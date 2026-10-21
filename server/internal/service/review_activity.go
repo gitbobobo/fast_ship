@@ -284,14 +284,10 @@ func buildPullRequestActivity(pr *model.ReviewPullRequest, projectName string,
 	if len(runs) == 0 {
 		return api.ReviewPullRequestActivity{}, time.Time{}, false
 	}
-	// 本轮有 cancelled 运行（PR 关闭 / 系统取消）：既不是通过，也没有可执行
-	// 动作，等下一次触发事件（reopened/新推送/手动重跑）再出现，避免把
-	// 「另一个组合还没结论」误标成最近通过。
-	for i := range runs {
-		if runs[i].Status == model.ReviewRunCancelled {
-			return api.ReviewPullRequestActivity{}, time.Time{}, false
-		}
-	}
+	// cancelled 运行单独记账：同轮可能还有仍在跑/已失败的组合，不能整行丢弃
+	// （tokens 提交时 head 已变只取消当前一条，其余组合还在继续）。只有
+	// 「其余都是干净 completed、又夹着 cancelled」时才不返回。
+	anyCancelled := false
 
 	var codeRuns, visualRuns []model.ReviewRun
 	var meta *model.ReviewRun
@@ -322,6 +318,10 @@ func buildPullRequestActivity(pr *model.ReviewPullRequest, projectName string,
 	active := false
 	allQueued := true
 	for i := range runs {
+		if runs[i].Status == model.ReviewRunCancelled {
+			anyCancelled = true
+			continue
+		}
 		if runs[i].Status.Terminal() {
 			continue
 		}
@@ -330,15 +330,10 @@ func buildPullRequestActivity(pr *model.ReviewPullRequest, projectName string,
 			allQueued = false
 		}
 	}
-	// 视觉衔接窗口：代码已全部完成、配置了视觉组合、视觉运行还没创建，而账本
-	// 仍挂着 sync_pending（调度器正在同步/探测截图，视觉是否启动还没落定）。
-	// 这一小段仍算进行中，否则列表会先判通过、停掉轮询，随后出现的视觉运行
-	// 就看不到了。同步清掉 pending 后仍无视觉运行，才是真的「未启动视觉」。
-	handoff := !active && visualComboCount > 0 && len(visualRuns) == 0 && pr.SyncPending
-	if active || handoff {
+	if active {
 		// 执行状态只看 runs：账本 pending 不能把已终态 run 判成进行中。
 		switch {
-		case allQueued && active:
+		case allQueued:
 			stage = api.Ptr(api.ReviewPullRequestActivityStageQueued)
 		default:
 			stage = api.Ptr(api.ReviewPullRequestActivityStageReviewing)
@@ -347,7 +342,8 @@ func buildPullRequestActivity(pr *model.ReviewPullRequest, projectName string,
 
 	findings := api.ReviewFindingCounts{}
 	issues := []api.ReviewActivityIssue{}
-	if !active && !handoff {
+	handoff := false
+	if !active {
 		reviewCollectRunIssues(codeRuns, api.ReviewActivityIssueKindCode, &findings, &issues)
 		reviewCollectRunIssues(visualRuns, api.ReviewActivityIssueKindVisual, &findings, &issues)
 		// 账本兜底（保守，不猜具体原因）：结论被同步丢失/沿用等场景的兜底。
@@ -390,9 +386,10 @@ func buildPullRequestActivity(pr *model.ReviewPullRequest, projectName string,
 			group = api.ReviewPullRequestActivityGroupNeedsAction
 		} else {
 			// 通过：至少有一条 completed 的代码运行（全 cancelled 的轮次不算
-			// 通过，也不进首页）。近 7 天按当前轮 runs 的最晚 finished_at（缺失
-			// 回退账本 updated_at）；更早的不返回。
-			if reviewCompletedCount(codeRuns) == 0 {
+			// 通过，也不进首页）；夹着 cancelled 的干净轮次同样不返回（另一个
+			// 组合没有结论）。近 7 天按当前轮 runs 的最晚 finished_at（缺失回退
+			// 账本 updated_at）；更早的不返回。
+			if reviewCompletedCount(codeRuns) == 0 || anyCancelled {
 				return api.ReviewPullRequestActivity{}, time.Time{}, false
 			}
 			passedAt := pr.UpdatedAt
@@ -402,7 +399,16 @@ func buildPullRequestActivity(pr *model.ReviewPullRequest, projectName string,
 			if passedAt.Before(now.Add(-reviewActivityPassedWindow)) {
 				return api.ReviewPullRequestActivity{}, time.Time{}, false
 			}
-			group = api.ReviewPullRequestActivityGroupRecentlyPassed
+			// 视觉衔接窗口：本应判通过，但视觉是否启动还没落定（sync_pending），
+			// 先留在进行中，避免列表停掉轮询后看不到随后创建的视觉运行。同步
+			// 清掉 pending 后仍无视觉运行，才是真的「未启动视觉」。
+			if visualComboCount > 0 && len(visualRuns) == 0 && pr.SyncPending {
+				group = api.ReviewPullRequestActivityGroupInProgress
+				stage = api.Ptr(api.ReviewPullRequestActivityStageReviewing)
+				handoff = true
+			} else {
+				group = api.ReviewPullRequestActivityGroupRecentlyPassed
+			}
 		}
 	}
 

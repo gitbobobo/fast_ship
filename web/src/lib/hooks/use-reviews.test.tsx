@@ -149,7 +149,7 @@ describe("use-reviews query keys", () => {
     ).toBeTruthy();
 
     const { result: detail } = renderHook(
-      () => useReviewPullRequestDetail("p1", 12, false),
+      () => useReviewPullRequestDetail("p1", 12),
       { wrapper },
     );
     await waitFor(() => expect(detail.current.isSuccess).toBe(true));
@@ -247,12 +247,12 @@ describe("use-reviews 轮询开关", () => {
     expect(api.listPullRequests).toHaveBeenCalledTimes(1);
   });
 
-  it("详情 live=true 时轮询，live=false 时不轮询", async () => {
+  it("抽屉打开期间详情每 10s 轮询，卸载后停止", async () => {
     vi.useFakeTimers();
     const { wrapper } = setup();
 
     const { unmount } = renderHook(
-      () => useReviewPullRequestDetail("p1", 12, true),
+      () => useReviewPullRequestDetail("p1", 12),
       { wrapper },
     );
     await act(async () => {});
@@ -263,19 +263,19 @@ describe("use-reviews 轮询开关", () => {
     });
     expect(api.getPullRequestDetail).toHaveBeenCalledTimes(2);
 
-    // 先卸载 live=true 的 hook，再验证 live=false 不轮询。
-    unmount();
-    api.getPullRequestDetail.mockClear();
-    renderHook(() => useReviewPullRequestDetail("p1", 34, false), {
-      wrapper,
-    });
-    await act(async () => {});
-    expect(api.getPullRequestDetail).toHaveBeenCalledTimes(1);
-
     await act(async () => {
-      vi.advanceTimersByTime(REVIEW_POLL_INTERVAL * 2);
+      vi.advanceTimersByTime(REVIEW_POLL_INTERVAL);
     });
-    expect(api.getPullRequestDetail).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      vi.advanceTimersByTime(REVIEW_POLL_INTERVAL);
+    });
+    expect(api.getPullRequestDetail).toHaveBeenCalledTimes(4);
+
+    unmount();
+    await act(async () => {
+      vi.advanceTimersByTime(REVIEW_POLL_INTERVAL * 3);
+    });
+    expect(api.getPullRequestDetail).toHaveBeenCalledTimes(4);
   });
 });
 

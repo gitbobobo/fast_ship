@@ -144,9 +144,9 @@ export default function ReviewsPage() {
               <Skeleton key={i} className="h-16 rounded-lg" />
             ))}
           </div>
-        ) : projectsError ? (
+        ) : projectsError && !projects ? (
           <LoadFailed text="项目列表加载失败" onRetry={() => void refetchProjects()} />
-        ) : isError ? (
+        ) : isError && !activity ? (
           <LoadFailed text="审查动态加载失败" onRetry={() => void refetch()} />
         ) : enabledProjects.length === 0 ? (
           <div className="rounded-lg border bg-muted/40 py-12 text-center">
@@ -160,7 +160,7 @@ export default function ReviewsPage() {
               </Button>
             </div>
           </div>
-        ) : items.length === 0 ? (
+        ) : items.length === 0 && (activity?.total ?? 0) === 0 ? (
           <div className="rounded-lg border bg-muted/40 py-12 text-center">
             <GitPullRequest className="mx-auto mb-2 h-6 w-6 text-muted-foreground" />
             <p className="text-sm text-muted-foreground">
@@ -224,12 +224,12 @@ export default function ReviewsPage() {
               </section>
             )}
 
-            {activity && activity.total > PAGE_SIZE && (
+            {activity && activity.total > 0 && (
               <div className="flex items-center justify-between gap-2 pt-2 text-xs text-muted-foreground">
                 <span>
-                  第 {offset + 1}–
-                  {Math.min(offset + items.length, activity.total)} 条 / 共{" "}
-                  {activity.total} 条
+                  {items.length > 0
+                    ? `第 ${offset + 1}–${Math.min(offset + items.length, activity.total)} 条 / 共 ${activity.total} 条`
+                    : `共 ${activity.total} 条`}
                 </span>
                 <div className="flex gap-1.5">
                   <Button

@@ -640,10 +640,10 @@ describe("ReviewsPage PR 动态", () => {
     // 进行中项打开详情时 live=true（10s 轮询）。
     expect(
       vi.mocked(useReviewPullRequestDetail),
-    ).toHaveBeenLastCalledWith("p1", 12, true);
+    ).toHaveBeenLastCalledWith("p1", 12);
   });
 
-  it("需要处理项打开抽屉时详情不轮询（live=false）", async () => {
+  it("需要处理项打开抽屉时详情同样轮询（不依赖列表分组快照）", async () => {
     const user = userEvent.setup();
     mockProjects([projectSummary()]);
     mockActivity(
@@ -676,7 +676,7 @@ describe("ReviewsPage PR 动态", () => {
 
     expect(
       vi.mocked(useReviewPullRequestDetail),
-    ).toHaveBeenLastCalledWith("p1", 34, false);
+    ).toHaveBeenLastCalledWith("p1", 34);
   });
 
   it("点「重新审查」调用 rerun 并 toast", async () => {

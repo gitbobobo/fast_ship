@@ -886,3 +886,85 @@ func TestListPullRequestActivity_PartialCancelledNotPassed(t *testing.T) {
 		t.Fatalf("部分取消不应进入首页: total=%d items=%d", page.Total, len(page.Items))
 	}
 }
+
+// 视觉衔接只覆盖「本应通过」的轮次：代码已有 P1 时即使 sync_pending 为真、
+// 视觉运行还没创建，也必须进需要处理，不能被衔接窗口吞掉。
+func TestListPullRequestActivity_HandoffDoesNotHideFindings(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "u1")
+	project := createTestProject(t, svc.db, user.ID)
+	repo := "octo/repo"
+	createActivitySettings(t, svc.db, user.ID, project.ID, repo, 1, 1, true)
+	result := `{"summary":"s","findings":[{"level":"P1","file":"a.go","body":"x"}],"prior":[],"ui_changed":true,"ui_changed_since_last_visual":false}`
+	createTestReviewPR(t, svc.db, user.ID, project.ID, repo, 1, 1, func(p *model.ReviewPullRequest) {
+		p.CodeStatus = "failure"
+		p.VisualStatus = ""
+		p.SyncPending = true
+	})
+	createActivityRun(t, svc.db, user.ID, project.ID, repo, 1, func(r *model.ReviewRun) {
+		r.ResultJSON = result
+	})
+
+	rs, _ := readyReviewService(t, svc)
+	page := listActivity(t, rs, user.ID, "", 0, 0)
+	if page.Counts.NeedsAction != 1 || page.Counts.InProgress != 0 {
+		t.Fatalf("有 P1 应进需要处理: %+v", page.Counts)
+	}
+	if page.Items[0].Findings.P1 != 1 {
+		t.Fatalf("findings 错误: %+v", page.Items[0].Findings)
+	}
+}
+
+// 同轮一条 cancelled、另一条仍在跑：整行仍算进行中，不能因 cancelled 丢弃。
+func TestListPullRequestActivity_ActiveWithCancelledStays(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "u1")
+	project := createTestProject(t, svc.db, user.ID)
+	repo := "octo/repo"
+	createActivitySettings(t, svc.db, user.ID, project.ID, repo, 2, 0, true)
+	createTestReviewPR(t, svc.db, user.ID, project.ID, repo, 1, 1, func(p *model.ReviewPullRequest) {
+		p.VisualStatus = ""
+	})
+	createActivityRun(t, svc.db, user.ID, project.ID, repo, 1, func(r *model.ReviewRun) {
+		r.Status = model.ReviewRunRunning
+	})
+	createActivityRun(t, svc.db, user.ID, project.ID, repo, 1, func(r *model.ReviewRun) {
+		r.Status = model.ReviewRunCancelled
+		r.ErrorCode = "superseded"
+	})
+
+	rs, _ := readyReviewService(t, svc)
+	page := listActivity(t, rs, user.ID, "", 0, 0)
+	if page.Counts.InProgress != 1 || page.Total != 1 {
+		t.Fatalf("仍有运行时应留在进行中: %+v", page.Counts)
+	}
+	if page.Items[0].Stage == nil || *page.Items[0].Stage != api.ReviewPullRequestActivityStageReviewing {
+		t.Fatalf("stage 错误: %+v", page.Items[0].Stage)
+	}
+}
+
+// 同轮一条 completed 带发现、另一条 cancelled：进需要处理，不能丢弃。
+func TestListPullRequestActivity_FindingsWithCancelledNeedsAction(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "u1")
+	project := createTestProject(t, svc.db, user.ID)
+	repo := "octo/repo"
+	createActivitySettings(t, svc.db, user.ID, project.ID, repo, 2, 0, true)
+	result := `{"summary":"s","findings":[{"level":"P2","file":"a.go","body":"x"}],"prior":[],"ui_changed":false,"ui_changed_since_last_visual":false}`
+	createTestReviewPR(t, svc.db, user.ID, project.ID, repo, 1, 1, func(p *model.ReviewPullRequest) {
+		p.VisualStatus = ""
+	})
+	createActivityRun(t, svc.db, user.ID, project.ID, repo, 1, func(r *model.ReviewRun) {
+		r.ResultJSON = result
+	})
+	createActivityRun(t, svc.db, user.ID, project.ID, repo, 1, func(r *model.ReviewRun) {
+		r.Status = model.ReviewRunCancelled
+		r.ErrorCode = "superseded"
+	})
+
+	rs, _ := readyReviewService(t, svc)
+	page := listActivity(t, rs, user.ID, "", 0, 0)
+	if page.Counts.NeedsAction != 1 || page.Items[0].Findings.P2 != 1 {
+		t.Fatalf("应进需要处理: %+v %+v", page.Counts, page.Items[0].Findings)
+	}
+}

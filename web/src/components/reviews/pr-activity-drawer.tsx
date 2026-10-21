@@ -60,11 +60,7 @@ function DrawerBody({ item }: { item: ReviewPullRequestActivity }) {
     isLoading,
     isError,
     refetch,
-  } = useReviewPullRequestDetail(
-    item.project_id,
-    item.pr_number,
-    item.group === "in_progress",
-  );
+  } = useReviewPullRequestDetail(item.project_id, item.pr_number);
   // 手动展开的历史轮次；最新一轮恒展开。
   const [expandedRounds, setExpandedRounds] = useState<Set<number>>(new Set());
 
@@ -85,7 +81,12 @@ function DrawerBody({ item }: { item: ReviewPullRequestActivity }) {
     (a, b) => b.round_number - a.round_number,
   );
   // 防抖中还没有新一轮运行：详情里的最新一轮是上一轮，不能当成当前轮展开。
-  const debouncing = item.stage === "debouncing";
+  // 详情轮询拿到新 head 的轮次后（PR 可能已被挤出当前页，item 还是旧快照），
+  // 以详情为准结束防抖展示，避免永久停在「等待防抖结束」。
+  const newRoundStarted = rounds.some(
+    (r) => r.head_sha && r.head_sha === item.head_sha,
+  );
+  const debouncing = item.stage === "debouncing" && !newRoundStarted;
   const latestRound = debouncing ? undefined : rounds[0]?.round_number;
 
   return (
@@ -122,7 +123,7 @@ function DrawerBody({ item }: { item: ReviewPullRequestActivity }) {
               <Skeleton key={i} className="h-12 rounded" />
             ))}
           </div>
-        ) : isError ? (
+        ) : isError && !detail ? (
           <div className="rounded-lg border bg-muted/40 py-8 text-center">
             <p className="text-sm text-muted-foreground">详情加载失败</p>
             <div className="mt-3">

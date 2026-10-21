@@ -57,7 +57,7 @@ export default function ReviewConfigPage() {
               <Skeleton key={i} className="h-10 rounded" />
             ))}
           </div>
-        ) : isError ? (
+        ) : isError && !projects ? (
           <div className="rounded-lg border bg-muted/40 py-12 text-center">
             <p className="text-sm text-muted-foreground">项目列表加载失败</p>
             <div className="mt-4">

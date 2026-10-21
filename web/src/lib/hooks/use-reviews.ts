@@ -1,8 +1,4 @@
 import {
-  useEffect,
-  useRef,
-} from "react";
-import {
   useMutation,
   useQuery,
   useQueryClient,
@@ -108,16 +104,15 @@ export function useReviewPullRequests(
 }
 
 /**
- * 抽屉里的单个 PR 审查详情。live=true（选中项属于进行中组）时 10s 轮询；
- * 组件卸载（抽屉关闭）后自动停止。
+ * 抽屉里的单个 PR 审查详情：抽屉打开期间固定 10s 轮询（组件卸载即停）。
+ * 不依赖列表分组快照——PR 移出当前页或被重新审查后，详情仍要跟上最新状态。
  */
 export function useReviewPullRequestDetail(
   projectId: string | null,
   prNumber: number | null,
-  live: boolean,
 ) {
   const userId = useUserId();
-  const query = useQuery({
+  return useQuery({
     queryKey: keys.pullRequestDetail(userId, projectId ?? "", prNumber ?? 0),
     queryFn: async () =>
       (
@@ -127,17 +122,8 @@ export function useReviewPullRequestDetail(
         )
       ).data,
     enabled: Boolean(userId && projectId && prNumber),
-    refetchInterval: live ? REVIEW_POLL_INTERVAL : false,
+    refetchInterval: REVIEW_POLL_INTERVAL,
   });
-  // 从进行中转终态：停止轮询前补取一次，拿到最终结论（列表轮询与详情轮询
-  // 不同步，列表先观察到完成时不能只靠停掉定时器）。
-  const wasLive = useRef(live);
-  const refetch = query.refetch;
-  useEffect(() => {
-    if (wasLive.current && !live) void refetch();
-    wasLive.current = live;
-  }, [live, refetch]);
-  return query;
 }
 
 function useInvalidateReviews() {
