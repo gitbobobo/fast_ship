@@ -12,6 +12,7 @@ import {
   type BotCallStatus,
   type BotMessage,
   type BotRun,
+  type BotRunErrorAction,
   type BotRunStatus,
 } from "@/lib/api/bots";
 import {
@@ -55,6 +56,65 @@ export function pickActiveRun(runs: BotRun[] | undefined): BotRun | null {
  */
 export function pickBackgroundCalls(calls: BotCall[]): BotCall[] {
   return calls.filter((c) => c.execution_mode === "async" && !isTerminalCall(c));
+}
+
+/** 错误条模型（INT-137）：最近一次失败 run 中用户可直接处理的那类失败。 */
+export interface BotRunError {
+  code: string;
+  message: string;
+  action: BotRunErrorAction;
+}
+
+/** 错误条只覆盖「用户能直接处理」的失败：认证失效与额度用完。 */
+const ACTIONABLE_RUN_ERROR_CODES: ReadonlySet<string> = new Set([
+  "provider_auth_failed",
+  "provider_quota_exhausted",
+]);
+
+const RUN_ERROR_FALLBACKS: Record<string, string> = {
+  provider_auth_failed:
+    "AI 提供商认证失败：密钥无效或已失效，请到设置页更新密钥",
+  provider_quota_exhausted:
+    "AI 提供商额度已用完或余额不足，请充值或更换提供商",
+};
+
+const AI_PROVIDERS_ACTION: BotRunErrorAction = {
+  kind: "ai_providers_settings",
+  label: "去设置",
+};
+
+/**
+ * 取最新一次 run（按 created_at，缓存里快照与 SSE 追加的次序不保证）：只有它
+ * 本人才是错误条的候选。错误码可操作（auth/quota）时返回错误条模型，其余
+ * （包括后续运行已成功的情况）返回 null——不把历史失败一直挂在聊天页顶上。
+ * action 优先用服务端随 run_error 下发的值；快照没有该字段时按 code 推导。
+ */
+export function pickRunError(runs: BotRun[] | undefined): BotRunError | null {
+  if (!runs?.length) return null;
+  const latest = runs.reduce((newest, run) => {
+    // 缺时间戳的是 SSE 新追加的 run（mergeRun 追加在末尾），视为最新。
+    const at = typeof run.created_at === "string" ? run.created_at : "";
+    const newestAt =
+      typeof newest.created_at === "string" ? newest.created_at : "";
+    if (at === "") return run;
+    if (newestAt === "") return newest;
+    return at >= newestAt ? run : newest;
+  });
+  if (latest.status !== "failed") return null;
+  const code = latest.error_code ?? "";
+  if (!ACTIONABLE_RUN_ERROR_CODES.has(code)) return null;
+  const action =
+    latest.error_action && latest.error_action.kind
+      ? {
+          kind: latest.error_action.kind,
+          label: latest.error_action.label || AI_PROVIDERS_ACTION.label,
+        }
+      : AI_PROVIDERS_ACTION;
+  return {
+    code,
+    message: latest.error_message || RUN_ERROR_FALLBACKS[code] || "模型调用失败",
+    action,
+  };
 }
 
 // ---- 合并纯函数：SSE 事件与 REST 响应折叠进 react-query 缓存 ----
@@ -394,8 +454,13 @@ export function foldStreamEvent(
     }
     case "error": {
       if (!data.run_id) break;
-      // run_error 载荷字段是 code/message（服务端 finishFailed 的形状）。
-      const payload = (data.payload ?? {}) as { code?: string; message?: string };
+      // run_error 载荷字段是 code/message（服务端 finishFailed 的形状）；
+      // 可操作失败（auth/quota）另带 action 按钮描述。
+      const payload = (data.payload ?? {}) as {
+        code?: string;
+        message?: string;
+        action?: BotRun["error_action"];
+      };
       sinks.setMaintenanceProgress(null);
       sinks.setRuns(
         mergeRun(sinks.getRuns(), {
@@ -403,6 +468,7 @@ export function foldStreamEvent(
           status: "failed",
           error_code: payload.code,
           error_message: payload.message,
+          error_action: payload.action,
         }),
       );
       break;
@@ -419,6 +485,7 @@ export function foldStreamEvent(
           finished_at: payload.finished_at ?? new Date().toISOString(),
           error_code: payload.error_code,
           error_message: payload.error_message,
+          error_action: payload.error_action,
         }),
       );
       // done 只代表本 run 结束；后台结果仍可能继续到达，调用状态不动。
@@ -707,6 +774,8 @@ export function useBotChat(botId: string) {
     () => pickActiveRun(runsQuery.data ?? []),
     [runsQuery.data],
   );
+  // 内容区顶部的可操作错误条：最近一次失败 run 的 auth/quota 失败。
+  const runError = useMemo(() => pickRunError(runsQuery.data), [runsQuery.data]);
 
   const stopRun = useCallback(async () => {
     if (!activeRun || stopping || !userId) return;
@@ -813,6 +882,8 @@ export function useBotChat(botId: string) {
     activeRun,
     runActive: Boolean(activeRun),
     stopRequested: Boolean(activeRun?.stop_requested),
+    /** 可操作错误条（auth/quota 失败）；其它失败为 null，视图不渲染。 */
+    runError,
     backgroundCalls,
     streamStatus,
     streamError,

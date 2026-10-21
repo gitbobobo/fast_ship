@@ -104,6 +104,9 @@ function EditProviderDialogInner({
     try {
       const result = await testConnection.mutateAsync({
         catalog_id: provider.catalog_id,
+        // 带上已存 provider id：测试成功时服务端会清除该提供商的熔断
+        // （INT-137），定时任务不必等用户先保存新密钥才恢复。
+        provider_id: provider.id,
         ...(isCustom ? { base_url: baseUrl.trim(), model: model.trim() } : {}),
         api_key: apiKey.trim(),
       });

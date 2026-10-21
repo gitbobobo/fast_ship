@@ -75,6 +75,8 @@ export interface TestAIProviderInput {
   base_url?: string;
   api_key?: string;
   model?: string;
+  /** 已存提供商 id：测试成功时服务端清除该提供商的熔断（INT-137）。 */
+  provider_id?: string;
 }
 
 /** 与 bot 请求同一口径：35 秒超时、不重试（测试连接本身是一次模型调用）。 */

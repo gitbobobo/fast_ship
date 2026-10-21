@@ -1,4 +1,6 @@
-import { CalendarClock, ChevronRight, Trash2 } from "lucide-react";
+import { useState } from "react";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { CalendarClock, ChevronRight, Loader2, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -12,17 +14,20 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { ApiRequestError } from "@/lib/api/client";
 import {
+  botApi,
   botScheduleRunStatusLabel,
   type BotScheduleRun,
   type BotScheduleTask,
 } from "@/lib/api/bots";
 import {
   BOT_SCHEDULE_RUNS_PAGE,
+  botKeys,
   useBotScheduleTaskRuns,
   useBotScheduleTasks,
   useClearBotScheduleTaskState,
   useSetBotScheduleTaskEnabled,
 } from "@/lib/hooks/use-bots";
+import { useAuthStore } from "@/lib/store/auth-store";
 import { describeCronExpression, uiLocale } from "@/lib/cron-frequency";
 import { cn } from "@/lib/utils";
 import { formatDate } from "@/lib/utils/format";
@@ -72,6 +77,27 @@ function formatDuration(ms: number | null) {
 function runTime(run: BotScheduleRun) {
   const at = run.started_at ?? run.scheduled_for;
   return at ? formatDate(at) : "—";
+}
+
+/**
+ * 停止一次定时任务运行（INT-137）。成功后任务与运行记录两份缓存一并失效：
+ * 任务行的「最近一次结果」与弹窗列表同时收敛到 stopped。
+ */
+function useStopScheduleRun(botId: string) {
+  const queryClient = useQueryClient();
+  const userId = useAuthStore((state) => state.user?.id ?? null);
+  return useMutation({
+    mutationFn: ({ taskId, runId }: { taskId: string; runId: string }) =>
+      botApi.stopScheduleRun(botId, taskId, runId),
+    onSuccess: (_run, { taskId }) => {
+      void queryClient.invalidateQueries({
+        queryKey: botKeys.scheduleTasks(userId, botId),
+      });
+      void queryClient.invalidateQueries({
+        queryKey: botKeys.scheduleTaskRuns(userId, botId, taskId),
+      });
+    },
+  });
 }
 
 /**
@@ -263,6 +289,8 @@ export function BotScheduleTaskDialog({
     task?.id ?? null,
   );
   const clearState = useClearBotScheduleTaskState(botId);
+  const stopRun = useStopScheduleRun(botId);
+  const [stoppingRunId, setStoppingRunId] = useState<string | null>(null);
   const stateView = task?.state != null ? prettyStateText(task.state) : null;
 
   const handleClearState = async (taskId: string) => {
@@ -275,6 +303,23 @@ export function BotScheduleTaskDialog({
           ? err.message
           : "清空失败",
       );
+    }
+  };
+
+  const handleStopRun = async (run: BotScheduleRun) => {
+    if (!task || stoppingRunId) return;
+    setStoppingRunId(run.id);
+    try {
+      await stopRun.mutateAsync({ taskId: task.id, runId: run.id });
+      toast.success("已停止该次运行");
+    } catch (err) {
+      toast.error(
+        err instanceof ApiRequestError && err.message
+          ? err.message
+          : "停止失败",
+      );
+    } finally {
+      setStoppingRunId(null);
     }
   };
 
@@ -379,6 +424,20 @@ export function BotScheduleTaskDialog({
                           <span className="ml-auto text-xs text-muted-foreground">
                             {formatDuration(run.duration_ms)}
                           </span>
+                          {run.status === "running" && (
+                            <Button
+                              type="button"
+                              size="xs"
+                              variant="destructive"
+                              disabled={stoppingRunId === run.id}
+                              onClick={() => void handleStopRun(run)}
+                            >
+                              {stoppingRunId === run.id && (
+                                <Loader2 className="h-3 w-3 animate-spin" />
+                              )}
+                              停止
+                            </Button>
+                          )}
                         </div>
                         {(run.summary || run.error_message) && (
                           <p className="text-xs text-muted-foreground">

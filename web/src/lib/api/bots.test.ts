@@ -163,4 +163,12 @@ describe("bot api requests", () => {
       calls(get).map(([, o]) => (o as { searchParams?: unknown }).searchParams),
     ).toEqual([undefined, { limit: "20" }]);
   });
+
+  it("stops a schedule-task run via the nested encoded path", async () => {
+    await botApi.stopScheduleRun("b 1", "t/1", "r 1");
+
+    expect(calls(post).map(([path]) => path)).toEqual([
+      "bots/b%201/schedule-tasks/t%2F1/runs/r%201/stop",
+    ]);
+  });
 });

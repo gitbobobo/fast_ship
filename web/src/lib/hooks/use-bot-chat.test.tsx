@@ -857,6 +857,123 @@ describe("useBotChat", () => {
     expect(result.current.stopRequested).toBe(false);
   });
 
+  // ---- INT-137：可操作的 run 失败提示（错误条）----
+
+  it("run_error（auth）把 code/message/action 折叠进 runError", async () => {
+    const { result } = hook();
+    await waitFor(() => expect(stream.subscribe).toHaveBeenCalled());
+
+    emit(
+      "error",
+      {
+        run_id: "r-err",
+        payload: {
+          code: "provider_auth_failed",
+          message:
+            "AI 提供商认证失败：密钥无效或已失效，请到设置页更新密钥",
+          action: { kind: "ai_providers_settings", label: "去设置" },
+        },
+      },
+      10,
+    );
+
+    await waitFor(() => expect(result.current.runError).not.toBeNull());
+    expect(result.current.runError).toEqual({
+      code: "provider_auth_failed",
+      message: "AI 提供商认证失败：密钥无效或已失效，请到设置页更新密钥",
+      action: { kind: "ai_providers_settings", label: "去设置" },
+    });
+  });
+
+  it("run_error（quota）缺省 action 时按 error_code 推导去设置", async () => {
+    const { result } = hook();
+    await waitFor(() => expect(stream.subscribe).toHaveBeenCalled());
+
+    emit(
+      "error",
+      {
+        run_id: "r-quota",
+        payload: {
+          code: "provider_quota_exhausted",
+          message: "AI 提供商额度已用完或余额不足，请充值或更换提供商",
+        },
+      },
+      10,
+    );
+
+    await waitFor(() => expect(result.current.runError).not.toBeNull());
+    expect(result.current.runError?.action).toEqual({
+      kind: "ai_providers_settings",
+      label: "去设置",
+    });
+  });
+
+  it("非 auth/quota 的失败不产生错误条", async () => {
+    const { result } = hook();
+    await waitFor(() => expect(stream.subscribe).toHaveBeenCalled());
+
+    emit(
+      "error",
+      {
+        run_id: "r-x",
+        payload: { code: "model_request_failed", message: "上游 502" },
+      },
+      10,
+    );
+    await act(async () => {});
+    // 折叠照常落进 run（error_code 可见），但错误条状态保持 null。
+    expect(result.current.runError).toBeNull();
+  });
+
+  it("刷新后从快照 run 的 error_code 推导错误条", async () => {
+    api.getChatSnapshot.mockResolvedValue(
+      snapshotWith({
+        runs: [
+          {
+            ...activeRun,
+            status: "failed",
+            finished_at: "2026-10-15T00:05:00Z",
+            error_code: "provider_auth_failed",
+            error_message: "密钥无效",
+          },
+        ],
+      }),
+    );
+    const { result } = hook();
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    expect(result.current.runError).toEqual({
+      code: "provider_auth_failed",
+      message: "密钥无效",
+      action: { kind: "ai_providers_settings", label: "去设置" },
+    });
+  });
+
+  it("更新的 failed run 覆盖旧失败；新失败不可操作时错误条消失", async () => {
+    const { result } = hook();
+    await waitFor(() => expect(stream.subscribe).toHaveBeenCalled());
+
+    emit(
+      "error",
+      {
+        run_id: "r-1",
+        payload: { code: "provider_auth_failed", message: "密钥无效" },
+      },
+      10,
+    );
+    await waitFor(() => expect(result.current.runError).not.toBeNull());
+
+    emit(
+      "error",
+      {
+        run_id: "r-2",
+        payload: { code: "model_request_failed", message: "上游 502" },
+      },
+      11,
+    );
+    await waitFor(() => expect(result.current.runError).toBeNull());
+  });
+
   it("decides and cancels calls through the ledger endpoints", async () => {
     const pending: BotCall = {
       id: "c1",
@@ -1089,6 +1206,28 @@ describe("foldStreamEvent", () => {
     expect(state.runs.map((r) => `${r.id}:${r.status}:${r.error_code}:${r.error_message}`)).toEqual([
       "r-err:failed:model_request_failed:上游 502",
     ]);
+  });
+  it("run_error 携带 action 时折叠进 run 的 error_action", () => {
+    const { state, sinks: sinksObj } = sinks();
+    foldStreamEvent(
+      {
+        event: "error",
+        data: JSON.stringify({
+          run_id: "r-err",
+          payload: {
+            code: "provider_auth_failed",
+            message: "密钥无效",
+            action: { kind: "ai_providers_settings", label: "去设置" },
+          },
+        }),
+        id: 10,
+      },
+      sinksObj,
+    );
+    expect(state.runs[0]?.error_action).toEqual({
+      kind: "ai_providers_settings",
+      label: "去设置",
+    });
   });
   it("同分快照也合并：权威快照补齐缓存缺失的终态字段", () => {
     const previous: BotCall[] = [{

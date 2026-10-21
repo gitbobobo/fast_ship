@@ -1,4 +1,5 @@
 import { useLayoutEffect, useRef, useState } from "react";
+import { Link } from "react-router";
 import { Loader2, RefreshCw, Square } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -90,7 +91,12 @@ export function BotChat({ botId }: { botId: string }) {
     );
   }
 
-  const stopLabel = chat.stopRequested ? "停止中…" : "请求停止";
+  // 已请求停止后再点是「强制停止」：第一次只是追加停止消息等安全点，
+  // 服务端宽限后才硬取消；卡住时用户要能立即中断，按钮必须保持可点。
+  const stopLabel = chat.stopRequested ? "强制停止" : "请求停止";
+  const stopTitle = chat.stopRequested
+    ? "立即中断当前模型请求"
+    : "向机器人发送一条「停止」消息，由它结合上下文决定是否结束运行";
   const runBadge = chat.stopRequested
     ? "停止中"
     : chat.activeRun?.status === "queued"
@@ -114,6 +120,26 @@ export function BotChat({ botId }: { botId: string }) {
     >
       {/* 输入框之外的全部内容：flex-1 保证消息少时它撑满栏高、浮层贴底。 */}
       <div className="flex flex-1 flex-col gap-4">
+        {/* 可操作的 run 失败提示（INT-137）：仅 auth/quota，其它失败不新增噪音。 */}
+        {chat.runError && (
+          <div
+            role="alert"
+            data-testid="bot-run-error"
+            className="flex items-center gap-2 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+          >
+            <span className="min-w-0 flex-1">{chat.runError.message}</span>
+            {chat.runError.action.kind === "ai_providers_settings" && (
+              <Button
+                size="xs"
+                variant="outline"
+                render={<Link to="/settings/ai-providers" />}
+              >
+                {chat.runError.action.label || "去设置"}
+              </Button>
+            )}
+          </div>
+        )}
+
         {chat.runActive && (
           <div
             data-testid="bot-run-bar"
@@ -158,14 +184,14 @@ export function BotChat({ botId }: { botId: string }) {
               size="xs"
               variant="destructive"
               className="ml-auto"
-              disabled={chat.stopping || chat.stopRequested}
+              disabled={chat.stopping}
               aria-label={stopLabel}
-              title="向机器人发送一条「停止」消息，由它结合上下文决定是否结束运行"
+              title={stopTitle}
               onClick={() => void chat.stopRun()}
             >
               {chat.stopping && <Loader2 className="mr-1 h-3 w-3 animate-spin" />}
               <Square className="mr-1 h-3 w-3 fill-current" />
-              请求停止
+              {stopLabel}
             </Button>
           </div>
         )}
