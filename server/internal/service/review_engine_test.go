@@ -589,7 +589,18 @@ func TestDecideVisual(t *testing.T) {
 		{"无视觉组合", func(in *visualDecisionInput) { in.HasVisualCombos = false }, visualNone},
 		{"无截图", func(in *visualDecisionInput) { in.HasScreenshots = false }, visualNone},
 		{"无 UI 变化", func(in *visualDecisionInput) { in.AnyUIChanged = false }, visualNone},
-		{"截图全部下载失败", func(in *visualDecisionInput) { in.ScreensUnavailable = true }, visualScreensUnavailable},
+		// E5：截图不可用不再是独立短路——本轮不开视觉（截图未变、上轮视觉后
+		// 无 UI 改动）时探测根本不会发生，ScreensUnavailable 不能盖过沿用路径。
+		{"截图不可用但本轮不开视觉", func(in *visualDecisionInput) { in.ScreensUnavailable = true }, visualNone},
+		{"截图不可用且上轮遗留沿用 failure", func(in *visualDecisionInput) {
+			in.ScreensUnavailable = true
+			in.PriorVisualFailed = true
+		}, visualCarryFailure},
+		// 截图变了（本轮真的要开视觉）+ 下载全部失败 → 报「截图无法下载」。
+		{"截图变了但下载失败", func(in *visualDecisionInput) {
+			in.ScreensChanged = true
+			in.ScreensUnavailable = true
+		}, visualScreensUnavailable},
 		{"截图变了", func(in *visualDecisionInput) { in.ScreensChanged = true }, visualStart},
 		{"上轮后又有 UI 改动", func(in *visualDecisionInput) { in.AnyUIChangedSinceLastVisual = true }, visualStart},
 		{"截图未变且遗留", func(in *visualDecisionInput) { in.PriorVisualFailed = true }, visualCarryFailure},

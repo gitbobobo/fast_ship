@@ -320,6 +320,10 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 			// 单独排定时重试。每次事件都写当前原因（与 visualCarryFailure
 			// 分支一致）：沿用上一轮的旧描述会保留语义不同的文案。
 			visualPending = false
+			// 上一轮视觉意见尚未处理时，代码顶层评论同样要带「截图复核意见
+			// 尚未处理」——与 visualCarryFailure 分支口径一致；上一轮通过或
+			// 没有上一轮时不置真（不能拿不存在的遗留去催复核者）。
+			visualCarry = priorVisualFailure(priorVisuals)
 			reason := screensReason
 			if reason == "" {
 				reason = "截图全部下载失败"
@@ -960,31 +964,28 @@ type visualDecisionInput struct {
 	ScreensChanged              bool // 本次截图指纹 ≠ 总账 fingerprint
 	AnyUIChangedSinceLastVisual bool
 	PriorVisualFailed           bool // 上一轮视觉含 blocker/worth_fixing
-	ScreensUnavailable          bool // 独立短路，不依赖 HasScreenshots
-	ScreensUnavailableReason    string
+	// ScreensUnavailable 截图探测全部失败。探测只在 ScreensChanged ||
+	// AnyUIChangedSinceLastVisual 成立（本轮真的要开视觉）时发生，所以它只
+	// 会把 visualStart 改判成 visualScreensUnavailable，不是独立短路——截图
+	// 未变时为假，沿用/带过上一轮结论的路径照常。
+	ScreensUnavailable       bool
+	ScreensUnavailableReason string
 }
 
 // decideVisual 视觉衔接判定（顺序即优先级）：
-// 代码未全净、无视觉组合、无 UI 变化 → 不启动；
-// 截图全部下载失败 → 报「截图无法下载」，不走沿用旧 failure 的分支
-// （那会拿上一轮不相关的结论解释这次的失败）。ScreensUnavailable 只在探测
-// 发生时为真，而探测只在「本轮真的要开视觉」（ScreensChanged 或
-// AnyUIChangedSinceLastVisual）时进行，所以这个分支只会抢占 visualStart，
-// 不会盖掉沿用 failure / 沿用 success 的路径——截图未变时下载失败，
-// 上一轮结论照常带过；
-// 无截图 → 不启动；截图变了或上轮视觉后又有 UI 改动 → 启动；
+// 代码未全净、无视觉组合、无 UI 变化、无截图 → 不启动；
+// 截图变了或上轮视觉后又有 UI 改动（本轮真的要开视觉）→ 探测全部失败则报
+// 「截图无法下载」（不走沿用旧 failure 的分支——那会拿上一轮不相关的结论
+// 解释这次的失败），否则启动；
 // 截图未变且上一轮视觉有遗留 → 沿用 failure 到新 head。
 func decideVisual(in visualDecisionInput) visualDecision {
-	if !in.CodeAllTerminalOK || !in.HasVisualCombos || !in.AnyUIChanged {
-		return visualNone
-	}
-	if in.ScreensUnavailable {
-		return visualScreensUnavailable
-	}
-	if !in.HasScreenshots {
+	if !in.CodeAllTerminalOK || !in.HasVisualCombos || !in.AnyUIChanged || !in.HasScreenshots {
 		return visualNone
 	}
 	if in.ScreensChanged || in.AnyUIChangedSinceLastVisual {
+		if in.ScreensUnavailable {
+			return visualScreensUnavailable
+		}
 		return visualStart
 	}
 	if in.PriorVisualFailed {

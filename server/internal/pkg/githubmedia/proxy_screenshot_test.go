@@ -8,7 +8,9 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -34,7 +36,14 @@ func TestIsBlockedIP(t *testing.T) {
 		{"::1", true},                // IPv6 回环
 		{"fd00::1", true},            // IPv6 ULA
 		{"fe80::1", true},            // IPv6 链路本地
+		{"fec0::1", true},            // 已废弃 site-local（fec0::/10 下界）
+		{"fec0:0:0:ffff::1", true},   // 已废弃 site-local（fec0::/10 上界）
 		{"64:ff9b::a9fe:a9fe", true}, // NAT64 /96 内嵌 169.254.169.254
+		// 64:ff9a::/96（RFC 8215 local-use）整体拒绝：布局与 well-known /96
+		// 相同，内嵌内网地址要拒，内嵌公网地址（下一行 8.8.8.8）也拒——不
+		// 享有 well-known /96 的解码放行。
+		{"64:ff9a::a9fe:a9fe", true},
+		{"64:ff9a::808:808", true},
 		// RFC 6052 /48 布局：前缀在 0-5、IPv4 高 16 位在 6-7、u 八位组在 8、
 		// 低 16 位在 9-10——64:ff9b:1:a00:0:100:: 内嵌的正是 10.0.0.1。
 		// local-use /48 整体拒绝，内嵌公网地址的同前缀地址（下一行）也拒：
@@ -61,6 +70,10 @@ func TestIsBlockedIP(t *testing.T) {
 		{"1.1.1.1", false},                              // 公网
 		{"8.8.8.8", false},                              // 公网
 		{"2606:4700:4700::1111", false},                 // 公网 IPv6
+		// fe80::/10（fe80–febf）之外、同样以 0xfe 开头的未指派地址（fe01）：
+		// 新加的 site-local 判定（ipv6[0]==0xfe && ipv6[1]&0xc0==0xc0）只该
+		// 收第二字节高两位为 11 的 fec0::/10，不把整个 fe::/8 误收。
+		{"fe01::1", false},
 	}
 	for _, c := range cases {
 		if got := isBlockedIP(parseTestIP(t, c.ip)); got != c.blocked {
@@ -79,6 +92,44 @@ func parseTestIP(t *testing.T, s string) net.IP {
 		t.Fatalf("parse ip %q", s)
 	}
 	return ip
+}
+
+// E1 回归：本地缓存操作失败在产生点打标。cacheRoot 指向一个普通文件（不是
+// 目录）时 MkdirAll 以 ENOTDIR 失败——比 chmod 稳（root 下 chmod 000 不生效），
+// 任何用户都能复现。FetchAndCache 必须以 ErrLocalCache sentinel 到达，且原始
+// 错误链保留（errors.Is(err, syscall.ENOTDIR) 仍命中）。
+func TestFetchAndCacheLocalCacheFailureTagged(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(root, []byte("x"), 0o600); err != nil {
+		t.Fatalf("seed regular file: %v", err)
+	}
+	svc := NewReviewMediaService(root)
+	_, err := svc.FetchAndCache(context.Background(), "https://uiv.example.com/f/x.png")
+	if !errors.Is(err, ErrLocalCache) {
+		t.Fatalf("err = %v, want ErrLocalCache", err)
+	}
+	if !errors.Is(err, syscall.ENOTDIR) {
+		t.Fatalf("err = %v, want 原始 ENOTDIR 仍在错误链上", err)
+	}
+	if !strings.Contains(err.Error(), ErrLocalCache.Error()) {
+		t.Fatalf("err text = %q, want 含 sentinel 文案", err.Error())
+	}
+}
+
+// localCacheError 包装的双向 errors.Is：sentinel 与原始错误都要找得到（service
+// 层按 sentinel 分类、原有 fs.ErrNotExist 类判定不失效的依据）。
+func TestLocalCacheErrorWrapping(t *testing.T) {
+	base := errors.New("disk on fire")
+	err := markLocalCacheErr(base)
+	if !errors.Is(err, ErrLocalCache) {
+		t.Fatalf("errors.Is(err, ErrLocalCache) = false, want true")
+	}
+	if !errors.Is(err, base) {
+		t.Fatalf("errors.Is(err, base) = false, want true（原始错误链保留）")
+	}
+	if markLocalCacheErr(nil) != nil {
+		t.Fatal("markLocalCacheErr(nil) 应原样返回 nil")
+	}
 }
 
 // guardAddress: true 的服务对回环上游（httptest 即 127.0.0.1）拨号即拒。
@@ -384,6 +435,10 @@ func TestIsGitHubMediaURL(t *testing.T) {
 		"https://uiv.example.com/f/x.png",
 		"https://evil.example.com/github.com/user-attachments/assets/abc",
 		"github.com/user-attachments/assets/abc", // 无 scheme：解析后 Host 为空
+		// http 明文不算 GitHub 媒体域：这个闸门决定 bearer 令牌重试，令牌只
+		// 发 https 上游（截图下载面也只走 https）。注意 isAllowedGitHubMediaURL
+		// 有意允许 http，两个口径不同——这里回归的是导出闸门的形状准入。
+		"http://github.com/user-attachments/assets/x",
 		"", ":", "not a url",
 	}
 	for _, raw := range yes {

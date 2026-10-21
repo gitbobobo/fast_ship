@@ -4,9 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
 	"net"
-	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -139,7 +137,14 @@ func screenshotErrorText(err error) string {
 	// sentinel 命中后必须返回 sentinel 自己的文案：生产里 Dialer.Control、
 	// CheckRedirect 抛出的 sentinel 会被 *net.OpError → *url.Error 层层包住，
 	// 外层 err.Error() 是「Get https://…: dial tcp …: 中文文案」——英文网络
-	// 原文连同目标 URL 会一起透出到 status 与落库字段。
+	// 原文连同目标 URL 会一起透出到 status 与落库字段。ErrLocalCache 的分类
+	// 文案与 sentinel 文案不同，单独一层；它由 githubmedia 在本地缓存操作
+	// 失败的产生点打标，不再按 *fs.PathError / *os.SyscallError 外壳嗅探
+	// ——网络错误的 syscall 形态（dial connect: connection refused 也是
+	// SyscallError）不会再被误归成磁盘故障。
+	if errors.Is(err, githubmedia.ErrLocalCache) {
+		return "截图缓存写入失败"
+	}
 	for _, sentinel := range []error{
 		errReviewMediaUnconfigured,
 		githubmedia.ErrInvalidMediaURL,
@@ -163,14 +168,8 @@ func screenshotErrorText(err error) string {
 		return "下载超时"
 	}
 	// 本地磁盘/缓存写入失败（磁盘满、权限、缓存目录损坏）不是网络故障，落到
-	// 兜底「无法连接图片服务器」会把用户引向查网络。fetchAndCache 的
-	// MkdirAll/CreateTemp/io.Copy（写本地临时文件）都以 *fs.PathError 到达，
-	// 权限类错误（fs.ErrPermission）包在 PathError.Err 里，随之覆盖。
-	var pathErr *fs.PathError
-	var sysErr *os.SyscallError
-	if errors.As(err, &pathErr) || errors.As(err, &sysErr) {
-		return "截图缓存写入失败"
-	}
+	// 兜底「无法连接图片服务器」会把用户引向查网络——由上面的 ErrLocalCache
+	// sentinel 覆盖。
 	return "无法连接图片服务器"
 }
 

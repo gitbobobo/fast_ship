@@ -44,7 +44,45 @@ var (
 	ErrBlockedUpstreamAddress   = errors.New("图片地址指向内网或保留地址")
 	ErrEmptyUpstreamMedia       = errors.New("上游返回空内容")
 	ErrMediaTooLarge            = errors.New("图片超过大小上限")
+	// ErrLocalCache 本地截图缓存操作失败（建缓存目录/建临时文件/写盘/改名/
+	// 读缓存元数据）。在产生点打标：service 层只认这个 sentinel 归「截图缓
+	// 存写入失败」类，不再嗅探 *fs.PathError / *os.SyscallError 外壳——网络
+	// 错误的 syscall 形态（dial connect: connection refused 也是 SyscallError）
+	// 不会再被误归成磁盘故障。
+	ErrLocalCache = errors.New("本地截图缓存操作失败")
 )
+
+// localCacheError 本地缓存文件操作的统一包装：errors.Is 同时命中
+// ErrLocalCache（调用方分类用）与原始错误链（fs.ErrNotExist、syscall.ENOSPC
+// 等原判定不丢）。
+type localCacheError struct{ err error }
+
+func (e *localCacheError) Error() string { return ErrLocalCache.Error() + ": " + e.err.Error() }
+
+// Unwrap 双链：sentinel 与原始错误都要能被 errors.Is 找到。
+func (e *localCacheError) Unwrap() []error { return []error{ErrLocalCache, e.err} }
+
+// markLocalCacheErr 给本地缓存操作失败包上 ErrLocalCache；nil 原样返回。
+func markLocalCacheErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &localCacheError{err: err}
+}
+
+// cacheFileWriter 写侧打标：io.Copy 的失败可能来自读网络 body（网络错误，
+// 原样外抛）或写本地临时文件（缓存故障）。包装后的 dst 不再实现 ReaderFrom
+// （*os.File 在 Linux 上的 splice/copy_file_range 快路径因此不会旁路这里），
+// 写失败必然经过 Write 被打上 ErrLocalCache。
+type cacheFileWriter struct{ w io.Writer }
+
+func (c cacheFileWriter) Write(p []byte) (int, error) {
+	n, err := c.w.Write(p)
+	if err != nil {
+		return n, &localCacheError{err: err}
+	}
+	return n, nil
+}
 
 type UpstreamStatusError struct {
 	StatusCode int
@@ -240,10 +278,11 @@ func guardDialControl(_, address string, _ syscall.RawConn) error {
 }
 
 // isBlockedIP SSRF 地址判定：拒绝回环、RFC1918 私网、IPv6 ULA/链路本地/
-// 多播/未指定地址，以及 169.254.0.0/16、100.64.0.0/10（CGNAT）、0.0.0.0/8、
-// 198.18.0.0/15（基准测试）、240.0.0.0/4（保留段，含广播）地址；IPv6 还要
-// 解出内嵌 IPv4 再判一遍（NAT64 只有 well-known /96 解码，/32 内其余前缀
-// 长度整体拒绝，见下）；公网地址放行。
+// 多播/未指定/已废弃 site-local（fec0::/10，见下）地址，以及 169.254.0.0/16、
+// 100.64.0.0/10（CGNAT）、0.0.0.0/8、198.18.0.0/15（基准测试）、240.0.0.0/4
+// （保留段，含广播）地址；IPv6 还要解出内嵌 IPv4 再判一遍（NAT64 只有
+// well-known /96 解码，/32 内其余前缀长度与 local-use /96 整体拒绝，见下）；
+// 公网地址放行。
 func isBlockedIP(ip net.IP) bool {
 	if ip == nil {
 		return true
@@ -266,8 +305,18 @@ func isBlockedIP(ip net.IP) bool {
 		}
 		return false
 	}
+	// fec0::/10 已废弃的 site-local（RFC 3879）整体拒绝：标准判定里没有这段
+	// ——IsPrivate 只认 fc00::/7 ULA，IsLinkLocalUnicast 只认 fe80::/10——
+	// 旧实现会当公网放行。与 fe80::/10 的区别在第二字节高两位（11 vs 10）。
+	if ipv6 := ip.To16(); ipv6 != nil && ipv6[0] == 0xfe && ipv6[1]&0xc0 == 0xc0 {
+		return true
+	}
 	// NAT64/6to4/Teredo 等前缀本身是公网单播，能内嵌任意 IPv4——载荷是
 	// 内网地址时同样要拒，否则「看起来是公网」的 IPv6 就绕过了上面的判定。
+	// 64:ff9a::/96（RFC 8215 local-use）整体拒绝：布局与 well-known /96 相同
+	// （bytes 4-11 全零、内嵌 IPv4 恰在末 4 字节），按解码规则「解得出」，但
+	// 它与 64:ff9b::/32 一样是 local-use 前缀，不属于公网可路由空间，公网图
+	// 床不会出现——不为它维持一条解码例外，宁拒不放。
 	// NAT64（64:ff9b::/32，RFC 6052/8215）统一成一条规则：只有 well-known
 	// /96（bytes 4-11 全零）按末 4 字节解出内嵌 IPv4 递归判定（内嵌公网
 	// 放行）；/32 内其余前缀长度——RFC 6052 §2.2 的 /40 /48 /56 /64 布局
@@ -275,14 +324,19 @@ func isBlockedIP(ip net.IP) bool {
 	// 都解不出可靠的内嵌 IPv4）与 RFC 8215 的 local-use /48（布局还可由
 	// 网络自行选择）——一律整体拒绝。这些前缀不该出现在公网图床上，宁可
 	// 错拒不可放过，有意保守。
-	if ipv6 := ip.To16(); ipv6 != nil && isNAT64Prefix(ipv6) {
-		if allZero(ipv6[4:12]) {
-			if v4 := embeddedIPv4(ip); v4 != nil && isBlockedIP(v4) {
-				return true
-			}
-			return false
+	if ipv6 := ip.To16(); ipv6 != nil {
+		if isLocalUseNAT64(ipv6) {
+			return true
 		}
-		return true
+		if isNAT64Prefix(ipv6) {
+			if allZero(ipv6[4:12]) {
+				if v4 := embeddedIPv4(ip); v4 != nil && isBlockedIP(v4) {
+					return true
+				}
+				return false
+			}
+			return true
+		}
 	}
 	if v4 := embeddedIPv4(ip); v4 != nil && isBlockedIP(v4) {
 		return true
@@ -293,6 +347,12 @@ func isBlockedIP(ip net.IP) bool {
 // isNAT64Prefix 地址（16 字节形式）是否落在 NAT64 前缀 64:ff9b::/32 内。
 func isNAT64Prefix(ipv6 []byte) bool {
 	return ipv6[0] == 0 && ipv6[1] == 0x64 && ipv6[2] == 0xff && ipv6[3] == 0x9b
+}
+
+// isLocalUseNAT64 地址（16 字节形式）是否落在 RFC 8215 local-use NAT64 前缀
+// 64:ff9a::/96 内（前 4 字节 00 64 ff 9a，与 well-known /32 只差末字节）。
+func isLocalUseNAT64(ipv6 []byte) bool {
+	return ipv6[0] == 0 && ipv6[1] == 0x64 && ipv6[2] == 0xff && ipv6[3] == 0x9a
 }
 
 func allZero(b []byte) bool {
@@ -339,7 +399,9 @@ func embeddedIPv4(ip net.IP) net.IP {
 	}
 	// NAT64 well-known 前缀与 IPv4-compatible 的内嵌 IPv4 都在末 4 字节。
 	// /32 内非 /96 布局（含 local-use /48）的 bytes 4-11 不全零，不满足零
-	// 校验，到这里返回 nil，由 isBlockedIP 按整体拒绝处理。
+	// 校验；64:ff9a::/96（local-use /96）bytes 4-11 全零但前缀不匹配
+	// isNAT64Prefix，也不在这里解码——它由 isBlockedIP 在调用之前整体拒绝，
+	// 不会走到这里。两种形态都返回 nil。
 	nat64 := isNAT64Prefix(ipv6) && allZero(ipv6[4:12])
 	compatible := allZero(ipv6[:12])
 	if nat64 || compatible {
@@ -458,7 +520,7 @@ func (s *ProxyService) fetchAndCache(ctx context.Context, rawURL, bearer string)
 	}
 
 	if err := os.MkdirAll(s.cacheDir, 0o750); err != nil {
-		return nil, err
+		return nil, markLocalCacheErr(err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, normalized, nil)
@@ -496,7 +558,7 @@ func (s *ProxyService) fetchAndCache(ctx context.Context, rawURL, bearer string)
 
 	tempFile, err := os.CreateTemp(s.cacheDir, defaultTempFilePattern)
 	if err != nil {
-		return nil, err
+		return nil, markLocalCacheErr(err)
 	}
 
 	downloadOK := false
@@ -507,7 +569,9 @@ func (s *ProxyService) fetchAndCache(ctx context.Context, rawURL, bearer string)
 		}
 	}()
 
-	written, err := io.Copy(tempFile, io.LimitReader(resp.Body, s.maxCacheEntrySize+1))
+	// 写侧打标：写本地临时文件失败带 ErrLocalCache，读网络 body 失败仍是
+	// 原始网络错误。
+	written, err := io.Copy(cacheFileWriter{w: tempFile}, io.LimitReader(resp.Body, s.maxCacheEntrySize+1))
 	if err != nil {
 		return nil, err
 	}
@@ -520,7 +584,7 @@ func (s *ProxyService) fetchAndCache(ctx context.Context, rawURL, bearer string)
 		return nil, ErrMediaTooLarge
 	}
 	if _, err := tempFile.Seek(0, io.SeekStart); err != nil {
-		return nil, err
+		return nil, markLocalCacheErr(err)
 	}
 
 	now := time.Now().UTC()
@@ -539,14 +603,14 @@ func (s *ProxyService) fetchAndCache(ctx context.Context, rawURL, bearer string)
 	metaPath := s.metaPath(normalized)
 
 	if err := os.Rename(tempFile.Name(), cachePath); err != nil {
-		return nil, err
+		return nil, markLocalCacheErr(err) // *os.LinkError 也统一打标
 	}
 	metaBytes, err := json.Marshal(entry)
 	if err != nil {
 		return nil, err
 	}
 	if err := os.WriteFile(metaPath, metaBytes, 0o640); err != nil {
-		return nil, err
+		return nil, markLocalCacheErr(err)
 	}
 
 	downloadOK = true
@@ -618,7 +682,9 @@ func (s *ProxyService) getCachedNormalized(normalized string) (*CachedMedia, boo
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, false, nil
 		}
-		return nil, false, err
+		// 其余本地读失败（权限、目录损坏）同样打标；ErrNotExist（缓存未命中）
+		// 保持 (nil, false, nil) 的既有语义，不算失败。
+		return nil, false, markLocalCacheErr(err)
 	}
 
 	var entry cacheEntry
@@ -640,7 +706,7 @@ func (s *ProxyService) getCachedNormalized(normalized string) (*CachedMedia, boo
 			_ = os.Remove(metaPath)
 			return nil, false, nil
 		}
-		return nil, false, err
+		return nil, false, markLocalCacheErr(err)
 	}
 
 	entry.Size = info.Size()
@@ -711,11 +777,17 @@ func normalizeMediaURL(rawURL string) (string, error) {
 }
 
 // IsGitHubMediaURL URL 是否属于 GitHub 媒体域（与 media-proxy 白名单同一
-// 口径）。service 层用它决定下载失败后是否值得带 App 安装令牌重试——外部
-// 图床拿了令牌等于拿到仓库凭证。
+// 口径，且必须是完整的 https URL：有 host、无 userinfo、无 fragment）。
+// service 层用它决定下载失败后是否值得带 App 安装令牌重试——外部图床拿了
+// 令牌等于拿到仓库凭证，所以按「可发请求的地址」准入而不是只看域名；http
+// 明文的 GitHub 域名同样不算（截图下载面只走 https）。只影响这个导出闸门，
+// isAllowedGitHubMediaURL 保持原语义（GitHub 媒体面有意允许 http）。
 func IsGitHubMediaURL(raw string) bool {
 	parsed, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil {
+	if err != nil || parsed == nil {
+		return false
+	}
+	if parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" {
 		return false
 	}
 	return isAllowedGitHubMediaURL(parsed)

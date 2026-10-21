@@ -4,9 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
 	"net"
 	"net/url"
+	"os"
 	"strings"
 	"syscall"
 	"testing"
@@ -258,6 +258,17 @@ func TestVisualSyncProbeSkippedCarriesPriorFailure(t *testing.T) {
 	if !found {
 		t.Fatalf("comments = %v, want 视觉带过评论", e.fake.Comments(repo, 86))
 	}
+	// 带过路径的代码顶层评论同样带「截图复核意见尚未处理」（visualCarryFailure
+	// 分支的既有行为，与截图不可用分支的口径对齐）。
+	hint := false
+	for _, c := range e.fake.Comments(repo, 86) {
+		if strings.Contains(c, reviewCodeCommentMarker) && strings.Contains(c, "截图复核意见尚未处理") {
+			hint = true
+		}
+	}
+	if !hint {
+		t.Fatalf("code comments = %v, want 含「截图复核意见尚未处理」", e.fake.Comments(repo, 86))
+	}
 }
 
 // F20 回归：截图指纹未变 + 上一轮视觉通过 + 下载失败 → 沿用 success，不因
@@ -315,6 +326,13 @@ func TestVisualSyncProbeSkippedKeepsPriorSuccess(t *testing.T) {
 	}
 	if ledger.VisualStatus != "success" {
 		t.Fatalf("visual_status = %q, want success", ledger.VisualStatus)
+	}
+	// 沿用 success 时上一轮没有遗留：代码顶层评论不得带「截图复核意见尚未
+	// 处理」（拿不存在的遗留去催复核者会误导）。
+	for _, c := range e.fake.Comments(repo, 87) {
+		if strings.Contains(c, reviewCodeCommentMarker) && strings.Contains(c, "截图复核意见尚未处理") {
+			t.Fatalf("code comment = %q, 沿用 success 不应带遗留提示", c)
+		}
 	}
 }
 
@@ -424,6 +442,67 @@ func TestVisualSyncScreensUnavailableSkipsCommentWithoutPrior(t *testing.T) {
 		if strings.Contains(c, reviewVisualCommentMarker) {
 			t.Fatalf("comment = %q, want 不新发视觉评论", c)
 		}
+	}
+}
+
+// E5 回归：上一轮视觉含 blocker + 本轮截图集合已换且全部下载失败 → 决策是
+// 「截图无法下载」（visualScreensUnavailable），但代码顶层评论仍要带「截图
+// 复核意见尚未处理」——与 visualCarryFailure 分支口径一致。旧实现在这个分支
+// 恒置 visualCarry=false，提示丢失，复核者不知道上一轮意见还挂着。
+func TestVisualSyncScreensUnavailableCarriesPriorHint(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	body := "![界面](https://uiv.frp.musiver.cn/f/x.png)"
+	e.fake.SetPR(repo, 90, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 90, HeadSHA: "sha-sh", Body: body,
+		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
+	})
+	visualCombos, err := marshalCombinations([]api.ReviewCombination{testCombo("env-sh")})
+	if err != nil {
+		t.Fatalf("marshal combos: %v", err)
+	}
+	e.enableReview(t, func(s *model.ProjectReviewSettings) {
+		s.VisualCombinationsJSON = visualCombos
+	})
+	// 上一轮（round 1）视觉发现 blocker。
+	prior := e.seedRun(t, repo, 90, "sha-prev", model.ReviewRunCompleted, now.Add(-time.Hour))
+	e.svc.db.Model(prior).Updates(map[string]any{
+		"kind": model.ReviewKindVisual, "round_number": 1,
+		"result_json": `{"summary":"有阻断问题","findings":[{"severity":"blocker","screenshot":"界面","dimension":"hierarchy","body":"按钮叠在文字上","fix":"调整层级"}],"prior":[],"unmeasurable":[]}`,
+	})
+	// 本轮（round 2）代码通过；账本未记截图指纹 → ScreensChanged=true，
+	// 探测真的发生。
+	run := e.seedRun(t, repo, 90, "sha-sh", model.ReviewRunCompleted, now)
+	e.svc.db.Model(run).Updates(map[string]any{
+		"round_number": 2, "summary": "干净",
+		"result_json": `{"summary":"干净","findings":[],"prior":[],"ui_changed":true,"ui_changed_since_last_visual":true}`,
+	})
+	if err := e.svc.db.Create(&model.ReviewPullRequest{
+		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 90, UserID: e.user.ID,
+		InstallationID: 1, HeadSHA: "sha-sh", RoundNumber: 2,
+		SyncPending: true, SyncEpoch: 1, UpdatedAt: now,
+	}).Error; err != nil {
+		t.Fatalf("seed ledger: %v", err)
+	}
+
+	e.media.anonErr = errors.New("connection refused")
+	e.review.syncPendingPRs(now)
+
+	// 决策确实是「截图无法下载」分支。
+	statuses := e.fake.StatusesForContext(reviewVisualStatusContext)
+	if len(statuses) != 1 || statuses[0].State != "failure" || !strings.Contains(statuses[0].Description, "截图无法下载") {
+		t.Fatalf("statuses = %+v, want 一条「截图无法下载」failure", statuses)
+	}
+	// 代码顶层评论带遗留提示。
+	hint := false
+	for _, c := range e.fake.Comments(repo, 90) {
+		if strings.Contains(c, reviewCodeCommentMarker) && strings.Contains(c, "截图复核意见尚未处理") {
+			hint = true
+		}
+	}
+	if !hint {
+		t.Fatalf("code comments = %v, want 含「截图复核意见尚未处理」", e.fake.Comments(repo, 90))
 	}
 }
 
@@ -635,10 +714,15 @@ func TestScreenshotErrorText(t *testing.T) {
 		{"超限哨兵", githubmedia.ErrMediaTooLarge, "图片超过大小上限"},
 		{"下载面未配置", errReviewMediaUnconfigured, "截图下载面未配置"},
 		{"上游状态码", &githubmedia.UpstreamStatusError{StatusCode: 503}, "上游返回状态码 503"},
-		// F34 回归：本地磁盘/缓存写入失败（磁盘满）不落兜底「无法连接图片
-		// 服务器」——那会把用户引向查网络。
-		{"磁盘写入失败", &fs.PathError{Op: "open", Path: "/var/x", Err: syscall.ENOSPC}, "截图缓存写入失败"},
-		{"包在 url.Error 里的缓存写入失败仍按写入失败归类", &url.Error{Op: "Get", URL: "https://uiv.example.com/f/x.png", Err: &fs.PathError{Op: "write", Path: "/cache/x.part", Err: syscall.ENOSPC}}, "截图缓存写入失败"},
+		// E1 回归：本地缓存失败由 githubmedia 在产生点打上 ErrLocalCache，
+		// service 层只认 sentinel、不再按 *fs.PathError / *os.SyscallError
+		// 外壳嗅探。
+		{"缓存写入 sentinel", githubmedia.ErrLocalCache, "截图缓存写入失败"},
+		{"包装后的缓存写入 sentinel", fmt.Errorf("download: %w", githubmedia.ErrLocalCache), "截图缓存写入失败"},
+		// P1 回归：网络 syscall 错误（connection refused 以 *os.SyscallError
+		// 到达）必须归「无法连接图片服务器」——旧实现按 SyscallError 外壳
+		// 嗅探会把它误归成「截图缓存写入失败」。
+		{"网络 syscall 错误不按磁盘错误归类", &url.Error{Op: "Get", URL: "https://x/a.png", Err: &net.OpError{Op: "dial", Err: os.NewSyscallError("connect", syscall.ECONNREFUSED)}}, "无法连接图片服务器"},
 	}
 	for _, c := range cases {
 		if got := screenshotErrorText(c.err); got != c.want {
