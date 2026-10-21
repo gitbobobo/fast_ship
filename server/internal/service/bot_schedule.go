@@ -396,6 +396,8 @@ func (s *BotService) createScheduleTask(botID, name, cronExpr, timezone, instruc
 		Name: name, CronExpression: strings.TrimSpace(cronExpr), Timezone: timezone,
 		Instruction: instruction, Model: strings.TrimSpace(mdl),
 		NeedsReport: needsReport, Enabled: true, NextRunAt: &next,
+		// create 的唯一入口是确认卡批准后的异步执行：走到这里配置即已复核。
+		Confirmed: true,
 		CreatedAt: now, UpdatedAt: now,
 	}
 	// 计数与插入在同一事务里：定时任务允许并行运行，两个并发的 schedule 会话
@@ -427,7 +429,7 @@ func (s *BotService) createScheduleTask(botID, name, cronExpr, timezone, instruc
 // cron/时区变化且任务启用时重算 next_run_at 为 now 之后的下一次。读改写走
 // 同一事务：与用户启停（setScheduleTaskEnabled）在同一连接上串行化，避免
 // 「读到启用 → 期间被停用 → 把 next_run_at 又写回去」的竞态。
-func (s *BotService) updateScheduleTask(botID, taskID, name, cronExpr, timezone, instruction string, mdl *string, needsReport *bool, expectedUpdatedAt string) (*model.BotScheduleTask, error) {
+func (s *BotService) updateScheduleTask(botID, taskID, name, cronExpr, timezone, instruction string, mdl *string, needsReport *bool, expectedUpdatedAt string, confirmed bool) (*model.BotScheduleTask, error) {
 	var out *model.BotScheduleTask
 	txErr := s.db.Transaction(func(tx *gorm.DB) error {
 		repo := repository.NewBotScheduleTaskRepository(tx)
@@ -452,6 +454,12 @@ func (s *BotService) updateScheduleTask(botID, taskID, name, cronExpr, timezone,
 			"timezone": updated.Timezone, "instruction": updated.Instruction,
 			"model": updated.Model, "needs_report": updated.NeedsReport,
 			"next_run_at": updated.NextRunAt, "updated_at": time.Now().UTC(),
+		}
+		if confirmed {
+			// 带确认卡的 update 把合并后的整份配置（含指令全文）展示给用户
+			// 批准过：任务配置即已复核（INT-136）。
+			cols["confirmed"] = true
+			updated.Confirmed = true
 		}
 		if ok, err := repo.UpdateColumns(updated.ID, nil, cols); err != nil || !ok {
 			return errs.ErrInternal
@@ -522,7 +530,7 @@ func applyScheduleTaskUpdate(task *model.BotScheduleTask, name, cronExpr, timezo
 
 // setScheduleTaskEnabled 开关任务：重新启用时 next_run_at 重算为 now 之后的
 // 下一次（不补跑过期计划）；停用后不再触发。
-func (s *BotService) setScheduleTaskEnabled(botID, taskID string, enabled bool, expectedUpdatedAt string) (*model.BotScheduleTask, error) {
+func (s *BotService) setScheduleTaskEnabled(botID, taskID string, enabled bool, expectedUpdatedAt string, confirmed bool) (*model.BotScheduleTask, error) {
 	now := time.Now().UTC()
 	var task *model.BotScheduleTask
 	txErr := s.db.Transaction(func(tx *gorm.DB) error {
@@ -538,6 +546,11 @@ func (s *BotService) setScheduleTaskEnabled(botID, taskID string, enabled bool, 
 			return err
 		}
 		cols := map[string]interface{}{"enabled": enabled, "updated_at": now}
+		if confirmed {
+			// 经确认卡的 enable 已把任务整份配置（含指令全文）展示给用户
+			// 批准：任务配置即已复核（INT-136）。
+			cols["confirmed"] = true
+		}
 		if enabled {
 			// 只有「原本停用」或「没有下次计划」才重算。已经启用、且这次计划
 			// 就在宽限内等着派发的任务，再点一次「启用」不该吃掉这一次触发。
@@ -557,6 +570,9 @@ func (s *BotService) setScheduleTaskEnabled(botID, taskID string, enabled bool, 
 			return res.Error
 		}
 		task.Enabled = enabled
+		if confirmed {
+			task.Confirmed = true
+		}
 		if enabled {
 			if next, ok := cols["next_run_at"].(time.Time); ok {
 				v := next
@@ -798,8 +814,8 @@ func (s *BotService) SetScheduleTaskEnabled(userID, botID, taskID string, enable
 	if err := s.checkOwnership(userID, botID); err != nil {
 		return nil, err
 	}
-	// 用户侧 REST 没有确认卡这一步，不做修订比对。
-	task, err := s.setScheduleTaskEnabled(botID, taskID, enabled, "")
+	// 用户侧 REST 没有确认卡这一步，不做修订比对、不改写 confirmed 标记。
+	task, err := s.setScheduleTaskEnabled(botID, taskID, enabled, "", false)
 	if err != nil {
 		return nil, err
 	}
@@ -1210,7 +1226,7 @@ func (s *BotService) execScheduleCreate(call *model.BotToolCall, args *botSchedu
 func (s *BotService) execScheduleUpdate(call *model.BotToolCall, args *botScheduleTaskArgs) (string, error) {
 	updated, err := s.updateScheduleTask(call.BotID, strings.TrimSpace(args.TaskID),
 		args.Name, args.Cron, args.Timezone, args.Instruction, args.Model, args.NeedsReport,
-		botScheduleAcceptedRevision(call))
+		botScheduleAcceptedRevision(call), call.RequiresConfirmation)
 	if err != nil {
 		return "", err
 	}
@@ -1263,7 +1279,7 @@ func (s *BotService) execScheduleRuns(call *model.BotToolCall, args *botSchedule
 }
 
 func (s *BotService) execScheduleEnable(call *model.BotToolCall, args *botScheduleTaskArgs, enabled bool) (string, error) {
-	task, err := s.setScheduleTaskEnabled(call.BotID, strings.TrimSpace(args.TaskID), enabled, botScheduleAcceptedRevision(call))
+	task, err := s.setScheduleTaskEnabled(call.BotID, strings.TrimSpace(args.TaskID), enabled, botScheduleAcceptedRevision(call), enabled && call.RequiresConfirmation)
 	if err != nil {
 		return "", err
 	}

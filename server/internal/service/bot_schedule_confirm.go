@@ -163,7 +163,16 @@ func (s *BotService) resolveScheduleScope(bot *model.Bot, prepared *botPreparedC
 	case "update":
 		prepared.ScopeKind = botScopeScheduleTask
 		prepared.FieldsConstraint = presentFields(raw, "name", "cron", "timezone", "instruction", "model", "needs_report")
-		task, err := s.scheduleTargetTask(bot, rawString(raw["task_id"]))
+		prepared.ScopeID = rawString(raw["task_id"])
+		if !prepared.RequiresConfirmation {
+			// 免确认 update（只改 name/cron/timezone）受理期不读库内任务：
+			// 存量非法配置不该挡住这类同步修改（执行层会返回具体字段错误），
+			// 没有确认卡的路径也不能记修订水位——否则受理到同步执行之间
+			// 任务被 REST 启停或另一路写碰过 updated_at，同步 update 会以
+			// 「任务在确认期间被修改」失败，而这条路径根本没有确认期间。
+			return nil
+		}
+		task, err := s.scheduleTargetTask(bot, prepared.ScopeID)
 		if err != nil {
 			return err
 		}
@@ -200,12 +209,10 @@ func (s *BotService) resolveScheduleScope(bot *model.Bot, prepared *botPreparedC
 					"无法计算任务的生效配置（现有配置不合法），请先修正任务后再操作")
 			}
 			// run/delete 的执行不解析 cron（run 只冻结任务快照、delete 只按 id
-			// 删除），存量非法配置时仍允许受理，只保留目标与修订水位；确认卡
-			// 按动作说明后果，不需要完整配置。
-			prepared.SchedulePreview = &botScheduleCallPreview{
-				TaskID:        task.ID,
-				TaskUpdatedAt: task.UpdatedAt.UTC().Format(time.RFC3339Nano),
-			}
+			// 删除），存量非法配置时仍允许受理；确认卡如实展示库里那一整份
+			// 配置——只剩 task_id 的匿名卡会让用户在看不到指令的情况下批准
+			// 一次「默认放行写操作」的执行，正是确认卡要防的盲批。
+			prepared.SchedulePreview = scheduleRawTaskPreview(bot, task)
 		}
 	}
 	return nil
@@ -282,6 +289,32 @@ func (s *BotService) schedulePreviewFromTask(bot *model.Bot, in schedulePreviewI
 		loc := timeOrUTC(merged.Timezone)
 		preview.NextRunAt = next.In(loc).Format("2006-01-02 15:04:05 MST")
 		preview.NextRunAtUTC = next.UTC().Format(time.RFC3339)
+	}
+	return preview
+}
+
+// scheduleRawTaskPreview 用任务行的原始字段组兜底预览：合并/校验失败（存量
+// 配置不合法）时 run/delete 仍允许受理，但确认卡必须如实展示将要执行/删除的
+// 那一份配置，而不是一张只剩 task_id 的匿名卡。next_run_at 取库里存的计划
+// （不再解析 cron——它可能本来就解析不了，那也是配置不合法的一部分）。
+func scheduleRawTaskPreview(bot *model.Bot, task *model.BotScheduleTask) *botScheduleCallPreview {
+	effective := strings.TrimSpace(task.Model)
+	if effective == "" {
+		effective = bot.Model
+	}
+	report := task.NeedsReport
+	preview := &botScheduleCallPreview{
+		TaskID: task.ID, Name: task.Name,
+		Cron: task.CronExpression, Timezone: task.Timezone,
+		Instruction: task.Instruction, NeedsReport: &report,
+		EffectiveModel: effective,
+		ModelInherited: strings.TrimSpace(task.Model) == "",
+		TaskUpdatedAt:  task.UpdatedAt.UTC().Format(time.RFC3339Nano),
+	}
+	if task.NextRunAt != nil {
+		loc := timeOrUTC(task.Timezone)
+		preview.NextRunAt = task.NextRunAt.In(loc).Format("2006-01-02 15:04:05 MST")
+		preview.NextRunAtUTC = task.NextRunAt.UTC().Format(time.RFC3339)
 	}
 	return preview
 }

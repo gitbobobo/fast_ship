@@ -790,7 +790,7 @@ func TestBotInt136RunRejectedWhenTaskChangedAfterAccept(t *testing.T) {
 
 	// 确认期间任务指令被改（含写操作），执行时必须拒绝。
 	changed := "顺便把高优先级问题全部关闭"
-	if _, err := env.bots.updateScheduleTask(bot.ID, task.ID, "", "", "", changed, nil, nil, ""); err != nil {
+	if _, err := env.bots.updateScheduleTask(bot.ID, task.ID, "", "", "", changed, nil, nil, "", false); err != nil {
 		t.Fatalf("update task: %v", err)
 	}
 	if _, err := env.bots.DecideCall(userID, bot.ID, callID, &CallDecisionRequest{Decision: "approve"}); err != nil {
@@ -821,7 +821,7 @@ func TestBotInt136DeleteRevisionConflictPropagates(t *testing.T) {
 	task := seedScheduleTask(t, env, bot.ID, nil)
 	stale := task.UpdatedAt.UTC().Format(time.RFC3339Nano)
 	// 改动任务，制造「受理之后被改过」。
-	if _, err := env.bots.updateScheduleTask(bot.ID, task.ID, "", "", "", "改过的指令", nil, nil, ""); err != nil {
+	if _, err := env.bots.updateScheduleTask(bot.ID, task.ID, "", "", "", "改过的指令", nil, nil, "", false); err != nil {
 		t.Fatalf("update task: %v", err)
 	}
 	err := env.bots.deleteScheduleTask(bot.ID, task.ID, stale)
@@ -1111,5 +1111,206 @@ func TestBotInt136AcceptRejectsTaskWithoutPreview(t *testing.T) {
 	}
 	if delPrep.SchedulePreview == nil || delPrep.SchedulePreview.TaskUpdatedAt == "" {
 		t.Fatalf("delete 预览应保留目标与修订水位: %+v", delPrep.SchedulePreview)
+	}
+}
+
+// 免确认 update（只改 name/cron/timezone）受理期不读库内任务：存量非法配置
+// 不该挡住这类同步修改（执行层会返回具体字段错误），没有确认卡的路径也不
+// 记修订水位——否则受理到执行之间 updated_at 一动，同步 update 会以
+// 「任务在确认期间被修改」误伤，而这条路径根本没有确认期间。
+func TestBotInt136SyncUpdateSkipsPreviewAndWatermark(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "int136syncupd")
+	bot := env.createBot(t, userID)
+	task := seedScheduleTask(t, env, bot.ID, nil)
+	botRow, err := env.bots.bots.Get(bot.ID)
+	if err != nil {
+		t.Fatalf("load bot: %v", err)
+	}
+	args := `{"action":"update","task_id":"` + task.ID + `","name":"改名后的任务"}`
+	prep, err := botPrepareToolCall(botToolsetVersionOf(8), "fs_schedule", args)
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if prep.RequiresConfirmation {
+		t.Fatalf("只改 name 应为免确认同步 update")
+	}
+	var execCtx botCallExecContext
+	if err := env.bots.resolveCallScope(botRow, prep, args, &execCtx); err != nil {
+		t.Fatalf("免确认 update 受理不应读库校验: %v", err)
+	}
+	if execCtx.Schedule != nil {
+		t.Fatalf("免确认路径不应记预览/修订水位: %+v", execCtx.Schedule)
+	}
+	if execCtx.ScopeKind != botScopeScheduleTask || execCtx.ScopeID != task.ID {
+		t.Fatalf("范围应仍指向目标任务: %+v", execCtx)
+	}
+	// 受理到执行之间任务被另一路改过：同步路径没有确认卡，执行不应报
+	// 「确认期间被修改」。
+	if err := env.db.Model(&model.BotScheduleTask{}).Where("id = ?", task.ID).
+		Update("updated_at", time.Now().Add(time.Hour).UTC()).Error; err != nil {
+		t.Fatalf("bump updated_at: %v", err)
+	}
+	call := &model.BotToolCall{BotID: bot.ID, ArgumentsJSON: args,
+		ExecutionContextJSON: marshalExecContext(execCtx)}
+	if _, err := env.bots.execScheduleTool(call); err != nil {
+		t.Fatalf("同步 update 不应被修订比对挡住: %v", err)
+	}
+	var reloaded model.BotScheduleTask
+	if err := env.db.First(&reloaded, "id = ?", task.ID).Error; err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if reloaded.Name != "改名后的任务" {
+		t.Fatalf("同步 update 应已生效: %+v", reloaded)
+	}
+	// 存量非法配置的任务：受理同样放行，执行层返回具体字段错误而非
+	// 「现有配置不合法」的笼统拒绝。
+	bad := seedScheduleTask(t, env, bot.ID, func(tk *model.BotScheduleTask) {
+		tk.Instruction = "   "
+	})
+	badArgs := `{"action":"update","task_id":"` + bad.ID + `","name":"还是改名"}`
+	badPrep, err := botPrepareToolCall(botToolsetVersionOf(8), "fs_schedule", badArgs)
+	if err != nil {
+		t.Fatalf("prepare bad: %v", err)
+	}
+	var badCtx botCallExecContext
+	if err := env.bots.resolveCallScope(botRow, badPrep, badArgs, &badCtx); err != nil {
+		t.Fatalf("免确认 update 不应在受理期被存量配置挡住: %v", err)
+	}
+	badCall := &model.BotToolCall{BotID: bot.ID, ArgumentsJSON: badArgs,
+		ExecutionContextJSON: marshalExecContext(badCtx)}
+	_, execErr := env.bots.execScheduleTool(badCall)
+	if execErr == nil || !strings.Contains(execErr.Error(), "指令") {
+		t.Fatalf("执行层应返回具体字段错误（指令不合法）: %v", execErr)
+	}
+}
+
+// run/delete 的兜底预览如实展示库里那一份配置：存量非法配置的任务上，
+// 只剩 task_id 的匿名卡会让用户在看不到指令的情况下批准一次「默认放行
+// 写操作」的执行——正是确认卡要防的盲批。
+func TestBotInt136RawFallbackPreviewShowsStoredConfig(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "int136rawprev")
+	bot := env.createBot(t, userID)
+	task := seedScheduleTask(t, env, bot.ID, func(tk *model.BotScheduleTask) {
+		tk.Name = "脏数据任务"
+		tk.Instruction = "   "
+		tk.CronExpression = "not-a-cron"
+		// 预设 next_run_at 跳过 helper 的 cron 解析——这条任务模拟的正是
+		// 存量非法配置。
+		next := time.Now().UTC().Add(time.Hour)
+		tk.NextRunAt = &next
+	})
+	botRow, err := env.bots.bots.Get(bot.ID)
+	if err != nil {
+		t.Fatalf("load bot: %v", err)
+	}
+	for _, action := range []string{"run", "delete"} {
+		args := `{"action":"` + action + `","task_id":"` + task.ID + `"}`
+		prep, err := botPrepareToolCall(botToolsetVersionOf(8), "fs_schedule", args)
+		if err != nil {
+			t.Fatalf("prepare %s: %v", action, err)
+		}
+		if err := env.bots.resolveCallScope(botRow, prep, args, &botCallExecContext{}); err != nil {
+			t.Fatalf("%s 应仍可受理: %v", action, err)
+		}
+		preview := prep.SchedulePreview
+		if preview == nil {
+			t.Fatalf("%s 兜底预览不应为空", action)
+		}
+		if preview.Name != "脏数据任务" || preview.Instruction != "   " || preview.Cron != "not-a-cron" {
+			t.Fatalf("%s 兜底预览应带库存原始配置: %+v", action, preview)
+		}
+		if preview.TaskUpdatedAt == "" || preview.TaskID != task.ID {
+			t.Fatalf("%s 兜底预览应保留目标与修订水位: %+v", action, preview)
+		}
+		if !preview.ModelInherited || preview.EffectiveModel != botRow.Model {
+			t.Fatalf("%s 兜底预览的模型口径应与正常预览一致: %+v", action, preview)
+		}
+	}
+}
+
+// confirmed 标记的口径（INT-136）：经确认卡的 create/敏感 update/enable
+// 置位；免确认同步 update、disable 与 REST 启停不改写——它标识「这份配置
+// 经确认卡复核过」，供存量复核提示区分上线前后的任务。
+func TestBotInt136ConfirmedFlagLifecycle(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "int136flag")
+	bot := env.createBot(t, userID)
+
+	// 经确认卡的 create：落库即已复核。
+	createCall := &model.BotToolCall{BotID: bot.ID, RequiresConfirmation: true,
+		ArgumentsJSON: `{"action":"create","name":"已确认任务","cron":"0 9 * * *","instruction":"跑一下"}`}
+	if _, err := env.bots.execScheduleTool(createCall); err != nil {
+		t.Fatalf("create exec: %v", err)
+	}
+	var created model.BotScheduleTask
+	if err := env.db.First(&created, "bot_id = ? AND name = ?", bot.ID, "已确认任务").Error; err != nil {
+		t.Fatalf("load created: %v", err)
+	}
+	if !created.Confirmed {
+		t.Fatalf("经确认卡创建的任务应为已复核")
+	}
+
+	// 存量任务（默认未复核）：免确认同步 update 与 disable 都不改写标记。
+	legacy := seedScheduleTask(t, env, bot.ID, nil)
+	if legacy.Confirmed {
+		t.Fatalf("种子任务默认应为未复核")
+	}
+	for _, args := range []string{
+		`{"action":"update","task_id":"` + legacy.ID + `","name":"换个名"}`,
+		`{"action":"disable","task_id":"` + legacy.ID + `"}`,
+	} {
+		call := &model.BotToolCall{BotID: bot.ID, ArgumentsJSON: args}
+		if _, err := env.bots.execScheduleTool(call); err != nil {
+			t.Fatalf("exec %s: %v", args, err)
+		}
+		var reloaded model.BotScheduleTask
+		if err := env.db.First(&reloaded, "id = ?", legacy.ID).Error; err != nil {
+			t.Fatalf("reload: %v", err)
+		}
+		if reloaded.Confirmed {
+			t.Fatalf("免确认动作不应改写 confirmed: %s", args)
+		}
+	}
+
+	// 带确认卡的 update（哪怕只动 needs_report）：卡上展示了整份合并配置，
+	// 批准即复核。
+	confUpdate := &model.BotToolCall{BotID: bot.ID, RequiresConfirmation: true,
+		ArgumentsJSON: `{"action":"update","task_id":"` + legacy.ID + `","needs_report":false}`}
+	if _, err := env.bots.execScheduleTool(confUpdate); err != nil {
+		t.Fatalf("confirmed update: %v", err)
+	}
+	var afterUpdate model.BotScheduleTask
+	if err := env.db.First(&afterUpdate, "id = ?", legacy.ID).Error; err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if !afterUpdate.Confirmed {
+		t.Fatalf("带确认卡的 update 应把任务标记为已复核")
+	}
+
+	// REST 启停不经确认卡：不改写标记；随后经确认卡的 enable 置位。
+	legacy2 := seedScheduleTask(t, env, bot.ID, nil)
+	if _, err := env.bots.SetScheduleTaskEnabled(userID, bot.ID, legacy2.ID, false); err != nil {
+		t.Fatalf("rest disable: %v", err)
+	}
+	var restDone model.BotScheduleTask
+	if err := env.db.First(&restDone, "id = ?", legacy2.ID).Error; err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if restDone.Confirmed {
+		t.Fatalf("REST 启停不应改写 confirmed")
+	}
+	confEnable := &model.BotToolCall{BotID: bot.ID, RequiresConfirmation: true,
+		ArgumentsJSON: `{"action":"enable","task_id":"` + legacy2.ID + `"}`}
+	if _, err := env.bots.execScheduleTool(confEnable); err != nil {
+		t.Fatalf("confirmed enable: %v", err)
+	}
+	var afterEnable model.BotScheduleTask
+	if err := env.db.First(&afterEnable, "id = ?", legacy2.ID).Error; err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if !afterEnable.Confirmed || !afterEnable.Enabled {
+		t.Fatalf("经确认卡的 enable 应启用并标记已复核: %+v", afterEnable)
 	}
 }

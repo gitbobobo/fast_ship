@@ -95,7 +95,7 @@ var botResultFenceExemptTools = map[string]bool{
 // 判定放在模型输入的出口，默认拒绝——新增工具、新增字段、嵌套对象、远端错误
 // 文本都自动落在围栏内，不需要在每处投影里逐字段列清单（那样是 fail-open：
 // 漏列就是裸文本）。调用方的投影仍然负责瘦身与脱敏，两者互补。
-// 平台自有的控制性回执（记忆、帮助、续读、停止/取消、任务小状态）按
+// 平台自有的控制性回执（记忆、帮助、停止/取消、任务小状态）按
 // botResultFenceExemptTools 豁免；payload 里的围栏标签先转义，无法提前闭合。
 func botFenceToolResult(nonce, toolName, action, payload string) string {
 	if nonce == "" || payload == "" || botResultFenceExemptTools[toolName+"/"+action] {

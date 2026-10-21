@@ -45,7 +45,7 @@ func TestBotInt121ManualRunAcceptedAndExecutes(t *testing.T) {
 		tk.NeedsReport = false
 		tk.Instruction = "手动指令-QAZ 汇总昨日动态"
 	})
-	if _, err := env.bots.setScheduleTaskEnabled(bot.ID, task.ID, false, ""); err != nil {
+	if _, err := env.bots.setScheduleTaskEnabled(bot.ID, task.ID, false, "", false); err != nil {
 		t.Fatalf("disable: %v", err)
 	}
 
@@ -161,7 +161,7 @@ func TestBotInt121DryRunHasNoSideEffects(t *testing.T) {
 		tk.Instruction = "预览指令-WSX 每日整理"
 	})
 	// 停用任务也能预览（gorm 建行对布尔零值走默认值，停用走开关服务）。
-	if _, err := env.bots.setScheduleTaskEnabled(bot.ID, task.ID, false, ""); err != nil {
+	if _, err := env.bots.setScheduleTaskEnabled(bot.ID, task.ID, false, "", false); err != nil {
 		t.Fatalf("disable: %v", err)
 	}
 

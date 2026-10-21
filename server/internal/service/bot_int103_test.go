@@ -1185,14 +1185,14 @@ func TestBotScheduleUpdateDisabledKeepsNoNextRun(t *testing.T) {
 	bot := env.createBot(t, userID)
 	task := seedScheduleTask(t, env, bot.ID, nil)
 
-	if _, err := env.bots.setScheduleTaskEnabled(bot.ID, task.ID, false, ""); err != nil {
+	if _, err := env.bots.setScheduleTaskEnabled(bot.ID, task.ID, false, "", false); err != nil {
 		t.Fatalf("disable: %v", err)
 	}
 	off, _ := env.bots.schedTasks.FindByID(task.ID)
 	if off.NextRunAt != nil {
 		t.Fatalf("停用后 next_run_at 应清空: %+v", off.NextRunAt)
 	}
-	updated, err := env.bots.updateScheduleTask(bot.ID, task.ID, "", "0 10 * * *", "Asia/Shanghai", "", nil, nil, "")
+	updated, err := env.bots.updateScheduleTask(bot.ID, task.ID, "", "0 10 * * *", "Asia/Shanghai", "", nil, nil, "", false)
 	if err != nil {
 		t.Fatalf("update: %v", err)
 	}
@@ -1204,7 +1204,7 @@ func TestBotScheduleUpdateDisabledKeepsNoNextRun(t *testing.T) {
 		t.Fatalf("库里的停用任务不应有计划时间: %+v", persisted)
 	}
 	// 重新启用才重算。
-	on, err := env.bots.setScheduleTaskEnabled(bot.ID, task.ID, true, "")
+	on, err := env.bots.setScheduleTaskEnabled(bot.ID, task.ID, true, "", false)
 	if err != nil {
 		t.Fatalf("enable: %v", err)
 	}
@@ -1395,7 +1395,7 @@ func TestBotScheduleUpdateClearsModelOverride(t *testing.T) {
 		t.Fatalf("create 应记录模型覆盖: %+v", task.Model)
 	}
 	// 省略 model（nil）：保持覆盖。
-	kept, err := env.bots.updateScheduleTask(bot.ID, task.ID, "改名只", "", "", "", nil, nil, "")
+	kept, err := env.bots.updateScheduleTask(bot.ID, task.ID, "改名只", "", "", "", nil, nil, "", false)
 	if err != nil {
 		t.Fatalf("update keep: %v", err)
 	}
@@ -1404,7 +1404,7 @@ func TestBotScheduleUpdateClearsModelOverride(t *testing.T) {
 	}
 	// 显式空串：清除覆盖，回到机器人当前模型。
 	empty := ""
-	cleared, err := env.bots.updateScheduleTask(bot.ID, task.ID, "", "", "", "", &empty, nil, "")
+	cleared, err := env.bots.updateScheduleTask(bot.ID, task.ID, "", "", "", "", &empty, nil, "", false)
 	if err != nil {
 		t.Fatalf("update clear: %v", err)
 	}
@@ -1783,7 +1783,7 @@ func TestBotScheduleEnableKeepsPendingDueRun(t *testing.T) {
 	task := seedScheduleTask(t, env, bot.ID, func(tk *model.BotScheduleTask) {
 		tk.NextRunAt = &due
 	})
-	got, err := env.bots.setScheduleTaskEnabled(bot.ID, task.ID, true, "")
+	got, err := env.bots.setScheduleTaskEnabled(bot.ID, task.ID, true, "", false)
 	if err != nil {
 		t.Fatalf("enable: %v", err)
 	}
@@ -1791,10 +1791,10 @@ func TestBotScheduleEnableKeepsPendingDueRun(t *testing.T) {
 		t.Fatalf("已启用任务再启用应保留待派发的计划，实得 %+v", got.NextRunAt)
 	}
 	// 停用后再启用才重算。
-	if _, err := env.bots.setScheduleTaskEnabled(bot.ID, task.ID, false, ""); err != nil {
+	if _, err := env.bots.setScheduleTaskEnabled(bot.ID, task.ID, false, "", false); err != nil {
 		t.Fatalf("disable: %v", err)
 	}
-	back, err := env.bots.setScheduleTaskEnabled(bot.ID, task.ID, true, "")
+	back, err := env.bots.setScheduleTaskEnabled(bot.ID, task.ID, true, "", false)
 	if err != nil {
 		t.Fatalf("re-enable: %v", err)
 	}

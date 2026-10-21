@@ -340,14 +340,14 @@ func TestBotInt123StateSurvivesUpdateAndToggle(t *testing.T) {
 	mustStateCall(t, env, run, `{"action":"state_set","state":{"since":"2026-01-01"}}`)
 
 	// 改指令/cron/模型。
-	if _, err := env.bots.updateScheduleTask(bot.ID, task.ID, "改名", "30 10 * * *", "Asia/Shanghai", "新指令", nil, nil, ""); err != nil {
+	if _, err := env.bots.updateScheduleTask(bot.ID, task.ID, "改名", "30 10 * * *", "Asia/Shanghai", "新指令", nil, nil, "", false); err != nil {
 		t.Fatalf("update: %v", err)
 	}
 	// 开关启停。
-	if _, err := env.bots.setScheduleTaskEnabled(bot.ID, task.ID, false, ""); err != nil {
+	if _, err := env.bots.setScheduleTaskEnabled(bot.ID, task.ID, false, "", false); err != nil {
 		t.Fatalf("disable: %v", err)
 	}
-	if _, err := env.bots.setScheduleTaskEnabled(bot.ID, task.ID, true, ""); err != nil {
+	if _, err := env.bots.setScheduleTaskEnabled(bot.ID, task.ID, true, "", false); err != nil {
 		t.Fatalf("enable: %v", err)
 	}
 
