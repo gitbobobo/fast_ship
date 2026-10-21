@@ -336,7 +336,10 @@ func Setup(
 	api.POST("/notifications/:id/read", middleware.RequireJWT(cfg, authService), notificationHandler.MarkRead)
 
 	// JWT 必须 — PR 审查（INT-135）：审查总览、项目审查设置与记录。
+	// INT-141 起新增跨项目 PR 动态（列表分组由服务端算好）与单 PR 详情。
 	api.GET("/reviews", middleware.RequireJWT(cfg, authService), reviewHandler.ListProjects)
+	api.GET("/reviews/pull-requests", middleware.RequireJWT(cfg, authService), reviewHandler.ListPullRequests)
+	api.GET("/reviews/pull-requests/:prNumber", middleware.RequireJWT(cfg, authService), reviewHandler.GetPullRequestDetail)
 	api.GET("/projects/:id/review-settings", middleware.RequireJWT(cfg, authService), reviewHandler.GetSettings)
 	api.PUT("/projects/:id/review-settings", middleware.RequireJWT(cfg, authService), reviewHandler.UpdateSettings)
 	api.GET("/projects/:id/review-records", middleware.RequireJWT(cfg, authService), reviewHandler.ListRecords)

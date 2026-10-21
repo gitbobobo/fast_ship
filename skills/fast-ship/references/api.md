@@ -7237,6 +7237,200 @@ PR 审查（INT-135，仅 JWT）：项目级审查设置、审查总览与审查
 | 401 | 未提供或提供无效凭证（40100-40199） |
 | 500 | 服务器内部错误（50000） |
 
+### GET `/api/reviews/pull-requests`
+
+<!-- operationId: listReviewPullRequests -->
+
+跨项目 PR 审查动态
+
+以当前用户已开启审查的项目（`enabled=true`）的总账行为范围，服务端算好
+分组（进行中 / 需要处理 / 最近通过）、阶段进度、发现计数与待处理原因。
+`counts`/`total` 是过滤范围内全量 PR 的统计，`items` 按 `offset`/`limit`
+切片。动作未勾选导致新 head 没有任何运行的 PR 不返回；通过且最后一轮
+完成时间早于 7 天前的 PR 不返回。
+
+**鉴权**：仅 JWT
+
+**Query 参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `project_id` | string | 否 | 项目 ID（UUID，可选；必须属于当前用户，否则 40401） |
+| `limit` | integer（1..200，默认 50） | 否 | 返回的 PR 数量上限 |
+| `offset` | integer（≥0，默认 0） | 否 | 分页偏移 |
+
+**成功响应**
+
+**200** PR 审查动态
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `items` | object[] | 是 |  |
+| `items[].project_id` | string | 是 |  |
+| `items[].project_name` | string | 是 |  |
+| `items[].repo_full_name` | string | 是 |  |
+| `items[].pr_number` | integer | 是 |  |
+| `items[].pr_title` | string | 是 |  |
+| `items[].pr_url` | string | 是 |  |
+| `items[].group` | string（enum: in_progress \| needs_action \| recently_passed） | 是 |  |
+| `items[].stage` | string（enum: debouncing \| queued \| reviewing，可空） | 否 | 仅 group=in_progress 时有值 |
+| `items[].debounce_fire_at` | string（可空） | 否 | 防抖到点时刻（仅 stage=debouncing 时有值） |
+| `items[].round_number` | integer | 是 |  |
+| `items[].head_sha` | string | 是 |  |
+| `items[].updated_at` | string | 是 |  |
+| `items[].started_at` | string | 是 | 本轮开始时刻（防抖中为防抖行更新时刻） |
+| `items[].stages` | object[] | 是 | 两段进度（代码/视觉）；防抖中为空数组 |
+| `items[].stages[].kind` | string（enum: code \| visual） | 是 |  |
+| `items[].stages[].total` | integer | 是 | 该段组合总数（无运行时为设置行配置数） |
+| `items[].stages[].completed` | integer | 是 | 已完成的组合数 |
+| `items[].stages[].status` | string（enum: pending \| queued \| running \| completed \| failed \| skipped） | 是 | skipped=该段未启动（无 UI 改动/截图未变化/代码发现问题） |
+| `items[].findings` | object | 是 | 发现计数（缺省 0；代码 P0/P1/P2，视觉 blocker/worth_fixing） |
+| `items[].findings.P0` | integer | 是 |  |
+| `items[].findings.P1` | integer | 是 |  |
+| `items[].findings.P2` | integer | 是 |  |
+| `items[].findings.blocker` | integer | 是 |  |
+| `items[].findings.worth_fixing` | integer | 是 |  |
+| `items[].issues` | object[] | 是 | 需要人处理的问题（失败的运行、无法解析的结论、账本兜底） |
+| `items[].issues[].kind` | string（enum: code \| visual） | 是 |  |
+| `items[].issues[].combination` | string（可空） | 否 | <model> · <instance_id>；账本兜底的 issue 无组合 |
+| `items[].issues[].reason` | string | 是 | 短原因（派发失败/超时/审查失败/审查未通过/审查未完成/结论无法解析） |
+| `items[].issues[].message` | string | 是 | 面向用户的说明 |
+| `items[].can_rerun` | boolean | 是 |  |
+| `counts` | object | 是 | 过滤范围内全部 PR 的分组计数（与分页无关） |
+| `counts.in_progress` | integer | 是 |  |
+| `counts.needs_action` | integer | 是 |  |
+| `counts.recently_passed` | integer | 是 |  |
+| `total` | integer | 是 | 过滤范围内全部 PR 数（分页前的总数） |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 404 | 资源不存在（40400-40499） |
+| 500 | 服务器内部错误（50000） |
+
+### GET `/api/reviews/pull-requests/{prNumber}`
+
+<!-- operationId: getReviewPullRequestDetail -->
+
+单个 PR 的审查详情（轮次 → 各组合运行 → 发现列表）
+
+与项目审查记录同结构，另带每轮 `trigger_action` 与每运行的完整
+`findings`/`unmeasurable`。项目必须属于当前用户（40401）；项目有设置行
+且按设置行仓库匹配的账本行存在，否则 40434。不要求项目已开启审查
+（停用项目仍可查看历史详情）。
+
+**鉴权**：仅 JWT
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `prNumber` | integer（≥1） | 是 | PR 编号 |
+
+**Query 参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `project_id` | string | 是 | 项目 ID（UUID，必填） |
+
+**成功响应**
+
+**200** PR 审查详情
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `repo_full_name` | string | 是 |  |
+| `pr_number` | integer | 是 |  |
+| `pr_title` | string | 是 |  |
+| `pr_url` | string | 是 |  |
+| `head_sha` | string | 是 |  |
+| `can_rerun` | boolean | 是 | 该记录是否属于项目当前仓库；跨仓库的历史记录只能查看，不能重跑。 |
+| `code_status` | string（可空） | 否 |  |
+| `visual_status` | string（可空） | 否 |  |
+| `updated_at` | string | 是 |  |
+| `rounds` | object[] | 是 |  |
+| `rounds[].round_number` | integer | 是 |  |
+| `rounds[].head_sha` | string | 是 |  |
+| `rounds[].trigger_action` | string（enum: opened \| synchronize \| ready_for_review \| reopened \| manual \| visual \| unknown） | 是 | 触发方式（该轮第一条代码 run 的 trigger_action；没有代码 run 时为 unknown） |
+| `rounds[].created_at` | string | 是 |  |
+| `rounds[].code_runs` | object[] | 是 |  |
+| `rounds[].code_runs[].id` | string | 是 |  |
+| `rounds[].code_runs[].kind` | string（enum: code \| visual） | 是 |  |
+| `rounds[].code_runs[].environment_id` | string | 是 |  |
+| `rounds[].code_runs[].environment_name` | string | 否 |  |
+| `rounds[].code_runs[].instance_id` | string | 是 |  |
+| `rounds[].code_runs[].model` | string | 是 |  |
+| `rounds[].code_runs[].options` | object[] | 否 |  |
+| `rounds[].code_runs[].options[].id` | string | 是 |  |
+| `rounds[].code_runs[].options[].value` | any | 是 | 选项值（字符串或布尔） |
+| `rounds[].code_runs[].status` | string（enum: queued \| dispatched \| running \| completed \| failed \| timed_out \| cancelled） | 是 |  |
+| `rounds[].code_runs[].thread_id` | string | 是 |  |
+| `rounds[].code_runs[].summary` | string | 否 |  |
+| `rounds[].code_runs[].error_code` | string | 否 |  |
+| `rounds[].code_runs[].error_message` | string | 否 |  |
+| `rounds[].code_runs[].findings_count` | integer | 否 | P0/P1/P2（代码）或 blocker/worth fixing（视觉）的条目数 |
+| `rounds[].code_runs[].findings` | object[] | 否 | 完整发现列表（result_json 可解析时才有）；代码含 Note，视觉为 severity→level |
+| `rounds[].code_runs[].findings[].level` | string | 是 | 代码为 P0/P1/P2/Note；视觉为 blocker/worth_fixing/minor |
+| `rounds[].code_runs[].findings[].body` | string | 是 |  |
+| `rounds[].code_runs[].findings[].file` | string | 否 | 代码发现涉及的文件（文件:行号 展示） |
+| `rounds[].code_runs[].findings[].line` | integer（≥1） | 否 | 当前 HEAD 右侧代码行号 |
+| `rounds[].code_runs[].findings[].dimension` | string | 否 | 视觉发现的设计维度 |
+| `rounds[].code_runs[].findings[].fix` | string | 否 | 视觉发现的修复建议 |
+| `rounds[].code_runs[].findings[].screenshot` | string | 否 | 视觉发现涉及的截图标签 |
+| `rounds[].code_runs[].unmeasurable` | object[] | 否 | 视觉审查「无法判断」的截图项（仅视觉运行） |
+| `rounds[].code_runs[].unmeasurable[].screenshot` | string | 是 |  |
+| `rounds[].code_runs[].unmeasurable[].reason` | string | 是 |  |
+| `rounds[].code_runs[].ui_changed` | boolean | 否 |  |
+| `rounds[].code_runs[].worktree_state` | string（可空） | 否 |  |
+| `rounds[].code_runs[].started_at` | string（可空） | 否 |  |
+| `rounds[].code_runs[].finished_at` | string（可空） | 否 |  |
+| `rounds[].visual_runs` | object[] | 是 |  |
+| `rounds[].visual_runs[].id` | string | 是 |  |
+| `rounds[].visual_runs[].kind` | string（enum: code \| visual） | 是 |  |
+| `rounds[].visual_runs[].environment_id` | string | 是 |  |
+| `rounds[].visual_runs[].environment_name` | string | 否 |  |
+| `rounds[].visual_runs[].instance_id` | string | 是 |  |
+| `rounds[].visual_runs[].model` | string | 是 |  |
+| `rounds[].visual_runs[].options` | object[] | 否 |  |
+| `rounds[].visual_runs[].options[].id` | string | 是 |  |
+| `rounds[].visual_runs[].options[].value` | any | 是 | 选项值（字符串或布尔） |
+| `rounds[].visual_runs[].status` | string（enum: queued \| dispatched \| running \| completed \| failed \| timed_out \| cancelled） | 是 |  |
+| `rounds[].visual_runs[].thread_id` | string | 是 |  |
+| `rounds[].visual_runs[].summary` | string | 否 |  |
+| `rounds[].visual_runs[].error_code` | string | 否 |  |
+| `rounds[].visual_runs[].error_message` | string | 否 |  |
+| `rounds[].visual_runs[].findings_count` | integer | 否 | P0/P1/P2（代码）或 blocker/worth fixing（视觉）的条目数 |
+| `rounds[].visual_runs[].findings` | object[] | 否 | 完整发现列表（result_json 可解析时才有）；代码含 Note，视觉为 severity→level |
+| `rounds[].visual_runs[].findings[].level` | string | 是 | 代码为 P0/P1/P2/Note；视觉为 blocker/worth_fixing/minor |
+| `rounds[].visual_runs[].findings[].body` | string | 是 |  |
+| `rounds[].visual_runs[].findings[].file` | string | 否 | 代码发现涉及的文件（文件:行号 展示） |
+| `rounds[].visual_runs[].findings[].line` | integer（≥1） | 否 | 当前 HEAD 右侧代码行号 |
+| `rounds[].visual_runs[].findings[].dimension` | string | 否 | 视觉发现的设计维度 |
+| `rounds[].visual_runs[].findings[].fix` | string | 否 | 视觉发现的修复建议 |
+| `rounds[].visual_runs[].findings[].screenshot` | string | 否 | 视觉发现涉及的截图标签 |
+| `rounds[].visual_runs[].unmeasurable` | object[] | 否 | 视觉审查「无法判断」的截图项（仅视觉运行） |
+| `rounds[].visual_runs[].unmeasurable[].screenshot` | string | 是 |  |
+| `rounds[].visual_runs[].unmeasurable[].reason` | string | 是 |  |
+| `rounds[].visual_runs[].ui_changed` | boolean | 否 |  |
+| `rounds[].visual_runs[].worktree_state` | string（可空） | 否 |  |
+| `rounds[].visual_runs[].started_at` | string（可空） | 否 |  |
+| `rounds[].visual_runs[].finished_at` | string（可空） | 否 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 400 | 请求参数无效（40001-40099） |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 404 | 项目不存在（40401）或审查 PR 记录不存在（40434） |
+| 500 | 服务器内部错误（50000） |
+
 ### GET `/api/projects/{id}/review-settings`
 
 <!-- operationId: getProjectReviewSettings -->
@@ -7445,6 +7639,7 @@ PR 审查（INT-135，仅 JWT）：项目级审查设置、审查总览与审查
 | `items[].rounds` | object[] | 是 |  |
 | `items[].rounds[].round_number` | integer | 是 |  |
 | `items[].rounds[].head_sha` | string | 是 |  |
+| `items[].rounds[].trigger_action` | string（enum: opened \| synchronize \| ready_for_review \| reopened \| manual \| visual \| unknown） | 是 | 触发方式（该轮第一条代码 run 的 trigger_action；没有代码 run 时为 unknown） |
 | `items[].rounds[].created_at` | string | 是 |  |
 | `items[].rounds[].code_runs` | object[] | 是 |  |
 | `items[].rounds[].code_runs[].id` | string | 是 |  |
@@ -7462,6 +7657,17 @@ PR 审查（INT-135，仅 JWT）：项目级审查设置、审查总览与审查
 | `items[].rounds[].code_runs[].error_code` | string | 否 |  |
 | `items[].rounds[].code_runs[].error_message` | string | 否 |  |
 | `items[].rounds[].code_runs[].findings_count` | integer | 否 | P0/P1/P2（代码）或 blocker/worth fixing（视觉）的条目数 |
+| `items[].rounds[].code_runs[].findings` | object[] | 否 | 完整发现列表（result_json 可解析时才有）；代码含 Note，视觉为 severity→level |
+| `items[].rounds[].code_runs[].findings[].level` | string | 是 | 代码为 P0/P1/P2/Note；视觉为 blocker/worth_fixing/minor |
+| `items[].rounds[].code_runs[].findings[].body` | string | 是 |  |
+| `items[].rounds[].code_runs[].findings[].file` | string | 否 | 代码发现涉及的文件（文件:行号 展示） |
+| `items[].rounds[].code_runs[].findings[].line` | integer（≥1） | 否 | 当前 HEAD 右侧代码行号 |
+| `items[].rounds[].code_runs[].findings[].dimension` | string | 否 | 视觉发现的设计维度 |
+| `items[].rounds[].code_runs[].findings[].fix` | string | 否 | 视觉发现的修复建议 |
+| `items[].rounds[].code_runs[].findings[].screenshot` | string | 否 | 视觉发现涉及的截图标签 |
+| `items[].rounds[].code_runs[].unmeasurable` | object[] | 否 | 视觉审查「无法判断」的截图项（仅视觉运行） |
+| `items[].rounds[].code_runs[].unmeasurable[].screenshot` | string | 是 |  |
+| `items[].rounds[].code_runs[].unmeasurable[].reason` | string | 是 |  |
 | `items[].rounds[].code_runs[].ui_changed` | boolean | 否 |  |
 | `items[].rounds[].code_runs[].worktree_state` | string（可空） | 否 |  |
 | `items[].rounds[].code_runs[].started_at` | string（可空） | 否 |  |
@@ -7482,6 +7688,17 @@ PR 审查（INT-135，仅 JWT）：项目级审查设置、审查总览与审查
 | `items[].rounds[].visual_runs[].error_code` | string | 否 |  |
 | `items[].rounds[].visual_runs[].error_message` | string | 否 |  |
 | `items[].rounds[].visual_runs[].findings_count` | integer | 否 | P0/P1/P2（代码）或 blocker/worth fixing（视觉）的条目数 |
+| `items[].rounds[].visual_runs[].findings` | object[] | 否 | 完整发现列表（result_json 可解析时才有）；代码含 Note，视觉为 severity→level |
+| `items[].rounds[].visual_runs[].findings[].level` | string | 是 | 代码为 P0/P1/P2/Note；视觉为 blocker/worth_fixing/minor |
+| `items[].rounds[].visual_runs[].findings[].body` | string | 是 |  |
+| `items[].rounds[].visual_runs[].findings[].file` | string | 否 | 代码发现涉及的文件（文件:行号 展示） |
+| `items[].rounds[].visual_runs[].findings[].line` | integer（≥1） | 否 | 当前 HEAD 右侧代码行号 |
+| `items[].rounds[].visual_runs[].findings[].dimension` | string | 否 | 视觉发现的设计维度 |
+| `items[].rounds[].visual_runs[].findings[].fix` | string | 否 | 视觉发现的修复建议 |
+| `items[].rounds[].visual_runs[].findings[].screenshot` | string | 否 | 视觉发现涉及的截图标签 |
+| `items[].rounds[].visual_runs[].unmeasurable` | object[] | 否 | 视觉审查「无法判断」的截图项（仅视觉运行） |
+| `items[].rounds[].visual_runs[].unmeasurable[].screenshot` | string | 是 |  |
+| `items[].rounds[].visual_runs[].unmeasurable[].reason` | string | 是 |  |
 | `items[].rounds[].visual_runs[].ui_changed` | boolean | 否 |  |
 | `items[].rounds[].visual_runs[].worktree_state` | string（可空） | 否 |  |
 | `items[].rounds[].visual_runs[].started_at` | string（可空） | 否 |  |
