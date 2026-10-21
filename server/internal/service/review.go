@@ -88,6 +88,10 @@ type ReviewService struct {
 	// 避免「清理时线程还没确认、清理后线程才建成」的孤儿线程。
 	projectLocksMu sync.Mutex
 	projectLocks   map[string]*sync.Mutex
+
+	// redeliveryNextAt 投递失败对账的下次执行时刻（节流用；只由调度循环
+	// goroutine 读写，不需要锁）。
+	redeliveryNextAt time.Time
 }
 
 func NewReviewService(

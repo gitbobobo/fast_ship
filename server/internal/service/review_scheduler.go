@@ -11,7 +11,8 @@ import (
 
 // PR 审查调度循环（INT-135）：单进程一个 10s tick + 非阻塞 kick。
 // 每轮依次：到期防抖消费并开轮 → 排队提升 → 派发 → 超时 → 取消运行的线程
-// 中断 → GitHub 同步 → 工作区清理。各阶段独立容错；网络调用都在事务外。
+// 中断 → GitHub 同步 → 归档 → 工作区清理 → 旧线程墓碑清理 → 投递失败对账
+// （低频，见 review_redelivery.go）。各阶段独立容错；网络调用都在事务外。
 
 const reviewSchedulerInterval = 10 * time.Second
 
@@ -64,7 +65,9 @@ func (s *ReviewService) reviewLoop(cancel <-chan struct{}, kickCh <-chan struct{
 	}
 }
 
-// reviewTick 每轮顺序执行八个阶段；各阶段内部逐条容错，互不打断。
+// reviewTick 每轮顺序执行：到期防抖消费并开轮 → 排队提升 → 派发 → 超时 →
+// 取消运行的线程中断 → GitHub 同步 → 归档 → 工作区清理 → 旧线程墓碑清理 →
+// 投递失败对账（低频，内部自带节流）。各阶段独立容错，互不打断。
 // 归档在工作区清理之前：删除必须以归档完成为前提。
 func (s *ReviewService) reviewTick(now time.Time) {
 	s.processDueDebounces(now)
@@ -76,6 +79,7 @@ func (s *ReviewService) reviewTick(now time.Time) {
 	s.archiveRuns(now)
 	s.cleanupWorktrees(now)
 	s.cleanupLegacyThreads(now)
+	s.reconcileWebhookDeliveries(now)
 }
 
 // cleanupLegacyThreads 处理通用自动化下线时留下的在途线程墓碑：停线程、

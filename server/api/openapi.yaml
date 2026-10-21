@@ -12118,7 +12118,7 @@ components:
           type: string
         kind:
           type: string
-          enum: [review_dispatch_failed, review_run_timeout, review_cleanup_failed]
+          enum: [review_dispatch_failed, review_run_timeout, review_cleanup_failed, review_redelivery_failed]
         title:
           type: string
         body:

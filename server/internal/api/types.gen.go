@@ -256,9 +256,10 @@ func (e IssueRecommendationStatus) Valid() bool {
 
 // Defines values for NotificationKind.
 const (
-	ReviewCleanupFailed  NotificationKind = "review_cleanup_failed"
-	ReviewDispatchFailed NotificationKind = "review_dispatch_failed"
-	ReviewRunTimeout     NotificationKind = "review_run_timeout"
+	ReviewCleanupFailed    NotificationKind = "review_cleanup_failed"
+	ReviewDispatchFailed   NotificationKind = "review_dispatch_failed"
+	ReviewRedeliveryFailed NotificationKind = "review_redelivery_failed"
+	ReviewRunTimeout       NotificationKind = "review_run_timeout"
 )
 
 // Valid indicates whether the value is a known member of the NotificationKind enum.
@@ -267,6 +268,8 @@ func (e NotificationKind) Valid() bool {
 	case ReviewCleanupFailed:
 		return true
 	case ReviewDispatchFailed:
+		return true
+	case ReviewRedeliveryFailed:
 		return true
 	case ReviewRunTimeout:
 		return true
