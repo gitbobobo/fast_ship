@@ -481,11 +481,13 @@ func (s *BotService) RequestStop(userID, botID, runID string) (*BotRunResponse, 
 		// 序号基准在追加停止消息之前、于同一事务内采样：单连接下事务持有唯一
 		// 连接，采样之后不会再有请求插进来；而这条消息提交后的新请求要么
 		// 包含它（进展），要么是更早构建的上下文（由 stopSeq 条件排除）。
-		if ord, ordErr := repository.NewBotModelRequestRepository(tx).MaxOrdinalTx(tx, runID); ordErr != nil {
-			acceptedOrdinal = -1
-		} else {
-			acceptedOrdinal = ord
+		// 采样失败必须让整个事务失败：-1 表示「跳过进展判断」，拿它兜底会把
+		// 一次数据库抖动降级成无条件硬取消，可能丢掉已带上停止消息的请求。
+		ord, ordErr := repository.NewBotModelRequestRepository(tx).MaxOrdinalTx(tx, runID)
+		if ordErr != nil {
+			return errs.ErrInternal
 		}
+		acceptedOrdinal = ord
 		raw, marshalErr := json.Marshal(botUserContent{Text: "停止"})
 		if marshalErr != nil {
 			return errs.ErrInternal
