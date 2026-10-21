@@ -430,11 +430,11 @@ func TestInt124NightlyCatchUp(t *testing.T) {
 }
 
 // TestInt124PlatformPromptProactiveMemory 平台提示词：规则 9（v7 引入）明确稳定
-// 偏好与重要事实应主动沉淀；规则 10 的守门文案保持不变。当前版本 9（INT-133
-// 把默认人设前置、收紧告知语义）。
+// 偏好与重要事实应主动沉淀；规则 10 的守门文案保持不变。当前版本 11
+// （v10 引入围栏规则 15，v11 补「不复述 nonce」）。
 func TestInt124PlatformPromptProactiveMemory(t *testing.T) {
-	if botPlatformPromptVersion != 10 {
-		t.Fatalf("平台提示词版本应为 10: %d", botPlatformPromptVersion)
+	if botPlatformPromptVersion != 11 {
+		t.Fatalf("平台提示词版本应为 11: %d", botPlatformPromptVersion)
 	}
 	full := buildBotSystemPrompt("", "t-nonce")
 	for _, kw := range []string{"主动写入", "不必等用户要求", "稳定偏好"} {

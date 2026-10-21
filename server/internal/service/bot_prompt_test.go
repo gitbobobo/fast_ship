@@ -18,8 +18,8 @@ import (
 // 在后，可以覆盖默认语气。它替代了 INT-122 的「对话风格」段，规则 8/9/13 的
 // 「告知/汇报」统一改为「简要说明结果」，升级通知限定为内部信息。
 func TestBotSystemPromptStyleSection(t *testing.T) {
-	if botPlatformPromptVersion != 10 {
-		t.Fatalf("提示词版本应递增到 10: %d", botPlatformPromptVersion)
+	if botPlatformPromptVersion != 11 {
+		t.Fatalf("提示词版本应递增到 11: %d", botPlatformPromptVersion)
 	}
 	if botStylePromptVersion != 9 {
 		t.Fatalf("说话方式版本应为 9: %d", botStylePromptVersion)
