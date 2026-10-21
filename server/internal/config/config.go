@@ -432,6 +432,13 @@ func Load(path string) (*Config, error) {
 	_ = viper.BindEnv("bots.memory.nightly_model", "FAST_SHIP_BOTS_MEMORY_NIGHTLY_MODEL")
 	_ = viper.BindEnv("bots.memory.timezone", "FAST_SHIP_BOTS_MEMORY_TIMEZONE")
 	_ = viper.BindEnv("bots.memory.nightly_time", "FAST_SHIP_BOTS_MEMORY_NIGHTLY_TIME")
+	// INT-137 运行参数：与上面的 bot 配置同口径，允许部署用环境变量覆盖。
+	_ = viper.BindEnv("bots.runtime.stream_first_chunk_timeout_seconds", "FAST_SHIP_BOTS_RUNTIME_STREAM_FIRST_CHUNK_TIMEOUT_SECONDS")
+	_ = viper.BindEnv("bots.runtime.stream_idle_timeout_seconds", "FAST_SHIP_BOTS_RUNTIME_STREAM_IDLE_TIMEOUT_SECONDS")
+	_ = viper.BindEnv("bots.runtime.stop_grace_seconds", "FAST_SHIP_BOTS_RUNTIME_STOP_GRACE_SECONDS")
+	_ = viper.BindEnv("bots.runtime.retry_max_attempts", "FAST_SHIP_BOTS_RUNTIME_RETRY_MAX_ATTEMPTS")
+	_ = viper.BindEnv("bots.runtime.retry_base_delay_ms", "FAST_SHIP_BOTS_RUNTIME_RETRY_BASE_DELAY_MS")
+	_ = viper.BindEnv("bots.runtime.provider_circuit_minutes", "FAST_SHIP_BOTS_RUNTIME_PROVIDER_CIRCUIT_MINUTES")
 	_ = viper.BindEnv("quota.enabled", "FAST_SHIP_QUOTA_ENABLED")
 	_ = viper.BindEnv("quota.interval_minutes", "FAST_SHIP_QUOTA_INTERVAL_MINUTES")
 	_ = viper.BindEnv("quota.run_on_startup", "FAST_SHIP_QUOTA_RUN_ON_STARTUP")

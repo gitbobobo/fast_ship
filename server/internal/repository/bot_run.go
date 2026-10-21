@@ -121,14 +121,21 @@ func (r *BotRunRepository) ListActive() ([]model.BotRun, error) {
 }
 
 // MarkStopRequested 原子地请求停止一个 run：条件是 run 未结束且（
-// acceptedOrdinal < 0 或「受理后没有新模型请求」）。判定与写入在同一条
-// UPDATE 里完成——硬停止与主线循环发新请求竞速时，新请求一旦插入，本
-// 语句就落空，绝不会取消已经带上新输入的请求（INT-137）。返回是否命中。
-func (r *BotRunRepository) MarkStopRequested(runID string, acceptedOrdinal int64, now time.Time) (bool, error) {
+// acceptedOrdinal < 0 或「受理后没有一条既新又真正包含停止消息的请求」）。
+//
+// 「有进展」的判定同时看 ordinal 与请求的 input_through_seq：循环可能在停止
+// 消息追加前就构建好上下文，只是登记晚了一步——这种请求 ordinal 更大却不含
+// 停止消息，不能算进展（否则宽限会放它继续跑，停止被拖到看门狗超时）。
+// 只有 input_through_seq >= stopSeq 的请求才说明停止消息已经交给模型。
+// 判定与写入在同一条 UPDATE 里完成，与请求登记在单连接下串行，不会取消
+// 已经带上停止消息的请求（INT-137）。返回是否命中。
+func (r *BotRunRepository) MarkStopRequested(runID string, acceptedOrdinal, stopSeq int64, now time.Time) (bool, error) {
 	q := r.db.Model(&model.BotRun{}).Where("id = ? AND finished_at IS NULL", runID)
 	if acceptedOrdinal >= 0 {
-		q = q.Where("NOT EXISTS (SELECT 1 FROM bot_model_requests WHERE run_id = ? AND ordinal > ?)",
-			runID, acceptedOrdinal)
+		q = q.Where(`NOT EXISTS (
+			SELECT 1 FROM bot_model_requests
+			WHERE run_id = ? AND ordinal > ? AND input_through_seq >= ?)`,
+			runID, acceptedOrdinal, stopSeq)
 	}
 	res := q.Update("stop_requested_at", now)
 	if res.Error != nil {
@@ -207,8 +214,14 @@ func (r *BotModelRequestRepository) NextOrdinalTx(tx *gorm.DB, runID string) (in
 // MaxOrdinal 返回该 run 当前最大的模型请求序号（没有请求为 0）：停止宽限
 // 到期时比对它，判断 run 在受理停止之后是否又发起了新请求（INT-137）。
 func (r *BotModelRequestRepository) MaxOrdinal(runID string) (int64, error) {
+	return r.MaxOrdinalTx(r.db, runID)
+}
+
+// MaxOrdinalTx 是 MaxOrdinal 的事务版本：受理停止时在同一事务里（追加停止
+// 消息之前）采样序号，避免「事务提交到采样之间」新登记的请求被算进基线。
+func (r *BotModelRequestRepository) MaxOrdinalTx(tx *gorm.DB, runID string) (int64, error) {
 	var ordinal int64
-	if err := r.db.Model(&model.BotModelRequest{}).Where("run_id = ?", runID).
+	if err := tx.Model(&model.BotModelRequest{}).Where("run_id = ?", runID).
 		Select("COALESCE(MAX(ordinal), 0)").Scan(&ordinal).Error; err != nil {
 		return 0, err
 	}

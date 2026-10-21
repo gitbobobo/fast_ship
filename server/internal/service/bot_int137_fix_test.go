@@ -117,11 +117,12 @@ func seedMainRun(t *testing.T, env *botTestEnv, botID string) *model.BotRun {
 }
 
 // seedModelRequestOrdinal 直接落一条模型请求行，制造「run 已有进展」。
-func seedModelRequestOrdinal(t *testing.T, env *botTestEnv, runID string, ordinal int64) {
+func seedModelRequestOrdinal(t *testing.T, env *botTestEnv, runID string, ordinal, inputThroughSeq int64) {
 	t.Helper()
 	req := &model.BotModelRequest{
 		ID: uuid.NewString(), RunID: runID, Ordinal: ordinal,
 		Status: model.BotModelRequestSucceeded, StartedAt: time.Now().UTC(),
+		InputThroughSeq: inputThroughSeq,
 	}
 	if err := env.bots.requests.CreateTx(env.db, req); err != nil {
 		t.Fatalf("seed model request: %v", err)
@@ -135,7 +136,7 @@ func TestBotHardStopGraceSkippedWhenProgressMade(t *testing.T) {
 	userID := createBotTestUser(t, env.db, "stopprogress")
 	bot := env.createBot(t, userID)
 	run := seedMainRun(t, env, bot.ID)
-	seedModelRequestOrdinal(t, env, run.ID, 1)
+	seedModelRequestOrdinal(t, env, run.ID, 1, 0)
 
 	// 占住执行槽并绑定该 run，模拟正在跑的模型流。
 	cancelCalled := false
@@ -146,8 +147,9 @@ func TestBotHardStopGraceSkippedWhenProgressMade(t *testing.T) {
 	env.bots.rt.setCancel(bot.ID, cancel)
 	env.bots.rt.bindRun(bot.ID, run.ID)
 
-	// 受理时 ordinal=1，之后 run 又发起 ordinal=2：宽限到期不硬杀。
-	seedModelRequestOrdinal(t, env, run.ID, 2)
+	// 受理时 ordinal=1，之后 run 又发起 ordinal=2 且该请求已包含停止消息
+	// （input_through_seq 覆盖 stopSeq）：宽限到期不硬杀。
+	seedModelRequestOrdinal(t, env, run.ID, 2, 1)
 	env.bots.hardStopRun(bot.ID, run.ID, 1, 1)
 	if cancelCalled {
 		t.Fatalf("宽限期内已有新请求，不得硬取消（否则丢掉停止之后的新消息）")
@@ -168,6 +170,35 @@ func TestBotHardStopGraceSkippedWhenProgressMade(t *testing.T) {
 	fresh = mustFindRun(t, env, run.ID)
 	if fresh.StopRequestedAt == nil || fresh.InputThroughSeq != 1 {
 		t.Fatalf("硬取消应置 stop_requested 并推进水位到停止消息 seq: %+v", fresh)
+	}
+}
+
+// 循环在停止消息追加前就构建好上下文、只是登记晚了一步：该请求 ordinal 更大
+// 但 input_through_seq 未覆盖停止消息，不算「已把停止交给模型」——宽限到期
+// 仍要硬取消，否则停止会被拖到看门狗超时。
+func TestBotHardStopCancelsRequestBuiltBeforeStop(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "stopoldctx")
+	bot := env.createBot(t, userID)
+	run := seedMainRun(t, env, bot.ID)
+	seedModelRequestOrdinal(t, env, run.ID, 1, 0)
+
+	cancelCalled := false
+	if env.bots.rt.acquire(bot.ID, nil) == nil {
+		t.Fatalf("acquire slot")
+	}
+	env.bots.rt.setCancel(bot.ID, context.CancelFunc(func() { cancelCalled = true }))
+	env.bots.rt.bindRun(bot.ID, run.ID)
+
+	// ordinal=2 但 input_through_seq=0：上下文在停止消息（seq=1）之前构建。
+	seedModelRequestOrdinal(t, env, run.ID, 2, 0)
+	env.bots.hardStopRun(bot.ID, run.ID, 1, 1)
+	if !cancelCalled {
+		t.Fatalf("更早构建的上下文不算进展，宽限到期应硬取消")
+	}
+	fresh := mustFindRun(t, env, run.ID)
+	if fresh.StopRequestedAt == nil {
+		t.Fatalf("硬取消应写 stop_requested: %+v", fresh)
 	}
 }
 

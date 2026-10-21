@@ -404,7 +404,7 @@ func (s *BotService) activeRunOf(botID string) (*model.BotRun, bool) {
 // 处理「停止」文本；只推进到停止消息的 seq，之后到达的新消息不受影响），
 // 最后取消执行槽 context，循环在安全点落 stopped。
 func (s *BotService) hardStopRun(botID, runID string, stopSeq int64, acceptedOrdinal int64) {
-	ok, err := s.runs.MarkStopRequested(runID, acceptedOrdinal, time.Now().UTC())
+	ok, err := s.runs.MarkStopRequested(runID, acceptedOrdinal, stopSeq, time.Now().UTC())
 	if err != nil || !ok {
 		return
 	}
@@ -454,6 +454,7 @@ func (s *BotService) RequestStop(userID, botID, runID string) (*BotRunResponse, 
 	clientMsgID := "stop:" + runID
 	var msgSeq int64
 	var already bool
+	var acceptedOrdinal int64 = -1
 	txErr := s.db.Transaction(func(tx *gorm.DB) error {
 		fresh, err := repository.NewBotRunRepository(tx).FindByID(runID)
 		if err != nil {
@@ -476,6 +477,14 @@ func (s *BotService) RequestStop(userID, botID, runID string) (*BotRunResponse, 
 		seq, seqErr := s.bots.NextMessageSeqTx(tx, botID)
 		if seqErr != nil {
 			return errs.ErrInternal
+		}
+		// 序号基准在追加停止消息之前、于同一事务内采样：单连接下事务持有唯一
+		// 连接，采样之后不会再有请求插进来；而这条消息提交后的新请求要么
+		// 包含它（进展），要么是更早构建的上下文（由 stopSeq 条件排除）。
+		if ord, ordErr := repository.NewBotModelRequestRepository(tx).MaxOrdinalTx(tx, runID); ordErr != nil {
+			acceptedOrdinal = -1
+		} else {
+			acceptedOrdinal = ord
 		}
 		raw, marshalErr := json.Marshal(botUserContent{Text: "停止"})
 		if marshalErr != nil {
@@ -508,14 +517,9 @@ func (s *BotService) RequestStop(userID, botID, runID string) (*BotRunResponse, 
 		return nil, errs.ErrInternal
 	}
 	if !already {
-		// 宽限计时：到时 run 仍未结束则硬取消。序号基准必须在**追加停止消息
-		// 之前**采样（这里在唤醒之前，避免新请求被算进基准）：之后任何一次
-		// 新请求都必然包含这条停止消息，正是「已有进展」的定义。计时器随进程
-		// 重启丢失可接受——重启恢复本就会把活动 run 置 failed。
-		acceptedOrdinal, ordErr := s.requests.MaxOrdinal(runID)
-		if ordErr != nil {
-			acceptedOrdinal = -1
-		}
+		// 宽限计时：到时 run 仍未结束则硬取消（acceptedOrdinal 已在追加事务内
+		// 采样）。计时器随进程重启丢失可接受——重启恢复本就会把活动 run 置
+		// failed。
 		s.publishEvent(botID)
 		s.wakeRuntime(botID, botWake{
 			Trigger: model.BotTriggerUserMessage,
