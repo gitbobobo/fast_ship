@@ -485,7 +485,10 @@ func reviewCollectRunIssues(runs []model.ReviewRun, kind api.ReviewActivityIssue
 }
 
 // reviewCountResult 把一条结论计入发现计数（代码计 P0/P1/P2，视觉计
-// blocker/worth_fixing）；result_json 无法解析返回 false。
+// blocker/worth_fixing）；result_json 无法解析返回 false。视觉分支把 prior
+// 里 status=open 且按 priorOpenBlocks 阻塞的条目一并计入——与 GitHub status
+// 的红绿判定（visualFailureCount）同一口径，否则 Web 侧「需要处理」会漏掉
+// 模型只写进 prior(open) 的未解决项。
 func reviewCountResult(kind model.ReviewKind, raw string, findings *api.ReviewFindingCounts) bool {
 	if kind == model.ReviewKindVisual {
 		var result api.ReviewVisualResult
@@ -497,6 +500,18 @@ func reviewCountResult(kind model.ReviewKind, raw string, findings *api.ReviewFi
 			case api.Blocker:
 				findings.Blocker++
 			case api.WorthFixing:
+				findings.WorthFixing++
+			}
+		}
+		for _, p := range result.Prior {
+			if p.Status != api.ReviewPriorDecisionStatusOpen || !priorOpenBlocks(p.Level) {
+				continue
+			}
+			// 计数桶只有两格：blocker 归 Blocker，其余阻塞级别（含 nil 兜底与
+			// P0/P1 等未知形态）都归 WorthFixing——阻塞的必须有位置可落。
+			if p.Level != nil && *p.Level == string(api.Blocker) {
+				findings.Blocker++
+			} else {
 				findings.WorthFixing++
 			}
 		}

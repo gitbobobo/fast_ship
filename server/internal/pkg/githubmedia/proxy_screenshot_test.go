@@ -113,7 +113,7 @@ func TestFetchAndCacheLocalCacheFailureTagged(t *testing.T) {
 	if err := os.WriteFile(root, []byte("x"), 0o600); err != nil {
 		t.Fatalf("seed regular file: %v", err)
 	}
-	svc := NewReviewMediaService(root)
+	svc := NewReviewMediaService(root, "")
 	_, err := svc.FetchAndCache(context.Background(), "https://uiv.example.com/f/x.png")
 	if !errors.Is(err, ErrLocalCache) {
 		t.Fatalf("err = %v, want ErrLocalCache", err)
@@ -538,7 +538,7 @@ func TestFetchAndCacheDownloadWaitRespectsContext(t *testing.T) {
 }
 
 func TestScreenshotServiceRequiresHTTPS(t *testing.T) {
-	svc := NewReviewMediaService(t.TempDir())
+	svc := NewReviewMediaService(t.TempDir(), "")
 	if _, err := svc.FetchAndCache(context.Background(), "http://uiv.example.com/f/x.png"); !errors.Is(err, ErrInvalidMediaURL) {
 		t.Fatalf("err = %v, want ErrInvalidMediaURL", err)
 	}
@@ -591,6 +591,57 @@ func TestFetchWithBearerNeverSendsTokenToExternalHost(t *testing.T) {
 	}
 	if gotAuth != "" {
 		t.Fatalf("外部图床收到了 Authorization: %q, want 不发送", gotAuth)
+	}
+}
+
+// recordingRoundTripper 记录上游请求头、回一张位图：验证凭证闸门在部署
+// host 下真的发出了 Authorization，不靠真实网络。
+type recordingRoundTripper struct {
+	auth string
+}
+
+func (r *recordingRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	r.auth = req.Header.Get("Authorization")
+	return &http.Response{
+		StatusCode:    http.StatusOK,
+		Header:        http.Header{"Content-Type": []string{"image/png"}},
+		Body:          io.NopCloser(strings.NewReader("png-data")),
+		ContentLength: int64(len("png-data")),
+		Request:       req,
+	}, nil
+}
+
+// GHE 部署的私有附件：凭证闸门按部署的 GitHub Web host 放行实例自己的附件
+// 路径（否则私有截图匿名 404 后永远拿不到令牌重试）；同一 host 的非附件
+// 路径仍然不发令牌。
+func TestFetchWithBearerSendsTokenToDeploymentAttachments(t *testing.T) {
+	newSvc := func() (*ProxyService, *recordingRoundTripper) {
+		rt := &recordingRoundTripper{}
+		return newService(t.TempDir(), serviceConfig{
+			cacheSubdir:   "review-screenshot-cache",
+			allowURL:      allowPublicImageHost,
+			requireHTTPS:  true,
+			imagesOnly:    true,
+			githubWebHost: "ghe.example.com",
+			client:        &http.Client{Transport: rt},
+		}), rt
+	}
+
+	svc, rt := newSvc()
+	attachment := "https://ghe.example.com/user-attachments/assets/abc-123"
+	if _, err := svc.FetchAndCacheWithBearer(context.Background(), attachment, "secret-token", "install:7"); err != nil {
+		t.Fatalf("fetch GHE attachment: %v", err)
+	}
+	if rt.auth != "Bearer secret-token" {
+		t.Fatalf("Authorization = %q, want 部署实例附件路径带令牌", rt.auth)
+	}
+
+	svc, rt = newSvc()
+	if _, err := svc.FetchAndCacheWithBearer(context.Background(), "https://ghe.example.com/owner/repo", "secret-token", "install:7"); err != nil {
+		t.Fatalf("fetch GHE page: %v", err)
+	}
+	if rt.auth != "" {
+		t.Fatalf("Authorization = %q, want 同 host 非附件路径不发令牌", rt.auth)
 	}
 }
 
@@ -759,5 +810,148 @@ func TestProxyServiceKeepsGitHubAllowList(t *testing.T) {
 	tr, ok := svc.client.Transport.(*http.Transport)
 	if !ok || tr.Proxy == nil {
 		t.Fatal("GitHub 媒体面应保留环境代理（不 guard）")
+	}
+}
+
+// GitHubWebHost 从 API base 推导部署 Web 地址：公共入口与异常输入都回落
+// github.com，GHE 取 API base 自己的 authority（小写，端口保留、默认端口
+// 去掉——凭证闸门按完整 authority 判定）。
+func TestGitHubWebHost(t *testing.T) {
+	cases := []struct{ apiBase, want string }{
+		{"", "github.com"},
+		{"   ", "github.com"},
+		{"https://api.github.com", "github.com"},
+		{"https://api.github.com/", "github.com"},
+		{"https://API.GitHub.COM", "github.com"}, // host 判定大小写不敏感
+		{"https://ghe.example.com/api/v3", "ghe.example.com"},
+		{"https://ghe.example.com/api/v3/", "ghe.example.com"},          // 尾斜杠
+		{"https://GHE.Example.COM/api/v3", "ghe.example.com"},           // 返回小写
+		{"https://ghe.example.com:8443/api/v3", "ghe.example.com:8443"}, // 非默认端口保留
+		{"https://ghe.example.com:443/api/v3", "ghe.example.com"},       // https 默认端口去掉
+		{"http://ghe.example.com:80/api/v3", "ghe.example.com"},         // http 默认端口去掉
+		{"://bad", "github.com"},                                        // 解析失败
+		{"not a url", "github.com"},                                     // 无 host
+		{"ghe.example.com/api/v3", "github.com"},                        // 缺 scheme：无 host
+	}
+	for _, c := range cases {
+		if got := GitHubWebHost(c.apiBase); got != c.want {
+			t.Fatalf("GitHubWebHost(%q) = %q, want %q", c.apiBase, got, c.want)
+		}
+	}
+}
+
+// IsGitHubAttachmentURLFor 的部署口径：附件形态 = 公共 GitHub 形态 ∪ 部署
+// 实例形态——GHE 部署下引公共 GitHub 截图同样应被收集，新增的是本实例
+// authority 下的附件直链。
+func TestIsGitHubAttachmentURLFor(t *testing.T) {
+	// 公共 GitHub 附件形态在任何部署（github.com/空/GHE）下都算。
+	for _, raw := range []string{
+		"https://github.com/user-attachments/assets/abc-123",
+		"https://user-images.githubusercontent.com/123/456",
+	} {
+		for _, wh := range []string{"github.com", "", "ghe.example.com"} {
+			if !IsGitHubAttachmentURLFor(raw, wh) {
+				t.Fatalf("IsGitHubAttachmentURLFor(%q, %q) = false, want true", raw, wh)
+			}
+		}
+	}
+
+	// GHE 附件直链只在部署自己的 Web host 下算附件形态（本任务要修的缺口：
+	// 无扩展名裸链被扩展名要求拒掉，HasScreenshots 误判 false）。
+	ghe := "https://ghe.example.com/user-attachments/assets/abc-123"
+	if !IsGitHubAttachmentURLFor(ghe, "ghe.example.com") {
+		t.Fatalf("IsGitHubAttachmentURLFor(%q, ghe.example.com) = false, want true", ghe)
+	}
+	for _, wh := range []string{"github.com", "", "other.example.com"} {
+		if IsGitHubAttachmentURLFor(ghe, wh) {
+			t.Fatalf("IsGitHubAttachmentURLFor(%q, %q) = true, want false", ghe, wh)
+		}
+	}
+
+	no := []struct{ raw, webHost string }{
+		{"https://ghe.example.com/owner/repo/pull/1", "ghe.example.com"},       // 非附件路径
+		{"https://ghe.example.com/user-attachments/assets", "ghe.example.com"}, // 缺 id 段
+		// host 按解析结果判定：前缀嵌在路径里的仿冒不算。
+		{"https://evil.example.com/ghe.example.com/user-attachments/assets/x", "ghe.example.com"},
+		// 带非默认端口的部署实例：同 host 其他端口不是同一实例。
+		{"https://ghe.example.com:4443/user-attachments/assets/x", "ghe.example.com:8443"},
+		// 点段/编码点段：规范化后会离开附件目录，不算附件形态。
+		{"https://ghe.example.com/user-attachments/assets/../../other", "ghe.example.com"},
+		{"https://ghe.example.com/user-attachments/assets/%2e%2e/%2e%2e/other", "ghe.example.com"},
+		{"", "ghe.example.com"},
+		{"not a url", "ghe.example.com"},
+	}
+	for _, c := range no {
+		if IsGitHubAttachmentURLFor(c.raw, c.webHost) {
+			t.Fatalf("IsGitHubAttachmentURLFor(%q, %q) = true, want false", c.raw, c.webHost)
+		}
+	}
+}
+
+// IsGitHubMediaURLFor 是 bearer 令牌重试闸门：公共 GitHub 媒体域照原样放
+// 行；GHE 只放行部署自己 host 上的 /user-attachments/assets/ 附件路径，外
+// 部图床与同 host 其他路径一律不放行。
+func TestIsGitHubMediaURLFor(t *testing.T) {
+	// 本任务要修的缺口：GHE 附件 URL 在部署 webHost 下应判 true——匿名
+	// 下载被 401/403/404 拒后才值得带 App 安装令牌重试。
+	gheAttachment := "https://ghe.example.com/user-attachments/assets/abc-123"
+	if !IsGitHubMediaURLFor(gheAttachment, "ghe.example.com") {
+		t.Fatalf("IsGitHubMediaURLFor(%q, ghe.example.com) = false, want true", gheAttachment)
+	}
+	// webHost 为公共 GitHub/空/外部域名时该 URL 不算媒体域，令牌不发。
+	for _, wh := range []string{"github.com", "", "evil.example.com"} {
+		if IsGitHubMediaURLFor(gheAttachment, wh) {
+			t.Fatalf("IsGitHubMediaURLFor(%q, %q) = true, want false", gheAttachment, wh)
+		}
+	}
+
+	// 公共 GitHub 媒体域只在公共部署（github.com/空 webHost）下放行；GHE
+	// 部署的安装令牌只属于本实例，不发给公共 GitHub。
+	for _, raw := range []string{
+		"https://github.com/user-attachments/assets/abc",
+		"https://private-user-images.githubusercontent.com/abc",
+		"https://github-production-user-asset-6210df1.s3.amazonaws.com/x",
+	} {
+		if !IsGitHubMediaURLFor(raw, "github.com") || !IsGitHubMediaURLFor(raw, "") {
+			t.Fatalf("IsGitHubMediaURLFor(%q, 公共部署) = false, want true", raw)
+		}
+		if IsGitHubMediaURLFor(raw, "ghe.example.com") {
+			t.Fatalf("IsGitHubMediaURLFor(%q, GHE 部署) = true, want false（令牌只属于本实例）", raw)
+		}
+	}
+
+	// https 上的 :80 不是默认端口，不能剥。
+	if IsGitHubMediaURLFor("https://ghe.example.com:80/user-attachments/assets/x", "ghe.example.com") {
+		t.Fatal("https 的 :80 不是本实例默认端口，不应放行")
+	}
+	// 非默认端口的实例：只有同端口算同一实例。
+	if !IsGitHubMediaURLFor("https://ghe.example.com:8443/user-attachments/assets/x", "ghe.example.com:8443") {
+		t.Fatal("同 authority（带端口）的附件应放行")
+	}
+	if IsGitHubMediaURLFor("https://ghe.example.com:4443/user-attachments/assets/x", "ghe.example.com:8443") {
+		t.Fatal("同 host 不同端口不应放行（不是同一实例）")
+	}
+
+	no := []struct{ raw, webHost string }{
+		// GHE host 上的普通页面/非附件路径：令牌不放行。
+		{"https://ghe.example.com/owner/repo", "ghe.example.com"},
+		{"https://ghe.example.com/user-attachments/assets", "ghe.example.com"}, // 缺 id 段
+		// http 明文不发令牌（与 IsGitHubMediaURL 的形状准入一致）。
+		{"http://ghe.example.com/user-attachments/assets/x", "ghe.example.com"},
+		// userinfo / fragment 形态不可发。
+		{"https://token@ghe.example.com/user-attachments/assets/x", "ghe.example.com"},
+		{"https://ghe.example.com/user-attachments/assets/x#f", "ghe.example.com"},
+		// 点段/编码点段：上游规范化后会离开附件目录。
+		{"https://ghe.example.com/user-attachments/assets/../../other", "ghe.example.com"},
+		{"https://ghe.example.com/user-attachments/assets/%2e%2e/%2e%2e/other", "ghe.example.com"},
+		// 外部图床一律不放行：令牌发出去等于交出仓库凭证。
+		{"https://uiv.example.com/f/x.png", "ghe.example.com"},
+		// 仿冒：附件路径嵌在别人域名路径里。
+		{"https://evil.example.com/ghe.example.com/user-attachments/assets/x", "ghe.example.com"},
+	}
+	for _, c := range no {
+		if IsGitHubMediaURLFor(c.raw, c.webHost) {
+			t.Fatalf("IsGitHubMediaURLFor(%q, %q) = true, want false", c.raw, c.webHost)
+		}
 	}
 }

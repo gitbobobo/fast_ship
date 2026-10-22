@@ -62,7 +62,7 @@ Issue 与 Release、无代码；代码在另一仓库）。`project.CodeRepo()` 
 | `project_review_settings` | PK `project_id`；`user_id`；`enabled`；`trigger_opened/synchronize/ready_for_review/reopened`；`code_combinations_json`/`visual_combinations_json` | 项目级开关与组合。组合元素：`environment_id`、`instance_id`（harness/provider 实例）、`model`、`options`（canonical `[{id,value}]` 数组，思考强度等）、`t3_project_id`（保存时由 `project_t3_bindings` 快照，不信任客户端回传）。代码组合启用时 1–5 个必填；视觉组合 0–3 个，0 个即从不启动视觉审查。 |
 | `review_runs` | `kind(code\|visual)`、`repo_full_name/pr_number/head_sha/round_number`、`installation_id`、`trigger_action`、`pr_title/pr_url/base_ref/head_ref`、组合列 `environment_id/t3_project_id/instance_id/model/model_options_json`、预分配 `thread_id/launch_command_id/initial_message_id`、`status(queued\|dispatched\|running\|completed\|failed\|timed_out\|cancelled)`、`dispatch_started_at/dispatched_at/started_at/finished_at/deadline_at`、`error_code/error_message`、`prep_retry_count`、`summary/result_json`、`review_id/posted_at`、`worktree_path/worktree_state/worktree_error`、`stop_attempted_at`、`archived_at` | 一次审查运行 = 一轮 × 一个组合。同一 (repo, pr, head_sha) 的代码与视觉运行共享 `round_number`（视觉是同一轮内的第二段）。`dispatched_at` 在启动 RPC 结果确认或 Agent 首次持令牌鉴权时写入，为空 = 线程是否建成未确认。`prep_retry_count` 是 T3 工作区准备失败后的自动重试次数（INT-147，须持久化：进程重启不能把已用掉的重试名额清零）。`archived_at` 是终态后线程归档写回的时刻；归档有限重试超限后也写入（不再重试），失败原因见 `worktree_error` 与 `review_cleanup_failed` 通知。 |
 | `review_run_tokens` | PK `run_id`；`token_hash`（UNIQUE）；`expires_at`；`consumed_at` | 每次运行一个 `fsr_` 令牌，只存完整令牌的 SHA-256。 |
-| `review_pull_requests` | PK `(project_id, repo_full_name, pr_number)`；`user_id/installation_id`；`round_number/head_sha`；`code_comment_id/visual_comment_id`；`code_status/visual_status`；`visual_screens_fingerprint`；`sync_pending/sync_epoch/sync_error` | 一个 PR 的审查总账：评论落点、最近一次推送的 commit status 结论、视觉截图指纹、事务外同步标记（置 pending 时 epoch+1，清标记按开始时 epoch 条件写）。主键含 `project_id`：同仓库换项目接管后各一本账。 |
+| `review_pull_requests` | PK `(project_id, repo_full_name, pr_number)`；`user_id/installation_id`；`round_number/head_sha`；`code_comment_id/visual_comment_id`；`code_status/visual_status`；`visual_screens_fingerprint`（`c:<urlFP>:<contentFP>` / `u:<urlFP>`，见「视觉审查衔接」）；`sync_pending/sync_epoch/sync_error` | 一个 PR 的审查总账：评论落点、最近一次推送的 commit status 结论、视觉截图指纹、事务外同步标记（置 pending 时 epoch+1，清标记按开始时 epoch 条件写）。主键含 `project_id`：同仓库换项目接管后各一本账。 |
 | `review_assets` | `(repo_full_name, pr_number, head_sha, position)`；`label`；`source_url`；`storage_path`；`mime_type`；`size_bytes` | 视觉审查截图：PR 描述里的图片链接经截图下载面（`NewReviewMediaService`）下载后本地落盘。内容是仓库归一的共享产物（同一 head 同一批截图），不按项目分区。 |
 | `review_debounces` | PK `(project_id, repo_full_name, pr_number)`；`head_sha/action/installation_id/pr_title/pr_url/base_ref/head_ref`；`fire_at` | 防抖窗口。窗口内新推送只更新 head 并推后 `fire_at`；固定 60s，不提供配置。 |
 | `review_seen_shas` | PK `(project_id, repo_full_name, pr_number, head_sha)`；`pr_updated_at`；`accepted_at` | 某项目已受理过的 head SHA：force-push 回旧 SHA 不再开轮。按项目分区——接管后新项目对同仓库同一 SHA 重新受理。 |
@@ -235,6 +235,24 @@ GitHub App 投递失败（公网隧道超时/502）不会自动重试，一次�
   本地 `github_webhook_deliveries` 幂等账已有该 guid（说明投递其实已送达，
   只是 GitHub 侧记录滞后）→ 跳过（不重投、不通知、不记账）；同 guid 任一行
   2xx（含成功的重投）→ 跳过。
+- **关闭/合并的 PR 不重投、不报故障**：投递列表行（`HookDelivery`）没有
+  repo/PR 信息，而重放的 payload 是旧快照（PR 当时写着 open），所以重投前
+  先 `GetHookDelivery`（`GET /app/hook/deliveries/{id}`，同一 `HookDeliveries`
+  访问面）取请求体，解析出 `repository.full_name`/`number`/`installation.id`，
+  再 `GetPullRequest` 读**实时** State（同轮按 `repo#pr` 缓存，同一 PR 的多个
+  投递只读一次）。PR 已关闭/合并 → 该 guid 记终态（重投次数账的
+  `closed_at` 非空）并静默跳过：不重投、不发 `review_redelivery_failed`
+  通知、以后每轮也不再查询它——否则隧道恢复后这些旧
+  synchronize 会被重投回去白跑一轮，重投持续失败时还会误报「这次推送可能
+  没有被审查」。payload 读不到 / 解析不出 PR / `GetPullRequest` 失败时
+  **降级为不校验照常重投**：这道闸门只省白跑与误报，开轮与写产出的三道
+  实时状态关卡（见「调度循环」「派发」「GitHub 产出」）已经拦得住误开轮，
+  不能反过来把真投递漏掉。闸门查询（详情 + 实时读各占一个名额）有独立的
+  **每轮 20 次次数预算与 30 秒时间预算**（`reviewRedeliveryProbeTimeout`）：
+  用完后立即按未知降级，剩下的时间留给重投——不能拿可选校验烧完 90 秒
+  总超时，否则重投请求会拿到已取消的 ctx，后面的真投递既不重投也不通知。
+  闸门截止时间还不晚于「总截止 - 30 秒余量」（`reviewRedeliveryReserve`），
+  列表页多、探测慢时重投仍有时间。
 - 通过 `POST /app/hook/deliveries/{id}/attempts`（App JWT 端点，访问面
   `githubapp.HookDeliveries`，不进安装令牌的 `GitHubClient` 接口）让 GitHub
   重投：请求与原始投递相同，`X-GitHub-Delivery` 也相同，webhook 的幂等登记
@@ -295,7 +313,14 @@ GitHub App 投递失败（公网隧道超时/502）不会自动重试，一次�
 - 提示词系统写死（`review_prompts.go` 常量）：代码审查要求自查证（git diff
   + 读文件）、以找 bug 为主、P0/P1/P2/Note 分级、历史处置规则、判断
   `ui_changed` 与 `ui_changed_since_last_visual`；视觉审查按层级/间距/排版/
-  颜色/交互/文案/可访问性七维度、blocker/worth_fixing/minor 三级。两份都
+  颜色/交互/文案/可访问性七维度、blocker/worth_fixing/minor 三级，先核对
+  截图是否体现 PR 描述的改动，给出具体检查项（WCAG AA 对比度、点击区域、
+  状态反馈、文案泄露技术串、假数据等），不凑数；旧图、裁切、缺关键状态
+  与压缩看不清一并写进 `unmeasurable` 并说明怎么补拍。视觉的
+  历史处置口径：`prior` 记对上一轮每条发现的处置（fixed / rejected /
+  open，open 保持原级别并写清现状），`findings` 只写本轮新发现的问题——评论
+  的「本轮新发现 / 仍未解决」两段正好对应这两份数据，不需要靠文本比对归
+  类。两份都
   明确「只读审查、不发评论、不改 PR 状态，结论只能经 `/result` 提交」。
   代码审查另约束产出形态：`summary` ≤2 句（结论 + 关键影响），finding
   按「问题 / 影响 / 建议」组织，`line` 无法定位到 HEAD 行时省略（顶层评论
@@ -356,8 +381,8 @@ Ship 不代点就干等 1h deadline 变 `timed_out`，整轮还得手动重审�
 | --- | --- |
 | `GET /pull-request` | PR 元数据（repo、PR 号、标题、正文、base/head ref、head SHA、URL）；身份全部取自运行行，不接受请求参数。 |
 | `GET /pull-request/diff` | PR diff，>1MB 按字节截断并标 `truncated:true`。 |
-| `GET /history` | 系统生成的历史上下文 Markdown（无历史时空串）。代码：上一轮（`round_number-1`）所有组合的结构化发现（含组合名）+ 上一轮结论之后的新行内/会话评论；首次审查给全部讨论（最近 50 条）。视觉：上一轮视觉 findings + unmeasurable。**只识别本系统自己发的结论**（按评论隐藏标记找回），不兼容旧 Review Bot / Code Bot 评论。 |
-| `GET /screenshots` | 仅视觉运行。`{items:[{id,label,url}], changed}`：`url` 指向图片端点；`changed` = 本次 head 的截图 URL 指纹 ≠ 总账 `visual_screens_fingerprint`。 |
+| `GET /history` | 系统生成的历史上下文 Markdown（无历史时空串）。代码：上一轮（`round_number-1`）所有组合的结构化发现（含组合名）+ 上一轮结论之后的新行内/会话评论；首次审查给全部讨论（最近 50 条）。视觉：上一轮视觉 findings + unmeasurable，再加该轮 `prior` 里仍未解决（`status=open`）的条目（独立小节「仍未解决（更早一轮）」）——模型把遗留只写进 `prior(open)` 时也不会从下一轮历史里消失。**只识别本系统自己发的结论**（按评论隐藏标记找回），不兼容旧 Review Bot / Code Bot 评论。 |
+| `GET /screenshots` | 仅视觉运行。`{items:[{id,label,url}], changed}`：`url` 指向图片端点；`changed` = 本次 head 的截图 URL 集合 ≠ 上一轮视觉运行绑定 head 的截图 URL 集合（只作审查员的「是否要对比上一轮」提示；**是否开视觉轮由总账的内容指纹决定**，两者口径不同，别拿它推结论）。 |
 | `GET /screenshots/{assetId}` | 仅视觉运行。图片字节 + Content-Type，按运行所属 PR/SHA 校验；未下载成功 404。 |
 | `POST /result` | 提交结构化结论，见下。 |
 
@@ -388,8 +413,13 @@ Ship 不代点就干等 1h deadline 变 `timed_out`，整轮还得手动重审�
 `repo_full_name` 与该项目 enabled 设置行快照一致的行（选中后还要过一次准入
 复核：pending 未清、epoch 未推进、快照仍是本仓库；通过后每次 GitHub 写之前
 再复核一次，避免同步期间改仓库把产出写到旧仓库）；全部走
-App 安装令牌。失败只记 `sync_error` 下轮重试，不改运行终态；成功后按开始
-同步时的 `sync_epoch` 条件清 pending（同步期间的新 pending 不会被误清）。
+App 安装令牌。失败只记 `sync_error`、记 `sync_failed_epoch = sync_epoch` 并
+按 `reviewSyncRetryBackoff`（5 分钟）退避重试，不改运行终态——持续性失败
+（超大 diff 固定 406、`SubmitReview` 固定 422、评论接口 403）不会每 10s
+重放整条同步（否则读 diff、写评论、写 commit status 被放大 360 倍/小时，还会
+写满同一 SHA 的 1000 条 status 上限）；任何置 pending 的入口都会推进
+`sync_epoch`，新事件因此立即重新入队、不受退避影响。成功后按开始同步时的
+`sync_epoch` 条件清 pending（同步期间的新 pending 不会被误清）。
 中段写回（`code_status`/`visual_status`/`visual_screens_fingerprint`）同样带
 `sync_epoch` 条件：同步期间总账被新 webhook/rerun 推进时不命中，直接放弃
 本轮落库——陈旧快照的结论不得写回。
@@ -413,12 +443,17 @@ rune 截断加 `...`，不劈断多字节字符）；状态未变不重复调用
 | | 任一 `failed/timed_out/cancelled` | `error`「审查未完成：<组合> 失败」（取第一个失败组合） |
 | | 全部 completed 且有 P0/P1/P2 | `failure`「发现问题：P1 x 条，P2 x 条」（所有组合合计，只列非零级别，按 P0→P1→P2） |
 | | 全部 completed 且无 P0/P1/P2 | `success`「审查通过」 |
-| `视觉审查` | 视觉运行启动 | `pending`「视觉审查中」 |
-| | 有 blocker / worth fixing | `failure`「发现 N 条问题」 |
+| `视觉审查` | 代码审查未全部终态 | 不写（`visualWait`：结论还可能变，不提前落 status/评论/指纹） |
+| | 视觉运行启动 | `pending`「视觉审查中」 |
+| | 有 blocker / worth fixing，含 `prior` 里 `status=open` 且原级别为 blocker/worth_fixing 的遗留 | `failure`「发现 N 条问题」 |
 | | 只有 minor 或无发现 | `success`「审查通过」 |
+| | 本轮无事可做（截图内容未变、上轮视觉后无 UI 改动）且上一轮通过 | `success`「审查通过（沿用上一轮，截图未变化）」 |
+| | 本轮无事可做且上一轮遗留 blocker / worth fixing | `failure`「截图复核意见尚未处理（上轮 N 条）」 |
 
 代码审查 `error` 时不启动视觉审查，等手动重新审查；未配置视觉组合时永不
-设 `视觉审查` 状态。
+设 `视觉审查` 状态。代码运行未全部终态时**不写任何视觉产出**（等待分支见
+「视觉审查衔接」）；描述里没有可服务截图、或截图变了/有新 UI 改动时都不沿
+用上一轮通过——不写 status 也不冒充。
 
 ### 顶层评论（各一条，隐藏标记找回）
 
@@ -435,9 +470,35 @@ rune 截断加 `...`，不劈断多字节字符）；状态未变不重复调用
     注明「未行内标注」。Note 全部折叠进 `<details>`。
   - 视觉待办/截图遗留提示在表格之后，末尾固定复审说明（推送后自动复审）。
   - 行内标注判定与行内 review 共用一次 `GetPullRequestDiff` + 右侧有效行
-    集合（`fetchInlineLines`），不再重复拉取。
-- 视觉审查：标记 `<!-- fast-ship-visual-review -->`，标题「视觉审查意见：」，
-  按严重度排序，每条带截图标签、维度、改法；不发行内评论。
+    集合（`fetchInlineLines`），不再重复拉取。**diff 读取失败只推迟行内
+    review**：commit status、顶层评论（按「本轮没读 diff」口径，不加「未
+    行内标注」注记）照常写，推迟的错误最后才上报——账本保持 `sync_pending`
+    并写 `sync_error`，退避后重试；不能把失败压成「没有有效行号」，那会把
+    行内意见静默丢掉。**无论有没有待发布的行内运行都上报**：本轮评论可能已
+    按「没读 diff」口径重写，保持 `sync_pending` 才能在 diff 恢复后补上注记。
+    注：同一 (head, round) 里「diff 读取失败」与「存在视觉运行」互斥——读
+    diff 的前提是某个 completed 代码运行有带行号的 P0–P2，而这会让视觉决策
+    停在 `visualNone`、不建视觉运行；视觉产出因此不会被 diff 失败连累。
+  - **顶层评论写入统一去重**（`upsertPRComment`，代码与视觉评论共用）：先按
+    账本记的 `code_comment_id`/`visual_comment_id` 认自己的评论，id 不可用
+    （写回失败/评论已重建）时退回与 `FindPullRequestComment` 同口径的「bot +
+    marker 前缀」；正文已等于本轮正文就不 PATCH（重试路径每次都调这里，相同
+    正文的写入既耗配额又留编辑记录），并顺手把找回的 id 补记回账本；正文变了
+    照常更新。用状态做代理会漏掉「多个组合里又完成一个但状态没变」，只看
+    「正文含 marker」会把用户复制粘贴的同一段正文当成自己的评论。
+  - 视觉 `commit status` 的去重：沿用上一轮通过时按账本 `visual_status` 判
+    （开轮已清空它，新轮首次照常写）；「截图不可用」「沿用上一轮 failure」
+    两支在**同一快照的失败重试**（`sync_failed_epoch == sync_epoch`）且账本
+    已是 failure 时跳过——状态写成功、随后写评论失败的重试不再每轮追加一条
+    相同 context 的 status（同一 SHA + context 有 1000 条上限）。
+- 视觉审查：标记 `<!-- fast-ship-visual-review -->`，标题
+  `## 视觉审查 · <短SHA> · 第 N 轮`（与代码评论同一定位口径）。按组合分节
+  （`### 模型 · 实例` + summary），先「本轮新发现」（`findings` + `unmeasurable`）再「仍未解决」（`prior` 里 `status=open` 的条目）；沿用上
+  一轮时开头写「沿用上一轮视觉审查结论（第 N 轮 · head <短SHA>）：截图未变
+  化，意见尚未处理」，被沿用的 findings 归入「仍未解决」，不冒充本轮新发现。
+  `findings` 每条带截图标签、维度、改法；`prior(open)` 每条只有级别 + 正
+  文（原条目没有截图/维度字段）。不发行内评论；截图全部无法下载的评论共用
+  同一 marker 与标题口径。
 
 ### 行内 review（每个代码组合一个）
 
@@ -449,6 +510,12 @@ rune 截断加 `...`，不劈断多字节字符）；状态未变不重复调用
 
 ## 视觉审查衔接
 
+视觉决策只在代码审查**全部终态**后做。代码运行还有排队/在途时决策是
+`visualWait`（同步的等待分支）：本轮只发布代码侧产出，不写视觉 status、不
+发视觉评论、不动截图指纹——代码结论还没落定，任何视觉判断（沿用/开轮/截
+图不可用）都可能建立在即将被推翻的输入上。代码运行终态会置
+`sync_pending`，下一次同步自然接上，等待不会卡死衔接。
+
 代码审查全部终态后，以下五条**同时满足**才开视觉运行（每个视觉组合一行，
 `kind=visual`，同 `round_number`），并把 `视觉审查` 置 pending「视觉审查中」：
 
@@ -456,13 +523,21 @@ rune 截断加 `...`，不劈断多字节字符）；状态未变不重复调用
 2. 配置了视觉组合（0 个则永不启动，也不设 `视觉审查` 状态）；
 3. **至少一张截图下载成功**（下载面见下；描述里的截图引用数只是前置）；
 4. 至少一个代码运行 `ui_changed=true`；
-5. 截图集合有变化（URL 指纹 ≠ `visual_screens_fingerprint`），或任一代码
-   运行 `ui_changed_since_last_visual=true`。
+5. 截图集合有变化（URL 集合指纹不同**且内容指纹也不同**），或任一代码运
+   行 `ui_changed_since_last_visual=true`。
+
+判定顺序（`decideVisual`）：代码未全终态 → 等待；无视觉组合/无可服务截图
+→ 不动任何产出；截图变了或上轮视觉后又有 UI 改动 → 代码没全净或 UI 没变
+就不开，否则探测后开轮（探测拉不到则报「截图无法下载」）；以上都不成立
+（截图内容未变且上轮视觉后无 UI 改动）→ 上一轮遗留 blocker/worth_fixing
+就沿用 failure，上一轮通过就沿用 success。**截图变了或有新 UI 改动时绝不
+沿用 success**——那会盖住真正需要复审的信号。
 
 「其余判据都成立」包含条件 5：只有本轮真的要开视觉（截图指纹变了，或上轮
 视觉后又有 UI 改动）才实际去**探测**下载——避免每次同步都拉图，也避免把
-截图未变的沿用/带过路径误写成「截图不可用」。探测按描述顺序逐张试，第一张
-成功即停（成功图已落盘缓存，视觉运行时直接命中），不写 `review_assets`
+截图未变的沿用/带过路径误写成「截图不可用」。探测按描述顺序把**每一张**
+都试一遍（不再第一张成功即停：内容指纹需要全部成功图的哈希；成功图已落盘
+缓存，视觉运行时直接命中），不写 `review_assets`
 ——资产行仍由视觉运行时的 `ensureAssets` 落账，可用性只看当前描述里的 URL，
 不按资产行计数（已不在描述里的陈旧资产不算可用截图）。探测有 30s 总时限
 （含同 URL 下载锁上的等待——等待吃 ctx，不会被前一请求的 45s 客户端超时
@@ -473,15 +548,43 @@ rune 截断加 `...`，不劈断多字节字符）；状态未变不重复调用
 ——网络、超时、预算耗尽——→「拉不到」）：任一成功 → `ready`，照常开轮；
 全部探完且全部「不是图」→ `none`，把 `HasScreenshots` 改判为 false，与「描
 述里没有截图」同收敛（`visualNone`，不写任何视觉状态——svg 徽章这类引用
-不会每个同步事件刷一条 failure）；其余（任一「拉不到」、或总预算耗尽未探
-完）→ `unavailable`，reason 取第一条「拉不到」类原因，没有再取第一条失败
-原因。
+不会每个同步事件刷一条 failure）；零成功且存在「拉不到」、或总预算耗尽未
+探完 → `unavailable`，reason 取第一条「拉不到」类原因，没有再取第一条失败
+原因。只有全部引用都下载成功时 `ready` 才带内容指纹；只成功一部分时内容未
+知，调用方保守按「变化」处理，账本指纹只推进 URL 维度（见下）。
 
-判定为 `none` 的集合会**结清**：指纹以 `none:` 前缀写入
-`visual_screens_fingerprint`，与「有图集合的指纹」区分开——同一集合（指
-纹相同）之后任何同步事件（含 UI 又改动、手动重跑）直接判无截图、不再重
-探；集合变化（指纹不同）自动恢复探测。无引用（描述里没有截图）同样结清。
-`unavailable` 不写指纹：拉不到是暂时性的，下次同步重试。
+**截图指纹是两层的**：`visual_screens_fingerprint` 存
+`c:<urlFP>:<contentFP>`（URL 集合指纹 + 内容指纹）、或 `u:<urlFP>`（已结
+清「没有可服务截图」）、或历史上无前缀的裸 `urlFP`（按只有 URL 维度兼
+容；旧版结清前缀 `none:` 仍可解析、不再新写）。比较时先看 URL 集合：相同
+即判未变，不下载、不探测（便宜的常见路径）；URL 集合换了才探测，用下载文
+件的字节 SHA-256 与账本里的内容指纹比对——作者重新上传截图、URL 全换但字
+节相同不算变化（musiver PR #563 第 4→5 轮的红绿反复正源于按 URL 判变化）。
+内容指纹是各图文件哈希（流式读取，单次读盘）排序后 join 再哈希的前 16 位，
+与引用顺序无关；部分下载失败或 hash 预算耗尽时为空（未知）。
+
+**账本指纹总是描述最近一次视觉轮的材料**：开轮 / 沿用分支只要本轮拿到新
+知识就会推进——内容指纹已知写 `c:` 形态；内容未知但 URL 集合变了，至少写
+裸 URL 指纹（不能把上一轮的内容指纹留在账本里，否则后来换回旧 URL 的
+head 会被误判「未变化」，把别的截图集合上的通过结论沿用过去）；URL 集合
+没变则不覆盖，保留已有的内容维度。已知取舍：**URL 集合相同就当作同一批
+截图**，不再下载——附件类图床每次上传都换 URL，这条便宜路径成立；对固定
+URL 换内容的第三方图床不检出，接受。
+
+指纹哈希与探测共用同一份 30s 预算：每张换算前检查预算（不启动新的哈希），
+耗尽后已下载的图仍可用于开轮，但内容指纹按未知处理（不写内容维度）。
+
+指纹与视觉运行**在同一事务里落账**，且在确认**真的建出了运行**之后才写
+（`createVisualRuns` 内、组合循环之后）：否则「运行已建、紧接着的 GitHub
+pending 写失败」时账本会停在上一条材料上，下一次同步因为已有运行而走汇总分
+支、不补指纹，之后换回旧 URL 集合的 head 就会被误判「未变化」。反向也一样：
+决策时读到的组合可能在探测期间被清空（启用状态允许 0 个视觉组合，保存设置
+不推进账本 epoch），此时只写指纹会让账本指向一次从未发生的审查。
+
+判定为 `none`（或描述里没有截图）的集合会**结清**：指纹以 `u:` 前缀写入，
+同一集合（指纹相同）之后任何同步事件（含 UI 又改动、手动重跑）直接判无截
+图、不再重探；集合变化（指纹不同）自动恢复探测。`unavailable` 不写指纹：
+拉不到是暂时性的，下次同步重试。
 
 「拉不到」时**不建视觉运行**，`视觉审查` 写一条明确的 failure（「截图无法
 下载，未做视觉审查：<原因>」，原因为中文可读文案，网络层英文报错只进日志，
@@ -493,13 +596,25 @@ query 不落日志），且**不写指纹**。这里的重试发生在**下一�
 fixing 时，这个分支的代码审查结论同样加「截图复核意见尚未处理」（与沿用
 failure 分支口径一致；上一轮通过或没有上一轮时不加）。
 
-条件 5 不满足（截图没变）且上一轮视觉审查有 blocker / worth fixing：**不新
-开视觉轮**，把上一轮的 failure 结论带到新 HEAD 的 `视觉审查` status，并在
-代码审查结论里加「截图复核意见尚未处理」。条件 5 不满足且上一轮视觉通过：
-沿用 success 到新 HEAD，status 描述区分两种情况——截图引用仍在且集合未变
-写「审查通过（沿用上一轮，截图未变化）」；描述删光了截图或全部不是图
-（`HasScreenshots=false`）时那句文案不再成立，改写通用的「审查通过（沿用
-上一轮）」。
+条件 5 不满足（截图内容没变）且上一轮视觉审查有 blocker / worth fixing：
+**不新开视觉轮**，把上一轮的 failure 结论带到新 HEAD 的 `视觉审查` status，
+并在代码审查结论里加「截图复核意见尚未处理」。条件 5 不满足且上一轮视觉通
+过：沿用 success 到新 HEAD（「审查通过（沿用上一轮，截图未变化）」）。截图
+内容变了或有新 UI 改动时不沿用；描述里没有可服务截图（`u:` 结清态）时也
+不沿用——上一轮的结论不是这批材料上的结论，宁可不写 status，也不冒充。
+
+**未解决的问题计入结论**：视觉 failure 的判定与条数（`visualFailureCount`）、
+Web「需要处理」计数、审查记录投影（`review_records.go` 的 `findings_count`）
+都取「本轮 `findings` 里的 blocker/worth_fixing」+「`prior` 里阻塞的
+`status=open` 条目」。阻塞口径由 `priorOpenBlocks` 判定：`minor` / `P2` /
+`Note` 不阻塞，其余（含 `nil` 与未知值）一律阻塞——模型显式标了「仍未解决」
+却漏写级别时不能让结论变绿（新提交由 `validateVisualResult` 直接拒绝：open
+必须带 blocker/worth_fixing/minor 级别）。评论的「仍未解决」段、下一轮视觉
+历史与记录详情里的 `findings[]` 保留 `prior(open)` 的**全部**条目（含未分级 /
+minor），比计数口径更宽——展示用宽口径，红绿用阻塞口径；记录详情里这些条目
+带「上轮遗留：」前缀，避免被误读成本轮新发现。只写进 `prior(open)` 的遗留问
+题因此不会从状态、评论、历史、记录里消失（musiver PR #563 的红绿反复正是它
+被三处一起忽略导致的）。
 
 失败原因按**错误本身**归类，不按错误外壳嗅探：本地缓存操作失败（建目录、
 建临时文件、写盘、改名、读缓存）由下载面在产生点打上
@@ -548,11 +663,19 @@ Linkify；去重保序，label 取 alt 或「截图 N」）。收集走 AST 而�
 显式声明的图交给探测的 Content-Type 裁决（`render.php?id=1` 这类无扩展名直
 链可能是真图，扩展名误判会漏收）；「全部不是图」由探测三态收敛成
 `visualNone`，不会每个同步事件刷「截图无法下载」failure。裸链没有图片语法
-背书，在此之上额外按「GitHub 附件形态
-（`github.com/user-attachments/assets/…` 与 `user-images.githubusercontent.com/…`，
-拖入/粘贴附件的标准直链）∪ 位图扩展名」准入，否则描述里每个无扩展名的网页
-链接都会被当成截图。这个启发式会误收正文里恰好以 `.png` 结尾的普通链接，接
-受。
+背书，在此之上额外按「GitHub 附件形态 ∪ 位图扩展名」准入，否则描述里每个
+无扩展名的网页链接都会被当成截图。附件形态是**公共形态 ∪ 本部署实例形态**
+（`githubmedia.IsGitHubAttachmentURLFor`）：公共形态
+（`github.com/user-attachments/assets/…`、`user-images.githubusercontent.com/…`）
+在任何部署下都收——GHE 的 PR 引用公共 GitHub 截图同样合理；本实例形态按
+部署推导的 Web 地址判定（`githubmedia.GitHubWebHost`：`github_app.api_base_url`
+为空或 `api.github.com` → `github.com`，GHE 的 `https://<host>[:port]/api/v3` →
+同一 `host[:port]`，默认端口去掉），GHE 收
+`https://<ghe-host>/user-attachments/assets/…`
+（拖入/粘贴附件的标准直链，通常无扩展名）。附件路径要求解码后的规范形态，
+点段/编码点段（`/../`、`%2e%2e`）一律不算。写死 `github.com` 会让 GHE 部署
+的附件直链被静默丢掉，`HasScreenshots=false` 后视觉审查不启动。这个启发式
+会误收正文里恰好以 `.png` 结尾的普通链接，接受。
 由**独立的截图下载面**（`githubmedia.NewReviewMediaService`，与
 `/api/github/media-proxy` 的 GitHub 白名单面是两个实例）下载落盘为
 `review_assets`；同一 (repo, pr, head) 已有 asset 行复用，失败的行保留
@@ -570,9 +693,16 @@ https** 主机，内容只收位图：`image/*`（svg 即使标着 `image/svg+xm
 布局与 RFC 8215 的 local-use `/48`）布局不可安全解码，**整体拒绝**——内嵌
 公网地址的也一并拒，宁可错拒不可放过），
 重定向目标与 DNS 重绑定的每次建连同样被拦。App 安装令牌（bearer）只发往
-GitHub 媒体域、且只在匿名被 401/403/404 拒时重试一次（私有附件对匿名请求
-正是回这两个码）：外部图床匿名失败即止，协议不支持、不是图片、超限、内网
-地址这类确定性失败也不重试。
+**本部署的 GitHub 实例**、且只在匿名被 401/403/404 拒时重试一次（私有附件
+对匿名请求正是回这两个码）：外部图床匿名失败即止，协议不支持、不是图片、
+超限、内网地址这类确定性失败也不重试。凭证闸门按部署推导
+（`IsGitHubMediaURLFor`）：公共 GitHub 部署沿用 `IsGitHubMediaURL` 的媒体域
+白名单（`github.com` 上的附件路径同样要求解码后的规范形态，点段不能借前缀
+把令牌带出附件目录）；GHE 部署只放行本实例 authority（含端口，`https://<host>:<port>/…`
+的端口不同即不算同一实例；默认端口按 scheme 判定，https 的 `:80` 保留）上的
+规范附件路径，公共 GitHub 域也不发——令牌只属本实例，发出去没有意义。媒体
+适配器（`ProxyService`）自己发送前也用同一闸门再校一次
+（`NewReviewMediaService` 构造时注入部署 authority）。
 
 缓存按授权域分键：令牌拉取的条目键里带 `install:<id>` 授权域——私有附件
 URL 即使被第三方知道，匿名或其他安装的请求也命中不了这条缓存（各是各的

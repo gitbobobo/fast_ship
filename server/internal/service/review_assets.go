@@ -2,10 +2,14 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/url"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -174,12 +178,15 @@ func imageLabelText(n ast.Node, source []byte) string {
 	return strings.TrimSpace(b.String())
 }
 
-// collectScreenshotURLs 按出现顺序提取 PR 描述里的图片引用；同 URL 只取首次，
+// collectScreenshotURLsAt 按出现顺序提取 PR 描述里的图片引用；同 URL 只取首次，
 // 标签取 alt 文本，缺省回退「截图 N」。三个来源（walk 顺序即文档序）：
 // ![alt](url)（含引用式与尖括号目的地）、HTML <img src>（行内与整行 HTML
 // 块）、裸链（Linkify 自动链接）。围栏代码/行内代码/HTML 注释不产链接节点，
-// 自然不收集。
-func collectScreenshotURLs(body string) []screenshotRef {
+// 自然不收集。githubWebHost 是部署的 GitHub Web 地址（host[:port]，见
+// githubmedia.GitHubWebHost）：裸链/普通链接里的「用户上传的附件直链
+// （通常无文件名扩展名）」按「公共 GitHub 形态 ∪ 本部署实例形态」判定，
+// GHE 实例的 `https://<host>/user-attachments/assets/…` 同样收。
+func collectScreenshotURLsAt(body, githubWebHost string) []screenshotRef {
 	if strings.TrimSpace(body) == "" {
 		return nil
 	}
@@ -284,11 +291,11 @@ func collectScreenshotURLs(body string) []screenshotRef {
 			continue
 		}
 		// 裸链与普通链接目的地都没有图片语法背书，在结构准入之外额外要求
-		// 「GitHub 附件形态（附件直链无扩展名）∪ 位图扩展名」：无扩展名的
-		// 任意 https 链接都收会把描述里每个网页链接当成截图（按扩展名结尾
-		// 判定，接受这个启发式的误收）。
+		// 「部署 GitHub 实例的附件形态（附件直链无扩展名）∪ 位图扩展名」：无
+		// 扩展名的任意 https 链接都收会把描述里每个网页链接当成截图（按扩
+		// 展名结尾判定，接受这个启发式的误收）。
 		if (c.source == refSourceBareLink || c.source == refSourceLink) &&
-			!githubmedia.IsGitHubAttachmentURL(c.ref.URL) && !githubmedia.HasBitmapExtension(c.ref.URL) {
+			!githubmedia.IsGitHubAttachmentURLFor(c.ref.URL, githubWebHost) && !githubmedia.HasBitmapExtension(c.ref.URL) {
 			continue
 		}
 		if _, dup := seen[c.ref.URL]; dup {
@@ -349,7 +356,7 @@ func (s *ReviewService) downloadScreenshot(ctx context.Context, installationID i
 	default:
 		return nil, err
 	}
-	if !githubmedia.IsGitHubMediaURL(url) || s.mediaBearer == nil || installationID == 0 {
+	if !githubmedia.IsGitHubMediaURLFor(url, s.githubWebHost()) || s.mediaBearer == nil || installationID == 0 {
 		return nil, err
 	}
 	bearer, berr := s.mediaBearer(ctx, installationID)
@@ -413,13 +420,25 @@ func screenshotErrorText(err error) string {
 	return "无法连接图片服务器"
 }
 
+// githubWebHost 本部署的 GitHub Web 地址（GHE 部署在 github_app.api_base_url
+// 里配置实例地址，公共 GitHub 留空）——host[:port]，默认端口去掉。截图收集的
+// 附件形态判定与「匿名失败后能否带 App 安装令牌重试」都以它为准：写死
+// github.com 会让 GHE 部署的附件直链被准入拒掉（视觉审查静默不启动），私有
+// 附件也永远拿不到令牌。
+func (s *ReviewService) githubWebHost() string {
+	if s.cfg == nil {
+		return githubmedia.GitHubWebHost("")
+	}
+	return githubmedia.GitHubWebHost(s.cfg.GitHubApp.APIBaseURL)
+}
+
 // ensureAssets 保证 (repo,pr,head) 的截图资产已落账：逐引用查重 → 未下载的
 // 走 downloadScreenshot；失败行（storage_path 为空）每次重试下载，成功则
-// 更新原行。私有仓库附件匿名拉不到：GitHub 媒体域失败且有安装 id 时带 App
-// 令牌重试一次。下载失败也落一行（error 非空、storage_path 空），图片端点
-// 据此回 404。返回本次指纹与资产列表。
+// 更新原行。私有仓库附件匿名拉不到：GitHub 媒体域（含部署实例附件路径）
+// 失败且有安装 id 时带 App 令牌重试一次。下载失败也落一行（error 非空、
+// storage_path 空），图片端点据此回 404。返回本次指纹与资产列表。
 func (s *ReviewService) ensureAssets(ctx context.Context, repo string, prNumber int, headSHA, prBody string, installationID int64) (string, []model.ReviewAsset, error) {
-	refs := collectScreenshotURLs(prBody)
+	refs := collectScreenshotURLsAt(prBody, s.githubWebHost())
 	fingerprint := screenshotFingerprint(refs)
 	now := time.Now().UTC()
 
@@ -532,17 +551,44 @@ func isNotAnImageError(err error) bool {
 		errors.Is(err, githubmedia.ErrInvalidMediaURL)
 }
 
-// probeScreenshots 试下载 PR 描述里的截图，第一张成功即停：成功图已落盘缓存
-// （视觉运行时直接命中）。逐 ref 分类失败：「不是图」与「拉不到」（见
-// isNotAnImageError）。任一成功 → probeReady；全部探完且全部「不是图」→
-// probeNone；其余（任一拉不到、或总预算耗尽未探完）→ probeUnavailable，
-// reason 取第一条「拉不到」类原因，没有再取第一条失败原因。探测不写
-// review_assets——资产行仍由视觉运行时的 ensureAssets 落账，这里不按资产
-// 行计数，避免「已不在描述里的陈旧资产」被当成可用截图。
-func (s *ReviewService) probeScreenshots(ctx context.Context, installationID int64, prBody string) (screenshotProbeResult, string) {
-	refs := collectScreenshotURLs(prBody)
+// hashFileSHA256 流式读文件算 SHA-256 hex。探测用它对下载成功的缓存文件取
+// 内容指纹——下载面单文件上限 256 MiB，整文件读进内存再哈希是白付的峰值
+// 内存，边读边算只占一个哈希缓冲。
+func hashFileSHA256(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// screenshotProbe probeScreenshots 的结果。contentFP 内容指纹只在 result=
+// probeReady 且全部引用都下载成功时非空——只成功一部分时无法证明「内容没
+// 变」，按未知（调用方保守视为变化）处理。
+type screenshotProbe struct {
+	result    screenshotProbeResult
+	reason    string
+	contentFP string
+}
+
+// probeScreenshots 试下载 PR 描述里的全部截图引用（不再「第一张成功即停」
+// ——每个成功图都要参与内容指纹，指纹是「URL 换了但图没变」判定的依据）。
+// 成功图已落盘缓存（视觉运行时直接命中）。逐 ref 分类失败：「不是图」与
+// 「拉不到」（见 isNotAnImageError）。任一成功 → probeReady（部分失败时内容
+// 指纹为空）；全部探完且全部「不是图」→ probeNone；零成功且存在「拉不到」
+// 或总预算耗尽未探完 → probeUnavailable，reason 取第一条「拉不到」类原因，
+// 没有再取第一条失败原因。探测不写 review_assets——资产行仍由视觉运行时的
+// ensureAssets 落账，这里不按资产行计数，避免「已不在描述里的陈旧资产」被
+// 当成可用截图。
+func (s *ReviewService) probeScreenshots(ctx context.Context, installationID int64, prBody string) screenshotProbe {
+	refs := collectScreenshotURLsAt(prBody, s.githubWebHost())
 	if len(refs) == 0 {
-		return probeNone, ""
+		return screenshotProbe{result: probeNone}
 	}
 	ctx, cancel := context.WithTimeout(ctx, screenshotProbeTimeout)
 	defer cancel()
@@ -550,14 +596,34 @@ func (s *ReviewService) probeScreenshots(ctx context.Context, installationID int
 	firstFetchFailReason := ""
 	fetchFailed := false
 	completed := true
+	var contentHashes []string
 	for _, ref := range refs {
 		// 单张限时：挂死图只吃掉自己的时限，还有剩余预算就继续试下一张；
 		// 总预算吃满才放弃（剩下的引用继续探测只会继续超时，同步循环还在等）。
 		attemptCtx, cancel := context.WithTimeout(ctx, screenshotProbeAttemptTimeout)
-		_, err := s.downloadScreenshot(attemptCtx, installationID, ref.URL)
+		cached, err := s.downloadScreenshot(attemptCtx, installationID, ref.URL)
 		cancel()
 		if err == nil {
-			return probeReady, ""
+			// 每张开始哈希前检查总预算：前面的图把预算吃光时这张不再读盘
+			// （内容按未知处理），也不能给「全部不是图」的结论留口子——按
+			// 预算耗尽收敛，下轮同步事件再试。
+			if ctx.Err() != nil {
+				completed = false
+				if firstReason == "" {
+					firstReason = screenshotErrorText(ctx.Err())
+				}
+				break
+			}
+			// 下载成功只读一次盘：哈希在下载当场算，不再在末尾按路径二次
+			// 读取。读失败（磁盘异常）按该张「拉不到」处理，不当成可用图——
+			// 视觉运行时同样会栽在读文件上。
+			sum, hashErr := hashFileSHA256(cached.Path)
+			if hashErr != nil {
+				err = fmt.Errorf("%w: %v", githubmedia.ErrLocalCache, hashErr)
+			} else {
+				contentHashes = append(contentHashes, sum)
+				continue
+			}
 		}
 		text := screenshotErrorText(err)
 		if firstReason == "" {
@@ -580,13 +646,23 @@ func (s *ReviewService) probeScreenshots(ctx context.Context, installationID int
 			break
 		}
 	}
+	// 任一成功即 probeReady（优先于「拉不到」——决策要的是「能否开视觉轮」，
+	// 部分失败交给运行时的 unmeasurable 与指纹「内容未知」口径），但只有全
+	// 部成功才带内容指纹。
+	if len(contentHashes) > 0 {
+		probe := screenshotProbe{result: probeReady}
+		if len(contentHashes) == len(refs) {
+			probe.contentFP = screenshotContentFingerprintFromHashes(contentHashes)
+		}
+		return probe
+	}
 	if fetchFailed {
-		return probeUnavailable, firstFetchFailReason
+		return screenshotProbe{result: probeUnavailable, reason: firstFetchFailReason}
 	}
 	if !completed {
-		return probeUnavailable, firstReason
+		return screenshotProbe{result: probeUnavailable, reason: firstReason}
 	}
-	return probeNone, ""
+	return screenshotProbe{result: probeNone}
 }
 
 // AgentScreenshots GET /api/review-agent/screenshots：仅视觉运行可用。
@@ -641,7 +717,7 @@ func (s *ReviewService) AgentScreenshots(ctx context.Context, runID string) ([]a
 	// （URL 规整形态不同、或按旧准入本不该收的）。只把 SourceURL 仍在当前
 	// 描述收集结果里的行交给审查员，残留行不再展示。
 	currentURLs := map[string]struct{}{}
-	for _, ref := range collectScreenshotURLs(pr.Body) {
+	for _, ref := range collectScreenshotURLsAt(pr.Body, s.githubWebHost()) {
 		currentURLs[ref.URL] = struct{}{}
 	}
 	items := make([]api.ReviewAgentScreenshot, 0, len(assets))

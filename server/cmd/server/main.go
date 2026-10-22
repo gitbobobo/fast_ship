@@ -301,7 +301,11 @@ func main() {
 	// GitHub 域名白名单面；reviewMediaService 是 PR 审查截图下载面，放行
 	// 任意公网 https 图片、靠拨号时校验解析 IP 防 SSRF，不与代理共用白名单。
 	mediaProxyService := githubmedia.NewProxyService(cfg.Upload.StoragePath)
-	reviewMediaService := githubmedia.NewReviewMediaService(cfg.Upload.StoragePath)
+	// 截图下载面的凭证闸门要知道本部署的 GitHub 实例（GHE 拉私有附件）：只对
+	// 同一实例（host[:port]）的附件路径带 App 安装令牌重试，公共 GitHub 部署
+	// 下即 github.com。
+	reviewMediaService := githubmedia.NewReviewMediaService(cfg.Upload.StoragePath,
+		githubmedia.GitHubWebHost(cfg.GitHubApp.APIBaseURL))
 	// shell 订阅 hub（INT-116）：每环境常驻活跃/归档两条 WS，列表与运行态读取
 	// 从内存回答；环境重配/删除时由环境服务清 entry。这里注册停机钩子：当前
 	// main 进程没有优雅停机路径、defer 通常不会执行（进程被信号终止时由 OS

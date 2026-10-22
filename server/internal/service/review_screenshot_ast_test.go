@@ -3,7 +3,6 @@ package service
 import (
 	"context"
 	"errors"
-	"strings"
 	"testing"
 	"time"
 
@@ -180,9 +179,9 @@ func TestProbeScreenshotsClassifiesNotAnImage(t *testing.T) {
 	// 全部「不是图」→ probeNone。
 	e.media.failURLs = map[string]error{badge: githubmedia.ErrUnsupportedUpstreamMedia}
 	e.media.anonErr = githubmedia.ErrUnsupportedUpstreamMedia
-	probe, reason := review.probeScreenshots(context.Background(), 1, body)
-	if probe != probeNone {
-		t.Fatalf("probe = %v (reason %q), want probeNone（全部不是图）", probe, reason)
+	probe := review.probeScreenshots(context.Background(), 1, body)
+	if probe.result != probeNone {
+		t.Fatalf("probe = %+v, want probeNone（全部不是图）", probe)
 	}
 
 	// 混合：徽章不是图 + png 拉不到 → probeUnavailable，原因取「拉不到」。
@@ -191,12 +190,12 @@ func TestProbeScreenshotsClassifiesNotAnImage(t *testing.T) {
 		badge: githubmedia.ErrUnsupportedUpstreamMedia,
 		png:   errors.New("connection refused"),
 	}
-	probe, reason = review.probeScreenshots(context.Background(), 1, body)
-	if probe != probeUnavailable {
-		t.Fatalf("probe = %v (reason %q), want probeUnavailable（存在拉不到）", probe, reason)
+	probe = review.probeScreenshots(context.Background(), 1, body)
+	if probe.result != probeUnavailable {
+		t.Fatalf("probe = %+v, want probeUnavailable（存在拉不到）", probe)
 	}
-	if reason != "无法连接图片服务器" {
-		t.Fatalf("reason = %q, want 拉不到那条的原因", reason)
+	if probe.reason != "无法连接图片服务器" {
+		t.Fatalf("reason = %q, want 拉不到那条的原因", probe.reason)
 	}
 
 	// 形态不支持的地址（ErrInvalidMediaURL）也算「不是图」。
@@ -204,15 +203,15 @@ func TestProbeScreenshotsClassifiesNotAnImage(t *testing.T) {
 		badge: githubmedia.ErrInvalidMediaURL,
 		png:   githubmedia.ErrInvalidMediaURL,
 	}
-	probe, _ = review.probeScreenshots(context.Background(), 1, body)
-	if probe != probeNone {
-		t.Fatalf("probe = %v, want probeNone（形态不支持=不是图）", probe)
+	probe = review.probeScreenshots(context.Background(), 1, body)
+	if probe.result != probeNone {
+		t.Fatalf("probe = %+v, want probeNone（形态不支持=不是图）", probe)
 	}
 }
 
-// 沿用文案两分支：上一轮视觉通过、本轮不需要开视觉时沿用 success；「截图
-// 未变化」只在截图引用仍在且集合未变时写——描述删光了截图，改用通用沿用
-// 文案（那句话与当前 head 不符）。
+// 描述删光了截图：HasScreenshots=false → visualNone，本轮不写任何视觉状态
+// （上一轮的通过不是本 head 的结论，不能沿用——描述里已经没有截图可复核
+// 了），只把「空集合已结清」的指纹入账，同一集合后续事件不再重探。
 func TestVisualSyncCarryMessageWithoutScreenshots(t *testing.T) {
 	e := newReviewEngineEnv(t)
 	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
@@ -249,30 +248,35 @@ func TestVisualSyncCarryMessageWithoutScreenshots(t *testing.T) {
 		t.Fatalf("seed ledger: %v", err)
 	}
 
-	// 描述删光了截图：HasScreenshots=false → visualNone → 沿用 success，但
-	// 不再写「截图未变化」。
+	// 描述删光了截图：HasScreenshots=false → visualNone，不写视觉状态。
 	e.fake.SetPR(repo, 93, &githubapi.PullRequest{
 		RepoFullName: repo, Number: 93, HeadSHA: "sha-cg",
 		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature", Body: "只改了文档",
 	})
 	e.review.syncPendingPRs(now)
 
-	statuses := e.fake.StatusesForContext(reviewVisualStatusContext)
-	if len(statuses) != 1 || statuses[0].State != "success" {
-		t.Fatalf("statuses = %+v, want 一条 success（沿用上一轮）", statuses)
+	if got := e.fake.StatusesForContext(reviewVisualStatusContext); len(got) != 0 {
+		t.Fatalf("statuses = %+v, want 0（无截图不沿用上一轮结论）", got)
 	}
-	desc := statuses[0].Description
-	if !strings.Contains(desc, "审查通过（沿用上一轮）") || strings.Contains(desc, "截图未变化") {
-		t.Fatalf("status desc = %q, want 通用沿用文案（截图已删光）", desc)
+	var ledger model.ReviewPullRequest
+	e.svc.db.First(&ledger, "repo_full_name = ? AND pr_number = 93", repo)
+	if want := settledNonePrefixV2 + screenshotFingerprint(nil); ledger.VisualScreensFingerprint != want {
+		t.Fatalf("fingerprint = %q, want %q（空集合以结清态入账）", ledger.VisualScreensFingerprint, want)
 	}
 	// 没有截图引用就不探测。
 	if e.media.anonCalls != 0 {
 		t.Fatalf("anonCalls = %d, want 0（无截图不探测）", e.media.anonCalls)
 	}
+	// 同一空集合再来一次同步事件：不重复探测（结清态收敛）。
+	e.setLedgerPending(t, repo, 93)
+	e.review.syncPendingPRs(now.Add(time.Minute))
+	if e.media.anonCalls != 0 {
+		t.Fatalf("anonCalls = %d, want 0（结清态不重探）", e.media.anonCalls)
+	}
 }
 
-// 沿用文案两分支的另一路：截图引用还在但全部「不是图」（probeNone 改判
-// HasScreenshots=false）→ 同样走通用沿用文案。
+// 另一路：截图引用还在但全部「不是图」（probeNone 改判 HasScreenshots=false）
+// → 同样 visualNone 不写视觉状态，集合以结清态入账（同一批徽章地址不再重探）。
 func TestVisualSyncCarryMessageWhenAllNotImages(t *testing.T) {
 	e := newReviewEngineEnv(t)
 	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
@@ -300,7 +304,7 @@ func TestVisualSyncCarryMessageWhenAllNotImages(t *testing.T) {
 		"round_number": 2, "summary": "干净",
 		"result_json": `{"summary":"干净","findings":[],"prior":[],"ui_changed":true,"ui_changed_since_last_visual":false}`,
 	})
-	// 账本指纹是旧描述的：新描述只有徽章 → 指纹不同 → 探测真的发生。
+	// 账本指纹是旧描述的：新描述只有徽章 → 集合指纹不同 → 探测真的发生。
 	fp := screenshotFingerprint(collectScreenshotURLs(oldBody))
 	if err := e.svc.db.Create(&model.ReviewPullRequest{
 		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 94, UserID: e.user.ID,
@@ -315,19 +319,26 @@ func TestVisualSyncCarryMessageWhenAllNotImages(t *testing.T) {
 	}
 	e.review.syncPendingPRs(now)
 
-	statuses := e.fake.StatusesForContext(reviewVisualStatusContext)
-	if len(statuses) != 1 || statuses[0].State != "success" {
-		t.Fatalf("statuses = %+v, want 一条 success（全部不是图，沿用上一轮）", statuses)
+	if got := e.fake.StatusesForContext(reviewVisualStatusContext); len(got) != 0 {
+		t.Fatalf("statuses = %+v, want 0（全部不是图不开视觉轮也不沿用结论）", got)
 	}
-	desc := statuses[0].Description
-	if !strings.Contains(desc, "审查通过（沿用上一轮）") || strings.Contains(desc, "截图未变化") {
-		t.Fatalf("status desc = %q, want 通用沿用文案（全部不是图）", desc)
+	var ledger model.ReviewPullRequest
+	e.svc.db.First(&ledger, "repo_full_name = ? AND pr_number = 94", repo)
+	if want := settledNonePrefixV2 + screenshotFingerprint(collectScreenshotURLs(newBody)); ledger.VisualScreensFingerprint != want {
+		t.Fatalf("fingerprint = %q, want %q（徽章集合以结清态入账）", ledger.VisualScreensFingerprint, want)
 	}
 	var visual int64
 	e.svc.db.Model(&model.ReviewRun{}).
 		Where("kind = ? AND head_sha = ?", model.ReviewKindVisual, "sha-cm").Count(&visual)
 	if visual != 0 {
 		t.Fatalf("visual runs = %d, want 0（全部不是图不开视觉轮）", visual)
+	}
+	// 同一徽章集合再来一次同步事件：不再重探。
+	e.setLedgerPending(t, repo, 94)
+	callsBefore := e.media.anonCalls
+	e.review.syncPendingPRs(now.Add(time.Minute))
+	if e.media.anonCalls != callsBefore {
+		t.Fatalf("anonCalls %d → %d, want 结清态不重探", callsBefore, e.media.anonCalls)
 	}
 }
 
@@ -373,7 +384,7 @@ func TestVisualSyncProbeNoneSettlesFingerprint(t *testing.T) {
 		ledger.ProjectID, ledger.RepoFullName, ledger.PRNumber).Error; err != nil {
 		t.Fatalf("reload ledger: %v", err)
 	}
-	want := settledNonePrefix + screenshotFingerprint(collectScreenshotURLs(newBody))
+	want := settledNonePrefixV2 + screenshotFingerprint(collectScreenshotURLs(newBody))
 	if cur.VisualScreensFingerprint != want {
 		t.Fatalf("fingerprint = %q, want %q（全部不是图判定后以结清态入账）", cur.VisualScreensFingerprint, want)
 	}

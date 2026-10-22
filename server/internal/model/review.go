@@ -206,6 +206,10 @@ type ReviewPullRequest struct {
 	SyncPending bool   `gorm:"column:sync_pending;not null;default:false" json:"sync_pending"`
 	SyncEpoch   int    `gorm:"column:sync_epoch;not null;default:0" json:"sync_epoch"`
 	SyncError   string `gorm:"column:sync_error;type:text" json:"sync_error,omitempty"`
+	// SyncFailedEpoch 最近一次同步失败时的 epoch：等于当前 epoch 表示「同一份
+	// 快照已失败过」，调度按退避间隔再重试（新事件会推进 epoch，立即重新入队）；
+	// 成功后清零。
+	SyncFailedEpoch int `gorm:"column:sync_failed_epoch;not null;default:0" json:"sync_failed_epoch"`
 
 	UpdatedAt time.Time `gorm:"not null" json:"updated_at"`
 }

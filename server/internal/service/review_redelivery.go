@@ -2,10 +2,13 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/githubapi"
@@ -20,9 +23,20 @@ import (
 // 占 10s 调度 tick）拉投递记录、按 guid 分组并重投；复杂度收在 pkg/githubapp
 // 适配器里，本文件只做分组与决策。
 //
-// 已重投次数持久化在 github_webhook_redeliveries（重投次数账）：投递列表只
-// 保留约 3 天，原始行滑出 24h 回看窗口后从列表推导的次数会变少——可能重复
-// 重投或漏发超限通知；账丢了（被清/恢复丢失）顶多退化回列表推导的近期次数。
+// 重投前有一道「PR 实况闸门」：投递列表行没有 repo/PR 信息，只能先拉单次
+// 投递详情（GetHookDelivery）拿到 payload 定位 repo/PR，再用安装令牌实时读
+// State。payload 是投递时刻的旧快照（PR 当时写着 open），不能据此判断关闭；
+// 而本地也可能压根不知道 PR 已关（closed 投递有意不重投，收不到关闭事件），
+// 所以只能问 GitHub。已关闭/合并的 PR 重投只会白跑一轮（webhook 会受理并
+// 推进账本、取消旧运行）并在连续失败时误报「推送可能没被审查」，闸门把它
+// 记成终态后静默跳过。读不到（详情拉取失败/解析不出 PR/实时读失败）时降级
+// 为原行为照常重投——下游三道实时关卡（防抖开轮/建线程/写产出）已拦得住
+// 误开轮，这道闸门只是省白跑与误报，不能反过来漏掉真投递。
+//
+// 已重投次数与关闭终态持久化在 github_webhook_redeliveries（重投次数账）：
+// 投递列表只保留约 3 天，原始行滑出 24h 回看窗口后从列表推导的次数会变少
+// ——可能重复重投或漏发超限通知；账丢了（被清/恢复丢失）顶多退化回列表
+// 推导的近期次数。
 
 const (
 	// reviewRedeliverySweepEvery 对账频率：远低于 10s 调度 tick——投递失败是
@@ -37,6 +51,14 @@ const (
 	// reviewRedeliveryTimeout 单轮对账的兜底超时：列表 + 若干次重投的总额。
 	// 独立循环不阻塞调度，但仍要有界，避免 GitHub 半挂时无限拖。
 	reviewRedeliveryTimeout = 90 * time.Second
+	// reviewRedeliveryProbeTimeout PR 实况闸门的独立时间预算：闸门是可选校验
+	// （读不到就降级为原行为），不能把整轮时间耗在这里——否则探测超时后重投
+	// 请求会拿到已取消的 ctx，后面的真投递既不重投也不通知，与改动前相比是
+	// 退化。到点后闸门立即返回未知，剩下的时间留给重投与通知。
+	reviewRedeliveryProbeTimeout = 30 * time.Second
+	// reviewRedeliveryReserve 整轮总超时里给重投/通知预留的余量：列表页多、
+	// 探测又慢时，闸门的截止时间不能晚于「总截止 - 余量」，保证重投还有时间。
+	reviewRedeliveryReserve = 30 * time.Second
 	// reviewRedeliveryMaxPerSweep 一轮对账内最多发出的重投请求数（按「尝试」
 	// 计，失败也占名额）：到顶就停，剩余留到下一轮（5 分钟后）。不按成功计
 	// 是因为接口持续 5xx / 404 时请求同样在打 GitHub 与本服务的 webhook 入口，
@@ -59,7 +81,8 @@ type hookDeliveryState struct {
 // reconcileWebhookDeliveries 一轮投递失败对账：GitHub 发出但没送达本服务的
 // pull_request 投递（隧道超时/502）会被重投，避免一次投递失败就让这次推送
 // 永远不会被审查。节流由 redeliveryLoop 的 ticker 负责，本函数不做节流。
-// 超上限后不再重试并发站内通知。
+// 超上限后不再重试并发站内通知。循环内的判定顺序：跳过已送达 → 已判关闭
+// 静默跳过 → PR 实况闸门 → 超限通知 → 每轮重投预算 → 重投。
 func (s *ReviewService) reconcileWebhookDeliveries(now time.Time) {
 	if s.gh == nil {
 		return
@@ -115,13 +138,32 @@ func (s *ReviewService) reconcileWebhookDeliveries(now time.Time) {
 		s.logger.Error("查询本地投递幂等账失败", zap.Error(err))
 		return
 	}
-	// 重投次数账一次查全：有效次数取 max(账, 列表)——列表里 redelivery=true
+	// 重投账一次查全：有效次数取 max(账, 列表)——列表里 redelivery=true
 	// 的行数只是兜底（DB 行被清/恢复丢失时列表还能反映近期尝试），账是跨
-	// 24h 窗口的真相（原始行滑出窗口后列表推不出总次数）。
-	dbAttempts, err := s.redeliveries.AttemptsFor(s.db, guids)
+	// 24h 窗口的真相（原始行滑出窗口后列表推不出总次数）。Closed 是上一轮
+	// 闸门记下的终态：直接跳过，不再发任何查询。
+	ledger, err := s.redeliveries.StatesFor(s.db, guids)
 	if err != nil {
-		s.logger.Error("查询 webhook 重投次数账失败", zap.Error(err))
+		s.logger.Error("查询 webhook 重投账失败", zap.Error(err))
 		return
+	}
+	// PR 实况闸门的查询面：payload/PR 查询共享每轮预算（同重投上限，防一条
+	// 积压列表每轮打上百个请求），同一 repo#pr 实时读过一次后整轮复用。
+	// 闸门另有独立时间预算（probeCtx）：探测不挤占总超时，否则它会先烧完 90s
+	// 再让重投请求拿到已取消的 ctx。
+	probeBudget := reviewRedeliveryProbeTimeout
+	if deadline, ok := ctx.Deadline(); ok {
+		if remain := time.Until(deadline) - reviewRedeliveryReserve; remain < probeBudget {
+			probeBudget = remain // 列表已花掉大半总超时：给重投留余量，闸门缩到负值即停用
+		}
+	}
+	probeCtx, probeCancel := context.WithTimeout(ctx, probeBudget)
+	defer probeCancel()
+	probe := &redeliveryPRProbe{
+		hooks:    hooks,
+		client:   client,
+		budget:   reviewRedeliveryMaxPerSweep,
+		prStates: map[string]bool{},
 	}
 	tried := 0
 	for _, st := range pending {
@@ -131,7 +173,23 @@ func (s *ReviewService) reconcileWebhookDeliveries(now time.Time) {
 		if existing[st.GUID] {
 			continue // 已送达（GitHub 侧记录滞后于本地登记），不重投
 		}
-		attempts := dbAttempts[st.GUID]
+		if ledger[st.GUID].Closed {
+			continue // 已确认关闭的 PR：终态，不重投、不通知、不再查询
+		}
+		if check := s.redeliveryPRReviewable(probeCtx, probe, st.TargetID); check.Known && !check.Reviewable {
+			// PR 已关闭/合并：记终态后静默跳过——重投只会白跑一轮（webhook
+			// 会照常受理并在连续失败时误报故障通知）。记账失败只留日志，
+			// 不影响其它组（下一轮重查同一条，顶多重复一次）。
+			if err := s.redeliveries.RecordClosed(s.db, st.GUID, time.Now().UTC()); err != nil {
+				s.logger.Error("记录投递终态失败",
+					zap.String("guid", st.GUID), zap.Error(err))
+			}
+			s.logger.Info("投递指向的 PR 已关闭，跳过重投",
+				zap.String("guid", st.GUID), zap.Int64("delivery", st.TargetID),
+				zap.String("repo", check.Repo), zap.Int("pr", check.Number))
+			continue
+		}
+		attempts := ledger[st.GUID].Attempts
 		if st.Attempts > attempts {
 			attempts = st.Attempts
 		}
@@ -193,6 +251,91 @@ func (s *ReviewService) notifyRedeliveryExhausted(userIDs []string, st hookDeliv
 			s.logger.Warn("投递重投失败通知写入失败", zap.String("user", userID), zap.Error(err))
 		}
 	}
+}
+
+// errRedeliveryProbeBudget 一轮内闸门查询预算用完：按设计降级（known=false
+// 照常重投），不是故障，调用方不按 Warn 处理。
+var errRedeliveryProbeBudget = errors.New("重投闸门查询预算已用完")
+
+// redeliveryPRProbe 一轮对账内 PR 实况闸门的查询面：GetHookDelivery（定位
+// 投递指向的 PR）与缓存未命中的 GetPullRequest（实时读 State）共享每轮次数
+// 预算（独立于重投请求的 20 次上限），防一条积压列表每轮打上百个请求；同一
+// repo#pr 读到一次后整轮复用。
+type redeliveryPRProbe struct {
+	hooks    githubapp.HookDeliveries
+	client   githubapi.GitHubClient
+	budget   int
+	prStates map[string]bool // repo#number -> PR 实时可审
+}
+
+// redeliveryPRCheck 一次闸门判定的结果。Known=false 表示读不到（payload 拉取
+// 失败/解析不出 PR/实时读失败/预算耗尽），调用方降级为原行为照常重投。
+type redeliveryPRCheck struct {
+	Known      bool
+	Reviewable bool
+	Repo       string
+	Number     int
+}
+
+// redeliveryPRReviewable 重投前的 PR 实况闸门：确认投递指向的 PR 仍开着。
+// 读不到时只记 Warn（含投递 id 与原因，不打 payload 全文——里面是仓库内容）
+// 并按未知处理。闸门预算/时间用完是设计内的降级，不当故障记。
+func (s *ReviewService) redeliveryPRReviewable(ctx context.Context, probe *redeliveryPRProbe, deliveryID int64) redeliveryPRCheck {
+	check, err := probe.lookup(ctx, deliveryID)
+	if err != nil && !errors.Is(err, errRedeliveryProbeBudget) &&
+		!errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+		s.logger.Warn("重投闸门无法确认投递指向的 PR 实况，降级为照常重投",
+			zap.Int64("delivery", deliveryID), zap.Error(err))
+	}
+	return check
+}
+
+// lookup 取投递详情、定位其 PR 并实时读 State。每次 GetHookDelivery、每次
+// 缓存未命中的 GetPullRequest 各占一个预算名额（被拒的请求同样打到了
+// GitHub，与重投预算同口径）；只缓存读到的状态，失败不缓存——预算兜住
+// 总量，后续投递仍可重试。
+func (p *redeliveryPRProbe) lookup(ctx context.Context, deliveryID int64) (redeliveryPRCheck, error) {
+	// 闸门自己的时间预算已经用完：不再发请求，直接按未知降级（调用方还有
+	// 正常的总超时 context 可用）。
+	if err := ctx.Err(); err != nil {
+		return redeliveryPRCheck{}, err
+	}
+	if p.budget <= 0 {
+		return redeliveryPRCheck{}, errRedeliveryProbeBudget
+	}
+	p.budget--
+	detail, err := p.hooks.GetHookDelivery(ctx, deliveryID)
+	if err != nil {
+		return redeliveryPRCheck{}, err
+	}
+	var payload prWebhookPayload
+	if err := json.Unmarshal(detail.Payload, &payload); err != nil {
+		return redeliveryPRCheck{}, fmt.Errorf("解析投递 payload: %w", err)
+	}
+	check := redeliveryPRCheck{
+		Repo:   strings.ToLower(payload.Repository.FullName),
+		Number: payload.Number,
+	}
+	if payload.Number <= 0 || payload.Repository.FullName == "" || payload.Installation.ID == 0 {
+		return check, errors.New("投递 payload 缺少 repo/PR/installation 字段")
+	}
+	key := check.Repo + "#" + strconv.Itoa(check.Number)
+	if reviewable, ok := p.prStates[key]; ok {
+		check.Known, check.Reviewable = true, reviewable
+		return check, nil
+	}
+	if p.budget <= 0 {
+		return check, errRedeliveryProbeBudget
+	}
+	p.budget--
+	pr, err := p.client.GetPullRequest(ctx, payload.Installation.ID, payload.Repository.FullName, payload.Number)
+	if err != nil {
+		return check, err
+	}
+	reviewable := prReviewable(pr)
+	p.prStates[key] = reviewable
+	check.Known, check.Reviewable = true, reviewable
+	return check, nil
 }
 
 // groupHookDeliveries 把投递行按 guid 汇总：只处理 pull_request 事件里会开轮

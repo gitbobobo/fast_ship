@@ -27,14 +27,6 @@ func (r *BotMessageRepository) MaxSeq(botID string) (int64, error) {
 	return seq, err
 }
 
-// MaxSeqTx 同 MaxSeq，供事务闭包内的最终一致性检查使用。
-func (r *BotMessageRepository) MaxSeqTx(tx *gorm.DB, botID string) (int64, error) {
-	var seq int64
-	err := tx.Model(&model.BotMessage{}).Where("bot_id = ?", botID).
-		Select("COALESCE(MAX(seq), 0)").Scan(&seq).Error
-	return seq, err
-}
-
 // botInputKinds 是会话内算「新输入」的消息类别：user / background_result /
 // schedule_event（定时任务事件只出现在主线会话）。
 func botInputKinds() []model.BotMessageKind {
@@ -102,11 +94,6 @@ func (r *BotMessageRepository) ListMainline(botID string, before, after int64, l
 	return rows, nil
 }
 
-// ListAfterSeq 重放用：返回主线 seq 大于 after 的全部后续消息（正序）。
-func (r *BotMessageRepository) ListAfterSeq(botID string, after int64, limit int) ([]model.BotMessage, error) {
-	return r.ListSeqRange(botID, model.BotSessionKindMain, "", after, 0, limit)
-}
-
 // ListSeqRange 按会话与 seq 正序取 (after, through]；through<=0 表示无上界，
 // runID 非空时再限定单次运行（定时任务会话按 run 隔离投影）。压缩与构建按
 // 页读取，避免滑窗截掉尚未摘要的历史。
@@ -141,22 +128,6 @@ func (r *BotMessageRepository) FindByDedupKey(botID, dedupKey string) (*model.Bo
 		return nil, err
 	}
 	return &row, nil
-}
-
-// ListByCall 返回某次调用的全部关联消息（回执、结果、决定）。
-func (r *BotMessageRepository) ListByCall(botID, callID string) ([]model.BotMessage, error) {
-	var rows []model.BotMessage
-	err := r.db.Where("bot_id = ? AND call_id = ?", botID, callID).
-		Order("seq ASC").Find(&rows).Error
-	return rows, err
-}
-
-// ListByRun 返回 run 的全部消息。
-func (r *BotMessageRepository) ListByRun(botID, runID string) ([]model.BotMessage, error) {
-	var rows []model.BotMessage
-	err := r.db.Where("bot_id = ? AND run_id = ?", botID, runID).
-		Order("seq ASC").Find(&rows).Error
-	return rows, err
 }
 
 // LastAssistantOfRun 返回 run 内最后一条 assistant 消息；没有返回

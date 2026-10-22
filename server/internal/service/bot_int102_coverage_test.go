@@ -141,15 +141,6 @@ func countMainModelRequests(db *gorm.DB, botID string) int {
 	return int(n)
 }
 
-func contentForEstimate(want int64) string {
-	for n := 1; n < 500000; n++ {
-		if botEstimateBytes(int64(n)) == want {
-			return strings.Repeat("a", n)
-		}
-	}
-	return strings.Repeat("a", int(want)*4)
-}
-
 // ---------- 压缩主路径 ----------
 
 func writeFakeChatSSE(w http.ResponseWriter, text string) {

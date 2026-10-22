@@ -90,12 +90,5 @@ func (r *BotContextRepository) CreateCompactionTx(tx *gorm.DB, row *model.BotCom
 	return tx.Create(row).Error
 }
 
-// ListCompactionsByBot 列出压缩记录（时间倒序，排查用）。
-func (r *BotContextRepository) ListCompactionsByBot(botID string, limit int) ([]model.BotCompaction, error) {
-	var rows []model.BotCompaction
-	err := r.db.Where("bot_id = ?", botID).Order("created_at DESC").Limit(limit).Find(&rows).Error
-	return rows, err
-}
-
 // ErrContextGenerationConflict 投影发布 CAS 落空（并发发布或已被推进）。
 var ErrContextGenerationConflict = errors.New("bot context generation conflict")
