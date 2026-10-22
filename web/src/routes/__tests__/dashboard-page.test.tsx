@@ -30,6 +30,79 @@ describe("DashboardPage", () => {
     vi.clearAllMocks();
   });
 
+  function dailyResolvedWith(resolvedByIndex: Record<number, number>) {
+    return Array.from({ length: 30 }, (_, index) => ({
+      date: `2026-05-${String(index + 1).padStart(2, "0")}`,
+      resolved_count: resolvedByIndex[index] ?? 0,
+      projects: resolvedByIndex[index]
+        ? [
+            {
+              project_id: "p1",
+              project_name: "Alpha App",
+              count: resolvedByIndex[index],
+            },
+          ]
+        : [],
+    }));
+  }
+
+  it("marks an improving trend and avoids rounding a tiny average to 0.0", async () => {
+    vi.mocked(useDashboardOverview).mockReturnValue({
+      data: {
+        open_issues_by_project: [
+          { project_id: "p1", project_name: "Alpha App", open_issue_count: 0 },
+        ],
+        // 最近 7 天解决 1 条，上一个 7 天为 0。
+        daily_resolved: dailyResolvedWith({ 29: 1 }),
+      },
+      isLoading: false,
+    } as unknown as ReturnType<typeof useDashboardOverview>);
+
+    await renderDashboardPage();
+
+    expect(
+      screen.getByRole("img", { name: "最近 7 天解决数高于前 7 天" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("日均 <0.1")).toBeInTheDocument();
+  });
+
+  it("marks a declining trend when the previous week had more resolved issues", async () => {
+    vi.mocked(useDashboardOverview).mockReturnValue({
+      data: {
+        open_issues_by_project: [
+          { project_id: "p1", project_name: "Alpha App", open_issue_count: 0 },
+        ],
+        // 上一个 7 天（index 16-22）解决 2 条，最近 7 天为 0。
+        daily_resolved: dailyResolvedWith({ 20: 2 }),
+      },
+      isLoading: false,
+    } as unknown as ReturnType<typeof useDashboardOverview>);
+
+    await renderDashboardPage();
+
+    expect(
+      screen.getByRole("img", { name: "最近 7 天解决数低于前 7 天" }),
+    ).toBeInTheDocument();
+  });
+
+  it("marks a flat trend when both weeks resolved the same number", async () => {
+    vi.mocked(useDashboardOverview).mockReturnValue({
+      data: {
+        open_issues_by_project: [
+          { project_id: "p1", project_name: "Alpha App", open_issue_count: 0 },
+        ],
+        daily_resolved: dailyResolvedWith({ 20: 1, 29: 1 }),
+      },
+      isLoading: false,
+    } as unknown as ReturnType<typeof useDashboardOverview>);
+
+    await renderDashboardPage();
+
+    expect(
+      screen.getByRole("img", { name: "最近 7 天解决数与前 7 天持平" }),
+    ).toBeInTheDocument();
+  });
+
   it("renders open-issue and 30-day resolved chart sections", async () => {
     vi.mocked(useDashboardOverview).mockReturnValue({
       data: {

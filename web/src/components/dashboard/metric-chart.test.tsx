@@ -12,7 +12,7 @@ describe("MetricChart", () => {
   });
 
   it("keeps zero-valued project rows visible instead of an empty state", () => {
-    render(
+    const { container } = render(
       <MetricChart
         points={[
           { id: "p1", label: "Alpha", value: 0 },
@@ -27,6 +27,23 @@ describe("MetricChart", () => {
     expect(screen.queryByText("暂无已配置项目")).not.toBeInTheDocument();
     expect(screen.getByText("Alpha")).toBeInTheDocument();
     expect(screen.getByText("Beta")).toBeInTheDocument();
+    // 值为 0 时不留填充段，避免被误读成「有少量进度」。
+    expect(container.querySelectorAll('[class*="bg-primary/"]')).toHaveLength(0);
+  });
+
+  it("draws a fill only for rows with a positive value", () => {
+    const { container } = render(
+      <MetricChart
+        points={[
+          { id: "p1", label: "Alpha", value: 0 },
+          { id: "p2", label: "Beta", value: 3 },
+        ]}
+        variant="bar"
+        emptyMessage="暂无已配置项目"
+      />,
+    );
+
+    expect(container.querySelectorAll('[class*="bg-primary/"]')).toHaveLength(1);
   });
 
   it("shows only the empty state when the 30-day series is all zeros", () => {
@@ -49,21 +66,53 @@ describe("MetricChart", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("uses distinct integer axis ticks when the daily maximum is 1", () => {
-    render(
+  it("scales the axis to two integer ticks when the maximum is 1 or 2", () => {
+    const renderWithMax = (max: number) => {
+      const { unmount } = render(
+        <MetricChart
+          points={[
+            {
+              label: "2026-05-11",
+              shortLabel: "05-11",
+              value: max,
+              series: [{ id: "p1", name: "Alpha", value: max }],
+            },
+            {
+              label: "2026-05-12",
+              shortLabel: "05-12",
+              value: 0,
+              series: [],
+            },
+          ]}
+          variant="area"
+          emptyMessage="暂无已解决问题数据"
+        />,
+      );
+      return unmount;
+    };
+
+    for (const max of [1, 2]) {
+      const unmount = renderWithMax(max);
+      expect(
+        screen.getByRole("img", { name: "stacked area chart" }),
+      ).toBeInTheDocument();
+      for (const tick of ["0", "1", "2"]) {
+        expect(screen.getAllByText(tick)).toHaveLength(1);
+      }
+      expect(screen.queryByText("4")).not.toBeInTheDocument();
+      unmount();
+    }
+  });
+
+  it("uses a four-interval integer ladder for larger maximums", () => {
+    const { unmount } = render(
       <MetricChart
         points={[
           {
             label: "2026-05-11",
             shortLabel: "05-11",
-            value: 1,
-            series: [{ id: "p1", name: "Alpha", value: 1 }],
-          },
-          {
-            label: "2026-05-12",
-            shortLabel: "05-12",
-            value: 0,
-            series: [],
+            value: 5,
+            series: [{ id: "p1", name: "Alpha", value: 5 }],
           },
         ]}
         variant="area"
@@ -71,11 +120,10 @@ describe("MetricChart", () => {
       />,
     );
 
-    expect(
-      screen.getByRole("img", { name: "stacked area chart" }),
-    ).toBeInTheDocument();
-    for (const tick of ["0", "1", "2", "3", "4"]) {
+    for (const tick of ["0", "2", "4", "6", "8"]) {
       expect(screen.getAllByText(tick)).toHaveLength(1);
     }
+    expect(screen.queryByText("10")).not.toBeInTheDocument();
+    unmount();
   });
 });

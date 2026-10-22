@@ -137,7 +137,6 @@ function HorizontalBarChart({
       {points.map((point, index) => {
         const ratio = point.value / chartMax;
         const isHovered = hoveredIndex === index;
-        const isBarEmpty = chartMax <= 1 && point.value === 0;
 
         return (
           <div
@@ -159,7 +158,8 @@ function HorizontalBarChart({
                 className="relative overflow-hidden rounded-full bg-muted/60 transition-all duration-500"
                 style={{ height: barHeight }}
               >
-                {!isBarEmpty && (
+                {/* 值为 0 时只留空轨道：画一段短灰条会被误读成「有少量进度」。 */}
+                {point.value > 0 && (
                   <div
                     className={cn(
                       "absolute left-0 top-0 h-full rounded-full transition-all duration-500 ease-out",
@@ -171,11 +171,6 @@ function HorizontalBarChart({
                     }}
                   >
                     <div className="absolute inset-0 -translate-x-full animate-[shimmer_2s_infinite] bg-gradient-to-r from-transparent via-white/20 to-transparent" />
-                  </div>
-                )}
-                {isBarEmpty && (
-                  <div className="flex h-full items-center px-3">
-                    <span className="h-1.5 w-8 rounded-full bg-muted-foreground/15" />
                   </div>
                 )}
               </div>
@@ -260,9 +255,11 @@ function StackedAreaChart({
   }, [points, seriesMeta]);
 
   const maxTotal = Math.max(...stackedData.map((d) => d.total), 0);
-  // 纵轴按整数阶梯取整（每档至少 1），避免全 0 或最大值很小时出现 1、1、1、0、0 这种重复刻度。
-  const tickStep = Math.max(Math.ceil(maxTotal / 4), 1);
-  const chartMax = tickStep * 4;
+  // 纵轴用整数阶梯：最大值较小时只分两档（0/1/2），峰値不至于只占四分之一高；
+  // 其余情况分四档，每档至少 1，避免出现 1、1、1、0、0 这种重复刻度。
+  const tickIntervals = maxTotal <= 2 ? 2 : 4;
+  const tickStep = Math.max(Math.ceil(maxTotal / tickIntervals), 1);
+  const chartMax = tickStep * tickIntervals;
   const isEmpty = points.length === 0 || maxTotal === 0;
 
   const safeData = stackedData.length === 1
@@ -311,8 +308,8 @@ function StackedAreaChart({
   }, [coordinates, seriesMeta]);
 
   // Grid lines
-  const gridLines = [0, 1, 2, 3, 4].map((index) => ({
-    y: SVG_HEIGHT - SVG_PADDING_Y - (plotHeight * index) / 4,
+  const gridLines = Array.from({ length: tickIntervals + 1 }, (_, index) => ({
+    y: SVG_HEIGHT - SVG_PADDING_Y - (plotHeight * index) / tickIntervals,
     value: tickStep * index,
   }));
 
@@ -394,7 +391,7 @@ function StackedAreaChart({
               x={SVG_PADDING_X - 8}
               y={line.y + 4}
               textAnchor="end"
-              className="fill-muted-foreground text-[10px]"
+              className="fill-muted-foreground text-[11px]"
             >
               {line.value}
             </text>
@@ -441,7 +438,7 @@ function StackedAreaChart({
       </svg>
 
       {/* X-axis labels */}
-      <div className="mt-1 flex flex-wrap items-center justify-between gap-x-2 gap-y-1 px-10 text-[10px] text-muted-foreground">
+      <div className="mt-1 flex flex-wrap items-center justify-between gap-x-2 gap-y-1 px-10 text-[11px] text-muted-foreground">
         {points
           .filter((_, index) => index % labelStride === 0 || index === points.length - 1)
           .map((point, index) => (

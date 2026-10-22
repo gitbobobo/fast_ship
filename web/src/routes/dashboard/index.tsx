@@ -4,6 +4,7 @@ import {
   Bug,
   CalendarDays,
   FolderKanban,
+  Minus,
   Plus,
   TrendingDown,
   TrendingUp,
@@ -24,6 +25,14 @@ import { cn } from "@/lib/utils";
 function formatDateLabel(date: string) {
   return date.slice(5);
 }
+
+/** 日均数量小于 0.1 时保留「有数据」的语义，不要四舍五入成 0.0。 */
+function formatDailyAverage(value: number) {
+  if (value > 0 && value < 0.1) return "<0.1";
+  return value.toFixed(1);
+}
+
+const TREND_WINDOW_DAYS = 7;
 
 function formatDate() {
   const now = new Date();
@@ -96,6 +105,20 @@ export default function DashboardPage() {
     if (!data?.daily_resolved.length) return 0;
     return totalResolvedIssues / data.daily_resolved.length;
   }, [data, totalResolvedIssues]);
+
+  // 趋势只比较「最近 7 天」与「上一个 7 天」；没有上一周期数据时不判定方向，
+  // 避免刚有一条记录就被当成「在变差」。
+  const resolvedTrend = useMemo<"up" | "down" | "flat" | null>(() => {
+    const days = data?.daily_resolved ?? [];
+    if (days.length < TREND_WINDOW_DAYS * 2) return null;
+    const sum = (points: typeof days) =>
+      points.reduce((total, point) => total + point.resolved_count, 0);
+    const recent = sum(days.slice(-TREND_WINDOW_DAYS));
+    const previous = sum(days.slice(-TREND_WINDOW_DAYS * 2, -TREND_WINDOW_DAYS));
+    if (recent === 0 && previous === 0) return null;
+    if (recent === previous) return "flat";
+    return recent > previous ? "up" : "down";
+  }, [data]);
 
   return (
     <div className="flex min-h-full flex-col bg-background">
@@ -187,13 +210,29 @@ export default function DashboardPage() {
                 </div>
                 {!isLoading && totalResolvedIssues > 0 && (
                   <div className="flex items-center gap-1.5">
-                    {avgDailyResolved >= (maxDailyResolved || 1) * 0.5 ? (
-                      <TrendingUp className="h-3.5 w-3.5 text-emerald-500" />
-                    ) : (
-                      <TrendingDown className="h-3.5 w-3.5 text-amber-500" />
+                    {resolvedTrend === "up" && (
+                      <TrendingUp
+                        role="img"
+                        aria-label="最近 7 天解决数高于前 7 天"
+                        className="h-3.5 w-3.5 text-emerald-500"
+                      />
+                    )}
+                    {resolvedTrend === "down" && (
+                      <TrendingDown
+                        role="img"
+                        aria-label="最近 7 天解决数低于前 7 天"
+                        className="h-3.5 w-3.5 text-amber-500"
+                      />
+                    )}
+                    {resolvedTrend === "flat" && (
+                      <Minus
+                        role="img"
+                        aria-label="最近 7 天解决数与前 7 天持平"
+                        className="h-3.5 w-3.5 text-muted-foreground"
+                      />
                     )}
                     <span className="text-xs font-medium text-muted-foreground">
-                      日均 {avgDailyResolved.toFixed(1)}
+                      日均 {formatDailyAverage(avgDailyResolved)}
                     </span>
                   </div>
                 )}
@@ -219,7 +258,7 @@ export default function DashboardPage() {
           />
           <StatPill
             label="日均解决"
-            value={isLoading ? "—" : avgDailyResolved.toFixed(1)}
+            value={isLoading ? "—" : formatDailyAverage(avgDailyResolved)}
           />
           <StatPill
             label="活跃项目"
