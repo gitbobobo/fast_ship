@@ -229,6 +229,9 @@ describe("BotMetrics", () => {
     expect(formatCostEstimate(0.00000012)).toBe("$1.2e-7");
     // 显式零价是真实 $0，不能落进科学计数法分支渲染成 $0.0e+0（云端复审）。
     expect(formatCostEstimate(0)).toBe("$0");
+    // 分位段剥尾零：$0.5000 → $0.5（云端复审），非整段保留四位小数。
+    expect(formatCostEstimate(0.5)).toBe("$0.5");
+    expect(formatCostEstimate(0.0123)).toBe("$0.0123");
   });
 
   it("cost_estimate 为 null 时不渲染成本项（缺失 ≠ 0）", () => {

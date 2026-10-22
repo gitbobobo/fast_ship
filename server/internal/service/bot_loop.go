@@ -805,6 +805,7 @@ func (s *BotService) finishModelRequest(row *model.BotModelRequest, reply *botMo
 	// 照样计费，只挂在成功分支会让已付费用量整段消失（INT-139 复审）。
 	// run 的 token 总量仍只累计成功请求（「会话实际消费」口径），但
 	// cost_estimate 按「已计价请求」累计——含本处送过 usage 的失败尝试。
+	var priced *float64
 	if row != nil && reply != nil {
 		// provider_request_id 也是上游接触证据（chunk 必带 id）：纯工具
 		// 调用流失败后无正文首段、无 usage，id 是唯一残留的触达痕迹
@@ -820,18 +821,8 @@ func (s *BotService) finishModelRequest(row *model.BotModelRequest, reply *botMo
 			if usd, ok := botRequestCost(run, bot, reply); ok {
 				cols["cost_estimate"] = usd
 				cols["cost_source"] = botCostSourceCatalog
-				row.CostEstimate = &usd
-				src := botCostSourceCatalog
-				row.CostSource = &src
+				priced = &usd
 			}
-		}
-		// 已计价的失败请求同样计进 run 成本——run.cost_estimate 的契约是
-		// 「已计价请求的累计」，上游送过 usage 的失败尝试照样计费
-		// （INT-139 云端复审）。token 总量不累计：run token 口径仍是
-		// 「会话实际消费」的成功量，重试的成功尝试不得与前半截重复计数。
-		if streamErr != nil && row.CostEstimate != nil {
-			run.CostEstimate = addToFloatPtr(run.CostEstimate, *row.CostEstimate)
-			run.CostSource = row.CostSource
 		}
 	}
 	if row == nil {
@@ -839,6 +830,20 @@ func (s *BotService) finishModelRequest(row *model.BotModelRequest, reply *botMo
 	}
 	if _, err := s.requests.UpdateColumns(row.ID, nil, cols); err != nil {
 		s.logger.Warn("落模型请求终态失败", zap.String("request_id", row.ID), zap.Error(err))
+		return
+	}
+	// 内存行回写与 run 累计必须在 UPDATE 成功之后（INT-139 云端复审）：
+	// 落库失败时两处口径同为 NULL，不得让 run 记进一条请求行上并不
+	// 存在的成本。成功路径的 run 累计在调用方 accumulateRunUsage 读取
+	// 本回写；失败路径在此直接把已计价成本并进 run 总账。
+	if priced != nil {
+		row.CostEstimate = priced
+		src := botCostSourceCatalog
+		row.CostSource = &src
+		if streamErr != nil {
+			run.CostEstimate = addToFloatPtr(run.CostEstimate, *priced)
+			run.CostSource = row.CostSource
+		}
 	}
 }
 

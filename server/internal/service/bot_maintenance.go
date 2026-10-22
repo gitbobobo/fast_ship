@@ -120,6 +120,10 @@ func (s *BotService) auxModelRequest(ctx context.Context, bot *model.Bot, maintR
 		cols["error_message"] = botErrMessage(callErr)
 	} else {
 		cols["status"] = model.BotModelRequestSucceeded
+	}
+	// provider_request_id 与成败无关（INT-139 云端复审，与 finishModelRequest
+	// 同口径）：上游回过 chunk 就有 id 残迹，失败分支同样落。
+	if reply != nil && reply.ProviderRequestID != "" {
 		cols["provider_request_id"] = reply.ProviderRequestID
 	}
 	// usage 与成本是计费事实、与成败无关：usage 送达后断流的请求照样计费

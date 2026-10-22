@@ -158,7 +158,11 @@ run 入口的 `activateBotPrompt` 在一个短事务里读行、
 被跳过、热度回看更早的真实请求——上游从未处理过的前缀没有缓存可保。
 `first_delta_at` 与 `provider_request_id` 在失败分支同样落库（流过
 半截正文后失败仍算触达上游；纯工具调用流没有正文首段与 usage，chunk
-带回的 `provider_request_id` 是唯一的触达残迹）。
+带回的 `provider_request_id` 是唯一的触达残迹）。**存量数据窗口**：
+本改动前落库的失败行不写这三列，升级后首个保留窗口内它们一律按
+「未触达」处理——可能把仍热的缓存误判为冷而提前激活一次（多作废一次
+缓存，保守方向）；窗口过后新行带齐证据，自愈，无需回填（存量行也无从
+分辨是否真触达过上游）。
 候选行排序按上游实际接触时刻 `COALESCE(finished_at, started_at)`（
 `server_restarted` 的 finished_at 是恢复记账时刻、回退 started_at），
 与热度判定同源——更早开始但刚结束的热请求不会被更晚开始的冷请求盖过。
