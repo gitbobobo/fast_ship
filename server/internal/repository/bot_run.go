@@ -273,6 +273,24 @@ func (r *BotModelRequestRepository) LatestMainByBot(botID string) (*model.BotMod
 	return &row, nil
 }
 
+// LatestMainUpstreamByBot 返回最新一条「真正触达上游」的主线请求
+// （INT-139 云端复审）：本地失败的行（failed 且无首段、无 usage——上游
+// 根本没处理这段前缀）不计入前缀缓存热度，否则一条 transport 失败的
+// 残留行会把激活推迟盖在并不存在的缓存上。没有返回 gorm.ErrRecordNotFound。
+func (r *BotModelRequestRepository) LatestMainUpstreamByBot(botID string) (*model.BotModelRequest, error) {
+	var row model.BotModelRequest
+	err := r.db.Joins("JOIN bot_runs ON bot_runs.id = bot_model_requests.run_id").
+		Where("bot_runs.bot_id = ? AND bot_runs.session_kind = ?", botID, model.BotSessionKindMain).
+		Where("NOT (bot_model_requests.status = ? AND bot_model_requests.first_delta_at IS NULL AND bot_model_requests.prompt_tokens IS NULL)",
+			model.BotModelRequestFailed).
+		Order("bot_model_requests.started_at DESC, bot_model_requests.ordinal DESC").
+		First(&row).Error
+	if err != nil {
+		return nil, err
+	}
+	return &row, nil
+}
+
 // BotEventRepository 是 SSE 持久重放账本的仓库：只追加、按 seq 读取。
 type BotEventRepository struct {
 	db *gorm.DB

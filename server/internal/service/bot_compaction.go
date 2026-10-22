@@ -1701,7 +1701,7 @@ func (s *BotService) finishMaintenanceRunTx(tx *gorm.DB, maintRun *model.BotMain
 // 重写不再浪费命中）。仍在窗口内返回 false = 推迟到下一个压缩边界。查询失败
 // 按可激活处理——激活只是少命中缓存，查询坏掉时推迟会让升级永远排不上。
 func (s *BotService) mainlinePrefixCacheExpired(botID string) bool {
-	last, err := s.requests.LatestMainByBot(botID)
+	last, err := s.requests.LatestMainUpstreamByBot(botID)
 	if err != nil {
 		return true
 	}

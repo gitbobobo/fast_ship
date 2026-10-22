@@ -227,6 +227,8 @@ describe("BotMetrics", () => {
     expect(formatCostEstimate(0.023456)).toBe("$0.0235");
     expect(formatCostEstimate(0.0000336)).toBe("$3.4e-5");
     expect(formatCostEstimate(0.00000012)).toBe("$1.2e-7");
+    // 显式零价是真实 $0，不能落进科学计数法分支渲染成 $0.0e+0（云端复审）。
+    expect(formatCostEstimate(0)).toBe("$0");
   });
 
   it("cost_estimate 为 null 时不渲染成本项（缺失 ≠ 0）", () => {

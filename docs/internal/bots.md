@@ -150,7 +150,12 @@ run 入口的 `activateBotPrompt` 在一个短事务里读行、
 前缀缓存——最近一次主线模型请求距今未超
 `bots.runtime.prompt_cache_retain_minutes`（默认 10 分钟，`mainlinePrefixCacheExpired`
 判）就推迟到下一个压缩边界，全新机器人（无主线请求）或窗口外的请求照常入口
-激活。**推迟本身封顶一个保留窗口**：首次推迟给行落
+激活。「最近一次请求」的口径是**真正触达上游**的请求
+（`LatestMainUpstreamByBot`）：`failed` 且既无 `first_delta_at` 也无
+`prompt_tokens` 的本地失败行（transport 失败、认证/限流被上游拒于入口等）
+被跳过、热度回看更早的真实请求——上游从未处理过的前缀没有缓存可保。
+panic 残留行（`running` + `finished_at=nil`）不受此过滤：请求可能已发出，
+按 `started_at` 保守兜底、且推迟本身有上限。**推迟本身封顶一个保留窗口**：首次推迟给行落
 `activation_deferred_at`，距起点满一个窗口仍未等到压缩边界时强制入口
 激活并清掉标记（`ActivateToolsetTx` 同事务清空）——持续活跃不压缩的
 会话不会把升级与「下一个压缩点生效」的承诺无限推迟。定时任务会话独立、

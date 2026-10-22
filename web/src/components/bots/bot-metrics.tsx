@@ -26,6 +26,9 @@ function formatSpeed(tokensPerSecond: number): string {
  * 非空数字的展示。
  */
 export function formatCostEstimate(usd: number): string {
+  // 显式零价（目录里 500+ 免费模型）是真实 $0，不是缺失——先拦下，
+  // 否则 0 会落到科学计数法分支渲染成 $0.0e+0。
+  if (usd <= 0) return "$0";
   if (usd >= 1) return `$${usd.toFixed(2)}`;
   if (usd >= 0.01) return `$${usd.toFixed(4)}`;
   if (usd >= 0.001) return `$${usd.toPrecision(2)}`;

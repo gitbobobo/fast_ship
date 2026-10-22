@@ -246,7 +246,9 @@ func TestMainlinePrefixCacheExpiredUnfinishedLeftover(t *testing.T) {
 	env := setupBotTestEnv(t)
 	userID := createBotTestUser(t, env.db, "r11nil")
 
-	seedRaw := func(botID string, startedAt time.Time, finishedAt *time.Time, errCode string) {
+	// panic 残留行的真实形状是 running + finished_at=nil（finishRunAfterPanic
+	// 只关 run，不关请求行）；server_restarted 由恢复流程落成 failed。
+	seedRaw := func(botID string, status model.BotModelRequestStatus, startedAt time.Time, finishedAt *time.Time, errCode string) {
 		run := &model.BotRun{
 			ID: uuid.NewString(), BotID: botID,
 			TriggerSource: model.BotTriggerUserMessage, TriggerKey: "r11r-" + uuid.NewString(),
@@ -258,7 +260,7 @@ func TestMainlinePrefixCacheExpiredUnfinishedLeftover(t *testing.T) {
 		}
 		req := &model.BotModelRequest{
 			ID: uuid.NewString(), RunID: run.ID, Ordinal: 1,
-			Status: model.BotModelRequestFailed, StartedAt: startedAt, FinishedAt: finishedAt,
+			Status: status, StartedAt: startedAt, FinishedAt: finishedAt,
 			PrefixHash: "x", ToolsHash: "x", RequestHash: "x", TokenEstimator: "chars/4",
 		}
 		if errCode != "" {
@@ -273,13 +275,13 @@ func TestMainlinePrefixCacheExpiredUnfinishedLeftover(t *testing.T) {
 
 	// panic 残留的未完成行：started_at 在窗口外 → 可激活。
 	staleLeftover := env.createBot(t, userID)
-	seedRaw(staleLeftover.ID, time.Now().UTC().Add(-retain-time.Minute), nil, "")
+	seedRaw(staleLeftover.ID, model.BotModelRequestRunning, time.Now().UTC().Add(-retain-time.Minute), nil, "")
 	if !env.bots.mainlinePrefixCacheExpired(staleLeftover.ID) {
 		t.Fatalf("残留的未完成行不得无限推迟激活")
 	}
 	// 残留行的 started_at 仍在窗口内 → 推迟（上游刚被联系过）。
 	freshLeftover := env.createBot(t, userID)
-	seedRaw(freshLeftover.ID, time.Now().UTC(), nil, "")
+	seedRaw(freshLeftover.ID, model.BotModelRequestRunning, time.Now().UTC(), nil, "")
 	if env.bots.mainlinePrefixCacheExpired(freshLeftover.ID) {
 		t.Fatalf("最近启动的请求残留仍应判为缓存热")
 	}
@@ -287,9 +289,66 @@ func TestMainlinePrefixCacheExpiredUnfinishedLeftover(t *testing.T) {
 	// 新 finished_at 不得把中断很久的请求误判成刚热。
 	restarted := env.createBot(t, userID)
 	recentFinish := time.Now().UTC()
-	seedRaw(restarted.ID, time.Now().UTC().Add(-retain-time.Minute), &recentFinish, "server_restarted")
+	seedRaw(restarted.ID, model.BotModelRequestFailed, time.Now().UTC().Add(-retain-time.Minute), &recentFinish, "server_restarted")
 	if !env.bots.mainlinePrefixCacheExpired(restarted.ID) {
 		t.Fatalf("server_restarted 记账时刻不得被当作上游活动时间")
+	}
+}
+
+// 本地失败的请求行（failed 且无首段、无 usage——上游从未处理这段前缀）
+// 不计入前缀热度（INT-139 云端复审 Note）：否则一条 transport 失败残留
+// 会把激活推迟盖在并不存在的缓存上；热度应回看更早的真实上游请求。
+func TestMainlinePrefixCacheExpiredLocalFailures(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "r11lf")
+
+	seedFailed := func(botID string, startedAt time.Time, withDelta bool) {
+		run := &model.BotRun{
+			ID: uuid.NewString(), BotID: botID,
+			TriggerSource: model.BotTriggerUserMessage, TriggerKey: "r11lf-" + uuid.NewString(),
+			Status: model.BotRunStatusCompleted, SessionKind: model.BotSessionKindMain,
+			ConfigSnapshotJSON: "{}", CreatedAt: startedAt, StartedAt: &startedAt, FinishedAt: &startedAt,
+		}
+		if err := env.db.Create(run).Error; err != nil {
+			t.Fatalf("seed run: %v", err)
+		}
+		finished := startedAt.Add(2 * time.Second)
+		code := "request_failed"
+		req := &model.BotModelRequest{
+			ID: uuid.NewString(), RunID: run.ID, Ordinal: 10,
+			Status: model.BotModelRequestFailed, ErrorCode: &code,
+			StartedAt: startedAt, FinishedAt: &finished,
+			PrefixHash: "x", ToolsHash: "x", RequestHash: "x", TokenEstimator: "chars/4",
+		}
+		if withDelta {
+			delta := startedAt.Add(time.Second)
+			req.FirstDeltaAt = &delta
+		}
+		if err := env.db.Create(req).Error; err != nil {
+			t.Fatalf("seed request: %v", err)
+		}
+	}
+
+	// 唯一一条「请求」是最近的本地失败 → 上游什么也没见过 → 可激活。
+	localOnly := env.createBot(t, userID)
+	seedFailed(localOnly.ID, time.Now().UTC(), false)
+	if !env.bots.mainlinePrefixCacheExpired(localOnly.ID) {
+		t.Fatalf("本地失败行不得计入前缀热度")
+	}
+	// 本地失败在窗口内、更早的真实请求在窗口外 → 回看旧行，可激活。
+	retain := env.cfg.Bots.Runtime.PromptCacheRetain()
+	fallback := env.createBot(t, userID)
+	int139SeedMainRequest(t, env, fallback.ID, model.BotSessionKindMain,
+		time.Now().UTC().Add(-retain-time.Minute))
+	seedFailed(fallback.ID, time.Now().UTC(), false)
+	if !env.bots.mainlinePrefixCacheExpired(fallback.ID) {
+		t.Fatalf("热度应回看失败行之前的真实上游请求")
+	}
+	// 失败但已有首段（上游确实处理过）→ 仍是热度证据。
+	evidenced := env.createBot(t, userID)
+	seedFailed(evidenced.ID, time.Now().UTC(), true)
+	if env.bots.mainlinePrefixCacheExpired(evidenced.ID) {
+		t.Fatalf("触达上游后失败的请求仍应算缓存热")
 	}
 }
 
