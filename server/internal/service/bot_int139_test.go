@@ -302,7 +302,7 @@ func TestMainlinePrefixCacheExpiredLocalFailures(t *testing.T) {
 	env := setupBotTestEnv(t)
 	userID := createBotTestUser(t, env.db, "r11lf")
 
-	seedFailed := func(botID string, startedAt time.Time, withDelta bool) {
+	seedFailed := func(botID string, startedAt time.Time, withDelta bool) *model.BotModelRequest {
 		run := &model.BotRun{
 			ID: uuid.NewString(), BotID: botID,
 			TriggerSource: model.BotTriggerUserMessage, TriggerKey: "r11lf-" + uuid.NewString(),
@@ -327,6 +327,7 @@ func TestMainlinePrefixCacheExpiredLocalFailures(t *testing.T) {
 		if err := env.db.Create(req).Error; err != nil {
 			t.Fatalf("seed request: %v", err)
 		}
+		return req
 	}
 
 	// 唯一一条「请求」是最近的本地失败 → 上游什么也没见过 → 可激活。
@@ -349,6 +350,17 @@ func TestMainlinePrefixCacheExpiredLocalFailures(t *testing.T) {
 	seedFailed(evidenced.ID, time.Now().UTC(), true)
 	if env.bots.mainlinePrefixCacheExpired(evidenced.ID) {
 		t.Fatalf("触达上游后失败的请求仍应算缓存热")
+	}
+	// 纯工具调用流失败：无正文首段、无 usage，但 chunk 带回了
+	// provider_request_id → 上游确实处理过前缀，仍算热度证据
+	// （INT-139 云端复审 codex）。
+	toolCallOnly := env.createBot(t, userID)
+	req := seedFailed(toolCallOnly.ID, time.Now().UTC(), false)
+	if err := env.db.Model(req).Update("provider_request_id", "chatcmpl-tc").Error; err != nil {
+		t.Fatalf("seed provider_request_id: %v", err)
+	}
+	if env.bots.mainlinePrefixCacheExpired(toolCallOnly.ID) {
+		t.Fatalf("带 provider_request_id 的失败行仍应算缓存热")
 	}
 }
 

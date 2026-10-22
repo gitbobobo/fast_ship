@@ -151,10 +151,13 @@ run 入口的 `activateBotPrompt` 在一个短事务里读行、
 `bots.runtime.prompt_cache_retain_minutes`（默认 10 分钟，`mainlinePrefixCacheExpired`
 判）就推迟到下一个压缩边界，全新机器人（无主线请求）或窗口外的请求照常入口
 激活。「最近一次请求」的口径是**真正触达上游**的请求
-（`LatestMainUpstreamByBot`）：`failed` 且既无 `first_delta_at` 也无
-`prompt_tokens` 的本地失败行（transport 失败、认证/限流被上游拒于入口等）
+（`LatestMainUpstreamByBot`）：`failed` 且 `first_delta_at`、
+`prompt_tokens`、`provider_request_id` 三者皆空的本地失败行
+（transport 失败、认证/限流被上游拒于入口等）
 被跳过、热度回看更早的真实请求——上游从未处理过的前缀没有缓存可保。
-`first_delta_at` 在失败分支同样落库（流过半截正文后失败仍算触达上游）。
+`first_delta_at` 与 `provider_request_id` 在失败分支同样落库（流过
+半截正文后失败仍算触达上游；纯工具调用流没有正文首段与 usage，chunk
+带回的 `provider_request_id` 是唯一的触达残迹）。
 候选行排序按上游实际接触时刻 `COALESCE(finished_at, started_at)`（
 `server_restarted` 的 finished_at 是恢复记账时刻、回退 started_at），
 与热度判定同源——更早开始但刚结束的热请求不会被更晚开始的冷请求盖过。

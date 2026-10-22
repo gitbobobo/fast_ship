@@ -791,7 +791,10 @@ func (s *BotService) finishModelRequest(row *model.BotModelRequest, reply *botMo
 	// run 总账仍只累计成功请求——run 粒度是「会话实际消费」，请求行粒度
 	// 才是计费流水。
 	if row != nil && reply != nil {
-		if streamErr == nil {
+		// provider_request_id 也是上游接触证据（chunk 必带 id）：纯工具
+		// 调用流失败后无正文首段、无 usage，id 是唯一残留的触达痕迹
+		// （INT-139 云端复审）。
+		if reply.ProviderRequestID != "" {
 			cols["provider_request_id"] = reply.ProviderRequestID
 		}
 		if reply.UsageComplete {

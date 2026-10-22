@@ -274,8 +274,8 @@ func (r *BotModelRequestRepository) LatestMainByBot(botID string) (*model.BotMod
 }
 
 // LatestMainUpstreamByBot 返回最近一次「真正触达上游」的主线请求
-// （INT-139 云端复审）：本地失败的行（failed 且无首段、无 usage——上游
-// 根本没处理这段前缀）不计入前缀缓存热度，否则一条 transport 失败的
+// （INT-139 云端复审）：本地失败的行（failed 且无首段、无 usage、无
+// provider_request_id——上游根本没处理这段前缀）不计入前缀缓存热度，否则一条 transport 失败的
 // 残留行会把激活推迟盖在并不存在的缓存上。排序按上游实际接触时刻而非
 // started_at：一条更早开始但刚结束的热请求不得被一条更晚开始的冷请求
 // 盖过；server_restarted 的 finished_at 是恢复记账时刻，回退
@@ -285,7 +285,7 @@ func (r *BotModelRequestRepository) LatestMainUpstreamByBot(botID string) (*mode
 	var row model.BotModelRequest
 	err := r.db.Joins("JOIN bot_runs ON bot_runs.id = bot_model_requests.run_id").
 		Where("bot_runs.bot_id = ? AND bot_runs.session_kind = ?", botID, model.BotSessionKindMain).
-		Where("NOT (bot_model_requests.status = ? AND bot_model_requests.first_delta_at IS NULL AND bot_model_requests.prompt_tokens IS NULL)",
+		Where("NOT (bot_model_requests.status = ? AND bot_model_requests.first_delta_at IS NULL AND bot_model_requests.prompt_tokens IS NULL AND bot_model_requests.provider_request_id = '')",
 			model.BotModelRequestFailed).
 		Order("COALESCE(CASE WHEN bot_model_requests.error_code = 'server_restarted' THEN NULL ELSE bot_model_requests.finished_at END, bot_model_requests.started_at) DESC, bot_model_requests.ordinal DESC").
 		First(&row).Error
