@@ -353,8 +353,9 @@ next_offset}`；`fs_result.read` 按 Unicode 字符续读，不切断 UTF-8。
   旧请求的窗口按它发起时的目录身份解析；INT-133 之前落的旧快照没有该
   字段，读取方回退 bot 当前 `catalog_id`），没有主线请求时 `request`
   缺省、窗口能力仍然可见。`bot_model_requests.first_delta_at` 在首个非空正文流式片段
-  时记录；`generation_ms` = finished − first_delta，两者都有效且为正才给出，
-  否则 0（纯工具调用、失败请求视为不可用）。历史累计仍在 run 上，指标区只
+  时记录（与成败无关——它还兼作前缀热度的上游接触证据）；`generation_ms` 仅对
+  成功请求给出 = finished − first_delta，其余一律 0（纯工具调用、失败请求、时长
+  非正均视为不可用）。历史累计仍在 run 上，指标区只
   用单次口径。辅助模型（摘要/归档）的输出预算沿用「目标 − 前缀 − 附录 −
   保留尾部」与 `MaxCompletionTokens` 传递，不因省 token 硬砍到截断。
 - **成本估算（INT-139）**：目录生成器现在透射 models.dev 的 `cost`
