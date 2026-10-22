@@ -144,7 +144,8 @@ type BotsRuntimeConfig struct {
 	// PromptCacheRetainMinutes 是前缀缓存在上游的保留窗口（默认 10 分钟，
 	// INT-139）：主线 run 入口发现版本落后时，最近一次主线模型请求仍在窗口
 	// 内就不在入口激活（重写前缀会作废仍热的缓存），推迟到下一个压缩边界。
-	PromptCacheRetainMinutes int `mapstructure:"prompt_cache_retain_minutes"`
+	// 显式配 0 表示禁用推迟——窗口为零时热度判定自然过期，入口始终激活。
+	PromptCacheRetainMinutes *int `mapstructure:"prompt_cache_retain_minutes"`
 }
 
 func (c BotsRuntimeConfig) StreamFirstChunkTimeout() time.Duration {
@@ -200,12 +201,13 @@ func (c BotsRuntimeConfig) ProviderCircuitWindow() time.Duration {
 }
 
 // PromptCacheRetain 是「最近一次主线请求距今多久算前缀缓存已冷」的窗口；
-// 未配置取默认 10 分钟。窗口内推迟入口激活，让活跃对话保住前缀命中。
+// 未配置取默认 10 分钟，显式 0 表示禁用推迟（窗口为零、入口始终激活）。
+// 窗口内推迟入口激活，让活跃对话保住前缀命中。
 func (c BotsRuntimeConfig) PromptCacheRetain() time.Duration {
-	if c.PromptCacheRetainMinutes > 0 {
-		return time.Duration(c.PromptCacheRetainMinutes) * time.Minute
+	if c.PromptCacheRetainMinutes == nil {
+		return 10 * time.Minute
 	}
-	return 10 * time.Minute
+	return time.Duration(*c.PromptCacheRetainMinutes) * time.Minute
 }
 
 type BotsContextConfig struct {
@@ -390,7 +392,7 @@ func (c BotsConfig) validate() error {
 	if c.Runtime.StopGraceSeconds < 0 {
 		return fmt.Errorf("bots.runtime.stop_grace_seconds 不得为负")
 	}
-	if c.Runtime.PromptCacheRetainMinutes < 0 {
+	if c.Runtime.PromptCacheRetainMinutes != nil && *c.Runtime.PromptCacheRetainMinutes < 0 {
 		return fmt.Errorf("bots.runtime.prompt_cache_retain_minutes 不得为负")
 	}
 	if c.Memory.Timezone != "" {

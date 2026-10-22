@@ -624,6 +624,25 @@ func TestMarkActivationDeferredVersionGuard(t *testing.T) {
 			staleCopy.ToolsetVersion, staleCopy.ActivationDeferredAt)
 	}
 
+	// 早退竞态（INT-139 云端复审）：副本带着「激活前的旧读」——deferred_at
+	// 非空且版本落后，但行已被别的事务激活清标。不得被副本上的旧标记判成
+	// 推迟（那会写出永不收口的通知），回读行事实后应返 false 并清副本。
+	activated2 := env.createBot(t, userID)
+	staleCopyOld, err := env.bots.bots.Get(activated2.ID)
+	if err != nil {
+		t.Fatalf("get bot: %v", err)
+	}
+	staleCopyOld.ToolsetVersion = botToolsetVersion - 1
+	past := time.Now().UTC().Add(-time.Minute)
+	staleCopyOld.ActivationDeferredAt = &past
+	if env.bots.markActivationDeferred(staleCopyOld) {
+		t.Fatalf("副本挂着旧推迟标记而行已激活时，不得判为推迟")
+	}
+	if staleCopyOld.ActivationDeferredAt != nil || staleCopyOld.ToolsetVersion != botToolsetVersion {
+		t.Fatalf("回读后副本应对齐行事实（已激活、无推迟标记）: v=%d deferred=%v",
+			staleCopyOld.ToolsetVersion, staleCopyOld.ActivationDeferredAt)
+	}
+
 	// 行确实陈旧：正常落起点，返回 true，副本同步标记。
 	stale := env.createBot(t, userID)
 	if err := env.db.Model(&model.Bot{}).Where("id = ?", stale.ID).

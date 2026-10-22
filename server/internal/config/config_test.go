@@ -228,6 +228,15 @@ func TestBotsRuntimeConfig(t *testing.T) {
 	if got := zero.ProviderCircuitWindow(); got != 30*time.Minute {
 		t.Fatalf("熔断窗口默认 30m，got %v", got)
 	}
+	if got := zero.PromptCacheRetain(); got != 10*time.Minute {
+		t.Fatalf("前缀缓存窗口默认 10m，got %v", got)
+	}
+	// 显式 0 = 禁用推迟（窗口为零、入口始终激活）；与「未配置走默认」靠
+	// 指针可区分（INT-139 云端复审）。
+	disabled := 0
+	if got := (BotsRuntimeConfig{PromptCacheRetainMinutes: &disabled}).PromptCacheRetain(); got != 0 {
+		t.Fatalf("显式 0 应禁用推迟窗口，got %v", got)
+	}
 
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	body := baseConfigYAML + "\nbots:\n  runtime:\n    stream_first_chunk_timeout_seconds: 5\n    retry_max_attempts: 9\n    provider_circuit_minutes: 1\n"

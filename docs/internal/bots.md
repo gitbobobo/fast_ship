@@ -148,7 +148,8 @@ run 入口的 `activateBotPrompt` 在一个短事务里读行、
 副本写不坏库，因此不再需要进程级的激活缓存与事后补读。**主线入口激活另有
 前缀缓存门控（INT-139 R11）**：对话仍活跃时重写系统提示会作废仍热的上游
 前缀缓存——最近一次主线模型请求距今未超
-`bots.runtime.prompt_cache_retain_minutes`（默认 10 分钟，`mainlinePrefixCacheExpired`
+`bots.runtime.prompt_cache_retain_minutes`（默认 10 分钟，显式 0 禁用
+推迟——入口始终激活；`mainlinePrefixCacheExpired`
 判）就推迟到下一个压缩边界，全新机器人（无主线请求）或窗口外的请求照常入口
 激活。「最近一次请求」的口径是**真正触达上游**的请求
 （`LatestMainUpstreamByBot`）：`failed` 且 `first_delta_at`、

@@ -1737,15 +1737,17 @@ func (s *BotService) activationDeferralExpired(bot *model.Bot) bool {
 // 已被别的事务激活并清掉 deferred_at，不带守卫会把已激活的行重写上一个
 // 对当前版本无意义的起点。
 //
+// 不能靠副本的 deferred_at 早退（INT-139 云端复审）：陈旧副本可能同时满足
+// 「deferred_at 非空 + 版本落后」而行已被激活清标，早退会把已激活行当推迟
+// 写出永不收口的通知。统一走守卫 UPDATE——行仍推迟时更新自然落空，回读
+// 后 deferred_at 非空照返 true，与早退同开销但一路对齐行事实。
+//
 // 未命中时分两种行事实（INT-139 云端复审）：行已被激活——回读行把副本
 // 刷新到真实版本后返回 false，调用方不再当本 run 推迟（否则会给已激活
 // 的行写出永不兑现的推迟通知）；行仍陈旧但被并发写者先落了起点——回读
 // 后副本的 deferred_at 非空，返回 true，本 run 仍是真推迟。返回值即
 // 「本 run 的推迟决策是否成立」，调用方据此驱动通知文案。
 func (s *BotService) markActivationDeferred(bot *model.Bot) bool {
-	if bot.ActivationDeferredAt != nil {
-		return true
-	}
 	now := s.now()
 	res := s.db.Model(&model.Bot{}).
 		Where("id = ? AND activation_deferred_at IS NULL", bot.ID).
@@ -1812,7 +1814,11 @@ func (s *BotService) resolveBotPrompt(bot *model.Bot, persist bool) error {
 			prompt := buildBotSystemPrompt(fresh.PersonaPrompt, fresh.UntrustedNonce)
 			if !persist {
 				// 会话内解析：内存推进版本即可，行水位留给压缩边界激活。
+				// revision 也同步投影 +1——提示词对同一 persona+nonce 是
+				// 确定性的，这正是行激活时将落的 revision；不动会让冻结
+				// 快照记成「新文本+旧 revision」的自相矛盾组合。
 				fresh.SystemPromptText = prompt
+				fresh.PromptRevision = fresh.PromptRevision + 1
 				fresh.ToolsetVersion = botToolsetVersion
 				fresh.PlatformPromptVersion = botPlatformPromptVersion
 			} else {
