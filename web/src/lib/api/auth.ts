@@ -1,28 +1,17 @@
+import type { components } from "@/types/api.gen";
 import { api, decodeApiError, ROTATION_OWNER_HEADER } from "./client";
 
-interface LoginRequest {
-  login: string;
-  password: string;
-}
+/** 契约类型直接引用 api.gen.ts。 */
+type Schemas = components["schemas"];
 
-interface RegisterRequest {
-  username: string;
-  email: string;
-  password: string;
-  /** 邀请注册的明文 token（INT-129）；库里无用户的首个注册可省略 */
-  invite_token?: string;
-}
+type LoginRequest = Schemas["LoginRequest"];
 
-interface AuthResponse {
-  token: string;
-  refresh_token: string;
-  user: User;
-}
+type RegisterRequest = Schemas["RegisterRequest"];
 
-interface SessionTokens {
-  token: string;
-  refresh_token: string;
-}
+type AuthResponse = Schemas["AuthResponse"];
+
+/** 契约名为 RefreshResponse（改密响应复用它表达「新签发的 token 对」）。 */
+type SessionTokens = Schemas["RefreshResponse"];
 
 export const authApi = {
   login: (data: LoginRequest) =>

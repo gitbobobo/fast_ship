@@ -20,6 +20,8 @@ function thread(over: Partial<ThreadSummary> = {}): ThreadSummary {
     updated_at: new Date(Date.now() - 42 * 60_000).toISOString(),
     pull_request_count: 0,
     settled: false,
+    run_status: "idle",
+    pull_requests: [],
     ...over,
   };
 }

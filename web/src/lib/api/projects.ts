@@ -1,26 +1,13 @@
+import type { components } from "@/types/api.gen";
 import { api } from "./client";
 
-interface CreateProjectRequest {
-  name: string;
-  description?: string;
-  repository_url?: string;
-  /** 代码仓库（PR 审查用）；可空，空 = 与公开仓库相同 */
-  code_repository_url?: string;
-  /** 公开仓库 Token（Token 库记录 id）；可空 */
-  public_github_token_id?: string;
-  /** 代码仓库 Token（Token 库记录 id）；可空 */
-  code_github_token_id?: string;
-}
+/** 契约类型直接引用 api.gen.ts；请求体字段语义见 openapi.yaml 的 @description。 */
+type Schemas = components["schemas"];
+
+type CreateProjectRequest = Schemas["CreateProjectRequest"];
 
 // 更新请求的仓库与 Token 引用字段是三态：缺省保留、null 或空串清空、非空替换。
-interface UpdateProjectRequest {
-  name?: string;
-  description?: string;
-  repository_url?: string;
-  code_repository_url?: string | null;
-  public_github_token_id?: string | null;
-  code_github_token_id?: string | null;
-}
+type UpdateProjectRequest = Schemas["UpdateProjectRequest"];
 
 export const projectApi = {
   list: (page = 1, pageSize = 20) =>

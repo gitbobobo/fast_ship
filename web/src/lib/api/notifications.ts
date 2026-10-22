@@ -1,6 +1,11 @@
+import type { components } from "@/types/api.gen";
 import { api } from "./client";
 
 // 站内通知（INT-135）：审查系统故障与 Agent 发布。
+// Notification 引用契约；kind 的字面量联合保留手写——契约枚举只有四个
+// review_* 值，前端另含 "agent"（Agent 发布文案），穷尽 switch 的标签映射依赖它。
+
+type Schemas = components["schemas"];
 
 export type NotificationKind =
   | "agent"
@@ -9,19 +14,7 @@ export type NotificationKind =
   | "review_cleanup_failed"
   | "review_redelivery_failed";
 
-export interface Notification {
-  id: string;
-  kind: NotificationKind;
-  title: string;
-  body: string;
-  environment_id?: string | null;
-  thread_id?: string | null;
-  run_id?: string | null;
-  created_at: string;
-  updated_at: string;
-  last_seen_at: string;
-  read_at?: string | null;
-}
+export type Notification = Schemas["Notification"];
 
 export const notificationApi = {
   list: (params?: { limit?: number; unread_only?: boolean }) => {

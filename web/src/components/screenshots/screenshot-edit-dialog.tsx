@@ -39,7 +39,7 @@ export function ScreenshotEditDialog({
   const [title, setTitle] = useState(screen.title);
   const [platform, setPlatform] = useState(screen.platform ?? "");
   const [locale, setLocale] = useState(screen.locale ?? "");
-  const [theme, setTheme] = useState(screen.theme ?? "");
+  const [theme, setTheme] = useState<ScreenshotTheme | "">(screen.theme ?? "");
   const updateScreen = useUpdateScreenshotScreen(projectId);
 
   useEffect(() => {
@@ -119,7 +119,7 @@ export function ScreenshotEditDialog({
             <Label htmlFor="edit-screenshot-theme">亮度</Label>
             <OptionSelect
               value={theme}
-              onValueChange={(v) => setTheme(v ?? "")}
+              onValueChange={(v) => setTheme((v ?? "") as ScreenshotTheme | "")}
               options={THEME_OPTIONS}
               className="w-full"
               aria-label="亮度"

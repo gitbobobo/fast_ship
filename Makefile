@@ -26,7 +26,7 @@ help:
 	@printf "  make lint-server  Check Go formatting and run go vet\n"
 	@printf "  make lint-web     Run web ESLint and type checks\n"
 	@printf "  make tidy         Tidy server dependencies\n"
-	@printf "  make api-types    Regenerate Go types from api/openapi.yaml\n"
+	@printf "  make api-types    Regenerate Go and web types from api/openapi.yaml\n"
 	@printf "  make api-docs     Regenerate skills/fast-ship API reference docs\n"
 	@printf "  make clean        Clean build artifacts\n"
 	@printf "  make release      Create a release commit, tag, and push\n"
@@ -76,6 +76,7 @@ tidy-server:
 
 api-types:
 	@$(MAKE) -C server api-types
+	@pnpm --dir web api-types
 
 api-docs:
 	@$(MAKE) -C server api-docs

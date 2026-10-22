@@ -33,5 +33,10 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Verify generated API types are up to date
+        # --check 逐字节比对已提交的 api.gen.ts；文件缺失或与 yaml 不一致都退出非零，
+        # 且不改动工作树（比重新生成 + git diff 严格——后者漏检未提交的生成文件）。
+        run: pnpm api-types --check
+
       - name: Run web checks
         run: pnpm check

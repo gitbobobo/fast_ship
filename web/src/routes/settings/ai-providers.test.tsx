@@ -51,14 +51,14 @@ const catalogFixture: CatalogProvider[] = [
     name: "DeepSeek",
     api: "https://api.deepseek.com/v1",
     models: [
-      { id: "deepseek-flash", name: "DeepSeek Flash", context_window: 131072 },
+      { id: "deepseek-flash", name: "DeepSeek Flash", context_window: 131072, max_output_tokens: 0, reasoning: false },
     ],
   },
   {
     id: "openai",
     name: "OpenAI",
     api: "https://api.openai.com/v1",
-    models: [{ id: "gpt-5", name: "GPT-5", context_window: 272000 }],
+    models: [{ id: "gpt-5", name: "GPT-5", context_window: 272000, max_output_tokens: 0, reasoning: false }],
   },
 ];
 

@@ -1,10 +1,10 @@
+import type { components } from "@/types/api.gen";
 import { api } from "./client";
 
-interface UpdateAISettingsRequest {
-  api_host: string;
-  api_key?: string;
-  model: string;
-}
+/** 契约类型直接引用 api.gen.ts。 */
+type Schemas = components["schemas"];
+
+type UpdateAISettingsRequest = Schemas["UpdateAISettingsRequest"];
 
 export const aiApi = {
   getSettings: () => api.get("ai/settings").json<ApiResponse<AISettings>>(),

@@ -9,12 +9,13 @@ function makeVersion(
     project_id: "proj-1",
     version_number: "v1.2.0",
     status: "pending",
-    release_notes: null,
+    release_notes: "",
     target_commitish: "main",
-    github_release_url: null,
-    error_log: null,
+    github_release_url: "",
+    error_log: "",
     ship_status: "in_progress",
     ship_stage: "upload_assets",
+    ship_hooks_status: "pending",
     ship_message: "正在上传安装包",
     created_at: "2026-04-06T10:00:00Z",
     shipped_at: null,
@@ -77,7 +78,7 @@ describe("VersionShipProgressCard", () => {
         version={makeVersion({
           ship_status: "",
           ship_stage: "",
-          ship_message: null,
+          ship_message: "",
         })}
         isPending
         isShipping={false}

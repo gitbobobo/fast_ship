@@ -115,7 +115,6 @@ const screensFixture: ScreenshotScreen[] = [
 function mockProjects(items: Project[] = [
   {
     id: "proj-1",
-    user_id: "user-1",
     name: "Alpha App",
     description: "",
     github_owner: "acme",
@@ -124,7 +123,6 @@ function mockProjects(items: Project[] = [
     code_github_repo: "",
     public_github_token_id: "",
     code_github_token_id: "",
-    latest_version: null,
     created_at: "2026-04-06T09:00:00Z",
     updated_at: "2026-04-06T09:00:00Z",
   },

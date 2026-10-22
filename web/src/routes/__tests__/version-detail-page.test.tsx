@@ -55,10 +55,11 @@ function makeVersion(overrides: Partial<Version> = {}): Version {
     status: "pending",
     release_notes: "notes",
     target_commitish: "main",
-    github_release_url: null,
-    error_log: null,
+    github_release_url: "",
+    error_log: "",
     ship_status: "in_progress",
     ship_stage: "upload_assets",
+    ship_hooks_status: "pending",
     ship_message: "正在上传安装包",
     created_at: "2026-04-06T10:00:00Z",
     shipped_at: null,
@@ -68,7 +69,6 @@ function makeVersion(overrides: Partial<Version> = {}): Version {
         version_id: "ver-1",
         file_name: "app.apk",
         file_size: 1024,
-        file_path: "proj-1/ver-1/app.apk",
         platform: "android",
         uploaded_by: "API Key: CI-Upload",
         uploaded_at: "2026-04-06T10:10:00Z",
@@ -191,7 +191,7 @@ describe("VersionDetailPage", () => {
       data: makeVersion({
         ship_status: "",
         ship_stage: "",
-        ship_message: null,
+        ship_message: "",
       }),
       isLoading: false,
       refetch: vi.fn(),
@@ -247,7 +247,7 @@ describe("VersionDetailPage", () => {
       data: makeVersion({
         ship_status: "",
         ship_stage: "",
-        ship_message: null,
+        ship_message: "",
       }),
       isLoading: false,
       refetch: vi.fn(),
@@ -281,7 +281,7 @@ describe("VersionDetailPage", () => {
       data: makeVersion({
         ship_status: "",
         ship_stage: "",
-        ship_message: null,
+        ship_message: "",
       }),
       isLoading: false,
       refetch: vi.fn(),
@@ -342,7 +342,7 @@ describe("VersionDetailPage", () => {
       data: makeVersion({
         ship_status: "",
         ship_stage: "",
-        ship_message: null,
+        ship_message: "",
       }),
       isLoading: false,
       refetch: vi.fn(),
@@ -391,7 +391,7 @@ describe("VersionDetailPage", () => {
       data: makeVersion({
         ship_status: "",
         ship_stage: "",
-        ship_message: null,
+        ship_message: "",
       }),
       isLoading: false,
       refetch: refetchVersion,
@@ -424,7 +424,7 @@ describe("VersionDetailPage", () => {
         ship_status: "in_progress",
         ship_stage: "upload_assets",
         ship_message: "正在上传安装包",
-        error_log: null,
+        error_log: "",
       }),
     });
 
@@ -432,7 +432,7 @@ describe("VersionDetailPage", () => {
       data: makeVersion({
         ship_status: "",
         ship_stage: "",
-        ship_message: null,
+        ship_message: "",
       }),
       isLoading: false,
       refetch: refetchVersion,
@@ -467,7 +467,7 @@ describe("VersionDetailPage", () => {
       }),
     });
     vi.mocked(useVersion).mockReturnValue({
-      data: makeVersion({ ship_status: "", ship_stage: "", ship_message: null }),
+      data: makeVersion({ ship_status: "", ship_stage: "", ship_message: "" }),
       isLoading: false,
       refetch: refetchVersion,
     } as unknown as ReturnType<typeof useVersion>);
@@ -493,7 +493,7 @@ describe("VersionDetailPage", () => {
       data: makeVersion({
         ship_status: "",
         ship_stage: "",
-        ship_message: null,
+        ship_message: "",
       }),
       isLoading: false,
       refetch: vi.fn(),
@@ -515,7 +515,7 @@ describe("VersionDetailPage", () => {
         artifacts: [],
         ship_status: "",
         ship_stage: "",
-        ship_message: null,
+        ship_message: "",
       }),
       isLoading: false,
       refetch: vi.fn(),
@@ -537,7 +537,7 @@ describe("VersionDetailPage", () => {
         status: "shipped",
         ship_status: "completed",
         ship_stage: "",
-        ship_message: null,
+        ship_message: "",
         shipped_at: "2026-04-06T12:00:00Z",
       }),
       isLoading: false,
@@ -562,7 +562,7 @@ describe("VersionDetailPage", () => {
       data: makeVersion({
         ship_status: "",
         ship_stage: "",
-        ship_message: null,
+        ship_message: "",
       }),
       isLoading: false,
       refetch: vi.fn(),
@@ -610,7 +610,7 @@ describe("VersionDetailPage", () => {
       data: makeVersion({
         ship_status: "",
         ship_stage: "",
-        ship_message: null,
+        ship_message: "",
       }),
       isLoading: false,
       refetch: vi.fn(),
@@ -650,7 +650,7 @@ describe("VersionDetailPage", () => {
       data: makeVersion({
         ship_status: "",
         ship_stage: "",
-        ship_message: null,
+        ship_message: "",
       }),
       isLoading: false,
       refetch: vi.fn(),
@@ -676,14 +676,13 @@ describe("VersionDetailPage", () => {
       data: makeVersion({
         ship_status: "",
         ship_stage: "",
-        ship_message: null,
+        ship_message: "",
         artifacts: [
           {
             id: "artifact-1",
             version_id: "ver-1",
             file_name: "app.apk",
             file_size: 1024,
-            file_path: "proj-1/ver-1/app.apk",
             platform: "android",
             uploaded_by: "API Key: CI-Upload",
             uploaded_at: "2026-04-06T10:10:00Z",
@@ -693,7 +692,6 @@ describe("VersionDetailPage", () => {
             version_id: "ver-1",
             file_name: "app.ipa",
             file_size: 2048,
-            file_path: "proj-1/ver-1/app.ipa",
             platform: "ios",
             uploaded_by: "shipbobo",
             uploaded_at: "2026-04-06T10:11:00Z",
@@ -730,7 +728,7 @@ describe("VersionDetailPage", () => {
       data: makeVersion({
         ship_status: "",
         ship_stage: "",
-        ship_message: null,
+        ship_message: "",
       }),
       isLoading: false,
       refetch: vi.fn(),
@@ -784,7 +782,7 @@ describe("VersionDetailPage", () => {
       data: makeVersion({
         ship_status: "",
         ship_stage: "",
-        ship_message: null,
+        ship_message: "",
       }),
       isLoading: false,
       refetch: refetchVersion,

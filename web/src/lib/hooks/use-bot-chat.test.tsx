@@ -64,9 +64,13 @@ const bot: Bot = {
   base_url: "https://api.example.com/v1",
   model: "gpt-test",
   api_key_last4: "1234",
-  next_message_seq: 5,
+  prompt_revision: 1,
+  platform_prompt_version: 1,
+  toolset_version: 1,
+  context_window: 131072,
+  max_output_tokens: 32768,
+  context_source: "catalog",
   next_event_seq: 10,
-  last_message: null,
   created_at: "2026-10-15T00:00:00Z",
   updated_at: "2026-10-15T00:00:00Z",
 };
@@ -592,7 +596,7 @@ describe("useBotChat", () => {
     const { client } = hook();
     await waitFor(() => expect(stream.subscribe).toHaveBeenCalled());
     client.setQueryData<Bot[]>(botKeys.list("A"), [
-      { ...bot, last_message: null },
+      { ...bot },
       {
         ...bot,
         id: "b2",
@@ -614,7 +618,7 @@ describe("useBotChat", () => {
         true,
       ),
     );
-    expect(list?.[0]?.last_message).toBeNull();
+    expect(list?.[0]?.last_message).toBeUndefined();
     expect(list?.[1]?.last_message).toEqual({
       kind: "user",
       text: "旧预览",
@@ -625,7 +629,7 @@ describe("useBotChat", () => {
     const { client, result } = hook();
     await waitFor(() => expect(stream.subscribe).toHaveBeenCalled());
     client.setQueryData<Bot[]>(botKeys.list("A"), [
-      { ...bot, last_message: null },
+      { ...bot },
     ]);
 
     emit(
@@ -673,7 +677,7 @@ describe("useBotChat", () => {
     const { client } = hook();
     await waitFor(() => expect(stream.subscribe).toHaveBeenCalled());
     client.setQueryData<Bot[]>(botKeys.list("A"), [
-      { ...bot, last_message: null },
+      { ...bot },
     ]);
 
     emit(
@@ -795,7 +799,7 @@ describe("useBotChat", () => {
     const { client } = hook();
     await waitFor(() => expect(stream.subscribe).toHaveBeenCalled());
     client.setQueryData<Bot[]>(botKeys.list("A"), [
-      { ...bot, last_message: null },
+      { ...bot },
     ]);
 
     emit(
@@ -828,7 +832,7 @@ describe("useBotChat", () => {
     const { client, result } = hook();
     await waitFor(() => expect(result.current.loading).toBe(false));
     client.setQueryData<Bot[]>(botKeys.list("A"), [
-      { ...bot, last_message: null },
+      { ...bot },
     ]);
     api.send.mockResolvedValue({
       message: {
@@ -847,7 +851,7 @@ describe("useBotChat", () => {
 
     expect(
       client.getQueryData<Bot[]>(botKeys.list("A"))?.[0]?.last_message,
-    ).toBeNull();
+    ).toBeUndefined();
   });
 
   it("stopRun 受理后 stopRequested 立即为 true（服务端宽限期间本地兜底）", async () => {

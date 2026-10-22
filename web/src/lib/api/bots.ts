@@ -1,85 +1,36 @@
+import type { components } from "@/types/api.gen";
 import { api, decodeApiError } from "./client";
 
 // 内置机器人（INT-101，INT-133 起地址/密钥改由统一 AI 提供商派生）：
-// 类型与端点按契约冻结的形状手写，明文与密文形式的 API Key 任何响应都不
-// 回传，仅返回末四位。
+// 与契约形状等价的类型引用 api.gen.ts；明文与密文形式的 API Key 任何响应
+// 都不回传，仅返回末四位。
+//
+// 消息/调用/run 这几组保留手写，契约形状不等价（细节见各自注释）：
+// - 契约把 message.content / call.arguments 建模为无属性对象（生成
+//   Record<string, never>），前端需要按 kind 的字段文档化访问；
+// - 契约缺 run.error_action（SSE run_error 事件携带、REST 快照缺省）；
+// - 前端维护 status/kind 的字面量联合供穷尽 switch 的标签映射使用。
+type Schemas = components["schemas"];
 
-/** 最近一条主线消息预览：kind 区分消息来自用户还是机器人。 */
-export interface BotLastMessage {
-  kind: "user" | "assistant";
-  text: string;
-}
+/** 最近一条主线消息预览：契约 kind 为 string；前端按 user/assistant 区分前缀。 */
+export type BotLastMessage = Schemas["BotLastMessage"];
 
-export interface Bot {
-  id: string;
-  name: string;
-  persona_prompt: string;
-  /** 引用的 ai_providers.id；地址与密钥以提供商为准。 */
-  provider_id: string;
-  /** 提供商名随响应带出，省一次 join 查询（详情面板展示用）。 */
-  provider_name: string;
-  /** 服务端派生字段，当前无 UI 消费，保留供调试/后续使用。 */
-  catalog_id: string;
-  /** 服务端派生字段，当前无 UI 消费，保留供调试/后续使用。 */
-  base_url: string;
-  model: string;
-  /** provider 密钥的末四位；空串表示尚未配置。 */
-  api_key_last4: string;
-  /** 消息/事件账本水位（下一条的 seq）；订阅游标取 next_event_seq - 1。 */
-  next_message_seq?: number;
-  next_event_seq: number;
-  /** 模型上下文窗口；缺失或 0 = 未知，展示层不得当成 0 上限。 */
-  context_window?: number;
-  /** 单次输出上限；缺失或 0 = 未知。 */
-  max_output_tokens?: number;
-  /** context_window 的来源：manual|detected|catalog|known|fallback。 */
-  context_source?: string;
-  context_detail?: string;
-  /** 最近一条对话预览：列表端点返回真实值，详情/快照等其它端点恒为 null。 */
-  last_message: BotLastMessage | null;
-  created_at: string;
-  updated_at: string;
-}
+export type Bot = Schemas["Bot"];
 
-export interface CreateBotInput {
-  name: string;
-  persona_prompt: string;
-  provider_id: string;
-  model: string;
-}
+/** 契约名为 CreateBotRequest。 */
+export type CreateBotInput = Schemas["CreateBotRequest"];
 
-/** 更新为指针语义：出现才更新；provider_id 必须属于当前用户。 */
-export interface UpdateBotInput {
-  name?: string;
-  persona_prompt?: string;
-  provider_id?: string;
-  model?: string;
-}
+/** 契约名为 UpdateBotRequest（指针语义：出现才更新）。 */
+export type UpdateBotInput = Schemas["UpdateBotRequest"];
 
-export interface BotConnectionCheck {
-  name: string;
-  passed: boolean;
-  /** 失败原因（截断；不含密钥），通过时服务端省略。 */
-  detail?: string;
-}
+/** 检查结果 checks 数组的元素（契约内联在 BotConnectionCheck.checks 里，直接取内联类型）。 */
+export type BotConnectionCheck = Schemas["BotConnectionCheck"]["checks"][number];
 
-export interface BotConnectionTestResult {
-  ok: boolean;
-  /** 流式、工具调用兼容性等逐项检查结果。 */
-  checks: BotConnectionCheck[];
-  /** 本次探测到的模型能力（探测失败时为回退值，来源如实标注）。 */
-  context_window?: number;
-  max_output_tokens?: number;
-  context_source?: string;
-  context_detail?: string;
-}
+/** 契约名就叫 BotConnectionCheck（整体结果），与上面的条目类型重名故保留映射名。 */
+export type BotConnectionTestResult = Schemas["BotConnectionCheck"];
 
-/** 地址与密钥一律取 provider；bot_id 让服务端沿用已存机器人的上下文。 */
-export interface BotConnectionTestInput {
-  bot_id?: string;
-  provider_id: string;
-  model: string;
-}
+/** 契约名为 TestBotConnectionRequest；地址与密钥一律取 provider。 */
+export type BotConnectionTestInput = Schemas["TestBotConnectionRequest"];
 
 export type BotMessageKind =
   | "user"
@@ -233,69 +184,28 @@ export interface BotRun {
   finished_at?: string | null;
 }
 
-export interface BotAuthorization {
-  id: string;
-  tool_name: string;
-  action: string;
-  scope_kind: string;
-  scope_id: string;
-  environment_id?: string | null;
-  /** 规范化约束（写入字段集合等），键为字段名。 */
-  constraints?: Record<string, unknown>;
-  created_at: string;
-  /** 撤销只写 revoked_at，记录保留用于审计。 */
-  revoked_at?: string | null;
-}
+export type BotAuthorization = Schemas["BotAuthorization"];
 
-/**
- * 最近一次主线模型请求的指标口径；进行中或 usage 未收齐时
- * token 计数字段为 null，展示层必须区分缺失与 0。
- */
-export interface BotRequestMetrics {
-  request_id: string;
-  run_id: string;
-  ordinal: number;
-  status: "running" | "succeeded" | "failed";
-  prompt_tokens: number | null;
-  completion_tokens: number | null;
-  cached_tokens: number | null;
-  /** false = usage 计数不完整，token 计数一律视为不可用。 */
-  usage_complete: boolean;
-  /** 服务端估算的本次输入体积（估算口径见 input_estimator），非精确值。 */
-  input_tokens_estimate: number;
-  input_estimator: string;
-  started_at: string;
-  finished_at: string | null;
-  /** 首个流式正文片段到请求结束的毫秒数；0 = 不可用，不是 0ms。 */
-  generation_ms: number;
-}
+/** 契约同名的指标口径；进行中或 usage 未收齐时 token 计数为 null。 */
+export type BotRequestMetrics = Schemas["BotRequestMetrics"];
 
 /** 聊天页指标区的一致读取：窗口能力 + 最近一次主线模型请求口径。 */
-export interface BotMetrics {
-  context_window: number;
-  max_output_tokens: number;
-  context_source: "manual" | "detected" | "catalog" | "known" | "fallback";
-  context_detail?: string;
-  /** 最近一次主线模型请求（进行中或已结束）；没有则缺省。 */
-  request?: BotRequestMetrics | null;
-}
+export type BotMetrics = Schemas["BotMetrics"];
 
 /**
  * 活动主线 run 最近一条维护进度（压缩阶段/失败原因）：与 SSE 的
  * kind=maintenance_progress delta 事件同源，快照随取随带，刷新后运行栏
  * 不丢反馈。无活动主线 run 或尚无进度事件时整体缺省。
  */
-export interface BotMaintenanceProgress {
-  /** 进度所属主线 run；服务端无 run 场景缺省。 */
-  run_id?: string;
-  phase: string;
-  message: string;
-}
+export type BotMaintenanceProgress = Schemas["BotMaintenanceProgress"];
 
 /**
  * 聊天页一致快照：bot、消息尾部页、调用、run 与事件水位取自服务端
  * 同一读取点。订阅游标取 next_event_seq - 1，与快照内容严格衔接，
  * 既不重放快照已含的事件也不漏掉其后的事件。
+ *
+ * 保留手写：契约 BotChatSnapshot 内嵌 BotMessage/BotToolCall（形状不等价，
+ * 见文件头说明），别名会把消息与调用的字段访问一起拖垮。
  */
 export interface ChatSnapshot {
   bot: Bot;
@@ -311,20 +221,24 @@ export interface ChatSnapshot {
   maintenance_progress?: BotMaintenanceProgress;
 }
 
-export interface SendBotMessageInput {
-  client_message_id: string;
-  text: string;
-}
+/** 契约名为 SendBotMessageRequest。 */
+export type SendBotMessageInput = Schemas["SendBotMessageRequest"];
 
-export interface SendBotMessageResult {
+/**
+ * 契约类型 + message/run 局部覆盖为前端富类型（契约把 content 建模为无
+ * 属性对象、缺 run.error_action，别名会把消费方的类型访问一起拖垮）。
+ */
+export type SendBotMessageResult = Omit<
+  Schemas["SendBotMessageResult"],
+  "message" | "run"
+> & {
   message: BotMessage;
   /** 受理时已存在的 run；没有则由服务端随后启动。 */
   run: BotRun | null;
-  /** true = 消息排队等待现有 run 在安全点处理，而不是立即触发新 run。 */
-  queued: boolean;
-}
+};
 
 // ---- 定时任务（INT-103）----
+// 字段引用生成类型；status/trigger_source 的字面量联合供穷尽 switch 用。
 
 export type BotScheduleRunStatus =
   | "running"
@@ -333,49 +247,26 @@ export type BotScheduleRunStatus =
   | "stopped"
   | "skipped";
 
-export interface BotScheduleRun {
-  id: string;
-  task_id: string;
+export type BotScheduleTriggerSource = "cron" | "manual";
+
+/** 契约类型 + status/trigger_source 字面量收窄。 */
+export type BotScheduleRun = Omit<
+  Schemas["BotScheduleRun"],
+  "status" | "trigger_source"
+> & {
   status: BotScheduleRunStatus;
   /** 触发来源：cron 到点触发，manual 为工具 fs_schedule.run 手动触发。 */
-  trigger_source: "cron" | "manual";
-  summary: string;
-  /** 静默运行（结果不回报到对话）。 */
-  silent: boolean;
-  error_code?: string;
-  error_message?: string;
-  scheduled_for: string | null;
-  started_at: string | null;
-  finished_at: string | null;
-  duration_ms: number | null;
-  prompt_tokens?: number;
-  completion_tokens?: number;
-  total_tokens?: number;
-}
+  trigger_source: BotScheduleTriggerSource;
+};
 
 /**
  * 定时任务只能由机器人经工具创建/修改/删除，前端只读 + 启停。
  * timezone 空串按 UTC；model 空串 = 用机器人自身模型。
+ * state 用原始 JSON 文本而不是解好的值（INT-123），避免浏览器把大整数折成 double。
  */
-export interface BotScheduleTask {
-  id: string;
-  bot_id: string;
-  name: string;
-  cron_expression: string;
-  timezone: string;
-  instruction: string;
-  model: string;
-  needs_report: boolean;
-  enabled: boolean;
-  next_run_at: string | null;
-  /** 跨运行保留的持久小状态（INT-123）：原始 JSON 文本，无状态为 null。用文本而不是解好的值，避免浏览器把大整数折成 double。 */
-  state: string | null;
-  /** 状态最后写入时间（RFC3339）；无状态为 null。 */
-  state_updated_at: string | null;
-  created_at: string;
-  updated_at: string;
+export type BotScheduleTask = Omit<Schemas["BotScheduleTask"], "last_run"> & {
   last_run: BotScheduleRun | null;
-}
+};
 
 export interface BotScheduleRunsQuery {
   limit?: number;

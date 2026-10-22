@@ -1,32 +1,21 @@
+import type { components } from "@/types/api.gen";
 import { api, decodeApiError } from "./client";
 
-// 套餐额度（INT-109）：端点与字段按冻结契约 v1 §5。
+// 套餐额度（INT-109）：请求类型引用 api.gen.ts（契约 v1 §5）。
 // credentials 是 { "<credential_fields[].key>": "<value>" } 对象；
 // PUT 省略 credentials 表示不改凭据，给了就是整组替换。
 
-export interface CreateQuotaAccountInput {
-  provider: string;
-  label: string;
-  credentials: Record<string, string>;
-}
+type Schemas = components["schemas"];
 
-export interface UpdateQuotaAccountInput {
-  label?: string;
-  credentials?: Record<string, string>;
-}
+export type CreateQuotaAccountInput = Schemas["CreateQuotaAccountRequest"];
 
-export interface QuotaProbeInput {
-  provider: string;
-  credentials: Record<string, string>;
-}
+export type UpdateQuotaAccountInput = Schemas["UpdateQuotaAccountRequest"];
 
-/** POST /api/quota/device-authorizations 请求体（INT-117） */
-export interface StartQuotaDeviceAuthorizationInput {
-  provider: string;
-  label: string;
-  /** 编辑已有账号时带上：批准后整组替换该账号凭据而不是新建（A5） */
-  account_id?: string;
-}
+export type QuotaProbeInput = Schemas["TestQuotaCredentialsRequest"];
+
+/** POST /api/quota/device-authorizations 请求体（INT-117）；契约名为 StartQuotaDeviceAuthorizationRequest。 */
+export type StartQuotaDeviceAuthorizationInput =
+  Schemas["StartQuotaDeviceAuthorizationRequest"];
 
 /** 探测与手动刷新会真实访问供应商接口（服务端默认 20s 超时），ky 默认 10s 不够。 */
 export const QUOTA_LIVE_REQUEST_TIMEOUT_MS = 30_000;

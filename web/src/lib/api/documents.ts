@@ -1,16 +1,18 @@
+import type { components } from "@/types/api.gen";
 import { api } from "./client";
 
+/**
+ * 创建请求体保留手写：parent_id 的三态（不传=不变、null=清除父级、
+ * 字符串=设为父文档）叠加创建端点的「可传 null」表单语义；契约的
+ * CreateDocumentRequest.parent_id 不含 null，表达不了这个写法。
+ */
 export interface CreateDocumentPayload {
   title: string;
   body?: string;
   parent_id?: string | null;
 }
 
-export interface UpdateDocumentPayload {
-  title?: string;
-  body?: string;
-  parent_id?: string | null;
-}
+export type UpdateDocumentPayload = components["schemas"]["UpdateDocumentRequest"];
 
 export const documentApi = {
   list: (projectId: string) =>

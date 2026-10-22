@@ -205,11 +205,12 @@ function poolRecoveryAt(pool: QuotaPool): string | null {
   let latestMs = -Infinity;
   for (const w of pool.windows) {
     if ((w.used_percent ?? 0) < 100) continue;
-    const ms = w.reset_at ? new Date(w.reset_at).getTime() : NaN;
+    const resetAt = w.reset_at ?? null;
+    const ms = resetAt ? new Date(resetAt).getTime() : NaN;
     if (Number.isNaN(ms)) return null;
     if (ms > latestMs) {
       latestMs = ms;
-      latest = w.reset_at;
+      latest = resetAt;
     }
   }
   return latest;

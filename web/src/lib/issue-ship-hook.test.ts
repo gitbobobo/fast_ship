@@ -193,13 +193,13 @@ describe("validateShipHookForm", () => {
 
 describe("formatShipSuccessToast", () => {
   it("formats hook counts into success messages", () => {
-    expect(formatShipSuccessToast({ hook_total: 0, hook_failed: 0 })).toBe(
+    expect(formatShipSuccessToast({ hook_total: 0, hook_failed: 0, hook_status: "completed" })).toBe(
       "发货成功！",
     );
-    expect(formatShipSuccessToast({ hook_total: 2, hook_failed: 0 })).toBe(
+    expect(formatShipSuccessToast({ hook_total: 2, hook_failed: 0, hook_status: "completed" })).toBe(
       "已发货，并执行了 2 个问题钩子",
     );
-    expect(formatShipSuccessToast({ hook_total: 2, hook_failed: 1 })).toBe(
+    expect(formatShipSuccessToast({ hook_total: 2, hook_failed: 1, hook_status: "completed" })).toBe(
       "已发货，并执行了 2 个问题钩子，其中 1 个有失败，请打开问题详情",
     );
   });

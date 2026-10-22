@@ -1,144 +1,39 @@
+import type { components } from "@/types/api.gen";
 import { api, decodeApiError } from "./client";
 
-// PR 审查（INT-135）前端类型：与 server/api/openapi.yaml 的 Review* schemas 对应。
+// PR 审查（INT-135）前端类型：与契约形状等价的直接引用 api.gen.ts
+//（server/api/openapi.yaml 生成，字段含义看其 @description）；字面量联合
+// 用契约枚举字段下标抽取。ReviewRerunResult 是契约内联响应，保留手写。
+
+type Schemas = components["schemas"];
 
 /** T3 模型选项，canonical `{id,value}` 数组形式（与 T3ModelSelection.options 同形）。 */
-export interface ReviewModelOption {
-  id: string;
-  value: string | boolean;
-}
+export type ReviewModelOption = Schemas["ReviewModelOption"];
 
 /** 一个审查组合：环境 + harness（instance_id）+ 模型 + 选项（思考强度等）。 */
-export interface ReviewCombination {
-  environment_id: string;
-  /** T3 provider 实例 id（harness 维度）。 */
-  instance_id: string;
-  model: string;
-  /** 模型选项（如 reasoningEffort），原样交给 T3。 */
-  options?: ReviewModelOption[];
-  /** 仅响应；环境当前名称。 */
-  environment_name?: string;
-  /** 仅响应；绑定的 T3 项目 id（保存时快照）。 */
-  t3_project_id?: string;
-}
+export type ReviewCombination = Schemas["ReviewCombination"];
 
-export type ReviewPrerequisiteCode =
-  | "github_app"
-  | "github_app_installation"
-  | "public_url"
-  | "github_token"
-  | "environment_binding";
+export type ReviewPrerequisiteCode = Schemas["ReviewPrerequisite"]["code"];
 
-export interface ReviewPrerequisite {
-  code: ReviewPrerequisiteCode;
-  label: string;
-  missing: boolean;
-  detail?: string;
-}
+export type ReviewPrerequisite = Schemas["ReviewPrerequisite"];
 
-export interface ReviewSettings {
-  project_id: string;
-  /** 仅响应；审查实际使用的仓库（owner/repo，原样大小写）。 */
-  repo_full_name: string;
-  enabled: boolean;
-  trigger_opened: boolean;
-  trigger_synchronize: boolean;
-  trigger_ready_for_review: boolean;
-  trigger_reopened: boolean;
-  code_combinations: ReviewCombination[];
-  visual_combinations: ReviewCombination[];
-  prerequisites: ReviewPrerequisite[];
-  /** 同仓库已开启审查的其他项目占用者登录名（只读）。 */
-  taken_by?: string | null;
-  can_manage?: boolean;
-}
+export type ReviewSettings = Schemas["ReviewSettings"];
 
-export interface ReviewSettingsInput {
-  enabled: boolean;
-  trigger_opened: boolean;
-  trigger_synchronize: boolean;
-  trigger_ready_for_review: boolean;
-  trigger_reopened: boolean;
-  code_combinations: ReviewCombination[];
-  visual_combinations: ReviewCombination[];
-}
+export type ReviewSettingsInput = Schemas["ReviewSettingsInput"];
 
-export interface ReviewProjectSummary {
-  project_id: string;
-  project_name: string;
-  github_owner: string;
-  github_repo: string;
-  enabled: boolean;
-  code_combination_count: number;
-  visual_combination_count: number;
-  /** 最近一次代码审查结论（success/failure/error/pending）。 */
-  code_status?: string | null;
-  visual_status?: string | null;
-  last_review_at?: string | null;
-  taken_by?: string | null;
-  can_manage: boolean;
-}
+export type ReviewProjectSummary = Schemas["ReviewProjectSummary"];
 
-export type ReviewRunStatus =
-  | "queued"
-  | "dispatched"
-  | "running"
-  | "completed"
-  | "failed"
-  | "timed_out"
-  | "cancelled";
+export type ReviewRunStatus = Schemas["ReviewRunSummary"]["status"];
 
-export type ReviewRunKind = "code" | "visual";
+export type ReviewRunKind = Schemas["ReviewRunSummary"]["kind"];
 
-export interface ReviewRunSummary {
-  id: string;
-  kind: ReviewRunKind;
-  environment_id: string;
-  environment_name?: string;
-  instance_id: string;
-  model: string;
-  options?: ReviewModelOption[];
-  status: ReviewRunStatus;
-  thread_id: string;
-  summary?: string;
-  error_code?: string;
-  error_message?: string;
-  /** P0/P1/P2（代码）或 blocker/worth fixing（视觉）的条目数。 */
-  findings_count?: number;
-  /** 完整发现列表：代码含 file/line，视觉含 screenshot/dimension/fix。 */
-  findings?: ReviewFinding[];
-  /** 视觉审查「无法判断」项。 */
-  unmeasurable?: ReviewUnmeasurable[];
-  ui_changed?: boolean;
-  worktree_state?: string | null;
-  started_at?: string | null;
-  finished_at?: string | null;
-}
+export type ReviewRunSummary = Schemas["ReviewRunSummary"];
 
-export interface ReviewRoundRecord {
-  round_number: number;
-  head_sha: string;
-  /** 该轮第一条代码 run 的触发动作；没有代码 run 时服务端回退 "unknown"。 */
-  trigger_action: string;
-  created_at: string;
-  code_runs: ReviewRunSummary[];
-  visual_runs: ReviewRunSummary[];
-}
+export type ReviewRoundRecord = Schemas["ReviewRoundRecord"];
 
-export interface ReviewPullRequestRecord {
-  repo_full_name: string;
-  pr_number: number;
-  pr_title: string;
-  pr_url: string;
-  head_sha: string;
-  code_status?: string | null;
-  visual_status?: string | null;
-  updated_at: string;
-  /** 记录是否属于项目当前仓库；跨仓库的历史记录只能查看。 */
-  can_rerun: boolean;
-  rounds: ReviewRoundRecord[];
-}
+export type ReviewPullRequestRecord = Schemas["ReviewPullRequestRecord"];
 
+/** rerun 端点的 data 是契约内联对象，无独立 schema。 */
 export interface ReviewRerunResult {
   accepted: boolean;
   head_sha: string;
@@ -146,95 +41,38 @@ export interface ReviewRerunResult {
 }
 
 /** 单条审查发现：代码 level=P0/P1/P2/Note，视觉 level=blocker/worth_fixing/minor。 */
-export interface ReviewFinding {
-  level: string;
-  body: string;
-  file?: string;
-  line?: number;
-  dimension?: string;
-  fix?: string;
-  screenshot?: string;
-}
+export type ReviewFinding = Schemas["ReviewFinding"];
 
 /** 视觉审查「无法判断」的截图项。 */
-export interface ReviewUnmeasurable {
-  screenshot: string;
-  reason: string;
-}
+export type ReviewUnmeasurable = Schemas["ReviewUnmeasurable"];
 
 /* ---------------- /reviews 首页 PR 动态（INT-141） ---------------- */
 
 export type ReviewPullRequestGroup =
-  | "in_progress"
-  | "needs_action"
-  | "recently_passed";
+  Schemas["ReviewPullRequestActivity"]["group"];
 
 /** 进行中细分阶段；仅 in_progress 组的行返回。 */
-export type ReviewActivityStage = "debouncing" | "queued" | "reviewing";
+export type ReviewActivityStage = NonNullable<
+  Schemas["ReviewPullRequestActivity"]["stage"]
+>;
 
-export type ReviewStageStatus =
-  | "pending"
-  | "queued"
-  | "running"
-  | "completed"
-  | "failed"
-  | "skipped";
+export type ReviewStageStatus = Schemas["ReviewStageProgress"]["status"];
 
 /** 一段（代码/视觉）的聚合进度，前端进度文案的唯一数据源。 */
-export interface ReviewStageProgress {
-  kind: ReviewRunKind;
-  total: number;
-  completed: number;
-  status: ReviewStageStatus;
-}
+export type ReviewStageProgress = Schemas["ReviewStageProgress"];
 
 /** 当前轮发现计数；JSON key 与后端一致（P0/P1/P2 大写）。 */
-export interface ReviewFindingCounts {
-  P0: number;
-  P1: number;
-  P2: number;
-  blocker: number;
-  worth_fixing: number;
-}
+export type ReviewFindingCounts = Schemas["ReviewFindingCounts"];
 
 /** 需要处理的原因行：失败的组合与可读原因；账本兜底项 combination 为 null。 */
-export interface ReviewActivityIssue {
-  kind: ReviewRunKind;
-  combination?: string | null;
-  reason: string;
-  message: string;
-}
+export type ReviewActivityIssue = Schemas["ReviewActivityIssue"];
 
 /** 跨项目 PR 动态行；分组与阶段由服务端算好，前端只负责展示。 */
-export interface ReviewPullRequestActivity {
-  project_id: string;
-  project_name: string;
-  repo_full_name: string;
-  pr_number: number;
-  pr_title: string;
-  pr_url: string;
-  group: ReviewPullRequestGroup;
-  stage?: ReviewActivityStage | null;
-  debounce_fire_at?: string | null;
-  round_number: number;
-  head_sha: string;
-  updated_at: string;
-  started_at: string;
-  stages: ReviewStageProgress[];
-  findings: ReviewFindingCounts;
-  issues: ReviewActivityIssue[];
-  can_rerun: boolean;
-}
+export type ReviewPullRequestActivity = Schemas["ReviewPullRequestActivity"];
 
-export interface ReviewPullRequestActivityResult {
-  items: ReviewPullRequestActivity[];
-  counts: {
-    in_progress: number;
-    needs_action: number;
-    recently_passed: number;
-  };
-  total: number;
-}
+/** 契约名为 ReviewPullRequestActivityPage。 */
+export type ReviewPullRequestActivityResult =
+  Schemas["ReviewPullRequestActivityPage"];
 
 const projectPath = (projectId: string) =>
   `projects/${encodeURIComponent(projectId)}`;

@@ -16,7 +16,6 @@ const listMock = vi.mocked(projectApi.list);
 function makeProject(id: string, issueCount?: number): Project {
   return {
     id,
-    user_id: "user-1",
     name: `项目-${id}`,
     description: "",
     github_owner: "",

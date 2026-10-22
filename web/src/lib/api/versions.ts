@@ -1,16 +1,12 @@
+import type { components } from "@/types/api.gen";
 import { api } from "./client";
 
-interface CreateVersionRequest {
-  version_number: string;
-  release_notes?: string;
-  target_commitish?: string;
-}
+/** 契约类型直接引用 api.gen.ts。 */
+type Schemas = components["schemas"];
 
-interface UpdateVersionRequest {
-  version_number?: string;
-  release_notes?: string;
-  target_commitish?: string;
-}
+type CreateVersionRequest = Schemas["CreateVersionRequest"];
+
+type UpdateVersionRequest = Schemas["UpdateVersionRequest"];
 
 export const versionApi = {
   list: (projectId: string, status?: string) =>

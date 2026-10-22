@@ -28,6 +28,7 @@ const PROVIDERS: QuotaProvider[] = [
   {
     id: "commandcode",
     name: "Command Code",
+    plan_hint: "",
     credential_fields: [
       {
         key: "api_key",
@@ -45,6 +46,7 @@ const PROVIDERS: QuotaProvider[] = [
   {
     id: "opencodego",
     name: "OpenCode Go",
+    plan_hint: "",
     credential_fields: [
       {
         key: "api_key",
@@ -62,6 +64,7 @@ const PROVIDERS: QuotaProvider[] = [
   {
     id: "zai",
     name: "智谱 GLM Coding Plan",
+    plan_hint: "",
     credential_fields: [
       {
         key: "api_key",
@@ -79,6 +82,7 @@ const PROVIDERS: QuotaProvider[] = [
   {
     id: "grok",
     name: "Grok",
+    plan_hint: "",
     credential_fields: [
       {
         key: "token",
@@ -96,6 +100,7 @@ const PROVIDERS: QuotaProvider[] = [
   {
     id: "codex",
     name: "Codex",
+    plan_hint: "",
     credential_fields: [
       {
         key: "access_token",
@@ -121,6 +126,7 @@ const PROVIDERS: QuotaProvider[] = [
   {
     id: "devin",
     name: "Devin",
+    plan_hint: "",
     credential_fields: [
       {
         key: "token",

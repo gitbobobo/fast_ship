@@ -23,6 +23,7 @@ const fullRequest: BotRequestMetrics = {
 };
 
 function makeMetrics(
+  // null 表示「无最近请求」；契约的 request 可选不可空，这里归一成 undefined
   request: BotRequestMetrics | null = fullRequest,
   overrides: Partial<MetricsData> = {},
 ): MetricsData {
@@ -31,7 +32,7 @@ function makeMetrics(
     max_output_tokens: 8000,
     context_source: "detected",
     context_detail: "GET /models",
-    request,
+    request: request ?? undefined,
     ...overrides,
   };
 }

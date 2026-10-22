@@ -1,14 +1,12 @@
+import type { components } from "@/types/api.gen";
 import { api } from "./client";
 
-interface CreateGitHubTokenRequest {
-  title: string;
-  token: string;
-}
+/** 契约类型直接引用 api.gen.ts。 */
+type Schemas = components["schemas"];
 
-interface UpdateGitHubTokenRequest {
-  title?: string;
-  token?: string;
-}
+type CreateGitHubTokenRequest = Schemas["CreateGitHubTokenRequest"];
+
+type UpdateGitHubTokenRequest = Schemas["UpdateGitHubTokenRequest"];
 
 export const githubTokenApi = {
   list: () => api.get("github-tokens").json<ApiResponse<GitHubToken[]>>(),

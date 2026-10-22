@@ -55,10 +55,12 @@ function makeIssue(id: string): Issue {
     body_html: "",
     author: { login: "alice", avatar_url: "" },
     unread_comments_count: 0,
+    closed_at: null,
     created_at: "2026-08-22T00:00:00Z",
     updated_at: "2026-08-22T00:00:00Z",
     internal_meta: {
       workflow_status: "todo",
+      progress_percent: null,
       checklist_total: 0,
       checklist_done: 0,
       labels: [],
