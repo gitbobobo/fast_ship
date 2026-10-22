@@ -8813,7 +8813,7 @@ client_message_id 必填（幂等键）：同键同正文返回已有消息；�
 | `message.kind` | string | 是 | user / assistant / tool_reply / background_result / approval_decision / lifecycle |
 | `message.content` | object | 是 | 按 kind 变化的正文；assistant 含 text 与 tool_calls 数组；tool_reply 含协议回复字符串 |
 | `message.created_at` | string（date-time） | 是 |  |
-| `run` | object | 否 |  |
+| `run` | object（可空） | 是 | 当前活动 run（可能尚未包含本消息）；没有时为 null，本次发送会触发新 run |
 | `run.id` | string | 是 |  |
 | `run.bot_id` | string | 是 |  |
 | `run.trigger_source` | string | 是 | user_message / tool_result / recovery / schedule / manual / schedule_event（定时任务运行事件写入主线后的立即唤醒，INT-138） |
