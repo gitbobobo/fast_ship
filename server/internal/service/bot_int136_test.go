@@ -10,6 +10,7 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 // 定时任务写确认（INT-136）服务层测试：fs_schedule create/敏感字段 update/
@@ -1251,6 +1252,19 @@ func TestBotInt136ConfirmedFlagLifecycle(t *testing.T) {
 	// 经确认卡的 create：落库即已复核。
 	createCall := &model.BotToolCall{BotID: bot.ID, RequiresConfirmation: true,
 		ArgumentsJSON: `{"action":"create","name":"已确认任务","cron":"0 9 * * *","instruction":"跑一下"}`}
+	botRow, err := env.bots.bots.Get(bot.ID)
+	if err != nil {
+		t.Fatalf("load bot: %v", err)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(createCall.ArgumentsJSON), &raw); err != nil {
+		t.Fatalf("decode args: %v", err)
+	}
+	preview, err := env.bots.schedulePreviewFromArgs(botRow, raw)
+	if err != nil || preview == nil {
+		t.Fatalf("preview: %+v %v", preview, err)
+	}
+	createCall.ExecutionContextJSON = marshalExecContext(botCallExecContext{Schedule: preview})
 	if _, err := env.bots.execScheduleTool(createCall); err != nil {
 		t.Fatalf("create exec: %v", err)
 	}
@@ -1531,8 +1545,8 @@ func TestBotInt136SchedulePreviewUsesOwnerTimezone(t *testing.T) {
 	if preview == nil {
 		t.Fatalf("预览不应为空")
 	}
-	if preview.Timezone != "Asia/Shanghai" {
-		t.Fatalf("省略时区时快照应写用户时区，实得 %q", preview.Timezone)
+	if preview.Timezone != "Asia/Shanghai" || preview.UserTimezone != "Asia/Shanghai" {
+		t.Fatalf("省略时区时快照应冻结任务与用户时区，实得 %+v", preview)
 	}
 	if !strings.Contains(preview.NextRunAt, "09:00:00") {
 		t.Fatalf("next_run_at 应为用户本地 09:00，实得 %q", preview.NextRunAt)
@@ -1543,8 +1557,8 @@ func TestBotInt136SchedulePreviewUsesOwnerTimezone(t *testing.T) {
 
 	// 显式时区仍以参数为准，不被用户时区覆盖。
 	raw["timezone"] = json.RawMessage(`"UTC"`)
-	if got, err := env.bots.schedulePreviewFromArgs(botRow, raw); err != nil || got.Timezone != "UTC" {
-		t.Fatalf("显式时区应保留，实得 %q", got.Timezone)
+	if got, err := env.bots.schedulePreviewFromArgs(botRow, raw); err != nil || got == nil || got.Timezone != "UTC" || got.UserTimezone != "Asia/Shanghai" {
+		t.Fatalf("显式任务时区与用户回执时区应分别保留，实得 %+v err=%v", got, err)
 	}
 }
 
@@ -1562,7 +1576,10 @@ func TestBotInt136ScheduleCreateUsesSnapshotTimezone(t *testing.T) {
 		ID: uuid.NewString(), BotID: bot.ID, ToolName: "fs_schedule", Action: "create",
 		ArgumentsJSON: `{"action":"create","name":"晨报","cron":"0 9 * * *","instruction":"检查新 issue"}`,
 		ExecutionContextJSON: marshalExecContext(botCallExecContext{
-			Schedule: &botScheduleCallPreview{Timezone: "UTC"},
+			Schedule: &botScheduleCallPreview{
+				Name: "晨报", Cron: "0 9 * * *", Timezone: "UTC",
+				Instruction: "检查新 issue", ModelInherited: true,
+			},
 		}),
 	}
 	out, err := env.bots.execScheduleCreate(call, &botScheduleTaskArgs{
@@ -1584,5 +1601,331 @@ func TestBotInt136ScheduleCreateUsesSnapshotTimezone(t *testing.T) {
 	}
 	if task.Timezone != "UTC" {
 		t.Fatalf("应按快照时区落库（UTC），实得 %q", task.Timezone)
+	}
+	var receipt map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(out), &receipt); err != nil {
+		t.Fatalf("decode receipt: %v", err)
+	}
+	for _, field := range []string{"user_timezone", "next_run_at_user"} {
+		if _, ok := receipt[field]; ok {
+			t.Fatalf("旧快照没有用户时区时应省略 %s: %s", field, out)
+		}
+	}
+}
+
+func scheduleUserReadProbe(t *testing.T, env *botTestEnv, readErr error) *int {
+	t.Helper()
+	reads := 0
+	const name = "test:schedule_user_read_probe"
+	if err := env.db.Callback().Query().Before("gorm:query").Register(name, func(tx *gorm.DB) {
+		if tx.Statement.Table == "users" {
+			reads++
+			if readErr != nil {
+				tx.AddError(readErr)
+			}
+		}
+	}); err != nil {
+		t.Fatalf("register user read probe: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := env.db.Callback().Query().Remove(name); err != nil {
+			t.Errorf("remove user read probe: %v", err)
+		}
+	})
+	return &reads
+}
+
+func TestBotInt136ScheduleAcceptRejectsUserTimezoneReadFailure(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "accepttzerr")
+	bot := env.createBot(t, userID)
+	task := seedScheduleTask(t, env, bot.ID, nil)
+	botRow, err := env.bots.bots.Get(bot.ID)
+	if err != nil {
+		t.Fatalf("load bot: %v", err)
+	}
+	// 不存在的用户会按未声明回退；注入真实查询错误才覆盖失败关闭分支。
+	readErr := errors.New("user timezone query failed")
+	reads := scheduleUserReadProbe(t, env, readErr)
+	for _, args := range []string{
+		`{"action":"create","name":"n","cron":"0 9 * * *","instruction":"i"}`,
+		`{"action":"create","name":"n","cron":"0 9 * * *","timezone":"UTC","instruction":"i"}`,
+		`{"action":"update","task_id":"` + task.ID + `","instruction":"new"}`,
+		`{"action":"enable","task_id":"` + task.ID + `"}`,
+	} {
+		prepared, err := botPrepareToolCall(botToolsetVersionOf(8), "fs_schedule", args)
+		if err != nil {
+			t.Fatalf("prepare: %v", err)
+		}
+		execCtx := botCallExecContext{}
+		before := *reads
+		err = env.bots.resolveCallScope(botRow, prepared, args, &execCtx)
+		if !errors.Is(err, readErr) || *reads != before+1 {
+			t.Fatalf("应只查询一次并返回时区读库错误: args=%s reads=%d err=%v", args, *reads-before, err)
+		}
+		if prepared.SchedulePreview != nil || execCtx.Schedule != nil {
+			t.Fatalf("受理失败不应留下快照: prepared=%+v ctx=%+v", prepared.SchedulePreview, execCtx.Schedule)
+		}
+	}
+	var calls int64
+	if err := env.db.Model(&model.BotToolCall{}).Where("bot_id = ?", bot.ID).Count(&calls).Error; err != nil {
+		t.Fatalf("count calls: %v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("受理失败不应建确认卡，实得 %d", calls)
+	}
+	for _, action := range []string{"run", "delete"} {
+		args := `{"action":"` + action + `","task_id":"` + task.ID + `"}`
+		prepared, err := botPrepareToolCall(botToolsetVersionOf(8), "fs_schedule", args)
+		if err != nil {
+			t.Fatalf("prepare %s: %v", action, err)
+		}
+		before := *reads
+		execCtx := botCallExecContext{}
+		if err := env.bots.resolveCallScope(botRow, prepared, args, &execCtx); err != nil {
+			t.Fatalf("%s 不应依赖用户时区: %v", action, err)
+		}
+		if *reads != before || execCtx.Schedule == nil || execCtx.Schedule.UserTimezone != "" {
+			t.Fatalf("%s 不应查询或冻结无用的用户时区: reads=%d snap=%+v", action, *reads-before, execCtx.Schedule)
+		}
+	}
+}
+
+func TestBotInt136ScheduleCreateReceiptUsesSnapshotUserTimezone(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "receipttz")
+	bot := env.createBot(t, userID)
+	report := true
+	snap := &botScheduleCallPreview{
+		Name: "approved", Cron: "0 9 * * *", Timezone: "America/New_York",
+		UserTimezone: "Asia/Shanghai", Instruction: "approved instruction",
+		NeedsReport: &report, EffectiveModel: "approved-model",
+	}
+	// 执行期即使用户查询报错也必须成功，而不只是「换时区后碰巧结果相同」。
+	reads := scheduleUserReadProbe(t, env, errors.New("unexpected user read"))
+	for _, currentTimezone := range []string{"UTC", "Asia/Tokyo", ""} {
+		setUserTimezone(t, env, userID, currentTimezone)
+		call := &model.BotToolCall{ID: uuid.NewString(), BotID: bot.ID, RequiresConfirmation: true,
+			ExecutionContextJSON: marshalExecContext(botCallExecContext{Schedule: snap})}
+		out, err := env.bots.execScheduleCreate(call, &botScheduleTaskArgs{
+			Name: "unapproved", Cron: "0 1 * * *", Timezone: "UTC", Instruction: "unapproved",
+		})
+		if err != nil {
+			t.Fatalf("create with user timezone %q: %v", currentTimezone, err)
+		}
+		var receipt struct {
+			ID            string `json:"id"`
+			UserTimezone  string `json:"user_timezone"`
+			NextRunAtUser string `json:"next_run_at_user"`
+		}
+		if err := json.Unmarshal([]byte(out), &receipt); err != nil {
+			t.Fatalf("decode receipt: %v %s", err, out)
+		}
+		task, err := env.bots.schedTasks.FindByID(receipt.ID)
+		if err != nil {
+			t.Fatalf("load task: %v", err)
+		}
+		if task.Name != snap.Name || task.CronExpression != snap.Cron || task.Timezone != snap.Timezone ||
+			task.Instruction != snap.Instruction || !task.NeedsReport || task.Model != snap.EffectiveModel {
+			t.Fatalf("落库配置必须全部取自快照: %+v", task)
+		}
+		if task.NextRunAt == nil {
+			t.Fatal("created task missing next run")
+		}
+		want := task.NextRunAt.In(timeOrUTC(snap.UserTimezone)).Format("2006-01-02 15:04:05 MST")
+		if receipt.UserTimezone != snap.UserTimezone || receipt.NextRunAtUser != want || *reads != 0 {
+			t.Fatalf("回执应只用受理快照: receipt=%+v want=%s user_reads=%d", receipt, want, *reads)
+		}
+	}
+	snap.ModelInherited = true
+	call := &model.BotToolCall{BotID: bot.ID,
+		ExecutionContextJSON: marshalExecContext(botCallExecContext{Schedule: snap})}
+	out, err := env.bots.execScheduleCreate(call, &botScheduleTaskArgs{})
+	if err != nil {
+		t.Fatalf("create inherited: %v", err)
+	}
+	var receipt struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(out), &receipt); err != nil {
+		t.Fatalf("decode inherited: %v", err)
+	}
+	task, err := env.bots.schedTasks.FindByID(receipt.ID)
+	if err != nil || task.Model != "" || *reads != 0 {
+		t.Fatalf("继承模型应保存跟随策略且不读用户: task=%+v reads=%d err=%v", task, *reads, err)
+	}
+}
+
+func TestBotInt136SchedulePreviewKeepsMergedNextRun(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "mergednext")
+	bot := env.createBot(t, userID)
+	setUserTimezone(t, env, userID, "Asia/Tokyo")
+	botRow, err := env.bots.bots.Get(bot.ID)
+	if err != nil {
+		t.Fatalf("load bot: %v", err)
+	}
+	// 调度推进不改配置水位；这次计划可以已过期，不能从 now 重算把它藏掉。
+	due := time.Now().UTC().Add(-5 * time.Minute).Truncate(time.Second)
+	task := seedScheduleTask(t, env, bot.ID, func(task *model.BotScheduleTask) {
+		task.NextRunAt = &due
+	})
+	reads := scheduleUserReadProbe(t, env, nil)
+	preview := func(action, fields string) *botScheduleCallPreview {
+		t.Helper()
+		args := `{"action":"` + action + `","task_id":"` + task.ID + `"` + fields + `}`
+		prepared, err := botPrepareToolCall(botToolsetVersionOf(8), "fs_schedule", args)
+		if err != nil {
+			t.Fatalf("prepare %s: %v", action, err)
+		}
+		before := *reads
+		execCtx := botCallExecContext{}
+		if err := env.bots.resolveCallScope(botRow, prepared, args, &execCtx); err != nil {
+			t.Fatalf("resolve %s: %v", action, err)
+		}
+		wantReads := 0
+		if action == "update" || action == "enable" {
+			wantReads = 1
+		}
+		if *reads-before != wantReads || execCtx.Schedule == nil {
+			t.Fatalf("%s 时区应只在需要时解析一次: reads=%d snap=%+v", action, *reads-before, execCtx.Schedule)
+		}
+		if wantReads == 1 && execCtx.Schedule.UserTimezone != "Asia/Tokyo" {
+			t.Fatalf("%s 应冻结回执时区: %+v", action, execCtx.Schedule)
+		}
+		return execCtx.Schedule
+	}
+	for _, action := range []string{"update", "enable", "run", "delete"} {
+		fields := ""
+		if action == "update" {
+			fields = `,"instruction":"new instruction"`
+		}
+		got := preview(action, fields)
+		wantLocal := due.In(timeOrUTC(task.Timezone)).Format("2006-01-02 15:04:05 MST")
+		if got.NextRunAt != wantLocal || got.NextRunAtUTC != due.Format(time.RFC3339) {
+			t.Fatalf("%s 应展示合并结果的原计划: got=%+v want=%s", action, got, wantLocal)
+		}
+	}
+	if err := env.db.Model(&model.BotScheduleTask{}).Where("id = ?", task.ID).
+		UpdateColumns(map[string]interface{}{"enabled": false, "next_run_at": nil}).Error; err != nil {
+		t.Fatalf("disable task: %v", err)
+	}
+	for _, fields := range []string{`,"instruction":"new instruction"`, `,"instruction":"new instruction","cron":"30 10 * * *"`} {
+		got := preview("update", fields)
+		if got.NextRunAt != "" || got.NextRunAtUTC != "" {
+			t.Fatalf("停用任务的 update 不能凭空给出未来计划: %+v", got)
+		}
+	}
+	// enable 与执行器同一谓词预测重新武装，但预测不能写回原本无计划的任务行。
+	before := time.Now().UTC()
+	got := preview("enable", "")
+	next, err := time.Parse(time.RFC3339, got.NextRunAtUTC)
+	if err != nil || !next.After(before) || !strings.Contains(got.NextRunAt, "09:00:00") {
+		t.Fatalf("停用任务 enable 应预览重新武装的计划: %+v err=%v", got, err)
+	}
+	unchanged, err := env.bots.schedTasks.FindByID(task.ID)
+	if err != nil {
+		t.Fatalf("reload disabled task: %v", err)
+	}
+	if unchanged.NextRunAt != nil || unchanged.Enabled || !unchanged.UpdatedAt.Equal(task.UpdatedAt) {
+		t.Fatalf("卡片预测不能写回任务行: %+v", unchanged)
+	}
+	if err := env.db.Model(&model.BotScheduleTask{}).Where("id = ?", task.ID).
+		UpdateColumn("enabled", true).Error; err != nil {
+		t.Fatalf("enable without next run: %v", err)
+	}
+	if got := preview("enable", ""); got.NextRunAt == "" || got.NextRunAtUTC == "" {
+		t.Fatalf("已启用但无计划也应按 enable 谓词预测: %+v", got)
+	}
+}
+
+func TestBotInt136ScheduleCreateRejectsMissingSnapshot(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "missingsnap")
+	bot := env.createBot(t, userID)
+	reads := scheduleUserReadProbe(t, env, errors.New("unexpected user read"))
+	for _, execContext := range []string{"", "{", "{}", `{"schedule":{}}`, `{"schedule":{"timezone":" "}}`} {
+		call := &model.BotToolCall{BotID: bot.ID, ExecutionContextJSON: execContext}
+		_, err := env.bots.execScheduleCreate(call, &botScheduleTaskArgs{
+			Name: "n", Cron: "0 9 * * *", Timezone: "UTC", Instruction: "i",
+		})
+		var appErr *errs.AppError
+		if !errors.As(err, &appErr) || appErr.Code != errs.ErrInvalidParams.Code || !strings.Contains(appErr.Message, "重新发起") {
+			t.Fatalf("缺失或不完整快照应明确拒绝重发: ctx=%q err=%v", execContext, err)
+		}
+	}
+	if n := countScheduleTasks(t, env, bot.ID); n != 0 || *reads != 0 {
+		t.Fatalf("无快照 create 不应建任务或读用户: tasks=%d reads=%d", n, *reads)
+	}
+}
+
+func TestBotInt136ScheduleUpdateEnableReceiptUsesSnapshot(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "updatereceipttz")
+	bot := env.createBot(t, userID)
+	setUserTimezone(t, env, userID, "UTC")
+	reads := scheduleUserReadProbe(t, env, errors.New("unexpected user read"))
+	for _, action := range []string{"update", "enable"} {
+		for _, snapshot := range []struct {
+			userTimezone string
+			missing      bool
+		}{{userTimezone: "Asia/Shanghai"}, {}, {missing: true}} {
+			userTimezone := snapshot.userTimezone
+			task := seedScheduleTask(t, env, bot.ID, func(task *model.BotScheduleTask) {
+				task.Enabled = action != "enable"
+			})
+			call := &model.BotToolCall{BotID: bot.ID, RequiresConfirmation: true,
+				ExecutionContextJSON: marshalExecContext(botCallExecContext{
+					Schedule: &botScheduleCallPreview{
+						UserTimezone:  userTimezone,
+						TaskUpdatedAt: task.UpdatedAt.UTC().Format(time.RFC3339Nano),
+					},
+				})}
+			if snapshot.missing {
+				call.ExecutionContextJSON = ""
+			}
+			args := &botScheduleTaskArgs{TaskID: task.ID, Instruction: "approved instruction"}
+			var out string
+			var err error
+			if action == "update" {
+				out, err = env.bots.execScheduleUpdate(call, args)
+			} else {
+				out, err = env.bots.execScheduleEnable(call, args, true)
+			}
+			if err != nil {
+				t.Fatalf("%s with snapshot user timezone %q: %v", action, userTimezone, err)
+			}
+			var receipt map[string]json.RawMessage
+			if err := json.Unmarshal([]byte(out), &receipt); err != nil {
+				t.Fatalf("decode %s: %v", action, err)
+			}
+			if *reads != 0 {
+				t.Fatalf("%s 回执不应重新查询用户时区: %d", action, *reads)
+			}
+			if userTimezone == "" {
+				if receipt["user_timezone"] != nil || receipt["next_run_at_user"] != nil {
+					t.Fatalf("%s 旧快照应省略用户时间: %s", action, out)
+				}
+				continue
+			}
+			var gotTimezone, local, utc string
+			if err := json.Unmarshal(receipt["user_timezone"], &gotTimezone); err != nil {
+				t.Fatalf("decode user timezone: %v", err)
+			}
+			if err := json.Unmarshal(receipt["next_run_at_user"], &local); err != nil {
+				t.Fatalf("decode local time: %v", err)
+			}
+			if err := json.Unmarshal(receipt["next_run_at_utc"], &utc); err != nil {
+				t.Fatalf("decode UTC time: %v", err)
+			}
+			next, err := time.Parse(time.RFC3339, utc)
+			if err != nil {
+				t.Fatalf("parse UTC time: %v", err)
+			}
+			want := next.In(timeOrUTC(userTimezone)).Format("2006-01-02 15:04:05 MST")
+			if gotTimezone != userTimezone || local != want {
+				t.Fatalf("%s 应沿用受理时区: timezone=%s local=%s want=%s", action, gotTimezone, local, want)
+			}
+		}
 	}
 }

@@ -98,9 +98,8 @@ func (s *BotService) newScheduleSession(bot *model.Bot, run *model.BotRun) (*bot
 }
 
 // botScheduleSensitiveSHA 是任务敏感配置的指纹：instruction/model/
-// needs_report 任一变更都会改哈希。run 的修订比对只关心这三项——name/
-// cron/timezone/enabled 的改动本身不需要确认，批准后发生也不该让已受理
-// 的 run 以「确认期间被修改」失败。
+// needs_report 任一变更都会改哈希。建 run 之后的修订比对只关心这三项，
+// 不把改名/cron/时区/启停误当成对已批准的一次性运行的撤销。
 func botScheduleSensitiveSHA(task *model.BotScheduleTask) string {
 	needs := "0"
 	if task.NeedsReport {
@@ -112,9 +111,9 @@ func botScheduleSensitiveSHA(task *model.BotScheduleTask) string {
 
 // botScheduleRunRevisionChanged 核对手动 run 的敏感配置是否仍是建 run 时那
 // 一版：确认卡的受理→执行窗口由 worker 事务里的 task_updated_at 比对把关，
-// 这里守的是建 run→会话加载的窗口——只比对敏感指纹，批准后的良性改动
-// （改名/改 cron/停用）不再误杀已批准的 run。存量 run 没有指纹字段时回落
-// 到 task_updated_at 整行比对。
+// 这里守的是建 run→会话加载的几秒窗口，只比对敏感指纹；不能与可能挂数天
+// 的受理水位合并，否则改名/cron/停用会误杀已批准的一次性运行。存量 run
+// 没有指纹字段时回落到 task_updated_at 整行比对。
 func botScheduleRunRevisionChanged(run *model.BotRun, task *model.BotScheduleTask) error {
 	if run == nil || task == nil {
 		return nil
@@ -421,6 +420,7 @@ func (s *BotService) createScheduleTask(botID, name, cronExpr, timezone, instruc
 	instruction = strings.TrimSpace(instruction)
 	timezone = strings.TrimSpace(timezone)
 	if timezone == "" {
+		// 这里只兼容直接调用；确认执行者必须传快照时区，不能再进入读库分支。
 		// 读不到机器人（数据库错误，或调用途中机器人被删）必须失败：继续下去
 		// 会以空时区建出任务，而空时区在解析与调度里都等价于 UTC——用户的
 		// 「每天早上 9 点」就被静默固化成 UTC 任务了。
@@ -491,8 +491,8 @@ func (s *BotService) updateScheduleTask(botID, taskID, name, cronExpr, timezone,
 			}
 			return err
 		}
-		// 确认卡批准的是受理时看到的那一版：期间任务被改过就拒绝，避免
-		// 「卡上展示的合并后配置」与「实际执行的合并基底」不是同一份。
+		// 受理到事务可能挂数天，整行修订变化都使旧卡失效；不能用建 run
+		// 后秒级窗口的敏感指纹代替，否则改名/cron/启停后仍会执行旧卡。
 		if err := botScheduleRevisionChanged(task, expectedUpdatedAt); err != nil {
 			return err
 		}
@@ -593,6 +593,7 @@ func (s *BotService) setScheduleTaskEnabled(botID, taskID string, enabled bool, 
 			}
 			return err
 		}
+		// enable 同样守可能挂数天的整行受理水位，不是建 run 后的敏感指纹。
 		if err := botScheduleRevisionChanged(task, expectedUpdatedAt); err != nil {
 			return err
 		}
@@ -667,6 +668,7 @@ func (s *BotService) deleteScheduleTask(botID, taskID, expectedUpdatedAt string)
 				}
 				return err
 			}
+			// 删除旧卡也要核对整行受理水位，不能只因敏感指纹没变就删掉新配置。
 			if err := botScheduleRevisionChanged(current, expectedUpdatedAt); err != nil {
 				return err
 			}
@@ -1192,6 +1194,7 @@ func (s *BotService) manuallyStartScheduleRun(botID string, task *model.BotSched
 			}
 			return err
 		}
+		// 建 run 前仍守整行受理水位；建好后到会话加载才改守秒级敏感指纹。
 		if err := botScheduleRevisionChanged(current, expectedUpdatedAt); err != nil {
 			return err
 		}
@@ -1305,7 +1308,9 @@ func (s *BotService) scheduleTaskSlim(userTimezone string, userLoc *time.Locatio
 		"cron_expression": task.CronExpression, "timezone": task.Timezone,
 		"instruction": task.Instruction, "needs_report": task.NeedsReport,
 		"enabled": task.Enabled, "has_state": task.StateJSON != "",
-		"user_timezone": userTimezone,
+	}
+	if userTimezone != "" {
+		out["user_timezone"] = userTimezone
 	}
 	if task.Model != "" {
 		out["model"] = task.Model
@@ -1314,7 +1319,9 @@ func (s *BotService) scheduleTaskSlim(userTimezone string, userLoc *time.Locatio
 		loc := timeOrUTC(task.Timezone)
 		out["next_run_at"] = task.NextRunAt.In(loc).Format("2006-01-02 15:04:05 MST")
 		out["next_run_at_utc"] = task.NextRunAt.UTC().Format(time.RFC3339)
-		out["next_run_at_user"] = task.NextRunAt.In(userLoc).Format("2006-01-02 15:04:05 MST")
+		if userTimezone != "" && userLoc != nil {
+			out["next_run_at_user"] = task.NextRunAt.In(userLoc).Format("2006-01-02 15:04:05 MST")
+		}
 	} else {
 		out["next_run_at"] = nil
 	}
@@ -1331,49 +1338,53 @@ func timeOrUTC(name string) *time.Location {
 	return time.UTC
 }
 
-// botScheduleSnapshotTimezone 取确认卡快照里受理时解析的任务时区；没有快照
-// （旧版本会话或免确认路径）返回空串，由调用方回退到现场解析。
-func botScheduleSnapshotTimezone(call *model.BotToolCall) string {
+// botScheduleSnapshot 读取受理时冻结的配置，避免执行期重新解释参数或用户时区。
+func botScheduleSnapshot(call *model.BotToolCall) *botScheduleCallPreview {
 	if call == nil || strings.TrimSpace(call.ExecutionContextJSON) == "" {
-		return ""
+		return nil
 	}
 	var ctx botCallExecContext
 	if err := json.Unmarshal([]byte(call.ExecutionContextJSON), &ctx); err != nil {
-		return ""
+		return nil
 	}
-	if ctx.Schedule == nil {
-		return ""
-	}
-	return strings.TrimSpace(ctx.Schedule.Timezone)
+	return ctx.Schedule
 }
 
-func (s *BotService) execScheduleCreate(call *model.BotToolCall, args *botScheduleTaskArgs) (string, error) {
-	mdl := ""
-	if args.Model != nil {
-		mdl = *args.Model
-	}
-	// resolved 只用于回执里的「用户当地时间」。
-	resolved, err := s.botOwnerTimezoneOfIDErr(call.BotID)
-	if err != nil {
-		return "", errs.ErrInternal
-	}
-	// 任务时区优先用确认卡快照里受理那一刻解析的值：批准之后重新解析用户
-	// 时区，会让卡片上的「9 点」和真正落地的「9 点」不在同一个时区（用户在
-	// 受理到批准之间改了自己的时区）。没有快照（旧版本会话、免确认路径）才
-	// 现场解析。
-	timezone := strings.TrimSpace(args.Timezone)
-	if timezone == "" {
-		if snapTZ := botScheduleSnapshotTimezone(call); snapTZ != "" {
-			timezone = snapTZ
-		} else {
-			timezone = resolved.name
+// botScheduleReceiptTimezone 让确认回执沿用受理口径；旧快照缺用户时区就省略，
+// 只有没有确认快照的同步路径才允许静默读库回退。
+func (s *BotService) botScheduleReceiptTimezone(call *model.BotToolCall) (string, *time.Location) {
+	if snap := botScheduleSnapshot(call); snap != nil {
+		if snap.UserTimezone == "" {
+			return "", nil
 		}
+		return snap.UserTimezone, timeOrUTC(snap.UserTimezone)
 	}
-	task, err := s.createScheduleTask(call.BotID, args.Name, args.Cron, timezone, args.Instruction, mdl, args.NeedsReportBool())
+	if call.RequiresConfirmation {
+		return "", nil
+	}
+	return s.botOwnerTimezoneOfID(call.BotID)
+}
+
+func (s *BotService) execScheduleCreate(call *model.BotToolCall, _ *botScheduleTaskArgs) (string, error) {
+	snap := botScheduleSnapshot(call)
+	if snap == nil || strings.TrimSpace(snap.Timezone) == "" {
+		return "", errs.New(errs.ErrInvalidParams.Code,
+			"任务确认快照缺失或不完整，请重新发起创建任务")
+	}
+	mdl := snap.EffectiveModel
+	if snap.ModelInherited {
+		mdl = ""
+	}
+	needsReport := snap.NeedsReport != nil && *snap.NeedsReport
+	task, err := s.createScheduleTask(call.BotID, snap.Name, snap.Cron, snap.Timezone, snap.Instruction, mdl, needsReport)
 	if err != nil {
 		return "", err
 	}
-	out := s.scheduleTaskSlim(resolved.name, resolved.loc, task)
+	var userLoc *time.Location
+	if snap.UserTimezone != "" {
+		userLoc = timeOrUTC(snap.UserTimezone)
+	}
+	out := s.scheduleTaskSlim(snap.UserTimezone, userLoc, task)
 	out["ok"] = true
 	out["note"] = "任务已创建并启用；请在对话里用中文告知用户任务名与执行时间"
 	return botMarshalResult(out)
@@ -1386,7 +1397,7 @@ func (s *BotService) execScheduleUpdate(call *model.BotToolCall, args *botSchedu
 	if err != nil {
 		return "", err
 	}
-	userTimezone, userLoc := s.botOwnerTimezoneOfID(call.BotID)
+	userTimezone, userLoc := s.botScheduleReceiptTimezone(call)
 	out := s.scheduleTaskSlim(userTimezone, userLoc, updated)
 	out["ok"] = true
 	out["note"] = "任务已更新；请在对话里用中文告知用户任务名与新的执行时间"
@@ -1440,7 +1451,7 @@ func (s *BotService) execScheduleEnable(call *model.BotToolCall, args *botSchedu
 	if err != nil {
 		return "", err
 	}
-	userTimezone, userLoc := s.botOwnerTimezoneOfID(call.BotID)
+	userTimezone, userLoc := s.botScheduleReceiptTimezone(call)
 	out := s.scheduleTaskSlim(userTimezone, userLoc, task)
 	out["ok"] = true
 	out["note"] = "任务已" + map[bool]string{true: "启用", false: "停用"}[enabled] +

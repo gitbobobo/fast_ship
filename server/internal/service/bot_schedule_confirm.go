@@ -143,6 +143,9 @@ type botScheduleCallPreview struct {
 	Timezone    string `json:"timezone,omitempty"`
 	Instruction string `json:"instruction,omitempty"`
 	NeedsReport *bool  `json:"needs_report,omitempty"`
+	// UserTimezone 是回执用的用户有效时区，不是任务时区 Timezone；旧快照
+	// 没有它时省略 next_run_at_user，不能重新读库改变已批准的展示口径。
+	UserTimezone string `json:"user_timezone,omitempty"`
 	// NextRunAt 是任务时区的可读时间，格式 "2006-01-02 15:04:05 MST"（与
 	// scheduleTaskSlim 一致）。
 	NextRunAt string `json:"next_run_at,omitempty"`
@@ -153,8 +156,8 @@ type botScheduleCallPreview struct {
 	// ModelInherited 标记生效模型来自「跟随机器人」而不是任务固定覆盖：
 	// 卡片据此说明继承语义（机器人换模型后，下次运行会跟着变）。
 	ModelInherited bool `json:"model_inherited,omitempty"`
-	// TaskUpdatedAt 是受理时任务的 updated_at（RFC3339Nano，只对 run/enable/
-	// delete 这类「按库里配置执行」的动作填）：确认卡批准的是当时看到的配置，
+	// TaskUpdatedAt 是受理时任务的 updated_at（RFC3339Nano，update/run/
+	// enable/delete 填）：确认卡批准的是当时看到的配置，
 	// 执行器在事务内比对同一水位，期间任务被改过就拒绝执行（TOCTOU）。
 	TaskUpdatedAt string `json:"task_updated_at,omitempty"`
 }
@@ -163,8 +166,8 @@ type botScheduleCallPreview struct {
 // create 的范围是本机器人的任务集合（ScopeID=bot.ID）；update/run 的范围是
 // 单个任务，任务读不到就保持 ScopeID 为空（主线不建卡，按无法确定目标失败；
 // 受理与执行之间任务被删的，执行期会以 40429 失败）。update 的预览按「未提供
-// 则保留原值」合并 cron/timezone/model 后计算，让用户在卡上看到的是生效后的
-// 配置而不是增量。list/delete/runs/enable/disable 等同步动作不设范围与预览。
+// 则保留原值」合并配置，让用户在卡上看到的是生效值而不是增量；
+// list/runs/disable 等免确认动作不设预览。
 func (s *BotService) resolveScheduleScope(bot *model.Bot, prepared *botPreparedCall, raw map[string]json.RawMessage) error {
 	switch prepared.Action {
 	case "create":
@@ -173,8 +176,7 @@ func (s *BotService) resolveScheduleScope(bot *model.Bot, prepared *botPreparedC
 		prepared.FieldsConstraint = presentFields(raw, "name", "cron", "timezone", "instruction", "model", "needs_report")
 		preview, err := s.schedulePreviewFromArgs(bot, raw)
 		if err != nil {
-			// 读不到用户有效时区就不建卡：执行期同样会在这里失败，先把卡片
-			// 建出来只会得到一张指向必然失败调用的确认卡。
+			// 读不到用户有效时区就不建卡，不能让回退值冒充已批准的配置。
 			return err
 		}
 		if preview == nil {
@@ -213,6 +215,12 @@ func (s *BotService) resolveScheduleScope(bot *model.Bot, prepared *botPreparedC
 			return errs.New(errs.ErrInvalidParams.Code,
 				"无法计算任务的生效配置（现有配置不合法），请先修正任务后再操作")
 		}
+		resolved, err := s.botOwnerTimezoneOfErr(bot)
+		if err != nil {
+			prepared.SchedulePreview = nil
+			return err
+		}
+		prepared.SchedulePreview.UserTimezone = resolved.name
 	case "run", "enable", "delete":
 		// 这三个动作执行时只按 task_id 读库里的任务，确认卡展示的是那一刻的
 		// 配置；目标读不到（含瞬时读库错误）就当场失败，不留一张指向未知
@@ -223,19 +231,23 @@ func (s *BotService) resolveScheduleScope(bot *model.Bot, prepared *botPreparedC
 			return err
 		}
 		prepared.ScopeID = task.ID
-		prepared.SchedulePreview = s.schedulePreviewFromTask(bot, schedulePreviewInput{}, task)
-		if prepared.SchedulePreview == nil {
-			if prepared.Action == "enable" {
-				// enable 要按 cron 重算下次计划：配置不合法就必须先修。
-				return errs.New(errs.ErrInvalidParams.Code,
-					"无法计算任务的生效配置（现有配置不合法），请先修正任务后再操作")
-			}
-			// run/delete 的执行不解析 cron（run 只冻结任务快照、delete 只按 id
-			// 删除），存量非法配置时仍允许受理；确认卡如实展示库里那一整份
-			// 配置——只剩 task_id 的匿名卡会让用户在看不到指令的情况下批准
-			// 一次「默认放行写操作」的执行，正是确认卡要防的盲批。
+		if prepared.Action != "enable" {
+			// run/delete 不解析 cron，也不需要用户时区；即使存量配置非法，
+			// 仍应如实展示将要执行或删除的整份配置，避免匿名卡导致盲批。
 			prepared.SchedulePreview = scheduleRawTaskPreview(bot, task)
+			return nil
 		}
+		preview := s.schedulePreviewFromTask(bot, schedulePreviewInput{Enable: true}, task)
+		if preview == nil {
+			return errs.New(errs.ErrInvalidParams.Code,
+				"无法计算任务的生效配置（现有配置不合法），请先修正任务后再操作")
+		}
+		resolved, err := s.botOwnerTimezoneOfErr(bot)
+		if err != nil {
+			return err
+		}
+		preview.UserTimezone = resolved.name
+		prepared.SchedulePreview = preview
 	}
 	return nil
 }
@@ -263,28 +275,32 @@ type schedulePreviewInput struct {
 	Instruction    string
 	ModelPtr       *string
 	NeedsReportPtr *bool
+	Enable         bool
 }
 
-// schedulePreviewFromArgs 为 create 计算预览。时区解析与执行期同一口径：
-// 省略时区 = 归属用户的有效时区，且读库失败按失败关闭处理（不用回退时区
-// 顶替）——回退值一旦写进快照，卡片上的下次运行和真正落地的不在同一个时区。
+// schedulePreviewFromArgs 为 create 冻结任务配置与回执时区：即使显式指定
+// 任务时区，也必须在受理期读到用户有效时区，执行期才能完全不依赖用户读库。
 func (s *BotService) schedulePreviewFromArgs(bot *model.Bot, raw map[string]json.RawMessage) (*botScheduleCallPreview, error) {
+	resolved, err := s.botOwnerTimezoneOfErr(bot)
+	if err != nil {
+		return nil, err
+	}
 	timezone := rawString(raw["timezone"])
 	if strings.TrimSpace(timezone) == "" {
-		resolved, err := s.botOwnerTimezoneOfErr(bot)
-		if err != nil {
-			return nil, err
-		}
 		timezone = resolved.name
 	}
-	return s.schedulePreviewFromTask(bot, schedulePreviewInput{
+	preview := s.schedulePreviewFromTask(bot, schedulePreviewInput{
 		Name:           rawString(raw["name"]),
 		Cron:           rawString(raw["cron"]),
 		Timezone:       timezone,
 		Instruction:    rawString(raw["instruction"]),
 		ModelPtr:       rawStringPtr(raw["model"]),
 		NeedsReportPtr: rawBoolPtr(raw["needs_report"]),
-	}, nil), nil
+	}, nil)
+	if preview != nil {
+		preview.UserTimezone = resolved.name
+	}
+	return preview, nil
 }
 
 // schedulePreviewFromTask 用执行器同一份纯函数（applyScheduleTaskUpdate）合并
@@ -293,13 +309,20 @@ func (s *BotService) schedulePreviewFromArgs(bot *model.Bot, raw map[string]json
 // 受理期校验拦住，这里只是兜底）。生效模型：任务覆盖非空优先，否则机器人当前
 // 模型（与建 run 时的冻结优先级一致）。
 func (s *BotService) schedulePreviewFromTask(bot *model.Bot, in schedulePreviewInput, task *model.BotScheduleTask) *botScheduleCallPreview {
-	base := model.BotScheduleTask{}
+	base := model.BotScheduleTask{Enabled: true}
 	if task != nil {
 		base = *task
 	}
 	merged, err := applyScheduleTaskUpdate(&base, in.Name, in.Cron, in.Timezone, in.Instruction, in.ModelPtr, in.NeedsReportPtr)
 	if err != nil {
 		return nil
+	}
+	if in.Enable && (!base.Enabled || merged.NextRunAt == nil) {
+		_, next, err := parseScheduleCron(merged.CronExpression, merged.Timezone, time.Now().UTC())
+		if err != nil {
+			return nil
+		}
+		merged.NextRunAt = &next
 	}
 	effective := strings.TrimSpace(merged.Model)
 	if effective == "" {
@@ -316,7 +339,9 @@ func (s *BotService) schedulePreviewFromTask(bot *model.Bot, in schedulePreviewI
 		preview.TaskID = task.ID
 		preview.TaskUpdatedAt = task.UpdatedAt.UTC().Format(time.RFC3339Nano)
 	}
-	if _, next, parseErr := parseScheduleCron(merged.CronExpression, merged.Timezone, time.Now().UTC()); parseErr == nil {
+	// 合并结果就是卡片的预计计划，不能再重算覆盖只改指令时保留的原计划；
+	// 预测值也不能写回任务行，否则会冲掉不推进 updated_at 的调度器更新。
+	if next := merged.NextRunAt; next != nil {
 		loc := timeOrUTC(merged.Timezone)
 		preview.NextRunAt = next.In(loc).Format("2006-01-02 15:04:05 MST")
 		preview.NextRunAtUTC = next.UTC().Format(time.RFC3339)
@@ -366,10 +391,9 @@ func botScheduleAcceptedRevision(call *model.BotToolCall) string {
 	return execCtx.Schedule.TaskUpdatedAt
 }
 
-// botScheduleRevisionChanged 在事务内比对任务修订：确认卡批准的是受理时看到
-// 的配置，run/enable/delete 执行时任务已被改过就拒绝（TOCTOU，与 fs_issue 的
-// expected_updated_at 同一口径），让用户重新看一眼再决定，而不是静默按新配置
-// 执行已批准的旧卡。
+// botScheduleRevisionChanged 守受理到执行事务的窗口，确认可能挂数天：
+// update/run/enable/delete 都比整行 UpdatedAt，改名/cron/时区/启停也让旧卡
+// 失效。不能与建 run 后秒级窗口的敏感指纹合并，两个窗口批准的对象不同。
 func botScheduleRevisionChanged(task *model.BotScheduleTask, expected string) error {
 	if expected == "" || task == nil {
 		return nil

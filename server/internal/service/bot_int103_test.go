@@ -758,11 +758,26 @@ func TestBotScheduleRunRecord(t *testing.T) {
 
 // ---------- 8. fs_schedule 工具与校验 ----------
 
+// botScheduleCall 走与线上一致的入口：确认型动作在生产里总是先过受理端，
+// 受理快照是执行器的唯一输入，缺快照时执行器按设计拒绝（INT-136 复审：
+// 不再现场解析默认时区）。helper 这里用同一个构造器补上快照，而不是让
+// 生产代码为测试保留一条无快照回退路径。
 func botScheduleCall(t *testing.T, env *botTestEnv, botID, args string) (string, error) {
 	t.Helper()
-	return env.bots.execScheduleTool(&model.BotToolCall{
+	call := &model.BotToolCall{
 		ID: uuid.NewString(), BotID: botID, ArgumentsJSON: args,
-	})
+	}
+	var parsed map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(args), &parsed); err == nil {
+		if action := rawString(parsed["action"]); action == "create" && call.ExecutionContextJSON == "" {
+			if botRow, err := env.bots.bots.Get(botID); err == nil {
+				if preview, err := env.bots.schedulePreviewFromArgs(botRow, parsed); err == nil && preview != nil {
+					call.ExecutionContextJSON = marshalExecContext(botCallExecContext{Schedule: preview})
+				}
+			}
+		}
+	}
+	return env.bots.execScheduleTool(call)
 }
 
 func TestBotScheduleToolLifecycle(t *testing.T) {

@@ -627,8 +627,10 @@ path→version，无新笔记的空成功不会让次日重跑全部 daily。恢
   needs_report 的 SHA-256）——批准后改名/改 cron/停用这类良性改动不再
   误杀已批准的 run（存量 run 没有指纹字段时回退到整行 `task_updated_at`）。
   注意收窄只覆盖建 run 后的秒级窗口：确认卡挂起期间（可能数天）的比对仍是
-  整行 `task_updated_at`，此时改名也会让待执行的 run/enable/delete 以
-  「任务在确认期间被修改」拒绝——方向安全，重新看一眼再批准即可。
+  整行 `task_updated_at`，此时改名/cron/时区/启停都会让待执行的
+  update/run/enable/delete 以「任务在确认期间被修改」拒绝。两段窗口不能
+  合并：受理水位保护用户看到的整份配置，建 run 后的敏感指纹只防止一次性
+  运行加载新指令；把后者改回整行比对会误杀已批准的运行。
 - **`run`/`enable`/`delete` 只收 `task_id`**：执行器按 `task_id` 读库里的任务
   配置，模型传的 `name`/`cron`/`timezone`/`instruction`/`model`/`needs_report`
   一概不生效，受理端直接拒绝，避免确认卡被参数遮住真正执行的那份配置。
@@ -661,11 +663,18 @@ path→version，无新笔记的空成功不会让次日重跑全部 daily。恢
   来自 `execution_context.schedule`（受理端用执行器同一份 `applyScheduleTaskUpdate`
   合并出的生效值），前端不重新解释参数、不做二次合并——参数只在原始调用 JSON
   里展示。两套真值并存时会互相遮住（空白 instruction、`model:null` 都这么漏过）。
-- **确认卡与预览**：受理时把 `{task_id,name,cron,timezone,instruction,
+- **确认卡与预览**：受理时把 `{task_id,name,cron,timezone,user_timezone,instruction,
   needs_report,next_run_at,next_run_at_utc,effective_model}` 写进
   `execution_context.schedule`（update 是「未提供则保留原值」合并后的生效值；
   合并直接复用执行器的纯函数 `applyScheduleTaskUpdate`，避免确认卡展示值与
-  实际执行值各写一份而漂移）。
+  实际执行值各写一份而漂移）。create 无论是否显式指定任务时区，都只在
+  受理期解析一次用户有效时区，读库失败直接拒绝受理；执行时落库配置全部
+  来自快照，继承模型仍保存为「跟随机器人」，不重新解释参数或用户时区。
+  卡上的下次运行是受理时预计：create/update 展示合并结果，enable 仅在原本
+  停用或没有下次计划时重算；落库需重算时，在批准后用同一份 cron/任务时区
+  按执行时间计算，绝不把卡片预测值写回任务行覆盖调度推进。回执里的用户
+  当地时间来自受理时解析的 `user_timezone`，与任务 `timezone` 分开；
+  旧快照没有它时省略 `next_run_at_user`，不为补字段重新读库。
   前端不重新实现 cron 解析；卡片展示任务名/cron/时区/下次运行/模型/需汇报/
   指令全文，并明写「批准即授权该任务以后每次运行默认放行写操作」。卡片上
   所有模型可写文本（快照值、chips、原始 JSON、错误与结果展示）渲染前经
