@@ -1,5 +1,7 @@
 package service
 
+import "encoding/json"
+
 // v1/v2 冻结的工具参数结构体：存量会话在压缩/重启边界前继续用旧字节构建
 // tools 数组，`action` 枚举的历史生成结果（只列出第一个取值）必须逐字节保留。
 // v3 起使用 bot_tools.go 里的同名结构体（已修正枚举）；v5 起活跃的 fs_thread
@@ -149,6 +151,42 @@ type botScheduleTaskArgsV5 struct {
 	Model *string `json:"model,omitempty" jsonschema:"description=运行使用的模型名（可选；省略则保持不变或跟随机器人当前模型，传空串清除覆盖）"`
 	// NeedsReport 标记成功且非静默的运行是否也追加事件进主线。
 	NeedsReport *bool `json:"needs_report,omitempty" jsonschema:"description=运行是否需要汇报（可选；true 时成功且非静默的运行也会通知主线）"`
+	// Limit/Offset 是 runs/list 的分页参数。
+	Limit  int `json:"limit,omitempty" jsonschema:"description=条数上限（runs 默认 20 上限 100；list 默认且最多 200）"`
+	Offset int `json:"offset,omitempty" jsonschema:"description=分页偏移（runs/list，默认 0）"`
+}
+
+// botScheduleTaskArgsV7 是 v7（INT-123）的 fs_schedule 参数：10 个动作含
+// state_get/state_set 与 state 参数。INT-138 的 timezone 描述变更（「默认
+// UTC」→「省略即用户时区」）只进 v8，本副本与 v7 发布时逐标签一致，保证
+// v7 冻结会话的 tools_hash 不回退（基线见 bot_int103_test.go）。不要改动
+// 本结构体的任何标签。
+type botScheduleTaskArgsV7 struct {
+	Action string `json:"action" jsonschema:"enum=list,enum=create,enum=update,enum=delete,enum=runs,enum=run,enum=enable,enum=disable,enum=state_get,enum=state_set,required"`
+	// TaskID 是任务 ID（update/delete/runs/run/enable/disable 必填；create 禁止）。
+	TaskID string `json:"task_id,omitempty" jsonschema:"description=任务 ID（update/delete/runs/run/enable/disable 必填）"`
+	// Name 任务名（create 必填；update 提供即改）。
+	Name string `json:"name,omitempty" jsonschema:"description=任务名（create 必填；update 可改）"`
+	// Cron 标准五字段表达式 分 时 日 月 周（create 必填；update 提供即改）。
+	Cron string `json:"cron,omitempty" jsonschema:"description=cron 表达式，标准五字段（分 时 日 月 周；create 必填；update 提供即改）"`
+	// Timezone 是 IANA 名称；空串=UTC。update 传空保持原值，显式换时区传 UTC。
+	Timezone string `json:"timezone,omitempty" jsonschema:"description=时区，IANA 名称如 Asia/Shanghai（可选，默认 UTC；update 提供即改）"`
+	// Instruction 是每次运行交给机器人的任务指令（create 必填；update 提供即改）。
+	Instruction string `json:"instruction,omitempty" jsonschema:"description=任务指令：每次运行交给你的目标说明（create 必填；update 可改）"`
+	// Model 可选：省略则保持原值（update）/用机器人当前模型（create）；
+	// 显式传空串清除覆盖，回到机器人当前模型。用指针区分「未提供」与
+	// 「显式清空」，否则创建时指定的模型永远无法撤掉。
+	Model *string `json:"model,omitempty" jsonschema:"description=运行使用的模型名（可选；省略则保持不变或跟随机器人当前模型，传空串清除覆盖）"`
+	// NeedsReport 标记成功且非静默的运行是否也追加事件进主线。
+	NeedsReport *bool `json:"needs_report,omitempty" jsonschema:"description=运行是否需要汇报（可选；true 时成功且非静默的运行也会通知主线）"`
+	// DryRun 只配合 run 使用：true 时只预览任务与下次计划、不建运行记录不执行；
+	// 任务忙碌时回执标 busy=true。其它动作不接受该字段（显式 false 也拒绝），
+	// 避免「带预览标记仍写入」的误用。
+	DryRun *bool `json:"dry_run,omitempty" jsonschema:"description=只配合 run：true 时只预览（任务信息、指令与下次计划），不建运行记录、不执行；任务已有未结束运行时 busy=true；其它动作携带 dry_run 即被拒绝（显式 false / null 亦然）"`
+	// State 只配合 state_set（INT-123）：要写入任务小状态的任意 JSON 值，
+	// 省略或 null 表示清空；其它动作不接受该字段。原始 JSON 字节在归一化后
+	// 原样保留，避免大整数精度丢失。
+	State *json.RawMessage `json:"state,omitempty" jsonschema:"description=只配合 state_set：要写入任务小状态的任意 JSON 值（≤8192 UTF-8 字节）；省略或 null 表示清空；其它动作携带 state 即被拒绝"`
 	// Limit/Offset 是 runs/list 的分页参数。
 	Limit  int `json:"limit,omitempty" jsonschema:"description=条数上限（runs 默认 20 上限 100；list 默认且最多 200）"`
 	Offset int `json:"offset,omitempty" jsonschema:"description=分页偏移（runs/list，默认 0）"`

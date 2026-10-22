@@ -79,6 +79,11 @@ func (s *BotService) RecoverOnStartup() error {
 	}
 
 	affectedBots := map[string]bool{}
+	// 定时任务失败事件提交后不立即唤醒：恢复分四步（run 终态 → 调用终态 →
+	// 协议回复 → 恢复通知），过早启动 goroutine 会让它还看到尚未恢复完的
+	// running 调用、甚至复用一条还没被置 failed 的主线 run（INT-138 复审）。
+	// 记事到全部恢复完成后再统一发出，仍不依赖 5s 扫描。
+	var scheduleEventWakes []struct{ botID, runID string }
 	for _, run := range runs {
 		// 定时任务 run 中断也是失败：失败必报，运行事件必须与终态同一事务——
 		// 分两次提交时进程若在中间退出，这条 run 已不再是活动 run，事件就永远
@@ -101,6 +106,7 @@ func (s *BotService) RecoverOnStartup() error {
 			}
 			_, schedSummary = s.botSilentSummaryOf(run.BotID, run.ID)
 		}
+		appendedSchedEvent := false
 		// 终态转移与 error/done 事件同一事务：一直挂在页面上的客户端重启
 		// 后按 SSE 游标回放也能把原 run 折到 failed，不必等快照重读。
 		txErr := s.db.Transaction(func(tx *gorm.DB) error {
@@ -133,9 +139,13 @@ func (s *BotService) RecoverOnStartup() error {
 			if schedTask == nil {
 				return nil
 			}
-			return s.appendScheduleEventTx(tx, run.BotID, schedTask, &run,
+			if err := s.appendScheduleEventTx(tx, run.BotID, schedTask, &run,
 				model.BotRunStatusFailed, schedSummary, "server_restarted",
-				"服务在定时任务运行执行中重启，未完成步骤不再继续", now)
+				"服务在定时任务运行执行中重启，未完成步骤不再继续", now); err != nil {
+				return err
+			}
+			appendedSchedEvent = true
+			return nil
 		})
 		if txErr != nil {
 			s.logger.Warn("恢复 run 失败", zap.String("run_id", run.ID), zap.Error(txErr))
@@ -143,6 +153,10 @@ func (s *BotService) RecoverOnStartup() error {
 		}
 		affectedBots[run.BotID] = true
 		s.publishEvent(run.BotID)
+		if appendedSchedEvent {
+			scheduleEventWakes = append(scheduleEventWakes,
+				struct{ botID, runID string }{run.BotID, run.ID})
+		}
 	}
 
 	for i := range calls {
@@ -257,6 +271,11 @@ func (s *BotService) RecoverOnStartup() error {
 			s.logger.Warn("追加恢复通知失败", zap.String("bot_id", botID), zap.Error(err))
 			continue
 		}
+	}
+	// 5. 全部恢复动作落库后再唤醒定时任务事件的主线（INT-138）：这里已经
+	// 没有 running 调用、旧主线 run 均已失败，新 run 不会读到半恢复的账本。
+	for _, wake := range scheduleEventWakes {
+		s.wakeScheduleEvent(wake.botID, wake.runID, model.BotRunStatusFailed)
 	}
 	return nil
 }

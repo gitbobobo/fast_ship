@@ -194,13 +194,15 @@ export type BotRunStatus =
   | "failed"
   | "stopped";
 
-// generic run 端点按 run 原值返回：定时任务触发的 run 是 schedule，手动触发是 manual。
+// generic run 端点按 run 原值返回：定时任务触发的 run 是 schedule，手动触发是 manual；
+// schedule_event 是定时任务运行事件写入主线后的立即唤醒（INT-138）。
 export type BotRunTrigger =
   | "user_message"
   | "tool_result"
   | "recovery"
   | "schedule"
-  | "manual";
+  | "manual"
+  | "schedule_event";
 
 /** run 失败时的可操作动作（INT-137）：kind 由前端映射到具体页面。 */
 export interface BotRunErrorAction {

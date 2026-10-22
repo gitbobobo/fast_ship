@@ -165,12 +165,16 @@ type botUsageBaseline struct {
 	Model             string
 }
 
-// botRuntimeContext 是末尾运行时上下文（易变内容只出现在这里）。
+// botRuntimeContext 是末尾运行时上下文（易变内容只出现在这里）。UserTimezone
+// 与 CurrentTimeLocal 是机器人归属用户的当地视角（INT-138）：模型说「今天早上」
+// 时按用户时区理解，不必自己换算。
 type botRuntimeContext struct {
-	Note           string            `json:"note"`
-	CurrentTimeUTC string            `json:"current_time_utc"`
-	RunID          string            `json:"run_id"`
-	PendingInputs  []botPendingInput `json:"pending_inputs,omitempty"`
+	Note             string            `json:"note"`
+	CurrentTimeUTC   string            `json:"current_time_utc"`
+	UserTimezone     string            `json:"user_timezone"`
+	CurrentTimeLocal string            `json:"current_time_local"`
+	RunID            string            `json:"run_id"`
+	PendingInputs    []botPendingInput `json:"pending_inputs,omitempty"`
 }
 
 type botPendingInput struct {
@@ -259,9 +263,16 @@ func (s *BotService) buildRunContextWith(bot *model.Bot, run *model.BotRun, over
 	messages = append(messages, projected...)
 
 	// 6. 本轮运行时上下文（末尾；当前时间、待处理输入等易变内容只在这里）。
+	// 用户时区与当地时间（INT-138）也只出现在这里，不影响前缀哈希。
+	tzName, tzLoc := s.botOwnerTimezoneOf(bot)
+	// 只取一次 now：UTC 与当地时间必须描述同一时刻，跨秒（甚至跨当地日期）
+	// 的两次采样会让模型看到互相矛盾的两个「现在」。
+	now := time.Now()
 	rt := botRuntimeContext{
-		CurrentTimeUTC: time.Now().UTC().Format(time.RFC3339),
-		RunID:          run.ID,
+		CurrentTimeUTC:   now.UTC().Format(time.RFC3339),
+		UserTimezone:     tzName,
+		CurrentTimeLocal: botLocalStamp(now, tzLoc),
+		RunID:            run.ID,
 	}
 	for _, row := range rows {
 		if row.Seq > run.InputThroughSeq && row.Kind.IsModelInput() {

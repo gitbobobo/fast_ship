@@ -59,6 +59,8 @@ INT-129 起公开注册按部署状态区分：
 | `user.email` | string | 是 |  |
 | `user.avatar_url` | string | 是 | 形如 /api/avatars/:uid/:filename，未设置为空串 |
 | `user.role` | string（enum: admin \| member） | 是 | 用户角色（INT-129）：admin 可管理成员、邀请与部署设置；member 只能使用自己的资源。角色只存库，服务端每请求查库判定，不写进 JWT |
+| `user.timezone` | string | 是 | 用户 IANA 时区（INT-138）；空串表示未声明，机器人按部署配置回退 |
+| `user.effective_timezone` | string | 否 | 生效时区（INT-138）：timezone 非空时为它，否则为部署配置 bots.memory.timezone，再否则 UTC。/auth/me 会返回；成员列表不返回（省略） |
 | `user.created_at` | string（date-time） | 是 |  |
 | `user.updated_at` | string（date-time） | 是 |  |
 
@@ -144,6 +146,8 @@ INT-129 起公开注册按部署状态区分：
 | `user.email` | string | 是 |  |
 | `user.avatar_url` | string | 是 | 形如 /api/avatars/:uid/:filename，未设置为空串 |
 | `user.role` | string（enum: admin \| member） | 是 | 用户角色（INT-129）：admin 可管理成员、邀请与部署设置；member 只能使用自己的资源。角色只存库，服务端每请求查库判定，不写进 JWT |
+| `user.timezone` | string | 是 | 用户 IANA 时区（INT-138）；空串表示未声明，机器人按部署配置回退 |
+| `user.effective_timezone` | string | 否 | 生效时区（INT-138）：timezone 非空时为它，否则为部署配置 bots.memory.timezone，再否则 UTC。/auth/me 会返回；成员列表不返回（省略） |
 | `user.created_at` | string（date-time） | 是 |  |
 | `user.updated_at` | string（date-time） | 是 |  |
 
@@ -240,6 +244,8 @@ INT-129 起公开注册按部署状态区分：
 | `email` | string | 是 |  |
 | `avatar_url` | string | 是 | 形如 /api/avatars/:uid/:filename，未设置为空串 |
 | `role` | string（enum: admin \| member） | 是 | 用户角色（INT-129）：admin 可管理成员、邀请与部署设置；member 只能使用自己的资源。角色只存库，服务端每请求查库判定，不写进 JWT |
+| `timezone` | string | 是 | 用户 IANA 时区（INT-138）；空串表示未声明，机器人按部署配置回退 |
+| `effective_timezone` | string | 否 | 生效时区（INT-138）：timezone 非空时为它，否则为部署配置 bots.memory.timezone，再否则 UTC。/auth/me 会返回；成员列表不返回（省略） |
 | `created_at` | string（date-time） | 是 |  |
 | `updated_at` | string（date-time） | 是 |  |
 
@@ -267,6 +273,7 @@ INT-129 起公开注册按部署状态区分：
 | --- | --- | --- | --- |
 | `username` | string（长度 2..50） | 否 | 新用户名；与现值相同或省略则不变 |
 | `email` | string（email） | 否 | 新邮箱 |
+| `timezone` | string（长度 ≤64） | 否 | 用户 IANA 时区（INT-138）；空串清空，非法名称拒绝 |
 
 **成功响应**
 
@@ -281,6 +288,8 @@ INT-129 起公开注册按部署状态区分：
 | `email` | string | 是 |  |
 | `avatar_url` | string | 是 | 形如 /api/avatars/:uid/:filename，未设置为空串 |
 | `role` | string（enum: admin \| member） | 是 | 用户角色（INT-129）：admin 可管理成员、邀请与部署设置；member 只能使用自己的资源。角色只存库，服务端每请求查库判定，不写进 JWT |
+| `timezone` | string | 是 | 用户 IANA 时区（INT-138）；空串表示未声明，机器人按部署配置回退 |
+| `effective_timezone` | string | 否 | 生效时区（INT-138）：timezone 非空时为它，否则为部署配置 bots.memory.timezone，再否则 UTC。/auth/me 会返回；成员列表不返回（省略） |
 | `created_at` | string（date-time） | 是 |  |
 | `updated_at` | string（date-time） | 是 |  |
 
@@ -360,6 +369,8 @@ INT-129 起公开注册按部署状态区分：
 | `email` | string | 是 |  |
 | `avatar_url` | string | 是 | 形如 /api/avatars/:uid/:filename，未设置为空串 |
 | `role` | string（enum: admin \| member） | 是 | 用户角色（INT-129）：admin 可管理成员、邀请与部署设置；member 只能使用自己的资源。角色只存库，服务端每请求查库判定，不写进 JWT |
+| `timezone` | string | 是 | 用户 IANA 时区（INT-138）；空串表示未声明，机器人按部署配置回退 |
+| `effective_timezone` | string | 否 | 生效时区（INT-138）：timezone 非空时为它，否则为部署配置 bots.memory.timezone，再否则 UTC。/auth/me 会返回；成员列表不返回（省略） |
 | `created_at` | string（date-time） | 是 |  |
 | `updated_at` | string（date-time） | 是 |  |
 
@@ -8783,7 +8794,7 @@ client_message_id 必填（幂等键）：同键同正文返回已有消息；�
 | `run` | object | 否 |  |
 | `run.id` | string | 是 |  |
 | `run.bot_id` | string | 是 |  |
-| `run.trigger_source` | string | 是 | user_message / tool_result / recovery / schedule / manual |
+| `run.trigger_source` | string | 是 | user_message / tool_result / recovery / schedule / manual / schedule_event（定时任务运行事件写入主线后的立即唤醒，INT-138） |
 | `run.trigger_key` | string | 是 |  |
 | `run.status` | string | 是 | queued / running / completed / failed / stopped |
 | `run.config_snapshot` | string | 是 | 本次模型/地址/提示词版本快照 JSON；不含明文 key |
@@ -8904,7 +8915,7 @@ client_message_id 必填（幂等键）：同键同正文返回已有消息；�
 | `runs` | object[] | 是 |  |
 | `runs[].id` | string | 是 |  |
 | `runs[].bot_id` | string | 是 |  |
-| `runs[].trigger_source` | string | 是 | user_message / tool_result / recovery / schedule / manual |
+| `runs[].trigger_source` | string | 是 | user_message / tool_result / recovery / schedule / manual / schedule_event（定时任务运行事件写入主线后的立即唤醒，INT-138） |
 | `runs[].trigger_key` | string | 是 |  |
 | `runs[].status` | string | 是 | queued / running / completed / failed / stopped |
 | `runs[].config_snapshot` | string | 是 | 本次模型/地址/提示词版本快照 JSON；不含明文 key |
@@ -9032,7 +9043,7 @@ done 携带 run 终态，error 携带 code/message（顺序固定 error → done
 | `items` | object[] | 是 |  |
 | `items[].id` | string | 是 |  |
 | `items[].bot_id` | string | 是 |  |
-| `items[].trigger_source` | string | 是 | user_message / tool_result / recovery / schedule / manual |
+| `items[].trigger_source` | string | 是 | user_message / tool_result / recovery / schedule / manual / schedule_event（定时任务运行事件写入主线后的立即唤醒，INT-138） |
 | `items[].trigger_key` | string | 是 |  |
 | `items[].status` | string | 是 | queued / running / completed / failed / stopped |
 | `items[].config_snapshot` | string | 是 | 本次模型/地址/提示词版本快照 JSON；不含明文 key |
@@ -9082,7 +9093,7 @@ done 携带 run 终态，error 携带 code/message（顺序固定 error → done
 | --- | --- | --- | --- |
 | `id` | string | 是 |  |
 | `bot_id` | string | 是 |  |
-| `trigger_source` | string | 是 | user_message / tool_result / recovery / schedule / manual |
+| `trigger_source` | string | 是 | user_message / tool_result / recovery / schedule / manual / schedule_event（定时任务运行事件写入主线后的立即唤醒，INT-138） |
 | `trigger_key` | string | 是 |  |
 | `status` | string | 是 | queued / running / completed / failed / stopped |
 | `config_snapshot` | string | 是 | 本次模型/地址/提示词版本快照 JSON；不含明文 key |
@@ -9139,7 +9150,7 @@ stop:<runId> 幂等）并唤醒机器人，由它结合上下文决定后续动�
 | --- | --- | --- | --- |
 | `id` | string | 是 |  |
 | `bot_id` | string | 是 |  |
-| `trigger_source` | string | 是 | user_message / tool_result / recovery / schedule / manual |
+| `trigger_source` | string | 是 | user_message / tool_result / recovery / schedule / manual / schedule_event（定时任务运行事件写入主线后的立即唤醒，INT-138） |
 | `trigger_key` | string | 是 |  |
 | `status` | string | 是 | queued / running / completed / failed / stopped |
 | `config_snapshot` | string | 是 | 本次模型/地址/提示词版本快照 JSON；不含明文 key |
@@ -9377,7 +9388,7 @@ stopped，不追加主线事件（用户主动停止不是需要汇报的运行�
 | --- | --- | --- | --- |
 | `id` | string | 是 |  |
 | `bot_id` | string | 是 |  |
-| `trigger_source` | string | 是 | user_message / tool_result / recovery / schedule / manual |
+| `trigger_source` | string | 是 | user_message / tool_result / recovery / schedule / manual / schedule_event（定时任务运行事件写入主线后的立即唤醒，INT-138） |
 | `trigger_key` | string | 是 |  |
 | `status` | string | 是 | queued / running / completed / failed / stopped |
 | `config_snapshot` | string | 是 | 本次模型/地址/提示词版本快照 JSON；不含明文 key |
@@ -10764,6 +10775,8 @@ expired/denied/invalid 为终态，error 给用户可读原因，前端提示重
 | `items[].email` | string | 是 |  |
 | `items[].avatar_url` | string | 是 | 形如 /api/avatars/:uid/:filename，未设置为空串 |
 | `items[].role` | string（enum: admin \| member） | 是 | 用户角色（INT-129）：admin 可管理成员、邀请与部署设置；member 只能使用自己的资源。角色只存库，服务端每请求查库判定，不写进 JWT |
+| `items[].timezone` | string | 是 | 用户 IANA 时区（INT-138）；空串表示未声明，机器人按部署配置回退 |
+| `items[].effective_timezone` | string | 否 | 生效时区（INT-138）：timezone 非空时为它，否则为部署配置 bots.memory.timezone，再否则 UTC。/auth/me 会返回；成员列表不返回（省略） |
 | `items[].created_at` | string（date-time） | 是 |  |
 | `items[].updated_at` | string（date-time） | 是 |  |
 
@@ -10816,6 +10829,8 @@ expired/denied/invalid 为终态，error 给用户可读原因，前端提示重
 | `email` | string | 是 |  |
 | `avatar_url` | string | 是 | 形如 /api/avatars/:uid/:filename，未设置为空串 |
 | `role` | string（enum: admin \| member） | 是 | 用户角色（INT-129）：admin 可管理成员、邀请与部署设置；member 只能使用自己的资源。角色只存库，服务端每请求查库判定，不写进 JWT |
+| `timezone` | string | 是 | 用户 IANA 时区（INT-138）；空串表示未声明，机器人按部署配置回退 |
+| `effective_timezone` | string | 否 | 生效时区（INT-138）：timezone 非空时为它，否则为部署配置 bots.memory.timezone，再否则 UTC。/auth/me 会返回；成员列表不返回（省略） |
 | `created_at` | string（date-time） | 是 |  |
 | `updated_at` | string（date-time） | 是 |  |
 

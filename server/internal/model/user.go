@@ -14,9 +14,12 @@ type User struct {
 	Role string `gorm:"type:text;not null;default:'member'" json:"role"`
 	// TokenVersion 是用户级令牌版本，签发进 JWT 的 ver claim；改密递增后，
 	// 此前签发的 access token 在中间件校验时立即失效。
-	TokenVersion int       `gorm:"not null;default:0" json:"-"`
-	CreatedAt    time.Time `gorm:"not null" json:"created_at"`
-	UpdatedAt    time.Time `gorm:"not null" json:"updated_at"`
+	TokenVersion int `gorm:"not null;default:0" json:"-"`
+	// Timezone 是用户的 IANA 时区（INT-138）：浏览器首次登录写入，设置页可改。
+	// 空串表示用户还没声明过，机器人侧按部署配置 bots.memory.timezone 回退。
+	Timezone  string    `gorm:"type:text;not null;default:''" json:"timezone"`
+	CreatedAt time.Time `gorm:"not null" json:"created_at"`
+	UpdatedAt time.Time `gorm:"not null" json:"updated_at"`
 }
 
 // 用户角色取值，与 api.UserRole 一一对应。

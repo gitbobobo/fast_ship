@@ -1549,7 +1549,7 @@ func TestBotPreCompactionArchive(t *testing.T) {
 	if mains != 0 {
 		t.Fatalf("归档不得写主线请求")
 	}
-	f, err := repository.NewBotMemoryRepository(env.db).FindFile(bot.ID, env.bots.botDailyPathFor(time.Now().UTC()))
+	f, err := repository.NewBotMemoryRepository(env.db).FindFile(bot.ID, env.bots.botDailyPathForBot(botRow, time.Now().UTC()))
 	if err != nil {
 		t.Fatalf("daily: %v", err)
 	}
