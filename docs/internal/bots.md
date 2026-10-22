@@ -167,7 +167,12 @@ panic 残留行（`running` + `finished_at=nil`）不受此过滤：请求可能
 静默换掉它。告知由 `maybeTellToolset` 按 `last_told_version`
 单独补发 lifecycle 系统事件；文案如实标注激活状态——已激活的写「已生效」，
 窗口内推迟的写「下一个压缩点生效」（`activation` 字段 active/next_compaction），
-每个版本只告知一次。推迟通知不是终态：激活真正落库时（入口或压缩边界）
+每个版本只告知一次。推迟与否以入口显式传下的 `deferred` 决策为准，不用副本
+版本落后反推（激活失败留下的落后副本不是推迟：此时通知暂不发、last_told 不
+推进，下次入口重试激活成功后如实告知）。`markActivationDeferred` 的 UPDATE
+带版本守卫（`toolset_version < 当前 OR platform_prompt_version < 当前`），
+陈旧副本不会给已激活行重落推迟起点，未命中也不回写副本；激活落库后副本上的
+`ActivationDeferredAt` 同步清空。推迟通知不是终态：激活真正落库时（入口或压缩边界）
 `settleToolsetNoticesTx` 追加一条 `toolset_activated` 事件收口——账本
 append-only 不改写原通知，投影给模型的生命周期保持「先推迟、后生效」的
 真实顺序。pending 判定按通知自身 `to_version` 与已发出的

@@ -1929,8 +1929,8 @@ func TestBotToolsetUpgradeBoundary(t *testing.T) {
 	if builtNew.ToolsHash == builtOld.ToolsHash {
 		t.Fatalf("新旧 holder 字节应不同")
 	}
-	env.bots.maybeTellToolset(fresh, run)
-	env.bots.maybeTellToolset(fresh, run)
+	env.bots.maybeTellToolset(fresh, run, false)
+	env.bots.maybeTellToolset(fresh, run, false)
 	var n int64
 	env.db.Model(&model.BotMessage{}).Where("bot_id = ? AND dedup_key = ?",
 		bot.ID, fmt.Sprintf("toolset_notice:%d", botToolsetVersion)).Count(&n)

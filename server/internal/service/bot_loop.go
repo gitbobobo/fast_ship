@@ -131,6 +131,11 @@ func (s *BotService) botLoop(bot *model.Bot, run *model.BotRun, ctx context.Cont
 	//（buildBoundarySnapshot 判 stale → publishCompaction 事务内激活 →
 	// acceptCompactionBoundary 装入）。定时任务是独立会话、不吃主线前缀
 	// 缓存，入口始终用最新版本。
+	// activationDeferred 记录本 run 入口是否真的走了推迟分支：通知文案的
+	// 「下一个压缩点生效」只能由这个决策得出——入口激活失败（降级记日志、
+	// 副本仍落后）不是推迟，下一次入口会立即重试而非等压缩点（INT-139
+	// 云端复审）。
+	activationDeferred := false
 	if run.SessionKind == model.BotSessionKindSchedule {
 		// schedule 吃不到主线前缀缓存，会话内直接用最新版；但不写回激活
 		// 水位，否则主线窗口内的推迟判定与「下一个压缩点生效」通知失真。
@@ -150,6 +155,7 @@ func (s *BotService) botLoop(bot *model.Bot, run *model.BotRun, ctx context.Cont
 				}
 			} else {
 				s.markActivationDeferred(bot)
+				activationDeferred = true
 			}
 		} else if err := s.activateBotPrompt(bot); err != nil {
 			s.logger.Warn("激活工具集失败", zap.String("bot_id", bot.ID), zap.Error(err))
@@ -220,7 +226,7 @@ runLoop:
 			}
 			applyRunCredentialFreeze(bot, freeze)
 			applyRunPromptFreeze(bot, freeze)
-			s.maybeTellToolset(bot, run)
+			s.maybeTellToolset(bot, run, activationDeferred)
 		}
 
 		var built *botBuiltContext

@@ -1732,16 +1732,25 @@ func (s *BotService) activationDeferralExpired(bot *model.Bot) bool {
 }
 
 // markActivationDeferred 在首次推迟时给行落时间戳；已有时不动（起点以
-// 第一次推迟为准，不随后续推迟顺延）。写失败只记日志——宁可漏记一次
-// 推迟起点也不阻塞 run。
+// 第一次推迟为准，不随后续推迟顺延）。WHERE 带与入口 stale 判定同源的
+// 版本守卫（INT-139 云端复审）：副本在 ensureRun→botLoop 间陈旧时，行可能
+// 已被别的事务激活并清掉 deferred_at，不带守卫会把已激活的行重写上一个
+// 对当前版本无意义的起点。未命中（已激活/已记过）不同步副本——副本应与
+// 行事实一致。写失败只记日志，不阻塞 run。
 func (s *BotService) markActivationDeferred(bot *model.Bot) {
 	if bot.ActivationDeferredAt != nil {
 		return
 	}
 	now := s.now()
-	if err := s.db.Model(&model.Bot{}).Where("id = ? AND activation_deferred_at IS NULL", bot.ID).
-		Update("activation_deferred_at", now).Error; err != nil {
-		s.logger.Warn("记录激活推迟起点失败", zap.String("bot_id", bot.ID), zap.Error(err))
+	res := s.db.Model(&model.Bot{}).
+		Where("id = ? AND activation_deferred_at IS NULL", bot.ID).
+		Where("toolset_version < ? OR platform_prompt_version < ?", botToolsetVersion, botPlatformPromptVersion).
+		Update("activation_deferred_at", now)
+	if res.Error != nil {
+		s.logger.Warn("记录激活推迟起点失败", zap.String("bot_id", bot.ID), zap.Error(res.Error))
+		return
+	}
+	if res.RowsAffected == 0 {
 		return
 	}
 	bot.ActivationDeferredAt = &now
@@ -1823,6 +1832,11 @@ func (s *BotService) resolveBotPrompt(bot *model.Bot, persist bool) error {
 	bot.PersonaPrompt = state.PersonaPrompt
 	bot.ToolsetVersion = state.ToolsetVersion
 	bot.UntrustedNonce = state.UntrustedNonce
+	if persist {
+		// 激活成功即已清掉行上的 activation_deferred_at（ActivateToolsetTx
+		// 同事务），副本同步——否则本 run 内副本一直挂着已失效的推迟标记。
+		bot.ActivationDeferredAt = nil
+	}
 	return nil
 }
 
@@ -1869,16 +1883,24 @@ func (s *BotService) activateToolsetWithPromptTx(tx *gorm.DB, botID string, curT
 	return s.settleToolsetNoticesTx(tx, botID, botToolsetVersion)
 }
 
-func (s *BotService) maybeTellToolset(bot *model.Bot, run *model.BotRun) {
+// deferred 是本 run 入口是否真正走了推迟分支（INT-139 云端复审）：不能用
+// 副本版本落后反推——入口激活失败（只降级记日志）同样留下落后副本，而那
+// 不是推迟决策，下一次入口会立即重试而非等压缩点。此时通知先不发：
+// 「已生效」和「下一个压缩点生效」都失真，last_told 不推进，下次入口重试
+// 激活成功后如实告知。
+func (s *BotService) maybeTellToolset(bot *model.Bot, run *model.BotRun, deferred bool) {
 	if bot.LastToldVersion >= botToolsetVersion {
 		return
 	}
+	if !deferred && (bot.ToolsetVersion < botToolsetVersion || bot.PlatformPromptVersion < botPlatformPromptVersion) {
+		return
+	}
 	_ = s.db.Transaction(func(tx *gorm.DB) error {
-		return s.tellToolsetTx(tx, bot)
+		return s.tellToolsetTx(tx, bot, deferred)
 	})
 }
 
-func (s *BotService) tellToolsetTx(tx *gorm.DB, bot *model.Bot) error {
+func (s *BotService) tellToolsetTx(tx *gorm.DB, bot *model.Bot, deferred bool) error {
 	from := bot.LastToldVersion
 	if from >= botToolsetVersion {
 		return nil
@@ -1895,15 +1917,17 @@ func (s *BotService) tellToolsetTx(tx *gorm.DB, bot *model.Bot) error {
 	note := botToolsetChangeNote(from, botToolsetVersion)
 	// INT-133：升级通知只作为内部信息，模型不需要向用户转述或逐项验证。
 	note = "（内部信息：不需要向用户转述，也不需要逐项验证）" + note
-	// INT-139 R11：通知文案如实反映本 run 的实际激活状态——前缀已在新版本
-	// 写「已生效」；缓存窗口内被推迟的会话写「下一个压缩点生效」并补上
-	// 封顶说明（activation_deferred_at 满一个保留窗口后入口强制激活），
-	// 否则持续活跃不压缩的会话里这句承诺可能不以压缩点方式兑现。每个版本
-	// 只告知一次（dedup + last_told_version）；推迟文案在激活真正落库时由
-	// settleToolsetNoticesTx 补发一条 toolset_activated 事件收口。
+	// INT-139 R11：通知文案如实反映本 run 的实际激活决策——deferred 标记
+	// 由入口分支显式传入（不走推迟分支的落后副本属于激活失败，已在
+	// maybeTellToolset 拦下，到不了这里）。推迟的会话写「下一个压缩点
+	// 生效」并补上封顶说明（activation_deferred_at 满一个保留窗口后
+	// 入口强制激活），否则持续活跃不压缩的会话里这句承诺可能不以压缩点
+	// 方式兑现。每个版本只告知一次（dedup + last_told_version）；推迟文案
+	// 在激活真正落库时由 settleToolsetNoticesTx 补发一条 toolset_activated
+	// 事件收口。
 	activation, stateText := "active", "已生效"
 	userState := "已生效"
-	if bot.ToolsetVersion < botToolsetVersion {
+	if deferred {
 		capMin := int64(math.Ceil(s.cfg.Bots.Runtime.PromptCacheRetain().Minutes()))
 		activation = "next_compaction"
 		stateText = fmt.Sprintf("下一个压缩点生效（若会话持续活跃未压缩，最迟约 %d 分钟后随新消息生效）", capMin)

@@ -459,6 +459,92 @@ func TestBotActivationDeferralCapped(t *testing.T) {
 	}
 }
 
+// 「下一个压缩点生效」的判定是本 run 入口显式传下来的推迟决策，而不是
+// 副本版本落后的反推（INT-139 云端复审）：入口激活失败留下的落后副本
+// 没有推迟决策，下一次入口会立即重试——此时不得写推迟文案，通知先不发、
+// last_told 不推进，待激活成功后如实告知。
+func TestTellToolsetFollowsDeferredDecisionNotStaleCopy(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "r11flag")
+	bot := env.createBot(t, userID)
+	// 行与副本同步降回旧水位，扮演「入口激活尝试失败」后的样子。
+	if err := env.db.Model(&model.Bot{}).Where("id = ?", bot.ID).
+		Updates(map[string]interface{}{"toolset_version": 9, "last_told_version": 9}).Error; err != nil {
+		t.Fatalf("降级水位: %v", err)
+	}
+	fresh, err := env.bots.bots.Get(bot.ID)
+	if err != nil {
+		t.Fatalf("get bot: %v", err)
+	}
+	run := &model.BotRun{ID: uuid.NewString(), BotID: bot.ID}
+
+	dedup := fmt.Sprintf("toolset_notice:%d", botToolsetVersion)
+	env.bots.maybeTellToolset(fresh, run, false)
+	var n int64
+	env.db.Model(&model.BotMessage{}).Where("bot_id = ? AND dedup_key = ?", bot.ID, dedup).Count(&n)
+	if n != 0 {
+		t.Fatalf("激活失败的落后副本不得写推迟通知，实得 %d 条", n)
+	}
+	var row model.Bot
+	env.db.First(&row, "id = ?", bot.ID)
+	if row.LastToldVersion != 9 {
+		t.Fatalf("未发通知不得推进告知水位，实得 %d", row.LastToldVersion)
+	}
+
+	// 同一落后副本、入口确实走了推迟分支 → 通知按推迟文案落库。
+	env.bots.maybeTellToolset(fresh, run, true)
+	var msg model.BotMessage
+	if err := env.db.Where("bot_id = ? AND dedup_key = ?", bot.ID, dedup).First(&msg).Error; err != nil {
+		t.Fatalf("推迟分支应写推迟通知: %v", err)
+	}
+	if !strings.Contains(msg.ContentJSON, `"activation":"next_compaction"`) {
+		t.Fatalf("推迟通知应标 next_compaction: %s", msg.ContentJSON)
+	}
+}
+
+// markActivationDeferred 的版本守卫（INT-139 云端复审）：副本陈旧时行可能
+// 已被别的事务激活并清掉 deferred_at，不带守卫的更新会给已激活行重落一个
+// 对当前版本无意义的起点；未命中时副本也不得回写。
+func TestMarkActivationDeferredVersionGuard(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "r11guard")
+
+	// 行已在当前版本（视同别的事务刚激活）：陈旧副本来记推迟起点 → 被挡。
+	activated := env.createBot(t, userID)
+	staleCopy, err := env.bots.bots.Get(activated.ID)
+	if err != nil {
+		t.Fatalf("get bot: %v", err)
+	}
+	staleCopy.ToolsetVersion = botToolsetVersion - 1
+	env.bots.markActivationDeferred(staleCopy)
+	var row model.Bot
+	env.db.First(&row, "id = ?", activated.ID)
+	if row.ActivationDeferredAt != nil {
+		t.Fatalf("已激活的行不得被陈旧副本重落推迟起点: %v", row.ActivationDeferredAt)
+	}
+	if staleCopy.ActivationDeferredAt != nil {
+		t.Fatalf("更新未命中时副本不得回写推迟标记")
+	}
+
+	// 行确实陈旧：正常落起点。
+	stale := env.createBot(t, userID)
+	if err := env.db.Model(&model.Bot{}).Where("id = ?", stale.ID).
+		Update("toolset_version", botToolsetVersion-1).Error; err != nil {
+		t.Fatalf("降级水位: %v", err)
+	}
+	staleCopy2, _ := env.bots.bots.Get(stale.ID)
+	env.bots.markActivationDeferred(staleCopy2)
+	// 复用上文的 row 会让 gorm 把旧主键追加成第二条件——换独立变量。
+	var row2 model.Bot
+	env.db.First(&row2, "id = ?", stale.ID)
+	if row2.ActivationDeferredAt == nil {
+		t.Fatalf("陈旧行应正常落推迟起点")
+	}
+	if staleCopy2.ActivationDeferredAt == nil {
+		t.Fatalf("更新命中后副本应同步推迟标记")
+	}
+}
+
 // 窗口外（旧请求或全新会话）：入口立即激活，通知写「已生效」。
 func TestBotActivationImmediateOutsideCacheWindow(t *testing.T) {
 	env := setupBotTestEnv(t, fakeModelTurn{Text: "ok", Usage: &fakeModelUsage{Prompt: 5, Completion: 2, Total: 7}})
