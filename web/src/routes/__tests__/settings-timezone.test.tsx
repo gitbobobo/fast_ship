@@ -19,7 +19,7 @@ vi.mock("@/components/layout/header", () => ({
 }));
 
 vi.mock("@/lib/api/auth", () => ({
-  authApi: { updateMe: vi.fn() },
+  authApi: { me: vi.fn(), updateMe: vi.fn() },
 }));
 
 function fakeUser(overrides: Partial<User> = {}): User {
@@ -30,6 +30,7 @@ function fakeUser(overrides: Partial<User> = {}): User {
     avatar_url: "",
     role: "member",
     timezone: "",
+    effective_timezone: "UTC",
     created_at: "2026-04-06T10:00:00Z",
     updated_at: "2026-04-06T10:00:00Z",
     ...overrides,
@@ -86,15 +87,32 @@ describe("Settings General Page - timezone", () => {
     ).toHaveTextContent("默认（跟随部署配置）");
   });
 
-  it("生效时区缺失时退回浏览器时区，不显示空值", () => {
-    useAuthStore.setState({ user: fakeUser({ timezone: "" }) });
+  it("生效时区缺失时只说规则，不拿本机时区冒充部署时区，并补拉一次 /auth/me", () => {
+    useAuthStore.setState({
+      user: fakeUser({ timezone: "", effective_timezone: undefined }),
+    });
+    const refreshed = fakeUser({
+      timezone: "",
+      effective_timezone: "Europe/Berlin",
+    });
+    vi.mocked(authApi.me).mockResolvedValue({
+      data: refreshed,
+    } as Awaited<ReturnType<typeof authApi.me>>);
 
     renderPage();
 
-    expect(screen.getByText("该时区当前时间：")).toBeInTheDocument();
+    // 先按保守分支显示规则，绝不写「<本机时区>（来自部署配置）」。
     expect(
-      screen.getByRole("combobox", { name: "时区" }),
-    ).toHaveTextContent("默认（跟随部署配置）");
+      screen.getByText("机器人按部署配置的时区计算，部署未配置时区时为 UTC"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/（来自部署配置）/)).not.toBeInTheDocument();
+
+    // 同时补拉 /auth/me 写回 store，拿到真实生效时区后正常显示。
+    return waitFor(() =>
+      expect(useAuthStore.getState().user?.effective_timezone).toBe(
+        "Europe/Berlin",
+      ),
+    );
   });
 
   it("切换时区后调用 updateMe 并更新 store", async () => {

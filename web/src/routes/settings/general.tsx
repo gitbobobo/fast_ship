@@ -7,7 +7,6 @@ import { useThemeStore, type Theme } from "@/lib/store/theme-store";
 import { useAuthStore } from "@/lib/store/auth-store";
 import { authApi } from "@/lib/api/auth";
 import {
-  browserTimezone,
   formatTimeInZone,
   TIMEZONE_GROUP_COMMON,
   TIMEZONE_GROUP_DIVIDER,
@@ -40,10 +39,29 @@ export default function GeneralPage() {
   const Icon = currentTheme?.icon ?? Monitor;
 
   const currentTimezone = user?.timezone ?? "";
-  // 生效时区由服务端算好（用户设置 → 部署配置 → UTC）；拿不到时退回浏览器
-  // 时区，只用于展示。
-  const effectiveTimezone = currentTimezone || user?.effective_timezone || "";
-  const displayTimezone = effectiveTimezone || browserTimezone() || "UTC";
+  // 生效时区由服务端算好（用户设置 → 部署配置 → UTC）。没有它时不要用本机
+  // 时区冒充「部署配置的时区」——本机与部署不一致时名字和时间都是错的
+  // （INT-138 复审 P1）。
+  const effectiveTimezone = user?.effective_timezone ?? "";
+  const displayTimezone = currentTimezone || effectiveTimezone;
+
+  // 长期开着的标签页可能停在「user 里还没有 effective_timezone」的旧对象上
+  // （布局只在 user 为空时拉 /auth/me）：进这个页面时补拉一次写回 store。
+  useEffect(() => {
+    if (!user || user.effective_timezone !== undefined) return;
+    let cancelled = false;
+    authApi
+      .me()
+      .then((res) => {
+        if (!cancelled) useAuthStore.getState().setUser(res.data);
+      })
+      .catch(() => {
+        // 后台补齐失败不影响页面：下面按「字段缺失」的保守分支显示。
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [user]);
 
   const timezoneSelectOptions = useMemo(() => {
     // 分组标题不可选：只用来把「常用」和完整列表分开。
@@ -157,7 +175,7 @@ export default function GeneralPage() {
                         {formatTimeInZone(now, displayTimezone)}
                       </span>
                     </p>
-                  ) : (
+                  ) : displayTimezone ? (
                     <>
                       <p className="text-muted-foreground">
                         当前生效时区：
@@ -172,6 +190,11 @@ export default function GeneralPage() {
                         </span>
                       </p>
                     </>
+                  ) : (
+                    // 生效时区还没拿到：只说规则，不拿本机时区冒充。
+                    <p className="text-muted-foreground">
+                      机器人按部署配置的时区计算，部署未配置时区时为 UTC
+                    </p>
                   )}
                 </div>
               </div>
