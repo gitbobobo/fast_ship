@@ -1,10 +1,12 @@
 package service
 
 import (
+	"errors"
 	"strings"
 	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/model"
+	"gorm.io/gorm"
 )
 
 // 用户时区解析（INT-138）：用户设置优先，未声明或非法时回退部署配置
@@ -30,23 +32,61 @@ func (s *BotService) botEffectiveTimezone(raw string) (string, *time.Location) {
 }
 
 // botUserTimezoneOf 返回用户的有效时区；用户行读不到时按未声明处理。
+// 只用于「读失败也不该影响本条路径」的场景（运行时上下文、夜间整理、
+// daily 路径）——把回退当成唯一结果。需要区分「用户没声明」与「查询失败」
+// 的写入路径（创建定时任务）必须用 botUserTimezoneOfErr。
 func (s *BotService) botUserTimezoneOf(userID string) (string, *time.Location) {
-	if userID == "" {
+	resolved, err := s.botUserTimezoneOfErr(userID)
+	if err != nil {
 		return s.botEffectiveTimezone("")
+	}
+	return resolved.name, resolved.loc
+}
+
+// botTimezoneResolution 是一次时区解析的结果。
+type botTimezoneResolution struct {
+	name string
+	loc  *time.Location
+}
+
+// botUserTimezoneOfErr 同 botUserTimezoneOf，但把读库失败与「用户没声明时区」
+// 区分开：用户行不存在（机器人随用户级联删除，属可预期状态）按未声明处理，
+// 其余错误原样返回。把瞬时读库失败当成未声明，会把回退时区当成用户的选择
+// 永久写进任务（INT-138 复审）。
+func (s *BotService) botUserTimezoneOfErr(userID string) (botTimezoneResolution, error) {
+	if userID == "" {
+		name, loc := s.botEffectiveTimezone("")
+		return botTimezoneResolution{name: name, loc: loc}, nil
 	}
 	user, err := s.users.FindByID(userID)
-	if err != nil || user == nil {
-		return s.botEffectiveTimezone("")
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			name, loc := s.botEffectiveTimezone("")
+			return botTimezoneResolution{name: name, loc: loc}, nil
+		}
+		return botTimezoneResolution{}, err
 	}
-	return s.botEffectiveTimezone(user.Timezone)
+	name, loc := s.botEffectiveTimezone(user.Timezone)
+	return botTimezoneResolution{name: name, loc: loc}, nil
 }
 
 // botOwnerTimezoneOf 返回机器人归属用户的有效时区。
 func (s *BotService) botOwnerTimezoneOf(bot *model.Bot) (string, *time.Location) {
-	if bot == nil {
+	resolved, err := s.botOwnerTimezoneOfErr(bot)
+	if err != nil {
 		return s.botEffectiveTimezone("")
 	}
-	return s.botUserTimezoneOf(bot.UserID)
+	return resolved.name, resolved.loc
+}
+
+// botOwnerTimezoneOfErr 同 botOwnerTimezoneOf，但把读库失败原样返回；写入
+// 路径（创建定时任务）用它，不要用静默回退。
+func (s *BotService) botOwnerTimezoneOfErr(bot *model.Bot) (botTimezoneResolution, error) {
+	if bot == nil {
+		name, loc := s.botEffectiveTimezone("")
+		return botTimezoneResolution{name: name, loc: loc}, nil
+	}
+	return s.botUserTimezoneOfErr(bot.UserID)
 }
 
 // botOwnerTimezoneOfID 同 botOwnerTimezoneOf，但按 bot ID 查：工具执行路径

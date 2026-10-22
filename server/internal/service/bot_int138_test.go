@@ -6,11 +6,15 @@ package service
 
 import (
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/glebarez/sqlite"
 	"github.com/godbobo/fast_ship/server/internal/model"
+	"github.com/godbobo/fast_ship/server/internal/repository"
+	"gorm.io/gorm"
 )
 
 // setUserTimezone 直接改用户时区列（模拟设置页/首登写入，绕过 handler）。
@@ -253,6 +257,46 @@ func TestBotInt138ScheduleCreateDefaultsUserTimezone(t *testing.T) {
 	}
 	if !strings.Contains(out, `"timezone":"America/New_York"`) {
 		t.Fatalf("update 不传时区应保持原值: %s", out)
+	}
+}
+
+// 创建任务时读不到用户行（数据库故障，而不是「用户没声明时区」）必须失败：
+// 把瞬时读库失败当成未声明，会把部署回退时区当成用户的选择永久写进任务，
+// 之后用户改时区也不会带动这条任务（INT-138 复审）。
+func TestInt138ScheduleCreateFailsWhenUserReadFails(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "tzdberr")
+	bot := env.createBot(t, userID)
+
+	// 换成一个连接已关闭的仓储：bot 行仍读得到，用户行读会真实报错。
+	broken, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "closed.db")), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open broken db: %v", err)
+	}
+	sqlDB, err := broken.DB()
+	if err != nil {
+		t.Fatalf("broken sql db: %v", err)
+	}
+	if err := sqlDB.Close(); err != nil {
+		t.Fatalf("close broken db: %v", err)
+	}
+	original := env.bots.users
+	env.bots.users = repository.NewUserRepository(broken)
+	t.Cleanup(func() { env.bots.users = original })
+
+	_, err = botScheduleCall(t, env, bot.ID,
+		`{"action":"create","name":"晨报","cron":"0 9 * * *","instruction":"检查新 issue"}`)
+	if err == nil {
+		t.Fatalf("读不到用户行时应拒绝创建任务，而不是回退成部署时区落库")
+	}
+
+	// 不能留下任务行（空时区等于 UTC，会被静默固化）。
+	var count int64
+	if err := env.db.Model(&model.BotScheduleTask{}).Where("bot_id = ?", bot.ID).Count(&count).Error; err != nil {
+		t.Fatalf("count tasks: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("创建失败时不应留下任务行，实得 %d 条", count)
 	}
 }
 

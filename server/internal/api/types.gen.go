@@ -1748,7 +1748,7 @@ type BotRun struct {
 	TotalTokens   *int64 `json:"total_tokens,omitempty"`
 	TriggerKey    string `json:"trigger_key"`
 
-	// TriggerSource user_message / tool_result / recovery / schedule / manual
+	// TriggerSource user_message / tool_result / recovery / schedule / manual / schedule_event（定时任务运行事件写入主线后的立即唤醒，INT-138）
 	TriggerSource string `json:"trigger_source"`
 
 	// UsageComplete false 表示上游未报 usage（缺失与零严格区分）

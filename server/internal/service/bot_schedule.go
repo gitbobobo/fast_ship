@@ -361,8 +361,11 @@ func (s *BotService) createScheduleTask(botID, name, cronExpr, timezone, instruc
 		if err != nil {
 			return nil, errs.ErrInternal
 		}
-		tzName, _ := s.botOwnerTimezoneOf(botRow)
-		timezone = tzName
+		resolved, err := s.botOwnerTimezoneOfErr(botRow)
+		if err != nil {
+			return nil, errs.ErrInternal
+		}
+		timezone = resolved.name
 	}
 	if err := botValidateScheduleTaskFields(name, cronExpr, timezone, instruction); err != nil {
 		return nil, err
