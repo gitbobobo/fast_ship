@@ -358,23 +358,32 @@ func TestReviewSyncCarriesVisualSuccessStatusOnce(t *testing.T) {
 	e := newReviewEngineEnv(t)
 	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
 	now := time.Now().UTC()
+	body := "![界面](https://uiv.frp.musiver.cn/f/x.png)"
 	e.fake.SetPR(repo, 91, &githubapi.PullRequest{
-		RepoFullName: repo, Number: 91, HeadSHA: "sha-w", State: "open",
+		RepoFullName: repo, Number: 91, HeadSHA: "sha-w", State: "open", Body: body,
 		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
 	})
-	e.enableReview(t)
-	// 上一轮（round 1）视觉通过；本轮（round 2）代码有带行号的 P1、没有视觉
-	// 运行 → 沿用上一轮通过，同时触发 diff 读取。
+	visualCombos, err := marshalCombinations([]api.ReviewCombination{testCombo("env-cs")})
+	if err != nil {
+		t.Fatalf("marshal combos: %v", err)
+	}
+	e.enableReview(t, func(s *model.ProjectReviewSettings) {
+		s.VisualCombinationsJSON = visualCombos
+	})
+	// 上一轮（round 1）视觉通过；本轮（round 2）截图集合未变（账本指纹与
+	// 描述同集合）、上轮视觉后无 UI 改动 → 沿用上一轮通过；代码有带行号的
+	// P1，同步同时触发 diff 读取。描述里没有截图时按新决策不沿用（visualNone）。
 	prior := e.seedRun(t, repo, 91, "sha-old", model.ReviewRunCompleted, now)
 	e.svc.db.Model(prior).Updates(map[string]any{
 		"kind": model.ReviewKindVisual, "round_number": 1,
 		"result_json": `{"summary":"通过","findings":[],"prior":[],"unmeasurable":[]}`,
 	})
 	e.seedRunWithFindings(t, repo, 91, "sha-w", now)
+	fp := screenshotFingerprint(collectScreenshotURLs(body))
 	e.svc.db.Create(&model.ReviewPullRequest{
 		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 91, UserID: e.user.ID,
 		InstallationID: 1, HeadSHA: "sha-w", RoundNumber: 2,
-		SyncPending: true, SyncEpoch: 1, UpdatedAt: now,
+		VisualScreensFingerprint: fp, SyncPending: true, SyncEpoch: 1, UpdatedAt: now,
 	})
 	review := NewReviewService(e.svc.db, e.svc.projectRepo,
 		repository.NewGitHubWebhookDeliveryRepository(e.svc.db),

@@ -21,10 +21,10 @@ import (
 	"go.uber.org/zap"
 )
 
-// 视觉开轮前的截图探测：第一张下载成功即开轮，全部失败不开轮并给中文
-// failure status。探测不写 review_assets，也不按资产行计数——陈旧资产不能
-// 把「当前截图全失败」顶成可用。重试只发生在下一次同步事件（新推送/手动
-// 重跑）。
+// 视觉开轮前的截图探测：试完全部引用算内容指纹，任一成功即开轮；全部失败
+// 不开轮并给中文 failure status。探测不写 review_assets，也不按资产行计数
+// ——陈旧资产不能把「当前截图全失败」顶成可用。重试只发生在下一次同步事件
+// （新推送/手动重跑）。
 
 func seedVisualSyncEnv(t *testing.T, e *reviewEngineEnv, repo string, prNumber int, head string, now time.Time) {
 	t.Helper()
@@ -401,18 +401,21 @@ func TestVisualSyncScreensUnavailable(t *testing.T) {
 	}
 }
 
-// 探测第一张成功即停：三张里第一张可用 → 只下载 1 次（失败的两张还没轮到），
-// 照常开轮。
-func TestVisualSyncProbeStopsAtFirstSuccess(t *testing.T) {
+// 探测不再「第一张成功即停」：每个成功图都要参与内容指纹（「URL 换了但图
+// 没变」判定的依据），三张里第一张可用也把其余的试完；失败的算「拉不到」
+// 不算内容，照常开轮。部分失败时内容指纹未知——但 URL 集合维度照常推进
+// （本轮开轮的材料是什么要记下来），后续同一集合不再重探。
+func TestVisualSyncProbeTriesAllRefsForContentFingerprint(t *testing.T) {
 	e := newReviewEngineEnv(t)
 	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
 	now := time.Now().UTC()
 	seedVisualSyncEnv(t, e, repo, 84, "sha-p", now)
 
+	body := "![a](https://uiv.frp.musiver.cn/f/ok.png) ![b](https://uiv.frp.musiver.cn/f/bad1.png) ![c](https://uiv.frp.musiver.cn/f/bad2.png)"
 	e.fake.SetPR(repo, 84, &githubapi.PullRequest{
 		RepoFullName: repo, Number: 84, HeadSHA: "sha-p",
 		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
-		Body: "![a](https://uiv.frp.musiver.cn/f/ok.png) ![b](https://uiv.frp.musiver.cn/f/bad1.png) ![c](https://uiv.frp.musiver.cn/f/bad2.png)",
+		Body: body,
 	})
 	e.media.failURLs = map[string]error{
 		"https://uiv.frp.musiver.cn/f/bad1.png": errors.New("404 not found"),
@@ -420,8 +423,8 @@ func TestVisualSyncProbeStopsAtFirstSuccess(t *testing.T) {
 	}
 	e.review.syncPendingPRs(now)
 
-	if e.media.anonCalls != 1 {
-		t.Fatalf("anonCalls = %d, want 1（第一张成功即停，不继续下载）", e.media.anonCalls)
+	if e.media.anonCalls != 3 {
+		t.Fatalf("anonCalls = %d, want 3（每张都要试，为内容指纹）", e.media.anonCalls)
 	}
 	var visualRuns []model.ReviewRun
 	e.svc.db.Where("repo_full_name = ? AND pr_number = ? AND kind = ?", repo, 84, model.ReviewKindVisual).Find(&visualRuns)
@@ -430,8 +433,23 @@ func TestVisualSyncProbeStopsAtFirstSuccess(t *testing.T) {
 	}
 	var ledger model.ReviewPullRequest
 	e.svc.db.First(&ledger, "repo_full_name = ? AND pr_number = 84", repo)
-	if ledger.VisualStatus != "pending" || ledger.VisualScreensFingerprint == "" {
-		t.Fatalf("ledger = %q/%q, want pending/指纹", ledger.VisualStatus, ledger.VisualScreensFingerprint)
+	if ledger.VisualStatus != "pending" {
+		t.Fatalf("visual_status = %q, want pending", ledger.VisualStatus)
+	}
+	// 只成功一部分：内容维度未知不入账，但 URL 集合维度要推进——账本描述的
+	// 是本轮开轮的材料，不再留着旧集合的指纹被后续轮次误命中。
+	stored := parseScreensFingerprint(ledger.VisualScreensFingerprint)
+	wantURLFP := screenshotFingerprint(collectScreenshotURLs(body))
+	if stored.urlFP != wantURLFP || stored.contentFP != "" || stored.settledNone {
+		t.Fatalf("fingerprint = %+v (%q), want urlFP=%s 且内容维度未知（裸 urlFP 形态）",
+			stored, ledger.VisualScreensFingerprint, wantURLFP)
+	}
+	// 同一 body 再来一次同步事件：视觉运行在途走汇总路径，不再进决策——
+	// 不重探、不重开轮。
+	e.setLedgerPending(t, repo, 84)
+	e.review.syncPendingPRs(now.Add(time.Second))
+	if e.media.anonCalls != 3 {
+		t.Fatalf("anonCalls = %d, want 仍为 3（运行在途不重探）", e.media.anonCalls)
 	}
 }
 
@@ -894,14 +912,17 @@ func TestProbeScreenshotsAttemptTimeoutLetsLaterScreensThrough(t *testing.T) {
 
 	body := "![a](" + hangURL + ") ![b](" + okURL + ")"
 	start := time.Now()
-	probe, reason := review.probeScreenshots(context.Background(), 1, body)
+	probe := review.probeScreenshots(context.Background(), 1, body)
 	elapsed := time.Since(start)
 
-	if probe != probeReady {
-		t.Fatalf("probe = %v (reason %q), want probeReady——第一张挂死不应饿死后面的可用图", probe, reason)
+	if probe.result != probeReady {
+		t.Fatalf("probe = %+v, want probeReady——第一张挂死不应饿死后面的可用图", probe)
 	}
 	if e.media.anonCalls != 2 {
 		t.Fatalf("anonCalls = %d, want 2（第二张必须被尝试）", e.media.anonCalls)
+	}
+	if probe.contentFP != "" {
+		t.Fatalf("contentFP = %q, want 空（部分失败内容未知）", probe.contentFP)
 	}
 	if elapsed >= 2*time.Second {
 		t.Fatalf("elapsed = %v, want 远小于总预算", elapsed)
@@ -929,13 +950,13 @@ func TestProbeScreenshotsAllBlockedStopsAtBudget(t *testing.T) {
 	}()
 
 	start := time.Now()
-	probe, reason := review.probeScreenshots(context.Background(), 1, strings.Join(refs, " "))
+	probe := review.probeScreenshots(context.Background(), 1, strings.Join(refs, " "))
 	elapsed := time.Since(start)
 
-	if probe != probeUnavailable {
-		t.Fatalf("probe = %v, want probeUnavailable（全部挂死，预算耗尽未探完也算拉不到）", probe)
+	if probe.result != probeUnavailable {
+		t.Fatalf("probe = %+v, want probeUnavailable（全部挂死，预算耗尽未探完也算拉不到）", probe)
 	}
-	if reason == "" {
+	if probe.reason == "" {
 		t.Fatal("reason 为空, want 非空（下载超时）")
 	}
 	// 15 张 × 100ms 单张时限本会拖 1.5s，总预算 1s 必须截停。

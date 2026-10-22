@@ -2,10 +2,14 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/url"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -547,17 +551,44 @@ func isNotAnImageError(err error) bool {
 		errors.Is(err, githubmedia.ErrInvalidMediaURL)
 }
 
-// probeScreenshots 试下载 PR 描述里的截图，第一张成功即停：成功图已落盘缓存
-// （视觉运行时直接命中）。逐 ref 分类失败：「不是图」与「拉不到」（见
-// isNotAnImageError）。任一成功 → probeReady；全部探完且全部「不是图」→
-// probeNone；其余（任一拉不到、或总预算耗尽未探完）→ probeUnavailable，
-// reason 取第一条「拉不到」类原因，没有再取第一条失败原因。探测不写
-// review_assets——资产行仍由视觉运行时的 ensureAssets 落账，这里不按资产
-// 行计数，避免「已不在描述里的陈旧资产」被当成可用截图。
-func (s *ReviewService) probeScreenshots(ctx context.Context, installationID int64, prBody string) (screenshotProbeResult, string) {
+// hashFileSHA256 流式读文件算 SHA-256 hex。探测用它对下载成功的缓存文件取
+// 内容指纹——下载面单文件上限 256 MiB，整文件读进内存再哈希是白付的峰值
+// 内存，边读边算只占一个哈希缓冲。
+func hashFileSHA256(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// screenshotProbe probeScreenshots 的结果。contentFP 内容指纹只在 result=
+// probeReady 且全部引用都下载成功时非空——只成功一部分时无法证明「内容没
+// 变」，按未知（调用方保守视为变化）处理。
+type screenshotProbe struct {
+	result    screenshotProbeResult
+	reason    string
+	contentFP string
+}
+
+// probeScreenshots 试下载 PR 描述里的全部截图引用（不再「第一张成功即停」
+// ——每个成功图都要参与内容指纹，指纹是「URL 换了但图没变」判定的依据）。
+// 成功图已落盘缓存（视觉运行时直接命中）。逐 ref 分类失败：「不是图」与
+// 「拉不到」（见 isNotAnImageError）。任一成功 → probeReady（部分失败时内容
+// 指纹为空）；全部探完且全部「不是图」→ probeNone；零成功且存在「拉不到」
+// 或总预算耗尽未探完 → probeUnavailable，reason 取第一条「拉不到」类原因，
+// 没有再取第一条失败原因。探测不写 review_assets——资产行仍由视觉运行时的
+// ensureAssets 落账，这里不按资产行计数，避免「已不在描述里的陈旧资产」被
+// 当成可用截图。
+func (s *ReviewService) probeScreenshots(ctx context.Context, installationID int64, prBody string) screenshotProbe {
 	refs := collectScreenshotURLsAt(prBody, s.githubWebHost())
 	if len(refs) == 0 {
-		return probeNone, ""
+		return screenshotProbe{result: probeNone}
 	}
 	ctx, cancel := context.WithTimeout(ctx, screenshotProbeTimeout)
 	defer cancel()
@@ -565,14 +596,34 @@ func (s *ReviewService) probeScreenshots(ctx context.Context, installationID int
 	firstFetchFailReason := ""
 	fetchFailed := false
 	completed := true
+	var contentHashes []string
 	for _, ref := range refs {
 		// 单张限时：挂死图只吃掉自己的时限，还有剩余预算就继续试下一张；
 		// 总预算吃满才放弃（剩下的引用继续探测只会继续超时，同步循环还在等）。
 		attemptCtx, cancel := context.WithTimeout(ctx, screenshotProbeAttemptTimeout)
-		_, err := s.downloadScreenshot(attemptCtx, installationID, ref.URL)
+		cached, err := s.downloadScreenshot(attemptCtx, installationID, ref.URL)
 		cancel()
 		if err == nil {
-			return probeReady, ""
+			// 每张开始哈希前检查总预算：前面的图把预算吃光时这张不再读盘
+			// （内容按未知处理），也不能给「全部不是图」的结论留口子——按
+			// 预算耗尽收敛，下轮同步事件再试。
+			if ctx.Err() != nil {
+				completed = false
+				if firstReason == "" {
+					firstReason = screenshotErrorText(ctx.Err())
+				}
+				break
+			}
+			// 下载成功只读一次盘：哈希在下载当场算，不再在末尾按路径二次
+			// 读取。读失败（磁盘异常）按该张「拉不到」处理，不当成可用图——
+			// 视觉运行时同样会栽在读文件上。
+			sum, hashErr := hashFileSHA256(cached.Path)
+			if hashErr != nil {
+				err = fmt.Errorf("%w: %v", githubmedia.ErrLocalCache, hashErr)
+			} else {
+				contentHashes = append(contentHashes, sum)
+				continue
+			}
 		}
 		text := screenshotErrorText(err)
 		if firstReason == "" {
@@ -595,13 +646,23 @@ func (s *ReviewService) probeScreenshots(ctx context.Context, installationID int
 			break
 		}
 	}
+	// 任一成功即 probeReady（优先于「拉不到」——决策要的是「能否开视觉轮」，
+	// 部分失败交给运行时的 unmeasurable 与指纹「内容未知」口径），但只有全
+	// 部成功才带内容指纹。
+	if len(contentHashes) > 0 {
+		probe := screenshotProbe{result: probeReady}
+		if len(contentHashes) == len(refs) {
+			probe.contentFP = screenshotContentFingerprintFromHashes(contentHashes)
+		}
+		return probe
+	}
 	if fetchFailed {
-		return probeUnavailable, firstFetchFailReason
+		return screenshotProbe{result: probeUnavailable, reason: firstFetchFailReason}
 	}
 	if !completed {
-		return probeUnavailable, firstReason
+		return screenshotProbe{result: probeUnavailable, reason: firstReason}
 	}
-	return probeNone, ""
+	return screenshotProbe{result: probeNone}
 }
 
 // AgentScreenshots GET /api/review-agent/screenshots：仅视觉运行可用。
