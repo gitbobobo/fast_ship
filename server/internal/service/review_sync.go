@@ -532,13 +532,19 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 	}
 
 	// 4. 行内 review：每个 completed 且未 posted 的代码运行，有效行发 review。
+	// diff 读不到时本轮推迟这一步（不标记已发布，下一轮重试），但不打断后面
+	// 与 diff 无关的视觉收尾——推迟的错误在 step 5 之后统一上报，账本保持
+	// sync_pending。
+	inlineDeferred := inlineErr != nil
 	if ok, err := s.ledgerEpochCurrent(ledger, epoch); err != nil {
 		return errs.New(errs.ErrInternal.Code, "复核同步 epoch 失败: "+err.Error())
 	} else if !ok {
 		return nil
 	}
-	if err := s.postInlineReviews(ctx, client, ledger, codeRuns, inlineLines, inlineErr, epoch, now); err != nil {
-		return err
+	if !inlineDeferred {
+		if err := s.postInlineReviews(ctx, client, ledger, codeRuns, inlineLines, epoch, now); err != nil {
+			return err
+		}
 	}
 
 	// 5. 视觉运行存在时的状态与评论。
@@ -568,6 +574,9 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 				return err
 			}
 		}
+	}
+	if inlineDeferred {
+		return inlineErr // 行内 review 推迟：保持 pending，下一轮 diff 读得到时补发
 	}
 	return nil
 }
@@ -1082,20 +1091,11 @@ func buildScreensUnavailableComment(priorRuns []model.ReviewRun) string {
 // postInlineReviews 每个 completed 且 posted_at IS NULL 的代码运行：
 // P0–P2 且行号落在 diff 右侧有效行内 → SubmitReview；posted_at=now。
 // inlineLines 由调用方传入（fetchInlineLines 的结果），本函数不再自己读 diff
-// ——它与顶层评论的「未行内标注」注记同源，保证两处判定一致。
-// inlineErr 是同一份 diff 读取的错误：非 nil 时本阶段原样上报并返回（无论
-// 有没有待发布运行），账本保持 sync_pending、下一轮同步重试——把失败压成
-// 「没有有效行号」会把行内意见静默丢掉，也会让按「没读 diff」口径写的顶层
-// 评论永远缺「未行内标注」注记。
+// ——它与顶层评论的「未行内标注」注记同源，保证两处判定一致。diff 读不到时
+// 调用方根本不进本函数（推迟到下一轮）。
 func (s *ReviewService) postInlineReviews(ctx context.Context, client githubapi.GitHubClient,
 	ledger *model.ReviewPullRequest, codeRuns []model.ReviewRun, inlineLines map[string]map[int]bool,
-	inlineErr error, epoch int, now time.Time) error {
-	// diff 读不到时无论有没有待发布运行都上报：本轮顶层评论可能已按「没读
-	// diff」口径重写（缺「未行内标注」注记），必须保持 pending 让下一轮在
-	// diff 恢复后重写，否则注记永久缺失；行内意见本身也还在运行上没发。
-	if inlineErr != nil {
-		return inlineErr
-	}
+	epoch int, now time.Time) error {
 	var pending []model.ReviewRun
 	for _, r := range codeRuns {
 		if r.Status == model.ReviewRunCompleted && r.PostedAt == nil {

@@ -231,3 +231,57 @@ func TestReviewDiffFailureRewritesCommentWhenBodyChanges(t *testing.T) {
 		t.Fatal("diff 仍不可读，应保持 pending")
 	}
 }
+
+// TestReviewDiffFailureStillWritesVisualOutput diff 读不到只推迟行内 review，
+// 视觉状态与视觉评论照常写（它们不依赖 diff）：推迟的错误在视觉收尾之后才
+// 上报，账本保持 pending 便于下一轮补发行内意见。
+func TestReviewDiffFailureStillWritesVisualOutput(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	e.fake.SetPR(repo, 81, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 81, HeadSHA: "sha-v", State: "open",
+		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
+	})
+	e.enableReview(t)
+	// 带行号 P1 才会触发 diff 读取。
+	code := e.seedRunWithFindings(t, repo, 81, "sha-v", now)
+	visual := e.seedRun(t, repo, 81, "sha-v", model.ReviewRunCompleted, now)
+	e.svc.db.Model(visual).Updates(map[string]any{
+		"kind":        model.ReviewKindVisual,
+		"result_json": `{"summary":"视觉通过","findings":[],"prior":[],"unmeasurable":[]}`,
+	})
+	e.svc.db.Create(&model.ReviewPullRequest{
+		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 81, UserID: e.user.ID,
+		InstallationID: 1, HeadSHA: "sha-v", RoundNumber: 1,
+		SyncPending: true, SyncEpoch: 1, UpdatedAt: now,
+	})
+	review := NewReviewService(e.svc.db, e.svc.projectRepo,
+		repository.NewGitHubWebhookDeliveryRepository(e.svc.db),
+		NewNotificationSink(e.svc.db),
+		githubapp.StaticClients{Client: &diffFailClient{GitHubClient: e.fake}},
+		fakeReviewAppSource{ok: true},
+		fakeReviewPublicURL("https://fs.example.com"),
+		nil, e.media, nil, e.svc.cfg, zap.NewNop())
+	review.syncPendingPRs(now)
+
+	if got := len(e.fake.StatusesForContext(reviewVisualStatusContext)); got == 0 {
+		t.Fatalf("视觉状态应照常写出（diff 失败不该挡住视觉收尾），statuses=%v", e.fake.StatusesForContext(reviewVisualStatusContext))
+	}
+	hasVisualComment := false
+	for _, body := range e.fake.Comments(repo, 81) {
+		if strings.Contains(body, reviewVisualCommentMarker) {
+			hasVisualComment = true
+		}
+	}
+	if !hasVisualComment {
+		t.Fatal("视觉评论应照常写出")
+	}
+	var ledger model.ReviewPullRequest
+	e.svc.db.Where("project_id = ? AND repo_full_name = ? AND pr_number = ?",
+		e.project.ID, repo, 81).First(&ledger)
+	if !ledger.SyncPending || !strings.Contains(ledger.SyncError, "读取 diff 失败") {
+		t.Fatalf("行内 review 仍推迟：pending=%v sync_error=%q", ledger.SyncPending, ledger.SyncError)
+	}
+	_ = code
+}
