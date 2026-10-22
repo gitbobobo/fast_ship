@@ -105,7 +105,7 @@ INT-133 新增 `ai_providers`）
 逻辑分段顺序固定：系统提示 → 记忆快照（无驻留文件时不注入空段）→
 工具定义 → 会话摘要（首期空）→ 最近消息 → 本轮运行时上下文。Chat
 Completions 的工具定义实际在顶层 `tools`，不伪造 tools 消息；当前时间、待
-处理输入等易变内容只出现在末尾运行时上下文。`prefix_hash`（去掉运行时
+处理输入、用户时区与当地时间等易变内容只出现在末尾运行时上下文。`prefix_hash`（去掉运行时
 上下文的消息数组）、`tools_hash`（tools 数组）按实际字节计算 SHA-256，
 测试断言前缀逐字节只追加、不改写。记忆快照按 `context_generation` 冻结
 （`memSnaps` 缓存），只有压缩边界或重启才重新注入——普通请求的记忆段
@@ -132,9 +132,11 @@ SDK 重试显式关零（`option.WithMaxRetries(0)`）：连接测试与被中�
 字段；v5（INT-120）让 `fs_thread list` 真正支持 `env_id`/`query` 过滤并
 修正这两个参数的 schema 描述；v6（INT-121）起 `fs_schedule` 新增 `run`
 （手动立即执行一次）与 `dry_run` 预览；v7（INT-123）起 `fs_schedule` 新增
-`state_get`/`state_set` 与 `state` 参数（任务小状态，见下节）。已发布
-版本（v1–v6）的注册表都是**冻结副本**——新版本变化不得改写旧版本的字节
-（存量会话的 tools_hash 失稳即前缀失稳；v1–v6 的 hash 逐字节钉死在测试基线里）。版本只在 run 入口或压缩边界推进（重建平台规则并递增 prompt_revision）：
+`state_get`/`state_set` 与 `state` 参数（任务小状态，见下节）；v8（INT-138）
+只改 `fs_schedule` 的描述（时区默认跟随用户时区、任务指令写法指导），动作集与
+参数字段不变。已发布
+版本（v1–v7）的注册表都是**冻结副本**——新版本变化不得改写旧版本的字节
+（存量会话的 tools_hash 失稳即前缀失稳；v1–v7 的 hash 逐字节钉死在测试基线里）。版本只在 run 入口或压缩边界推进（重建平台规则并递增 prompt_revision）：
 run 入口的 `activateBotPrompt` 在一个短事务里读行、
 判 stale、按**该行**人设重建提示词并写回，主线与定时任务会话都适用（在冻结
 本次 run 的配置与会话快照之前完成）；提示词始终由事务内读到的行生成——
@@ -314,6 +316,19 @@ next_offset}`；`fs_result.read` 按 Unicode 字符续读，不切断 UTF-8。
   用单次口径。辅助模型（摘要/归档）的输出预算沿用「目标 − 前缀 − 附录 −
   保留尾部」与 `MaxCompletionTokens` 传递，不因省 token 硬砍到截断。
 
+### 用户时区与当地语义（INT-138）
+
+「用户时区」是 `users.timezone` 的 IANA 名称：浏览器首次登录用 `Intl` 时区
+写入，设置页「通用」可改；空串 = 未声明。解析链集中在 `bot_timezone.go`
+（`botEffectiveTimezone` / `botUserTimezoneOf` / `botOwnerTimezoneOf`）：
+用户设置 → 部署配置 `bots.memory.timezone` → UTC，返回（有效时区名,
+Location）两件套，各处不再自拼回退。走这条链的语义有五处：运行时上下文的
+`user_timezone` 与 `current_time_local`（主线与 schedule 会话都在末尾，
+不进前缀）、`fs_schedule create` 省略时区时的默认值、夜间整理的触发时刻与
+「当地日期」、daily 文件命名。改时区不需要迁移任何存量数据：定时任务的
+`timezone` 列是创建时落下的快照（已有任务不变），daily 只影响之后的写入，
+不重命名已有文件。
+
 ### 长期记忆（INT-102）
 
 文件形记忆：`USER.md`（用户画像，≤1500 字符注入）、`MEMORY.md`（长期
@@ -340,8 +355,9 @@ history 对墓碑记 `exists:false, deleted:true` 但历史版本仍照常列出
 与存在路径同判；缺失路径 + 合法 version 与写入类动作（create 之外的
 replace/append/delete/restore）对缺失路径仍按非法操作报错。
 
-夜间整理是内置协调器：按配置时区在当地 03:00
-触发，用可配的更便宜模型合并 daily 笔记到 USER.md / MEMORY.md。触发键
+夜间整理是内置协调器：按机器人归属用户的有效时区（未声明时回退部署配置
+`bots.memory.timezone`）在当地 03:00 逐个 bot 分别判断触发，用可配的更便宜
+模型合并 daily 笔记到 USER.md / MEMORY.md。触发键
 （INT-124 起）在无未消费 daily 时是 `nightly:<当地日期>`（保持每天至多
 一条 nothing_to_consume 记录）；有未消费内容时附加内容签名
 `nightly:<当地日期>:<sha256 前 16 hex>`（未消费 daily 的 path@version
@@ -403,7 +419,8 @@ path→version，无新笔记的空成功不会让次日重跑全部 daily。恢
   + 冻结记忆注入（run 开始现读一次、run 内冻结）+ 冻结工具集 + 只含本 run
   的消息 + 末尾运行时上下文（任务名/指令/cron/静默约定；INT-123 起带上一次
   已结束运行的 `last_run_at/last_run_status/last_run_summary`——没有则整体
-  省略——与任务小状态的用法说明）。主线读取面里 messages/`ListMainline`、/runs、
+  省略——与任务小状态的用法说明；INT-138 起带 `user_timezone` 与
+  `current_time_local`）。主线读取面里 messages/`ListMainline`、/runs、
   `FindActiveByBot`、SSE 重放、`HasModelInputSince` 按 `session_kind='main'` 收窄；
   `/calls` 与聊天快照的 `calls[]` 是 bot 级调用账本视角，仍含 schedule 调用
   （因此也含 `state` 参数与 state_get 回执；前端只在主线 assistant 消息引用时把
@@ -467,18 +484,30 @@ path→version，无新笔记的空成功不会让次日重跑全部 daily。恢
   任务行时用占位名「已删除的定时任务」，否则这次运行的结果既报不出去、用户也
   无从经任务查询看到。`schedule_event` 是主线模型输入（计入
   `HasModelInputSince`），主线循环自动被唤醒判断是否通知用户。
+- **事件落库即唤醒（INT-138）**：写事件的事务提交后，调用方（跳过、熔断
+  去重、completed 且 needs_report 非静默、failed、启动恢复）立即
+  `wakeScheduleEvent` → `wakeRuntime(trigger="schedule_event",
+  key="schedule_event:<run_id>:<status>")`，不必等 `scanOnce` 的 5s 扫描；
+  没有真追加事件时不唤醒。5s 扫描保留为兜底（瞬态唤醒失败、执行槽异常仍能
+  被补上）。
 - **静默约定**：运行时上下文明确要求「无话可说只回复一行 `[[SILENT]]`」。
   收尾取本 run 最后一条 assistant 正文，去尾部空白与句号后等于哨兵即
   `silent=true`，summary 记空串；否则 summary 取正文并截断到 2000 字符。
-- **工具**：`fs_schedule`（v3 起）动作 v7 为 10 个：`list/create/update/
+- **工具**：`fs_schedule`（v3 起）动作 v8 为 10 个：`list/create/update/
   delete/runs/run/enable/disable/state_get/state_set`，全部同步执行、立即生效。
-  create/update 校验
+  create 省略时区时默认机器人归属用户的**有效时区**（INT-138；不再是 UTC），
+  update 不传时区仍是保持原值。create/update 校验
   cron 五字段与时区，结果带 `next_run_at` 与 cron/时区原文，让模型能在回复里用
   中文说明执行时间。update 省略字段即保留；`model` 用指针区分「未提供」与「空串」
   ——传空串明确清除模型覆盖、回到机器人当前模型。`list` 支持 `limit`/`offset`
   分页（默认且最多 200），返回真实 `total` 与 `has_more`：把截断结果当总量会让
   旧任务不可达、也就无从管理。旧占位动作 `fs_schedule/status` 走改名映射回结构化提示
-  （冻结在 v1/v2 的会话仍可用 status 查询可用性）。
+  （冻结在 v1/v2 的会话仍可用 status 查询可用性）。v8 的工具描述与 `fs_help`
+  都要求把指令写成「意图」而不是固定操作步骤：目标、什么情况才需要汇报、
+  去重方式（用 `state_get`/`state_set` 记「上次已报的 ID」）、无变化只回
+  `[[SILENT]]`；并说明 `needs_report` 何时开（只给「新内容确实值得打断用户」
+  的周期检查开）。写成固定步骤的指令环境一变就失效，没写汇报条件与去重方式
+  则每次都刷屏。
 - **手动立即触发（INT-121，v6 的 `run` 动作）**：动机——新建或修改任务后只能
   等下一个 cron 时点才能验证效果，手动复述不等于调度器真的跑通，也不产生
   runs 记录。`run`（`task_id` 必填）在同一事务里核对忙碌并建 run
@@ -503,7 +532,8 @@ path→version，无新笔记的空成功不会让次日重跑全部 daily。恢
   没有任何创建/编辑端点。`BotScheduleTask` 含 `last_run` 与
   `state`/`state_updated_at`（INT-123 起，无状态为 null）；
   `BotScheduleRun` 含 `status/summary/silent/trigger_source/scheduled_for/
-  duration_ms/usage`（`trigger_source`：`cron`/`manual`，INT-121 起）。
+  duration_ms/usage`（`trigger_source`：`cron`/`manual`，INT-121 起；主线 run
+  的 `trigger_source` 另有 `schedule_event`，INT-138 起）。
 - **删除任务**：同一事务里给该任务未完成的运行置 `stop_requested_at` 再删任务
   ——运行记录只能按任务查询，任务一删这些 run 就既查不到也停不了，却仍会挡住
   机器人删除；已跑了很久的运行不受影响，会在下一个安全点收尾为 `stopped`。
@@ -515,9 +545,11 @@ path→version，无新笔记的空成功不会让次日重跑全部 daily。恢
   INT-121 后手动触发（`run`）在运行中被明确拒绝（40930，不排队），cron 触发
   的并发行为不变。另外：重启或 `async_calls_unsettled`
   失败后，该 run 已受理的排队异步写仍会执行，结果落在已终态的 schedule 会话
-  里，主线不可见也不上报；`schedule_event` 唤醒主线靠 5s 扫描（非即时）；
+  里，主线不可见也不上报；
   同一机器人的多个定时任务同刻到时会并行起多个 run，模型调用并发无上限
-  （仅 4 个异步 worker 兜底）。
+  （仅 4 个异步 worker 兜底）。`schedule_event` 已改为落库即唤醒主线
+  （INT-138），5s 扫描仅作兜底——但唤醒不等于立刻调模型：主线在跑时只标记
+  requeue，在安全点才重建上下文。
 
 ### 确认与授权
 

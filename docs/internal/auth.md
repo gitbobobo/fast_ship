@@ -69,3 +69,18 @@ Web 侧镜像约束：改密响应落地前旧凭证已死、新凭证未写回�
 读侧（`GET /api/deployment/settings`、`GET /api/deployment/github-app`）对全部登录用户开放，
 成员需要看到 App 状态与安装链接。
 
+
+## 用户时区（INT-138）
+
+`users.timezone` 存 IANA 时区名（如 `Asia/Shanghai`），空串 = 用户还没声明过。
+它是机器人侧「当地」语义的唯一来源（运行时上下文的 `user_timezone` /
+`current_time_local`、定时任务默认时区、夜间整理与 daily 文件日期），解析链
+与回退顺序见 `bots.md`「用户时区与当地语义」。
+
+- 写入口只有 `PUT /api/auth/me`，三态：省略 = 不变、空串 = 清空（回落部署
+  配置 `bots.memory.timezone`）、非空必须是 `time.LoadLocation` 能加载的名字，
+  否则 40001。前端首次登录（登录与注册）在 `user.timezone` 为空时用浏览器
+  `Intl` 时区补写一次，设置页「通用」可改。
+- `GET /api/auth/me` 与 `GET /api/members` 的投影都带 `timezone`（`Member` 与
+  `User` 同形）。
+- 不迁移任何存量数据：定时任务的 `timezone` 是创建时的快照，daily 文件不重命名。

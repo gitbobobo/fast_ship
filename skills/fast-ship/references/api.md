@@ -59,6 +59,7 @@ INT-129 起公开注册按部署状态区分：
 | `user.email` | string | 是 |  |
 | `user.avatar_url` | string | 是 | 形如 /api/avatars/:uid/:filename，未设置为空串 |
 | `user.role` | string（enum: admin \| member） | 是 | 用户角色（INT-129）：admin 可管理成员、邀请与部署设置；member 只能使用自己的资源。角色只存库，服务端每请求查库判定，不写进 JWT |
+| `user.timezone` | string | 是 | 用户 IANA 时区（INT-138）；空串表示未声明，机器人按部署配置回退 |
 | `user.created_at` | string（date-time） | 是 |  |
 | `user.updated_at` | string（date-time） | 是 |  |
 
@@ -144,6 +145,7 @@ INT-129 起公开注册按部署状态区分：
 | `user.email` | string | 是 |  |
 | `user.avatar_url` | string | 是 | 形如 /api/avatars/:uid/:filename，未设置为空串 |
 | `user.role` | string（enum: admin \| member） | 是 | 用户角色（INT-129）：admin 可管理成员、邀请与部署设置；member 只能使用自己的资源。角色只存库，服务端每请求查库判定，不写进 JWT |
+| `user.timezone` | string | 是 | 用户 IANA 时区（INT-138）；空串表示未声明，机器人按部署配置回退 |
 | `user.created_at` | string（date-time） | 是 |  |
 | `user.updated_at` | string（date-time） | 是 |  |
 
@@ -240,6 +242,7 @@ INT-129 起公开注册按部署状态区分：
 | `email` | string | 是 |  |
 | `avatar_url` | string | 是 | 形如 /api/avatars/:uid/:filename，未设置为空串 |
 | `role` | string（enum: admin \| member） | 是 | 用户角色（INT-129）：admin 可管理成员、邀请与部署设置；member 只能使用自己的资源。角色只存库，服务端每请求查库判定，不写进 JWT |
+| `timezone` | string | 是 | 用户 IANA 时区（INT-138）；空串表示未声明，机器人按部署配置回退 |
 | `created_at` | string（date-time） | 是 |  |
 | `updated_at` | string（date-time） | 是 |  |
 
@@ -267,6 +270,7 @@ INT-129 起公开注册按部署状态区分：
 | --- | --- | --- | --- |
 | `username` | string（长度 2..50） | 否 | 新用户名；与现值相同或省略则不变 |
 | `email` | string（email） | 否 | 新邮箱 |
+| `timezone` | string（长度 ≤64） | 否 | 用户 IANA 时区（INT-138）；空串清空，非法名称拒绝 |
 
 **成功响应**
 
@@ -281,6 +285,7 @@ INT-129 起公开注册按部署状态区分：
 | `email` | string | 是 |  |
 | `avatar_url` | string | 是 | 形如 /api/avatars/:uid/:filename，未设置为空串 |
 | `role` | string（enum: admin \| member） | 是 | 用户角色（INT-129）：admin 可管理成员、邀请与部署设置；member 只能使用自己的资源。角色只存库，服务端每请求查库判定，不写进 JWT |
+| `timezone` | string | 是 | 用户 IANA 时区（INT-138）；空串表示未声明，机器人按部署配置回退 |
 | `created_at` | string（date-time） | 是 |  |
 | `updated_at` | string（date-time） | 是 |  |
 
@@ -360,6 +365,7 @@ INT-129 起公开注册按部署状态区分：
 | `email` | string | 是 |  |
 | `avatar_url` | string | 是 | 形如 /api/avatars/:uid/:filename，未设置为空串 |
 | `role` | string（enum: admin \| member） | 是 | 用户角色（INT-129）：admin 可管理成员、邀请与部署设置；member 只能使用自己的资源。角色只存库，服务端每请求查库判定，不写进 JWT |
+| `timezone` | string | 是 | 用户 IANA 时区（INT-138）；空串表示未声明，机器人按部署配置回退 |
 | `created_at` | string（date-time） | 是 |  |
 | `updated_at` | string（date-time） | 是 |  |
 
@@ -10764,6 +10770,7 @@ expired/denied/invalid 为终态，error 给用户可读原因，前端提示重
 | `items[].email` | string | 是 |  |
 | `items[].avatar_url` | string | 是 | 形如 /api/avatars/:uid/:filename，未设置为空串 |
 | `items[].role` | string（enum: admin \| member） | 是 | 用户角色（INT-129）：admin 可管理成员、邀请与部署设置；member 只能使用自己的资源。角色只存库，服务端每请求查库判定，不写进 JWT |
+| `items[].timezone` | string | 是 | 用户 IANA 时区（INT-138）；空串表示未声明，机器人按部署配置回退 |
 | `items[].created_at` | string（date-time） | 是 |  |
 | `items[].updated_at` | string（date-time） | 是 |  |
 
@@ -10816,6 +10823,7 @@ expired/denied/invalid 为终态，error 给用户可读原因，前端提示重
 | `email` | string | 是 |  |
 | `avatar_url` | string | 是 | 形如 /api/avatars/:uid/:filename，未设置为空串 |
 | `role` | string（enum: admin \| member） | 是 | 用户角色（INT-129）：admin 可管理成员、邀请与部署设置；member 只能使用自己的资源。角色只存库，服务端每请求查库判定，不写进 JWT |
+| `timezone` | string | 是 | 用户 IANA 时区（INT-138）；空串表示未声明，机器人按部署配置回退 |
 | `created_at` | string（date-time） | 是 |  |
 | `updated_at` | string（date-time） | 是 |  |
 
