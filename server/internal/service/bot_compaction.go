@@ -1838,10 +1838,19 @@ func (s *BotService) tellToolsetTx(tx *gorm.DB, bot *model.Bot) error {
 }
 
 func botToolsetChangeNote(from, to int64) string {
-	if to >= 9 && from < 9 {
+	if to >= 10 && from < 10 {
 		note := "工具集已升级：fs_schedule 的 create、改动 instruction/needs_report/model 的 update、非 dry_run 的 run、enable、delete 需要用户确认并异步执行（批准创建或修改任务等于授权该任务以后每次运行默认放行写操作；enable 等于重新启用一个默认放行写操作的任务，delete 不可逆）；定时任务运行中不能 create/update/run/enable/disable/delete 任务"
+		// INT-136 的确认告知与 INT-148 的线程/调度告知互不替代，跨过 v9 时一并补发。
+		if from < 9 {
+			note += "；" + strings.TrimPrefix(botToolsetChangeNote(from, 9), "工具集已升级：")
+			note += "；同一定时任务运行不重叠：上一轮未结束时本轮记 skipped、推进下次运行时间，不并行"
+		}
+		return note
+	}
+	if to >= 9 && from < 9 {
+		note := "工具集已升级：fs_thread 新增 settle/unsettle（把线程收进/移出 T3 历史区）与 resume_queue（恢复被挂起的消息队列）三个写动作；stop 只在存在可中断 run/后台工作时才挂起队列、结束 PR 监听（否则是空操作），停没停用 fs_thread get 的 activity.stopping 判断；线程读取新增 run_status（T3 原始状态，status=idle 时它才是最终结局）与 pull_requests[]（含 watching）；fs_thread list 默认不含已结算线程（要看历史区传 settled=true，返回体的 settled_filter 标明实际生效的筛选）"
 		if from < 8 {
-			note += "；创建任务省略时区时默认用户时区（不再默认 UTC）；任务指令应写「目标 + 什么情况需要汇报 + 去重方式（用 state_get/state_set 记已报过的 ID）+ 无变化只回复 [[SILENT]]」"
+			note += "；fs_schedule 创建任务省略时区时默认用户时区（不再默认 UTC）；任务指令应写「目标 + 什么情况需要汇报 + 去重方式（用 state_get/state_set 记已报过的 ID）+ 无变化只回复 [[SILENT]]」"
 		}
 		if from < 7 {
 			note += "；fs_schedule 新增 state_get/state_set（任务跨运行保留的小状态，仅定时任务运行内可用，≤8192 UTF-8 字节，省略 state 即清空）"

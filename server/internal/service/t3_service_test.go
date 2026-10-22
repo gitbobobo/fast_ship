@@ -812,8 +812,13 @@ func shellThread(id, title, status string, extra map[string]any) map[string]any 
 		"modelSelection":     map[string]any{"instanceId": "claude-pro", "model": "claude-sonnet-5-5"},
 		"branch":             "t3/threads",
 		"status":             status,
-		"pullRequests":       []any{map[string]any{"number": 1}, map[string]any{"number": 2}},
-		"updatedAt":          "2026-10-12T03:00:00.000Z",
+		// 真实 ThreadPullRequestLink 形状：投影要求 repository 身份（缺身份的条目
+		// 会被当作坏数据跳过，不会进 pull_requests / pull_request_count）。
+		"pullRequests": []any{
+			map[string]any{"host": "github.com", "repository": "o/r", "number": 1, "url": "https://github.com/o/r/pull/1", "source": "manual"},
+			map[string]any{"host": "github.com", "repository": "o/r", "number": 2, "url": "https://github.com/o/r/pull/2", "source": "created"},
+		},
+		"updatedAt": "2026-10-12T03:00:00.000Z",
 	}
 	for k, v := range extra {
 		thread[k] = v

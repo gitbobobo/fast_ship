@@ -415,9 +415,11 @@ Ship 不代点就干等 1h deadline 变 `timed_out`，整轮还得手动重审�
 再复核一次，避免同步期间改仓库把产出写到旧仓库）；全部走
 App 安装令牌。失败只记 `sync_error`、记 `sync_failed_epoch = sync_epoch` 并
 按 `reviewSyncRetryBackoff`（5 分钟）退避重试，不改运行终态——持续性失败
-（超大 diff 固定 406、`SubmitReview` 固定 422、评论接口 403）不会每 10s
+（`SubmitReview` 固定 422、评论接口 403）不会每 10s
 重放整条同步（否则读 diff、写评论、写 commit status 被放大 360 倍/小时，还会
-写满同一 SHA 的 1000 条 status 上限）；任何置 pending 的入口都会推进
+写满同一 SHA 的 1000 条 status 上限）；diff 超出上限（4xx + `errors[].code=too_large`，实测 406）
+是唯一不走退避的确定性失败，按「本轮无行内 review」降级收尾（见「顶层评论」
+的「确定性失败（diff 超限）例外」）；任何置 pending 的入口都会推进
 `sync_epoch`，新事件因此立即重新入队、不受退避影响。成功后按开始同步时的
 `sync_epoch` 条件清 pending（同步期间的新 pending 不会被误清）。
 中段写回（`code_status`/`visual_status`/`visual_screens_fingerprint`）同样带
@@ -479,6 +481,22 @@ rune 截断加 `...`，不劈断多字节字符）；状态未变不重复调用
     注：同一 (head, round) 里「diff 读取失败」与「存在视觉运行」互斥——读
     diff 的前提是某个 completed 代码运行有带行号的 P0–P2，而这会让视觉决策
     停在 `visualNone`、不建视觉运行；视觉产出因此不会被 diff 失败连累。
+    **确定性失败（diff 超限）例外**：GitHub 对超出上限的 diff 返回 4xx（实测 406，
+    413/422 防御性兼容）且响应体 `errors[].code=too_large`（`githubapi.IsDiffTooLarge`），这是重试不
+    可能成功的确定性失败，只认结构化 code、不凭状态码判定（406 是通用的
+    Unacceptable，误判会把暂时性失败降级成终态）。此时本轮按「无行内 review」
+    降级收尾：顶层评论照常写并注明「本轮 GitHub 拒绝读取 PR diff（超出上限），
+    未发行内 review」，P0–P2 仍完整列在评论里（不静默丢）；有行号但本轮无法
+    核对 diff 的发现不加「未行内标注」注记（无行号的发现本来就加，与是否读
+    diff 无关）；行内运行保持 `posted_at` 为空，账本清 `sync_pending`/
+    `sync_error`（本轮终态、不入退避）。同一 (head, round) 的下一次同步事件
+    （同轮其他组合完成/失败、超时收尾）仍会再读 diff，读得到就补发行内 review
+    与注记——属于自愈而非永久终态，所以不写 posted_at、不留任何「已降级」
+    持久标记。手动重跑恒开新轮（`openRoundTx`），由新轮的运行重新审查并发布，
+    不是补发旧轮的降级运行。**自愈窗口的边界**：同一 (head, round) 若之后再无
+    同步事件（包括最后一轮收尾之后才超限、且 PR 不再有新事件），这次降级就是
+    该 head 的终态；base 分支内容变化不会给 PR 触发同步事件，不能指望靠它补发
+    行内 review。解析不出 `too_large` 的 4xx/5xx 仍按可重试推迟。
   - **顶层评论写入统一去重**（`upsertPRComment`，代码与视觉评论共用）：先按
     账本记的 `code_comment_id`/`visual_comment_id` 认自己的评论，id 不可用
     （写回失败/评论已重建）时退回与 `FindPullRequestComment` 同口径的「bot +

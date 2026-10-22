@@ -134,10 +134,13 @@ SDK 重试显式关零（`option.WithMaxRetries(0)`）：连接测试与被中�
 （手动立即执行一次）与 `dry_run` 预览；v7（INT-123）起 `fs_schedule` 新增
 `state_get`/`state_set` 与 `state` 参数（任务小状态，见下节）；v8（INT-138）
 只改 `fs_schedule` 的描述（时区默认跟随用户时区、任务指令写法指导），动作集与
-参数字段不变；v9（INT-136）只改 `fs_schedule` 的工具/动作描述（说明哪些动作需
-确认、异步受理、定时任务运行中不能管理任务），动作清单与参数结构体不变。已发布
-版本（v1–v8）的注册表都是**冻结副本**——新版本变化不得改写旧版本的字节
-（存量会话的 tools_hash 失稳即前缀失稳；v1–v8 的 hash 逐字节钉死在测试基线里）。版本只在 run 入口或压缩边界推进（重建平台规则并递增 prompt_revision）：
+参数字段不变；v9（INT-148）演进 `fs_thread`——新增 `settle`/`unsettle`/
+`resume_queue` 三个写动作，按 T3 真实行为改写 `stop`/`send` 等动作描述；
+v10（INT-136）在 v9 上只改 `fs_schedule` 的工具/动作描述（说明哪些动作需
+确认、异步受理、定时任务运行中不能管理任务，并保留同一任务运行不重叠的语义），
+动作清单与参数结构体不变。INT-148 的线程结算与 INT-136 的确认、围栏是独立约束，
+同时保留。已发布版本（v1–v9）的注册表都是**冻结副本**——新版本变化不得改写旧版本的字节
+（存量会话的 tools_hash 失稳即前缀失稳；v1–v9 的 hash 逐字节钉死在测试基线里）。版本只在 run 入口或压缩边界推进（重建平台规则并递增 prompt_revision）：
 run 入口的 `activateBotPrompt` 在一个短事务里读行、
 判 stale、按**该行**人设重建提示词并写回，主线与定时任务会话都适用（在冻结
 本次 run 的配置与会话快照之前完成）；提示词始终由事务内读到的行生成——
@@ -398,7 +401,7 @@ path→version，无新笔记的空成功不会让次日重跑全部 daily。恢
   `next_run_at`（UTC 存储）；启用/重新启用时重算为 now 之后的下一次，停用
   清空（不补跑过期计划）。每机器人任务数上限 200，与列表读取上限一致——建得比
   看得见还多的话，用户唯一的任务管理面（列表 + 开关）就管不到那些任务；计数与
-  插入在同一事务内（任务允许并行运行，分开读会让并发创建都通过检查）。
+  插入在同一事务内（不同任务仍可并行运行，分开读会让并发创建都通过检查）。
 - **任务小状态（INT-123）**：`state_json`（JSON 文本，空串=无状态）+
   `state_updated_at`（无状态为 NULL）。这是每个任务一块跨运行保留的小状态，
   供「仅新增时提醒」这类跨运行去重使用；上限 8192 UTF-8 字节，超限显式 40001
@@ -419,9 +422,11 @@ path→version，无新笔记的空成功不会让次日重跑全部 daily。恢
   state_get 里给，避免 list 结果膨胀）。v6 及更早的冻结会话不认识
   state_get/state_set（工具集逐字节冻结，hash 见测试基线；运行时上下文的
   note 只在本次冻结工具集声明了这两个动作时才宣传它们）。**并发语义**：状态
-  是整块覆盖写（last-write-wins），同一任务允许并行运行且读改写不原子，并行
-  时去重集合可能丢更新；要并发可靠去重需外部协调（如在状态里记运行水位并由
-  单一 run 语义保证，或落到外部存储）。
+  是整块覆盖写（last-write-wins），读改写不原子。同一任务不并行（INT-148）：
+  上一轮未结束时到点的 cron 轮记 `skipped`（summary 写明原因）、照常推进
+  `next_run_at`，并复用 skipped 的 `needs_report` 主线事件——不再出现两轮基于
+  同一份状态各自行动、去重集合丢更新。跨任务/跨 run 的读改写依然不原子，
+  要并发可靠去重仍需外部协调（或在状态里记运行水位）。
 - **会话隔离**：schedule run 复用 `bot_runs`/`bot_messages`/`bot_events`，
   以 `session_kind='schedule'` 判别；每次运行是独立会话，只带同一份系统提示
   + 冻结记忆注入（run 开始现读一次、run 内冻结）+ 冻结工具集 + 只含本 run
@@ -543,8 +548,8 @@ path→version，无新笔记的空成功不会让次日重跑全部 daily。恢
   回执只表示「已受理」（`accepted:true` + `status:running`），终态与产出用
   `runs` 查询。`dry_run=true` 是只读预览：返回任务名、指令全文、cron、时区、
   模型、enabled、从 now 起算解析的下次计划与 `busy` 标记，**零副作用**（不建
-  run、不执行）；忙碌时 `busy:true`。cron 触发的并发行为不变（同一任务仍可能
-  被 cron 重复触发，见已知限制）。v5 及更早的冻结会话不认识 `run`（工具集
+  run、不执行）；忙碌时 `busy:true`。cron 触发已从「允许并行」改为同一任务
+  不重叠（INT-148，见已知限制）。v5 及更早的冻结会话不认识 `run`（工具集
   逐字节冻结，hash 见测试基线）。
 - **REST（仅 JWT，接口形状已与前端冻结）**：
   `GET /api/bots/{id}/schedule-tasks`、`GET .../{taskId}`、
@@ -560,12 +565,14 @@ path→version，无新笔记的空成功不会让次日重跑全部 daily。恢
   ——运行记录只能按任务查询，任务一删这些 run 就既查不到也停不了，却仍会挡住
   机器人删除；已跑了很久的运行不受影响，会在下一个安全点收尾为 `stopped`。
 - **已知限制**：schedule 会话不做压缩与摘要（超长会话靠确定性折叠与上游
-  上下文限制显式失败）；错过不补跑；无用户侧任务编辑。**同一任务在一次运行
-  还没结束时仍会按 cron 再次触发**（多个 run 并行、各自默认放行写操作）——
-  这是产品决定：不限制任务运行的并发，与「运行内不限制工具调用次数/并发/费用」
-  一致；运行之间靠 `session_kind` + `run_id` 隔离，互不看见对方的输入。
-  INT-121 后手动触发（`run`）在运行中被明确拒绝（40930，不排队），cron 触发
-  的并发行为不变。另外：重启或 `async_calls_unsettled`
+  上下文限制显式失败）；错过不补跑；无用户侧任务编辑。**同一任务不并行运行**
+  （INT-148）：上一轮（cron 或手动）未结束时，到点的 cron 轮记 `skipped`、
+  summary 写明「上一次运行尚未结束，本轮跳过（不并行）」、`next_run_at` 照常
+  推进，`needs_report` 任务同样追加一条 skipped 主线事件；手动触发（`run`）
+  早已在忙碌时返回 40930，两者同语义。判定在派发短事务内完成，优先级为
+  熔断 > 上一轮未结束 > 错过宽限（熔断是更根本的阻塞原因）。运行之间靠
+  `session_kind` + `run_id` 隔离，互不看见对方的输入。另外：重启或
+  `async_calls_unsettled`
   失败后，该 run 已受理的排队异步写仍会执行，结果落在已终态的 schedule 会话
   里，主线不可见也不上报；
   同一机器人的多个定时任务同刻到时会并行起多个 run，模型调用并发无上限
@@ -858,11 +865,15 @@ CAS 终结；running 记录取消并取消 context，worker 落唯一终态且
   （`botActionRules` 同时是服务端校验的唯一事实源）；不用 `if/then` 是因为
   多数 OpenAI 兼容后端不校验 JSON Schema，条件分支只增加每请求约 700 token
   的固定开销而无强制力。
-- **列表筛选与分页**：`fs_thread list` 默认只返回未归档线程，支持
+- **列表筛选与分页**：`fs_thread list` 默认只返回未归档、未结算的线程
+  （INT-148 起结算线程默认不进巡检列表——`settled` 省略或 false 都只返回
+  未结算线程，`settled=true` 只返回已结算线程；实际生效的筛选随结果回带
+  `settled_filter` 与 `settled_filter_note`，让冻结在旧 schema 的会话也能
+  自证看到的是哪一侧），支持
   `env_id`（只保留该环境的线程；不在已连接环境里就报错，不静默返回空）/
   `project_id` / `query`（线程 id/标题/项目名/项目 id/环境名，不区分大小写
   包含）/
-  `settled` / `status` / `updated_after` 过滤与 `page` / `page_size`（默认
+  `status` / `updated_after` 过滤与 `page` / `page_size`（默认
   50、上限 100）；结果带 `total_items` / `returned_items` / `offset`（实际
   切片起点）/ `has_more` 与各环境的读取覆盖（`environments`，未完整读取时
   给 `incomplete_environments` 与说明；`env_id` 收窄时只报该环境）。某环境
@@ -874,6 +885,38 @@ CAS 终结；running 记录取消并取消 context，worker 落唯一终态且
   最近条目（含条目 id、短摘要与 `detail_available`）以及完整历史的翻页入口
   （`item_offset` / `next_item_offset`），条目正文用 `fs_thread item` 按 id
   补读。
+- **线程读取补终态与 PR 明细（INT-148）**：`fs_thread list`/`get` 的每一项在
+  归一化 `status` 之外再带两个字段：`run_status`（T3 `shell.status` 原文透传）
+  与 `pull_requests[]`。归一化 `status` 把 completed/failed/cancelled 一并折叠
+  成 `idle`，区分「正常结束/失败/被取消」要看 `run_status`——但**只有
+  `status=idle` 时它才代表最终结局**：根 run 结束后台 run/占位工作还在时
+  `status=running` 而 `run_status` 已是终态，线程并没有结束。`pull_requests`
+  每项是 `repo`（host/repository）/`number`/`url`/`watching`，快照已同步时另有
+  `state`/`merged_at`/`is_draft`/`checks_state`/`mergeability`，`watching=true`
+  表示 T3 挂着 PR 监听（检查结束、他人评论、分支冲突会唤醒线程代理）。
+  数据只来自 `shell.pullRequests`，并跳过两类条目：解析失败/缺身份的坏数据、
+  `source=stack-dismissed` 的墓碑（用户在 T3 解开的栈成员，上游
+  `visibleThreadPullRequests` 同样隐藏）；`pull_request_count` 按「字段存在性」
+  与可见明细同口径——`pullRequests` 存在（含显式空数组与全墓碑）时恒等于可见
+  条数，只有字段缺失（旧服务端）才回退到
+  `linkedPullRequest`/`branchPullRequest`，不合成缺 state 的条目。`fs_thread get` 的条目列表与 `item` 补读都带
+  `child_thread_id`：子线程不出现在列表里，只能靠它进详情。
+- **线程写动作的真实语义（INT-148）**：`stop`（`run.interrupt` + `holdQueue:true`）
+  只有存在可中断的 run/后台工作才派发停止命令，命中时才同时把排队消息标成
+  held、结束该线程的 PR 监听、停掉它委派的子任务；线程只剩 PR 监听这类不可
+  中断的占位时是无操作（`stopped=false`，监听继续）。回执只表示受理，是否真的
+  停了看 `fs_thread get` 的 `activity.stopping`。`send` 走 `queue_after_active`：
+  线程在跑时进入排队；队列里已有被挂起的排队消息时，新消息也会继承挂起，要先
+  `resume_queue`（队列已空则下一条消息照常开跑）。`settle`/`unsettle` 派发
+  `thread.settle`/`thread.unsettle`（`reason:"user"`）：结算会清掉置顶与该线程
+  每条 PR 的监听、拆掉 provider session；线程仍在跑、有排队消息或待应答的审批/
+  提问时上游拒绝（先 stop / 清队列 / 应答），以 50202 返回。结算后线程默认不在
+  `fs_thread list` 里，要带 `settled=true` 才看得到（`unsettle` 放回默认列表）。
+  三个新动作都是 async + 需确认、按线程解析授权范围（scope kind
+  `thread_settle`/`thread_queue`），定时任务会话照常默认放行。结算能力是
+  optionalKey（`server.getConfig` 的 `environment.capabilities.threadSettlement`）：
+  缺失或 false 时在派发前明确报 50202「该 T3 环境不支持线程结算（旧版本
+  服务端）」，不向上游发出命令。
 - **结果续读无损**：`fs_result.read` 把整个读取体控制在预算内（必要时收缩
   `content` 并迭代收敛），保证不会被通用截断再切一次——否则按 `next_offset`
   续读会跳过一段谁也没看过的内容。返回体带 `offset` / `end` / `next_offset`
@@ -941,11 +984,11 @@ CAS 终结；running 记录取消并取消 context，worker 落唯一终态且
   `thread_id+env_id` 链接到 `/threads/{env}/{tid}`，其余 ID 没有对应路由
   时只显示短标识不造坏链；分页与 `expected_*` 等次要参数不进 chips。
 - **映射表维护约定**：`tool-labels.ts` 是前端侧副本，唯一事实源是
-  `server/internal/service/bot_tools.go` 的 `botToolRegistryV9()`（工具与
+  `server/internal/service/bot_tools.go` 的 `botToolRegistryV10()`（工具与
   action 清单）和 `botReadOnlyActions`（只读集合）。effect 不能靠
-  `requires_confirmation` 推断——`fs_schedule` 的 list/delete/runs/enable/
-  disable 与只改 name/cron/timezone 的 update 仍同步执行、不需确认，但
-  delete/enable/disable 仍是写入。后端新增/改名工具或 action 时必须同步
+  `requires_confirmation` 推断——`fs_schedule` 的 list/runs/disable、
+  dry_run=true 的 run 与只改 name/cron/timezone 的 update 仍同步执行、不需确认，
+  但 disable/update 仍是写入；enable/delete 需要确认并异步受理。后端新增/改名工具或 action 时必须同步
   更新此表；表外条目按「未知」回退：标签显示原始 `tool.action`、effect 保守
   按写入、chips 走通用字段集，不抛错（账本可能先于界面升级）。
 - **定时任务确认卡**（INT-136，`bot-confirmation-card.tsx`）：`fs_schedule` 的
@@ -1062,14 +1105,20 @@ INT-134 的四条里，「输入框浮动在对话内容上方」已由 INT-126 
 - **注意**：固定前缀体积对提示词文案敏感，INT-102 的压缩测试用固定窗口标定
   种子内容。INT-122 的风格段把窗口从 8000 提到 8400；INT-123 的 v7 提示词/
   工具集变长（规则 8 补任务小状态、fs_schedule 扩到 10 动作）后重定标到
-  压缩测试窗口 9500、压缩前置检查窗口 6800（触发阈值 5100）；INT-136 的规则
-  15 与 v8 工具描述再次变长后重定标，出口围栏与摘要/附录围栏再涨一次后当前为
-  **压缩测试窗口 10800**（折叠批量场景 21600）、**压缩前置检查窗口 7400**。
-  压缩前置检查的固定前缀按 bytes/3.5 统一估算：系统提示 6091 字节（INT-136
-  规则 15 与 enable/delete 文案）+ 工具集 schema 17308 字节 = 23399 字节
-  ≈ 6.7k token（工具集的 `ToolsTokensEstimate` 展示字段另按 chars/4 记约
-  4327）；围栏包装本身按实际渲染字节进估算，不进这个常量。断言语义不变；
-  再改提示词文案或工具集后需要重新核对这批窗口余量（几何变化直接表现为
+  压缩测试窗口 9500。INT-148 的 v9 给 `fs_thread` 加了结算类动作与描述，
+  原分支的前置检查窗口为 7200、「折叠足够」窗口为 21000；INT-136 的规则 15、
+  nonce、外部内容围栏与确认描述进一步增加前缀，合并时必须按同一投影实测重定标。
+  压缩断言直接取测试配置的 `WindowTokens`，不沿用旧版本硬编码阈值。
+  固定前缀按 bytes/3.5 统一估算，围栏包装按实际渲染字节计入；
+  `ToolsTokensEstimate` 展示字段另按 chars/4 估算，两者不可混用。
+  合并 INT-136 + INT-148 前缀后重定标：v10 工具集 wire 19173 字节，
+  平台提示 6239 字节；测试固定投影 F 实测 7878–8021 token。
+  常规压缩窗口改为 **11200**（T=8400）：原 10800 的 T=8100 小于
+  F+256=8134–8182，记忆快照场景原 11000 的 T=8250 小于 F+256=8277。
+  「折叠足够」窗口从 23000 改为 **23400**（G=7897），因为 afterFold=7802
+  已超旧 G=7762。前置失败窗口保持 **8000**，实测 F=7919<W 且 F+256≥T=6000，
+  仍精确覆盖 target_unreachable，而非固定前缀超窗。历史长度无需改变。
+  再改提示词文案或工具集后需要重新核对窗口余量（几何变化直接表现为
   可达性/触发断言失败，不要靠放宽断言绕过）。
 
 ## 默认人设、告知语义与风格升级压缩（INT-133）

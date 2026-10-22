@@ -555,9 +555,9 @@ func TestBotConnectionDetectsWindow(t *testing.T) {
 // ---------- B：压缩前置检查、失败不重试、进度事件 ----------
 
 // compactionPrecheckEnv 构造一个「固定前缀 + 最小摘要预算 ≥ 触发阈值」的
-// 场景：合并后的固定投影约 7.6k token（v9 的 fs_schedule 描述同时含
-// INT-136 的确认语义与 INT-138 的时区/指令写法），窗口取 8000（触发阈值
-// 6000）即可命中 target_unreachable 且不命中「已超窗口」。
+// 场景：合并 INT-136 + INT-148 前缀后重定标复核，实测 F=7919；
+// 窗口仍取 8000（T=6000），满足 F<W 且 F+256≥T，命中 target_unreachable
+// 而不是「固定前缀已超窗口」，因此不需要扩大这个专门验证不可达的窗口。
 func compactionPrecheckEnv(t *testing.T) (*botTestEnv, *model.Bot, *model.BotRun) {
 	env := setupBotTestEnv(t,
 		fakeModelTurn{Text: `{"items":[]}`},

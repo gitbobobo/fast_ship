@@ -412,9 +412,9 @@ func TestBotCompactionSafeCutAndFold(t *testing.T) {
 	userID := createBotTestUser(t, env.db, "compact")
 	bot := env.createBot(t, userID)
 	botRow, _ := env.bots.bots.Get(bot.ID)
-	// 9500：v7 工具集与规则 8 变长后固定前缀更大，9000 的旧几何会误判
-	// 压缩目标不可达（INT-123 随 v7 重定标）。
-	env.cfg.Bots.Context.WindowTokens = 10800
+	// 合并 INT-136 + INT-148 前缀后重定标：实测 F=7897，F+256=8153，
+	// 旧 T=8100 不可达，11200 的 T=8400 保留安全切点与折叠的原断言。
+	env.cfg.Bots.Context.WindowTokens = 11200
 
 	seedBotUserMessage(t, env, bot.ID, "最早的问题")
 	bigReply := strings.Repeat("很长的工具结果", 400)
@@ -695,7 +695,7 @@ func TestBotToolsetUpgradeOnCompactionBoundary(t *testing.T) {
 		"toolset_version": 1, "last_told_version": 1, "platform_prompt_version": 1,
 	})
 	botRow, _ := env.bots.bots.Get(bot.ID)
-	// 合并后的固定前缀重定标（INT-139）：v9 的 fs_schedule 描述同时含
+	// 合并后的固定前缀重定标（INT-139）：v10 的 fs_schedule 描述同时含
 	// INT-136 的确认语义与 INT-138 的时区/指令写法，序列化后在 tools 里出现
 	// 两次（function.description 与 parameters.description），固定前缀比
 	// v8 再涨约 0.25k。这里的 bot 又冻结在 v1 工具集上（升级在压缩边界才

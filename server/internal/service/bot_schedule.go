@@ -363,6 +363,15 @@ type botScheduleEventContent struct {
 // appendScheduleEventTx 在调用方事务内向主线会话追加一条定时任务运行事件
 // （run_id=NULL，不与任何会话关联；schedule_event 是主线模型输入）。
 func (s *BotService) appendScheduleEventTx(tx *gorm.DB, botID string, task *model.BotScheduleTask, run *model.BotRun, status model.BotRunStatus, summary, errorCode, errorMessage string, now time.Time) error {
+	_, err := s.appendScheduleEventTxDeduped(tx, botID, task, run, status, summary, errorCode, errorMessage, "", now)
+	return err
+}
+
+// appendScheduleEventTxDeduped 是带去重键的变体：dedupKey 非空时先预查（已
+// 存在则跳过，唯一索引兜底），供同一原因会逐次到点的场合（如上一轮未结束的
+// 重叠跳过）只留一条主线事件。空键行为与原函数完全一致；返回是否真正追加了
+// 消息（去重命中为 false，调用方据此决定事务外要不要唤醒）。
+func (s *BotService) appendScheduleEventTxDeduped(tx *gorm.DB, botID string, task *model.BotScheduleTask, run *model.BotRun, status model.BotRunStatus, summary, errorCode, errorMessage, dedupKey string, now time.Time) (bool, error) {
 	content := botScheduleEventContent{
 		TaskID: task.ID, TaskName: task.Name, RunID: run.ID,
 		Status: string(status), Summary: summary,
@@ -370,25 +379,39 @@ func (s *BotService) appendScheduleEventTx(tx *gorm.DB, botID string, task *mode
 	}
 	raw, err := json.Marshal(content)
 	if err != nil {
-		return err
+		return false, err
+	}
+	msgs := repository.NewBotMessageRepository(tx)
+	if dedupKey != "" {
+		if _, err := msgs.FindByDedupKey(botID, dedupKey); err == nil {
+			return false, nil
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return false, err
+		}
 	}
 	seq, err := s.bots.NextMessageSeqTx(tx, botID)
 	if err != nil {
-		return err
+		return false, err
 	}
 	msg := &model.BotMessage{
 		ID: uuid.NewString(), BotID: botID, Seq: seq,
 		Kind: model.BotMessageKindScheduleEvent, ContentJSON: string(raw),
 		SessionKind: model.BotSessionKindMain, CreatedAt: now,
 	}
-	if err := repository.NewBotMessageRepository(tx).AppendTx(tx, msg); err != nil {
-		return err
+	if dedupKey != "" {
+		msg.DedupKey = &dedupKey
 	}
-	return s.appendEventTx(tx, botID, nil, "", model.BotEventDelta, botEventEnvelope{
+	if err := msgs.AppendTx(tx, msg); err != nil {
+		return false, err
+	}
+	if err := s.appendEventTx(tx, botID, nil, "", model.BotEventDelta, botEventEnvelope{
 		Kind:      "schedule_event",
 		MessageID: msg.ID,
 		Payload:   botMessageResponseOf(msg),
-	})
+	}); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // ---------- 任务校验与维护（工具与 REST 共用） ----------
@@ -451,9 +474,9 @@ func (s *BotService) createScheduleTask(botID, name, cronExpr, timezone, instruc
 		Confirmed: true,
 		CreatedAt: now, UpdatedAt: now,
 	}
-	// 计数与插入在同一事务里：定时任务允许并行运行，两个并发的 schedule 会话
-	// 可能同时创建任务，分开读会让两次都通过上限检查、建出超额的任务（而列表
-	// 读取有上限，超额的那条用户既看不到也关不掉）。单进程 + MaxOpenConns=1
+	// 计数与插入在同一事务里：不同任务的 schedule 会话仍可并行运行，两个并发的
+	// 会话可能同时创建任务，分开读会让两次都通过上限检查、建出超额的任务（而
+	// 列表读取有上限，超额的那条用户既看不到也关不掉）。单进程 + MaxOpenConns=1
 	// 下事务即串行化（与仓内其它计数约束同一假设）。
 	txErr := s.db.Transaction(func(tx *gorm.DB) error {
 		repo := repository.NewBotScheduleTaskRepository(tx)

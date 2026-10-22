@@ -19,10 +19,10 @@ import (
 // 管理任务；冻结在 v3–v7 的会话同样要确认；always_allow 按 create/update
 // 拒绝、run 按任务放行。
 
-// botToolsetV9FrozenHash 是 INT-136 发布的 v9 wire 字节基线（INT-138 先占用
-// 了 v8，本版重编号为 v9）。v9 只改 fs_schedule 的工具与动作描述；之后任何
+// botToolsetV10FrozenHash 是 INT-136 发布的 v10 wire 字节基线（INT-138 占用
+// v8、INT-148 占用 v9，本版重编号为 v10）。v10 只改 fs_schedule 的工具与动作描述；之后任何
 // 改动都会让存量会话升级后的 tools_hash 漂移，必须先递增版本再改字节。
-const botToolsetV9FrozenHash = "d6c4bedf5a9982e6e21e6b207e62752c3669ad124d10763b12bd5defb614d716"
+const botToolsetV10FrozenHash = "fa03273b79fb8e8ac50df8387ff0e9a0bd0dd8a64a265648a94797f6cba5bf6a"
 
 // countScheduleTasks 统计机器人名下的任务数。
 func countScheduleTasks(t *testing.T, env *botTestEnv, botID string) int64 {
@@ -655,15 +655,16 @@ func TestBotInt136RunRejectsConfigFields(t *testing.T) {
 	}
 }
 
-// ---------- 7. 工具集 v9：描述说明确认语义，字节钉死 ----------
+// ---------- 7. 工具集 v10：描述说明确认语义，字节钉死 ----------
 
-func TestBotInt136ToolsetV9(t *testing.T) {
-	if botToolsetVersion != 9 {
-		t.Fatalf("当前工具集版本应为 9，实得 %d", botToolsetVersion)
+func TestBotInt136ToolsetV10(t *testing.T) {
+	if botToolsetVersion != 10 {
+		t.Fatalf("当前工具集版本应为 10，实得 %d", botToolsetVersion)
 	}
 	v7 := botToolsetVersionOf(7)
 	v8 := botToolsetVersionOf(8)
 	v9 := botToolsetVersionOf(9)
+	v10 := botToolsetVersionOf(10)
 	if v7.hash != botToolsetV7FrozenHash {
 		t.Fatalf("v7 tools_hash 偏离冻结基线: got %s want %s", v7.hash, botToolsetV7FrozenHash)
 	}
@@ -671,60 +672,101 @@ func TestBotInt136ToolsetV9(t *testing.T) {
 		t.Fatalf("v8 tools_hash 偏离冻结基线: got %s want %s", v8.hash, botToolsetV8FrozenHash)
 	}
 	if v9.hash != botToolsetV9FrozenHash {
-		t.Fatalf("v9 tools_hash 偏离基线: got %s want %s", v9.hash, botToolsetV9FrozenHash)
+		t.Fatalf("v9 tools_hash 偏离 INT-148 冻结基线: got %s want %s", v9.hash, botToolsetV9FrozenHash)
 	}
-	if v8.hash == v9.hash {
-		t.Fatalf("v9 应与 v8 字节不同")
+	if v10.hash != botToolsetV10FrozenHash {
+		t.Fatalf("v10 tools_hash 偏离基线: got %s want %s", v10.hash, botToolsetV10FrozenHash)
 	}
-	sched := v9.byName["fs_schedule"]
+	if v8.hash == v9.hash || v9.hash == v10.hash {
+		t.Fatalf("v8/v9/v10 相邻版本应字节不同")
+	}
+	for i, tool := range v9.tools {
+		if tool.Name == "fs_schedule" {
+			continue
+		}
+		before, _ := json.Marshal(v9.schemas[i])
+		after, _ := json.Marshal(v10.schemas[i])
+		if string(before) != string(after) {
+			t.Fatalf("v10 不得改写 v9 的 %s wire 字节", tool.Name)
+		}
+	}
+	sched := v10.byName["fs_schedule"]
 	if sched == nil || len(sched.Actions) != 10 {
-		t.Fatalf("v8 fs_schedule 应仍是 10 个动作: %+v", sched)
+		t.Fatalf("v10 fs_schedule 应仍是 10 个动作: %+v", sched)
 	}
 	// 动作清单顺序不变。
 	wantOrder := []string{"list", "create", "update", "delete", "runs", "run", "enable", "disable", "state_get", "state_set"}
 	for i, want := range wantOrder {
 		if sched.Actions[i].Name != want {
-			t.Fatalf("v9 动作顺序应不变: %d %s != %s", i, sched.Actions[i].Name, want)
+			t.Fatalf("v10 动作顺序应不变: %d %s != %s", i, sched.Actions[i].Name, want)
 		}
 	}
 	for _, kw := range []string{
 		"需要用户确认", "平台后台结果", "授权该任务以后每次运行默认放行写操作",
 		"定时任务运行中不能", "dry_run=true 预览除外",
+		"省略即用户时区", "instruction 写「意图」", "定时触发也不重叠", "本轮记 skipped",
+		"线程结算独立使用 fs_thread settle/unsettle",
 	} {
 		if !strings.Contains(sched.Description, kw) {
-			t.Fatalf("v8 fs_schedule 描述应说明确认语义（缺 %q）: %s", kw, sched.Description)
+			t.Fatalf("v10 fs_schedule 描述应保留确认、时区、指令与不重叠语义（缺 %q）: %s", kw, sched.Description)
 		}
 	}
-	// create/update/run 的动作描述点明确认；其余动作保持原描述。
-	for _, name := range []string{"create", "update", "run"} {
+	// create/update/run/enable/delete 的动作描述点明确认。
+	for _, name := range []string{"create", "update", "run", "enable", "delete"} {
 		found := false
 		for _, a := range sched.Actions {
 			if a.Name == name {
 				found = true
 				if !strings.Contains(a.Description, "确认") {
-					t.Fatalf("v9 %s 动作描述应点明需要确认: %s", name, a.Description)
+					t.Fatalf("v10 %s 动作描述应点明需要确认: %s", name, a.Description)
 				}
 			}
 		}
 		if !found {
-			t.Fatalf("v9 缺动作 %s", name)
+			t.Fatalf("v10 缺动作 %s", name)
 		}
 	}
-	// v7/v8 字节未被 v9 污染。
-	for _, frozen := range []*botToolsetHolder{v7, v8} {
+	// v7/v8/v9 字节未被 v10 污染。
+	for _, frozen := range []*botToolsetHolder{v7, v8, v9} {
 		if strings.Contains(frozen.byName["fs_schedule"].Description, "pending_confirmation") {
-			t.Fatalf("v%d fs_schedule 描述不得被 v9 污染: %s", frozen.version, frozen.byName["fs_schedule"].Description)
+			t.Fatalf("v%d fs_schedule 描述不得被 v10 污染: %s", frozen.version, frozen.byName["fs_schedule"].Description)
 		}
 	}
 	if sched.ArgsType.Name() != "botScheduleTaskArgs" {
-		t.Fatalf("v9 fs_schedule 应沿用 botScheduleTaskArgs: %s", sched.ArgsType.Name())
+		t.Fatalf("v10 fs_schedule 应沿用 botScheduleTaskArgs: %s", sched.ArgsType.Name())
+	}
+}
+
+func TestBotInt136ToolsetV10ChangeNote(t *testing.T) {
+	note910 := botToolsetChangeNote(9, 10)
+	for _, want := range []string{"需要用户确认", "instruction/needs_report/model", "enable", "delete"} {
+		if !strings.Contains(note910, want) {
+			t.Fatalf("9→10 应告知确认语义 %q: %s", want, note910)
+		}
+	}
+	if strings.Contains(note910, "resume_queue") || strings.Contains(note910, "用户时区") {
+		t.Fatalf("9→10 不应重告旧版本变化: %s", note910)
+	}
+	note810 := botToolsetChangeNote(8, 10)
+	for _, want := range []string{"需要用户确认", "settle/unsettle", "resume_queue", "pull_requests", "不重叠"} {
+		if !strings.Contains(note810, want) {
+			t.Fatalf("8→10 应同时告知 INT-136 与 INT-148 %q: %s", want, note810)
+		}
+	}
+	if strings.Contains(note810, "用户时区") {
+		t.Fatalf("8→10 不应重告 v8 变化: %s", note810)
+	}
+	note710 := botToolsetChangeNote(7, 10)
+	if !strings.Contains(note710, "用户时区") || !strings.Contains(note710, "需要用户确认") ||
+		!strings.Contains(note710, "pull_requests") {
+		t.Fatalf("7→10 应级联时区、确认与线程变化: %s", note710)
 	}
 }
 
 // enable/delete 同样要确认（INT-136 review）：enable 是重新武装一个「运行内
 // 默认放行写操作」的任务、delete 不可逆；disable 是收紧权限、可逆，保持同步。
 func TestBotInt136EnableDeleteNeedConfirmation(t *testing.T) {
-	ts := botToolsetVersionOf(9)
+	ts := botToolsetVersionOf(10)
 	for _, action := range []string{"enable", "delete"} {
 		prepared, err := botPrepareToolCall(ts, "fs_schedule", `{"action":"`+action+`","task_id":"t1"}`)
 		if err != nil {

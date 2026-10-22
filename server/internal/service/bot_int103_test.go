@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -892,9 +893,9 @@ func TestBotScheduleDeleteMissingTaskNotFound(t *testing.T) {
 // 已发布工具集的 wire 字节 SHA-256：改动任一版本都会让存量会话的前缀与
 // tools_hash 失稳，这里钉死。这是跨版本契约，不是实现细节；v4 自 INT-120
 // 起冻结（基线在 bot_int120_test.go），v5 自 INT-121、v6 自 INT-123 起冻结，
-// v7 自 INT-138 起冻结（timezone 描述变更只进 v8），v8 自 INT-136 起冻结
-// （fs_schedule 确认语义描述只进 v9），v9 是当前发布版本（基线在
-// bot_int136_test.go）。
+// v7 自 INT-138 起冻结（timezone 描述变更只进 v8），v8 自 INT-148 起冻结
+// （fs_thread 的结算类动作与描述改写只进 v9），v9 = INT-148，现已冻结；
+// v10 = INT-136 是当前发布版本（基线在 bot_int136_test.go）。
 const (
 	botToolsetV1FrozenHash = "c1da7e95288ed681392529f68a812ec1ac403bcd53cee1414634cca28197ef06"
 	botToolsetV2FrozenHash = "4ec300f75e9aff618b820246c85cc497db6e4d8027cbce342696cc629560ca19"
@@ -906,11 +907,13 @@ const (
 	// 只进 v7（冻结时 15215 字节）。
 	botToolsetV6FrozenHash = "c55b88e31debf5ff87bac9cb7d5b67f756a2395ce17d381944cd0e3b13361b6b"
 	// v7 在 INT-138 后冻结：fs_schedule 的 timezone 描述变更（省略即用户时区）
-	// 只进 v8。v8 在 INT-136 后冻结：确认语义描述只进 v9（动作定义与参数结构体
-	// 不变，确认判定在受理端，不进 wire 字节）。
+	// 只进 v8。
 	botToolsetV7FrozenHash = "e275c8ce9cae472cb9b9a97be3cf042e699ee29d63e37509cdf8cb8994cfe8b4"
-	// v8 在 INT-136 后冻结：fs_schedule 的确认语义描述只进 v9。
+	// v8 在 INT-148 后冻结：fs_thread 的 settle/unsettle/resume_queue 与描述
+	// 改写只进 v9。
 	botToolsetV8FrozenHash = "f1a4fcfc56adf8ddfc143f56f09c308452674ba01c31e3be36ecd403f324c356"
+	// v9 = INT-148；INT-136 的确认描述只进 v10，v9 保留 main 的冻结字节。
+	botToolsetV9FrozenHash = "8e063c146a4c4e7a20788c7f87ec9fce9ccc2d2ca922a3d23fbde49af6630612"
 )
 
 func TestBotScheduleToolsetVersions(t *testing.T) {
@@ -922,11 +925,15 @@ func TestBotScheduleToolsetVersions(t *testing.T) {
 	v6 := botToolsetVersionOf(6)
 	v7 := botToolsetVersionOf(7)
 	v8 := botToolsetVersionOf(8)
-	v9 := botToolsetVersionOf(botToolsetVersion)
+	v9 := botToolsetVersionOf(9)
+	v10 := botToolsetVersionOf(10)
 	if v1.hash == v2.hash || v2.hash == v3.hash || v3.hash == v4.hash ||
 		v4.hash == v5.hash || v5.hash == v6.hash || v6.hash == v7.hash ||
-		v7.hash == v8.hash || v8.hash == v9.hash {
+		v7.hash == v8.hash || v8.hash == v9.hash || v9.hash == v10.hash {
 		t.Fatalf("相邻版本的工具集 hash 必须互不相同")
+	}
+	if v9.hash != botToolsetV9FrozenHash {
+		t.Fatalf("v9 tools_hash 偏离 INT-148 冻结基线: got %s want %s", v9.hash, botToolsetV9FrozenHash)
 	}
 	// 已发布版本的 wire 字节已冻结：v1-v8 的 hash 必须与基线逐字节一致。
 	if v1.hash != botToolsetV1FrozenHash || v2.hash != botToolsetV2FrozenHash ||
@@ -936,12 +943,12 @@ func TestBotScheduleToolsetVersions(t *testing.T) {
 		t.Fatalf("v1-v8 tools_hash 偏离冻结基线: v1=%s v2=%s v3=%s v4=%s v5=%s v6=%s v7=%s v8=%s",
 			v1.hash, v2.hash, v3.hash, v4.hash, v5.hash, v6.hash, v7.hash, v8.hash)
 	}
-	if len(v7.schemas) != 11 || len(v6.schemas) != 11 || len(v5.schemas) != 11 ||
-		len(v4.schemas) != 11 || len(v3.schemas) != 11 || len(v2.schemas) != 11 ||
-		len(v1.schemas) != 10 {
-		t.Fatalf("v1-v7 工具数应为 10/11/11/11/11/11/11，实得 %d/%d/%d/%d/%d/%d/%d",
+	if len(v8.schemas) != 11 || len(v7.schemas) != 11 || len(v6.schemas) != 11 ||
+		len(v5.schemas) != 11 || len(v4.schemas) != 11 || len(v3.schemas) != 11 ||
+		len(v2.schemas) != 11 || len(v1.schemas) != 10 {
+		t.Fatalf("v1-v8 工具数应为 10/11/11/11/11/11/11/11，实得 %d/%d/%d/%d/%d/%d/%d/%d",
 			len(v1.schemas), len(v2.schemas), len(v3.schemas), len(v4.schemas),
-			len(v5.schemas), len(v6.schemas), len(v7.schemas))
+			len(v5.schemas), len(v6.schemas), len(v7.schemas), len(v8.schemas))
 	}
 	// v4/v5 冻结的 fs_schedule：7 个同步动作、冻结参数结构体（不含 run/dry_run）。
 	for _, frozen := range []*botToolsetHolder{v4, v5} {
@@ -1145,6 +1152,33 @@ func TestBotScheduleToolsetVersions(t *testing.T) {
 	}
 	if _, err := botPrepareToolCall(v7, "fs_schedule", `{"action":"state_set","dry_run":true}`); err == nil {
 		t.Fatalf("state_set 携带 dry_run 应被拒绝")
+	}
+	// v5–v8 冻结的 fs_thread（INT-148）：8 个动作、参数用共用冻结副本
+	// botThreadArgsV5Frozen，不得出现 v9 的结算类动作。
+	for _, frozen := range map[int64]*botToolsetHolder{5: v5, 6: v6, 7: v7, 8: v8} {
+		thread := frozen.byName["fs_thread"]
+		if thread == nil || thread.ArgsType.Name() != "botThreadArgsV5Frozen" {
+			t.Fatalf("v%d fs_thread 应使用冻结参数结构体 botThreadArgsV5Frozen，实得 %+v", frozen.version, thread)
+		}
+		threadSchemaRaw, _ := json.Marshal(thread.Parameters)
+		var threadSchema struct {
+			Properties struct {
+				Action struct {
+					Enum []string `json:"enum"`
+				} `json:"action"`
+			} `json:"properties"`
+		}
+		if err := json.Unmarshal(threadSchemaRaw, &threadSchema); err != nil {
+			t.Fatalf("decode v%d fs_thread schema: %v", frozen.version, err)
+		}
+		for _, banned := range []string{"settle", "unsettle", "resume_queue"} {
+			if slices.Contains(threadSchema.Properties.Action.Enum, banned) {
+				t.Fatalf("v%d fs_thread action 枚举不得出现 %s: %s", frozen.version, banned, threadSchemaRaw)
+			}
+		}
+		if _, err := botPrepareToolCall(frozen, "fs_thread", `{"action":"settle","env_id":"e1","thread_id":"t1"}`); err == nil {
+			t.Fatalf("v%d 不应接受 fs_thread/settle", frozen.version)
+		}
 	}
 }
 

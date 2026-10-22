@@ -4348,6 +4348,38 @@ type T3ThreadLaunchResult struct {
 	ThreadId string `json:"thread_id"`
 }
 
+// T3ThreadPullRequest 线程关联 PR 的精简明细（T3 ThreadPullRequestLink；不含 source=
+// stack-dismissed 的墓碑条目）。snapshot 尚未同步（null）时除
+// repo/number/url/watching 外全部省略
+type T3ThreadPullRequest struct {
+	// ChecksState 检查状态（passing/failing/pending）；无检查数据或 snapshot 未同步时省略
+	ChecksState *string `json:"checks_state,omitempty"`
+
+	// IsDraft 是否草稿 PR；snapshot 未同步时省略
+	IsDraft *bool `json:"is_draft,omitempty"`
+
+	// Mergeability 可合并性（mergeable/conflicting/unknown）；snapshot 未同步时省略
+	Mergeability *string `json:"mergeability,omitempty"`
+
+	// MergedAt 合并时间（ISO-8601）；未合并或 snapshot 未同步时省略
+	MergedAt *string `json:"merged_at,omitempty"`
+
+	// Number PR 号
+	Number int `json:"number"`
+
+	// Repo 仓库标识（host + repository，如 github.com/owner/repo）
+	Repo string `json:"repo"`
+
+	// State PR 状态（open/closed/merged）；snapshot 未同步时省略
+	State *string `json:"state,omitempty"`
+
+	// Url PR 页面链接
+	Url string `json:"url"`
+
+	// Watching 该 PR 是否挂着 T3 监听（有监听时服务端会在检查结束、他人评论或分支冲突时唤醒线程代理）
+	Watching bool `json:"watching"`
+}
+
 // T3ThreadQueue 线程排队消息工作流，口径对齐 T3 `deriveThreadQueueWorkflowState`：
 // items 为用户消息产生的排队 run（自动完成/通知 run 不在内），按
 // queuePosition（缺省 ordinal）升序。
@@ -4402,11 +4434,21 @@ type T3ThreadSummary struct {
 	// Provider T3 providerInstanceId
 	Provider string `json:"provider"`
 
-	// PullRequestCount 关联 PR 数（pullRequests 数组长度；缺失时按 linkedPullRequest/branchPullRequest 计）
+	// PullRequestCount 关联 PR 数：shell.pullRequests 字段存在时（含空数组与全墓碑）恒为 pull_requests 过滤后的可见条数（已排除墓碑条目），两侧同源；仅字段缺失（旧服务端）时按 linkedPullRequest/branchPullRequest 计
 	PullRequestCount int `json:"pull_request_count"`
+
+	// PullRequests 线程关联的 PR 可见明细（来自 shell.pullRequests，已排除 source=stack-dismissed 的墓碑条目——用户取消关联的栈成员，上游仅为同步去重保留）；无可见 PR 时为空数组。旧服务端只有 linkedPullRequest/branchPullRequest 而无明细，此时也是空数组（不合成缺 state 的条目），条目数看 pull_request_count
+	PullRequests []T3ThreadPullRequest `json:"pull_requests"`
 
 	// RunStartedAt 最近 run 的 startedAt（上游 latestRunStartedAt）原样透传，供「运行中 N 分钟」计时；无线程运行记录时缺省
 	RunStartedAt *string `json:"run_started_at,omitempty"`
+
+	// RunStatus T3 原始线程状态（shell.status）原样透传，不做归一化。与归一化后的
+	// status 互补：completed/failed/cancelled/interrupted 等终态在 status
+	// 里都会折叠成 idle，这里保留上游原文，供区分「正常结束」「失败」「被取消」。
+	// 注意 status 不是 idle 时线程还没结束（后台 run/后台工作仍在），此时
+	// run_status 只是最近一次根 run 的状态；只有 status=idle 时它才代表最终结局
+	RunStatus string `json:"run_status"`
 
 	// Settled 上游 settledOverride=="settled" 原样透传：用户在 T3 把线程收进了历史区。归档判定看 status=archived，与 settled 互不蕴含
 	Settled bool `json:"settled"`

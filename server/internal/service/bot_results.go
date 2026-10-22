@@ -239,13 +239,16 @@ func (s *BotService) execCapabilityStatus(call *model.BotToolCall, toolsetVersio
 const botHelpText = `Fast Ship 机器人工具说明：
 
 - 读取类（同步）：fs_project list/get、fs_issue list/get/comments/timeline、fs_thread list/get/item/composer_options/workspace_options、fs_environment list/projects。
-- 写操作（异步、需确认或已有授权）：fs_project create/update、fs_issue create/update/set_workflow/replace_checklist/comment、fs_thread launch/send/stop。
+- 写操作（异步、需确认或已有授权）：fs_project create/update、fs_issue create/update/set_workflow/replace_checklist/comment、fs_thread launch/send/stop/settle/unsettle/resume_queue。
 - 写操作受理后你会收到回执 status=pending_confirmation（等待用户确认）或 queued（已授权、已排队）；执行完成后平台会以「平台后台结果」消息送达终态。
 - fs_issue get 返回正文、清单、标签等完整信息，无清单/标签时 labels/checklist 为空数组；列表项只保留决策所需的最小字段。update/replace_checklist 前先 get 读回 updated_at / checklist_updated_at，并原样带上 expected_updated_at / expected_checklist_updated_at；目标已被改动时返回 conflict 与最新内容，应重新读取、保留双方修改后再提交。
 - fs_issue replace_checklist 是整组替换：items 必须是完整清单，不是增量。
-- fs_thread list 默认只返回未归档线程，支持 env_id/project_id/query/settled/status/updated_after 过滤与 page/page_size 分页（query 匹配线程 id/标题/项目名/项目 id/环境名，不区分大小写包含）；返回 total_items/returned_items/offset/has_more 以及各环境的读取覆盖情况（incomplete_environments）。
-- fs_thread get 返回线程状态、最近条目（含条目 id 与短摘要）与完整历史翻页入口（item_offset/next_item_offset）；条目正文用 fs_thread action=item item_id=<id> 补读。
+- fs_thread list 默认只返回未归档、未结算的线程（已结算的要带 settled=true 才看得到），支持 env_id/project_id/query/settled/status/updated_after 过滤与 page/page_size 分页（query 匹配线程 id/标题/项目名/项目 id/环境名，不区分大小写包含）；返回 total_items/returned_items/offset/has_more、settled_filter（本次实际生效的结算筛选）以及各环境的读取覆盖情况（incomplete_environments）。每项带 run_status（T3 原始线程状态：status 不是 idle 时线程还没结束——后台 run/后台工作仍在，run_status 只是最近一次根 run 的状态；status=idle 时它才是最终结局，completed/failed/cancelled 靠它区分）与 pull_requests[]（repo/number/url/watching，snapshot 已同步时另有 state/merged_at/is_draft/checks_state/mergeability；watching=true 表示 T3 挂着监听，检查结束/他人评论/分支冲突会唤醒该线程）。
+- fs_thread get 返回线程状态、最近条目（含条目 id 与短摘要；subagent 条目带 child_thread_id，用它进子线程 get）与完整历史翻页入口（item_offset/next_item_offset）；条目正文用 fs_thread action=item item_id=<id> 补读。
 - fs_thread launch 受理成功只表示启动 RPC 已发出，远端 Agent 是否完成用 fs_thread get/item 查询。
+- fs_thread stop 是 run.interrupt + holdQueue：仅当线程存在可中断 run/后台工作才派发停止命令，并挂起该线程的排队消息（队列 held，此后新消息也进队列但不执行）、结束该线程的 PR 监听、停掉它委派的子任务；线程只剩 PR 监听这类不可中断占位时 stop 是空操作（stopped=false），PR 监听继续；回执只表示受理，是否真的停了用 fs_thread get 的 activity.stopping 判断。
+- fs_thread send 在线程运行中会把消息排队；队列里已有被挂起的排队消息（stop 或 T3 重启恢复所致）时，新消息也会继承挂起，要先 resume_queue。
+- fs_thread settle 把线程收进 T3 历史区：list 默认不含已结算线程，要带 settled=true 才看得到；结算会清掉置顶与该线程所有 PR 监听；线程还在跑、有排队消息或有待应答的审批/提问时会被拒绝（先停止或先应答再结算）。unsettle 撤销、放回默认列表。resume_queue 恢复该线程被挂起的队列，排队消息继续执行。
 - 大结果被截断时（truncated=true）结果体只给开头预览（preview），用 fs_result action=read call_id=<call_id> offset=next_offset 续读，单位是 Unicode 字符；续读返回体标明切片范围与 next_offset，按它继续不会漏内容。
 - fs_stop.stop 结束当前主线运行；用户点「停止」只是发来一条「停止」消息，是否停止由你决定，可用 fs_stop 执行。fs_cancel.cancel 取消本机器人的某个后台调用。
 - 中断（如服务重启、调用被取消）后结果可能无法核实（effect_may_have_occurred=true）：不要断言失败、不要自动重放副作用，先用读取类工具核实现状。

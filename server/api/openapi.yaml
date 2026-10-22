@@ -11682,7 +11682,7 @@ components:
 
     T3ThreadSummary:
       type: object
-      required: [id, environment_id, environment_name, project_id, project_name, title, status, settled, branch, provider, model, updated_at, pull_request_count]
+      required: [id, environment_id, environment_name, project_id, project_name, title, status, settled, branch, provider, model, updated_at, pull_request_count, run_status, pull_requests]
       properties:
         id:
           type: string
@@ -11727,10 +11727,59 @@ components:
           description: 最近 run 的 startedAt（上游 latestRunStartedAt）原样透传，供「运行中 N 分钟」计时；无线程运行记录时缺省
         pull_request_count:
           type: integer
-          description: 关联 PR 数（pullRequests 数组长度；缺失时按 linkedPullRequest/branchPullRequest 计）
+          description: 关联 PR 数：shell.pullRequests 字段存在时（含空数组与全墓碑）恒为 pull_requests 过滤后的可见条数（已排除墓碑条目），两侧同源；仅字段缺失（旧服务端）时按 linkedPullRequest/branchPullRequest 计
+        run_status:
+          type: string
+          description: |
+            T3 原始线程状态（shell.status）原样透传，不做归一化。与归一化后的
+            status 互补：completed/failed/cancelled/interrupted 等终态在 status
+            里都会折叠成 idle，这里保留上游原文，供区分「正常结束」「失败」「被取消」。
+            注意 status 不是 idle 时线程还没结束（后台 run/后台工作仍在），此时
+            run_status 只是最近一次根 run 的状态；只有 status=idle 时它才代表最终结局
+        pull_requests:
+          type: array
+          description: 线程关联的 PR 可见明细（来自 shell.pullRequests，已排除 source=stack-dismissed 的墓碑条目——用户取消关联的栈成员，上游仅为同步去重保留）；无可见 PR 时为空数组。旧服务端只有 linkedPullRequest/branchPullRequest 而无明细，此时也是空数组（不合成缺 state 的条目），条目数看 pull_request_count
+          items:
+            $ref: '#/components/schemas/T3ThreadPullRequest'
         parent_thread_id:
           type: string
           description: 仅详情且该线程为子代理线程时给出（lineage.relationshipToParent=subagent 的 parentThreadId）；列表与父线程缺省
+
+    T3ThreadPullRequest:
+      type: object
+      description: |
+        线程关联 PR 的精简明细（T3 ThreadPullRequestLink；不含 source=
+        stack-dismissed 的墓碑条目）。snapshot 尚未同步（null）时除
+        repo/number/url/watching 外全部省略
+      required: [repo, number, url, watching]
+      properties:
+        repo:
+          type: string
+          description: 仓库标识（host + repository，如 github.com/owner/repo）
+        number:
+          type: integer
+          description: PR 号
+        url:
+          type: string
+          description: PR 页面链接
+        watching:
+          type: boolean
+          description: 该 PR 是否挂着 T3 监听（有监听时服务端会在检查结束、他人评论或分支冲突时唤醒线程代理）
+        state:
+          type: string
+          description: PR 状态（open/closed/merged）；snapshot 未同步时省略
+        merged_at:
+          type: string
+          description: 合并时间（ISO-8601）；未合并或 snapshot 未同步时省略
+        is_draft:
+          type: boolean
+          description: 是否草稿 PR；snapshot 未同步时省略
+        checks_state:
+          type: string
+          description: 检查状态（passing/failing/pending）；无检查数据或 snapshot 未同步时省略
+        mergeability:
+          type: string
+          description: 可合并性（mergeable/conflicting/unknown）；snapshot 未同步时省略
 
     T3ThreadItem:
       type: object

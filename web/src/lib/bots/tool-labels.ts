@@ -43,6 +43,9 @@ const TOOL_ACTION_META: Record<string, Record<string, ToolActionMeta>> = {
     launch: { label: "启动线程", effect: "write" },
     send: { label: "向线程发送消息", effect: "write" },
     stop: { label: "停止线程运行", effect: "write" },
+    settle: { label: "结算线程（收进历史区）", effect: "write" },
+    unsettle: { label: "撤销结算", effect: "write" },
+    resume_queue: { label: "恢复队列", effect: "write" },
   },
   fs_environment: {
     list: { label: "列出环境", effect: "read" },
