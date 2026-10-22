@@ -1,0 +1,286 @@
+package service
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"testing"
+	"time"
+
+	"github.com/godbobo/fast_ship/server/internal/githubapi"
+	"github.com/godbobo/fast_ship/server/internal/model"
+	"github.com/godbobo/fast_ship/server/internal/pkg/githubapp"
+)
+
+// INT-146 重投前的 PR 实况闸门测试：payload 只能定位 repo/PR（旧快照写着
+// open），是否还开着以 GetPullRequest 实时 State 为准。已关闭的投递记终态后
+// 静默跳过（不重投、不通知、下一轮不再查询）；读不到 payload/PR 实况时降级
+// 为原行为照常重投。种子与断言辅助复用 review_redelivery_test.go。
+
+// redeliveryGatePayload 构造投递详情里的 request.payload：闸门定位 repo/PR
+// 用，只含必要字段（payload 是投递时刻的旧快照，这里不带 PR 状态——状态
+// 也不该从它读）。
+func redeliveryGatePayload(repo string, number int) json.RawMessage {
+	body, err := json.Marshal(map[string]any{
+		"number":       number,
+		"repository":   map[string]any{"full_name": repo},
+		"installation": map[string]any{"id": 1},
+	})
+	if err != nil {
+		panic(err)
+	}
+	return body
+}
+
+// redeliveryClosedRow 查某 guid 的重投账行；无行返回 false。
+func redeliveryClosedRow(t *testing.T, env *reviewEngineEnv, guid string) (model.GitHubWebhookRedelivery, bool) {
+	t.Helper()
+	var row model.GitHubWebhookRedelivery
+	err := env.svc.db.Where("guid = ?", guid).First(&row).Error
+	if err != nil {
+		return model.GitHubWebhookRedelivery{}, false
+	}
+	return row, true
+}
+
+// TestRedeliveryGateOpenPRStillRedelivers 投递指向的 PR 仍 open：闸门放行，
+// 照常重投并记次数账，不记终态、不发通知。
+func TestRedeliveryGateOpenPRStillRedelivers(t *testing.T) {
+	env := newReviewEngineEnv(t)
+	env.enableReview(t)
+
+	base := redeliveryTestNow.Add(-time.Hour)
+	env.fake.SetHookDeliveries([]githubapp.HookDelivery{
+		hookRow(1101, "guid-open", "pull_request", "synchronize", 500, false, base),
+	})
+	env.fake.SetHookDeliveryPayload(1101, redeliveryGatePayload("owner/repo", 7))
+	env.fake.SetPR("owner/repo", 7, &githubapi.PullRequest{})
+
+	env.review.reconcileWebhookDeliveries(redeliveryTestNow)
+	if got := env.fake.RedeliveredIDs(); len(got) != 1 || got[0] != 1101 {
+		t.Fatalf("redelivered = %v, want [1101]", got)
+	}
+	if n := mustLedgerAttempts(t, env, "guid-open"); n != 1 {
+		t.Fatalf("guid-open 重投次数账 = %d, want 1", n)
+	}
+	if row, ok := redeliveryClosedRow(t, env, "guid-open"); !ok || row.ClosedAt != nil {
+		t.Fatalf("open PR 不应记终态: %+v (ok=%v)", row, ok)
+	}
+	if n := countNotifications(t, env, model.NotificationReviewRedeliveryFailed); n != 0 {
+		t.Fatalf("notifications = %d, want 0", n)
+	}
+}
+
+// TestRedeliveryGateClosedPRSkippedQuietly 投递指向的 PR 已关闭：不重投、不
+// 记次数、不通知，账记终态（closed_at 非空）；再次对账不重发任何查询——
+// 终态后 payload/PR 都不再拉。
+func TestRedeliveryGateClosedPRSkippedQuietly(t *testing.T) {
+	env := newReviewEngineEnv(t)
+	env.enableReview(t)
+
+	base := redeliveryTestNow.Add(-time.Hour)
+	env.fake.SetHookDeliveries([]githubapp.HookDelivery{
+		hookRow(2101, "guid-closed", "pull_request", "synchronize", 502, false, base),
+	})
+	env.fake.SetHookDeliveryPayload(2101, redeliveryGatePayload("owner/repo", 7))
+	env.fake.SetPR("owner/repo", 7, &githubapi.PullRequest{State: "closed"})
+
+	env.review.reconcileWebhookDeliveries(redeliveryTestNow)
+	if got := env.fake.RedeliveredIDs(); len(got) != 0 {
+		t.Fatalf("已关闭 PR 不应重投，实际 %v", got)
+	}
+	row, ok := redeliveryClosedRow(t, env, "guid-closed")
+	if !ok || row.ClosedAt == nil {
+		t.Fatalf("应记 closed_at 终态: %+v (ok=%v)", row, ok)
+	}
+	if row.Attempts != 0 {
+		t.Fatalf("跳过不应记重投次数，实际 %d", row.Attempts)
+	}
+	if n := countNotifications(t, env, model.NotificationReviewRedeliveryFailed); n != 0 {
+		t.Fatalf("notifications = %d, want 0", n)
+	}
+
+	before := env.fake.CallCounts()
+	env.review.reconcileWebhookDeliveries(redeliveryTestNow.Add(6 * time.Minute))
+	after := env.fake.CallCounts()
+	if got := env.fake.RedeliveredIDs(); len(got) != 0 {
+		t.Fatalf("终态后不应重投，实际 %v", got)
+	}
+	for _, m := range []string{"GetHookDelivery", "GetPullRequest"} {
+		if after[m] != before[m] {
+			t.Fatalf("终态后不应再查 %s：%d → %d", m, before[m], after[m])
+		}
+	}
+	if n := countNotifications(t, env, model.NotificationReviewRedeliveryFailed); n != 0 {
+		t.Fatalf("终态后不应发通知，实际 %d 条", n)
+	}
+}
+
+// TestRedeliveryGateClosedPRWithExhaustedAttemptsNotNotified 误报主场景：
+// 已超 3 次上限的失败投递，其 PR 已关闭——闸门先于超限通知判定，记终态后
+// 静默跳过，不发 NotificationReviewRedeliveryFailed；账行保留原次数、只补
+// closed_at。
+func TestRedeliveryGateClosedPRWithExhaustedAttemptsNotNotified(t *testing.T) {
+	env := newReviewEngineEnv(t)
+	env.enableReview(t)
+
+	base := redeliveryTestNow.Add(-2 * time.Hour)
+	env.fake.SetHookDeliveries([]githubapp.HookDelivery{
+		hookRow(2201, "guid-x3", "pull_request", "synchronize", 502, false, base),
+	})
+	env.fake.SetHookDeliveryPayload(2201, redeliveryGatePayload("owner/repo", 7))
+	env.fake.SetPR("owner/repo", 7, &githubapi.PullRequest{State: "closed"})
+	seedRedeliveryLedger(t, env, "guid-x3", 3)
+
+	env.review.reconcileWebhookDeliveries(redeliveryTestNow)
+	if got := env.fake.RedeliveredIDs(); len(got) != 0 {
+		t.Fatalf("不应重投，实际 %v", got)
+	}
+	if n := countNotifications(t, env, model.NotificationReviewRedeliveryFailed); n != 0 {
+		t.Fatalf("已关闭的 PR 不应发超限误报，实际 %d 条", n)
+	}
+	row, ok := redeliveryClosedRow(t, env, "guid-x3")
+	if !ok || row.ClosedAt == nil {
+		t.Fatalf("应记 closed_at 终态: %+v (ok=%v)", row, ok)
+	}
+	if row.Attempts != 3 {
+		t.Fatalf("记终态不应改写次数，实际 %d, want 3", row.Attempts)
+	}
+}
+
+// TestRedeliveryGateDegradesWhenUnreadable 读不到实况时降级为原行为：payload
+// 未登记（详情拉取失败）、payload 解析得出 PR 但实时读失败（PR 未登记）两种
+// 情况都照常重投并记次数账，且不记终态——闸门只省白跑，不能反过来漏掉真投递。
+func TestRedeliveryGateDegradesWhenUnreadable(t *testing.T) {
+	env := newReviewEngineEnv(t)
+	env.enableReview(t)
+
+	base := redeliveryTestNow.Add(-time.Hour)
+	env.fake.SetHookDeliveries([]githubapp.HookDelivery{
+		// payload 未登记：GetHookDelivery 失败。
+		hookRow(2301, "guid-deg1", "pull_request", "synchronize", 500, false, base),
+		// payload 指向的 PR 未登记：GetPullRequest 失败。
+		hookRow(2302, "guid-deg2", "pull_request", "synchronize", 500, false, base),
+	})
+	env.fake.SetHookDeliveryPayload(2302, redeliveryGatePayload("owner/ghost", 99))
+
+	env.review.reconcileWebhookDeliveries(redeliveryTestNow)
+	got := env.fake.RedeliveredIDs()
+	if len(got) != 2 || got[0] != 2301 || got[1] != 2302 {
+		t.Fatalf("redelivered = %v, want [2301 2302]（降级照常重投）", got)
+	}
+	for _, guid := range []string{"guid-deg1", "guid-deg2"} {
+		if n := mustLedgerAttempts(t, env, guid); n != 1 {
+			t.Fatalf("%s 重投次数账 = %d, want 1", guid, n)
+		}
+		if row, ok := redeliveryClosedRow(t, env, guid); !ok || row.ClosedAt != nil {
+			t.Fatalf("%s 读不到实况不应记终态: %+v (ok=%v)", guid, row, ok)
+		}
+	}
+	if n := countNotifications(t, env, model.NotificationReviewRedeliveryFailed); n != 0 {
+		t.Fatalf("notifications = %d, want 0", n)
+	}
+}
+
+// TestRedeliveryGateBudgetAndPRStateCache 同一 PR 的多个投递只实时读一次
+// State（缓存）；payload/PR 查询共享每轮预算，到顶后不再发查询、剩余投递
+// 降级为照常重投（受重投上限约束）。
+func TestRedeliveryGateBudgetAndPRStateCache(t *testing.T) {
+	env := newReviewEngineEnv(t)
+	env.enableReview(t)
+
+	base := redeliveryTestNow.Add(-time.Hour)
+	rows := make([]githubapp.HookDelivery, 0, 25)
+	for i := 0; i < 25; i++ {
+		id := int64(2400 + i)
+		rows = append(rows, hookRow(id, fmt.Sprintf("guid-cache-%02d", i),
+			"pull_request", "synchronize", 500, false, base))
+		env.fake.SetHookDeliveryPayload(id, redeliveryGatePayload("owner/repo", 7))
+	}
+	env.fake.SetHookDeliveries(rows)
+	env.fake.SetPR("owner/repo", 7, &githubapi.PullRequest{})
+
+	env.review.reconcileWebhookDeliveries(redeliveryTestNow)
+	counts := env.fake.CallCounts()
+	if counts["GetPullRequest"] != 1 {
+		t.Fatalf("同一 PR 的实时读 = %d, want 1（repo#pr 缓存）", counts["GetPullRequest"])
+	}
+	// 闸门查询（详情 + 实时读）各占一个名额，合计不超预算；重投另有自己的上限。
+	if queried := counts["GetHookDelivery"] + counts["GetPullRequest"]; queried > reviewRedeliveryMaxPerSweep {
+		t.Fatalf("闸门查询合计 = %d, 应不超过每轮预算 %d", queried, reviewRedeliveryMaxPerSweep)
+	}
+	if got := env.fake.RedeliveredIDs(); len(got) != reviewRedeliveryMaxPerSweep {
+		t.Fatalf("重投 = %d, want %d（预算耗尽后降级，仍受重投上限约束）",
+			len(got), reviewRedeliveryMaxPerSweep)
+	}
+}
+
+// TestRedeliveryProbeHonoursItsOwnContext 闸门有自己的时间预算：ctx 已结束时
+// 不再发任何请求（直接降级），不能把整轮 90s 预算耗在可选校验上、让重投请求
+// 拿到已取消的 ctx。
+func TestRedeliveryProbeHonoursItsOwnContext(t *testing.T) {
+	env := newReviewEngineEnv(t)
+	env.enableReview(t)
+	base := redeliveryTestNow.Add(-time.Hour)
+	env.fake.SetHookDeliveries([]githubapp.HookDelivery{
+		hookRow(2501, "guid-ctx", "pull_request", "synchronize", 500, false, base),
+	})
+	env.fake.SetHookDeliveryPayload(2501, redeliveryGatePayload("owner/repo", 7))
+	env.fake.SetPR("owner/repo", 7, &githubapi.PullRequest{})
+
+	probe := &redeliveryPRProbe{
+		hooks:    env.fake,
+		client:   env.fake,
+		budget:   reviewRedeliveryMaxPerSweep,
+		prStates: map[string]bool{},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	before := env.fake.CallCounts()
+	check := env.review.redeliveryPRReviewable(ctx, probe, 2501)
+	if check.Known {
+		t.Fatal("闸门 ctx 已结束时应按未知处理")
+	}
+	after := env.fake.CallCounts()
+	for _, m := range []string{"GetHookDelivery", "GetPullRequest"} {
+		if after[m] != before[m] {
+			t.Fatalf("闸门预算用完时不应再请求 %s：%d → %d", m, before[m], after[m])
+		}
+	}
+}
+
+// TestRedeliveryGateBudgetExhaustedClosedPRDegrades 闸门查询预算用完后的降级：
+// 前 10 个不同 PR 判出关闭（各 2 次查询），第 11 个查不到结果 → 按未知照常
+// 重投。这是有意接受的降级（闸门只省白跑，不能因为查不完就漏掉真投递），
+// 锁住它避免以后误以为「所有关闭 PR 都能免于重投」。
+func TestRedeliveryGateBudgetExhaustedClosedPRDegrades(t *testing.T) {
+	env := newReviewEngineEnv(t)
+	env.enableReview(t)
+
+	base := redeliveryTestNow.Add(-time.Hour)
+	rows := make([]githubapp.HookDelivery, 0, 11)
+	for i := 0; i < 11; i++ {
+		id := int64(2600 + i)
+		rows = append(rows, hookRow(id, fmt.Sprintf("guid-budget-%02d", i),
+			"pull_request", "synchronize", 500, false, base))
+		env.fake.SetHookDeliveryPayload(id, redeliveryGatePayload("owner/repo", 100+i))
+		env.fake.SetPR("owner/repo", 100+i, &githubapi.PullRequest{State: "closed"})
+	}
+	env.fake.SetHookDeliveries(rows)
+
+	env.review.reconcileWebhookDeliveries(redeliveryTestNow)
+	if got := env.fake.RedeliveredIDs(); len(got) != 1 || got[0] != 2610 {
+		t.Fatalf("redelivered = %v, want [2610]（预算耗尽后的第 11 个按未知降级）", got)
+	}
+	var closed int64
+	env.svc.db.Model(&model.GitHubWebhookRedelivery{}).Where("closed_at IS NOT NULL").Count(&closed)
+	if closed != 10 {
+		t.Fatalf("closed 行 = %d, want 10（每轮 20 次查询预算 ÷ 每 PR 2 次）", closed)
+	}
+	var wrongClosed int64
+	env.svc.db.Model(&model.GitHubWebhookRedelivery{}).
+		Where("guid = ? AND closed_at IS NOT NULL", "guid-budget-10").Count(&wrongClosed)
+	if wrongClosed != 0 {
+		t.Fatal("第 11 个 guid 不应被记成关闭（没查到实况）")
+	}
+}

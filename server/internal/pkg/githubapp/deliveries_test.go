@@ -104,6 +104,72 @@ func TestListHookDeliveries_PaginatesAndStopsBeforeSince(t *testing.T) {
 	}
 }
 
+// TestGetHookDelivery 详情端点：GET /app/hook/deliveries/{id}、App JWT 头、
+// 解析 request.payload；404 转 *githubapi.StatusError。
+func TestGetHookDelivery(t *testing.T) {
+	var method, path string
+	body := map[string]any{
+		"id": 123, "guid": "g-d", "event": "pull_request", "action": "synchronize",
+		"request": map[string]any{
+			"headers": map[string]any{"Content-Type": "application/json"},
+			"payload": map[string]any{
+				"number":       7,
+				"repository":   map[string]any{"full_name": "owner/repo"},
+				"installation": map[string]any{"id": 42},
+			},
+		},
+	}
+	var code int
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method, path = r.Method, r.URL.Path
+		if iss := jwtIssuer(t, r.Header.Get("Authorization")); iss != "42" {
+			t.Errorf("JWT iss = %q, want 42", iss)
+		}
+		if code == 0 {
+			_ = json.NewEncoder(w).Encode(body)
+		} else {
+			w.WriteHeader(code)
+		}
+	}))
+	defer ts.Close()
+
+	c := NewClient(NewInstallationTokenStore(&AppCredentials{
+		AppID: "42", PrivateKeyPEM: mustKeyPEM(t), APIBaseURL: ts.URL,
+	}))
+	det, err := c.GetHookDelivery(context.Background(), 123)
+	if err != nil {
+		t.Fatalf("GetHookDelivery: %v", err)
+	}
+	if method != http.MethodGet || path != "/app/hook/deliveries/123" {
+		t.Fatalf("request = %s %s, want GET /app/hook/deliveries/123", method, path)
+	}
+	if det.ID != 123 || det.GUID != "g-d" || det.Event != "pull_request" || det.Action != "synchronize" {
+		t.Fatalf("详情元数据不对: %+v", det)
+	}
+	var payload struct {
+		Number     int `json:"number"`
+		Repository struct {
+			FullName string `json:"full_name"`
+		} `json:"repository"`
+		Installation struct {
+			ID int64 `json:"id"`
+		} `json:"installation"`
+	}
+	if err := json.Unmarshal(det.Payload, &payload); err != nil {
+		t.Fatalf("解析 payload: %v", err)
+	}
+	if payload.Number != 7 || payload.Repository.FullName != "owner/repo" || payload.Installation.ID != 42 {
+		t.Fatalf("payload 解析不对: %+v", payload)
+	}
+
+	code = http.StatusNotFound
+	_, err = c.GetHookDelivery(context.Background(), 123)
+	var statusErr *githubapi.StatusError
+	if !errors.As(err, &statusErr) || statusErr.StatusCode != 404 {
+		t.Fatalf("err = %v, want *githubapi.StatusError{404}", err)
+	}
+}
+
 func TestRedeliverHookDelivery(t *testing.T) {
 	var method, path string
 	code := http.StatusAccepted

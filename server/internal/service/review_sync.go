@@ -35,6 +35,12 @@ import (
 var errReviewSyncDeferred = errors.New("review: sync deferred")
 
 const (
+	// reviewSyncRetryBackoff 同一 epoch 同步失败后的退避间隔：调度 tick 是 10s，
+	// 持续性失败（超大 diff 固定 406、SubmitReview 固定 422、评论接口 403）不
+	// 该每 tick 重放整条同步——否则读 diff、写评论、写 commit status 都被放大
+	// 360 倍/小时，还会把同一 SHA 的 status 写满 GitHub 的 1000 条上限。新事件
+	// （webhook/重跑/超时）会推进 sync_epoch，立即重新入队，不受退避影响。
+	reviewSyncRetryBackoff    = 5 * time.Minute
 	reviewCodeStatusContext   = "代码审查"
 	reviewVisualStatusContext = "视觉审查"
 	reviewCodeCommentMarker   = "<!-- fast-ship-code-review -->"
@@ -150,13 +156,16 @@ func (s *ReviewService) syncPendingPRs(now time.Time) {
 	// 的 repo_full_name 快照（审查仓库的唯一真相）。项目换过仓库后旧仓库的
 	// ledger 可能因旧运行收尾再次置 pending，不能在新仓库的项目上把它同步
 	// 出去；公开仓库 ≠ 代码仓库时，公开仓库的账本行同样不再同步。
+	// 退避：同一 epoch 最近失败过的行等 reviewSyncRetryBackoff 再试（新事件
+	// 推进 epoch 后立即入队，见常量注释）。
 	if err := s.db.Where(`sync_pending
+		AND (sync_failed_epoch <> sync_epoch OR updated_at <= ?)
 		AND EXISTS (
 			SELECT 1 FROM project_review_settings s
 			WHERE s.project_id = review_pull_requests.project_id
 			  AND s.enabled
 			  AND s.repo_full_name = review_pull_requests.repo_full_name
-		)`).
+		)`, now.Add(-reviewSyncRetryBackoff)).
 		Order("updated_at ASC").Limit(reviewStageBatch).
 		Find(&rows).Error; err != nil {
 		s.logger.Error("查询待同步 PR 失败", zap.Error(err))
@@ -224,15 +233,24 @@ func (s *ReviewService) syncOnePR(ledger *model.ReviewPullRequest) {
 		s.db.Model(&model.ReviewPullRequest{}).
 			Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND sync_epoch = ?",
 				cur.ProjectID, cur.RepoFullName, cur.PRNumber, epoch).
-			Updates(map[string]any{"sync_error": syncErr.Error(), "updated_at": now})
-		s.logger.Warn("PR 审查同步失败（下轮重试）",
+			Updates(map[string]any{
+				"sync_error":        syncErr.Error(),
+				"sync_failed_epoch": epoch,
+				"updated_at":        now,
+			})
+		s.logger.Warn("PR 审查同步失败（退避后重试）",
 			zap.String("repo", cur.RepoFullName), zap.Int("pr", cur.PRNumber), zap.Error(syncErr))
 		return
 	}
 	s.db.Model(&model.ReviewPullRequest{}).
 		Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND sync_epoch = ?",
 			cur.ProjectID, cur.RepoFullName, cur.PRNumber, epoch).
-		Updates(map[string]any{"sync_pending": false, "sync_error": "", "updated_at": now})
+		Updates(map[string]any{
+			"sync_pending":      false,
+			"sync_error":        "",
+			"sync_failed_epoch": 0,
+			"updated_at":        now,
+		})
 }
 
 // doSyncPR 同步主体：读 PR 实时数据 → 代码汇总状态/评论/行内 → 视觉衔接。
@@ -342,6 +360,10 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 	}
 
 	// 2. 视觉衔接决策（仅当全部代码运行终态后才有意义；视觉运行已建时走汇总）。
+	// retrying 同一快照的失败重试（sync_failed_epoch 已记当前 epoch）：视觉
+	// commit status 已经写成功、只是后续写评论失败时，退避重试不再每轮追加
+	// 一条相同 context 的 status（GitHub 同一 SHA + context 有 1000 条上限）。
+	retrying := ledger.SyncFailedEpoch == epoch
 	visualCarry := false
 	visualPending := len(visualRuns) == 0
 	if len(visualRuns) == 0 {
@@ -373,9 +395,11 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 				reason = "截图全部下载失败"
 			}
 			desc := "截图无法下载，未做视觉审查：" + reason
-			if err := client.CreateCommitStatus(ctx, ledger.InstallationID, ledger.RepoFullName,
-				ledger.HeadSHA, "failure", reviewVisualStatusContext, statusDesc(desc), targetURL); err != nil {
-				return errs.New(errs.ErrGitHubAPI.Code, "写视觉审查状态失败: "+err.Error())
+			if !(retrying && ledger.VisualStatus == "failure") {
+				if err := client.CreateCommitStatus(ctx, ledger.InstallationID, ledger.RepoFullName,
+					ledger.HeadSHA, "failure", reviewVisualStatusContext, statusDesc(desc), targetURL); err != nil {
+					return errs.New(errs.ErrGitHubAPI.Code, "写视觉审查状态失败: "+err.Error())
+				}
 			}
 			ok, err := s.updateLedgerEpoch(ledger, epoch, map[string]any{"visual_status": "failure"})
 			if err != nil {
@@ -447,9 +471,11 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 			visualPending = false
 			visualCarry = true
 			desc := visualCarryDescription(outcome.PriorRuns)
-			if err := client.CreateCommitStatus(ctx, ledger.InstallationID, ledger.RepoFullName,
-				ledger.HeadSHA, "failure", reviewVisualStatusContext, statusDesc(desc), targetURL); err != nil {
-				return errs.New(errs.ErrGitHubAPI.Code, "写视觉审查状态失败: "+err.Error())
+			if !(retrying && ledger.VisualStatus == "failure") {
+				if err := client.CreateCommitStatus(ctx, ledger.InstallationID, ledger.RepoFullName,
+					ledger.HeadSHA, "failure", reviewVisualStatusContext, statusDesc(desc), targetURL); err != nil {
+					return errs.New(errs.ErrGitHubAPI.Code, "写视觉审查状态失败: "+err.Error())
+				}
 			}
 			fields := map[string]any{"visual_status": "failure"}
 			// 内容指纹是本次探测刚拿到的新知识（如作者换了 URL 但图没变）：
@@ -476,13 +502,18 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 			// 结论，把 success 带过来（开轮清空了 visual_status），否则新提交
 			// 会没有视觉结论。走到这里的 ScreensChanged 必为 false。
 			visualPending = false
-			desc := "审查通过（沿用上一轮）"
-			if outcome.HasScreenshots && !outcome.ScreensChanged {
-				desc = "审查通过（沿用上一轮，截图未变化）"
-			}
-			if err := client.CreateCommitStatus(ctx, ledger.InstallationID, ledger.RepoFullName,
-				ledger.HeadSHA, "success", reviewVisualStatusContext, statusDesc(desc), targetURL); err != nil {
-				return errs.New(errs.ErrGitHubAPI.Code, "写视觉审查状态失败: "+err.Error())
+			// 沿用上一轮通过：账本已经是 success 就不再写（开轮已清空
+			// visual_status，首次照常写；同一快照的失败重试不重复写同一状态）。
+			if ledger.VisualStatus != "success" {
+				desc := "审查通过（沿用上一轮）"
+				if outcome.HasScreenshots && !outcome.ScreensChanged {
+					desc = "审查通过（沿用上一轮，截图未变化）"
+				}
+				if err := client.CreateCommitStatus(ctx, ledger.InstallationID, ledger.RepoFullName,
+					ledger.HeadSHA, "success", reviewVisualStatusContext,
+					statusDesc(desc), targetURL); err != nil {
+					return errs.New(errs.ErrGitHubAPI.Code, "写视觉审查状态失败: "+err.Error())
+				}
 			}
 			fields := map[string]any{"visual_status": "success"}
 			if outcome.FingerprintToStore != "" {
@@ -533,28 +564,42 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 		return nil
 	}
 	// diff 在 step 3 前读一次：顶层评论的「未行内标注」注记与 step 4 的行内
-	// review 共用同一份解析结果，不再两处各读一遍。
-	inlineLines, err := s.fetchInlineLines(ctx, client, ledger, codeRuns)
-	if err != nil {
-		return err
+	// review 共用同一份解析结果，不再两处各读一遍。读失败不让整段同步在这里
+	// 中断——commit status 已写完，顶层评论紧接着按「本轮没读 diff」口径出，
+	// 只有行内 review 依赖 diff；错误交给 step 4 在行内阶段上报（本轮不标记
+	// 已发布，下一轮同步重试）。
+	inlineLines, inlineErr := s.fetchInlineLines(ctx, client, ledger, codeRuns)
+	if inlineErr != nil {
+		// 这是「本 tick 重试」的暂时态：真正的失败由同步收尾的 Warn 与账本
+		// sync_error 记录，不必每 10 秒多一条 Warn。
+		s.logger.Info("读取 PR diff 失败，本轮跳过行内 review（状态与顶层评论照常写）",
+			zap.String("repo", ledger.RepoFullName), zap.Int("pr", ledger.PRNumber), zap.Error(inlineErr))
 	}
 	codeBody := buildCodeComment(reviewCommentMeta{
 		RepoFullName: ledger.RepoFullName,
 		HeadSHA:      ledger.HeadSHA,
 		RoundNumber:  ledger.RoundNumber,
 	}, codeRuns, inlineLines, visualPending, visualCarry)
+	// upsertPRComment 自己按正文去重：diff 读不到的重试里正文没变就不 PATCH，
+	// 变了照常更新（等 diff 读得到时再补「未行内标注」注记）。
 	if err := s.upsertPRComment(ctx, client, ledger, reviewCodeCommentMarker, codeBody, "code_comment_id", ledger.CodeCommentID); err != nil {
 		return err
 	}
 
 	// 4. 行内 review：每个 completed 且未 posted 的代码运行，有效行发 review。
+	// diff 读不到时本轮推迟这一步（不标记已发布，下一轮重试），但不打断后面
+	// 与 diff 无关的视觉收尾——推迟的错误在 step 5 之后统一上报，账本保持
+	// sync_pending。
+	inlineDeferred := inlineErr != nil
 	if ok, err := s.ledgerEpochCurrent(ledger, epoch); err != nil {
 		return errs.New(errs.ErrInternal.Code, "复核同步 epoch 失败: "+err.Error())
 	} else if !ok {
 		return nil
 	}
-	if err := s.postInlineReviews(ctx, client, ledger, codeRuns, inlineLines, epoch, now); err != nil {
-		return err
+	if !inlineDeferred {
+		if err := s.postInlineReviews(ctx, client, ledger, codeRuns, inlineLines, epoch, now); err != nil {
+			return err
+		}
 	}
 
 	// 5. 视觉运行存在时的状态与评论。
@@ -584,6 +629,9 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 				return err
 			}
 		}
+	}
+	if inlineDeferred {
+		return inlineErr // 行内 review 推迟：保持 pending，下一轮 diff 读得到时补发
 	}
 	return nil
 }
@@ -615,10 +663,39 @@ func (s *ReviewService) updateLedgerEpoch(ledger *model.ReviewPullRequest, epoch
 	return res.RowsAffected > 0, nil
 }
 
-// upsertPRComment 优先按已存 comment id 直接更新（savedID）；更新撞 404
-// （评论被删）时回退 marker 分页找回，仍找不到才创建。写回 comment id 列。
+// upsertPRComment 顶层评论的唯一写入口：优先按已存 comment id 直接更新
+// （savedID）；更新撞 404（评论被删）时回退 marker 分页找回，仍找不到才创建。
+// 写回 comment id 列。
+//
+// **正文没变就不 PATCH**：同步的重试路径（diff 读不到、视觉未收尾）每个 tick
+// 都会调到这里，相同正文的写入既耗配额又留编辑记录。认自己的评论先按账本记
+// 的 id，id 不可用（写回失败/评论已重建）时退回与 FindPullRequestComment 同
+// 口径的「作者是 bot + 正文以 marker 开头」——只看「正文含 marker」会把用户
+// 复制粘贴的同一段正文当成自己的评论。正文已是最新时顺手把找回的 id 补记回
+// 账本（写回失败只记日志，下一轮多一次列表读而已）。
 func (s *ReviewService) upsertPRComment(ctx context.Context, client githubapi.GitHubClient,
 	ledger *model.ReviewPullRequest, marker, body, idColumn string, savedID int64) error {
+	want := strings.TrimSpace(body)
+	if comments, err := client.ListIssueCommentsForPR(ctx, ledger.InstallationID, ledger.RepoFullName, ledger.PRNumber); err == nil {
+		for _, c := range comments {
+			own := false
+			if savedID != 0 {
+				own = c.ID == savedID
+			} else {
+				own = strings.HasSuffix(c.User, "[bot]") && strings.HasPrefix(strings.TrimSpace(c.Body), marker)
+			}
+			if !own {
+				continue
+			}
+			if strings.TrimSpace(c.Body) == want {
+				if savedID == 0 {
+					s.recordCommentID(ledger, idColumn, c.ID)
+				}
+				return nil
+			}
+			break
+		}
+	}
 	commentID := savedID
 	found := false
 	if savedID != 0 {
@@ -657,11 +734,20 @@ func (s *ReviewService) upsertPRComment(ctx context.Context, client githubapi.Gi
 		}
 		commentID = newID
 	}
-	s.db.Model(&model.ReviewPullRequest{}).
+	s.recordCommentID(ledger, idColumn, commentID)
+	return nil
+}
+
+// recordCommentID 把顶层评论 id 写回账本。失败只记日志：下一轮会多一次评论
+// 列表读（按 bot+marker 找回），不影响正文正确性。
+func (s *ReviewService) recordCommentID(ledger *model.ReviewPullRequest, idColumn string, id int64) {
+	if err := s.db.Model(&model.ReviewPullRequest{}).
 		Where("project_id = ? AND repo_full_name = ? AND pr_number = ?",
 			ledger.ProjectID, ledger.RepoFullName, ledger.PRNumber).
-		Update(idColumn, commentID)
-	return nil
+		Update(idColumn, id).Error; err != nil {
+		s.logger.Warn("写回顶层评论 id 失败",
+			zap.String("column", idColumn), zap.Int64("comment", id), zap.Error(err))
+	}
 }
 
 // upsertVisualComment 视觉顶层评论：本 head 的视觉运行结论或沿用提醒。
@@ -1125,9 +1211,11 @@ func buildScreensUnavailableComment(meta reviewCommentMeta, priorRuns []model.Re
 // postInlineReviews 每个 completed 且 posted_at IS NULL 的代码运行：
 // P0–P2 且行号落在 diff 右侧有效行内 → SubmitReview；posted_at=now。
 // inlineLines 由调用方传入（fetchInlineLines 的结果），本函数不再自己读 diff
-// ——它与顶层评论的「未行内标注」注记同源，保证两处判定一致。
+// ——它与顶层评论的「未行内标注」注记同源，保证两处判定一致。diff 读不到时
+// 调用方根本不进本函数（推迟到下一轮）。
 func (s *ReviewService) postInlineReviews(ctx context.Context, client githubapi.GitHubClient,
-	ledger *model.ReviewPullRequest, codeRuns []model.ReviewRun, inlineLines map[string]map[int]bool, epoch int, now time.Time) error {
+	ledger *model.ReviewPullRequest, codeRuns []model.ReviewRun, inlineLines map[string]map[int]bool,
+	epoch int, now time.Time) error {
 	var pending []model.ReviewRun
 	for _, r := range codeRuns {
 		if r.Status == model.ReviewRunCompleted && r.PostedAt == nil {
@@ -1425,7 +1513,7 @@ func (s *ReviewService) decideVisualForPR(ctx context.Context, ledger *model.Rev
 	}
 	in.HasVisualCombos = len(visualCombos) > 0
 
-	refs := collectScreenshotURLs(pr.Body)
+	refs := collectScreenshotURLsAt(pr.Body, s.githubWebHost())
 	in.HasScreenshots = len(refs) > 0
 	urlFP := screenshotFingerprint(refs)
 	// 账本指纹带内容维度（c:<urlFP>:<contentFP>）后，比较分两层：URL 集合

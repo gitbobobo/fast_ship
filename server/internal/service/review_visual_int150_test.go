@@ -1182,9 +1182,10 @@ func TestVisualSyncFingerprintStoredWhenGitHubPendingWriteFails(t *testing.T) {
 		}
 	}
 
-	// 同一 client（错误只注入一次）重试：视觉运行已存在，直接走汇总分支补写
-	// pending——仍不得写 success，指纹也不被覆盖。
-	review.syncPendingPRs(now.Add(time.Minute))
+	// 同一 client（错误只注入一次）重试：同一 epoch 的失败重试有
+	// reviewSyncRetryBackoff 退避，要跳过窗口；视觉运行已存在，直接走汇总
+	// 分支补写 pending——仍不得写 success，指纹也不被覆盖。
+	review.syncPendingPRs(now.Add(reviewSyncRetryBackoff + time.Second))
 	var gbStatuses int
 	for _, s := range e.fake.StatusesForContext(reviewVisualStatusContext) {
 		if s.SHA == "sha-gb" {

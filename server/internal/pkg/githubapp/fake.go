@@ -33,6 +33,7 @@ type Fake struct {
 	submittedReviews []githubapi.ReviewSummary                 // 已提交 review（对账用）
 	repoErrs         map[string]error                          // repo -> GetRepository 注入的错误（nil=可访问）
 	hookDeliveries   []HookDelivery                            // 投递记录（SetHookDeliveries 覆盖，重投时追加行）
+	hookPayloads     map[int64]json.RawMessage                 // delivery id -> 投递 payload（SetHookDeliveryPayload 登记）
 	redeliveredIDs   []int64                                   // 已触发重投的 delivery id（调用序）
 	redeliverErr     error                                     // SetRedeliverError 注入的重投错误（非 nil 时不记账）
 	nextID           int64
@@ -79,6 +80,7 @@ func NewFake() *Fake {
 		comments:       map[string]map[int][]fakeComment{},
 		reviews:        map[string][]fakeComment{},
 		repoErrs:       map[string]error{},
+		hookPayloads:   map[int64]json.RawMessage{},
 		diffText:       "diff --git a/main.go b/main.go\n+func main() {}\n",
 		nextID:         1000,
 		InstallationID: 1,
@@ -397,6 +399,38 @@ func (f *Fake) SetHookDeliveries(items []HookDelivery) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.hookDeliveries = append([]HookDelivery(nil), items...)
+}
+
+// SetHookDeliveryPayload 登记单次投递的请求 payload（GetHookDelivery 读），
+// 对账闸门据此确定投递指向哪个 PR。未登记的投递返回错误，走调用方的降级
+// 路径（照常重投）——与真实 GitHub 一定有详情不同，这里的「没有」就是测试
+// 注入降级场景的开关。
+func (f *Fake) SetHookDeliveryPayload(id int64, payload json.RawMessage) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.hookPayloads[id] = append(json.RawMessage(nil), payload...)
+}
+
+// GetHookDelivery 返回单次投递详情：元数据取自投递记录行，payload 取登记表；
+// 投递行或 payload 任一未登记即报错。
+func (f *Fake) GetHookDelivery(_ context.Context, deliveryID int64) (HookDeliveryDetail, error) {
+	f.record("GetHookDelivery", "", 0, fmt.Sprintf("delivery:%d", deliveryID))
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	payload, ok := f.hookPayloads[deliveryID]
+	if !ok {
+		return HookDeliveryDetail{}, fmt.Errorf("githubapp fake: 未登记的投递 payload %d", deliveryID)
+	}
+	for _, d := range f.hookDeliveries {
+		if d.ID != deliveryID {
+			continue
+		}
+		return HookDeliveryDetail{
+			ID: d.ID, GUID: d.GUID, Event: d.Event, Action: d.Action,
+			Payload: append(json.RawMessage(nil), payload...),
+		}, nil
+	}
+	return HookDeliveryDetail{}, fmt.Errorf("githubapp fake: 未登记的投递 %d", deliveryID)
 }
 
 // RedeliveredIDs 按调用序返回已触发重投的 delivery id。
