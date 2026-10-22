@@ -27,10 +27,13 @@ func botCostEstimate(catalogID, modelID string, prompt, cached, completion int64
 	if !ok || m.Cost == nil || m.Cost.Input == nil || m.Cost.Output == nil {
 		return 0, false
 	}
-	uncached := prompt - cached
-	if uncached < 0 {
-		uncached = 0
+	// cached ⊆ prompt 是上游口径承诺；异常上报（cached > prompt）时把
+	// cached 也钳到 prompt——输入侧计价总量不得超过 prompt_tokens，否则
+	// 成本按虚高的 cached 全额高估（INT-139 云端复审）。
+	if cached > prompt {
+		cached = prompt
 	}
+	uncached := prompt - cached
 	read := *m.Cost.Input
 	if m.Cost.CacheRead != nil {
 		read = *m.Cost.CacheRead

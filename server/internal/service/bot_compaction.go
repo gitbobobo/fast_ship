@@ -1964,10 +1964,23 @@ func (s *BotService) tellToolsetTx(tx *gorm.DB, bot *model.Bot, deferred bool) e
 	userState := "已生效"
 	if deferred {
 		capMin := int64(math.Ceil(s.cfg.Bots.Runtime.PromptCacheRetain().Minutes()))
+		// 计时起点是首次推迟落点（activation_deferred_at）而非通知发出
+		// 时刻：通知在后续 run 补发时按剩余窗口写承诺，不高估（INT-139
+		// 云端复审）。
+		if bot.ActivationDeferredAt != nil {
+			if rem := bot.ActivationDeferredAt.Add(s.cfg.Bots.Runtime.PromptCacheRetain()).Sub(s.now()); rem > 0 {
+				if m := int64(math.Ceil(rem.Minutes())); m < capMin {
+					capMin = m
+				}
+			}
+		}
 		activation = "next_compaction"
 		stateText = fmt.Sprintf("下一个压缩点生效（若会话持续活跃未压缩，最迟约 %d 分钟后随新消息生效）", capMin)
-		// 给用户看的版本不出现「压缩点」这类内部术语，括号也不嵌套。
-		userState = fmt.Sprintf("下次上下文整理时生效，最迟约 %d 分钟", capMin)
+		// 给用户看的版本不出现「压缩点」这类内部术语，括号也不嵌套；
+		// 「随新消息生效」限定不能丢——封顶兑现只在 run 入口与安全点
+		// 复核，没有后台定时器，会话静默时激活落在窗口后的下一条消息
+		// （INT-139 云端复审）。
+		userState = fmt.Sprintf("下次上下文整理时生效，持续活跃时最迟约 %d 分钟后随新消息生效", capMin)
 	}
 	note += "（" + stateText + "）"
 	// 用户版：生效状态放句首（「已升级：…下次生效」的首尾矛盾会让用户
@@ -2097,13 +2110,19 @@ func (s *BotService) settleToolsetNoticesTx(tx *gorm.DB, botID string, toVersion
 // 概括这轮变化和自己有什么关系，不列 fs_schedule/dry_run 这类工具与字段
 // 名——模型版（botToolsetChangeNote）才需要精确清单。
 func botToolsetUserNote(from, to int64) string {
+	// 跨档升级逐档并列（INT-139 云端复审）：只报最高档会把中间档的用户
+	// 可感知变化吞掉（如 from=8→10 时 v9 线程能力）。
+	var parts []string
 	if to >= 10 && from < 10 {
-		return "定时任务的创建、修改、启用和删除现在需要你确认后才会执行"
+		parts = append(parts, "定时任务的创建、修改、启用和删除现在需要你确认后才会执行")
 	}
 	if to >= 9 && from < 9 {
-		return "线程管理增加了归档、恢复队列等新能力"
+		parts = append(parts, "线程管理增加了归档、恢复队列等新能力")
 	}
-	return "机器人的提示词与工具集有更新"
+	if len(parts) == 0 {
+		return "机器人的提示词与工具集有更新"
+	}
+	return strings.Join(parts, "；")
 }
 
 func botToolsetChangeNote(from, to int64) string {
