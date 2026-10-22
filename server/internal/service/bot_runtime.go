@@ -38,6 +38,9 @@ type botRuntimeState struct {
 
 type botActivation struct {
 	cancel context.CancelFunc
+	// runID 是当前绑定执行的 run：硬停止取消前核对它，槽被重入换成新 run
+	// 时不得取消到别人的 context（INT-137）。空值表示尚未绑定（不取消）。
+	runID string
 	// requeue 标记执行期间又有唤醒：主线循环退出后由收尾重启。
 	requeue bool
 	// pending 是重启循环要用的最新触发描述。
@@ -71,6 +74,26 @@ func (rt *botRuntimeState) setCancel(botID string, cancel context.CancelFunc) {
 	if a, ok := rt.active[botID]; ok {
 		a.cancel = cancel
 	}
+}
+
+// bindRun 记录执行槽当前绑定的 run：硬停止取消前按它核对目标（INT-137）。
+func (rt *botRuntimeState) bindRun(key, runID string) {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if a, ok := rt.active[key]; ok {
+		a.runID = runID
+	}
+}
+
+// bindSlotRun 把 run 绑定到它所在的执行槽（主线槽 key 是 botID，schedule 槽
+// key 是 "schedule:"+runID，与 cancelBotContext 同一映射）：botLoop 每次进入
+// 都重绑，槽重入新 run 时同步换绑，硬停止就不会取消到别人的 context。
+func (s *BotService) bindSlotRun(bot *model.Bot, run *model.BotRun) {
+	key := bot.ID
+	if run.SessionKind == model.BotSessionKindSchedule {
+		key = botScheduleSlotKey(run.ID)
+	}
+	s.rt.bindRun(key, run.ID)
 }
 
 // markRequeue 执行期间再收到唤醒时置位并记录触发描述。
@@ -353,7 +376,11 @@ func (s *BotService) ensureRun(bot *model.Bot, wake botWake) (*model.BotRun, boo
 		return nil, false, err
 	}
 	s.emitRunEvent(bot.ID, run, model.BotEventDelta, botEventEnvelope{
-		Kind: "run_started", Payload: map[string]interface{}{"trigger": string(wake.Trigger)},
+		Kind: "run_started",
+		Payload: map[string]interface{}{
+			"trigger":    string(wake.Trigger),
+			"created_at": run.CreatedAt.UTC().Format(time.RFC3339Nano),
+		},
 	})
 	return run, true, nil
 }
@@ -367,12 +394,34 @@ func (s *BotService) activeRunOf(botID string) (*model.BotRun, bool) {
 	return run, true
 }
 
-// RequestStop 停止主线：置 stop_requested 并取消当前模型/同步调用 context；
-// 已受理后台调用继续存在，可逐项取消。
-// RequestStop 把「停止」入口当作一条用户输入：追加一条「停止」消息并唤醒
-// 机器人，由它结合上下文决定后续动作（继续、调整或结束）。不再硬编码为
-// 取消当前回复、全部后台调用或远端线程——那些由机器人按目标决定；真正要
-// 结束自身运行时它仍可用 fs_stop。已结束的 run 不接受停止输入（409）。
+// hardStopRun 硬停止主线 run（停止宽限到期或重复请求）。acceptedOrdinal 是
+// 受理停止时该 run 的最大模型请求序号；-1 表示跳过进展判断（重复点击的立即
+// 硬取消）。「条件写停止标记」在一条 UPDATE 里同时要求「run 未结束」与
+// 「受理后没有新请求（NOT EXISTS ordinal > accepted）」——判定与写入原子，
+// 宽限期间 run 已带着停止消息发起新请求时落空：用户消息已随新上下文送出，
+// 此时硬取消会把停止之后的新消息一起丢掉。命中后把「停止」消息标记为已
+// 消费（不这样做，run 落 stopped 后扫描器会因「未消费输入」立刻拉起新 run
+// 处理「停止」文本；只推进到停止消息的 seq，之后到达的新消息不受影响），
+// 最后取消执行槽 context，循环在安全点落 stopped。
+func (s *BotService) hardStopRun(botID, runID string, stopSeq int64, acceptedOrdinal int64) {
+	ok, err := s.runs.MarkStopRequested(runID, acceptedOrdinal, stopSeq, time.Now().UTC())
+	if err != nil || !ok {
+		return
+	}
+	run, err := s.runs.FindByID(runID)
+	if err != nil {
+		return
+	}
+	s.advanceInputWatermarks(run, stopSeq)
+	s.cancelBotContext(botID, run)
+}
+
+// RequestStop 停止主线：追加一条「停止」消息并唤醒机器人，由它结合上下文
+// 决定后续动作（继续、调整或结束）；宽限期（stop_grace）内 run 未自然到达
+// 安全点，或已受理过停止仍再次点击，则硬取消当前模型/同步调用 context，
+// 循环在安全点落 stopped。不再硬编码为取消全部后台调用或远端线程——那些由
+// 机器人按目标决定；真正要结束自身运行时它仍可用 fs_stop。已结束的 run 不
+// 接受停止输入（409）。
 func (s *BotService) RequestStop(userID, botID, runID string) (*BotRunResponse, error) {
 	if _, err := s.bots.FindByIDAndUser(botID, userID); err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -405,6 +454,7 @@ func (s *BotService) RequestStop(userID, botID, runID string) (*BotRunResponse, 
 	clientMsgID := "stop:" + runID
 	var msgSeq int64
 	var already bool
+	var acceptedOrdinal int64 = -1
 	txErr := s.db.Transaction(func(tx *gorm.DB) error {
 		fresh, err := repository.NewBotRunRepository(tx).FindByID(runID)
 		if err != nil {
@@ -428,6 +478,16 @@ func (s *BotService) RequestStop(userID, botID, runID string) (*BotRunResponse, 
 		if seqErr != nil {
 			return errs.ErrInternal
 		}
+		// 序号基准在追加停止消息之前、于同一事务内采样：单连接下事务持有唯一
+		// 连接，采样之后不会再有请求插进来；而这条消息提交后的新请求要么
+		// 包含它（进展），要么是更早构建的上下文（由 stopSeq 条件排除）。
+		// 采样失败必须让整个事务失败：-1 表示「跳过进展判断」，拿它兜底会把
+		// 一次数据库抖动降级成无条件硬取消，可能丢掉已带上停止消息的请求。
+		ord, ordErr := repository.NewBotModelRequestRepository(tx).MaxOrdinalTx(tx, runID)
+		if ordErr != nil {
+			return errs.ErrInternal
+		}
+		acceptedOrdinal = ord
 		raw, marshalErr := json.Marshal(botUserContent{Text: "停止"})
 		if marshalErr != nil {
 			return errs.ErrInternal
@@ -459,12 +519,21 @@ func (s *BotService) RequestStop(userID, botID, runID string) (*BotRunResponse, 
 		return nil, errs.ErrInternal
 	}
 	if !already {
+		// 宽限计时：到时 run 仍未结束则硬取消（acceptedOrdinal 已在追加事务内
+		// 采样）。计时器随进程重启丢失可接受——重启恢复本就会把活动 run 置
+		// failed。
 		s.publishEvent(botID)
 		s.wakeRuntime(botID, botWake{
 			Trigger: model.BotTriggerUserMessage,
 			Key:     fmt.Sprintf("user_message:%d", msgSeq),
 			Context: fmt.Sprintf(`{"message_seq":%d,"client_message_id":%q,"kind":"stop"}`, msgSeq, clientMsgID),
 		})
+		time.AfterFunc(s.cfg.Bots.Runtime.StopGrace(), func() {
+			s.hardStopRun(botID, runID, msgSeq, acceptedOrdinal)
+		})
+	} else {
+		// 已受理过停止仍再次点击：不再等宽限、跳过进展判断，立即硬取消。
+		s.hardStopRun(botID, runID, msgSeq, -1)
 	}
 
 	fresh, err := s.runs.FindByID(runID)
@@ -477,7 +546,8 @@ func (s *BotService) RequestStop(userID, botID, runID string) (*BotRunResponse, 
 
 // cancelBotContext 按 run 的会话解析执行槽并取消（若在跑）：schedule run 的
 // 槽 key 是 "schedule:"+runID（见 wakeScheduleRun），主线 run 用 botID。取消
-// 当前的模型请求/同步工具调用，循环在安全点收尾。
+// 前核对槽绑定的 run：槽已被重入换绑成别的 run 时不得取消——硬停止与重入
+// 竞速时，取消别人的 context 会丢掉新 run 正在处理的输入（INT-137）。
 func (s *BotService) cancelBotContext(botID string, run *model.BotRun) {
 	key := botID
 	if run.SessionKind == model.BotSessionKindSchedule {
@@ -485,9 +555,16 @@ func (s *BotService) cancelBotContext(botID string, run *model.BotRun) {
 	}
 	s.rt.mu.Lock()
 	defer s.rt.mu.Unlock()
-	if a, ok := s.rt.active[key]; ok && a.cancel != nil {
-		a.cancel()
+	a, ok := s.rt.active[key]
+	if !ok || a.cancel == nil {
+		return
 	}
+	if a.runID != run.ID {
+		// 只有槽明确绑定着同一个 run 才取消：绑定前（空值）与已换绑成新 run
+		// 都不能取消——旧停止晚到一步时，绝不能打中别人的 context。
+		return
+	}
+	a.cancel()
 }
 
 // ---------- 响应投影 ----------
@@ -620,7 +697,12 @@ type botDecisionContent struct {
 }
 
 type botLifecycleContent struct {
-	Event  string          `json:"event"`
+	Event string `json:"event"`
+	// Render 是事件投影的渲染标记（INT-137 R6）："user" 表示按 user 角色 +
+	// [平台事件] 前缀进请求。缺省为空表示旧消息——部分兼容后端要求 system
+	// 只能出现在开头，但不能改写已有会话的前缀（prefix_hash），所以只有新追加
+	// 的消息带标记；旧消息保持 system 角色，随压缩归档离开投影。
+	Render string          `json:"render,omitempty"`
 	Detail json.RawMessage `json:"detail,omitempty"`
 }
 

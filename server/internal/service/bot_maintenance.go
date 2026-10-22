@@ -94,18 +94,25 @@ func (s *BotService) auxModelRequest(ctx context.Context, bot *model.Bot, maintR
 	}
 
 	client := botNewClient(bot.BaseURL, apiKey)
-	callCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	// 总超时是防泄漏的兜底（上游无限挂住/进程退出）：取 FirstChunk + Idle +
+	// 30s。空闲看门狗管「不再出片」，这条墙钟管「一直出片但永远不结束」——
+	// 持续正常出片超过该上限的辅助请求会被取消并记 provider_unavailable，
+	// 这是刻意保留的兜底（维护 worker 槽位不能被一条流长期占住）。
+	timeouts := s.botStreamTimeoutsOf()
+	callCtx, cancel := context.WithTimeout(ctx, timeouts.FirstChunk+timeouts.Idle+30*time.Second)
 	defer cancel()
 	reply, callErr := botStreamChat(callCtx, &client, botStreamRequest{
 		Messages:            params,
 		Model:               modelName,
 		MaxCompletionTokens: maxOut,
-	}, nil)
+	}, timeouts, nil)
 
 	cols := map[string]interface{}{"finished_at": s.now()}
 	if callErr != nil {
+		// error_code 与主线同一分类口径：看门狗超时记 model_stream_timeout，
+		// 认证/额度/限流各自可区分（INT-137）。
 		cols["status"] = model.BotModelRequestFailed
-		cols["error_code"] = "maintenance_request_failed"
+		cols["error_code"] = botClassifyModelError(callErr).Code
 		cols["error_message"] = botErrMessage(callErr)
 	} else {
 		cols["status"] = model.BotModelRequestSucceeded

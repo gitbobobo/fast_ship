@@ -1038,8 +1038,10 @@ func TestBotContextLimitNotOn429(t *testing.T) {
 		t.Fatalf("send: %v", err)
 	}
 	waitForBot(t, "429", 10*time.Second, func() bool { return env.botSettled(bot.ID) })
-	if n != 1 {
-		t.Fatalf("429 不应触发强制压缩重试，实际 %d", n)
+	// INT-137 起 429 改走「未输出前的有限重试」（默认重试 2 次，共 3 次
+	// 请求），但仍然不得触发上下文超限的强制压缩，最终按限流失败。
+	if n != 3 {
+		t.Fatalf("429 应做有限重试共 3 次请求，实际 %d", n)
 	}
 	var c int64
 	env.db.Model(&model.BotCompaction{}).Where("bot_id = ?", bot.ID).Count(&c)

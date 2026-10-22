@@ -205,3 +205,54 @@ issues:
   auto_sync_on_startup: true
   auto_sync_interval_minutes: 15
 `
+
+// INT-137：机器人运行参数（流超时、停止宽限、重试、熔断窗口）的默认值、
+// 覆盖与校验。默认值本身就是行为契约（90s/120s/15s/2 次/30 分钟）。
+func TestBotsRuntimeConfig(t *testing.T) {
+	var zero BotsRuntimeConfig
+	if got := zero.StreamFirstChunkTimeout(); got != 90*time.Second {
+		t.Fatalf("首包超时默认 90s，got %v", got)
+	}
+	if got := zero.StreamIdleTimeout(); got != 120*time.Second {
+		t.Fatalf("空闲超时默认 120s，got %v", got)
+	}
+	if got := zero.StopGrace(); got != 15*time.Second {
+		t.Fatalf("停止宽限默认 15s，got %v", got)
+	}
+	if got := zero.RetryMaxAttemptsV(); got != 2 {
+		t.Fatalf("重试次数默认 2，got %d", got)
+	}
+	if got := zero.RetryBaseDelay(); got != time.Second {
+		t.Fatalf("退避基数默认 1s，got %v", got)
+	}
+	if got := zero.ProviderCircuitWindow(); got != 30*time.Minute {
+		t.Fatalf("熔断窗口默认 30m，got %v", got)
+	}
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	body := baseConfigYAML + "\nbots:\n  runtime:\n    stream_first_chunk_timeout_seconds: 5\n    retry_max_attempts: 9\n    provider_circuit_minutes: 1\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("load bots.runtime: %v", err)
+	}
+	if got := cfg.Bots.Runtime.StreamFirstChunkTimeout(); got != 5*time.Second {
+		t.Fatalf("显式首包超时应生效，got %v", got)
+	}
+	if got := cfg.Bots.Runtime.RetryMaxAttemptsV(); got != 5 {
+		t.Fatalf("重试次数应封顶 5，got %d", got)
+	}
+	if got := cfg.Bots.Runtime.ProviderCircuitWindow(); got != time.Minute {
+		t.Fatalf("显式熔断窗口应生效，got %v", got)
+	}
+
+	negative := BotsRuntimeConfig{RetryMaxAttempts: -1, StopGraceSeconds: -1, StreamFirstChunkTimeoutSeconds: -1}
+	if got := negative.RetryMaxAttemptsV(); got != 0 {
+		t.Fatalf("负值应关闭重试，got %d", got)
+	}
+	if err := (BotsConfig{Runtime: negative}).validate(); err == nil {
+		t.Fatalf("负的流超时应被 validate 拒绝")
+	}
+}

@@ -230,22 +230,23 @@ func TestAIProviderCatalogProjection(t *testing.T) {
 func TestAIProviderTestValidation(t *testing.T) {
 	env := setupBotTestEnv(t)
 	svc := newProviderTestService(t, env)
+	userID := createBotTestUser(t, env.db, "ptest")
 
-	if _, err := svc.Test(&TestAIProviderRequest{APIKey: strPtrBot(" ")}); err == nil {
+	if _, err := svc.Test(userID, &TestAIProviderRequest{APIKey: strPtrBot(" ")}); err == nil {
 		t.Fatalf("空 key 应拒绝")
 	}
-	if _, err := svc.Test(&TestAIProviderRequest{APIKey: strPtrBot("sk-x"), CatalogID: strPtrBot("no-such")}); err == nil {
+	if _, err := svc.Test(userID, &TestAIProviderRequest{APIKey: strPtrBot("sk-x"), CatalogID: strPtrBot("no-such")}); err == nil {
 		t.Fatalf("未知 catalog 应拒绝")
 	}
-	if _, err := svc.Test(&TestAIProviderRequest{APIKey: strPtrBot("sk-x"), CatalogID: strPtrBot("custom")}); err == nil {
+	if _, err := svc.Test(userID, &TestAIProviderRequest{APIKey: strPtrBot("sk-x"), CatalogID: strPtrBot("custom")}); err == nil {
 		t.Fatalf("custom 缺 model 应拒绝")
 	}
-	if _, err := svc.Test(&TestAIProviderRequest{APIKey: strPtrBot("sk-x"), CatalogID: strPtrBot("custom"), BaseURL: strPtrBot("ftp://x")}); err == nil {
+	if _, err := svc.Test(userID, &TestAIProviderRequest{APIKey: strPtrBot("sk-x"), CatalogID: strPtrBot("custom"), BaseURL: strPtrBot("ftp://x")}); err == nil {
 		t.Fatalf("custom 坏地址应拒绝")
 	}
 	// 目录 provider 不给 model：用目录第一个模型发起（打不可达地址也返回检查
 	// 结果，不报错——可达性问题体现在 checks 里）。
-	res, err := svc.Test(&TestAIProviderRequest{
+	res, err := svc.Test(userID, &TestAIProviderRequest{
 		APIKey: strPtrBot("sk-probe-7777"), CatalogID: strPtrBot("deepseek"),
 	})
 	if err != nil {
@@ -292,8 +293,9 @@ func TestAIProviderTestProbesRunConcurrently(t *testing.T) {
 
 	env := setupBotTestEnv(t)
 	svc := NewAIProviderService(env.db, env.cfg, zap.NewNop())
+	userID := createBotTestUser(t, env.db, "pconcurrent")
 	start := time.Now()
-	res, err := svc.Test(&TestAIProviderRequest{
+	res, err := svc.Test(userID, &TestAIProviderRequest{
 		CatalogID: strPtrBot(catalog.CustomCatalogID),
 		BaseURL:   strPtrBot(srv.URL + "/v1"),
 		APIKey:    strPtrBot("sk-test-concurrent-0001"),

@@ -12,6 +12,7 @@ import {
   type BotCallStatus,
   type BotMessage,
   type BotRun,
+  type BotRunErrorAction,
   type BotRunStatus,
 } from "@/lib/api/bots";
 import {
@@ -55,6 +56,89 @@ export function pickActiveRun(runs: BotRun[] | undefined): BotRun | null {
  */
 export function pickBackgroundCalls(calls: BotCall[]): BotCall[] {
   return calls.filter((c) => c.execution_mode === "async" && !isTerminalCall(c));
+}
+
+/** 错误条模型（INT-137）：最近一次失败 run 中用户可直接处理的那类失败。 */
+export interface BotRunError {
+  code: string;
+  message: string;
+  action: BotRunErrorAction;
+}
+
+/** 错误条只覆盖「用户能直接处理」的失败：认证失效与额度用完。 */
+const ACTIONABLE_RUN_ERROR_CODES: ReadonlySet<string> = new Set([
+  "provider_auth_failed",
+  "provider_quota_exhausted",
+]);
+
+const RUN_ERROR_FALLBACKS: Record<string, string> = {
+  provider_auth_failed:
+    "AI 提供商认证失败：密钥无效或已失效，请到设置页更新密钥",
+  provider_quota_exhausted:
+    "AI 提供商额度已用完或余额不足，请充值或更换提供商",
+};
+
+const AI_PROVIDERS_ACTION: BotRunErrorAction = {
+  kind: "ai_providers_settings",
+  label: "去设置",
+};
+
+/**
+ * 取最新一次 run（按 created_at，缓存里快照与 SSE 追加的次序不保证）：只有它
+ * 本人才是错误条的候选。错误码可操作（auth/quota）时返回错误条模型，其余
+ * （包括后续运行已成功的情况）返回 null——不把历史失败一直挂在聊天页顶上。
+ * action 优先用服务端随 run_error 下发的值；快照没有该字段时按 code 推导。
+ */
+/**
+ * 服务端 created_at 是 RFC3339Nano，小数位不固定（`.1Z` / `.11Z` / 无小数），
+ * 字符串比较会排错，统一解析成毫秒时间戳再比。
+ */
+function runCreatedAtKey(run: BotRun): { ms: number; frac: string } | null {
+  if (typeof run.created_at !== "string" || run.created_at === "") return null;
+  const ms = Date.parse(run.created_at);
+  if (Number.isNaN(ms)) return null;
+  // Date.parse 只保留毫秒；RFC3339Nano 的小数位可以到纳秒，取出来做同毫秒
+  // 的次级比较（.1239 晚于 .1234，字符串比较会判反）。
+  const matched = /\.(\d+)/.exec(run.created_at);
+  const frac = (matched?.[1] ?? "").padEnd(9, "0").slice(0, 9);
+  return { ms, frac };
+}
+
+function compareRunCreatedAt(a: BotRun, b: BotRun): number {
+  const left = runCreatedAtKey(a);
+  const right = runCreatedAtKey(b);
+  if (left && right) {
+    if (left.ms !== right.ms) return left.ms - right.ms;
+    return left.frac.localeCompare(right.frac);
+  }
+  if (left) return 1;
+  if (right) return -1;
+  return 0;
+}
+
+export function pickRunError(runs: BotRun[] | undefined): BotRunError | null {
+  if (!runs?.length) return null;
+  const latest = runs.reduce((newest, run) => {
+    // 缺时间戳的 run（旧服务端来的 run_started 没有 created_at）只在双方都
+    // 缺时按追加次序胜出；一方带时间戳就以时间戳为准——否则永远赢过缓存里
+    // 已存在的 run，旧失败会盖住后续成功一直挂在顶上。
+    return compareRunCreatedAt(run, newest) >= 0 ? run : newest;
+  });
+  if (latest.status !== "failed") return null;
+  const code = latest.error_code ?? "";
+  if (!ACTIONABLE_RUN_ERROR_CODES.has(code)) return null;
+  const action =
+    latest.error_action && latest.error_action.kind
+      ? {
+          kind: latest.error_action.kind,
+          label: latest.error_action.label || AI_PROVIDERS_ACTION.label,
+        }
+      : AI_PROVIDERS_ACTION;
+  return {
+    code,
+    message: latest.error_message || RUN_ERROR_FALLBACKS[code] || "模型调用失败",
+    action,
+  };
 }
 
 // ---- 合并纯函数：SSE 事件与 REST 响应折叠进 react-query 缓存 ----
@@ -179,6 +263,18 @@ export function mergeRunSnapshots(
       RUN_STATUS_RANK[run.status] > RUN_STATUS_RANK[cached.status]
     ) {
       merged.set(run.id, run);
+    } else if (RUN_STATUS_RANK[run.status] === RUN_STATUS_RANK[cached.status]) {
+      // 同分也合并：快照是权威，error_*/stop_requested 等可变字段以快照为准
+      // 补齐（SSE 折叠的记录常缺这些字段）；created_at 只在缓存缺省时回填，
+      // SSE run_started 已写入的创建时刻不回拨。
+      merged.set(run.id, {
+        ...cached,
+        ...run,
+        created_at: cached.created_at || run.created_at,
+        // 停止受理是单调事实：迟到的旧快照可能还带着 stop_requested=false，
+        // 不能把已受理的停止态回退（其他标签页/重连场景会丢失「停止中」）。
+        stop_requested: Boolean(cached.stop_requested) || Boolean(run.stop_requested),
+      });
     }
   }
   return [...merged.values()];
@@ -361,9 +457,19 @@ export function foldStreamEvent(
       } else if (data.kind === "run_started" && data.run_id) {
         // 运行栏依赖 activeRun：run_started 到达即把 run 折叠进缓存；
         // 新 run 开始意味着上一段维护进度已过时，一并清掉。
+        // payload 携带服务端落库时刻 created_at（RFC3339）：写进缓存让
+        // 「最新 run」判定按时间比较，不再依赖数组追加次序。
         sinks.setMaintenanceProgress(null);
+        const payload = (data.payload ?? {}) as { created_at?: unknown };
         sinks.setRuns(
-          mergeRun(sinks.getRuns(), { id: data.run_id, status: "running" }),
+          mergeRun(sinks.getRuns(), {
+            id: data.run_id,
+            status: "running",
+            created_at:
+              typeof payload.created_at === "string"
+                ? payload.created_at
+                : undefined,
+          }),
         );
       } else if (data.message_id) {
         const text = (data.payload as { text?: string } | undefined)?.text;
@@ -394,8 +500,13 @@ export function foldStreamEvent(
     }
     case "error": {
       if (!data.run_id) break;
-      // run_error 载荷字段是 code/message（服务端 finishFailed 的形状）。
-      const payload = (data.payload ?? {}) as { code?: string; message?: string };
+      // run_error 载荷字段是 code/message（服务端 finishFailed 的形状）；
+      // 可操作失败（auth/quota）另带 action 按钮描述。
+      const payload = (data.payload ?? {}) as {
+        code?: string;
+        message?: string;
+        action?: BotRun["error_action"];
+      };
       sinks.setMaintenanceProgress(null);
       sinks.setRuns(
         mergeRun(sinks.getRuns(), {
@@ -403,6 +514,7 @@ export function foldStreamEvent(
           status: "failed",
           error_code: payload.code,
           error_message: payload.message,
+          error_action: payload.action,
         }),
       );
       break;
@@ -419,6 +531,7 @@ export function foldStreamEvent(
           finished_at: payload.finished_at ?? new Date().toISOString(),
           error_code: payload.error_code,
           error_message: payload.error_message,
+          error_action: payload.error_action,
         }),
       );
       // done 只代表本 run 结束；后台结果仍可能继续到达，调用状态不动。
@@ -448,6 +561,10 @@ export function useBotChat(botId: string) {
   const [sendError, setSendError] = useState<unknown>(null);
   const [stopping, setStopping] = useState(false);
   const [stopError, setStopError] = useState<unknown>(null);
+  // 本次 run 已受理软停止：服务端首次受理只追加「停止」消息，
+  // stop_requested 要等宽限兜底才落库；本地记住受理态让按钮立刻切到
+  // 「强制停止」。按 run id 匹配——run 结束或换 run 后旧 id 自然失效。
+  const [softStopRunId, setSoftStopRunId] = useState<string | null>(null);
   const [busyCallId, setBusyCallId] = useState<string | null>(null);
   const [callActionError, setCallActionError] = useState<unknown>(null);
   const [loadingOlder, setLoadingOlder] = useState(false);
@@ -707,15 +824,21 @@ export function useBotChat(botId: string) {
     () => pickActiveRun(runsQuery.data ?? []),
     [runsQuery.data],
   );
+  // 内容区顶部的可操作错误条：最近一次失败 run 的 auth/quota 失败。
+  const runError = useMemo(() => pickRunError(runsQuery.data), [runsQuery.data]);
 
   const stopRun = useCallback(async () => {
+    // stopping 期间仍挡重复提交；已受理后再点（stopRequested=true）刻意
+    // 放行——服务端对已有停止消息的同 client_message_id 请求会立即硬取消。
     if (!activeRun || stopping || !userId) return;
     setStopError(null);
     setStopping(true);
     try {
       // 「停止」等价于向机器人发一条「停止」消息：服务端不再硬取消当前回复，
-      // 是否结束由机器人决定。这里不回填 stop_requested，改为重读 run 收敛。
+      // 是否结束由机器人决定。stop_requested 要等宽限兜底才落库，受理成功后
+      // 本地先记下软停止态，让按钮立即进入「强制停止」语义。
       await botApi.stopRun(botId, activeRun.id);
+      setSoftStopRunId(activeRun.id);
       await queryClient.invalidateQueries({ queryKey: botKeys.runs(userId, botId) });
     } catch (err) {
       setStopError(err);
@@ -812,7 +935,10 @@ export function useBotChat(botId: string) {
     calls: callsQuery.data ?? [],
     activeRun,
     runActive: Boolean(activeRun),
-    stopRequested: Boolean(activeRun?.stop_requested),
+    stopRequested:
+      Boolean(activeRun?.stop_requested) || softStopRunId === activeRun?.id,
+    /** 可操作错误条（auth/quota 失败）；其它失败为 null，视图不渲染。 */
+    runError,
     backgroundCalls,
     streamStatus,
     streamError,

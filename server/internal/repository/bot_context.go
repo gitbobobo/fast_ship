@@ -47,6 +47,8 @@ func (r *BotContextRepository) PublishTx(
 	next := prevGeneration + 1
 	if prevGeneration == 0 {
 		// 首次发布：建行（generation 1）。唯一主键兜底并发；已存在则 CAS 落空。
+		// LifecycleRenderVersion 同步写 1（R6）：发布后仍留在投影里的旧
+		// toolset_updated 按 user 角色发送。
 		row := &model.BotContextState{
 			BotID:                  botID,
 			Generation:             next,
@@ -54,6 +56,7 @@ func (r *BotContextRepository) PublishTx(
 			SummaryText:            summaryText,
 			IdentifierManifestJSON: identifierManifestJSON,
 			FoldedResultsJSON:      foldedResultsJSON,
+			LifecycleRenderVersion: 1,
 			UpdatedAt:              now,
 		}
 		if err := tx.Create(row).Error; err != nil {
@@ -69,6 +72,7 @@ func (r *BotContextRepository) PublishTx(
 			"summary_text":             summaryText,
 			"identifier_manifest_json": identifierManifestJSON,
 			"folded_results_json":      foldedResultsJSON,
+			"lifecycle_render_version": 1,
 			"updated_at":               now,
 		})
 	if res.Error != nil {
