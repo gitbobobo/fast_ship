@@ -33,6 +33,10 @@ func TestIsDiffTooLarge(t *testing.T) {
 		{"406 无 errors", statusErr(http.StatusNotAcceptable, `{"message":"Unacceptable"}`), false},
 		{"406 code 不是 too_large", statusErr(http.StatusNotAcceptable, `{"errors":[{"resource":"PullRequest","field":"diff","code":"unreadable"}]}`), false},
 		{"406 body 非 JSON", statusErr(http.StatusNotAcceptable, "<html>gateway error</html>"), false},
+		// field 缺失仍认（结构化 code 已足够）；field 不是 diff（例如 files 端点的
+		// 同名 too_large）不归本函数管，避免复用到其它端点时误降级。
+		{"406 无 field + too_large", statusErr(http.StatusNotAcceptable, `{"errors":[{"code":"too_large"}]}`), true},
+		{"406 field=files + too_large", statusErr(http.StatusNotAcceptable, `{"errors":[{"field":"files","code":"too_large"}]}`), false},
 		// 状态码不在白名单：即使 body 说 too_large 也不认（500 是暂时态，重试有意义）。
 		{"500+too_large", statusErr(http.StatusInternalServerError, tooLargeBody), false},
 		{"404+too_large", statusErr(http.StatusNotFound, tooLargeBody), false},
