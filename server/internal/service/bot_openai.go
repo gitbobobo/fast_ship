@@ -183,13 +183,18 @@ func botStreamChat(ctx context.Context, client *openai.Client, req botStreamRequ
 			}
 		}
 	}
+	sErr := stream.Err()
 	// 无论成败都先拼装已收到的工具调用片段：调用方按「本次尝试是否已有
 	// 输出」决定能否重试，半截的工具调用必须可见。
 	for _, idx := range order {
 		part := parts[idx]
-		// 缺 name 无法合成语义：丢弃并计数（INT-139 R12）。
+		// 缺 name 无法合成语义：丢弃。干净结束时计入缺名异常——断流残片
+		// 的缺名是截断的后果而非上游协议畸形，不计入避免观测噪音
+		// （INT-139 R12 / 云端复审）。
 		if part.Name == "" {
-			reply.DroppedToolCalls++
+			if sErr == nil {
+				reply.DroppedToolCalls++
+			}
 			continue
 		}
 		// 缺 id 的合成平台 id：部分兼容服务流式不返回 id，静默丢弃会让
@@ -201,7 +206,7 @@ func botStreamChat(ctx context.Context, client *openai.Client, req botStreamRequ
 		}
 		reply.ToolCalls = append(reply.ToolCalls, *part)
 	}
-	if err := stream.Err(); err != nil {
+	if err := sErr; err != nil {
 		// 只有看门狗取消（父 ctx 仍存活且错误为取消）才改写为超时错误：
 		// 用户停止 / 关停导致的取消保持原样，HTTP 与网络错误也原样透出。
 		if watchdog != nil && ctx.Err() == nil && errors.Is(err, context.Canceled) {

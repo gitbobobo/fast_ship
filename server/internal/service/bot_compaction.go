@@ -1758,15 +1758,23 @@ func (s *BotService) markActivationDeferred(bot *model.Bot) bool {
 		return false
 	}
 	if res.RowsAffected == 0 {
-		if fresh, err := s.bots.Get(bot.ID); err == nil {
-			bot.ToolsetVersion = fresh.ToolsetVersion
-			bot.PlatformPromptVersion = fresh.PlatformPromptVersion
-			bot.SystemPromptText = fresh.SystemPromptText
-			bot.PromptRevision = fresh.PromptRevision
-			bot.PersonaPrompt = fresh.PersonaPrompt
-			bot.UntrustedNonce = fresh.UntrustedNonce
-			bot.ActivationDeferredAt = fresh.ActivationDeferredAt
+		fresh, err := s.bots.Get(bot.ID)
+		if err != nil {
+			// 回读失败时不得按陈旧副本判定：副本若残留旧 deferred_at 而行
+			// 已激活，会把本 run 误判为推迟并写出永不按预期收口的通知——
+			// 保守按非推迟返回（反方向只会让通知晚一轮，安全）（INT-139
+			// 云端复审）。
+			s.logger.Warn("回读激活推迟状态失败，按非推迟处理",
+				zap.String("bot_id", bot.ID), zap.Error(err))
+			return false
 		}
+		bot.ToolsetVersion = fresh.ToolsetVersion
+		bot.PlatformPromptVersion = fresh.PlatformPromptVersion
+		bot.SystemPromptText = fresh.SystemPromptText
+		bot.PromptRevision = fresh.PromptRevision
+		bot.PersonaPrompt = fresh.PersonaPrompt
+		bot.UntrustedNonce = fresh.UntrustedNonce
+		bot.ActivationDeferredAt = fresh.ActivationDeferredAt
 		return bot.ActivationDeferredAt != nil
 	}
 	bot.ActivationDeferredAt = &now
