@@ -326,7 +326,10 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 
 	// 1. 代码 commit status（状态变化才写）。
 	codeState, codeDesc := summarizeCodeRuns(codeRuns)
-	if codeState != ledger.CodeStatus {
+	// codeStatusChanged 是「本轮运行集结论变了」的代理信号：diff 读不到的重试
+	// 分支用它决定要不要重写顶层评论（见 step 3）。
+	codeStatusChanged := codeState != ledger.CodeStatus
+	if codeStatusChanged {
 		if err := client.CreateCommitStatus(ctx, ledger.InstallationID, ledger.RepoFullName,
 			ledger.HeadSHA, codeState, reviewCodeStatusContext, statusDesc(codeDesc), targetURL); err != nil {
 			return errs.New(errs.ErrGitHubAPI.Code, "写代码审查状态失败: "+err.Error())
@@ -503,17 +506,29 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 		return nil
 	}
 	// diff 在 step 3 前读一次：顶层评论的「未行内标注」注记与 step 4 的行内
-	// review 共用同一份解析结果，不再两处各读一遍。
-	inlineLines, err := s.fetchInlineLines(ctx, client, ledger, codeRuns)
-	if err != nil {
-		return err
+	// review 共用同一份解析结果，不再两处各读一遍。读失败不让整段同步在这里
+	// 中断——commit status 已写完，顶层评论紧接着按「本轮没读 diff」口径出，
+	// 只有行内 review 依赖 diff；错误交给 step 4 在行内阶段上报（本轮不标记
+	// 已发布，下一轮同步重试）。
+	inlineLines, inlineErr := s.fetchInlineLines(ctx, client, ledger, codeRuns)
+	if inlineErr != nil {
+		// 这是「本 tick 重试」的暂时态：真正的失败由同步收尾的 Warn 与账本
+		// sync_error 记录，不必每 10 秒多一条 Warn。
+		s.logger.Info("读取 PR diff 失败，本轮跳过行内 review（状态与顶层评论照常写）",
+			zap.String("repo", ledger.RepoFullName), zap.Int("pr", ledger.PRNumber), zap.Error(inlineErr))
 	}
 	codeBody := buildCodeComment(reviewCommentMeta{
 		RepoFullName: ledger.RepoFullName,
 		HeadSHA:      ledger.HeadSHA,
 		RoundNumber:  ledger.RoundNumber,
 	}, codeRuns, inlineLines, visualPending, visualCarry)
-	if err := s.upsertPRComment(ctx, client, ledger, reviewCodeCommentMarker, codeBody, "code_comment_id", ledger.CodeCommentID); err != nil {
+	// diff 读不到时，同一个 head 的运行结论不变，重试每 tick 都 PATCH 一次相同
+	// 正文既耗 API 配额又留编辑记录：已有顶层评论且运行集结论未变时只重试行内
+	// 阶段（首次失败仍写出评论；等 diff 读得到时再补「未行内标注」注记）。
+	if inlineErr != nil && ledger.CodeCommentID != 0 && !codeStatusChanged {
+		s.logger.Info("diff 仍不可读，跳过顶层评论重复写入",
+			zap.String("repo", ledger.RepoFullName), zap.Int("pr", ledger.PRNumber))
+	} else if err := s.upsertPRComment(ctx, client, ledger, reviewCodeCommentMarker, codeBody, "code_comment_id", ledger.CodeCommentID); err != nil {
 		return err
 	}
 
@@ -523,7 +538,7 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 	} else if !ok {
 		return nil
 	}
-	if err := s.postInlineReviews(ctx, client, ledger, codeRuns, inlineLines, epoch, now); err != nil {
+	if err := s.postInlineReviews(ctx, client, ledger, codeRuns, inlineLines, inlineErr, epoch, now); err != nil {
 		return err
 	}
 
@@ -1051,8 +1066,19 @@ func buildScreensUnavailableComment(priorRuns []model.ReviewRun) string {
 // P0–P2 且行号落在 diff 右侧有效行内 → SubmitReview；posted_at=now。
 // inlineLines 由调用方传入（fetchInlineLines 的结果），本函数不再自己读 diff
 // ——它与顶层评论的「未行内标注」注记同源，保证两处判定一致。
+// inlineErr 是同一份 diff 读取的错误：非 nil 时本阶段原样上报并返回（无论
+// 有没有待发布运行），账本保持 sync_pending、下一轮同步重试——把失败压成
+// 「没有有效行号」会把行内意见静默丢掉，也会让按「没读 diff」口径写的顶层
+// 评论永远缺「未行内标注」注记。
 func (s *ReviewService) postInlineReviews(ctx context.Context, client githubapi.GitHubClient,
-	ledger *model.ReviewPullRequest, codeRuns []model.ReviewRun, inlineLines map[string]map[int]bool, epoch int, now time.Time) error {
+	ledger *model.ReviewPullRequest, codeRuns []model.ReviewRun, inlineLines map[string]map[int]bool,
+	inlineErr error, epoch int, now time.Time) error {
+	// diff 读不到时无论有没有待发布运行都上报：本轮顶层评论可能已按「没读
+	// diff」口径重写（缺「未行内标注」注记），必须保持 pending 让下一轮在
+	// diff 恢复后重写，否则注记永久缺失；行内意见本身也还在运行上没发。
+	if inlineErr != nil {
+		return inlineErr
+	}
 	var pending []model.ReviewRun
 	for _, r := range codeRuns {
 		if r.Status == model.ReviewRunCompleted && r.PostedAt == nil {
