@@ -6,7 +6,8 @@ export type NotificationKind =
   | "agent"
   | "review_dispatch_failed"
   | "review_run_timeout"
-  | "review_cleanup_failed";
+  | "review_cleanup_failed"
+  | "review_redelivery_failed";
 
 export interface Notification {
   id: string;
@@ -50,5 +51,7 @@ export function notificationKindLabel(kind: NotificationKind): string {
       return "审查超时";
     case "review_cleanup_failed":
       return "工作区回收失败";
+    case "review_redelivery_failed":
+      return "投递重投失败";
   }
 }

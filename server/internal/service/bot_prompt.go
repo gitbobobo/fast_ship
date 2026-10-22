@@ -28,11 +28,13 @@ const (
 	// 激活跨过该水位后，下一个 run 边界强制压缩一次，把旧风格的长回复收进
 	// 摘要，避免模型继续模仿自己的历史回复（INT-133）。
 	botStylePromptVersion int64 = 9
-	// botToolsetVersion 是当前发布的工具集版本（v8 = INT-136：fs_schedule 描述
+	// botToolsetVersion 是当前发布的工具集版本（v9 = INT-136：fs_schedule 描述
 	// 说明确认语义——create、改动 instruction/needs_report/model 的 update 与
-	// 非 dry_run 的 run 需要用户确认、异步受理；v7 = INT-123 任务小状态起冻结）；
-	// 存量对话线冻结在旧版本，只在压缩/重启边界升级。
-	botToolsetVersion int64 = 8
+	// 非 dry_run 的 run 需要用户确认、异步受理。v8 = INT-138：时区默认改为
+	// 用户时区并补任务指令写法指导；v7 = INT-123：新增 state_get/state_set
+	// 读写任务跨运行保留的小状态）；存量对话线冻结在旧版本，只在压缩/重启
+	// 边界升级。
+	botToolsetVersion int64 = 9
 )
 
 // botIdentityRules 是系统自动注入的默认人设（身份与说话方式）：拼在提示词
@@ -86,7 +88,8 @@ func buildBotSystemPrompt(persona, nonce string) string {
 // botConfigSnapshot 是 run 的配置快照（不含明文 key）。catalog_id 与
 // base_url 成对记录：机器人换 provider 后，旧 run 的窗口仍按派发时的
 // 目录归属解析（INT-133）；INT-133 之前的快照没有该字段，读取方回退
-// bot 当前值。
+// bot 当前值。provider_id 同理成对冻结（INT-137）：熔断按 run 派发时的
+// provider 打开，不随用户中途换 provider 漂移；旧快照缺失时同样回退。
 type botConfigSnapshot struct {
 	PromptRevision        int64  `json:"prompt_revision"`
 	PlatformPromptVersion int64  `json:"platform_prompt_version"`
@@ -94,6 +97,7 @@ type botConfigSnapshot struct {
 	BaseURL               string `json:"base_url"`
 	Model                 string `json:"model"`
 	CatalogID             string `json:"catalog_id"`
+	ProviderID            string `json:"provider_id"`
 }
 
 func botSnapshotOf(b *model.Bot) botConfigSnapshot {
@@ -104,5 +108,6 @@ func botSnapshotOf(b *model.Bot) botConfigSnapshot {
 		BaseURL:               b.BaseURL,
 		Model:                 b.Model,
 		CatalogID:             b.CatalogID,
+		ProviderID:            b.ProviderID,
 	}
 }

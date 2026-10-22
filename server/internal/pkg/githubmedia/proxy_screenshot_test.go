@@ -1,0 +1,957 @@
+package githubmedia
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
+	"syscall"
+	"testing"
+	"time"
+)
+
+// 截图下载面（NewReviewMediaService）的行为：任意公网 https 图片、只收位图、
+// 拨号时校验解析 IP 拒绝内网/保留地址；与 GitHub 白名单面互不影响。
+
+func TestIsBlockedIP(t *testing.T) {
+	cases := []struct {
+		ip      string
+		blocked bool
+	}{
+		{"127.0.0.1", true},          // 回环
+		{"10.0.0.5", true},           // RFC1918
+		{"172.16.0.1", true},         // RFC1918
+		{"192.168.1.1", true},        // RFC1918
+		{"169.254.1.1", true},        // 链路本地
+		{"100.64.1.1", true},         // CGNAT
+		{"192.0.0.9", true},          // 192.0.0.0/24 IETF 协议分配（.9 anycast）
+		{"192.0.0.10", true},         // 192.0.0.0/24 IETF 协议分配（.10 anycast）
+		{"192.88.99.1", true},        // 已废弃 6to4 relay anycast
+		{"198.18.0.1", true},         // 基准测试保留段
+		{"240.0.0.1", true},          // 240.0.0.0/4 保留段
+		{"0.0.0.0", true},            // 未指定（0.0.0.0/8 全段同拒）
+		{"255.255.255.255", true},    // 广播
+		{"::1", true},                // IPv6 回环
+		{"fd00::1", true},            // IPv6 ULA
+		{"fe80::1", true},            // IPv6 链路本地
+		{"fec0::1", true},            // 已废弃 site-local（fec0::/10 下界）
+		{"fec0:0:0:ffff::1", true},   // 已废弃 site-local（fec0::/10 上界）
+		{"64:ff9b::a9fe:a9fe", true}, // NAT64 /96 内嵌 169.254.169.254
+		// 64:ff9a::/96（RFC 8215 local-use）整体拒绝：布局与 well-known /96
+		// 相同，内嵌内网地址要拒，内嵌公网地址（下一行 8.8.8.8）也拒——不
+		// 享有 well-known /96 的解码放行。
+		{"64:ff9a::a9fe:a9fe", true},
+		{"64:ff9a::808:808", true},
+		// RFC 6052 /48 布局：前缀在 0-5、IPv4 高 16 位在 6-7、u 八位组在 8、
+		// 低 16 位在 9-10——64:ff9b:1:a00:0:100:: 内嵌的正是 10.0.0.1。
+		// local-use /48 整体拒绝，内嵌公网地址的同前缀地址（下一行）也拒：
+		// 布局可变、按固定偏移解码不可靠，宁可错拒不可放过。
+		{"64:ff9b:1:a00:0:100::", true},
+		{"64:ff9b:1:808:808:0::", true},
+		// 旧用例曾把 64:ff9b:1::808:808 标成「/48 内嵌 8.8.8.8，放行」：那是
+		// 拿 /96 的末 4 字节布局误读 /48。/48 不再解码、整体拒绝。
+		{"64:ff9b:1::808:808", true},
+		// /32 内非 /96 的非 local-use 前缀同样整体拒绝：64:ff9b:a00:0:100::
+		// 按 /48 式布局内嵌 10.0.0.1，旧实现既解不出内嵌 IPv4 也不整体拒，
+		// 当公网放行；统一规则下 bytes 4-11 非全零 → 整体拒绝。
+		{"64:ff9b:a00:0:100::", true},
+		{"2002:c0a8:0101::", true}, // 6to4 内嵌 192.168.1.1
+		// Teredo（RFC 4380 真实布局）：0-3 前缀、4-7 服务器 IPv4、8-9 flags、
+		// 10-11 混淆端口、12-15 客户端 IPv4 按位取反存储。
+		{"2001:0:0102:0304:4000:abcd:f5ff:fffe", true},  // Teredo 内嵌 10.0.0.1（f5ff:fffe 取反）
+		{"2001:0:1111:2222:4000:abcd:3f57:fefe", true},  // Teredo 内嵌 192.168.1.1（3f57:fefe 取反）
+		{"::a9fe:a9fe", true},                           // IPv4-compatible 内嵌 169.254.169.254
+		{"64:ff9b::808:808", false},                     // NAT64 /96 内嵌 8.8.8.8，公网放行
+		{"2002:0808:0808::", false},                     // 6to4 内嵌 8.8.8.8，公网放行
+		{"2001:0:0102:0304:4000:abcd:f7f7:f7f7", false}, // Teredo 内嵌 8.8.8.8，放行证明不是整个 2001::/32 一律拒
+		{"::808:808", false},                            // IPv4-compatible 内嵌 8.8.8.8，公网放行
+		{"1.1.1.1", false},                              // 公网
+		{"8.8.8.8", false},                              // 公网
+		{"2606:4700:4700::1111", false},                 // 公网 IPv6
+		// 文档示例网段（TEST-NET）是公网可路由空间里的教学地址，有意放行：
+		// 新加的 /24 判定只收 192.0.0.0/24 与 192.88.99.0/24，不误收 TEST-NET。
+		{"192.0.2.1", false},    // TEST-NET-1 文档示例
+		{"198.51.100.1", false}, // TEST-NET-2 文档示例
+		{"203.0.113.1", false},  // TEST-NET-3 文档示例
+		// fe80::/10（fe80–febf）之外、同样以 0xfe 开头的未指派地址（fe01）：
+		// 新加的 site-local 判定（ipv6[0]==0xfe && ipv6[1]&0xc0==0xc0）只该
+		// 收第二字节高两位为 11 的 fec0::/10，不把整个 fe::/8 误收。
+		{"fe01::1", false},
+	}
+	for _, c := range cases {
+		if got := isBlockedIP(parseTestIP(t, c.ip)); got != c.blocked {
+			t.Fatalf("isBlockedIP(%s) = %v, want %v", c.ip, got, c.blocked)
+		}
+	}
+	if !isBlockedIP(nil) {
+		t.Fatal("nil IP 应视为阻塞")
+	}
+}
+
+func parseTestIP(t *testing.T, s string) net.IP {
+	t.Helper()
+	ip := net.ParseIP(s)
+	if ip == nil {
+		t.Fatalf("parse ip %q", s)
+	}
+	return ip
+}
+
+// E1 回归：本地缓存操作失败在产生点打标。cacheRoot 指向一个普通文件（不是
+// 目录）时 MkdirAll 以 ENOTDIR 失败——比 chmod 稳（root 下 chmod 000 不生效），
+// 任何用户都能复现。FetchAndCache 必须以 ErrLocalCache sentinel 到达，且原始
+// 错误链保留（errors.Is(err, syscall.ENOTDIR) 仍命中）。
+func TestFetchAndCacheLocalCacheFailureTagged(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(root, []byte("x"), 0o600); err != nil {
+		t.Fatalf("seed regular file: %v", err)
+	}
+	svc := NewReviewMediaService(root, "")
+	_, err := svc.FetchAndCache(context.Background(), "https://uiv.example.com/f/x.png")
+	if !errors.Is(err, ErrLocalCache) {
+		t.Fatalf("err = %v, want ErrLocalCache", err)
+	}
+	if !errors.Is(err, syscall.ENOTDIR) {
+		t.Fatalf("err = %v, want 原始 ENOTDIR 仍在错误链上", err)
+	}
+	if !strings.Contains(err.Error(), ErrLocalCache.Error()) {
+		t.Fatalf("err text = %q, want 含 sentinel 文案", err.Error())
+	}
+}
+
+// localCacheError 包装的双向 errors.Is：sentinel 与原始错误都要找得到（service
+// 层按 sentinel 分类、原有 fs.ErrNotExist 类判定不失效的依据）。
+func TestLocalCacheErrorWrapping(t *testing.T) {
+	base := errors.New("disk on fire")
+	err := markLocalCacheErr(base)
+	if !errors.Is(err, ErrLocalCache) {
+		t.Fatalf("errors.Is(err, ErrLocalCache) = false, want true")
+	}
+	if !errors.Is(err, base) {
+		t.Fatalf("errors.Is(err, base) = false, want true（原始错误链保留）")
+	}
+	if markLocalCacheErr(nil) != nil {
+		t.Fatal("markLocalCacheErr(nil) 应原样返回 nil")
+	}
+}
+
+// shortWriter 每次调用少写一个字节的桩 writer，模拟磁盘满/配额耗尽时部分
+// 文件系统的先兆短写（返回 n < len(p) 且无错误）。
+type shortWriter struct{}
+
+func (shortWriter) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	return len(p) - 1, nil
+}
+
+// 短写也要打 ErrLocalCache：io.Copy 对写方短写会自行折成 io.ErrShortWrite
+// 返回，不经过 Write 的错误包装分支——不打标会落到 service 层兜底「无法连
+// 接图片服务器」，把磁盘故障说成网络故障。sentinel 与原始 io.ErrShortWrite
+// 都要在错误链上。
+func TestCacheFileWriterShortWriteTagged(t *testing.T) {
+	n, err := cacheFileWriter{w: shortWriter{}}.Write([]byte("png-data"))
+	if n != len("png-data")-1 {
+		t.Fatalf("n = %d, want len(p)-1（桩返回的字节数原样透出）", n)
+	}
+	if !errors.Is(err, ErrLocalCache) {
+		t.Fatalf("err = %v, want ErrLocalCache", err)
+	}
+	if !errors.Is(err, io.ErrShortWrite) {
+		t.Fatalf("err = %v, want io.ErrShortWrite 仍在错误链上", err)
+	}
+}
+
+// guardAddress: true 的服务对回环上游（httptest 即 127.0.0.1）拨号即拒。
+func TestScreenshotServiceBlocksLoopbackUpstream(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write([]byte("png-data"))
+	}))
+	defer upstream.Close()
+
+	svc := newService(t.TempDir(), serviceConfig{
+		cacheSubdir:  "review-screenshot-cache",
+		allowURL:     allowPublicImageHost,
+		guardAddress: true,
+	})
+	_, err := svc.FetchAndCache(context.Background(), upstream.URL+"/shot.png")
+	if !errors.Is(err, ErrBlockedUpstreamAddress) {
+		t.Fatalf("err = %v, want ErrBlockedUpstreamAddress", err)
+	}
+}
+
+// 非 GitHub 域名的公网图片（测试里是任意 httptest 主机）应能下载落盘；
+// 内容类型与大小上限语义按 imagesOnly 收紧。
+func TestScreenshotServiceDownloadsPublicImages(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/shot.png":
+			w.Header().Set("Content-Type", "image/png")
+			_, _ = w.Write([]byte("png-data"))
+		case "/chunked.png":
+			// 先写头再 flush：强制分块传输，响应无 Content-Length（旧的
+			// contentLength<=0 判定会把它误判成 413）。
+			w.Header().Set("Content-Type", "image/png")
+			w.WriteHeader(http.StatusOK)
+			flusher := w.(http.Flusher)
+			flusher.Flush()
+			_, _ = w.Write([]byte("chunked-png-data"))
+			flusher.Flush()
+		case "/blob.png":
+			w.Header().Set("Content-Type", "application/octet-stream")
+			_, _ = w.Write([]byte("octet-png-data"))
+		case "/clip.mp4":
+			w.Header().Set("Content-Type", "application/octet-stream")
+			_, _ = w.Write([]byte("not-a-video"))
+		default:
+			w.Header().Set("Content-Type", "text/plain")
+			_, _ = w.Write([]byte("hello"))
+		}
+	}))
+	defer upstream.Close()
+
+	parsed, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("parse upstream url: %v", err)
+	}
+	svc := newService(t.TempDir(), serviceConfig{
+		cacheSubdir: "review-screenshot-cache",
+		allowURL:    func(u *url.URL) bool { return u.Host == parsed.Host },
+		imagesOnly:  true,
+		client:      upstream.Client(),
+	})
+
+	// image/png 直接成功落盘。
+	cached, err := svc.FetchAndCache(context.Background(), upstream.URL+"/shot.png")
+	if err != nil {
+		t.Fatalf("png fetch: %v", err)
+	}
+	if cached.Metadata.ContentType != "image/png" || cached.Metadata.Size != int64(len("png-data")) {
+		t.Fatalf("cached = %+v", cached.Metadata)
+	}
+
+	// 无 Content-Length 的分块图片也应成功（ContentLength 误判修复）。
+	chunked, err := svc.FetchAndCache(context.Background(), upstream.URL+"/chunked.png")
+	if err != nil {
+		t.Fatalf("chunked png fetch: %v", err)
+	}
+	if chunked.Metadata.Size != int64(len("chunked-png-data")) {
+		t.Fatalf("chunked size = %d, want %d", chunked.Metadata.Size, len("chunked-png-data"))
+	}
+
+	// octet-stream + 图片扩展名 → 收；+ 视频扩展名 → 拒（imagesOnly）。
+	if _, err := svc.FetchAndCache(context.Background(), upstream.URL+"/blob.png"); err != nil {
+		t.Fatalf("octet-stream png: %v", err)
+	}
+	if _, err := svc.FetchAndCache(context.Background(), upstream.URL+"/clip.mp4"); !errors.Is(err, ErrUnsupportedUpstreamMedia) {
+		t.Fatalf("mp4 err = %v, want ErrUnsupportedUpstreamMedia", err)
+	}
+
+	// text/plain 被拒。
+	if _, err := svc.FetchAndCache(context.Background(), upstream.URL+"/notes.txt"); !errors.Is(err, ErrUnsupportedUpstreamMedia) {
+		t.Fatalf("text err = %v, want ErrUnsupportedUpstreamMedia", err)
+	}
+}
+
+// 令牌拉取的条目按授权域隔离：scope 不匹配（匿名或其他安装）一律按未命中
+// 处理——知道私有附件 URL 不能经共享缓存取到内容；同 scope 的带令牌请求
+// 正常命中。（令牌是否外发由 GitHub 媒体主机白名单另测，这里只测缓存键的
+// 授权域维度——上游恒定 200，靠请求计数判断命中/穿透。）
+func TestFetchAndCacheBearerScopeIsolation(t *testing.T) {
+	var hits int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write([]byte("private-png"))
+	}))
+	defer upstream.Close()
+
+	parsed, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("parse upstream url: %v", err)
+	}
+	svc := newService(t.TempDir(), serviceConfig{
+		cacheSubdir: "review-screenshot-cache",
+		allowURL:    func(u *url.URL) bool { return u.Host == parsed.Host },
+		imagesOnly:  true,
+		client:      upstream.Client(),
+	})
+	u := upstream.URL + "/private.png"
+	ctx := context.Background()
+
+	// install:1 令牌拉到并落缓存（scope 标记）。
+	if _, err := svc.FetchAndCacheWithBearer(ctx, u, "tok-A", "install:1"); err != nil {
+		t.Fatalf("bearer fetch: %v", err)
+	}
+	hitsAfterFetch := hits
+	// 同 scope 命中缓存，不再发请求。
+	if _, err := svc.FetchAndCacheWithBearer(ctx, u, "tok-A", "install:1"); err != nil {
+		t.Fatalf("same-scope refetch: %v", err)
+	}
+	if hits != hitsAfterFetch {
+		t.Fatalf("hits %d → %d, want 同 scope 命中缓存", hitsAfterFetch, hits)
+	}
+	// 匿名请求不得命中 scope 条目：穿透到上游。
+	if _, err := svc.FetchAndCache(ctx, u); err != nil {
+		t.Fatalf("anonymous fetch: %v", err)
+	}
+	if hits != hitsAfterFetch+1 {
+		t.Fatalf("hits = %d, want 匿名请求穿透到上游（scope 条目未命中）", hits)
+	}
+	// 匿名这次 200 会以 scope="" 落缓存——匿名读取现在命中的是自己的条目。
+	if _, err := svc.FetchAndCache(ctx, u); err != nil {
+		t.Fatalf("anonymous refetch: %v", err)
+	}
+	if hits != hitsAfterFetch+1 {
+		t.Fatalf("hits = %d, want 匿名命中自己的条目，不穿透", hits)
+	}
+	// 其他安装不得命中 install:1 的条目：穿透且不覆写。
+	if _, err := svc.FetchAndCacheWithBearer(ctx, u, "tok-B", "install:2"); err != nil {
+		t.Fatalf("other-scope bearer fetch: %v", err)
+	}
+	if hits != hitsAfterFetch+2 {
+		t.Fatalf("hits = %d, want install:2 穿透到上游", hits)
+	}
+	if _, err := svc.FetchAndCacheWithBearer(ctx, u, "tok-A", "install:1"); err != nil {
+		t.Fatalf("scope-A entry must survive install:2's fetch: %v", err)
+	}
+	if hits != hitsAfterFetch+2 {
+		t.Fatalf("hits = %d, want install:1 仍命中自己的条目", hits)
+	}
+}
+
+// 存量缓存清场：scope 进键之前写下的旧条目（meta 无 Scope、键=纯 URL）来源
+// 不可辨——可能装着安装令牌拉的私有附件。服务构造时清一次，之后 GetCached
+// 不再命中旧键，请求穿透到上游重拉。
+func TestLegacyCacheEntriesPurgedOnStart(t *testing.T) {
+	var hits int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write([]byte("png"))
+	}))
+	defer upstream.Close()
+	parsed, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("parse upstream url: %v", err)
+	}
+	cfg := serviceConfig{
+		cacheSubdir: "review-screenshot-cache",
+		allowURL:    func(u *url.URL) bool { return u.Host == parsed.Host },
+		imagesOnly:  true,
+		client:      upstream.Client(),
+	}
+	root := t.TempDir()
+	u := upstream.URL + "/x.png"
+
+	// 老服务写入一条匿名条目（旧格式：meta 无 Scope）。
+	svcOld := newService(root, cfg)
+	if _, err := svcOld.FetchAndCache(context.Background(), u); err != nil {
+		t.Fatalf("legacy fetch: %v", err)
+	}
+	var entry cacheEntry
+	meta, err := os.ReadFile(svcOld.metaPath(u, ""))
+	if err != nil || json.Unmarshal(meta, &entry) != nil || entry.Scope != "" {
+		t.Fatalf("seed legacy entry: %v %+v", err, entry)
+	}
+	if cached, ok, err := svcOld.getCachedNormalized(u, ""); err != nil || !ok || cached == nil {
+		t.Fatalf("legacy entry should be readable before upgrade: ok=%v err=%v", ok, err)
+	}
+	// 模拟升级前部署：摘掉版本标记（老代码不写它）。
+	if err := os.Remove(filepath.Join(svcOld.cacheDir, legacyScopeMarker)); err != nil {
+		t.Fatalf("drop marker: %v", err)
+	}
+
+	// 新服务构造即清场：旧条目全删，同 URL 再请求穿透到上游重拉。
+	svc := newService(root, cfg)
+	if _, ok, err := svc.getCachedNormalized(u, ""); err != nil || ok {
+		t.Fatalf("getCachedNormalized ok=%v err=%v, want 存量条目已清、按 miss", ok, err)
+	}
+	if _, err := svc.FetchAndCache(context.Background(), u); err != nil {
+		t.Fatalf("refetch: %v", err)
+	}
+	if hits != 2 {
+		t.Fatalf("hits = %d, want 旧条目不可用、真重拉", hits)
+	}
+	// 重拉后的新条目带 Scope 字段（匿名=""也显式记录由键区分），正常命中。
+	if cached, ok, err := svc.getCachedNormalized(u, ""); err != nil || !ok || cached == nil {
+		t.Fatalf("new entry should hit: ok=%v err=%v", ok, err)
+	}
+	// 再构造一次不清场：新条目仍在。
+	svcAgain := newService(root, cfg)
+	if _, ok, err := svcAgain.getCachedNormalized(u, ""); err != nil || !ok {
+		t.Fatalf("second construction must not wipe v2 entries: ok=%v err=%v", ok, err)
+	}
+}
+
+// F27 回归：上游没有 Content-Type 时按位图扩展名回退——位图扩展名收，
+// 非位图扩展名拒（ErrUnsupportedUpstreamMedia）。响应头里真没有 Content-Type
+// 的写法是把头置 nil：Go 服务器只在头不存在时做内容嗅探补头，置 nil 既压掉
+// 嗅探又不会写出到响应。
+func TestScreenshotServiceMissingContentTypeFallsBackToExtension(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header()["Content-Type"] = nil
+		switch r.URL.Path {
+		case "/shot.png":
+			_, _ = w.Write([]byte("png-data"))
+		default:
+			_, _ = w.Write([]byte("hello"))
+		}
+	}))
+	defer upstream.Close()
+
+	parsed, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("parse upstream url: %v", err)
+	}
+	// 先证明上游响应确实没有 Content-Type：置 nil 的技巧失效时 Go 会嗅探补头
+	// （PNG 魔数会被嗅成 image/png），下面的断言就成了假绿。
+	resp, err := upstream.Client().Get(upstream.URL + "/shot.png")
+	if err != nil {
+		t.Fatalf("probe upstream: %v", err)
+	}
+	resp.Body.Close()
+	if got := resp.Header.Get("Content-Type"); got != "" {
+		t.Fatalf("上游 Content-Type = %q, want 空（测试前置不成立）", got)
+	}
+	svc := newService(t.TempDir(), serviceConfig{
+		cacheSubdir: "review-screenshot-cache",
+		allowURL:    func(u *url.URL) bool { return u.Host == parsed.Host },
+		imagesOnly:  true,
+		client:      upstream.Client(),
+	})
+
+	// 无 Content-Type + 位图扩展名 → 收。
+	if _, err := svc.FetchAndCache(context.Background(), upstream.URL+"/shot.png"); err != nil {
+		t.Fatalf("missing content-type + .png: %v", err)
+	}
+	// 无 Content-Type + 非位图扩展名 → 拒。
+	if _, err := svc.FetchAndCache(context.Background(), upstream.URL+"/notes.txt"); !errors.Is(err, ErrUnsupportedUpstreamMedia) {
+		t.Fatalf("missing content-type + .txt err = %v, want ErrUnsupportedUpstreamMedia", err)
+	}
+}
+
+// 重定向复检必须用实例自身的 allowURL（旧实现写死 GitHub 白名单）：只放行
+// A 主机的服务遇到 A→B 的 302 应在重定向处拒绝。
+func TestScreenshotRedirectCheckedAgainstInstanceAllowList(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write([]byte("png-data"))
+	}))
+	defer target.Close()
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/final.png", http.StatusFound)
+	}))
+	defer origin.Close()
+
+	parsedOrigin, err := url.Parse(origin.URL)
+	if err != nil {
+		t.Fatalf("parse origin url: %v", err)
+	}
+	svc := newService(t.TempDir(), serviceConfig{
+		cacheSubdir: "review-screenshot-cache",
+		allowURL:    func(u *url.URL) bool { return u.Host == parsedOrigin.Host },
+	})
+	_, err = svc.FetchAndCache(context.Background(), origin.URL+"/start.png")
+	if !errors.Is(err, ErrInvalidMediaURL) {
+		t.Fatalf("err = %v, want ErrInvalidMediaURL（重定向目标不在实例白名单）", err)
+	}
+}
+
+// 正向：实例白名单同时放行 A、B 时，A→B 的 302 应照常下载。只测拒绝方向的
+// 用例在旧 bug（CheckRedirect 写死 GitHub 白名单）下也会假绿，这条补上放行
+// 方向。
+func TestScreenshotRedirectFollowedWithinInstanceAllowList(t *testing.T) {
+	final := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write([]byte("png-data"))
+	}))
+	defer final.Close()
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, final.URL+"/final.png", http.StatusFound)
+	}))
+	defer origin.Close()
+
+	parsedOrigin, err := url.Parse(origin.URL)
+	if err != nil {
+		t.Fatalf("parse origin url: %v", err)
+	}
+	parsedFinal, err := url.Parse(final.URL)
+	if err != nil {
+		t.Fatalf("parse final url: %v", err)
+	}
+	svc := newService(t.TempDir(), serviceConfig{
+		cacheSubdir: "review-screenshot-cache",
+		allowURL:    func(u *url.URL) bool { return u.Host == parsedOrigin.Host || u.Host == parsedFinal.Host },
+	})
+	cached, err := svc.FetchAndCache(context.Background(), origin.URL+"/start.png")
+	if err != nil {
+		t.Fatalf("redirect download: %v", err)
+	}
+	if cached.Metadata.ContentType != "image/png" {
+		t.Fatalf("content type = %q, want image/png", cached.Metadata.ContentType)
+	}
+	data, err := os.ReadFile(cached.Path)
+	if err != nil {
+		t.Fatalf("read cached: %v", err)
+	}
+	if string(data) != "png-data" {
+		t.Fatalf("cached content = %q, want png-data", data)
+	}
+}
+
+// F21 回归：同 URL 已有下载持锁时，等待必须吃 ctx——30s 探测时限是总时限，
+// 不能被同 URL 前一请求的 45s 客户端超时拖穿（旧实现是 sync.Mutex，会干等
+// 到对方超时为止）。
+func TestFetchAndCacheDownloadWaitRespectsContext(t *testing.T) {
+	svc := newService(t.TempDir(), serviceConfig{
+		cacheSubdir: "review-screenshot-cache",
+		allowURL:    allowPublicImageHost,
+	})
+	normalized, err := svc.normalize("http://example.com/held.png")
+	if err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	// 占住闸门：模拟同 URL 已有下载在跑。
+	lock := svc.acquireDownloadLock(normalized)
+	lock <- struct{}{}
+	defer func() { <-lock }()
+
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
+	defer cancel()
+	if _, err := svc.FetchAndCache(ctx, normalized); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want context.DeadlineExceeded", err)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("等待 %v, 应在 ctx 时限（80ms）放弃而不是等满客户端超时", elapsed)
+	}
+}
+
+func TestScreenshotServiceRequiresHTTPS(t *testing.T) {
+	svc := NewReviewMediaService(t.TempDir(), "")
+	if _, err := svc.FetchAndCache(context.Background(), "http://uiv.example.com/f/x.png"); !errors.Is(err, ErrInvalidMediaURL) {
+		t.Fatalf("err = %v, want ErrInvalidMediaURL", err)
+	}
+	if _, err := svc.normalize("https://uiv.example.com/f/x.png"); err != nil {
+		t.Fatalf("https normalize: %v", err)
+	}
+	if !strings.Contains(svc.cacheDir, "review-screenshot-cache") {
+		t.Fatalf("cacheDir = %q, want review-screenshot-cache 子目录", svc.cacheDir)
+	}
+}
+
+// guardAddress 的客户端必须自己拨目标（不走环境代理）才能校验目标 IP；
+// GitHub 媒体面不 guard，保留 ProxyFromEnvironment。
+func TestGuardedClientProxyPolicy(t *testing.T) {
+	guarded := newGuardedClient(true, allowPublicImageHost, true)
+	gtr, ok := guarded.Transport.(*http.Transport)
+	if !ok || gtr.Proxy != nil {
+		t.Fatal("guard 客户端 transport proxy 应为 nil（拨号校验要求直连目标）")
+	}
+	plain := newGuardedClient(false, isAllowedGitHubMediaURL, false)
+	ptr, ok := plain.Transport.(*http.Transport)
+	if !ok || ptr.Proxy == nil {
+		t.Fatalf("GitHub 媒体面 transport proxy 不应被清空，want ProxyFromEnvironment")
+	}
+}
+
+// Bearer 令牌只准发给 GitHub 媒体域：外部图床的上游请求头里不能出现
+// Authorization（攻击者在 PR 描述放外链即可换走 App 安装令牌）。
+func TestFetchWithBearerNeverSendsTokenToExternalHost(t *testing.T) {
+	var gotAuth string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write([]byte("png-data"))
+	}))
+	defer upstream.Close()
+
+	parsed, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("parse upstream url: %v", err)
+	}
+	svc := newService(t.TempDir(), serviceConfig{
+		cacheSubdir: "review-screenshot-cache",
+		allowURL:    func(u *url.URL) bool { return u.Host == parsed.Host },
+		imagesOnly:  true,
+		client:      upstream.Client(),
+	})
+	if _, err := svc.FetchAndCacheWithBearer(context.Background(), upstream.URL+"/x.png", "secret-token", "install:1"); err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	if gotAuth != "" {
+		t.Fatalf("外部图床收到了 Authorization: %q, want 不发送", gotAuth)
+	}
+}
+
+// recordingRoundTripper 记录上游请求头、回一张位图：验证凭证闸门在部署
+// host 下真的发出了 Authorization，不靠真实网络。
+type recordingRoundTripper struct {
+	auth string
+}
+
+func (r *recordingRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	r.auth = req.Header.Get("Authorization")
+	return &http.Response{
+		StatusCode:    http.StatusOK,
+		Header:        http.Header{"Content-Type": []string{"image/png"}},
+		Body:          io.NopCloser(strings.NewReader("png-data")),
+		ContentLength: int64(len("png-data")),
+		Request:       req,
+	}, nil
+}
+
+// GHE 部署的私有附件：凭证闸门按部署的 GitHub Web host 放行实例自己的附件
+// 路径（否则私有截图匿名 404 后永远拿不到令牌重试）；同一 host 的非附件
+// 路径仍然不发令牌。
+func TestFetchWithBearerSendsTokenToDeploymentAttachments(t *testing.T) {
+	newSvc := func() (*ProxyService, *recordingRoundTripper) {
+		rt := &recordingRoundTripper{}
+		return newService(t.TempDir(), serviceConfig{
+			cacheSubdir:   "review-screenshot-cache",
+			allowURL:      allowPublicImageHost,
+			requireHTTPS:  true,
+			imagesOnly:    true,
+			githubWebHost: "ghe.example.com",
+			client:        &http.Client{Transport: rt},
+		}), rt
+	}
+
+	svc, rt := newSvc()
+	attachment := "https://ghe.example.com/user-attachments/assets/abc-123"
+	if _, err := svc.FetchAndCacheWithBearer(context.Background(), attachment, "secret-token", "install:7"); err != nil {
+		t.Fatalf("fetch GHE attachment: %v", err)
+	}
+	if rt.auth != "Bearer secret-token" {
+		t.Fatalf("Authorization = %q, want 部署实例附件路径带令牌", rt.auth)
+	}
+
+	svc, rt = newSvc()
+	if _, err := svc.FetchAndCacheWithBearer(context.Background(), "https://ghe.example.com/owner/repo", "secret-token", "install:7"); err != nil {
+		t.Fatalf("fetch GHE page: %v", err)
+	}
+	if rt.auth != "" {
+		t.Fatalf("Authorization = %q, want 同 host 非附件路径不发令牌", rt.auth)
+	}
+}
+
+func TestIsGitHubMediaURL(t *testing.T) {
+	yes := []string{
+		"https://github.com/user-attachments/assets/abc",
+		"https://private-user-images.githubusercontent.com/abc",
+		"https://github-production-user-asset-6210df1.s3.amazonaws.com/x",
+	}
+	no := []string{
+		"https://uiv.example.com/f/x.png",
+		"https://evil.example.com/github.com/user-attachments/assets/abc",
+		"github.com/user-attachments/assets/abc", // 无 scheme：解析后 Host 为空
+		// http 明文不算 GitHub 媒体域：这个闸门决定 bearer 令牌重试，令牌只
+		// 发 https 上游（截图下载面也只走 https）。注意 isAllowedGitHubMediaURL
+		// 有意允许 http，两个口径不同——这里回归的是导出闸门的形状准入。
+		"http://github.com/user-attachments/assets/x",
+		"", ":", "not a url",
+	}
+	for _, raw := range yes {
+		if !IsGitHubMediaURL(raw) {
+			t.Fatalf("IsGitHubMediaURL(%q) = false, want true", raw)
+		}
+	}
+	for _, raw := range no {
+		if IsGitHubMediaURL(raw) {
+			t.Fatalf("IsGitHubMediaURL(%q) = true, want false", raw)
+		}
+	}
+}
+
+// IsGitHubAttachmentURL 只认附件形态（github.com 的 user-attachments/assets
+// 与 user-images.githubusercontent.com），不要求文件名扩展名——GitHub 拖入/
+// 粘贴附件的标准直链恰恰没有扩展名。其余 GitHub 域名与路径不算：service 层
+// 用它豁免裸链收集的位图扩展名要求，收得太宽会把普通网页链接误当截图。
+func TestIsGitHubAttachmentURL(t *testing.T) {
+	yes := []string{
+		"https://github.com/user-attachments/assets/abc-123",
+		"https://github.com/user-attachments/assets/abc.png", // 有扩展名同样算
+		"https://user-images.githubusercontent.com/123/456",
+		"https://USER-Images.GitHubUserContent.com/123/456", // host 判定大小写不敏感
+	}
+	no := []string{
+		"https://github.com/owner/repo/pull/1",       // github.com 但不是附件路径
+		"https://github.com/user-attachments/assets", // 缺 id 段
+		// host 是解析出来再判的：附件路径嵌在别人域名路径里不算。
+		"https://evil.example.com/github.com/user-attachments/assets/abc",
+		"", "not a url",
+	}
+	for _, raw := range yes {
+		if !IsGitHubAttachmentURL(raw) {
+			t.Fatalf("IsGitHubAttachmentURL(%q) = false, want true", raw)
+		}
+	}
+	for _, raw := range no {
+		if IsGitHubAttachmentURL(raw) {
+			t.Fatalf("IsGitHubAttachmentURL(%q) = true, want false", raw)
+		}
+	}
+}
+
+// 200 + 空响应体（已知 Content-Length: 0 与分块空 body 两种）都不是可用截图。
+func TestEmptyUpstreamMediaRejected(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		switch r.URL.Path {
+		case "/empty.png":
+			// 不写 body：Go 会补 Content-Length: 0。
+		case "/chunked-empty.png":
+			w.WriteHeader(http.StatusOK)
+			w.(http.Flusher).Flush() // 强制分块：Content-Length 未知（-1）
+		}
+	}))
+	defer upstream.Close()
+
+	parsed, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("parse upstream url: %v", err)
+	}
+	svc := newService(t.TempDir(), serviceConfig{
+		cacheSubdir: "review-screenshot-cache",
+		allowURL:    func(u *url.URL) bool { return u.Host == parsed.Host },
+		imagesOnly:  true,
+		client:      upstream.Client(),
+	})
+	for _, p := range []string{"/empty.png", "/chunked-empty.png"} {
+		if _, err := svc.FetchAndCache(context.Background(), upstream.URL+p); !errors.Is(err, ErrEmptyUpstreamMedia) {
+			t.Fatalf("%s err = %v, want ErrEmptyUpstreamMedia", p, err)
+		}
+	}
+}
+
+// 本地超限（已知长度与流式写超两种路径）都报 ErrMediaTooLarge，文案固定中文。
+func TestMediaTooLargeSentinel(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		switch r.URL.Path {
+		case "/known.png":
+			// Go 自动补 Content-Length，走「已知长度超限」判定。
+			_, _ = w.Write(make([]byte, 64))
+		case "/chunked.png":
+			w.WriteHeader(http.StatusOK)
+			w.(http.Flusher).Flush()
+			_, _ = w.Write(make([]byte, 64)) // 分块：走 io.Copy 后复核判定
+		}
+	}))
+	defer upstream.Close()
+
+	parsed, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("parse upstream url: %v", err)
+	}
+	svc := newService(t.TempDir(), serviceConfig{
+		cacheSubdir:       "review-screenshot-cache",
+		allowURL:          func(u *url.URL) bool { return u.Host == parsed.Host },
+		imagesOnly:        true,
+		maxCacheEntrySize: 8,
+		client:            upstream.Client(),
+	})
+	for _, p := range []string{"/known.png", "/chunked.png"} {
+		_, err := svc.FetchAndCache(context.Background(), upstream.URL+p)
+		if !errors.Is(err, ErrMediaTooLarge) {
+			t.Fatalf("%s err = %v, want ErrMediaTooLarge", p, err)
+		}
+		if err.Error() != "图片超过大小上限" {
+			t.Fatalf("err text = %q, want 图片超过大小上限", err.Error())
+		}
+	}
+}
+
+// 截图面只吃位图：svg 不按扩展名收，image/svg+xml 内容类型也拒。
+func TestScreenshotFaceRejectsSVG(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/svg+xml")
+		_, _ = w.Write([]byte("<svg/>"))
+	}))
+	defer upstream.Close()
+
+	parsed, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("parse upstream url: %v", err)
+	}
+	svc := newService(t.TempDir(), serviceConfig{
+		cacheSubdir: "review-screenshot-cache",
+		allowURL:    func(u *url.URL) bool { return u.Host == parsed.Host },
+		imagesOnly:  true,
+		client:      upstream.Client(),
+	})
+	if _, err := svc.FetchAndCache(context.Background(), upstream.URL+"/icon.svg"); !errors.Is(err, ErrUnsupportedUpstreamMedia) {
+		t.Fatalf("svg err = %v, want ErrUnsupportedUpstreamMedia", err)
+	}
+}
+
+// GitHub 媒体代理面行为不变：仍只放行 GitHub 域名，允许 http/https。
+func TestProxyServiceKeepsGitHubAllowList(t *testing.T) {
+	svc := NewProxyService(t.TempDir())
+	if _, err := svc.normalize("https://github.com/user-attachments/assets/xyz"); err != nil {
+		t.Fatalf("github normalize: %v", err)
+	}
+	if _, err := svc.normalize("https://uiv.example.com/f/x.png"); !errors.Is(err, ErrInvalidMediaURL) {
+		t.Fatalf("err = %v, want ErrInvalidMediaURL（GitHub 白名单不收外部图床）", err)
+	}
+	if svc.requireHTTPS || svc.imagesOnly {
+		t.Fatal("GitHub 媒体面语义应保持不变（http/https、图片视频、无拨号校验）")
+	}
+	tr, ok := svc.client.Transport.(*http.Transport)
+	if !ok || tr.Proxy == nil {
+		t.Fatal("GitHub 媒体面应保留环境代理（不 guard）")
+	}
+}
+
+// GitHubWebHost 从 API base 推导部署 Web 地址：公共入口与异常输入都回落
+// github.com，GHE 取 API base 自己的 authority（小写，端口保留、默认端口
+// 去掉——凭证闸门按完整 authority 判定）。
+func TestGitHubWebHost(t *testing.T) {
+	cases := []struct{ apiBase, want string }{
+		{"", "github.com"},
+		{"   ", "github.com"},
+		{"https://api.github.com", "github.com"},
+		{"https://api.github.com/", "github.com"},
+		{"https://API.GitHub.COM", "github.com"}, // host 判定大小写不敏感
+		{"https://ghe.example.com/api/v3", "ghe.example.com"},
+		{"https://ghe.example.com/api/v3/", "ghe.example.com"},          // 尾斜杠
+		{"https://GHE.Example.COM/api/v3", "ghe.example.com"},           // 返回小写
+		{"https://ghe.example.com:8443/api/v3", "ghe.example.com:8443"}, // 非默认端口保留
+		{"https://ghe.example.com:443/api/v3", "ghe.example.com"},       // https 默认端口去掉
+		{"http://ghe.example.com:80/api/v3", "ghe.example.com"},         // http 默认端口去掉
+		{"://bad", "github.com"},                                        // 解析失败
+		{"not a url", "github.com"},                                     // 无 host
+		{"ghe.example.com/api/v3", "github.com"},                        // 缺 scheme：无 host
+	}
+	for _, c := range cases {
+		if got := GitHubWebHost(c.apiBase); got != c.want {
+			t.Fatalf("GitHubWebHost(%q) = %q, want %q", c.apiBase, got, c.want)
+		}
+	}
+}
+
+// IsGitHubAttachmentURLFor 的部署口径：附件形态 = 公共 GitHub 形态 ∪ 部署
+// 实例形态——GHE 部署下引公共 GitHub 截图同样应被收集，新增的是本实例
+// authority 下的附件直链。
+func TestIsGitHubAttachmentURLFor(t *testing.T) {
+	// 公共 GitHub 附件形态在任何部署（github.com/空/GHE）下都算。
+	for _, raw := range []string{
+		"https://github.com/user-attachments/assets/abc-123",
+		"https://user-images.githubusercontent.com/123/456",
+	} {
+		for _, wh := range []string{"github.com", "", "ghe.example.com"} {
+			if !IsGitHubAttachmentURLFor(raw, wh) {
+				t.Fatalf("IsGitHubAttachmentURLFor(%q, %q) = false, want true", raw, wh)
+			}
+		}
+	}
+
+	// GHE 附件直链只在部署自己的 Web host 下算附件形态（本任务要修的缺口：
+	// 无扩展名裸链被扩展名要求拒掉，HasScreenshots 误判 false）。
+	ghe := "https://ghe.example.com/user-attachments/assets/abc-123"
+	if !IsGitHubAttachmentURLFor(ghe, "ghe.example.com") {
+		t.Fatalf("IsGitHubAttachmentURLFor(%q, ghe.example.com) = false, want true", ghe)
+	}
+	for _, wh := range []string{"github.com", "", "other.example.com"} {
+		if IsGitHubAttachmentURLFor(ghe, wh) {
+			t.Fatalf("IsGitHubAttachmentURLFor(%q, %q) = true, want false", ghe, wh)
+		}
+	}
+
+	no := []struct{ raw, webHost string }{
+		{"https://ghe.example.com/owner/repo/pull/1", "ghe.example.com"},       // 非附件路径
+		{"https://ghe.example.com/user-attachments/assets", "ghe.example.com"}, // 缺 id 段
+		// host 按解析结果判定：前缀嵌在路径里的仿冒不算。
+		{"https://evil.example.com/ghe.example.com/user-attachments/assets/x", "ghe.example.com"},
+		// 带非默认端口的部署实例：同 host 其他端口不是同一实例。
+		{"https://ghe.example.com:4443/user-attachments/assets/x", "ghe.example.com:8443"},
+		// 点段/编码点段：规范化后会离开附件目录，不算附件形态。
+		{"https://ghe.example.com/user-attachments/assets/../../other", "ghe.example.com"},
+		{"https://ghe.example.com/user-attachments/assets/%2e%2e/%2e%2e/other", "ghe.example.com"},
+		{"", "ghe.example.com"},
+		{"not a url", "ghe.example.com"},
+	}
+	for _, c := range no {
+		if IsGitHubAttachmentURLFor(c.raw, c.webHost) {
+			t.Fatalf("IsGitHubAttachmentURLFor(%q, %q) = true, want false", c.raw, c.webHost)
+		}
+	}
+}
+
+// IsGitHubMediaURLFor 是 bearer 令牌重试闸门：公共 GitHub 媒体域照原样放
+// 行；GHE 只放行部署自己 host 上的 /user-attachments/assets/ 附件路径，外
+// 部图床与同 host 其他路径一律不放行。
+func TestIsGitHubMediaURLFor(t *testing.T) {
+	// 本任务要修的缺口：GHE 附件 URL 在部署 webHost 下应判 true——匿名
+	// 下载被 401/403/404 拒后才值得带 App 安装令牌重试。
+	gheAttachment := "https://ghe.example.com/user-attachments/assets/abc-123"
+	if !IsGitHubMediaURLFor(gheAttachment, "ghe.example.com") {
+		t.Fatalf("IsGitHubMediaURLFor(%q, ghe.example.com) = false, want true", gheAttachment)
+	}
+	// webHost 为公共 GitHub/空/外部域名时该 URL 不算媒体域，令牌不发。
+	for _, wh := range []string{"github.com", "", "evil.example.com"} {
+		if IsGitHubMediaURLFor(gheAttachment, wh) {
+			t.Fatalf("IsGitHubMediaURLFor(%q, %q) = true, want false", gheAttachment, wh)
+		}
+	}
+
+	// 公共 GitHub 媒体域只在公共部署（github.com/空 webHost）下放行；GHE
+	// 部署的安装令牌只属于本实例，不发给公共 GitHub。
+	for _, raw := range []string{
+		"https://github.com/user-attachments/assets/abc",
+		"https://private-user-images.githubusercontent.com/abc",
+		"https://github-production-user-asset-6210df1.s3.amazonaws.com/x",
+	} {
+		if !IsGitHubMediaURLFor(raw, "github.com") || !IsGitHubMediaURLFor(raw, "") {
+			t.Fatalf("IsGitHubMediaURLFor(%q, 公共部署) = false, want true", raw)
+		}
+		if IsGitHubMediaURLFor(raw, "ghe.example.com") {
+			t.Fatalf("IsGitHubMediaURLFor(%q, GHE 部署) = true, want false（令牌只属于本实例）", raw)
+		}
+	}
+
+	// https 上的 :80 不是默认端口，不能剥。
+	if IsGitHubMediaURLFor("https://ghe.example.com:80/user-attachments/assets/x", "ghe.example.com") {
+		t.Fatal("https 的 :80 不是本实例默认端口，不应放行")
+	}
+	// 非默认端口的实例：只有同端口算同一实例。
+	if !IsGitHubMediaURLFor("https://ghe.example.com:8443/user-attachments/assets/x", "ghe.example.com:8443") {
+		t.Fatal("同 authority（带端口）的附件应放行")
+	}
+	if IsGitHubMediaURLFor("https://ghe.example.com:4443/user-attachments/assets/x", "ghe.example.com:8443") {
+		t.Fatal("同 host 不同端口不应放行（不是同一实例）")
+	}
+
+	no := []struct{ raw, webHost string }{
+		// GHE host 上的普通页面/非附件路径：令牌不放行。
+		{"https://ghe.example.com/owner/repo", "ghe.example.com"},
+		{"https://ghe.example.com/user-attachments/assets", "ghe.example.com"}, // 缺 id 段
+		// http 明文不发令牌（与 IsGitHubMediaURL 的形状准入一致）。
+		{"http://ghe.example.com/user-attachments/assets/x", "ghe.example.com"},
+		// userinfo / fragment 形态不可发。
+		{"https://token@ghe.example.com/user-attachments/assets/x", "ghe.example.com"},
+		{"https://ghe.example.com/user-attachments/assets/x#f", "ghe.example.com"},
+		// 点段/编码点段：上游规范化后会离开附件目录。
+		{"https://ghe.example.com/user-attachments/assets/../../other", "ghe.example.com"},
+		{"https://ghe.example.com/user-attachments/assets/%2e%2e/%2e%2e/other", "ghe.example.com"},
+		// 外部图床一律不放行：令牌发出去等于交出仓库凭证。
+		{"https://uiv.example.com/f/x.png", "ghe.example.com"},
+		// 仿冒：附件路径嵌在别人域名路径里。
+		{"https://evil.example.com/ghe.example.com/user-attachments/assets/x", "ghe.example.com"},
+	}
+	for _, c := range no {
+		if IsGitHubMediaURLFor(c.raw, c.webHost) {
+			t.Fatalf("IsGitHubMediaURLFor(%q, %q) = true, want false", c.raw, c.webHost)
+		}
+	}
+}

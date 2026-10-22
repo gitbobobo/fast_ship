@@ -94,18 +94,25 @@ func (s *BotService) auxModelRequest(ctx context.Context, bot *model.Bot, maintR
 	}
 
 	client := botNewClient(bot.BaseURL, apiKey)
-	callCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	// 总超时是防泄漏的兜底（上游无限挂住/进程退出）：取 FirstChunk + Idle +
+	// 30s。空闲看门狗管「不再出片」，这条墙钟管「一直出片但永远不结束」——
+	// 持续正常出片超过该上限的辅助请求会被取消并记 provider_unavailable，
+	// 这是刻意保留的兜底（维护 worker 槽位不能被一条流长期占住）。
+	timeouts := s.botStreamTimeoutsOf()
+	callCtx, cancel := context.WithTimeout(ctx, timeouts.FirstChunk+timeouts.Idle+30*time.Second)
 	defer cancel()
 	reply, callErr := botStreamChat(callCtx, &client, botStreamRequest{
 		Messages:            params,
 		Model:               modelName,
 		MaxCompletionTokens: maxOut,
-	}, nil)
+	}, timeouts, nil)
 
 	cols := map[string]interface{}{"finished_at": s.now()}
 	if callErr != nil {
+		// error_code 与主线同一分类口径：看门狗超时记 model_stream_timeout，
+		// 认证/额度/限流各自可区分（INT-137）。
 		cols["status"] = model.BotModelRequestFailed
-		cols["error_code"] = "maintenance_request_failed"
+		cols["error_code"] = botClassifyModelError(callErr).Code
 		cols["error_message"] = botErrMessage(callErr)
 	} else {
 		cols["status"] = model.BotModelRequestSucceeded
@@ -169,15 +176,23 @@ func (s *BotService) scanNightlyOnce() {
 	if err != nil {
 		return
 	}
-	loc := s.cfg.Bots.Memory.Location()
 	hour, minute := s.cfg.Bots.Memory.NightlyClock()
-	now := s.now().In(loc)
-	todayClock := time.Date(now.Year(), now.Month(), now.Day(), hour, minute, 0, 0, loc)
-	if now.Before(todayClock) {
-		return
-	}
-	date := now.Format("2006-01-02")
+	now := s.now()
 	for _, botID := range ids {
+		// 触发时刻与日期按各 bot 归属用户的有效时区分别计算（INT-138）：
+		// 同一批 bot 的「当地 03:00」可能落在不同的 UTC 时刻与日期上。
+		// 用户未声明时区时回退部署配置，与旧的全局口径一致。
+		bot, err := s.bots.Get(botID)
+		if err != nil {
+			continue
+		}
+		_, loc := s.botOwnerTimezoneOf(bot)
+		local := now.In(loc)
+		todayClock := time.Date(local.Year(), local.Month(), local.Day(), hour, minute, 0, 0, loc)
+		if local.Before(todayClock) {
+			continue
+		}
+		date := local.Format("2006-01-02")
 		select {
 		case s.maintJobs <- botMaintJob{botID: botID, triggerKey: s.nightlyTriggerKey(botID, date)}:
 		default:
@@ -217,9 +232,10 @@ func (s *BotService) runNightlyForBot(botID, triggerKey string) {
 	if err != nil {
 		return
 	}
+	tzName, _ := s.botOwnerTimezoneOf(bot)
 	now := s.now()
 	snap, _ := json.Marshal(map[string]interface{}{
-		"nightly_model": s.nightlyModelOf(bot), "timezone": s.cfg.Bots.Memory.Timezone,
+		"nightly_model": s.nightlyModelOf(bot), "timezone": tzName,
 	})
 	maintRun := &model.BotMaintenanceRun{
 		ID:                 uuid.NewString(),

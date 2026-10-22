@@ -108,8 +108,11 @@ type t3AppThread struct {
 	ProjectID              string           `json:"projectId"`
 	Title                  string           `json:"title"`
 	ActiveProviderThreadId *string          `json:"activeProviderThreadId"`
+	Branch                 *string          `json:"branch"`
+	WorktreePath           *string          `json:"worktreePath"`
 	Lineage                *t3ThreadLineage `json:"lineage"`
 	ArchivedAt             *string          `json:"archivedAt"`
+	DeletedAt              *string          `json:"deletedAt"`
 	UpdatedAt              string           `json:"updatedAt"`
 }
 
@@ -131,16 +134,19 @@ type t3ThreadProjection struct {
 	VisibleTurnItems []t3ProjectedTurnRow `json:"visibleTurnItems"`
 }
 
-// t3Run 是投影里的 run 行（只解码派生队列/活动用到的字段）。
+// t3Run 是投影里的 run 行（只解码派生队列/活动用到的字段）。WorkspacePreparation
+// 只判存在（非空指针即带该字段）：它是 T3 侧「工作区准备」run 的标记，重试
+// 判定要求目标 run 携带它，字段本体 Fast Ship 不建模。
 type t3Run struct {
-	ID               string  `json:"id"`
-	Ordinal          int     `json:"ordinal"`
-	Status           string  `json:"status"`
-	QueuePosition    *int    `json:"queuePosition"`
-	QueueHeld        *bool   `json:"queueHeld"`
-	UserMessageID    string  `json:"userMessageId"`
-	ProviderThreadID *string `json:"providerThreadId"`
-	ActiveAttemptID  *string `json:"activeAttemptId"`
+	ID                   string           `json:"id"`
+	Ordinal              int              `json:"ordinal"`
+	Status               string           `json:"status"`
+	QueuePosition        *int             `json:"queuePosition"`
+	QueueHeld            *bool            `json:"queueHeld"`
+	UserMessageID        string           `json:"userMessageId"`
+	ProviderThreadID     *string          `json:"providerThreadId"`
+	ActiveAttemptID      *string          `json:"activeAttemptId"`
+	WorkspacePreparation *json.RawMessage `json:"workspacePreparation"`
 }
 
 // t3Message 是投影里的会话消息行（排队消息的正文/附件来源）。
@@ -344,11 +350,12 @@ func t3PullRequestCount(shell *t3ThreadShell) int {
 
 // normalizeT3ThreadDetail 把 HTTP 投影 + 可信 WS shell 组装成线程详情。
 //
-// 投影的 thread 是 AppThread（orchestrationV2.ts:363），不带运行态字段；
-// 运行态与元数据（title/provider/model/branch/PR 数/project_name）取该线程
-// 的 ThreadShell（WS 快照侧由 threadShellFromProjection 派生），与列表共用
-// 同一状态映射，不扫描历史 runs。shell 由调用方按线程 ID 在活跃/归档快照中
-// 找出（含子代理子线程），找不到时调用方明确失败，不假 idle。
+// 投影的 thread 是 AppThread（orchestrationV2.ts:363）：branch/worktreePath
+// 就挂在 AppThread 上（已实测，工作区回收真值即取自那里），缺的只是运行态
+// 字段。详情的运行态与摘要元数据（provider/model/branch/PR 数/project_name）
+// 取该线程的 ThreadShell（WS 快照侧由 threadShellFromProjection 派生），与
+// 列表共用同一状态映射，不扫描历史 runs。shell 由调用方按线程 ID 在活跃/
+// 归档快照中找出（含子代理子线程），找不到时调用方明确失败，不假 idle。
 // 审批/提问条目按投影 runtimeRequests 补齐状态；queue/activity 由投影
 // runs/messages/会话能力派生（口径对齐 T3 deriveThreadQueueWorkflowState）。
 func normalizeT3ThreadDetail(env *model.T3Environment, projection json.RawMessage, shell *t3ThreadShell, projectNames map[string]string) (*T3ThreadDetail, error) {

@@ -217,19 +217,19 @@ func (e GitHubTokenDetectionStatus) Valid() bool {
 
 // Defines values for GitHubTokenDetectionTokenType.
 const (
-	Classic     GitHubTokenDetectionTokenType = "classic"
-	FineGrained GitHubTokenDetectionTokenType = "fine_grained"
-	Unknown     GitHubTokenDetectionTokenType = "unknown"
+	GitHubTokenDetectionTokenTypeClassic     GitHubTokenDetectionTokenType = "classic"
+	GitHubTokenDetectionTokenTypeFineGrained GitHubTokenDetectionTokenType = "fine_grained"
+	GitHubTokenDetectionTokenTypeUnknown     GitHubTokenDetectionTokenType = "unknown"
 )
 
 // Valid indicates whether the value is a known member of the GitHubTokenDetectionTokenType enum.
 func (e GitHubTokenDetectionTokenType) Valid() bool {
 	switch e {
-	case Classic:
+	case GitHubTokenDetectionTokenTypeClassic:
 		return true
-	case FineGrained:
+	case GitHubTokenDetectionTokenTypeFineGrained:
 		return true
-	case Unknown:
+	case GitHubTokenDetectionTokenTypeUnknown:
 		return true
 	default:
 		return false
@@ -256,9 +256,10 @@ func (e IssueRecommendationStatus) Valid() bool {
 
 // Defines values for NotificationKind.
 const (
-	ReviewCleanupFailed  NotificationKind = "review_cleanup_failed"
-	ReviewDispatchFailed NotificationKind = "review_dispatch_failed"
-	ReviewRunTimeout     NotificationKind = "review_run_timeout"
+	ReviewCleanupFailed    NotificationKind = "review_cleanup_failed"
+	ReviewDispatchFailed   NotificationKind = "review_dispatch_failed"
+	ReviewRedeliveryFailed NotificationKind = "review_redelivery_failed"
+	ReviewRunTimeout       NotificationKind = "review_run_timeout"
 )
 
 // Valid indicates whether the value is a known member of the NotificationKind enum.
@@ -267,6 +268,8 @@ func (e NotificationKind) Valid() bool {
 	case ReviewCleanupFailed:
 		return true
 	case ReviewDispatchFailed:
+		return true
+	case ReviewRedeliveryFailed:
 		return true
 	case ReviewRunTimeout:
 		return true
@@ -413,6 +416,24 @@ func (e RespondT3ThreadRequestType) Valid() bool {
 	}
 }
 
+// Defines values for ReviewActivityIssueKind.
+const (
+	ReviewActivityIssueKindCode   ReviewActivityIssueKind = "code"
+	ReviewActivityIssueKindVisual ReviewActivityIssueKind = "visual"
+)
+
+// Valid indicates whether the value is a known member of the ReviewActivityIssueKind enum.
+func (e ReviewActivityIssueKind) Valid() bool {
+	switch e {
+	case ReviewActivityIssueKindCode:
+		return true
+	case ReviewActivityIssueKindVisual:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for ReviewCodeFindingLevel.
 const (
 	Note ReviewCodeFindingLevel = "Note"
@@ -485,18 +506,93 @@ func (e ReviewPriorDecisionStatus) Valid() bool {
 	}
 }
 
+// Defines values for ReviewPullRequestActivityGroup.
+const (
+	ReviewPullRequestActivityGroupInProgress     ReviewPullRequestActivityGroup = "in_progress"
+	ReviewPullRequestActivityGroupNeedsAction    ReviewPullRequestActivityGroup = "needs_action"
+	ReviewPullRequestActivityGroupRecentlyPassed ReviewPullRequestActivityGroup = "recently_passed"
+)
+
+// Valid indicates whether the value is a known member of the ReviewPullRequestActivityGroup enum.
+func (e ReviewPullRequestActivityGroup) Valid() bool {
+	switch e {
+	case ReviewPullRequestActivityGroupInProgress:
+		return true
+	case ReviewPullRequestActivityGroupNeedsAction:
+		return true
+	case ReviewPullRequestActivityGroupRecentlyPassed:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ReviewPullRequestActivityStage.
+const (
+	ReviewPullRequestActivityStageDebouncing ReviewPullRequestActivityStage = "debouncing"
+	ReviewPullRequestActivityStageQueued     ReviewPullRequestActivityStage = "queued"
+	ReviewPullRequestActivityStageReviewing  ReviewPullRequestActivityStage = "reviewing"
+)
+
+// Valid indicates whether the value is a known member of the ReviewPullRequestActivityStage enum.
+func (e ReviewPullRequestActivityStage) Valid() bool {
+	switch e {
+	case ReviewPullRequestActivityStageDebouncing:
+		return true
+	case ReviewPullRequestActivityStageQueued:
+		return true
+	case ReviewPullRequestActivityStageReviewing:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ReviewRoundRecordTriggerAction.
+const (
+	ReviewRoundRecordTriggerActionManual         ReviewRoundRecordTriggerAction = "manual"
+	ReviewRoundRecordTriggerActionOpened         ReviewRoundRecordTriggerAction = "opened"
+	ReviewRoundRecordTriggerActionReadyForReview ReviewRoundRecordTriggerAction = "ready_for_review"
+	ReviewRoundRecordTriggerActionReopened       ReviewRoundRecordTriggerAction = "reopened"
+	ReviewRoundRecordTriggerActionSynchronize    ReviewRoundRecordTriggerAction = "synchronize"
+	ReviewRoundRecordTriggerActionUnknown        ReviewRoundRecordTriggerAction = "unknown"
+	ReviewRoundRecordTriggerActionVisual         ReviewRoundRecordTriggerAction = "visual"
+)
+
+// Valid indicates whether the value is a known member of the ReviewRoundRecordTriggerAction enum.
+func (e ReviewRoundRecordTriggerAction) Valid() bool {
+	switch e {
+	case ReviewRoundRecordTriggerActionManual:
+		return true
+	case ReviewRoundRecordTriggerActionOpened:
+		return true
+	case ReviewRoundRecordTriggerActionReadyForReview:
+		return true
+	case ReviewRoundRecordTriggerActionReopened:
+		return true
+	case ReviewRoundRecordTriggerActionSynchronize:
+		return true
+	case ReviewRoundRecordTriggerActionUnknown:
+		return true
+	case ReviewRoundRecordTriggerActionVisual:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for ReviewRunSummaryKind.
 const (
-	Code   ReviewRunSummaryKind = "code"
-	Visual ReviewRunSummaryKind = "visual"
+	ReviewRunSummaryKindCode   ReviewRunSummaryKind = "code"
+	ReviewRunSummaryKindVisual ReviewRunSummaryKind = "visual"
 )
 
 // Valid indicates whether the value is a known member of the ReviewRunSummaryKind enum.
 func (e ReviewRunSummaryKind) Valid() bool {
 	switch e {
-	case Code:
+	case ReviewRunSummaryKindCode:
 		return true
-	case Visual:
+	case ReviewRunSummaryKindVisual:
 		return true
 	default:
 		return false
@@ -530,6 +626,54 @@ func (e ReviewRunSummaryStatus) Valid() bool {
 	case ReviewRunSummaryStatusRunning:
 		return true
 	case ReviewRunSummaryStatusTimedOut:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ReviewStageProgressKind.
+const (
+	ReviewStageProgressKindCode   ReviewStageProgressKind = "code"
+	ReviewStageProgressKindVisual ReviewStageProgressKind = "visual"
+)
+
+// Valid indicates whether the value is a known member of the ReviewStageProgressKind enum.
+func (e ReviewStageProgressKind) Valid() bool {
+	switch e {
+	case ReviewStageProgressKindCode:
+		return true
+	case ReviewStageProgressKindVisual:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ReviewStageProgressStatus.
+const (
+	ReviewStageProgressStatusCompleted ReviewStageProgressStatus = "completed"
+	ReviewStageProgressStatusFailed    ReviewStageProgressStatus = "failed"
+	ReviewStageProgressStatusPending   ReviewStageProgressStatus = "pending"
+	ReviewStageProgressStatusQueued    ReviewStageProgressStatus = "queued"
+	ReviewStageProgressStatusRunning   ReviewStageProgressStatus = "running"
+	ReviewStageProgressStatusSkipped   ReviewStageProgressStatus = "skipped"
+)
+
+// Valid indicates whether the value is a known member of the ReviewStageProgressStatus enum.
+func (e ReviewStageProgressStatus) Valid() bool {
+	switch e {
+	case ReviewStageProgressStatusCompleted:
+		return true
+	case ReviewStageProgressStatusFailed:
+		return true
+	case ReviewStageProgressStatusPending:
+		return true
+	case ReviewStageProgressStatusQueued:
+		return true
+	case ReviewStageProgressStatusRunning:
+		return true
+	case ReviewStageProgressStatusSkipped:
 		return true
 	default:
 		return false
@@ -1604,7 +1748,7 @@ type BotRun struct {
 	TotalTokens   *int64 `json:"total_tokens,omitempty"`
 	TriggerKey    string `json:"trigger_key"`
 
-	// TriggerSource user_message / tool_result / recovery / schedule / manual
+	// TriggerSource user_message / tool_result / recovery / schedule / manual / schedule_event（定时任务运行事件写入主线后的立即唤醒，INT-138）
 	TriggerSource string `json:"trigger_source"`
 
 	// UsageComplete false 表示上游未报 usage（缺失与零严格区分）
@@ -1848,6 +1992,9 @@ type CreateIssueRequest struct {
 type CreateProjectRequest struct {
 	// CodeGithubTokenId 代码仓库 Token（Token 库记录 id）引用；仅用于读取关联 PR（含其他仓库）。可空；必须属于当前用户，否则 40420
 	CodeGithubTokenId *string `json:"code_github_token_id,omitempty"`
+
+	// CodeRepositoryUrl 代码仓库链接（owner/repo 或完整 URL），供 PR 审查使用；空 = 与公开仓库相同
+	CodeRepositoryUrl *string `json:"code_repository_url,omitempty"`
 	Description       *string `json:"description,omitempty"`
 
 	// Name 项目名，当前用户下唯一
@@ -2916,6 +3063,12 @@ type PendingIssueHook struct {
 
 // Project defines model for Project.
 type Project struct {
+	// CodeGithubOwner 代码仓库（PR 审查用）owner；未单独配置为空串，表示与公开仓库相同
+	CodeGithubOwner string `json:"code_github_owner"`
+
+	// CodeGithubRepo 代码仓库（PR 审查用）repo 名；未单独配置为空串，表示与公开仓库相同
+	CodeGithubRepo string `json:"code_github_repo"`
+
 	// CodeGithubTokenId 代码仓库 Token 引用；未配置为空串
 	CodeGithubTokenId string `json:"code_github_token_id"`
 	CreatedAt         string `json:"created_at"`
@@ -3215,6 +3368,22 @@ type RespondT3ThreadRequest struct {
 // RespondT3ThreadRequestType defines model for RespondT3ThreadRequest.Type.
 type RespondT3ThreadRequestType string
 
+// ReviewActivityIssue defines model for ReviewActivityIssue.
+type ReviewActivityIssue struct {
+	// Combination <model> · <instance_id>；账本兜底的 issue 无组合
+	Combination *string                 `json:"combination,omitempty"`
+	Kind        ReviewActivityIssueKind `json:"kind"`
+
+	// Message 面向用户的说明
+	Message string `json:"message"`
+
+	// Reason 短原因（派发失败/超时/审查失败/审查未通过/审查未完成/结论无法解析）
+	Reason string `json:"reason"`
+}
+
+// ReviewActivityIssueKind defines model for ReviewActivityIssue.Kind.
+type ReviewActivityIssueKind string
+
 // ReviewAgentDiff defines model for ReviewAgentDiff.
 type ReviewAgentDiff struct {
 	Content   string `json:"content"`
@@ -3284,6 +3453,38 @@ type ReviewCombination struct {
 	T3ProjectId *string `json:"t3_project_id,omitempty"`
 }
 
+// ReviewFinding 发现的统一展示投影（代码与视觉合并；来自 result_json）
+type ReviewFinding struct {
+	Body string `json:"body"`
+
+	// Dimension 视觉发现的设计维度
+	Dimension *string `json:"dimension,omitempty"`
+
+	// File 代码发现涉及的文件（文件:行号 展示）
+	File *string `json:"file,omitempty"`
+
+	// Fix 视觉发现的修复建议
+	Fix *string `json:"fix,omitempty"`
+
+	// Level 代码为 P0/P1/P2/Note；视觉为 blocker/worth_fixing/minor
+	Level string `json:"level"`
+
+	// Line 当前 HEAD 右侧代码行号
+	Line *int `json:"line,omitempty"`
+
+	// Screenshot 视觉发现涉及的截图标签
+	Screenshot *string `json:"screenshot,omitempty"`
+}
+
+// ReviewFindingCounts 发现计数（缺省 0；代码 P0/P1/P2，视觉 blocker/worth_fixing）
+type ReviewFindingCounts struct {
+	P0          int `json:"P0"`
+	P1          int `json:"P1"`
+	P2          int `json:"P2"`
+	Blocker     int `json:"blocker"`
+	WorthFixing int `json:"worth_fixing"`
+}
+
 // ReviewModelOption 模型选项（与 T3 modelSelection.options 同形，值可为字符串或布尔）
 type ReviewModelOption struct {
 	Id string `json:"id"`
@@ -3327,9 +3528,13 @@ type ReviewProjectSummary struct {
 	CodeCombinationCount int  `json:"code_combination_count"`
 
 	// CodeStatus 最近一次代码审查结论（success/failure/error/pending）
-	CodeStatus             *string `json:"code_status,omitempty"`
-	Enabled                bool    `json:"enabled"`
-	GithubOwner            string  `json:"github_owner"`
+	CodeStatus *string `json:"code_status,omitempty"`
+	Enabled    bool    `json:"enabled"`
+
+	// GithubOwner 实际审查的代码仓库 owner（未单独配置代码仓库时即公开仓库）
+	GithubOwner string `json:"github_owner"`
+
+	// GithubRepo 实际审查的代码仓库 repo 名（未单独配置代码仓库时即公开仓库）
 	GithubRepo             string  `json:"github_repo"`
 	LastReviewAt           *string `json:"last_review_at,omitempty"`
 	ProjectId              string  `json:"project_id"`
@@ -3337,6 +3542,62 @@ type ReviewProjectSummary struct {
 	TakenBy                *string `json:"taken_by,omitempty"`
 	VisualCombinationCount int     `json:"visual_combination_count"`
 	VisualStatus           *string `json:"visual_status,omitempty"`
+}
+
+// ReviewPullRequestActivity 单个 PR 的动态行（分组与进度由服务端算好，前端只负责展示）
+type ReviewPullRequestActivity struct {
+	CanRerun bool `json:"can_rerun"`
+
+	// DebounceFireAt 防抖到点时刻（仅 stage=debouncing 时有值）
+	DebounceFireAt *string `json:"debounce_fire_at,omitempty"`
+
+	// Findings 发现计数（缺省 0；代码 P0/P1/P2，视觉 blocker/worth_fixing）
+	Findings ReviewFindingCounts            `json:"findings"`
+	Group    ReviewPullRequestActivityGroup `json:"group"`
+	HeadSha  string                         `json:"head_sha"`
+
+	// Issues 需要人处理的问题（失败的运行、无法解析的结论、账本兜底）
+	Issues       []ReviewActivityIssue `json:"issues"`
+	PrNumber     int                   `json:"pr_number"`
+	PrTitle      string                `json:"pr_title"`
+	PrUrl        string                `json:"pr_url"`
+	ProjectId    string                `json:"project_id"`
+	ProjectName  string                `json:"project_name"`
+	RepoFullName string                `json:"repo_full_name"`
+	RoundNumber  int                   `json:"round_number"`
+
+	// Stage 仅 group=in_progress 时有值
+	Stage *ReviewPullRequestActivityStage `json:"stage,omitempty"`
+
+	// Stages 两段进度（代码/视觉）；防抖中为空数组
+	Stages []ReviewStageProgress `json:"stages"`
+
+	// StartedAt 本轮开始时刻（防抖中为防抖行更新时刻）
+	StartedAt string `json:"started_at"`
+	UpdatedAt string `json:"updated_at"`
+}
+
+// ReviewPullRequestActivityGroup defines model for ReviewPullRequestActivity.Group.
+type ReviewPullRequestActivityGroup string
+
+// ReviewPullRequestActivityStage 仅 group=in_progress 时有值
+type ReviewPullRequestActivityStage string
+
+// ReviewPullRequestActivityCounts 过滤范围内全部 PR 的分组计数（与分页无关）
+type ReviewPullRequestActivityCounts struct {
+	InProgress     int `json:"in_progress"`
+	NeedsAction    int `json:"needs_action"`
+	RecentlyPassed int `json:"recently_passed"`
+}
+
+// ReviewPullRequestActivityPage defines model for ReviewPullRequestActivityPage.
+type ReviewPullRequestActivityPage struct {
+	// Counts 过滤范围内全部 PR 的分组计数（与分页无关）
+	Counts ReviewPullRequestActivityCounts `json:"counts"`
+	Items  []ReviewPullRequestActivity     `json:"items"`
+
+	// Total 过滤范围内全部 PR 数（分页前的总数）
+	Total int `json:"total"`
 }
 
 // ReviewPullRequestRecord defines model for ReviewPullRequestRecord.
@@ -3360,8 +3621,14 @@ type ReviewRoundRecord struct {
 	CreatedAt   string             `json:"created_at"`
 	HeadSha     string             `json:"head_sha"`
 	RoundNumber int                `json:"round_number"`
-	VisualRuns  []ReviewRunSummary `json:"visual_runs"`
+
+	// TriggerAction 触发方式（该轮第一条代码 run 的 trigger_action；没有代码 run 时为 unknown）
+	TriggerAction ReviewRoundRecordTriggerAction `json:"trigger_action"`
+	VisualRuns    []ReviewRunSummary             `json:"visual_runs"`
 }
+
+// ReviewRoundRecordTriggerAction 触发方式（该轮第一条代码 run 的 trigger_action；没有代码 run 时为 unknown）
+type ReviewRoundRecordTriggerAction string
 
 // ReviewRunSummary defines model for ReviewRunSummary.
 type ReviewRunSummary struct {
@@ -3369,6 +3636,9 @@ type ReviewRunSummary struct {
 	EnvironmentName *string `json:"environment_name,omitempty"`
 	ErrorCode       *string `json:"error_code,omitempty"`
 	ErrorMessage    *string `json:"error_message,omitempty"`
+
+	// Findings 完整发现列表（result_json 可解析时才有）；代码含 Note，视觉为 severity→level
+	Findings []ReviewFinding `json:"findings,omitempty"`
 
 	// FindingsCount P0/P1/P2（代码）或 blocker/worth fixing（视觉）的条目数
 	FindingsCount *int                   `json:"findings_count,omitempty"`
@@ -3383,7 +3653,10 @@ type ReviewRunSummary struct {
 	Summary       *string                `json:"summary,omitempty"`
 	ThreadId      string                 `json:"thread_id"`
 	UiChanged     *bool                  `json:"ui_changed,omitempty"`
-	WorktreeState *string                `json:"worktree_state,omitempty"`
+
+	// Unmeasurable 视觉审查「无法判断」的截图项（仅视觉运行）
+	Unmeasurable  []ReviewUnmeasurable `json:"unmeasurable,omitempty"`
+	WorktreeState *string              `json:"worktree_state,omitempty"`
 }
 
 // ReviewRunSummaryKind defines model for ReviewRunSummary.Kind.
@@ -3399,6 +3672,9 @@ type ReviewSettings struct {
 	Enabled          bool                 `json:"enabled"`
 	Prerequisites    []ReviewPrerequisite `json:"prerequisites"`
 	ProjectId        string               `json:"project_id"`
+
+	// RepoFullName 该审查实际使用的代码仓库（owner/repo，原样大小写；未单独配置代码仓库时即公开仓库）
+	RepoFullName string `json:"repo_full_name"`
 
 	// TakenBy 同仓库已开启审查的其他项目占用者登录名（只读）
 	TakenBy               *string             `json:"taken_by,omitempty"`
@@ -3419,6 +3695,25 @@ type ReviewSettingsInput struct {
 	TriggerSynchronize    bool                `json:"trigger_synchronize"`
 	VisualCombinations    []ReviewCombination `json:"visual_combinations"`
 }
+
+// ReviewStageProgress defines model for ReviewStageProgress.
+type ReviewStageProgress struct {
+	// Completed 已完成的组合数
+	Completed int                     `json:"completed"`
+	Kind      ReviewStageProgressKind `json:"kind"`
+
+	// Status skipped=该段未启动（无 UI 改动/截图未变化/代码发现问题）
+	Status ReviewStageProgressStatus `json:"status"`
+
+	// Total 该段组合总数（无运行时为设置行配置数）
+	Total int `json:"total"`
+}
+
+// ReviewStageProgressKind defines model for ReviewStageProgress.Kind.
+type ReviewStageProgressKind string
+
+// ReviewStageProgressStatus skipped=该段未启动（无 UI 改动/截图未变化/代码发现问题）
+type ReviewStageProgressStatus string
 
 // ReviewUnmeasurable defines model for ReviewUnmeasurable.
 type ReviewUnmeasurable struct {
@@ -4236,6 +4531,9 @@ type TestAIProviderRequest struct {
 
 	// Model 缺省用目录里第一个模型；custom 必须提供
 	Model *string `json:"model,omitempty"`
+
+	// ProviderId 已存提供商 id（可选）：测试通过时服务端清除该提供商的定时任务熔断
+	ProviderId *string `json:"provider_id,omitempty"`
 }
 
 // TestBotConnectionRequest 地址与密钥一律取 provider（INT-133）；model 显式提供时优先，否则沿用 bot_id 的已保存模型（两者都没有时 40001）
@@ -4361,6 +4659,9 @@ type UpdateProfileRequest struct {
 	// Email 新邮箱
 	Email *string `json:"email,omitempty"`
 
+	// Timezone 用户 IANA 时区（INT-138）；空串清空，非法名称拒绝
+	Timezone *string `json:"timezone,omitempty"`
+
 	// Username 新用户名；与现值相同或省略则不变
 	Username *string `json:"username,omitempty"`
 }
@@ -4369,6 +4670,9 @@ type UpdateProfileRequest struct {
 type UpdateProjectRequest struct {
 	// CodeGithubTokenId 三态——key 缺省保留现值；显式 null 或空串清空该用途引用；非空替换（须属于当前用户，否则 40420）
 	CodeGithubTokenId *string `json:"code_github_token_id,omitempty"`
+
+	// CodeRepositoryUrl 三态——key 缺省保留现值；显式 null 或空串清空（回落公开仓库）；非空替换（owner/repo 或完整 URL；与公开仓库相同则归一为空）
+	CodeRepositoryUrl *string `json:"code_repository_url,omitempty"`
 
 	// Description 缺省或 null 保留现值；显式空串清空；非空替换
 	Description *string `json:"description,omitempty"`
@@ -4512,13 +4816,19 @@ type User struct {
 	// AvatarUrl 形如 /api/avatars/:uid/:filename，未设置为空串
 	AvatarUrl string `json:"avatar_url"`
 	CreatedAt string `json:"created_at"`
-	Email     string `json:"email"`
-	Id        string `json:"id"`
+
+	// EffectiveTimezone 生效时区（INT-138）：timezone 非空时为它，否则为部署配置 bots.memory.timezone，再否则 UTC。/auth/me 会返回；成员列表不返回（省略）
+	EffectiveTimezone *string `json:"effective_timezone,omitempty"`
+	Email             string  `json:"email"`
+	Id                string  `json:"id"`
 
 	// Role 用户角色（INT-129）：admin 可管理成员、邀请与部署设置；member 只能使用自己的资源。角色只存库，服务端每请求查库判定，不写进 JWT
-	Role      UserRole `json:"role"`
-	UpdatedAt string   `json:"updated_at"`
-	Username  string   `json:"username"`
+	Role UserRole `json:"role"`
+
+	// Timezone 用户 IANA 时区（INT-138）；空串表示未声明，机器人按部署配置回退
+	Timezone  string `json:"timezone"`
+	UpdatedAt string `json:"updated_at"`
+	Username  string `json:"username"`
 }
 
 // UserRole 用户角色（INT-129）：admin 可管理成员、邀请与部署设置；member 只能使用自己的资源。角色只存库，服务端每请求查库判定，不写进 JWT
@@ -5255,6 +5565,16 @@ type ListBotScheduleTaskRuns200JSONResponseBody struct {
 	// Code 业务错误码；0 表示成功
 	Code int                                              `json:"code"`
 	Data *ListBotScheduleTaskRuns200JSONResponseBody_Data `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// StopBotScheduleTaskRun200JSONResponseBody defines parameters for StopBotScheduleTaskRun.
+type StopBotScheduleTaskRun200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int     `json:"code"`
+	Data *BotRun `json:"data,omitempty"`
 
 	// Message 人类可读信息；成功时为 "success"
 	Message string `json:"message"`
@@ -6929,6 +7249,44 @@ type ListReviewProjects200JSONResponseBody struct {
 	// Code 业务错误码；0 表示成功
 	Code int                                         `json:"code"`
 	Data *ListReviewProjects200JSONResponseBody_Data `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// ListReviewPullRequestsParams defines parameters for ListReviewPullRequests.
+type ListReviewPullRequestsParams struct {
+	// ProjectId 项目 ID（UUID，可选；必须属于当前用户，否则 40401）
+	ProjectId *string `form:"project_id,omitempty" json:"project_id,omitempty"`
+
+	// Limit 返回的 PR 数量上限
+	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
+
+	// Offset 分页偏移
+	Offset *int `form:"offset,omitempty" json:"offset,omitempty"`
+}
+
+// ListReviewPullRequests200JSONResponseBody defines parameters for ListReviewPullRequests.
+type ListReviewPullRequests200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                            `json:"code"`
+	Data *ReviewPullRequestActivityPage `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// GetReviewPullRequestDetailParams defines parameters for GetReviewPullRequestDetail.
+type GetReviewPullRequestDetailParams struct {
+	// ProjectId 项目 ID（UUID，必填）
+	ProjectId string `form:"project_id" json:"project_id"`
+}
+
+// GetReviewPullRequestDetail200JSONResponseBody defines parameters for GetReviewPullRequestDetail.
+type GetReviewPullRequestDetail200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                      `json:"code"`
+	Data *ReviewPullRequestRecord `json:"data,omitempty"`
 
 	// Message 人类可读信息；成功时为 "success"
 	Message string `json:"message"`

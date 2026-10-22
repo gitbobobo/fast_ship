@@ -310,6 +310,20 @@ func TestUpdateSettings_SaveAndRead_Consistent(t *testing.T) {
 		}
 	}
 
+	// 未关联仓库的项目 repo_full_name 不回显 "/"（CodeRepoFullName 双空拼出
+	// "/"），响应给空串。
+	bare := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.GithubOwner = ""
+		p.GithubRepo = ""
+	})
+	bareSettings, err := rs.GetSettings(ctx, user.ID, bare.ID)
+	if err != nil {
+		t.Fatalf("GetSettings bare: %v", err)
+	}
+	if bareSettings.RepoFullName != "" {
+		t.Fatalf("repo_full_name = %q, want 空串（未关联仓库）", bareSettings.RepoFullName)
+	}
+
 	// 关闭允许零组合。
 	off, err := rs.UpdateSettings(ctx, user.ID, project.ID, &api.ReviewSettingsInput{
 		Enabled: false, CodeCombinations: nil, VisualCombinations: nil,

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/api"
+	"github.com/godbobo/fast_ship/server/internal/githubapi"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
@@ -88,6 +89,28 @@ func (s *ReviewService) launchRun(ctx context.Context, runID string, now time.Ti
 		return
 	}
 
+	// 建线程前最后一道关卡：PR 实况必须还是 open（覆盖「排队期间 PR 被关、
+	// closed 投递丢失」——closed 有意不进重投，对账不会补）。已关闭/合并
+	// 直接落 cancelled/pr_closed 终态，不建线程。检查必须在签发令牌之前：
+	// 只有从未签发的运行才会被 dispatchRuns 的认领超窗重新认领——读 PR 失败
+	// 时同样不落终态、不签令牌，留给下一轮。
+	prCtx, prCancel := context.WithTimeout(ctx, 30*time.Second)
+	client, clientErr := s.ghClient(prCtx)
+	var pr *githubapi.PullRequest
+	if clientErr == nil {
+		pr, clientErr = client.GetPullRequest(prCtx, run.InstallationID, run.RepoFullName, run.PRNumber)
+	}
+	prCancel()
+	if clientErr != nil {
+		s.logger.Warn("派发前读取 PR 失败，运行等待重新认领",
+			zap.String("run", run.ID), zap.Error(clientErr))
+		return
+	}
+	if !prReviewable(pr) {
+		s.cancelRunPRClosed(&run, now)
+		return
+	}
+
 	token, err := s.issueRunToken(&run, now)
 	if err != nil {
 		fail("签发运行令牌失败")
@@ -106,20 +129,12 @@ func (s *ReviewService) launchRun(ctx context.Context, runID string, now time.Ti
 	}
 
 	// 工作区：代码审查开 worktree（基于 head 分支），视觉审查用主检出。
+	// 工作区路径不在 launch 时解析——createThread 确认时 worktree 常尚未建好，
+	// 回收阶段按线程投影的 worktreePath/branch 真值处理（见 cleanupRunWorktree）。
 	workspace := &api.T3ThreadWorkspace{Type: "root"}
 	if run.Kind == model.ReviewKindCode {
 		startOrigin := true
 		workspace = &api.T3ThreadWorkspace{Type: "worktree", BaseRef: &run.HeadRef, StartFromOrigin: &startOrigin}
-		// 记录 launch 前的已知 worktree 路径——只在紧随 launch 的有界窗口内
-		// 做「新增即本次」差集；窗口过后基线释放，回收阶段不再猜路径。
-		if paths, listErr := s.t3.ListWorktreePaths(ctx, run.UserID, run.EnvironmentID, binding.T3ProjectID); listErr == nil {
-			s.worktreeMu.Lock()
-			s.worktreeBaseline[run.ID] = paths
-			s.worktreeMu.Unlock()
-		} else {
-			s.logger.Warn("worktree 基线列举失败（本运行无法证明工作区归属）",
-				zap.String("run", run.ID), zap.Error(listErr))
-		}
 	}
 
 	req := &T3CreateThreadRequest{
@@ -167,66 +182,6 @@ func (s *ReviewService) launchRun(ctx context.Context, runID string, now time.Ti
 		s.logger.Error("更新审查运行派发状态失败", zap.String("run", run.ID), zap.Error(err))
 		return
 	}
-
-	// 代码审查：launch 确认后有界窗口内解析本次工作区路径（被取消的运行也要
-	// 解析，否则回收阶段无法证明归属、只能记失败）。
-	if run.Kind == model.ReviewKindCode {
-		s.resolveWorktreePath(ctx, &run, binding.T3ProjectID)
-	}
-}
-
-// reviewWorktreeResolveTries/Interval launch 确认后工作区路径解析的重试窗口：
-// T3 建 worktree 可能略滞后于 thread 创建确认，给 3 次、间隔 1.5s。
-const (
-	reviewWorktreeResolveTries    = 3
-	reviewWorktreeResolveInterval = 1500 * time.Millisecond
-)
-
-// resolveWorktreePath launch 后的工作区解析：launch 前基线差集，在有限重试
-// 窗口内写 worktree_path；窗口结束（无论成败）统一释放基线。解析不到就
-// 保持空——回收阶段不再猜路径，空路径即「无法证明归属」。
-func (s *ReviewService) resolveWorktreePath(ctx context.Context, run *model.ReviewRun, t3ProjectID string) {
-	defer s.releaseWorktreeState(run.ID)
-	if _, ok := s.baselineFor(run.ID); !ok {
-		return // launch 前列举已失败，差集无从算起
-	}
-	for attempt := 0; attempt < reviewWorktreeResolveTries; attempt++ {
-		if attempt > 0 {
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(reviewWorktreeResolveInterval):
-			}
-		}
-		paths, err := s.t3.ListWorktreePaths(ctx, run.UserID, run.EnvironmentID, t3ProjectID)
-		if err != nil {
-			s.logger.Warn("launch 后列举 worktree 失败", zap.String("run", run.ID), zap.Error(err))
-			continue
-		}
-		if path := s.diffWorktreePath(run.ID, paths); path != "" {
-			s.db.Model(&model.ReviewRun{}).
-				Where("id = ? AND worktree_path = ''", run.ID).
-				Updates(map[string]any{"worktree_path": path, "updated_at": time.Now().UTC()})
-			return
-		}
-	}
-}
-
-// baselineFor 取 launch 前基线（只读）。
-func (s *ReviewService) baselineFor(runID string) ([]string, bool) {
-	s.worktreeMu.Lock()
-	defer s.worktreeMu.Unlock()
-	b, ok := s.worktreeBaseline[runID]
-	return b, ok
-}
-
-// releaseWorktreeState 释放一个运行的进程内工作区状态（差集基线 + 回收
-// 重试计数）：解析成功、解析失败、终态回收结束都必须调用，防泄漏。
-func (s *ReviewService) releaseWorktreeState(runID string) {
-	s.worktreeMu.Lock()
-	defer s.worktreeMu.Unlock()
-	delete(s.worktreeBaseline, runID)
-	delete(s.worktreeTries, runID)
 }
 
 // projectIDForRun 读运行所属项目（读取失败返回空串，锁退化为按空串串行）。
@@ -234,30 +189,6 @@ func projectIDForRun(db *gorm.DB, runID string) string {
 	var projectID string
 	_ = db.Model(&model.ReviewRun{}).Where("id = ?", runID).Select("project_id").Scan(&projectID).Error
 	return projectID
-}
-
-// diffWorktreePath 计算 launch 后新增的唯一 worktree 路径；无新增或多个返回空。
-func (s *ReviewService) diffWorktreePath(runID string, current []string) string {
-	s.worktreeMu.Lock()
-	baseline, ok := s.worktreeBaseline[runID]
-	s.worktreeMu.Unlock()
-	if !ok {
-		return ""
-	}
-	base := map[string]struct{}{}
-	for _, p := range baseline {
-		base[p] = struct{}{}
-	}
-	var added []string
-	for _, p := range current {
-		if _, seen := base[p]; !seen {
-			added = append(added, p)
-		}
-	}
-	if len(added) == 1 {
-		return added[0]
-	}
-	return ""
 }
 
 // failRunDispatch 派发失败终态：failed + 消费令牌 + 置 PR sync_pending + 通知。
@@ -291,6 +222,38 @@ func (s *ReviewService) failRunDispatch(runID, code, msg string, now time.Time) 
 		return s.markPRSyncPendingByRepoTx(tx, run.ProjectID, run.RepoFullName, run.PRNumber, now)
 	})
 	s.publishReviewNotification(&run, model.NotificationReviewDispatchFailed, msg, now)
+}
+
+// cancelRunPRClosed PR 已关闭时把运行落终态：cancelled + error_code=pr_closed
+// + 消费令牌 + 置 PR sync_pending。与 failRunDispatch 同构但不是派发失败——
+// PR 关闭是正常终局，不发 dispatch_failed 通知。
+func (s *ReviewService) cancelRunPRClosed(run *model.ReviewRun, now time.Time) {
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		res := tx.Model(&model.ReviewRun{}).
+			Where("id = ? AND status IN ?", run.ID,
+				[]model.ReviewRunStatus{model.ReviewRunQueued, model.ReviewRunDispatched, model.ReviewRunRunning}).
+			Updates(map[string]any{
+				"status":      model.ReviewRunCancelled,
+				"error_code":  "pr_closed",
+				"finished_at": now,
+				"updated_at":  now,
+			})
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			return nil
+		}
+		if err := tx.Model(&model.ReviewRunToken{}).
+			Where("run_id = ? AND consumed_at IS NULL", run.ID).
+			Update("consumed_at", now).Error; err != nil {
+			return err
+		}
+		return s.markPRSyncPendingByRepoTx(tx, run.ProjectID, run.RepoFullName, run.PRNumber, now)
+	})
+	if err != nil {
+		s.logger.Error("PR 关闭收尾运行失败", zap.String("run", run.ID), zap.Error(err))
+	}
 }
 
 // markPRSyncPendingByRepoTx 本项目总账置 sync_pending（不重取项目——行已

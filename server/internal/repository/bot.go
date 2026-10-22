@@ -274,9 +274,11 @@ func (r *BotRepository) NextEventSeqTx(tx *gorm.DB, botID string) (int64, error)
 	return seq, nil
 }
 
-// SetOfferedInputSeq 记录已交给某次模型请求的输入水位。
+// SetOfferedInputSeq 记录已交给某次模型请求的输入水位；只升不降——硬停止等
+// 并发写者持有更旧的 seq 时不得把已推进的水位覆盖回去（INT-137）。
 func (r *BotRepository) SetOfferedInputSeq(botID string, seq int64) error {
-	return r.db.Model(&model.Bot{}).Where("id = ?", botID).
+	return r.db.Model(&model.Bot{}).
+		Where("id = ? AND offered_input_seq < ?", botID, seq).
 		Update("offered_input_seq", seq).Error
 }
 

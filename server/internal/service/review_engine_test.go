@@ -25,12 +25,14 @@ import (
 // INT-135 1c 执行引擎测试：webhook 触发/过滤、delivery 幂等、防抖消费开轮、
 // 排队提升并发上限、超时、结果校验、汇总文案与视觉衔接判定。
 
-// reviewEngineEnv 一套可用的审查执行测试环境（不落 T3/媒体面——派发不在
-// 本文件范围；GitHub 侧用 githubapp.Fake）。
+// reviewEngineEnv 一套可用的审查执行测试环境（不落 T3——派发不在本文件
+// 范围；GitHub 侧用 githubapp.Fake；media 默认恒成功的截图下载桩，需要
+// 失败场景的测试自己换桩）。
 type reviewEngineEnv struct {
 	svc     *testServices
 	review  *ReviewService
 	fake    *githubapp.Fake
+	media   *fakeReviewMedia
 	user    *model.User
 	project *model.Project
 }
@@ -39,19 +41,21 @@ func newReviewEngineEnv(t *testing.T) *reviewEngineEnv {
 	t.Helper()
 	svc := setupTestServices(t)
 	fake := githubapp.NewFake()
+	media := fakeScreenshotMedia(t)
 	review := NewReviewService(svc.db, svc.projectRepo,
 		repository.NewGitHubWebhookDeliveryRepository(svc.db),
 		NewNotificationSink(svc.db),
 		githubapp.StaticClients{Client: fake},
 		fakeReviewAppSource{ok: true},
 		fakeReviewPublicURL("https://fs.example.com"),
-		nil, nil, nil, svc.cfg, zap.NewNop())
+		nil, media, nil, svc.cfg, zap.NewNop())
 	user := createTestUser(t, svc.db, "reviewer")
 	project := createTestProject(t, svc.db, user.ID)
-	return &reviewEngineEnv{svc: svc, review: review, fake: fake, user: user, project: project}
+	return &reviewEngineEnv{svc: svc, review: review, fake: fake, media: media, user: user, project: project}
 }
 
 // enableReview 直接落启用设置（绕过绑定校验——执行路径只读落库 JSON）。
+// repo_full_name 快照按项目当前审查仓库落小写：触发反查只认快照列。
 func (e *reviewEngineEnv) enableReview(t *testing.T, opts ...func(*model.ProjectReviewSettings)) {
 	t.Helper()
 	code, err := marshalCombinations([]api.ReviewCombination{testCombo("env-1")})
@@ -61,6 +65,7 @@ func (e *reviewEngineEnv) enableReview(t *testing.T, opts ...func(*model.Project
 	settings := &model.ProjectReviewSettings{
 		ProjectID:             e.project.ID,
 		UserID:                e.user.ID,
+		RepoFullName:          strings.ToLower(e.project.CodeRepoFullName()),
 		Enabled:               true,
 		TriggerOpened:         true,
 		TriggerSynchronize:    true,
@@ -274,6 +279,7 @@ func TestReviewDebounceConsumeOpensRound(t *testing.T) {
 	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
 	now := time.Now().UTC()
 
+	e.fake.SetPR(repo, 9, &githubapi.PullRequest{HeadSHA: "sha-9"})
 	e.svc.db.Create(&model.ReviewDebounce{
 		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 9,
 		HeadSHA: "sha-9", Action: "synchronize", InstallationID: 42,
@@ -555,16 +561,19 @@ func TestReviewSummarizeAndComment(t *testing.T) {
 		t.Fatalf("clean state = %q", st)
 	}
 
-	// 评论正文：分节 + 排序 + 遗留提示。
-	body := buildCodeComment([]model.ReviewRun{mkRun(model.ReviewRunCompleted, fail)}, false, true)
-	if !strings.Contains(body, reviewCodeCommentMarker) || !strings.Contains(body, "P0 a.go:1 crash") {
+	// 评论正文：标题/结论/分节 + 排序 + 遗留提示（inlineLines=nil：有行号的不加注）。
+	body := buildCodeComment(reviewCommentMeta{RepoFullName: "o/r", HeadSHA: "0123456789abcdef", RoundNumber: 1},
+		[]model.ReviewRun{mkRun(model.ReviewRunCompleted, fail)}, nil, false, true)
+	if !strings.Contains(body, reviewCodeCommentMarker) ||
+		!strings.Contains(body, "## 代码审查 · 0123456 · 第 1 轮") ||
+		!strings.Contains(body, "**P0** [a.go:1](https://github.com/o/r/blob/0123456789abcdef/a.go#L1)") {
 		t.Fatalf("comment body missing finding: %s", body)
 	}
 	if !strings.Contains(body, "截图复核意见尚未处理") {
 		t.Fatalf("comment body missing carry hint: %s", body)
 	}
-	// P0 在 Note 之前。
-	if strings.Index(body, "P0 a.go") > strings.Index(body, "Note b.go") {
+	// P0 在 Note（折叠块）之前。
+	if strings.Index(body, "**P0**") > strings.Index(body, "<details>") {
 		t.Fatal("findings should sort P0 before Note")
 	}
 }
@@ -572,7 +581,7 @@ func TestReviewSummarizeAndComment(t *testing.T) {
 // TestDecideVisual 视觉衔接判定表。
 func TestDecideVisual(t *testing.T) {
 	base := visualDecisionInput{
-		CodeAllTerminalOK: true, HasVisualCombos: true,
+		CodeAllTerminal: true, CodeAllTerminalOK: true, HasVisualCombos: true,
 		HasScreenshots: true, AnyUIChanged: true,
 	}
 	cases := []struct {
@@ -580,13 +589,42 @@ func TestDecideVisual(t *testing.T) {
 		mut  func(*visualDecisionInput)
 		want visualDecision
 	}{
+		// 代码未全终态最优先：其他条件再齐备也只等待，不写任何视觉产出。
+		{"代码未终态", func(in *visualDecisionInput) { in.CodeAllTerminal = false }, visualWait},
+		{"代码未终态且截图已换", func(in *visualDecisionInput) {
+			in.CodeAllTerminal = false
+			in.ScreensChanged = true
+		}, visualWait},
 		{"代码未全净", func(in *visualDecisionInput) { in.CodeAllTerminalOK = false }, visualNone},
+		{"截图已换但代码未全净", func(in *visualDecisionInput) {
+			in.CodeAllTerminalOK = false
+			in.ScreensChanged = true
+		}, visualNone},
 		{"无视觉组合", func(in *visualDecisionInput) { in.HasVisualCombos = false }, visualNone},
 		{"无截图", func(in *visualDecisionInput) { in.HasScreenshots = false }, visualNone},
 		{"无 UI 变化", func(in *visualDecisionInput) { in.AnyUIChanged = false }, visualNone},
+		// E5：截图不可用不再是独立短路——本轮不开视觉（截图未变、上轮视觉后
+		// 无 UI 改动）时探测根本不会发生，ScreensUnavailable 不能盖过沿用路径。
+		{"截图不可用但本轮不开视觉", func(in *visualDecisionInput) { in.ScreensUnavailable = true }, visualNone},
+		{"截图不可用且上轮遗留沿用 failure", func(in *visualDecisionInput) {
+			in.ScreensUnavailable = true
+			in.PriorVisualFailed = true
+		}, visualCarryFailure},
+		// 截图变了（本轮真的要开视觉）+ 下载全部失败 → 报「截图无法下载」。
+		{"截图变了但下载失败", func(in *visualDecisionInput) {
+			in.ScreensChanged = true
+			in.ScreensUnavailable = true
+		}, visualScreensUnavailable},
 		{"截图变了", func(in *visualDecisionInput) { in.ScreensChanged = true }, visualStart},
 		{"上轮后又有 UI 改动", func(in *visualDecisionInput) { in.AnyUIChangedSinceLastVisual = true }, visualStart},
 		{"截图未变且遗留", func(in *visualDecisionInput) { in.PriorVisualFailed = true }, visualCarryFailure},
+		// 沿用 success 只在「本轮确实无事可做」（截图未变且上轮视觉后无 UI
+		// 改动）时发生；截图变了绝不沿用通过。
+		{"截图未变且上轮通过", func(in *visualDecisionInput) { in.PriorVisualPassed = true }, visualCarrySuccess},
+		{"截图变了不沿用通过", func(in *visualDecisionInput) {
+			in.PriorVisualPassed = true
+			in.ScreensChanged = true
+		}, visualStart},
 		{"截图未变且无遗留", func(in *visualDecisionInput) {}, visualNone},
 	}
 	for _, c := range cases {

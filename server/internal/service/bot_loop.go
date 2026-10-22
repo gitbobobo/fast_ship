@@ -55,6 +55,7 @@ type botRunFreeze struct {
 	Model                 string
 	BaseURL               string
 	APIKeyEncrypted       []byte
+	ProviderID            string
 	SystemPromptText      string
 	PromptRevision        int64
 	PlatformPromptVersion int64
@@ -73,6 +74,7 @@ func captureRunFreeze(bot *model.Bot, run *model.BotRun) botRunFreeze {
 		Model:                 runModelOf(run, bot),
 		BaseURL:               runBaseURLOf(run, bot),
 		APIKeyEncrypted:       key,
+		ProviderID:            runProviderIDOf(run, bot),
 		SystemPromptText:      bot.SystemPromptText,
 		PromptRevision:        bot.PromptRevision,
 		PlatformPromptVersion: bot.PlatformPromptVersion,
@@ -85,6 +87,7 @@ func applyRunCredentialFreeze(bot *model.Bot, freeze botRunFreeze) {
 	bot.Model = freeze.Model
 	bot.BaseURL = freeze.BaseURL
 	bot.APIKeyEncrypted = freeze.APIKeyEncrypted
+	bot.ProviderID = freeze.ProviderID
 }
 
 func applyRunPromptFreeze(bot *model.Bot, freeze botRunFreeze) {
@@ -116,6 +119,9 @@ func (s *BotService) acceptCompactionBoundary(bot *model.Bot, freeze *botRunFree
 // 上下文构建、压缩（schedule 跳过）、记忆基线与收尾分支；重启边界的版本
 // 激活两种会话都在入口执行。
 func (s *BotService) botLoop(bot *model.Bot, run *model.BotRun, ctx context.Context) {
+	// 槽绑定先于一切收尾路径：硬停止（宽限到期 / 重复点击）取消前核对槽上
+	// 绑定的 run，槽已被重入换绑成新 run 时不得取消到别人的 context（INT-137）。
+	s.bindSlotRun(bot, run)
 	// 工具集/提示词激活先于冻结执行，主线与 schedule 一视同仁：激活在同一个
 	// 短事务里读行、判 stale、按该行人设重建提示词并写回，事务结束后副本与
 	// 库内行一致，freeze 捕获的才是本次 run 的最终提示词，schedule 会话也基于
@@ -153,6 +159,7 @@ func (s *BotService) botLoop(bot *model.Bot, run *model.BotRun, ctx context.Cont
 	// 都会重新越过触发阈值，不设防会把确定性失败放大成每轮一次归档+摘要。
 	// 上下文极限后的强制压缩不受此守卫影响（那是唯一合法的重试）。
 	thresholdCompactionFailed := false
+runLoop:
 	for {
 		if input := s.safePoint(run); input.StopRequested {
 			s.closeUnstartedSyncCalls(calls, "stop_requested")
@@ -259,30 +266,57 @@ func (s *BotService) botLoop(bot *model.Bot, run *model.BotRun, ctx context.Cont
 				}
 			}
 		}
-		requestRow, err := s.beginModelRequest(bot, run, built)
-		if err != nil {
-			s.finishFailed(bot, run, "request_record_failed", err)
-			return
-		}
-		s.advanceInputWatermarks(run, built.InputThroughSeq)
+		// 尝试循环（INT-137）：每次尝试独立记录模型请求；只在本次尝试尚未
+		// 收到任何片段就失败时按分类做有限重试。reply/requestRow/assistantMsgID
+		// 留存最后一次尝试的结果。
+		var (
+			reply          *botModelReply
+			requestRow     *model.BotModelRequest
+			assistantMsgID string
+		)
+		for attempt := 0; ; attempt++ {
+			requestRow, err = s.beginModelRequest(bot, run, built)
+			if err != nil {
+				if errors.Is(err, errBotRunStopBeforeRequest) {
+					// 停止/结束先落库：不再发请求，也不推进水位（停止之后的新输入
+					// 留给下一次 run），直接收尾。
+					s.finishStopped(bot, run)
+					return
+				}
+				s.finishFailed(bot, run, "request_record_failed", err)
+				return
+			}
+			s.advanceInputWatermarks(run, built.InputThroughSeq)
 
-		// 预分配 assistant 消息 ID：流式增量信封先带上它，提交时复用同一个。
-		assistantMsgID := uuid.NewString()
-		deltas := s.newDeltaBuffer(bot.ID, run.ID, assistantMsgID)
-		reply, streamErr := botStreamChat(ctx, &streamClient, built.Request, deltas.onDelta)
-		deltas.flush()
-		if streamErr != nil {
+			// 预分配 assistant 消息 ID：流式增量信封先带上它，提交时复用同一个。
+			assistantMsgID = uuid.NewString()
+			deltas := s.newDeltaBuffer(bot.ID, run.ID, assistantMsgID)
+			var streamErr error
+			reply, streamErr = botStreamChat(ctx, &streamClient, built.Request, s.botStreamTimeoutsOf(), deltas.onDelta)
+			deltas.flush()
+			if streamErr == nil {
+				break
+			}
 			// 失败（含用户停止打断）：草稿等不来 message_commit，丢弃。
 			deltas.discard()
 			s.finishModelRequest(requestRow, reply, streamErr)
 			if input := s.safePoint(run); input.StopRequested {
+				// 被停止打断的流已经丢弃草稿：主线补一条可见的 lifecycle 提示，
+				// 否则时间线停在用户的「停止」上，看不出半截回复去哪了（视觉
+				// 审查）。定时任务 run 不写主线消息——用户是从运行记录停的，主线
+				// 不该多出一条无关提示（也不进入后续主线上下文）。
+				if run.SessionKind != model.BotSessionKindSchedule {
+					s.appendForcedStopNotice(bot.ID, run.ID)
+				}
 				s.finishStopped(bot, run)
 				return
 			}
 			// 上游上下文超限：强制压缩一次后恰好重试一次；其他错误
-			//（400 参数、429 限流等）不重试。schedule 会话不压缩，超限
-			// 直接失败并记录。
-			if sched == nil && botIsContextLimitError(streamErr) && !contextLimitRetried {
+			//（400 参数、429 限流等）不在此列。schedule 会话不压缩，超限
+			// 直接失败并记录。压缩后重建上下文，尝试计数一并归零。
+			// 已收到过片段的不压缩重试——那不是「没输出被拒」，是这轮对话
+			// 本身超窗，重放只会再次计费（INT-137）。
+			if sched == nil && botIsContextLimitError(streamErr) && !contextLimitRetried && !botReplyHasOutput(reply) {
 				contextLimitRetried = true
 				outcome, compErr := s.runCompactionCycle(ctx, bot, run, model.BotCompactionForced)
 				if compErr != nil {
@@ -299,10 +333,25 @@ func (s *BotService) botLoop(bot *model.Bot, run *model.BotRun, ctx context.Cont
 				}
 				s.acceptCompactionBoundary(bot, &freeze, outcome.Snapshot)
 				s.clearUsageBaseline(bot.ID)
-				continue
+				continue runLoop
 			}
-			s.finishFailed(bot, run, "model_request_failed", streamErr)
-			return
+			// 有限重试只认「无输出 + 可重试分类」：已收到正文/工具调用片段、
+			// 看门狗超时与普通 4xx 都直接落终态。
+			retryAfter, canRetry := botShouldRetryModelError(streamErr)
+			if botReplyHasOutput(reply) || !canRetry || attempt >= s.cfg.Bots.Runtime.RetryMaxAttemptsV() {
+				s.finishModelFailed(bot, run, streamErr)
+				return
+			}
+			wait := max(retryAfter, s.cfg.Bots.Runtime.RetryBaseDelay()<<attempt)
+			if !s.waitRetryBackoff(ctx, wait) {
+				// 退避被打断：安全点判停止；非停止的 ctx 取消（关停）不再重试。
+				if input := s.safePoint(run); input.StopRequested {
+					s.finishStopped(bot, run)
+					return
+				}
+				s.finishModelFailed(bot, run, streamErr)
+				return
+			}
 		}
 		contextLimitRetried = false
 		s.finishModelRequest(requestRow, reply, nil)
@@ -312,7 +361,9 @@ func (s *BotService) botLoop(bot *model.Bot, run *model.BotRun, ctx context.Cont
 		}
 		s.accumulateRunUsage(run, reply)
 
-		calls, err := s.commitAssistantTurn(bot, run, requestRow, reply, assistantMsgID)
+		// 用 = 而不是 :=：外层 calls 保留给循环顶部的 closeUnstartedSyncCalls，
+		// 不留一个永远为 nil 的变量（INT-137 复审顺手清理）。
+		calls, err = s.commitAssistantTurn(bot, run, requestRow, reply, assistantMsgID)
 		if err != nil {
 			s.finishFailed(bot, run, "commit_failed", err)
 			return
@@ -373,6 +424,17 @@ func (s *BotService) markStyleCompactionDone(bot *model.Bot) {
 	}
 }
 
+// runProviderIDOf run 期间的 provider 归属：优先配置快照（熔断按 run 派发时
+// 的 provider 打开，用户中途换 provider 不漂移）。INT-137 之前的快照没有
+// provider_id 字段——空值回退 bot 当前值，兼容旧数据。
+func runProviderIDOf(run *model.BotRun, bot *model.Bot) string {
+	var snap botConfigSnapshot
+	if err := json.Unmarshal([]byte(run.ConfigSnapshotJSON), &snap); err == nil && snap.ProviderID != "" {
+		return snap.ProviderID
+	}
+	return bot.ProviderID
+}
+
 // runBaseURLOf run 期间的地址：优先配置快照。
 func runBaseURLOf(run *model.BotRun, bot *model.Bot) string {
 	var snap botConfigSnapshot
@@ -424,14 +486,48 @@ func (s *BotService) safePoint(run *model.BotRun) botSafePoint {
 
 // advanceInputWatermarks 推进 run 消费水位与 bot 的 offered 水位（已交给模型
 // 请求的输入不再自动重试）。offered 水位只由主线推进，schedule 会话不碰。
+// 两处写库都只升不降：硬停止与主线循环并发写时，持有更旧 seq 的一方不得把
+// 已推进的水位覆盖回去（INT-137）；run 的内存副本同步取 max。
 func (s *BotService) advanceInputWatermarks(run *model.BotRun, seq int64) {
 	if seq <= run.InputThroughSeq {
 		return
 	}
 	run.InputThroughSeq = seq
-	_, _ = s.runs.UpdateColumns(run.ID, nil, map[string]interface{}{"input_through_seq": seq})
+	_, _ = s.runs.AdvanceInputThroughSeq(run.ID, seq)
 	if run.SessionKind != model.BotSessionKindSchedule {
 		_ = s.bots.SetOfferedInputSeq(run.BotID, seq)
+	}
+}
+
+// botStreamTimeoutsOf 从部署配置取流式看门狗阈值；主线与辅助请求共用同一份。
+func (s *BotService) botStreamTimeoutsOf() botStreamTimeouts {
+	return botStreamTimeouts{
+		FirstChunk: s.cfg.Bots.Runtime.StreamFirstChunkTimeout(),
+		Idle:       s.cfg.Bots.Runtime.StreamIdleTimeout(),
+	}
+}
+
+// botReplyHasOutput 报告本次尝试已收到正文或工具调用片段：SawOutput 在聚合
+// 处置位（半截工具调用也算输出），Text/ToolCalls 兜底覆盖构造出 reply 的
+// 非流式路径。有过输出的失败不在重试与强制压缩重试之列（上游可能已计费，
+// 重放还可能重复触发副作用）。
+func botReplyHasOutput(reply *botModelReply) bool {
+	return reply != nil && (reply.SawOutput || reply.Text != "" || len(reply.ToolCalls) > 0)
+}
+
+// waitRetryBackoff 等待重试退避；ctx 取消（用户停止 / 关停）立即返回 false，
+// 由调用方在安全点判定收尾方式。
+func (s *BotService) waitRetryBackoff(ctx context.Context, wait time.Duration) bool {
+	if wait <= 0 {
+		return true
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
 	}
 }
 
@@ -511,13 +607,32 @@ func (s *BotService) finishStopped(bot *model.Bot, run *model.BotRun) {
 	}
 }
 
+// finishFailed 非模型类失败的收尾（key_decrypt_failed、context_build_failed
+// 等）：error_message 取 cause 原文，payload 不带 detail/action，行为不变。
 func (s *BotService) finishFailed(bot *model.Bot, run *model.BotRun, code string, cause error) {
 	if run.SessionKind == model.BotSessionKindSchedule {
 		s.finishScheduleFailed(bot, run, code, cause)
 		return
 	}
+	s.finishFailedDetail(bot, run, code, botErrMessage(cause), "", nil)
+}
+
+// finishModelFailed 模型流失败的终态收尾（INT-137）：错误先过分类层得到可
+// 行动的 code 与中文说明。schedule 会话沿用专属收尾带出 code/message（熔断
+// 任务依赖 error_code）；主线 payload 追加上游 detail 与可选 action。
+func (s *BotService) finishModelFailed(bot *model.Bot, run *model.BotRun, cause error) {
+	info := botClassifyModelError(cause)
+	if run.SessionKind == model.BotSessionKindSchedule {
+		s.finishScheduleFailed(bot, run, info.Code, errors.New(info.Message))
+		return
+	}
+	s.finishFailedDetail(bot, run, info.Code, info.Message, info.Detail, info.Action)
+}
+
+// finishFailedDetail 主线失败收尾的公共实现：终态转移、error/done 事件与
+// 停止抢占回退同 finishFailed；detail/action 只进 run_error payload。
+func (s *BotService) finishFailedDetail(bot *model.Bot, run *model.BotRun, code, message, detail string, action *botModelErrorAction) {
 	now := time.Now().UTC()
-	msg := botErrMessage(cause)
 	ok := false
 	txErr := s.db.Transaction(func(tx *gorm.DB) error {
 		var err error
@@ -529,16 +644,23 @@ func (s *BotService) finishFailed(bot *model.Bot, run *model.BotRun, code string
 				"status":        model.BotRunStatusFailed,
 				"finished_at":   now,
 				"error_code":    code,
-				"error_message": msg,
+				"error_message": message,
 			})
 		if err != nil || !ok {
 			return err
 		}
+		payload := map[string]interface{}{
+			"code": code, "message": message, "status": string(model.BotRunStatusFailed),
+		}
+		if detail != "" {
+			payload["detail"] = detail
+		}
+		if action != nil {
+			payload["action"] = action
+		}
 		if err := s.appendEventTx(tx, bot.ID, runIDPtr(run.ID), "", model.BotEventError, botEventEnvelope{
-			Kind: "run_error",
-			Payload: map[string]interface{}{
-				"code": code, "message": msg, "status": string(model.BotRunStatusFailed),
-			},
+			Kind:    "run_error",
+			Payload: payload,
 		}); err != nil {
 			return err
 		}
@@ -562,9 +684,24 @@ func (s *BotService) finishFailed(bot *model.Bot, run *model.BotRun, code string
 
 // ---------- 模型请求记录 ----------
 
+// errBotRunStopBeforeRequest 表示登记请求前发现 run 已请求停止或已结束：这时
+// 不能再发起模型请求——否则停止 UPDATE 已经命中（没有更新的请求）之后，本条
+// 请求仍会登记并推进输入水位，随后被取消，停止之后的新输入就再也没人处理。
+// 停止标记与请求登记都走数据库，MaxOpenConns(1) 下两个事务串行：要么停止先
+// 落库（这里看见标记直接收尾），要么请求先登记（停止的条件 UPDATE 看见更高
+// ordinal 而落空），不存在两者都成功却互相不知道的交错。
+var errBotRunStopBeforeRequest = errors.New("bot run stopped before model request")
+
 func (s *BotService) beginModelRequest(bot *model.Bot, run *model.BotRun, built *botBuiltContext) (*model.BotModelRequest, error) {
 	var row *model.BotModelRequest
 	err := s.db.Transaction(func(tx *gorm.DB) error {
+		fresh, err := repository.NewBotRunRepository(tx).FindByID(run.ID)
+		if err != nil {
+			return err
+		}
+		if fresh.FinishedAt != nil || fresh.StopRequestedAt != nil {
+			return errBotRunStopBeforeRequest
+		}
 		ordinal, err := repository.NewBotModelRequestRepository(tx).NextOrdinalTx(tx, run.ID)
 		if err != nil {
 			return err
@@ -598,7 +735,8 @@ func (s *BotService) finishModelRequest(row *model.BotModelRequest, reply *botMo
 	cols := map[string]interface{}{"finished_at": time.Now().UTC()}
 	if streamErr != nil {
 		cols["status"] = model.BotModelRequestFailed
-		cols["error_code"] = "model_request_failed"
+		// 请求行 error_code 直接用分类结果：限流/超时/认证失败可区分。
+		cols["error_code"] = botClassifyModelError(streamErr).Code
 		cols["error_message"] = botErrMessage(streamErr)
 	} else {
 		cols["status"] = model.BotModelRequestSucceeded
@@ -710,6 +848,52 @@ func (s *BotService) appendCompactionFailedNotice(botID string, generation, thro
 	if err != nil {
 		// 消息追加失败不改变 run 终态，只记日志。
 		s.logger.Warn("追加压缩失败消息失败", zap.String("bot_id", botID), zap.Error(err))
+		return
+	}
+	s.publishEvent(botID)
+}
+
+// appendForcedStopNotice 在硬取消丢弃草稿后追加一条可见的 lifecycle 提示
+// （INT-137 视觉审查）：时间线不能停在用户发的「停止」上什么也不说——用户
+// 需要知道半截回复是被主动停止了，而不是机器人没回应。按 run 幂等。
+func (s *BotService) appendForcedStopNotice(botID, runID string) {
+	content := botLifecycleContent{
+		Event:  "run_interrupted",
+		Detail: json.RawMessage(`{"note":"已强制停止，未完成的回复已丢弃"}`),
+	}
+	dedup := "stop_notice:" + runID
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		txMsgs := repository.NewBotMessageRepository(tx)
+		if _, err := txMsgs.FindByDedupKey(botID, dedup); err == nil {
+			return nil
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		seq, err := s.bots.NextMessageSeqTx(tx, botID)
+		if err != nil {
+			return err
+		}
+		raw, err := json.Marshal(content)
+		if err != nil {
+			return err
+		}
+		msgID := uuid.NewString()
+		msg := &model.BotMessage{
+			ID: msgID, BotID: botID, Seq: seq,
+			Kind: model.BotMessageKindLifecycle, ContentJSON: string(raw),
+			DedupKey: &dedup, CreatedAt: time.Now().UTC(),
+		}
+		if err := txMsgs.AppendTx(tx, msg); err != nil {
+			return err
+		}
+		return s.appendEventTx(tx, botID, nil, "", model.BotEventDelta, botEventEnvelope{
+			Kind:    "lifecycle",
+			Payload: map[string]interface{}{"event": "run_interrupted", "message_id": msgID},
+		})
+	})
+	if err != nil {
+		// 提示追加失败不改变 run 终态，只记日志。
+		s.logger.Warn("追加强制停止提示失败", zap.String("bot_id", botID), zap.Error(err))
 		return
 	}
 	s.publishEvent(botID)

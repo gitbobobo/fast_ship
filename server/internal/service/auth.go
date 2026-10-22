@@ -306,6 +306,21 @@ func (s *AuthService) UpdateProfile(userID string, req *UpdateProfileRequest) (*
 		fields["email"] = email
 	}
 
+	// timezone 三态：省略保留现值，空串清空，非空必须是可加载的 IANA 名称。
+	// 机器人侧将空串视为「未声明」并回退部署配置（INT-138）。
+	if req.Timezone != nil {
+		tz := strings.TrimSpace(*req.Timezone)
+		if tz != "" {
+			if _, err := time.LoadLocation(tz); err != nil {
+				return nil, errs.New(errs.ErrInvalidParams.Code, "时区无效（须为 IANA 名称，如 Asia/Shanghai）")
+			}
+		}
+		if tz != user.Timezone {
+			user.Timezone = tz
+			fields["timezone"] = tz
+		}
+	}
+
 	if len(fields) > 0 {
 		if err := s.userRepo.UpdateFields(userID, fields); err != nil {
 			return nil, errs.ErrInternal
@@ -411,7 +426,12 @@ func (s *AuthService) generateToken(user *model.User) (string, error) {
 }
 
 func (s *AuthService) toUserResponse(user *model.User) UserResponse {
-	return newUserResponse(user)
+	resp := newUserResponse(user)
+	// 生效时区只对「当前登录用户」有意义（成员列表不需要），所以只在 auth
+	// 投影里补：前端据此显示机器人实际按哪个时区计算。
+	effective := effectiveTimezoneName(user.Timezone, s.cfg.Bots.Memory.Timezone)
+	resp.EffectiveTimezone = &effective
+	return resp
 }
 
 // RoleOf 查用户角色（INT-129）：管理员守卫每请求调用，不缓存。用户已删除时

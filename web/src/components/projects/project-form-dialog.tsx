@@ -166,6 +166,10 @@ export function ProjectFormDialog({
         repository_url: hasGitHubRepo(project)
           ? `https://github.com/${project.github_owner}/${project.github_repo}`
           : "",
+        code_repository_url:
+          project.code_github_owner && project.code_github_repo
+            ? `https://github.com/${project.code_github_owner}/${project.code_github_repo}`
+            : "",
         public_github_token_id: project.public_github_token_id || "",
         code_github_token_id: project.code_github_token_id || "",
       });
@@ -174,6 +178,7 @@ export function ProjectFormDialog({
         name: "",
         description: "",
         repository_url: "",
+        code_repository_url: "",
         public_github_token_id: "",
         code_github_token_id: "",
       });
@@ -200,6 +205,29 @@ export function ProjectFormDialog({
           payload.description = data.description;
         }
         if (data.repository_url) payload.repository_url = data.repository_url;
+        // 代码仓库同 Token 引用走三态：与现值等价则不携带 key，清空传 null
+        // 回落公开仓库。等价判定只认解析出非空 owner/repo 的输入——parseRepoUrl
+        // 很宽松（"https://github.com/" 也是空 owner/repo），拿它跟空的现值比较
+        // 会把非法输入判成「未改动」而静默丢弃；这类输入一律原样发出去交给
+        // 服务端校验（40001），失败语义与公开仓库链接一致。
+        if (project && data.code_repository_url !== undefined) {
+          const raw = (data.code_repository_url || "").trim();
+          const current =
+            (project.code_github_owner || "") +
+            "/" +
+            (project.code_github_repo || "");
+          const next = parseRepoUrl(raw);
+          const parsed = next.owner !== "" && next.repo !== "";
+          const unchanged =
+            raw === ""
+              ? current === "/" // 输入空、当前也没配（"owner/repo" 为 "/"）= 未改动
+              : parsed &&
+                current.toLowerCase() ===
+                  (next.owner + "/" + next.repo).toLowerCase();
+          if (!unchanged) {
+            payload.code_repository_url = raw || null;
+          }
+        }
         if (project && data.public_github_token_id !== undefined) {
           const current = project.public_github_token_id || "";
           payload.public_github_token_id =
@@ -227,6 +255,9 @@ export function ProjectFormDialog({
         }
         if (createData.repository_url) {
           payload.repository_url = createData.repository_url;
+        }
+        if (createData.code_repository_url) {
+          payload.code_repository_url = createData.code_repository_url;
         }
         if (createData.public_github_token_id) {
           payload.public_github_token_id = createData.public_github_token_id;
@@ -317,6 +348,25 @@ export function ProjectFormDialog({
             <p className="text-xs text-muted-foreground -mt-2">
               用于 Issue 同步、GitHub 写操作、分支查询与发货；未配置时这些功能停用
             </p>
+
+            <div className="space-y-2">
+              <Label htmlFor="project-code_repository_url">
+                代码仓库（可选，默认同公开仓库）
+              </Label>
+              <Input
+                id="project-code_repository_url"
+                placeholder="https://github.com/owner/repo 或 owner/repo"
+                {...register("code_repository_url")}
+              />
+              <p className="text-xs text-muted-foreground">
+                PR 审查盯的仓库；留空则审查公开仓库
+              </p>
+              {errors.code_repository_url && (
+                <p className="text-xs text-destructive">
+                  {errors.code_repository_url.message}
+                </p>
+              )}
+            </div>
 
             <TokenSelect
               id="project-code_github_token_id"

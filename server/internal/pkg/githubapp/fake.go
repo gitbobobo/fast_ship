@@ -19,6 +19,10 @@ import (
 // 编译期钉住 Fake 满足 seam 契约。
 var _ githubapi.GitHubClient = (*Fake)(nil)
 
+// HookDeliveries 投递记录访问面同 Fake 一并实现（审查调度对账的测试与
+// debug 自测走同一份假数据）。
+var _ HookDeliveries = (*Fake)(nil)
+
 type Fake struct {
 	mu               sync.Mutex
 	prs              map[string]map[int]*githubapi.PullRequest // repo -> number -> PR
@@ -28,6 +32,10 @@ type Fake struct {
 	reviewInputs     []githubapi.ReviewInput                   // SubmitReview 的完整入参
 	submittedReviews []githubapi.ReviewSummary                 // 已提交 review（对账用）
 	repoErrs         map[string]error                          // repo -> GetRepository 注入的错误（nil=可访问）
+	hookDeliveries   []HookDelivery                            // 投递记录（SetHookDeliveries 覆盖，重投时追加行）
+	hookPayloads     map[int64]json.RawMessage                 // delivery id -> 投递 payload（SetHookDeliveryPayload 登记）
+	redeliveredIDs   []int64                                   // 已触发重投的 delivery id（调用序）
+	redeliverErr     error                                     // SetRedeliverError 注入的重投错误（非 nil 时不记账）
 	nextID           int64
 	diffText         string
 
@@ -72,6 +80,7 @@ func NewFake() *Fake {
 		comments:       map[string]map[int][]fakeComment{},
 		reviews:        map[string][]fakeComment{},
 		repoErrs:       map[string]error{},
+		hookPayloads:   map[int64]json.RawMessage{},
 		diffText:       "diff --git a/main.go b/main.go\n+func main() {}\n",
 		nextID:         1000,
 		InstallationID: 1,
@@ -102,7 +111,9 @@ func (f *Fake) TotalCalls() int {
 	return len(f.Calls)
 }
 
-// SetPR 入站 PR 数据（GetPullRequest 读这份）。
+// SetPR 入站 PR 数据（GetPullRequest 读这份）。State 未指定时按 open 处理：
+// 真实 GitHub 的 PR 一定带 state，登记的 PR 默认就是「还开着」——需要关闭/
+// 合并语义的用例显式写 State="closed"。
 func (f *Fake) SetPR(repo string, number int, pr *githubapi.PullRequest) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -112,6 +123,9 @@ func (f *Fake) SetPR(repo string, number int, pr *githubapi.PullRequest) {
 	}
 	pr.RepoFullName = repo
 	pr.Number = number
+	if pr.State == "" {
+		pr.State = "open"
+	}
 	f.prs[key][number] = pr
 }
 
@@ -379,6 +393,102 @@ func (f *Fake) ResolveInstallation(ctx context.Context, repoFullName string) (in
 
 // Bearer fake 没有真实凭证：恒返回空串（匿名下载即可）。
 func (f *Fake) Bearer(context.Context, int64) (string, error) { return "", nil }
+
+// SetHookDeliveries 覆盖返回的投递记录（审查调度对账测试的种子数据）。
+func (f *Fake) SetHookDeliveries(items []HookDelivery) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.hookDeliveries = append([]HookDelivery(nil), items...)
+}
+
+// SetHookDeliveryPayload 登记单次投递的请求 payload（GetHookDelivery 读），
+// 对账闸门据此确定投递指向哪个 PR。未登记的投递返回错误，走调用方的降级
+// 路径（照常重投）——与真实 GitHub 一定有详情不同，这里的「没有」就是测试
+// 注入降级场景的开关。
+func (f *Fake) SetHookDeliveryPayload(id int64, payload json.RawMessage) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.hookPayloads[id] = append(json.RawMessage(nil), payload...)
+}
+
+// GetHookDelivery 返回单次投递详情：元数据取自投递记录行，payload 取登记表；
+// 投递行或 payload 任一未登记即报错。
+func (f *Fake) GetHookDelivery(_ context.Context, deliveryID int64) (HookDeliveryDetail, error) {
+	f.record("GetHookDelivery", "", 0, fmt.Sprintf("delivery:%d", deliveryID))
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	payload, ok := f.hookPayloads[deliveryID]
+	if !ok {
+		return HookDeliveryDetail{}, fmt.Errorf("githubapp fake: 未登记的投递 payload %d", deliveryID)
+	}
+	for _, d := range f.hookDeliveries {
+		if d.ID != deliveryID {
+			continue
+		}
+		return HookDeliveryDetail{
+			ID: d.ID, GUID: d.GUID, Event: d.Event, Action: d.Action,
+			Payload: append(json.RawMessage(nil), payload...),
+		}, nil
+	}
+	return HookDeliveryDetail{}, fmt.Errorf("githubapp fake: 未登记的投递 %d", deliveryID)
+}
+
+// RedeliveredIDs 按调用序返回已触发重投的 delivery id。
+func (f *Fake) RedeliveredIDs() []int64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]int64, len(f.redeliveredIDs))
+	copy(out, f.redeliveredIDs)
+	return out
+}
+
+// SetRedeliverError 注入 RedeliverHookDelivery 的错误：非 nil 时重投请求直接
+// 返回它，不追加投递行、不记 redeliveredIDs（模拟 GitHub 限流/故障，调用
+// 计数照常记账，供「只试了一次」断言）。
+func (f *Fake) SetRedeliverError(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.redeliverErr = err
+}
+
+// ListHookDeliveries 返回 DeliveredAt >= since 的记录（含失败的）。
+func (f *Fake) ListHookDeliveries(_ context.Context, since time.Time) ([]HookDelivery, error) {
+	f.record("ListHookDeliveries", "", 0, "")
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []HookDelivery
+	for _, d := range f.hookDeliveries {
+		if !d.DeliveredAt.Before(since) {
+			out = append(out, d)
+		}
+	}
+	return out, nil
+}
+
+// RedeliverHookDelivery 记账并像真实 GitHub 那样追加一条同 guid、
+// Redelivery=true 的失败投递行（id 递增、DeliveredAt 用当前时间），让下一次
+// 列表读到的 Attempts 推进一档。
+func (f *Fake) RedeliverHookDelivery(_ context.Context, deliveryID int64) error {
+	f.record("RedeliverHookDelivery", "", 0, fmt.Sprintf("delivery:%d", deliveryID))
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.redeliverErr != nil {
+		return f.redeliverErr
+	}
+	for _, d := range f.hookDeliveries {
+		if d.ID != deliveryID {
+			continue
+		}
+		f.nextID++
+		f.redeliveredIDs = append(f.redeliveredIDs, deliveryID)
+		f.hookDeliveries = append(f.hookDeliveries, HookDelivery{
+			ID: f.nextID, GUID: d.GUID, Event: d.Event, Action: d.Action,
+			StatusCode: 500, Redelivery: true, DeliveredAt: time.Now().UTC(),
+		})
+		return nil
+	}
+	return fmt.Errorf("githubapp fake: 未登记的投递 %d", deliveryID)
+}
 
 // SeedFakeFromWebhook 把 webhook payload 登记进 fake，让随后的 GetPullRequest
 // 读到同一份 PR（本地 simulate 脚本不另调 SetPR）。解析失败静默忽略。

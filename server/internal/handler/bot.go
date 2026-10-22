@@ -333,6 +333,17 @@ func (h *BotHandler) ClearScheduleTaskState(c *gin.Context) {
 	response.Success(c, result)
 }
 
+// StopScheduleRun 停止一条定时任务运行（INT-137）：置 stop_requested 并取消
+// 执行槽，run 在安全点收尾 stopped，不追加主线事件。
+func (h *BotHandler) StopScheduleRun(c *gin.Context) {
+	result, err := h.bots.StopScheduleRun(middleware.GetUserID(c), c.Param("id"), c.Param("taskId"), c.Param("runId"))
+	if err != nil {
+		middleware.HandleAppError(c, err)
+		return
+	}
+	response.Success(c, result)
+}
+
 // ---------- 授权 ----------
 
 func (h *BotHandler) ListAuthorizations(c *gin.Context) {

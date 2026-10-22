@@ -59,6 +59,8 @@ INT-129 起公开注册按部署状态区分：
 | `user.email` | string | 是 |  |
 | `user.avatar_url` | string | 是 | 形如 /api/avatars/:uid/:filename，未设置为空串 |
 | `user.role` | string（enum: admin \| member） | 是 | 用户角色（INT-129）：admin 可管理成员、邀请与部署设置；member 只能使用自己的资源。角色只存库，服务端每请求查库判定，不写进 JWT |
+| `user.timezone` | string | 是 | 用户 IANA 时区（INT-138）；空串表示未声明，机器人按部署配置回退 |
+| `user.effective_timezone` | string | 否 | 生效时区（INT-138）：timezone 非空时为它，否则为部署配置 bots.memory.timezone，再否则 UTC。/auth/me 会返回；成员列表不返回（省略） |
 | `user.created_at` | string（date-time） | 是 |  |
 | `user.updated_at` | string（date-time） | 是 |  |
 
@@ -144,6 +146,8 @@ INT-129 起公开注册按部署状态区分：
 | `user.email` | string | 是 |  |
 | `user.avatar_url` | string | 是 | 形如 /api/avatars/:uid/:filename，未设置为空串 |
 | `user.role` | string（enum: admin \| member） | 是 | 用户角色（INT-129）：admin 可管理成员、邀请与部署设置；member 只能使用自己的资源。角色只存库，服务端每请求查库判定，不写进 JWT |
+| `user.timezone` | string | 是 | 用户 IANA 时区（INT-138）；空串表示未声明，机器人按部署配置回退 |
+| `user.effective_timezone` | string | 否 | 生效时区（INT-138）：timezone 非空时为它，否则为部署配置 bots.memory.timezone，再否则 UTC。/auth/me 会返回；成员列表不返回（省略） |
 | `user.created_at` | string（date-time） | 是 |  |
 | `user.updated_at` | string（date-time） | 是 |  |
 
@@ -240,6 +244,8 @@ INT-129 起公开注册按部署状态区分：
 | `email` | string | 是 |  |
 | `avatar_url` | string | 是 | 形如 /api/avatars/:uid/:filename，未设置为空串 |
 | `role` | string（enum: admin \| member） | 是 | 用户角色（INT-129）：admin 可管理成员、邀请与部署设置；member 只能使用自己的资源。角色只存库，服务端每请求查库判定，不写进 JWT |
+| `timezone` | string | 是 | 用户 IANA 时区（INT-138）；空串表示未声明，机器人按部署配置回退 |
+| `effective_timezone` | string | 否 | 生效时区（INT-138）：timezone 非空时为它，否则为部署配置 bots.memory.timezone，再否则 UTC。/auth/me 会返回；成员列表不返回（省略） |
 | `created_at` | string（date-time） | 是 |  |
 | `updated_at` | string（date-time） | 是 |  |
 
@@ -267,6 +273,7 @@ INT-129 起公开注册按部署状态区分：
 | --- | --- | --- | --- |
 | `username` | string（长度 2..50） | 否 | 新用户名；与现值相同或省略则不变 |
 | `email` | string（email） | 否 | 新邮箱 |
+| `timezone` | string（长度 ≤64） | 否 | 用户 IANA 时区（INT-138）；空串清空，非法名称拒绝 |
 
 **成功响应**
 
@@ -281,6 +288,8 @@ INT-129 起公开注册按部署状态区分：
 | `email` | string | 是 |  |
 | `avatar_url` | string | 是 | 形如 /api/avatars/:uid/:filename，未设置为空串 |
 | `role` | string（enum: admin \| member） | 是 | 用户角色（INT-129）：admin 可管理成员、邀请与部署设置；member 只能使用自己的资源。角色只存库，服务端每请求查库判定，不写进 JWT |
+| `timezone` | string | 是 | 用户 IANA 时区（INT-138）；空串表示未声明，机器人按部署配置回退 |
+| `effective_timezone` | string | 否 | 生效时区（INT-138）：timezone 非空时为它，否则为部署配置 bots.memory.timezone，再否则 UTC。/auth/me 会返回；成员列表不返回（省略） |
 | `created_at` | string（date-time） | 是 |  |
 | `updated_at` | string（date-time） | 是 |  |
 
@@ -360,6 +369,8 @@ INT-129 起公开注册按部署状态区分：
 | `email` | string | 是 |  |
 | `avatar_url` | string | 是 | 形如 /api/avatars/:uid/:filename，未设置为空串 |
 | `role` | string（enum: admin \| member） | 是 | 用户角色（INT-129）：admin 可管理成员、邀请与部署设置；member 只能使用自己的资源。角色只存库，服务端每请求查库判定，不写进 JWT |
+| `timezone` | string | 是 | 用户 IANA 时区（INT-138）；空串表示未声明，机器人按部署配置回退 |
+| `effective_timezone` | string | 否 | 生效时区（INT-138）：timezone 非空时为它，否则为部署配置 bots.memory.timezone，再否则 UTC。/auth/me 会返回；成员列表不返回（省略） |
 | `created_at` | string（date-time） | 是 |  |
 | `updated_at` | string（date-time） | 是 |  |
 
@@ -1005,6 +1016,8 @@ API Key 管理（仅 JWT）
 | `items[].description` | string | 是 |  |
 | `items[].github_owner` | string | 是 |  |
 | `items[].github_repo` | string | 是 |  |
+| `items[].code_github_owner` | string | 是 | 代码仓库（PR 审查用）owner；未单独配置为空串，表示与公开仓库相同 |
+| `items[].code_github_repo` | string | 是 | 代码仓库（PR 审查用）repo 名；未单独配置为空串，表示与公开仓库相同 |
 | `items[].public_github_token_id` | string | 是 | 公开仓库 Token 引用；未配置为空串 |
 | `items[].code_github_token_id` | string | 是 | 代码仓库 Token 引用；未配置为空串 |
 | `items[].latest_version` | object | 否 | omitempty，仅在列表项中出现 |
@@ -1054,6 +1067,7 @@ API Key 管理（仅 JWT）
 | `name` | string（长度 1..100） | 是 | 项目名，当前用户下唯一 |
 | `description` | string | 否 |  |
 | `repository_url` | string | 否 | GitHub 仓库链接（owner/repo 或完整 URL）；不再要求同时提供 Token |
+| `code_repository_url` | string | 否 | 代码仓库链接（owner/repo 或完整 URL），供 PR 审查使用；空 = 与公开仓库相同 |
 | `public_github_token_id` | string | 否 | 公开仓库 Token（Token 库记录 id）引用；用于 Issue 同步与 GitHub 写、分支查询、发货。可空；必须属于当前用户，否则 40420 |
 | `code_github_token_id` | string | 否 | 代码仓库 Token（Token 库记录 id）引用；仅用于读取关联 PR（含其他仓库）。可空；必须属于当前用户，否则 40420 |
 
@@ -1070,6 +1084,8 @@ API Key 管理（仅 JWT）
 | `description` | string | 是 |  |
 | `github_owner` | string | 是 |  |
 | `github_repo` | string | 是 |  |
+| `code_github_owner` | string | 是 | 代码仓库（PR 审查用）owner；未单独配置为空串，表示与公开仓库相同 |
+| `code_github_repo` | string | 是 | 代码仓库（PR 审查用）repo 名；未单独配置为空串，表示与公开仓库相同 |
 | `public_github_token_id` | string | 是 | 公开仓库 Token 引用；未配置为空串 |
 | `code_github_token_id` | string | 是 | 代码仓库 Token 引用；未配置为空串 |
 | `latest_version` | object | 否 | omitempty，仅在列表项中出现 |
@@ -1130,6 +1146,8 @@ API Key 管理（仅 JWT）
 | `description` | string | 是 |  |
 | `github_owner` | string | 是 |  |
 | `github_repo` | string | 是 |  |
+| `code_github_owner` | string | 是 | 代码仓库（PR 审查用）owner；未单独配置为空串，表示与公开仓库相同 |
+| `code_github_repo` | string | 是 | 代码仓库（PR 审查用）repo 名；未单独配置为空串，表示与公开仓库相同 |
 | `public_github_token_id` | string | 是 | 公开仓库 Token 引用；未配置为空串 |
 | `code_github_token_id` | string | 是 | 代码仓库 Token 引用；未配置为空串 |
 | `latest_version` | object | 否 | omitempty，仅在列表项中出现 |
@@ -1183,6 +1201,7 @@ API Key 管理（仅 JWT）
 | `name` | string（长度 1..100） | 否 |  |
 | `description` | string | 否 | 缺省或 null 保留现值；显式空串清空；非空替换 |
 | `repository_url` | string | 否 | 同创建；不再要求项目已配 Token |
+| `code_repository_url` | string（可空） | 否 | 三态——key 缺省保留现值；显式 null 或空串清空（回落公开仓库）；非空替换（owner/repo 或完整 URL；与公开仓库相同则归一为空） |
 | `public_github_token_id` | string（可空） | 否 | 三态——key 缺省保留现值；显式 null 或空串清空该用途引用；非空替换（须属于当前用户，否则 40420） |
 | `code_github_token_id` | string（可空） | 否 | 三态——key 缺省保留现值；显式 null 或空串清空该用途引用；非空替换（须属于当前用户，否则 40420） |
 
@@ -1199,6 +1218,8 @@ API Key 管理（仅 JWT）
 | `description` | string | 是 |  |
 | `github_owner` | string | 是 |  |
 | `github_repo` | string | 是 |  |
+| `code_github_owner` | string | 是 | 代码仓库（PR 审查用）owner；未单独配置为空串，表示与公开仓库相同 |
+| `code_github_repo` | string | 是 | 代码仓库（PR 审查用）repo 名；未单独配置为空串，表示与公开仓库相同 |
 | `public_github_token_id` | string | 是 | 公开仓库 Token 引用；未配置为空串 |
 | `code_github_token_id` | string | 是 | 代码仓库 Token 引用；未配置为空串 |
 | `latest_version` | object | 否 | omitempty，仅在列表项中出现 |
@@ -5206,9 +5227,11 @@ platform 非法长度、locale 非法 BCP 47、theme 非 light|dark 返回 40001
 
 <!-- operationId: deleteScreenshotScreen -->
 
-删除截图及其文件与全部标注（仅 JWT）
+删除截图及其文件与全部标注
 
-**鉴权**：仅 JWT
+支持 Authorization 头携带 JWT 或 API Key。删除为硬删除：级联删除该截图上的全部标注（FK CASCADE），并在事务提交后清理磁盘文件；截图不存在或属于其他用户时一律按不存在处理（40413）。
+
+**鉴权**：JWT+API Key
 
 **路径参数**
 
@@ -5227,7 +5250,6 @@ platform 非法长度、locale 非法 BCP 47、theme 非 light|dark 返回 40001
 | HTTP | 说明 |
 | --- | --- |
 | 401 | 未提供或提供无效凭证（40100-40199） |
-| 403 | 已认证但无权限（40300-40399；40301=API Key 越权，40303=仅限 API Key） |
 | 404 | 资源不存在（40400-40499） |
 | 500 | 服务器内部错误（50000） |
 
@@ -7208,8 +7230,8 @@ PR 审查（INT-135，仅 JWT）：项目级审查设置、审查总览与审查
 | `items` | object[] | 是 |  |
 | `items[].project_id` | string | 是 |  |
 | `items[].project_name` | string | 是 |  |
-| `items[].github_owner` | string | 是 |  |
-| `items[].github_repo` | string | 是 |  |
+| `items[].github_owner` | string | 是 | 实际审查的代码仓库 owner（未单独配置代码仓库时即公开仓库） |
+| `items[].github_repo` | string | 是 | 实际审查的代码仓库 repo 名（未单独配置代码仓库时即公开仓库） |
 | `items[].enabled` | boolean | 是 |  |
 | `items[].code_combination_count` | integer | 是 |  |
 | `items[].visual_combination_count` | integer | 是 |  |
@@ -7224,6 +7246,200 @@ PR 审查（INT-135，仅 JWT）：项目级审查设置、审查总览与审查
 | HTTP | 说明 |
 | --- | --- |
 | 401 | 未提供或提供无效凭证（40100-40199） |
+| 500 | 服务器内部错误（50000） |
+
+### GET `/api/reviews/pull-requests`
+
+<!-- operationId: listReviewPullRequests -->
+
+跨项目 PR 审查动态
+
+以当前用户已开启审查的项目（`enabled=true`）的总账行为范围，服务端算好
+分组（进行中 / 需要处理 / 最近通过）、阶段进度、发现计数与待处理原因。
+`counts`/`total` 是过滤范围内全量 PR 的统计，`items` 按 `offset`/`limit`
+切片。动作未勾选导致新 head 没有任何运行的 PR 不返回；通过且最后一轮
+完成时间早于 7 天前的 PR 不返回。
+
+**鉴权**：仅 JWT
+
+**Query 参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `project_id` | string | 否 | 项目 ID（UUID，可选；必须属于当前用户，否则 40401） |
+| `limit` | integer（1..200，默认 50） | 否 | 返回的 PR 数量上限 |
+| `offset` | integer（≥0，默认 0） | 否 | 分页偏移 |
+
+**成功响应**
+
+**200** PR 审查动态
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `items` | object[] | 是 |  |
+| `items[].project_id` | string | 是 |  |
+| `items[].project_name` | string | 是 |  |
+| `items[].repo_full_name` | string | 是 |  |
+| `items[].pr_number` | integer | 是 |  |
+| `items[].pr_title` | string | 是 |  |
+| `items[].pr_url` | string | 是 |  |
+| `items[].group` | string（enum: in_progress \| needs_action \| recently_passed） | 是 |  |
+| `items[].stage` | string（enum: debouncing \| queued \| reviewing，可空） | 否 | 仅 group=in_progress 时有值 |
+| `items[].debounce_fire_at` | string（可空） | 否 | 防抖到点时刻（仅 stage=debouncing 时有值） |
+| `items[].round_number` | integer | 是 |  |
+| `items[].head_sha` | string | 是 |  |
+| `items[].updated_at` | string | 是 |  |
+| `items[].started_at` | string | 是 | 本轮开始时刻（防抖中为防抖行更新时刻） |
+| `items[].stages` | object[] | 是 | 两段进度（代码/视觉）；防抖中为空数组 |
+| `items[].stages[].kind` | string（enum: code \| visual） | 是 |  |
+| `items[].stages[].total` | integer | 是 | 该段组合总数（无运行时为设置行配置数） |
+| `items[].stages[].completed` | integer | 是 | 已完成的组合数 |
+| `items[].stages[].status` | string（enum: pending \| queued \| running \| completed \| failed \| skipped） | 是 | skipped=该段未启动（无 UI 改动/截图未变化/代码发现问题） |
+| `items[].findings` | object | 是 | 发现计数（缺省 0；代码 P0/P1/P2，视觉 blocker/worth_fixing） |
+| `items[].findings.P0` | integer | 是 |  |
+| `items[].findings.P1` | integer | 是 |  |
+| `items[].findings.P2` | integer | 是 |  |
+| `items[].findings.blocker` | integer | 是 |  |
+| `items[].findings.worth_fixing` | integer | 是 |  |
+| `items[].issues` | object[] | 是 | 需要人处理的问题（失败的运行、无法解析的结论、账本兜底） |
+| `items[].issues[].kind` | string（enum: code \| visual） | 是 |  |
+| `items[].issues[].combination` | string（可空） | 否 | <model> · <instance_id>；账本兜底的 issue 无组合 |
+| `items[].issues[].reason` | string | 是 | 短原因（派发失败/超时/审查失败/审查未通过/审查未完成/结论无法解析） |
+| `items[].issues[].message` | string | 是 | 面向用户的说明 |
+| `items[].can_rerun` | boolean | 是 |  |
+| `counts` | object | 是 | 过滤范围内全部 PR 的分组计数（与分页无关） |
+| `counts.in_progress` | integer | 是 |  |
+| `counts.needs_action` | integer | 是 |  |
+| `counts.recently_passed` | integer | 是 |  |
+| `total` | integer | 是 | 过滤范围内全部 PR 数（分页前的总数） |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 404 | 资源不存在（40400-40499） |
+| 500 | 服务器内部错误（50000） |
+
+### GET `/api/reviews/pull-requests/{prNumber}`
+
+<!-- operationId: getReviewPullRequestDetail -->
+
+单个 PR 的审查详情（轮次 → 各组合运行 → 发现列表）
+
+与项目审查记录同结构，另带每轮 `trigger_action` 与每运行的完整
+`findings`/`unmeasurable`。项目必须属于当前用户（40401）；项目有设置行
+且按设置行仓库匹配的账本行存在，否则 40434。不要求项目已开启审查
+（停用项目仍可查看历史详情）。
+
+**鉴权**：仅 JWT
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `prNumber` | integer（≥1） | 是 | PR 编号 |
+
+**Query 参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `project_id` | string | 是 | 项目 ID（UUID，必填） |
+
+**成功响应**
+
+**200** PR 审查详情
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `repo_full_name` | string | 是 |  |
+| `pr_number` | integer | 是 |  |
+| `pr_title` | string | 是 |  |
+| `pr_url` | string | 是 |  |
+| `head_sha` | string | 是 |  |
+| `can_rerun` | boolean | 是 | 该记录是否属于项目当前仓库；跨仓库的历史记录只能查看，不能重跑。 |
+| `code_status` | string（可空） | 否 |  |
+| `visual_status` | string（可空） | 否 |  |
+| `updated_at` | string | 是 |  |
+| `rounds` | object[] | 是 |  |
+| `rounds[].round_number` | integer | 是 |  |
+| `rounds[].head_sha` | string | 是 |  |
+| `rounds[].trigger_action` | string（enum: opened \| synchronize \| ready_for_review \| reopened \| manual \| visual \| unknown） | 是 | 触发方式（该轮第一条代码 run 的 trigger_action；没有代码 run 时为 unknown） |
+| `rounds[].created_at` | string | 是 |  |
+| `rounds[].code_runs` | object[] | 是 |  |
+| `rounds[].code_runs[].id` | string | 是 |  |
+| `rounds[].code_runs[].kind` | string（enum: code \| visual） | 是 |  |
+| `rounds[].code_runs[].environment_id` | string | 是 |  |
+| `rounds[].code_runs[].environment_name` | string | 否 |  |
+| `rounds[].code_runs[].instance_id` | string | 是 |  |
+| `rounds[].code_runs[].model` | string | 是 |  |
+| `rounds[].code_runs[].options` | object[] | 否 |  |
+| `rounds[].code_runs[].options[].id` | string | 是 |  |
+| `rounds[].code_runs[].options[].value` | any | 是 | 选项值（字符串或布尔） |
+| `rounds[].code_runs[].status` | string（enum: queued \| dispatched \| running \| completed \| failed \| timed_out \| cancelled） | 是 |  |
+| `rounds[].code_runs[].thread_id` | string | 是 |  |
+| `rounds[].code_runs[].summary` | string | 否 |  |
+| `rounds[].code_runs[].error_code` | string | 否 |  |
+| `rounds[].code_runs[].error_message` | string | 否 |  |
+| `rounds[].code_runs[].findings_count` | integer | 否 | P0/P1/P2（代码）或 blocker/worth fixing（视觉）的条目数 |
+| `rounds[].code_runs[].findings` | object[] | 否 | 完整发现列表（result_json 可解析时才有）；代码含 Note，视觉为 severity→level |
+| `rounds[].code_runs[].findings[].level` | string | 是 | 代码为 P0/P1/P2/Note；视觉为 blocker/worth_fixing/minor |
+| `rounds[].code_runs[].findings[].body` | string | 是 |  |
+| `rounds[].code_runs[].findings[].file` | string | 否 | 代码发现涉及的文件（文件:行号 展示） |
+| `rounds[].code_runs[].findings[].line` | integer（≥1） | 否 | 当前 HEAD 右侧代码行号 |
+| `rounds[].code_runs[].findings[].dimension` | string | 否 | 视觉发现的设计维度 |
+| `rounds[].code_runs[].findings[].fix` | string | 否 | 视觉发现的修复建议 |
+| `rounds[].code_runs[].findings[].screenshot` | string | 否 | 视觉发现涉及的截图标签 |
+| `rounds[].code_runs[].unmeasurable` | object[] | 否 | 视觉审查「无法判断」的截图项（仅视觉运行） |
+| `rounds[].code_runs[].unmeasurable[].screenshot` | string | 是 |  |
+| `rounds[].code_runs[].unmeasurable[].reason` | string | 是 |  |
+| `rounds[].code_runs[].ui_changed` | boolean | 否 |  |
+| `rounds[].code_runs[].worktree_state` | string（可空） | 否 |  |
+| `rounds[].code_runs[].started_at` | string（可空） | 否 |  |
+| `rounds[].code_runs[].finished_at` | string（可空） | 否 |  |
+| `rounds[].visual_runs` | object[] | 是 |  |
+| `rounds[].visual_runs[].id` | string | 是 |  |
+| `rounds[].visual_runs[].kind` | string（enum: code \| visual） | 是 |  |
+| `rounds[].visual_runs[].environment_id` | string | 是 |  |
+| `rounds[].visual_runs[].environment_name` | string | 否 |  |
+| `rounds[].visual_runs[].instance_id` | string | 是 |  |
+| `rounds[].visual_runs[].model` | string | 是 |  |
+| `rounds[].visual_runs[].options` | object[] | 否 |  |
+| `rounds[].visual_runs[].options[].id` | string | 是 |  |
+| `rounds[].visual_runs[].options[].value` | any | 是 | 选项值（字符串或布尔） |
+| `rounds[].visual_runs[].status` | string（enum: queued \| dispatched \| running \| completed \| failed \| timed_out \| cancelled） | 是 |  |
+| `rounds[].visual_runs[].thread_id` | string | 是 |  |
+| `rounds[].visual_runs[].summary` | string | 否 |  |
+| `rounds[].visual_runs[].error_code` | string | 否 |  |
+| `rounds[].visual_runs[].error_message` | string | 否 |  |
+| `rounds[].visual_runs[].findings_count` | integer | 否 | P0/P1/P2（代码）或 blocker/worth fixing（视觉）的条目数 |
+| `rounds[].visual_runs[].findings` | object[] | 否 | 完整发现列表（result_json 可解析时才有）；代码含 Note，视觉为 severity→level |
+| `rounds[].visual_runs[].findings[].level` | string | 是 | 代码为 P0/P1/P2/Note；视觉为 blocker/worth_fixing/minor |
+| `rounds[].visual_runs[].findings[].body` | string | 是 |  |
+| `rounds[].visual_runs[].findings[].file` | string | 否 | 代码发现涉及的文件（文件:行号 展示） |
+| `rounds[].visual_runs[].findings[].line` | integer（≥1） | 否 | 当前 HEAD 右侧代码行号 |
+| `rounds[].visual_runs[].findings[].dimension` | string | 否 | 视觉发现的设计维度 |
+| `rounds[].visual_runs[].findings[].fix` | string | 否 | 视觉发现的修复建议 |
+| `rounds[].visual_runs[].findings[].screenshot` | string | 否 | 视觉发现涉及的截图标签 |
+| `rounds[].visual_runs[].unmeasurable` | object[] | 否 | 视觉审查「无法判断」的截图项（仅视觉运行） |
+| `rounds[].visual_runs[].unmeasurable[].screenshot` | string | 是 |  |
+| `rounds[].visual_runs[].unmeasurable[].reason` | string | 是 |  |
+| `rounds[].visual_runs[].ui_changed` | boolean | 否 |  |
+| `rounds[].visual_runs[].worktree_state` | string（可空） | 否 |  |
+| `rounds[].visual_runs[].started_at` | string（可空） | 否 |  |
+| `rounds[].visual_runs[].finished_at` | string（可空） | 否 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 400 | 请求参数无效（40001-40099） |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 404 | 项目不存在（40401）或审查 PR 记录不存在（40434） |
 | 500 | 服务器内部错误（50000） |
 
 ### GET `/api/projects/{id}/review-settings`
@@ -7251,6 +7467,7 @@ PR 审查（INT-135，仅 JWT）：项目级审查设置、审查总览与审查
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `project_id` | string | 是 |  |
+| `repo_full_name` | string | 是 | 该审查实际使用的代码仓库（owner/repo，原样大小写；未单独配置代码仓库时即公开仓库） |
 | `enabled` | boolean | 是 |  |
 | `trigger_opened` | boolean | 是 |  |
 | `trigger_synchronize` | boolean | 是 |  |
@@ -7347,6 +7564,7 @@ PR 审查（INT-135，仅 JWT）：项目级审查设置、审查总览与审查
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `project_id` | string | 是 |  |
+| `repo_full_name` | string | 是 | 该审查实际使用的代码仓库（owner/repo，原样大小写；未单独配置代码仓库时即公开仓库） |
 | `enabled` | boolean | 是 |  |
 | `trigger_opened` | boolean | 是 |  |
 | `trigger_synchronize` | boolean | 是 |  |
@@ -7432,6 +7650,7 @@ PR 审查（INT-135，仅 JWT）：项目级审查设置、审查总览与审查
 | `items[].rounds` | object[] | 是 |  |
 | `items[].rounds[].round_number` | integer | 是 |  |
 | `items[].rounds[].head_sha` | string | 是 |  |
+| `items[].rounds[].trigger_action` | string（enum: opened \| synchronize \| ready_for_review \| reopened \| manual \| visual \| unknown） | 是 | 触发方式（该轮第一条代码 run 的 trigger_action；没有代码 run 时为 unknown） |
 | `items[].rounds[].created_at` | string | 是 |  |
 | `items[].rounds[].code_runs` | object[] | 是 |  |
 | `items[].rounds[].code_runs[].id` | string | 是 |  |
@@ -7449,6 +7668,17 @@ PR 审查（INT-135，仅 JWT）：项目级审查设置、审查总览与审查
 | `items[].rounds[].code_runs[].error_code` | string | 否 |  |
 | `items[].rounds[].code_runs[].error_message` | string | 否 |  |
 | `items[].rounds[].code_runs[].findings_count` | integer | 否 | P0/P1/P2（代码）或 blocker/worth fixing（视觉）的条目数 |
+| `items[].rounds[].code_runs[].findings` | object[] | 否 | 完整发现列表（result_json 可解析时才有）；代码含 Note，视觉为 severity→level |
+| `items[].rounds[].code_runs[].findings[].level` | string | 是 | 代码为 P0/P1/P2/Note；视觉为 blocker/worth_fixing/minor |
+| `items[].rounds[].code_runs[].findings[].body` | string | 是 |  |
+| `items[].rounds[].code_runs[].findings[].file` | string | 否 | 代码发现涉及的文件（文件:行号 展示） |
+| `items[].rounds[].code_runs[].findings[].line` | integer（≥1） | 否 | 当前 HEAD 右侧代码行号 |
+| `items[].rounds[].code_runs[].findings[].dimension` | string | 否 | 视觉发现的设计维度 |
+| `items[].rounds[].code_runs[].findings[].fix` | string | 否 | 视觉发现的修复建议 |
+| `items[].rounds[].code_runs[].findings[].screenshot` | string | 否 | 视觉发现涉及的截图标签 |
+| `items[].rounds[].code_runs[].unmeasurable` | object[] | 否 | 视觉审查「无法判断」的截图项（仅视觉运行） |
+| `items[].rounds[].code_runs[].unmeasurable[].screenshot` | string | 是 |  |
+| `items[].rounds[].code_runs[].unmeasurable[].reason` | string | 是 |  |
 | `items[].rounds[].code_runs[].ui_changed` | boolean | 否 |  |
 | `items[].rounds[].code_runs[].worktree_state` | string（可空） | 否 |  |
 | `items[].rounds[].code_runs[].started_at` | string（可空） | 否 |  |
@@ -7469,6 +7699,17 @@ PR 审查（INT-135，仅 JWT）：项目级审查设置、审查总览与审查
 | `items[].rounds[].visual_runs[].error_code` | string | 否 |  |
 | `items[].rounds[].visual_runs[].error_message` | string | 否 |  |
 | `items[].rounds[].visual_runs[].findings_count` | integer | 否 | P0/P1/P2（代码）或 blocker/worth fixing（视觉）的条目数 |
+| `items[].rounds[].visual_runs[].findings` | object[] | 否 | 完整发现列表（result_json 可解析时才有）；代码含 Note，视觉为 severity→level |
+| `items[].rounds[].visual_runs[].findings[].level` | string | 是 | 代码为 P0/P1/P2/Note；视觉为 blocker/worth_fixing/minor |
+| `items[].rounds[].visual_runs[].findings[].body` | string | 是 |  |
+| `items[].rounds[].visual_runs[].findings[].file` | string | 否 | 代码发现涉及的文件（文件:行号 展示） |
+| `items[].rounds[].visual_runs[].findings[].line` | integer（≥1） | 否 | 当前 HEAD 右侧代码行号 |
+| `items[].rounds[].visual_runs[].findings[].dimension` | string | 否 | 视觉发现的设计维度 |
+| `items[].rounds[].visual_runs[].findings[].fix` | string | 否 | 视觉发现的修复建议 |
+| `items[].rounds[].visual_runs[].findings[].screenshot` | string | 否 | 视觉发现涉及的截图标签 |
+| `items[].rounds[].visual_runs[].unmeasurable` | object[] | 否 | 视觉审查「无法判断」的截图项（仅视觉运行） |
+| `items[].rounds[].visual_runs[].unmeasurable[].screenshot` | string | 是 |  |
+| `items[].rounds[].visual_runs[].unmeasurable[].reason` | string | 是 |  |
 | `items[].rounds[].visual_runs[].ui_changed` | boolean | 否 |  |
 | `items[].rounds[].visual_runs[].worktree_state` | string（可空） | 否 |  |
 | `items[].rounds[].visual_runs[].started_at` | string（可空） | 否 |  |
@@ -7559,7 +7800,7 @@ PR 审查（INT-135，仅 JWT）：项目级审查设置、审查总览与审查
 | --- | --- | --- | --- |
 | `items` | object[] | 是 |  |
 | `items[].id` | string | 是 |  |
-| `items[].kind` | string（enum: review_dispatch_failed \| review_run_timeout \| review_cleanup_failed） | 是 |  |
+| `items[].kind` | string（enum: review_dispatch_failed \| review_run_timeout \| review_cleanup_failed \| review_redelivery_failed） | 是 |  |
 | `items[].title` | string | 是 |  |
 | `items[].body` | string | 是 |  |
 | `items[].environment_id` | string（可空） | 否 |  |
@@ -8553,7 +8794,7 @@ client_message_id 必填（幂等键）：同键同正文返回已有消息；�
 | `run` | object | 否 |  |
 | `run.id` | string | 是 |  |
 | `run.bot_id` | string | 是 |  |
-| `run.trigger_source` | string | 是 | user_message / tool_result / recovery / schedule / manual |
+| `run.trigger_source` | string | 是 | user_message / tool_result / recovery / schedule / manual / schedule_event（定时任务运行事件写入主线后的立即唤醒，INT-138） |
 | `run.trigger_key` | string | 是 |  |
 | `run.status` | string | 是 | queued / running / completed / failed / stopped |
 | `run.config_snapshot` | string | 是 | 本次模型/地址/提示词版本快照 JSON；不含明文 key |
@@ -8674,7 +8915,7 @@ client_message_id 必填（幂等键）：同键同正文返回已有消息；�
 | `runs` | object[] | 是 |  |
 | `runs[].id` | string | 是 |  |
 | `runs[].bot_id` | string | 是 |  |
-| `runs[].trigger_source` | string | 是 | user_message / tool_result / recovery / schedule / manual |
+| `runs[].trigger_source` | string | 是 | user_message / tool_result / recovery / schedule / manual / schedule_event（定时任务运行事件写入主线后的立即唤醒，INT-138） |
 | `runs[].trigger_key` | string | 是 |  |
 | `runs[].status` | string | 是 | queued / running / completed / failed / stopped |
 | `runs[].config_snapshot` | string | 是 | 本次模型/地址/提示词版本快照 JSON；不含明文 key |
@@ -8802,7 +9043,7 @@ done 携带 run 终态，error 携带 code/message（顺序固定 error → done
 | `items` | object[] | 是 |  |
 | `items[].id` | string | 是 |  |
 | `items[].bot_id` | string | 是 |  |
-| `items[].trigger_source` | string | 是 | user_message / tool_result / recovery / schedule / manual |
+| `items[].trigger_source` | string | 是 | user_message / tool_result / recovery / schedule / manual / schedule_event（定时任务运行事件写入主线后的立即唤醒，INT-138） |
 | `items[].trigger_key` | string | 是 |  |
 | `items[].status` | string | 是 | queued / running / completed / failed / stopped |
 | `items[].config_snapshot` | string | 是 | 本次模型/地址/提示词版本快照 JSON；不含明文 key |
@@ -8852,7 +9093,7 @@ done 携带 run 终态，error 携带 code/message（顺序固定 error → done
 | --- | --- | --- | --- |
 | `id` | string | 是 |  |
 | `bot_id` | string | 是 |  |
-| `trigger_source` | string | 是 | user_message / tool_result / recovery / schedule / manual |
+| `trigger_source` | string | 是 | user_message / tool_result / recovery / schedule / manual / schedule_event（定时任务运行事件写入主线后的立即唤醒，INT-138） |
 | `trigger_key` | string | 是 |  |
 | `status` | string | 是 | queued / running / completed / failed / stopped |
 | `config_snapshot` | string | 是 | 本次模型/地址/提示词版本快照 JSON；不含明文 key |
@@ -8883,9 +9124,12 @@ done 携带 run 终态，error 携带 code/message（顺序固定 error → done
 
 停止主线 run
 
-置 stop_requested 并取消当前模型/同步调用 context；run 在安全点收尾为
-stopped。已持久化调用中缺少协议回复的会补「已被中断」；已受理后台调用
-继续存在，可逐项取消。重复停止或 run 已结束返回 40928。
+首次调用受理停止：追加一条「停止」用户消息（client_message_id=
+stop:<runId> 幂等）并唤醒机器人，由它结合上下文决定后续动作；宽限期
+内 run 未自然到安全点时按受理时的请求序号判断——之后已发起过新请求则
+不硬取消（避免丢掉停止之后的新输入），否则硬取消执行槽 context，run
+在安全点收尾为 stopped。已受理过停止再调用（重复点击 / 强制停止）跳过
+宽限与进展判断，立即硬取消。run 已结束返回 40928。
 
 **鉴权**：仅 JWT
 
@@ -8906,7 +9150,7 @@ stopped。已持久化调用中缺少协议回复的会补「已被中断」；�
 | --- | --- | --- | --- |
 | `id` | string | 是 |  |
 | `bot_id` | string | 是 |  |
-| `trigger_source` | string | 是 | user_message / tool_result / recovery / schedule / manual |
+| `trigger_source` | string | 是 | user_message / tool_result / recovery / schedule / manual / schedule_event（定时任务运行事件写入主线后的立即唤醒，INT-138） |
 | `trigger_key` | string | 是 |  |
 | `status` | string | 是 | queued / running / completed / failed / stopped |
 | `config_snapshot` | string | 是 | 本次模型/地址/提示词版本快照 JSON；不含明文 key |
@@ -9111,6 +9355,63 @@ stopped。已持久化调用中缺少协议回复的会补「已被中断」；�
 | --- | --- |
 | 401 | 未提供或提供无效凭证（40100-40199） |
 | 404 | 资源不存在（40400-40499） |
+| 500 | 服务器内部错误（50000） |
+
+### POST `/api/bots/{id}/schedule-tasks/{taskId}/runs/{runId}/stop`
+
+<!-- operationId: stopBotScheduleTaskRun -->
+
+停止定时任务运行
+
+置 stop_requested 并取消该 run 的执行槽 context，循环在安全点收尾为
+stopped，不追加主线事件（用户主动停止不是需要汇报的运行结果）。没有
+执行槽的运行由补唤醒或 5s 扫描进入收尾。run 已终态返回 40928；run 不
+属于该机器人或该任务返回 404。
+
+**鉴权**：仅 JWT
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | API Key ID |
+| `taskId` | string | 是 |  |
+| `runId` | string | 是 |  |
+
+**成功响应**
+
+**200** 停止已请求（run 状态以响应为准）
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 |  |
+| `bot_id` | string | 是 |  |
+| `trigger_source` | string | 是 | user_message / tool_result / recovery / schedule / manual / schedule_event（定时任务运行事件写入主线后的立即唤醒，INT-138） |
+| `trigger_key` | string | 是 |  |
+| `status` | string | 是 | queued / running / completed / failed / stopped |
+| `config_snapshot` | string | 是 | 本次模型/地址/提示词版本快照 JSON；不含明文 key |
+| `input_through_seq` | integer（int64） | 是 |  |
+| `stop_requested` | boolean | 是 |  |
+| `prompt_tokens` | integer（int64，可空） | 否 |  |
+| `completion_tokens` | integer（int64，可空） | 否 |  |
+| `total_tokens` | integer（int64，可空） | 否 |  |
+| `cached_tokens` | integer（int64，可空） | 否 |  |
+| `usage_complete` | boolean | 是 | false 表示上游未报 usage（缺失与零严格区分） |
+| `error_code` | string（可空） | 否 |  |
+| `error_message` | string（可空） | 否 |  |
+| `created_at` | string（date-time） | 是 |  |
+| `started_at` | string（date-time，可空） | 否 |  |
+| `finished_at` | string（date-time，可空） | 否 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 404 | 资源不存在（40400-40499） |
+| 409 | 运行状态已变化（40928） |
 | 500 | 服务器内部错误（50000） |
 
 ### PUT `/api/bots/{id}/schedule-tasks/{taskId}/enabled`
@@ -9735,6 +10036,7 @@ models 为 /models 列表尽力拉取的模型 id（拉取失败不填充，不�
 | `base_url` | string | 否 | custom / 缺省 catalog_id 时必填 |
 | `api_key` | string | 是 |  |
 | `model` | string | 否 | 缺省用目录里第一个模型；custom 必须提供 |
+| `provider_id` | string | 否 | 已存提供商 id（可选）：测试通过时服务端清除该提供商的定时任务熔断 |
 
 **成功响应**
 
@@ -9757,6 +10059,7 @@ models 为 /models 列表尽力拉取的模型 id（拉取失败不填充，不�
 | --- | --- |
 | 400 | 请求参数无效（40001-40099） |
 | 401 | 未提供或提供无效凭证（40100-40199） |
+| 404 | provider_id 不存在或不属于当前用户（40433） |
 | 500 | 服务器内部错误（50000） |
 
 ### GET `/api/ai-providers/catalog`
@@ -10472,6 +10775,8 @@ expired/denied/invalid 为终态，error 给用户可读原因，前端提示重
 | `items[].email` | string | 是 |  |
 | `items[].avatar_url` | string | 是 | 形如 /api/avatars/:uid/:filename，未设置为空串 |
 | `items[].role` | string（enum: admin \| member） | 是 | 用户角色（INT-129）：admin 可管理成员、邀请与部署设置；member 只能使用自己的资源。角色只存库，服务端每请求查库判定，不写进 JWT |
+| `items[].timezone` | string | 是 | 用户 IANA 时区（INT-138）；空串表示未声明，机器人按部署配置回退 |
+| `items[].effective_timezone` | string | 否 | 生效时区（INT-138）：timezone 非空时为它，否则为部署配置 bots.memory.timezone，再否则 UTC。/auth/me 会返回；成员列表不返回（省略） |
 | `items[].created_at` | string（date-time） | 是 |  |
 | `items[].updated_at` | string（date-time） | 是 |  |
 
@@ -10524,6 +10829,8 @@ expired/denied/invalid 为终态，error 给用户可读原因，前端提示重
 | `email` | string | 是 |  |
 | `avatar_url` | string | 是 | 形如 /api/avatars/:uid/:filename，未设置为空串 |
 | `role` | string（enum: admin \| member） | 是 | 用户角色（INT-129）：admin 可管理成员、邀请与部署设置；member 只能使用自己的资源。角色只存库，服务端每请求查库判定，不写进 JWT |
+| `timezone` | string | 是 | 用户 IANA 时区（INT-138）；空串表示未声明，机器人按部署配置回退 |
+| `effective_timezone` | string | 否 | 生效时区（INT-138）：timezone 非空时为它，否则为部署配置 bots.memory.timezone，再否则 UTC。/auth/me 会返回；成员列表不返回（省略） |
 | `created_at` | string（date-time） | 是 |  |
 | `updated_at` | string（date-time） | 是 |  |
 

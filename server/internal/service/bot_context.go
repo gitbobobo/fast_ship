@@ -195,12 +195,16 @@ type botUsageBaseline struct {
 	Model             string
 }
 
-// botRuntimeContext 是末尾运行时上下文（易变内容只出现在这里）。
+// botRuntimeContext 是末尾运行时上下文（易变内容只出现在这里）。UserTimezone
+// 与 CurrentTimeLocal 是机器人归属用户的当地视角（INT-138）：模型说「今天早上」
+// 时按用户时区理解，不必自己换算。
 type botRuntimeContext struct {
-	Note           string            `json:"note"`
-	CurrentTimeUTC string            `json:"current_time_utc"`
-	RunID          string            `json:"run_id"`
-	PendingInputs  []botPendingInput `json:"pending_inputs,omitempty"`
+	Note             string            `json:"note"`
+	CurrentTimeUTC   string            `json:"current_time_utc"`
+	UserTimezone     string            `json:"user_timezone"`
+	CurrentTimeLocal string            `json:"current_time_local"`
+	RunID            string            `json:"run_id"`
+	PendingInputs    []botPendingInput `json:"pending_inputs,omitempty"`
 }
 
 type botPendingInput struct {
@@ -298,16 +302,23 @@ func (s *BotService) buildRunContextWith(bot *model.Bot, run *model.BotRun, over
 	if err != nil {
 		return nil, errs.ErrInternal
 	}
-	projected, rows, _, err := botProjectMessages(rawRows, sess.Folded, nonce)
+	projected, rows, _, err := botProjectMessages(rawRows, sess.Folded, nonce, sess.State.LifecycleRenderVersion >= 1)
 	if err != nil {
 		return nil, err
 	}
 	messages = append(messages, projected...)
 
 	// 6. 本轮运行时上下文（末尾；当前时间、待处理输入等易变内容只在这里）。
+	// 用户时区与当地时间（INT-138）也只出现在这里，不影响前缀哈希。
+	tzName, tzLoc := s.botOwnerTimezoneOf(bot)
+	// 只取一次 now：UTC 与当地时间必须描述同一时刻，跨秒（甚至跨当地日期）
+	// 的两次采样会让模型看到互相矛盾的两个「现在」。
+	now := time.Now()
 	rt := botRuntimeContext{
-		CurrentTimeUTC: time.Now().UTC().Format(time.RFC3339),
-		RunID:          run.ID,
+		CurrentTimeUTC:   now.UTC().Format(time.RFC3339),
+		UserTimezone:     tzName,
+		CurrentTimeLocal: botLocalStamp(now, tzLoc),
+		RunID:            run.ID,
 	}
 	for _, row := range rows {
 		if row.Seq > run.InputThroughSeq && row.Kind.IsModelInput() {
@@ -436,10 +447,17 @@ func botFoldedReference(callID string, items, chars int64) string {
 
 // botProjectMessages 把账本行投影为协议消息：折叠映射替换大结果、assistant
 // 工具调用与 tool 回复块保持连续、未闭合块拒绝发请求。只依赖入参，主线与
+// botProjectMessages 把账本行投影为协议消息：折叠映射替换大结果、assistant
+// 工具调用与 tool 回复块保持连续、未闭合块拒绝发请求。只依赖入参，主线与
 // 定时任务（INT-103）构建共用同一段投影，保证输出形状一致。nonce 非空时
-// 平台消息前缀带该值（INT-136 围栏渲染）；空串走旧渲染、逐字节不变。返回
-// 投影后的消息数组、（裁剪孤儿回复后的）原始行与待处理输入列表。
-func botProjectMessages(rows []model.BotMessage, folded map[string]string, nonce string) (
+// 平台消息前缀带该值（INT-136 围栏渲染）；空串走旧渲染、逐字节不变。
+// legacyToolsetAsUser 控制「无 render 标记的旧 toolset_updated」的角色
+// （INT-137 R6）：主线按 LifecycleRenderVersion 传入——压缩发布（>=1）后仍
+// 留在投影里的旧消息改按 user 角色（system 已不在开头，部分兼容后端拒绝）；
+// 未发布过压缩传 false 保持 system，prefix_hash 不变。定时会话无前缀缓存
+// 顾虑，恒传 true。返回投影后的消息数组、（裁剪孤儿回复后的）原始行与待
+// 处理输入列表。
+func botProjectMessages(rows []model.BotMessage, folded map[string]string, nonce string, legacyToolsetAsUser bool) (
 	[]openai.ChatCompletionMessageParamUnion, []model.BotMessage, []botPendingInput, error,
 ) {
 	// 窗口起点对齐协议块：滑窗起点可能落在一个 tool 回复块中间（assistant
@@ -556,8 +574,15 @@ func botProjectMessages(rows []model.BotMessage, folded map[string]string, nonce
 			raw, _ := json.Marshal(content)
 			var msg openai.ChatCompletionMessageParamUnion
 			switch {
-			case content.Event == "toolset_updated":
+			case content.Event == "toolset_updated" && content.Render != "user" && !legacyToolsetAsUser:
+				// 旧消息：保持原文 system 角色，既有会话的 prefix_hash 在压缩
+				// 边界之前不变（INT-137 R6）。nonce 为空时前缀与旧文案逐字节
+				// 一致（INT-136）。
 				msg = openai.SystemMessage(botPlatformPrefix(nonce, "工具集变更") + " 以下是平台可信系统事件（非用户发言）：\n" + string(raw))
+			case content.Event == "toolset_updated":
+				// 新消息按 user 角色投影（INT-137 R6）：内容是平台自己生成的静态
+				// 变更说明，属于可信事件，不围栏（INT-136 的平台可信豁免）。
+				msg = openai.UserMessage(botPlatformPrefix(nonce, "平台事件") + " 以下是平台生命周期事件（非用户发言）：\n" + string(raw))
 			case content.Event == "legacy_schedule_review" && nonce != "":
 				// 复核提示里的任务名等字段来自存量任务数据（模型可写、可能
 				// 被注入）：不能借平台前缀取得指令权，与 schedule_event

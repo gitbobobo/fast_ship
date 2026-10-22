@@ -98,6 +98,9 @@ const (
 	// BotTriggerManual 是手动立即触发（fs_schedule run，INT-121）：显式单次
 	// 执行，不占 cron 计划，不要求任务启用。
 	BotTriggerManual BotRunTrigger = "manual"
+	// BotTriggerScheduleEvent 是定时任务运行事件写入主线后的立即唤醒
+	// （INT-138）：schedule_event 落库即唤醒，不再等 5s 扫描兜底。
+	BotTriggerScheduleEvent BotRunTrigger = "schedule_event"
 )
 
 // 会话判别：主线（main）与定时任务（schedule）共用 bot_runs/bot_messages

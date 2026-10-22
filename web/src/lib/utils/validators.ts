@@ -25,6 +25,7 @@ export const projectSchema = z.object({
   name: z.string().min(1, "请输入项目名称").max(100),
   description: z.string().optional(),
   repository_url: z.string().optional(),
+  code_repository_url: z.string().optional(),
   public_github_token_id: z.string().optional(),
   code_github_token_id: z.string().optional(),
 });
@@ -33,6 +34,7 @@ export const projectEditSchema = z.object({
   name: z.string().min(1, "请输入项目名称").max(100),
   description: z.string().optional(),
   repository_url: z.string().optional(),
+  code_repository_url: z.string().optional(),
   public_github_token_id: z.string().optional(),
   code_github_token_id: z.string().optional(),
 });

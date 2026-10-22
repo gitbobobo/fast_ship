@@ -37,6 +37,9 @@ type BotService struct {
 	authz      *repository.BotAuthorizationRepository
 	schedTasks *repository.BotScheduleTaskRepository
 	windows    *repository.BotWindowRepository
+	// users 只读用户时区（INT-138）：定时任务默认时区、运行时上下文与夜间
+	// 整理都按机器人归属用户的时区计算。
+	users *repository.UserRepository
 
 	projects *ProjectService
 	issues   *IssueService
@@ -90,6 +93,7 @@ func NewBotService(
 		authz:      repository.NewBotAuthorizationRepository(db),
 		schedTasks: repository.NewBotScheduleTaskRepository(db),
 		windows:    repository.NewBotWindowRepository(db),
+		users:      repository.NewUserRepository(db),
 		projects:   projects,
 		issues:     issues,
 		threads:    threads,

@@ -78,6 +78,16 @@ func (s *ProjectService) Create(userID string, req *CreateProjectRequest) (*Proj
 		}
 	}
 
+	// 代码仓库（PR 审查用）：解析后落 code 字段；与公开仓库相同的归一在
+	// normalizeCodeRepo 统一做（与 Update 同一条规则）。
+	var codeOwner, codeRepo string
+	if codeURL := api.Deref(req.CodeRepositoryUrl); codeURL != "" {
+		codeOwner, codeRepo, err = parseRepositoryURL(codeURL)
+		if err != nil {
+			return nil, errs.New(errs.ErrInvalidParams.Code, errs.ErrInvalidParams.Message+": "+err.Error())
+		}
+	}
+
 	// 引用必须属于当前用户；仓库与 Token 相互独立，可只填仓库不选 Token。
 	publicTokenID := api.Deref(req.PublicGithubTokenId)
 	codeTokenID := api.Deref(req.CodeGithubTokenId)
@@ -95,9 +105,13 @@ func (s *ProjectService) Create(userID string, req *CreateProjectRequest) (*Proj
 		Description:         api.Deref(req.Description),
 		GithubOwner:         owner,
 		GithubRepo:          repo,
+		CodeGithubOwner:     codeOwner,
+		CodeGithubRepo:      codeRepo,
 		PublicGitHubTokenID: publicTokenID,
 		CodeGitHubTokenID:   codeTokenID,
 	}
+
+	normalizeCodeRepo(project)
 
 	if err := s.projectRepo.Create(project); err != nil {
 		if errors.Is(err, repository.ErrGitHubTokenMissing) {
@@ -166,24 +180,30 @@ func (s *ProjectService) List(userID string, page, pageSize int) ([]ProjectRespo
 	return resp, total, nil
 }
 
-// TokenRefUpdate 表达项目更新请求里 Token 引用字段的三态：
+// OptionalStringUpdate 表达项目更新请求里可选字符串字段的三态：
 // Set=false（JSON key 缺省）保留现值；Set=true 且 Value 为空（显式 null 或空串）
-// 清空该用途引用；Set=true 且 Value 非空替换。*string 表达不了三态——
-// 显式 null 与 key 缺省解引用后都是 nil，而两者语义相反（清空 vs 保留）。
-type TokenRefUpdate struct {
+// 清空；Set=true 且 Value 非空替换。*string 表达不了三态——显式 null 与 key
+// 缺省解引用后都是 nil，而两者语义相反（清空 vs 保留）。
+type OptionalStringUpdate struct {
 	Set   bool
 	Value string
 }
 
+// TokenRefUpdate 是 OptionalStringUpdate 的旧名（Token 引用字段最先用它），
+// 保留别名避免改动既有调用点。
+type TokenRefUpdate = OptionalStringUpdate
+
 // UpdateProjectRequest 是项目更新的 service 入参，不再别名到 api.UpdateProjectRequest：
-// 两个 Token 引用字段需三态（见 TokenRefUpdate），其余字段沿用生成类型的指针语义；
-// handler 的手写 updateProjectInput 负责把 RawMessage 旁路解析成这里的三态。
+// Token 引用与代码仓库字段需三态（见 OptionalStringUpdate），其余字段沿用生成
+// 类型的指针语义；handler 的手写 updateProjectInput 负责把 RawMessage 旁路解析
+// 成这里的三态。
 type UpdateProjectRequest struct {
 	Name                *string
 	Description         *string
 	RepositoryUrl       *string
-	PublicGithubTokenId TokenRefUpdate
-	CodeGithubTokenId   TokenRefUpdate
+	CodeRepositoryUrl   OptionalStringUpdate
+	PublicGithubTokenId OptionalStringUpdate
+	CodeGithubTokenId   OptionalStringUpdate
 }
 
 func (s *ProjectService) Update(id, userID string, req *UpdateProjectRequest) (*ProjectResponse, error) {
@@ -219,6 +239,26 @@ func (s *ProjectService) Update(id, userID string, req *UpdateProjectRequest) (*
 		project.GithubOwner = owner
 		project.GithubRepo = repo
 	}
+
+	// 代码仓库三态：key 缺省保留、显式空清空（回落公开仓库）、非空替换。
+	// 与公开仓库相同的归一在下面应用完全部仓库字段后统一做。
+	if req.CodeRepositoryUrl.Set {
+		if req.CodeRepositoryUrl.Value != "" {
+			owner, repo, err := parseRepositoryURL(req.CodeRepositoryUrl.Value)
+			if err != nil {
+				return nil, errs.New(errs.ErrInvalidParams.Code, errs.ErrInvalidParams.Message+": "+err.Error())
+			}
+			project.CodeGithubOwner = owner
+			project.CodeGithubRepo = repo
+		} else {
+			project.CodeGithubOwner = ""
+			project.CodeGithubRepo = ""
+		}
+	}
+
+	// 归一收尾：公开与代码仓库字段都已应用完（含请求不带 code key、只改
+	// 公开仓库撞上存量 code 仓库的情形），同一规则统一判一次。
+	normalizeCodeRepo(project)
 
 	// Token 引用三态：key 缺省保留、显式空清空、非空替换（须属于当前用户）。
 	if req.PublicGithubTokenId.Set {
@@ -304,6 +344,16 @@ func (s *ProjectService) GetBranches(ctx context.Context, id, userID string) ([]
 	return resp, defaultBranch, nil
 }
 
+// normalizeCodeRepo 归一收尾：代码仓库与公开仓库大小写不敏感相同时清空 code
+// 字段（空 = 同公开仓库，规范存储不存冗余值）。必须在应用完全部仓库字段之后
+// 调用，Create/Update 共用这一条规则，写侧不另设第二处归一判断。
+func normalizeCodeRepo(p *model.Project) {
+	if p.CodeGithubOwner != "" && strings.EqualFold(
+		p.CodeGithubOwner+"/"+p.CodeGithubRepo, p.GithubOwner+"/"+p.GithubRepo) {
+		p.CodeGithubOwner, p.CodeGithubRepo = "", ""
+	}
+}
+
 func parseRepositoryURL(raw string) (owner, repo string, err error) {
 	s := strings.TrimSpace(raw)
 	if s == "" {
@@ -348,6 +398,8 @@ func (s *ProjectService) toResponse(p *model.Project) *ProjectResponse {
 		Description:         p.Description,
 		GithubOwner:         p.GithubOwner,
 		GithubRepo:          p.GithubRepo,
+		CodeGithubOwner:     p.CodeGithubOwner,
+		CodeGithubRepo:      p.CodeGithubRepo,
 		PublicGithubTokenId: p.PublicGitHubTokenID,
 		CodeGithubTokenId:   p.CodeGitHubTokenID,
 		CreatedAt:           p.CreatedAt.Format("2006-01-02T15:04:05Z"),

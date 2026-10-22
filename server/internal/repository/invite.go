@@ -17,13 +17,6 @@ func NewInviteRepository(db *gorm.DB) *InviteRepository {
 	return &InviteRepository{db: db}
 }
 
-// Transaction 以短事务执行 fn（注册的用户创建 + 邀请消费必须整体提交或回滚）。
-// 闭包内只用 tx 句柄与显式收句柄的 Tx 方法，不得触碰池根——单连接池下再借
-// 第二条连接会永久自锁，见 docs/internal/database.md。
-func (r *InviteRepository) Transaction(fn func(tx *gorm.DB) error) error {
-	return r.db.Transaction(fn)
-}
-
 func (r *InviteRepository) Create(invite *model.Invite) error {
 	return r.CreateTx(r.db, invite)
 }

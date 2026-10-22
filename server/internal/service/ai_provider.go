@@ -101,6 +101,9 @@ type TestAIProviderRequest struct {
 	BaseURL   *string `json:"base_url,omitempty"`
 	APIKey    *string `json:"api_key"`
 	Model     *string `json:"model,omitempty"`
+	// ProviderID 可选：指向一条已存在的 provider 时校验归属，探测成功后清除
+	// 该 provider 的定时任务熔断（INT-137）。探测参数仍只来自请求体。
+	ProviderID *string `json:"provider_id,omitempty"`
 }
 
 // ---------- 目录 ----------
@@ -214,6 +217,7 @@ func (s *AIProviderService) Create(userID string, req *CreateAIProviderRequest) 
 		APIKeyLast4:     last4,
 		CreatedAt:       now,
 		UpdatedAt:       now,
+		ConfigVersionAt: &now,
 	}
 	if err := s.providers.Create(p); err != nil {
 		return nil, errs.ErrInternal
@@ -250,6 +254,7 @@ func (s *AIProviderService) Update(userID, id string, req *UpdateAIProviderReque
 			}
 			return errs.ErrInternal
 		}
+		baseURLBefore := p.BaseURL
 		if req.Name != nil {
 			name := strings.TrimSpace(*req.Name)
 			if name == "" {
@@ -269,8 +274,18 @@ func (s *AIProviderService) Update(userID, id string, req *UpdateAIProviderReque
 			p.APIKeyLast4 = newLast4
 		}
 		p.UpdatedAt = time.Now().UTC()
-		if err := repo.UpdateConfigTx(tx, p, req.APIKey != nil); err != nil {
+		// 只有真正改了凭证/地址才算「配置变更」：只为改名字提交 base_url 不
+		// 推进配置版本（也就不会放过旧凭证的迟到失败）。
+		credsChanged := req.APIKey != nil || (req.BaseURL != nil && p.BaseURL != baseURLBefore)
+		if err := repo.UpdateConfigTx(tx, p, req.APIKey != nil, credsChanged); err != nil {
 			return errs.ErrInternal
+		}
+		// 改了凭证或地址即视为恢复动作（INT-137）：与更新同一事务清除定时
+		// 任务熔断，下一次到点正常派发。
+		if credsChanged {
+			if err := repo.ClearCircuitTx(tx, id); err != nil {
+				return errs.ErrInternal
+			}
 		}
 		updated = p
 		return nil
@@ -335,7 +350,24 @@ func (s *AIProviderService) responseOf(p *model.AIProvider, botCount int64) AIPr
 // 不写入主线、不落任何配置。目录提供商的地址由目录决定；model 缺省用目录里
 // 第一个模型，custom 必须显式给 model。探测不涉及任何用户数据，端点仅以 JWT
 // 做准入。
-func (s *AIProviderService) Test(req *TestAIProviderRequest) (*ProviderTestResult, error) {
+//
+// 请求带 provider_id 时先校验归属（非本用户即 404），探测成功则清除该
+// provider 的定时任务熔断（INT-137）；不给 provider_id 保持纯探测。
+func (s *AIProviderService) Test(userID string, req *TestAIProviderRequest) (*ProviderTestResult, error) {
+	providerID := strings.TrimSpace(derefOr(req.ProviderID))
+	// providerRow 是「本次探测实际验证的那份已存配置」：探测成功后只在它没被
+	// 用户改动时清除熔断 / 标记已验证，避免迟到的探测结果作用到另一份配置。
+	var providerRow *model.AIProvider
+	if providerID != "" {
+		p, err := s.providers.FindByIDAndUser(providerID, userID)
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil, errs.ErrAIProviderNotFound
+			}
+			return nil, errs.ErrInternal
+		}
+		providerRow = p
+	}
 	apiKey := strings.TrimSpace(derefOr(req.APIKey))
 	if apiKey == "" {
 		return nil, errs.New(errs.ErrInvalidParams.Code, "api_key 必填")
@@ -394,7 +426,31 @@ func (s *AIProviderService) Test(req *TestAIProviderRequest) (*ProviderTestResul
 	checks = append(checks, ConnectionCheckResult{Name: "streaming", Passed: streamOK, Detail: streamDetail})
 	checks = append(checks, ConnectionCheckResult{Name: "tool_call", Passed: toolOK, Detail: toolDetail})
 
-	return &ProviderTestResult{Ok: streamOK && toolOK, Checks: checks, Models: models}, nil
+	result := &ProviderTestResult{Ok: streamOK && toolOK, Checks: checks, Models: models}
+	if result.Ok && providerID != "" {
+		// 用户测通了凭证：恢复该 provider 的定时任务调度（清除熔断）。但只有
+		// 探测用的密钥与库存一致时才清——测的是新密钥（尚未保存）说明用户
+		// 正在排障，此时清掉熔断会让旧密钥的定时任务立刻恢复打上游；保存
+		// 路径（Update 提供 api_key）自会清除。清除失败只记日志，不回滚
+		// 已成功的探测结果。
+		matches, err := s.apiKeyMatchesStored(providerID, apiKey)
+		if err != nil {
+			s.logger.Warn("比对 provider 库存密钥失败", zap.String("provider_id", providerID), zap.Error(err))
+		} else if providerRow.BaseURL != baseURL {
+			// 探测的是另一个地址（用户正在改地址），不能据此认定已存配置可用。
+			s.logger.Info("探测地址与已存配置不一致，跳过清除熔断", zap.String("provider_id", providerID))
+		} else if matches {
+			// 条件更新：地址与配置版本必须仍是探测时那一份（迁移前创建的
+			// provider 没有版本，用 base_url 认定），否则放弃这次恢复动作。
+			ok, err := s.providers.MarkConfigVerified(providerID, providerRow.BaseURL, providerRow.ConfigVersionAt, time.Now().UTC())
+			if err != nil {
+				s.logger.Warn("清除 provider 熔断失败", zap.String("provider_id", providerID), zap.Error(err))
+			} else if !ok {
+				s.logger.Info("探测期间 provider 配置已变更，跳过清除熔断", zap.String("provider_id", providerID))
+			}
+		}
+	}
+	return result, nil
 }
 
 // providerProbeModelIDs 尽力拉取 {baseURL}/models 的模型 id 列表，仅用于测试
@@ -421,6 +477,20 @@ func providerValidBaseURL(raw string) bool {
 }
 
 // ---------- 密钥 ----------
+
+// apiKeyMatchesStored 报告明文 key 是否与库存密文解密后一致：测试连接仅在
+// 密钥与库存一致时才清除熔断（INT-137）。provider 不存在返回 false 与 NotFound。
+func (s *AIProviderService) apiKeyMatchesStored(providerID, plain string) (bool, error) {
+	p, err := s.providers.GetByID(providerID)
+	if err != nil {
+		return false, err
+	}
+	stored, err := crypto.Decrypt(p.APIKeyEncrypted, []byte(s.cfg.Encryption.Key))
+	if err != nil {
+		return false, err
+	}
+	return string(stored) == plain, nil
+}
 
 func (s *AIProviderService) encryptAPIKey(plain string) ([]byte, string, error) {
 	cipher, err := crypto.Encrypt([]byte(plain), []byte(s.cfg.Encryption.Key))

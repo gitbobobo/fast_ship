@@ -32,28 +32,35 @@ const reviewDeliveryRetention = 7 * 24 * time.Hour
 type reviewT3 interface {
 	CreateThreadForAgent(ctx context.Context, userID, envID string, req *T3CreateThreadRequest) (*T3ThreadLaunchResult, bool, error)
 	StopThread(ctx context.Context, userID, envID, threadID string) (*T3ThreadStopResult, error)
-	ListWorktreePaths(ctx context.Context, userID, envID, projectID string) ([]string, error)
+	ThreadWorktree(ctx context.Context, userID, envID, threadID string) (*T3ThreadWorktree, error)
+	ListWorktrees(ctx context.Context, userID, envID, cwd string) ([]T3Worktree, error)
 	RemoveWorktree(ctx context.Context, userID, envID, cwd, path string, force bool) error
 	ArchiveThread(ctx context.Context, userID, envID, threadID string) error
+	// FailedPreparation 判读线程是否处于可重试的工作区准备失败态；
+	// RetryPreparation 代发 prepared-run.retry（INT-147）。
+	FailedPreparation(ctx context.Context, userID, envID, threadID, messageID string) (*T3FailedPreparation, error)
+	RetryPreparation(ctx context.Context, userID, envID, threadID, t3RunID, commandID string) error
 }
 
-// reviewMedia 视觉截图下载面；*githubmedia.ProxyService 实现（白名单+磁盘缓存，
-// 匿名与 Bearer 两路）。
+// reviewMedia 截图下载面：任意公网 https 图片、只收图片、拨号校验 IP；磁盘
+// 缓存。*githubmedia.ProxyService（NewReviewMediaService 构造）实现，匿名与
+// Bearer 两路。
 type reviewMedia interface {
 	FetchAndCache(ctx context.Context, rawURL string) (*githubmedia.CachedMedia, error)
-	FetchAndCacheWithBearer(ctx context.Context, rawURL, bearer string) (*githubmedia.CachedMedia, error)
+	FetchAndCacheWithBearer(ctx context.Context, rawURL, bearer, scope string) (*githubmedia.CachedMedia, error)
 }
 
 // ReviewService PR 审查协调面：webhook 事务（幂等登记与防抖写库）与调度循环
 // 驱动共用。事务内零 GitHub/T3 调用；提交后非阻塞 kick。1b 起的审查设置/
 // 记录查询也挂在本服务上：gh、appSource、publicURL 服务于读/写面与 GitHub 产出。
 type ReviewService struct {
-	db         *gorm.DB
-	projects   *repository.ProjectRepository
-	deliveries *repository.GitHubWebhookDeliveryRepository
-	sink       *NotificationSink
-	cfg        *config.Config
-	logger     *zap.Logger
+	db           *gorm.DB
+	projects     *repository.ProjectRepository
+	deliveries   *repository.GitHubWebhookDeliveryRepository
+	redeliveries *repository.GitHubWebhookRedeliveryRepository
+	sink         *NotificationSink
+	cfg          *config.Config
+	logger       *zap.Logger
 
 	// gh 是 App 安装令牌访问面；appSource 回答部署是否配置了 App 身份；
 	// publicURL 回答部署对外地址。三者均可为 nil——对应前置条件按缺失处理。
@@ -73,13 +80,23 @@ type ReviewService struct {
 	kickCh chan struct{}
 	cancel chan struct{}
 
-	// worktreeBaseline：launch 前的已知工作区路径集合，只在 launch 确认后的
-	// 有界窗口内做「新增即本次」差集（回收阶段不再用它猜路径）。
-	// worktreeTries：归档等回收阶段的有限重试计数。
-	// 两者进程内即可：进程重启后未解析的行按「无法证明归属」失败处理（不漏通知）。
-	worktreeMu       sync.Mutex
-	worktreeBaseline map[string][]string
-	worktreeTries    map[string]int
+	// worktreeTries：归档/工作区读取等回收阶段的有限重试计数（进程内即可：
+	// 进程重启后未完成的行下个 tick 重新计，上限内不会漏终态）。
+	worktreeMu    sync.Mutex
+	worktreeTries map[string]int
+
+	// prepRetryChecked 准备失败检测的查询节流表（INT-147）：每运行最多每
+	// reviewPrepRetryQueryEvery 查一次 T3 投影。进程内即可（重启丢失顶多多
+	// 查一轮）；注册新项时顺手清过期项，不留无界增长。
+	// prepRetryCursor 记住上一次扫描停在哪条运行上：阶段预算耗尽后下一轮
+	// 从它的下一条继续（环形），避免队首几条反复吃满预算、尾部饿到超时。
+	prepRetryMu      sync.Mutex
+	prepRetryChecked map[string]time.Time
+	prepRetryCursor  string
+	// prepRetryReadTimeout / prepRetryRPCTimeout 覆盖默认超时（零值用常量）：
+	// 测试注入小超时，验证「投影读与重试 RPC 各用独立预算」。
+	prepRetryReadTimeout time.Duration
+	prepRetryRPCTimeout  time.Duration
 
 	// prLocks 每 PR 一把进程内锁：同一 PR 的 GitHub 同步串行，避免并发重复写。
 	prLocksMu sync.Mutex
@@ -107,11 +124,12 @@ func NewReviewService(
 ) *ReviewService {
 	return &ReviewService{
 		db: db, projects: projects, deliveries: deliveries,
-		sink: sink, gh: gh, appSource: appSource, publicURL: publicURL,
+		redeliveries: repository.NewGitHubWebhookRedeliveryRepository(db),
+		sink:         sink, gh: gh, appSource: appSource, publicURL: publicURL,
 		t3: t3, media: media, mediaBearer: mediaBearer,
 		cfg: cfg, logger: logger,
-		worktreeBaseline: map[string][]string{},
 		worktreeTries:    map[string]int{},
+		prepRetryChecked: map[string]time.Time{},
 		prLocks:          map[string]*sync.Mutex{},
 		projectLocks:     map[string]*sync.Mutex{},
 	}

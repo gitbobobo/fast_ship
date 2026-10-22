@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -139,6 +140,7 @@ func (s *BotService) dispatchDueScheduleTask(task *model.BotScheduleTask, now ti
 	planned := *task.NextRunAt
 	wakeRunID := ""
 	appendedEvent := false
+	eventRunID := ""
 	txErr := s.db.Transaction(func(tx *gorm.DB) error {
 		var current model.BotScheduleTask
 		if err := tx.Where("id = ? AND enabled = ?", task.ID, true).First(&current).Error; err != nil {
@@ -168,6 +170,20 @@ func (s *BotService) dispatchDueScheduleTask(task *model.BotScheduleTask, now ti
 			snap.Model = current.Model
 		}
 
+		// provider 熔断（INT-137）：认证失效/额度用完打开的窗口内，到点不再
+		// 发起模型请求，直接记 skipped。事务内只读库，不发网络。
+		var circuit *model.AIProvider
+		if botRow.ProviderID != "" {
+			p, err := repository.NewAIProviderRepository(tx).GetByID(botRow.ProviderID)
+			if err != nil {
+				if !errors.Is(err, gorm.ErrRecordNotFound) {
+					return err
+				}
+			} else if p.CircuitOpenUntil != nil && p.CircuitOpenUntil.After(now) {
+				circuit = p
+			}
+		}
+
 		run := &model.BotRun{
 			ID: uuid.NewString(), BotID: current.BotID,
 			TriggerSource: model.BotTriggerSchedule,
@@ -184,7 +200,14 @@ func (s *BotService) dispatchDueScheduleTask(task *model.BotScheduleTask, now ti
 		run.ScheduledFor = &planned
 		run.ConfigSnapshotJSON = marshalJSONString(snap)
 		missed := now.Sub(planned) > botScheduleMissGrace
-		if missed {
+		if circuit != nil {
+			// 熔断中到点：不执行任务，与「错过」同型落 skipped 终态；摘要
+			// 写明原因、自动恢复时间与手动恢复方式。
+			run.Status = model.BotRunStatusSkipped
+			run.Summary = botCircuitSkipSummary(circuit)
+			finished := now
+			run.FinishedAt = &finished
+		} else if missed {
 			// 错过的计划时间：跳过并记录，不执行、不补跑；直接落终态。
 			run.Status = model.BotRunStatusSkipped
 			// 写明原定计划时间：跨越很长停机时次数不会逐个补记，至少留得住
@@ -218,8 +241,17 @@ func (s *BotService) dispatchDueScheduleTask(task *model.BotScheduleTask, now ti
 			}
 			return err
 		}
-		if !missed {
+		if !missed && circuit == nil {
 			wakeRunID = run.ID
+		} else if circuit != nil {
+			// 熔断期间不逐次打扰主线：同一次熔断只留一条去重事件（含
+			// needs_report 的任务也一样），后续到点只记 skipped run。
+			appended, err := s.appendCircuitScheduleEventTx(tx, current.BotID, &current, run, circuit, now)
+			if err != nil {
+				return err
+			}
+			appendedEvent = appended
+			eventRunID = run.ID
 		} else if current.NeedsReport {
 			// 需要汇报的任务：跳过也是一次「没跑」，不能零信号。一条停机只记
 			// 一条，不会刷屏。
@@ -228,6 +260,7 @@ func (s *BotService) dispatchDueScheduleTask(task *model.BotScheduleTask, now ti
 				return err
 			}
 			appendedEvent = true
+			eventRunID = run.ID
 		}
 
 		// CAS 推进 next_run_at 到严格晚于 now 的下一次；0 行 = 被并发抢走。
@@ -252,6 +285,7 @@ func (s *BotService) dispatchDueScheduleTask(task *model.BotScheduleTask, now ti
 		// 跳过事件已落账本，但本路径没有别的发布点：不 publish 的话订阅方要等
 		// 下一次别的事件才看得到这一行。
 		s.publishEvent(task.BotID)
+		s.wakeScheduleEvent(task.BotID, eventRunID, model.BotRunStatusSkipped)
 	}
 }
 
@@ -259,6 +293,130 @@ func (s *BotService) dispatchDueScheduleTask(task *model.BotScheduleTask, now ti
 // 一次 run。
 func botScheduleTriggerKey(taskID string, planned time.Time) string {
 	return "schedule:" + taskID + ":" + planned.UTC().Format(time.RFC3339Nano)
+}
+
+// wakeScheduleEvent 在定时任务运行事件（schedule_event）提交进主线后立即
+// 唤醒主线（INT-138），5s 扫描仍作兜底。Key 用 runID+status 幂等：同一运行
+// 同一终态的重复唤醒撞上 (bot_id, trigger_key) 唯一约束，不会重复建 run。
+func (s *BotService) wakeScheduleEvent(botID, runID string, status model.BotRunStatus) {
+	s.wakeRuntime(botID, botWake{
+		Trigger: model.BotTriggerScheduleEvent,
+		Key:     "schedule_event:" + runID + ":" + string(status),
+	})
+}
+
+// ---------- provider 熔断（INT-137） ----------
+
+// botProviderCircuitDedupKey 是一次熔断的主线事件去重键：同一 provider 同一
+// 截止时间视为同一次熔断，窗口内多次到点只追加一条事件。
+func botProviderCircuitDedupKey(providerID string, until time.Time) string {
+	return fmt.Sprintf("circuit:provider:%s:%d", providerID, until.UTC().Unix())
+}
+
+// botCircuitReasonText 把熔断原因分类码翻成给用户看的中文短语。
+func botCircuitReasonText(code string) string {
+	switch code {
+	case botModelErrAuthFailed:
+		return "认证失败：密钥无效或已失效"
+	case botModelErrQuotaExhausted:
+		return "额度已用完或余额不足"
+	default:
+		return "暂时不可用"
+	}
+}
+
+// botCircuitSkipSummary 是熔断跳过的 run 摘要：写明原因、自动恢复时间
+// （窗口过后到点照常派发）与手动恢复方式。
+func botCircuitSkipSummary(p *model.AIProvider) string {
+	return "AI 提供商" + botCircuitReasonText(p.CircuitReason) +
+		"，已暂停定时任务（熔断至 " + p.CircuitOpenUntil.UTC().Format("2006-01-02 15:04") +
+		"）；在设置页更新密钥并测试连接成功后恢复"
+}
+
+// appendCircuitScheduleEventTx 在调用方事务内向主线追加「定时任务因熔断被
+// 跳过」的事件；dedup_key 钉在这次熔断上，同一熔断窗口内多次到点只留一条
+// （唯一索引兜底，预查走常规路径）。返回是否真正追加了消息。
+func (s *BotService) appendCircuitScheduleEventTx(tx *gorm.DB, botID string, task *model.BotScheduleTask, run *model.BotRun, p *model.AIProvider, now time.Time) (bool, error) {
+	dedup := botProviderCircuitDedupKey(p.ID, *p.CircuitOpenUntil)
+	msgs := repository.NewBotMessageRepository(tx)
+	if _, err := msgs.FindByDedupKey(botID, dedup); err == nil {
+		return false, nil
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return false, err
+	}
+	content := botScheduleEventContent{
+		TaskID: task.ID, TaskName: task.Name, RunID: run.ID,
+		Status: string(model.BotRunStatusSkipped), Summary: run.Summary,
+	}
+	raw, err := json.Marshal(content)
+	if err != nil {
+		return false, err
+	}
+	seq, err := s.bots.NextMessageSeqTx(tx, botID)
+	if err != nil {
+		return false, err
+	}
+	msg := &model.BotMessage{
+		ID: uuid.NewString(), BotID: botID, Seq: seq,
+		Kind: model.BotMessageKindScheduleEvent, ContentJSON: string(raw),
+		SessionKind: model.BotSessionKindMain, DedupKey: &dedup, CreatedAt: now,
+	}
+	if err := msgs.AppendTx(tx, msg); err != nil {
+		return false, err
+	}
+	if err := s.appendEventTx(tx, botID, nil, "", model.BotEventDelta, botEventEnvelope{
+		Kind:      "schedule_event",
+		MessageID: msg.ID,
+		Payload:   botMessageResponseOf(msg),
+	}); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// openProviderCircuitOnFailure 在 schedule run 因认证失效/额度用完落 failed
+// 终态后打开 provider 熔断：窗口内该提供商的定时任务到点直接记 skipped，
+// 不再反复打一个注定失败的上游。provider 取 run 派发时冻结的归属；打开前读
+// 一次 provider——运行期间用户已更新过凭证/地址（含测试连接/清除熔断）的话，
+// 这次失败针对的可能是已被换掉的旧配置，不再重新打开。窗口已开着时不延长、
+// 不换去重键；打开失败只记日志，不改变已落的 run 终态。
+func (s *BotService) openProviderCircuitOnFailure(bot *model.Bot, run *model.BotRun, code string) {
+	if !botCircuitTrippingCode(code) {
+		return
+	}
+	providerID := runProviderIDOf(run, bot)
+	if providerID == "" {
+		return
+	}
+	p, err := s.providers.GetByID(providerID)
+	if err != nil {
+		// provider 行已删除：没有可熔断的对象，跳过即可。
+		return
+	}
+	if run.StartedAt != nil && p.ConfigVersionAt != nil && p.ConfigVersionAt.After(*run.StartedAt) {
+		// 版本号为空的旧记录不参与判断（OpenCircuit 的 WHERE 同样放行 NULL）：
+		// 用 updated_at 兜底会让「只改名字」也阻止熔断。
+		return
+	}
+	// 配置版本条件同样写进 OpenCircuit 的 WHERE（检查与写入原子）：上面
+	// 的预检只是快速路径，真正防竞态的是那句 config_version_at <= 本 run
+	// 开始时刻。
+	configSince := time.Now().UTC()
+	if run.StartedAt != nil {
+		configSince = *run.StartedAt
+	}
+	opened, err := s.providers.OpenCircuit(providerID, time.Now().UTC().Add(s.cfg.Bots.Runtime.ProviderCircuitWindow()), code, configSince)
+	if err != nil {
+		s.logger.Warn("打开 provider 熔断失败",
+			zap.String("provider_id", providerID), zap.Error(err))
+		return
+	}
+	if !opened {
+		// 同一熔断窗口内的并行/重试失败：窗口与去重键保持不变，不重复记录。
+		return
+	}
+	s.logger.Info("provider 熔断已打开",
+		zap.String("provider_id", providerID), zap.String("reason", code))
 }
 
 // botScheduleTaskNameFromContext 取派发时记下的任务名；缺失时给一个可读占位，
@@ -348,6 +506,7 @@ func (s *BotService) runScheduleSlot(botID, runID string) {
 func (s *BotService) tryFinishScheduleRun(bot *model.Bot, run *model.BotRun) bool {
 	silent, summary := s.botSilentSummaryOf(bot.ID, run.ID)
 	finished := false
+	appendedEvent := false
 	txErr := s.db.Transaction(func(tx *gorm.DB) error {
 		// 本次运行自己的异步写还没结算（queued/running）时不收尾：晚到的结果
 		// 可能就是失败，是运行结果的一部分。等结算后循环会重建上下文。
@@ -394,8 +553,11 @@ func (s *BotService) tryFinishScheduleRun(bot *model.Bot, run *model.BotRun) boo
 				return err
 			}
 			if needsReport {
-				return s.appendScheduleEventTx(tx, bot.ID, &task, run,
-					model.BotRunStatusCompleted, summary, "", "", now)
+				if err := s.appendScheduleEventTx(tx, bot.ID, &task, run,
+					model.BotRunStatusCompleted, summary, "", "", now); err != nil {
+					return err
+				}
+				appendedEvent = true
 			}
 		}
 		return nil
@@ -406,6 +568,9 @@ func (s *BotService) tryFinishScheduleRun(bot *model.Bot, run *model.BotRun) boo
 	}
 	if finished {
 		s.publishEvent(bot.ID)
+		if appendedEvent {
+			s.wakeScheduleEvent(bot.ID, run.ID, model.BotRunStatusCompleted)
+		}
 	}
 	return finished
 }
@@ -416,6 +581,7 @@ func (s *BotService) finishScheduleFailed(bot *model.Bot, run *model.BotRun, cod
 	msg := botErrMessage(cause)
 	_, summary := s.botSilentSummaryOf(bot.ID, run.ID)
 	ok := false
+	appendedEvent := false
 	txErr := s.db.Transaction(func(tx *gorm.DB) error {
 		var err error
 		ok, err = repository.NewBotRunRepository(tx).UpdateColumnsWhereTx(tx, run.ID,
@@ -460,15 +626,23 @@ func (s *BotService) finishScheduleFailed(bot *model.Bot, run *model.BotRun, cod
 				Name: botScheduleTaskNameFromContext(run),
 			}
 		}
-		return s.appendScheduleEventTx(tx, bot.ID, &task, run,
-			model.BotRunStatusFailed, summary, code, msg, now)
+		if err := s.appendScheduleEventTx(tx, bot.ID, &task, run,
+			model.BotRunStatusFailed, summary, code, msg, now); err != nil {
+			return err
+		}
+		appendedEvent = true
+		return nil
 	})
 	if txErr != nil {
 		s.logger.Warn("落定时任务失败终态", zap.String("run_id", run.ID), zap.Error(txErr))
 		return
 	}
 	if ok {
+		s.openProviderCircuitOnFailure(bot, run, code)
 		s.publishEvent(bot.ID)
+		if appendedEvent {
+			s.wakeScheduleEvent(bot.ID, run.ID, model.BotRunStatusFailed)
+		}
 		return
 	}
 	// CAS 失败：可能已被受理的停止抢占（错误检出后停止落库）。落 stopped，

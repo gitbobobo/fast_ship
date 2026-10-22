@@ -141,15 +141,6 @@ func countMainModelRequests(db *gorm.DB, botID string) int {
 	return int(n)
 }
 
-func contentForEstimate(want int64) string {
-	for n := 1; n < 500000; n++ {
-		if botEstimateBytes(int64(n)) == want {
-			return strings.Repeat("a", n)
-		}
-	}
-	return strings.Repeat("a", int(want)*4)
-}
-
 // ---------- 压缩主路径 ----------
 
 func writeFakeChatSSE(w http.ResponseWriter, text string) {
@@ -836,7 +827,10 @@ func TestBotFoldBatchThreshold(t *testing.T) {
 	env3.fake.strict = true
 	u3 := createBotTestUser(t, env3.db, "foldok")
 	bot3 := env3.createBot(t, u3)
-	env3.cfg.Bots.Context.WindowTokens = 21600 // INT-136：工具结果出口围栏让固定前缀再涨，goal 要大于折叠后前缀 ~7.2k
+	// 窗口按合并后的固定前缀重定标：v9 的 fs_schedule 描述同时含确认语义
+	//（INT-136）与时区/指令写法（INT-138），折叠后前缀升到 ~7.5k，goal 要
+	// 大于它才走「折叠已足够」的路径。
+	env3.cfg.Bots.Context.WindowTokens = 23000
 	seedBotUserMessage(t, env3, bot3.ID, "old")
 	seedBotAssistantToolBlock(t, env3, bot3.ID, "huge", "fs_issue", strings.Repeat("很长的工具结果", 8000))
 	for i := 1; i <= 3; i++ {
@@ -1038,8 +1032,10 @@ func TestBotContextLimitNotOn429(t *testing.T) {
 		t.Fatalf("send: %v", err)
 	}
 	waitForBot(t, "429", 10*time.Second, func() bool { return env.botSettled(bot.ID) })
-	if n != 1 {
-		t.Fatalf("429 不应触发强制压缩重试，实际 %d", n)
+	// INT-137 起 429 改走「未输出前的有限重试」（默认重试 2 次，共 3 次
+	// 请求），但仍然不得触发上下文超限的强制压缩，最终按限流失败。
+	if n != 3 {
+		t.Fatalf("429 应做有限重试共 3 次请求，实际 %d", n)
 	}
 	var c int64
 	env.db.Model(&model.BotCompaction{}).Where("bot_id = ?", bot.ID).Count(&c)
@@ -1356,8 +1352,9 @@ func TestBotMemorySnapshotFrozen(t *testing.T) {
 		t.Fatalf("服务重建后应加载最新快照")
 	}
 	// INT-136 重构：工具结果整条包围栏、记忆快照多一句声明，固定前缀再涨；
-	// 这里只验证「压缩会刷新注入」，给足窗口避免误判不可达。
-	env.cfg.Bots.Context.WindowTokens = 10600
+	// v9 的 fs_schedule 描述又并入了 INT-138 的时区/指令写法。这里只验证
+	// 「压缩会刷新注入」，给足窗口（固定前缀 ≈7.7k）避免误判不可达。
+	env.cfg.Bots.Context.WindowTokens = 11000
 	seedCompactableLedger(t, env, bot.ID, "压缩刷新")
 	botRow, _ = env.bots.bots.Get(bot.ID)
 	markHistoryConsumed(t, env, botRow, run)
@@ -1559,7 +1556,7 @@ func TestBotPreCompactionArchive(t *testing.T) {
 	if mains != 0 {
 		t.Fatalf("归档不得写主线请求")
 	}
-	f, err := repository.NewBotMemoryRepository(env.db).FindFile(bot.ID, env.bots.botDailyPathFor(time.Now().UTC()))
+	f, err := repository.NewBotMemoryRepository(env.db).FindFile(bot.ID, env.bots.botDailyPathForBot(botRow, time.Now().UTC()))
 	if err != nil {
 		t.Fatalf("daily: %v", err)
 	}

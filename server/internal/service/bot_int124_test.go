@@ -209,7 +209,7 @@ func TestInt124SilentArchiveWatermark(t *testing.T) {
 	// 第一轮：正常归档——daily 落库、水位推进到段内最大 seq。
 	mr1 := int124SeedMaintRun(t, env, bot.ID, "compaction:threshold:g0:s-int124-1")
 	env.bots.runSilentArchive(context.Background(), botRow, mr1, plan)
-	dailyPath := env.bots.botDailyPathFor(time.Now())
+	dailyPath := env.bots.botDailyPathForBot(botRow, time.Now())
 	f, err := repository.NewBotMemoryRepository(env.db).FindFile(bot.ID, dailyPath)
 	if err != nil || !strings.Contains(f.Content, "用户叫 Bobo") {
 		t.Fatalf("第一轮应写入 daily: %v", err)
@@ -322,7 +322,7 @@ func TestInt124SilentArchiveSkipsBelowWatermark(t *testing.T) {
 	}
 	mr := int124SeedMaintRun(t, env, bot.ID, "compaction:threshold:g0:s-int124-mix")
 	env.bots.runSilentArchive(context.Background(), botRow, mr, plan)
-	dailyPath := env.bots.botDailyPathFor(time.Now())
+	dailyPath := env.bots.botDailyPathForBot(botRow, time.Now())
 	f, err := repository.NewBotMemoryRepository(env.db).FindFile(bot.ID, dailyPath)
 	if err != nil {
 		t.Fatalf("daily: %v", err)
@@ -510,7 +510,7 @@ func TestInt124SilentArchiveSentPrefixWatermark(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load bot: %v", err)
 	}
-	dailyPath := env.bots.botDailyPathFor(time.Now())
+	dailyPath := env.bots.botDailyPathForBot(botRow, time.Now())
 
 	// 第一轮：请求体只含发出前缀 m1+m2，段尾 m3 根本没进请求。
 	mr1 := int124SeedMaintRun(t, env, bot.ID, "compaction:threshold:g0:s-int124-t1")
@@ -608,7 +608,7 @@ func TestInt124SilentArchiveBacklogAcrossCycles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load bot: %v", err)
 	}
-	dailyPath := env.bots.botDailyPathFor(time.Now())
+	dailyPath := env.bots.botDailyPathForBot(botRow, time.Now())
 
 	// 第一轮：Segment 含 m1..m4、切点 m4.Seq；预算截尾只发出 m1+m2，水位停在
 	// m2.Seq，m3/m4 保持未归档。
@@ -670,7 +670,11 @@ func TestInt124SilentArchiveAllDuplicate(t *testing.T) {
 	userID := createBotTestUser(t, env.db, "int124dup")
 	bot := env.createBot(t, userID)
 	m1 := seedBotUserMessage(t, env, bot.ID, "用户叫 Bobo")
-	dailyPath := env.bots.botDailyPathFor(time.Now())
+	botRow, err := env.bots.bots.Get(bot.ID)
+	if err != nil {
+		t.Fatalf("load bot: %v", err)
+	}
+	dailyPath := env.bots.botDailyPathForBot(botRow, time.Now())
 	if _, _, err := repository.NewBotMemoryRepository(env.db).WriteVersionTx(env.db, bot.ID, dailyPath,
 		model.BotMemoryOpCreate, "- 用户叫 Bobo", false, nil, model.BotMemoryWriterMain,
 		"", "", "int124-pre", time.Now().UTC()); err != nil {
@@ -687,10 +691,6 @@ func TestInt124SilentArchiveAllDuplicate(t *testing.T) {
 	}}
 	env.fake.mu.Unlock()
 	env.fake.strict = true
-	botRow, err := env.bots.bots.Get(bot.ID)
-	if err != nil {
-		t.Fatalf("load bot: %v", err)
-	}
 
 	mr := int124SeedMaintRun(t, env, bot.ID, "compaction:threshold:g0:s-int124-dup")
 	env.bots.runSilentArchive(context.Background(), botRow, mr, plan)

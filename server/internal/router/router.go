@@ -231,13 +231,14 @@ func Setup(
 		api.DELETE("/attachments/:aid", middleware.RequireAuth(cfg, apiKeyRepo, authService), issueAttachmentHandler.Delete)
 		api.GET("/attachments/:aid/download", middleware.RequireAuthWithQueryToken(cfg, apiKeyRepo, authService, "token"), issueAttachmentHandler.Download)
 
-		// 截图库 —— 上传与读 JWT / API Key 均可；标题/维度修改与删除仅 JWT；content 支持 ?token= 供 <img> 直链
+		// 截图库 —— 上传、读与删除 JWT / API Key 均可（归属校验在 service 内按凭证用户走同一条链）；
+		// 标题/维度修改仅 JWT；content 支持 ?token= 供 <img> 直链
 		api.POST("/projects/:id/screenshots", middleware.RequireAuth(cfg, apiKeyRepo, authService), screenshotHandler.Upload)
 		api.GET("/projects/:id/screenshots", middleware.RequireAuth(cfg, apiKeyRepo, authService), screenshotHandler.List)
 		api.GET("/screenshot-screens/:sid/content", middleware.RequireAuthWithQueryToken(cfg, apiKeyRepo, authService, "token"), screenshotHandler.Content)
 		api.HEAD("/screenshot-screens/:sid/content", middleware.RequireAuthWithQueryToken(cfg, apiKeyRepo, authService, "token"), screenshotHandler.Content)
 		api.PATCH("/screenshot-screens/:sid", middleware.RequireJWT(cfg, authService), screenshotHandler.Update)
-		api.DELETE("/screenshot-screens/:sid", middleware.RequireJWT(cfg, authService), screenshotHandler.DeleteScreen)
+		api.DELETE("/screenshot-screens/:sid", middleware.RequireAuth(cfg, apiKeyRepo, authService), screenshotHandler.DeleteScreen)
 
 		// 截图标注 —— 列表与裁剪图 JWT / API Key 均可；新建、删除与批量动作仅 JWT；
 		// PUT 两类凭证均可，service 内再按凭证限制 API Key 只能置 resolved；crop 支持 ?token= 直链。
@@ -335,7 +336,10 @@ func Setup(
 	api.POST("/notifications/:id/read", middleware.RequireJWT(cfg, authService), notificationHandler.MarkRead)
 
 	// JWT 必须 — PR 审查（INT-135）：审查总览、项目审查设置与记录。
+	// INT-141 起新增跨项目 PR 动态（列表分组由服务端算好）与单 PR 详情。
 	api.GET("/reviews", middleware.RequireJWT(cfg, authService), reviewHandler.ListProjects)
+	api.GET("/reviews/pull-requests", middleware.RequireJWT(cfg, authService), reviewHandler.ListPullRequests)
+	api.GET("/reviews/pull-requests/:prNumber", middleware.RequireJWT(cfg, authService), reviewHandler.GetPullRequestDetail)
 	api.GET("/projects/:id/review-settings", middleware.RequireJWT(cfg, authService), reviewHandler.GetSettings)
 	api.PUT("/projects/:id/review-settings", middleware.RequireJWT(cfg, authService), reviewHandler.UpdateSettings)
 	api.GET("/projects/:id/review-records", middleware.RequireJWT(cfg, authService), reviewHandler.ListRecords)
@@ -384,6 +388,9 @@ func Setup(
 		bots.GET("/:id/schedule-tasks", botHandler.ListScheduleTasks)
 		bots.GET("/:id/schedule-tasks/:taskId", botHandler.GetScheduleTask)
 		bots.GET("/:id/schedule-tasks/:taskId/runs", botHandler.ListScheduleTaskRuns)
+		// 定时任务运行停止（INT-137）：置 stop_requested 并取消执行槽，run 在
+		// 安全点收尾 stopped，不追加主线事件。
+		bots.POST("/:id/schedule-tasks/:taskId/runs/:runId/stop", botHandler.StopScheduleRun)
 		bots.PUT("/:id/schedule-tasks/:taskId/enabled", botHandler.SetScheduleTaskEnabled)
 		bots.DELETE("/:id/schedule-tasks/:taskId/state", botHandler.ClearScheduleTaskState)
 	}

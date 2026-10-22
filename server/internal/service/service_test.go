@@ -103,6 +103,7 @@ func setupTestServices(t *testing.T) *testServices {
 		&model.ProjectT3Binding{},
 		&model.Notification{},
 		&model.GitHubWebhookDelivery{},
+		&model.GitHubWebhookRedelivery{},
 		&model.ProjectReviewSettings{},
 		&model.ReviewRun{},
 		&model.ReviewRunToken{},

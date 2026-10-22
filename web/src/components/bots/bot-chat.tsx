@@ -1,4 +1,5 @@
 import { useLayoutEffect, useRef, useState } from "react";
+import { Link } from "react-router";
 import { Loader2, RefreshCw, Square } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -90,7 +91,12 @@ export function BotChat({ botId }: { botId: string }) {
     );
   }
 
-  const stopLabel = chat.stopRequested ? "停止中…" : "请求停止";
+  // 已请求停止后再点是「强制停止」：第一次只是追加停止消息等安全点，
+  // 服务端宽限后才硬取消；卡住时用户要能立即中断，按钮必须保持可点。
+  const stopLabel = chat.stopRequested ? "强制停止" : "请求停止";
+  const stopTitle = chat.stopRequested
+    ? "立即中断当前模型请求"
+    : "向机器人发送一条「停止」消息，由它结合上下文决定是否结束运行";
   const runBadge = chat.stopRequested
     ? "停止中"
     : chat.activeRun?.status === "queued"
@@ -114,6 +120,26 @@ export function BotChat({ botId }: { botId: string }) {
     >
       {/* 输入框之外的全部内容：flex-1 保证消息少时它撑满栏高、浮层贴底。 */}
       <div className="flex flex-1 flex-col gap-4">
+        {/* 可操作的 run 失败提示（INT-137）：仅 auth/quota，其它失败不新增噪音。 */}
+        {chat.runError && (
+          <div
+            role="alert"
+            data-testid="bot-run-error"
+            className="flex items-center gap-2 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+          >
+            <span className="min-w-0 flex-1">{chat.runError.message}</span>
+            {chat.runError.action.kind === "ai_providers_settings" && (
+              <Button
+                size="xs"
+                variant="outline"
+                render={<Link to="/settings/ai-providers" />}
+              >
+                {chat.runError.action.label || "去设置"}
+              </Button>
+            )}
+          </div>
+        )}
+
         {chat.runActive && (
           <div
             data-testid="bot-run-bar"
@@ -123,8 +149,10 @@ export function BotChat({ botId }: { botId: string }) {
               {runBadge}
             </Badge>
             {chat.stopRequested ? (
+              // 说明「再点会发生什么」：强制停止会丢弃未完成的回复，不能只靠
+              // 文字变化表达升级（视觉审查：两个状态样式一致，用户看不出）。
               <span className="text-xs text-muted-foreground">
-                已请求停止，等待当前步骤结束
+                已请求停止；再点「强制停止」将立即中断并丢弃未完成的回复
               </span>
             ) : activeProgress ? (
               // 压缩阶段/失败原因（INT-115）：phase=failed 用醒目但非报错的
@@ -155,17 +183,23 @@ export function BotChat({ botId }: { botId: string }) {
             )}
             <Button
               type="button"
-              size="xs"
+              size="sm"
               variant="destructive"
-              className="ml-auto"
-              disabled={chat.stopping || chat.stopRequested}
+              // 强制停止比普通停止更具破坏性（丢弃草稿、立即终止）：升级后
+              // 用实心红底白字拉开层级，点击区域也放大到可点范围。
+              className={cn(
+                "ml-auto h-8 px-3",
+                chat.stopRequested &&
+                  "bg-destructive text-white hover:bg-destructive/90 focus-visible:ring-destructive/30",
+              )}
+              disabled={chat.stopping}
               aria-label={stopLabel}
-              title="向机器人发送一条「停止」消息，由它结合上下文决定是否结束运行"
+              title={stopTitle}
               onClick={() => void chat.stopRun()}
             >
-              {chat.stopping && <Loader2 className="mr-1 h-3 w-3 animate-spin" />}
-              <Square className="mr-1 h-3 w-3 fill-current" />
-              请求停止
+              {chat.stopping && <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />}
+              <Square className="mr-1 h-3.5 w-3.5 fill-current" />
+              {stopLabel}
             </Button>
           </div>
         )}
@@ -245,7 +279,9 @@ export function BotChat({ botId }: { botId: string }) {
         {/* 回复中的等待指示贴在内容最底部（原来是输入框里的一行提示文字）。
             放在后台调用面板之后、等高 spacer 之前：贴底后它一定落在可见区，
             不会被上方的后台调用面板顶出视口。 */}
-        {chat.runActive && <BotTypingIndicator />}
+        {/* 已请求停止时不再显示正在打字的动画：状态区已经在说停止中，
+            动画会让消息区看起来仍在正常生成（视觉审查）。 */}
+        {chat.runActive && !chat.stopRequested && <BotTypingIndicator />}
       </div>
 
       {/* 等高滚动余量：高度等于浮层实高（上方 ResizeObserver 实测）。滚到底

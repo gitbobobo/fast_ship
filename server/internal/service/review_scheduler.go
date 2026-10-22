@@ -2,8 +2,10 @@ package service
 
 import (
 	"context"
+	"strings"
 	"time"
 
+	"github.com/godbobo/fast_ship/server/internal/githubapi"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
@@ -11,16 +13,25 @@ import (
 
 // PR 审查调度循环（INT-135）：单进程一个 10s tick + 非阻塞 kick。
 // 每轮依次：到期防抖消费并开轮 → 排队提升 → 派发 → 超时 → 取消运行的线程
-// 中断 → GitHub 同步 → 工作区清理。各阶段独立容错；网络调用都在事务外。
+// 中断 → GitHub 同步 → 归档 → 工作区清理 → 旧线程墓碑清理。各阶段独立容错；
+// 网络调用都在事务外。投递失败对账在独立 goroutine 里低频跑，见
+// review_redelivery.go。
 
 const reviewSchedulerInterval = 10 * time.Second
 
-// 每 tick 批量上限：防抖消费 50、其余阶段 20、派发认领 4。
+// 每 tick 批量上限：防抖消费 50、其余阶段 20、派发认领 4。准备失败重试
+// 不设批量上限，见 retryFailedPreparations。
 const (
 	reviewDebounceBatch = 50
 	reviewStageBatch    = 20
 	reviewDispatchBatch = 4
 )
+
+// reviewNetworkStageBudget 调度循环里带串行外部读的阶段（防抖消费逐行读
+// PR 实况、准备失败重试逐行读 T3 投影）的单轮耗时预算：与同步阶段单 PR
+// 2 分钟同量级，保证上游变慢时一个 tick 仍大体有界，超时/取消中断/同步/
+// 回收不会被拖到几十分钟后。超预算的剩余行本来就还在库里，下个 tick 再处理。
+const reviewNetworkStageBudget = 60 * time.Second
 
 // Start 启动审查调度循环（幂等：重复调用不叠加第二个循环）。
 func (s *ReviewService) Start() {
@@ -35,6 +46,7 @@ func (s *ReviewService) Start() {
 	s.kickCh = kickCh
 	s.mu.Unlock()
 	go s.reviewLoop(cancel, kickCh)
+	go s.redeliveryLoop(cancel)
 }
 
 // Stop 停止调度循环；幂等，未启动时为空操作。
@@ -64,12 +76,34 @@ func (s *ReviewService) reviewLoop(cancel <-chan struct{}, kickCh <-chan struct{
 	}
 }
 
-// reviewTick 每轮顺序执行八个阶段；各阶段内部逐条容错，互不打断。
+// redeliveryLoop 投递失败对账的独立低频循环：不与 10s 调度 tick 抢执行权
+// （GitHub 变慢时对账会长时间占住网络调用，不能拖住防抖消费/派发/超时）。
+// 启动即先跑一轮（进程刚起来时最需要补上停机期间漏掉的投递），之后每
+// reviewRedeliverySweepEvery 一轮。与 reviewLoop 共用同一个 cancel。
+func (s *ReviewService) redeliveryLoop(cancel <-chan struct{}) {
+	ticker := time.NewTicker(reviewRedeliverySweepEvery)
+	defer ticker.Stop()
+	s.reconcileWebhookDeliveries(time.Now().UTC())
+	for {
+		select {
+		case <-cancel:
+			return
+		case now := <-ticker.C:
+			s.reconcileWebhookDeliveries(now.UTC())
+		}
+	}
+}
+
+// reviewTick 每轮顺序执行：到期防抖消费并开轮 → 排队提升 → 派发 →
+// 工作区准备失败代发重试 → 超时 → 取消运行的线程中断 → GitHub 同步 → 归档 →
+// 工作区清理 → 旧线程墓碑清理。各阶段独立容错，互不打断。重试排在超时之前：
+// 重试成功会重置 deadline，别让同一 tick 的旧 deadline 抢先落 timed_out。
 // 归档在工作区清理之前：删除必须以归档完成为前提。
 func (s *ReviewService) reviewTick(now time.Time) {
 	s.processDueDebounces(now)
 	s.promoteQueuedRuns(now)
 	s.dispatchRuns(now)
+	s.retryFailedPreparations(now)
 	s.markTimeouts(now)
 	s.interruptCancelledRuns(now)
 	s.syncPendingPRs(now)
@@ -122,18 +156,63 @@ func (s *ReviewService) processDueDebounces(now time.Time) {
 		s.logger.Error("查询到期防抖行失败", zap.Error(err))
 		return
 	}
+	start := time.Now()
 	for i := range rows {
+		if time.Since(start) > reviewNetworkStageBudget {
+			s.logger.Info("防抖消费到达阶段网络预算，剩余行下轮处理", zap.Int("remaining", len(rows)-i))
+			break
+		}
 		s.consumeDebounce(&rows[i], now)
 	}
 	_ = s.db.Transaction(func(tx *gorm.DB) error {
 		_, err := s.deliveries.DeleteOlderThanTx(tx, now.Add(-reviewDeliveryRetention))
 		return err
 	})
+	// 重投次数账（INT-146）按同一保留期清理；guid 账只在重投后短期内有意义，
+	// 丢了顶多按投递列表重新推近期次数。
+	if _, err := s.redeliveries.DeleteOlderThan(s.db, now.Add(-reviewDeliveryRetention)); err != nil {
+		s.logger.Error("清理 webhook 重投次数账失败", zap.Error(err))
+	}
 }
 
-// consumeDebounce 一行防抖的消费事务：条件删除防重入，复核后同事务开轮。
+// consumeDebounce 一行防抖的消费：先在事务外读 PR 实况——防抖行可能是已
+// 合并/已关闭 PR 的旧账（重投的 closed 投递被有意排除、payload 又是旧快照），
+// PR 已关闭或远端 head 与防抖行不一致则删行不开轮。读 PR 失败不开轮也不删
+// 行（暂时性故障不能当成「已关闭」），但把 fire_at 推后一个防抖窗口：否则
+// 一条永久读不到的行（仓库转走/PR 不可见）会一直排在本 tick 批量队首，把
+// 后续正常防抖行挡在 50 条名额之外。事务内条件删除防重入，复核项目仍启
+// 用/动作仍勾选/仓库一致后同事务开轮。
 func (s *ReviewService) consumeDebounce(row *model.ReviewDebounce, now time.Time) {
-	err := s.db.Transaction(func(tx *gorm.DB) error {
+	// 单次 PR 实况读 10s：这是「读一次 PR 状态」的检查而非数据传输，超时只
+	// 意味着本轮不开轮（fire_at 推后），10s 足够，别占满整个阶段预算。
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	client, err := s.ghClient(ctx)
+	var pr *githubapi.PullRequest
+	if err == nil {
+		pr, err = client.GetPullRequest(ctx, row.InstallationID, row.RepoFullName, row.PRNumber)
+	}
+	cancel()
+	if err != nil {
+		s.logger.Warn("防抖消费前读取 PR 失败，推后重试",
+			zap.String("repo", row.RepoFullName), zap.Int("pr", row.PRNumber), zap.Error(err))
+		// 推后用当前时刻而不是 tick 开始的 now：一个阶段预算内本批次可能已
+		// 跑了很久，慢批次结束时按 now 推后的时刻可能已经过期，行会立刻再次
+		// 被选中继续失败。
+		pushTo := time.Now().UTC().Add(reviewDebounceSeconds * time.Second)
+		if retryErr := s.db.Where(
+			"project_id = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ? AND fire_at <= ?",
+			row.ProjectID, row.RepoFullName, row.PRNumber, row.HeadSHA, now,
+		).Model(&model.ReviewDebounce{}).
+			Update("fire_at", pushTo).Error; retryErr != nil {
+			s.logger.Error("推后防抖行失败",
+				zap.String("repo", row.RepoFullName), zap.Int("pr", row.PRNumber), zap.Error(retryErr))
+		}
+		return
+	}
+	// PR 已关闭/合并或远端 head 已偏（新 webhook 尚未落账）→ 删行不开轮；
+	// 新 head 的防抖行由它自己的 webhook 重建。
+	reviewable := prReviewable(pr) && strings.EqualFold(pr.HeadSHA, row.HeadSHA)
+	err = s.db.Transaction(func(tx *gorm.DB) error {
 		res := tx.Where(
 			"project_id = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ? AND fire_at <= ?",
 			row.ProjectID, row.RepoFullName, row.PRNumber, row.HeadSHA, now,
@@ -144,6 +223,9 @@ func (s *ReviewService) consumeDebounce(row *model.ReviewDebounce, now time.Time
 		if res.RowsAffected == 0 {
 			return nil // 已被更新（新 head 覆盖）或已消费
 		}
+		if !reviewable {
+			return nil
+		}
 		var project model.Project
 		if err := tx.Where("id = ?", row.ProjectID).First(&project).Error; err != nil {
 			return err
@@ -152,12 +234,14 @@ func (s *ReviewService) consumeDebounce(row *model.ReviewDebounce, now time.Time
 		if err := tx.Where("project_id = ?", row.ProjectID).First(&settings).Error; err != nil {
 			return err
 		}
-		// 复核：仍启用、动作仍勾选、仓库仍归属该项目。
+		// 复核：仍启用、动作仍勾选、仓库（enabled 设置行的 repo_full_name 快照，
+		// 与 webhook 反查、syncOnePR 准入复核同口径）仍是该防抖行对应的仓库。
+		// 两个键写库时都是小写，直接等值比较；不回读项目行的 live 仓库字段——
+		// 快照是本项目审查仓库的唯一真相。
 		if !settings.Enabled || !reviewTriggerEnabled(&settings, row.Action) {
 			return nil
 		}
-		owner, repoName := splitRepoName(row.RepoFullName)
-		if owner == "" || !equalFoldStr(project.GithubOwner, owner) || !equalFoldStr(project.GithubRepo, repoName) {
+		if settings.RepoFullName != row.RepoFullName {
 			return nil
 		}
 		_, err := s.openRoundTx(tx, &project, &settings,

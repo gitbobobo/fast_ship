@@ -1,6 +1,8 @@
 package repository
 
 import (
+	"time"
+
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"gorm.io/gorm"
 )
@@ -46,15 +48,6 @@ func (r *BotRunRepository) FindActiveByBot(botID string) (*model.BotRun, error) 
 	var run model.BotRun
 	if err := r.db.Where("bot_id = ? AND finished_at IS NULL AND session_kind = ?",
 		botID, model.BotSessionKindMain).First(&run).Error; err != nil {
-		return nil, err
-	}
-	return &run, nil
-}
-
-func (r *BotRunRepository) FindByTriggerKeyTx(tx *gorm.DB, botID, triggerKey string) (*model.BotRun, error) {
-	var run model.BotRun
-	if err := tx.Where("bot_id = ? AND trigger_key = ?", botID, triggerKey).
-		First(&run).Error; err != nil {
 		return nil, err
 	}
 	return &run, nil
@@ -118,6 +111,43 @@ func (r *BotRunRepository) ListActive() ([]model.BotRun, error) {
 	return rows, err
 }
 
+// MarkStopRequested 原子地请求停止一个 run：条件是 run 未结束且（
+// acceptedOrdinal < 0 或「受理后没有一条既新又真正包含停止消息的请求」）。
+//
+// 「有进展」的判定同时看 ordinal 与请求的 input_through_seq：循环可能在停止
+// 消息追加前就构建好上下文，只是登记晚了一步——这种请求 ordinal 更大却不含
+// 停止消息，不能算进展（否则宽限会放它继续跑，停止被拖到看门狗超时）。
+// 只有 input_through_seq >= stopSeq 的请求才说明停止消息已经交给模型。
+// 判定与写入在同一条 UPDATE 里完成，与请求登记在单连接下串行，不会取消
+// 已经带上停止消息的请求（INT-137）。返回是否命中。
+func (r *BotRunRepository) MarkStopRequested(runID string, acceptedOrdinal, stopSeq int64, now time.Time) (bool, error) {
+	q := r.db.Model(&model.BotRun{}).Where("id = ? AND finished_at IS NULL", runID)
+	if acceptedOrdinal >= 0 {
+		q = q.Where(`NOT EXISTS (
+			SELECT 1 FROM bot_model_requests
+			WHERE run_id = ? AND ordinal > ? AND input_through_seq >= ?)`,
+			runID, acceptedOrdinal, stopSeq)
+	}
+	res := q.Update("stop_requested_at", now)
+	if res.Error != nil {
+		return false, res.Error
+	}
+	return res.RowsAffected > 0, nil
+}
+
+// AdvanceInputThroughSeq 只升不降地推进 run 的输入消费水位：硬停止与主线循环
+// 并发写时，持有更旧 seq 的一方不得把已推进的水位覆盖回去（INT-137）。
+// 返回是否命中（水位已更高时落空）。
+func (r *BotRunRepository) AdvanceInputThroughSeq(runID string, seq int64) (bool, error) {
+	res := r.db.Model(&model.BotRun{}).
+		Where("id = ? AND input_through_seq < ?", runID, seq).
+		Update("input_through_seq", seq)
+	if res.Error != nil {
+		return false, res.Error
+	}
+	return res.RowsAffected > 0, nil
+}
+
 // UpdateColumns 条件更新 run 列；返回是否命中（0 行 = 状态已被别人落定）。
 // where 值为 nil 渲染成 IS NULL（= NULL 永假，会让终态判定失灵）。
 func (r *BotRunRepository) UpdateColumns(runID string, where map[string]interface{}, cols map[string]interface{}) (bool, error) {
@@ -172,6 +202,18 @@ func (r *BotModelRequestRepository) NextOrdinalTx(tx *gorm.DB, runID string) (in
 	return ordinal + 1, nil
 }
 
+// MaxOrdinalTx 返回该 run 当前最大的模型请求序号（没有请求为 0）。受理停止
+// 时在同一事务里（追加停止消息之前）采样序号，避免「事务提交到采样之间」
+// 新登记的请求被算进基线（INT-137）。
+func (r *BotModelRequestRepository) MaxOrdinalTx(tx *gorm.DB, runID string) (int64, error) {
+	var ordinal int64
+	if err := tx.Model(&model.BotModelRequest{}).Where("run_id = ?", runID).
+		Select("COALESCE(MAX(ordinal), 0)").Scan(&ordinal).Error; err != nil {
+		return 0, err
+	}
+	return ordinal, nil
+}
+
 func (r *BotModelRequestRepository) CreateTx(tx *gorm.DB, req *model.BotModelRequest) error {
 	return tx.Create(req).Error
 }
@@ -182,12 +224,6 @@ func (r *BotModelRequestRepository) FindByID(id string) (*model.BotModelRequest,
 		return nil, err
 	}
 	return &row, nil
-}
-
-func (r *BotModelRequestRepository) ListByRun(runID string) ([]model.BotModelRequest, error) {
-	var rows []model.BotModelRequest
-	err := r.db.Where("run_id = ?", runID).Order("ordinal ASC").Find(&rows).Error
-	return rows, err
 }
 
 // UpdateColumns 条件更新请求记录。

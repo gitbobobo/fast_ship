@@ -166,7 +166,12 @@ func (s *ReviewService) codeHistory(ctx context.Context, run *model.ReviewRun) (
 		}
 		fmt.Fprintf(&b, "## 上一轮（轮次 %d，head %s）\n", run.RoundNumber-1, reviewShortSHA(prevRuns[0].HeadSHA))
 		for _, r := range prevRuns {
-			fmt.Fprintf(&b, "### 组合 %s\n", runCombinationLabel(&r))
+			// 历史上下文是纯文本：选项拼在标题行，不用 <sub>（那是渲染层的小字）。
+			label := runCombinationLabel(&r)
+			if opts := runCombinationOptions(&r); opts != "" {
+				label += " · " + opts
+			}
+			fmt.Fprintf(&b, "### 组合 %s\n", label)
 			if r.Status == model.ReviewRunCompleted && r.ResultJSON != "" {
 				var result api.ReviewCodeResult
 				if json.Unmarshal([]byte(r.ResultJSON), &result) == nil {
@@ -246,7 +251,9 @@ func (s *ReviewService) appendNewDiscussion(ctx context.Context, run *model.Revi
 	return nil
 }
 
-// visualHistory 视觉审查历史：上一轮视觉运行的 findings + unmeasurable。
+// visualHistory 视觉审查历史：上一轮视觉运行的 findings + unmeasurable，再
+// 补上该轮 result 里 prior 仍未解决的条目——模型可能只把遗留写进 prior(open)
+// 而没重写进 findings，不补这段的话未解决项会从下一轮历史里消失，复核断链。
 func (s *ReviewService) visualHistory(ctx context.Context, run *model.ReviewRun) (string, error) {
 	// 最近一轮「确有视觉运行」的轮次：中间轮可能只跑了代码审查，
 	// round-1 会拿到空历史。历史只在本项目账本内取。
@@ -270,6 +277,7 @@ func (s *ReviewService) visualHistory(ctx context.Context, run *model.ReviewRun)
 	var b strings.Builder
 	fmt.Fprintf(&b, "## 上一轮视觉审查（轮次 %d）\n", *prevRound)
 	var unmeasurable []api.ReviewUnmeasurable
+	var openPrior []api.ReviewPriorDecision
 	for _, r := range prevRuns {
 		if r.Status != model.ReviewRunCompleted || r.ResultJSON == "" {
 			continue
@@ -282,11 +290,20 @@ func (s *ReviewService) visualHistory(ctx context.Context, run *model.ReviewRun)
 			fmt.Fprintf(&b, "- %s · %s · %s：%s\n  %s\n", f.Severity, f.Screenshot, f.Dimension, f.Body, f.Fix)
 		}
 		unmeasurable = append(unmeasurable, result.Unmeasurable...)
+		openPrior = append(openPrior, openPriorDecisions(result.Prior)...)
 	}
 	if len(unmeasurable) > 0 {
 		b.WriteString("### 无法判断\n")
 		for _, u := range unmeasurable {
 			fmt.Fprintf(&b, "- %s：%s\n", u.Screenshot, u.Reason)
+		}
+	}
+	if len(openPrior) > 0 {
+		// 独立小节：这些条目「更早一轮」就提出了，上一轮也没能了结——比
+		// 上一轮 findings 更值得审查员优先复核。
+		b.WriteString("### 仍未解决（更早一轮）\n")
+		for _, p := range openPrior {
+			fmt.Fprintf(&b, "- %s：%s\n", priorLevelText(p.Level), p.Body)
 		}
 	}
 	return strings.TrimRight(b.String(), "\n"), nil
@@ -314,27 +331,53 @@ func reviewShortSHA(sha string) string {
 	return sha
 }
 
-// reviewLabelMaxRunes 组合显示名上限（字符）：model/options/instance 取自
-// 项目配置，长度不可控——标签会进 commit status 描述与评论分节标题，超
-// 长输入截断防止灌爆。
-const reviewLabelMaxRunes = 60
+// reviewOptionsMaxRunes 组合选项串上限（字符）：选项取自项目配置，长度不可控
+// ——只截选项串自身；实例名是分节标题里最有用的部分，不参与截断。
+const reviewOptionsMaxRunes = 80
 
-// runCombinationLabel 组合显示名：model[opt=val,...] / instance（沿用历史
-// 上下文与评论分节的同一标签），截断到 reviewLabelMaxRunes。
+// singleLine 把可能来自配置/上游的显示文本压成一行：换行会拆开标题、表格和
+// 评论结构，统一换成空格后由各消费点再做自己的转义（表格转义竖线等）。
+func singleLine(s string) string {
+	s = strings.NewReplacer("\r\n", " ", "\r", " ", "\n", " ").Replace(s)
+	return strings.TrimSpace(s)
+}
+
+// runCombinationLabel 组合显示名：模型 · 实例。不拼选项也不截断——选项另有
+// runCombinationOptions 单独展示（评论 <sub> 小字、历史标题纯文本），避免
+// 整体截断后把信息量最低的模型名前缀留下、最有用的实例名被截掉。模型/实例
+// 来自项目配置，可能含换行，压成单行后再拼。
 func runCombinationLabel(run *model.ReviewRun) string {
-	label := run.Model
-	if run.ModelOptionsJSON != "" && run.ModelOptionsJSON != "null" {
-		var opts []api.ReviewModelOption
-		if json.Unmarshal([]byte(run.ModelOptionsJSON), &opts) == nil && len(opts) > 0 {
-			parts := make([]string, 0, len(opts))
-			for _, o := range opts {
-				raw, _ := json.Marshal(o.Value)
-				parts = append(parts, fmt.Sprintf("%s=%s", o.Id, raw))
+	return singleLine(run.Model) + " · " + singleLine(run.InstanceID)
+}
+
+// runCombinationOptions 组合选项串：k=v · k=v。值取 JSON 解码后的原生形态：
+// 字符串原样（不加引号）、null 输出 "null"（%v 会输出 <nil>）、其余类型走
+// json.Marshal（bool/number 稳定可读），整体截断到 reviewOptionsMaxRunes；
+// 无选项或选项 JSON 损坏返回空串。HTML 转义在渲染层做（见 buildCodeComment）。
+func runCombinationOptions(run *model.ReviewRun) string {
+	if run.ModelOptionsJSON == "" || run.ModelOptionsJSON == "null" {
+		return ""
+	}
+	var opts []api.ReviewModelOption
+	if json.Unmarshal([]byte(run.ModelOptionsJSON), &opts) != nil || len(opts) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(opts))
+	for _, o := range opts {
+		switch v := o.Value.(type) {
+		case nil:
+			parts = append(parts, o.Id+"=null")
+		case string:
+			parts = append(parts, o.Id+"="+v)
+		default:
+			encoded, err := json.Marshal(v)
+			if err != nil {
+				encoded = []byte(fmt.Sprintf("%v", v))
 			}
-			label += "[" + strings.Join(parts, ",") + "]"
+			parts = append(parts, o.Id+"="+string(encoded))
 		}
 	}
-	return truncateRunes(label+" / "+run.InstanceID, reviewLabelMaxRunes)
+	return truncateRunes(strings.Join(parts, " · "), reviewOptionsMaxRunes)
 }
 
 // AgentSubmitResult POST /api/review-agent/result：结构化结论的校验与落地。
@@ -399,7 +442,7 @@ func (s *ReviewService) AgentSubmitResult(ctx context.Context, runID string, bod
 		return errs.ErrRunTokenInvalid
 	}
 
-	// 提交前核对 PR 实时 head：已前进 → 本轮作废（取消 + 消费令牌 + sync）。
+	// 提交前核对 PR 实时状态：已关闭或 head 已前进 → 本轮作废（取消 + 消费令牌 + sync）。
 	client, err := s.ghClient(ctx)
 	if err != nil {
 		return err
@@ -409,7 +452,9 @@ func (s *ReviewService) AgentSubmitResult(ctx context.Context, runID string, bod
 		return errs.New(errs.ErrGitHubAPI.Code, "读取 PR head 失败: "+err.Error())
 	}
 	now := time.Now().UTC()
-	if pr.HeadSHA != "" && !strings.EqualFold(pr.HeadSHA, run.HeadSHA) {
+	// 已关闭/合并或 head 已前进 → 本轮作废（取消 + 消费令牌 + sync）。
+	// 关闭后 head 不再前进，仅比对 SHA 会漏掉「PR 已关」。
+	if !prReviewable(pr) || (pr.HeadSHA != "" && !strings.EqualFold(pr.HeadSHA, run.HeadSHA)) {
 		_ = s.db.Transaction(func(tx *gorm.DB) error {
 			tx.Model(&model.ReviewRun{}).
 				Where("id = ? AND status IN ?", run.ID,
@@ -566,7 +611,26 @@ func validateVisualResult(r *api.ReviewVisualResult) error {
 			return reviewResultErr("unmeasurable[%d] 需要 screenshot 与 reason", i)
 		}
 	}
-	return validatePrior(r.Prior)
+	if err := validatePrior(r.Prior); err != nil {
+		return err
+	}
+	// 视觉专属：open 的 prior 必须保留原严重度。红绿判定按 prior(open) 的级别
+	// 计数（priorOpenBlocks），缺级别或误写代码审查的分级（P0/P1 等）会让遗
+	// 留项漏出计数、结论错误变绿——在新提交的入口拦下，不把防御摊给各读取方。
+	for i, p := range r.Prior {
+		if p.Status != api.ReviewPriorDecisionStatusOpen {
+			continue
+		}
+		if p.Level == nil {
+			return reviewResultErr("prior[%d].level 必须是 blocker/worth_fixing/minor（open 需保留原严重度）", i)
+		}
+		switch *p.Level {
+		case string(api.Blocker), string(api.WorthFixing), string(api.Minor):
+		default:
+			return reviewResultErr("prior[%d].level 必须是 blocker/worth_fixing/minor（open 需保留原严重度）", i)
+		}
+	}
+	return nil
 }
 
 // reviewResultRequiredKeys 结果端点按 kind 的必填顶层键：缺键或显式 null
@@ -604,25 +668,33 @@ func (s *ReviewService) RerunReview(ctx context.Context, userID, projectID strin
 	if prNumber < 1 {
 		return nil, errs.ErrInvalidParams
 	}
-	// 记录所属仓库是历史仓库时不重跑：项目当前的 GitHub 字段才是取 PR 的依据，
-	// 同号的无关 PR 不能被当成本项目的 PR。
-	if repoFullName != "" && !strings.EqualFold(repoFullName, project.GithubOwner+"/"+project.GithubRepo) {
+	// 审查仓库取设置行的 repo_full_name 快照（小写），与 webhook 反查、同步
+	// 过滤、防抖复核同口径；不回读项目行 live 字段。这里先不按 enabled 过滤：
+	// 「记录属于历史仓库」的拒绝要先于「未开启」返回，否则用户拿到的是 40923
+	// 而不是真正的原因。
+	var settings model.ProjectReviewSettings
+	rowErr := s.db.WithContext(ctx).Where("project_id = ?", projectID).First(&settings).Error
+	if rowErr != nil && !errors.Is(rowErr, gorm.ErrRecordNotFound) {
+		return nil, errs.ErrInternal
+	}
+	// 记录所属仓库是历史仓库时不重跑：同号的无关 PR 不能被当成本项目的 PR。
+	if rowErr == nil && repoFullName != "" && settings.RepoFullName != "" &&
+		!strings.EqualFold(repoFullName, settings.RepoFullName) {
 		return nil, errs.New(errs.ErrInvalidParams.Code,
 			"该审查记录属于历史仓库，项目仓库已变更，不能重跑")
 	}
-	var settings model.ProjectReviewSettings
-	if err := s.db.WithContext(ctx).Where("project_id = ? AND enabled", projectID).First(&settings).Error; err != nil {
+	if rowErr != nil || !settings.Enabled {
 		return nil, errs.ErrReviewNotEnabled
 	}
-	if project.GithubOwner == "" || project.GithubRepo == "" {
+	// 写库键因此天然是小写（GitHub API 本身大小写不敏感）。
+	repo := settings.RepoFullName
+	if repo == "" || repo == "/" {
 		return nil, errs.ErrProjectGitHubNotConfigured
 	}
 	client, err := s.ghClient(ctx)
 	if err != nil {
 		return nil, err
 	}
-	// 写库键与 webhook 侧同口径小写（GitHub API 本身大小写不敏感）。
-	repo := strings.ToLower(project.GithubOwner + "/" + project.GithubRepo)
 	// rerun 没有 webhook installation 快照：先解析真实安装 id，再取 PR；
 	// 解析不支持/失败时不得拿 0 当安装 id 继续写库。
 	installationID, err := client.ResolveInstallation(ctx, repo)
@@ -633,6 +705,9 @@ func (s *ReviewService) RerunReview(ctx context.Context, userID, projectID strin
 	if err != nil {
 		return nil, errs.New(errs.ErrGitHubAPI.Code, "读取 PR head 失败: "+err.Error())
 	}
+	if !prReviewable(pr) {
+		return nil, errs.New(errs.ErrInvalidParams.Code, "PR 已关闭，不能重跑审查")
+	}
 	if pr.HeadSHA == "" {
 		return nil, errs.New(errs.ErrGitHubAPI.Code, "PR head 为空")
 	}
@@ -640,23 +715,18 @@ func (s *ReviewService) RerunReview(ctx context.Context, userID, projectID strin
 	now := time.Now().UTC()
 	var round int
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		// 取 PR 与开轮之间可能发生停用/换仓库/新 webhook：事务内复核，
-		// 否则会用旧快照开一轮（甚至取消新 head 的运行）。
-		var current model.Project
-		if err := tx.Select("github_owner", "github_repo").
-			Where("id = ? AND user_id = ?", project.ID, userID).First(&current).Error; err != nil {
-			return errs.ErrProjectNotFound
-		}
-		if !strings.EqualFold(current.GithubOwner+"/"+current.GithubRepo, repo) {
-			return errs.New(errs.ErrInvalidParams.Code, "项目仓库已变更，请刷新后重试")
-		}
-		var enabled int64
-		if err := tx.Model(&model.ProjectReviewSettings{}).
-			Where("project_id = ? AND enabled", project.ID).Count(&enabled).Error; err != nil {
-			return err
-		}
-		if enabled == 0 {
+		// 取 PR 与开轮之间可能发生停用/换仓库/新 webhook：事务内复核设置行的
+		// 仓库快照与启用状态，否则会用旧快照开一轮（甚至取消新 head 的运行）。
+		var fresh model.ProjectReviewSettings
+		if err := tx.Select("repo_full_name", "enabled").
+			Where("project_id = ?", project.ID).First(&fresh).Error; err != nil {
 			return errs.ErrReviewNotEnabled
+		}
+		if !fresh.Enabled {
+			return errs.ErrReviewNotEnabled
+		}
+		if !strings.EqualFold(fresh.RepoFullName, repo) {
+			return errs.New(errs.ErrInvalidParams.Code, "项目仓库已变更，请刷新后重试")
 		}
 		latest, err := s.currentAcceptedHeadTx(tx, project.ID, repo, prNumber)
 		if err != nil {

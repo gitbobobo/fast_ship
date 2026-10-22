@@ -170,15 +170,10 @@ func newT3ShellState() *t3ShellState {
 	}
 }
 
-// applyActiveSnapshot 应用权威活跃快照：整体替换 projects + active threads，
-// 游标重置为 snapshotSequence；archivedThreads 字段（真实服务恒为空）一律
-// 丢弃——归档数据只由归档流维护，不能被活跃帧清空（规则 1/3）。
-func (s *t3ShellState) applyActiveSnapshot(snapshot t3ShellSnapshot) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.applyActiveSnapshotLocked(snapshot)
-}
-
+// applyActiveSnapshotLocked 应用权威活跃快照（调用方须已持有锁）：整体替换
+// projects + active threads，游标重置为 snapshotSequence；archivedThreads
+// 字段（真实服务恒为空）一律丢弃——归档数据只由归档流维护，不能被活跃帧
+// 清空（规则 1/3）。
 func (s *t3ShellState) applyActiveSnapshotLocked(snapshot t3ShellSnapshot) error {
 	if err := s.activeProjects.reset(snapshot.Projects, func(p *t3ProjectShell) string { return p.ID }); err != nil {
 		return fmt.Errorf("活跃快照项目缺少 ID: %w", err)
@@ -258,7 +253,7 @@ func (s *t3ShellState) applyActiveItem(item t3ShellStreamItem) error {
 }
 
 // advanceActiveCursorLocked 把游标推进为 delta 序号（只前进不回卷；权威快照
-// 的重置走 applyActiveSnapshot，不受此限制）。
+// 的重置走 applyActiveSnapshotLocked，不受此限制）。
 func (s *t3ShellState) advanceActiveCursorLocked(sequence int) {
 	if sequence > s.activeCursor {
 		s.activeCursor = sequence

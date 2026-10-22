@@ -418,7 +418,7 @@ func TestBotInt136FenceScheduleEventWording(t *testing.T) {
 	msgs, _, _, err := botProjectMessages([]model.BotMessage{{
 		ID: "m-1", BotID: "b-1", Seq: 1,
 		Kind: model.BotMessageKindScheduleEvent, ContentJSON: string(seRaw),
-	}}, nil, nonce)
+	}}, nil, nonce, false)
 	if err != nil {
 		t.Fatalf("project: %v", err)
 	}
@@ -760,7 +760,7 @@ func TestBotInt136FenceLegacyScheduleReviewNotice(t *testing.T) {
 	msgs, _, _, err := botProjectMessages([]model.BotMessage{{
 		ID: "m-1", BotID: "b-1", Seq: 1,
 		Kind: model.BotMessageKindLifecycle, ContentJSON: string(lcRaw),
-	}}, nil, nonce)
+	}}, nil, nonce, false)
 	if err != nil {
 		t.Fatalf("project: %v", err)
 	}
@@ -881,7 +881,7 @@ func TestBotInt136FenceLifecycleDefaultBranch(t *testing.T) {
 	msgs, _, _, err := botProjectMessages([]model.BotMessage{{
 		ID: "m-1", BotID: "b-1", Seq: 1,
 		Kind: model.BotMessageKindLifecycle, ContentJSON: string(lcRaw),
-	}}, nil, nonce)
+	}}, nil, nonce, false)
 	if err != nil {
 		t.Fatalf("project: %v", err)
 	}
@@ -900,7 +900,7 @@ func TestBotInt136FenceLifecycleDefaultBranch(t *testing.T) {
 	msgs, _, _, err = botProjectMessages([]model.BotMessage{{
 		ID: "m-2", BotID: "b-1", Seq: 2,
 		Kind: model.BotMessageKindLifecycle, ContentJSON: string(lcTool),
-	}}, nil, nonce)
+	}}, nil, nonce, false)
 	if err != nil {
 		t.Fatalf("project toolset: %v", err)
 	}

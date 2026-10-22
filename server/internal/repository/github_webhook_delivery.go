@@ -38,3 +38,22 @@ func (r *GitHubWebhookDeliveryRepository) DeleteOlderThanTx(tx *gorm.DB, cutoff 
 	res := tx.Where("received_at < ?", cutoff).Delete(&model.GitHubWebhookDelivery{})
 	return res.RowsAffected, res.Error
 }
+
+// ExistingIDs 返回 ids 中已登记在幂等账里的那些（对账去重用）：账里有该
+// guid 说明投递其实已送达（判定用的是 GitHub 侧记录，可能滞后）。一次 IN
+// 查询；ids 为空直接返回空 map，不发 SQL。
+func (r *GitHubWebhookDeliveryRepository) ExistingIDs(db *gorm.DB, ids []string) (map[string]bool, error) {
+	out := map[string]bool{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	var found []string
+	if err := db.Model(&model.GitHubWebhookDelivery{}).
+		Where("delivery_id IN ?", ids).Pluck("delivery_id", &found).Error; err != nil {
+		return nil, err
+	}
+	for _, id := range found {
+		out[id] = true
+	}
+	return out, nil
+}

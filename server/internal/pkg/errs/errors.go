@@ -93,6 +93,9 @@ var (
 	// 邀请（INT-129）：不存在/已过期/已撤销统一此码，不向注册页泄漏具体状态。
 	ErrInviteNotFound     = New(40432, "邀请链接无效或已过期")
 	ErrAIProviderNotFound = New(40433, "AI 提供商不存在")
+	// ErrReviewPullRequestNotFound PR 审查详情（INT-141）：项目没有设置行，
+	// 或按设置行仓库找不到对应账本行。
+	ErrReviewPullRequestNotFound = New(40434, "审查 PR 记录不存在")
 )
 
 // 业务冲突 40900-40999

@@ -15,6 +15,45 @@ export function formatDate(dateStr: string): string {
   });
 }
 
+export function shortSha(sha: string): string {
+  return sha.length > 7 ? sha.slice(0, 7) : sha;
+}
+
+/**
+ * 已用时长（如「3 分 5 秒」「1 小时 2 分」）。now 参数便于测试固定时间。
+ */
+export function formatElapsed(startIso: string, now: number): string {
+  const seconds = Math.max(
+    0,
+    Math.floor((now - new Date(startIso).getTime()) / 1000),
+  );
+  if (seconds < 60) return `${seconds} 秒`;
+  const minutes = Math.floor(seconds / 60);
+  const restSeconds = seconds % 60;
+  if (minutes < 60) {
+    return restSeconds ? `${minutes} 分 ${restSeconds} 秒` : `${minutes} 分`;
+  }
+  const hours = Math.floor(minutes / 60);
+  const restMinutes = minutes % 60;
+  if (hours < 24) {
+    return restMinutes ? `${hours} 小时 ${restMinutes} 分` : `${hours} 小时`;
+  }
+  const days = Math.floor(hours / 24);
+  const restHours = hours % 24;
+  return restHours ? `${days} 天 ${restHours} 小时` : `${days} 天`;
+}
+
+/** 防抖剩余秒数（向上取整，负值归 0）。 */
+export function debounceRemainingSeconds(
+  fireAtIso: string,
+  now: number,
+): number {
+  return Math.max(
+    0,
+    Math.ceil((new Date(fireAtIso).getTime() - now) / 1000),
+  );
+}
+
 export function formatRelativeTime(dateStr: string): string {
   const now = Date.now();
   const diff = now - new Date(dateStr).getTime();

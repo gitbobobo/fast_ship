@@ -76,6 +76,7 @@ func TestReviewLedgerPartitionedByProject(t *testing.T) {
 	})
 
 	// 本项目受理同 SHA：B 的 seen 行与 B 的同 SHA 运行都不构成去重/吞并。
+	e.fake.SetPR(repo, 55, &githubapi.PullRequest{HeadSHA: "sha-x"})
 	if err := e.review.HandleGitHubWebhook(ctx, "pull_request", "d-p1",
 		prPayload("synchronize", repo, 55, "sha-x", false, false)); err != nil {
 		t.Fatalf("webhook: %v", err)
@@ -436,6 +437,7 @@ func TestUpdateSettingsTakeoverCleansUpOtherProjects(t *testing.T) {
 func TestRerunRejectsHistoricalRepo(t *testing.T) {
 	e := newReviewEngineEnv(t)
 	e.enableReview(t)
+	// 直改项目行（绕开 Update，保留旧快照）：历史上换过仓库、设置行仍停在旧仓库。
 	e.project.GithubOwner, e.project.GithubRepo = "newowner", "newrepo"
 	if err := e.svc.db.Model(e.project).Updates(map[string]any{
 		"github_owner": "newowner", "github_repo": "newrepo"}).Error; err != nil {
@@ -451,7 +453,8 @@ func TestRerunRejectsHistoricalRepo(t *testing.T) {
 	}
 }
 
-// 记录页的 can_rerun 随项目仓库判断：历史仓库的记录为 false。
+// 记录页的 can_rerun 判定键是设置行的 repo_full_name 快照（与 rerun 接口同口径）：
+// 换仓库后快照被刷新，旧仓库的记录为 false。
 func TestReviewRecordsCanRerunTracksProjectRepo(t *testing.T) {
 	e := newReviewEngineEnv(t)
 	e.enableReview(t)
@@ -463,9 +466,10 @@ func TestReviewRecordsCanRerunTracksProjectRepo(t *testing.T) {
 	if err := e.svc.db.Create(&rows).Error; err != nil {
 		t.Fatalf("seed ledgers: %v", err)
 	}
+	// 走真实写路径换仓库：repository.Update 会在同事务里停用审查并刷新设置行的
+	// repo_full_name 快照（can_rerun 的判定键就是这列）。
 	e.project.GithubOwner, e.project.GithubRepo = "newowner", "newrepo"
-	if err := e.svc.db.Model(e.project).Updates(map[string]any{
-		"github_owner": "newowner", "github_repo": "newrepo"}).Error; err != nil {
+	if err := e.svc.projectRepo.Update(e.project); err != nil {
 		t.Fatalf("update project repo: %v", err)
 	}
 	records, err := e.review.ListReviewRecords(context.Background(), e.user.ID, e.project.ID, 10)
@@ -910,7 +914,6 @@ func TestLaunchPersistsWorkspaceRootAfterAgentFirstAuth(t *testing.T) {
 	createTestT3Binding(t, e.svc.db, e.project.ID, env.ID, "t3p")
 	var runID string
 	t3 := &fakeReviewT3{
-		listQueue: [][]string{{}, {"/ws/wt-af"}},
 		createFn: func(_ context.Context, _, _ string, req *T3CreateThreadRequest) (*T3ThreadLaunchResult, bool, error) {
 			// Agent 先读了端点：dispatched_at 已被补写。
 			if err := e.svc.db.Model(&model.ReviewRun{}).Where("id = ?", runID).
@@ -924,6 +927,7 @@ func TestLaunchPersistsWorkspaceRootAfterAgentFirstAuth(t *testing.T) {
 	run := e.seedRun(t, repo, 95, "sha-af", model.ReviewRunDispatched, now)
 	runID = run.ID
 	e.svc.db.Model(run).Update("environment_id", env.ID)
+	e.fake.SetPR(repo, 95, &githubapi.PullRequest{HeadSHA: "sha-af"})
 
 	review.launchRun(context.Background(), run.ID, now)
 	var after model.ReviewRun
@@ -931,8 +935,8 @@ func TestLaunchPersistsWorkspaceRootAfterAgentFirstAuth(t *testing.T) {
 	if after.WorkspaceRoot != "/ws" || after.T3ProjectID != "t3p" {
 		t.Fatalf("workspace_root/t3_project_id = %q/%q, want /ws/t3p", after.WorkspaceRoot, after.T3ProjectID)
 	}
-	if after.WorktreePath != "/ws/wt-af" {
-		t.Fatalf("worktree_path = %q", after.WorktreePath)
+	if after.WorktreePath != "" {
+		t.Fatalf("worktree_path = %q, want 空（回收时按线程投影取真值）", after.WorktreePath)
 	}
 }
 

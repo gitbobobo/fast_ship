@@ -196,13 +196,22 @@ export type BotRunStatus =
   | "failed"
   | "stopped";
 
-// generic run 端点按 run 原值返回：定时任务触发的 run 是 schedule，手动触发是 manual。
+// generic run 端点按 run 原值返回：定时任务触发的 run 是 schedule，手动触发是 manual；
+// schedule_event 是定时任务运行事件写入主线后的立即唤醒（INT-138）。
 export type BotRunTrigger =
   | "user_message"
   | "tool_result"
   | "recovery"
   | "schedule"
-  | "manual";
+  | "manual"
+  | "schedule_event";
+
+/** run 失败时的可操作动作（INT-137）：kind 由前端映射到具体页面。 */
+export interface BotRunErrorAction {
+  /** 当前取值 ai_providers_settings（AI 提供商设置页）。 */
+  kind: string;
+  label: string;
+}
 
 export interface BotRun {
   id: string;
@@ -219,6 +228,8 @@ export interface BotRun {
   usage_complete?: boolean;
   error_code?: string | null;
   error_message?: string | null;
+  /** 可操作失败的动作提示；仅 run_error 事件携带，REST 快照缺省。 */
+  error_action?: BotRunErrorAction | null;
   created_at: string;
   started_at?: string | null;
   finished_at?: string | null;
@@ -568,6 +579,17 @@ export const botApi = {
           }),
         })
         .json<ApiResponse<{ items: BotScheduleRun[] }>>(),
+    ),
+
+  /** 停止一次定时任务运行（INT-137）；成功语义是运行落 stopped。 */
+  stopScheduleRun: (botId: string, taskId: string, runId: string) =>
+    write(
+      api
+        .post(
+          `${scheduleTaskPath(botId, taskId)}/runs/${encodeURIComponent(runId)}/stop`,
+          options(),
+        )
+        .json<ApiResponse<BotScheduleRun>>(),
     ),
 
   /**

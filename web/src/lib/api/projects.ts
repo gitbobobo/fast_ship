@@ -4,17 +4,20 @@ interface CreateProjectRequest {
   name: string;
   description?: string;
   repository_url?: string;
+  /** 代码仓库（PR 审查用）；可空，空 = 与公开仓库相同 */
+  code_repository_url?: string;
   /** 公开仓库 Token（Token 库记录 id）；可空 */
   public_github_token_id?: string;
   /** 代码仓库 Token（Token 库记录 id）；可空 */
   code_github_token_id?: string;
 }
 
-// 更新请求的 Token 引用字段是三态：缺省保留、null 或空串清空、非空替换。
+// 更新请求的仓库与 Token 引用字段是三态：缺省保留、null 或空串清空、非空替换。
 interface UpdateProjectRequest {
   name?: string;
   description?: string;
   repository_url?: string;
+  code_repository_url?: string | null;
   public_github_token_id?: string | null;
   code_github_token_id?: string | null;
 }

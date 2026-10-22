@@ -51,7 +51,8 @@ export const authApi = {
 
   me: () => api.get("auth/me").json<ApiResponse<User>>(),
 
-  updateMe: (data: { username?: string; email?: string }) =>
+  // timezone 三态：省略=不变、空串=清空（回落部署配置）、非空=必须是可加载的 IANA 名称
+  updateMe: (data: { username?: string; email?: string; timezone?: string }) =>
     api.put("auth/me", { json: data }).json<ApiResponse<User>>(),
 
   uploadAvatar: (formData: FormData) =>

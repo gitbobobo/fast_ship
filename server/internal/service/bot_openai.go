@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"io"
 	"strings"
 	"time"
 
@@ -31,6 +32,10 @@ func botNewClient(baseURL, apiKey string) openai.Client {
 type botModelReply struct {
 	Text      string
 	ToolCalls []botModelToolCall
+	// SawOutput 报告本流是否出现过任何正文或工具调用片段（含未拼齐的半截
+	// 调用）：聚合处置位，不依赖 id/name 是否齐全。有过输出的失败不在重试
+	// 与强制压缩重试之列——上游可能已计费，重放还可能重复触发副作用（INT-137）。
+	SawOutput bool
 	// ProviderRequestID 是响应里的请求身份；拿不到为空。
 	ProviderRequestID string
 	FinishReason      string
@@ -60,9 +65,21 @@ type botStreamRequest struct {
 	MaxCompletionTokens int64
 }
 
+// botStreamTimeouts 是流式看门狗阈值：发出请求到首个片段、相邻片段之间的
+// 空闲上限。由调用方从运行配置注入，适配层不读配置；非正阈值不启用对应
+// 看门狗（配置层已保证正数，这里只作防御）。
+type botStreamTimeouts struct {
+	FirstChunk time.Duration
+	Idle       time.Duration
+}
+
 // botStreamChat 发起流式请求并聚合：finish_reason 之后继续读取可能随后到达
 // 的 usage chunk；文本增量经 onDelta 透出（由调用方合并批量落 SSE）。
-func botStreamChat(ctx context.Context, client *openai.Client, req botStreamRequest, onDelta func(text string)) (*botModelReply, error) {
+// 看门狗（INT-137）：首包与片段间空闲超时经派生 context 只杀本条流，以
+// *botStreamTimeoutError 返回；父 ctx 的取消（用户停止）不改写成超时。
+// 失败时同样返回已聚合的部分回复（正文与工具调用片段），供调用方判断
+// 「本次尝试是否已有输出」。
+func botStreamChat(ctx context.Context, client *openai.Client, req botStreamRequest, timeouts botStreamTimeouts, onDelta func(text string)) (*botModelReply, error) {
 	params := openai.ChatCompletionNewParams{
 		Model:    req.Model,
 		Messages: req.Messages,
@@ -79,15 +96,34 @@ func botStreamChat(ctx context.Context, client *openai.Client, req botStreamRequ
 		params.ParallelToolCalls = param.NewOpt(false)
 	}
 
-	stream := client.Chat.Completions.NewStreaming(ctx, params)
+	// 看门狗：独立派生 context，首个片段前按首包阈值计时，之后每次收到
+	// 片段重置为空闲阈值；超时只取消本条流，父 ctx（用户停止）不受影响。
+	streamCtx, cancelStream := context.WithCancel(ctx)
+	defer cancelStream()
+	idle := timeouts.Idle
+	if idle <= 0 {
+		idle = timeouts.FirstChunk
+	}
+	var watchdog *time.Timer
+	if timeouts.FirstChunk > 0 {
+		watchdog = time.AfterFunc(timeouts.FirstChunk, cancelStream)
+		defer watchdog.Stop()
+	}
+
+	stream := client.Chat.Completions.NewStreaming(streamCtx, params)
 	defer stream.Close()
 
 	reply := &botModelReply{}
 	// 流式工具调用按 index 分片拼接。
 	parts := map[int64]*botModelToolCall{}
 	order := []int64{}
+	firstChunkSeen := false
 
 	for stream.Next() {
+		if watchdog != nil {
+			firstChunkSeen = true
+			watchdog.Reset(idle)
+		}
 		chunk := stream.Current()
 		if chunk.ID != "" {
 			reply.ProviderRequestID = chunk.ID
@@ -104,6 +140,7 @@ func botStreamChat(ctx context.Context, client *openai.Client, req botStreamRequ
 				reply.FinishReason = choice.FinishReason
 			}
 			if text := choice.Delta.Content; text != "" {
+				reply.SawOutput = true
 				if reply.FirstDeltaAt == nil {
 					// 只记首个非空正文片段：GenerationMs 衡量正文生成耗时。
 					now := time.Now().UTC()
@@ -113,6 +150,9 @@ func botStreamChat(ctx context.Context, client *openai.Client, req botStreamRequ
 				if onDelta != nil {
 					onDelta(text)
 				}
+			}
+			if len(choice.Delta.ToolCalls) > 0 {
+				reply.SawOutput = true
 			}
 			for _, tc := range choice.Delta.ToolCalls {
 				part, ok := parts[tc.Index]
@@ -133,13 +173,31 @@ func botStreamChat(ctx context.Context, client *openai.Client, req botStreamRequ
 			}
 		}
 	}
-	if err := stream.Err(); err != nil {
-		return nil, err
-	}
+	// 无论成败都先拼装已收到的工具调用片段：调用方按「本次尝试是否已有
+	// 输出」决定能否重试，半截的工具调用必须可见。
 	for _, idx := range order {
 		if part := parts[idx]; part.ID != "" && part.Name != "" {
 			reply.ToolCalls = append(reply.ToolCalls, *part)
 		}
+	}
+	if err := stream.Err(); err != nil {
+		// 只有看门狗取消（父 ctx 仍存活且错误为取消）才改写为超时错误：
+		// 用户停止 / 关停导致的取消保持原样，HTTP 与网络错误也原样透出。
+		if watchdog != nil && ctx.Err() == nil && errors.Is(err, context.Canceled) {
+			phase, took := "first_chunk", timeouts.FirstChunk
+			if firstChunkSeen {
+				phase, took = "idle", idle
+			}
+			return reply, &botStreamTimeoutError{Phase: phase, Timeout: took}
+		}
+		return reply, err
+	}
+	// 正常结束但协议没有完成信号（无 finish_reason 也无 usage）：上游在输出
+	// 中途关闭了连接，SDK 把普通 HTTP EOF 当成正常结束。半截回复、尤其是
+	// 半截摘要不能当成功提交（摘要会推进水位，丢掉未总结的内容），统一按
+	// 断流失败处理；已输出片段时调用方不会重试（INT-137）。
+	if reply.FinishReason == "" && !reply.UsageComplete {
+		return reply, io.ErrUnexpectedEOF
 	}
 	return reply, nil
 }

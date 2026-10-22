@@ -18,11 +18,10 @@ import (
 // 管理任务；冻结在 v3–v7 的会话同样要确认；always_allow 按 create/update
 // 拒绝、run 按任务放行。
 
-// botToolsetV8FrozenHash 是 INT-136 发布的 v8 wire 字节基线（实现本版时的
-// 实测值：b7bf3803…，完整 wire 数组的 SHA-256）。v8 只改 fs_schedule 的工具
-// 与动作描述；之后任何改动都会让存量会话升级后的 tools_hash 漂移，必须先
-// 递增版本再改字节。
-const botToolsetV8FrozenHash = "f6390f8c2b43c8c03fb525a39a17b1ce88962fa8b5d1252259cf63c41ade4ac7"
+// botToolsetV9FrozenHash 是 INT-136 发布的 v9 wire 字节基线（INT-138 先占用
+// 了 v8，本版重编号为 v9）。v9 只改 fs_schedule 的工具与动作描述；之后任何
+// 改动都会让存量会话升级后的 tools_hash 漂移，必须先递增版本再改字节。
+const botToolsetV9FrozenHash = "d6c4bedf5a9982e6e21e6b207e62752c3669ad124d10763b12bd5defb614d716"
 
 // countScheduleTasks 统计机器人名下的任务数。
 func countScheduleTasks(t *testing.T, env *botTestEnv, botID string) int64 {
@@ -655,24 +654,28 @@ func TestBotInt136RunRejectsConfigFields(t *testing.T) {
 	}
 }
 
-// ---------- 7. 工具集 v8：描述说明确认语义，字节钉死 ----------
+// ---------- 7. 工具集 v9：描述说明确认语义，字节钉死 ----------
 
-func TestBotInt136ToolsetV8(t *testing.T) {
-	if botToolsetVersion != 8 {
-		t.Fatalf("当前工具集版本应为 8，实得 %d", botToolsetVersion)
+func TestBotInt136ToolsetV9(t *testing.T) {
+	if botToolsetVersion != 9 {
+		t.Fatalf("当前工具集版本应为 9，实得 %d", botToolsetVersion)
 	}
 	v7 := botToolsetVersionOf(7)
 	v8 := botToolsetVersionOf(8)
+	v9 := botToolsetVersionOf(9)
 	if v7.hash != botToolsetV7FrozenHash {
 		t.Fatalf("v7 tools_hash 偏离冻结基线: got %s want %s", v7.hash, botToolsetV7FrozenHash)
 	}
 	if v8.hash != botToolsetV8FrozenHash {
-		t.Fatalf("v8 tools_hash 偏离基线: got %s want %s", v8.hash, botToolsetV8FrozenHash)
+		t.Fatalf("v8 tools_hash 偏离冻结基线: got %s want %s", v8.hash, botToolsetV8FrozenHash)
 	}
-	if v7.hash == v8.hash {
-		t.Fatalf("v8 应与 v7 字节不同")
+	if v9.hash != botToolsetV9FrozenHash {
+		t.Fatalf("v9 tools_hash 偏离基线: got %s want %s", v9.hash, botToolsetV9FrozenHash)
 	}
-	sched := v8.byName["fs_schedule"]
+	if v8.hash == v9.hash {
+		t.Fatalf("v9 应与 v8 字节不同")
+	}
+	sched := v9.byName["fs_schedule"]
 	if sched == nil || len(sched.Actions) != 10 {
 		t.Fatalf("v8 fs_schedule 应仍是 10 个动作: %+v", sched)
 	}
@@ -680,7 +683,7 @@ func TestBotInt136ToolsetV8(t *testing.T) {
 	wantOrder := []string{"list", "create", "update", "delete", "runs", "run", "enable", "disable", "state_get", "state_set"}
 	for i, want := range wantOrder {
 		if sched.Actions[i].Name != want {
-			t.Fatalf("v8 动作顺序应不变: %d %s != %s", i, sched.Actions[i].Name, want)
+			t.Fatalf("v9 动作顺序应不变: %d %s != %s", i, sched.Actions[i].Name, want)
 		}
 	}
 	for _, kw := range []string{
@@ -698,27 +701,29 @@ func TestBotInt136ToolsetV8(t *testing.T) {
 			if a.Name == name {
 				found = true
 				if !strings.Contains(a.Description, "确认") {
-					t.Fatalf("v8 %s 动作描述应点明需要确认: %s", name, a.Description)
+					t.Fatalf("v9 %s 动作描述应点明需要确认: %s", name, a.Description)
 				}
 			}
 		}
 		if !found {
-			t.Fatalf("v8 缺动作 %s", name)
+			t.Fatalf("v9 缺动作 %s", name)
 		}
 	}
-	// v7 字节未被 v8 污染。
-	if strings.Contains(v7.byName["fs_schedule"].Description, "pending_confirmation") {
-		t.Fatalf("v7 fs_schedule 描述不得被 v8 污染: %s", v7.byName["fs_schedule"].Description)
+	// v7/v8 字节未被 v9 污染。
+	for _, frozen := range []*botToolsetHolder{v7, v8} {
+		if strings.Contains(frozen.byName["fs_schedule"].Description, "pending_confirmation") {
+			t.Fatalf("v%d fs_schedule 描述不得被 v9 污染: %s", frozen.version, frozen.byName["fs_schedule"].Description)
+		}
 	}
 	if sched.ArgsType.Name() != "botScheduleTaskArgs" {
-		t.Fatalf("v8 fs_schedule 应沿用 botScheduleTaskArgs: %s", sched.ArgsType.Name())
+		t.Fatalf("v9 fs_schedule 应沿用 botScheduleTaskArgs: %s", sched.ArgsType.Name())
 	}
 }
 
 // enable/delete 同样要确认（INT-136 review）：enable 是重新武装一个「运行内
 // 默认放行写操作」的任务、delete 不可逆；disable 是收紧权限、可逆，保持同步。
 func TestBotInt136EnableDeleteNeedConfirmation(t *testing.T) {
-	ts := botToolsetVersionOf(8)
+	ts := botToolsetVersionOf(9)
 	for _, action := range []string{"enable", "delete"} {
 		prepared, err := botPrepareToolCall(ts, "fs_schedule", `{"action":"`+action+`","task_id":"t1"}`)
 		if err != nil {

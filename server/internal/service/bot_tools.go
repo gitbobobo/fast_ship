@@ -59,11 +59,13 @@ type botScheduleArgs struct {
 	Action string `json:"action" jsonschema:"enum=status,required"`
 }
 
-// botScheduleTaskArgs 是当前（v7）fs_schedule 的参数超集：schema 描述并集，
+// botScheduleTaskArgs 是当前（v9）fs_schedule 的参数超集：schema 描述并集，
 // 服务端按 action 校验必填/禁止字段。全部动作同步执行、立即生效。INT-121 起
 // 新增 run（手动立即执行一次）与 dry_run（只预览）；INT-123 起新增
-// state_get/state_set 与 state 参数（任务小状态，只有 state_set 接受它）。
-// v6 及更早的冻结副本在 bot_args_frozen.go（botScheduleTaskArgsV5/V6）与
+// state_get/state_set 与 state 参数（任务小状态，只有 state_set 接受它）；
+// INT-138 起 timezone 的描述改为「省略即用户时区」（行为本身由服务端
+// createScheduleTask 兜底，schema 只是同一事实的文字投影）。
+// v7 及更早的冻结副本在 bot_args_frozen.go（botScheduleTaskArgsV5/V6/V7）与
 // botScheduleTaskArgsFrozen。
 type botScheduleTaskArgs struct {
 	Action string `json:"action" jsonschema:"enum=list,enum=create,enum=update,enum=delete,enum=runs,enum=run,enum=enable,enum=disable,enum=state_get,enum=state_set,required"`
@@ -73,8 +75,9 @@ type botScheduleTaskArgs struct {
 	Name string `json:"name,omitempty" jsonschema:"description=任务名（create 必填；update 可改）"`
 	// Cron 标准五字段表达式 分 时 日 月 周（create 必填；update 提供即改）。
 	Cron string `json:"cron,omitempty" jsonschema:"description=cron 表达式，标准五字段（分 时 日 月 周；create 必填；update 提供即改）"`
-	// Timezone 是 IANA 名称；空串=UTC。update 传空保持原值，显式换时区传 UTC。
-	Timezone string `json:"timezone,omitempty" jsonschema:"description=时区，IANA 名称如 Asia/Shanghai（可选，默认 UTC；update 提供即改）"`
+	// Timezone 是 IANA 名称；create 省略即用户时区（INT-138），update 传空
+	// 保持原值，显式换时区传 UTC。
+	Timezone string `json:"timezone,omitempty" jsonschema:"description=时区，IANA 名称如 Asia/Shanghai（可选，省略即用户时区；update 提供即改、不传保持原值）"`
 	// Instruction 是每次运行交给机器人的任务指令（create 必填；update 提供即改）。
 	Instruction string `json:"instruction,omitempty" jsonschema:"description=任务指令：每次运行交给你的目标说明（create 必填；update 可改）"`
 	// Model 可选：省略则保持原值（update）/用机器人当前模型（create）；
@@ -386,12 +389,12 @@ func botToolRegistryV6() []*botToolDef {
 	return tools
 }
 
-// botToolRegistryV7 是当前发布注册表（INT-123）：在 v6 之上，fs_schedule 新增
-// state_get/state_set（任务跨运行保留的小状态）与 state 参数、更新工具描述，
-// 共 10 个动作，全部同步执行。任务小状态只在 schedule run 内可用（执行器按
-// 本次 run 判别，不收 task_id 参数）。v6 及更早版本是冻结副本——本注册表的
-// 任何变化（含共享工具的描述调整）不得影响它们，否则存量会话的前缀/tools_hash
-// 失稳。
+// botToolRegistryV7 是 INT-138 起冻结的 v7 注册表（INT-123）：在 v6 之上，
+// fs_schedule 新增 state_get/state_set（任务跨运行保留的小状态）与 state 参数、
+// 更新工具描述，共 10 个动作，全部同步执行。任务小状态只在 schedule run 内
+// 可用（执行器按本次 run 判别，不收 task_id 参数）。v6 及更早版本是冻结副本。
+// INT-138 的 timezone 描述变更只进 v8：参数结构体换用冻结副本
+// botScheduleTaskArgsV7，本版 wire 字节逐字节保留（基线见 bot_int103_test.go）。
 func botToolRegistryV7() []*botToolDef {
 	tools := botToolRegistryV4Literal()
 	for _, tool := range tools {
@@ -399,7 +402,7 @@ func botToolRegistryV7() []*botToolDef {
 			continue
 		}
 		tool.Description = "管理本机器人绑定的定时任务：list/create/update/delete/runs/run/enable/disable，全部同步执行、立即生效。每次运行是独立会话，只带你的记忆与本任务指令，写操作默认放行（不弹确认）。用户只能查看与开关任务，创建/修改由你负责；创建或修改后要在对话里用中文告知用户任务名与执行时间。run 立即手动执行一次任务：显式触发就是一次执行、不要求任务启用；回执只表示已受理，终态与产出用 runs 查询；同一任务已有未结束运行时会被明确拒绝（不排队）；dry_run=true 只预览、不执行也不建运行记录。state_get/state_set 读写本任务跨运行保留的小状态（≤8192 UTF-8 字节）：只能在定时任务运行中使用、由本次运行的任务隐式决定，省略 state 即清空，适合存「上次已报的 ID」这类去重集合。"
-		tool.ArgsType = reflect.TypeOf(botScheduleTaskArgs{})
+		tool.ArgsType = reflect.TypeOf(botScheduleTaskArgsV7{})
 		tool.Actions = []botActionDef{
 			{Name: "list", Description: "列出本机器人的定时任务", Mode: model.BotExecutionSync},
 			{Name: "create", Description: "创建定时任务（name/cron/instruction 必填；时区可选默认 UTC）", Mode: model.BotExecutionSync},
@@ -416,26 +419,60 @@ func botToolRegistryV7() []*botToolDef {
 	return tools
 }
 
-// botToolRegistryV8 是当前发布注册表（INT-136）：在 v7 之上只改 fs_schedule
+// botToolRegistryV8 是 INT-138 起冻结的 v8 注册表：在 v7 之上只改 fs_schedule
+// 的描述——创建任务省略时区即用户时区（不再默认 UTC），并写明任务指令的
+// 写法（目标、汇报条件、去重方式、无变化回静默哨兵）。动作集与参数字段不变；
+// 参数结构体的 timezone 描述演进只进 v8（v7 用冻结副本 botScheduleTaskArgsV7，
+// wire 字节不变）。v7 及更早版本是冻结副本——本注册表的任何变化（含共享工具
+// 的描述调整）不得影响它们，否则存量会话的前缀/tools_hash 失稳。
+func botToolRegistryV8() []*botToolDef {
+	tools := botToolRegistryV7()
+	for _, tool := range tools {
+		if tool.Name != "fs_schedule" {
+			continue
+		}
+		tool.Description = "管理本机器人绑定的定时任务：list/create/update/delete/runs/run/enable/disable，全部同步执行、立即生效。每次运行是独立会话，只带你的记忆与本任务指令，写操作默认放行（不弹确认）。用户只能查看与开关任务，创建/修改由你负责；创建或修改后要在对话里用中文告知用户任务名与执行时间。时区可选，省略即用户时区（不是 UTC），「每天早上 9 点」按用户所在地执行。run 立即手动执行一次任务：显式触发就是一次执行、不要求任务启用；回执只表示已受理，终态与产出用 runs 查询；同一任务已有未结束运行时会被明确拒绝（不排队）；dry_run=true 只预览、不执行也不建运行记录。state_get/state_set 读写本任务跨运行保留的小状态（≤8192 UTF-8 字节）：只能在定时任务运行中使用、由本次运行的任务隐式决定，省略 state 即清空。instruction 写「意图」而不是固定操作步骤：说清目标、什么情况才需要汇报、去重方式（用 state_get/state_set 记「上次已报的 ID」，只报新增）；没有需要告知的内容时只回复一行 [[SILENT]]；只有「新内容确实值得打断用户」的周期检查才开 needs_report=true。"
+		// v8 用活跃参数结构体：timezone 的 jsonschema 描述随本版更新
+		//（「默认 UTC」→「省略即用户时区」）；v7 的 wire 字节由冻结副本保留。
+		tool.ArgsType = reflect.TypeOf(botScheduleTaskArgs{})
+		tool.Actions = []botActionDef{
+			{Name: "list", Description: "列出本机器人的定时任务", Mode: model.BotExecutionSync},
+			{Name: "create", Description: "创建定时任务（name/cron/instruction 必填；时区可选，省略即用户时区）", Mode: model.BotExecutionSync},
+			{Name: "update", Description: "修改定时任务（task_id 必填；提供即改）", Mode: model.BotExecutionSync},
+			{Name: "delete", Description: "删除定时任务（task_id 必填；运行记录保留）", Mode: model.BotExecutionSync},
+			{Name: "runs", Description: "查看任务最近运行记录（task_id 必填；trigger_source 区分 cron/manual）", Mode: model.BotExecutionSync},
+			{Name: "run", Description: "立即手动执行一次任务（task_id 必填；不要求任务启用；回执只表示已受理；已有未结束运行时拒绝；dry_run=true 只预览）", Mode: model.BotExecutionSync},
+			{Name: "enable", Description: "启用任务并重算下次运行时间（task_id 必填）", Mode: model.BotExecutionSync},
+			{Name: "disable", Description: "停用任务，不再触发（task_id 必填）", Mode: model.BotExecutionSync},
+			{Name: "state_get", Description: "读取本任务跨运行保留的小状态（无参数；只能在定时任务运行中使用）", Mode: model.BotExecutionSync},
+			{Name: "state_set", Description: "写入本任务的小状态（state 为任意 JSON 值，省略或 null 表示清空；只能在定时任务运行中使用）", Mode: model.BotExecutionSync},
+		}
+	}
+	return tools
+}
+
+// botToolRegistryV9 是当前发布注册表（INT-136）：在 v8 之上只改 fs_schedule
 // 的工具与动作描述，说明确认语义——create、改动 instruction/needs_report/model
 // 的 update、非 dry_run 的 run 需要用户确认、异步受理、结果以后台结果送达；
 // 批准创建或修改任务等于授权该任务以后每次运行默认放行写操作；定时任务运行中
 // 不能 create/update/run。动作清单与参数结构体不变（仍 10 个动作、共用
 // botScheduleTaskArgs）。确认判定的事实源是 botScheduleConfirmation（版本
 // 无关、在受理端生效），动作定义里的 Mode/RequiresConfirmation 不进 wire
-// 字节、保持原样，v7 及更早版本是冻结副本——本注册表的任何变化（含共享工具
+// 字节、保持原样，v8 及更早版本是冻结副本——本注册表的任何变化（含共享工具
 // 的描述调整）不得影响它们，否则存量会话的前缀/tools_hash 失稳。
-func botToolRegistryV8() []*botToolDef {
-	tools := botToolRegistryV4Literal()
+func botToolRegistryV9() []*botToolDef {
+	tools := botToolRegistryV8()
 	for _, tool := range tools {
 		if tool.Name != "fs_schedule" {
 			continue
 		}
-		tool.Description = "管理本机器人绑定的定时任务：list/runs/disable 与只改 name/cron/timezone 的 update、dry_run=true 的 run 同步执行、立即生效；create、update 中改动 instruction/needs_report/model、run（dry_run=true 预览除外）、enable、delete 需要用户确认：调用先受理（回执 status=pending_confirmation），用户批准后在后台执行，结果以「平台后台结果」消息送达，不要把受理当成已执行。批准创建或修改任务等于授权该任务以后每次运行默认放行写操作；enable 等于重新启用一个以后每次运行都默认放行写操作的任务，delete 不可逆。定时任务运行中不能管理任务（create/update/run/enable/disable/delete 都会拒绝），请在主线对话里操作。每次运行是独立会话，只带你的记忆与本任务指令，写操作默认放行（不弹确认）。用户只能查看与开关任务，创建/修改由你负责；创建或修改后要在对话里用中文告知用户任务名与执行时间。run 立即手动执行一次任务：显式触发就是一次执行、不要求任务启用；非 dry_run 的 run 同样需要确认，回执只表示已受理，终态与产出用 runs 查询；同一任务已有未结束运行时会被明确拒绝（不排队）；dry_run=true 只预览、不执行也不建运行记录。state_get/state_set 读写本任务跨运行保留的小状态（≤8192 UTF-8 字节）：只能在定时任务运行中使用、由本次运行的任务隐式决定，省略 state 即清空，适合存「上次已报的 ID」这类去重集合。"
+		tool.Description = "管理本机器人绑定的定时任务：list/runs/disable 与只改 name/cron/timezone 的 update、dry_run=true 的 run 同步执行、立即生效；create、update 中改动 instruction/needs_report/model、run（dry_run=true 预览除外）、enable、delete 需要用户确认：调用先受理（回执 status=pending_confirmation），用户批准后在后台执行，结果以「平台后台结果」消息送达，不要把受理当成已执行。批准创建或修改任务等于授权该任务以后每次运行默认放行写操作；enable 等于重新启用一个以后每次运行都默认放行写操作的任务，delete 不可逆。定时任务运行中不能管理任务（create/update/run/enable/disable/delete 都会拒绝），请在主线对话里操作。每次运行是独立会话，只带你的记忆与本任务指令，写操作默认放行（不弹确认）。用户只能查看与开关任务，创建/修改由你负责；创建或修改后要在对话里用中文告知用户任务名与执行时间。时区可选，省略即用户时区（不是 UTC），「每天早上 9 点」按用户所在地执行。run 立即手动执行一次任务：显式触发就是一次执行、不要求任务启用；非 dry_run 的 run 同样需要确认，回执只表示已受理，终态与产出用 runs 查询；同一任务已有未结束运行时会被明确拒绝（不排队）；dry_run=true 只预览、不执行也不建运行记录。state_get/state_set 读写本任务跨运行保留的小状态（≤8192 UTF-8 字节）：只能在定时任务运行中使用、由本次运行的任务隐式决定，省略 state 即清空。instruction 写「意图」而不是固定操作步骤：说清目标、什么情况才需要汇报、去重方式（用 state_get/state_set 记「上次已报的 ID」，只报新增）；没有需要告知的内容时只回复一行 [[SILENT]]；只有「新内容确实值得打断用户」的周期检查才开 needs_report=true。"
+		// v9 用活跃参数结构体：timezone 的 jsonschema 描述随 v8 更新，v7 的
+		// wire 字节由冻结副本 botScheduleTaskArgsV7 保留。
 		tool.ArgsType = reflect.TypeOf(botScheduleTaskArgs{})
 		tool.Actions = []botActionDef{
 			{Name: "list", Description: "列出本机器人的定时任务", Mode: model.BotExecutionSync},
-			{Name: "create", Description: "创建定时任务（name/cron/instruction 必填；时区可选默认 UTC）。需要用户确认：受理后等待批准，批准即授权该任务以后每次运行默认放行写操作", Mode: model.BotExecutionSync},
+			{Name: "create", Description: "创建定时任务（name/cron/instruction 必填；时区可选，省略即用户时区）。需要用户确认：受理后等待批准，批准即授权该任务以后每次运行默认放行写操作", Mode: model.BotExecutionSync},
 			{Name: "update", Description: "修改定时任务（task_id 必填；提供即改）。只改 name/cron/timezone 同步生效；改动 instruction/needs_report/model 需要用户确认并异步受理，批准即授权该任务以后每次运行默认放行写操作", Mode: model.BotExecutionSync},
 			{Name: "delete", Description: "删除定时任务（task_id 必填；运行记录保留）。需要用户确认：删除不可逆", Mode: model.BotExecutionSync},
 			{Name: "runs", Description: "查看任务最近运行记录（task_id 必填；trigger_source 区分 cron/manual）", Mode: model.BotExecutionSync},
@@ -767,8 +804,10 @@ func botToolsetVersionOf(version int64) *botToolsetHolder {
 		tools = botToolRegistryV6()
 	case 7:
 		tools = botToolRegistryV7()
-	default:
+	case 8:
 		tools = botToolRegistryV8()
+	default:
+		tools = botToolRegistryV9()
 	}
 	holder := botBuildToolset(version, tools)
 	botToolsetsByID[version] = holder

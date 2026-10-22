@@ -1,4 +1,10 @@
-import { useMemo, useRef, useState } from "react";
+import {
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { cn } from "@/lib/utils";
 
 export interface MetricChartPoint {
@@ -27,6 +33,7 @@ interface MetricChartProps {
   points: MetricChartPoint[];
   variant: "bar";
   emptyMessage: string;
+  emptyAction?: ReactNode;
   className?: string;
 }
 
@@ -36,6 +43,7 @@ interface MultiSeriesChartProps {
   points: MetricChartSeriesPoint[];
   variant: "area";
   emptyMessage: string;
+  emptyAction?: ReactNode;
   className?: string;
 }
 
@@ -53,7 +61,8 @@ const CHART_COLORS = [
 ];
 
 export function MetricChart(props: ChartProps) {
-  const { title, description, variant, emptyMessage, className } = props;
+  const { title, description, variant, emptyMessage, emptyAction, className } =
+    props;
 
   return (
     <div className={cn("space-y-4", className)}>
@@ -71,11 +80,13 @@ export function MetricChart(props: ChartProps) {
           <HorizontalBarChart
             points={(props as MetricChartProps).points}
             emptyMessage={emptyMessage}
+            emptyAction={emptyAction}
           />
         ) : (
           <StackedAreaChart
             points={(props as MultiSeriesChartProps).points}
             emptyMessage={emptyMessage}
+            emptyAction={emptyAction}
           />
         )}
       </div>
@@ -87,14 +98,32 @@ function getPointKey(point: { label: string; id?: string }, index: number) {
   return point.id ?? `${point.label}-${index}`;
 }
 
+/** 空数据处理：只显示一段居中说明（可带一个真实入口），不画坐标轴，免得多套空状态互相打架。 */
+function ChartEmptyState({
+  message,
+  action,
+}: {
+  message: string;
+  action?: ReactNode;
+}) {
+  return (
+    <div className="flex h-[240px] flex-col items-center justify-center gap-2 px-4 text-center">
+      <p className="text-xs text-muted-foreground">{message}</p>
+      {action}
+    </div>
+  );
+}
+
 /* ─── Horizontal Bar Chart ─── */
 
 function HorizontalBarChart({
   points,
   emptyMessage,
+  emptyAction,
 }: {
   points: MetricChartPoint[];
   emptyMessage: string;
+  emptyAction?: ReactNode;
 }) {
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
   const maxValue = Math.max(...points.map((p) => p.value), 0);
@@ -102,14 +131,18 @@ function HorizontalBarChart({
   const barHeight = 24;
   const labelWidth = 96;
   const maxBarWidth = 360;
-  const isEmpty = points.length === 0 || maxValue === 0;
+  // 只有完全没数据才算空；全是 0 的项目行仍然保留，读者能看到项目本身。
+  const isEmpty = points.length === 0;
+
+  if (isEmpty) {
+    return <ChartEmptyState message={emptyMessage} action={emptyAction} />;
+  }
 
   return (
     <div className="space-y-1">
       {points.map((point, index) => {
         const ratio = point.value / chartMax;
         const isHovered = hoveredIndex === index;
-        const isBarEmpty = chartMax <= 1 && point.value === 0;
 
         return (
           <div
@@ -131,7 +164,8 @@ function HorizontalBarChart({
                 className="relative overflow-hidden rounded-full bg-muted/60 transition-all duration-500"
                 style={{ height: barHeight }}
               >
-                {!isBarEmpty && (
+                {/* 值为 0 时只留空轨道：画一段短灰条会被误读成「有少量进度」。 */}
+                {point.value > 0 && (
                   <div
                     className={cn(
                       "absolute left-0 top-0 h-full rounded-full transition-all duration-500 ease-out",
@@ -143,11 +177,6 @@ function HorizontalBarChart({
                     }}
                   >
                     <div className="absolute inset-0 -translate-x-full animate-[shimmer_2s_infinite] bg-gradient-to-r from-transparent via-white/20 to-transparent" />
-                  </div>
-                )}
-                {isBarEmpty && (
-                  <div className="flex h-full items-center px-3">
-                    <span className="h-1.5 w-8 rounded-full bg-muted-foreground/15" />
                   </div>
                 )}
               </div>
@@ -164,35 +193,49 @@ function HorizontalBarChart({
           </div>
         );
       })}
-
-      {isEmpty && (
-        <div className="flex items-center justify-center py-8">
-          <div className="rounded-lg border border-dashed bg-muted/40 px-4 py-3 text-xs text-muted-foreground">
-            {emptyMessage}
-          </div>
-        </div>
-      )}
     </div>
   );
 }
 
 /* ─── Stacked Area Chart ─── */
 
-const SVG_WIDTH = 720;
-const SVG_HEIGHT = 220;
-const SVG_PADDING_X = 40;
-const SVG_PADDING_Y = 28;
+const CHART_HEIGHT = 240;
+const CHART_PADDING_X = 40;
+const CHART_PADDING_TOP = 24;
+const CHART_PADDING_BOTTOM = 30;
 
 function StackedAreaChart({
   points,
   emptyMessage,
+  emptyAction,
 }: {
   points: MetricChartSeriesPoint[];
   emptyMessage: string;
+  emptyAction?: ReactNode;
 }) {
   const svgRef = useRef<SVGSVGElement>(null);
+  const boxRef = useRef<HTMLDivElement>(null);
+  // 用实测宽度画图（1:1 像素坐标）：viewBox 缩放会把坐标轴文字一起缩小，
+  // 也会让横轴日期和数据点错位。
+  const [chartWidth, setChartWidth] = useState(720);
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
   const [tooltipPos, setTooltipPos] = useState<{ x: number; y: number; containerWidth: number } | null>(null);
+
+  useLayoutEffect(() => {
+    const el = boxRef.current;
+    if (!el) return;
+    const apply = (width: number) => {
+      const next = Math.round(width);
+      if (next > 0) setChartWidth(next);
+    };
+    apply(el.getBoundingClientRect().width);
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver((entries) => {
+      apply(entries[0]?.contentRect.width ?? 0);
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
 
   // Extract all unique series IDs and names
   const seriesMeta = useMemo(() => {
@@ -238,22 +281,27 @@ function StackedAreaChart({
   }, [points, seriesMeta]);
 
   const maxTotal = Math.max(...stackedData.map((d) => d.total), 0);
-  const chartMax = Math.max(maxTotal, 1);
+  // 纵轴用整数阶梯：最大值较小时只分两档（0/1/2），峰値不至于只占四分之一高；
+  // 其余情况分四档，每档至少 1，避免出现 1、1、1、0、0 这种重复刻度。
+  const tickIntervals = maxTotal <= 2 ? 2 : 4;
+  const tickStep = Math.max(Math.ceil(maxTotal / tickIntervals), 1);
+  const chartMax = tickStep * tickIntervals;
   const isEmpty = points.length === 0 || maxTotal === 0;
 
   const safeData = stackedData.length === 1
     ? [...stackedData, { ...stackedData[0], index: 1 }]
     : stackedData;
 
-  const plotWidth = SVG_WIDTH - SVG_PADDING_X * 2;
-  const plotHeight = SVG_HEIGHT - SVG_PADDING_Y * 2;
+  const plotWidth = chartWidth - CHART_PADDING_X * 2;
+  const baselineY = CHART_HEIGHT - CHART_PADDING_BOTTOM;
+  const plotHeight = baselineY - CHART_PADDING_TOP;
   const denominator = Math.max(safeData.length - 1, 1);
 
   // Compute coordinates for each stack layer
   const coordinates = safeData.map((point, index) => {
-    const x = SVG_PADDING_X + (plotWidth * index) / denominator;
+    const x = CHART_PADDING_X + (plotWidth * index) / denominator;
     const getY = (value: number) =>
-      SVG_HEIGHT - SVG_PADDING_Y - (plotHeight * Math.min(value, chartMax)) / chartMax;
+      baselineY - (plotHeight * Math.min(value, chartMax)) / chartMax;
     return {
       x,
       yTotal: getY(point.total),
@@ -287,20 +335,28 @@ function StackedAreaChart({
   }, [coordinates, seriesMeta]);
 
   // Grid lines
-  const gridLines = [0, 0.25, 0.5, 0.75, 1].map((ratio) => {
-    const y = SVG_HEIGHT - SVG_PADDING_Y - plotHeight * ratio;
-    const value = Math.round(chartMax * ratio);
-    return { y, value };
-  });
+  const gridLines = Array.from({ length: tickIntervals + 1 }, (_, index) => ({
+    y: baselineY - (plotHeight * index) / tickIntervals,
+    value: tickStep * index,
+  }));
 
-  // X-axis labels
-  const labelStride = Math.max(Math.ceil(Math.max(points.length - 1, 1) / 6), 1);
+  // X-axis labels：从最后一个点按固定天数步长往前取，保证相邻标签间隔一致，
+  // 且最后一个日期永远落在最后一个点正下方。首点可能因此没有标签（30 个点时
+  // 是 4/9/14/19/24/29），不要在中间插一个不均匀的间隔。
+  const labelIndexes = useMemo(() => {
+    const last = points.length - 1;
+    if (last < 1) return points.length === 1 ? [0] : [];
+    const stride = Math.max(Math.ceil(last / 6), 1);
+    const indexes: number[] = [];
+    for (let index = last; index >= 0; index -= stride) indexes.push(index);
+    return indexes.reverse();
+  }, [points.length]);
 
   const handleMouseMove = (e: React.MouseEvent<SVGSVGElement>) => {
     if (!svgRef.current) return;
     const rect = svgRef.current.getBoundingClientRect();
     const x = e.clientX - rect.left;
-    const svgX = (x / rect.width) * SVG_WIDTH;
+    const svgX = (x / rect.width) * chartWidth;
 
     // Find nearest point
     let nearestIndex = 0;
@@ -326,15 +382,22 @@ function StackedAreaChart({
 
   return (
     <div className="relative">
-      <svg
-        ref={svgRef}
-        viewBox={`0 0 ${SVG_WIDTH} ${SVG_HEIGHT}`}
-        className="h-[240px] w-full overflow-visible"
-        role="img"
-        aria-label="stacked area chart"
-        onMouseMove={handleMouseMove}
-        onMouseLeave={handleMouseLeave}
-      >
+      {/* 测量容器始终渲染：空状态挂载后再出现数据时，ResizeObserver 仍然有效，
+          否则 chartWidth 会永久停在默认值，viewBox 缩放问题会回归。 */}
+      <div ref={boxRef} className="w-full">
+        {isEmpty ? (
+          <ChartEmptyState message={emptyMessage} action={emptyAction} />
+        ) : (
+          <svg
+            ref={svgRef}
+            viewBox={`0 0 ${chartWidth} ${CHART_HEIGHT}`}
+            className="w-full overflow-visible"
+            style={{ height: CHART_HEIGHT }}
+            role="img"
+            aria-label="stacked area chart"
+            onMouseMove={handleMouseMove}
+            onMouseLeave={handleMouseLeave}
+          >
         <defs>
           {seriesMeta.map((meta) => (
             <linearGradient
@@ -355,19 +418,19 @@ function StackedAreaChart({
         {gridLines.map((line, i) => (
           <g key={`grid-${i}`}>
             <line
-              x1={SVG_PADDING_X}
+              x1={CHART_PADDING_X}
               y1={line.y}
-              x2={SVG_WIDTH - SVG_PADDING_X}
+              x2={chartWidth - CHART_PADDING_X}
               y2={line.y}
               className="stroke-border/50"
               strokeWidth="1"
               strokeDasharray={i === 0 ? undefined : "3 3"}
             />
             <text
-              x={SVG_PADDING_X - 8}
+              x={CHART_PADDING_X - 8}
               y={line.y + 4}
               textAnchor="end"
-              className="fill-muted-foreground text-[10px]"
+              className="fill-muted-foreground text-[11px]"
             >
               {line.value}
             </text>
@@ -391,9 +454,9 @@ function StackedAreaChart({
         {hoveredData && (
           <line
             x1={hoveredData.x}
-            y1={SVG_PADDING_Y}
+            y1={CHART_PADDING_TOP}
             x2={hoveredData.x}
-            y2={SVG_HEIGHT - SVG_PADDING_Y}
+            y2={baselineY}
             stroke="currentColor"
             strokeWidth="1"
             strokeDasharray="4 4"
@@ -411,21 +474,28 @@ function StackedAreaChart({
             className="fill-foreground stroke-background stroke-[2] transition-all duration-150"
           />
         ))}
-      </svg>
 
-      {/* X-axis labels */}
-      <div className="mt-1 flex flex-wrap items-center justify-between gap-x-2 gap-y-1 px-10 text-[10px] text-muted-foreground">
-        {points
-          .filter((_, index) => index % labelStride === 0 || index === points.length - 1)
-          .map((point, index) => (
-            <span key={getPointKey(point, index)} className="min-w-0 truncate">
+        {/* X-axis labels：画在图内，和数据点共用同一套坐标，刻度与日期一一对应 */}
+        {labelIndexes.map((index) => {
+          const point = points[index];
+          return (
+            <text
+              key={getPointKey(point, index)}
+              x={coordinates[index].x}
+              y={CHART_HEIGHT - 8}
+              textAnchor="middle"
+              className="fill-muted-foreground text-[11px]"
+            >
               {point.shortLabel ?? point.label}
-            </span>
-          ))}
+            </text>
+          );
+        })}
+          </svg>
+        )}
       </div>
 
-      {/* Tooltip */}
-      {hoveredData && tooltipPos && !isEmpty && (
+      {/* Tooltip：图表已转成空状态时不能留浮层（数据可能在悬浮中被刷新成全零） */}
+      {!isEmpty && hoveredData && tooltipPos && (
         <div
           className="pointer-events-none absolute z-50 min-w-[160px] rounded-lg border bg-popover px-3 py-2 shadow-lg"
           style={{
@@ -465,14 +535,6 @@ function StackedAreaChart({
                 </span>
               </div>
             )}
-          </div>
-        </div>
-      )}
-
-      {isEmpty && (
-        <div className="absolute inset-0 flex items-center justify-center">
-          <div className="rounded-lg border border-dashed bg-muted/40 px-4 py-3 text-xs text-muted-foreground">
-            {emptyMessage}
           </div>
         </div>
       )}
