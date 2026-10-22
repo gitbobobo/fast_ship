@@ -31,8 +31,6 @@ export interface Frequency {
 
 export const MINUTE_STEP_OPTIONS = [1, 2, 5, 10, 15, 20, 30] as const;
 export const HOUR_STEP_OPTIONS = [1, 2, 3, 4, 6, 8, 12] as const;
-export const WEEKDAY_ORDER = [1, 2, 3, 4, 5, 6, 0] as const; // 周一 … 周日
-export const DAY_OF_MONTH_OPTIONS = Array.from({ length: 31 }, (_, i) => i + 1);
 
 export const defaultFrequency = (): Frequency => ({
   kind: "daily",

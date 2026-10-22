@@ -842,10 +842,6 @@ func (s *BotService) estimatePlanTokens(bot *model.Bot, state *model.BotContextS
 	return botEstimateBytes(n)
 }
 
-func (s *BotService) estimateAfterProjection(bot *model.Bot, plan *botCompactionPlan, summary, manifest, foldedJSON string, through int64) int64 {
-	return s.buildBoundarySnapshot(bot, plan, summary, manifest, foldedJSON, through).AfterTokens
-}
-
 func (s *BotService) buildBoundarySnapshot(bot *model.Bot, plan *botCompactionPlan, summary, manifest, foldedJSON string, through int64) *botBoundarySnapshot {
 	folded := map[string]string{}
 	_ = json.Unmarshal([]byte(foldedJSON), &folded)

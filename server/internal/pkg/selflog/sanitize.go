@@ -63,14 +63,6 @@ func isSensitiveKey(key string) bool {
 	return ok
 }
 
-// sanitizeValue 对字符串属性值脱敏：敏感 key 整值替换，其余做形状替换。
-func sanitizeValue(key, value string) string {
-	if isSensitiveKey(key) {
-		return redacted
-	}
-	return sanitizeString(value)
-}
-
 // sanitizeAttrValue 递归脱敏附加字段：先按 key 判定，再按值类型展开。
 // map/slice/struct 先落到 JSON 再走同一套规则，避免非 string 敏感值漏网。
 func sanitizeAttrValue(key string, value interface{}) interface{} {
