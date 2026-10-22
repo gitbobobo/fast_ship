@@ -4,6 +4,7 @@ import {
   Bug,
   CalendarDays,
   FolderKanban,
+  Plus,
   TrendingDown,
   TrendingUp,
 } from "lucide-react";
@@ -15,6 +16,7 @@ import {
   type MetricChartSeriesPoint,
 } from "@/components/dashboard/metric-chart";
 import { Card, CardContent } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useDashboardOverview } from "@/lib/hooks/use-dashboard";
 import { cn } from "@/lib/utils";
@@ -160,12 +162,14 @@ export default function DashboardPage() {
                   variant="bar"
                   emptyMessage="暂无已配置项目"
                   emptyAction={
-                    <Link
-                      to="/projects"
-                      className="text-xs font-medium text-primary hover:underline"
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      render={<Link to="/projects" />}
                     >
+                      <Plus />
                       去创建项目
-                    </Link>
+                    </Button>
                   }
                 />
               )}
