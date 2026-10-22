@@ -1505,3 +1505,42 @@ func TestBotInt136UnknownActionFailsClosed(t *testing.T) {
 		}
 	}
 }
+
+// create 省略时区时，确认卡快照必须与执行期 createScheduleTask 同一口径
+// （机器人归属用户的有效时区）：否则用户批准的是「UTC 的 9 点」，落地却是
+// 用户时区的 9 点，next_run 也对不上（INT-136 复审 P1）。
+func TestBotInt136SchedulePreviewUsesOwnerTimezone(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "previewtz")
+	bot := env.createBot(t, userID)
+	setUserTimezone(t, env, userID, "Asia/Shanghai")
+	botRow, err := env.bots.bots.Get(bot.ID)
+	if err != nil {
+		t.Fatalf("load bot: %v", err)
+	}
+
+	raw := map[string]json.RawMessage{
+		"name":        json.RawMessage(`"晨报"`),
+		"cron":        json.RawMessage(`"0 9 * * *"`),
+		"instruction": json.RawMessage(`"检查新 issue 并汇报"`),
+	}
+	preview := env.bots.schedulePreviewFromArgs(botRow, raw)
+	if preview == nil {
+		t.Fatalf("预览不应为空")
+	}
+	if preview.Timezone != "Asia/Shanghai" {
+		t.Fatalf("省略时区时快照应写用户时区，实得 %q", preview.Timezone)
+	}
+	if !strings.Contains(preview.NextRunAt, "09:00:00") {
+		t.Fatalf("next_run_at 应为用户本地 09:00，实得 %q", preview.NextRunAt)
+	}
+	if !strings.Contains(preview.NextRunAtUTC, "T01:00:00Z") {
+		t.Fatalf("next_run_at_utc 应为 UTC 01:00，实得 %q", preview.NextRunAtUTC)
+	}
+
+	// 显式时区仍以参数为准，不被用户时区覆盖。
+	raw["timezone"] = json.RawMessage(`"UTC"`)
+	if got := env.bots.schedulePreviewFromArgs(botRow, raw); got.Timezone != "UTC" {
+		t.Fatalf("显式时区应保留，实得 %q", got.Timezone)
+	}
+}

@@ -64,7 +64,6 @@ function ScheduleConfirmSummary({ call }: { call: BotCall }) {
       ? (ctx as Record<string, unknown>)
       : {};
   })();
-  const isRun = call.action === "run";
 
   // 空白串按「未提供」处理（服务端 TrimSpace 语义），避免把空白当成有效配置。
   const str = (v: unknown) =>
@@ -83,7 +82,9 @@ function ScheduleConfirmSummary({ call }: { call: BotCall }) {
   // instruction、model:null 都是这么漏出去的）。参数只在原始调用 JSON 里看。
   const name = schedStr("name", "task_name") ?? "—";
   const cron = schedStr("cron", "cron_expression") ?? "—";
-  const timezone = schedStr("timezone") ?? (isRun ? "—" : "UTC");
+  // 快照缺时区时显示「—」而不是假设 UTC：受理端已按「省略即用户时区」写进
+  // 快照，这里再兜一个 UTC 会把批准界面带偏。
+  const timezone = schedStr("timezone") ?? "—";
   const nextRun = schedStr("next_run_at") ?? "—";
   // 模型来源要如实说清：任务固定覆盖 vs 跟随机器人（换模型后下次运行会变）。
   const modelName = schedStr("effective_model") ?? "—";

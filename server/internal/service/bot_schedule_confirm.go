@@ -258,10 +258,19 @@ type schedulePreviewInput struct {
 // schedulePreviewFromArgs 为 create 计算预览：cron/timezone 已在受理期校验，
 // 解析失败时只省略下次运行时间，不阻断受理。
 func (s *BotService) schedulePreviewFromArgs(bot *model.Bot, raw map[string]json.RawMessage) *botScheduleCallPreview {
+	timezone := rawString(raw["timezone"])
+	if strings.TrimSpace(timezone) == "" {
+		// 与执行期 createScheduleTask 同一口径：省略时区 = 机器人归属用户的
+		// 有效时区。少了这一步，确认卡按 UTC 展示下次运行、落地却按用户时区，
+		// 用户批准的和真正执行的就不是同一件事。
+		if tz, _ := s.botOwnerTimezoneOf(bot); tz != "" {
+			timezone = tz
+		}
+	}
 	return s.schedulePreviewFromTask(bot, schedulePreviewInput{
 		Name:           rawString(raw["name"]),
 		Cron:           rawString(raw["cron"]),
-		Timezone:       rawString(raw["timezone"]),
+		Timezone:       timezone,
 		Instruction:    rawString(raw["instruction"]),
 		ModelPtr:       rawStringPtr(raw["model"]),
 		NeedsReportPtr: rawBoolPtr(raw["needs_report"]),

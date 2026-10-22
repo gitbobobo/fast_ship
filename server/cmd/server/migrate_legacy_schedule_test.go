@@ -7,8 +7,10 @@ import (
 	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/model"
+	"github.com/godbobo/fast_ship/server/internal/repository"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
+	"gorm.io/gorm"
 )
 
 // 存量任务复核提示（INT-136 发布策略 A）：每个有未复核任务的机器人收到
@@ -154,5 +156,49 @@ func TestMigrateLegacyScheduleNoticeNoop(t *testing.T) {
 	}
 	if count != 0 {
 		t.Fatalf("空库不应产生消息: %d", count)
+	}
+}
+
+// 并发首启时后到者的插入会命中 idx_bot_messages_dedup；迁移靠
+// isUniqueConstraintErr 把这种冲突当成「已经提示过」。这里用真实的重复插入
+// 证明该判定认得出唯一索引报错，避免哪天驱动换了文案后静默失效。
+func TestIsUniqueConstraintErrRecognizesDedupConflict(t *testing.T) {
+	db, err := openMigrationTestDB(t)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if err := db.AutoMigrate(autoMigrateModels...); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	// dedup 唯一索引由 EnsureBotSchema 的原始 SQL 建，AutoMigrate 不会代劳。
+	if err := repository.EnsureBotSchema(db); err != nil {
+		t.Fatalf("ensure bot schema: %v", err)
+	}
+	createMigrationUser(t, db, "u-dedup")
+	createMigrationBot(t, db, "b-dedup", "u-dedup", "nonce-dedup")
+	if err := db.Model(&model.Bot{}).Where("id = ?", "b-dedup").
+		Update("next_message_seq", 1).Error; err != nil {
+		t.Fatalf("set seq: %v", err)
+	}
+
+	dedup := legacyScheduleReviewDedup
+	appendNotice := func(seq int64) error {
+		return db.Transaction(func(tx *gorm.DB) error {
+			return repository.NewBotMessageRepository(tx).AppendTx(tx, &model.BotMessage{
+				ID: uuid.NewString(), BotID: "b-dedup", Seq: seq,
+				Kind: model.BotMessageKindLifecycle, ContentJSON: "{}",
+				DedupKey: &dedup, CreatedAt: time.Now().UTC(),
+			})
+		})
+	}
+	if err := appendNotice(1); err != nil {
+		t.Fatalf("first notice: %v", err)
+	}
+	err = appendNotice(2)
+	if err == nil {
+		t.Fatalf("同 dedup_key 的第二次插入应被唯一索引拒绝")
+	}
+	if !isUniqueConstraintErr(err) {
+		t.Fatalf("唯一索引冲突应被 isUniqueConstraintErr 识别，实得 %v", err)
 	}
 }

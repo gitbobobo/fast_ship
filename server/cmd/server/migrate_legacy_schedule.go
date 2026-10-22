@@ -54,8 +54,8 @@ func migrateLegacyScheduleNotice(db *gorm.DB, logger *zap.Logger) error {
 			dedup := legacyScheduleReviewDedup
 			existing, err := repository.NewBotMessageRepository(tx).FindByDedupKey(botID, dedup)
 			if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-				// dedup_key 没有唯一索引兜底，瞬时读库错误不能吞：吞了会
-				// 重复插入提示，重启重跑还会再加一条。回滚让下次启动重试。
+				// 瞬时读库错误不能吞：回滚让下次启动重试。重复插入由下面的
+				// 唯一索引（idx_bot_messages_dedup）兜住。
 				return err
 			}
 			if existing != nil {
@@ -80,11 +80,18 @@ func migrateLegacyScheduleNotice(db *gorm.DB, logger *zap.Logger) error {
 			if err != nil {
 				return err
 			}
-			return repository.NewBotMessageRepository(tx).AppendTx(tx, &model.BotMessage{
+			appendErr := repository.NewBotMessageRepository(tx).AppendTx(tx, &model.BotMessage{
 				ID: uuid.NewString(), BotID: botID, Seq: seq,
 				Kind: model.BotMessageKindLifecycle, ContentJSON: string(content),
 				DedupKey: &dedup, CreatedAt: time.Now().UTC(),
 			})
+			if appendErr != nil && isUniqueConstraintErr(appendErr) {
+				// 多实例并发首启（滚动发布、双副本同时升级）时两个进程都能通过
+				// 上面的 dedup 检查，后到者的插入命中 idx_bot_messages_dedup。
+				// 那等价于「已经提示过」，不能因此让本次启动迁移失败。
+				return nil
+			}
+			return appendErr
 		})
 		if err != nil {
 			return err
@@ -95,6 +102,12 @@ func migrateLegacyScheduleNotice(db *gorm.DB, logger *zap.Logger) error {
 		logger.Info("已向机器人主线发送存量定时任务复核提示", zap.Int("bots", notified))
 	}
 	return nil
+}
+
+// isUniqueConstraintErr 判断写入是否命中唯一索引（SQLite 的报错文案，
+// 与 repository.isUniqueConstraintError 同一口径）。
+func isUniqueConstraintErr(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed")
 }
 
 // legacyScheduleReviewDetail 组提示的 detail：note 是用户可读正文（前端对
