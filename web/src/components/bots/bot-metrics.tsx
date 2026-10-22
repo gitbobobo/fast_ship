@@ -32,7 +32,7 @@ export function formatCostEstimate(usd: number): string {
   if (usd >= 1) return `$${usd.toFixed(2)}`;
   // 分位段保留四位小数再剥尾零：$0.5000 → $0.5，$0.0123 → $0.0123。
   if (usd >= 0.01) return `$${usd.toFixed(4).replace(/\.?0+$/, "")}`;
-  if (usd >= 0.001) return `$${usd.toPrecision(2)}`;
+  if (usd >= 0.001) return `$${usd.toPrecision(2).replace(/\.?0+$/, "")}`;
   // 毫厘以下的金额一长串前导零读不出数量级（视觉复审）：两位有效数字
   // 的科学计数法比 0.000034 直观，如 $3.4e-5。
   return `$${usd.toExponential(1)}`;

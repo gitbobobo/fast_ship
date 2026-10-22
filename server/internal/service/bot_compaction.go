@@ -2035,8 +2035,11 @@ func (s *BotService) settleToolsetNoticesTx(tx *gorm.DB, botID string, toVersion
 			ToVersion  int64  `json:"to_version"`
 			Activation string `json:"activation"`
 		}
+		// 兼容升级前已发出的旧格式（activation="next_compaction_or_restart"），
+		// 否则存量推迟通知永远等不到收口事件（INT-139 云端复审）。
 		if err := json.Unmarshal(content.Detail, &detail); err == nil &&
-			detail.Activation == "next_compaction" && detail.ToVersion > settledMax {
+			(detail.Activation == "next_compaction" || detail.Activation == "next_compaction_or_restart") &&
+			detail.ToVersion > settledMax {
 			pending = true
 			break
 		}

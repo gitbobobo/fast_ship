@@ -134,9 +134,16 @@ func (s *BotService) auxModelRequest(ctx context.Context, bot *model.Bot, maintR
 		cols["completion_tokens"] = reply.CompletionTokens
 		cols["total_tokens"] = reply.TotalTokens
 		cols["cached_tokens"] = reply.CachedTokens
-		// 维护请求按机器人当前目录归属计价（与上面的 modelCapability
-		// 同一解析口径）；目录无价保持 NULL（INT-139）。
-		if usd, ok := botCostEstimate(bot.CatalogID, modelName,
+		// 维护请求按维护运行快照里的目录归属计价（INT-139 云端复审）：
+		// maintRun.ConfigSnapshotJSON 由父 run 派发时冻结，与主线请求走
+		// runCatalogIDOf 同口径——运行中用户切了 provider/目录，发往冻结旧
+		// provider 的流量不得按新目录单价记账；无父 run 快照时回退当前归属。
+		catalogID := bot.CatalogID
+		var snap botConfigSnapshot
+		if err := json.Unmarshal([]byte(maintRun.ConfigSnapshotJSON), &snap); err == nil && snap.CatalogID != "" {
+			catalogID = snap.CatalogID
+		}
+		if usd, ok := botCostEstimate(catalogID, modelName,
 			reply.PromptTokens, reply.CachedTokens, reply.CompletionTokens); ok {
 			cols["cost_estimate"] = usd
 			cols["cost_source"] = botCostSourceCatalog

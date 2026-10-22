@@ -919,6 +919,49 @@ func TestFailedRequestWithUsageStillPriced(t *testing.T) {
 	}
 }
 
+// 维护请求按维护运行快照里的目录归属计价（INT-139 云端复审）：父 run
+// 派发时冻结的 catalog_id 与主线 runCatalogIDOf 同口径——机器人当前归属
+// 无价而快照有价时，发往冻结 provider 的辅助流量必须按快照单价记账。
+func TestAuxRequestPricedByMaintenanceSnapshot(t *testing.T) {
+	env := setupBotTestEnv(t, fakeModelTurn{
+		Text:  "ok",
+		Usage: &fakeModelUsage{Prompt: 1000, Cached: 400, Completion: 200, Total: 1200},
+	})
+	userID := createBotTestUser(t, env.db, "r11auxcat")
+	created := env.createBot(t, userID)
+	bot, err := env.bots.bots.Get(created.ID)
+	if err != nil {
+		t.Fatalf("读 bot: %v", err)
+	}
+	// 实时归属无价（custom 目录没有 deepseek-flash）：错用它计价会丢成 NULL。
+	bot.CatalogID = "custom"
+	now := time.Now().UTC()
+	maint := &model.BotMaintenanceRun{
+		ID: uuid.NewString(), BotID: bot.ID,
+		Kind: model.BotMaintenanceCompaction, TriggerKey: "auxcat-" + uuid.NewString(),
+		Status:             model.BotMaintenanceRunning,
+		ConfigSnapshotJSON: `{"catalog_id":"deepseek"}`,
+		InputSnapshotJSON:  "{}", ResultJSON: "{}",
+		CreatedAt: now, StartedAt: &now,
+	}
+	if err := env.db.Create(maint).Error; err != nil {
+		t.Fatalf("seed maint run: %v", err)
+	}
+	if _, err := env.bots.auxModelRequest(context.Background(), bot, maint,
+		model.BotPurposeSummary, "deepseek-flash",
+		[]openaiMessage{{Role: "user", Content: "hi"}}, 256); err != nil {
+		t.Fatalf("aux: %v", err)
+	}
+	var req model.BotMaintenanceRequest
+	if err := env.db.Where("maintenance_run_id = ?", maint.ID).First(&req).Error; err != nil {
+		t.Fatalf("读维护请求: %v", err)
+	}
+	want := 0.0002112
+	if req.CostEstimate == nil || math.Abs(*req.CostEstimate-want) > 1e-9 {
+		t.Fatalf("维护请求应按快照目录 deepseek 计价: %v", req.CostEstimate)
+	}
+}
+
 // 显式 0 价（免费模型）是已知价格：可计价、估算 $0，而非 NULL。
 func TestBotCostEstimateHonorsExplicitZero(t *testing.T) {
 	// agnes-2.0-flash：models.dev 目录里 input/output 均为显式 0。
@@ -1072,6 +1115,35 @@ func TestBotSettleSkipsSettledNoticeForNewerVersion(t *testing.T) {
 	env.db.Model(&model.BotMessage{}).Where("bot_id = ? AND dedup_key = ?", bot.ID, "toolset_activated:11").Count(&cnt)
 	if cnt != 0 {
 		t.Fatalf("v11 未推迟却补发了收口事件，实得 %d 条", cnt)
+	}
+}
+
+// 升级前已发出的旧格式推迟通知（activation="next_compaction_or_restart"）
+// 同样计为 pending（INT-139 云端复审）：否则存量通知在激活落库时永远
+// 等不到 toolset_activated 收口事件。
+func TestBotSettleCoversLegacyNoticeFormat(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "r11legacy")
+	bot := env.createBot(t, userID)
+	dedup := "toolset_notice:10"
+	raw := `{"event":"toolset_updated","render":"user","detail":{"from_version":9,"to_version":10,"note":"x（下一个压缩点生效）","activation":"next_compaction_or_restart"}}`
+	if err := env.db.Create(&model.BotMessage{
+		ID: uuid.NewString(), BotID: bot.ID, Seq: 100,
+		Kind: model.BotMessageKindLifecycle, ContentJSON: raw,
+		DedupKey: &dedup, CreatedAt: time.Now().UTC(),
+	}).Error; err != nil {
+		t.Fatalf("seed legacy notice: %v", err)
+	}
+
+	if err := env.db.Transaction(func(tx *gorm.DB) error {
+		return env.bots.settleToolsetNoticesTx(tx, bot.ID, 10)
+	}); err != nil {
+		t.Fatalf("settle: %v", err)
+	}
+	var cnt int64
+	env.db.Model(&model.BotMessage{}).Where("bot_id = ? AND dedup_key = ?", bot.ID, "toolset_activated:10").Count(&cnt)
+	if cnt != 1 {
+		t.Fatalf("旧格式推迟通知在激活落库时应收口，实得 %d 条", cnt)
 	}
 }
 

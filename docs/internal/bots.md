@@ -375,7 +375,9 @@ next_offset}`；`fs_result.read` 按 Unicode 字符续读，不切断 UTF-8。
   `catalog_id`+`model` 计价——未命中缓存的输入（prompt−cached）×输入价 +
   缓存命中 ×缓存读取价（缺省回退输入价）+ 输出 ×输出价；结果落
   `bot_model_requests.cost_estimate`/`cost_source="catalog"`，run 级是已计价
-  请求的累计（`bot_runs.cost_estimate`），维护请求同口径落自己的行。usage
+  请求的累计（`bot_runs.cost_estimate`），维护请求落自己的行、按维护运行
+  快照里的 `catalog_id` 计价（与父 run 冻结目录同口径——运行中切换
+  provider 不得按新目录记旧 provider 的流量）。usage
   与成本是计费事实、与请求成败无关：usage 送达后断流的失败请求行照样落
   tokens 与成本，其成本也计入 run 总账并随失败/停止收尾落库（收尾路径统一
   走 `runCostPersistCols`）；run 的 token 总量仍只累计成功请求——run
