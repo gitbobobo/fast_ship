@@ -598,6 +598,14 @@ path→version，无新笔记的空成功不会让次日重跑全部 daily。恢
   `botReadOnlyActions` 本身就是显式枚举+默认拒绝/按写处理。受影响动作在受理
   时改判为 async + RequiresConfirmation：回执 `status=pending_confirmation`，
   批准后 queued → worker 执行，结果以【平台后台结果】送达。
+- **后台结果的人话渲染**：`botResultSummary` 只截到 200 字符，直接把工具
+  结果 JSON 当正文会断在字符串中间、也看不出成败。前端按 `call_id` 关联
+  调用账本：`fs_schedule` 用受理快照拼一句人话（动作 + 任务名 + cron/时区，
+  成功/失败各有图标与颜色），原始 summary 收进折叠的「查看原始结果」；
+  cron/时区只在 create/update/enable 上出现（delete 之后任务已不存在、
+  run 是这次手动触发）。错误文案短且可行动，仍直接外露而不是藏进折叠区。
+  找不到调用时若 summary 是 JSON 形状，主行只写「后台调用已完成」之类的
+  说明，不把截断的 JSON 当正文。
 - **受理期校验**：会弹卡的 create/敏感 update 先把 cron/时区（执行层同一
   解析路径）与 name/instruction 长度（同一组上限常量）校验完，不合法直接
   40001——不给一个必然失败的调用弹确认卡。参数键名必须是规范小写：
@@ -912,14 +920,19 @@ CAS 终结；running 记录取消并取消 context，worker 落唯一终态且
 - **工具调用本地化**：工具卡与确认卡的主标题、只读/写入徽标查
   `web/src/lib/bots/tool-labels.ts` 的映射表，不以 `fs_issue.create` 这类
   原始标识当标题。工具卡把原始 `tool.action` 与完整参数 JSON 折叠进
-  「查看原始调用」；确认卡是刻意例外——「始终允许」按精确 action 授权，
-  因此常驻原始 `tool.action` 小字、完整参数 JSON 默认展开不折叠。参数
+  「查看原始调用」；非 `fs_schedule` 的确认卡是刻意例外——「始终允许」按
+  精确 action 授权，因此常驻原始 `tool.action` 小字、完整参数 JSON 默认
+  展开不折叠（`replace_checklist` 这类整组替换必须逐字看清）。`fs_schedule`
+  的确认卡相反：服务端受理快照是唯一权威视图，只渲染摘要表 + 指令全文 +
+  授权提示，决定按钮紧跟其后，参数 chips 与原始 JSON 收进按钮下方默认
+  折叠的「查看原始参数」——同一份配置铺三遍会让人逐份比对，把批准按钮挤到
+  卡片底部（视觉审查意见）。参数
   摘要成 chips：`*_id` 显示前 8 位短标识（完整值进 title），
   `issue_id+project_id` 链接到 `/projects/{pid}/issues/{iid}`、
   `thread_id+env_id` 链接到 `/threads/{env}/{tid}`，其余 ID 没有对应路由
   时只显示短标识不造坏链；分页与 `expected_*` 等次要参数不进 chips。
 - **映射表维护约定**：`tool-labels.ts` 是前端侧副本，唯一事实源是
-  `server/internal/service/bot_tools.go` 的 `botToolRegistryV8()`（工具与
+  `server/internal/service/bot_tools.go` 的 `botToolRegistryV9()`（工具与
   action 清单）和 `botReadOnlyActions`（只读集合）。effect 不能靠
   `requires_confirmation` 推断——`fs_schedule` 的 list/delete/runs/enable/
   disable 与只改 name/cron/timezone 的 update 仍同步执行、不需确认，但
