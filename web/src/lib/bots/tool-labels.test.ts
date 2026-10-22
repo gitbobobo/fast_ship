@@ -17,6 +17,9 @@ describe("toolActionLabel", () => {
     expect(toolActionLabel("fs_thread", "get")).toBe("查看线程");
     expect(toolActionLabel("fs_thread", "launch")).toBe("启动线程");
     expect(toolActionLabel("fs_thread", "send")).toBe("向线程发送消息");
+    expect(toolActionLabel("fs_thread", "settle")).toBe("结算线程（收进历史区）");
+    expect(toolActionLabel("fs_thread", "unsettle")).toBe("撤销结算");
+    expect(toolActionLabel("fs_thread", "resume_queue")).toBe("恢复队列");
     expect(toolActionLabel("fs_schedule", "create")).toBe("创建定时任务");
     expect(toolActionLabel("fs_schedule", "run")).toBe("立即运行定时任务");
     expect(toolActionLabel("fs_schedule", "state_get")).toBe("读取任务状态");
@@ -44,6 +47,10 @@ describe("toolActionEffect", () => {
     expect(toolActionEffect("fs_memory", "restore")).toBe("write");
     expect(toolActionEffect("fs_result", "read")).toBe("read");
     expect(toolActionEffect("fs_cancel", "cancel")).toBe("write");
+    // fs_thread 的三个新写动作与 send/stop 一致：异步、需确认、写入。
+    expect(toolActionEffect("fs_thread", "settle")).toBe("write");
+    expect(toolActionEffect("fs_thread", "unsettle")).toBe("write");
+    expect(toolActionEffect("fs_thread", "resume_queue")).toBe("write");
   });
 
   it("未知值保守默认 write", () => {

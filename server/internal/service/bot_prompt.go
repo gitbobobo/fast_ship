@@ -19,11 +19,12 @@ const (
 	// 激活跨过该水位后，下一个 run 边界强制压缩一次，把旧风格的长回复收进
 	// 摘要，避免模型继续模仿自己的历史回复（INT-133）。
 	botStylePromptVersion int64 = 9
-	// botToolsetVersion 是当前发布的工具集版本（v8 = INT-138：fs_schedule 时区
-	// 默认改为用户时区，并补任务指令写法指导；v7 = INT-123：fs_schedule 新增
-	// state_get/state_set 读写任务跨运行保留的小状态）；存量对话线冻结在旧
-	// 版本，只在压缩/重启边界升级。
-	botToolsetVersion int64 = 8
+	// botToolsetVersion 是当前发布的工具集版本（v9 = INT-148：fs_thread 新增
+	// settle/unsettle/resume_queue 写动作，stop/send 描述按 T3 真实行为改写；
+	// v8 = INT-138：fs_schedule 时区默认改为用户时区，并补任务指令写法指导；
+	// v7 = INT-123：fs_schedule 新增 state_get/state_set 读写任务跨运行保留的
+	// 小状态）；存量对话线冻结在旧版本，只在压缩/重启边界升级。
+	botToolsetVersion int64 = 9
 )
 
 // botIdentityRules 是系统自动注入的默认人设（身份与说话方式）：拼在提示词

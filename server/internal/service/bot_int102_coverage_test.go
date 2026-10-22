@@ -403,7 +403,11 @@ func TestBotAutoCompaction(t *testing.T) {
 			}
 		}
 	}
-	trigger := botFloorRatio(9000, env.cfg.Bots.Context.CompressionRatioV())
+	// 断言窗口取测试实际配置的窗口（INT-123 起 9500）：v9（INT-148）把
+	// fs_thread 的结算类动作与描述加进工具集后固定前缀又长了约 390 字节，
+	// 原先硬编码的 9000 已不再是这套几何的窗口，会误报「压缩后仍在触发阈值
+	// 之上」。改文案或工具集后按 docs/internal/bots.md 的说明重新核对余量。
+	trigger := botFloorRatio(env.cfg.Bots.Context.WindowTokens, env.cfg.Bots.Context.CompressionRatioV())
 	goal := botFloorRatio(trigger, env.cfg.Bots.Context.TargetRatioV())
 	if row.AfterTokensEstimate >= row.BeforeTokensEstimate {
 		t.Fatalf("最终投影应净缩减 after=%d before=%d", row.AfterTokensEstimate, row.BeforeTokensEstimate)
@@ -827,7 +831,10 @@ func TestBotFoldBatchThreshold(t *testing.T) {
 	env3.fake.strict = true
 	u3 := createBotTestUser(t, env3.db, "foldok")
 	bot3 := env3.createBot(t, u3)
-	env3.cfg.Bots.Context.WindowTokens = 20000
+	// 21000：v9（INT-148）的工具集是每请求固定前缀，比 v8 长约 660 字节；
+	// 20000 窗口下「折叠后恰好达标」的几何已越界（goal 6750 < afterFold 6772），
+	// 重定标到 21000（goal 7087）继续验证「折叠足够就不摘要」。
+	env3.cfg.Bots.Context.WindowTokens = 21000
 	seedBotUserMessage(t, env3, bot3.ID, "old")
 	seedBotAssistantToolBlock(t, env3, bot3.ID, "huge", "fs_issue", strings.Repeat("很长的工具结果", 8000))
 	for i := 1; i <= 3; i++ {

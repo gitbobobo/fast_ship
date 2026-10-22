@@ -552,9 +552,9 @@ func TestBotConnectionDetectsWindow(t *testing.T) {
 // ---------- B：压缩前置检查、失败不重试、进度事件 ----------
 
 // compactionPrecheckEnv 构造一个「固定前缀 + 最小摘要预算 ≥ 触发阈值」的
-// 场景：v7 固定投影约 6.4k+ token（INT-123 实测已越过 6400 的旧窗口），
-// 窗口取 6800（触发阈值 5100）即可命中 target_unreachable 且不命中
-// 「已超窗口」。
+// 场景：v9（INT-148）的工具集加长后固定前缀约 6830 token，窗口取 7200
+// （触发阈值 5400）才能命中 target_unreachable 且不命中「固定前缀已超窗口」
+// ——6800 的旧窗口已被前缀本身越过。
 func compactionPrecheckEnv(t *testing.T) (*botTestEnv, *model.Bot, *model.BotRun) {
 	env := setupBotTestEnv(t,
 		fakeModelTurn{Text: `{"items":[]}`},
@@ -563,7 +563,7 @@ func compactionPrecheckEnv(t *testing.T) (*botTestEnv, *model.Bot, *model.BotRun
 	env.fake.strict = true
 	userID := createBotTestUser(t, env.db, "precheck")
 	bot := env.createBot(t, userID)
-	env.cfg.Bots.Context.WindowTokens = 6800
+	env.cfg.Bots.Context.WindowTokens = 7200
 	seedCompactableLedger(t, env, bot.ID, "旧轮次")
 	botRow, _ := env.bots.bots.Get(bot.ID)
 	run := botFixtureRun(t, env, botRow)

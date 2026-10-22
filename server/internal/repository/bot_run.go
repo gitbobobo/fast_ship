@@ -105,6 +105,18 @@ func (r *BotRunRepository) CountUnfinishedByScheduleTaskTx(tx *gorm.DB, botID, t
 	return n, err
 }
 
+// FirstUnfinishedByScheduleTaskTx 返回任务最早一条未结束的运行（按
+// created_at ASC, id ASC）；没有返回 gorm.ErrRecordNotFound。调度器用它既判
+// 重叠、又拿到钉跳过事件去重键的 run id（INT-148）。
+func (r *BotRunRepository) FirstUnfinishedByScheduleTaskTx(tx *gorm.DB, botID, taskID string) (*model.BotRun, error) {
+	var run model.BotRun
+	if err := tx.Where("bot_id = ? AND schedule_task_id = ? AND finished_at IS NULL", botID, taskID).
+		Order("created_at ASC, id ASC").First(&run).Error; err != nil {
+		return nil, err
+	}
+	return &run, nil
+}
+
 func (r *BotRunRepository) ListActive() ([]model.BotRun, error) {
 	var rows []model.BotRun
 	err := r.db.Where("finished_at IS NULL").Find(&rows).Error

@@ -394,9 +394,12 @@ func TestBotInt138ToolsetV8Baseline(t *testing.T) {
 	if v8.hash == botToolsetV7FrozenHash {
 		t.Fatalf("v8 不得复用 v7 冻结 hash")
 	}
-	// 当前发布版本路由到 v8。
-	if botToolsetVersionOf(botToolsetVersion).hash != v8.hash {
-		t.Fatalf("botToolsetVersion 应指向 v8")
+	// INT-148 起 v8 冻结（fs_thread 的结算类动作只进 v9），当前发布版本是 v9。
+	if v8.hash != botToolsetV8FrozenHash {
+		t.Fatalf("v8 tools_hash 应等于冻结基线，实得 %s", v8.hash)
+	}
+	if botToolsetVersionOf(botToolsetVersion).hash == v8.hash {
+		t.Fatalf("botToolsetVersion 应已指向 v9，不得仍是 v8")
 	}
 
 	// v8 schema 的 timezone 描述为新口径；v7 冻结 schema 保持旧口径。

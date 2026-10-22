@@ -192,6 +192,32 @@ type botScheduleTaskArgsV7 struct {
 	Offset int `json:"offset,omitempty" jsonschema:"description=分页偏移（runs/list，默认 0）"`
 }
 
+// botThreadArgsV5Frozen 是 v5–v8 共用的 fs_thread 参数冻结副本（v5 起标签
+// 一直未变）。INT-148 给 fs_thread 新增 settle/unsettle/resume_queue 动作只进
+// v9，v5–v8 的 wire 字节由本副本逐字节保留（基线见 bot_int103_test.go 与
+// bot_int138_test.go）。不要改动本结构体的任何字段或标签。
+type botThreadArgsV5Frozen struct {
+	Action    string `json:"action" jsonschema:"enum=list,enum=get,enum=item,enum=composer_options,enum=workspace_options,enum=launch,enum=send,enum=stop,required"`
+	EnvID     string `json:"env_id,omitempty" jsonschema:"description=T3 环境 ID（get/item/composer_options/workspace_options/launch/send/stop 必填；list 可选，只保留该环境的线程）"`
+	ThreadID  string `json:"thread_id,omitempty" jsonschema:"description=T3 线程 ID（get/item/send/stop 必填）"`
+	ItemID    string `json:"item_id,omitempty" jsonschema:"description=T3 线程条目 ID（item 必填；条目 ID 由 get 返回的 items[].id 提供）"`
+	ProjectID string `json:"project_id,omitempty" jsonschema:"description=T3 项目 ID（workspace_options/launch 必填；list 可选，只保留该项目的线程）"`
+	Query     string `json:"query,omitempty" jsonschema:"description=关键词过滤（list 可选：线程 id/标题/项目名/项目 id/环境名，不区分大小写包含匹配；workspace_options 为引用名过滤）"`
+	Cursor    *int   `json:"cursor,omitempty" jsonschema:"description=上一页返回的 next_cursor（workspace_options）"`
+	Text      string `json:"text,omitempty" jsonschema:"description=消息正文（launch/send 必填）"`
+	Title     string `json:"title,omitempty" jsonschema:"description=线程标题（launch 可选，缺省由 T3 生成）"`
+	// list 过滤与分页：默认只看未归档线程（归档线程不属于巡检范围）。
+	IncludeArchived *bool  `json:"include_archived,omitempty" jsonschema:"description=list 可选；true 时连归档线程一起返回（默认 false，只返回未归档线程）"`
+	Settled         *bool  `json:"settled,omitempty" jsonschema:"description=list 可选；按 settled 过滤（true 只看已收进历史区的线程）"`
+	Status          string `json:"status,omitempty" jsonschema:"description=list 可选；按运行态过滤（running/idle/waiting/archived/error 等，服务端原样比较）"`
+	UpdatedAfter    string `json:"updated_after,omitempty" jsonschema:"description=list 可选；只返回 updated_at 晚于该 RFC3339 时间的线程"`
+	Page            int    `json:"page,omitempty" jsonschema:"description=页码（从 1 起，list 用；过滤后稳定排序再切片）"`
+	PageSize        int    `json:"page_size,omitempty" jsonschema:"description=页长（1-100，list 用，默认 50；服务端强制上限，不允许一次拉全量）"`
+	// get 的条目分页：详情默认只回最近若干条，完整历史按 offset 向前读。
+	ItemLimit  int `json:"item_limit,omitempty" jsonschema:"description=get 可选；返回的线程条目条数（默认 50，上限 200）"`
+	ItemOffset int `json:"item_offset,omitempty" jsonschema:"description=get 可选；条目偏移（从 0 起，配合 item_limit 向前翻完整历史）"`
+}
+
 // botScheduleTaskArgsV6 是 v6（INT-121）的 fs_schedule 参数：8 个管理动作、
 // 含 run/dry_run。INT-123 的 state_get/state_set 与 state 参数只进 v7，本副本
 // 与 v6 发布时逐标签一致，保证 v6 冻结会话的 tools_hash 不回退（基线见

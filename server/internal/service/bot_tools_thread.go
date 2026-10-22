@@ -132,6 +132,12 @@ func (s *BotService) runThreadWrite(ctx context.Context, call *model.BotToolCall
 		return s.threads.SendMessage(ctx, userID, args.EnvID, args.ThreadID, req)
 	case "stop":
 		return s.threads.StopThread(ctx, userID, args.EnvID, args.ThreadID)
+	case "settle":
+		return s.threads.SettleThread(ctx, userID, args.EnvID, args.ThreadID)
+	case "unsettle":
+		return s.threads.UnsettleThread(ctx, userID, args.EnvID, args.ThreadID)
+	case "resume_queue":
+		return s.threads.ResumeQueue(ctx, userID, args.EnvID, args.ThreadID)
 	}
 	return nil, errs.New(errs.ErrInvalidParams.Code, "fs_thread 不支持该写动作")
 }
@@ -171,6 +177,16 @@ func (s *BotService) resolveThreadScope(prepared *botPreparedCall, raw map[strin
 		prepared.ScopeKind = botScopeThreadStop
 		prepared.ScopeID = rawString(raw["thread_id"])
 		prepared.EnvironmentID = &envID
+	case "settle", "unsettle":
+		// 结算/撤销结算按线程授权：把线程收进历史区或恢复，影响的是这一个线程。
+		prepared.ScopeKind = botScopeThreadSettle
+		prepared.ScopeID = rawString(raw["thread_id"])
+		prepared.EnvironmentID = &envID
+	case "resume_queue":
+		// 恢复队列同样按线程授权。
+		prepared.ScopeKind = botScopeThreadQueue
+		prepared.ScopeID = rawString(raw["thread_id"])
+		prepared.EnvironmentID = &envID
 	}
 }
 
@@ -208,10 +224,12 @@ func botThreadPage(page, pageSize int) (int, int, error) {
 }
 
 // botSlimThreadList 过滤、稳定分页并回报覆盖范围。默认排除归档线程（归档
-// 不属于巡检范围）；include_archived=true 才纳入。env_id 收窄到单环境（不在
-// 已连接环境里就报错，不静默返回空）；query 对线程 id/标题/项目名/项目 id/
-// 环境名做不区分大小写的包含匹配。过滤后按 updated_at 降序、id 升序排序，
-// 保证同一 filter 下分页稳定。
+// 不属于巡检范围）；include_archived=true 才纳入。settled 默认排除已结算
+// 线程（settle 是把线程收进历史区，与归档同属「不在默认巡检面」）：省略或
+// settled=false 只返回未结算线程，settled=true 只返回已结算线程。env_id 收窄
+// 到单环境（不在已连接环境里就报错，不静默返回空）；query 对线程 id/标题/
+// 项目名/项目 id/环境名做不区分大小写的包含匹配。过滤后按 updated_at 降序、
+// id 升序排序，保证同一 filter 下分页稳定。
 func botSlimThreadList(list *T3ThreadListResponse, args *botThreadArgs) (map[string]interface{}, error) {
 	page, pageSize, err := botThreadPage(args.Page, args.PageSize)
 	if err != nil {
@@ -250,7 +268,10 @@ func botSlimThreadList(list *T3ThreadListResponse, args *botThreadArgs) (map[str
 		if args.ProjectID != "" && thread.ProjectId != args.ProjectID {
 			continue
 		}
-		if args.Settled != nil && thread.Settled != *args.Settled {
+		// 默认不含已结算线程（与 settle 描述、帮助文本一致）：省略 settled
+		// 等价 settled=false，已结算的要显式 settled=true 才看得到。
+		wantSettled := args.Settled != nil && *args.Settled
+		if thread.Settled != wantSettled {
 			continue
 		}
 		if args.Status != "" && string(thread.Status) != args.Status {
@@ -355,13 +376,19 @@ func botThreadMatchesQuery(thread *T3ThreadSummary, query string, envNames map[s
 
 func botSlimThreadSummary(t *T3ThreadSummary) map[string]interface{} {
 	out := map[string]interface{}{
-		"id":             t.Id,
-		"title":          t.Title,
-		"status":         string(t.Status),
+		"id":     t.Id,
+		"title":  t.Title,
+		"status": string(t.Status),
+		// run_status 是 T3 原始线程状态：completed/failed/cancelled 在归一化
+		// status 里都折叠成 idle，终态区分看这里；但 status 不是 idle 时线程
+		// 还没结束（后台 run/工作仍在），run_status 只是最近一次根 run 的状态。
+		"run_status":     t.RunStatus,
 		"settled":        t.Settled,
 		"updated_at":     t.UpdatedAt,
 		"environment_id": t.EnvironmentId,
 		"project_id":     t.ProjectId,
+		// pull_requests 恒为数组（无 PR 即空）；watching 标记该 PR 是否挂着监听。
+		"pull_requests": t.PullRequests,
 	}
 	if t.ProjectName != "" {
 		out["project_name"] = t.ProjectName
@@ -441,6 +468,7 @@ func botSlimThreadItemSummary(item *T3ThreadItem) map[string]interface{} {
 	if item.Text != "" {
 		out["text_preview"] = truncateBotRunes(item.Text, botThreadTextPreview)
 	}
+	botSlimItemAttachChildThreadID(out, item)
 	return out
 }
 
@@ -453,6 +481,15 @@ func truncateBotRunes(s string, limit int) string {
 		return s
 	}
 	return string(runes[:limit]) + "…"
+}
+
+// botSlimItemAttachChildThreadID 把非空的子线程 ID 带进精简条目：子代理条目
+// 只有这里能拿到子线程 ID，是模型压缩后重新进入子线程（fs_thread get）的
+// 唯一入口。精简列表与补读条目共用同一段判定，不复制两遍。
+func botSlimItemAttachChildThreadID(out map[string]interface{}, item *T3ThreadItem) {
+	if item.ChildThreadId != nil && *item.ChildThreadId != "" {
+		out["child_thread_id"] = *item.ChildThreadId
+	}
 }
 
 func botSlimThreadItem(item *T3ThreadItem) map[string]interface{} {
@@ -468,5 +505,6 @@ func botSlimThreadItem(item *T3ThreadItem) map[string]interface{} {
 	if item.Text != "" {
 		out["text"] = item.Text
 	}
+	botSlimItemAttachChildThreadID(out, item)
 	return out
 }
