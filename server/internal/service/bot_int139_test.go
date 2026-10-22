@@ -6,7 +6,6 @@ package service
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -1108,7 +1107,7 @@ func TestBotSettleSkipsSettledNoticeForNewerVersion(t *testing.T) {
 	}
 
 	if err := env.db.Transaction(func(tx *gorm.DB) error {
-		return env.bots.settleToolsetNoticesTx(tx, bot.ID, 11, true)
+		return env.bots.settleToolsetNoticesTx(tx, bot.ID, 11)
 	}); err != nil {
 		t.Fatalf("settle: %v", err)
 	}
@@ -1137,7 +1136,7 @@ func TestBotSettleCoversLegacyNoticeFormat(t *testing.T) {
 	}
 
 	if err := env.db.Transaction(func(tx *gorm.DB) error {
-		return env.bots.settleToolsetNoticesTx(tx, bot.ID, 10, true)
+		return env.bots.settleToolsetNoticesTx(tx, bot.ID, 10)
 	}); err != nil {
 		t.Fatalf("settle: %v", err)
 	}
@@ -1170,7 +1169,7 @@ func TestBotSettleFiresForPendingNewerNotice(t *testing.T) {
 	}
 
 	if err := env.db.Transaction(func(tx *gorm.DB) error {
-		return env.bots.settleToolsetNoticesTx(tx, bot.ID, 11, true)
+		return env.bots.settleToolsetNoticesTx(tx, bot.ID, 11)
 	}); err != nil {
 		t.Fatalf("settle: %v", err)
 	}
@@ -1269,19 +1268,26 @@ func TestBotAllToolCallsDroppedFailsTurn(t *testing.T) {
 
 // 推迟封顶的 run 内复核（INT-139 云端复审 P2）：只在入口判一次时，持续有
 // 输入的长寿 run 会无限越过承诺窗口、toolset_activated 永不落地。安全点
-// 复核到推迟过期即推进库内水位并收口；冻结快照让本 run 继续用旧前缀
-// （缓存不炸），第二条模型请求应与第一条带同一 system 提示词。
+// 复核到推迟过期即在本 run 真正换前缀（更新 freeze → 下一轮装入新提示词，
+// 付一次冷请求兑现「最迟约 N 分钟生效」）；第二条模型请求应带新 system
+// 提示词，收口事件如实标 active。
 func TestBotActivationDeferralExpiresMidRun(t *testing.T) {
+	hold := make(chan struct{})
 	env := setupBotTestEnv(t,
 		fakeModelTurn{ToolCalls: []fakeModelToolCall{{
 			ID: "call-m", Name: "fs_project", Args: `{"action":"list","page":1,"page_size":10}`,
-		}}},
+		}}, Hold: hold},
 		fakeModelTurn{Text: "done"},
 	)
 	userID := createBotTestUser(t, env.db, "r13mid")
 	bot := env.createBot(t, userID)
+	// system_prompt_text 对 persona+nonce 是确定性的——版本号降级不改字节。
+	// 塞 marker 扮演「旧构建器留下的旧前缀」，请求体对比才测得出换装。
 	if err := env.db.Model(&model.Bot{}).Where("id = ?", bot.ID).
-		Updates(map[string]interface{}{"toolset_version": 9, "last_told_version": 9}).Error; err != nil {
+		Updates(map[string]interface{}{
+			"toolset_version": 9, "platform_prompt_version": 11, "last_told_version": 9,
+			"system_prompt_text": "OLD-PROMPT-MARKER",
+		}).Error; err != nil {
 		t.Fatalf("降级水位: %v", err)
 	}
 	// 窗口内热请求 → 入口走推迟分支、落 activation_deferred_at。
@@ -1290,11 +1296,12 @@ func TestBotActivationDeferralExpiresMidRun(t *testing.T) {
 	if _, err := env.bots.SendMessage(userID, bot.ID, &SendMessageRequest{Text: "hi", ClientMessageID: "r13m1"}); err != nil {
 		t.Fatalf("send: %v", err)
 	}
-	// 第一条请求在飞 = 入口判定已落定。此刻把时钟拨过保留窗口，第二轮
-	// 迭代的安全点复核必须看到推迟已过期并激活。
+	// 第一条请求在飞且被 Hold 卡住 = 入口判定已落定、第二轮迭代还没跑到。
+	// 此刻拨过保留窗口再放行，第二轮的安全点复核必须看到推迟已过期。
 	first := env.fake.nextRequest(t, 10*time.Second)
 	retain := env.cfg.Bots.Runtime.PromptCacheRetain()
 	env.bots.nowFn = func() time.Time { return time.Now().UTC().Add(retain + time.Minute) }
+	close(hold)
 
 	waitForBot(t, "midrun activation", 15*time.Second, func() bool { return env.botSettled(bot.ID) })
 
@@ -1307,33 +1314,23 @@ func TestBotActivationDeferralExpiresMidRun(t *testing.T) {
 		t.Fatalf("激活落库应清空推迟标记，实得 %v", row.ActivationDeferredAt)
 	}
 
-	// 本 run 的缓存不能炸：第二次模型请求仍带冻结的旧 system 前缀。
+	// 到期即在本 run 真正换前缀：第二次模型请求应换成重建的新提示词
+	// （付一次冷请求换承诺兑现，只动水位不动前缀的写法会让承诺永不兑现）。
 	second := env.fake.nextRequest(t, 5*time.Second)
-	systemOf := func(body []byte) string {
-		var req struct {
-			Messages []struct {
-				Role    string `json:"role"`
-				Content string `json:"content"`
-			} `json:"messages"`
-		}
-		if err := json.Unmarshal(body, &req); err != nil || len(req.Messages) == 0 {
-			t.Fatalf("解析请求体失败: %v", err)
-		}
-		return req.Messages[0].Content
+	if !strings.Contains(string(first.Body), "OLD-PROMPT-MARKER") {
+		t.Fatalf("冻结期第一条请求应带旧前缀")
 	}
-	if systemOf(first.Body) != systemOf(second.Body) {
-		t.Fatalf("run 内前缀应保持冻结，第二条请求的 system 不得换成新提示词")
+	if strings.Contains(string(second.Body), "OLD-PROMPT-MARKER") {
+		t.Fatalf("到期激活后第二条请求仍带旧前缀，升级未在本 run 内生效")
 	}
 
-	// 推迟通知在激活时必须有 toolset_activated 收口，且文案如实写生效
-	// 时点——本 run 仍冻结旧前缀，不得宣称「已切换」（INT-139 云端复审）。
+	// 收口事件如实标 active——前缀确实在本 run 内换掉了。
 	var act model.BotMessage
 	if err := env.db.Where("bot_id = ? AND kind = ? AND content_json LIKE ?",
 		bot.ID, model.BotMessageKindLifecycle, "%toolset_activated%").First(&act).Error; err != nil {
 		t.Fatalf("推迟通知应有 toolset_activated 收口事件: %v", err)
 	}
-	if !strings.Contains(act.ContentJSON, `"activation":"next_boundary"`) ||
-		strings.Contains(act.ContentJSON, "已切换到最新版本") {
-		t.Fatalf("run 内激活的收口文案应标 next_boundary 且不得宣称已切换: %s", act.ContentJSON)
+	if !strings.Contains(act.ContentJSON, `"activation":"active"`) {
+		t.Fatalf("run 内真换前缀的收口应标 active: %s", act.ContentJSON)
 	}
 }

@@ -1774,15 +1774,7 @@ func (s *BotService) markActivationDeferred(bot *model.Bot) bool {
 }
 
 func (s *BotService) activateBotPrompt(bot *model.Bot) error {
-	return s.resolveBotPrompt(bot, true, true)
-}
-
-// activateBotPromptWatermark 推进库内水位并收口推迟通知，但不声称当前
-// run 换前缀（INT-139 云端复审）：run 内安全点激活后 applyRunPromptFreeze
-// 会把副本按回冻结值，新前缀自下一个压缩边界或下一次运行才生效——收口
-// 文案必须如实写生效时点，否则模型投影会误读本 run 已换新工具集。
-func (s *BotService) activateBotPromptWatermark(bot *model.Bot) error {
-	return s.resolveBotPrompt(bot, true, false)
+	return s.resolveBotPrompt(bot, true)
 }
 
 // activateBotPromptForSession 让定时任务会话用上当前版本的提示词/工具集，
@@ -1791,13 +1783,10 @@ func (s *BotService) activateBotPromptWatermark(bot *model.Bot) error {
 // 下一次主线冻结直接拿到新前缀，窗口保护与已发出的「下一个压缩点生效」
 // 通知同时失真（INT-139 R11 复审）。
 func (s *BotService) activateBotPromptForSession(bot *model.Bot) error {
-	return s.resolveBotPrompt(bot, false, true)
+	return s.resolveBotPrompt(bot, false)
 }
 
-// settleNow 决定收口事件的生效口径：persist=false 的会话内解析无收口可发，
-// 该参数被忽略；persist=true 时 true 表示新前缀随激活同刻装入（入口激活、
-// 压缩边界发布），false 表示水位先行、前缀仍冻结到下一压缩边界/下一次运行。
-func (s *BotService) resolveBotPrompt(bot *model.Bot, persist, settleNow bool) error {
+func (s *BotService) resolveBotPrompt(bot *model.Bot, persist bool) error {
 	now := s.now()
 	var state model.Bot
 	err := s.db.Transaction(func(tx *gorm.DB) error {
@@ -1843,7 +1832,7 @@ func (s *BotService) resolveBotPrompt(bot *model.Bot, persist, settleNow bool) e
 					fresh.PromptRevision = rev
 					fresh.ToolsetVersion = botToolsetVersion
 					fresh.PlatformPromptVersion = botPlatformPromptVersion
-					if err := s.settleToolsetNoticesTx(tx, bot.ID, botToolsetVersion, settleNow); err != nil {
+					if err := s.settleToolsetNoticesTx(tx, bot.ID, botToolsetVersion); err != nil {
 						return err
 					}
 				} else if again, gerr := repo.Get(bot.ID); gerr == nil {
@@ -1912,7 +1901,7 @@ func (s *BotService) activateToolsetWithPromptTx(tx *gorm.DB, botID string, curT
 	if err != nil || !ok {
 		return err
 	}
-	return s.settleToolsetNoticesTx(tx, botID, botToolsetVersion, true)
+	return s.settleToolsetNoticesTx(tx, botID, botToolsetVersion)
 }
 
 // deferred 是本 run 入口是否真正走了推迟分支（INT-139 云端复审）：不能用
@@ -2011,9 +2000,8 @@ func (s *BotService) tellToolsetTx(tx *gorm.DB, bot *model.Bot, deferred bool) e
 // 按通知自身的 to_version 与已发出的 toolset_activated 版本匹配——旧版本
 // 已收口的通知行仍是 next_compaction 原文，不能据此把未推迟的新版本误补
 // 一条生效事件。入口激活与压缩边界激活共用本函数；没有 pending 推迟通知
-// 或已发过收口时为空操作。takesEffectNow=false 用于 run 内安全点激活：
-// 水位已推进但本 run 仍按冻结前缀运行，收口文案写真实的生效时点。
-func (s *BotService) settleToolsetNoticesTx(tx *gorm.DB, botID string, toVersion int64, takesEffectNow bool) error {
+// 或已发过收口时为空操作。
+func (s *BotService) settleToolsetNoticesTx(tx *gorm.DB, botID string, toVersion int64) error {
 	var msgs []model.BotMessage
 	if err := tx.Where("bot_id = ? AND kind = ? AND dedup_key GLOB ?",
 		botID, model.BotMessageKindLifecycle, "toolset_notice:*").Find(&msgs).Error; err != nil {
@@ -2070,24 +2058,14 @@ func (s *BotService) settleToolsetNoticesTx(tx *gorm.DB, botID string, toVersion
 	if err != nil {
 		return err
 	}
-	note := "（内部信息：不需要向用户转述，也不需要逐项验证）上述工具集升级已生效：当前提示词与工具集已切换到最新版本"
-	userNote := "工具集升级已生效：提示词与工具集已切换到最新版本"
-	activation := "active"
-	if !takesEffectNow {
-		// 水位先行、前缀仍冻结：宣称「已切换」会让本 run 后续迭代的模型
-		// 投影把旧工具集当成新版误用（INT-139 云端复审）。
-		note = "（内部信息：不需要向用户转述，也不需要逐项验证）上述工具集升级已登记：本次运行仍使用冻结的旧版提示词与工具集，新版本自下一个压缩边界或下一次运行起生效"
-		userNote = "工具集升级已生效：本次运行继续使用当前版本，新版本自下次上下文整理或下一次运行起生效"
-		activation = "next_boundary"
-	}
 	activated := botLifecycleContent{
 		Event: "toolset_activated", Render: "user",
 		Detail: json.RawMessage(fmt.Sprintf(
 			`{"to_version":%d,"note":%s,"user_note":%s,"activation":%s}`,
 			toVersion,
-			jsonString(note),
-			jsonString(userNote),
-			jsonString(activation))),
+			jsonString("（内部信息：不需要向用户转述，也不需要逐项验证）上述工具集升级已生效：当前提示词与工具集已切换到最新版本"),
+			jsonString("工具集升级已生效：提示词与工具集已切换到最新版本"),
+			jsonString("active"))),
 	}
 	raw, err := json.Marshal(activated)
 	if err != nil {

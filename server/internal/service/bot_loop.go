@@ -230,14 +230,21 @@ runLoop:
 			}
 			// 推迟封顶的安全点复核（INT-139 云端复审）：只在入口判一次时，
 			// 持续有输入的长寿 run 会无限越过承诺窗口、收口事件永不落地。
-			// 激活只推进库内水位并补 toolset_activated——applyRunPromptFreeze
-			// 随后把本 run 的副本按回冻结前缀，缓存不炸，下一个压缩边界或
-			// 下一次运行自然用上新版本。
+			// 到期即在本 run 真正换前缀——更新 freeze 提示词字段，下一轮
+			// applyRunPromptFreeze 装入新版本（与压缩边界同一换装路径）；
+			// 代价是热缓存里付一次冷请求，换「最迟约 N 分钟生效」承诺兑现。
+			// 只推进水位不换前缀的写法会让承诺在长寿不压缩 run 里永不兑现，
+			// 且 dedup 先占掉 toolset_activated:N、真正换前缀时无收口可发。
 			if activationDeferred && s.activationDeferralExpired(bot) {
-				if err := s.activateBotPromptWatermark(bot); err != nil {
+				if err := s.activateBotPrompt(bot); err != nil {
 					s.logger.Warn("安全点激活工具集失败", zap.String("bot_id", bot.ID), zap.Error(err))
 				} else {
 					activationDeferred = false
+					freeze.SystemPromptText = bot.SystemPromptText
+					freeze.PromptRevision = bot.PromptRevision
+					freeze.PlatformPromptVersion = bot.PlatformPromptVersion
+					freeze.PersonaPrompt = bot.PersonaPrompt
+					freeze.ToolsetVersion = bot.ToolsetVersion
 				}
 			}
 			applyRunCredentialFreeze(bot, freeze)
