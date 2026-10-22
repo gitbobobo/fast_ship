@@ -354,10 +354,15 @@ func (s *BotService) createScheduleTask(botID, name, cronExpr, timezone, instruc
 	instruction = strings.TrimSpace(instruction)
 	timezone = strings.TrimSpace(timezone)
 	if timezone == "" {
-		if botRow, err := s.bots.Get(botID); err == nil {
-			tzName, _ := s.botOwnerTimezoneOf(botRow)
-			timezone = tzName
+		// 读不到机器人（数据库错误，或调用途中机器人被删）必须失败：继续下去
+		// 会以空时区建出任务，而空时区在解析与调度里都等价于 UTC——用户的
+		// 「每天早上 9 点」就被静默固化成 UTC 任务了。
+		botRow, err := s.bots.Get(botID)
+		if err != nil {
+			return nil, errs.ErrInternal
 		}
+		tzName, _ := s.botOwnerTimezoneOf(botRow)
+		timezone = tzName
 	}
 	if err := botValidateScheduleTaskFields(name, cronExpr, timezone, instruction); err != nil {
 		return nil, err

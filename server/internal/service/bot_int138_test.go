@@ -212,6 +212,7 @@ func TestBotInt138ScheduleCreateDefaultsUserTimezone(t *testing.T) {
 	// 纽约 09:00 与上海 21:00 指向同一时刻，模型汇报时不必自己换算。
 	var nyProjection struct {
 		NextRunAt     string `json:"next_run_at"`
+		NextRunAtUTC  string `json:"next_run_at_utc"`
 		NextRunAtUser string `json:"next_run_at_user"`
 		UserTimezone  string `json:"user_timezone"`
 	}
@@ -221,13 +222,21 @@ func TestBotInt138ScheduleCreateDefaultsUserTimezone(t *testing.T) {
 	if nyProjection.UserTimezone != "Asia/Shanghai" {
 		t.Fatalf("任务投影应带用户时区，实得 %q: %s", nyProjection.UserTimezone, out)
 	}
-	if !strings.Contains(nyProjection.NextRunAt, "09:00:00") ||
-		!strings.Contains(nyProjection.NextRunAt, "EDT") {
+	// cron 是 0 9 * * *，任务时区的钟点恒为 09:00（与夏令时无关）；用户时区
+	// 那一份按绝对时刻推出，避免把 EDT/EST 或上海 21:00/22:00 写死。
+	if !strings.Contains(nyProjection.NextRunAt, "09:00:00") {
 		t.Fatalf("next_run_at 应为任务时区（纽约）本地 09:00: %s", out)
 	}
-	if !strings.Contains(nyProjection.NextRunAtUser, "21:00:00") ||
-		!strings.Contains(nyProjection.NextRunAtUser, "CST") {
-		t.Fatalf("next_run_at_user 应为用户时区（上海）本地 21:00: %s", out)
+	utc, err := time.Parse(time.RFC3339, nyProjection.NextRunAtUTC)
+	if err != nil {
+		t.Fatalf("next_run_at_utc 应为 RFC3339: %v %s", err, out)
+	}
+	shanghai, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		t.Fatalf("load shanghai: %v", err)
+	}
+	if want := utc.In(shanghai).Format("2006-01-02 15:04:05"); !strings.HasPrefix(nyProjection.NextRunAtUser, want) {
+		t.Fatalf("next_run_at_user 应为上海本地 %s，实得 %q", want, nyProjection.NextRunAtUser)
 	}
 	var nyTask struct {
 		ID string `json:"id"`
