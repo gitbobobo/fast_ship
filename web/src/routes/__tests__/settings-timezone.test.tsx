@@ -45,6 +45,17 @@ function renderPage() {
 }
 
 describe("Settings General Page - timezone", () => {
+  // 真实候选是 400+ 项，每次渲染都要为每一项算一次偏移标签；测试只需要验证
+  // 交互，用一份短名单即可，否则机器繁忙时会撞上 5s 超时（不是被测行为）。
+  beforeEach(() => {
+    vi.spyOn(Intl, "supportedValuesOf").mockReturnValue([
+      "Asia/Shanghai",
+      "Asia/Tokyo",
+      "Europe/Berlin",
+      "UTC",
+    ]);
+  });
+
   afterEach(() => {
     vi.clearAllMocks();
     useAuthStore.setState({ user: null });
@@ -58,7 +69,7 @@ describe("Settings General Page - timezone", () => {
     expect(screen.getByText("时区")).toBeInTheDocument();
     expect(
       screen.getByText(
-        "机器人理解「每天 9 点」这类时间、新建定时任务和夜间整理都按此时区计算",
+        "机器人理解时间、新建定时任务和夜间整理都按此时区",
       ),
     ).toBeInTheDocument();
     // 显式选了时区时不再重复一行「当前生效时区」，下拉本身就是事实来源。

@@ -164,7 +164,7 @@ export default function GeneralPage() {
                 <div>
                   <p className="font-medium">时区</p>
                   <p className="text-sm text-muted-foreground">
-                    机器人理解「每天 9 点」这类时间、新建定时任务和夜间整理都按此时区计算
+                    机器人理解时间、新建定时任务和夜间整理都按此时区
                   </p>
                 </div>
 
@@ -211,7 +211,7 @@ export default function GeneralPage() {
                 placeholder="选择时区"
                 aria-label="时区"
                 disabled={savingTimezone}
-                className="w-56 shrink-0"
+                className="w-48 shrink-0"
               />
             </div>
           </div>
