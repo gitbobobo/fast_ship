@@ -776,9 +776,12 @@ func (s *BotService) finishModelRequest(row *model.BotModelRequest, reply *botMo
 		cols["error_message"] = botErrMessage(streamErr)
 	} else {
 		cols["status"] = model.BotModelRequestSucceeded
-		if reply != nil && reply.FirstDeltaAt != nil {
-			cols["first_delta_at"] = *reply.FirstDeltaAt
-		}
+	}
+	// first_delta_at 是上游接触证据、与成败无关（INT-139 云端复审）：流过
+	// 半截正文后失败的请求确实触达过上游，只在成功分支落会让前缀热度把
+	// 它误判成「本地失败」。
+	if reply != nil && reply.FirstDeltaAt != nil {
+		cols["first_delta_at"] = *reply.FirstDeltaAt
 	}
 	// usage 与成本是计费事实、与成败无关：上游在 usage 送达后断流的请求
 	// 照样计费，只挂在成功分支会让已付费用量整段消失（INT-139 复审）。

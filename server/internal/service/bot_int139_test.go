@@ -352,6 +352,64 @@ func TestMainlinePrefixCacheExpiredLocalFailures(t *testing.T) {
 	}
 }
 
+// 热度排序按上游实际接触时刻（COALESCE(finished_at, started_at)）而非
+// started_at（INT-139 云端复审）：一条更早开始、刚结束的长跑请求仍热，
+// 不得被一条更晚开始的冷请求盖过；server_restarted 的 finished_at 是
+// 恢复记账时刻，排序同样回退 started_at，不得排在真实热度前面。
+func TestMainlinePrefixCacheOrderingByContactTime(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "r11ord")
+	retain := env.cfg.Bots.Runtime.PromptCacheRetain()
+
+	seedAt := func(botID string, ordinal int64, status model.BotModelRequestStatus,
+		errCode string, startedAt, finishedAt time.Time, withDelta bool) {
+		run := &model.BotRun{
+			ID: uuid.NewString(), BotID: botID,
+			TriggerSource: model.BotTriggerUserMessage, TriggerKey: "r11o-" + uuid.NewString(),
+			Status: model.BotRunStatusCompleted, SessionKind: model.BotSessionKindMain,
+			ConfigSnapshotJSON: "{}", CreatedAt: startedAt, StartedAt: &startedAt, FinishedAt: &startedAt,
+		}
+		if err := env.db.Create(run).Error; err != nil {
+			t.Fatalf("seed run: %v", err)
+		}
+		req := &model.BotModelRequest{
+			ID: uuid.NewString(), RunID: run.ID, Ordinal: ordinal,
+			Status: status, StartedAt: startedAt, FinishedAt: &finishedAt,
+			PrefixHash: "x", ToolsHash: "x", RequestHash: "x", TokenEstimator: "chars/4",
+		}
+		if errCode != "" {
+			req.ErrorCode = &errCode
+		}
+		if withDelta {
+			delta := startedAt.Add(time.Second)
+			req.FirstDeltaAt = &delta
+		}
+		if err := env.db.Create(req).Error; err != nil {
+			t.Fatalf("seed request: %v", err)
+		}
+	}
+
+	// 长跑请求 A：2 个窗口前开始、刚刚结束（仍热）；请求 B：1.5 个窗口前
+	// 开始并结束（冷）。按 started_at 排序 B 会盖住 A 误判为冷。
+	now := time.Now().UTC()
+	bot := env.createBot(t, userID)
+	seedAt(bot.ID, 1, model.BotModelRequestSucceeded, "", now.Add(-2*retain), now.Add(-time.Second), false)
+	seedAt(bot.ID, 2, model.BotModelRequestSucceeded, "", now.Add(-retain-retain/2), now.Add(-retain-time.Minute), false)
+	if env.bots.mainlinePrefixCacheExpired(bot.ID) {
+		t.Fatalf("刚结束的长跑请求仍热，不得被更晚开始的冷请求盖过")
+	}
+
+	// server_restarted 行的 finished_at 是恢复记账时刻：带首段证据使其
+	// 不被本地失败过滤跳过，排序必须回退 started_at，不得把 5 分钟前
+	// 真实完成的请求盖掉。
+	bot2 := env.createBot(t, userID)
+	seedAt(bot2.ID, 1, model.BotModelRequestSucceeded, "", now.Add(-5*time.Minute), now.Add(-4*time.Minute), false)
+	seedAt(bot2.ID, 2, model.BotModelRequestFailed, "server_restarted", now.Add(-2*retain), now, true)
+	if env.bots.mainlinePrefixCacheExpired(bot2.ID) {
+		t.Fatalf("server_restarted 记账时刻不得盖住 5 分钟前的真实热度")
+	}
+}
+
 // int139WaitNewRunSettled 等待「发送后新建」的 run 收尾：种子的历史 run 会
 // 让 botSettled 提前为真，必须按 run 数增加等。
 func int139WaitNewRunSettled(t *testing.T, env *botTestEnv, botID string, wantRuns int64) {
@@ -499,6 +557,29 @@ func TestTellToolsetFollowsDeferredDecisionNotStaleCopy(t *testing.T) {
 	}
 	if !strings.Contains(msg.ContentJSON, `"activation":"next_compaction"`) {
 		t.Fatalf("推迟通知应标 next_compaction: %s", msg.ContentJSON)
+	}
+
+	// 入口判过推迟、随后同一 run 内压缩边界已激活（副本版本被
+	// installBoundarySnapshot 推进）：第一轮通知写入失败的重试不得按
+	// 入口时刻的 deferred 再写推迟文案——那会成为永远等不到收口的孤儿
+	// （INT-139 云端复审）。按副本当前版本复核，写「已生效」。
+	bot2 := env.createBot(t, userID)
+	if err := env.db.Model(&model.Bot{}).Where("id = ?", bot2.ID).
+		Update("last_told_version", botToolsetVersion-1).Error; err != nil {
+		t.Fatalf("降级告知水位: %v", err)
+	}
+	activatedCopy, err := env.bots.bots.Get(bot2.ID)
+	if err != nil {
+		t.Fatalf("get bot: %v", err)
+	}
+	activatedCopy.LastToldVersion = botToolsetVersion - 1
+	env.bots.maybeTellToolset(activatedCopy, run, true)
+	var msg2 model.BotMessage
+	if err := env.db.Where("bot_id = ? AND dedup_key = ?", bot2.ID, dedup).First(&msg2).Error; err != nil {
+		t.Fatalf("已激活的重试通知应写库: %v", err)
+	}
+	if !strings.Contains(msg2.ContentJSON, `"activation":"active"`) {
+		t.Fatalf("run 内已激活后重试应写已生效: %s", msg2.ContentJSON)
 	}
 }
 

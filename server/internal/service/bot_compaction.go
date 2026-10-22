@@ -1888,15 +1888,21 @@ func (s *BotService) activateToolsetWithPromptTx(tx *gorm.DB, botID string, curT
 // 不是推迟决策，下一次入口会立即重试而非等压缩点。此时通知先不发：
 // 「已生效」和「下一个压缩点生效」都失真，last_told 不推进，下次入口重试
 // 激活成功后如实告知。
+//
+// 入口判定在 runLoop 里每轮重试通知：deferred 只是入口时刻的决策，同一 run
+// 内的压缩边界可能已把副本推进到新版本（installBoundarySnapshot）——上一轮
+// 写入失败重试时必须按副本当前版本复核，否则「已激活」的会话会补出一条
+// 永远等不到收口的推迟通知。
 func (s *BotService) maybeTellToolset(bot *model.Bot, run *model.BotRun, deferred bool) {
 	if bot.LastToldVersion >= botToolsetVersion {
 		return
 	}
-	if !deferred && (bot.ToolsetVersion < botToolsetVersion || bot.PlatformPromptVersion < botPlatformPromptVersion) {
+	stale := bot.ToolsetVersion < botToolsetVersion || bot.PlatformPromptVersion < botPlatformPromptVersion
+	if stale && !deferred {
 		return
 	}
 	_ = s.db.Transaction(func(tx *gorm.DB) error {
-		return s.tellToolsetTx(tx, bot, deferred)
+		return s.tellToolsetTx(tx, bot, deferred && stale)
 	})
 }
 

@@ -154,6 +154,10 @@ run 入口的 `activateBotPrompt` 在一个短事务里读行、
 （`LatestMainUpstreamByBot`）：`failed` 且既无 `first_delta_at` 也无
 `prompt_tokens` 的本地失败行（transport 失败、认证/限流被上游拒于入口等）
 被跳过、热度回看更早的真实请求——上游从未处理过的前缀没有缓存可保。
+`first_delta_at` 在失败分支同样落库（流过半截正文后失败仍算触达上游）。
+候选行排序按上游实际接触时刻 `COALESCE(finished_at, started_at)`（
+`server_restarted` 的 finished_at 是恢复记账时刻、回退 started_at），
+与热度判定同源——更早开始但刚结束的热请求不会被更晚开始的冷请求盖过。
 panic 残留行（`running` + `finished_at=nil`）不受此过滤：请求可能已发出，
 按 `started_at` 保守兜底、且推迟本身有上限。**推迟本身封顶一个保留窗口**：首次推迟给行落
 `activation_deferred_at`，距起点满一个窗口仍未等到压缩边界时强制入口
@@ -169,7 +173,10 @@ panic 残留行（`running` + `finished_at=nil`）不受此过滤：请求可能
 窗口内推迟的写「下一个压缩点生效」（`activation` 字段 active/next_compaction），
 每个版本只告知一次。推迟与否以入口显式传下的 `deferred` 决策为准，不用副本
 版本落后反推（激活失败留下的落后副本不是推迟：此时通知暂不发、last_told 不
-推进，下次入口重试激活成功后如实告知）。`markActivationDeferred` 的 UPDATE
+推进，下次入口重试激活成功后如实告知）。`deferred` 只是入口时刻的决策——
+同一 run 内的压缩边界可能已激活并推进副本版本，重试通知时按副本当前版本
+复核：已激活就写「已生效」，否则会留下一条永远等不到收口的推迟通知。
+`markActivationDeferred` 的 UPDATE
 带版本守卫（`toolset_version < 当前 OR platform_prompt_version < 当前`），
 陈旧副本不会给已激活行重落推迟起点，未命中也不回写副本；激活落库后副本上的
 `ActivationDeferredAt` 同步清空。推迟通知不是终态：激活真正落库时（入口或压缩边界）
