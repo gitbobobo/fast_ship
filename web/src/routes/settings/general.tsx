@@ -9,6 +9,7 @@ import { authApi } from "@/lib/api/auth";
 import {
   browserTimezone,
   formatTimeInZone,
+  TIMEZONE_GROUP_COMMON,
   TIMEZONE_GROUP_SEPARATOR,
   timezoneOptions,
 } from "@/lib/utils/timezone";
@@ -42,21 +43,26 @@ export default function GeneralPage() {
   const displayTimezone = currentTimezone || browserTimezone() || "UTC";
 
   const timezoneSelectOptions = useMemo(() => {
-    const grouped = timezoneOptions(currentTimezone).map((option) =>
-      option.value === TIMEZONE_GROUP_SEPARATOR
-        ? {
-            ...option,
-            // 分隔项不可选：它只用来把「常用」和完整列表分开。
-            disabled: true,
-            label: "全部时区",
-            itemLabel: (
-              <span className="text-xs uppercase tracking-wide text-muted-foreground">
-                全部时区
-              </span>
-            ),
-          }
-        : option,
-    );
+    // 分组标题不可选：只用来把「常用」和完整列表分开。
+    const groupHeader = (label: string) => ({
+      value: label,
+      label,
+      disabled: true,
+      itemLabel: (
+        <span className="text-xs font-medium text-muted-foreground">
+          {label}
+        </span>
+      ),
+    });
+    const grouped = timezoneOptions(currentTimezone).map((option) => {
+      if (option.value === TIMEZONE_GROUP_COMMON) {
+        return { ...groupHeader("常用时区"), value: TIMEZONE_GROUP_COMMON };
+      }
+      if (option.value === TIMEZONE_GROUP_SEPARATOR) {
+        return { ...groupHeader("全部时区"), value: TIMEZONE_GROUP_SEPARATOR };
+      }
+      return option;
+    });
     return [
       { value: DEFAULT_TIMEZONE, label: "默认（跟随部署配置）" },
       ...grouped,
@@ -141,15 +147,22 @@ export default function GeneralPage() {
               </div>
 
               <div className="space-y-1 text-sm">
-                {/* 不另写「当前生效时区」：显式选了时区时下拉就是事实来源；
-                    跟随部署配置时前端拿不到部署配置的时区，写「未在此显示」
-                    只会把用户引到死胡同。时间行按各自的时区说清是哪一个。 */}
-                <p className="text-muted-foreground">
-                  {currentTimezone ? "该时区当前时间：" : "你的本机时间："}
-                  <span className="text-foreground">
-                    {formatTimeInZone(now, displayTimezone)}
-                  </span>
-                </p>
+                {/* 显式选了时区时，下拉就是事实来源，这里只补一个该时区的当前
+                    时间；跟随部署配置时前端拿不到部署配置的时区，就只说明生效
+                    规则（未配置时 UTC 是后端回退链的终点），不摆一个会被误读成
+                    「机器人用的时间」的本机时钟。 */}
+                {currentTimezone ? (
+                  <p className="text-muted-foreground">
+                    该时区当前时间：
+                    <span className="text-foreground">
+                      {formatTimeInZone(now, displayTimezone)}
+                    </span>
+                  </p>
+                ) : (
+                  <p className="text-muted-foreground">
+                    机器人按部署配置的时区计算，部署未配置时区时为 UTC
+                  </p>
+                )}
               </div>
             </div>
           </div>

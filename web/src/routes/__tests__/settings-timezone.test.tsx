@@ -69,17 +69,17 @@ describe("Settings General Page - timezone", () => {
     ).toBeInTheDocument();
   });
 
-  it("未设置时区时由下拉表达「跟随部署配置」，时间行明确是本机时间", () => {
+  it("未设置时区时说明生效规则，不摆会被误读的本机时钟", () => {
     useAuthStore.setState({ user: fakeUser() });
 
     renderPage();
 
-    // 前端拿不到部署配置的时区，就不假装知道它、也不写「未在此显示」这种
-    // 死胡同文案：状态由下拉承担，时间行明确说是本机时间。
-    expect(screen.getByText("你的本机时间：")).toBeInTheDocument();
+    // 前端拿不到部署配置的时区：只说明生效规则（回退链终点是 UTC），
+    // 不显示本机时间，避免被当成机器人实际使用的时间。
     expect(
-      screen.queryByText("当前生效时区："),
-    ).not.toBeInTheDocument();
+      screen.getByText("机器人按部署配置的时区计算，部署未配置时区时为 UTC"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("该时区当前时间：")).not.toBeInTheDocument();
     expect(
       screen.getByRole("combobox", { name: "时区" }),
     ).toHaveTextContent("默认（跟随部署配置）");

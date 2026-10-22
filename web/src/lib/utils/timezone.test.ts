@@ -137,7 +137,8 @@ describe("timezoneOptions", () => {
 
     const values = timezoneOptions("Asia/Saigon").map((o) => o.value);
 
-    expect(values[0]).toBe("Asia/Saigon");
+    // 首位是「常用时区」分组标题，当前值紧随其后。
+    expect(values[1]).toBe("Asia/Saigon");
   });
 
   it("当前值不在候选里时插到首位，并带上 UTC 偏移", () => {
@@ -145,7 +146,7 @@ describe("timezoneOptions", () => {
 
     const options = timezoneOptions("Asia/Shanghai");
 
-    expect(options[0]).toEqual({
+    expect(options[1]).toEqual({
       value: "Asia/Shanghai",
       label: "Asia/Shanghai (UTC+8)",
     });
