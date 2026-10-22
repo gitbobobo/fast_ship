@@ -340,18 +340,16 @@ function StackedAreaChart({
     value: tickStep * index,
   }));
 
-  // X-axis labels：均匀取最多 7 个刻度，首尾都在，避免末尾日期与前一个刻度叠印
-  // （按 stride 取点再强塞最后一个点时，27 个数据点会让 25/26 两个 MM-DD 相距约 17px）。
+  // X-axis labels：从最后一个点按固定天数步长往前取，保证相邻标签间隔一致，
+  // 且最后一个日期永远落在最后一个点正下方。首点可能因此没有标签（30 个点时
+  // 是 4/9/14/19/24/29），不要在中间插一个不均匀的间隔。
   const labelIndexes = useMemo(() => {
     const last = points.length - 1;
     if (last < 1) return points.length === 1 ? [0] : [];
-    const count = Math.min(7, points.length);
+    const stride = Math.max(Math.ceil(last / 6), 1);
     const indexes: number[] = [];
-    for (let i = 0; i < count; i += 1) {
-      const index = Math.round((last * i) / (count - 1));
-      if (indexes[indexes.length - 1] !== index) indexes.push(index);
-    }
-    return indexes;
+    for (let index = last; index >= 0; index -= stride) indexes.push(index);
+    return indexes.reverse();
   }, [points.length]);
 
   const handleMouseMove = (e: React.MouseEvent<SVGSVGElement>) => {

@@ -180,7 +180,7 @@ describe("MetricChart", () => {
     vi.unstubAllGlobals();
   });
 
-  it("spaces date labels evenly so the last one never overlaps the previous tick", () => {
+  it("spaces date labels with a constant stride from the last point", () => {
     const points = Array.from({ length: 27 }, (_, index) => ({
       label: `2026-05-${String(index + 1).padStart(2, "0")}`,
       shortLabel: `D${index}`,
@@ -201,7 +201,8 @@ describe("MetricChart", () => {
       .map((node) => node.textContent ?? "")
       .filter((text) => text.startsWith("D"));
 
-    expect(labels).toEqual(["D0", "D4", "D9", "D13", "D17", "D22", "D26"]);
+    // 从 26 往前每 5 个点取一个，间隔恒为 5 天；首点因此没有标签。
+    expect(labels).toEqual(["D1", "D6", "D11", "D16", "D21", "D26"]);
   });
 
   it("drops an open tooltip when the series becomes empty", () => {

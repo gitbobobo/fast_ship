@@ -319,7 +319,14 @@ function KpiCard({
       {isLoading ? (
         <Skeleton className="h-10 w-24" />
       ) : (
-        <div className="text-4xl font-bold tracking-tighter tabular-nums">
+        <div
+          className={cn(
+            "tracking-tighter tabular-nums",
+            value === null
+              ? "text-3xl font-normal text-muted-foreground"
+              : "text-4xl font-bold",
+          )}
+        >
           {value ?? "—"}
         </div>
       )}
