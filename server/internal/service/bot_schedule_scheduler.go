@@ -627,15 +627,16 @@ func (s *BotService) finishScheduleFailed(bot *model.Bot, run *model.BotRun, cod
 	appendedEvent := false
 	txErr := s.db.Transaction(func(tx *gorm.DB) error {
 		var err error
+		cols := map[string]interface{}{
+			"status":        model.BotRunStatusFailed,
+			"finished_at":   now,
+			"error_code":    code,
+			"error_message": msg,
+			"summary":       summary,
+		}
+		runCostPersistCols(run, cols)
 		ok, err = repository.NewBotRunRepository(tx).UpdateColumnsWhereTx(tx, run.ID,
-			map[string]interface{}{"finished_at": nil, "stop_requested_at": nil},
-			map[string]interface{}{
-				"status":        model.BotRunStatusFailed,
-				"finished_at":   now,
-				"error_code":    code,
-				"error_message": msg,
-				"summary":       summary,
-			})
+			map[string]interface{}{"finished_at": nil, "stop_requested_at": nil}, cols)
 		if err != nil || !ok {
 			return err
 		}
@@ -702,13 +703,14 @@ func (s *BotService) finishScheduleStopped(bot *model.Bot, run *model.BotRun) {
 	ok := false
 	txErr := s.db.Transaction(func(tx *gorm.DB) error {
 		var err error
+		cols := map[string]interface{}{
+			"status":      model.BotRunStatusStopped,
+			"finished_at": now,
+			"summary":     summary,
+		}
+		runCostPersistCols(run, cols)
 		ok, err = repository.NewBotRunRepository(tx).UpdateColumnsWhereTx(tx, run.ID,
-			map[string]interface{}{"finished_at": nil},
-			map[string]interface{}{
-				"status":      model.BotRunStatusStopped,
-				"finished_at": now,
-				"summary":     summary,
-			})
+			map[string]interface{}{"finished_at": nil}, cols)
 		if err != nil || !ok {
 			return err
 		}

@@ -1740,7 +1740,7 @@ type BotRun struct {
 	// ConfigSnapshot 本次模型/地址/提示词版本快照 JSON；不含明文 key
 	ConfigSnapshot string `json:"config_snapshot"`
 
-	// CostEstimate 本 run 已计价请求的成本累计（USD）；目录无价/全缺 usage 时为 null（缺失 ≠ 0，INT-139）
+	// CostEstimate 本 run 已计价请求的成本累计（USD，含送过 usage 的失败请求）；目录无价/全缺 usage 时为 null（缺失 ≠ 0，INT-139）
 	CostEstimate *float64 `json:"cost_estimate,omitempty"`
 
 	// CostSource 计价来源（catalog）；cost_estimate 为 null 时同 null
@@ -1771,7 +1771,7 @@ type BotRun struct {
 type BotScheduleRun struct {
 	CompletionTokens *int64 `json:"completion_tokens,omitempty"`
 
-	// CostEstimate 本 run 已计价请求的成本累计（USD）；目录无价时缺省（缺失 ≠ 0，INT-139）
+	// CostEstimate 本 run 已计价请求的成本累计（USD，含送过 usage 的失败请求）；目录无价时缺省（缺失 ≠ 0，INT-139）
 	CostEstimate *float64 `json:"cost_estimate,omitempty"`
 
 	// CostSource 计价来源（catalog）

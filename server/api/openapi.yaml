@@ -13638,7 +13638,7 @@ components:
           type: number
           format: double
           nullable: true
-          description: 本 run 已计价请求的成本累计（USD）；目录无价/全缺 usage 时为 null（缺失 ≠ 0，INT-139）
+          description: 本 run 已计价请求的成本累计（USD，含送过 usage 的失败请求）；目录无价/全缺 usage 时为 null（缺失 ≠ 0，INT-139）
         cost_source:
           type: string
           nullable: true
@@ -13768,7 +13768,7 @@ components:
         cost_estimate:
           type: number
           format: double
-          description: 本 run 已计价请求的成本累计（USD）；目录无价时缺省（缺失 ≠ 0，INT-139）
+          description: 本 run 已计价请求的成本累计（USD，含送过 usage 的失败请求）；目录无价时缺省（缺失 ≠ 0，INT-139）
         cost_source:
           type: string
           description: 计价来源（catalog）

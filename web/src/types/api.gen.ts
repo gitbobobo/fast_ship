@@ -6096,7 +6096,7 @@ export interface components {
             usage_complete: boolean;
             /**
              * Format: double
-             * @description 本 run 已计价请求的成本累计（USD）；目录无价/全缺 usage 时为 null（缺失 ≠ 0，INT-139）
+             * @description 本 run 已计价请求的成本累计（USD，含送过 usage 的失败请求）；目录无价/全缺 usage 时为 null（缺失 ≠ 0，INT-139）
              */
             cost_estimate?: number | null;
             /** @description 计价来源（catalog）；cost_estimate 为 null 时同 null */
@@ -6175,7 +6175,7 @@ export interface components {
             total_tokens?: number;
             /**
              * Format: double
-             * @description 本 run 已计价请求的成本累计（USD）；目录无价时缺省（缺失 ≠ 0，INT-139）
+             * @description 本 run 已计价请求的成本累计（USD，含送过 usage 的失败请求）；目录无价时缺省（缺失 ≠ 0，INT-139）
              */
             cost_estimate?: number;
             /** @description 计价来源（catalog） */

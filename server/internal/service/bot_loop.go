@@ -612,6 +612,19 @@ func (s *BotService) tryFinishRun(bot *model.Bot, run *model.BotRun) bool {
 	return finished
 }
 
+// runCostPersistCols 把内存累计的已计价成本并入收尾更新列（INT-139 云端
+// 复审）：失败/停止的 run 同样有已计价请求成本，只写终态列会让它消失。
+// token 总量不在此落——失败收尾时 run.PromptTokens 等只含成功回合，成功
+// 回合在 commitAssistantTurn 已随每次提交落库。
+func runCostPersistCols(run *model.BotRun, cols map[string]interface{}) {
+	if run.CostEstimate != nil {
+		cols["cost_estimate"] = *run.CostEstimate
+		if run.CostSource != nil {
+			cols["cost_source"] = *run.CostSource
+		}
+	}
+}
+
 // finishStopped / finishFailed 落定终态并发 done（失败先 error 再 done）。
 // 终态与事件同一事务：崩溃不留无事件的已终态 run；提交后再发布 SSE。
 // schedule 会话走专属收尾（摘要/静默判定与运行事件）。
@@ -624,9 +637,10 @@ func (s *BotService) finishStopped(bot *model.Bot, run *model.BotRun) {
 	ok := false
 	txErr := s.db.Transaction(func(tx *gorm.DB) error {
 		var err error
+		cols := map[string]interface{}{"status": model.BotRunStatusStopped, "finished_at": now}
+		runCostPersistCols(run, cols)
 		ok, err = repository.NewBotRunRepository(tx).UpdateColumnsWhereTx(tx, run.ID,
-			map[string]interface{}{"finished_at": nil},
-			map[string]interface{}{"status": model.BotRunStatusStopped, "finished_at": now})
+			map[string]interface{}{"finished_at": nil}, cols)
 		if err != nil || !ok {
 			return err
 		}
@@ -675,14 +689,15 @@ func (s *BotService) finishFailedDetail(bot *model.Bot, run *model.BotRun, code,
 		var err error
 		// failed 转移带 stop_requested_at IS NULL：错误检出后才受理的停止
 		// 请求不能被 failed 覆盖（与 completed 同型保护）。
+		cols := map[string]interface{}{
+			"status":        model.BotRunStatusFailed,
+			"finished_at":   now,
+			"error_code":    code,
+			"error_message": message,
+		}
+		runCostPersistCols(run, cols)
 		ok, err = repository.NewBotRunRepository(tx).UpdateColumnsWhereTx(tx, run.ID,
-			map[string]interface{}{"finished_at": nil, "stop_requested_at": nil},
-			map[string]interface{}{
-				"status":        model.BotRunStatusFailed,
-				"finished_at":   now,
-				"error_code":    code,
-				"error_message": message,
-			})
+			map[string]interface{}{"finished_at": nil, "stop_requested_at": nil}, cols)
 		if err != nil || !ok {
 			return err
 		}
@@ -788,8 +803,8 @@ func (s *BotService) finishModelRequest(row *model.BotModelRequest, reply *botMo
 	}
 	// usage 与成本是计费事实、与成败无关：上游在 usage 送达后断流的请求
 	// 照样计费，只挂在成功分支会让已付费用量整段消失（INT-139 复审）。
-	// run 总账仍只累计成功请求——run 粒度是「会话实际消费」，请求行粒度
-	// 才是计费流水。
+	// run 的 token 总量仍只累计成功请求（「会话实际消费」口径），但
+	// cost_estimate 按「已计价请求」累计——含本处送过 usage 的失败尝试。
 	if row != nil && reply != nil {
 		// provider_request_id 也是上游接触证据（chunk 必带 id）：纯工具
 		// 调用流失败后无正文首段、无 usage，id 是唯一残留的触达痕迹
@@ -809,6 +824,14 @@ func (s *BotService) finishModelRequest(row *model.BotModelRequest, reply *botMo
 				src := botCostSourceCatalog
 				row.CostSource = &src
 			}
+		}
+		// 已计价的失败请求同样计进 run 成本——run.cost_estimate 的契约是
+		// 「已计价请求的累计」，上游送过 usage 的失败尝试照样计费
+		// （INT-139 云端复审）。token 总量不累计：run token 口径仍是
+		// 「会话实际消费」的成功量，重试的成功尝试不得与前半截重复计数。
+		if streamErr != nil && row.CostEstimate != nil {
+			run.CostEstimate = addToFloatPtr(run.CostEstimate, *row.CostEstimate)
+			run.CostSource = row.CostSource
 		}
 	}
 	if row == nil {

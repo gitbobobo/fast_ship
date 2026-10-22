@@ -852,8 +852,10 @@ func TestScheduleSessionResolveKeepsRowWatermark(t *testing.T) {
 	}
 }
 
-// usage 送达后断流的失败请求：tokens 与成本仍是计费事实，请求行必须落库
-// （run 总账只累计成功请求，不变）。
+// usage 送达后断流的失败请求：tokens 与成本仍是计费事实，请求行必须落库；
+// 已计价失败请求的成本也计入 run 总账并随失败收尾落库（INT-139 云端
+// 复审——cost_estimate 契约是「已计价请求的累计」），token 总量仍只计
+// 成功请求（「会话实际消费」口径）。
 func TestFailedRequestWithUsageStillPriced(t *testing.T) {
 	env := setupBotTestEnv(t)
 	userID := createBotTestUser(t, env.db, "costfail")
@@ -899,6 +901,21 @@ func TestFailedRequestWithUsageStillPriced(t *testing.T) {
 	want := 0.0002112
 	if got.CostEstimate == nil || math.Abs(*got.CostEstimate-want) > 1e-9 {
 		t.Fatalf("失败请求的成本应照计: %v", got.CostEstimate)
+	}
+
+	// 已计价失败成本计入 run 总账；token 总量保持「只计成功请求」。
+	if run.CostEstimate == nil || math.Abs(*run.CostEstimate-want) > 1e-9 {
+		t.Fatalf("run 成本应含已计价失败请求: %v", run.CostEstimate)
+	}
+	if run.PromptTokens != nil {
+		t.Fatalf("失败请求的 token 不得计入 run 总量: %v", run.PromptTokens)
+	}
+	// 失败收尾必须把累计成本写进 run 行——否则永远停在请求行粒度。
+	env.bots.finishModelFailed(bot, run, errors.New("stream reset"))
+	var runRow model.BotRun
+	env.db.First(&runRow, "id = ?", run.ID)
+	if runRow.CostEstimate == nil || math.Abs(*runRow.CostEstimate-want) > 1e-9 {
+		t.Fatalf("失败 run 的 cost_estimate 应落库: %v", runRow.CostEstimate)
 	}
 }
 
