@@ -71,6 +71,7 @@ const bot: Bot = {
   max_output_tokens: 32768,
   context_source: "catalog",
   next_event_seq: 10,
+  last_message: null,
   created_at: "2026-10-15T00:00:00Z",
   updated_at: "2026-10-15T00:00:00Z",
 };
@@ -618,7 +619,7 @@ describe("useBotChat", () => {
         true,
       ),
     );
-    expect(list?.[0]?.last_message).toBeUndefined();
+    expect(list?.[0]?.last_message).toBeNull();
     expect(list?.[1]?.last_message).toEqual({
       kind: "user",
       text: "旧预览",
@@ -851,7 +852,7 @@ describe("useBotChat", () => {
 
     expect(
       client.getQueryData<Bot[]>(botKeys.list("A"))?.[0]?.last_message,
-    ).toBeUndefined();
+    ).toBeNull();
   });
 
   it("stopRun 受理后 stopRequested 立即为 true（服务端宽限期间本地兜底）", async () => {

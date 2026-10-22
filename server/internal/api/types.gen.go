@@ -1525,7 +1525,7 @@ type Bot struct {
 	Id            string `json:"id"`
 
 	// LastMessage 主线最近一条正文 trim 后非空的 user/assistant 消息预览（按 seq 最大取）； 正文纯空白或 content 坏 JSON 的消息跳过继续往前找，定时任务会话不参与。 没有符合条件消息时为 null。仅 GET /api/bots 列表端点返回真实值； 详情与聊天快照等其它端点恒为 null
-	LastMessage *BotLastMessage `json:"last_message,omitempty"`
+	LastMessage *BotLastMessage `json:"last_message"`
 
 	// MaxOutputTokens 模型输出上限；detected（探测缓存）与 catalog（内置目录）来源可给出，未知为 0
 	MaxOutputTokens int64  `json:"max_output_tokens"`
@@ -1592,12 +1592,10 @@ type BotChatSnapshot struct {
 	Bot   Bot           `json:"bot"`
 	Calls []BotToolCall `json:"calls"`
 
-	// MaintenanceProgress 当前活动主线 run 最近一条维护进度（压缩阶段/失败原因）； 无活动主线 run 或尚无进度事件时省略——已结束 run 的进度不再返回
+	// MaintenanceProgress 活动主线 run 的最近一条维护进度；与 SSE 的 kind=maintenance_progress delta 事件同源，供刷新后运行栏水合
 	MaintenanceProgress *BotMaintenanceProgress `json:"maintenance_progress,omitempty"`
 	Messages            []BotMessage            `json:"messages"`
-
-	// Metrics 运行指标（INT-115）：窗口能力 + 最近一次主线模型请求口径； 没有主线请求时 request 缺省、窗口能力仍然可见
-	Metrics *BotMetrics `json:"metrics,omitempty"`
+	Metrics             *BotMetrics             `json:"metrics,omitempty"`
 
 	// NextEventSeq 与快照同一读取点的事件账本水位（下一条的 seq）
 	NextEventSeq int64    `json:"next_event_seq"`

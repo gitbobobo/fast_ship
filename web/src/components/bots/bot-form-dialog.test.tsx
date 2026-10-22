@@ -93,6 +93,7 @@ const botFixture: Bot = {
   platform_prompt_version: 1,
   toolset_version: 1,
   next_event_seq: 1,
+  last_message: null,
   context_window: 1048576,
   max_output_tokens: 262144,
   context_source: "detected",

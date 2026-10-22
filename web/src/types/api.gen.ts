@@ -5823,7 +5823,7 @@ export interface components {
              */
             next_event_seq: number;
             /** @description 主线最近一条正文 trim 后非空的 user/assistant 消息预览（按 seq 最大取）； 正文纯空白或 content 坏 JSON 的消息跳过继续往前找，定时任务会话不参与。 没有符合条件消息时为 null。仅 GET /api/bots 列表端点返回真实值； 详情与聊天快照等其它端点恒为 null */
-            last_message?: components["schemas"]["BotLastMessage"] | null;
+            last_message: components["schemas"]["BotLastMessage"] | null;
             /** Format: date-time */
             created_at: string;
             /** Format: date-time */
@@ -5846,10 +5846,10 @@ export interface components {
              * @description 与快照同一读取点的事件账本水位（下一条的 seq）
              */
             next_event_seq: number;
-            /** @description 运行指标（INT-115）：窗口能力 + 最近一次主线模型请求口径； 没有主线请求时 request 缺省、窗口能力仍然可见 */
-            metrics?: components["schemas"]["BotMetrics"] | null;
-            /** @description 当前活动主线 run 最近一条维护进度（压缩阶段/失败原因）； 无活动主线 run 或尚无进度事件时省略——已结束 run 的进度不再返回 */
-            maintenance_progress?: components["schemas"]["BotMaintenanceProgress"] | null;
+            /** @description 运行指标（INT-115）：窗口能力 + 最近一次主线模型请求口径； 没有主线请求时 request 缺省、窗口能力仍然可见；字段缺省（omitempty） */
+            metrics?: components["schemas"]["BotMetrics"];
+            /** @description 当前活动主线 run 最近一条维护进度（压缩阶段/失败原因）； 无活动主线 run 或尚无进度事件时字段缺省——已结束 run 的进度不再返回 */
+            maintenance_progress?: components["schemas"]["BotMaintenanceProgress"];
         };
         /** @description 活动主线 run 的最近一条维护进度；与 SSE 的 kind=maintenance_progress delta 事件同源，供刷新后运行栏水合 */
         BotMaintenanceProgress: {
@@ -6223,7 +6223,9 @@ export interface components {
             scope_id: string;
             environment_id?: string | null;
             /** @description 规范化约束（如允许写入的字段集合 fields） */
-            constraints: Record<string, never>;
+            constraints: {
+                [key: string]: unknown;
+            };
             /** Format: date-time */
             created_at: string;
             /** Format: date-time */

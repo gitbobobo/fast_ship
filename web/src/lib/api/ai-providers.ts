@@ -17,13 +17,8 @@ export type CatalogModel = Schemas["CatalogProviderModel"];
 
 export type CatalogProvider = Schemas["CatalogProvider"];
 
-/** 测试结果 checks 数组的元素（契约内联在 AIProviderTestResult.checks 里，无独立 schema）。 */
-export interface AIProviderTestCheck {
-  name: string;
-  passed: boolean;
-  /** 失败原因（截断；不含密钥），通过时服务端省略。 */
-  detail?: string;
-}
+/** 测试结果 checks 数组的元素（契约内联在 AIProviderTestResult.checks 里，直接取内联类型）。 */
+export type AIProviderTestCheck = Schemas["AIProviderTestResult"]["checks"][number];
 
 export type AIProviderTestResult = Schemas["AIProviderTestResult"];
 
