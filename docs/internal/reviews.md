@@ -235,6 +235,24 @@ GitHub App 投递失败（公网隧道超时/502）不会自动重试，一次�
   本地 `github_webhook_deliveries` 幂等账已有该 guid（说明投递其实已送达，
   只是 GitHub 侧记录滞后）→ 跳过（不重投、不通知、不记账）；同 guid 任一行
   2xx（含成功的重投）→ 跳过。
+- **关闭/合并的 PR 不重投、不报故障**：投递列表行（`HookDelivery`）没有
+  repo/PR 信息，而重放的 payload 是旧快照（PR 当时写着 open），所以重投前
+  先 `GetHookDelivery`（`GET /app/hook/deliveries/{id}`，同一 `HookDeliveries`
+  访问面）取请求体，解析出 `repository.full_name`/`number`/`installation.id`，
+  再 `GetPullRequest` 读**实时** State（同轮按 `repo#pr` 缓存，同一 PR 的多个
+  投递只读一次）。PR 已关闭/合并 → 该 guid 记终态（重投次数账的
+  `closed_at` 非空）并静默跳过：不重投、不发 `review_redelivery_failed`
+  通知、以后每轮也不再查询它——否则隧道恢复后这些旧
+  synchronize 会被重投回去白跑一轮，重投持续失败时还会误报「这次推送可能
+  没有被审查」。payload 读不到 / 解析不出 PR / `GetPullRequest` 失败时
+  **降级为不校验照常重投**：这道闸门只省白跑与误报，开轮与写产出的三道
+  实时状态关卡（见「调度循环」「派发」「GitHub 产出」）已经拦得住误开轮，
+  不能反过来把真投递漏掉。闸门查询（详情 + 实时读各占一个名额）有独立的
+  **每轮 20 次次数预算与 30 秒时间预算**（`reviewRedeliveryProbeTimeout`）：
+  用完后立即按未知降级，剩下的时间留给重投——不能拿可选校验烧完 90 秒
+  总超时，否则重投请求会拿到已取消的 ctx，后面的真投递既不重投也不通知。
+  闸门截止时间还不晚于「总截止 - 30 秒余量」（`reviewRedeliveryReserve`），
+  列表页多、探测慢时重投仍有时间。
 - 通过 `POST /app/hook/deliveries/{id}/attempts`（App JWT 端点，访问面
   `githubapp.HookDeliveries`，不进安装令牌的 `GitHubClient` 接口）让 GitHub
   重投：请求与原始投递相同，`X-GitHub-Delivery` 也相同，webhook 的幂等登记
@@ -435,7 +453,15 @@ rune 截断加 `...`，不劈断多字节字符）；状态未变不重复调用
     注明「未行内标注」。Note 全部折叠进 `<details>`。
   - 视觉待办/截图遗留提示在表格之后，末尾固定复审说明（推送后自动复审）。
   - 行内标注判定与行内 review 共用一次 `GetPullRequestDiff` + 右侧有效行
-    集合（`fetchInlineLines`），不再重复拉取。
+    集合（`fetchInlineLines`），不再重复拉取。**diff 读取失败只影响行内
+    review**：状态与顶层评论已经写出，不该被一次读失败扣住，所以评论按
+    「本轮没读 diff」口径出（不加「未行内标注」注记），错误推迟到行内阶段
+    上报——账本保持 `sync_pending` 并写 `sync_error`，下一轮同步重试；
+    不能把失败压成「没有有效行号」，那会把行内意见静默丢掉。**无论有没有
+    待发布的行内运行都上报**：本轮评论可能已按「没读 diff」口径重写，
+    保持 `sync_pending` 才能在 diff 恢复后补上注记。同一份运行结论的重试
+    不再重写顶层评论（已有 `code_comment_id` 且代码状态未变时跳过），否则
+    每个 10s tick 一次相同正文既耗配额又留编辑记录。
 - 视觉审查：标记 `<!-- fast-ship-visual-review -->`，标题「视觉审查意见：」，
   按严重度排序，每条带截图标签、维度、改法；不发行内评论。
 
@@ -548,11 +574,19 @@ Linkify；去重保序，label 取 alt 或「截图 N」）。收集走 AST 而�
 显式声明的图交给探测的 Content-Type 裁决（`render.php?id=1` 这类无扩展名直
 链可能是真图，扩展名误判会漏收）；「全部不是图」由探测三态收敛成
 `visualNone`，不会每个同步事件刷「截图无法下载」failure。裸链没有图片语法
-背书，在此之上额外按「GitHub 附件形态
-（`github.com/user-attachments/assets/…` 与 `user-images.githubusercontent.com/…`，
-拖入/粘贴附件的标准直链）∪ 位图扩展名」准入，否则描述里每个无扩展名的网页
-链接都会被当成截图。这个启发式会误收正文里恰好以 `.png` 结尾的普通链接，接
-受。
+背书，在此之上额外按「GitHub 附件形态 ∪ 位图扩展名」准入，否则描述里每个
+无扩展名的网页链接都会被当成截图。附件形态是**公共形态 ∪ 本部署实例形态**
+（`githubmedia.IsGitHubAttachmentURLFor`）：公共形态
+（`github.com/user-attachments/assets/…`、`user-images.githubusercontent.com/…`）
+在任何部署下都收——GHE 的 PR 引用公共 GitHub 截图同样合理；本实例形态按
+部署推导的 Web 地址判定（`githubmedia.GitHubWebHost`：`github_app.api_base_url`
+为空或 `api.github.com` → `github.com`，GHE 的 `https://<host>[:port]/api/v3` →
+同一 `host[:port]`，默认端口去掉），GHE 收
+`https://<ghe-host>/user-attachments/assets/…`
+（拖入/粘贴附件的标准直链，通常无扩展名）。附件路径要求解码后的规范形态，
+点段/编码点段（`/../`、`%2e%2e`）一律不算。写死 `github.com` 会让 GHE 部署
+的附件直链被静默丢掉，`HasScreenshots=false` 后视觉审查不启动。这个启发式
+会误收正文里恰好以 `.png` 结尾的普通链接，接受。
 由**独立的截图下载面**（`githubmedia.NewReviewMediaService`，与
 `/api/github/media-proxy` 的 GitHub 白名单面是两个实例）下载落盘为
 `review_assets`；同一 (repo, pr, head) 已有 asset 行复用，失败的行保留
@@ -570,9 +604,16 @@ https** 主机，内容只收位图：`image/*`（svg 即使标着 `image/svg+xm
 布局与 RFC 8215 的 local-use `/48`）布局不可安全解码，**整体拒绝**——内嵌
 公网地址的也一并拒，宁可错拒不可放过），
 重定向目标与 DNS 重绑定的每次建连同样被拦。App 安装令牌（bearer）只发往
-GitHub 媒体域、且只在匿名被 401/403/404 拒时重试一次（私有附件对匿名请求
-正是回这两个码）：外部图床匿名失败即止，协议不支持、不是图片、超限、内网
-地址这类确定性失败也不重试。
+**本部署的 GitHub 实例**、且只在匿名被 401/403/404 拒时重试一次（私有附件
+对匿名请求正是回这两个码）：外部图床匿名失败即止，协议不支持、不是图片、
+超限、内网地址这类确定性失败也不重试。凭证闸门按部署推导
+（`IsGitHubMediaURLFor`）：公共 GitHub 部署沿用 `IsGitHubMediaURL` 的媒体域
+白名单（`github.com` 上的附件路径同样要求解码后的规范形态，点段不能借前缀
+把令牌带出附件目录）；GHE 部署只放行本实例 authority（含端口，`https://<host>:<port>/…`
+的端口不同即不算同一实例；默认端口按 scheme 判定，https 的 `:80` 保留）上的
+规范附件路径，公共 GitHub 域也不发——令牌只属本实例，发出去没有意义。媒体
+适配器（`ProxyService`）自己发送前也用同一闸门再校一次
+（`NewReviewMediaService` 构造时注入部署 authority）。
 
 缓存按授权域分键：令牌拉取的条目键里带 `install:<id>` 授权域——私有附件
 URL 即使被第三方知道，匿名或其他安装的请求也命中不了这条缓存（各是各的
