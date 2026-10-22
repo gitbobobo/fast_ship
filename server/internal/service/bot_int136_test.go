@@ -1524,7 +1524,10 @@ func TestBotInt136SchedulePreviewUsesOwnerTimezone(t *testing.T) {
 		"cron":        json.RawMessage(`"0 9 * * *"`),
 		"instruction": json.RawMessage(`"检查新 issue 并汇报"`),
 	}
-	preview := env.bots.schedulePreviewFromArgs(botRow, raw)
+	preview, err := env.bots.schedulePreviewFromArgs(botRow, raw)
+	if err != nil {
+		t.Fatalf("preview: %v", err)
+	}
 	if preview == nil {
 		t.Fatalf("预览不应为空")
 	}
@@ -1540,7 +1543,46 @@ func TestBotInt136SchedulePreviewUsesOwnerTimezone(t *testing.T) {
 
 	// 显式时区仍以参数为准，不被用户时区覆盖。
 	raw["timezone"] = json.RawMessage(`"UTC"`)
-	if got := env.bots.schedulePreviewFromArgs(botRow, raw); got.Timezone != "UTC" {
+	if got, err := env.bots.schedulePreviewFromArgs(botRow, raw); err != nil || got.Timezone != "UTC" {
 		t.Fatalf("显式时区应保留，实得 %q", got.Timezone)
+	}
+}
+
+// 确认型 create 在批准后按受理那一刻的快照时区执行：用户在受理到批准之间
+// 改了自己的有效时区，不改变这次批准的落地结果（INT-136 复审 P2：卡上 9 点
+// 与落地 9 点必须落在同一时区）。
+func TestBotInt136ScheduleCreateUsesSnapshotTimezone(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "snaptz")
+	bot := env.createBot(t, userID)
+	// 批准时用户的有效时区已是上海，但快照是受理时解析的 UTC。
+	setUserTimezone(t, env, userID, "Asia/Shanghai")
+
+	call := &model.BotToolCall{
+		ID: uuid.NewString(), BotID: bot.ID, ToolName: "fs_schedule", Action: "create",
+		ArgumentsJSON: `{"action":"create","name":"晨报","cron":"0 9 * * *","instruction":"检查新 issue"}`,
+		ExecutionContextJSON: marshalExecContext(botCallExecContext{
+			Schedule: &botScheduleCallPreview{Timezone: "UTC"},
+		}),
+	}
+	out, err := env.bots.execScheduleCreate(call, &botScheduleTaskArgs{
+		Action: "create", Name: "晨报", Cron: "0 9 * * *", Instruction: "检查新 issue",
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	var created struct {
+		ID       string `json:"id"`
+		Timezone string `json:"timezone"`
+	}
+	if err := json.Unmarshal([]byte(out), &created); err != nil {
+		t.Fatalf("decode: %v %s", err, out)
+	}
+	task, err := env.bots.schedTasks.FindByID(created.ID)
+	if err != nil || task == nil {
+		t.Fatalf("load task: %v", err)
+	}
+	if task.Timezone != "UTC" {
+		t.Fatalf("应按快照时区落库（UTC），实得 %q", task.Timezone)
 	}
 }

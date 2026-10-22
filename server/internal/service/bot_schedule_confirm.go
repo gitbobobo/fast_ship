@@ -171,7 +171,17 @@ func (s *BotService) resolveScheduleScope(bot *model.Bot, prepared *botPreparedC
 		prepared.ScopeKind = botScopeScheduleTaskCollection
 		prepared.ScopeID = bot.ID
 		prepared.FieldsConstraint = presentFields(raw, "name", "cron", "timezone", "instruction", "model", "needs_report")
-		prepared.SchedulePreview = s.schedulePreviewFromArgs(bot, raw)
+		preview, err := s.schedulePreviewFromArgs(bot, raw)
+		if err != nil {
+			// 读不到用户有效时区就不建卡：执行期同样会在这里失败，先把卡片
+			// 建出来只会得到一张指向必然失败调用的确认卡。
+			return err
+		}
+		if preview == nil {
+			return errs.New(errs.ErrInvalidParams.Code,
+				"无法计算任务的生效配置，请检查 cron 与时区后再操作")
+		}
+		prepared.SchedulePreview = preview
 	case "update":
 		prepared.ScopeKind = botScopeScheduleTask
 		prepared.FieldsConstraint = presentFields(raw, "name", "cron", "timezone", "instruction", "model", "needs_report")
@@ -255,17 +265,17 @@ type schedulePreviewInput struct {
 	NeedsReportPtr *bool
 }
 
-// schedulePreviewFromArgs 为 create 计算预览：cron/timezone 已在受理期校验，
-// 解析失败时只省略下次运行时间，不阻断受理。
-func (s *BotService) schedulePreviewFromArgs(bot *model.Bot, raw map[string]json.RawMessage) *botScheduleCallPreview {
+// schedulePreviewFromArgs 为 create 计算预览。时区解析与执行期同一口径：
+// 省略时区 = 归属用户的有效时区，且读库失败按失败关闭处理（不用回退时区
+// 顶替）——回退值一旦写进快照，卡片上的下次运行和真正落地的不在同一个时区。
+func (s *BotService) schedulePreviewFromArgs(bot *model.Bot, raw map[string]json.RawMessage) (*botScheduleCallPreview, error) {
 	timezone := rawString(raw["timezone"])
 	if strings.TrimSpace(timezone) == "" {
-		// 与执行期 createScheduleTask 同一口径：省略时区 = 机器人归属用户的
-		// 有效时区。少了这一步，确认卡按 UTC 展示下次运行、落地却按用户时区，
-		// 用户批准的和真正执行的就不是同一件事。
-		if tz, _ := s.botOwnerTimezoneOf(bot); tz != "" {
-			timezone = tz
+		resolved, err := s.botOwnerTimezoneOfErr(bot)
+		if err != nil {
+			return nil, err
 		}
+		timezone = resolved.name
 	}
 	return s.schedulePreviewFromTask(bot, schedulePreviewInput{
 		Name:           rawString(raw["name"]),
@@ -274,7 +284,7 @@ func (s *BotService) schedulePreviewFromArgs(bot *model.Bot, raw map[string]json
 		Instruction:    rawString(raw["instruction"]),
 		ModelPtr:       rawStringPtr(raw["model"]),
 		NeedsReportPtr: rawBoolPtr(raw["needs_report"]),
-	}, nil)
+	}, nil), nil
 }
 
 // schedulePreviewFromTask 用执行器同一份纯函数（applyScheduleTaskUpdate）合并

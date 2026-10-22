@@ -1331,20 +1331,43 @@ func timeOrUTC(name string) *time.Location {
 	return time.UTC
 }
 
+// botScheduleSnapshotTimezone 取确认卡快照里受理时解析的任务时区；没有快照
+// （旧版本会话或免确认路径）返回空串，由调用方回退到现场解析。
+func botScheduleSnapshotTimezone(call *model.BotToolCall) string {
+	if call == nil || strings.TrimSpace(call.ExecutionContextJSON) == "" {
+		return ""
+	}
+	var ctx botCallExecContext
+	if err := json.Unmarshal([]byte(call.ExecutionContextJSON), &ctx); err != nil {
+		return ""
+	}
+	if ctx.Schedule == nil {
+		return ""
+	}
+	return strings.TrimSpace(ctx.Schedule.Timezone)
+}
+
 func (s *BotService) execScheduleCreate(call *model.BotToolCall, args *botScheduleTaskArgs) (string, error) {
 	mdl := ""
 	if args.Model != nil {
 		mdl = *args.Model
 	}
-	// 时区只解析一次，落库与回执共用：分两次读会出现「任务按用户时区建好、
-	// 回执却报告回退时区」的错位，模型据此告诉用户错误的下次执行时间。
+	// resolved 只用于回执里的「用户当地时间」。
 	resolved, err := s.botOwnerTimezoneOfIDErr(call.BotID)
 	if err != nil {
 		return "", errs.ErrInternal
 	}
+	// 任务时区优先用确认卡快照里受理那一刻解析的值：批准之后重新解析用户
+	// 时区，会让卡片上的「9 点」和真正落地的「9 点」不在同一个时区（用户在
+	// 受理到批准之间改了自己的时区）。没有快照（旧版本会话、免确认路径）才
+	// 现场解析。
 	timezone := strings.TrimSpace(args.Timezone)
 	if timezone == "" {
-		timezone = resolved.name
+		if snapTZ := botScheduleSnapshotTimezone(call); snapTZ != "" {
+			timezone = snapTZ
+		} else {
+			timezone = resolved.name
+		}
 	}
 	task, err := s.createScheduleTask(call.BotID, args.Name, args.Cron, timezone, args.Instruction, mdl, args.NeedsReportBool())
 	if err != nil {
