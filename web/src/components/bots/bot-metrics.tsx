@@ -33,9 +33,9 @@ export function formatCostEstimate(usd: number): string {
   // 分位段保留四位小数再剥尾零：$0.5000 → $0.5，$0.0123 → $0.0123。
   if (usd >= 0.01) return `$${usd.toFixed(4).replace(/\.?0+$/, "")}`;
   if (usd >= 0.001) return `$${usd.toPrecision(2).replace(/\.?0+$/, "")}`;
-  // 毫厘以下的金额一长串前导零读不出数量级（视觉复审）：两位有效数字
-  // 的科学计数法比 0.000034 直观，如 $3.4e-5。
-  return `$${usd.toExponential(1)}`;
+  // 毫厘以下统一写 <$0.001：科学计数法 e-5 对普通用户不直观，第一眼
+  // 容易读成 3.4 美元；精确值留在 hover tooltip（视觉复审）。
+  return "<$0.001";
 }
 
 // 双环几何：尺寸与输入框那一行文字相称，不抢发送按钮的注意力；圆心（盒中心，
@@ -163,7 +163,7 @@ export function BotMetrics({ metrics }: { metrics?: BotMetricsData | null }) {
     request?.cost_estimate != null ? formatCostEstimate(request.cost_estimate) : null;
   const costTitle =
     cost != null
-      ? `本次请求成本估算 ≈${cost}（按内置目录单价：输入 × 单价 + 缓存读取 × 缓存价 + 输出 × 输出价；仅供参考）`
+      ? `本次请求成本估算 ≈$${request?.cost_estimate}（按内置目录单价：输入 × 单价 + 缓存读取 × 缓存价 + 输出 × 输出价；仅供参考）`
       : null;
 
   return (
@@ -197,12 +197,16 @@ export function BotMetrics({ metrics }: { metrics?: BotMetricsData | null }) {
           arcClassName="stroke-muted-foreground/45"
         />
       </svg>
-      <span data-testid="bot-metric-speed" title={speedTitle}>
-        <span className="font-mono">{speed ?? "—"}</span>
-      </span>
+      {speed != null && (
+        <span data-testid="bot-metric-speed" title={speedTitle}>
+          <span className="font-mono">{speed}</span>
+        </span>
+      )}
       {cost != null && (
         <span data-testid="bot-metric-cost" title={costTitle ?? undefined}>
-          <span className="font-mono">本次 ≈{cost}</span>
+          <span className="font-mono">
+            本次 {cost.startsWith("<") ? cost : `≈${cost}`}
+          </span>
         </span>
       )}
     </div>
