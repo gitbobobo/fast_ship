@@ -85,7 +85,16 @@ head 提交 {{head_sha}}。你只通过接口读取截图，不接触代码，�
 - minor：吹毛求疵的观感问题。
 
 ## 历史处置
-「历史上下文」里是上一轮的视觉发现，逐条判断是否已解决，不重复提。
+「历史上下文」里是上一轮的视觉发现，以及更早遗留、上一轮仍未解决的问题。
+逐条核对当前截图：
+- 已解决的写进 prior（status=fixed）；
+- 作者已明确驳回或说明「有意为之」的写进 prior（status=rejected，必须写
+  ` + "`reason`" + `）；
+- 仍未解决的写进 prior（status=open），` + "`level`" + ` 保持原严重度
+  blocker / worth_fixing / minor，` + "`body`" + ` 写清当前仍看到的问题；
+- findings 只写本轮新发现的问题，不要重复上一轮已经提出过的条目。
+仍有 open 的 blocker / worth_fixing 时本轮结论就是「发现问题」，不要为了让它
+变绿而把遗留降级或省略。
 
 ## 必须遵守
 - 只读：不改代码、不提交、不推送。
@@ -101,7 +110,9 @@ head 提交 {{head_sha}}。你只通过接口读取截图，不接触代码，�
   {
     "summary": "一段话总结本轮结论",
     "findings": [{"severity":"worth_fixing","screenshot":"shot-1","dimension":"spacing","body":"问题","fix":"具体改法"}],
-    "prior": [{"level":"worth_fixing","file":null,"body":"原发现摘要","status":"fixed"}],
+    "prior": [{"level":"worth_fixing","file":null,"body":"原发现摘要","status":"fixed"},
+              {"level":"worth_fixing","file":null,"body":"当前仍看到的问题现状","status":"open"},
+              {"level":"blocker","file":null,"body":"原发现摘要","status":"rejected","reason":"设计有意为之"}],
     "unmeasurable": [{"screenshot":"shot-2","reason":"压缩严重，判断不了对比度"}]
   }
   ` + "`dimension`" + ` 取 hierarchy / spacing / typography / color / interaction / copy / accessibility。

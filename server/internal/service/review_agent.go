@@ -251,7 +251,9 @@ func (s *ReviewService) appendNewDiscussion(ctx context.Context, run *model.Revi
 	return nil
 }
 
-// visualHistory 视觉审查历史：上一轮视觉运行的 findings + unmeasurable。
+// visualHistory 视觉审查历史：上一轮视觉运行的 findings + unmeasurable，再
+// 补上该轮 result 里 prior 仍未解决的条目——模型可能只把遗留写进 prior(open)
+// 而没重写进 findings，不补这段的话未解决项会从下一轮历史里消失，复核断链。
 func (s *ReviewService) visualHistory(ctx context.Context, run *model.ReviewRun) (string, error) {
 	// 最近一轮「确有视觉运行」的轮次：中间轮可能只跑了代码审查，
 	// round-1 会拿到空历史。历史只在本项目账本内取。
@@ -275,6 +277,7 @@ func (s *ReviewService) visualHistory(ctx context.Context, run *model.ReviewRun)
 	var b strings.Builder
 	fmt.Fprintf(&b, "## 上一轮视觉审查（轮次 %d）\n", *prevRound)
 	var unmeasurable []api.ReviewUnmeasurable
+	var openPrior []api.ReviewPriorDecision
 	for _, r := range prevRuns {
 		if r.Status != model.ReviewRunCompleted || r.ResultJSON == "" {
 			continue
@@ -287,11 +290,20 @@ func (s *ReviewService) visualHistory(ctx context.Context, run *model.ReviewRun)
 			fmt.Fprintf(&b, "- %s · %s · %s：%s\n  %s\n", f.Severity, f.Screenshot, f.Dimension, f.Body, f.Fix)
 		}
 		unmeasurable = append(unmeasurable, result.Unmeasurable...)
+		openPrior = append(openPrior, openPriorDecisions(result.Prior)...)
 	}
 	if len(unmeasurable) > 0 {
 		b.WriteString("### 无法判断\n")
 		for _, u := range unmeasurable {
 			fmt.Fprintf(&b, "- %s：%s\n", u.Screenshot, u.Reason)
+		}
+	}
+	if len(openPrior) > 0 {
+		// 独立小节：这些条目「更早一轮」就提出了，上一轮也没能了结——比
+		// 上一轮 findings 更值得审查员优先复核。
+		b.WriteString("### 仍未解决（更早一轮）\n")
+		for _, p := range openPrior {
+			fmt.Fprintf(&b, "- %s：%s\n", priorLevelText(p.Level), p.Body)
 		}
 	}
 	return strings.TrimRight(b.String(), "\n"), nil
