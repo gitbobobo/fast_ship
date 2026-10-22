@@ -1,5 +1,7 @@
 import { useState } from "react";
-import { screen, waitFor, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
+import { MemoryRouter } from "react-router";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { toast } from "sonner";
@@ -8,10 +10,12 @@ import {
   BotScheduleTaskDialog,
 } from "./bot-schedule-section";
 import { renderWithRoute } from "@/test/render";
+import { signInAs, teardownAuth } from "@/test/auth";
 import { ApiRequestError } from "@/lib/api/client";
-import type { BotScheduleTask } from "@/lib/api/bots";
+import type { BotScheduleRun, BotScheduleTask } from "@/lib/api/bots";
 import { formatDate } from "@/lib/utils/format";
 import {
+  botKeys,
   useBotScheduleTaskRuns,
   useBotScheduleTasks,
 } from "@/lib/hooks/use-bots";
@@ -20,10 +24,21 @@ vi.mock("sonner", () => ({
   toast: { success: vi.fn(), error: vi.fn() },
 }));
 
-const { setEnabledMutateAsync, clearStateMutateAsync } = vi.hoisted(() => ({
-  setEnabledMutateAsync: vi.fn(),
-  clearStateMutateAsync: vi.fn(),
-}));
+const { setEnabledMutateAsync, clearStateMutateAsync, stopScheduleRun } =
+  vi.hoisted(() => ({
+    setEnabledMutateAsync: vi.fn(),
+    clearStateMutateAsync: vi.fn(),
+    stopScheduleRun: vi.fn(),
+  }));
+
+// 组件直连 botApi.stopScheduleRun（INT-137）；其余方法保留真实实现。
+vi.mock("@/lib/api/bots", async (importOriginal) => {
+  const original = await importOriginal<typeof import("@/lib/api/bots")>();
+  return {
+    ...original,
+    botApi: { ...original.botApi, stopScheduleRun },
+  };
+});
 
 vi.mock("@/lib/hooks/use-bots", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/hooks/use-bots")>()),
@@ -119,6 +134,7 @@ const getSection = () => screen.getByTestId("bot-schedule-section");
 
 beforeEach(() => {
   setLang("zh-CN");
+  signInAs("A");
   vi.clearAllMocks();
   // mockReturnValue 的实现不会被 clearAllMocks 清掉，每例前重放默认值。
   vi.mocked(useBotScheduleTasks).mockReturnValue({
@@ -132,6 +148,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  teardownAuth();
   setLang("en-US");
 });
 
@@ -415,5 +432,174 @@ describe("BotScheduleSection", () => {
         name: /新建|创建|编辑|删除|保存/,
       }),
     ).not.toBeInTheDocument();
+  });
+
+  // ---- INT-137：运行中的定时任务可停止 ----
+
+  const runningRun: BotScheduleRun = {
+    id: "r-run",
+    task_id: "t1",
+    status: "running",
+    trigger_source: "cron",
+    summary: "",
+    silent: false,
+    scheduled_for: "2026-10-18T01:00:00Z",
+    started_at: "2026-10-18T01:00:02Z",
+    finished_at: null,
+    duration_ms: null,
+  };
+  const completedRun: BotScheduleRun = {
+    ...runningRun,
+    id: "r-done",
+    status: "completed",
+    summary: "已汇总 3 条变化",
+    finished_at: "2026-10-18T01:02:10Z",
+    duration_ms: 128_000,
+  };
+
+  function mockRuns(runs: BotScheduleRun[]) {
+    vi.mocked(useBotScheduleTasks).mockReturnValue({
+      data: [enabledTask],
+      isLoading: false,
+    } as never);
+    vi.mocked(useBotScheduleTaskRuns).mockReturnValue({
+      data: runs,
+      isLoading: false,
+    } as never);
+  }
+
+  // 需要探到 invalidateQueries 的调用：用自己的 QueryClient 渲染弹窗。
+  function renderDialog() {
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+    render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter>
+          <BotScheduleTaskDialog botId="b1" taskId="t1" onClose={() => {}} />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    return { invalidate, client };
+  }
+
+  it("运行中的记录显示停止按钮，点击调用接口并刷新任务与运行记录", async () => {
+    stopScheduleRun.mockResolvedValue({
+      ...runningRun,
+      status: "stopped",
+    });
+    mockRuns([runningRun, completedRun]);
+    const { invalidate } = renderDialog();
+    const user = userEvent.setup();
+
+    const dialog = await screen.findByRole("dialog");
+    const rows = within(dialog).getAllByTestId("bot-schedule-run");
+    expect(rows).toHaveLength(2);
+    const stopButton = within(rows[0]).getByRole("button", { name: "停止该次运行" });
+    // 非 running 行没有停止按钮。
+    expect(
+      within(rows[1]).queryByRole("button", { name: "停止该次运行" }),
+    ).not.toBeInTheDocument();
+
+    await user.click(stopButton);
+    await waitFor(() =>
+      expect(stopScheduleRun).toHaveBeenCalledWith("b1", "t1", "r-run"),
+    );
+    await waitFor(() =>
+      expect(invalidate).toHaveBeenCalledWith({
+        queryKey: botKeys.scheduleTaskRuns("A", "b1", "t1"),
+      }),
+    );
+    expect(invalidate).toHaveBeenCalledWith({
+      queryKey: botKeys.scheduleTasks("A", "b1"),
+    });
+    await waitFor(() =>
+      expect(toast.success).toHaveBeenCalledWith("已发出停止请求"),
+    );
+  });
+
+  it("停止成功后把返回的 run 就地写进运行记录缓存", async () => {
+    const stoppedRun: BotScheduleRun = {
+      ...runningRun,
+      status: "stopped",
+      finished_at: "2026-10-18T01:01:00Z",
+      duration_ms: 58_000,
+    };
+    stopScheduleRun.mockResolvedValue(stoppedRun);
+    mockRuns([runningRun, completedRun]);
+    const { client } = renderDialog();
+    // 运行记录按 15s 轮询；就地写回让停止按钮立刻消失，不等下次取数。
+    // 真实环境由 useBotScheduleTaskRuns 水合，这里 hook 被 mock，预置缓存。
+    client.setQueryData<BotScheduleRun[]>(
+      botKeys.scheduleTaskRuns("A", "b1", "t1"),
+      [runningRun, completedRun],
+    );
+    const user = userEvent.setup();
+
+    const dialog = await screen.findByRole("dialog");
+    await user.click(
+      within(dialog).getByRole("button", { name: "停止该次运行" }),
+    );
+
+    await waitFor(() =>
+      expect(
+        client
+          .getQueryData<BotScheduleRun[]>(
+            botKeys.scheduleTaskRuns("A", "b1", "t1"),
+          )
+          ?.map((r) => `${r.id}:${r.status}`),
+      ).toEqual(["r-run:stopped", "r-done:completed"]),
+    );
+    // 终态合并保留原行的定时运行字段（summary/task_id 等不被主线投影覆盖）。
+    const merged = client
+      .getQueryData<BotScheduleRun[]>(botKeys.scheduleTaskRuns("A", "b1", "t1"))
+      ?.find((r) => r.id === "r-run");
+    expect(merged?.summary).toBe(runningRun.summary);
+    expect(merged?.finished_at).toBe("2026-10-18T01:01:00Z");
+  });
+
+  it("停止受理（返回仍是 running）不整行覆盖运行记录缓存", async () => {
+    // 停止接口返回的是主线 run 投影：受理瞬间 status 仍是 running，且缺
+    // summary/task_id/scheduled_for 等字段——不能拿它替换定时运行行。
+    stopScheduleRun.mockResolvedValue({ ...runningRun });
+    mockRuns([runningRun, completedRun]);
+    const { client } = renderDialog();
+    client.setQueryData<BotScheduleRun[]>(
+      botKeys.scheduleTaskRuns("A", "b1", "t1"),
+      [runningRun, completedRun],
+    );
+    const user = userEvent.setup();
+
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "停止该次运行" }));
+
+    await waitFor(() => expect(stopScheduleRun).toHaveBeenCalled());
+    const rows = client.getQueryData<BotScheduleRun[]>(
+      botKeys.scheduleTaskRuns("A", "b1", "t1"),
+    );
+    expect(rows?.find((r) => r.id === "r-run")?.summary).toBe(
+      runningRun.summary,
+    );
+    expect(rows?.find((r) => r.id === "r-run")?.status).toBe("running");
+  });
+
+  it("停止失败给出可见反馈且不刷新", async () => {
+    stopScheduleRun.mockRejectedValue(
+      new ApiRequestError(500, null, "服务器错误"),
+    );
+    mockRuns([runningRun]);
+    const { invalidate } = renderDialog();
+    const user = userEvent.setup();
+
+    const dialog = await screen.findByRole("dialog");
+    await user.click(
+      within(dialog).getByRole("button", { name: "停止该次运行" }),
+    );
+
+    await waitFor(() =>
+      expect(toast.error).toHaveBeenCalledWith("服务器错误"),
+    );
+    expect(invalidate).not.toHaveBeenCalled();
   });
 });

@@ -121,6 +121,78 @@ type GitHubAppConfig struct {
 type BotsConfig struct {
 	Context BotsContextConfig `mapstructure:"context"`
 	Memory  BotsMemoryConfig  `mapstructure:"memory"`
+	Runtime BotsRuntimeConfig `mapstructure:"runtime"`
+}
+
+// BotsRuntimeConfig 是模型请求的运行参数（INT-137）：流式看门狗、停止宽限与
+// 未输出前的有限重试。全部为部署级配置。
+type BotsRuntimeConfig struct {
+	// StreamFirstChunkTimeoutSeconds 是发出请求到第一个流式片段的超时（默认 90s）。
+	StreamFirstChunkTimeoutSeconds int `mapstructure:"stream_first_chunk_timeout_seconds"`
+	// StreamIdleTimeoutSeconds 是相邻流式片段之间的空闲超时（默认 120s）。
+	StreamIdleTimeoutSeconds int `mapstructure:"stream_idle_timeout_seconds"`
+	// StopGraceSeconds 是「停止」消息受理后等待 run 自然到达安全点的宽限，
+	// 超时即硬取消当前模型请求（默认 15s）。
+	StopGraceSeconds int `mapstructure:"stop_grace_seconds"`
+	// RetryMaxAttempts 是未收到任何片段就失败时的最大重试次数（默认 2）。
+	RetryMaxAttempts int `mapstructure:"retry_max_attempts"`
+	// RetryBaseDelayMs 是重试指数退避的基数（默认 1000ms）。
+	RetryBaseDelayMs int `mapstructure:"retry_base_delay_ms"`
+	// ProviderCircuitMinutes 是 provider 熔断窗口（默认 30 分钟）：认证失败/
+	// 额度用完时定时任务在该窗口内直接记 skipped。
+	ProviderCircuitMinutes int `mapstructure:"provider_circuit_minutes"`
+}
+
+func (c BotsRuntimeConfig) StreamFirstChunkTimeout() time.Duration {
+	if c.StreamFirstChunkTimeoutSeconds > 0 {
+		return time.Duration(c.StreamFirstChunkTimeoutSeconds) * time.Second
+	}
+	return 90 * time.Second
+}
+
+func (c BotsRuntimeConfig) StreamIdleTimeout() time.Duration {
+	if c.StreamIdleTimeoutSeconds > 0 {
+		return time.Duration(c.StreamIdleTimeoutSeconds) * time.Second
+	}
+	return 120 * time.Second
+}
+
+func (c BotsRuntimeConfig) StopGrace() time.Duration {
+	if c.StopGraceSeconds > 0 {
+		return time.Duration(c.StopGraceSeconds) * time.Second
+	}
+	return 15 * time.Second
+}
+
+// RetryMaxAttemptsV 是「首次失败之后」的重试次数：未配置取默认 2，负值
+// 关闭重试，上限 5。
+func (c BotsRuntimeConfig) RetryMaxAttemptsV() int {
+	if c.RetryMaxAttempts < 0 {
+		return 0
+	}
+	if c.RetryMaxAttempts > 5 {
+		return 5
+	}
+	if c.RetryMaxAttempts == 0 {
+		return 2
+	}
+	return c.RetryMaxAttempts
+}
+
+func (c BotsRuntimeConfig) RetryBaseDelay() time.Duration {
+	if c.RetryBaseDelayMs > 0 {
+		return time.Duration(c.RetryBaseDelayMs) * time.Millisecond
+	}
+	return time.Second
+}
+
+// ProviderCircuitWindow 是熔断窗口：认证失败/额度用完的 provider 在窗口内
+// 不派发定时任务，避免每次到点都失败一次。
+func (c BotsRuntimeConfig) ProviderCircuitWindow() time.Duration {
+	if c.ProviderCircuitMinutes > 0 {
+		return time.Duration(c.ProviderCircuitMinutes) * time.Minute
+	}
+	return 30 * time.Minute
 }
 
 type BotsContextConfig struct {
@@ -299,6 +371,12 @@ func (c BotsConfig) validate() error {
 	if c.Memory.MemoryMaxChars != 0 && c.Memory.MemoryMaxChars < botMemoryInjectMinChars {
 		return fmt.Errorf("bots.memory.memory_max_chars 不得小于 %d（需容纳截断标记）", botMemoryInjectMinChars)
 	}
+	if c.Runtime.StreamFirstChunkTimeoutSeconds < 0 || c.Runtime.StreamIdleTimeoutSeconds < 0 {
+		return fmt.Errorf("bots.runtime 的流式超时不得为负")
+	}
+	if c.Runtime.StopGraceSeconds < 0 {
+		return fmt.Errorf("bots.runtime.stop_grace_seconds 不得为负")
+	}
 	if c.Memory.Timezone != "" {
 		if _, err := time.LoadLocation(c.Memory.Timezone); err != nil {
 			return fmt.Errorf("bots.memory.timezone 非法: %v", err)
@@ -354,6 +432,13 @@ func Load(path string) (*Config, error) {
 	_ = viper.BindEnv("bots.memory.nightly_model", "FAST_SHIP_BOTS_MEMORY_NIGHTLY_MODEL")
 	_ = viper.BindEnv("bots.memory.timezone", "FAST_SHIP_BOTS_MEMORY_TIMEZONE")
 	_ = viper.BindEnv("bots.memory.nightly_time", "FAST_SHIP_BOTS_MEMORY_NIGHTLY_TIME")
+	// INT-137 运行参数：与上面的 bot 配置同口径，允许部署用环境变量覆盖。
+	_ = viper.BindEnv("bots.runtime.stream_first_chunk_timeout_seconds", "FAST_SHIP_BOTS_RUNTIME_STREAM_FIRST_CHUNK_TIMEOUT_SECONDS")
+	_ = viper.BindEnv("bots.runtime.stream_idle_timeout_seconds", "FAST_SHIP_BOTS_RUNTIME_STREAM_IDLE_TIMEOUT_SECONDS")
+	_ = viper.BindEnv("bots.runtime.stop_grace_seconds", "FAST_SHIP_BOTS_RUNTIME_STOP_GRACE_SECONDS")
+	_ = viper.BindEnv("bots.runtime.retry_max_attempts", "FAST_SHIP_BOTS_RUNTIME_RETRY_MAX_ATTEMPTS")
+	_ = viper.BindEnv("bots.runtime.retry_base_delay_ms", "FAST_SHIP_BOTS_RUNTIME_RETRY_BASE_DELAY_MS")
+	_ = viper.BindEnv("bots.runtime.provider_circuit_minutes", "FAST_SHIP_BOTS_RUNTIME_PROVIDER_CIRCUIT_MINUTES")
 	_ = viper.BindEnv("quota.enabled", "FAST_SHIP_QUOTA_ENABLED")
 	_ = viper.BindEnv("quota.interval_minutes", "FAST_SHIP_QUOTA_INTERVAL_MINUTES")
 	_ = viper.BindEnv("quota.run_on_startup", "FAST_SHIP_QUOTA_RUN_ON_STARTUP")

@@ -114,7 +114,9 @@ func (s *BotService) buildScheduleRunContext(bot *model.Bot, run *model.BotRun, 
 	if err != nil {
 		return nil, errs.ErrInternal
 	}
-	projected, projRows, _, err := botProjectMessages(rows, botScheduleFoldMap(rows))
+	// schedule 会话无前缀缓存顾虑（独立短会话），旧 toolset_updated 恒按 user
+	// 投影（INT-137 R6）。
+	projected, projRows, _, err := botProjectMessages(rows, botScheduleFoldMap(rows), true)
 	if err != nil {
 		return nil, err
 	}
@@ -782,6 +784,56 @@ func (s *BotService) ClearScheduleTaskState(userID, botID, taskID string) (*BotS
 // 其它字段在 handler 层拒绝（400）。
 type SetScheduleTaskEnabledRequest struct {
 	Enabled *bool `json:"enabled"`
+}
+
+// StopScheduleRun 停止一条定时任务运行（INT-137 用户侧 REST）：置
+// stop_requested_at 并取消执行槽 context，循环在安全点收尾 stopped，不追加
+// 主线事件（用户主动停止不是需要汇报的运行结果）。归属不符一律 404：机器人
+// 不属于该用户、任务不属于该机器人、run 不属于该机器人或该任务；run 已终态
+// 返回 409。没有执行槽的 run 不在这里直接落终态——补唤醒让它进入执行槽，
+// 由安全点收尾（保持单一收尾路径，5s 扫描兜底）。
+func (s *BotService) StopScheduleRun(userID, botID, taskID, runID string) (*BotRunResponse, error) {
+	if err := s.checkOwnership(userID, botID); err != nil {
+		return nil, err
+	}
+	if _, err := s.schedTasks.FindByIDAndBot(taskID, botID); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errs.ErrBotScheduleTaskNotFound
+		}
+		return nil, errs.ErrInternal
+	}
+	run, err := s.runs.FindByID(runID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errs.ErrBotRunNotFound
+		}
+		return nil, errs.ErrInternal
+	}
+	if run.BotID != botID || run.SessionKind != model.BotSessionKindSchedule ||
+		run.ScheduleTaskID == nil || *run.ScheduleTaskID != taskID {
+		return nil, errs.ErrBotRunNotFound
+	}
+	if run.FinishedAt != nil {
+		return nil, errs.ErrBotRunStateConflict
+	}
+	ok, err := s.runs.UpdateColumns(runID, map[string]interface{}{"finished_at": nil},
+		map[string]interface{}{"stop_requested_at": time.Now().UTC()})
+	if err != nil {
+		return nil, errs.ErrInternal
+	}
+	if !ok {
+		// CAS 落空：校验与落库之间 run 自然结束。
+		return nil, errs.ErrBotRunStateConflict
+	}
+	s.cancelBotContext(botID, run)
+	// 提交后补唤醒：没有执行槽的孤儿 run 靠 5s 扫描也能被捡起，这里让收尾更快。
+	s.wakeScheduleRun(botID, runID)
+	fresh, err := s.runs.FindByID(runID)
+	if err != nil {
+		return nil, errs.ErrInternal
+	}
+	resp := botRunResponseOf(fresh)
+	return &resp, nil
 }
 
 // ---------- fs_schedule 工具执行（全部同步、不弹确认） ----------

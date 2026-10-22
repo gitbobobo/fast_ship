@@ -22,6 +22,12 @@ type BotContextState struct {
 	// FoldedResultsJSON 是消息 ID → 折叠引用正文 的持久映射；构建投影按它
 	// 确定性替换，不每次动态重折叠。
 	FoldedResultsJSON string `gorm:"type:text;not null" json:"folded_results_json"`
+	// LifecycleRenderVersion 记录「压缩发布后旧 lifecycle 消息改按 user 角色
+	// 投影」的水位（INT-137 R6）：0 表示未发布过压缩——旧 toolset_updated 保持
+	// system 角色，既有会话 prefix_hash 不变；任何一次发布（含 fold-only）后
+	// 写 1，仍留在投影里的旧 toolset_updated 也按 user 角色发送（system 已不
+	// 在开头，部分兼容后端会拒绝）。
+	LifecycleRenderVersion int64 `gorm:"not null;default:0" json:"lifecycle_render_version"`
 
 	UpdatedAt time.Time `gorm:"not null" json:"updated_at"`
 

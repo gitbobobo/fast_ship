@@ -252,7 +252,7 @@ func (s *BotService) buildRunContextWith(bot *model.Bot, run *model.BotRun, over
 	if err != nil {
 		return nil, errs.ErrInternal
 	}
-	projected, rows, _, err := botProjectMessages(rawRows, sess.Folded)
+	projected, rows, _, err := botProjectMessages(rawRows, sess.Folded, sess.State.LifecycleRenderVersion >= 1)
 	if err != nil {
 		return nil, err
 	}
@@ -389,8 +389,12 @@ func botFoldedReference(callID string, items, chars int64) string {
 // botProjectMessages 把账本行投影为协议消息：折叠映射替换大结果、assistant
 // 工具调用与 tool 回复块保持连续、未闭合块拒绝发请求。只依赖入参，主线与
 // 定时任务（INT-103）构建共用同一段投影，保证输出形状一致。返回投影后的
-// 消息数组、（裁剪孤儿回复后的）原始行与待处理输入列表。
-func botProjectMessages(rows []model.BotMessage, folded map[string]string) (
+// 消息数组、（裁剪孤儿回复后的）原始行与待处理输入列表。legacyToolsetAsUser
+// 控制「无 render 标记的旧 toolset_updated」的角色（INT-137 R6）：主线按
+// LifecycleRenderVersion 传入——压缩发布（>=1）后仍留在投影里的旧消息改按
+// user 角色（system 已不在开头，部分兼容后端拒绝）；未发布过压缩传 false
+// 保持 system，prefix_hash 不变。定时会话无前缀缓存顾虑，恒传 true。
+func botProjectMessages(rows []model.BotMessage, folded map[string]string, legacyToolsetAsUser bool) (
 	[]openai.ChatCompletionMessageParamUnion, []model.BotMessage, []botPendingInput, error,
 ) {
 	// 窗口起点对齐协议块：滑窗起点可能落在一个 tool 回复块中间（assistant
@@ -496,7 +500,9 @@ func botProjectMessages(rows []model.BotMessage, folded map[string]string) (
 			}
 			raw, _ := json.Marshal(content)
 			var msg openai.ChatCompletionMessageParamUnion
-			if content.Event == "toolset_updated" {
+			if content.Event == "toolset_updated" && content.Render != "user" && !legacyToolsetAsUser {
+				// 旧消息：保持原文 system 角色，既有会话的 prefix_hash 在压缩边界
+				// 之前不变（INT-137 R6）。
 				msg = openai.SystemMessage("[工具集变更] 以下是平台可信系统事件（非用户发言）：\n" + string(raw))
 			} else {
 				msg = openai.UserMessage("[平台事件] 以下是平台生命周期事件（非用户发言）：\n" + string(raw))

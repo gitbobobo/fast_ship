@@ -45,16 +45,34 @@ type fakeModelTurn struct {
 	// Hold 非 nil 时请求阻塞到该 channel 可读或请求 context 结束——测试用它
 	// 把「模型请求进行中」精确控制在时点上。
 	Hold <-chan struct{}
+	// HoldFor 非 0 时输出前阻塞该时长（或直到请求被取消/关停）：模拟首包
+	// 迟迟不到的上游。
+	HoldFor time.Duration
+	// StallAfterText 非 0 时正文片段输出完后挂起该时长（或直到取消/关停）：
+	// 模拟流中途卡住、片段之间不再有数据的上游。
+	StallAfterText time.Duration
 	// BreakAfterText 流完文本后立刻断开连接：模拟「发了部分正文就报错」
 	// 的上游故障（草稿已挂出但永远等不来 message_commit）。
 	BreakAfterText bool
 	// FinishReason 覆盖默认 stop/tool_calls，供摘要 length 截断等场景。
 	FinishReason string
+	// NoFinish 为真时不输出 finish_reason chunk（直接 [DONE] 收尾）：模拟上游
+	// 正常关闭但协议没有完成信号，适配器应按断流失败处理（INT-137）。
+	NoFinish bool
+	// Status 非 0 时以该状态码直接返回 JSON 错误体，不输出流：脚本化
+	// 401/429/500 等 HTTP 失败。
+	Status int
+	// ErrorBody 是 Status 非 0 时的响应体；空则给通用错误 JSON。
+	ErrorBody string
+	// RetryAfter 设置 Retry-After 响应头（配合 Status=429 等）。
+	RetryAfter string
 }
 
 type fakeModelRequest struct {
 	Body          []byte
 	Authorization string
+	// At 是请求到达时刻：重试退避用例据此断言相邻请求的间隔。
+	At time.Time
 }
 
 type fakeModelServer struct {
@@ -99,7 +117,7 @@ func newFakeModelServer(t *testing.T, turns ...fakeModelTurn) *fakeModelServer {
 			return
 		}
 		select {
-		case f.requests <- fakeModelRequest{Body: body, Authorization: r.Header.Get("Authorization")}:
+		case f.requests <- fakeModelRequest{Body: body, Authorization: r.Header.Get("Authorization"), At: time.Now()}:
 		default:
 			// 缓冲满即丢弃：不阻塞服务协程；需要断言请求体的测试会及时消费。
 		}
@@ -118,6 +136,29 @@ func newFakeModelServer(t *testing.T, turns ...fakeModelTurn) *fakeModelServer {
 			turn = fakeModelTurn{Text: "(脚本外的默认回复)"}
 		}
 		f.mu.Unlock()
+		// 脚本化 HTTP 错误：直接回状态码 + JSON 错误体，不输出流。
+		if turn.Status != 0 {
+			if turn.RetryAfter != "" {
+				w.Header().Set("Retry-After", turn.RetryAfter)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(turn.Status)
+			if turn.ErrorBody != "" {
+				fmt.Fprint(w, turn.ErrorBody)
+			} else {
+				fmt.Fprint(w, `{"error":{"message":"upstream failure","type":"server_error"}}`)
+			}
+			return
+		}
+		if turn.HoldFor > 0 {
+			select {
+			case <-time.After(turn.HoldFor):
+			case <-f.shutdown:
+				return
+			case <-r.Context().Done():
+				return
+			}
+		}
 		if turn.Hold != nil {
 			select {
 			case <-turn.Hold:
@@ -169,6 +210,15 @@ func newFakeModelServer(t *testing.T, turns ...fakeModelTurn) *fakeModelServer {
 				panic(http.ErrAbortHandler)
 			}
 		}
+		if turn.StallAfterText > 0 {
+			select {
+			case <-time.After(turn.StallAfterText):
+			case <-f.shutdown:
+				return
+			case <-r.Context().Done():
+				return
+			}
+		}
 		for i, tc := range turn.ToolCalls {
 			writeChunk(chunk("", []map[string]interface{}{{
 				"index":    i,
@@ -177,7 +227,9 @@ func newFakeModelServer(t *testing.T, turns ...fakeModelTurn) *fakeModelServer {
 				"function": map[string]interface{}{"name": tc.Name, "arguments": tc.Args},
 			}}, ""))
 		}
-		writeChunk(chunk("", nil, finish))
+		if !turn.NoFinish {
+			writeChunk(chunk("", nil, finish))
+		}
 		if turn.Usage != nil {
 			// cached_tokens 在 prompt_tokens_details 下（与上游 wire 格式一致）。
 			usageRaw, _ := json.Marshal(map[string]interface{}{
@@ -193,8 +245,10 @@ func newFakeModelServer(t *testing.T, turns ...fakeModelTurn) *fakeModelServer {
 			})
 			writeChunk(string(usageRaw))
 		}
-		fmt.Fprint(w, "data: [DONE]\n\n")
-		flusher.Flush()
+		if !turn.NoFinish {
+			fmt.Fprint(w, "data: [DONE]\n\n")
+			flusher.Flush()
+		}
 	}))
 	t.Cleanup(f.srv.Close)
 	t.Cleanup(func() { close(f.shutdown) })

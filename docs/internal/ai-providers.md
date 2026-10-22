@@ -18,6 +18,8 @@
 | `base_url` | 规范化地址（TrimSpace + 去尾部 `/`）；目录提供商由目录决定 |
 | `api_key_encrypted` | AES-GCM 密文（`crypto` 包，与用户级 AI 配置同一口径） |
 | `api_key_last4` | 只用于展示的末四位 |
+| `circuit_open_until` / `circuit_reason` | 定时任务熔断（INT-137）：认证失效或额度用完时打开，窗口内该 provider 的定时任务到点直接记 `skipped`；窗口过后自动恢复，更新密钥/地址或测试连接成功（密钥与库存一致）也清除。窗口已开着时不延长（同一窗口只对应一个去重键、一条主线事件）。内部调度状态，不出现在任何 API 投影 |
+| `config_version_at` | 当前凭证/地址配置的生效时刻：创建、换 key/地址、以及测试连接确认现有密钥可用时前移。打开熔断的 UPDATE 同时要求 `config_version_at <= run.started_at`，用户修好后迟到的旧凭证失败不会重新熔断；迟到失败与凭证更新之间没有检查-写入间隙 |
 
 `bots` 侧（INT-133）：
 
@@ -104,7 +106,7 @@ GET    /api/ai-providers             -> {items:[AIProvider]}
 POST   /api/ai-providers             {catalog_id, name?, base_url?, api_key}
 PUT    /api/ai-providers/{id}        {name?, base_url?, api_key?}
 DELETE /api/ai-providers/{id}        被机器人引用时 409（40933）
-POST   /api/ai-providers/test        {catalog_id?, base_url?, api_key, model?}
+POST   /api/ai-providers/test        {catalog_id?, base_url?, api_key, model?, provider_id?}
 GET    /api/ai-providers/catalog     -> {items:[CatalogProvider]}
 ```
 
@@ -118,7 +120,11 @@ GET    /api/ai-providers/catalog     -> {items:[CatalogProvider]}
   返回 `/models` 拉到的模型 id 列表。三项探测相互独立，**并行发起**：总耗时
   受单次探测超时（`botProbeTimeout` 30s）约束而不是串行相加，web 侧 35s 的
   客户端超时能覆盖最坏情况并拿到逐项结果。`model` 缺省用目录第一个模型，custom
-  必填。
+  必填。可选 `provider_id`：给了先校验归属（非本用户 40433），探测通过且
+  **请求里的 api_key 与库存密文解密一致**时清除该 provider 的定时任务熔断
+  （INT-137）——测试的是尚未保存的新密钥时不清（正在排障旧配置，清掉熔断会
+  让定时任务立刻拿旧密钥打上游；保存路径 `Update` 自会清除）；不给
+  `provider_id` 则是纯探测，不读写任何行。
 - `/catalog` 返回全量目录（约 1.2 MB，前端一次拉取后 `staleTime: Infinity`）；
   目录提供商 `models` 供 ModelPicker 分组渲染。
 - 错误码：`40433` provider 不存在/不属于该用户，`40933` 仍被机器人引用。
