@@ -9,6 +9,7 @@ import { authApi } from "@/lib/api/auth";
 import {
   browserTimezone,
   formatTimeInZone,
+  TIMEZONE_GROUP_SEPARATOR,
   timezoneOptions,
 } from "@/lib/utils/timezone";
 
@@ -40,13 +41,27 @@ export default function GeneralPage() {
   // 未声明时区时按浏览器时区展示时间，同时说明机器人实际按部署配置执行。
   const displayTimezone = currentTimezone || browserTimezone() || "UTC";
 
-  const timezoneSelectOptions = useMemo(
-    () => [
+  const timezoneSelectOptions = useMemo(() => {
+    const grouped = timezoneOptions(currentTimezone).map((option) =>
+      option.value === TIMEZONE_GROUP_SEPARATOR
+        ? {
+            ...option,
+            // 分隔项不可选：它只用来把「常用」和完整列表分开。
+            disabled: true,
+            label: "全部时区",
+            itemLabel: (
+              <span className="text-xs uppercase tracking-wide text-muted-foreground">
+                全部时区
+              </span>
+            ),
+          }
+        : option,
+    );
+    return [
       { value: DEFAULT_TIMEZONE, label: "默认（跟随部署配置）" },
-      ...timezoneOptions(currentTimezone),
-    ],
-    [currentTimezone],
-  );
+      ...grouped,
+    ];
+  }, [currentTimezone]);
 
   /** 选中即保存：空串回落到部署配置，其余为 IANA 名称。 */
   const handleTimezoneChange = async (value: string | null) => {
@@ -126,24 +141,14 @@ export default function GeneralPage() {
               </div>
 
               <div className="space-y-1 text-sm">
-                {/* 显式选了时区时，下拉本身就显示了它，再写一行「当前生效时区」
-                    只是重复；只有跟随部署配置时才需要说明生效值的来源。 */}
-                {!currentTimezone && (
-                  <p className="text-muted-foreground">
-                    当前生效时区：
-                    <span className="text-foreground">
-                      由部署配置决定（未在此显示）
-                    </span>
-                  </p>
-                )}
+                {/* 不另写「当前生效时区」：显式选了时区时下拉就是事实来源；
+                    跟随部署配置时前端拿不到部署配置的时区，写「未在此显示」
+                    只会把用户引到死胡同。时间行按各自的时区说清是哪一个。 */}
                 <p className="text-muted-foreground">
-                  {currentTimezone ? "该时区当前时间：" : "本机当前时间："}
+                  {currentTimezone ? "该时区当前时间：" : "你的本机时间："}
                   <span className="text-foreground">
                     {formatTimeInZone(now, displayTimezone)}
                   </span>
-                  {!currentTimezone && (
-                    <span className="ml-2 text-xs">（仅用于预览）</span>
-                  )}
                 </p>
               </div>
             </div>

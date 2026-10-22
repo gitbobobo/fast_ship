@@ -130,6 +130,9 @@ function timezoneLabel(timeZone: string): string {
  * 不可用时退回内置常用列表；当前值不在候选里且非空时插到首位，保证它可选中、
  * 收起态也能显示。
  */
+/** 常用段与完整列表之间的分隔项 value；不是合法时区，只用于渲染分组标题。 */
+export const TIMEZONE_GROUP_SEPARATOR = "__all_timezones__";
+
 export function timezoneOptions(
   current: string,
 ): { value: string; label: string }[] {
@@ -150,11 +153,19 @@ export function timezoneOptions(
   for (const name of head) {
     if (!values.includes(name)) values.push(name);
   }
+  const options: { value: string; label: string }[] = [];
+  const headCount = values.length;
   for (const name of names) {
     if (LEGACY_TIMEZONE_ALIASES.has(name) || values.includes(name)) continue;
     values.push(name);
   }
-  return values.map((value) => ({ value, label: timezoneLabel(value) }));
+  for (let i = 0; i < values.length; i++) {
+    if (i === headCount) {
+      options.push({ value: TIMEZONE_GROUP_SEPARATOR, label: "全部时区" });
+    }
+    options.push({ value: values[i], label: timezoneLabel(values[i]) });
+  }
+  return options;
 }
 
 /**
