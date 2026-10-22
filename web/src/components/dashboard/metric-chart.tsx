@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { cn } from "@/lib/utils";
 
 export interface MetricChartPoint {
@@ -193,10 +193,10 @@ function HorizontalBarChart({
 
 /* ─── Stacked Area Chart ─── */
 
-const SVG_WIDTH = 720;
-const SVG_HEIGHT = 220;
-const SVG_PADDING_X = 40;
-const SVG_PADDING_Y = 28;
+const CHART_HEIGHT = 240;
+const CHART_PADDING_X = 40;
+const CHART_PADDING_TOP = 24;
+const CHART_PADDING_BOTTOM = 30;
 
 function StackedAreaChart({
   points,
@@ -208,8 +208,23 @@ function StackedAreaChart({
   emptyAction?: ReactNode;
 }) {
   const svgRef = useRef<SVGSVGElement>(null);
+  const boxRef = useRef<HTMLDivElement>(null);
+  // 用实测宽度画图（1:1 像素坐标）：viewBox 缩放会把坐标轴文字一起缩小，
+  // 也会让横轴日期和数据点错位。
+  const [chartWidth, setChartWidth] = useState(720);
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
   const [tooltipPos, setTooltipPos] = useState<{ x: number; y: number; containerWidth: number } | null>(null);
+
+  useEffect(() => {
+    const el = boxRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver((entries) => {
+      const next = Math.round(entries[0]?.contentRect.width ?? 0);
+      if (next > 0) setChartWidth(next);
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
 
   // Extract all unique series IDs and names
   const seriesMeta = useMemo(() => {
@@ -266,15 +281,16 @@ function StackedAreaChart({
     ? [...stackedData, { ...stackedData[0], index: 1 }]
     : stackedData;
 
-  const plotWidth = SVG_WIDTH - SVG_PADDING_X * 2;
-  const plotHeight = SVG_HEIGHT - SVG_PADDING_Y * 2;
+  const plotWidth = chartWidth - CHART_PADDING_X * 2;
+  const baselineY = CHART_HEIGHT - CHART_PADDING_BOTTOM;
+  const plotHeight = baselineY - CHART_PADDING_TOP;
   const denominator = Math.max(safeData.length - 1, 1);
 
   // Compute coordinates for each stack layer
   const coordinates = safeData.map((point, index) => {
-    const x = SVG_PADDING_X + (plotWidth * index) / denominator;
+    const x = CHART_PADDING_X + (plotWidth * index) / denominator;
     const getY = (value: number) =>
-      SVG_HEIGHT - SVG_PADDING_Y - (plotHeight * Math.min(value, chartMax)) / chartMax;
+      baselineY - (plotHeight * Math.min(value, chartMax)) / chartMax;
     return {
       x,
       yTotal: getY(point.total),
@@ -309,7 +325,7 @@ function StackedAreaChart({
 
   // Grid lines
   const gridLines = Array.from({ length: tickIntervals + 1 }, (_, index) => ({
-    y: SVG_HEIGHT - SVG_PADDING_Y - (plotHeight * index) / tickIntervals,
+    y: baselineY - (plotHeight * index) / tickIntervals,
     value: tickStep * index,
   }));
 
@@ -320,7 +336,7 @@ function StackedAreaChart({
     if (!svgRef.current) return;
     const rect = svgRef.current.getBoundingClientRect();
     const x = e.clientX - rect.left;
-    const svgX = (x / rect.width) * SVG_WIDTH;
+    const svgX = (x / rect.width) * chartWidth;
 
     // Find nearest point
     let nearestIndex = 0;
@@ -350,15 +366,17 @@ function StackedAreaChart({
 
   return (
     <div className="relative">
-      <svg
-        ref={svgRef}
-        viewBox={`0 0 ${SVG_WIDTH} ${SVG_HEIGHT}`}
-        className="h-[240px] w-full overflow-visible"
-        role="img"
-        aria-label="stacked area chart"
-        onMouseMove={handleMouseMove}
-        onMouseLeave={handleMouseLeave}
-      >
+      <div ref={boxRef} className="w-full">
+        <svg
+          ref={svgRef}
+          viewBox={`0 0 ${chartWidth} ${CHART_HEIGHT}`}
+          className="w-full overflow-visible"
+          style={{ height: CHART_HEIGHT }}
+          role="img"
+          aria-label="stacked area chart"
+          onMouseMove={handleMouseMove}
+          onMouseLeave={handleMouseLeave}
+        >
         <defs>
           {seriesMeta.map((meta) => (
             <linearGradient
@@ -379,16 +397,16 @@ function StackedAreaChart({
         {gridLines.map((line, i) => (
           <g key={`grid-${i}`}>
             <line
-              x1={SVG_PADDING_X}
+              x1={CHART_PADDING_X}
               y1={line.y}
-              x2={SVG_WIDTH - SVG_PADDING_X}
+              x2={chartWidth - CHART_PADDING_X}
               y2={line.y}
               className="stroke-border/50"
               strokeWidth="1"
               strokeDasharray={i === 0 ? undefined : "3 3"}
             />
             <text
-              x={SVG_PADDING_X - 8}
+              x={CHART_PADDING_X - 8}
               y={line.y + 4}
               textAnchor="end"
               className="fill-muted-foreground text-[11px]"
@@ -415,9 +433,9 @@ function StackedAreaChart({
         {hoveredData && (
           <line
             x1={hoveredData.x}
-            y1={SVG_PADDING_Y}
+            y1={CHART_PADDING_TOP}
             x2={hoveredData.x}
-            y2={SVG_HEIGHT - SVG_PADDING_Y}
+            y2={baselineY}
             stroke="currentColor"
             strokeWidth="1"
             strokeDasharray="4 4"
@@ -435,17 +453,23 @@ function StackedAreaChart({
             className="fill-foreground stroke-background stroke-[2] transition-all duration-150"
           />
         ))}
-      </svg>
 
-      {/* X-axis labels */}
-      <div className="mt-1 flex flex-wrap items-center justify-between gap-x-2 gap-y-1 px-10 text-[11px] text-muted-foreground">
-        {points
-          .filter((_, index) => index % labelStride === 0 || index === points.length - 1)
-          .map((point, index) => (
-            <span key={getPointKey(point, index)} className="min-w-0 truncate">
+        {/* X-axis labels：画在图内，和数据点共用同一套坐标，刻度与日期一一对应 */}
+        {points.map((point, index) => {
+          if (index % labelStride !== 0 && index !== points.length - 1) return null;
+          return (
+            <text
+              key={getPointKey(point, index)}
+              x={coordinates[index].x}
+              y={CHART_HEIGHT - 8}
+              textAnchor="middle"
+              className="fill-muted-foreground text-[11px]"
+            >
               {point.shortLabel ?? point.label}
-            </span>
-          ))}
+            </text>
+          );
+        })}
+      </svg>
       </div>
 
       {/* Tooltip */}
