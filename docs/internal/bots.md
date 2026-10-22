@@ -150,7 +150,11 @@ run 入口的 `activateBotPrompt` 在一个短事务里读行、
 前缀缓存——最近一次主线模型请求距今未超
 `bots.runtime.prompt_cache_retain_minutes`（默认 10 分钟，`mainlinePrefixCacheExpired`
 判）就推迟到下一个压缩边界，全新机器人（无主线请求）或窗口外的请求照常入口
-激活；定时任务会话独立、不吃主线缓存，入口始终用最新版本——但它走
+激活。**推迟本身封顶一个保留窗口**：首次推迟给行落
+`activation_deferred_at`，距起点满一个窗口仍未等到压缩边界时强制入口
+激活并清掉标记（`ActivateToolsetTx` 同事务清空）——持续活跃不压缩的
+会话不会把升级与「下一个压缩点生效」的承诺无限推迟。定时任务会话独立、
+不吃主线缓存，入口始终用最新版本——但它走
 `activateBotPromptForSession` 只做会话内解析、**不写回 bots 行激活水位**，
 否则主线窗口内的推迟判定会被 schedule 运行洗掉。工具集版本随同入冻
 （`botRunFreeze.ToolsetVersion`），主线 run 的工具集只在压缩边界
@@ -161,7 +165,9 @@ run 入口的 `activateBotPrompt` 在一个短事务里读行、
 每个版本只告知一次。推迟通知不是终态：激活真正落库时（入口或压缩边界）
 `settleToolsetNoticesTx` 追加一条 `toolset_activated` 事件收口——账本
 append-only 不改写原通知，投影给模型的生命周期保持「先推迟、后生效」的
-真实顺序。普通请求期间钉死；请求行记录实际使用的版本号，
+真实顺序。pending 判定按通知自身 `to_version` 与已发出的
+`toolset_activated:N` 版本匹配：已收口的旧通知仍是 next_compaction 原文，
+不能替后来未推迟的新版本再补一条生效事件。普通请求期间钉死；请求行记录实际使用的版本号，
 `tools_hash` 取完整 tools 数组实际 wire 字节。模型误用
 旧 action 名（如 `fs_memory/search`、v3 里的 `fs_schedule/status`）会命中
 改名映射表返回结构化迁移指引——不静默代执行新动作；冻结工具集里仍存在的

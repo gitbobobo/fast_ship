@@ -16,6 +16,7 @@ import (
 
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 // ---------- R7：错误截断按 rune，不切 UTF-8 ----------
@@ -332,6 +333,10 @@ func TestBotActivationDeferredInsideCacheWindow(t *testing.T) {
 	if row.ToolsetVersion != 9 {
 		t.Fatalf("窗口内不应在入口激活，toolset 应仍 9，实得 %d", row.ToolsetVersion)
 	}
+	if row.ActivationDeferredAt == nil {
+		t.Fatal("首次推迟应落 activation_deferred_at 起点")
+	}
+	deferredAt := *row.ActivationDeferredAt
 	var msgs []model.BotMessage
 	env.db.Where("bot_id = ? AND dedup_key = ?", bot.ID, fmt.Sprintf("toolset_notice:%d", botToolsetVersion)).Find(&msgs)
 	if len(msgs) != 1 {
@@ -342,7 +347,8 @@ func TestBotActivationDeferredInsideCacheWindow(t *testing.T) {
 		t.Fatalf("推迟激活的通知应如实标注: %s", msgs[0].ContentJSON)
 	}
 
-	// 再来一条：窗口仍热（上一步的请求刚写过），水位不变、通知不重复。
+	// 再来一条：窗口仍热（上一步的请求刚写过），水位不变、通知不重复，
+	// 推迟起点不顺延（封顶从第一次推迟量起）。
 	if _, err := env.bots.SendMessage(userID, bot.ID, &SendMessageRequest{Text: "again", ClientMessageID: "r11-2"}); err != nil {
 		t.Fatalf("send 2: %v", err)
 	}
@@ -351,9 +357,46 @@ func TestBotActivationDeferredInsideCacheWindow(t *testing.T) {
 	if row.ToolsetVersion != 9 {
 		t.Fatalf("持续活跃的会话仍应推迟激活，实得 %d", row.ToolsetVersion)
 	}
+	if row.ActivationDeferredAt == nil || !row.ActivationDeferredAt.Equal(deferredAt) {
+		t.Fatalf("后续推迟不应顺延起点: %v", row.ActivationDeferredAt)
+	}
 	env.db.Where("bot_id = ? AND dedup_key = ?", bot.ID, fmt.Sprintf("toolset_notice:%d", botToolsetVersion)).Find(&msgs)
 	if len(msgs) != 1 {
 		t.Fatalf("通知不得重复发送，实得 %d 条", len(msgs))
+	}
+}
+
+// 推迟封顶（INT-139 云端复审）：持续活跃、始终不压缩的会话不能把升级
+// 无限推迟——activation_deferred_at 距今超过一个保留窗口时，即使前缀
+// 缓存仍热也强制入口激活，并清掉推迟标记。
+func TestBotActivationDeferralCapped(t *testing.T) {
+	env := setupBotTestEnv(t, fakeModelTurn{Text: "ok", Usage: &fakeModelUsage{Prompt: 5, Completion: 2, Total: 7}})
+	userID := createBotTestUser(t, env.db, "r11cap")
+	bot := env.createBot(t, userID)
+	old := time.Now().UTC().Add(-env.cfg.Bots.Runtime.PromptCacheRetain() - time.Minute)
+	if err := env.db.Model(&model.Bot{}).Where("id = ?", bot.ID).
+		Updates(map[string]interface{}{
+			"toolset_version":        9,
+			"last_told_version":      9,
+			"activation_deferred_at": old,
+		}).Error; err != nil {
+		t.Fatalf("降级水位: %v", err)
+	}
+	// 窗口内仍有热请求——推迟不封顶的场景下不会激活。
+	int139SeedMainRequest(t, env, bot.ID, model.BotSessionKindMain, time.Now().UTC())
+
+	if _, err := env.bots.SendMessage(userID, bot.ID, &SendMessageRequest{Text: "hi", ClientMessageID: "r11-c1"}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	int139WaitNewRunSettled(t, env, bot.ID, 2)
+
+	var row model.Bot
+	env.db.First(&row, "id = ?", bot.ID)
+	if row.ToolsetVersion != botToolsetVersion {
+		t.Fatalf("推迟超一个窗口应强制入口激活到 v%d，实得 %d", botToolsetVersion, row.ToolsetVersion)
+	}
+	if row.ActivationDeferredAt != nil {
+		t.Fatalf("激活落库应清空推迟标记，实得 %v", row.ActivationDeferredAt)
 	}
 }
 
@@ -714,5 +757,74 @@ func TestBotSettleEmitsSingleActivatedEventAcrossVersions(t *testing.T) {
 	}
 	if !strings.Contains(acts[0].ContentJSON, fmt.Sprintf(`"to_version":%d`, botToolsetVersion)) {
 		t.Fatalf("收口事件应记本次实际激活版本 v%d: %s", botToolsetVersion, acts[0].ContentJSON)
+	}
+}
+
+// 已收口通知不得替新版本再发事件（INT-139 云端复审）：v10 的推迟通知已被
+// toolset_activated:10 收口，但 append-only 原文仍是 next_compaction。
+// 后来 v11 未推迟直接激活时，收口扫描不得把 v10 的旧通知当 pending 误补
+// 一条 toolset_activated:11——v11 从未被推迟过。
+func TestBotSettleSkipsSettledNoticeForNewerVersion(t *testing.T) {
+	env := setupBotTestEnv(t, fakeModelTurn{Text: "ok"})
+	userID := createBotTestUser(t, env.db, "r11skip")
+	bot := env.createBot(t, userID)
+	for i, kv := range [][2]string{
+		{"toolset_notice:10", `{"event":"toolset_updated","render":"user","detail":{"from_version":9,"to_version":10,"note":"x（下一个压缩点生效）","activation":"next_compaction"}}`},
+		{"toolset_activated:10", `{"event":"toolset_activated","render":"user","detail":{"to_version":10,"note":"已生效","activation":"active"}}`},
+	} {
+		dedup := kv[0]
+		if err := env.db.Create(&model.BotMessage{
+			ID: uuid.NewString(), BotID: bot.ID, Seq: int64(100 + i),
+			Kind: model.BotMessageKindLifecycle, ContentJSON: kv[1],
+			DedupKey: &dedup, CreatedAt: time.Now().UTC(),
+		}).Error; err != nil {
+			t.Fatalf("seed %s: %v", kv[0], err)
+		}
+	}
+
+	if err := env.db.Transaction(func(tx *gorm.DB) error {
+		return env.bots.settleToolsetNoticesTx(tx, bot.ID, 11)
+	}); err != nil {
+		t.Fatalf("settle: %v", err)
+	}
+	var cnt int64
+	env.db.Model(&model.BotMessage{}).Where("bot_id = ? AND dedup_key = ?", bot.ID, "toolset_activated:11").Count(&cnt)
+	if cnt != 0 {
+		t.Fatalf("v11 未推迟却补发了收口事件，实得 %d 条", cnt)
+	}
+}
+
+// 反向用例：确实存在未收口的新版本推迟通知时仍要补发——已收口的旧版本
+// 不抵消新版本自己的 pending 状态。
+func TestBotSettleFiresForPendingNewerNotice(t *testing.T) {
+	env := setupBotTestEnv(t, fakeModelTurn{Text: "ok"})
+	userID := createBotTestUser(t, env.db, "r11pend")
+	bot := env.createBot(t, userID)
+	for i, kv := range [][2]string{
+		{"toolset_notice:10", `{"event":"toolset_updated","render":"user","detail":{"from_version":9,"to_version":10,"note":"x（下一个压缩点生效）","activation":"next_compaction"}}`},
+		{"toolset_activated:10", `{"event":"toolset_activated","render":"user","detail":{"to_version":10,"note":"已生效","activation":"active"}}`},
+		{"toolset_notice:11", `{"event":"toolset_updated","render":"user","detail":{"from_version":10,"to_version":11,"note":"y（下一个压缩点生效）","activation":"next_compaction"}}`},
+	} {
+		dedup := kv[0]
+		if err := env.db.Create(&model.BotMessage{
+			ID: uuid.NewString(), BotID: bot.ID, Seq: int64(100 + i),
+			Kind: model.BotMessageKindLifecycle, ContentJSON: kv[1],
+			DedupKey: &dedup, CreatedAt: time.Now().UTC(),
+		}).Error; err != nil {
+			t.Fatalf("seed %s: %v", kv[0], err)
+		}
+	}
+
+	if err := env.db.Transaction(func(tx *gorm.DB) error {
+		return env.bots.settleToolsetNoticesTx(tx, bot.ID, 11)
+	}); err != nil {
+		t.Fatalf("settle: %v", err)
+	}
+	var act model.BotMessage
+	if err := env.db.Where("bot_id = ? AND dedup_key = ?", bot.ID, "toolset_activated:11").First(&act).Error; err != nil {
+		t.Fatalf("存在未收口的新版本推迟通知时应补发 activated: %v", err)
+	}
+	if !strings.Contains(act.ContentJSON, `"to_version":11`) {
+		t.Fatalf("收口事件应记实际激活版本 v11: %s", act.ContentJSON)
 	}
 }

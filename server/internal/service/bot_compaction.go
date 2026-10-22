@@ -8,6 +8,7 @@ import (
 	"math"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -17,6 +18,7 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/repository"
 	"github.com/google/uuid"
 	"github.com/openai/openai-go/v2"
+	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
 
@@ -1718,6 +1720,33 @@ func (s *BotService) mainlinePrefixCacheExpired(botID string) bool {
 	return !at.After(s.now().Add(-s.cfg.Bots.Runtime.PromptCacheRetain()))
 }
 
+// activationDeferralExpired 报告主线入口的激活推迟是否已超上限
+// （INT-139 复审）：首次推迟由 markActivationDeferred 落
+// activation_deferred_at；距首次推迟达到一个保留窗口仍未等到压缩
+// 边界时返回 true，调用方应强制入口激活。
+func (s *BotService) activationDeferralExpired(bot *model.Bot) bool {
+	if bot.ActivationDeferredAt == nil {
+		return false
+	}
+	return !bot.ActivationDeferredAt.After(s.now().Add(-s.cfg.Bots.Runtime.PromptCacheRetain()))
+}
+
+// markActivationDeferred 在首次推迟时给行落时间戳；已有时不动（起点以
+// 第一次推迟为准，不随后续推迟顺延）。写失败只记日志——宁可漏记一次
+// 推迟起点也不阻塞 run。
+func (s *BotService) markActivationDeferred(bot *model.Bot) {
+	if bot.ActivationDeferredAt != nil {
+		return
+	}
+	now := s.now()
+	if err := s.db.Model(&model.Bot{}).Where("id = ? AND activation_deferred_at IS NULL", bot.ID).
+		Update("activation_deferred_at", now).Error; err != nil {
+		s.logger.Warn("记录激活推迟起点失败", zap.String("bot_id", bot.ID), zap.Error(err))
+		return
+	}
+	bot.ActivationDeferredAt = &now
+}
+
 func (s *BotService) activateBotPrompt(bot *model.Bot) error {
 	return s.resolveBotPrompt(bot, true)
 }
@@ -1773,7 +1802,7 @@ func (s *BotService) resolveBotPrompt(bot *model.Bot, persist bool) error {
 					fresh.PromptRevision = rev
 					fresh.ToolsetVersion = botToolsetVersion
 					fresh.PlatformPromptVersion = botPlatformPromptVersion
-					if err := s.settleToolsetNoticesTx(tx, bot.ID); err != nil {
+					if err := s.settleToolsetNoticesTx(tx, bot.ID, botToolsetVersion); err != nil {
 						return err
 					}
 				} else if again, gerr := repo.Get(bot.ID); gerr == nil {
@@ -1837,7 +1866,7 @@ func (s *BotService) activateToolsetWithPromptTx(tx *gorm.DB, botID string, curT
 	if err != nil || !ok {
 		return err
 	}
-	return s.settleToolsetNoticesTx(tx, botID)
+	return s.settleToolsetNoticesTx(tx, botID, botToolsetVersion)
 }
 
 func (s *BotService) maybeTellToolset(bot *model.Bot, run *model.BotRun) {
@@ -1867,12 +1896,16 @@ func (s *BotService) tellToolsetTx(tx *gorm.DB, bot *model.Bot) error {
 	// INT-133：升级通知只作为内部信息，模型不需要向用户转述或逐项验证。
 	note = "（内部信息：不需要向用户转述，也不需要逐项验证）" + note
 	// INT-139 R11：通知文案如实反映本 run 的实际激活状态——前缀已在新版本
-	// 写「已生效」；缓存窗口内被推迟的会话写「下一个压缩点生效」。每个版本
+	// 写「已生效」；缓存窗口内被推迟的会话写「下一个压缩点生效」并补上
+	// 封顶说明（activation_deferred_at 满一个保留窗口后入口强制激活），
+	// 否则持续活跃不压缩的会话里这句承诺可能不以压缩点方式兑现。每个版本
 	// 只告知一次（dedup + last_told_version）；推迟文案在激活真正落库时由
 	// settleToolsetNoticesTx 补发一条 toolset_activated 事件收口。
 	activation, stateText := "active", "已生效"
 	if bot.ToolsetVersion < botToolsetVersion {
-		activation, stateText = "next_compaction", "下一个压缩点生效"
+		activation = "next_compaction"
+		stateText = fmt.Sprintf("下一个压缩点生效（若会话持续活跃未压缩，最迟约 %d 分钟后随新消息生效）",
+			int64(math.Ceil(s.cfg.Bots.Runtime.PromptCacheRetain().Minutes())))
 	}
 	note += "（" + stateText + "）"
 	content := botLifecycleContent{
@@ -1908,13 +1941,34 @@ func (s *BotService) tellToolsetTx(tx *gorm.DB, bot *model.Bot) error {
 // 改写——改为追加一条 toolset_activated 事件，让投影给模型的生命周期按真实
 // 顺序收尾（先推迟、后生效），否则激活后的请求会把推迟文案投影到已是
 // 新版本的提示词旁。跨版本可能挂着多条推迟通知：只发一条收口事件，
-// to_version 记本次实际激活的版本，不逐条复述历史目标版本。入口激活与
-// 压缩边界激活共用本函数；没有 pending 推迟通知或已发过收口时为空操作。
-func (s *BotService) settleToolsetNoticesTx(tx *gorm.DB, botID string) error {
+// toVersion 记本次实际激活的版本，不逐条复述历史目标版本。pending 判定
+// 按通知自身的 to_version 与已发出的 toolset_activated 版本匹配——旧版本
+// 已收口的通知行仍是 next_compaction 原文，不能据此把未推迟的新版本误补
+// 一条生效事件。入口激活与压缩边界激活共用本函数；没有 pending 推迟通知
+// 或已发过收口时为空操作。
+func (s *BotService) settleToolsetNoticesTx(tx *gorm.DB, botID string, toVersion int64) error {
 	var msgs []model.BotMessage
 	if err := tx.Where("bot_id = ? AND kind = ? AND dedup_key GLOB ?",
 		botID, model.BotMessageKindLifecycle, "toolset_notice:*").Find(&msgs).Error; err != nil {
 		return err
+	}
+	var acts []model.BotMessage
+	if err := tx.Where("bot_id = ? AND kind = ? AND dedup_key GLOB ?",
+		botID, model.BotMessageKindLifecycle, "toolset_activated:*").Find(&acts).Error; err != nil {
+		return err
+	}
+	// 已收口的通知行仍是 next_compaction 原文（append-only 不改写）：按
+	// 通知自己的目标版本匹配已发出的 activated 事件——只有存在比所有
+	// 已收口版本更新的推迟通知时才补发，否则激活未推迟版本时会误补一条
+	// 不该有的「已生效」事件（INT-139 云端复审）。
+	settledMax := int64(0)
+	for i := range acts {
+		if acts[i].DedupKey == nil {
+			continue
+		}
+		if v, err := strconv.ParseInt(strings.TrimPrefix(*acts[i].DedupKey, "toolset_activated:"), 10, 64); err == nil && v > settledMax {
+			settledMax = v
+		}
 	}
 	pending := false
 	for i := range msgs {
@@ -1923,9 +1977,11 @@ func (s *BotService) settleToolsetNoticesTx(tx *gorm.DB, botID string) error {
 			continue
 		}
 		var detail struct {
+			ToVersion  int64  `json:"to_version"`
 			Activation string `json:"activation"`
 		}
-		if err := json.Unmarshal(content.Detail, &detail); err == nil && detail.Activation == "next_compaction" {
+		if err := json.Unmarshal(content.Detail, &detail); err == nil &&
+			detail.Activation == "next_compaction" && detail.ToVersion > settledMax {
 			pending = true
 			break
 		}
@@ -1934,7 +1990,7 @@ func (s *BotService) settleToolsetNoticesTx(tx *gorm.DB, botID string) error {
 		return nil
 	}
 	msgRepo := repository.NewBotMessageRepository(tx)
-	dedup := fmt.Sprintf("toolset_activated:%d", botToolsetVersion)
+	dedup := fmt.Sprintf("toolset_activated:%d", toVersion)
 	if existing, err := msgRepo.FindByDedupKey(botID, dedup); err == nil && existing != nil {
 		return nil
 	} else if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
@@ -1948,7 +2004,7 @@ func (s *BotService) settleToolsetNoticesTx(tx *gorm.DB, botID string) error {
 		Event: "toolset_activated", Render: "user",
 		Detail: json.RawMessage(fmt.Sprintf(
 			`{"to_version":%d,"note":%s,"activation":%s}`,
-			botToolsetVersion,
+			toVersion,
 			jsonString("（内部信息：不需要向用户转述，也不需要逐项验证）上述工具集升级已生效：当前提示词与工具集已切换到最新版本"),
 			jsonString("active"))),
 	}

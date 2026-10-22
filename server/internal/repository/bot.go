@@ -55,6 +55,7 @@ func (r *BotRepository) ActivateToolsetTx(tx *gorm.DB, botID string, toolsetVers
 			"platform_prompt_version": platformPromptVersion,
 			"system_prompt_text":      systemPromptText,
 			"prompt_revision":         promptRevision,
+			"activation_deferred_at":  nil,
 			"updated_at":              now,
 		})
 	if res.Error != nil {

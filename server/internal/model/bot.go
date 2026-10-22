@@ -23,6 +23,11 @@ type Bot struct {
 	// 重启或长期不活跃后补发应告知的变更（INT-102）。
 	ToolsetVersion  int64 `gorm:"not null" json:"toolset_version"`
 	LastToldVersion int64 `gorm:"not null;default:1" json:"last_told_version"`
+	// ActivationDeferredAt 记录主线入口首次因前缀缓存窗口推迟激活的时刻
+	// （INT-139 复审）：NULL 表示当前没有挂起的推迟；激活落库时由
+	// ActivateToolsetTx 一并清空。持续活跃不压缩的会话靠它给推迟封顶，
+	// 避免升级被无限推迟、「下一个压缩点生效」的承诺不兑现。
+	ActivationDeferredAt *time.Time `json:"-"`
 
 	// ProviderID 是所属 AI 提供商（INT-133）：必须属于同一 user（服务层保证）。
 	// 列只存引用；BaseURL / 密钥 / last4 从 provider 派生，密钥只在 provider

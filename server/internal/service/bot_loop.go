@@ -139,10 +139,20 @@ func (s *BotService) botLoop(bot *model.Bot, run *model.BotRun, ctx context.Cont
 		}
 	} else {
 		stale := bot.ToolsetVersion < botToolsetVersion || bot.PlatformPromptVersion < botPlatformPromptVersion
-		if !stale || s.mainlinePrefixCacheExpired(bot.ID) {
-			if err := s.activateBotPrompt(bot); err != nil {
-				s.logger.Warn("激活工具集失败", zap.String("bot_id", bot.ID), zap.Error(err))
+		if stale && !s.mainlinePrefixCacheExpired(bot.ID) {
+			// 窗口内热缓存 → 推迟到压缩边界，但推迟本身封顶一个保留窗口
+			// （INT-139 复审）：首次推迟落 activation_deferred_at，超过窗口
+			// 仍无压缩边界到达时强制入口激活——持续活跃不压缩的会话不得
+			// 把升级与「下一个压缩点生效」的承诺无限推迟。
+			if s.activationDeferralExpired(bot) {
+				if err := s.activateBotPrompt(bot); err != nil {
+					s.logger.Warn("激活工具集失败", zap.String("bot_id", bot.ID), zap.Error(err))
+				}
+			} else {
+				s.markActivationDeferred(bot)
 			}
+		} else if err := s.activateBotPrompt(bot); err != nil {
+			s.logger.Warn("激活工具集失败", zap.String("bot_id", bot.ID), zap.Error(err))
 		}
 	}
 	// 先冻结再取密钥：schedule run 的地址与密钥是派发时成对冻结的，解密必须用
