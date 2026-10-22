@@ -63,7 +63,9 @@ function member(id: string, role: UserRole): Member {
 function invite(overrides: Partial<Invite> = {}): Invite {
   return {
     id: "inv-1",
-    expires_at: "2026-10-22T00:00:00Z",
+    // 过期时间相对当前时刻生成，写死日期会随时间推移变成「已过期」，
+    // 「有效」状态和撤销按钮就不再渲染。
+    expires_at: new Date(Date.now() + 7 * 86400_000).toISOString(),
     revoked_at: null,
     used_at: null,
     used_by: null,

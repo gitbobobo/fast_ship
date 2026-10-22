@@ -76,6 +76,7 @@ func TestReviewLedgerPartitionedByProject(t *testing.T) {
 	})
 
 	// 本项目受理同 SHA：B 的 seen 行与 B 的同 SHA 运行都不构成去重/吞并。
+	e.fake.SetPR(repo, 55, &githubapi.PullRequest{HeadSHA: "sha-x"})
 	if err := e.review.HandleGitHubWebhook(ctx, "pull_request", "d-p1",
 		prPayload("synchronize", repo, 55, "sha-x", false, false)); err != nil {
 		t.Fatalf("webhook: %v", err)
@@ -926,6 +927,7 @@ func TestLaunchPersistsWorkspaceRootAfterAgentFirstAuth(t *testing.T) {
 	run := e.seedRun(t, repo, 95, "sha-af", model.ReviewRunDispatched, now)
 	runID = run.ID
 	e.svc.db.Model(run).Update("environment_id", env.ID)
+	e.fake.SetPR(repo, 95, &githubapi.PullRequest{HeadSHA: "sha-af"})
 
 	review.launchRun(context.Background(), run.ID, now)
 	var after model.ReviewRun

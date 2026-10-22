@@ -2,8 +2,10 @@ package service
 
 import (
 	"context"
+	"strings"
 	"time"
 
+	"github.com/godbobo/fast_ship/server/internal/githubapi"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
@@ -17,12 +19,19 @@ import (
 
 const reviewSchedulerInterval = 10 * time.Second
 
-// 每 tick 批量上限：防抖消费 50、其余阶段 20、派发认领 4。
+// 每 tick 批量上限：防抖消费 50、其余阶段 20、派发认领 4。准备失败重试
+// 不设批量上限，见 retryFailedPreparations。
 const (
 	reviewDebounceBatch = 50
 	reviewStageBatch    = 20
 	reviewDispatchBatch = 4
 )
+
+// reviewNetworkStageBudget 调度循环里带串行外部读的阶段（防抖消费逐行读
+// PR 实况、准备失败重试逐行读 T3 投影）的单轮耗时预算：与同步阶段单 PR
+// 2 分钟同量级，保证上游变慢时一个 tick 仍大体有界，超时/取消中断/同步/
+// 回收不会被拖到几十分钟后。超预算的剩余行本来就还在库里，下个 tick 再处理。
+const reviewNetworkStageBudget = 60 * time.Second
 
 // Start 启动审查调度循环（幂等：重复调用不叠加第二个循环）。
 func (s *ReviewService) Start() {
@@ -85,13 +94,16 @@ func (s *ReviewService) redeliveryLoop(cancel <-chan struct{}) {
 	}
 }
 
-// reviewTick 每轮顺序执行：到期防抖消费并开轮 → 排队提升 → 派发 → 超时 →
-// 取消运行的线程中断 → GitHub 同步 → 归档 → 工作区清理 → 旧线程墓碑清理。
-// 各阶段独立容错，互不打断。归档在工作区清理之前：删除必须以归档完成为前提。
+// reviewTick 每轮顺序执行：到期防抖消费并开轮 → 排队提升 → 派发 →
+// 工作区准备失败代发重试 → 超时 → 取消运行的线程中断 → GitHub 同步 → 归档 →
+// 工作区清理 → 旧线程墓碑清理。各阶段独立容错，互不打断。重试排在超时之前：
+// 重试成功会重置 deadline，别让同一 tick 的旧 deadline 抢先落 timed_out。
+// 归档在工作区清理之前：删除必须以归档完成为前提。
 func (s *ReviewService) reviewTick(now time.Time) {
 	s.processDueDebounces(now)
 	s.promoteQueuedRuns(now)
 	s.dispatchRuns(now)
+	s.retryFailedPreparations(now)
 	s.markTimeouts(now)
 	s.interruptCancelledRuns(now)
 	s.syncPendingPRs(now)
@@ -144,7 +156,12 @@ func (s *ReviewService) processDueDebounces(now time.Time) {
 		s.logger.Error("查询到期防抖行失败", zap.Error(err))
 		return
 	}
+	start := time.Now()
 	for i := range rows {
+		if time.Since(start) > reviewNetworkStageBudget {
+			s.logger.Info("防抖消费到达阶段网络预算，剩余行下轮处理", zap.Int("remaining", len(rows)-i))
+			break
+		}
 		s.consumeDebounce(&rows[i], now)
 	}
 	_ = s.db.Transaction(func(tx *gorm.DB) error {
@@ -158,9 +175,44 @@ func (s *ReviewService) processDueDebounces(now time.Time) {
 	}
 }
 
-// consumeDebounce 一行防抖的消费事务：条件删除防重入，复核后同事务开轮。
+// consumeDebounce 一行防抖的消费：先在事务外读 PR 实况——防抖行可能是已
+// 合并/已关闭 PR 的旧账（重投的 closed 投递被有意排除、payload 又是旧快照），
+// PR 已关闭或远端 head 与防抖行不一致则删行不开轮。读 PR 失败不开轮也不删
+// 行（暂时性故障不能当成「已关闭」），但把 fire_at 推后一个防抖窗口：否则
+// 一条永久读不到的行（仓库转走/PR 不可见）会一直排在本 tick 批量队首，把
+// 后续正常防抖行挡在 50 条名额之外。事务内条件删除防重入，复核项目仍启
+// 用/动作仍勾选/仓库一致后同事务开轮。
 func (s *ReviewService) consumeDebounce(row *model.ReviewDebounce, now time.Time) {
-	err := s.db.Transaction(func(tx *gorm.DB) error {
+	// 单次 PR 实况读 10s：这是「读一次 PR 状态」的检查而非数据传输，超时只
+	// 意味着本轮不开轮（fire_at 推后），10s 足够，别占满整个阶段预算。
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	client, err := s.ghClient(ctx)
+	var pr *githubapi.PullRequest
+	if err == nil {
+		pr, err = client.GetPullRequest(ctx, row.InstallationID, row.RepoFullName, row.PRNumber)
+	}
+	cancel()
+	if err != nil {
+		s.logger.Warn("防抖消费前读取 PR 失败，推后重试",
+			zap.String("repo", row.RepoFullName), zap.Int("pr", row.PRNumber), zap.Error(err))
+		// 推后用当前时刻而不是 tick 开始的 now：一个阶段预算内本批次可能已
+		// 跑了很久，慢批次结束时按 now 推后的时刻可能已经过期，行会立刻再次
+		// 被选中继续失败。
+		pushTo := time.Now().UTC().Add(reviewDebounceSeconds * time.Second)
+		if retryErr := s.db.Where(
+			"project_id = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ? AND fire_at <= ?",
+			row.ProjectID, row.RepoFullName, row.PRNumber, row.HeadSHA, now,
+		).Model(&model.ReviewDebounce{}).
+			Update("fire_at", pushTo).Error; retryErr != nil {
+			s.logger.Error("推后防抖行失败",
+				zap.String("repo", row.RepoFullName), zap.Int("pr", row.PRNumber), zap.Error(retryErr))
+		}
+		return
+	}
+	// PR 已关闭/合并或远端 head 已偏（新 webhook 尚未落账）→ 删行不开轮；
+	// 新 head 的防抖行由它自己的 webhook 重建。
+	reviewable := prReviewable(pr) && strings.EqualFold(pr.HeadSHA, row.HeadSHA)
+	err = s.db.Transaction(func(tx *gorm.DB) error {
 		res := tx.Where(
 			"project_id = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ? AND fire_at <= ?",
 			row.ProjectID, row.RepoFullName, row.PRNumber, row.HeadSHA, now,
@@ -170,6 +222,9 @@ func (s *ReviewService) consumeDebounce(row *model.ReviewDebounce, now time.Time
 		}
 		if res.RowsAffected == 0 {
 			return nil // 已被更新（新 head 覆盖）或已消费
+		}
+		if !reviewable {
+			return nil
 		}
 		var project model.Project
 		if err := tx.Where("id = ?", row.ProjectID).First(&project).Error; err != nil {

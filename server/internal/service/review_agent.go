@@ -430,7 +430,7 @@ func (s *ReviewService) AgentSubmitResult(ctx context.Context, runID string, bod
 		return errs.ErrRunTokenInvalid
 	}
 
-	// 提交前核对 PR 实时 head：已前进 → 本轮作废（取消 + 消费令牌 + sync）。
+	// 提交前核对 PR 实时状态：已关闭或 head 已前进 → 本轮作废（取消 + 消费令牌 + sync）。
 	client, err := s.ghClient(ctx)
 	if err != nil {
 		return err
@@ -440,7 +440,9 @@ func (s *ReviewService) AgentSubmitResult(ctx context.Context, runID string, bod
 		return errs.New(errs.ErrGitHubAPI.Code, "读取 PR head 失败: "+err.Error())
 	}
 	now := time.Now().UTC()
-	if pr.HeadSHA != "" && !strings.EqualFold(pr.HeadSHA, run.HeadSHA) {
+	// 已关闭/合并或 head 已前进 → 本轮作废（取消 + 消费令牌 + sync）。
+	// 关闭后 head 不再前进，仅比对 SHA 会漏掉「PR 已关」。
+	if !prReviewable(pr) || (pr.HeadSHA != "" && !strings.EqualFold(pr.HeadSHA, run.HeadSHA)) {
 		_ = s.db.Transaction(func(tx *gorm.DB) error {
 			tx.Model(&model.ReviewRun{}).
 				Where("id = ? AND status IN ?", run.ID,
@@ -671,6 +673,9 @@ func (s *ReviewService) RerunReview(ctx context.Context, userID, projectID strin
 	pr, err := client.GetPullRequest(ctx, installationID, repo, prNumber)
 	if err != nil {
 		return nil, errs.New(errs.ErrGitHubAPI.Code, "读取 PR head 失败: "+err.Error())
+	}
+	if !prReviewable(pr) {
+		return nil, errs.New(errs.ErrInvalidParams.Code, "PR 已关闭，不能重跑审查")
 	}
 	if pr.HeadSHA == "" {
 		return nil, errs.New(errs.ErrGitHubAPI.Code, "PR head 为空")

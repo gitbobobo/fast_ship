@@ -60,7 +60,7 @@ Issue 与 Release、无代码；代码在另一仓库）。`project.CodeRepo()` 
 | 表 | 关键列 | 说明 |
 | --- | --- | --- |
 | `project_review_settings` | PK `project_id`；`user_id`；`enabled`；`trigger_opened/synchronize/ready_for_review/reopened`；`code_combinations_json`/`visual_combinations_json` | 项目级开关与组合。组合元素：`environment_id`、`instance_id`（harness/provider 实例）、`model`、`options`（canonical `[{id,value}]` 数组，思考强度等）、`t3_project_id`（保存时由 `project_t3_bindings` 快照，不信任客户端回传）。代码组合启用时 1–5 个必填；视觉组合 0–3 个，0 个即从不启动视觉审查。 |
-| `review_runs` | `kind(code\|visual)`、`repo_full_name/pr_number/head_sha/round_number`、`installation_id`、`trigger_action`、`pr_title/pr_url/base_ref/head_ref`、组合列 `environment_id/t3_project_id/instance_id/model/model_options_json`、预分配 `thread_id/launch_command_id/initial_message_id`、`status(queued\|dispatched\|running\|completed\|failed\|timed_out\|cancelled)`、`dispatch_started_at/dispatched_at/started_at/finished_at/deadline_at`、`error_code/error_message`、`summary/result_json`、`review_id/posted_at`、`worktree_path/worktree_state/worktree_error`、`stop_attempted_at`、`archived_at` | 一次审查运行 = 一轮 × 一个组合。同一 (repo, pr, head_sha) 的代码与视觉运行共享 `round_number`（视觉是同一轮内的第二段）。`dispatched_at` 在启动 RPC 结果确认或 Agent 首次持令牌鉴权时写入，为空 = 线程是否建成未确认。`archived_at` 是终态后线程归档写回的时刻；归档有限重试超限后也写入（不再重试），失败原因见 `worktree_error` 与 `review_cleanup_failed` 通知。 |
+| `review_runs` | `kind(code\|visual)`、`repo_full_name/pr_number/head_sha/round_number`、`installation_id`、`trigger_action`、`pr_title/pr_url/base_ref/head_ref`、组合列 `environment_id/t3_project_id/instance_id/model/model_options_json`、预分配 `thread_id/launch_command_id/initial_message_id`、`status(queued\|dispatched\|running\|completed\|failed\|timed_out\|cancelled)`、`dispatch_started_at/dispatched_at/started_at/finished_at/deadline_at`、`error_code/error_message`、`prep_retry_count`、`summary/result_json`、`review_id/posted_at`、`worktree_path/worktree_state/worktree_error`、`stop_attempted_at`、`archived_at` | 一次审查运行 = 一轮 × 一个组合。同一 (repo, pr, head_sha) 的代码与视觉运行共享 `round_number`（视觉是同一轮内的第二段）。`dispatched_at` 在启动 RPC 结果确认或 Agent 首次持令牌鉴权时写入，为空 = 线程是否建成未确认。`prep_retry_count` 是 T3 工作区准备失败后的自动重试次数（INT-147，须持久化：进程重启不能把已用掉的重试名额清零）。`archived_at` 是终态后线程归档写回的时刻；归档有限重试超限后也写入（不再重试），失败原因见 `worktree_error` 与 `review_cleanup_failed` 通知。 |
 | `review_run_tokens` | PK `run_id`；`token_hash`（UNIQUE）；`expires_at`；`consumed_at` | 每次运行一个 `fsr_` 令牌，只存完整令牌的 SHA-256。 |
 | `review_pull_requests` | PK `(project_id, repo_full_name, pr_number)`；`user_id/installation_id`；`round_number/head_sha`；`code_comment_id/visual_comment_id`；`code_status/visual_status`；`visual_screens_fingerprint`；`sync_pending/sync_epoch/sync_error` | 一个 PR 的审查总账：评论落点、最近一次推送的 commit status 结论、视觉截图指纹、事务外同步标记（置 pending 时 epoch+1，清标记按开始时 epoch 条件写）。主键含 `project_id`：同仓库换项目接管后各一本账。 |
 | `review_assets` | `(repo_full_name, pr_number, head_sha, position)`；`label`；`source_url`；`storage_path`；`mime_type`；`size_bytes` | 视觉审查截图：PR 描述里的图片链接经截图下载面（`NewReviewMediaService`）下载后本地落盘。内容是仓库归一的共享产物（同一 head 同一批截图），不按项目分区。 |
@@ -137,32 +137,66 @@ seen SHA、取消旧轮全部失效）。
 
 单进程一个循环（10s tick + 缓冲 1 的 kick），每 tick 顺序：
 
-1. **到期防抖**：查 `fire_at<=now` 的防抖行，逐行短事务条件删除后复核——
-   项目仍启用、`project_review_settings.repo_full_name` 快照仍与防抖行
-   `repo_full_name` 一致（与 webhook 反查、同步准入同口径，不回读项目行
-   live 仓库字段）、触发条件仍勾选——成立才开一轮；顺带清理
-   超龄 delivery 幂等账（保留 7 天）。
-2. **派发认领**：`dispatched` 且未确认建线程、**且从未签发过运行令牌**的
-   运行，在认领后超过 5 分钟仍 `dispatched_at IS NULL` 时允许重新认领——
-   `CreateThread` 以运行行预分配的 threadId/commandId 幂等，不会建出第二个线程。
-   **已签发令牌的运行不再重认领**：令牌是随机值、库中只存 SHA-256，进程
-   重启后无法恢复原值；令牌存在即证明 `launchRun` 至少走到过签发点，重签
-   会覆盖旧哈希让已建成线程的令牌失效。这类运行保留 `dispatched` 等
-   `deadline_at` 超时兜底，不自动重试。
-3. **排队提升**：每用户最多 **5 个在途**（dispatched/running），其余
+1. **到期防抖**：查 `fire_at<=now` 的防抖行，**先在事务外读一次 PR 实况**
+   （`GetPullRequest`，单次 10s 超时）：PR 已关闭/合并或远端 head 与防抖
+   行 head 不一致就删行不开轮（这是拦下「重投的旧 payload」的主关卡，见
+   「投递失败对账」）；读失败不开轮也不删行，把 `fire_at` 按当前时刻推后
+   一个防抖窗口——一条永久读不到的行不能一直占住本 tick 的批量名额。通过
+   后再逐行短事务条件删除并复核——项目仍启用、
+   `project_review_settings.repo_full_name` 快照仍
+   与防抖行 `repo_full_name` 一致（与 webhook 反查、同步准入同口径，不回读
+   项目行 live 仓库字段）、触发条件仍勾选——成立才开一轮；顺带清理超龄
+   delivery 幂等账（保留 7 天）。
+2. **排队提升**：每用户最多 **5 个在途**（dispatched/running），其余
    `queued` 按 `created_at` 依序提升为 `dispatched`，`deadline_at` 重置为
    提升时刻 + 超时（超时从真正开始派发算，不占排队时间）。超时固定
    **代码审查 1h、视觉审查 30min**，常量，不提供配置。
-4. **派发**：`dispatched` 且未派发的运行条件 UPDATE 认领
-   （`dispatch_started_at`），事务外执行 launch。
+3. **派发（含认领）**：`dispatched` 且未确认建线程、**且从未签发过运行
+   令牌**的运行，在认领后超过 5 分钟仍 `dispatched_at IS NULL` 时允许重新
+   认领——`CreateThread` 以运行行预分配的 threadId/commandId 幂等，不会建
+   出第二个线程。**已签发令牌的运行不再重认领**：令牌是随机值、库中只存
+   SHA-256，进程重启后无法恢复原值；令牌存在即证明 `launchRun` 至少走到过
+   签发点，重签会覆盖旧哈希让已建成线程的令牌失效。这类运行保留
+   `dispatched` 等 `deadline_at` 超时兜底，不自动重试。认领后条件 UPDATE
+   占住 `dispatch_started_at`，事务外执行 launch；launch 在**签发运行令牌
+   之前**再读一次 PR，已关闭/合并就落 `cancelled`+`error_code=pr_closed`
+   （消费令牌、置 `sync_pending`），不建线程——覆盖排队期间 PR 被关且
+   closed 投递丢失的情况。读失败不落终态、不签令牌，留给认领超窗重试。
+4. **工作区准备失败重试**（INT-147）：`kind=code`、`dispatched/running`、
+   `dispatched_at` 非空的运行，每运行最多 60 秒查一次 T3 线程投影
+   （进程内节流表）；投影显示「可重试的工作区准备失败」且失败条目已存在
+   满 30 秒时，先把 `prep_retry_count` 条件加 1，再代发
+   `prepared-run.retry`（`commandId=fs-review-prep-retry-<runId>-<n>`）。
+   重试被受理后在状态守卫下把 `deadline_at` 重置为 now+超时，并把未消费
+   令牌的 `expires_at` 一并延到新 deadline+5min（只延 deadline 会让 Agent
+   在旧过期点开始收到 40106）；RPC 期间运行已被终态化时两者都不改写。
+   RPC 失败不回退计数。计数已达 3 次则不再发第 4 次，直接落 `failed`、
+   `error_code=workspace_preparation_failed`、`error_message` 写 T3 原文，
+   并发 `review_dispatch_failed` 通知（消费令牌、置 `sync_pending`）。
+   判定与阈值见「工作区准备失败重试」。
 5. **超时**：`dispatched/running` 过 `deadline_at` → `timed_out`
    （`error_code='timeout'`），消费令牌、置 `sync_pending`、写
    `review_run_timeout` 通知。
-6. **GitHub 同步**：见「GitHub 产出」。只处理项目设置仍 `enabled` 的总账
+6. **取消运行的线程中断**：`cancelled` 且已派发且 `stop_attempted_at` 为
+   空 → 先条件占标记，再 `StopThread`（`run.interrupt`，每运行只尝试
+   一次）。
+7. **GitHub 同步**：见「GitHub 产出」。只处理项目设置仍 `enabled` 的总账
    行——被接管/停用项目的 `sync_pending` 残留不再发 GitHub 产出。
-7. **工作区回收**：见「工作区回收」。
-8. 取消运行的线程中断：`cancelled` 且已派发且 `stop_attempted_at` 为空 →
-   先条件占标记，再 `StopThread`（`run.interrupt`，每运行只尝试一次）。
+8. **归档**：见「工作区回收」。终态且线程可能已建成的运行逐个归档；确定
+   没有建成线程的（`reviewRunNeverLaunched`：`dispatch_failed` 请求帧未
+   发出、`pr_closed` 在建线程前就被拦下）跳过，不误报回收失败。
+9. **工作区回收**：见「工作区回收」。
+10. **旧线程墓碑清理**：通用自动化下线留下的在途线程墓碑逐条停线程、归
+    档，成功即删行；失败有限重试后放弃（只留日志），避免墓碑无限累积。
+
+顺序约束：重试排在超时之前（重试成功会重置 `deadline_at`，别让同一 tick
+的旧 deadline 抢先落 `timed_out`）；归档在工作区清理之前（删除必须以归
+档完成为前提）。
+
+带串行外部读的阶段（到期防抖逐行读 PR、准备失败重试逐行读 T3 投影）每个
+有 **60 秒网络预算**（`reviewNetworkStageBudget`，与同步阶段单 PR 2 分钟
+同量级）：超预算的剩余行留在库里，下个 tick 再处理——上游变慢时单个
+tick 仍大体有界，不会把超时/取消中断/同步/回收拖到几十分钟后。
 
 所有网络调用在事务外；DB 落库用条件 UPDATE（影响 0 行 = 状态已被并发改写）。
 
@@ -185,6 +219,10 @@ GitHub App 投递失败（公网隧道超时/502）不会自动重试，一次�
   同源判定），`status_code` 非 2xx 即失败。`closed` **有意不重投**：丢失的
   closed 投递不会导致「推送没被审查」，而重投回去会无条件取消该 PR 当前
   有效的审查运行（webhook 的 closed 分支在任何时间戳判定之前执行）。
+  重投重放的是**原始 payload**（PR 仍写着 open、`updated_at`/head 都是旧
+  值），所以「该不该继续审」不能信事件体，只能看 `GetPullRequest` 的实时
+  `State`——三个开关关卡（防抖到期开轮、建线程前、写 GitHub 产出前）
+  都以它为准（见「调度循环」「派发」「GitHub 产出」）。
 - 每个 guid 汇总成一行状态（`groupHookDeliveries` 纯函数）：任一行 2xx =
   已送达；列表里 `redelivery=true` 的行数只是**列表可见的近期重投次数**
   （兜底），**总次数以持久化的重投次数账为准**（`github_webhook_redeliveries`
@@ -251,6 +289,9 @@ GitHub App 投递失败（公网隧道超时/502）不会自动重试，一次�
   在运行行上预分配（开轮时刻写入），重试重放同一请求不建第二个线程；运行
   令牌只在运行从未签发过时才新签（令牌存在 = `launchRun` 到达过签发点）。
   `dispatch_started_at` 是认领时刻、`dispatched_at` 是建线程确认时刻。
+- **建线程前查 PR 实况**：`launchRun` 在签发令牌之前读 PR，不是 open
+  就落 `cancelled`/`error_code=pr_closed`（消费令牌、置 `sync_pending`），
+  不建线程；读 PR 失败则不落终态也不签令牌，等认领超窗重试。
 - 提示词系统写死（`review_prompts.go` 常量）：代码审查要求自查证（git diff
   + 读文件）、以找 bug 为主、P0/P1/P2/Note 分级、历史处置规则、判断
   `ui_changed` 与 `ui_changed_since_last_visual`；视觉审查按层级/间距/排版/
@@ -260,6 +301,46 @@ GitHub App 投递失败（公网隧道超时/502）不会自动重试，一次�
   按「问题 / 影响 / 建议」组织，`line` 无法定位到 HEAD 行时省略（顶层评论
   会注明未行内标注）。
 
+### 工作区准备失败重试（`review_prep_retry.go`）
+
+T3 建线程阶段可能撞上 Git 锁竞争（同仓库多个组合同时建 worktree 时
+`fetchRemote` 报 `Another Git operation or a stale lock may be blocking the
+fetch`）：T3 把 run 置 failed、写一条
+`type=error`/`failure.code=workspace_preparation_failed` 的条目，并提供一个
+Retry 按钮（`orchestration.dispatchCommand` 的 `prepared-run.retry`）。Fast
+Ship 不代点就干等 1h deadline 变 `timed_out`，整轮还得手动重审。系统因此
+自己代发，判定与阈值：
+
+- **可重试的投影条件**（对齐 T3 `dispatchPreparedRunRetry` 的受理条件，看
+  结构化字段、不看报错文案）：线程投影里的目标 run（按
+  `userMessageId == 运行行 initial_message_id` 匹配，同一消息出现多条 run
+  时取 ordinal 最大的一条——只有最新那条代表当前状态）`status=failed` 且
+  带 `workspacePreparation`；`turnItems`/`visibleTurnItems` 里有该 run 的
+  `type=error`、`status=failed`、`failure.code=workspace_preparation_failed`
+  条目；`thread.archivedAt`/`deletedAt` 为空；同线程没有其他
+  preparing/starting/running/waiting 的 run。失败原始文案与发生时刻从该
+  条目取（`updatedAt`，缺失回退 `completedAt`）。
+- **节奏**：每运行最多 60s 查一次投影（进程内节流表，重启丢表只是多查
+  一次），失败条目存在满 30s 才重试（避开同一次锁竞争）。检查对象是
+  `kind=code`、`dispatched/running`、`dispatched_at` 非空的运行，**不设
+  批量上限**——节流命中不发生网络调用；带投影读的阶段有 60s 网络预算。
+  扫描用**进程内轮转游标**：预算耗尽就停在哪条、下轮从它的下一条继续
+  （环形），不回到队首——慢投影读会把预算吃光，固定从队首扫会让前几条
+  反复占满预算、尾部直到超时都轮不到。
+- **计数与上限**：先条件 UPDATE 把 `prep_retry_count` 加 1 再发 RPC；RPC
+  失败不回退计数（下个窗口按新计数换 commandId 再试）。达 3 次不再发第
+  4 次，落 `failed`+`error_code=workspace_preparation_failed`+
+  `error_message=T3 原文`，发 `review_dispatch_failed` 通知。注意 Fast
+  Ship 的判定是 T3 受理条件的**子集**（T3 还要求 workspace-preparation 的
+  command_execution 条目等内部状态）：Fast Ship 判定可重试但 T3 不受理时
+  RPC 会被拒，此时计数照常推进（不回退），达上限即转人工。
+- **重试受理后**在一个事务里把 `deadline_at` 重置为 now+超时、并把未消费
+  令牌的 `expires_at` 延到新 deadline+5min（T3 复用同一 run、把它恢复成
+  preparing 并重放原用户消息，运行仍在原线程里跑；只延 deadline 不延令牌
+  会让 Agent 在旧过期点开始收到 40106）。状态守卫（计数=本次加 1 后的值
+  且仍在 dispatched/running）保证 RPC 期间运行已被取消/完成/超时终态化时
+  两者都不改写。
+
 ## 运行令牌与 Agent 端点（`/api/review-agent/*`）
 
 派发时签发 `fsr_` + 32 字节 base64url，存 SHA-256，
@@ -268,8 +349,8 @@ GitHub App 投递失败（公网隧道超时/502）不会自动重试，一次�
 **40304**，无令牌/无效/过期/已消费一律 **40106**。运行必须 `kind` 匹配
 端点且 `status ∈ {dispatched, running}`；首次成功鉴权把 `dispatched→running`
 落库（`started_at`），**并补 `dispatched_at`**——令牌只经启动提示词交给
-线程，Agent 能出示即证明线程已建成（即使启动 RPC 结果未确认），归档阶段
-以 `dispatched_at` 非空为前提。运行进终态后所有端点 40106。
+线程，Agent 能出示即证明线程已建成（即使启动 RPC 结果未确认），归档/回收
+据此区分「可能已建成」与「确定没建」。运行进终态后所有端点 40106。
 
 | 端点 | 说明 |
 | --- | --- |
@@ -293,8 +374,9 @@ GitHub App 投递失败（公网隧道超时/502）不会自动重试，一次�
 
 校验：请求体上限 2MB（超限 40004）、必填字段、枚举、`summary` 非空、
 `line>=1`；非法 → 400（40004 口径）并提示修正重交，不改运行状态。提交前用 App 令牌 `GetPullRequest` 核对 PR
-当前 HEAD：与运行 `head_sha` 不一致 → 本轮作废（`cancelled/superseded`、
-消费令牌、置 `sync_pending`），返回 **40920**。成功后写 `result_json/summary`、
+当前状态与 HEAD：PR 已关闭/合并，或 HEAD 与运行 `head_sha` 不一致 → 本轮
+作废（`cancelled/superseded`、消费令牌、置 `sync_pending`），返回 **40920**。
+成功后写 `result_json/summary`、
 `completed`、`finished_at`，消费令牌、`posted_at` 置空（待同步推 GitHub）、
 置 `sync_pending` 并 kick。
 
@@ -310,7 +392,13 @@ App 安装令牌。失败只记 `sync_error` 下轮重试，不改运行终态�
 同步时的 `sync_epoch` 条件清 pending（同步期间的新 pending 不会被误清）。
 中段写回（`code_status`/`visual_status`/`visual_screens_fingerprint`）同样带
 `sync_epoch` 条件：同步期间总账被新 webhook/rerun 推进时不命中，直接放弃
-本轮落库——陈旧快照的结论不得写回。汇总运行、视觉沿用判定、评论写回等
+本轮落库——陈旧快照的结论不得写回。
+
+**已关闭/合并的 PR 不写任何产出**：`doSyncPR` 读到 PR 后先判 `State`，
+不是 open 就在一个事务里清 pending（`sync_epoch+1`，带 epoch 守卫）、用
+`supersedePRRunsTx` 取消在途运行，然后返回——不发 commit status、不建/
+不改顶层评论、不写行内 review、不建视觉运行（合并后 head 不再变化，
+靠 SHA 比较拦不住，必须先判关闭）。汇总运行、视觉沿用判定、评论写回等
 所有账本读写都按 `project_id + repo + pr`。
 
 ### commit status（不用 Checks API）
@@ -498,12 +586,19 @@ SHA-256 前 16 位。
 
 运行进终态（完成、失败、超时、取消）后分两步：
 
-- **归档**（`archiveRuns` 阶段）：所有 `dispatched_at` 非空的终态运行
-  （代码与视觉都归档）逐个 `thread.archive`，成功写 `archived_at`；失败
-  按进程内计数有限重试（3 个 tick），超限置 `archived_at` 防无限重试
-  并发 `review_cleanup_failed` 通知，代码运行同时置
-  `worktree_state=failed`。
-- **删除**（`cleanupWorktrees` 阶段）：只处理已归档完成的代码运行。工作区
+- **归档**（`archiveRuns` 阶段）：线程「可能已建成」的终态运行
+  （`dispatch_started_at` 非空，代码与视觉都归档；含 `dispatched_at` 为空
+  的结果未确认运行——线程可能实际已建成，不停掉会永久游离）逐个
+  `thread.archive`，成功写 `archived_at`；失败按进程内计数有限重试
+  （3 个 tick），超限置 `archived_at` 防无限重试并发
+  `review_cleanup_failed` 通知，代码运行同时置 `worktree_state=failed`。
+  确定没有建成线程的（`reviewRunNeverLaunched`：`dispatch_failed` 请求帧
+  未发出、`pr_closed` 在建线程前就被拦下）跳过——这类运行无线程可归，
+  误归档只会制造回收失败假告警。
+- **删除**（`cleanupWorktrees` 阶段）：先给确定没建线程的运行直接收尾
+  （`reviewRunNeverLaunched` → `worktree_state=removed`，无线程/无工作区
+  可清）；其余代码运行要等归档完成（`archived_at` 非空）才进入工作区
+  删除。工作区
   的**唯一真值来自线程投影**（`GET /api/orchestration/threads/:id` 的
   `projection.thread.worktreePath` / `.branch`，已归档线程同样可读）：
   launch 确认时 T3 往往还没建好 worktree，启动前后做差集推断必然歧义，
@@ -581,7 +676,7 @@ SHA-256 前 16 位。
 | GET | `/api/projects/{id}/review-settings` | 设置 + `repo_full_name`（实际审查的代码仓库，原样大小写）+ `prerequisites[]`（缺项 `missing=true` + `detail`）+ `taken_by`。prerequisite 的 `github_app_installation` 每次实时调一次 GitHub。 |
 | PUT | `/api/projects/{id}/review-settings` | 全量保存。组合结构/归属/绑定/数量/重复问题 40001（只读会话的环境同样拒绝）；启用时前置条件缺项 41202（逐条写进 message）；同仓库占用 40922（带占用者）。`enabled=false` 跳过前置校验、允许零组合。 |
 | GET | `/api/projects/{id}/review-records` | 审查记录：`items[]` 每个 PR 一行，内嵌 `rounds[]`（轮次、head、触发方式、时间）与每轮 `code_runs[]`/`visual_runs[]`（含 `findings[]`/`unmeasurable[]`）。`?limit=` 默认 20、上限 100。首页改版后网页不再有入口，接口保留。 |
-| POST | `/api/projects/{id}/reviews/rerun` | 重新审查：body `{pr_number}`。项目必须 enabled（否则 40923）。rerun 没有 webhook installation 快照：先 `ResolveInstallation` 解析真实安装 id（解析不支持/失败直接报错，不拿 0 继续），再用安装令牌 `GetPullRequest` 实时取当前 head，走与 webhook 相同的「取消旧 SHA + 开轮」事务路径（`trigger_action=manual`，恒开新轮），安装 id 落进运行与总账。返回 `{accepted, head_sha, round_number}`。 |
+| POST | `/api/projects/{id}/reviews/rerun` | 重新审查：body `{pr_number}`。项目必须 enabled（否则 40923）。rerun 没有 webhook installation 快照：先 `ResolveInstallation` 解析真实安装 id（解析不支持/失败直接报错，不拿 0 继续），再用安装令牌 `GetPullRequest` 实时取当前 head，走与 webhook 相同的「取消旧 SHA + 开轮」事务路径（`trigger_action=manual`，恒开新轮），安装 id 落进运行与总账。PR 已关闭/合并时直接报错（40001「PR 已关闭」），不开轮。返回 `{accepted, head_sha, round_number}`。 |
 
 ## 开启前置与同仓库唯一
 
@@ -682,5 +777,7 @@ options canonical JSON` 判重（同一搭配不同思考强度算不同组合�
   新仓库上重新开启（前置条件都按新仓库重算）。
 - **重投的旧事件走上游既有触发判定**：投递失败对账把旧投递原样重投，触发
   判定仍是 webhook 入口的既有逻辑（seen SHA / `pull_request.updated_at`
-  水位 / epoch），系统不会重新核验 PR 的实时开关状态——「投递失败后 PR 已
-  被关闭」的极端窗口里仍可能给已关闭 PR 开一轮，由既有超时兜底。
+  水位 / epoch），重放的 payload 里 PR 仍写着 open。但「投递失败后 PR 已
+  被关闭」不再靠超时兜底：三道关卡都以 `GetPullRequest` 的实时 State 为准
+  ——防抖到期开轮前（见「调度循环」）、派发建线程前（见「派发」）、GitHub
+  产出写入前（见「GitHub 产出」）——已关闭 PR 不会开轮、建线程或写产出。

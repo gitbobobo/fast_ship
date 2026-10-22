@@ -111,6 +111,7 @@ func TestReviewWebhookResolvesByCodeRepo(t *testing.T) {
 func TestReviewDebounceConsumeWithCodeRepo(t *testing.T) {
 	e := newCodeRepoEnv(t)
 	now := time.Now().UTC()
+	e.fake.SetPR(e.codeRepo, 21, &githubapi.PullRequest{HeadSHA: "sha-c"})
 	e.svc.db.Create(&model.ReviewDebounce{
 		ProjectID: e.project.ID, RepoFullName: e.codeRepo, PRNumber: 21,
 		HeadSHA: "sha-c", Action: "synchronize", InstallationID: 42,
@@ -470,6 +471,7 @@ func TestReviewDebounceConsumeUsesSnapshotNotLiveCodeRepo(t *testing.T) {
 	e := newCodeRepoEnv(t)
 	divergeLiveCodeRepo(t, e.svc.db, e.project.ID)
 	now := time.Now().UTC()
+	e.fake.SetPR(e.codeRepo, 22, &githubapi.PullRequest{HeadSHA: "sha-snap"})
 	if err := e.svc.db.Create(&model.ReviewDebounce{
 		ProjectID: e.project.ID, RepoFullName: e.codeRepo, PRNumber: 22,
 		HeadSHA: "sha-snap", Action: "synchronize", InstallationID: 42,

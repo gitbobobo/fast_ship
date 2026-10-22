@@ -36,6 +36,10 @@ type reviewT3 interface {
 	ListWorktrees(ctx context.Context, userID, envID, cwd string) ([]T3Worktree, error)
 	RemoveWorktree(ctx context.Context, userID, envID, cwd, path string, force bool) error
 	ArchiveThread(ctx context.Context, userID, envID, threadID string) error
+	// FailedPreparation 判读线程是否处于可重试的工作区准备失败态；
+	// RetryPreparation 代发 prepared-run.retry（INT-147）。
+	FailedPreparation(ctx context.Context, userID, envID, threadID, messageID string) (*T3FailedPreparation, error)
+	RetryPreparation(ctx context.Context, userID, envID, threadID, t3RunID, commandID string) error
 }
 
 // reviewMedia 截图下载面：任意公网 https 图片、只收图片、拨号校验 IP；磁盘
@@ -81,6 +85,19 @@ type ReviewService struct {
 	worktreeMu    sync.Mutex
 	worktreeTries map[string]int
 
+	// prepRetryChecked 准备失败检测的查询节流表（INT-147）：每运行最多每
+	// reviewPrepRetryQueryEvery 查一次 T3 投影。进程内即可（重启丢失顶多多
+	// 查一轮）；注册新项时顺手清过期项，不留无界增长。
+	// prepRetryCursor 记住上一次扫描停在哪条运行上：阶段预算耗尽后下一轮
+	// 从它的下一条继续（环形），避免队首几条反复吃满预算、尾部饿到超时。
+	prepRetryMu      sync.Mutex
+	prepRetryChecked map[string]time.Time
+	prepRetryCursor  string
+	// prepRetryReadTimeout / prepRetryRPCTimeout 覆盖默认超时（零值用常量）：
+	// 测试注入小超时，验证「投影读与重试 RPC 各用独立预算」。
+	prepRetryReadTimeout time.Duration
+	prepRetryRPCTimeout  time.Duration
+
 	// prLocks 每 PR 一把进程内锁：同一 PR 的 GitHub 同步串行，避免并发重复写。
 	prLocksMu sync.Mutex
 	prLocks   map[string]*sync.Mutex
@@ -111,9 +128,10 @@ func NewReviewService(
 		sink:         sink, gh: gh, appSource: appSource, publicURL: publicURL,
 		t3: t3, media: media, mediaBearer: mediaBearer,
 		cfg: cfg, logger: logger,
-		worktreeTries: map[string]int{},
-		prLocks:       map[string]*sync.Mutex{},
-		projectLocks:  map[string]*sync.Mutex{},
+		worktreeTries:    map[string]int{},
+		prepRetryChecked: map[string]time.Time{},
+		prLocks:          map[string]*sync.Mutex{},
+		projectLocks:     map[string]*sync.Mutex{},
 	}
 }
 

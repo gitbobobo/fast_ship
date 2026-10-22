@@ -279,6 +279,7 @@ func TestReviewDebounceConsumeOpensRound(t *testing.T) {
 	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
 	now := time.Now().UTC()
 
+	e.fake.SetPR(repo, 9, &githubapi.PullRequest{HeadSHA: "sha-9"})
 	e.svc.db.Create(&model.ReviewDebounce{
 		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 9,
 		HeadSHA: "sha-9", Action: "synchronize", InstallationID: 42,

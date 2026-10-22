@@ -8,6 +8,7 @@ import (
 	"slices"
 	"sort"
 
+	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 )
 
@@ -220,4 +221,164 @@ func (s *T3ThreadsService) ArchiveThread(ctx context.Context, userID, envID, thr
 		"threadId":  threadID,
 	})
 	return err
+}
+
+// T3FailedPreparation 是线程投影判读出的「工作区准备失败」事实：T3 侧 run
+// 行 ID（重试命令的 runId 入参）、失败发生时刻（失败条目 updatedAt，缺失回
+// 退 completedAt）与失败原文（failure.message）。
+type T3FailedPreparation struct {
+	RunID    string
+	FailedAt string
+	Message  string
+}
+
+// FailedPreparation 读线程投影，判读该线程是否处于可代发重试的工作区准备
+// 失败态。可重试返回失败事实；不满足条件返回 (nil, nil)——调用方保持现状等
+// 下个周期。线程不存在原样透传 errT3ThreadNotFound；其余错误走 upstreamError。
+// messageID 是 Fast Ship 运行行预分配的 initial_message_id：投影 run 行以
+// userMessageId 承载它，靠它对应「我们的运行 → T3 的 run」。
+func (s *T3ThreadsService) FailedPreparation(ctx context.Context, userID, envID, threadID, messageID string) (*T3FailedPreparation, error) {
+	env, err := s.loadEnvForWrite(ctx, userID, envID)
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := s.t3WriteBudget(ctx)
+	defer cancel()
+
+	token, err := s.bearerToken(env)
+	if err != nil {
+		return nil, errs.New(errs.ErrT3Upstream.Code, "环境凭证不可用，请重新配对")
+	}
+	raw, err := s.http.fetchThreadDetail(ctx, env.Address, token, threadID)
+	if err != nil {
+		if errors.Is(err, errT3ThreadNotFound) {
+			return nil, err
+		}
+		return nil, s.upstreamError(err)
+	}
+	parsed, err := decodeT3Projection(raw)
+	if err != nil {
+		return nil, s.upstreamError(fmt.Errorf("线程投影解析失败: %w", err))
+	}
+	return failedPreparationFromProjection(parsed, messageID), nil
+}
+
+// RetryPreparation 代发 T3 的 prepared-run.retry（orchestration.dispatchCommand，
+// 与用户手点 Retry 同一 RPC）：T3 复用失败前已建成的 worktree 并重放原用户
+// 消息。T3 只要求 commandId/threadId/runId 三个字段，不臆造其余。
+func (s *T3ThreadsService) RetryPreparation(ctx context.Context, userID, envID, threadID, t3RunID, commandID string) error {
+	env, err := s.loadEnvForWrite(ctx, userID, envID)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := s.t3WriteBudget(ctx)
+	defer cancel()
+
+	session, err := s.dialAfterProbe(ctx, env)
+	if err != nil {
+		return err
+	}
+	defer session.Close()
+
+	_, err = s.dispatchT3Command(ctx, session, threadID, map[string]any{
+		"type":      "prepared-run.retry",
+		"commandId": commandID,
+		"threadId":  threadID,
+		"runId":     t3RunID,
+	})
+	return err
+}
+
+// failedPreparationFromProjection 从线程投影判读「工作区准备失败可重试」
+// （纯函数，用真实形状的 projection fixture 钉住契约）。对齐 T3 侧
+// dispatchPreparedRunRetry 的受理条件：目标 run（按 userMessageId 匹配，
+// 同一消息出现多条 run 时取 ordinal 最大的一条——只有最新那条代表当前状态）
+// status=failed 且带 workspacePreparation 字段；turnItems/visibleTurnItems
+// 里有该 run 的 error 条目（status=failed、failure.code=workspace_preparation_failed）；
+// 线程未归档未软删；同线程没有其他占用中的 run。任一不满足即 (nil, nil)。
+func failedPreparationFromProjection(p *t3ThreadProjection, messageID string) *T3FailedPreparation {
+	if p.Thread.ArchivedAt != nil && *p.Thread.ArchivedAt != "" {
+		return nil
+	}
+	if p.Thread.DeletedAt != nil && *p.Thread.DeletedAt != "" {
+		return nil
+	}
+
+	var run *t3Run
+	for i := range p.Runs {
+		if p.Runs[i].UserMessageID != messageID {
+			continue
+		}
+		// T3 的 prepared-run.retry 复用同一 run（恢复成 preparing），不另开
+		// 行；这里取 ordinal 最大只是对「同一消息多条 run」的防御：旧 failed
+		// 快照不代表当前状态，取到的不是 failed 就整体不可重试。
+		if run == nil || p.Runs[i].Ordinal >= run.Ordinal {
+			run = &p.Runs[i]
+		}
+	}
+	if run == nil || run.Status != "failed" || run.WorkspacePreparation == nil {
+		return nil
+	}
+	for i := range p.Runs {
+		other := &p.Runs[i]
+		if other.ID == run.ID {
+			continue
+		}
+		switch other.Status {
+		case "preparing", "starting", "running", "waiting":
+			return nil
+		}
+	}
+	return scanPrepFailureItem(p, run.ID)
+}
+
+// t3PrepFailureItem 是 error 型 turn item 的最小解码：重试判定只看这些字段，
+// 未知字段忽略。
+type t3PrepFailureItem struct {
+	ID          string  `json:"id"`
+	Type        string  `json:"type"`
+	RunID       string  `json:"runId"`
+	Status      string  `json:"status"`
+	UpdatedAt   *string `json:"updatedAt"`
+	CompletedAt *string `json:"completedAt"`
+	Failure     struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	} `json:"failure"`
+}
+
+// scanPrepFailureItem 在 turnItems 与 visibleTurnItems 两处扫目标 run 的工作
+// 区准备失败条目（前者是本线程全量，后者是继承/回滚过滤后的可见窗口，同一
+// 条目可能两处都出现）：按条目 id 去重，取先扫到的一条。
+func scanPrepFailureItem(p *t3ThreadProjection, runID string) *T3FailedPreparation {
+	seen := map[string]bool{}
+	var found *t3PrepFailureItem
+	consider := func(raw json.RawMessage) {
+		if raw == nil || found != nil {
+			return
+		}
+		var item t3PrepFailureItem
+		if err := json.Unmarshal(raw, &item); err != nil || item.ID == "" || seen[item.ID] {
+			return
+		}
+		seen[item.ID] = true
+		if item.Type == "error" && item.RunID == runID && item.Status == "failed" &&
+			item.Failure.Code == "workspace_preparation_failed" {
+			found = &item
+		}
+	}
+	for _, raw := range p.TurnItems {
+		consider(raw)
+	}
+	for _, row := range p.VisibleTurnItems {
+		consider(row.Item)
+	}
+	if found == nil {
+		return nil
+	}
+	failedAt := api.Deref(found.UpdatedAt)
+	if failedAt == "" {
+		failedAt = api.Deref(found.CompletedAt)
+	}
+	return &T3FailedPreparation{RunID: found.RunID, FailedAt: failedAt, Message: found.Failure.Message}
 }

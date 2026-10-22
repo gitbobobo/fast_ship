@@ -109,7 +109,9 @@ func (f *Fake) TotalCalls() int {
 	return len(f.Calls)
 }
 
-// SetPR 入站 PR 数据（GetPullRequest 读这份）。
+// SetPR 入站 PR 数据（GetPullRequest 读这份）。State 未指定时按 open 处理：
+// 真实 GitHub 的 PR 一定带 state，登记的 PR 默认就是「还开着」——需要关闭/
+// 合并语义的用例显式写 State="closed"。
 func (f *Fake) SetPR(repo string, number int, pr *githubapi.PullRequest) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -119,6 +121,9 @@ func (f *Fake) SetPR(repo string, number int, pr *githubapi.PullRequest) {
 	}
 	pr.RepoFullName = repo
 	pr.Number = number
+	if pr.State == "" {
+		pr.State = "open"
+	}
 	f.prs[key][number] = pr
 }
 
