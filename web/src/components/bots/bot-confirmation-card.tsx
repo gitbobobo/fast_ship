@@ -1,7 +1,13 @@
 import { ShieldAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { BotCall, BotCallDecision } from "@/lib/api/bots";
-import { bidiSafeText, toolActionLabel, toolParamChips } from "@/lib/bots/tool-labels";
+import {
+  bidiSafeText,
+  toolActionLabel,
+  toolParamChips,
+  type ToolParamChip,
+} from "@/lib/bots/tool-labels";
+import { cn } from "@/lib/utils";
 import { botActionErrorText, ParamChips } from "./bot-tool-card";
 
 // fs_schedule 里需要确认的动作（与 server 的 botScheduleConfirmation 对齐）：
@@ -11,13 +17,14 @@ const SCHEDULE_CONFIRM_ACTIONS = new Set(["create", "update", "run", "enable", "
 // 只有 run 可以「始终允许」（按任务绑定）；create/update/enable/delete 服务端
 // 也会拒绝，见 bot_authorization.go。
 const SCHEDULE_ALWAYS_ALLOW_ACTIONS = new Set(["run"]);
-// 授权提示里的动作名要与服务端口径一致（创建/修改/启用/删除），否则 enable/
-// delete 的卡片会写成「修改任务不支持始终允许」。
+// 授权提示与批准按钮里的动作名要与服务端口径一致（创建/修改/启用/删除/
+// 运行），否则 enable/delete 的卡片会写成「修改任务不支持始终允许」。
 const SCHEDULE_ACTION_LABELS: Record<string, string> = {
   create: "创建",
   update: "修改",
   enable: "启用",
   delete: "删除",
+  run: "运行",
 };
 
 // 每种动作批准后的后果不同：run 只执行一次、enable/创建/修改会授权以后的每次
@@ -92,7 +99,7 @@ function ScheduleConfirmSummary({ call }: { call: BotCall }) {
 
   const rows: [string, string][] = [
     ["任务名", name],
-    ["cron", cron],
+    ["执行周期（cron）", cron],
     ["时区", timezone],
     ["下次运行", nextRun],
     ["模型", model],
@@ -104,7 +111,7 @@ function ScheduleConfirmSummary({ call }: { call: BotCall }) {
       data-testid="bot-schedule-summary"
       className="space-y-2 rounded-lg border border-amber-500/30 bg-background/60 px-3 py-2"
     >
-      <dl className="grid grid-cols-[4.5rem_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs">
+      <dl className="grid grid-cols-[6.5rem_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs">
         {rows.map(([label, value]) => (
           <div key={label} className="contents">
             <dt className="text-muted-foreground">{label}</dt>
@@ -117,7 +124,9 @@ function ScheduleConfirmSummary({ call }: { call: BotCall }) {
       {instruction !== undefined && (
         <div className="space-y-1">
           <p className="text-xs text-muted-foreground">指令</p>
-          <pre className="max-h-72 overflow-auto rounded-lg bg-background/80 p-2 font-mono text-xs whitespace-pre-wrap break-all [unicode-bidi:isolate]">
+          {/* 指令是自然语言正文，等宽字体会让中英混排松散难读，用正文字体；
+              cron/时区/下次运行是结构化取值，上面的表格保持等宽。 */}
+          <pre className="max-h-72 overflow-auto rounded-lg bg-background/80 p-2 font-sans text-xs whitespace-pre-wrap break-all [unicode-bidi:isolate]">
             {bidiSafeText(instruction)}
           </pre>
         </div>
@@ -128,6 +137,78 @@ function ScheduleConfirmSummary({ call }: { call: BotCall }) {
         {!SCHEDULE_ALWAYS_ALLOW_ACTIONS.has(call.action) &&
           `${SCHEDULE_ACTION_LABELS[call.action] ?? "修改"}任务不支持「始终允许」，每次都要确认。`}
       </p>
+    </div>
+  );
+}
+
+// 原始参数块：参数 chips + 完整 JSON。schedule 卡把它折叠收起（上面的
+// 服务端摘要才是唯一权威视图，同一份配置不重复铺三遍），其余确认卡
+// 默认展开——整组替换（replace_checklist 等）必须看清完整内容才能批准。
+function RawParams({
+  chips,
+  argPretty,
+}: {
+  chips: ToolParamChip[];
+  argPretty: string;
+}) {
+  return (
+    <>
+      <ParamChips chips={chips} />
+      {argPretty && (
+        <pre className="max-h-72 overflow-auto rounded-lg bg-background/80 p-2 font-mono text-xs whitespace-pre-wrap break-all [unicode-bidi:isolate]">
+          {bidiSafeText(argPretty)}
+        </pre>
+      )}
+    </>
+  );
+}
+
+// 决定按钮行：批准定时任务是「以后每次运行都默认放行写操作」的高风险
+// 授权，用默认尺寸加大点击区、间距拉开；其余写操作保持原小尺寸与紧凑
+// 间距。schedule 卡的批准按钮带动作名（批准创建/批准修改…），降低误点。
+function DecisionButtons({
+  callId,
+  approveLabel,
+  busy,
+  canAlwaysAllow,
+  size = "default",
+  onDecide,
+}: {
+  callId: string;
+  approveLabel: string;
+  busy: boolean;
+  canAlwaysAllow: boolean;
+  size?: "default" | "sm";
+  onDecide: (callId: string, decision: BotCallDecision) => void;
+}) {
+  return (
+    <div className={cn("flex flex-wrap", size === "default" ? "gap-3" : "gap-2")}>
+      <Button
+        size={size}
+        disabled={busy}
+        onClick={() => onDecide(callId, "approve")}
+      >
+        {approveLabel}
+      </Button>
+      <Button
+        size={size}
+        variant="outline"
+        disabled={busy}
+        onClick={() => onDecide(callId, "reject")}
+      >
+        拒绝
+      </Button>
+      {canAlwaysAllow && (
+        <Button
+          size={size}
+          variant="outline"
+          disabled={busy}
+          title="建立与本次调用相同范围与字段约束的授权，并批准当前调用"
+          onClick={() => onDecide(callId, "always_allow")}
+        >
+          始终允许
+        </Button>
+      )}
     </div>
   );
 }
@@ -165,6 +246,9 @@ export function BotConfirmationCard({
       return "";
     }
   })();
+  const approveLabel = isScheduleCall
+    ? `批准${SCHEDULE_ACTION_LABELS[call.action] ?? ""}`
+    : "批准";
 
   return (
     <section
@@ -176,45 +260,51 @@ export function BotConfirmationCard({
           <ShieldAlert className="h-3.5 w-3.5" />
           需要你的确认 · {toolActionLabel(call.tool_name, call.action)}
         </h3>
-        <p className="mt-0.5 font-mono text-xs text-muted-foreground/70">
-          {call.tool_name}.{call.action}
-        </p>
-      </div>
-      {isScheduleCall && <ScheduleConfirmSummary call={call} />}
-      <ParamChips chips={chips} />
-      {argPretty && (
-        <pre className="max-h-72 overflow-auto rounded-lg bg-background/80 p-2 font-mono text-xs whitespace-pre-wrap break-all [unicode-bidi:isolate]">
-          {bidiSafeText(argPretty)}
-        </pre>
-      )}
-      <div className="flex flex-wrap gap-2">
-        <Button
-          size="sm"
-          disabled={busy}
-          onClick={() => onDecide(call.id, "approve")}
-        >
-          批准
-        </Button>
-        <Button
-          size="sm"
-          variant="outline"
-          disabled={busy}
-          onClick={() => onDecide(call.id, "reject")}
-        >
-          拒绝
-        </Button>
-        {canAlwaysAllow && (
-          <Button
-            size="sm"
-            variant="outline"
-            disabled={busy}
-            title="建立与本次调用相同范围与字段约束的授权，并批准当前调用"
-            onClick={() => onDecide(call.id, "always_allow")}
-          >
-            始终允许
-          </Button>
+        {/* 内部工具名对用户没有意义：schedule 卡的中文标题与动作名已经说清，
+            原始 tool.action 只在「查看原始参数」里作为参数上下文出现。 */}
+        {!isScheduleCall && (
+          <p className="mt-0.5 font-mono text-xs text-muted-foreground/70">
+            {call.tool_name}.{call.action}
+          </p>
         )}
       </div>
+      {isScheduleCall ? (
+        <>
+          {/* schedule 卡只保留服务端摘要这一份权威视图，按钮紧跟其后；
+              原始参数与完整 JSON 折叠在按钮之后，供逐字段核对。 */}
+          <ScheduleConfirmSummary call={call} />
+          <DecisionButtons
+            callId={call.id}
+            approveLabel={approveLabel}
+            busy={busy}
+            canAlwaysAllow={canAlwaysAllow}
+            onDecide={onDecide}
+          />
+          <details
+            data-testid="bot-schedule-raw-params"
+            className="text-xs"
+          >
+            <summary className="cursor-pointer select-none text-muted-foreground hover:text-foreground">
+              查看原始参数
+            </summary>
+            <div className="space-y-2 pt-2">
+              <RawParams chips={chips} argPretty={argPretty} />
+            </div>
+          </details>
+        </>
+      ) : (
+        <>
+          <RawParams chips={chips} argPretty={argPretty} />
+          <DecisionButtons
+            callId={call.id}
+            approveLabel={approveLabel}
+            busy={busy}
+            canAlwaysAllow={canAlwaysAllow}
+            size="sm"
+            onDecide={onDecide}
+          />
+        </>
+      )}
       {canAlwaysAllow && (
         <p className="text-xs text-muted-foreground">
           「始终允许」按本次调用的 action、范围与写入字段精确授权，可在授权管理中撤销。

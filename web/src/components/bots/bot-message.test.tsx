@@ -292,3 +292,122 @@ describe("BotMessageView 中间回合折叠", () => {
     expect(container.querySelector(".bg-muted.rounded-2xl")).not.toBeNull();
   });
 });
+
+// background_result（INT-136 审查）：服务端把工具结果 JSON 截到 200 字符
+// 当 summary，直接当正文会断在字符串中间、看不出成败。fs_schedule 用
+// execution_context.schedule 拼人话主行，原始内容收进默认折叠区；
+// 找不到调用时保持兜底，但 JSON 形状的 summary 不当正文。
+
+const scheduleCreateCall: BotCall = {
+  id: "c-sched",
+  bot_id: "b1",
+  tool_name: "fs_schedule",
+  action: "create",
+  arguments: { name: "每日站会提醒", cron: "0 9 * * *", timezone: "Asia/Shanghai" },
+  execution_mode: "async",
+  requires_confirmation: true,
+  status: "succeeded",
+  execution_context: {
+    schedule: {
+      task_id: "task-0001",
+      name: "每日站会提醒",
+      cron: "0 9 * * *",
+      timezone: "Asia/Shanghai",
+      instruction: "提醒大家开会。",
+      needs_report: true,
+      next_run_at: "2026-10-21 09:00:00 CST",
+    },
+  },
+  created_at: "2026-10-18T00:00:03Z",
+};
+
+// 服务端 botResultSummary 截断后的样子：JSON 断在字符串中间。
+const truncatedJsonSummary =
+  '{"cron_expression":"0 9 * * *","timezone":"Asia/Shanghai","needs_report":true,"name":"每日';
+
+const backgroundResult: BotMessage = {
+  id: "m-bg",
+  bot_id: "b1",
+  seq: 50,
+  kind: "background_result",
+  content: {
+    call_id: "c-sched",
+    tool_name: "fs_schedule",
+    action: "create",
+    status: "succeeded",
+    summary: truncatedJsonSummary,
+  },
+  created_at: "2026-10-18T00:05:00Z",
+};
+
+describe("BotMessageView background_result", () => {
+  it("fs_schedule 成功：主行是中文人话，不暴露原始字段名；summary 折叠在原始结果里", () => {
+    const { container } = renderMessage(backgroundResult, {
+      calls: [scheduleCreateCall],
+    });
+
+    const line = screen.getByText(/已创建定时任务/);
+    expect(line).toHaveTextContent("已创建定时任务「每日站会提醒」");
+    expect(line).toHaveTextContent("0 9 * * *");
+    expect(line).toHaveTextContent("Asia/Shanghai");
+    expect(line.textContent ?? "").not.toContain("cron_expression");
+    // 成功状态可辨识：绿色对勾。
+    expect(container.querySelector("svg.text-emerald-600")).not.toBeNull();
+
+    const raw = screen.getByTestId("bot-background-raw-result");
+    expect(raw).not.toHaveAttribute("open");
+    expect(within(raw).getByText("查看原始结果")).toBeInTheDocument();
+    expect(raw).toHaveTextContent('{"cron_expression"');
+    expect(raw).toHaveTextContent("每日");
+  });
+
+  it("fs_schedule 失败：主行写「未成功」并用 destructive 着色，错误文案直接外露", () => {
+    renderMessage(
+      {
+        ...backgroundResult,
+        content: {
+          ...backgroundResult.content,
+          status: "failed",
+          error_code: "schedule_run_failed",
+          error_message: "上游模型请求失败",
+        },
+      },
+      { calls: [scheduleCreateCall] },
+    );
+
+    const line = screen.getByText(/定时任务/);
+    expect(line).toHaveTextContent("创建定时任务「每日站会提醒」未成功");
+    expect(line).toHaveClass("text-destructive");
+    expect(screen.queryByText(/已创建定时任务/)).not.toBeInTheDocument();
+    // 错误文案短、可行动（坏 cron/时区等），不藏进折叠区。
+    expect(
+      screen.getByText("schedule_run_failed: 上游模型请求失败"),
+    ).toBeVisible();
+    // 原始 summary（截断的 JSON 片段）仍在折叠区，且默认收起。
+    const raw = screen.getByTestId("bot-background-raw-result");
+    expect(raw).not.toHaveAttribute("open");
+    expect(raw).toHaveTextContent('{"cron_expression"');
+  });
+
+  it("summary 是 JSON 但找不到调用：主行只给简短说明，不把 JSON 当正文", () => {
+    renderMessage(backgroundResult);
+
+    const note = screen.getByText("后台调用已完成（原始结果见下）");
+    expect(note).not.toHaveTextContent("cron_expression");
+    const raw = screen.getByTestId("bot-background-raw-result");
+    expect(raw).not.toHaveAttribute("open");
+    expect(raw).toHaveTextContent('{"cron_expression"');
+  });
+
+  it("找不到调用且 summary 是自然语言：保持原兜底直接当正文，不出折叠区", () => {
+    renderMessage({
+      ...backgroundResult,
+      content: { ...backgroundResult.content, summary: "任务已创建并启用。" },
+    });
+
+    expect(screen.getByText("任务已创建并启用。")).toBeInTheDocument();
+    expect(
+      screen.queryByTestId("bot-background-raw-result"),
+    ).not.toBeInTheDocument();
+  });
+});

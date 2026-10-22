@@ -4,8 +4,9 @@ import { describe, expect, it, vi } from "vitest";
 import type { BotCall } from "@/lib/api/bots";
 import { BotConfirmationCard } from "./bot-confirmation-card";
 
-// 普通工具卡已隐藏参数摘要：确认卡是写操作确认的唯一依据，
-// 参数 chips、完整 JSON 与决定按钮必须始终可见。
+// 普通工具卡已隐藏参数摘要：确认卡是写操作确认的唯一依据。非 schedule
+// 卡的参数 chips、完整 JSON 与决定按钮必须始终可见；schedule 卡以服务端
+// 摘要为唯一权威视图，原始参数折叠在按钮之后，避免同一份配置铺三遍。
 
 function makeCall(overrides: Partial<BotCall> = {}): BotCall {
   return {
@@ -88,6 +89,7 @@ describe("BotConfirmationCard", () => {
     expect(card).toHaveTextContent('"issue_id": "abcdef1234567890"');
     expect(card).toHaveTextContent('"body": "新正文"');
     expect(card).toHaveTextContent('"project_id": "p1"');
+    expect(card.querySelector("details")).toBeNull();
   });
 
   it("保留三个决定入口与授权说明", () => {
@@ -139,7 +141,10 @@ describe("BotConfirmationCard", () => {
       within(summary).getByText(/创建任务不支持「始终允许」，每次都要确认。/),
     ).toBeInTheDocument();
 
-    expect(within(card).getByRole("button", { name: "批准" })).toBeInTheDocument();
+    // 批准按钮带动作名，避免在高风险授权卡上误点。
+    expect(
+      within(card).getByRole("button", { name: "批准创建" }),
+    ).toBeInTheDocument();
     expect(within(card).getByRole("button", { name: "拒绝" })).toBeInTheDocument();
     expect(
       within(card).queryByRole("button", { name: "始终允许" }),
@@ -147,6 +152,20 @@ describe("BotConfirmationCard", () => {
     expect(
       within(card).queryByText(/可在授权管理中撤销/),
     ).not.toBeInTheDocument();
+
+    // 原始参数（chips + 完整 JSON）收进默认折叠的 details，且排在按钮
+    // 行之后：先对唯一的权威摘要做决定，再按需展开原始数据。
+    const raw = within(card).getByTestId("bot-schedule-raw-params");
+    expect(raw).not.toHaveAttribute("open");
+    expect(within(raw).getByText("查看原始参数")).toBeInTheDocument();
+    expect(within(raw).getByText("名称")).toBeInTheDocument();
+    expect(raw).toHaveTextContent('"cron": "0 9 * * *"');
+    expect(raw).toHaveTextContent('"instruction"');
+    const approveButton = within(card).getByRole("button", { name: "批准创建" });
+    expect(
+      approveButton.compareDocumentPosition(raw) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
   });
 
   it("fs_schedule：任务名/指令/原始 JSON 剥掉双向覆盖等格式字符", () => {
@@ -242,6 +261,9 @@ describe("BotConfirmationCard", () => {
     expect(summary).toHaveTextContent("改成只看高优先级问题。");
     expect(
       within(summary).getByText(/修改任务不支持「始终允许」，每次都要确认。/),
+    ).toBeInTheDocument();
+    expect(
+      within(card).getByRole("button", { name: "批准修改" }),
     ).toBeInTheDocument();
     expect(
       within(card).queryByRole("button", { name: "始终允许" }),
@@ -398,8 +420,12 @@ describe("BotConfirmationCard", () => {
       expect(
         within(card).queryByRole("button", { name: "始终允许" }),
       ).not.toBeInTheDocument();
-      // 提示文案里的动作名要跟着动作走（enable/delete 不能写成「修改」）。
+      // 提示文案与批准按钮里的动作名都要跟着动作走（enable/delete 不能
+      // 写成「修改」）。
       const label = action === "enable" ? "启用" : "删除";
+      expect(
+        within(card).getByRole("button", { name: `批准${label}` }),
+      ).toBeInTheDocument();
       expect(
         summary.getByText(new RegExp(`${label}任务不支持「始终允许」`)),
       ).toBeInTheDocument();
@@ -455,6 +481,9 @@ describe("BotConfirmationCard", () => {
       within(summary).queryByText(/不支持「始终允许」/),
     ).not.toBeInTheDocument();
 
+    expect(
+      within(card).getByRole("button", { name: "批准运行" }),
+    ).toBeInTheDocument();
     expect(
       within(card).getByRole("button", { name: "始终允许" }),
     ).toBeInTheDocument();
