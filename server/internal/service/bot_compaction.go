@@ -1902,20 +1902,24 @@ func (s *BotService) tellToolsetTx(tx *gorm.DB, bot *model.Bot) error {
 	// 只告知一次（dedup + last_told_version）；推迟文案在激活真正落库时由
 	// settleToolsetNoticesTx 补发一条 toolset_activated 事件收口。
 	activation, stateText := "active", "已生效"
+	userState := "已生效"
 	if bot.ToolsetVersion < botToolsetVersion {
+		capMin := int64(math.Ceil(s.cfg.Bots.Runtime.PromptCacheRetain().Minutes()))
 		activation = "next_compaction"
-		stateText = fmt.Sprintf("下一个压缩点生效（若会话持续活跃未压缩，最迟约 %d 分钟后随新消息生效）",
-			int64(math.Ceil(s.cfg.Bots.Runtime.PromptCacheRetain().Minutes())))
+		stateText = fmt.Sprintf("下一个压缩点生效（若会话持续活跃未压缩，最迟约 %d 分钟后随新消息生效）", capMin)
+		// 给用户看的版本不出现「压缩点」这类内部术语，括号也不嵌套。
+		userState = fmt.Sprintf("下次上下文整理时生效，持续活跃时最迟约 %d 分钟", capMin)
 	}
 	note += "（" + stateText + "）"
+	userNote := botToolsetChangeNote(from, botToolsetVersion) + "（" + userState + "）"
 	content := botLifecycleContent{
 		Event: "toolset_updated",
 		// 新消息按 user 角色投影（INT-137 R6）：部分 OpenAI 兼容后端的 chat
 		// 模板要求 system 只能出现在开头，而这条事件会一直留在历史里。
 		Render: "user",
 		Detail: json.RawMessage(fmt.Sprintf(
-			`{"from_version":%d,"to_version":%d,"note":%s,"activation":%s}`,
-			from, botToolsetVersion, jsonString(note), jsonString(activation))),
+			`{"from_version":%d,"to_version":%d,"note":%s,"user_note":%s,"activation":%s}`,
+			from, botToolsetVersion, jsonString(note), jsonString(userNote), jsonString(activation))),
 	}
 	raw, err := json.Marshal(content)
 	if err != nil {
@@ -2003,9 +2007,10 @@ func (s *BotService) settleToolsetNoticesTx(tx *gorm.DB, botID string, toVersion
 	activated := botLifecycleContent{
 		Event: "toolset_activated", Render: "user",
 		Detail: json.RawMessage(fmt.Sprintf(
-			`{"to_version":%d,"note":%s,"activation":%s}`,
+			`{"to_version":%d,"note":%s,"user_note":%s,"activation":%s}`,
 			toVersion,
 			jsonString("（内部信息：不需要向用户转述，也不需要逐项验证）上述工具集升级已生效：当前提示词与工具集已切换到最新版本"),
+			jsonString("工具集升级已生效：提示词与工具集已切换到最新版本"),
 			jsonString("active"))),
 	}
 	raw, err := json.Marshal(activated)

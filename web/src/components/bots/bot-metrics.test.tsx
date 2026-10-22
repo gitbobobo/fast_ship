@@ -4,7 +4,7 @@ import type {
   BotMetrics as MetricsData,
   BotRequestMetrics,
 } from "@/lib/api/bots";
-import { BotMetrics } from "./bot-metrics";
+import { BotMetrics, formatCostEstimate } from "./bot-metrics";
 
 const fullRequest: BotRequestMetrics = {
   request_id: "req-1",
@@ -210,15 +210,23 @@ describe("BotMetrics", () => {
     );
   });
 
-  it("cost_estimate 非空时显示 ≈$x 成本（INT-139），为空时整项隐藏", () => {
+  it("cost_estimate 非空时显示「本次 ≈$x」成本（INT-139），为空时整项隐藏", () => {
     render(
       <BotMetrics
         metrics={makeMetrics({ ...fullRequest, cost_estimate: 0.0002112 })}
       />,
     );
     const cost = screen.getByTestId("bot-metric-cost");
-    expect(cost).toHaveTextContent("≈$0.0002");
+    // 「本次」标明口径为最近一次请求；毫厘以下用两位有效数字科学计数法。
+    expect(cost).toHaveTextContent("本次 ≈$2.1e-4");
     expect(cost).toHaveAttribute("title", expect.stringContaining("目录单价"));
+  });
+
+  it("成本分段：大额两位小数、毫厘两位有效数字、更小用科学计数法", () => {
+    expect(formatCostEstimate(1.234)).toBe("$1.23");
+    expect(formatCostEstimate(0.023456)).toBe("$0.0235");
+    expect(formatCostEstimate(0.0000336)).toBe("$3.4e-5");
+    expect(formatCostEstimate(0.00000012)).toBe("$1.2e-7");
   });
 
   it("cost_estimate 为 null 时不渲染成本项（缺失 ≠ 0）", () => {

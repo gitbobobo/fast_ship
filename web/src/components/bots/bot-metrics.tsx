@@ -28,7 +28,10 @@ function formatSpeed(tokensPerSecond: number): string {
 export function formatCostEstimate(usd: number): string {
   if (usd >= 1) return `$${usd.toFixed(2)}`;
   if (usd >= 0.01) return `$${usd.toFixed(4)}`;
-  return `$${usd.toPrecision(2)}`;
+  if (usd >= 0.001) return `$${usd.toPrecision(2)}`;
+  // 毫厘以下的金额一长串前导零读不出数量级（视觉复审）：两位有效数字
+  // 的科学计数法比 0.000034 直观，如 $3.4e-5。
+  return `$${usd.toExponential(1)}`;
 }
 
 // 双环几何：尺寸与输入框那一行文字相称，不抢发送按钮的注意力；圆心（盒中心，
@@ -195,7 +198,7 @@ export function BotMetrics({ metrics }: { metrics?: BotMetricsData | null }) {
       </span>
       {cost != null && (
         <span data-testid="bot-metric-cost" title={costTitle ?? undefined}>
-          <span className="font-mono">≈{cost}</span>
+          <span className="font-mono">本次 ≈{cost}</span>
         </span>
       )}
     </div>

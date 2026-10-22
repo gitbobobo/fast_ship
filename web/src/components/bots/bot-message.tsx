@@ -93,6 +93,7 @@ export function BotMessageView({
     const detail = (message.content.detail ?? {}) as {
       note?: string;
       message?: string;
+      user_note?: string;
     };
     if (message.content.event === "compaction_failed") {
       // 压缩失败（INT-115）：note 是服务端给的中文原因。不能只显示英文
@@ -108,9 +109,15 @@ export function BotMessageView({
         </p>
       );
     }
+    // note 写给模型（可带「（内部信息：…）」前缀与内部术语）；user_note 是
+    // 面向用户的短句（INT-139 视觉复审）。旧消息没有 user_note 时把内部前缀
+    // 剥掉兜底，其余照常渲染 note。
+    const text =
+      detail.user_note ??
+      (detail.note || message.content.event || "").replace(/^（内部信息：[^）]*）/, "");
     return (
       <p className="text-center text-xs text-muted-foreground [unicode-bidi:isolate]">
-        {bidiSafeText(detail.note || message.content.event || "")}
+        {bidiSafeText(text)}
       </p>
     );
   }

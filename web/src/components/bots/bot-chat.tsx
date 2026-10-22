@@ -187,7 +187,7 @@ export function BotChat({ botId }: { botId: string }) {
               >
                 {chat.activeRun.total_tokens} tokens
                 {chat.activeRun.cost_estimate != null &&
-                  ` · ≈${formatCostEstimate(chat.activeRun.cost_estimate)}`}
+                  ` · 本次 ≈${formatCostEstimate(chat.activeRun.cost_estimate)}`}
               </span>
             )}
             <Button

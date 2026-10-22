@@ -156,6 +156,39 @@ describe("BotMessageView compaction_failed", () => {
     });
     expect(screen.getByText("工具集已升级")).toBeInTheDocument();
   });
+
+  it("lifecycle 优先渲染 user_note，旧消息剥掉内部信息前缀", () => {
+    renderMessage({
+      id: "m-un",
+      bot_id: "b1",
+      seq: 42,
+      kind: "lifecycle",
+      content: {
+        event: "toolset_updated",
+        detail: {
+          note: "（内部信息：不需要向用户转述，也不需要逐项验证）工具集已升级（下一个压缩点生效）",
+          user_note: "工具集已升级（下次上下文整理时生效）",
+        },
+      },
+      created_at: "2026-10-18T02:01:00Z",
+    });
+    expect(screen.getByText("工具集已升级（下次上下文整理时生效）")).toBeInTheDocument();
+    expect(screen.queryByText(/内部信息/)).toBeNull();
+
+    renderMessage({
+      id: "m-old",
+      bot_id: "b1",
+      seq: 43,
+      kind: "lifecycle",
+      content: {
+        event: "toolset_updated",
+        detail: { note: "（内部信息：不需要向用户转述）工具集已升级" },
+      },
+      created_at: "2026-10-18T02:02:00Z",
+    });
+    expect(screen.getByText("工具集已升级")).toBeInTheDocument();
+    expect(screen.queryByText(/内部信息/)).toBeNull();
+  });
 });
 
 // INT-122：带 tool_calls 的 assistant 是中间回合，正文只是调用前的
