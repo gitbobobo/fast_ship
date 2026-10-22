@@ -18,17 +18,29 @@ import (
 // 非法名称都按回退链处理，不返回错误——时区只影响展示与默认值，不值得让一次
 // 运行因为一个坏值时区失败。
 func (s *BotService) botEffectiveTimezone(raw string) (string, *time.Location) {
+	name := effectiveTimezoneName(raw, s.cfg.Bots.Memory.Timezone)
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		return "UTC", time.UTC
+	}
+	return name, loc
+}
+
+// effectiveTimezoneName 是回退链的纯函数版（用户设置 → 部署配置 → UTC），
+// 供不持有 BotService 的调用方复用同一条规则——用户投影里的
+// effective_timezone 就用它，避免前端自己拼一套回退逻辑。
+func effectiveTimezoneName(raw, deploymentTZ string) string {
 	if name := strings.TrimSpace(raw); name != "" {
-		if loc, err := time.LoadLocation(name); err == nil {
-			return name, loc
+		if _, err := time.LoadLocation(name); err == nil {
+			return name
 		}
 	}
-	if fallback := strings.TrimSpace(s.cfg.Bots.Memory.Timezone); fallback != "" {
-		if loc, err := time.LoadLocation(fallback); err == nil {
-			return fallback, loc
+	if fallback := strings.TrimSpace(deploymentTZ); fallback != "" {
+		if _, err := time.LoadLocation(fallback); err == nil {
+			return fallback
 		}
 	}
-	return "UTC", time.UTC
+	return "UTC"
 }
 
 // botUserTimezoneOf 返回用户的有效时区；用户行读不到时按未声明处理。

@@ -4816,8 +4816,11 @@ type User struct {
 	// AvatarUrl 形如 /api/avatars/:uid/:filename，未设置为空串
 	AvatarUrl string `json:"avatar_url"`
 	CreatedAt string `json:"created_at"`
-	Email     string `json:"email"`
-	Id        string `json:"id"`
+
+	// EffectiveTimezone 生效时区（INT-138）：timezone 非空时为它，否则为部署配置 bots.memory.timezone，再否则 UTC。/auth/me 会返回；成员列表不返回（省略）
+	EffectiveTimezone *string `json:"effective_timezone,omitempty"`
+	Email             string  `json:"email"`
+	Id                string  `json:"id"`
 
 	// Role 用户角色（INT-129）：admin 可管理成员、邀请与部署设置；member 只能使用自己的资源。角色只存库，服务端每请求查库判定，不写进 JWT
 	Role UserRole `json:"role"`

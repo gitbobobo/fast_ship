@@ -40,8 +40,10 @@ export default function GeneralPage() {
   const Icon = currentTheme?.icon ?? Monitor;
 
   const currentTimezone = user?.timezone ?? "";
-  // 未声明时区时按浏览器时区展示时间，同时说明机器人实际按部署配置执行。
-  const displayTimezone = currentTimezone || browserTimezone() || "UTC";
+  // 生效时区由服务端算好（用户设置 → 部署配置 → UTC）；拿不到时退回浏览器
+  // 时区，只用于展示。
+  const effectiveTimezone = currentTimezone || user?.effective_timezone || "";
+  const displayTimezone = effectiveTimezone || browserTimezone() || "UTC";
 
   const timezoneSelectOptions = useMemo(() => {
     // 分组标题不可选：只用来把「常用」和完整列表分开。
@@ -70,7 +72,7 @@ export default function GeneralPage() {
         value: TIMEZONE_GROUP_DIVIDER,
         label: "—",
         disabled: true,
-        itemLabel: <span className="block h-px w-full bg-border" />,
+        itemLabel: <span className="-mx-2 block h-px bg-border" />,
       },
       ...grouped,
     ];
@@ -156,9 +158,20 @@ export default function GeneralPage() {
                       </span>
                     </p>
                   ) : (
-                    <p className="text-muted-foreground">
-                      机器人按部署配置的时区计算，部署未配置时区时为 UTC
-                    </p>
+                    <>
+                      <p className="text-muted-foreground">
+                        当前生效时区：
+                        <span className="text-foreground">
+                          {displayTimezone}（来自部署配置）
+                        </span>
+                      </p>
+                      <p className="text-muted-foreground">
+                        该时区当前时间：
+                        <span className="text-foreground">
+                          {formatTimeInZone(now, displayTimezone)}
+                        </span>
+                      </p>
+                    </>
                   )}
                 </div>
               </div>

@@ -69,17 +69,29 @@ describe("Settings General Page - timezone", () => {
     ).toBeInTheDocument();
   });
 
-  it("未设置时区时说明生效规则，不摆会被误读的本机时钟", () => {
-    useAuthStore.setState({ user: fakeUser() });
+  it("未设置时区时显示服务端算出的生效时区与它的当前时间", () => {
+    // 服务端按「用户设置 → 部署配置 → UTC」算出生效时区并随 /auth/me 返回，
+    // 前端直接用，不需要自己拼回退链，也不会把本机时间当成机器人的时间。
+    useAuthStore.setState({
+      user: fakeUser({ timezone: "", effective_timezone: "Asia/Tokyo" }),
+    });
 
     renderPage();
 
-    // 前端拿不到部署配置的时区：只说明生效规则（回退链终点是 UTC），
-    // 不显示本机时间，避免被当成机器人实际使用的时间。
+    expect(screen.getByText("Asia/Tokyo（来自部署配置）")).toBeInTheDocument();
+    expect(screen.getByText("该时区当前时间：")).toBeInTheDocument();
+    expect(screen.getByText(/\(UTC\+9\)$/)).toBeInTheDocument();
     expect(
-      screen.getByText("机器人按部署配置的时区计算，部署未配置时区时为 UTC"),
-    ).toBeInTheDocument();
-    expect(screen.queryByText("该时区当前时间：")).not.toBeInTheDocument();
+      screen.getByRole("combobox", { name: "时区" }),
+    ).toHaveTextContent("默认（跟随部署配置）");
+  });
+
+  it("生效时区缺失时退回浏览器时区，不显示空值", () => {
+    useAuthStore.setState({ user: fakeUser({ timezone: "" }) });
+
+    renderPage();
+
+    expect(screen.getByText("该时区当前时间：")).toBeInTheDocument();
     expect(
       screen.getByRole("combobox", { name: "时区" }),
     ).toHaveTextContent("默认（跟随部署配置）");

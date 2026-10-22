@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/glebarez/sqlite"
+	"github.com/godbobo/fast_ship/server/internal/config"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/repository"
 	"gorm.io/gorm"
@@ -297,6 +298,42 @@ func TestInt138ScheduleCreateFailsWhenUserReadFails(t *testing.T) {
 	}
 	if count != 0 {
 		t.Fatalf("创建失败时不应留下任务行，实得 %d 条", count)
+	}
+}
+
+// 生效时区（用户设置 → 部署配置 → UTC）是 /auth/me 里的 effective_timezone，
+// 设置页据此显示「跟随部署配置」时机器人实际用哪个时区。
+func TestInt138EffectiveTimezoneName(t *testing.T) {
+	cases := []struct {
+		name     string
+		userTZ   string
+		deployTZ string
+		want     string
+	}{
+		{"用户设置优先", "Asia/Shanghai", "Europe/Berlin", "Asia/Shanghai"},
+		{"用户为空回落部署", "", "Europe/Berlin", "Europe/Berlin"},
+		{"用户非法回落部署", "Asia/Shangha", "Europe/Berlin", "Europe/Berlin"},
+		{"都为空回落 UTC", "", "", "UTC"},
+		{"部署非法回落 UTC", "", "Not/AZone", "UTC"},
+	}
+	for _, tc := range cases {
+		if got := effectiveTimezoneName(tc.userTZ, tc.deployTZ); got != tc.want {
+			t.Fatalf("%s: effectiveTimezoneName(%q, %q) = %q, want %q",
+				tc.name, tc.userTZ, tc.deployTZ, got, tc.want)
+		}
+	}
+
+	// auth 投影带上生效时区；成员投影不填（成员列表不需要这个派生值）。
+	svc := &AuthService{cfg: &config.Config{Bots: config.BotsConfig{
+		Memory: config.BotsMemoryConfig{Timezone: "Asia/Tokyo"},
+	}}}
+	resp := svc.toUserResponse(&model.User{ID: "u1", Username: "n", Email: "e"})
+	if resp.EffectiveTimezone == nil || *resp.EffectiveTimezone != "Asia/Tokyo" {
+		t.Fatalf("/auth/me 应带生效时区 Asia/Tokyo，实得 %+v", resp.EffectiveTimezone)
+	}
+	member := newUserResponse(&model.User{ID: "u1", Username: "n", Email: "e"})
+	if member.EffectiveTimezone != nil {
+		t.Fatalf("成员投影不应带生效时区: %+v", member.EffectiveTimezone)
 	}
 }
 

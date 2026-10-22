@@ -9171,6 +9171,9 @@ components:
         timezone:
           type: string
           description: 用户 IANA 时区（INT-138）；空串表示未声明，机器人按部署配置回退
+        effective_timezone:
+          type: string
+          description: 生效时区（INT-138）：timezone 非空时为它，否则为部署配置 bots.memory.timezone，再否则 UTC。/auth/me 会返回；成员列表不返回（省略）
         created_at:
           type: string
           format: date-time

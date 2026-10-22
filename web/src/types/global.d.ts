@@ -11,6 +11,11 @@ interface User {
   role: UserRole;
   /** 用户 IANA 时区（如 Asia/Shanghai）；空串表示未声明，机器人按部署配置回退 */
   timezone: string;
+  /**
+   * 生效时区（INT-138）：timezone 非空时为它，否则是部署配置的时区，再否则
+   * UTC。只有 /auth/me 返回，成员列表省略。
+   */
+  effective_timezone?: string | null;
   created_at: string;
   updated_at: string;
 }

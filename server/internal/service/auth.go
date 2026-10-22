@@ -426,7 +426,12 @@ func (s *AuthService) generateToken(user *model.User) (string, error) {
 }
 
 func (s *AuthService) toUserResponse(user *model.User) UserResponse {
-	return newUserResponse(user)
+	resp := newUserResponse(user)
+	// 生效时区只对「当前登录用户」有意义（成员列表不需要），所以只在 auth
+	// 投影里补：前端据此显示机器人实际按哪个时区计算。
+	effective := effectiveTimezoneName(user.Timezone, s.cfg.Bots.Memory.Timezone)
+	resp.EffectiveTimezone = &effective
+	return resp
 }
 
 // RoleOf 查用户角色（INT-129）：管理员守卫每请求调用，不缓存。用户已删除时
