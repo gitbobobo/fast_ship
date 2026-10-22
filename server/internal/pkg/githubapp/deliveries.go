@@ -35,11 +35,26 @@ func (d HookDelivery) Delivered() bool {
 	return d.StatusCode >= 200 && d.StatusCode < 300
 }
 
+// HookDeliveryDetail 单次投递的详情（GET /app/hook/deliveries/{id}）：列表行
+// 只有 id/guid/event/action 等元数据，payload 只在详情里。对账在重投前据此
+// 确定投递指向哪个 PR。注意 payload 是投递时刻的旧快照（PR 当时写着 open），
+// 只能用来定位 repo/PR，不能用来判断 PR 当前是否还开着。
+type HookDeliveryDetail struct {
+	ID      int64
+	GUID    string
+	Event   string
+	Action  string
+	Payload json.RawMessage // 原始 webhook 请求体
+}
+
 // HookDeliveries App 维度投递记录的访问面：/app/hook/* 只认 App JWT，不按
 // installation 区分。*Client 实现；Fake 也实现（debug 自测与测试）。
 type HookDeliveries interface {
 	// ListHookDeliveries 拉 since 之后的投递记录（含失败的）。
 	ListHookDeliveries(ctx context.Context, since time.Time) ([]HookDelivery, error)
+	// GetHookDelivery 取单次投递详情（含原始 payload）：对账在重投前据此
+	// 确定投递指向哪个 PR，再用安装令牌实时确认该 PR 是否仍开着。
+	GetHookDelivery(ctx context.Context, deliveryID int64) (HookDeliveryDetail, error)
 	// RedeliverHookDelivery 让 GitHub 重新投递一次（请求与原始投递相同，
 	// 因此 X-GitHub-Delivery 也相同，现有幂等登记能保证不重复处理）。
 	RedeliverHookDelivery(ctx context.Context, deliveryID int64) error
@@ -64,6 +79,18 @@ type hookDeliveryRaw struct {
 	StatusCode  int       `json:"status_code"`
 	Redelivery  bool      `json:"redelivery"`
 	DeliveredAt time.Time `json:"delivered_at"`
+}
+
+// hookDeliveryDetailRaw /app/hook/deliveries/{id} 响应的形状；request.payload
+// 是原始 webhook JSON 对象（含 repository.full_name / number / installation.id）。
+type hookDeliveryDetailRaw struct {
+	ID      int64  `json:"id"`
+	GUID    string `json:"guid"`
+	Event   string `json:"event"`
+	Action  string `json:"action"`
+	Request struct {
+		Payload json.RawMessage `json:"payload"`
+	} `json:"request"`
 }
 
 // ListHookDeliveries 拉 since 之后的投递记录（含失败的）。GitHub 按
@@ -127,6 +154,47 @@ func (c *Client) ListHookDeliveries(ctx context.Context, since time.Time) ([]Hoo
 	// 循环自然耗尽 = 最后一页仍有窗口内的行且带 next：账本被页数上限截断，
 	// 按错误返回（对账靠完整账本推已重投次数，缺页会把次数算少）。
 	return out, ErrDeliveriesTruncated
+}
+
+// GetHookDelivery 取单次投递详情（含原始请求体）：对账在重投前据此确定投递
+// 指向哪个 PR。头部与列表一致（App JWT / Accept / Api-Version）；非 2xx 转
+// *githubapi.StatusError。
+func (c *Client) GetHookDelivery(ctx context.Context, deliveryID int64) (HookDeliveryDetail, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	jwtTok, err := c.store.creds.appJWT(time.Now())
+	if err != nil {
+		return HookDeliveryDetail{}, err
+	}
+	path := fmt.Sprintf("/app/hook/deliveries/%d", deliveryID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.store.baseURL+path, nil)
+	if err != nil {
+		return HookDeliveryDetail{}, err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	req.Header.Set("Authorization", "Bearer "+jwtTok)
+	resp, err := c.store.client.Do(req)
+	if err != nil {
+		return HookDeliveryDetail{}, err
+	}
+	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	resp.Body.Close()
+	if readErr != nil {
+		return HookDeliveryDetail{}, readErr
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return HookDeliveryDetail{}, &githubapi.StatusError{StatusCode: resp.StatusCode, Method: http.MethodGet, URL: path, Body: string(raw)}
+	}
+	var det hookDeliveryDetailRaw
+	if err := json.Unmarshal(raw, &det); err != nil {
+		return HookDeliveryDetail{}, fmt.Errorf("githubapp: 解析投递详情响应失败: %w", err)
+	}
+	return HookDeliveryDetail{
+		ID: det.ID, GUID: det.GUID, Event: det.Event, Action: det.Action,
+		Payload: det.Request.Payload,
+	}, nil
 }
 
 // RedeliverHookDelivery POST /app/hook/deliveries/{id}/attempts 请求重投；
