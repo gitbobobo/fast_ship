@@ -81,17 +81,6 @@ func (r *BotMaintenanceRepository) ListBotIDs() ([]string, error) {
 	return ids, err
 }
 
-// FindLatestSucceeded 取某机器人某类维护运行最近一次成功记录（夜间整理消费水位）。
-func (r *BotMaintenanceRepository) FindLatestSucceeded(botID string, kind model.BotMaintenanceKind) (*model.BotMaintenanceRun, error) {
-	var row model.BotMaintenanceRun
-	err := r.db.Where("bot_id = ? AND kind = ? AND status = ?", botID, kind, model.BotMaintenanceSucceeded).
-		Order("created_at DESC").First(&row).Error
-	if err != nil {
-		return nil, err
-	}
-	return &row, nil
-}
-
 // ListSucceeded 列出某机器人某类全部成功维护运行（按时间升序，供累计消费水位）。
 func (r *BotMaintenanceRepository) ListSucceeded(botID string, kind model.BotMaintenanceKind) ([]model.BotMaintenanceRun, error) {
 	var rows []model.BotMaintenanceRun
@@ -126,13 +115,6 @@ func (r *BotMaintenanceRepository) UpdateRequestColumns(id string, where map[str
 func (r *BotMaintenanceRepository) ListUnfinishedRequests() ([]model.BotMaintenanceRequest, error) {
 	var rows []model.BotMaintenanceRequest
 	err := r.db.Where("status = ?", model.BotModelRequestRunning).Find(&rows).Error
-	return rows, err
-}
-
-// ListRequestsByRun 列出维护运行的全部请求。
-func (r *BotMaintenanceRepository) ListRequestsByRun(runID string) ([]model.BotMaintenanceRequest, error) {
-	var rows []model.BotMaintenanceRequest
-	err := r.db.Where("maintenance_run_id = ?", runID).Order("ordinal ASC").Find(&rows).Error
 	return rows, err
 }
 

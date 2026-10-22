@@ -784,7 +784,7 @@ func TestT3ShellHub_MarkerWaitTimeoutForcesFullResync(t *testing.T) {
 		t.Fatalf("forced resync must still request marker: %+v", resync.sub.Payload)
 	}
 
-	// 权威全量快照到达 → applyActiveSnapshot 置追平 → Ready，游标被权威重置。
+	// 权威全量快照到达 → applyActiveSnapshotLocked 置追平 → Ready，游标被权威重置。
 	if err := resync.conn.sendValue(resync.sub.ID, shellSnapshotValue(77, "th-1", "th-2")); err != nil {
 		t.Fatalf("send authoritative snapshot: %v", err)
 	}

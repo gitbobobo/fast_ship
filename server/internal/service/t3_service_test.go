@@ -266,21 +266,6 @@ func (f *fakeT3Environment) pushThreadRemoval(t *testing.T, threadID string) {
 	f.pushActive(t, value)
 }
 
-// pushArchiveThread 推送归档流的 thread.updated 增量（归档快照已发出之后）。
-func (f *fakeT3Environment) pushArchiveThread(t *testing.T, thread map[string]any) {
-	t.Helper()
-	f.mu.Lock()
-	st := f.archiveStream
-	f.mu.Unlock()
-	if st == nil {
-		t.Fatalf("no archive subscription stream to push on")
-	}
-	value := mustJSON(map[string]any{"kind": "thread.updated", "sequence": f.nextPushSeq(), "thread": thread})
-	if err := st.push(value); err != nil {
-		t.Fatalf("push archive thread: %v", err)
-	}
-}
-
 // dropConnections 服务端主动断开全部 WS 连接（模拟吊销会话/进程重启后的
 // 连接死亡；hub 侧表现为读失败判死，随后按各自分类重连）。
 func (f *fakeT3Environment) dropConnections() {
