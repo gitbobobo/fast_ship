@@ -141,6 +141,10 @@ type BotsRuntimeConfig struct {
 	// ProviderCircuitMinutes 是 provider 熔断窗口（默认 30 分钟）：认证失败/
 	// 额度用完时定时任务在该窗口内直接记 skipped。
 	ProviderCircuitMinutes int `mapstructure:"provider_circuit_minutes"`
+	// PromptCacheRetainMinutes 是前缀缓存在上游的保留窗口（默认 10 分钟，
+	// INT-139）：主线 run 入口发现版本落后时，最近一次主线模型请求仍在窗口
+	// 内就不在入口激活（重写前缀会作废仍热的缓存），推迟到下一个压缩边界。
+	PromptCacheRetainMinutes int `mapstructure:"prompt_cache_retain_minutes"`
 }
 
 func (c BotsRuntimeConfig) StreamFirstChunkTimeout() time.Duration {
@@ -193,6 +197,15 @@ func (c BotsRuntimeConfig) ProviderCircuitWindow() time.Duration {
 		return time.Duration(c.ProviderCircuitMinutes) * time.Minute
 	}
 	return 30 * time.Minute
+}
+
+// PromptCacheRetain 是「最近一次主线请求距今多久算前缀缓存已冷」的窗口；
+// 未配置取默认 10 分钟。窗口内推迟入口激活，让活跃对话保住前缀命中。
+func (c BotsRuntimeConfig) PromptCacheRetain() time.Duration {
+	if c.PromptCacheRetainMinutes > 0 {
+		return time.Duration(c.PromptCacheRetainMinutes) * time.Minute
+	}
+	return 10 * time.Minute
 }
 
 type BotsContextConfig struct {
@@ -377,6 +390,9 @@ func (c BotsConfig) validate() error {
 	if c.Runtime.StopGraceSeconds < 0 {
 		return fmt.Errorf("bots.runtime.stop_grace_seconds 不得为负")
 	}
+	if c.Runtime.PromptCacheRetainMinutes < 0 {
+		return fmt.Errorf("bots.runtime.prompt_cache_retain_minutes 不得为负")
+	}
 	if c.Memory.Timezone != "" {
 		if _, err := time.LoadLocation(c.Memory.Timezone); err != nil {
 			return fmt.Errorf("bots.memory.timezone 非法: %v", err)
@@ -439,6 +455,7 @@ func Load(path string) (*Config, error) {
 	_ = viper.BindEnv("bots.runtime.retry_max_attempts", "FAST_SHIP_BOTS_RUNTIME_RETRY_MAX_ATTEMPTS")
 	_ = viper.BindEnv("bots.runtime.retry_base_delay_ms", "FAST_SHIP_BOTS_RUNTIME_RETRY_BASE_DELAY_MS")
 	_ = viper.BindEnv("bots.runtime.provider_circuit_minutes", "FAST_SHIP_BOTS_RUNTIME_PROVIDER_CIRCUIT_MINUTES")
+	_ = viper.BindEnv("bots.runtime.prompt_cache_retain_minutes", "FAST_SHIP_BOTS_RUNTIME_PROMPT_CACHE_RETAIN_MINUTES")
 	_ = viper.BindEnv("quota.enabled", "FAST_SHIP_QUOTA_ENABLED")
 	_ = viper.BindEnv("quota.interval_minutes", "FAST_SHIP_QUOTA_INTERVAL_MINUTES")
 	_ = viper.BindEnv("quota.run_on_startup", "FAST_SHIP_QUOTA_RUN_ON_STARTUP")

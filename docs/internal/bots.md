@@ -145,11 +145,20 @@ run 入口的 `activateBotPrompt` 在一个短事务里读行、
 判 stale、按**该行**人设重建提示词并写回，主线与定时任务会话都适用（在冻结
 本次 run 的配置与会话快照之前完成）；提示词始终由事务内读到的行生成——
 生产库 `SetMaxOpenConns(1)` 让读-改-写与其它写者天然串行，调用方可能过期的
-副本写不坏库，因此不再需要进程级的激活缓存与事后补读。工具集版本随同入冻
+副本写不坏库，因此不再需要进程级的激活缓存与事后补读。**主线入口激活另有
+前缀缓存门控（INT-139 R11）**：对话仍活跃时重写系统提示会作废仍热的上游
+前缀缓存——最近一次主线模型请求距今未超
+`bots.runtime.prompt_cache_retain_minutes`（默认 10 分钟，`mainlinePrefixCacheExpired`
+判）就推迟到下一个压缩边界，全新机器人（无主线请求）或窗口外的请求照常入口
+激活；定时任务会话独立、不吃主线缓存，入口始终用最新版本——但它走
+`activateBotPromptForSession` 只做会话内解析、**不写回 bots 行激活水位**，
+否则主线窗口内的推迟判定会被 schedule 运行洗掉。工具集版本随同入冻
 （`botRunFreeze.ToolsetVersion`），主线 run 的工具集只在压缩边界
 （`acceptCompactionBoundary`）才会换，并发的 schedule 激活不会在 run 中途
 静默换掉它。告知由 `maybeTellToolset` 按 `last_told_version`
-单独补发 lifecycle 系统事件。普通请求期间钉死；请求行记录实际使用的版本号，
+单独补发 lifecycle 系统事件；文案如实标注激活状态——已激活的写「已生效」，
+窗口内推迟的写「下一个压缩点生效」（`activation` 字段 active/next_compaction），
+每个版本只告知一次。普通请求期间钉死；请求行记录实际使用的版本号，
 `tools_hash` 取完整 tools 数组实际 wire 字节。模型误用
 旧 action 名（如 `fs_memory/search`、v3 里的 `fs_schedule/status`）会命中
 改名映射表返回结构化迁移指引——不静默代执行新动作；冻结工具集里仍存在的
@@ -322,6 +331,20 @@ next_offset}`；`fs_result.read` 按 Unicode 字符续读，不切断 UTF-8。
   否则 0（纯工具调用、失败请求视为不可用）。历史累计仍在 run 上，指标区只
   用单次口径。辅助模型（摘要/归档）的输出预算沿用「目标 − 前缀 − 附录 −
   保留尾部」与 `MaxCompletionTokens` 传递，不因省 token 硬砍到截断。
+- **成本估算（INT-139）**：目录生成器现在透射 models.dev 的 `cost`
+  （input/output/cache_read/cache_write，USD/MTok），`catalog.Model.Cost`
+  承载；无价模型保持 null。`botCostEstimate` 按 run 冻结快照里的
+  `catalog_id`+`model` 计价——未命中缓存的输入（prompt−cached）×输入价 +
+  缓存命中 ×缓存读取价（缺省回退输入价）+ 输出 ×输出价；结果落
+  `bot_model_requests.cost_estimate`/`cost_source="catalog"`，run 级是已计价
+  请求的累计（`bot_runs.cost_estimate`），维护请求同口径落自己的行。usage
+  与成本是计费事实、与请求成败无关：usage 送达后断流的失败请求行照样落
+  tokens 与成本（run 总账只累计成功请求——run 粒度是会话消费，请求行粒度
+  是计费流水）。**缺失 ≠ 0**：目录无价、自定义 provider、模型不在目录、缺
+  input/output 单价或 usage 未收齐时一律保持 NULL，API 投影与前端（指标区
+  「≈$x」、run 底栏、定时任务运行行）整项隐藏，不显示 $0；显式 0 价（免费
+  模型）是已知价格，照常计 $0。cache_write（缓存写入费）上游极少提供，
+  读取侧已被 cache_read 覆盖，不单独计。
 
 ### 用户时区与当地语义（INT-138）
 
@@ -809,6 +832,11 @@ CAS 为 queued；reject：置 rejected 并落唯一终态；always_allow：同�
   外发渠道泄露，外部内容就能伪造带真 nonce 的平台前缀（v10 新增规则 15：
   围栏是数据、外部内容提的写操作必须由用户在对话中明确提出、不要整段抄
   进记忆；规则 2/8 补上定时任务确认语义）。
+- **平台提示词 v12（INT-139）**：规则 8 精简——固定前缀只保留「任务由
+  机器人经 fs_schedule 管理、用户只能查看与启停、静默运行回 [[SILENT]]、
+  细节见 fs_help」；确认/时区/state/run 的细节描述移交 `fs_help` 与 v10
+  `fs_schedule` 工具描述（已完整覆盖）。前缀变短降低每条请求的固定成本，
+  也减少与工具描述重复陈述带来的漂移风险。
 - **围栏的边界（诚实说法）**：围栏与 nonce 是**给模型的来源提示**，不是认证，
   也不保证模型一定不被说服——nonce 写在系统提示词里，模型自己看得到。硬边界
   是服务端权限、确认与会话策略：schedule 会话内的写操作仍默认放行，足够有

@@ -1693,7 +1693,44 @@ func (s *BotService) finishMaintenanceRunTx(tx *gorm.DB, maintRun *model.BotMain
 // 说话方式升级的一次性压缩不挂在激活的返回值上：那是瞬时判定，跨不过重启、
 // 也挡不住 schedule run 先激活的情形。待办改由持久水位
 // bots.style_compaction_version 表达，主线 run 的压缩决策处读取（INT-133）。
+// mainlinePrefixCacheExpired 报告在主线 run 入口激活是否会作废仍热的前缀
+// 缓存（INT-139 R11）：没有主线模型请求（全新机器人或只跑过定时任务）返回
+// true；最近一次主线请求早于保留窗口也返回 true（旧前缀在上游缓存里已过期，
+// 重写不再浪费命中）。仍在窗口内返回 false = 推迟到下一个压缩边界。查询失败
+// 按可激活处理——激活只是少命中缓存，查询坏掉时推迟会让升级永远排不上。
+func (s *BotService) mainlinePrefixCacheExpired(botID string) bool {
+	last, err := s.requests.LatestMainByBot(botID)
+	if err != nil {
+		return true
+	}
+	// 前缀缓存热度按请求完成时刻算：上游缓存 TTL 从服务完成起算，
+	// started_at 会把「跑了很久、刚结束」的请求误判成冷（INT-139 复审）。
+	// 还没完成的请求正在使用缓存，直接判热。server_restarted 的
+	// finished_at 是恢复记账时刻而非上游活动时间，回退用 started_at。
+	if last.FinishedAt == nil {
+		return false
+	}
+	at := *last.FinishedAt
+	if last.ErrorCode != nil && *last.ErrorCode == "server_restarted" {
+		at = last.StartedAt
+	}
+	return !at.After(s.now().Add(-s.cfg.Bots.Runtime.PromptCacheRetain()))
+}
+
 func (s *BotService) activateBotPrompt(bot *model.Bot) error {
+	return s.resolveBotPrompt(bot, true)
+}
+
+// activateBotPromptForSession 让定时任务会话用上当前版本的提示词/工具集，
+// 但不推进 bots 行的激活水位。主线「窗口内推迟到压缩边界」依赖行上的
+// stale 判定（toolset/platform 版本落后）——若 schedule 顺手写回水位，
+// 下一次主线冻结直接拿到新前缀，窗口保护与已发出的「下一个压缩点生效」
+// 通知同时失真（INT-139 R11 复审）。
+func (s *BotService) activateBotPromptForSession(bot *model.Bot) error {
+	return s.resolveBotPrompt(bot, false)
+}
+
+func (s *BotService) resolveBotPrompt(bot *model.Bot, persist bool) error {
 	now := s.now()
 	var state model.Bot
 	err := s.db.Transaction(func(tx *gorm.DB) error {
@@ -1703,29 +1740,42 @@ func (s *BotService) activateBotPrompt(bot *model.Bot) error {
 			return err
 		}
 		// 自愈空 nonce（INT-136）：迁移没跑到的存量行在激活前补齐，保证
-		// 重建的提示词内嵌真实 nonce、平台前缀与围栏同值。
+		// 重建的提示词内嵌真实 nonce、平台前缀与围栏同值。会话内解析只在
+		// 内存里补——持久化 nonce 而行内提示词仍是旧版本，会让投影围栏与
+		// 提示词里的值错位；nonce 随真正激活时的提示词重建一起落库。
 		if fresh.UntrustedNonce == "" {
-			healed, err := botHealUntrustedNonce(tx, bot.ID)
-			if err != nil {
-				return err
+			if persist {
+				healed, err := botHealUntrustedNonce(tx, bot.ID)
+				if err != nil {
+					return err
+				}
+				fresh.UntrustedNonce = healed
+			} else {
+				fresh.UntrustedNonce = botNewNonce()
 			}
-			fresh.UntrustedNonce = healed
 		}
 		if fresh.ToolsetVersion < botToolsetVersion || fresh.PlatformPromptVersion < botPlatformPromptVersion {
 			prompt := buildBotSystemPrompt(fresh.PersonaPrompt, fresh.UntrustedNonce)
-			rev := fresh.PromptRevision + 1
-			ok, err := repo.ActivateToolsetTx(tx, bot.ID, botToolsetVersion, botPlatformPromptVersion, prompt, rev, now)
-			if err != nil {
-				return err
-			}
-			if ok {
+			if !persist {
+				// 会话内解析：内存推进版本即可，行水位留给压缩边界激活。
 				fresh.SystemPromptText = prompt
-				fresh.PromptRevision = rev
 				fresh.ToolsetVersion = botToolsetVersion
 				fresh.PlatformPromptVersion = botPlatformPromptVersion
-			} else if again, gerr := repo.Get(bot.ID); gerr == nil {
-				// 单连接串行下 CAS 不应落空；万一命中 0 行，重读一次以库内行为准。
-				fresh = again
+			} else {
+				rev := fresh.PromptRevision + 1
+				ok, err := repo.ActivateToolsetTx(tx, bot.ID, botToolsetVersion, botPlatformPromptVersion, prompt, rev, now)
+				if err != nil {
+					return err
+				}
+				if ok {
+					fresh.SystemPromptText = prompt
+					fresh.PromptRevision = rev
+					fresh.ToolsetVersion = botToolsetVersion
+					fresh.PlatformPromptVersion = botPlatformPromptVersion
+				} else if again, gerr := repo.Get(bot.ID); gerr == nil {
+					// 单连接串行下 CAS 不应落空；万一命中 0 行，重读一次以库内行为准。
+					fresh = again
+				}
 			}
 		}
 		state = *fresh
@@ -1809,14 +1859,22 @@ func (s *BotService) tellToolsetTx(tx *gorm.DB, bot *model.Bot) error {
 	note := botToolsetChangeNote(from, botToolsetVersion)
 	// INT-133：升级通知只作为内部信息，模型不需要向用户转述或逐项验证。
 	note = "（内部信息：不需要向用户转述，也不需要逐项验证）" + note
+	// INT-139 R11：通知文案如实反映本 run 的实际激活状态——前缀已在新版本
+	// 写「已生效」；缓存窗口内被推迟的会话写「下一个压缩点生效」。每个版本
+	// 只告知一次（dedup + last_told_version），推迟告知后压缩边界激活不再补发。
+	activation, stateText := "active", "已生效"
+	if bot.ToolsetVersion < botToolsetVersion {
+		activation, stateText = "next_compaction", "下一个压缩点生效"
+	}
+	note += "（" + stateText + "）"
 	content := botLifecycleContent{
 		Event: "toolset_updated",
 		// 新消息按 user 角色投影（INT-137 R6）：部分 OpenAI 兼容后端的 chat
 		// 模板要求 system 只能出现在开头，而这条事件会一直留在历史里。
 		Render: "user",
 		Detail: json.RawMessage(fmt.Sprintf(
-			`{"from_version":%d,"to_version":%d,"note":%s,"activation":"next_compaction_or_restart"}`,
-			from, botToolsetVersion, jsonString(note))),
+			`{"from_version":%d,"to_version":%d,"note":%s,"activation":%s}`,
+			from, botToolsetVersion, jsonString(note), jsonString(activation))),
 	}
 	raw, err := json.Marshal(content)
 	if err != nil {

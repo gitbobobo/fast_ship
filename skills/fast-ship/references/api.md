@@ -8827,6 +8827,8 @@ client_message_id 必填（幂等键）：同键同正文返回已有消息；�
 | `run.total_tokens` | integer（int64，可空） | 否 |  |
 | `run.cached_tokens` | integer（int64，可空） | 否 |  |
 | `run.usage_complete` | boolean | 是 | false 表示上游未报 usage（缺失与零严格区分） |
+| `run.cost_estimate` | number（double，可空） | 否 | 本 run 已计价请求的成本累计（USD）；目录无价/全缺 usage 时为 null（缺失 ≠ 0，INT-139） |
+| `run.cost_source` | string（可空） | 否 | 计价来源（catalog）；cost_estimate 为 null 时同 null |
 | `run.error_code` | string（可空） | 否 |  |
 | `run.error_message` | string（可空） | 否 |  |
 | `run.created_at` | string（date-time） | 是 |  |
@@ -8948,6 +8950,8 @@ client_message_id 必填（幂等键）：同键同正文返回已有消息；�
 | `runs[].total_tokens` | integer（int64，可空） | 否 |  |
 | `runs[].cached_tokens` | integer（int64，可空） | 否 |  |
 | `runs[].usage_complete` | boolean | 是 | false 表示上游未报 usage（缺失与零严格区分） |
+| `runs[].cost_estimate` | number（double，可空） | 否 | 本 run 已计价请求的成本累计（USD）；目录无价/全缺 usage 时为 null（缺失 ≠ 0，INT-139） |
+| `runs[].cost_source` | string（可空） | 否 | 计价来源（catalog）；cost_estimate 为 null 时同 null |
 | `runs[].error_code` | string（可空） | 否 |  |
 | `runs[].error_message` | string（可空） | 否 |  |
 | `runs[].created_at` | string（date-time） | 是 |  |
@@ -8968,6 +8972,8 @@ client_message_id 必填（幂等键）：同键同正文返回已有消息；�
 | `metrics.request.completion_tokens` | integer（int64，可空） | 否 |  |
 | `metrics.request.cached_tokens` | integer（int64，可空） | 否 |  |
 | `metrics.request.usage_complete` | boolean | 是 | false 表示上游未报 usage（缺失与零严格区分）；false 时计数视为不可用 |
+| `metrics.request.cost_estimate` | number（double，可空） | 否 | 按 run 冻结目录单价估算的本次请求成本（USD）；目录无价/缺 usage 时为 null（缺失 ≠ 0，INT-139） |
+| `metrics.request.cost_source` | string（可空） | 否 | 计价来源（catalog）；cost_estimate 为 null 时同 null |
 | `metrics.request.input_tokens_estimate` | integer（int64） | 是 | 发送前的上下文 token 估算值（口径见 input_estimator；上下文占比用估算值） |
 | `metrics.request.input_estimator` | string | 是 | 估算方式（usage_delta/3.5 或 utf8_bytes/3.5） |
 | `metrics.request.started_at` | string（date-time） | 是 |  |
@@ -9076,6 +9082,8 @@ done 携带 run 终态，error 携带 code/message（顺序固定 error → done
 | `items[].total_tokens` | integer（int64，可空） | 否 |  |
 | `items[].cached_tokens` | integer（int64，可空） | 否 |  |
 | `items[].usage_complete` | boolean | 是 | false 表示上游未报 usage（缺失与零严格区分） |
+| `items[].cost_estimate` | number（double，可空） | 否 | 本 run 已计价请求的成本累计（USD）；目录无价/全缺 usage 时为 null（缺失 ≠ 0，INT-139） |
+| `items[].cost_source` | string（可空） | 否 | 计价来源（catalog）；cost_estimate 为 null 时同 null |
 | `items[].error_code` | string（可空） | 否 |  |
 | `items[].error_message` | string（可空） | 否 |  |
 | `items[].created_at` | string（date-time） | 是 |  |
@@ -9126,6 +9134,8 @@ done 携带 run 终态，error 携带 code/message（顺序固定 error → done
 | `total_tokens` | integer（int64，可空） | 否 |  |
 | `cached_tokens` | integer（int64，可空） | 否 |  |
 | `usage_complete` | boolean | 是 | false 表示上游未报 usage（缺失与零严格区分） |
+| `cost_estimate` | number（double，可空） | 否 | 本 run 已计价请求的成本累计（USD）；目录无价/全缺 usage 时为 null（缺失 ≠ 0，INT-139） |
+| `cost_source` | string（可空） | 否 | 计价来源（catalog）；cost_estimate 为 null 时同 null |
 | `error_code` | string（可空） | 否 |  |
 | `error_message` | string（可空） | 否 |  |
 | `created_at` | string（date-time） | 是 |  |
@@ -9183,6 +9193,8 @@ stop:<runId> 幂等）并唤醒机器人，由它结合上下文决定后续动�
 | `total_tokens` | integer（int64，可空） | 否 |  |
 | `cached_tokens` | integer（int64，可空） | 否 |  |
 | `usage_complete` | boolean | 是 | false 表示上游未报 usage（缺失与零严格区分） |
+| `cost_estimate` | number（double，可空） | 否 | 本 run 已计价请求的成本累计（USD）；目录无价/全缺 usage 时为 null（缺失 ≠ 0，INT-139） |
+| `cost_source` | string（可空） | 否 | 计价来源（catalog）；cost_estimate 为 null 时同 null |
 | `error_code` | string（可空） | 否 |  |
 | `error_message` | string（可空） | 否 |  |
 | `created_at` | string（date-time） | 是 |  |
@@ -9253,6 +9265,8 @@ stop:<runId> 幂等）并唤醒机器人，由它结合上下文决定后续动�
 | `items[].last_run.prompt_tokens` | integer（int64） | 否 |  |
 | `items[].last_run.completion_tokens` | integer（int64） | 否 |  |
 | `items[].last_run.total_tokens` | integer（int64） | 否 |  |
+| `items[].last_run.cost_estimate` | number（double） | 否 | 本 run 已计价请求的成本累计（USD）；目录无价时缺省（缺失 ≠ 0，INT-139） |
+| `items[].last_run.cost_source` | string | 否 | 计价来源（catalog） |
 
 **错误**
 
@@ -9315,6 +9329,8 @@ stop:<runId> 幂等）并唤醒机器人，由它结合上下文决定后续动�
 | `last_run.prompt_tokens` | integer（int64） | 否 |  |
 | `last_run.completion_tokens` | integer（int64） | 否 |  |
 | `last_run.total_tokens` | integer（int64） | 否 |  |
+| `last_run.cost_estimate` | number（double） | 否 | 本 run 已计价请求的成本累计（USD）；目录无价时缺省（缺失 ≠ 0，INT-139） |
+| `last_run.cost_source` | string | 否 | 计价来源（catalog） |
 
 **错误**
 
@@ -9370,6 +9386,8 @@ stop:<runId> 幂等）并唤醒机器人，由它结合上下文决定后续动�
 | `items[].prompt_tokens` | integer（int64） | 否 |  |
 | `items[].completion_tokens` | integer（int64） | 否 |  |
 | `items[].total_tokens` | integer（int64） | 否 |  |
+| `items[].cost_estimate` | number（double） | 否 | 本 run 已计价请求的成本累计（USD）；目录无价时缺省（缺失 ≠ 0，INT-139） |
+| `items[].cost_source` | string | 否 | 计价来源（catalog） |
 
 **错误**
 
@@ -9421,6 +9439,8 @@ stopped，不追加主线事件（用户主动停止不是需要汇报的运行�
 | `total_tokens` | integer（int64，可空） | 否 |  |
 | `cached_tokens` | integer（int64，可空） | 否 |  |
 | `usage_complete` | boolean | 是 | false 表示上游未报 usage（缺失与零严格区分） |
+| `cost_estimate` | number（double，可空） | 否 | 本 run 已计价请求的成本累计（USD）；目录无价/全缺 usage 时为 null（缺失 ≠ 0，INT-139） |
+| `cost_source` | string（可空） | 否 | 计价来源（catalog）；cost_estimate 为 null 时同 null |
 | `error_code` | string（可空） | 否 |  |
 | `error_message` | string（可空） | 否 |  |
 | `created_at` | string（date-time） | 是 |  |
@@ -9500,6 +9520,8 @@ stopped，不追加主线事件（用户主动停止不是需要汇报的运行�
 | `last_run.prompt_tokens` | integer（int64） | 否 |  |
 | `last_run.completion_tokens` | integer（int64） | 否 |  |
 | `last_run.total_tokens` | integer（int64） | 否 |  |
+| `last_run.cost_estimate` | number（double） | 否 | 本 run 已计价请求的成本累计（USD）；目录无价时缺省（缺失 ≠ 0，INT-139） |
+| `last_run.cost_source` | string | 否 | 计价来源（catalog） |
 
 **错误**
 
@@ -9567,6 +9589,8 @@ stopped，不追加主线事件（用户主动停止不是需要汇报的运行�
 | `last_run.prompt_tokens` | integer（int64） | 否 |  |
 | `last_run.completion_tokens` | integer（int64） | 否 |  |
 | `last_run.total_tokens` | integer（int64） | 否 |  |
+| `last_run.cost_estimate` | number（double） | 否 | 本 run 已计价请求的成本累计（USD）；目录无价时缺省（缺失 ≠ 0，INT-139） |
+| `last_run.cost_source` | string | 否 | 计价来源（catalog） |
 
 **错误**
 

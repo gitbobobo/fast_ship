@@ -210,6 +210,27 @@ describe("BotMetrics", () => {
     );
   });
 
+  it("cost_estimate 非空时显示 ≈$x 成本（INT-139），为空时整项隐藏", () => {
+    render(
+      <BotMetrics
+        metrics={makeMetrics({ ...fullRequest, cost_estimate: 0.0002112 })}
+      />,
+    );
+    const cost = screen.getByTestId("bot-metric-cost");
+    expect(cost).toHaveTextContent("≈$0.0002");
+    expect(cost).toHaveAttribute("title", expect.stringContaining("目录单价"));
+  });
+
+  it("cost_estimate 为 null 时不渲染成本项（缺失 ≠ 0）", () => {
+    render(
+      <BotMetrics
+        metrics={makeMetrics({ ...fullRequest, cost_estimate: null })}
+      />,
+    );
+    expect(screen.queryByTestId("bot-metric-cost")).toBeNull();
+    expect(screen.getByTestId("bot-metrics").textContent).not.toContain("$");
+  });
+
   it("有数据时 aria-label 汇总两项可读值", () => {
     render(<BotMetrics metrics={makeMetrics()} />);
     expect(screen.getByTestId("bot-metrics").querySelector("svg")).toHaveAttribute(

@@ -120,8 +120,10 @@ func botResultItemCount(raw string) int64 {
 
 func botErrMessage(err error) string {
 	msg := err.Error()
-	if len(msg) > 500 {
-		msg = msg[:500]
+	// 按字符截断（INT-139 R7）：字节截断可能劈在多字节字符中间，
+	// 落库/外发的就是非法 UTF-8。
+	if rs := []rune(msg); len(rs) > 500 {
+		msg = string(rs[:500])
 	}
 	return msg
 }

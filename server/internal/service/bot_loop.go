@@ -122,12 +122,28 @@ func (s *BotService) botLoop(bot *model.Bot, run *model.BotRun, ctx context.Cont
 	// 槽绑定先于一切收尾路径：硬停止（宽限到期 / 重复点击）取消前核对槽上
 	// 绑定的 run，槽已被重入换绑成新 run 时不得取消到别人的 context（INT-137）。
 	s.bindSlotRun(bot, run)
-	// 工具集/提示词激活先于冻结执行，主线与 schedule 一视同仁：激活在同一个
-	// 短事务里读行、判 stale、按该行人设重建提示词并写回，事务结束后副本与
-	// 库内行一致，freeze 捕获的才是本次 run 的最终提示词，schedule 会话也基于
-	// 激活后的工具集构建。激活失败只降级记日志、不阻塞 run。
-	if err := s.activateBotPrompt(bot); err != nil {
-		s.logger.Warn("激活工具集失败", zap.String("bot_id", bot.ID), zap.Error(err))
+	// 工具集/提示词激活先于冻结执行：激活在同一个短事务里读行、判 stale、
+	// 按该行人设重建提示词并写回，事务结束后副本与库内行一致，freeze 捕获
+	// 的才是本次 run 的最终提示词。激活失败只降级记日志、不阻塞 run。
+	// INT-139 R11 激活时机：主线会话只在「还没有主线模型请求」或「最近一次
+	// 主线请求早于前缀缓存保留窗口」时在入口激活——对话正活跃时重写系统
+	// 提示会让仍热的前缀缓存整段作废，推迟到下一个压缩边界
+	//（buildBoundarySnapshot 判 stale → publishCompaction 事务内激活 →
+	// acceptCompactionBoundary 装入）。定时任务是独立会话、不吃主线前缀
+	// 缓存，入口始终用最新版本。
+	if run.SessionKind == model.BotSessionKindSchedule {
+		// schedule 吃不到主线前缀缓存，会话内直接用最新版；但不写回激活
+		// 水位，否则主线窗口内的推迟判定与「下一个压缩点生效」通知失真。
+		if err := s.activateBotPromptForSession(bot); err != nil {
+			s.logger.Warn("会话内解析工具集失败", zap.String("bot_id", bot.ID), zap.Error(err))
+		}
+	} else {
+		stale := bot.ToolsetVersion < botToolsetVersion || bot.PlatformPromptVersion < botPlatformPromptVersion
+		if !stale || s.mainlinePrefixCacheExpired(bot.ID) {
+			if err := s.activateBotPrompt(bot); err != nil {
+				s.logger.Warn("激活工具集失败", zap.String("bot_id", bot.ID), zap.Error(err))
+			}
+		}
 	}
 	// 先冻结再取密钥：schedule run 的地址与密钥是派发时成对冻结的，解密必须用
 	// 冻结的那一份，否则轮换密钥后会把新密钥发往旧地址。
@@ -294,12 +310,14 @@ runLoop:
 			var streamErr error
 			reply, streamErr = botStreamChat(ctx, &streamClient, built.Request, s.botStreamTimeoutsOf(), deltas.onDelta)
 			deltas.flush()
+			s.warnToolCallAnomalies(reply,
+				zap.String("bot_id", bot.ID), zap.String("run_id", run.ID))
 			if streamErr == nil {
 				break
 			}
 			// 失败（含用户停止打断）：草稿等不来 message_commit，丢弃。
 			deltas.discard()
-			s.finishModelRequest(requestRow, reply, streamErr)
+			s.finishModelRequest(requestRow, reply, streamErr, run, bot)
 			if input := s.safePoint(run); input.StopRequested {
 				// 被停止打断的流已经丢弃草稿：主线补一条可见的 lifecycle 提示，
 				// 否则时间线停在用户的「停止」上，看不出半截回复去哪了（视觉
@@ -354,12 +372,12 @@ runLoop:
 			}
 		}
 		contextLimitRetried = false
-		s.finishModelRequest(requestRow, reply, nil)
+		s.finishModelRequest(requestRow, reply, nil, run, bot)
 		if sched == nil {
 			// usage 增量基线是主线压缩估算的状态，schedule 会话不碰。
 			s.rememberUsageBaseline(bot, run, built, reply)
 		}
-		s.accumulateRunUsage(run, reply)
+		s.accumulateRunUsage(run, reply, requestRow)
 
 		// 用 = 而不是 :=：外层 calls 保留给循环顶部的 closeUnstartedSyncCalls，
 		// 不留一个永远为 nil 的变量（INT-137 复审顺手清理）。
@@ -730,8 +748,10 @@ func (s *BotService) beginModelRequest(bot *model.Bot, run *model.BotRun, built 
 	return row, err
 }
 
-// finishModelRequest 落请求终态与 usage；usage 缺失与零严格区分。
-func (s *BotService) finishModelRequest(row *model.BotModelRequest, reply *botModelReply, streamErr error) {
+// finishModelRequest 落请求终态、usage 与按 run 冻结目录计价的成本
+// （INT-139）；usage 缺失与零严格区分，目录无价时成本保持 NULL。
+func (s *BotService) finishModelRequest(row *model.BotModelRequest, reply *botModelReply, streamErr error,
+	run *model.BotRun, bot *model.Bot) {
 	cols := map[string]interface{}{"finished_at": time.Now().UTC()}
 	if streamErr != nil {
 		cols["status"] = model.BotModelRequestFailed
@@ -740,16 +760,29 @@ func (s *BotService) finishModelRequest(row *model.BotModelRequest, reply *botMo
 		cols["error_message"] = botErrMessage(streamErr)
 	} else {
 		cols["status"] = model.BotModelRequestSucceeded
-		if row != nil && reply != nil {
+		if reply != nil && reply.FirstDeltaAt != nil {
+			cols["first_delta_at"] = *reply.FirstDeltaAt
+		}
+	}
+	// usage 与成本是计费事实、与成败无关：上游在 usage 送达后断流的请求
+	// 照样计费，只挂在成功分支会让已付费用量整段消失（INT-139 复审）。
+	// run 总账仍只累计成功请求——run 粒度是「会话实际消费」，请求行粒度
+	// 才是计费流水。
+	if row != nil && reply != nil {
+		if streamErr == nil {
 			cols["provider_request_id"] = reply.ProviderRequestID
-			if reply.FirstDeltaAt != nil {
-				cols["first_delta_at"] = *reply.FirstDeltaAt
-			}
-			if reply.UsageComplete {
-				cols["prompt_tokens"] = reply.PromptTokens
-				cols["completion_tokens"] = reply.CompletionTokens
-				cols["total_tokens"] = reply.TotalTokens
-				cols["cached_tokens"] = reply.CachedTokens
+		}
+		if reply.UsageComplete {
+			cols["prompt_tokens"] = reply.PromptTokens
+			cols["completion_tokens"] = reply.CompletionTokens
+			cols["total_tokens"] = reply.TotalTokens
+			cols["cached_tokens"] = reply.CachedTokens
+			if usd, ok := botRequestCost(run, bot, reply); ok {
+				cols["cost_estimate"] = usd
+				cols["cost_source"] = botCostSourceCatalog
+				row.CostEstimate = &usd
+				src := botCostSourceCatalog
+				row.CostSource = &src
 			}
 		}
 	}
@@ -761,8 +794,9 @@ func (s *BotService) finishModelRequest(row *model.BotModelRequest, reply *botMo
 	}
 }
 
-// accumulateRunUsage 把本次请求的 usage 累加进 run（内存累计，收尾统一落库）。
-func (s *BotService) accumulateRunUsage(run *model.BotRun, reply *botModelReply) {
+// accumulateRunUsage 把本次请求的 usage 与已计价成本累加进 run
+// （内存累计，收尾统一落库）。请求成本为 NULL（目录无价/缺 usage）时不累计。
+func (s *BotService) accumulateRunUsage(run *model.BotRun, reply *botModelReply, requestRow *model.BotModelRequest) {
 	if reply == nil || !reply.UsageComplete {
 		return
 	}
@@ -771,6 +805,10 @@ func (s *BotService) accumulateRunUsage(run *model.BotRun, reply *botModelReply)
 	run.TotalTokens = addToPtr(run.TotalTokens, reply.TotalTokens)
 	run.CachedTokens = addToPtr(run.CachedTokens, reply.CachedTokens)
 	run.UsageComplete = true
+	if requestRow != nil && requestRow.CostEstimate != nil {
+		run.CostEstimate = addToFloatPtr(run.CostEstimate, *requestRow.CostEstimate)
+		run.CostSource = requestRow.CostSource
+	}
 }
 
 // compactionFailDetail 提取压缩失败的精确原因码与中文说明：带类型的

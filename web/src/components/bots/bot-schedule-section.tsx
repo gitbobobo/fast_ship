@@ -28,6 +28,7 @@ import {
   useSetBotScheduleTaskEnabled,
 } from "@/lib/hooks/use-bots";
 import { useAuthStore } from "@/lib/store/auth-store";
+import { formatCostEstimate } from "./bot-metrics";
 import { describeCronExpression, uiLocale } from "@/lib/cron-frequency";
 import { cn } from "@/lib/utils";
 import { formatDate } from "@/lib/utils/format";
@@ -441,7 +442,17 @@ export function BotScheduleTaskDialog({
                           <span className="text-xs text-muted-foreground">
                             {runTime(run)}
                           </span>
-                          <span className="ml-auto text-xs text-muted-foreground">
+                          {run.cost_estimate != null && (
+                            <span
+                              className="ml-auto text-xs text-muted-foreground"
+                              title="成本按内置目录单价估算，仅供参考；无价模型不显示"
+                            >
+                              ≈{formatCostEstimate(run.cost_estimate)}
+                            </span>
+                          )}
+                          <span
+                            className={`${run.cost_estimate == null ? "ml-auto " : ""}text-xs text-muted-foreground`}
+                          >
                             {formatDuration(run.duration_ms)}
                           </span>
                           {run.status === "running" && (

@@ -17,6 +17,7 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/repository"
 	"github.com/google/uuid"
 	"github.com/openai/openai-go/v2"
+	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
 
@@ -106,6 +107,9 @@ func (s *BotService) auxModelRequest(ctx context.Context, bot *model.Bot, maintR
 		Model:               modelName,
 		MaxCompletionTokens: maxOut,
 	}, timeouts, nil)
+	s.warnToolCallAnomalies(reply,
+		zap.String("bot_id", bot.ID), zap.String("maintenance_run_id", maintRun.ID),
+		zap.String("purpose", string(purpose)))
 
 	cols := map[string]interface{}{"finished_at": s.now()}
 	if callErr != nil {
@@ -117,12 +121,21 @@ func (s *BotService) auxModelRequest(ctx context.Context, bot *model.Bot, maintR
 	} else {
 		cols["status"] = model.BotModelRequestSucceeded
 		cols["provider_request_id"] = reply.ProviderRequestID
-		if reply.UsageComplete {
-			cols["usage_complete"] = true
-			cols["prompt_tokens"] = reply.PromptTokens
-			cols["completion_tokens"] = reply.CompletionTokens
-			cols["total_tokens"] = reply.TotalTokens
-			cols["cached_tokens"] = reply.CachedTokens
+	}
+	// usage 与成本是计费事实、与成败无关：usage 送达后断流的请求照样计费
+	//（INT-139 复审，与 finishModelRequest 同口径）。
+	if reply != nil && reply.UsageComplete {
+		cols["usage_complete"] = true
+		cols["prompt_tokens"] = reply.PromptTokens
+		cols["completion_tokens"] = reply.CompletionTokens
+		cols["total_tokens"] = reply.TotalTokens
+		cols["cached_tokens"] = reply.CachedTokens
+		// 维护请求按机器人当前目录归属计价（与上面的 modelCapability
+		// 同一解析口径）；目录无价保持 NULL（INT-139）。
+		if usd, ok := botCostEstimate(bot.CatalogID, modelName,
+			reply.PromptTokens, reply.CachedTokens, reply.CompletionTokens); ok {
+			cols["cost_estimate"] = usd
+			cols["cost_source"] = botCostSourceCatalog
 		}
 	}
 	_, _ = repository.NewBotMaintenanceRepository(s.db).UpdateRequestColumns(req.ID, nil, cols)

@@ -20,6 +20,17 @@ function formatSpeed(tokensPerSecond: number): string {
     : tokensPerSecond.toFixed(1);
 }
 
+/**
+ * 成本估算（USD）：目录计价的量纲通常在 $0.001 附近，金额越小精度越高，
+ * 避免把 $0.0004 四舍五入成 $0.00——缺失值在调用方就过滤了，这里只管
+ * 非空数字的展示。
+ */
+export function formatCostEstimate(usd: number): string {
+  if (usd >= 1) return `$${usd.toFixed(2)}`;
+  if (usd >= 0.01) return `$${usd.toFixed(4)}`;
+  return `$${usd.toPrecision(2)}`;
+}
+
 // 双环几何：尺寸与输入框那一行文字相称，不抢发送按钮的注意力；圆心（盒中心，
 // 由 viewBox 决定），外环半径 8、内环 4.5，环间留 1.5px 间隙，弧从顶部起画
 // （rotate -90）。
@@ -139,6 +150,15 @@ export function BotMetrics({ metrics }: { metrics?: BotMetricsData | null }) {
       ? `缓存命中率 ${cachePct}% = cached_tokens / prompt_tokens · 最近一次模型请求`
       : "暂无缓存命中率：最近一次请求的 usage 不可用";
 
+  // 成本只在目录有价且请求报了 usage 时才有值；无价模型/自定义 provider
+  // 为 null，整项隐藏（缺失 ≠ 0）。
+  const cost =
+    request?.cost_estimate != null ? formatCostEstimate(request.cost_estimate) : null;
+  const costTitle =
+    cost != null
+      ? `本次请求成本估算 ≈${cost}（按内置目录单价：输入 × 单价 + 缓存读取 × 缓存价 + 输出 × 输出价；仅供参考）`
+      : null;
+
   return (
     <div
       data-testid="bot-metrics"
@@ -173,6 +193,11 @@ export function BotMetrics({ metrics }: { metrics?: BotMetricsData | null }) {
       <span data-testid="bot-metric-speed" title={speedTitle}>
         <span className="font-mono">{speed ?? "—"}</span>
       </span>
+      {cost != null && (
+        <span data-testid="bot-metric-cost" title={costTitle ?? undefined}>
+          <span className="font-mono">≈{cost}</span>
+        </span>
+      )}
     </div>
   );
 }

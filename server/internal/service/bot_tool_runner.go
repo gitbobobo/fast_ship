@@ -275,6 +275,12 @@ func (s *BotService) commitAssistantTurn(bot *model.Bot, run *model.BotRun, requ
 		if run.UsageComplete {
 			usageCols["usage_complete"] = true
 		}
+		if run.CostEstimate != nil {
+			usageCols["cost_estimate"] = *run.CostEstimate
+			if run.CostSource != nil {
+				usageCols["cost_source"] = *run.CostSource
+			}
+		}
 		if len(usageCols) > 0 {
 			if _, err := repository.NewBotRunRepository(tx).UpdateColumnsWhereTx(tx, run.ID, nil, usageCols); err != nil {
 				return err

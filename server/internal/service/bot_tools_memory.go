@@ -171,6 +171,12 @@ func (s *BotService) execMemoryRead(call *model.BotToolCall, args *botMemoryArgs
 func (s *BotService) execMemoryWrite(call *model.BotToolCall, args *botMemoryArgs) (string, error) {
 	now := time.Now().UTC()
 	sourceRunID := s.runIDOfCall(call)
+	// 写入者按所在 run 的会话判别（INT-139 R8）：定时任务运行里写的记忆
+	// 记 scheduled，不再一律记成 main。
+	writer := model.BotMemoryWriterMain
+	if s.runs.SessionKindOf(sourceRunID) == model.BotSessionKindSchedule {
+		writer = model.BotMemoryWriterScheduled
+	}
 
 	var op model.BotMemoryOperation
 	switch args.Action {
@@ -234,7 +240,7 @@ func (s *BotService) execMemoryWrite(call *model.BotToolCall, args *botMemoryArg
 			}
 		}
 		f, v, err := txRepo.WriteVersionTx(tx, call.BotID, args.Path, op, content, deleted,
-			args.ExpectedVersion, model.BotMemoryWriterMain, sourceRunID, "", call.ID, now)
+			args.ExpectedVersion, writer, sourceRunID, "", call.ID, now)
 		if err != nil {
 			return err
 		}

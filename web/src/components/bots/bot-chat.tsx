@@ -11,7 +11,7 @@ import { cn } from "@/lib/utils";
 import { BotBackgroundCalls } from "./bot-background-calls";
 import { BotComposer } from "./bot-composer";
 import { BotMessageView } from "./bot-message";
-import { BotMetrics } from "./bot-metrics";
+import { BotMetrics, formatCostEstimate } from "./bot-metrics";
 import { BotTypingIndicator } from "./bot-typing-indicator";
 import { botActionErrorText } from "./bot-tool-card";
 
@@ -177,8 +177,17 @@ export function BotChat({ botId }: { botId: string }) {
               </span>
             )}
             {chat.activeRun?.usage_complete && chat.activeRun.total_tokens != null && (
-              <span className="ml-auto text-xs text-muted-foreground">
+              <span
+                className="ml-auto text-xs text-muted-foreground"
+                title={
+                  chat.activeRun.cost_estimate != null
+                    ? "成本按内置目录单价估算，仅供参考；无价模型不显示"
+                    : undefined
+                }
+              >
                 {chat.activeRun.total_tokens} tokens
+                {chat.activeRun.cost_estimate != null &&
+                  ` · ≈${formatCostEstimate(chat.activeRun.cost_estimate)}`}
               </span>
             )}
             <Button

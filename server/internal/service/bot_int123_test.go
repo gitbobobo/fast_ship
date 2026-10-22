@@ -723,11 +723,22 @@ func TestBotInt123HelpTextMentionsStateActions(t *testing.T) {
 
 // ---------- 8. 平台提示词规则 8 ----------
 
+// INT-139 起规则 8 精简：固定前缀只留边界（归属、用户权限、[[SILENT]]、
+// 详细见 fs_help）；state_get/state_set 等细节留在 fs_help 与 fs_schedule
+// 工具描述里。本测试钉住新口径：前缀不再重复展开细节，细节出处仍在。
 func TestBotInt123PlatformPromptMentionsState(t *testing.T) {
 	full := buildBotSystemPrompt("", "t-nonce")
-	for _, kw := range []string{"state_get", "state_set", "跨运行保留的小状态", "仅新增时提醒"} {
+	for _, kw := range []string{"fs_schedule", "开关启停", "fs_help", "[[SILENT]]"} {
 		if !strings.Contains(full, kw) {
-			t.Fatalf("平台提示词应说明任务小状态（缺 %q）", kw)
+			t.Fatalf("规则 8 应保留边界文案（缺 %q）", kw)
+		}
+	}
+	for _, kw := range []string{"state_get", "state_set", "跨运行保留的小状态", "只报新增"} {
+		if strings.Contains(full, kw) {
+			t.Fatalf("规则 8 精简后不应再展开 %q（细节归 fs_help/工具描述）", kw)
+		}
+		if !strings.Contains(botHelpText, kw) {
+			t.Fatalf("fs_help 应保留完整用法说明（缺 %q）", kw)
 		}
 	}
 	// INT-123 的交付是「工具集升到 v7」：当前版本只会继续演进（INT-136 起

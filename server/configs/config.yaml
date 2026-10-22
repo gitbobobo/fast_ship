@@ -74,3 +74,5 @@ bots:
     nightly_model: ""       # 夜间整理模型；留空继承机器人主模型
     timezone: UTC           # IANA 时区：夜间「当地日期」与 daily 文件命名
     nightly_time: "03:00"   # 当地时区每日触发时刻（HH:MM）
+  runtime:
+    prompt_cache_retain_minutes: 10  # 前缀缓存保留窗口：主线入口激活仅在无主线请求或最近请求超过该窗口时执行，窗口内推迟到压缩边界

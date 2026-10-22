@@ -1700,9 +1700,15 @@ type BotMetrics struct {
 
 // BotRequestMetrics 单次主线模型请求口径；历史累计仍在 run 上，指标区不用累计值
 type BotRequestMetrics struct {
-	CachedTokens     *int64  `json:"cached_tokens,omitempty"`
-	CompletionTokens *int64  `json:"completion_tokens,omitempty"`
-	FinishedAt       *string `json:"finished_at,omitempty"`
+	CachedTokens     *int64 `json:"cached_tokens,omitempty"`
+	CompletionTokens *int64 `json:"completion_tokens,omitempty"`
+
+	// CostEstimate 按 run 冻结目录单价估算的本次请求成本（USD）；目录无价/缺 usage 时为 null（缺失 ≠ 0，INT-139）
+	CostEstimate *float64 `json:"cost_estimate,omitempty"`
+
+	// CostSource 计价来源（catalog）；cost_estimate 为 null 时同 null
+	CostSource *string `json:"cost_source,omitempty"`
+	FinishedAt *string `json:"finished_at,omitempty"`
 
 	// GenerationMs 首个流式正文片段到请求结束的耗时；0 表示不可用（纯工具 调用、失败请求或时长非正）。Token 输出速度 = completion_tokens / (generation_ms/1000)，仅在两者都有且 >0 时给出
 	GenerationMs int64 `json:"generation_ms"`
@@ -1732,7 +1738,13 @@ type BotRun struct {
 	CompletionTokens *int64 `json:"completion_tokens,omitempty"`
 
 	// ConfigSnapshot 本次模型/地址/提示词版本快照 JSON；不含明文 key
-	ConfigSnapshot  string  `json:"config_snapshot"`
+	ConfigSnapshot string `json:"config_snapshot"`
+
+	// CostEstimate 本 run 已计价请求的成本累计（USD）；目录无价/全缺 usage 时为 null（缺失 ≠ 0，INT-139）
+	CostEstimate *float64 `json:"cost_estimate,omitempty"`
+
+	// CostSource 计价来源（catalog）；cost_estimate 为 null 时同 null
+	CostSource      *string `json:"cost_source,omitempty"`
 	CreatedAt       string  `json:"created_at"`
 	ErrorCode       *string `json:"error_code,omitempty"`
 	ErrorMessage    *string `json:"error_message,omitempty"`
@@ -1757,13 +1769,19 @@ type BotRun struct {
 
 // BotScheduleRun defines model for BotScheduleRun.
 type BotScheduleRun struct {
-	CompletionTokens *int64  `json:"completion_tokens,omitempty"`
-	DurationMs       *int64  `json:"duration_ms"`
-	ErrorCode        *string `json:"error_code,omitempty"`
-	ErrorMessage     *string `json:"error_message,omitempty"`
-	FinishedAt       *string `json:"finished_at"`
-	Id               string  `json:"id"`
-	PromptTokens     *int64  `json:"prompt_tokens,omitempty"`
+	CompletionTokens *int64 `json:"completion_tokens,omitempty"`
+
+	// CostEstimate 本 run 已计价请求的成本累计（USD）；目录无价时缺省（缺失 ≠ 0，INT-139）
+	CostEstimate *float64 `json:"cost_estimate,omitempty"`
+
+	// CostSource 计价来源（catalog）
+	CostSource   *string `json:"cost_source,omitempty"`
+	DurationMs   *int64  `json:"duration_ms"`
+	ErrorCode    *string `json:"error_code,omitempty"`
+	ErrorMessage *string `json:"error_message,omitempty"`
+	FinishedAt   *string `json:"finished_at"`
+	Id           string  `json:"id"`
+	PromptTokens *int64  `json:"prompt_tokens,omitempty"`
 
 	// ScheduledFor 本 run 对应的计划时间（UTC）
 	ScheduledFor *string `json:"scheduled_for"`

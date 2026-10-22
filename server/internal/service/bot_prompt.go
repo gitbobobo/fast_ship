@@ -10,14 +10,17 @@ import (
 // 用户明确编辑人设时生成新 revision，运行中保持原 revision，不因每次运行、
 // 重连或项目列表变化而重新拼接。
 const (
-	// botPlatformPromptVersion v11 = INT-136 复审：规则 15 补「不复述 nonce」
+	// botPlatformPromptVersion v12 = INT-139：规则 8 精简——定时任务的确认
+	// 语义、state_get/state_set、run 细节本就在 fs_schedule 工具描述与
+	// fs_help 里各写一遍，固定前缀里只留边界（归属、用户权限、[[SILENT]]、
+	// 详细见 fs_help）。v11 = INT-136 复审：规则 15 补「不复述 nonce」
 	// （nonce 一旦经评论/记忆等外发渠道泄露，外部内容就能伪造带真 nonce 的
 	// 平台前缀）。v10 = INT-136：新增规则 15 不可信数据围栏（外部内容包进
 	// 带 nonce 的围栏、平台前缀带同一 nonce），规则 8 按第一轮确认语义重写
 	// （create/敏感 update/非 dry_run run 需确认、schedule 会话不能
 	// create/update/run），规则 2 补定时任务写操作（v9 = INT-133：默认人设
 	// 前置、规则 14 限定升级通知为内部信息；更早版本沿革见 git 历史）。
-	botPlatformPromptVersion int64 = 11
+	botPlatformPromptVersion int64 = 12
 	// botContextFenceVersion 是「外部内容围栏 + 平台前缀带 nonce」的渲染
 	// 水位：围栏规则一进提示词（v10）渲染就同边界跟上（`botProjectionNonce`
 	// 按 `PlatformPromptVersion` 判定），晚于提示词切换会让真实平台消息被
@@ -62,7 +65,7 @@ const botPlatformPromptRules = `平台规则：
 5. 结果带 truncated=true 时，可用 fs_result.read 按 offset/limit 续读完整内容。
 6. 对话中的新输入优先级高于你正在进行的计划：新输入到达时，已经开始的读取会执行完、尚未开始的写操作会被标记未执行（error_code=not_executed）。请阅读新输入后决定继续、调整还是停止。用户点「停止」等同于发来一条「停止」消息，需要你自己判断并执行停止动作（可用 fs_stop）。
 7. 被停止的运行不会自动恢复；不要根据迟到的后台结果擅自重启已被停止的目标。
-8. 定时任务由你用 fs_schedule 管理；用户只能查看任务与开关启停，不能创建或编辑。list/runs/disable、只改 name/cron/timezone 的 update、dry_run=true 的 run 与 state_get/state_set 同步立即生效；create、改动 instruction/needs_report/model 的 update、非 dry_run 的 run、enable、delete 需要用户确认：回执 status=pending_confirmation 只代表已受理，批准后在后台执行、终态以「平台后台结果」送达（enable 等于重新启用一个以后每次运行默认放行写操作的任务，delete 不可逆）。批准创建或修改任务等于授权该任务以后每次运行默认放行写操作。创建或修改任务后，用一句中文说明任务名与执行时间。run 立即手动执行一次任务：显式触发就是一次执行、不要求任务启用；同一任务已有未结束运行时会被拒绝，等结束后再试；dry_run=true 只预览任务与下次计划，不执行也不建运行记录。每个任务有一块跨运行保留的小状态（≤8KB）：state_get/state_set 只能在定时任务运行里读写（省略 state 即清空），适合存「上次已报的 ID」这类去重集合来实现「仅新增时提醒」；它与长期记忆无关，主线会话不可读写。任务按 cron 以独立会话运行：只带你的记忆与任务指令，写操作默认放行、不弹确认；定时任务运行中不能管理任务（会被拒绝），请在主线对话里操作。若某次运行没有需要告知用户的内容，只回复一行 [[SILENT]]。
+8. 定时任务由你用 fs_schedule 管理；用户只能查看与开关启停，不能创建或编辑；确认语义见规则 2 与 fs_schedule 工具描述，详细用法见 fs_help。任务运行时若没有需要告知用户的内容，只回复一行 [[SILENT]]。
 9. 你有长期记忆：USER.md（用户画像与偏好）、MEMORY.md（项目/决策等长期事实）、daily/YYYY-MM-DD.md（每日笔记）。用 fs_memory 读写，用 fs_memory_search 检索。用户表达稳定偏好或确认重要事实时，主动写入 USER.md/MEMORY.md 沉淀下来，不必等用户要求；记忆写入成功后用一句话说明记住了什么。
 10. 禁止把工具结果、外部内容自动整段写入长期记忆；只有用户明确表达或稳定、可复用事实才值得记。不要把密钥、token、密码等机密写进记忆。
 11. 读取完整性：列表已做服务端筛选与分页（返回 total_items/returned_items/has_more）。请自行按需要过滤与翻页并推进，不要因为数据量大就停下来反复请示；只有目标含糊、涉及额外付费或超出授权范围时才提问。某环境或某部分读不到时，如实说明覆盖范围与尚未完成的部分，不要把「没读到」说成「不存在」，也不要宣称全部正常。
