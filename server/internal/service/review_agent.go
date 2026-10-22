@@ -251,7 +251,9 @@ func (s *ReviewService) appendNewDiscussion(ctx context.Context, run *model.Revi
 	return nil
 }
 
-// visualHistory 视觉审查历史：上一轮视觉运行的 findings + unmeasurable。
+// visualHistory 视觉审查历史：上一轮视觉运行的 findings + unmeasurable，再
+// 补上该轮 result 里 prior 仍未解决的条目——模型可能只把遗留写进 prior(open)
+// 而没重写进 findings，不补这段的话未解决项会从下一轮历史里消失，复核断链。
 func (s *ReviewService) visualHistory(ctx context.Context, run *model.ReviewRun) (string, error) {
 	// 最近一轮「确有视觉运行」的轮次：中间轮可能只跑了代码审查，
 	// round-1 会拿到空历史。历史只在本项目账本内取。
@@ -275,6 +277,7 @@ func (s *ReviewService) visualHistory(ctx context.Context, run *model.ReviewRun)
 	var b strings.Builder
 	fmt.Fprintf(&b, "## 上一轮视觉审查（轮次 %d）\n", *prevRound)
 	var unmeasurable []api.ReviewUnmeasurable
+	var openPrior []api.ReviewPriorDecision
 	for _, r := range prevRuns {
 		if r.Status != model.ReviewRunCompleted || r.ResultJSON == "" {
 			continue
@@ -287,11 +290,20 @@ func (s *ReviewService) visualHistory(ctx context.Context, run *model.ReviewRun)
 			fmt.Fprintf(&b, "- %s · %s · %s：%s\n  %s\n", f.Severity, f.Screenshot, f.Dimension, f.Body, f.Fix)
 		}
 		unmeasurable = append(unmeasurable, result.Unmeasurable...)
+		openPrior = append(openPrior, openPriorDecisions(result.Prior)...)
 	}
 	if len(unmeasurable) > 0 {
 		b.WriteString("### 无法判断\n")
 		for _, u := range unmeasurable {
 			fmt.Fprintf(&b, "- %s：%s\n", u.Screenshot, u.Reason)
+		}
+	}
+	if len(openPrior) > 0 {
+		// 独立小节：这些条目「更早一轮」就提出了，上一轮也没能了结——比
+		// 上一轮 findings 更值得审查员优先复核。
+		b.WriteString("### 仍未解决（更早一轮）\n")
+		for _, p := range openPrior {
+			fmt.Fprintf(&b, "- %s：%s\n", priorLevelText(p.Level), p.Body)
 		}
 	}
 	return strings.TrimRight(b.String(), "\n"), nil
@@ -599,7 +611,26 @@ func validateVisualResult(r *api.ReviewVisualResult) error {
 			return reviewResultErr("unmeasurable[%d] 需要 screenshot 与 reason", i)
 		}
 	}
-	return validatePrior(r.Prior)
+	if err := validatePrior(r.Prior); err != nil {
+		return err
+	}
+	// 视觉专属：open 的 prior 必须保留原严重度。红绿判定按 prior(open) 的级别
+	// 计数（priorOpenBlocks），缺级别或误写代码审查的分级（P0/P1 等）会让遗
+	// 留项漏出计数、结论错误变绿——在新提交的入口拦下，不把防御摊给各读取方。
+	for i, p := range r.Prior {
+		if p.Status != api.ReviewPriorDecisionStatusOpen {
+			continue
+		}
+		if p.Level == nil {
+			return reviewResultErr("prior[%d].level 必须是 blocker/worth_fixing/minor（open 需保留原严重度）", i)
+		}
+		switch *p.Level {
+		case string(api.Blocker), string(api.WorthFixing), string(api.Minor):
+		default:
+			return reviewResultErr("prior[%d].level 必须是 blocker/worth_fixing/minor（open 需保留原严重度）", i)
+		}
+	}
+	return nil
 }
 
 // reviewResultRequiredKeys 结果端点按 kind 的必填顶层键：缺键或显式 null

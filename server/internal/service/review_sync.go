@@ -350,6 +350,12 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 			return decErr
 		}
 		switch outcome.Decision {
+		case visualWait:
+			// 代码审查还有在途运行：本轮同步只发布代码侧产出，不写视觉状态、
+			// 不发视觉评论、不动截图指纹——代码结论还没落定，任何视觉判断
+			// （沿用/开轮/截图不可用）都可能建立在即将被推翻的输入上。等代码
+			// 全部终态后的下一次同步事件再做决策。
+			visualPending = false
 		case visualScreensUnavailable:
 			// 截图全部下载失败：不建视觉运行，给「视觉审查」写一条明确的
 			// failure。指纹不入账——重试发生在下一次同步事件（新推送产生
@@ -394,7 +400,11 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 				} else if !ok {
 					return nil
 				}
-				body := buildScreensUnavailableComment(outcome.PriorRuns)
+				body := buildScreensUnavailableComment(reviewCommentMeta{
+					RepoFullName: ledger.RepoFullName,
+					HeadSHA:      ledger.HeadSHA,
+					RoundNumber:  ledger.RoundNumber,
+				}, outcome.PriorRuns)
 				if err := s.upsertPRComment(ctx, client, ledger, reviewVisualCommentMarker,
 					body, "visual_comment_id", ledger.VisualCommentID); err != nil {
 					return err
@@ -402,7 +412,9 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 			}
 		case visualStart:
 			visualPending = true
-			created, aborted, createErr := s.createVisualRuns(ledger, pr, codeRuns, now)
+			// 指纹随运行同一事务落账：GitHub pending 写失败时账本指纹也已推进，
+			// 重试走汇总分支不会留下「账本描述更早轮材料」的错配。
+			created, aborted, createErr := s.createVisualRuns(ledger, pr, codeRuns, now, outcome.FingerprintToStore)
 			if createErr != nil {
 				return createErr
 			}
@@ -420,10 +432,7 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 				ledger.HeadSHA, "pending", reviewVisualStatusContext, statusDesc("视觉审查中"), targetURL); err != nil {
 				return errs.New(errs.ErrGitHubAPI.Code, "写视觉审查状态失败: "+err.Error())
 			}
-			ok, err := s.updateLedgerEpoch(ledger, epoch, map[string]any{
-				"visual_status":              "pending",
-				"visual_screens_fingerprint": outcome.Fingerprint,
-			})
+			ok, err := s.updateLedgerEpoch(ledger, epoch, map[string]any{"visual_status": "pending"})
 			if err != nil {
 				return errs.ErrInternal
 			}
@@ -431,7 +440,9 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 				return nil
 			}
 			ledger.VisualStatus = "pending"
-			ledger.VisualScreensFingerprint = outcome.Fingerprint
+			if outcome.FingerprintToStore != "" {
+				ledger.VisualScreensFingerprint = outcome.FingerprintToStore
+			}
 		case visualCarryFailure:
 			visualPending = false
 			visualCarry = true
@@ -440,7 +451,13 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 				ledger.HeadSHA, "failure", reviewVisualStatusContext, statusDesc(desc), targetURL); err != nil {
 				return errs.New(errs.ErrGitHubAPI.Code, "写视觉审查状态失败: "+err.Error())
 			}
-			ok, err := s.updateLedgerEpoch(ledger, epoch, map[string]any{"visual_status": "failure"})
+			fields := map[string]any{"visual_status": "failure"}
+			// 内容指纹是本次探测刚拿到的新知识（如作者换了 URL 但图没变）：
+			// 一并落账，否则内容相同的判定没存住，后续同步事件会反复重探。
+			if outcome.FingerprintToStore != "" {
+				fields["visual_screens_fingerprint"] = outcome.FingerprintToStore
+			}
+			ok, err := s.updateLedgerEpoch(ledger, epoch, fields)
 			if err != nil {
 				return errs.ErrInternal
 			}
@@ -448,48 +465,61 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 				return nil
 			}
 			ledger.VisualStatus = "failure"
+			if outcome.FingerprintToStore != "" {
+				ledger.VisualScreensFingerprint = outcome.FingerprintToStore
+			}
 			if err := s.upsertVisualComment(ctx, client, ledger, nil, outcome.PriorRuns, true, now); err != nil {
 				return err
 			}
-		default:
+		case visualCarrySuccess:
+			// 截图内容未变且上轮视觉后无 UI 改动：上一轮的通过就是本 head 的
+			// 结论，把 success 带过来（开轮清空了 visual_status），否则新提交
+			// 会没有视觉结论。走到这里的 ScreensChanged 必为 false。
 			visualPending = false
-			// 截图没变、无需重启视觉审查：上一轮视觉已通过时把 success 带到
-			// 新 head（开轮清空了 visual_status），否则新提交会没有视觉结论。
-			// 「截图未变化」只在截图集合确实没变时才写——描述删光了截图或全
-			// 部不是图同样落进本分支（HasScreenshots=false），那句文案不再成立，
-			// 改用通用沿用文案。ScreensSettled 时把指纹一并入账（none: 前缀标
-			// 记结清态）：同一集合后续同步事件不再重探。
-			fields := map[string]any{}
-			if len(outcome.PriorRuns) > 0 && priorVisualPassed(outcome.PriorRuns) {
-				desc := "审查通过（沿用上一轮）"
-				if outcome.HasScreenshots && !outcome.ScreensChanged {
-					desc = "审查通过（沿用上一轮，截图未变化）"
-				}
-				if err := client.CreateCommitStatus(ctx, ledger.InstallationID, ledger.RepoFullName,
-					ledger.HeadSHA, "success", reviewVisualStatusContext,
-					statusDesc(desc), targetURL); err != nil {
-					return errs.New(errs.ErrGitHubAPI.Code, "写视觉审查状态失败: "+err.Error())
-				}
-				fields["visual_status"] = "success"
+			desc := "审查通过（沿用上一轮）"
+			if outcome.HasScreenshots && !outcome.ScreensChanged {
+				desc = "审查通过（沿用上一轮，截图未变化）"
 			}
+			if err := client.CreateCommitStatus(ctx, ledger.InstallationID, ledger.RepoFullName,
+				ledger.HeadSHA, "success", reviewVisualStatusContext, statusDesc(desc), targetURL); err != nil {
+				return errs.New(errs.ErrGitHubAPI.Code, "写视觉审查状态失败: "+err.Error())
+			}
+			fields := map[string]any{"visual_status": "success"}
+			if outcome.FingerprintToStore != "" {
+				fields["visual_screens_fingerprint"] = outcome.FingerprintToStore
+			}
+			ok, err := s.updateLedgerEpoch(ledger, epoch, fields)
+			if err != nil {
+				return errs.ErrInternal
+			}
+			if !ok {
+				return nil
+			}
+			ledger.VisualStatus = "success"
+			if outcome.FingerprintToStore != "" {
+				ledger.VisualScreensFingerprint = outcome.FingerprintToStore
+			}
+		case visualNone:
+			visualPending = false
+			// 截图集合已判定「没有可服务的截图」（描述里没有引用、或全部「不
+			// 是图」）：结清态指纹入账，同一集合后续同步事件不再重探。不写视
+			// 觉状态——上一轮的结论不是本 head 的结论，不能冒充（尤其不能在
+			// 上一轮失败时冒充通过，musiver PR #563 的红绿反复正源于此）。
 			if outcome.ScreensSettled {
-				fields["visual_screens_fingerprint"] = settledNonePrefix + outcome.Fingerprint
-			}
-			if len(fields) > 0 {
-				ok, err := s.updateLedgerEpoch(ledger, epoch, fields)
+				stored := encodeScreensFingerprint(screensFingerprint{urlFP: outcome.Fingerprint, settledNone: true})
+				ok, err := s.updateLedgerEpoch(ledger, epoch, map[string]any{"visual_screens_fingerprint": stored})
 				if err != nil {
 					return errs.ErrInternal
 				}
 				if !ok {
 					return nil
 				}
-				if _, ok := fields["visual_status"]; ok {
-					ledger.VisualStatus = "success"
-				}
-				if outcome.ScreensSettled {
-					ledger.VisualScreensFingerprint = settledNonePrefix + outcome.Fingerprint
-				}
+				ledger.VisualScreensFingerprint = stored
 			}
+		default:
+			// 决策枚举已全覆盖，不应到达。保持什么都不写：这里凭空补一条
+			// success（旧实现的行为）正是状态红绿反复的来源之一。
+			visualPending = false
 		}
 	} else {
 		visualPending = false
@@ -637,7 +667,8 @@ func (s *ReviewService) upsertPRComment(ctx context.Context, client githubapi.Gi
 // upsertVisualComment 视觉顶层评论：本 head 的视觉运行结论或沿用提醒。
 func (s *ReviewService) upsertVisualComment(ctx context.Context, client githubapi.GitHubClient,
 	ledger *model.ReviewPullRequest, visualRuns []model.ReviewRun, priorRuns []model.ReviewRun, carried bool, now time.Time) error {
-	body := buildVisualComment(visualRuns, priorRuns, carried)
+	meta := reviewCommentMeta{RepoFullName: ledger.RepoFullName, HeadSHA: ledger.HeadSHA, RoundNumber: ledger.RoundNumber}
+	body := buildVisualComment(meta, visualRuns, priorRuns, carried)
 	return s.upsertPRComment(ctx, client, ledger, reviewVisualCommentMarker, body, "visual_comment_id", ledger.VisualCommentID)
 }
 
@@ -687,7 +718,8 @@ func summarizeCodeRuns(runs []model.ReviewRun) (state, description string) {
 }
 
 // summarizeVisualRuns 视觉审查汇总：active → pending；未完成的运行 → error；
-// blocker/worth_fixing → failure；否则 success。
+// blocker/worth_fixing（含 prior 里仍未解决的）→ failure；否则 success。计数
+// 走 visualFailureCount，与状态判定、评论渲染、Web 计数同一口径。
 func summarizeVisualRuns(runs []model.ReviewRun) (state, description string) {
 	for _, r := range runs {
 		if !r.Status.Terminal() {
@@ -705,11 +737,7 @@ func summarizeVisualRuns(runs []model.ReviewRun) (state, description string) {
 		if json.Unmarshal([]byte(r.ResultJSON), &result) != nil {
 			continue
 		}
-		for _, f := range result.Findings {
-			if f.Severity == api.Blocker || f.Severity == api.WorthFixing {
-				n++
-			}
-		}
+		n += visualFailureCount(&result)
 	}
 	if n > 0 {
 		return "failure", fmt.Sprintf("发现 %d 条问题", n)
@@ -984,10 +1012,36 @@ func codeLevelRank(level api.ReviewCodeFindingLevel) int {
 	return 3
 }
 
+// openPriorDecisions 取结论里仍未解决（status=open）的 prior 条目。fixed /
+// rejected 已经了结，只有 open 还挂在复核者头上。
+func openPriorDecisions(prior []api.ReviewPriorDecision) []api.ReviewPriorDecision {
+	var out []api.ReviewPriorDecision
+	for _, p := range prior {
+		if p.Status == api.ReviewPriorDecisionStatusOpen {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// priorLevelText prior 条目的级别展示文本：级别缺失（模型没写）时标注「未分
+// 级」，别让列表行变成「- ·：正文」这种残缺形态。
+func priorLevelText(level *string) string {
+	if level == nil || strings.TrimSpace(*level) == "" {
+		return "未分级"
+	}
+	return *level
+}
+
 // appendVisualFindings 把视觉运行的意见条目渲染进正文：按严重度排序，带截图
-// 标签/维度/改法。buildVisualComment 与 buildScreensUnavailableComment 共用
-// 这段渲染，不复制两份。
-func appendVisualFindings(b *strings.Builder, runs []model.ReviewRun) {
+// 标签/维度/改法；每个组合先「本轮新发现」（findings + unmeasurable，提示词
+// 契约约定 findings 只写本轮新问题）再「仍未解决」（prior 里 status=open 的
+// 条目——按契约未解决项只标 prior，这里不渲染就会从评论里消失，状态红绿判
+// 定也同口径计数）。
+// carried=true 表示渲染的是被沿用的上一轮运行：那些 findings 本身就是未解决
+// 项，统一归入「仍未解决」，不冒充本轮新发现。buildVisualComment 与
+// buildScreensUnavailableComment 共用这段渲染，不复制两份。
+func appendVisualFindings(b *strings.Builder, runs []model.ReviewRun, carried bool) {
 	rank := func(s api.ReviewVisualFindingSeverity) int {
 		switch s {
 		case api.Blocker:
@@ -1009,41 +1063,62 @@ func appendVisualFindings(b *strings.Builder, runs []model.ReviewRun) {
 		sort.SliceStable(result.Findings, func(i, j int) bool {
 			return rank(result.Findings[i].Severity) < rank(result.Findings[j].Severity)
 		})
+		openPrior := openPriorDecisions(result.Prior)
+		hasNew := len(result.Findings) > 0 || len(result.Unmeasurable) > 0
+		if carried {
+			// 被沿用的上一轮发现全是未解决项：与 prior(open) 合在同一段。
+			if hasNew || len(openPrior) > 0 {
+				b.WriteString("**仍未解决**\n")
+			}
+		} else if hasNew {
+			b.WriteString("**本轮新发现**\n")
+		}
 		for _, f := range result.Findings {
 			fmt.Fprintf(b, "- %s · %s · %s：%s\n  改法：%s\n", f.Severity, f.Screenshot, f.Dimension, f.Body, f.Fix)
 		}
 		for _, u := range result.Unmeasurable {
 			fmt.Fprintf(b, "- 无法判断 · %s：%s\n", u.Screenshot, u.Reason)
 		}
+		if !carried && len(openPrior) > 0 {
+			b.WriteString("**仍未解决**\n")
+		}
+		for _, p := range openPrior {
+			fmt.Fprintf(b, "- 仍未解决 · %s：%s\n", priorLevelText(p.Level), p.Body)
+		}
 		b.WriteString("\n")
 	}
 }
 
-// buildVisualComment 视觉审查顶层评论：按严重度排序，带截图标签/维度/改法；
-// carried 时正文说明沿用了上一轮（截图未变）。
-func buildVisualComment(visualRuns, priorRuns []model.ReviewRun, carried bool) string {
+// buildVisualComment 视觉审查顶层评论：标题带短 SHA 与轮次（与代码评论同一
+// 定位口径），按组合分节（summary → 本轮新发现 → 仍未解决）；carried 时正文
+// 开头说明沿用原因并指向上轮的轮次与 head——复核者要能知道意见是哪轮留下
+// 的，不能只看到一句「未变化」。
+func buildVisualComment(meta reviewCommentMeta, visualRuns, priorRuns []model.ReviewRun, carried bool) string {
 	var b strings.Builder
-	b.WriteString(reviewVisualCommentMarker + "\n视觉审查意见：\n\n")
-	if carried {
-		b.WriteString("沿用上一轮视觉审查结论（截图未变化，意见尚未处理）。\n\n")
+	b.WriteString(reviewVisualCommentMarker + "\n")
+	fmt.Fprintf(&b, "## 视觉审查 · %s · 第 %d 轮\n\n", reviewShortSHA(meta.HeadSHA), meta.RoundNumber)
+	if carried && len(priorRuns) > 0 {
+		fmt.Fprintf(&b, "沿用上一轮视觉审查结论（第 %d 轮 · head %s）：截图未变化，意见尚未处理。\n\n",
+			priorRuns[0].RoundNumber, reviewShortSHA(priorRuns[0].HeadSHA))
 	}
 	source := visualRuns
 	if carried {
 		source = priorRuns
 	}
-	appendVisualFindings(&b, source)
+	appendVisualFindings(&b, source, carried)
 	return strings.TrimRight(b.String(), "\n")
 }
 
 // buildScreensUnavailableComment 截图全部无法下载时的视觉评论正文：沿用同一
-// marker，说明本轮未做视觉审查的原因，并保留上一轮的视觉意见条目——上一轮
-// carry 发的「截图未变化」评论不能原样留在新 head 上（截图集合已换），但上一
-// 轮的意见本身仍未处理，丢掉会让复核者失去线索。
-func buildScreensUnavailableComment(priorRuns []model.ReviewRun) string {
+// marker 与标题口径，说明本轮未做视觉审查的原因，并保留上一轮的视觉意见条
+// 目——上一轮 carry 发的「截图未变化」评论不能原样留在新 head 上（截图集合
+// 已换），但上一轮的意见本身仍未处理，丢掉会让复核者失去线索。
+func buildScreensUnavailableComment(meta reviewCommentMeta, priorRuns []model.ReviewRun) string {
 	var b strings.Builder
-	b.WriteString(reviewVisualCommentMarker + "\n视觉审查意见：\n\n")
+	b.WriteString(reviewVisualCommentMarker + "\n")
+	fmt.Fprintf(&b, "## 视觉审查 · %s · 第 %d 轮\n\n", reviewShortSHA(meta.HeadSHA), meta.RoundNumber)
 	b.WriteString("本轮 PR 描述里的截图全部无法下载，未做视觉审查。以下为上一轮的视觉审查意见：\n\n")
-	appendVisualFindings(&b, priorRuns)
+	appendVisualFindings(&b, priorRuns, true)
 	return strings.TrimRight(b.String(), "\n")
 }
 
@@ -1230,10 +1305,16 @@ const (
 	visualStart                                    // 建视觉运行
 	visualCarryFailure                             // 不新建，沿用旧 failure 到新 head
 	visualScreensUnavailable                       // 截图全部下载失败，未启动视觉运行
+	visualWait                                     // 代码审查未终态：本轮不做任何视觉产出
+	visualCarrySuccess                             // 不新建，沿用旧 success 到新 head
 )
 
 // visualDecisionInput decideVisual 的纯输入（便于单测）。
 type visualDecisionInput struct {
+	// CodeAllTerminal 所有代码运行都已终态（completed/failed/超时/取消）。
+	// 未终态时视觉决策整体悬置（visualWait）——代码结论未落定，任何视觉
+	// 判断都可能建立在即将被推翻的输入上。
+	CodeAllTerminal             bool
 	CodeAllTerminalOK           bool // 全部代码运行 completed 且无 P0/P1/P2
 	HasVisualCombos             bool
 	HasScreenshots              bool
@@ -1241,6 +1322,7 @@ type visualDecisionInput struct {
 	ScreensChanged              bool // 本次截图指纹 ≠ 总账 fingerprint
 	AnyUIChangedSinceLastVisual bool
 	PriorVisualFailed           bool // 上一轮视觉含 blocker/worth_fixing
+	PriorVisualPassed           bool // 上一轮视觉全部完成且无未处理问题
 	// ScreensUnavailable 截图探测「拉不到」（probeUnavailable；全部「不是图」
 	// 走 probeNone，在 decideVisualForPR 里改判 HasScreenshots=false）。探测
 	// 只在 ScreensChanged || AnyUIChangedSinceLastVisual 成立（本轮真的要开
@@ -1251,16 +1333,25 @@ type visualDecisionInput struct {
 }
 
 // decideVisual 视觉衔接判定（顺序即优先级）：
-// 代码未全净、无视觉组合、无 UI 变化、无截图（含全部「不是图」）→ 不启动；
-// 截图变了或上轮视觉后又有 UI 改动（本轮真的要开视觉）→ 探测拉不到则报
-// 「截图无法下载」（不走沿用旧 failure 的分支——那会拿上一轮不相关的结论
-// 解释这次的失败），否则启动；
-// 截图未变且上一轮视觉有遗留 → 沿用 failure 到新 head。
+// 代码审查未全终态 → 等待（不写任何视觉产出）；
+// 代码未全净、无视觉组合、无截图（含全部「不是图」）→ 不启动；
+// 截图变了或上轮视觉后又有 UI 改动（本轮真的要开视觉）→ 代码没全净/无 UI
+// 改动就不开，探测拉不到则报「截图无法下载」（不走沿用旧 failure 的分支
+// ——那会拿上一轮不相关的结论解释这次的失败），否则启动；
+// 截图未变且上一轮视觉有遗留 → 沿用 failure 到新 head；
+// 截图未变且上一轮视觉通过且本轮无事可做 → 沿用 success（截图变了或有新
+// UI 改动时绝不沿用通过——那会盖住真正需要复审的信号）。
 func decideVisual(in visualDecisionInput) visualDecision {
-	if !in.CodeAllTerminalOK || !in.HasVisualCombos || !in.AnyUIChanged || !in.HasScreenshots {
+	if !in.CodeAllTerminal {
+		return visualWait
+	}
+	if !in.HasVisualCombos || !in.HasScreenshots {
 		return visualNone
 	}
 	if in.ScreensChanged || in.AnyUIChangedSinceLastVisual {
+		if !in.CodeAllTerminalOK || !in.AnyUIChanged {
+			return visualNone
+		}
 		if in.ScreensUnavailable {
 			return visualScreensUnavailable
 		}
@@ -1269,14 +1360,21 @@ func decideVisual(in visualDecisionInput) visualDecision {
 	if in.PriorVisualFailed {
 		return visualCarryFailure
 	}
+	if in.PriorVisualPassed {
+		return visualCarrySuccess
+	}
 	return visualNone
 }
 
 // visualDecisionOutcome decideVisualForPR 的输出：决策本身 + 沿用分支需要的
 // 两个事实（本轮是否仍有截图引用、截图集合是否变化）。
 type visualDecisionOutcome struct {
-	Decision                 visualDecision
-	Fingerprint              string // 本次截图指纹（visualStart / 集合已判无时入账）
+	Decision    visualDecision
+	Fingerprint string // 本次截图 URL 集合指纹（ScreensSettled 结清态入账时用）
+	// FingerprintToStore 待落账的完整指纹（含内容指纹，c: 前缀形态）。只在
+	// 真正得到新内容指纹时非空（开轮/沿用且探测全部成功）——没有新知识就不
+	// 覆盖账本，别把已知的内容指纹冲成未知。
+	FingerprintToStore       string
 	ScreensUnavailableReason string
 	HasScreenshots           bool // 规整/准入/探测后仍成立的截图引用
 	ScreensChanged           bool
@@ -1290,9 +1388,12 @@ type visualDecisionOutcome struct {
 // decideVisualForPR 组装真实输入并调 decideVisual。
 func (s *ReviewService) decideVisualForPR(ctx context.Context, ledger *model.ReviewPullRequest,
 	pr *githubapi.PullRequest, codeRuns []model.ReviewRun) (visualDecisionOutcome, error) {
-	in := visualDecisionInput{CodeAllTerminalOK: true}
+	in := visualDecisionInput{CodeAllTerminal: true, CodeAllTerminalOK: true}
 	anyUI, anySinceLast := false, false
 	for _, r := range codeRuns {
+		if !r.Status.Terminal() {
+			in.CodeAllTerminal = false
+		}
 		if r.Status != model.ReviewRunCompleted {
 			in.CodeAllTerminalOK = false
 			continue
@@ -1326,14 +1427,18 @@ func (s *ReviewService) decideVisualForPR(ctx context.Context, ledger *model.Rev
 
 	refs := collectScreenshotURLs(pr.Body)
 	in.HasScreenshots = len(refs) > 0
-	fingerprint := screenshotFingerprint(refs)
-	// 已结清的「没有可服务截图」集合以 none: 前缀入账，与「有图集合的指
-	// 纹」区分开：同一集合（指纹相同）后续同步事件直接判无截图、不再重
-	// 探；集合变化（指纹不同）自动恢复探测。
-	storedFP, settledNone := splitSettledFingerprint(ledger.VisualScreensFingerprint)
-	in.ScreensChanged = fingerprint != storedFP
+	urlFP := screenshotFingerprint(refs)
+	// 账本指纹带内容维度（c:<urlFP>:<contentFP>）后，比较分两层：URL 集合
+	// 相同直接判未变（不下载、不探测，保留「不每次同步拉图」的便宜路径）；
+	// 集合换了才探测，用下载内容的指纹比对——作者重新上传截图、URL 全换但
+	// 像素相同不算变化（musiver PR #563 第 4→5 轮的红绿反复正源于此）。
+	storedFP := parseScreensFingerprint(ledger.VisualScreensFingerprint)
+	sameSet := storedFP.urlFP != "" && storedFP.urlFP == urlFP
+	in.ScreensChanged = !sameSet
 	screensSettled := !in.HasScreenshots
-	judgedNone := settledNone && !in.ScreensChanged
+	// 已结清的「没有可服务截图」集合：同一集合（指纹相同）后续同步事件直接
+	// 判无截图、不再重探；集合变化自动恢复探测。
+	judgedNone := storedFP.settledNone && !in.ScreensChanged
 	if judgedNone {
 		in.HasScreenshots = false
 		screensSettled = true
@@ -1342,27 +1447,35 @@ func (s *ReviewService) decideVisualForPR(ctx context.Context, ledger *model.Rev
 	// 截图能否下载只在「本轮真的要开视觉」时才探测（ScreensChanged 或
 	// AnyUIChangedSinceLastVisual 成立，决策才可能走到 visualStart）：指纹
 	// 未变时不拉图——那走的是沿用/带过上一轮结论的路径，探测失败只会把
-	// 上一轮的 failure 带过分支误写成「截图不可用」。探测第一张成功即停、
-	// 不落账；全部「不是图」（probeNone）把 HasScreenshots 改判为 false，
-	// 与「描述里没有截图」同收敛（visualNone，不刷「截图无法下载」）；
-	// 拉不到时不建视觉运行（决策改报 visualScreensUnavailable），且指纹不
-	// 入账——下次同步事件指纹仍不同，会重新尝试下载。
+	// 上一轮的 failure 带过分支误写成「截图不可用」。探测后按内容指纹收敛
+	// ScreensChanged：账本没有内容指纹（旧格式/上次部分失败）或本次只成功
+	// 一部分（内容未知）时保守视为变化——视觉轮照常开，ensureAssets 会在
+	// 运行时补齐。全部「不是图」（probeNone）把 HasScreenshots 改判为 false，
+	// 与「描述里没有截图」同收敛（visualNone，不刷「截图无法下载」）；拉不
+	// 到时不建视觉运行（决策改报 visualScreensUnavailable），且指纹不入账
+	// ——下次同步事件指纹仍不同，会重新尝试下载。
+	newContentFP := ""
 	if !judgedNone && in.CodeAllTerminalOK && in.HasVisualCombos && in.AnyUIChanged && in.HasScreenshots &&
 		(in.ScreensChanged || in.AnyUIChangedSinceLastVisual) {
-		probe, reason := s.probeScreenshots(ctx, ledger.InstallationID, pr.Body)
-		switch probe {
+		probe := s.probeScreenshots(ctx, ledger.InstallationID, pr.Body)
+		switch probe.result {
 		case probeReady:
+			newContentFP = probe.contentFP
+			// 内容可比对且相同 → 改判未变（URL 全换但像素相同的重传不算变化）；
+			// 任一侧内容未知或不同 → 按变化保守处理。
+			in.ScreensChanged = storedFP.contentFP == "" || probe.contentFP == "" ||
+				probe.contentFP != storedFP.contentFP
 		case probeNone:
 			in.HasScreenshots = false
 			screensSettled = true
 		case probeUnavailable:
 			in.ScreensUnavailable = true
-			in.ScreensUnavailableReason = reason
+			in.ScreensUnavailableReason = probe.reason
 		}
 	}
 
-	// 上一轮（更早 round）视觉运行是否带 blocker/worth_fixing。历史只看
-	// 本项目账本——其他项目同仓库的残留运行不构成「上一轮」。
+	// 上一轮（更早 round）视觉运行的结论。历史只看本项目账本——其他项目
+	// 同仓库的残留运行不构成「上一轮」。
 	var allPrior []model.ReviewRun
 	if err := s.db.Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND kind = ? AND round_number < ?",
 		ledger.ProjectID, ledger.RepoFullName, ledger.PRNumber, model.ReviewKindVisual, ledger.RoundNumber).
@@ -1379,13 +1492,35 @@ func (s *ReviewService) decideVisualForPR(ctx context.Context, ledger *model.Rev
 			break // 只看最近一轮
 		}
 		priorRuns = append(priorRuns, r)
-		if r.Status == model.ReviewRunCompleted && visualResultHasFailure(r.ResultJSON) {
-			in.PriorVisualFailed = true
+	}
+	in.PriorVisualFailed = priorVisualFailure(priorRuns)
+	in.PriorVisualPassed = priorVisualPassed(priorRuns)
+
+	decision := decideVisual(in)
+	// 待落账指纹：开轮/沿用的三个决策都要让账本描述「最近一次视觉轮的材料」，
+	// 否则会与更早轮次的结论错配——例如某轮部分下载成功开轮但内容指纹未知，
+	// 账本还留着更早集合的指纹，之后截图换回那个集合时被误判「未变化」，把
+	// 本轮（不同截图）的 success 沿用给旧截图。分三档：
+	//   - 拿到内容指纹 → c:<urlFP>:<contentFP>（现有行为）；
+	//   - 没拿到但 URL 集合变了 → 至少推进 URL 维度（裸 urlFP），旧指纹不再
+	//     能命中本轮材料。副作用一并解决：描述里混着「正常图 + 恒失败引用」
+	//     时内容指纹永远未知，首轮把 URL 指纹落账后同一集合不再反复重探；
+	//   - URL 集合没变 → 不写，沿用账本已有的内容指纹（没有新知识就别把已
+	//     知冲成未知）。
+	store := ""
+	switch decision {
+	case visualStart, visualCarryFailure, visualCarrySuccess:
+		switch {
+		case newContentFP != "":
+			store = encodeScreensFingerprint(screensFingerprint{urlFP: urlFP, contentFP: newContentFP})
+		case !sameSet:
+			store = encodeScreensFingerprint(screensFingerprint{urlFP: urlFP})
 		}
 	}
 	return visualDecisionOutcome{
-		Decision:                 decideVisual(in),
-		Fingerprint:              fingerprint,
+		Decision:                 decision,
+		Fingerprint:              urlFP,
+		FingerprintToStore:       store,
 		ScreensUnavailableReason: in.ScreensUnavailableReason,
 		HasScreenshots:           in.HasScreenshots,
 		ScreensChanged:           in.ScreensChanged,
@@ -1418,18 +1553,57 @@ func priorVisualFailure(runs []model.ReviewRun) bool {
 	return false
 }
 
-// visualResultHasFailure 视觉结论是否含 blocker/worth_fixing。
+// priorOpenBlocks prior 里 status=open 的条目是否阻塞合并：minor（以及从代码
+// 审查分级误带过来的 P2/Note）不阻塞；nil 与未知级别按阻塞兜底——显式标了
+// 「仍未解决」就不该让结论变绿。nil/未知兜底是对旧数据的防御（历史轮次模型
+// 漏写 level 或写错分级时仍按阻塞计，不放过遗留项），新提交由
+// validateVisualResult 拦掉 open 缺 level / 非法 level，兜底只服务存量数据。
+func priorOpenBlocks(level *string) bool {
+	if level == nil {
+		return true
+	}
+	switch *level {
+	case string(api.Minor), string(api.P2), string(api.Note):
+		return false
+	}
+	return true
+}
+
+// visualFailureCount 视觉结论里仍未处理的问题条数：本轮 findings 的
+// blocker/worth_fixing + prior 里 status=open 且按 priorOpenBlocks 阻塞的条目
+// （提示词契约让未解决项只标 prior(open)，未解决与否的真相就在这一段；兼容
+// 旧轮次「重写进 findings」的结论，两条路径都计）。状态汇总、沿用描述、Web
+// 计数都走它，保证各处红绿判定一致（musiver PR #563 的红绿反复正是
+// prior(open) 不计导致的）。
+func visualFailureCount(result *api.ReviewVisualResult) int {
+	if result == nil {
+		return 0
+	}
+	n := 0
+	for _, f := range result.Findings {
+		if f.Severity == api.Blocker || f.Severity == api.WorthFixing {
+			n++
+		}
+	}
+	for _, p := range result.Prior {
+		if p.Status != api.ReviewPriorDecisionStatusOpen {
+			continue
+		}
+		if priorOpenBlocks(p.Level) {
+			n++
+		}
+	}
+	return n
+}
+
+// visualResultHasFailure 视觉结论是否含未处理问题（findings 与 prior(open)
+// 合并口径，见 visualFailureCount）。
 func visualResultHasFailure(raw string) bool {
 	var result api.ReviewVisualResult
 	if json.Unmarshal([]byte(raw), &result) != nil {
 		return false
 	}
-	for _, f := range result.Findings {
-		if f.Severity == api.Blocker || f.Severity == api.WorthFixing {
-			return true
-		}
-	}
-	return false
+	return visualFailureCount(&result) > 0
 }
 
 // visualCarryDescription 沿用旧视觉 failure 时的 status 描述。
@@ -1447,11 +1621,7 @@ func visualCarryDescription(priorRuns []model.ReviewRun) string {
 		if json.Unmarshal([]byte(r.ResultJSON), &result) != nil {
 			continue
 		}
-		for _, f := range result.Findings {
-			if f.Severity == api.Blocker || f.Severity == api.WorthFixing {
-				n++
-			}
-		}
+		n += visualFailureCount(&result)
 	}
 	if n == 0 {
 		return "截图复核意见尚未处理"
@@ -1460,11 +1630,17 @@ func visualCarryDescription(priorRuns []model.ReviewRun) string {
 }
 
 // createVisualRuns 为当前 round 建视觉运行（每组合一行，queued 等提升）。
-// 事务内先复核快照：同步期间总账被推进（新 webhook、手动重跑）或该 head
-// 的代码运行被取消时，建出来的是陈旧视觉运行——aborted=true 让调用方
-// 放弃本轮同步（新 sync_pending 会重试）。
+// fingerprintToStore 是本轮待落账的截图指纹（decideVisualForPR 算出），与
+// 运行在同一事务写入——若靠运行建好之后的 GitHub pending 写成功才落账，那
+// 一步失败（5xx/网络）时账本会停留在更早轮的指纹上，而重试因该 head/round
+// 已有视觉运行直接走汇总分支、不再补指纹，之后换回旧 URL 集合的 head 会被
+// 误判「截图未变化」。事务内先复核快照：同步期间总账被推进（新 webhook、
+// 手动重跑）或该 head 的代码运行被取消时，建出来的是陈旧视觉运行——
+// aborted=true 让调用方放弃本轮同步（新 sync_pending 会重试），指纹也不写
+// （新快照会用它自己的材料重新决策）。
 func (s *ReviewService) createVisualRuns(ledger *model.ReviewPullRequest,
-	pr *githubapi.PullRequest, codeRuns []model.ReviewRun, now time.Time) ([]model.ReviewRun, bool, error) {
+	pr *githubapi.PullRequest, codeRuns []model.ReviewRun, now time.Time,
+	fingerprintToStore string) ([]model.ReviewRun, bool, error) {
 	var settings model.ProjectReviewSettings
 	if err := s.db.Where("project_id = ?", ledger.ProjectID).First(&settings).Error; err != nil {
 		return nil, false, errs.ErrInternal
@@ -1540,6 +1716,18 @@ func (s *ReviewService) createVisualRuns(ledger *model.ReviewPullRequest,
 			}
 			runs = append(runs, *run)
 		}
+		// 指纹在确认真的建出运行之后才落账（同一事务）：决策时读到的组合可能在
+		// 探测期间被用户清空（启用状态下允许 0 个视觉组合，保存设置不推进账本
+		// epoch），此时只写指纹会让账本指向一次从未发生的审查——之后用同一批
+		// 截图的新 head 会因指纹相同被判「未变化」，把更早一轮的通过沿用过去。
+		if len(runs) > 0 && fingerprintToStore != "" {
+			if err := tx.Model(&model.ReviewPullRequest{}).
+				Where("project_id = ? AND repo_full_name = ? AND pr_number = ?",
+					ledger.ProjectID, ledger.RepoFullName, ledger.PRNumber).
+				Update("visual_screens_fingerprint", fingerprintToStore).Error; err != nil {
+				return err
+			}
+		}
 		return s.promoteQueuedRunsTx(tx, ledger.UserID, now)
 	})
 	if err != nil {
@@ -1548,16 +1736,50 @@ func (s *ReviewService) createVisualRuns(ledger *model.ReviewPullRequest,
 	return runs, aborted, nil
 }
 
-// settledNonePrefix 「已判无可服务截图」的集合在指纹列里的前缀：同一集合
-// 不再重探（含 UI 又变了的同步事件），集合变化则前缀与指纹都不匹配、自然
-// 恢复探测。
-const settledNonePrefix = "none:"
+// 截图指纹的两个维度与历史形态。账本 visual_screens_fingerprint 列的取值：
+//   - c:<urlFP>:<contentFP>  URL 集合指纹 + 内容指纹（contentFP 可为空串，
+//     表示只知道 URL 集合）
+//   - u:<urlFP>              已结清「没有可服务截图」的集合（现行前缀）
+//   - none:<urlFP>           同上的旧版前缀（只兼容解析，不再新写）
+//   - <urlFP>                最早的纯 URL 指纹（无前缀，按只有 urlFP 兼容）
+const (
+	settledNonePrefix        = "none:" // 旧版结清前缀
+	settledNonePrefixV2      = "u:"    // 现行结清前缀
+	contentFingerprintPrefix = "c:"    // URL+内容指纹前缀
+)
 
-func splitSettledFingerprint(stored string) (fp string, settledNone bool) {
-	if strings.HasPrefix(stored, settledNonePrefix) {
-		return strings.TrimPrefix(stored, settledNonePrefix), true
+// screensFingerprint 账本指纹的解析结果。
+type screensFingerprint struct {
+	urlFP       string // URL 集合指纹；空串=账本还没有可用指纹
+	contentFP   string // 内容指纹；空串=未知（旧格式、或上次只成功下载了一部分）
+	settledNone bool   // 已结清「没有可服务截图」
+}
+
+// parseScreensFingerprint 解析账本里的截图指纹，兼容上述全部历史形态。前缀
+// 都带冒号（urlFP/contentFP 是 hex，不含冒号），不会误咬裸指纹。
+func parseScreensFingerprint(stored string) screensFingerprint {
+	switch {
+	case strings.HasPrefix(stored, settledNonePrefixV2):
+		return screensFingerprint{urlFP: strings.TrimPrefix(stored, settledNonePrefixV2), settledNone: true}
+	case strings.HasPrefix(stored, settledNonePrefix):
+		return screensFingerprint{urlFP: strings.TrimPrefix(stored, settledNonePrefix), settledNone: true}
+	case strings.HasPrefix(stored, contentFingerprintPrefix):
+		urlFP, contentFP, _ := strings.Cut(strings.TrimPrefix(stored, contentFingerprintPrefix), ":")
+		return screensFingerprint{urlFP: urlFP, contentFP: contentFP}
 	}
-	return stored, false
+	return screensFingerprint{urlFP: stored}
+}
+
+// encodeScreensFingerprint 编码回账本存储形态：内容未知时退回裸 urlFP（与最
+// 早格式兼容），已知时带 c: 前缀；结清态一律用 u: 前缀。
+func encodeScreensFingerprint(fp screensFingerprint) string {
+	if fp.settledNone {
+		return settledNonePrefixV2 + fp.urlFP
+	}
+	if fp.contentFP != "" {
+		return contentFingerprintPrefix + fp.urlFP + ":" + fp.contentFP
+	}
+	return fp.urlFP
 }
 
 // screenshotFingerprint 排序后 URL 列表的 SHA-256 前 16 位（hex）。
@@ -1568,5 +1790,16 @@ func screenshotFingerprint(refs []screenshotRef) string {
 	}
 	sort.Strings(urls)
 	sum := sha256.Sum256([]byte(strings.Join(urls, "\n")))
+	return hex.EncodeToString(sum[:])[:16]
+}
+
+// screenshotContentFingerprintFromHashes 由各文件哈希合成内容指纹：哈希排序
+// 后 join 再整体 SHA-256，取前 16 位。排序保证与引用顺序无关——同一批图无论
+// 以什么顺序出现在描述里，都判「未变化」。哈希由探测在下载当场逐张算好传入
+// （hashFileSHA256 流式读取），这里不再按路径读盘。
+func screenshotContentFingerprintFromHashes(hashes []string) string {
+	sorted := append([]string(nil), hashes...)
+	sort.Strings(sorted)
+	sum := sha256.Sum256([]byte(strings.Join(sorted, "\n")))
 	return hex.EncodeToString(sum[:])[:16]
 }

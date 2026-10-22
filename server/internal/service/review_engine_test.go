@@ -581,7 +581,7 @@ func TestReviewSummarizeAndComment(t *testing.T) {
 // TestDecideVisual 视觉衔接判定表。
 func TestDecideVisual(t *testing.T) {
 	base := visualDecisionInput{
-		CodeAllTerminalOK: true, HasVisualCombos: true,
+		CodeAllTerminal: true, CodeAllTerminalOK: true, HasVisualCombos: true,
 		HasScreenshots: true, AnyUIChanged: true,
 	}
 	cases := []struct {
@@ -589,7 +589,17 @@ func TestDecideVisual(t *testing.T) {
 		mut  func(*visualDecisionInput)
 		want visualDecision
 	}{
+		// 代码未全终态最优先：其他条件再齐备也只等待，不写任何视觉产出。
+		{"代码未终态", func(in *visualDecisionInput) { in.CodeAllTerminal = false }, visualWait},
+		{"代码未终态且截图已换", func(in *visualDecisionInput) {
+			in.CodeAllTerminal = false
+			in.ScreensChanged = true
+		}, visualWait},
 		{"代码未全净", func(in *visualDecisionInput) { in.CodeAllTerminalOK = false }, visualNone},
+		{"截图已换但代码未全净", func(in *visualDecisionInput) {
+			in.CodeAllTerminalOK = false
+			in.ScreensChanged = true
+		}, visualNone},
 		{"无视觉组合", func(in *visualDecisionInput) { in.HasVisualCombos = false }, visualNone},
 		{"无截图", func(in *visualDecisionInput) { in.HasScreenshots = false }, visualNone},
 		{"无 UI 变化", func(in *visualDecisionInput) { in.AnyUIChanged = false }, visualNone},
@@ -608,6 +618,13 @@ func TestDecideVisual(t *testing.T) {
 		{"截图变了", func(in *visualDecisionInput) { in.ScreensChanged = true }, visualStart},
 		{"上轮后又有 UI 改动", func(in *visualDecisionInput) { in.AnyUIChangedSinceLastVisual = true }, visualStart},
 		{"截图未变且遗留", func(in *visualDecisionInput) { in.PriorVisualFailed = true }, visualCarryFailure},
+		// 沿用 success 只在「本轮确实无事可做」（截图未变且上轮视觉后无 UI
+		// 改动）时发生；截图变了绝不沿用通过。
+		{"截图未变且上轮通过", func(in *visualDecisionInput) { in.PriorVisualPassed = true }, visualCarrySuccess},
+		{"截图变了不沿用通过", func(in *visualDecisionInput) {
+			in.PriorVisualPassed = true
+			in.ScreensChanged = true
+		}, visualStart},
 		{"截图未变且无遗留", func(in *visualDecisionInput) {}, visualNone},
 	}
 	for _, c := range cases {
