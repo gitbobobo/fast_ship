@@ -92,11 +92,21 @@ func (s *BotService) botOwnerTimezoneOfErr(bot *model.Bot) (botTimezoneResolutio
 // botOwnerTimezoneOfID 同 botOwnerTimezoneOf，但按 bot ID 查：工具执行路径
 // 手里只有 bot ID，没有 bot 行。读不到时按未声明处理。
 func (s *BotService) botOwnerTimezoneOfID(botID string) (string, *time.Location) {
-	bot, err := s.bots.Get(botID)
+	resolved, err := s.botOwnerTimezoneOfIDErr(botID)
 	if err != nil {
 		return s.botEffectiveTimezone("")
 	}
-	return s.botOwnerTimezoneOf(bot)
+	return resolved.name, resolved.loc
+}
+
+// botOwnerTimezoneOfIDErr 同 botOwnerTimezoneOfID，但把读库失败原样返回；
+// 需要「落库与回执用同一次解析」的写入路径用它。
+func (s *BotService) botOwnerTimezoneOfIDErr(botID string) (botTimezoneResolution, error) {
+	bot, err := s.bots.Get(botID)
+	if err != nil {
+		return botTimezoneResolution{}, err
+	}
+	return s.botOwnerTimezoneOfErr(bot)
 }
 
 // botLocalStamp 是运行时上下文里的本地时间投影：带偏移的 RFC3339，让模型

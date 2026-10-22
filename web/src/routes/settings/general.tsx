@@ -108,7 +108,7 @@ export default function GeneralPage() {
               <div>
                 <p className="font-medium">时区</p>
                 <p className="text-sm text-muted-foreground">
-                  机器人的定时任务与运行时间按此时区计算
+                  机器人理解「每天 9 点」这类时间、新建定时任务和夜间整理都按此时区计算
                 </p>
               </div>
             </div>
@@ -124,17 +124,16 @@ export default function GeneralPage() {
           </div>
 
           <div className="mt-3 space-y-1 pl-8 text-sm">
+            {/* 显式选了时区时，下拉本身就显示了它，再写一行「当前生效时区」
+                只是重复；只有跟随部署配置时才需要说明生效值从哪来。 */}
+            {!currentTimezone && (
+              <p className="text-muted-foreground">
+                当前生效时区：
+                <span className="text-foreground">跟随部署配置</span>
+              </p>
+            )}
             <p className="text-muted-foreground">
-              当前生效时区：
-              <span className="text-foreground">
-                {currentTimezone || "跟随部署配置"}
-              </span>
-              {!currentTimezone && (
-                <span className="ml-2 text-xs">（未设置）</span>
-              )}
-            </p>
-            <p className="text-muted-foreground">
-              当前时间：
+              该时区当前时间：
               <span className="text-foreground">
                 {formatTimeInZone(now, displayTimezone)}
               </span>

@@ -109,7 +109,7 @@ describe("timezoneOptions", () => {
 
     expect(options[0]).toEqual({
       value: "Asia/Shanghai",
-      label: "Asia/Shanghai（UTC+8）",
+      label: "Asia/Shanghai (UTC+8)",
     });
     expect(options.map((o) => o.value)).toContain("Asia/Tokyo");
   });

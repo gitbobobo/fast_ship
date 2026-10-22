@@ -1204,12 +1204,21 @@ func (s *BotService) execScheduleCreate(call *model.BotToolCall, args *botSchedu
 	if args.Model != nil {
 		mdl = *args.Model
 	}
-	task, err := s.createScheduleTask(call.BotID, args.Name, args.Cron, args.Timezone, args.Instruction, mdl, args.NeedsReportBool())
+	// 时区只解析一次，落库与回执共用：分两次读会出现「任务按用户时区建好、
+	// 回执却报告回退时区」的错位，模型据此告诉用户错误的下次执行时间。
+	resolved, err := s.botOwnerTimezoneOfIDErr(call.BotID)
+	if err != nil {
+		return "", errs.ErrInternal
+	}
+	timezone := strings.TrimSpace(args.Timezone)
+	if timezone == "" {
+		timezone = resolved.name
+	}
+	task, err := s.createScheduleTask(call.BotID, args.Name, args.Cron, timezone, args.Instruction, mdl, args.NeedsReportBool())
 	if err != nil {
 		return "", err
 	}
-	userTimezone, userLoc := s.botOwnerTimezoneOfID(call.BotID)
-	out := s.scheduleTaskSlim(userTimezone, userLoc, task)
+	out := s.scheduleTaskSlim(resolved.name, resolved.loc, task)
 	out["ok"] = true
 	out["note"] = "任务已创建并启用；请在对话里用中文告知用户任务名与执行时间"
 	return botMarshalResult(out)

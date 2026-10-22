@@ -73,10 +73,10 @@ function readOffsetLabel(timeZone: string): string {
   }
 }
 
-/** 下拉项文案：「IANA 名称（UTC+8）」；拼不出偏移时只有名称。 */
+/** 下拉项文案：`Asia/Shanghai (UTC+8)`；拼不出偏移时只有名称。 */
 function timezoneLabel(timeZone: string): string {
   const offset = offsetLabel(timeZone);
-  return offset ? `${timeZone}（${offset}）` : timeZone;
+  return offset ? `${timeZone} (${offset})` : timeZone;
 }
 
 /**
