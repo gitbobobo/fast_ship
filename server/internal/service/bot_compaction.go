@@ -1967,10 +1967,17 @@ func (s *BotService) tellToolsetTx(tx *gorm.DB, bot *model.Bot, deferred bool) e
 		activation = "next_compaction"
 		stateText = fmt.Sprintf("下一个压缩点生效（若会话持续活跃未压缩，最迟约 %d 分钟后随新消息生效）", capMin)
 		// 给用户看的版本不出现「压缩点」这类内部术语，括号也不嵌套。
-		userState = fmt.Sprintf("下次上下文整理时生效，持续活跃时最迟约 %d 分钟", capMin)
+		userState = fmt.Sprintf("下次上下文整理时生效，最迟约 %d 分钟", capMin)
 	}
 	note += "（" + stateText + "）"
-	userNote := botToolsetChangeNote(from, botToolsetVersion) + "（" + userState + "）"
+	// 用户版：生效状态放句首（「已升级：…下次生效」的首尾矛盾会让用户
+	// 分不清到底生效没有），正文用一句白话概括，不列工具名与字段名——
+	// 那些细节是写给模型的 note 的内容（INT-139 视觉复审）。
+	userNote := "工具集已更新并生效：" + botToolsetUserNote(from, botToolsetVersion)
+	if deferred {
+		userNote = fmt.Sprintf("工具集更新待生效（%s）：%s",
+			userState, botToolsetUserNote(from, botToolsetVersion))
+	}
 	content := botLifecycleContent{
 		Event: "toolset_updated",
 		// 新消息按 user 角色投影（INT-137 R6）：部分 OpenAI 兼容后端的 chat
@@ -2084,6 +2091,19 @@ func (s *BotService) settleToolsetNoticesTx(tx *gorm.DB, botID string, toVersion
 		Kind: model.BotMessageKindLifecycle, ContentJSON: string(raw),
 		DedupKey: &dedup, CreatedAt: s.now(),
 	})
+}
+
+// botToolsetUserNote 是写给用户的升级摘要（INT-139 视觉复审）：一句白话
+// 概括这轮变化和自己有什么关系，不列 fs_schedule/dry_run 这类工具与字段
+// 名——模型版（botToolsetChangeNote）才需要精确清单。
+func botToolsetUserNote(from, to int64) string {
+	if to >= 10 && from < 10 {
+		return "定时任务的创建、修改、启用和删除现在需要你确认后才会执行"
+	}
+	if to >= 9 && from < 9 {
+		return "线程管理增加了归档、恢复队列等新能力"
+	}
+	return "机器人的提示词与工具集有更新"
 }
 
 func botToolsetChangeNote(from, to int64) string {
