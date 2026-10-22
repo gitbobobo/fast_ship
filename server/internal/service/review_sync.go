@@ -34,12 +34,17 @@ import (
 // 推进账本）：不改写 sync_error，也不清 sync_pending。
 var errReviewSyncDeferred = errors.New("review: sync deferred")
 
+// errReviewDiffTooLarge GitHub 判定 PR diff 超出上限（确定性失败，重试不可能
+// 成功）：行内阶段按「本轮无行内 review」降级收尾，不再保持 sync_pending。
+var errReviewDiffTooLarge = errors.New("review: diff too large")
+
 const (
 	// reviewSyncRetryBackoff 同一 epoch 同步失败后的退避间隔：调度 tick 是 10s，
-	// 持续性失败（超大 diff 固定 406、SubmitReview 固定 422、评论接口 403）不
-	// 该每 tick 重放整条同步——否则读 diff、写评论、写 commit status 都被放大
-	// 360 倍/小时，还会把同一 SHA 的 status 写满 GitHub 的 1000 条上限。新事件
-	// （webhook/重跑/超时）会推进 sync_epoch，立即重新入队，不受退避影响。
+	// 持续性失败（SubmitReview 固定 422、评论接口 403）不该每 tick 重放整条
+	// 同步——否则读 diff、写评论、写 commit status 都被放大 360 倍/小时，还会
+	// 把同一 SHA 的 status 写满 GitHub 的 1000 条上限。超大 diff（4xx + too_large）不在此列：重试不可能成功，走降级收尾、不入退避（见
+	// errReviewDiffTooLarge）。新事件（webhook/重跑/超时）会推进 sync_epoch，
+	// 立即重新入队，不受退避影响。
 	reviewSyncRetryBackoff    = 5 * time.Minute
 	reviewCodeStatusContext   = "代码审查"
 	reviewVisualStatusContext = "视觉审查"
@@ -566,19 +571,27 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 	// diff 在 step 3 前读一次：顶层评论的「未行内标注」注记与 step 4 的行内
 	// review 共用同一份解析结果，不再两处各读一遍。读失败不让整段同步在这里
 	// 中断——commit status 已写完，顶层评论紧接着按「本轮没读 diff」口径出，
-	// 只有行内 review 依赖 diff；错误交给 step 4 在行内阶段上报（本轮不标记
-	// 已发布，下一轮同步重试）。
+	// 只有行内 review 依赖 diff；暂时性错误交给 step 4 推迟行内阶段（本轮不
+	// 标记已发布，下一轮同步重试），diff 超限的确定性失败按「本轮无行内行」
+	// 降级收尾（见 step 4 的 inlineDeferred）。
 	inlineLines, inlineErr := s.fetchInlineLines(ctx, client, ledger, codeRuns)
-	if inlineErr != nil {
+	diffUnavailable := errors.Is(inlineErr, errReviewDiffTooLarge)
+	switch {
+	case diffUnavailable:
+		// 确定性失败：不是「本 tick 重试」的暂时态，Info 记录降级决策即可。
+		s.logger.Info("PR diff 超出 GitHub 上限，本轮按无行内标注降级收尾",
+			zap.String("repo", ledger.RepoFullName), zap.Int("pr", ledger.PRNumber), zap.Error(inlineErr))
+	case inlineErr != nil:
 		// 这是「本 tick 重试」的暂时态：真正的失败由同步收尾的 Warn 与账本
 		// sync_error 记录，不必每 10 秒多一条 Warn。
 		s.logger.Info("读取 PR diff 失败，本轮跳过行内 review（状态与顶层评论照常写）",
 			zap.String("repo", ledger.RepoFullName), zap.Int("pr", ledger.PRNumber), zap.Error(inlineErr))
 	}
 	codeBody := buildCodeComment(reviewCommentMeta{
-		RepoFullName: ledger.RepoFullName,
-		HeadSHA:      ledger.HeadSHA,
-		RoundNumber:  ledger.RoundNumber,
+		RepoFullName:    ledger.RepoFullName,
+		HeadSHA:         ledger.HeadSHA,
+		RoundNumber:     ledger.RoundNumber,
+		DiffUnavailable: diffUnavailable,
 	}, codeRuns, inlineLines, visualPending, visualCarry)
 	// upsertPRComment 自己按正文去重：diff 读不到的重试里正文没变就不 PATCH，
 	// 变了照常更新（等 diff 读得到时再补「未行内标注」注记）。
@@ -589,14 +602,23 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 	// 4. 行内 review：每个 completed 且未 posted 的代码运行，有效行发 review。
 	// diff 读不到时本轮推迟这一步（不标记已发布，下一轮重试），但不打断后面
 	// 与 diff 无关的视觉收尾——推迟的错误在 step 5 之后统一上报，账本保持
-	// sync_pending。
-	inlineDeferred := inlineErr != nil
+	// sync_pending。diff 超限（errReviewDiffTooLarge）是确定性失败，退避重试
+	// 永远撞同一堵墙，不推迟：按「本轮无行内 review」降级收尾——评论已注明
+	// 原因、P0–P2 仍在评论里，本轮正常清 pending 与 sync_error；行内运行保持
+	// posted_at 为空、不留任何「已降级」持久标记，同一 (head, round) 的下一次
+	// 同步事件（同轮其他组合完成/失败、超时收尾）diff 读得到时自动补发行内
+	// review 与注记（自愈）。手动重跑恒开新轮，由新轮运行重新审查，不是补发
+	// 旧轮的降级运行。
+	inlineDeferred := inlineErr != nil && !diffUnavailable
 	if ok, err := s.ledgerEpochCurrent(ledger, epoch); err != nil {
 		return errs.New(errs.ErrInternal.Code, "复核同步 epoch 失败: "+err.Error())
 	} else if !ok {
 		return nil
 	}
-	if !inlineDeferred {
+	// 只有 diff 真读到（inlineErr == nil）才发行内 review：暂时态推迟、超限降级
+	// 都不进这里——降级时若进了本函数，空 inlineLines 不会提交任何 review，却会
+	// 把 posted_at 写上，下一次同步事件就不再补发，自愈通道随之关闭。
+	if inlineErr == nil {
 		if err := s.postInlineReviews(ctx, client, ledger, codeRuns, inlineLines, epoch, now); err != nil {
 			return err
 		}
@@ -832,11 +854,13 @@ func summarizeVisualRuns(runs []model.ReviewRun) (state, description string) {
 }
 
 // reviewCommentMeta 顶层评论的定位信息：标题带短 SHA 与轮次，发现链接指向
-// head blob 的行锚点。
+// head blob 的行锚点。DiffUnavailable 表示 GitHub 拒绝返回 diff（超限，确定性
+// 失败），本轮无行内 review，评论按此注明原因。
 type reviewCommentMeta struct {
-	RepoFullName string
-	HeadSHA      string
-	RoundNumber  int
+	RepoFullName    string
+	HeadSHA         string
+	RoundNumber     int
+	DiffUnavailable bool
 }
 
 // reviewRunStatusText 总览表的状态列文案：非终态一律「审查中」。
@@ -992,6 +1016,15 @@ func buildCodeComment(meta reviewCommentMeta, codeRuns []model.ReviewRun, inline
 	if visualCarryFailure {
 		b.WriteString("截图复核意见尚未处理\n\n")
 	}
+	// GitHub 拒绝返回 diff（超限）时的降级提示：固定文案、不带动态错误文本
+	// ——意见仍完整列在下面的分节里，不能静默丢，作者也要知道为什么没有行内
+	// review。本轮没读 diff 就不加「未行内标注」注记（writeCodeFinding 的
+	// inlineLines == nil 分支已天然满足，不改它）；posted_at 留空且无持久降级
+	// 标记，同一 (head, round) 后续同步事件 diff 读得到时照常补发行内 review、
+	// 本提示随正文更新消失。
+	if meta.DiffUnavailable {
+		b.WriteString("本轮 GitHub 拒绝读取 PR diff（超出上限），未发行内 review：以下问题仍完整列出。\n\n")
+	}
 
 	for i := range codeRuns {
 		r := &codeRuns[i]
@@ -1052,6 +1085,8 @@ func buildCodeComment(meta reviewCommentMeta, codeRuns []model.ReviewRun, inline
 // 注记与行内 review 的行判定共用同一份结果，diff 只读一次。本轮没有已完成的
 // 带行号 P0–P2 发现时返回 nil、不读 diff——此时行内 review 也发不出任何
 // 意见，评论注记口径随之放宽（有行号的不加注，因为无从判断）。
+// 读 diff 失败时返回的 err 可能是 errReviewDiffTooLarge（GitHub 判定 diff
+// 超出上限的确定性失败，调用方据此降级收尾）；其余为可重试错误。
 // 扫描范围刻意不收窄到「尚未行内标注过」的发现（PostedAt == nil）：每次
 // resync 都要重算整份注记（已发过的行内 review 不会撤销，注记必须随之保持
 // 准确），轻微多一次 diff 读取可接受。
@@ -1081,6 +1116,14 @@ func (s *ReviewService) fetchInlineLines(ctx context.Context, client githubapi.G
 	}
 	diff, err := client.GetPullRequestDiff(ctx, ledger.InstallationID, ledger.RepoFullName, ledger.PRNumber)
 	if err != nil {
+		// 先分类：diff 超出 GitHub 上限（4xx + too_large，实测 406）是确定性
+		// 失败，退避重试永远撞同一堵墙——包装成哨兵错误让调用方按「本轮无行内
+		// 行」降级收尾，而不是把行内意见挂在永远清不掉的 sync_pending 上。
+		// 其余照旧按可重试的 GitHub 错误上报。原错误保留在链上（%w），日志与
+		// 后续分类都能拿到状态码。
+		if githubapi.IsDiffTooLarge(err) {
+			return nil, fmt.Errorf("%w: %w", errReviewDiffTooLarge, err)
+		}
 		return nil, errs.New(errs.ErrGitHubAPI.Code, "读取 diff 失败: "+err.Error())
 	}
 	return parseDiffRightLines(diff), nil

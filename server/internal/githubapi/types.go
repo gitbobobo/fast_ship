@@ -1,6 +1,7 @@
 package githubapi
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -101,6 +102,38 @@ func IsForbidden(err error) bool {
 func IsNotFound(err error) bool {
 	var se *StatusError
 	return errors.As(err, &se) && se.StatusCode == http.StatusNotFound
+}
+
+// IsDiffTooLarge 判断 err 是否是 GitHub 对「PR diff 超出上限」的确定性拒绝：
+// 4xx（实测 406；413/422 防御性兼容）且响应体 errors[] 里有 code = "too_large"。
+// GitHub 把 406 列为通用的 "Unacceptable"，而 too_large 是 422 系的结构化
+// validation code，所以只认 code——单看状态码可能把别的原因当成不可重试，那会
+// 把行内意见静默丢掉；解析不出 too_large 时按可重试处理。5xx 不在此列：那是
+// 服务端暂时态，重试有意义。
+func IsDiffTooLarge(err error) bool {
+	var se *StatusError
+	if !errors.As(err, &se) {
+		return false
+	}
+	switch se.StatusCode {
+	case http.StatusNotAcceptable, http.StatusRequestEntityTooLarge, http.StatusUnprocessableEntity:
+	default:
+		return false
+	}
+	var body struct {
+		Errors []struct {
+			Code string `json:"code"`
+		} `json:"errors"`
+	}
+	if json.Unmarshal([]byte(se.Body), &body) != nil {
+		return false
+	}
+	for _, e := range body.Errors {
+		if strings.EqualFold(strings.TrimSpace(e.Code), "too_large") {
+			return true
+		}
+	}
+	return false
 }
 
 // isStatus 判断 err 链里是否带指定状态码的 *StatusError。
