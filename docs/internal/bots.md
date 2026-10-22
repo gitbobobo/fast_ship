@@ -178,7 +178,10 @@ panic 残留行（`running` + `finished_at=nil`）不受此过滤：请求可能
 复核：已激活就写「已生效」，否则会留下一条永远等不到收口的推迟通知。
 `markActivationDeferred` 的 UPDATE
 带版本守卫（`toolset_version < 当前 OR platform_prompt_version < 当前`），
-陈旧副本不会给已激活行重落推迟起点，未命中也不回写副本；激活落库后副本上的
+陈旧副本不会给已激活行重落推迟起点；守卫未命中时回读行事实把副本（版本、
+提示词、`ActivationDeferredAt`）对齐后按行事实返回「本 run 是否真推迟」——
+行已被激活则返回 false、副本同步到当前版本，本 run 的冻结物直接吃到真实
+新提示词，通知也不会再写出永不兑现的推迟文案。激活落库后副本上的
 `ActivationDeferredAt` 同步清空。推迟通知不是终态：激活真正落库时（入口或压缩边界）
 `settleToolsetNoticesTx` 追加一条 `toolset_activated` 事件收口——账本
 append-only 不改写原通知，投影给模型的生命周期保持「先推迟、后生效」的

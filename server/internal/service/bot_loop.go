@@ -154,8 +154,11 @@ func (s *BotService) botLoop(bot *model.Bot, run *model.BotRun, ctx context.Cont
 					s.logger.Warn("激活工具集失败", zap.String("bot_id", bot.ID), zap.Error(err))
 				}
 			} else {
-				s.markActivationDeferred(bot)
-				activationDeferred = true
+				// 守卫未命中 = 行事实与副本不一致（已被激活或并发已落
+				// 起点）：markActivationDeferred 会把副本对齐行事实，
+				// 返回值才是本 run 真实的推迟决策——不得无条件置位
+				// （INT-139 云端复审）。
+				activationDeferred = s.markActivationDeferred(bot)
 			}
 		} else if err := s.activateBotPrompt(bot); err != nil {
 			s.logger.Warn("激活工具集失败", zap.String("bot_id", bot.ID), zap.Error(err))

@@ -1735,11 +1735,16 @@ func (s *BotService) activationDeferralExpired(bot *model.Bot) bool {
 // 第一次推迟为准，不随后续推迟顺延）。WHERE 带与入口 stale 判定同源的
 // 版本守卫（INT-139 云端复审）：副本在 ensureRun→botLoop 间陈旧时，行可能
 // 已被别的事务激活并清掉 deferred_at，不带守卫会把已激活的行重写上一个
-// 对当前版本无意义的起点。未命中（已激活/已记过）不同步副本——副本应与
-// 行事实一致。写失败只记日志，不阻塞 run。
-func (s *BotService) markActivationDeferred(bot *model.Bot) {
+// 对当前版本无意义的起点。
+//
+// 未命中时分两种行事实（INT-139 云端复审）：行已被激活——回读行把副本
+// 刷新到真实版本后返回 false，调用方不再当本 run 推迟（否则会给已激活
+// 的行写出永不兑现的推迟通知）；行仍陈旧但被并发写者先落了起点——回读
+// 后副本的 deferred_at 非空，返回 true，本 run 仍是真推迟。返回值即
+// 「本 run 的推迟决策是否成立」，调用方据此驱动通知文案。
+func (s *BotService) markActivationDeferred(bot *model.Bot) bool {
 	if bot.ActivationDeferredAt != nil {
-		return
+		return true
 	}
 	now := s.now()
 	res := s.db.Model(&model.Bot{}).
@@ -1748,12 +1753,22 @@ func (s *BotService) markActivationDeferred(bot *model.Bot) {
 		Update("activation_deferred_at", now)
 	if res.Error != nil {
 		s.logger.Warn("记录激活推迟起点失败", zap.String("bot_id", bot.ID), zap.Error(res.Error))
-		return
+		return false
 	}
 	if res.RowsAffected == 0 {
-		return
+		if fresh, err := s.bots.Get(bot.ID); err == nil {
+			bot.ToolsetVersion = fresh.ToolsetVersion
+			bot.PlatformPromptVersion = fresh.PlatformPromptVersion
+			bot.SystemPromptText = fresh.SystemPromptText
+			bot.PromptRevision = fresh.PromptRevision
+			bot.PersonaPrompt = fresh.PersonaPrompt
+			bot.UntrustedNonce = fresh.UntrustedNonce
+			bot.ActivationDeferredAt = fresh.ActivationDeferredAt
+		}
+		return bot.ActivationDeferredAt != nil
 	}
 	bot.ActivationDeferredAt = &now
+	return true
 }
 
 func (s *BotService) activateBotPrompt(bot *model.Bot) error {

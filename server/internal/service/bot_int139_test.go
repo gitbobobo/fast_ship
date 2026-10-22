@@ -583,38 +583,45 @@ func TestTellToolsetFollowsDeferredDecisionNotStaleCopy(t *testing.T) {
 	}
 }
 
-// markActivationDeferred 的版本守卫（INT-139 云端复审）：副本陈旧时行可能
-// 已被别的事务激活并清掉 deferred_at，不带守卫的更新会给已激活行重落一个
-// 对当前版本无意义的起点；未命中时副本也不得回写。
+// markActivationDeferred 的版本守卫与行事实回读（INT-139 云端复审）：
+// 副本陈旧时行可能已被别的事务激活并清掉 deferred_at，不带守卫的更新会
+// 给已激活行重落一个无意义起点；未命中时回读行事实对齐副本，并据实
+// 返回「本 run 是否真推迟」。
 func TestMarkActivationDeferredVersionGuard(t *testing.T) {
 	env := setupBotTestEnv(t)
 	userID := createBotTestUser(t, env.db, "r11guard")
 
-	// 行已在当前版本（视同别的事务刚激活）：陈旧副本来记推迟起点 → 被挡。
+	// 行已在当前版本（视同别的事务刚激活）：陈旧副本来记推迟起点 → 被挡，
+	// 副本回读对齐行事实（版本刷新、无推迟标记），返回 false。
 	activated := env.createBot(t, userID)
 	staleCopy, err := env.bots.bots.Get(activated.ID)
 	if err != nil {
 		t.Fatalf("get bot: %v", err)
 	}
 	staleCopy.ToolsetVersion = botToolsetVersion - 1
-	env.bots.markActivationDeferred(staleCopy)
+	if env.bots.markActivationDeferred(staleCopy) {
+		t.Fatalf("行已激活时不得把本 run 判为推迟")
+	}
 	var row model.Bot
 	env.db.First(&row, "id = ?", activated.ID)
 	if row.ActivationDeferredAt != nil {
 		t.Fatalf("已激活的行不得被陈旧副本重落推迟起点: %v", row.ActivationDeferredAt)
 	}
-	if staleCopy.ActivationDeferredAt != nil {
-		t.Fatalf("更新未命中时副本不得回写推迟标记")
+	if staleCopy.ActivationDeferredAt != nil || staleCopy.ToolsetVersion != botToolsetVersion {
+		t.Fatalf("副本应按行事实对齐（已激活、无推迟标记）: v=%d deferred=%v",
+			staleCopy.ToolsetVersion, staleCopy.ActivationDeferredAt)
 	}
 
-	// 行确实陈旧：正常落起点。
+	// 行确实陈旧：正常落起点，返回 true，副本同步标记。
 	stale := env.createBot(t, userID)
 	if err := env.db.Model(&model.Bot{}).Where("id = ?", stale.ID).
 		Update("toolset_version", botToolsetVersion-1).Error; err != nil {
 		t.Fatalf("降级水位: %v", err)
 	}
 	staleCopy2, _ := env.bots.bots.Get(stale.ID)
-	env.bots.markActivationDeferred(staleCopy2)
+	if !env.bots.markActivationDeferred(staleCopy2) {
+		t.Fatalf("陈旧行应判为真推迟")
+	}
 	// 复用上文的 row 会让 gorm 把旧主键追加成第二条件——换独立变量。
 	var row2 model.Bot
 	env.db.First(&row2, "id = ?", stale.ID)
