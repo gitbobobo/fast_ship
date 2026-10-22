@@ -1181,3 +1181,87 @@ func TestBotSettleFiresForPendingNewerNotice(t *testing.T) {
 		t.Fatalf("收口事件应记实际激活版本 v11: %s", act.ContentJSON)
 	}
 }
+
+// panic 收尾读到的 run 是库里新副本，CostEstimate 可能仍是 NULL——已计价
+// 的请求行成本不能随 run 一起丢（INT-139 云端复审 P2）：失败/恢复收尾按
+// SUM(bot_model_requests.cost_estimate) 实算落库，请求行与 run 行同源。
+func TestPanicRunCostReconcilesFromRequestRows(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "r13pc")
+	bot := env.createBot(t, userID)
+
+	now := time.Now().UTC()
+	run := &model.BotRun{
+		ID: uuid.NewString(), BotID: bot.ID,
+		TriggerSource: model.BotTriggerUserMessage, TriggerKey: "r13pc-" + uuid.NewString(),
+		Status: model.BotRunStatusRunning, SessionKind: model.BotSessionKindMain,
+		ConfigSnapshotJSON: "{}", StartedAt: &now,
+	}
+	if err := env.db.Create(run).Error; err != nil {
+		t.Fatalf("seed run: %v", err)
+	}
+	cost := 0.0123
+	req := &model.BotModelRequest{
+		ID: uuid.NewString(), RunID: run.ID, Ordinal: 1,
+		Status: model.BotModelRequestFailed, StartedAt: now, FinishedAt: &now,
+		PrefixHash: "x", ToolsHash: "x", RequestHash: "x", TokenEstimator: "chars/4",
+		CostEstimate: &cost,
+	}
+	if err := env.db.Create(req).Error; err != nil {
+		t.Fatalf("seed request: %v", err)
+	}
+
+	env.bots.finishRunAfterPanic(bot.ID, "boom")
+
+	var row model.BotRun
+	if err := env.db.First(&row, "id = ?", run.ID).Error; err != nil {
+		t.Fatalf("reload run: %v", err)
+	}
+	if row.Status != model.BotRunStatusFailed {
+		t.Fatalf("panic 收尾应把 run 置 failed，实得 %s", row.Status)
+	}
+	if row.CostEstimate == nil || *row.CostEstimate != cost {
+		t.Fatalf("run 成本应按请求行实算为 %v，实得 %v", cost, row.CostEstimate)
+	}
+	if row.CostSource == nil || *row.CostSource != botCostSourceCatalog {
+		t.Fatalf("成本来源应为 catalog，实得 %v", row.CostSource)
+	}
+}
+
+// 一轮的全部工具调用都缺 name 被丢弃且无正文：不是「空输出的正常完成」——
+// 合成失败走断流同型收尾，run 记 model_tool_calls_dropped，不提交空助手
+// 回合、不重试（上游已计费，畸形多半复发）（INT-139 云端复审 Note）。
+func TestBotAllToolCallsDroppedFailsTurn(t *testing.T) {
+	env := setupBotTestEnv(t, fakeModelTurn{
+		ToolCalls: []fakeModelToolCall{{ID: "call-x", Args: `{"action":"list"}`}},
+	})
+	userID := createBotTestUser(t, env.db, "r13drop")
+	bot := env.createBot(t, userID)
+
+	if _, err := env.bots.SendMessage(userID, bot.ID, &SendMessageRequest{Text: "你好", ClientMessageID: "drop1"}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	waitForBot(t, "drop run settled", 10*time.Second, func() bool { return env.botSettled(bot.ID) })
+
+	runs, err := env.bots.ListRuns(userID, bot.ID, 5)
+	if err != nil || len(runs) == 0 {
+		t.Fatalf("list runs: %v", err)
+	}
+	run := runs[0]
+	if run.Status != string(model.BotRunStatusFailed) ||
+		run.ErrorCode == nil || *run.ErrorCode != botModelErrToolCallsDropped {
+		t.Fatalf("整轮工具调用被丢弃应失败为 model_tool_calls_dropped，实得 %s %v",
+			run.Status, run.ErrorCode)
+	}
+	var requests int64
+	env.db.Model(&model.BotModelRequest{}).Where("run_id = ?", run.ID).Count(&requests)
+	if requests != 1 {
+		t.Fatalf("已计费且输出畸形的轮次不得重试，实得 %d 条请求", requests)
+	}
+	var assistants int64
+	env.db.Model(&model.BotMessage{}).
+		Where("bot_id = ? AND kind = ?", bot.ID, model.BotMessageKindAssistant).Count(&assistants)
+	if assistants != 0 {
+		t.Fatalf("不得提交空助手回合，实得 %d 条", assistants)
+	}
+}

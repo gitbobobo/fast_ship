@@ -110,14 +110,17 @@ func (s *BotService) RecoverOnStartup() error {
 		// 终态转移与 error/done 事件同一事务：一直挂在页面上的客户端重启
 		// 后按 SSE 游标回放也能把原 run 折到 failed，不必等快照重读。
 		txErr := s.db.Transaction(func(tx *gorm.DB) error {
+			cols := map[string]interface{}{
+				"status":        model.BotRunStatusFailed,
+				"finished_at":   now,
+				"error_code":    "server_restarted",
+				"error_message": "服务在运行执行中重启，未完成步骤不再继续",
+			}
+			// 恢复收尾也要重算已计价成本：崩溃前已落库的失败/成功请求
+			// 成本不能随 run 一起丢成 NULL（INT-139 云端复审）。
+			runCostPersistColsTx(tx, run.ID, cols)
 			ok, err := repository.NewBotRunRepository(tx).UpdateColumnsWhereTx(tx, run.ID,
-				map[string]interface{}{"finished_at": nil},
-				map[string]interface{}{
-					"status":        model.BotRunStatusFailed,
-					"finished_at":   now,
-					"error_code":    "server_restarted",
-					"error_message": "服务在运行执行中重启，未完成步骤不再继续",
-				})
+				map[string]interface{}{"finished_at": nil}, cols)
 			if err != nil || !ok {
 				return err
 			}

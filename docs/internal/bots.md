@@ -379,8 +379,10 @@ next_offset}`；`fs_result.read` 按 Unicode 字符续读，不切断 UTF-8。
   快照里的 `catalog_id` 计价（与父 run 冻结目录同口径——运行中切换
   provider 不得按新目录记旧 provider 的流量）。usage
   与成本是计费事实、与请求成败无关：usage 送达后断流的失败请求行照样落
-  tokens 与成本，其成本也计入 run 总账并随失败/停止收尾落库（收尾路径统一
-  走 `runCostPersistCols`）；run 的 token 总量仍只累计成功请求——run
+  tokens 与成本，其成本也计入 run 总账并随失败/停止/恢复收尾落库（收尾
+  路径统一走 `runCostPersistColsTx`，事务内按
+  `SUM(bot_model_requests.cost_estimate)` 实算——panic/重启收尾读到的 run
+  是库里旧副本，内存累计靠不住）；run 的 token 总量仍只累计成功请求——run
   token 粒度是「会话实际消费」，成本粒度是「已计价请求累计」。
   **缺失 ≠ 0**：目录无价、自定义 provider、模型不在目录、缺
   input/output 单价或 usage 未收齐时一律保持 NULL，API 投影与前端（指标区
@@ -1317,10 +1319,14 @@ null），给三栏工作台的左侧列表当预览列。语义与约束：
   `max(Retry-After, retry_base_delay_ms << attempt)`，Retry-After 封顶 60s，
   退避期可被 ctx 取消打断。已输出片段的失败（含半截工具调用，聚合处置位
   `SawOutput`）、看门狗超时、普通 4xx 都不重试；上下文超限的强制压缩重试同样
-  以「未收到过任何片段」为前置。
+  以「未收到过任何片段」为前置。整轮工具调用都缺 `name` 被丢弃且无正文时
+  不是「空输出的正常完成」：合成 `errBotToolCallsDropped` 走断流同型失败
+  （草稿丢弃、请求行记失败、run 记 `model_tool_calls_dropped`），不提交空
+  助手回合也不重试——上游已就此计费，畸形 delta 多半复发。
 - **错误分类**（`bot_model_errors.go`）：把上游报错收敛为 `provider_auth_failed`
   / `provider_quota_exhausted` / `provider_rate_limited` / `provider_unavailable`
-  / `model_not_found` / `model_stream_timeout` / `model_request_failed`。
+  / `model_not_found` / `model_stream_timeout` / `model_tool_calls_dropped`
+  / `model_request_failed`。
   结构化状态码之外有文本兜底：HTTP 200 里返回 `{"error":...}` 被 SDK 降级成
   普通 error 的报错按同一批短语收敛（额度优先于认证与模型判定；不匹配
   `billing`/`payment required` 这类泛词，402 已由状态码覆盖）。
