@@ -306,6 +306,21 @@ func (s *AuthService) UpdateProfile(userID string, req *UpdateProfileRequest) (*
 		fields["email"] = email
 	}
 
+	// timezone 三态：省略保留现值，空串清空，非空必须是可加载的 IANA 名称。
+	// 机器人侧将空串视为「未声明」并回退部署配置（INT-138）。
+	if req.Timezone != nil {
+		tz := strings.TrimSpace(*req.Timezone)
+		if tz != "" {
+			if _, err := time.LoadLocation(tz); err != nil {
+				return nil, errs.New(errs.ErrInvalidParams.Code, "时区无效（须为 IANA 名称，如 Asia/Shanghai）")
+			}
+		}
+		if tz != user.Timezone {
+			user.Timezone = tz
+			fields["timezone"] = tz
+		}
+	}
+
 	if len(fields) > 0 {
 		if err := s.userRepo.UpdateFields(userID, fields); err != nil {
 			return nil, errs.ErrInternal

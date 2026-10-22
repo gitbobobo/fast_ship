@@ -9116,6 +9116,10 @@ components:
           type: string
           format: email
           description: 新邮箱
+        timezone:
+          type: string
+          maxLength: 64
+          description: 用户 IANA 时区（INT-138）；空串清空，非法名称拒绝
     UpdatePasswordRequest:
       type: object
       required: [old_password, new_password]
@@ -9151,7 +9155,7 @@ components:
           type: string
     User:
       type: object
-      required: [id, username, email, avatar_url, role, created_at, updated_at]
+      required: [id, username, email, avatar_url, role, timezone, created_at, updated_at]
       properties:
         id:
           type: string
@@ -9164,6 +9168,9 @@ components:
           description: 形如 /api/avatars/:uid/:filename，未设置为空串
         role:
           $ref: '#/components/schemas/UserRole'
+        timezone:
+          type: string
+          description: 用户 IANA 时区（INT-138）；空串表示未声明，机器人按部署配置回退
         created_at:
           type: string
           format: date-time

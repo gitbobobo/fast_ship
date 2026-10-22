@@ -4659,6 +4659,9 @@ type UpdateProfileRequest struct {
 	// Email 新邮箱
 	Email *string `json:"email,omitempty"`
 
+	// Timezone 用户 IANA 时区（INT-138）；空串清空，非法名称拒绝
+	Timezone *string `json:"timezone,omitempty"`
+
 	// Username 新用户名；与现值相同或省略则不变
 	Username *string `json:"username,omitempty"`
 }
@@ -4817,9 +4820,12 @@ type User struct {
 	Id        string `json:"id"`
 
 	// Role 用户角色（INT-129）：admin 可管理成员、邀请与部署设置；member 只能使用自己的资源。角色只存库，服务端每请求查库判定，不写进 JWT
-	Role      UserRole `json:"role"`
-	UpdatedAt string   `json:"updated_at"`
-	Username  string   `json:"username"`
+	Role UserRole `json:"role"`
+
+	// Timezone 用户 IANA 时区（INT-138）；空串表示未声明，机器人按部署配置回退
+	Timezone  string `json:"timezone"`
+	UpdatedAt string `json:"updated_at"`
+	Username  string `json:"username"`
 }
 
 // UserRole 用户角色（INT-129）：admin 可管理成员、邀请与部署设置；member 只能使用自己的资源。角色只存库，服务端每请求查库判定，不写进 JWT
