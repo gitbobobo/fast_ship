@@ -223,7 +223,7 @@ func TestInt138ScheduleFailureEventWakesMainline(t *testing.T) {
 	// 事件提交后立刻唤醒主线：env.bots.Start 从未调用，5s scanLoop 兜底不在场，
 	// 这条 run 只能来自 wakeScheduleEvent 的立即唤醒。
 	wake := int138WaitEventWakeRun(t, env, bot.ID, "schedule_event:"+schedRun.ID+":failed")
-	body := int138WaitEventProjection(t, env, "定时任务运行事件")
+	body := int138WaitEventProjection(t, env, "[定时任务运行事件")
 	if !strings.Contains(body, `\"status\":\"failed\"`) {
 		t.Fatalf("事件投影应带 failed 状态: %s", body)
 	}
@@ -258,7 +258,7 @@ func TestInt138ScheduleSkippedEventWakesMainline(t *testing.T) {
 	}
 
 	wake := int138WaitEventWakeRun(t, env, bot.ID, "schedule_event:"+schedRun.ID+":skipped")
-	body := int138WaitEventProjection(t, env, "定时任务运行事件")
+	body := int138WaitEventProjection(t, env, "[定时任务运行事件")
 	if !strings.Contains(body, `\"status\":\"skipped\"`) {
 		t.Fatalf("事件投影应带 skipped 状态: %s", body)
 	}

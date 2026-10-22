@@ -4,7 +4,11 @@ import { ChevronDown, ChevronUp, Wrench } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ApiRequestError } from "@/lib/api/client";
 import { botApi, type BotCall } from "@/lib/api/bots";
-import { toolActionLabel, type ToolParamChip } from "@/lib/bots/tool-labels";
+import {
+  bidiSafeText,
+  toolActionLabel,
+  type ToolParamChip,
+} from "@/lib/bots/tool-labels";
 
 /** 调用状态中文标签；未知值原样显示（账本可能先于界面升级）。 */
 export const BOT_CALL_STATUS_LABELS: Record<string, string> = {
@@ -45,14 +49,16 @@ export function ParamChipView({ chip }: { chip: ToolParamChip }) {
   const inner = (
     <>
       <span className="text-muted-foreground">{chip.label}</span>
-      <span className="font-mono">{chip.value}</span>
+      <span className="font-mono [unicode-bidi:isolate]">
+        {bidiSafeText(chip.value)}
+      </span>
     </>
   );
   if (chip.href) {
     return (
       <Link
         to={chip.href}
-        title={chip.title}
+        title={chip.title === undefined ? undefined : bidiSafeText(chip.title)}
         className="inline-flex items-center gap-1 rounded-md border bg-background/60 px-1.5 py-0.5 text-xs text-primary hover:border-primary/50 hover:underline"
       >
         {inner}
@@ -61,7 +67,7 @@ export function ParamChipView({ chip }: { chip: ToolParamChip }) {
   }
   return (
     <span
-      title={chip.title}
+      title={chip.title === undefined ? undefined : bidiSafeText(chip.title)}
       className="inline-flex items-center gap-1 rounded-md border bg-background/60 px-1.5 py-0.5 text-xs"
     >
       {inner}
@@ -160,9 +166,9 @@ export function BotToolCard({
         )}
       </div>
       {call?.error_message && (
-        <p className="text-xs text-destructive">
+        <p className="text-xs text-destructive [unicode-bidi:isolate]">
           {call.error_code ? `${call.error_code}: ` : ""}
-          {call.error_message}
+          {bidiSafeText(call.error_message)}
         </p>
       )}
       {call?.effect_may_have_occurred && (
@@ -202,8 +208,8 @@ export function BotToolCard({
                 {resultError}
               </p>
             ) : fullResult !== null ? (
-              <pre className="max-h-60 overflow-auto rounded-lg bg-background p-2 font-mono text-xs">
-                {fullResult}
+              <pre className="max-h-60 overflow-auto rounded-lg bg-background p-2 font-mono text-xs [unicode-bidi:isolate]">
+                {bidiSafeText(fullResult)}
               </pre>
             ) : (
               <p className="text-xs text-muted-foreground">结果读取中…</p>

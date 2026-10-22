@@ -457,7 +457,7 @@ func TestBotLegacyToolsetProjectionGateByRenderVersion(t *testing.T) {
 		{ID: "m1", Seq: 1, Kind: model.BotMessageKindLifecycle, ContentJSON: raw},
 	}
 
-	msgs, _, _, err := botProjectMessages(rows, nil, false)
+	msgs, _, _, err := botProjectMessages(rows, nil, "", false)
 	if err != nil {
 		t.Fatalf("project (gate closed): %v", err)
 	}
@@ -469,7 +469,7 @@ func TestBotLegacyToolsetProjectionGateByRenderVersion(t *testing.T) {
 		t.Fatalf("闸门关闭时投影正文必须逐字节不变:\n got=%q\nwant=%q", got, want)
 	}
 
-	msgs, _, _, err = botProjectMessages(rows, nil, true)
+	msgs, _, _, err = botProjectMessages(rows, nil, "", true)
 	if err != nil {
 		t.Fatalf("project (gate open): %v", err)
 	}

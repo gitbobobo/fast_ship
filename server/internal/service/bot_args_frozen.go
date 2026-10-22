@@ -158,8 +158,9 @@ type botScheduleTaskArgsV5 struct {
 
 // botScheduleTaskArgsV7 是 v7（INT-123）的 fs_schedule 参数：10 个动作含
 // state_get/state_set 与 state 参数。INT-138 的 timezone 描述变更（「默认
-// UTC」→「省略即用户时区」）只进 v8，本副本与 v7 发布时逐标签一致，保证
-// v7 冻结会话的 tools_hash 不回退（基线见 bot_int103_test.go）。不要改动
+// UTC」→「省略即用户时区」）只进 v8；v10（INT-136）只改工具与动作描述、
+// 参数标签不动，本副本与 v7 发布时逐标签一致，保证 v7 冻结会话的
+// tools_hash 不回退（基线见 bot_int103_test.go）。不要改动
 // 本结构体的任何标签。
 type botScheduleTaskArgsV7 struct {
 	Action string `json:"action" jsonschema:"enum=list,enum=create,enum=update,enum=delete,enum=runs,enum=run,enum=enable,enum=disable,enum=state_get,enum=state_set,required"`

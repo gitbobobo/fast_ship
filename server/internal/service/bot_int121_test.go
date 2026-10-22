@@ -45,7 +45,7 @@ func TestBotInt121ManualRunAcceptedAndExecutes(t *testing.T) {
 		tk.NeedsReport = false
 		tk.Instruction = "手动指令-QAZ 汇总昨日动态"
 	})
-	if _, err := env.bots.setScheduleTaskEnabled(bot.ID, task.ID, false); err != nil {
+	if _, err := env.bots.setScheduleTaskEnabled(bot.ID, task.ID, false, "", false); err != nil {
 		t.Fatalf("disable: %v", err)
 	}
 
@@ -161,7 +161,7 @@ func TestBotInt121DryRunHasNoSideEffects(t *testing.T) {
 		tk.Instruction = "预览指令-WSX 每日整理"
 	})
 	// 停用任务也能预览（gorm 建行对布尔零值走默认值，停用走开关服务）。
-	if _, err := env.bots.setScheduleTaskEnabled(bot.ID, task.ID, false); err != nil {
+	if _, err := env.bots.setScheduleTaskEnabled(bot.ID, task.ID, false, "", false); err != nil {
 		t.Fatalf("disable: %v", err)
 	}
 
@@ -173,6 +173,7 @@ func TestBotInt121DryRunHasNoSideEffects(t *testing.T) {
 	if parsed["dry_run"] != true || parsed["ok"] != true {
 		t.Fatalf("回执应标 dry_run: %s", out)
 	}
+	// 预览字段本身不围栏：整条工具结果由模型输入出口统一包（INT-136）。
 	if parsed["instruction"] != "预览指令-WSX 每日整理" {
 		t.Fatalf("预览应含指令全文: %s", out)
 	}
@@ -281,18 +282,23 @@ func TestBotInt121RunMissingTaskNotFound(t *testing.T) {
 // ---------- 4. 受理路径（v6 工具集） ----------
 
 // run 在 v6 受理路径要求 task_id；v5 冻结会话不接受 run（基线与 schema 断言
-// 见 bot_int103_test.go）。
+// 见 bot_int103_test.go）。INT-136 起确认判定在受理端、版本无关：非 dry_run
+// 的 run 受理即改判异步待确认，dry_run 预览保持同步。
 func TestBotInt121RunPrepareRequiresTaskID(t *testing.T) {
 	v6 := botToolsetVersionOf(6)
 	if _, err := botPrepareToolCall(v6, "fs_schedule", `{"action":"run"}`); err == nil {
 		t.Fatalf("run 缺 task_id 应被拒绝")
 	}
 	prepared, err := botPrepareToolCall(v6, "fs_schedule", `{"action":"run","task_id":"t1"}`)
-	if err != nil || prepared.Action != "run" || prepared.Mode != model.BotExecutionSync {
-		t.Fatalf("run 应同步受理: %v %+v", err, prepared)
+	if err != nil || prepared.Action != "run" || prepared.Mode != model.BotExecutionAsync {
+		t.Fatalf("run 应异步待确认受理: %v %+v", err, prepared)
 	}
-	if prepared.RequiresConfirmation {
-		t.Fatalf("run 不应要求确认")
+	if !prepared.RequiresConfirmation {
+		t.Fatalf("run 应要求确认（INT-136）")
+	}
+	prepared, err = botPrepareToolCall(v6, "fs_schedule", `{"action":"run","task_id":"t1","dry_run":true}`)
+	if err != nil || prepared.Mode != model.BotExecutionSync || prepared.RequiresConfirmation {
+		t.Fatalf("dry_run 预览应保持同步: %v %+v", err, prepared)
 	}
 }
 

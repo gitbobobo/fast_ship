@@ -27,6 +27,24 @@ describe("toolActionLabel", () => {
     expect(toolActionLabel("fs_memory", "append")).toBe("追加记忆内容");
   });
 
+  it("fs_schedule 十个动作全部有中文标签", () => {
+    const expected: Record<string, string> = {
+      list: "列出定时任务",
+      create: "创建定时任务",
+      update: "更新定时任务",
+      delete: "删除定时任务",
+      runs: "查看任务运行记录",
+      run: "立即运行定时任务",
+      enable: "启用定时任务",
+      disable: "停用定时任务",
+      state_get: "读取任务状态",
+      state_set: "写入任务状态",
+    };
+    for (const [action, label] of Object.entries(expected)) {
+      expect(toolActionLabel("fs_schedule", action)).toBe(label);
+    }
+  });
+
   it("未知工具或 action 回退为原始标识，不抛错", () => {
     expect(toolActionLabel("fs_xxx", "do")).toBe("fs_xxx.do");
     expect(toolActionLabel("fs_issue", "explode")).toBe("fs_issue.explode");
@@ -38,7 +56,7 @@ describe("toolActionEffect", () => {
   it("按后端只读清单返回 read/write", () => {
     expect(toolActionEffect("fs_issue", "get")).toBe("read");
     expect(toolActionEffect("fs_issue", "timeline")).toBe("read");
-    // fs_schedule 的写是同步执行、不需确认，但仍是写入。
+    // fs_schedule 的写无论同步（delete）还是异步需确认（create/run）都是写入。
     expect(toolActionEffect("fs_schedule", "delete")).toBe("write");
     expect(toolActionEffect("fs_schedule", "runs")).toBe("read");
     expect(toolActionEffect("fs_schedule", "run")).toBe("write");
@@ -51,6 +69,25 @@ describe("toolActionEffect", () => {
     expect(toolActionEffect("fs_thread", "settle")).toBe("write");
     expect(toolActionEffect("fs_thread", "unsettle")).toBe("write");
     expect(toolActionEffect("fs_thread", "resume_queue")).toBe("write");
+  });
+
+  it("fs_schedule：读类 read、写类 write（含需确认与同步写）", () => {
+    for (const action of ["list", "runs", "state_get"]) {
+      expect(toolActionEffect("fs_schedule", action)).toBe("read");
+    }
+    // create/敏感字段 update/run 异步需确认；delete/enable/disable/state_set
+    // 同步执行——同步不等于只读，effect 一律 write。
+    for (const action of [
+      "create",
+      "update",
+      "delete",
+      "run",
+      "enable",
+      "disable",
+      "state_set",
+    ]) {
+      expect(toolActionEffect("fs_schedule", action)).toBe("write");
+    }
   });
 
   it("未知值保守默认 write", () => {

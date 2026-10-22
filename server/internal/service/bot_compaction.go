@@ -96,7 +96,10 @@ type botBoundarySnapshot struct {
 	SourcePersonaPrompt  string
 	Generation           int64
 	NeedActivate         bool
-	AfterTokens          int64
+	// UntrustedNonce 是「发布后口径」的围栏 nonce（INT-136）：快照里的平台
+	// 提示词版本决定发布后是否启用围栏渲染，验收按同一口径估算。
+	UntrustedNonce string
+	AfterTokens    int64
 	// FixedTokens 是同一投影仅清空摘要正文后的体积（F 口径）。它与
 	// AfterTokens 出自同一次物化（见 estimateSnapshotTokensPair）。
 	FixedTokens int64
@@ -514,6 +517,11 @@ func (s *BotService) publishCompaction(bot *model.Bot, maintRun *model.BotMainte
 		if err := s.finishMaintenanceRunTx(tx, maintRun, model.BotMaintenanceSucceeded, "", ""); err != nil {
 			return err
 		}
+		// 快照放弃激活（例如 nonce 自愈失败）时不要在这里补激活：否则会把旧
+		// 提示词标成当前版本，规则 15 内嵌空 nonce、围栏渲染同时被关掉。
+		if !snap.NeedActivate && snap.PlatformPromptVersion < botPlatformPromptVersion {
+			return nil
+		}
 		// stale 判定传事务内读到的行水位，不用 bot 副本（理由见函数注释）。
 		return s.activateToolsetWithPromptTx(tx, bot.ID, fresh.ToolsetVersion, fresh.PlatformPromptVersion,
 			snap.SystemPromptText, snap.PromptRevision, publishAt)
@@ -837,7 +845,7 @@ func (s *BotService) estimatePlanTokens(bot *model.Bot, state *model.BotContextS
 			n += int64(len(ref))
 			continue
 		}
-		n += int64(len(serializeMessage(rows[i])))
+		n += int64(len(serializeMessage(rows[i], botProjectionNonce(bot))))
 	}
 	return botEstimateBytes(n)
 }
@@ -858,10 +866,29 @@ func (s *BotService) buildBoundarySnapshot(bot *model.Bot, plan *botCompactionPl
 	toolVer := fresh.ToolsetVersion
 	needActivate := toolVer < botToolsetVersion || plat < botPlatformPromptVersion
 	if needActivate {
-		prompt = buildBotSystemPrompt(persona)
-		rev = fresh.PromptRevision + 1
-		plat = botPlatformPromptVersion
-		toolVer = botToolsetVersion
+		nonce := fresh.UntrustedNonce
+		if nonce == "" {
+			// 压缩发布可能先于 activateBotPrompt 跑到：这里同样要自愈空
+			// nonce，否则重建的提示词会内嵌空值、围栏永不生效。
+			healed, herr := botHealUntrustedNonce(s.db, fresh.ID)
+			if herr != nil {
+				// 自愈失败就不能发布带围栏规则的新提示词：那会让规则 15 要求
+				// 信任一个不存在的 nonce，同时 `botProjectionNonce` 因 nonce
+				// 为空关闭全部围栏渲染——一次 DB 抖动就把 fail-closed 设计降级
+				// 成无围栏。保持旧版本，下一轮激活再试（与 activateBotPrompt
+				// 自愈失败即返回同一口径）。
+				needActivate = false
+			} else {
+				nonce = healed
+				fresh.UntrustedNonce = healed
+			}
+		}
+		if needActivate {
+			prompt = buildBotSystemPrompt(persona, nonce)
+			rev = fresh.PromptRevision + 1
+			plat = botPlatformPromptVersion
+			toolVer = botToolsetVersion
+		}
 	}
 	var memText string
 	var memVer map[string]int64
@@ -891,6 +918,7 @@ func (s *BotService) buildBoundarySnapshot(bot *model.Bot, plan *botCompactionPl
 		SourcePersonaPrompt:    fresh.PersonaPrompt,
 		Generation:             plan.State.Generation + 1,
 		NeedActivate:           needActivate,
+		UntrustedNonce:         fresh.UntrustedNonce,
 	}
 	snap.AfterTokens, snap.FixedTokens = s.estimateSnapshotTokensPair(bot, plan, snap)
 	return snap
@@ -913,6 +941,14 @@ func (s *BotService) estimateSnapshotTokensPair(bot *model.Bot, plan *botCompact
 		Toolset:                snap.Toolset,
 		SystemPromptText:       &snap.SystemPromptText,
 	}
+	// 验收口径要对齐发布后的渲染：快照水位达标时投影会带 nonce 前缀与
+	// 新文案，多出的字节必须计入 after/F（INT-136），否则验收数字会
+	// 相对真实投影漂移几十字节。
+	var fenceNonce string
+	if snap.PlatformPromptVersion >= botContextFenceVersion {
+		fenceNonce = snap.UntrustedNonce
+	}
+	over.FenceNonce = &fenceNonce
 	if plan != nil && plan.Run != nil && bot != nil {
 		probe := *bot
 		probe.SystemPromptText = snap.SystemPromptText
@@ -929,8 +965,10 @@ func (s *BotService) estimateSnapshotTokensPair(bot *model.Bot, plan *botCompact
 		fixed := after
 		if snap.SummaryText != "" && built.SummaryMessageIdx >= 0 && built.SummaryMessageIdx < len(built.Request.Messages) {
 			fixedMsgs := append([]openai.ChatCompletionMessageParamUnion(nil), built.Request.Messages...)
+			// F 口径必须用与 after 同一份渲染条件（含激活后的 nonce），否则
+			// 摘要前缀的围栏/声明会被算进差值、验收数字偏小。
 			fixedMsgs[built.SummaryMessageIdx] = openai.SystemMessage(
-				botSummaryMessageText("", snap.IdentifierManifestJSON))
+				botSummaryMessageText(fenceNonce, "", snap.IdentifierManifestJSON))
 			fixedRaw, _ := json.Marshal(fixedMsgs)
 			fixed = botEstimateBytes(int64(len(fixedRaw) + int(built.ToolsSchemaBytes)))
 		}
@@ -967,6 +1005,11 @@ func (s *BotService) installBoundarySnapshot(bot *model.Bot, snap *botBoundarySn
 	bot.SystemPromptText = snap.SystemPromptText
 	bot.PromptRevision = snap.PromptRevision
 	bot.PersonaPrompt = snap.PersonaPrompt
+	// 围栏 nonce 同步到副本：发布后提示词可能已升到带围栏的版本，同一 run
+	// 内据此立即按新渲染投影（INT-136）。
+	if snap.UntrustedNonce != "" {
+		bot.UntrustedNonce = snap.UntrustedNonce
+	}
 	s.rt.memMu.Lock()
 	s.rt.memSnaps[bot.ID] = &botFrozenMemory{
 		Generation: snap.Generation,
@@ -1112,7 +1155,7 @@ func (s *BotService) requestSummary(ctx context.Context, bot *model.Bot, maintRu
 	outBudget := s.summaryOutputBudget(bot, plan)
 	rules := botSummaryRules
 	sys := botSummarySysPrompt
-	blocks := summaryProtocolBlocks(plan.Segment)
+	blocks := summaryProtocolBlocks(plan.Segment, botProjectionNonce(bot))
 	acc := plan.State.SummaryText
 	bi := 0
 	var pending []string
@@ -1233,7 +1276,7 @@ func (s *BotService) summaryOutputBudget(bot *model.Bot, plan *botCompactionPlan
 	var tail int64
 	for i := range plan.AllRows {
 		if plan.AllRows[i].Seq > plan.ThroughSeq {
-			tail += int64(len(serializeMessage(plan.AllRows[i])))
+			tail += int64(len(serializeMessage(plan.AllRows[i], botProjectionNonce(bot))))
 		}
 	}
 	budget := plan.GoalTokens - botEstimateBytes(prefix+int64(len(manifest))+tail)
@@ -1243,7 +1286,7 @@ func (s *BotService) summaryOutputBudget(bot *model.Bot, plan *botCompactionPlan
 	return budget
 }
 
-func summaryProtocolBlocks(rows []model.BotMessage) []string {
+func summaryProtocolBlocks(rows []model.BotMessage, nonce string) []string {
 	if len(rows) == 0 {
 		return nil
 	}
@@ -1277,7 +1320,7 @@ func summaryProtocolBlocks(rows []model.BotMessage) []string {
 				}
 			}
 		}
-		cur.WriteString(serializeMessage(rows[i]))
+		cur.WriteString(serializeMessage(rows[i], nonce))
 		if len(open) == 0 {
 			flushBlock()
 		}
@@ -1398,7 +1441,13 @@ var (
 	botIssueKeyRe = regexp.MustCompile(`\b[A-Z][A-Z0-9]{1,15}-\d+\b`)
 )
 
-func serializeMessage(row model.BotMessage) string {
+// serializeMessage 把一条账本消息序列化成辅助模型（摘要/归档）的输入文本。
+// nonce 非空时按模型输入出口的同一规则围栏：工具结果、后台结果、定时任务
+// 事件与 lifecycle 都是回流/外部文本（lifecycle 的 detail 可携带模型可写
+// 数据，如 legacy_schedule_review 的存量任务名），摘要模型也不该把它们当
+// 指令——一次注入可以借摘要进入主线上下文。未列出的种类默认走同一围栏，
+// 不给新增消息类型留裸送通道；平台自有回执的豁免与工具结果一致。
+func serializeMessage(row model.BotMessage, nonce string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "[seq %d] %s: ", row.Seq, string(row.Kind))
 	var text string
@@ -1419,10 +1468,17 @@ func serializeMessage(row model.BotMessage) string {
 	case model.BotMessageKindToolReply:
 		var c botToolReplyContent
 		if json.Unmarshal([]byte(row.ContentJSON), &c) == nil {
-			text = fmt.Sprintf("tool %s status=%s call_id=%s: %s", c.ToolName, c.Status, c.CallID, c.Content)
+			text = fmt.Sprintf("tool %s status=%s call_id=%s: %s",
+				c.ToolName, c.Status, c.CallID, botFenceToolResult(nonce, c.ToolName, c.Action, c.Content))
 		}
 	default:
-		text = row.ContentJSON
+		// background_result / schedule_event / lifecycle / approval_decision 与
+		// 将来新增的种类一律围栏：正文可能携带模型可写或外部来源的数据。
+		if nonce != "" {
+			text = botFenceUntrusted(nonce, "aux_input", row.ContentJSON)
+		} else {
+			text = row.ContentJSON
+		}
 	}
 	b.WriteString(text)
 	b.WriteString("\n")
@@ -1432,11 +1488,11 @@ func serializeMessage(row model.BotMessage) string {
 // serializeSegment 按预算逐条序列化，超预算即停：返回正文与实际写进请求的
 // 最大 seq——预算截尾丢掉的只是尾部，水位只能推进到发出过的部分（INT-124）。
 // 一条都没写（rows 为空或 seq 全 0）时 sentMaxSeq 为 0。
-func serializeSegment(rows []model.BotMessage, maxChars int) (string, int64) {
+func serializeSegment(rows []model.BotMessage, maxChars int, nonce string) (string, int64) {
 	var b strings.Builder
 	var sentMaxSeq int64
 	for i := range rows {
-		b.WriteString(serializeMessage(rows[i]))
+		b.WriteString(serializeMessage(rows[i], nonce))
 		if rows[i].Seq > sentMaxSeq {
 			sentMaxSeq = rows[i].Seq
 		}
@@ -1646,8 +1702,17 @@ func (s *BotService) activateBotPrompt(bot *model.Bot) error {
 		if err != nil {
 			return err
 		}
+		// 自愈空 nonce（INT-136）：迁移没跑到的存量行在激活前补齐，保证
+		// 重建的提示词内嵌真实 nonce、平台前缀与围栏同值。
+		if fresh.UntrustedNonce == "" {
+			healed, err := botHealUntrustedNonce(tx, bot.ID)
+			if err != nil {
+				return err
+			}
+			fresh.UntrustedNonce = healed
+		}
 		if fresh.ToolsetVersion < botToolsetVersion || fresh.PlatformPromptVersion < botPlatformPromptVersion {
-			prompt := buildBotSystemPrompt(fresh.PersonaPrompt)
+			prompt := buildBotSystemPrompt(fresh.PersonaPrompt, fresh.UntrustedNonce)
 			rev := fresh.PromptRevision + 1
 			ok, err := repo.ActivateToolsetTx(tx, bot.ID, botToolsetVersion, botPlatformPromptVersion, prompt, rev, now)
 			if err != nil {
@@ -1674,7 +1739,31 @@ func (s *BotService) activateBotPrompt(bot *model.Bot) error {
 	bot.PlatformPromptVersion = state.PlatformPromptVersion
 	bot.PersonaPrompt = state.PersonaPrompt
 	bot.ToolsetVersion = state.ToolsetVersion
+	bot.UntrustedNonce = state.UntrustedNonce
 	return nil
+}
+
+// botHealUntrustedNonce 给空 nonce 的机器人补一次围栏 nonce（INT-136）：
+// 只写空值行（CAS），并发写者落空后回读库内值，保证提示词与平台前缀永远
+// 共用同一个 nonce。返回行内最终生效的 nonce。
+func botHealUntrustedNonce(db *gorm.DB, botID string) (string, error) {
+	nonce := botNewNonce()
+	res := db.Model(&model.Bot{}).
+		Where("id = ? AND untrusted_nonce = ''", botID).
+		Update("untrusted_nonce", nonce)
+	if res.Error != nil {
+		return "", res.Error
+	}
+	if res.RowsAffected == 0 {
+		// 已有人补过（并发激活/迁移）：以库内值为准。
+		var v string
+		if err := db.Model(&model.Bot{}).Where("id = ?", botID).
+			Pluck("untrusted_nonce", &v).Error; err != nil {
+			return "", err
+		}
+		return v, nil
+	}
+	return nonce, nil
 }
 
 // activateToolsetWithPromptTx 在事务内把工具集/平台提示词水位推进到当前版本
@@ -1749,6 +1838,15 @@ func (s *BotService) tellToolsetTx(tx *gorm.DB, bot *model.Bot) error {
 }
 
 func botToolsetChangeNote(from, to int64) string {
+	if to >= 10 && from < 10 {
+		note := "工具集已升级：fs_schedule 的 create、改动 instruction/needs_report/model 的 update、非 dry_run 的 run、enable、delete 需要用户确认并异步执行（批准创建或修改任务等于授权该任务以后每次运行默认放行写操作；enable 等于重新启用一个默认放行写操作的任务，delete 不可逆）；定时任务运行中不能 create/update/run/enable/disable/delete 任务"
+		// INT-136 的确认告知与 INT-148 的线程/调度告知互不替代，跨过 v9 时一并补发。
+		if from < 9 {
+			note += "；" + strings.TrimPrefix(botToolsetChangeNote(from, 9), "工具集已升级：")
+			note += "；同一定时任务运行不重叠：上一轮未结束时本轮记 skipped、推进下次运行时间，不并行"
+		}
+		return note
+	}
 	if to >= 9 && from < 9 {
 		note := "工具集已升级：fs_thread 新增 settle/unsettle（把线程收进/移出 T3 历史区）与 resume_queue（恢复被挂起的消息队列）三个写动作；stop 只在存在可中断 run/后台工作时才挂起队列、结束 PR 监听（否则是空操作），停没停用 fs_thread get 的 activity.stopping 判断；线程读取新增 run_status（T3 原始状态，status=idle 时它才是最终结局）与 pull_requests[]（含 watching）；fs_thread list 默认不含已结算线程（要看历史区传 settled=true，返回体的 settled_filter 标明实际生效的筛选）"
 		if from < 8 {
@@ -1878,7 +1976,7 @@ func (s *BotService) runSilentArchive(ctx context.Context, bot *model.Bot, maint
 	// 截尾只可能发生在尾部：按预算序列化后取实际发出的最大 seq，水位推进、
 	// source_seq 白名单都以它为界——没发给模型的消息不得被标记为已归档，
 	// 否则重试整段会直接 already_archived、这些消息永远失去归档机会。
-	input, sentMaxSeq := serializeSegment(pending, tokenBudgetToBytes(inputBudget))
+	input, sentMaxSeq := serializeSegment(pending, tokenBudgetToBytes(inputBudget), botProjectionNonce(bot))
 	if sentMaxSeq == 0 {
 		s.recordArchiveResult(maintRun, "over_window", 0)
 		return

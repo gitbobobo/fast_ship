@@ -87,16 +87,19 @@ func createBotRowAt(t *testing.T, env *botTestEnv, userID, baseURL, modelName st
 	if err := env.db.Create(provider).Error; err != nil {
 		t.Fatalf("create provider row: %v", err)
 	}
+	nonce := botNewNonce()
 	bot := &model.Bot{
 		ID: uuid.NewString(), UserID: userID, Name: "win-" + uuid.NewString()[:6],
-		SystemPromptText:      buildBotSystemPrompt("简洁回答。"),
+		SystemPromptText:      buildBotSystemPrompt("简洁回答。", nonce),
 		PromptRevision:        1,
 		PlatformPromptVersion: botPlatformPromptVersion,
 		ToolsetVersion:        botToolsetVersion,
 		LastToldVersion:       botToolsetVersion,
 		// 新机器人直接站在当前说话方式版本上（无旧风格历史要压缩）。
 		StyleCompactionVersion: botStylePromptVersion,
-		ProviderID:             provider.ID, Model: modelName,
+		// 新机器人默认启用围栏（INT-136），窗口估算按真实投影口径。
+		UntrustedNonce: nonce,
+		ProviderID:     provider.ID, Model: modelName,
 		NextMessageSeq: 1, NextEventSeq: 1,
 		CreatedAt: now, UpdatedAt: now,
 	}
@@ -552,9 +555,9 @@ func TestBotConnectionDetectsWindow(t *testing.T) {
 // ---------- B：压缩前置检查、失败不重试、进度事件 ----------
 
 // compactionPrecheckEnv 构造一个「固定前缀 + 最小摘要预算 ≥ 触发阈值」的
-// 场景：v9（INT-148）的工具集加长后固定前缀约 6830 token，窗口取 7200
-// （触发阈值 5400）才能命中 target_unreachable 且不命中「固定前缀已超窗口」
-// ——6800 的旧窗口已被前缀本身越过。
+// 场景：合并 INT-136 + INT-148 前缀后重定标复核，实测 F=7919；
+// 窗口仍取 8000（T=6000），满足 F<W 且 F+256≥T，命中 target_unreachable
+// 而不是「固定前缀已超窗口」，因此不需要扩大这个专门验证不可达的窗口。
 func compactionPrecheckEnv(t *testing.T) (*botTestEnv, *model.Bot, *model.BotRun) {
 	env := setupBotTestEnv(t,
 		fakeModelTurn{Text: `{"items":[]}`},
@@ -563,7 +566,7 @@ func compactionPrecheckEnv(t *testing.T) (*botTestEnv, *model.Bot, *model.BotRun
 	env.fake.strict = true
 	userID := createBotTestUser(t, env.db, "precheck")
 	bot := env.createBot(t, userID)
-	env.cfg.Bots.Context.WindowTokens = 7200
+	env.cfg.Bots.Context.WindowTokens = 8000
 	seedCompactableLedger(t, env, bot.ID, "旧轮次")
 	botRow, _ := env.bots.bots.Get(bot.ID)
 	run := botFixtureRun(t, env, botRow)

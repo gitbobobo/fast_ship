@@ -335,19 +335,21 @@ func TestBotInt123StateSurvivesUpdateAndToggle(t *testing.T) {
 	env := setupBotTestEnv(t)
 	userID := createBotTestUser(t, env.db, "schedstatekeep")
 	bot := env.createBot(t, userID)
-	task := seedScheduleTask(t, env, bot.ID, nil)
+	task := seedScheduleTask(t, env, bot.ID, func(tk *model.BotScheduleTask) {
+		tk.Confirmed = true
+	})
 	run := seedScheduleRun(t, env, bot.ID, task.ID)
 	mustStateCall(t, env, run, `{"action":"state_set","state":{"since":"2026-01-01"}}`)
 
 	// 改指令/cron/模型。
-	if _, err := env.bots.updateScheduleTask(bot.ID, task.ID, "改名", "30 10 * * *", "Asia/Shanghai", "新指令", nil, nil); err != nil {
+	if _, err := env.bots.updateScheduleTask(bot.ID, task.ID, "改名", "30 10 * * *", "Asia/Shanghai", "新指令", nil, nil, "", false); err != nil {
 		t.Fatalf("update: %v", err)
 	}
 	// 开关启停。
-	if _, err := env.bots.setScheduleTaskEnabled(bot.ID, task.ID, false); err != nil {
+	if _, err := env.bots.setScheduleTaskEnabled(bot.ID, task.ID, false, "", false); err != nil {
 		t.Fatalf("disable: %v", err)
 	}
-	if _, err := env.bots.setScheduleTaskEnabled(bot.ID, task.ID, true); err != nil {
+	if _, err := env.bots.setScheduleTaskEnabled(bot.ID, task.ID, true, "", false); err != nil {
 		t.Fatalf("enable: %v", err)
 	}
 
@@ -512,7 +514,7 @@ func TestBotInt123RuntimeContextLastRunAndStateNote(t *testing.T) {
 		if err := json.Unmarshal(raw, &wire); err != nil {
 			t.Fatalf("unmarshal: %v", err)
 		}
-		const prefix = "[运行时上下文]\n"
+		prefix := botPlatformPrefix(botProjectionNonce(botRow), "运行时上下文") + "\n"
 		if !strings.HasPrefix(wire.Content, prefix) {
 			t.Fatalf("末条消息应为运行时上下文: %q", wire.Content)
 		}
@@ -546,7 +548,9 @@ func TestBotInt123RuntimeContextLastRunAndStateNote(t *testing.T) {
 	if rt2.LastRunStatus != string(model.BotRunStatusCompleted) {
 		t.Fatalf("last_run_status 应为 completed: %+v", rt2)
 	}
-	if rt2.LastRunSummary != "上次汇总：2 条新增" {
+	// 摘要进不可信围栏（INT-136）：它是任务会话里模型生成的回流文本，而这条
+	// 运行时上下文本身带平台 nonce，不围栏等于给伪造前缀背书。
+	if want := botFenceUntrusted(botNonce(t, env, bot.ID), "schedule_run", "上次汇总：2 条新增"); rt2.LastRunSummary != want {
 		t.Fatalf("last_run_summary 不符: %q", rt2.LastRunSummary)
 	}
 	if _, err := time.Parse(time.RFC3339, rt2.LastRunAt); err != nil {
@@ -653,7 +657,8 @@ func TestBotInt123StateNoteFollowsFrozenToolset(t *testing.T) {
 			t.Fatalf("unmarshal: %v", err)
 		}
 		var rt botScheduleRuntimeContext
-		if err := json.Unmarshal([]byte(strings.TrimPrefix(wire.Content, "[运行时上下文]\n")), &rt); err != nil {
+		rtPrefix := botPlatformPrefix(botProjectionNonce(botRow), "运行时上下文") + "\n"
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(wire.Content, rtPrefix)), &rt); err != nil {
 			t.Fatalf("unmarshal rt: %v", err)
 		}
 		return rt.Note
@@ -719,14 +724,14 @@ func TestBotInt123HelpTextMentionsStateActions(t *testing.T) {
 // ---------- 8. 平台提示词规则 8 ----------
 
 func TestBotInt123PlatformPromptMentionsState(t *testing.T) {
-	full := buildBotSystemPrompt("")
+	full := buildBotSystemPrompt("", "t-nonce")
 	for _, kw := range []string{"state_get", "state_set", "跨运行保留的小状态", "仅新增时提醒"} {
 		if !strings.Contains(full, kw) {
 			t.Fatalf("平台提示词应说明任务小状态（缺 %q）", kw)
 		}
 	}
-	// INT-123 的交付是「工具集升到 v7」：当前版本只会继续演进（INT-138 已到
-	// v8），这里断言水位不低于 7，避免正常升版反复改动本测试。
+	// INT-123 的交付是「工具集升到 v7」：当前版本只会继续演进（INT-136 起
+	// 为 v9），这里断言水位不低于 7，避免正常升版反复改动本测试。
 	if botToolsetVersion < 7 {
 		t.Fatalf("工具集版本应不低于 7: %d", botToolsetVersion)
 	}
