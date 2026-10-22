@@ -37,14 +37,14 @@ const FULL_AREA: IssueCollabArea = {
   consensus: {
     issue_id: "issue-1",
     body: "双方同意优先处理登录页",
-    author: { kind: "agent", login: "代理" },
+    author: { kind: "agent", login: "代理", avatar_url: "" },
     created_at: "2026-06-19T10:00:00Z",
     updated_at: "2026-06-19T10:30:00Z",
   },
   summary: {
     issue_id: "issue-1",
     body: "已新增顶部按钮",
-    author: { kind: "agent", login: "代理" },
+    author: { kind: "agent", login: "代理", avatar_url: "" },
     created_at: "2026-06-19T13:00:00Z",
     updated_at: "2026-06-19T13:00:00Z",
   },

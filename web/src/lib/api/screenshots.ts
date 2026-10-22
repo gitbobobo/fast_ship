@@ -1,14 +1,14 @@
+import type { components } from "@/types/api.gen";
 import { useAuthStore } from "@/lib/store/auth-store";
 import { api } from "./client";
 
-export interface UpdateScreenshotScreenPayload {
-  /** 出现才更新；空串表示清除为未标注 */
-  title?: string;
-  platform?: string;
-  locale?: string;
-  theme?: string;
-}
+/** 契约类型直接引用 api.gen.ts；multipart 与 query 参数契约没有 schema，保留手写。 */
+type Schemas = components["schemas"];
 
+/** 契约名为 UpdateScreenshotScreenRequest（指针语义；空串清除为未标注）。 */
+export type UpdateScreenshotScreenPayload = Schemas["UpdateScreenshotScreenRequest"];
+
+/** multipart 表单字段（契约只描述 body 字节，无 schema）。 */
 export interface UploadScreenshotFields {
   screen_key: string;
   title?: string;

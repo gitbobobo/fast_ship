@@ -1,6 +1,6 @@
 # API 契约文档
 
-契约真相源是手写的单文件 `server/api/openapi.yaml`。Go 类型和技能参考都从它生成，字段表不再维护第二份。
+契约真相源是手写的单文件 `server/api/openapi.yaml`。Go 类型、Web 的 TypeScript 类型和技能参考都从它生成，字段表不再维护第二份。
 
 ## 真相源
 
@@ -8,13 +8,15 @@
 
 ## 生成链路
 
-两条命令，输入都是这份 yaml。
+三条命令，输入都是这份 yaml。`make api-types` 一次跑完前两条。
 
-`make api-types` 用 oapi-codegen 写出 `server/internal/api/types.gen.go`。配置在 `server/api/oapi-codegen.yaml`，版本由 `server/go.mod` 的 `tool` 指令钉死（当前是 `github.com/oapi-codegen/oapi-codegen/v2 v2.8.0`）。生成文件提交进 git。`go test` 会再跑一次生成，并断言结果和已提交文件逐字节一致。
+`make api-types` 的 server 段用 oapi-codegen 写出 `server/internal/api/types.gen.go`。配置在 `server/api/oapi-codegen.yaml`，版本由 `server/go.mod` 的 `tool` 指令钉死（当前是 `github.com/oapi-codegen/oapi-codegen/v2 v2.8.0`）。生成文件提交进 git。`go test` 会再跑一次生成，并断言结果和已提交文件逐字节一致。
+
+`make api-types` 的 web 段是 `pnpm --dir web api-types`，用 openapi-typescript 写出 `web/src/types/api.gen.ts`。版本是 `web/package.json` 的 devDependency，实际取值由 `web/pnpm-lock.yaml` 钉死。生成文件提交进 git；CI 的 `web-check` 作业重新生成一次并和已提交文件比对，不一致就让流水线失败。
 
 `make api-docs` 运行 `server/cmd/apidocgen`（在 `server` 目录下 `go run ./cmd/apidocgen`），写出 `skills/fast-ship/references/api.md`。同一份 yaml 两次运行，markdown 逐字节相同；`go test` 断言已提交文件与重新渲染结果一致。文件头注明请勿手改。
 
-直接调 codegen 的命令写在 `server/api/oapi-codegen.yaml` 顶部：`cd server && go tool oapi-codegen -config api/oapi-codegen.yaml api/openapi.yaml`。
+直接调 codegen 的命令写在 `server/api/oapi-codegen.yaml` 顶部：`cd server && go tool oapi-codegen -config api/oapi-codegen.yaml api/openapi.yaml`；web 段单独跑用 `pnpm --dir web api-types`。
 
 ## 生成覆盖不到的部分
 
@@ -28,7 +30,11 @@
 
 ## Web 的 TypeScript
 
-前端类型生成是下一步，这单没做。要做的话得加一条 Node 侧生成链路，还要改掉几十个已经手写类型的组件。这单只把契约收成一份 yaml，并让 Go 类型和技能文档从它产出。
+前端类型同样从这份 yaml 生成，`web/src/types/api.gen.ts` 是 openapi-typescript 的原始输出，提交进 git，CI 校验它和 yaml 一致。
+
+手写类型改成对生成类型的引用：`web/src/types/global.d.ts` 引入 `api.gen` 后变成模块，全局声明随之失效，因此用 `declare global` 包一层别名；`web/src/lib/api/*.ts` 直接 `import type { components } from "@/types/api.gen"` 后别名。schema 名以 `api.gen.ts` 里 `components["schemas"]` 的实际键为准，例如 `Issue`、`T3ThreadItem`、`Bot`。
+
+生成类型表达不了的继续手写，且只声明差异：`IssueTimelineEvent` 只覆盖 `payload`、`BotScheduleRun` 只收窄 `status`/`trigger_source`、`CreateDocumentPayload.parent_id` 保留表单三态（契约的 create 不允许 null）。query 参数结构与纯前端类型（如 `ApiResponse<T>`、UI 状态）也没有对应 schema，保持手写。
 
 ## 设计决策
 

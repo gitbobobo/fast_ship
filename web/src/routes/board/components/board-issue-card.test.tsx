@@ -30,10 +30,12 @@ const issue: Issue = {
     avatar_url: "",
   },
   unread_comments_count: 0,
+  closed_at: null,
   created_at: "2026-05-14T12:00:00Z",
   updated_at: "2026-05-14T12:00:00Z",
   internal_meta: {
     workflow_status: "in_progress",
+    progress_percent: null,
     checklist_total: 0,
     checklist_done: 0,
     labels: [],
@@ -46,7 +48,6 @@ const issue: Issue = {
     author_association: "OWNER",
     assignees: [],
     labels: [],
-    milestone: null,
     reactions: {
       total_count: 0,
       "+1": 0,

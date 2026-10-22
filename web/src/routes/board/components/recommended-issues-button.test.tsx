@@ -161,15 +161,16 @@ function makeIssue(
     body_html: "",
     author: { login: "alice", avatar_url: "" },
     unread_comments_count: 0,
+    closed_at: null,
     created_at: "2026-08-22T00:00:00Z",
     updated_at: "2026-08-22T00:00:00Z",
     internal_meta: {
       workflow_status: "todo",
+      progress_percent: null,
       checklist_total: 0,
       checklist_done: 0,
       checklist: [],
     },
-    github: null,
     ...extra,
   };
 }
@@ -196,6 +197,7 @@ const ISSUES: Record<string, Issue> = {
   "issue-1": makeIssue("issue-1", "INT-1", "高优任务", {
     internal_meta: {
       workflow_status: "todo",
+      progress_percent: null,
       checklist_total: 2,
       checklist_done: 1,
       checklist: [
@@ -212,6 +214,7 @@ const ISSUES: Record<string, Issue> = {
     state: "closed",
     internal_meta: {
       workflow_status: "done",
+      progress_percent: null,
       checklist_total: 0,
       checklist_done: 0,
       checklist: [],

@@ -9554,6 +9554,7 @@ components:
       allOf:
         - $ref: '#/components/schemas/ApiKey'
         - type: object
+          required: [key]
           properties:
             key:
               type: string
@@ -13092,7 +13093,7 @@ components:
 
     Bot:
       type: object
-      required: [id, name, persona_prompt, prompt_revision, platform_prompt_version, toolset_version, provider_id, provider_name, catalog_id, base_url, model, api_key_last4, next_event_seq, context_window, max_output_tokens, context_source, created_at, updated_at]
+      required: [id, name, persona_prompt, prompt_revision, platform_prompt_version, toolset_version, provider_id, provider_name, catalog_id, base_url, model, api_key_last4, next_event_seq, context_window, max_output_tokens, context_source, last_message, created_at, updated_at]
       properties:
         id:
           type: string
@@ -13153,13 +13154,15 @@ components:
           description: 事件账本水位（下一条的 seq）；详情订阅以此-1 为 afterSeq，
             与详情快照衔接，不从 0 重放历史
         last_message:
+          type: object
           nullable: true
+          allOf:
+            - $ref: '#/components/schemas/BotLastMessage'
           description: >-
             主线最近一条正文 trim 后非空的 user/assistant 消息预览（按 seq 最大取）；
             正文纯空白或 content 坏 JSON 的消息跳过继续往前找，定时任务会话不参与。
             没有符合条件消息时为 null。仅 GET /api/bots 列表端点返回真实值；
             详情与聊天快照等其它端点恒为 null
-          $ref: '#/components/schemas/BotLastMessage'
         created_at:
           type: string
           format: date-time
@@ -13202,15 +13205,13 @@ components:
           format: int64
           description: 与快照同一读取点的事件账本水位（下一条的 seq）
         metrics:
-          nullable: true
-          description: 运行指标（INT-115）：窗口能力 + 最近一次主线模型请求口径；
-            没有主线请求时 request 缺省、窗口能力仍然可见
           $ref: '#/components/schemas/BotMetrics'
+          description: 运行指标（INT-115）：窗口能力 + 最近一次主线模型请求口径；
+            没有主线请求时 request 缺省、窗口能力仍然可见；字段缺省（omitempty）
         maintenance_progress:
-          nullable: true
-          description: 当前活动主线 run 最近一条维护进度（压缩阶段/失败原因）；
-            无活动主线 run 或尚无进度事件时省略——已结束 run 的进度不再返回
           $ref: '#/components/schemas/BotMaintenanceProgress'
+          description: 当前活动主线 run 最近一条维护进度（压缩阶段/失败原因）；
+            无活动主线 run 或尚无进度事件时字段缺省——已结束 run 的进度不再返回
 
     BotMaintenanceProgress:
       type: object
@@ -13567,12 +13568,16 @@ components:
 
     SendBotMessageResult:
       type: object
-      required: [message, queued]
+      required: [message, run, queued]
       properties:
         message:
           $ref: '#/components/schemas/BotMessage'
         run:
-          $ref: '#/components/schemas/BotRun'
+          type: object
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/BotRun'
+          description: 当前活动 run（可能尚未包含本消息）；没有时为 null，本次发送会触发新 run
         queued:
           type: boolean
           description: 恒为 true；执行交给 runtime
@@ -13686,8 +13691,10 @@ components:
           type: string
           format: date-time
         last_run:
+          type: object
           nullable: true
-          $ref: '#/components/schemas/BotScheduleRun'
+          allOf:
+            - $ref: '#/components/schemas/BotScheduleRun'
 
     BotScheduleRun:
       type: object
@@ -13861,6 +13868,7 @@ components:
           nullable: true
         constraints:
           type: object
+          additionalProperties: true
           description: 规范化约束（如允许写入的字段集合 fields）
         created_at:
           type: string

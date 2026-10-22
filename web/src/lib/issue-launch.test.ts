@@ -18,14 +18,14 @@ import {
 
 function makeBinding(environmentId: string): ProjectT3Binding {
   return {
-    project_id: "proj-1",
     environment_id: environmentId,
     environment_name: "env",
     environment_status: "ok",
-    environment_access: "operate",
     t3_project_id: `t3-${environmentId}`,
     t3_project_title: "Alpha",
     workspace_root: "/w/alpha",
+    created_at: "2026-10-01T00:00:00Z",
+    updated_at: "2026-10-01T00:00:00Z",
   };
 }
 
@@ -42,6 +42,8 @@ function makeThread(
     title: "t",
     status,
     settled: false,
+    run_status: "idle",
+    pull_requests: [],
     branch: "main",
     provider: "codex",
     model: "gpt-5",
@@ -230,6 +232,7 @@ describe("bindingInvalidReason", () => {
         name: "Mac",
         status: "ok",
         access: "operate",
+        projects: [],
         error: "daemon 超时",
       }),
     ).toBeNull();

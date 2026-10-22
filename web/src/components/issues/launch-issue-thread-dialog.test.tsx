@@ -104,14 +104,14 @@ function makeBinding(
   t3ProjectId = `t3-${environmentId}`,
 ): ProjectT3Binding {
   return {
-    project_id: "proj-1",
     environment_id: environmentId,
     environment_name: environmentId,
     environment_status: "ok",
-    environment_access: "operate",
     t3_project_id: t3ProjectId,
     t3_project_title: "Alpha",
     workspace_root: "/w/alpha",
+    created_at: "2026-10-01T00:00:00Z",
+    updated_at: "2026-10-01T00:00:00Z",
   };
 }
 
@@ -216,6 +216,8 @@ describe("LaunchIssueThreadDialog", () => {
           title: "t",
           status: "running",
           settled: false,
+          run_status: "idle",
+          pull_requests: [],
           branch: "main",
           provider: "codex",
           model: "gpt-5",

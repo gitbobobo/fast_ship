@@ -136,7 +136,7 @@ describe("IntegrationsPage admin view", () => {
         default_permissions: {
           pull_requests: "write",
           issues: "write",
-          checks: "write",
+          statuses: "write",
           contents: "read",
           metadata: "read",
         },

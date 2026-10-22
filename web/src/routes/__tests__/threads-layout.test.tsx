@@ -32,6 +32,8 @@ function thread(i: number, over: Partial<ThreadSummary> = {}): ThreadSummary {
     updated_at: new Date(Date.UTC(2026, 9, 1, 0, i)).toISOString(),
     pull_request_count: 0,
     settled: false,
+    run_status: "idle",
+    pull_requests: [],
     ...over,
   };
 }

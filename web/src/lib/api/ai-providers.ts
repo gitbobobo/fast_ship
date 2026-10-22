@@ -1,83 +1,35 @@
+import type { components } from "@/types/api.gen";
 import { api, decodeApiError } from "./client";
 
-// 统一 AI 提供商（INT-133）：类型与端点按契约第 4 节手写。
+// 统一 AI 提供商（INT-133）：类型引用 api.gen.ts（契约第 4 节）。
 // 密钥任何响应都不回传，仅返回末四位；catalog 来自 models.dev 内置子集，
 // 由服务端随二进制发布，前端只读不写。
 
 /** 自定义提供商的 catalog_id 哨兵值，与契约一致（自定义不出现在内置目录里）。 */
 export const AI_PROVIDER_CUSTOM_ID = "custom";
 
-export interface AIProvider {
-  id: string;
-  /** models.dev 提供商 id；自定义固定为 "custom"。 */
-  catalog_id: string;
-  name: string;
-  base_url: string;
-  api_key_last4: string;
-  /** 引用该提供商的机器人数；删除时服务端据此返回 409。 */
-  bot_count: number;
-  created_at: string;
-  updated_at: string;
-}
+type Schemas = components["schemas"];
 
-export interface CatalogModel {
-  id: string;
-  name: string;
-  context_window?: number;
-  max_output_tokens?: number;
-  reasoning?: boolean;
-}
+export type AIProvider = Schemas["AIProvider"];
 
-export interface CatalogProvider {
-  id: string;
-  name: string;
-  /** 目录给出的 OpenAI 兼容 API 地址；目录提供商的 base_url 以此为准。 */
-  api: string;
-  models: CatalogModel[];
-}
+/** 契约名为 CatalogProviderModel（窗口/输出缺失为 0，不是缺省）。 */
+export type CatalogModel = Schemas["CatalogProviderModel"];
 
-export interface AIProviderTestCheck {
-  name: string;
-  passed: boolean;
-  /** 失败原因（截断；不含密钥），通过时服务端省略。 */
-  detail?: string;
-}
+export type CatalogProvider = Schemas["CatalogProvider"];
 
-export interface AIProviderTestResult {
-  ok: boolean;
-  /** models 列表可达 + 一次最小 chat 调用等逐项检查。 */
-  checks: AIProviderTestCheck[];
-  /** 测试过程中拿到的模型清单（服务端可选返回）。 */
-  models?: string[];
-}
+/** 测试结果 checks 数组的元素（契约内联在 AIProviderTestResult.checks 里，直接取内联类型）。 */
+export type AIProviderTestCheck = Schemas["AIProviderTestResult"]["checks"][number];
 
-/** catalog_id === "custom" 时才接受 base_url；name 缺省服务端用目录名/「自定义」。 */
-export interface CreateAIProviderInput {
-  catalog_id: string;
-  name?: string;
-  base_url?: string;
-  api_key: string;
-}
+export type AIProviderTestResult = Schemas["AIProviderTestResult"];
 
-/** 指针语义：出现才更新；catalog_id 不可改，api_key 省略保留已存值。 */
-export interface UpdateAIProviderInput {
-  name?: string;
-  base_url?: string;
-  api_key?: string;
-}
+/** 契约名为 CreateAIProviderRequest；catalog_id === "custom" 时才接受 base_url。 */
+export type CreateAIProviderInput = Schemas["CreateAIProviderRequest"];
 
-/**
- * 不落库的连通性测试：catalog 提供商只传 catalog_id + api_key（model 缺省
- * 用目录第一个模型）；custom 必须给 base_url 与 model。
- */
-export interface TestAIProviderInput {
-  catalog_id?: string;
-  base_url?: string;
-  api_key?: string;
-  model?: string;
-  /** 已存提供商 id：测试成功时服务端清除该提供商的熔断（INT-137）。 */
-  provider_id?: string;
-}
+/** 契约名为 UpdateAIProviderRequest（指针语义：出现才更新，api_key 省略保留已存值）。 */
+export type UpdateAIProviderInput = Schemas["UpdateAIProviderRequest"];
+
+/** 契约名为 TestAIProviderRequest；不落库的连通性测试，custom 必须给 base_url 与 model。 */
+export type TestAIProviderInput = Schemas["TestAIProviderRequest"];
 
 /** 与 bot 请求同一口径：35 秒超时、不重试（测试连接本身是一次模型调用）。 */
 export const AI_PROVIDER_REQUEST_TIMEOUT_MS = 35_000;

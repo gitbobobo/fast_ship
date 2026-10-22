@@ -28,7 +28,6 @@ vi.mock("@/lib/hooks/use-projects", () => ({
 // 更新 payload 只剩 name/description，便于断言 description 字段本身。
 const projectFixture: Project = {
   id: "proj-1",
-  user_id: "user-1",
   name: "fast-ship",
   description: "旧描述",
   github_owner: "",

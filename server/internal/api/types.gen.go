@@ -1461,7 +1461,7 @@ type ApiKeyCreated struct {
 	Id        string `json:"id"`
 
 	// Key 完整 API Key（fsk_ 前缀），仅创建响应中出现一次，服务端不存原文
-	Key *string `json:"key,omitempty"`
+	Key string `json:"key"`
 
 	// KeyHash Key 的 SHA-256 哈希
 	KeyHash string `json:"key_hash"`
@@ -1524,8 +1524,8 @@ type Bot struct {
 	CreatedAt     string `json:"created_at"`
 	Id            string `json:"id"`
 
-	// LastMessage 机器人主线最近一条可见消息的预览（INT-125），机器人列表端点专用
-	LastMessage *BotLastMessage `json:"last_message,omitempty"`
+	// LastMessage 主线最近一条正文 trim 后非空的 user/assistant 消息预览（按 seq 最大取）； 正文纯空白或 content 坏 JSON 的消息跳过继续往前找，定时任务会话不参与。 没有符合条件消息时为 null。仅 GET /api/bots 列表端点返回真实值； 详情与聊天快照等其它端点恒为 null
+	LastMessage *BotLastMessage `json:"last_message"`
 
 	// MaxOutputTokens 模型输出上限；detected（探测缓存）与 catalog（内置目录）来源可给出，未知为 0
 	MaxOutputTokens int64  `json:"max_output_tokens"`
@@ -1795,8 +1795,8 @@ type BotScheduleTask struct {
 	Id             string `json:"id"`
 
 	// Instruction 每次运行交给机器人的任务指令
-	Instruction string         `json:"instruction"`
-	LastRun     BotScheduleRun `json:"last_run"`
+	Instruction string          `json:"instruction"`
+	LastRun     *BotScheduleRun `json:"last_run"`
 
 	// Model 运行使用的模型；空串用机器人当前模型
 	Model string `json:"model"`
@@ -3994,8 +3994,10 @@ type SendBotMessageResult struct {
 	Message BotMessage `json:"message"`
 
 	// Queued 恒为 true；执行交给 runtime
-	Queued bool    `json:"queued"`
-	Run    *BotRun `json:"run,omitempty"`
+	Queued bool `json:"queued"`
+
+	// Run 当前活动 run（可能尚未包含本消息）；没有时为 null，本次发送会触发新 run
+	Run *BotRun `json:"run"`
 }
 
 // SendT3ThreadMessageRequest defines model for SendT3ThreadMessageRequest.

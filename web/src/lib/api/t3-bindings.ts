@@ -1,45 +1,21 @@
+import type { components } from "@/types/api.gen";
 import { api, decodeApiError } from "./client";
-import {
-  THREAD_REQUEST_TIMEOUT_MS,
-  type EnvironmentAccess,
-  type EnvironmentStatus,
-} from "./threads";
+import { THREAD_REQUEST_TIMEOUT_MS } from "./threads";
 
 function options(signal?: AbortSignal) {
   return { signal, timeout: THREAD_REQUEST_TIMEOUT_MS, retry: 0 } as const;
 }
 
+/** 契约类型直接引用 api.gen.ts（服务端响应就是 oapi-codegen 的同名结构）。 */
+type Schemas = components["schemas"];
+
 /** GET /api/environments/t3-projects 的逐环境条目；单环境失败只标在该条目上。 */
-export interface T3EnvironmentProjects {
-  environment_id: string;
-  name: string;
-  status: EnvironmentStatus;
-  access: EnvironmentAccess;
-  /** 该环境发现失败时的错误说明 */
-  error?: string;
-  projects?: T3DiscoveredProject[];
-}
+export type T3EnvironmentProjects = Schemas["T3EnvironmentProjects"];
 
-export interface T3DiscoveredProject {
-  id: string;
-  title: string;
-  workspace_root?: string;
-}
+export type T3DiscoveredProject = Schemas["T3DiscoveredProject"];
 
-/** GET /api/projects/:id/t3-bindings 的绑定记录（附环境名与状态）。 */
-export interface ProjectT3Binding {
-  project_id: string;
-  environment_id: string;
-  environment_name?: string;
-  environment_status?: EnvironmentStatus;
-  environment_access?: EnvironmentAccess;
-  t3_project_id: string;
-  /** 绑定成功那一刻的远端快照；与最新发现不一致即「失效绑定」。 */
-  t3_project_title?: string;
-  workspace_root?: string;
-  created_at?: string;
-  updated_at?: string;
-}
+/** GET /api/projects/:id/t3-bindings 的绑定记录（附环境名与实时探测状态）。 */
+export type ProjectT3Binding = Schemas["ProjectT3Binding"];
 
 const bindingsPath = (projectId: string) =>
   `projects/${encodeURIComponent(projectId)}/t3-bindings`;

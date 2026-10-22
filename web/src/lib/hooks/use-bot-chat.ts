@@ -286,10 +286,6 @@ export function mergeBotSnapshot(previous: Bot | undefined, incoming: Bot): Bot 
   return {
     ...incoming,
     next_event_seq: Math.max(incoming.next_event_seq, previous.next_event_seq ?? 1),
-    next_message_seq: Math.max(
-      incoming.next_message_seq ?? 1,
-      previous.next_message_seq ?? 1,
-    ),
   };
 }
 

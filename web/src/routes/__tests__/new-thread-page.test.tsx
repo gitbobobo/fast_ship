@@ -106,6 +106,8 @@ function thread(over: Partial<ThreadSummary> = {}): ThreadSummary {
     updated_at: "2026-10-01T00:00:00Z",
     pull_request_count: 0,
     settled: false,
+    run_status: "idle",
+    pull_requests: [],
     ...over,
   };
 }

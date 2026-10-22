@@ -1,5 +1,11 @@
-import type { IssueWorkflowStatus } from "@/lib/issue-workflow-status";
+import type { components } from "@/types/api.gen";
 import { api } from "./client";
+
+/**
+ * Issue 域契约类型直接引用 api.gen.ts；query 参数（IssueListParams）契约
+ * 内联、无 schema，保留手写。
+ */
+type Schemas = components["schemas"];
 
 export interface IssueListParams {
   state?: string;
@@ -16,54 +22,27 @@ interface UpdateIssueInternalMetaRequest {
   workflow_status: "" | "todo" | "in_progress" | "done";
 }
 
-interface ReplaceIssueChecklistRequest {
-  items: Array<{
-    id?: string;
-    title: string;
-    is_completed: boolean;
-  }>;
-}
+type ReplaceIssueChecklistRequest = { items: Schemas["IssueChecklistItemInput"][] };
 
-interface CreateIssueRequest {
-  title: string;
-  body: string;
-  workflow_status?: "" | "todo" | "in_progress" | "done";
-  source?: "internal" | "github";
-}
+/** 契约名为 CreateIssueRequest。 */
+type CreateIssueRequest = Schemas["CreateIssueRequest"];
 
-interface UpdateInternalIssueRequest {
-  title?: string;
-  body?: string;
-  state?: "open" | "closed";
-  state_reason?: "completed" | "not_planned" | "reopened";
-  labels?: string[];
-}
+/** 契约名为 UpdateIssueRequest。 */
+type UpdateInternalIssueRequest = Schemas["UpdateIssueRequest"];
 
 interface BatchCloseDoneRequest {
   source?: "internal" | "github";
 }
 
-interface BatchCloseDoneResponse {
-  total: number;
-  succeeded: number;
-  failed: number;
-  failures: Array<{
-    id: string;
-    reference?: string;
-    error: string;
-  }>;
-  elapsed_ms: number;
-}
+/** 契约名为 IssueBatchResult。 */
+type BatchCloseDoneResponse = Schemas["IssueBatchResult"];
 
 interface CreateInternalIssueCommentRequest {
   body: string;
 }
 
-interface UpsertShipHookRequest {
-  comment_body?: string;
-  close?: boolean;
-  workflow_status?: IssueWorkflowStatus;
-}
+/** 契约名为 UpsertShipHookRequest。 */
+type UpsertShipHookRequest = Schemas["UpsertShipHookRequest"];
 
 export type CollabDeleteSection = "all" | "consensus" | "summary";
 

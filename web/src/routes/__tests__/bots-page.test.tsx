@@ -47,7 +47,12 @@ const fakeBot: Bot = {
   base_url: "https://api.deepseek.com/v1",
   model: "gpt-test",
   api_key_last4: "1234",
-  next_message_seq: 2,
+  prompt_revision: 1,
+  platform_prompt_version: 1,
+  toolset_version: 1,
+  context_window: 131072,
+  max_output_tokens: 32768,
+  context_source: "catalog",
   next_event_seq: 10,
   last_message: {
     kind: "assistant",

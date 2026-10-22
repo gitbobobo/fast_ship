@@ -1,27 +1,13 @@
+import type { components } from "@/types/api.gen";
 import { api } from "./client";
 
-// 站内通知（INT-135）：审查系统故障与 Agent 发布。
+// 站内通知（INT-135）：审查系统故障四类，kind 直接取契约枚举。
 
-export type NotificationKind =
-  | "agent"
-  | "review_dispatch_failed"
-  | "review_run_timeout"
-  | "review_cleanup_failed"
-  | "review_redelivery_failed";
+type Schemas = components["schemas"];
 
-export interface Notification {
-  id: string;
-  kind: NotificationKind;
-  title: string;
-  body: string;
-  environment_id?: string | null;
-  thread_id?: string | null;
-  run_id?: string | null;
-  created_at: string;
-  updated_at: string;
-  last_seen_at: string;
-  read_at?: string | null;
-}
+export type NotificationKind = Schemas["Notification"]["kind"];
+
+export type Notification = Schemas["Notification"];
 
 export const notificationApi = {
   list: (params?: { limit?: number; unread_only?: boolean }) => {
@@ -43,8 +29,6 @@ export const notificationApi = {
 
 export function notificationKindLabel(kind: NotificationKind): string {
   switch (kind) {
-    case "agent":
-      return "Agent";
     case "review_dispatch_failed":
       return "审查派发失败";
     case "review_run_timeout":

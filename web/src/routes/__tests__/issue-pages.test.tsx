@@ -79,7 +79,7 @@ function buildGitHubIssue(
     unread_comments_count: 0,
     created_at: "2026-04-10T10:00:00Z",
     updated_at: "2026-04-12T10:00:00Z",
-    internal_meta: null,
+    closed_at: null,
     github: {
       github_issue_id: 1001,
       github_node_id: "I_kw",
@@ -125,6 +125,7 @@ function buildInternalIssue(overrides: Partial<Issue> = {}): Issue {
     unread_comments_count: 0,
     created_at: "2026-04-10T10:00:00Z",
     updated_at: "2026-04-12T10:00:00Z",
+    closed_at: null,
     internal_meta: {
       workflow_status: "todo",
       progress_percent: 0,
@@ -132,7 +133,6 @@ function buildInternalIssue(overrides: Partial<Issue> = {}): Issue {
       checklist_done: 0,
       updated_at: "2026-04-12T10:00:00Z",
     },
-    github: null,
     ...overrides,
   };
 }
@@ -143,7 +143,6 @@ function buildIssuePullRequest(
   return {
     id: "link-1",
     issue_id: "issue-1",
-    project_id: "proj-1",
     provider: "github",
     repo_full_name: "acme/alpha",
     number: 123,
@@ -1496,7 +1495,7 @@ describe("Issue pages", () => {
     const navigate = vi.fn();
     const useNavigateSpy = vi.spyOn(ReactRouter, "useNavigate").mockReturnValue(navigate);
     const mutateAsync = vi.fn().mockResolvedValue({
-      data: buildInternalIssue({ internal_meta: null }),
+      data: buildInternalIssue({ internal_meta: undefined }),
     });
     const uploadMutateAsync = vi.fn().mockResolvedValue({
       data: {

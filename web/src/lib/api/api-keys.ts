@@ -1,12 +1,13 @@
+import type { components } from "@/types/api.gen";
 import { api } from "./client";
 
-interface CreateApiKeyRequest {
-  name: string;
-}
+/** 契约类型直接引用 api.gen.ts。 */
+type Schemas = components["schemas"];
 
-interface CreateApiKeyResponse extends ApiKey {
-  key: string;
-}
+type CreateApiKeyRequest = Schemas["CreateApiKeyRequest"];
+
+/** 契约名为 ApiKeyCreated；明文 key 仅创建响应出现一次，契约已标 required。 */
+type CreateApiKeyResponse = Schemas["ApiKeyCreated"];
 
 export const apiKeyApi = {
   list: () => api.get("api-keys").json<ApiResponse<ApiKey[]>>(),

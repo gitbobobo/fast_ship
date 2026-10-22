@@ -108,8 +108,8 @@ describe("NotificationsPage", () => {
         {
           ...notification,
           id: "n-2",
-          kind: "agent",
-          title: "Agent 汇报",
+          kind: "review_cleanup_failed",
+          title: "工作区回收失败通知",
           read_at: "2026-10-14T01:00:00Z",
         },
       ],
@@ -139,9 +139,9 @@ describe("NotificationsPage", () => {
     });
 
     expect(screen.getByText("审查运行超时")).toBeInTheDocument();
-    expect(screen.getByText("Agent 汇报")).toBeInTheDocument();
     expect(screen.getByText("审查超时")).toBeInTheDocument();
-    expect(screen.getByText("Agent")).toBeInTheDocument();
+    expect(screen.getByText("工作区回收失败通知")).toBeInTheDocument();
+    expect(screen.getByText("工作区回收失败")).toBeInTheDocument();
     expect(screen.getByText("标记已读")).toBeInTheDocument();
     expect(screen.getByText("已读")).toBeInTheDocument();
   });

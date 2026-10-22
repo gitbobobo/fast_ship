@@ -105,6 +105,7 @@ describe("canProbe", () => {
   const PROVIDER: QuotaProvider = {
     id: "factory",
     name: "Factory Droid",
+    plan_hint: "",
     credential_fields: FIELDS,
     instructions: [],
     warning: "",

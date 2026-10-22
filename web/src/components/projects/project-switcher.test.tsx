@@ -6,7 +6,6 @@ import { ProjectSwitcher } from "./project-switcher";
 const projects: Project[] = [
   {
     id: "fast-ship",
-    user_id: "user-1",
     name: "Fast Ship",
     description: "项目管理工具",
     github_owner: "Bobo",
@@ -21,7 +20,6 @@ const projects: Project[] = [
   },
   {
     id: "notes",
-    user_id: "user-1",
     name: "Notes",
     description: "团队知识库",
     github_owner: "",

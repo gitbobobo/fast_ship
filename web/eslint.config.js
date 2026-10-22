@@ -7,7 +7,7 @@ import { defineConfig, globalIgnores } from 'eslint/config'
 import fastShip from './eslint-rules/index.js'
 
 export default defineConfig([
-  globalIgnores(['dist']),
+  globalIgnores(['dist', 'src/types/api.gen.ts']),
   {
     files: ['**/*.{ts,tsx}'],
     plugins: { 'fast-ship': fastShip },
