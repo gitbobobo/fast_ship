@@ -557,13 +557,18 @@ failure 分支口径一致；上一轮通过或没有上一轮时不加）。
 内容变了或有新 UI 改动时不沿用；描述里没有可服务截图（`u:` 结清态）时也
 不沿用——上一轮的结论不是这批材料上的结论，宁可不写 status，也不冒充。
 
-**未解决的问题计入结论**：视觉 failure 的判定与条数（`visualFailureCount`）
-与 Web「需要处理」计数都取「本轮 `findings` 里的 blocker/worth_fixing」+
-「`prior` 里 `status=open` 且 `level` 为 blocker/worth_fixing 的条目」；评论
-的「仍未解决」段与下一轮视觉历史保留 `prior(open)` 的**全部**条目（含未分
-级 / minor），比计数口径更宽——展示用宽口径，红绿用阻塞口径。只写进
-`prior(open)` 的遗留问题因此不会从状态、评论、历史里消失（musiver PR #563
-的红绿反复正是它被三处一起忽略导致的）。
+**未解决的问题计入结论**：视觉 failure 的判定与条数（`visualFailureCount`）、
+Web「需要处理」计数、审查记录投影（`review_records.go` 的 `findings_count`）
+都取「本轮 `findings` 里的 blocker/worth_fixing」+「`prior` 里阻塞的
+`status=open` 条目」。阻塞口径由 `priorOpenBlocks` 判定：`minor` / `P2` /
+`Note` 不阻塞，其余（含 `nil` 与未知值）一律阻塞——模型显式标了「仍未解决」
+却漏写级别时不能让结论变绿（新提交由 `validateVisualResult` 直接拒绝：open
+必须带 blocker/worth_fixing/minor 级别）。评论的「仍未解决」段、下一轮视觉
+历史与记录详情里的 `findings[]` 保留 `prior(open)` 的**全部**条目（含未分级 /
+minor），比计数口径更宽——展示用宽口径，红绿用阻塞口径；记录详情里这些条目
+带「上轮遗留：」前缀，避免被误读成本轮新发现。只写进 `prior(open)` 的遗留问
+题因此不会从状态、评论、历史、记录里消失（musiver PR #563 的红绿反复正是它
+被三处一起忽略导致的）。
 
 失败原因按**错误本身**归类，不按错误外壳嗅探：本地缓存操作失败（建目录、
 建临时文件、写盘、改名、读缓存）由下载面在产生点打上

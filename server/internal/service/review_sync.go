@@ -1553,12 +1553,28 @@ func priorVisualFailure(runs []model.ReviewRun) bool {
 	return false
 }
 
+// priorOpenBlocks prior 里 status=open 的条目是否阻塞合并：minor（以及从代码
+// 审查分级误带过来的 P2/Note）不阻塞；nil 与未知级别按阻塞兜底——显式标了
+// 「仍未解决」就不该让结论变绿。nil/未知兜底是对旧数据的防御（历史轮次模型
+// 漏写 level 或写错分级时仍按阻塞计，不放过遗留项），新提交由
+// validateVisualResult 拦掉 open 缺 level / 非法 level，兜底只服务存量数据。
+func priorOpenBlocks(level *string) bool {
+	if level == nil {
+		return true
+	}
+	switch *level {
+	case string(api.Minor), string(api.P2), string(api.Note):
+		return false
+	}
+	return true
+}
+
 // visualFailureCount 视觉结论里仍未处理的问题条数：本轮 findings 的
-// blocker/worth_fixing + prior 里 status=open 且级别为 blocker/worth_fixing
-// 的条目（level 为 nil 或 minor 不计——提示词契约让未解决项只标 prior(open)，
-// 未解决与否的真相就在这一段；兼容旧轮次「重写进 findings」的结论，两条路径
-// 都计）。状态汇总、沿用描述、Web 计数都走它，保证各处红绿判定一致
-// （musiver PR #563 的红绿反复正是 prior(open) 不计导致的）。
+// blocker/worth_fixing + prior 里 status=open 且按 priorOpenBlocks 阻塞的条目
+// （提示词契约让未解决项只标 prior(open)，未解决与否的真相就在这一段；兼容
+// 旧轮次「重写进 findings」的结论，两条路径都计）。状态汇总、沿用描述、Web
+// 计数都走它，保证各处红绿判定一致（musiver PR #563 的红绿反复正是
+// prior(open) 不计导致的）。
 func visualFailureCount(result *api.ReviewVisualResult) int {
 	if result == nil {
 		return 0
@@ -1570,11 +1586,10 @@ func visualFailureCount(result *api.ReviewVisualResult) int {
 		}
 	}
 	for _, p := range result.Prior {
-		if p.Status != api.ReviewPriorDecisionStatusOpen || p.Level == nil {
+		if p.Status != api.ReviewPriorDecisionStatusOpen {
 			continue
 		}
-		switch *p.Level {
-		case string(api.Blocker), string(api.WorthFixing):
+		if priorOpenBlocks(p.Level) {
 			n++
 		}
 	}

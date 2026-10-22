@@ -611,7 +611,26 @@ func validateVisualResult(r *api.ReviewVisualResult) error {
 			return reviewResultErr("unmeasurable[%d] 需要 screenshot 与 reason", i)
 		}
 	}
-	return validatePrior(r.Prior)
+	if err := validatePrior(r.Prior); err != nil {
+		return err
+	}
+	// 视觉专属：open 的 prior 必须保留原严重度。红绿判定按 prior(open) 的级别
+	// 计数（priorOpenBlocks），缺级别或误写代码审查的分级（P0/P1 等）会让遗
+	// 留项漏出计数、结论错误变绿——在新提交的入口拦下，不把防御摊给各读取方。
+	for i, p := range r.Prior {
+		if p.Status != api.ReviewPriorDecisionStatusOpen {
+			continue
+		}
+		if p.Level == nil {
+			return reviewResultErr("prior[%d].level 必须是 blocker/worth_fixing/minor（open 需保留原严重度）", i)
+		}
+		switch *p.Level {
+		case string(api.Blocker), string(api.WorthFixing), string(api.Minor):
+		default:
+			return reviewResultErr("prior[%d].level 必须是 blocker/worth_fixing/minor（open 需保留原严重度）", i)
+		}
+	}
+	return nil
 }
 
 // reviewResultRequiredKeys 结果端点按 kind 的必填顶层键：缺键或显式 null

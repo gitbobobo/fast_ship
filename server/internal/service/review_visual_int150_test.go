@@ -36,8 +36,9 @@ func visComboRun(status model.ReviewRunStatus, result string) model.ReviewRun {
 const int150Result = `{"summary":"问题仍挂着","findings":[{"severity":"minor","screenshot":"界面","dimension":"spacing","body":"圆角略不一致","fix":"统一圆角"}],` +
 	`"prior":[{"level":"worth_fixing","body":"对比度不足看不清次要按钮","status":"open"}],"unmeasurable":[]}`
 
-// E.1 未解决的 prior(open) 计入失败判定与各处计数：level 为 nil / minor /
-// 非 open 状态都不计，只把「open 且 blocker/worth_fixing」算问题。
+// E.1 未解决的 prior(open) 计入失败判定与各处计数：minor / 非 open 状态不
+// 计，open 且按 priorOpenBlocks 阻塞的（blocker/worth_fixing、nil 与未知级
+// 别兜底）都算问题。
 func TestVisualPriorOpenCountsAsFailure(t *testing.T) {
 	var result api.ReviewVisualResult
 	if err := json.Unmarshal([]byte(int150Result), &result); err != nil {
@@ -46,7 +47,9 @@ func TestVisualPriorOpenCountsAsFailure(t *testing.T) {
 	if n := visualFailureCount(&result); n != 1 {
 		t.Fatalf("visualFailureCount = %d, want 1（prior open worth_fixing 计入）", n)
 	}
-	// 口径边界：level 缺失、minor、fixed/rejected 都不算未解决问题。
+	// 口径边界（修 B）：open 的级别按 priorOpenBlocks 判阻塞——minor 不计，
+	// fixed/rejected 已了结不计；「没写级别」的 open 按阻塞兜底计入（显式标
+	// 了仍未解决就不该让结论变绿）。
 	minorPrior := &api.ReviewVisualResult{
 		Findings: []api.ReviewVisualFinding{{Severity: api.Minor, Screenshot: "s", Dimension: api.Spacing, Body: "b", Fix: "f"}},
 		Prior: []api.ReviewPriorDecision{
@@ -56,8 +59,17 @@ func TestVisualPriorOpenCountsAsFailure(t *testing.T) {
 			{Level: api.Ptr("worth_fixing"), Body: "驳回", Status: api.ReviewPriorDecisionStatusRejected, Reason: api.Ptr("有意为之")},
 		},
 	}
-	if n := visualFailureCount(minorPrior); n != 0 {
-		t.Fatalf("visualFailureCount = %d, want 0（nil/minor/fixed/rejected 不计）", n)
+	if n := visualFailureCount(minorPrior); n != 1 {
+		t.Fatalf("visualFailureCount = %d, want 1（nil 级别的 open 兜底计入，minor/fixed/rejected 不计）", n)
+	}
+	// 未知级别（代码审查的 P1）的 open 同样按阻塞兜底计入。
+	p1Prior := &api.ReviewVisualResult{
+		Prior: []api.ReviewPriorDecision{
+			{Level: api.Ptr("P1"), Body: "误写了代码分级", Status: api.ReviewPriorDecisionStatusOpen},
+		},
+	}
+	if n := visualFailureCount(p1Prior); n != 1 {
+		t.Fatalf("visualFailureCount = %d, want 1（未知级别 P1 的 open 计入）", n)
 	}
 
 	// GitHub 状态：failure，描述与「发现 1 条问题」同量级。
@@ -76,6 +88,118 @@ func TestVisualPriorOpenCountsAsFailure(t *testing.T) {
 	}
 	if findings.Blocker != 0 || findings.WorthFixing != 1 {
 		t.Fatalf("counts = %+v, want worth_fixing 1（prior open 计入）", findings)
+	}
+}
+
+// 修 A：审查记录投影（PR 详情抽屉）把 prior(open) 一并展示并按阻塞口径计数
+// ——展示宽（全部 open 条目，含 minor/未分级），计数窄（只算阻塞级别），与
+// GitHub status / 首页「需要处理」同一把尺，应用内不再出现「抽屉 0 条发现但
+// 状态失败」的矛盾。遗留条目带「上轮遗留：」前缀，复核者能区分本轮新发现。
+func TestRunSummaryVisualPriorOpenProjected(t *testing.T) {
+	project := func(run model.ReviewRun) api.ReviewRunSummary {
+		t.Helper()
+		return runSummary(&run, nil)
+	}
+
+	// 本轮只有 minor（不计数），上轮 worth_fixing 只标 prior(open)（计数）：
+	// findings_count = 1，列表两条——本轮原文 + 带前缀的遗留条目。
+	run := visComboRun(model.ReviewRunCompleted, int150Result)
+	sum := project(run)
+	if sum.FindingsCount == nil || *sum.FindingsCount != 1 {
+		t.Fatalf("FindingsCount = %v, want 1（minor 不计、prior open worth_fixing 计）", sum.FindingsCount)
+	}
+	if len(sum.Findings) != 2 {
+		t.Fatalf("Findings = %d 条, want 2（本轮 minor + 上轮遗留）", len(sum.Findings))
+	}
+	if sum.Findings[0].Level != string(api.Minor) || sum.Findings[0].Body != "圆角略不一致" {
+		t.Fatalf("Findings[0] = %+v, want 本轮 minor 原文", sum.Findings[0])
+	}
+	legacy := sum.Findings[1]
+	if legacy.Level != string(api.WorthFixing) || legacy.Body != "上轮遗留：对比度不足看不清次要按钮" {
+		t.Fatalf("Findings[1] = %+v, want 上轮遗留前缀的 worth_fixing", legacy)
+	}
+	if legacy.Screenshot != nil || legacy.Dimension != nil || legacy.Fix != nil {
+		t.Fatalf("遗留条目 = %+v, want 截图/维度/改法留空", legacy)
+	}
+
+	// prior(open) 没写 level：计数按阻塞兜底（1 条），展示级别兜底为
+	// worth_fixing——Level 字段非可空，留空会渲染残缺行。
+	nilLevel, err := json.Marshal(&api.ReviewVisualResult{
+		Prior: []api.ReviewPriorDecision{{Body: "上轮的阻断问题", Status: api.ReviewPriorDecisionStatusOpen}},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	sum = project(visComboRun(model.ReviewRunCompleted, string(nilLevel)))
+	if sum.FindingsCount == nil || *sum.FindingsCount != 1 {
+		t.Fatalf("FindingsCount = %v, want 1（nil 级别的 open 按阻塞兜底）", sum.FindingsCount)
+	}
+	if len(sum.Findings) != 1 || sum.Findings[0].Level != string(api.WorthFixing) ||
+		sum.Findings[0].Body != "上轮遗留：上轮的阻断问题" {
+		t.Fatalf("Findings = %+v, want 1 条上轮遗留且级别兜底 worth_fixing", sum.Findings)
+	}
+
+	// prior(open, minor)：不计数（FindingsCount = 0）但条目仍出现在列表里
+	// ——展示宽口径让复核者看到全部遗留，计数只跟红绿判定走。
+	minorOpen, err := json.Marshal(&api.ReviewVisualResult{
+		Prior: []api.ReviewPriorDecision{{Level: api.Ptr("minor"), Body: "降级的遗留", Status: api.ReviewPriorDecisionStatusOpen}},
+	})
+	if err != nil {
+		t.Fatalf("marshal minor: %v", err)
+	}
+	sum = project(visComboRun(model.ReviewRunCompleted, string(minorOpen)))
+	if sum.FindingsCount == nil || *sum.FindingsCount != 0 {
+		t.Fatalf("FindingsCount = %v, want 0（minor 的遗留不计数）", sum.FindingsCount)
+	}
+	if len(sum.Findings) != 1 || sum.Findings[0].Level != string(api.Minor) ||
+		sum.Findings[0].Body != "上轮遗留：降级的遗留" {
+		t.Fatalf("Findings = %+v, want minor 遗留仍展示", sum.Findings)
+	}
+}
+
+// 修 B：视觉结论校验拒绝 open 缺 level / 非法 level，worth_fixing 与 minor
+// 通过；代码结论（validateCodeResult）不做此校验，open 缺 level 仍放行——
+// 口径不变，防止误伤历史形态的代码结论。
+func TestValidateVisualResultPriorOpenRequiresLevel(t *testing.T) {
+	visual := func(priorJSON string) *api.ReviewVisualResult {
+		t.Helper()
+		var r api.ReviewVisualResult
+		body := `{"summary":"s","findings":[],"unmeasurable":[],"prior":[` + priorJSON + `]}`
+		if err := json.Unmarshal([]byte(body), &r); err != nil {
+			t.Fatalf("seed visual result: %v", err)
+		}
+		return &r
+	}
+	for _, good := range []string{
+		`{"level":"worth_fixing","body":"x","status":"open"}`,
+		`{"level":"blocker","body":"x","status":"open"}`,
+		`{"level":"minor","body":"x","status":"open"}`,
+	} {
+		if err := validateVisualResult(visual(good)); err != nil {
+			t.Fatalf("validateVisualResult(%s) = %v, want nil", good, err)
+		}
+	}
+	for _, bad := range []string{
+		`{"body":"x","status":"open"}`,              // open 缺 level
+		`{"level":"P1","body":"x","status":"open"}`, // 误写代码审查分级
+	} {
+		if err := validateVisualResult(visual(bad)); appErrorCode(t, err) != 40004 {
+			t.Fatalf("validateVisualResult(%s) = %v, want 40004（open 缺/错 level 拒收）", bad, err)
+		}
+	}
+
+	// fixed / rejected 不要求 level（已了结的条目不参与红绿计数）。
+	if err := validateVisualResult(visual(`{"body":"x","status":"fixed"}`)); err != nil {
+		t.Fatalf("fixed 缺 level 应通过: %v", err)
+	}
+
+	var code api.ReviewCodeResult
+	codeBody := `{"summary":"s","findings":[],"prior":[{"body":"x","status":"open"}],"ui_changed":false,"ui_changed_since_last_visual":false}`
+	if err := json.Unmarshal([]byte(codeBody), &code); err != nil {
+		t.Fatalf("seed code result: %v", err)
+	}
+	if err := validateCodeResult(&code); err != nil {
+		t.Fatalf("validateCodeResult = %v, want nil（代码校验口径不变）", err)
 	}
 }
 

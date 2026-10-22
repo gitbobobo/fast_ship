@@ -335,7 +335,11 @@ func buildRoundRecord(roundNumber int, runs []model.ReviewRun, envNames map[stri
 
 // runSummary 一次运行的 API 投影：findings_count 从 result_json 解析
 // （代码计 P0/P1/P2，视觉计 blocker/worth_fixing）；ui_changed 仅代码结论有值；
-// findings/unmeasurable 是完整发现列表（结论可解析时才有）。
+// findings/unmeasurable 是完整发现列表（结论可解析时才有）。视觉分支把
+// prior(open) 一并展示——展示宽口径（全部 open 条目，含 minor/未分级），计
+// 数窄口径（只把阻塞级别算进 findings_count，与 GitHub status / Web 计数同
+// 一把尺）；否则 PR 详情抽屉对「本轮只有 minor、上轮意见只标 prior(open)」
+// 的轮次显示 0 条，而状态和首页都是失败，应用内看起来像通过。
 func runSummary(r *model.ReviewRun, envNames map[string]string) api.ReviewRunSummary {
 	sum := api.ReviewRunSummary{
 		Id:            r.ID,
@@ -387,6 +391,27 @@ func runSummary(r *model.ReviewRun, envNames map[string]string) api.ReviewRunSum
 				count++
 			}
 			sum.Findings = append(sum.Findings, reviewFindingFromVisual(&f))
+		}
+		// prior(open) 追加进展示列表（展示宽口径）：正文加「上轮遗留：」前缀，
+		// 抽屉里能一眼区分遗留与本轮新发现；截图/维度/改法是本轮发现的字段，
+		// 遗留条目没有对应本轮截图，留空。计数按阻塞口径（priorOpenBlocks），
+		// minor 的遗留只陈列不计数——与状态判定的红绿口径一致。level 空时展示
+		// 兜底为 worth_fixing：Level 字段非可空，留空会渲染残缺行。
+		for _, p := range result.Prior {
+			if p.Status != api.ReviewPriorDecisionStatusOpen {
+				continue
+			}
+			if priorOpenBlocks(p.Level) {
+				count++
+			}
+			level := "worth_fixing"
+			if p.Level != nil && strings.TrimSpace(*p.Level) != "" {
+				level = *p.Level
+			}
+			sum.Findings = append(sum.Findings, api.ReviewFinding{
+				Level: level,
+				Body:  "上轮遗留：" + p.Body,
+			})
 		}
 		sum.FindingsCount = api.Ptr(count)
 		sum.Unmeasurable = result.Unmeasurable
