@@ -313,7 +313,10 @@ GitHub App 投递失败（公网隧道超时/502）不会自动重试，一次�
 - 提示词系统写死（`review_prompts.go` 常量）：代码审查要求自查证（git diff
   + 读文件）、以找 bug 为主、P0/P1/P2/Note 分级、历史处置规则、判断
   `ui_changed` 与 `ui_changed_since_last_visual`；视觉审查按层级/间距/排版/
-  颜色/交互/文案/可访问性七维度、blocker/worth_fixing/minor 三级。视觉的
+  颜色/交互/文案/可访问性七维度、blocker/worth_fixing/minor 三级，先核对
+  截图是否体现 PR 描述的改动，给出具体检查项（WCAG AA 对比度、点击区域、
+  状态反馈、文案泄露技术串、假数据等），不凑数；旧图、裁切、缺关键状态
+  与压缩看不清一并写进 `unmeasurable` 并说明怎么补拍。视觉的
   历史处置口径：`prior` 记对上一轮每条发现的处置（fixed / rejected /
   open，open 保持原级别并写清现状），`findings` 只写本轮新发现的问题——评论
   的「本轮新发现 / 仍未解决」两段正好对应这两份数据，不需要靠文本比对归
