@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/githubapi"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/githubapp"
@@ -389,5 +390,88 @@ func TestReviewSyncCarriesVisualSuccessStatusOnce(t *testing.T) {
 	review.syncPendingPRs(now.Add(reviewSyncRetryBackoff + time.Second))
 	if got := len(e.fake.StatusesForContext(reviewVisualStatusContext)); got != 1 {
 		t.Fatalf("重试不应重复写视觉状态，实际 %d 条", got)
+	}
+}
+
+// commentFailOnce 让顶层评论创建失败一次：模拟「视觉状态已写成功、写评论
+// 失败」的中间态，用来验证退避重试不重复追加 commit status。
+type commentFailOnce struct {
+	githubapi.GitHubClient
+	failCreate bool
+}
+
+func (c *commentFailOnce) CreatePullRequestComment(ctx context.Context, installationID int64, repo string, number int, body string) (int64, error) {
+	if c.failCreate {
+		c.failCreate = false
+		return 0, errors.New("评论接口 403")
+	}
+	return c.GitHubClient.CreatePullRequestComment(ctx, installationID, repo, number, body)
+}
+
+// TestReviewSyncRetryKeepsVisualStatusSingle 视觉状态写成功、随后写评论失败：
+// 退避重试不再追加第二条相同 context 的 status（同一 SHA 有 1000 条上限），
+// 评论补写成功后收尾。
+func TestReviewSyncRetryKeepsVisualStatusSingle(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	body := "![界面](https://uiv.frp.musiver.cn/f/x.png)"
+	e.fake.SetPR(repo, 92, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 92, HeadSHA: "sha-cf2", Body: body,
+		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
+	})
+	visualCombos, err := marshalCombinations([]api.ReviewCombination{testCombo("env-vf2")})
+	if err != nil {
+		t.Fatalf("marshal combos: %v", err)
+	}
+	e.enableReview(t, func(s *model.ProjectReviewSettings) {
+		s.VisualCombinationsJSON = visualCombos
+	})
+	// 上一轮视觉发现 blocker；本轮代码干净、UI 有改动、截图集合没变 → 沿用失败。
+	prior := e.seedRun(t, repo, 92, "sha-prev2", model.ReviewRunCompleted, now.Add(-time.Hour))
+	e.svc.db.Model(prior).Updates(map[string]any{
+		"kind": model.ReviewKindVisual, "round_number": 1,
+		"result_json": `{"summary":"有阻断","findings":[{"severity":"blocker","screenshot":"界面","dimension":"x","body":"b","fix":"f"}],"prior":[],"unmeasurable":[]}`,
+	})
+	run := e.seedRun(t, repo, 92, "sha-cf2", model.ReviewRunCompleted, now)
+	e.svc.db.Model(run).Updates(map[string]any{
+		"round_number": 2, "summary": "干净",
+		"result_json": `{"summary":"干净","findings":[],"prior":[],"ui_changed":true,"ui_changed_since_last_visual":false}`,
+	})
+	fp := screenshotFingerprint(collectScreenshotURLs(body))
+	if err := e.svc.db.Create(&model.ReviewPullRequest{
+		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 92, UserID: e.user.ID,
+		InstallationID: 1, HeadSHA: "sha-cf2", RoundNumber: 2,
+		VisualScreensFingerprint: fp, SyncPending: true, SyncEpoch: 1, UpdatedAt: now,
+	}).Error; err != nil {
+		t.Fatalf("seed ledger: %v", err)
+	}
+	client := &commentFailOnce{GitHubClient: e.fake, failCreate: true}
+	review := NewReviewService(e.svc.db, e.svc.projectRepo,
+		repository.NewGitHubWebhookDeliveryRepository(e.svc.db),
+		NewNotificationSink(e.svc.db),
+		githubapp.StaticClients{Client: client},
+		fakeReviewAppSource{ok: true},
+		fakeReviewPublicURL("https://fs.example.com"),
+		nil, e.media, nil, e.svc.cfg, zap.NewNop())
+	review.syncPendingPRs(now)
+	if got := len(e.fake.StatusesForContext(reviewVisualStatusContext)); got != 1 {
+		t.Fatalf("首次应写 1 条视觉状态，实际 %d", got)
+	}
+	var ledger model.ReviewPullRequest
+	e.svc.db.Where("project_id = ? AND repo_full_name = ? AND pr_number = ?",
+		e.project.ID, repo, 92).First(&ledger)
+	if !ledger.SyncPending {
+		t.Fatal("评论写失败应保持 pending")
+	}
+
+	review.syncPendingPRs(now.Add(reviewSyncRetryBackoff + time.Second))
+	if got := len(e.fake.StatusesForContext(reviewVisualStatusContext)); got != 1 {
+		t.Fatalf("退避重试不应追加视觉状态，实际 %d 条", got)
+	}
+	e.svc.db.Where("project_id = ? AND repo_full_name = ? AND pr_number = ?",
+		e.project.ID, repo, 92).First(&ledger)
+	if ledger.SyncPending {
+		t.Fatal("评论补写成功后应收尾")
 	}
 }

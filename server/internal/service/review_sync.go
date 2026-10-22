@@ -360,6 +360,10 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 	}
 
 	// 2. 视觉衔接决策（仅当全部代码运行终态后才有意义；视觉运行已建时走汇总）。
+	// retrying 同一快照的失败重试（sync_failed_epoch 已记当前 epoch）：视觉
+	// commit status 已经写成功、只是后续写评论失败时，退避重试不再每轮追加
+	// 一条相同 context 的 status（GitHub 同一 SHA + context 有 1000 条上限）。
+	retrying := ledger.SyncFailedEpoch == epoch
 	visualCarry := false
 	visualPending := len(visualRuns) == 0
 	if len(visualRuns) == 0 {
@@ -385,9 +389,11 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 				reason = "截图全部下载失败"
 			}
 			desc := "截图无法下载，未做视觉审查：" + reason
-			if err := client.CreateCommitStatus(ctx, ledger.InstallationID, ledger.RepoFullName,
-				ledger.HeadSHA, "failure", reviewVisualStatusContext, statusDesc(desc), targetURL); err != nil {
-				return errs.New(errs.ErrGitHubAPI.Code, "写视觉审查状态失败: "+err.Error())
+			if !(retrying && ledger.VisualStatus == "failure") {
+				if err := client.CreateCommitStatus(ctx, ledger.InstallationID, ledger.RepoFullName,
+					ledger.HeadSHA, "failure", reviewVisualStatusContext, statusDesc(desc), targetURL); err != nil {
+					return errs.New(errs.ErrGitHubAPI.Code, "写视觉审查状态失败: "+err.Error())
+				}
 			}
 			ok, err := s.updateLedgerEpoch(ledger, epoch, map[string]any{"visual_status": "failure"})
 			if err != nil {
@@ -454,9 +460,11 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 			visualPending = false
 			visualCarry = true
 			desc := visualCarryDescription(outcome.PriorRuns)
-			if err := client.CreateCommitStatus(ctx, ledger.InstallationID, ledger.RepoFullName,
-				ledger.HeadSHA, "failure", reviewVisualStatusContext, statusDesc(desc), targetURL); err != nil {
-				return errs.New(errs.ErrGitHubAPI.Code, "写视觉审查状态失败: "+err.Error())
+			if !(retrying && ledger.VisualStatus == "failure") {
+				if err := client.CreateCommitStatus(ctx, ledger.InstallationID, ledger.RepoFullName,
+					ledger.HeadSHA, "failure", reviewVisualStatusContext, statusDesc(desc), targetURL); err != nil {
+					return errs.New(errs.ErrGitHubAPI.Code, "写视觉审查状态失败: "+err.Error())
+				}
 			}
 			ok, err := s.updateLedgerEpoch(ledger, epoch, map[string]any{"visual_status": "failure"})
 			if err != nil {
