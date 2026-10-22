@@ -58,15 +58,13 @@ describe("首登写入浏览器时区", () => {
     useAuthStore.setState({ token: null, refreshToken: null, user: null });
   });
 
-  it("登录时 user.timezone 为空，写入浏览器时区后再跳转", async () => {
+  // 登录路径不写时区：用户可能刚在设置页选了「跟随部署配置」（存空串），
+  // 每次登录都按浏览器时区补写会把那个显式选择覆盖掉。
+  it("登录时 user.timezone 为空也不写，只跳转", async () => {
     const loggedIn = fakeUser();
-    const synced = fakeUser({ timezone: "Asia/Shanghai" });
     vi.mocked(authApi.login).mockResolvedValue({
       data: { token: "jwt-token", refresh_token: "refresh-token", user: loggedIn },
     } as Awaited<ReturnType<typeof authApi.login>>);
-    vi.mocked(authApi.updateMe).mockResolvedValue({
-      data: synced,
-    } as Awaited<ReturnType<typeof authApi.updateMe>>);
 
     const user = userEvent.setup();
     renderWithRoute(<LoginPage />, { path: "/login", initialEntry: "/login" });
@@ -76,12 +74,10 @@ describe("首登写入浏览器时区", () => {
     await user.click(screen.getByRole("button", { name: "登录" }));
 
     await waitFor(() =>
-      expect(authApi.updateMe).toHaveBeenCalledWith({
-        timezone: "Asia/Shanghai",
-      }),
+      expect(mockNavigate).toHaveBeenCalledWith("/dashboard", { replace: true }),
     );
-    expect(useAuthStore.getState().user?.timezone).toBe("Asia/Shanghai");
-    expect(mockNavigate).toHaveBeenCalledWith("/dashboard", { replace: true });
+    expect(authApi.updateMe).not.toHaveBeenCalled();
+    expect(useAuthStore.getState().user?.timezone).toBe("");
   });
 
   it("登录时 user.timezone 已有值就不再写", async () => {

@@ -88,6 +88,20 @@ describe("timezoneOptions", () => {
     vi.restoreAllMocks();
   });
 
+  it("supportedValuesOf 不含 UTC 时也把 UTC 补进候选", () => {
+    // 真实环境里 supportedValuesOf("timeZone") 只列地区时区，不含 UTC；
+    // 「跟随部署配置」不能代替显式 UTC。
+    vi.spyOn(Intl, "supportedValuesOf").mockReturnValue([
+      "Asia/Tokyo",
+      "Asia/Shanghai",
+    ]);
+
+    const values = timezoneOptions("").map((o) => o.value);
+
+    expect(values).toContain("UTC");
+    expect(values.filter((v) => v === "UTC")).toHaveLength(1);
+  });
+
   it("当前值不在候选里时插到首位，并带上 UTC 偏移", () => {
     vi.spyOn(Intl, "supportedValuesOf").mockReturnValue(["UTC", "Asia/Tokyo"]);
 

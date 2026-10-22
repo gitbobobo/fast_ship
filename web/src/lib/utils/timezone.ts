@@ -94,7 +94,10 @@ export function timezoneOptions(
     typeof intl.supportedValuesOf === "function"
       ? intl.supportedValuesOf("timeZone")
       : FALLBACK_TIMEZONES;
-  const values = [...names];
+  // supportedValuesOf 不含 UTC（它只列地区时区），但它是一个明确可选的时区：
+  // 「跟随部署配置」并不等于 UTC，缺了这项用户就选不到 UTC。固定排在最前，
+  // 与「默认（跟随部署配置）」相邻。
+  const values = ["UTC", ...names.filter((name) => name !== "UTC")];
   if (current && !values.includes(current)) values.unshift(current);
   return values.map((value) => ({ value, label: timezoneLabel(value) }));
 }

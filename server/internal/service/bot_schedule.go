@@ -142,11 +142,13 @@ func (s *BotService) buildScheduleRunContext(bot *model.Bot, run *model.BotRun, 
 			"适合存「上次已报的 ID」这类去重集合。"
 	}
 	schedTz, schedTzLoc := s.botOwnerTimezoneOf(bot)
+	// 只取一次 now：UTC 与当地时间必须是同一时刻（同主线运行时上下文）。
+	now := time.Now()
 	rt := botScheduleRuntimeContext{
 		Note:             note,
-		CurrentTimeUTC:   time.Now().UTC().Format(time.RFC3339),
+		CurrentTimeUTC:   now.UTC().Format(time.RFC3339),
 		UserTimezone:     schedTz,
-		CurrentTimeLocal: botLocalStamp(time.Now(), schedTzLoc),
+		CurrentTimeLocal: botLocalStamp(now, schedTzLoc),
 		RunID:            run.ID,
 		TaskID:           sess.task.ID,
 		TaskName:         sess.task.Name,
@@ -1016,8 +1018,11 @@ func (s *BotService) execScheduleRun(call *model.BotToolCall, args *botScheduleT
 		// next_run_at 是空的，这里仍给出「若启用会何时触发」。
 		if _, next, parseErr := parseScheduleCron(task.CronExpression, task.Timezone, time.Now().UTC()); parseErr == nil {
 			loc := timeOrUTC(task.Timezone)
+			userTimezone, userLoc := s.botOwnerTimezoneOfID(call.BotID)
 			out["next_run_at"] = next.In(loc).Format("2006-01-02 15:04:05 MST")
 			out["next_run_at_utc"] = next.UTC().Format(time.RFC3339)
+			out["user_timezone"] = userTimezone
+			out["next_run_at_user"] = next.In(userLoc).Format("2006-01-02 15:04:05 MST")
 		}
 		return botMarshalResult(out)
 	}
@@ -1132,9 +1137,10 @@ func (s *BotService) execScheduleList(call *model.BotToolCall, args *botSchedule
 	if err != nil {
 		return "", errs.ErrInternal
 	}
+	userTimezone, userLoc := s.botOwnerTimezoneOfID(call.BotID)
 	items := make([]map[string]interface{}, 0, len(tasks))
 	for i := range tasks {
-		items = append(items, s.scheduleTaskSlim(&tasks[i]))
+		items = append(items, s.scheduleTaskSlim(userTimezone, userLoc, &tasks[i]))
 	}
 	out := map[string]interface{}{
 		"items": items, "total": total, "limit": limit, "offset": offset,
@@ -1148,12 +1154,18 @@ func (s *BotService) execScheduleList(call *model.BotToolCall, args *botSchedule
 // scheduleTaskSlim 是工具结果里的任务投影：带 next_run_at 与 cron/时区原文，
 // 让模型能在回复里用中文说明执行时间；has_state 标记任务有没有小状态
 // （INT-123），状态正文只在 state_get 里给，避免 list 结果膨胀。
-func (s *BotService) scheduleTaskSlim(task *model.BotScheduleTask) map[string]interface{} {
+//
+// userTimezone / userLoc 是机器人归属用户的有效时区（INT-138）：任务时区与
+// 用户时区可能不同（用户显式指定了别的时区，或改了自己的时区后看旧任务），
+// 所以除任务时区的 next_run_at 与绝对时间 next_run_at_utc 之外，再给一份
+// 用户当地时间，模型汇报「下次什么时候跑」时不必自己做换算。
+func (s *BotService) scheduleTaskSlim(userTimezone string, userLoc *time.Location, task *model.BotScheduleTask) map[string]interface{} {
 	out := map[string]interface{}{
 		"id": task.ID, "name": task.Name,
 		"cron_expression": task.CronExpression, "timezone": task.Timezone,
 		"instruction": task.Instruction, "needs_report": task.NeedsReport,
 		"enabled": task.Enabled, "has_state": task.StateJSON != "",
+		"user_timezone": userTimezone,
 	}
 	if task.Model != "" {
 		out["model"] = task.Model
@@ -1162,6 +1174,7 @@ func (s *BotService) scheduleTaskSlim(task *model.BotScheduleTask) map[string]in
 		loc := timeOrUTC(task.Timezone)
 		out["next_run_at"] = task.NextRunAt.In(loc).Format("2006-01-02 15:04:05 MST")
 		out["next_run_at_utc"] = task.NextRunAt.UTC().Format(time.RFC3339)
+		out["next_run_at_user"] = task.NextRunAt.In(userLoc).Format("2006-01-02 15:04:05 MST")
 	} else {
 		out["next_run_at"] = nil
 	}
@@ -1187,7 +1200,8 @@ func (s *BotService) execScheduleCreate(call *model.BotToolCall, args *botSchedu
 	if err != nil {
 		return "", err
 	}
-	out := s.scheduleTaskSlim(task)
+	userTimezone, userLoc := s.botOwnerTimezoneOfID(call.BotID)
+	out := s.scheduleTaskSlim(userTimezone, userLoc, task)
 	out["ok"] = true
 	out["note"] = "任务已创建并启用；请在对话里用中文告知用户任务名与执行时间"
 	return botMarshalResult(out)
@@ -1199,7 +1213,8 @@ func (s *BotService) execScheduleUpdate(call *model.BotToolCall, args *botSchedu
 	if err != nil {
 		return "", err
 	}
-	out := s.scheduleTaskSlim(updated)
+	userTimezone, userLoc := s.botOwnerTimezoneOfID(call.BotID)
+	out := s.scheduleTaskSlim(userTimezone, userLoc, updated)
 	out["ok"] = true
 	out["note"] = "任务已更新；请在对话里用中文告知用户任务名与新的执行时间"
 	return botMarshalResult(out)
@@ -1252,7 +1267,8 @@ func (s *BotService) execScheduleEnable(call *model.BotToolCall, args *botSchedu
 	if err != nil {
 		return "", err
 	}
-	out := s.scheduleTaskSlim(task)
+	userTimezone, userLoc := s.botOwnerTimezoneOfID(call.BotID)
+	out := s.scheduleTaskSlim(userTimezone, userLoc, task)
 	out["ok"] = true
 	out["note"] = "任务已" + map[bool]string{true: "启用", false: "停用"}[enabled] +
 		"；请在对话里用中文告知用户"

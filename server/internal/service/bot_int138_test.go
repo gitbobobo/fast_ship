@@ -208,6 +208,27 @@ func TestBotInt138ScheduleCreateDefaultsUserTimezone(t *testing.T) {
 	if !strings.Contains(out, `"timezone":"America/New_York"`) {
 		t.Fatalf("显式时区应原样采用: %s", out)
 	}
+	// 任务时区与用户时区不同时，除了任务本地时间还要给用户当地时间：
+	// 纽约 09:00 与上海 21:00 指向同一时刻，模型汇报时不必自己换算。
+	var nyProjection struct {
+		NextRunAt     string `json:"next_run_at"`
+		NextRunAtUser string `json:"next_run_at_user"`
+		UserTimezone  string `json:"user_timezone"`
+	}
+	if err := json.Unmarshal([]byte(out), &nyProjection); err != nil {
+		t.Fatalf("decode ny projection: %v %s", err, out)
+	}
+	if nyProjection.UserTimezone != "Asia/Shanghai" {
+		t.Fatalf("任务投影应带用户时区，实得 %q: %s", nyProjection.UserTimezone, out)
+	}
+	if !strings.Contains(nyProjection.NextRunAt, "09:00:00") ||
+		!strings.Contains(nyProjection.NextRunAt, "EDT") {
+		t.Fatalf("next_run_at 应为任务时区（纽约）本地 09:00: %s", out)
+	}
+	if !strings.Contains(nyProjection.NextRunAtUser, "21:00:00") ||
+		!strings.Contains(nyProjection.NextRunAtUser, "CST") {
+		t.Fatalf("next_run_at_user 应为用户时区（上海）本地 21:00: %s", out)
+	}
 	var nyTask struct {
 		ID string `json:"id"`
 	}
@@ -226,37 +247,42 @@ func TestBotInt138ScheduleCreateDefaultsUserTimezone(t *testing.T) {
 	}
 }
 
+// 模型可见文本的快照（INT-138 验收要求）：fs_help 的「定时任务」整行与 v8 的
+// fs_schedule 工具描述逐字钉死。这两段话直接决定模型怎么写任务指令、怎么理解
+// 时区默认值，改一个字都应该是有意识的决定——所以是等值断言，不是关键词包含。
+const (
+	botInt138V8ScheduleDescription = "管理本机器人绑定的定时任务：list/create/update/delete/runs/run/enable/disable，全部同步执行、立即生效。每次运行是独立会话，只带你的记忆与本任务指令，写操作默认放行（不弹确认）。用户只能查看与开关任务，创建/修改由你负责；创建或修改后要在对话里用中文告知用户任务名与执行时间。时区可选，省略即用户时区（不是 UTC），「每天早上 9 点」按用户所在地执行。run 立即手动执行一次任务：显式触发就是一次执行、不要求任务启用；回执只表示已受理，终态与产出用 runs 查询；同一任务已有未结束运行时会被明确拒绝（不排队）；dry_run=true 只预览、不执行也不建运行记录。state_get/state_set 读写本任务跨运行保留的小状态（≤8192 UTF-8 字节）：只能在定时任务运行中使用、由本次运行的任务隐式决定，省略 state 即清空。instruction 写「意图」而不是固定操作步骤：说清目标、什么情况才需要汇报、去重方式（用 state_get/state_set 记「上次已报的 ID」，只报新增）；没有需要告知的内容时只回复一行 [[SILENT]]；只有「新内容确实值得打断用户」的周期检查才开 needs_report=true。"
+	botInt138HelpScheduleLine      = "- 定时任务：fs_schedule list/create/update/delete/runs/run/enable/disable（全部同步、立即生效）。cron 是标准五字段（分 时 日 月 周），时区用独立 IANA 字段（可选，省略即用户时区，「每天 9 点」按用户所在地执行；update 不传时区=保持原值）。任务由你创建/修改/删除；用户只能查看与开关。run 立即手动执行一次：显式触发就是一次执行、不要求任务启用，回执只表示已受理（终态用 runs 查询，trigger_source 区分 cron/manual）；同一任务已有未结束运行时被拒绝；dry_run=true 只预览、不建运行记录。每次运行是独立会话，只带你的记忆与任务指令，写操作默认放行；无话可说时只回复一行 [[SILENT]]。任务各有一块跨运行保留的小状态：state_get（无参数）读取、state_set 写入（state 为任意 JSON 值，≤8192 UTF-8 字节；省略或 null 即清空）；这两个动作只能在定时任务运行（schedule run）内使用，主线会话调用会被拒绝。任务指令写「意图」而不是固定操作步骤：说清目标、什么情况才需要汇报、去重方式（用 state_get/state_set 记「上次已报的 ID」，只报新增），例如「每天 9 点检查新 issue，有新的才告诉我」；只有新内容确实值得打断用户的周期检查才开 needs_report=true。"
+)
+
 func TestBotInt138HelpAndToolDescriptionGuidance(t *testing.T) {
-	// 帮助文本：时区默认用户时区 + 指令写法示例。
-	for _, kw := range []string{
-		"省略即用户时区",
-		"每天 9 点检查新 issue，有新的才告诉我",
-		"去重",
-		"[[SILENT]]",
-		"needs_report",
-	} {
-		if !strings.Contains(botHelpText, kw) {
-			t.Fatalf("帮助文本应包含 %q", kw)
+	// fs_help 的「定时任务」整行逐字快照（含时区默认与指令写法示例）。
+	var helpLine string
+	for _, line := range strings.Split(botHelpText, "\n") {
+		if strings.HasPrefix(line, "- 定时任务：") {
+			helpLine = line
+			break
 		}
 	}
-	if strings.Contains(botHelpText, "（默认 UTC）") {
-		t.Fatalf("帮助文本不应再声称默认 UTC")
+	if helpLine == "" {
+		t.Fatalf("帮助文本缺少「定时任务」条目")
+	}
+	if helpLine != botInt138HelpScheduleLine {
+		t.Fatalf("fs_help 定时任务条目偏离快照:\n  got: %s\n want: %s", helpLine, botInt138HelpScheduleLine)
 	}
 
-	// v8 工具描述：时区默认 + 指令写法四要素。
+	// v8 的 fs_schedule 工具描述逐字快照。
 	v8 := botToolsetVersionOf(botToolsetVersion)
 	sched := v8.byName["fs_schedule"]
 	if sched == nil {
 		t.Fatalf("v8 应含 fs_schedule")
 	}
-	for _, kw := range []string{
-		"省略即用户时区", "不是 UTC",
-		"意图", "目标", "汇报", "去重", "state_get/state_set", "[[SILENT]]", "needs_report",
-	} {
-		if !strings.Contains(sched.Description, kw) {
-			t.Fatalf("v8 fs_schedule 描述应包含 %q: %s", kw, sched.Description)
-		}
+	if sched.Description != botInt138V8ScheduleDescription {
+		t.Fatalf("v8 fs_schedule 描述偏离快照:\n  got: %s\n want: %s",
+			sched.Description, botInt138V8ScheduleDescription)
 	}
+
+	// create 动作描述（不进 wire 字节，但模型会读到）只需说明时区默认。
 	createAction, ok := v8.byAction["fs_schedule/create"]
 	if !ok {
 		t.Fatalf("v8 fs_schedule 应有 create 动作")

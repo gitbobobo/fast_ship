@@ -265,10 +265,13 @@ func (s *BotService) buildRunContextWith(bot *model.Bot, run *model.BotRun, over
 	// 6. 本轮运行时上下文（末尾；当前时间、待处理输入等易变内容只在这里）。
 	// 用户时区与当地时间（INT-138）也只出现在这里，不影响前缀哈希。
 	tzName, tzLoc := s.botOwnerTimezoneOf(bot)
+	// 只取一次 now：UTC 与当地时间必须描述同一时刻，跨秒（甚至跨当地日期）
+	// 的两次采样会让模型看到互相矛盾的两个「现在」。
+	now := time.Now()
 	rt := botRuntimeContext{
-		CurrentTimeUTC:   time.Now().UTC().Format(time.RFC3339),
+		CurrentTimeUTC:   now.UTC().Format(time.RFC3339),
 		UserTimezone:     tzName,
-		CurrentTimeLocal: botLocalStamp(time.Now(), tzLoc),
+		CurrentTimeLocal: botLocalStamp(now, tzLoc),
 		RunID:            run.ID,
 	}
 	for _, row := range rows {

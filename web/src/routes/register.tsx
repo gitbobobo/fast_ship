@@ -47,8 +47,9 @@ function RegisterForm({
         invite_token: inviteToken || undefined,
       });
       setAuth(res.data.token, res.data.refresh_token, res.data.user);
-      // 用户还没声明时区时按浏览器时区写一次（helper 内部静默失败，不阻断跳转）；
-      // 只有真正拿到新 user 才回写 store。
+      // 首次登录（注册即首登）按浏览器时区补写一次；helper 内部静默失败、不
+      // 阻断跳转，只有真正拿到新 user 才回写 store。登录路径不写：否则用户在
+      // 设置页选的「跟随部署配置」（空串）会被下次登录覆盖。
       const syncedUser = await syncBrowserTimezone(res.data.user);
       if (syncedUser !== res.data.user) {
         useAuthStore.getState().setUser(syncedUser);

@@ -318,8 +318,9 @@ next_offset}`；`fs_result.read` 按 Unicode 字符续读，不切断 UTF-8。
 
 ### 用户时区与当地语义（INT-138）
 
-「用户时区」是 `users.timezone` 的 IANA 名称：浏览器首次登录用 `Intl` 时区
-写入，设置页「通用」可改；空串 = 未声明。解析链集中在 `bot_timezone.go`
+「用户时区」是 `users.timezone` 的 IANA 名称：浏览器 `Intl` 时区在注册
+（首次登录）时写入一次，设置页「通用」可改；空串 = 未声明（也是用户显式选择
+「跟随部署配置」的取值，所以登录路径不再自动补写，免得覆盖这个选择）。解析链集中在 `bot_timezone.go`
 （`botEffectiveTimezone` / `botUserTimezoneOf` / `botOwnerTimezoneOf`）：
 用户设置 → 部署配置 `bots.memory.timezone` → UTC，返回（有效时区名,
 Location）两件套，各处不再自拼回退。走这条链的语义有五处：运行时上下文的

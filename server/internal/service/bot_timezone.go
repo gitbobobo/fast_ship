@@ -49,6 +49,16 @@ func (s *BotService) botOwnerTimezoneOf(bot *model.Bot) (string, *time.Location)
 	return s.botUserTimezoneOf(bot.UserID)
 }
 
+// botOwnerTimezoneOfID 同 botOwnerTimezoneOf，但按 bot ID 查：工具执行路径
+// 手里只有 bot ID，没有 bot 行。读不到时按未声明处理。
+func (s *BotService) botOwnerTimezoneOfID(botID string) (string, *time.Location) {
+	bot, err := s.bots.Get(botID)
+	if err != nil {
+		return s.botEffectiveTimezone("")
+	}
+	return s.botOwnerTimezoneOf(bot)
+}
+
 // botLocalStamp 是运行时上下文里的本地时间投影：带偏移的 RFC3339，让模型
 // 不必自己做时区换算就能说清「现在当地几点」。
 func botLocalStamp(now time.Time, loc *time.Location) string {
