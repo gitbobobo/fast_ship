@@ -496,8 +496,8 @@ function StackedAreaChart({
         )}
       </div>
 
-      {/* Tooltip */}
-      {hoveredData && tooltipPos && (
+      {/* Tooltip：图表已转成空状态时不能留浮层（数据可能在悬浮中被刷新成全零） */}
+      {!isEmpty && hoveredData && tooltipPos && (
         <div
           className="pointer-events-none absolute z-50 min-w-[160px] rounded-lg border bg-popover px-3 py-2 shadow-lg"
           style={{

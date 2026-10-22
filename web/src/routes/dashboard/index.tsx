@@ -4,11 +4,8 @@ import {
   Bug,
   CalendarDays,
   FolderKanban,
-  Minus,
   Plus,
   TriangleAlert,
-  TrendingDown,
-  TrendingUp,
 } from "lucide-react";
 import { Link } from "react-router";
 import { Header } from "@/components/layout/header";
@@ -33,7 +30,6 @@ function formatDailyAverage(value: number) {
   return value.toFixed(1);
 }
 
-const TREND_WINDOW_DAYS = 7;
 
 function formatDate() {
   const now = new Date();
@@ -57,6 +53,9 @@ function getGreeting() {
 
 export default function DashboardPage() {
   const { data, isLoading, isError, refetch } = useDashboardOverview();
+  // 失败但已有缓存时（refetch 失败，isLoading=false、data 仍是旧值）也不能把旧数字
+  // 当成当前状态：所有数字与趋势展示统一走这一个条件。
+  const unavailable = isLoading || isError;
 
   const openIssuePoints = useMemo<MetricChartPoint[]>(() => {
     return (
@@ -107,20 +106,6 @@ export default function DashboardPage() {
     return totalResolvedIssues / data.daily_resolved.length;
   }, [data, totalResolvedIssues]);
 
-  // 趋势只比较「最近 7 天」与「上一个 7 天」；没有上一周期数据时不判定方向，
-  // 避免刚有一条记录就被当成「在变差」。
-  const resolvedTrend = useMemo<"up" | "down" | "flat" | null>(() => {
-    const days = data?.daily_resolved ?? [];
-    if (days.length < TREND_WINDOW_DAYS * 2) return null;
-    const sum = (points: typeof days) =>
-      points.reduce((total, point) => total + point.resolved_count, 0);
-    const recent = sum(days.slice(-TREND_WINDOW_DAYS));
-    const previous = sum(days.slice(-TREND_WINDOW_DAYS * 2, -TREND_WINDOW_DAYS));
-    if (recent === 0 && previous === 0) return null;
-    if (recent === previous) return "flat";
-    return recent > previous ? "up" : "down";
-  }, [data]);
-
   return (
     <div className="flex min-h-full flex-col bg-background">
       <Header title="仪表盘" />
@@ -163,23 +148,35 @@ export default function DashboardPage() {
           <KpiCard
             icon={FolderKanban}
             label="已配置项目"
-            value={isError ? null : configuredProjectCount}
+            value={unavailable ? null : configuredProjectCount}
             isLoading={isLoading}
             tone="neutral"
           />
           <KpiCard
             icon={Bug}
             label="剩余开启问题"
-            value={isError ? null : totalOpenIssues}
+            value={unavailable ? null : totalOpenIssues}
             isLoading={isLoading}
-            tone={totalOpenIssues > 0 ? "warning" : "neutral"}
+            tone={
+              unavailable
+                ? "neutral"
+                : totalOpenIssues > 0
+                  ? "warning"
+                  : "neutral"
+            }
           />
           <KpiCard
             icon={CalendarDays}
             label="近 30 天已解决"
-            value={isError ? null : totalResolvedIssues}
+            value={unavailable ? null : totalResolvedIssues}
             isLoading={isLoading}
-            tone={totalResolvedIssues > 0 ? "positive" : "neutral"}
+            tone={
+              unavailable
+                ? "neutral"
+                : totalResolvedIssues > 0
+                  ? "positive"
+                  : "neutral"
+            }
           />
         </section>
 
@@ -194,7 +191,7 @@ export default function DashboardPage() {
                     按项目分布的未解决问题数量
                   </p>
                 </div>
-                {!isLoading && totalOpenIssues > 0 && (
+                {!unavailable && totalOpenIssues > 0 && (
                   <span className="rounded-full bg-primary/10 px-2.5 py-0.5 text-xs font-medium text-primary">
                     总计 {totalOpenIssues}
                   </span>
@@ -233,33 +230,10 @@ export default function DashboardPage() {
                     各项目每日已解决问题数量趋势
                   </p>
                 </div>
-                {!isLoading && totalResolvedIssues > 0 && (
-                  <div className="flex items-center gap-1.5">
-                    {resolvedTrend === "up" && (
-                      <TrendingUp
-                        role="img"
-                        aria-label="最近 7 天解决数高于前 7 天"
-                        className="h-3.5 w-3.5 text-emerald-500"
-                      />
-                    )}
-                    {resolvedTrend === "down" && (
-                      <TrendingDown
-                        role="img"
-                        aria-label="最近 7 天解决数低于前 7 天"
-                        className="h-3.5 w-3.5 text-amber-500"
-                      />
-                    )}
-                    {resolvedTrend === "flat" && (
-                      <Minus
-                        role="img"
-                        aria-label="最近 7 天解决数与前 7 天持平"
-                        className="h-3.5 w-3.5 text-muted-foreground"
-                      />
-                    )}
-                    <span className="text-xs font-medium text-muted-foreground">
-                      日均 {formatDailyAverage(avgDailyResolved)}
-                    </span>
-                  </div>
+                {!unavailable && totalResolvedIssues > 0 && (
+                  <span className="text-xs font-medium text-muted-foreground">
+                    日均 {formatDailyAverage(avgDailyResolved)}
+                  </span>
                 )}
               </div>
               {isLoading ? (
@@ -281,22 +255,22 @@ export default function DashboardPage() {
         <section className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           <StatPill
             label="最高日解决"
-            value={isLoading || isError ? "—" : String(maxDailyResolved)}
+            value={unavailable ? "—" : String(maxDailyResolved)}
           />
           <StatPill
             label="日均解决"
             value={
-              isLoading || isError ? "—" : formatDailyAverage(avgDailyResolved)
+              unavailable ? "—" : formatDailyAverage(avgDailyResolved)
             }
           />
           <StatPill
             label="活跃项目"
-            value={isLoading || isError ? "—" : String(configuredProjectCount)}
+            value={unavailable ? "—" : String(configuredProjectCount)}
           />
           <StatPill
             label="问题总量"
             value={
-              isLoading || isError
+              unavailable
                 ? "—"
                 : String(totalOpenIssues + totalResolvedIssues)
             }

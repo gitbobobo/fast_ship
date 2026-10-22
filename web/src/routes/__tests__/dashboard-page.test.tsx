@@ -46,13 +46,13 @@ describe("DashboardPage", () => {
     }));
   }
 
-  it("marks an improving trend and avoids rounding a tiny average to 0.0", async () => {
+  it("shows the daily average with a <0.1 floor and no trend arrow", async () => {
     vi.mocked(useDashboardOverview).mockReturnValue({
       data: {
         open_issues_by_project: [
           { project_id: "p1", project_name: "Alpha App", open_issue_count: 0 },
         ],
-        // 最近 7 天解决 1 条，上一个 7 天为 0。
+        // 最近 7 天解决 1 条。
         daily_resolved: dailyResolvedWith({ 29: 1 }),
       },
       isLoading: false,
@@ -60,48 +60,37 @@ describe("DashboardPage", () => {
 
     await renderDashboardPage();
 
-    expect(
-      screen.getByRole("img", { name: "最近 7 天解决数高于前 7 天" }),
-    ).toBeInTheDocument();
     expect(screen.getByText("日均 <0.1")).toBeInTheDocument();
+    // 方向图标已移出本需求：不再对两周合计做涨跌判断。
+    expect(screen.queryByRole("img", { name: /最近 7 天/ })).toBeNull();
   });
 
-  it("marks a declining trend when the previous week had more resolved issues", async () => {
+  it("hides stale header numbers when cached data is followed by a failed refetch", async () => {
     vi.mocked(useDashboardOverview).mockReturnValue({
       data: {
         open_issues_by_project: [
-          { project_id: "p1", project_name: "Alpha App", open_issue_count: 0 },
+          { project_id: "p1", project_name: "Alpha App", open_issue_count: 3 },
         ],
-        // 上一个 7 天（index 16-22）解决 2 条，最近 7 天为 0。
-        daily_resolved: dailyResolvedWith({ 20: 2 }),
+        daily_resolved: dailyResolvedWith({ 29: 2 }),
       },
       isLoading: false,
+      isError: true,
+      refetch: vi.fn(),
     } as unknown as ReturnType<typeof useDashboardOverview>);
 
     await renderDashboardPage();
 
+    expect(screen.getByRole("alert")).toHaveTextContent("仪表盘数据加载失败");
+    // 缓存里的旧数字不能被当成当前状态展示。
+    expect(screen.queryByText(/总计/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/^日均 /)).not.toBeInTheDocument();
+    expect(screen.queryByText("Alpha App")).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "去创建项目" })).not.toBeInTheDocument();
     expect(
-      screen.getByRole("img", { name: "最近 7 天解决数低于前 7 天" }),
-    ).toBeInTheDocument();
+      screen.getAllByText("数据加载失败，请在上方重试。"),
+    ).toHaveLength(2);
   });
 
-  it("marks a flat trend when both weeks resolved the same number", async () => {
-    vi.mocked(useDashboardOverview).mockReturnValue({
-      data: {
-        open_issues_by_project: [
-          { project_id: "p1", project_name: "Alpha App", open_issue_count: 0 },
-        ],
-        daily_resolved: dailyResolvedWith({ 20: 1, 29: 1 }),
-      },
-      isLoading: false,
-    } as unknown as ReturnType<typeof useDashboardOverview>);
-
-    await renderDashboardPage();
-
-    expect(
-      screen.getByRole("img", { name: "最近 7 天解决数与前 7 天持平" }),
-    ).toBeInTheDocument();
-  });
 
   it("renders open-issue and 30-day resolved chart sections", async () => {
     vi.mocked(useDashboardOverview).mockReturnValue({

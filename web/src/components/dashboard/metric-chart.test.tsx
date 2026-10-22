@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { MetricChart } from "@/components/dashboard/metric-chart";
 
 describe("MetricChart", () => {
@@ -202,5 +202,40 @@ describe("MetricChart", () => {
       .filter((text) => text.startsWith("D"));
 
     expect(labels).toEqual(["D0", "D4", "D9", "D13", "D17", "D22", "D26"]);
+  });
+
+  it("drops an open tooltip when the series becomes empty", () => {
+    const points = (values: number[]) =>
+      values.map((value, index) => ({
+        label: `2026-05-0${index + 1}`,
+        shortLabel: `D${index}`,
+        value,
+        series: value ? [{ id: "p1", name: "Alpha", value }] : [],
+      }));
+
+    const { container, rerender } = render(
+      <MetricChart
+        points={points([0, 0, 1])}
+        variant="area"
+        emptyMessage="暂无已解决问题数据"
+      />,
+    );
+    const svg = container.querySelector('svg[aria-label="stacked area chart"]');
+    expect(svg).not.toBeNull();
+    fireEvent.mouseMove(svg as Element, { clientX: 120, clientY: 40 });
+    // 测试环境没有布局信息，最近点落回第一个点；这里只关心浮层出现了。
+    expect(screen.getByText("2026-05-01")).toBeInTheDocument();
+
+    // 悬浮中数据被刷新成全零：图表转为空状态，浮层不能留在页面上。
+    rerender(
+      <MetricChart
+        points={points([0, 0, 0])}
+        variant="area"
+        emptyMessage="暂无已解决问题数据"
+      />,
+    );
+
+    expect(screen.queryByText("2026-05-01")).not.toBeInTheDocument();
+    expect(screen.getByText("暂无已解决问题数据")).toBeInTheDocument();
   });
 });
