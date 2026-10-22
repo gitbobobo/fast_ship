@@ -169,7 +169,11 @@ run 入口的 `activateBotPrompt` 在一个短事务里读行、
 panic 残留行（`running` + `finished_at=nil`）不受此过滤：请求可能已发出，
 按 `started_at` 保守兜底、且推迟本身有上限。**推迟本身封顶一个保留窗口**：首次推迟给行落
 `activation_deferred_at`，距起点满一个窗口仍未等到压缩边界时强制入口
-激活并清掉标记（`ActivateToolsetTx` 同事务清空）——持续活跃不压缩的
+激活并清掉标记（`ActivateToolsetTx` 同事务清空）；run 内每个安全点
+（`maybeTellToolset` 同处）也复核一次——只在入口判会让持续有输入的长寿
+run 无限越过承诺窗口，安全点激活只推进库内水位并收口
+`toolset_activated`，本 run 仍按冻结前缀跑完，下一压缩边界或下一次运行
+自然换新版本。持续活跃不压缩的
 会话不会把升级与「下一个压缩点生效」的承诺无限推迟。定时任务会话独立、
 不吃主线缓存，入口始终用最新版本——但它走
 `activateBotPromptForSession` 只做会话内解析、**不写回 bots 行激活水位**，

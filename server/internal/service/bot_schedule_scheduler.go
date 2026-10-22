@@ -634,7 +634,7 @@ func (s *BotService) finishScheduleFailed(bot *model.Bot, run *model.BotRun, cod
 			"error_message": msg,
 			"summary":       summary,
 		}
-		runCostPersistColsTx(tx, run.ID, cols)
+		s.runCostPersistColsTx(tx, run.ID, cols)
 		ok, err = repository.NewBotRunRepository(tx).UpdateColumnsWhereTx(tx, run.ID,
 			map[string]interface{}{"finished_at": nil, "stop_requested_at": nil}, cols)
 		if err != nil || !ok {
@@ -708,7 +708,7 @@ func (s *BotService) finishScheduleStopped(bot *model.Bot, run *model.BotRun) {
 			"finished_at": now,
 			"summary":     summary,
 		}
-		runCostPersistColsTx(tx, run.ID, cols)
+		s.runCostPersistColsTx(tx, run.ID, cols)
 		ok, err = repository.NewBotRunRepository(tx).UpdateColumnsWhereTx(tx, run.ID,
 			map[string]interface{}{"finished_at": nil}, cols)
 		if err != nil || !ok {

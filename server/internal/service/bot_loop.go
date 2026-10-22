@@ -226,6 +226,19 @@ runLoop:
 				bot.LastToldVersion = fresh.LastToldVersion
 				bot.OfferedInputSeq = fresh.OfferedInputSeq
 				bot.StyleCompactionVersion = fresh.StyleCompactionVersion
+				bot.ActivationDeferredAt = fresh.ActivationDeferredAt
+			}
+			// 推迟封顶的安全点复核（INT-139 云端复审）：只在入口判一次时，
+			// 持续有输入的长寿 run 会无限越过承诺窗口、收口事件永不落地。
+			// 激活只推进库内水位并补 toolset_activated——applyRunPromptFreeze
+			// 随后把本 run 的副本按回冻结前缀，缓存不炸，下一个压缩边界或
+			// 下一次运行自然用上新版本。
+			if activationDeferred && s.activationDeferralExpired(bot) {
+				if err := s.activateBotPrompt(bot); err != nil {
+					s.logger.Warn("安全点激活工具集失败", zap.String("bot_id", bot.ID), zap.Error(err))
+				} else {
+					activationDeferred = false
+				}
 			}
 			applyRunCredentialFreeze(bot, freeze)
 			applyRunPromptFreeze(bot, freeze)
@@ -624,11 +637,17 @@ func (s *BotService) tryFinishRun(bot *model.Bot, run *model.BotRun) bool {
 // panic/重启收尾读到的 run 是库里旧副本，SUM(bot_model_requests.cost_estimate)
 // 把「最后一次 commit 之后才计价」的失败尝试一并入账，请求行与 run 行同源、
 // 不留跨表不一致。token 总量不在此落——它仍是「会话实际消费」口径。
-func runCostPersistColsTx(tx *gorm.DB, runID string, cols map[string]interface{}) {
+func (s *BotService) runCostPersistColsTx(tx *gorm.DB, runID string, cols map[string]interface{}) {
 	var total *float64
 	if err := tx.Model(&model.BotModelRequest{}).
 		Where("run_id = ? AND cost_estimate IS NOT NULL", runID).
-		Select("SUM(cost_estimate)").Scan(&total).Error; err != nil || total == nil {
+		Select("SUM(cost_estimate)").Scan(&total).Error; err != nil {
+		// 对账失败不能静默：run 落终态而请求行已有成本时正是要消除的
+		// 跨表不一致，必须留痕（INT-139 云端复审）。
+		s.logger.Warn("实算 run 成本失败", zap.String("run_id", runID), zap.Error(err))
+		return
+	}
+	if total == nil {
 		return
 	}
 	cols["cost_estimate"] = *total
@@ -648,7 +667,7 @@ func (s *BotService) finishStopped(bot *model.Bot, run *model.BotRun) {
 	txErr := s.db.Transaction(func(tx *gorm.DB) error {
 		var err error
 		cols := map[string]interface{}{"status": model.BotRunStatusStopped, "finished_at": now}
-		runCostPersistColsTx(tx, run.ID, cols)
+		s.runCostPersistColsTx(tx, run.ID, cols)
 		ok, err = repository.NewBotRunRepository(tx).UpdateColumnsWhereTx(tx, run.ID,
 			map[string]interface{}{"finished_at": nil}, cols)
 		if err != nil || !ok {
@@ -705,7 +724,7 @@ func (s *BotService) finishFailedDetail(bot *model.Bot, run *model.BotRun, code,
 			"error_code":    code,
 			"error_message": message,
 		}
-		runCostPersistColsTx(tx, run.ID, cols)
+		s.runCostPersistColsTx(tx, run.ID, cols)
 		ok, err = repository.NewBotRunRepository(tx).UpdateColumnsWhereTx(tx, run.ID,
 			map[string]interface{}{"finished_at": nil, "stop_requested_at": nil}, cols)
 		if err != nil || !ok {

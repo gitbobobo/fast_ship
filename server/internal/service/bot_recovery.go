@@ -118,7 +118,7 @@ func (s *BotService) RecoverOnStartup() error {
 			}
 			// 恢复收尾也要重算已计价成本：崩溃前已落库的失败/成功请求
 			// 成本不能随 run 一起丢成 NULL（INT-139 云端复审）。
-			runCostPersistColsTx(tx, run.ID, cols)
+			s.runCostPersistColsTx(tx, run.ID, cols)
 			ok, err := repository.NewBotRunRepository(tx).UpdateColumnsWhereTx(tx, run.ID,
 				map[string]interface{}{"finished_at": nil}, cols)
 			if err != nil || !ok {

@@ -6,6 +6,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -1263,5 +1264,73 @@ func TestBotAllToolCallsDroppedFailsTurn(t *testing.T) {
 		Where("bot_id = ? AND kind = ?", bot.ID, model.BotMessageKindAssistant).Count(&assistants)
 	if assistants != 0 {
 		t.Fatalf("不得提交空助手回合，实得 %d 条", assistants)
+	}
+}
+
+// 推迟封顶的 run 内复核（INT-139 云端复审 P2）：只在入口判一次时，持续有
+// 输入的长寿 run 会无限越过承诺窗口、toolset_activated 永不落地。安全点
+// 复核到推迟过期即推进库内水位并收口；冻结快照让本 run 继续用旧前缀
+// （缓存不炸），第二条模型请求应与第一条带同一 system 提示词。
+func TestBotActivationDeferralExpiresMidRun(t *testing.T) {
+	env := setupBotTestEnv(t,
+		fakeModelTurn{ToolCalls: []fakeModelToolCall{{
+			ID: "call-m", Name: "fs_project", Args: `{"action":"list","page":1,"page_size":10}`,
+		}}},
+		fakeModelTurn{Text: "done"},
+	)
+	userID := createBotTestUser(t, env.db, "r13mid")
+	bot := env.createBot(t, userID)
+	if err := env.db.Model(&model.Bot{}).Where("id = ?", bot.ID).
+		Updates(map[string]interface{}{"toolset_version": 9, "last_told_version": 9}).Error; err != nil {
+		t.Fatalf("降级水位: %v", err)
+	}
+	// 窗口内热请求 → 入口走推迟分支、落 activation_deferred_at。
+	int139SeedMainRequest(t, env, bot.ID, model.BotSessionKindMain, time.Now().UTC())
+
+	if _, err := env.bots.SendMessage(userID, bot.ID, &SendMessageRequest{Text: "hi", ClientMessageID: "r13m1"}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	// 第一条请求在飞 = 入口判定已落定。此刻把时钟拨过保留窗口，第二轮
+	// 迭代的安全点复核必须看到推迟已过期并激活。
+	first := env.fake.nextRequest(t, 10*time.Second)
+	retain := env.cfg.Bots.Runtime.PromptCacheRetain()
+	env.bots.nowFn = func() time.Time { return time.Now().UTC().Add(retain + time.Minute) }
+
+	waitForBot(t, "midrun activation", 15*time.Second, func() bool { return env.botSettled(bot.ID) })
+
+	var row model.Bot
+	env.db.First(&row, "id = ?", bot.ID)
+	if row.ToolsetVersion != botToolsetVersion {
+		t.Fatalf("安全点复核应把水位推进到 v%d，实得 %d", botToolsetVersion, row.ToolsetVersion)
+	}
+	if row.ActivationDeferredAt != nil {
+		t.Fatalf("激活落库应清空推迟标记，实得 %v", row.ActivationDeferredAt)
+	}
+
+	// 本 run 的缓存不能炸：第二次模型请求仍带冻结的旧 system 前缀。
+	second := env.fake.nextRequest(t, 5*time.Second)
+	systemOf := func(body []byte) string {
+		var req struct {
+			Messages []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		if err := json.Unmarshal(body, &req); err != nil || len(req.Messages) == 0 {
+			t.Fatalf("解析请求体失败: %v", err)
+		}
+		return req.Messages[0].Content
+	}
+	if systemOf(first.Body) != systemOf(second.Body) {
+		t.Fatalf("run 内前缀应保持冻结，第二条请求的 system 不得换成新提示词")
+	}
+
+	// 推迟通知在激活时必须有 toolset_activated 收口（run 内承诺兑现）。
+	var found int64
+	env.db.Model(&model.BotMessage{}).
+		Where("bot_id = ? AND kind = ? AND content_json LIKE ?", bot.ID,
+			model.BotMessageKindLifecycle, "%toolset_activated%").Count(&found)
+	if found == 0 {
+		t.Fatalf("推迟通知应有 toolset_activated 收口事件")
 	}
 }
