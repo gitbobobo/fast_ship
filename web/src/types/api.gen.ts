@@ -3798,7 +3798,7 @@ export interface components {
         };
         ApiKeyCreated: components["schemas"]["ApiKey"] & {
             /** @description 完整 API Key（fsk_ 前缀），仅创建响应中出现一次，服务端不存原文 */
-            key?: string;
+            key: string;
         };
         CreateGitHubTokenRequest: {
             /** @description Token 标题（如「主仓库发布 Token」） */

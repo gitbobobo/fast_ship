@@ -1461,7 +1461,7 @@ type ApiKeyCreated struct {
 	Id        string `json:"id"`
 
 	// Key 完整 API Key（fsk_ 前缀），仅创建响应中出现一次，服务端不存原文
-	Key *string `json:"key,omitempty"`
+	Key string `json:"key"`
 
 	// KeyHash Key 的 SHA-256 哈希
 	KeyHash string `json:"key_hash"`

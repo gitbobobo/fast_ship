@@ -700,7 +700,7 @@ API Key 管理（仅 JWT）
 | `key_hash` | string | 是 | Key 的 SHA-256 哈希 |
 | `last_used_at` | string（date-time，可空） | 是 |  |
 | `created_at` | string（date-time） | 是 |  |
-| `key` | string | 否 | 完整 API Key（fsk_ 前缀），仅创建响应中出现一次，服务端不存原文 |
+| `key` | string | 是 | 完整 API Key（fsk_ 前缀），仅创建响应中出现一次，服务端不存原文 |
 
 **错误**
 

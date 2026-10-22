@@ -85,8 +85,20 @@ export type WorkspaceRef = Schemas["T3WorkspaceRef"];
 /** 契约名为 T3WorkspaceOptions。 */
 export type WorkspaceOptions = Schemas["T3WorkspaceOptions"];
 
-/** 契约名为 T3ThreadWorkspace（扁平对象，靠 type 字段区分三类）。 */
-export type ThreadWorkspace = Schemas["T3ThreadWorkspace"];
+/**
+ * 保留手写判别联合：契约 T3ThreadWorkspace 是扁平对象（type + 全可选字段），
+ * 表达不了「existing_worktree 必须带 worktree_path」这类按 variant 的必填约束。
+ */
+export type ThreadWorkspace =
+  | { type: "root" }
+  | {
+      type: "worktree";
+      /** 缺省时由服务端取项目主检出的当前分支（启动弹框用）。 */
+      base_ref?: string;
+      branch?: string;
+      start_from_origin?: boolean;
+    }
+  | { type: "existing_worktree"; worktree_path: string; branch?: string };
 
 /**
  * 新建线程请求保留手写：模型选项经 ModelSelection 携带（布尔选项值契约
@@ -103,14 +115,34 @@ export interface CreateThreadInput {
   workspace: ThreadWorkspace;
 }
 
-/** 契约名为 SendT3ThreadMessageRequest。 */
-export type SendMessageInput = Schemas["SendT3ThreadMessageRequest"];
+/**
+ * 契约类型收窄：契约 command_id/message_id 可选（缺省服务端生成），前端为
+ * 「同一操作重试必须带同一 ID」的幂等语义恒提供，收窄为必填。
+ */
+export type SendMessageInput = Schemas["SendT3ThreadMessageRequest"] & {
+  command_id: string;
+  message_id: string;
+};
 
-/** 契约名为 RespondT3ThreadRequest（扁平联合：type=approval 带 decision，type=user_input 带 answers）。 */
-export type RespondInput = Schemas["RespondT3ThreadRequest"];
+/**
+ * 保留手写判别联合：契约 RespondT3ThreadRequest 是扁平对象，表达不了
+ * 「type=approval 必须带 decision；type=user_input 必须带 answers」的约束。
+ */
+export type RespondInput =
+  | { type: "approval"; decision: string }
+  | {
+      type: "user_input";
+      answers: Record<string, string | string[]>;
+      attachments_by_question_id?: Record<string, ChatAttachment[]>;
+    };
 
-/** 契约名为 AnswerT3SecretRequest；调用方负责不把 secret 写进日志。 */
-export type SecretAnswerInput = Schemas["AnswerT3SecretRequest"];
+/**
+ * 保留手写判别联合：契约 AnswerT3SecretRequest 是扁平对象，表达不了
+ * 「type=save 必须带 secret」。调用方负责不把 secret 写进日志。
+ */
+export type SecretAnswerInput =
+  | { type: "save"; secret: string }
+  | { type: "decline" };
 
 /** 契约名为 UpdateT3EnvironmentRequest。 */
 export type EnvironmentInput = Schemas["UpdateT3EnvironmentRequest"];

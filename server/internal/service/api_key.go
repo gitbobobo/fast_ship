@@ -83,7 +83,7 @@ func (s *ApiKeyService) Create(ctx context.Context, userID string, req *CreateAp
 		KeyHash:    apiKey.KeyHash,
 		LastUsedAt: api.JSONTimePtr(apiKey.LastUsedAt),
 		CreatedAt:  api.JSONTime(apiKey.CreatedAt),
-		Key:        api.Ptr(fullKey),
+		Key:        fullKey,
 	}
 	return &resp, nil
 }

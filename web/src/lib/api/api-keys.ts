@@ -6,11 +6,8 @@ type Schemas = components["schemas"];
 
 type CreateApiKeyRequest = Schemas["CreateApiKeyRequest"];
 
-/**
- * 契约 ApiKeyCreated 把 key 标成可选，但服务端创建响应恒携带明文 key
- * （仅此一次下发），这里收窄为必有。
- */
-type CreateApiKeyResponse = Schemas["ApiKeyCreated"] & { key: string };
+/** 契约名为 ApiKeyCreated；明文 key 仅创建响应出现一次，契约已标 required。 */
+type CreateApiKeyResponse = Schemas["ApiKeyCreated"];
 
 export const apiKeyApi = {
   list: () => api.get("api-keys").json<ApiResponse<ApiKey[]>>(),
