@@ -11,18 +11,19 @@ describe("MetricChart", () => {
     expect(screen.queryByText("暂无项目")).not.toBeInTheDocument();
   });
 
-  it("keeps zero-valued project rows visible", () => {
+  it("keeps zero-valued project rows visible instead of an empty state", () => {
     render(
       <MetricChart
         points={[
           { id: "p1", label: "Alpha", value: 0 },
-          { id: "p2", label: "Beta", value: 3 },
+          { id: "p2", label: "Beta", value: 0 },
         ]}
         variant="bar"
         emptyMessage="暂无已配置项目"
       />,
     );
 
+    // 有项目但都清零时不应该退化成空状态：项目名仍要能看到。
     expect(screen.queryByText("暂无已配置项目")).not.toBeInTheDocument();
     expect(screen.getByText("Alpha")).toBeInTheDocument();
     expect(screen.getByText("Beta")).toBeInTheDocument();
