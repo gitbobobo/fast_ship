@@ -35,6 +35,7 @@ export function OptionSelect({
   disabled,
   id,
   className,
+  contentClassName,
   size,
   "aria-label": ariaLabel,
 }: {
@@ -49,6 +50,8 @@ export function OptionSelect({
   /** 以下四个属性透传给 SelectTrigger。 */
   id?: string;
   className?: string;
+  /** 下拉面板自身的 class（触发器较窄、选项较长时用它放宽面板）。 */
+  contentClassName?: string;
   size?: "sm" | "default";
   "aria-label"?: string;
 }) {
@@ -78,7 +81,7 @@ export function OptionSelect({
           {hasValue ? valueLabel : undefined}
         </SelectValue>
       </SelectTrigger>
-      <SelectContent>
+      <SelectContent className={contentClassName}>
         {options.map((option) => (
           <SelectItem
             key={option.value}

@@ -212,6 +212,10 @@ export default function GeneralPage() {
                 aria-label="时区"
                 disabled={savingTimezone}
                 className="w-48 shrink-0"
+                // 触发器保持窄（让左侧说明一行放得下），面板单独放宽：
+                // 「America/Argentina/Buenos_Aires (UTC-3)」这类长名连同偏移量
+                // 一起显示，不把关键的 (UTC±N) 截掉。
+                contentClassName="min-w-80 max-w-96"
               />
             </div>
           </div>
