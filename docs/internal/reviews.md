@@ -406,8 +406,13 @@ Ship 不代点就干等 1h deadline 变 `timed_out`，整轮还得手动重审�
 `repo_full_name` 与该项目 enabled 设置行快照一致的行（选中后还要过一次准入
 复核：pending 未清、epoch 未推进、快照仍是本仓库；通过后每次 GitHub 写之前
 再复核一次，避免同步期间改仓库把产出写到旧仓库）；全部走
-App 安装令牌。失败只记 `sync_error` 下轮重试，不改运行终态；成功后按开始
-同步时的 `sync_epoch` 条件清 pending（同步期间的新 pending 不会被误清）。
+App 安装令牌。失败只记 `sync_error`、记 `sync_failed_epoch = sync_epoch` 并
+按 `reviewSyncRetryBackoff`（5 分钟）退避重试，不改运行终态——持续性失败
+（超大 diff 固定 406、`SubmitReview` 固定 422、评论接口 403）不会每 10s
+重放整条同步（否则读 diff、写评论、写 commit status 被放大 360 倍/小时，还会
+写满同一 SHA 的 1000 条 status 上限）；任何置 pending 的入口都会推进
+`sync_epoch`，新事件因此立即重新入队、不受退避影响。成功后按开始同步时的
+`sync_epoch` 条件清 pending（同步期间的新 pending 不会被误清）。
 中段写回（`code_status`/`visual_status`/`visual_screens_fingerprint`）同样带
 `sync_epoch` 条件：同步期间总账被新 webhook/rerun 推进时不命中，直接放弃
 本轮落库——陈旧快照的结论不得写回。
@@ -455,17 +460,22 @@ rune 截断加 `...`，不劈断多字节字符）；状态未变不重复调用
   - 行内标注判定与行内 review 共用一次 `GetPullRequestDiff` + 右侧有效行
     集合（`fetchInlineLines`），不再重复拉取。**diff 读取失败只推迟行内
     review**：commit status、顶层评论（按「本轮没读 diff」口径，不加「未
-    行内标注」注记）以及视觉状态/视觉评论（不依赖 diff）都照常写，推迟的
-    错误在视觉收尾之后才上报——账本保持 `sync_pending` 并写 `sync_error`，
-    下一轮同步重试；不能把失败压成「没有有效行号」，那会把行内意见静默
-    丢掉。**无论有没有待发布的行内运行都上报**：本轮评论可能已按「没读
-    diff」口径重写，保持 `sync_pending` 才能在 diff 恢复后补上注记。
-    diff 读不到的重试里，**自己那条**评论正文已经等于本轮正文时才跳过重写
-    （避免每 10s tick 一次相同 PATCH 既耗配额又留编辑记录）；正文变了照常
-    更新——用代码状态做代理会漏掉「多个组合里又完成一个但状态没变」，作者
-    会一直看到旧快照。认自己的评论先按账本记的 `code_comment_id`，id 不可
-    用时退回与 `FindPullRequestComment` 同口径的「bot + marker 前缀」判定：
-    只看「正文含 marker」会把用户复制粘贴的同一段正文当成自己的评论。
+    行内标注」注记）照常写，推迟的错误最后才上报——账本保持 `sync_pending`
+    并写 `sync_error`，退避后重试；不能把失败压成「没有有效行号」，那会把
+    行内意见静默丢掉。**无论有没有待发布的行内运行都上报**：本轮评论可能已
+    按「没读 diff」口径重写，保持 `sync_pending` 才能在 diff 恢复后补上注记。
+    注：同一 (head, round) 里「diff 读取失败」与「存在视觉运行」互斥——读
+    diff 的前提是某个 completed 代码运行有带行号的 P0–P2，而这会让视觉决策
+    停在 `visualNone`、不建视觉运行；视觉产出因此不会被 diff 失败连累。
+  - **顶层评论写入统一去重**（`upsertPRComment`，代码与视觉评论共用）：先按
+    账本记的 `code_comment_id`/`visual_comment_id` 认自己的评论，id 不可用
+    （写回失败/评论已重建）时退回与 `FindPullRequestComment` 同口径的「bot +
+    marker 前缀」；正文已等于本轮正文就不 PATCH（重试路径每次都调这里，相同
+    正文的写入既耗配额又留编辑记录），并顺手把找回的 id 补记回账本；正文变了
+    照常更新。用状态做代理会漏掉「多个组合里又完成一个但状态没变」，只看
+    「正文含 marker」会把用户复制粘贴的同一段正文当成自己的评论。
+  - 沿用上一轮视觉通过时的 `视觉审查` success 状态也按账本 `visual_status`
+    去重：开轮已清空它，新轮首次照常写；同一轮的失败重试不重复写。
 - 视觉审查：标记 `<!-- fast-ship-visual-review -->`，标题「视觉审查意见：」，
   按严重度排序，每条带截图标签、维度、改法；不发行内评论。
 

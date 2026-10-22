@@ -35,6 +35,12 @@ import (
 var errReviewSyncDeferred = errors.New("review: sync deferred")
 
 const (
+	// reviewSyncRetryBackoff 同一 epoch 同步失败后的退避间隔：调度 tick 是 10s，
+	// 持续性失败（超大 diff 固定 406、SubmitReview 固定 422、评论接口 403）不
+	// 该每 tick 重放整条同步——否则读 diff、写评论、写 commit status 都被放大
+	// 360 倍/小时，还会把同一 SHA 的 status 写满 GitHub 的 1000 条上限。新事件
+	// （webhook/重跑/超时）会推进 sync_epoch，立即重新入队，不受退避影响。
+	reviewSyncRetryBackoff    = 5 * time.Minute
 	reviewCodeStatusContext   = "代码审查"
 	reviewVisualStatusContext = "视觉审查"
 	reviewCodeCommentMarker   = "<!-- fast-ship-code-review -->"
@@ -150,13 +156,16 @@ func (s *ReviewService) syncPendingPRs(now time.Time) {
 	// 的 repo_full_name 快照（审查仓库的唯一真相）。项目换过仓库后旧仓库的
 	// ledger 可能因旧运行收尾再次置 pending，不能在新仓库的项目上把它同步
 	// 出去；公开仓库 ≠ 代码仓库时，公开仓库的账本行同样不再同步。
+	// 退避：同一 epoch 最近失败过的行等 reviewSyncRetryBackoff 再试（新事件
+	// 推进 epoch 后立即入队，见常量注释）。
 	if err := s.db.Where(`sync_pending
+		AND (sync_failed_epoch <> sync_epoch OR updated_at <= ?)
 		AND EXISTS (
 			SELECT 1 FROM project_review_settings s
 			WHERE s.project_id = review_pull_requests.project_id
 			  AND s.enabled
 			  AND s.repo_full_name = review_pull_requests.repo_full_name
-		)`).
+		)`, now.Add(-reviewSyncRetryBackoff)).
 		Order("updated_at ASC").Limit(reviewStageBatch).
 		Find(&rows).Error; err != nil {
 		s.logger.Error("查询待同步 PR 失败", zap.Error(err))
@@ -224,15 +233,24 @@ func (s *ReviewService) syncOnePR(ledger *model.ReviewPullRequest) {
 		s.db.Model(&model.ReviewPullRequest{}).
 			Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND sync_epoch = ?",
 				cur.ProjectID, cur.RepoFullName, cur.PRNumber, epoch).
-			Updates(map[string]any{"sync_error": syncErr.Error(), "updated_at": now})
-		s.logger.Warn("PR 审查同步失败（下轮重试）",
+			Updates(map[string]any{
+				"sync_error":        syncErr.Error(),
+				"sync_failed_epoch": epoch,
+				"updated_at":        now,
+			})
+		s.logger.Warn("PR 审查同步失败（退避后重试）",
 			zap.String("repo", cur.RepoFullName), zap.Int("pr", cur.PRNumber), zap.Error(syncErr))
 		return
 	}
 	s.db.Model(&model.ReviewPullRequest{}).
 		Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND sync_epoch = ?",
 			cur.ProjectID, cur.RepoFullName, cur.PRNumber, epoch).
-		Updates(map[string]any{"sync_pending": false, "sync_error": "", "updated_at": now})
+		Updates(map[string]any{
+			"sync_pending":      false,
+			"sync_error":        "",
+			"sync_failed_epoch": 0,
+			"updated_at":        now,
+		})
 }
 
 // doSyncPR 同步主体：读 PR 实时数据 → 代码汇总状态/评论/行内 → 视觉衔接。
@@ -460,7 +478,9 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 			// 改用通用沿用文案。ScreensSettled 时把指纹一并入账（none: 前缀标
 			// 记结清态）：同一集合后续同步事件不再重探。
 			fields := map[string]any{}
-			if len(outcome.PriorRuns) > 0 && priorVisualPassed(outcome.PriorRuns) {
+			// 沿用上一轮通过：账本已经是 success 就不再写（开轮已清空
+			// visual_status，首次照常写；同一轮的失败重试不重复写同一状态）。
+			if len(outcome.PriorRuns) > 0 && priorVisualPassed(outcome.PriorRuns) && ledger.VisualStatus != "success" {
 				desc := "审查通过（沿用上一轮）"
 				if outcome.HasScreenshots && !outcome.ScreensChanged {
 					desc = "审查通过（沿用上一轮，截图未变化）"
@@ -519,15 +539,9 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 		HeadSHA:      ledger.HeadSHA,
 		RoundNumber:  ledger.RoundNumber,
 	}, codeRuns, inlineLines, visualPending, visualCarry)
-	// diff 读不到的重试：远端评论正文已经等于本轮正文时不再重写（每 tick 一次
-	// 相同 PATCH 既耗配额又留编辑记录），正文变了照常更新——用代码状态做代理
-	// 信号会漏掉「多个组合里又完成一个、结论/摘要变了但状态没变」的情况，作者
-	// 的进度与发现会停在旧快照。等 diff 读得到时再补「未行内标注」注记。
-	if inlineErr != nil && ledger.CodeCommentID != 0 &&
-		s.prCommentMatches(ctx, client, ledger, reviewCodeCommentMarker, codeBody) {
-		s.logger.Info("diff 仍不可读且顶层评论正文未变，跳过重复写入",
-			zap.String("repo", ledger.RepoFullName), zap.Int("pr", ledger.PRNumber))
-	} else if err := s.upsertPRComment(ctx, client, ledger, reviewCodeCommentMarker, codeBody, "code_comment_id", ledger.CodeCommentID); err != nil {
+	// upsertPRComment 自己按正文去重：diff 读不到的重试里正文没变就不 PATCH，
+	// 变了照常更新（等 diff 读得到时再补「未行内标注」注记）。
+	if err := s.upsertPRComment(ctx, client, ledger, reviewCodeCommentMarker, codeBody, "code_comment_id", ledger.CodeCommentID); err != nil {
 		return err
 	}
 
@@ -608,39 +622,39 @@ func (s *ReviewService) updateLedgerEpoch(ledger *model.ReviewPullRequest, epoch
 	return res.RowsAffected > 0, nil
 }
 
-// prCommentMatches 远端顶层评论正文是否已经是 body。只给「diff 读不到时避免
-// 重复 PATCH」用：读评论失败或认不出自己的评论都按「需要更新」处理（写失败
-// 会留在下一轮重试，不会把正文写错）。
-// 先按账本记的 comment id 认自己的评论；id 不可用（写回丢失/评论已重建）时
-// 退回与 FindPullRequestComment 同口径的「bot + marker 前缀」判定——只看
-// 「正文含 marker」会把用户复制粘贴的同一段正文当成自己的评论，跳过真正该
-// 更新的那条。
-func (s *ReviewService) prCommentMatches(ctx context.Context, client githubapi.GitHubClient,
-	ledger *model.ReviewPullRequest, marker, body string) bool {
-	comments, err := client.ListIssueCommentsForPR(ctx, ledger.InstallationID, ledger.RepoFullName, ledger.PRNumber)
-	if err != nil {
-		return false
-	}
-	want := strings.TrimSpace(body)
-	for _, c := range comments {
-		if ledger.CodeCommentID != 0 {
-			if c.ID == ledger.CodeCommentID {
-				return strings.TrimSpace(c.Body) == want
-			}
-			continue
-		}
-		if !strings.HasSuffix(c.User, "[bot]") || !strings.HasPrefix(strings.TrimSpace(c.Body), marker) {
-			continue
-		}
-		return strings.TrimSpace(c.Body) == want
-	}
-	return false
-}
-
-// upsertPRComment 优先按已存 comment id 直接更新（savedID）；更新撞 404
-// （评论被删）时回退 marker 分页找回，仍找不到才创建。写回 comment id 列。
+// upsertPRComment 顶层评论的唯一写入口：优先按已存 comment id 直接更新
+// （savedID）；更新撞 404（评论被删）时回退 marker 分页找回，仍找不到才创建。
+// 写回 comment id 列。
+//
+// **正文没变就不 PATCH**：同步的重试路径（diff 读不到、视觉未收尾）每个 tick
+// 都会调到这里，相同正文的写入既耗配额又留编辑记录。认自己的评论先按账本记
+// 的 id，id 不可用（写回失败/评论已重建）时退回与 FindPullRequestComment 同
+// 口径的「作者是 bot + 正文以 marker 开头」——只看「正文含 marker」会把用户
+// 复制粘贴的同一段正文当成自己的评论。正文已是最新时顺手把找回的 id 补记回
+// 账本（写回失败只记日志，下一轮多一次列表读而已）。
 func (s *ReviewService) upsertPRComment(ctx context.Context, client githubapi.GitHubClient,
 	ledger *model.ReviewPullRequest, marker, body, idColumn string, savedID int64) error {
+	want := strings.TrimSpace(body)
+	if comments, err := client.ListIssueCommentsForPR(ctx, ledger.InstallationID, ledger.RepoFullName, ledger.PRNumber); err == nil {
+		for _, c := range comments {
+			own := false
+			if savedID != 0 {
+				own = c.ID == savedID
+			} else {
+				own = strings.HasSuffix(c.User, "[bot]") && strings.HasPrefix(strings.TrimSpace(c.Body), marker)
+			}
+			if !own {
+				continue
+			}
+			if strings.TrimSpace(c.Body) == want {
+				if savedID == 0 {
+					s.recordCommentID(ledger, idColumn, c.ID)
+				}
+				return nil
+			}
+			break
+		}
+	}
 	commentID := savedID
 	found := false
 	if savedID != 0 {
@@ -679,11 +693,20 @@ func (s *ReviewService) upsertPRComment(ctx context.Context, client githubapi.Gi
 		}
 		commentID = newID
 	}
-	s.db.Model(&model.ReviewPullRequest{}).
+	s.recordCommentID(ledger, idColumn, commentID)
+	return nil
+}
+
+// recordCommentID 把顶层评论 id 写回账本。失败只记日志：下一轮会多一次评论
+// 列表读（按 bot+marker 找回），不影响正文正确性。
+func (s *ReviewService) recordCommentID(ledger *model.ReviewPullRequest, idColumn string, id int64) {
+	if err := s.db.Model(&model.ReviewPullRequest{}).
 		Where("project_id = ? AND repo_full_name = ? AND pr_number = ?",
 			ledger.ProjectID, ledger.RepoFullName, ledger.PRNumber).
-		Update(idColumn, commentID)
-	return nil
+		Update(idColumn, id).Error; err != nil {
+		s.logger.Warn("写回顶层评论 id 失败",
+			zap.String("column", idColumn), zap.Int64("comment", id), zap.Error(err))
+	}
 }
 
 // upsertVisualComment 视觉顶层评论：本 head 的视觉运行结论或沿用提醒。

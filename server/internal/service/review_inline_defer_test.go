@@ -13,6 +13,7 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/pkg/githubapp"
 	"github.com/godbobo/fast_ship/server/internal/repository"
 	"go.uber.org/zap"
+	"gorm.io/gorm"
 )
 
 // diffFailClient 只让 diff 读取失败：验证「单次 diff 读取失败只影响行内
@@ -90,8 +91,8 @@ func TestReviewDiffFailureKeepsTopLevelOutput(t *testing.T) {
 		t.Fatalf("sync_error = %q, want 含「读取 diff 失败」", ledger.SyncError)
 	}
 
-	// 同一份运行结论的重试：不再重写顶层评论（否则每个 tick 一次 PATCH）。
-	review.syncPendingPRs(now.Add(10 * time.Second))
+	// 退避窗口过后的重试：同一份运行结论不再重写顶层评论（否则每次重试都 PATCH）。
+	review.syncPendingPRs(now.Add(reviewSyncRetryBackoff + time.Second))
 	counts := e.fake.CallCounts()
 	if counts["CreatePullRequestComment"] != 1 || counts["UpdatePullRequestComment"] != 0 {
 		t.Fatalf("评论写入 = create:%d update:%d, want 1/0（重试不重写相同正文）",
@@ -102,7 +103,7 @@ func TestReviewDiffFailureKeepsTopLevelOutput(t *testing.T) {
 	}
 
 	// 下一轮（diff 读得到）补发行内 review：推迟而不是丢弃，并收尾账本。
-	e.review.syncPendingPRs(now.Add(time.Minute))
+	e.review.syncPendingPRs(now.Add(2 * reviewSyncRetryBackoff))
 	if got := len(e.fake.ReviewEvents(repo)); got != 1 {
 		t.Fatalf("下一轮应补发 1 条行内 review，实际 %d", got)
 	}
@@ -219,7 +220,7 @@ func TestReviewDiffFailureRewritesCommentWhenBodyChanges(t *testing.T) {
 		"summary":     "s1b",
 		"result_json": `{"summary":"s1b","findings":[{"level":"P1","file":"a","line":2,"body":"s1b"}],"prior":[],"ui_changed":false,"ui_changed_since_last_visual":false}`,
 	})
-	review.syncPendingPRs(now.Add(10 * time.Second))
+	review.syncPendingPRs(now.Add(reviewSyncRetryBackoff + time.Second))
 
 	counts := e.fake.CallCounts()
 	if counts["UpdatePullRequestComment"] != 1 {
@@ -232,28 +233,146 @@ func TestReviewDiffFailureRewritesCommentWhenBodyChanges(t *testing.T) {
 	}
 }
 
-// TestReviewDiffFailureStillWritesVisualOutput diff 读不到只推迟行内 review，
-// 视觉状态与视觉评论照常写（它们不依赖 diff）：推迟的错误在视觉收尾之后才
-// 上报，账本保持 pending 便于下一轮补发行内意见。
-func TestReviewDiffFailureStillWritesVisualOutput(t *testing.T) {
+// TestUpsertPRCommentDedupesOwnComment 顶层评论的去重必须认准自己的评论：
+// 账本记的 comment id 优先；id 不可用时按「bot + marker 前缀」过滤。用户复制
+// 粘贴含 marker 的同一段正文不能被当成自己的评论而跳过更新；正文确实一致的
+// 情况下不 PATCH，并把找回的 id 补记回账本。
+func TestUpsertPRCommentDedupesOwnComment(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	review := e.withT3(nil, nil, nil)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	ctx := context.Background()
+	const marker = reviewCodeCommentMarker
+	ledger := &model.ReviewPullRequest{
+		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 84, UserID: e.user.ID,
+		InstallationID: 1, HeadSHA: "sha-c", RoundNumber: 1, UpdatedAt: time.Now().UTC(),
+	}
+	if err := e.svc.db.Create(ledger).Error; err != nil {
+		t.Fatalf("seed ledger: %v", err)
+	}
+
+	// 用户先贴了一段带 marker 的正文（本轮正文），bot 评论仍是旧的。
+	e.fake.AddIssueComment(repo, 84, "someone", marker+"\n本轮正文", time.Now().UTC())
+	botID, err := e.fake.CreatePullRequestComment(ctx, 1, repo, 84, marker+"\n旧正文")
+	if err != nil {
+		t.Fatalf("seed bot comment: %v", err)
+	}
+	if err := review.upsertPRComment(ctx, e.fake, ledger, marker, marker+"\n本轮正文", "code_comment_id", botID); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	if got := e.fake.CallCounts(); got["UpdatePullRequestComment"] != 1 {
+		t.Fatalf("update = %d, want 1（bot 评论正文是旧的，必须更新）", got["UpdatePullRequestComment"])
+	}
+
+	// 正文一致 → 不 PATCH；id 不可用时按 bot+marker 找回并补记回账本。
+	ledger.CodeCommentID = 0
+	countsBefore := e.fake.CallCounts()["UpdatePullRequestComment"]
+	if err := review.upsertPRComment(ctx, e.fake, ledger, marker, marker+"\n本轮正文", "code_comment_id", 0); err != nil {
+		t.Fatalf("upsert dedupe: %v", err)
+	}
+	if got := e.fake.CallCounts()["UpdatePullRequestComment"]; got != countsBefore {
+		t.Fatalf("正文一致不应再 PATCH：update %d → %d", countsBefore, got)
+	}
+	var after model.ReviewPullRequest
+	if err := e.svc.db.Where("project_id = ? AND repo_full_name = ? AND pr_number = ?",
+		e.project.ID, repo, 84).First(&after).Error; err != nil {
+		t.Fatalf("reload ledger: %v", err)
+	}
+	if after.CodeCommentID == 0 {
+		t.Fatal("找回自己的评论后应把 id 补记回账本")
+	}
+}
+
+// prErrClient 让 GetPullRequest 固定失败：同步在第一步就失败，用来看退避。
+// 自己记调用次数（不走 Fake，错误路径不会留下 Fake 的调用记录）。
+type prErrClient struct {
+	githubapi.GitHubClient
+	calls int
+}
+
+func (c *prErrClient) GetPullRequest(context.Context, int64, string, int) (*githubapi.PullRequest, error) {
+	c.calls++
+	return nil, errors.New("上游 502")
+}
+
+// TestReviewSyncFailureBacksOff 持续性失败不再每 10s 重放整条同步：同一 epoch
+// 失败后等 reviewSyncRetryBackoff 再试；新事件推进 epoch 立即重新入队。
+func TestReviewSyncFailureBacksOff(t *testing.T) {
 	e := newReviewEngineEnv(t)
 	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
 	now := time.Now().UTC()
-	e.fake.SetPR(repo, 81, &githubapi.PullRequest{
-		RepoFullName: repo, Number: 81, HeadSHA: "sha-v", State: "open",
+	e.enableReview(t)
+	e.svc.db.Create(&model.ReviewPullRequest{
+		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 90, UserID: e.user.ID,
+		InstallationID: 1, HeadSHA: "sha-f", RoundNumber: 1,
+		SyncPending: true, SyncEpoch: 1, UpdatedAt: now,
+	})
+	client := &prErrClient{GitHubClient: e.fake}
+	review := NewReviewService(e.svc.db, e.svc.projectRepo,
+		repository.NewGitHubWebhookDeliveryRepository(e.svc.db),
+		NewNotificationSink(e.svc.db),
+		githubapp.StaticClients{Client: client},
+		fakeReviewAppSource{ok: true},
+		fakeReviewPublicURL("https://fs.example.com"),
+		nil, e.media, nil, e.svc.cfg, zap.NewNop())
+	review.syncPendingPRs(now)
+	calls := client.calls
+	var ledger model.ReviewPullRequest
+	e.svc.db.Where("project_id = ? AND repo_full_name = ? AND pr_number = ?",
+		e.project.ID, repo, 90).First(&ledger)
+	if ledger.SyncFailedEpoch != 1 || !ledger.SyncPending {
+		t.Fatalf("失败后应记 sync_failed_epoch=1 且保持 pending：%+v", ledger)
+	}
+	if calls != 1 {
+		t.Fatalf("首次失败调用 = %d, want 1", calls)
+	}
+
+	// 退避窗口内不重试。
+	review.syncPendingPRs(now.Add(10 * time.Second))
+	if got := client.calls; got != calls {
+		t.Fatalf("退避窗口内不应重试：%d → %d", calls, got)
+	}
+	// 窗口过后重试。
+	review.syncPendingPRs(now.Add(reviewSyncRetryBackoff + time.Second))
+	if got := client.calls; got != calls+1 {
+		t.Fatalf("退避过后应重试：%d → %d", calls+1, got)
+	}
+	// 新事件推进 epoch：立即重新入队，不等退避。
+	if err := e.svc.db.Model(&model.ReviewPullRequest{}).
+		Where("project_id = ? AND repo_full_name = ? AND pr_number = ?", e.project.ID, repo, 90).
+		Update("sync_epoch", gorm.Expr("sync_epoch + 1")).Error; err != nil {
+		t.Fatalf("bump epoch: %v", err)
+	}
+	syncCalls := client.calls
+	review.syncPendingPRs(now.Add(2 * time.Second))
+	if got := client.calls; got != syncCalls+1 {
+		t.Fatalf("epoch 推进后应立即重试：%d → %d", syncCalls+1, got)
+	}
+}
+
+// TestReviewSyncCarriesVisualSuccessStatusOnce 沿用上一轮视觉通过时，成功状态
+// 只在账本还不是 success 时写一次：diff 持续失败的每次重试不再重复发同一个
+// commit status（GitHub 对同一 SHA+context 有 1000 条上限）。
+func TestReviewSyncCarriesVisualSuccessStatusOnce(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	e.fake.SetPR(repo, 91, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 91, HeadSHA: "sha-w", State: "open",
 		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
 	})
 	e.enableReview(t)
-	// 带行号 P1 才会触发 diff 读取。
-	code := e.seedRunWithFindings(t, repo, 81, "sha-v", now)
-	visual := e.seedRun(t, repo, 81, "sha-v", model.ReviewRunCompleted, now)
-	e.svc.db.Model(visual).Updates(map[string]any{
-		"kind":        model.ReviewKindVisual,
-		"result_json": `{"summary":"视觉通过","findings":[],"prior":[],"unmeasurable":[]}`,
+	// 上一轮（round 1）视觉通过；本轮（round 2）代码有带行号的 P1、没有视觉
+	// 运行 → 沿用上一轮通过，同时触发 diff 读取。
+	prior := e.seedRun(t, repo, 91, "sha-old", model.ReviewRunCompleted, now)
+	e.svc.db.Model(prior).Updates(map[string]any{
+		"kind": model.ReviewKindVisual, "round_number": 1,
+		"result_json": `{"summary":"通过","findings":[],"prior":[],"unmeasurable":[]}`,
 	})
+	e.seedRunWithFindings(t, repo, 91, "sha-w", now)
 	e.svc.db.Create(&model.ReviewPullRequest{
-		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 81, UserID: e.user.ID,
-		InstallationID: 1, HeadSHA: "sha-v", RoundNumber: 1,
+		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 91, UserID: e.user.ID,
+		InstallationID: 1, HeadSHA: "sha-w", RoundNumber: 2,
 		SyncPending: true, SyncEpoch: 1, UpdatedAt: now,
 	})
 	review := NewReviewService(e.svc.db, e.svc.projectRepo,
@@ -264,59 +383,11 @@ func TestReviewDiffFailureStillWritesVisualOutput(t *testing.T) {
 		fakeReviewPublicURL("https://fs.example.com"),
 		nil, e.media, nil, e.svc.cfg, zap.NewNop())
 	review.syncPendingPRs(now)
-
-	if got := len(e.fake.StatusesForContext(reviewVisualStatusContext)); got == 0 {
-		t.Fatalf("视觉状态应照常写出（diff 失败不该挡住视觉收尾），statuses=%v", e.fake.StatusesForContext(reviewVisualStatusContext))
+	if got := len(e.fake.StatusesForContext(reviewVisualStatusContext)); got != 1 {
+		t.Fatalf("沿用上一轮通过应写 1 条视觉状态，实际 %d", got)
 	}
-	hasVisualComment := false
-	for _, body := range e.fake.Comments(repo, 81) {
-		if strings.Contains(body, reviewVisualCommentMarker) {
-			hasVisualComment = true
-		}
-	}
-	if !hasVisualComment {
-		t.Fatal("视觉评论应照常写出")
-	}
-	var ledger model.ReviewPullRequest
-	e.svc.db.Where("project_id = ? AND repo_full_name = ? AND pr_number = ?",
-		e.project.ID, repo, 81).First(&ledger)
-	if !ledger.SyncPending || !strings.Contains(ledger.SyncError, "读取 diff 失败") {
-		t.Fatalf("行内 review 仍推迟：pending=%v sync_error=%q", ledger.SyncPending, ledger.SyncError)
-	}
-	_ = code
-}
-
-// TestPrCommentMatchesIgnoresForeignMarkerComment 「评论正文未变」必须认准
-// 自己的评论：账本记的 comment id 优先；id 不可用时按「bot + marker 前缀」
-// 过滤。用户复制粘贴同一段 marker 正文不能让我们跳过真正该更新的那条。
-func TestPrCommentMatchesIgnoresForeignMarkerComment(t *testing.T) {
-	e := newReviewEngineEnv(t)
-	review := e.withT3(nil, nil, nil)
-	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
-	ctx := context.Background()
-	const marker = reviewCodeCommentMarker
-
-	botID, err := e.fake.CreatePullRequestComment(ctx, 1, repo, 82, marker+"\n旧正文")
-	if err != nil {
-		t.Fatalf("seed bot comment: %v", err)
-	}
-	// 用户复制了一段含 marker 的正文，正文正好等于本轮要写的。
-	e.fake.AddIssueComment(repo, 82, "someone", marker+"\n本轮正文", time.Now().UTC())
-	withID := &model.ReviewPullRequest{RepoFullName: repo, PRNumber: 82, InstallationID: 1, CodeCommentID: botID}
-	if review.prCommentMatches(ctx, e.fake, withID, marker, marker+"\n本轮正文") {
-		t.Fatal("账本记的 bot 评论正文是旧的，不能因为用户复制的正文相同就跳过更新")
-	}
-	noID := &model.ReviewPullRequest{RepoFullName: repo, PRNumber: 82, InstallationID: 1}
-	if review.prCommentMatches(ctx, e.fake, noID, marker, marker+"\n本轮正文") {
-		t.Fatal("id 不可用时要按作者（bot）+ marker 前缀认自己的评论")
-	}
-
-	botID2, err := e.fake.CreatePullRequestComment(ctx, 1, repo, 83, marker+"\n相同正文")
-	if err != nil {
-		t.Fatalf("seed bot comment 2: %v", err)
-	}
-	own := &model.ReviewPullRequest{RepoFullName: repo, PRNumber: 83, InstallationID: 1, CodeCommentID: botID2}
-	if !review.prCommentMatches(ctx, e.fake, own, marker, marker+"\n相同正文") {
-		t.Fatal("自己的评论正文一致时应命中（可以跳过重写）")
+	review.syncPendingPRs(now.Add(reviewSyncRetryBackoff + time.Second))
+	if got := len(e.fake.StatusesForContext(reviewVisualStatusContext)); got != 1 {
+		t.Fatalf("重试不应重复写视觉状态，实际 %d 条", got)
 	}
 }
