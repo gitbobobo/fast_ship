@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -159,5 +160,74 @@ func TestReviewDiffFailureWithoutPendingInlineKeepsSyncPending(t *testing.T) {
 	if counts["CreatePullRequestComment"] != 1 || counts["UpdatePullRequestComment"] != 0 {
 		t.Fatalf("评论写入 = create:%d update:%d, want 1/0（首次写出、重试不重写）",
 			counts["CreatePullRequestComment"], counts["UpdatePullRequestComment"])
+	}
+}
+
+// TestReviewDiffFailureRewritesCommentWhenBodyChanges diff 读不到且代码状态
+// 没变时，评论正文仍可能变（多个组合里又完成一个、摘要/发现不同）：这轮必须
+// 更新顶层评论，否则作者一直看到旧快照。防重复用「远端正文等于本轮正文」，
+// 不能用代码状态做代理。
+func TestReviewDiffFailureRewritesCommentWhenBodyChanges(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	e.fake.SetPR(repo, 80, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 80, HeadSHA: "sha-b", State: "open",
+		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
+	})
+	e.enableReview(t)
+	// 带行号 P1 才会触发 diff 读取（fetchInlineLines 只在这种发现存在时读）。
+	seedCombo := func(modelName, summary string, status model.ReviewRunStatus) *model.ReviewRun {
+		run := e.seedRun(t, repo, 80, "sha-b", status, now)
+		result := fmt.Sprintf(
+			`{"summary":%q,"findings":[{"level":"P1","file":"a","line":2,"body":%q}],"prior":[],"ui_changed":false,"ui_changed_since_last_visual":false}`,
+			summary, summary)
+		e.svc.db.Model(run).Updates(map[string]any{
+			"model": modelName, "result_json": result, "summary": summary,
+		})
+		return run
+	}
+	first := seedCombo("m-a", "s1", model.ReviewRunCompleted)
+	seedCombo("m-b", "s2", model.ReviewRunCompleted)
+	seedCombo("m-c", "", model.ReviewRunRunning) // 还在跑：代码状态保持 pending
+	e.svc.db.Create(&model.ReviewPullRequest{
+		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 80, UserID: e.user.ID,
+		InstallationID: 1, HeadSHA: "sha-b", RoundNumber: 1,
+		CodeStatus: "pending", SyncPending: true, SyncEpoch: 1, UpdatedAt: now,
+	})
+	review := NewReviewService(e.svc.db, e.svc.projectRepo,
+		repository.NewGitHubWebhookDeliveryRepository(e.svc.db),
+		NewNotificationSink(e.svc.db),
+		githubapp.StaticClients{Client: &diffFailClient{GitHubClient: e.fake}},
+		fakeReviewAppSource{ok: true},
+		fakeReviewPublicURL("https://fs.example.com"),
+		nil, e.media, nil, e.svc.cfg, zap.NewNop())
+	review.syncPendingPRs(now)
+
+	var ledger model.ReviewPullRequest
+	e.svc.db.Where("project_id = ? AND repo_full_name = ? AND pr_number = ?",
+		e.project.ID, repo, 80).First(&ledger)
+	if !ledger.SyncPending || ledger.CodeCommentID == 0 {
+		t.Fatalf("首轮应写出评论并保持 pending：pending=%v comment=%d", ledger.SyncPending, ledger.CodeCommentID)
+	}
+	if counts := e.fake.CallCounts(); counts["UpdatePullRequestComment"] != 0 {
+		t.Fatalf("首轮写评论用 create，update 次数 = %d", counts["UpdatePullRequestComment"])
+	}
+
+	// 同一 head 上某个已完成组合的摘要变了：代码状态仍是 pending，正文变了。
+	e.svc.db.Model(first).Updates(map[string]any{
+		"summary":     "s1b",
+		"result_json": `{"summary":"s1b","findings":[{"level":"P1","file":"a","line":2,"body":"s1b"}],"prior":[],"ui_changed":false,"ui_changed_since_last_visual":false}`,
+	})
+	review.syncPendingPRs(now.Add(10 * time.Second))
+
+	counts := e.fake.CallCounts()
+	if counts["UpdatePullRequestComment"] != 1 {
+		t.Fatalf("update 次数 = %d, want 1（正文变了要更新）", counts["UpdatePullRequestComment"])
+	}
+	e.svc.db.Where("project_id = ? AND repo_full_name = ? AND pr_number = ?",
+		e.project.ID, repo, 80).First(&ledger)
+	if !ledger.SyncPending {
+		t.Fatal("diff 仍不可读，应保持 pending")
 	}
 }

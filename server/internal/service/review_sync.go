@@ -326,10 +326,7 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 
 	// 1. 代码 commit status（状态变化才写）。
 	codeState, codeDesc := summarizeCodeRuns(codeRuns)
-	// codeStatusChanged 是「本轮运行集结论变了」的代理信号：diff 读不到的重试
-	// 分支用它决定要不要重写顶层评论（见 step 3）。
-	codeStatusChanged := codeState != ledger.CodeStatus
-	if codeStatusChanged {
+	if codeState != ledger.CodeStatus {
 		if err := client.CreateCommitStatus(ctx, ledger.InstallationID, ledger.RepoFullName,
 			ledger.HeadSHA, codeState, reviewCodeStatusContext, statusDesc(codeDesc), targetURL); err != nil {
 			return errs.New(errs.ErrGitHubAPI.Code, "写代码审查状态失败: "+err.Error())
@@ -522,11 +519,13 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 		HeadSHA:      ledger.HeadSHA,
 		RoundNumber:  ledger.RoundNumber,
 	}, codeRuns, inlineLines, visualPending, visualCarry)
-	// diff 读不到时，同一个 head 的运行结论不变，重试每 tick 都 PATCH 一次相同
-	// 正文既耗 API 配额又留编辑记录：已有顶层评论且运行集结论未变时只重试行内
-	// 阶段（首次失败仍写出评论；等 diff 读得到时再补「未行内标注」注记）。
-	if inlineErr != nil && ledger.CodeCommentID != 0 && !codeStatusChanged {
-		s.logger.Info("diff 仍不可读，跳过顶层评论重复写入",
+	// diff 读不到的重试：远端评论正文已经等于本轮正文时不再重写（每 tick 一次
+	// 相同 PATCH 既耗配额又留编辑记录），正文变了照常更新——用代码状态做代理
+	// 信号会漏掉「多个组合里又完成一个、结论/摘要变了但状态没变」的情况，作者
+	// 的进度与发现会停在旧快照。等 diff 读得到时再补「未行内标注」注记。
+	if inlineErr != nil && ledger.CodeCommentID != 0 &&
+		s.prCommentMatches(ctx, client, ledger, reviewCodeCommentMarker, codeBody) {
+		s.logger.Info("diff 仍不可读且顶层评论正文未变，跳过重复写入",
 			zap.String("repo", ledger.RepoFullName), zap.Int("pr", ledger.PRNumber))
 	} else if err := s.upsertPRComment(ctx, client, ledger, reviewCodeCommentMarker, codeBody, "code_comment_id", ledger.CodeCommentID); err != nil {
 		return err
@@ -598,6 +597,24 @@ func (s *ReviewService) updateLedgerEpoch(ledger *model.ReviewPullRequest, epoch
 		return false, res.Error
 	}
 	return res.RowsAffected > 0, nil
+}
+
+// prCommentMatches 远端顶层评论正文是否已经是 body（按 marker 定位）。只给
+// 「diff 读不到时避免重复 PATCH」用：读评论失败或找不到都按「需要更新」处理
+// （写失败会留在下一轮重试，不会把正文写错）。
+func (s *ReviewService) prCommentMatches(ctx context.Context, client githubapi.GitHubClient,
+	ledger *model.ReviewPullRequest, marker, body string) bool {
+	comments, err := client.ListIssueCommentsForPR(ctx, ledger.InstallationID, ledger.RepoFullName, ledger.PRNumber)
+	if err != nil {
+		return false
+	}
+	want := strings.TrimSpace(body)
+	for _, c := range comments {
+		if strings.Contains(c.Body, marker) {
+			return strings.TrimSpace(c.Body) == want
+		}
+	}
+	return false
 }
 
 // upsertPRComment 优先按已存 comment id 直接更新（savedID）；更新撞 404
