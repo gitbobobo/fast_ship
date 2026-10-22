@@ -725,8 +725,10 @@ func TestBotInt123PlatformPromptMentionsState(t *testing.T) {
 			t.Fatalf("平台提示词应说明任务小状态（缺 %q）", kw)
 		}
 	}
-	if botToolsetVersion != 7 {
-		t.Fatalf("工具集版本应升到 7: %d", botToolsetVersion)
+	// INT-123 的交付是「工具集升到 v7」：当前版本只会继续演进（INT-138 已到
+	// v8），这里断言水位不低于 7，避免正常升版反复改动本测试。
+	if botToolsetVersion < 7 {
+		t.Fatalf("工具集版本应不低于 7: %d", botToolsetVersion)
 	}
 }
 

@@ -101,6 +101,7 @@ func (s *BotService) RecoverOnStartup() error {
 			}
 			_, schedSummary = s.botSilentSummaryOf(run.BotID, run.ID)
 		}
+		appendedSchedEvent := false
 		// 终态转移与 error/done 事件同一事务：一直挂在页面上的客户端重启
 		// 后按 SSE 游标回放也能把原 run 折到 failed，不必等快照重读。
 		txErr := s.db.Transaction(func(tx *gorm.DB) error {
@@ -133,9 +134,13 @@ func (s *BotService) RecoverOnStartup() error {
 			if schedTask == nil {
 				return nil
 			}
-			return s.appendScheduleEventTx(tx, run.BotID, schedTask, &run,
+			if err := s.appendScheduleEventTx(tx, run.BotID, schedTask, &run,
 				model.BotRunStatusFailed, schedSummary, "server_restarted",
-				"服务在定时任务运行执行中重启，未完成步骤不再继续", now)
+				"服务在定时任务运行执行中重启，未完成步骤不再继续", now); err != nil {
+				return err
+			}
+			appendedSchedEvent = true
+			return nil
 		})
 		if txErr != nil {
 			s.logger.Warn("恢复 run 失败", zap.String("run_id", run.ID), zap.Error(txErr))
@@ -143,6 +148,11 @@ func (s *BotService) RecoverOnStartup() error {
 		}
 		affectedBots[run.BotID] = true
 		s.publishEvent(run.BotID)
+		// 定时任务失败事件进了主线就立即唤醒（INT-138）；后面的恢复通知
+		// 唤醒仍是兜底。
+		if appendedSchedEvent {
+			s.wakeScheduleEvent(run.BotID, run.ID, model.BotRunStatusFailed)
+		}
 	}
 
 	for i := range calls {

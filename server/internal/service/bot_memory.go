@@ -9,6 +9,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	"github.com/godbobo/fast_ship/server/internal/repository"
 	"gorm.io/gorm"
@@ -81,9 +82,16 @@ func (s *BotService) botMemoryPathLimit(path string) int64 {
 	return 0
 }
 
-// botDailyPathFor 返回某时刻在配置时区下的 daily 文件路径。
-func (s *BotService) botDailyPathFor(t time.Time) string {
-	local := t.In(s.cfg.Bots.Memory.Location())
+// botDailyPathForBot 返回某时刻的 daily 文件路径：日期按机器人归属用户的
+// 有效时区计算（INT-138；用户未声明时区时经 botOwnerTimezoneOf 回退部署
+// 配置，与旧口径一致）。只对之后的写入生效，不回填/重命名已有 daily 文件。
+func (s *BotService) botDailyPathForBot(bot *model.Bot, t time.Time) string {
+	_, loc := s.botOwnerTimezoneOf(bot)
+	return botDailyPathAt(t, loc)
+}
+
+func botDailyPathAt(t time.Time, loc *time.Location) string {
+	local := t.In(loc)
 	return fmt.Sprintf("daily/%04d-%02d-%02d.md", local.Year(), int(local.Month()), local.Day())
 }
 

@@ -90,20 +90,23 @@ func (s *BotService) newScheduleSession(bot *model.Bot, run *model.BotRun) (*bot
 
 // botScheduleRuntimeContext 是 schedule 会话末尾的运行时上下文：任务指令、
 // 静默约定与放行说明只出现在这里。last_run_* 是上一次已结束运行（INT-123），
-// 没有上一次运行时整体省略。
+// 没有上一次运行时整体省略。UserTimezone/CurrentTimeLocal 是机器人归属用户
+// 的当地视角（INT-138）。
 type botScheduleRuntimeContext struct {
-	Note           string `json:"note"`
-	CurrentTimeUTC string `json:"current_time_utc"`
-	RunID          string `json:"run_id"`
-	TaskID         string `json:"task_id"`
-	TaskName       string `json:"task_name"`
-	Instruction    string `json:"instruction"`
-	Cron           string `json:"cron,omitempty"`
-	Timezone       string `json:"timezone,omitempty"`
-	ScheduledFor   string `json:"scheduled_for,omitempty"`
-	LastRunAt      string `json:"last_run_at,omitempty"`
-	LastRunStatus  string `json:"last_run_status,omitempty"`
-	LastRunSummary string `json:"last_run_summary,omitempty"`
+	Note             string `json:"note"`
+	CurrentTimeUTC   string `json:"current_time_utc"`
+	UserTimezone     string `json:"user_timezone"`
+	CurrentTimeLocal string `json:"current_time_local"`
+	RunID            string `json:"run_id"`
+	TaskID           string `json:"task_id"`
+	TaskName         string `json:"task_name"`
+	Instruction      string `json:"instruction"`
+	Cron             string `json:"cron,omitempty"`
+	Timezone         string `json:"timezone,omitempty"`
+	ScheduledFor     string `json:"scheduled_for,omitempty"`
+	LastRunAt        string `json:"last_run_at,omitempty"`
+	LastRunStatus    string `json:"last_run_status,omitempty"`
+	LastRunSummary   string `json:"last_run_summary,omitempty"`
 }
 
 // buildScheduleRunContext 把 schedule run 投影为协议请求：同一份系统提示与
@@ -138,15 +141,18 @@ func (s *BotService) buildScheduleRunContext(bot *model.Bot, run *model.BotRun, 
 		note += "本任务有一块跨运行保留的小状态，用 fs_schedule 的 state_get/state_set 读写，" +
 			"适合存「上次已报的 ID」这类去重集合。"
 	}
+	schedTz, schedTzLoc := s.botOwnerTimezoneOf(bot)
 	rt := botScheduleRuntimeContext{
-		Note:           note,
-		CurrentTimeUTC: time.Now().UTC().Format(time.RFC3339),
-		RunID:          run.ID,
-		TaskID:         sess.task.ID,
-		TaskName:       sess.task.Name,
-		Instruction:    sess.task.Instruction,
-		Cron:           sess.task.CronExpression,
-		Timezone:       sess.task.Timezone,
+		Note:             note,
+		CurrentTimeUTC:   time.Now().UTC().Format(time.RFC3339),
+		UserTimezone:     schedTz,
+		CurrentTimeLocal: botLocalStamp(time.Now(), schedTzLoc),
+		RunID:            run.ID,
+		TaskID:           sess.task.ID,
+		TaskName:         sess.task.Name,
+		Instruction:      sess.task.Instruction,
+		Cron:             sess.task.CronExpression,
+		Timezone:         sess.task.Timezone,
 	}
 	if run.ScheduledFor != nil {
 		rt.ScheduledFor = run.ScheduledFor.UTC().Format(time.RFC3339)
@@ -338,11 +344,19 @@ func botValidateScheduleTaskFields(name, cronExpr, timezone, instruction string)
 	return err
 }
 
-// createScheduleTask 校验并创建任务；next_run_at 取 now 之后的下一次。
+// createScheduleTask 校验并创建任务；next_run_at 取 now 之后的下一次。省略
+// 时区时（INT-138）默认机器人归属用户的有效时区——「每天早上 9 点」按用户
+// 所在地执行，而不是 UTC。update 路径不受影响：不传时区仍是「保持原值」。
 func (s *BotService) createScheduleTask(botID, name, cronExpr, timezone, instruction, mdl string, needsReport bool) (*model.BotScheduleTask, error) {
 	name = strings.TrimSpace(name)
 	instruction = strings.TrimSpace(instruction)
 	timezone = strings.TrimSpace(timezone)
+	if timezone == "" {
+		if botRow, err := s.bots.Get(botID); err == nil {
+			tzName, _ := s.botOwnerTimezoneOf(botRow)
+			timezone = tzName
+		}
+	}
 	if err := botValidateScheduleTaskFields(name, cronExpr, timezone, instruction); err != nil {
 		return nil, err
 	}

@@ -140,6 +140,7 @@ func (s *BotService) dispatchDueScheduleTask(task *model.BotScheduleTask, now ti
 	planned := *task.NextRunAt
 	wakeRunID := ""
 	appendedEvent := false
+	eventRunID := ""
 	txErr := s.db.Transaction(func(tx *gorm.DB) error {
 		var current model.BotScheduleTask
 		if err := tx.Where("id = ? AND enabled = ?", task.ID, true).First(&current).Error; err != nil {
@@ -250,6 +251,7 @@ func (s *BotService) dispatchDueScheduleTask(task *model.BotScheduleTask, now ti
 				return err
 			}
 			appendedEvent = appended
+			eventRunID = run.ID
 		} else if current.NeedsReport {
 			// 需要汇报的任务：跳过也是一次「没跑」，不能零信号。一条停机只记
 			// 一条，不会刷屏。
@@ -258,6 +260,7 @@ func (s *BotService) dispatchDueScheduleTask(task *model.BotScheduleTask, now ti
 				return err
 			}
 			appendedEvent = true
+			eventRunID = run.ID
 		}
 
 		// CAS 推进 next_run_at 到严格晚于 now 的下一次；0 行 = 被并发抢走。
@@ -282,6 +285,7 @@ func (s *BotService) dispatchDueScheduleTask(task *model.BotScheduleTask, now ti
 		// 跳过事件已落账本，但本路径没有别的发布点：不 publish 的话订阅方要等
 		// 下一次别的事件才看得到这一行。
 		s.publishEvent(task.BotID)
+		s.wakeScheduleEvent(task.BotID, eventRunID, model.BotRunStatusSkipped)
 	}
 }
 
@@ -289,6 +293,16 @@ func (s *BotService) dispatchDueScheduleTask(task *model.BotScheduleTask, now ti
 // 一次 run。
 func botScheduleTriggerKey(taskID string, planned time.Time) string {
 	return "schedule:" + taskID + ":" + planned.UTC().Format(time.RFC3339Nano)
+}
+
+// wakeScheduleEvent 在定时任务运行事件（schedule_event）提交进主线后立即
+// 唤醒主线（INT-138），5s 扫描仍作兜底。Key 用 runID+status 幂等：同一运行
+// 同一终态的重复唤醒撞上 (bot_id, trigger_key) 唯一约束，不会重复建 run。
+func (s *BotService) wakeScheduleEvent(botID, runID string, status model.BotRunStatus) {
+	s.wakeRuntime(botID, botWake{
+		Trigger: model.BotTriggerScheduleEvent,
+		Key:     "schedule_event:" + runID + ":" + string(status),
+	})
 }
 
 // ---------- provider 熔断（INT-137） ----------
@@ -492,6 +506,7 @@ func (s *BotService) runScheduleSlot(botID, runID string) {
 func (s *BotService) tryFinishScheduleRun(bot *model.Bot, run *model.BotRun) bool {
 	silent, summary := s.botSilentSummaryOf(bot.ID, run.ID)
 	finished := false
+	appendedEvent := false
 	txErr := s.db.Transaction(func(tx *gorm.DB) error {
 		// 本次运行自己的异步写还没结算（queued/running）时不收尾：晚到的结果
 		// 可能就是失败，是运行结果的一部分。等结算后循环会重建上下文。
@@ -538,8 +553,11 @@ func (s *BotService) tryFinishScheduleRun(bot *model.Bot, run *model.BotRun) boo
 				return err
 			}
 			if needsReport {
-				return s.appendScheduleEventTx(tx, bot.ID, &task, run,
-					model.BotRunStatusCompleted, summary, "", "", now)
+				if err := s.appendScheduleEventTx(tx, bot.ID, &task, run,
+					model.BotRunStatusCompleted, summary, "", "", now); err != nil {
+					return err
+				}
+				appendedEvent = true
 			}
 		}
 		return nil
@@ -550,6 +568,9 @@ func (s *BotService) tryFinishScheduleRun(bot *model.Bot, run *model.BotRun) boo
 	}
 	if finished {
 		s.publishEvent(bot.ID)
+		if appendedEvent {
+			s.wakeScheduleEvent(bot.ID, run.ID, model.BotRunStatusCompleted)
+		}
 	}
 	return finished
 }
@@ -560,6 +581,7 @@ func (s *BotService) finishScheduleFailed(bot *model.Bot, run *model.BotRun, cod
 	msg := botErrMessage(cause)
 	_, summary := s.botSilentSummaryOf(bot.ID, run.ID)
 	ok := false
+	appendedEvent := false
 	txErr := s.db.Transaction(func(tx *gorm.DB) error {
 		var err error
 		ok, err = repository.NewBotRunRepository(tx).UpdateColumnsWhereTx(tx, run.ID,
@@ -604,8 +626,12 @@ func (s *BotService) finishScheduleFailed(bot *model.Bot, run *model.BotRun, cod
 				Name: botScheduleTaskNameFromContext(run),
 			}
 		}
-		return s.appendScheduleEventTx(tx, bot.ID, &task, run,
-			model.BotRunStatusFailed, summary, code, msg, now)
+		if err := s.appendScheduleEventTx(tx, bot.ID, &task, run,
+			model.BotRunStatusFailed, summary, code, msg, now); err != nil {
+			return err
+		}
+		appendedEvent = true
+		return nil
 	})
 	if txErr != nil {
 		s.logger.Warn("落定时任务失败终态", zap.String("run_id", run.ID), zap.Error(txErr))
@@ -614,6 +640,9 @@ func (s *BotService) finishScheduleFailed(bot *model.Bot, run *model.BotRun, cod
 	if ok {
 		s.openProviderCircuitOnFailure(bot, run, code)
 		s.publishEvent(bot.ID)
+		if appendedEvent {
+			s.wakeScheduleEvent(bot.ID, run.ID, model.BotRunStatusFailed)
+		}
 		return
 	}
 	// CAS 失败：可能已被受理的停止抢占（错误检出后停止落库）。落 stopped，
