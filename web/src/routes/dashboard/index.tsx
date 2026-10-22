@@ -4,9 +4,10 @@ import {
   Bug,
   CalendarDays,
   FolderKanban,
-  TrendingDown,
-  TrendingUp,
+  Plus,
+  TriangleAlert,
 } from "lucide-react";
+import { Link } from "react-router";
 import { Header } from "@/components/layout/header";
 import {
   MetricChart,
@@ -14,6 +15,7 @@ import {
   type MetricChartSeriesPoint,
 } from "@/components/dashboard/metric-chart";
 import { Card, CardContent } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useDashboardOverview } from "@/lib/hooks/use-dashboard";
 import { cn } from "@/lib/utils";
@@ -21,6 +23,13 @@ import { cn } from "@/lib/utils";
 function formatDateLabel(date: string) {
   return date.slice(5);
 }
+
+/** 日均数量小于 0.1 时保留「有数据」的语义，不要四舍五入成 0.0。 */
+function formatDailyAverage(value: number) {
+  if (value > 0 && value < 0.1) return "<0.1";
+  return value.toFixed(1);
+}
+
 
 function formatDate() {
   const now = new Date();
@@ -43,23 +52,24 @@ function getGreeting() {
 }
 
 export default function DashboardPage() {
-  const { data, isLoading } = useDashboardOverview();
+  const { data, isLoading, isError, refetch } = useDashboardOverview();
+  // 失败但已有缓存时（refetch 失败，isLoading=false、data 仍是旧值）也不能把旧数字
+  // 当成当前状态：所有数字与趋势展示统一走这一个条件。
+  const unavailable = isLoading || isError;
 
   const openIssuePoints = useMemo<MetricChartPoint[]>(() => {
-    const points =
+    return (
       data?.open_issues_by_project.map((item) => ({
         id: item.project_id,
         label: item.project_name,
         shortLabel: item.project_name,
         value: item.open_issue_count,
-      })) ?? [];
-    return points.length > 0
-      ? points
-      : [{ label: "暂无项目", shortLabel: "暂无项目", value: 0 }];
+      })) ?? []
+    );
   }, [data]);
 
   const dailyResolvedPoints = useMemo<MetricChartSeriesPoint[]>(() => {
-    const points =
+    return (
       data?.daily_resolved.map((item) => ({
         label: item.date,
         shortLabel: formatDateLabel(item.date),
@@ -70,15 +80,8 @@ export default function DashboardPage() {
             name: p.project_name,
             value: p.count,
           })) ?? [],
-      })) ?? [];
-    return points.length > 0
-      ? points
-      : Array.from({ length: 30 }, (_, index) => ({
-          label: `day-${index}`,
-          shortLabel: `${index + 1}`,
-          value: 0,
-          series: [],
-        }));
+      })) ?? []
+    );
   }, [data]);
 
   const configuredProjectCount = data?.open_issues_by_project.length ?? 0;
@@ -103,9 +106,6 @@ export default function DashboardPage() {
     return totalResolvedIssues / data.daily_resolved.length;
   }, [data, totalResolvedIssues]);
 
-  const openIssuesEmptyMessage =
-    configuredProjectCount === 0 ? "暂无已配置项目" : "当前没有剩余开启问题";
-
   return (
     <div className="flex min-h-full flex-col bg-background">
       <Header title="仪表盘" />
@@ -121,28 +121,62 @@ export default function DashboardPage() {
           </h2>
         </section>
 
+        {/* 概览请求失败时不要把「没有数据」当成「没有项目」 */}
+        {isError && (
+          <div
+            role="alert"
+            className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-destructive/40 bg-destructive/[0.06] px-4 py-3"
+          >
+            <div className="flex items-center gap-2 text-sm text-destructive">
+              <TriangleAlert className="h-4 w-4 shrink-0" />
+              仪表盘数据加载失败，下面的统计不代表当前状态。
+            </div>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => {
+                void refetch();
+              }}
+            >
+              重试
+            </Button>
+          </div>
+        )}
+
         {/* KPI Cards */}
         <section className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           <KpiCard
             icon={FolderKanban}
             label="已配置项目"
-            value={configuredProjectCount}
+            value={unavailable ? null : configuredProjectCount}
             isLoading={isLoading}
             tone="neutral"
           />
           <KpiCard
             icon={Bug}
             label="剩余开启问题"
-            value={totalOpenIssues}
+            value={unavailable ? null : totalOpenIssues}
             isLoading={isLoading}
-            tone={totalOpenIssues > 0 ? "warning" : "neutral"}
+            tone={
+              unavailable
+                ? "neutral"
+                : totalOpenIssues > 0
+                  ? "warning"
+                  : "neutral"
+            }
           />
           <KpiCard
             icon={CalendarDays}
             label="近 30 天已解决"
-            value={totalResolvedIssues}
+            value={unavailable ? null : totalResolvedIssues}
             isLoading={isLoading}
-            tone={totalResolvedIssues > 0 ? "positive" : "neutral"}
+            tone={
+              unavailable
+                ? "neutral"
+                : totalResolvedIssues > 0
+                  ? "positive"
+                  : "neutral"
+            }
           />
         </section>
 
@@ -157,7 +191,7 @@ export default function DashboardPage() {
                     按项目分布的未解决问题数量
                   </p>
                 </div>
-                {!isLoading && totalOpenIssues > 0 && (
+                {!unavailable && totalOpenIssues > 0 && (
                   <span className="rounded-full bg-primary/10 px-2.5 py-0.5 text-xs font-medium text-primary">
                     总计 {totalOpenIssues}
                   </span>
@@ -165,11 +199,23 @@ export default function DashboardPage() {
               </div>
               {isLoading ? (
                 <ChartSkeleton />
+              ) : isError ? (
+                <ChartFailure />
               ) : (
                 <MetricChart
                   points={openIssuePoints}
                   variant="bar"
-                  emptyMessage={openIssuesEmptyMessage}
+                  emptyMessage="暂无已配置项目"
+                  emptyAction={
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      render={<Link to="/projects" />}
+                    >
+                      <Plus />
+                      去创建项目
+                    </Button>
+                  }
                 />
               )}
             </CardContent>
@@ -184,21 +230,16 @@ export default function DashboardPage() {
                     各项目每日已解决问题数量趋势
                   </p>
                 </div>
-                {!isLoading && (
-                  <div className="flex items-center gap-1.5">
-                    {avgDailyResolved >= (maxDailyResolved || 1) * 0.5 ? (
-                      <TrendingUp className="h-3.5 w-3.5 text-emerald-500" />
-                    ) : (
-                      <TrendingDown className="h-3.5 w-3.5 text-amber-500" />
-                    )}
-                    <span className="text-xs font-medium text-muted-foreground">
-                      日均 {avgDailyResolved.toFixed(1)}
-                    </span>
-                  </div>
+                {!unavailable && totalResolvedIssues > 0 && (
+                  <span className="text-xs font-medium text-muted-foreground">
+                    日均 {formatDailyAverage(avgDailyResolved)}
+                  </span>
                 )}
               </div>
               {isLoading ? (
                 <ChartSkeleton />
+              ) : isError ? (
+                <ChartFailure />
               ) : (
                 <MetricChart
                   points={dailyResolvedPoints}
@@ -214,19 +255,25 @@ export default function DashboardPage() {
         <section className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           <StatPill
             label="最高日解决"
-            value={isLoading ? "—" : String(maxDailyResolved)}
+            value={unavailable ? "—" : String(maxDailyResolved)}
           />
           <StatPill
             label="日均解决"
-            value={isLoading ? "—" : avgDailyResolved.toFixed(1)}
+            value={
+              unavailable ? "—" : formatDailyAverage(avgDailyResolved)
+            }
           />
           <StatPill
             label="活跃项目"
-            value={isLoading ? "—" : String(configuredProjectCount)}
+            value={unavailable ? "—" : String(configuredProjectCount)}
           />
           <StatPill
             label="问题总量"
-            value={isLoading ? "—" : String(totalOpenIssues + totalResolvedIssues)}
+            value={
+              unavailable
+                ? "—"
+                : String(totalOpenIssues + totalResolvedIssues)
+            }
           />
         </section>
       </div>
@@ -245,7 +292,7 @@ function KpiCard({
 }: {
   icon: typeof Activity;
   label: string;
-  value: number;
+  value: number | null;
   isLoading: boolean;
   tone?: "neutral" | "warning" | "positive";
 }) {
@@ -261,7 +308,7 @@ function KpiCard({
   return (
     <div
       className={cn(
-        "group relative flex flex-col gap-3 rounded-2xl p-5 ring-1 transition-all duration-300",
+        "flex flex-col gap-3 rounded-2xl p-5 ring-1 transition-all duration-300",
         toneClasses[tone],
       )}
     >
@@ -272,11 +319,17 @@ function KpiCard({
       {isLoading ? (
         <Skeleton className="h-10 w-24" />
       ) : (
-        <div className="text-4xl font-bold tracking-tighter tabular-nums">
-          {value}
+        <div
+          className={cn(
+            "tracking-tighter tabular-nums",
+            value === null
+              ? "text-3xl font-normal text-muted-foreground"
+              : "text-4xl font-bold",
+          )}
+        >
+          {value ?? "—"}
         </div>
       )}
-      <span className="absolute right-4 top-4 h-1.5 w-1.5 rounded-full bg-current opacity-20" />
     </div>
   );
 }
@@ -296,6 +349,14 @@ function ChartSkeleton() {
       <Skeleton className="h-4 w-40" />
       <Skeleton className="h-[200px] w-full" />
       <Skeleton className="h-8 w-full" />
+    </div>
+  );
+}
+
+function ChartFailure() {
+  return (
+    <div className="flex h-[240px] items-center justify-center px-4 text-center text-xs text-muted-foreground">
+      数据加载失败，请在上方重试。
     </div>
   );
 }

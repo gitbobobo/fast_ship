@@ -30,6 +30,68 @@ describe("DashboardPage", () => {
     vi.clearAllMocks();
   });
 
+  function dailyResolvedWith(resolvedByIndex: Record<number, number>) {
+    return Array.from({ length: 30 }, (_, index) => ({
+      date: `2026-05-${String(index + 1).padStart(2, "0")}`,
+      resolved_count: resolvedByIndex[index] ?? 0,
+      projects: resolvedByIndex[index]
+        ? [
+            {
+              project_id: "p1",
+              project_name: "Alpha App",
+              count: resolvedByIndex[index],
+            },
+          ]
+        : [],
+    }));
+  }
+
+  it("shows the daily average with a <0.1 floor and no trend arrow", async () => {
+    vi.mocked(useDashboardOverview).mockReturnValue({
+      data: {
+        open_issues_by_project: [
+          { project_id: "p1", project_name: "Alpha App", open_issue_count: 0 },
+        ],
+        // 最近 7 天解决 1 条。
+        daily_resolved: dailyResolvedWith({ 29: 1 }),
+      },
+      isLoading: false,
+    } as unknown as ReturnType<typeof useDashboardOverview>);
+
+    await renderDashboardPage();
+
+    expect(screen.getByText("日均 <0.1")).toBeInTheDocument();
+    // 方向图标已移出本需求：不再对两周合计做涨跌判断。
+    expect(screen.queryByRole("img", { name: /最近 7 天/ })).toBeNull();
+  });
+
+  it("hides stale header numbers when cached data is followed by a failed refetch", async () => {
+    vi.mocked(useDashboardOverview).mockReturnValue({
+      data: {
+        open_issues_by_project: [
+          { project_id: "p1", project_name: "Alpha App", open_issue_count: 3 },
+        ],
+        daily_resolved: dailyResolvedWith({ 29: 2 }),
+      },
+      isLoading: false,
+      isError: true,
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useDashboardOverview>);
+
+    await renderDashboardPage();
+
+    expect(screen.getByRole("alert")).toHaveTextContent("仪表盘数据加载失败");
+    // 缓存里的旧数字不能被当成当前状态展示。
+    expect(screen.queryByText(/总计/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/^日均 /)).not.toBeInTheDocument();
+    expect(screen.queryByText("Alpha App")).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "去创建项目" })).not.toBeInTheDocument();
+    expect(
+      screen.getAllByText("数据加载失败，请在上方重试。"),
+    ).toHaveLength(2);
+  });
+
+
   it("renders open-issue and 30-day resolved chart sections", async () => {
     vi.mocked(useDashboardOverview).mockReturnValue({
       data: {
@@ -93,6 +155,46 @@ describe("DashboardPage", () => {
         .length,
     ).toBeGreaterThan(0);
     expect(screen.getAllByText("0").length).toBeGreaterThanOrEqual(2);
-    expect(screen.getAllByText(/暂无|empty|no data/i).length).toBeGreaterThanOrEqual(2);
+    // 每个图表只保留一个空状态，且带一个真实的配置入口。
+    expect(screen.getAllByText("暂无已配置项目")).toHaveLength(1);
+    expect(screen.getAllByText("暂无已解决问题数据")).toHaveLength(1);
+    expect(screen.queryByText("暂无项目")).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "去创建项目" })).toHaveAttribute(
+      "href",
+      "/projects",
+    );
+    // 空数据时不画趋势图（也就不存在重复刻度与下降趋势图标）。
+    expect(
+      screen.queryByRole("img", { name: "stacked area chart" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/日均 0\.0/)).not.toBeInTheDocument();
+  });
+
+  it("shows a retryable error state instead of an empty account when the overview fails", async () => {
+    const refetch = vi.fn();
+    vi.mocked(useDashboardOverview).mockReturnValue({
+      data: undefined,
+      isLoading: false,
+      isError: true,
+      refetch,
+    } as unknown as ReturnType<typeof useDashboardOverview>);
+
+    await renderDashboardPage();
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "仪表盘数据加载失败",
+    );
+    const retry = screen.getByRole("button", { name: "重试" });
+    retry.click();
+    expect(refetch).toHaveBeenCalledTimes(1);
+    // 请求失败不等于「没有项目」：不要给创建入口，也不要显示空状态文案。
+    expect(
+      screen.queryByRole("link", { name: "去创建项目" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("暂无已配置项目")).not.toBeInTheDocument();
+    expect(screen.queryByText("暂无已解决问题数据")).not.toBeInTheDocument();
+    expect(
+      screen.getAllByText("数据加载失败，请在上方重试。"),
+    ).toHaveLength(2);
   });
 });
