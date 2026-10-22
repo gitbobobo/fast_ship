@@ -10,6 +10,7 @@ import {
   browserTimezone,
   formatTimeInZone,
   TIMEZONE_GROUP_COMMON,
+  TIMEZONE_GROUP_DIVIDER,
   TIMEZONE_GROUP_SEPARATOR,
   timezoneOptions,
 } from "@/lib/utils/timezone";
@@ -48,10 +49,9 @@ export default function GeneralPage() {
       value: label,
       label,
       disabled: true,
+      // 与选项正文字重拉开、但比辅助文案更实，长列表里能一眼看到分组边界。
       itemLabel: (
-        <span className="text-xs font-medium text-muted-foreground">
-          {label}
-        </span>
+        <span className="text-xs font-semibold text-foreground/70">{label}</span>
       ),
     });
     const grouped = timezoneOptions(currentTimezone).map((option) => {
@@ -65,6 +65,13 @@ export default function GeneralPage() {
     });
     return [
       { value: DEFAULT_TIMEZONE, label: "默认（跟随部署配置）" },
+      // 分隔线：默认项会清空设置、性质与具体时区不同，单独成一组。
+      {
+        value: TIMEZONE_GROUP_DIVIDER,
+        label: "—",
+        disabled: true,
+        itemLabel: <span className="block h-px w-full bg-border" />,
+      },
       ...grouped,
     ];
   }, [currentTimezone]);
@@ -123,47 +130,48 @@ export default function GeneralPage() {
         </div>
 
         <div className="rounded-lg border p-4">
-          {/* 图标在一列、文字内容在同一列：标题/说明/信息行共用同一个左边缘，
-              与「主题」卡片的视觉节奏一致。 */}
+          {/* 图标一列；右侧再分「文字列 + 下拉」：标题、说明、信息行都在同一个
+              文字列里，右边界受同一约束，不会伸到下拉框下方。 */}
           <div className="flex items-start gap-3">
             <Globe className="mt-0.5 h-5 w-5 shrink-0 text-muted-foreground" />
-            <div className="min-w-0 flex-1 space-y-3">
-              <div className="flex items-center justify-between gap-4">
+            <div className="flex w-full items-start justify-between gap-4">
+              <div className="min-w-0 flex-1 space-y-3">
                 <div>
                   <p className="font-medium">时区</p>
                   <p className="text-sm text-muted-foreground">
                     机器人理解「每天 9 点」这类时间、新建定时任务和夜间整理都按此时区计算
                   </p>
                 </div>
-                <OptionSelect
-                  value={currentTimezone || DEFAULT_TIMEZONE}
-                  onValueChange={handleTimezoneChange}
-                  options={timezoneSelectOptions}
-                  placeholder="选择时区"
-                  aria-label="时区"
-                  disabled={savingTimezone}
-                  className="w-64 shrink-0"
-                />
+
+                <div className="space-y-1 text-sm">
+                  {/* 显式选了时区时，下拉就是事实来源，这里只补一个该时区的当前
+                      时间；跟随部署配置时前端拿不到部署配置的时区，就只说明生效
+                      规则（未配置时 UTC 是后端回退链的终点），不摆一个会被误读成
+                      「机器人用的时间」的本机时钟。 */}
+                  {currentTimezone ? (
+                    <p className="text-muted-foreground">
+                      该时区当前时间：
+                      <span className="text-foreground">
+                        {formatTimeInZone(now, displayTimezone)}
+                      </span>
+                    </p>
+                  ) : (
+                    <p className="text-muted-foreground">
+                      机器人按部署配置的时区计算，部署未配置时区时为 UTC
+                    </p>
+                  )}
+                </div>
               </div>
 
-              <div className="space-y-1 text-sm">
-                {/* 显式选了时区时，下拉就是事实来源，这里只补一个该时区的当前
-                    时间；跟随部署配置时前端拿不到部署配置的时区，就只说明生效
-                    规则（未配置时 UTC 是后端回退链的终点），不摆一个会被误读成
-                    「机器人用的时间」的本机时钟。 */}
-                {currentTimezone ? (
-                  <p className="text-muted-foreground">
-                    该时区当前时间：
-                    <span className="text-foreground">
-                      {formatTimeInZone(now, displayTimezone)}
-                    </span>
-                  </p>
-                ) : (
-                  <p className="text-muted-foreground">
-                    机器人按部署配置的时区计算，部署未配置时区时为 UTC
-                  </p>
-                )}
-              </div>
+              <OptionSelect
+                value={currentTimezone || DEFAULT_TIMEZONE}
+                onValueChange={handleTimezoneChange}
+                options={timezoneSelectOptions}
+                placeholder="选择时区"
+                aria-label="时区"
+                disabled={savingTimezone}
+                className="w-56 shrink-0"
+              />
             </div>
           </div>
         </div>

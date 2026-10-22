@@ -133,6 +133,8 @@ function timezoneLabel(timeZone: string): string {
 /** 分组标题项的 value 前缀；不是合法时区，只用于渲染分组标题。 */
 export const TIMEZONE_GROUP_SEPARATOR = "__all_timezones__";
 export const TIMEZONE_GROUP_COMMON = "__common_timezones__";
+/** 「默认（跟随部署配置）」与「常用时区」之间的分隔线 value。 */
+export const TIMEZONE_GROUP_DIVIDER = "__timezone_divider__";
 
 export function timezoneOptions(
   current: string,
