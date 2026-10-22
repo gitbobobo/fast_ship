@@ -69,9 +69,13 @@ export default function GeneralPage() {
       value: label,
       label,
       disabled: true,
-      // 与选项正文字重拉开、但比辅助文案更实，长列表里能一眼看到分组边界。
+      // 分组标题不可选，但不该因此变淡：SelectItem 的 disabled 会叠 50% 透明度，
+      // 抵消掉再用与卡片次要文字同档的 muted-foreground（≈4.7:1）。
+      className: "opacity-100 data-disabled:opacity-100",
       itemLabel: (
-        <span className="text-xs font-semibold text-foreground/70">{label}</span>
+        <span className="text-xs font-medium text-muted-foreground">
+          {label}
+        </span>
       ),
     });
     const grouped = timezoneOptions(currentTimezone).map((option) => {
@@ -90,6 +94,7 @@ export default function GeneralPage() {
         value: TIMEZONE_GROUP_DIVIDER,
         label: "—",
         disabled: true,
+        className: "opacity-100 data-disabled:opacity-100 py-0",
         itemLabel: <span className="-mx-2 block h-px bg-border" />,
       },
       ...grouped,

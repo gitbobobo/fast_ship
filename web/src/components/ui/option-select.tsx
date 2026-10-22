@@ -14,6 +14,11 @@ export interface OptionSelectOption {
   disabled?: boolean;
   /** 下拉项内容与 label 不同时（如带图标、附加说明）单独提供。 */
   itemLabel?: ReactNode;
+  /**
+   * 下拉项自身的 class。分组标题这类「不可选但需要正常对比度」的项用它抵消
+   * SelectItem 的 data-disabled:opacity-50。
+   */
+  className?: string;
 }
 
 /**
@@ -79,6 +84,7 @@ export function OptionSelect({
             key={option.value}
             value={option.value}
             disabled={option.disabled}
+            className={option.className}
           >
             {option.itemLabel ?? option.label}
           </SelectItem>
