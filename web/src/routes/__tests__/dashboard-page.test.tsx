@@ -180,4 +180,32 @@ describe("DashboardPage", () => {
     ).not.toBeInTheDocument();
     expect(screen.queryByText(/日均 0\.0/)).not.toBeInTheDocument();
   });
+
+  it("shows a retryable error state instead of an empty account when the overview fails", async () => {
+    const refetch = vi.fn();
+    vi.mocked(useDashboardOverview).mockReturnValue({
+      data: undefined,
+      isLoading: false,
+      isError: true,
+      refetch,
+    } as unknown as ReturnType<typeof useDashboardOverview>);
+
+    await renderDashboardPage();
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "仪表盘数据加载失败",
+    );
+    const retry = screen.getByRole("button", { name: "重试" });
+    retry.click();
+    expect(refetch).toHaveBeenCalledTimes(1);
+    // 请求失败不等于「没有项目」：不要给创建入口，也不要显示空状态文案。
+    expect(
+      screen.queryByRole("link", { name: "去创建项目" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("暂无已配置项目")).not.toBeInTheDocument();
+    expect(screen.queryByText("暂无已解决问题数据")).not.toBeInTheDocument();
+    expect(
+      screen.getAllByText("数据加载失败，请在上方重试。"),
+    ).toHaveLength(2);
+  });
 });

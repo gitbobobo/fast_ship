@@ -1,4 +1,10 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { cn } from "@/lib/utils";
 
 export interface MetricChartPoint {
@@ -215,7 +221,7 @@ function StackedAreaChart({
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
   const [tooltipPos, setTooltipPos] = useState<{ x: number; y: number; containerWidth: number } | null>(null);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const el = boxRef.current;
     if (!el) return;
     const apply = (width: number) => {
@@ -334,8 +340,19 @@ function StackedAreaChart({
     value: tickStep * index,
   }));
 
-  // X-axis labels
-  const labelStride = Math.max(Math.ceil(Math.max(points.length - 1, 1) / 6), 1);
+  // X-axis labels：均匀取最多 7 个刻度，首尾都在，避免末尾日期与前一个刻度叠印
+  // （按 stride 取点再强塞最后一个点时，27 个数据点会让 25/26 两个 MM-DD 相距约 17px）。
+  const labelIndexes = useMemo(() => {
+    const last = points.length - 1;
+    if (last < 1) return points.length === 1 ? [0] : [];
+    const count = Math.min(7, points.length);
+    const indexes: number[] = [];
+    for (let i = 0; i < count; i += 1) {
+      const index = Math.round((last * i) / (count - 1));
+      if (indexes[indexes.length - 1] !== index) indexes.push(index);
+    }
+    return indexes;
+  }, [points.length]);
 
   const handleMouseMove = (e: React.MouseEvent<SVGSVGElement>) => {
     if (!svgRef.current) return;
@@ -461,8 +478,8 @@ function StackedAreaChart({
         ))}
 
         {/* X-axis labels：画在图内，和数据点共用同一套坐标，刻度与日期一一对应 */}
-        {points.map((point, index) => {
-          if (index % labelStride !== 0 && index !== points.length - 1) return null;
+        {labelIndexes.map((index) => {
+          const point = points[index];
           return (
             <text
               key={getPointKey(point, index)}

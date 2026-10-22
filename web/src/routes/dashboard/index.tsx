@@ -6,6 +6,7 @@ import {
   FolderKanban,
   Minus,
   Plus,
+  TriangleAlert,
   TrendingDown,
   TrendingUp,
 } from "lucide-react";
@@ -55,7 +56,7 @@ function getGreeting() {
 }
 
 export default function DashboardPage() {
-  const { data, isLoading } = useDashboardOverview();
+  const { data, isLoading, isError, refetch } = useDashboardOverview();
 
   const openIssuePoints = useMemo<MetricChartPoint[]>(() => {
     return (
@@ -135,26 +136,48 @@ export default function DashboardPage() {
           </h2>
         </section>
 
+        {/* 概览请求失败时不要把「没有数据」当成「没有项目」 */}
+        {isError && (
+          <div
+            role="alert"
+            className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-destructive/40 bg-destructive/[0.06] px-4 py-3"
+          >
+            <div className="flex items-center gap-2 text-sm text-destructive">
+              <TriangleAlert className="h-4 w-4 shrink-0" />
+              仪表盘数据加载失败，下面的统计不代表当前状态。
+            </div>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => {
+                void refetch();
+              }}
+            >
+              重试
+            </Button>
+          </div>
+        )}
+
         {/* KPI Cards */}
         <section className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           <KpiCard
             icon={FolderKanban}
             label="已配置项目"
-            value={configuredProjectCount}
+            value={isError ? null : configuredProjectCount}
             isLoading={isLoading}
             tone="neutral"
           />
           <KpiCard
             icon={Bug}
             label="剩余开启问题"
-            value={totalOpenIssues}
+            value={isError ? null : totalOpenIssues}
             isLoading={isLoading}
             tone={totalOpenIssues > 0 ? "warning" : "neutral"}
           />
           <KpiCard
             icon={CalendarDays}
             label="近 30 天已解决"
-            value={totalResolvedIssues}
+            value={isError ? null : totalResolvedIssues}
             isLoading={isLoading}
             tone={totalResolvedIssues > 0 ? "positive" : "neutral"}
           />
@@ -179,6 +202,8 @@ export default function DashboardPage() {
               </div>
               {isLoading ? (
                 <ChartSkeleton />
+              ) : isError ? (
+                <ChartFailure />
               ) : (
                 <MetricChart
                   points={openIssuePoints}
@@ -239,6 +264,8 @@ export default function DashboardPage() {
               </div>
               {isLoading ? (
                 <ChartSkeleton />
+              ) : isError ? (
+                <ChartFailure />
               ) : (
                 <MetricChart
                   points={dailyResolvedPoints}
@@ -254,19 +281,25 @@ export default function DashboardPage() {
         <section className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           <StatPill
             label="最高日解决"
-            value={isLoading ? "—" : String(maxDailyResolved)}
+            value={isLoading || isError ? "—" : String(maxDailyResolved)}
           />
           <StatPill
             label="日均解决"
-            value={isLoading ? "—" : formatDailyAverage(avgDailyResolved)}
+            value={
+              isLoading || isError ? "—" : formatDailyAverage(avgDailyResolved)
+            }
           />
           <StatPill
             label="活跃项目"
-            value={isLoading ? "—" : String(configuredProjectCount)}
+            value={isLoading || isError ? "—" : String(configuredProjectCount)}
           />
           <StatPill
             label="问题总量"
-            value={isLoading ? "—" : String(totalOpenIssues + totalResolvedIssues)}
+            value={
+              isLoading || isError
+                ? "—"
+                : String(totalOpenIssues + totalResolvedIssues)
+            }
           />
         </section>
       </div>
@@ -285,7 +318,7 @@ function KpiCard({
 }: {
   icon: typeof Activity;
   label: string;
-  value: number;
+  value: number | null;
   isLoading: boolean;
   tone?: "neutral" | "warning" | "positive";
 }) {
@@ -313,7 +346,7 @@ function KpiCard({
         <Skeleton className="h-10 w-24" />
       ) : (
         <div className="text-4xl font-bold tracking-tighter tabular-nums">
-          {value}
+          {value ?? "—"}
         </div>
       )}
     </div>
@@ -335,6 +368,14 @@ function ChartSkeleton() {
       <Skeleton className="h-4 w-40" />
       <Skeleton className="h-[200px] w-full" />
       <Skeleton className="h-8 w-full" />
+    </div>
+  );
+}
+
+function ChartFailure() {
+  return (
+    <div className="flex h-[240px] items-center justify-center px-4 text-center text-xs text-muted-foreground">
+      数据加载失败，请在上方重试。
     </div>
   );
 }

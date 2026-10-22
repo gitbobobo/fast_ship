@@ -179,4 +179,28 @@ describe("MetricChart", () => {
 
     vi.unstubAllGlobals();
   });
+
+  it("spaces date labels evenly so the last one never overlaps the previous tick", () => {
+    const points = Array.from({ length: 27 }, (_, index) => ({
+      label: `2026-05-${String(index + 1).padStart(2, "0")}`,
+      shortLabel: `D${index}`,
+      value: index === 26 ? 2 : 0,
+      series:
+        index === 26 ? [{ id: "p1", name: "Alpha", value: 2 }] : [],
+    }));
+
+    const { container } = render(
+      <MetricChart
+        points={points}
+        variant="area"
+        emptyMessage="暂无已解决问题数据"
+      />,
+    );
+
+    const labels = Array.from(container.querySelectorAll("svg text"))
+      .map((node) => node.textContent ?? "")
+      .filter((text) => text.startsWith("D"));
+
+    expect(labels).toEqual(["D0", "D4", "D9", "D13", "D17", "D22", "D26"]);
+  });
 });
