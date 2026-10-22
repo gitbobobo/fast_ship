@@ -41,6 +41,52 @@ const FALLBACK_TIMEZONES = [
   "America/Los_Angeles",
 ];
 
+/**
+ * 常用时区：固定排在候选列表最前，省掉在 400 多项里滚动。本机时区与当前值
+ * 另外插到更前面。
+ */
+const COMMON_TIMEZONES = [
+  "UTC",
+  "Asia/Shanghai",
+  "Asia/Tokyo",
+  "Asia/Singapore",
+  "Asia/Seoul",
+  "Europe/London",
+  "Europe/Berlin",
+  "Europe/Paris",
+  "America/New_York",
+  "America/Los_Angeles",
+];
+
+/**
+ * IANA 的历史别名（backward-compat links）：与规范名称解析结果相同，列在下拉
+ * 里只是干扰项。当前值本身若落在这里会被单独插回，不会因此选不中。
+ */
+const LEGACY_TIMEZONE_ALIASES = new Set([
+  "Asia/Saigon",
+  "Asia/Rangoon",
+  "Asia/Calcutta",
+  "Asia/Katmandu",
+  "Asia/Chongqing",
+  "Asia/Harbin",
+  "Asia/Kashgar",
+  "Asia/Macao",
+  "Asia/Tel_Aviv",
+  "Asia/Ulan_Bator",
+  "Europe/Kiev",
+  "America/Godthab",
+  "Pacific/Ponape",
+  "Pacific/Truk",
+  "Pacific/Samoa",
+  "Africa/Asmera",
+  "Atlantic/Faeroe",
+  "Australia/Canberra",
+  "US/Eastern",
+  "US/Central",
+  "US/Mountain",
+  "US/Pacific",
+]);
+
 // 候选列表一次可达数百项，逐个构造 Intl 太贵：按名称缓存偏移标签。
 const offsetLabelCache = new Map<string, string>();
 
@@ -94,11 +140,20 @@ export function timezoneOptions(
     typeof intl.supportedValuesOf === "function"
       ? intl.supportedValuesOf("timeZone")
       : FALLBACK_TIMEZONES;
-  // supportedValuesOf 不含 UTC（它只列地区时区），但它是一个明确可选的时区：
-  // 「跟随部署配置」并不等于 UTC，缺了这项用户就选不到 UTC。固定排在最前，
-  // 与「默认（跟随部署配置）」相邻。
-  const values = ["UTC", ...names.filter((name) => name !== "UTC")];
-  if (current && !values.includes(current)) values.unshift(current);
+  // 顺序：当前值 → 本机时区 → 常用时区 → 其余（保持 IANA 的字母序）。
+  // supportedValuesOf 不含 UTC（它只列地区时区），但「跟随部署配置」不等于
+  // UTC，缺了这项用户就选不到 UTC，所以固定补在最前。
+  const head = [current, browserTimezone(), ...COMMON_TIMEZONES, "UTC"].filter(
+    (name): name is string => Boolean(name),
+  );
+  const values: string[] = [];
+  for (const name of head) {
+    if (!values.includes(name)) values.push(name);
+  }
+  for (const name of names) {
+    if (LEGACY_TIMEZONE_ALIASES.has(name) || values.includes(name)) continue;
+    values.push(name);
+  }
   return values.map((value) => ({ value, label: timezoneLabel(value) }));
 }
 

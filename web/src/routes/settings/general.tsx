@@ -102,45 +102,51 @@ export default function GeneralPage() {
         </div>
 
         <div className="rounded-lg border p-4">
-          <div className="flex items-center justify-between gap-4">
-            <div className="flex items-center gap-3">
-              <Globe className="h-5 w-5 text-muted-foreground" />
-              <div>
-                <p className="font-medium">时区</p>
-                <p className="text-sm text-muted-foreground">
-                  机器人理解「每天 9 点」这类时间、新建定时任务和夜间整理都按此时区计算
+          {/* 图标在一列、文字内容在同一列：标题/说明/信息行共用同一个左边缘，
+              与「主题」卡片的视觉节奏一致。 */}
+          <div className="flex items-start gap-3">
+            <Globe className="mt-0.5 h-5 w-5 shrink-0 text-muted-foreground" />
+            <div className="min-w-0 flex-1 space-y-3">
+              <div className="flex items-center justify-between gap-4">
+                <div>
+                  <p className="font-medium">时区</p>
+                  <p className="text-sm text-muted-foreground">
+                    机器人理解「每天 9 点」这类时间、新建定时任务和夜间整理都按此时区计算
+                  </p>
+                </div>
+                <OptionSelect
+                  value={currentTimezone || DEFAULT_TIMEZONE}
+                  onValueChange={handleTimezoneChange}
+                  options={timezoneSelectOptions}
+                  placeholder="选择时区"
+                  aria-label="时区"
+                  disabled={savingTimezone}
+                  className="w-64 shrink-0"
+                />
+              </div>
+
+              <div className="space-y-1 text-sm">
+                {/* 显式选了时区时，下拉本身就显示了它，再写一行「当前生效时区」
+                    只是重复；只有跟随部署配置时才需要说明生效值的来源。 */}
+                {!currentTimezone && (
+                  <p className="text-muted-foreground">
+                    当前生效时区：
+                    <span className="text-foreground">
+                      由部署配置决定（未在此显示）
+                    </span>
+                  </p>
+                )}
+                <p className="text-muted-foreground">
+                  {currentTimezone ? "该时区当前时间：" : "本机当前时间："}
+                  <span className="text-foreground">
+                    {formatTimeInZone(now, displayTimezone)}
+                  </span>
+                  {!currentTimezone && (
+                    <span className="ml-2 text-xs">（仅用于预览）</span>
+                  )}
                 </p>
               </div>
             </div>
-            <OptionSelect
-              value={currentTimezone || DEFAULT_TIMEZONE}
-              onValueChange={handleTimezoneChange}
-              options={timezoneSelectOptions}
-              placeholder="选择时区"
-              aria-label="时区"
-              disabled={savingTimezone}
-              className="w-64"
-            />
-          </div>
-
-          <div className="mt-3 space-y-1 pl-8 text-sm">
-            {/* 显式选了时区时，下拉本身就显示了它，再写一行「当前生效时区」
-                只是重复；只有跟随部署配置时才需要说明生效值从哪来。 */}
-            {!currentTimezone && (
-              <p className="text-muted-foreground">
-                当前生效时区：
-                <span className="text-foreground">跟随部署配置</span>
-              </p>
-            )}
-            <p className="text-muted-foreground">
-              该时区当前时间：
-              <span className="text-foreground">
-                {formatTimeInZone(now, displayTimezone)}
-              </span>
-              {!currentTimezone && (
-                <span className="ml-2 text-xs">（按本机时区显示）</span>
-              )}
-            </p>
           </div>
         </div>
       </div>

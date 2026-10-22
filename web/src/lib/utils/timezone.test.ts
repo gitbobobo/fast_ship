@@ -102,6 +102,44 @@ describe("timezoneOptions", () => {
     expect(values.filter((v) => v === "UTC")).toHaveLength(1);
   });
 
+  it("剔除历史别名，并让常用时区排在字母序之前", () => {
+    vi.spyOn(Intl, "supportedValuesOf").mockReturnValue([
+      "Africa/Abidjan",
+      "Asia/Calcutta",
+      "Asia/Rangoon",
+      "Asia/Saigon",
+      "Asia/Shanghai",
+      "Asia/Tokyo",
+      "UTC",
+      "Zulu",
+    ]);
+
+    const values = timezoneOptions("").map((o) => o.value);
+
+    for (const legacy of ["Asia/Calcutta", "Asia/Rangoon", "Asia/Saigon"]) {
+      expect(values).not.toContain(legacy);
+    }
+    // 常用时区在字母序之前，字母序部分保持原顺序。
+    expect(values.indexOf("Asia/Tokyo")).toBeLessThan(
+      values.indexOf("Africa/Abidjan"),
+    );
+    expect(values.indexOf("Asia/Shanghai")).toBeLessThan(
+      values.indexOf("Africa/Abidjan"),
+    );
+    expect(values.filter((v) => v === "UTC")).toHaveLength(1);
+  });
+
+  it("当前值是历史别名时仍然可选（插到首位）", () => {
+    vi.spyOn(Intl, "supportedValuesOf").mockReturnValue([
+      "Asia/Shanghai",
+      "Asia/Saigon",
+    ]);
+
+    const values = timezoneOptions("Asia/Saigon").map((o) => o.value);
+
+    expect(values[0]).toBe("Asia/Saigon");
+  });
+
   it("当前值不在候选里时插到首位，并带上 UTC 偏移", () => {
     vi.spyOn(Intl, "supportedValuesOf").mockReturnValue(["UTC", "Asia/Tokyo"]);
 
