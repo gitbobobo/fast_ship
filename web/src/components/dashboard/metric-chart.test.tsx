@@ -126,4 +126,57 @@ describe("MetricChart", () => {
     expect(screen.queryByText("10")).not.toBeInTheDocument();
     unmount();
   });
+
+  it("keeps the width observer attached across the empty → data transition", () => {
+    const observed: Element[] = [];
+    class FakeResizeObserver {
+      observe(target: Element) {
+        observed.push(target);
+      }
+      unobserve() {}
+      disconnect() {}
+    }
+    vi.stubGlobal("ResizeObserver", FakeResizeObserver);
+
+    const emptyPoints = Array.from({ length: 30 }, (_, index) => ({
+      label: `2026-05-${String(index + 1).padStart(2, "0")}`,
+      shortLabel: `05-${String(index + 1).padStart(2, "0")}`,
+      value: 0,
+      series: [],
+    }));
+    const { rerender } = render(
+      <MetricChart
+        points={emptyPoints}
+        variant="area"
+        emptyMessage="暂无已解决问题数据"
+      />,
+    );
+
+    // 空状态时测量容器也必须在树上；否则挂载后再来数据时 ResizeObserver 不会重绑，
+    // chartWidth 会停在默认值，viewBox 缩放与横轴对齐问题就会回归。
+    expect(screen.getByText("暂无已解决问题数据")).toBeInTheDocument();
+    expect(observed).toHaveLength(1);
+
+    rerender(
+      <MetricChart
+        points={[
+          {
+            label: "2026-05-30",
+            shortLabel: "05-30",
+            value: 2,
+            series: [{ id: "p1", name: "Alpha", value: 2 }],
+          },
+        ]}
+        variant="area"
+        emptyMessage="暂无已解决问题数据"
+      />,
+    );
+
+    expect(
+      screen.getByRole("img", { name: "stacked area chart" }),
+    ).toBeInTheDocument();
+    expect(observed).toHaveLength(1);
+
+    vi.unstubAllGlobals();
+  });
 });

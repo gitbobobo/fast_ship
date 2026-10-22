@@ -217,10 +217,15 @@ function StackedAreaChart({
 
   useEffect(() => {
     const el = boxRef.current;
-    if (!el || typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver((entries) => {
-      const next = Math.round(entries[0]?.contentRect.width ?? 0);
+    if (!el) return;
+    const apply = (width: number) => {
+      const next = Math.round(width);
       if (next > 0) setChartWidth(next);
+    };
+    apply(el.getBoundingClientRect().width);
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver((entries) => {
+      apply(entries[0]?.contentRect.width ?? 0);
     });
     observer.observe(el);
     return () => observer.disconnect();
@@ -360,23 +365,24 @@ function StackedAreaChart({
 
   const hoveredData = hoveredIndex !== null ? coordinates[hoveredIndex] : null;
 
-  if (isEmpty) {
-    return <ChartEmptyState message={emptyMessage} action={emptyAction} />;
-  }
-
   return (
     <div className="relative">
+      {/* 测量容器始终渲染：空状态挂载后再出现数据时，ResizeObserver 仍然有效，
+          否则 chartWidth 会永久停在默认值，viewBox 缩放问题会回归。 */}
       <div ref={boxRef} className="w-full">
-        <svg
-          ref={svgRef}
-          viewBox={`0 0 ${chartWidth} ${CHART_HEIGHT}`}
-          className="w-full overflow-visible"
-          style={{ height: CHART_HEIGHT }}
-          role="img"
-          aria-label="stacked area chart"
-          onMouseMove={handleMouseMove}
-          onMouseLeave={handleMouseLeave}
-        >
+        {isEmpty ? (
+          <ChartEmptyState message={emptyMessage} action={emptyAction} />
+        ) : (
+          <svg
+            ref={svgRef}
+            viewBox={`0 0 ${chartWidth} ${CHART_HEIGHT}`}
+            className="w-full overflow-visible"
+            style={{ height: CHART_HEIGHT }}
+            role="img"
+            aria-label="stacked area chart"
+            onMouseMove={handleMouseMove}
+            onMouseLeave={handleMouseLeave}
+          >
         <defs>
           {seriesMeta.map((meta) => (
             <linearGradient
@@ -469,7 +475,8 @@ function StackedAreaChart({
             </text>
           );
         })}
-      </svg>
+          </svg>
+        )}
       </div>
 
       {/* Tooltip */}
