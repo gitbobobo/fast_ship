@@ -1324,7 +1324,7 @@ func (s *ReviewService) decideVisualForPR(ctx context.Context, ledger *model.Rev
 	}
 	in.HasVisualCombos = len(visualCombos) > 0
 
-	refs := collectScreenshotURLs(pr.Body)
+	refs := collectScreenshotURLsAt(pr.Body, s.githubWebHost())
 	in.HasScreenshots = len(refs) > 0
 	fingerprint := screenshotFingerprint(refs)
 	// 已结清的「没有可服务截图」集合以 none: 前缀入账，与「有图集合的指

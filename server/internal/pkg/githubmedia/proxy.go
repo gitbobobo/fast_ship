@@ -152,6 +152,9 @@ type ProxyService struct {
 	// GitHub 媒体面两者全关：白名单语义 + 图片视频都收，与截图面是两套准入。
 	requireHTTPS bool
 	imagesOnly   bool
+	// githubWebHost 部署的 GitHub Web 地址 host[:port]（见 GitHubWebHost）：只
+	// 用于「能否把 App 安装令牌发给该上游」的判定；空值按公共 GitHub 处理。
+	githubWebHost string
 
 	mu sync.Mutex
 	// download 每 URL 一把容量 1 的信号量（发送即持有、接收即释放）：同 URL
@@ -170,6 +173,10 @@ type serviceConfig struct {
 	requireHTTPS      bool
 	imagesOnly        bool
 	guardAddress      bool
+	// githubWebHost 部署的 GitHub Web 地址 host[:port]（同
+	// ProxyService.githubWebHost）：凭证闸门据此放行部署实例自己的附件路径，
+	// 空值按公共 GitHub 处理。
+	githubWebHost string
 }
 
 // NewProxyService GitHub 媒体代理面：GitHub 域名白名单、图片视频都收，
@@ -184,13 +191,17 @@ func NewProxyService(cacheRoot string) *ProxyService {
 // NewReviewMediaService PR 审查截图下载面：放行任意公网 https 图片，SSRF
 // 防线不在域名白名单，而在拨号时校验解析出的 IP——重定向与 DNS 重绑定
 // 的每次建连都会被拦。与 NewProxyService 是两个独立实例，别混用。
-func NewReviewMediaService(cacheRoot string) *ProxyService {
+// githubWebHost 是部署的 GitHub Web 地址 host[:port]（GitHubWebHost 从
+// github_app.api_base_url 推导）：私有仓库附件的 App 安装令牌只发给它（见
+// IsGitHubMediaURLFor），GHE 部署的附件才不会卡在凭证闸门上。
+func NewReviewMediaService(cacheRoot, githubWebHost string) *ProxyService {
 	return newService(cacheRoot, serviceConfig{
-		cacheSubdir:  "review-screenshot-cache",
-		allowURL:     allowPublicImageHost,
-		requireHTTPS: true,
-		imagesOnly:   true,
-		guardAddress: true,
+		cacheSubdir:   "review-screenshot-cache",
+		allowURL:      allowPublicImageHost,
+		requireHTTPS:  true,
+		imagesOnly:    true,
+		guardAddress:  true,
+		githubWebHost: githubWebHost,
 	})
 }
 
@@ -224,6 +235,7 @@ func newService(cacheRoot string, cfg serviceConfig) *ProxyService {
 		allowURL:          cfg.allowURL,
 		requireHTTPS:      cfg.requireHTTPS,
 		imagesOnly:        cfg.imagesOnly,
+		githubWebHost:     cfg.githubWebHost,
 		download:          make(map[string]chan struct{}),
 	}
 	s.purgeLegacyCacheEntries()
@@ -581,9 +593,10 @@ func (s *ProxyService) fetchAndCache(ctx context.Context, rawURL, bearer, scope 
 	}
 	req.Header.Set("Accept", "*/*")
 	req.Header.Set("User-Agent", "fast-ship-media-proxy/1.0")
-	// Bearer 令牌是仓库凭证，只对 GitHub 媒体域有意义；截图面放行任意公网
-	// host，把令牌发给外部图床等于把 App 安装凭证送出去。
-	if bearer != "" && IsGitHubMediaURL(normalized) {
+	// Bearer 令牌是仓库凭证，只对 GitHub 媒体域（含部署实例的附件路径）
+	// 有意义；截图面放行任意公网 host，把令牌发给外部图床等于把 App 安装凭证
+	// 送出去。
+	if bearer != "" && IsGitHubMediaURLFor(normalized, s.githubWebHost) {
 		req.Header.Set("Authorization", "Bearer "+bearer)
 	}
 
@@ -877,23 +890,135 @@ func IsGitHubMediaURL(raw string) bool {
 	return isAllowedGitHubMediaURL(parsed)
 }
 
-// IsGitHubAttachmentURL URL 是否是 GitHub 附件形态的直链：github.com 的
+// githubHost 公共 GitHub 的 Web 域；部署未配置 GHE 时的默认 Web 地址。
+const githubHost = "github.com"
+
+// attachmentPathPrefix GitHub 附件直链的路径形态：
+// /user-attachments/assets/<id>（拖入/粘贴附件，通常无文件名扩展名）。
+const attachmentPathPrefix = "/user-attachments/assets/"
+
+// normalizeAuthority 统一 authority（host[:port]）的口径：去空白、小写，按
+// scheme 去掉默认端口（https 443 / http 80）——配置与 URL 两侧都比同一形态，
+// 否则「配置带端口、URL 不带」会被判成不同实例，或反过来把同 host 的另一个
+// 服务当成同一实例。https 上的 :80 不是默认端口，保留。
+func normalizeAuthority(scheme, authority string) string {
+	a := strings.ToLower(strings.TrimSpace(authority))
+	if host, port, err := net.SplitHostPort(a); err == nil {
+		if (scheme == "https" && port == "443") || (scheme == "http" && port == "80") {
+			return host
+		}
+	}
+	return a
+}
+
+// isGitHubAttachmentPath 路径是否附件直链：解码后的路径以附件前缀开头且是
+// 规范形态（不含 "."/".." 段、不重复斜杠、不以斜杠结尾）。只看前缀不够——
+// /user-attachments/assets/../../other 这类写法在上游规范化后会离开附件目录，
+// 凭证闸门必须把它拒掉。
+func isGitHubAttachmentPath(u *url.URL) bool {
+	p := u.Path // 已解码：%2e%2e 也是 ".."
+	if !strings.HasPrefix(p, attachmentPathPrefix) {
+		return false
+	}
+	return strings.TrimPrefix(p, attachmentPathPrefix) != "" && path.Clean(p) == p
+}
+
+// GitHubWebHost 从 GitHub API base（config 的 github_app.api_base_url）推导
+// 部署的 Web 地址（authority = host[:非默认端口]）：apiBase 为空、解析失败或
+// 取不到 host 时按公共 GitHub 兜底；host 为 api.github.com 时对应 github.com；
+// 其余（GHE 的 https://<host>[:port]/api/v3）Web 地址即该 host 与端口本身。
+// 端口必须保留：凭证闸门按完整 authority 判定，丢掉端口会把安装令牌发给同
+// host 上另一个服务。service 层把它传给 IsGitHubAttachmentURLFor /
+// IsGitHubMediaURLFor，不要手填域名。
+func GitHubWebHost(apiBase string) string {
+	parsed, err := url.Parse(strings.TrimSpace(apiBase))
+	if err != nil || parsed == nil {
+		return githubHost
+	}
+	authority := normalizeAuthority(parsed.Scheme, parsed.Host)
+	if authority == "" || authority == "api.github.com" {
+		return githubHost
+	}
+	return authority
+}
+
+// normalizeGitHubWebHost webHost 入参的统一口径：去空白、小写、去默认端口，
+// 空值按公共 GitHub 处理——与 GitHubWebHost 的兜底一致，调用方传 "" 与传
+// "github.com" 语义相同。
+func normalizeGitHubWebHost(webHost string) string {
+	if h := normalizeAuthority("https", webHost); h != "" {
+		return h
+	}
+	return githubHost
+}
+
+// IsGitHubMediaURLFor 带部署口径的 bearer 重试闸门：能否把 App 安装令牌发给
+// 该上游。令牌属于一个 GitHub 实例，所以只发给本部署的实例：公共 GitHub
+// 部署（webHost 为空或 github.com）沿用 IsGitHubMediaURL 的媒体域白名单；
+// GHE 部署只放行实例自己的附件直链（https、authority 恰为 webHost、无
+// userinfo、无 fragment、规范附件路径），公共 GitHub 域也不放行——那不是
+// 本实例，令牌在那里也没有意义。外部图床与同 host 的其他路径一律不放行。
+func IsGitHubMediaURLFor(raw, webHost string) bool {
+	webHost = normalizeGitHubWebHost(webHost)
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed == nil {
+		return false
+	}
+	if parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" {
+		return false
+	}
+	if webHost == githubHost {
+		if !isAllowedGitHubMediaURL(parsed) {
+			return false
+		}
+		// github.com 上的附件路径同样要求规范形态：点段不能借路径前缀把令牌
+		// 带出附件目录（与 GHE 分支同一口径）。
+		if strings.ToLower(parsed.Hostname()) == githubHost {
+			return isGitHubAttachmentPath(parsed)
+		}
+		return true
+	}
+	if normalizeAuthority(parsed.Scheme, parsed.Host) != webHost {
+		return false
+	}
+	return isGitHubAttachmentPath(parsed)
+}
+
+// IsGitHubAttachmentURL URL 是否是公共 GitHub 的附件形态直链：github.com 的
 // user-attachments/assets 附件，或 user-images.githubusercontent.com 用户
 // 图片——GitHub 拖入/粘贴附件的标准形态，路径通常没有文件名扩展名。service
 // 层收集 PR 描述裸贴链接时用它豁免「必须有位图扩展名」的要求；能否发 App
-// 安装令牌仍由 IsGitHubMediaURL 按「可发请求的地址」把关，两个口径独立。
-// 按 URL 解析出 host 再判，前缀嵌在路径里的仿冒地址（evil.com/github.com/…）
-// 不算。
+// 安装令牌另由 IsGitHubMediaURL / IsGitHubMediaURLFor 按「可发请求的地址」
+// 把关，两个口径独立。公共 GitHub 固定口径；GHE 部署用
+// IsGitHubAttachmentURLFor。
 func IsGitHubAttachmentURL(raw string) bool {
+	return IsGitHubAttachmentURLFor(raw, githubHost)
+}
+
+// IsGitHubAttachmentURLFor URL 是否是该部署 GitHub 实例的附件形态直链。
+// 附件形态是「公共 GitHub 形态 ∪ 本部署实例形态」：公共形态（
+// github.com/user-attachments/assets/…、user-images.githubusercontent.com）
+// 在任何部署下都算——GHE 的 PR 引用公共 GitHub 截图完全合理，截图下载面
+// 本来就允许任意公网图；本实例形态按 webHost（GitHubWebHost 推导）判定
+// authority + 附件路径。host 按解析结果再判，前缀嵌在路径里的仿冒地址
+// （evil.com/<webHost>/user-attachments/assets/x）不算。
+func IsGitHubAttachmentURLFor(raw, webHost string) bool {
 	parsed, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || parsed == nil {
 		return false
 	}
 	host := strings.ToLower(parsed.Hostname())
-	if host == "github.com" {
-		return strings.HasPrefix(parsed.EscapedPath(), "/user-attachments/assets/")
+	if host == githubHost && isGitHubAttachmentPath(parsed) {
+		return true
 	}
-	return host == "user-images.githubusercontent.com"
+	if host == "user-images.githubusercontent.com" {
+		return true
+	}
+	webHost = normalizeGitHubWebHost(webHost)
+	if webHost == githubHost || normalizeAuthority(parsed.Scheme, parsed.Host) != webHost {
+		return false
+	}
+	return isGitHubAttachmentPath(parsed)
 }
 
 func isAllowedGitHubMediaURL(parsed *url.URL) bool {
