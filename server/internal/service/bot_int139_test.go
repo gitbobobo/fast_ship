@@ -238,6 +238,60 @@ func TestMainlinePrefixCacheExpired(t *testing.T) {
 	}
 }
 
+// finished_at 为 nil 的行不是「在飞请求」——入口判定时本 run 已持有 bot 槽，
+// 残留 nil 行来自 panic/中断收尾（INT-139 复审）。热度按 started_at 量：
+// 刚 panic 的请求仍算热，几天前的残留不得把激活无限推迟。
+func TestMainlinePrefixCacheExpiredUnfinishedLeftover(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "r11nil")
+
+	seedRaw := func(botID string, startedAt time.Time, finishedAt *time.Time, errCode string) {
+		run := &model.BotRun{
+			ID: uuid.NewString(), BotID: botID,
+			TriggerSource: model.BotTriggerUserMessage, TriggerKey: "r11r-" + uuid.NewString(),
+			Status: model.BotRunStatusCompleted, SessionKind: model.BotSessionKindMain,
+			ConfigSnapshotJSON: "{}", CreatedAt: startedAt, StartedAt: &startedAt, FinishedAt: &startedAt,
+		}
+		if err := env.db.Create(run).Error; err != nil {
+			t.Fatalf("seed run: %v", err)
+		}
+		req := &model.BotModelRequest{
+			ID: uuid.NewString(), RunID: run.ID, Ordinal: 1,
+			Status: model.BotModelRequestFailed, StartedAt: startedAt, FinishedAt: finishedAt,
+			PrefixHash: "x", ToolsHash: "x", RequestHash: "x", TokenEstimator: "chars/4",
+		}
+		if errCode != "" {
+			req.ErrorCode = &errCode
+		}
+		if err := env.db.Create(req).Error; err != nil {
+			t.Fatalf("seed request: %v", err)
+		}
+	}
+
+	retain := env.cfg.Bots.Runtime.PromptCacheRetain()
+
+	// panic 残留的未完成行：started_at 在窗口外 → 可激活。
+	staleLeftover := env.createBot(t, userID)
+	seedRaw(staleLeftover.ID, time.Now().UTC().Add(-retain-time.Minute), nil, "")
+	if !env.bots.mainlinePrefixCacheExpired(staleLeftover.ID) {
+		t.Fatalf("残留的未完成行不得无限推迟激活")
+	}
+	// 残留行的 started_at 仍在窗口内 → 推迟（上游刚被联系过）。
+	freshLeftover := env.createBot(t, userID)
+	seedRaw(freshLeftover.ID, time.Now().UTC(), nil, "")
+	if env.bots.mainlinePrefixCacheExpired(freshLeftover.ID) {
+		t.Fatalf("最近启动的请求残留仍应判为缓存热")
+	}
+	// server_restarted 的 finished_at 是恢复记账时刻：旧 started_at +
+	// 新 finished_at 不得把中断很久的请求误判成刚热。
+	restarted := env.createBot(t, userID)
+	recentFinish := time.Now().UTC()
+	seedRaw(restarted.ID, time.Now().UTC().Add(-retain-time.Minute), &recentFinish, "server_restarted")
+	if !env.bots.mainlinePrefixCacheExpired(restarted.ID) {
+		t.Fatalf("server_restarted 记账时刻不得被当作上游活动时间")
+	}
+}
+
 // int139WaitNewRunSettled 等待「发送后新建」的 run 收尾：种子的历史 run 会
 // 让 botSettled 提前为真，必须按 run 数增加等。
 func int139WaitNewRunSettled(t *testing.T, env *botTestEnv, botID string, wantRuns int64) {
@@ -550,5 +604,115 @@ func TestBotCostEstimateHonorsExplicitZero(t *testing.T) {
 	}
 	if got != 0 {
 		t.Fatalf("免费模型成本应为 0，实得 %v", got)
+	}
+}
+
+// 推迟通知在激活落库时收口（INT-139 复审）：窗口内发出「下一个压缩点生效」
+// 后，窗口一过入口激活，须追加一条 toolset_activated「已生效」事件——
+// 账本 append-only 不改写原通知，否则激活后的请求会把推迟文案投影到新
+// 提示词旁，模型读到的状态与实况相反。
+func TestBotDeferredNoticeSettledOnActivation(t *testing.T) {
+	env := setupBotTestEnv(t, fakeModelTurn{Text: "ok", Usage: &fakeModelUsage{Prompt: 5, Completion: 2, Total: 7}})
+	userID := createBotTestUser(t, env.db, "r11settle")
+	bot := env.createBot(t, userID)
+	if err := env.db.Model(&model.Bot{}).Where("id = ?", bot.ID).
+		Updates(map[string]interface{}{"toolset_version": 9, "last_told_version": 9}).Error; err != nil {
+		t.Fatalf("降级水位: %v", err)
+	}
+	int139SeedMainRequest(t, env, bot.ID, model.BotSessionKindMain, time.Now().UTC())
+
+	if _, err := env.bots.SendMessage(userID, bot.ID, &SendMessageRequest{Text: "hi", ClientMessageID: "r11-s1"}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	int139WaitNewRunSettled(t, env, bot.ID, 2)
+
+	dedup := fmt.Sprintf("toolset_notice:%d", botToolsetVersion)
+	var msg model.BotMessage
+	if err := env.db.Where("bot_id = ? AND dedup_key = ?", bot.ID, dedup).First(&msg).Error; err != nil {
+		t.Fatalf("应有推迟通知: %v", err)
+	}
+	if !strings.Contains(msg.ContentJSON, `"activation":"next_compaction"`) {
+		t.Fatalf("首条通知应为推迟语义: %s", msg.ContentJSON)
+	}
+
+	// 把所有主线请求的 finished_at 拨回窗口外，下一条消息走入口激活。
+	old := time.Now().UTC().Add(-env.cfg.Bots.Runtime.PromptCacheRetain() - time.Minute)
+	if err := env.db.Model(&model.BotModelRequest{}).
+		Where("run_id IN (SELECT id FROM bot_runs WHERE bot_id = ?)", bot.ID).
+		Update("finished_at", old).Error; err != nil {
+		t.Fatalf("回拨请求时间: %v", err)
+	}
+	if _, err := env.bots.SendMessage(userID, bot.ID, &SendMessageRequest{Text: "again", ClientMessageID: "r11-s2"}); err != nil {
+		t.Fatalf("send 2: %v", err)
+	}
+	int139WaitNewRunSettled(t, env, bot.ID, 3)
+
+	var row model.Bot
+	env.db.First(&row, "id = ?", bot.ID)
+	if row.ToolsetVersion != botToolsetVersion {
+		t.Fatalf("窗口外应激活到 v%d，实得 %d", botToolsetVersion, row.ToolsetVersion)
+	}
+	// 账本是 append-only：原通知保持「下一个压缩点生效」不动，激活以追加的
+	// toolset_activated 事件收口，模型按序读到的是真实时间线。
+	env.db.First(&msg, "id = ?", msg.ID)
+	if !strings.Contains(msg.ContentJSON, `"activation":"next_compaction"`) {
+		t.Fatalf("原通知不应被改写: %s", msg.ContentJSON)
+	}
+	var act model.BotMessage
+	err := env.db.Where("bot_id = ? AND dedup_key = ?", bot.ID,
+		fmt.Sprintf("toolset_activated:%d", botToolsetVersion)).First(&act).Error
+	if err != nil {
+		t.Fatalf("激活落库应补发 toolset_activated 事件: %v", err)
+	}
+	if !strings.Contains(act.ContentJSON, `"toolset_activated"`) ||
+		!strings.Contains(act.ContentJSON, `"activation":"active"`) ||
+		!strings.Contains(act.ContentJSON, "已生效") {
+		t.Fatalf("activated 事件内容不对: %s", act.ContentJSON)
+	}
+	var cnt int64
+	env.db.Model(&model.BotMessage{}).Where("bot_id = ? AND dedup_key = ?", bot.ID, dedup).Count(&cnt)
+	if cnt != 1 {
+		t.Fatalf("推迟通知仍只应有一条，实得 %d 条", cnt)
+	}
+}
+
+// 跨版本并存的多条推迟通知只收口一次（INT-139 复审）：去重键字典序会让
+// 「toolset_notice:10」排在「:9」前面，按通知逐条收口会把旧版本说成
+// 「已生效」且乱序；实现只发一条 to_version=当前激活版本的事件。
+func TestBotSettleEmitsSingleActivatedEventAcrossVersions(t *testing.T) {
+	env := setupBotTestEnv(t, fakeModelTurn{Text: "ok", Usage: &fakeModelUsage{Prompt: 5, Completion: 2, Total: 7}})
+	userID := createBotTestUser(t, env.db, "r11multi")
+	bot := env.createBot(t, userID)
+	if err := env.db.Model(&model.Bot{}).Where("id = ?", bot.ID).
+		Updates(map[string]interface{}{"toolset_version": 8, "last_told_version": 8}).Error; err != nil {
+		t.Fatalf("降级水位: %v", err)
+	}
+	// 手工种两条不同版本的推迟通知（模拟窗口期跨过版本升级）。
+	for i, v := range []int64{9, 10} {
+		dedup := fmt.Sprintf("toolset_notice:%d", v)
+		raw := fmt.Sprintf(`{"event":"toolset_updated","render":"user","detail":{"from_version":%d,"to_version":%d,"note":"x（下一个压缩点生效）","activation":"next_compaction"}}`, v-1, v)
+		if err := env.db.Create(&model.BotMessage{
+			ID: uuid.NewString(), BotID: bot.ID, Seq: int64(100 + i),
+			Kind: model.BotMessageKindLifecycle, ContentJSON: raw,
+			DedupKey: &dedup, CreatedAt: time.Now().UTC(),
+		}).Error; err != nil {
+			t.Fatalf("seed notice v%d: %v", v, err)
+		}
+	}
+	int139SeedMainRequest(t, env, bot.ID, model.BotSessionKindMain,
+		time.Now().UTC().Add(-env.cfg.Bots.Runtime.PromptCacheRetain()-time.Minute))
+
+	if _, err := env.bots.SendMessage(userID, bot.ID, &SendMessageRequest{Text: "hi", ClientMessageID: "r11-m1"}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	int139WaitNewRunSettled(t, env, bot.ID, 2)
+
+	var acts []model.BotMessage
+	env.db.Where("bot_id = ? AND dedup_key GLOB ?", bot.ID, "toolset_activated:*").Find(&acts)
+	if len(acts) != 1 {
+		t.Fatalf("多条推迟通知也只应收口一次，实得 %d 条", len(acts))
+	}
+	if !strings.Contains(acts[0].ContentJSON, fmt.Sprintf(`"to_version":%d`, botToolsetVersion)) {
+		t.Fatalf("收口事件应记本次实际激活版本 v%d: %s", botToolsetVersion, acts[0].ContentJSON)
 	}
 }

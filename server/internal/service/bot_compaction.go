@@ -1705,14 +1705,15 @@ func (s *BotService) mainlinePrefixCacheExpired(botID string) bool {
 	}
 	// 前缀缓存热度按请求完成时刻算：上游缓存 TTL 从服务完成起算，
 	// started_at 会把「跑了很久、刚结束」的请求误判成冷（INT-139 复审）。
-	// 还没完成的请求正在使用缓存，直接判热。server_restarted 的
-	// finished_at 是恢复记账时刻而非上游活动时间，回退用 started_at。
-	if last.FinishedAt == nil {
-		return false
-	}
-	at := *last.FinishedAt
-	if last.ErrorCode != nil && *last.ErrorCode == "server_restarted" {
-		at = last.StartedAt
+	// finished_at 为空的行不是「在飞请求」——本函数只在 run 入口被调，
+	// 此时 bot 槽已被本 run 持有，残留 nil 行来自 panic/中断收尾
+	// （finishRunAfterPanic 不落 finished_at）。此类行的上游接触上界是
+	// started_at（实际可能流得更久，这里取保守下界）——宁可少保一次
+	// 缓存，也不让一行残留把激活无限推迟。server_restarted 的
+	// finished_at 同理是恢复记账时刻而非上游活动时间，回退 started_at。
+	at := last.StartedAt
+	if last.FinishedAt != nil && (last.ErrorCode == nil || *last.ErrorCode != "server_restarted") {
+		at = *last.FinishedAt
 	}
 	return !at.After(s.now().Add(-s.cfg.Bots.Runtime.PromptCacheRetain()))
 }
@@ -1772,6 +1773,9 @@ func (s *BotService) resolveBotPrompt(bot *model.Bot, persist bool) error {
 					fresh.PromptRevision = rev
 					fresh.ToolsetVersion = botToolsetVersion
 					fresh.PlatformPromptVersion = botPlatformPromptVersion
+					if err := s.settleToolsetNoticesTx(tx, bot.ID); err != nil {
+						return err
+					}
 				} else if again, gerr := repo.Get(bot.ID); gerr == nil {
 					// 单连接串行下 CAS 不应落空；万一命中 0 行，重读一次以库内行为准。
 					fresh = again
@@ -1829,8 +1833,11 @@ func (s *BotService) activateToolsetWithPromptTx(tx *gorm.DB, botID string, curT
 	}
 	// 单连接串行下同一事务内的判定与 CAS 作用在同一行，命中 0 行不可达；
 	// 万一发生也只说明水位已被人推过，不回写副本、不报错。
-	_, err := repository.NewBotRepository(tx).ActivateToolsetTx(tx, botID, botToolsetVersion, botPlatformPromptVersion, prompt, rev, now)
-	return err
+	ok, err := repository.NewBotRepository(tx).ActivateToolsetTx(tx, botID, botToolsetVersion, botPlatformPromptVersion, prompt, rev, now)
+	if err != nil || !ok {
+		return err
+	}
+	return s.settleToolsetNoticesTx(tx, botID)
 }
 
 func (s *BotService) maybeTellToolset(bot *model.Bot, run *model.BotRun) {
@@ -1861,7 +1868,8 @@ func (s *BotService) tellToolsetTx(tx *gorm.DB, bot *model.Bot) error {
 	note = "（内部信息：不需要向用户转述，也不需要逐项验证）" + note
 	// INT-139 R11：通知文案如实反映本 run 的实际激活状态——前缀已在新版本
 	// 写「已生效」；缓存窗口内被推迟的会话写「下一个压缩点生效」。每个版本
-	// 只告知一次（dedup + last_told_version），推迟告知后压缩边界激活不再补发。
+	// 只告知一次（dedup + last_told_version）；推迟文案在激活真正落库时由
+	// settleToolsetNoticesTx 补发一条 toolset_activated 事件收口。
 	activation, stateText := "active", "已生效"
 	if bot.ToolsetVersion < botToolsetVersion {
 		activation, stateText = "next_compaction", "下一个压缩点生效"
@@ -1893,6 +1901,66 @@ func (s *BotService) tellToolsetTx(tx *gorm.DB, bot *model.Bot) error {
 		bot.LastToldVersion = botToolsetVersion
 	}
 	return err
+}
+
+// settleToolsetNoticesTx 在激活真正落库时补发「已生效」事件（INT-139 复审）：
+// bot_messages 是 append-only 账本，已发出的「下一个压缩点生效」通知不能
+// 改写——改为追加一条 toolset_activated 事件，让投影给模型的生命周期按真实
+// 顺序收尾（先推迟、后生效），否则激活后的请求会把推迟文案投影到已是
+// 新版本的提示词旁。跨版本可能挂着多条推迟通知：只发一条收口事件，
+// to_version 记本次实际激活的版本，不逐条复述历史目标版本。入口激活与
+// 压缩边界激活共用本函数；没有 pending 推迟通知或已发过收口时为空操作。
+func (s *BotService) settleToolsetNoticesTx(tx *gorm.DB, botID string) error {
+	var msgs []model.BotMessage
+	if err := tx.Where("bot_id = ? AND kind = ? AND dedup_key GLOB ?",
+		botID, model.BotMessageKindLifecycle, "toolset_notice:*").Find(&msgs).Error; err != nil {
+		return err
+	}
+	pending := false
+	for i := range msgs {
+		var content botLifecycleContent
+		if err := json.Unmarshal([]byte(msgs[i].ContentJSON), &content); err != nil || content.Event != "toolset_updated" {
+			continue
+		}
+		var detail struct {
+			Activation string `json:"activation"`
+		}
+		if err := json.Unmarshal(content.Detail, &detail); err == nil && detail.Activation == "next_compaction" {
+			pending = true
+			break
+		}
+	}
+	if !pending {
+		return nil
+	}
+	msgRepo := repository.NewBotMessageRepository(tx)
+	dedup := fmt.Sprintf("toolset_activated:%d", botToolsetVersion)
+	if existing, err := msgRepo.FindByDedupKey(botID, dedup); err == nil && existing != nil {
+		return nil
+	} else if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return err
+	}
+	seq, err := s.bots.NextMessageSeqTx(tx, botID)
+	if err != nil {
+		return err
+	}
+	activated := botLifecycleContent{
+		Event: "toolset_activated", Render: "user",
+		Detail: json.RawMessage(fmt.Sprintf(
+			`{"to_version":%d,"note":%s,"activation":%s}`,
+			botToolsetVersion,
+			jsonString("（内部信息：不需要向用户转述，也不需要逐项验证）上述工具集升级已生效：当前提示词与工具集已切换到最新版本"),
+			jsonString("active"))),
+	}
+	raw, err := json.Marshal(activated)
+	if err != nil {
+		return err
+	}
+	return msgRepo.AppendTx(tx, &model.BotMessage{
+		ID: uuid.NewString(), BotID: botID, Seq: seq,
+		Kind: model.BotMessageKindLifecycle, ContentJSON: string(raw),
+		DedupKey: &dedup, CreatedAt: s.now(),
+	})
 }
 
 func botToolsetChangeNote(from, to int64) string {

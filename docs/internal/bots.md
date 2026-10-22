@@ -158,7 +158,10 @@ run 入口的 `activateBotPrompt` 在一个短事务里读行、
 静默换掉它。告知由 `maybeTellToolset` 按 `last_told_version`
 单独补发 lifecycle 系统事件；文案如实标注激活状态——已激活的写「已生效」，
 窗口内推迟的写「下一个压缩点生效」（`activation` 字段 active/next_compaction），
-每个版本只告知一次。普通请求期间钉死；请求行记录实际使用的版本号，
+每个版本只告知一次。推迟通知不是终态：激活真正落库时（入口或压缩边界）
+`settleToolsetNoticesTx` 追加一条 `toolset_activated` 事件收口——账本
+append-only 不改写原通知，投影给模型的生命周期保持「先推迟、后生效」的
+真实顺序。普通请求期间钉死；请求行记录实际使用的版本号，
 `tools_hash` 取完整 tools 数组实际 wire 字节。模型误用
 旧 action 名（如 `fs_memory/search`、v3 里的 `fs_schedule/status`）会命中
 改名映射表返回结构化迁移指引——不静默代执行新动作；冻结工具集里仍存在的
