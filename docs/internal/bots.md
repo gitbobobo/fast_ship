@@ -618,7 +618,9 @@ CAS 终结；running 记录取消并取消 context，worker 落唯一终态且
   的固定开销而无强制力。
 - **列表筛选与分页**：`fs_thread list` 默认只返回未归档、未结算的线程
   （INT-148 起结算线程默认不进巡检列表——`settled` 省略或 false 都只返回
-  未结算线程，`settled=true` 只返回已结算线程），支持
+  未结算线程，`settled=true` 只返回已结算线程；实际生效的筛选随结果回带
+  `settled_filter` 与 `settled_filter_note`，让冻结在旧 schema 的会话也能
+  自证看到的是哪一侧），支持
   `env_id`（只保留该环境的线程；不在已连接环境里就报错，不静默返回空）/
   `project_id` / `query`（线程 id/标题/项目名/项目 id/环境名，不区分大小写
   包含）/
@@ -645,9 +647,10 @@ CAS 终结；running 记录取消并取消 context，worker 落唯一终态且
   表示 T3 挂着 PR 监听（检查结束、他人评论、分支冲突会唤醒线程代理）。
   数据只来自 `shell.pullRequests`，并跳过两类条目：解析失败/缺身份的坏数据、
   `source=stack-dismissed` 的墓碑（用户在 T3 解开的栈成员，上游
-  `visibleThreadPullRequests` 同样隐藏）；`pull_request_count` 与可见明细同口径
-  （旧服务端没有明细数组时才回退到 `linkedPullRequest`/`branchPullRequest`），
-  不合成缺 state 的条目。`fs_thread get` 的条目列表与 `item` 补读都带
+  `visibleThreadPullRequests` 同样隐藏）；`pull_request_count` 按「字段存在性」
+  与可见明细同口径——`pullRequests` 存在（含显式空数组与全墓碑）时恒等于可见
+  条数，只有字段缺失（旧服务端）才回退到
+  `linkedPullRequest`/`branchPullRequest`，不合成缺 state 的条目。`fs_thread get` 的条目列表与 `item` 补读都带
   `child_thread_id`：子线程不出现在列表里，只能靠它进详情。
 - **线程写动作的真实语义（INT-148）**：`stop`（`run.interrupt` + `holdQueue:true`）
   只有存在可中断的 run/后台工作才派发停止命令，命中时才同时把排队消息标成

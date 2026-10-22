@@ -1750,7 +1750,7 @@ func (s *BotService) tellToolsetTx(tx *gorm.DB, bot *model.Bot) error {
 
 func botToolsetChangeNote(from, to int64) string {
 	if to >= 9 && from < 9 {
-		note := "工具集已升级：fs_thread 新增 settle/unsettle（把线程收进/移出 T3 历史区）与 resume_queue（恢复被挂起的消息队列）三个写动作；stop 只在存在可中断 run/后台工作时才挂起队列、结束 PR 监听（否则是空操作），停没停用 fs_thread get 的 activity.stopping 判断；线程读取新增 run_status（T3 原始状态，status=idle 时它才是最终结局）与 pull_requests[]（含 watching）"
+		note := "工具集已升级：fs_thread 新增 settle/unsettle（把线程收进/移出 T3 历史区）与 resume_queue（恢复被挂起的消息队列）三个写动作；stop 只在存在可中断 run/后台工作时才挂起队列、结束 PR 监听（否则是空操作），停没停用 fs_thread get 的 activity.stopping 判断；线程读取新增 run_status（T3 原始状态，status=idle 时它才是最终结局）与 pull_requests[]（含 watching）；fs_thread list 默认不含已结算线程（要看历史区传 settled=true，返回体的 settled_filter 标明实际生效的筛选）"
 		if from < 8 {
 			note += "；fs_schedule 创建任务省略时区时默认用户时区（不再默认 UTC）；任务指令应写「目标 + 什么情况需要汇报 + 去重方式（用 state_get/state_set 记已报过的 ID）+ 无变化只回复 [[SILENT]]」"
 		}

@@ -210,6 +210,8 @@ func TestBotInt148HelpTextThreadSemantics(t *testing.T) {
 		"要先 resume_queue",
 		"settled=true 才看得到",
 		"默认不含已结算",
+		// list 结果自证实际生效的筛选：帮助文本写明 settled_filter 的含义。
+		"settled_filter",
 		"未结算的线程",
 		"空操作",
 		"PR 监听继续",
@@ -232,8 +234,9 @@ func TestBotInt148HelpTextThreadSemantics(t *testing.T) {
 
 // fs_thread list 的 settled 默认语义：默认不含已结算线程（settle 之后离开
 // 默认列表，settled=true 仍可见）；settled=false 与默认一致；settled=true
-// 只看已结算。纯函数直测 botSlimThreadList，不起 T3。同时钉住 v9 描述与
-// 帮助文本口径一致（list 默认口径、stop 的空操作边界）。
+// 只看已结算。实际生效的筛选以 settled_filter 随结果回带（附 note 说明），
+// 旧版冻结 schema 的会话也能自证口径。纯函数直测 botSlimThreadList，不起
+// T3。同时钉住 v9 描述与帮助文本口径一致（list 默认口径、stop 的空操作边界）。
 func TestBotInt148ThreadListSettledFilter(t *testing.T) {
 	thread := func(id string, settled bool) T3ThreadSummary {
 		return T3ThreadSummary{
@@ -269,12 +272,23 @@ func TestBotInt148ThreadListSettledFilter(t *testing.T) {
 	if defOut["total_items"] != 1 {
 		t.Fatalf("默认 total_items 应为 1: %+v", defOut)
 	}
+	// settled_filter 回带实际生效的筛选：默认（省略 settled）为 false，且附
+	// 说明让冻结在旧 schema 的会话也能自证口径；total_items 只覆盖该侧。
+	if defOut["settled_filter"] != false {
+		t.Fatalf("默认 list 的 settled_filter 应为 false: %+v", defOut["settled_filter"])
+	}
+	if note, _ := defOut["settled_filter_note"].(string); !strings.Contains(note, "settled=true") {
+		t.Fatalf("settled_filter_note 应说明筛选口径: %+v", defOut["settled_filter_note"])
+	}
 	falseOut, err := botSlimThreadList(list, &botThreadArgs{Settled: api.Ptr(false)})
 	if err != nil {
 		t.Fatalf("settled=false list: %v", err)
 	}
 	if idsOf(t, falseOut)["th-settled"] {
 		t.Fatalf("settled=false 应与默认一致: %v", falseOut["items"])
+	}
+	if falseOut["settled_filter"] != false {
+		t.Fatalf("settled=false 的 settled_filter 应为 false: %+v", falseOut["settled_filter"])
 	}
 	trueOut, err := botSlimThreadList(list, &botThreadArgs{Settled: api.Ptr(true)})
 	if err != nil {
@@ -283,6 +297,9 @@ func TestBotInt148ThreadListSettledFilter(t *testing.T) {
 	trueIDs := idsOf(t, trueOut)
 	if !trueIDs["th-settled"] || trueIDs["th-open"] || len(trueIDs) != 1 {
 		t.Fatalf("settled=true 应只含已结算线程: %v", trueIDs)
+	}
+	if trueOut["settled_filter"] != true {
+		t.Fatalf("settled=true 的 settled_filter 应为 true: %+v", trueOut["settled_filter"])
 	}
 
 	// 行为闭环：settle 之后该线程离开默认列表，settled=true 能看到。
@@ -329,6 +346,13 @@ func TestBotInt148ToolsetChangeNote(t *testing.T) {
 	for _, want := range []string{"resume_queue", "run_status", "pull_requests"} {
 		if !strings.Contains(note89, want) {
 			t.Fatalf("8→9 升级通知应说明 v9 变更 %q: %s", want, note89)
+		}
+	}
+	// 默认不含已结算是升级后立刻生效的行为变更，存量会话必须被告知
+	// （冻结 schema 的旧口径仍写着「true 只看已收进历史区的」）。
+	for _, want := range []string{"默认不含已结算线程", "settled=true", "settled_filter"} {
+		if !strings.Contains(note89, want) {
+			t.Fatalf("8→9 升级通知应写明 list 默认口径变更 %q: %s", want, note89)
 		}
 	}
 	if strings.Contains(note89, "用户时区") {

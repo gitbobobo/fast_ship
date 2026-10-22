@@ -56,6 +56,9 @@ func TestBotInt148OverlapTickSkippedWhilePreviousRunning(t *testing.T) {
 	if !strings.Contains(fresh.Summary, "不并行") {
 		t.Fatalf("摘要应写明不并行的语义: %+v", fresh)
 	}
+	if !strings.Contains(fresh.Summary, prev.ID) {
+		t.Fatalf("摘要应带阻塞 run 的 ID（%s），排查卡死时可直接定位: %+v", prev.ID, fresh)
+	}
 	// 上一轮 run 不受影响。
 	if cur.FinishedAt != nil || cur.Status != model.BotRunStatusRunning {
 		t.Fatalf("上一轮 run 不应被本轮派发影响: %+v", cur)
@@ -164,6 +167,9 @@ func TestBotInt148OverlapSkipEventDedupedPerUnfinishedRun(t *testing.T) {
 	}
 	if !strings.Contains(content.Summary, "尚未结束") {
 		t.Fatalf("事件摘要应写明上一轮未结束的原因: %+v", content)
+	}
+	if !strings.Contains(content.Summary, prev.ID) {
+		t.Fatalf("事件摘要应带阻塞 run 的 ID（%s）: %+v", prev.ID, content)
 	}
 
 	// 第二个周期到点（把 next_run_at 拨回宽限窗口，上一轮仍未结束）：再落

@@ -226,10 +226,12 @@ func botThreadPage(page, pageSize int) (int, int, error) {
 // botSlimThreadList 过滤、稳定分页并回报覆盖范围。默认排除归档线程（归档
 // 不属于巡检范围）；include_archived=true 才纳入。settled 默认排除已结算
 // 线程（settle 是把线程收进历史区，与归档同属「不在默认巡检面」）：省略或
-// settled=false 只返回未结算线程，settled=true 只返回已结算线程。env_id 收窄
-// 到单环境（不在已连接环境里就报错，不静默返回空）；query 对线程 id/标题/
-// 项目名/项目 id/环境名做不区分大小写的包含匹配。过滤后按 updated_at 降序、
-// id 升序排序，保证同一 filter 下分页稳定。
+// settled=false 只返回未结算线程，settled=true 只返回已结算线程。该默认是
+// 服务端行为、对所有工具集版本生效，实际生效的筛选以 settled_filter 随结果
+// 回带（附 settled_filter_note 说明），冻结在旧 schema 的会话也能自证口径。
+// env_id 收窄到单环境（不在已连接环境里就报错，不静默返回空）；query 对线程
+// id/标题/项目名/项目 id/环境名做不区分大小写的包含匹配。过滤后按 updated_at
+// 降序、id 升序排序，保证同一 filter 下分页稳定。
 func botSlimThreadList(list *T3ThreadListResponse, args *botThreadArgs) (map[string]interface{}, error) {
 	page, pageSize, err := botThreadPage(args.Page, args.PageSize)
 	if err != nil {
@@ -244,6 +246,12 @@ func botSlimThreadList(list *T3ThreadListResponse, args *botThreadArgs) (map[str
 		updatedAfter = parsed
 	}
 	includeArchived := args.IncludeArchived != nil && *args.IncludeArchived
+	// 默认不含已结算线程（与 settle 描述、帮助文本一致）：省略 settled 等价
+	// settled=false，已结算的要显式 settled=true 才看得到。这是服务端行为，
+	// 对所有工具集版本生效——冻结会话的 schema 仍是旧口径，所以实际生效的
+	// 筛选要随结果回带（settled_filter），让任何版本的模型都能自证看到的是
+	// 哪一侧。
+	wantSettled := args.Settled != nil && *args.Settled
 
 	envID := strings.TrimSpace(args.EnvID)
 	query := strings.ToLower(strings.TrimSpace(args.Query))
@@ -268,9 +276,8 @@ func botSlimThreadList(list *T3ThreadListResponse, args *botThreadArgs) (map[str
 		if args.ProjectID != "" && thread.ProjectId != args.ProjectID {
 			continue
 		}
-		// 默认不含已结算线程（与 settle 描述、帮助文本一致）：省略 settled
-		// 等价 settled=false，已结算的要显式 settled=true 才看得到。
-		wantSettled := args.Settled != nil && *args.Settled
+		// 默认不含已结算线程：省略 settled 等价 settled=false，已结算的要显式
+		// settled=true 才看得到。
 		if thread.Settled != wantSettled {
 			continue
 		}
@@ -348,6 +355,11 @@ func botSlimThreadList(list *T3ThreadListResponse, args *botThreadArgs) (map[str
 		"has_more":         end < total,
 		"environments":     coverage,
 		"include_archived": includeArchived,
+		// 实际生效的结算筛选随结果回带：旧版冻结 schema 只写了 settled=true
+		// 的含义，模型省略 settled 时靠这个字段（与配套说明）知道自己看到的
+		// 只是未结算一侧，不会把 total_items 误读成全部线程。
+		"settled_filter":      wantSettled,
+		"settled_filter_note": "settled_filter 标明本次实际生效的结算筛选：false=默认只返回未结算线程，true=只返回已结算线程（要看历史区传 settled=true）",
 	}
 	if len(incomplete) > 0 {
 		out["incomplete_environments"] = incomplete

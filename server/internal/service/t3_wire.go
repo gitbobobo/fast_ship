@@ -384,8 +384,9 @@ func normalizeT3ThreadShell(env *model.T3Environment, shell *t3ThreadShell, proj
 	if t3IsSubagentThread(shell) && shell.Lineage.ParentThreadID != "" {
 		parentThreadID = api.Ptr(shell.Lineage.ParentThreadID)
 	}
-	// 明细与计数同源：count 取过滤后的可见条数（墓碑/坏条目两头都排除），
-	// 不会出现「列表 2 条、count 3」的分裂。
+	// 明细与计数同源：pullRequests 字段存在（含空数组/全墓碑）时 count 恒为
+	// 过滤后的可见条数（墓碑/坏条目两头都排除），不会出现「列表 2 条、count 3」
+	// 或「明细 []、count 1」的分裂；字段缺失（旧服务端）才回退旧字段口径。
 	prs := normalizeT3PullRequests(shell.PullRequests)
 	return T3ThreadSummary{
 		Id:              shell.ID,
@@ -413,10 +414,13 @@ func normalizeT3ThreadShell(env *model.T3Environment, shell *t3ThreadShell, proj
 	}
 }
 
-// t3PullRequestCount 是摘要上的关联 PR 数：明细数组存在时即过滤后的可见条数；
-// 旧服务端没有明细数组时维持 linkedPullRequest/branchPullRequest 的回退口径。
+// t3PullRequestCount 是摘要上的关联 PR 数：按「字段存在性」判定，与 Go 解
+// JSON 的 nil/空切片区分对齐——pullRequests 字段存在（含显式 [] 与全墓碑）
+// 即取过滤后的可见条数（空数组为 0），明细与计数恒同源；只有字段真的缺失
+// （旧服务端没有该字段，解码为 nil）才回退 linkedPullRequest/branchPullRequest
+// 口径。用 len>0 判会把显式 [] 误当缺失，回退出 count=1/2 与明细 [] 的分裂。
 func t3PullRequestCount(shell *t3ThreadShell, visible int) int {
-	if len(shell.PullRequests) > 0 {
+	if shell.PullRequests != nil {
 		return visible
 	}
 	count := 0

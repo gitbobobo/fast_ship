@@ -6015,7 +6015,7 @@ ThreadItem 列表；条目 ID 由 `sourceThreadId + "::" + T3 原始条目 id` �
 | `thread.updated_at` | string | 是 | T3 原样返回的 ISO-8601 时间 |
 | `thread.settled` | boolean | 是 | 上游 settledOverride=="settled" 原样透传：用户在 T3 把线程收进了历史区。归档判定看 status=archived，与 settled 互不蕴含 |
 | `thread.run_started_at` | string | 否 | 最近 run 的 startedAt（上游 latestRunStartedAt）原样透传，供「运行中 N 分钟」计时；无线程运行记录时缺省 |
-| `thread.pull_request_count` | integer | 是 | 关联 PR 数：shell.pullRequests 存在时与 pull_requests 的可见条数一致（已排除墓碑条目）；该数组缺失时按 linkedPullRequest/branchPullRequest 计 |
+| `thread.pull_request_count` | integer | 是 | 关联 PR 数：shell.pullRequests 字段存在时（含空数组与全墓碑）恒为 pull_requests 过滤后的可见条数（已排除墓碑条目），两侧同源；仅字段缺失（旧服务端）时按 linkedPullRequest/branchPullRequest 计 |
 | `thread.run_status` | string | 是 | T3 原始线程状态（shell.status）原样透传，不做归一化。与归一化后的 status 互补：completed/failed/cancelled/interrupted 等终态在 status 里都会折叠成 idle，这里保留上游原文，供区分「正常结束」「失败」「被取消」。 注意 status 不是 idle 时线程还没结束（后台 run/后台工作仍在），此时 run_status 只是最近一次根 run 的状态；只有 status=idle 时它才代表最终结局 |
 | `thread.pull_requests` | object[] | 是 | 线程关联的 PR 可见明细（来自 shell.pullRequests，已排除 source=stack-dismissed 的墓碑条目——用户取消关联的栈成员，上游仅为同步去重保留）；无可见 PR 时为空数组。旧服务端只有 linkedPullRequest/branchPullRequest 而无明细，此时也是空数组（不合成缺 state 的条目），条目数看 pull_request_count |
 | `thread.pull_requests[].repo` | string | 是 | 仓库标识（host + repository，如 github.com/owner/repo） |
@@ -6244,7 +6244,7 @@ user_input_request（提问）/ secret_request（密钥，绝不携带密钥值�
 | `items[].updated_at` | string | 是 | T3 原样返回的 ISO-8601 时间 |
 | `items[].settled` | boolean | 是 | 上游 settledOverride=="settled" 原样透传：用户在 T3 把线程收进了历史区。归档判定看 status=archived，与 settled 互不蕴含 |
 | `items[].run_started_at` | string | 否 | 最近 run 的 startedAt（上游 latestRunStartedAt）原样透传，供「运行中 N 分钟」计时；无线程运行记录时缺省 |
-| `items[].pull_request_count` | integer | 是 | 关联 PR 数：shell.pullRequests 存在时与 pull_requests 的可见条数一致（已排除墓碑条目）；该数组缺失时按 linkedPullRequest/branchPullRequest 计 |
+| `items[].pull_request_count` | integer | 是 | 关联 PR 数：shell.pullRequests 字段存在时（含空数组与全墓碑）恒为 pull_requests 过滤后的可见条数（已排除墓碑条目），两侧同源；仅字段缺失（旧服务端）时按 linkedPullRequest/branchPullRequest 计 |
 | `items[].run_status` | string | 是 | T3 原始线程状态（shell.status）原样透传，不做归一化。与归一化后的 status 互补：completed/failed/cancelled/interrupted 等终态在 status 里都会折叠成 idle，这里保留上游原文，供区分「正常结束」「失败」「被取消」。 注意 status 不是 idle 时线程还没结束（后台 run/后台工作仍在），此时 run_status 只是最近一次根 run 的状态；只有 status=idle 时它才代表最终结局 |
 | `items[].pull_requests` | object[] | 是 | 线程关联的 PR 可见明细（来自 shell.pullRequests，已排除 source=stack-dismissed 的墓碑条目——用户取消关联的栈成员，上游仅为同步去重保留）；无可见 PR 时为空数组。旧服务端只有 linkedPullRequest/branchPullRequest 而无明细，此时也是空数组（不合成缺 state 的条目），条目数看 pull_request_count |
 | `items[].pull_requests[].repo` | string | 是 | 仓库标识（host + repository，如 github.com/owner/repo） |

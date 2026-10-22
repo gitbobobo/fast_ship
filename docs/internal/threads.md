@@ -375,8 +375,9 @@ kind 缺省按 background_task 加载）→ 存在占位条目即 `running`；�
 `snapshot` 为 null 时后五项省略。数据只来自 `shell.pullRequests`，并跳过
 `source=stack-dismissed` 的墓碑（用户解开的栈成员，上游
 `visibleThreadPullRequests` 同样隐藏）与解析失败的坏条目；
-`pull_request_count` 与可见明细同口径（旧服务端没有明细数组时才回退到
-`linkedPullRequest`/`branchPullRequest`），无 PR 时恒为空数组。
+`pull_request_count` 按「字段存在性」与可见明细同口径：`pullRequests` 存在
+（含显式空数组与全墓碑）时恒等于可见条数，只有字段缺失（旧服务端）才回退到
+`linkedPullRequest`/`branchPullRequest`；无 PR 时恒为空数组。
 
 ### Turn item 归一化映射
 

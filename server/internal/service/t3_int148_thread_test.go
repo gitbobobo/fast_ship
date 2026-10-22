@@ -96,6 +96,43 @@ func TestT3Int148PullRequestProjection(t *testing.T) {
 	}
 }
 
+// pull_request_count 按「字段存在性」判定：pullRequests 字段存在（Go 解 JSON
+// 时显式 [] 是非 nil 空切片，与字段缺失的 nil 可区分）即恒等于可见明细条数，
+// 即使同时残留旧字段 linkedPullRequest/branchPullRequest 也不回退；只有字段
+// 真的缺失（旧服务端）才按旧字段计数。否则会出现「明细 []、count 1」的分裂。
+func TestT3Int148PullRequestCountFieldPresence(t *testing.T) {
+	legacyRaw := json.RawMessage(`{"repository":"owner/x","number":3,"url":"u"}`)
+
+	// 字段缺失 + 旧字段存在：回退旧字段口径。
+	legacy := &t3ThreadShell{ID: "th-1", Status: "idle", LinkedPullReq: &legacyRaw}
+	legacySummary := normalizeT3ThreadShell(int148ThreadEnv(), legacy, nil)
+	if len(legacySummary.PullRequests) != 0 || legacySummary.PullRequestCount != 1 {
+		t.Fatalf("字段缺失应回退旧字段计数 1，实得 len=%d count=%d",
+			len(legacySummary.PullRequests), legacySummary.PullRequestCount)
+	}
+
+	// 字段为显式 [] + 旧字段存在：字段存在优先，不回退。
+	emptyWithLegacy := &t3ThreadShell{
+		ID: "th-2", Status: "idle",
+		PullRequests:  []json.RawMessage{},
+		LinkedPullReq: &legacyRaw,
+		BranchPullReq: &legacyRaw,
+	}
+	emptySummary := normalizeT3ThreadShell(int148ThreadEnv(), emptyWithLegacy, nil)
+	if len(emptySummary.PullRequests) != 0 || emptySummary.PullRequestCount != 0 {
+		t.Fatalf("字段为 [] 时不回退：应明细空、count=0，实得 len=%d count=%d",
+			len(emptySummary.PullRequests), emptySummary.PullRequestCount)
+	}
+
+	// 字段为 [] 且无旧字段：同样 count=0。
+	empty := &t3ThreadShell{ID: "th-3", Status: "idle", PullRequests: []json.RawMessage{}}
+	emptyOnly := normalizeT3ThreadShell(int148ThreadEnv(), empty, nil)
+	if len(emptyOnly.PullRequests) != 0 || emptyOnly.PullRequestCount != 0 {
+		t.Fatalf("字段为 [] 应 count=0，实得 len=%d count=%d",
+			len(emptyOnly.PullRequests), emptyOnly.PullRequestCount)
+	}
+}
+
 // 墓碑条目（source=stack-dismissed，用户取消关联的栈成员）：上游只为同步去重
 // 保留，客户端要隐藏——不进 pull_requests[] 也不计入 pull_request_count，
 // 计数与可见明细恒一致。

@@ -225,9 +225,10 @@ func (s *BotService) dispatchDueScheduleTask(task *model.BotScheduleTask, now ti
 		} else if overlapRun != nil {
 			// 上一轮未结束：本轮不并行，直接落 skipped 终态。不设 StartedAt 与
 			// 触发上下文（与错过的 skipped 同型），也不唤醒执行槽；next_run_at
-			// 照常推进，否则任务每 tick 空转。
+			// 照常推进，否则任务每 tick 空转。带出阻塞 run 的 ID：排查卡死的
+			// run 时从本行摘要就能直接定位是哪一轮在阻塞。
 			run.Status = model.BotRunStatusSkipped
-			run.Summary = "上一次运行尚未结束，本轮跳过（不并行）"
+			run.Summary = fmt.Sprintf("上一次运行尚未结束（run %s），本轮跳过（不并行）", overlapRun.ID)
 			finished := now
 			run.FinishedAt = &finished
 		} else if missed {

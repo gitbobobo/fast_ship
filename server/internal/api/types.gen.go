@@ -4434,7 +4434,7 @@ type T3ThreadSummary struct {
 	// Provider T3 providerInstanceId
 	Provider string `json:"provider"`
 
-	// PullRequestCount 关联 PR 数：shell.pullRequests 存在时与 pull_requests 的可见条数一致（已排除墓碑条目）；该数组缺失时按 linkedPullRequest/branchPullRequest 计
+	// PullRequestCount 关联 PR 数：shell.pullRequests 字段存在时（含空数组与全墓碑）恒为 pull_requests 过滤后的可见条数（已排除墓碑条目），两侧同源；仅字段缺失（旧服务端）时按 linkedPullRequest/branchPullRequest 计
 	PullRequestCount int `json:"pull_request_count"`
 
 	// PullRequests 线程关联的 PR 可见明细（来自 shell.pullRequests，已排除 source=stack-dismissed 的墓碑条目——用户取消关联的栈成员，上游仅为同步去重保留）；无可见 PR 时为空数组。旧服务端只有 linkedPullRequest/branchPullRequest 而无明细，此时也是空数组（不合成缺 state 的条目），条目数看 pull_request_count

@@ -11727,7 +11727,7 @@ components:
           description: 最近 run 的 startedAt（上游 latestRunStartedAt）原样透传，供「运行中 N 分钟」计时；无线程运行记录时缺省
         pull_request_count:
           type: integer
-          description: 关联 PR 数：shell.pullRequests 存在时与 pull_requests 的可见条数一致（已排除墓碑条目）；该数组缺失时按 linkedPullRequest/branchPullRequest 计
+          description: 关联 PR 数：shell.pullRequests 字段存在时（含空数组与全墓碑）恒为 pull_requests 过滤后的可见条数（已排除墓碑条目），两侧同源；仅字段缺失（旧服务端）时按 linkedPullRequest/branchPullRequest 计
         run_status:
           type: string
           description: |
