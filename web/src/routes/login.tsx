@@ -9,6 +9,7 @@ import { loginSchema, type LoginInput } from "@/lib/utils/validators";
 import { authApi } from "@/lib/api/auth";
 import { useAuthStore } from "@/lib/store/auth-store";
 import { DEFAULT_POST_LOGIN_PATH, safeNextPath } from "@/lib/utils/safe-next";
+import { syncBrowserTimezone } from "@/lib/utils/timezone";
 import { useState } from "react";
 
 export default function LoginPage() {
@@ -31,6 +32,12 @@ export default function LoginPage() {
     try {
       const res = await authApi.login(data);
       setAuth(res.data.token, res.data.refresh_token, res.data.user);
+      // 用户还没声明时区时按浏览器时区写一次（helper 内部静默失败，不阻断跳转）；
+      // 只有真正拿到新 user 才回写 store，避免无谓的状态更新。
+      const syncedUser = await syncBrowserTimezone(res.data.user);
+      if (syncedUser !== res.data.user) {
+        useAuthStore.getState().setUser(syncedUser);
+      }
       navigate(next ?? DEFAULT_POST_LOGIN_PATH, { replace: true });
     } catch {
       setError("用户名/邮箱或密码错误");

@@ -9,6 +9,8 @@ interface User {
   email: string;
   avatar_url: string;
   role: UserRole;
+  /** 用户 IANA 时区（如 Asia/Shanghai）；空串表示未声明，机器人按部署配置回退 */
+  timezone: string;
   created_at: string;
   updated_at: string;
 }

@@ -55,6 +55,7 @@ function member(id: string, role: UserRole): Member {
     email: `${id}@example.com`,
     avatar_url: "",
     role,
+    timezone: "",
     created_at: "2026-10-01T00:00:00Z",
     updated_at: "2026-10-01T00:00:00Z",
   };

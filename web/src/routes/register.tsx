@@ -12,6 +12,7 @@ import { authApi } from "@/lib/api/auth";
 import { ApiRequestError } from "@/lib/api/client";
 import { useAuthStore } from "@/lib/store/auth-store";
 import { formatDate } from "@/lib/utils/format";
+import { syncBrowserTimezone } from "@/lib/utils/timezone";
 
 type InviteCheck =
   | { state: "none" }
@@ -46,6 +47,12 @@ function RegisterForm({
         invite_token: inviteToken || undefined,
       });
       setAuth(res.data.token, res.data.refresh_token, res.data.user);
+      // 用户还没声明时区时按浏览器时区写一次（helper 内部静默失败，不阻断跳转）；
+      // 只有真正拿到新 user 才回写 store。
+      const syncedUser = await syncBrowserTimezone(res.data.user);
+      if (syncedUser !== res.data.user) {
+        useAuthStore.getState().setUser(syncedUser);
+      }
       navigate("/dashboard", { replace: true });
     } catch (err) {
       // 失败文案用服务端 message（40306 注册关闭、40432 邀请失效、
