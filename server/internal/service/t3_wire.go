@@ -72,6 +72,77 @@ type t3PendingBackgroundTask struct {
 	Kind   string `json:"kind"`
 }
 
+// t3PullRequestSnapshot 是 PR 链接上的宿主状态快照（contracts
+// threadPullRequest.ts ThreadPullRequestSnapshot，可为 null）：只解码投影
+// 需要的概览字段，未知字段忽略。
+type t3PullRequestSnapshot struct {
+	State        string  `json:"state"`
+	MergedAt     *string `json:"mergedAt"`
+	IsDraft      *bool   `json:"isDraft"`
+	ChecksState  *string `json:"checksState"`
+	Mergeability *string `json:"mergeability"`
+}
+
+// t3PullRequestLink 是线程上的一条 PR 链接（contracts threadPullRequest.ts
+// ThreadPullRequestLink）：host+repository+number 是宿主级身份；watch 存在即
+// 表示服务端挂着 PR 监听。snapshot 可为 null（首次同步前）。source 是链接
+// 创建方，stack-dismissed 是墓碑——用户取消关联的栈成员，上游只为同步去重
+// 保留，客户端要隐藏。
+type t3PullRequestLink struct {
+	Host       string                 `json:"host"`
+	Repository string                 `json:"repository"`
+	Number     int                    `json:"number"`
+	URL        string                 `json:"url"`
+	Source     string                 `json:"source"`
+	Snapshot   *t3PullRequestSnapshot `json:"snapshot"`
+	Watch      *json.RawMessage       `json:"watch"`
+}
+
+// normalizeT3PullRequests 把 shell.pullRequests 的原始 JSON 解成对外投影。
+// 两类条目跳过：单条解析失败/缺身份的坏数据（一条坏数据不该毁掉整个列表），
+// 以及 source=stack-dismissed 的墓碑条目（对齐上游 visibleThreadPullRequests）。
+// 明细与 pull_request_count 都基于过滤后的可见条数，两侧一致。旧服务端没有
+// 该数组（返回 nil），明细不从 linkedPullRequest/branchPullRequest 合成——
+// 合成条目缺 state，只会误导。
+func normalizeT3PullRequests(raw []json.RawMessage) []api.T3ThreadPullRequest {
+	out := make([]api.T3ThreadPullRequest, 0, len(raw))
+	for _, item := range raw {
+		var link t3PullRequestLink
+		if err := json.Unmarshal(item, &link); err != nil || link.Repository == "" || link.Number == 0 {
+			continue
+		}
+		// 墓碑条目：用户已取消关联，投影与计数都不收。
+		if link.Source == "stack-dismissed" {
+			continue
+		}
+		// repo 是宿主级仓库标识：host 缺失（理论不该发生）时退化为 repository。
+		repo := link.Repository
+		if link.Host != "" {
+			repo = link.Host + "/" + link.Repository
+		}
+		// watch 显式 null 与缺省等价（上游 schema 是 optional，防御一下）。
+		watching := link.Watch != nil && strings.TrimSpace(string(*link.Watch)) != "" &&
+			string(*link.Watch) != "null"
+		pr := api.T3ThreadPullRequest{
+			Repo:     repo,
+			Number:   link.Number,
+			Url:      link.URL,
+			Watching: watching,
+		}
+		if link.Snapshot != nil {
+			pr.State = api.NonEmpty(link.Snapshot.State)
+			pr.MergedAt = api.NonEmptyPtr(link.Snapshot.MergedAt)
+			if link.Snapshot.IsDraft != nil {
+				pr.IsDraft = api.Ptr(*link.Snapshot.IsDraft)
+			}
+			pr.ChecksState = api.NonEmptyPtr(link.Snapshot.ChecksState)
+			pr.Mergeability = api.NonEmptyPtr(link.Snapshot.Mergeability)
+		}
+		out = append(out, pr)
+	}
+	return out
+}
+
 type t3ThreadShell struct {
 	ID                    string                   `json:"id"`
 	ProjectID             string                   `json:"projectId"`
@@ -313,6 +384,10 @@ func normalizeT3ThreadShell(env *model.T3Environment, shell *t3ThreadShell, proj
 	if t3IsSubagentThread(shell) && shell.Lineage.ParentThreadID != "" {
 		parentThreadID = api.Ptr(shell.Lineage.ParentThreadID)
 	}
+	// 明细与计数同源：pullRequests 字段存在（含空数组/全墓碑）时 count 恒为
+	// 过滤后的可见条数（墓碑/坏条目两头都排除），不会出现「列表 2 条、count 3」
+	// 或「明细 []、count 1」的分裂；字段缺失（旧服务端）才回退旧字段口径。
+	prs := normalizeT3PullRequests(shell.PullRequests)
 	return T3ThreadSummary{
 		Id:              shell.ID,
 		EnvironmentId:   env.ID,
@@ -329,14 +404,24 @@ func normalizeT3ThreadShell(env *model.T3Environment, shell *t3ThreadShell, proj
 		Provider:         shell.ModelSelection.InstanceID,
 		Model:            shell.ModelSelection.Model,
 		UpdatedAt:        shell.UpdatedAt,
-		PullRequestCount: t3PullRequestCount(shell),
-		ParentThreadId:   parentThreadID,
+		PullRequestCount: t3PullRequestCount(shell, len(prs)),
+		// run_status 是 shell.status 原文（不归一化）：completed/failed/cancelled
+		// 在 status 里都折叠成 idle，终态区分靠这里。pull_requests 只来自
+		// shell.pullRequests 明细；恒为数组（无 PR 即空），恒出现在响应里。
+		RunStatus:      shell.Status,
+		PullRequests:   prs,
+		ParentThreadId: parentThreadID,
 	}
 }
 
-func t3PullRequestCount(shell *t3ThreadShell) int {
-	if len(shell.PullRequests) > 0 {
-		return len(shell.PullRequests)
+// t3PullRequestCount 是摘要上的关联 PR 数：按「字段存在性」判定，与 Go 解
+// JSON 的 nil/空切片区分对齐——pullRequests 字段存在（含显式 [] 与全墓碑）
+// 即取过滤后的可见条数（空数组为 0），明细与计数恒同源；只有字段真的缺失
+// （旧服务端没有该字段，解码为 nil）才回退 linkedPullRequest/branchPullRequest
+// 口径。用 len>0 判会把显式 [] 误当缺失，回退出 count=1/2 与明细 [] 的分裂。
+func t3PullRequestCount(shell *t3ThreadShell, visible int) int {
+	if shell.PullRequests != nil {
+		return visible
 	}
 	count := 0
 	if shell.LinkedPullReq != nil {

@@ -18,9 +18,11 @@ import (
 
 // 定时任务调度（INT-103）：单进程一个 10s ticker，与审查调度同一纪律——
 // 数据库是事实来源，MaxOpenConns(1) 下事务内绝不发网络调用。每个
-// tick 短事务内逐任务处理：到期 →（错过超宽限记 skipped | 建运行行）→ CAS
-// 推进 next_run_at；随后事务外唤醒执行槽。重启不补跑：错过的计划时间按
-// 「跳过并记录」处理，未完成的 schedule run 由启动恢复统一置 failed。
+// tick 短事务内逐任务处理：到期 →（错过超宽限或上一轮未结束记 skipped |
+// 建运行行）→ CAS 推进 next_run_at；随后事务外唤醒执行槽。同一任务不并行
+// （INT-148）：上一轮未结束时到点的这一轮记 skipped，与手动触发的忙碌拒绝
+// 同语义。重启不补跑：错过的计划时间按「跳过并记录」处理，未完成的
+// schedule run 由启动恢复统一置 failed。
 
 const (
 	botScheduleTickInterval = 10 * time.Second
@@ -184,6 +186,19 @@ func (s *BotService) dispatchDueScheduleTask(task *model.BotScheduleTask, now ti
 			}
 		}
 
+		// 同一任务上一轮未结束（INT-148）：本轮到点不并行执行。查询在本次
+		// tx.Create(run) 之前做——新 run 还没建，不会把自己算进去。取最早一条
+		// 未结束 run：既判重叠，又给跳过事件的去重键提供 run id。熔断优先：
+		// 熔断窗口内无论上一轮是否结束都记熔断跳过，不再多查一次。
+		var overlapRun *model.BotRun
+		if circuit == nil {
+			first, err := repository.NewBotRunRepository(tx).FirstUnfinishedByScheduleTaskTx(tx, current.BotID, current.ID)
+			if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+				return err
+			}
+			overlapRun = first
+		}
+
 		run := &model.BotRun{
 			ID: uuid.NewString(), BotID: current.BotID,
 			TriggerSource: model.BotTriggerSchedule,
@@ -205,6 +220,15 @@ func (s *BotService) dispatchDueScheduleTask(task *model.BotScheduleTask, now ti
 			// 写明原因、自动恢复时间与手动恢复方式。
 			run.Status = model.BotRunStatusSkipped
 			run.Summary = botCircuitSkipSummary(circuit)
+			finished := now
+			run.FinishedAt = &finished
+		} else if overlapRun != nil {
+			// 上一轮未结束：本轮不并行，直接落 skipped 终态。不设 StartedAt 与
+			// 触发上下文（与错过的 skipped 同型），也不唤醒执行槽；next_run_at
+			// 照常推进，否则任务每 tick 空转。带出阻塞 run 的 ID：排查卡死的
+			// run 时从本行摘要就能直接定位是哪一轮在阻塞。
+			run.Status = model.BotRunStatusSkipped
+			run.Summary = fmt.Sprintf("上一次运行尚未结束（run %s），本轮跳过（不并行）", overlapRun.ID)
 			finished := now
 			run.FinishedAt = &finished
 		} else if missed {
@@ -241,12 +265,25 @@ func (s *BotService) dispatchDueScheduleTask(task *model.BotScheduleTask, now ti
 			}
 			return err
 		}
-		if !missed && circuit == nil {
+		if !missed && overlapRun == nil && circuit == nil {
 			wakeRunID = run.ID
 		} else if circuit != nil {
 			// 熔断期间不逐次打扰主线：同一次熔断只留一条去重事件（含
 			// needs_report 的任务也一样），后续到点只记 skipped run。
 			appended, err := s.appendCircuitScheduleEventTx(tx, current.BotID, &current, run, circuit, now)
+			if err != nil {
+				return err
+			}
+			appendedEvent = appended
+			eventRunID = run.ID
+		} else if overlapRun != nil && current.NeedsReport {
+			// 需要汇报的任务：重叠跳过也是一次「没跑」，但去重键钉在未结束的
+			// 上一轮 run 上——周期短于运行时长（或一条 run 卡死等重启恢复）时，
+			// 同一轮未结束期间只追加一条主线事件，不逐次刷屏；上一轮结束后
+			// 再重叠才会产生下一条。
+			dedup := botScheduleOverlapDedupKey(current.ID, overlapRun.ID)
+			appended, err := s.appendScheduleEventTxDeduped(tx, current.BotID, &current, run,
+				model.BotRunStatusSkipped, run.Summary, "", "", dedup, now)
 			if err != nil {
 				return err
 			}
@@ -293,6 +330,12 @@ func (s *BotService) dispatchDueScheduleTask(task *model.BotScheduleTask, now ti
 // 一次 run。
 func botScheduleTriggerKey(taskID string, planned time.Time) string {
 	return "schedule:" + taskID + ":" + planned.UTC().Format(time.RFC3339Nano)
+}
+
+// botScheduleOverlapDedupKey 是「上一轮未结束」跳过事件的去重键：钉在未结束
+// 的那一轮 run 上，同一轮未结束期间多次到点只留一条主线事件（INT-148）。
+func botScheduleOverlapDedupKey(taskID, runID string) string {
+	return "schedule_overlap:" + taskID + ":" + runID
 }
 
 // wakeScheduleEvent 在定时任务运行事件（schedule_event）提交进主线后立即

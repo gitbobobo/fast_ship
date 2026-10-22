@@ -126,6 +126,11 @@ const (
 	botScopeThreadLaunch      = "thread_launch"
 	botScopeThread            = "thread"
 	botScopeThreadStop        = "thread_stop"
+	// botScopeThreadSettle 结算/撤销结算（settle/unsettle），botScopeThreadQueue
+	// 恢复队列（resume_queue）：都是按线程粒度的写操作，scope kind 只进授权
+	// 规则哈希与确认卡片展示。
+	botScopeThreadSettle = "thread_settle"
+	botScopeThreadQueue  = "thread_queue"
 )
 
 // botValidatePage 校验分页参数：工具适配层不照搬 HTTP handler 的假设。
