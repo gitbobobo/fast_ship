@@ -63,6 +63,12 @@ func (s *BotService) matchAuthorization(botID string, prepared *botPreparedCall)
 	rule := botRuleOf(prepared)
 	authz, err := s.authz.FindActiveRuleTx(s.db, botID, botRuleHash(rule))
 	if err != nil {
+		// 查询失败按无授权处理（调用转确认，方向安全），但要留痕——否则
+		// 数据库降级时会无声地变成一场解释不清的确认卡风暴。
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			s.logger.Warn("授权规则查询失败，按无授权处理",
+				zap.String("bot_id", botID), zap.Error(err))
+		}
 		return nil
 	}
 	return authz
@@ -209,6 +215,17 @@ func (s *BotService) DecideCall(userID, botID, callID string, req *CallDecisionR
 	// always_allow 的精确授权值：同一事务中建立并批准当前调用。
 	var newAuthz *model.BotAuthorization
 	if decision == model.BotDecisionAlwaysAllow {
+		// 定时任务的「始终允许」只留给 run（INT-136）：范围=单个任务 ID，
+		// 用户此前已确认过该任务。create/update 的指令全文每次都可能不同，
+		// 一旦豁免，模型改写任务指令时用户没有看过新指令，而任务以后每次
+		// 运行都默认放行写操作，等于一次点击永久授权未知的指令；enable 是
+		// 重新武装，delete 不可逆，同样不能一次点完永久生效。未列出的动作
+		// ——包括未来新增动作——一律拒绝：受理端对未识别动作 fail-closed
+		// 弹确认，这里若默认放行豁免，洞会原样重开。
+		if call.ToolName == "fs_schedule" && call.Action != "run" {
+			return nil, errs.New(errs.ErrInvalidParams.Code,
+				"定时任务只有手动运行支持「始终允许」；创建/修改/启用/删除等其余动作每次都要确认")
+		}
 		newAuthz = s.buildAlwaysAllowValue(botID, call)
 	}
 

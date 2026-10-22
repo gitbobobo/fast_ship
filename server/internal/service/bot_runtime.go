@@ -675,8 +675,11 @@ type botToolReplyContent struct {
 	CallID             string `json:"call_id"`
 	ProviderToolCallID string `json:"provider_tool_call_id"`
 	ToolName           string `json:"tool_name"`
-	Status             string `json:"status"`
-	Content            string `json:"content"`
+	// Action 用于出口围栏的豁免判定（fs_schedule/state_set 这类平台自有回执）；
+	// INT-136 之前的存量行没有该字段，按「未豁免」处理（方向安全）。
+	Action  string `json:"action,omitempty"`
+	Status  string `json:"status"`
+	Content string `json:"content"`
 }
 
 // botBackgroundResultContent 是后台完成投影出的「平台后台结果」消息。

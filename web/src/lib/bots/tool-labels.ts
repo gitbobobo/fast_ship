@@ -1,10 +1,13 @@
 // 工具调用的本地化展示映射表：调用卡/确认卡只查表渲染，不展示原始
 // 工具标识（原始 tool.action 收进「查看原始调用」）。
-// 唯一事实源是 server/internal/service/bot_tools.go 的 botToolRegistryV5()
-// 与 botReadOnlyActions——后端新增或改名工具/action 时必须同步此表；
-// effect 不能靠 requires_confirmation 推断（fs_schedule 的写操作是同步
-// 执行、不需要确认，但仍是写入）。表外条目一律安全回退：账本可能先于
-// 界面升级，展示层不得抛错。
+// 唯一事实源是 server/internal/service/bot_tools.go 的 botToolRegistryV8()
+// 与 botReadOnlyActions——后端新增或改名工具/action 时必须同步此表。
+// fs_schedule 的 create、涉及 instruction/needs_report/model 的 update、
+// run（dry_run=true 预览除外）、enable、delete 需要用户确认后异步执行；
+// list/runs/disable 与只改 name/cron/timezone 的 update、dry_run 预览仍是
+// 同步。同步不等于只读（disable/state_set 都写），effect 不能靠
+// requires_confirmation 推断。表外条目一律安全回退：账本可能先于界面
+// 升级，展示层不得抛错。
 
 export type ToolEffect = "read" | "write";
 
@@ -109,6 +112,18 @@ export const TOOL_EFFECT_BADGE: Record<ToolEffect, string> = {
   read: "bg-muted text-muted-foreground",
   write: "bg-blue-500/15 text-blue-700 dark:text-blue-400",
 };
+
+// 模型可写文本进批准/展示界面时剥掉格式字符（Cf，如 U+202E 双向覆盖）
+// 与除换行/制表外的控制字符：不剥的话确认卡/chips 上的文本会被重排成
+// 与执行内容相反的顺序，或夹带不可见字符。\n 与 \t 保留——多行任务指令
+// 的行结构本身就是被批准的内容，剥了会让用户看到折成一行的指令；\r 是
+// 行覆盖符，剥掉（服务端 legacyNoticeTaskName 剥全部 Cc/Cf 是因为它只
+// 处理单行任务名）。
+const BIDI_UNSAFE_CHAR = /\p{Cc}|\p{Cf}/u;
+export const bidiSafeText = (v: string) =>
+  [...v]
+    .filter((ch) => ch === "\n" || ch === "\t" || !BIDI_UNSAFE_CHAR.test(ch))
+    .join("");
 
 export interface ToolParamChip {
   /** 参数名（同时当渲染 key）。 */

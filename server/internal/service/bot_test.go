@@ -1491,7 +1491,8 @@ func TestBotResultTruncation(t *testing.T) {
 	if err := json.Unmarshal([]byte(content), &page); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if page.Offset != botResultBudgetChars || len([]rune(page.Content)) != 10 || !page.HasMore {
+	// 续读切片原样返回（围栏由模型输入出口统一包，不在结果里）。
+	if page.Offset != botResultBudgetChars || !page.HasMore || len([]rune(page.Content)) != 10 {
 		t.Fatalf("续读结果不符: %+v", page)
 	}
 	if page.NextOffset != page.Offset+10 {

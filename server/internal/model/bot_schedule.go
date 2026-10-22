@@ -19,6 +19,11 @@ type BotScheduleTask struct {
 	Model string `gorm:"type:text;not null;default:''" json:"model"`
 	// NeedsReport 为 true 时，成功且非静默的运行也追加事件进主线。
 	NeedsReport bool `gorm:"not null;default:false" json:"needs_report"`
+	// Confirmed 记录任务当前配置是否经确认卡复核过（INT-136）：确认机制
+	// 上线后的 create、带确认卡的 update 与 enable 置位；上线前的存量行
+	// 保持 false，启动迁移据此向主线发一次性复核提示（不经卡片的 REST
+	// 启停与 disable 不改写）。
+	Confirmed bool `gorm:"not null;default:false" json:"confirmed"`
 	// Enabled 关闭后不再触发；重新开启时 next_run_at 重算为 now 之后的下一次。
 	Enabled bool `gorm:"not null;default:true" json:"enabled"`
 	// NextRunAt 是下一次计划触发时间（UTC）；nil 表示停用或配置损坏暂停。

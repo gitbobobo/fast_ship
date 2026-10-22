@@ -57,7 +57,7 @@ func (s *BotService) execIssueRead(ctx context.Context, call *model.BotToolCall)
 			if err != nil {
 				return "", err
 			}
-			return botMarshalResult(botSlimPage("comments", items, total, page, pageSize))
+			return botMarshalResult(botSlimPage("comments", botSlimIssueComments(items), total, page, pageSize))
 		default:
 			page, pageSize, pageErr := botValidatePage(args.Page, args.PageSize)
 			if pageErr != nil {
@@ -67,7 +67,7 @@ func (s *BotService) execIssueRead(ctx context.Context, call *model.BotToolCall)
 			if err != nil {
 				return "", err
 			}
-			return botMarshalResult(botSlimPage("timeline", items, total, page, pageSize))
+			return botMarshalResult(botSlimPage("timeline", botSlimIssueTimeline(items), total, page, pageSize))
 		}
 	}
 	return "", errs.New(errs.ErrInvalidParams.Code, "fs_issue 不支持该读取动作")
@@ -83,6 +83,7 @@ func botSlimIssues(items []IssueResponse) []map[string]interface{} {
 }
 
 // botSlimIssueListItem 是列表项的精简形状：列表保持轻量，详情走 get。
+// 外部文本由模型输入的出口统一围栏（botFenceToolResult），这里只负责瘦身。
 func botSlimIssueListItem(i *IssueResponse) map[string]interface{} {
 	out := map[string]interface{}{
 		"id":         i.Id,
@@ -132,8 +133,52 @@ func botSlimIssueDetail(i *IssueResponse) map[string]interface{} {
 	return out
 }
 
+// botSlimIssueComments 是 comments 的精简投影：只给模型决策所需的字段，
+// 不再整包透出 api.IssueComment；body 是外部内容，进不可信围栏（INT-136）。
+func botSlimIssueComments(items []IssueCommentResponse) []map[string]interface{} {
+	out := make([]map[string]interface{}, 0, len(items))
+	for i := range items {
+		c := &items[i]
+		out = append(out, map[string]interface{}{
+			"id":         c.Id,
+			"source":     string(c.Source),
+			"author":     c.Author.Login,
+			"body":       c.Body,
+			"created_at": c.CreatedAt,
+		})
+	}
+	return out
+}
+
+// botSlimIssueTimeline 是 timeline 的精简投影：不再整包透出
+// api.IssueTimelineEvent；summary/body 是外部内容，进不可信围栏（INT-136）。
+// 空串字段省略，投影保持轻量。
+func botSlimIssueTimeline(items []IssueTimelineEventResponse) []map[string]interface{} {
+	out := make([]map[string]interface{}, 0, len(items))
+	for i := range items {
+		e := &items[i]
+		item := map[string]interface{}{
+			"id":         e.Id,
+			"event_type": e.EventType,
+			"created_at": e.CreatedAt,
+		}
+		if e.Actor.Login != "" {
+			item["actor"] = e.Actor.Login
+		}
+		if e.Summary != "" {
+			item["summary"] = e.Summary
+		}
+		if e.Body != "" {
+			item["body"] = e.Body
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
 // botIssueConflictResult 把「他人已改动，本次未执行」回给模型：带上目标最新
-// 内容，便于重新读取并保留双方修改后再提交，而不是静默覆盖。
+// 内容，便于重新读取并保留双方修改后再提交，而不是静默覆盖。current 与
+// get 同一投影，外部字段同样进围栏（INT-136）。
 func botIssueConflictResult(reason string, current *IssueResponse) map[string]interface{} {
 	return map[string]interface{}{
 		"conflict": true,
@@ -158,10 +203,18 @@ func (s *BotService) runIssueWrite(ctx context.Context, call *model.BotToolCall)
 		}
 		source := strings.TrimSpace(args.Source)
 		if source == "" || source == "internal" {
-			return s.issues.CreateInternalIssue(args.ProjectID, userID, req)
+			created, err := s.issues.CreateInternalIssue(args.ProjectID, userID, req)
+			if err != nil {
+				return nil, err
+			}
+			return botSlimIssueDetail(created), nil
 		}
 		if source == "github" {
-			return s.issues.CreateGitHubIssueContext(ctx, args.ProjectID, userID, req)
+			created, err := s.issues.CreateGitHubIssueContext(ctx, args.ProjectID, userID, req)
+			if err != nil {
+				return nil, err
+			}
+			return botSlimIssueDetail(created), nil
 		}
 		return nil, errs.New(errs.ErrInvalidParams.Code, "source 只支持 internal/github")
 	case "update":
@@ -195,10 +248,18 @@ func (s *BotService) runIssueWrite(ctx context.Context, call *model.BotToolCall)
 			state := model.IssueState(args.State)
 			req.State = &state
 		}
-		return s.issues.UpdateInternalIssueContext(ctx, args.IssueID, userID, req)
+		updated, err := s.issues.UpdateInternalIssueContext(ctx, args.IssueID, userID, req)
+		if err != nil {
+			return nil, err
+		}
+		return botSlimIssueDetail(updated), nil
 	case "set_workflow":
 		status := model.IssueWorkflowStatus(strings.TrimSpace(args.WorkflowStatus))
-		return s.issues.UpdateInternalMeta(args.IssueID, userID, status, botIssueActor)
+		meta, err := s.issues.UpdateInternalMeta(args.IssueID, userID, status, botIssueActor)
+		if err != nil {
+			return nil, err
+		}
+		return meta, nil
 	case "replace_checklist":
 		// 写入保护：清单整组替换前核对上次读到的清单版本。
 		if expected := strings.TrimSpace(args.ExpectedChecklistUpdatedAt); expected != "" {
@@ -215,11 +276,19 @@ func (s *BotService) runIssueWrite(ctx context.Context, call *model.BotToolCall)
 			}
 		}
 		req := ReplaceIssueChecklistRequest{Items: args.Items}
-		return s.issues.ReplaceChecklist(args.IssueID, userID, req, botIssueActor)
+		meta, err := s.issues.ReplaceChecklist(args.IssueID, userID, req, botIssueActor)
+		if err != nil {
+			return nil, err
+		}
+		return meta, nil
 	case "comment":
 		req := CreateInternalIssueCommentRequest{Body: args.CommentBody}
 		// 复用已有幂等入口；幂等键是服务端调用 ID，不让模型指定。
-		return s.issues.CreateInternalCommentIdempotentContext(ctx, args.IssueID, userID, req, botIssueActor, call.ID)
+		comment, err := s.issues.CreateInternalCommentIdempotentContext(ctx, args.IssueID, userID, req, botIssueActor, call.ID)
+		if err != nil {
+			return nil, err
+		}
+		return comment, nil
 	}
 	return nil, errs.New(errs.ErrInvalidParams.Code, "fs_issue 不支持该写动作")
 }

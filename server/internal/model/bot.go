@@ -61,6 +61,10 @@ type Bot struct {
 	// 不读也不写这个水位。
 	StyleCompactionVersion int64 `gorm:"not null;default:0" json:"-"`
 
+	// UntrustedNonce 是不可信数据围栏的平台 nonce（INT-136）：创建时生成、
+	// 迁移补齐，之后不再变化（前缀与围栏标记要稳定）。
+	UntrustedNonce string `gorm:"type:text;not null;default:''" json:"-"`
+
 	CreatedAt time.Time `gorm:"not null" json:"created_at"`
 	UpdatedAt time.Time `gorm:"not null" json:"updated_at"`
 

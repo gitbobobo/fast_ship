@@ -589,6 +589,19 @@ func runBootMigrations(db *gorm.DB, fileStorage storage.Storage, logger *zap.Log
 		return fmt.Errorf("AI 提供商迁移失败: %w", err)
 	}
 
+	// 机器人围栏 nonce（INT-136）：只为空值行生成一次，已有的 nonce 永不
+	// 改写。必须在 AutoMigrate 之后（依赖 bots.untrusted_nonce 列）。
+	if err := migrateBotUntrustedNonce(db, logger); err != nil {
+		return fmt.Errorf("机器人围栏 nonce 迁移失败: %w", err)
+	}
+
+	// 存量定时任务复核提示（INT-136）：确认机制上线前创建的任务其指令从未
+	// 经确认卡复核，升级后向所在机器人主线发一次性提示（只提示不阻断）。
+	// 必须在 AutoMigrate 之后（依赖 bot_schedule_tasks.confirmed 列）。
+	if err := migrateLegacyScheduleNotice(db, logger); err != nil {
+		return fmt.Errorf("存量定时任务复核提示迁移失败: %w", err)
+	}
+
 	createBootIndexes(db)
 
 	// 用户角色（INT-129）：AutoMigrate 补齐 users.role 后，存量库可能一个

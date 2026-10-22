@@ -430,13 +430,13 @@ func TestInt124NightlyCatchUp(t *testing.T) {
 }
 
 // TestInt124PlatformPromptProactiveMemory 平台提示词：规则 9（v7 引入）明确稳定
-// 偏好与重要事实应主动沉淀；规则 10 的守门文案保持不变。当前版本 9（INT-133
-// 把默认人设前置、收紧告知语义）。
+// 偏好与重要事实应主动沉淀；规则 10 的守门文案保持不变。当前版本 11
+// （v10 引入围栏规则 15，v11 补「不复述 nonce」）。
 func TestInt124PlatformPromptProactiveMemory(t *testing.T) {
-	if botPlatformPromptVersion != 9 {
-		t.Fatalf("平台提示词版本应为 9: %d", botPlatformPromptVersion)
+	if botPlatformPromptVersion != 11 {
+		t.Fatalf("平台提示词版本应为 11: %d", botPlatformPromptVersion)
 	}
-	full := buildBotSystemPrompt("")
+	full := buildBotSystemPrompt("", "t-nonce")
 	for _, kw := range []string{"主动写入", "不必等用户要求", "稳定偏好"} {
 		if !strings.Contains(full, kw) {
 			t.Fatalf("规则 9 应含主动沉淀指引 %q", kw)
@@ -459,21 +459,21 @@ func TestInt124SerializeSegmentSentPrefix(t *testing.T) {
 	rows := []model.BotMessage{mk(1, "第一条"), mk(2, "第二条"), mk(3, "第三条")}
 
 	// 不限预算：整段发出，max seq = 3。
-	full, maxSeq := serializeSegment(rows, 0)
+	full, maxSeq := serializeSegment(rows, 0, "")
 	if maxSeq != 3 || !strings.Contains(full, "第三条") {
 		t.Fatalf("不限预算应整段发出: maxSeq=%d full=%q", maxSeq, full)
 	}
 	// 每条序列化约 24 字节（"[seq N] user: 第一条\n"）：40 字节预算越过阈值时
 	// 第二条已写入、第三条未写入——发出的最大 seq 是 2。
-	text, sent := serializeSegment(rows, 40)
+	text, sent := serializeSegment(rows, 40, "")
 	if sent != 2 || !strings.Contains(text, "第二条") || strings.Contains(text, "第三条") {
 		t.Fatalf("40 字节预算应发出前两条: sent=%d text=%q", sent, text)
 	}
-	text, sent = serializeSegment(rows, 20)
+	text, sent = serializeSegment(rows, 20, "")
 	if sent != 1 || !strings.Contains(text, "第一条") || strings.Contains(text, "第二条") {
 		t.Fatalf("20 字节预算应只发出第一条: sent=%d text=%q", sent, text)
 	}
-	if text, sent := serializeSegment(nil, 100); text != "" || sent != 0 {
+	if text, sent := serializeSegment(nil, 100, ""); text != "" || sent != 0 {
 		t.Fatalf("空段应返回空正文与 0: %q %d", text, sent)
 	}
 }

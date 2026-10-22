@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ChevronDown, ChevronUp } from "lucide-react";
+import { CheckCircle2, ChevronDown, ChevronUp, XCircle } from "lucide-react";
 import type {
   BotCall,
   BotCallDecision,
@@ -7,6 +7,8 @@ import type {
   BotScheduleRunStatus,
 } from "@/lib/api/bots";
 import { botScheduleRunStatusLabel } from "@/lib/api/bots";
+import { scheduleResultLine } from "@/lib/bots/schedule-result-summary";
+import { bidiSafeText } from "@/lib/bots/tool-labels";
 import { cn } from "@/lib/utils";
 import { BotConfirmationCard } from "./bot-confirmation-card";
 import { BotMarkdown } from "./bot-markdown";
@@ -95,27 +97,41 @@ export function BotMessageView({
     if (message.content.event === "compaction_failed") {
       // 压缩失败（INT-115）：note 是服务端给的中文原因。不能只显示英文
       // 事件名——要告诉用户发生了什么、以及可以直接继续发新消息。
+      // 远端错误文本可能落到 detail.message，渲染前剥双向/控制字符。
       const reason = detail.note || detail.message || "上下文压缩未成功";
       return (
         <p
           data-testid="bot-compaction-failed-note"
           className="mx-auto max-w-[85%] rounded-lg bg-muted/40 px-3 py-1.5 text-center text-xs text-muted-foreground"
         >
-          上下文压缩失败：{reason}。这条消息已停止自动重试，直接继续发新消息即可。
+          上下文压缩失败：{bidiSafeText(reason)}。这条消息已停止自动重试，直接继续发新消息即可。
         </p>
       );
     }
     return (
-      <p className="text-center text-xs text-muted-foreground">
-        {detail.note || message.content.event || ""}
+      <p className="text-center text-xs text-muted-foreground [unicode-bidi:isolate]">
+        {bidiSafeText(detail.note || message.content.event || "")}
       </p>
     );
   }
 
   if (message.kind === "approval_decision") {
     const decision = message.content.decision ?? "";
+    // 批准之后，用户回看对话时最先要找的是「刚才那步同意了没有」：给它
+    // 状态图标与颜色，别再是比「等你确认」更淡的一行灰字。
+    const approved = decision === "approve" || decision === "always_allow";
+    const rejected = decision === "reject";
     return (
-      <p className="text-center text-xs text-muted-foreground">
+      <p
+        className={cn(
+          "flex items-center justify-center gap-1.5 text-center text-xs",
+          approved && "text-emerald-700 dark:text-emerald-400",
+          rejected && "text-destructive",
+          !approved && !rejected && "text-muted-foreground",
+        )}
+      >
+        {approved && <CheckCircle2 className="h-3.5 w-3.5" />}
+        {rejected && <XCircle className="h-3.5 w-3.5" />}
         {DECISION_LABELS[decision] ?? "已处理决定"}
         {message.content.call_id ? " · 调用已按决定继续" : ""}
       </p>
@@ -123,19 +139,82 @@ export function BotMessageView({
   }
 
   if (message.kind === "background_result") {
+    // 服务端把工具结果 JSON 截到 200 字符当 summary：直接当正文会断在
+    // 字符串中间，也看不出成败。fs_schedule 优先用服务端受理快照拼人话
+    // 主行；其余场景保持原兜底，但 JSON 形状的片段不直接当正文，一律收
+    // 进折叠区完整展示。summary/error_message 是模型可写串，渲染前剥
+    // 双向/控制字符并隔离。
+    const call = calls.find((c) => c.id === message.content.call_id);
+    const isScheduleCall = call?.tool_name === "fs_schedule";
+    const status = message.content.status ?? call?.status ?? "";
+    const succeeded = status === "succeeded";
+    const failed = status === "failed";
+    const humanLine =
+      isScheduleCall && call ? scheduleResultLine(call, failed) : "";
+    const summaryText = message.content.summary ?? "";
+    const summaryLooksJson =
+      summaryText.trimStart().startsWith("{") ||
+      summaryText.trimStart().startsWith("[");
+    // 能关联到的非 schedule 调用，summary 是模型写的自然语言汇报，保持
+    // 原样当正文；找不到调用或 schedule 拼不出摘要时才触发 JSON 兜底。
+    const hideRawSummary =
+      Boolean(humanLine) || ((!call || isScheduleCall) && summaryLooksJson);
     return (
       <section className="space-y-1.5 rounded-xl border border-dashed bg-muted/20 px-3.5 py-2.5 text-sm">
         <p className="text-xs font-medium text-muted-foreground">
           平台后台结果
           {message.content.call_id ? ` · ${message.content.call_id.slice(0, 8)}` : ""}
         </p>
-        {message.content.summary && (
-          <p className="break-words whitespace-pre-wrap">{message.content.summary}</p>
+        {humanLine && (
+          <div className="flex items-start gap-1.5">
+            {succeeded && (
+              <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
+            )}
+            {failed && (
+              <XCircle className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
+            )}
+            <p
+              className={cn(
+                "break-words [unicode-bidi:isolate]",
+                failed && "text-destructive",
+              )}
+            >
+              {bidiSafeText(humanLine)}
+            </p>
+          </div>
         )}
+        {hideRawSummary && !humanLine && (
+          <p className="text-xs text-muted-foreground">
+            {failed
+              ? "后台调用未成功（原始结果见下）"
+              : "后台调用已完成（原始结果见下）"}
+          </p>
+        )}
+        {!hideRawSummary && message.content.summary && (
+          <p className="break-words whitespace-pre-wrap [unicode-bidi:isolate]">
+            {bidiSafeText(message.content.summary)}
+          </p>
+        )}
+        {hideRawSummary && message.content.summary && (
+          <details
+            data-testid="bot-background-raw-result"
+            className="text-xs"
+          >
+            <summary className="cursor-pointer select-none text-muted-foreground hover:text-foreground">
+              查看原始结果
+            </summary>
+            <pre className="mt-1.5 rounded-lg bg-background/80 p-2 font-mono whitespace-pre-wrap break-all [unicode-bidi:isolate]">
+              {bidiSafeText(message.content.summary)}
+            </pre>
+          </details>
+        )}
+        {/* 错误文案短、可行动（坏 cron/时区等），直接外露而不是藏进折叠区。 */}
         {message.content.error_message && (
-          <p className="text-xs text-destructive">
-            {message.content.error_code ? `${message.content.error_code}: ` : ""}
-            {message.content.error_message}
+          <p className="text-xs text-destructive [unicode-bidi:isolate]">
+            {message.content.error_code
+              ? `${bidiSafeText(message.content.error_code)}: `
+              : ""}
+            {bidiSafeText(message.content.error_message)}
           </p>
         )}
       </section>
@@ -150,6 +229,9 @@ export function BotMessageView({
       botScheduleRunStatusLabel(message.content.status as BotScheduleRunStatus) ??
       message.content.status ??
       "";
+    // task_name 是模型可写数据（建/改任务时只 trim+限长，不过滤字符），
+    // summary/error_message 同理——渲染前一律剥双向/控制字符并隔离，
+    // 与确认卡、后台结果同口径（bidiSafeText + unicode-bidi:isolate）。
     return (
       <p
         className={cn(
@@ -158,13 +240,22 @@ export function BotMessageView({
         )}
       >
         定时任务「
-        {message.content.task_name || message.content.task_id || "未命名任务"}」
+        <span className="[unicode-bidi:isolate]">
+          {bidiSafeText(
+            message.content.task_name || message.content.task_id || "未命名任务",
+          )}
+        </span>
+        」
         {statusLabel}
-        {message.content.summary ? `：${message.content.summary}` : ""}
+        {message.content.summary && (
+          <span className="[unicode-bidi:isolate]">
+            {`：${bidiSafeText(message.content.summary)}`}
+          </span>
+        )}
         {message.content.error_message && (
-          <span className="block">
-            {message.content.error_code ? `${message.content.error_code}: ` : ""}
-            {message.content.error_message}
+          <span className="block [unicode-bidi:isolate]">
+            {message.content.error_code ? `${bidiSafeText(message.content.error_code)}: ` : ""}
+            {bidiSafeText(message.content.error_message)}
           </span>
         )}
       </p>
@@ -174,8 +265,8 @@ export function BotMessageView({
   if (message.kind === "tool_reply") {
     // 能关联到工具卡的回执已由卡片吸收；关联不到的退化成协议回复提示行。
     return (
-      <p className="text-xs text-muted-foreground">
-        {message.content.content || "工具已受理"}
+      <p className="text-xs text-muted-foreground [unicode-bidi:isolate]">
+        {bidiSafeText(message.content.content || "工具已受理")}
       </p>
     );
   }

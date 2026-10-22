@@ -759,11 +759,26 @@ func TestBotScheduleRunRecord(t *testing.T) {
 
 // ---------- 8. fs_schedule 工具与校验 ----------
 
+// botScheduleCall 走与线上一致的入口：确认型动作在生产里总是先过受理端，
+// 受理快照是执行器的唯一输入，缺快照时执行器按设计拒绝（INT-136 复审：
+// 不再现场解析默认时区）。helper 这里用同一个构造器补上快照，而不是让
+// 生产代码为测试保留一条无快照回退路径。
 func botScheduleCall(t *testing.T, env *botTestEnv, botID, args string) (string, error) {
 	t.Helper()
-	return env.bots.execScheduleTool(&model.BotToolCall{
+	call := &model.BotToolCall{
 		ID: uuid.NewString(), BotID: botID, ArgumentsJSON: args,
-	})
+	}
+	var parsed map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(args), &parsed); err == nil {
+		if action := rawString(parsed["action"]); action == "create" && call.ExecutionContextJSON == "" {
+			if botRow, err := env.bots.bots.Get(botID); err == nil {
+				if preview, err := env.bots.schedulePreviewFromArgs(botRow, parsed); err == nil && preview != nil {
+					call.ExecutionContextJSON = marshalExecContext(botCallExecContext{Schedule: preview})
+				}
+			}
+		}
+	}
+	return env.bots.execScheduleTool(call)
 }
 
 func TestBotScheduleToolLifecycle(t *testing.T) {
@@ -879,7 +894,8 @@ func TestBotScheduleDeleteMissingTaskNotFound(t *testing.T) {
 // tools_hash 失稳，这里钉死。这是跨版本契约，不是实现细节；v4 自 INT-120
 // 起冻结（基线在 bot_int120_test.go），v5 自 INT-121、v6 自 INT-123 起冻结，
 // v7 自 INT-138 起冻结（timezone 描述变更只进 v8），v8 自 INT-148 起冻结
-// （fs_thread 的结算类动作与描述改写只进 v9），v9 是当前发布版本。
+// （fs_thread 的结算类动作与描述改写只进 v9），v9 = INT-148，现已冻结；
+// v10 = INT-136 是当前发布版本（基线在 bot_int136_test.go）。
 const (
 	botToolsetV1FrozenHash = "c1da7e95288ed681392529f68a812ec1ac403bcd53cee1414634cca28197ef06"
 	botToolsetV2FrozenHash = "4ec300f75e9aff618b820246c85cc497db6e4d8027cbce342696cc629560ca19"
@@ -896,6 +912,8 @@ const (
 	// v8 在 INT-148 后冻结：fs_thread 的 settle/unsettle/resume_queue 与描述
 	// 改写只进 v9。
 	botToolsetV8FrozenHash = "f1a4fcfc56adf8ddfc143f56f09c308452674ba01c31e3be36ecd403f324c356"
+	// v9 = INT-148；INT-136 的确认描述只进 v10，v9 保留 main 的冻结字节。
+	botToolsetV9FrozenHash = "8e063c146a4c4e7a20788c7f87ec9fce9ccc2d2ca922a3d23fbde49af6630612"
 )
 
 func TestBotScheduleToolsetVersions(t *testing.T) {
@@ -907,10 +925,15 @@ func TestBotScheduleToolsetVersions(t *testing.T) {
 	v6 := botToolsetVersionOf(6)
 	v7 := botToolsetVersionOf(7)
 	v8 := botToolsetVersionOf(8)
+	v9 := botToolsetVersionOf(9)
+	v10 := botToolsetVersionOf(10)
 	if v1.hash == v2.hash || v2.hash == v3.hash || v3.hash == v4.hash ||
 		v4.hash == v5.hash || v5.hash == v6.hash || v6.hash == v7.hash ||
-		v7.hash == v8.hash {
+		v7.hash == v8.hash || v8.hash == v9.hash || v9.hash == v10.hash {
 		t.Fatalf("相邻版本的工具集 hash 必须互不相同")
+	}
+	if v9.hash != botToolsetV9FrozenHash {
+		t.Fatalf("v9 tools_hash 偏离 INT-148 冻结基线: got %s want %s", v9.hash, botToolsetV9FrozenHash)
 	}
 	// 已发布版本的 wire 字节已冻结：v1-v8 的 hash 必须与基线逐字节一致。
 	if v1.hash != botToolsetV1FrozenHash || v2.hash != botToolsetV2FrozenHash ||
@@ -1060,7 +1083,8 @@ func TestBotScheduleToolsetVersions(t *testing.T) {
 		t.Fatalf("v5 不应接受 fs_schedule/run")
 	}
 	// v7（INT-138 起冻结）的 fs_schedule：10 个同步动作，state_get/state_set
-	// 与 state 参数进 schema，参数用冻结副本 botScheduleTaskArgsV7。
+	// 与 state 参数进 schema，参数用冻结副本 botScheduleTaskArgsV7；确认判定
+	// 在受理端（botScheduleConfirmation），不在冻结字节里。
 	sched7 := v7.byName["fs_schedule"]
 	if sched7 == nil || len(sched7.Actions) != 10 {
 		t.Fatalf("v7 fs_schedule 应有 10 个动作: %+v", sched7)
@@ -1217,16 +1241,18 @@ func TestBotScheduleUpdateDisabledKeepsNoNextRun(t *testing.T) {
 	env := setupBotTestEnv(t)
 	userID := createBotTestUser(t, env.db, "scheddis")
 	bot := env.createBot(t, userID)
-	task := seedScheduleTask(t, env, bot.ID, nil)
+	task := seedScheduleTask(t, env, bot.ID, func(tk *model.BotScheduleTask) {
+		tk.Confirmed = true
+	})
 
-	if _, err := env.bots.setScheduleTaskEnabled(bot.ID, task.ID, false); err != nil {
+	if _, err := env.bots.setScheduleTaskEnabled(bot.ID, task.ID, false, "", false); err != nil {
 		t.Fatalf("disable: %v", err)
 	}
 	off, _ := env.bots.schedTasks.FindByID(task.ID)
 	if off.NextRunAt != nil {
 		t.Fatalf("停用后 next_run_at 应清空: %+v", off.NextRunAt)
 	}
-	updated, err := env.bots.updateScheduleTask(bot.ID, task.ID, "", "0 10 * * *", "Asia/Shanghai", "", nil, nil)
+	updated, err := env.bots.updateScheduleTask(bot.ID, task.ID, "", "0 10 * * *", "Asia/Shanghai", "", nil, nil, "", false)
 	if err != nil {
 		t.Fatalf("update: %v", err)
 	}
@@ -1238,7 +1264,7 @@ func TestBotScheduleUpdateDisabledKeepsNoNextRun(t *testing.T) {
 		t.Fatalf("库里的停用任务不应有计划时间: %+v", persisted)
 	}
 	// 重新启用才重算。
-	on, err := env.bots.setScheduleTaskEnabled(bot.ID, task.ID, true)
+	on, err := env.bots.setScheduleTaskEnabled(bot.ID, task.ID, true, "", false)
 	if err != nil {
 		t.Fatalf("enable: %v", err)
 	}
@@ -1429,7 +1455,7 @@ func TestBotScheduleUpdateClearsModelOverride(t *testing.T) {
 		t.Fatalf("create 应记录模型覆盖: %+v", task.Model)
 	}
 	// 省略 model（nil）：保持覆盖。
-	kept, err := env.bots.updateScheduleTask(bot.ID, task.ID, "改名只", "", "", "", nil, nil)
+	kept, err := env.bots.updateScheduleTask(bot.ID, task.ID, "改名只", "", "", "", nil, nil, "", false)
 	if err != nil {
 		t.Fatalf("update keep: %v", err)
 	}
@@ -1438,7 +1464,7 @@ func TestBotScheduleUpdateClearsModelOverride(t *testing.T) {
 	}
 	// 显式空串：清除覆盖，回到机器人当前模型。
 	empty := ""
-	cleared, err := env.bots.updateScheduleTask(bot.ID, task.ID, "", "", "", "", &empty, nil)
+	cleared, err := env.bots.updateScheduleTask(bot.ID, task.ID, "", "", "", "", &empty, nil, "", false)
 	if err != nil {
 		t.Fatalf("update clear: %v", err)
 	}
@@ -1754,7 +1780,7 @@ func TestBotScheduleDeleteStopsUnfinishedRuns(t *testing.T) {
 	task := seedScheduleTask(t, env, bot.ID, nil)
 	run := seedScheduleRun(t, env, bot.ID, task.ID)
 
-	if err := env.bots.deleteScheduleTask(bot.ID, task.ID); err != nil {
+	if err := env.bots.deleteScheduleTask(bot.ID, task.ID, ""); err != nil {
 		t.Fatalf("delete task: %v", err)
 	}
 	fresh := mustFindRun(t, env, run.ID)
@@ -1816,8 +1842,9 @@ func TestBotScheduleEnableKeepsPendingDueRun(t *testing.T) {
 	due := time.Now().UTC().Add(-5 * time.Second)
 	task := seedScheduleTask(t, env, bot.ID, func(tk *model.BotScheduleTask) {
 		tk.NextRunAt = &due
+		tk.Confirmed = true
 	})
-	got, err := env.bots.setScheduleTaskEnabled(bot.ID, task.ID, true)
+	got, err := env.bots.setScheduleTaskEnabled(bot.ID, task.ID, true, "", false)
 	if err != nil {
 		t.Fatalf("enable: %v", err)
 	}
@@ -1825,10 +1852,10 @@ func TestBotScheduleEnableKeepsPendingDueRun(t *testing.T) {
 		t.Fatalf("已启用任务再启用应保留待派发的计划，实得 %+v", got.NextRunAt)
 	}
 	// 停用后再启用才重算。
-	if _, err := env.bots.setScheduleTaskEnabled(bot.ID, task.ID, false); err != nil {
+	if _, err := env.bots.setScheduleTaskEnabled(bot.ID, task.ID, false, "", false); err != nil {
 		t.Fatalf("disable: %v", err)
 	}
-	back, err := env.bots.setScheduleTaskEnabled(bot.ID, task.ID, true)
+	back, err := env.bots.setScheduleTaskEnabled(bot.ID, task.ID, true, "", false)
 	if err != nil {
 		t.Fatalf("re-enable: %v", err)
 	}
@@ -1916,5 +1943,43 @@ func TestBotScheduleSkippedEventPublishesToSubscribers(t *testing.T) {
 		// 收到有新事件的信号即可（订阅方按 seq 回读）。
 	case <-time.After(2 * time.Second):
 		t.Fatalf("跳过事件追加后应发布一次事件通知")
+	}
+}
+
+// 调度推进不是配置变更（INT-136）：确认卡用 updated_at 当任务修订水位，
+// cron 触发推进 next_run_at 时若顺带改写 updated_at，待确认的 run/enable/delete
+// 卡片会被误判成「任务在确认期间被修改」。
+func TestBotScheduleAdvanceKeepsUpdatedAt(t *testing.T) {
+	env := setupBotTestEnv(t, fakeModelTurn{Text: "[[SILENT]]"})
+	userID := createBotTestUser(t, env.db, "schedadv")
+	bot := env.createBot(t, userID)
+	task := seedScheduleTask(t, env, bot.ID, func(tk *model.BotScheduleTask) { tk.NeedsReport = false })
+
+	before, err := env.bots.schedTasks.FindByID(task.ID)
+	if err != nil {
+		t.Fatalf("load task: %v", err)
+	}
+	due := time.Now().UTC().Add(-3 * time.Second)
+	env.db.Model(&model.BotScheduleTask{}).Where("id = ?", task.ID).Update("next_run_at", due)
+	before, err = env.bots.schedTasks.FindByID(task.ID)
+	if err != nil {
+		t.Fatalf("reload task: %v", err)
+	}
+	env.bots.scheduleTick(time.Now().UTC())
+	var run model.BotRun
+	if err := env.db.Where("schedule_task_id = ?", task.ID).Order("created_at ASC").First(&run).Error; err != nil {
+		t.Fatalf("dispatch should create run: %v", err)
+	}
+	waitForScheduleRunFinished(t, env, run.ID)
+
+	after, err := env.bots.schedTasks.FindByID(task.ID)
+	if err != nil {
+		t.Fatalf("reload after: %v", err)
+	}
+	if after.NextRunAt == nil || before.NextRunAt == nil || !after.NextRunAt.After(*before.NextRunAt) {
+		t.Fatalf("next_run_at 应被推进: %v -> %v", before.NextRunAt, after.NextRunAt)
+	}
+	if !after.UpdatedAt.Equal(before.UpdatedAt) {
+		t.Fatalf("调度推进不应改写 updated_at: %v -> %v", before.UpdatedAt, after.UpdatedAt)
 	}
 }

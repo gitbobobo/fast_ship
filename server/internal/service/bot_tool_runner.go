@@ -70,7 +70,45 @@ func (s *BotService) commitAssistantTurn(bot *model.Bot, run *model.BotRun, requ
 			entry.call.ErrorMessage = botStrPtr(botErrMessage(err))
 		} else {
 			entry.prepared = prepared
-			s.resolveCallScope(bot, prepared, tc.Arguments, &entry.execCtx)
+			// 已通过校验的元数据先落进调用账本：后面任何一步（schedule 会话
+			// 拦截、范围解析）拒绝这次调用时，账本仍能说清「被拒的是哪个动作」，
+			// 而不是一条 tool_name/action 为空的泛化失败。
+			entry.call.ToolName = prepared.ToolName
+			entry.call.Action = prepared.Action
+			entry.call.ArgumentsJSON = prepared.ArgumentsJSON
+			entry.call.ArgumentsHash = prepared.ArgumentsHash
+			entry.call.ExecutionMode = string(prepared.Mode)
+			entry.call.RequiresConfirmation = prepared.RequiresConfirmation
+			// 定时任务会话禁止管理任务（INT-136）：schedule 会话默认放行写
+			// 操作，受理端直接拦截 create/update/run，防止造出递归绕过确认的
+			// 会话。命中按校验失败同路径处理（failed + 40001 + 同步失败回复）。
+			if run.SessionKind == model.BotSessionKindSchedule {
+				if err := botScheduleManageDenied(prepared); err != nil {
+					entry.invalidErr = err
+					entry.call.ToolName = tc.Name
+					entry.call.Action = prepared.Action
+					entry.call.Status = model.BotCallStatusFailed
+					entry.call.FinishedAt = &now
+					entry.call.ErrorCode = botStrPtr(botErrCodeOf(err))
+					entry.call.ErrorMessage = botStrPtr(botErrMessage(err))
+					// 这是受理端同步拒绝（从未进异步队列），账本记回 sync，
+					// 避免排查时误以为是异步执行失败。
+					entry.call.ExecutionMode = string(model.BotExecutionSync)
+					entry.prepared = nil
+				}
+			}
+		}
+		if entry.prepared != nil {
+			if err := s.resolveCallScope(bot, prepared, tc.Arguments, &entry.execCtx); err != nil {
+				entry.invalidErr = err
+				entry.call.Status = model.BotCallStatusFailed
+				entry.call.FinishedAt = &now
+				entry.call.ErrorCode = botStrPtr(botErrCodeOf(err))
+				entry.call.ErrorMessage = botStrPtr(botErrMessage(err))
+				entry.prepared = nil
+			}
+		}
+		if entry.prepared != nil {
 			if prepared.RequiresConfirmation {
 				// schedule 会话默认放行（INT-103）：直接排队执行，不建授权
 				// 记录、不等待确认；范围仍要求可解析（目标不明的调用按失败
@@ -99,12 +137,6 @@ func (s *BotService) commitAssistantTurn(bot *model.Bot, run *model.BotRun, requ
 		}
 		if entry.prepared != nil {
 			call := entry.call
-			call.ToolName = entry.prepared.ToolName
-			call.Action = entry.prepared.Action
-			call.ArgumentsJSON = entry.prepared.ArgumentsJSON
-			call.ArgumentsHash = entry.prepared.ArgumentsHash
-			call.ExecutionMode = string(entry.prepared.Mode)
-			call.RequiresConfirmation = entry.prepared.RequiresConfirmation
 			call.ExecutionContextJSON = marshalExecContext(entry.execCtx)
 			switch {
 			case entry.prepared.Mode == model.BotExecutionSync:
@@ -266,7 +298,7 @@ func (s *BotService) commitAssistantTurn(bot *model.Bot, run *model.BotRun, requ
 }
 
 // resolveCallScope 在受理时解析写操作范围并填充执行上下文；读操作不设范围。
-func (s *BotService) resolveCallScope(bot *model.Bot, prepared *botPreparedCall, rawArguments string, execCtx *botCallExecContext) {
+func (s *BotService) resolveCallScope(bot *model.Bot, prepared *botPreparedCall, rawArguments string, execCtx *botCallExecContext) error {
 	var raw map[string]json.RawMessage
 	_ = json.Unmarshal([]byte(rawArguments), &raw)
 	execCtx.ScopeKind = prepared.ScopeKind
@@ -285,12 +317,18 @@ func (s *BotService) resolveCallScope(bot *model.Bot, prepared *botPreparedCall,
 		if prepared.EnvironmentID != nil {
 			execCtx.EnvID = *prepared.EnvironmentID
 		}
+	case "fs_schedule":
+		if err := s.resolveScheduleScope(bot, prepared, raw); err != nil {
+			return err
+		}
 	}
 	// scope 解析可能回填（issue→project），同步回执行上下文。
 	execCtx.ScopeKind = prepared.ScopeKind
 	execCtx.ScopeID = prepared.ScopeID
 	execCtx.Fields = prepared.FieldsConstraint
 	execCtx.Param = prepared.ParamConstraint
+	execCtx.Schedule = prepared.SchedulePreview
+	return nil
 }
 
 // botRequireScope 写操作必须有可展示的具体范围，否则建卡失败。
@@ -326,6 +364,9 @@ func botErrCodeOf(err error) string {
 
 // appendToolReplyTx 追加唯一的 tool 角色回复（dedup terminal/receipt）。
 func (s *BotService) appendToolReplyTx(tx *gorm.DB, botID, runID, requestID string, call *model.BotToolCall, content botToolReplyContent, now time.Time) error {
+	// 出口围栏按 tool/action 判豁免，reply 正文必须带上动作（构造点分散在
+	// 受理、终态、恢复三处，统一在这里补齐）。
+	content.Action = call.Action
 	txMsgs := repository.NewBotMessageRepository(tx)
 	dedup := "receipt:" + call.ID
 	if call.Status.IsTerminal() {
@@ -500,7 +541,18 @@ func botCallIsReadOnly(call *model.BotToolCall) bool {
 	if call.ExecutionMode != string(model.BotExecutionSync) {
 		return false
 	}
-	return botReadOnlyActions[call.ToolName+"/"+call.Action]
+	if botReadOnlyActions[call.ToolName+"/"+call.Action] {
+		return true
+	}
+	// fs_schedule/run 的 dry_run=true 是只读预览（不建运行、不执行），参数决定
+	// 语义：新输入到达时它应当执行完，而不是被标成 not_executed。
+	if call.ToolName == "fs_schedule" && call.Action == "run" {
+		var args botScheduleTaskArgs
+		if err := json.Unmarshal([]byte(call.ArgumentsJSON), &args); err == nil && args.DryRunBool() {
+			return true
+		}
+	}
+	return false
 }
 
 // botNotExecutedReplyText 是「调用未执行」的模型回复：与参数校验失败（40001）
@@ -657,6 +709,9 @@ func (s *BotService) runAsyncTool(ctx context.Context, call *model.BotToolCall) 
 		return s.runIssueWrite(ctx, call)
 	case "fs_thread":
 		return s.runThreadWrite(ctx, call)
+	case "fs_schedule":
+		// INT-136：create/update 敏感字段/run 在确认后由 worker 执行。
+		return s.runScheduleWrite(ctx, call)
 	}
 	return nil, errs.New(errs.ErrInvalidParams.Code, "工具没有异步实现: "+call.ToolName)
 }

@@ -199,7 +199,7 @@ func expectedSummaryBatchesForPlan(t *testing.T, env *botTestEnv, botRow *model.
 	}
 	auxWindow := env.cfg.Bots.Context.WindowTokensFor(modelName)
 	outBudget := env.bots.summaryOutputBudget(botRow, plan)
-	blocks := summaryProtocolBlocks(plan.Segment)
+	blocks := summaryProtocolBlocks(plan.Segment, "")
 	sys, rules := botSummarySysPrompt, botSummaryRules
 	acc := plan.State.SummaryText
 	bi := 0
@@ -315,11 +315,11 @@ func TestBotAutoCompaction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	// 9500：v7 工具集与平台规则变长后固定前缀更大，9000 的旧几何会让
-	// 「固定前缀+最小摘要预算 ≥ 触发阈值」误判不可达（INT-123 随 v7 重定标）。
-	env.cfg.Bots.Context.WindowTokens = 9500
+	// 合并 INT-136 + INT-148 前缀后重定标：实测 F=7926，F+256=8182，
+	// 旧窗口 10800 的 T=8100 不可达；11200 的 T=8400 保留摘要空间。
+	env.cfg.Bots.Context.WindowTokens = 11200
 	// 归档输入是整段原文：本场景单个大工具结果（≈27k token）装不进主模型
-	// 9500 窗口的归档输入预算，auxModelRequest 发送关口会按 INT-115 拒绝这种
+	// 11200 窗口的归档输入预算，auxModelRequest 发送关口会按 INT-115 拒绝这种
 	// 请求。归档模型配置成更大窗口的模型——这正是 ArchiveModel 的用法。
 	env.cfg.Bots.Context.ArchiveModel = "arch-big"
 	env.cfg.Bots.Context.ModelWindows = map[string]int64{"arch-big": 131072}
@@ -403,10 +403,7 @@ func TestBotAutoCompaction(t *testing.T) {
 			}
 		}
 	}
-	// 断言窗口取测试实际配置的窗口（INT-123 起 9500）：v9（INT-148）把
-	// fs_thread 的结算类动作与描述加进工具集后固定前缀又长了约 390 字节，
-	// 原先硬编码的 9000 已不再是这套几何的窗口，会误报「压缩后仍在触发阈值
-	// 之上」。改文案或工具集后按 docs/internal/bots.md 的说明重新核对余量。
+	// 断言窗口取测试实际配置的窗口，不能沿用旧工具集的硬编码阈值。
 	trigger := botFloorRatio(env.cfg.Bots.Context.WindowTokens, env.cfg.Bots.Context.CompressionRatioV())
 	goal := botFloorRatio(trigger, env.cfg.Bots.Context.TargetRatioV())
 	if row.AfterTokensEstimate >= row.BeforeTokensEstimate {
@@ -433,7 +430,7 @@ func TestBotSummaryPreservesIdentifiers(t *testing.T) {
 	env.fake.strict = true
 	userID := createBotTestUser(t, env.db, "ids")
 	bot := env.createBot(t, userID)
-	env.cfg.Bots.Context.WindowTokens = 9500 // v7 工具集与规则 8 变长后固定前缀更大，9000 旧几何会误判压缩不可达（INT-123 重定标）
+	env.cfg.Bots.Context.WindowTokens = 11200 // 合并 INT-136 + INT-148 前缀后重定标：F=7924，F+256=8180，旧 T=8100。
 	uid := "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
 	seedBotUserMessage(t, env, bot.ID, "处理 Issue INT-102 和 "+uid)
 	args := `{"action":"read","thread_id":"thr_keep_me","issue_id":"iss_raw_Case"}`
@@ -473,7 +470,7 @@ func TestBotCompactionPreservesLedger(t *testing.T) {
 	env.fake.strict = true
 	userID := createBotTestUser(t, env.db, "ledger")
 	bot := env.createBot(t, userID)
-	env.cfg.Bots.Context.WindowTokens = 9500 // v7 工具集与规则 8 变长后固定前缀更大，9000 旧几何会误判压缩不可达（INT-123 重定标）
+	env.cfg.Bots.Context.WindowTokens = 11200 // 合并 INT-136 + INT-148 前缀后重定标：F=7919，F+256=8175，旧 T=8100。
 	seedCompactableLedger(t, env, bot.ID, "账本保持")
 	var before []model.BotMessage
 	env.db.Where("bot_id = ?", bot.ID).Order("seq ASC").Find(&before)
@@ -509,7 +506,7 @@ func TestBotFoldedResultRead(t *testing.T) {
 	env.fake.strict = true
 	userID := createBotTestUser(t, env.db, "foldreal")
 	bot := env.createBot(t, userID)
-	env.cfg.Bots.Context.WindowTokens = 9500 // v7 工具集与规则 8 变长后固定前缀更大，9000 旧几何会误判压缩不可达（INT-123 重定标）
+	env.cfg.Bots.Context.WindowTokens = 11200 // 合并 INT-136 + INT-148 前缀后重定标：F=7878，F+256=8134，旧 T=8100。
 	seedBotUserMessage(t, env, bot.ID, "q")
 	big := strings.Repeat("完整结果正文XY", 800)
 	_, tr := seedBotAssistantToolBlock(t, env, bot.ID, "call-real-fold", "fs_issue", big)
@@ -831,10 +828,9 @@ func TestBotFoldBatchThreshold(t *testing.T) {
 	env3.fake.strict = true
 	u3 := createBotTestUser(t, env3.db, "foldok")
 	bot3 := env3.createBot(t, u3)
-	// 21000：v9（INT-148）的工具集是每请求固定前缀，比 v8 长约 660 字节；
-	// 20000 窗口下「折叠后恰好达标」的几何已越界（goal 6750 < afterFold 6772），
-	// 重定标到 21000（goal 7087）继续验证「折叠足够就不摘要」。
-	env3.cfg.Bots.Context.WindowTokens = 21000
+	// 合并 INT-136 + INT-148 前缀后重定标：实测 afterFold=7802 > 旧 G=7762，
+	// 23400 的 G=7897 才能继续验证「折叠已足够、不发摘要」。
+	env3.cfg.Bots.Context.WindowTokens = 23400
 	seedBotUserMessage(t, env3, bot3.ID, "old")
 	seedBotAssistantToolBlock(t, env3, bot3.ID, "huge", "fs_issue", strings.Repeat("很长的工具结果", 8000))
 	for i := 1; i <= 3; i++ {
@@ -1094,7 +1090,7 @@ func TestBotSummaryFailureFallback(t *testing.T) {
 	env.fake.strict = true
 	userID := createBotTestUser(t, env.db, "sumfail")
 	bot := env.createBot(t, userID)
-	env.cfg.Bots.Context.WindowTokens = 9500 // v7 工具集与规则 8 变长后固定前缀更大，9000 旧几何会误判压缩不可达（INT-123 重定标）
+	env.cfg.Bots.Context.WindowTokens = 11200 // 合并 INT-136 + INT-148 前缀后重定标：F=7919，F+256=8175，旧 T=8100。
 	seedCompactableLedger(t, env, bot.ID, "失败回退")
 	botRow, _ := env.bots.bots.Get(bot.ID)
 	run := botFixtureRun(t, env, botRow)
@@ -1158,7 +1154,7 @@ func TestBotSummaryFailureFallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	envHTTP.cfg.Bots.Context.WindowTokens = 9500 // v7 工具集与规则 8 变长后固定前缀更大，9000 旧几何会误判压缩不可达（INT-123 重定标）
+	envHTTP.cfg.Bots.Context.WindowTokens = 11200 // 合并 INT-136 + INT-148 前缀后重定标：与上面的截断失败场景共用 F=7919 的几何。
 	seedCompactableLedger(t, envHTTP, b3.ID, "http失败")
 	row3, _ := envHTTP.bots.bots.Get(b3.ID)
 	run3 := botFixtureRun(t, envHTTP, row3)
@@ -1193,7 +1189,7 @@ func TestBotSummaryFailureFallback(t *testing.T) {
 	envEmpty.fake.strict = true
 	uE := createBotTestUser(t, envEmpty.db, "sumempty")
 	bE := envEmpty.createBot(t, uE)
-	envEmpty.cfg.Bots.Context.WindowTokens = 9500 // v7 工具集与规则 8 变长后固定前缀更大，9000 旧几何会误判压缩不可达（INT-123 重定标）
+	envEmpty.cfg.Bots.Context.WindowTokens = 11200 // 合并 INT-136 + INT-148 前缀后重定标：与上面的截断失败场景共用 F=7919 的几何。
 	seedCompactableLedger(t, envEmpty, bE.ID, "空输出")
 	rowE, _ := envEmpty.bots.bots.Get(bE.ID)
 	runE := botFixtureRun(t, envEmpty, rowE)
@@ -1355,7 +1351,9 @@ func TestBotMemorySnapshotFrozen(t *testing.T) {
 	if !strings.Contains(string(raw), "夜间写入不应刷新注入") {
 		t.Fatalf("服务重建后应加载最新快照")
 	}
-	env.cfg.Bots.Context.WindowTokens = 9500 // v7 工具集与规则 8 变长后固定前缀更大，9000 旧几何会误判压缩不可达（INT-123 重定标）
+	// 合并 INT-136 + INT-148 前缀后重定标：实测 F=8021，F+256=8277，
+	// 旧窗口 11000 的 T=8250 不可达；11200 的 T=8400 可验证注入刷新。
+	env.cfg.Bots.Context.WindowTokens = 11200
 	seedCompactableLedger(t, env, bot.ID, "压缩刷新")
 	botRow, _ = env.bots.bots.Get(bot.ID)
 	markHistoryConsumed(t, env, botRow, run)
@@ -1512,7 +1510,9 @@ func TestBotPreCompactionArchive(t *testing.T) {
 	env := setupBotTestEnv(t)
 	userID := createBotTestUser(t, env.db, "arch")
 	bot := env.createBot(t, userID)
-	env.cfg.Bots.Context.WindowTokens = 9500 // v7 工具集与规则 8 变长后固定前缀更大，9000 旧几何会误判压缩不可达（INT-123 重定标）
+	// 合并 INT-136 + INT-148 前缀后重定标：实测 F=7919，F+256=8175，
+	// 旧 T=8100 不可达，11200 的 T=8400 保留归档与摘要路径。
+	env.cfg.Bots.Context.WindowTokens = 11200
 	seedCompactableLedger(t, env, bot.ID, "用户叫 Bobo")
 	botRow, _ := env.bots.bots.Get(bot.ID)
 	markHistoryConsumed(t, env, botRow, nil)
@@ -2530,7 +2530,7 @@ func TestBotSummarySerializedCostShrink(t *testing.T) {
 	if inputBudget < 32 {
 		t.Fatalf("本场景 inputBudget 过小: %d", inputBudget)
 	}
-	blocks := summaryProtocolBlocks(plan.Segment)
+	blocks := summaryProtocolBlocks(plan.Segment, "")
 	fullPiece := shardSummaryBlock(blocks[0], inputBudget)[0]
 	over0 := botSerializedInputTokens(summaryBatchMessages(botSummarySysPrompt, botSummaryRules, accSection, 1, fullPiece)) + reqOut - auxWindow
 	if over0 <= inputBudget {
@@ -2852,8 +2852,8 @@ func TestBotBoundarySnapshotFixedTokensSameProjection(t *testing.T) {
 	if snap.FixedTokens != indep.AfterTokens {
 		t.Fatalf("F 应等于独立复核: F=%d indep=%d", snap.FixedTokens, indep.AfterTokens)
 	}
-	// after−F 恰为摘要正文转义后的字节开销（转义开销不得计入 F）。
-	escRaw, _ := json.Marshal(summary)
+	// after−F 恰为「摘要正文（含围栏）」转义后的字节开销（转义开销不得计入 F）。
+	escRaw, _ := json.Marshal(botFenceUntrusted(botNonce(t, env, bot.ID), "summary", summary))
 	escTokens := botEstimateBytes(int64(len(escRaw) - 2))
 	if d := snap.AfterTokens - snap.FixedTokens; d < escTokens-1 || d > escTokens {
 		t.Fatalf("after−F 应≈正文转义开销: d=%d esc=%d", d, escTokens)
@@ -3031,7 +3031,7 @@ func TestBotCompactionPublishPromptChanged(t *testing.T) {
 	if fresh.PromptRevision != afterUpdate.PromptRevision {
 		t.Fatalf("库内 revision 不得被旧快照覆盖: %d vs %d", fresh.PromptRevision, afterUpdate.PromptRevision)
 	}
-	if fresh.SystemPromptText != buildBotSystemPrompt(newPersona) {
+	if fresh.SystemPromptText != buildBotSystemPrompt(newPersona, fresh.UntrustedNonce) {
 		t.Fatalf("库内系统提示词应仍是按新人设构建的版本")
 	}
 	// generation 未推进。

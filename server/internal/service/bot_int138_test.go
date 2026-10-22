@@ -26,6 +26,20 @@ func setUserTimezone(t *testing.T, env *botTestEnv, userID, tz string) {
 	}
 }
 
+// botRuntimeContextPayload 去掉运行时上下文消息的平台前缀并返回正文。
+// INT-136 起前缀带围栏 nonce（"[运行时上下文 nonce=…]"），旧渲染为
+// "[运行时上下文]"；两种都要能解出正文。
+func botRuntimeContextPayload(content string) (string, bool) {
+	if !strings.HasPrefix(content, "[运行时上下文") {
+		return "", false
+	}
+	end := strings.Index(content, "]\n")
+	if end < 0 {
+		return "", false
+	}
+	return content[end+2:], true
+}
+
 // decodeMainlineRuntimeContext 校验主线构建产物末条消息形态并解出运行时上下文。
 func decodeMainlineRuntimeContext(t *testing.T, built *botBuiltContext) botRuntimeContext {
 	t.Helper()
@@ -44,12 +58,12 @@ func decodeMainlineRuntimeContext(t *testing.T, built *botBuiltContext) botRunti
 	if err := json.Unmarshal(raw, &wire); err != nil {
 		t.Fatalf("unmarshal last message: %v", err)
 	}
-	const prefix = "[运行时上下文]\n"
-	if !strings.HasPrefix(wire.Content, prefix) {
+	payload, ok := botRuntimeContextPayload(wire.Content)
+	if !ok {
 		t.Fatalf("末条消息应为运行时上下文: %q", wire.Content)
 	}
 	var rt botRuntimeContext
-	if err := json.Unmarshal([]byte(strings.TrimPrefix(wire.Content, prefix)), &rt); err != nil {
+	if err := json.Unmarshal([]byte(payload), &rt); err != nil {
 		t.Fatalf("unmarshal rt: %v", err)
 	}
 	return rt
@@ -140,12 +154,12 @@ func TestBotInt138ScheduleRuntimeContextTimezone(t *testing.T) {
 	if err := json.Unmarshal(raw, &wire); err != nil {
 		t.Fatalf("unmarshal last message: %v", err)
 	}
-	const prefix = "[运行时上下文]\n"
-	if !strings.HasPrefix(wire.Content, prefix) {
+	payload, ok := botRuntimeContextPayload(wire.Content)
+	if !ok {
 		t.Fatalf("末条消息应为运行时上下文: %q", wire.Content)
 	}
 	var rt botScheduleRuntimeContext
-	if err := json.Unmarshal([]byte(strings.TrimPrefix(wire.Content, prefix)), &rt); err != nil {
+	if err := json.Unmarshal([]byte(payload), &rt); err != nil {
 		t.Fatalf("unmarshal rt: %v", err)
 	}
 	if rt.UserTimezone != "Asia/Shanghai" {
@@ -342,7 +356,7 @@ func TestInt138EffectiveTimezoneName(t *testing.T) {
 // 时区默认值，改一个字都应该是有意识的决定——所以是等值断言，不是关键词包含。
 const (
 	botInt138V8ScheduleDescription = "管理本机器人绑定的定时任务：list/create/update/delete/runs/run/enable/disable，全部同步执行、立即生效。每次运行是独立会话，只带你的记忆与本任务指令，写操作默认放行（不弹确认）。用户只能查看与开关任务，创建/修改由你负责；创建或修改后要在对话里用中文告知用户任务名与执行时间。时区可选，省略即用户时区（不是 UTC），「每天早上 9 点」按用户所在地执行。run 立即手动执行一次任务：显式触发就是一次执行、不要求任务启用；回执只表示已受理，终态与产出用 runs 查询；同一任务已有未结束运行时会被明确拒绝（不排队）；dry_run=true 只预览、不执行也不建运行记录。state_get/state_set 读写本任务跨运行保留的小状态（≤8192 UTF-8 字节）：只能在定时任务运行中使用、由本次运行的任务隐式决定，省略 state 即清空。instruction 写「意图」而不是固定操作步骤：说清目标、什么情况才需要汇报、去重方式（用 state_get/state_set 记「上次已报的 ID」，只报新增）；没有需要告知的内容时只回复一行 [[SILENT]]；只有「新内容确实值得打断用户」的周期检查才开 needs_report=true。"
-	botInt138HelpScheduleLine      = "- 定时任务：fs_schedule list/create/update/delete/runs/run/enable/disable（全部同步、立即生效）。cron 是标准五字段（分 时 日 月 周），时区用独立 IANA 字段（可选，省略即用户时区，「每天 9 点」按用户所在地执行；update 不传时区=保持原值）。任务由你创建/修改/删除；用户只能查看与开关。run 立即手动执行一次：显式触发就是一次执行、不要求任务启用，回执只表示已受理（终态用 runs 查询，trigger_source 区分 cron/manual）；同一任务已有未结束运行时被拒绝；dry_run=true 只预览、不建运行记录。每次运行是独立会话，只带你的记忆与任务指令，写操作默认放行；无话可说时只回复一行 [[SILENT]]。任务各有一块跨运行保留的小状态：state_get（无参数）读取、state_set 写入（state 为任意 JSON 值，≤8192 UTF-8 字节；省略或 null 即清空）；这两个动作只能在定时任务运行（schedule run）内使用，主线会话调用会被拒绝。任务指令写「意图」而不是固定操作步骤：说清目标、什么情况才需要汇报、去重方式（用 state_get/state_set 记「上次已报的 ID」，只报新增），例如「每天 9 点检查新 issue，有新的才告诉我」；只有新内容确实值得打断用户的周期检查才开 needs_report=true。"
+	botInt138HelpScheduleLine      = "- 定时任务：fs_schedule list/create/update/delete/runs/run/enable/disable。cron 是标准五字段（分 时 日 月 周），时区用独立 IANA 字段（可选，省略即用户时区，「每天 9 点」按用户所在地执行；update 不传时区=保持原值）。list/runs/disable 与只改 name/cron/timezone 的 update、dry_run=true 的 run 同步立即生效；create、改动 instruction/needs_report/model 的 update、run（dry_run=true 预览除外）、enable、delete 需要用户确认：先受理（回执 status=pending_confirmation），用户批准后在后台执行，结果以「平台后台结果」消息送达，不要把受理当成已执行；批准创建或修改任务等于授权该任务以后每次运行默认放行写操作，enable 等于重新启用一个以后每次运行默认放行写操作的任务，delete 不可逆。任务由你创建/修改/删除；用户只能查看与开关。run 立即手动执行一次：显式触发就是一次执行、不要求任务启用，回执只表示已受理（终态用 runs 查询，trigger_source 区分 cron/manual）；同一任务已有未结束运行时被拒绝；dry_run=true 只预览、不建运行记录。定时任务运行中不能管理任务（防止绕过写操作确认），请在主线对话里操作。每次运行是独立会话，只带你的记忆与任务指令，写操作默认放行；无话可说时只回复一行 [[SILENT]]。任务各有一块跨运行保留的小状态：state_get（无参数）读取、state_set 写入（state 为任意 JSON 值，≤8192 UTF-8 字节；省略或 null 即清空）；这两个动作只能在定时任务运行（schedule run）内使用，主线会话调用会被拒绝。任务指令写「意图」而不是固定操作步骤：说清目标、什么情况才需要汇报、去重方式（用 state_get/state_set 记「上次已报的 ID」，只报新增），例如「每天 9 点检查新 issue，有新的才告诉我」；只有新内容确实值得打断用户的周期检查才开 needs_report=true。"
 )
 
 func TestBotInt138HelpAndToolDescriptionGuidance(t *testing.T) {
@@ -362,7 +376,8 @@ func TestBotInt138HelpAndToolDescriptionGuidance(t *testing.T) {
 	}
 
 	// v8 的 fs_schedule 工具描述逐字快照。
-	v8 := botToolsetVersionOf(botToolsetVersion)
+	// v8 已冻结在 INT-138、v9 已冻结为 INT-148 的字节；当前发布版本是 v10（INT-136）。
+	v8 := botToolsetVersionOf(8)
 	sched := v8.byName["fs_schedule"]
 	if sched == nil {
 		t.Fatalf("v8 应含 fs_schedule")
@@ -394,12 +409,17 @@ func TestBotInt138ToolsetV8Baseline(t *testing.T) {
 	if v8.hash == botToolsetV7FrozenHash {
 		t.Fatalf("v8 不得复用 v7 冻结 hash")
 	}
-	// INT-148 起 v8 冻结（fs_thread 的结算类动作只进 v9），当前发布版本是 v9。
-	if v8.hash != botToolsetV8FrozenHash {
-		t.Fatalf("v8 tools_hash 应等于冻结基线，实得 %s", v8.hash)
+	// v8 冻结在 INT-138，v9 已冻结为 INT-148 的字节，当前是 INT-136 的 v10。
+	current := botToolsetVersionOf(botToolsetVersion)
+	v9 := botToolsetVersionOf(9)
+	if current.version != 10 || current.hash == v8.hash || current.hash == v9.hash {
+		t.Fatalf("botToolsetVersion 应指向 v10（v8/v9 已冻结），实得 v%d", current.version)
 	}
-	if botToolsetVersionOf(botToolsetVersion).hash == v8.hash {
-		t.Fatalf("botToolsetVersion 应已指向 v9，不得仍是 v8")
+	if v9.hash != botToolsetV9FrozenHash {
+		t.Fatalf("v9 tools_hash 偏离 INT-148 冻结基线: got %s want %s", v9.hash, botToolsetV9FrozenHash)
+	}
+	if v8.hash != botToolsetV8FrozenHash {
+		t.Fatalf("v8 tools_hash 偏离冻结基线: got %s want %s", v8.hash, botToolsetV8FrozenHash)
 	}
 
 	// v8 schema 的 timezone 描述为新口径；v7 冻结 schema 保持旧口径。

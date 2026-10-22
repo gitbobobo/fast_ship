@@ -21,6 +21,7 @@ func seedScheduleTaskRow(t *testing.T, e *e2eEnv, botID string) *model.BotSchedu
 		ID: uuid.NewString(), BotID: botID,
 		Name: "每日汇总", CronExpression: "0 9 * * *", Timezone: "Asia/Shanghai",
 		Instruction: "汇总昨日动态", Enabled: true, NeedsReport: true,
+		Confirmed: true,
 		NextRunAt: &now, CreatedAt: now, UpdatedAt: now,
 	}
 	if err := e.env.db.Create(task).Error; err != nil {
@@ -133,6 +134,39 @@ func TestBotScheduleRESTEnabledToggle(t *testing.T) {
 	e.env.db.Where("id = ?", task.ID).First(&after)
 	if after.CronExpression != task.CronExpression {
 		t.Fatalf("用户不得经 REST 编辑任务配置")
+	}
+}
+
+// 未复核任务（confirmed=false，确认机制上线前的存量行）不得经 REST 开关
+// 直接启用：指令从未展示给用户核对，一键启用等于绕过确认卡重新武装
+// （INT-136 审查）。停用不受限。
+func TestBotScheduleRESTEnableUnconfirmedRejected(t *testing.T) {
+	e := setupE2E(t)
+	botID := e.createBot(t)
+	task := seedScheduleTaskRow(t, e, botID)
+	if err := e.env.db.Model(&model.BotScheduleTask{}).Where("id = ?", task.ID).Update("confirmed", false).Error; err != nil {
+		t.Fatalf("unconfirm: %v", err)
+	}
+	base := "/api/bots/" + botID + "/schedule-tasks/" + task.ID
+
+	code, body := e.doJSON(t, http.MethodPut, base+"/enabled", map[string]interface{}{"enabled": true})
+	if code != http.StatusConflict {
+		t.Fatalf("未复核任务 REST 启用应 409，实得 %d %v", code, body)
+	}
+	if got, _ := body["code"].(float64); got != 40934 {
+		t.Fatalf("错误码应为 40934: %v", body)
+	}
+	// 停用与「启用后复核置位」不受影响。
+	code, body = e.doJSON(t, http.MethodPut, base+"/enabled", map[string]interface{}{"enabled": false})
+	if code != http.StatusOK {
+		t.Fatalf("未复核任务停用不应受限: %d %v", code, body)
+	}
+	var row model.BotScheduleTask
+	if err := e.env.db.Where("id = ?", task.ID).First(&row).Error; err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if row.Enabled || row.Confirmed {
+		t.Fatalf("被拒的启用不得改库: %+v", row)
 	}
 }
 

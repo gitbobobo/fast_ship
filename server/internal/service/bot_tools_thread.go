@@ -55,13 +55,15 @@ func (s *BotService) execThreadRead(ctx context.Context, call *model.BotToolCall
 		if err != nil {
 			return "", err
 		}
-		// 只透出启动器需要的项目与模型选择，不透传 T3 全量配置。
+		// 只透出启动器需要的项目与模型选择，不透传 T3 全量配置；项目标题来自
+		// 配对的 T3 服务/仓库，进围栏（INT-136）。
 		return botMarshalResult(map[string]interface{}{"projects": opts.Projects})
 	case "workspace_options":
 		opts, err := s.threads.WorkspaceOptions(ctx, userID, args.EnvID, args.ProjectID, args.Query, args.Cursor)
 		if err != nil {
 			return "", err
 		}
+		// 远程 VCS 引用名与工作树路径同属仓库侧可控文本，进围栏（INT-136）。
 		return botMarshalResult(opts)
 	}
 	return "", errs.New(errs.ErrInvalidParams.Code, "fs_thread 不支持该读取动作")
@@ -155,6 +157,9 @@ type botCallExecContext struct {
 	// Param 与授权规则的参数值级约束一致（如 source=github）：always-allow
 	// 重建规则时必须有它，否则后续调用哈希永远对不上。
 	Param string `json:"param,omitempty"`
+	// Schedule 是 fs_schedule 确认卡的服务端预览（受理时算好，避免前端重复
+	// 实现 cron 解析）。
+	Schedule *botScheduleCallPreview `json:"schedule,omitempty"`
 }
 
 func botThreadMessage(text string) api.CreateT3ThreadRequest_Message {
@@ -386,6 +391,7 @@ func botThreadMatchesQuery(thread *T3ThreadSummary, query string, envNames map[s
 	return false
 }
 
+// botSlimThreadSummary 是线程摘要投影：列表项与详情的 thread 字段共用。
 func botSlimThreadSummary(t *T3ThreadSummary) map[string]interface{} {
 	out := map[string]interface{}{
 		"id":     t.Id,
@@ -460,7 +466,8 @@ func botSlimThreadDetail(detail *T3ThreadDetail, args *botThreadArgs) (map[strin
 }
 
 // botSlimThreadItemSummary 是详情内条目列表的精简形状：给 id 与短摘要，
-// 正文（text）走 fs_thread item 按需补读。
+// 正文（text）走 fs_thread item 按需补读。summary/text_preview 是外部内容，
+// 进不可信围栏（INT-136）。
 func botSlimThreadItemSummary(item *T3ThreadItem) map[string]interface{} {
 	out := map[string]interface{}{
 		"id":         item.Id,
@@ -504,6 +511,7 @@ func botSlimItemAttachChildThreadID(out map[string]interface{}, item *T3ThreadIt
 	}
 }
 
+// botSlimThreadItem 是条目正文投影；INT-148 的子线程入口与 INT-136 的围栏投影独立保留。
 func botSlimThreadItem(item *T3ThreadItem) map[string]interface{} {
 	out := map[string]interface{}{
 		"id":         item.Id,
