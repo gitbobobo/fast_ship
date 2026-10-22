@@ -365,6 +365,19 @@ kind 缺省按 background_task 加载）→ 存在占位条目即 `running`；�
 互不蕴含，筛选与呈现由前端决定）；`run_started_at`（上游
 `latestRunStartedAt`，卡片「运行中 N 分钟」的计时起点）。
 
+`run_status`（INT-148）是 `shell.status` 的**原文透传**，与归一化 `status`
+互补：completed/failed/cancelled/interrupted 在 `status` 里都折叠成 `idle`，
+区分终态要看 `run_status`；但只有 `status=idle` 时它才是最终结局——根 run 结束
+而后台 run/占位工作还在时 `status=running`、`run_status` 已是终态。
+`pull_requests[]`（INT-148）是线程上的 PR 明细（T3 `ThreadPullRequestLink`）：
+`repo`（host/repository）、`number`、`url`、`watching`（挂着 PR 监听）恒在，
+快照已同步时另有 `state`/`merged_at`/`is_draft`/`checks_state`/`mergeability`；
+`snapshot` 为 null 时后五项省略。数据只来自 `shell.pullRequests`，并跳过
+`source=stack-dismissed` 的墓碑（用户解开的栈成员，上游
+`visibleThreadPullRequests` 同样隐藏）与解析失败的坏条目；
+`pull_request_count` 与可见明细同口径（旧服务端没有明细数组时才回退到
+`linkedPullRequest`/`branchPullRequest`），无 PR 时恒为空数组。
+
 ### Turn item 归一化映射
 
 T3 `OrchestrationV2TurnItem` → Fast Ship 11 种 `ThreadItem`。条目 ID 由来源身份
