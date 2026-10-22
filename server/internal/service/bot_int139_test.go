@@ -1108,7 +1108,7 @@ func TestBotSettleSkipsSettledNoticeForNewerVersion(t *testing.T) {
 	}
 
 	if err := env.db.Transaction(func(tx *gorm.DB) error {
-		return env.bots.settleToolsetNoticesTx(tx, bot.ID, 11)
+		return env.bots.settleToolsetNoticesTx(tx, bot.ID, 11, true)
 	}); err != nil {
 		t.Fatalf("settle: %v", err)
 	}
@@ -1137,7 +1137,7 @@ func TestBotSettleCoversLegacyNoticeFormat(t *testing.T) {
 	}
 
 	if err := env.db.Transaction(func(tx *gorm.DB) error {
-		return env.bots.settleToolsetNoticesTx(tx, bot.ID, 10)
+		return env.bots.settleToolsetNoticesTx(tx, bot.ID, 10, true)
 	}); err != nil {
 		t.Fatalf("settle: %v", err)
 	}
@@ -1170,7 +1170,7 @@ func TestBotSettleFiresForPendingNewerNotice(t *testing.T) {
 	}
 
 	if err := env.db.Transaction(func(tx *gorm.DB) error {
-		return env.bots.settleToolsetNoticesTx(tx, bot.ID, 11)
+		return env.bots.settleToolsetNoticesTx(tx, bot.ID, 11, true)
 	}); err != nil {
 		t.Fatalf("settle: %v", err)
 	}
@@ -1325,12 +1325,15 @@ func TestBotActivationDeferralExpiresMidRun(t *testing.T) {
 		t.Fatalf("run 内前缀应保持冻结，第二条请求的 system 不得换成新提示词")
 	}
 
-	// 推迟通知在激活时必须有 toolset_activated 收口（run 内承诺兑现）。
-	var found int64
-	env.db.Model(&model.BotMessage{}).
-		Where("bot_id = ? AND kind = ? AND content_json LIKE ?", bot.ID,
-			model.BotMessageKindLifecycle, "%toolset_activated%").Count(&found)
-	if found == 0 {
-		t.Fatalf("推迟通知应有 toolset_activated 收口事件")
+	// 推迟通知在激活时必须有 toolset_activated 收口，且文案如实写生效
+	// 时点——本 run 仍冻结旧前缀，不得宣称「已切换」（INT-139 云端复审）。
+	var act model.BotMessage
+	if err := env.db.Where("bot_id = ? AND kind = ? AND content_json LIKE ?",
+		bot.ID, model.BotMessageKindLifecycle, "%toolset_activated%").First(&act).Error; err != nil {
+		t.Fatalf("推迟通知应有 toolset_activated 收口事件: %v", err)
+	}
+	if !strings.Contains(act.ContentJSON, `"activation":"next_boundary"`) ||
+		strings.Contains(act.ContentJSON, "已切换到最新版本") {
+		t.Fatalf("run 内激活的收口文案应标 next_boundary 且不得宣称已切换: %s", act.ContentJSON)
 	}
 }

@@ -171,9 +171,12 @@ panic 残留行（`running` + `finished_at=nil`）不受此过滤：请求可能
 `activation_deferred_at`，距起点满一个窗口仍未等到压缩边界时强制入口
 激活并清掉标记（`ActivateToolsetTx` 同事务清空）；run 内每个安全点
 （`maybeTellToolset` 同处）也复核一次——只在入口判会让持续有输入的长寿
-run 无限越过承诺窗口，安全点激活只推进库内水位并收口
-`toolset_activated`，本 run 仍按冻结前缀跑完，下一压缩边界或下一次运行
-自然换新版本。持续活跃不压缩的
+run 无限越过承诺窗口，安全点激活（`activateBotPromptWatermark`）只推进
+库内水位并收口 `toolset_activated`，本 run 仍按冻结前缀跑完，下一压缩
+边界或下一次运行自然换新版本；此时收口文案也如实标
+`next_boundary`（「自下一个压缩边界或下一次运行起生效」），不写「已切换」——
+模型投影会把生命周期事件当事实读，错标生效时点会让本 run 把旧工具集
+误当新版调用。持续活跃不压缩的
 会话不会把升级与「下一个压缩点生效」的承诺无限推迟。定时任务会话独立、
 不吃主线缓存，入口始终用最新版本——但它走
 `activateBotPromptForSession` 只做会话内解析、**不写回 bots 行激活水位**，

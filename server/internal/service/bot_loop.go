@@ -234,7 +234,7 @@ runLoop:
 			// 随后把本 run 的副本按回冻结前缀，缓存不炸，下一个压缩边界或
 			// 下一次运行自然用上新版本。
 			if activationDeferred && s.activationDeferralExpired(bot) {
-				if err := s.activateBotPrompt(bot); err != nil {
+				if err := s.activateBotPromptWatermark(bot); err != nil {
 					s.logger.Warn("安全点激活工具集失败", zap.String("bot_id", bot.ID), zap.Error(err))
 				} else {
 					activationDeferred = false
