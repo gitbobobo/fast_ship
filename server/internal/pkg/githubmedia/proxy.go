@@ -225,7 +225,9 @@ func newService(cacheRoot string, cfg serviceConfig) *ProxyService {
 		cfg.allowURL = isAllowedGitHubMediaURL
 	}
 	if cfg.client == nil {
-		cfg.client = newGuardedClient(cfg.requireHTTPS, cfg.allowURL, cfg.guardAddress)
+		webHost := cfg.githubWebHost
+		cfg.client = newGuardedClient(cfg.requireHTTPS, cfg.allowURL, cfg.guardAddress,
+			func(u *url.URL) bool { return IsGitHubMediaURLFor(u.String(), webHost) })
 	}
 	s := &ProxyService{
 		client:            cfg.client,
@@ -282,8 +284,11 @@ func newProxyService(cacheRoot string, cacheTTL time.Duration, maxCacheEntrySize
 
 // newGuardedClient 默认客户端：重定向按实例自身的 allowURL/requireHTTPS 复检
 // （旧实现写死 GitHub 白名单，截图面会拦错/放错）；guardAddress 时在拨号
-// 前校验解析 IP。Transport 克隆自 DefaultTransport，保留连接池参数。
-func newGuardedClient(requireHTTPS bool, allowURL func(*url.URL) bool, guardAddress bool) *http.Client {
+// 前校验解析 IP。bearerGate 判定跳转目标是否仍可携带 Authorization：
+// Go http.Client 会把敏感头透传给同域及子域目标，GHE 部署的兄弟子域
+// （x.ghe.corp.com 对 ghe.corp.com）也在其列——目标过不了闸门就剥掉，
+// nil 一律剥。Transport 克隆自 DefaultTransport，保留连接池参数。
+func newGuardedClient(requireHTTPS bool, allowURL func(*url.URL) bool, guardAddress bool, bearerGate func(*url.URL) bool) *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	if guardAddress {
 		// 必须自己拨到目标才能校验目标 IP：走环境代理时校验到的会是代理地址
@@ -308,6 +313,10 @@ func newGuardedClient(requireHTTPS bool, allowURL func(*url.URL) bool, guardAddr
 			}
 			if !allowURL(req.URL) {
 				return ErrInvalidMediaURL
+			}
+			if req.Header.Get("Authorization") != "" &&
+				(bearerGate == nil || !bearerGate(req.URL)) {
+				req.Header.Del("Authorization")
 			}
 			return nil
 		},

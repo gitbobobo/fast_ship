@@ -1930,9 +1930,13 @@ func (s *BotService) maybeTellToolset(bot *model.Bot, run *model.BotRun, deferre
 	if stale && !deferred {
 		return
 	}
-	_ = s.db.Transaction(func(tx *gorm.DB) error {
+	if err := s.db.Transaction(func(tx *gorm.DB) error {
 		return s.tellToolsetTx(tx, bot, deferred && stale)
-	})
+	}); err != nil {
+		// 失败不阻塞 run：下一轮 runLoop 会重试；但要有留痕，否则排查
+		// 「升级通知没出现」时无线索。
+		s.logger.Warn("工具集升级通知写入失败", zap.String("bot_id", bot.ID), zap.Error(err))
+	}
 }
 
 func (s *BotService) tellToolsetTx(tx *gorm.DB, bot *model.Bot, deferred bool) error {

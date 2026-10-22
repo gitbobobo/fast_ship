@@ -392,8 +392,13 @@ func (c BotsConfig) validate() error {
 	if c.Runtime.StopGraceSeconds < 0 {
 		return fmt.Errorf("bots.runtime.stop_grace_seconds 不得为负")
 	}
-	if c.Runtime.PromptCacheRetainMinutes != nil && *c.Runtime.PromptCacheRetainMinutes < 0 {
-		return fmt.Errorf("bots.runtime.prompt_cache_retain_minutes 不得为负")
+	if c.Runtime.PromptCacheRetainMinutes != nil {
+		// 上限防 int64 溢出：约 1.5 亿分钟 × time.Minute 溢出为负，
+		// 窗口变负后热度判定恒冷，推迟功能被静默禁用——报配置错而不是
+		// 让部署者看到「配置生效但行为相反」。
+		if *c.Runtime.PromptCacheRetainMinutes < 0 || *c.Runtime.PromptCacheRetainMinutes > 525600 {
+			return fmt.Errorf("bots.runtime.prompt_cache_retain_minutes 须在 0–525600（一年）之间")
+		}
 	}
 	if c.Memory.Timezone != "" {
 		if _, err := time.LoadLocation(c.Memory.Timezone); err != nil {
