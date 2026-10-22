@@ -608,9 +608,13 @@ func (s *ReviewService) updateLedgerEpoch(ledger *model.ReviewPullRequest, epoch
 	return res.RowsAffected > 0, nil
 }
 
-// prCommentMatches 远端顶层评论正文是否已经是 body（按 marker 定位）。只给
-// 「diff 读不到时避免重复 PATCH」用：读评论失败或找不到都按「需要更新」处理
-// （写失败会留在下一轮重试，不会把正文写错）。
+// prCommentMatches 远端顶层评论正文是否已经是 body。只给「diff 读不到时避免
+// 重复 PATCH」用：读评论失败或认不出自己的评论都按「需要更新」处理（写失败
+// 会留在下一轮重试，不会把正文写错）。
+// 先按账本记的 comment id 认自己的评论；id 不可用（写回丢失/评论已重建）时
+// 退回与 FindPullRequestComment 同口径的「bot + marker 前缀」判定——只看
+// 「正文含 marker」会把用户复制粘贴的同一段正文当成自己的评论，跳过真正该
+// 更新的那条。
 func (s *ReviewService) prCommentMatches(ctx context.Context, client githubapi.GitHubClient,
 	ledger *model.ReviewPullRequest, marker, body string) bool {
 	comments, err := client.ListIssueCommentsForPR(ctx, ledger.InstallationID, ledger.RepoFullName, ledger.PRNumber)
@@ -619,9 +623,16 @@ func (s *ReviewService) prCommentMatches(ctx context.Context, client githubapi.G
 	}
 	want := strings.TrimSpace(body)
 	for _, c := range comments {
-		if strings.Contains(c.Body, marker) {
-			return strings.TrimSpace(c.Body) == want
+		if ledger.CodeCommentID != 0 {
+			if c.ID == ledger.CodeCommentID {
+				return strings.TrimSpace(c.Body) == want
+			}
+			continue
 		}
+		if !strings.HasSuffix(c.User, "[bot]") || !strings.HasPrefix(strings.TrimSpace(c.Body), marker) {
+			continue
+		}
+		return strings.TrimSpace(c.Body) == want
 	}
 	return false
 }

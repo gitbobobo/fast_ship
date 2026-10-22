@@ -285,3 +285,38 @@ func TestReviewDiffFailureStillWritesVisualOutput(t *testing.T) {
 	}
 	_ = code
 }
+
+// TestPrCommentMatchesIgnoresForeignMarkerComment 「评论正文未变」必须认准
+// 自己的评论：账本记的 comment id 优先；id 不可用时按「bot + marker 前缀」
+// 过滤。用户复制粘贴同一段 marker 正文不能让我们跳过真正该更新的那条。
+func TestPrCommentMatchesIgnoresForeignMarkerComment(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	review := e.withT3(nil, nil, nil)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	ctx := context.Background()
+	const marker = reviewCodeCommentMarker
+
+	botID, err := e.fake.CreatePullRequestComment(ctx, 1, repo, 82, marker+"\n旧正文")
+	if err != nil {
+		t.Fatalf("seed bot comment: %v", err)
+	}
+	// 用户复制了一段含 marker 的正文，正文正好等于本轮要写的。
+	e.fake.AddIssueComment(repo, 82, "someone", marker+"\n本轮正文", time.Now().UTC())
+	withID := &model.ReviewPullRequest{RepoFullName: repo, PRNumber: 82, InstallationID: 1, CodeCommentID: botID}
+	if review.prCommentMatches(ctx, e.fake, withID, marker, marker+"\n本轮正文") {
+		t.Fatal("账本记的 bot 评论正文是旧的，不能因为用户复制的正文相同就跳过更新")
+	}
+	noID := &model.ReviewPullRequest{RepoFullName: repo, PRNumber: 82, InstallationID: 1}
+	if review.prCommentMatches(ctx, e.fake, noID, marker, marker+"\n本轮正文") {
+		t.Fatal("id 不可用时要按作者（bot）+ marker 前缀认自己的评论")
+	}
+
+	botID2, err := e.fake.CreatePullRequestComment(ctx, 1, repo, 83, marker+"\n相同正文")
+	if err != nil {
+		t.Fatalf("seed bot comment 2: %v", err)
+	}
+	own := &model.ReviewPullRequest{RepoFullName: repo, PRNumber: 83, InstallationID: 1, CodeCommentID: botID2}
+	if !review.prCommentMatches(ctx, e.fake, own, marker, marker+"\n相同正文") {
+		t.Fatal("自己的评论正文一致时应命中（可以跳过重写）")
+	}
+}
