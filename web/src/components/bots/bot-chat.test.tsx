@@ -4,7 +4,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { BotChat } from "./bot-chat";
 import { renderWithRoute } from "@/test/render";
 import type { BotRun } from "@/lib/api/bots";
-import type { UseBotChatResult } from "@/lib/hooks/use-bot-chat";
+import type { useBotChat } from "@/lib/hooks/use-bot-chat";
+
+/** hook 返回值的本地别名（原 use-bot-chat 导出的 UseBotChatResult 已删除） */
+type ChatState = ReturnType<typeof useBotChat>;
 
 // 组件测试只关心视图行为：useBotChat 整钩替换，hook 侧逻辑由
 // use-bot-chat.test.tsx 覆盖。
@@ -16,7 +19,7 @@ const chat = vi.hoisted(() => ({
   loadOlder: vi.fn(),
   retry: vi.fn(),
   resumeStream: vi.fn(),
-  value: null as unknown as UseBotChatResult,
+  value: null as unknown as ChatState,
 }));
 
 vi.mock("@/lib/hooks/use-bot-chat", () => ({
@@ -32,7 +35,7 @@ const runningRun: BotRun = {
   created_at: "2026-10-15T00:00:30Z",
 };
 
-function chatState(overrides: Partial<UseBotChatResult> = {}): UseBotChatResult {
+function chatState(overrides: Partial<ChatState> = {}): ChatState {
   return {
     loading: false,
     loadError: null,
@@ -64,7 +67,7 @@ function chatState(overrides: Partial<UseBotChatResult> = {}): UseBotChatResult 
     cancelCall: chat.cancelCall,
     loadOlder: chat.loadOlder,
     ...overrides,
-  } as UseBotChatResult;
+  } as ChatState;
 }
 
 beforeEach(() => {

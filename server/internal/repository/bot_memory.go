@@ -218,16 +218,6 @@ func (r *BotMemoryRepository) ListVersionsTx(tx *gorm.DB, fileID string, beforeV
 	return rows, err
 }
 
-// FindVersionByOperationKeyTx 按幂等键查版本（启动恢复核对记忆写副作用）。
-func (r *BotMemoryRepository) FindVersionByOperationKeyTx(tx *gorm.DB, fileID, operationKey string) (*model.BotMemoryVersion, error) {
-	var row model.BotMemoryVersion
-	if err := tx.Where("file_id = ? AND operation_key = ?", fileID, operationKey).
-		First(&row).Error; err != nil {
-		return nil, err
-	}
-	return &row, nil
-}
-
 // HasVersionWithOperationKey 报告某机器人的记忆版本表里是否存在该幂等键
 // （恢复时判断写入是否已发生；跨文件查询限定机器人归属）。
 func (r *BotMemoryRepository) HasVersionWithOperationKey(botID, operationKey string) (bool, error) {

@@ -36,15 +36,6 @@ func LoggerFromContext(ctx context.Context) *slog.Logger {
 	return l
 }
 
-// RequestIDFromContext 返回当前请求 ID；没有则空串。
-func RequestIDFromContext(ctx context.Context) string {
-	if ctx == nil {
-		return ""
-	}
-	s, _ := ctx.Value(ctxRequestID).(string)
-	return s
-}
-
 // LoggerOr 优先用 context 里的请求日志器，否则回落到进程级 logger。
 func LoggerOr(ctx context.Context, fallback *slog.Logger) *slog.Logger {
 	if l := LoggerFromContext(ctx); l != nil {

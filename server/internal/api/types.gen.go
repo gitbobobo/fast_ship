@@ -1748,7 +1748,7 @@ type BotRun struct {
 	TotalTokens   *int64 `json:"total_tokens,omitempty"`
 	TriggerKey    string `json:"trigger_key"`
 
-	// TriggerSource user_message / tool_result / recovery / schedule / manual
+	// TriggerSource user_message / tool_result / recovery / schedule / manual / schedule_event（定时任务运行事件写入主线后的立即唤醒，INT-138）
 	TriggerSource string `json:"trigger_source"`
 
 	// UsageComplete false 表示上游未报 usage（缺失与零严格区分）
@@ -4659,6 +4659,9 @@ type UpdateProfileRequest struct {
 	// Email 新邮箱
 	Email *string `json:"email,omitempty"`
 
+	// Timezone 用户 IANA 时区（INT-138）；空串清空，非法名称拒绝
+	Timezone *string `json:"timezone,omitempty"`
+
 	// Username 新用户名；与现值相同或省略则不变
 	Username *string `json:"username,omitempty"`
 }
@@ -4813,13 +4816,19 @@ type User struct {
 	// AvatarUrl 形如 /api/avatars/:uid/:filename，未设置为空串
 	AvatarUrl string `json:"avatar_url"`
 	CreatedAt string `json:"created_at"`
-	Email     string `json:"email"`
-	Id        string `json:"id"`
+
+	// EffectiveTimezone 生效时区（INT-138）：timezone 非空时为它，否则为部署配置 bots.memory.timezone，再否则 UTC。/auth/me 会返回；成员列表不返回（省略）
+	EffectiveTimezone *string `json:"effective_timezone,omitempty"`
+	Email             string  `json:"email"`
+	Id                string  `json:"id"`
 
 	// Role 用户角色（INT-129）：admin 可管理成员、邀请与部署设置；member 只能使用自己的资源。角色只存库，服务端每请求查库判定，不写进 JWT
-	Role      UserRole `json:"role"`
-	UpdatedAt string   `json:"updated_at"`
-	Username  string   `json:"username"`
+	Role UserRole `json:"role"`
+
+	// Timezone 用户 IANA 时区（INT-138）；空串表示未声明，机器人按部署配置回退
+	Timezone  string `json:"timezone"`
+	UpdatedAt string `json:"updated_at"`
+	Username  string `json:"username"`
 }
 
 // UserRole 用户角色（INT-129）：admin 可管理成员、邀请与部署设置；member 只能使用自己的资源。角色只存库，服务端每请求查库判定，不写进 JWT

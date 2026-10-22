@@ -12,6 +12,7 @@ import { authApi } from "@/lib/api/auth";
 import { ApiRequestError } from "@/lib/api/client";
 import { useAuthStore } from "@/lib/store/auth-store";
 import { formatDate } from "@/lib/utils/format";
+import { syncBrowserTimezone } from "@/lib/utils/timezone";
 
 type InviteCheck =
   | { state: "none" }
@@ -46,6 +47,13 @@ function RegisterForm({
         invite_token: inviteToken || undefined,
       });
       setAuth(res.data.token, res.data.refresh_token, res.data.user);
+      // 首次登录（注册即首登）按浏览器时区补写一次；helper 内部静默失败、不
+      // 阻断跳转，只有真正拿到新 user 才回写 store。登录路径不写：否则用户在
+      // 设置页选的「跟随部署配置」（空串）会被下次登录覆盖。
+      const syncedUser = await syncBrowserTimezone(res.data.user);
+      if (syncedUser !== res.data.user) {
+        useAuthStore.getState().setUser(syncedUser);
+      }
       navigate("/dashboard", { replace: true });
     } catch (err) {
       // 失败文案用服务端 message（40306 注册关闭、40432 邀请失效、

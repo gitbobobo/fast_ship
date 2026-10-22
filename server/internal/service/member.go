@@ -205,6 +205,7 @@ func newUserResponse(user *model.User) MemberResponse {
 		Email:     user.Email,
 		AvatarUrl: user.AvatarURL,
 		Role:      api.UserRole(role),
+		Timezone:  user.Timezone,
 		CreatedAt: api.JSONTime(user.CreatedAt),
 		UpdatedAt: api.JSONTime(user.UpdatedAt),
 	}

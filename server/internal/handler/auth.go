@@ -108,10 +108,12 @@ func (h *AuthHandler) GetMe(c *gin.Context) {
 // updateMeInput 保留基线的 string+omitempty 绑定语义：生成类型字段是
 // *string，{"username":""} 会绑定成非 nil 指针触发 min/email 校验返回 400，
 // 而基线里显式空串被 omitempty 跳过（200 且字段不变）。NonEmpty 把 "" 折回
-// nil，与 service 的 "空串即不提供" 判定等价。
+// nil，与 service 的 "空串即不提供" 判定等价。timezone 例外：空串是合法的
+// 「清空」意图（INT-138），所以用指针区分省略与显式空串。
 type updateMeInput struct {
-	Username string `json:"username" binding:"omitempty,min=2,max=50"`
-	Email    string `json:"email" binding:"omitempty,email"`
+	Username string  `json:"username" binding:"omitempty,min=2,max=50"`
+	Email    string  `json:"email" binding:"omitempty,email"`
+	Timezone *string `json:"timezone" binding:"omitempty,max=64"`
 }
 
 func (h *AuthHandler) UpdateMe(c *gin.Context) {
@@ -125,6 +127,7 @@ func (h *AuthHandler) UpdateMe(c *gin.Context) {
 	result, err := h.authService.UpdateProfile(userID, &service.UpdateProfileRequest{
 		Username: api.NonEmpty(input.Username),
 		Email:    api.NonEmpty(input.Email),
+		Timezone: input.Timezone,
 	})
 	if err != nil {
 		middleware.HandleAppError(c, err)

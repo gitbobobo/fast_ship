@@ -47,14 +47,6 @@ export function deriveDimensionOptions(
     .sort((a, b) => b.count - a.count || a.value.localeCompare(b.value));
 }
 
-/** 未标注桶的计数（维度为 NULL 的截图数） */
-export function countUntagged(
-  screens: ScreenshotScreen[],
-  dimension: "platform" | "locale" | "theme",
-): number {
-  return screens.filter((s) => s[dimension] === null).length;
-}
-
 /** 多选切换：已选则移除，未选则加入 */
 export function toggleDimensionValue(
   values: DimensionFilter,

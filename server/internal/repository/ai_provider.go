@@ -61,11 +61,6 @@ func (r *AIProviderRepository) OpenCircuit(id string, until time.Time, reason st
 	return res.RowsAffected > 0, nil
 }
 
-// ClearCircuit 清除熔断标记：用户更新凭证/地址或测试连接成功后调用。
-func (r *AIProviderRepository) ClearCircuit(id string) error {
-	return r.ClearCircuitTx(r.db, id)
-}
-
 // ClearCircuitTx 在调用方事务内清除熔断标记：更新凭证与恢复调度保持原子。
 func (r *AIProviderRepository) ClearCircuitTx(tx *gorm.DB, id string) error {
 	return tx.Model(&model.AIProvider{}).Where("id = ?", id).Updates(map[string]interface{}{

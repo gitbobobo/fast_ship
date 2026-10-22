@@ -29,14 +29,6 @@ func (r *BotToolCallRepository) FindByID(callID string) (*model.BotToolCall, err
 	return &row, nil
 }
 
-func (r *BotToolCallRepository) FindByIDTx(tx *gorm.DB, callID string) (*model.BotToolCall, error) {
-	var row model.BotToolCall
-	if err := tx.Where("id = ?", callID).First(&row).Error; err != nil {
-		return nil, err
-	}
-	return &row, nil
-}
-
 func (r *BotToolCallRepository) ListByBot(botID string, statuses []string, limit int) ([]model.BotToolCall, error) {
 	q := r.db.Where("bot_id = ?", botID)
 	if len(statuses) > 0 {
@@ -51,23 +43,6 @@ func (r *BotToolCallRepository) ListByBot(botID string, statuses []string, limit
 func (r *BotToolCallRepository) ListQueued(limit int) ([]model.BotToolCall, error) {
 	var rows []model.BotToolCall
 	err := r.db.Where("status = ?", model.BotCallStatusQueued).
-		Order("created_at ASC, id ASC").Limit(limit).Find(&rows).Error
-	return rows, err
-}
-
-// ListPendingConfirmation 列出等待用户确认的调用。
-func (r *BotToolCallRepository) ListPendingConfirmation(botID string, limit int) ([]model.BotToolCall, error) {
-	var rows []model.BotToolCall
-	err := r.db.Where("bot_id = ? AND status = ?", botID, model.BotCallStatusPendingConfirmation).
-		Order("created_at ASC, id ASC").Limit(limit).Find(&rows).Error
-	return rows, err
-}
-
-// ListUnfinishedByBot 列出本机器人全部未终态调用（快照收录：数量有界且
-// 必须可操作）。
-func (r *BotToolCallRepository) ListUnfinishedByBot(botID string, limit int) ([]model.BotToolCall, error) {
-	var rows []model.BotToolCall
-	err := r.db.Where("bot_id = ? AND finished_at IS NULL", botID).
 		Order("created_at ASC, id ASC").Limit(limit).Find(&rows).Error
 	return rows, err
 }

@@ -9116,6 +9116,10 @@ components:
           type: string
           format: email
           description: 新邮箱
+        timezone:
+          type: string
+          maxLength: 64
+          description: 用户 IANA 时区（INT-138）；空串清空，非法名称拒绝
     UpdatePasswordRequest:
       type: object
       required: [old_password, new_password]
@@ -9151,7 +9155,7 @@ components:
           type: string
     User:
       type: object
-      required: [id, username, email, avatar_url, role, created_at, updated_at]
+      required: [id, username, email, avatar_url, role, timezone, created_at, updated_at]
       properties:
         id:
           type: string
@@ -9164,6 +9168,12 @@ components:
           description: 形如 /api/avatars/:uid/:filename，未设置为空串
         role:
           $ref: '#/components/schemas/UserRole'
+        timezone:
+          type: string
+          description: 用户 IANA 时区（INT-138）；空串表示未声明，机器人按部署配置回退
+        effective_timezone:
+          type: string
+          description: 生效时区（INT-138）：timezone 非空时为它，否则为部署配置 bots.memory.timezone，再否则 UTC。/auth/me 会返回；成员列表不返回（省略）
         created_at:
           type: string
           format: date-time
@@ -13528,7 +13538,7 @@ components:
           type: string
         trigger_source:
           type: string
-          description: user_message / tool_result / recovery / schedule / manual
+          description: user_message / tool_result / recovery / schedule / manual / schedule_event（定时任务运行事件写入主线后的立即唤醒，INT-138）
         trigger_key:
           type: string
         status:

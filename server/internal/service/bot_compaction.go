@@ -842,10 +842,6 @@ func (s *BotService) estimatePlanTokens(bot *model.Bot, state *model.BotContextS
 	return botEstimateBytes(n)
 }
 
-func (s *BotService) estimateAfterProjection(bot *model.Bot, plan *botCompactionPlan, summary, manifest, foldedJSON string, through int64) int64 {
-	return s.buildBoundarySnapshot(bot, plan, summary, manifest, foldedJSON, through).AfterTokens
-}
-
 func (s *BotService) buildBoundarySnapshot(bot *model.Bot, plan *botCompactionPlan, summary, manifest, foldedJSON string, through int64) *botBoundarySnapshot {
 	folded := map[string]string{}
 	_ = json.Unmarshal([]byte(foldedJSON), &folded)
@@ -1753,6 +1749,19 @@ func (s *BotService) tellToolsetTx(tx *gorm.DB, bot *model.Bot) error {
 }
 
 func botToolsetChangeNote(from, to int64) string {
+	if to >= 8 && from < 8 {
+		note := "工具集已升级：fs_schedule 创建任务省略时区时默认用户时区（不再默认 UTC）；任务指令应写「目标 + 什么情况需要汇报 + 去重方式（用 state_get/state_set 记已报过的 ID）+ 无变化只回复 [[SILENT]]」"
+		if from < 7 {
+			note += "；fs_schedule 新增 state_get/state_set（任务跨运行保留的小状态，仅定时任务运行内可用，≤8192 UTF-8 字节，省略 state 即清空）"
+		}
+		if from < 6 {
+			note += "；fs_schedule 新增 run 动作（立即手动执行一次，dry_run=true 只预览；同一任务已有未结束运行时拒绝，手动触发不要求任务启用），运行记录新增 trigger_source 区分 cron/manual"
+		}
+		if from < 5 {
+			note += "；fs_thread list 支持 env_id/query 过滤，分页响应新增 offset（实际切片起点）；fs_issue get 的 labels/checklist 恒返回数组（没有时为空数组）"
+		}
+		return note
+	}
 	if to >= 7 && from < 7 {
 		note := "工具集已升级：fs_schedule 新增 state_get/state_set（任务跨运行保留的小状态，仅定时任务运行内可用，≤8192 UTF-8 字节，省略 state 即清空）"
 		if from < 6 {
@@ -1908,7 +1917,7 @@ func (s *BotService) runSilentArchive(ctx context.Context, bot *model.Bot, maint
 		s.recordArchiveResult(maintRun, "stop_requested", 0)
 		return
 	}
-	dailyPath := s.botDailyPathFor(now)
+	dailyPath := s.botDailyPathForBot(bot, now)
 	sourceRunID := s.parentRunIDOf(maintRun)
 	writeAt := now
 	writeErr := s.db.Transaction(func(tx *gorm.DB) error {

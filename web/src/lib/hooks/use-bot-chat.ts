@@ -960,5 +960,3 @@ export function useBotChat(botId: string) {
     loadOlder,
   };
 }
-
-export type UseBotChatResult = ReturnType<typeof useBotChat>;

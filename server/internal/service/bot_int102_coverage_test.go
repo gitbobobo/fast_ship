@@ -141,15 +141,6 @@ func countMainModelRequests(db *gorm.DB, botID string) int {
 	return int(n)
 }
 
-func contentForEstimate(want int64) string {
-	for n := 1; n < 500000; n++ {
-		if botEstimateBytes(int64(n)) == want {
-			return strings.Repeat("a", n)
-		}
-	}
-	return strings.Repeat("a", int(want)*4)
-}
-
 // ---------- 压缩主路径 ----------
 
 func writeFakeChatSSE(w http.ResponseWriter, text string) {
@@ -1558,7 +1549,7 @@ func TestBotPreCompactionArchive(t *testing.T) {
 	if mains != 0 {
 		t.Fatalf("归档不得写主线请求")
 	}
-	f, err := repository.NewBotMemoryRepository(env.db).FindFile(bot.ID, env.bots.botDailyPathFor(time.Now().UTC()))
+	f, err := repository.NewBotMemoryRepository(env.db).FindFile(bot.ID, env.bots.botDailyPathForBot(botRow, time.Now().UTC()))
 	if err != nil {
 		t.Fatalf("daily: %v", err)
 	}

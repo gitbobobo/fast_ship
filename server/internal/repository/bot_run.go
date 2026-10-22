@@ -53,15 +53,6 @@ func (r *BotRunRepository) FindActiveByBot(botID string) (*model.BotRun, error) 
 	return &run, nil
 }
 
-func (r *BotRunRepository) FindByTriggerKeyTx(tx *gorm.DB, botID, triggerKey string) (*model.BotRun, error) {
-	var run model.BotRun
-	if err := tx.Where("bot_id = ? AND trigger_key = ?", botID, triggerKey).
-		First(&run).Error; err != nil {
-		return nil, err
-	}
-	return &run, nil
-}
-
 // ListByBot 主线 run 列表（用户可见的 /runs）；定时任务 run 走
 // schedule-tasks/{taskId}/runs 读取。
 func (r *BotRunRepository) ListByBot(botID string, limit int) ([]model.BotRun, error) {
@@ -211,14 +202,9 @@ func (r *BotModelRequestRepository) NextOrdinalTx(tx *gorm.DB, runID string) (in
 	return ordinal + 1, nil
 }
 
-// MaxOrdinal 返回该 run 当前最大的模型请求序号（没有请求为 0）：停止宽限
-// 到期时比对它，判断 run 在受理停止之后是否又发起了新请求（INT-137）。
-func (r *BotModelRequestRepository) MaxOrdinal(runID string) (int64, error) {
-	return r.MaxOrdinalTx(r.db, runID)
-}
-
-// MaxOrdinalTx 是 MaxOrdinal 的事务版本：受理停止时在同一事务里（追加停止
-// 消息之前）采样序号，避免「事务提交到采样之间」新登记的请求被算进基线。
+// MaxOrdinalTx 返回该 run 当前最大的模型请求序号（没有请求为 0）。受理停止
+// 时在同一事务里（追加停止消息之前）采样序号，避免「事务提交到采样之间」
+// 新登记的请求被算进基线（INT-137）。
 func (r *BotModelRequestRepository) MaxOrdinalTx(tx *gorm.DB, runID string) (int64, error) {
 	var ordinal int64
 	if err := tx.Model(&model.BotModelRequest{}).Where("run_id = ?", runID).
@@ -238,12 +224,6 @@ func (r *BotModelRequestRepository) FindByID(id string) (*model.BotModelRequest,
 		return nil, err
 	}
 	return &row, nil
-}
-
-func (r *BotModelRequestRepository) ListByRun(runID string) ([]model.BotModelRequest, error) {
-	var rows []model.BotModelRequest
-	err := r.db.Where("run_id = ?", runID).Order("ordinal ASC").Find(&rows).Error
-	return rows, err
 }
 
 // UpdateColumns 条件更新请求记录。

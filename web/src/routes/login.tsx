@@ -31,6 +31,8 @@ export default function LoginPage() {
     try {
       const res = await authApi.login(data);
       setAuth(res.data.token, res.data.refresh_token, res.data.user);
+      // 时区探测只在注册时做一次（见 register.tsx）：登录路径不写，避免把用户
+      // 在设置页选的「跟随部署配置」（存空串）在下次登录时又覆盖回浏览器时区。
       navigate(next ?? DEFAULT_POST_LOGIN_PATH, { replace: true });
     } catch {
       setError("用户名/邮箱或密码错误");
