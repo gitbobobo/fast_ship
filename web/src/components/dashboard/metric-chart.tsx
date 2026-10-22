@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState, type ReactNode } from "react";
 import { cn } from "@/lib/utils";
 
 export interface MetricChartPoint {
@@ -27,6 +27,7 @@ interface MetricChartProps {
   points: MetricChartPoint[];
   variant: "bar";
   emptyMessage: string;
+  emptyAction?: ReactNode;
   className?: string;
 }
 
@@ -36,6 +37,7 @@ interface MultiSeriesChartProps {
   points: MetricChartSeriesPoint[];
   variant: "area";
   emptyMessage: string;
+  emptyAction?: ReactNode;
   className?: string;
 }
 
@@ -53,7 +55,8 @@ const CHART_COLORS = [
 ];
 
 export function MetricChart(props: ChartProps) {
-  const { title, description, variant, emptyMessage, className } = props;
+  const { title, description, variant, emptyMessage, emptyAction, className } =
+    props;
 
   return (
     <div className={cn("space-y-4", className)}>
@@ -71,11 +74,13 @@ export function MetricChart(props: ChartProps) {
           <HorizontalBarChart
             points={(props as MetricChartProps).points}
             emptyMessage={emptyMessage}
+            emptyAction={emptyAction}
           />
         ) : (
           <StackedAreaChart
             points={(props as MultiSeriesChartProps).points}
             emptyMessage={emptyMessage}
+            emptyAction={emptyAction}
           />
         )}
       </div>
@@ -87,14 +92,32 @@ function getPointKey(point: { label: string; id?: string }, index: number) {
   return point.id ?? `${point.label}-${index}`;
 }
 
+/** 空数据处理：只显示一段居中说明（可带一个真实入口），不画坐标轴，免得多套空状态互相打架。 */
+function ChartEmptyState({
+  message,
+  action,
+}: {
+  message: string;
+  action?: ReactNode;
+}) {
+  return (
+    <div className="flex h-[240px] flex-col items-center justify-center gap-2 px-4 text-center">
+      <p className="text-xs text-muted-foreground">{message}</p>
+      {action}
+    </div>
+  );
+}
+
 /* ─── Horizontal Bar Chart ─── */
 
 function HorizontalBarChart({
   points,
   emptyMessage,
+  emptyAction,
 }: {
   points: MetricChartPoint[];
   emptyMessage: string;
+  emptyAction?: ReactNode;
 }) {
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
   const maxValue = Math.max(...points.map((p) => p.value), 0);
@@ -102,7 +125,12 @@ function HorizontalBarChart({
   const barHeight = 24;
   const labelWidth = 96;
   const maxBarWidth = 360;
-  const isEmpty = points.length === 0 || maxValue === 0;
+  // 只有完全没数据才算空；全是 0 的项目行仍然保留，读者能看到项目本身。
+  const isEmpty = points.length === 0;
+
+  if (isEmpty) {
+    return <ChartEmptyState message={emptyMessage} action={emptyAction} />;
+  }
 
   return (
     <div className="space-y-1">
@@ -164,14 +192,6 @@ function HorizontalBarChart({
           </div>
         );
       })}
-
-      {isEmpty && (
-        <div className="flex items-center justify-center py-8">
-          <div className="rounded-lg border border-dashed bg-muted/40 px-4 py-3 text-xs text-muted-foreground">
-            {emptyMessage}
-          </div>
-        </div>
-      )}
     </div>
   );
 }
@@ -186,9 +206,11 @@ const SVG_PADDING_Y = 28;
 function StackedAreaChart({
   points,
   emptyMessage,
+  emptyAction,
 }: {
   points: MetricChartSeriesPoint[];
   emptyMessage: string;
+  emptyAction?: ReactNode;
 }) {
   const svgRef = useRef<SVGSVGElement>(null);
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
@@ -238,7 +260,9 @@ function StackedAreaChart({
   }, [points, seriesMeta]);
 
   const maxTotal = Math.max(...stackedData.map((d) => d.total), 0);
-  const chartMax = Math.max(maxTotal, 1);
+  // 纵轴按整数阶梯取整（每档至少 1），避免全 0 或最大值很小时出现 1、1、1、0、0 这种重复刻度。
+  const tickStep = Math.max(Math.ceil(maxTotal / 4), 1);
+  const chartMax = tickStep * 4;
   const isEmpty = points.length === 0 || maxTotal === 0;
 
   const safeData = stackedData.length === 1
@@ -287,11 +311,10 @@ function StackedAreaChart({
   }, [coordinates, seriesMeta]);
 
   // Grid lines
-  const gridLines = [0, 0.25, 0.5, 0.75, 1].map((ratio) => {
-    const y = SVG_HEIGHT - SVG_PADDING_Y - plotHeight * ratio;
-    const value = Math.round(chartMax * ratio);
-    return { y, value };
-  });
+  const gridLines = [0, 1, 2, 3, 4].map((index) => ({
+    y: SVG_HEIGHT - SVG_PADDING_Y - (plotHeight * index) / 4,
+    value: tickStep * index,
+  }));
 
   // X-axis labels
   const labelStride = Math.max(Math.ceil(Math.max(points.length - 1, 1) / 6), 1);
@@ -323,6 +346,10 @@ function StackedAreaChart({
   };
 
   const hoveredData = hoveredIndex !== null ? coordinates[hoveredIndex] : null;
+
+  if (isEmpty) {
+    return <ChartEmptyState message={emptyMessage} action={emptyAction} />;
+  }
 
   return (
     <div className="relative">
@@ -425,7 +452,7 @@ function StackedAreaChart({
       </div>
 
       {/* Tooltip */}
-      {hoveredData && tooltipPos && !isEmpty && (
+      {hoveredData && tooltipPos && (
         <div
           className="pointer-events-none absolute z-50 min-w-[160px] rounded-lg border bg-popover px-3 py-2 shadow-lg"
           style={{
@@ -465,14 +492,6 @@ function StackedAreaChart({
                 </span>
               </div>
             )}
-          </div>
-        </div>
-      )}
-
-      {isEmpty && (
-        <div className="absolute inset-0 flex items-center justify-center">
-          <div className="rounded-lg border border-dashed bg-muted/40 px-4 py-3 text-xs text-muted-foreground">
-            {emptyMessage}
           </div>
         </div>
       )}

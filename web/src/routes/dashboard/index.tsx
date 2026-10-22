@@ -7,6 +7,7 @@ import {
   TrendingDown,
   TrendingUp,
 } from "lucide-react";
+import { Link } from "react-router";
 import { Header } from "@/components/layout/header";
 import {
   MetricChart,
@@ -46,20 +47,18 @@ export default function DashboardPage() {
   const { data, isLoading } = useDashboardOverview();
 
   const openIssuePoints = useMemo<MetricChartPoint[]>(() => {
-    const points =
+    return (
       data?.open_issues_by_project.map((item) => ({
         id: item.project_id,
         label: item.project_name,
         shortLabel: item.project_name,
         value: item.open_issue_count,
-      })) ?? [];
-    return points.length > 0
-      ? points
-      : [{ label: "暂无项目", shortLabel: "暂无项目", value: 0 }];
+      })) ?? []
+    );
   }, [data]);
 
   const dailyResolvedPoints = useMemo<MetricChartSeriesPoint[]>(() => {
-    const points =
+    return (
       data?.daily_resolved.map((item) => ({
         label: item.date,
         shortLabel: formatDateLabel(item.date),
@@ -70,15 +69,8 @@ export default function DashboardPage() {
             name: p.project_name,
             value: p.count,
           })) ?? [],
-      })) ?? [];
-    return points.length > 0
-      ? points
-      : Array.from({ length: 30 }, (_, index) => ({
-          label: `day-${index}`,
-          shortLabel: `${index + 1}`,
-          value: 0,
-          series: [],
-        }));
+      })) ?? []
+    );
   }, [data]);
 
   const configuredProjectCount = data?.open_issues_by_project.length ?? 0;
@@ -102,9 +94,6 @@ export default function DashboardPage() {
     if (!data?.daily_resolved.length) return 0;
     return totalResolvedIssues / data.daily_resolved.length;
   }, [data, totalResolvedIssues]);
-
-  const openIssuesEmptyMessage =
-    configuredProjectCount === 0 ? "暂无已配置项目" : "当前没有剩余开启问题";
 
   return (
     <div className="flex min-h-full flex-col bg-background">
@@ -169,7 +158,15 @@ export default function DashboardPage() {
                 <MetricChart
                   points={openIssuePoints}
                   variant="bar"
-                  emptyMessage={openIssuesEmptyMessage}
+                  emptyMessage="暂无已配置项目"
+                  emptyAction={
+                    <Link
+                      to="/projects"
+                      className="text-xs font-medium text-primary hover:underline"
+                    >
+                      去创建项目
+                    </Link>
+                  }
                 />
               )}
             </CardContent>
@@ -184,7 +181,7 @@ export default function DashboardPage() {
                     各项目每日已解决问题数量趋势
                   </p>
                 </div>
-                {!isLoading && (
+                {!isLoading && totalResolvedIssues > 0 && (
                   <div className="flex items-center gap-1.5">
                     {avgDailyResolved >= (maxDailyResolved || 1) * 0.5 ? (
                       <TrendingUp className="h-3.5 w-3.5 text-emerald-500" />
@@ -261,7 +258,7 @@ function KpiCard({
   return (
     <div
       className={cn(
-        "group relative flex flex-col gap-3 rounded-2xl p-5 ring-1 transition-all duration-300",
+        "flex flex-col gap-3 rounded-2xl p-5 ring-1 transition-all duration-300",
         toneClasses[tone],
       )}
     >
@@ -276,7 +273,6 @@ function KpiCard({
           {value}
         </div>
       )}
-      <span className="absolute right-4 top-4 h-1.5 w-1.5 rounded-full bg-current opacity-20" />
     </div>
   );
 }

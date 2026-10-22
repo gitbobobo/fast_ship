@@ -93,6 +93,18 @@ describe("DashboardPage", () => {
         .length,
     ).toBeGreaterThan(0);
     expect(screen.getAllByText("0").length).toBeGreaterThanOrEqual(2);
-    expect(screen.getAllByText(/暂无|empty|no data/i).length).toBeGreaterThanOrEqual(2);
+    // 每个图表只保留一个空状态，且带一个真实的配置入口。
+    expect(screen.getAllByText("暂无已配置项目")).toHaveLength(1);
+    expect(screen.getAllByText("暂无已解决问题数据")).toHaveLength(1);
+    expect(screen.queryByText("暂无项目")).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "去创建项目" })).toHaveAttribute(
+      "href",
+      "/projects",
+    );
+    // 空数据时不画趋势图（也就不存在重复刻度与下降趋势图标）。
+    expect(
+      screen.queryByRole("img", { name: "stacked area chart" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/日均 0\.0/)).not.toBeInTheDocument();
   });
 });
