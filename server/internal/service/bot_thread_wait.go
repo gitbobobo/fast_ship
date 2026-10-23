@@ -945,6 +945,9 @@ func waitStampDuplicateTerminal(call *model.BotToolCall, existingCallID string, 
 	})
 	call.Status = model.BotCallStatusSucceeded
 	call.FinishedAt = &now
+	// 受理段已预置 started_at；重复挂从未执行，终态行不能带着未消费
+	// 的执行起点（与 failAcceptedEntry 清 started_at 同一口径）。
+	call.StartedAt = nil
 	call.ResultJSON = &raw
 	call.ResultPreviewJSON = &raw
 	call.ResultChars = int64(len([]rune(raw)))

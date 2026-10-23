@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -297,6 +298,55 @@ func (s *BotService) policyThreadState(userID, envID, threadID string) botPolicy
 	return st
 }
 
+// queueHeldResult 是一次 queue.held 读取的结果（ok=false 表示读取失败）。
+type queueHeldResult struct {
+	held bool
+	ok   bool
+}
+
+// prefetchQueueHeld 在进入 commitMu 前为本批 settle 候选并行预读线程队列
+// 挂起状态：受理评估落在全局互斥内，锁内不得做 Detail 网络读取（一条慢
+// 读会堵住所有机器人的受理提交）。键与评估侧一致（threadKey 口径）；未
+// 预取到的线程按读取失败保守降级，执行前复检仍会实时重读。
+func (s *BotService) prefetchQueueHeld(bot *model.Bot, toolCalls []botModelToolCall) map[string]queueHeldResult {
+	targets := map[string][2]string{}
+	for _, tc := range toolCalls {
+		if tc.Name != "fs_thread" {
+			continue
+		}
+		var args botThreadArgs
+		if json.Unmarshal([]byte(tc.Arguments), &args) != nil {
+			continue
+		}
+		if strings.TrimSpace(args.Action) != "settle" {
+			continue
+		}
+		envID, threadID := strings.TrimSpace(args.EnvID), strings.TrimSpace(args.ThreadID)
+		if envID == "" || threadID == "" {
+			continue
+		}
+		targets[envID+"\x00"+threadID] = [2]string{envID, threadID}
+	}
+	out := make(map[string]queueHeldResult, len(targets))
+	if len(targets) == 0 || s.threads == nil {
+		return out
+	}
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	for key, t := range targets {
+		wg.Add(1)
+		go func(key string, envID, threadID string) {
+			defer wg.Done()
+			held, ok := s.policyQueueHeld(bot.UserID, envID, threadID)
+			mu.Lock()
+			out[key] = queueHeldResult{held: held, ok: ok}
+			mu.Unlock()
+		}(key, t[0], t[1])
+	}
+	wg.Wait()
+	return out
+}
+
 // policyQueueHeld 读线程队列挂起状态（不在 hub 内存里，读一次详情）；读取
 // 失败返回 ok=false，由调用方保守降级。
 func (s *BotService) policyQueueHeld(userID, envID, threadID string) (held, ok bool) {
@@ -359,7 +409,9 @@ func (s *BotService) policyCheckSendPreconditions(bot *model.Bot, args botThread
 
 // policyCheckSettlePreconditions 校验 settle 的线程侧前置条件：已知、空闲、
 // 无待应答请求、无活动运行/后台任务、队列未挂起。任一不满足即降级。
-func (s *BotService) policyCheckSettlePreconditions(bot *model.Bot, args botThreadArgs, facts map[string]interface{}, now time.Time) (bool, string) {
+// queueHeld 非空时是 commitMu 内受理路径：队列挂起状态已锁外预取，本函数
+// 只查表不做网络读取；为 nil 时是执行前复检（锁外），实时读 Detail。
+func (s *BotService) policyCheckSettlePreconditions(bot *model.Bot, args botThreadArgs, facts map[string]interface{}, now time.Time, queueHeld map[string]queueHeldResult) (bool, string) {
 	st := s.policyThreadState(bot.UserID, args.EnvID, args.ThreadID)
 	facts["thread"] = st.facts()
 	if !st.known {
@@ -374,7 +426,15 @@ func (s *BotService) policyCheckSettlePreconditions(bot *model.Bot, args botThre
 	if st.hasActiveRun || st.backgroundTasks > 0 {
 		return false, "线程还有活动运行或后台任务未结束"
 	}
-	held, ok := s.policyQueueHeld(bot.UserID, args.EnvID, args.ThreadID)
+	var held, ok bool
+	if queueHeld != nil {
+		// 受理路径：Detail 网络读取已在进 commitMu 前预取，这里只查表。
+		// 未预取到按读取失败降级——锁内不得做网络读取。
+		res, found := queueHeld[strings.TrimSpace(args.EnvID)+"\x00"+strings.TrimSpace(args.ThreadID)]
+		held, ok = res.held, found && res.ok
+	} else {
+		held, ok = s.policyQueueHeld(bot.UserID, args.EnvID, args.ThreadID)
+	}
 	if !ok {
 		// 读取失败不记 false：facts 是审计事实源，把「读不到」写成
 		// 「队列没挂起」会误导复核者与事后审计。
@@ -426,7 +486,7 @@ func (s *BotService) policySendQuotaUsedTx(db *gorm.DB, botID, envID, threadID s
 // 自动排队（不建授权）、tier1 候选不成立降级为带过期的确认卡、tier2/tier3
 // 先查 always-allow 再落确认卡。定时任务会话：tier1 自动执行、tier2 维持
 // INT-103 默认放行、tier3 同步拒绝。
-func (s *BotService) evaluateWritePolicy(bot *model.Bot, run *model.BotRun, prepared *botPreparedCall, batchAutoSendUsed int) *botWritePolicyEval {
+func (s *BotService) evaluateWritePolicy(bot *model.Bot, run *model.BotRun, prepared *botPreparedCall, batchAutoSendUsed int, queueHeld map[string]queueHeldResult) *botWritePolicyEval {
 	now := time.Now().UTC()
 	schedule := run.SessionKind == model.BotSessionKindSchedule
 	eval := &botWritePolicyEval{}
@@ -462,7 +522,7 @@ func (s *BotService) evaluateWritePolicy(bot *model.Bot, run *model.BotRun, prep
 			case botPolicyRuleSendContinue:
 				tier1OK, downgrade = s.policyCheckSendPreconditions(bot, args, &eval.record, now, true, batchAutoSendUsed)
 			case botPolicyRuleSettleIdle:
-				tier1OK, downgrade = s.policyCheckSettlePreconditions(bot, args, eval.record.Facts, now)
+				tier1OK, downgrade = s.policyCheckSettlePreconditions(bot, args, eval.record.Facts, now, queueHeld)
 			case botPolicyRuleUnsettle:
 				tier1OK, downgrade = s.policyCheckUnsettlePreconditions(bot, args, eval.record.Facts)
 			}
@@ -567,7 +627,8 @@ func (s *BotService) policyRecheckCall(bot *model.Bot, call *model.BotToolCall) 
 		// 无人在场的自动放行。
 		_, reason = s.policyCheckSendPreconditions(bot, args, rec, now, false, 0)
 	case botPolicyRuleSettleIdle:
-		_, reason = s.policyCheckSettlePreconditions(bot, args, rec.Facts, now)
+		// 执行前复检不在 commitMu 内，实时重读 Detail（传 nil）。
+		_, reason = s.policyCheckSettlePreconditions(bot, args, rec.Facts, now, nil)
 	case botPolicyRuleUnsettle:
 		_, reason = s.policyCheckUnsettlePreconditions(bot, args, rec.Facts)
 	default:

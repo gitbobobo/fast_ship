@@ -36,12 +36,16 @@ type botBatchAcceptance struct {
 	waitCount int
 	// autoSends 按 (env,thread) 记录同批已受理的自动「继续」数（共享每小时配额）。
 	autoSends map[string]int
+	// queueHeld 是 settle 前置条件要用的线程队列挂起状态：Detail 网络
+	// 读取在进 commitMu 前预取（见 prefetchQueueHeld），锁内只查表。
+	queueHeld map[string]queueHeldResult
 }
 
 func newBotBatchAcceptance() botBatchAcceptance {
 	return botBatchAcceptance{
 		waitThreads: map[string]string{},
 		autoSends:   map[string]int{},
+		queueHeld:   map[string]queueHeldResult{},
 	}
 }
 
@@ -150,12 +154,15 @@ func (s *BotService) recheckSendQuota(tx *gorm.DB, botID string, args botThreadA
 func (s *BotService) commitAssistantTurn(bot *model.Bot, run *model.BotRun, requestRow *model.BotModelRequest, reply *botModelReply, msgID string) ([]*model.BotToolCall, error) {
 	// 受理评估与提交互斥：wait 判重与 tier1 配额都以已提交行为准，并发事务
 	// 互相读不到对方未提交行，评估到提交完成的窗口必须闭合（见 commitMu）。
+	// settle 前置条件要读线程队列挂起状态（Detail 网络请求）——在锁外预取，
+	// 否则锁内一串 settle 候选会把所有机器人的受理串行堵在 IO 上。
+	batch := newBotBatchAcceptance()
+	batch.queueHeld = s.prefetchQueueHeld(bot, reply.ToolCalls)
 	s.commitMu.Lock()
 	defer s.commitMu.Unlock()
 
 	now := time.Now().UTC()
 	requestID := requestRow.ID
-	batch := newBotBatchAcceptance()
 
 	// 事务外：逐调用分配 ID、解析/校验/解析范围/匹配授权。
 	entries := make([]botPreparedEntry, 0, len(reply.ToolCalls))
@@ -307,7 +314,7 @@ func (s *BotService) commitAssistantTurn(bot *model.Bot, run *model.BotRun, requ
 					// 发送串进同一配额桶。
 					batchEnv, batchThread := botPolicyThreadTargetOf(entry.execCtx)
 					batchKey := batch.threadKey(batchEnv, batchThread)
-					pol := s.evaluateWritePolicy(bot, run, prepared, batch.autoSends[batchKey])
+					pol := s.evaluateWritePolicy(bot, run, prepared, batch.autoSends[batchKey], batch.queueHeld)
 					entry.policy = pol
 					entry.call.PolicyJSON = botPolicyRecordJSON(&pol.record)
 					if pol.record.Auto && pol.record.Source == "tier1" &&

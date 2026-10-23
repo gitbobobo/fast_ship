@@ -1032,7 +1032,7 @@ func TestBotInt160PolicyQueueHeldUnknown(t *testing.T) {
 	}
 	facts := map[string]interface{}{}
 	ok, reason := env.bots.policyCheckSettlePreconditions(botRow,
-		botThreadArgs{EnvID: envID, ThreadID: "th-nq"}, facts, time.Now().UTC())
+		botThreadArgs{EnvID: envID, ThreadID: "th-nq"}, facts, time.Now().UTC(), nil)
 	if ok {
 		t.Fatalf("队列状态读不到应保守降级")
 	}
@@ -1041,5 +1041,48 @@ func TestBotInt160PolicyQueueHeldUnknown(t *testing.T) {
 	}
 	if reason == "" {
 		t.Fatalf("应给出降级原因")
+	}
+}
+
+// TestBotInt160PolicySettleQueueHeldPrefetched 验证受理路径的 settle 前置检查
+// 只查预取表不做 Detail 网络读取（第 13 轮 P2：锁内不得有网络 IO）：
+// 表内命中用表内值（held=true → 降级），未预取到的线程按读取失败记
+// queue_held="unknown" 保守降级。
+func TestBotInt160PolicySettleQueueHeldPrefetched(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "int160policy18")
+	_, envID := pairBotT3WithSnapshot(t, env, userID, "预取表",
+		shellSnapshotFixture([]any{map[string]any{"id": "p-1", "title": "P"}},
+			[]any{shellThread("th-pf", "预取表线程", "idle", nil)}))
+	bot := env.createBot(t, userID)
+	waitHubReady(t, env, userID, envID)
+
+	botRow, err := env.bots.bots.Get(bot.ID)
+	if err != nil {
+		t.Fatalf("get bot: %v", err)
+	}
+	facts := map[string]interface{}{}
+	args := botThreadArgs{EnvID: envID, ThreadID: "th-pf"}
+
+	// 预取表命中 held=true：不做 Detail 读取（hub 里本就没有投影可读，
+	// 走了实时读会记 unknown 而不是 true），直接按挂起降级。
+	ok, reason := env.bots.policyCheckSettlePreconditions(botRow, args, facts,
+		time.Now().UTC(), map[string]queueHeldResult{
+			envID + "\x00" + "th-pf": {held: true, ok: true},
+		})
+	if ok || facts["queue_held"] != true {
+		t.Fatalf("预取 held=true 应按挂起降级: ok=%v facts=%v", ok, facts)
+	}
+	if reason == "" {
+		t.Fatalf("应给出降级原因")
+	}
+
+	// 预取表无该线程键（预取漏抓或参数写坏）：按读取失败降级，不得在锁内
+	// 补做网络读取（若走了实时读，本断言拿到的会是 unknown 之外的结果）。
+	facts2 := map[string]interface{}{}
+	ok2, _ := env.bots.policyCheckSettlePreconditions(botRow, args, facts2,
+		time.Now().UTC(), map[string]queueHeldResult{})
+	if ok2 || facts2["queue_held"] != "unknown" {
+		t.Fatalf("未预取到应按读取失败记 unknown: ok=%v facts=%v", ok2, facts2)
 	}
 }

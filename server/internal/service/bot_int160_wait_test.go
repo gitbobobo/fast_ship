@@ -1514,3 +1514,21 @@ func TestBotInt160WaitFailAcceptedClearsStartedAt(t *testing.T) {
 		t.Fatalf("受理失败应清空 started_at")
 	}
 }
+
+// TestBotInt160WaitDupTerminalClearsStartedAt 验证重复挂的 wait 直落
+// already_waiting 终态时 started_at 一并清空——与 failAcceptedEntry 同
+// 一缺陷类：从未执行的终态行不能携带执行起点（第 13 轮 P2）。
+func TestBotInt160WaitDupTerminalClearsStartedAt(t *testing.T) {
+	now := time.Now().UTC()
+	call := &model.BotToolCall{
+		ID: uuid.NewString(), StartedAt: &now,
+	}
+	waitStampDuplicateTerminal(call, "call-existing", []string{"idle"}, now)
+	if call.StartedAt != nil {
+		t.Fatalf("重复挂终态应清空 started_at")
+	}
+	if call.Status != model.BotCallStatusSucceeded || call.ResultJSON == nil ||
+		!strings.Contains(*call.ResultJSON, "already_waiting") {
+		t.Fatalf("重复挂应落 already_waiting 终态: %+v", call)
+	}
+}
