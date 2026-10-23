@@ -314,10 +314,11 @@ function modelSelectionText(raw: unknown): string | null {
   if (typeof raw !== "object" || raw === null) return null;
   const ms = raw as { instance_id?: unknown; model?: unknown; options?: unknown };
   if (typeof ms.model !== "string" || ms.model === "") return null;
-  // 多 provider 下同 slug 要靠 instance_id 消歧（云端审查）。
+  // 多 provider 下同 slug 要靠 instance_id 消歧；模型名前置，内部实例
+  // 标识收进括号作注解（视觉审查：裸 i1 用户看不懂）。
   let text =
     typeof ms.instance_id === "string" && ms.instance_id !== ""
-      ? `${ms.instance_id}/${ms.model}`
+      ? `${ms.model} (${ms.instance_id})`
       : ms.model;
   if (Array.isArray(ms.options)) {
     const parts = ms.options

@@ -51,8 +51,8 @@ export function ParamChipView({ chip }: { chip: ToolParamChip }) {
   const inner = (
     <>
       <span className="text-muted-foreground">{chip.label}</span>
-      {/* 所有 chip 统一最大宽度并 CSS 截断，完整值在 title（视觉审查） */}
-      <span className="max-w-72 truncate font-mono [unicode-bidi:isolate]">
+      {/* chip 可撑满整行，只有真放不下才截断，完整值在 title（视觉审查） */}
+      <span className="min-w-0 truncate font-mono [unicode-bidi:isolate]">
         {bidiSafeText(chip.value)}
       </span>
     </>
@@ -62,7 +62,7 @@ export function ParamChipView({ chip }: { chip: ToolParamChip }) {
       <Link
         to={chip.href}
         title={chip.title === undefined ? undefined : bidiSafeText(chip.title)}
-        className="inline-flex items-center gap-1 rounded-md border bg-background/60 px-1.5 py-0.5 text-xs text-primary hover:border-primary/50 hover:underline"
+        className="inline-flex max-w-full items-center gap-1 rounded-md border bg-background/60 px-1.5 py-0.5 text-xs text-primary hover:border-primary/50 hover:underline"
       >
         {inner}
       </Link>
@@ -72,7 +72,7 @@ export function ParamChipView({ chip }: { chip: ToolParamChip }) {
     <span
       title={chip.title === undefined ? undefined : bidiSafeText(chip.title)}
       className={cn(
-        "inline-flex items-center gap-1 rounded-md border bg-background/60 px-1.5 py-0.5 text-xs",
+        "inline-flex max-w-full items-center gap-1 rounded-md border bg-background/60 px-1.5 py-0.5 text-xs",
         chip.tone === "warn" && "border-amber-500/50 text-amber-700 dark:text-amber-400",
       )}
     >

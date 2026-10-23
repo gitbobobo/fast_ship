@@ -114,7 +114,7 @@ describe("BotConfirmationCard", () => {
     const card = screen.getByTestId("bot-confirmation-card");
 
     // 结构化参数渲染为可读摘要而非原始 JSON。
-    expect(within(card).getByText("i1/swe-2 · effort high")).toBeInTheDocument();
+    expect(within(card).getByText("swe-2 (i1) · effort high")).toBeInTheDocument();
     expect(within(card).getByText("完全访问")).toBeInTheDocument();
     expect(within(card).getByText("项目主检出")).toBeInTheDocument();
 
