@@ -60,7 +60,10 @@ export function renderErrorMessage(text: string): ReactNode {
     const idx = m.index ?? 0;
     if (idx > last) out.push(bidiSafeText(text.slice(last, idx)));
     out.push(
-      <code key={i++} className="font-mono">
+      <code
+        key={i++}
+        className="rounded bg-foreground/[0.07] px-1 py-px font-mono [unicode-bidi:isolate]"
+      >
         {m[0]}
       </code>,
     );

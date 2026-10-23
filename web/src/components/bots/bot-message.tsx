@@ -29,6 +29,7 @@ import {
   BotToolCard,
   callStatusLabel,
   STATUS_BADGE,
+  renderErrorMessage,
 } from "./bot-tool-card";
 import { toolActionLabel } from "@/lib/bots/tool-labels";
 
@@ -111,7 +112,7 @@ function ScheduleEventView({ message }: { message: BotMessage }) {
             <div className="rounded-lg bg-destructive/10 px-3 py-2">
               {errorMessage && (
                 <p className="text-sm text-destructive [unicode-bidi:isolate]">
-                  {bidiSafeText(errorMessage)}
+                  {renderErrorMessage(errorMessage.replace(/^\[\d{5}\]\s*/, ""))}
                 </p>
               )}
               {errorCode && (
@@ -316,7 +317,8 @@ export function BotMessageView({
         )}
         {/* 错误文案短、可行动（坏 cron/时区等），直接外露而不是藏进折叠区。
             只有 failed 用强调红——cancelled 的「用户取消了调用」是中性事实，
-            页面上琥珀色警示句才是唯一强调色（视觉复审）。 */}
+            页面上琥珀色警示句才是唯一强调色（视觉复审）。字段名走
+            renderErrorMessage chip 化，与工具卡同口径（视觉审查）。 */}
         {message.content.error_message && (
           <p
             className={cn(
@@ -327,7 +329,9 @@ export function BotMessageView({
             {message.content.error_code
               ? `${bidiSafeText(message.content.error_code)}: `
               : ""}
-            {bidiSafeText(message.content.error_message)}
+            {renderErrorMessage(
+              message.content.error_message.replace(/^\[\d{5}\]\s*/, ""),
+            )}
           </p>
         )}
         {/* async 调用的「副作用可能已发生」警示只随结果消息下发——这是
