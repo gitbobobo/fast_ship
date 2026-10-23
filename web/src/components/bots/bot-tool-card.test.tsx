@@ -127,4 +127,39 @@ describe("BotToolCard", () => {
     expect(screen.queryByText("写入")).toBeNull();
   });
 
+  // INT-160 分级放行：tier1 策略放行的调用在卡片上带「自动执行」徽标；
+  // always-allow / 定时任务默认放行（tier2）不在此标记。
+  it("tier1 自动放行渲染「自动执行」徽标", () => {
+    renderCard(
+      makeCall({
+        status: "succeeded",
+        policy: { tier: "tier1", auto: true, rule_id: "thread_send_continue" },
+      }),
+    );
+    const badge = screen.getByTestId("bot-call-auto-badge");
+    expect(badge).toHaveTextContent("自动执行");
+    expect(badge).toHaveTextContent("继续");
+  });
+
+  it("tier2 / 非自动 / 无 policy 不渲染自动执行徽标", () => {
+    const { unmount } = renderCard(
+      makeCall({
+        status: "succeeded",
+        policy: { tier: "tier2", auto: true, source: "schedule_default" },
+      }),
+    );
+    expect(screen.queryByTestId("bot-call-auto-badge")).toBeNull();
+    unmount();
+    renderCard(
+      makeCall({
+        status: "pending_confirmation",
+        policy: { tier: "tier1", auto: false, downgrade_reason: "配额用尽" },
+      }),
+    );
+    expect(screen.queryByTestId("bot-call-auto-badge")).toBeNull();
+    unmount();
+    renderCard(makeCall({ status: "succeeded" }));
+    expect(screen.queryByTestId("bot-call-auto-badge")).toBeNull();
+  });
+
 });

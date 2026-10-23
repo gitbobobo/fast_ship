@@ -59,9 +59,10 @@ func TestBotInt148ThreadToolsetV9(t *testing.T) {
 			t.Fatalf("%s 的字段规则应为 env_id+thread_id: %+v", action, rule)
 		}
 	}
-	// v9 的 fs_thread 参数用活跃结构体；v8 仍冻结在共享副本。
-	if thread.ArgsType.Name() != "botThreadArgs" {
-		t.Fatalf("v9 fs_thread 应使用活跃参数结构体，实得 %s", thread.ArgsType.Name())
+	// v9 的 fs_thread 参数自 INT-160 起冻结在 botThreadArgsV9Frozen；v8 仍冻结
+	// 在共享副本 botThreadArgsV5Frozen。
+	if thread.ArgsType.Name() != "botThreadArgsV9Frozen" {
+		t.Fatalf("v9 fs_thread 应冻结在 botThreadArgsV9Frozen，实得 %s", thread.ArgsType.Name())
 	}
 	if v8.byName["fs_thread"].ArgsType.Name() != "botThreadArgsV5Frozen" {
 		t.Fatalf("v8 fs_thread 应冻结在 botThreadArgsV5Frozen")

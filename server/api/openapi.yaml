@@ -8534,6 +8534,85 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /api/bots/{id}/policy-rules:
+    get:
+      tags: [bots]
+      operationId: listBotWritePolicyRules
+      summary: 分级放行规则清单（tier1 规则开关与误判状态，INT-160）
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectOrKeyId'
+      responses:
+        '200':
+          description: 规则清单（静态目录全量，行缺失按启用）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [items]
+                        properties:
+                          items:
+                            type: array
+                            items:
+                              $ref: '#/components/schemas/BotWritePolicyRule'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/bots/{id}/policy-rules/{ruleId}:
+    put:
+      tags: [bots]
+      operationId: setBotWritePolicyRuleEnabled
+      summary: 开关一条分级放行规则（INT-160）
+      description: |
+        开关 tier1 规则；行不存在则落行。手动重新启用会清空自动降级时间戳
+        与误判计数（窗口重新开始）。误判自动降级（24 小时内 2 次用户反向
+        操作）也会写本开关并给主线追加生命周期消息。
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectOrKeyId'
+        - name: ruleId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BotWritePolicyRuleToggleRequest'
+      responses:
+        '200':
+          description: 开关后的规则状态
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/BotWritePolicyRule'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
 components:
   securitySchemes:
     jwtAuth:
@@ -13821,6 +13900,14 @@ components:
         execution_context:
           type: object
           description: 服务端生成的执行身份（T3 command/thread/message ID 等）与授权范围
+        policy:
+          type: object
+          additionalProperties: true
+          description: |
+            分级放行评估结论（INT-160）：{tier, rule_id?, auto, source, facts?,
+            downgrade_reason?, expiry?, schedule_denied?}。凡经过策略评估的写
+            调用都有：自动执行（auto=true）、确认卡（含降级原因与过期时间）、
+            定时任务会话 tier3 同步拒绝三类；历史行为空即「策略上线前」
         cancel_requested:
           type: boolean
         result_preview:
@@ -13903,10 +13990,50 @@ components:
         created_at:
           type: string
           format: date-time
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: 到期时间（INT-160）：新建「始终允许」默认创建后 30 天；到期后不再命中（视为已失效，惰性补 revoked_at）。历史行可能为 null
         revoked_at:
           type: string
           format: date-time
           nullable: true
+
+    BotWritePolicyRule:
+      type: object
+      required: [rule_id, name, description, enabled, false_positive_count_24h]
+      description: 分级放行 tier1 规则的独立开关与误判状态（INT-160）。分档与前置条件由服务端按「动作+参数+目标线程内存状态」计算，本端点只暴露开关
+      properties:
+        rule_id:
+          type: string
+          description: 规则 ID（thread_send_continue / thread_settle_idle / thread_unsettle）
+        name:
+          type: string
+        description:
+          type: string
+        enabled:
+          type: boolean
+          description: 行不存在即启用；误判自动降级或手动关闭后为 false
+        false_positive_count_24h:
+          type: integer
+          description: 24 小时窗口内的误判次数（用户反向操作按事实计数）
+        auto_disabled_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: 误判自动降级的落库时间；手动重新启用后清空
+        updated_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    BotWritePolicyRuleToggleRequest:
+      type: object
+      required: [enabled]
+      properties:
+        enabled:
+          type: boolean
 
     BotEvent:
       type: object

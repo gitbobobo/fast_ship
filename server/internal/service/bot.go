@@ -49,6 +49,14 @@ type BotService struct {
 	// runtime 与 worker 见 bot_runtime.go / bot_tool_runner.go。
 	rt *botRuntimeState
 
+	// wait 是 fs_thread/wait 的评估现场注册表（INT-160）：受理即 running 的
+	// 调用由评估器按 5s 扫描收尾；数据库调用行是事实来源，注册表只是免查库
+	// 的现场缓存（基线、防抖计时），进程重启后不恢复（启动恢复统一落
+	// server_restarted）。时间参数可注入供测试缩短。
+	waitMu  sync.Mutex
+	waits   map[string]*botWaitEntry
+	waitCfg botWaitEvalConfig
+
 	// 后台 worker：channel 只负责唤醒，队列满/丢失推送由扫描补回。
 	workCh      chan string
 	workOnce    sync.Once
@@ -100,6 +108,8 @@ func NewBotService(
 		bindings:   bindings,
 		rt:         newBotRuntimeState(),
 		streamHub:  newBotStreamHub(),
+		waits:      map[string]*botWaitEntry{},
+		waitCfg:    defaultBotWaitEvalConfig(),
 	}
 }
 

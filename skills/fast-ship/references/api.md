@@ -8773,6 +8773,7 @@ before_seq/after_seq 都是排他 seq 边界，页内按 seq 正序；不使用 
 | `calls[].decided_at` | string（date-time，可空） | 否 |  |
 | `calls[].authorization_id` | string（可空） | 否 |  |
 | `calls[].execution_context` | object | 是 | 服务端生成的执行身份（T3 command/thread/message ID 等）与授权范围 |
+| `calls[].policy` | object | 否 | 分级放行评估结论（INT-160）：{tier, rule_id?, auto, source, facts?, downgrade_reason?, expiry?, schedule_denied?}。凡经过策略评估的写 调用都有：自动执行（auto=true）、确认卡（含降级原因与过期时间）、 定时任务会话 tier3 同步拒绝三类；历史行为空即「策略上线前」 |
 | `calls[].cancel_requested` | boolean | 否 |  |
 | `calls[].result_preview` | object | 否 | 进入模型上下文的受限结果（完整结果走 result 端点） |
 | `calls[].result_chars` | integer（int64） | 是 |  |
@@ -8951,6 +8952,7 @@ client_message_id 必填（幂等键）：同键同正文返回已有消息；�
 | `calls[].decided_at` | string（date-time，可空） | 否 |  |
 | `calls[].authorization_id` | string（可空） | 否 |  |
 | `calls[].execution_context` | object | 是 | 服务端生成的执行身份（T3 command/thread/message ID 等）与授权范围 |
+| `calls[].policy` | object | 否 | 分级放行评估结论（INT-160）：{tier, rule_id?, auto, source, facts?, downgrade_reason?, expiry?, schedule_denied?}。凡经过策略评估的写 调用都有：自动执行（auto=true）、确认卡（含降级原因与过期时间）、 定时任务会话 tier3 同步拒绝三类；历史行为空即「策略上线前」 |
 | `calls[].cancel_requested` | boolean | 否 |  |
 | `calls[].result_preview` | object | 否 | 进入模型上下文的受限结果（完整结果走 result 端点） |
 | `calls[].result_chars` | integer（int64） | 是 |  |
@@ -9671,6 +9673,7 @@ status 逗号分隔；常用 pending_confirmation 查待确认卡片、queued/ru
 | `items[].decided_at` | string（date-time，可空） | 否 |  |
 | `items[].authorization_id` | string（可空） | 否 |  |
 | `items[].execution_context` | object | 是 | 服务端生成的执行身份（T3 command/thread/message ID 等）与授权范围 |
+| `items[].policy` | object | 否 | 分级放行评估结论（INT-160）：{tier, rule_id?, auto, source, facts?, downgrade_reason?, expiry?, schedule_denied?}。凡经过策略评估的写 调用都有：自动执行（auto=true）、确认卡（含降级原因与过期时间）、 定时任务会话 tier3 同步拒绝三类；历史行为空即「策略上线前」 |
 | `items[].cancel_requested` | boolean | 否 |  |
 | `items[].result_preview` | object | 否 | 进入模型上下文的受限结果（完整结果走 result 端点） |
 | `items[].result_chars` | integer（int64） | 是 |  |
@@ -9727,6 +9730,7 @@ status 逗号分隔；常用 pending_confirmation 查待确认卡片、queued/ru
 | `decided_at` | string（date-time，可空） | 否 |  |
 | `authorization_id` | string（可空） | 否 |  |
 | `execution_context` | object | 是 | 服务端生成的执行身份（T3 command/thread/message ID 等）与授权范围 |
+| `policy` | object | 否 | 分级放行评估结论（INT-160）：{tier, rule_id?, auto, source, facts?, downgrade_reason?, expiry?, schedule_denied?}。凡经过策略评估的写 调用都有：自动执行（auto=true）、确认卡（含降级原因与过期时间）、 定时任务会话 tier3 同步拒绝三类；历史行为空即「策略上线前」 |
 | `cancel_requested` | boolean | 否 |  |
 | `result_preview` | object | 否 | 进入模型上下文的受限结果（完整结果走 result 端点） |
 | `result_chars` | integer（int64） | 是 |  |
@@ -9835,6 +9839,7 @@ status 逗号分隔；常用 pending_confirmation 查待确认卡片、queued/ru
 | `decided_at` | string（date-time，可空） | 否 |  |
 | `authorization_id` | string（可空） | 否 |  |
 | `execution_context` | object | 是 | 服务端生成的执行身份（T3 command/thread/message ID 等）与授权范围 |
+| `policy` | object | 否 | 分级放行评估结论（INT-160）：{tier, rule_id?, auto, source, facts?, downgrade_reason?, expiry?, schedule_denied?}。凡经过策略评估的写 调用都有：自动执行（auto=true）、确认卡（含降级原因与过期时间）、 定时任务会话 tier3 同步拒绝三类；历史行为空即「策略上线前」 |
 | `cancel_requested` | boolean | 否 |  |
 | `result_preview` | object | 否 | 进入模型上下文的受限结果（完整结果走 result 端点） |
 | `result_chars` | integer（int64） | 是 |  |
@@ -9897,6 +9902,7 @@ effect_may_have_occurred=true（不声称回滚）。已终结调用幂等返回
 | `decided_at` | string（date-time，可空） | 否 |  |
 | `authorization_id` | string（可空） | 否 |  |
 | `execution_context` | object | 是 | 服务端生成的执行身份（T3 command/thread/message ID 等）与授权范围 |
+| `policy` | object | 否 | 分级放行评估结论（INT-160）：{tier, rule_id?, auto, source, facts?, downgrade_reason?, expiry?, schedule_denied?}。凡经过策略评估的写 调用都有：自动执行（auto=true）、确认卡（含降级原因与过期时间）、 定时任务会话 tier3 同步拒绝三类；历史行为空即「策略上线前」 |
 | `cancel_requested` | boolean | 否 |  |
 | `result_preview` | object | 否 | 进入模型上下文的受限结果（完整结果走 result 端点） |
 | `result_chars` | integer（int64） | 是 |  |
@@ -9953,6 +9959,7 @@ effect_may_have_occurred=true（不声称回滚）。已终结调用幂等返回
 | `items[].environment_id` | string（可空） | 否 |  |
 | `items[].constraints` | object | 是 | 规范化约束（如允许写入的字段集合 fields） |
 | `items[].created_at` | string（date-time） | 是 |  |
+| `items[].expires_at` | string（date-time，可空） | 否 | 到期时间（INT-160）：新建「始终允许」默认创建后 30 天；到期后不再命中（视为已失效，惰性补 revoked_at）。历史行可能为 null |
 | `items[].revoked_at` | string（date-time，可空） | 否 |  |
 
 **错误**
@@ -9991,6 +9998,99 @@ effect_may_have_occurred=true（不声称回滚）。已终结调用幂等返回
 
 | HTTP | 说明 |
 | --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 404 | 资源不存在（40400-40499） |
+| 500 | 服务器内部错误（50000） |
+
+### GET `/api/bots/{id}/policy-rules`
+
+<!-- operationId: listBotWritePolicyRules -->
+
+分级放行规则清单（tier1 规则开关与误判状态，INT-160）
+
+**鉴权**：仅 JWT
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | API Key ID |
+
+**成功响应**
+
+**200** 规则清单（静态目录全量，行缺失按启用）
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `items` | object[] | 是 |  |
+| `items[].rule_id` | string | 是 | 规则 ID（thread_send_continue / thread_settle_idle / thread_unsettle） |
+| `items[].name` | string | 是 |  |
+| `items[].description` | string | 是 |  |
+| `items[].enabled` | boolean | 是 | 行不存在即启用；误判自动降级或手动关闭后为 false |
+| `items[].false_positive_count_24h` | integer | 是 | 24 小时窗口内的误判次数（用户反向操作按事实计数） |
+| `items[].auto_disabled_at` | string（date-time，可空） | 否 | 误判自动降级的落库时间；手动重新启用后清空 |
+| `items[].updated_at` | string（date-time，可空） | 否 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 404 | 资源不存在（40400-40499） |
+| 500 | 服务器内部错误（50000） |
+
+### PUT `/api/bots/{id}/policy-rules/{ruleId}`
+
+<!-- operationId: setBotWritePolicyRuleEnabled -->
+
+开关一条分级放行规则（INT-160）
+
+开关 tier1 规则；行不存在则落行。手动重新启用会清空自动降级时间戳
+与误判计数（窗口重新开始）。误判自动降级（24 小时内 2 次用户反向
+操作）也会写本开关并给主线追加生命周期消息。
+
+**鉴权**：仅 JWT
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | API Key ID |
+| `ruleId` | string | 是 |  |
+
+**请求体**
+
+`application/json`，必填。
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `enabled` | boolean | 是 |  |
+
+**成功响应**
+
+**200** 开关后的规则状态
+
+`data`：
+
+分级放行 tier1 规则的独立开关与误判状态（INT-160）。分档与前置条件由服务端按「动作+参数+目标线程内存状态」计算，本端点只暴露开关
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `rule_id` | string | 是 | 规则 ID（thread_send_continue / thread_settle_idle / thread_unsettle） |
+| `name` | string | 是 |  |
+| `description` | string | 是 |  |
+| `enabled` | boolean | 是 | 行不存在即启用；误判自动降级或手动关闭后为 false |
+| `false_positive_count_24h` | integer | 是 | 24 小时窗口内的误判次数（用户反向操作按事实计数） |
+| `auto_disabled_at` | string（date-time，可空） | 否 | 误判自动降级的落库时间；手动重新启用后清空 |
+| `updated_at` | string（date-time，可空） | 否 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 400 | 请求参数无效（40001-40099） |
 | 401 | 未提供或提供无效凭证（40100-40199） |
 | 404 | 资源不存在（40400-40499） |
 | 500 | 服务器内部错误（50000） |

@@ -1453,6 +1453,199 @@ null），给三栏工作台的左侧列表当预览列。语义与约束：
   误点坏链接不会误删仍在有效期内的记忆。菜单项激活态按 `/bots` 前缀
   判定，跳到具体聊天页后分区高亮不丢。
 
+## 线程等待 fs_thread/wait（INT-160，工具集 v12）
+
+机器人发完指令后能挂上等待，线程进入 idle/需要回复/出错时被唤醒，而不是
+只能等下一轮巡检。不新增工具，也不新增订阅与常驻 goroutine：建立在平台订阅
+hub 按「用户 × 环境」维持的内存 ThreadShell（INT-116）与异步调用的「先回执、
+完成后以后台结果唤醒」管线之上。命名口径：动作叫 `wait`、返回字段用
+`waiting_for`/`outcome`，全程不出现 watch/watching 字样（避免与 T3 的 PR
+监听字段 `pull_requests[].watching` 混淆）；规格要求的 outcome 取值
+`watch_degraded` 是唯一例外。
+
+- **受理即 running、不进 queued**：`ListQueued` 会把 queued 调用推给 worker，
+  而 `runThreadWrite` 没有 wait 实现，会被错误认领。受理在
+  `commitAssistantTurn` 里直接置 `running` 并写 `started_at`（走既有 prepared
+  管线：async、不要求确认、不属于写操作的确认分支，`fs_cancel` 可取消），
+  事务提交后不调 `enqueueCallWork`，改为向评估器注册（botID、env_id、
+  thread_id、on、timeout、attached_at、内存快照基线）。回执 status 如实写
+  `running` 并附 `waiting_for`。
+- **5s 扫描评估**：评估器挂在既有 `scanOnce` 上，每轮只读 hub 内存并对比
+  挂上时的基线；注册表只是免查库的现场缓存，数据库调用行是事实来源——
+  注册表缺失的 running wait（受理与注册之间异常丢失）按首次观察到的快照
+  补建基线收编。触发或超时那一刻才做唯一一次详情读取（`s.threads.Detail`）
+  补 queue.held 与最近条目摘要（两者不在内存里），成本为每次 wait 一次
+  请求，与事件数量无关。
+- **触发条件全部在内存判定**：status/idle 复用 `t3ThreadStatus` 同一判定；
+  run_status 原样透传 `shell.Status`；needs_reply =
+  `PendingRuntimeRequest != nil`；error = run_status 落在错误集合
+  （`failed`/`error`，T3 实际取值见 t3_int148_thread_test.go）。idle 需连续
+  稳定约 20 秒才算命中，且视图非 Ready 的轮次把稳定窗清零、整体观察不可信
+  （非 Ready 轮数占比过半）时不命中——盲区之后的 idle 不能接着盲区前的
+  计时立刻放行。error/needs_reply 立即唤醒。「产生新条目」不作为触发
+  条件——条目变化只进唤醒现场信息。
+- **必须处理「根本没开始」**：触发条件只在观察到线程确实开始运行后才评估
+  （ActiveRunID 出现、线程处于 running 语义——`t3ThreadStatus` 为 running
+  含根 run 已结束但后台任务/subagent 仍在的情形，或最新一轮
+  LatestRunID/LatestRunStartedAt 变化）；挂上约 60 秒内始终未开始运行的以
+  `not_started` 收尾——否则「挂上时本来就 idle」的线程会在 20 秒稳定窗后
+  抢在 not_started 之前以 idle 命中，掩盖真相；后台工作未停的线程被误报
+  not_started 同样是错报。
+- **outcome 分类**：`triggered`（附命中项）/`not_started`/`timeout_unchanged`
+  （监听可信、确实无变化）/`timeout_progressing`（有更新未达终态）/
+  `watch_degraded`（视图非 Ready 轮数占比过半或收尾时仍非 Ready，或收尾
+  详情读取失败——不把「没听到」说成「没动」）/`thread_gone`（可信面上
+  线程不存在；归档面不可信时不得断言，见 G1）/`cancelled`/`server_restarted`。
+  超时那一刻必须再做一次权威读取（hub 视图 + 详情）与挂上时基线对比，
+  不能只依据期间扫到的内容；进展证据不只字段前后对比——latest_run 身份
+  变化与等待期间更新过的条目数（`new_items`）同样计入，否则「同一 run
+  持续产出」会被误判成 timeout_unchanged。条目缺更新时间戳导致证据不完整
+  时在 note 里说明证据范围，不下强断言。
+- **唤醒现场信息**：`botBackgroundResultContent` 新增可选 `wait_result`
+  字段携带完整 outcome 对象（waiting_for、matched、attach/resolve 两个
+  时间戳、changes 前后对比、queue_held、条目绝对数、最近 3 条条目摘要）；
+  整条 background_result 在上下文里已被围栏，不再内层转义。`result_json`
+  存同一对象供 fs_result.read。基线来自内存、不含条目数（差值不可算），
+  `new_items` 以 `updated_at > attachedAt` 的条目数代替（上游缺
+  `updated_at` 的条目保守不计）。
+- **防循环限额（受理端）**：每机器人同时最多 3 个 running wait；每条线程
+  最多 1 个——重复挂不新建，立即以 succeeded 落终态，结果带
+  `{already_waiting:true, waiting_call_id}`；同一线程 1 小时内最多挂 6 次，
+  超出拒绝（failed + 40001，提示「已达上限，请向用户汇报」）。限额计数在
+  SQL 侧按 bot（及目标线程）过滤——全局 LIMIT 扫描被其他机器人的行占满时
+  本 bot 会被误判为 0；同一回复内的同批 wait 由受理账本补充计数（同批同
+  线程判重，后到者 already_waiting；同批 wait 数计入每 bot 上限），并在
+  插入事务内对已提交行二次复核，超限的调用按受理端同步失败落
+  failed+40001——受理评估与插入之间的并发窗口（主线与 schedule 会话并行）
+  由这一层收口。重复挂写下的 already_waiting 账本行计入 1 小时额度，但
+  限额判定始终发生在写行之前。
+- **定时任务会话**：schedule run 要等全部异步调用落终态（500ms 轮询，上限
+  ≈20 分钟），因此会话内 `timeout_minutes` 不得超过 15，超出在受理端按参数
+  校验拒绝（40001 并说明原因）。wait 落终态经 `finalizeCall` 唤醒对应执行
+  槽，`wakeForCallResult` 的 schedule 分支天然覆盖。
+- **取消与重启专门分支**：`cancelBotCall` 对 running 只记
+  `cancel_requested_at`（wait 没有 worker context 可取消；写入 0 行即调用
+  已落终态，如实报告未能取消），评估器每轮检查该标记并以 cancelled 收尾；
+  `finalizeCall` 的终态 CAS 带 `cancel_requested_at IS NULL`，取消标记在
+  读取与写入之间落上的窗口由 0 行重读收口——改走 cancelled 收尾（wait
+  覆写 outcome=cancelled 的结果体），复检失败路径的 effect 恒 false。
+  wait 无副作用，取消与迟到完成都不把 `effect_may_have_occurred` 翻成
+  true。启动恢复对 wait 单独处理：置 failed 但
+  `effect_may_have_occurred=false`，`result_json` 带
+  `{"outcome":"server_restarted"}`，后台结果同带 wait_result——模型拿到的
+  是「等待中断」而不是「执行失败」（error_message 同口径：等待中断，不是
+  「结果未知」）。评估现场不跨重启恢复（调用行已落 failed，不残留）。
+
+## 写操作分级放行（INT-160）
+
+写操作确认过重会让无人值守的链路断掉；放宽又不能走「永久、范围宽、无前置
+条件」的老路（实测的存量 always-allow 恰好是最不安全的形态）。分档由服务端
+按「动作 + 归一化参数 + 目标线程内存状态」计算（`bot_write_policy.go`），模型
+不能自证安全；策略不写进工具定义（不受工具集冻结影响）。同 Issue 的
+fs_thread/wait（见上一节）负责「看到结果」，本节负责「无人值守时仍能处置」。
+
+### 分档
+
+- **tier1 自动执行**（不再确认、不建 always-allow 授权——策略放行每次现算，
+  与持久授权的审计语义必须分开）：
+  - `thread_send_continue`：`fs_thread/send` 正文归一化（去空白/标点、转小写）
+    后精确命中写死在服务端的模板词表（继续/继续执行/请继续/继续推进），
+    且目标线程在可信 hub 视图（`PeekShell`，State==t3ShellReady）里已知、
+    有既有运行痕迹（latest_run_id 或活动运行/后台任务——「继续」不引入新
+    意图的判据）、处于 idle；配额：同一 bot 对同一线程 1 小时内自动 send
+    最多 2 次（从 `bot_tool_calls.policy_json` 计数，失败的发送同样消耗）。
+  - `thread_settle_idle`：`fs_thread/settle`，线程已知且 status==idle、无
+    待应答请求、无活动运行/后台任务、queue.held=false。queue.held 不在
+    hub 内存里，评估那一刻做唯一一次详情读取（5s 预算）；读取失败保守降级。
+  - `thread_unsettle`：`fs_thread/unsettle`，线程已知即放行。
+- **tier2 维持确认卡**：其余需确认动作（fs_project 写、fs_schedule
+  run/enable）。本版不做第二档限额。
+- **tier3**：launch、stop、resume_queue、不满足 tier1 条件的
+  send/settle/unsettle、fs_schedule create/update/delete、fs_issue 全部写
+  动作。主线照旧确认卡；**定时任务会话同步拒绝**（40001「需用户确认的动作
+  在定时任务会话中不可执行，请向用户汇报」，不建卡），由主线重新发起同一
+  动作生成正常确认卡——定时任务里建卡会吃掉 20 分钟结算预算且主线收不到
+  结果（INT-103 已验证的结论），同步拒绝 + 强制汇报是唯一可行路径。
+
+tier1 候选不满足前置/配额/规则开关时**降级为确认卡**并带 **30 分钟过期
+时间**：`policy_json` 记 `{tier:"tier1", rule_id, auto:false,
+downgrade_reason, expiry}`；配额降级另记 `approved_call_id`（最近一次消耗
+额度的自动调用）。既有 always-allow 命中优先于降级——用户明示的持久授权
+不因策略前置失效而悄悄降格。
+
+### 审计与展示
+
+- `bot_tool_calls.policy_json`（AutoMigrate 可空列，历史行为空即「策略上线
+  前」，不回填）：`{tier, rule_id?, auto, source(tier1/always_allow/
+  schedule_default/confirmation/schedule_denied), facts(线程状态/配额/
+  queue_held 等服务端算出的事实), downgrade_reason?, expiry?,
+  approved_call_id?, schedule_denied?}`。自动执行、确认卡、定时任务同步
+  拒绝三条路径都写。
+- 调用 API 投影（`BotToolCall.policy`）与「平台后台结果」消息内容
+  （`policy` 可选字段）都带同一份结论；前端在工具卡与后台结果消息上渲染
+  「自动执行」徽标（仅 tier1+auto——always-allow 与 schedule 默认放行走
+  既有授权语义，不重复标记），确认卡渲染降级原因与过期时间。审计不只放
+  面板——聊天流里必须可见（终态调用卡会被降噪，后台结果消息是持久痕迹）。
+
+### 降级 → 复检 → 过期链路
+
+入队的 tier1 调用在 `executeQueuedCall` 认领后、执行前**复检**
+（`policyRecheckCall`）：覆盖所有带 rule_id 的 tier1 记录——降级批准卡与
+自动放行都复检，「判断时满足、执行时已变」的窗口不因无人确认而消失。
+先查过期（降级卡的 expiry 已过即拒），再重评该规则前置条件（复检一律不查
+配额——额度只约束受理时刻的自动放行，用户明确批准的这一次不被额度翻脸）。
+失败落 failed + 专用错误码 `policy_recheck_failed`（不走 e40001 折算，
+账本与后台结果消息同一口径），effect=false（发生在执行前，无副作用）。
+tier2/tier3 确认卡与无策略记录的调用不复检。
+
+### 规则独立开关与误判自动降级
+
+`bot_write_policy_rules`（AutoMigrate）：`(bot_id, rule_id)` 主键、
+`enabled`、`false_positive_count_24h`、`last_false_positive_at`（24 小时
+窗口锚点）、`auto_disabled_at`、`updated_at`；**行不存在即启用**（Enabled
+不带 default 标签——GORM Create 会把带 default 的零值字段替换成库默认
+值，显式写 false 会被静默翻成 true）。API：`GET/PUT /bots/:id/policy-rules`
+（清单 + 开关；手动重开清自动降级痕迹与误判计数）。
+
+误判检测（判定逻辑在服务层，按事实不靠自报）：自动放行的调用受理/落定后，
+30 分钟窗口内同 (rule, scope) 出现用户方向相反的写操作记一次——
+settle↔unsettle 往返（受理端检测与确认卡批准钩子同用：批准方向相反的
+settle/unsettle 卡等同受理往返）、自动「继续」后用户批准同线程 stop
+（DecideCall approve 钩子）、用户拒批同目标同类写（reject 钩子）、撤销同
+目标授权（RevokeAuthorization 钩子）。24 小时内累计 2 次即自动关闭规则
+（auto_disabled_at 落时戳）并向主线追加一条 `policy_rule_autodisabled`
+生命周期消息（走既有消息/事件机制）说明「规则已自动降级回确认」。计数
+推进、关闭落库与通知落库在同一事务里：读-改-写不进事务会并发丢更新，
+关闭与通知分两次提交则中间崩溃后已关规则直接 return、通知永丢（dedup 键
+绑本次关闭事件）。窗口判定在 SQL 侧按 bot/规则/目标线程过滤（LIMIT 截断
+的全局扫描不能当完整窗口用）。检测方向偏保守：多记的代价只是规则早一点
+回到确认档。
+
+定时任务会话的 tier3 同步拒绝强制本轮汇报，且被拒清单（工具/动作 + 拒绝
+原因）直接拼进主线事件内容：静默运行 summary 为空，不拼清单的话拒绝原因
+就被静默哨兵与 needs_report=false 一起吞掉了。
+
+### 存量 always-allow 迁移
+
+`bot_authorizations` 新增 `expires_at`（可空）。启动迁移
+（`MigrateTieredAuthorization`，挂在 `RecoverOnStartup` 最前，幂等）：
+`revoked_at IS NULL AND expires_at IS NULL` 的旧行统一 `revoked_at=now`——
+**只撤销、不删除**：`bot_tool_calls.authorization_id` 外键是
+ON DELETE CASCADE，物理删除会连带删掉调用账本行，审计就断了。此后新建的
+always-allow 一律 `expires_at = now + 30 天`；匹配查询
+（`FindActiveRuleTx`）同时要求未过期，过期的行不再命中；过期行占着部分
+唯一索引（按 revoked_at IS NULL 判活跃）会让同规则重建失败，`DecideCall`
+冲突分支惰性撤销过期行后重试创建（`RevokeExpiredRuleTx`）。worker 认领
+前的授权复核同样把过期视同已撤销；授权列表的 active 口径同口径排除过期
+未撤销的行（留痕行在非 active 查询里仍可见）。授权列表 API/前端展示过期
+时间。
+
+### MVP 边界
+
+第二档 stop 限额、/pr-finish、自动 Issue 写、发起方门禁（trigger_source
+只记录不作判定）都不在本版；tier1 规则只有上表三条，扩展新规则时目录
+（`botWritePolicyRuleCatalog`）与规则 ID 常量同源维护。
+
 ## 边界与决策
 
 - **身份**：机器人继承归属人身份（userID 恒取机器人归属人），全部端点仅

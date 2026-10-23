@@ -25,6 +25,13 @@ import (
 func (s *BotService) RecoverOnStartup() error {
 	now := time.Now().UTC()
 
+	// 0. INT-160 存量授权迁移（幂等一次性）：没有过期字段的旧「始终允许」
+	// 等于永久授权，统一撤销（只写 revoked_at 留痕不删）；此后新建的
+	// always-allow 一律带 30 天有效期。迁移失败按启动失败处理。
+	if err := s.MigrateTieredAuthorization(); err != nil {
+		return err
+	}
+
 	// 1. 未完成的模型请求。
 	requests, err := s.requests.ListUnfinished()
 	if err != nil {
@@ -169,6 +176,21 @@ func (s *BotService) RecoverOnStartup() error {
 		isAsync := call.ExecutionMode == string(model.BotExecutionAsync)
 		effect := isAsync && call.Status == model.BotCallStatusRunning
 		interruptNote := "调用被服务重启中断；请先用读取类工具核实现状，再决定是否重试"
+		// wait（INT-160）专门分支：无任何副作用，重启只让等待丢失；结果带
+		// 结构化 outcome，模型拿到的是「等待中断」而不是「执行失败」。
+		isWait := call.ToolName == "fs_thread" && call.Action == "wait"
+		recoverOutcome := botToolOutcome{ResultJSON: "{}", PreviewJSON: "{}", ResultChars: 2}
+		if isWait {
+			effect = false
+			recoverRaw := `{"outcome":"server_restarted"}`
+			recoverOutcome = botToolOutcome{
+				ResultJSON:  recoverRaw,
+				PreviewJSON: recoverRaw,
+				ResultChars: int64(len([]rune(recoverRaw))),
+				WaitResult:  json.RawMessage(recoverRaw),
+			}
+			interruptNote = "wait 被服务重启中断（wait 无副作用，线程不受影响）；如仍需跟踪请重新发起"
+		}
 		if botIsMemoryWriteCall(call) {
 			written, werr := repository.NewBotMemoryRepository(s.db).HasVersionWithOperationKey(call.BotID, call.ID)
 			if werr == nil && written {
@@ -180,15 +202,28 @@ func (s *BotService) RecoverOnStartup() error {
 			}
 		}
 		runID := s.runIDOfCall(call)
+		// wait（INT-160）的 result_json 带结构化 outcome：模型从调用账本与
+		// fs_result.read 读到的是「等待中断」，不是一句泛化的执行失败。
+		// error_message 同口径：等待中断不是「结果未知」（wait 无副作用）。
+		recoverMessage := "服务在调用执行中重启，结果未知"
+		if isWait {
+			recoverMessage = "服务在等待中重启，等待已中断（wait 无副作用）；如仍需跟踪请重新发起"
+		}
+		recoverCols := map[string]interface{}{
+			"status":                   model.BotCallStatusFailed,
+			"finished_at":              now,
+			"error_code":               "server_restarted",
+			"error_message":            recoverMessage,
+			"effect_may_have_occurred": effect,
+		}
+		if isWait {
+			recoverCols["result_json"] = recoverOutcome.ResultJSON
+			recoverCols["result_preview_json"] = recoverOutcome.PreviewJSON
+			recoverCols["result_chars"] = recoverOutcome.ResultChars
+		}
 		txErr := s.db.Transaction(func(tx *gorm.DB) error {
 			ok, err := repository.NewBotToolCallRepository(tx).UpdateWhereTx(tx, call.ID,
-				string(model.BotCallStatusRunning), map[string]interface{}{
-					"status":                   model.BotCallStatusFailed,
-					"finished_at":              now,
-					"error_code":               "server_restarted",
-					"error_message":            "服务在调用执行中重启，结果未知",
-					"effect_may_have_occurred": effect,
-				})
+				string(model.BotCallStatusRunning), recoverCols)
 			if err != nil || !ok {
 				return err
 			}
@@ -206,7 +241,7 @@ func (s *BotService) RecoverOnStartup() error {
 			}
 			// 后台终态消息/事件（幂等；已有回执的异步调用在这里拿到终态投影）。
 			return s.appendBackgroundResultTx(tx, runID, call, model.BotCallStatusFailed,
-				botToolOutcome{ResultJSON: "{}", PreviewJSON: "{}", ResultChars: 2},
+				recoverOutcome,
 				errs.New(errs.ErrInternal.Code, "server_restarted"), effect, now)
 		})
 		if txErr != nil {

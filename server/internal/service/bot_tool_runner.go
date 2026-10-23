@@ -24,6 +24,112 @@ const botAsyncExecTimeout = 15 * time.Minute
 
 // ---------- assistant 回合提交 ----------
 
+// botBatchAcceptance 是同一回复内逐调用受理时的同批账本：限额与配额评估只
+// 查已提交行的话，同一回复里的 N 个同类调用会共享旧计数全部通过。同批已
+// 受理的成员在这里补充计数，插入事务内再对已提交行二次复核兜底。
+type botBatchAcceptance struct {
+	// waitThreads 记录同批已受理（非重复挂）wait 的 (env,thread) → 调用 ID：
+	// 同批同线程的后到者按 already_waiting 处理。
+	waitThreads map[string]string
+	// waitCount 是同批已受理的 wait 数（计入每 bot 并发上限）。
+	waitCount int
+	// autoSends 按 (env,thread) 记录同批已受理的自动「继续」数（共享每小时配额）。
+	autoSends map[string]int
+}
+
+func newBotBatchAcceptance() botBatchAcceptance {
+	return botBatchAcceptance{
+		waitThreads: map[string]string{},
+		autoSends:   map[string]int{},
+	}
+}
+
+func (b *botBatchAcceptance) threadKey(envID, threadID string) string {
+	return envID + "\x00" + threadID
+}
+
+// botPreparedEntry 是 commitAssistantTurn 逐调用受理的中间形态：校验、范围
+// 解析、策略评估与 wait 受理的结论都挂在这里，插入事务按它落账本行。提升
+// 到包级别是让受理事务内的二次复核辅助函数能就地改判。
+type botPreparedEntry struct {
+	call       *model.BotToolCall
+	providerID string
+	toolName   string
+	prepared   *botPreparedCall
+	execCtx    botCallExecContext
+	authzID    *string
+	invalidErr error
+	// policy 是分级放行评估结论（INT-160）：凡需确认的写调用都评估，
+	// 结论（含降级/拒绝事实）写进 policy_json 审计。
+	policy *botWritePolicyEval
+	// wait 专用（INT-160）：受理即 running、由评估器收尾；waitDup 非空
+	// 表示线程已有 wait，本调用在提交后立即以 already_waiting 落终态。
+	waitAccepted bool
+	waitDup      string
+	waitConds    []string
+	waitTimeout  time.Duration
+}
+
+// failAcceptedEntry 把已受理的调用改判为受理端同步失败（与既有 invalidErr
+// 路径同一落库形态：failed + 40001 + 同步失败回复，账本记回 sync——从未进
+// 异步路径，避免排查时误以为是异步执行失败）。
+func failAcceptedEntry(entry *botPreparedEntry, now time.Time, err error) {
+	entry.invalidErr = err
+	entry.call.Status = model.BotCallStatusFailed
+	entry.call.FinishedAt = &now
+	entry.call.ErrorCode = botStrPtr(botErrCodeOf(err))
+	entry.call.ErrorMessage = botStrPtr(botErrMessage(err))
+	entry.call.ExecutionMode = string(model.BotExecutionSync)
+	entry.prepared = nil
+	entry.waitAccepted = false
+	entry.waitDup = ""
+}
+
+// botWaitRecheckVerdict 是插入事务内 wait 受理二次复核的结论。
+type botWaitRecheckVerdict struct {
+	// dupCallID 非空：同线程已有 running wait（并发请求抢先挂上），本调用
+	// 改判 already_waiting。
+	dupCallID string
+	// limErr 非空：超出并发上限或 1 小时限额，本调用改判受理失败。
+	limErr error
+}
+
+// recheckWaitAcceptance 在插入事务内对 wait 受理二次复核：以已提交行为准
+// 重新裁决重复挂与两级限额。同批成员由本事务早前的插入天然可见；查询失败
+// 不改判（限额评估已在外层做过，这里只兜受理与插入之间的并发窗口）。
+func (s *BotService) recheckWaitAcceptance(tx *gorm.DB, botID string, args botThreadArgs) botWaitRecheckVerdict {
+	repo := repository.NewBotToolCallRepository(tx)
+	existing, err := repo.FindRunningWaitByThreadTx(tx, botID, args.EnvID, args.ThreadID)
+	switch {
+	case err == nil:
+		return botWaitRecheckVerdict{dupCallID: existing.ID}
+	case !errors.Is(err, gorm.ErrRecordNotFound):
+		return botWaitRecheckVerdict{}
+	}
+	if n, cerr := repo.CountRunningWaitCallsTx(tx, botID); cerr == nil && n >= botWaitMaxPerBot {
+		return botWaitRecheckVerdict{limErr: errs.New(errs.ErrInvalidParams.Code,
+			fmt.Sprintf("同时挂起的 wait 已达上限（%d 个），请等待现有等待结束或用 fs_cancel 取消后再挂；已达上限，请向用户汇报", botWaitMaxPerBot))}
+	}
+	if n, cerr := repo.CountWaitCallsByThreadSinceTx(tx, botID, args.EnvID, args.ThreadID,
+		time.Now().UTC().Add(-time.Hour)); cerr == nil && n >= botWaitMaxPerThreadHour {
+		return botWaitRecheckVerdict{limErr: errs.New(errs.ErrInvalidParams.Code,
+			fmt.Sprintf("同一线程 1 小时内最多挂 %d 次 wait，已达上限，请向用户汇报", botWaitMaxPerThreadHour))}
+	}
+	return botWaitRecheckVerdict{}
+}
+
+// recheckSendQuota 在插入事务内对 tier1 自动「继续」的配额二次复核：并发
+// 请求（主线与 schedule 会话并行）可能已用尽额度。自动放行是受理时刻的
+// 裁决，这里不再降级成确认卡——超限按受理端同步失败落 failed+40001。
+func (s *BotService) recheckSendQuota(tx *gorm.DB, botID string, args botThreadArgs, now time.Time) error {
+	used, _, ok := s.policySendQuotaUsedTx(tx, botID, args.EnvID, args.ThreadID, now)
+	if !ok || used < botPolicySendQuotaPerThreadHour {
+		return nil
+	}
+	return errs.New(errs.ErrInvalidParams.Code,
+		"自动「继续」的每小时额度已用尽（并发请求已消耗），请向用户汇报")
+}
+
 // commitAssistantTurn 在一个短事务内提交：assistant 消息、每调用的账本行、
 // 异步回执（dedup receipt:<call_id>）、校验失败的即时回复与全部 SSE 事件。
 // scope/授权解析与调用 ID 分配都在事务外完成（消息账本有防 UPDATE 守护，
@@ -32,23 +138,15 @@ const botAsyncExecTimeout = 15 * time.Minute
 func (s *BotService) commitAssistantTurn(bot *model.Bot, run *model.BotRun, requestRow *model.BotModelRequest, reply *botModelReply, msgID string) ([]*model.BotToolCall, error) {
 	now := time.Now().UTC()
 	requestID := requestRow.ID
+	batch := newBotBatchAcceptance()
 
 	// 事务外：逐调用分配 ID、解析/校验/解析范围/匹配授权。
-	type preparedEntry struct {
-		call       *model.BotToolCall
-		providerID string
-		toolName   string
-		prepared   *botPreparedCall
-		execCtx    botCallExecContext
-		authzID    *string
-		invalidErr error
-	}
-	entries := make([]preparedEntry, 0, len(reply.ToolCalls))
+	entries := make([]botPreparedEntry, 0, len(reply.ToolCalls))
 	content := botAssistantContent{Text: reply.Text}
 	// 校验用本请求构建时的冻结工具集（压缩边界后新旧版本可能不同）。
 	ts := botToolsetVersionOf(requestRow.ToolsetVersion)
 	for _, tc := range reply.ToolCalls {
-		entry := preparedEntry{
+		entry := botPreparedEntry{
 			providerID: tc.ID,
 			toolName:   tc.Name,
 			call: &model.BotToolCall{
@@ -108,30 +206,100 @@ func (s *BotService) commitAssistantTurn(bot *model.Bot, run *model.BotRun, requ
 				entry.prepared = nil
 			}
 		}
+		if entry.prepared != nil && prepared.ToolName == "fs_thread" && prepared.Action == "wait" {
+			// wait 受理端专门校验（INT-160）：定时任务会话内等待上限 15 分钟
+			//（schedule run 要等全部异步调用落终态，超长等待会吃掉整个结算
+			// 预算），防循环限额（每机器人 3 个、同线程 1 个、每小时 6 次）。
+			var waitArgs botThreadArgs
+			_ = json.Unmarshal([]byte(prepared.ArgumentsJSON), &waitArgs)
+			conds, perr := botWaitParseOn(waitArgs.On)
+			timeout, terr := botWaitParseTimeout(waitArgs.TimeoutMinutes)
+			if perr == nil {
+				perr = terr
+			}
+			scheduleOver := run.SessionKind == model.BotSessionKindSchedule &&
+				waitArgs.TimeoutMinutes > botWaitScheduleMaxMinutes
+			switch {
+			case perr != nil:
+				entry.invalidErr = perr
+			case scheduleOver:
+				entry.invalidErr = errs.New(errs.ErrInvalidParams.Code,
+					fmt.Sprintf("定时任务会话内 timeout_minutes 不得超过 %d（定时任务要等待全部异步调用落终态），请缩短等待或改在主线跟踪",
+						botWaitScheduleMaxMinutes))
+			default:
+				dup, limErr := s.threadWaitAcceptance(bot.ID, waitArgs.EnvID, waitArgs.ThreadID, batch.waitCount)
+				if limErr != nil {
+					entry.invalidErr = limErr
+				} else {
+					if dup == "" {
+						// 同批判重：同一线程在两个 wait 之间只可能有一个挂上，
+						// 后到者立即走 already_waiting。
+						if mate, ok := batch.waitThreads[batch.threadKey(waitArgs.EnvID, waitArgs.ThreadID)]; ok {
+							dup = mate
+						}
+					}
+					if dup == "" {
+						batch.waitThreads[batch.threadKey(waitArgs.EnvID, waitArgs.ThreadID)] = entry.call.ID
+						batch.waitCount++
+					}
+					entry.waitAccepted = true
+					entry.waitConds = conds
+					entry.waitTimeout = timeout
+					entry.waitDup = dup
+				}
+			}
+			if entry.invalidErr != nil {
+				entry.call.Status = model.BotCallStatusFailed
+				entry.call.FinishedAt = &now
+				entry.call.ErrorCode = botStrPtr(botErrCodeOf(entry.invalidErr))
+				entry.call.ErrorMessage = botStrPtr(botErrMessage(entry.invalidErr))
+				// 受理端同步拒绝（从未进异步路径），账本记回 sync，避免排查时
+				// 误以为是异步执行失败。
+				entry.call.ExecutionMode = string(model.BotExecutionSync)
+				entry.prepared = nil
+			}
+		}
 		if entry.prepared != nil {
 			if prepared.RequiresConfirmation {
-				// schedule 会话默认放行（INT-103）：直接排队执行，不建授权
-				// 记录、不等待确认；范围仍要求可解析（目标不明的调用按失败
-				// 回复模型）。
-				if run.SessionKind == model.BotSessionKindSchedule {
-					if err := botRequireScope(prepared); err != nil {
-						entry.invalidErr = err
-						entry.call.Status = model.BotCallStatusFailed
-						entry.call.FinishedAt = &now
-						entry.call.ErrorCode = botStrPtr(botErrCodeOf(err))
-						entry.call.ErrorMessage = botStrPtr(botErrMessage(err))
-						entry.prepared = nil
-					}
-				} else if err := botRequireScope(prepared); err != nil {
+				// 范围仍要求可解析（目标不明的调用按失败回复模型），两种会话
+				// 口径一致。
+				if err := botRequireScope(prepared); err != nil {
 					entry.invalidErr = err
 					entry.call.Status = model.BotCallStatusFailed
 					entry.call.FinishedAt = &now
 					entry.call.ErrorCode = botStrPtr(botErrCodeOf(err))
 					entry.call.ErrorMessage = botStrPtr(botErrMessage(err))
 					entry.prepared = nil
-				} else if authz := s.matchAuthorization(bot.ID, prepared); authz != nil {
-					id := authz.ID
-					entry.authzID = &id
+				} else {
+					// 分级放行（INT-160）：档位由服务端按「动作 + 归一化参数 +
+					// 目标线程内存状态」计算，模型不能自证安全。评估结论无论
+					// 落在哪条路径（自动执行 / 确认卡 / 定时任务同步拒绝）都
+					// 写进 policy_json 审计。同批已受理的自动「继续」计入配额。
+					pol := s.evaluateWritePolicy(bot, run, prepared,
+						batch.autoSends[batch.threadKey(entry.execCtx.EnvID, entry.execCtx.ThreadID)])
+					entry.policy = pol
+					entry.call.PolicyJSON = botPolicyRecordJSON(&pol.record)
+					if pol.record.Auto && pol.record.RuleID == botPolicyRuleSendContinue {
+						batch.autoSends[batch.threadKey(entry.execCtx.EnvID, entry.execCtx.ThreadID)]++
+					}
+					switch {
+					case pol.denied:
+						// 定时任务会话 tier3 同步拒绝（不建卡）：主线重新发起
+						// 同一动作才会生成正常确认卡；本轮强制汇报由 run 收尾
+						// 按账本里的拒绝计数触发。按受理端同步失败处理（从未
+						// 进异步队列，账本记回 sync）。
+						entry.invalidErr = errs.New(errs.ErrInvalidParams.Code,
+							"需用户确认的动作在定时任务会话中不可执行，请向用户汇报")
+						entry.call.Status = model.BotCallStatusFailed
+						entry.call.FinishedAt = &now
+						entry.call.ErrorCode = botStrPtr(botErrCodeOf(entry.invalidErr))
+						entry.call.ErrorMessage = botStrPtr(botErrMessage(entry.invalidErr))
+						entry.call.ExecutionMode = string(model.BotExecutionSync)
+						entry.prepared = nil
+					case pol.authz != nil:
+						id := pol.authz.ID
+						entry.authzID = &id
+					}
 				}
 			}
 		}
@@ -139,13 +307,25 @@ func (s *BotService) commitAssistantTurn(bot *model.Bot, run *model.BotRun, requ
 			call := entry.call
 			call.ExecutionContextJSON = marshalExecContext(entry.execCtx)
 			switch {
+			case entry.waitAccepted:
+				// wait（INT-160）：受理即 running（不进 queued——ListQueued 会
+				// 把 queued 调用推给 worker，而 runThreadWrite 没有 wait 实现，
+				// 会被错误认领）。started_at 即挂上时刻，由评估器收尾。
+				call.Status = model.BotCallStatusRunning
+				call.StartedAt = &now
 			case entry.prepared.Mode == model.BotExecutionSync:
 				call.Status = model.BotCallStatusQueued
 			case entry.authzID != nil:
 				call.Status = model.BotCallStatusQueued
 				call.AuthorizationID = entry.authzID
+			case entry.policy != nil && entry.policy.record.Auto:
+				// tier1 策略自动放行（主线与 schedule 会话一致）与 schedule
+				// 会话 tier2 默认放行：直接排队。tier1 不建授权记录——策略
+				// 放行每次现算，与持久授权的审计语义分开。
+				call.Status = model.BotCallStatusQueued
 			case run.SessionKind == model.BotSessionKindSchedule:
-				// schedule 会话：需确认的写操作默认放行，直接排队（无授权记录）。
+				// schedule 会话兜底：需确认的写操作默认放行（INT-103），理论
+				// 不可达（策略评估已覆盖），保留防回归。
 				call.Status = model.BotCallStatusQueued
 			default:
 				call.Status = model.BotCallStatusPendingConfirmation
@@ -195,6 +375,37 @@ func (s *BotService) commitAssistantTurn(bot *model.Bot, run *model.BotRun, requ
 		for i := range entries {
 			entry := &entries[i]
 			call := entry.call
+			// 受理端限额的二次复核（INT-160）：受理评估与插入之间有并发窗口
+			//（其他请求在同一间隙提交的行，受理评估看不见），同批判重也代替
+			// 不了已提交行。在插入事务内以已提交行再裁决一次（同事务早前插入
+			// 的同批成员天然可见）：超限的调用按受理端同步失败落 failed+40001，
+			// 与既有 invalidErr 路径一致。
+			if entry.waitAccepted {
+				var waitArgs botThreadArgs
+				_ = json.Unmarshal([]byte(entry.call.ArgumentsJSON), &waitArgs)
+				verdict := s.recheckWaitAcceptance(tx, bot.ID, waitArgs)
+				switch {
+				case verdict.dupCallID != "":
+					// 同批判重已把后到者链到本批最初的受理者；这里只在批内
+					// 没判出重复（并发请求抢先挂上）时改判。
+					if entry.waitDup == "" {
+						entry.waitDup = verdict.dupCallID
+					}
+				case verdict.limErr != nil:
+					failAcceptedEntry(entry, now, verdict.limErr)
+				}
+			} else if entry.policy != nil && entry.policy.record.Auto &&
+				entry.policy.record.Source == "tier1" &&
+				entry.policy.record.RuleID == botPolicyRuleSendContinue &&
+				call.Status == model.BotCallStatusQueued {
+				// 只复核策略自动放行（source=tier1）：always-allow 是用户明示
+				// 的持久授权，不因无人在场额度用尽而翻脸。
+				var args botThreadArgs
+				_ = json.Unmarshal([]byte(entry.call.ArgumentsJSON), &args)
+				if quotaErr := s.recheckSendQuota(tx, bot.ID, args, now); quotaErr != nil {
+					failAcceptedEntry(entry, now, quotaErr)
+				}
+			}
 			if err := txCalls.CreateTx(tx, call); err != nil {
 				return err
 			}
@@ -207,6 +418,9 @@ func (s *BotService) commitAssistantTurn(bot *model.Bot, run *model.BotRun, requ
 				phase = "awaiting_confirmation"
 			} else if call.Status == model.BotCallStatusQueued && call.ExecutionMode == string(model.BotExecutionAsync) {
 				phase = "queued"
+			} else if call.Status == model.BotCallStatusRunning && call.ExecutionMode == string(model.BotExecutionAsync) {
+				// wait（INT-160）：受理即 running。
+				phase = "running"
 			}
 			if err := s.appendEventTx(tx, bot.ID, &run.ID, call.ID, model.BotEventToolCall, botEventEnvelope{
 				Kind: "tool_call", Phase: phase,
@@ -232,12 +446,24 @@ func (s *BotService) commitAssistantTurn(bot *model.Bot, run *model.BotRun, requ
 				status := string(model.BotCallStatusPendingConfirmation)
 				if call.Status == model.BotCallStatusQueued {
 					status = string(model.BotCallStatusQueued)
+				} else if call.Status == model.BotCallStatusRunning {
+					// wait（INT-160）：受理即 running，回执带触发条件。
+					status = string(model.BotCallStatusRunning)
 				}
-				receiptRaw, _ := json.Marshal(map[string]interface{}{
+				receipt := map[string]interface{}{
 					"accepted": true, "call_id": call.ID, "status": status,
 					"tool_name": call.ToolName, "action": call.Action,
 					"requires_confirmation": call.RequiresConfirmation,
-				})
+				}
+				if len(entry.waitConds) > 0 {
+					receipt["waiting_for"] = entry.waitConds
+				}
+				if entry.waitDup != "" {
+					// 重复挂：线程已有 wait，终态随后立即送达。
+					receipt["already_waiting"] = true
+					receipt["waiting_call_id"] = entry.waitDup
+				}
+				receiptRaw, _ := json.Marshal(receipt)
 				replyContent := botToolReplyContent{
 					CallID: call.ID, ProviderToolCallID: entry.providerID,
 					ToolName: call.ToolName, Status: status,
@@ -294,10 +520,29 @@ func (s *BotService) commitAssistantTurn(bot *model.Bot, run *model.BotRun, requ
 
 	s.publishEvent(bot.ID)
 
-	// 事务提交后才唤醒 worker（回执已可见）。
-	for _, call := range calls {
+	// 事务提交后才唤醒 worker（回执已可见）；wait 不进 worker 队列——提交后
+	// 注册评估现场，重复挂立即以 already_waiting 落终态。
+	for i := range entries {
+		entry := &entries[i]
+		call := entry.call
 		if call.Status == model.BotCallStatusQueued && call.ExecutionMode == string(model.BotExecutionAsync) {
 			s.enqueueCallWork(call.ID)
+		}
+		if entry.waitAccepted && call.Status == model.BotCallStatusRunning {
+			if entry.waitDup != "" {
+				s.waitFinalizeDuplicate(bot, call, entry.waitDup, entry.waitConds)
+			} else {
+				s.threadWaitAttach(bot, call, entry.waitConds, entry.waitTimeout)
+			}
+		}
+		// 分级放行误判检测（INT-160）：settle/unsettle 的往返（前一次自动
+		// 放行后 30 分钟内出现方向相反的受理）按事实记一次误判。放在受理端
+		// 而非终态：方向相反的写被受理本身就说明目标状态刚被反转过。
+		if entry.prepared != nil && entry.prepared.ToolName == "fs_thread" &&
+			(entry.prepared.Action == "settle" || entry.prepared.Action == "unsettle") &&
+			(call.Status == model.BotCallStatusQueued || call.Status == model.BotCallStatusRunning) {
+			envID, threadID := botPolicyThreadTargetOf(entry.execCtx)
+			s.detectPolicyInverseAcceptance(bot.ID, entry.prepared.Action, envID, threadID)
 		}
 	}
 	return calls, nil
@@ -636,10 +881,11 @@ func (s *BotService) executeQueuedCall(callID string) {
 		return
 	}
 
-	// 撤销对尚未认领的授权调用生效：授权失效则回到待确认（快速路径）。
+	// 撤销/过期对尚未认领的授权调用生效：授权失效则回到待确认（快速路径）。
 	if call.AuthorizationID != nil {
 		authz, authzErr := s.authz.FindByID(*call.AuthorizationID)
-		if authzErr != nil || authz.RevokedAt != nil || authz.BotID != bot.ID {
+		if authzErr != nil || authz.RevokedAt != nil || authz.BotID != bot.ID ||
+			botAuthorizationExpired(authz, time.Now().UTC()) {
 			s.revertQueuedCall(call)
 			return
 		}
@@ -656,7 +902,7 @@ func (s *BotService) executeQueuedCall(callID string) {
 			if err != nil {
 				return err
 			}
-			if authz.RevokedAt != nil || authz.BotID != bot.ID {
+			if authz.RevokedAt != nil || authz.BotID != bot.ID || botAuthorizationExpired(authz, now) {
 				authzRevoked = true
 				return nil
 			}
@@ -692,6 +938,15 @@ func (s *BotService) executeQueuedCall(callID string) {
 	// 可能已记录标记（此时 signalCallCancel 还没有可取消的 handler），
 	// 直接以取消语义执行，不再发起外部写入。
 	if s.abortIfCancelRequested(bot, call) {
+		return
+	}
+
+	// 分级放行执行前复检（INT-160）：降级确认卡带过期时间，且「判断时满足、
+	// 执行时已变」的窗口由这里重评前置条件收口。复检失败落 failed +
+	// policy_recheck_failed，不发起外部写入（无副作用）。
+	if recheckErr := s.policyRecheckCall(bot, call); recheckErr != nil {
+		s.finalizeCall(bot, s.runIDOfCall(call), call, model.BotCallStatusFailed,
+			botBuildOutcomeRaw(call.ID, "", recheckErr), recheckErr, false)
 		return
 	}
 
@@ -735,6 +990,46 @@ func (s *BotService) abortIfCancelRequested(bot *model.Bot, call *model.BotToolC
 	return false
 }
 
+// cancelRaceCols 构造取消竞速下的终态列：取消标记在执行与落定之间落上时，
+// 成功/失败结论不得以原状态送达。复检失败发生在任何外部写入之前，effect
+// 恒 false；wait（INT-160）无任何副作用，取消也不例外，结果体覆写为
+// outcome=cancelled；其余调用按「可能已写出」处理，结果保持原样。
+func cancelRaceCols(call *model.BotToolCall, outcome botToolOutcome, execErr error, now time.Time) (model.BotToolCallStatus, botToolOutcome, bool, map[string]interface{}) {
+	effect := execErr == nil
+	if isBotPolicyRecheckError(execErr) {
+		effect = false
+	}
+	status := model.BotCallStatusCancelled
+	if call.ToolName == "fs_thread" && call.Action == "wait" {
+		effect = false
+		cancelRaw := marshalJSONString(map[string]interface{}{
+			"outcome":     "cancelled",
+			"resolved_at": rfc3339(&now),
+		})
+		outcome = botToolOutcome{
+			ResultJSON:  cancelRaw,
+			PreviewJSON: cancelRaw,
+			ResultChars: int64(len([]rune(cancelRaw))),
+			WaitResult:  json.RawMessage(cancelRaw),
+		}
+	}
+	cols := map[string]interface{}{
+		"status":                   status,
+		"finished_at":              now,
+		"result_json":              outcome.ResultJSON,
+		"result_preview_json":      outcome.PreviewJSON,
+		"result_chars":             outcome.ResultChars,
+		"result_items":             outcome.ResultItems,
+		"truncated":                outcome.Truncated,
+		"effect_may_have_occurred": effect,
+	}
+	if execErr != nil {
+		cols["error_code"] = botCallErrorCodeOf(execErr)
+		cols["error_message"] = botErrMessage(execErr)
+	}
+	return status, outcome, effect, cols
+}
+
 // finalizeCall 原子落终态、结果、background_result 消息与事件；CAS 失败说明
 // 终态已被别人落定（取消竞速），迟到返回不覆盖。
 func (s *BotService) finalizeCall(bot *model.Bot, runID string, call *model.BotToolCall, status model.BotToolCallStatus, outcome botToolOutcome, execErr error, effect bool) {
@@ -750,26 +1045,37 @@ func (s *BotService) finalizeCall(bot *model.Bot, runID string, call *model.BotT
 		"effect_may_have_occurred": effect,
 	}
 	if execErr != nil {
-		cols["error_code"] = botErrCodeOf(execErr)
+		// 分级放行执行前复检失败用专用错误码而不是折算业务码，账本检索与
+		// 后台结果消息按同一口径识别。
+		cols["error_code"] = botCallErrorCodeOf(execErr)
 		cols["error_message"] = botErrMessage(execErr)
 	}
 	var ok bool
 	txErr := s.db.Transaction(func(tx *gorm.DB) error {
-		// 取消竞速重查必须在本事务内：取消方记录标记与本 CAS 之间的窗口
-		// 里，取消请求已受理的成功写入不得以 effect=false 落 succeeded。
-		if fresh, err := repository.NewBotToolCallRepository(tx).FindByID(call.ID); err == nil && fresh.CancelRequestedAt != nil {
-			// 无论工具返回成败，取消请求已记录则终态为 cancelled——成功
-			// 返回的写入也可能已生效，副作用标记跟着取消走。
-			status = model.BotCallStatusCancelled
-			effect = true
-			cols["status"] = status
-			cols["effect_may_have_occurred"] = effect
-		}
+		repo := repository.NewBotToolCallRepository(tx)
+		// 取消竞态（INT-160 复审）：CAS 条件带 cancel_requested_at IS NULL。
+		// 取消标记在读取与写入之间落上的窗口里，成功终态不再覆盖取消——
+		// 0 行时重读该行裁决：有取消标记改走 cancelled 收尾，否则终态已被
+		// 取消/恢复路径落定，迟到返回不覆盖。
 		var err error
-		ok, err = repository.NewBotToolCallRepository(tx).UpdateWhereTx(tx, call.ID,
-			string(model.BotCallStatusRunning), cols)
-		if err != nil || !ok {
+		ok, err = repo.UpdateWhereRunningFreshTx(tx, call.ID, cols)
+		if err != nil {
 			return err
+		}
+		if !ok {
+			fresh, ferr := repo.FindByID(call.ID)
+			if ferr != nil {
+				return ferr
+			}
+			if fresh.Status != model.BotCallStatusRunning || fresh.CancelRequestedAt == nil {
+				return nil
+			}
+			status, outcome, effect, cols = cancelRaceCols(call, outcome, execErr, now)
+			ok, err = repo.UpdateWhereTx(tx, call.ID,
+				string(model.BotCallStatusRunning), cols)
+			if err != nil || !ok {
+				return err
+			}
 		}
 		if call.ExecutionMode != string(model.BotExecutionAsync) {
 			// 同步工具：协议回复就在本事务内补齐（每个 provider_tool_call_id
@@ -935,10 +1241,16 @@ func (s *BotService) cancelBotCall(call *model.BotToolCall) (*model.BotToolCall,
 		fresh, _ := s.calls.FindByID(call.ID)
 		return fresh, true
 	case model.BotCallStatusRunning:
-		_, err := s.calls.UpdateWhere(call.ID, string(model.BotCallStatusRunning), map[string]interface{}{
+		updated, err := s.calls.UpdateWhere(call.ID, string(model.BotCallStatusRunning), map[string]interface{}{
 			"cancel_requested_at": now,
 		})
 		if err != nil {
+			fresh, _ := s.calls.FindByID(call.ID)
+			return fresh, false
+		}
+		if !updated {
+			// 0 行：调用已在初读与写入之间落终态（或取消标记已被并发请求
+			// 记上）。如实报告未能取消，不谎报成功。
 			fresh, _ := s.calls.FindByID(call.ID)
 			return fresh, false
 		}
@@ -954,7 +1266,9 @@ func (s *BotService) cancelBotCall(call *model.BotToolCall) (*model.BotToolCall,
 func (s *BotService) appendBackgroundResultTx(tx *gorm.DB, runID string, call *model.BotToolCall, status model.BotToolCallStatus, outcome botToolOutcome, execErr error, effect bool, now time.Time) error {
 	code, message := "", ""
 	if execErr != nil {
-		code, message = botErrCodeOf(execErr), botErrMessage(execErr)
+		// 与账本 error_code 同一口径：复检失败的专用码不折算成业务码，
+		// 否则后台结果消息与账本行对不上。
+		code, message = botCallErrorCodeOf(execErr), botErrMessage(execErr)
 	}
 	return s.appendBackgroundResultMsgTx(tx, runID, call, status, outcome, code, message, effect, now)
 }
@@ -974,6 +1288,15 @@ func (s *BotService) appendBackgroundResultMsgTx(tx *gorm.DB, runID string, call
 		result.Summary = botResultSummary(outcome.ResultJSON)
 	} else {
 		result.Summary = botResultSummary("{}")
+	}
+	if call.PolicyJSON != "" {
+		// 分级放行（INT-160）：评估结论随后台结果进模型上下文与前端渲染
+		//（自动执行的调用在聊天流里也能看到「自动执行」标记）。
+		result.Policy = json.RawMessage(call.PolicyJSON)
+	}
+	if len(outcome.WaitResult) > 0 {
+		// wait（INT-160）：完整结构化收尾对象随唤醒消息进入模型上下文。
+		result.WaitResult = outcome.WaitResult
 	}
 	raw, _ := json.Marshal(result)
 	seq, seqErr := s.bots.NextMessageSeqTx(tx, call.BotID)

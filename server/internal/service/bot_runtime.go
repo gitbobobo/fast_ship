@@ -258,6 +258,9 @@ func (s *BotService) scanOnce() {
 	}
 	// 后台调用：排队的调用推给 worker（重复推送无害，CAS 认领挡住并发）。
 	s.scanQueuedCalls()
+	// fs_thread/wait（INT-160）：受理即 running 的等待调用由本轮扫描评估——
+	// 触发条件命中、启动宽限到期、超时或取消请求，都由评估器统一收尾。
+	s.evaluateThreadWaits()
 	// 定时任务运行：补回丢失的唤醒——wakeScheduleRun 的瞬态失败或执行槽异常
 	// 结束会让 run 永远卡在 running（未完成的 schedule run 还会挡住机器人删除）。
 	// 任务允许并行，未完成 run 数量无上限，所以扫完整个集合，但只唤醒「还没有
@@ -698,6 +701,13 @@ type botBackgroundResultContent struct {
 	ErrorMessage          string `json:"error_message,omitempty"`
 	EffectMayHaveOccurred bool   `json:"effect_may_have_occurred,omitempty"`
 	Summary               string `json:"summary,omitempty"`
+	// Policy 是分级放行（INT-160）的评估结论（tier/rule_id/auto），进模型
+	// 上下文与前端渲染共用同一份；历史行为空即缺省。
+	Policy json.RawMessage `json:"policy,omitempty"`
+	// WaitResult 是 fs_thread/wait 的完整收尾对象（INT-160）：唤醒时带现场
+	// 信息（outcome、命中条件、变化前后对比、最近条目摘要），醒来不必再调
+	// get。整条 background_result 在上下文里已被围栏，不再内层转义。
+	WaitResult json.RawMessage `json:"wait_result,omitempty"`
 }
 
 type botDecisionContent struct {

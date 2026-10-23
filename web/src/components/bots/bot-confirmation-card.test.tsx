@@ -490,3 +490,39 @@ describe("BotConfirmationCard", () => {
     expect(within(card).getByText(/可在授权管理中撤销/)).toBeInTheDocument();
   });
 });
+
+// INT-160 分级放行降级卡：tier1 候选因前置/配额不满足交回确认时，卡上要
+// 说明原因与过期时间（过期后批准入队的调用会在执行前复检并拒绝）。
+describe("BotConfirmationCard 分级放行降级说明", () => {
+  it("policy 带降级原因与过期时间时渲染说明块", () => {
+    renderCard(
+      makeCall({
+        policy: {
+          tier: "tier1",
+          auto: false,
+          rule_id: "thread_send_continue",
+          downgrade_reason: "自动「继续」的每小时额度已用尽",
+          expiry: "2099-01-01T08:30:00Z",
+        },
+      }),
+    );
+    const note = screen.getByTestId("bot-confirmation-policy-note");
+    expect(
+      within(note).getByText(/自动放行未生效：自动「继续」的每小时额度已用尽/),
+    ).toBeInTheDocument();
+    expect(within(note).getByText(/过期/)).toBeInTheDocument();
+    // 时间取本地时区的时分，这里只断言包含「本卡」句式与冒号时间存在。
+    expect(within(note).getByText(/本卡 .* 过期/)).toBeInTheDocument();
+  });
+
+  it("普通确认卡（无 policy 或无降级事实）不渲染说明块", () => {
+    renderCard(makeCall());
+    expect(screen.queryByTestId("bot-confirmation-policy-note")).toBeNull();
+    renderCard(
+      makeCall({
+        policy: { tier: "tier3", auto: false, source: "confirmation" },
+      }),
+    );
+    expect(screen.queryByTestId("bot-confirmation-policy-note")).toBeNull();
+  });
+});

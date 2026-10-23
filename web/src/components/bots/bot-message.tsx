@@ -28,6 +28,7 @@ import { BotMarkdown } from "./bot-markdown";
 import {
   BotToolCard,
   callStatusLabel,
+  PolicyAutoBadge,
   STATUS_BADGE,
 } from "./bot-tool-card";
 import { toolActionLabel } from "@/lib/bots/tool-labels";
@@ -263,6 +264,11 @@ export function BotMessageView({
             <Wrench className="h-3.5 w-3.5" />
             {toolTitle ? `${toolTitle} · 后台结果` : "平台后台结果"}
           </p>
+          {/* 自动执行标记（INT-160）：终态调用卡会被降噪，后台结果消息是
+              自动放行在聊天流里的持久痕迹，徽标在这里不缺席。 */}
+          <PolicyAutoBadge
+            policy={message.content.policy ?? call?.policy ?? null}
+          />
           {status && (
             <span
               className={`ml-auto rounded-full px-2 py-0.5 text-xs font-medium ${STATUS_BADGE[status] ?? "bg-muted text-muted-foreground"}`}

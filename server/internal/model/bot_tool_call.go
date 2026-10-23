@@ -35,6 +35,10 @@ type BotToolCall struct {
 	// 等），不让模型指定幂等身份。
 	ExecutionContextJSON string `gorm:"type:text;not null" json:"execution_context"`
 
+	// PolicyJSON 是写操作分级放行（INT-160）的服务端审计：tier/rule_id/auto 与
+	// 受理时算出的前置条件事实。可空——历史行为空即「策略上线前」，不做回填。
+	PolicyJSON string `gorm:"type:text;not null;default:''" json:"-"`
+
 	CancelRequestedAt *time.Time `json:"cancel_requested_at,omitempty"`
 	StartedAt         *time.Time `json:"started_at,omitempty"`
 	FinishedAt        *time.Time `json:"finished_at,omitempty"`
@@ -120,10 +124,13 @@ type BotAuthorization struct {
 	EnvironmentID *string `gorm:"type:text" json:"environment_id,omitempty"`
 
 	// ConstraintsJSON 是规范化约束（如允许写入的字段集合）；规则整体哈希为
-	// RuleHash，用于活跃唯一与快速匹配。
+	// RuleHash，用于活跃唯一与快速匹配。ExpiresAt 自 INT-160 起为新建授权的
+	// 必填值（默认 30 天）：永久、范围宽的「始终允许」是实测中最不安全的放宽
+	// 形态；过期行由查询条件挡掉，不再命中。
 	ConstraintsJSON string     `gorm:"type:text;not null" json:"constraints"`
 	RuleHash        string     `gorm:"type:text;not null" json:"rule_hash"`
 	CreatedAt       time.Time  `gorm:"not null" json:"created_at"`
+	ExpiresAt       *time.Time `json:"expires_at,omitempty"`
 	RevokedAt       *time.Time `json:"revoked_at,omitempty"`
 
 	Bot Bot `gorm:"foreignKey:BotID;constraint:OnDelete:CASCADE" json:"-"`
@@ -131,4 +138,28 @@ type BotAuthorization struct {
 
 func (BotAuthorization) TableName() string {
 	return "bot_authorizations"
+}
+
+// BotWritePolicyRule 是分级放行（INT-160）每条规则的独立开关与误判计数：
+// 行不存在即启用（缺省启用，用户不必先建行才能放行）。同一 (bot, rule)
+// 24 小时内累计 2 次误判即自动关闭（auto_disabled_at 落时戳），并给主线
+// 追加一条生命周期消息说明「规则已自动降级回确认」。Enabled 不带 default
+// 标签——GORM 的 Create 会把带 default 的零值字段替换成库默认值，显式写
+// false 会被静默翻成 true。
+type BotWritePolicyRule struct {
+	BotID  string `gorm:"type:text;primaryKey" json:"bot_id"`
+	RuleID string `gorm:"type:text;primaryKey" json:"rule_id"`
+
+	Enabled bool `gorm:"not null" json:"enabled"`
+
+	// FalsePositiveCount24h 是 24 小时窗口内的误判次数；LastFalsePositiveAt
+	// 是窗口锚点——距离上次误判超过 24 小时的下一次误判把计数重置为 1。
+	FalsePositiveCount24h int        `gorm:"not null" json:"false_positive_count_24h"`
+	LastFalsePositiveAt   *time.Time `json:"last_false_positive_at,omitempty"`
+	AutoDisabledAt        *time.Time `json:"auto_disabled_at,omitempty"`
+	UpdatedAt             time.Time  `gorm:"not null" json:"updated_at"`
+}
+
+func (BotWritePolicyRule) TableName() string {
+	return "bot_write_policy_rules"
 }

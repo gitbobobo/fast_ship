@@ -9,8 +9,8 @@ import (
 
 // BotModels 返回机器人的全部表模型（七张主线表 + INT-102 的压缩/记忆/维护
 // 表 + INT-103 的定时任务表 + INT-115 的模型窗口缓存表 + INT-133 的 AI 提供
-// 商表），供 AutoMigrate 与测试建库共用。FTS5 虚表与触发器不在 GORM 模型体系
-// 内，由 botSchemaDDL 创建。
+// 商表 + INT-160 的写操作分级规则表），供 AutoMigrate 与测试建库共用。FTS5
+// 虚表与触发器不在 GORM 模型体系内，由 botSchemaDDL 创建。
 func BotModels() []interface{} {
 	return []interface{}{
 		&model.AIProvider{},
@@ -29,6 +29,7 @@ func BotModels() []interface{} {
 		&model.BotMaintenanceRequest{},
 		&model.BotScheduleTask{},
 		&model.BotModelWindow{},
+		&model.BotWritePolicyRule{},
 	}
 }
 

@@ -566,7 +566,10 @@ func compactionPrecheckEnv(t *testing.T) (*botTestEnv, *model.Bot, *model.BotRun
 	env.fake.strict = true
 	userID := createBotTestUser(t, env.db, "precheck")
 	bot := env.createBot(t, userID)
-	env.cfg.Bots.Context.WindowTokens = 8000
+	// 合并 INT-160 前缀后重定标：实测 F=8139——旧窗口 8000 已低于固定前缀，
+	// 会命中第一优先级「前缀超窗」；11000 的 T=8250 让 F+256=8395 仍然落在
+	// target_unreachable 分支。
+	env.cfg.Bots.Context.WindowTokens = 11000
 	seedCompactableLedger(t, env, bot.ID, "旧轮次")
 	botRow, _ := env.bots.bots.Get(bot.ID)
 	run := botFixtureRun(t, env, botRow)

@@ -209,6 +209,21 @@ func (s *T3ThreadsService) Detail(ctx context.Context, userID, envID, threadID s
 	return detail, nil
 }
 
+// PeekShell 读取一个环境的 shell 视图当前值（不等待首次同步，无网络 I/O）：
+// wait 评估器（INT-160）每轮扫描用。环境不存在或凭证不可用返回错误；hub
+// 视图状态（Syncing/Stale/Failed）原样带回，由调用方按可信度处理。
+func (s *T3ThreadsService) PeekShell(userID, envID string) (*t3ShellView, error) {
+	env, err := s.envRepo.FindByIDAndUserID(context.Background(), envID, userID)
+	if err != nil {
+		return nil, err
+	}
+	token, err := s.bearerToken(env)
+	if err != nil {
+		return nil, err
+	}
+	return s.shellHub.Peek(env, token)
+}
+
 // ItemDetail 读取单个条目的完整正文（detail_available=true 的条目才走到
 // 远程补读）。成员校验在先：先取指定线程的可见时间线确认条目属于它，再从
 // 可信行本身派生 getTurnItem 参数（threadId/itemId 取行内 item 的持久身份），

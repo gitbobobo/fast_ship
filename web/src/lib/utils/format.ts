@@ -66,3 +66,30 @@ export function formatRelativeTime(dateStr: string): string {
   if (days < 30) return `${days} 天前`;
   return formatDate(dateStr);
 }
+
+/**
+ * 未来时间的相对表达（如「30 天后」，限时授权到期用）；已过时间点回退
+ * formatRelativeTime（「3 小时前」），超过 30 天用绝对日期。
+ */
+export function formatRelativeFuture(dateStr: string): string {
+  const diff = new Date(dateStr).getTime() - Date.now();
+  if (diff <= 0) return formatRelativeTime(dateStr);
+  const minutes = Math.floor(diff / 60000);
+  if (minutes < 1) return "即将";
+  if (minutes < 60) return `${minutes} 分钟后`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} 小时后`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `${days} 天后`;
+  return formatDate(dateStr);
+}
+
+/**
+ * 到期时间是否已过（限时授权等）；dateStr 缺省视为未过期。
+ * 放在 lib 里供组件渲染期调用——组件内直接 Date.now 会被 react-hooks/purity 拦下。
+ */
+export function isExpiredDate(dateStr?: string | null): boolean {
+  if (!dateStr) return false;
+  const when = new Date(dateStr).getTime();
+  return !Number.isNaN(when) && when <= Date.now();
+}
