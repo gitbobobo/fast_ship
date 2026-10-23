@@ -337,8 +337,11 @@ function modelSelectionText(raw: unknown): string | null {
   return text;
 }
 
-function workspaceText(raw: unknown): string | null {
-  if (typeof raw !== "object" || raw === null) return null;
+// workspace 拆成每字段一个短 chip（视觉审查）：合并长文案在窄屏会标签
+// 折行、分支被截断；拆分后各自折行，路径截断也碰不到分支。路径取末两级
+// 目录加 …/ 前缀（尾段是区分工作树的依据），完整路径在 title。
+function workspaceChips(raw: unknown): ToolParamChip[] {
+  if (typeof raw !== "object" || raw === null) return [];
   const ws = raw as {
     type?: unknown;
     branch?: unknown;
@@ -346,69 +349,74 @@ function workspaceText(raw: unknown): string | null {
     base_ref?: unknown;
     start_from_origin?: unknown;
   };
-  if (typeof ws.type !== "string" || ws.type === "") return null;
-  const base = WORKSPACE_TYPE_LABELS[ws.type] ?? ws.type;
+  if (typeof ws.type !== "string" || ws.type === "") return [];
+  const title = JSON.stringify(raw);
+  const str = (v: unknown): string | undefined =>
+    typeof v === "string" && v !== "" ? v : undefined;
+  const chips: ToolParamChip[] = [
+    {
+      key: "workspace",
+      label: "工作区",
+      value: WORKSPACE_TYPE_LABELS[ws.type] ?? ws.type,
+      title,
+    },
+  ];
   if (ws.type === "worktree") {
-    // 生效字段全上 chip：branch/base_ref/start_from_origin 都是批准依据
-    // （代码审查：原始 JSON 折叠后不能再藏起来）。
-    const text =
-      typeof ws.branch === "string" && ws.branch !== "" ? `${base} ${ws.branch}` : base;
-    const extras: string[] = [];
-    if (typeof ws.base_ref === "string" && ws.base_ref !== "") {
-      extras.push(`基线 ${ws.base_ref}`);
+    const branch = str(ws.branch);
+    if (branch) chips.push({ key: "workspace.branch", label: "分支", value: branch, title });
+    const baseRef = str(ws.base_ref);
+    if (baseRef) chips.push({ key: "workspace.base_ref", label: "基线", value: baseRef, title });
+    if (ws.start_from_origin !== undefined) {
+      chips.push({
+        key: "workspace.start",
+        label: "起点",
+        value: ws.start_from_origin === true ? "origin" : "本地",
+        title,
+      });
     }
-    if (ws.start_from_origin === true) {
-      extras.push("从 origin 起点");
-    }
-    return extras.length > 0 ? `${text} · ${extras.join(" · ")}` : text;
   }
-  if (
-    ws.type === "existing_worktree" &&
-    typeof ws.worktree_path === "string" &&
-    ws.worktree_path !== ""
-  ) {
-    // 区分工作树主要靠路径尾段：取末两级目录加 …/ 前缀，完整路径在
-    // title（视觉审查：末尾截断看不出是哪棵树）。
-    const parts = ws.worktree_path.replace(/\/+$/, "").split("/").filter(Boolean);
-    const tail = parts.slice(-2).join("/");
-    let text = tail ? `${base} …/${tail}` : base;
-    if (typeof ws.branch === "string" && ws.branch !== "") {
-      text += ` ${ws.branch}`;
+  if (ws.type === "existing_worktree") {
+    const path = str(ws.worktree_path);
+    if (path) {
+      const parts = path.replace(/\/+$/, "").split("/").filter(Boolean);
+      const tail = parts.slice(-2).join("/");
+      if (tail) {
+        chips.push({ key: "workspace.path", label: "路径", value: `…/${tail}`, title: path });
+      }
     }
-    return text;
+    const branch = str(ws.branch);
+    if (branch) chips.push({ key: "workspace.branch", label: "分支", value: branch, title });
   }
-  return base;
+  return chips;
 }
 
-function chipValue(
+function chipValues(
   key: string,
   raw: unknown,
   args: Record<string, unknown>,
-): ToolParamChip | null {
+): ToolParamChip[] {
   const label = PARAM_LABELS[key] ?? key;
-  if (raw === undefined || raw === null || raw === "") return null;
+  if (raw === undefined || raw === null || raw === "") return [];
 
   if (key === "runtime_mode" && typeof raw === "string") {
-    return {
+    return [{
       key,
       label,
       value: RUNTIME_MODE_LABELS[raw] ?? raw,
       title: raw,
       // full-access 是最宽的权限模式，chip 上要给警示色而不是混在普通参数里。
       tone: raw === "full-access" ? "warn" : undefined,
-    };
+    }];
   }
   if (key === "model_selection") {
     const text = modelSelectionText(raw);
     if (text !== null) {
-      return { key, label, value: text, title: JSON.stringify(raw) };
+      return [{ key, label, value: text, title: JSON.stringify(raw) }];
     }
   }
   if (key === "workspace") {
-    const text = workspaceText(raw);
-    if (text !== null) {
-      return { key, label, value: text, title: JSON.stringify(raw) };
-    }
+    const chips = workspaceChips(raw);
+    if (chips.length > 0) return chips;
   }
 
   if (typeof raw === "string") {
@@ -416,28 +424,28 @@ function chipValue(
       // slug 型 ID（fake-project 等）多在 16 字符内，放宽截断让批准前能
       // 看全目标；UUID 只取前缀、完整值进 title（视觉审查）。
       const short = raw.length > 16 ? `${raw.slice(0, 16)}…` : raw;
-      return { key, label, value: short, title: raw, href: chipRoute(key, raw, args) };
+      return [{ key, label, value: short, title: raw, href: chipRoute(key, raw, args) }];
     }
-    return { key, label, value: truncateText(raw), title: raw };
+    return [{ key, label, value: truncateText(raw), title: raw }];
   }
   if (typeof raw === "number" || typeof raw === "boolean") {
-    return { key, label, value: typeof raw === "boolean" ? (raw ? "是" : "否") : String(raw) };
+    return [{ key, label, value: typeof raw === "boolean" ? (raw ? "是" : "否") : String(raw) }];
   }
   if (Array.isArray(raw)) {
-    if (raw.length === 0) return null;
+    if (raw.length === 0) return [];
     if (raw.every((v) => typeof v === "string")) {
       const joined = raw.join("、");
-      return { key, label, value: truncateText(joined), title: joined };
+      return [{ key, label, value: truncateText(joined), title: joined }];
     }
     // 结构化数组（如 replace_checklist 的 items）只给数量摘要，
     // 完整内容看确认卡/原始调用里的 JSON。
-    return { key, label, value: `${raw.length} 项` };
+    return [{ key, label, value: `${raw.length} 项` }];
   }
   try {
     const json = JSON.stringify(raw);
-    return { key, label, value: truncateText(json), title: json };
+    return [{ key, label, value: truncateText(json), title: json }];
   } catch {
-    return { key, label, value: String(raw) };
+    return [{ key, label, value: String(raw) }];
   }
 }
 
@@ -463,8 +471,19 @@ export function toolParamChips(
   }
   const chips: ToolParamChip[] = [];
   for (const key of keys) {
-    const chip = chipValue(key, args[key], args);
-    if (chip) chips.push(chip);
+    const produced = chipValues(key, args[key], args);
+    if (produced.length === 0 && key === "runtime_mode" && toolName === "fs_thread" && act === "launch") {
+      // launch 省略 runtime_mode 时服务端缺省同样是 full-access：不显式
+      // 警示会让「始终允许」裸 launch 等于无提示永久放行最高权限（代码审查）。
+      produced.push({
+        key,
+        label: PARAM_LABELS[key] ?? key,
+        value: "完全访问（缺省）",
+        title: "runtime_mode 缺省为 full-access",
+        tone: "warn",
+      });
+    }
+    chips.push(...produced);
   }
   return chips;
 }

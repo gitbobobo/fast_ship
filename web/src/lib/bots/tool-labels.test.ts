@@ -152,28 +152,57 @@ describe("toolParamChips", () => {
     expect(noAction.find((c) => c.key === "text")).toBeDefined();
   });
 
-  it("workspace chip 回显全部生效字段：worktree 基线/起点、existing_worktree 分支", () => {
-    const worktree = toolParamChips("fs_thread", {
+  it("workspace 拆字段 chip：各自折行不互相截断（窄屏视觉审查）", () => {
+    const chips = toolParamChips("fs_thread", {
       workspace: {
         type: "worktree",
         branch: "feat-x",
         base_ref: "main",
         start_from_origin: true,
       },
-    }).find((c) => c.key === "workspace");
-    expect(worktree!.value).toBe("新工作树 feat-x · 基线 main · 从 origin 起点");
+    });
+    const byKey = new Map(chips.map((c) => [c.key, c.value]));
+    expect(byKey.get("workspace")).toBe("新工作树");
+    expect(byKey.get("workspace.branch")).toBe("feat-x");
+    expect(byKey.get("workspace.base_ref")).toBe("main");
+    expect(byKey.get("workspace.start")).toBe("origin");
+
     const existing = toolParamChips("fs_thread", {
       workspace: {
         type: "existing_worktree",
         worktree_path: "/a/b/c/d",
         branch: "fix",
       },
-    }).find((c) => c.key === "workspace");
-    expect(existing!.value).toBe("已有工作树 …/c/d fix");
+    });
+    const eKeys = new Map(existing.map((c) => [c.key, c.value]));
+    expect(eKeys.get("workspace")).toBe("已有工作树");
+    expect(eKeys.get("workspace.path")).toBe("…/c/d");
+    expect(eKeys.get("workspace.branch")).toBe("fix");
+
     const bare = toolParamChips("fs_thread", {
       workspace: { type: "worktree" },
-    }).find((c) => c.key === "workspace");
-    expect(bare!.value).toBe("新工作树");
+    });
+    expect(bare.map((c) => c.key)).toEqual(["workspace"]);
+    expect(bare[0]!.value).toBe("新工作树");
+  });
+
+  it("launch 缺省 runtime_mode 也给「完全访问（缺省）」警示 chip", () => {
+    const chips = toolParamChips(
+      "fs_thread",
+      { action: "launch", env_id: "e", project_id: "p", text: "x" },
+      "launch",
+    );
+    const rt = chips.find((c) => c.key === "runtime_mode");
+    expect(rt).toBeDefined();
+    expect(rt!.value).toBe("完全访问（缺省）");
+    expect(rt!.tone).toBe("warn");
+    // send 不带 runtime_mode 字段语义，不出缺省 chip；非 launch 同。
+    const send = toolParamChips(
+      "fs_thread",
+      { action: "send", env_id: "e", project_id: "p", text: "x" },
+      "send",
+    );
+    expect(send.find((c) => c.key === "runtime_mode")).toBeUndefined();
   });
 
   it("次要参数（分页/乐观锁/action 自身）不进 chips", () => {

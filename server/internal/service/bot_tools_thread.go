@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -14,6 +15,8 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	"github.com/google/uuid"
+	"go.uber.org/zap"
+	"gorm.io/gorm"
 )
 
 // fs_thread / fs_environment 适配：只操作已连接环境；T3 的 scope/operate 守卫
@@ -70,6 +73,12 @@ func (s *BotService) execThreadRead(ctx context.Context, call *model.BotToolCall
 		botToolsetVer := int64(0)
 		if bot, err := s.bots.Get(call.BotID); err == nil {
 			botToolsetVer = bot.ToolsetVersion
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			// 查询失败按 0 处理（旧会话的 not_settable 版本标注会缺，模型
+			// 传了新字段仍被受理拒，方向安全），但要留痕便于排查 DB 抖动
+			// （代码审查：与 matchAuthorization 的降级留痕同口径）。
+			s.logger.Warn("bot 工具集版本查询失败，按未升级处理",
+				zap.String("bot_id", call.BotID), zap.Error(err))
 		}
 		if botToolsetVer > 0 && botToolsetVer < botToolsetVersion {
 			// 冻结旧工具集的会话也看得到 providers 目录：如实标注这些字段
@@ -906,6 +915,13 @@ func botSlimComposerModels(raw any) []map[string]interface{} {
 		}
 		slug, _ := m["slug"].(string)
 		if slug == "" {
+			continue
+		}
+		// 模型级可用性按 provider 同口径防御性剔除：上游条目若带
+		// enabled/availability/deprecated 标记就遵守，没有这些字段时条件
+		// 不命中、行为不变（代码审查：上游字段无本地类型 schema 可查）。
+		if m["enabled"] == false || m["availability"] == "unavailable" ||
+			m["deprecated"] == true {
 			continue
 		}
 		entry := map[string]interface{}{"slug": slug}

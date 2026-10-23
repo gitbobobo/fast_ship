@@ -50,7 +50,7 @@ export const STATUS_BADGE: Record<string, string> = {
 export function ParamChipView({ chip }: { chip: ToolParamChip }) {
   const inner = (
     <>
-      <span className="text-muted-foreground">{chip.label}</span>
+      <span className="shrink-0 whitespace-nowrap text-muted-foreground">{chip.label}</span>
       {/* chip 可撑满整行，只有真放不下才截断，完整值在 title（视觉审查） */}
       <span className="min-w-0 truncate font-mono [unicode-bidi:isolate]">
         {bidiSafeText(chip.value)}
