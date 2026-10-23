@@ -104,11 +104,14 @@ export function BotToolCard({
   call,
   onCancel,
   cancelling = false,
+  subtitle,
 }: {
   botId: string;
   call?: BotCall;
   onCancel?: (callId: string) => void;
   cancelling?: boolean;
+  /** 后台调用列表里的区分副文本（多张同名卡并排时需要认出是哪一次）。 */
+  subtitle?: string;
 }) {
   const [showResult, setShowResult] = useState(false);
   const [fullResult, setFullResult] = useState<string | null>(null);
@@ -165,6 +168,11 @@ export function BotToolCard({
           </Button>
         )}
       </div>
+      {subtitle && (
+        <p className="text-xs text-muted-foreground [unicode-bidi:isolate]">
+          {bidiSafeText(subtitle)}
+        </p>
+      )}
       {call?.error_message && (
         // 错误码是排查用的内部标识，收进 title 而不是直接露出（视觉审查）；
         // message 内嵌的 [NNNNN] 前缀（AppError.Error 格式，码恒为 5 位）
