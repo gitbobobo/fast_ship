@@ -74,7 +74,7 @@ function ScheduleEventView({ message }: { message: BotMessage }) {
           type="button"
           data-testid="bot-schedule-event-detail"
           className={cn(
-            "inline-flex items-center gap-1.5 rounded-full px-3 py-1.5",
+            "inline-flex min-h-7 items-center gap-1.5 rounded-full px-3 py-1.5",
             "text-foreground/75 transition-colors hover:bg-accent hover:text-foreground",
             failed && "text-destructive hover:text-destructive",
           )}
