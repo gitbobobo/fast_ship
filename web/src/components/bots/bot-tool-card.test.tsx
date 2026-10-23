@@ -113,19 +113,20 @@ describe("BotToolCard", () => {
       makeCall({
         status: "failed",
         error_message:
-          "workspace.type=root 不接受 base_ref/branch/worktree_path：项目主检出不需要工作区参数；要新建工作树请改用 worktree",
+          "workspace.type=root 不接受以下字段（项目主检出不需要工作区参数）：\n- base_ref\n- branch\n- worktree_path\n要新建工作树请改用 worktree",
       }),
     );
     const errP = document.querySelector("p.text-destructive")!;
     // 可辨识的字段名（snake_case/点路径/赋值）各成 <code>，中文说明与
-    // 单词枚举值保持普通文案。
+    // 单词枚举值保持普通文案；pre-wrap 让服务端的多行清单逐行落地。
     const codes = [...errP.querySelectorAll("code")].map((c) => c.textContent);
     expect(codes).toEqual([
       "workspace.type=root",
       "base_ref",
       "worktree_path",
     ]);
-    expect(errP).toHaveTextContent("不接受 base_ref/branch/worktree_path");
+    expect(errP).toHaveClass("whitespace-pre-wrap");
+    expect(errP).toHaveTextContent("- base_ref");
     expect(errP).toHaveTextContent("要新建工作树请改用 worktree");
   });
 

@@ -111,7 +111,7 @@ function ScheduleEventView({ message }: { message: BotMessage }) {
             // 不抢主信息（排查时仍可见）。
             <div className="rounded-lg bg-destructive/10 px-3 py-2">
               {errorMessage && (
-                <p className="text-sm text-destructive [unicode-bidi:isolate]">
+                <p className="text-sm text-destructive whitespace-pre-wrap [unicode-bidi:isolate]">
                   {renderErrorMessage(errorMessage.replace(/^\[\d{5}\]\s*/, ""))}
                 </p>
               )}
@@ -322,7 +322,7 @@ export function BotMessageView({
         {message.content.error_message && (
           <p
             className={cn(
-              "text-xs [unicode-bidi:isolate]",
+              "text-xs whitespace-pre-wrap [unicode-bidi:isolate]",
               failed ? "text-destructive" : "text-muted-foreground",
             )}
           >

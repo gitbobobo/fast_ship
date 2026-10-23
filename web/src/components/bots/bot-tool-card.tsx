@@ -208,7 +208,7 @@ export function BotToolCard({
         // 正常消息不受影响。
         <p
           title={call.error_code ?? undefined}
-          className="text-xs text-destructive [unicode-bidi:isolate]"
+          className="text-xs text-destructive whitespace-pre-wrap [unicode-bidi:isolate]"
         >
           {renderErrorMessage(call.error_message.replace(/^\[\d{5}\]\s*/, ""))}
         </p>
