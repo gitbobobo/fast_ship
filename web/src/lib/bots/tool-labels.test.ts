@@ -135,6 +135,47 @@ describe("toolParamChips", () => {
     expect(text!.title).toBe(long);
   });
 
+  it("launch/send 的 text 不进 chip（确认卡整块平铺），无 action 时仍出", () => {
+    const launch = toolParamChips("fs_thread", {
+      action: "launch",
+      env_id: "env-1",
+      text: "调查这个仓库",
+    });
+    expect(launch.find((c) => c.key === "text")).toBeUndefined();
+    const send = toolParamChips("fs_thread", {
+      action: "send",
+      env_id: "env-1",
+      text: "回复内容",
+    });
+    expect(send.find((c) => c.key === "text")).toBeUndefined();
+    const noAction = toolParamChips("fs_thread", { env_id: "env-1", text: "正文" });
+    expect(noAction.find((c) => c.key === "text")).toBeDefined();
+  });
+
+  it("workspace chip 回显全部生效字段：worktree 基线/起点、existing_worktree 分支", () => {
+    const worktree = toolParamChips("fs_thread", {
+      workspace: {
+        type: "worktree",
+        branch: "feat-x",
+        base_ref: "main",
+        start_from_origin: true,
+      },
+    }).find((c) => c.key === "workspace");
+    expect(worktree!.value).toBe("新工作树 feat-x · 基线 main · 从 origin 起点");
+    const existing = toolParamChips("fs_thread", {
+      workspace: {
+        type: "existing_worktree",
+        worktree_path: "/a/b/c/d",
+        branch: "fix",
+      },
+    }).find((c) => c.key === "workspace");
+    expect(existing!.value).toBe("已有工作树 …/c/d fix");
+    const bare = toolParamChips("fs_thread", {
+      workspace: { type: "worktree" },
+    }).find((c) => c.key === "workspace");
+    expect(bare!.value).toBe("新工作树");
+  });
+
   it("次要参数（分页/乐观锁/action 自身）不进 chips", () => {
     const chips = toolParamChips("fs_issue", {
       project_id: "p1",

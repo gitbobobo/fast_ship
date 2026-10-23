@@ -240,7 +240,7 @@ export function BotConfirmationCard({
   error?: unknown;
   onDecide: (callId: string, decision: BotCallDecision) => void;
 }) {
-  const chips = toolParamChips(call.tool_name, call.arguments);
+  const chips = toolParamChips(call.tool_name, call.arguments, call.action);
   const isScheduleCall =
     call.tool_name === "fs_schedule" &&
     SCHEDULE_CONFIRM_ACTIONS.has(call.action);
@@ -249,6 +249,15 @@ export function BotConfirmationCard({
   const canAlwaysAllow = !(
     call.tool_name === "fs_schedule" && !SCHEDULE_ALWAYS_ALLOW_ACTIONS.has(call.action)
   );
+  // launch/send 的 text 是被批准的消息正文，批准前必须看全：整块平铺
+  // 在 chips 上方（chip 40 字截断、原始 JSON 默认折叠都会藏正文）。
+  const threadBody =
+    call.tool_name === "fs_thread" &&
+    (call.action === "launch" || call.action === "send") &&
+    typeof call.arguments?.text === "string" &&
+    call.arguments.text !== ""
+      ? call.arguments.text
+      : null;
   const argPretty = (() => {
     try {
       return JSON.stringify(call.arguments, null, 2);
@@ -307,6 +316,14 @@ export function BotConfirmationCard({
           {/* fs_thread 的参数全是配置句柄，chips 已逐项汇总；完整 JSON 折叠
               在按钮下方，避免大 JSON 把决定按钮顶出视口或被拦腰裁切
               （视觉审查）。replace_checklist 等内容型参数仍默认展开。 */}
+          {threadBody !== null && (
+            <div className="space-y-1">
+              <p className="text-xs text-muted-foreground">消息</p>
+              <pre className="max-h-72 overflow-auto rounded-lg bg-background/80 p-2 font-sans text-xs whitespace-pre-wrap break-all [unicode-bidi:isolate]">
+                {bidiSafeText(threadBody)}
+              </pre>
+            </div>
+          )}
           <ParamChips chips={chips} />
           {call.tool_name === "fs_thread" ? (
             <details

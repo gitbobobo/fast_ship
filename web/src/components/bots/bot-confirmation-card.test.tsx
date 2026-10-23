@@ -125,6 +125,26 @@ describe("BotConfirmationCard", () => {
     expect(card).toHaveTextContent('"runtime_mode": "full-access"');
   });
 
+  it("fs_thread send/launch：text 整块平铺不截断，不进 chip", () => {
+    const long = "这是一条需要被批准者完整看到的正文".repeat(8);
+    renderCard(
+      makeCall({
+        tool_name: "fs_thread",
+        action: "send",
+        arguments: { env_id: "env-1", thread_id: "t-1", text: long },
+      }),
+    );
+    const card = screen.getByTestId("bot-confirmation-card");
+    // 正文整块平铺（无 40 字截断），标签「消息」在块上方。
+    const body = card.querySelector("pre");
+    expect(body).not.toBeNull();
+    expect(body!.textContent).toBe(long);
+    // text 不再以截断 chip 形式重复出现。
+    expect(
+      within(card).queryByText(/这是一条需要被批准者完整看到的正文.*…/),
+    ).not.toBeInTheDocument();
+  });
+
   it("保留三个决定入口与授权说明", () => {
     renderCard(makeCall());
     const card = screen.getByTestId("bot-confirmation-card");

@@ -342,11 +342,24 @@ function workspaceText(raw: unknown): string | null {
     type?: unknown;
     branch?: unknown;
     worktree_path?: unknown;
+    base_ref?: unknown;
+    start_from_origin?: unknown;
   };
   if (typeof ws.type !== "string" || ws.type === "") return null;
   const base = WORKSPACE_TYPE_LABELS[ws.type] ?? ws.type;
-  if (ws.type === "worktree" && typeof ws.branch === "string" && ws.branch !== "") {
-    return `${base} ${ws.branch}`;
+  if (ws.type === "worktree") {
+    // 生效字段全上 chip：branch/base_ref/start_from_origin 都是批准依据
+    // （代码审查：原始 JSON 折叠后不能再藏起来）。
+    const text =
+      typeof ws.branch === "string" && ws.branch !== "" ? `${base} ${ws.branch}` : base;
+    const extras: string[] = [];
+    if (typeof ws.base_ref === "string" && ws.base_ref !== "") {
+      extras.push(`基线 ${ws.base_ref}`);
+    }
+    if (ws.start_from_origin === true) {
+      extras.push("从 origin 起点");
+    }
+    return extras.length > 0 ? `${text} · ${extras.join(" · ")}` : text;
   }
   if (
     ws.type === "existing_worktree" &&
@@ -357,7 +370,11 @@ function workspaceText(raw: unknown): string | null {
     // title（视觉审查：末尾截断看不出是哪棵树）。
     const parts = ws.worktree_path.replace(/\/+$/, "").split("/").filter(Boolean);
     const tail = parts.slice(-2).join("/");
-    return tail ? `${base} …/${tail}` : base;
+    let text = tail ? `${base} …/${tail}` : base;
+    if (typeof ws.branch === "string" && ws.branch !== "") {
+      text += ` ${ws.branch}`;
+    }
+    return text;
   }
   return base;
 }
@@ -432,9 +449,17 @@ function chipValue(
 export function toolParamChips(
   toolName: string,
   args: Record<string, unknown> | null | undefined,
+  action?: string,
 ): ToolParamChip[] {
   if (!args) return [];
-  const keys = TOOL_CHIP_PARAMS[toolName] ?? GENERIC_CHIP_PARAMS;
+  let keys = TOOL_CHIP_PARAMS[toolName] ?? GENERIC_CHIP_PARAMS;
+  // launch/send 的 text 是被批准的消息正文：确认卡把它整块平铺，chip 的
+  // 40 字截断只会藏正文（代码审查），此处跳过避免重复占位。action 以调用
+  // 方传入为准，缺省回退到参数内嵌字段（模型原始 JSON 常带 action）。
+  const act = action ?? (typeof args.action === "string" ? args.action : undefined);
+  if (toolName === "fs_thread" && (act === "launch" || act === "send")) {
+    keys = keys.filter((key) => key !== "text");
+  }
   const chips: ToolParamChip[] = [];
   for (const key of keys) {
     const chip = chipValue(key, args[key], args);
