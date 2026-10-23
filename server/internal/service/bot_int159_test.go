@@ -582,13 +582,23 @@ func TestBotInt159LaunchConfigAccepted(t *testing.T) {
 		t.Fatalf("launch 应需确认")
 	}
 
-	// 冻结的 v10 会话没有这些字段：传了被未知字段规则拒掉，不传正常受理。
-	v10 := botToolsetVersionOf(10)
-	if _, err := botPrepareToolCall(v10, "fs_thread", "{"+base+`,"runtime_mode":"auto"}`); err == nil {
-		t.Fatalf("v10 应拒绝 runtime_mode 字段")
-	}
-	if _, err := botPrepareToolCall(v10, "fs_thread", "{"+base+"}"); err != nil {
-		t.Fatalf("v10 launch 应受理: %v", err)
+	// 冻结的 v9–v11 会话没有这些字段：传了被顶层 knownKeys 白名单拒掉
+	// （ArgsType 已换成 botThreadArgsV9Frozen，根本走不到 launch 配置
+	// 校验），不传正常受理——不存在「绕过校验静默生效」的路径。
+	for _, ver := range []int64{9, 10, 11} {
+		frozen := botToolsetVersionOf(ver)
+		for _, field := range []string{
+			`,"model_selection":{"instance_id":"i","model":"m"}`,
+			`,"runtime_mode":"auto"`,
+			`,"workspace":{"type":"worktree"}`,
+		} {
+			if _, err := botPrepareToolCall(frozen, "fs_thread", "{"+base+field+"}"); err == nil {
+				t.Fatalf("v%d 应拒绝 launch 执行配置字段 %s", ver, field)
+			}
+		}
+		if _, err := botPrepareToolCall(frozen, "fs_thread", "{"+base+"}"); err != nil {
+			t.Fatalf("v%d launch 应受理: %v", ver, err)
+		}
 	}
 }
 
