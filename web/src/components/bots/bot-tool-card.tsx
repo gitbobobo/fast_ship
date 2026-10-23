@@ -51,25 +51,28 @@ export const STATUS_BADGE: Record<string, string> = {
 // 可辨（视觉审查）。字段名原文保留：bot 自校正需要精确字段。
 // 第三分支匹配行首「- 」清单里的裸字段名（如 branch 没有下划线/点，前两个
 // 分支不命中，与相邻 chip 化的字段并排时显得缺空格，视觉审查 minor）。
+// 用捕获组而非 lookbehind：Safari <16.4 对 lookbehind 直接 SyntaxError。
 const ERROR_FIELD_TOKEN =
-  /[a-z][a-z0-9]*(?:_[a-z0-9]+)+(?:\.[a-z0-9_[\]]+)*(?:=[^\s，。；、]+)?|(?:[a-z][a-z0-9_]*\.)+[a-z0-9_[\]]+(?:=[^\s，。；、]*)?|(?<=\n- )[a-z][a-z0-9_.]*/g;
+  /[a-z][a-z0-9]*(?:_[a-z0-9]+)+(?:\.[a-z0-9_[\]]+)*(?:=[^\s，。；、]+)?|(?:[a-z][a-z0-9_]*\.)+[a-z0-9_[\]]+(?:=[^\s，。；、]*)?|(?:^|\n)- ([a-z][a-z0-9_.]+)/g;
 
 export function renderErrorMessage(text: string): ReactNode {
   const out: ReactNode[] = [];
   let last = 0;
   let i = 0;
   for (const m of text.matchAll(ERROR_FIELD_TOKEN)) {
-    const idx = m.index ?? 0;
+    // 第三分支的 m[0] 含行首「- 」前缀，chip 只取捕获组，横线留在正文里。
+    const token = m[1] ?? m[0];
+    const idx = m[1] ? (m.index ?? 0) + m[0].length - m[1].length : (m.index ?? 0);
     if (idx > last) out.push(bidiSafeText(text.slice(last, idx)));
     out.push(
       <code
         key={i++}
         className="rounded bg-foreground/[0.07] px-1 py-px font-mono [unicode-bidi:isolate]"
       >
-        {m[0]}
+        {token}
       </code>,
     );
-    last = idx + m[0].length;
+    last = idx + token.length;
   }
   if (last < text.length) out.push(bidiSafeText(text.slice(last)));
   return out;
