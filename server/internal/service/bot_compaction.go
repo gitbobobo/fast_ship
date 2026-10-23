@@ -703,16 +703,29 @@ func (s *BotService) loadCallsForRows(rows []model.BotMessage) map[string]*model
 			ids = append(ids, c.CallID)
 		}
 	}
+	return s.loadCallsByIDs(ids)
+}
+
+// loadCallsByIDs 用一次 IN 查询批量装载调用行；查不到的 id 也占一个键
+// （值为 nil），调用方凭「键在不在」区分已查无此行与未查过。
+func (s *BotService) loadCallsByIDs(ids []string) map[string]*model.BotToolCall {
 	out := map[string]*model.BotToolCall{}
 	if len(ids) == 0 {
 		return out
 	}
 	var calls []model.BotToolCall
-	if err := s.db.Where("id IN ?", ids).Find(&calls).Error; err != nil {
-		return out
+	if err := s.db.Where("id IN ?", ids).Find(&calls).Error; err == nil {
+		for i := range calls {
+			out[calls[i].ID] = &calls[i]
+		}
+	} else {
+		s.logger.Warn("批量装载工具调用失败，状态按 unknown 处理",
+			zap.Int("call_count", len(ids)), zap.Error(err))
 	}
-	for i := range calls {
-		out[calls[i].ID] = &calls[i]
+	for _, id := range ids {
+		if _, ok := out[id]; !ok {
+			out[id] = nil
+		}
 	}
 	return out
 }
@@ -1601,8 +1614,17 @@ func (s *BotService) buildIdentifierManifest(plan *botCompactionPlan) string {
 	return strings.Join(lines, "\n")
 }
 
+// pendingCallSnapshot 生成账本中引用过的调用状态行。一轮压缩会多次构建清单
+// （前置估算、输出预算、摘要成功后重建），状态须取构建时点的库内值——摘要
+// 请求耗时长，期间 running→终态的流转要反映进重建的清单。每次构建一次
+// IN 批量查询取回全部 call_id，替代逐条 FindByID（INT-155）。
 func (s *BotService) pendingCallSnapshot(plan *botCompactionPlan) []string {
-	var lines []string
+	type entry struct {
+		tc  botAssistantToolCall
+		seq int64
+	}
+	var entries []entry
+	var ids []string
 	seen := map[string]bool{}
 	for i := range plan.AllRows {
 		row := &plan.AllRows[i]
@@ -1618,12 +1640,18 @@ func (s *BotService) pendingCallSnapshot(plan *botCompactionPlan) []string {
 				continue
 			}
 			seen[tc.CallID] = true
-			st := "unknown"
-			if call, err := s.calls.FindByID(tc.CallID); err == nil {
-				st = string(call.Status)
-			}
-			lines = append(lines, fmt.Sprintf("- call:%s %s/%s status=%s (seq %d)", tc.CallID, tc.ToolName, tc.Action, st, row.Seq))
+			entries = append(entries, entry{tc: tc, seq: row.Seq})
+			ids = append(ids, tc.CallID)
 		}
+	}
+	calls := s.loadCallsByIDs(ids)
+	var lines []string
+	for _, e := range entries {
+		st := "unknown"
+		if call := calls[e.tc.CallID]; call != nil {
+			st = string(call.Status)
+		}
+		lines = append(lines, fmt.Sprintf("- call:%s %s/%s status=%s (seq %d)", e.tc.CallID, e.tc.ToolName, e.tc.Action, st, e.seq))
 	}
 	return lines
 }
