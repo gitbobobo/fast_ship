@@ -328,8 +328,11 @@ func TestBotInt160WaitBackgroundWorkCountsAsStarted(t *testing.T) {
 		defer env.bots.waitMu.Unlock()
 		return env.bots.waits[call.ID]
 	}
-	if entry := entryOf(); entry.started {
-		t.Fatalf("挂上时没有活动 run，started 不应置位: %+v", entry)
+	// 挂上即视为已开始：activityRunStatus 把线程投影为 running 时若等到下
+	// 轮扫描才判定，活动可能已经结束——started 永远立不起来，收尾会误报
+	// not_started（复审 P2：挂上/收编与评估器共用 waitObsRunning）。
+	if entry := entryOf(); !entry.started {
+		t.Fatalf("后台工作让线程处于 running 语义，挂上即应视为已开始: %+v", entry)
 	}
 	env.bots.evaluateThreadWaits()
 	if entry := entryOf(); !entry.started {

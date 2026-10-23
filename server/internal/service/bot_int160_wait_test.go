@@ -418,6 +418,53 @@ func TestBotInt160WaitIdleDebounceTrigger(t *testing.T) {
 	}
 }
 
+// 挂上时线程靠 activityRunStatus/后台任务投影 running（根 run 已结束、无
+// activeRunId）：扫描前转 idle 应按 idle 触发收尾，不得误报 not_started
+// （复审 P2：挂上/收编的 running 判定须与评估器同源）。
+func TestBotInt160WaitAttachBackgroundRunning(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "waitbgrun")
+	bot := env.createBot(t, userID)
+
+	const bgThread = "th-wait-bg"
+	threads := []any{
+		shellThread(bgThread, "后台在跑", "completed", map[string]any{
+			"activityRunStatus":  "running",
+			"latestRunId":        "run-bg1",
+			"latestRunStartedAt": "2026-10-20T00:00:00.000Z",
+		}),
+	}
+	fake, envID := pairBotT3WithSnapshot(t, env, userID, "后台等待机",
+		shellSnapshotFixture([]any{map[string]any{"id": "p-1", "title": "P"}}, threads))
+	fake.mu.Lock()
+	fake.projections[bgThread] = threadProjection(bgThread, []any{}, nil)
+	fake.mu.Unlock()
+	shrinkWaitTimers(env)
+	waitHubReady(t, env, userID, envID)
+
+	call := acceptWaitCall(t, env, bot.ID, false,
+		`{"action":"wait","env_id":"`+envID+`","thread_id":"`+bgThread+`","on":"idle"}`)
+
+	// 后台活动在下轮扫描前结束：推送去掉 activityRunStatus 的 idle 投影。
+	fake.pushThreadDelta(t, shellThread(bgThread, "后台在跑", "completed", map[string]any{
+		"latestRunId":        "run-bg1",
+		"latestRunStartedAt": "2026-10-20T00:00:00.000Z",
+	}))
+
+	done := waitCallTerminal(t, env, call.ID, "后台 running 转 idle 触发")
+	if done.Status != model.BotCallStatusSucceeded {
+		t.Fatalf("应落 succeeded: %+v", done)
+	}
+	result := waitResultJSON(t, done)
+	if result["outcome"] != "triggered" {
+		t.Fatalf("不应是 not_started，outcome=%v", result["outcome"])
+	}
+	matched, _ := result["matched"].([]interface{})
+	if len(matched) != 1 || matched[0] != "idle" {
+		t.Fatalf("命中项应为 idle: %v", matched)
+	}
+}
+
 // ---------- 4. needs_reply / error 立即触发 ----------
 
 func TestBotInt160WaitImmediateTriggers(t *testing.T) {

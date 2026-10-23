@@ -271,7 +271,7 @@ func (s *BotService) threadWaitAttach(bot *model.Bot, call *model.BotToolCall, c
 		}
 		entry.baseline = obs
 		// 挂上时线程已在跑：启动宽限不适用，触发条件立即可评估。
-		if obs.activeRunID != "" {
+		if waitObsRunning(obs) {
 			entry.started = true
 		}
 	}
@@ -363,7 +363,7 @@ func (s *BotService) waitAdoptUnregistered() {
 				entry.notReadyTicks = 1
 			}
 			entry.baseline = obs
-			if obs.activeRunID != "" {
+			if waitObsRunning(obs) {
 				entry.started = true
 			}
 		}
@@ -426,6 +426,15 @@ func botWaitSnapshotOf(shell *t3ThreadShell) botWaitSnapshot {
 		obs.latestRunStartedAt = *shell.LatestRunStartedAt
 	}
 	return obs
+}
+
+// waitObsRunning 报告快照此刻是否处于 running 语义：根 run 在跑，或根
+// run 已结束但后台任务/subagent 仍把投影撑为 running。挂上、收编与评估
+// 器共用同一判定——只认 ActiveRunID 会把「挂上时靠后台任务撑着 running、
+// 扫描前转 idle」的线程误报成 not_started。
+func waitObsRunning(obs botWaitSnapshot) bool {
+	return obs.activeRunID != "" ||
+		obs.status == string(api.T3ThreadSummaryStatusRunning)
 }
 
 // botWaitShellActivity 从内存 shell 投影运行活动摘要（与 botSlimThreadActivity
@@ -517,17 +526,15 @@ func (s *BotService) evaluateThreadWait(e *botWaitEntry) {
 		} else {
 			if !e.baseline.known {
 				e.baseline = obs
-				if obs.activeRunID != "" {
+				if waitObsRunning(obs) {
 					e.started = true
 				}
 			}
-			// 开始运行的观察：ActiveRunID 出现、线程处于 running 语义（根 run
-			// 已结束但后台任务/subagent 仍让投影为 running 的线程不算「没
-			// 开始」，botWaitSnapshotOf 的 status 复用 t3ThreadStatus），或
-			// 最新 run 换成了新的一轮（LatestRunID / LatestRunStartedAt 任一
-			// 变化）。
-			if obs.activeRunID != "" ||
-				obs.status == string(api.T3ThreadSummaryStatusRunning) ||
+			// 开始运行的观察：线程此刻处于 running 语义（ActiveRunID 在跑，
+			// 或根 run 已结束但后台任务/subagent 仍把投影撑为 running——
+			// botWaitSnapshotOf 的 status 复用 t3ThreadStatus），或最新 run
+			// 换成了新的一轮（LatestRunID / LatestRunStartedAt 任一变化）。
+			if waitObsRunning(obs) ||
 				(obs.latestRunID != "" && obs.latestRunID != e.baseline.latestRunID) ||
 				(obs.latestRunStartedAt != "" && obs.latestRunStartedAt != e.baseline.latestRunStartedAt) {
 				e.started = true
