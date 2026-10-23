@@ -618,8 +618,9 @@ func styleCompactionCount(env *botTestEnv, botID string) int64 {
 }
 
 // TestBotStyleCompactionSurvivesScheduleRun INT-133(a)：存量会话先跑一次
-// schedule run——它推进平台版本但完全忽略风格水位（不压缩、不推进水位）；
-// 之后主线发消息仍发生恰好一次 style_upgrade 压缩。
+// schedule run——平台版本只做会话内解析、不写回行水位（INT-139 R11），风格
+// 水位与压缩账本也完全不碰；之后主线发消息仍发生恰好一次 style_upgrade
+// 压缩。
 func TestBotStyleCompactionSurvivesScheduleRun(t *testing.T) {
 	env := setupBotTestEnv(t)
 	userID := createBotTestUser(t, env.db, "stysched")
@@ -633,8 +634,15 @@ func TestBotStyleCompactionSurvivesScheduleRun(t *testing.T) {
 	markHistoryConsumed(t, env, botRow, nil)
 
 	// 先跑一次 schedule run：到期任务派发一个 schedule 会话的 run。
+	// NeedsReport=false 是关键隔离：非静默回执的汇报事件会 wakeScheduleEvent
+	// 唤醒一条主线 run，主线入口激活按 INT-139 R11 语义持久化平台/工具集
+	// 水位——那是主线的合法行为而非 schedule 写回，但落点与本断言竞争会让
+	// 测试在「实得 11/12」之间抖动。本断言只核 schedule 会话自己不写回。
 	due := time.Now().UTC().Add(-5 * time.Second)
-	task := seedScheduleTask(t, env, bot.ID, func(tk *model.BotScheduleTask) { tk.NextRunAt = &due })
+	task := seedScheduleTask(t, env, bot.ID, func(tk *model.BotScheduleTask) {
+		tk.NextRunAt = &due
+		tk.NeedsReport = false
+	})
 	env.bots.scheduleTick(time.Now().UTC())
 	var runs []model.BotRun
 	if err := env.db.Where("schedule_task_id = ?", task.ID).Find(&runs).Error; err != nil || len(runs) != 1 {
@@ -642,10 +650,12 @@ func TestBotStyleCompactionSurvivesScheduleRun(t *testing.T) {
 	}
 	waitForScheduleRunFinished(t, env, runs[0].ID)
 
-	// schedule run 内的激活推进了平台版本，但风格水位与压缩账本都没有被碰。
+	// schedule 入口只做会话内解析，不写回 bots 行水位（INT-139 R11：写回会让
+	// 主线窗口内的推迟判定与「下一个压缩点生效」通知失真）；风格水位与压缩
+	// 账本也都没有被碰——行上的平台版本仍是种子值。
 	mid, _ := env.bots.bots.Get(bot.ID)
-	if mid.PlatformPromptVersion != botPlatformPromptVersion {
-		t.Fatalf("schedule 激活应推进平台版本到 %d，实得 %d", botPlatformPromptVersion, mid.PlatformPromptVersion)
+	if mid.PlatformPromptVersion != botPlatformPromptVersion-1 {
+		t.Fatalf("schedule 会话内解析不得写回平台版本，应仍为 %d，实得 %d", botPlatformPromptVersion-1, mid.PlatformPromptVersion)
 	}
 	if mid.StyleCompactionVersion != 0 {
 		t.Fatalf("schedule run 不得消费风格压缩水位: %d", mid.StyleCompactionVersion)
