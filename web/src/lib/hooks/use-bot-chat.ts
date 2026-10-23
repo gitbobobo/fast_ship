@@ -892,6 +892,16 @@ export function useBotChat(botId: string) {
         botKeys.messages(userId, botId),
         (previous) => mergeMessages(previous ?? [], items),
       );
+      // 翻页响应附带页内消息引用的调用：更早消息的警示卡/人话行
+      // 按 call_id 命中 calls 缓存，缺失会让卡片整条消失（INT-157
+      // 复审）。并入既有缓存，不覆盖较新状态。
+      const pageCalls = page.data.calls ?? [];
+      if (pageCalls.length > 0) {
+        queryClient.setQueryData<BotCall[]>(
+          botKeys.calls(userId, botId),
+          (previous) => mergeCallSnapshots(previous ?? [], pageCalls),
+        );
+      }
     } catch (err) {
       setOlderError(err);
     } finally {

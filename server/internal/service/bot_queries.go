@@ -212,6 +212,40 @@ type BotChatSnapshot struct {
 	MaintenanceProgress *BotMaintenanceProgress `json:"maintenance_progress,omitempty"`
 }
 
+// referencedCallIDs 收集消息里引用的调用 ID：assistant 取
+// tool_calls[].call_id，background_result/tool_reply/approval_decision
+// 等取顶层 call_id（前端按引用渲染，如 fs_schedule 人话行）。保持出现
+// 顺序去重；快照与消息分页共用这条口径。
+func referencedCallIDs(msgs []model.BotMessage) []string {
+	seen := map[string]bool{}
+	var ids []string
+	add := func(id string) {
+		if id != "" && !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	for i := range msgs {
+		if msgs[i].Kind == model.BotMessageKindAssistant {
+			var ac botAssistantContent
+			if json.Unmarshal([]byte(msgs[i].ContentJSON), &ac) != nil {
+				continue
+			}
+			for _, tc := range ac.ToolCalls {
+				add(tc.CallID)
+			}
+			continue
+		}
+		var ref struct {
+			CallID string `json:"call_id"`
+		}
+		if json.Unmarshal([]byte(msgs[i].ContentJSON), &ref) == nil {
+			add(ref.CallID)
+		}
+	}
+	return ids
+}
+
 // listAllUnfinishedCalls 分页取全本机器人未终态调用（页大小 200，按
 // created_at/id 游标推进）。
 func listAllUnfinishedCalls(tx *gorm.DB, botID string) ([]model.BotToolCall, error) {
@@ -318,30 +352,10 @@ func (s *BotService) GetChatSnapshot(userID, botID string, messageLimit int) (*B
 		// 等于把安全提示藏死（INT-157 复审）。只补窗口内引用——无引用
 		// 的调用前端不渲染，全量历史收录会让快照随机器人历史无限膨胀。
 		var missing []string
-		collect := func(id string) {
-			if id != "" && !seen[id] {
+		for _, id := range referencedCallIDs(msgs) {
+			if !seen[id] {
 				seen[id] = true
 				missing = append(missing, id)
-			}
-		}
-		for i := range msgs {
-			if msgs[i].Kind == model.BotMessageKindAssistant {
-				var ac botAssistantContent
-				if json.Unmarshal([]byte(msgs[i].ContentJSON), &ac) != nil {
-					continue
-				}
-				for _, tc := range ac.ToolCalls {
-					collect(tc.CallID)
-				}
-				continue
-			}
-			// background_result/tool_reply/approval_decision 的顶层 call_id
-			// 同样被前端按引用渲染（如 fs_schedule 人话行），一并补齐。
-			var ref struct {
-				CallID string `json:"call_id"`
-			}
-			if json.Unmarshal([]byte(msgs[i].ContentJSON), &ref) == nil {
-				collect(ref.CallID)
 			}
 		}
 		if len(missing) > 0 {

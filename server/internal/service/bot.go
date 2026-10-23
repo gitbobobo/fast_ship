@@ -738,24 +738,38 @@ func (s *BotService) currentRunResponse(botID string) *BotRunResponse {
 }
 
 // ListMessages 主线分页：before/after 是排他 seq 边界，页内正序；两边界都
-// 缺省时返回最新的 limit 条（见 repository.ListMainline）。
-func (s *BotService) ListMessages(userID, botID string, before, after int64, limit int) ([]BotMessageResponse, int64, error) {
+// 缺省时返回最新的 limit 条（见 repository.ListMainline）。响应附带页内
+// 消息引用的调用——翻页加载的更早消息引用的调用可能不在首屏快照内
+// （警示卡/人话行按 call_id 渲染，INT-157 复审 P2），随页下发保证任何
+// 深度的历史消息都自足。
+func (s *BotService) ListMessages(userID, botID string, before, after int64, limit int) ([]BotMessageResponse, []BotToolCallResponse, int64, error) {
 	if _, err := s.bots.FindByIDAndUser(botID, userID); err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, 0, errs.ErrBotNotFound
+			return nil, nil, 0, errs.ErrBotNotFound
 		}
-		return nil, 0, errs.ErrInternal
+		return nil, nil, 0, errs.ErrInternal
 	}
 	if limit <= 0 || limit > 200 {
 		limit = 100
 	}
 	rows, err := s.messages.ListMainline(botID, before, after, limit)
 	if err != nil {
-		return nil, 0, errs.ErrInternal
+		return nil, nil, 0, errs.ErrInternal
 	}
 	out := make([]BotMessageResponse, 0, len(rows))
 	for i := range rows {
 		out = append(out, botMessageResponseOf(&rows[i]))
 	}
-	return out, int64(len(out)), nil
+	var callRows []model.BotToolCall
+	if ids := referencedCallIDs(rows); len(ids) > 0 {
+		callRows, err = repository.NewBotToolCallRepository(s.db).ListByIDs(botID, ids)
+		if err != nil {
+			return nil, nil, 0, errs.ErrInternal
+		}
+	}
+	calls := make([]BotToolCallResponse, 0, len(callRows))
+	for i := range callRows {
+		calls = append(calls, botToolCallResponseOf(&callRows[i]))
+	}
+	return out, calls, int64(len(out)), nil
 }

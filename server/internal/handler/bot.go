@@ -124,12 +124,12 @@ func (h *BotHandler) ListMessages(c *gin.Context) {
 		}
 		limit = parsed
 	}
-	items, total, err := h.bots.ListMessages(middleware.GetUserID(c), c.Param("id"), before, after, limit)
+	items, calls, total, err := h.bots.ListMessages(middleware.GetUserID(c), c.Param("id"), before, after, limit)
 	if err != nil {
 		middleware.HandleAppError(c, err)
 		return
 	}
-	response.Success(c, gin.H{"items": items, "total": total})
+	response.Success(c, gin.H{"items": items, "calls": calls, "total": total})
 }
 
 func (h *BotHandler) SendMessage(c *gin.Context) {

@@ -139,7 +139,7 @@ func TestBotInt136CreateConfirmedAsyncEndToEnd(t *testing.T) {
 
 	// 后台结果消息 + 下一轮模型请求能看到它。
 	waitForBot(t, "后台结果", 20*time.Second, func() bool {
-		msgs, _, _ := env.bots.ListMessages(userID, bot.ID, 0, 0, 50)
+		msgs, _, _, _ := env.bots.ListMessages(userID, bot.ID, 0, 0, 50)
 		for _, m := range msgs {
 			if m.Kind == "background_result" && m.CallID != nil && *m.CallID == callID {
 				return true
