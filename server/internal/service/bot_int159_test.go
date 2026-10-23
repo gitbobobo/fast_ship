@@ -541,6 +541,12 @@ func TestBotInt159LaunchAuthzBindsExecConfig(t *testing.T) {
 	if hashOf(emptyBranch) != hashOf(plainWorktree) {
 		t.Fatalf("branch:\"\" 应与省略同规则")
 	}
+	// 纯空白串同口径：执行侧 TrimSpace+NonEmptyPtr 丢弃，与省略等价
+	// （代码审查 r28）。
+	blankBranch := `{"env_id":"e","project_id":"p","text":"t","workspace":{"type":"worktree","branch":" "}}`
+	if hashOf(blankBranch) != hashOf(plainWorktree) {
+		t.Fatalf("branch:\" \" 应与省略同规则")
+	}
 	// 例外：options[].value:"" 执行侧原样透传，与省略 value 语义不同，
 	// 必须拆规则（豁免不能过头）。
 	valEmpty := `{"env_id":"e","project_id":"p","text":"t","model_selection":{"instance_id":"i","model":"m2","options":[{"id":"x","value":""}]}}`

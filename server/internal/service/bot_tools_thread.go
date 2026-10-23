@@ -319,7 +319,7 @@ func botCanonicalValue(v interface{}) interface{} {
 				delete(t, k)
 				continue
 			}
-			if s, ok := e.(string); ok && s == "" && k != "value" {
+			if s, ok := e.(string); ok && strings.TrimSpace(s) == "" && k != "value" {
 				delete(t, k)
 				continue
 			}
