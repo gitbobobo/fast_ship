@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { ShieldAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { BotCall, BotCallDecision } from "@/lib/api/bots";
@@ -146,14 +147,40 @@ function ScheduleConfirmSummary({ call }: { call: BotCall }) {
 // 服务端摘要才是唯一权威视图，同一份配置不重复铺三遍），其余确认卡
 // 默认展开——整组替换（replace_checklist 等）必须看清完整内容才能批准。
 // JSON 区限高滚动，底部渐隐遮罩提示还有内容（视觉审查），不再拦腰裁切
-// 得像渲染出错。
+// 得像渲染出错。渐隐遮罩在叠加式滚动条下看不出可滚，渐隐处放「显示全部」
+// 入口展开为完整高度（视觉审查：被盖住的字段须能完整核对）。
 function JsonBlock({ text }: { text: string }) {
+  const [expanded, setExpanded] = useState(false);
   return (
     <div className="relative">
-      <pre className="max-h-72 overflow-auto rounded-lg bg-background/80 p-2 pb-6 font-mono text-xs whitespace-pre-wrap break-all [unicode-bidi:isolate]">
+      <pre
+        className={cn(
+          "overflow-auto rounded-lg bg-background/80 p-2 pb-6 font-mono text-xs whitespace-pre-wrap break-all [unicode-bidi:isolate]",
+          expanded ? "max-h-none" : "max-h-72",
+        )}
+      >
         {bidiSafeText(text)}
       </pre>
-      <div className="pointer-events-none absolute inset-x-0 bottom-0 h-6 rounded-b-lg bg-gradient-to-t from-background/90 to-transparent" />
+      {expanded ? (
+        <button
+          type="button"
+          onClick={() => setExpanded(false)}
+          className="mt-1 text-xs text-muted-foreground hover:text-foreground"
+        >
+          收起
+        </button>
+      ) : (
+        <>
+          <div className="pointer-events-none absolute inset-x-0 bottom-0 h-6 rounded-b-lg bg-gradient-to-t from-background/90 to-transparent" />
+          <button
+            type="button"
+            onClick={() => setExpanded(true)}
+            className="absolute bottom-1 right-2 rounded bg-background/80 px-1 text-xs text-muted-foreground hover:text-foreground"
+          >
+            显示全部
+          </button>
+        </>
+      )}
     </div>
   );
 }
