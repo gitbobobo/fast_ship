@@ -49,8 +49,10 @@ export const STATUS_BADGE: Record<string, string> = {
 // 失败文案里内联的参数字段名（snake_case/dotted.path/key=value）用等宽
 // 样式与中文文案区分——长句逐词解析成本高，定位错误参数靠字段名一眼
 // 可辨（视觉审查）。字段名原文保留：bot 自校正需要精确字段。
+// 第三分支匹配行首「- 」清单里的裸字段名（如 branch 没有下划线/点，前两个
+// 分支不命中，与相邻 chip 化的字段并排时显得缺空格，视觉审查 minor）。
 const ERROR_FIELD_TOKEN =
-  /[a-z][a-z0-9]*(?:_[a-z0-9]+)+(?:\.[a-z0-9_[\]]+)*(?:=[^\s，。；、]+)?|(?:[a-z][a-z0-9_]*\.)+[a-z0-9_[\]]+(?:=[^\s，。；、]*)?/g;
+  /[a-z][a-z0-9]*(?:_[a-z0-9]+)+(?:\.[a-z0-9_[\]]+)*(?:=[^\s，。；、]+)?|(?:[a-z][a-z0-9_]*\.)+[a-z0-9_[\]]+(?:=[^\s，。；、]*)?|(?<=\n- )[a-z][a-z0-9_.]*/g;
 
 export function renderErrorMessage(text: string): ReactNode {
   const out: ReactNode[] = [];

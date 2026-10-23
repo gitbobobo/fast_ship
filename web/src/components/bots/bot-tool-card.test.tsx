@@ -117,12 +117,14 @@ describe("BotToolCard", () => {
       }),
     );
     const errP = document.querySelector("p.text-destructive")!;
-    // 可辨识的字段名（snake_case/点路径/赋值）各成 <code>，中文说明与
-    // 单词枚举值保持普通文案；pre-wrap 让服务端的多行清单逐行落地。
+    // 可辨识的字段名（snake_case/点路径/赋值 + 行首「- 」清单里的裸字段名）
+    // 各成 <code>，中文说明与句中单词枚举值保持普通文案；pre-wrap 让服务端
+    // 的多行清单逐行落地。
     const codes = [...errP.querySelectorAll("code")].map((c) => c.textContent);
     expect(codes).toEqual([
       "workspace.type=root",
       "base_ref",
+      "branch",
       "worktree_path",
     ]);
     expect(errP).toHaveClass("whitespace-pre-wrap");
