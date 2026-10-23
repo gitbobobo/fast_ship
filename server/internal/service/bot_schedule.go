@@ -156,9 +156,14 @@ type botScheduleRuntimeContext struct {
 	Cron             string `json:"cron,omitempty"`
 	Timezone         string `json:"timezone,omitempty"`
 	ScheduledFor     string `json:"scheduled_for,omitempty"`
-	LastRunAt        string `json:"last_run_at,omitempty"`
-	LastRunStatus    string `json:"last_run_status,omitempty"`
-	LastRunSummary   string `json:"last_run_summary,omitempty"`
+	// TaskState 是任务小状态的当前值（INT-156）：会话声明了 state_get 且状态
+	// 非空时随上下文注入，巡检开局不必再调 state_get 才知道「上次报过什么」；
+	// 无状态或降级会话整体省略。TaskStateUpdatedAt 是对应写入时间。
+	TaskState          string `json:"task_state,omitempty"`
+	TaskStateUpdatedAt string `json:"task_state_updated_at,omitempty"`
+	LastRunAt          string `json:"last_run_at,omitempty"`
+	LastRunStatus      string `json:"last_run_status,omitempty"`
+	LastRunSummary     string `json:"last_run_summary,omitempty"`
 }
 
 // buildScheduleRunContext 把 schedule run 投影为协议请求：同一份系统提示与
@@ -199,8 +204,10 @@ func (s *BotService) buildScheduleRunContext(bot *model.Bot, run *model.BotRun, 
 		"若没有需要告知用户的内容，只回复一行 " + botScheduleSentinel + "；" +
 		"否则用简洁中文汇报执行结果。本次运行继承用户权限，业务写操作默认放行（不弹确认）。"
 	if _, ok := sess.toolset.byAction["fs_schedule/state_get"]; ok {
-		note += "本任务有一块跨运行保留的小状态，用 fs_schedule 的 state_get/state_set 读写，" +
-			"适合存「上次已报的 ID」这类去重集合。"
+		note += "本任务有一块跨运行保留的小状态，适合存「上次已报的 ID」这类去重集合；" +
+			"task_state 字段是本次运行开始时的快照（字段省略表示当时为空），开局不必调 state_get；" +
+			"运行中 state_set 或外部清空后该字段仍是旧快照，要拿最新值请调 state_get。" +
+			"写入与当前完全相同的内容会回 unchanged、不产生变更——没有变化就不要重复写。"
 	}
 	schedTz, schedTzLoc := s.botOwnerTimezoneOf(bot)
 	// 只取一次 now：UTC 与当地时间必须是同一时刻（同主线运行时上下文）。
@@ -226,6 +233,16 @@ func (s *BotService) buildScheduleRunContext(bot *model.Bot, run *model.BotRun, 
 	// 进行中，不会被选中。摘要/任务名是模型生成或任务里存的回流文本，而这条
 	// 运行时上下文本身带平台 nonce——不围栏就等于给伪造前缀背书（INT-136）。
 	rt.TaskName = botFenceUntrusted(nonce, "schedule_task", rt.TaskName)
+	// 任务小状态随上下文注入（INT-156）：只在会话声明了 state_get 且有存量时
+	// 带——降级会话没有这个动作，注入即诱导调用必然失败的动作。状态正文是
+	// 任务会话历史写回的 JSON、可能引用外部回流文本，按不可信围栏（与
+	// last_run_summary 同一纪律）。
+	if _, ok := sess.toolset.byAction["fs_schedule/state_get"]; ok && sess.task.StateJSON != "" {
+		rt.TaskState = botFenceUntrusted(nonce, "schedule_state", sess.task.StateJSON)
+		if sess.task.StateUpdatedAt != nil {
+			rt.TaskStateUpdatedAt = sess.task.StateUpdatedAt.UTC().Format(time.RFC3339)
+		}
+	}
 	if last, err := s.runs.LatestFinishedByScheduleTask(bot.ID, sess.task.ID); err == nil && last.FinishedAt != nil {
 		rt.LastRunAt = last.FinishedAt.UTC().Format(time.RFC3339)
 		rt.LastRunStatus = string(last.Status)
@@ -285,8 +302,10 @@ func (s *BotService) buildScheduleRunContext(bot *model.Bot, run *model.BotRun, 
 }
 
 // botScheduleFoldMap 是 schedule 会话的确定性折叠：超阈值的 tool_reply 正文
-// 替换为一行 fs_result.read 引用。state_get 的回执豁免折叠（INT-123）——其正文
-// 就是任务状态本体，折成引用后模型拿不到内容（续读同样是大块）。豁免集直接从
+// 替换为一行 fs_result.read 引用。两个动作豁免折叠：state_get（INT-123）——
+// 其正文就是任务状态本体，折成引用后模型拿不到内容（续读同样是大块）；
+// fs_thread list（INT-156）——巡检要靠一次 list 拿到 activity/last_reply，
+// 折成引用就把省掉的读轮次又加回来。豁免集直接从
 // 同一份账本 rows 的 assistant 工具调用解出，不额外查库：结果仍只由 rows 决定，
 // 确定性不变，也不存在查询失败的回退路径。
 func botScheduleFoldMap(rows []model.BotMessage) map[string]string {
@@ -301,7 +320,12 @@ func botScheduleFoldMap(rows []model.BotMessage) map[string]string {
 		}
 		for j := range content.ToolCalls {
 			tc := content.ToolCalls[j]
-			if tc.ToolName == "fs_schedule" && tc.Action == "state_get" {
+			// INT-156：fs_thread list 也豁免——巡检靠它一次拿到 activity 与
+			// last_reply，折成引用就得再发一轮 fs_result.read，而降本的目的
+			// 恰是消掉这种多出来的读轮次。list 结果本身已按 botResultBudgetChars
+			// 截断（≤16000 字符），内联最坏有界；模型可用 page_size 自控大小。
+			if tc.ToolName == "fs_schedule" && tc.Action == "state_get" ||
+				tc.ToolName == "fs_thread" && tc.Action == "list" {
 				exempt[tc.CallID] = true
 			}
 		}
@@ -1100,18 +1124,18 @@ func (s *BotService) execScheduleStateGet(call *model.BotToolCall) (string, erro
 // execScheduleStateSet 写入本任务的小状态（INT-123）：state 省略或 null 表示
 // 清空，否则写入其紧凑 JSON（保留原始字节，避免大整数精度丢失）；超过
 // botScheduleStateMaxBytes 显式拒绝并在消息里给出当前字节数与上限。状态写入
-// 与长期记忆无关——不写 bot_memory_*、不产生记忆版本。
+// 与长期记忆无关——不写 bot_memory_*、不产生记忆版本。INT-156 起目标值与
+// 当前状态完全一致（紧凑化后字节相等，不做键序归一）时短路返回 unchanged：
+// 巡检会话惯用相同内容重复 state_set 表示「无新增」，重复写只会白推
+// state_updated_at。
 func (s *BotService) execScheduleStateSet(call *model.BotToolCall, args *botScheduleTaskArgs) (string, error) {
 	task, err := s.scheduleRunTaskOf(call)
 	if err != nil {
 		return "", err
 	}
-	// updated_at 显式保持原值：GORM 的 Updates 会隐式 autoUpdateTime 改写
-	// updated_at，而状态有独立的 state_updated_at，配置时间不应被状态写入推动。
-	cols := map[string]interface{}{
-		"state_json": "", "state_updated_at": nil, "updated_at": gorm.Expr("updated_at"),
-	}
-	stateBytes := 0
+	// 目标值先归一（省略/null → 空串清空；否则紧凑化）；上限校验放在比较之前，
+	// 超限拒绝的语义与写入路径一致。
+	target := ""
 	if args.State != nil && string(*args.State) != "null" {
 		var compacted bytes.Buffer
 		if err := json.Compact(&compacted, *args.State); err != nil {
@@ -1121,9 +1145,21 @@ func (s *BotService) execScheduleStateSet(call *model.BotToolCall, args *botSche
 			return "", errs.New(errs.ErrInvalidParams.Code, fmt.Sprintf(
 				"任务状态过大：%d 字节（上限 %d 字节）", compacted.Len(), botScheduleStateMaxBytes))
 		}
-		cols["state_json"] = compacted.String()
+		target = compacted.String()
+	}
+	if target == task.StateJSON {
+		return botMarshalResult(map[string]interface{}{
+			"ok": true, "unchanged": true, "task_id": task.ID, "bytes": len(target),
+			"max_bytes": botScheduleStateMaxBytes, "cleared": target == "",
+		})
+	}
+	// updated_at 显式保持原值：GORM 的 Updates 会隐式 autoUpdateTime 改写
+	// updated_at，而状态有独立的 state_updated_at，配置时间不应被状态写入推动。
+	cols := map[string]interface{}{
+		"state_json": target, "state_updated_at": nil, "updated_at": gorm.Expr("updated_at"),
+	}
+	if target != "" {
 		cols["state_updated_at"] = time.Now().UTC()
-		stateBytes = compacted.Len()
 	}
 	// 单条 UpdateColumns 没有业务错误码要区分，不需要事务包裹。
 	ok, err := s.schedTasks.UpdateColumns(task.ID, nil, cols)
@@ -1131,8 +1167,8 @@ func (s *BotService) execScheduleStateSet(call *model.BotToolCall, args *botSche
 		return "", errs.ErrInternal
 	}
 	return botMarshalResult(map[string]interface{}{
-		"ok": true, "task_id": task.ID, "bytes": stateBytes,
-		"max_bytes": botScheduleStateMaxBytes, "cleared": stateBytes == 0,
+		"ok": true, "task_id": task.ID, "bytes": len(target),
+		"max_bytes": botScheduleStateMaxBytes, "cleared": target == "",
 	})
 }
 

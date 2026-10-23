@@ -29,9 +29,10 @@ func TestBotInt148ThreadToolsetV9(t *testing.T) {
 	if v9.hash == v8.hash || v9.hash == botToolsetV8FrozenHash {
 		t.Fatalf("v9 与 v8 的 tools_hash 必须不同")
 	}
-	// v9 已冻结为 INT-148 的字节，当前发布版本路由到 INT-136 的 v10。
-	if v9.hash != botToolsetV9FrozenHash || botToolsetOf().hash != botToolsetVersionOf(10).hash {
-		t.Fatalf("v9 应保持 INT-148 冻结基线，botToolsetOf 应指向 v10")
+	// v9 已冻结为 INT-148 的字节；当前发布版本（INT-156 起为 v11）在其之上
+	// 演进，botToolsetOf 路由到当前版。
+	if v9.hash != botToolsetV9FrozenHash || botToolsetOf().version != botToolsetVersion {
+		t.Fatalf("v9 应保持 INT-148 冻结基线，botToolsetOf 应指向当前发布版本")
 	}
 
 	thread := v9.byName["fs_thread"]
