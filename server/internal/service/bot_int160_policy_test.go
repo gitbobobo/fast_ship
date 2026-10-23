@@ -1086,3 +1086,48 @@ func TestBotInt160PolicySettleQueueHeldPrefetched(t *testing.T) {
 		t.Fatalf("未预取到应按读取失败记 unknown: ok=%v facts=%v", ok2, facts2)
 	}
 }
+
+// Bot Note：执行前复检把复检时刻的事实写回 policy_json（facts.recheck），
+// 受理时刻快照保留在 facts 顶层——复检依据对审计可见而不是死赋值。
+func TestBotInt160RecheckWritesFactsBack(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "int160policyrb")
+	bot := env.createBot(t, userID)
+	botRow, err := env.bots.bots.Get(bot.ID)
+	if err != nil {
+		t.Fatalf("get bot: %v", err)
+	}
+
+	args := `{"action":"send","env_id":"env-none","thread_id":"th-x","text":"继续"}`
+	// 受理时刻的既有 facts 原样保留，复检结论挂 facts.recheck。
+	policyRec, _ := json.Marshal(botWritePolicyRecord{
+		Tier: "tier1", RuleID: botPolicyRuleSendContinue, Auto: true, Source: "tier1",
+		Facts: map[string]interface{}{"thread": map[string]interface{}{"known": true}},
+	})
+	call := &model.BotToolCall{
+		ToolName: "fs_thread", Action: "send", ArgumentsJSON: args, PolicyJSON: string(policyRec),
+	}
+	recheckErr := env.bots.policyRecheckCall(botRow, call)
+	if recheckErr == nil {
+		t.Fatalf("线程不可信时应复检失败")
+	}
+	written := botWritePolicyRecordOf(call)
+	if written == nil || written.Facts == nil {
+		t.Fatalf("复检后 policy_json 应仍带 facts: %s", call.PolicyJSON)
+	}
+	recheck, ok := written.Facts["recheck"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("facts.recheck 应写回复检依据: %s", call.PolicyJSON)
+	}
+	if recheck["failed_reason"] == "" {
+		t.Fatalf("facts.recheck 应含 failed_reason: %v", recheck)
+	}
+	// 受理时刻的顶层快照不被覆写。
+	top, ok := written.Facts["thread"].(map[string]interface{})
+	if !ok || top["known"] != true {
+		t.Fatalf("受理时刻 facts 快照应保留: %s", call.PolicyJSON)
+	}
+	if written.Facts["recheck_at"] == "" {
+		t.Fatalf("应记录复检时刻: %s", call.PolicyJSON)
+	}
+}

@@ -610,30 +610,46 @@ func (s *BotService) policyRecheckCall(bot *model.Bot, call *model.BotToolCall) 
 		return nil
 	}
 	now := time.Now().UTC()
+	if rec.Facts == nil {
+		rec.Facts = map[string]interface{}{}
+	}
+	// 复检事实挂 facts.recheck 子键并写回 policy_json：受理时刻的事实
+	// 快照不被覆写，复检依据（执行时刻的线程/队列状态）对审计可见。
+	recheckFacts := map[string]interface{}{}
+	flush := func() {
+		rec.Facts["recheck_at"] = now.Format(time.RFC3339)
+		rec.Facts["recheck"] = recheckFacts
+		call.PolicyJSON = botPolicyRecordJSON(rec)
+	}
 	if rec.Expiry != nil && now.After(*rec.Expiry) {
+		recheckFacts["expired"] = true
+		flush()
 		return &botPolicyRecheckError{
 			"确认卡已过期（降级确认卡 30 分钟内有效）；请重新评估线程现状后再次发起",
 		}
 	}
 	var args botThreadArgs
 	_ = json.Unmarshal([]byte(call.ArgumentsJSON), &args)
-	// rec.Facts 可能是 nil（旧 policy_json 无 facts 字段）——统一给一张新
-	// map 供三条复检路径写事实。
-	rec.Facts = map[string]interface{}{}
 	var reason string
 	switch rec.RuleID {
 	case botPolicyRuleSendContinue:
 		// 复检不查配额：用户已明确批准/受理时额度已核过这一次，额度只约束
-		// 无人在场的自动放行。
-		_, reason = s.policyCheckSendPreconditions(bot, args, rec, now, false, 0)
+		// 无人在场的自动放行。事实写入复检专用 map，不碰受理快照。
+		recheckRec := *rec
+		recheckRec.Facts = recheckFacts
+		_, reason = s.policyCheckSendPreconditions(bot, args, &recheckRec, now, false, 0)
 	case botPolicyRuleSettleIdle:
 		// 执行前复检不在 commitMu 内，实时重读 Detail（传 nil）。
-		_, reason = s.policyCheckSettlePreconditions(bot, args, rec.Facts, now, nil)
+		_, reason = s.policyCheckSettlePreconditions(bot, args, recheckFacts, now, nil)
 	case botPolicyRuleUnsettle:
-		_, reason = s.policyCheckUnsettlePreconditions(bot, args, rec.Facts)
+		_, reason = s.policyCheckUnsettlePreconditions(bot, args, recheckFacts)
 	default:
 		return nil
 	}
+	if reason != "" {
+		recheckFacts["failed_reason"] = reason
+	}
+	flush()
 	if reason != "" {
 		return &botPolicyRecheckError{reason + "。请向用户说明并重新评估"}
 	}

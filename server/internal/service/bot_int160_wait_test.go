@@ -1532,3 +1532,33 @@ func TestBotInt160WaitDupTerminalClearsStartedAt(t *testing.T) {
 		t.Fatalf("重复挂应落 already_waiting 终态: %+v", call)
 	}
 }
+
+// TestBotInt160WaitAdoptMissingTarget 验证缺 env_id/thread_id 的脏行同样
+// 直落 failed 终态——收编面不留 running 孤儿（第 14 轮 Note）。
+func TestBotInt160WaitAdoptMissingTarget(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "int160wait18")
+	bot := env.createBot(t, userID)
+	_, req := seedWaitRun(t, env, bot.ID, false)
+	now := time.Now().UTC()
+	call := &model.BotToolCall{
+		ID: uuid.NewString(), BotID: bot.ID, RequestID: req.ID,
+		ProviderToolCallID: "prov-notarget-wait", ToolName: "fs_thread", Action: "wait",
+		ArgumentsJSON: `{"action":"wait"}`,
+		ArgumentsHash: "x", ExecutionMode: string(model.BotExecutionAsync),
+		Status: model.BotCallStatusRunning, StartedAt: &now,
+		ExecutionContextJSON: "{}", CreatedAt: now,
+	}
+	if err := env.db.Create(call).Error; err != nil {
+		t.Fatalf("seed no-target wait: %v", err)
+	}
+
+	env.bots.waitAdoptUnregistered()
+	done, err := env.bots.calls.FindByID(call.ID)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if done.Status != model.BotCallStatusFailed || done.FinishedAt == nil {
+		t.Fatalf("缺目标字段的收编行应落 failed 终态: %+v", done)
+	}
+}

@@ -374,6 +374,10 @@ func (s *BotService) waitAdoptUnregistered() {
 		}
 		args := botWaitArgsOfCall(call)
 		if args.EnvID == "" || args.ThreadID == "" {
+			// 缺目标字段的脏行（正常受理路径必填不可达，手工修库/旧版本
+			// 可能遗留）与解析失败同口径收尾——收编面不留 running 孤儿。
+			s.waitFinalizeAdoptInvalid(call, errs.New(errs.ErrInvalidParams.Code,
+				"wait 参数缺 env_id/thread_id"))
 			continue
 		}
 		conditions, condErr := botWaitParseOn(args.On)
@@ -869,12 +873,20 @@ func (s *BotService) waitDetail(e *botWaitEntry, parent context.Context) (*botWa
 	// 等待期间的条目更新数：条目 updated_at 晚于挂上时刻即计入（基线不在
 	// 内存里，用时间戳代替计数差值；上游缺 updated_at 的条目保守不计）。
 	for i := range detail.Items {
-		if u := detail.Items[i].UpdatedAt; u != nil && *u != "" {
-			if ts, perr := time.Parse(time.RFC3339, *u); perr == nil && ts.After(e.attachedAt) {
-				info.newItems++
-			}
-		} else {
+		u := detail.Items[i].UpdatedAt
+		if u == nil || *u == "" {
 			info.untimestampedItems++
+			continue
+		}
+		ts, perr := time.Parse(time.RFC3339, *u)
+		if perr != nil {
+			// 非 RFC3339 的时间戳与「缺时间戳」同口径计入：否则这类条目
+			// 两边都不计，收尾会误报「可计时条目均无变化」。
+			info.untimestampedItems++
+			continue
+		}
+		if ts.After(e.attachedAt) {
+			info.newItems++
 		}
 	}
 	return info, nil

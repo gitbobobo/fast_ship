@@ -1161,6 +1161,11 @@ func (s *BotService) finalizeCall(bot *model.Bot, runID string, call *model.BotT
 		"truncated":                outcome.Truncated,
 		"effect_may_have_occurred": effect,
 	}
+	// 执行前复检会把复检事实写回 call.PolicyJSON（受理快照保留在 facts
+	// 顶层，复检依据挂 facts.recheck）；有变更时随终态同事务落库。
+	if call.PolicyJSON != "" {
+		cols["policy_json"] = call.PolicyJSON
+	}
 	if execErr != nil {
 		// 分级放行执行前复检失败用专用错误码而不是折算业务码，账本检索与
 		// 后台结果消息按同一口径识别。
