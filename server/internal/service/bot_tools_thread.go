@@ -312,6 +312,17 @@ func botCanonicalValue(v interface{}) interface{} {
 				delete(t, k)
 				continue
 			}
+			// 空数组与缺省等价（options:[] 执行侧不进 wire）；空串可选字段
+			// 经 NonEmptyPtr 同样按缺省处理——唯 value 例外：options[]
+			// 的 value:"" 会原样透传上游，与省略语义不同，不能丢（r27）。
+			if arr, ok := e.([]interface{}); ok && len(arr) == 0 {
+				delete(t, k)
+				continue
+			}
+			if s, ok := e.(string); ok && s == "" && k != "value" {
+				delete(t, k)
+				continue
+			}
 			t[k] = botCanonicalValue(e)
 		}
 		if opts, ok := t["options"].([]interface{}); ok {

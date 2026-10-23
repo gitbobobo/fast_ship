@@ -895,8 +895,9 @@ func TestBotScheduleDeleteMissingTaskNotFound(t *testing.T) {
 // 起冻结（基线在 bot_int120_test.go），v5 自 INT-121、v6 自 INT-123 起冻结，
 // v7 自 INT-138 起冻结（timezone 描述变更只进 v8），v8 自 INT-148 起冻结
 // （fs_thread 的结算类动作与描述改写只进 v9），v9 = INT-148、v10 = INT-136，
-// 现已冻结（v10 基线在 bot_int136_test.go）；v11 = INT-159 是当前发布版本
-// （基线在 bot_int159_test.go）。
+// 现已冻结（v10 基线在 bot_int136_test.go）；v11 = INT-156（基线在
+// bot_int156_test.go），v12 = INT-159 是当前发布版本（基线在
+// bot_int159_test.go）。
 const (
 	botToolsetV1FrozenHash = "c1da7e95288ed681392529f68a812ec1ac403bcd53cee1414634cca28197ef06"
 	botToolsetV2FrozenHash = "4ec300f75e9aff618b820246c85cc497db6e4d8027cbce342696cc629560ca19"

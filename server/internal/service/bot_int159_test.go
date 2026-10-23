@@ -530,6 +530,24 @@ func TestBotInt159LaunchAuthzBindsExecConfig(t *testing.T) {
 	if hashOf(`{"env_id":"e","project_id":"p","text":"t","model_selection":null,"workspace":null}`) != hashOf(bare) {
 		t.Fatalf("顶层 null 应与省略同规则")
 	}
+	// 空容器/空串与省略同口径（执行侧 options:[] 不进 wire、NonEmptyPtr
+	// 丢空串），不得拆规则（代码审查 r27）。
+	emptyOpts := `{"env_id":"e","project_id":"p","text":"任务一","runtime_mode":"full-access","model_selection":{"instance_id":"i","model":"m2","options":[]}}`
+	if hashOf(emptyOpts) != hashOf(withoutNull) {
+		t.Fatalf("options:[] 应与省略同规则")
+	}
+	emptyBranch := `{"env_id":"e","project_id":"p","text":"t","workspace":{"type":"worktree","branch":""}}`
+	plainWorktree := `{"env_id":"e","project_id":"p","text":"t","workspace":{"type":"worktree"}}`
+	if hashOf(emptyBranch) != hashOf(plainWorktree) {
+		t.Fatalf("branch:\"\" 应与省略同规则")
+	}
+	// 例外：options[].value:"" 执行侧原样透传，与省略 value 语义不同，
+	// 必须拆规则（豁免不能过头）。
+	valEmpty := `{"env_id":"e","project_id":"p","text":"t","model_selection":{"instance_id":"i","model":"m2","options":[{"id":"x","value":""}]}}`
+	valAbsent := `{"env_id":"e","project_id":"p","text":"t","model_selection":{"instance_id":"i","model":"m2","options":[{"id":"x"}]}}`
+	if hashOf(valEmpty) == hashOf(valAbsent) {
+		t.Fatalf("value:\"\" 与省略 value 执行不同，不得共用授权")
+	}
 }
 
 // INT-159 always-allow 落库：constraints_json 必须带上规范化执行配置
