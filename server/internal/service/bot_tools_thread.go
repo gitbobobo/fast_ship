@@ -698,18 +698,18 @@ func botThreadLaunchConfig(args *botThreadArgs, req *T3CreateThreadRequest) erro
 		switch wsType {
 		case "root":
 			if baseRef != "" || branch != "" || worktreePath != "" || ws.StartFromOrigin != nil {
-				return errs.New(errs.ErrInvalidParams.Code, "workspace.type=root 不接受 base_ref/branch/worktree_path/start_from_origin")
+				return errs.New(errs.ErrInvalidParams.Code, "workspace.type=root 不接受 base_ref/branch/worktree_path/start_from_origin：项目主检出不需要工作区参数；要新建工作树请改用 worktree，要复用已有目录请改用 existing_worktree")
 			}
 		case "worktree":
 			if worktreePath != "" {
-				return errs.New(errs.ErrInvalidParams.Code, "workspace.type=worktree 不接受 worktree_path（existing_worktree 才用）")
+				return errs.New(errs.ErrInvalidParams.Code, "workspace.type=worktree 不接受 worktree_path：worktree 由服务端新建；要复用已有目录请改用 existing_worktree")
 			}
 		case "existing_worktree":
 			if worktreePath == "" {
-				return errs.New(errs.ErrInvalidParams.Code, "existing_worktree 需要提供 worktree_path")
+				return errs.New(errs.ErrInvalidParams.Code, "existing_worktree 需要提供 worktree_path（已有工作树的绝对路径）；不需要指定目录时请改用 worktree")
 			}
 			if baseRef != "" || ws.StartFromOrigin != nil {
-				return errs.New(errs.ErrInvalidParams.Code, "workspace.type=existing_worktree 不接受 base_ref/start_from_origin")
+				return errs.New(errs.ErrInvalidParams.Code, "workspace.type=existing_worktree 不接受 base_ref/start_from_origin：已有工作树只按 worktree_path 与可选 branch 进入")
 			}
 		}
 		req.Workspace = &api.T3ThreadWorkspace{
