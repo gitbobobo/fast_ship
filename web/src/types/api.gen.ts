@@ -13791,6 +13791,8 @@ export interface operations {
                     "application/json": components["schemas"]["Envelope"] & {
                         data?: {
                             items: components["schemas"]["BotMessage"][];
+                            /** @description 页内消息引用到的调用记录（assistant 嵌套 tool_calls 与非 assistant 消息顶层 call_id），保证旧消息渲染确认/警示卡不缺数据 */
+                            calls: components["schemas"]["BotToolCall"][];
                             total: number;
                         };
                     };
