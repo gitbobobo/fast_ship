@@ -70,7 +70,8 @@ func (r *VersionRepository) ExistsByVersionNumberExcludeID(projectID, versionNum
 // GetLatestByProjectIDs 用一条窗口函数查询取每个项目的最新版本（created_at
 // 最大，并列按 id 升序取小者——与原 Order("created_at DESC").First 隐式追加
 // 主键升序的口径一致），供项目列表按页填充 latest_version；无版本的项目
-// 不出现在结果中。
+// 不出现在结果中。外层列清单与 model.Version 的持久化字段一一对应，版本模型
+// 增删列（含引入软删除）时需同步维护。
 func (r *VersionRepository) GetLatestByProjectIDs(projectIDs []string) (map[string]*model.Version, error) {
 	versions := make(map[string]*model.Version, len(projectIDs))
 	if len(projectIDs) == 0 {
