@@ -67,15 +67,14 @@ func (r *BotToolCallRepository) ListUnfinishedByBotPage(botID string, offset, li
 	return rows, err
 }
 
-// ListAttentionByBotPage 分页取「终态但需用户留意」的调用：取消写调用后
-// 副作用可能已发生、或带错误信息的调用，警示与失败原因在前端只有工具卡
-// /结果消息这些出口——快照只收最近 N 条会漏掉它们（INT-157 复审 P2）。
-func (r *BotToolCallRepository) ListAttentionByBotPage(botID string, offset, limit int) ([]model.BotToolCall, error) {
+// ListByIDs 按 ID 批量取本机器人调用——快照按窗口内消息的 tool_calls
+// 引用补齐最近 N 条窗口外的旧调用（前端渲染卡片靠 call_id 命中）。
+func (r *BotToolCallRepository) ListByIDs(botID string, ids []string) ([]model.BotToolCall, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
 	var rows []model.BotToolCall
-	err := r.db.Where(`bot_id = ? AND finished_at IS NOT NULL AND (
-		effect_may_have_occurred OR
-		COALESCE(error_message, '') <> '' OR COALESCE(error_code, '') <> '')`, botID).
-		Order("created_at ASC, id ASC").Offset(offset).Limit(limit).Find(&rows).Error
+	err := r.db.Where("bot_id = ? AND id IN ?", botID, ids).Find(&rows).Error
 	return rows, err
 }
 

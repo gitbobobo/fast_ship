@@ -2080,15 +2080,17 @@ func TestBotChatSnapshotConsistent(t *testing.T) {
 	}
 }
 
-// INT-157 复审 P2：终态但「需留意」的调用（副作用警示/错误信息）超出
-// 最近 100 条窗口后仍要进快照——它们的警示/失败原因在前端只有
-// 工具卡与结果消息这些出口，窗口漏掉等于藏死安全提示。
-func TestBotChatSnapshotAttentionCallsBeyondWindow(t *testing.T) {
+// INT-157 复审：窗口内消息引用的旧调用要按引用补齐进快照——它们的
+// 警示/失败原因在前端只有工具卡与结果消息这些出口，最近 100 条窗口
+// 漏掉等于藏死安全提示；但未被窗口内消息引用的调用前端不渲染，
+// 不应随历史无界收进快照。
+func TestBotChatSnapshotReferencedCallsBeyondWindow(t *testing.T) {
 	env := setupBotTestEnv(t)
 	userID := createBotTestUser(t, env.db, "botsnapatt")
 	bot := env.createBot(t, userID)
 
-	// 一条带副作用警示的已取消调用排在最早。
+	// 一条带副作用警示的已取消调用排在最早，并被窗口内 assistant
+	// 消息的 tool_calls 引用。
 	now := time.Now().UTC()
 	_, warnCallID := seedBotCallFixture(t, env, bot.ID, model.BotCallStatusCancelled, string(model.BotExecutionSync))
 	if err := env.db.Model(&model.BotToolCall{}).Where("id = ?", warnCallID).
@@ -2098,7 +2100,34 @@ func TestBotChatSnapshotAttentionCallsBeyondWindow(t *testing.T) {
 		}).Error; err != nil {
 		t.Fatalf("flag warn call: %v", err)
 	}
-	// 101 条干净的终态调用把它挤出最近 100 条窗口。
+	// 另一条同类警示调用不被任何消息引用：不该进快照（防无界膨胀）。
+	_, orphanCallID := seedBotCallFixture(t, env, bot.ID, model.BotCallStatusCancelled, string(model.BotExecutionSync))
+	if err := env.db.Model(&model.BotToolCall{}).Where("id = ?", orphanCallID).
+		Updates(map[string]interface{}{
+			"effect_may_have_occurred": true,
+			"finished_at":              now,
+		}).Error; err != nil {
+		t.Fatalf("flag orphan call: %v", err)
+	}
+	msgSeq, err := repository.NewBotRepository(env.db).NextMessageSeqTx(env.db, bot.ID)
+	if err != nil {
+		t.Fatalf("seq: %v", err)
+	}
+	content, _ := json.Marshal(botAssistantContent{
+		Text: "我先更新一下 issue。",
+		ToolCalls: []botAssistantToolCall{{
+			CallID: warnCallID, ProviderToolCallID: "ptc-warn",
+			ToolName: "fs_issue", Action: "update", Arguments: "{}",
+		}},
+	})
+	if err := repository.NewBotMessageRepository(env.db).AppendTx(env.db, &model.BotMessage{
+		ID: uuid.NewString(), BotID: bot.ID, Seq: msgSeq,
+		Kind: model.BotMessageKindAssistant, ContentJSON: string(content),
+		CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("append ref message: %v", err)
+	}
+	// 101 条干净的终态调用把两条警示调用都挤出最近 100 条窗口。
 	for i := 0; i < 101; i++ {
 		_, callID := seedBotCallFixture(t, env, bot.ID, model.BotCallStatusSucceeded, string(model.BotExecutionSync))
 		if err := env.db.Model(&model.BotToolCall{}).Where("id = ?", callID).
@@ -2111,17 +2140,15 @@ func TestBotChatSnapshotAttentionCallsBeyondWindow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("snapshot: %v", err)
 	}
-	found := false
+	found := map[string]bool{}
 	for _, c := range snap.Calls {
-		if c.ID == warnCallID {
-			found = true
-			if !c.EffectMayHaveOccurred {
-				t.Fatalf("警示字段应随快照下发: %+v", c)
-			}
-		}
+		found[c.ID] = true
 	}
-	if !found {
-		t.Fatalf("警示调用被挤出窗口后仍应收录进快照")
+	if !found[warnCallID] {
+		t.Fatalf("窗口内消息引用的警示调用应收录进快照")
+	}
+	if got := found[orphanCallID]; got {
+		t.Fatalf("未被消息引用的警示调用不应进快照（快照须随窗口有界）")
 	}
 }
 
