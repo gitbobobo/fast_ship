@@ -239,10 +239,12 @@ type botThreadModelSelection struct {
 }
 
 // botThreadModelOption 是模型选项的 canonical 项 {id,value}；value 为字符串
-// 或布尔（T3 ProviderOptionSelectionValue），不收窄成纯字符串。
+// 或布尔（T3 ProviderOptionSelectionValue），不收窄成纯字符串。oneof_type
+// 显式声明类型并集：any 生成的 schema 没有 type，严格校验 function
+// parameters 的上游网关会拒掉整个工具（代码审查 P2）。
 type botThreadModelOption struct {
 	ID    string `json:"id" jsonschema:"description=选项 id（options[].id）"`
-	Value any    `json:"value" jsonschema:"description=选项值（select 取 choices[].id；boolean 取 true/false）"`
+	Value any    `json:"value" jsonschema:"oneof_type=string;boolean,description=选项值（select 取 choices[].id；boolean 取 true/false）"`
 }
 
 // botThreadWorkspace 是 launch 可选的工作区策略（INT-159），形状与 REST
@@ -644,6 +646,10 @@ func botToolRegistryV11() []*botToolDef {
 			}
 		}
 	}
+	// 显式冻结本版（与 V9/V10 同口径）：v10 链里的 botUseFrozenArgs(10)
+	// 恰好把 fs_thread 换成 V9Frozen 属隐式依赖；v11 将来若有独立冻结项，
+	// 缺这行会静默漂移（代码审查 Note）。当前为同一类型，无字节差。
+	botUseFrozenArgs(11, tools)
 	return tools
 }
 

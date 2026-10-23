@@ -22,7 +22,7 @@ import (
 // botToolsetV12FrozenHash 是 INT-159 发布的 v12 wire 字节基线：launch 执行
 // 配置、composer_options/providers 描述与摘要回显只进 v12；之后任何改动都
 // 会让存量会话升级后的 tools_hash 漂移，必须先递增版本再改字节。
-const botToolsetV12FrozenHash = "3897c17ed0fa075af1fb12f2f9947029d694f4022db675fa9eca5fc221e8372c"
+const botToolsetV12FrozenHash = "d7a64886f0ea926574caa97a0e14e757c75d931750852e8422a41e5a77fdb1a2"
 
 func TestBotInt159ToolsetV12(t *testing.T) {
 	v11 := botToolsetVersionOf(11)
@@ -64,6 +64,29 @@ func TestBotInt159ToolsetV12(t *testing.T) {
 			t.Fatalf("v12 fs_thread 描述缺 %q: %s", kw, thread.Description)
 		}
 	}
+}
+
+// TestBotInt159SchemaValueTyped 钉住 options[].value 的类型声明：Go any 默认
+// 生成无 type 的 schema，严格校验 parameters 的 OpenAI 兼容网关会拒掉整个
+// fs_thread。oneof_type 显式产 oneOf[{type:string},{type:boolean}]。
+func TestBotInt159SchemaValueTyped(t *testing.T) {
+	thread := botToolsetVersionOf(12).byName["fs_thread"]
+	b, _ := json.Marshal(thread.Parameters)
+	var p map[string]interface{}
+	json.Unmarshal(b, &p)
+	node := p["properties"].(map[string]interface{})["model_selection"].(map[string]interface{})["properties"].(map[string]interface{})["options"].(map[string]interface{})["items"].(map[string]interface{})["properties"].(map[string]interface{})["value"].(map[string]interface{})
+	if _, hasType := node["type"]; hasType {
+		t.Fatalf("value 应走 oneOf 而非单 type: %v", node)
+	}
+	oneOf, _ := node["oneOf"].([]interface{})
+	got := map[string]bool{}
+	for _, o := range oneOf {
+		got[o.(map[string]interface{})["type"].(string)] = true
+	}
+	if len(oneOf) != 2 || !got["string"] || !got["boolean"] {
+		t.Fatalf("options[].value 应声明 oneOf string|boolean: %v", node)
+	}
+	// v11 及以下为冻结参数结构体，本断言只针对 v12 活跃 schema。
 }
 
 // 非 launch 动作携带执行配置字段必须被拒（不静默忽略）；launch 合法通过。
