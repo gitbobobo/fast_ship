@@ -156,12 +156,19 @@ function JsonBlock({ text, visible = true }: { text: string; visible?: boolean }
   // 只有真溢出才挂渐隐与「显示全部」：短参数块挂假截断提示会让人以为
   // 内容被藏了（视觉审查）。visible 驱动重测：闭合的 <details> 里子树没有
   // 布局盒、scrollHeight 恒 0，要在父级展开后才量（视觉审查）。
+  // ResizeObserver 兜底容器变窄/文本更新造成的后发溢出，并按测量结果双向
+  // 复位——变短后不再残留假提示（视觉审查）。
   useLayoutEffect(() => {
     const el = preRef.current;
-    if (el && visible && !expanded && el.scrollHeight > el.clientHeight + 1) {
-      setOverflows(true);
-    }
-  }, [expanded, visible]);
+    if (!el || !visible) return;
+    const measure = () =>
+      setOverflows(!expanded && el.scrollHeight > el.clientHeight + 1);
+    measure();
+    if (typeof ResizeObserver !== "function") return;
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [expanded, visible, text]);
   return (
     <div className="relative">
       <pre
