@@ -166,11 +166,12 @@ export function BotToolCard({
         )}
       </div>
       {call?.error_message && (
-        <p className="text-xs text-destructive [unicode-bidi:isolate]">
-          {call.error_code ? `${call.error_code}: ` : ""}
-          {/* error_message 本身可能内嵌 [code] 前缀（AppError.Error 格式），
-              与 error_code 并列时会显示成 e40001: [40001] 双码，剥掉；
-              error_code 缺失时不剥——以 [数字] 开头的正常消息不是双码。 */}
+        // 错误码是排查用的内部标识，收进 title 而不是直接露出（视觉审查）；
+        // message 内嵌的 [code] 前缀（AppError.Error 格式）同样剥掉。
+        <p
+          title={call.error_code ?? undefined}
+          className="text-xs text-destructive [unicode-bidi:isolate]"
+        >
           {bidiSafeText(
             call.error_code
               ? call.error_message.replace(/^\[\d+\]\s*/, "")

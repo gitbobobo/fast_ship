@@ -99,7 +99,11 @@ describe("BotToolCard", () => {
         effect_may_have_occurred: true,
       }),
     );
-    expect(screen.getByText(/model_error: 上游 502/)).toBeInTheDocument();
+    // 错误码收进 title 提示，正文只显示消息本身（视觉审查：双码与原始
+    // 码不外露）。
+    const errText = screen.getByText("上游 502");
+    expect(errText).toBeInTheDocument();
+    expect(errText).toHaveAttribute("title", "model_error");
     expect(screen.getByText(/副作用可能已经发生/)).toBeInTheDocument();
     expect(screen.getByTestId("bot-call-status")).toHaveTextContent("失败");
   });

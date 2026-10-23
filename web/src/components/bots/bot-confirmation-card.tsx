@@ -145,6 +145,19 @@ function ScheduleConfirmSummary({ call }: { call: BotCall }) {
 // 原始参数块：参数 chips + 完整 JSON。schedule 卡把它折叠收起（上面的
 // 服务端摘要才是唯一权威视图，同一份配置不重复铺三遍），其余确认卡
 // 默认展开——整组替换（replace_checklist 等）必须看清完整内容才能批准。
+// JSON 区限高滚动，底部渐隐遮罩提示还有内容（视觉审查），不再拦腰裁切
+// 得像渲染出错。
+function JsonBlock({ text }: { text: string }) {
+  return (
+    <div className="relative">
+      <pre className="max-h-72 overflow-auto rounded-lg bg-background/80 p-2 pb-6 font-mono text-xs whitespace-pre-wrap break-all [unicode-bidi:isolate]">
+        {bidiSafeText(text)}
+      </pre>
+      <div className="pointer-events-none absolute inset-x-0 bottom-0 h-6 rounded-b-lg bg-gradient-to-t from-background/90 to-transparent" />
+    </div>
+  );
+}
+
 function RawParams({
   chips,
   argPretty,
@@ -155,11 +168,7 @@ function RawParams({
   return (
     <>
       <ParamChips chips={chips} />
-      {argPretty && (
-        <pre className="max-h-72 overflow-auto rounded-lg bg-background/80 p-2 font-mono text-xs whitespace-pre-wrap break-all [unicode-bidi:isolate]">
-          {bidiSafeText(argPretty)}
-        </pre>
-      )}
+      {argPretty && <JsonBlock text={argPretty} />}
     </>
   );
 }
@@ -308,19 +317,11 @@ export function BotConfirmationCard({
                 查看原始参数
               </summary>
               <div className="pt-2">
-                {argPretty && (
-                  <pre className="max-h-72 overflow-auto rounded-lg bg-background/80 p-2 font-mono text-xs whitespace-pre-wrap break-all [unicode-bidi:isolate]">
-                    {bidiSafeText(argPretty)}
-                  </pre>
-                )}
+                {argPretty && <JsonBlock text={argPretty} />}
               </div>
             </details>
           ) : (
-            argPretty && (
-              <pre className="max-h-72 overflow-auto rounded-lg bg-background/80 p-2 font-mono text-xs whitespace-pre-wrap break-all [unicode-bidi:isolate]">
-                {bidiSafeText(argPretty)}
-              </pre>
-            )
+            argPretty && <JsonBlock text={argPretty} />
           )}
           <DecisionButtons
             callId={call.id}
