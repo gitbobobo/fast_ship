@@ -1,9 +1,10 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { Link } from "react-router";
 import { ChevronDown, ChevronUp, Wrench } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ApiRequestError } from "@/lib/api/client";
 import { botApi, type BotCall } from "@/lib/api/bots";
+import { cn } from "@/lib/utils";
 import {
   bidiSafeText,
   toolActionLabel,
@@ -45,12 +46,45 @@ export const STATUS_BADGE: Record<string, string> = {
   not_executed: "bg-muted text-muted-foreground",
 };
 
+// 失败文案里内联的参数字段名（snake_case/dotted.path/key=value）用等宽
+// 样式与中文文案区分——长句逐词解析成本高，定位错误参数靠字段名一眼
+// 可辨（视觉审查）。字段名原文保留：bot 自校正需要精确字段。
+// 第三分支匹配行首「- 」清单里的裸字段名（如 branch 没有下划线/点，前两个
+// 分支不命中，与相邻 chip 化的字段并排时显得缺空格，视觉审查 minor）。
+// 用捕获组而非 lookbehind：Safari <16.4 对 lookbehind 直接 SyntaxError。
+const ERROR_FIELD_TOKEN =
+  /[a-z][a-z0-9]*(?:_[a-z0-9]+)+(?:\.[a-z0-9_[\]]+)*(?:=[^\s，。；、]+)?|(?:[a-z][a-z0-9_]*\.)+[a-z0-9_[\]]+(?:=[^\s，。；、]*)?|(?:^|\n)- ([a-z][a-z0-9_.]*)/g;
+
+export function renderErrorMessage(text: string): ReactNode {
+  const out: ReactNode[] = [];
+  let last = 0;
+  let i = 0;
+  for (const m of text.matchAll(ERROR_FIELD_TOKEN)) {
+    // 第三分支的 m[0] 含行首「- 」前缀，chip 只取捕获组，横线留在正文里。
+    const token = m[1] ?? m[0];
+    const idx = m[1] ? (m.index ?? 0) + m[0].length - m[1].length : (m.index ?? 0);
+    if (idx > last) out.push(bidiSafeText(text.slice(last, idx)));
+    out.push(
+      <code
+        key={i++}
+        className="rounded bg-foreground/[0.07] px-1 py-px font-mono [unicode-bidi:isolate]"
+      >
+        {token}
+      </code>,
+    );
+    last = idx + token.length;
+  }
+  if (last < text.length) out.push(bidiSafeText(text.slice(last)));
+  return out;
+}
+
 /** 参数 chip：短标识能拼出站内外路由时渲染为链接，完整值进 title。 */
 export function ParamChipView({ chip }: { chip: ToolParamChip }) {
   const inner = (
     <>
-      <span className="text-muted-foreground">{chip.label}</span>
-      <span className="font-mono [unicode-bidi:isolate]">
+      <span className="shrink-0 whitespace-nowrap text-muted-foreground">{chip.label}</span>
+      {/* chip 可撑满整行，只有真放不下才截断，完整值在 title（视觉审查） */}
+      <span className="min-w-0 truncate font-mono [unicode-bidi:isolate]">
         {bidiSafeText(chip.value)}
       </span>
     </>
@@ -60,7 +94,7 @@ export function ParamChipView({ chip }: { chip: ToolParamChip }) {
       <Link
         to={chip.href}
         title={chip.title === undefined ? undefined : bidiSafeText(chip.title)}
-        className="inline-flex items-center gap-1 rounded-md border bg-background/60 px-1.5 py-0.5 text-xs text-primary hover:border-primary/50 hover:underline"
+        className="inline-flex max-w-full items-center gap-1 rounded-md border bg-background/60 px-1.5 py-0.5 text-xs text-primary hover:border-primary/50 hover:underline"
       >
         {inner}
       </Link>
@@ -69,7 +103,10 @@ export function ParamChipView({ chip }: { chip: ToolParamChip }) {
   return (
     <span
       title={chip.title === undefined ? undefined : bidiSafeText(chip.title)}
-      className="inline-flex items-center gap-1 rounded-md border bg-background/60 px-1.5 py-0.5 text-xs"
+      className={cn(
+        "inline-flex max-w-full items-center gap-1 rounded-md border bg-background/60 px-1.5 py-0.5 text-xs",
+        chip.tone === "warn" && "border-amber-500/50 text-amber-700 dark:text-amber-400",
+      )}
     >
       {inner}
     </span>
@@ -99,11 +136,14 @@ export function BotToolCard({
   call,
   onCancel,
   cancelling = false,
+  subtitle,
 }: {
   botId: string;
   call?: BotCall;
   onCancel?: (callId: string) => void;
   cancelling?: boolean;
+  /** 后台调用列表里的区分副文本（多张同名卡并排时需要认出是哪一次）。 */
+  subtitle?: string;
 }) {
   const [showResult, setShowResult] = useState(false);
   const [fullResult, setFullResult] = useState<string | null>(null);
@@ -160,10 +200,22 @@ export function BotToolCard({
           </Button>
         )}
       </div>
+      {subtitle && (
+        <p className="text-xs text-muted-foreground [unicode-bidi:isolate]">
+          {bidiSafeText(subtitle)}
+        </p>
+      )}
       {call?.error_message && (
-        <p className="text-xs text-destructive [unicode-bidi:isolate]">
-          {call.error_code ? `${call.error_code}: ` : ""}
-          {bidiSafeText(call.error_message)}
+        // 错误码是排查用的内部标识，收进 title 而不是直接露出（视觉审查）；
+        // message 内嵌的 [NNNNN] 前缀（AppError.Error 格式，码恒为 5 位）
+        // 一律剥掉：有 error_code 时避免 e40001: [40001] 双码，历史数据
+        // error_code 缺失时前缀也不外露。只剥 5 位码格式，[数字] 开头的
+        // 正常消息不受影响。
+        <p
+          title={call.error_code ?? undefined}
+          className="text-xs text-destructive whitespace-pre-wrap [unicode-bidi:isolate]"
+        >
+          {renderErrorMessage(call.error_message.replace(/^\[\d{5}\]\s*/, ""))}
         </p>
       )}
       {call?.effect_may_have_occurred && (

@@ -1,6 +1,24 @@
 import { ListChecks } from "lucide-react";
 import type { BotCall } from "@/lib/api/bots";
+import { toolParamChips } from "@/lib/bots/tool-labels";
 import { BotToolCard } from "./bot-tool-card";
+
+/** 后台列表多行同名卡片并排时的区分副文本：消息正文截前 24 字优先，
+ *  无正文回退参数 chip 摘要（工作区/分支等生效取值）。 */
+function callSubtitle(call: BotCall): string | undefined {
+  const args = call.arguments;
+  if (args === null || typeof args !== "object") return undefined;
+  const text = args["text"];
+  if (typeof text === "string" && text.trim() !== "") {
+    const t = text.trim();
+    return t.length > 24 ? `${t.slice(0, 24)}…` : t;
+  }
+  const joined = toolParamChips(call.tool_name, args, call.action)
+    .map((c) => c.value)
+    .slice(0, 3)
+    .join(" · ");
+  return joined === "" ? undefined : joined;
+}
 
 /**
  * 后台调用列表：异步且未终结的调用（含待确认）集中展示，逐项可取消。
@@ -38,6 +56,7 @@ export function BotBackgroundCalls({
           call={call}
           cancelling={busyCallId === call.id}
           onCancel={onCancel}
+          subtitle={callSubtitle(call)}
         />
       ))}
       {actionError !== undefined && actionError !== null && (

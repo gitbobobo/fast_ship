@@ -48,7 +48,9 @@ describe("toolActionLabel", () => {
   it("未知工具或 action 回退为原始标识，不抛错", () => {
     expect(toolActionLabel("fs_xxx", "do")).toBe("fs_xxx.do");
     expect(toolActionLabel("fs_issue", "explode")).toBe("fs_issue.explode");
-    expect(toolActionLabel("", "")).toBe(".");
+    // 受理即拒的调用可能没解析出 action：空 action 回退为裸工具名。
+    expect(toolActionLabel("fs_thread", "")).toBe("fs_thread");
+    expect(toolActionLabel("", "")).toBe("");
   });
 });
 
@@ -110,7 +112,7 @@ describe("toolParamChips", () => {
     });
     const issue = chips.find((c) => c.key === "issue_id");
     expect(issue).toBeDefined();
-    expect(issue!.value).toBe("abcdef12…");
+    expect(issue!.value).toBe("abcdef1234567890");
     expect(issue!.title).toBe("abcdef1234567890");
     expect(issue!.href).toBe("/projects/proj-0001/issues/abcdef1234567890");
     const project = chips.find((c) => c.key === "project_id");
@@ -131,6 +133,98 @@ describe("toolParamChips", () => {
     const text = chips.find((c) => c.key === "text");
     expect(text!.value.endsWith("…")).toBe(true);
     expect(text!.title).toBe(long);
+  });
+
+  it("launch/send 的 text 不进 chip（确认卡整块平铺），无 action 时仍出", () => {
+    const launch = toolParamChips("fs_thread", {
+      action: "launch",
+      env_id: "env-1",
+      text: "调查这个仓库",
+    });
+    expect(launch.find((c) => c.key === "text")).toBeUndefined();
+    const send = toolParamChips("fs_thread", {
+      action: "send",
+      env_id: "env-1",
+      text: "回复内容",
+    });
+    expect(send.find((c) => c.key === "text")).toBeUndefined();
+    const noAction = toolParamChips("fs_thread", { env_id: "env-1", text: "正文" });
+    expect(noAction.find((c) => c.key === "text")).toBeDefined();
+  });
+
+  it("workspace 拆字段 chip：各自折行不互相截断（窄屏视觉审查）", () => {
+    const chips = toolParamChips("fs_thread", {
+      workspace: {
+        type: "worktree",
+        branch: "feat-x",
+        base_ref: "main",
+        start_from_origin: true,
+      },
+    });
+    const byKey = new Map(chips.map((c) => [c.key, c.value]));
+    expect(byKey.get("workspace")).toBe("新工作树");
+    expect(byKey.get("workspace.branch")).toBe("feat-x");
+    expect(byKey.get("workspace.base_ref")).toBe("main");
+    expect(byKey.get("workspace.start")).toBe("origin");
+
+    const existing = toolParamChips("fs_thread", {
+      workspace: {
+        type: "existing_worktree",
+        worktree_path: "/a/b/c/d",
+        branch: "fix",
+      },
+    });
+    const eKeys = new Map(existing.map((c) => [c.key, c.value]));
+    expect(eKeys.get("workspace")).toBe("已有工作树");
+    expect(eKeys.get("workspace.path")).toBe("/a/b/c/d");
+    expect(eKeys.get("workspace.branch")).toBe("fix");
+
+    // 长路径中段省略保留首尾目录（尾段区分、首段给根上下文），完整
+    // 路径仍在 title（视觉审查：截首只剩尾部不可核对）。
+    const longPath =
+      "/Users/dev/repos/monorepo/packages/service-a/worktrees/hotfix-login-flow-regression-20261015";
+    const longChips = toolParamChips("fs_thread", {
+      workspace: { type: "existing_worktree", worktree_path: longPath },
+    });
+    const pathChip = longChips.find((c) => c.key === "workspace.path")!;
+    expect(pathChip.value).toBe("/Users/dev/repos/monorepo…/hotfix-login-flow-regression-20261015");
+    expect(pathChip.title).toBe(longPath);
+
+    const bare = toolParamChips("fs_thread", {
+      workspace: { type: "worktree" },
+    });
+    expect(bare.map((c) => c.key)).toEqual(["workspace"]);
+    expect(bare[0]!.value).toBe("新工作树");
+
+    // start_from_origin:null 与省略同口径（服务端 null=缺省），不出
+    // 「起点：本地」chip——显示了等于谎称显式传了 false（代码审查 P2）。
+    const nullStart = toolParamChips("fs_thread", {
+      workspace: { type: "worktree", start_from_origin: null },
+    });
+    expect(nullStart.map((c) => c.key)).toEqual(["workspace"]);
+    const falseStart = toolParamChips("fs_thread", {
+      workspace: { type: "worktree", start_from_origin: false },
+    });
+    expect(falseStart.find((c) => c.key === "workspace.start")?.value).toBe("本地");
+  });
+
+  it("launch 缺省 runtime_mode 也给「完全访问（缺省）」警示 chip", () => {
+    const chips = toolParamChips(
+      "fs_thread",
+      { action: "launch", env_id: "e", project_id: "p", text: "x" },
+      "launch",
+    );
+    const rt = chips.find((c) => c.key === "runtime_mode");
+    expect(rt).toBeDefined();
+    expect(rt!.value).toBe("完全访问（缺省）");
+    expect(rt!.tone).toBe("warn");
+    // send 不带 runtime_mode 字段语义，不出缺省 chip；非 launch 同。
+    const send = toolParamChips(
+      "fs_thread",
+      { action: "send", env_id: "e", project_id: "p", text: "x" },
+      "send",
+    );
+    expect(send.find((c) => c.key === "runtime_mode")).toBeUndefined();
   });
 
   it("次要参数（分页/乐观锁/action 自身）不进 chips", () => {
@@ -159,7 +253,7 @@ describe("toolParamChips", () => {
       whatever: { nested: true },
     });
     expect(chips.map((c) => c.key)).toEqual(["call_id"]);
-    expect(chips[0]!.value).toBe("call-123…");
+    expect(chips[0]!.value).toBe("call-123456789");
     expect(chips[0]!.href).toBeUndefined();
   });
 

@@ -322,12 +322,29 @@ func (s *BotService) buildAlwaysAllowValue(botID string, call *model.BotToolCall
 	envID := execCtx.EnvID
 	var fields []string
 	if len(execCtx.Fields) > 0 {
-		fields = execCtx.Fields
+		// presentFields 返回声明序，botRuleOf 走排序口径——重建规则前
+		// 必须同序，否则多字段调用的规则哈希永远对不上、always-allow
+		// 静默失效成重复弹确认（代码审查 P2）。
+		fields = append([]string{}, execCtx.Fields...)
+		sort.Strings(fields)
 	}
-	constraintsRaw, _ := json.Marshal(map[string]interface{}{"fields": fields})
-	if fields == nil {
-		constraintsRaw, _ = json.Marshal(map[string]interface{}{})
+	constraints := map[string]interface{}{}
+	if fields != nil {
+		constraints["fields"] = fields
 	}
+	// 参数值级约束与规范化执行配置一并落库：只有 RuleHash 里带摘要时，
+	// 授权管理面无法区分同 action 的不同取值规则、审计无法自证「按值
+	// 精确授权」（代码审查 P2）。
+	if execCtx.Param != "" {
+		constraints["param"] = execCtx.Param
+	}
+	if execCtx.ExecConfig != "" {
+		var cfg interface{}
+		if err := json.Unmarshal([]byte(execCtx.ExecConfig), &cfg); err == nil {
+			constraints["exec_config"] = cfg
+		}
+	}
+	constraintsRaw, _ := json.Marshal(constraints)
 	rule := botAuthorizationRule{
 		ToolName:      call.ToolName,
 		Action:        call.Action,
