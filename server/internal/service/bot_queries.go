@@ -212,6 +212,23 @@ type BotChatSnapshot struct {
 	MaintenanceProgress *BotMaintenanceProgress `json:"maintenance_progress,omitempty"`
 }
 
+// listAllAttentionCalls 分页取全本机器人「终态但需留意」的调用
+// （副作用警示或错误信息），页大小与未终态扫描一致。
+func listAllAttentionCalls(tx *gorm.DB, botID string) ([]model.BotToolCall, error) {
+	repo := repository.NewBotToolCallRepository(tx)
+	all := make([]model.BotToolCall, 0, 8)
+	for {
+		page, err := repo.ListAttentionByBotPage(botID, len(all), 200)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, page...)
+		if len(page) < 200 {
+			return all, nil
+		}
+	}
+}
+
 // listAllUnfinishedCalls 分页取全本机器人未终态调用（页大小 200，按
 // created_at/id 游标推进）。
 func listAllUnfinishedCalls(tx *gorm.DB, botID string) ([]model.BotToolCall, error) {
@@ -303,7 +320,23 @@ func (s *BotService) GetChatSnapshot(userID, botID string, messageLimit int) (*B
 			return err
 		}
 		seen := map[string]bool{}
+		for _, c := range callRows {
+			seen[c.ID] = true
+		}
 		for _, c := range unfinished {
+			if !seen[c.ID] {
+				seen[c.ID] = true
+				snap.Calls = append(snap.Calls, botToolCallResponseOf(&c))
+			}
+		}
+		// 终态但「需留意」的调用同样全量收录（INT-157 复审）：取消写
+		// 调用的副作用警示与失败原因只有工具卡/结果消息这些出口，
+		// 最近 100 条窗口漏掉它们等于把安全提示藏死。
+		attention, err := listAllAttentionCalls(tx, botID)
+		if err != nil {
+			return err
+		}
+		for _, c := range attention {
 			if !seen[c.ID] {
 				seen[c.ID] = true
 				snap.Calls = append(snap.Calls, botToolCallResponseOf(&c))

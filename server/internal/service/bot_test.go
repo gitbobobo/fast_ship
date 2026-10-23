@@ -2080,6 +2080,51 @@ func TestBotChatSnapshotConsistent(t *testing.T) {
 	}
 }
 
+// INT-157 复审 P2：终态但「需留意」的调用（副作用警示/错误信息）超出
+// 最近 100 条窗口后仍要进快照——它们的警示/失败原因在前端只有
+// 工具卡与结果消息这些出口，窗口漏掉等于藏死安全提示。
+func TestBotChatSnapshotAttentionCallsBeyondWindow(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "botsnapatt")
+	bot := env.createBot(t, userID)
+
+	// 一条带副作用警示的已取消调用排在最早。
+	now := time.Now().UTC()
+	_, warnCallID := seedBotCallFixture(t, env, bot.ID, model.BotCallStatusCancelled, string(model.BotExecutionSync))
+	if err := env.db.Model(&model.BotToolCall{}).Where("id = ?", warnCallID).
+		Updates(map[string]interface{}{
+			"effect_may_have_occurred": true,
+			"finished_at":              now,
+		}).Error; err != nil {
+		t.Fatalf("flag warn call: %v", err)
+	}
+	// 101 条干净的终态调用把它挤出最近 100 条窗口。
+	for i := 0; i < 101; i++ {
+		_, callID := seedBotCallFixture(t, env, bot.ID, model.BotCallStatusSucceeded, string(model.BotExecutionSync))
+		if err := env.db.Model(&model.BotToolCall{}).Where("id = ?", callID).
+			Update("finished_at", now).Error; err != nil {
+			t.Fatalf("finish call: %v", err)
+		}
+	}
+
+	snap, err := env.bots.GetChatSnapshot(userID, bot.ID, 50)
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	found := false
+	for _, c := range snap.Calls {
+		if c.ID == warnCallID {
+			found = true
+			if !c.EffectMayHaveOccurred {
+				t.Fatalf("警示字段应随快照下发: %+v", c)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("警示调用被挤出窗口后仍应收录进快照")
+	}
+}
+
 func TestBotRecoveryQueuedSyncCall(t *testing.T) {
 	env := setupBotTestEnv(t)
 	userID := createBotTestUser(t, env.db, "botqsync")

@@ -51,8 +51,10 @@ function ScheduleEventView({ message }: { message: BotMessage }) {
   const errorCode = message.content.error_code;
   const errorMessage = message.content.error_message;
   // 详情口径与弹窗错误块保持一致：仅 error_code 的失败事件也要可点，
-  // 否则错误码无处可看。
-  const hasDetail = Boolean(summary || errorMessage || errorCode);
+  // 否则错误码无处可看；全空白字段不算详情（点开空弹窗没有意义）。
+  const hasDetail = Boolean(
+    summary.trim() || errorMessage?.trim() || errorCode?.trim(),
+  );
   const line = (
     <>
       定时任务「
