@@ -2109,6 +2109,16 @@ func TestBotChatSnapshotReferencedCallsBeyondWindow(t *testing.T) {
 		}).Error; err != nil {
 		t.Fatalf("flag orphan call: %v", err)
 	}
+	// 第三条警示调用只被 background_result 消息引用（其声明的
+	// assistant 回合在窗口外）：人话行渲染同样靠 calls.find 命中。
+	_, bgRefCallID := seedBotCallFixture(t, env, bot.ID, model.BotCallStatusFailed, string(model.BotExecutionAsync))
+	if err := env.db.Model(&model.BotToolCall{}).Where("id = ?", bgRefCallID).
+		Updates(map[string]interface{}{
+			"error_message": "worker 异常退出",
+			"finished_at":   now,
+		}).Error; err != nil {
+		t.Fatalf("flag bg ref call: %v", err)
+	}
 	msgSeq, err := repository.NewBotRepository(env.db).NextMessageSeqTx(env.db, bot.ID)
 	if err != nil {
 		t.Fatalf("seq: %v", err)
@@ -2126,6 +2136,21 @@ func TestBotChatSnapshotReferencedCallsBeyondWindow(t *testing.T) {
 		CreatedAt: now,
 	}); err != nil {
 		t.Fatalf("append ref message: %v", err)
+	}
+	bgSeq, err := repository.NewBotRepository(env.db).NextMessageSeqTx(env.db, bot.ID)
+	if err != nil {
+		t.Fatalf("seq: %v", err)
+	}
+	bgContent, _ := json.Marshal(botBackgroundResultContent{
+		CallID: bgRefCallID, ToolName: "fs_schedule", Action: "create",
+		Status: string(model.BotCallStatusFailed),
+	})
+	if err := repository.NewBotMessageRepository(env.db).AppendTx(env.db, &model.BotMessage{
+		ID: uuid.NewString(), BotID: bot.ID, Seq: bgSeq,
+		Kind: model.BotMessageKindBackgroundResult, ContentJSON: string(bgContent),
+		CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("append bg message: %v", err)
 	}
 	// 101 条干净的终态调用把两条警示调用都挤出最近 100 条窗口。
 	for i := 0; i < 101; i++ {
@@ -2146,6 +2171,9 @@ func TestBotChatSnapshotReferencedCallsBeyondWindow(t *testing.T) {
 	}
 	if !found[warnCallID] {
 		t.Fatalf("窗口内消息引用的警示调用应收录进快照")
+	}
+	if !found[bgRefCallID] {
+		t.Fatalf("仅被 background_result 引用的调用也应收录（人话行渲染依赖）")
 	}
 	if got := found[orphanCallID]; got {
 		t.Fatalf("未被消息引用的警示调用不应进快照（快照须随窗口有界）")

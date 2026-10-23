@@ -318,19 +318,30 @@ func (s *BotService) GetChatSnapshot(userID, botID string, messageLimit int) (*B
 		// 等于把安全提示藏死（INT-157 复审）。只补窗口内引用——无引用
 		// 的调用前端不渲染，全量历史收录会让快照随机器人历史无限膨胀。
 		var missing []string
+		collect := func(id string) {
+			if id != "" && !seen[id] {
+				seen[id] = true
+				missing = append(missing, id)
+			}
+		}
 		for i := range msgs {
-			if msgs[i].Kind != model.BotMessageKindAssistant {
-				continue
-			}
-			var ac botAssistantContent
-			if json.Unmarshal([]byte(msgs[i].ContentJSON), &ac) != nil {
-				continue
-			}
-			for _, tc := range ac.ToolCalls {
-				if tc.CallID != "" && !seen[tc.CallID] {
-					seen[tc.CallID] = true
-					missing = append(missing, tc.CallID)
+			if msgs[i].Kind == model.BotMessageKindAssistant {
+				var ac botAssistantContent
+				if json.Unmarshal([]byte(msgs[i].ContentJSON), &ac) != nil {
+					continue
 				}
+				for _, tc := range ac.ToolCalls {
+					collect(tc.CallID)
+				}
+				continue
+			}
+			// background_result/tool_reply/approval_decision 的顶层 call_id
+			// 同样被前端按引用渲染（如 fs_schedule 人话行），一并补齐。
+			var ref struct {
+				CallID string `json:"call_id"`
+			}
+			if json.Unmarshal([]byte(msgs[i].ContentJSON), &ref) == nil {
+				collect(ref.CallID)
 			}
 		}
 		if len(missing) > 0 {
