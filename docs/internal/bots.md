@@ -1392,8 +1392,10 @@ null），给三栏工作台的左侧列表当预览列。语义与约束：
 - **定时任务事件一行居中**：`schedule_event` 渲染为居中一行
   「定时任务「name」<状态>」，summary/error 不再内联；有详情时行渲染
   为胶囊形按钮（图标 + 后缀箭头，悬停有底色），点开弹窗内 summary 走
-  `BotMarkdown`、error 以 destructive 样式展示。无摘要无错误的事件行
-  保持朴素灰字不可点（跳过/静默），两种形态视觉可分。模型可写文本
+  `BotMarkdown`、error_message 为主信息、error_code 降级次级小字。
+  summary/error_message/error_code 任一非空即可点——仅 error_code 的
+  失败事件也要让唯一排查线索可达；三者皆空的事件行保持朴素灰字不可点，
+  两种形态视觉可分。模型可写文本
   （task_name/summary/error）仍经 bidiSafeText + `unicode-bidi:isolate`
   处理。
 - **侧边栏直跳上次聊天**：`fast-ship-last-bot`（zustand persist）记录

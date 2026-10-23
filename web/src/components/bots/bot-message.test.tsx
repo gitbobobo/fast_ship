@@ -83,6 +83,24 @@ describe("BotMessageView schedule_event", () => {
     expect(screen.getByText("错误码：model_request_failed")).toBeInTheDocument();
   });
 
+  it("仅 error_code（无 error_message/summary）的失败事件仍可点，错误码在弹窗可见", async () => {
+    const user = userEvent.setup();
+    renderMessage({
+      ...completedEvent,
+      content: {
+        ...completedEvent.content,
+        status: "failed",
+        summary: "",
+        error_code: "schedule_conflict",
+      },
+    });
+
+    await user.click(screen.getByTestId("bot-schedule-event-detail"));
+    expect(
+      screen.getByText("错误码：schedule_conflict"),
+    ).toBeInTheDocument();
+  });
+
   it("无摘要也无错误的事件行不可点", () => {
     renderMessage({
       ...completedEvent,
