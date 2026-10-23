@@ -326,17 +326,19 @@ export function BotConfirmationCard({
           )}
           <ParamChips chips={chips} />
           {call.tool_name === "fs_thread" ? (
-            <details
-              data-testid="bot-thread-raw-params"
-              className="text-xs"
-            >
-              <summary className="cursor-pointer select-none text-muted-foreground hover:text-foreground">
-                查看原始参数
-              </summary>
-              <div className="pt-2">
-                {argPretty && <JsonBlock text={argPretty} />}
-              </div>
-            </details>
+            argPretty !== "" && (
+              <details
+                data-testid="bot-thread-raw-params"
+                className="text-xs"
+              >
+                <summary className="cursor-pointer select-none text-muted-foreground hover:text-foreground">
+                  查看原始参数
+                </summary>
+                <div className="pt-2">
+                  <JsonBlock text={argPretty} />
+                </div>
+              </details>
+            )
           ) : (
             argPretty && <JsonBlock text={argPretty} />
           )}

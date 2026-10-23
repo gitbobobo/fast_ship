@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -203,6 +205,12 @@ func (s *BotService) resolveThreadScope(prepared *botPreparedCall, raw map[strin
 		prepared.ScopeKind = botScopeThreadLaunch
 		prepared.ScopeID = rawString(raw["project_id"])
 		prepared.EnvironmentID = &envID
+		// 执行配置参与授权（代码审查 P2）：同一「始终允许」只覆盖相同配置
+		// 的 launch——换模型/运行模式/工作区都重新确认。字段集合绑定出现的
+		// 字段名，取值摘要绑定具体值：只绑字段拦不住 runtime_mode 从
+		// approval-required 换成 full-access 这类同字段不同值的提权。
+		prepared.FieldsConstraint = presentFields(raw, "model_selection", "runtime_mode", "workspace")
+		prepared.ParamConstraint = "exec=" + botThreadExecConfigDigest(raw)
 	case "send":
 		prepared.ScopeKind = botScopeThread
 		prepared.ScopeID = rawString(raw["thread_id"])
@@ -222,6 +230,20 @@ func (s *BotService) resolveThreadScope(prepared *botPreparedCall, raw map[strin
 		prepared.ScopeID = rawString(raw["thread_id"])
 		prepared.EnvironmentID = &envID
 	}
+}
+
+// botThreadExecConfigDigest 摘要 launch 的执行配置取值（参数级授权约束）：
+// 模型/选项键序、运行模式、工作区各字段按固定顺序取原始 JSON 参与哈希，
+// 任何取值差异（含显式传默认值与省略的差别）都让规则哈希不同。
+func botThreadExecConfigDigest(raw map[string]json.RawMessage) string {
+	h := sha256.New()
+	for _, key := range []string{"model_selection", "runtime_mode", "workspace"} {
+		h.Write([]byte{0})
+		if v, ok := raw[key]; ok && string(v) != "null" {
+			h.Write(v)
+		}
+	}
+	return hex.EncodeToString(h.Sum(nil)[:8])
 }
 
 // buildThreadExecIDs 在受理时为写操作生成 T3 幂等身份（不让模型指定）。
@@ -733,6 +755,15 @@ var botThreadLaunchNestedKeys = map[string][]string{
 }
 
 func botValidateThreadLaunchNestedKeys(raw map[string]json.RawMessage) error {
+	// runtime_mode 显式空串受理即拒：与 workspace.type="" 同一口径，「字段
+	// 缺失」与「字段为空」不等价——空串不能让模型误以为指定了某个模式
+	//（实则会静默落 full-access 缺省，代码审查）。
+	if blob, ok := raw["runtime_mode"]; ok && string(blob) != "null" {
+		var mode string
+		if err := json.Unmarshal(blob, &mode); err == nil && strings.TrimSpace(mode) == "" {
+			return errs.New(errs.ErrInvalidParams.Code, "runtime_mode 不接受空字符串；不需要指定时省略整个字段（缺省为 full-access）")
+		}
+	}
 	for field, allowed := range botThreadLaunchNestedKeys {
 		blob, ok := raw[field]
 		if !ok {
@@ -859,17 +890,25 @@ func botSlimComposerOptionDescriptors(raw any) []map[string]interface{} {
 		if id == "" {
 			continue
 		}
+		// 只保留机器人能回填的类型（select/boolean；缺省 type 但带 choices
+		// 的按 select 计）：number 等其它类型 launch 受理不接受，列出来只会
+		// 引导模型发起注定被拒的调用（代码审查）。
+		typ, _ := d["type"].(string)
+		choices := botSlimComposerChoices(d["options"])
+		if typ != "select" && typ != "boolean" && (typ != "" || len(choices) == 0) {
+			continue
+		}
 		entry := map[string]interface{}{"id": id}
 		if label, _ := d["label"].(string); label != "" {
 			entry["label"] = label
 		}
-		if typ, _ := d["type"].(string); typ != "" {
+		if typ != "" {
 			entry["type"] = typ
 		}
 		if v, ok := d["currentValue"]; ok && v != nil {
 			entry["current_value"] = v
 		}
-		if choices := botSlimComposerChoices(d["options"]); len(choices) > 0 {
+		if len(choices) > 0 {
 			entry["choices"] = choices
 		}
 		out = append(out, entry)

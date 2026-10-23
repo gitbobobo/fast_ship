@@ -448,3 +448,48 @@ func TestBotInt159LaunchConfigAccepted(t *testing.T) {
 		t.Fatalf("v10 launch 应受理: %v", err)
 	}
 }
+
+// INT-159 授权绑定：launch 的「始终允许」按项目 + 执行配置取值精确授权，
+// 换配置组合要重新确认，同配置不同正文复用授权（代码审查 P2）。
+func TestBotInt159LaunchAuthzBindsExecConfig(t *testing.T) {
+	svc := &BotService{}
+	hashOf := func(argsJSON string) string {
+		raw := map[string]json.RawMessage{}
+		if err := json.Unmarshal([]byte(argsJSON), &raw); err != nil {
+			t.Fatalf("bad args: %v", err)
+		}
+		p := &botPreparedCall{ToolName: "fs_thread", Action: "launch"}
+		svc.resolveThreadScope(p, raw)
+		return botRuleHash(botRuleOf(p))
+	}
+	bare := `{"env_id":"e","project_id":"p","text":"任务一"}`
+	fullAccess := `{"env_id":"e","project_id":"p","text":"任务一","runtime_mode":"full-access"}`
+	fullAccessOtherText := `{"env_id":"e","project_id":"p","text":"任务二","runtime_mode":"full-access"}`
+	approval := `{"env_id":"e","project_id":"p","text":"任务一","runtime_mode":"approval-required"}`
+	otherModel := `{"env_id":"e","project_id":"p","text":"任务一","runtime_mode":"full-access","model_selection":{"instance_id":"i","model":"m2"}}`
+	if hashOf(bare) == hashOf(fullAccess) {
+		t.Fatalf("带与不带执行配置的 launch 不得共用授权")
+	}
+	if hashOf(fullAccess) != hashOf(fullAccessOtherText) {
+		t.Fatalf("同配置不同正文的 launch 应复用同一授权（正文不进约束）")
+	}
+	if hashOf(fullAccess) == hashOf(approval) {
+		t.Fatalf("同字段不同 runtime_mode 取值不得共用授权（防提权放行）")
+	}
+	if hashOf(fullAccess) == hashOf(otherModel) {
+		t.Fatalf("换模型不得共用授权")
+	}
+}
+
+// INT-159 受理侧：runtime_mode 显式空串与非枚举同口径拒掉（缺失与为空
+// 不等价——空串会静默落 full-access 缺省）。
+func TestBotInt159RuntimeModeEmptyRejected(t *testing.T) {
+	v12 := botToolsetVersionOf(12)
+	base := `"action":"launch","env_id":"e","project_id":"p","text":"x"`
+	if _, err := botPrepareToolCall(v12, "fs_thread", "{"+base+`,"runtime_mode":""}`); err == nil {
+		t.Fatalf("runtime_mode 空串应受理即拒")
+	}
+	if _, err := botPrepareToolCall(v12, "fs_thread", "{"+base+`,"runtime_mode":"  "}`); err == nil {
+		t.Fatalf("runtime_mode 空白串应受理即拒")
+	}
+}
