@@ -4,6 +4,7 @@ import {
   CheckCircle2,
   ChevronRight,
   Info,
+  Wrench,
   XCircle,
 } from "lucide-react";
 import type {
@@ -24,7 +25,12 @@ import {
 import { cn } from "@/lib/utils";
 import { BotConfirmationCard } from "./bot-confirmation-card";
 import { BotMarkdown } from "./bot-markdown";
-import { BotToolCard } from "./bot-tool-card";
+import {
+  BotToolCard,
+  callStatusLabel,
+  STATUS_BADGE,
+} from "./bot-tool-card";
+import { toolActionLabel } from "@/lib/bots/tool-labels";
 
 const DECISION_LABELS: Record<string, string> = {
   approve: "已批准",
@@ -241,12 +247,30 @@ export function BotMessageView({
     // 原样当正文；找不到调用或 schedule 拼不出摘要时才触发 JSON 兜底。
     const hideRawSummary =
       Boolean(humanLine) || ((!call || isScheduleCall) && summaryLooksJson);
+    const toolTitle =
+      message.content.tool_name
+        ? toolActionLabel(
+            message.content.tool_name,
+            message.content.action ?? "",
+          )
+        : "";
     return (
       <section className="space-y-1.5 rounded-xl border border-dashed bg-muted/20 px-3.5 py-2.5 text-sm">
-        <p className="text-xs font-medium text-muted-foreground">
-          平台后台结果
-          {message.content.call_id ? ` · ${message.content.call_id.slice(0, 8)}` : ""}
-        </p>
+        {/* 卡头与工具卡同构：中文工具名 + 状态徽标。内部 call_id 不外露——
+            排查走服务端账本，截断的 ID 对用户只有噪音没有信息。 */}
+        <div className="flex items-center gap-2">
+          <p className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+            <Wrench className="h-3.5 w-3.5" />
+            {toolTitle ? `${toolTitle} · 后台结果` : "平台后台结果"}
+          </p>
+          {status && (
+            <span
+              className={`ml-auto rounded-full px-2 py-0.5 text-xs font-medium ${STATUS_BADGE[status] ?? "bg-muted text-muted-foreground"}`}
+            >
+              {callStatusLabel(status)}
+            </span>
+          )}
+        </div>
         {humanLine && (
           <div className="flex items-start gap-1.5">
             {succeeded && (
@@ -290,9 +314,16 @@ export function BotMessageView({
             </pre>
           </details>
         )}
-        {/* 错误文案短、可行动（坏 cron/时区等），直接外露而不是藏进折叠区。 */}
+        {/* 错误文案短、可行动（坏 cron/时区等），直接外露而不是藏进折叠区。
+            只有 failed 用强调红——cancelled 的「用户取消了调用」是中性事实，
+            页面上琥珀色警示句才是唯一强调色（视觉复审）。 */}
         {message.content.error_message && (
-          <p className="text-xs text-destructive [unicode-bidi:isolate]">
+          <p
+            className={cn(
+              "text-xs [unicode-bidi:isolate]",
+              failed ? "text-destructive" : "text-muted-foreground",
+            )}
+          >
             {message.content.error_code
               ? `${bidiSafeText(message.content.error_code)}: `
               : ""}

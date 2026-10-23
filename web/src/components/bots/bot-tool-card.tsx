@@ -33,7 +33,8 @@ export function botActionErrorText(error: unknown, fallback = "操作失败，�
     : fallback;
 }
 
-const STATUS_BADGE: Record<string, string> = {
+/** 状态徽标配色；后台结果消息复用同一套（bot-message.tsx）。 */
+export const STATUS_BADGE: Record<string, string> = {
   pending_confirmation: "bg-amber-500/15 text-amber-700 dark:text-amber-400",
   queued: "bg-primary/10 text-primary",
   running: "bg-primary/10 text-primary",

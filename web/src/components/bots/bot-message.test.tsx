@@ -477,7 +477,7 @@ describe("BotMessageView background_result", () => {
       { calls: [scheduleCreateCall] },
     );
 
-    const line = screen.getByText(/定时任务/);
+    const line = screen.getByText(/未成功/);
     expect(line).toHaveTextContent("创建定时任务「每日站会提醒」未成功");
     expect(line).toHaveClass("text-destructive");
     expect(screen.queryByText(/已创建定时任务/)).not.toBeInTheDocument();
@@ -522,12 +522,21 @@ describe("BotMessageView background_result", () => {
         ...backgroundResult.content,
         status: "cancelled",
         summary: undefined,
+        error_message: "用户取消了调用",
         effect_may_have_occurred: true,
       },
     });
     expect(
       screen.getByText(/副作用可能已经发生；请先核实再决定后续操作/),
     ).toBeInTheDocument();
+    // 卡头用中文工具名 + 状态徽标，不露内部 call_id；取消文案中性灰，
+    // 琥珀色警示句是页面唯一强调色（视觉复审 worth_fixing）。
+    expect(screen.getByText("创建定时任务 · 后台结果")).toBeInTheDocument();
+    expect(screen.getByText("已取消")).toBeInTheDocument();
+    expect(screen.queryByText(/call-/)).not.toBeInTheDocument();
+    expect(screen.getByText("用户取消了调用")).toHaveClass(
+      "text-muted-foreground",
+    );
     unmount();
 
     renderMessage(backgroundResult);
