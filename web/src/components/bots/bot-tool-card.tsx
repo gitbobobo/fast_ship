@@ -53,7 +53,7 @@ export const STATUS_BADGE: Record<string, string> = {
 // 分支不命中，与相邻 chip 化的字段并排时显得缺空格，视觉审查 minor）。
 // 用捕获组而非 lookbehind：Safari <16.4 对 lookbehind 直接 SyntaxError。
 const ERROR_FIELD_TOKEN =
-  /[a-z][a-z0-9]*(?:_[a-z0-9]+)+(?:\.[a-z0-9_[\]]+)*(?:=[^\s，。；、]+)?|(?:[a-z][a-z0-9_]*\.)+[a-z0-9_[\]]+(?:=[^\s，。；、]*)?|(?:^|\n)- ([a-z][a-z0-9_.]+)/g;
+  /[a-z][a-z0-9]*(?:_[a-z0-9]+)+(?:\.[a-z0-9_[\]]+)*(?:=[^\s，。；、]+)?|(?:[a-z][a-z0-9_]*\.)+[a-z0-9_[\]]+(?:=[^\s，。；、]*)?|(?:^|\n)- ([a-z][a-z0-9_.]*)/g;
 
 export function renderErrorMessage(text: string): ReactNode {
   const out: ReactNode[] = [];
