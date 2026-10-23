@@ -59,7 +59,7 @@ type botScheduleArgs struct {
 	Action string `json:"action" jsonschema:"enum=status,required"`
 }
 
-// botScheduleTaskArgs 是当前（v10）fs_schedule 的参数超集：schema 描述并集，
+// botScheduleTaskArgs 是当前（v11）fs_schedule 的参数超集：schema 描述并集，
 // 服务端按 action 校验必填/禁止字段与确认语义。INT-121 起
 // 新增 run（手动立即执行一次）与 dry_run（只预览）；INT-123 起新增
 // state_get/state_set 与 state 参数（任务小状态，只有 state_set 接受它）；
@@ -529,6 +529,55 @@ func botToolRegistryV10() []*botToolDef {
 	return tools
 }
 
+// botToolRegistryV11 是当前发布注册表（INT-156 巡检降本）：在 v10 之上只改
+// fs_thread 与 fs_schedule 的工具/动作描述——fs_thread list 每项自带 activity
+// （运行活动摘要）与末条回复摘要 last_reply（300 字符截断；无助手回复省略，
+// 单条详情读不到时 detail_unavailable=true），巡检不必再逐线程 get 只为看
+// 末条回复；fs_schedule 说明运行时上下文已直接带当前任务小状态 task_state
+// （开局不必调 state_get），state_set 写入与当前完全相同的内容短路返回
+// unchanged、不产生变更。动作清单、参数结构体与读/写分类都不变（fs_thread
+// 工具级描述进 wire 字节，动作描述与 fs_schedule 的 Replace 同样只服务本版）。
+// v10 及更早版本是冻结副本——本注册表的任何变化（含共享工具的描述调整）
+// 不得影响它们，否则存量会话的前缀/tools_hash 失稳。
+func botToolRegistryV11() []*botToolDef {
+	tools := botToolRegistryV10()
+	for _, tool := range tools {
+		switch tool.Name {
+		case "fs_thread":
+			// 工具级描述在 v9 文本（v10 未动 fs_thread）之上追加 list 的
+			// enrichment 说明，不重写既有句子。
+			tool.Description += "list 每项另带 activity（运行活动摘要：活动 run、待应答的审批/提问、后台工作数、停止中；全空即平静线程）与 last_reply（末条助手回复摘要，300 字符截断；无助手回复则省略；单条详情读不到时 detail_unavailable=true，读超时/预算耗尽被中止的标 detail_skipped=true），看线程进展通常不必再逐线程 get。"
+			for i := range tool.Actions {
+				if tool.Actions[i].Name == "list" {
+					tool.Actions[i].Description = "列出全部环境的线程（默认不含归档与已结算线程；已结算的要带 settled=true 才看得到）。每项自带 activity 与 last_reply（末条助手回复摘要；无助手回复则省略；单条详情读不到时 detail_unavailable=true，读超时/预算耗尽被中止的标 detail_skipped=true），通常不必再逐条 get"
+				}
+			}
+		case "fs_schedule":
+			// 只把 v10 描述里的小状态句替换为带 task_state/unchanged 语义的新句，
+			// 其余文字与 v10 逐字一致（确认语义、时区、run 细节原样保留）。
+			tool.Description = strings.Replace(tool.Description,
+				botScheduleV10StateSentence, botScheduleV11StateSentence, 1)
+			for i := range tool.Actions {
+				switch tool.Actions[i].Name {
+				case "state_get":
+					tool.Actions[i].Description = "读取本任务跨运行保留的小状态（无参数；只能在定时任务运行中使用）。当前值已随运行时上下文 task_state 字段给出，通常不必在开局调用"
+				case "state_set":
+					tool.Actions[i].Description = "写入本任务的小状态（state 为任意 JSON 值，省略或 null 表示清空；只能在定时任务运行中使用）。与当前完全相同的内容直接回 unchanged、不产生变更，没有变化就不要重复写"
+				}
+			}
+		}
+	}
+	return tools
+}
+
+// botScheduleV10StateSentence 是 v10 fs_schedule 描述里的小状态句；v11 只把
+// 这一句替换为带运行时上下文与 unchanged 语义的新句，其余描述与 v10 一致。
+// Replace 目标若因 v10 文案调整而失配会静默 no-op，v11 的描述断言会兜住。
+const (
+	botScheduleV10StateSentence = "state_get/state_set 读写本任务跨运行保留的小状态（≤8192 UTF-8 字节）：只能在定时任务运行中使用、由本次运行的任务隐式决定，省略 state 即清空。"
+	botScheduleV11StateSentence = "state_get/state_set 读写本任务跨运行保留的小状态（≤8192 UTF-8 字节）：只能在定时任务运行中使用、由本次运行的任务隐式决定，省略 state 即清空；当前状态已随运行时上下文的 task_state 字段给出，开局不必再调 state_get；写入与当前完全相同的内容会回 unchanged、不产生变更，没有变化就不要重复写。"
+)
+
 // botToolRegistryV3 是 INT-103 冻结的 v3 注册表。工具/动作/描述与 v4 完全
 // 相同，只有参数结构体不同：用冻结副本，保证已发布 v3 会话的 tools_hash 不
 // 因 INT-110 的 schema 修正而回退。
@@ -854,8 +903,10 @@ func botToolsetVersionOf(version int64) *botToolsetHolder {
 		tools = botToolRegistryV8()
 	case 9:
 		tools = botToolRegistryV9()
-	default:
+	case 10:
 		tools = botToolRegistryV10()
+	default:
+		tools = botToolRegistryV11()
 	}
 	holder := botBuildToolset(version, tools)
 	botToolsetsByID[version] = holder
@@ -922,8 +973,8 @@ func botBuildToolset(version int64, tools []*botToolDef) *botToolsetHolder {
 // botUseFrozenArgs 把已发布版本的 schema 参数换回冻结结构体：活跃版本演进
 // 后（v4 修正枚举、v5 修正 fs_thread 的 list 语义与描述、v9 给 fs_thread 加
 // 结算类动作），冻结副本保证已发布版本的 tools_hash 不回退。v1 的 fs_memory
-// 是 status 占位（用 botScheduleArgs），不在此替换；v9/v10 参数相同，
-// 沿用 INT-148 发布 v9 时的结构体，v10 只演进任务描述。
+// 是 status 占位（用 botScheduleArgs），不在此替换；v9–v11 参数相同，
+// 沿用 INT-148 发布 v9 时的结构体，v10/v11 只演进工具描述。
 func botUseFrozenArgs(version int64, tools []*botToolDef) {
 	frozen := map[string]reflect.Type{
 		"fs_project":     reflect.TypeOf(botProjectArgsFrozen{}),

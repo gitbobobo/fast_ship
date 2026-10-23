@@ -138,9 +138,12 @@ SDK 重试显式关零（`option.WithMaxRetries(0)`）：连接测试与被中�
 `resume_queue` 三个写动作，按 T3 真实行为改写 `stop`/`send` 等动作描述；
 v10（INT-136）在 v9 上只改 `fs_schedule` 的工具/动作描述（说明哪些动作需
 确认、异步受理、定时任务运行中不能管理任务，并保留同一任务运行不重叠的语义），
-动作清单与参数结构体不变。INT-148 的线程结算与 INT-136 的确认、围栏是独立约束，
-同时保留。已发布版本（v1–v9）的注册表都是**冻结副本**——新版本变化不得改写旧版本的字节
-（存量会话的 tools_hash 失稳即前缀失稳；v1–v9 的 hash 逐字节钉死在测试基线里）。版本只在 run 入口或压缩边界推进（重建平台规则并递增 prompt_revision）：
+动作清单与参数结构体不变；v11（INT-156 巡检降本）在 v10 上只改 `fs_thread`/
+`fs_schedule` 的工具/动作描述——`list` 每项自带 `activity` 与 `last_reply`、
+定时任务运行时上下文直接带 `task_state`、`state_set` 相同内容短路回
+`unchanged`，动作清单与参数结构体不变。INT-148 的线程结算与 INT-136 的确认、围栏是独立约束，
+同时保留。已发布版本（v1–v10）的注册表都是**冻结副本**——新版本变化不得改写旧版本的字节
+（存量会话的 tools_hash 失稳即前缀失稳；v1–v11 的 hash 逐字节钉死在测试基线里）。版本只在 run 入口或压缩边界推进（重建平台规则并递增 prompt_revision）：
 run 入口的 `activateBotPrompt` 在一个短事务里读行、
 判 stale、按**该行**人设重建提示词并写回，主线与定时任务会话都适用（在冻结
 本次 run 的配置与会话快照之前完成）；提示词始终由事务内读到的行生成——
@@ -490,7 +493,14 @@ path→version，无新笔记的空成功不会让次日重跑全部 daily。恢
   schedule run 内可用，任务由本次 run 隐式决定，不收 task_id；省略或 null 即
   清空），读取经 `state_get`（无参数，计入只读动作；其回执豁免 schedule 会话
   的确定性折叠——折叠成 fs_result.read 引用会让模型拿不到状态内容）；主线
-  会话调用一律 40001。用户侧唯一的状态操作是
+  会话调用一律 40001。INT-156 起两处降本：当前状态（`task_state` +
+  `task_state_updated_at`）随运行时上下文注入（见会话隔离段），开局不必
+  `state_get`；`state_set` 把目标值紧凑化后先做一次条件 UPDATE
+  （`WHERE state_json=target`、只置 `updated_at` 原值的 no-op）在提交点
+  原子确认——命中回 `{ok:true, unchanged:true}`、不推进
+  `state_updated_at`/`updated_at`；未命中说明读到后被并发改过（REST
+  清空等），落正常写路径恢复 last-write-wins。键序不同但语义相同的
+  JSON 仍算不同，不做归一化。用户侧唯一的状态操作是
   `DELETE /api/bots/{id}/schedule-tasks/{taskId}/state`（幂等，返回清空后的
   任务投影）。`fs_schedule` 的任务瘦身投影带 `has_state`（状态正文只在
   state_get 里给，避免 list 结果膨胀）。v6 及更早的冻结会话不认识
@@ -507,7 +517,9 @@ path→version，无新笔记的空成功不会让次日重跑全部 daily。恢
   的消息 + 末尾运行时上下文（任务名/指令/cron/静默约定；INT-123 起带上一次
   已结束运行的 `last_run_at/last_run_status/last_run_summary`——没有则整体
   省略——与任务小状态的用法说明；INT-138 起带 `user_timezone` 与
-  `current_time_local`）。主线读取面里 messages/`ListMainline`、/runs、
+  `current_time_local`；INT-156 起在会话声明了 `state_get` 且状态非空时
+  再带围栏化的 `task_state` 与 `task_state_updated_at`——会话开始时的快照，
+  run 内被 `state_set` 更新过的最新值仍要用 `state_get` 回读）。主线读取面里 messages/`ListMainline`、/runs、
   `FindActiveByBot`、SSE 重放、`HasModelInputSince` 按 `session_kind='main'` 收窄；
   `/calls` 与聊天快照的 `calls[]` 是 bot 级调用账本视角，仍含 schedule 调用
   （因此也含 `state` 参数与 state_get 回执；前端只在主线 assistant 消息引用时把
@@ -520,9 +532,10 @@ path→version，无新笔记的空成功不会让次日重跑全部 daily。恢
   后台结果不算自己的输入。
 - **不做压缩**：schedule 会话不读写 `bot_context_states`/`bot_compactions`、
   不跑压缩周期、不发工具集告知。折叠是**无状态、确定性**的：tool_reply 正文
-  超过 6000 字符即替换为一行 `fs_result.read` 引用；唯一例外是 INT-123 的
-  `state_get` 回执（其正文就是任务状态本体，折掉模型就读不到；豁免集由同一份
-  账本的 assistant 工具调用解出，仍是账本内容的纯函数）——同一 run 内任何一次
+  超过 6000 字符即替换为一行 `fs_result.read` 引用；豁免两类回执：INT-123 的
+  `state_get`（其正文就是任务状态本体，折掉模型就读不到）与 INT-156 的
+  `fs_thread list`（富化后必然越线，折成 read 引用等于把省掉的读轮次又加回来）。
+  豁免集由同一份账本的 assistant 工具调用解出，仍是账本内容的纯函数——同一 run 内任何一次
   投影结果一致（前缀稳定），原文仍在账本与调用结果里。这与主线「压缩驱动折叠」
   （大结果换引用、写入持久投影、按窗口与门槛裁剪）不同：schedule 会话生命
   只有一次运行，没有跨请求的水位需要维护，确定性规则即可保证不漂移。
@@ -956,7 +969,25 @@ CAS 终结；running 记录取消并取消 context，worker 落唯一终态且
   50、上限 100）；结果带 `total_items` / `returned_items` / `offset`（实际
   切片起点）/ `has_more` 与各环境的读取覆盖（`environments`，未完整读取时
   给 `incomplete_environments` 与说明；`env_id` 收窄时只报该环境）。某环境
-  读不到不谎报为「不存在」，也不宣称全部正常。
+  读不到不谎报为「不存在」，也不宣称全部正常。INT-156 起每项再带两个
+  enrichment：`activity`（详情同源的运行活动摘要，瘦身投影只含非零键——
+  `active_run_id`/`active_run_status`/`has_pending_requests`/
+  `pending_background_task_count`/`stopping`，平静线程是空对象）与
+  `last_reply`（末条 `assistant_message` 正文摘要，`truncateBotRunes`
+  截 300 字符；无线程助手回复则省略该键）。实现是 `execThreadRead` 对页内
+  每条并发补 `threads.Detail`（并发 4、单条 10s、整页 25s 总闸）；单条
+  Detail 失败置 `detail_unavailable=true` 不中断整页；读超时/预算耗尽
+  被中止的（排队没轮到、或 Detail 途中被总闸/单条预算杀掉，回调入口与
+  err 路径各查一次 ctx）归 `detail_skipped=true`——真读不到与预算耗尽
+  要可分（`activity`/`last_reply` 缺席的条目不能按平静读，先看 `detail_*`
+  标记判因）。巡检不再为「线程
+  有没有回话」逐条 `fs_thread get`。响应增量按条线性增长：每条 ~330
+  （平静、带满额回复）至 ~500 字符（活动信号全打满 + UUID 长度 run id），
+  15 条页 ≈5k–7.4k、默认 50 条页 ≈16.5k–25k；超过 ~16k 结果预算的回执
+  照常退化为 500 字符预览（`truncated=true`），按 `next_offset` 用
+  `fs_result.read` 续读。list 回执在 schedule 会话豁免确定性折叠（与
+  state_get 同列）：6k–16k 区间内折成 fs_result.read 引用等于把省掉的
+  读轮次又加回来。
 - **详情可读**：`fs_issue get` 返回正文、清单、标签、`updated_at` /
   `checklist_updated_at`（`labels` / `checklist` 恒在，没有时为空数组，
   让调用方能区分「没有」与「字段未实现」；列表项保持精简）；`fs_thread get`

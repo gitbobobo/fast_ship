@@ -658,8 +658,10 @@ func TestBotInt136RunRejectsConfigFields(t *testing.T) {
 // ---------- 7. 工具集 v10：描述说明确认语义，字节钉死 ----------
 
 func TestBotInt136ToolsetV10(t *testing.T) {
-	if botToolsetVersion != 10 {
-		t.Fatalf("当前工具集版本应为 10，实得 %d", botToolsetVersion)
+	// v10 自 INT-156 起冻结为基线；当前发布版本在其之上演进，但不得低于 v10，
+	// 否则下方 v10 基线断言失去路由前提。
+	if botToolsetVersion < 10 {
+		t.Fatalf("v10 基线断言要求当前版本至少为 10，实得 %d", botToolsetVersion)
 	}
 	v7 := botToolsetVersionOf(7)
 	v8 := botToolsetVersionOf(8)

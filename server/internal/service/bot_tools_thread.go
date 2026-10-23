@@ -33,6 +33,11 @@ func (s *BotService) execThreadRead(ctx context.Context, call *model.BotToolCall
 		if err != nil {
 			return "", err
 		}
+		// INT-156：页内逐条补 activity 与末条回复摘要——巡检过去要为「线程
+		// 有没有回话」逐线程 get，现在 list 一次带回。空页直接跳过。
+		if items, ok := result["items"].([]map[string]interface{}); ok && len(items) > 0 {
+			s.botEnrichThreadListItems(ctx, userID, items)
+		}
 		return botMarshalResult(result)
 	case "get":
 		detail, err := s.threads.Detail(ctx, userID, args.EnvID, args.ThreadID)
@@ -500,6 +505,78 @@ func truncateBotRunes(s string, limit int) string {
 		return s
 	}
 	return string(runes[:limit]) + "…"
+}
+
+// fs_thread list 补详情的预算（INT-156）：并发 4、单条 10s，整页再封 25s
+// 总闸——巡检只需要「线程有没有回话、还在不在跑」，预算到点放弃单条而不
+// 是拖死整页。
+const (
+	botThreadListEnrichConcurrency = 4
+	botThreadListEnrichPerItem     = 10 * time.Second
+	botThreadListEnrichTotal       = 25 * time.Second
+	// botThreadLastReplyChars 是 last_reply 的字符上限（truncateBotRunes 截断）。
+	botThreadLastReplyChars = 300
+)
+
+// botEnrichThreadListItems 给一页线程摘要逐条补 activity 与 last_reply（INT-156）：
+// last_reply 从详情条目尾部往前找第一条正文非空的 assistant_message。单条失败
+// 置 detail_unavailable=true 不中断整页；被预算杀掉的（排队没轮到、或 Detail
+// 途中到期）归 detail_skipped=true——「真读不到」与「预算耗尽」必须可分
+// （云端复审 P2，回调入口与 err 路径各查一次 ctx）；无助手回复省略
+// last_reply；activity 是瘦身投影（botSlimThreadActivity），平静线程只占一个空对象。
+func (s *BotService) botEnrichThreadListItems(ctx context.Context, userID string, items []map[string]interface{}) {
+	ctx, cancel := context.WithTimeout(ctx, botThreadListEnrichTotal)
+	defer cancel()
+	runT3Bounded(ctx, len(items), botThreadListEnrichConcurrency, botThreadListEnrichPerItem, func(ctx context.Context, i int) {
+		item := items[i]
+		if ctx.Err() != nil {
+			item["detail_skipped"] = true
+			return
+		}
+		envID, _ := item["environment_id"].(string)
+		threadID, _ := item["id"].(string)
+		detail, err := s.threads.Detail(ctx, userID, envID, threadID)
+		if err != nil {
+			// 失败也要分流：本协程预算（单条 10s 或整页总闸）到点杀掉的
+			// 读取归 detail_skipped——读到一半被杀不等于详情真读不到。
+			if ctx.Err() != nil {
+				item["detail_skipped"] = true
+			} else {
+				item["detail_unavailable"] = true
+			}
+			return
+		}
+		item["activity"] = botSlimThreadActivity(detail.Activity)
+		for j := len(detail.Items) - 1; j >= 0; j-- {
+			if it := &detail.Items[j]; it.Type == api.AssistantMessage && it.Text != "" {
+				item["last_reply"] = truncateBotRunes(it.Text, botThreadLastReplyChars)
+				break
+			}
+		}
+	})
+}
+
+// botSlimThreadActivity 把详情 activity 投影成只含非零信号的瘦身对象：平静线程
+// 是空对象（列表大头是平静线程，全字段常驻会把字符增量翻倍）；有活动 run、
+// 待应答请求、后台工作或停止中时才出现对应键。
+func botSlimThreadActivity(a T3ThreadActivity) map[string]interface{} {
+	out := map[string]interface{}{}
+	if a.ActiveRunId != nil && *a.ActiveRunId != "" {
+		out["active_run_id"] = *a.ActiveRunId
+	}
+	if a.ActiveRunStatus != nil && *a.ActiveRunStatus != "" {
+		out["active_run_status"] = *a.ActiveRunStatus
+	}
+	if a.HasPendingRequests {
+		out["has_pending_requests"] = true
+	}
+	if a.PendingBackgroundTaskCount > 0 {
+		out["pending_background_task_count"] = a.PendingBackgroundTaskCount
+	}
+	if a.Stopping {
+		out["stopping"] = true
+	}
+	return out
 }
 
 // botSlimItemAttachChildThreadID 把非空的子线程 ID 带进精简条目：子代理条目

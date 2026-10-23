@@ -31,15 +31,17 @@ const (
 	// 激活跨过该水位后，下一个 run 边界强制压缩一次，把旧风格的长回复收进
 	// 摘要，避免模型继续模仿自己的历史回复（INT-133）。
 	botStylePromptVersion int64 = 9
-	// botToolsetVersion 是当前发布的工具集版本（v10 = INT-136：fs_schedule 描述
-	// 说明确认语义——create、改动 instruction/needs_report/model 的 update 与
-	// 非 dry_run 的 run、enable、delete 需要用户确认、异步受理；
-	// v9 = INT-148：fs_thread 新增 settle/unsettle/resume_queue 写动作，
-	// stop/send 描述按 T3 真实行为改写，冻结保留 INT-148 的字节；
+	// botToolsetVersion 是当前发布的工具集版本（v11 = INT-156 巡检降本：fs_thread
+	// list 每项自带 activity 与末条回复摘要 last_reply、fs_schedule 说明运行时
+	// 上下文已带任务小状态 task_state 且 state_set 无变化短路返回 unchanged；
+	// v10 = INT-136：fs_schedule 描述说明确认语义——create、改动
+	// instruction/needs_report/model 的 update 与非 dry_run 的 run、enable、
+	// delete 需要用户确认、异步受理；v9 = INT-148：fs_thread 新增
+	// settle/unsettle/resume_queue 写动作，stop/send 描述按 T3 真实行为改写；
 	// v8 = INT-138：fs_schedule 时区默认改为用户时区，并补任务指令写法指导；
 	// v7 = INT-123：fs_schedule 新增 state_get/state_set 读写任务跨运行保留的
 	// 小状态）；存量对话线冻结在旧版本，只在压缩/重启边界升级。
-	botToolsetVersion int64 = 10
+	botToolsetVersion int64 = 11
 )
 
 // botIdentityRules 是系统自动注入的默认人设（身份与说话方式）：拼在提示词
