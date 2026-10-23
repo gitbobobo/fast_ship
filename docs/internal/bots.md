@@ -1381,10 +1381,13 @@ null），给三栏工作台的左侧列表当预览列。语义与约束：
 
 - **中间回合整体隐藏**：带 `tool_calls` 的 assistant 消息（正文只是
   调用前旁白）与已终态工具卡不再渲染——此前的「过程」折叠入口一并
-  移除。两种可见性保留：`pending_confirmation && requires_confirmation`
-  的确认卡（用户唯一的批准入口），以及在途**前台**（非 async、
+  移除。三种可见性保留：`pending_confirmation && requires_confirmation`
+  的确认卡（用户唯一的批准入口）；在途**前台**（非 async、
   queued/running）调用的工具卡（唯一逐项取消入口——async 在途调用
-  已由 `BotBackgroundCalls` 面板承担，不重复渲染）。流式草稿不受影响，
+  已由 `BotBackgroundCalls` 面板承担，不重复渲染）；终态但「需要用户
+  留意」的前台调用卡——`effect_may_have_occurred`（如取消写调用后
+  副作用可能已发生）或带 `error_message`/`error_code` 的调用，警示与
+  失败原因只有工具卡这一个出口，不能一并降噪。流式草稿不受影响，
   仍直出气泡。消息内无可见内容时 `BotMessageView` 返回 null，不留空块。
   有意取舍：text 与 tool_calls 并存的消息即使正文非空也整体隐藏——
   按协议这段正文是调用前旁白（思考/计划），属 INT-157 明确要藏的
@@ -1398,10 +1401,10 @@ null），给三栏工作台的左侧列表当预览列。语义与约束：
   两种形态视觉可分。模型可写文本
   （task_name/summary/error）仍经 bidiSafeText + `unicode-bidi:isolate`
   处理。
-- **侧边栏直跳上次聊天**：`fast-ship-last-bot`（zustand persist）记录
-  最近打开的 `{ userId, botId }`，「机器人」菜单项 href 变成
-  `/bots/<lastBotId>`；消费方经 `useLastBotId` 读取——记忆绑定写入时
-  的登录用户，切换账号读不到上一账号的记录。写入只在 `useBot` 加载
+- **侧边栏直跳上次聊天**：`fast-ship-last-bot`（zustand persist）按
+  `Record<userId, botId>` 记各账号最近打开的机器人，「机器人」菜单项
+  href 变成 `/bots/<lastBotId>`；消费方经 `useLastBotId` 读取当前用户
+  的记忆——同浏览器切换账号各记各的，互不覆盖也互不可见。写入只在 `useBot` 加载
   成功后发生；清除只在「被记住的那个机器人自己 404/被删」时执行，
   误点坏链接不会误删仍在有效期内的记忆。菜单项激活态按 `/bots` 前缀
   判定，跳到具体聊天页后分区高亮不丢。

@@ -315,27 +315,46 @@ export function BotMessageView({
   }
 
   // assistant：带 tool_calls 的中间回合整体隐藏（INT-157）——正文只是
-  // 调用前的过程旁白，已终态的调用卡是执行噪音；保留两种可见性：
-  // 待确认调用的确认卡（用户唯一的批准入口）与在途前台（非 async）
-  // 调用的工具卡（唯一逐项取消入口——async 在途调用由后台调用面板
-  // 承担，不重复渲染）。流式草稿照旧直出气泡。
+  // 调用前的过程旁白，已终态的调用卡是执行噪音；保留三种可见性：
+  // 待确认调用的确认卡（唯一批准入口）、在途前台（非 async）调用的
+  // 工具卡（唯一逐项取消入口——async 在途调用由后台调用面板承担）、
+  // 以及终态但「需要用户留意」的调用卡——取消写调用后副作用可能已
+  // 发生、调用失败的原因，都只有工具卡这一个出口，不能一并降噪。
+  // 流式草稿照旧直出气泡。
   const toolCalls = message.content.tool_calls ?? [];
+  const findCall = (id: string) => calls.find((c) => c.id === id);
   const pendingConfirmations = toolCalls.flatMap((tc) => {
-    const call = calls.find((c) => c.id === tc.call_id);
+    const call = findCall(tc.call_id);
     return call?.status === "pending_confirmation" && call.requires_confirmation
       ? [call]
       : [];
   });
   const inflightCalls = toolCalls.flatMap((tc) => {
-    const call = calls.find((c) => c.id === tc.call_id);
+    const call = findCall(tc.call_id);
     return call &&
       call.execution_mode !== "async" &&
       (call.status === "queued" || call.status === "running")
       ? [call]
       : [];
   });
+  const attentionCalls = toolCalls.flatMap((tc) => {
+    const call = findCall(tc.call_id);
+    return call &&
+      call.execution_mode !== "async" &&
+      call.status !== "pending_confirmation" &&
+      call.status !== "queued" &&
+      call.status !== "running" &&
+      (call.effect_may_have_occurred || call.error_message || call.error_code)
+      ? [call]
+      : [];
+  });
   const showText = draft || toolCalls.length === 0;
-  if (!showText && !pendingConfirmations.length && !inflightCalls.length) {
+  if (
+    !showText &&
+    !pendingConfirmations.length &&
+    !inflightCalls.length &&
+    !attentionCalls.length
+  ) {
     return null;
   }
   return (
@@ -362,7 +381,7 @@ export function BotMessageView({
           onDecide={onDecide}
         />
       ))}
-      {inflightCalls.map((call) => (
+      {[...inflightCalls, ...attentionCalls].map((call) => (
         <BotToolCard
           key={call.id}
           botId={botId}

@@ -38,7 +38,7 @@ function renderSidebar(path: string) {
 describe("Sidebar 机器人入口", () => {
   beforeEach(() => {
     useAuthStore.setState({ user });
-    useLastBotStore.setState({ lastBot: { userId: "u-1", botId: "bot-1" } });
+    useLastBotStore.setState({ byUser: { "u-1": "bot-1" } });
   });
 
   it("有 lastBotId 时跳转目标改写为对应聊天页", () => {
@@ -63,9 +63,18 @@ describe("Sidebar 机器人入口", () => {
   });
 
   it("记忆属于别的账号时入口退回 /bots 列表", () => {
-    useLastBotStore.setState({ lastBot: { userId: "u-2", botId: "bot-9" } });
+    useLastBotStore.setState({ byUser: { "u-2": "bot-9" } });
     renderSidebar("/dashboard");
     const link = screen.getByRole("link", { name: "机器人" });
     expect(link).toHaveAttribute("href", "/bots");
+  });
+
+  it("另一账号写入记忆不覆盖当前账号的（per-user 槽位）", () => {
+    useAuthStore.setState({ user: { ...user, id: "u-2" } });
+    useLastBotStore.getState().setLastBot("bot-9");
+    useAuthStore.setState({ user });
+    renderSidebar("/dashboard");
+    const link = screen.getByRole("link", { name: "机器人" });
+    expect(link).toHaveAttribute("href", "/bots/bot-1");
   });
 });

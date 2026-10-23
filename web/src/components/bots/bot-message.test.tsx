@@ -367,6 +367,32 @@ describe("BotMessageView 中间回合隐藏", () => {
     });
     expect(screen.queryByTestId("bot-tool-card")).not.toBeInTheDocument();
   });
+
+  // 终态但「需要用户留意」的调用仍渲染工具卡——取消写调用后的
+  // effect_may_have_occurred 警示与失败原因是前端唯一出口（第 8 轮
+  // 复审 P1）；干净的终态调用照旧隐藏。
+  it("带副作用警示的已取消调用保留工具卡（无取消按钮）", () => {
+    const { unmount } = renderMessage(interimMessage, {
+      calls: [
+        { ...runningCall, status: "cancelled", effect_may_have_occurred: true },
+      ],
+    });
+    const card = screen.getByTestId("bot-tool-card");
+    expect(
+      within(card).getByText(/副作用可能已经发生/),
+    ).toBeInTheDocument();
+    expect(
+      within(card).queryByRole("button", { name: "取消" }),
+    ).not.toBeInTheDocument();
+    unmount();
+
+    renderMessage(interimMessage, {
+      calls: [
+        { ...runningCall, status: "failed", error_message: "写入冲突" },
+      ],
+    });
+    expect(screen.getByTestId("bot-tool-card")).toBeInTheDocument();
+  });
 });
 
 // background_result（INT-136 审查）：服务端把工具结果 JSON 截到 200 字符
