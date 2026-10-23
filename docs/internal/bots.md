@@ -1380,11 +1380,12 @@ null），给三栏工作台的左侧列表当预览列。语义与约束：
 纯前端改动，账本与协议不变；时间线只留用户与机器人的对话正文。
 
 - **中间回合整体隐藏**：带 `tool_calls` 的 assistant 消息（正文只是
-  调用前旁白）连同工具卡都不再渲染——此前的「过程」折叠入口一并移除。
-  唯一保留的是 `pending_confirmation && requires_confirmation` 的确认卡
-  （用户唯一的批准入口）。流式草稿不受影响，仍直出气泡。消息内无可见
-  内容时 `BotMessageView` 返回 null，不留空块。后台调用面板
-  （`BotBackgroundCalls`）保留——它是在途调用的取消入口，不是时间线噪音。
+  调用前旁白）与已终态工具卡不再渲染——此前的「过程」折叠入口一并
+  移除。两种可见性保留：`pending_confirmation && requires_confirmation`
+  的确认卡（用户唯一的批准入口），以及在途**前台**（非 async、
+  queued/running）调用的工具卡（唯一逐项取消入口——async 在途调用
+  已由 `BotBackgroundCalls` 面板承担，不重复渲染）。流式草稿不受影响，
+  仍直出气泡。消息内无可见内容时 `BotMessageView` 返回 null，不留空块。
 - **定时任务事件一行居中**：`schedule_event` 渲染为居中一行
   「定时任务「name」<状态>」，summary/error 不再内联；有详情时行可点，
   弹窗内 summary 走 `BotMarkdown`、error 以 destructive 样式展示。

@@ -312,6 +312,43 @@ describe("BotMessageView 中间回合隐藏", () => {
     expect(screen.getByText(/我先看一下有哪些项目/)).toBeInTheDocument();
     expect(container.querySelector(".bg-muted.rounded-2xl")).not.toBeNull();
   });
+
+  // 在途的前台（非 async）调用保留工具卡——那是逐项取消的唯一入口；
+  // async 在途调用由后台调用面板承担，不再重复渲染（INT-157 复审）。
+  const runningCall: BotCall = {
+    id: "c-read",
+    bot_id: "b1",
+    tool_name: "fs_project",
+    action: "list",
+    arguments: {},
+    execution_mode: "sync",
+    requires_confirmation: false,
+    status: "running",
+    created_at: "2026-10-18T00:00:01Z",
+  };
+
+  it("在途前台调用仍渲染工具卡（取消入口），已终态调用不渲染", () => {
+    const { unmount } = renderMessage(interimMessage, {
+      calls: [runningCall],
+    });
+    expect(screen.getByTestId("bot-tool-card")).toBeInTheDocument();
+    expect(
+      screen.queryByText(/我先看一下有哪些项目/),
+    ).not.toBeInTheDocument();
+    unmount();
+
+    renderMessage(interimMessage, {
+      calls: [{ ...runningCall, status: "succeeded" }],
+    });
+    expect(screen.queryByTestId("bot-tool-card")).not.toBeInTheDocument();
+  });
+
+  it("在途 async 调用不重复渲染（由后台调用面板承担）", () => {
+    renderMessage(interimMessage, {
+      calls: [{ ...runningCall, execution_mode: "async" }],
+    });
+    expect(screen.queryByTestId("bot-tool-card")).not.toBeInTheDocument();
+  });
 });
 
 // background_result（INT-136 审查）：服务端把工具结果 JSON 截到 200 字符

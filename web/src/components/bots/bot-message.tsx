@@ -18,6 +18,7 @@ import {
 import { cn } from "@/lib/utils";
 import { BotConfirmationCard } from "./bot-confirmation-card";
 import { BotMarkdown } from "./bot-markdown";
+import { BotToolCard } from "./bot-tool-card";
 
 const DECISION_LABELS: Record<string, string> = {
   approve: "已批准",
@@ -81,7 +82,7 @@ function ScheduleEventView({ message }: { message: BotMessage }) {
               {bidiSafeText(errorMessage ?? "")}
             </p>
           )}
-          {summary && <BotMarkdown text={summary} />}
+          {summary && <BotMarkdown text={bidiSafeText(summary)} />}
         </DialogContent>
       </Dialog>
     </p>
@@ -90,17 +91,19 @@ function ScheduleEventView({ message }: { message: BotMessage }) {
 
 /**
  * 主线单条消息：用户右对齐、机器人左对齐；assistant 消息不再渲染
- * 工具卡与过程旁白（INT-157），待确认调用仍给出确认卡（批准入口）。
- * 后台结果、批准决定与生命周期事件是平台投影出的结构性消息，用
- * 安静的样式与对话正文区分。
+ * 过程旁白与已终态工具卡（INT-157）——待确认调用给确认卡（批准入口）、
+ * 在途前台调用保留工具卡（逐项取消入口）。后台结果、批准决定与生命
+ * 周期事件是平台投影出的结构性消息，用安静的样式与对话正文区分。
  */
 export function BotMessageView({
+  botId,
   message,
   draft = false,
   calls,
   busyCallId,
   callActionError,
   onDecide,
+  onCancelCall,
 }: {
   botId: string;
   message: BotMessage;
@@ -277,8 +280,10 @@ export function BotMessageView({
   }
 
   // assistant：带 tool_calls 的中间回合整体隐藏（INT-157）——正文只是
-  // 调用前的过程旁白，工具卡是执行噪音；唯一保留的是待确认调用的
-  // 确认卡，那是用户唯一的批准入口。流式草稿照旧直出气泡。
+  // 调用前的过程旁白，已终态的调用卡是执行噪音；保留两种可见性：
+  // 待确认调用的确认卡（用户唯一的批准入口）与在途前台（非 async）
+  // 调用的工具卡（唯一逐项取消入口——async 在途调用由后台调用面板
+  // 承担，不重复渲染）。流式草稿照旧直出气泡。
   const toolCalls = message.content.tool_calls ?? [];
   const pendingConfirmations = toolCalls.flatMap((tc) => {
     const call = calls.find((c) => c.id === tc.call_id);
@@ -286,8 +291,18 @@ export function BotMessageView({
       ? [call]
       : [];
   });
+  const inflightCalls = toolCalls.flatMap((tc) => {
+    const call = calls.find((c) => c.id === tc.call_id);
+    return call &&
+      call.execution_mode !== "async" &&
+      (call.status === "queued" || call.status === "running")
+      ? [call]
+      : [];
+  });
   const showText = draft || toolCalls.length === 0;
-  if (!showText && pendingConfirmations.length === 0) return null;
+  if (!showText && !pendingConfirmations.length && !inflightCalls.length) {
+    return null;
+  }
   return (
     <div className="space-y-2">
       {showText && (text || draft) && (
@@ -310,6 +325,15 @@ export function BotMessageView({
           busy={busyCallId === call.id}
           error={callActionError}
           onDecide={onDecide}
+        />
+      ))}
+      {inflightCalls.map((call) => (
+        <BotToolCard
+          key={call.id}
+          botId={botId}
+          call={call}
+          onCancel={onCancelCall}
+          cancelling={busyCallId === call.id}
         />
       ))}
     </div>
