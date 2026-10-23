@@ -222,8 +222,18 @@ func (s *BotService) RecoverOnStartup() error {
 			recoverCols["result_chars"] = recoverOutcome.ResultChars
 		}
 		txErr := s.db.Transaction(func(tx *gorm.DB) error {
-			ok, err := repository.NewBotToolCallRepository(tx).UpdateWhereTx(tx, call.ID,
-				string(model.BotCallStatusRunning), recoverCols)
+			var ok bool
+			var err error
+			if isWait {
+				// EnsureBotSchema 的去重前置已把重复 running wait 移出
+				// running（finished_at 仍 NULL），它们走到这里时 status
+				// 已是 failed——wait 收尾按 unfinished 定界，仍补终态
+				// 消息与唤醒。
+				ok, err = repository.NewBotToolCallRepository(tx).UpdateWhereUnfinishedTx(tx, call.ID, recoverCols)
+			} else {
+				ok, err = repository.NewBotToolCallRepository(tx).UpdateWhereTx(tx, call.ID,
+					string(model.BotCallStatusRunning), recoverCols)
+			}
 			if err != nil || !ok {
 				return err
 			}

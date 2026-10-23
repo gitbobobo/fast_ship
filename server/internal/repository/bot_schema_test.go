@@ -66,11 +66,13 @@ func TestEnsureBotSchemaDedupesRunningWaits(t *testing.T) {
 	}
 	if dropped.Status != model.BotCallStatusFailed || dropped.ErrorCode == nil ||
 		*dropped.ErrorCode != "server_restarted" {
-		t.Fatalf("后到重复 wait 应落 server_restarted 终态: %+v", dropped)
+		t.Fatalf("后到重复 wait 应移出 running 并标 server_restarted: %+v", dropped)
 	}
-	if dropped.FinishedAt == nil || dropped.ResultJSON == nil ||
-		*dropped.ResultJSON != `{"outcome":"server_restarted"}` {
-		t.Fatalf("终态行应带 server_restarted 结果: %+v", dropped)
+	// finished_at 保持 NULL：RecoverOnStartup 按 unfinished 取行，补
+	// server_restarted 终态消息与结果字段——直落终态会让模型手里的
+	// running 回执永远等不到终态投影。
+	if dropped.FinishedAt != nil {
+		t.Fatalf("去重行应留待恢复收尾（finished_at 须为 NULL）: %+v", dropped)
 	}
 	if other.Status != model.BotCallStatusRunning {
 		t.Fatalf("异线程 wait 不应被误清: %s", other.Status)

@@ -308,6 +308,19 @@ func (r *BotToolCallRepository) UpdateWhereRunningFreshTx(tx *gorm.DB, callID st
 	return res.RowsAffected > 0, nil
 }
 
+// UpdateWhereUnfinishedTx 按 finished_at IS NULL 定界的事务版更新：启动
+// 恢复的 wait 收尾用它——EnsureBotSchema 的去重前置已把重复行移出
+// running（仍 unfinished），status 门会把它们挡在恢复外。
+func (r *BotToolCallRepository) UpdateWhereUnfinishedTx(tx *gorm.DB, callID string, cols map[string]interface{}) (bool, error) {
+	res := tx.Model(&model.BotToolCall{}).
+		Where("id = ? AND finished_at IS NULL", callID).
+		Updates(cols)
+	if res.Error != nil {
+		return false, res.Error
+	}
+	return res.RowsAffected > 0, nil
+}
+
 // UpdateWhereTx 事务版条件更新（确认决定在事务内 CAS）。
 func (r *BotToolCallRepository) UpdateWhereTx(tx *gorm.DB, callID string, fromStatus string, cols map[string]interface{}) (bool, error) {
 	q := tx.Model(&model.BotToolCall{}).Where("id = ?", callID)

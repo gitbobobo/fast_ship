@@ -1331,3 +1331,127 @@ func TestBotInt160WaitStaleSnapshotGrace(t *testing.T) {
 		return e != nil && e.baseline.known && e.started
 	})
 }
+
+// ---------- 16. 复审第 9 轮：on 类型错误、可信缺席轮次、去重行恢复 ----------
+
+// TestBotInt160WaitOnTypeError 验证 on 传非字符串（数组/数字等）显式报错，
+// 不静默放大为全量条件——与 timeout_minutes 同口径。
+func TestBotInt160WaitOnTypeError(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "int160wait16")
+	_, envID := pairWaitT3(t, env, userID)
+	bot := env.createBot(t, userID)
+
+	for _, bad := range []string{
+		`{"action":"wait","env_id":"` + envID + `","thread_id":"t","on":["idle"]}`,
+		`{"action":"wait","env_id":"` + envID + `","thread_id":"t","on":123}`,
+		`{"action":"wait","env_id":"` + envID + `","thread_id":"t","on":true}`,
+	} {
+		call := acceptWaitCall(t, env, bot.ID, false, bad)
+		if call.Status != model.BotCallStatusFailed || call.ErrorCode == nil ||
+			*call.ErrorCode != "e40001" {
+			t.Fatalf("on 类型错误应落 invalid_params: %+v", call)
+		}
+	}
+}
+
+// TestBotInt160WaitTrustedAbsenceNotNotReady 验证 baseline.known=false 的 wait
+// 在可信视图里查无此线程（宽限内）：缺席是可信观察，不计 notReadyTicks——
+// 否则快照滞后几十秒就把随后的收尾降格成 watch_degraded。
+func TestBotInt160WaitTrustedAbsenceNotNotReady(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "int160wait16b")
+	_, envID := pairWaitT3(t, env, userID)
+	bot := env.createBot(t, userID)
+	shrinkWaitTimers(env)
+
+	waitForBot(t, "archive ready", 5*time.Second, func() bool {
+		v, err := env.bots.threads.PeekShell(userID, envID)
+		return err == nil && v != nil && v.Snaps != nil && v.Snaps.ArchiveErr == nil
+	})
+	call := acceptWaitCall(t, env, bot.ID, false,
+		`{"action":"wait","env_id":"`+envID+`","thread_id":"th-launching","on":"idle"}`)
+
+	env.bots.evaluateThreadWaits()
+	env.bots.evaluateThreadWaits()
+	env.bots.waitMu.Lock()
+	e := env.bots.waits[call.ID]
+	var ticks int
+	if e != nil {
+		ticks = e.notReadyTicks
+	}
+	env.bots.waitMu.Unlock()
+	if ticks != 0 {
+		t.Fatalf("可信缺席不应计不可信轮次，实得 notReadyTicks=%d", ticks)
+	}
+	c, err := env.bots.calls.FindByID(call.ID)
+	if err != nil {
+		t.Fatalf("find call: %v", err)
+	}
+	if c.Status.IsTerminal() {
+		t.Fatalf("宽限内可信缺席不落终态: %s", c.Status)
+	}
+}
+
+// TestBotInt160WaitRecoveryDedupedRow 验证 EnsureBotSchema 去重留下的
+// failed+unfinished 行（status=failed、finished_at NULL）能被
+// RecoverOnStartup 捡起并按 server_restarted 正常收尾——补后台终态消息。
+func TestBotInt160WaitRecoveryDedupedRow(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "int160wait16c")
+	bot := env.createBot(t, userID)
+	run, req := seedWaitRun(t, env, bot.ID, false)
+	now := time.Now().UTC()
+	// 去重后置形态：status=failed、finished_at 仍 NULL。
+	call := &model.BotToolCall{
+		ID: uuid.NewString(), BotID: bot.ID, RequestID: req.ID,
+		ProviderToolCallID: "prov-wait-dedup", ToolName: "fs_thread", Action: "wait",
+		ArgumentsJSON: `{"action":"wait","env_id":"e1","thread_id":"t1"}`,
+		ArgumentsHash: "x", ExecutionMode: string(model.BotExecutionAsync),
+		Status: model.BotCallStatusFailed, StartedAt: &now,
+		ErrorCode:            strPtrBot("server_restarted"),
+		ExecutionContextJSON: "{}", CreatedAt: now,
+	}
+	if err := env.db.Create(call).Error; err != nil {
+		t.Fatalf("seed deduped wait: %v", err)
+	}
+	receipt := map[string]interface{}{"accepted": true, "call_id": call.ID, "status": "running"}
+	rawReceipt, _ := json.Marshal(receipt)
+	msg := &model.BotMessage{
+		ID: uuid.NewString(), BotID: bot.ID, Seq: 1,
+		RunID: &run.ID, RequestID: &req.ID, CallID: &call.ID,
+		Kind: model.BotMessageKindToolReply,
+		ContentJSON: string(mustJSON(botToolReplyContent{
+			CallID: call.ID, ProviderToolCallID: call.ProviderToolCallID,
+			ToolName: "fs_thread", Action: "wait",
+			Status: "running", Content: string(rawReceipt),
+		})),
+		DedupKey: strPtrBot("receipt:" + call.ID), CreatedAt: now,
+	}
+	if err := env.db.Create(msg).Error; err != nil {
+		t.Fatalf("seed receipt: %v", err)
+	}
+	if err := env.db.Model(&model.Bot{}).Where("id = ?", bot.ID).
+		Update("next_message_seq", 2).Error; err != nil {
+		t.Fatalf("bump message seq: %v", err)
+	}
+
+	if err := env.bots.RecoverOnStartup(); err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	done, err := env.bots.calls.FindByID(call.ID)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if done.FinishedAt == nil {
+		t.Fatalf("去重行应被恢复收尾（finished_at 落定）: %+v", done)
+	}
+	var bg []model.BotMessage
+	if err := env.db.Where("bot_id = ? AND call_id = ? AND kind = ?",
+		bot.ID, call.ID, model.BotMessageKindBackgroundResult).Find(&bg).Error; err != nil {
+		t.Fatalf("list background: %v", err)
+	}
+	if len(bg) != 1 || !strings.Contains(bg[0].ContentJSON, "wait_result") {
+		t.Fatalf("去重行恢复应补后台终态消息: %+v", bg)
+	}
+}

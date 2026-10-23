@@ -434,6 +434,18 @@ func (s *BotService) commitAssistantTurn(bot *model.Bot, run *model.BotRun, requ
 				_ = json.Unmarshal([]byte(entry.call.ArgumentsJSON), &args)
 				if quotaErr := s.recheckSendQuota(tx, bot.ID, args, now); quotaErr != nil {
 					failAcceptedEntry(entry, now, quotaErr)
+				} else {
+					// 规则开关同口径复核：评估与提交之间被关闭时不再放行
+					// 这一次 tier1 自动——开关是即时生效的用户意图。
+					rule, ruleErr := repository.NewBotWritePolicyRuleRepository(tx).GetTx(
+						tx, bot.ID, entry.policy.record.RuleID)
+					if ruleErr != nil && !errors.Is(ruleErr, gorm.ErrRecordNotFound) {
+						failAcceptedEntry(entry, now, errs.New(errs.ErrInternal.Code,
+							"规则开关复核失败，保守交回确认"))
+					} else if ruleErr == nil && !rule.Enabled {
+						failAcceptedEntry(entry, now, errs.New(errs.ErrInvalidParams.Code,
+							"分级放行规则已关闭，该动作回到确认"))
+					}
 				}
 			}
 			if err := txCalls.CreateTx(tx, call); err != nil {

@@ -2,7 +2,6 @@ package repository
 
 import (
 	"fmt"
-	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"gorm.io/gorm"
@@ -203,17 +202,15 @@ func EnsureBotSchema(db *gorm.DB) error {
 	// running wait 唯一索引的前置去重（INT-160）：本函数先于启动恢复执行，
 	// 而旧版本的并发漏洞可能已在库中留下同（bot, env, thread）的多条
 	// running wait——不先收敛，CREATE UNIQUE INDEX 会失败、挡住启动。保留
-	// 最早受理的那条（模型拿到的 call_id 以它为准），其余按重启口径落
-	// server_restarted 终态；幂等，新建库上影响 0 行。
+	// 最早受理的那条（模型拿到的 call_id 以它为准），其余只移出 running
+	// 状态（finished_at 保持 NULL），交给随后的 RecoverOnStartup 按
+	// server_restarted 正常收尾——补终态消息、结果字段与唤醒都由恢复路径
+	// 统一负责，这里直落终态会让模型手里的 running 回执永远等不到终态
+	// 投影；幂等，新建库上影响 0 行。
 	dupWaitCleanup := `UPDATE bot_tool_calls
 SET status = 'failed',
-    finished_at = ?,
     error_code = 'server_restarted',
-    error_message = '服务在等待中重启，等待已中断（wait 无副作用）；如仍需跟踪请重新发起',
-    result_json = '{"outcome":"server_restarted"}',
-    result_preview_json = '{"outcome":"server_restarted"}',
-    result_chars = 30,
-    result_items = 0
+    error_message = '服务在等待中重启，等待已中断（wait 无副作用）；如仍需跟踪请重新发起'
 WHERE tool_name = 'fs_thread' AND action = 'wait' AND status = 'running'
   AND EXISTS (
     SELECT 1 FROM bot_tool_calls AS older
@@ -224,7 +221,7 @@ WHERE tool_name = 'fs_thread' AND action = 'wait' AND status = 'running'
       AND (older.created_at < bot_tool_calls.created_at
            OR (older.created_at = bot_tool_calls.created_at AND older.id < bot_tool_calls.id))
   )`
-	if err := db.Exec(dupWaitCleanup, time.Now().UTC()).Error; err != nil {
+	if err := db.Exec(dupWaitCleanup).Error; err != nil {
 		return fmt.Errorf("bot schema: dedupe running waits: %w", err)
 	}
 	for _, ddl := range botSchemaDDL {

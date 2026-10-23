@@ -181,7 +181,11 @@ func botThreadWaitParams(raw map[string]json.RawMessage) ([]string, time.Duratio
 	if len(raw) > 0 {
 		// 只取两个字段，未知字段已由字段白名单拒绝；解析失败按参数错误处理。
 		if v, ok := raw["on"]; ok {
-			_ = json.Unmarshal(v, &args.On)
+			// 与 timeout_minutes 同口径：类型错误显式报错，不静默退回全量
+			// 条件——否则模型传错（如数组/数字）会被悄悄放大为全集 wait。
+			if err := json.Unmarshal(v, &args.On); err != nil {
+				return nil, 0, errs.New(errs.ErrInvalidParams.Code, "on 需要是字符串（idle/needs_reply/error 或其组合）")
+			}
 		}
 		if v, ok := raw["timeout_minutes"]; ok {
 			if err := json.Unmarshal(v, &args.TimeoutMinutes); err != nil {
@@ -546,13 +550,18 @@ func (s *BotService) evaluateThreadWait(e *botWaitEntry, detailCtx context.Conte
 			// 可能还没推到含新线程的版本——只在启动宽限过后仍缺失才下
 			// thread_gone 结论，宽限内按「尚未出现」继续等（落到下方
 			// StartGrace 分支收尾）。
-			if view.Snaps != nil && view.Snaps.ArchiveErr == nil &&
+			trusted := view.Snaps != nil && view.Snaps.ArchiveErr == nil
+			if trusted &&
 				(e.baseline.known || now.Sub(e.attachedAt) >= s.waitCfg.StartGrace) {
 				s.waitResolveThreadGone(e, call)
 				return
 			}
-			// 归档面不可信（G1）：不能断言不存在，按不可信窗口处理。
-			e.notReadyTicks++
+			// 归档面不可信（G1）才计不可信轮次：baseline 未见过线程时的
+			// 宽限内缺席是可信观察（快照只是还没到），记进 notReadyTicks
+			// 会把随后的 not_started/超时收尾降格成 watch_degraded。
+			if !trusted {
+				e.notReadyTicks++
+			}
 		} else {
 			if !e.baseline.known {
 				e.baseline = obs
