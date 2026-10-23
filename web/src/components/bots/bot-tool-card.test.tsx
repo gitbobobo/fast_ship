@@ -108,6 +108,27 @@ describe("BotToolCard", () => {
     expect(screen.getByTestId("bot-call-status")).toHaveTextContent("失败");
   });
 
+  it("错误文案里的参数字段名用等宽样式与普通文案区分（视觉审查）", () => {
+    renderCard(
+      makeCall({
+        status: "failed",
+        error_message:
+          "workspace.type=root 不接受 base_ref/branch/worktree_path：项目主检出不需要工作区参数；要新建工作树请改用 worktree",
+      }),
+    );
+    const errP = document.querySelector("p.text-destructive")!;
+    // 可辨识的字段名（snake_case/点路径/赋值）各成 <code>，中文说明与
+    // 单词枚举值保持普通文案。
+    const codes = [...errP.querySelectorAll("code")].map((c) => c.textContent);
+    expect(codes).toEqual([
+      "workspace.type=root",
+      "base_ref",
+      "worktree_path",
+    ]);
+    expect(errP).toHaveTextContent("不接受 base_ref/branch/worktree_path");
+    expect(errP).toHaveTextContent("要新建工作树请改用 worktree");
+  });
+
   it("截断结果保留「查看完整结果」按需展开", () => {
     renderCard(makeCall({ truncated: true }));
     expect(

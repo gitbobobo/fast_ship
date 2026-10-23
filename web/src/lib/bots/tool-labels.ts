@@ -338,8 +338,20 @@ function modelSelectionText(raw: unknown): string | null {
 }
 
 // workspace 拆成每字段一个短 chip（视觉审查）：合并长文案在窄屏会标签
-// 折行、分支被截断；拆分后各自折行，路径截断也碰不到分支。路径取末两级
-// 目录加 …/ 前缀（尾段是区分工作树的依据），完整路径在 title。
+// 折行、分支被截断；拆分后各自折行，路径截断也碰不到分支。长路径中段
+// 省略保留首尾目录（尾段区分工作树、首段给出根上下文），完整路径在
+// title（视觉审查：截首只剩尾部无法核对完整目标路径）。
+function truncatePathMiddle(p: string, max = 56): string {
+  if (p.length <= max) return p;
+  const keep = max - 1; // 为 … 留位
+  const headLen = Math.max(4, Math.floor(keep / 3));
+  const tailLen = keep - headLen;
+  const headEnd = p.indexOf("/", headLen);
+  const tailStart = p.lastIndexOf("/", p.length - tailLen);
+  const head = headEnd > 0 ? p.slice(0, headEnd) : p.slice(0, headLen);
+  const tail = tailStart > 0 ? p.slice(tailStart) : p.slice(p.length - tailLen);
+  return `${head}…${tail}`;
+}
 function workspaceChips(raw: unknown): ToolParamChip[] {
   if (typeof raw !== "object" || raw === null) return [];
   const ws = raw as {
@@ -378,11 +390,12 @@ function workspaceChips(raw: unknown): ToolParamChip[] {
   if (ws.type === "existing_worktree") {
     const path = str(ws.worktree_path);
     if (path) {
-      const parts = path.replace(/\/+$/, "").split("/").filter(Boolean);
-      const tail = parts.slice(-2).join("/");
-      if (tail) {
-        chips.push({ key: "workspace.path", label: "路径", value: `…/${tail}`, title: path });
-      }
+      chips.push({
+        key: "workspace.path",
+        label: "路径",
+        value: truncatePathMiddle(path),
+        title: path,
+      });
     }
     const branch = str(ws.branch);
     if (branch) chips.push({ key: "workspace.branch", label: "分支", value: branch, title });

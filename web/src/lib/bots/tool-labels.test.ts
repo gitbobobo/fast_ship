@@ -176,8 +176,19 @@ describe("toolParamChips", () => {
     });
     const eKeys = new Map(existing.map((c) => [c.key, c.value]));
     expect(eKeys.get("workspace")).toBe("已有工作树");
-    expect(eKeys.get("workspace.path")).toBe("…/c/d");
+    expect(eKeys.get("workspace.path")).toBe("/a/b/c/d");
     expect(eKeys.get("workspace.branch")).toBe("fix");
+
+    // 长路径中段省略保留首尾目录（尾段区分、首段给根上下文），完整
+    // 路径仍在 title（视觉审查：截首只剩尾部不可核对）。
+    const longPath =
+      "/Users/dev/repos/monorepo/packages/service-a/worktrees/hotfix-login-flow-regression-20261015";
+    const longChips = toolParamChips("fs_thread", {
+      workspace: { type: "existing_worktree", worktree_path: longPath },
+    });
+    const pathChip = longChips.find((c) => c.key === "workspace.path")!;
+    expect(pathChip.value).toBe("/Users/dev/repos/monorepo…/hotfix-login-flow-regression-20261015");
+    expect(pathChip.title).toBe(longPath);
 
     const bare = toolParamChips("fs_thread", {
       workspace: { type: "worktree" },

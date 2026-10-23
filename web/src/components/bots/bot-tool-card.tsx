@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { Link } from "react-router";
 import { ChevronDown, ChevronUp, Wrench } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -45,6 +45,30 @@ export const STATUS_BADGE: Record<string, string> = {
   cancelled: "bg-muted text-muted-foreground",
   not_executed: "bg-muted text-muted-foreground",
 };
+
+// 失败文案里内联的参数字段名（snake_case/dotted.path/key=value）用等宽
+// 样式与中文文案区分——长句逐词解析成本高，定位错误参数靠字段名一眼
+// 可辨（视觉审查）。字段名原文保留：bot 自校正需要精确字段。
+const ERROR_FIELD_TOKEN =
+  /[a-z][a-z0-9]*(?:_[a-z0-9]+)+(?:\.[a-z0-9_[\]]+)*(?:=[^\s，。；、]+)?|(?:[a-z][a-z0-9_]*\.)+[a-z0-9_[\]]+(?:=[^\s，。；、]*)?/g;
+
+export function renderErrorMessage(text: string): ReactNode {
+  const out: ReactNode[] = [];
+  let last = 0;
+  let i = 0;
+  for (const m of text.matchAll(ERROR_FIELD_TOKEN)) {
+    const idx = m.index ?? 0;
+    if (idx > last) out.push(bidiSafeText(text.slice(last, idx)));
+    out.push(
+      <code key={i++} className="font-mono">
+        {m[0]}
+      </code>,
+    );
+    last = idx + m[0].length;
+  }
+  if (last < text.length) out.push(bidiSafeText(text.slice(last)));
+  return out;
+}
 
 /** 参数 chip：短标识能拼出站内外路由时渲染为链接，完整值进 title。 */
 export function ParamChipView({ chip }: { chip: ToolParamChip }) {
@@ -183,7 +207,7 @@ export function BotToolCard({
           title={call.error_code ?? undefined}
           className="text-xs text-destructive [unicode-bidi:isolate]"
         >
-          {bidiSafeText(call.error_message.replace(/^\[\d{5}\]\s*/, ""))}
+          {renderErrorMessage(call.error_message.replace(/^\[\d{5}\]\s*/, ""))}
         </p>
       )}
       {call?.effect_may_have_occurred && (
