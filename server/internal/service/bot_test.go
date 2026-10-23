@@ -3240,6 +3240,48 @@ func TestBotAlwaysAllowPersistsSourceParam(t *testing.T) {
 	}
 }
 
+func TestBotAlwaysAllowMultiFieldRuleMatches(t *testing.T) {
+	// buildAlwaysAllowValue 用账本里声明序的 fields 重建规则，botRuleOf
+	// 按排序口径哈希——不排序的话多字段 update 的 always-allow 规则
+	// 永远匹配不上后续调用，静默失效成重复弹确认（代码审查 P2）。
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "botalwmulti")
+	bot := env.createBot(t, userID)
+	botRow := &model.Bot{ID: bot.ID, UserID: userID}
+	project, err := env.bots.projects.Create(userID, &CreateProjectRequest{Name: "多字段授权项目"})
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+	issue, err := env.bots.issues.CreateInternalIssue(project.Id, userID,
+		CreateInternalIssueRequest{Title: "原标题"})
+	if err != nil {
+		t.Fatalf("issue: %v", err)
+	}
+	args := `{"action":"update","issue_id":"` + issue.Id + `","title":"t","body":"b"}`
+	prep, err := botPrepareToolCall(botToolsetOf(), "fs_issue", args)
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	var execCtx botCallExecContext
+	env.bots.resolveCallScope(botRow, prep, args, &execCtx)
+	call := &model.BotToolCall{
+		ID: "c1", BotID: bot.ID, ToolName: "fs_issue", Action: "update",
+		ExecutionContextJSON: marshalExecContext(execCtx),
+	}
+	authz := env.bots.buildAlwaysAllowValue(bot.ID, call)
+	prep2, err := botPrepareToolCall(botToolsetOf(), "fs_issue",
+		`{"action":"update","issue_id":"`+issue.Id+`","body":"b2","title":"t2"}`)
+	if err != nil {
+		t.Fatalf("prepare2: %v", err)
+	}
+	var freshCtx botCallExecContext
+	env.bots.resolveCallScope(botRow, prep2,
+		`{"action":"update","issue_id":"`+issue.Id+`","body":"b2","title":"t2"}`, &freshCtx)
+	if got := botRuleHash(botRuleOf(prep2)); got != authz.RuleHash {
+		t.Fatalf("同字段集合的后续 update 必须命中 always-allow 规则（排序口径）")
+	}
+}
+
 func TestBotProjectListSlimsTokenRefs(t *testing.T) {
 	// fs_project/list 与 get 一致走瘦身投影：GitHub 凭证引用 ID 不进模型上下文。
 	env := setupBotTestEnv(t)

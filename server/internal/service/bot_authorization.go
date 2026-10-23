@@ -322,7 +322,11 @@ func (s *BotService) buildAlwaysAllowValue(botID string, call *model.BotToolCall
 	envID := execCtx.EnvID
 	var fields []string
 	if len(execCtx.Fields) > 0 {
-		fields = execCtx.Fields
+		// presentFields 返回声明序，botRuleOf 走排序口径——重建规则前
+		// 必须同序，否则多字段调用的规则哈希永远对不上、always-allow
+		// 静默失效成重复弹确认（代码审查 P2）。
+		fields = append([]string{}, execCtx.Fields...)
+		sort.Strings(fields)
 	}
 	constraints := map[string]interface{}{}
 	if fields != nil {
