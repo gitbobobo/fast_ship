@@ -133,12 +133,32 @@ describe("BotToolCard", () => {
     renderCard(
       makeCall({
         status: "succeeded",
-        policy: { tier: "tier1", auto: true, rule_id: "thread_send_continue" },
+        policy: {
+          tier: "tier1",
+          auto: true,
+          source: "tier1",
+          rule_id: "thread_send_continue",
+        },
       }),
     );
     const badge = screen.getByTestId("bot-call-auto-badge");
     expect(badge).toHaveTextContent("自动执行");
     expect(badge).toHaveTextContent("继续");
+  });
+
+  it("always-allow 接管的 tier1 候选行不渲染自动执行徽标", () => {
+    renderCard(
+      makeCall({
+        status: "succeeded",
+        policy: {
+          tier: "tier1",
+          auto: true,
+          source: "always_allow",
+          rule_id: "thread_send_continue",
+        },
+      }),
+    );
+    expect(screen.queryByTestId("bot-call-auto-badge")).toBeNull();
   });
 
   it("tier2 / 非自动 / 无 policy 不渲染自动执行徽标", () => {

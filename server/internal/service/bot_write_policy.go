@@ -703,8 +703,10 @@ func (s *BotService) appendPolicyRuleDisabledNoticeTx(tx *gorm.DB, botID, ruleID
 	})
 }
 
-// detectPolicyInverseAcceptance 在受理端检测结算/撤销结算的往返（settle 后
-// 30 分钟内 unsettle，或反向）：方向相反的写说明前一次自动放行是误判。
+// detectPolicyInverseAcceptance 检测结算/撤销结算的往返（settle 后 30 分钟
+// 内 unsettle，或反向）：方向相反的写说明前一次自动放行是误判。只从用户
+// 决策路径（批准反向确认卡）调用——机器人自己受理的往返（自动放行、
+// 定时任务默认放行）是正常的巡检行为，不算误判。
 func (s *BotService) detectPolicyInverseAcceptance(botID, action, envID, threadID string) {
 	inverse := "settle"
 	if action == "settle" {

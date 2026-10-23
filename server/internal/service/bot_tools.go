@@ -1384,18 +1384,20 @@ var botActionRules = map[string]botActionRule{
 	"fs_issue/comment":           {Required: req("issue_id", "comment_body")},
 	"fs_issue/create":            {Required: req("project_id", "title")},
 
-	"fs_thread/list":              {},
-	"fs_thread/get":               {Required: req("env_id", "thread_id")},
-	"fs_thread/item":              {Required: req("env_id", "thread_id", "item_id")},
-	"fs_thread/composer_options":  {Required: req("env_id")},
-	"fs_thread/workspace_options": {Required: req("env_id", "project_id")},
-	"fs_thread/launch":            {Required: req("env_id", "project_id", "text")},
-	"fs_thread/send":              {Required: req("env_id", "thread_id", "text")},
-	"fs_thread/stop":              {Required: req("env_id", "thread_id")},
+	// on/timeout_minutes 是 v12 起 wait 的字段（INT-160）：其它动作携带即拒——
+	// 放行会被静默丢弃，模型却以为挂了等待或带了过滤条件。
+	"fs_thread/list":              {Forbidden: []string{"on", "timeout_minutes"}},
+	"fs_thread/get":               {Required: req("env_id", "thread_id"), Forbidden: []string{"on", "timeout_minutes"}},
+	"fs_thread/item":              {Required: req("env_id", "thread_id", "item_id"), Forbidden: []string{"on", "timeout_minutes"}},
+	"fs_thread/composer_options":  {Required: req("env_id"), Forbidden: []string{"on", "timeout_minutes"}},
+	"fs_thread/workspace_options": {Required: req("env_id", "project_id"), Forbidden: []string{"on", "timeout_minutes"}},
+	"fs_thread/launch":            {Required: req("env_id", "project_id", "text"), Forbidden: []string{"on", "timeout_minutes"}},
+	"fs_thread/send":              {Required: req("env_id", "thread_id", "text"), Forbidden: []string{"on", "timeout_minutes"}},
+	"fs_thread/stop":              {Required: req("env_id", "thread_id"), Forbidden: []string{"on", "timeout_minutes"}},
 	// 结算与队列恢复（INT-148）：都只认 env_id + thread_id，不收其它参数。
-	"fs_thread/settle":       {Required: req("env_id", "thread_id")},
-	"fs_thread/unsettle":     {Required: req("env_id", "thread_id")},
-	"fs_thread/resume_queue": {Required: req("env_id", "thread_id")},
+	"fs_thread/settle":       {Required: req("env_id", "thread_id"), Forbidden: []string{"on", "timeout_minutes"}},
+	"fs_thread/unsettle":     {Required: req("env_id", "thread_id"), Forbidden: []string{"on", "timeout_minutes"}},
+	"fs_thread/resume_queue": {Required: req("env_id", "thread_id"), Forbidden: []string{"on", "timeout_minutes"}},
 	// wait（INT-160）：env_id + thread_id 必填；on/timeout_minutes 可选，取值
 	// 由 botThreadWaitParams 校验。其余字段一概不生效，出现即拒——放行会被
 	// 静默丢弃，模型却以为带了过滤条件。

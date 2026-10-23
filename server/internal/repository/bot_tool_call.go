@@ -183,15 +183,18 @@ func (r *BotToolCallRepository) CountWaitCallsByThreadSince(botID, envID, thread
 }
 
 // CountPolicyAutoCallsByThreadSinceTx 统计窗口内本 bot 对该线程按指定规则
-// 自动放行的调用行（policy_json 的 auto/rule_id 与 arguments_json 的
+// 自动放行的调用行（policy_json 的 auto/rule_id/source 与 arguments_json 的
 // env/thread 都在 SQL 过滤），带回最近一行 ID（配额审计的 approved_call_id）。
-// 含已失败/取消的行——失败的发送同样消耗一次尝试。
+// 含已失败/取消的行——失败的发送同样消耗一次尝试。只看 source=tier1：
+// always-allow 接管的降级候选行同样是 auto=1+tier=tier1+rule_id，但那是用户
+// 明示的持久授权执行，不消耗无人值守配额（复审 P2 修正）。
 func (r *BotToolCallRepository) CountPolicyAutoCallsByThreadSinceTx(tx *gorm.DB, botID, ruleID, envID, threadID string, since time.Time) (int64, string, error) {
 	pol := botPolicyJSONExpr()
 	args := botWaitArgsJSONExpr()
 	matched := func(q *gorm.DB) *gorm.DB {
 		return q.Where("bot_id = ? AND created_at >= ? AND policy_json <> ''", botID, since).
-			Where("json_extract("+pol+", '$.auto') = 1 AND json_extract("+pol+", '$.rule_id') = ?", ruleID).
+			Where("json_extract("+pol+", '$.auto') = 1 AND json_extract("+pol+", '$.rule_id') = ?"+
+				" AND json_extract("+pol+", '$.source') = 'tier1'", ruleID).
 			Where("json_extract("+args+", '$.env_id') = ? AND json_extract("+args+", '$.thread_id') = ?",
 				envID, threadID)
 	}
@@ -213,12 +216,15 @@ func (r *BotToolCallRepository) CountPolicyAutoCallsByThreadSinceTx(tx *gorm.DB,
 // PolicyAutoCallExistsSinceTx 报告窗口内是否有过同规则、同目标线程的 tier1
 // 自动放行（误判检测窗口判定）。目标线程取执行上下文：thread_id 缺省回退
 // scope_id，与 botPolicyThreadTargetOf 同口径；env/thread 为空串时不参与过滤。
+// 只看 source=tier1：always-allow 接管的用户授权执行不算无人值守自动放行，
+// 不应成为误判的参照（复审 P2 修正）。
 func (r *BotToolCallRepository) PolicyAutoCallExistsSinceTx(tx *gorm.DB, botID, ruleID, envID, threadID string, since time.Time) (bool, error) {
 	pol := botPolicyJSONExpr()
 	ec := jsonColumnOr("execution_context_json", "{}")
 	q := tx.Model(&model.BotToolCall{}).
 		Where("bot_id = ? AND created_at >= ? AND policy_json <> ''", botID, since).
 		Where("json_extract("+pol+", '$.auto') = 1 AND json_extract("+pol+", '$.tier') = 'tier1'"+
+			" AND json_extract("+pol+", '$.source') = 'tier1'"+
 			" AND json_extract("+pol+", '$.rule_id') = ?", ruleID)
 	if envID != "" {
 		q = q.Where("json_extract("+ec+", '$.env_id') = ?", envID)

@@ -89,12 +89,15 @@ export function ParamChips({ chips }: { chips: ToolParamChip[] }) {
 }
 
 /**
- * 自动执行判定（INT-160）：只有 tier1 策略放行算「自动执行」——
- * always-allow 与定时任务默认放行走的是既有授权语义，decision_source
- * 可从 authorization_id / 会话推导，不在这里重复标记。
+ * 自动执行判定（INT-160）：只有 tier1 策略放行（source=tier1）算「自动
+ * 执行」——always-allow 接管的降级候选行同样写 tier=tier1+auto=true，
+ * 但那是用户明示的持久授权执行，不在这里重复标记；定时任务默认放行走
+ * schedule_default，同样不算。
  */
 export function isPolicyAuto(policy?: BotCallPolicy | null): boolean {
-  return Boolean(policy && policy.auto && policy.tier === "tier1");
+  return Boolean(
+    policy && policy.auto && policy.tier === "tier1" && policy.source === "tier1",
+  );
 }
 
 /** 「自动执行」徽标：审计不只放面板——聊天流与后台面板都能看到。 */

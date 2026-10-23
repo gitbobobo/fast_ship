@@ -613,18 +613,37 @@ func TestBotInt160PolicyMisjudgmentHooks(t *testing.T) {
 	_, envID := pairPolicyT3(t, env, userID)
 	bot := env.createBot(t, userID)
 
-	// 自动放行 settle（queued）后受理方向相反的 unsettle：按事实记一次误判。
+	// 自动放行 settle（queued）后机器人自己受理方向相反的 unsettle：不记
+	// 误判——误判只计「用户」反向操作（复审 P2 修正：正常巡检的
+	// settle→unsettle 往返不是用户反转）。
 	settle := acceptPolicyCall(t, env, bot.ID, false, "fs_thread",
 		`{"action":"settle","env_id":"`+envID+`","thread_id":"`+int160PolicyIdleThread+`"}`)
 	settleAutoCall(t, env, settle.ID)
 	acceptPolicyCall(t, env, bot.ID, false, "fs_thread",
 		`{"action":"unsettle","env_id":"`+envID+`","thread_id":"`+int160PolicyIdleThread+`"}`)
+	if row := policyRuleRowOf(t, env, bot.ID, botPolicyRuleSettleIdle); row != nil && row.FalsePositiveCount24h != 0 {
+		t.Fatalf("机器人自发 settle→unsettle 往返不应记误判: %+v", row)
+	}
+
+	// 用户批准一张反向确认卡才记误判：关闭 unsettle 规则让反向操作落成
+	// 确认卡，批准后按事实记一次。
+	if _, err := env.bots.SetWritePolicyRuleEnabled(userID, bot.ID, botPolicyRuleUnsettle, false); err != nil {
+		t.Fatalf("disable unsettle rule: %v", err)
+	}
+	unsettleCard := acceptPolicyCall(t, env, bot.ID, false, "fs_thread",
+		`{"action":"unsettle","env_id":"`+envID+`","thread_id":"`+int160PolicyIdleThread+`"}`)
+	if unsettleCard.Status != model.BotCallStatusPendingConfirmation {
+		t.Fatalf("规则关闭后 unsettle 应落确认卡，实得 %s", unsettleCard.Status)
+	}
+	if _, err := env.bots.DecideCall(userID, bot.ID, unsettleCard.ID, &CallDecisionRequest{Decision: "approve"}); err != nil {
+		t.Fatalf("approve unsettle card: %v", err)
+	}
 	row := policyRuleRowOf(t, env, bot.ID, botPolicyRuleSettleIdle)
 	if row == nil {
 		t.Fatalf("误判后应有规则行")
 	}
 	if row.FalsePositiveCount24h != 1 {
-		t.Fatalf("settle→unsettle 往返应记一次误判: %+v", row)
+		t.Fatalf("用户批准反向确认卡应记一次误判: %+v", row)
 	}
 
 	// 自动「继续」后用户批准 stop：第二个钩子。

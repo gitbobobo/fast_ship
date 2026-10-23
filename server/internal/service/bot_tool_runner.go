@@ -274,13 +274,17 @@ func (s *BotService) commitAssistantTurn(bot *model.Bot, run *model.BotRun, requ
 					// 分级放行（INT-160）：档位由服务端按「动作 + 归一化参数 +
 					// 目标线程内存状态」计算，模型不能自证安全。评估结论无论
 					// 落在哪条路径（自动执行 / 确认卡 / 定时任务同步拒绝）都
-					// 写进 policy_json 审计。同批已受理的自动「继续」计入配额。
-					pol := s.evaluateWritePolicy(bot, run, prepared,
-						batch.autoSends[batch.threadKey(entry.execCtx.EnvID, entry.execCtx.ThreadID)])
+					// 写进 policy_json 审计。同批已受理的自动「继续」计入配额：
+					// 键取 botPolicyThreadTargetOf 口径（send 的 ThreadID 缺省，
+					// 回退 ScopeID），直接读 execCtx.ThreadID 会把不同线程的
+					// 发送串进同一配额桶。
+					batchEnv, batchThread := botPolicyThreadTargetOf(entry.execCtx)
+					batchKey := batch.threadKey(batchEnv, batchThread)
+					pol := s.evaluateWritePolicy(bot, run, prepared, batch.autoSends[batchKey])
 					entry.policy = pol
 					entry.call.PolicyJSON = botPolicyRecordJSON(&pol.record)
 					if pol.record.Auto && pol.record.RuleID == botPolicyRuleSendContinue {
-						batch.autoSends[batch.threadKey(entry.execCtx.EnvID, entry.execCtx.ThreadID)]++
+						batch.autoSends[batchKey]++
 					}
 					switch {
 					case pol.denied:
@@ -535,15 +539,11 @@ func (s *BotService) commitAssistantTurn(bot *model.Bot, run *model.BotRun, requ
 				s.threadWaitAttach(bot, call, entry.waitConds, entry.waitTimeout)
 			}
 		}
-		// 分级放行误判检测（INT-160）：settle/unsettle 的往返（前一次自动
-		// 放行后 30 分钟内出现方向相反的受理）按事实记一次误判。放在受理端
-		// 而非终态：方向相反的写被受理本身就说明目标状态刚被反转过。
-		if entry.prepared != nil && entry.prepared.ToolName == "fs_thread" &&
-			(entry.prepared.Action == "settle" || entry.prepared.Action == "unsettle") &&
-			(call.Status == model.BotCallStatusQueued || call.Status == model.BotCallStatusRunning) {
-			envID, threadID := botPolicyThreadTargetOf(entry.execCtx)
-			s.detectPolicyInverseAcceptance(bot.ID, entry.prepared.Action, envID, threadID)
-		}
+		// 误判只记「用户」反向操作：机器人自己受理的 settle/unsettle 往返
+		//（自动放行、定时任务默认放行、甚至自己发的确认卡待批准前的受理）
+		// 都不在这里记——用户批准/拒批/撤销的检测在 DecideCall 路径上
+		//（detectPolicyMisjudgeOnDecision）。受理端计数会把正常巡检的
+		// settle→unsettle 往返也记成误判（复审 P2 修正）。
 	}
 	return calls, nil
 }
@@ -992,10 +992,15 @@ func (s *BotService) abortIfCancelRequested(bot *model.Bot, call *model.BotToolC
 
 // cancelRaceCols 构造取消竞速下的终态列：取消标记在执行与落定之间落上时，
 // 成功/失败结论不得以原状态送达。复检失败发生在任何外部写入之前，effect
-// 恒 false；wait（INT-160）无任何副作用，取消也不例外，结果体覆写为
-// outcome=cancelled；其余调用按「可能已写出」处理，结果保持原样。
+// false；wait（INT-160）无任何副作用，取消也不例外，结果体覆写为
+// outcome=cancelled；其余调用 effect 恒 true（保守记「可能已写出」），
+// 结果保持原样。
 func cancelRaceCols(call *model.BotToolCall, outcome botToolOutcome, execErr error, now time.Time) (model.BotToolCallStatus, botToolOutcome, bool, map[string]interface{}) {
-	effect := execErr == nil
+	// 缺省按「可能已写出」处理：取消与已派发写入竞速时，适配器报错
+	//（context.Canceled/超时/丢响应）不代表远端没应用——保守留痕让模型
+	// 先核实再决定是否重试，避免重复写。只有确定发生在写入之前的失败
+	//（执行前复检）与无副作用的 wait 才清掉该标记。
+	effect := true
 	if isBotPolicyRecheckError(execErr) {
 		effect = false
 	}
