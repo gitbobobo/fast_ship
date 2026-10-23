@@ -1219,6 +1219,9 @@ type botPreparedCall struct {
 	// ParamConstraint 是参数值级约束（如 source=github）：同一动作不同参数
 	// 值的副作用不同，「总是允许」必须按值绑定，不能只看字段集合。
 	ParamConstraint string
+	// ExecConfigJSON 是 launch 执行配置的规范化 JSON（摘要同口径）：
+	// 镜像进执行上下文，always-allow 落库时写进 constraints_json 供管理面展示。
+	ExecConfigJSON string
 	// SchedulePreview 是 fs_schedule 确认卡的服务端预览（create/update/run
 	// 受理时算好下次运行与生效模型）；resolveCallScope 把它镜像进执行上下文，
 	// 不进 wire 字节。

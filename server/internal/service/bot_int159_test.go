@@ -515,6 +515,53 @@ func TestBotInt159LaunchAuthzBindsExecConfig(t *testing.T) {
 	if hashOf(padded) != hashOf(fullAccess) {
 		t.Fatalf("仅首尾空白不同的同语义取值应共用授权")
 	}
+	// null 叶子与缺省同口径：执行侧 null 按空值处理，摘要不得拆规则
+	// （代码审查 r25）。
+	withNull := `{"env_id":"e","project_id":"p","text":"任务一","runtime_mode":"full-access","model_selection":{"instance_id":"i","model":"m2","options":null}}`
+	withoutNull := `{"env_id":"e","project_id":"p","text":"任务一","runtime_mode":"full-access","model_selection":{"instance_id":"i","model":"m2"}}`
+	if hashOf(withNull) != hashOf(withoutNull) {
+		t.Fatalf("null 占位字段与缺省应共用授权")
+	}
+}
+
+// INT-159 always-allow 落库：constraints_json 必须带上规范化执行配置
+// （exec_config）与参数值约束（param），授权管理面才能按值区分同
+// action 的不同配置规则（代码审查 r25 P2）。
+func TestBotInt159AlwaysAllowPersistsExecConfig(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "botalw159")
+	bot := env.createBot(t, userID)
+	botRow := &model.Bot{ID: bot.ID, UserID: userID}
+	args := `{"action":"launch","env_id":"e","project_id":"p","text":"t","runtime_mode":"auto","model_selection":{"instance_id":"i","model":"m2"}}`
+	prep, err := botPrepareToolCall(botToolsetOf(), "fs_thread", args)
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	var execCtx botCallExecContext
+	env.bots.resolveCallScope(botRow, prep, args, &execCtx)
+	call := &model.BotToolCall{
+		ID: "c1", BotID: bot.ID, ToolName: "fs_thread", Action: "launch",
+		ExecutionContextJSON: marshalExecContext(execCtx),
+	}
+	authz := env.bots.buildAlwaysAllowValue(bot.ID, call)
+	var constraints map[string]interface{}
+	if err := json.Unmarshal([]byte(authz.ConstraintsJSON), &constraints); err != nil {
+		t.Fatalf("constraints: %v", err)
+	}
+	execCfg, ok := constraints["exec_config"].(map[string]interface{})
+	if !ok || execCfg["runtime_mode"] != "auto" {
+		t.Fatalf("exec_config 应落库规范化配置: %s", authz.ConstraintsJSON)
+	}
+	if ms, ok := execCfg["model_selection"].(map[string]interface{}); !ok || ms["model"] != "m2" {
+		t.Fatalf("exec_config 应含规范化 model_selection: %s", authz.ConstraintsJSON)
+	}
+	if p, ok := constraints["param"].(string); !ok || !strings.HasPrefix(p, "exec=") {
+		t.Fatalf("param 应落 exec 摘要: %s", authz.ConstraintsJSON)
+	}
+	f, _ := constraints["fields"].([]interface{})
+	if len(f) != 2 {
+		t.Fatalf("fields 应含两个配置字段: %s", authz.ConstraintsJSON)
+	}
 }
 
 // INT-159 受理侧：runtime_mode 显式空串与非枚举同口径拒掉（缺失与为空

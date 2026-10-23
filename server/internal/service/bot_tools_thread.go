@@ -197,6 +197,9 @@ type botCallExecContext struct {
 	// Param 与授权规则的参数值级约束一致（如 source=github）：always-allow
 	// 重建规则时必须有它，否则后续调用哈希永远对不上。
 	Param string `json:"param,omitempty"`
+	// ExecConfig 是 launch 执行配置的规范化 JSON（与摘要同口径）：
+	// always-allow 重建规则时写进 constraints_json，授权管理面按值展示。
+	ExecConfig string `json:"exec_config,omitempty"`
 	// Schedule 是 fs_schedule 确认卡的服务端预览（受理时算好，避免前端重复
 	// 实现 cron 解析）。
 	Schedule *botScheduleCallPreview `json:"schedule,omitempty"`
@@ -224,6 +227,9 @@ func (s *BotService) resolveThreadScope(prepared *botPreparedCall, raw map[strin
 			// 均为空，命中升级前已存在的裸规则（Param 为空），存量授权用户
 			// 不会因本次升级被无谓重新确认（代码审查 Note）。
 			prepared.ParamConstraint = "exec=" + botThreadExecConfigDigest(raw)
+			// 规范化配置随调用账本进授权约束：摘要让规则哈希可区分，但
+			// 只有摘要管理面与审计无法看出规则覆盖哪套配置。
+			prepared.ExecConfigJSON = string(botThreadExecConfigObject(raw))
 		}
 	case "send":
 		prepared.ScopeKind = botScopeThread
@@ -262,6 +268,23 @@ func botThreadExecConfigDigest(raw map[string]json.RawMessage) string {
 	return hex.EncodeToString(h.Sum(nil)[:8])
 }
 
+// botThreadExecConfigObject 把三个执行配置字段归一成单个规范 JSON 对象
+// （键按名序、值与摘要同口径归一化）——随授权约束落库，授权管理面能
+// 按值展示一条规则覆盖哪套配置，而不是只有一个不可辨认的摘要。
+func botThreadExecConfigObject(raw map[string]json.RawMessage) json.RawMessage {
+	cfg := map[string]json.RawMessage{}
+	for _, key := range []string{"model_selection", "runtime_mode", "workspace"} {
+		if v, ok := raw[key]; ok && string(v) != "null" {
+			cfg[key] = json.RawMessage(botCanonicalExecJSON(v))
+		}
+	}
+	out, err := json.Marshal(cfg)
+	if err != nil {
+		return json.RawMessage("{}")
+	}
+	return out
+}
+
 // botCanonicalExecJSON 把配置字段反序列化后重新规范化序列化：对象键按名
 // 排序（Go Marshal map 的既有行为）、空白剥离；非法 JSON 透原样（受理侧
 // shape 校验先于执行，不会走到这里）。
@@ -283,6 +306,12 @@ func botCanonicalValue(v interface{}) interface{} {
 	switch t := v.(type) {
 	case map[string]interface{}:
 		for k, e := range t {
+			// null 叶子递归丢弃：执行侧 null 与缺省同口径按空值处理，
+			// 摘要里保留会把语义相同的配置拆成两条授权规则（代码审查）。
+			if e == nil {
+				delete(t, k)
+				continue
+			}
 			t[k] = botCanonicalValue(e)
 		}
 		if opts, ok := t["options"].([]interface{}); ok {

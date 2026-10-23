@@ -342,6 +342,7 @@ func (s *BotService) resolveCallScope(bot *model.Bot, prepared *botPreparedCall,
 	execCtx.ScopeID = prepared.ScopeID
 	execCtx.Fields = prepared.FieldsConstraint
 	execCtx.Param = prepared.ParamConstraint
+	execCtx.ExecConfig = prepared.ExecConfigJSON
 	execCtx.Schedule = prepared.SchedulePreview
 	return nil
 }
