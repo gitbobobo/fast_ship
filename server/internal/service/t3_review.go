@@ -372,6 +372,12 @@ func failedPreparationFromProjection(p *t3ThreadProjection, messageID string) *T
 	if p.Thread.DeletedAt != nil && *p.Thread.DeletedAt != "" {
 		return nil
 	}
+	// messageID 为空（存量行没有 initial_message_id）匹配不了任何具体 run：
+	// 空串会撞上投影里缺 userMessageId 的 run（反序列化零值同为空串），
+	// 按无失败处理——与 threadTurnSettledFromProjection 同口径。
+	if messageID == "" {
+		return nil
+	}
 
 	var run *t3Run
 	for i := range p.Runs {

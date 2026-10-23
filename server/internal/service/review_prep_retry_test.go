@@ -245,6 +245,21 @@ func TestPrepRetryProjectionVerdict(t *testing.T) {
 		}
 	})
 
+	t.Run("empty messageID never matches", func(t *testing.T) {
+		// 存量行没有 initial_message_id：空串会撞上缺 userMessageId 的 run
+		// （反序列化零值同为空串），不得误判成可重试。
+		parsed := decodePrepFixture(t, func(m map[string]any) {
+			runs, _ := m["runs"].([]any)
+			m["runs"] = append(runs, map[string]any{
+				"id": "run-nomsg", "ordinal": 9, "status": "failed",
+				"workspacePreparation": map[string]any{},
+			})
+		})
+		if out := failedPreparationFromProjection(parsed, ""); out != nil {
+			t.Fatalf("空 messageID 不得匹配缺 userMessageId 的 run, got %+v", out)
+		}
+	})
+
 	t.Run("same message picks the highest ordinal run", func(t *testing.T) {
 		// 同一消息出现两条 run：只看 ordinal 最大的一条（最新状态），旧 failed
 		// 快照不作数。失败条目必须属于这条 run（T3 重试复用同一条 run，

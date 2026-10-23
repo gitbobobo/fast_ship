@@ -166,8 +166,10 @@ func TestArchiveRunsNoFinishedAt(t *testing.T) {
 	}
 }
 
-// TestArchiveRunsSettleThreadNotFound 宽限内线程已不存在：无可等，直接归档
-// （归档自身失败仍走原有限重试）。
+// TestArchiveRunsSettleThreadNotFound 宽限内线程 404 不立即采信（与
+// cleanupRunWorktree 同口径，防 T3 重启/抖动误判）：连续到上限认定无可归
+// 对象直接落 archived_at——不走归档 RPC（无线程的 RPC 只会误记归档失败、
+// 发假告警）。中途读成功即清零连续计数。
 func TestArchiveRunsSettleThreadNotFound(t *testing.T) {
 	e := newReviewEngineEnv(t)
 	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
@@ -176,15 +178,35 @@ func TestArchiveRunsSettleThreadNotFound(t *testing.T) {
 	t3 := &fakeReviewT3{settledErr: errT3ThreadNotFound}
 	review := e.withT3(t3, nil, nil)
 
-	review.archiveRuns(now)
-
-	if len(t3.archived) != 1 || t3.archived[0] != run.ThreadID {
-		t.Fatalf("线程 404 应直接归档，archived = %v", t3.archived)
+	// 上限前：既不走归档 RPC 也不落 archived_at。
+	for i := 0; i < reviewWorktreeMaxTries-1; i++ {
+		review.archiveRuns(now)
+	}
+	if len(t3.archived) != 0 {
+		t.Fatalf("404 未到上限不得走归档 RPC，archived = %v", t3.archived)
 	}
 	var after model.ReviewRun
 	e.svc.db.First(&after, "id = ?", run.ID)
+	if after.ArchivedAt != nil {
+		t.Fatal("404 未到上限不得写 archived_at")
+	}
+	// 中途读成功：连续 404 计数清零，重新计满才放行直接落账。
+	t3.settledErr = nil
+	t3.settled = map[string]bool{run.ThreadID: false}
+	review.archiveRuns(now)
+	if review.worktreeTries[run.ID+"|"+worktreeTryNotFound] != 0 {
+		t.Fatalf("读成功应清零连续 404 计数，tries = %v", review.worktreeTries)
+	}
+	t3.settledErr = errT3ThreadNotFound
+	for i := 0; i < reviewWorktreeMaxTries; i++ {
+		review.archiveRuns(now)
+	}
+	if len(t3.archived) != 0 {
+		t.Fatalf("404 到上限应直接落账而非走归档 RPC，archived = %v", t3.archived)
+	}
+	e.svc.db.First(&after, "id = ?", run.ID)
 	if after.ArchivedAt == nil {
-		t.Fatal("归档成功应写 archived_at")
+		t.Fatal("404 到上限应直接写 archived_at")
 	}
 }
 

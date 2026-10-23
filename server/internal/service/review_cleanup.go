@@ -113,16 +113,31 @@ func (s *ReviewService) archiveRunThread(run *model.ReviewRun, now time.Time) {
 	if run.FinishedAt != nil && now.Sub(*run.FinishedAt) < reviewArchiveSettleWait {
 		settled, err := s.t3.ThreadTurnSettled(ctx, run.UserID, run.EnvironmentID, run.ThreadID, run.InitialMessageID)
 		switch {
-		case err == nil && !settled:
-			// run 还在写收尾回复：本 tick 不归档，等下轮。
+		case err == nil:
+			// 读到了线程投影：之前的连续 404 不再算「连续」。
+			s.resetWorktreeTries(run.ID, worktreeTryNotFound)
+			if !settled {
+				// run 还在写收尾回复：本 tick 不归档，等下轮。
+				return
+			}
+		case errors.Is(err, errT3ThreadNotFound):
+			// 线程 404 不立即采信（T3 重启/代理抖动，与 cleanupRunWorktree
+			// 同口径）：连续到上限才认定无可归对象，直接落 archived_at——
+			// 再走归档 RPC 只会把无线程误记成归档失败、发假告警。
+			if tries := s.bumpWorktreeTries(run.ID, worktreeTryNotFound); tries < reviewWorktreeMaxTries {
+				return
+			}
+			s.db.Model(&model.ReviewRun{}).Where("id = ? AND archived_at IS NULL", run.ID).
+				Updates(map[string]any{"archived_at": now, "updated_at": now})
+			s.releaseWorktreeTries(run.ID)
 			return
-		case err != nil && !errors.Is(err, errT3ThreadNotFound):
+		default:
 			// 暂时读不到收尾状态：本 tick 不归档，下轮再试（宽限即上限）。
 			s.logger.Info("归档前读取线程收尾状态未成功，等下轮再试",
 				zap.String("run", run.ID), zap.Error(err))
 			return
 		}
-		// settled、或线程不存在（无可等）：落入归档。
+		// settled：落入归档。
 	}
 	if err := s.t3.ArchiveThread(ctx, run.UserID, run.EnvironmentID, run.ThreadID); err == nil {
 		s.db.Model(&model.ReviewRun{}).Where("id = ? AND archived_at IS NULL", run.ID).
