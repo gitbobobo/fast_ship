@@ -230,7 +230,10 @@ func TestBotInt159ComposerProviders(t *testing.T) {
 			map[string]interface{}{"displayName": "缺 instanceId"},
 		},
 	}
-	providers := botSlimComposerProviders(config)
+	providers, drifted := botSlimComposerProviders(config)
+	if drifted {
+		t.Fatalf("正常目录不得报漂移（缺 instanceId 的坏行单独跳过即可）")
+	}
 	if len(providers) != 1 || providers[0]["instance_id"] != "codex" || providers[0]["name"] != "Codex" {
 		t.Fatalf("providers = %+v", providers)
 	}
@@ -246,12 +249,23 @@ func TestBotInt159ComposerProviders(t *testing.T) {
 	if len(choices) != 2 || choices[1]["is_default"] != true {
 		t.Fatalf("choices = %+v", choices)
 	}
-	// 空/非数组 config 安全返回空目录。
-	if got := botSlimComposerProviders(map[string]interface{}{}); len(got) != 0 {
-		t.Fatalf("empty config 应返回空目录: %+v", got)
+	// 空/非数组 config 安全返回空目录，不算漂移（上游合法地没有目录）。
+	if got, d := botSlimComposerProviders(map[string]interface{}{}); len(got) != 0 || d {
+		t.Fatalf("empty config 应返回空目录且无漂移: %+v drift=%v", got, d)
 	}
-	if got := botSlimComposerProviders(map[string]interface{}{"providers": map[string]interface{}{}}); len(got) != 0 {
-		t.Fatalf("非数组 providers 应返回空目录: %+v", got)
+	if got, d := botSlimComposerProviders(map[string]interface{}{"providers": map[string]interface{}{}}); len(got) != 0 || d {
+		t.Fatalf("非数组 providers 应返回空目录且无漂移: %+v drift=%v", got, d)
+	}
+	// 上游改了键名：条目存在但一个 instanceId 都读不到 → 报漂移，回执
+	// 里必须显式标注而不是让目录静默消失（代码审查 Note）。
+	_, drifted = botSlimComposerProviders(map[string]interface{}{
+		"providers": []interface{}{
+			map[string]interface{}{"instance_id": "snake_case 漂移"},
+			map[string]interface{}{"name": "只有名字"},
+		},
+	})
+	if !drifted {
+		t.Fatalf("providers 有条目但无 instanceId 应报字段漂移")
 	}
 }
 

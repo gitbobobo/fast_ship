@@ -76,12 +76,20 @@ func (s *BotService) execThreadRead(ctx context.Context, call *model.BotToolCall
 		// 时 not_settable 标注会缺失（代码审查）。
 		if req, err := s.requests.FindByID(call.RequestID); err == nil {
 			botToolsetVer = req.ToolsetVersion
-		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
-			// 查询失败按 0 处理（旧会话的 not_settable 版本标注会缺，模型
-			// 传了新字段仍被受理拒，方向安全），但要留痕便于排查 DB 抖动
-			// （代码审查：与 matchAuthorization 的降级留痕同口径）。
-			s.logger.Warn("bot 工具集版本查询失败，按未升级处理",
-				zap.String("bot_id", call.BotID), zap.Error(err))
+		} else {
+			if !errors.Is(err, gorm.ErrRecordNotFound) {
+				// 查询失败要留痕便于排查 DB 抖动（代码审查：与
+				// matchAuthorization 的降级留痕同口径）。
+				s.logger.Warn("bot 工具集版本查询失败，回退 bots 表活值",
+					zap.String("bot_id", call.BotID), zap.Error(err))
+			}
+			// 降级回退 bots 表活值而非 0：活值只前进不回退，会话冻结版本
+			// 恒 ≤ 活值——活值已低于当前版时冻结版必也低，标注恒正确；
+			// 活值≥当前版的旧会话仍会漏标（双重降级才出现，方向安全），
+			// 但比按 0 兜底更贴近事实（代码审查 Note）。
+			if bot, berr := s.bots.FindByIDAndUser(call.BotID, userID); berr == nil {
+				botToolsetVer = bot.ToolsetVersion
+			}
 		}
 		if botToolsetVer > 0 && botToolsetVer < botToolsetVersion {
 			// 冻结旧工具集的会话也看得到 providers 目录：如实标注这些字段
@@ -92,11 +100,20 @@ func (s *BotService) execThreadRead(ctx context.Context, call *model.BotToolCall
 					"reason": fmt.Sprintf("本会话工具集 v%d 不含这些字段（传了会被受理拒绝）；压缩升级到 v%d 后可用", botToolsetVer, botToolsetVersion),
 				})
 		}
-		return botMarshalResult(map[string]interface{}{
+		providers, providersDrifted := botSlimComposerProviders(opts.Config)
+		resp := map[string]interface{}{
 			"projects":     opts.Projects,
-			"providers":    botSlimComposerProviders(opts.Config),
+			"providers":    providers,
 			"not_settable": notSettable,
-		})
+		}
+		if providersDrifted {
+			// 上游 providers 字段形状与约定不符（键名漂移等）：目录可能不完整，
+			// 显式标注而不是让模型目录静默消失（代码审查 Note）。
+			s.logger.Warn("composer_options providers 上游字段形状漂移",
+				zap.String("bot_id", call.BotID))
+			resp["providers_warning"] = "上游 providers 字段形状与预期不符，模型目录可能不完整；launch 的 model_selection 取值来源可能缺失"
+		}
+		return botMarshalResult(resp)
 	case "workspace_options":
 		opts, err := s.threads.WorkspaceOptions(ctx, userID, args.EnvID, args.ProjectID, args.Query, args.Cursor)
 		if err != nil {
@@ -932,9 +949,13 @@ var botThreadNotSettable = []map[string]string{
 // camelCase）归一化成蛇形模型目录：跳过停用/未安装/不可用的 provider 与
 // 缺 slug 的模型，保留选项描述符（id/type/choices/current_value），供
 // launch 的 model_selection 直接回填，机器人侧不硬编码模型清单。
-func botSlimComposerProviders(config map[string]interface{}) []map[string]interface{} {
+// 第二返回值报告上游字段形状漂移：providers 有条目但一个 instanceId 都
+// 读不到时，大概率是上游改了键名——目录静默为空对模型不可见，调用方应在
+// 回执里显式标注而不是让 launch 的取值来源悄悄消失（代码审查 Note）。
+func botSlimComposerProviders(config map[string]interface{}) ([]map[string]interface{}, bool) {
 	rawProviders, _ := config["providers"].([]interface{})
 	out := make([]map[string]interface{}, 0, len(rawProviders))
+	sawInstanceID := false
 	for _, raw := range rawProviders {
 		provider, ok := raw.(map[string]interface{})
 		if !ok {
@@ -944,6 +965,7 @@ func botSlimComposerProviders(config map[string]interface{}) []map[string]interf
 		if instanceID == "" {
 			continue
 		}
+		sawInstanceID = true
 		if provider["enabled"] == false || provider["installed"] == false ||
 			provider["availability"] == "unavailable" {
 			continue
@@ -961,7 +983,9 @@ func botSlimComposerProviders(config map[string]interface{}) []map[string]interf
 		}
 		out = append(out, entry)
 	}
-	return out
+	// 漂移判定收窄到「有条目但完全读不到 instanceId」：混入的个别坏行
+	// 静默跳过即可，整批缺关键字段名才像上游改了契约。
+	return out, len(rawProviders) > 0 && !sawInstanceID
 }
 
 // botSlimComposerModels 归一化 provider 的 models 数组（slug 必填）。

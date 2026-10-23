@@ -378,7 +378,9 @@ function workspaceChips(raw: unknown): ToolParamChip[] {
     if (branch) chips.push({ key: "workspace.branch", label: "分支", value: branch, title });
     const baseRef = str(ws.base_ref);
     if (baseRef) chips.push({ key: "workspace.base_ref", label: "基线", value: baseRef, title });
-    if (ws.start_from_origin !== undefined) {
+    // null 与省略同口径（服务端把 null 归一为缺省），不显示起点 chip：
+    // 显示「起点：本地」会让批准者误以为传了显式 false（代码审查 P2）。
+    if (ws.start_from_origin != null) {
       chips.push({
         key: "workspace.start",
         label: "起点",

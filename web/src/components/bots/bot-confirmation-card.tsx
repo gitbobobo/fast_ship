@@ -149,18 +149,19 @@ function ScheduleConfirmSummary({ call }: { call: BotCall }) {
 // JSON 区限高滚动，底部渐隐遮罩提示还有内容（视觉审查），不再拦腰裁切
 // 得像渲染出错。渐隐遮罩在叠加式滚动条下看不出可滚，渐隐处放「显示全部」
 // 入口展开为完整高度（视觉审查：被盖住的字段须能完整核对）。
-function JsonBlock({ text }: { text: string }) {
+function JsonBlock({ text, visible = true }: { text: string; visible?: boolean }) {
   const preRef = useRef<HTMLPreElement>(null);
   const [expanded, setExpanded] = useState(false);
   const [overflows, setOverflows] = useState(false);
   // 只有真溢出才挂渐隐与「显示全部」：短参数块挂假截断提示会让人以为
-  // 内容被藏了（视觉审查）。
+  // 内容被藏了（视觉审查）。visible 驱动重测：闭合的 <details> 里子树没有
+  // 布局盒、scrollHeight 恒 0，要在父级展开后才量（视觉审查）。
   useLayoutEffect(() => {
     const el = preRef.current;
-    if (el && !expanded && el.scrollHeight > el.clientHeight + 1) {
+    if (el && visible && !expanded && el.scrollHeight > el.clientHeight + 1) {
       setOverflows(true);
     }
-  }, [expanded]);
+  }, [expanded, visible]);
   return (
     <div className="relative">
       <pre
@@ -200,14 +201,16 @@ function JsonBlock({ text }: { text: string }) {
 function RawParams({
   chips,
   argPretty,
+  visible = true,
 }: {
   chips: ToolParamChip[];
   argPretty: string;
+  visible?: boolean;
 }) {
   return (
     <>
       <ParamChips chips={chips} />
-      {argPretty && <JsonBlock text={argPretty} />}
+      {argPretty && <JsonBlock text={argPretty} visible={visible} />}
     </>
   );
 }
@@ -307,6 +310,9 @@ export function BotConfirmationCard({
   const approveLabel = isScheduleCall
     ? `批准${SCHEDULE_ACTION_LABELS[call.action] ?? ""}`
     : "批准";
+  // 折叠的「查看原始参数」展开态：闭合的 <details> 里 JsonBlock 子树没有
+  // 布局盒，溢出检测要等展开后重测（视觉审查）。
+  const [rawParamsOpen, setRawParamsOpen] = useState(false);
 
   return (
     <section
@@ -341,12 +347,13 @@ export function BotConfirmationCard({
           <details
             data-testid="bot-schedule-raw-params"
             className="text-xs"
+            onToggle={(e) => setRawParamsOpen(e.currentTarget.open)}
           >
             <summary className="cursor-pointer select-none text-muted-foreground hover:text-foreground">
               查看原始参数
             </summary>
             <div className="space-y-2 pt-2">
-              <RawParams chips={chips} argPretty={argPretty} />
+              <RawParams chips={chips} argPretty={argPretty} visible={rawParamsOpen} />
             </div>
           </details>
         </>
@@ -369,12 +376,13 @@ export function BotConfirmationCard({
               <details
                 data-testid="bot-thread-raw-params"
                 className="text-xs"
+                onToggle={(e) => setRawParamsOpen(e.currentTarget.open)}
               >
                 <summary className="cursor-pointer select-none text-muted-foreground hover:text-foreground">
                   查看原始参数
                 </summary>
                 <div className="pt-2">
-                  <JsonBlock text={argPretty} />
+                  <JsonBlock text={argPretty} visible={rawParamsOpen} />
                 </div>
               </details>
             )

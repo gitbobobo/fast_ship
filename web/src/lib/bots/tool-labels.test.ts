@@ -195,6 +195,17 @@ describe("toolParamChips", () => {
     });
     expect(bare.map((c) => c.key)).toEqual(["workspace"]);
     expect(bare[0]!.value).toBe("新工作树");
+
+    // start_from_origin:null 与省略同口径（服务端 null=缺省），不出
+    // 「起点：本地」chip——显示了等于谎称显式传了 false（代码审查 P2）。
+    const nullStart = toolParamChips("fs_thread", {
+      workspace: { type: "worktree", start_from_origin: null },
+    });
+    expect(nullStart.map((c) => c.key)).toEqual(["workspace"]);
+    const falseStart = toolParamChips("fs_thread", {
+      workspace: { type: "worktree", start_from_origin: false },
+    });
+    expect(falseStart.find((c) => c.key === "workspace.start")?.value).toBe("本地");
   });
 
   it("launch 缺省 runtime_mode 也给「完全访问（缺省）」警示 chip", () => {
