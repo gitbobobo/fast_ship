@@ -353,8 +353,11 @@ function workspaceText(raw: unknown): string | null {
     typeof ws.worktree_path === "string" &&
     ws.worktree_path !== ""
   ) {
-    const tail = ws.worktree_path.replace(/\/+$/, "").split("/").pop();
-    return tail ? `${base} ${tail}` : base;
+    // 区分工作树主要靠路径尾段：取末两级目录加 …/ 前缀，完整路径在
+    // title（视觉审查：末尾截断看不出是哪棵树）。
+    const parts = ws.worktree_path.replace(/\/+$/, "").split("/").filter(Boolean);
+    const tail = parts.slice(-2).join("/");
+    return tail ? `${base} …/${tail}` : base;
   }
   return base;
 }

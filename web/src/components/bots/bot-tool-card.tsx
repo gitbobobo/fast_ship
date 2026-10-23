@@ -167,16 +167,15 @@ export function BotToolCard({
       </div>
       {call?.error_message && (
         // 错误码是排查用的内部标识，收进 title 而不是直接露出（视觉审查）；
-        // message 内嵌的 [code] 前缀（AppError.Error 格式）同样剥掉。
+        // message 内嵌的 [NNNNN] 前缀（AppError.Error 格式，码恒为 5 位）
+        // 一律剥掉：有 error_code 时避免 e40001: [40001] 双码，历史数据
+        // error_code 缺失时前缀也不外露。只剥 5 位码格式，[数字] 开头的
+        // 正常消息不受影响。
         <p
           title={call.error_code ?? undefined}
           className="text-xs text-destructive [unicode-bidi:isolate]"
         >
-          {bidiSafeText(
-            call.error_code
-              ? call.error_message.replace(/^\[\d+\]\s*/, "")
-              : call.error_message,
-          )}
+          {bidiSafeText(call.error_message.replace(/^\[\d{5}\]\s*/, ""))}
         </p>
       )}
       {call?.effect_may_have_occurred && (
