@@ -42,9 +42,9 @@ type fakeReviewT3 struct {
 	archived           []string
 	archiveErr         error
 	// settled/settledErr 是归档前收尾判定（INT-158）的注入点：按 threadID 查
-	// settled，缺 key（含未注入）回 settled=true——既有测试的 finished_at 都
+	// 三态判定，缺 key（含未注入）回 turnSettled——既有测试的 finished_at 都
 	// 落在宽限内，缺省必须让归档照常发生。
-	settled      map[string]bool
+	settled      map[string]t3TurnVerdict
 	settledErr   error
 	settledCalls []string // threadID:messageID
 	prepFailed   map[string]*T3FailedPreparation
@@ -115,15 +115,15 @@ func (f *fakeReviewT3) ArchiveThread(_ context.Context, _, _, threadID string) e
 	return f.archiveErr
 }
 
-func (f *fakeReviewT3) ThreadTurnSettled(_ context.Context, _, _, threadID, messageID string) (bool, error) {
+func (f *fakeReviewT3) ThreadTurnSettled(_ context.Context, _, _, threadID, messageID string) (t3TurnVerdict, error) {
 	f.settledCalls = append(f.settledCalls, threadID+":"+messageID)
 	if f.settledErr != nil {
-		return false, f.settledErr
+		return turnUnsettled, f.settledErr
 	}
-	if settled, ok := f.settled[threadID]; ok {
-		return settled, nil
+	if verdict, ok := f.settled[threadID]; ok {
+		return verdict, nil
 	}
-	return true, nil
+	return turnSettled, nil
 }
 
 func (f *fakeReviewT3) FailedPreparation(_ context.Context, _, _, threadID, messageID string) (*T3FailedPreparation, error) {

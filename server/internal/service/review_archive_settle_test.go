@@ -15,20 +15,21 @@ import (
 
 // TestThreadTurnSettledFromProjection 收尾判定的契约：非终态 run（活动态、
 // queued、未识别状态，按 userMessageId 匹配、同一消息多条取 ordinal 最大）
-// 未收尾返回 false；run 落已知终态集、线程已归档返回 true；投影里没有该消
-// 息的 run 不能证明已收尾，同样返回 false。
+// 未收尾返回 turnUnsettled；run 落已知终态集返回 turnSettled；线程已归档/
+// 已删除返回 turnThreadGone——墓碑投影证明目标态已达成，不归档 RPC；投影里
+// 没有该消息的 run 不能证明已收尾，同样返回 turnUnsettled。
 func TestThreadTurnSettledFromProjection(t *testing.T) {
 	// 基线 fixture：run-1（msg-review-1，ordinal 1）status=failed 已终态。
-	if settled := threadTurnSettledFromProjection(decodePrepFixture(t, nil), "msg-review-1"); !settled {
-		t.Fatal("终态 run 应判定已收尾")
+	if v := threadTurnSettledFromProjection(decodePrepFixture(t, nil), "msg-review-1"); v != turnSettled {
+		t.Fatalf("终态 run 应判定已收尾, got %d", v)
 	}
 	// 另一条 completed run 的消息同样已收尾。
-	if settled := threadTurnSettledFromProjection(decodePrepFixture(t, nil), "msg-0"); !settled {
-		t.Fatal("completed run 应判定已收尾")
+	if v := threadTurnSettledFromProjection(decodePrepFixture(t, nil), "msg-0"); v != turnSettled {
+		t.Fatalf("completed run 应判定已收尾, got %d", v)
 	}
 	// 投影里没有该消息的 run：不能证明已收尾，按未收尾处理（等宽限兜底）。
-	if settled := threadTurnSettledFromProjection(decodePrepFixture(t, nil), "msg-absent"); settled {
-		t.Fatal("投影无该消息应判定未收尾")
+	if v := threadTurnSettledFromProjection(decodePrepFixture(t, nil), "msg-absent"); v != turnUnsettled {
+		t.Fatalf("投影无该消息应判定未收尾, got %d", v)
 	}
 	// messageID 为空（存量行无 initial_message_id）：空串会撞上缺
 	// userMessageId 的 run，同样按未收尾处理。
@@ -38,11 +39,11 @@ func TestThreadTurnSettledFromProjection(t *testing.T) {
 			"id": "run-nomsg", "ordinal": 9, "status": "failed",
 		})
 	})
-	if settled := threadTurnSettledFromProjection(parsed, ""); settled {
-		t.Fatal("空 messageID 不得匹配缺 userMessageId 的 run，应判定未收尾")
+	if v := threadTurnSettledFromProjection(parsed, ""); v != turnUnsettled {
+		t.Fatalf("空 messageID 不得匹配缺 userMessageId 的 run，应判定未收尾, got %d", v)
 	}
-	// 线程已归档/已删除 + run 仍报活动态：归档覆盖活动态——没有可切断的
-	// 事件流，按已收尾处理（用活动 run 钉住这条短路，终态 run 测不出）。
+	// 线程已归档/已删除 + run 仍报活动态：墓碑判定优先于 run 状态——没有
+	// 可切断的事件流，更没有可归档的对象（用活动 run 钉住这条短路）。
 	for _, field := range []string{"archivedAt", "deletedAt"} {
 		parsed := decodePrepFixture(t, func(m map[string]any) {
 			thread, _ := m["thread"].(map[string]any)
@@ -51,8 +52,8 @@ func TestThreadTurnSettledFromProjection(t *testing.T) {
 				run["status"] = "running"
 			}
 		})
-		if settled := threadTurnSettledFromProjection(parsed, "msg-review-1"); !settled {
-			t.Fatalf("线程 %s 时活动 run 仍应判定已收尾", field)
+		if v := threadTurnSettledFromProjection(parsed, "msg-review-1"); v != turnThreadGone {
+			t.Fatalf("线程 %s 应判定 turnThreadGone, got %d", field, v)
 		}
 	}
 	// 目标 run 处于活动态、排队或出现未识别状态：非终态，未收尾（「不在活动
@@ -63,8 +64,8 @@ func TestThreadTurnSettledFromProjection(t *testing.T) {
 				run["status"] = status
 			}
 		})
-		if settled := threadTurnSettledFromProjection(parsed, "msg-review-1"); settled {
-			t.Fatalf("非终态 run（%s）应判定未收尾", status)
+		if v := threadTurnSettledFromProjection(parsed, "msg-review-1"); v != turnUnsettled {
+			t.Fatalf("非终态 run（%s）应判定未收尾, got %d", status, v)
 		}
 	}
 	// 同一消息多条 run 取 ordinal 最大：新 run 在排队（waiting），旧 failed
@@ -75,8 +76,8 @@ func TestThreadTurnSettledFromProjection(t *testing.T) {
 			"id": "run-2", "ordinal": 2, "status": "waiting", "userMessageId": "msg-review-1",
 		})
 	})
-	if settled := threadTurnSettledFromProjection(parsed, "msg-review-1"); settled {
-		t.Fatal("ordinal 最大的活动 run 应判定未收尾")
+	if v := threadTurnSettledFromProjection(parsed, "msg-review-1"); v != turnUnsettled {
+		t.Fatalf("ordinal 最大的活动 run 应判定未收尾, got %d", v)
 	}
 }
 
@@ -87,7 +88,7 @@ func TestArchiveRunsWaitsForTurnSettle(t *testing.T) {
 	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
 	now := time.Now().UTC()
 	run := e.seedDispatchedRun(t, repo, 81, model.ReviewKindCode, model.ReviewRunCompleted, "", false, now)
-	t3 := &fakeReviewT3{settled: map[string]bool{run.ThreadID: false}}
+	t3 := &fakeReviewT3{settled: map[string]t3TurnVerdict{run.ThreadID: turnUnsettled}}
 	review := e.withT3(t3, nil, nil)
 
 	review.archiveRuns(now)
@@ -108,7 +109,7 @@ func TestArchiveRunsWaitsForTurnSettle(t *testing.T) {
 	}
 
 	// 收尾后：归档成功并写 archived_at。
-	t3.settled[run.ThreadID] = true
+	t3.settled[run.ThreadID] = turnSettled
 	review.archiveRuns(now)
 	if len(t3.archived) != 1 || t3.archived[0] != run.ThreadID {
 		t.Fatalf("收尾后应归档，archived = %v", t3.archived)
@@ -127,7 +128,7 @@ func TestArchiveRunsSettleGraceExpiry(t *testing.T) {
 	now := time.Now().UTC()
 	run := e.seedDispatchedRun(t, repo, 82, model.ReviewKindCode, model.ReviewRunCompleted, "", false, now)
 	e.svc.db.Model(run).Update("finished_at", now.Add(-11*time.Minute))
-	t3 := &fakeReviewT3{settled: map[string]bool{run.ThreadID: false}}
+	t3 := &fakeReviewT3{settled: map[string]t3TurnVerdict{run.ThreadID: turnUnsettled}}
 	review := e.withT3(t3, nil, nil)
 
 	review.archiveRuns(now)
@@ -153,7 +154,7 @@ func TestArchiveRunsNoFinishedAt(t *testing.T) {
 	now := time.Now().UTC()
 	run := e.seedDispatchedRun(t, repo, 80, model.ReviewKindCode, model.ReviewRunCompleted, "", false, now)
 	e.svc.db.Model(run).Update("finished_at", nil)
-	t3 := &fakeReviewT3{settled: map[string]bool{run.ThreadID: false}}
+	t3 := &fakeReviewT3{settled: map[string]t3TurnVerdict{run.ThreadID: turnUnsettled}}
 	review := e.withT3(t3, nil, nil)
 
 	review.archiveRuns(now)
@@ -192,7 +193,7 @@ func TestArchiveRunsSettleThreadNotFound(t *testing.T) {
 	}
 	// 中途读成功：连续 404 计数清零，重新计满才放行直接落账。
 	t3.settledErr = nil
-	t3.settled = map[string]bool{run.ThreadID: false}
+	t3.settled = map[string]t3TurnVerdict{run.ThreadID: turnUnsettled}
 	review.archiveRuns(now)
 	if review.worktreeTries[run.ID+"|"+worktreeTryNotFound] != 0 {
 		t.Fatalf("读成功应清零连续 404 计数，tries = %v", review.worktreeTries)
@@ -222,7 +223,7 @@ func TestArchiveRunsUnconfirmedWaitsSettle(t *testing.T) {
 		"environment_id": env.ID, "dispatch_started_at": now, "dispatched_at": nil,
 		"finished_at": now,
 	})
-	t3 := &fakeReviewT3{settled: map[string]bool{run.ThreadID: false}}
+	t3 := &fakeReviewT3{settled: map[string]t3TurnVerdict{run.ThreadID: turnUnsettled}}
 	review := e.withT3(t3, nil, nil)
 
 	review.archiveRuns(now)
@@ -240,7 +241,7 @@ func TestArchiveRunsUnconfirmedWaitsSettle(t *testing.T) {
 	}
 
 	// 收尾后：归档成功。
-	t3.settled[run.ThreadID] = true
+	t3.settled[run.ThreadID] = turnSettled
 	review.archiveRuns(now)
 	if len(t3.archived) != 1 || t3.archived[0] != run.ThreadID {
 		t.Fatalf("收尾后应归档，archived = %v", t3.archived)
@@ -287,6 +288,50 @@ func TestArchiveRunsArchiveErrorThreadGone(t *testing.T) {
 	}
 	if after.WorktreeState == model.ReviewWorktreeFailed {
 		t.Fatal("无可归对象不得置 worktree_state=failed")
+	}
+}
+
+// TestArchiveRunsTombstoneThread 投影可读的已归档/已删除线程（墓碑）：目标
+// 态已达成，不走归档 RPC 直接落 archived_at——墓碑线程的归档 RPC 若非幂等
+// 只会误记归档失败发假告警。归档 RPC 失败的归因补读遇到墓碑同样直接落账。
+func TestArchiveRunsTombstoneThread(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+
+	// 窗口内墓碑：一次投影读直接落账，零归档 RPC。
+	run := e.seedDispatchedRun(t, repo, 87, model.ReviewKindCode, model.ReviewRunCompleted, "", false, now)
+	t3 := &fakeReviewT3{settled: map[string]t3TurnVerdict{run.ThreadID: turnThreadGone}}
+	review := e.withT3(t3, nil, nil)
+	review.archiveRuns(now)
+	if len(t3.archived) != 0 {
+		t.Fatalf("墓碑线程不得走归档 RPC，archived = %v", t3.archived)
+	}
+	var after model.ReviewRun
+	e.svc.db.First(&after, "id = ?", run.ID)
+	if after.ArchivedAt == nil {
+		t.Fatal("墓碑线程应直接写 archived_at")
+	}
+
+	// 窗口外归档失败 + 归因读回墓碑：归档 RPC 的失败只是非幂等报错，直接落
+	// 账、不计归档失败、不置 failed。
+	run2 := e.seedDispatchedRun(t, repo, 88, model.ReviewKindCode, model.ReviewRunCompleted, "", false, now)
+	e.svc.db.Model(run2).Update("finished_at", nil)
+	t3b := &fakeReviewT3{
+		archiveErr: errors.New("upstream command failed"),
+		settled:    map[string]t3TurnVerdict{run2.ThreadID: turnThreadGone},
+	}
+	review2 := e.withT3(t3b, nil, nil)
+	review2.archiveRuns(now)
+	e.svc.db.First(&after, "id = ?", run2.ID)
+	if after.ArchivedAt == nil {
+		t.Fatal("归因墓碑应直接写 archived_at")
+	}
+	if after.WorktreeState == model.ReviewWorktreeFailed {
+		t.Fatal("墓碑线程不得置 worktree_state=failed")
+	}
+	if review2.worktreeTries[run2.ID+"|"+worktreeTryArchive] != 0 {
+		t.Fatal("墓碑线程不得计入归档失败重试")
 	}
 }
 

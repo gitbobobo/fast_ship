@@ -755,8 +755,10 @@ SHA-256 前 16 位。
     （preparing/starting/running/waiting）、queued 或其它未识别状态——
     本 tick 不归档，等下轮再试（等待不占归档有限重试计数，宽限即上限；
     「不在活动集」不等于「已收尾」，只有 completed/failed/stopped/
-    interrupted/cancelled/error 能证明回合已结束）；run 已终态或线程已
-    归档/已删除 → 正常归档；投影里没有该消息的 run、`initial_message_id`
+    interrupted/cancelled/error 能证明回合已结束）；run 已终态 → 正常
+    归档；线程已归档/已删除（墓碑投影可读）→ 目标态已达成，直接落
+    `archived_at` 不走归档 RPC（墓碑线程的非幂等报错会被误记成归档失
+    败）；投影里没有该消息的 run、`initial_message_id`
     为空（存量行，空串会误撞缺 `userMessageId` 的 run）→ 不能证明已收尾，
     同样等宽限兜底；线程 404 不立即采信（T3 重启/抖动，与
     `cleanupRunWorktree` 同口径）→ 连续到上限认定无可归对象，直接落
@@ -766,7 +768,8 @@ SHA-256 前 16 位。
     归档（防御 + 兜底，不会有永久不归档的运行）。归档 RPC 失败且行预算未
     耗尽时补读一次投影归因（dispatchCommand 对不存在的线程只回普通上游错
     误）：归因 404 与窗口内同一连续计数，到上限直接落账不误记归档失败；
-    证实线程存在才按真实归档错误计重试。未确认启动的运行在宽限
+    归因读回墓碑（已归档/已删除）同样直接落账；证实线程存在且未墓碑才按
+    真实归档错误计重试。未确认启动的运行在宽限
     等待期间每个 tick 仍会再发一次 `StopThread`（幂等，帮孤儿回合尽快终止）。
     单行归档动作（停线程 + 收尾判定 + 归档 RPC）共享 60s 行预算
     （`reviewNetworkStageBudget`，各 T3 调用内部另有 `t3WriteBudget` 25s
