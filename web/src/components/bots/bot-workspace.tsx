@@ -30,7 +30,10 @@ import { ApiRequestError } from "@/lib/api/client";
 import type { Bot } from "@/lib/api/bots";
 import { useBot, useBots, useDeleteBot } from "@/lib/hooks/use-bots";
 import { useBotDetailPanelStore } from "@/lib/store/bot-detail-panel-store";
-import { useLastBotStore } from "@/lib/store/last-bot-store";
+import {
+  useLastBotId,
+  useLastBotStore,
+} from "@/lib/store/last-bot-store";
 import { cn } from "@/lib/utils";
 import { BotAuthorizationsDialog } from "./bot-authorizations-dialog";
 import { BotChat } from "./bot-chat";
@@ -58,6 +61,7 @@ export function BotWorkspace({ botId }: { botId?: string }) {
   const { data: bots } = useBots();
   const deleteBot = useDeleteBot();
   const setLastBot = useLastBotStore((state) => state.setLastBot);
+  const lastBotId = useLastBotId();
   const panelExpanded = useBotDetailPanelStore((state) => state.expanded);
   const setPanelExpanded = useBotDetailPanelStore((state) => state.setExpanded);
   const [sheetOpen, setSheetOpen] = useState(false);
@@ -70,23 +74,29 @@ export function BotWorkspace({ botId }: { botId?: string }) {
   const [scheduleDetailId, setScheduleDetailId] = useState<string | null>(null);
 
   // 「最近打开的机器人」供侧边栏入口直跳（INT-157），只在加载成功后
-  // 记录——坏链接（404/无权限）不该覆盖掉原有有效记忆；机器人已不存在
-  // 时清掉记录，免得入口反复跳进错误页。
+  // 记录——坏链接（404/无权限）不该覆盖掉原有有效记忆；同理，清除也
+  // 只在「被记住的那个机器人自己 404/被删」时执行，别的坏链接不能
+  // 误删仍在有效期内的记忆。
   useEffect(() => {
     if (bot?.id) setLastBot(bot.id);
   }, [bot?.id, setLastBot]);
   useEffect(() => {
-    if (botId && botError instanceof ApiRequestError && botError.status === 404) {
+    if (
+      botId &&
+      botId === lastBotId &&
+      botError instanceof ApiRequestError &&
+      botError.status === 404
+    ) {
       setLastBot(null);
     }
-  }, [botId, botError, setLastBot]);
+  }, [botId, lastBotId, botError, setLastBot]);
 
   const handleDelete = async () => {
     if (!bot) return;
     try {
       await deleteBot.mutateAsync(bot.id);
       toast.success("机器人已删除");
-      setLastBot(null);
+      if (bot.id === lastBotId) setLastBot(null);
       navigate("/bots");
     } catch (err) {
       // 活动 run 或未终结调用未清理时服务端返回冲突，提示先显式处理。
