@@ -60,7 +60,7 @@ func TestBotInt148ThreadToolsetV9(t *testing.T) {
 		}
 	}
 	// v9/v10 的 fs_thread 参数自 INT-159 起冻结在 botThreadArgsV9Frozen
-	// （launch 执行配置只进 v11 的活跃结构体）；v8 仍冻结在更早的共享副本。
+	// （launch 执行配置只进 v12 的活跃结构体）；v8 仍冻结在更早的共享副本。
 	if thread.ArgsType.Name() != "botThreadArgsV9Frozen" {
 		t.Fatalf("v9 fs_thread 应冻结在 botThreadArgsV9Frozen，实得 %s", thread.ArgsType.Name())
 	}

@@ -200,7 +200,7 @@ type botIssueArgs struct {
 // env_id/query 过滤；v4 的旧标签由 bot_args_frozen.go 的 botThreadArgsV4 冻结；
 // v5–v8 的标签与本结构体曾逐字节一致，INT-148 起 settle/unsettle/resume_queue
 // 只进 v9，v5–v8 由 botThreadArgsV5Frozen 冻结。INT-159 起 launch 可选的
-// model_selection/runtime_mode/workspace 只进 v11，v9/v10 由 botThreadArgsV9Frozen
+// model_selection/runtime_mode/workspace 只进 v12，v9–v11 由 botThreadArgsV9Frozen
 // 冻结。
 type botThreadArgs struct {
 	Action    string `json:"action" jsonschema:"enum=list,enum=get,enum=item,enum=composer_options,enum=workspace_options,enum=launch,enum=send,enum=stop,enum=settle,enum=unsettle,enum=resume_queue,required"`
@@ -524,7 +524,7 @@ func botToolRegistryV9() []*botToolDef {
 			{Name: "resume_queue", Description: "恢复该线程被挂起的消息队列，排队消息继续执行", Mode: model.BotExecutionAsync, RequiresConfirmation: true},
 		}
 	}
-	// INT-159 起 v9 冻结：fs_thread 的 launch 配置参数只进 v11，本版换回冻结
+	// INT-159 起 v9 冻结：fs_thread 的 launch 配置参数只进 v12，本版换回冻结
 	// 副本，wire 字节与 INT-148 发布时逐字节一致（基线见 bot_int148_thread_test.go）。
 	botUseFrozenArgs(9, tools)
 	return tools
@@ -563,7 +563,7 @@ func botToolRegistryV10() []*botToolDef {
 			{Name: "state_set", Description: "写入本任务的小状态（state 为任意 JSON 值，省略或 null 表示清空；只能在定时任务运行中使用）", Mode: model.BotExecutionSync},
 		}
 	}
-	// INT-159 起 v10 冻结：fs_thread 的 launch 配置参数只进 v11，本版换回冻结
+	// INT-159 起 v10 冻结：fs_thread 的 launch 配置参数只进 v12，本版换回冻结
 	// 副本，wire 字节与 INT-136 发布时逐字节一致（基线见 bot_int136_test.go）。
 	botUseFrozenArgs(10, tools)
 	return tools

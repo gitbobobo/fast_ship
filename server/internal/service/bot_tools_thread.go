@@ -210,7 +210,12 @@ func (s *BotService) resolveThreadScope(prepared *botPreparedCall, raw map[strin
 		// 字段名，取值摘要绑定具体值：只绑字段拦不住 runtime_mode 从
 		// approval-required 换成 full-access 这类同字段不同值的提权。
 		prepared.FieldsConstraint = presentFields(raw, "model_selection", "runtime_mode", "workspace")
-		prepared.ParamConstraint = "exec=" + botThreadExecConfigDigest(raw)
+		if len(prepared.FieldsConstraint) > 0 {
+			// 只有携带配置时才写摘要：不带配置的 launch 字段集合与取值摘要
+			// 均为空，命中升级前已存在的裸规则（Param 为空），存量授权用户
+			// 不会因本次升级被无谓重新确认（代码审查 Note）。
+			prepared.ParamConstraint = "exec=" + botThreadExecConfigDigest(raw)
+		}
 	case "send":
 		prepared.ScopeKind = botScopeThread
 		prepared.ScopeID = rawString(raw["thread_id"])

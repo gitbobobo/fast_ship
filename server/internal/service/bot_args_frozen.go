@@ -222,7 +222,7 @@ type botThreadArgsV5Frozen struct {
 // botThreadArgsV9Frozen 是 v9/v10 共用的 fs_thread 参数冻结副本（v9 由
 // INT-148 发布、v10 由 INT-136 发布时两者的 fs_thread 标签一致——v10 只演进
 // fs_schedule 描述）。INT-159 给 launch 新增 model_selection/runtime_mode/
-// workspace 只进 v11，v9/v10 的 wire 字节由本副本逐字节保留（基线见
+// workspace 只进 v12，v9/v10 的 wire 字节由本副本逐字节保留（基线见
 // bot_int148_thread_test.go 的 botToolsetV9FrozenHash 与 bot_int136_test.go
 // 的 botToolsetV10FrozenHash）。不要改动本结构体的任何字段或标签。
 type botThreadArgsV9Frozen struct {
