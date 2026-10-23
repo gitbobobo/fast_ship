@@ -1349,7 +1349,13 @@ func botPrepareToolCall(ts *botToolsetHolder, toolName, rawArguments string) (*b
 // 在 map 里是 null、在结构体里是 "a"。嵌套对象（model_selection/workspace
 // 及其 options 数组元素）同样存在该分叉：授权摘要按 map 规范化值计算、执行
 // 按结构体取值，受理判定/确认卡/执行必须同源。非对象形态留给参数校验兜底。
+// 全工具生效（不限 fs_thread）：同一分叉类在任何含嵌套 JSON 的参数上都存在；
+// 错误文案带键路径（如 model_selection.options[0].id）便于排查存量习惯载荷。
 func botJSONKeysUnique(raw json.RawMessage) error {
+	return botJSONKeysUniqueAt(raw, "")
+}
+
+func botJSONKeysUniqueAt(raw json.RawMessage, path string) error {
 	dec := json.NewDecoder(strings.NewReader(string(raw)))
 	t, err := dec.Token()
 	if err != nil {
@@ -1364,28 +1370,34 @@ func botJSONKeysUnique(raw json.RawMessage) error {
 				return errs.New(errs.ErrInvalidParams.Code, "工具参数不是有效 JSON 对象")
 			}
 			key, _ := keyTok.(string)
+			child := key
+			if path != "" {
+				child = path + "." + key
+			}
 			if seen[key] {
 				return errs.New(errs.ErrInvalidParams.Code,
-					fmt.Sprintf("工具参数包含重复字段 %s", key))
+					fmt.Sprintf("工具参数包含重复字段 %s", child))
 			}
 			seen[key] = true
 			var val json.RawMessage
 			if err := dec.Decode(&val); err != nil {
 				return errs.New(errs.ErrInvalidParams.Code, "工具参数不是有效 JSON 对象")
 			}
-			if err := botJSONKeysUnique(val); err != nil {
+			if err := botJSONKeysUniqueAt(val, child); err != nil {
 				return err
 			}
 		}
 	case json.Delim('['):
+		i := 0
 		for dec.More() {
 			var val json.RawMessage
 			if err := dec.Decode(&val); err != nil {
 				return errs.New(errs.ErrInvalidParams.Code, "工具参数不是有效 JSON 对象")
 			}
-			if err := botJSONKeysUnique(val); err != nil {
+			if err := botJSONKeysUniqueAt(val, fmt.Sprintf("%s[%d]", path, i)); err != nil {
 				return err
 			}
+			i++
 		}
 	}
 	return nil

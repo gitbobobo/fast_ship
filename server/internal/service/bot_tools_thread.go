@@ -268,7 +268,9 @@ func botThreadExecConfigDigest(raw map[string]json.RawMessage) string {
 			h.Write(botCanonicalExecJSON(v))
 		}
 	}
-	return hex.EncodeToString(h.Sum(nil)[:8])
+	// 全量 32 字节摘要：该指纹是授权匹配边界，截短碰撞会让不同执行配置
+	// 复用同一条「始终允许」（权限放大且不易察觉），不值得省几个字符。
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // botThreadExecConfigObject 把三个执行配置字段归一成单个规范 JSON 对象
