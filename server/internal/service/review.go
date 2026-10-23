@@ -36,6 +36,11 @@ type reviewT3 interface {
 	ListWorktrees(ctx context.Context, userID, envID, cwd string) ([]T3Worktree, error)
 	RemoveWorktree(ctx context.Context, userID, envID, cwd, path string, force bool) error
 	ArchiveThread(ctx context.Context, userID, envID, threadID string) error
+	// ThreadTurnSettled 判读该运行绑定的 T3 run 是否已收尾（INT-158）：归档
+	// 前的收尾宽限等待用。run 处活动态返回 false；线程已归档/已删除或 run
+	// 已终态返回 true；投影里没有该消息的 run 不能证明已收尾，同样返回
+	// false（等宽限兜底）。
+	ThreadTurnSettled(ctx context.Context, userID, envID, threadID, messageID string) (bool, error)
 	// FailedPreparation 判读线程是否处于可重试的工作区准备失败态；
 	// RetryPreparation 代发 prepared-run.retry（INT-147）。
 	FailedPreparation(ctx context.Context, userID, envID, threadID, messageID string) (*T3FailedPreparation, error)
