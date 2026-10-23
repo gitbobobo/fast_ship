@@ -30,6 +30,17 @@ func TestThreadTurnSettledFromProjection(t *testing.T) {
 	if settled := threadTurnSettledFromProjection(decodePrepFixture(t, nil), "msg-absent"); settled {
 		t.Fatal("投影无该消息应判定未收尾")
 	}
+	// messageID 为空（存量行无 initial_message_id）：空串会撞上缺
+	// userMessageId 的 run，同样按未收尾处理。
+	parsed := decodePrepFixture(t, func(m map[string]any) {
+		runs, _ := m["runs"].([]any)
+		m["runs"] = append(runs, map[string]any{
+			"id": "run-nomsg", "ordinal": 9, "status": "failed",
+		})
+	})
+	if settled := threadTurnSettledFromProjection(parsed, ""); settled {
+		t.Fatal("空 messageID 不得匹配缺 userMessageId 的 run，应判定未收尾")
+	}
 	// 线程已归档/已删除 + run 仍报活动态：归档覆盖活动态——没有可切断的
 	// 事件流，按已收尾处理（用活动 run 钉住这条短路，终态 run 测不出）。
 	for _, field := range []string{"archivedAt", "deletedAt"} {
@@ -58,7 +69,7 @@ func TestThreadTurnSettledFromProjection(t *testing.T) {
 	}
 	// 同一消息多条 run 取 ordinal 最大：新 run 在排队（waiting），旧 failed
 	// 快照不代表当前状态——取错旧条会误判已收尾。
-	parsed := decodePrepFixture(t, func(m map[string]any) {
+	parsed = decodePrepFixture(t, func(m map[string]any) {
 		runs, _ := m["runs"].([]any)
 		m["runs"] = append(runs, map[string]any{
 			"id": "run-2", "ordinal": 2, "status": "waiting", "userMessageId": "msg-review-1",

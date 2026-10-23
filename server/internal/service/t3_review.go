@@ -261,14 +261,21 @@ func (s *T3ThreadsService) ThreadTurnSettled(ctx context.Context, userID, envID,
 // failedPreparationFromProjection 相同：按 userMessageId 匹配，同一消息多条
 // run 取 ordinal 最大（只有最新那条代表当前状态）。线程已归档/已删除即已
 // 收尾——没有可切断的事件流。run 只有落在已知终态集才算收尾：queued 或
-// 其它未识别状态与匹配不到一样按未收尾处理——证明不了已结束，静默放行的
-// 代价是退回切断收尾回复的老 bug，等满宽限的代价只是归档晚十分钟。
+// 其它未识别状态、messageID 为空与匹配不到一样按未收尾处理——证明不了
+// 已结束，静默放行的代价是退回切断收尾回复的老 bug，等满宽限的代价只是
+// 归档晚十分钟。
 func threadTurnSettledFromProjection(p *t3ThreadProjection, messageID string) bool {
 	if p.Thread.ArchivedAt != nil && *p.Thread.ArchivedAt != "" {
 		return true
 	}
 	if p.Thread.DeletedAt != nil && *p.Thread.DeletedAt != "" {
 		return true
+	}
+	// messageID 为空（存量行没有 initial_message_id）匹配不了任何具体 run：
+	// 空串会撞上投影里缺 userMessageId 的 run（反序列化零值同为空串），
+	// 按未收尾处理，等宽限兜底。
+	if messageID == "" {
+		return false
 	}
 	var run *t3Run
 	for i := range p.Runs {
