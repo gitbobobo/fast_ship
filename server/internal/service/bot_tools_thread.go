@@ -709,6 +709,50 @@ func botThreadLaunchConfig(args *botThreadArgs, req *T3CreateThreadRequest) erro
 	return nil
 }
 
+// botThreadLaunchNestedKeys 白名单校验 launch 嵌套对象的键（云端审查）：
+// 顶层 knownKeys 只看一层，model_selection.temperature、workspace.path
+// 这类不存在的键会被 Unmarshal 静默丢弃——不报错不生效，确认卡上也看不
+// 到，与「无效字段不静默忽略」约定相悖，受理侧即拒。
+var botThreadLaunchNestedKeys = map[string][]string{
+	"model_selection": {"instance_id", "model", "options"},
+	"workspace":       {"type", "base_ref", "branch", "worktree_path", "start_from_origin"},
+}
+
+func botValidateThreadLaunchNestedKeys(raw map[string]json.RawMessage) error {
+	for field, allowed := range botThreadLaunchNestedKeys {
+		blob, ok := raw[field]
+		if !ok {
+			continue
+		}
+		var obj map[string]json.RawMessage
+		if err := json.Unmarshal(blob, &obj); err != nil {
+			continue // 非对象形状由结构体反序列化报错，不在这里判
+		}
+		allow := make(map[string]bool, len(allowed))
+		for _, k := range allowed {
+			allow[k] = true
+		}
+		for key := range obj {
+			if !allow[key] {
+				return errs.New(errs.ErrInvalidParams.Code, "launch "+field+" 不接受字段 "+key)
+			}
+		}
+		if field == "model_selection" {
+			var opts []map[string]json.RawMessage
+			if err := json.Unmarshal(obj["options"], &opts); err == nil {
+				for _, opt := range opts {
+					for key := range opt {
+						if key != "id" && key != "value" {
+							return errs.New(errs.ErrInvalidParams.Code, "launch model_selection.options[] 不接受字段 "+key)
+						}
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
 // botThreadNotSettable 是 composer_options 返回的「机器人不可设置」清单
 // （INT-159）：这些配置项存在于 T3 启动面但不由机器人决定，如实列出原因
 // 而不是让模型猜哪些能传、哪些会被静默忽略。

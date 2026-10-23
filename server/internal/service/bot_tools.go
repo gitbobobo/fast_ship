@@ -1314,6 +1314,9 @@ func botPrepareToolCall(ts *botToolsetHolder, toolName, rawArguments string) (*b
 		// 受理侧即校验可选执行配置（INT-159）：形状错误在此拒掉，不产生
 		// 待确认卡片。冻结工具集（v9/v10）的 args 类型不含这些字段，断言
 		// 不命中即跳过。
+		if err := botValidateThreadLaunchNestedKeys(rawMap); err != nil {
+			return nil, err
+		}
 		if targs, ok := args.(*botThreadArgs); ok {
 			if err := botThreadLaunchConfig(targs, &T3CreateThreadRequest{}); err != nil {
 				return nil, err

@@ -418,6 +418,9 @@ func TestBotInt159LaunchConfigAccepted(t *testing.T) {
 		{"root 携带 start_from_origin", `"workspace":{"type":"root","start_from_origin":true}`},
 		{"worktree 携带 worktree_path", `"workspace":{"type":"worktree","worktree_path":"/tmp/w"}`},
 		{"existing_worktree 携带 base_ref", `"workspace":{"type":"existing_worktree","worktree_path":"/tmp/w","base_ref":"main"}`},
+		{"model_selection 未知嵌套键", `"model_selection":{"instance_id":"i","model":"m","temperature":0.5}`},
+		{"workspace 未知嵌套键", `"workspace":{"type":"root","path":"/tmp/w"}`},
+		{"option 未知嵌套键", `"model_selection":{"instance_id":"i","model":"m","options":[{"id":"e","value":"h","label":"x"}]}`},
 	}
 	for _, c := range reject {
 		if _, err := botPrepareToolCall(v12, "fs_thread", "{"+base+","+c.args+"}"); err == nil {
