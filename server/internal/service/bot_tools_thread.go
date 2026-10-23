@@ -744,12 +744,19 @@ func botThreadLaunchConfig(args *botThreadArgs, req *T3CreateThreadRequest) erro
 			}
 			// T3 契约 value 只收 string|boolean（T3ModelOption）；
 			// 缺省/null/数字/对象在受理侧拒掉，不透给上游变成 RPC 失败。
-			switch opt.Value.(type) {
+			// 字符串 value 与其他字段同口径 TrimSpace：授权摘要对叶子值
+			// 统一 trim，执行侧不 trim 会让「 high 」与「high」在执行上
+			// 是两个取值却共用一条授权规则（代码审查）。
+			value := opt.Value
+			if s, ok := value.(string); ok {
+				value = strings.TrimSpace(s)
+			}
+			switch value.(type) {
 			case string, bool:
 			default:
 				return errs.New(errs.ErrInvalidParams.Code, "model_selection.options["+optID+"].value 需要字符串或布尔值")
 			}
-			sel.Options = append(sel.Options, api.T3ModelOption{Id: optID, Value: opt.Value})
+			sel.Options = append(sel.Options, api.T3ModelOption{Id: optID, Value: value})
 		}
 		req.ModelSelection = sel
 	}

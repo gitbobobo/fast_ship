@@ -144,6 +144,21 @@ func TestBotInt159LaunchConfigMapping(t *testing.T) {
 			t.Fatalf("非法 model_selection 应被拒绝: %+v", ms)
 		}
 	}
+
+	// options[].value 字符串同口径 TrimSpace：执行取值须与授权摘要
+	// （统一 trim 叶子值）一致（代码审查 r22）。
+	padded := &T3CreateThreadRequest{}
+	paddedArgs := &botThreadArgs{ModelSelection: &botThreadModelSelection{
+		InstanceID: "prov", Model: "m",
+		Options: []botThreadModelOption{{ID: " effort ", Value: " high "}},
+	}}
+	if err := botThreadLaunchConfig(paddedArgs, padded); err != nil {
+		t.Fatalf("padded options: %v", err)
+	}
+	opt := padded.ModelSelection.Options[0]
+	if opt.Id != "effort" || opt.Value != "high" {
+		t.Fatalf("options id/value 应 TrimSpace: %+v", opt)
+	}
 }
 
 // botSlimComposerProviders：归一化上游 camelCase 目录，剔除不可用项。

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { ShieldAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { BotCall, BotCallDecision } from "@/lib/api/bots";
@@ -150,10 +150,21 @@ function ScheduleConfirmSummary({ call }: { call: BotCall }) {
 // 得像渲染出错。渐隐遮罩在叠加式滚动条下看不出可滚，渐隐处放「显示全部」
 // 入口展开为完整高度（视觉审查：被盖住的字段须能完整核对）。
 function JsonBlock({ text }: { text: string }) {
+  const preRef = useRef<HTMLPreElement>(null);
   const [expanded, setExpanded] = useState(false);
+  const [overflows, setOverflows] = useState(false);
+  // 只有真溢出才挂渐隐与「显示全部」：短参数块挂假截断提示会让人以为
+  // 内容被藏了（视觉审查）。
+  useLayoutEffect(() => {
+    const el = preRef.current;
+    if (el && !expanded && el.scrollHeight > el.clientHeight + 1) {
+      setOverflows(true);
+    }
+  }, [expanded]);
   return (
     <div className="relative">
       <pre
+        ref={preRef}
         className={cn(
           "overflow-auto rounded-lg bg-background/80 p-2 pb-6 font-mono text-xs whitespace-pre-wrap break-all [unicode-bidi:isolate]",
           expanded ? "max-h-none" : "max-h-72",
@@ -161,7 +172,7 @@ function JsonBlock({ text }: { text: string }) {
       >
         {bidiSafeText(text)}
       </pre>
-      {expanded ? (
+      {expanded && (
         <button
           type="button"
           onClick={() => setExpanded(false)}
@@ -169,7 +180,8 @@ function JsonBlock({ text }: { text: string }) {
         >
           收起
         </button>
-      ) : (
+      )}
+      {!expanded && overflows && (
         <>
           <div className="pointer-events-none absolute inset-x-0 bottom-0 h-6 rounded-b-lg bg-gradient-to-t from-background/90 to-transparent" />
           <button
