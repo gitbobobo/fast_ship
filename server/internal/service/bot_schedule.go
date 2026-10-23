@@ -1127,7 +1127,8 @@ func (s *BotService) execScheduleStateGet(call *model.BotToolCall) (string, erro
 // 与长期记忆无关——不写 bot_memory_*、不产生记忆版本。INT-156 起目标值与
 // 当前状态完全一致（紧凑化后字节相等，不做键序归一）时短路返回 unchanged：
 // 巡检会话惯用相同内容重复 state_set 表示「无新增」，重复写只会白推
-// state_updated_at。
+// state_updated_at。「无变化」必须在提交点原子确认——快照读到一致后、返回
+// 之前 REST 清空等并发写可能插进来，回 unchanged 就等于谎称状态已是目标值。
 func (s *BotService) execScheduleStateSet(call *model.BotToolCall, args *botScheduleTaskArgs) (string, error) {
 	task, err := s.scheduleRunTaskOf(call)
 	if err != nil {
@@ -1147,7 +1148,17 @@ func (s *BotService) execScheduleStateSet(call *model.BotToolCall, args *botSche
 		}
 		target = compacted.String()
 	}
-	if target == task.StateJSON {
+	// 无变化确认钉在提交点：条件 UPDATE（WHERE state_json=target、cols 只把
+	// updated_at 置回自身的 no-op 写）——命中说明提交时仍是目标值，回
+	// unchanged；未命中说明读到快照后被并发改过，落到下方正常写路径恢复
+	// last-write-wins（与短路前的写入语义一致）。
+	hit, err := s.schedTasks.UpdateColumns(task.ID,
+		map[string]interface{}{"state_json": target},
+		map[string]interface{}{"updated_at": gorm.Expr("updated_at")})
+	if err != nil {
+		return "", errs.ErrInternal
+	}
+	if hit {
 		return botMarshalResult(map[string]interface{}{
 			"ok": true, "unchanged": true, "task_id": task.ID, "bytes": len(target),
 			"max_bytes": botScheduleStateMaxBytes, "cleared": target == "",

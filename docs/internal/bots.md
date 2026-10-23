@@ -495,9 +495,12 @@ path→version，无新笔记的空成功不会让次日重跑全部 daily。恢
   的确定性折叠——折叠成 fs_result.read 引用会让模型拿不到状态内容）；主线
   会话调用一律 40001。INT-156 起两处降本：当前状态（`task_state` +
   `task_state_updated_at`）随运行时上下文注入（见会话隔离段），开局不必
-  `state_get`；`state_set` 把目标值紧凑化后与 `state_json` 字节比较，完全
-  相同直接回 `{ok:true, unchanged:true}`、不落库不推进 `state_updated_at`
-  （键序不同但语义相同的 JSON 仍算不同，不做归一化）。用户侧唯一的状态操作是
+  `state_get`；`state_set` 把目标值紧凑化后先做一次条件 UPDATE
+  （`WHERE state_json=target`、只置 `updated_at` 原值的 no-op）在提交点
+  原子确认——命中回 `{ok:true, unchanged:true}`、不推进
+  `state_updated_at`/`updated_at`；未命中说明读到后被并发改过（REST
+  清空等），落正常写路径恢复 last-write-wins。键序不同但语义相同的
+  JSON 仍算不同，不做归一化。用户侧唯一的状态操作是
   `DELETE /api/bots/{id}/schedule-tasks/{taskId}/state`（幂等，返回清空后的
   任务投影）。`fs_schedule` 的任务瘦身投影带 `has_state`（状态正文只在
   state_get 里给，避免 list 结果膨胀）。v6 及更早的冻结会话不认识

@@ -171,6 +171,10 @@ func TestBotInt156StateSetSameContentShortCircuits(t *testing.T) {
 	if !again.StateUpdatedAt.Equal(*first.StateUpdatedAt) {
 		t.Fatalf("短路不得推进 state_updated_at: %v vs %v", again.StateUpdatedAt, first.StateUpdatedAt)
 	}
+	if !again.UpdatedAt.Equal(first.UpdatedAt) {
+		// unchanged 走条件 UPDATE 确认提交点状态，同样不得推动配置时间。
+		t.Fatalf("短路不得推进 updated_at: %v vs %v", again.UpdatedAt, first.UpdatedAt)
+	}
 	if got := mustStateCall(t, env, run, `{"action":"state_get"}`); !strings.Contains(got, `"state":{"seen":["a-1"]}`) {
 		t.Fatalf("state_get 应读到原值: %s", got)
 	}
