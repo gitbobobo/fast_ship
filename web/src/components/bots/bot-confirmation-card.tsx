@@ -326,7 +326,7 @@ export function BotConfirmationCard({
           )}
           <ParamChips chips={chips} />
           {call.tool_name === "fs_thread" ? (
-            argPretty !== "" && (
+            argPretty && (
               <details
                 data-testid="bot-thread-raw-params"
                 className="text-xs"

@@ -479,6 +479,12 @@ func TestBotInt159LaunchAuthzBindsExecConfig(t *testing.T) {
 	if hashOf(fullAccess) == hashOf(otherModel) {
 		t.Fatalf("换模型不得共用授权")
 	}
+	// 序列化差异（键序/空白/options 顺序）不得产生新授权规则（代码审查）。
+	reordered := `{"env_id":"e","project_id":"p","text":"任务一","runtime_mode":"full-access","model_selection":{ "model":"m2", "options":[{"value":"high","id":"effort"},{"id":"x","value":true}], "instance_id":"i" }}`
+	canonical := `{"env_id":"e","project_id":"p","text":"任务一","runtime_mode":"full-access","model_selection":{"instance_id":"i","model":"m2","options":[{"id":"x","value":true},{"id":"effort","value":"high"}]}}`
+	if hashOf(reordered) != hashOf(canonical) {
+		t.Fatalf("语义相同的执行配置（键序/空白/options 顺序不同）应共用授权")
+	}
 }
 
 // INT-159 受理侧：runtime_mode 显式空串与非枚举同口径拒掉（缺失与为空

@@ -233,17 +233,60 @@ func (s *BotService) resolveThreadScope(prepared *botPreparedCall, raw map[strin
 }
 
 // botThreadExecConfigDigest 摘要 launch 的执行配置取值（参数级授权约束）：
-// 模型/选项键序、运行模式、工作区各字段按固定顺序取原始 JSON 参与哈希，
-// 任何取值差异（含显式传默认值与省略的差别）都让规则哈希不同。
+// 三个配置字段按固定顺序把**规范化后**的 JSON 写入哈希——键序、空白与
+// options 数组顺序等纯序列化差异不得产生新授权规则（代码审查：语义相同
+// 的配置序列化不同会被重复弹确认）；语义取值差异（含显式默认值与省略的
+// 差别）都让规则哈希不同、重新确认。
 func botThreadExecConfigDigest(raw map[string]json.RawMessage) string {
 	h := sha256.New()
 	for _, key := range []string{"model_selection", "runtime_mode", "workspace"} {
 		h.Write([]byte{0})
 		if v, ok := raw[key]; ok && string(v) != "null" {
-			h.Write(v)
+			h.Write(botCanonicalExecJSON(v))
 		}
 	}
 	return hex.EncodeToString(h.Sum(nil)[:8])
+}
+
+// botCanonicalExecJSON 把配置字段反序列化后重新规范化序列化：对象键按名
+// 排序（Go Marshal map 的既有行为）、空白剥离；非法 JSON 透原样（受理侧
+// shape 校验先于执行，不会走到这里）。
+func botCanonicalExecJSON(v json.RawMessage) []byte {
+	var parsed interface{}
+	if err := json.Unmarshal(v, &parsed); err != nil {
+		return v
+	}
+	out, err := json.Marshal(botCanonicalValue(parsed))
+	if err != nil {
+		return v
+	}
+	return out
+}
+
+// botCanonicalValue 递归归一化：model_selection.options 数组语义无序，
+// 按元素的规范化字节排序后参与哈希。
+func botCanonicalValue(v interface{}) interface{} {
+	switch t := v.(type) {
+	case map[string]interface{}:
+		for k, e := range t {
+			t[k] = botCanonicalValue(e)
+		}
+		if opts, ok := t["options"].([]interface{}); ok {
+			sort.SliceStable(opts, func(i, j int) bool {
+				bi, _ := json.Marshal(opts[i])
+				bj, _ := json.Marshal(opts[j])
+				return string(bi) < string(bj)
+			})
+		}
+		return t
+	case []interface{}:
+		for i, e := range t {
+			t[i] = botCanonicalValue(e)
+		}
+		return t
+	default:
+		return v
+	}
 }
 
 // buildThreadExecIDs 在受理时为写操作生成 T3 幂等身份（不让模型指定）。
