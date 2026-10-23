@@ -23,7 +23,7 @@ import (
 // botToolsetV13FrozenHash 是 INT-160 发布的 v13 wire 字节基线：wait 动作与
 // on/timeout_minutes 参数只进本版（v12 是 INT-159 的 launch 执行配置）；
 // 之后任何改动都必须先递增版本。
-const botToolsetV13FrozenHash = "PLACEHOLDER_RECOMPUTE"
+const botToolsetV13FrozenHash = "a7e747528c0039844a1808eafd436918673f22d3be8d55a81490009317f69e47"
 
 func shrinkWaitTimers(env *botTestEnv) {
 	env.bots.waitCfg = botWaitEvalConfig{
@@ -765,6 +765,23 @@ func TestBotInt160WaitLimits(t *testing.T) {
 	if dupResult["already_waiting"] != true || dupResult["waiting_call_id"] != first.ID {
 		t.Fatalf("重复挂结果应指向已有调用: %v", dupResult)
 	}
+	// 终态调用的回执不能误报 pending_confirmation（复审 P2）：撞重行直落
+	// succeeded，回执 status 与 already_waiting 语义一致。
+	var dupReplies []model.BotMessage
+	if err := env.db.Where("bot_id = ? AND call_id = ? AND kind = ?",
+		bot.ID, dup.ID, model.BotMessageKindToolReply).Find(&dupReplies).Error; err != nil {
+		t.Fatalf("list dup replies: %v", err)
+	}
+	if len(dupReplies) != 1 {
+		t.Fatalf("重复挂应恰好一条回执，实得 %d", len(dupReplies))
+	}
+	var dupReceipt botToolReplyContent
+	if err := json.Unmarshal([]byte(dupReplies[0].ContentJSON), &dupReceipt); err != nil {
+		t.Fatalf("decode dup receipt: %v", err)
+	}
+	if dupReceipt.Status != string(model.BotCallStatusSucceeded) {
+		t.Fatalf("终态重复挂的回执应为 succeeded，实得 %s", dupReceipt.Status)
+	}
 
 	// 每机器人同时 3 个：first + 两个新线程到达上限，第四个被拒。
 	second := acceptWaitCall(t, env, bot.ID, false, wait(int160IdleThread))
@@ -1189,5 +1206,87 @@ func TestBotInt160WaitConcurrentCommitDeduped(t *testing.T) {
 	}
 	if running != 1 || dup != 1 {
 		t.Fatalf("并发挂 wait 应恰为 1 running + 1 already_waiting，实得 running=%d dup=%d", running, dup)
+	}
+}
+
+// Codex P2：同响应 send「继续」+ wait 指向同一线程——wait 的基线必须在
+// 兄弟写派发之前采定，否则快速完成的写会让 wait 采到发送后现场，宽限后
+// 误报 not_started。
+func TestBotInt160WaitBaselineBeforeSiblingSend(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "waitsibling")
+	bot := env.createBot(t, userID)
+	fake, envID := pairPolicyT3(t, env, userID)
+	shrinkWaitTimers(env)
+	run, _ := seedWaitRun(t, env, bot.ID, false)
+
+	// send 的 dispatchCommand 一到 fake 就把线程推成 running(run-new)：
+	// 模拟「继续」送达后线程立即开跑。同时记录「RPC 到达时 wait 是否已
+	// 注册」——修复后 wait 先于兄弟写派发，该事实必须恒真。
+	var sentMu sync.Mutex
+	var waitCallID string
+	sent, waitWasAttached := false, false
+	fake.onDispatch = func(payload json.RawMessage) {
+		var p struct {
+			Type     string `json:"type"`
+			ThreadID string `json:"threadId"`
+		}
+		if json.Unmarshal(payload, &p) != nil || p.ThreadID != int160PolicyIdleThread {
+			return
+		}
+		sentMu.Lock()
+		sent = true
+		env.bots.waitMu.Lock()
+		_, waitWasAttached = env.bots.waits[waitCallID]
+		env.bots.waitMu.Unlock()
+		sentMu.Unlock()
+		fake.pushThreadDelta(t, shellThread(int160PolicyIdleThread, "待续", "running", map[string]any{
+			"activeRunId":        "run-new",
+			"latestRunId":        "run-new",
+			"latestRunStartedAt": "2026-10-24T00:00:00.000Z",
+		}))
+	}
+	argsSend := `{"action":"send","env_id":"` + envID + `","thread_id":"` + int160PolicyIdleThread + `","text":"请继续"}`
+	argsWait := `{"action":"wait","env_id":"` + envID + `","thread_id":"` + int160PolicyIdleThread + `","on":"idle"}`
+	calls := commitBotReply(t, env, bot.ID, run, "", []botModelToolCall{
+		{ID: "prov-sibling-send-" + uuid.NewString()[:8], Name: "fs_thread", Arguments: argsSend},
+		{ID: "prov-sibling-wait-" + uuid.NewString()[:8], Name: "fs_thread", Arguments: argsWait},
+	})
+	if len(calls) != 2 {
+		t.Fatalf("应受理 2 个调用，实得 %d", len(calls))
+	}
+	waitCall := calls[1]
+	sentMu.Lock()
+	waitCallID = waitCall.ID
+	sentMu.Unlock()
+	if waitCall.Status != model.BotCallStatusRunning {
+		t.Fatalf("wait 应受理即 running: %s", waitCall.Status)
+	}
+
+	// wait 挂在 send 派发之前：基线的 latestRunID 必须是发送前的 run-old，
+	// 不能采到 send 生效后的 run-new（否则无人再变 run 身份，wait 会误报
+	// not_started）。
+	waitForBot(t, "wait attach", 5*time.Second, func() bool {
+		env.bots.waitMu.Lock()
+		defer env.bots.waitMu.Unlock()
+		_, ok := env.bots.waits[waitCall.ID]
+		return ok
+	})
+	waitForBot(t, "send dispatched", 5*time.Second, func() bool {
+		sentMu.Lock()
+		defer sentMu.Unlock()
+		return sent
+	})
+	env.bots.waitMu.Lock()
+	base := env.bots.waits[waitCall.ID].baseline.latestRunID
+	env.bots.waitMu.Unlock()
+	if base != "run-old" {
+		t.Fatalf("wait 基线应采到发送前现场 run-old，实得 %q", base)
+	}
+	sentMu.Lock()
+	attached := waitWasAttached
+	sentMu.Unlock()
+	if !attached {
+		t.Fatalf("send 的 dispatch RPC 到达时 wait 必须已完成注册")
 	}
 }

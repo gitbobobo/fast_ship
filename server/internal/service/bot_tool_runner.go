@@ -496,6 +496,11 @@ func (s *BotService) commitAssistantTurn(bot *model.Bot, run *model.BotRun, requ
 				} else if call.Status == model.BotCallStatusRunning {
 					// wait（INT-160）：受理即 running，回执带触发条件。
 					status = string(model.BotCallStatusRunning)
+				} else if call.Status.IsTerminal() {
+					// 撞重 wait 已在事务内直落终态，回执如实回报终态
+					//（already_waiting 在下方字段补语义），不能误报成
+					// 待确认。
+					status = string(call.Status)
 				}
 				receipt := map[string]interface{}{
 					"accepted": true, "call_id": call.ID, "status": status,
@@ -577,14 +582,23 @@ func (s *BotService) commitAssistantTurn(bot *model.Bot, run *model.BotRun, requ
 	// 事务提交后才唤醒 worker（回执已可见）；wait 不进 worker 队列——提交后
 	// 注册评估现场，重复挂的 already_waiting 终态与终态消息已同事务落库，
 	// 这里只补提交后的唤醒。
+	//
+	// 两趟而非一趟：同响应里 send+wait 指向同一线程时，若先派发 send 再挂
+	// wait，快速完成的写会让 wait 基线采到「发送后的 idle」现场，宽限过后
+	// 误报 not_started。先把本批全部 wait 挂上（基线在 send 起效前采定），
+	// 再派发 queued 写。
+	for i := range entries {
+		entry := &entries[i]
+		call := entry.call
+		if entry.waitAccepted && call.Status == model.BotCallStatusRunning {
+			s.threadWaitAttach(bot, call, entry.waitConds, entry.waitTimeout)
+		}
+	}
 	for i := range entries {
 		entry := &entries[i]
 		call := entry.call
 		if call.Status == model.BotCallStatusQueued && call.ExecutionMode == string(model.BotExecutionAsync) {
 			s.enqueueCallWork(call.ID)
-		}
-		if entry.waitAccepted && call.Status == model.BotCallStatusRunning {
-			s.threadWaitAttach(bot, call, entry.waitConds, entry.waitTimeout)
 		}
 		if entry.waitDup != "" && call.Status.IsTerminal() {
 			// 撞重行的终态与终态消息已在事务内落库；补 finalizeCall 本来

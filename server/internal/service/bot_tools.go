@@ -661,7 +661,7 @@ func botToolRegistryV11() []*botToolDef {
 // botToolRegistryV13 是当前发布注册表（INT-160 线程等待）：在 v12（INT-159）
 // 之上只演进 fs_thread——新增异步动作 wait（挂起等待线程变化，受理即
 // running、由评估器按现有 5s 扫描评估，不进 worker 队列），参数新增 on
-//（触发条件子集）与 timeout_minutes（等待上限），工具描述追加 wait 语义。
+// （触发条件子集）与 timeout_minutes（等待上限），工具描述追加 wait 语义。
 // v12 及更早版本是冻结副本——本注册表的任何变化（含共享工具的描述调整）
 // 不得影响它们，否则存量会话的前缀/tools_hash 失稳。
 func botToolRegistryV13() []*botToolDef {
@@ -1358,13 +1358,26 @@ func botPrepareToolCall(ts *botToolsetHolder, toolName, rawArguments string) (*b
 	}
 	if toolName == "fs_thread" && prepared.Action == "launch" {
 		// 受理侧即校验可选执行配置（INT-159）：形状错误在此拒掉，不产生
-		// 待确认卡片。冻结工具集（v9–v12）的 args 类型不含这些字段，断言
-		// 不命中即跳过。
+		// 待确认卡片。v9–v11 的冻结 args 类型不含这些字段，断言不命中即跳过。
 		if err := botValidateThreadLaunchNestedKeys(rawMap); err != nil {
 			return nil, err
 		}
-		if targs, ok := args.(*botThreadArgs); ok {
-			if err := botThreadLaunchConfig(targs, &T3CreateThreadRequest{}); err != nil {
+		// v12 会话解码成 botThreadArgsV12Frozen：三个 launch 配置字段形状与
+		// 活跃结构体一致，拷进 botThreadArgs 复用同一套语义校验，不因类型
+		// 分叉放行非法配置。
+		var launchArgs *botThreadArgs
+		switch targs := args.(type) {
+		case *botThreadArgs:
+			launchArgs = targs
+		case *botThreadArgsV12Frozen:
+			launchArgs = &botThreadArgs{
+				ModelSelection: targs.ModelSelection,
+				RuntimeMode:    targs.RuntimeMode,
+				Workspace:      targs.Workspace,
+			}
+		}
+		if launchArgs != nil {
+			if err := botThreadLaunchConfig(launchArgs, &T3CreateThreadRequest{}); err != nil {
 				return nil, err
 			}
 		}
@@ -1509,7 +1522,7 @@ func reqAllowEmpty(names ...string) []botRequiredField {
 var botThreadLaunchConfigFields = []string{"model_selection", "runtime_mode", "workspace"}
 
 // botThreadLaunchWaitForbidden 是 launch 执行配置（INT-159）与 wait 参数
-//（INT-160 的 on/timeout_minutes）对其它动作的合并禁带清单。
+// （INT-160 的 on/timeout_minutes）对其它动作的合并禁带清单。
 var botThreadLaunchWaitForbidden = append(
 	append([]string{}, botThreadLaunchConfigFields...), "on", "timeout_minutes")
 

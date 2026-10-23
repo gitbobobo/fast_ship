@@ -2,6 +2,7 @@ package repository
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"gorm.io/gorm"
@@ -80,7 +81,9 @@ END`,
 	`CREATE INDEX IF NOT EXISTS idx_bot_tool_calls_status_created ON bot_tool_calls(status, created_at)`,
 	// INT-160：running wait 每（bot, env, thread）至多一个是硬约束——应用层
 	// 判重只读已提交视图，并发事务互相看不见对方未提交行，由部分唯一索引
-	// 兜底（env_id/thread_id 在 arguments_json 里，用表达式抽取）。
+	// 兜底（env_id/thread_id 在 arguments_json 里，用表达式抽取）。索引前的
+	// 去重 UPDATE 见 EnsureBotSchema：旧版本并发漏洞可能已留下同键重复
+	// running 行，不先落终态建索引会失败、挡住整个启动。
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_bot_tool_calls_running_wait ON bot_tool_calls(bot_id, json_extract(arguments_json, '$.env_id'), json_extract(arguments_json, '$.thread_id')) WHERE tool_name = 'fs_thread' AND action = 'wait' AND status = 'running'`,
 
 	// bot_authorizations：活跃授权规则唯一（撤销后允许重建同规则）。
@@ -197,6 +200,33 @@ END`,
 // EnsureBotSchema 在 AutoMigrate 之后补齐机器人相关索引、守护触发器与 FTS5
 // 派生索引。任何一条失败都返回错误，由启动方决定退出，绝不带错运行。
 func EnsureBotSchema(db *gorm.DB) error {
+	// running wait 唯一索引的前置去重（INT-160）：本函数先于启动恢复执行，
+	// 而旧版本的并发漏洞可能已在库中留下同（bot, env, thread）的多条
+	// running wait——不先收敛，CREATE UNIQUE INDEX 会失败、挡住启动。保留
+	// 最早受理的那条（模型拿到的 call_id 以它为准），其余按重启口径落
+	// server_restarted 终态；幂等，新建库上影响 0 行。
+	dupWaitCleanup := `UPDATE bot_tool_calls
+SET status = 'failed',
+    finished_at = ?,
+    error_code = 'server_restarted',
+    error_message = '服务在等待中重启，等待已中断（wait 无副作用）；如仍需跟踪请重新发起',
+    result_json = '{"outcome":"server_restarted"}',
+    result_preview_json = '{"outcome":"server_restarted"}',
+    result_chars = 30,
+    result_items = 0
+WHERE tool_name = 'fs_thread' AND action = 'wait' AND status = 'running'
+  AND EXISTS (
+    SELECT 1 FROM bot_tool_calls AS older
+    WHERE older.tool_name = 'fs_thread' AND older.action = 'wait' AND older.status = 'running'
+      AND older.bot_id = bot_tool_calls.bot_id
+      AND json_extract(older.arguments_json, '$.env_id') = json_extract(bot_tool_calls.arguments_json, '$.env_id')
+      AND json_extract(older.arguments_json, '$.thread_id') = json_extract(bot_tool_calls.arguments_json, '$.thread_id')
+      AND (older.created_at < bot_tool_calls.created_at
+           OR (older.created_at = bot_tool_calls.created_at AND older.id < bot_tool_calls.id))
+  )`
+	if err := db.Exec(dupWaitCleanup, time.Now().UTC()).Error; err != nil {
+		return fmt.Errorf("bot schema: dedupe running waits: %w", err)
+	}
 	for _, ddl := range botSchemaDDL {
 		if err := db.Exec(ddl).Error; err != nil {
 			return fmt.Errorf("bot schema: %w", err)
