@@ -522,6 +522,14 @@ func TestBotInt159LaunchAuthzBindsExecConfig(t *testing.T) {
 	if hashOf(withNull) != hashOf(withoutNull) {
 		t.Fatalf("null 占位字段与缺省应共用授权")
 	}
+	// 顶层配置键值为 null 与省略同口径（presentFields 排除 null 值，
+	// fields 为空即不写摘要），与裸 launch 共用裸规则（代码审查 r26）。
+	if hashOf(`{"env_id":"e","project_id":"p","text":"t","runtime_mode":null}`) != hashOf(bare) {
+		t.Fatalf("顶层 null 应与省略同规则")
+	}
+	if hashOf(`{"env_id":"e","project_id":"p","text":"t","model_selection":null,"workspace":null}`) != hashOf(bare) {
+		t.Fatalf("顶层 null 应与省略同规则")
+	}
 }
 
 // INT-159 always-allow 落库：constraints_json 必须带上规范化执行配置
