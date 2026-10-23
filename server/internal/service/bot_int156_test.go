@@ -24,7 +24,7 @@ import (
 // botToolsetV11FrozenHash 是 INT-156 发布的 v11 wire 字节基线。v11 只改
 // fs_thread/fs_schedule 的工具与动作描述；之后任何改动都会让存量会话升级后
 // 的 tools_hash 漂移，必须先递增版本再改字节。
-const botToolsetV11FrozenHash = "3d770c330da53e803d3dc23b7f305eb28e10c68393a0bd1f10f4caeb000a98d5"
+const botToolsetV11FrozenHash = "1a2ced8662c40be1f9b20f4ef9ce70b66507cf5536c3e1cb553848e287697418"
 
 // ---------- 1. 工具集 v11：描述演进、字节钉死、冻结基线不动 ----------
 
@@ -438,10 +438,45 @@ func TestBotInt156ThreadListCarriesActivityAndLastReply(t *testing.T) {
 	if _, has := g["last_reply"]; has {
 		t.Fatalf("详情不可得时不得编造 last_reply")
 	}
+	if _, has := g["detail_skipped"]; has {
+		t.Fatalf("尝试过但失败的不得标 detail_skipped: %+v", g)
+	}
 
-	// 描述与行为一致：v11 list 动作描述提到 last_reply/activity。
-	if ts := botToolsetVersionOf(botToolsetVersion); !strings.Contains(ts.byAction["fs_thread/list"].Description, "last_reply") {
-		t.Fatalf("v11 list 描述应与行为一致")
+	// 描述与行为一致：v11 list 动作描述提到 last_reply/activity/detail_skipped。
+	listDesc := botToolsetVersionOf(botToolsetVersion).byAction["fs_thread/list"].Description
+	for _, want := range []string{"last_reply", "activity", "detail_unavailable", "detail_skipped"} {
+		if !strings.Contains(listDesc, want) {
+			t.Fatalf("v11 list 描述应与行为一致（缺 %q）", want)
+		}
+	}
+}
+
+// 整页预算到期后进回调的下标不得标 detail_unavailable——「没轮到」与
+// 「真读不到」要可分（云端复审 P2）。已取消 ctx 下全部条目应标
+// detail_skipped 且不写 last_reply/activity。
+func TestBotInt156ThreadListSkippedNotUnavailable(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "int156skip")
+	// threads 服务只用 env.bots.threads——本测试 ctx 已取消、Detail 必败，
+	// 连 fake T3 都不需要；若误走真实 Detail，detail_unavailable 会露馅。
+	env.bots.threads = NewT3ThreadsService(nil, env.cfg, zap.NewNop(), nil)
+
+	items := []map[string]interface{}{
+		{"id": "t-1", "environment_id": "e-1"},
+		{"id": "t-2", "environment_id": "e-1"},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	env.bots.botEnrichThreadListItems(ctx, userID, items)
+	for i, item := range items {
+		if item["detail_skipped"] != true {
+			t.Fatalf("条目 %d 应标 detail_skipped: %+v", i, item)
+		}
+		for _, absent := range []string{"detail_unavailable", "last_reply", "activity"} {
+			if _, has := item[absent]; has {
+				t.Fatalf("未尝试的条目不得写 %s: %+v", absent, item)
+			}
+		}
 	}
 }
 

@@ -546,10 +546,10 @@ func botToolRegistryV11() []*botToolDef {
 		case "fs_thread":
 			// 工具级描述在 v9 文本（v10 未动 fs_thread）之上追加 list 的
 			// enrichment 说明，不重写既有句子。
-			tool.Description += "list 每项另带 activity（运行活动摘要：活动 run、待应答的审批/提问、后台工作数、停止中；全空即平静线程）与 last_reply（末条助手回复摘要，300 字符截断；无助手回复则省略；单条详情读不到时 detail_unavailable=true），看线程进展通常不必再逐线程 get。"
+			tool.Description += "list 每项另带 activity（运行活动摘要：活动 run、待应答的审批/提问、后台工作数、停止中；全空即平静线程）与 last_reply（末条助手回复摘要，300 字符截断；无助手回复则省略；单条详情读不到时 detail_unavailable=true，整页预算耗尽没轮到的标 detail_skipped=true），看线程进展通常不必再逐线程 get。"
 			for i := range tool.Actions {
 				if tool.Actions[i].Name == "list" {
-					tool.Actions[i].Description = "列出全部环境的线程（默认不含归档与已结算线程；已结算的要带 settled=true 才看得到）。每项自带 activity 与 last_reply（末条助手回复摘要；无助手回复则省略；单条详情读不到时 detail_unavailable=true），通常不必再逐条 get"
+					tool.Actions[i].Description = "列出全部环境的线程（默认不含归档与已结算线程；已结算的要带 settled=true 才看得到）。每项自带 activity 与 last_reply（末条助手回复摘要；无助手回复则省略；单条详情读不到时 detail_unavailable=true，整页预算耗尽没轮到的标 detail_skipped=true），通常不必再逐条 get"
 				}
 			}
 		case "fs_schedule":

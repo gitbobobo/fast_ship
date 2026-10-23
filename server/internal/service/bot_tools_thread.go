@@ -520,13 +520,19 @@ const (
 
 // botEnrichThreadListItems 给一页线程摘要逐条补 activity 与 last_reply（INT-156）：
 // last_reply 从详情条目尾部往前找第一条正文非空的 assistant_message。单条失败
-// 置 detail_unavailable=true 不中断整页；无助手回复省略 last_reply；activity 是
+// 置 detail_unavailable=true 不中断整页；整页总闸到期后排队下标仍会进回调、
+// Detail 必失败，「没轮到」另置 detail_skipped=true——模型要把「真读不到」
+// 与「预算耗尽」区分开（云端复审 P2）；无助手回复省略 last_reply；activity 是
 // 瘦身投影（botSlimThreadActivity），平静线程只占一个空对象。
 func (s *BotService) botEnrichThreadListItems(ctx context.Context, userID string, items []map[string]interface{}) {
 	ctx, cancel := context.WithTimeout(ctx, botThreadListEnrichTotal)
 	defer cancel()
 	runT3Bounded(ctx, len(items), botThreadListEnrichConcurrency, botThreadListEnrichPerItem, func(ctx context.Context, i int) {
 		item := items[i]
+		if ctx.Err() != nil {
+			item["detail_skipped"] = true
+			return
+		}
 		envID, _ := item["environment_id"].(string)
 		threadID, _ := item["id"].(string)
 		detail, err := s.threads.Detail(ctx, userID, envID, threadID)
