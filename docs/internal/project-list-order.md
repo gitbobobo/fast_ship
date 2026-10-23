@@ -6,10 +6,10 @@ closed 都计入），计数缺失按 0，同数保持服务端顺序**。服务
 
 ## 顺序的唯一来源
 
-顺序在 `useProjects`（`web/src/lib/hooks/use-projects.ts`）里一次性决定：拉完全部分页后
-对合并结果排序一次，`items` 出参已经是最终顺序。组件拿到什么顺序就展示什么顺序，不再各自
-排序——这既避免同一份数据在不同界面里排出不同先后，也避免「分页前排序」把跨页的大项目
-埋在后面。
+顺序在 `useProjects`（`web/src/lib/hooks/use-projects.ts`）里一次性决定：按首页
+`total` 算清剩余页数并发拉完全部分页，对合并结果排序一次，`items` 出参已经是最终顺序。
+组件拿到什么顺序就展示什么顺序，不再各自排序——这既避免同一份数据在不同界面里排出
+不同先后，也避免「分页前排序」把跨页的大项目埋在后面。
 
 `issue_count` 由 `GET /api/projects` 列表项携带（`ProjectService.List` 调
 `ProjectRepository.GetIssueCounts` 统计，`omitempty`，详情接口不带）。切换器卡片第二行的

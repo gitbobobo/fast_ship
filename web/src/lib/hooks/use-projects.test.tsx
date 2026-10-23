@@ -79,8 +79,37 @@ describe("useProjects", () => {
     expect(listMock).toHaveBeenNthCalledWith(2, 2, 100);
   });
 
-  it("服务端少于一页时提前停止，不空转分页", async () => {
-    // total 声称 200 但第 2 页已不满页：防止脏 total 导致无限翻页
+  it("剩余分页并发发出，不串行等待", async () => {
+    // INT-154：按首页 total 一次算清剩余页数后并发请求——串行版本下
+    // 页 3 要等页 2 resolve 才会发出
+    type PageResponse = ReturnType<typeof page>;
+    const pending: Array<{ page: number; resolve: (v: PageResponse) => void }> =
+      [];
+    listMock.mockImplementation(
+      (p = 1) =>
+        new Promise<PageResponse>((resolve) => {
+          pending.push({ page: p, resolve });
+        }),
+    );
+    const { result } = renderUseProjects();
+
+    const fill = (start: number, count: number) =>
+      Array.from({ length: count }, (_, i) => makeProject(`p${start + i}`));
+
+    await waitFor(() => expect(pending).toHaveLength(1));
+    pending[0].resolve(page(1, fill(0, 100), 250));
+    // total=250 → 页 2、3 一起挂起，而不是等页 2 回来再发页 3
+    await waitFor(() => expect(pending).toHaveLength(3));
+    pending[2].resolve(page(3, fill(200, 50), 250));
+    pending[1].resolve(page(2, fill(100, 100), 250));
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data?.items).toHaveLength(250);
+    expect(listMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("按首页 total 算出的页数发完即止，不多发", async () => {
+    // total=200 → 恰好两页；末页不满是正常形态，不再额外探测
     const page1 = Array.from({ length: 100 }, (_, i) => makeProject(`p${i}`));
     const page2 = [makeProject("extra")];
     listMock
@@ -96,20 +125,23 @@ describe("useProjects", () => {
   it("合并分页后按 Issue 总数降序排列，缺省按 0 且不原地修改响应数组", async () => {
     // 服务端按 created_at DESC 分页返回，排序只在合并后做一次：
     // 否则跨页的大计数项目会被埋在后面的页里
-    const firstPage = [makeProject("old-empty"), makeProject("old-few", 2)];
+    const firstPage = [
+      makeProject("old-empty"),
+      makeProject("old-few", 2),
+      ...Array.from({ length: 98 }, (_, i) => makeProject(`f${i}`)),
+    ];
     listMock
-      .mockResolvedValueOnce(page(1, firstPage, 3))
-      .mockResolvedValueOnce(page(2, [makeProject("new-busy", 9)], 3));
+      .mockResolvedValueOnce(page(1, firstPage, 101))
+      .mockResolvedValueOnce(page(2, [makeProject("new-busy", 9)], 101));
     const { result } = renderUseProjects();
 
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
-    expect(result.current.data?.items.map((p) => p.id)).toEqual([
-      "new-busy",
-      "old-few",
-      "old-empty",
-    ]);
+    const ids = result.current.data?.items.map((p) => p.id);
+    expect(ids).toHaveLength(101);
+    expect(ids?.slice(0, 2)).toEqual(["new-busy", "old-few"]);
+    expect(ids).toContain("old-empty");
     // 排的是副本：响应页数组保持服务端返回顺序
-    expect(firstPage.map((p) => p.id)).toEqual(["old-empty", "old-few"]);
+    expect(firstPage.slice(0, 2).map((p) => p.id)).toEqual(["old-empty", "old-few"]);
   });
 
   it("同计数保持服务端顺序，显式 0 与计数缺失并列", async () => {

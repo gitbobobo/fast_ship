@@ -67,12 +67,34 @@ func (r *VersionRepository) ExistsByVersionNumberExcludeID(projectID, versionNum
 	return count > 0, err
 }
 
-func (r *VersionRepository) GetLatestByProjectID(projectID string) (*model.Version, error) {
-	var version model.Version
-	err := r.db.Where("project_id = ?", projectID).
-		Order("created_at DESC").First(&version).Error
+// GetLatestByProjectIDs 用一条窗口函数查询取每个项目的最新版本（created_at
+// 最大，并列按 id 升序取小者——与原 Order("created_at DESC").First 隐式追加
+// 主键升序的口径一致），供项目列表按页填充 latest_version；无版本的项目
+// 不出现在结果中。外层列清单与 model.Version 的持久化字段一一对应，版本模型
+// 增删列（含引入软删除）时需同步维护。
+func (r *VersionRepository) GetLatestByProjectIDs(projectIDs []string) (map[string]*model.Version, error) {
+	versions := make(map[string]*model.Version, len(projectIDs))
+	if len(projectIDs) == 0 {
+		return versions, nil
+	}
+	var rows []model.Version
+	err := r.db.Raw(`
+		SELECT id, project_id, version_number, status, release_notes, target_commitish,
+			github_release_url, error_log, ship_status, ship_stage, ship_message,
+			ship_hooks_status, created_at, shipped_at
+		FROM (
+			SELECT *, ROW_NUMBER() OVER (
+				PARTITION BY project_id ORDER BY created_at DESC, id ASC
+			) AS rn
+			FROM versions
+			WHERE project_id IN ?
+		)
+		WHERE rn = 1`, projectIDs).Scan(&rows).Error
 	if err != nil {
 		return nil, err
 	}
-	return &version, nil
+	for i := range rows {
+		versions[rows[i].ProjectID] = &rows[i]
+	}
+	return versions, nil
 }

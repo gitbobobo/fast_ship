@@ -11,15 +11,20 @@ export function useProjects() {
   return useQuery({
     queryKey: ["projects"],
     queryFn: async () => {
-      // 语义是全量列表（调用方在内存里过滤/排序），按 total 拉完剩余分页，
-      // 防止超过 pageSize 的老项目被静默截断
+      // 语义是全量列表（调用方在内存里过滤/排序），按首页 total 并发拉完剩余
+      // 分页，防止超过 pageSize 的老项目被静默截断；拉取期间新增的项目可能
+      // 缺席（以首页 total 为准），被删项目返回空页不阻塞合并
       const pageSize = 100;
       const first = await projectApi.list(1, pageSize);
       const items = [...first.data.items];
-      for (let page = 2; items.length < first.data.total; page++) {
-        const res = await projectApi.list(page, pageSize);
-        items.push(...res.data.items);
-        if (res.data.items.length < pageSize) break;
+      const restPages = Math.ceil(first.data.total / pageSize) - 1;
+      if (restPages > 0) {
+        const rest = await Promise.all(
+          Array.from({ length: restPages }, (_, i) =>
+            projectApi.list(i + 2, pageSize),
+          ),
+        );
+        for (const res of rest) items.push(...res.data.items);
       }
       return { ...first.data, items: items.sort(compareByIssueCount) };
     },
