@@ -122,12 +122,47 @@ func (s *BotService) botLoop(bot *model.Bot, run *model.BotRun, ctx context.Cont
 	// 槽绑定先于一切收尾路径：硬停止（宽限到期 / 重复点击）取消前核对槽上
 	// 绑定的 run，槽已被重入换绑成新 run 时不得取消到别人的 context（INT-137）。
 	s.bindSlotRun(bot, run)
-	// 工具集/提示词激活先于冻结执行，主线与 schedule 一视同仁：激活在同一个
-	// 短事务里读行、判 stale、按该行人设重建提示词并写回，事务结束后副本与
-	// 库内行一致，freeze 捕获的才是本次 run 的最终提示词，schedule 会话也基于
-	// 激活后的工具集构建。激活失败只降级记日志、不阻塞 run。
-	if err := s.activateBotPrompt(bot); err != nil {
-		s.logger.Warn("激活工具集失败", zap.String("bot_id", bot.ID), zap.Error(err))
+	// 工具集/提示词激活先于冻结执行：激活在同一个短事务里读行、判 stale、
+	// 按该行人设重建提示词并写回，事务结束后副本与库内行一致，freeze 捕获
+	// 的才是本次 run 的最终提示词。激活失败只降级记日志、不阻塞 run。
+	// INT-139 R11 激活时机：主线会话只在「还没有主线模型请求」或「最近一次
+	// 主线请求早于前缀缓存保留窗口」时在入口激活——对话正活跃时重写系统
+	// 提示会让仍热的前缀缓存整段作废，推迟到下一个压缩边界
+	//（buildBoundarySnapshot 判 stale → publishCompaction 事务内激活 →
+	// acceptCompactionBoundary 装入）。定时任务是独立会话、不吃主线前缀
+	// 缓存，入口始终用最新版本。
+	// activationDeferred 记录本 run 入口是否真的走了推迟分支：通知文案的
+	// 「下一个压缩点生效」只能由这个决策得出——入口激活失败（降级记日志、
+	// 副本仍落后）不是推迟，下一次入口会立即重试而非等压缩点（INT-139
+	// 云端复审）。
+	activationDeferred := false
+	if run.SessionKind == model.BotSessionKindSchedule {
+		// schedule 吃不到主线前缀缓存，会话内直接用最新版；但不写回激活
+		// 水位，否则主线窗口内的推迟判定与「下一个压缩点生效」通知失真。
+		if err := s.activateBotPromptForSession(bot); err != nil {
+			s.logger.Warn("会话内解析工具集失败", zap.String("bot_id", bot.ID), zap.Error(err))
+		}
+	} else {
+		stale := bot.ToolsetVersion < botToolsetVersion || bot.PlatformPromptVersion < botPlatformPromptVersion
+		if stale && !s.mainlinePrefixCacheExpired(bot.ID) {
+			// 窗口内热缓存 → 推迟到压缩边界，但推迟本身封顶一个保留窗口
+			// （INT-139 复审）：首次推迟落 activation_deferred_at，超过窗口
+			// 仍无压缩边界到达时强制入口激活——持续活跃不压缩的会话不得
+			// 把升级与「下一个压缩点生效」的承诺无限推迟。
+			if s.activationDeferralExpired(bot) {
+				if err := s.activateBotPrompt(bot); err != nil {
+					s.logger.Warn("激活工具集失败", zap.String("bot_id", bot.ID), zap.Error(err))
+				}
+			} else {
+				// 守卫未命中 = 行事实与副本不一致（已被激活或并发已落
+				// 起点）：markActivationDeferred 会把副本对齐行事实，
+				// 返回值才是本 run 真实的推迟决策——不得无条件置位
+				// （INT-139 云端复审）。
+				activationDeferred = s.markActivationDeferred(bot)
+			}
+		} else if err := s.activateBotPrompt(bot); err != nil {
+			s.logger.Warn("激活工具集失败", zap.String("bot_id", bot.ID), zap.Error(err))
+		}
 	}
 	// 先冻结再取密钥：schedule run 的地址与密钥是派发时成对冻结的，解密必须用
 	// 冻结的那一份，否则轮换密钥后会把新密钥发往旧地址。
@@ -191,10 +226,30 @@ runLoop:
 				bot.LastToldVersion = fresh.LastToldVersion
 				bot.OfferedInputSeq = fresh.OfferedInputSeq
 				bot.StyleCompactionVersion = fresh.StyleCompactionVersion
+				bot.ActivationDeferredAt = fresh.ActivationDeferredAt
+			}
+			// 推迟封顶的安全点复核（INT-139 云端复审）：只在入口判一次时，
+			// 持续有输入的长寿 run 会无限越过承诺窗口、收口事件永不落地。
+			// 到期即在本 run 真正换前缀——更新 freeze 提示词字段，下一轮
+			// applyRunPromptFreeze 装入新版本（与压缩边界同一换装路径）；
+			// 代价是热缓存里付一次冷请求，换「最迟约 N 分钟生效」承诺兑现。
+			// 只推进水位不换前缀的写法会让承诺在长寿不压缩 run 里永不兑现，
+			// 且 dedup 先占掉 toolset_activated:N、真正换前缀时无收口可发。
+			if activationDeferred && s.activationDeferralExpired(bot) {
+				if err := s.activateBotPrompt(bot); err != nil {
+					s.logger.Warn("安全点激活工具集失败", zap.String("bot_id", bot.ID), zap.Error(err))
+				} else {
+					activationDeferred = false
+					freeze.SystemPromptText = bot.SystemPromptText
+					freeze.PromptRevision = bot.PromptRevision
+					freeze.PlatformPromptVersion = bot.PlatformPromptVersion
+					freeze.PersonaPrompt = bot.PersonaPrompt
+					freeze.ToolsetVersion = bot.ToolsetVersion
+				}
 			}
 			applyRunCredentialFreeze(bot, freeze)
 			applyRunPromptFreeze(bot, freeze)
-			s.maybeTellToolset(bot, run)
+			s.maybeTellToolset(bot, run, activationDeferred)
 		}
 
 		var built *botBuiltContext
@@ -294,12 +349,21 @@ runLoop:
 			var streamErr error
 			reply, streamErr = botStreamChat(ctx, &streamClient, built.Request, s.botStreamTimeoutsOf(), deltas.onDelta)
 			deltas.flush()
+			s.warnToolCallAnomalies(reply,
+				zap.String("bot_id", bot.ID), zap.String("run_id", run.ID))
+			if streamErr == nil && reply != nil && reply.DroppedToolCalls > 0 &&
+				reply.Text == "" && len(reply.ToolCalls) == 0 {
+				// 一轮的全部工具调用都缺名被丢弃且无正文：合成失败让下方
+				// 失败路径接管（草稿丢弃、请求行记失败、run 终态），而不是
+				// 提交一条空助手回合（INT-139 云端复审 Note）。
+				streamErr = errBotToolCallsDropped
+			}
 			if streamErr == nil {
 				break
 			}
 			// 失败（含用户停止打断）：草稿等不来 message_commit，丢弃。
 			deltas.discard()
-			s.finishModelRequest(requestRow, reply, streamErr)
+			s.finishModelRequest(requestRow, reply, streamErr, run, bot)
 			if input := s.safePoint(run); input.StopRequested {
 				// 被停止打断的流已经丢弃草稿：主线补一条可见的 lifecycle 提示，
 				// 否则时间线停在用户的「停止」上，看不出半截回复去哪了（视觉
@@ -354,12 +418,12 @@ runLoop:
 			}
 		}
 		contextLimitRetried = false
-		s.finishModelRequest(requestRow, reply, nil)
+		s.finishModelRequest(requestRow, reply, nil, run, bot)
 		if sched == nil {
 			// usage 增量基线是主线压缩估算的状态，schedule 会话不碰。
 			s.rememberUsageBaseline(bot, run, built, reply)
 		}
-		s.accumulateRunUsage(run, reply)
+		s.accumulateRunUsage(run, reply, requestRow)
 
 		// 用 = 而不是 :=：外层 calls 保留给循环顶部的 closeUnstartedSyncCalls，
 		// 不留一个永远为 nil 的变量（INT-137 复审顺手清理）。
@@ -575,6 +639,28 @@ func (s *BotService) tryFinishRun(bot *model.Bot, run *model.BotRun) bool {
 	return finished
 }
 
+// runCostPersistColsTx 按请求行实算 run 已计价成本并入收尾更新列
+// （INT-139 云端复审）：内存累计只是「最后一次成功 commit 时」的便利值——
+// panic/重启收尾读到的 run 是库里旧副本，SUM(bot_model_requests.cost_estimate)
+// 把「最后一次 commit 之后才计价」的失败尝试一并入账，请求行与 run 行同源、
+// 不留跨表不一致。token 总量不在此落——它仍是「会话实际消费」口径。
+func (s *BotService) runCostPersistColsTx(tx *gorm.DB, runID string, cols map[string]interface{}) {
+	var total *float64
+	if err := tx.Model(&model.BotModelRequest{}).
+		Where("run_id = ? AND cost_estimate IS NOT NULL", runID).
+		Select("SUM(cost_estimate)").Scan(&total).Error; err != nil {
+		// 对账失败不能静默：run 落终态而请求行已有成本时正是要消除的
+		// 跨表不一致，必须留痕（INT-139 云端复审）。
+		s.logger.Warn("实算 run 成本失败", zap.String("run_id", runID), zap.Error(err))
+		return
+	}
+	if total == nil {
+		return
+	}
+	cols["cost_estimate"] = *total
+	cols["cost_source"] = botCostSourceCatalog
+}
+
 // finishStopped / finishFailed 落定终态并发 done（失败先 error 再 done）。
 // 终态与事件同一事务：崩溃不留无事件的已终态 run；提交后再发布 SSE。
 // schedule 会话走专属收尾（摘要/静默判定与运行事件）。
@@ -587,9 +673,10 @@ func (s *BotService) finishStopped(bot *model.Bot, run *model.BotRun) {
 	ok := false
 	txErr := s.db.Transaction(func(tx *gorm.DB) error {
 		var err error
+		cols := map[string]interface{}{"status": model.BotRunStatusStopped, "finished_at": now}
+		s.runCostPersistColsTx(tx, run.ID, cols)
 		ok, err = repository.NewBotRunRepository(tx).UpdateColumnsWhereTx(tx, run.ID,
-			map[string]interface{}{"finished_at": nil},
-			map[string]interface{}{"status": model.BotRunStatusStopped, "finished_at": now})
+			map[string]interface{}{"finished_at": nil}, cols)
 		if err != nil || !ok {
 			return err
 		}
@@ -638,14 +725,15 @@ func (s *BotService) finishFailedDetail(bot *model.Bot, run *model.BotRun, code,
 		var err error
 		// failed 转移带 stop_requested_at IS NULL：错误检出后才受理的停止
 		// 请求不能被 failed 覆盖（与 completed 同型保护）。
+		cols := map[string]interface{}{
+			"status":        model.BotRunStatusFailed,
+			"finished_at":   now,
+			"error_code":    code,
+			"error_message": message,
+		}
+		s.runCostPersistColsTx(tx, run.ID, cols)
 		ok, err = repository.NewBotRunRepository(tx).UpdateColumnsWhereTx(tx, run.ID,
-			map[string]interface{}{"finished_at": nil, "stop_requested_at": nil},
-			map[string]interface{}{
-				"status":        model.BotRunStatusFailed,
-				"finished_at":   now,
-				"error_code":    code,
-				"error_message": message,
-			})
+			map[string]interface{}{"finished_at": nil, "stop_requested_at": nil}, cols)
 		if err != nil || !ok {
 			return err
 		}
@@ -730,8 +818,10 @@ func (s *BotService) beginModelRequest(bot *model.Bot, run *model.BotRun, built 
 	return row, err
 }
 
-// finishModelRequest 落请求终态与 usage；usage 缺失与零严格区分。
-func (s *BotService) finishModelRequest(row *model.BotModelRequest, reply *botModelReply, streamErr error) {
+// finishModelRequest 落请求终态、usage 与按 run 冻结目录计价的成本
+// （INT-139）；usage 缺失与零严格区分，目录无价时成本保持 NULL。
+func (s *BotService) finishModelRequest(row *model.BotModelRequest, reply *botModelReply, streamErr error,
+	run *model.BotRun, bot *model.Bot) {
 	cols := map[string]interface{}{"finished_at": time.Now().UTC()}
 	if streamErr != nil {
 		cols["status"] = model.BotModelRequestFailed
@@ -740,16 +830,34 @@ func (s *BotService) finishModelRequest(row *model.BotModelRequest, reply *botMo
 		cols["error_message"] = botErrMessage(streamErr)
 	} else {
 		cols["status"] = model.BotModelRequestSucceeded
-		if row != nil && reply != nil {
+	}
+	// first_delta_at 是上游接触证据、与成败无关（INT-139 云端复审）：流过
+	// 半截正文后失败的请求确实触达过上游，只在成功分支落会让前缀热度把
+	// 它误判成「本地失败」。
+	if reply != nil && reply.FirstDeltaAt != nil {
+		cols["first_delta_at"] = *reply.FirstDeltaAt
+	}
+	// usage 与成本是计费事实、与成败无关：上游在 usage 送达后断流的请求
+	// 照样计费，只挂在成功分支会让已付费用量整段消失（INT-139 复审）。
+	// run 的 token 总量仍只累计成功请求（「会话实际消费」口径），但
+	// cost_estimate 按「已计价请求」累计——含本处送过 usage 的失败尝试。
+	var priced *float64
+	if row != nil && reply != nil {
+		// provider_request_id 也是上游接触证据（chunk 必带 id）：纯工具
+		// 调用流失败后无正文首段、无 usage，id 是唯一残留的触达痕迹
+		// （INT-139 云端复审）。
+		if reply.ProviderRequestID != "" {
 			cols["provider_request_id"] = reply.ProviderRequestID
-			if reply.FirstDeltaAt != nil {
-				cols["first_delta_at"] = *reply.FirstDeltaAt
-			}
-			if reply.UsageComplete {
-				cols["prompt_tokens"] = reply.PromptTokens
-				cols["completion_tokens"] = reply.CompletionTokens
-				cols["total_tokens"] = reply.TotalTokens
-				cols["cached_tokens"] = reply.CachedTokens
+		}
+		if reply.UsageComplete {
+			cols["prompt_tokens"] = reply.PromptTokens
+			cols["completion_tokens"] = reply.CompletionTokens
+			cols["total_tokens"] = reply.TotalTokens
+			cols["cached_tokens"] = reply.CachedTokens
+			if usd, ok := botRequestCost(run, bot, reply); ok {
+				cols["cost_estimate"] = usd
+				cols["cost_source"] = botCostSourceCatalog
+				priced = &usd
 			}
 		}
 	}
@@ -758,11 +866,26 @@ func (s *BotService) finishModelRequest(row *model.BotModelRequest, reply *botMo
 	}
 	if _, err := s.requests.UpdateColumns(row.ID, nil, cols); err != nil {
 		s.logger.Warn("落模型请求终态失败", zap.String("request_id", row.ID), zap.Error(err))
+		return
+	}
+	// 内存行回写与 run 累计必须在 UPDATE 成功之后（INT-139 云端复审）：
+	// 落库失败时两处口径同为 NULL，不得让 run 记进一条请求行上并不
+	// 存在的成本。成功路径的 run 累计在调用方 accumulateRunUsage 读取
+	// 本回写；失败路径在此直接把已计价成本并进 run 总账。
+	if priced != nil {
+		row.CostEstimate = priced
+		src := botCostSourceCatalog
+		row.CostSource = &src
+		if streamErr != nil {
+			run.CostEstimate = addToFloatPtr(run.CostEstimate, *priced)
+			run.CostSource = row.CostSource
+		}
 	}
 }
 
-// accumulateRunUsage 把本次请求的 usage 累加进 run（内存累计，收尾统一落库）。
-func (s *BotService) accumulateRunUsage(run *model.BotRun, reply *botModelReply) {
+// accumulateRunUsage 把本次请求的 usage 与已计价成本累加进 run
+// （内存累计，收尾统一落库）。请求成本为 NULL（目录无价/缺 usage）时不累计。
+func (s *BotService) accumulateRunUsage(run *model.BotRun, reply *botModelReply, requestRow *model.BotModelRequest) {
 	if reply == nil || !reply.UsageComplete {
 		return
 	}
@@ -771,6 +894,10 @@ func (s *BotService) accumulateRunUsage(run *model.BotRun, reply *botModelReply)
 	run.TotalTokens = addToPtr(run.TotalTokens, reply.TotalTokens)
 	run.CachedTokens = addToPtr(run.CachedTokens, reply.CachedTokens)
 	run.UsageComplete = true
+	if requestRow != nil && requestRow.CostEstimate != nil {
+		run.CostEstimate = addToFloatPtr(run.CostEstimate, *requestRow.CostEstimate)
+		run.CostSource = requestRow.CostSource
+	}
 }
 
 // compactionFailDetail 提取压缩失败的精确原因码与中文说明：带类型的

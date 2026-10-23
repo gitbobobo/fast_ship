@@ -17,6 +17,7 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/repository"
 	"github.com/google/uuid"
 	"github.com/openai/openai-go/v2"
+	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
 
@@ -106,6 +107,9 @@ func (s *BotService) auxModelRequest(ctx context.Context, bot *model.Bot, maintR
 		Model:               modelName,
 		MaxCompletionTokens: maxOut,
 	}, timeouts, nil)
+	s.warnToolCallAnomalies(reply,
+		zap.String("bot_id", bot.ID), zap.String("maintenance_run_id", maintRun.ID),
+		zap.String("purpose", string(purpose)))
 
 	cols := map[string]interface{}{"finished_at": s.now()}
 	if callErr != nil {
@@ -116,13 +120,33 @@ func (s *BotService) auxModelRequest(ctx context.Context, bot *model.Bot, maintR
 		cols["error_message"] = botErrMessage(callErr)
 	} else {
 		cols["status"] = model.BotModelRequestSucceeded
+	}
+	// provider_request_id 与成败无关（INT-139 云端复审，与 finishModelRequest
+	// 同口径）：上游回过 chunk 就有 id 残迹，失败分支同样落。
+	if reply != nil && reply.ProviderRequestID != "" {
 		cols["provider_request_id"] = reply.ProviderRequestID
-		if reply.UsageComplete {
-			cols["usage_complete"] = true
-			cols["prompt_tokens"] = reply.PromptTokens
-			cols["completion_tokens"] = reply.CompletionTokens
-			cols["total_tokens"] = reply.TotalTokens
-			cols["cached_tokens"] = reply.CachedTokens
+	}
+	// usage 与成本是计费事实、与成败无关：usage 送达后断流的请求照样计费
+	//（INT-139 复审，与 finishModelRequest 同口径）。
+	if reply != nil && reply.UsageComplete {
+		cols["usage_complete"] = true
+		cols["prompt_tokens"] = reply.PromptTokens
+		cols["completion_tokens"] = reply.CompletionTokens
+		cols["total_tokens"] = reply.TotalTokens
+		cols["cached_tokens"] = reply.CachedTokens
+		// 维护请求按维护运行快照里的目录归属计价（INT-139 云端复审）：
+		// maintRun.ConfigSnapshotJSON 由父 run 派发时冻结，与主线请求走
+		// runCatalogIDOf 同口径——运行中用户切了 provider/目录，发往冻结旧
+		// provider 的流量不得按新目录单价记账；无父 run 快照时回退当前归属。
+		catalogID := bot.CatalogID
+		var snap botConfigSnapshot
+		if err := json.Unmarshal([]byte(maintRun.ConfigSnapshotJSON), &snap); err == nil && snap.CatalogID != "" {
+			catalogID = snap.CatalogID
+		}
+		if usd, ok := botCostEstimate(catalogID, modelName,
+			reply.PromptTokens, reply.CachedTokens, reply.CompletionTokens); ok {
+			cols["cost_estimate"] = usd
+			cols["cost_source"] = botCostSourceCatalog
 		}
 	}
 	_, _ = repository.NewBotMaintenanceRepository(s.db).UpdateRequestColumns(req.ID, nil, cols)

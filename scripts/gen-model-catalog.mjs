@@ -50,6 +50,28 @@ function positiveNumber(value) {
   return typeof n === "number" && Number.isFinite(n) && n > 0 ? Math.trunc(n) : 0;
 }
 
+// cost 单价透射（INT-139 费用估算）：models.dev 的 cost.* 是 USD/百万 tokens。
+// 显式 0（免费模型、免缓存读取费）与缺失严格区分——前者是已知价格，
+// 后者输出 null（缺失 ≠ 0，无价模型不能显示 $0）。cache_read/cache_write
+// 可选——不提供的厂商按 input 价计缓存命中由调用方回退处理。
+function costNumber(value) {
+  const n = typeof value === "string" ? Number(value) : value;
+  return typeof n === "number" && Number.isFinite(n) && n >= 0 ? n : null;
+}
+
+function modelCost(m) {
+  const c = m && typeof m === "object" ? m.cost : null;
+  if (!c || typeof c !== "object") return null;
+  const out = {
+    input: costNumber(c.input),
+    output: costNumber(c.output),
+    cache_read: costNumber(c.cache_read),
+    cache_write: costNumber(c.cache_write),
+  };
+  if (out.input == null && out.output == null) return null;
+  return out;
+}
+
 function toRFC3339(dateOnly) {
   return `${dateOnly}T00:00:00Z`;
 }
@@ -82,6 +104,7 @@ async function main() {
         context_window: positiveNumber(limit.context),
         max_output_tokens: positiveNumber(limit.output),
         reasoning: m.reasoning === true,
+        cost: modelCost(m),
       });
     }
     if (models.length === 0) continue;

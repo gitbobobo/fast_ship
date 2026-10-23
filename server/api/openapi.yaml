@@ -13285,6 +13285,15 @@ components:
         usage_complete:
           type: boolean
           description: false 表示上游未报 usage（缺失与零严格区分）；false 时计数视为不可用
+        cost_estimate:
+          type: number
+          format: double
+          nullable: true
+          description: 按 run 冻结目录单价估算的本次请求成本（USD）；目录无价/缺 usage 时为 null（缺失 ≠ 0，INT-139）
+        cost_source:
+          type: string
+          nullable: true
+          description: 计价来源（catalog）；cost_estimate 为 null 时同 null
         input_tokens_estimate:
           type: integer
           format: int64
@@ -13625,6 +13634,15 @@ components:
         usage_complete:
           type: boolean
           description: false 表示上游未报 usage（缺失与零严格区分）
+        cost_estimate:
+          type: number
+          format: double
+          nullable: true
+          description: 本 run 已计价请求的成本累计（USD，含送过 usage 的失败请求）；目录无价/全缺 usage 时为 null（缺失 ≠ 0，INT-139）
+        cost_source:
+          type: string
+          nullable: true
+          description: 计价来源（catalog）；cost_estimate 为 null 时同 null
         error_code:
           type: string
           nullable: true
@@ -13747,6 +13765,13 @@ components:
         total_tokens:
           type: integer
           format: int64
+        cost_estimate:
+          type: number
+          format: double
+          description: 本 run 已计价请求的成本累计（USD，含送过 usage 的失败请求）；目录无价时缺省（缺失 ≠ 0，INT-139）
+        cost_source:
+          type: string
+          description: 计价来源（catalog）
 
     BotToolCall:
       type: object

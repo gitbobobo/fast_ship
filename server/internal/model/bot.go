@@ -23,6 +23,11 @@ type Bot struct {
 	// 重启或长期不活跃后补发应告知的变更（INT-102）。
 	ToolsetVersion  int64 `gorm:"not null" json:"toolset_version"`
 	LastToldVersion int64 `gorm:"not null;default:1" json:"last_told_version"`
+	// ActivationDeferredAt 记录主线入口首次因前缀缓存窗口推迟激活的时刻
+	// （INT-139 复审）：NULL 表示当前没有挂起的推迟；激活落库时由
+	// ActivateToolsetTx 一并清空。持续活跃不压缩的会话靠它给推迟封顶，
+	// 避免升级被无限推迟、「下一个压缩点生效」的承诺不兑现。
+	ActivationDeferredAt *time.Time `json:"-"`
 
 	// ProviderID 是所属 AI 提供商（INT-133）：必须属于同一 user（服务层保证）。
 	// 列只存引用；BaseURL / 密钥 / last4 从 provider 派生，密钥只在 provider
@@ -145,12 +150,17 @@ type BotRun struct {
 	TotalTokens      *int64     `json:"total_tokens"`
 	CachedTokens     *int64     `json:"cached_tokens"`
 	// UsageComplete 区分「服务没报 usage」与「usage 为零」。
-	UsageComplete bool       `json:"usage_complete"`
-	ErrorCode     *string    `json:"error_code"`
-	ErrorMessage  *string    `json:"error_message"`
-	CreatedAt     time.Time  `gorm:"not null" json:"created_at"`
-	StartedAt     *time.Time `json:"started_at"`
-	FinishedAt    *time.Time `json:"finished_at"`
+	UsageComplete bool `json:"usage_complete"`
+	// CostEstimate 是本 run 已计价请求的成本累计（USD，可空）：目录无价、
+	// 自定义 provider 或全部请求都没报 usage 时保持 NULL——缺失不记 0
+	// （INT-139）。CostSource 标记计价来源（目前只有 "catalog"）。
+	CostEstimate *float64   `json:"cost_estimate"`
+	CostSource   *string    `json:"cost_source"`
+	ErrorCode    *string    `json:"error_code"`
+	ErrorMessage *string    `json:"error_message"`
+	CreatedAt    time.Time  `gorm:"not null" json:"created_at"`
+	StartedAt    *time.Time `json:"started_at"`
+	FinishedAt   *time.Time `json:"finished_at"`
 
 	Bot Bot `gorm:"foreignKey:BotID;constraint:OnDelete:CASCADE" json:"-"`
 }
@@ -202,6 +212,10 @@ type BotModelRequest struct {
 	CompletionTokens *int64 `json:"completion_tokens"`
 	TotalTokens      *int64 `json:"total_tokens"`
 	CachedTokens     *int64 `json:"cached_tokens"`
+	// CostEstimate 是按 run 冻结的目录单价估算的本次请求成本（USD，可空）：
+	// 无价模型或缺 usage 时保持 NULL；CostSource 标记计价来源（INT-139）。
+	CostEstimate *float64 `json:"cost_estimate"`
+	CostSource   *string  `json:"cost_source"`
 
 	ProviderRequestID string    `gorm:"type:text;not null" json:"provider_request_id"`
 	ErrorCode         *string   `json:"error_code"`

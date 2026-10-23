@@ -220,12 +220,21 @@ func newFakeModelServer(t *testing.T, turns ...fakeModelTurn) *fakeModelServer {
 			}
 		}
 		for i, tc := range turn.ToolCalls {
-			writeChunk(chunk("", []map[string]interface{}{{
+			// ID/Name 为空时直接不写该键，模拟上游残缺工具调用流（INT-139
+			// R12：缺 id 需合成、缺 name 需丢弃）。
+			fn := map[string]interface{}{"arguments": tc.Args}
+			if tc.Name != "" {
+				fn["name"] = tc.Name
+			}
+			part := map[string]interface{}{
 				"index":    i,
-				"id":       tc.ID,
 				"type":     "function",
-				"function": map[string]interface{}{"name": tc.Name, "arguments": tc.Args},
-			}}, ""))
+				"function": fn,
+			}
+			if tc.ID != "" {
+				part["id"] = tc.ID
+			}
+			writeChunk(chunk("", []map[string]interface{}{part}, ""))
 		}
 		if !turn.NoFinish {
 			writeChunk(chunk("", nil, finish))

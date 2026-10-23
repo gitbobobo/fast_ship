@@ -737,21 +737,23 @@ func (s *BotService) deleteScheduleTask(botID, taskID, expectedUpdatedAt string)
 
 // BotScheduleRunResponse 是定时任务运行记录的 API 投影。
 type BotScheduleRunResponse struct {
-	ID            string  `json:"id"`
-	TaskID        *string `json:"task_id"`
-	Status        string  `json:"status"`
-	Summary       string  `json:"summary"`
-	Silent        bool    `json:"silent"`
-	TriggerSource string  `json:"trigger_source"`
-	ErrorCode     *string `json:"error_code,omitempty"`
-	ErrorMessage  *string `json:"error_message,omitempty"`
-	ScheduledFor  *string `json:"scheduled_for"`
-	StartedAt     *string `json:"started_at"`
-	FinishedAt    *string `json:"finished_at"`
-	DurationMS    *int64  `json:"duration_ms"`
-	PromptTokens  *int64  `json:"prompt_tokens,omitempty"`
-	Completion    *int64  `json:"completion_tokens,omitempty"`
-	TotalTokens   *int64  `json:"total_tokens,omitempty"`
+	ID            string   `json:"id"`
+	TaskID        *string  `json:"task_id"`
+	Status        string   `json:"status"`
+	Summary       string   `json:"summary"`
+	Silent        bool     `json:"silent"`
+	TriggerSource string   `json:"trigger_source"`
+	ErrorCode     *string  `json:"error_code,omitempty"`
+	ErrorMessage  *string  `json:"error_message,omitempty"`
+	ScheduledFor  *string  `json:"scheduled_for"`
+	StartedAt     *string  `json:"started_at"`
+	FinishedAt    *string  `json:"finished_at"`
+	DurationMS    *int64   `json:"duration_ms"`
+	PromptTokens  *int64   `json:"prompt_tokens,omitempty"`
+	Completion    *int64   `json:"completion_tokens,omitempty"`
+	TotalTokens   *int64   `json:"total_tokens,omitempty"`
+	CostEstimate  *float64 `json:"cost_estimate,omitempty"`
+	CostSource    *string  `json:"cost_source,omitempty"`
 }
 
 // botTriggerSourceLabel 把触发来源投影为 API 标签：定时任务的运行只会来自
@@ -779,6 +781,8 @@ func botScheduleRunResponseOf(run *model.BotRun) BotScheduleRunResponse {
 		PromptTokens:  run.PromptTokens,
 		Completion:    run.CompletionTokens,
 		TotalTokens:   run.TotalTokens,
+		CostEstimate:  run.CostEstimate,
+		CostSource:    run.CostSource,
 	}
 	if run.StartedAt != nil && run.FinishedAt != nil {
 		ms := run.FinishedAt.Sub(*run.StartedAt).Milliseconds()

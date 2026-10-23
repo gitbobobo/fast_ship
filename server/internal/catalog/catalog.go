@@ -18,14 +18,26 @@ var raw []byte
 // 模型清单完全由用户提供。
 const CustomCatalogID = "custom"
 
+// ModelCost 是 models.dev 透射的单价（USD/百万 tokens，INT-139 费用估算）。
+// 字段为指针以区分显式 0（免费）与缺失（nil）：Input/Output 任一缺失即
+// 不可计价；CacheRead 缺失由调用方回退按 Input 计（不提供缓存计价的厂商
+// 对命中输入按普通输入计费）。
+type ModelCost struct {
+	Input      *float64 `json:"input"`
+	Output     *float64 `json:"output"`
+	CacheRead  *float64 `json:"cache_read"`
+	CacheWrite *float64 `json:"cache_write"`
+}
+
 // Model 是目录内的一个模型：窗口与输出上限缺失时为 0（未知），调用方不得把
-// 0 当成 0 上限参与预算。
+// 0 当成 0 上限参与预算。Cost 为 nil 表示目录无该模型的价格（缺失 ≠ 0）。
 type Model struct {
-	ID              string `json:"id"`
-	Name            string `json:"name"`
-	ContextWindow   int64  `json:"context_window"`
-	MaxOutputTokens int64  `json:"max_output_tokens"`
-	Reasoning       bool   `json:"reasoning"`
+	ID              string     `json:"id"`
+	Name            string     `json:"name"`
+	ContextWindow   int64      `json:"context_window"`
+	MaxOutputTokens int64      `json:"max_output_tokens"`
+	Reasoning       bool       `json:"reasoning"`
+	Cost            *ModelCost `json:"cost"`
 }
 
 // Provider 是目录内的一个提供商：api 是官方 OpenAI 兼容端点。

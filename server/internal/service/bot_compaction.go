@@ -8,6 +8,7 @@ import (
 	"math"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -17,6 +18,7 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/repository"
 	"github.com/google/uuid"
 	"github.com/openai/openai-go/v2"
+	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
 
@@ -1693,7 +1695,106 @@ func (s *BotService) finishMaintenanceRunTx(tx *gorm.DB, maintRun *model.BotMain
 // 说话方式升级的一次性压缩不挂在激活的返回值上：那是瞬时判定，跨不过重启、
 // 也挡不住 schedule run 先激活的情形。待办改由持久水位
 // bots.style_compaction_version 表达，主线 run 的压缩决策处读取（INT-133）。
+// mainlinePrefixCacheExpired 报告在主线 run 入口激活是否会作废仍热的前缀
+// 缓存（INT-139 R11）：没有主线模型请求（全新机器人或只跑过定时任务）返回
+// true；最近一次主线请求早于保留窗口也返回 true（旧前缀在上游缓存里已过期，
+// 重写不再浪费命中）。仍在窗口内返回 false = 推迟到下一个压缩边界。查询失败
+// 按可激活处理——激活只是少命中缓存，查询坏掉时推迟会让升级永远排不上。
+func (s *BotService) mainlinePrefixCacheExpired(botID string) bool {
+	last, err := s.requests.LatestMainUpstreamByBot(botID)
+	if err != nil {
+		return true
+	}
+	// 前缀缓存热度按请求完成时刻算：上游缓存 TTL 从服务完成起算，
+	// started_at 会把「跑了很久、刚结束」的请求误判成冷（INT-139 复审）。
+	// finished_at 为空的行不是「在飞请求」——本函数只在 run 入口被调，
+	// 此时 bot 槽已被本 run 持有，残留 nil 行来自 panic/中断收尾
+	// （finishRunAfterPanic 不落 finished_at）。此类行的上游接触上界是
+	// started_at（实际可能流得更久，这里取保守下界）——宁可少保一次
+	// 缓存，也不让一行残留把激活无限推迟。server_restarted 的
+	// finished_at 同理是恢复记账时刻而非上游活动时间，回退 started_at。
+	at := last.StartedAt
+	if last.FinishedAt != nil && (last.ErrorCode == nil || *last.ErrorCode != "server_restarted") {
+		at = *last.FinishedAt
+	}
+	return !at.After(s.now().Add(-s.cfg.Bots.Runtime.PromptCacheRetain()))
+}
+
+// activationDeferralExpired 报告主线入口的激活推迟是否已超上限
+// （INT-139 复审）：首次推迟由 markActivationDeferred 落
+// activation_deferred_at；距首次推迟达到一个保留窗口仍未等到压缩
+// 边界时返回 true，调用方应强制入口激活。
+func (s *BotService) activationDeferralExpired(bot *model.Bot) bool {
+	if bot.ActivationDeferredAt == nil {
+		return false
+	}
+	return !bot.ActivationDeferredAt.After(s.now().Add(-s.cfg.Bots.Runtime.PromptCacheRetain()))
+}
+
+// markActivationDeferred 在首次推迟时给行落时间戳；已有时不动（起点以
+// 第一次推迟为准，不随后续推迟顺延）。WHERE 带与入口 stale 判定同源的
+// 版本守卫（INT-139 云端复审）：副本在 ensureRun→botLoop 间陈旧时，行可能
+// 已被别的事务激活并清掉 deferred_at，不带守卫会把已激活的行重写上一个
+// 对当前版本无意义的起点。
+//
+// 不能靠副本的 deferred_at 早退（INT-139 云端复审）：陈旧副本可能同时满足
+// 「deferred_at 非空 + 版本落后」而行已被激活清标，早退会把已激活行当推迟
+// 写出永不收口的通知。统一走守卫 UPDATE——行仍推迟时更新自然落空，回读
+// 后 deferred_at 非空照返 true，与早退同开销但一路对齐行事实。
+//
+// 未命中时分两种行事实（INT-139 云端复审）：行已被激活——回读行把副本
+// 刷新到真实版本后返回 false，调用方不再当本 run 推迟（否则会给已激活
+// 的行写出永不兑现的推迟通知）；行仍陈旧但被并发写者先落了起点——回读
+// 后副本的 deferred_at 非空，返回 true，本 run 仍是真推迟。返回值即
+// 「本 run 的推迟决策是否成立」，调用方据此驱动通知文案。
+func (s *BotService) markActivationDeferred(bot *model.Bot) bool {
+	now := s.now()
+	res := s.db.Model(&model.Bot{}).
+		Where("id = ? AND activation_deferred_at IS NULL", bot.ID).
+		Where("toolset_version < ? OR platform_prompt_version < ?", botToolsetVersion, botPlatformPromptVersion).
+		Update("activation_deferred_at", now)
+	if res.Error != nil {
+		s.logger.Warn("记录激活推迟起点失败", zap.String("bot_id", bot.ID), zap.Error(res.Error))
+		return false
+	}
+	if res.RowsAffected == 0 {
+		fresh, err := s.bots.Get(bot.ID)
+		if err != nil {
+			// 回读失败时不得按陈旧副本判定：副本若残留旧 deferred_at 而行
+			// 已激活，会把本 run 误判为推迟并写出永不按预期收口的通知——
+			// 保守按非推迟返回（反方向只会让通知晚一轮，安全）（INT-139
+			// 云端复审）。
+			s.logger.Warn("回读激活推迟状态失败，按非推迟处理",
+				zap.String("bot_id", bot.ID), zap.Error(err))
+			return false
+		}
+		bot.ToolsetVersion = fresh.ToolsetVersion
+		bot.PlatformPromptVersion = fresh.PlatformPromptVersion
+		bot.SystemPromptText = fresh.SystemPromptText
+		bot.PromptRevision = fresh.PromptRevision
+		bot.PersonaPrompt = fresh.PersonaPrompt
+		bot.UntrustedNonce = fresh.UntrustedNonce
+		bot.ActivationDeferredAt = fresh.ActivationDeferredAt
+		return bot.ActivationDeferredAt != nil
+	}
+	bot.ActivationDeferredAt = &now
+	return true
+}
+
 func (s *BotService) activateBotPrompt(bot *model.Bot) error {
+	return s.resolveBotPrompt(bot, true)
+}
+
+// activateBotPromptForSession 让定时任务会话用上当前版本的提示词/工具集，
+// 但不推进 bots 行的激活水位。主线「窗口内推迟到压缩边界」依赖行上的
+// stale 判定（toolset/platform 版本落后）——若 schedule 顺手写回水位，
+// 下一次主线冻结直接拿到新前缀，窗口保护与已发出的「下一个压缩点生效」
+// 通知同时失真（INT-139 R11 复审）。
+func (s *BotService) activateBotPromptForSession(bot *model.Bot) error {
+	return s.resolveBotPrompt(bot, false)
+}
+
+func (s *BotService) resolveBotPrompt(bot *model.Bot, persist bool) error {
 	now := s.now()
 	var state model.Bot
 	err := s.db.Transaction(func(tx *gorm.DB) error {
@@ -1703,29 +1804,49 @@ func (s *BotService) activateBotPrompt(bot *model.Bot) error {
 			return err
 		}
 		// 自愈空 nonce（INT-136）：迁移没跑到的存量行在激活前补齐，保证
-		// 重建的提示词内嵌真实 nonce、平台前缀与围栏同值。
+		// 重建的提示词内嵌真实 nonce、平台前缀与围栏同值。会话内解析只在
+		// 内存里补——持久化 nonce 而行内提示词仍是旧版本，会让投影围栏与
+		// 提示词里的值错位；nonce 随真正激活时的提示词重建一起落库。
 		if fresh.UntrustedNonce == "" {
-			healed, err := botHealUntrustedNonce(tx, bot.ID)
-			if err != nil {
-				return err
+			if persist {
+				healed, err := botHealUntrustedNonce(tx, bot.ID)
+				if err != nil {
+					return err
+				}
+				fresh.UntrustedNonce = healed
+			} else {
+				fresh.UntrustedNonce = botNewNonce()
 			}
-			fresh.UntrustedNonce = healed
 		}
 		if fresh.ToolsetVersion < botToolsetVersion || fresh.PlatformPromptVersion < botPlatformPromptVersion {
 			prompt := buildBotSystemPrompt(fresh.PersonaPrompt, fresh.UntrustedNonce)
-			rev := fresh.PromptRevision + 1
-			ok, err := repo.ActivateToolsetTx(tx, bot.ID, botToolsetVersion, botPlatformPromptVersion, prompt, rev, now)
-			if err != nil {
-				return err
-			}
-			if ok {
+			if !persist {
+				// 会话内解析：内存推进版本即可，行水位留给压缩边界激活。
+				// revision 也同步投影 +1——提示词对同一 persona+nonce 是
+				// 确定性的，这正是行激活时将落的 revision；不动会让冻结
+				// 快照记成「新文本+旧 revision」的自相矛盾组合。
 				fresh.SystemPromptText = prompt
-				fresh.PromptRevision = rev
+				fresh.PromptRevision = fresh.PromptRevision + 1
 				fresh.ToolsetVersion = botToolsetVersion
 				fresh.PlatformPromptVersion = botPlatformPromptVersion
-			} else if again, gerr := repo.Get(bot.ID); gerr == nil {
-				// 单连接串行下 CAS 不应落空；万一命中 0 行，重读一次以库内行为准。
-				fresh = again
+			} else {
+				rev := fresh.PromptRevision + 1
+				ok, err := repo.ActivateToolsetTx(tx, bot.ID, botToolsetVersion, botPlatformPromptVersion, prompt, rev, now)
+				if err != nil {
+					return err
+				}
+				if ok {
+					fresh.SystemPromptText = prompt
+					fresh.PromptRevision = rev
+					fresh.ToolsetVersion = botToolsetVersion
+					fresh.PlatformPromptVersion = botPlatformPromptVersion
+					if err := s.settleToolsetNoticesTx(tx, bot.ID, botToolsetVersion); err != nil {
+						return err
+					}
+				} else if again, gerr := repo.Get(bot.ID); gerr == nil {
+					// 单连接串行下 CAS 不应落空；万一命中 0 行，重读一次以库内行为准。
+					fresh = again
+				}
 			}
 		}
 		state = *fresh
@@ -1740,6 +1861,11 @@ func (s *BotService) activateBotPrompt(bot *model.Bot) error {
 	bot.PersonaPrompt = state.PersonaPrompt
 	bot.ToolsetVersion = state.ToolsetVersion
 	bot.UntrustedNonce = state.UntrustedNonce
+	if persist {
+		// 激活成功即已清掉行上的 activation_deferred_at（ActivateToolsetTx
+		// 同事务），副本同步——否则本 run 内副本一直挂着已失效的推迟标记。
+		bot.ActivationDeferredAt = nil
+	}
 	return nil
 }
 
@@ -1779,20 +1905,41 @@ func (s *BotService) activateToolsetWithPromptTx(tx *gorm.DB, botID string, curT
 	}
 	// 单连接串行下同一事务内的判定与 CAS 作用在同一行，命中 0 行不可达；
 	// 万一发生也只说明水位已被人推过，不回写副本、不报错。
-	_, err := repository.NewBotRepository(tx).ActivateToolsetTx(tx, botID, botToolsetVersion, botPlatformPromptVersion, prompt, rev, now)
-	return err
+	ok, err := repository.NewBotRepository(tx).ActivateToolsetTx(tx, botID, botToolsetVersion, botPlatformPromptVersion, prompt, rev, now)
+	if err != nil || !ok {
+		return err
+	}
+	return s.settleToolsetNoticesTx(tx, botID, botToolsetVersion)
 }
 
-func (s *BotService) maybeTellToolset(bot *model.Bot, run *model.BotRun) {
+// deferred 是本 run 入口是否真正走了推迟分支（INT-139 云端复审）：不能用
+// 副本版本落后反推——入口激活失败（只降级记日志）同样留下落后副本，而那
+// 不是推迟决策，下一次入口会立即重试而非等压缩点。此时通知先不发：
+// 「已生效」和「下一个压缩点生效」都失真，last_told 不推进，下次入口重试
+// 激活成功后如实告知。
+//
+// 入口判定在 runLoop 里每轮重试通知：deferred 只是入口时刻的决策，同一 run
+// 内的压缩边界可能已把副本推进到新版本（installBoundarySnapshot）——上一轮
+// 写入失败重试时必须按副本当前版本复核，否则「已激活」的会话会补出一条
+// 永远等不到收口的推迟通知。
+func (s *BotService) maybeTellToolset(bot *model.Bot, run *model.BotRun, deferred bool) {
 	if bot.LastToldVersion >= botToolsetVersion {
 		return
 	}
-	_ = s.db.Transaction(func(tx *gorm.DB) error {
-		return s.tellToolsetTx(tx, bot)
-	})
+	stale := bot.ToolsetVersion < botToolsetVersion || bot.PlatformPromptVersion < botPlatformPromptVersion
+	if stale && !deferred {
+		return
+	}
+	if err := s.db.Transaction(func(tx *gorm.DB) error {
+		return s.tellToolsetTx(tx, bot, deferred && stale)
+	}); err != nil {
+		// 失败不阻塞 run：下一轮 runLoop 会重试；但要有留痕，否则排查
+		// 「升级通知没出现」时无线索。
+		s.logger.Warn("工具集升级通知写入失败", zap.String("bot_id", bot.ID), zap.Error(err))
+	}
 }
 
-func (s *BotService) tellToolsetTx(tx *gorm.DB, bot *model.Bot) error {
+func (s *BotService) tellToolsetTx(tx *gorm.DB, bot *model.Bot, deferred bool) error {
 	from := bot.LastToldVersion
 	if from >= botToolsetVersion {
 		return nil
@@ -1809,14 +1956,53 @@ func (s *BotService) tellToolsetTx(tx *gorm.DB, bot *model.Bot) error {
 	note := botToolsetChangeNote(from, botToolsetVersion)
 	// INT-133：升级通知只作为内部信息，模型不需要向用户转述或逐项验证。
 	note = "（内部信息：不需要向用户转述，也不需要逐项验证）" + note
+	// INT-139 R11：通知文案如实反映本 run 的实际激活决策——deferred 标记
+	// 由入口分支显式传入（不走推迟分支的落后副本属于激活失败，已在
+	// maybeTellToolset 拦下，到不了这里）。推迟的会话写「下一个压缩点
+	// 生效」并补上封顶说明（activation_deferred_at 满一个保留窗口后
+	// 入口强制激活），否则持续活跃不压缩的会话里这句承诺可能不以压缩点
+	// 方式兑现。每个版本只告知一次（dedup + last_told_version）；推迟文案
+	// 在激活真正落库时由 settleToolsetNoticesTx 补发一条 toolset_activated
+	// 事件收口。
+	activation, stateText := "active", "已生效"
+	userState := "已生效"
+	if deferred {
+		capMin := int64(math.Ceil(s.cfg.Bots.Runtime.PromptCacheRetain().Minutes()))
+		// 计时起点是首次推迟落点（activation_deferred_at）而非通知发出
+		// 时刻：通知在后续 run 补发时按剩余窗口写承诺，不高估（INT-139
+		// 云端复审）。
+		if bot.ActivationDeferredAt != nil {
+			if rem := bot.ActivationDeferredAt.Add(s.cfg.Bots.Runtime.PromptCacheRetain()).Sub(s.now()); rem > 0 {
+				if m := int64(math.Ceil(rem.Minutes())); m < capMin {
+					capMin = m
+				}
+			}
+		}
+		activation = "next_compaction"
+		stateText = fmt.Sprintf("下一个压缩点生效（若会话持续活跃未压缩，最迟约 %d 分钟后随新消息生效）", capMin)
+		// 给用户看的版本不出现「压缩点」这类内部术语，括号也不嵌套；
+		// 「随新消息生效」限定不能丢——封顶兑现只在 run 入口与安全点
+		// 复核，没有后台定时器，会话静默时激活落在窗口后的下一条消息
+		// （INT-139 云端复审）。
+		userState = fmt.Sprintf("下次上下文整理时生效，持续活跃时最迟约 %d 分钟后随新消息生效", capMin)
+	}
+	note += "（" + stateText + "）"
+	// 用户版：生效状态放句首（「已升级：…下次生效」的首尾矛盾会让用户
+	// 分不清到底生效没有），正文用一句白话概括，不列工具名与字段名——
+	// 那些细节是写给模型的 note 的内容（INT-139 视觉复审）。
+	userNote := "工具集已更新并生效：" + botToolsetUserNote(from, botToolsetVersion)
+	if deferred {
+		userNote = fmt.Sprintf("工具集更新待生效（%s）：%s",
+			userState, botToolsetUserNote(from, botToolsetVersion))
+	}
 	content := botLifecycleContent{
 		Event: "toolset_updated",
 		// 新消息按 user 角色投影（INT-137 R6）：部分 OpenAI 兼容后端的 chat
 		// 模板要求 system 只能出现在开头，而这条事件会一直留在历史里。
 		Render: "user",
 		Detail: json.RawMessage(fmt.Sprintf(
-			`{"from_version":%d,"to_version":%d,"note":%s,"activation":"next_compaction_or_restart"}`,
-			from, botToolsetVersion, jsonString(note))),
+			`{"from_version":%d,"to_version":%d,"note":%s,"user_note":%s,"activation":%s}`,
+			from, botToolsetVersion, jsonString(note), jsonString(userNote), jsonString(activation))),
 	}
 	raw, err := json.Marshal(content)
 	if err != nil {
@@ -1835,6 +2021,112 @@ func (s *BotService) tellToolsetTx(tx *gorm.DB, bot *model.Bot) error {
 		bot.LastToldVersion = botToolsetVersion
 	}
 	return err
+}
+
+// settleToolsetNoticesTx 在激活真正落库时补发「已生效」事件（INT-139 复审）：
+// bot_messages 是 append-only 账本，已发出的「下一个压缩点生效」通知不能
+// 改写——改为追加一条 toolset_activated 事件，让投影给模型的生命周期按真实
+// 顺序收尾（先推迟、后生效），否则激活后的请求会把推迟文案投影到已是
+// 新版本的提示词旁。跨版本可能挂着多条推迟通知：只发一条收口事件，
+// toVersion 记本次实际激活的版本，不逐条复述历史目标版本。pending 判定
+// 按通知自身的 to_version 与已发出的 toolset_activated 版本匹配——旧版本
+// 已收口的通知行仍是 next_compaction 原文，不能据此把未推迟的新版本误补
+// 一条生效事件。入口激活与压缩边界激活共用本函数；没有 pending 推迟通知
+// 或已发过收口时为空操作。
+func (s *BotService) settleToolsetNoticesTx(tx *gorm.DB, botID string, toVersion int64) error {
+	var msgs []model.BotMessage
+	if err := tx.Where("bot_id = ? AND kind = ? AND dedup_key GLOB ?",
+		botID, model.BotMessageKindLifecycle, "toolset_notice:*").Find(&msgs).Error; err != nil {
+		return err
+	}
+	var acts []model.BotMessage
+	if err := tx.Where("bot_id = ? AND kind = ? AND dedup_key GLOB ?",
+		botID, model.BotMessageKindLifecycle, "toolset_activated:*").Find(&acts).Error; err != nil {
+		return err
+	}
+	// 已收口的通知行仍是 next_compaction 原文（append-only 不改写）：按
+	// 通知自己的目标版本匹配已发出的 activated 事件——只有存在比所有
+	// 已收口版本更新的推迟通知时才补发，否则激活未推迟版本时会误补一条
+	// 不该有的「已生效」事件（INT-139 云端复审）。
+	settledMax := int64(0)
+	for i := range acts {
+		if acts[i].DedupKey == nil {
+			continue
+		}
+		if v, err := strconv.ParseInt(strings.TrimPrefix(*acts[i].DedupKey, "toolset_activated:"), 10, 64); err == nil && v > settledMax {
+			settledMax = v
+		}
+	}
+	pending := false
+	for i := range msgs {
+		var content botLifecycleContent
+		if err := json.Unmarshal([]byte(msgs[i].ContentJSON), &content); err != nil || content.Event != "toolset_updated" {
+			continue
+		}
+		var detail struct {
+			ToVersion  int64  `json:"to_version"`
+			Activation string `json:"activation"`
+		}
+		// 兼容升级前已发出的旧格式（activation="next_compaction_or_restart"），
+		// 否则存量推迟通知永远等不到收口事件（INT-139 云端复审）。
+		if err := json.Unmarshal(content.Detail, &detail); err == nil &&
+			(detail.Activation == "next_compaction" || detail.Activation == "next_compaction_or_restart") &&
+			detail.ToVersion > settledMax {
+			pending = true
+			break
+		}
+	}
+	if !pending {
+		return nil
+	}
+	msgRepo := repository.NewBotMessageRepository(tx)
+	dedup := fmt.Sprintf("toolset_activated:%d", toVersion)
+	if existing, err := msgRepo.FindByDedupKey(botID, dedup); err == nil && existing != nil {
+		return nil
+	} else if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return err
+	}
+	seq, err := s.bots.NextMessageSeqTx(tx, botID)
+	if err != nil {
+		return err
+	}
+	activated := botLifecycleContent{
+		Event: "toolset_activated", Render: "user",
+		Detail: json.RawMessage(fmt.Sprintf(
+			`{"to_version":%d,"note":%s,"user_note":%s,"activation":%s}`,
+			toVersion,
+			jsonString("（内部信息：不需要向用户转述，也不需要逐项验证）上述工具集升级已生效：当前提示词与工具集已切换到最新版本"),
+			jsonString("工具集升级已生效：提示词与工具集已切换到最新版本"),
+			jsonString("active"))),
+	}
+	raw, err := json.Marshal(activated)
+	if err != nil {
+		return err
+	}
+	return msgRepo.AppendTx(tx, &model.BotMessage{
+		ID: uuid.NewString(), BotID: botID, Seq: seq,
+		Kind: model.BotMessageKindLifecycle, ContentJSON: string(raw),
+		DedupKey: &dedup, CreatedAt: s.now(),
+	})
+}
+
+// botToolsetUserNote 是写给用户的升级摘要（INT-139 视觉复审）：一句白话
+// 概括这轮变化和自己有什么关系，不列 fs_schedule/dry_run 这类工具与字段
+// 名——模型版（botToolsetChangeNote）才需要精确清单。
+func botToolsetUserNote(from, to int64) string {
+	// 跨档升级逐档并列（INT-139 云端复审）：只报最高档会把中间档的用户
+	// 可感知变化吞掉（如 from=8→10 时 v9 线程能力）。
+	var parts []string
+	if to >= 10 && from < 10 {
+		parts = append(parts, "定时任务的创建、修改、启用和删除现在需要你确认后才会执行")
+	}
+	if to >= 9 && from < 9 {
+		parts = append(parts, "线程管理增加了归档、恢复队列等新能力")
+	}
+	if len(parts) == 0 {
+		return "机器人的提示词与工具集有更新"
+	}
+	return strings.Join(parts, "；")
 }
 
 func botToolsetChangeNote(from, to int64) string {

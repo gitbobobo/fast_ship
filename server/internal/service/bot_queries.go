@@ -152,20 +152,25 @@ func (s *BotService) CancelCall(userID, botID, callID string) (*BotToolCallRespo
 
 // BotRequestMetrics 是最近一次主线模型请求的单次口径。
 type BotRequestMetrics struct {
-	RequestID           string  `json:"request_id"`
-	RunID               string  `json:"run_id"`
-	Ordinal             int64   `json:"ordinal"`
-	Status              string  `json:"status"` // running|succeeded|failed
-	PromptTokens        *int64  `json:"prompt_tokens"`
-	CompletionTokens    *int64  `json:"completion_tokens"`
-	CachedTokens        *int64  `json:"cached_tokens"`
-	UsageComplete       bool    `json:"usage_complete"`
-	InputTokensEstimate int64   `json:"input_tokens_estimate"`
-	InputEstimator      string  `json:"input_estimator"`
-	StartedAt           string  `json:"started_at"`
-	FinishedAt          *string `json:"finished_at"`
+	RequestID        string `json:"request_id"`
+	RunID            string `json:"run_id"`
+	Ordinal          int64  `json:"ordinal"`
+	Status           string `json:"status"` // running|succeeded|failed
+	PromptTokens     *int64 `json:"prompt_tokens"`
+	CompletionTokens *int64 `json:"completion_tokens"`
+	CachedTokens     *int64 `json:"cached_tokens"`
+	UsageComplete    bool   `json:"usage_complete"`
+	// CostEstimate 是本次请求按 run 冻结目录单价估算的成本（USD）；
+	// 目录无价/缺 usage 时为 null，前端整项隐藏（缺失 ≠ 0，INT-139）。
+	CostEstimate        *float64 `json:"cost_estimate"`
+	CostSource          *string  `json:"cost_source"`
+	InputTokensEstimate int64    `json:"input_tokens_estimate"`
+	InputEstimator      string   `json:"input_estimator"`
+	StartedAt           string   `json:"started_at"`
+	FinishedAt          *string  `json:"finished_at"`
 	// GenerationMs 是首个流式正文片段到请求结束的耗时；0 表示不可用
-	//（首个正文与结束时间必须都有效且差值为正）。
+	//（仅成功请求给出：失败请求即使流过正文片段也按契约报 0，纯工具
+	// 调用、首片/结束时间缺失或时长非正同为 0）。
 	GenerationMs int64 `json:"generation_ms"`
 }
 
@@ -377,12 +382,16 @@ func (s *BotService) botMetricsOf(bot *model.Bot, run *model.BotRun, req *model.
 		CompletionTokens:    req.CompletionTokens,
 		CachedTokens:        req.CachedTokens,
 		UsageComplete:       req.PromptTokens != nil,
+		CostEstimate:        req.CostEstimate,
+		CostSource:          req.CostSource,
 		InputTokensEstimate: req.InputTokensEstimate,
 		InputEstimator:      req.InputEstimator,
 		StartedAt:           req.StartedAt.UTC().Format(time.RFC3339Nano),
 		FinishedAt:          rfc3339(req.FinishedAt),
 	}
-	if req.FinishedAt != nil && req.FirstDeltaAt != nil {
+	// 失败请求的生成耗时契约是 0（不可用）：first_delta_at 现在也会在失败
+	// 分支落库（上游接触证据，INT-139 复审），不能据此给失败请求算耗时。
+	if req.Status == model.BotModelRequestSucceeded && req.FinishedAt != nil && req.FirstDeltaAt != nil {
 		// 首片与结束时间都有效且为正才给出生成耗时。
 		if ms := req.FinishedAt.Sub(*req.FirstDeltaAt).Milliseconds(); ms > 0 {
 			out.Request.GenerationMs = ms

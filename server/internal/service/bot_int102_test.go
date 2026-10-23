@@ -721,7 +721,7 @@ func TestBotToolsetUpgradeOnCompactionBoundary(t *testing.T) {
 	if fresh.ToolsetVersion != botToolsetVersion {
 		t.Fatalf("压缩边界应推进工具集到 v%d，实得 v%d", botToolsetVersion, fresh.ToolsetVersion)
 	}
-	env.bots.maybeTellToolset(fresh, run)
+	env.bots.maybeTellToolset(fresh, run, false)
 	var lifecycle int64
 	env.db.Model(&model.BotMessage{}).Where("bot_id = ? AND dedup_key = ?",
 		bot.ID, fmt.Sprintf("toolset_notice:%d", botToolsetVersion)).Count(&lifecycle)

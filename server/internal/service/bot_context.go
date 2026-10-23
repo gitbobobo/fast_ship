@@ -579,7 +579,7 @@ func botProjectMessages(rows []model.BotMessage, folded map[string]string, nonce
 				// 边界之前不变（INT-137 R6）。nonce 为空时前缀与旧文案逐字节
 				// 一致（INT-136）。
 				msg = openai.SystemMessage(botPlatformPrefix(nonce, "工具集变更") + " 以下是平台可信系统事件（非用户发言）：\n" + string(raw))
-			case content.Event == "toolset_updated":
+			case content.Event == "toolset_updated" || content.Event == "toolset_activated":
 				// 新消息按 user 角色投影（INT-137 R6）：内容是平台自己生成的静态
 				// 变更说明，属于可信事件，不围栏（INT-136 的平台可信豁免）。
 				msg = openai.UserMessage(botPlatformPrefix(nonce, "平台事件") + " 以下是平台生命周期事件（非用户发言）：\n" + string(raw))

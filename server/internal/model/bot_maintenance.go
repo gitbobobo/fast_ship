@@ -88,6 +88,9 @@ type BotMaintenanceRequest struct {
 	CompletionTokens *int64 `json:"completion_tokens"`
 	TotalTokens      *int64 `json:"total_tokens"`
 	CachedTokens     *int64 `json:"cached_tokens"`
+	// CostEstimate / CostSource 同 bot_model_requests 口径（INT-139）。
+	CostEstimate *float64 `json:"cost_estimate"`
+	CostSource   *string  `json:"cost_source"`
 
 	ErrorCode    *string    `json:"error_code,omitempty"`
 	ErrorMessage *string    `json:"error_message,omitempty"`

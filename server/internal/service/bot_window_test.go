@@ -876,7 +876,7 @@ func TestBotChatSnapshotMetricsAbsentOrDegenerate(t *testing.T) {
 		t.Fatalf("窗口能力应可见: %+v", snap.Metrics)
 	}
 
-	// 定时任务会话的请求不算主线口径；主线缺 usage/首片的请求 generation_ms=0。
+	// 定时任务会话的请求不算主线口径；主线失败请求 generation_ms 按契约恒为 0。
 	now := time.Now().UTC()
 	schedRun := &model.BotRun{
 		ID: uuid.NewString(), BotID: bot.ID,
@@ -903,9 +903,14 @@ func TestBotChatSnapshotMetricsAbsentOrDegenerate(t *testing.T) {
 	if err := env.bots.runs.CreateTx(env.db, mainRun); err != nil {
 		t.Fatalf("seed main run: %v", err)
 	}
+	// 失败行也落 first_delta_at/finished_at（上游接触证据，INT-139 复审）；
+	// generation_ms 契约仍是 0——失败请求的耗时不可用，不为它算。
+	delta := now.Add(time.Second)
+	fin := now.Add(3 * time.Second)
 	if err := env.bots.requests.CreateTx(env.db, &model.BotModelRequest{
 		ID: uuid.NewString(), RunID: mainRun.ID, Ordinal: 1,
 		Status: model.BotModelRequestFailed, StartedAt: now,
+		FirstDeltaAt: &delta, FinishedAt: &fin,
 		PrefixHash: "x", ToolsHash: "x", RequestHash: "x", TokenEstimator: "chars/4",
 	}); err != nil {
 		t.Fatalf("seed main request: %v", err)
@@ -923,7 +928,7 @@ func TestBotChatSnapshotMetricsAbsentOrDegenerate(t *testing.T) {
 		t.Fatalf("应取主线最新请求: %+v", r)
 	}
 	if r.UsageComplete || r.PromptTokens != nil || r.GenerationMs != 0 {
-		t.Fatalf("缺 usage/首片时口径应为不可用: %+v", r)
+		t.Fatalf("失败请求的 usage/耗时口径应不可用: %+v", r)
 	}
 }
 

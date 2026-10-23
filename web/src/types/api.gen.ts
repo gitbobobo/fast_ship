@@ -5895,6 +5895,13 @@ export interface components {
             /** @description false 表示上游未报 usage（缺失与零严格区分）；false 时计数视为不可用 */
             usage_complete: boolean;
             /**
+             * Format: double
+             * @description 按 run 冻结目录单价估算的本次请求成本（USD）；目录无价/缺 usage 时为 null（缺失 ≠ 0，INT-139）
+             */
+            cost_estimate?: number | null;
+            /** @description 计价来源（catalog）；cost_estimate 为 null 时同 null */
+            cost_source?: string | null;
+            /**
              * Format: int64
              * @description 发送前的上下文 token 估算值（口径见 input_estimator；上下文占比用估算值）
              */
@@ -6087,6 +6094,13 @@ export interface components {
             cached_tokens?: number | null;
             /** @description false 表示上游未报 usage（缺失与零严格区分） */
             usage_complete: boolean;
+            /**
+             * Format: double
+             * @description 本 run 已计价请求的成本累计（USD，含送过 usage 的失败请求）；目录无价/全缺 usage 时为 null（缺失 ≠ 0，INT-139）
+             */
+            cost_estimate?: number | null;
+            /** @description 计价来源（catalog）；cost_estimate 为 null 时同 null */
+            cost_source?: string | null;
             error_code?: string | null;
             error_message?: string | null;
             /** Format: date-time */
@@ -6159,6 +6173,13 @@ export interface components {
             completion_tokens?: number;
             /** Format: int64 */
             total_tokens?: number;
+            /**
+             * Format: double
+             * @description 本 run 已计价请求的成本累计（USD，含送过 usage 的失败请求）；目录无价时缺省（缺失 ≠ 0，INT-139）
+             */
+            cost_estimate?: number;
+            /** @description 计价来源（catalog） */
+            cost_source?: string;
         };
         BotToolCall: {
             /** @description 平台调用 ID，同时是执行幂等键 */

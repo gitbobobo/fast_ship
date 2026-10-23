@@ -1929,8 +1929,8 @@ func TestBotToolsetUpgradeBoundary(t *testing.T) {
 	if builtNew.ToolsHash == builtOld.ToolsHash {
 		t.Fatalf("新旧 holder 字节应不同")
 	}
-	env.bots.maybeTellToolset(fresh, run)
-	env.bots.maybeTellToolset(fresh, run)
+	env.bots.maybeTellToolset(fresh, run, false)
+	env.bots.maybeTellToolset(fresh, run, false)
 	var n int64
 	env.db.Model(&model.BotMessage{}).Where("bot_id = ? AND dedup_key = ?",
 		bot.ID, fmt.Sprintf("toolset_notice:%d", botToolsetVersion)).Count(&n)
@@ -2866,9 +2866,9 @@ func TestBotBoundarySnapshotFixedTokensSameProjection(t *testing.T) {
 }
 
 // TestBotScheduleRunActivatesStaleBot 重启后只跑定时任务（schedule 路径）：
-// 旧版本机器人重启后的第一次运行如果是 schedule run，也必须完成 v5 激活——
-// bot 行升级到新提示词，本次发出的请求就带新 system 前缀，而不是等下一次
-// 主线运行才补上。
+// 旧版本机器人重启后的第一次运行如果是 schedule run，本次发出的请求也必须
+// 带新 system 前缀，而不是等下一次主线运行才补上。会话内解析不推进 bots 行
+// 激活水位（INT-139 R11 复审：写回会洗掉主线窗口内的推迟判定）。
 func TestBotScheduleRunActivatesStaleBot(t *testing.T) {
 	env := setupBotTestEnv(t, fakeModelTurn{Text: "定时汇报：已完成"})
 	userID := createBotTestUser(t, env.db, "schedact5")
@@ -2882,7 +2882,9 @@ func TestBotScheduleRunActivatesStaleBot(t *testing.T) {
 		t.Fatalf("stale bot: %v", err)
 	}
 
-	task := seedScheduleTask(t, env, bot.ID, nil)
+	// needs_report=false：汇报事件会唤醒主线 run（合法的主线入口激活），
+	// 与本测试要断言的「schedule 会话不推进行水位」口径无关，关掉去抖。
+	task := seedScheduleTask(t, env, bot.ID, func(tk *model.BotScheduleTask) { tk.NeedsReport = false })
 	run := seedScheduleRun(t, env, bot.ID, task.ID)
 	env.bots.wakeScheduleRun(bot.ID, run.ID)
 	done := waitForScheduleRunFinished(t, env, run.ID)
@@ -2893,11 +2895,11 @@ func TestBotScheduleRunActivatesStaleBot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load bot: %v", err)
 	}
-	if fresh.PlatformPromptVersion != botPlatformPromptVersion {
-		t.Fatalf("schedule run 应激活平台提示词到 %d，实得 %d", botPlatformPromptVersion, fresh.PlatformPromptVersion)
-	}
-	if !strings.Contains(fresh.SystemPromptText, "说话方式") || strings.Contains(fresh.SystemPromptText, oldPrompt) {
-		t.Fatalf("schedule run 后系统提示词应重建为含默认人设的新文案")
+	// 行水位保持不动：主线窗口内的推迟激活依赖这个 stale 判定。
+	if fresh.PlatformPromptVersion != 4 || fresh.ToolsetVersion != botToolsetVersion ||
+		fresh.SystemPromptText != oldPrompt {
+		t.Fatalf("schedule run 不得推进 bots 行激活水位: prompt=%d toolset=%d",
+			fresh.PlatformPromptVersion, fresh.ToolsetVersion)
 	}
 	req := env.fake.nextRequest(t, 10*time.Second)
 	elems, _ := rawMessages(t, req.Body)

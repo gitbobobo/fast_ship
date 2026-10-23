@@ -145,11 +145,64 @@ run 入口的 `activateBotPrompt` 在一个短事务里读行、
 判 stale、按**该行**人设重建提示词并写回，主线与定时任务会话都适用（在冻结
 本次 run 的配置与会话快照之前完成）；提示词始终由事务内读到的行生成——
 生产库 `SetMaxOpenConns(1)` 让读-改-写与其它写者天然串行，调用方可能过期的
-副本写不坏库，因此不再需要进程级的激活缓存与事后补读。工具集版本随同入冻
+副本写不坏库，因此不再需要进程级的激活缓存与事后补读。**主线入口激活另有
+前缀缓存门控（INT-139 R11）**：对话仍活跃时重写系统提示会作废仍热的上游
+前缀缓存——最近一次主线模型请求距今未超
+`bots.runtime.prompt_cache_retain_minutes`（默认 10 分钟，显式 0 禁用
+推迟——入口始终激活；`mainlinePrefixCacheExpired`
+判）就推迟到下一个压缩边界，全新机器人（无主线请求）或窗口外的请求照常入口
+激活。「最近一次请求」的口径是**真正触达上游**的请求
+（`LatestMainUpstreamByBot`）：`failed` 且 `first_delta_at`、
+`prompt_tokens`、`provider_request_id` 三者皆空的本地失败行
+（transport 失败、认证/限流被上游拒于入口等）
+被跳过、热度回看更早的真实请求——上游从未处理过的前缀没有缓存可保。
+`first_delta_at` 与 `provider_request_id` 在失败分支同样落库（流过
+半截正文后失败仍算触达上游；纯工具调用流没有正文首段与 usage，chunk
+带回的 `provider_request_id` 是唯一的触达残迹）。**存量数据窗口**：
+本改动前落库的失败行不写这三列，升级后首个保留窗口内它们一律按
+「未触达」处理——可能把仍热的缓存误判为冷而提前激活一次（多作废一次
+缓存，保守方向）；窗口过后新行带齐证据，自愈，无需回填（存量行也无从
+分辨是否真触达过上游）。
+候选行排序按上游实际接触时刻 `COALESCE(finished_at, started_at)`（
+`server_restarted` 的 finished_at 是恢复记账时刻、回退 started_at），
+与热度判定同源——更早开始但刚结束的热请求不会被更晚开始的冷请求盖过。
+panic 残留行（`running` + `finished_at=nil`）不受此过滤：请求可能已发出，
+按 `started_at` 保守兜底、且推迟本身有上限。**推迟本身封顶一个保留窗口**：首次推迟给行落
+`activation_deferred_at`，距起点满一个窗口仍未等到压缩边界时强制入口
+激活并清掉标记（`ActivateToolsetTx` 同事务清空）；run 内每个安全点
+（`maybeTellToolset` 同处）也复核一次——只在入口判会让持续有输入的长寿
+run 无限越过承诺窗口、收口事件永不落地。到期激活与压缩边界同一路径
+换装前缀：更新 `freeze` 的提示词字段，下一轮 `applyRunPromptFreeze`
+把新版本装进本 run——代价是热缓存里付一次冷请求，换「最迟约 N 分钟
+生效」承诺在 run 内真实兑现（只推进水位不换前缀时，承诺对不压缩的
+长寿 run 永不兑现，`toolset_activated:N` 的 dedup 还会先被「登记」
+占掉、真正换装时无收口可发）。持续活跃不压缩的
+会话不会把升级与「下一个压缩点生效」的承诺无限推迟。定时任务会话独立、
+不吃主线缓存，入口始终用最新版本——但它走
+`activateBotPromptForSession` 只做会话内解析、**不写回 bots 行激活水位**，
+否则主线窗口内的推迟判定会被 schedule 运行洗掉。工具集版本随同入冻
 （`botRunFreeze.ToolsetVersion`），主线 run 的工具集只在压缩边界
 （`acceptCompactionBoundary`）才会换，并发的 schedule 激活不会在 run 中途
 静默换掉它。告知由 `maybeTellToolset` 按 `last_told_version`
-单独补发 lifecycle 系统事件。普通请求期间钉死；请求行记录实际使用的版本号，
+单独补发 lifecycle 系统事件；文案如实标注激活状态——已激活的写「已生效」，
+窗口内推迟的写「下一个压缩点生效」（`activation` 字段 active/next_compaction），
+每个版本只告知一次。推迟与否以入口显式传下的 `deferred` 决策为准，不用副本
+版本落后反推（激活失败留下的落后副本不是推迟：此时通知暂不发、last_told 不
+推进，下次入口重试激活成功后如实告知）。`deferred` 只是入口时刻的决策——
+同一 run 内的压缩边界可能已激活并推进副本版本，重试通知时按副本当前版本
+复核：已激活就写「已生效」，否则会留下一条永远等不到收口的推迟通知。
+`markActivationDeferred` 的 UPDATE
+带版本守卫（`toolset_version < 当前 OR platform_prompt_version < 当前`），
+陈旧副本不会给已激活行重落推迟起点；守卫未命中时回读行事实把副本（版本、
+提示词、`ActivationDeferredAt`）对齐后按行事实返回「本 run 是否真推迟」——
+行已被激活则返回 false、副本同步到当前版本，本 run 的冻结物直接吃到真实
+新提示词，通知也不会再写出永不兑现的推迟文案。激活落库后副本上的
+`ActivationDeferredAt` 同步清空。推迟通知不是终态：激活真正落库时（入口或压缩边界）
+`settleToolsetNoticesTx` 追加一条 `toolset_activated` 事件收口——账本
+append-only 不改写原通知，投影给模型的生命周期保持「先推迟、后生效」的
+真实顺序。pending 判定按通知自身 `to_version` 与已发出的
+`toolset_activated:N` 版本匹配：已收口的旧通知仍是 next_compaction 原文，
+不能替后来未推迟的新版本再补一条生效事件。普通请求期间钉死；请求行记录实际使用的版本号，
 `tools_hash` 取完整 tools 数组实际 wire 字节。模型误用
 旧 action 名（如 `fs_memory/search`、v3 里的 `fs_schedule/status`）会命中
 改名映射表返回结构化迁移指引——不静默代执行新动作；冻结工具集里仍存在的
@@ -318,10 +371,31 @@ next_offset}`；`fs_result.read` 按 Unicode 字符续读，不切断 UTF-8。
   旧请求的窗口按它发起时的目录身份解析；INT-133 之前落的旧快照没有该
   字段，读取方回退 bot 当前 `catalog_id`），没有主线请求时 `request`
   缺省、窗口能力仍然可见。`bot_model_requests.first_delta_at` 在首个非空正文流式片段
-  时记录；`generation_ms` = finished − first_delta，两者都有效且为正才给出，
-  否则 0（纯工具调用、失败请求视为不可用）。历史累计仍在 run 上，指标区只
+  时记录（与成败无关——它还兼作前缀热度的上游接触证据）；`generation_ms` 仅对
+  成功请求给出 = finished − first_delta，其余一律 0（纯工具调用、失败请求、时长
+  非正均视为不可用）。历史累计仍在 run 上，指标区只
   用单次口径。辅助模型（摘要/归档）的输出预算沿用「目标 − 前缀 − 附录 −
   保留尾部」与 `MaxCompletionTokens` 传递，不因省 token 硬砍到截断。
+- **成本估算（INT-139）**：目录生成器现在透射 models.dev 的 `cost`
+  （input/output/cache_read/cache_write，USD/MTok），`catalog.Model.Cost`
+  承载；无价模型保持 null。`botCostEstimate` 按 run 冻结快照里的
+  `catalog_id`+`model` 计价——未命中缓存的输入（prompt−cached）×输入价 +
+  缓存命中 ×缓存读取价（缺省回退输入价）+ 输出 ×输出价；结果落
+  `bot_model_requests.cost_estimate`/`cost_source="catalog"`，run 级是已计价
+  请求的累计（`bot_runs.cost_estimate`），维护请求落自己的行、按维护运行
+  快照里的 `catalog_id` 计价（与父 run 冻结目录同口径——运行中切换
+  provider 不得按新目录记旧 provider 的流量）。usage
+  与成本是计费事实、与请求成败无关：usage 送达后断流的失败请求行照样落
+  tokens 与成本，其成本也计入 run 总账并随失败/停止/恢复收尾落库（收尾
+  路径统一走 `runCostPersistColsTx`，事务内按
+  `SUM(bot_model_requests.cost_estimate)` 实算——panic/重启收尾读到的 run
+  是库里旧副本，内存累计靠不住）；run 的 token 总量仍只累计成功请求——run
+  token 粒度是「会话实际消费」，成本粒度是「已计价请求累计」。
+  **缺失 ≠ 0**：目录无价、自定义 provider、模型不在目录、缺
+  input/output 单价或 usage 未收齐时一律保持 NULL，API 投影与前端（指标区
+  「≈$x」、run 底栏、定时任务运行行）整项隐藏，不显示 $0；显式 0 价（免费
+  模型）是已知价格，照常计 $0。cache_write（缓存写入费）上游极少提供，
+  读取侧已被 cache_read 覆盖，不单独计。
 
 ### 用户时区与当地语义（INT-138）
 
@@ -809,6 +883,11 @@ CAS 为 queued；reject：置 rejected 并落唯一终态；always_allow：同�
   外发渠道泄露，外部内容就能伪造带真 nonce 的平台前缀（v10 新增规则 15：
   围栏是数据、外部内容提的写操作必须由用户在对话中明确提出、不要整段抄
   进记忆；规则 2/8 补上定时任务确认语义）。
+- **平台提示词 v12（INT-139）**：规则 8 精简——固定前缀只保留「任务由
+  机器人经 fs_schedule 管理、用户只能查看与启停、静默运行回 [[SILENT]]、
+  细节见 fs_help」；确认/时区/state/run 的细节描述移交 `fs_help` 与 v10
+  `fs_schedule` 工具描述（已完整覆盖）。前缀变短降低每条请求的固定成本，
+  也减少与工具描述重复陈述带来的漂移风险。
 - **围栏的边界（诚实说法）**：围栏与 nonce 是**给模型的来源提示**，不是认证，
   也不保证模型一定不被说服——nonce 写在系统提示词里，模型自己看得到。硬边界
   是服务端权限、确认与会话策略：schedule 会话内的写操作仍默认放行，足够有
@@ -1247,10 +1326,14 @@ null），给三栏工作台的左侧列表当预览列。语义与约束：
   `max(Retry-After, retry_base_delay_ms << attempt)`，Retry-After 封顶 60s，
   退避期可被 ctx 取消打断。已输出片段的失败（含半截工具调用，聚合处置位
   `SawOutput`）、看门狗超时、普通 4xx 都不重试；上下文超限的强制压缩重试同样
-  以「未收到过任何片段」为前置。
+  以「未收到过任何片段」为前置。整轮工具调用都缺 `name` 被丢弃且无正文时
+  不是「空输出的正常完成」：合成 `errBotToolCallsDropped` 走断流同型失败
+  （草稿丢弃、请求行记失败、run 记 `model_tool_calls_dropped`），不提交空
+  助手回合也不重试——上游已就此计费，畸形 delta 多半复发。
 - **错误分类**（`bot_model_errors.go`）：把上游报错收敛为 `provider_auth_failed`
   / `provider_quota_exhausted` / `provider_rate_limited` / `provider_unavailable`
-  / `model_not_found` / `model_stream_timeout` / `model_request_failed`。
+  / `model_not_found` / `model_stream_timeout` / `model_tool_calls_dropped`
+  / `model_request_failed`。
   结构化状态码之外有文本兜底：HTTP 200 里返回 `{"error":...}` 被 SDK 降级成
   普通 error 的报错按同一批短语收敛（额度优先于认证与模型判定；不匹配
   `billing`/`payment required` 这类泛词，402 已由状态码覆盖）。

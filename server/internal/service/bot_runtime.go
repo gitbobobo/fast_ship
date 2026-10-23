@@ -579,24 +579,28 @@ func rfc3339(t *time.Time) *string {
 
 // BotRunResponse 是 run 的 API 投影；config_snapshot 不含明文 key，原样返回。
 type BotRunResponse struct {
-	ID               string  `json:"id"`
-	BotID            string  `json:"bot_id"`
-	TriggerSource    string  `json:"trigger_source"`
-	TriggerKey       string  `json:"trigger_key"`
-	Status           string  `json:"status"`
-	ConfigSnapshot   string  `json:"config_snapshot"`
-	InputThroughSeq  int64   `json:"input_through_seq"`
-	StopRequested    bool    `json:"stop_requested"`
-	PromptTokens     *int64  `json:"prompt_tokens"`
-	CompletionTokens *int64  `json:"completion_tokens"`
-	TotalTokens      *int64  `json:"total_tokens"`
-	CachedTokens     *int64  `json:"cached_tokens"`
-	UsageComplete    bool    `json:"usage_complete"`
-	ErrorCode        *string `json:"error_code"`
-	ErrorMessage     *string `json:"error_message"`
-	CreatedAt        string  `json:"created_at"`
-	StartedAt        *string `json:"started_at"`
-	FinishedAt       *string `json:"finished_at"`
+	ID               string `json:"id"`
+	BotID            string `json:"bot_id"`
+	TriggerSource    string `json:"trigger_source"`
+	TriggerKey       string `json:"trigger_key"`
+	Status           string `json:"status"`
+	ConfigSnapshot   string `json:"config_snapshot"`
+	InputThroughSeq  int64  `json:"input_through_seq"`
+	StopRequested    bool   `json:"stop_requested"`
+	PromptTokens     *int64 `json:"prompt_tokens"`
+	CompletionTokens *int64 `json:"completion_tokens"`
+	TotalTokens      *int64 `json:"total_tokens"`
+	CachedTokens     *int64 `json:"cached_tokens"`
+	UsageComplete    bool   `json:"usage_complete"`
+	// CostEstimate 是本 run 已计价请求的成本累计（USD）；目录无价时为
+	// null，前端整项隐藏（缺失 ≠ 0，INT-139）。
+	CostEstimate *float64 `json:"cost_estimate"`
+	CostSource   *string  `json:"cost_source"`
+	ErrorCode    *string  `json:"error_code"`
+	ErrorMessage *string  `json:"error_message"`
+	CreatedAt    string   `json:"created_at"`
+	StartedAt    *string  `json:"started_at"`
+	FinishedAt   *string  `json:"finished_at"`
 }
 
 func botRunResponseOf(run *model.BotRun) BotRunResponse {
@@ -614,6 +618,8 @@ func botRunResponseOf(run *model.BotRun) BotRunResponse {
 		TotalTokens:      run.TotalTokens,
 		CachedTokens:     run.CachedTokens,
 		UsageComplete:    run.UsageComplete,
+		CostEstimate:     run.CostEstimate,
+		CostSource:       run.CostSource,
 		ErrorCode:        run.ErrorCode,
 		ErrorMessage:     run.ErrorMessage,
 		CreatedAt:        run.CreatedAt.UTC().Format(time.RFC3339Nano),

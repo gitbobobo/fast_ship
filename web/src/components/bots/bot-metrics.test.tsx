@@ -4,7 +4,7 @@ import type {
   BotMetrics as MetricsData,
   BotRequestMetrics,
 } from "@/lib/api/bots";
-import { BotMetrics } from "./bot-metrics";
+import { BotMetrics, formatCostEstimate } from "./bot-metrics";
 
 const fullRequest: BotRequestMetrics = {
   request_id: "req-1",
@@ -118,7 +118,7 @@ describe("BotMetrics", () => {
         metrics={makeMetrics({ ...fullRequest, usage_complete: false })}
       />,
     );
-    expect(screen.getByTestId("bot-metric-speed").textContent).toBe("—");
+    expect(screen.queryByTestId("bot-metric-speed")).toBeNull();
     expect(arcOf("bot-metric-cache")).toBeNull();
     // 缺失画虚线轨道，不与「真实 0%」混淆。
     expect(trackOf("bot-metric-cache")?.getAttribute("stroke-dasharray")).toBe(
@@ -134,9 +134,7 @@ describe("BotMetrics", () => {
     render(
       <BotMetrics metrics={makeMetrics({ ...fullRequest, generation_ms: 0 })} />,
     );
-    const speed = screen.getByTestId("bot-metric-speed");
-    expect(speed.textContent).toBe("—");
-    expect(speed.textContent).not.toContain("0");
+    expect(screen.queryByTestId("bot-metric-speed")).toBeNull();
   });
 
   it("cached_tokens 为 0 是真实 0%：实线轨道、title 写明 0%，与缺失的虚线可区分", () => {
@@ -155,7 +153,7 @@ describe("BotMetrics", () => {
     expect(titleOf("bot-metric-context")).toContain("暂无");
     expect(arcOf("bot-metric-cache")).toBeNull();
     expect(arcOf("bot-metric-context")).toBeNull();
-    expect(screen.getByTestId("bot-metric-speed").textContent).toBe("—");
+    expect(screen.queryByTestId("bot-metric-speed")).toBeNull();
     expect(screen.getByTestId("bot-metrics").textContent).not.toContain("0");
   });
 
@@ -163,7 +161,7 @@ describe("BotMetrics", () => {
     render(<BotMetrics metrics={undefined} />);
     expect(titleOf("bot-metric-cache")).toContain("暂无");
     expect(titleOf("bot-metric-context")).toContain("暂无");
-    expect(screen.getByTestId("bot-metric-speed").textContent).toBe("—");
+    expect(screen.queryByTestId("bot-metric-speed")).toBeNull();
     expect(screen.getByTestId("bot-metrics").textContent).not.toContain("0");
     expect(screen.getByTestId("bot-metrics").querySelector("svg")).toHaveAttribute(
       "aria-label",
@@ -208,6 +206,41 @@ describe("BotMetrics", () => {
     expect(screen.getByTestId("bot-metric-speed")).toHaveTextContent(
       "40.0 tok/s",
     );
+  });
+
+  it("cost_estimate 非空时显示「本次 ≈$x」成本（INT-139），为空时整项隐藏", () => {
+    render(
+      <BotMetrics
+        metrics={makeMetrics({ ...fullRequest, cost_estimate: 0.0002112 })}
+      />,
+    );
+    const cost = screen.getByTestId("bot-metric-cost");
+    // 「本次」标明口径为最近一次请求；毫厘以下写 <$0.001，精确值在 tooltip。
+    expect(cost).toHaveTextContent("本次 <$0.001");
+    expect(cost).toHaveAttribute("title", expect.stringContaining("0.0002112"));
+    expect(cost).toHaveAttribute("title", expect.stringContaining("目录单价"));
+  });
+
+  it("成本分段：大额两位小数、毫厘两位有效数字、更小写 <$0.001", () => {
+    expect(formatCostEstimate(1.234)).toBe("$1.23");
+    expect(formatCostEstimate(0.023456)).toBe("$0.0235");
+    expect(formatCostEstimate(0.0000336)).toBe("<$0.001");
+    expect(formatCostEstimate(0.00000012)).toBe("<$0.001");
+    // 显式零价是真实 $0，不能落到 <$0.001 分支（云端复审）。
+    expect(formatCostEstimate(0)).toBe("$0");
+    // 分位段剥尾零：$0.5000 → $0.5（云端复审），非整段保留四位小数。
+    expect(formatCostEstimate(0.5)).toBe("$0.5");
+    expect(formatCostEstimate(0.0123)).toBe("$0.0123");
+  });
+
+  it("cost_estimate 为 null 时不渲染成本项（缺失 ≠ 0）", () => {
+    render(
+      <BotMetrics
+        metrics={makeMetrics({ ...fullRequest, cost_estimate: null })}
+      />,
+    );
+    expect(screen.queryByTestId("bot-metric-cost")).toBeNull();
+    expect(screen.getByTestId("bot-metrics").textContent).not.toContain("$");
   });
 
   it("有数据时 aria-label 汇总两项可读值", () => {

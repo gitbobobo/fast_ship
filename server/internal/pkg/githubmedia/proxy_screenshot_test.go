@@ -553,15 +553,81 @@ func TestScreenshotServiceRequiresHTTPS(t *testing.T) {
 // guardAddress 的客户端必须自己拨目标（不走环境代理）才能校验目标 IP；
 // GitHub 媒体面不 guard，保留 ProxyFromEnvironment。
 func TestGuardedClientProxyPolicy(t *testing.T) {
-	guarded := newGuardedClient(true, allowPublicImageHost, true)
+	guarded := newGuardedClient(true, allowPublicImageHost, true, nil)
 	gtr, ok := guarded.Transport.(*http.Transport)
 	if !ok || gtr.Proxy != nil {
 		t.Fatal("guard 客户端 transport proxy 应为 nil（拨号校验要求直连目标）")
 	}
-	plain := newGuardedClient(false, isAllowedGitHubMediaURL, false)
+	plain := newGuardedClient(false, isAllowedGitHubMediaURL, false, nil)
 	ptr, ok := plain.Transport.(*http.Transport)
 	if !ok || ptr.Proxy == nil {
 		t.Fatalf("GitHub 媒体面 transport proxy 不应被清空，want ProxyFromEnvironment")
+	}
+}
+
+// 重定向把 bearer 带出闸门（云端复审 P2）：Go http.Client 会把 Authorization
+// 透传给同域及子域跳转，GHE 兄弟子域（x.ghe.corp.com ← ghe.corp.com）也在其
+// 列——目标过不了 bearerGate 就必须剥头，否则兄弟子域上任意公网服务都能
+// 收走 App 安装令牌。
+func TestGuardedClientStripsBearerOnRedirect(t *testing.T) {
+	var leakedAuth string
+	// sibling 扮演 GHE 兄弟子域：allowURL 放行的公网 host，但不归本实例。
+	sibling := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		leakedAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer sibling.Close()
+	var siblingURL string
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, siblingURL, http.StatusFound)
+	}))
+	defer origin.Close()
+	siblingURL = sibling.URL
+
+	// 闸门只认 origin（本部署 GitHub）；origin→sibling 的 302 必须剥头。
+	client := newGuardedClient(false, allowPublicImageHost, false,
+		func(u *url.URL) bool { return u.Host == origin.Listener.Addr().String() })
+	req, err := http.NewRequest(http.MethodGet, origin.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer install-token")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	if leakedAuth != "" {
+		t.Fatalf("闸门外跳转目标不应收到 Authorization，got %q", leakedAuth)
+	}
+
+	// 反向：闸门内的跳转（GHE 同实例附件直链换路径/换签名）必须保留
+	// 凭证，不能一刀切剥光。
+	var keptAuth string
+	gated := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		keptAuth = r.Header.Get("Authorization")
+		if r.URL.Path != "/final" {
+			http.Redirect(w, r, "/final", http.StatusFound)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer gated.Close()
+	client2 := newGuardedClient(false, allowPublicImageHost, false,
+		func(u *url.URL) bool { return u.Host == gated.Listener.Addr().String() })
+	req2, err := http.NewRequest(http.MethodGet, gated.URL+"/start", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req2.Header.Set("Authorization", "Bearer install-token")
+	resp2, err := client2.Do(req2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp2.Body.Close()
+	if keptAuth != "Bearer install-token" {
+		t.Fatalf("闸门内跳转应保留 Authorization，got %q", keptAuth)
 	}
 }
 

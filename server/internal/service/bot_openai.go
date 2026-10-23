@@ -3,14 +3,17 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/openai/openai-go/v2"
 	"github.com/openai/openai-go/v2/option"
 	"github.com/openai/openai-go/v2/packages/param"
 	"github.com/openai/openai-go/v2/shared"
+	"go.uber.org/zap"
 )
 
 // bot_openai.go 是官方 openai-go 的适配层：客户端构造、流式聚合、usage 提取
@@ -48,6 +51,13 @@ type botModelReply struct {
 	CompletionTokens int64
 	TotalTokens      int64
 	CachedTokens     int64
+	// SynthesizedToolCallIDs 是聚合时为缺失 id 的流式工具调用合成的平台
+	// id 个数（INT-139 R12）：部分兼容服务流式不给 id，配对键是我们账本
+	// 里的 provider_tool_call_id，本地合成不影响协议配对。
+	SynthesizedToolCallIDs int
+	// DroppedToolCalls 是聚合时被丢弃的缺名工具调用个数：缺 name 无法合成
+	// 语义，只能丢，但必须可观测（调用方据此记 warn）。
+	DroppedToolCalls int
 }
 
 type botModelToolCall struct {
@@ -173,14 +183,30 @@ func botStreamChat(ctx context.Context, client *openai.Client, req botStreamRequ
 			}
 		}
 	}
+	sErr := stream.Err()
 	// 无论成败都先拼装已收到的工具调用片段：调用方按「本次尝试是否已有
 	// 输出」决定能否重试，半截的工具调用必须可见。
 	for _, idx := range order {
-		if part := parts[idx]; part.ID != "" && part.Name != "" {
-			reply.ToolCalls = append(reply.ToolCalls, *part)
+		part := parts[idx]
+		// 缺 name 无法合成语义：丢弃。干净结束时计入缺名异常——断流残片
+		// 的缺名是截断的后果而非上游协议畸形，不计入避免观测噪音
+		// （INT-139 R12 / 云端复审）。
+		if part.Name == "" {
+			if sErr == nil {
+				reply.DroppedToolCalls++
+			}
+			continue
 		}
+		// 缺 id 的合成平台 id：部分兼容服务流式不返回 id，静默丢弃会让
+		// 调用丢失、本轮无结果。配对键 provider_tool_call_id 存在我们账本
+		// 里、回放什么就按什么配对，本地合成不破坏协议闭合。
+		if part.ID == "" {
+			part.ID = fmt.Sprintf("call_%d_%s", idx, uuid.NewString())
+			reply.SynthesizedToolCallIDs++
+		}
+		reply.ToolCalls = append(reply.ToolCalls, *part)
 	}
-	if err := stream.Err(); err != nil {
+	if err := sErr; err != nil {
 		// 只有看门狗取消（父 ctx 仍存活且错误为取消）才改写为超时错误：
 		// 用户停止 / 关停导致的取消保持原样，HTTP 与网络错误也原样透出。
 		if watchdog != nil && ctx.Err() == nil && errors.Is(err, context.Canceled) {
@@ -321,11 +347,25 @@ func botIsContextLimitError(err error) bool {
 	return false
 }
 
+// warnToolCallAnomalies 上报流式聚合里的工具调用异常（INT-139 R12）：
+// 为缺 id 的调用合成平台 id、丢弃缺 name 的调用。两者都必须可观测——
+// 静默丢弃会让一次模型意图彻底消失、本轮无结果且无人知晓。
+func (s *BotService) warnToolCallAnomalies(reply *botModelReply, fields ...zap.Field) {
+	if reply == nil || (reply.SynthesizedToolCallIDs == 0 && reply.DroppedToolCalls == 0) {
+		return
+	}
+	s.logger.Warn("流式工具调用存在异常片段",
+		append(fields,
+			zap.Int("synthesized_ids", reply.SynthesizedToolCallIDs),
+			zap.Int("dropped_no_name", reply.DroppedToolCalls))...)
+}
+
 // botProbeErrText 截断上游错误文本（错误不透传密钥，也不整段透传响应体）。
 func botProbeErrText(err error) string {
 	msg := err.Error()
-	if len(msg) > 300 {
-		msg = msg[:300]
+	// 同 botErrMessage：按字符截断，不劈多字节字符（INT-139 R7）。
+	if rs := []rune(msg); len(rs) > 300 {
+		msg = string(rs[:300])
 	}
 	return msg
 }

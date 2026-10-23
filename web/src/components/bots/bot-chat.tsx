@@ -11,7 +11,7 @@ import { cn } from "@/lib/utils";
 import { BotBackgroundCalls } from "./bot-background-calls";
 import { BotComposer } from "./bot-composer";
 import { BotMessageView } from "./bot-message";
-import { BotMetrics } from "./bot-metrics";
+import { BotMetrics, formatCostEstimate } from "./bot-metrics";
 import { BotTypingIndicator } from "./bot-typing-indicator";
 import { botActionErrorText } from "./bot-tool-card";
 
@@ -176,11 +176,34 @@ export function BotChat({ botId }: { botId: string }) {
                 新消息将在安全点交给机器人
               </span>
             )}
-            {chat.activeRun?.usage_complete && chat.activeRun.total_tokens != null && (
-              <span className="ml-auto text-xs text-muted-foreground">
-                {chat.activeRun.total_tokens} tokens
-              </span>
-            )}
+            {(() => {
+              const r = chat.activeRun;
+              if (r == null) return null;
+              // 成本与 token 各自独立成段：全部请求为已计价失败的 run 没有
+              // usage_complete 也照常显示「本次 ≈$x」（与 schedule 运行列表
+              // 同口径，INT-139 云端复审）。
+              const tokens =
+                r.usage_complete && r.total_tokens != null
+                  ? `${r.total_tokens} tokens`
+                  : null;
+              const cost =
+                r.cost_estimate != null
+                  ? `本次 ≈${formatCostEstimate(r.cost_estimate)}`
+                  : null;
+              if (tokens == null && cost == null) return null;
+              return (
+                <span
+                  className="ml-auto text-xs text-muted-foreground"
+                  title={
+                    cost != null
+                      ? "成本按内置目录单价估算，仅供参考；无价模型不显示"
+                      : undefined
+                  }
+                >
+                  {[tokens, cost].filter(Boolean).join(" · ")}
+                </span>
+              );
+            })()}
             <Button
               type="button"
               size="sm"

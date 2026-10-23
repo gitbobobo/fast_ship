@@ -29,7 +29,15 @@ const (
 	botModelErrModelNotFound  = "model_not_found"
 	botModelErrStreamTimeout  = "model_stream_timeout"
 	botModelErrRequestFailed  = "model_request_failed"
+	// botModelErrToolCallsDropped：一轮的全部工具调用都缺 name 被丢弃且
+	// 无正文——上游确实回了东西但整段无法解释。属于终态失败而非「空输出
+	// 正常完成」，否则时间线会留一条空助手回合（INT-139 云端复审）。
+	botModelErrToolCallsDropped = "model_tool_calls_dropped"
 )
+
+// errBotToolCallsDropped 是缺名工具调用吞掉整轮输出时的合成流错误。
+// 不进入重试名单：上游已就此计费，畸形 delta 多半复发，重试是再扣一次费。
+var errBotToolCallsDropped = errors.New("模型返回的工具调用缺少名称，本轮已全部丢弃")
 
 // botModelActionAIProviders 是前端动作标识：跳到 AI 提供商设置页。
 const botModelActionAIProviders = "ai_providers_settings"
@@ -79,6 +87,13 @@ func botClassifyModelError(err error) botModelErrorInfo {
 	var timeout *botStreamTimeoutError
 	if errors.As(err, &timeout) {
 		return botModelErrorInfo{Code: botModelErrStreamTimeout, Message: timeout.Error(), Detail: timeout.Error()}
+	}
+	if errors.Is(err, errBotToolCallsDropped) {
+		return botModelErrorInfo{
+			Code:    botModelErrToolCallsDropped,
+			Message: errBotToolCallsDropped.Error(),
+			Detail:  errBotToolCallsDropped.Error(),
+		}
 	}
 
 	var apiErr *openai.Error

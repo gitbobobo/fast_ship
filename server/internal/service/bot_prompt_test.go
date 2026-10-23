@@ -18,8 +18,8 @@ import (
 // 在后，可以覆盖默认语气。它替代了 INT-122 的「对话风格」段，规则 8/9/13 的
 // 「告知/汇报」统一改为「简要说明结果」，升级通知限定为内部信息。
 func TestBotSystemPromptStyleSection(t *testing.T) {
-	if botPlatformPromptVersion != 11 {
-		t.Fatalf("提示词版本应递增到 11: %d", botPlatformPromptVersion)
+	if botPlatformPromptVersion != 12 {
+		t.Fatalf("提示词版本应递增到 12: %d", botPlatformPromptVersion)
 	}
 	if botStylePromptVersion != 9 {
 		t.Fatalf("说话方式版本应为 9: %d", botStylePromptVersion)
@@ -45,9 +45,9 @@ func TestBotSystemPromptStyleSection(t *testing.T) {
 			t.Fatalf("默认人设不宜再出现旧句式 %q", gone)
 		}
 	}
-	// 规则 8/9/13 的告知语义统一为「简要说明结果」。
+	// 规则 9/13 的告知语义统一为「简要说明结果」；规则 8 的任务名告知
+	// 条款随 INT-139 精简移出前缀，归 fs_schedule 工具描述（仍钉住）。
 	for _, kw := range []string{
-		"用一句中文说明任务名与执行时间",
 		"记忆写入成功后用一句话说明记住了什么",
 		"并简要说明结果",
 		"恢复后继续核实并说明结果",
@@ -55,6 +55,15 @@ func TestBotSystemPromptStyleSection(t *testing.T) {
 		if !strings.Contains(full, kw) {
 			t.Fatalf("规则文案缺少关键词 %q", kw)
 		}
+	}
+	schedDesc := ""
+	for _, tool := range botToolRegistryV10() {
+		if tool.Name == "fs_schedule" {
+			schedDesc = tool.Description
+		}
+	}
+	if !strings.Contains(schedDesc, "告知用户任务名与执行时间") {
+		t.Fatalf("fs_schedule 工具描述应保留「创建/修改后告知任务名与执行时间」: %q", schedDesc)
 	}
 	if !strings.Contains(full, "升级通知属于内部信息") {
 		t.Fatalf("规则 14 应把升级通知限定为内部信息")

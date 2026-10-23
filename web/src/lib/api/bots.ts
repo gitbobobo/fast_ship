@@ -177,6 +177,10 @@ export interface BotRun {
   total_tokens?: number | null;
   cached_tokens?: number | null;
   usage_complete?: boolean;
+  /** 已计价请求的成本累计（USD）；目录无价/缺 usage 时为 null，缺失 ≠ 0，整项隐藏（INT-139）。 */
+  cost_estimate?: number | null;
+  /** 计价来源（catalog）；cost_estimate 为 null 时同 null。 */
+  cost_source?: string | null;
   error_code?: string | null;
   error_message?: string | null;
   /** 可操作失败的动作提示；仅 run_error 事件携带，REST 快照缺省。 */
