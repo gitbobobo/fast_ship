@@ -1,8 +1,8 @@
 package service
 
-// INT-155：压缩标识清单的工具调用状态必须经批量查询获得——planCompaction
-// 预载后整轮压缩（前置估算、输出预算、摘要成功后的重建）不再点查
-// bot_tool_calls；清单内容与逐条 FindByID 的口径一致。
+// INT-155：压缩标识清单的工具调用状态经批量查询获得——每次清单构建一次
+// IN 查询取回全部 call_id，替代逐条 FindByID。状态按构建时点取库内值：
+// 摘要请求期间 running→终态的流转要在重建的清单中立即可见（云端复审 P2）。
 
 import (
 	"context"
@@ -61,8 +61,9 @@ func TestBotCompactionManifestBatchLoadsCallStatus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("plan: %v", err)
 	}
-	if *reads != 1 {
-		t.Fatalf("planCompaction 应只发一次 bot_tool_calls 批量查询，实得 %d", *reads)
+	// 账本没有 tool_reply 引用，折叠装载不产生 bot_tool_calls 查询。
+	if *reads != 0 {
+		t.Fatalf("planCompaction 不应查 bot_tool_calls，实得 %d", *reads)
 	}
 
 	manifest := env.bots.buildIdentifierManifest(plan)
@@ -80,17 +81,24 @@ func TestBotCompactionManifestBatchLoadsCallStatus(t *testing.T) {
 		t.Fatalf("调用行应带声明消息的 seq=%d:\n%s", decl.Seq, manifest)
 	}
 	if *reads != 1 {
-		t.Fatalf("清单构建不应再查 bot_tool_calls，实得 %d", *reads)
+		t.Fatalf("一次清单构建应只发一次批量查询，实得 %d", *reads)
 	}
-	// 同轮第二次构建（摘要成功后重建）同样命中缓存。
-	_ = env.bots.buildIdentifierManifest(plan)
-	if *reads != 1 {
-		t.Fatalf("同轮重复构建不应重查 bot_tool_calls，实得 %d", *reads)
+
+	// 两次构建之间状态流转立即可见（不沿用首次构建的快照）。
+	env.db.Model(&model.BotToolCall{}).Where("id = ?", runningID).
+		Update("status", model.BotCallStatusSucceeded)
+	manifest2 := env.bots.buildIdentifierManifest(plan)
+	if !strings.Contains(manifest2, "- call:"+runningID+" fs_issue/list status=succeeded") {
+		t.Fatalf("重建清单应反映最新状态:\n%s", manifest2)
+	}
+	if *reads != 2 {
+		t.Fatalf("第二次构建应再发一次批量查询，实得 %d", *reads)
 	}
 }
 
-// 手工构造的 plan（无 Calls 预载）退化为一次批量补齐，而不是逐条点查。
-func TestBotPendingCallSnapshotLazyBatch(t *testing.T) {
+// 手工构造的 plan（无账本查询预载）同样一次批量取回；两次构建各查一次，
+// 状态按构建时点的库内值出。
+func TestBotPendingCallSnapshotBatchPerBuild(t *testing.T) {
 	env := setupBotTestEnv(t)
 	userID := createBotTestUser(t, env.db, "int155lazy")
 	bot := env.createBot(t, userID)
@@ -106,22 +114,27 @@ func TestBotPendingCallSnapshotLazyBatch(t *testing.T) {
 	reads := botToolCallReadProbe(t, env)
 	lines := env.bots.pendingCallSnapshot(plan)
 	if *reads != 1 {
-		t.Fatalf("缺预载时应一次批量补齐，实查 %d 次", *reads)
+		t.Fatalf("应一次批量取回，实查 %d 次", *reads)
 	}
 	joined := strings.Join(lines, "\n")
 	if !strings.Contains(joined, "- call:"+callID+" fs_issue/list status=succeeded") ||
 		!strings.Contains(joined, "- call:call-missing fs_issue/list status=unknown") {
 		t.Fatalf("状态行不符: %s", joined)
 	}
-	// 缺失 id 已标记为「查过无此行」，再次构建不再查。
-	_ = env.bots.pendingCallSnapshot(plan)
-	if *reads != 1 {
-		t.Fatalf("缺失 id 不应被重查，实得 %d", *reads)
+	env.db.Model(&model.BotToolCall{}).Where("id = ?", callID).
+		Update("status", model.BotCallStatusCancelled)
+	lines2 := env.bots.pendingCallSnapshot(plan)
+	if *reads != 2 {
+		t.Fatalf("第二次构建应再查一次，实得 %d", *reads)
+	}
+	if !strings.Contains(strings.Join(lines2, "\n"), "- call:"+callID+" fs_issue/list status=cancelled") {
+		t.Fatalf("第二次构建应取到最新状态: %s", strings.Join(lines2, "\n"))
 	}
 }
 
-// 完整压缩周期端到端：一轮内 bot_tool_calls 只有 planCompaction 的一次批量
-// 查询（前置估算、输出预算、摘要成功后重建清单均命中缓存）。
+// 完整压缩周期端到端：一轮内 bot_tool_calls 的查询 = planCompaction 折叠
+// 装载 1 次 + 每次清单构建 1 次（本轮前置估算/输出预算/摘要后重建共 3 次），
+// 与引用数量无关——旧实现同样的路径是 3×T 次点查。
 func TestBotCompactionCycleSingleCallQuery(t *testing.T) {
 	env := setupBotTestEnv(t, archiveAndSummaryTurns("压缩后的摘要")...)
 	env.fake.strict = true
@@ -154,7 +167,7 @@ func TestBotCompactionCycleSingleCallQuery(t *testing.T) {
 	if !out.Published {
 		t.Fatalf("应正常发布: %+v", out)
 	}
-	if *reads != 1 {
-		t.Fatalf("一轮压缩对 bot_tool_calls 应只有一次批量查询，实得 %d", *reads)
+	if *reads != 4 {
+		t.Fatalf("一轮压缩对 bot_tool_calls 应为 1 次装载 + 3 次清单构建 = 4 次批量查询，实得 %d", *reads)
 	}
 }

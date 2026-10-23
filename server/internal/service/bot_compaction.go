@@ -129,10 +129,6 @@ type botCompactionPlan struct {
 	NeedSummary         bool
 	ToolsetTo           int64
 	Run                 *model.BotRun
-	// Calls 是本轮压缩预载的工具调用（键覆盖 AllRows 引用的全部 call_id，
-	// 已查无此行的键值为 nil）。pendingCallSnapshot 的逐条点查并入这里，
-	// 同轮多次构建标识清单共用同一份结果（INT-155）。
-	Calls map[string]*model.BotToolCall
 }
 
 func botFloorRatio(n int64, ratio float64) int64 {
@@ -658,7 +654,7 @@ func (s *BotService) planCompaction(bot *model.Bot, run *model.BotRun, reason mo
 		FoldedAdded: foldedAdded, FoldedChars: foldedCleared, ProtectStartSeq: cut.ProtectStartSeq,
 		WindowTokens: window, TriggerTokens: trigger, GoalTokens: goal,
 		BeforeTokens: before, AfterFoldTokens: afterFold, NeedSummary: needSummary,
-		ToolsetTo: botToolsetVersion, Run: run, Calls: calls,
+		ToolsetTo: botToolsetVersion, Run: run,
 	}, nil
 }
 
@@ -691,39 +687,27 @@ func botFoldEligible(content *botToolReplyContent, call *model.BotToolCall) bool
 	return true
 }
 
-// loadCallsForRows 用一次 IN 查询取出账本消息引用的全部工具调用：
-// tool_reply 的 call_id 与 assistant 声明的 tool_calls 同属一批。
 func (s *BotService) loadCallsForRows(rows []model.BotMessage) map[string]*model.BotToolCall {
 	ids := make([]string, 0, 8)
 	seen := map[string]bool{}
-	addID := func(id string) {
-		if id != "" && !seen[id] {
-			seen[id] = true
-			ids = append(ids, id)
-		}
-	}
 	for i := range rows {
-		switch rows[i].Kind {
-		case model.BotMessageKindToolReply:
-			var c botToolReplyContent
-			if json.Unmarshal([]byte(rows[i].ContentJSON), &c) == nil {
-				addID(c.CallID)
-			}
-		case model.BotMessageKindAssistant:
-			var c botAssistantContent
-			if json.Unmarshal([]byte(rows[i].ContentJSON), &c) != nil {
-				continue
-			}
-			for _, tc := range c.ToolCalls {
-				addID(tc.CallID)
-			}
+		if rows[i].Kind != model.BotMessageKindToolReply {
+			continue
+		}
+		var c botToolReplyContent
+		if json.Unmarshal([]byte(rows[i].ContentJSON), &c) != nil || c.CallID == "" {
+			continue
+		}
+		if !seen[c.CallID] {
+			seen[c.CallID] = true
+			ids = append(ids, c.CallID)
 		}
 	}
 	return s.loadCallsByIDs(ids)
 }
 
-// loadCallsByIDs 批量装载调用行；查不到的 id 也占一个键（值为 nil），
-// 调用方凭「键在不在」区分已查无此行与未查过，同轮压缩不重查。
+// loadCallsByIDs 用一次 IN 查询批量装载调用行；查不到的 id 也占一个键
+// （值为 nil），调用方凭「键在不在」区分已查无此行与未查过。
 func (s *BotService) loadCallsByIDs(ids []string) map[string]*model.BotToolCall {
 	out := map[string]*model.BotToolCall{}
 	if len(ids) == 0 {
@@ -1627,16 +1611,17 @@ func (s *BotService) buildIdentifierManifest(plan *botCompactionPlan) string {
 	return strings.Join(lines, "\n")
 }
 
-// pendingCallSnapshot 生成账本中引用过的调用状态行。状态从 plan.Calls 取
-// （planCompaction 已批量预载）；手工构造的 plan 缺条目时合并成一次批量
-// 查询补进缓存，整轮压缩不再逐条 FindByID（INT-155）。
+// pendingCallSnapshot 生成账本中引用过的调用状态行。一轮压缩会多次构建清单
+// （前置估算、输出预算、摘要成功后重建），状态须取构建时点的库内值——摘要
+// 请求耗时长，期间 running→终态的流转要反映进重建的清单。每次构建一次
+// IN 批量查询取回全部 call_id，替代逐条 FindByID（INT-155）。
 func (s *BotService) pendingCallSnapshot(plan *botCompactionPlan) []string {
 	type entry struct {
 		tc  botAssistantToolCall
 		seq int64
 	}
 	var entries []entry
-	var missing []string
+	var ids []string
 	seen := map[string]bool{}
 	for i := range plan.AllRows {
 		row := &plan.AllRows[i]
@@ -1653,23 +1638,14 @@ func (s *BotService) pendingCallSnapshot(plan *botCompactionPlan) []string {
 			}
 			seen[tc.CallID] = true
 			entries = append(entries, entry{tc: tc, seq: row.Seq})
-			if _, ok := plan.Calls[tc.CallID]; !ok {
-				missing = append(missing, tc.CallID)
-			}
+			ids = append(ids, tc.CallID)
 		}
 	}
-	if len(missing) > 0 {
-		if plan.Calls == nil {
-			plan.Calls = map[string]*model.BotToolCall{}
-		}
-		for id, call := range s.loadCallsByIDs(missing) {
-			plan.Calls[id] = call
-		}
-	}
+	calls := s.loadCallsByIDs(ids)
 	var lines []string
 	for _, e := range entries {
 		st := "unknown"
-		if call := plan.Calls[e.tc.CallID]; call != nil {
+		if call := calls[e.tc.CallID]; call != nil {
 			st = string(call.Status)
 		}
 		lines = append(lines, fmt.Sprintf("- call:%s %s/%s status=%s (seq %d)", e.tc.CallID, e.tc.ToolName, e.tc.Action, st, e.seq))
