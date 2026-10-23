@@ -1375,6 +1375,26 @@ null），给三栏工作台的左侧列表当预览列。语义与约束：
   之前保持 system。定时会话无前缀缓存顾虑，恒按 user 投影。旧消息最终随
   摘要归档离开投影（投影从 `summary_through_seq` 起读），不可变账本不回写。
 
+## 聊天页降噪与入口记忆（INT-157）
+
+纯前端改动，账本与协议不变；时间线只留用户与机器人的对话正文。
+
+- **中间回合整体隐藏**：带 `tool_calls` 的 assistant 消息（正文只是
+  调用前旁白）连同工具卡都不再渲染——此前的「过程」折叠入口一并移除。
+  唯一保留的是 `pending_confirmation && requires_confirmation` 的确认卡
+  （用户唯一的批准入口）。流式草稿不受影响，仍直出气泡。消息内无可见
+  内容时 `BotMessageView` 返回 null，不留空块。后台调用面板
+  （`BotBackgroundCalls`）保留——它是在途调用的取消入口，不是时间线噪音。
+- **定时任务事件一行居中**：`schedule_event` 渲染为居中一行
+  「定时任务「name」<状态>」，summary/error 不再内联；有详情时行可点，
+  弹窗内 summary 走 `BotMarkdown`、error 以 destructive 样式展示。
+  无摘要无错误的事件行保持不可点（跳过/静默）。模型可写文本（task_name/
+  summary/error）仍经 bidiSafeText + `unicode-bidi:isolate` 处理。
+- **侧边栏直跳上次聊天**：`fast-ship-last-bot`（zustand persist）记录
+  最近打开的 botId，「机器人」菜单项 href 变成 `/bots/<lastBotId>`；
+  工作台下 `/bots` 列表仍可从页内「机器人」返回钮进入。机器人 404
+  （已删除）时清掉记录，删除成功后同样清空，避免入口反复跳进错误页。
+
 ## 边界与决策
 
 - **身份**：机器人继承归属人身份（userID 恒取机器人归属人），全部端点仅

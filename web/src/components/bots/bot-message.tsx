@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { CheckCircle2, ChevronDown, ChevronUp, XCircle } from "lucide-react";
+import { CheckCircle2, XCircle } from "lucide-react";
 import type {
   BotCall,
   BotCallDecision,
@@ -9,10 +9,15 @@ import type {
 import { botScheduleRunStatusLabel } from "@/lib/api/bots";
 import { scheduleResultLine } from "@/lib/bots/schedule-result-summary";
 import { bidiSafeText } from "@/lib/bots/tool-labels";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 import { BotConfirmationCard } from "./bot-confirmation-card";
 import { BotMarkdown } from "./bot-markdown";
-import { BotToolCard } from "./bot-tool-card";
 
 const DECISION_LABELS: Record<string, string> = {
   approve: "已批准",
@@ -21,51 +26,81 @@ const DECISION_LABELS: Record<string, string> = {
 };
 
 /**
- * 中间回合的过程旁白：带 tool_calls 的 assistant 正文只是调用前的
- * 碎碎念，不是最终答复——折叠成一行「过程」入口默认收起，展开后用
- * 安静的 muted 小字呈现，与最终回复的气泡拉开层级。折叠状态只留在
- * 组件本地，不持久化。
+ * 定时任务运行事件（INT-157）：一行居中「定时任务「name」已完成」，
+ * 不再把整段汇报正文糊在时间线上——有汇报/错误时行可点，弹窗里
+ * 用 markdown 渲染详情；无详情（静默/跳过）就是普通事件行。
+ * task_name/summary/error 是模型可写数据，渲染前剥双向/控制字符并隔离。
  */
-function ProcessNarration({ text }: { text: string }) {
+function ScheduleEventView({ message }: { message: BotMessage }) {
   const [open, setOpen] = useState(false);
+  const failed = message.content.status === "failed";
+  const statusLabel =
+    botScheduleRunStatusLabel(message.content.status as BotScheduleRunStatus) ??
+    message.content.status ??
+    "";
+  const taskName =
+    message.content.task_name || message.content.task_id || "未命名任务";
+  const summary = message.content.summary ?? "";
+  const errorCode = message.content.error_code;
+  const errorMessage = message.content.error_message;
+  const hasDetail = Boolean(summary || errorMessage);
+  const line = (
+    <>
+      定时任务「
+      <span className="[unicode-bidi:isolate]">{bidiSafeText(taskName)}</span>
+      」{statusLabel}
+    </>
+  );
   return (
-    <div>
-      <button
-        type="button"
-        aria-expanded={open}
-        onClick={() => setOpen((v) => !v)}
-        className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
-      >
-        {open ? (
-          <ChevronUp className="h-3 w-3" />
-        ) : (
-          <ChevronDown className="h-3 w-3" />
-        )}
-        过程
-      </button>
-      {open && (
-        <div className="mt-1 border-l-2 pl-2.5 text-xs text-muted-foreground">
-          <BotMarkdown text={text} />
-        </div>
+    <p
+      className={cn(
+        "text-center text-xs text-muted-foreground",
+        failed && "text-destructive",
       )}
-    </div>
+    >
+      {hasDetail ? (
+        <button
+          type="button"
+          data-testid="bot-schedule-event-detail"
+          className="underline decoration-dotted underline-offset-2 hover:text-foreground"
+          onClick={() => setOpen(true)}
+        >
+          {line}
+        </button>
+      ) : (
+        line
+      )}
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>{line}</DialogTitle>
+          </DialogHeader>
+          {(errorCode || errorMessage) && (
+            <p className="rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive [unicode-bidi:isolate]">
+              {errorCode ? `${bidiSafeText(errorCode)}: ` : ""}
+              {bidiSafeText(errorMessage ?? "")}
+            </p>
+          )}
+          {summary && <BotMarkdown text={summary} />}
+        </DialogContent>
+      </Dialog>
+    </p>
   );
 }
 
 /**
- * 主线单条消息：用户右对齐、机器人左对齐；assistant 消息内联渲染
- * 工具卡（待确认时替换为确认卡）。后台结果、批准决定与生命周期
- * 事件是平台投影出的结构性消息，用安静的样式与对话正文区分。
+ * 主线单条消息：用户右对齐、机器人左对齐；assistant 消息不再渲染
+ * 工具卡与过程旁白（INT-157），待确认调用仍给出确认卡（批准入口）。
+ * 后台结果、批准决定与生命周期事件是平台投影出的结构性消息，用
+ * 安静的样式与对话正文区分。
  */
 export function BotMessageView({
-  botId,
   message,
   draft = false,
   calls,
   busyCallId,
   callActionError,
   onDecide,
-  onCancelCall,
 }: {
   botId: string;
   message: BotMessage;
@@ -229,44 +264,7 @@ export function BotMessageView({
   }
 
   if (message.kind === "schedule_event") {
-    // 定时任务运行事件是平台投影出的结构性消息：安静的居中事件行，
-    // 不是机器人的回复气泡。状态文案与「定时任务」区同一套标签。
-    const failed = message.content.status === "failed";
-    const statusLabel =
-      botScheduleRunStatusLabel(message.content.status as BotScheduleRunStatus) ??
-      message.content.status ??
-      "";
-    // task_name 是模型可写数据（建/改任务时只 trim+限长，不过滤字符），
-    // summary/error_message 同理——渲染前一律剥双向/控制字符并隔离，
-    // 与确认卡、后台结果同口径（bidiSafeText + unicode-bidi:isolate）。
-    return (
-      <p
-        className={cn(
-          "text-center text-xs text-muted-foreground",
-          failed && "text-destructive",
-        )}
-      >
-        定时任务「
-        <span className="[unicode-bidi:isolate]">
-          {bidiSafeText(
-            message.content.task_name || message.content.task_id || "未命名任务",
-          )}
-        </span>
-        」
-        {statusLabel}
-        {message.content.summary && (
-          <span className="[unicode-bidi:isolate]">
-            {`：${bidiSafeText(message.content.summary)}`}
-          </span>
-        )}
-        {message.content.error_message && (
-          <span className="block [unicode-bidi:isolate]">
-            {message.content.error_code ? `${bidiSafeText(message.content.error_code)}: ` : ""}
-            {bidiSafeText(message.content.error_message)}
-          </span>
-        )}
-      </p>
-    );
+    return <ScheduleEventView message={message} />;
   }
 
   if (message.kind === "tool_reply") {
@@ -278,54 +276,42 @@ export function BotMessageView({
     );
   }
 
-  // assistant：带 tool_calls 的是中间回合，正文只是过程旁白，折叠成
-  // 「过程」入口，把视觉重心留给最终回复；工具卡与确认卡是操作入口，
-  // 必须在折叠之外始终可见。草稿（draft）保持流式气泡不折叠。
+  // assistant：带 tool_calls 的中间回合整体隐藏（INT-157）——正文只是
+  // 调用前的过程旁白，工具卡是执行噪音；唯一保留的是待确认调用的
+  // 确认卡，那是用户唯一的批准入口。流式草稿照旧直出气泡。
   const toolCalls = message.content.tool_calls ?? [];
+  const pendingConfirmations = toolCalls.flatMap((tc) => {
+    const call = calls.find((c) => c.id === tc.call_id);
+    return call?.status === "pending_confirmation" && call.requires_confirmation
+      ? [call]
+      : [];
+  });
+  const showText = draft || toolCalls.length === 0;
+  if (!showText && pendingConfirmations.length === 0) return null;
   return (
     <div className="space-y-2">
-      {!draft && toolCalls.length > 0 && text ? (
-        <ProcessNarration text={text} />
-      ) : (
-        (text || draft) && (
-          <div
-            className={cn(
-              "inline-block max-w-[85%] min-w-0 rounded-2xl rounded-bl-sm bg-muted px-3.5 py-2 text-sm",
-              draft && "opacity-80",
-            )}
-          >
-            <BotMarkdown text={text ?? ""} streaming={draft} />
-            {draft && (
-              <span className="ml-0.5 inline-block h-3.5 w-1.5 animate-pulse rounded-sm bg-foreground/60 align-middle" />
-            )}
-          </div>
-        )
+      {showText && (text || draft) && (
+        <div
+          className={cn(
+            "inline-block max-w-[85%] min-w-0 rounded-2xl rounded-bl-sm bg-muted px-3.5 py-2 text-sm",
+            draft && "opacity-80",
+          )}
+        >
+          <BotMarkdown text={text ?? ""} streaming={draft} />
+          {draft && (
+            <span className="ml-0.5 inline-block h-3.5 w-1.5 animate-pulse rounded-sm bg-foreground/60 align-middle" />
+          )}
+        </div>
       )}
-      {toolCalls.map((tc) => {
-        const call = calls.find((c) => c.id === tc.call_id);
-        if (call?.status === "pending_confirmation" && call.requires_confirmation) {
-          return (
-            <BotConfirmationCard
-              key={tc.call_id}
-              call={call}
-              busy={busyCallId === call.id}
-              error={callActionError}
-              onDecide={onDecide}
-            />
-          );
-        }
-        return (
-          <BotToolCard
-            key={tc.call_id}
-            botId={botId}
-            call={call}
-            fallbackName={tc.tool_name}
-            fallbackAction={tc.action}
-            onCancel={onCancelCall}
-            cancelling={busyCallId === tc.call_id}
-          />
-        );
-      })}
+      {pendingConfirmations.map((call) => (
+        <BotConfirmationCard
+          key={call.id}
+          call={call}
+          busy={busyCallId === call.id}
+          error={callActionError}
+          onDecide={onDecide}
+        />
+      ))}
     </div>
   );
 }

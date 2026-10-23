@@ -26,6 +26,7 @@ import {
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
 import { FastShipLogo } from "@/components/ui/fast-ship-logo";
 import { UserNav } from "@/components/user-nav";
+import { useLastBotStore } from "@/lib/store/last-bot-store";
 import { useSidebarStore } from "@/lib/store/sidebar-store";
 import { cn } from "@/lib/utils";
 
@@ -173,6 +174,8 @@ function NavContent({
   onNavigate?: () => void;
 }) {
   const unread = useUnreadNotificationCount().data ?? 0;
+  // 「机器人」菜单项直跳上次打开的聊天（INT-157）；没打开过就进列表。
+  const lastBotId = useLastBotStore((state) => state.lastBotId);
 
   return (
     <div className="flex h-full flex-col">
@@ -198,7 +201,13 @@ function NavContent({
         {navItems.map((item) => (
           <SidebarNavItem
             key={item.to}
-            item={item}
+            item={{
+              ...item,
+              to:
+                item.to === "/bots" && lastBotId
+                  ? `/bots/${lastBotId}`
+                  : item.to,
+            }}
             collapsed={!!collapsed}
             onNavigate={onNavigate}
             unread={item.to === "/notifications" ? unread : 0}
