@@ -178,6 +178,9 @@ const PARAM_LABELS: Record<string, string> = {
   settled: "已收合",
   include_archived: "含归档",
   updated_after: "更新晚于",
+  model_selection: "模型",
+  runtime_mode: "运行模式",
+  workspace: "工作区",
 };
 
 // ID 型参数：展示为前 8 位短标识，完整值进 title。
@@ -222,6 +225,9 @@ const TOOL_CHIP_PARAMS: Record<string, string[]> = {
     "project_id",
     "text",
     "title",
+    "model_selection",
+    "runtime_mode",
+    "workspace",
     "status",
     "settled",
     "include_archived",

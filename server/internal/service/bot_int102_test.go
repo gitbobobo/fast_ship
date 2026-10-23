@@ -412,9 +412,9 @@ func TestBotCompactionSafeCutAndFold(t *testing.T) {
 	userID := createBotTestUser(t, env.db, "compact")
 	bot := env.createBot(t, userID)
 	botRow, _ := env.bots.bots.Get(bot.ID)
-	// 合并 INT-136 + INT-148 前缀后重定标：实测 F=7897，F+256=8153，
-	// 旧 T=8100 不可达，11200 的 T=8400 保留安全切点与折叠的原断言。
-	env.cfg.Bots.Context.WindowTokens = 11200
+	// INT-159 v11 前缀后重定标：实测 F≈8584，F+256≈8840，
+	// 旧 T=8400 不可达，12400 的 T=9300 保留安全切点与折叠的原断言。
+	env.cfg.Bots.Context.WindowTokens = 12400
 
 	seedBotUserMessage(t, env, bot.ID, "最早的问题")
 	bigReply := strings.Repeat("很长的工具结果", 400)

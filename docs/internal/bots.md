@@ -141,8 +141,13 @@ v10（INT-136）在 v9 上只改 `fs_schedule` 的工具/动作描述（说明�
 动作清单与参数结构体不变；v11（INT-156 巡检降本）在 v10 上只改 `fs_thread`/
 `fs_schedule` 的工具/动作描述——`list` 每项自带 `activity` 与 `last_reply`、
 定时任务运行时上下文直接带 `task_state`、`state_set` 相同内容短路回
-`unchanged`，动作清单与参数结构体不变。INT-148 的线程结算与 INT-136 的确认、围栏是独立约束，
-同时保留。已发布版本（v1–v10）的注册表都是**冻结副本**——新版本变化不得改写旧版本的字节
+`unchanged`，动作清单与参数结构体不变；v12（INT-159）演进 `fs_thread`——`launch` 新增
+可选执行配置 `model_selection`/`runtime_mode`/`workspace`（省略时模型沿用项目默认、runtime_mode 为 full-access、workspace 用项目主检出），
+`composer_options` 返回归一化的 `providers` 模型目录与 `not_settable`
+不可设置项清单，list/get 摘要回显 `provider`/`model`/`branch`；
+非 launch 动作携带这三个字段会被拒绝而不是静默忽略（`botActionRules`）。
+INT-148 的线程结算与 INT-136 的确认、围栏是独立约束，
+同时保留。已发布版本（v1–v11）的注册表都是**冻结副本**——新版本变化不得改写旧版本的字节
 （存量会话的 tools_hash 失稳即前缀失稳；v1–v11 的 hash 逐字节钉死在测试基线里）。版本只在 run 入口或压缩边界推进（重建平台规则并递增 prompt_revision）：
 run 入口的 `activateBotPrompt` 在一个短事务里读行、
 判 stale、按**该行**人设重建提示词并写回，主线与定时任务会话都适用（在冻结
@@ -1027,6 +1032,28 @@ CAS 终结；running 记录取消并取消 context，worker 落唯一终态且
   optionalKey（`server.getConfig` 的 `environment.capabilities.threadSettlement`）：
   缺失或 false 时在派发前明确报 50202「该 T3 环境不支持线程结算（旧版本
   服务端）」，不向上游发出命令。
+- **launch 可指定执行配置（INT-159）**：`fs_thread launch` 新增可选
+  `model_selection`（`instance_id`/`model`/`options[{id,value}]`，形状与
+  `T3ModelSelection` 一致）、`runtime_mode`（`approval-required`/
+  `auto-accept-edits`/`auto`/`full-access`）、`workspace`（`type`/
+  `base_ref`/`branch`/`worktree_path`/`start_from_origin`，形状与
+  `T3ThreadWorkspace` 一致）；省略时不落任何字段，缺省各字段不同：
+  模型沿用项目默认（`createThread` 的 `defaultModelSelection` 兜底路径
+  不变）、`runtime_mode` 为 `full-access`、`workspace` 用项目主检出。
+  这些字段在受理侧（`botPrepareToolCall`，不产生待确认卡片）就校验：
+  `model_selection` 缺 `instance_id`/`model`、`runtime_mode` 非枚举值、
+  `workspace` 缺 `type` 或非枚举值、`existing_worktree` 缺
+  `worktree_path` 都直接报 invalid-params，不透给上游变成 RPC 失败。
+  取值目录由
+  `fs_thread composer_options` 提供：除原有 `projects`（含
+  `default_model_selection`）外新增 `providers`——把上游 `config.providers`
+  归一化成蛇形（`instance_id`/`models[].slug`/`options[].id`/
+  `current_value`/`choices`），跳过停用/未安装/`unavailable` 的 provider
+  与缺 slug 的模型，机器人侧不硬编码模型清单；`not_settable` 如实列出
+  机器人不能指定的配置项（interaction_mode、附件、幂等身份）。这三个
+  字段只对 launch 合法：其余 fs_thread 动作携带会被 `botActionRules`
+  拒绝而不是静默忽略。list/get 的线程摘要回显 `provider`/`model`/`branch`
+  （`botSlimThreadSummary`），launch 后回读确认生效配置看这里。
 - **结果续读无损**：`fs_result.read` 把整个读取体控制在预算内（必要时收缩
   `content` 并迭代收敛），保证不会被通用截断再切一次——否则按 `next_offset`
   续读会跳过一段谁也没看过的内容。返回体带 `offset` / `end` / `next_offset`

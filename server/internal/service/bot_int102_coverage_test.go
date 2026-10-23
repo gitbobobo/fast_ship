@@ -315,9 +315,9 @@ func TestBotAutoCompaction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	// 合并 INT-136 + INT-148 前缀后重定标：实测 F=7926，F+256=8182，
-	// 旧窗口 10800 的 T=8100 不可达；11200 的 T=8400 保留摘要空间。
-	env.cfg.Bots.Context.WindowTokens = 11200
+	// INT-159 v11 前缀后重定标（wire +2402B≈+687tok）：实测 F≈8613，
+	// F+256≈8869；旧窗口 11200 的 T=8400 不可达，12400 的 T=9300 保留摘要空间。
+	env.cfg.Bots.Context.WindowTokens = 12400
 	// 归档输入是整段原文：本场景单个大工具结果（≈27k token）装不进主模型
 	// 11200 窗口的归档输入预算，auxModelRequest 发送关口会按 INT-115 拒绝这种
 	// 请求。归档模型配置成更大窗口的模型——这正是 ArchiveModel 的用法。
@@ -430,7 +430,7 @@ func TestBotSummaryPreservesIdentifiers(t *testing.T) {
 	env.fake.strict = true
 	userID := createBotTestUser(t, env.db, "ids")
 	bot := env.createBot(t, userID)
-	env.cfg.Bots.Context.WindowTokens = 11200 // 合并 INT-136 + INT-148 前缀后重定标：F=7924，F+256=8180，旧 T=8100。
+	env.cfg.Bots.Context.WindowTokens = 12400 // INT-159 v11 前缀后重定标：F≈8611，F+256≈8867，旧 T=8400 不可达。
 	uid := "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
 	seedBotUserMessage(t, env, bot.ID, "处理 Issue INT-102 和 "+uid)
 	args := `{"action":"read","thread_id":"thr_keep_me","issue_id":"iss_raw_Case"}`
@@ -470,7 +470,7 @@ func TestBotCompactionPreservesLedger(t *testing.T) {
 	env.fake.strict = true
 	userID := createBotTestUser(t, env.db, "ledger")
 	bot := env.createBot(t, userID)
-	env.cfg.Bots.Context.WindowTokens = 11200 // 合并 INT-136 + INT-148 前缀后重定标：F=7919，F+256=8175，旧 T=8100。
+	env.cfg.Bots.Context.WindowTokens = 12400 // INT-159 v11 前缀后重定标：F≈8606，F+256≈8862，旧 T=8400 不可达。
 	seedCompactableLedger(t, env, bot.ID, "账本保持")
 	var before []model.BotMessage
 	env.db.Where("bot_id = ?", bot.ID).Order("seq ASC").Find(&before)
@@ -506,7 +506,7 @@ func TestBotFoldedResultRead(t *testing.T) {
 	env.fake.strict = true
 	userID := createBotTestUser(t, env.db, "foldreal")
 	bot := env.createBot(t, userID)
-	env.cfg.Bots.Context.WindowTokens = 11200 // 合并 INT-136 + INT-148 前缀后重定标：F=7878，F+256=8134，旧 T=8100。
+	env.cfg.Bots.Context.WindowTokens = 12400 // INT-159 v11 前缀后重定标：F≈8565，F+256≈8821，旧 T=8400 不可达。
 	seedBotUserMessage(t, env, bot.ID, "q")
 	big := strings.Repeat("完整结果正文XY", 800)
 	_, tr := seedBotAssistantToolBlock(t, env, bot.ID, "call-real-fold", "fs_issue", big)
@@ -828,9 +828,9 @@ func TestBotFoldBatchThreshold(t *testing.T) {
 	env3.fake.strict = true
 	u3 := createBotTestUser(t, env3.db, "foldok")
 	bot3 := env3.createBot(t, u3)
-	// 合并 INT-136 + INT-148 前缀后重定标：实测 afterFold=7802 > 旧 G=7762，
-	// 23400 的 G=7897 才能继续验证「折叠已足够、不发摘要」。
-	env3.cfg.Bots.Context.WindowTokens = 23400
+	// INT-159 v11 前缀后重定标：实测 afterFold=8117 > 旧 G=7897，
+	// 24400 的 G=8235 才能继续验证「折叠已足够、不发摘要」。
+	env3.cfg.Bots.Context.WindowTokens = 24400
 	seedBotUserMessage(t, env3, bot3.ID, "old")
 	seedBotAssistantToolBlock(t, env3, bot3.ID, "huge", "fs_issue", strings.Repeat("很长的工具结果", 8000))
 	for i := 1; i <= 3; i++ {
@@ -1090,7 +1090,7 @@ func TestBotSummaryFailureFallback(t *testing.T) {
 	env.fake.strict = true
 	userID := createBotTestUser(t, env.db, "sumfail")
 	bot := env.createBot(t, userID)
-	env.cfg.Bots.Context.WindowTokens = 11200 // 合并 INT-136 + INT-148 前缀后重定标：F=7919，F+256=8175，旧 T=8100。
+	env.cfg.Bots.Context.WindowTokens = 12400 // INT-159 v11 前缀后重定标：F≈8606，F+256≈8862，旧 T=8400 不可达。
 	seedCompactableLedger(t, env, bot.ID, "失败回退")
 	botRow, _ := env.bots.bots.Get(bot.ID)
 	run := botFixtureRun(t, env, botRow)
@@ -1154,7 +1154,7 @@ func TestBotSummaryFailureFallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	envHTTP.cfg.Bots.Context.WindowTokens = 11200 // 合并 INT-136 + INT-148 前缀后重定标：与上面的截断失败场景共用 F=7919 的几何。
+	envHTTP.cfg.Bots.Context.WindowTokens = 12400 // INT-159 v11 前缀后重定标：与上面的截断失败场景共用 F≈8606 的几何。
 	seedCompactableLedger(t, envHTTP, b3.ID, "http失败")
 	row3, _ := envHTTP.bots.bots.Get(b3.ID)
 	run3 := botFixtureRun(t, envHTTP, row3)
@@ -1189,7 +1189,7 @@ func TestBotSummaryFailureFallback(t *testing.T) {
 	envEmpty.fake.strict = true
 	uE := createBotTestUser(t, envEmpty.db, "sumempty")
 	bE := envEmpty.createBot(t, uE)
-	envEmpty.cfg.Bots.Context.WindowTokens = 11200 // 合并 INT-136 + INT-148 前缀后重定标：与上面的截断失败场景共用 F=7919 的几何。
+	envEmpty.cfg.Bots.Context.WindowTokens = 12400 // INT-159 v11 前缀后重定标：与上面的截断失败场景共用 F≈8606 的几何。
 	seedCompactableLedger(t, envEmpty, bE.ID, "空输出")
 	rowE, _ := envEmpty.bots.bots.Get(bE.ID)
 	runE := botFixtureRun(t, envEmpty, rowE)
@@ -1351,9 +1351,9 @@ func TestBotMemorySnapshotFrozen(t *testing.T) {
 	if !strings.Contains(string(raw), "夜间写入不应刷新注入") {
 		t.Fatalf("服务重建后应加载最新快照")
 	}
-	// 合并 INT-136 + INT-148 前缀后重定标：实测 F=8021，F+256=8277，
-	// 旧窗口 11000 的 T=8250 不可达；11200 的 T=8400 可验证注入刷新。
-	env.cfg.Bots.Context.WindowTokens = 11200
+	// INT-159 v11 前缀后重定标：实测 F≈8708，F+256≈8964，
+	// 旧窗口 11200 的 T=8400 不可达；12400 的 T=9300 可验证注入刷新。
+	env.cfg.Bots.Context.WindowTokens = 12400
 	seedCompactableLedger(t, env, bot.ID, "压缩刷新")
 	botRow, _ = env.bots.bots.Get(bot.ID)
 	markHistoryConsumed(t, env, botRow, run)
@@ -1510,9 +1510,9 @@ func TestBotPreCompactionArchive(t *testing.T) {
 	env := setupBotTestEnv(t)
 	userID := createBotTestUser(t, env.db, "arch")
 	bot := env.createBot(t, userID)
-	// 合并 INT-136 + INT-148 前缀后重定标：实测 F=7919，F+256=8175，
-	// 旧 T=8100 不可达，11200 的 T=8400 保留归档与摘要路径。
-	env.cfg.Bots.Context.WindowTokens = 11200
+	// INT-159 v11 前缀后重定标：实测 F≈8606，F+256≈8862，
+	// 旧 T=8400 不可达，12400 的 T=9300 保留归档与摘要路径。
+	env.cfg.Bots.Context.WindowTokens = 12400
 	seedCompactableLedger(t, env, bot.ID, "用户叫 Bobo")
 	botRow, _ := env.bots.bots.Get(bot.ID)
 	markHistoryConsumed(t, env, botRow, nil)

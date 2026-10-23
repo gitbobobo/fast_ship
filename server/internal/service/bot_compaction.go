@@ -2145,6 +2145,9 @@ func botToolsetUserNote(from, to int64) string {
 	// 跨档升级逐档并列（INT-139 云端复审）：只报最高档会把中间档的用户
 	// 可感知变化吞掉（如 from=8→10 时 v9 线程能力）。
 	var parts []string
+	if to >= 12 && from < 12 {
+		parts = append(parts, "创建线程时可以指定模型等执行配置，线程列表和详情会显示实际生效的模型")
+	}
 	if to >= 11 && from < 11 {
 		parts = append(parts, "线程列表现在自带最近回复与运行活动摘要，巡检不用再逐个打开线程")
 	}
@@ -2161,6 +2164,15 @@ func botToolsetUserNote(from, to int64) string {
 }
 
 func botToolsetChangeNote(from, to int64) string {
+	// INT-159 执行配置（v12）：launch 可选配置与 composer_options 模型目录。
+	if to >= 12 && from < 12 {
+		note := "工具集已升级：fs_thread launch 新增可选执行配置——model_selection（instance_id/model/options[{id,value}]，取值用 composer_options 返回的 providers 清单）、runtime_mode、workspace，省略时模型沿用项目默认、runtime_mode 为 full-access、workspace 用项目主检出；composer_options 返回 projects（含 default_model_selection）、providers（按实例归一化的可用模型目录）与 not_settable（机器人不能指定的配置项）；list/get 的线程摘要新增 provider/model/branch 回显实际生效配置；这三个字段只对 launch 合法，其余动作携带会被拒绝"
+		if from < 11 {
+			// INT-159 的配置告知与 INT-156 的巡检告知互不替代，跨过 v11 时级联补发。
+			note += "；" + strings.TrimPrefix(botToolsetChangeNote(from, 11), "工具集已升级：")
+		}
+		return note
+	}
 	// INT-156 巡检降本（v11）：读取面与运行时上下文的省轮次语义。
 	if to >= 11 && from < 11 {
 		note := "工具集已升级：fs_thread list 每项自带 activity（运行活动摘要）与末条回复摘要 last_reply（300 字符截断；无助手回复省略，单条详情读不到时 detail_unavailable=true、读超时/预算耗尽被中止的标 detail_skipped=true），巡检不必再逐线程 get 只为看末条回复；fs_schedule 的运行时上下文直接带当前任务小状态 task_state，开局不必调 state_get；state_set 写入与当前完全相同的内容会回 unchanged、不产生变更（无变化就不要重复写）"

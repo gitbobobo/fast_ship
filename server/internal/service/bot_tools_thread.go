@@ -60,9 +60,15 @@ func (s *BotService) execThreadRead(ctx context.Context, call *model.BotToolCall
 		if err != nil {
 			return "", err
 		}
-		// 只透出启动器需要的项目与模型选择，不透传 T3 全量配置；项目标题来自
-		// 配对的 T3 服务/仓库，进围栏（INT-136）。
-		return botMarshalResult(map[string]interface{}{"projects": opts.Projects})
+		// 透出启动器需要的项目（含 default_model_selection）与归一化的模型
+		// 目录，不透传 T3 全量 config/settings；项目标题来自配对的 T3 服务/
+		// 仓库，进围栏（INT-136）。providers 供 launch 的 model_selection 直接
+		// 回填；not_settable 如实列出机器人不能指定的配置项（INT-159）。
+		return botMarshalResult(map[string]interface{}{
+			"projects":     opts.Projects,
+			"providers":    botSlimComposerProviders(opts.Config),
+			"not_settable": botThreadNotSettable,
+		})
 	case "workspace_options":
 		opts, err := s.threads.WorkspaceOptions(ctx, userID, args.EnvID, args.ProjectID, args.Query, args.Cursor)
 		if err != nil {
@@ -124,6 +130,10 @@ func (s *BotService) runThreadWrite(ctx context.Context, call *model.BotToolCall
 		}
 		if execCtx.ThreadID != "" {
 			req.ThreadId = &execCtx.ThreadID
+		}
+		// 可选执行配置（INT-159）：未指定时不落任何字段，沿用项目默认。
+		if err := botThreadLaunchConfig(&args, req); err != nil {
+			return nil, err
 		}
 		// 复用 launchSent 语义：结果只表示启动 RPC 的结果，不代表远端完成。
 		result, _, err := s.threads.CreateThreadForAgent(ctx, userID, args.EnvID, req)
@@ -416,6 +426,17 @@ func botSlimThreadSummary(t *T3ThreadSummary) map[string]interface{} {
 	if t.ProjectName != "" {
 		out["project_name"] = t.ProjectName
 	}
+	// 线程实际生效的执行配置（INT-159）：launch 不传时用项目默认，回读
+	// 确认生效值看这里；provider/model 缺失说明上游未上报。
+	if t.Provider != "" {
+		out["provider"] = t.Provider
+	}
+	if t.Model != "" {
+		out["model"] = t.Model
+	}
+	if t.Branch != "" {
+		out["branch"] = t.Branch
+	}
 	if t.ParentThreadId != nil {
 		out["parent_thread_id"] = *t.ParentThreadId
 	}
@@ -603,5 +624,204 @@ func botSlimThreadItem(item *T3ThreadItem) map[string]interface{} {
 		out["text"] = item.Text
 	}
 	botSlimItemAttachChildThreadID(out, item)
+	return out
+}
+
+// botThreadLaunchConfig 校验并把 launch 可选执行配置（INT-159）写进 REST
+// 请求：形状与 T3CreateThreadRequest 一致，缺省不落任何字段（沿用项目
+// 默认）。model_selection 缺 instance_id/model、runtime_mode 非枚举值、
+// workspace 缺 type 或非枚举值都是调用错误——透给上游会变成难以归因的
+// RPC 失败，受理侧就拒掉（botPrepareToolCall 同样调它做受理校验）。
+func botThreadLaunchConfig(args *botThreadArgs, req *T3CreateThreadRequest) error {
+	if ms := args.ModelSelection; ms != nil {
+		instanceID := strings.TrimSpace(ms.InstanceID)
+		modelSlug := strings.TrimSpace(ms.Model)
+		if instanceID == "" || modelSlug == "" {
+			return errs.New(errs.ErrInvalidParams.Code, "model_selection 需要 instance_id 与 model（取值见 composer_options 的 providers）")
+		}
+		sel := &api.T3ModelSelection{InstanceId: instanceID, Model: modelSlug}
+		for _, opt := range ms.Options {
+			optID := strings.TrimSpace(opt.ID)
+			if optID == "" {
+				return errs.New(errs.ErrInvalidParams.Code, "model_selection.options[].id 不能为空")
+			}
+			// T3 契约 value 只收 string|boolean（T3ModelOption）；
+			// 缺省/null/数字/对象在受理侧拒掉，不透给上游变成 RPC 失败。
+			switch opt.Value.(type) {
+			case string, bool:
+			default:
+				return errs.New(errs.ErrInvalidParams.Code, "model_selection.options["+optID+"].value 需要字符串或布尔值")
+			}
+			sel.Options = append(sel.Options, api.T3ModelOption{Id: optID, Value: opt.Value})
+		}
+		req.ModelSelection = sel
+	}
+	if mode := strings.TrimSpace(args.RuntimeMode); mode != "" {
+		switch mode {
+		case "approval-required", "auto-accept-edits", "auto", "full-access":
+		default:
+			return errs.New(errs.ErrInvalidParams.Code, "未知的 runtime_mode "+mode)
+		}
+		m := api.CreateT3ThreadRequestRuntimeMode(mode)
+		req.RuntimeMode = &m
+	}
+	if ws := args.Workspace; ws != nil {
+		wsType := strings.TrimSpace(ws.Type)
+		switch wsType {
+		case "root", "worktree", "existing_worktree":
+		case "":
+			return errs.New(errs.ErrInvalidParams.Code, "workspace 需要 type（root/worktree/existing_worktree）；不需要自定义工作区时省略整个 workspace 字段")
+		default:
+			return errs.New(errs.ErrInvalidParams.Code, "未知的 workspace.type "+wsType)
+		}
+		baseRef := strings.TrimSpace(ws.BaseRef)
+		branch := strings.TrimSpace(ws.Branch)
+		worktreePath := strings.TrimSpace(ws.WorktreePath)
+		if wsType == "existing_worktree" && worktreePath == "" {
+			return errs.New(errs.ErrInvalidParams.Code, "existing_worktree 需要提供 worktree_path")
+		}
+		req.Workspace = &api.T3ThreadWorkspace{
+			Type:            api.T3ThreadWorkspaceType(wsType),
+			BaseRef:         api.NonEmptyPtr(&baseRef),
+			Branch:          api.NonEmptyPtr(&branch),
+			WorktreePath:    api.NonEmptyPtr(&worktreePath),
+			StartFromOrigin: ws.StartFromOrigin,
+		}
+	}
+	return nil
+}
+
+// botThreadNotSettable 是 composer_options 返回的「机器人不可设置」清单
+// （INT-159）：这些配置项存在于 T3 启动面但不由机器人决定，如实列出原因
+// 而不是让模型猜哪些能传、哪些会被静默忽略。
+var botThreadNotSettable = []map[string]string{
+	{"field": "interaction_mode", "reason": "固定为 default，T3 不开放其它取值"},
+	{"field": "attachments", "reason": "机器人不支持随消息上传图片附件"},
+	{"field": "thread_id/command_id/message_id", "reason": "幂等身份由服务端受理时生成，不能由调用方指定"},
+}
+
+// botSlimComposerProviders 把 composer-options 的 config.providers（上游
+// camelCase）归一化成蛇形模型目录：跳过停用/未安装/不可用的 provider 与
+// 缺 slug 的模型，保留选项描述符（id/type/choices/current_value），供
+// launch 的 model_selection 直接回填，机器人侧不硬编码模型清单。
+func botSlimComposerProviders(config map[string]interface{}) []map[string]interface{} {
+	rawProviders, _ := config["providers"].([]interface{})
+	out := make([]map[string]interface{}, 0, len(rawProviders))
+	for _, raw := range rawProviders {
+		provider, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		instanceID, _ := provider["instanceId"].(string)
+		if instanceID == "" {
+			continue
+		}
+		if provider["enabled"] == false || provider["installed"] == false ||
+			provider["availability"] == "unavailable" {
+			continue
+		}
+		models := botSlimComposerModels(provider["models"])
+		if len(models) == 0 {
+			continue
+		}
+		entry := map[string]interface{}{
+			"instance_id": instanceID,
+			"models":      models,
+		}
+		if name, _ := provider["displayName"].(string); name != "" {
+			entry["name"] = name
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
+// botSlimComposerModels 归一化 provider 的 models 数组（slug 必填）。
+func botSlimComposerModels(raw any) []map[string]interface{} {
+	list, _ := raw.([]interface{})
+	out := make([]map[string]interface{}, 0, len(list))
+	for _, item := range list {
+		m, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		slug, _ := m["slug"].(string)
+		if slug == "" {
+			continue
+		}
+		entry := map[string]interface{}{"slug": slug}
+		if name, _ := m["name"].(string); name != "" {
+			entry["name"] = name
+		}
+		if sub, _ := m["subProvider"].(string); sub != "" {
+			entry["sub_provider"] = sub
+		}
+		if m["isDefault"] == true {
+			entry["is_default"] = true
+		}
+		if options := botSlimComposerOptionDescriptors(m["capabilities"]); len(options) > 0 {
+			entry["options"] = options
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
+// botSlimComposerOptionDescriptors 归一化 capabilities.optionDescriptors：
+// 保留有 id 的描述符（select 带 choices；boolean 取 true/false），
+// current_value 是 T3 该实例的当前默认，choices[].is_default 标记出厂默认。
+func botSlimComposerOptionDescriptors(raw any) []map[string]interface{} {
+	caps, _ := raw.(map[string]interface{})
+	list, _ := caps["optionDescriptors"].([]interface{})
+	out := make([]map[string]interface{}, 0, len(list))
+	for _, item := range list {
+		d, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		id, _ := d["id"].(string)
+		if id == "" {
+			continue
+		}
+		entry := map[string]interface{}{"id": id}
+		if label, _ := d["label"].(string); label != "" {
+			entry["label"] = label
+		}
+		if typ, _ := d["type"].(string); typ != "" {
+			entry["type"] = typ
+		}
+		if v, ok := d["currentValue"]; ok && v != nil {
+			entry["current_value"] = v
+		}
+		if choices := botSlimComposerChoices(d["options"]); len(choices) > 0 {
+			entry["choices"] = choices
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
+// botSlimComposerChoices 归一化 select 描述符的候选值。
+func botSlimComposerChoices(raw any) []map[string]interface{} {
+	list, _ := raw.([]interface{})
+	out := make([]map[string]interface{}, 0, len(list))
+	for _, item := range list {
+		c, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		id, _ := c["id"].(string)
+		if id == "" {
+			continue
+		}
+		entry := map[string]interface{}{"id": id}
+		if label, _ := c["label"].(string); label != "" {
+			entry["label"] = label
+		}
+		if c["isDefault"] == true {
+			entry["is_default"] = true
+		}
+		out = append(out, entry)
+	}
 	return out
 }
