@@ -206,12 +206,20 @@ func botWaitArgsOfCall(call *model.BotToolCall) botThreadArgs {
 
 // threadWaitAcceptance 是 wait 的受理端防循环限额：返回已存在的同线程 wait
 // 调用 ID（重复挂不新建，调用方立即以 already_waiting 落终态）；超出限额
-// 返回 40001。重复挂优先返回已有调用，不再累计限额（重复挂写下的
-// already_waiting 账本行也计入 1 小时额度，限额判定始终发生在写行之前）。
-// extraRunning 是同批已受理的 wait 数——限额只查已提交行会漏掉同批成员，
-// 由调用方把它们计入。查询在 SQL 侧按 bot（及目标线程）过滤：全局 LIMIT
-// 扫描被其他机器人的行占满时，本 bot 会被误判为 0。
+// 返回 40001。1 小时额度先于重复判定——每条 already_waiting 账本行本身也
+// 计入额度且会唤醒模型，先返重复会让「对同一线程反复挂 wait」绕过防循环
+// 上限无限产出后台结果。extraRunning 是同批已受理的 wait 数——限额只查已
+// 提交行会漏掉同批成员，由调用方把它们计入。查询在 SQL 侧按 bot（及目标
+// 线程）过滤：全局 LIMIT 扫描被其他机器人的行占满时，本 bot 会被误判为 0。
 func (s *BotService) threadWaitAcceptance(botID, envID, threadID string, extraRunning int) (string, error) {
+	sameThread, err := s.calls.CountWaitCallsByThreadSince(botID, envID, threadID, time.Now().UTC().Add(-time.Hour))
+	if err != nil {
+		return "", errs.ErrInternal
+	}
+	if sameThread >= botWaitMaxPerThreadHour {
+		return "", errs.New(errs.ErrInvalidParams.Code,
+			fmt.Sprintf("同一线程 1 小时内最多挂 %d 次 wait，已达上限，请向用户汇报", botWaitMaxPerThreadHour))
+	}
 	running, err := s.calls.ListRunningWaitCallsByBot(botID, botWaitScanLimit)
 	if err != nil {
 		return "", errs.ErrInternal
@@ -230,14 +238,6 @@ func (s *BotService) threadWaitAcceptance(botID, envID, threadID string, extraRu
 	if len(running)+extraRunning >= botWaitMaxPerBot {
 		return "", errs.New(errs.ErrInvalidParams.Code,
 			fmt.Sprintf("同时挂起的 wait 已达上限（%d 个），请等待现有等待结束或用 fs_cancel 取消后再挂；已达上限，请向用户汇报", botWaitMaxPerBot))
-	}
-	sameThread, err := s.calls.CountWaitCallsByThreadSince(botID, envID, threadID, time.Now().UTC().Add(-time.Hour))
-	if err != nil {
-		return "", errs.ErrInternal
-	}
-	if sameThread >= botWaitMaxPerThreadHour {
-		return "", errs.New(errs.ErrInvalidParams.Code,
-			fmt.Sprintf("同一线程 1 小时内最多挂 %d 次 wait，已达上限，请向用户汇报", botWaitMaxPerThreadHour))
 	}
 	return "", nil
 }
@@ -270,8 +270,9 @@ func (s *BotService) threadWaitAttach(bot *model.Bot, call *model.BotToolCall, c
 			entry.notReadyTicks = 1
 		}
 		entry.baseline = obs
-		// 挂上时线程已在跑：启动宽限不适用，触发条件立即可评估。
-		if waitObsRunning(obs) {
+		// 挂上时线程已在跑或已在等待应答/已出错：启动宽限不适用，触发
+		// 条件立即可评估（needs_reply/error 是即时状态，不能被 started 门挡）。
+		if waitObsActive(obs) {
 			entry.started = true
 		}
 	}
@@ -363,7 +364,7 @@ func (s *BotService) waitAdoptUnregistered() {
 				entry.notReadyTicks = 1
 			}
 			entry.baseline = obs
-			if waitObsRunning(obs) {
+			if waitObsActive(obs) {
 				entry.started = true
 			}
 		}
@@ -435,6 +436,18 @@ func botWaitSnapshotOf(shell *t3ThreadShell) botWaitSnapshot {
 func waitObsRunning(obs botWaitSnapshot) bool {
 	return obs.activeRunID != "" ||
 		obs.status == string(api.T3ThreadSummaryStatusRunning)
+}
+
+// waitObsActive 报告快照是否处于「已有可观察结果」的状态：running 语义、
+// 等待应答（pending request）或 run 已出错。挂上/收编/基线首建与评估器的
+// started 判定共用——needs_reply/error 是即时状态不是运行证据，挂上时
+// 已处于该态的线程要能立即评估条件，而不是被 started 门挡到 not_started。
+// 仍排除单纯 idle：挂上时本来就 idle 的线程不能提前命中，否则 idle 会
+// 在稳定窗后抢在 not_started 之前误报。
+func waitObsActive(obs botWaitSnapshot) bool {
+	return waitObsRunning(obs) ||
+		obs.status == string(api.T3ThreadSummaryStatusWaiting) ||
+		botWaitErrorStatusSet[strings.ToLower(obs.runStatus)]
 }
 
 // botWaitShellActivity 从内存 shell 投影运行活动摘要（与 botSlimThreadActivity
@@ -526,15 +539,15 @@ func (s *BotService) evaluateThreadWait(e *botWaitEntry) {
 		} else {
 			if !e.baseline.known {
 				e.baseline = obs
-				if waitObsRunning(obs) {
+				if waitObsActive(obs) {
 					e.started = true
 				}
 			}
-			// 开始运行的观察：线程此刻处于 running 语义（ActiveRunID 在跑，
-			// 或根 run 已结束但后台任务/subagent 仍把投影撑为 running——
-			// botWaitSnapshotOf 的 status 复用 t3ThreadStatus），或最新 run
-			// 换成了新的一轮（LatestRunID / LatestRunStartedAt 任一变化）。
-			if waitObsRunning(obs) ||
+			// 开始运行的观察：线程此刻处于活动语义（running 或在等应答/已
+			// 出错——挂上时已是触发态的线程要能立即命中，而不是被 started
+			// 门挡到 not_started），或最新 run 换成了新的一轮（LatestRunID /
+			// LatestRunStartedAt 任一变化）。
+			if waitObsActive(obs) ||
 				(obs.latestRunID != "" && obs.latestRunID != e.baseline.latestRunID) ||
 				(obs.latestRunStartedAt != "" && obs.latestRunStartedAt != e.baseline.latestRunStartedAt) {
 				e.started = true
@@ -544,13 +557,15 @@ func (s *BotService) evaluateThreadWait(e *botWaitEntry) {
 					s.waitResolveTriggered(e, call, obs, matched)
 					return
 				}
-			} else if now.Sub(e.attachedAt) >= s.waitCfg.StartGrace {
-				// 启动宽限到期仍未开始：无法可信观察时按 watch_degraded，
-				// 否则如实落 not_started。
-				s.waitResolveNotStarted(e, call, view)
-				return
 			}
 		}
+	}
+	// 启动宽限对所有「还没开始」生效：视图读不到、线程不在可信面上、或
+	// 线程始终没进活动态，都在 ~60s 出结论（watch_degraded / not_started
+	// 由 waitResolveNotStarted 按可信度裁决），不能占着槽位拖到超时。
+	if !e.started && now.Sub(e.attachedAt) >= s.waitCfg.StartGrace {
+		s.waitResolveNotStarted(e, call, view)
+		return
 	}
 	if now.After(e.deadline) {
 		s.waitResolveTimeout(e, call, view)

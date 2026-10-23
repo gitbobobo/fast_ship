@@ -645,8 +645,16 @@ func botScheduleDeniedNote(rows []model.BotToolCall) string {
 	lines := make([]string, 0, len(rows)+1)
 	lines = append(lines, fmt.Sprintf("本轮有 %d 个动作被定时任务会话拒绝，需在主线重新发起并由用户确认：", len(rows)))
 	for i := range rows {
+		// 真实拒绝原因在 policy_json.downgrade_reason 里；ErrorMessage 是
+		// 受理端通用文案，只说「不可执行」看不出为何被拒。
 		reason := ""
-		if rows[i].ErrorMessage != nil {
+		var pol map[string]interface{}
+		if err := json.Unmarshal([]byte(rows[i].PolicyJSON), &pol); err == nil {
+			if dr, _ := pol["downgrade_reason"].(string); dr != "" {
+				reason = dr
+			}
+		}
+		if reason == "" && rows[i].ErrorMessage != nil {
 			reason = *rows[i].ErrorMessage
 		}
 		lines = append(lines, fmt.Sprintf("- %s/%s：%s", rows[i].ToolName, rows[i].Action, reason))

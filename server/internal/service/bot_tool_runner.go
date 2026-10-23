@@ -99,6 +99,13 @@ type botWaitRecheckVerdict struct {
 // 不改判（限额评估已在外层做过，这里只兜受理与插入之间的并发窗口）。
 func (s *BotService) recheckWaitAcceptance(tx *gorm.DB, botID string, args botThreadArgs) botWaitRecheckVerdict {
 	repo := repository.NewBotToolCallRepository(tx)
+	// 与受理端同序：1 小时额度先于重复判定——重复挂返回 already_waiting 也
+	// 会写账本行并唤醒模型，额度必须先拦住（否则重试循环绕过防循环上限）。
+	if n, cerr := repo.CountWaitCallsByThreadSinceTx(tx, botID, args.EnvID, args.ThreadID,
+		time.Now().UTC().Add(-time.Hour)); cerr == nil && n >= botWaitMaxPerThreadHour {
+		return botWaitRecheckVerdict{limErr: errs.New(errs.ErrInvalidParams.Code,
+			fmt.Sprintf("同一线程 1 小时内最多挂 %d 次 wait，已达上限，请向用户汇报", botWaitMaxPerThreadHour))}
+	}
 	existing, err := repo.FindRunningWaitByThreadTx(tx, botID, args.EnvID, args.ThreadID)
 	switch {
 	case err == nil:
@@ -109,11 +116,6 @@ func (s *BotService) recheckWaitAcceptance(tx *gorm.DB, botID string, args botTh
 	if n, cerr := repo.CountRunningWaitCallsTx(tx, botID); cerr == nil && n >= botWaitMaxPerBot {
 		return botWaitRecheckVerdict{limErr: errs.New(errs.ErrInvalidParams.Code,
 			fmt.Sprintf("同时挂起的 wait 已达上限（%d 个），请等待现有等待结束或用 fs_cancel 取消后再挂；已达上限，请向用户汇报", botWaitMaxPerBot))}
-	}
-	if n, cerr := repo.CountWaitCallsByThreadSinceTx(tx, botID, args.EnvID, args.ThreadID,
-		time.Now().UTC().Add(-time.Hour)); cerr == nil && n >= botWaitMaxPerThreadHour {
-		return botWaitRecheckVerdict{limErr: errs.New(errs.ErrInvalidParams.Code,
-			fmt.Sprintf("同一线程 1 小时内最多挂 %d 次 wait，已达上限，请向用户汇报", botWaitMaxPerThreadHour))}
 	}
 	return botWaitRecheckVerdict{}
 }
@@ -1010,10 +1012,24 @@ func cancelRaceCols(call *model.BotToolCall, outcome botToolOutcome, execErr err
 	status := model.BotCallStatusCancelled
 	if call.ToolName == "fs_thread" && call.Action == "wait" {
 		effect = false
-		cancelRaw := marshalJSONString(map[string]interface{}{
+		// 取消竞速落到本分支时 waitResolveCancelled 的富结果 CAS 不上，
+		// 这里用账本行重建同构 payload（waiting_for 从 args.on 归一化，
+		// attached_at 取受理时刻），不留最小体丢上下文。
+		payload := map[string]interface{}{
 			"outcome":     "cancelled",
 			"resolved_at": rfc3339(&now),
-		})
+		}
+		var wargs botThreadArgs
+		_ = json.Unmarshal([]byte(call.ArgumentsJSON), &wargs)
+		if conds, cerr := botWaitParseOn(wargs.On); cerr == nil {
+			payload["waiting_for"] = conds
+		}
+		attachedAt := call.StartedAt
+		if attachedAt == nil {
+			attachedAt = &call.CreatedAt
+		}
+		payload["attached_at"] = rfc3339(attachedAt)
+		cancelRaw := marshalJSONString(payload)
 		outcome = botToolOutcome{
 			ResultJSON:  cancelRaw,
 			PreviewJSON: cancelRaw,

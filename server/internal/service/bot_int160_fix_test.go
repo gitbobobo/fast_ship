@@ -604,3 +604,69 @@ func TestBotInt160AuthzActiveListExcludesExpired(t *testing.T) {
 		t.Fatalf("非 active 口径保留过期行（留痕不删）: %d", len(all))
 	}
 }
+
+// ---------- 8. 复审第 4 轮回归 ----------
+
+// send_continue 的拒批误判只认正文命中「继续」模板的卡：botPolicyRuleForAction
+// 按动作映射，任意 send 都算同类会让一张内容无关的拒批卡污染误判计数。
+func TestBotInt160MisjudgeRejectNonTemplateSend(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "int160reject")
+	_, envID := pairPolicyT3(t, env, userID)
+	bot := env.createBot(t, userID)
+
+	// 先落两条自动「继续」（30 分钟误判窗口的原料 + 占满每小时额度）。
+	for i := 0; i < 2; i++ {
+		c := acceptPolicyCall(t, env, bot.ID, false, "fs_thread",
+			`{"action":"send","env_id":"`+envID+`","thread_id":"`+int160PolicyIdleThread+`","text":"继续"}`)
+		settleAutoCall(t, env, c.ID)
+	}
+
+	// 非模板 send 落 tier3 确认卡 → 拒批不得记 send_continue 误判。
+	card := acceptPolicyCall(t, env, bot.ID, false, "fs_thread",
+		`{"action":"send","env_id":"`+envID+`","thread_id":"`+int160PolicyIdleThread+`","text":"把报告删掉"}`)
+	if card.Status != model.BotCallStatusPendingConfirmation {
+		t.Fatalf("非模板 send 应落确认卡: %s", card.Status)
+	}
+	if _, err := env.bots.DecideCall(userID, bot.ID, card.ID, &CallDecisionRequest{Decision: "reject"}); err != nil {
+		t.Fatalf("reject: %v", err)
+	}
+	if row := policyRuleRowOf(t, env, bot.ID, botPolicyRuleSendContinue); row != nil && row.FalsePositiveCount24h != 0 {
+		t.Fatalf("内容无关的拒批卡不得记 send_continue 误判: %+v", row)
+	}
+
+	// 对照：命中模板的「继续」卡（额度耗尽降级）被拒 → 记一次误判。
+	// 不用关规则造卡——recordPolicyMisjudgment 对已关闭规则不再累计。
+	card2 := acceptPolicyCall(t, env, bot.ID, false, "fs_thread",
+		`{"action":"send","env_id":"`+envID+`","thread_id":"`+int160PolicyIdleThread+`","text":"继续"}`)
+	if card2.Status != model.BotCallStatusPendingConfirmation {
+		t.Fatalf("额度耗尽的「继续」应降级成确认卡: %s", card2.Status)
+	}
+	if _, err := env.bots.DecideCall(userID, bot.ID, card2.ID, &CallDecisionRequest{Decision: "reject"}); err != nil {
+		t.Fatalf("reject: %v", err)
+	}
+	row := policyRuleRowOf(t, env, bot.ID, botPolicyRuleSendContinue)
+	if row == nil || row.FalsePositiveCount24h != 1 {
+		t.Fatalf("命中模板的拒批卡应记一次误判: %+v", row)
+	}
+}
+
+// 强制汇报的拒绝清单必须带真实降级原因（policy_json.downgrade_reason），
+// 受理端通用文案只说「不可执行」看不出为何被拒。
+func TestBotInt160ScheduleDeniedNoteShowsDowngradeReason(t *testing.T) {
+	msg := "需用户确认的动作在定时任务会话中不可执行"
+	rows := []model.BotToolCall{{
+		ToolName: "fs_thread", Action: "launch", ErrorMessage: &msg,
+		PolicyJSON: `{"tier":"tier3","source":"schedule_denied","downgrade_reason":"launch 新建线程属于高影响动作，定时任务里须回主线确认"}`,
+	}}
+	note := botScheduleDeniedNote(rows)
+	if !strings.Contains(note, "launch 新建线程属于高影响动作") {
+		t.Fatalf("拒绝清单应带真实降级原因: %q", note)
+	}
+	// 无降级原因时回退通用文案，不致空白。
+	rows[0].PolicyJSON = `{}`
+	note = botScheduleDeniedNote(rows)
+	if !strings.Contains(note, msg) {
+		t.Fatalf("缺降级原因时应回退 ErrorMessage: %q", note)
+	}
+}

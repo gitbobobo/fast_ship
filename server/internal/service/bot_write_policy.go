@@ -734,6 +734,15 @@ func (s *BotService) detectPolicyMisjudgeOnDecision(botID string, call *model.Bo
 		if ruleID == "" {
 			return
 		}
+		// send_continue 只认命中「继续」模板的正文：botPolicyRuleForAction
+		// 按动作映射，任意 send 都算同类会让一张内容无关的拒批卡也记误判。
+		if ruleID == botPolicyRuleSendContinue {
+			var rejArgs botThreadArgs
+			_ = json.Unmarshal([]byte(call.ArgumentsJSON), &rejArgs)
+			if !botPolicyIsContinueTemplate(rejArgs.Text) {
+				return
+			}
+		}
 		if s.policyRecentAutoOnThread(botID, ruleID, envID, threadID) {
 			s.recordPolicyMisjudgment(botID, ruleID, "用户拒批了同目标的同类写操作")
 		}
@@ -818,24 +827,32 @@ func (s *BotService) SetWritePolicyRuleEnabled(userID, botID, ruleID string, ena
 	if !known {
 		return nil, errs.New(errs.ErrInvalidParams.Code, "未知的分级放行规则: "+ruleID)
 	}
-	repo := repository.NewBotWritePolicyRuleRepository(s.db)
-	row, err := repo.GetTx(s.db, botID, ruleID)
-	switch {
-	case errors.Is(err, gorm.ErrRecordNotFound):
-		row = &model.BotWritePolicyRule{BotID: botID, RuleID: ruleID}
-	case err != nil:
-		return nil, errs.ErrInternal
-	}
-	now := time.Now().UTC()
-	row.Enabled = enabled
-	if enabled {
-		// 手动重开：清自动降级痕迹与误判计数，窗口重新开始。
-		row.AutoDisabledAt = nil
-		row.FalsePositiveCount24h = 0
-		row.LastFalsePositiveAt = nil
-	}
-	row.UpdatedAt = now
-	if err := repo.UpsertEnabled(row); err != nil {
+	// 读-改-写包进事务：与 recordPolicyMisjudgment 的事务（同一行
+	// UpsertEnabledTx）并发时互相覆盖会让手动重开把刚落库的
+	// enabled=false/auto_disabled_at/计数写回启用态；事务内按最新行合并，
+	// 提交序即裁决序。
+	var row *model.BotWritePolicyRule
+	txErr := s.db.Transaction(func(tx *gorm.DB) error {
+		repo := repository.NewBotWritePolicyRuleRepository(tx)
+		var err error
+		row, err = repo.GetTx(tx, botID, ruleID)
+		switch {
+		case errors.Is(err, gorm.ErrRecordNotFound):
+			row = &model.BotWritePolicyRule{BotID: botID, RuleID: ruleID}
+		case err != nil:
+			return err
+		}
+		row.Enabled = enabled
+		if enabled {
+			// 手动重开：清自动降级痕迹与误判计数，窗口重新开始。
+			row.AutoDisabledAt = nil
+			row.FalsePositiveCount24h = 0
+			row.LastFalsePositiveAt = nil
+		}
+		row.UpdatedAt = time.Now().UTC()
+		return repo.UpsertEnabledTx(tx, row)
+	})
+	if txErr != nil {
 		return nil, errs.ErrInternal
 	}
 	return &BotWritePolicyRuleResponse{

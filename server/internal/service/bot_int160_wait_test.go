@@ -6,13 +6,17 @@ package service
 // 定时任务会话 15 分钟上限。工具集 v12 与冻结基线（v1–v11 hash 不动）。
 
 import (
+	"context"
 	"encoding/json"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/model"
+	"github.com/godbobo/fast_ship/server/internal/repository"
 	"github.com/google/uuid"
+	"go.uber.org/zap"
 )
 
 // botToolsetV12FrozenHash 是 INT-160 发布的 v12 wire 字节基线：wait 动作与
@@ -634,6 +638,14 @@ func TestBotInt160WaitCancel(t *testing.T) {
 	if result["outcome"] != "cancelled" {
 		t.Fatalf("outcome 应为 cancelled: %v", result["outcome"])
 	}
+	// 取消竞速落到 cancelRaceCols 时结果是覆写体——必须重建
+	// waiting_for/attached_at，不得退化成最小体丢上下文（复审 Note）。
+	if wf, _ := result["waiting_for"].([]interface{}); len(wf) == 0 {
+		t.Fatalf("cancelled 结果应带 waiting_for: %v", result)
+	}
+	if result["attached_at"] == nil {
+		t.Fatalf("cancelled 结果应带 attached_at: %v", result)
+	}
 	// 唤醒消息（平台后台结果）带 wait_result。
 	var msgs []model.BotMessage
 	if err := env.db.Where("bot_id = ? AND call_id = ? AND kind = ?",
@@ -816,4 +828,151 @@ func TestBotInt160WaitScheduleSessionCap(t *testing.T) {
 	fresh, _ := env.bots.calls.FindByID(okCall.ID)
 	env.bots.cancelBotCall(fresh)
 	driveWaitEvaluation(t, env, func() bool { return true })
+}
+
+// ---------- 11. 复审第 4 轮回归 ----------
+
+// Codex P1：同一线程 1 小时额度先于重复判定——已存在 running wait 且额度
+// 满时必须拒绝；先返 already_waiting 会让「对同一线程反复挂 wait」绕过防
+// 循环上限（每条 already_waiting 回执都会唤醒模型）。
+func TestBotInt160WaitDupAtHourlyCapRejected(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "waitdupcap")
+	bot := env.createBot(t, userID)
+	_, envID := pairWaitT3(t, env, userID)
+
+	wait := `{"action":"wait","env_id":"` + envID + `","thread_id":"` + int160RunningThread + `"}`
+	first := acceptWaitCall(t, env, bot.ID, false, wait)
+	if first.Status != model.BotCallStatusRunning {
+		t.Fatalf("首个 wait 应在跑: %s", first.Status)
+	}
+	// 额度窗口内已有 6 条该线程的终态 wait 行。
+	for i := 0; i < botWaitMaxPerThreadHour; i++ {
+		now := time.Now().UTC()
+		_, req := seedWaitRun(t, env, bot.ID, false)
+		row := &model.BotToolCall{
+			ID: uuid.NewString(), BotID: bot.ID, RequestID: req.ID,
+			ProviderToolCallID: "prov-wh-" + uuid.NewString()[:4],
+			ToolName:           "fs_thread", Action: "wait",
+			ArgumentsJSON: wait, ArgumentsHash: "x",
+			ExecutionMode:        string(model.BotExecutionAsync),
+			Status:               model.BotCallStatusSucceeded, FinishedAt: &now,
+			ExecutionContextJSON: "{}", CreatedAt: now,
+		}
+		if err := env.db.Create(row).Error; err != nil {
+			t.Fatalf("seed hourly wait: %v", err)
+		}
+	}
+	// 重复挂存在（first 在跑）但额度已满：必须拒而不是 already_waiting。
+	dup := acceptWaitCall(t, env, bot.ID, false, wait)
+	if dup.Status != model.BotCallStatusFailed || dup.ErrorCode == nil || *dup.ErrorCode != "e40001" {
+		t.Fatalf("额度满的重复挂应拒绝（40001）而非 already_waiting: %+v %v", dup.Status, dup.ErrorCode)
+	}
+	// 事务内复核同序：额度满时同样先拦。
+	verdict := env.bots.recheckWaitAcceptance(env.db, bot.ID,
+		botThreadArgs{EnvID: envID, ThreadID: int160RunningThread})
+	if verdict.limErr == nil || verdict.dupCallID != "" {
+		t.Fatalf("复核应先报额度而非重复: %+v", verdict)
+	}
+}
+
+// Codex P2：视图读得到但线程不在可信面上（归档面失败不可信）时，启动宽限
+// 到期也应收尾 watch_degraded，不能占着槽位拖到超时。
+func TestBotInt160WaitUnobservableDegradedAtGrace(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "waitdegrade")
+	bot := env.createBot(t, userID)
+
+	// 归档面失败（G1）：活跃面 Ready，归档不可信——不在快照里的线程
+	// known=false 且不能断言不存在。
+	if err := env.db.AutoMigrate(&model.T3Environment{}); err != nil {
+		t.Fatalf("migrate t3 env: %v", err)
+	}
+	fake := newFakeT3Environment(t)
+	fake.snapshot = shellSnapshotFixture(
+		[]any{map[string]any{"id": "p-1", "title": "P"}},
+		[]any{shellThread("th-x", "存在", "idle", nil)})
+	fake.archiveFail = true
+	server := httptest.NewServer(fake.handler())
+	t.Cleanup(server.Close)
+	fake.baseURL = server.URL
+
+	hub := NewT3ShellHub(zap.NewNop())
+	t.Cleanup(hub.Close)
+	repo := repository.NewT3EnvironmentRepository(env.db)
+	svc := NewT3ThreadsService(repo, env.cfg, zap.NewNop(), hub)
+	svc.budgets = t3RemoteBudgets{Round: 5 * time.Second, PerEnvironment: 2 * time.Second,
+		ThreadDetail: 5 * time.Second, ItemDetail: 5 * time.Second, ShellFirstSync: 2 * time.Second}
+	env.bots.threads = svc
+	envSvc := NewT3EnvironmentService(repo, env.cfg, zap.NewNop(), hub)
+	created, err := envSvc.Create(context.Background(), userID,
+		&CreateT3EnvironmentRequest{Name: "降级机", PairingUrl: fake.pairingURL(fake.baseURL)})
+	if err != nil {
+		t.Fatalf("pair: %v", err)
+	}
+	envID := created.Id
+	shrinkWaitTimers(env)
+	waitHubReady(t, env, userID, envID)
+	// 归档面确实不可信后再挂（G1 状态机事实）。
+	waitForBot(t, "archive degraded", 5*time.Second, func() bool {
+		v, err := env.bots.threads.PeekShell(userID, envID)
+		return err == nil && v != nil && v.Snaps != nil && v.Snaps.ArchiveErr != nil
+	})
+
+	call := acceptWaitCall(t, env, bot.ID, false,
+		`{"action":"wait","env_id":"`+envID+`","thread_id":"th-missing"}`)
+	done := waitCallTerminal(t, env, call.ID, "宽限期 watch_degraded")
+	result := waitResultJSON(t, done)
+	if result["outcome"] != "watch_degraded" {
+		t.Fatalf("观察不可信时宽限收尾应 watch_degraded: %v", result)
+	}
+}
+
+// bot P2：挂上时线程已在等待应答/已出错是「已有结果」的触发态——started
+// 立即成立，条件当轮评估，不得拖到启动宽限误报 not_started。
+func TestBotInt160WaitAttachAlreadyWaitingOrFailed(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "waitprestate")
+	bot := env.createBot(t, userID)
+
+	const waitingThread = "th-wait-pre"
+	const failedThread = "th-fail-pre"
+	threads := []any{
+		shellThread(waitingThread, "等审批", "completed", map[string]any{
+			"pendingRuntimeRequest": map[string]any{
+				"id": "req-pre", "kind": "approval", "createdAt": "2026-10-20T00:00:00.000Z",
+			},
+		}),
+		shellThread(failedThread, "已出错", "failed", nil),
+	}
+	fake, envID := pairBotT3WithSnapshot(t, env, userID, "预态机",
+		shellSnapshotFixture([]any{map[string]any{"id": "p-1", "title": "P"}}, threads))
+	fake.mu.Lock()
+	fake.projections[waitingThread] = threadProjection(waitingThread, []any{}, nil)
+	fake.projections[failedThread] = threadProjection(failedThread, []any{}, nil)
+	fake.mu.Unlock()
+	shrinkWaitTimers(env)
+	waitHubReady(t, env, userID, envID)
+
+	call1 := acceptWaitCall(t, env, bot.ID, false,
+		`{"action":"wait","env_id":"`+envID+`","thread_id":"`+waitingThread+`","on":"needs_reply"}`)
+	done1 := waitCallTerminal(t, env, call1.ID, "已等待应答应立即触发")
+	r1 := waitResultJSON(t, done1)
+	if r1["outcome"] != "triggered" {
+		t.Fatalf("已处于 needs_reply 的线程挂 wait 应立即触发: %v", r1["outcome"])
+	}
+	if m, _ := r1["matched"].([]interface{}); len(m) != 1 || m[0] != "needs_reply" {
+		t.Fatalf("命中项应为 needs_reply: %v", m)
+	}
+
+	call2 := acceptWaitCall(t, env, bot.ID, false,
+		`{"action":"wait","env_id":"`+envID+`","thread_id":"`+failedThread+`","on":"error"}`)
+	done2 := waitCallTerminal(t, env, call2.ID, "已出错应立即触发")
+	r2 := waitResultJSON(t, done2)
+	if r2["outcome"] != "triggered" {
+		t.Fatalf("已出错的线程挂 wait 应立即触发: %v", r2["outcome"])
+	}
+	if m, _ := r2["matched"].([]interface{}); len(m) != 1 || m[0] != "error" {
+		t.Fatalf("命中项应为 error: %v", m)
+	}
 }
