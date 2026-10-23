@@ -129,6 +129,10 @@ type botCompactionPlan struct {
 	NeedSummary         bool
 	ToolsetTo           int64
 	Run                 *model.BotRun
+	// Calls 是本轮压缩预载的工具调用（键覆盖 AllRows 引用的全部 call_id，
+	// 已查无此行的键值为 nil）。pendingCallSnapshot 的逐条点查并入这里，
+	// 同轮多次构建标识清单共用同一份结果（INT-155）。
+	Calls map[string]*model.BotToolCall
 }
 
 func botFloorRatio(n int64, ratio float64) int64 {
@@ -654,7 +658,7 @@ func (s *BotService) planCompaction(bot *model.Bot, run *model.BotRun, reason mo
 		FoldedAdded: foldedAdded, FoldedChars: foldedCleared, ProtectStartSeq: cut.ProtectStartSeq,
 		WindowTokens: window, TriggerTokens: trigger, GoalTokens: goal,
 		BeforeTokens: before, AfterFoldTokens: afterFold, NeedSummary: needSummary,
-		ToolsetTo: botToolsetVersion, Run: run,
+		ToolsetTo: botToolsetVersion, Run: run, Calls: calls,
 	}, nil
 }
 
@@ -687,32 +691,54 @@ func botFoldEligible(content *botToolReplyContent, call *model.BotToolCall) bool
 	return true
 }
 
+// loadCallsForRows 用一次 IN 查询取出账本消息引用的全部工具调用：
+// tool_reply 的 call_id 与 assistant 声明的 tool_calls 同属一批。
 func (s *BotService) loadCallsForRows(rows []model.BotMessage) map[string]*model.BotToolCall {
 	ids := make([]string, 0, 8)
 	seen := map[string]bool{}
-	for i := range rows {
-		if rows[i].Kind != model.BotMessageKindToolReply {
-			continue
-		}
-		var c botToolReplyContent
-		if json.Unmarshal([]byte(rows[i].ContentJSON), &c) != nil || c.CallID == "" {
-			continue
-		}
-		if !seen[c.CallID] {
-			seen[c.CallID] = true
-			ids = append(ids, c.CallID)
+	addID := func(id string) {
+		if id != "" && !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
 		}
 	}
+	for i := range rows {
+		switch rows[i].Kind {
+		case model.BotMessageKindToolReply:
+			var c botToolReplyContent
+			if json.Unmarshal([]byte(rows[i].ContentJSON), &c) == nil {
+				addID(c.CallID)
+			}
+		case model.BotMessageKindAssistant:
+			var c botAssistantContent
+			if json.Unmarshal([]byte(rows[i].ContentJSON), &c) != nil {
+				continue
+			}
+			for _, tc := range c.ToolCalls {
+				addID(tc.CallID)
+			}
+		}
+	}
+	return s.loadCallsByIDs(ids)
+}
+
+// loadCallsByIDs 批量装载调用行；查不到的 id 也占一个键（值为 nil），
+// 调用方凭「键在不在」区分已查无此行与未查过，同轮压缩不重查。
+func (s *BotService) loadCallsByIDs(ids []string) map[string]*model.BotToolCall {
 	out := map[string]*model.BotToolCall{}
 	if len(ids) == 0 {
 		return out
 	}
 	var calls []model.BotToolCall
-	if err := s.db.Where("id IN ?", ids).Find(&calls).Error; err != nil {
-		return out
+	if err := s.db.Where("id IN ?", ids).Find(&calls).Error; err == nil {
+		for i := range calls {
+			out[calls[i].ID] = &calls[i]
+		}
 	}
-	for i := range calls {
-		out[calls[i].ID] = &calls[i]
+	for _, id := range ids {
+		if _, ok := out[id]; !ok {
+			out[id] = nil
+		}
 	}
 	return out
 }
@@ -1601,8 +1627,16 @@ func (s *BotService) buildIdentifierManifest(plan *botCompactionPlan) string {
 	return strings.Join(lines, "\n")
 }
 
+// pendingCallSnapshot 生成账本中引用过的调用状态行。状态从 plan.Calls 取
+// （planCompaction 已批量预载）；手工构造的 plan 缺条目时合并成一次批量
+// 查询补进缓存，整轮压缩不再逐条 FindByID（INT-155）。
 func (s *BotService) pendingCallSnapshot(plan *botCompactionPlan) []string {
-	var lines []string
+	type entry struct {
+		tc  botAssistantToolCall
+		seq int64
+	}
+	var entries []entry
+	var missing []string
 	seen := map[string]bool{}
 	for i := range plan.AllRows {
 		row := &plan.AllRows[i]
@@ -1618,12 +1652,27 @@ func (s *BotService) pendingCallSnapshot(plan *botCompactionPlan) []string {
 				continue
 			}
 			seen[tc.CallID] = true
-			st := "unknown"
-			if call, err := s.calls.FindByID(tc.CallID); err == nil {
-				st = string(call.Status)
+			entries = append(entries, entry{tc: tc, seq: row.Seq})
+			if _, ok := plan.Calls[tc.CallID]; !ok {
+				missing = append(missing, tc.CallID)
 			}
-			lines = append(lines, fmt.Sprintf("- call:%s %s/%s status=%s (seq %d)", tc.CallID, tc.ToolName, tc.Action, st, row.Seq))
 		}
+	}
+	if len(missing) > 0 {
+		if plan.Calls == nil {
+			plan.Calls = map[string]*model.BotToolCall{}
+		}
+		for id, call := range s.loadCallsByIDs(missing) {
+			plan.Calls[id] = call
+		}
+	}
+	var lines []string
+	for _, e := range entries {
+		st := "unknown"
+		if call := plan.Calls[e.tc.CallID]; call != nil {
+			st = string(call.Status)
+		}
+		lines = append(lines, fmt.Sprintf("- call:%s %s/%s status=%s (seq %d)", e.tc.CallID, e.tc.ToolName, e.tc.Action, st, e.seq))
 	}
 	return lines
 }
