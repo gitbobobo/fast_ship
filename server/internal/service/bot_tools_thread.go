@@ -289,6 +289,10 @@ func botCanonicalValue(v interface{}) interface{} {
 			t[i] = botCanonicalValue(e)
 		}
 		return t
+	case string:
+		// 执行侧（botThreadLaunchConfig）对字符串字段统一 TrimSpace，摘要
+		// 按同一口径：仅首尾空白差异的取值命中同一条授权规则（代码审查）。
+		return strings.TrimSpace(t)
 	default:
 		return v
 	}

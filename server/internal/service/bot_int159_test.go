@@ -485,6 +485,11 @@ func TestBotInt159LaunchAuthzBindsExecConfig(t *testing.T) {
 	if hashOf(reordered) != hashOf(canonical) {
 		t.Fatalf("语义相同的执行配置（键序/空白/options 顺序不同）应共用授权")
 	}
+	// 执行侧 TrimSpace 的同语义取值不得产生新授权规则（代码审查 r19）。
+	padded := `{"env_id":"e","project_id":"p","text":"任务一","runtime_mode":" full-access "}`
+	if hashOf(padded) != hashOf(fullAccess) {
+		t.Fatalf("仅首尾空白不同的同语义取值应共用授权")
+	}
 }
 
 // INT-159 受理侧：runtime_mode 显式空串与非枚举同口径拒掉（缺失与为空
