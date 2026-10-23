@@ -718,6 +718,9 @@ func (s *BotService) loadCallsByIDs(ids []string) map[string]*model.BotToolCall 
 		for i := range calls {
 			out[calls[i].ID] = &calls[i]
 		}
+	} else {
+		s.logger.Warn("批量装载工具调用失败，状态按 unknown 处理",
+			zap.Int("call_count", len(ids)), zap.Error(err))
 	}
 	for _, id := range ids {
 		if _, ok := out[id]; !ok {
