@@ -4,6 +4,7 @@ import { ChevronDown, ChevronUp, Wrench } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ApiRequestError } from "@/lib/api/client";
 import { botApi, type BotCall } from "@/lib/api/bots";
+import { cn } from "@/lib/utils";
 import {
   bidiSafeText,
   toolActionLabel,
@@ -69,7 +70,10 @@ export function ParamChipView({ chip }: { chip: ToolParamChip }) {
   return (
     <span
       title={chip.title === undefined ? undefined : bidiSafeText(chip.title)}
-      className="inline-flex items-center gap-1 rounded-md border bg-background/60 px-1.5 py-0.5 text-xs"
+      className={cn(
+        "inline-flex items-center gap-1 rounded-md border bg-background/60 px-1.5 py-0.5 text-xs",
+        chip.tone === "warn" && "border-amber-500/50 text-amber-700 dark:text-amber-400",
+      )}
     >
       {inner}
     </span>

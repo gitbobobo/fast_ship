@@ -136,6 +136,8 @@ export interface ToolParamChip {
   title?: string;
   /** 站内路由；拼不出可靠路由时省略。 */
   href?: string;
+  /** 视觉强调：warn=高权限取值（如 full-access），用警示色描边。 */
+  tone?: "warn";
 }
 
 const PARAM_LABELS: Record<string, string> = {
@@ -291,6 +293,66 @@ function chipRoute(
   return undefined;
 }
 
+// launch 执行配置 chip（INT-159）：原始 JSON/枚举直接上 chip 会被截断、
+// 用户批准前看不清模型与权限（视觉审查）。统一转可读摘要，原文进 title。
+const RUNTIME_MODE_LABELS: Record<string, string> = {
+  "approval-required": "需审批",
+  "auto-accept-edits": "自动接受编辑",
+  auto: "自动",
+  "full-access": "完全访问",
+};
+
+const WORKSPACE_TYPE_LABELS: Record<string, string> = {
+  root: "项目主检出",
+  worktree: "新工作树",
+  existing_worktree: "已有工作树",
+};
+
+function modelSelectionText(raw: unknown): string | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const ms = raw as { model?: unknown; options?: unknown };
+  if (typeof ms.model !== "string" || ms.model === "") return null;
+  let text = ms.model;
+  if (Array.isArray(ms.options)) {
+    const parts = ms.options
+      .map((o) => {
+        if (typeof o !== "object" || o === null) return null;
+        const opt = o as { id?: unknown; value?: unknown };
+        return typeof opt.id === "string" && opt.id !== ""
+          ? `${opt.id} ${typeof opt.value === "boolean" ? (opt.value ? "开" : "关") : String(opt.value)}`
+          : null;
+      })
+      .filter((p): p is string => p !== null);
+    if (parts.length > 0) {
+      text += ` · ${parts.slice(0, 2).join("·")}${parts.length > 2 ? ` +${parts.length - 2}` : ""}`;
+    }
+  }
+  return text;
+}
+
+function workspaceText(raw: unknown): string | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const ws = raw as {
+    type?: unknown;
+    branch?: unknown;
+    worktree_path?: unknown;
+  };
+  if (typeof ws.type !== "string" || ws.type === "") return null;
+  const base = WORKSPACE_TYPE_LABELS[ws.type] ?? ws.type;
+  if (ws.type === "worktree" && typeof ws.branch === "string" && ws.branch !== "") {
+    return `${base} ${ws.branch}`;
+  }
+  if (
+    ws.type === "existing_worktree" &&
+    typeof ws.worktree_path === "string" &&
+    ws.worktree_path !== ""
+  ) {
+    const tail = ws.worktree_path.replace(/\/+$/, "").split("/").pop();
+    return tail ? `${base} ${tail}` : base;
+  }
+  return base;
+}
+
 function chipValue(
   key: string,
   raw: unknown,
@@ -298,6 +360,29 @@ function chipValue(
 ): ToolParamChip | null {
   const label = PARAM_LABELS[key] ?? key;
   if (raw === undefined || raw === null || raw === "") return null;
+
+  if (key === "runtime_mode" && typeof raw === "string") {
+    return {
+      key,
+      label,
+      value: RUNTIME_MODE_LABELS[raw] ?? raw,
+      title: raw,
+      // full-access 是最宽的权限模式，chip 上要给警示色而不是混在普通参数里。
+      tone: raw === "full-access" ? "warn" : undefined,
+    };
+  }
+  if (key === "model_selection") {
+    const text = modelSelectionText(raw);
+    if (text !== null) {
+      return { key, label, value: text, title: JSON.stringify(raw) };
+    }
+  }
+  if (key === "workspace") {
+    const text = workspaceText(raw);
+    if (text !== null) {
+      return { key, label, value: text, title: JSON.stringify(raw) };
+    }
+  }
 
   if (typeof raw === "string") {
     if (ID_PARAMS.has(key)) {

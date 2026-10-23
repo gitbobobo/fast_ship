@@ -295,7 +295,33 @@ export function BotConfirmationCard({
         </>
       ) : (
         <>
-          <RawParams chips={chips} argPretty={argPretty} />
+          {/* fs_thread 的参数全是配置句柄，chips 已逐项汇总；完整 JSON 折叠
+              在按钮下方，避免大 JSON 把决定按钮顶出视口或被拦腰裁切
+              （视觉审查）。replace_checklist 等内容型参数仍默认展开。 */}
+          <ParamChips chips={chips} />
+          {call.tool_name === "fs_thread" ? (
+            <details
+              data-testid="bot-thread-raw-params"
+              className="text-xs"
+            >
+              <summary className="cursor-pointer select-none text-muted-foreground hover:text-foreground">
+                查看原始参数
+              </summary>
+              <div className="pt-2">
+                {argPretty && (
+                  <pre className="max-h-72 overflow-auto rounded-lg bg-background/80 p-2 font-mono text-xs whitespace-pre-wrap break-all [unicode-bidi:isolate]">
+                    {bidiSafeText(argPretty)}
+                  </pre>
+                )}
+              </div>
+            </details>
+          ) : (
+            argPretty && (
+              <pre className="max-h-72 overflow-auto rounded-lg bg-background/80 p-2 font-mono text-xs whitespace-pre-wrap break-all [unicode-bidi:isolate]">
+                {bidiSafeText(argPretty)}
+              </pre>
+            )
+          )}
           <DecisionButtons
             callId={call.id}
             approveLabel={approveLabel}
