@@ -71,8 +71,11 @@ func (s *BotService) execThreadRead(ctx context.Context, call *model.BotToolCall
 		// 回填；not_settable 如实列出机器人不能指定的配置项（INT-159）。
 		notSettable := botThreadNotSettable
 		botToolsetVer := int64(0)
-		if bot, err := s.bots.Get(call.BotID); err == nil {
-			botToolsetVer = bot.ToolsetVersion
+		// 读发起本次调用的请求所冻结的工具集版本，不读 bots 表活值：
+		// 另一条对话线先激活新版本会把行版本推进，本会话仍冻结旧 schema
+		// 时 not_settable 标注会缺失（代码审查）。
+		if req, err := s.requests.FindByID(call.RequestID); err == nil {
+			botToolsetVer = req.ToolsetVersion
 		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 			// 查询失败按 0 处理（旧会话的 not_settable 版本标注会缺，模型
 			// 传了新字段仍被受理拒，方向安全），但要留痕便于排查 DB 抖动

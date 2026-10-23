@@ -12,6 +12,9 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/godbobo/fast_ship/server/internal/model"
 )
@@ -312,6 +315,84 @@ func TestBotInt159ComposerOptionsExec(t *testing.T) {
 		if item["field"] == "" || item["reason"] == "" {
 			t.Fatalf("not_settable 条目缺 field/reason: %+v", item)
 		}
+	}
+}
+
+// composer_options 的 not_settable 版本门按「发起调用的请求所冻结的
+// 工具集版本」判定（call.RequestID → bot_model_requests），不读 bots
+// 表活值——另一条对话线先激活 v12 会把行版本推进，本会话仍冻结 v11
+// 时必须照常标注不可用（代码审查 r30）。
+func TestBotInt159ComposerOptionsFrozenVersionGate(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "t3compgate")
+	bot := env.createBot(t, userID)
+	fake, envID := pairBotT3(t, env, userID, "版本门")
+	fake.mu.Lock()
+	fake.projects = mustJSON(map[string]any{"projects": []any{}})
+	fake.configValue = mustJSON(map[string]any{"providers": []any{}})
+	fake.mu.Unlock()
+
+	now := time.Now().UTC()
+	run := &model.BotRun{
+		ID: uuid.NewString(), BotID: bot.ID,
+		TriggerSource: model.BotTriggerUserMessage, TriggerKey: "gate:" + uuid.NewString(),
+		TriggerContextJSON: "{}", Status: model.BotRunStatusCompleted,
+		ConfigSnapshotJSON: "{}", CreatedAt: now, StartedAt: &now, FinishedAt: &now,
+	}
+	if err := env.bots.runs.CreateTx(env.db, run); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	var ordinal int64
+	newReq := func(ver int64) *model.BotModelRequest {
+		ordinal++
+		req := &model.BotModelRequest{
+			ID: uuid.NewString(), RunID: run.ID, Ordinal: ordinal,
+			Status:         model.BotModelRequestRunning,
+			PromptRevision: bot.PromptRevision, ToolsetVersion: ver,
+			PrefixHash: "x", ToolsHash: "x", RequestHash: "x",
+			TokenEstimator: "chars/4", StartedAt: now,
+		}
+		if err := env.bots.requests.CreateTx(env.db, req); err != nil {
+			t.Fatalf("req: %v", err)
+		}
+		return req
+	}
+	hasGateNote := func(reqID string) bool {
+		call := &model.BotToolCall{
+			BotID: bot.ID, RequestID: reqID,
+			ToolName: "fs_thread", Action: "composer_options",
+			ArgumentsJSON: `{"action":"composer_options","env_id":"` + envID + `"}`,
+		}
+		raw, err := env.bots.execThreadRead(context.Background(), call)
+		if err != nil {
+			t.Fatalf("composer_options: %v", err)
+		}
+		var out struct {
+			NotSettable []map[string]string `json:"not_settable"`
+		}
+		if err := json.Unmarshal([]byte(raw), &out); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		for _, item := range out.NotSettable {
+			if strings.Contains(item["reason"], "本会话工具集") {
+				return true
+			}
+		}
+		return false
+	}
+	if !hasGateNote(newReq(11).ID) {
+		t.Fatalf("v11 冻结会话的 not_settable 应标注 launch 配置字段不可用")
+	}
+	if hasGateNote(newReq(botToolsetVersion).ID) {
+		t.Fatalf("v%d 冻结会话不应出现版本门标注", botToolsetVersion)
+	}
+	// bots 表活值已被另一条线推进到 v12：本会话冻结 v11 仍应标注。
+	if err := env.db.Model(&model.Bot{}).Where("id = ?", bot.ID).
+		Update("toolset_version", botToolsetVersion).Error; err != nil {
+		t.Fatalf("bump bot version: %v", err)
+	}
+	if !hasGateNote(newReq(11).ID) {
+		t.Fatalf("活值推进后 v11 冻结会话仍应标注（按请求版本而非 bots 表活值）")
 	}
 }
 
