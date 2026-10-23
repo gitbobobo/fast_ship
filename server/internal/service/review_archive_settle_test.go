@@ -251,6 +251,45 @@ func TestArchiveRunsUnconfirmedWaitsSettle(t *testing.T) {
 	}
 }
 
+// TestArchiveRunsArchiveErrorThreadGone 超宽限/finished_at 为空的行跳过收
+// 尾判定直接归档；归档 RPC 失败归因可能是「线程已没了」（dispatchCommand
+// 对不存在的线程只回普通上游错误）：补读投影归因，404 与窗口内同一份有界
+// 确认——到上限直接落 archived_at，不计归档失败重试、不置 failed。
+func TestArchiveRunsArchiveErrorThreadGone(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	run := e.seedDispatchedRun(t, repo, 86, model.ReviewKindCode, model.ReviewRunCompleted, "", false, now)
+	e.svc.db.Model(run).Update("finished_at", nil) // 跳过收尾判定直接归档
+	t3 := &fakeReviewT3{archiveErr: errors.New("upstream command failed"), settledErr: errT3ThreadNotFound}
+	review := e.withT3(t3, nil, nil)
+
+	// 上限前：归档每 tick 尝试、归因 404 只计连续计数，不落账不计归档失败。
+	review.archiveRuns(now)
+	if len(t3.archived) != 1 {
+		t.Fatalf("超宽限应直接归档，archived = %v", t3.archived)
+	}
+	var after model.ReviewRun
+	e.svc.db.First(&after, "id = ?", run.ID)
+	if after.ArchivedAt != nil {
+		t.Fatal("404 未到上限不得写 archived_at")
+	}
+	if review.worktreeTries[run.ID+"|"+worktreeTryArchive] != 0 {
+		t.Fatal("无线程不得计入归档失败重试")
+	}
+	// 到上限：直接落账，不置 worktree_state=failed。
+	for i := 1; i < reviewWorktreeMaxTries; i++ {
+		review.archiveRuns(now)
+	}
+	e.svc.db.First(&after, "id = ?", run.ID)
+	if after.ArchivedAt == nil {
+		t.Fatal("404 到上限应直接写 archived_at")
+	}
+	if after.WorktreeState == model.ReviewWorktreeFailed {
+		t.Fatal("无可归对象不得置 worktree_state=failed")
+	}
+}
+
 // TestArchiveRunsSettleReadError 暂时读不到收尾状态：本 tick 不归档、不占归
 // 档重试计数；恢复后照常归档。
 func TestArchiveRunsSettleReadError(t *testing.T) {

@@ -122,14 +122,10 @@ func (s *ReviewService) archiveRunThread(run *model.ReviewRun, now time.Time) {
 			}
 		case errors.Is(err, errT3ThreadNotFound):
 			// 线程 404 不立即采信（T3 重启/代理抖动，与 cleanupRunWorktree
-			// 同口径）：连续到上限才认定无可归对象，直接落 archived_at——
-			// 再走归档 RPC 只会把无线程误记成归档失败、发假告警。
-			if tries := s.bumpWorktreeTries(run.ID, worktreeTryNotFound); tries < reviewWorktreeMaxTries {
-				return
+			// 同口径）：连续到上限才认定无可归对象。
+			if s.confirmThreadGone(run) {
+				s.archiveConfirmedGone(run, now)
 			}
-			s.db.Model(&model.ReviewRun{}).Where("id = ? AND archived_at IS NULL", run.ID).
-				Updates(map[string]any{"archived_at": now, "updated_at": now})
-			s.releaseWorktreeTries(run.ID)
 			return
 		default:
 			// 暂时读不到收尾状态：本 tick 不归档，下轮再试（宽限即上限）。
@@ -151,6 +147,22 @@ func (s *ReviewService) archiveRunThread(run *model.ReviewRun, now time.Time) {
 			zap.String("run", run.ID), zap.Error(err))
 		return
 	} else {
+		// 归档失败的归因可能是「线程已经没了」：超宽限/finished_at 为空的
+		// 行不读投影直接归档，用户删线程、T3 侧清理、停机后补跑都会让
+		// dispatchCommand 返回普通上游错误（不带 errT3ThreadNotFound）。补读
+		// 一次投影归因：404 走同一份有界确认，证实不存在直接落账——否则
+		// 无线程的归档失败会被误记成归档错误，到顶发假告警还置 failed。
+		_, perr := s.t3.ThreadTurnSettled(ctx, run.UserID, run.EnvironmentID, run.ThreadID, run.InitialMessageID)
+		if errors.Is(perr, errT3ThreadNotFound) {
+			if s.confirmThreadGone(run) {
+				s.archiveConfirmedGone(run, now)
+			}
+			return
+		}
+		if perr == nil {
+			// 读到了线程投影：之前的连续 404 不再算「连续」。
+			s.resetWorktreeTries(run.ID, worktreeTryNotFound)
+		}
 		s.logger.Info("审查线程归档未成功（有限重试）", zap.String("run", run.ID), zap.Error(err))
 		tries := s.bumpWorktreeTries(run.ID, worktreeTryArchive)
 		if tries < reviewWorktreeMaxTries {
@@ -166,6 +178,22 @@ func (s *ReviewService) archiveRunThread(run *model.ReviewRun, now time.Time) {
 		s.releaseWorktreeTries(run.ID)
 		s.publishReviewNotification(run, model.NotificationReviewCleanupFailed, msg, now)
 	}
+}
+
+// confirmThreadGone 累加一次连续 404 并报告是否已到上限：单次 404 不采信
+// （T3 重启/代理抖动，与 cleanupRunWorktree 同口径），连续到上限才认定
+// 线程确已不存在。
+func (s *ReviewService) confirmThreadGone(run *model.ReviewRun) bool {
+	return s.bumpWorktreeTries(run.ID, worktreeTryNotFound) >= reviewWorktreeMaxTries
+}
+
+// archiveConfirmedGone 线程已被证实不存在（连续 404 到上限）：无可归对象，
+// 直接落 archived_at 并释放重试计数——不走归档 RPC（无线程的 RPC 只会误记
+// 归档失败、发假告警），不置 worktree_state=failed，也不发通知。
+func (s *ReviewService) archiveConfirmedGone(run *model.ReviewRun, now time.Time) {
+	s.db.Model(&model.ReviewRun{}).Where("id = ? AND archived_at IS NULL", run.ID).
+		Updates(map[string]any{"archived_at": now, "updated_at": now})
+	s.releaseWorktreeTries(run.ID)
 }
 
 // cleanupWorktrees 调度阶段：挑终态且未清理完的代码运行逐条处理。
