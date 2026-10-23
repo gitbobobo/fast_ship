@@ -139,6 +139,69 @@ func TestBotInt160BatchSendQuotaShared(t *testing.T) {
 	settleAutoCall(t, env, calls[1].ID)
 }
 
+// 复审 P2（135355d 第 2 轮）：always-allow 接管的降级候选行同样带
+// auto=true+rule_id=send_continue，不得计入同批无人值守配额账本。账本键
+// 与授权作用域同源，实测上同桶里 tier1 与 always-allow 不会共存（授权在
+// 则一路接管），但账本口径必须与 SQL 侧 source='tier1' 过滤一致——
+// quota.used 写进 policy facts，污染会直接反映在审计事实里。
+func TestBotInt160BatchAlwaysAllowNotCountedInQuota(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "int160fixaa")
+	_, envID := pairPolicyT3(t, env, userID)
+	bot := env.createBot(t, userID)
+
+	// 先关规则造一张「继续」确认卡 → always_allow，拿到该线程的发送授权。
+	if _, err := env.bots.SetWritePolicyRuleEnabled(userID, bot.ID, botPolicyRuleSendContinue, false); err != nil {
+		t.Fatalf("disable rule: %v", err)
+	}
+	seed := acceptPolicyCall(t, env, bot.ID, false, "fs_thread",
+		`{"action":"send","env_id":"`+envID+`","thread_id":"`+int160PolicyIdleThread+`","text":"继续"}`)
+	if seed.Status != model.BotCallStatusPendingConfirmation {
+		t.Fatalf("规则关闭后应落确认卡: %s", seed.Status)
+	}
+	if _, err := env.bots.DecideCall(userID, bot.ID, seed.ID, &CallDecisionRequest{Decision: "always_allow"}); err != nil {
+		t.Fatalf("always_allow: %v", err)
+	}
+	settleAutoCall(t, env, seed.ID)
+	if _, err := env.bots.SetWritePolicyRuleEnabled(userID, bot.ID, botPolicyRuleSendContinue, true); err != nil {
+		t.Fatalf("enable rule: %v", err)
+	}
+
+	// 同批 4 条「继续」：前两条额度内 tier1 自动放行，第 3、4 条额度超限
+	// → always-allow 接管（tier1 分支先于授权分支，额度内不走 authz）。
+	run, _ := seedWaitRun(t, env, bot.ID, false)
+	args := `{"action":"send","env_id":"` + envID + `","thread_id":"` + int160PolicyIdleThread + `","text":"继续"}`
+	calls := commitBotReply(t, env, bot.ID, run, "", []botModelToolCall{
+		{ID: "prov-aa1-" + uuid.NewString()[:8], Name: "fs_thread", Arguments: args},
+		{ID: "prov-aa2-" + uuid.NewString()[:8], Name: "fs_thread", Arguments: args},
+		{ID: "prov-aa3-" + uuid.NewString()[:8], Name: "fs_thread", Arguments: args},
+		{ID: "prov-aa4-" + uuid.NewString()[:8], Name: "fs_thread", Arguments: args},
+	})
+	for i, c := range calls[:2] {
+		pol := decodePolicyOf(t, c)
+		if c.Status != model.BotCallStatusQueued || pol["source"] != "tier1" {
+			t.Fatalf("calls[%d] 应 tier1 自动放行: %s %v", i, c.Status, pol)
+		}
+	}
+	for i, c := range calls[2:] {
+		pol := decodePolicyOf(t, c)
+		if c.Status != model.BotCallStatusQueued || pol["source"] != "always_allow" {
+			t.Fatalf("calls[%d] 额度超限后应 always-allow 接管: %s %v", i+2, c.Status, pol)
+		}
+	}
+	// 第 4 条的审计事实：always-allow 行未污染账本，quota.used 保持真实的
+	// 2（被污染会读成 3）。
+	last := decodePolicyOf(t, calls[3])
+	facts, _ := last["facts"].(map[string]interface{})
+	quota, _ := facts["quota"].(map[string]interface{})
+	if used, _ := quota["used"].(float64); used != 2 {
+		t.Fatalf("always-allow 行不得计入无人值守账本，quota.used 应=2，实得 %v", quota["used"])
+	}
+	for _, c := range calls {
+		settleAutoCall(t, env, c.ID)
+	}
+}
+
 // TestBotInt160WaitRecheckVerdicts 直测插入事务内的 wait 受理二次复核：
 // 并发请求抢先挂上同线程 → 判重；并发上限已满 → 超限。
 func TestBotInt160WaitRecheckVerdicts(t *testing.T) {

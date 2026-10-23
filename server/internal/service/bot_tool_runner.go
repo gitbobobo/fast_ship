@@ -274,7 +274,9 @@ func (s *BotService) commitAssistantTurn(bot *model.Bot, run *model.BotRun, requ
 					// 分级放行（INT-160）：档位由服务端按「动作 + 归一化参数 +
 					// 目标线程内存状态」计算，模型不能自证安全。评估结论无论
 					// 落在哪条路径（自动执行 / 确认卡 / 定时任务同步拒绝）都
-					// 写进 policy_json 审计。同批已受理的自动「继续」计入配额：
+					// 写进 policy_json 审计。同批已受理的「继续」计入无人值守配
+					// 额仅限 source=tier1：always-allow 接管的降级候选行同样带
+					// auto+rule_id，但那是用户明示授权，不占自动放行额度。
 					// 键取 botPolicyThreadTargetOf 口径（send 的 ThreadID 缺省，
 					// 回退 ScopeID），直接读 execCtx.ThreadID 会把不同线程的
 					// 发送串进同一配额桶。
@@ -283,7 +285,8 @@ func (s *BotService) commitAssistantTurn(bot *model.Bot, run *model.BotRun, requ
 					pol := s.evaluateWritePolicy(bot, run, prepared, batch.autoSends[batchKey])
 					entry.policy = pol
 					entry.call.PolicyJSON = botPolicyRecordJSON(&pol.record)
-					if pol.record.Auto && pol.record.RuleID == botPolicyRuleSendContinue {
+					if pol.record.Auto && pol.record.Source == "tier1" &&
+						pol.record.RuleID == botPolicyRuleSendContinue {
 						batch.autoSends[batchKey]++
 					}
 					switch {
