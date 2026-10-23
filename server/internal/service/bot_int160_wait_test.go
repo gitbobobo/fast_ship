@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -25,9 +26,10 @@ const botToolsetV12FrozenHash = "89ddf49802db9adc48b77fcbb59cd8dde91ae64254426cc
 
 func shrinkWaitTimers(env *botTestEnv) {
 	env.bots.waitCfg = botWaitEvalConfig{
-		IdleStable:   80 * time.Millisecond,
-		StartGrace:   300 * time.Millisecond,
-		DetailBudget: 3 * time.Second,
+		IdleStable:       80 * time.Millisecond,
+		StartGrace:       300 * time.Millisecond,
+		DetailBudget:     3 * time.Second,
+		ScanDetailBudget: 3 * time.Second,
 	}
 }
 
@@ -855,8 +857,8 @@ func TestBotInt160WaitDupAtHourlyCapRejected(t *testing.T) {
 			ProviderToolCallID: "prov-wh-" + uuid.NewString()[:4],
 			ToolName:           "fs_thread", Action: "wait",
 			ArgumentsJSON: wait, ArgumentsHash: "x",
-			ExecutionMode:        string(model.BotExecutionAsync),
-			Status:               model.BotCallStatusSucceeded, FinishedAt: &now,
+			ExecutionMode: string(model.BotExecutionAsync),
+			Status:        model.BotCallStatusSucceeded, FinishedAt: &now,
 			ExecutionContextJSON: "{}", CreatedAt: now,
 		}
 		if err := env.db.Create(row).Error; err != nil {
@@ -974,5 +976,213 @@ func TestBotInt160WaitAttachAlreadyWaitingOrFailed(t *testing.T) {
 	}
 	if m, _ := r2["matched"].([]interface{}); len(m) != 1 || m[0] != "error" {
 		t.Fatalf("命中项应为 error: %v", m)
+	}
+}
+
+// ---------- 第 5 轮复审回归 ----------
+
+// Bot P2：一批 wait 同轮收尾时详情读取共享单轮总预算——不能把 5s 扫描循环
+// 拖住 N×DetailBudget。两个线程的投影读取都被掐死时，一轮评估的总耗时必须
+// 在共享预算量级，两个 wait 都按「详情失败」如实收尾。
+func TestBotInt160WaitScanDetailBudgetShared(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "waitbudget")
+	bot := env.createBot(t, userID)
+
+	th1, th2 := "th-budget-1", "th-budget-2"
+	pending := map[string]any{
+		"pendingRuntimeRequest": map[string]any{
+			"id": "req-b", "kind": "approval", "createdAt": "2026-10-20T00:00:00.000Z",
+		},
+	}
+	fake, envID := pairBotT3WithSnapshot(t, env, userID, "预算机",
+		shellSnapshotFixture([]any{map[string]any{"id": "p-1", "title": "P"}},
+			[]any{shellThread(th1, "等1", "completed", pending), shellThread(th2, "等2", "completed", pending)}))
+	fake.mu.Lock()
+	fake.projections[th1] = threadProjection(th1, []any{}, nil)
+	fake.projections[th2] = threadProjection(th2, []any{}, nil)
+	// 详情读取挂起：两个线程的投影请求都被掐死，只能等调用方 ctx 断开。
+	fake.blockProjection = map[string]chan struct{}{th1: make(chan struct{}), th2: make(chan struct{})}
+	fake.mu.Unlock()
+	env.bots.waitCfg = botWaitEvalConfig{
+		IdleStable:       80 * time.Millisecond,
+		StartGrace:       300 * time.Millisecond,
+		DetailBudget:     5 * time.Second,
+		ScanDetailBudget: 200 * time.Millisecond,
+	}
+	waitHubReady(t, env, userID, envID)
+
+	call1 := acceptWaitCall(t, env, bot.ID, false,
+		`{"action":"wait","env_id":"`+envID+`","thread_id":"`+th1+`","on":"needs_reply"}`)
+	call2 := acceptWaitCall(t, env, bot.ID, false,
+		`{"action":"wait","env_id":"`+envID+`","thread_id":"`+th2+`","on":"needs_reply"}`)
+
+	start := time.Now()
+	env.bots.evaluateThreadWaits()
+	elapsed := time.Since(start)
+	// 共享预算 200ms：两条串行详情各等满 DetailBudget 的旧行为是 ~10s，
+	// 现在整轮必须在共享预算量级内返回。
+	if elapsed > 3*time.Second {
+		t.Fatalf("一轮评估被详情读取拖住 %v（共享预算 200ms，预期 <3s）", elapsed)
+	}
+	for _, id := range []string{call1.ID, call2.ID} {
+		c, err := env.bots.calls.FindByID(id)
+		if err != nil || !c.Status.IsTerminal() {
+			t.Fatalf("wait %s 应已收尾: %+v err=%v", id, c, err)
+		}
+		r := waitResultJSON(t, c)
+		if r["outcome"] != "triggered" {
+			t.Fatalf("触发事实不依赖详情读取，应为 triggered: %v", r)
+		}
+		if _, hasNote := r["note"]; !hasNote {
+			t.Fatalf("详情读取失败应在 note 说明: %v", r)
+		}
+	}
+}
+
+// Bot Note：T3 服务未接线（threads=nil）时评估器不得整体罢工——取消要立即
+// 落终态，其余 wait 在启动宽限后如实落 watch_degraded，不能晾到进程重启。
+func TestBotInt160WaitThreadsUnavailable(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "waitnothreads")
+	bot := env.createBot(t, userID)
+	_, envID := pairBotT3WithSnapshot(t, env, userID, "断线机",
+		shellSnapshotFixture([]any{map[string]any{"id": "p-1", "title": "P"}},
+			[]any{shellThread("th-x", "在跑", "running", map[string]any{"activeRunId": "run-1"})}))
+	shrinkWaitTimers(env)
+	waitHubReady(t, env, userID, envID)
+
+	callCancel := acceptWaitCall(t, env, bot.ID, false,
+		`{"action":"wait","env_id":"`+envID+`","thread_id":"th-x","on":"idle"}`)
+	callGrace := acceptWaitCall(t, env, bot.ID, false,
+		`{"action":"wait","env_id":"`+envID+`","thread_id":"th-y","on":"idle"}`)
+	// 断线：T3 服务整体不可用。
+	env.bots.threads = nil
+	now := time.Now().UTC()
+	if err := env.db.Model(&model.BotToolCall{}).Where("id = ?", callCancel.ID).
+		Update("cancel_requested_at", &now).Error; err != nil {
+		t.Fatalf("mark cancel: %v", err)
+	}
+
+	done1 := waitCallTerminal(t, env, callCancel.ID, "断线后取消")
+	if done1.Status != model.BotCallStatusCancelled {
+		t.Fatalf("断线后取消应落 cancelled: %s", done1.Status)
+	}
+	done2 := waitCallTerminal(t, env, callGrace.ID, "断线后宽限收尾")
+	r2 := waitResultJSON(t, done2)
+	if r2["outcome"] != "watch_degraded" {
+		t.Fatalf("观察不可信时应落 watch_degraded: %v", r2["outcome"])
+	}
+}
+
+// Bot P2：running wait 每（bot,env,thread）至多一个是硬约束——部分唯一索引
+// 兜底应用层判重漏掉的并发窗口，第二条 running 插入必须撞索引失败。
+func TestBotInt160WaitRunningUniqueIndex(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "waitidx")
+	bot := env.createBot(t, userID)
+	_, req := seedWaitRun(t, env, bot.ID, false)
+
+	newWaitRow := func(threadID string) *model.BotToolCall {
+		return &model.BotToolCall{
+			ID: uuid.NewString(), BotID: bot.ID, RequestID: req.ID,
+			ProviderToolCallID: "prov-" + uuid.NewString()[:8], Ordinal: 1,
+			ToolName: "fs_thread", Action: "wait",
+			ArgumentsJSON:        `{"action":"wait","env_id":"env-1","thread_id":"` + threadID + `"}`,
+			ArgumentsHash:        "h-" + uuid.NewString()[:8],
+			ExecutionMode:        string(model.BotExecutionAsync),
+			Status:               model.BotCallStatusRunning,
+			ExecutionContextJSON: "{}", PolicyJSON: "{}",
+			CreatedAt: time.Now().UTC(),
+		}
+	}
+	repo := repository.NewBotToolCallRepository(env.db)
+	if err := repo.CreateTx(env.db, newWaitRow("th-dup")); err != nil {
+		t.Fatalf("第一条 running wait 应可插入: %v", err)
+	}
+	err := repo.CreateTx(env.db, newWaitRow("th-dup"))
+	if err == nil {
+		t.Fatalf("同线程第二条 running wait 必须被唯一索引拒绝")
+	}
+	if !strings.Contains(err.Error(), "idx_bot_tool_calls_running_wait") &&
+		!strings.Contains(err.Error(), "UNIQUE") {
+		t.Fatalf("应报唯一索引冲突: %v", err)
+	}
+	// 不同线程不受约束。
+	if err := repo.CreateTx(env.db, newWaitRow("th-other")); err != nil {
+		t.Fatalf("不同线程的 running wait 应可插入: %v", err)
+	}
+	// 已收尾的行不占唯一位（部分索引只盖 running）。
+	terminal := newWaitRow("th-dup")
+	terminal.Status = model.BotCallStatusSucceeded
+	now := time.Now().UTC()
+	terminal.FinishedAt = &now
+	if err := repo.CreateTx(env.db, terminal); err != nil {
+		t.Fatalf("已收尾的同线程 wait 应可插入: %v", err)
+	}
+}
+
+// Bot P2：两个并发 commitAssistantTurn 同挂一线程的 wait——commitMu 串行化
+// 受理评估到提交，后到者事务内复核必然看见先到的已提交行，落 already_waiting
+// 而不是两条 running。
+func TestBotInt160WaitConcurrentCommitDeduped(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "waitconc")
+	bot := env.createBot(t, userID)
+	_, envID := pairBotT3WithSnapshot(t, env, userID, "并发机",
+		shellSnapshotFixture([]any{map[string]any{"id": "p-1", "title": "P"}},
+			[]any{shellThread("th-c", "在跑", "running", map[string]any{"activeRunId": "run-1"})}))
+	shrinkWaitTimers(env)
+	waitHubReady(t, env, userID, envID)
+	botRow, err := env.bots.bots.Get(bot.ID)
+	if err != nil {
+		t.Fatalf("get bot: %v", err)
+	}
+	args := `{"action":"wait","env_id":"` + envID + `","thread_id":"th-c","on":"idle"}`
+
+	var wg sync.WaitGroup
+	results := make([]*model.BotToolCall, 2)
+	errsOut := make([]error, 2)
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			run, req := seedWaitRun(t, env, bot.ID, false)
+			reply := &botModelReply{ToolCalls: []botModelToolCall{{
+				ID: "prov-conc-" + uuid.NewString()[:8], Name: "fs_thread", Arguments: args,
+			}}}
+			calls, cerr := env.bots.commitAssistantTurn(botRow, run, req, reply, "msg-"+uuid.NewString())
+			if cerr == nil && len(calls) == 1 {
+				results[i] = calls[0]
+			} else {
+				errsOut[i] = cerr
+			}
+		}(i)
+	}
+	wg.Wait()
+	// 无锁时两个事务可同时通过判重各落一条 running；有锁后必然一挂一撞重。
+	// 后到者需等 post-commit 的 already_waiting 终态落定再断言。
+	time.Sleep(100 * time.Millisecond)
+	running, dup := 0, 0
+	for i, c := range results {
+		if c == nil {
+			t.Fatalf("并发提交 %d 失败: %v", i, errsOut[i])
+		}
+		fresh, ferr := env.bots.calls.FindByID(c.ID)
+		if ferr != nil {
+			t.Fatalf("reload call: %v", ferr)
+		}
+		switch {
+		case fresh.Status == model.BotCallStatusRunning:
+			running++
+		case fresh.Status == model.BotCallStatusSucceeded:
+			r := waitResultJSON(t, fresh)
+			if r["outcome"] == "already_waiting" {
+				dup++
+			}
+		}
+	}
+	if running != 1 || dup != 1 {
+		t.Fatalf("并发挂 wait 应恰为 1 running + 1 already_waiting，实得 running=%d dup=%d", running, dup)
 	}
 }

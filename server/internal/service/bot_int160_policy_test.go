@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -813,5 +814,99 @@ func TestBotInt160PolicyRuleToggleAPI(t *testing.T) {
 	otherUser := createBotTestUser(t, env.db, "int160policy16b")
 	if _, err := env.bots.SetWritePolicyRuleEnabled(otherUser, bot.ID, botPolicyRuleSendContinue, true); err == nil {
 		t.Fatalf("跨用户开关应报错")
+	}
+}
+
+// Bot P1：always_allow 持久授权的执行复检豁免——受理端裁决「授权优先于
+// 降级」，执行前复检不能再用同一组 tier1 前置条件推翻用户明示的授权。
+// 线程已不可信（env 不存在）时 source=tier1 会复检失败，always_allow 不。
+func TestBotInt160RecheckSkipsAlwaysAllow(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "int160policyskip")
+	bot := env.createBot(t, userID)
+	botRow, err := env.bots.bots.Get(bot.ID)
+	if err != nil {
+		t.Fatalf("get bot: %v", err)
+	}
+
+	args := `{"action":"send","env_id":"env-none","thread_id":"th-x","text":"继续"}`
+	allowRec, _ := json.Marshal(botWritePolicyRecord{
+		Tier: "tier1", RuleID: botPolicyRuleSendContinue, Auto: true, Source: "always_allow",
+	})
+	if recheckErr := env.bots.policyRecheckCall(botRow, &model.BotToolCall{
+		ToolName: "fs_thread", Action: "send", ArgumentsJSON: args, PolicyJSON: string(allowRec),
+	}); recheckErr != nil {
+		t.Fatalf("always_allow 不应被 tier1 前置条件复检推翻: %v", recheckErr)
+	}
+
+	// 对照：同记录 source=tier1 在前置不满足时必须复检失败（守卫豁免边界）。
+	tier1Rec, _ := json.Marshal(botWritePolicyRecord{
+		Tier: "tier1", RuleID: botPolicyRuleSendContinue, Auto: true, Source: "tier1",
+	})
+	recheckErr := env.bots.policyRecheckCall(botRow, &model.BotToolCall{
+		ToolName: "fs_thread", Action: "send", ArgumentsJSON: args, PolicyJSON: string(tier1Rec),
+	})
+	if recheckErr == nil {
+		t.Fatalf("source=tier1 前置已失效时应复检失败")
+	}
+	if _, ok := recheckErr.(*botPolicyRecheckError); !ok {
+		t.Fatalf("复检失败应是专用错误类型: %T", recheckErr)
+	}
+}
+
+// Bot P2：每小时 2 次「继续」配额是硬上限——两个并发 commitAssistantTurn
+// 在 commitMu 下串行评估，后到者看见先到者已提交的 tier1 行，不得双双
+// 越过配额（旧实现两个事务各读自己的已提交视图可同时放行）。
+func TestBotInt160ConcurrentSendQuota(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "int160policyconc")
+	_, envID := pairPolicyT3(t, env, userID)
+	bot := env.createBot(t, userID)
+	botRow, err := env.bots.bots.Get(bot.ID)
+	if err != nil {
+		t.Fatalf("get bot: %v", err)
+	}
+	args := `{"action":"send","env_id":"` + envID + `","thread_id":"` + int160PolicyIdleThread + `","text":"请继续"}`
+
+	// 先用掉 1 次额度，剩 1 次给两路并发抢。
+	first := acceptPolicyCall(t, env, bot.ID, false, "fs_thread", args)
+	if first.Status != model.BotCallStatusQueued {
+		t.Fatalf("第一笔应自动放行，实得 %s", first.Status)
+	}
+	settleAutoCall(t, env, first.ID)
+
+	var wg sync.WaitGroup
+	results := make([]*model.BotToolCall, 2)
+	errsOut := make([]error, 2)
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			run, req := seedWaitRun(t, env, bot.ID, false)
+			reply := &botModelReply{ToolCalls: []botModelToolCall{{
+				ID: "prov-quota-" + uuid.NewString()[:8], Name: "fs_thread", Arguments: args,
+			}}}
+			calls, cerr := env.bots.commitAssistantTurn(botRow, run, req, reply, "msg-"+uuid.NewString())
+			if cerr == nil && len(calls) == 1 {
+				results[i] = calls[0]
+			} else {
+				errsOut[i] = cerr
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	auto := 0
+	for i, c := range results {
+		if c == nil {
+			t.Fatalf("并发提交 %d 失败: %v", i, errsOut[i])
+		}
+		pol := decodePolicyOf(t, c)
+		if c.Status == model.BotCallStatusQueued && pol["source"] == "tier1" {
+			auto++
+		}
+	}
+	if auto != 1 {
+		t.Fatalf("额度只剩 1 次时两路并发应恰放行一笔 tier1 自动，实得 %d", auto)
 	}
 }

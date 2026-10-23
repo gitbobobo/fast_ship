@@ -540,14 +540,16 @@ func botCallErrorCodeOf(err error) string {
 }
 
 // policyRecheckCall 在 worker 认领后、真正执行前重评 tier1 前置条件：覆盖
-// 所有带 rule_id 的 tier1 记录——自动放行与降级批准卡都复检（「判断时满足、
-// 执行时已变」的窗口不因无人确认而消失），普通确认卡（tier2/tier3）与无
-// 策略记录的调用不复检。复检一律跳过配额：额度只约束受理时刻的自动放行，
-// 已入队的调用不因额度用尽而翻脸。过期（降级卡）或前置不满足都返回复检
-// 错误，调用落 failed + policy_recheck_failed + effect=false。
+// source=tier1 的自动放行与带有效期的降级批准卡（「判断时满足、执行时已变」
+// 的窗口不因无人确认而消失）。source=always_allow 不复检——受理端已裁决
+// 「持久授权优先于降级」，用户明示的授权不能在执行时被同一组前置条件静默
+// 推翻。普通确认卡（tier2/tier3）与无策略记录的调用同样不复检。复检一律
+// 跳过配额：额度只约束受理时刻的自动放行，已入队的调用不因额度用尽而翻脸。
+// 过期（降级卡）或前置不满足都返回复检错误，调用落 failed +
+// policy_recheck_failed + effect=false。
 func (s *BotService) policyRecheckCall(bot *model.Bot, call *model.BotToolCall) error {
 	rec := botWritePolicyRecordOf(call)
-	if rec == nil || rec.Tier != "tier1" || rec.RuleID == "" {
+	if rec == nil || rec.Tier != "tier1" || rec.RuleID == "" || rec.Source == "always_allow" {
 		return nil
 	}
 	now := time.Now().UTC()

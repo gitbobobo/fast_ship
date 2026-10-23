@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/model"
@@ -138,6 +139,11 @@ func (s *BotService) recheckSendQuota(tx *gorm.DB, botID string, args botThreadA
 // assistant 行必须一次写对）；提交成功后才唤醒 worker。msgID 由调用方在
 // 模型请求前预分配，流式增量信封已携带同一 ID。
 func (s *BotService) commitAssistantTurn(bot *model.Bot, run *model.BotRun, requestRow *model.BotModelRequest, reply *botModelReply, msgID string) ([]*model.BotToolCall, error) {
+	// 受理评估与提交互斥：wait 判重与 tier1 配额都以已提交行为准，并发事务
+	// 互相读不到对方未提交行，评估到提交完成的窗口必须闭合（见 commitMu）。
+	s.commitMu.Lock()
+	defer s.commitMu.Unlock()
+
 	now := time.Now().UTC()
 	requestID := requestRow.ID
 	batch := newBotBatchAcceptance()
@@ -384,6 +390,7 @@ func (s *BotService) commitAssistantTurn(bot *model.Bot, run *model.BotRun, requ
 		for i := range entries {
 			entry := &entries[i]
 			call := entry.call
+			var dupOutcome botToolOutcome
 			// 受理端限额的二次复核（INT-160）：受理评估与插入之间有并发窗口
 			//（其他请求在同一间隙提交的行，受理评估看不见），同批判重也代替
 			// 不了已提交行。在插入事务内以已提交行再裁决一次（同事务早前插入
@@ -403,6 +410,12 @@ func (s *BotService) commitAssistantTurn(bot *model.Bot, run *model.BotRun, requ
 				case verdict.limErr != nil:
 					failAcceptedEntry(entry, now, verdict.limErr)
 				}
+				if entry.waitAccepted && entry.waitDup != "" {
+					// 撞重行直落 already_waiting 终态：running wait 的
+					// （bot,env,thread）唯一索引不允许第二条 running 行。
+					// 终态在事务内写全，提交后只做唤醒（见下方 post-commit）。
+					dupOutcome = waitStampDuplicateTerminal(call, entry.waitDup, entry.waitConds, now)
+				}
 			} else if entry.policy != nil && entry.policy.record.Auto &&
 				entry.policy.record.Source == "tier1" &&
 				entry.policy.record.RuleID == botPolicyRuleSendContinue &&
@@ -416,7 +429,24 @@ func (s *BotService) commitAssistantTurn(bot *model.Bot, run *model.BotRun, requ
 				}
 			}
 			if err := txCalls.CreateTx(tx, call); err != nil {
-				return err
+				// DB 层兜底判重：running wait 的（bot,env,thread）部分唯一
+				// 索引兜住跨进程/漏锁路径写入的第二条 running wait。命中即
+				// 改判受理失败（already_waiting 需要胜者 call_id，尽力查出
+				// 放进错误消息），改判后以 failed 落行不再撞索引。
+				if !entry.waitAccepted || !strings.Contains(err.Error(), "idx_bot_tool_calls_running_wait") {
+					return err
+				}
+				msg := "同一线程已有运行中的 wait（并发受理由唯一索引兜底），请向用户汇报"
+				var waitArgs botThreadArgs
+				_ = json.Unmarshal([]byte(call.ArgumentsJSON), &waitArgs)
+				if existing, ferr := repository.NewBotToolCallRepository(tx).FindRunningWaitByThreadTx(
+					tx, bot.ID, waitArgs.EnvID, waitArgs.ThreadID); ferr == nil {
+					msg = fmt.Sprintf("同一线程已有运行中的 wait（call_id=%s），请等待其结束或用 fs_cancel 取消后再挂", existing.ID)
+				}
+				failAcceptedEntry(entry, now, errs.New(errs.ErrInvalidParams.Code, msg))
+				if err := txCalls.CreateTx(tx, call); err != nil {
+					return err
+				}
 			}
 			calls = append(calls, call)
 
@@ -481,6 +511,13 @@ func (s *BotService) commitAssistantTurn(bot *model.Bot, run *model.BotRun, requ
 				if err := s.appendToolReplyTx(tx, bot.ID, run.ID, requestID, call, replyContent, now); err != nil {
 					return err
 				}
+				if entry.waitDup != "" {
+					// 撞重行的 already_waiting 终态消息同事务落库（异步调用
+					// 的终态不走 provider 回复位，走 background_result）。
+					if err := s.appendBackgroundResultTx(tx, run.ID, call, call.Status, dupOutcome, nil, false, now); err != nil {
+						return err
+					}
+				}
 			}
 		}
 
@@ -530,7 +567,8 @@ func (s *BotService) commitAssistantTurn(bot *model.Bot, run *model.BotRun, requ
 	s.publishEvent(bot.ID)
 
 	// 事务提交后才唤醒 worker（回执已可见）；wait 不进 worker 队列——提交后
-	// 注册评估现场，重复挂立即以 already_waiting 落终态。
+	// 注册评估现场，重复挂的 already_waiting 终态与终态消息已同事务落库，
+	// 这里只补提交后的唤醒。
 	for i := range entries {
 		entry := &entries[i]
 		call := entry.call
@@ -538,11 +576,12 @@ func (s *BotService) commitAssistantTurn(bot *model.Bot, run *model.BotRun, requ
 			s.enqueueCallWork(call.ID)
 		}
 		if entry.waitAccepted && call.Status == model.BotCallStatusRunning {
-			if entry.waitDup != "" {
-				s.waitFinalizeDuplicate(bot, call, entry.waitDup, entry.waitConds)
-			} else {
-				s.threadWaitAttach(bot, call, entry.waitConds, entry.waitTimeout)
-			}
+			s.threadWaitAttach(bot, call, entry.waitConds, entry.waitTimeout)
+		}
+		if entry.waitDup != "" && call.Status.IsTerminal() {
+			// 撞重行的终态与终态消息已在事务内落库；补 finalizeCall 本来
+			// 在提交后做的唤醒（模型读到 already_waiting 后继续）。
+			s.wakeForCallResult(bot.ID, call, string(call.Status))
 		}
 		// 误判只记「用户」反向操作：机器人自己受理的 settle/unsettle 往返
 		//（自动放行、定时任务默认放行、甚至自己发的确认卡待批准前的受理）

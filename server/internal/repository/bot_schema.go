@@ -78,6 +78,10 @@ END`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_bot_tool_calls_request_provider ON bot_tool_calls(request_id, provider_tool_call_id)`,
 	`CREATE INDEX IF NOT EXISTS idx_bot_tool_calls_bot_status ON bot_tool_calls(bot_id, status, created_at)`,
 	`CREATE INDEX IF NOT EXISTS idx_bot_tool_calls_status_created ON bot_tool_calls(status, created_at)`,
+	// INT-160：running wait 每（bot, env, thread）至多一个是硬约束——应用层
+	// 判重只读已提交视图，并发事务互相看不见对方未提交行，由部分唯一索引
+	// 兜底（env_id/thread_id 在 arguments_json 里，用表达式抽取）。
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_bot_tool_calls_running_wait ON bot_tool_calls(bot_id, json_extract(arguments_json, '$.env_id'), json_extract(arguments_json, '$.thread_id')) WHERE tool_name = 'fs_thread' AND action = 'wait' AND status = 'running'`,
 
 	// bot_authorizations：活跃授权规则唯一（撤销后允许重建同规则）。
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_bot_authorizations_active_rule ON bot_authorizations(bot_id, rule_hash) WHERE revoked_at IS NULL`,

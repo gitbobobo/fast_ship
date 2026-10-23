@@ -71,15 +71,21 @@ type botWaitEvalConfig struct {
 	// ActiveRunID 或新一轮 LatestRunStartedAt）即以 not_started 收尾
 	//（生产 60s）。
 	StartGrace time.Duration
-	// DetailBudget 是收尾时唯一一次详情读取的预算。
+	// DetailBudget 是收尾时单次详情读取的预算。
 	DetailBudget time.Duration
+	// ScanDetailBudget 是单轮扫描里全部详情读取共享的总预算：逐条串行
+	// Detail（每条至多 DetailBudget）会让一批同时到期/触发的 wait 把 5s
+	// 扫描循环拖住 N×预算，连带延后队列派发与调度唤醒。预算耗尽后
+	// waitDetail 立即失败，收尾走详情缺省/降级路径，不阻塞下一轮。
+	ScanDetailBudget time.Duration
 }
 
 func defaultBotWaitEvalConfig() botWaitEvalConfig {
 	return botWaitEvalConfig{
-		IdleStable:   20 * time.Second,
-		StartGrace:   60 * time.Second,
-		DetailBudget: 10 * time.Second,
+		IdleStable:       20 * time.Second,
+		StartGrace:       60 * time.Second,
+		DetailBudget:     10 * time.Second,
+		ScanDetailBudget: 8 * time.Second,
 	}
 }
 
@@ -316,12 +322,14 @@ func (s *BotService) waitRegistered(callID string) bool {
 // wait（受理与注册之间异常丢失的行不能永远无人评估，按首次观察到的快照
 // 补建基线），再逐条评估。由 scanOnce 每轮调用。
 func (s *BotService) evaluateThreadWaits() {
-	if s.threads == nil {
-		return
-	}
+	// s.threads 为 nil（T3 服务未接线）时评估照常：观察一律不可信，取消
+	// 即时落终态，其余 wait 在启动宽限/超时后如实落 watch_degraded，不
+	// 能把 running wait 晾到进程重启。
 	s.waitAdoptUnregistered()
+	detailCtx, cancel := context.WithTimeout(context.Background(), s.waitCfg.ScanDetailBudget)
+	defer cancel()
 	for _, e := range s.waitEntrySnapshot() {
-		s.evaluateThreadWait(e)
+		s.evaluateThreadWait(e, detailCtx)
 	}
 }
 
@@ -393,6 +401,9 @@ func nowOr(preferred, fallback *time.Time) time.Time {
 // waitObserve 读取 hub 内存里该线程的当前快照：view 为 nil 表示环境不可读；
 // obs.known=false 表示可信面上没有该线程。
 func (s *BotService) waitObserve(userID, envID, threadID string) (*t3ShellView, botWaitSnapshot) {
+	if s.threads == nil {
+		return nil, botWaitSnapshot{}
+	}
 	view, err := s.threads.PeekShell(userID, envID)
 	if err != nil || view == nil {
 		return view, botWaitSnapshot{}
@@ -499,7 +510,8 @@ func waitEqualActivity(a, b map[string]interface{}) bool {
 
 // evaluateThreadWait 单条 wait 的一轮评估：取消 → 启动宽限 → 触发 → 超时，
 // 收尾统一走 finalizeCall（CAS 落终态并以后台结果唤醒所属会话）。
-func (s *BotService) evaluateThreadWait(e *botWaitEntry) {
+// detailCtx 是本轮扫描全部详情读取共享的预算上下文（见 evaluateThreadWaits）。
+func (s *BotService) evaluateThreadWait(e *botWaitEntry, detailCtx context.Context) {
 	call, err := s.calls.FindByID(e.callID)
 	if err != nil {
 		s.waitDrop(e.callID)
@@ -554,7 +566,7 @@ func (s *BotService) evaluateThreadWait(e *botWaitEntry) {
 			}
 			if e.started {
 				if matched, ok := s.waitMatchConditions(e, obs, now, s.waitTrusted(e, view)); ok {
-					s.waitResolveTriggered(e, call, obs, matched)
+					s.waitResolveTriggered(e, call, obs, matched, detailCtx)
 					return
 				}
 			}
@@ -568,7 +580,7 @@ func (s *BotService) evaluateThreadWait(e *botWaitEntry) {
 		return
 	}
 	if now.After(e.deadline) {
-		s.waitResolveTimeout(e, call, view)
+		s.waitResolveTimeout(e, call, view, detailCtx)
 	}
 }
 
@@ -653,7 +665,7 @@ func (s *BotService) waitResolveThreadGone(e *botWaitEntry, call *model.BotToolC
 // waitResolveTriggered 触发条件命中：做唯一一次详情读取补 queue.held 与最近
 // 条目摘要后落 succeeded。详情读取失败不推翻命中事实（条件是在可信视图上
 // 观察到的），只省略对应字段并在 note 说明。
-func (s *BotService) waitResolveTriggered(e *botWaitEntry, call *model.BotToolCall, obs botWaitSnapshot, matched []string) {
+func (s *BotService) waitResolveTriggered(e *botWaitEntry, call *model.BotToolCall, obs botWaitSnapshot, matched []string, detailCtx context.Context) {
 	note := ""
 	payload := map[string]interface{}{
 		"outcome":         "triggered",
@@ -664,7 +676,7 @@ func (s *BotService) waitResolveTriggered(e *botWaitEntry, call *model.BotToolCa
 		"timeout_minutes": int(e.timeout.Minutes()),
 		"changes":         botWaitChanges(e.baseline, obs),
 	}
-	detail, _ := s.waitDetail(e)
+	detail, _ := s.waitDetail(e, detailCtx)
 	if detail != nil {
 		payload["queue_held"] = detail.held
 		payload["item_count"] = detail.itemCount
@@ -683,7 +695,7 @@ func (s *BotService) waitResolveTriggered(e *botWaitEntry, call *model.BotToolCa
 // 时基线对比，区分「没动」（timeout_unchanged）与「在动但未到终态」
 // （timeout_progressing）；监听不可信或权威读取失败时如实报 watch_degraded，
 // 不把「没听到」说成「没动」。
-func (s *BotService) waitResolveTimeout(e *botWaitEntry, call *model.BotToolCall, view *t3ShellView) {
+func (s *BotService) waitResolveTimeout(e *botWaitEntry, call *model.BotToolCall, view *t3ShellView, detailCtx context.Context) {
 	// 权威读取：重新取一次视图（不沿用本轮早前的观察）。
 	freshView, obs := s.waitObserve(e.userID, e.envID, e.threadID)
 	if freshView != nil {
@@ -714,7 +726,7 @@ func (s *BotService) waitResolveTimeout(e *botWaitEntry, call *model.BotToolCall
 		return
 	}
 
-	detail, detailErr := s.waitDetail(e)
+	detail, detailErr := s.waitDetail(e, detailCtx)
 	// 进展证据（INT-160 复审）：字段前后对比只是证据之一——同一 run 持续产出
 	// 条目时 status/run_status/activity/PRs 全都不变，latest_run 身份变化与
 	// 等待期间更新过的条目数同样计入。
@@ -773,9 +785,14 @@ type botWaitDetailInfo struct {
 	recent             []map[string]string
 }
 
-// waitDetail 收尾时唯一一次详情读取；失败返回 (nil, err)。
-func (s *BotService) waitDetail(e *botWaitEntry) (*botWaitDetailInfo, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), s.waitCfg.DetailBudget)
+// waitDetail 收尾时唯一一次详情读取；失败返回 (nil, err)。父 ctx 是单轮
+// 扫描共享的总预算——预算耗尽后后续 wait 的详情读取立即失败，不排队等满
+// DetailBudget。
+func (s *BotService) waitDetail(e *botWaitEntry, parent context.Context) (*botWaitDetailInfo, error) {
+	if s.threads == nil {
+		return nil, fmt.Errorf("t3 线程服务未接线")
+	}
+	ctx, cancel := context.WithTimeout(parent, s.waitCfg.DetailBudget)
 	defer cancel()
 	detail, err := s.threads.Detail(ctx, e.userID, e.envID, e.threadID)
 	if err != nil {
@@ -870,22 +887,30 @@ func (s *BotService) waitFinalize(e *botWaitEntry, call *model.BotToolCall, stat
 	s.finalizeCall(bot, s.runIDOfCall(call), call, status, outcome, nil, false)
 }
 
-// waitFinalizeDuplicate 受理后立即对重复挂落 succeeded 终态：结果指向已存在
-// 的同线程 wait，让模型不必等待即可继续。
-func (s *BotService) waitFinalizeDuplicate(bot *model.Bot, call *model.BotToolCall, existingCallID string, conditions []string) {
+// waitStampDuplicateTerminal 把重复挂的调用行在受理事务内直落 already_waiting
+// 终态：running wait 的（bot,env,thread）唯一索引不允许第二条 running 行，
+// 终态字段必须随行一次写入，终态消息由提交循环补写（见 commitAssistantTurn）。
+// 返回产出供事务内 appendBackgroundResultTx 复用。
+func waitStampDuplicateTerminal(call *model.BotToolCall, existingCallID string, conditions []string, now time.Time) botToolOutcome {
 	raw := marshalJSONString(map[string]interface{}{
 		"outcome":         "already_waiting",
 		"already_waiting": true,
 		"waiting_call_id": existingCallID,
 		"waiting_for":     conditions,
 	})
-	outcome := botToolOutcome{
+	call.Status = model.BotCallStatusSucceeded
+	call.FinishedAt = &now
+	call.ResultJSON = &raw
+	call.ResultPreviewJSON = &raw
+	call.ResultChars = int64(len([]rune(raw)))
+	call.ResultItems = 1
+	return botToolOutcome{
 		ResultJSON:  raw,
 		PreviewJSON: raw,
-		ResultChars: int64(len([]rune(raw))),
+		ResultChars: call.ResultChars,
+		ResultItems: 1,
 		WaitResult:  json.RawMessage(raw),
 	}
-	s.finalizeCall(bot, s.runIDOfCall(call), call, model.BotCallStatusSucceeded, outcome, nil, false)
 }
 
 func nowPtr() *time.Time {

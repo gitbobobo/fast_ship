@@ -57,6 +57,12 @@ type BotService struct {
 	waits   map[string]*botWaitEntry
 	waitCfg botWaitEvalConfig
 
+	// commitMu 串行化 commitAssistantTurn 的受理评估与提交：wait 判重与
+	// tier1 配额都以已提交行为准，两个并发事务互相读不到对方未提交行，
+	// 「事务内二次复核」收窄窗口但不能闭合——受理评估到提交完成必须
+	// 互斥（回复提交低频，串行代价可忽略）。
+	commitMu sync.Mutex
+
 	// 后台 worker：channel 只负责唤醒，队列满/丢失推送由扫描补回。
 	workCh      chan string
 	workOnce    sync.Once
