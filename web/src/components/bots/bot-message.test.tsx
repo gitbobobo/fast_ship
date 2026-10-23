@@ -512,4 +512,27 @@ describe("BotMessageView background_result", () => {
       screen.queryByTestId("bot-background-raw-result"),
     ).not.toBeInTheDocument();
   });
+
+  // async 调用终态后工具卡与后台面板都退出视野——副作用警示只随
+  // background_result 下发，这条消息是它唯一的渲染出口（第 9 轮 P1）。
+  it("async 取消且副作用可能已发生：结果消息渲染警示行", () => {
+    const { unmount } = renderMessage({
+      ...backgroundResult,
+      content: {
+        ...backgroundResult.content,
+        status: "cancelled",
+        summary: undefined,
+        effect_may_have_occurred: true,
+      },
+    });
+    expect(
+      screen.getByText(/副作用可能已经发生；请先核实再决定后续操作/),
+    ).toBeInTheDocument();
+    unmount();
+
+    renderMessage(backgroundResult);
+    expect(
+      screen.queryByText(/副作用可能已经发生/),
+    ).not.toBeInTheDocument();
+  });
 });

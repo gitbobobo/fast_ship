@@ -1387,7 +1387,11 @@ null），给三栏工作台的左侧列表当预览列。语义与约束：
   已由 `BotBackgroundCalls` 面板承担，不重复渲染）；终态但「需要用户
   留意」的前台调用卡——`effect_may_have_occurred`（如取消写调用后
   副作用可能已发生）或带 `error_message`/`error_code` 的调用，警示与
-  失败原因只有工具卡这一个出口，不能一并降噪。流式草稿不受影响，
+  失败原因只有工具卡这一个出口，不能一并降噪。async 调用的同类警示
+  走 `background_result` 消息（服务端终态时下发
+  `effect_may_have_occurred`/`error_*`，前端在结果卡内渲染同款警示行）——
+  async 终态后工具卡与后台调用面板都退出视野，结果消息是唯一出口。
+  流式草稿不受影响，
   仍直出气泡。消息内无可见内容时 `BotMessageView` 返回 null，不留空块。
   有意取舍：text 与 tool_calls 并存的消息即使正文非空也整体隐藏——
   按协议这段正文是调用前旁白（思考/计划），属 INT-157 明确要藏的

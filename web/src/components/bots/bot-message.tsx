@@ -297,6 +297,14 @@ export function BotMessageView({
             {bidiSafeText(message.content.error_message)}
           </p>
         )}
+        {/* async 调用的「副作用可能已发生」警示只随结果消息下发——这是
+            它唯一的渲染出口（工具卡对 async 终态不渲染，后台面板只收
+            在途调用）。与工具卡同一句文案。 */}
+        {message.content.effect_may_have_occurred && (
+          <p className="text-xs text-amber-700 dark:text-amber-400">
+            副作用可能已经发生；请先核实再决定后续操作。
+          </p>
+        )}
       </section>
     );
   }
