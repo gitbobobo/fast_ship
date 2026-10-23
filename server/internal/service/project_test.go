@@ -12,6 +12,7 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/repository"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
+	"gorm.io/gorm"
 )
 
 func TestParseRepositoryURL(t *testing.T) {
@@ -613,6 +614,130 @@ func TestProjectServiceList_IssueCount(t *testing.T) {
 	if detail.IssueCount != nil || detail.IssueWorkflowCounts != nil {
 		t.Fatalf("get 详情不应携带计数: issue_count=%v issue_workflow_counts=%v",
 			detail.IssueCount, detail.IssueWorkflowCounts)
+	}
+}
+
+// List 的 latest_version 取各项目 created_at 最大的版本（无版本则缺省），
+// issue_sync 由批量预取填充；版本与同步状态取数必须是常数条批量查询
+// （INT-154：此前逐项目各一次版本查询 + 两次同步状态往返，共 3P 条）。
+func TestProjectServiceList_LatestVersion(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-latest-version")
+	projectSvc := newTestProjectService(svc)
+
+	withVersions := createTestProject(t, svc.db, user.ID)
+	failedSync := createTestProject(t, svc.db, user.ID)
+	noVersions := createTestProject(t, svc.db, user.ID)
+
+	older := time.Now().Add(-2 * time.Hour)
+	newer := time.Now().Add(-1 * time.Hour)
+	createTestVersion(t, svc.db, withVersions.ID, func(v *model.Version) {
+		v.VersionNumber = "v1.0.0"
+		v.CreatedAt = older
+	})
+	latestW := createTestVersion(t, svc.db, withVersions.ID, func(v *model.Version) {
+		v.VersionNumber = "v1.1.0"
+		v.Status = model.VersionStatusShipped
+		v.CreatedAt = newer
+	})
+	// failedSync 两条版本 created_at 并列：按 id 升序应稳定取小者
+	// （旧实现 Order("created_at DESC").First 会隐式追加主键升序）
+	tie := time.Now().Add(-30 * time.Minute)
+	createTestVersion(t, svc.db, failedSync.ID, func(v *model.Version) {
+		v.ID = "zzzzzzzz-0000-4000-8000-000000000000"
+		v.VersionNumber = "v2.0.1"
+		v.CreatedAt = tie
+	})
+	latestF := createTestVersion(t, svc.db, failedSync.ID, func(v *model.Version) {
+		v.ID = "aaaaaaaa-0000-4000-8000-000000000000"
+		v.VersionNumber = "v2.0.0"
+		v.CreatedAt = tie
+	})
+	if err := svc.syncStateRepo.Save(&model.IssueSyncState{
+		ProjectID: failedSync.ID,
+		Status:    model.IssueSyncStatusFailed,
+		LastError: "boom",
+	}); err != nil {
+		t.Fatalf("seed sync state: %v", err)
+	}
+
+	// 记录 List 期间执行的 SQL：断言两张表各只命中固定条数
+	var stmts []string
+	record := func(d *gorm.DB) {
+		if d.Statement != nil {
+			stmts = append(stmts, d.Statement.SQL.String())
+		}
+	}
+	if err := svc.db.Callback().Query().After("gorm:query").Register("int154:record-query", record); err != nil {
+		t.Fatalf("register query callback: %v", err)
+	}
+	// Raw().Scan() 的执行走 row 处理器（Rows→RowQuery）
+	if err := svc.db.Callback().Row().After("gorm:row").Register("int154:record-row", record); err != nil {
+		t.Fatalf("register row callback: %v", err)
+	}
+	if err := svc.db.Callback().Create().After("gorm:create").Register("int154:record-create", record); err != nil {
+		t.Fatalf("register create callback: %v", err)
+	}
+
+	resp, total, err := projectSvc.List(user.ID, 1, 10)
+	if err != nil {
+		t.Fatalf("list projects: %v", err)
+	}
+	if total != 3 || len(resp) != 3 {
+		t.Fatalf("expected 3 projects, got total=%d len=%d", total, len(resp))
+	}
+
+	latest := make(map[string]*api.LatestVersion, len(resp))
+	syncs := make(map[string]*api.IssueSyncState, len(resp))
+	for _, p := range resp {
+		latest[p.Id] = p.LatestVersion
+		syncs[p.Id] = p.IssueSync
+	}
+
+	got := latest[withVersions.ID]
+	if got == nil || got.Id != latestW.ID || got.VersionNumber != "v1.1.0" ||
+		got.Status != model.VersionStatusShipped ||
+		got.CreatedAt != latestW.CreatedAt.Format("2006-01-02T15:04:05Z") {
+		t.Fatalf("withVersions latest_version = %+v, want %s/shipped", got, latestW.ID)
+	}
+	if got := latest[failedSync.ID]; got == nil || got.Id != latestF.ID {
+		t.Fatalf("failedSync latest_version = %+v, want %s", got, latestF.ID)
+	}
+	if got := latest[noVersions.ID]; got != nil {
+		t.Fatalf("noVersions latest_version = %+v, want nil", got)
+	}
+
+	if got := syncs[withVersions.ID]; got == nil || got.Status != model.IssueSyncStatusIdle {
+		t.Fatalf("withVersions issue_sync = %+v, want idle", got)
+	}
+	if got := syncs[failedSync.ID]; got == nil ||
+		got.Status != model.IssueSyncStatusFailed || got.LastError != "boom" {
+		t.Fatalf("failedSync issue_sync = %+v, want failed/boom", got)
+	}
+
+	versionQueries, syncStatements := 0, 0
+	for _, sql := range stmts {
+		if strings.Contains(sql, "versions") {
+			versionQueries++
+		}
+		if strings.Contains(sql, "issue_sync_states") {
+			syncStatements++
+		}
+	}
+	if versionQueries != 1 {
+		t.Fatalf("versions 命中 %d 条查询，want 1（批量）：%v", versionQueries, stmts)
+	}
+	if syncStatements != 2 {
+		t.Fatalf("issue_sync_states 命中 %d 条语句，want 2（批量补行+取回）：%v", syncStatements, stmts)
+	}
+
+	// 详情不携带 latest_version（omitempty 仅列表项）
+	detail, err := projectSvc.Get(withVersions.ID, user.ID)
+	if err != nil {
+		t.Fatalf("get project: %v", err)
+	}
+	if detail.LatestVersion != nil {
+		t.Fatalf("get 详情不应携带 latest_version: %+v", detail.LatestVersion)
 	}
 }
 

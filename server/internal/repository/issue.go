@@ -721,6 +721,35 @@ func (r *IssueSyncStateRepository) GetOrCreate(projectID string) (*model.IssueSy
 	return r.Get(projectID)
 }
 
+// GetOrCreateByProjectIDs 是 GetOrCreate 的批量形态：一条
+// INSERT ... ON CONFLICT DO NOTHING 补齐缺失行，再一次 SELECT 拉回全部，
+// 供项目列表按页填充 issue_sync；无行的项目会在返回前被创建，因此全部出现
+// 在结果中。
+func (r *IssueSyncStateRepository) GetOrCreateByProjectIDs(projectIDs []string) (map[string]*model.IssueSyncState, error) {
+	result := make(map[string]*model.IssueSyncState, len(projectIDs))
+	if len(projectIDs) == 0 {
+		return result, nil
+	}
+	states := make([]model.IssueSyncState, len(projectIDs))
+	for i, id := range projectIDs {
+		states[i] = model.IssueSyncState{ProjectID: id, Status: model.IssueSyncStatusIdle}
+	}
+	if err := r.db.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "project_id"}},
+		DoNothing: true,
+	}).Create(&states).Error; err != nil {
+		return nil, err
+	}
+	var rows []model.IssueSyncState
+	if err := r.db.Where("project_id IN ?", projectIDs).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	for i := range rows {
+		result[rows[i].ProjectID] = &rows[i]
+	}
+	return result, nil
+}
+
 func (r *IssueSyncStateRepository) Save(state *model.IssueSyncState) error {
 	return r.db.Save(state).Error
 }

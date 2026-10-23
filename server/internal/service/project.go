@@ -120,7 +120,7 @@ func (s *ProjectService) Create(userID string, req *CreateProjectRequest) (*Proj
 		return nil, errs.ErrInternal
 	}
 
-	return s.toResponse(project), nil
+	return s.toResponse(project, s.syncStateFor(project.ID)), nil
 }
 
 func (s *ProjectService) Get(id, userID string) (*ProjectResponse, error) {
@@ -131,7 +131,7 @@ func (s *ProjectService) Get(id, userID string) (*ProjectResponse, error) {
 		}
 		return nil, errs.ErrInternal
 	}
-	return s.toResponse(project), nil
+	return s.toResponse(project, s.syncStateFor(project.ID)), nil
 }
 
 func (s *ProjectService) List(userID string, page, pageSize int) ([]ProjectResponse, int64, error) {
@@ -150,10 +150,22 @@ func (s *ProjectService) List(userID string, page, pageSize int) ([]ProjectRespo
 	if err != nil {
 		return nil, 0, errs.ErrInternal
 	}
+	latestVersions, err := s.versionRepo.GetLatestByProjectIDs(projectIDs)
+	if err != nil {
+		return nil, 0, errs.ErrInternal
+	}
+	// 同步状态一次批量补齐+取回；失败时整页缺省（旧实现按项目容错跳过，
+	// 批量化后粒度放大到整页，语义同为「不拖垮列表」）。
+	var syncStates map[string]*model.IssueSyncState
+	if s.syncStateRepo != nil {
+		if states, err := s.syncStateRepo.GetOrCreateByProjectIDs(projectIDs); err == nil {
+			syncStates = states
+		}
+	}
 
 	resp := make([]ProjectResponse, len(projects))
 	for i, p := range projects {
-		projectResp := s.toResponse(&p)
+		projectResp := s.toResponse(&p, syncStates[p.ID])
 		if count, ok := issueCounts[p.ID]; ok {
 			projectResp.IssueCount = &count.Total
 			projectResp.IssueWorkflowCounts = &api.IssueWorkflowCounts{
@@ -163,11 +175,7 @@ func (s *ProjectService) List(userID string, page, pageSize int) ([]ProjectRespo
 				Done:       count.Done,
 			}
 		}
-		latest, err := s.versionRepo.GetLatestByProjectID(p.ID)
-		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, 0, errs.ErrInternal
-		}
-		if err == nil {
+		if latest, ok := latestVersions[p.ID]; ok {
 			projectResp.LatestVersion = &LatestVersionResponse{
 				Id:            latest.ID,
 				VersionNumber: latest.VersionNumber,
@@ -284,7 +292,7 @@ func (s *ProjectService) Update(id, userID string, req *UpdateProjectRequest) (*
 		return nil, errs.ErrInternal
 	}
 
-	return s.toResponse(project), nil
+	return s.toResponse(project, s.syncStateFor(project.ID)), nil
 }
 
 func (s *ProjectService) Delete(id, userID string) error {
@@ -391,7 +399,10 @@ func parseRepositoryURL(raw string) (owner, repo string, err error) {
 	return owner, repo, nil
 }
 
-func (s *ProjectService) toResponse(p *model.Project) *ProjectResponse {
+// toResponse 组装项目响应；syncState 由调用方提供——单项目路径用
+// syncStateFor 现取，列表路径经 GetOrCreateByProjectIDs 批量预取后逐条传入，
+// nil 表示同步状态缺省。
+func (s *ProjectService) toResponse(p *model.Project, syncState *model.IssueSyncState) *ProjectResponse {
 	resp := &ProjectResponse{
 		Id:                  p.ID,
 		Name:                p.Name,
@@ -406,26 +417,36 @@ func (s *ProjectService) toResponse(p *model.Project) *ProjectResponse {
 		UpdatedAt:           p.UpdatedAt.Format("2006-01-02T15:04:05Z"),
 	}
 
-	if s.syncStateRepo != nil {
-		if state, err := s.syncStateRepo.GetOrCreate(p.ID); err == nil {
-			resp.IssueSync = &api.IssueSyncState{
-				Status:    state.Status,
-				LastError: state.LastError,
-			}
-			if state.LastIssueUpdatedAt != nil {
-				value := state.LastIssueUpdatedAt.UTC().Format("2006-01-02T15:04:05Z")
-				resp.IssueSync.LastIssueUpdatedAt = &value
-			}
-			if state.LastSyncedAt != nil {
-				value := state.LastSyncedAt.UTC().Format("2006-01-02T15:04:05Z")
-				resp.IssueSync.LastSyncedAt = &value
-			}
-			if state.LastSuccessfulSyncAt != nil {
-				value := state.LastSuccessfulSyncAt.UTC().Format("2006-01-02T15:04:05Z")
-				resp.IssueSync.LastSuccessfulSyncAt = &value
-			}
+	if syncState != nil {
+		resp.IssueSync = &api.IssueSyncState{
+			Status:    syncState.Status,
+			LastError: syncState.LastError,
+		}
+		if syncState.LastIssueUpdatedAt != nil {
+			value := syncState.LastIssueUpdatedAt.UTC().Format("2006-01-02T15:04:05Z")
+			resp.IssueSync.LastIssueUpdatedAt = &value
+		}
+		if syncState.LastSyncedAt != nil {
+			value := syncState.LastSyncedAt.UTC().Format("2006-01-02T15:04:05Z")
+			resp.IssueSync.LastSyncedAt = &value
+		}
+		if syncState.LastSuccessfulSyncAt != nil {
+			value := syncState.LastSuccessfulSyncAt.UTC().Format("2006-01-02T15:04:05Z")
+			resp.IssueSync.LastSuccessfulSyncAt = &value
 		}
 	}
 
 	return resp
+}
+
+// syncStateFor 单项目路径现取同步状态；repo 未挂载或读取失败时容错为 nil。
+func (s *ProjectService) syncStateFor(projectID string) *model.IssueSyncState {
+	if s.syncStateRepo == nil {
+		return nil
+	}
+	state, err := s.syncStateRepo.GetOrCreate(projectID)
+	if err != nil {
+		return nil
+	}
+	return state
 }
