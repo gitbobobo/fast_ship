@@ -418,21 +418,6 @@ func (s *BotService) policySendQuotaUsedTx(db *gorm.DB, botID, envID, threadID s
 	return int(n), lastAutoID, true
 }
 
-// policyRuleEnabled 读规则的独立开关：行不存在即启用。查询失败按禁用处理
-// （fail-safe：交回确认，不无声放行）。
-func (s *BotService) policyRuleEnabled(botID, ruleID string) bool {
-	row, err := repository.NewBotWritePolicyRuleRepository(s.db).GetTx(s.db, botID, ruleID)
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return true
-	}
-	if err != nil {
-		s.logger.Warn("分级放行规则开关查询失败，按禁用处理",
-			zap.String("bot_id", botID), zap.String("rule_id", ruleID), zap.Error(err))
-		return false
-	}
-	return row.Enabled
-}
-
 // ---------- 评估入口 ----------
 
 // evaluateWritePolicy 对一个已通过校验与范围解析的需确认写调用算出分档与
@@ -459,9 +444,18 @@ func (s *BotService) evaluateWritePolicy(bot *model.Bot, run *model.BotRun, prep
 	if candidate != "" {
 		eval.record.Tier = "tier1"
 		eval.record.RuleID = candidate
-		if !s.policyRuleEnabled(bot.ID, candidate) {
+		// 区分「规则已关闭」与「开关查询失败」：查询失败仍 fail-safe 降级，
+		// 但降级原因如实归因——写成「规则已关闭」会把 DB 抖动记成用户的
+		// 开关操作，审计与排查都被误导。
+		ruleRow, ruleErr := repository.NewBotWritePolicyRuleRepository(s.db).GetTx(s.db, bot.ID, candidate)
+		switch {
+		case ruleErr != nil && !errors.Is(ruleErr, gorm.ErrRecordNotFound):
+			eval.record.Facts["rule_check"] = "error"
+			downgrade = "规则开关查询失败，保守交回确认"
+		case ruleErr == nil && !ruleRow.Enabled:
+			eval.record.Facts["rule_check"] = "disabled"
 			downgrade = "该规则已关闭（误判自动降级或手动关闭），同类动作回到确认"
-		} else {
+		default:
 			var args botThreadArgs
 			_ = json.Unmarshal([]byte(prepared.ArgumentsJSON), &args)
 			switch candidate {
@@ -563,8 +557,9 @@ func (s *BotService) policyRecheckCall(bot *model.Bot, call *model.BotToolCall) 
 	}
 	var args botThreadArgs
 	_ = json.Unmarshal([]byte(call.ArgumentsJSON), &args)
-	facts := map[string]interface{}{}
-	rec.Facts = facts
+	// rec.Facts 可能是 nil（旧 policy_json 无 facts 字段）——统一给一张新
+	// map 供三条复检路径写事实。
+	rec.Facts = map[string]interface{}{}
 	var reason string
 	switch rec.RuleID {
 	case botPolicyRuleSendContinue:
@@ -572,9 +567,9 @@ func (s *BotService) policyRecheckCall(bot *model.Bot, call *model.BotToolCall) 
 		// 无人在场的自动放行。
 		_, reason = s.policyCheckSendPreconditions(bot, args, rec, now, false, 0)
 	case botPolicyRuleSettleIdle:
-		_, reason = s.policyCheckSettlePreconditions(bot, args, facts, now)
+		_, reason = s.policyCheckSettlePreconditions(bot, args, rec.Facts, now)
 	case botPolicyRuleUnsettle:
-		_, reason = s.policyCheckUnsettlePreconditions(bot, args, facts)
+		_, reason = s.policyCheckUnsettlePreconditions(bot, args, rec.Facts)
 	default:
 		return nil
 	}

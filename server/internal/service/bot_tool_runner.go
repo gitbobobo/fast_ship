@@ -77,6 +77,9 @@ type botPreparedEntry struct {
 func failAcceptedEntry(entry *botPreparedEntry, now time.Time, err error) {
 	entry.invalidErr = err
 	entry.call.Status = model.BotCallStatusFailed
+	// wait 受理段可能已置 started_at；终态行带着未消费的 started_at 会让
+	// 账本误读为「曾真正开始执行」。
+	entry.call.StartedAt = nil
 	entry.call.FinishedAt = &now
 	entry.call.ErrorCode = botStrPtr(botErrCodeOf(err))
 	entry.call.ErrorMessage = botStrPtr(botErrMessage(err))

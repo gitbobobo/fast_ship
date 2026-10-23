@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/model"
+	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	"github.com/godbobo/fast_ship/server/internal/repository"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
@@ -1453,5 +1454,63 @@ func TestBotInt160WaitRecoveryDedupedRow(t *testing.T) {
 	}
 	if len(bg) != 1 || !strings.Contains(bg[0].ContentJSON, "wait_result") {
 		t.Fatalf("去重行恢复应补后台终态消息: %+v", bg)
+	}
+}
+
+// ---------- 17. 复审第 11 轮：收编解析失败收尾 + 受理失败清 started_at ----------
+
+// TestBotInt160WaitAdoptInvalidParams 验证兜底收编遇到参数解析失败的 running
+// wait 时不再静默跳过——直落 failed 终态并补后台结果，否则该行永远挂起
+// （不评估、不超时、取消也不生效）。
+func TestBotInt160WaitAdoptInvalidParams(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "int160wait17")
+	bot := env.createBot(t, userID)
+	_, req := seedWaitRun(t, env, bot.ID, false)
+	now := time.Now().UTC()
+	call := &model.BotToolCall{
+		ID: uuid.NewString(), BotID: bot.ID, RequestID: req.ID,
+		ProviderToolCallID: "prov-bad-wait", ToolName: "fs_thread", Action: "wait",
+		ArgumentsJSON: `{"action":"wait","env_id":"e1","thread_id":"t1","on":"bogus"}`,
+		ArgumentsHash: "x", ExecutionMode: string(model.BotExecutionAsync),
+		Status: model.BotCallStatusRunning, StartedAt: &now,
+		ExecutionContextJSON: "{}", CreatedAt: now,
+	}
+	if err := env.db.Create(call).Error; err != nil {
+		t.Fatalf("seed bad wait: %v", err)
+	}
+
+	env.bots.waitAdoptUnregistered()
+	done, err := env.bots.calls.FindByID(call.ID)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if done.Status != model.BotCallStatusFailed || done.FinishedAt == nil {
+		t.Fatalf("解析失败的收编行应落 failed 终态: %+v", done)
+	}
+	env.bots.waitMu.Lock()
+	_, registered := env.bots.waits[call.ID]
+	env.bots.waitMu.Unlock()
+	if registered {
+		t.Fatalf("解析失败的行不得入注册表")
+	}
+}
+
+// TestBotInt160WaitFailAcceptedClearsStartedAt 验证事务内复核改判受理失败时
+// started_at 一并清空——终态行不能带着未消费的执行起点。
+func TestBotInt160WaitFailAcceptedClearsStartedAt(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "int160wait17b")
+	bot := env.createBot(t, userID)
+
+	now := time.Now().UTC()
+	entry := &botPreparedEntry{
+		call: &model.BotToolCall{
+			ID: uuid.NewString(), BotID: bot.ID, StartedAt: &now,
+		},
+	}
+	failAcceptedEntry(entry, now, errs.New(errs.ErrInvalidParams.Code, "x"))
+	if entry.call.StartedAt != nil {
+		t.Fatalf("受理失败应清空 started_at")
 	}
 }

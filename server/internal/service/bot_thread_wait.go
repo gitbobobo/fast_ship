@@ -337,6 +337,29 @@ func (s *BotService) evaluateThreadWaits() {
 	}
 }
 
+// waitFinalizeAdoptInvalid 收尾收编时参数解析失败的 running wait：不入
+// 注册表的行永远不会被评估/超时/取消，只能等重启兜底——直接落 failed
+// 终态并如实回报参数问题。
+func (s *BotService) waitFinalizeAdoptInvalid(call *model.BotToolCall, parseErr error) {
+	bot, err := s.bots.Get(call.BotID)
+	if err != nil {
+		s.logger.Warn("wait 收编收尾读取机器人失败",
+			zap.String("call_id", call.ID), zap.Error(err))
+		return
+	}
+	raw := marshalJSONString(map[string]interface{}{
+		"outcome": "invalid_params",
+		"error":   parseErr.Error(),
+	})
+	s.finalizeCall(bot, s.runIDOfCall(call), call, model.BotCallStatusFailed,
+		botToolOutcome{
+			ResultJSON:  raw,
+			PreviewJSON: raw,
+			ResultChars: int64(len([]rune(raw))),
+			WaitResult:  json.RawMessage(raw),
+		}, parseErr, false)
+}
+
 // waitAdoptUnregistered 把数据库里 running 的 fs_thread/wait 调用收进注册表：
 // 注册基线取首次观察到的快照（与受理时注册的差异只在基线采集时点）。
 func (s *BotService) waitAdoptUnregistered() {
@@ -356,6 +379,14 @@ func (s *BotService) waitAdoptUnregistered() {
 		conditions, condErr := botWaitParseOn(args.On)
 		timeout, timeoutErr := botWaitParseTimeout(args.TimeoutMinutes)
 		if condErr != nil || timeoutErr != nil {
+			// 解析失败的 running wait 不能静默跳过：不入注册表就永远不
+			// 评估、不超时、取消也不生效，只能等重启由恢复兜底。直接落
+			// failed 终态并如实回报参数问题。
+			parseErr := condErr
+			if parseErr == nil {
+				parseErr = timeoutErr
+			}
+			s.waitFinalizeAdoptInvalid(call, parseErr)
 			continue
 		}
 		attachedAt := nowOr(call.StartedAt, &call.CreatedAt)
