@@ -16,7 +16,7 @@ import {
   useSetPolicyRuleEnabled,
 } from "@/lib/hooks/use-bots";
 import { ApiRequestError } from "@/lib/api/client";
-import { formatDate, formatRelativeFuture, formatRelativeTime, isExpiredDate } from "@/lib/utils/format";
+import { expiryDisplay, formatDate, formatRelativeTime } from "@/lib/utils/format";
 import { cn } from "@/lib/utils";
 
 /** 授权范围的可读标签；未知 scope_kind 原样展示，不猜语义。 */
@@ -179,7 +179,7 @@ export function BotAuthorizationsDialog({
           <ul className="space-y-2">
             {active.map((a) => {
               const { fields, exec, param, others } = constraintView(a.constraints);
-              const expired = isExpiredDate(a.expires_at);
+              const expiry = expiryDisplay(a.expires_at);
               return (
                 <li
                   key={a.id}
@@ -228,10 +228,10 @@ export function BotAuthorizationsDialog({
                   )}
                   <p className="text-xs text-muted-foreground">
                     创建于 {formatDate(a.created_at)}
-                    {a.expires_at && !expired &&
-                      ` · ${formatRelativeFuture(a.expires_at)}过期`}
+                    {!expiry.expired && expiry.label &&
+                      ` · ${expiry.label}过期`}
                   </p>
-                  {expired && (
+                  {expiry.expired && (
                     <p className="text-xs text-amber-700 dark:text-amber-400">
                       已过期：不再命中，等同已撤销（历史记录保留）。
                     </p>
@@ -246,7 +246,7 @@ export function BotAuthorizationsDialog({
           <h4 className="text-xs font-medium text-muted-foreground">
             分级放行规则
             <span className="font-normal">
-              ·开启后满足前置条件的动作自动执行，不逐次确认
+              {" · "}开启后满足前置条件的动作自动执行，不逐次确认
             </span>
           </h4>
           {rulesLoading ? (

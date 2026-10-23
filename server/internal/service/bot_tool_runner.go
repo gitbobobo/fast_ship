@@ -126,7 +126,13 @@ func (s *BotService) recheckWaitAcceptance(tx *gorm.DB, botID string, args botTh
 // 裁决，这里不再降级成确认卡——超限按受理端同步失败落 failed+40001。
 func (s *BotService) recheckSendQuota(tx *gorm.DB, botID string, args botThreadArgs, now time.Time) error {
 	used, _, ok := s.policySendQuotaUsedTx(tx, botID, args.EnvID, args.ThreadID, now)
-	if !ok || used < botPolicySendQuotaPerThreadHour {
+	if !ok {
+		// 计数查询失败按超限同口径 fail closed——受理评估时同类失败会
+		// 降级为确认卡，这里不能无声放行重新打开并发窗口。
+		return errs.New(errs.ErrInternal.Code,
+			"自动放行配额复核失败，请重新发起该操作")
+	}
+	if used < botPolicySendQuotaPerThreadHour {
 		return nil
 	}
 	return errs.New(errs.ErrInvalidParams.Code,
@@ -426,27 +432,28 @@ func (s *BotService) commitAssistantTurn(bot *model.Bot, run *model.BotRun, requ
 				}
 			} else if entry.policy != nil && entry.policy.record.Auto &&
 				entry.policy.record.Source == "tier1" &&
-				entry.policy.record.RuleID == botPolicyRuleSendContinue &&
 				call.Status == model.BotCallStatusQueued {
 				// 只复核策略自动放行（source=tier1）：always-allow 是用户明示
 				// 的持久授权，不因无人在场额度用尽而翻脸。
-				var args botThreadArgs
-				_ = json.Unmarshal([]byte(entry.call.ArgumentsJSON), &args)
-				if quotaErr := s.recheckSendQuota(tx, bot.ID, args, now); quotaErr != nil {
-					failAcceptedEntry(entry, now, quotaErr)
-				} else {
-					// 规则开关同口径复核：评估与提交之间被关闭时不再放行
-					// 这一次 tier1 自动——开关是即时生效的用户意图。
-					rule, ruleErr := repository.NewBotWritePolicyRuleRepository(tx).GetTx(
-						tx, bot.ID, entry.policy.record.RuleID)
-					if ruleErr != nil && !errors.Is(ruleErr, gorm.ErrRecordNotFound) {
-						failAcceptedEntry(entry, now, errs.New(errs.ErrInternal.Code,
-							"规则开关复核失败，请重新发起该操作"))
-					} else if ruleErr == nil && !rule.Enabled {
-						// 语义是策略状态不是参数错误：调用直落终态，模型须
-						// 重新发起才会走确认流程——文案如实说明，别让它干等。
-						failAcceptedEntry(entry, now, errs.New(errs.ErrPermissionDenied.Code,
-							"分级放行规则已关闭，请重新发起该操作（将走确认流程）"))
+				// 规则开关对所有 tier1 自动放行生效：评估与提交之间被关闭时
+				// 不再放行这一次——开关是即时生效的用户意图。
+				rule, ruleErr := repository.NewBotWritePolicyRuleRepository(tx).GetTx(
+					tx, bot.ID, entry.policy.record.RuleID)
+				switch {
+				case ruleErr != nil && !errors.Is(ruleErr, gorm.ErrRecordNotFound):
+					failAcceptedEntry(entry, now, errs.New(errs.ErrInternal.Code,
+						"规则开关复核失败，请重新发起该操作"))
+				case ruleErr == nil && !rule.Enabled:
+					// 语义是策略状态不是参数错误：调用直落终态，模型须
+					// 重新发起才会走确认流程——文案如实说明，别让它干等。
+					failAcceptedEntry(entry, now, errs.New(errs.ErrPermissionDenied.Code,
+						"分级放行规则已关闭，请重新发起该操作（将走确认流程）"))
+				case entry.policy.record.RuleID == botPolicyRuleSendContinue:
+					// 发送配额只约束「继续」类 send。
+					var args botThreadArgs
+					_ = json.Unmarshal([]byte(entry.call.ArgumentsJSON), &args)
+					if quotaErr := s.recheckSendQuota(tx, bot.ID, args, now); quotaErr != nil {
+						failAcceptedEntry(entry, now, quotaErr)
 					}
 				}
 			}

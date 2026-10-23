@@ -93,3 +93,29 @@ export function isExpiredDate(dateStr?: string | null): boolean {
   const when = new Date(dateStr).getTime();
   return !Number.isNaN(when) && when <= Date.now();
 }
+
+/**
+ * 过期态展示的统一判定：单次 Date.now 同时给出 expired 与相对剩余时间，
+ * 避免 isExpiredDate 与 formatRelativeFuture 各取一次 now 在过期边界上
+ * 一个判 true、一个回退成「刚刚」的不一致行（授权列表曾出现两条同为
+ * 过期的授权展示不一致）。
+ */
+export function expiryDisplay(dateStr?: string | null): {
+  expired: boolean;
+  /** 未过期时的相对倒计时文案（如「3 小时后」）；过期或缺省为空串。 */
+  label: string;
+} {
+  if (!dateStr) return { expired: false, label: "" };
+  const when = new Date(dateStr).getTime();
+  if (Number.isNaN(when)) return { expired: false, label: "" };
+  const now = Date.now();
+  if (when <= now) return { expired: true, label: "" };
+  const minutes = Math.floor((when - now) / 60000);
+  if (minutes < 1) return { expired: false, label: "即将" };
+  if (minutes < 60) return { expired: false, label: `${minutes} 分钟后` };
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return { expired: false, label: `${hours} 小时后` };
+  const days = Math.floor(hours / 24);
+  if (days < 30) return { expired: false, label: `${days} 天后` };
+  return { expired: false, label: formatDate(dateStr) };
+}
