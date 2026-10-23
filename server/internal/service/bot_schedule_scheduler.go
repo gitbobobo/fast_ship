@@ -602,9 +602,10 @@ func (s *BotService) tryFinishScheduleRun(bot *model.Bot, run *model.BotRun) boo
 			}
 			reportSummary = strings.TrimSpace(summary + "\n" + botScheduleDeniedNote(deniedRows))
 		}
+		var task model.BotScheduleTask
+		needsReport := botScheduleNeedsReportFromContext(run)
 		if run.ScheduleTaskID != nil {
-			task := model.BotScheduleTask{ID: *run.ScheduleTaskID, Name: botScheduleTaskNameFromContext(run)}
-			needsReport := botScheduleNeedsReportFromContext(run)
+			task = model.BotScheduleTask{ID: *run.ScheduleTaskID, Name: botScheduleTaskNameFromContext(run)}
 			var stored model.BotScheduleTask
 			if err := tx.Where("id = ?", *run.ScheduleTaskID).First(&stored).Error; err == nil {
 				task = stored
@@ -612,13 +613,17 @@ func (s *BotService) tryFinishScheduleRun(bot *model.Bot, run *model.BotRun) boo
 			} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 				return err
 			}
-			if (needsReport || forceReport) && (!silent || forceReport) {
-				if err := s.appendScheduleEventTx(tx, bot.ID, &task, run,
-					model.BotRunStatusCompleted, reportSummary, "", "", now); err != nil {
-					return err
-				}
-				appendedEvent = true
+		} else {
+			// ScheduleTaskID 为空的 schedule run（防御口径外真实存在）：被拒
+			// 强制汇报仍要落到主线，任务名用运行时上下文兜底。
+			task.Name = botScheduleTaskNameFromContext(run)
+		}
+		if (needsReport || forceReport) && (!silent || forceReport) {
+			if err := s.appendScheduleEventTx(tx, bot.ID, &task, run,
+				model.BotRunStatusCompleted, reportSummary, "", "", now); err != nil {
+				return err
 			}
+			appendedEvent = true
 		}
 		return nil
 	})

@@ -244,6 +244,19 @@ func (s *BotService) DecideCall(userID, botID, callID string, req *CallDecisionR
 			"decision":   decisionStr,
 			"decided_at": now,
 		}
+		if decision == model.BotDecisionAlwaysAllow && call.PolicyJSON != "" {
+			// 「始终允许」批准的调用与存量授权放行的调用同口径：把 source
+			// 改写为 always_allow，执行前复检对 always_allow 直接豁免——
+			// 否则降级卡（source=confirmation）点了「始终允许」仍被复检
+			// 推翻，而新授权却已建出、后续同类调用反而自动放行，自相矛盾。
+			var pol map[string]interface{}
+			if json.Unmarshal([]byte(call.PolicyJSON), &pol) == nil {
+				pol["source"] = "always_allow"
+				if raw, err := json.Marshal(pol); err == nil {
+					cols["policy_json"] = string(raw)
+				}
+			}
+		}
 		if decision == model.BotDecisionReject {
 			cols["status"] = model.BotCallStatusRejected
 			cols["finished_at"] = now

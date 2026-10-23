@@ -375,10 +375,13 @@ func (s *BotService) policyCheckSettlePreconditions(bot *model.Bot, args botThre
 		return false, "线程还有活动运行或后台任务未结束"
 	}
 	held, ok := s.policyQueueHeld(bot.UserID, args.EnvID, args.ThreadID)
-	facts["queue_held"] = held
 	if !ok {
+		// 读取失败不记 false：facts 是审计事实源，把「读不到」写成
+		// 「队列没挂起」会误导复核者与事后审计。
+		facts["queue_held"] = "unknown"
 		return false, "无法读取线程队列状态，保守交回确认"
 	}
+	facts["queue_held"] = held
 	if held {
 		return false, "线程有被挂起的排队消息，先恢复或清理队列再结算"
 	}

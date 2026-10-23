@@ -1290,3 +1290,44 @@ func TestBotInt160WaitBaselineBeforeSiblingSend(t *testing.T) {
 		t.Fatalf("send 的 dispatch RPC 到达时 wait 必须已完成注册")
 	}
 }
+
+// ---------- 15. 复审第 7 轮：快照滞后于线程创建不误判 thread_gone ----------
+
+// TestBotInt160WaitStaleSnapshotGrace 验证 baseline 还没见过线程时，可信视图
+// 里的缺失先按启动宽限挂起（notReadyTicks 累计），等宽限耗尽才落
+// thread_gone——快照滞后于 launch/send 是常态，首轮评估不能直接判死。
+func TestBotInt160WaitStaleSnapshotGrace(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "int160wait15")
+	fake, envID := pairWaitT3(t, env, userID)
+	bot := env.createBot(t, userID)
+	shrinkWaitTimers(env)
+
+	// 刚 launch 的线程还没进快照：可信视图（归档就绪）里查无此线程。
+	waitForBot(t, "archive ready", 5*time.Second, func() bool {
+		v, err := env.bots.threads.PeekShell(userID, envID)
+		return err == nil && v != nil && v.Snaps != nil && v.Snaps.ArchiveErr == nil
+	})
+	call := acceptWaitCall(t, env, bot.ID, false,
+		`{"action":"wait","env_id":"`+envID+`","thread_id":"th-launching","on":"idle"}`)
+
+	// 宽限内：缺失只计 notReadyTicks，不落 thread_gone。
+	env.bots.evaluateThreadWaits()
+	c, err := env.bots.calls.FindByID(call.ID)
+	if err != nil {
+		t.Fatalf("find call: %v", err)
+	}
+	if c.Status.IsTerminal() {
+		t.Fatalf("宽限内缺失不应落终态，实得 %s", c.Status)
+	}
+
+	// 宽限耗尽仍查无此线程才判 thread_gone；中途线程出现则正常挂起。
+	fake.pushThreadDelta(t, shellThread("th-launching", "新线程", "running",
+		map[string]any{"activeRunId": "run-n"}))
+	driveWaitEvaluation(t, env, func() bool {
+		env.bots.waitMu.Lock()
+		defer env.bots.waitMu.Unlock()
+		e := env.bots.waits[call.ID]
+		return e != nil && e.baseline.known && e.started
+	})
+}

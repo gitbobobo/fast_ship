@@ -542,7 +542,12 @@ func (s *BotService) evaluateThreadWait(e *botWaitEntry, detailCtx context.Conte
 		if !obs.known {
 			e.firstIdleAt = time.Time{}
 			// 可信面上没有该线程且归档面可信：线程已不存在，等待失去意义。
-			if view.Snaps != nil && view.Snaps.ArchiveErr == nil {
+			// 但 baseline.known=false 的 wait 常紧跟 launch/send 挂上，hub 快照
+			// 可能还没推到含新线程的版本——只在启动宽限过后仍缺失才下
+			// thread_gone 结论，宽限内按「尚未出现」继续等（落到下方
+			// StartGrace 分支收尾）。
+			if view.Snaps != nil && view.Snaps.ArchiveErr == nil &&
+				(e.baseline.known || now.Sub(e.attachedAt) >= s.waitCfg.StartGrace) {
 				s.waitResolveThreadGone(e, call)
 				return
 			}

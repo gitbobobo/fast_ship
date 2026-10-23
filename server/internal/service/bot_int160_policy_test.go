@@ -910,3 +910,136 @@ func TestBotInt160ConcurrentSendQuota(t *testing.T) {
 		t.Fatalf("额度只剩 1 次时两路并发应恰放行一笔 tier1 自动，实得 %d", auto)
 	}
 }
+
+// ---------- 6. 复审第 7 轮回归 ----------
+
+// TestBotInt160PolicyAlwaysAllowRewritesSource 验证降级卡经「始终允许」批准后
+// policy_json.source 在同事务改写为 always_allow，执行时不再走确认复检。
+func TestBotInt160PolicyAlwaysAllowRewritesSource(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "int160policy15")
+	_, envID := pairPolicyT3(t, env, userID)
+	bot := env.createBot(t, userID)
+
+	future := time.Now().UTC().Add(time.Hour)
+	pol, _ := json.Marshal(botWritePolicyRecord{
+		Tier: "tier1", RuleID: botPolicyRuleSendContinue, Auto: false,
+		Source: "confirmation", DowngradeReason: "快照滞后", Expiry: &future,
+	})
+	call := seedDowngradedCard(t, env, bot.ID,
+		`{"action":"send","env_id":"`+envID+`","thread_id":"`+int160PolicyIdleThread+`","text":"继续"}`,
+		string(pol))
+	if err := env.db.Model(&model.BotToolCall{}).Where("id = ?", call.ID).
+		Update("status", string(model.BotCallStatusPendingConfirmation)).Error; err != nil {
+		t.Fatalf("置 pending: %v", err)
+	}
+
+	if _, err := env.bots.DecideCall(userID, bot.ID, call.ID,
+		&CallDecisionRequest{Decision: "always_allow"}); err != nil {
+		t.Fatalf("always_allow: %v", err)
+	}
+	fresh, err := env.bots.calls.FindByID(call.ID)
+	if err != nil {
+		t.Fatalf("find call: %v", err)
+	}
+	var stored map[string]interface{}
+	if err := json.Unmarshal([]byte(fresh.PolicyJSON), &stored); err != nil {
+		t.Fatalf("policy json: %v", err)
+	}
+	if stored["source"] != "always_allow" {
+		t.Fatalf("批准后 source 应改写为 always_allow: %v", stored)
+	}
+}
+
+// TestBotInt160PolicyNilTaskForceReport 验证 ScheduleTaskID 为空的 schedule
+// run 出现 tier3 拒绝时，强制汇报仍追加主线事件（needs_report=false 也压不过）。
+func TestBotInt160PolicyNilTaskForceReport(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "int160policy16")
+	bot := env.createBot(t, userID)
+
+	now := time.Now().UTC()
+	run := &model.BotRun{
+		ID: uuid.NewString(), BotID: bot.ID,
+		TriggerSource:      model.BotTriggerSchedule,
+		TriggerKey:         "wake:" + uuid.NewString(),
+		Status:             model.BotRunStatusRunning,
+		SessionKind:        model.BotSessionKindSchedule,
+		ConfigSnapshotJSON: "{}",
+		TriggerContextJSON: `{"needs_report":false,"task_name":"孤儿定时"}`,
+		CreatedAt:          now, StartedAt: &now,
+	}
+	if err := env.bots.runs.CreateTx(env.db, run); err != nil {
+		t.Fatalf("seed run: %v", err)
+	}
+	req := &model.BotModelRequest{
+		ID: uuid.NewString(), RunID: run.ID, Ordinal: 1,
+		Status: model.BotModelRequestSucceeded, PromptRevision: 1,
+		ToolsetVersion: botToolsetVersion,
+		StartedAt:      now, FinishedAt: &now,
+	}
+	if err := env.db.Create(req).Error; err != nil {
+		t.Fatalf("seed request: %v", err)
+	}
+	denied := &model.BotToolCall{
+		ID: uuid.NewString(), BotID: bot.ID, RequestID: req.ID,
+		ProviderToolCallID: "prov-denied", ToolName: "fs_thread", Action: "stop",
+		ArgumentsJSON: "{}", ArgumentsHash: "x", ExecutionMode: string(model.BotExecutionAsync),
+		Status: model.BotCallStatusFailed, ExecutionContextJSON: `{"scope_kind":"thread"}`,
+		PolicyJSON: `{"tier":"tier3","schedule_denied":true,"reason":"高危写"}`,
+		CreatedAt:  now, FinishedAt: &now,
+	}
+	if err := env.db.Create(denied).Error; err != nil {
+		t.Fatalf("seed denied: %v", err)
+	}
+
+	var before int64
+	env.db.Model(&model.BotMessage{}).
+		Where("bot_id = ? AND kind = ?", bot.ID, string(model.BotMessageKindScheduleEvent)).
+		Count(&before)
+	botRow, err := env.bots.bots.Get(bot.ID)
+	if err != nil {
+		t.Fatalf("get bot: %v", err)
+	}
+	if !env.bots.tryFinishScheduleRun(botRow, run) {
+		t.Fatalf("孤儿任务运行应收尾")
+	}
+	var after int64
+	env.db.Model(&model.BotMessage{}).
+		Where("bot_id = ? AND kind = ?", bot.ID, string(model.BotMessageKindScheduleEvent)).
+		Count(&after)
+	if after <= before {
+		t.Fatalf("ScheduleTaskID 为空的运行被拒后仍应追加强制汇报事件")
+	}
+}
+
+// TestBotInt160PolicyQueueHeldUnknown 验证 settle 前置检查读不到队列状态时，
+// facts 记 queue_held="unknown" 而不是 false——读取失败与「队列没挂起」是两码事。
+func TestBotInt160PolicyQueueHeldUnknown(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "int160policy17")
+	// 线程在快照里（已知、空闲、无活动运行），但不种详情投影——
+	// policyQueueHeld 的 Detail 读取会失败。
+	_, envID := pairBotT3WithSnapshot(t, env, userID, "无投影",
+		shellSnapshotFixture([]any{map[string]any{"id": "p-1", "title": "P"}},
+			[]any{shellThread("th-nq", "无投影", "idle", nil)}))
+	bot := env.createBot(t, userID)
+	waitHubReady(t, env, userID, envID)
+
+	botRow, err := env.bots.bots.Get(bot.ID)
+	if err != nil {
+		t.Fatalf("get bot: %v", err)
+	}
+	facts := map[string]interface{}{}
+	ok, reason := env.bots.policyCheckSettlePreconditions(botRow,
+		botThreadArgs{EnvID: envID, ThreadID: "th-nq"}, facts, time.Now().UTC())
+	if ok {
+		t.Fatalf("队列状态读不到应保守降级")
+	}
+	if facts["queue_held"] != "unknown" {
+		t.Fatalf("读取失败应记 unknown 而非 false: %v", facts)
+	}
+	if reason == "" {
+		t.Fatalf("应给出降级原因")
+	}
+}
