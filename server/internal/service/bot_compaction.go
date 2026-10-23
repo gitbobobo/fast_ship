@@ -2163,7 +2163,7 @@ func botToolsetUserNote(from, to int64) string {
 func botToolsetChangeNote(from, to int64) string {
 	// INT-156 巡检降本（v11）：读取面与运行时上下文的省轮次语义。
 	if to >= 11 && from < 11 {
-		note := "工具集已升级：fs_thread list 每项自带 activity（运行活动摘要）与末条回复摘要 last_reply（300 字符截断；无助手回复省略，单条详情读不到时 detail_unavailable=true、整页预算耗尽没轮到的标 detail_skipped=true），巡检不必再逐线程 get 只为看末条回复；fs_schedule 的运行时上下文直接带当前任务小状态 task_state，开局不必调 state_get；state_set 写入与当前完全相同的内容会回 unchanged、不产生变更（无变化就不要重复写）"
+		note := "工具集已升级：fs_thread list 每项自带 activity（运行活动摘要）与末条回复摘要 last_reply（300 字符截断；无助手回复省略，单条详情读不到时 detail_unavailable=true、读超时/预算耗尽被中止的标 detail_skipped=true），巡检不必再逐线程 get 只为看末条回复；fs_schedule 的运行时上下文直接带当前任务小状态 task_state，开局不必调 state_get；state_set 写入与当前完全相同的内容会回 unchanged、不产生变更（无变化就不要重复写）"
 		if from < 10 {
 			// INT-156 的巡检告知与 INT-136 的确认告知互不替代，跨过 v10 时级联补发。
 			note += "；" + strings.TrimPrefix(botToolsetChangeNote(from, 10), "工具集已升级：")

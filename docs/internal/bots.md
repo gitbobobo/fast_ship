@@ -976,10 +976,11 @@ CAS 终结；running 记录取消并取消 context，worker 落唯一终态且
   `last_reply`（末条 `assistant_message` 正文摘要，`truncateBotRunes`
   截 300 字符；无线程助手回复则省略该键）。实现是 `execThreadRead` 对页内
   每条并发补 `threads.Detail`（并发 4、单条 10s、整页 25s 总闸）；单条
-  Detail 失败置 `detail_unavailable=true` 不中断整页；整页总闸到期后
-  排队下标仍会进回调、Detail 必失败，「没轮到」另置 `detail_skipped=true`
-  ——真读不到与预算耗尽要可分（`activity`/`last_reply` 缺席的条目不能
-  按平静读，先看 `detail_*` 标记判因）。巡检不再为「线程
+  Detail 失败置 `detail_unavailable=true` 不中断整页；读超时/预算耗尽
+  被中止的（排队没轮到、或 Detail 途中被总闸/单条预算杀掉，回调入口与
+  err 路径各查一次 ctx）归 `detail_skipped=true`——真读不到与预算耗尽
+  要可分（`activity`/`last_reply` 缺席的条目不能按平静读，先看 `detail_*`
+  标记判因）。巡检不再为「线程
   有没有回话」逐条 `fs_thread get`。响应增量按条线性增长：每条 ~330
   （平静、带满额回复）至 ~500 字符（活动信号全打满 + UUID 长度 run id），
   15 条页 ≈5k–7.4k、默认 50 条页 ≈16.5k–25k；超过 ~16k 结果预算的回执

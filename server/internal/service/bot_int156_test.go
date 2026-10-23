@@ -24,7 +24,7 @@ import (
 // botToolsetV11FrozenHash 是 INT-156 发布的 v11 wire 字节基线。v11 只改
 // fs_thread/fs_schedule 的工具与动作描述；之后任何改动都会让存量会话升级后
 // 的 tools_hash 漂移，必须先递增版本再改字节。
-const botToolsetV11FrozenHash = "1a2ced8662c40be1f9b20f4ef9ce70b66507cf5536c3e1cb553848e287697418"
+const botToolsetV11FrozenHash = "7ef3e64ba0ba992e6cf0955b992e8454a658d8bb1dd73903de03d1adbe551188"
 
 // ---------- 1. 工具集 v11：描述演进、字节钉死、冻结基线不动 ----------
 
@@ -477,6 +477,34 @@ func TestBotInt156ThreadListSkippedNotUnavailable(t *testing.T) {
 				t.Fatalf("未尝试的条目不得写 %s: %+v", absent, item)
 			}
 		}
+	}
+}
+
+// Detail 读到一半被预算杀掉（整页总闸或单条超时在请求途中到点）同样归
+// detail_skipped：fake 端点挂起投影响应，父 ctx 在读取途中取消。
+func TestBotInt156ThreadListMidFlightKillMarkedSkipped(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "int156mid")
+
+	fake, envID := pairBotT3WithSnapshot(t, env, userID, "巡检机",
+		shellSnapshotFixture(nil, []any{shellThread("th-slow", "慢", "idle", nil)}))
+	gate := make(chan struct{})
+	fake.mu.Lock()
+	fake.projections["th-slow"] = threadProjection("th-slow", []any{}, nil)
+	fake.blockProjection = map[string]chan struct{}{"th-slow": gate}
+	fake.mu.Unlock()
+	t.Cleanup(func() { close(gate) })
+
+	items := []map[string]interface{}{{"id": "th-slow", "environment_id": envID}}
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(300 * time.Millisecond); cancel() }()
+	env.bots.botEnrichThreadListItems(ctx, userID, items)
+
+	if items[0]["detail_skipped"] != true {
+		t.Fatalf("途中被杀的条目应标 detail_skipped: %+v", items[0])
+	}
+	if _, has := items[0]["detail_unavailable"]; has {
+		t.Fatalf("预算杀掉的不得冒充详情真读不到: %+v", items[0])
 	}
 }
 

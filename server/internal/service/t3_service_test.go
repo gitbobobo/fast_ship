@@ -48,17 +48,18 @@ type fakeT3Environment struct {
 	mu sync.Mutex
 
 	baseURL         string
-	pairingCodes    map[string]bool   // 有效配对码
-	validBearers    map[string]bool   // 有效 Bearer
-	grantScope      string            // /oauth/token 回的 scope；默认宽 scope（标准客户端授权）
-	snapshot        json.RawMessage   // subscribeShell 的权威活跃快照流项（{"kind":"snapshot",...}）
-	archive         json.RawMessage   // 归档订阅的全量快照体（无 kind 包装）
-	archiveFail     bool              // true 时归档订阅回 Exit Failure（G1 降级路径）
-	archiveGate     chan struct{}     // 非空时归档订阅先等放行再发快照（制造「归档未就绪」窗口）
-	dropAfterActive bool              // true 时活跃快照发出后立即断连
-	projects        json.RawMessage   // GET /api/projects 响应体
-	projections     map[string]string // threadId -> wire 投影 JSON
-	turnItems       map[string]string // itemId -> getTurnItem 返回的完整条目 JSON
+	pairingCodes    map[string]bool          // 有效配对码
+	validBearers    map[string]bool          // 有效 Bearer
+	grantScope      string                   // /oauth/token 回的 scope；默认宽 scope（标准客户端授权）
+	snapshot        json.RawMessage          // subscribeShell 的权威活跃快照流项（{"kind":"snapshot",...}）
+	archive         json.RawMessage          // 归档订阅的全量快照体（无 kind 包装）
+	archiveFail     bool                     // true 时归档订阅回 Exit Failure（G1 降级路径）
+	archiveGate     chan struct{}            // 非空时归档订阅先等放行再发快照（制造「归档未就绪」窗口）
+	dropAfterActive bool                     // true 时活跃快照发出后立即断连
+	projects        json.RawMessage          // GET /api/projects 响应体
+	projections     map[string]string        // threadId -> wire 投影 JSON
+	blockProjection map[string]chan struct{} // threadId -> 非空时投影请求挂起直到关闭或客户端断开（测预算中途杀掉）
+	turnItems       map[string]string        // itemId -> getTurnItem 返回的完整条目 JSON
 
 	// 订阅流句柄：hub 每条连接至多一条流，测试经这两个引用推送增量驱动状态。
 	// 多环境共用一个 fake 时以最后注册者为准（测试没有这种用法）。
@@ -441,10 +442,19 @@ func (f *fakeT3Environment) handleSession(w http.ResponseWriter, r *http.Request
 
 func (f *fakeT3Environment) handleThreadSnapshot(w http.ResponseWriter, r *http.Request) {
 	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	threadID := strings.TrimPrefix(r.URL.Path, "/api/orchestration/threads/")
 	f.mu.Lock()
 	valid := f.validBearers[token]
-	projection, ok := f.projections[strings.TrimPrefix(r.URL.Path, "/api/orchestration/threads/")]
+	projection, ok := f.projections[threadID]
+	block := f.blockProjection[threadID]
 	f.mu.Unlock()
+	if block != nil {
+		select {
+		case <-block:
+		case <-r.Context().Done():
+			return
+		}
+	}
 	if !valid {
 		w.WriteHeader(http.StatusUnauthorized)
 		_, _ = w.Write([]byte(`{"code":"auth_invalid","reason":"invalid_credential","traceId":"t-fake"}`))
