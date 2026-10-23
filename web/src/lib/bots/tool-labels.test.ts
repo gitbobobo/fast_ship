@@ -48,7 +48,9 @@ describe("toolActionLabel", () => {
   it("未知工具或 action 回退为原始标识，不抛错", () => {
     expect(toolActionLabel("fs_xxx", "do")).toBe("fs_xxx.do");
     expect(toolActionLabel("fs_issue", "explode")).toBe("fs_issue.explode");
-    expect(toolActionLabel("", "")).toBe(".");
+    // 受理即拒的调用可能没解析出 action：空 action 回退为裸工具名。
+    expect(toolActionLabel("fs_thread", "")).toBe("fs_thread");
+    expect(toolActionLabel("", "")).toBe("");
   });
 });
 

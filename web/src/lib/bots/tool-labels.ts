@@ -94,7 +94,9 @@ const TOOL_ACTION_META: Record<string, Record<string, ToolActionMeta>> = {
 
 /** action 的中文标签；表外回退为原始 `tool.action`，不抛错。 */
 export function toolActionLabel(toolName: string, action: string): string {
-  return TOOL_ACTION_META[toolName]?.[action]?.label ?? `${toolName}.${action}`;
+  // 受理即拒的调用可能没解析出 action（非法 JSON），裸工具名比带尾点的
+  // `fs_thread.` 更可读。
+  return TOOL_ACTION_META[toolName]?.[action]?.label ?? (action ? `${toolName}.${action}` : toolName);
 }
 
 /** 副作用类型；未知条目保守按写入处理。 */
