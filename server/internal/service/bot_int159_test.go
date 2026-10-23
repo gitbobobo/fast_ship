@@ -159,6 +159,16 @@ func TestBotInt159LaunchConfigMapping(t *testing.T) {
 	if opt.Id != "effort" || opt.Value != "high" {
 		t.Fatalf("options id/value 应 TrimSpace: %+v", opt)
 	}
+
+	// options[].id 重复受理即拒：摘要排序归一与执行保序透传会分叉
+	// （代码审查 r24）。
+	dupArgs := &botThreadArgs{ModelSelection: &botThreadModelSelection{
+		InstanceID: "prov", Model: "m",
+		Options: []botThreadModelOption{{ID: "effort", Value: "low"}, {ID: "effort", Value: "high"}},
+	}}
+	if err := botThreadLaunchConfig(dupArgs, &T3CreateThreadRequest{}); err == nil {
+		t.Fatalf("options 重复 id 应被拒绝")
+	}
 }
 
 // botSlimComposerProviders：归一化上游 camelCase 目录，剔除不可用项。

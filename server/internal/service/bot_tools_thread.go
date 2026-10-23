@@ -737,11 +737,19 @@ func botThreadLaunchConfig(args *botThreadArgs, req *T3CreateThreadRequest) erro
 			return errs.New(errs.ErrInvalidParams.Code, "model_selection 需要 instance_id 与 model（取值见 composer_options 的 providers）")
 		}
 		sel := &api.T3ModelSelection{InstanceId: instanceID, Model: modelSlug}
+		seenOpt := map[string]bool{}
 		for _, opt := range ms.Options {
 			optID := strings.TrimSpace(opt.ID)
 			if optID == "" {
 				return errs.New(errs.ErrInvalidParams.Code, "model_selection.options[].id 不能为空")
 			}
+			// 重复 id 受理即拒：授权摘要按规范化字节排序 options、执行按原
+			// 序透传——[{effort:low},{effort:high}] 与反序命中同一规则但上游
+			// 按 last-wins 取值可能不同（代码审查：摘要与执行须同口径）。
+			if seenOpt[optID] {
+				return errs.New(errs.ErrInvalidParams.Code, "model_selection.options[].id 重复 "+optID)
+			}
+			seenOpt[optID] = true
 			// T3 契约 value 只收 string|boolean（T3ModelOption）；
 			// 缺省/null/数字/对象在受理侧拒掉，不透给上游变成 RPC 失败。
 			// 字符串 value 与其他字段同口径 TrimSpace：授权摘要对叶子值
