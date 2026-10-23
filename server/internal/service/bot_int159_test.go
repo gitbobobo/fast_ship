@@ -499,3 +499,28 @@ func TestBotInt159RuntimeModeEmptyRejected(t *testing.T) {
 		t.Fatalf("runtime_mode 空白串应受理即拒")
 	}
 }
+
+// 嵌套执行配置对象内的重复键会让授权摘要（map 末次值）与执行取值（结构体
+// 顺序赋值、null no-op）解释不一致，受理端必须逐层拒绝，不只查顶层。
+func TestBotInt159NestedDuplicateKeysRejected(t *testing.T) {
+	v12 := botToolsetVersionOf(12)
+	base := `"action":"launch","env_id":"e","project_id":"p","text":"x"`
+	for _, args := range []string{
+		`{"instance_id":"a","instance_id":null,"model":"m"}`,                           // model_selection 内重复
+		`{"instance_id":"a","model":"m","options":[{"id":"o","id":null,"value":"v"}]}`, // options 数组元素内重复
+	} {
+		if _, err := botPrepareToolCall(v12, "fs_thread",
+			"{"+base+`,"model_selection":`+args+`}`); err == nil {
+			t.Fatalf("嵌套重复键应受理即拒: %s", args)
+		}
+	}
+	if _, err := botPrepareToolCall(v12, "fs_thread",
+		"{"+base+`,"workspace":{"type":"root","type":"worktree"}}`); err == nil {
+		t.Fatalf("workspace 内重复键应受理即拒")
+	}
+	// 顶层重复键同样保持拒绝（回归）。
+	if _, err := botPrepareToolCall(v12, "fs_thread",
+		"{"+base+`,"runtime_mode":"auto","runtime_mode":null}`); err == nil {
+		t.Fatalf("顶层重复键应受理即拒")
+	}
+}
