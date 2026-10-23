@@ -5507,8 +5507,10 @@ type ListBotMessagesParams struct {
 
 // ListBotMessages200JSONResponseBody_Data defines parameters for ListBotMessages.
 type ListBotMessages200JSONResponseBody_Data struct {
-	Items []BotMessage `json:"items"`
-	Total int          `json:"total"`
+	// Calls 页内消息引用到的调用记录（assistant 嵌套 tool_calls 与非 assistant 消息顶层 call_id），保证旧消息渲染确认/警示卡不缺数据
+	Calls []BotToolCall `json:"calls"`
+	Items []BotMessage  `json:"items"`
+	Total int           `json:"total"`
 }
 
 // ListBotMessages200JSONResponseBody defines parameters for ListBotMessages.
