@@ -161,7 +161,7 @@ export function BotAuthorizationsDialog({
         <DialogHeader>
           <DialogTitle>授权管理</DialogTitle>
           <DialogDescription>
-            「始终允许」建立的精确授权，现在限时 30 天（INT-160）。撤销后未开始的调用回到待确认，
+            「始终允许」建立的精确授权，现在限时 30 天。撤销后未开始的调用回到待确认，
             已开始的操作不回滚。
           </DialogDescription>
         </DialogHeader>
@@ -190,18 +190,21 @@ export function BotAuthorizationsDialog({
                     <span className="font-medium">
                       {a.tool_name}.{a.action}
                     </span>
-                    <Button
-                      type="button"
-                      size="xs"
-                      variant="ghost"
-                      className="ml-auto text-destructive"
-                      disabled={revoke.isPending}
-                      aria-label={`撤销 ${a.tool_name}.${a.action} 授权`}
-                      onClick={() => void handleRevoke(a.id)}
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                      撤销
-                    </Button>
+                    {/* 已过期等同已撤销，再挂「撤销」按钮与过期说明自相矛盾。 */}
+                    {!expiry.expired && (
+                      <Button
+                        type="button"
+                        size="xs"
+                        variant="ghost"
+                        className="ml-auto text-destructive"
+                        disabled={revoke.isPending}
+                        aria-label={`撤销 ${a.tool_name}.${a.action} 授权`}
+                        onClick={() => void handleRevoke(a.id)}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                        撤销
+                      </Button>
+                    )}
                   </div>
                   <p className="text-xs text-muted-foreground">
                     {scopeLabel(a)}
