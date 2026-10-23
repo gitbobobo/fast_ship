@@ -62,12 +62,16 @@ function SidebarNavItem({
     label: string;
     icon: React.ElementType;
     end?: boolean;
+    // 跳转目标被改写成具体页面时（如 /bots/<lastBotId>），NavLink 的
+    // to 前缀匹配只认那一页，分区高亮会丢；用它按分区前缀判定激活态。
+    activePrefix?: string;
   };
   collapsed: boolean;
   onNavigate?: () => void;
   unread?: number;
 }) {
   const name = unreadLabel(item.label, unread);
+  const { pathname } = useLocation();
   const link = (
     <NavLink
       to={item.to}
@@ -78,7 +82,11 @@ function SidebarNavItem({
         cn(
           "relative flex items-center rounded-md text-sm font-medium transition-all duration-200",
           collapsed ? "justify-center px-2 py-2" : "gap-3 px-3 py-2",
-          isActive
+          (
+            item.activePrefix
+              ? pathname.startsWith(item.activePrefix)
+              : isActive
+          )
             ? "bg-primary text-primary-foreground"
             : "text-muted-foreground hover:bg-accent hover:text-accent-foreground"
         )
@@ -207,6 +215,7 @@ function NavContent({
                 item.to === "/bots" && lastBotId
                   ? `/bots/${lastBotId}`
                   : item.to,
+              activePrefix: item.to === "/bots" ? "/bots" : undefined,
             }}
             collapsed={!!collapsed}
             onNavigate={onNavigate}

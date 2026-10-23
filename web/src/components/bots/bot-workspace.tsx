@@ -69,11 +69,12 @@ export function BotWorkspace({ botId }: { botId?: string }) {
   const [scheduleExpanded, setScheduleExpanded] = useState(true);
   const [scheduleDetailId, setScheduleDetailId] = useState<string | null>(null);
 
-  // 「最近打开的机器人」供侧边栏入口直跳（INT-157）；机器人已不存在
-  // （404）时清掉记录，免得入口反复跳进错误页。
+  // 「最近打开的机器人」供侧边栏入口直跳（INT-157），只在加载成功后
+  // 记录——坏链接（404/无权限）不该覆盖掉原有有效记忆；机器人已不存在
+  // 时清掉记录，免得入口反复跳进错误页。
   useEffect(() => {
-    if (botId) setLastBot(botId);
-  }, [botId, setLastBot]);
+    if (bot?.id) setLastBot(bot.id);
+  }, [bot?.id, setLastBot]);
   useEffect(() => {
     if (botId && botError instanceof ApiRequestError && botError.status === 404) {
       setLastBot(null);
