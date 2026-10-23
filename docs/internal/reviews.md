@@ -751,14 +751,20 @@ SHA-256 前 16 位。
     流，T3 把 run 误记为 failed，留下 settled=false 的僵尸线程。`finished_at`
     之后的宽限窗口内，归档先读线程投影判定运行绑定的 run（按
     `userMessageId` 匹配 `initial_message_id`，同一消息多条 run 取 ordinal
-    最大，与准备失败判定同口径）是否已收尾：run 处活动态
-    （preparing/starting/running/waiting）→ 本 tick 不归档，等下轮再试
-    （等待不占归档有限重试计数，宽限即上限）；run 已终态或线程已归档/
-    已删除 → 正常归档；投影里没有该消息的 run → 不能证明已收尾，同样
+    最大，与准备失败判定同口径）是否已收尾：run 未落已知终态集——活动态
+    （preparing/starting/running/waiting）、queued 或其它未识别状态——
+    本 tick 不归档，等下轮再试（等待不占归档有限重试计数，宽限即上限；
+    「不在活动集」不等于「已收尾」，只有 completed/failed/stopped/
+    interrupted/cancelled/error 能证明回合已结束）；run 已终态或线程已
+    归档/已删除 → 正常归档；投影里没有该消息的 run → 不能证明已收尾，同样
     等宽限兜底；线程 404 → 无可等，直接归档；读投影其他错误 →
     本 tick 跳过、下轮再试。`finished_at` 为空或已超宽限 → 跳过等待直接
     归档（防御 + 兜底，不会有永久不归档的运行）。未确认启动的运行在宽限
     等待期间每个 tick 仍会再发一次 `StopThread`（幂等，帮孤儿回合尽快终止）。
+    单行归档动作（停线程 + 收尾判定 + 归档 RPC）共享 60s 行预算
+    （`reviewNetworkStageBudget`，各 T3 调用内部另有 `t3WriteBudget` 25s
+    收紧）：前序步骤耗尽行预算时归档是被掐断而非被拒绝，按等待处理不占
+    归档有限重试计数，下轮重试——宽限过后收尾判定跳过，归档独享行预算。
 - **删除**（`cleanupWorktrees` 阶段）：先给确定没建线程的运行直接收尾
   （`reviewRunNeverLaunched` → `worktree_state=removed`，无线程/无工作区
   可清）；其余代码运行要等归档完成（`archived_at` 非空）才进入工作区

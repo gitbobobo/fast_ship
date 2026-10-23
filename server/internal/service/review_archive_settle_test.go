@@ -13,9 +13,10 @@ import (
 // prepProjectionFixture）钉契约；归档阶段行为（宽限内等待、404/超宽限照常归
 // 档、未确认启动先停线程）用 fakeReviewT3 钉。
 
-// TestThreadTurnSettledFromProjection 收尾判定的契约：活动 run（按 userMessageId
-// 匹配、同一消息多条取 ordinal 最大）未收尾返回 false；run 已终态、线程已归
-// 档返回 true；投影里没有该消息的 run 不能证明已收尾，同样返回 false。
+// TestThreadTurnSettledFromProjection 收尾判定的契约：非终态 run（活动态、
+// queued、未识别状态，按 userMessageId 匹配、同一消息多条取 ordinal 最大）
+// 未收尾返回 false；run 落已知终态集、线程已归档返回 true；投影里没有该消
+// 息的 run 不能证明已收尾，同样返回 false。
 func TestThreadTurnSettledFromProjection(t *testing.T) {
 	// 基线 fixture：run-1（msg-review-1，ordinal 1）status=failed 已终态。
 	if settled := threadTurnSettledFromProjection(decodePrepFixture(t, nil), "msg-review-1"); !settled {
@@ -43,15 +44,16 @@ func TestThreadTurnSettledFromProjection(t *testing.T) {
 			t.Fatalf("线程 %s 时活动 run 仍应判定已收尾", field)
 		}
 	}
-	// 目标 run 处于活动态：未收尾。
-	for _, status := range []string{"preparing", "starting", "running", "waiting"} {
+	// 目标 run 处于活动态、排队或出现未识别状态：非终态，未收尾（「不在活动
+	// 集」不等于「已收尾」——queued 与未来新增状态都不能放行）。
+	for _, status := range []string{"preparing", "starting", "running", "waiting", "queued", "paused-new-state"} {
 		parsed := decodePrepFixture(t, func(m map[string]any) {
 			if run := prepFixtureRun(m, "run-1"); run != nil {
 				run["status"] = status
 			}
 		})
 		if settled := threadTurnSettledFromProjection(parsed, "msg-review-1"); settled {
-			t.Fatalf("活动 run（%s）应判定未收尾", status)
+			t.Fatalf("非终态 run（%s）应判定未收尾", status)
 		}
 	}
 	// 同一消息多条 run 取 ordinal 最大：新 run 在排队（waiting），旧 failed

@@ -225,9 +225,9 @@ func (s *T3ThreadsService) ArchiveThread(ctx context.Context, userID, envID, thr
 
 // ThreadTurnSettled 读线程投影，判定该运行绑定的 T3 run 是否已收尾（INT-158）：
 // 归档前的收尾宽限等待用——结果落库后 agent 的回合往往还在写收尾回复，立刻
-// 归档会切断 provider 事件流，T3 把 run 误记为 failed。run 处于活动态返回
-// false；已归档/已删除线程、run 已终态返回 true；投影里找不到该消息的 run
-// 同样返回 false——匹配不上不能证明已收尾，等宽限兜底。线程不存在原样透传
+// 归档会切断 provider 事件流，T3 把 run 误记为 failed。已归档/已删除线程或
+// run 落已知终态集返回 true；活动态、queued、未识别状态与投影里找不到该消息
+// 的 run 都返回 false——证明不了已收尾，等宽限兜底。线程不存在原样透传
 // errT3ThreadNotFound；其余错误走 upstreamError。messageID 与
 // FailedPreparation 同义：Fast Ship 运行行预分配的 initial_message_id。
 func (s *T3ThreadsService) ThreadTurnSettled(ctx context.Context, userID, envID, threadID, messageID string) (bool, error) {
@@ -260,9 +260,9 @@ func (s *T3ThreadsService) ThreadTurnSettled(ctx context.Context, userID, envID,
 // （纯函数，用真实形状的 projection fixture 钉住契约）。匹配口径与
 // failedPreparationFromProjection 相同：按 userMessageId 匹配，同一消息多条
 // run 取 ordinal 最大（只有最新那条代表当前状态）。线程已归档/已删除即已
-// 收尾——没有可切断的事件流。匹配不到按未收尾处理：匹配不上不能证明回合
-// 已结束，静默放行的代价是退回切断收尾回复的老 bug，等满宽限的代价只是
-// 归档晚十分钟。
+// 收尾——没有可切断的事件流。run 只有落在已知终态集才算收尾：queued 或
+// 其它未识别状态与匹配不到一样按未收尾处理——证明不了已结束，静默放行的
+// 代价是退回切断收尾回复的老 bug，等满宽限的代价只是归档晚十分钟。
 func threadTurnSettledFromProjection(p *t3ThreadProjection, messageID string) bool {
 	if p.Thread.ArchivedAt != nil && *p.Thread.ArchivedAt != "" {
 		return true
@@ -282,7 +282,7 @@ func threadTurnSettledFromProjection(p *t3ThreadProjection, messageID string) bo
 	if run == nil {
 		return false
 	}
-	return !t3ActiveRunStatuses[run.Status]
+	return t3SettledRunStatuses[run.Status]
 }
 
 // T3FailedPreparation 是线程投影判读出的「工作区准备失败」事实：T3 侧 run

@@ -29,6 +29,15 @@ var t3ActiveRunStatuses = map[string]bool{
 	"preparing": true, "starting": true, "running": true, "waiting": true,
 }
 
+// t3SettledRunStatuses 是 run 的已知终态集（INT-158 归档收尾判定用）：只有
+// 这些状态能证明回合已结束。「不在活动集」不等于「已收尾」——queued 在排
+// 队未执行，未来新增的活动态同样未知；未列出的状态一律按未收尾处理，等宽
+// 限兜底。
+var t3SettledRunStatuses = map[string]bool{
+	"completed": true, "failed": true, "stopped": true,
+	"interrupted": true, "cancelled": true, "error": true,
+}
+
 // resolveT3ActiveRun 返回活动 run（最近一个活动状态），静止时 nil。
 func resolveT3ActiveRun(runs []t3Run) *t3Run {
 	for i := len(runs) - 1; i >= 0; i-- {

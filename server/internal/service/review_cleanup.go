@@ -92,17 +92,18 @@ func (s *ReviewService) archiveRuns(now time.Time) {
 // 超限置 archived_at（不再重试）+ 通知；代码运行同时置 worktree_state=failed
 // （先归档后删除是硬前提，归档最终失败就不能删工作区）。
 func (s *ReviewService) archiveRunThread(run *model.ReviewRun, now time.Time) {
-	// 每一步各持独立预算：前序读取用掉的时间不能记成归档失败（共享预算时
-	// 停线程 + 投影读最长可吃掉近 50s，Archive 只剩零头，连续挤爆会被计成
-	// 归档失败并最终放弃回收）。
+	// 单行预算与阶段预算同量级（60s）：归档动作整体不能拖住后续阶段；各步
+	// 内部还有 t3WriteBudget 收紧。前序步骤把行预算耗尽时归档会返回 ctx
+	// 截止错误——那是「暂时读不到」而非归档失败，按等待处理不占重试计数，
+	// 下轮重试（宽限/行预算兜底见下）。
+	ctx, cancel := context.WithTimeout(context.Background(), reviewNetworkStageBudget)
+	defer cancel()
+
+	// 启动结果未确认（dispatched_at 为空）但可能已建成线程：先尽力停掉
+	// （仍在归档前；宽限等待期间每个 tick 都会再发一次，幂等，帮孤儿回合
+	// 尽快终止）。
 	if run.DispatchedAt == nil {
-		// 启动结果未确认（dispatched_at 为空）但可能已建成线程：先尽力停掉
-		// （仍在归档前；宽限等待期间每个 tick 都会再发一次，幂等，帮孤儿回合
-		// 尽快终止）。
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		_, err := s.t3.StopThread(ctx, run.UserID, run.EnvironmentID, run.ThreadID)
-		cancel()
-		if err != nil {
+		if _, err := s.t3.StopThread(ctx, run.UserID, run.EnvironmentID, run.ThreadID); err != nil {
 			s.logger.Info("未确认启动的运行停止线程未成功（继续尝试归档）",
 				zap.String("run", run.ID), zap.Error(err))
 		}
@@ -110,9 +111,7 @@ func (s *ReviewService) archiveRunThread(run *model.ReviewRun, now time.Time) {
 	// 收尾宽限：仅 finished_at 之后的宽限窗口内等待（finished_at 为空或已超
 	// 宽限都跳过等待直接归档，防御 + 兜底）。等待不占归档有限重试计数。
 	if run.FinishedAt != nil && now.Sub(*run.FinishedAt) < reviewArchiveSettleWait {
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		settled, err := s.t3.ThreadTurnSettled(ctx, run.UserID, run.EnvironmentID, run.ThreadID, run.InitialMessageID)
-		cancel()
 		switch {
 		case err == nil && !settled:
 			// run 还在写收尾回复：本 tick 不归档，等下轮。
@@ -125,12 +124,16 @@ func (s *ReviewService) archiveRunThread(run *model.ReviewRun, now time.Time) {
 		}
 		// settled、或线程不存在（无可等）：落入归档。
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
 	if err := s.t3.ArchiveThread(ctx, run.UserID, run.EnvironmentID, run.ThreadID); err == nil {
 		s.db.Model(&model.ReviewRun{}).Where("id = ? AND archived_at IS NULL", run.ID).
 			Updates(map[string]any{"archived_at": now, "updated_at": now})
 		s.releaseWorktreeTries(run.ID)
+		return
+	} else if ctx.Err() != nil {
+		// 行预算被停线程/投影读耗尽：归档是被掐断而不是被拒绝，本 tick 跳过
+		// 不占重试，下轮再试——与收尾读失败的等待语义一致。
+		s.logger.Info("归档行预算被前序步骤耗尽，等下轮再试",
+			zap.String("run", run.ID), zap.Error(err))
 		return
 	} else {
 		s.logger.Info("审查线程归档未成功（有限重试）", zap.String("run", run.ID), zap.Error(err))
