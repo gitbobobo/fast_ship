@@ -386,7 +386,9 @@ function chipValue(
 
   if (typeof raw === "string") {
     if (ID_PARAMS.has(key)) {
-      const short = raw.length > 8 ? `${raw.slice(0, 8)}…` : raw;
+      // slug 型 ID（fake-project 等）多在 16 字符内，放宽截断让批准前能
+      // 看全目标；UUID 只取前缀、完整值进 title（视觉审查）。
+      const short = raw.length > 16 ? `${raw.slice(0, 16)}…` : raw;
       return { key, label, value: short, title: raw, href: chipRoute(key, raw, args) };
     }
     return { key, label, value: truncateText(raw), title: raw };

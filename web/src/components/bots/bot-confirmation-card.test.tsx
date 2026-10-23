@@ -79,7 +79,7 @@ describe("BotConfirmationCard", () => {
     // 参数摘要 chips：项目/问题标签与短标识链接都在。
     expect(within(card).getByText("项目")).toBeInTheDocument();
     expect(within(card).getByText("问题")).toBeInTheDocument();
-    const link = within(card).getByRole("link", { name: /abcdef12…/ });
+    const link = within(card).getByRole("link", { name: /abcdef1234567890/ });
     expect(link).toHaveAttribute(
       "href",
       "/projects/p1/issues/abcdef1234567890",
@@ -90,6 +90,39 @@ describe("BotConfirmationCard", () => {
     expect(card).toHaveTextContent('"body": "新正文"');
     expect(card).toHaveTextContent('"project_id": "p1"');
     expect(card.querySelector("details")).toBeNull();
+  });
+
+  it("fs_thread launch：执行配置 chip 可读化，原始参数折叠", () => {
+    renderCard(
+      makeCall({
+        tool_name: "fs_thread",
+        action: "launch",
+        arguments: {
+          env_id: "env-1",
+          project_id: "proj-9",
+          text: "调查",
+          model_selection: {
+            instance_id: "i1",
+            model: "swe-2",
+            options: [{ id: "effort", value: "high" }],
+          },
+          runtime_mode: "full-access",
+          workspace: { type: "root" },
+        },
+      }),
+    );
+    const card = screen.getByTestId("bot-confirmation-card");
+
+    // 结构化参数渲染为可读摘要而非原始 JSON。
+    expect(within(card).getByText("swe-2 · effort high")).toBeInTheDocument();
+    expect(within(card).getByText("完全访问")).toBeInTheDocument();
+    expect(within(card).getByText("项目主检出")).toBeInTheDocument();
+
+    // 完整 JSON 折叠进「查看原始参数」，展开后可见。
+    const details = card.querySelector("details");
+    expect(details).not.toBeNull();
+    expect(within(card).getByText("查看原始参数")).toBeInTheDocument();
+    expect(card).toHaveTextContent('"runtime_mode": "full-access"');
   });
 
   it("保留三个决定入口与授权说明", () => {

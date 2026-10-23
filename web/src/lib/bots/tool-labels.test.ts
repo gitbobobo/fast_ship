@@ -110,7 +110,7 @@ describe("toolParamChips", () => {
     });
     const issue = chips.find((c) => c.key === "issue_id");
     expect(issue).toBeDefined();
-    expect(issue!.value).toBe("abcdef12…");
+    expect(issue!.value).toBe("abcdef1234567890");
     expect(issue!.title).toBe("abcdef1234567890");
     expect(issue!.href).toBe("/projects/proj-0001/issues/abcdef1234567890");
     const project = chips.find((c) => c.key === "project_id");
@@ -159,7 +159,7 @@ describe("toolParamChips", () => {
       whatever: { nested: true },
     });
     expect(chips.map((c) => c.key)).toEqual(["call_id"]);
-    expect(chips[0]!.value).toBe("call-123…");
+    expect(chips[0]!.value).toBe("call-123456789");
     expect(chips[0]!.href).toBeUndefined();
   });
 

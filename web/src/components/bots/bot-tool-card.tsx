@@ -51,7 +51,8 @@ export function ParamChipView({ chip }: { chip: ToolParamChip }) {
   const inner = (
     <>
       <span className="text-muted-foreground">{chip.label}</span>
-      <span className="font-mono [unicode-bidi:isolate]">
+      {/* 所有 chip 统一最大宽度并 CSS 截断，完整值在 title（视觉审查） */}
+      <span className="max-w-72 truncate font-mono [unicode-bidi:isolate]">
         {bidiSafeText(chip.value)}
       </span>
     </>
