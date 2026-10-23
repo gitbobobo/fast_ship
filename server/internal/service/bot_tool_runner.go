@@ -441,10 +441,12 @@ func (s *BotService) commitAssistantTurn(bot *model.Bot, run *model.BotRun, requ
 						tx, bot.ID, entry.policy.record.RuleID)
 					if ruleErr != nil && !errors.Is(ruleErr, gorm.ErrRecordNotFound) {
 						failAcceptedEntry(entry, now, errs.New(errs.ErrInternal.Code,
-							"规则开关复核失败，保守交回确认"))
+							"规则开关复核失败，请重新发起该操作"))
 					} else if ruleErr == nil && !rule.Enabled {
-						failAcceptedEntry(entry, now, errs.New(errs.ErrInvalidParams.Code,
-							"分级放行规则已关闭，该动作回到确认"))
+						// 语义是策略状态不是参数错误：调用直落终态，模型须
+						// 重新发起才会走确认流程——文案如实说明，别让它干等。
+						failAcceptedEntry(entry, now, errs.New(errs.ErrPermissionDenied.Code,
+							"分级放行规则已关闭，请重新发起该操作（将走确认流程）"))
 					}
 				}
 			}
