@@ -3,6 +3,7 @@ import {
   CalendarClock,
   CheckCircle2,
   ChevronRight,
+  Info,
   XCircle,
 } from "lucide-react";
 import type {
@@ -78,13 +79,15 @@ function ScheduleEventView({ message }: { message: BotMessage }) {
           onClick={() => setOpen(true)}
         >
           <CalendarClock className="h-3.5 w-3.5 shrink-0" />
-          {line}
+          {/* line 必须裹成单个 flex 子项：fragment 的多个文本节点在 flex
+              容器里会各自吃 gap，任务名两侧被挤出空格（视觉复审）。 */}
+          <span>{line}</span>
           <ChevronRight className="h-3.5 w-3.5 shrink-0" />
         </button>
       ) : (
         <span className="inline-flex items-center gap-1.5 px-3 py-1.5">
           <CalendarClock className="h-3.5 w-3.5 shrink-0" />
-          {line}
+          <span>{line}</span>
         </span>
       )}
       <Dialog open={open} onOpenChange={setOpen}>
@@ -93,10 +96,20 @@ function ScheduleEventView({ message }: { message: BotMessage }) {
             <DialogTitle>{line}</DialogTitle>
           </DialogHeader>
           {(errorCode || errorMessage) && (
-            <p className="rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive [unicode-bidi:isolate]">
-              {errorCode ? `${bidiSafeText(errorCode)}: ` : ""}
-              {bidiSafeText(errorMessage ?? "")}
-            </p>
+            // 主信息是面向用户的错误文案；机器可读错误码降级为次级小字，
+            // 不抢主信息（排查时仍可见）。
+            <div className="rounded-lg bg-destructive/10 px-3 py-2">
+              {errorMessage && (
+                <p className="text-sm text-destructive [unicode-bidi:isolate]">
+                  {bidiSafeText(errorMessage)}
+                </p>
+              )}
+              {errorCode && (
+                <p className="mt-1 text-xs text-muted-foreground [unicode-bidi:isolate]">
+                  错误码：{bidiSafeText(errorCode)}
+                </p>
+              )}
+            </div>
           )}
           {summary && <BotMarkdown text={bidiSafeText(summary)} />}
         </DialogContent>
@@ -165,14 +178,18 @@ export function BotMessageView({
     }
     // note 写给模型（可带「（内部信息：…）」前缀与内部术语）；user_note 是
     // 面向用户的短句（INT-139 视觉复审）。旧消息没有 user_note 时把内部前缀
-    // 剥掉兜底，其余照常渲染 note。
+    // 剥掉兜底，其余照常渲染 note。服务侧系统提示用带图标与浅底色的
+    // 通知条呈现，不与上下卡片粘连、也不被误读成某张卡片的脚注。
     const text =
       detail.user_note ??
       (detail.note || message.content.event || "").replace(/^（内部信息：[^）]*）/, "");
     return (
-      <p className="text-center text-xs text-muted-foreground [unicode-bidi:isolate]">
-        {bidiSafeText(text)}
-      </p>
+      <div className="my-1 flex justify-center">
+        <p className="inline-flex items-center gap-1.5 rounded-lg bg-muted/40 px-3 py-1.5 text-xs text-muted-foreground [unicode-bidi:isolate]">
+          <Info className="h-3.5 w-3.5 shrink-0" />
+          {bidiSafeText(text)}
+        </p>
+      </div>
     );
   }
 

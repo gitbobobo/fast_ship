@@ -78,9 +78,9 @@ describe("BotMessageView schedule_event", () => {
     expect(line).not.toHaveTextContent("上游 502");
 
     await user.click(screen.getByTestId("bot-schedule-event-detail"));
-    expect(
-      screen.getByText(/model_request_failed: 上游 502/),
-    ).toBeInTheDocument();
+    // 面向用户的错误文案为主信息，机器可读错误码降级为次级小字。
+    expect(screen.getByText("上游 502")).toBeInTheDocument();
+    expect(screen.getByText("错误码：model_request_failed")).toBeInTheDocument();
   });
 
   it("无摘要也无错误的事件行不可点", () => {
