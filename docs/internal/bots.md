@@ -1386,11 +1386,16 @@ null），给三栏工作台的左侧列表当预览列。语义与约束：
   queued/running）调用的工具卡（唯一逐项取消入口——async 在途调用
   已由 `BotBackgroundCalls` 面板承担，不重复渲染）。流式草稿不受影响，
   仍直出气泡。消息内无可见内容时 `BotMessageView` 返回 null，不留空块。
+  有意取舍：text 与 tool_calls 并存的消息即使正文非空也整体隐藏——
+  按协议这段正文是调用前旁白（思考/计划），属 INT-157 明确要藏的
+  「过程」；最终答复总是单独的无 tool_calls 消息，不提供回看入口。
 - **定时任务事件一行居中**：`schedule_event` 渲染为居中一行
-  「定时任务「name」<状态>」，summary/error 不再内联；有详情时行可点，
-  弹窗内 summary 走 `BotMarkdown`、error 以 destructive 样式展示。
-  无摘要无错误的事件行保持不可点（跳过/静默）。模型可写文本（task_name/
-  summary/error）仍经 bidiSafeText + `unicode-bidi:isolate` 处理。
+  「定时任务「name」<状态>」，summary/error 不再内联；有详情时行渲染
+  为胶囊形按钮（图标 + 后缀箭头，悬停有底色），点开弹窗内 summary 走
+  `BotMarkdown`、error 以 destructive 样式展示。无摘要无错误的事件行
+  保持朴素灰字不可点（跳过/静默），两种形态视觉可分。模型可写文本
+  （task_name/summary/error）仍经 bidiSafeText + `unicode-bidi:isolate`
+  处理。
 - **侧边栏直跳上次聊天**：`fast-ship-last-bot`（zustand persist）记录
   最近打开的 `{ userId, botId }`，「机器人」菜单项 href 变成
   `/bots/<lastBotId>`；消费方经 `useLastBotId` 读取——记忆绑定写入时

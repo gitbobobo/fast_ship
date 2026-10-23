@@ -156,8 +156,8 @@ export function BotToolCard({
           <Button
             type="button"
             size="xs"
-            variant="ghost"
-            className="text-muted-foreground"
+            variant="outline"
+            className="hover:border-destructive/50 hover:text-destructive"
             disabled={cancelling}
             onClick={() => onCancel!(call.id)}
           >

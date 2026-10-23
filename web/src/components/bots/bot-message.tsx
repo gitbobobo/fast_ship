@@ -1,5 +1,10 @@
 import { useState } from "react";
-import { CheckCircle2, XCircle } from "lucide-react";
+import {
+  CalendarClock,
+  CheckCircle2,
+  ChevronRight,
+  XCircle,
+} from "lucide-react";
 import type {
   BotCall,
   BotCallDecision,
@@ -60,16 +65,27 @@ function ScheduleEventView({ message }: { message: BotMessage }) {
       )}
     >
       {hasDetail ? (
+        // 详情唯一入口：胶囊形可点区（高度/悬停底色/后缀箭头做足暗示），
+        // 不可点的事件行保持朴素灰字，两种形态一眼可分。
         <button
           type="button"
           data-testid="bot-schedule-event-detail"
-          className="underline decoration-dotted underline-offset-2 hover:text-foreground"
+          className={cn(
+            "inline-flex items-center gap-1.5 rounded-full px-3 py-1.5",
+            "text-foreground/75 transition-colors hover:bg-accent hover:text-foreground",
+            failed && "text-destructive hover:text-destructive",
+          )}
           onClick={() => setOpen(true)}
         >
+          <CalendarClock className="h-3.5 w-3.5 shrink-0" />
           {line}
+          <ChevronRight className="h-3.5 w-3.5 shrink-0" />
         </button>
       ) : (
-        line
+        <span className="inline-flex items-center gap-1.5 px-3 py-1.5">
+          <CalendarClock className="h-3.5 w-3.5 shrink-0" />
+          {line}
+        </span>
       )}
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-2xl">
