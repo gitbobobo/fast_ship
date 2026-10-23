@@ -312,9 +312,13 @@ const WORKSPACE_TYPE_LABELS: Record<string, string> = {
 
 function modelSelectionText(raw: unknown): string | null {
   if (typeof raw !== "object" || raw === null) return null;
-  const ms = raw as { model?: unknown; options?: unknown };
+  const ms = raw as { instance_id?: unknown; model?: unknown; options?: unknown };
   if (typeof ms.model !== "string" || ms.model === "") return null;
-  let text = ms.model;
+  // 多 provider 下同 slug 要靠 instance_id 消歧（云端审查）。
+  let text =
+    typeof ms.instance_id === "string" && ms.instance_id !== ""
+      ? `${ms.instance_id}/${ms.model}`
+      : ms.model;
   if (Array.isArray(ms.options)) {
     const parts = ms.options
       .map((o) => {

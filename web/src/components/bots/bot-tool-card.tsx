@@ -169,8 +169,13 @@ export function BotToolCard({
         <p className="text-xs text-destructive [unicode-bidi:isolate]">
           {call.error_code ? `${call.error_code}: ` : ""}
           {/* error_message 本身可能内嵌 [code] 前缀（AppError.Error 格式），
-              与 error_code 并列时会显示成 e40001: [40001] 双码，剥掉。 */}
-          {bidiSafeText(call.error_message.replace(/^\[\d+\]\s*/, ""))}
+              与 error_code 并列时会显示成 e40001: [40001] 双码，剥掉；
+              error_code 缺失时不剥——以 [数字] 开头的正常消息不是双码。 */}
+          {bidiSafeText(
+            call.error_code
+              ? call.error_message.replace(/^\[\d+\]\s*/, "")
+              : call.error_message,
+          )}
         </p>
       )}
       {call?.effect_may_have_occurred && (

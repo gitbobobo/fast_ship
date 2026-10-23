@@ -64,10 +64,24 @@ func (s *BotService) execThreadRead(ctx context.Context, call *model.BotToolCall
 		// 目录，不透传 T3 全量 config/settings；项目标题来自配对的 T3 服务/
 		// 仓库，进围栏（INT-136）。providers 供 launch 的 model_selection 直接
 		// 回填；not_settable 如实列出机器人不能指定的配置项（INT-159）。
+		notSettable := botThreadNotSettable
+		botToolsetVer := int64(0)
+		if bot, err := s.bots.Get(call.BotID); err == nil {
+			botToolsetVer = bot.ToolsetVersion
+		}
+		if botToolsetVer > 0 && botToolsetVer < botToolsetVersion {
+			// 冻结旧工具集的会话也看得到 providers 目录：如实标注这些字段
+			// 本版本不可用，避免模型被引导去传会被受理拒绝的参数（云端审查）。
+			notSettable = append(append([]map[string]string{}, botThreadNotSettable...),
+				map[string]string{
+					"field":  "model_selection/runtime_mode/workspace",
+					"reason": fmt.Sprintf("本会话工具集 v%d 不含这些字段（传了会被受理拒绝）；压缩升级到 v%d 后可用", botToolsetVer, botToolsetVersion),
+				})
+		}
 		return botMarshalResult(map[string]interface{}{
 			"projects":     opts.Projects,
 			"providers":    botSlimComposerProviders(opts.Config),
-			"not_settable": botThreadNotSettable,
+			"not_settable": notSettable,
 		})
 	case "workspace_options":
 		opts, err := s.threads.WorkspaceOptions(ctx, userID, args.EnvID, args.ProjectID, args.Query, args.Cursor)
