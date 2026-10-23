@@ -409,12 +409,14 @@ func TestBotInt138ToolsetV8Baseline(t *testing.T) {
 	if v8.hash == botToolsetV7FrozenHash {
 		t.Fatalf("v8 不得复用 v7 冻结 hash")
 	}
-	// v8 冻结在 INT-138，v9 已冻结为 INT-148 的字节；当前是 INT-160 的 v12
-	//（v10/v11 也已冻结为各自发布基线）。
+	// v8 冻结在 INT-138，v9–v12 已冻结为各自发布基线的字节，当前是
+	// INT-160 的 v13。
 	current := botToolsetVersionOf(botToolsetVersion)
 	v9 := botToolsetVersionOf(9)
-	if current.version != 12 || current.hash == v8.hash || current.hash == v9.hash {
-		t.Fatalf("botToolsetVersion 应指向 v12（v8–v11 已冻结），实得 v%d", current.version)
+	v11 := botToolsetVersionOf(11)
+	v12 := botToolsetVersionOf(12)
+	if current.version != 13 || current.hash == v8.hash || current.hash == v9.hash || current.hash == v11.hash || current.hash == v12.hash {
+		t.Fatalf("botToolsetVersion 应指向 v13（v8–v12 已冻结），实得 v%d", current.version)
 	}
 	if v9.hash != botToolsetV9FrozenHash {
 		t.Fatalf("v9 tools_hash 偏离 INT-148 冻结基线: got %s want %s", v9.hash, botToolsetV9FrozenHash)

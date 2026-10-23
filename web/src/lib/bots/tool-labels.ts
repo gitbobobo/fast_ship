@@ -94,7 +94,9 @@ const TOOL_ACTION_META: Record<string, Record<string, ToolActionMeta>> = {
 
 /** action 的中文标签；表外回退为原始 `tool.action`，不抛错。 */
 export function toolActionLabel(toolName: string, action: string): string {
-  return TOOL_ACTION_META[toolName]?.[action]?.label ?? `${toolName}.${action}`;
+  // 受理即拒的调用可能没解析出 action（非法 JSON），裸工具名比带尾点的
+  // `fs_thread.` 更可读。
+  return TOOL_ACTION_META[toolName]?.[action]?.label ?? (action ? `${toolName}.${action}` : toolName);
 }
 
 /** 副作用类型；未知条目保守按写入处理。 */
@@ -136,6 +138,8 @@ export interface ToolParamChip {
   title?: string;
   /** 站内路由；拼不出可靠路由时省略。 */
   href?: string;
+  /** 视觉强调：warn=高权限取值（如 full-access），用警示色描边。 */
+  tone?: "warn";
 }
 
 const PARAM_LABELS: Record<string, string> = {
@@ -178,6 +182,9 @@ const PARAM_LABELS: Record<string, string> = {
   settled: "已收合",
   include_archived: "含归档",
   updated_after: "更新晚于",
+  model_selection: "模型",
+  runtime_mode: "运行模式",
+  workspace: "工作区",
 };
 
 // ID 型参数：展示为前 8 位短标识，完整值进 title。
@@ -222,6 +229,9 @@ const TOOL_CHIP_PARAMS: Record<string, string[]> = {
     "project_id",
     "text",
     "title",
+    "model_selection",
+    "runtime_mode",
+    "workspace",
     "status",
     "settled",
     "include_archived",
@@ -285,39 +295,172 @@ function chipRoute(
   return undefined;
 }
 
-function chipValue(
+// launch 执行配置 chip（INT-159）：原始 JSON/枚举直接上 chip 会被截断、
+// 用户批准前看不清模型与权限（视觉审查）。统一转可读摘要，原文进 title。
+const RUNTIME_MODE_LABELS: Record<string, string> = {
+  "approval-required": "需审批",
+  "auto-accept-edits": "自动接受编辑",
+  auto: "自动",
+  "full-access": "完全访问",
+};
+
+const WORKSPACE_TYPE_LABELS: Record<string, string> = {
+  root: "项目主检出",
+  worktree: "新工作树",
+  existing_worktree: "已有工作树",
+};
+
+function modelSelectionText(raw: unknown): string | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const ms = raw as { instance_id?: unknown; model?: unknown; options?: unknown };
+  if (typeof ms.model !== "string" || ms.model === "") return null;
+  // 多 provider 下同 slug 要靠 instance_id 消歧；模型名前置，内部实例
+  // 标识收进括号作注解（视觉审查：裸 i1 用户看不懂）。
+  let text =
+    typeof ms.instance_id === "string" && ms.instance_id !== ""
+      ? `${ms.model} (${ms.instance_id})`
+      : ms.model;
+  if (Array.isArray(ms.options)) {
+    const parts = ms.options
+      .map((o) => {
+        if (typeof o !== "object" || o === null) return null;
+        const opt = o as { id?: unknown; value?: unknown };
+        return typeof opt.id === "string" && opt.id !== ""
+          ? `${opt.id} ${typeof opt.value === "boolean" ? (opt.value ? "开" : "关") : String(opt.value)}`
+          : null;
+      })
+      .filter((p): p is string => p !== null);
+    if (parts.length > 0) {
+      text += ` · ${parts.slice(0, 2).join("·")}${parts.length > 2 ? ` +${parts.length - 2}` : ""}`;
+    }
+  }
+  return text;
+}
+
+// workspace 拆成每字段一个短 chip（视觉审查）：合并长文案在窄屏会标签
+// 折行、分支被截断；拆分后各自折行，路径截断也碰不到分支。长路径中段
+// 省略保留首尾目录（尾段区分工作树、首段给出根上下文），完整路径在
+// title（视觉审查：截首只剩尾部无法核对完整目标路径）。
+function truncatePathMiddle(p: string, max = 56): string {
+  if (p.length <= max) return p;
+  const keep = max - 1; // 为 … 留位
+  const headLen = Math.max(4, Math.floor(keep / 3));
+  const tailLen = keep - headLen;
+  const headEnd = p.indexOf("/", headLen);
+  const tailStart = p.lastIndexOf("/", p.length - tailLen);
+  const head = headEnd > 0 ? p.slice(0, headEnd) : p.slice(0, headLen);
+  const tail = tailStart > 0 ? p.slice(tailStart) : p.slice(p.length - tailLen);
+  return `${head}…${tail}`;
+}
+function workspaceChips(raw: unknown): ToolParamChip[] {
+  if (typeof raw !== "object" || raw === null) return [];
+  const ws = raw as {
+    type?: unknown;
+    branch?: unknown;
+    worktree_path?: unknown;
+    base_ref?: unknown;
+    start_from_origin?: unknown;
+  };
+  if (typeof ws.type !== "string" || ws.type === "") return [];
+  const title = JSON.stringify(raw);
+  const str = (v: unknown): string | undefined =>
+    typeof v === "string" && v !== "" ? v : undefined;
+  const chips: ToolParamChip[] = [
+    {
+      key: "workspace",
+      label: "工作区",
+      value: WORKSPACE_TYPE_LABELS[ws.type] ?? ws.type,
+      title,
+    },
+  ];
+  if (ws.type === "worktree") {
+    const branch = str(ws.branch);
+    if (branch) chips.push({ key: "workspace.branch", label: "分支", value: branch, title });
+    const baseRef = str(ws.base_ref);
+    if (baseRef) chips.push({ key: "workspace.base_ref", label: "基线", value: baseRef, title });
+    // null 与省略同口径（服务端把 null 归一为缺省），不显示起点 chip：
+    // 显示「起点：本地」会让批准者误以为传了显式 false（代码审查 P2）。
+    if (ws.start_from_origin != null) {
+      chips.push({
+        key: "workspace.start",
+        label: "起点",
+        value: ws.start_from_origin === true ? "origin" : "本地",
+        title,
+      });
+    }
+  }
+  if (ws.type === "existing_worktree") {
+    const path = str(ws.worktree_path);
+    if (path) {
+      chips.push({
+        key: "workspace.path",
+        label: "路径",
+        value: truncatePathMiddle(path),
+        title: path,
+      });
+    }
+    const branch = str(ws.branch);
+    if (branch) chips.push({ key: "workspace.branch", label: "分支", value: branch, title });
+  }
+  return chips;
+}
+
+function chipValues(
   key: string,
   raw: unknown,
   args: Record<string, unknown>,
-): ToolParamChip | null {
+): ToolParamChip[] {
   const label = PARAM_LABELS[key] ?? key;
-  if (raw === undefined || raw === null || raw === "") return null;
+  if (raw === undefined || raw === null || raw === "") return [];
+
+  if (key === "runtime_mode" && typeof raw === "string") {
+    return [{
+      key,
+      label,
+      value: RUNTIME_MODE_LABELS[raw] ?? raw,
+      title: raw,
+      // full-access 是最宽的权限模式，chip 上要给警示色而不是混在普通参数里。
+      tone: raw === "full-access" ? "warn" : undefined,
+    }];
+  }
+  if (key === "model_selection") {
+    const text = modelSelectionText(raw);
+    if (text !== null) {
+      return [{ key, label, value: text, title: JSON.stringify(raw) }];
+    }
+  }
+  if (key === "workspace") {
+    const chips = workspaceChips(raw);
+    if (chips.length > 0) return chips;
+  }
 
   if (typeof raw === "string") {
     if (ID_PARAMS.has(key)) {
-      const short = raw.length > 8 ? `${raw.slice(0, 8)}…` : raw;
-      return { key, label, value: short, title: raw, href: chipRoute(key, raw, args) };
+      // slug 型 ID（fake-project 等）多在 16 字符内，放宽截断让批准前能
+      // 看全目标；UUID 只取前缀、完整值进 title（视觉审查）。
+      const short = raw.length > 16 ? `${raw.slice(0, 16)}…` : raw;
+      return [{ key, label, value: short, title: raw, href: chipRoute(key, raw, args) }];
     }
-    return { key, label, value: truncateText(raw), title: raw };
+    return [{ key, label, value: truncateText(raw), title: raw }];
   }
   if (typeof raw === "number" || typeof raw === "boolean") {
-    return { key, label, value: typeof raw === "boolean" ? (raw ? "是" : "否") : String(raw) };
+    return [{ key, label, value: typeof raw === "boolean" ? (raw ? "是" : "否") : String(raw) }];
   }
   if (Array.isArray(raw)) {
-    if (raw.length === 0) return null;
+    if (raw.length === 0) return [];
     if (raw.every((v) => typeof v === "string")) {
       const joined = raw.join("、");
-      return { key, label, value: truncateText(joined), title: joined };
+      return [{ key, label, value: truncateText(joined), title: joined }];
     }
     // 结构化数组（如 replace_checklist 的 items）只给数量摘要，
     // 完整内容看确认卡/原始调用里的 JSON。
-    return { key, label, value: `${raw.length} 项` };
+    return [{ key, label, value: `${raw.length} 项` }];
   }
   try {
     const json = JSON.stringify(raw);
-    return { key, label, value: truncateText(json), title: json };
+    return [{ key, label, value: truncateText(json), title: json }];
   } catch {
-    return { key, label, value: String(raw) };
+    return [{ key, label, value: String(raw) }];
   }
 }
 
@@ -330,13 +473,32 @@ function chipValue(
 export function toolParamChips(
   toolName: string,
   args: Record<string, unknown> | null | undefined,
+  action?: string,
 ): ToolParamChip[] {
   if (!args) return [];
-  const keys = TOOL_CHIP_PARAMS[toolName] ?? GENERIC_CHIP_PARAMS;
+  let keys = TOOL_CHIP_PARAMS[toolName] ?? GENERIC_CHIP_PARAMS;
+  // launch/send 的 text 是被批准的消息正文：确认卡把它整块平铺，chip 的
+  // 40 字截断只会藏正文（代码审查），此处跳过避免重复占位。action 以调用
+  // 方传入为准，缺省回退到参数内嵌字段（模型原始 JSON 常带 action）。
+  const act = action ?? (typeof args.action === "string" ? args.action : undefined);
+  if (toolName === "fs_thread" && (act === "launch" || act === "send")) {
+    keys = keys.filter((key) => key !== "text");
+  }
   const chips: ToolParamChip[] = [];
   for (const key of keys) {
-    const chip = chipValue(key, args[key], args);
-    if (chip) chips.push(chip);
+    const produced = chipValues(key, args[key], args);
+    if (produced.length === 0 && key === "runtime_mode" && toolName === "fs_thread" && act === "launch") {
+      // launch 省略 runtime_mode 时服务端缺省同样是 full-access：不显式
+      // 警示会让「始终允许」裸 launch 等于无提示永久放行最高权限（代码审查）。
+      produced.push({
+        key,
+        label: PARAM_LABELS[key] ?? key,
+        value: "完全访问（缺省）",
+        title: "runtime_mode 缺省为 full-access",
+        tone: "warn",
+      });
+    }
+    chips.push(...produced);
   }
   return chips;
 }

@@ -223,6 +223,89 @@ func (s *T3ThreadsService) ArchiveThread(ctx context.Context, userID, envID, thr
 	return err
 }
 
+// t3TurnVerdict 绑定回合的收尾判定（INT-158）：归档不只是「等不等」的问题，
+// 已归档/已删除的墓碑线程连归档对象都没有，须与「终态可归档」区分开。
+type t3TurnVerdict int
+
+const (
+	turnUnsettled  t3TurnVerdict = iota // 证明不了已收尾：等宽限兜底
+	turnSettled                         // run 落已知终态集：可归档
+	turnThreadGone                      // 线程已归档/已删除：目标态已达成，直接落账
+)
+
+// ThreadTurnSettled 读线程投影，判定该运行绑定的 T3 run 是否已收尾（INT-158）：
+// 归档前的收尾宽限等待用——结果落库后 agent 的回合往往还在写收尾回复，立刻
+// 归档会切断 provider 事件流，T3 把 run 误记为 failed。run 落已知终态集返回
+// turnSettled；已归档/已删除线程返回 turnThreadGone（没有可归档的对象，更没
+// 有可切断的事件流）；活动态、queued、未识别状态与投影里找不到该消息的 run
+// 都返回 turnUnsettled——证明不了已收尾，等宽限兜底。线程不存在原样透传
+// errT3ThreadNotFound；其余错误走 upstreamError。messageID 与
+// FailedPreparation 同义：Fast Ship 运行行预分配的 initial_message_id。
+func (s *T3ThreadsService) ThreadTurnSettled(ctx context.Context, userID, envID, threadID, messageID string) (t3TurnVerdict, error) {
+	env, err := s.loadEnvForWrite(ctx, userID, envID)
+	if err != nil {
+		return turnUnsettled, err
+	}
+	ctx, cancel := s.t3WriteBudget(ctx)
+	defer cancel()
+
+	token, err := s.bearerToken(env)
+	if err != nil {
+		return turnUnsettled, errs.New(errs.ErrT3Upstream.Code, "环境凭证不可用，请重新配对")
+	}
+	raw, err := s.http.fetchThreadDetail(ctx, env.Address, token, threadID)
+	if err != nil {
+		if errors.Is(err, errT3ThreadNotFound) {
+			return turnUnsettled, err
+		}
+		return turnUnsettled, s.upstreamError(err)
+	}
+	parsed, err := decodeT3Projection(raw)
+	if err != nil {
+		return turnUnsettled, s.upstreamError(fmt.Errorf("线程投影解析失败: %w", err))
+	}
+	return threadTurnSettledFromProjection(parsed, messageID), nil
+}
+
+// threadTurnSettledFromProjection 从线程投影判定运行绑定的 run 是否已收尾
+// （纯函数，用真实形状的 projection fixture 钉住契约）。匹配口径与
+// failedPreparationFromProjection 相同：按 userMessageId 匹配，同一消息多条
+// run 取 ordinal 最大（只有最新那条代表当前状态）。线程已归档/已删除返回
+// turnThreadGone——墓碑投影证明目标态已达成，再走归档 RPC 会把非幂等报错
+// 误记成归档失败。run 只有落在已知终态集才算收尾：queued 或其它未识别状
+// 态、messageID 为空与匹配不到一样按未收尾处理——证明不了已结束，静默放行
+// 的代价是退回切断收尾回复的老 bug，等满宽限的代价只是归档晚十分钟。
+func threadTurnSettledFromProjection(p *t3ThreadProjection, messageID string) t3TurnVerdict {
+	if p.Thread.ArchivedAt != nil && *p.Thread.ArchivedAt != "" {
+		return turnThreadGone
+	}
+	if p.Thread.DeletedAt != nil && *p.Thread.DeletedAt != "" {
+		return turnThreadGone
+	}
+	// messageID 为空（存量行没有 initial_message_id）匹配不了任何具体 run：
+	// 空串会撞上投影里缺 userMessageId 的 run（反序列化零值同为空串），
+	// 按未收尾处理，等宽限兜底。
+	if messageID == "" {
+		return turnUnsettled
+	}
+	var run *t3Run
+	for i := range p.Runs {
+		if p.Runs[i].UserMessageID != messageID {
+			continue
+		}
+		if run == nil || p.Runs[i].Ordinal >= run.Ordinal {
+			run = &p.Runs[i]
+		}
+	}
+	if run == nil {
+		return turnUnsettled
+	}
+	if t3SettledRunStatuses[run.Status] {
+		return turnSettled
+	}
+	return turnUnsettled
+}
+
 // T3FailedPreparation 是线程投影判读出的「工作区准备失败」事实：T3 侧 run
 // 行 ID（重试命令的 runId 入参）、失败发生时刻（失败条目 updatedAt，缺失回
 // 退 completedAt）与失败原文（failure.message）。
@@ -301,6 +384,12 @@ func failedPreparationFromProjection(p *t3ThreadProjection, messageID string) *T
 		return nil
 	}
 	if p.Thread.DeletedAt != nil && *p.Thread.DeletedAt != "" {
+		return nil
+	}
+	// messageID 为空（存量行没有 initial_message_id）匹配不了任何具体 run：
+	// 空串会撞上投影里缺 userMessageId 的 run（反序列化零值同为空串），
+	// 按无失败处理——与 threadTurnSettledFromProjection 同口径。
+	if messageID == "" {
 		return nil
 	}
 

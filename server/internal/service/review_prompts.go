@@ -50,7 +50,15 @@ head 提交 {{head_sha}}（{{pr_url}}）。工作区已经按该 PR 的 head 分
 - 不要发评论、不要改 PR 状态——评论与状态由 Fast Ship 负责。
 - 结论只能通过下面的接口提交；对话里的文字不会被采用。
 
-## 接口（全部带请求头 ` + "`Authorization: Bearer {{run_token}}`" + `）
+## 凭证
+- 你的运行令牌是 ` + "`{{run_token}}`" + `。令牌不得出现在命令行参数、进程列表、
+  命令历史或仓库文件里：用文件写入能力（不是 echo 或命令行）把
+  ` + "`header = \"Authorization: Bearer {{run_token}}\"`" + ` 写进工作区外一个临时
+  curl 配置文件，之后接口调用一律 ` + "`curl -K <文件>`" + `（进程参数只剩文件
+  路径）；用其它 HTTP 客户端同理——让客户端自己从文件读令牌。提交结论后删除
+  该文件。
+
+## 接口（全部要求 ` + "`Authorization: Bearer`" + ` 请求头，构造方式见「凭证」）
 - ` + "`GET {{public_url}}/api/review-agent/pull-request`" + ` → PR 元数据
 - ` + "`GET {{public_url}}/api/review-agent/pull-request/diff`" + ` → diff（超过 1MB 会截断）
 - ` + "`GET {{public_url}}/api/review-agent/history`" + ` → 历史上下文（Markdown，可能为空）
@@ -116,7 +124,15 @@ head 提交 {{head_sha}}。你只通过接口读取截图，不接触代码，�
 - 不要发评论、不要改 PR 状态——评论与状态由 Fast Ship 负责。
 - 结论只能通过下面的接口提交；对话里的文字不会被采用。
 
-## 接口（全部带请求头 ` + "`Authorization: Bearer {{run_token}}`" + `）
+## 凭证
+- 你的运行令牌是 ` + "`{{run_token}}`" + `。令牌不得出现在命令行参数、进程列表、
+  命令历史或仓库文件里：用文件写入能力（不是 echo 或命令行）把
+  ` + "`header = \"Authorization: Bearer {{run_token}}\"`" + ` 写进工作区外一个临时
+  curl 配置文件，之后接口调用一律 ` + "`curl -K <文件>`" + `（进程参数只剩文件
+  路径）；用其它 HTTP 客户端同理——让客户端自己从文件读令牌。提交结论后删除
+  该文件。
+
+## 接口（全部要求 ` + "`Authorization: Bearer`" + ` 请求头，构造方式见「凭证」）
 - ` + "`GET {{public_url}}/api/review-agent/pull-request`" + ` → PR 元数据（含描述里的截图说明）
 - ` + "`GET {{public_url}}/api/review-agent/screenshots`" + ` → 截图清单 {items:[{id,label,url}],changed}
 - ` + "`GET {{public_url}}/api/review-agent/screenshots/{id}`" + ` → 图片本体

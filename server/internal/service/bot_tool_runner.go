@@ -170,6 +170,14 @@ func (s *BotService) commitAssistantTurn(bot *model.Bot, run *model.BotRun, requ
 		if err != nil {
 			entry.invalidErr = err
 			entry.call.ToolName = tc.Name
+			// 受理即拒的调用也要留下动作名：失败卡的标题与排查都靠
+			// tool.action 说清「被拒的是哪个动作」。
+			var rawArgs struct {
+				Action string `json:"action"`
+			}
+			if jsonErr := json.Unmarshal([]byte(tc.Arguments), &rawArgs); jsonErr == nil {
+				entry.call.Action = strings.TrimSpace(rawArgs.Action)
+			}
 			entry.call.Status = model.BotCallStatusFailed
 			entry.call.FinishedAt = &now
 			entry.call.ErrorCode = botStrPtr(botErrCodeOf(err))
@@ -622,6 +630,7 @@ func (s *BotService) resolveCallScope(bot *model.Bot, prepared *botPreparedCall,
 	execCtx.ScopeID = prepared.ScopeID
 	execCtx.Fields = prepared.FieldsConstraint
 	execCtx.Param = prepared.ParamConstraint
+	execCtx.ExecConfig = prepared.ExecConfigJSON
 	execCtx.Schedule = prepared.SchedulePreview
 	return nil
 }

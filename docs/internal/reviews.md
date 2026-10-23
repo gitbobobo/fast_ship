@@ -184,7 +184,9 @@ seen SHA、取消旧轮全部失效）。
    行——被接管/停用项目的 `sync_pending` 残留不再发 GitHub 产出。
 8. **归档**：见「工作区回收」。终态且线程可能已建成的运行逐个归档；确定
    没有建成线程的（`reviewRunNeverLaunched`：`dispatch_failed` 请求帧未
-   发出、`pr_closed` 在建线程前就被拦下）跳过，不误报回收失败。
+   发出、`pr_closed` 在建线程前就被拦下）跳过，不误报回收失败。归档前有
+   **收尾宽限**（宽限语义见「工作区回收」）：终态落库后 agent 的 T3 run
+   可能还在写收尾回复，立刻归档会切断 provider 事件流。
 9. **工作区回收**：见「工作区回收」。
 10. **旧线程墓碑清理**：通用自动化下线留下的在途线程墓碑逐条停线程、归
     档，成功即删行；失败有限重试后放弃（只留日志），避免墓碑无限累积。
@@ -193,10 +195,11 @@ seen SHA、取消旧轮全部失效）。
 的旧 deadline 抢先落 `timed_out`）；归档在工作区清理之前（删除必须以归
 档完成为前提）。
 
-带串行外部读的阶段（到期防抖逐行读 PR、准备失败重试逐行读 T3 投影）每个
-有 **60 秒网络预算**（`reviewNetworkStageBudget`，与同步阶段单 PR 2 分钟
-同量级）：超预算的剩余行留在库里，下个 tick 再处理——上游变慢时单个
-tick 仍大体有界，不会把超时/取消中断/同步/回收拖到几十分钟后。
+带串行外部读的阶段（到期防抖逐行读 PR、准备失败重试逐行读 T3 投影、归档
+逐行读线程收尾状态与归档 RPC）每个有 **60 秒网络预算**
+（`reviewNetworkStageBudget`，与同步阶段单 PR 2 分钟同量级）：超预算的剩余
+行留在库里，下个 tick 再处理——上游变慢时单个 tick 仍大体有界，不会把
+超时/取消中断/同步/回收拖到几十分钟后。
 
 所有网络调用在事务外；DB 落库用条件 UPDATE（影响 0 行 = 状态已被并发改写）。
 
@@ -743,6 +746,35 @@ SHA-256 前 16 位。
   确定没有建成线程的（`reviewRunNeverLaunched`：`dispatch_failed` 请求帧
   未发出、`pr_closed` 在建线程前就被拦下）跳过——这类运行无线程可归，
   误归档只会制造回收失败假告警。
+  - **归档前收尾宽限**（INT-158，`reviewArchiveSettleWait` = 10 分钟）：结果
+    落库后 agent 的 T3 run 往往还在写收尾回复，立刻归档会切断 provider 事件
+    流，T3 把 run 误记为 failed，留下 settled=false 的僵尸线程。`finished_at`
+    之后的宽限窗口内，归档先读线程投影判定运行绑定的 run（按
+    `userMessageId` 匹配 `initial_message_id`，同一消息多条 run 取 ordinal
+    最大，与准备失败判定同口径）是否已收尾：run 未落已知终态集——活动态
+    （preparing/starting/running/waiting）、queued 或其它未识别状态——
+    本 tick 不归档，等下轮再试（等待不占归档有限重试计数，宽限即上限；
+    「不在活动集」不等于「已收尾」，只有 completed/failed/stopped/
+    interrupted/cancelled/error 能证明回合已结束）；run 已终态 → 正常
+    归档；线程已归档/已删除（墓碑投影可读）→ 目标态已达成，直接落
+    `archived_at` 不走归档 RPC（墓碑线程的非幂等报错会被误记成归档失
+    败）；投影里没有该消息的 run、`initial_message_id`
+    为空（存量行，空串会误撞缺 `userMessageId` 的 run）→ 不能证明已收尾，
+    同样等宽限兜底；线程 404 不立即采信（T3 重启/抖动，与
+    `cleanupRunWorktree` 同口径）→ 连续到上限认定无可归对象，直接落
+    `archived_at`（无线程的归档 RPC 只会误记归档失败、发假告警），中途读
+    成功清零连续计数；读投影其他错误 →
+    本 tick 跳过、下轮再试。`finished_at` 为空或已超宽限 → 跳过等待直接
+    归档（防御 + 兜底，不会有永久不归档的运行）。归档 RPC 失败且行预算未
+    耗尽时补读一次投影归因（dispatchCommand 对不存在的线程只回普通上游错
+    误）：归因 404 与窗口内同一连续计数，到上限直接落账不误记归档失败；
+    归因读回墓碑（已归档/已删除）同样直接落账；证实线程存在且未墓碑才按
+    真实归档错误计重试。未确认启动的运行在宽限
+    等待期间每个 tick 仍会再发一次 `StopThread`（幂等，帮孤儿回合尽快终止）。
+    单行归档动作（停线程 + 收尾判定 + 归档 RPC）共享 60s 行预算
+    （`reviewNetworkStageBudget`，各 T3 调用内部另有 `t3WriteBudget` 25s
+    收紧）：前序步骤耗尽行预算时归档是被掐断而非被拒绝，按等待处理不占
+    归档有限重试计数，下轮重试——宽限过后收尾判定跳过，归档独享行预算。
 - **删除**（`cleanupWorktrees` 阶段）：先给确定没建线程的运行直接收尾
   （`reviewRunNeverLaunched` → `worktree_state=removed`，无线程/无工作区
   可清）；其余代码运行要等归档完成（`archived_at` 非空）才进入工作区

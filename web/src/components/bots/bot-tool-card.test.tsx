@@ -99,9 +99,37 @@ describe("BotToolCard", () => {
         effect_may_have_occurred: true,
       }),
     );
-    expect(screen.getByText(/model_error: 上游 502/)).toBeInTheDocument();
+    // 错误码收进 title 提示，正文只显示消息本身（视觉审查：双码与原始
+    // 码不外露）。
+    const errText = screen.getByText("上游 502");
+    expect(errText).toBeInTheDocument();
+    expect(errText).toHaveAttribute("title", "model_error");
     expect(screen.getByText(/副作用可能已经发生/)).toBeInTheDocument();
     expect(screen.getByTestId("bot-call-status")).toHaveTextContent("失败");
+  });
+
+  it("错误文案里的参数字段名用等宽样式与普通文案区分（视觉审查）", () => {
+    renderCard(
+      makeCall({
+        status: "failed",
+        error_message:
+          "workspace.type=root 不接受以下字段（项目主检出不需要工作区参数）：\n- base_ref\n- branch\n- worktree_path\n要新建工作树请改用 worktree",
+      }),
+    );
+    const errP = document.querySelector("p.text-destructive")!;
+    // 可辨识的字段名（snake_case/点路径/赋值 + 行首「- 」清单里的裸字段名）
+    // 各成 <code>，中文说明与句中单词枚举值保持普通文案；pre-wrap 让服务端
+    // 的多行清单逐行落地。
+    const codes = [...errP.querySelectorAll("code")].map((c) => c.textContent);
+    expect(codes).toEqual([
+      "workspace.type=root",
+      "base_ref",
+      "branch",
+      "worktree_path",
+    ]);
+    expect(errP).toHaveClass("whitespace-pre-wrap");
+    expect(errP).toHaveTextContent("- base_ref");
+    expect(errP).toHaveTextContent("要新建工作树请改用 worktree");
   });
 
   it("截断结果保留「查看完整结果」按需展开", () => {

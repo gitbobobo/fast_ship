@@ -2,7 +2,10 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -12,6 +15,8 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	"github.com/google/uuid"
+	"go.uber.org/zap"
+	"gorm.io/gorm"
 )
 
 // fs_thread / fs_environment 适配：只操作已连接环境；T3 的 scope/operate 守卫
@@ -60,9 +65,55 @@ func (s *BotService) execThreadRead(ctx context.Context, call *model.BotToolCall
 		if err != nil {
 			return "", err
 		}
-		// 只透出启动器需要的项目与模型选择，不透传 T3 全量配置；项目标题来自
-		// 配对的 T3 服务/仓库，进围栏（INT-136）。
-		return botMarshalResult(map[string]interface{}{"projects": opts.Projects})
+		// 透出启动器需要的项目（含 default_model_selection）与归一化的模型
+		// 目录，不透传 T3 全量 config/settings；项目标题来自配对的 T3 服务/
+		// 仓库，进围栏（INT-136）。providers 供 launch 的 model_selection 直接
+		// 回填；not_settable 如实列出机器人不能指定的配置项（INT-159）。
+		notSettable := botThreadNotSettable
+		botToolsetVer := int64(0)
+		// 读发起本次调用的请求所冻结的工具集版本，不读 bots 表活值：
+		// 另一条对话线先激活新版本会把行版本推进，本会话仍冻结旧 schema
+		// 时 not_settable 标注会缺失（代码审查）。
+		if req, err := s.requests.FindByID(call.RequestID); err == nil {
+			botToolsetVer = req.ToolsetVersion
+		} else {
+			if !errors.Is(err, gorm.ErrRecordNotFound) {
+				// 查询失败要留痕便于排查 DB 抖动（代码审查：与
+				// matchAuthorization 的降级留痕同口径）。
+				s.logger.Warn("bot 工具集版本查询失败，回退 bots 表活值",
+					zap.String("bot_id", call.BotID), zap.Error(err))
+			}
+			// 降级回退 bots 表活值而非 0：活值只前进不回退，会话冻结版本
+			// 恒 ≤ 活值——活值已低于当前版时冻结版必也低，标注恒正确；
+			// 活值≥当前版的旧会话仍会漏标（双重降级才出现，方向安全），
+			// 但比按 0 兜底更贴近事实（代码审查 Note）。
+			if bot, berr := s.bots.FindByIDAndUser(call.BotID, userID); berr == nil {
+				botToolsetVer = bot.ToolsetVersion
+			}
+		}
+		if botToolsetVer > 0 && botToolsetVer < botToolsetVersion {
+			// 冻结旧工具集的会话也看得到 providers 目录：如实标注这些字段
+			// 本版本不可用，避免模型被引导去传会被受理拒绝的参数（云端审查）。
+			notSettable = append(append([]map[string]string{}, botThreadNotSettable...),
+				map[string]string{
+					"field":  "model_selection/runtime_mode/workspace",
+					"reason": fmt.Sprintf("本会话工具集 v%d 不含这些字段（传了会被受理拒绝）；压缩升级到 v%d 后可用", botToolsetVer, botToolsetVersion),
+				})
+		}
+		providers, providersDrifted := botSlimComposerProviders(opts.Config)
+		resp := map[string]interface{}{
+			"projects":     opts.Projects,
+			"providers":    providers,
+			"not_settable": notSettable,
+		}
+		if providersDrifted {
+			// 上游 providers 字段形状与约定不符（键名漂移等）：目录可能不完整，
+			// 显式标注而不是让模型目录静默消失（代码审查 Note）。
+			s.logger.Warn("composer_options providers 上游字段形状漂移",
+				zap.String("bot_id", call.BotID))
+			resp["providers_warning"] = "上游 providers 字段形状与预期不符，模型目录可能不完整；launch 的 model_selection 取值来源可能缺失"
+		}
+		return botMarshalResult(resp)
 	case "workspace_options":
 		opts, err := s.threads.WorkspaceOptions(ctx, userID, args.EnvID, args.ProjectID, args.Query, args.Cursor)
 		if err != nil {
@@ -125,6 +176,10 @@ func (s *BotService) runThreadWrite(ctx context.Context, call *model.BotToolCall
 		if execCtx.ThreadID != "" {
 			req.ThreadId = &execCtx.ThreadID
 		}
+		// 可选执行配置（INT-159）：未指定时不落任何字段，沿用项目默认。
+		if err := botThreadLaunchConfig(&args, req); err != nil {
+			return nil, err
+		}
 		// 复用 launchSent 语义：结果只表示启动 RPC 的结果，不代表远端完成。
 		result, _, err := s.threads.CreateThreadForAgent(ctx, userID, args.EnvID, req)
 		return result, err
@@ -162,6 +217,9 @@ type botCallExecContext struct {
 	// Param 与授权规则的参数值级约束一致（如 source=github）：always-allow
 	// 重建规则时必须有它，否则后续调用哈希永远对不上。
 	Param string `json:"param,omitempty"`
+	// ExecConfig 是 launch 执行配置的规范化 JSON（与摘要同口径）：
+	// always-allow 重建规则时写进 constraints_json，授权管理面按值展示。
+	ExecConfig string `json:"exec_config,omitempty"`
 	// Schedule 是 fs_schedule 确认卡的服务端预览（受理时算好，避免前端重复
 	// 实现 cron 解析）。
 	Schedule *botScheduleCallPreview `json:"schedule,omitempty"`
@@ -179,6 +237,20 @@ func (s *BotService) resolveThreadScope(prepared *botPreparedCall, raw map[strin
 		prepared.ScopeKind = botScopeThreadLaunch
 		prepared.ScopeID = rawString(raw["project_id"])
 		prepared.EnvironmentID = &envID
+		// 执行配置参与授权（代码审查 P2）：同一「始终允许」只覆盖相同配置
+		// 的 launch——换模型/运行模式/工作区都重新确认。字段集合绑定出现的
+		// 字段名，取值摘要绑定具体值：只绑字段拦不住 runtime_mode 从
+		// approval-required 换成 full-access 这类同字段不同值的提权。
+		prepared.FieldsConstraint = presentFields(raw, "model_selection", "runtime_mode", "workspace")
+		if len(prepared.FieldsConstraint) > 0 {
+			// 只有携带配置时才写摘要：不带配置的 launch 字段集合与取值摘要
+			// 均为空，命中升级前已存在的裸规则（Param 为空），存量授权用户
+			// 不会因本次升级被无谓重新确认（代码审查 Note）。
+			prepared.ParamConstraint = "exec=" + botThreadExecConfigDigest(raw)
+			// 规范化配置随调用账本进授权约束：摘要让规则哈希可区分，但
+			// 只有摘要管理面与审计无法看出规则覆盖哪套配置。
+			prepared.ExecConfigJSON = string(botThreadExecConfigObject(raw))
+		}
 	case "send":
 		prepared.ScopeKind = botScopeThread
 		prepared.ScopeID = rawString(raw["thread_id"])
@@ -204,6 +276,103 @@ func (s *BotService) resolveThreadScope(prepared *botPreparedCall, raw map[strin
 		prepared.ScopeKind = botScopeThread
 		prepared.ScopeID = rawString(raw["thread_id"])
 		prepared.EnvironmentID = &envID
+	}
+}
+
+// botThreadExecConfigDigest 摘要 launch 的执行配置取值（参数级授权约束）：
+// 三个配置字段按固定顺序把**规范化后**的 JSON 写入哈希——键序、空白与
+// options 数组顺序等纯序列化差异不得产生新授权规则（代码审查：语义相同
+// 的配置序列化不同会被重复弹确认）；语义取值差异（含显式默认值与省略的
+// 差别）都让规则哈希不同、重新确认。
+func botThreadExecConfigDigest(raw map[string]json.RawMessage) string {
+	h := sha256.New()
+	for _, key := range []string{"model_selection", "runtime_mode", "workspace"} {
+		h.Write([]byte{0})
+		if v, ok := raw[key]; ok && string(v) != "null" {
+			h.Write(botCanonicalExecJSON(v))
+		}
+	}
+	// 全量 32 字节摘要：该指纹是授权匹配边界，截短碰撞会让不同执行配置
+	// 复用同一条「始终允许」（权限放大且不易察觉），不值得省几个字符。
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// botThreadExecConfigObject 把三个执行配置字段归一成单个规范 JSON 对象
+// （键按名序、值与摘要同口径归一化）——随授权约束落库，授权管理面能
+// 按值展示一条规则覆盖哪套配置，而不是只有一个不可辨认的摘要。
+func botThreadExecConfigObject(raw map[string]json.RawMessage) json.RawMessage {
+	cfg := map[string]json.RawMessage{}
+	for _, key := range []string{"model_selection", "runtime_mode", "workspace"} {
+		if v, ok := raw[key]; ok && string(v) != "null" {
+			cfg[key] = json.RawMessage(botCanonicalExecJSON(v))
+		}
+	}
+	out, err := json.Marshal(cfg)
+	if err != nil {
+		return json.RawMessage("{}")
+	}
+	return out
+}
+
+// botCanonicalExecJSON 把配置字段反序列化后重新规范化序列化：对象键按名
+// 排序（Go Marshal map 的既有行为）、空白剥离；非法 JSON 透原样（受理侧
+// shape 校验先于执行，不会走到这里）。
+func botCanonicalExecJSON(v json.RawMessage) []byte {
+	var parsed interface{}
+	if err := json.Unmarshal(v, &parsed); err != nil {
+		return v
+	}
+	out, err := json.Marshal(botCanonicalValue(parsed))
+	if err != nil {
+		return v
+	}
+	return out
+}
+
+// botCanonicalValue 递归归一化：model_selection.options 数组语义无序，
+// 按元素的规范化字节排序后参与哈希。
+func botCanonicalValue(v interface{}) interface{} {
+	switch t := v.(type) {
+	case map[string]interface{}:
+		for k, e := range t {
+			// null 叶子递归丢弃：执行侧 null 与缺省同口径按空值处理，
+			// 摘要里保留会把语义相同的配置拆成两条授权规则（代码审查）。
+			if e == nil {
+				delete(t, k)
+				continue
+			}
+			// 空数组与缺省等价（options:[] 执行侧不进 wire）；空串可选字段
+			// 经 NonEmptyPtr 同样按缺省处理——唯 value 例外：options[]
+			// 的 value:"" 会原样透传上游，与省略语义不同，不能丢（r27）。
+			if arr, ok := e.([]interface{}); ok && len(arr) == 0 {
+				delete(t, k)
+				continue
+			}
+			if s, ok := e.(string); ok && strings.TrimSpace(s) == "" && k != "value" {
+				delete(t, k)
+				continue
+			}
+			t[k] = botCanonicalValue(e)
+		}
+		if opts, ok := t["options"].([]interface{}); ok {
+			sort.SliceStable(opts, func(i, j int) bool {
+				bi, _ := json.Marshal(opts[i])
+				bj, _ := json.Marshal(opts[j])
+				return string(bi) < string(bj)
+			})
+		}
+		return t
+	case []interface{}:
+		for i, e := range t {
+			t[i] = botCanonicalValue(e)
+		}
+		return t
+	case string:
+		// 执行侧（botThreadLaunchConfig）对字符串字段统一 TrimSpace，摘要
+		// 按同一口径：仅首尾空白差异的取值命中同一条授权规则（代码审查）。
+		return strings.TrimSpace(t)
+	default:
+		return v
 	}
 }
 
@@ -423,6 +592,17 @@ func botSlimThreadSummary(t *T3ThreadSummary) map[string]interface{} {
 	if t.ProjectName != "" {
 		out["project_name"] = t.ProjectName
 	}
+	// 线程实际生效的执行配置（INT-159）：launch 不传时用项目默认，回读
+	// 确认生效值看这里；provider/model 缺失说明上游未上报。
+	if t.Provider != "" {
+		out["provider"] = t.Provider
+	}
+	if t.Model != "" {
+		out["model"] = t.Model
+	}
+	if t.Branch != "" {
+		out["branch"] = t.Branch
+	}
 	if t.ParentThreadId != nil {
 		out["parent_thread_id"] = *t.ParentThreadId
 	}
@@ -610,5 +790,312 @@ func botSlimThreadItem(item *T3ThreadItem) map[string]interface{} {
 		out["text"] = item.Text
 	}
 	botSlimItemAttachChildThreadID(out, item)
+	return out
+}
+
+// botThreadLaunchConfig 校验并把 launch 可选执行配置（INT-159）写进 REST
+// 请求：形状与 T3CreateThreadRequest 一致，缺省不落任何字段（沿用项目
+// 默认）。model_selection 缺 instance_id/model、runtime_mode 非枚举值、
+// workspace 缺 type 或非枚举值都是调用错误——透给上游会变成难以归因的
+// RPC 失败，受理侧就拒掉（botPrepareToolCall 同样调它做受理校验）。
+func botThreadLaunchConfig(args *botThreadArgs, req *T3CreateThreadRequest) error {
+	if ms := args.ModelSelection; ms != nil {
+		instanceID := strings.TrimSpace(ms.InstanceID)
+		modelSlug := strings.TrimSpace(ms.Model)
+		if instanceID == "" || modelSlug == "" {
+			return errs.New(errs.ErrInvalidParams.Code, "model_selection 需要 instance_id 与 model（取值见 composer_options 的 providers）")
+		}
+		sel := &api.T3ModelSelection{InstanceId: instanceID, Model: modelSlug}
+		seenOpt := map[string]bool{}
+		for _, opt := range ms.Options {
+			optID := strings.TrimSpace(opt.ID)
+			if optID == "" {
+				return errs.New(errs.ErrInvalidParams.Code, "model_selection.options[].id 不能为空")
+			}
+			// 重复 id 受理即拒：授权摘要按规范化字节排序 options、执行按原
+			// 序透传——[{effort:low},{effort:high}] 与反序命中同一规则但上游
+			// 按 last-wins 取值可能不同（代码审查：摘要与执行须同口径）。
+			if seenOpt[optID] {
+				return errs.New(errs.ErrInvalidParams.Code, "model_selection.options[].id 重复 "+optID)
+			}
+			seenOpt[optID] = true
+			// T3 契约 value 只收 string|boolean（T3ModelOption）；
+			// 缺省/null/数字/对象在受理侧拒掉，不透给上游变成 RPC 失败。
+			// 字符串 value 与其他字段同口径 TrimSpace：授权摘要对叶子值
+			// 统一 trim，执行侧不 trim 会让「 high 」与「high」在执行上
+			// 是两个取值却共用一条授权规则（代码审查）。
+			value := opt.Value
+			if s, ok := value.(string); ok {
+				value = strings.TrimSpace(s)
+			}
+			switch value.(type) {
+			case string, bool:
+			default:
+				return errs.New(errs.ErrInvalidParams.Code, "model_selection.options["+optID+"].value 需要字符串或布尔值")
+			}
+			sel.Options = append(sel.Options, api.T3ModelOption{Id: optID, Value: value})
+		}
+		req.ModelSelection = sel
+	}
+	if mode := strings.TrimSpace(args.RuntimeMode); mode != "" {
+		switch mode {
+		case "approval-required", "auto-accept-edits", "auto", "full-access":
+		default:
+			return errs.New(errs.ErrInvalidParams.Code, "未知的 runtime_mode "+mode)
+		}
+		m := api.CreateT3ThreadRequestRuntimeMode(mode)
+		req.RuntimeMode = &m
+	}
+	if ws := args.Workspace; ws != nil {
+		wsType := strings.TrimSpace(ws.Type)
+		switch wsType {
+		case "root", "worktree", "existing_worktree":
+		case "":
+			return errs.New(errs.ErrInvalidParams.Code, "workspace 需要 type（root/worktree/existing_worktree）；不需要自定义工作区时省略整个 workspace 字段")
+		default:
+			return errs.New(errs.ErrInvalidParams.Code, "未知的 workspace.type "+wsType)
+		}
+		baseRef := strings.TrimSpace(ws.BaseRef)
+		branch := strings.TrimSpace(ws.Branch)
+		worktreePath := strings.TrimSpace(ws.WorktreePath)
+		// 按 type 拒掉下游会静默丢弃的字段组合（云端审查）：root 不消费任何
+		// 策略字段（INT-85 共识）；worktree 不用 worktree_path；
+		// existing_worktree 只用 worktree_path+branch。不拦的话确认卡会显示
+		// 实际不生效的字段，与「无效字段不静默忽略」约定相悖。
+		switch wsType {
+		case "root":
+			if baseRef != "" || branch != "" || worktreePath != "" || ws.StartFromOrigin != nil {
+				return errs.New(errs.ErrInvalidParams.Code, "workspace.type=root 不接受以下字段（项目主检出不需要工作区参数）：\n- base_ref\n- branch\n- worktree_path\n- start_from_origin\n要新建工作树请改用 worktree，要复用已有目录请改用 existing_worktree")
+			}
+		case "worktree":
+			if worktreePath != "" {
+				return errs.New(errs.ErrInvalidParams.Code, "workspace.type=worktree 不接受 worktree_path：worktree 由服务端新建；要复用已有目录请改用 existing_worktree")
+			}
+		case "existing_worktree":
+			if worktreePath == "" {
+				return errs.New(errs.ErrInvalidParams.Code, "existing_worktree 需要提供 worktree_path（已有工作树的绝对路径）；不需要指定目录时请改用 worktree")
+			}
+			if baseRef != "" || ws.StartFromOrigin != nil {
+				return errs.New(errs.ErrInvalidParams.Code, "workspace.type=existing_worktree 不接受以下字段（已有工作树只按 worktree_path 与可选 branch 进入）：\n- base_ref\n- start_from_origin")
+			}
+		}
+		req.Workspace = &api.T3ThreadWorkspace{
+			Type:            api.T3ThreadWorkspaceType(wsType),
+			BaseRef:         api.NonEmptyPtr(&baseRef),
+			Branch:          api.NonEmptyPtr(&branch),
+			WorktreePath:    api.NonEmptyPtr(&worktreePath),
+			StartFromOrigin: ws.StartFromOrigin,
+		}
+	}
+	return nil
+}
+
+// botThreadLaunchNestedKeys 白名单校验 launch 嵌套对象的键（云端审查）：
+// 顶层 knownKeys 只看一层，model_selection.temperature、workspace.path
+// 这类不存在的键会被 Unmarshal 静默丢弃——不报错不生效，确认卡上也看不
+// 到，与「无效字段不静默忽略」约定相悖，受理侧即拒。
+var botThreadLaunchNestedKeys = map[string][]string{
+	"model_selection": {"instance_id", "model", "options"},
+	"workspace":       {"type", "base_ref", "branch", "worktree_path", "start_from_origin"},
+}
+
+func botValidateThreadLaunchNestedKeys(raw map[string]json.RawMessage) error {
+	// runtime_mode 显式空串受理即拒：与 workspace.type="" 同一口径，「字段
+	// 缺失」与「字段为空」不等价——空串不能让模型误以为指定了某个模式
+	//（实则会静默落 full-access 缺省，代码审查）。
+	if blob, ok := raw["runtime_mode"]; ok && string(blob) != "null" {
+		var mode string
+		if err := json.Unmarshal(blob, &mode); err == nil && strings.TrimSpace(mode) == "" {
+			return errs.New(errs.ErrInvalidParams.Code, "runtime_mode 不接受空字符串；不需要指定时省略整个字段（缺省为 full-access）")
+		}
+	}
+	for field, allowed := range botThreadLaunchNestedKeys {
+		blob, ok := raw[field]
+		if !ok {
+			continue
+		}
+		var obj map[string]json.RawMessage
+		if err := json.Unmarshal(blob, &obj); err != nil {
+			continue // 非对象形状由结构体反序列化报错，不在这里判
+		}
+		allow := make(map[string]bool, len(allowed))
+		for _, k := range allowed {
+			allow[k] = true
+		}
+		for key := range obj {
+			if !allow[key] {
+				return errs.New(errs.ErrInvalidParams.Code, "launch "+field+" 不接受字段 "+key)
+			}
+		}
+		if field == "model_selection" {
+			var opts []map[string]json.RawMessage
+			if err := json.Unmarshal(obj["options"], &opts); err == nil {
+				for _, opt := range opts {
+					for key := range opt {
+						if key != "id" && key != "value" {
+							return errs.New(errs.ErrInvalidParams.Code, "launch model_selection.options[] 不接受字段 "+key)
+						}
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// botThreadNotSettable 是 composer_options 返回的「机器人不可设置」清单
+// （INT-159）：这些配置项存在于 T3 启动面但不由机器人决定，如实列出原因
+// 而不是让模型猜哪些能传、哪些会被静默忽略。
+var botThreadNotSettable = []map[string]string{
+	{"field": "interaction_mode", "reason": "固定为 default，T3 不开放其它取值"},
+	{"field": "attachments", "reason": "机器人不支持随消息上传图片附件"},
+	{"field": "thread_id/command_id/message_id", "reason": "幂等身份由服务端受理时生成，不能由调用方指定"},
+}
+
+// botSlimComposerProviders 把 composer-options 的 config.providers（上游
+// camelCase）归一化成蛇形模型目录：跳过停用/未安装/不可用的 provider 与
+// 缺 slug 的模型，保留选项描述符（id/type/choices/current_value），供
+// launch 的 model_selection 直接回填，机器人侧不硬编码模型清单。
+// 第二返回值报告上游字段形状漂移：providers 有条目但一个 instanceId 都
+// 读不到时，大概率是上游改了键名——目录静默为空对模型不可见，调用方应在
+// 回执里显式标注而不是让 launch 的取值来源悄悄消失（代码审查 Note）。
+func botSlimComposerProviders(config map[string]interface{}) ([]map[string]interface{}, bool) {
+	rawProviders, _ := config["providers"].([]interface{})
+	out := make([]map[string]interface{}, 0, len(rawProviders))
+	sawInstanceID := false
+	for _, raw := range rawProviders {
+		provider, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		instanceID, _ := provider["instanceId"].(string)
+		if instanceID == "" {
+			continue
+		}
+		sawInstanceID = true
+		if provider["enabled"] == false || provider["installed"] == false ||
+			provider["availability"] == "unavailable" {
+			continue
+		}
+		models := botSlimComposerModels(provider["models"])
+		if len(models) == 0 {
+			continue
+		}
+		entry := map[string]interface{}{
+			"instance_id": instanceID,
+			"models":      models,
+		}
+		if name, _ := provider["displayName"].(string); name != "" {
+			entry["name"] = name
+		}
+		out = append(out, entry)
+	}
+	// 漂移判定收窄到「有条目但完全读不到 instanceId」：混入的个别坏行
+	// 静默跳过即可，整批缺关键字段名才像上游改了契约。
+	return out, len(rawProviders) > 0 && !sawInstanceID
+}
+
+// botSlimComposerModels 归一化 provider 的 models 数组（slug 必填）。
+func botSlimComposerModels(raw any) []map[string]interface{} {
+	list, _ := raw.([]interface{})
+	out := make([]map[string]interface{}, 0, len(list))
+	for _, item := range list {
+		m, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		slug, _ := m["slug"].(string)
+		if slug == "" {
+			continue
+		}
+		// 模型级可用性按 provider 同口径防御性剔除：上游条目若带
+		// enabled/availability/deprecated 标记就遵守，没有这些字段时条件
+		// 不命中、行为不变（代码审查：上游字段无本地类型 schema 可查）。
+		if m["enabled"] == false || m["availability"] == "unavailable" ||
+			m["deprecated"] == true {
+			continue
+		}
+		entry := map[string]interface{}{"slug": slug}
+		if name, _ := m["name"].(string); name != "" {
+			entry["name"] = name
+		}
+		if sub, _ := m["subProvider"].(string); sub != "" {
+			entry["sub_provider"] = sub
+		}
+		if m["isDefault"] == true {
+			entry["is_default"] = true
+		}
+		if options := botSlimComposerOptionDescriptors(m["capabilities"]); len(options) > 0 {
+			entry["options"] = options
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
+// botSlimComposerOptionDescriptors 归一化 capabilities.optionDescriptors：
+// 保留有 id 的描述符（select 带 choices；boolean 取 true/false），
+// current_value 是 T3 该实例的当前默认，choices[].is_default 标记出厂默认。
+func botSlimComposerOptionDescriptors(raw any) []map[string]interface{} {
+	caps, _ := raw.(map[string]interface{})
+	list, _ := caps["optionDescriptors"].([]interface{})
+	out := make([]map[string]interface{}, 0, len(list))
+	for _, item := range list {
+		d, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		id, _ := d["id"].(string)
+		if id == "" {
+			continue
+		}
+		// 只保留机器人能回填的类型（select/boolean；缺省 type 但带 choices
+		// 的按 select 计）：number 等其它类型 launch 受理不接受，列出来只会
+		// 引导模型发起注定被拒的调用（代码审查）。
+		typ, _ := d["type"].(string)
+		choices := botSlimComposerChoices(d["options"])
+		if typ != "select" && typ != "boolean" && (typ != "" || len(choices) == 0) {
+			continue
+		}
+		entry := map[string]interface{}{"id": id}
+		if label, _ := d["label"].(string); label != "" {
+			entry["label"] = label
+		}
+		if typ != "" {
+			entry["type"] = typ
+		}
+		if v, ok := d["currentValue"]; ok && v != nil {
+			entry["current_value"] = v
+		}
+		if len(choices) > 0 {
+			entry["choices"] = choices
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
+// botSlimComposerChoices 归一化 select 描述符的候选值。
+func botSlimComposerChoices(raw any) []map[string]interface{} {
+	list, _ := raw.([]interface{})
+	out := make([]map[string]interface{}, 0, len(list))
+	for _, item := range list {
+		c, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		id, _ := c["id"].(string)
+		if id == "" {
+			continue
+		}
+		entry := map[string]interface{}{"id": id}
+		if label, _ := c["label"].(string); label != "" {
+			entry["label"] = label
+		}
+		if c["isDefault"] == true {
+			entry["is_default"] = true
+		}
+		out = append(out, entry)
+	}
 	return out
 }

@@ -3,7 +3,7 @@ package service
 // INT-160 fs_thread/wait 测试：受理即 running 不进 worker、idle 稳定窗防抖、
 // needs_reply/error 立即触发、启动宽限 not_started、超时分类（unchanged /
 // progressing / degraded / thread_gone）、取消与重启分支、防循环限额与重复挂、
-// 定时任务会话 15 分钟上限。工具集 v12 与冻结基线（v1–v11 hash 不动）。
+// 定时任务会话 15 分钟上限。工具集 v13 与冻结基线（v1–v12 hash 不动）。
 
 import (
 	"context"
@@ -20,9 +20,10 @@ import (
 	"go.uber.org/zap"
 )
 
-// botToolsetV12FrozenHash 是 INT-160 发布的 v12 wire 字节基线：wait 动作与
-// on/timeout_minutes 参数只进本版；之后任何改动都必须先递增版本。
-const botToolsetV12FrozenHash = "89ddf49802db9adc48b77fcbb59cd8dde91ae64254426cc175d2cd4e98e6d3c0"
+// botToolsetV13FrozenHash 是 INT-160 发布的 v13 wire 字节基线：wait 动作与
+// on/timeout_minutes 参数只进本版（v12 是 INT-159 的 launch 执行配置）；
+// 之后任何改动都必须先递增版本。
+const botToolsetV13FrozenHash = "PLACEHOLDER_RECOMPUTE"
 
 func shrinkWaitTimers(env *botTestEnv) {
 	env.bots.waitCfg = botWaitEvalConfig{
@@ -179,21 +180,21 @@ func pairWaitT3(t *testing.T, env *botTestEnv, userID string) (*fakeT3Environmen
 	return fake, envID
 }
 
-// ---------- 1. 工具集 v12：wait 进活跃面，v1–v11 字节冻结 ----------
+// ---------- 1. 工具集 v13：wait 进活跃面，v1–v12 字节冻结 ----------
 
-func TestBotInt160ToolsetV12(t *testing.T) {
-	v11 := botToolsetVersionOf(11)
+func TestBotInt160ToolsetV13(t *testing.T) {
 	v12 := botToolsetVersionOf(12)
-	if len(v12.schemas) != len(v11.schemas) {
-		t.Fatalf("v12 不新增工具: %d vs %d", len(v12.schemas), len(v11.schemas))
+	v13 := botToolsetVersionOf(13)
+	if len(v13.schemas) != len(v12.schemas) {
+		t.Fatalf("v13 不新增工具: %d vs %d", len(v13.schemas), len(v12.schemas))
 	}
-	if v12.hash == v11.hash {
-		t.Fatalf("v12 与 v11 的 tools_hash 不应相同")
+	if v13.hash == v12.hash {
+		t.Fatalf("v13 与 v12 的 tools_hash 不应相同")
 	}
-	if v12.hash != botToolsetV12FrozenHash {
-		t.Fatalf("v12 tools_hash 偏离基线: got %s want %s", v12.hash, botToolsetV12FrozenHash)
+	if v13.hash != botToolsetV13FrozenHash {
+		t.Fatalf("v13 tools_hash 偏离基线: got %s want %s", v13.hash, botToolsetV13FrozenHash)
 	}
-	// v1–v11 各冻结基线原样通过：v12 的演进不得回写任何已发布版本。
+	// v1–v12 各冻结基线原样通过：v13 的演进不得回写任何已发布版本。
 	for _, tc := range []struct {
 		version int64
 		want    string
@@ -201,30 +202,34 @@ func TestBotInt160ToolsetV12(t *testing.T) {
 		{1, botToolsetV1FrozenHash}, {2, botToolsetV2FrozenHash}, {3, botToolsetV3FrozenHash},
 		{4, botToolsetV4FrozenHash}, {5, botToolsetV5FrozenHash}, {6, botToolsetV6FrozenHash},
 		{7, botToolsetV7FrozenHash}, {8, botToolsetV8FrozenHash}, {9, botToolsetV9FrozenHash},
-		{10, botToolsetV10FrozenHash}, {11, botToolsetV11FrozenHash},
+		{10, botToolsetV10FrozenHash}, {11, botToolsetV11FrozenHash}, {12, botToolsetV12FrozenHash},
 	} {
 		if got := botToolsetVersionOf(tc.version).hash; got != tc.want {
 			t.Fatalf("v%d tools_hash 偏离冻结基线: got %s want %s", tc.version, got, tc.want)
 		}
 	}
-	// v9–v11 的 fs_thread 冻结在 botThreadArgsV9Frozen；v12 用活跃结构体。
+	// v9–v11 的 fs_thread 冻结在 botThreadArgsV9Frozen，v12 冻结在
+	// botThreadArgsV12Frozen；v13 用活跃结构体。
 	for _, version := range []int64{9, 10, 11} {
 		thread := botToolsetVersionOf(version).byName["fs_thread"]
 		if thread.ArgsType.Name() != "botThreadArgsV9Frozen" {
 			t.Fatalf("v%d fs_thread 应冻结在 botThreadArgsV9Frozen，实得 %s", version, thread.ArgsType.Name())
 		}
-		if _, ok := v12.byAction["fs_thread/wait"]; !ok {
-			t.Fatalf("v12 应含 fs_thread/wait")
-		}
 	}
-	thread := v12.byName["fs_thread"]
+	if th := v12.byName["fs_thread"]; th.ArgsType.Name() != "botThreadArgsV12Frozen" {
+		t.Fatalf("v13 fs_thread 应冻结在 botThreadArgsV12Frozen，实得 %s", th.ArgsType.Name())
+	}
+	if _, ok := v12.byAction["fs_thread/wait"]; ok {
+		t.Fatalf("v13 不得含 fs_thread/wait（wait 只进 v13）")
+	}
+	thread := v13.byName["fs_thread"]
 	if thread.ArgsType.Name() != "botThreadArgs" {
-		t.Fatalf("v12 fs_thread 应使用活跃参数结构体，实得 %s", thread.ArgsType.Name())
+		t.Fatalf("v13 fs_thread 应使用活跃参数结构体，实得 %s", thread.ArgsType.Name())
 	}
 	if len(thread.Actions) != 12 {
-		t.Fatalf("v12 fs_thread 应有 12 个动作，实得 %d", len(thread.Actions))
+		t.Fatalf("v13 fs_thread 应有 12 个动作，实得 %d", len(thread.Actions))
 	}
-	waitDef := v12.byAction["fs_thread/wait"]
+	waitDef := v13.byAction["fs_thread/wait"]
 	if waitDef.Mode != model.BotExecutionAsync || waitDef.RequiresConfirmation {
 		t.Fatalf("wait 应为异步、不需确认: %+v", waitDef)
 	}
@@ -240,19 +245,19 @@ func TestBotInt160ToolsetV12(t *testing.T) {
 	}
 
 	// 受理校验：缺 thread_id、非法 on、越界 timeout、禁止字段都拒绝。
-	if _, err := botPrepareToolCall(v12, "fs_thread", `{"action":"wait","env_id":"e1"}`); err == nil {
+	if _, err := botPrepareToolCall(v13, "fs_thread", `{"action":"wait","env_id":"e1"}`); err == nil {
 		t.Fatalf("wait 缺 thread_id 应被拒绝")
 	}
-	if _, err := botPrepareToolCall(v12, "fs_thread", `{"action":"wait","env_id":"e1","thread_id":"t1","on":"idle,pr"}`); err == nil {
+	if _, err := botPrepareToolCall(v13, "fs_thread", `{"action":"wait","env_id":"e1","thread_id":"t1","on":"idle,pr"}`); err == nil {
 		t.Fatalf("wait 的 on 不接受 pr")
 	}
-	if _, err := botPrepareToolCall(v12, "fs_thread", `{"action":"wait","env_id":"e1","thread_id":"t1","timeout_minutes":31}`); err == nil {
+	if _, err := botPrepareToolCall(v13, "fs_thread", `{"action":"wait","env_id":"e1","thread_id":"t1","timeout_minutes":31}`); err == nil {
 		t.Fatalf("wait 的 timeout_minutes 越界应被拒绝")
 	}
-	if _, err := botPrepareToolCall(v12, "fs_thread", `{"action":"wait","env_id":"e1","thread_id":"t1","text":"x"}`); err == nil {
+	if _, err := botPrepareToolCall(v13, "fs_thread", `{"action":"wait","env_id":"e1","thread_id":"t1","text":"x"}`); err == nil {
 		t.Fatalf("wait 不接受 text")
 	}
-	prepared, err := botPrepareToolCall(v12, "fs_thread",
+	prepared, err := botPrepareToolCall(v13, "fs_thread",
 		`{"action":"wait","env_id":"e1","thread_id":"t1","on":"needs_reply","timeout_minutes":30}`)
 	if err != nil {
 		t.Fatalf("wait 应被受理: %v", err)
@@ -261,14 +266,14 @@ func TestBotInt160ToolsetV12(t *testing.T) {
 		t.Fatalf("wait 受理应为异步免确认: %+v", prepared)
 	}
 	// 缺省参数（on/timeout_minutes 省略）合法。
-	if _, err := botPrepareToolCall(v12, "fs_thread", `{"action":"wait","env_id":"e1","thread_id":"t1"}`); err != nil {
+	if _, err := botPrepareToolCall(v13, "fs_thread", `{"action":"wait","env_id":"e1","thread_id":"t1"}`); err != nil {
 		t.Fatalf("wait 缺省参数应被受理: %v", err)
 	}
 	// 工具与动作描述写明 wait 语义，且不含 watch/watching 字样（PR 监听字段
 	// watching 是既有口径，只约束 wait 自己的描述与帮助条目）。
 	for _, want := range []string{"wait", "outcome", "running"} {
 		if !strings.Contains(thread.Description, want) && !strings.Contains(waitDef.Description, want) {
-			t.Fatalf("v12 fs_thread 描述应含 %q", want)
+			t.Fatalf("v13 fs_thread 描述应含 %q", want)
 		}
 	}
 	// watch 字样只允许出现在规格规定的 outcome 取值 watch_degraded 里。

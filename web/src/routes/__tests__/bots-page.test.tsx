@@ -129,7 +129,11 @@ vi.mock("@/lib/hooks/use-bots", async (importOriginal) => ({
         scope_kind: "fastship_project",
         scope_id: "proj-1",
         environment_id: null,
-        constraints: { fields: ["body"] },
+        constraints: {
+          fields: ["body"],
+          param: "exec=deadbeef",
+          exec_config: { runtime_mode: "auto" },
+        },
         created_at: "2026-10-15T00:00:00Z",
         revoked_at: null,
       },
@@ -652,7 +656,9 @@ describe("BotDetailPage", () => {
     const item = await within(dialog).findByTestId("bot-authorization-item");
     expect(item).toHaveTextContent("fs_issue.update");
     expect(item).toHaveTextContent("fastship_project：proj-1");
-    expect(item).toHaveTextContent("允许写入字段：fields");
+    expect(item).toHaveTextContent("允许写入字段：body");
+    // 执行配置取值随约束落库展示（exec_config 可读值，不只有 opaque 摘要）。
+    expect(item).toHaveTextContent('执行配置：{"runtime_mode":"auto"}');
 
     await user.click(
       within(item).getByRole("button", { name: "撤销 fs_issue.update 授权" }),

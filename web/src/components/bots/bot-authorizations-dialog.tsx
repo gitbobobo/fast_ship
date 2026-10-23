@@ -30,10 +30,17 @@ function scopeLabel(a: {
   return parts.join(" · ");
 }
 
-/** constraints_json 的字段约束展示：键为字段名；空对象不显示该行。 */
-function constraintKeys(constraints?: Record<string, unknown>) {
-  const keys = Object.keys(constraints ?? {});
-  return keys.length > 0 ? keys.join("、") : null;
+/** constraints_json 分解展示：fields/param/exec_config 有专属行，
+ * 其余未知键兜底按键名拼接，不静默吞掉。 */
+function constraintView(constraints?: Record<string, unknown>) {
+  const c = constraints ?? {};
+  const fields = Array.isArray(c.fields) ? c.fields.map(String) : null;
+  const exec = c.exec_config !== undefined ? JSON.stringify(c.exec_config) : null;
+  const param = exec === null && typeof c.param === "string" ? c.param : null;
+  const others = Object.keys(c).filter(
+    (k) => k !== "fields" && k !== "param" && k !== "exec_config",
+  );
+  return { fields, exec, param, others: others.length > 0 ? others.join("、") : null };
 }
 
 /**
@@ -171,7 +178,7 @@ export function BotAuthorizationsDialog({
         ) : (
           <ul className="space-y-2">
             {active.map((a) => {
-              const fields = constraintKeys(a.constraints);
+              const { fields, exec, param, others } = constraintView(a.constraints);
               const expired = isExpiredDate(a.expires_at);
               return (
                 <li
@@ -201,7 +208,22 @@ export function BotAuthorizationsDialog({
                   </p>
                   {fields && (
                     <p className="text-xs text-muted-foreground">
-                      允许写入字段：{fields}
+                      允许写入字段：{fields.join("、")}
+                    </p>
+                  )}
+                  {exec && (
+                    <p className="break-all font-mono text-xs text-muted-foreground">
+                      执行配置：{exec}
+                    </p>
+                  )}
+                  {param && (
+                    <p className="text-xs text-muted-foreground">
+                      参数约束：{param}
+                    </p>
+                  )}
+                  {others && (
+                    <p className="text-xs text-muted-foreground">
+                      约束：{others}
                     </p>
                   )}
                   <p className="text-xs text-muted-foreground">

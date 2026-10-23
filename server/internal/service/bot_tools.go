@@ -198,9 +198,10 @@ type botIssueArgs struct {
 
 // botThreadArgs 是 fs_thread 的参数超集。v5（INT-120）起 list 真正支持
 // env_id/query 过滤；v4 的旧标签由 bot_args_frozen.go 的 botThreadArgsV4 冻结；
-// v5–v8 的标签由 botThreadArgsV5Frozen 冻结；v9–v11（settle/unsettle/
-// resume_queue 形态）由 botThreadArgsV9Frozen 冻结。INT-160 起 wait 动作与
-// on/timeout_minutes 参数只进 v12，本结构体即 v12 的活跃形态。
+// v5–v8 由 botThreadArgsV5Frozen 冻结；v9–v11（settle/unsettle/resume_queue
+// 形态）由 botThreadArgsV9Frozen 冻结；v12（INT-159 的 launch 执行配置）由
+// botThreadArgsV12Frozen 冻结。INT-160 起 wait 动作与 on/timeout_minutes
+// 参数只进 v13，本结构体即 v13 的活跃形态。
 type botThreadArgs struct {
 	Action    string `json:"action" jsonschema:"enum=list,enum=get,enum=item,enum=composer_options,enum=workspace_options,enum=launch,enum=send,enum=stop,enum=settle,enum=unsettle,enum=resume_queue,enum=wait,required"`
 	EnvID     string `json:"env_id,omitempty" jsonschema:"description=T3 环境 ID（除 list 外的动作必填；list 可选，只保留该环境的线程）"`
@@ -211,6 +212,12 @@ type botThreadArgs struct {
 	Cursor    *int   `json:"cursor,omitempty" jsonschema:"description=上一页返回的 next_cursor（workspace_options）"`
 	Text      string `json:"text,omitempty" jsonschema:"description=消息正文（launch/send 必填）"`
 	Title     string `json:"title,omitempty" jsonschema:"description=线程标题（launch 可选，缺省由 T3 生成）"`
+	// launch 可选执行配置（INT-159）：缺省行为各字段不同——model_selection
+	// 沿用项目默认模型、runtime_mode 为 full-access、workspace 用项目主检出；
+	// 其它动作携带即被拒绝（不静默忽略）。
+	ModelSelection *botThreadModelSelection `json:"model_selection,omitempty" jsonschema:"description=模型选择（launch 可选）：instance_id/model/options 的取值用 composer_options 返回的 providers 清单；省略沿用项目默认"`
+	RuntimeMode    string                   `json:"runtime_mode,omitempty" jsonschema:"enum=approval-required,enum=auto-accept-edits,enum=auto,enum=full-access,description=运行模式（launch 可选）；省略沿用服务端默认"`
+	Workspace      *botThreadWorkspace      `json:"workspace,omitempty" jsonschema:"description=工作区策略（launch 可选）；省略为项目主检出"`
 	// wait 的参数（INT-160）：on 是触发条件子集，timeout_minutes 是等待上限。
 	On             string `json:"on,omitempty" jsonschema:"description=wait 可选；触发条件子集，逗号分隔（idle/needs_reply/error，缺省 idle,needs_reply,error；pr 暂不作为触发条件）"`
 	TimeoutMinutes int    `json:"timeout_minutes,omitempty" jsonschema:"description=wait 可选；等待上限（分钟，1-30，缺省 10；定时任务会话内不得超过 15）"`
@@ -224,6 +231,34 @@ type botThreadArgs struct {
 	// get 的条目分页：详情默认只回最近若干条，完整历史按 offset 向前读。
 	ItemLimit  int `json:"item_limit,omitempty" jsonschema:"description=get 可选；返回的线程条目条数（默认 50，上限 200）"`
 	ItemOffset int `json:"item_offset,omitempty" jsonschema:"description=get 可选；条目偏移（从 0 起，配合 item_limit 向前翻完整历史）"`
+}
+
+// botThreadModelSelection 是 launch 可选的模型选择（INT-159），形状与 REST
+// T3ModelSelection 一致：取值不硬编码，由 composer_options 的 providers 提供。
+type botThreadModelSelection struct {
+	InstanceID string                 `json:"instance_id" jsonschema:"required,description=T3 providerInstanceId（providers[].instance_id）"`
+	Model      string                 `json:"model" jsonschema:"required,description=模型 slug（providers[].models[].slug）"`
+	Options    []botThreadModelOption `json:"options,omitempty" jsonschema:"description=模型选项（可选）；候选 id 与取值见 providers[].models[].options"`
+}
+
+// botThreadModelOption 是模型选项的 canonical 项 {id,value}；value 为字符串
+// 或布尔（T3 ProviderOptionSelectionValue），不收窄成纯字符串。oneof_type
+// 显式声明类型并集：any 生成的 schema 没有 type，严格校验 function
+// parameters 的上游网关会拒掉整个工具（代码审查 P2）。
+type botThreadModelOption struct {
+	ID    string `json:"id" jsonschema:"description=选项 id（options[].id）"`
+	Value any    `json:"value" jsonschema:"oneof_type=string;boolean,description=选项值（select 取 choices[].id；boolean 取 true/false）"`
+}
+
+// botThreadWorkspace 是 launch 可选的工作区策略（INT-159），形状与 REST
+// T3ThreadWorkspace 一致：root=项目主检出；worktree=新 worktree；existing_worktree=
+// 已有 worktree（worktree_path 必填）。
+type botThreadWorkspace struct {
+	Type            string `json:"type" jsonschema:"enum=root,enum=worktree,enum=existing_worktree,required,description=root=项目主检出当前分支；worktree=新 worktree（base_ref 缺省主检出当前分支，branch 缺省自动生成，start_from_origin 缺省 T3 设置）；existing_worktree=已有 worktree"`
+	BaseRef         string `json:"base_ref,omitempty" jsonschema:"description=新 worktree 的基线引用（worktree 可选；缺省主检出当前分支）"`
+	Branch          string `json:"branch,omitempty" jsonschema:"description=新分支名（worktree 可选）或已有 worktree 的分支"`
+	WorktreePath    string `json:"worktree_path,omitempty" jsonschema:"description=已有 worktree 路径（existing_worktree 必填）"`
+	StartFromOrigin *bool  `json:"start_from_origin,omitempty" jsonschema:"description=新 worktree 是否从 origin 起点（worktree 可选；缺省 T3 设置 newWorktreesStartFromOrigin）"`
 }
 
 type botEnvironmentArgs struct {
@@ -479,10 +514,9 @@ func botToolRegistryV9() []*botToolDef {
 			continue
 		}
 		tool.Description = "操作已连接 T3 环境里的线程：list/get/item/composer_options/workspace_options 读取，launch/send/stop/settle/unsettle/resume_queue 为需确认的写操作。list/get 带 run_status（T3 原始状态）与 pull_requests[]：status 不是 idle 时线程还没结束（后台 run/后台工作仍在），run_status 只是最近一次根 run 的状态，status=idle 时它才是最终结局；launch 只表示启动 RPC 受理，不代表远端完成。"
-		// v9 自 INT-160 起冻结：action 枚举与 env_id/thread_id 描述钉在
-		// INT-148 发布形态（botThreadArgsV9Frozen）；INT-160 的 wait 动作与
-		// on/timeout_minutes 参数只进 v12。
-		tool.ArgsType = reflect.TypeOf(botThreadArgsV9Frozen{})
+		// v9 起 fs_thread 冻结在 botThreadArgsV9Frozen（botUseFrozenArgs 在
+		// 下面换入）；这里先放活跃结构体只是占位，wire 字节以冻结副本为准。
+		tool.ArgsType = reflect.TypeOf(botThreadArgs{})
 		tool.Actions = []botActionDef{
 			{Name: "list", Description: "列出全部环境的线程（默认不含归档与已结算线程；已结算的要带 settled=true 才看得到）", Mode: model.BotExecutionSync},
 			{Name: "get", Description: "读取线程详情", Mode: model.BotExecutionSync},
@@ -497,10 +531,13 @@ func botToolRegistryV9() []*botToolDef {
 			{Name: "resume_queue", Description: "恢复该线程被挂起的消息队列，排队消息继续执行", Mode: model.BotExecutionAsync, RequiresConfirmation: true},
 		}
 	}
+	// INT-159 起 v9 冻结：fs_thread 的 launch 配置参数只进 v12，本版换回冻结
+	// 副本，wire 字节与 INT-148 发布时逐字节一致（基线见 bot_int148_thread_test.go）。
+	botUseFrozenArgs(9, tools)
 	return tools
 }
 
-// botToolRegistryV10 是当前发布注册表（INT-136）：在 v9 之上只改 fs_schedule
+// botToolRegistryV10 是 INT-136 发布、自 INT-159 起冻结的注册表：在 v9 之上只改 fs_schedule
 // 的工具与动作描述，说明确认语义——create、改动 instruction/needs_report/model
 // 的 update、非 dry_run 的 run 需要用户确认、异步受理、结果以后台结果送达；
 // 批准创建或修改任务等于授权该任务以后每次运行默认放行写操作；定时任务运行中
@@ -531,6 +568,46 @@ func botToolRegistryV10() []*botToolDef {
 			{Name: "disable", Description: "停用任务，不再触发（task_id 必填）", Mode: model.BotExecutionSync},
 			{Name: "state_get", Description: "读取本任务跨运行保留的小状态（无参数；只能在定时任务运行中使用）", Mode: model.BotExecutionSync},
 			{Name: "state_set", Description: "写入本任务的小状态（state 为任意 JSON 值，省略或 null 表示清空；只能在定时任务运行中使用）", Mode: model.BotExecutionSync},
+		}
+	}
+	// INT-159 起 v10 冻结：fs_thread 的 launch 配置参数只进 v12，本版换回冻结
+	// 副本，wire 字节与 INT-136 发布时逐字节一致（基线见 bot_int136_test.go）。
+	botUseFrozenArgs(10, tools)
+	return tools
+}
+
+// botToolRegistryV12 是当前发布注册表（INT-159）：在 v11（INT-156）之上演进
+// fs_thread——launch 接受可选执行配置（model_selection/runtime_mode/workspace，
+// 省略沿用项目默认），composer_options 返回 providers 模型目录与不可设置项
+// 清单，list/get 摘要回带 provider/model/branch（读取面变化不进 wire 字节，
+// 但描述引导模型使用）。fs_schedule 沿用 v11 形状。v11 及更早版本是冻结
+// 副本——本注册表的任何变化不得影响它们，否则存量会话的前缀/tools_hash
+// 失稳。
+func botToolRegistryV12() []*botToolDef {
+	tools := botToolRegistryV11()
+	for _, tool := range tools {
+		if tool.Name != "fs_thread" {
+			continue
+		}
+		// 在 v9 工具级描述之上合并两条增量：v11 的 list enrichment 与本版的
+		// launch 配置/provider 回显，与各自发布版逐字一致。
+		tool.Description = "操作已连接 T3 环境里的线程：list/get/item/composer_options/workspace_options 读取，launch/send/stop/settle/unsettle/resume_queue 为需确认的写操作。list/get 带 run_status（T3 原始状态）与 pull_requests[]：status 不是 idle 时线程还没结束（后台 run/后台工作仍在），run_status 只是最近一次根 run 的状态，status=idle 时它才是最终结局；每项还带 provider/model/branch 回显线程实际配置。composer_options 返回 providers 可用模型目录与项目默认；launch 可指定 model_selection/runtime_mode/workspace，省略时模型沿用项目默认、运行模式为 full-access、工作区为项目主检出。launch 只表示启动 RPC 受理，不代表远端完成。" +
+			"list 每项另带 activity（运行活动摘要：活动 run、待应答的审批/提问、后台工作数、停止中；全空即平静线程）与 last_reply（末条助手回复摘要，300 字符截断；无助手回复则省略；单条详情读不到时 detail_unavailable=true，读超时/预算耗尽被中止的标 detail_skipped=true），看线程进展通常不必再逐线程 get。"
+		// v12 用活跃参数结构体：model_selection/runtime_mode/workspace 随本版
+		// 新增；v9–v11 的 wire 字节由冻结副本 botThreadArgsV9Frozen 保留。
+		tool.ArgsType = reflect.TypeOf(botThreadArgsV12Frozen{})
+		tool.Actions = []botActionDef{
+			{Name: "list", Description: "列出全部环境的线程（默认不含归档与已结算线程；已结算的要带 settled=true 才看得到；每项带 provider/model/branch）。每项自带 activity 与 last_reply（末条助手回复摘要；无助手回复则省略；单条详情读不到时 detail_unavailable=true，读超时/预算耗尽被中止的标 detail_skipped=true），通常不必再逐条 get", Mode: model.BotExecutionSync},
+			{Name: "get", Description: "读取线程详情（thread 带 provider/model/branch 回显实际配置）", Mode: model.BotExecutionSync},
+			{Name: "item", Description: "读取线程条目", Mode: model.BotExecutionSync},
+			{Name: "composer_options", Description: "读取启动器选项：projects（含 default_model_selection）、providers 可用模型目录（instance_id/models[].slug/options 供 launch 的 model_selection 回填）与 not_settable 不可设置项", Mode: model.BotExecutionSync},
+			{Name: "workspace_options", Description: "读取工作区/引用选项（launch 的 workspace.base_ref/branch/worktree_path 取这里的引用名与 worktree 路径）", Mode: model.BotExecutionSync},
+			{Name: "launch", Description: "在新线程中启动 T3 任务（可选 model_selection/runtime_mode/workspace，取值分别见 composer_options 的 providers 与 workspace_options；省略时模型沿用项目默认、运行模式为 full-access、工作区为项目主检出）", Mode: model.BotExecutionAsync, RequiresConfirmation: true},
+			{Name: "send", Description: "向既有线程发消息（queue_after_active）：线程在跑时进入排队；队列里已有被挂起的排队消息时，新消息也会继承挂起（要先 resume_queue）", Mode: model.BotExecutionAsync, RequiresConfirmation: true},
+			{Name: "stop", Description: "停止线程当前运行（run.interrupt + holdQueue）：存在可中断 run/后台工作才派发停止命令，并挂起排队消息、结束 PR 监听、停掉子任务；只剩 PR 监听这类不可中断占位时是空操作（stopped=false，监听继续）；回执只表示受理，是否已停用 fs_thread get 的 activity.stopping 判断", Mode: model.BotExecutionAsync, RequiresConfirmation: true},
+			{Name: "settle", Description: "结算线程：收进 T3 历史区，之后默认 list 不再返回（要带 settled=true 才看得到）；结算会清掉置顶与该线程所有 PR 监听；线程还在跑、有排队消息或有待应答的审批/提问时会被拒绝", Mode: model.BotExecutionAsync, RequiresConfirmation: true},
+			{Name: "unsettle", Description: "撤销结算，把线程放回默认列表", Mode: model.BotExecutionAsync, RequiresConfirmation: true},
+			{Name: "resume_queue", Description: "恢复该线程被挂起的消息队列，排队消息继续执行", Mode: model.BotExecutionAsync, RequiresConfirmation: true},
 		}
 	}
 	return tools
@@ -574,27 +651,29 @@ func botToolRegistryV11() []*botToolDef {
 			}
 		}
 	}
+	// 显式冻结本版（与 V9/V10 同口径）：v10 链里的 botUseFrozenArgs(10)
+	// 恰好把 fs_thread 换成 V9Frozen 属隐式依赖；v11 将来若有独立冻结项，
+	// 缺这行会静默漂移（代码审查 Note）。当前为同一类型，无字节差。
+	botUseFrozenArgs(11, tools)
 	return tools
 }
 
-// botToolRegistryV12 是当前发布注册表（INT-160 线程等待）：在 v11 之上只演进
-// fs_thread——新增异步动作 wait（挂起等待线程变化，受理即 running、由评估器
-// 按现有 5s 扫描评估，不进 worker 队列），参数新增 on（触发条件子集）与
-// timeout_minutes（等待上限），工具描述追加 wait 语义。fs_thread 参数结构体
-// 换回活跃 botThreadArgs{}（v9–v11 冻结在 botThreadArgsV9Frozen，wire 字节
-// 不受影响）。v11 及更早版本是冻结副本——本注册表的任何变化（含共享工具的
-// 描述调整）不得影响它们，否则存量会话的前缀/tools_hash 失稳。
-func botToolRegistryV12() []*botToolDef {
-	tools := botToolRegistryV11()
+// botToolRegistryV13 是当前发布注册表（INT-160 线程等待）：在 v12（INT-159）
+// 之上只演进 fs_thread——新增异步动作 wait（挂起等待线程变化，受理即
+// running、由评估器按现有 5s 扫描评估，不进 worker 队列），参数新增 on
+//（触发条件子集）与 timeout_minutes（等待上限），工具描述追加 wait 语义。
+// v12 及更早版本是冻结副本——本注册表的任何变化（含共享工具的描述调整）
+// 不得影响它们，否则存量会话的前缀/tools_hash 失稳。
+func botToolRegistryV13() []*botToolDef {
+	tools := botToolRegistryV12()
 	for _, tool := range tools {
 		if tool.Name != "fs_thread" {
 			continue
 		}
-		// 工具级描述在 v11 文本（v10 未动、v11 追加 list enrichment 说明）之上
-		// 追加 wait 语义，不重写既有句子。
+		// 工具级描述在 v12 文本之上追加 wait 语义，不重写既有句子。
 		tool.Description += "wait 挂起等待线程变化（异步动作）：受理即 running，线程开始运行并进入 idle（稳定约 20 秒）/等待回复/出错时唤醒，或到超时按 outcome 如实回报；唤醒结果自带前后状态对比与最近条目摘要，醒来通常不必再 get。"
-		// v12 用活跃参数结构体：action 枚举加 wait、新增 on/timeout_minutes；
-		// v9–v11 的 wire 字节由冻结副本 botThreadArgsV9Frozen 保留。
+		// v13 用活跃参数结构体：action 枚举加 wait、新增 on/timeout_minutes；
+		// v12 的 wire 字节由冻结副本 botThreadArgsV12Frozen 保留。
 		tool.ArgsType = reflect.TypeOf(botThreadArgs{})
 		tool.Actions = append(tool.Actions, botActionDef{
 			Name:        "wait",
@@ -942,8 +1021,10 @@ func botToolsetVersionOf(version int64) *botToolsetHolder {
 		tools = botToolRegistryV10()
 	case 11:
 		tools = botToolRegistryV11()
-	default:
+	case 12:
 		tools = botToolRegistryV12()
+	default:
+		tools = botToolRegistryV13()
 	}
 	holder := botBuildToolset(version, tools)
 	botToolsetsByID[version] = holder
@@ -1008,10 +1089,11 @@ func botBuildToolset(version int64, tools []*botToolDef) *botToolsetHolder {
 }
 
 // botUseFrozenArgs 把已发布版本的 schema 参数换回冻结结构体：活跃版本演进
-// 后（v4 修正枚举、v5 修正 fs_thread 的 list 语义与描述），冻结副本保证已
-// 发布版本的 tools_hash 不回退。v1 的 fs_memory 是 status 占位（用
-// botScheduleArgs），不在此替换；v9–v11 的 fs_thread 冻结副本由
-// botToolRegistryV9 直接换上（botThreadArgsV9Frozen），不经过本函数。
+// 后（v4 修正枚举、v5 修正 fs_thread 的 list 语义与描述、v9 给 fs_thread 加
+// 结算类动作、v12 给 launch 加执行配置、v13 给 fs_thread 加 wait），冻结
+// 副本保证已发布版本的 tools_hash 不回退。v1 的 fs_memory 是 status 占位
+// （用 botScheduleArgs），不在此替换；v9–v11 的 fs_thread 参数相同，沿用
+// INT-148 发布 v9 时的结构体，v10/v11 只演进工具描述。
 func botUseFrozenArgs(version int64, tools []*botToolDef) {
 	frozen := map[string]reflect.Type{
 		"fs_project":     reflect.TypeOf(botProjectArgsFrozen{}),
@@ -1034,6 +1116,16 @@ func botUseFrozenArgs(version int64, tools []*botToolDef) {
 		// （botThreadArgsV5Frozen）。只换 fs_thread：v6/v7/v8 各自设置的
 		// fs_schedule 参数结构体不能被覆盖。
 		frozen = map[string]reflect.Type{"fs_thread": reflect.TypeOf(botThreadArgsV5Frozen{})}
+	case 9, 10, 11:
+		// v9–v11 的 fs_thread 参数一致（v10 只演进 fs_schedule 描述，v11 只
+		// 演进 fs_thread/fs_schedule 描述），共用一份冻结副本
+		// （botThreadArgsV9Frozen）。只换 fs_thread：v10/v11 各自设置的
+		// fs_schedule 参数结构体不能被覆盖；launch 执行配置是 v12 字段。
+		frozen = map[string]reflect.Type{"fs_thread": reflect.TypeOf(botThreadArgsV9Frozen{})}
+	case 12:
+		// v12 的 fs_thread 参数由 botThreadArgsV12Frozen 冻结：INT-160 的
+		// wait 动作与 on/timeout_minutes 只进 v13。
+		frozen = map[string]reflect.Type{"fs_thread": reflect.TypeOf(botThreadArgsV12Frozen{})}
 	}
 	for _, tool := range tools {
 		if typ, ok := frozen[tool.Name]; ok {
@@ -1170,6 +1262,9 @@ type botPreparedCall struct {
 	// ParamConstraint 是参数值级约束（如 source=github）：同一动作不同参数
 	// 值的副作用不同，「总是允许」必须按值绑定，不能只看字段集合。
 	ParamConstraint string
+	// ExecConfigJSON 是 launch 执行配置的规范化 JSON（摘要同口径）：
+	// 镜像进执行上下文，always-allow 落库时写进 constraints_json 供管理面展示。
+	ExecConfigJSON string
 	// SchedulePreview 是 fs_schedule 确认卡的服务端预览（create/update/run
 	// 受理时算好下次运行与生效模型）；resolveCallScope 把它镜像进执行上下文，
 	// 不进 wire 字节。
@@ -1193,7 +1288,7 @@ func botPrepareToolCall(ts *botToolsetHolder, toolName, rawArguments string) (*b
 	// 重复键必须在任何解析之前拒绝：map 解析取末次值、结构体解析对 null
 	// 做 no-op 还原，同一载荷会得到两份不一致的解释（确认卡按末次 null
 	// 显示「未提供」、执行按先前值生效），展示与执行必须同源。
-	if err := botJSONTopLevelKeysUnique(rawArguments); err != nil {
+	if err := botJSONKeysUnique(json.RawMessage(rawArguments)); err != nil {
 		return nil, err
 	}
 	// 改名/移除动作过渡期：action 从原始参数探出（参数形态可能已不属于
@@ -1261,6 +1356,19 @@ func botPrepareToolCall(ts *botToolsetHolder, toolName, rawArguments string) (*b
 	if err := botValidateActionFields(toolName, prepared.Action, rawMap); err != nil {
 		return nil, err
 	}
+	if toolName == "fs_thread" && prepared.Action == "launch" {
+		// 受理侧即校验可选执行配置（INT-159）：形状错误在此拒掉，不产生
+		// 待确认卡片。冻结工具集（v9–v12）的 args 类型不含这些字段，断言
+		// 不命中即跳过。
+		if err := botValidateThreadLaunchNestedKeys(rawMap); err != nil {
+			return nil, err
+		}
+		if targs, ok := args.(*botThreadArgs); ok {
+			if err := botThreadLaunchConfig(targs, &T3CreateThreadRequest{}); err != nil {
+				return nil, err
+			}
+		}
+	}
 	if toolName == "fs_thread" && prepared.Action == "wait" {
 		// on/timeout_minutes 的取值校验（INT-160）：非法取值在受理端同步拒绝。
 		// 会话级上限（定时任务会话内 timeout_minutes ≤ 15）在受理路径上按
@@ -1287,31 +1395,60 @@ func botPrepareToolCall(ts *botToolsetHolder, toolName, rawArguments string) (*b
 	return prepared, nil
 }
 
-// botJSONTopLevelKeysUnique 拒绝顶层重复键：Go 的 map 解析取末次值，
+// botJSONKeysUnique 递归拒绝任意层级对象内的重复键：Go 的 map 解析取末次值，
 // 结构体解析按出现顺序赋值且对 null 做 no-op 还原——`{"x":"a","x":null}`
-// 在 map 里是 null、在结构体里是 "a"，受理判定/确认卡按 map 解释、执行
-// 按结构体解释，两份解释必须一致。非对象形态留给参数校验兜底。
-func botJSONTopLevelKeysUnique(raw string) error {
-	dec := json.NewDecoder(strings.NewReader(raw))
+// 在 map 里是 null、在结构体里是 "a"。嵌套对象（model_selection/workspace
+// 及其 options 数组元素）同样存在该分叉：授权摘要按 map 规范化值计算、执行
+// 按结构体取值，受理判定/确认卡/执行必须同源。非对象形态留给参数校验兜底。
+// 全工具生效（不限 fs_thread）：同一分叉类在任何含嵌套 JSON 的参数上都存在；
+// 错误文案带键路径（如 model_selection.options[0].id）便于排查存量习惯载荷。
+func botJSONKeysUnique(raw json.RawMessage) error {
+	return botJSONKeysUniqueAt(raw, "")
+}
+
+func botJSONKeysUniqueAt(raw json.RawMessage, path string) error {
+	dec := json.NewDecoder(strings.NewReader(string(raw)))
 	t, err := dec.Token()
-	if err != nil || t != json.Delim('{') {
+	if err != nil {
 		return nil
 	}
-	seen := map[string]bool{}
-	for dec.More() {
-		keyTok, err := dec.Token()
-		if err != nil {
-			return errs.New(errs.ErrInvalidParams.Code, "工具参数不是有效 JSON 对象")
+	switch t {
+	case json.Delim('{'):
+		seen := map[string]bool{}
+		for dec.More() {
+			keyTok, err := dec.Token()
+			if err != nil {
+				return errs.New(errs.ErrInvalidParams.Code, "工具参数不是有效 JSON 对象")
+			}
+			key, _ := keyTok.(string)
+			child := key
+			if path != "" {
+				child = path + "." + key
+			}
+			if seen[key] {
+				return errs.New(errs.ErrInvalidParams.Code,
+					fmt.Sprintf("工具参数包含重复字段 %s", child))
+			}
+			seen[key] = true
+			var val json.RawMessage
+			if err := dec.Decode(&val); err != nil {
+				return errs.New(errs.ErrInvalidParams.Code, "工具参数不是有效 JSON 对象")
+			}
+			if err := botJSONKeysUniqueAt(val, child); err != nil {
+				return err
+			}
 		}
-		key, _ := keyTok.(string)
-		if seen[key] {
-			return errs.New(errs.ErrInvalidParams.Code,
-				fmt.Sprintf("工具参数包含重复字段 %s", key))
-		}
-		seen[key] = true
-		var skip json.RawMessage
-		if err := dec.Decode(&skip); err != nil {
-			return errs.New(errs.ErrInvalidParams.Code, "工具参数不是有效 JSON 对象")
+	case json.Delim('['):
+		i := 0
+		for dec.More() {
+			var val json.RawMessage
+			if err := dec.Decode(&val); err != nil {
+				return errs.New(errs.ErrInvalidParams.Code, "工具参数不是有效 JSON 对象")
+			}
+			if err := botJSONKeysUniqueAt(val, fmt.Sprintf("%s[%d]", path, i)); err != nil {
+				return err
+			}
+			i++
 		}
 	}
 	return nil
@@ -1365,6 +1502,17 @@ func reqAllowEmpty(names ...string) []botRequiredField {
 	return out
 }
 
+// botThreadLaunchConfigFields 是 fs_thread launch 的执行配置字段（INT-159）。
+// 它们是参数结构体里的合法键（launch 用），但只对 launch 生效——其它动作
+// 必须显式拒绝而不是静默丢弃，所以这里集中给一份名单供各动作 Forbidden
+// 复用。
+var botThreadLaunchConfigFields = []string{"model_selection", "runtime_mode", "workspace"}
+
+// botThreadLaunchWaitForbidden 是 launch 执行配置（INT-159）与 wait 参数
+//（INT-160 的 on/timeout_minutes）对其它动作的合并禁带清单。
+var botThreadLaunchWaitForbidden = append(
+	append([]string{}, botThreadLaunchConfigFields...), "on", "timeout_minutes")
+
 // botActionRules 是「工具/动作 → 字段约束」的单一事实源：服务端校验与 v3
 // 起的 schema 描述都由它生成，避免中文描述与机器校验各说各话。列出的动作
 // 才被接受；未列出的动作一律返回 40001。
@@ -1384,28 +1532,31 @@ var botActionRules = map[string]botActionRule{
 	"fs_issue/comment":           {Required: req("issue_id", "comment_body")},
 	"fs_issue/create":            {Required: req("project_id", "title")},
 
-	// on/timeout_minutes 是 v12 起 wait 的字段（INT-160）：其它动作携带即拒——
-	// 放行会被静默丢弃，模型却以为挂了等待或带了过滤条件。
-	"fs_thread/list":              {Forbidden: []string{"on", "timeout_minutes"}},
-	"fs_thread/get":               {Required: req("env_id", "thread_id"), Forbidden: []string{"on", "timeout_minutes"}},
-	"fs_thread/item":              {Required: req("env_id", "thread_id", "item_id"), Forbidden: []string{"on", "timeout_minutes"}},
-	"fs_thread/composer_options":  {Required: req("env_id"), Forbidden: []string{"on", "timeout_minutes"}},
-	"fs_thread/workspace_options": {Required: req("env_id", "project_id"), Forbidden: []string{"on", "timeout_minutes"}},
+	// launch 的执行配置（INT-159：model_selection/runtime_mode/workspace）只对
+	// launch 生效；on/timeout_minutes 是 v13 起 wait 的字段（INT-160）只对
+	// wait 生效；其它动作携带即拒——放行会被静默丢弃，模型却以为挂了等待
+	// 或改了运行中线程的配置。
+	"fs_thread/list":              {Forbidden: botThreadLaunchWaitForbidden},
+	"fs_thread/get":               {Required: req("env_id", "thread_id"), Forbidden: botThreadLaunchWaitForbidden},
+	"fs_thread/item":              {Required: req("env_id", "thread_id", "item_id"), Forbidden: botThreadLaunchWaitForbidden},
+	"fs_thread/composer_options":  {Required: req("env_id"), Forbidden: botThreadLaunchWaitForbidden},
+	"fs_thread/workspace_options": {Required: req("env_id", "project_id"), Forbidden: botThreadLaunchWaitForbidden},
 	"fs_thread/launch":            {Required: req("env_id", "project_id", "text"), Forbidden: []string{"on", "timeout_minutes"}},
-	"fs_thread/send":              {Required: req("env_id", "thread_id", "text"), Forbidden: []string{"on", "timeout_minutes"}},
-	"fs_thread/stop":              {Required: req("env_id", "thread_id"), Forbidden: []string{"on", "timeout_minutes"}},
+	"fs_thread/send":              {Required: req("env_id", "thread_id", "text"), Forbidden: botThreadLaunchWaitForbidden},
+	"fs_thread/stop":              {Required: req("env_id", "thread_id"), Forbidden: botThreadLaunchWaitForbidden},
 	// 结算与队列恢复（INT-148）：都只认 env_id + thread_id，不收其它参数。
-	"fs_thread/settle":       {Required: req("env_id", "thread_id"), Forbidden: []string{"on", "timeout_minutes"}},
-	"fs_thread/unsettle":     {Required: req("env_id", "thread_id"), Forbidden: []string{"on", "timeout_minutes"}},
-	"fs_thread/resume_queue": {Required: req("env_id", "thread_id"), Forbidden: []string{"on", "timeout_minutes"}},
+	"fs_thread/settle":       {Required: req("env_id", "thread_id"), Forbidden: botThreadLaunchWaitForbidden},
+	"fs_thread/unsettle":     {Required: req("env_id", "thread_id"), Forbidden: botThreadLaunchWaitForbidden},
+	"fs_thread/resume_queue": {Required: req("env_id", "thread_id"), Forbidden: botThreadLaunchWaitForbidden},
 	// wait（INT-160）：env_id + thread_id 必填；on/timeout_minutes 可选，取值
 	// 由 botThreadWaitParams 校验。其余字段一概不生效，出现即拒——放行会被
 	// 静默丢弃，模型却以为带了过滤条件。
-	"fs_thread/wait": {Required: req("env_id", "thread_id"), Forbidden: []string{
+	"fs_thread/wait": {Required: req("env_id", "thread_id"), Forbidden: append(
+		append([]string{}, botThreadLaunchConfigFields...),
 		"item_id", "project_id", "query", "cursor", "text", "title",
 		"include_archived", "settled", "status", "updated_after",
 		"page", "page_size", "item_limit", "item_offset",
-	}},
+	)},
 
 	"fs_environment/list":     {},
 	"fs_environment/projects": {},

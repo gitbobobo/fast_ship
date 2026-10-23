@@ -1,3 +1,4 @@
+import { useLayoutEffect, useRef, useState } from "react";
 import { ShieldAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { BotCall, BotCallDecision } from "@/lib/api/bots";
@@ -145,21 +146,78 @@ function ScheduleConfirmSummary({ call }: { call: BotCall }) {
 // 原始参数块：参数 chips + 完整 JSON。schedule 卡把它折叠收起（上面的
 // 服务端摘要才是唯一权威视图，同一份配置不重复铺三遍），其余确认卡
 // 默认展开——整组替换（replace_checklist 等）必须看清完整内容才能批准。
+// JSON 区限高滚动，底部渐隐遮罩提示还有内容（视觉审查），不再拦腰裁切
+// 得像渲染出错。渐隐遮罩在叠加式滚动条下看不出可滚，渐隐处放「显示全部」
+// 入口展开为完整高度（视觉审查：被盖住的字段须能完整核对）。
+function JsonBlock({ text, visible = true }: { text: string; visible?: boolean }) {
+  const preRef = useRef<HTMLPreElement>(null);
+  const [expanded, setExpanded] = useState(false);
+  const [overflows, setOverflows] = useState(false);
+  // 只有真溢出才挂渐隐与「显示全部」：短参数块挂假截断提示会让人以为
+  // 内容被藏了（视觉审查）。visible 驱动重测：闭合的 <details> 里子树没有
+  // 布局盒、scrollHeight 恒 0，要在父级展开后才量（视觉审查）。
+  // ResizeObserver 兜底容器变窄/文本更新造成的后发溢出，并按测量结果双向
+  // 复位——变短后不再残留假提示（视觉审查）。
+  useLayoutEffect(() => {
+    const el = preRef.current;
+    if (!el || !visible) return;
+    const measure = () =>
+      setOverflows(!expanded && el.scrollHeight > el.clientHeight + 1);
+    measure();
+    if (typeof ResizeObserver !== "function") return;
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [expanded, visible, text]);
+  return (
+    <div className="relative">
+      <pre
+        ref={preRef}
+        className={cn(
+          "overflow-auto rounded-lg bg-background/80 p-2 pb-6 font-mono text-xs whitespace-pre-wrap break-all [unicode-bidi:isolate]",
+          expanded ? "max-h-none" : "max-h-72",
+        )}
+      >
+        {bidiSafeText(text)}
+      </pre>
+      {expanded && (
+        <button
+          type="button"
+          onClick={() => setExpanded(false)}
+          className="mt-1 text-xs text-muted-foreground hover:text-foreground"
+        >
+          收起
+        </button>
+      )}
+      {!expanded && overflows && (
+        <>
+          <div className="pointer-events-none absolute inset-x-0 bottom-0 h-6 rounded-b-lg bg-gradient-to-t from-background/90 to-transparent" />
+          <button
+            type="button"
+            onClick={() => setExpanded(true)}
+            className="absolute bottom-1 right-2 rounded bg-background/80 px-1 text-xs text-muted-foreground hover:text-foreground"
+          >
+            显示全部
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
+
 function RawParams({
   chips,
   argPretty,
+  visible = true,
 }: {
   chips: ToolParamChip[];
   argPretty: string;
+  visible?: boolean;
 }) {
   return (
     <>
       <ParamChips chips={chips} />
-      {argPretty && (
-        <pre className="max-h-72 overflow-auto rounded-lg bg-background/80 p-2 font-mono text-xs whitespace-pre-wrap break-all [unicode-bidi:isolate]">
-          {bidiSafeText(argPretty)}
-        </pre>
-      )}
+      {argPretty && <JsonBlock text={argPretty} visible={visible} />}
     </>
   );
 }
@@ -231,7 +289,7 @@ export function BotConfirmationCard({
   error?: unknown;
   onDecide: (callId: string, decision: BotCallDecision) => void;
 }) {
-  const chips = toolParamChips(call.tool_name, call.arguments);
+  const chips = toolParamChips(call.tool_name, call.arguments, call.action);
   const isScheduleCall =
     call.tool_name === "fs_schedule" &&
     SCHEDULE_CONFIRM_ACTIONS.has(call.action);
@@ -240,6 +298,15 @@ export function BotConfirmationCard({
   const canAlwaysAllow = !(
     call.tool_name === "fs_schedule" && !SCHEDULE_ALWAYS_ALLOW_ACTIONS.has(call.action)
   );
+  // launch/send 的 text 是被批准的消息正文，批准前必须看全：整块平铺
+  // 在 chips 上方（chip 40 字截断、原始 JSON 默认折叠都会藏正文）。
+  const threadBody =
+    call.tool_name === "fs_thread" &&
+    (call.action === "launch" || call.action === "send") &&
+    typeof call.arguments?.text === "string" &&
+    call.arguments.text !== ""
+      ? call.arguments.text
+      : null;
   const argPretty = (() => {
     try {
       return JSON.stringify(call.arguments, null, 2);
@@ -264,6 +331,9 @@ export function BotConfirmationCard({
       ? ""
       : when.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   })();
+  // 折叠的「查看原始参数」展开态：闭合的 <details> 里 JsonBlock 子树没有
+  // 布局盒，溢出检测要等展开后重测（视觉审查）。
+  const [rawParamsOpen, setRawParamsOpen] = useState(false);
 
   return (
     <section
@@ -298,18 +368,48 @@ export function BotConfirmationCard({
           <details
             data-testid="bot-schedule-raw-params"
             className="text-xs"
+            onToggle={(e) => setRawParamsOpen(e.currentTarget.open)}
           >
             <summary className="cursor-pointer select-none text-muted-foreground hover:text-foreground">
               查看原始参数
             </summary>
             <div className="space-y-2 pt-2">
-              <RawParams chips={chips} argPretty={argPretty} />
+              <RawParams chips={chips} argPretty={argPretty} visible={rawParamsOpen} />
             </div>
           </details>
         </>
       ) : (
         <>
-          <RawParams chips={chips} argPretty={argPretty} />
+          {/* fs_thread 的参数全是配置句柄，chips 已逐项汇总；完整 JSON 折叠
+              在按钮下方，避免大 JSON 把决定按钮顶出视口或被拦腰裁切
+              （视觉审查）。replace_checklist 等内容型参数仍默认展开。 */}
+          {threadBody !== null && (
+            <div className="space-y-1">
+              <p className="text-xs text-muted-foreground">消息</p>
+              <pre className="max-h-72 overflow-auto rounded-lg bg-background/80 p-2 font-sans text-xs whitespace-pre-wrap break-all [unicode-bidi:isolate]">
+                {bidiSafeText(threadBody)}
+              </pre>
+            </div>
+          )}
+          <ParamChips chips={chips} />
+          {call.tool_name === "fs_thread" ? (
+            argPretty && (
+              <details
+                data-testid="bot-thread-raw-params"
+                className="text-xs"
+                onToggle={(e) => setRawParamsOpen(e.currentTarget.open)}
+              >
+                <summary className="cursor-pointer select-none text-muted-foreground hover:text-foreground">
+                  查看原始参数
+                </summary>
+                <div className="pt-2">
+                  <JsonBlock text={argPretty} visible={rawParamsOpen} />
+                </div>
+              </details>
+            )
+          ) : (
+            argPretty && <JsonBlock text={argPretty} />
+          )}
           <DecisionButtons
             callId={call.id}
             approveLabel={approveLabel}

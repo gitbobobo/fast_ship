@@ -15,7 +15,9 @@ import (
 //
 // 归档（archiveRuns）：终态且线程已确认（dispatched_at 非空）的运行逐个
 // ArchiveThread，成功写 archived_at；失败按有限计数重试，超限置 archived_at
-// 防无限重试并发通知，代码运行同时置 worktree_state=failed。
+// 防无限重试并发通知，代码运行同时置 worktree_state=failed。归档前有收尾
+// 宽限（INT-158）：终态落库后 agent 的 T3 run 可能还在写收尾回复，宽限窗口
+// 内等它收尾再归档，避免切断 provider 事件流产生僵尸线程。
 //
 // 工作区删除（cleanupWorktrees）：只对「已归档完成」的代码运行执行。工作区
 // 真值只认线程投影的 worktreePath/branch（launch 窗口差集推断已废弃），
@@ -24,6 +26,13 @@ import (
 
 // reviewWorktreeMaxTries 归档等回收动作的有限重试次数（tick 数）。
 const reviewWorktreeMaxTries = 3
+
+// reviewArchiveSettleWait 归档前的收尾宽限（INT-158）：结果落库后 agent 的
+// T3 run 往往还在写收尾回复，立刻归档切断 provider 事件流，T3 把 run 误记
+// 为 failed（status=archived / settled=false 的僵尸线程）。宽限窗口内先读
+// 线程投影等 run 收尾；等待不占归档有限重试计数，宽限即上限，超窗直接归档
+// 兜底。
+const reviewArchiveSettleWait = 10 * time.Minute
 
 // reviewRunNeverLaunched 「确定没有建成线程」的谓词。pr_closed 一定是未建
 // 线程：该取消发生在 launchRun 的 PR 实况关卡（CreateThreadForAgent 之前），
@@ -68,31 +77,104 @@ func (s *ReviewService) archiveRuns(now time.Time) {
 		s.logger.Error("查询待归档运行失败", zap.Error(err))
 		return
 	}
+	start := time.Now()
 	for i := range runs {
+		if time.Since(start) > reviewNetworkStageBudget {
+			s.logger.Info("归档到达阶段网络预算，剩余行下轮处理", zap.Int("remaining", len(runs)-i))
+			break
+		}
 		s.archiveRunThread(&runs[i], now)
 	}
 }
 
-// archiveRunThread 单条运行的线程归档：成功写 archived_at；失败计入有限重试，
+// archiveRunThread 单条运行的线程归档：先按收尾宽限等绑定 T3 run 收尾
+// （INT-158），再 ArchiveThread；归档成功写 archived_at；失败计入有限重试，
 // 超限置 archived_at（不再重试）+ 通知；代码运行同时置 worktree_state=failed
 // （先归档后删除是硬前提，归档最终失败就不能删工作区）。
 func (s *ReviewService) archiveRunThread(run *model.ReviewRun, now time.Time) {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	// 单行预算与阶段预算同量级（60s）：归档动作整体不能拖住后续阶段；各步
+	// 内部还有 t3WriteBudget 收紧。前序步骤把行预算耗尽时归档会返回 ctx
+	// 截止错误——那是「暂时读不到」而非归档失败，按等待处理不占重试计数，
+	// 下轮重试（宽限/行预算兜底见下）。
+	ctx, cancel := context.WithTimeout(context.Background(), reviewNetworkStageBudget)
 	defer cancel()
 
-	// 启动结果未确认（dispatched_at 为空）但可能已建成线程：先尽力停掉。
+	// 启动结果未确认（dispatched_at 为空）但可能已建成线程：先尽力停掉
+	// （仍在归档前；宽限等待期间每个 tick 都会再发一次，幂等，帮孤儿回合
+	// 尽快终止）。
 	if run.DispatchedAt == nil {
 		if _, err := s.t3.StopThread(ctx, run.UserID, run.EnvironmentID, run.ThreadID); err != nil {
 			s.logger.Info("未确认启动的运行停止线程未成功（继续尝试归档）",
 				zap.String("run", run.ID), zap.Error(err))
 		}
 	}
+	// 收尾宽限：仅 finished_at 之后的宽限窗口内等待（finished_at 为空或已超
+	// 宽限都跳过等待直接归档，防御 + 兜底）。等待不占归档有限重试计数。
+	if run.FinishedAt != nil && now.Sub(*run.FinishedAt) < reviewArchiveSettleWait {
+		verdict, err := s.t3.ThreadTurnSettled(ctx, run.UserID, run.EnvironmentID, run.ThreadID, run.InitialMessageID)
+		switch {
+		case err == nil:
+			// 读到了线程投影：之前的连续 404 不再算「连续」。
+			s.resetWorktreeTries(run.ID, worktreeTryNotFound)
+			if verdict == turnUnsettled {
+				// run 还在写收尾回复：本 tick 不归档，等下轮。
+				return
+			}
+			if verdict == turnThreadGone {
+				// 线程已归档/已删除：目标态已达成，归档 RPC 非幂等只会
+				// 误记归档失败——直接落账。
+				s.archiveConfirmedGone(run, now)
+				return
+			}
+		case errors.Is(err, errT3ThreadNotFound):
+			// 线程 404 不立即采信（T3 重启/代理抖动，与 cleanupRunWorktree
+			// 同口径）：连续到上限才认定无可归对象。
+			if s.confirmThreadGone(run) {
+				s.archiveConfirmedGone(run, now)
+			}
+			return
+		default:
+			// 暂时读不到收尾状态：本 tick 不归档，下轮再试（宽限即上限）。
+			s.logger.Info("归档前读取线程收尾状态未成功，等下轮再试",
+				zap.String("run", run.ID), zap.Error(err))
+			return
+		}
+		// turnSettled：落入归档。
+	}
 	if err := s.t3.ArchiveThread(ctx, run.UserID, run.EnvironmentID, run.ThreadID); err == nil {
 		s.db.Model(&model.ReviewRun{}).Where("id = ? AND archived_at IS NULL", run.ID).
 			Updates(map[string]any{"archived_at": now, "updated_at": now})
 		s.releaseWorktreeTries(run.ID)
 		return
+	} else if ctx.Err() != nil {
+		// 行预算被停线程/投影读耗尽：归档是被掐断而不是被拒绝，本 tick 跳过
+		// 不占重试，下轮再试——与收尾读失败的等待语义一致。
+		s.logger.Info("归档行预算被前序步骤耗尽，等下轮再试",
+			zap.String("run", run.ID), zap.Error(err))
+		return
 	} else {
+		// 归档失败的归因可能是「线程已经没了」：超宽限/finished_at 为空的
+		// 行不读投影直接归档，用户删线程、T3 侧清理、停机后补跑都会让
+		// dispatchCommand 返回普通上游错误（不带 errT3ThreadNotFound）。补读
+		// 一次投影归因：404 走同一份有界确认，证实不存在直接落账——否则
+		// 无线程的归档失败会被误记成归档错误，到顶发假告警还置 failed。
+		verdict, perr := s.t3.ThreadTurnSettled(ctx, run.UserID, run.EnvironmentID, run.ThreadID, run.InitialMessageID)
+		if errors.Is(perr, errT3ThreadNotFound) {
+			if s.confirmThreadGone(run) {
+				s.archiveConfirmedGone(run, now)
+			}
+			return
+		}
+		if perr == nil {
+			// 读到了线程投影：之前的连续 404 不再算「连续」。墓碑线程
+			// （已归档/已删除）证明目标态已达成——归档 RPC 的失败只是
+			// 非幂等报错，直接落账不计归档失败。
+			s.resetWorktreeTries(run.ID, worktreeTryNotFound)
+			if verdict == turnThreadGone {
+				s.archiveConfirmedGone(run, now)
+				return
+			}
+		}
 		s.logger.Info("审查线程归档未成功（有限重试）", zap.String("run", run.ID), zap.Error(err))
 		tries := s.bumpWorktreeTries(run.ID, worktreeTryArchive)
 		if tries < reviewWorktreeMaxTries {
@@ -108,6 +190,23 @@ func (s *ReviewService) archiveRunThread(run *model.ReviewRun, now time.Time) {
 		s.releaseWorktreeTries(run.ID)
 		s.publishReviewNotification(run, model.NotificationReviewCleanupFailed, msg, now)
 	}
+}
+
+// confirmThreadGone 累加一次连续 404 并报告是否已到上限：单次 404 不采信
+// （T3 重启/代理抖动，与 cleanupRunWorktree 同口径），连续到上限才认定
+// 线程确已不存在。
+func (s *ReviewService) confirmThreadGone(run *model.ReviewRun) bool {
+	return s.bumpWorktreeTries(run.ID, worktreeTryNotFound) >= reviewWorktreeMaxTries
+}
+
+// archiveConfirmedGone 线程已被证实不存在（连续 404 到上限）或目标态已达
+// 成（墓碑投影已归档/已删除）：无可归对象，直接落 archived_at 并释放重试
+// 计数——不走归档 RPC（无线程的 RPC 只会误记归档失败、发假告警），不置
+// worktree_state=failed，也不发通知。
+func (s *ReviewService) archiveConfirmedGone(run *model.ReviewRun, now time.Time) {
+	s.db.Model(&model.ReviewRun{}).Where("id = ? AND archived_at IS NULL", run.ID).
+		Updates(map[string]any{"archived_at": now, "updated_at": now})
+	s.releaseWorktreeTries(run.ID)
 }
 
 // cleanupWorktrees 调度阶段：挑终态且未清理完的代码运行逐条处理。

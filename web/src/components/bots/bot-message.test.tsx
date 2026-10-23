@@ -491,6 +491,33 @@ describe("BotMessageView background_result", () => {
     expect(raw).toHaveTextContent('{"cron_expression"');
   });
 
+  // 失败文案里的字段名走 renderErrorMessage 等宽化（视觉审查）：snake_case
+  // 与点号路径包 <code>，正文可扫读；原文逐字保留供 bot 自校正。
+  it("background_result 错误里的字段名等宽渲染", () => {
+    renderMessage(
+      {
+        ...backgroundResult,
+        content: {
+          ...backgroundResult.content,
+          status: "failed",
+          error_code: "schedule_run_failed",
+          error_message:
+            "workspace.type=root 时 base_ref 与 worktree_path 不可同时提供",
+        },
+      },
+      { calls: [scheduleCreateCall] },
+    );
+
+    const line = screen.getByText(/schedule_run_failed:/);
+    const codes = line.querySelectorAll("code.font-mono");
+    expect(
+      Array.from(codes).map((c) => c.textContent),
+    ).toEqual(["workspace.type=root", "base_ref", "worktree_path"]);
+    expect(line).toHaveTextContent(
+      "workspace.type=root 时 base_ref 与 worktree_path 不可同时提供",
+    );
+  });
+
   it("summary 是 JSON 但找不到调用：主行只给简短说明，不把 JSON 当正文", () => {
     renderMessage(backgroundResult);
 
