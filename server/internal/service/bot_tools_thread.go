@@ -677,8 +677,26 @@ func botThreadLaunchConfig(args *botThreadArgs, req *T3CreateThreadRequest) erro
 		baseRef := strings.TrimSpace(ws.BaseRef)
 		branch := strings.TrimSpace(ws.Branch)
 		worktreePath := strings.TrimSpace(ws.WorktreePath)
-		if wsType == "existing_worktree" && worktreePath == "" {
-			return errs.New(errs.ErrInvalidParams.Code, "existing_worktree 需要提供 worktree_path")
+		// 按 type 拒掉下游会静默丢弃的字段组合（云端审查）：root 不消费任何
+		// 策略字段（INT-85 共识）；worktree 不用 worktree_path；
+		// existing_worktree 只用 worktree_path+branch。不拦的话确认卡会显示
+		// 实际不生效的字段，与「无效字段不静默忽略」约定相悖。
+		switch wsType {
+		case "root":
+			if baseRef != "" || branch != "" || worktreePath != "" || ws.StartFromOrigin != nil {
+				return errs.New(errs.ErrInvalidParams.Code, "workspace.type=root 不接受 base_ref/branch/worktree_path/start_from_origin")
+			}
+		case "worktree":
+			if worktreePath != "" {
+				return errs.New(errs.ErrInvalidParams.Code, "workspace.type=worktree 不接受 worktree_path（existing_worktree 才用）")
+			}
+		case "existing_worktree":
+			if worktreePath == "" {
+				return errs.New(errs.ErrInvalidParams.Code, "existing_worktree 需要提供 worktree_path")
+			}
+			if baseRef != "" || ws.StartFromOrigin != nil {
+				return errs.New(errs.ErrInvalidParams.Code, "workspace.type=existing_worktree 不接受 base_ref/start_from_origin")
+			}
 		}
 		req.Workspace = &api.T3ThreadWorkspace{
 			Type:            api.T3ThreadWorkspaceType(wsType),

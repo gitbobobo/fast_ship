@@ -1043,7 +1043,12 @@ CAS 终结；running 记录取消并取消 context，worker 落唯一终态且
   这些字段在受理侧（`botPrepareToolCall`，不产生待确认卡片）就校验：
   `model_selection` 缺 `instance_id`/`model`、`runtime_mode` 非枚举值、
   `workspace` 缺 `type` 或非枚举值、`existing_worktree` 缺
-  `worktree_path` 都直接报 invalid-params，不透给上游变成 RPC 失败。
+  `worktree_path`、`options[].value` 非 string/bool 都直接报
+  invalid-params，不透给上游变成 RPC 失败；`workspace.type` 与附带
+  字段不匹配同样受理即拒（`root` 不接受策略字段、`worktree` 不接受
+  `worktree_path`、`existing_worktree` 不接受 `base_ref`/
+  `start_from_origin`）——下游对这些组合是静默丢弃，受理侧不拦会让
+  确认卡显示不生效的字段。
   取值目录由
   `fs_thread composer_options` 提供：除原有 `projects`（含
   `default_model_selection`）外新增 `providers`——把上游 `config.providers`

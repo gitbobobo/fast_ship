@@ -414,6 +414,10 @@ func TestBotInt159LaunchConfigAccepted(t *testing.T) {
 		{"workspace 缺 type", `"workspace":{"branch":"feat"}`},
 		{"workspace.type 非枚举", `"workspace":{"type":"new_worktree"}`},
 		{"existing_worktree 缺路径", `"workspace":{"type":"existing_worktree","branch":"b"}`},
+		{"root 携带 branch", `"workspace":{"type":"root","branch":"feat"}`},
+		{"root 携带 start_from_origin", `"workspace":{"type":"root","start_from_origin":true}`},
+		{"worktree 携带 worktree_path", `"workspace":{"type":"worktree","worktree_path":"/tmp/w"}`},
+		{"existing_worktree 携带 base_ref", `"workspace":{"type":"existing_worktree","worktree_path":"/tmp/w","base_ref":"main"}`},
 	}
 	for _, c := range reject {
 		if _, err := botPrepareToolCall(v12, "fs_thread", "{"+base+","+c.args+"}"); err == nil {
