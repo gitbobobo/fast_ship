@@ -67,6 +67,17 @@ func (r *BotToolCallRepository) ListUnfinishedByBotPage(botID string, offset, li
 	return rows, err
 }
 
+// ListByIDs 按 ID 批量取本机器人调用——快照按窗口内消息的 tool_calls
+// 引用补齐最近 N 条窗口外的旧调用（前端渲染卡片靠 call_id 命中）。
+func (r *BotToolCallRepository) ListByIDs(botID string, ids []string) ([]model.BotToolCall, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	var rows []model.BotToolCall
+	err := r.db.Where("bot_id = ? AND id IN ?", botID, ids).Find(&rows).Error
+	return rows, err
+}
+
 // ListQueuedSync 全局分页读排队中的同步调用（启动恢复用：后台扫描只认领
 // 异步调用，这些调用只能由恢复补终态）。
 func (r *BotToolCallRepository) ListQueuedSync(limit int) ([]model.BotToolCall, error) {

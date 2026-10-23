@@ -21,18 +21,11 @@ function makeCall(overrides: Partial<BotCall> = {}): BotCall {
 
 function renderCard(
   call?: BotCall,
-  fallback?: { name: string; action: string },
   onCancel?: (callId: string) => void,
 ) {
   return render(
     <MemoryRouter>
-      <BotToolCard
-        botId="b1"
-        call={call}
-        fallbackName={fallback?.name}
-        fallbackAction={fallback?.action}
-        onCancel={onCancel}
-      />
+      <BotToolCard botId="b1" call={call} onCancel={onCancel} />
     </MemoryRouter>,
   );
 }
@@ -84,7 +77,6 @@ describe("BotToolCard", () => {
     const onCancel = vi.fn();
     renderCard(
       makeCall({ status: "pending_confirmation", requires_confirmation: true }),
-      undefined,
       onCancel,
     );
     const status = screen.getByTestId("bot-call-status");
@@ -135,9 +127,4 @@ describe("BotToolCard", () => {
     expect(screen.queryByText("写入")).toBeNull();
   });
 
-  it("账本缺卡时用 fallback 标识渲染静态形态", () => {
-    renderCard(undefined, { name: "fs_thread", action: "send" });
-    expect(screen.getByText("向线程发送消息")).toBeInTheDocument();
-    expect(screen.queryByTestId("bot-call-status")).toBeNull();
-  });
 });

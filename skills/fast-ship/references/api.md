@@ -8758,6 +8758,31 @@ before_seq/after_seq 都是排他 seq 边界，页内按 seq 正序；不使用 
 | `items[].kind` | string | 是 | user / assistant / tool_reply / background_result / approval_decision / lifecycle |
 | `items[].content` | object | 是 | 按 kind 变化的正文；assistant 含 text 与 tool_calls 数组；tool_reply 含协议回复字符串 |
 | `items[].created_at` | string（date-time） | 是 |  |
+| `calls` | object[] | 是 | 页内消息引用到的调用记录（assistant 嵌套 tool_calls 与非 assistant 消息顶层 call_id），保证旧消息渲染确认/警示卡不缺数据 |
+| `calls[].id` | string | 是 | 平台调用 ID，同时是执行幂等键 |
+| `calls[].bot_id` | string | 是 |  |
+| `calls[].request_id` | string | 是 |  |
+| `calls[].provider_tool_call_id` | string | 是 | 模型协议配对 ID |
+| `calls[].tool_name` | string | 是 |  |
+| `calls[].action` | string | 是 |  |
+| `calls[].arguments` | object | 是 | 规范化后的参数 |
+| `calls[].execution_mode` | string | 是 | sync / async |
+| `calls[].requires_confirmation` | boolean | 是 |  |
+| `calls[].status` | string | 是 | pending_confirmation / queued / running / succeeded / failed / rejected / cancelled / not_executed |
+| `calls[].decision` | string（可空） | 否 | approve / reject / always_allow |
+| `calls[].decided_at` | string（date-time，可空） | 否 |  |
+| `calls[].authorization_id` | string（可空） | 否 |  |
+| `calls[].execution_context` | object | 是 | 服务端生成的执行身份（T3 command/thread/message ID 等）与授权范围 |
+| `calls[].cancel_requested` | boolean | 否 |  |
+| `calls[].result_preview` | object | 否 | 进入模型上下文的受限结果（完整结果走 result 端点） |
+| `calls[].result_chars` | integer（int64） | 是 |  |
+| `calls[].truncated` | boolean | 是 |  |
+| `calls[].error_code` | string（可空） | 否 |  |
+| `calls[].error_message` | string（可空） | 否 |  |
+| `calls[].effect_may_have_occurred` | boolean | 是 | 副作用可能已发生（取消/中断/重启）；不声称回滚 |
+| `calls[].created_at` | string（date-time） | 是 |  |
+| `calls[].started_at` | string（date-time，可空） | 否 |  |
+| `calls[].finished_at` | string（date-time，可空） | 否 |  |
 | `total` | integer | 是 |  |
 
 **错误**

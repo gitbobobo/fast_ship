@@ -4,8 +4,8 @@ import { describe, expect, it } from "vitest";
 import { BotMessageView } from "./bot-message";
 import type { BotCall, BotMessage } from "@/lib/api/bots";
 
-// schedule_event 是定时任务运行事件的平台投影：必须渲染成安静的事件行，
-// 不能落进 assistant 分支变成空块或机器人气泡。
+// schedule_event（INT-157）：一行居中的事件行，汇报/错误不再内联展开，
+// 收进点击打开的弹窗（markdown 渲染）；不能落进 assistant 分支。
 
 const completedEvent: BotMessage = {
   id: "m-se",
@@ -40,18 +40,27 @@ function renderMessage(
 }
 
 describe("BotMessageView schedule_event", () => {
-  it("渲染为安静的事件行：任务名 + 状态 + 摘要，不是 assistant 气泡", () => {
+  it("渲染为一行居中的事件行：任务名 + 状态，摘要不在行内", () => {
     const { container } = renderMessage(completedEvent);
 
     const line = screen.getByText(/定时任务「/);
     expect(line).toHaveTextContent("定时任务「每日汇总」已完成");
-    expect(line).toHaveTextContent("已汇总 3 条变化");
+    expect(line).not.toHaveTextContent("已汇总 3 条变化");
     // 不落 assistant 分支：没有气泡容器，也没有空占位块。
     expect(container.querySelector(".bg-muted.rounded-2xl")).toBeNull();
     expect(container.querySelector(".space-y-2")).toBeNull();
   });
 
-  it("失败事件带错误信息并用 destructive 着色", () => {
+  it("有摘要的事件行可点，弹窗里用 markdown 展示详情", async () => {
+    const user = userEvent.setup();
+    renderMessage(completedEvent);
+
+    await user.click(screen.getByTestId("bot-schedule-event-detail"));
+    expect(screen.getByText("已汇总 3 条变化")).toBeInTheDocument();
+  });
+
+  it("失败事件用 destructive 着色，错误信息在弹窗里不在行内", async () => {
+    const user = userEvent.setup();
     renderMessage({
       ...completedEvent,
       content: {
@@ -65,25 +74,57 @@ describe("BotMessageView schedule_event", () => {
 
     const line = screen.getByText(/定时任务「/);
     expect(line).toHaveTextContent("定时任务「每日汇总」已失败");
-    expect(line).toHaveClass("text-destructive");
-    expect(line).toHaveTextContent("model_request_failed: 上游 502");
+    expect(line.closest("p")).toHaveClass("text-destructive");
+    expect(line).not.toHaveTextContent("上游 502");
+
+    await user.click(screen.getByTestId("bot-schedule-event-detail"));
+    // 面向用户的错误文案为主信息，机器可读错误码降级为次级小字。
+    expect(screen.getByText("上游 502")).toBeInTheDocument();
+    expect(screen.getByText("错误码：model_request_failed")).toBeInTheDocument();
   });
 
-  // 任务名是模型可写数据（建/改任务只 trim+限长），summary 是模型最终汇报：
+  it("仅 error_code（无 error_message/summary）的失败事件仍可点，错误码在弹窗可见", async () => {
+    const user = userEvent.setup();
+    renderMessage({
+      ...completedEvent,
+      content: {
+        ...completedEvent.content,
+        status: "failed",
+        summary: "",
+        error_code: "schedule_conflict",
+      },
+    });
+
+    await user.click(screen.getByTestId("bot-schedule-event-detail"));
+    expect(
+      screen.getByText("错误码：schedule_conflict"),
+    ).toBeInTheDocument();
+  });
+
+  it("无摘要也无错误的事件行不可点", () => {
+    renderMessage({
+      ...completedEvent,
+      content: { ...completedEvent.content, summary: "" },
+    });
+
+    expect(screen.getByText(/定时任务「/)).toBeInTheDocument();
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+  });
+
+  // 任务名是模型可写数据（建/改任务只 trim+限长）：
   // 双向覆盖符（U+202E）能把事件行重排成相反意思，渲染前必须剥掉。
-  it("任务名/摘要/错误里的双向覆盖与控制字符被剥离", () => {
+  it("任务名里的双向覆盖与控制字符被剥离", () => {
     renderMessage({
       ...completedEvent,
       content: {
         ...completedEvent.content,
         task_name: "每日\u202E置倒",
-        summary: "已汇总\u202E3 条",
+        summary: "",
       },
     });
 
     const line = screen.getByText(/定时任务「/);
     expect(line).toHaveTextContent("每日置倒");
-    expect(line).toHaveTextContent("已汇总3 条");
     expect(line.textContent ?? "").not.toMatch(/[\u202B-\u202E]/);
   });
 });
@@ -191,9 +232,9 @@ describe("BotMessageView compaction_failed", () => {
   });
 });
 
-// INT-122：带 tool_calls 的 assistant 是中间回合，正文只是调用前的
-// 过程旁白——折叠成一行「过程」入口默认收起，把视觉重心留给最终回复；
-// 工具卡/确认卡是操作入口，必须在折叠之外始终可见。
+// INT-157：带 tool_calls 的 assistant 中间回合整体隐藏——正文只是
+// 调用前的过程旁白，工具卡是执行噪音；唯一保留的是待确认调用的
+// 确认卡（用户唯一的批准入口）。流式草稿照旧直出气泡。
 
 const interimMessage: BotMessage = {
   id: "m-a1",
@@ -228,35 +269,18 @@ const pendingCall: BotCall = {
   created_at: "2026-10-18T00:00:01Z",
 };
 
-describe("BotMessageView 中间回合折叠", () => {
-  it("带 tool_calls 的旁白默认收起为「过程」入口，工具卡在折叠外可见", () => {
+describe("BotMessageView 中间回合隐藏", () => {
+  it("带 tool_calls 的中间回合：旁白与工具卡都不渲染", () => {
     const { container } = renderMessage(interimMessage);
 
-    const toggle = screen.getByRole("button", { name: "过程" });
-    expect(toggle).toHaveAttribute("aria-expanded", "false");
     expect(
       screen.queryByText(/我先看一下有哪些项目/),
     ).not.toBeInTheDocument();
-    // 旁白不再以回复气泡呈现。
     expect(container.querySelector(".bg-muted.rounded-2xl")).toBeNull();
-    // 工具卡不属于折叠内容，收起状态下依然可见。
-    expect(screen.getByTestId("bot-tool-card")).toBeInTheDocument();
+    expect(container.innerHTML).toBe("");
   });
 
-  it("点击「过程」展开正文，再点收起", async () => {
-    const user = userEvent.setup();
-    renderMessage(interimMessage);
-
-    await user.click(screen.getByRole("button", { name: "过程" }));
-    expect(screen.getByText(/我先看一下有哪些项目/)).toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "过程" }));
-    expect(
-      screen.queryByText(/我先看一下有哪些项目/),
-    ).not.toBeInTheDocument();
-  });
-
-  it("待确认调用渲染确认卡：用户唯一的批准入口不受折叠影响", () => {
+  it("待确认调用仍渲染确认卡：用户唯一的批准入口", () => {
     renderMessage(
       {
         ...interimMessage,
@@ -286,7 +310,7 @@ describe("BotMessageView 中间回合折叠", () => {
     expect(screen.queryByTestId("bot-tool-card")).not.toBeInTheDocument();
   });
 
-  it("无 tool_calls 的最终回复：正文气泡直出，没有「过程」入口", () => {
+  it("无 tool_calls 的最终回复：正文气泡直出", () => {
     const { container } = renderMessage({
       id: "m-final",
       bot_id: "b1",
@@ -297,32 +321,77 @@ describe("BotMessageView 中间回合折叠", () => {
     });
 
     expect(screen.getByText(/这是最终答复/)).toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: "过程" }),
-    ).not.toBeInTheDocument();
     expect(container.querySelector(".bg-muted.rounded-2xl")).not.toBeNull();
   });
 
-  it("正文为空的中间消息没有「过程」入口，工具卡仍在", () => {
-    renderMessage({
-      ...interimMessage,
-      content: { ...interimMessage.content, text: "" },
-    });
-
-    expect(
-      screen.queryByRole("button", { name: "过程" }),
-    ).not.toBeInTheDocument();
-    expect(screen.getByTestId("bot-tool-card")).toBeInTheDocument();
-  });
-
-  it("流式草稿带 tool_calls 不折叠：正文气泡直出", () => {
+  it("流式草稿带 tool_calls 不隐藏：正文气泡直出", () => {
     const { container } = renderMessage(interimMessage, { draft: true });
 
     expect(screen.getByText(/我先看一下有哪些项目/)).toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: "过程" }),
-    ).not.toBeInTheDocument();
     expect(container.querySelector(".bg-muted.rounded-2xl")).not.toBeNull();
+  });
+
+  // 在途的前台（非 async）调用保留工具卡——那是逐项取消的唯一入口；
+  // async 在途调用由后台调用面板承担，不再重复渲染（INT-157 复审）。
+  const runningCall: BotCall = {
+    id: "c-read",
+    bot_id: "b1",
+    tool_name: "fs_project",
+    action: "list",
+    arguments: {},
+    execution_mode: "sync",
+    requires_confirmation: false,
+    status: "running",
+    created_at: "2026-10-18T00:00:01Z",
+  };
+
+  it("在途前台调用仍渲染工具卡（取消入口），已终态调用不渲染", () => {
+    const { unmount } = renderMessage(interimMessage, {
+      calls: [runningCall],
+    });
+    expect(screen.getByTestId("bot-tool-card")).toBeInTheDocument();
+    expect(
+      screen.queryByText(/我先看一下有哪些项目/),
+    ).not.toBeInTheDocument();
+    unmount();
+
+    renderMessage(interimMessage, {
+      calls: [{ ...runningCall, status: "succeeded" }],
+    });
+    expect(screen.queryByTestId("bot-tool-card")).not.toBeInTheDocument();
+  });
+
+  it("在途 async 调用不重复渲染（由后台调用面板承担）", () => {
+    renderMessage(interimMessage, {
+      calls: [{ ...runningCall, execution_mode: "async" }],
+    });
+    expect(screen.queryByTestId("bot-tool-card")).not.toBeInTheDocument();
+  });
+
+  // 终态但「需要用户留意」的调用仍渲染工具卡——取消写调用后的
+  // effect_may_have_occurred 警示与失败原因是前端唯一出口（第 8 轮
+  // 复审 P1）；干净的终态调用照旧隐藏。
+  it("带副作用警示的已取消调用保留工具卡（无取消按钮）", () => {
+    const { unmount } = renderMessage(interimMessage, {
+      calls: [
+        { ...runningCall, status: "cancelled", effect_may_have_occurred: true },
+      ],
+    });
+    const card = screen.getByTestId("bot-tool-card");
+    expect(
+      within(card).getByText(/副作用可能已经发生/),
+    ).toBeInTheDocument();
+    expect(
+      within(card).queryByRole("button", { name: "取消" }),
+    ).not.toBeInTheDocument();
+    unmount();
+
+    renderMessage(interimMessage, {
+      calls: [
+        { ...runningCall, status: "failed", error_message: "写入冲突" },
+      ],
+    });
+    expect(screen.getByTestId("bot-tool-card")).toBeInTheDocument();
   });
 });
 
@@ -408,7 +477,7 @@ describe("BotMessageView background_result", () => {
       { calls: [scheduleCreateCall] },
     );
 
-    const line = screen.getByText(/定时任务/);
+    const line = screen.getByText(/未成功/);
     expect(line).toHaveTextContent("创建定时任务「每日站会提醒」未成功");
     expect(line).toHaveClass("text-destructive");
     expect(screen.queryByText(/已创建定时任务/)).not.toBeInTheDocument();
@@ -441,6 +510,38 @@ describe("BotMessageView background_result", () => {
     expect(screen.getByText("任务已创建并启用。")).toBeInTheDocument();
     expect(
       screen.queryByTestId("bot-background-raw-result"),
+    ).not.toBeInTheDocument();
+  });
+
+  // async 调用终态后工具卡与后台面板都退出视野——副作用警示只随
+  // background_result 下发，这条消息是它唯一的渲染出口（第 9 轮 P1）。
+  it("async 取消且副作用可能已发生：结果消息渲染警示行", () => {
+    const { unmount } = renderMessage({
+      ...backgroundResult,
+      content: {
+        ...backgroundResult.content,
+        status: "cancelled",
+        summary: undefined,
+        error_message: "用户取消了调用",
+        effect_may_have_occurred: true,
+      },
+    });
+    expect(
+      screen.getByText(/副作用可能已经发生；请先核实再决定后续操作/),
+    ).toBeInTheDocument();
+    // 卡头用中文工具名 + 状态徽标，不露内部 call_id；取消文案中性灰，
+    // 琥珀色警示句是页面唯一强调色（视觉复审 worth_fixing）。
+    expect(screen.getByText("创建定时任务 · 后台结果")).toBeInTheDocument();
+    expect(screen.getByText("已取消")).toBeInTheDocument();
+    expect(screen.queryByText(/call-/)).not.toBeInTheDocument();
+    expect(screen.getByText("用户取消了调用")).toHaveClass(
+      "text-muted-foreground",
+    );
+    unmount();
+
+    renderMessage(backgroundResult);
+    expect(
+      screen.queryByText(/副作用可能已经发生/),
     ).not.toBeInTheDocument();
   });
 });

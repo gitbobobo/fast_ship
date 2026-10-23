@@ -26,6 +26,7 @@ import {
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
 import { FastShipLogo } from "@/components/ui/fast-ship-logo";
 import { UserNav } from "@/components/user-nav";
+import { useLastBotId } from "@/lib/store/last-bot-store";
 import { useSidebarStore } from "@/lib/store/sidebar-store";
 import { cn } from "@/lib/utils";
 
@@ -61,12 +62,16 @@ function SidebarNavItem({
     label: string;
     icon: React.ElementType;
     end?: boolean;
+    // 跳转目标被改写成具体页面时（如 /bots/<lastBotId>），NavLink 的
+    // to 前缀匹配只认那一页，分区高亮会丢；用它按分区前缀判定激活态。
+    activePrefix?: string;
   };
   collapsed: boolean;
   onNavigate?: () => void;
   unread?: number;
 }) {
   const name = unreadLabel(item.label, unread);
+  const { pathname } = useLocation();
   const link = (
     <NavLink
       to={item.to}
@@ -77,7 +82,11 @@ function SidebarNavItem({
         cn(
           "relative flex items-center rounded-md text-sm font-medium transition-all duration-200",
           collapsed ? "justify-center px-2 py-2" : "gap-3 px-3 py-2",
-          isActive
+          (
+            item.activePrefix
+              ? pathname.startsWith(item.activePrefix)
+              : isActive
+          )
             ? "bg-primary text-primary-foreground"
             : "text-muted-foreground hover:bg-accent hover:text-accent-foreground"
         )
@@ -173,6 +182,8 @@ function NavContent({
   onNavigate?: () => void;
 }) {
   const unread = useUnreadNotificationCount().data ?? 0;
+  // 「机器人」菜单项直跳上次打开的聊天（INT-157）；没打开过就进列表。
+  const lastBotId = useLastBotId();
 
   return (
     <div className="flex h-full flex-col">
@@ -198,7 +209,14 @@ function NavContent({
         {navItems.map((item) => (
           <SidebarNavItem
             key={item.to}
-            item={item}
+            item={{
+              ...item,
+              to:
+                item.to === "/bots" && lastBotId
+                  ? `/bots/${lastBotId}`
+                  : item.to,
+              activePrefix: item.to === "/bots" ? "/bots" : undefined,
+            }}
             collapsed={!!collapsed}
             onNavigate={onNavigate}
             unread={item.to === "/notifications" ? unread : 0}

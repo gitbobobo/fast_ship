@@ -713,7 +713,7 @@ func TestBotAppendOnly(t *testing.T) {
 		t.Fatalf("同 dedup_key 应唯一约束失败")
 	}
 
-	items, _, err := env.bots.ListMessages(userID, bot.ID, 0, 0, 50)
+	items, _, _, err := env.bots.ListMessages(userID, bot.ID, 0, 0, 50)
 	if err != nil || len(items) != 2 {
 		t.Fatalf("list 应含用户消息与去重用 lifecycle 夹具: %v %d", err, len(items))
 	}
@@ -751,7 +751,7 @@ func TestBotListMessagesDefaultPage(t *testing.T) {
 		return out
 	}
 
-	items, _, err := env.bots.ListMessages(userID, bot.ID, 0, 0, 3)
+	items, _, _, err := env.bots.ListMessages(userID, bot.ID, 0, 0, 3)
 	if err != nil {
 		t.Fatalf("default page: %v", err)
 	}
@@ -759,7 +759,7 @@ func TestBotListMessagesDefaultPage(t *testing.T) {
 		t.Fatalf("缺省应返回最新 3 条且正序: %v", got)
 	}
 
-	items, _, err = env.bots.ListMessages(userID, bot.ID, 5, 0, 3)
+	items, _, _, err = env.bots.ListMessages(userID, bot.ID, 5, 0, 3)
 	if err != nil {
 		t.Fatalf("before page: %v", err)
 	}
@@ -767,7 +767,7 @@ func TestBotListMessagesDefaultPage(t *testing.T) {
 		t.Fatalf("before=5 应返回其前最近 3 条且正序: %v", got)
 	}
 
-	items, _, err = env.bots.ListMessages(userID, bot.ID, 0, 5, 10)
+	items, _, _, err = env.bots.ListMessages(userID, bot.ID, 0, 5, 10)
 	if err != nil {
 		t.Fatalf("after page: %v", err)
 	}
@@ -829,7 +829,7 @@ func TestBotSyncTool(t *testing.T) {
 		return env.botSettled(bot.ID)
 	})
 
-	messages, _, err := env.bots.ListMessages(userID, bot.ID, 0, 0, 50)
+	messages, _, _, err := env.bots.ListMessages(userID, bot.ID, 0, 0, 50)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -881,7 +881,7 @@ func TestBotSafePoint(t *testing.T) {
 	waitForBot(t, "run completed", 15*time.Second, func() bool {
 		return env.botSettled(bot.ID)
 	})
-	messages, _, _ := env.bots.ListMessages(userID, bot.ID, 0, 0, 50)
+	messages, _, _, _ := env.bots.ListMessages(userID, bot.ID, 0, 0, 50)
 	// user x2 + assistant x2。
 	if len(messages) != 4 {
 		t.Fatalf("消息数应为 4: %d kinds=%v runs=[%s]", len(messages), func() []string {
@@ -932,7 +932,7 @@ func TestBotPrefix(t *testing.T) {
 	env.bots.SendMessage(userID, bot.ID, &SendMessageRequest{Text: "问题一", ClientMessageID: "q1"})
 	req1 := env.fake.nextRequest(t, 10*time.Second)
 	waitForBot(t, "第一轮完成", 15*time.Second, func() bool {
-		msgs, _, _ := env.bots.ListMessages(userID, bot.ID, 0, 0, 50)
+		msgs, _, _, _ := env.bots.ListMessages(userID, bot.ID, 0, 0, 50)
 		return len(msgs) >= 2
 	})
 	env.bots.SendMessage(userID, bot.ID, &SendMessageRequest{Text: "问题二", ClientMessageID: "q2"})
@@ -1053,7 +1053,7 @@ func TestBotApproval(t *testing.T) {
 	})
 
 	// 回执先于结果：批准前只有 receipt，没有终态。
-	msgs, _, _ := env.bots.ListMessages(userID, bot.ID, 0, 0, 50)
+	msgs, _, _, _ := env.bots.ListMessages(userID, bot.ID, 0, 0, 50)
 	hasReceipt := false
 	for _, m := range msgs {
 		if m.Kind == "tool_reply" {
@@ -1090,7 +1090,7 @@ func TestBotApproval(t *testing.T) {
 	waitForBot(t, "run 继续", 20*time.Second, func() bool {
 		return env.botSettled(bot.ID)
 	})
-	msgs, _, _ = env.bots.ListMessages(userID, bot.ID, 0, 0, 50)
+	msgs, _, _, _ = env.bots.ListMessages(userID, bot.ID, 0, 0, 50)
 	hasBackground := false
 	for _, m := range msgs {
 		if m.Kind == "background_result" && m.CallID != nil && *m.CallID == callID {
@@ -1124,7 +1124,7 @@ func TestBotReject(t *testing.T) {
 		t.Fatalf("reject: %v %+v", err, decided)
 	}
 	waitForBot(t, "终态结果", 10*time.Second, func() bool {
-		msgs, _, _ := env.bots.ListMessages(userID, bot.ID, 0, 0, 50)
+		msgs, _, _, _ := env.bots.ListMessages(userID, bot.ID, 0, 0, 50)
 		for _, m := range msgs {
 			if m.Kind == "background_result" {
 				return true
@@ -1270,7 +1270,7 @@ func TestBotCancelCall(t *testing.T) {
 		t.Fatalf("迟到结果覆盖了 cancelled 终态: %s", final.Status)
 	}
 	// 终态结果消息恰好一条。
-	msgs, _, _ := env.bots.ListMessages(userID, bot.ID, 0, 0, 100)
+	msgs, _, _, _ := env.bots.ListMessages(userID, bot.ID, 0, 0, 100)
 	terminal := 0
 	for _, m := range msgs {
 		if m.Kind == "background_result" && m.CallID != nil && *m.CallID == callID {
@@ -1648,7 +1648,7 @@ func TestBotRecovery(t *testing.T) {
 	if err := env.bots.RecoverOnStartup(); err != nil {
 		t.Fatalf("recovery 重复执行: %v", err)
 	}
-	notices, _, _ := env.bots.ListMessages(userID, bot.ID, 0, 0, 100)
+	notices, _, _, _ := env.bots.ListMessages(userID, bot.ID, 0, 0, 100)
 	count := 0
 	for _, m := range notices {
 		if m.Kind == "lifecycle" {
@@ -1684,7 +1684,7 @@ func strPtrBot(s string) *string { return &s }
 // dumpMessages 失败诊断：打印消息 kind 与内容摘要。
 func dumpMessages(t *testing.T, env *botTestEnv, botID string) string {
 	t.Helper()
-	msgs, _, _ := env.bots.ListMessages(botUserIDOf(t, env, botID), botID, 0, 0, 100)
+	msgs, _, _, _ := env.bots.ListMessages(botUserIDOf(t, env, botID), botID, 0, 0, 100)
 	parts := make([]string, 0, len(msgs))
 	for _, m := range msgs {
 		content := string(m.Content)
@@ -1744,7 +1744,7 @@ func TestBotReceipt(t *testing.T) {
 		}
 		return false
 	})
-	msgs, _, _ := env.bots.ListMessages(userID, bot.ID, 0, 0, 50)
+	msgs, _, _, _ := env.bots.ListMessages(userID, bot.ID, 0, 0, 50)
 	receiptSeq, terminalSeq := int64(-1), int64(-1)
 	for _, m := range msgs {
 		if m.Kind == "tool_reply" && m.CallID != nil && *m.CallID == callID {
@@ -1792,7 +1792,7 @@ func TestBotAsync(t *testing.T) {
 	if !botProjectExists(t, env, userID, "异步执行的项目") {
 		t.Fatalf("异步写操作未生效")
 	}
-	msgs, _, _ := env.bots.ListMessages(userID, bot.ID, 0, 0, 100)
+	msgs, _, _, _ := env.bots.ListMessages(userID, bot.ID, 0, 0, 100)
 	hasBackground := false
 	for _, m := range msgs {
 		if m.Kind == "background_result" && m.CallID != nil && *m.CallID == callID {
@@ -2077,6 +2077,151 @@ func TestBotChatSnapshotConsistent(t *testing.T) {
 	}
 	if len(eventSeqs) == 0 || eventSeqs[len(eventSeqs)-1] >= snap.NextEventSeq {
 		t.Fatalf("事件应全部落在水位之前: events=%v watermark=%d", eventSeqs, snap.NextEventSeq)
+	}
+}
+
+// INT-157 复审：窗口内消息引用的旧调用要按引用补齐进快照——它们的
+// 警示/失败原因在前端只有工具卡与结果消息这些出口，最近 100 条窗口
+// 漏掉等于藏死安全提示；但未被窗口内消息引用的调用前端不渲染，
+// 不应随历史无界收进快照。
+func TestBotChatSnapshotReferencedCallsBeyondWindow(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "botsnapatt")
+	bot := env.createBot(t, userID)
+
+	// 一条带副作用警示的已取消调用排在最早，并被窗口内 assistant
+	// 消息的 tool_calls 引用。
+	now := time.Now().UTC()
+	_, warnCallID := seedBotCallFixture(t, env, bot.ID, model.BotCallStatusCancelled, string(model.BotExecutionSync))
+	if err := env.db.Model(&model.BotToolCall{}).Where("id = ?", warnCallID).
+		Updates(map[string]interface{}{
+			"effect_may_have_occurred": true,
+			"finished_at":              now,
+		}).Error; err != nil {
+		t.Fatalf("flag warn call: %v", err)
+	}
+	// 另一条同类警示调用不被任何消息引用：不该进快照（防无界膨胀）。
+	_, orphanCallID := seedBotCallFixture(t, env, bot.ID, model.BotCallStatusCancelled, string(model.BotExecutionSync))
+	if err := env.db.Model(&model.BotToolCall{}).Where("id = ?", orphanCallID).
+		Updates(map[string]interface{}{
+			"effect_may_have_occurred": true,
+			"finished_at":              now,
+		}).Error; err != nil {
+		t.Fatalf("flag orphan call: %v", err)
+	}
+	// 第三条警示调用只被 background_result 消息引用（其声明的
+	// assistant 回合在窗口外）：人话行渲染同样靠 calls.find 命中。
+	_, bgRefCallID := seedBotCallFixture(t, env, bot.ID, model.BotCallStatusFailed, string(model.BotExecutionAsync))
+	if err := env.db.Model(&model.BotToolCall{}).Where("id = ?", bgRefCallID).
+		Updates(map[string]interface{}{
+			"error_message": "worker 异常退出",
+			"finished_at":   now,
+		}).Error; err != nil {
+		t.Fatalf("flag bg ref call: %v", err)
+	}
+	msgSeq, err := repository.NewBotRepository(env.db).NextMessageSeqTx(env.db, bot.ID)
+	if err != nil {
+		t.Fatalf("seq: %v", err)
+	}
+	content, _ := json.Marshal(botAssistantContent{
+		Text: "我先更新一下 issue。",
+		ToolCalls: []botAssistantToolCall{{
+			CallID: warnCallID, ProviderToolCallID: "ptc-warn",
+			ToolName: "fs_issue", Action: "update", Arguments: "{}",
+		}},
+	})
+	if err := repository.NewBotMessageRepository(env.db).AppendTx(env.db, &model.BotMessage{
+		ID: uuid.NewString(), BotID: bot.ID, Seq: msgSeq,
+		Kind: model.BotMessageKindAssistant, ContentJSON: string(content),
+		CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("append ref message: %v", err)
+	}
+	bgSeq, err := repository.NewBotRepository(env.db).NextMessageSeqTx(env.db, bot.ID)
+	if err != nil {
+		t.Fatalf("seq: %v", err)
+	}
+	bgContent, _ := json.Marshal(botBackgroundResultContent{
+		CallID: bgRefCallID, ToolName: "fs_schedule", Action: "create",
+		Status: string(model.BotCallStatusFailed),
+	})
+	if err := repository.NewBotMessageRepository(env.db).AppendTx(env.db, &model.BotMessage{
+		ID: uuid.NewString(), BotID: bot.ID, Seq: bgSeq,
+		Kind: model.BotMessageKindBackgroundResult, ContentJSON: string(bgContent),
+		CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("append bg message: %v", err)
+	}
+	// 101 条干净的终态调用把三条警示调用都挤出最近 100 条窗口。
+	for i := 0; i < 101; i++ {
+		_, callID := seedBotCallFixture(t, env, bot.ID, model.BotCallStatusSucceeded, string(model.BotExecutionSync))
+		if err := env.db.Model(&model.BotToolCall{}).Where("id = ?", callID).
+			Update("finished_at", now).Error; err != nil {
+			t.Fatalf("finish call: %v", err)
+		}
+	}
+
+	snap, err := env.bots.GetChatSnapshot(userID, bot.ID, 50)
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	found := map[string]bool{}
+	for _, c := range snap.Calls {
+		found[c.ID] = true
+	}
+	if !found[warnCallID] {
+		t.Fatalf("窗口内消息引用的警示调用应收录进快照")
+	}
+	if !found[bgRefCallID] {
+		t.Fatalf("仅被 background_result 引用的调用也应收录（人话行渲染依赖）")
+	}
+	if got := found[orphanCallID]; got {
+		t.Fatalf("未被消息引用的警示调用不应进快照（快照须随窗口有界）")
+	}
+
+	// 分页加载的更早消息同样自足：before 边界取回的页携带其引用的调用。
+	// 构造一页窗口外的早期消息：assistant 引用一条更早的警示调用。
+	_, oldCallID := seedBotCallFixture(t, env, bot.ID, model.BotCallStatusFailed, string(model.BotExecutionSync))
+	if err := env.db.Model(&model.BotToolCall{}).Where("id = ?", oldCallID).
+		Updates(map[string]interface{}{
+			"effect_may_have_occurred": true,
+			"finished_at":              now,
+		}).Error; err != nil {
+		t.Fatalf("flag old call: %v", err)
+	}
+	oldSeq, err := repository.NewBotRepository(env.db).NextMessageSeqTx(env.db, bot.ID)
+	if err != nil {
+		t.Fatalf("seq: %v", err)
+	}
+	oldContent, _ := json.Marshal(botAssistantContent{
+		Text: "更早的一回合。",
+		ToolCalls: []botAssistantToolCall{{
+			CallID: oldCallID, ProviderToolCallID: "ptc-old",
+			ToolName: "fs_issue", Action: "update", Arguments: "{}",
+		}},
+	})
+	if err := repository.NewBotMessageRepository(env.db).AppendTx(env.db, &model.BotMessage{
+		ID: uuid.NewString(), BotID: bot.ID, Seq: oldSeq,
+		Kind: model.BotMessageKindAssistant, ContentJSON: string(oldContent),
+		CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("append old message: %v", err)
+	}
+	items, pageCalls, _, err := env.bots.ListMessages(userID, bot.ID, oldSeq+1, 0, 50)
+	if err != nil {
+		t.Fatalf("list messages: %v", err)
+	}
+	if len(items) == 0 {
+		t.Fatalf("before 页应含早期消息")
+	}
+	foundPage := false
+	for _, c := range pageCalls {
+		if c.ID == oldCallID {
+			foundPage = true
+		}
+	}
+	if !foundPage {
+		t.Fatalf("分页响应应附带页内消息引用的调用")
 	}
 }
 

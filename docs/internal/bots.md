@@ -1406,6 +1406,53 @@ null），给三栏工作台的左侧列表当预览列。语义与约束：
   之前保持 system。定时会话无前缀缓存顾虑，恒按 user 投影。旧消息最终随
   摘要归档离开投影（投影从 `summary_through_seq` 起读），不可变账本不回写。
 
+## 聊天页降噪与入口记忆（INT-157）
+
+账本与 SSE 事件不变；协议侧有两处配套：`GET .../messages` 分页响应与
+聊天快照各新增 `calls` 字段（按窗口内消息引用补齐旧调用，见下）。
+时间线只留用户与机器人的对话正文。
+
+- **中间回合整体隐藏**：带 `tool_calls` 的 assistant 消息（正文只是
+  调用前旁白）与已终态工具卡不再渲染——此前的「过程」折叠入口一并
+  移除。三种可见性保留：`pending_confirmation && requires_confirmation`
+  的确认卡（用户唯一的批准入口）；在途**前台**（非 async、
+  queued/running）调用的工具卡（唯一逐项取消入口——async 在途调用
+  已由 `BotBackgroundCalls` 面板承担，不重复渲染）；终态但「需要用户
+  留意」的前台调用卡——`effect_may_have_occurred`（如取消写调用后
+  副作用可能已发生）或带 `error_message`/`error_code` 的调用，警示与
+  失败原因只有工具卡这一个出口，不能一并降噪。async 调用的同类警示
+  走 `background_result` 消息（服务端终态时下发
+  `effect_may_have_occurred`/`error_*`，前端在结果卡内渲染同款警示行）——
+  async 终态后工具卡与后台调用面板都退出视野，结果消息是唯一出口。
+  快照侧配套：calls 快照在「最近 100 条 + 未终态全集」之外，按
+  窗口内消息的 `tool_calls` 引用补齐旧调用（`ListByIDs`）——被
+  消息引用的警示卡不会因超出 100 条窗口而消失，未被引用的调用
+  前端本就不渲染、不进快照（快照随窗口有界，不随历史膨胀）。
+  翻页同理：`ListMessages` 响应附带页内消息引用的调用（`calls`
+  字段），前端 `loadOlder` 并入 calls 缓存——任何深度的历史消息
+  都自带渲染卡片所需的调用数据。
+  流式草稿不受影响，
+  仍直出气泡。消息内无可见内容时 `BotMessageView` 返回 null，不留空块。
+  有意取舍：text 与 tool_calls 并存的消息即使正文非空也整体隐藏——
+  按协议这段正文是调用前旁白（思考/计划），属 INT-157 明确要藏的
+  「过程」；最终答复总是单独的无 tool_calls 消息，不提供回看入口。
+- **定时任务事件一行居中**：`schedule_event` 渲染为居中一行
+  「定时任务「name」<状态>」，summary/error 不再内联；有详情时行渲染
+  为胶囊形按钮（图标 + 后缀箭头，悬停有底色），点开弹窗内 summary 走
+  `BotMarkdown`、error_message 为主信息、error_code 降级次级小字。
+  summary/error_message/error_code 任一非空即可点——仅 error_code 的
+  失败事件也要让唯一排查线索可达；三者皆空的事件行保持朴素灰字不可点，
+  两种形态视觉可分。模型可写文本
+  （task_name/summary/error）仍经 bidiSafeText + `unicode-bidi:isolate`
+  处理。
+- **侧边栏直跳上次聊天**：`fast-ship-last-bot`（zustand persist）按
+  `Record<userId, botId>` 记各账号最近打开的机器人，「机器人」菜单项
+  href 变成 `/bots/<lastBotId>`；消费方经 `useLastBotId` 读取当前用户
+  的记忆——同浏览器切换账号各记各的，互不覆盖也互不可见。写入只在 `useBot` 加载
+  成功后发生；清除只在「被记住的那个机器人自己 404/被删」时执行，
+  误点坏链接不会误删仍在有效期内的记忆。菜单项激活态按 `/bots` 前缀
+  判定，跳到具体聊天页后分区高亮不丢。
+
 ## 边界与决策
 
 - **身份**：机器人继承归属人身份（userID 恒取机器人归属人），全部端点仅

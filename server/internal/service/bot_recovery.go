@@ -309,7 +309,8 @@ func (s *BotService) appendRecoveryNotice(botID string, now time.Time) error {
 		content := botLifecycleContent{
 			Event: "recovered",
 			Detail: json.RawMessage(`{"note":"服务重启：进行中的运行已中断并标记失败；` +
-				`已受理的后台调用保留，效果不确定的操作请先核实再决定"}`),
+				`已受理的后台调用保留，效果不确定的操作请先核实再决定",` +
+				`"user_note":"服务已重启：进行中的运行已中断并标记失败，已受理的后台调用保留。"}`),
 		}
 		raw, err := json.Marshal(content)
 		if err != nil {

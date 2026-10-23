@@ -33,7 +33,8 @@ export function botActionErrorText(error: unknown, fallback = "操作失败，�
     : fallback;
 }
 
-const STATUS_BADGE: Record<string, string> = {
+/** 状态徽标配色；后台结果消息复用同一套（bot-message.tsx）。 */
+export const STATUS_BADGE: Record<string, string> = {
   pending_confirmation: "bg-amber-500/15 text-amber-700 dark:text-amber-400",
   queued: "bg-primary/10 text-primary",
   running: "bg-primary/10 text-primary",
@@ -88,25 +89,19 @@ export function ParamChips({ chips }: { chips: ToolParamChip[] }) {
 }
 
 /**
- * 工具调用卡：状态从调用账本派生。历史消息引用的调用若不在账本里
- * （如只展示最近调用），卡片退化为仅展示工具与 action 的静态形态。
- * 标题是中文标签，状态徽标贴在卡片右侧；参数摘要与完整 JSON 属于
+ * 工具调用卡：状态从调用账本派生。标题是中文标签，状态徽标贴在
+ * 卡片右侧；参数摘要与完整 JSON 属于
  * 确认依据，只在写操作确认卡上呈现，这里不再重复。「查看完整结果」
  * 经 result 端点按需读取，展开状态留在卡片本地。
  */
 export function BotToolCard({
   botId,
   call,
-  fallbackName,
-  fallbackAction,
   onCancel,
   cancelling = false,
 }: {
   botId: string;
   call?: BotCall;
-  /** 账本缺卡时的展示兜底（来自消息里的 tool_calls 引用）。 */
-  fallbackName?: string;
-  fallbackAction?: string;
   onCancel?: (callId: string) => void;
   cancelling?: boolean;
 }) {
@@ -114,8 +109,8 @@ export function BotToolCard({
   const [fullResult, setFullResult] = useState<string | null>(null);
   const [resultError, setResultError] = useState<string | null>(null);
 
-  const name = call?.tool_name ?? fallbackName ?? "";
-  const action = call?.action ?? fallbackAction ?? "";
+  const name = call?.tool_name ?? "";
+  const action = call?.action ?? "";
   const title = name ? toolActionLabel(name, action) : "工具调用";
   const cancellable =
     call &&
@@ -156,8 +151,8 @@ export function BotToolCard({
           <Button
             type="button"
             size="xs"
-            variant="ghost"
-            className="text-muted-foreground"
+            variant="outline"
+            className="hover:border-destructive/50 hover:text-destructive"
             disabled={cancelling}
             onClick={() => onCancel!(call.id)}
           >

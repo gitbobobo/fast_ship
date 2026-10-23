@@ -372,7 +372,7 @@ export const botApi = {
             limit: query.limit,
           }),
         })
-        .json<ApiResponse<{ items: BotMessage[] }>>(),
+        .json<ApiResponse<{ items: BotMessage[]; calls?: BotCall[] }>>(),
     ),
 
   /** client_message_id 必填；同键同正文幂等返回，同键不同正文返回冲突。 */
