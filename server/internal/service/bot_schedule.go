@@ -778,6 +778,9 @@ type BotScheduleRunResponse struct {
 	TotalTokens   *int64   `json:"total_tokens,omitempty"`
 	CostEstimate  *float64 `json:"cost_estimate,omitempty"`
 	CostSource    *string  `json:"cost_source,omitempty"`
+	// DisplayCostEstimate 是显示口径成本（INT-162）：本 run 已计价成本 +
+	// 关联维护运行已计价成本；两者都为 null 时为 null（缺失 ≠ 0）。
+	DisplayCostEstimate *float64 `json:"display_cost_estimate"`
 }
 
 // botTriggerSourceLabel 把触发来源投影为 API 标签：定时任务的运行只会来自
@@ -789,24 +792,27 @@ func botTriggerSourceLabel(src model.BotRunTrigger) string {
 	return "cron"
 }
 
-func botScheduleRunResponseOf(run *model.BotRun) BotScheduleRunResponse {
+// botScheduleRunResponseOf 定时任务 run 的投影；maintCost 是关联维护运行的
+// 已计价成本合计（无已计价维护传 nil），列表调用方批量取全，不做逐 run 查询。
+func botScheduleRunResponseOf(run *model.BotRun, maintCost *float64) BotScheduleRunResponse {
 	resp := BotScheduleRunResponse{
-		ID:            run.ID,
-		TaskID:        run.ScheduleTaskID,
-		Status:        string(run.Status),
-		Summary:       run.Summary,
-		Silent:        run.Silent,
-		TriggerSource: botTriggerSourceLabel(run.TriggerSource),
-		ErrorCode:     run.ErrorCode,
-		ErrorMessage:  run.ErrorMessage,
-		ScheduledFor:  rfc3339(run.ScheduledFor),
-		StartedAt:     rfc3339(run.StartedAt),
-		FinishedAt:    rfc3339(run.FinishedAt),
-		PromptTokens:  run.PromptTokens,
-		Completion:    run.CompletionTokens,
-		TotalTokens:   run.TotalTokens,
-		CostEstimate:  run.CostEstimate,
-		CostSource:    run.CostSource,
+		ID:                  run.ID,
+		TaskID:              run.ScheduleTaskID,
+		Status:              string(run.Status),
+		Summary:             run.Summary,
+		Silent:              run.Silent,
+		TriggerSource:       botTriggerSourceLabel(run.TriggerSource),
+		ErrorCode:           run.ErrorCode,
+		ErrorMessage:        run.ErrorMessage,
+		ScheduledFor:        rfc3339(run.ScheduledFor),
+		StartedAt:           rfc3339(run.StartedAt),
+		FinishedAt:          rfc3339(run.FinishedAt),
+		PromptTokens:        run.PromptTokens,
+		Completion:          run.CompletionTokens,
+		TotalTokens:         run.TotalTokens,
+		CostEstimate:        run.CostEstimate,
+		CostSource:          run.CostSource,
+		DisplayCostEstimate: botSumOptional(run.CostEstimate, maintCost),
 	}
 	if run.StartedAt != nil && run.FinishedAt != nil {
 		ms := run.FinishedAt.Sub(*run.StartedAt).Milliseconds()
@@ -820,32 +826,41 @@ func botScheduleRunResponseOf(run *model.BotRun) BotScheduleRunResponse {
 // 用文本而不是解好的 JSON 值：浏览器的 JSON.parse 会把 >2^53 的整数折成 double，
 // 返回原文才能无损展示。用户只能经 DELETE .../state 清空。
 type BotScheduleTaskResponse struct {
-	ID             string                  `json:"id"`
-	BotID          string                  `json:"bot_id"`
-	Name           string                  `json:"name"`
-	CronExpression string                  `json:"cron_expression"`
-	Timezone       string                  `json:"timezone"`
-	Instruction    string                  `json:"instruction"`
-	Model          string                  `json:"model"`
-	NeedsReport    bool                    `json:"needs_report"`
-	Enabled        bool                    `json:"enabled"`
-	NextRunAt      *string                 `json:"next_run_at"`
-	State          *string                 `json:"state"`
-	StateUpdatedAt *string                 `json:"state_updated_at"`
-	CreatedAt      string                  `json:"created_at"`
-	UpdatedAt      string                  `json:"updated_at"`
-	LastRun        *BotScheduleRunResponse `json:"last_run"`
+	ID             string  `json:"id"`
+	BotID          string  `json:"bot_id"`
+	Name           string  `json:"name"`
+	CronExpression string  `json:"cron_expression"`
+	Timezone       string  `json:"timezone"`
+	Instruction    string  `json:"instruction"`
+	Model          string  `json:"model"`
+	NeedsReport    bool    `json:"needs_report"`
+	Enabled        bool    `json:"enabled"`
+	NextRunAt      *string `json:"next_run_at"`
+	State          *string `json:"state"`
+	StateUpdatedAt *string `json:"state_updated_at"`
+	// CostLast7d 是近 7 天该任务已计价成本合计（schedule run 自身 + 关联
+	// 维护 + 连带主线成本，INT-162）；无已计价记录为 null（缺失 ≠ 0）。
+	CostLast7d *float64                `json:"cost_last_7d"`
+	CreatedAt  string                  `json:"created_at"`
+	UpdatedAt  string                  `json:"updated_at"`
+	LastRun    *BotScheduleRunResponse `json:"last_run"`
 }
 
-func (s *BotService) scheduleTaskResponseOf(task *model.BotScheduleTask) BotScheduleTaskResponse {
+// scheduleTaskResponseOf 任务投影；cost7d 传 ScheduleTaskCostsLast7d 的结果，
+// lastRun 传该任务最新运行的投影（无运行传 nil）——列表调用方对整页任务
+// 批量取全（成本、最新 run、维护各一次查询），单条调用走
+// lastScheduleRunResponseOf，这里只做纯投影。
+func (s *BotService) scheduleTaskResponseOf(task *model.BotScheduleTask, cost7d *float64, lastRun *BotScheduleRunResponse) BotScheduleTaskResponse {
 	resp := BotScheduleTaskResponse{
 		ID: task.ID, BotID: task.BotID, Name: task.Name,
 		CronExpression: task.CronExpression, Timezone: task.Timezone,
 		Instruction: task.Instruction, Model: task.Model,
 		NeedsReport: task.NeedsReport, Enabled: task.Enabled,
-		NextRunAt: rfc3339(task.NextRunAt),
-		CreatedAt: task.CreatedAt.UTC().Format(time.RFC3339Nano),
-		UpdatedAt: task.UpdatedAt.UTC().Format(time.RFC3339Nano),
+		NextRunAt:  rfc3339(task.NextRunAt),
+		CostLast7d: cost7d,
+		CreatedAt:  task.CreatedAt.UTC().Format(time.RFC3339Nano),
+		UpdatedAt:  task.UpdatedAt.UTC().Format(time.RFC3339Nano),
+		LastRun:    lastRun,
 	}
 	if task.StateJSON != "" {
 		// 状态原文直接透传（字符串）：数字字面量（大整数等）逐字保留，
@@ -854,11 +869,25 @@ func (s *BotService) scheduleTaskResponseOf(task *model.BotScheduleTask) BotSche
 		resp.State = &raw
 		resp.StateUpdatedAt = rfc3339(task.StateUpdatedAt)
 	}
-	if run, err := s.runs.LatestByScheduleTask(task.BotID, task.ID); err == nil {
-		out := botScheduleRunResponseOf(run)
-		resp.LastRun = &out
-	}
 	return resp
+}
+
+// lastScheduleRunResponseOf 单任务的最新运行投影（无运行返回 nil）；维护
+// 成本查询失败返回 error（与列表路径一致），不把失败伪装成「没有维护」。
+func (s *BotService) lastScheduleRunResponseOf(botID, taskID string) (*BotScheduleRunResponse, error) {
+	run, err := s.runs.LatestByScheduleTask(botID, taskID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	maint, err := s.maintenanceCostsOf([]string{run.ID})
+	if err != nil {
+		return nil, err
+	}
+	out := botScheduleRunResponseOf(run, maint[run.ID])
+	return &out, nil
 }
 
 // ---------- 用户侧只读服务（唯一可写：enabled 开关） ----------
@@ -871,9 +900,36 @@ func (s *BotService) ListScheduleTasks(userID, botID string) ([]BotScheduleTaskR
 	if err != nil {
 		return nil, errs.ErrInternal
 	}
+	// 近 7 天成本整页一次取全（schedule run 自身 + 关联维护 + 连带主线）；
+	// 每任务最新 run 与其维护成本同样整页一次取全，不做逐任务 N+1。
+	taskIDs := make([]string, 0, len(rows))
+	for i := range rows {
+		taskIDs = append(taskIDs, rows[i].ID)
+	}
+	costs, err := s.ScheduleTaskCostsLast7d(userID, botID, taskIDs)
+	if err != nil {
+		return nil, errs.ErrInternal
+	}
+	latest, err := s.runs.LatestRunsByScheduleTasks(botID, taskIDs)
+	if err != nil {
+		return nil, errs.ErrInternal
+	}
+	lastRunIDs := make([]string, 0, len(latest))
+	for _, run := range latest {
+		lastRunIDs = append(lastRunIDs, run.ID)
+	}
+	maint, err := s.maintenanceCostsOf(lastRunIDs)
+	if err != nil {
+		return nil, errs.ErrInternal
+	}
 	out := make([]BotScheduleTaskResponse, 0, len(rows))
 	for i := range rows {
-		out = append(out, s.scheduleTaskResponseOf(&rows[i]))
+		var lastRun *BotScheduleRunResponse
+		if run, ok := latest[rows[i].ID]; ok {
+			resp := botScheduleRunResponseOf(run, maint[run.ID])
+			lastRun = &resp
+		}
+		out = append(out, s.scheduleTaskResponseOf(&rows[i], costs[rows[i].ID], lastRun))
 	}
 	return out, nil
 }
@@ -889,7 +945,15 @@ func (s *BotService) GetScheduleTask(userID, botID, taskID string) (*BotSchedule
 		}
 		return nil, errs.ErrInternal
 	}
-	resp := s.scheduleTaskResponseOf(task)
+	costs, err := s.ScheduleTaskCostsLast7d(userID, botID, []string{task.ID})
+	if err != nil {
+		return nil, errs.ErrInternal
+	}
+	lastRun, err := s.lastScheduleRunResponseOf(botID, task.ID)
+	if err != nil {
+		return nil, errs.ErrInternal
+	}
+	resp := s.scheduleTaskResponseOf(task, costs[task.ID], lastRun)
 	return &resp, nil
 }
 
@@ -913,9 +977,17 @@ func (s *BotService) ListScheduleTaskRuns(userID, botID, taskID string, limit, o
 	if err != nil {
 		return nil, errs.ErrInternal
 	}
+	runIDs := make([]string, 0, len(rows))
+	for i := range rows {
+		runIDs = append(runIDs, rows[i].ID)
+	}
+	display, err := s.maintenanceCostsOf(runIDs)
+	if err != nil {
+		return nil, errs.ErrInternal
+	}
 	out := make([]BotScheduleRunResponse, 0, len(rows))
 	for i := range rows {
-		out = append(out, botScheduleRunResponseOf(&rows[i]))
+		out = append(out, botScheduleRunResponseOf(&rows[i], display[rows[i].ID]))
 	}
 	return out, nil
 }
@@ -933,7 +1005,15 @@ func (s *BotService) SetScheduleTaskEnabled(userID, botID, taskID string, enable
 	if err != nil {
 		return nil, err
 	}
-	resp := s.scheduleTaskResponseOf(task)
+	costs, err := s.ScheduleTaskCostsLast7d(userID, botID, []string{task.ID})
+	if err != nil {
+		return nil, errs.ErrInternal
+	}
+	lastRun, err := s.lastScheduleRunResponseOf(botID, task.ID)
+	if err != nil {
+		return nil, errs.ErrInternal
+	}
+	resp := s.scheduleTaskResponseOf(task, costs[task.ID], lastRun)
 	return &resp, nil
 }
 
@@ -974,7 +1054,15 @@ func (s *BotService) ClearScheduleTaskState(userID, botID, taskID string) (*BotS
 		}
 		return nil, errs.ErrInternal
 	}
-	resp := s.scheduleTaskResponseOf(task)
+	costs, err := s.ScheduleTaskCostsLast7d(userID, botID, []string{task.ID})
+	if err != nil {
+		return nil, errs.ErrInternal
+	}
+	lastRun, err := s.lastScheduleRunResponseOf(botID, task.ID)
+	if err != nil {
+		return nil, errs.ErrInternal
+	}
+	resp := s.scheduleTaskResponseOf(task, costs[task.ID], lastRun)
 	return &resp, nil
 }
 
@@ -1030,7 +1118,10 @@ func (s *BotService) StopScheduleRun(userID, botID, taskID, runID string) (*BotR
 	if err != nil {
 		return nil, errs.ErrInternal
 	}
-	resp := botRunResponseOf(fresh)
+	resp, err := s.botRunResponseWithDisplay(fresh)
+	if err != nil {
+		return nil, errs.ErrInternal
+	}
 	return &resp, nil
 }
 
@@ -1511,9 +1602,17 @@ func (s *BotService) execScheduleRuns(call *model.BotToolCall, args *botSchedule
 	if err != nil {
 		return "", errs.ErrInternal
 	}
+	runIDs := make([]string, 0, len(rows))
+	for i := range rows {
+		runIDs = append(runIDs, rows[i].ID)
+	}
+	display, err := s.maintenanceCostsOf(runIDs)
+	if err != nil {
+		return "", errs.ErrInternal
+	}
 	items := make([]BotScheduleRunResponse, 0, len(rows))
 	for i := range rows {
-		items = append(items, botScheduleRunResponseOf(&rows[i]))
+		items = append(items, botScheduleRunResponseOf(&rows[i], display[rows[i].ID]))
 	}
 	return botMarshalResult(map[string]interface{}{
 		"items": items, "task_id": taskID, "limit": limit, "offset": offset,

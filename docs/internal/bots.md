@@ -25,6 +25,7 @@ service/bot_tools_project.go / bot_tools_issue.go / bot_tools_thread.go   工具
 service/bot_tool_runner.go assistant 回合提交、同步执行、后台 worker、取消与终态
 service/bot_authorization.go 确认决定、结构化「始终允许」、撤销
 service/bot_results.go     结果瘦身、截断、fs_result.read 续读、能力查询与帮助
+service/bot_usage.go       花费页只读聚合（INT-162：按天/按机器人/按定时任务与单次运行明细）
 service/bot_recovery.go    启动恢复
 handler/bot.go             REST（全部仅 JWT）
 handler/bot_stream.go      SSE 重放与订阅
@@ -404,6 +405,47 @@ next_offset}`；`fs_result.read` 按 Unicode 字符续读，不切断 UTF-8。
   「≈$x」、run 底栏、定时任务运行行）整项隐藏，不显示 $0；显式 0 价（免费
   模型）是已知价格，照常计 $0。cache_write（缓存写入费）上游极少提供，
   读取侧已被 cache_read 覆盖，不单独计。
+
+### 花费页（INT-162）
+
+只读聚合，不新增表、不回填：`service/bot_usage.go` + `repository/bot_usage.go`
+实时扫账本（`bot_runs` / `bot_model_requests` / `bot_maintenance_*`），扫描走
+新索引 `idx_bot_runs_bot_kind_created` 与 `idx_bot_maintenance_runs_bot_created`，
+窗口最长 30 个当地日，一切聚合先按 userID 取机器人集合。两个端点：`GET
+/api/bots/usage`（`range=today|7d|30d` 缺省 7d、`bot_id` 可选）与 `GET
+/api/bots/usage/runs/:runId`（单次 run 的完整账单）。
+
+口径（与 openapi.yaml 的 BotUsage* description 一致）：
+
+- **切日时区** = 查询用户的有效时区（INT-138 回退链）；`7d`/`30d` 是含今天
+  的最近 N 个当地日，`days` 每天一行（含无数据日）。UTC 16:30 在
+  Asia/Shanghai 计入次日。
+- **金额**全部来自目录单价估算（INT-139 的 cost_estimate 列），`cost_estimate
+  IS NULL` 即「未计价」（自定义 provider、目录无价、缺 usage、旧记录），
+  已计价金额字段在没有任何已计价成分时输出 null（缺失 ≠ 0）；只有
+  `days[].cost`/`days[].bots[].cost` 是必填数值，全未计价就是 0。
+- **三桶归属**：主线桶 = 非 schedule_event 触发的 main run；定时任务桶 =
+  schedule run + schedule_event 连带主线成本（经 trigger_key
+  `schedule_event:<runID>:<status>` 反查被引用 schedule run 的
+  `schedule_task_id`，近似，被引用 run 可在窗口外；解析不出留在主线桶）；
+  无父 run 的维护（如夜间整理）计入机器人维护项。三桶之和 = totals.cost。
+- **归日规则**：run 自身成本按 run.created_at 记日；关联维护成本按**维护
+  运行自己的 created_at** 记日、**桶跟父 run 走**（父在窗口外经
+  `ListRunsByIDs` 反查，schedule/schedule_event 父同样解析归属；父行不
+  存在才进维护桶）——同一笔费用不因查询范围切换换日换桶。
+- **显示成本 display_cost** = run 自身已计价成本 + 关联维护（parent_run_id）
+  已计价成本，不改写账本列。`BotRun` / `BotScheduleRun` 响应新增
+  `display_cost_estimate`，定时任务列表新增 `cost_last_7d`（与总览一致的
+  当地日 7 天窗：schedule 自身 + 关联维护 + 连带主线自身与其维护；列表
+  整页批量取维护合计，不做 N+1）。
+- **任务聚合**：按 schedule_task_id，LEFT JOIN 任务表拿名称/开关/cron；任务
+  已删除（运行记录不建外键）仍带花费，`deleted=true`、名称与表达式空串、
+  `enabled=false`。`estimated_monthly_cost` = 有已计价 run 的平均显示成本 ×
+  未来 30 个**任务当地日**的 cron 触发次数（`now.In(loc).AddDate(0,0,30)`；
+  停用、已删除、无平均或解析失败为 null）。
+- **未计价计数**：`unpriced_requests` 按 bot_model_requests +
+  bot_maintenance_requests 计；`bot_model_requests` 没有 usage_complete 列，
+  聚合沿用聊天页口径「落过 usage 计数列 = prompt_tokens IS NOT NULL」。
 
 ### 用户时区与当地语义（INT-138）
 

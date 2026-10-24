@@ -735,7 +735,10 @@ func (s *BotService) SendMessage(userID, botID string, req *SendMessageRequest) 
 		Context: fmt.Sprintf(`{"message_seq":%d,"client_message_id":%q}`, msg.Seq, clientMsgID),
 	})
 
-	runResp := s.currentRunResponse(botID)
+	runResp, err := s.currentRunResponse(botID)
+	if err != nil {
+		return nil, errs.ErrInternal
+	}
 	return &SendMessageResult{
 		Message: botMessageResponseOf(msg),
 		Run:     runResp,
@@ -743,14 +746,18 @@ func (s *BotService) SendMessage(userID, botID string, req *SendMessageRequest) 
 	}, nil
 }
 
-// currentRunResponse 读当前活动 run 概要；没有则为 nil。
-func (s *BotService) currentRunResponse(botID string) *BotRunResponse {
+// currentRunResponse 读当前活动 run 概要；没有则为 nil（维护成本查询失败
+// 返回 error，不伪装成「没有活动 run」）。
+func (s *BotService) currentRunResponse(botID string) (*BotRunResponse, error) {
 	run, err := s.runs.FindActiveByBot(botID)
 	if err != nil {
-		return nil
+		return nil, nil
 	}
-	resp := botRunResponseOf(run)
-	return &resp
+	resp, err := s.botRunResponseWithDisplay(run)
+	if err != nil {
+		return nil, err
+	}
+	return &resp, nil
 }
 
 // ListMessages 主线分页：before/after 是排他 seq 边界，页内正序；两边界都

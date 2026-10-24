@@ -359,12 +359,16 @@ func Setup(
 	}
 
 	// JWT 必须 — 内置机器人（INT-101）：管理、主线、运行、调用、确认授权与
-	// SSE 全部仅 JWT；test-connection 为静态段，优先于 :id 匹配。
+	// SSE 全部仅 JWT；test-connection 与 usage 为静态段，优先于 :id 匹配
+	//（与 notifications/unread-count 同型）。
 	bots := api.Group("/bots", middleware.RequireJWT(cfg, authService))
 	{
 		bots.GET("", botHandler.List)
 		bots.POST("", botHandler.Create)
 		bots.POST("/test-connection", botHandler.TestConnection)
+		// 花费页（INT-162，只读聚合）：range/bot_id 过滤与单次运行明细。
+		bots.GET("/usage", botHandler.GetUsage)
+		bots.GET("/usage/runs/:runId", botHandler.GetUsageRun)
 		bots.GET("/:id", botHandler.Get)
 		bots.PUT("/:id", botHandler.Update)
 		bots.DELETE("/:id", botHandler.Delete)

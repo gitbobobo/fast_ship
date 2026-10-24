@@ -146,6 +146,39 @@ func (h *BotHandler) SendMessage(c *gin.Context) {
 	response.Success(c, result)
 }
 
+// ---------- 花费页（INT-162，只读聚合） ----------
+
+// GetUsage 花费总览：range 只接受 today/7d/30d（缺省 7d）；bot_id 可选，
+// 须属于当前用户。
+func (h *BotHandler) GetUsage(c *gin.Context) {
+	rangeParam := c.Query("range")
+	switch rangeParam {
+	case "", "today", "7d", "30d":
+	default:
+		response.BadRequest(c, 40001, "请求参数无效: range 必须是 today、7d 或 30d")
+		return
+	}
+	if rangeParam == "" {
+		rangeParam = "7d"
+	}
+	result, err := h.bots.GetBotUsageOverview(middleware.GetUserID(c), rangeParam, c.Query("bot_id"))
+	if err != nil {
+		middleware.HandleAppError(c, err)
+		return
+	}
+	response.Success(c, result)
+}
+
+// GetUsageRun 单次运行花费明细：run 须属于当前用户的机器人，否则 404。
+func (h *BotHandler) GetUsageRun(c *gin.Context) {
+	result, err := h.bots.GetBotUsageRunDetail(middleware.GetUserID(c), c.Param("runId"))
+	if err != nil {
+		middleware.HandleAppError(c, err)
+		return
+	}
+	response.Success(c, result)
+}
+
 // ---------- run ----------
 
 func (h *BotHandler) ListRuns(c *gin.Context) {
