@@ -34,7 +34,7 @@ func TestBuildCodeCommentFormatFull(t *testing.T) {
 	running := fmtTestRun(model.ReviewRunRunning, "")
 	running.InstanceID = "codex"
 
-	meta := reviewCommentMeta{RepoFullName: "o/r", HeadSHA: "abcdef1234567890", RoundNumber: 3}
+	meta := reviewCommentMeta{RepoFullName: "o/r", HeadSHA: "abcdef1234567890", links: githubLinks("https://github.com"), RoundNumber: 3}
 	// 行内判定只认 x.go:42：y.go:7 与 z.go:208 都要加「未行内标注」。
 	body := buildCodeComment(meta, []model.ReviewRun{done, running},
 		map[string]map[int]bool{"server/x.go": {42: true}}, false, false)
@@ -107,7 +107,7 @@ func TestBuildCodeCommentNotInlined(t *testing.T) {
 		`{"level":"P2","file":"b.go","body":"y"}` +
 		`],"prior":[],"summary":"s","ui_changed":false,"ui_changed_since_last_visual":false}`
 	run := fmtTestRun(model.ReviewRunCompleted, result)
-	meta := reviewCommentMeta{RepoFullName: "o/r", HeadSHA: "abcdef1234567890", RoundNumber: 1}
+	meta := reviewCommentMeta{RepoFullName: "o/r", HeadSHA: "abcdef1234567890", links: githubLinks("https://github.com"), RoundNumber: 1}
 
 	// inlineLines 存在但缺该行 → 链接后加注；无行号 → file 后加注。
 	body := buildCodeComment(meta, []model.ReviewRun{run}, map[string]map[int]bool{"a.go": {9: true}}, false, false)
@@ -142,7 +142,7 @@ func TestBuildCodeCommentAllPass(t *testing.T) {
 	pass := `{"findings":[{"level":"Note","file":"n.go","body":"nit"}],"prior":[],"summary":"通过",` +
 		`"ui_changed":false,"ui_changed_since_last_visual":false}`
 	run := fmtTestRun(model.ReviewRunCompleted, pass)
-	body := buildCodeComment(reviewCommentMeta{RepoFullName: "o/r", HeadSHA: "abcdef1234567890", RoundNumber: 1},
+	body := buildCodeComment(reviewCommentMeta{RepoFullName: "o/r", HeadSHA: "abcdef1234567890", links: githubLinks("https://github.com"), RoundNumber: 1},
 		[]model.ReviewRun{run}, nil, false, false)
 	if !strings.Contains(body, "全部组合通过，未发现 P0–P2 问题。") {
 		t.Fatalf("missing all-pass verdict: %s", body)
@@ -200,7 +200,7 @@ func TestBuildCodeCommentEscaping(t *testing.T) {
 	run.Model = "m|odel\nsecond"
 	run.InstanceID = "in\"stance"
 	run.ModelOptionsJSON = `[{"id":"tag","value":"<b>&amp;"},{"id":"off","value":null}]`
-	meta := reviewCommentMeta{RepoFullName: "o/r", HeadSHA: "abcdef1234567890", RoundNumber: 1}
+	meta := reviewCommentMeta{RepoFullName: "o/r", HeadSHA: "abcdef1234567890", links: githubLinks("https://github.com"), RoundNumber: 1}
 	body := buildCodeComment(meta, []model.ReviewRun{run}, map[string]map[int]bool{}, false, false)
 
 	// 路径分段编码：括号/空格/# 都不能裸出现在 URL 里，行锚点仍在。

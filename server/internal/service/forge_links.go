@@ -50,18 +50,11 @@ func githubLinks(base string) forgeLinks {
 }
 
 // forgeBase 集成基址去尾部 /（保存时已归一，这里防御存量 NULL 等历史形态）。
-// 零值与 kind=github 的空基址回落 https://github.com（内置口径）；forgejo 的
-// 基址缺失不给 github 兜底——拼出来的是 github.com 上的假链接，调用方按
-// 空串处理。
+// 基址缺失一律空串、调用方按「链接不可渲染」处理——零值回落 github.com 会
+// 在 GHE 部署下把链接静默指到公共主机，正是 forgejo 侧禁止的错误；生产路径
+// 的 github 基址由 githubLinks(ghWebBase) 显式传入。
 func (l forgeLinks) forgeBase() string {
-	base := strings.TrimRight(strings.TrimSpace(l.baseURL), "/")
-	if base != "" {
-		return base
-	}
-	if l.kind == model.ForgeIntegrationKindForgejo {
-		return ""
-	}
-	return "https://github.com"
+	return strings.TrimRight(strings.TrimSpace(l.baseURL), "/")
 }
 
 // PullURL 一个 PR 的页面链接：github 为 {base}/{o}/{r}/pull/{n}，forgejo 为

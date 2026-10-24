@@ -44,7 +44,11 @@ user_github_tokens 同一模式）。
   的仓库 URL 才匹配得上）。无 scheme 时首段含 `.` 或 `:` 视为 host，否则
   视为 owner。非 github.com 主机必须匹配某条已配置 forgejo 集成（双方都
   归一成「小写 host:端口」后比较），匹配不到 → 40001「主机未匹配任何已
-  配置集成」，不再像旧实现那样把 host 静默解析成 owner。尾部归一先剥尾
+  配置集成」，不再像旧实现那样把 host 静默解析成 owner。**GHE 部署下显式
+  `github.com` 地址拒收**（`explicit` 位区分裸 `o/r` 与 `github.com/o/r`）：
+  该地址指向本部署 App 够不到的公共实例，绑上去 code_repo_url/审查 API
+  全指错主机——裸 `o/r` 与本部署 GHE 主机地址才归内置（「本部署的
+  GitHub」）。尾部归一先剥尾
   斜杠再剥 `.git` 后缀（「…/r.git/」剥得干净，repo 不带后缀）；owner/repo
   之外的第三段非空直接 40001（`/pulls/1` 等页面路径与 `a/b/c` 裸形态都不
   收——静默丢弃会拼出用户没指的仓库）。匹配走 `FindByHostKey` 点查（
@@ -261,11 +265,11 @@ Key 在 RequireJWT 已被 40301 拒）。
 连接检测：解密 token 后调 `GET {api_base_url}/version` 与 `GET {api_base_url}/user`，
 返回 `{status, version, username, detail}`。status 沿用 `unchecked / ok /
 invalid / failed` 口径（unchecked 不会由该端点产生）：ok=两个请求都成功；
-invalid=401（PAT 被拒）；failed=网络错误或其他状态码。`/user` 的 403 是例外：
-Forgejo 把 `read:user` 划为独立 scope，仓库只读 PAT 在这里拿 403 是「已认证但
-缺权限」而非「被拒」，按 ok 返回、`username` 留空、detail 注明缺 scope——最小
-权限 token 不该被误报 invalid。**结论只随响应返回、
-不落库**（表里没有检测三列——没有后台轮询去消费它，落库只会制造过期状态）。
+invalid=401（PAT 被拒）；failed=网络错误或其他状态码。`/user` 与 `/version`
+的 403 是例外：403 是「已认证但缺对应 scope」而非「被拒」（Forgejo 把
+read:user 等划为独立 scope，实例也可能对 /version 做 scope 拦截），对应字段
+留空、detail 汇总缺的 scope——最小权限 token 不该被误报 invalid。**结论只随
+响应返回、不落库**（表里没有检测三列——没有后台轮询去消费它，落库只会制造过期状态）。
 检测走的是同一个 forges client，私网/自签 CA 的实例因此天然可测。
 
 ## 本期不做（后续任务）

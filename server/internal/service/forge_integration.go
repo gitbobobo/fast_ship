@@ -582,6 +582,7 @@ func probeForge(ctx context.Context, client *http.Client, apiBaseURL, token stri
 
 	status, body, err := forgeAPIGet(ctx, client, apiBase+"/version", token)
 	version := ""
+	var scopeNotes []string
 	switch {
 	case err != nil:
 		return ForgeProbe{Status: model.DeploymentDetectionFailed, Detail: "网络错误，未能连接 Forgejo"}
@@ -592,9 +593,13 @@ func probeForge(ctx context.Context, client *http.Client, apiBaseURL, token stri
 				Detail: "version 响应不是预期的 Forgejo API 格式，请确认实例地址与 API 版本"}
 		}
 		version = truncateProbeField(strings.TrimSpace(parsed.Version))
-	case status == http.StatusUnauthorized || status == http.StatusForbidden:
+	case status == http.StatusUnauthorized:
 		return ForgeProbe{Status: model.DeploymentDetectionInvalid,
 			Detail: fmt.Sprintf("token 被实例拒绝（HTTP %d），请检查机器人 PAT", status)}
+	case status == http.StatusForbidden:
+		// 已认证但实例把 /version 也按 scope 拦：与 /user 同口径——403
+		// 是缺权限不是 token 被拒，仓库只读 PAT 不该误报 invalid。
+		scopeNotes = append(scopeNotes, "实例版本不可读")
 	default:
 		return ForgeProbe{Status: model.DeploymentDetectionFailed,
 			Detail: fmt.Sprintf("实例返回 HTTP %d（GET version）", status)}
@@ -618,18 +623,21 @@ func probeForge(ctx context.Context, client *http.Client, apiBaseURL, token stri
 	case status == http.StatusForbidden:
 		// 已认证但缺 read:user scope——仓库只读 PAT 在 /user 拿 403，
 		// token 本身有效，不误报 invalid；401 才是真被拒。
-		return ForgeProbe{Status: model.DeploymentDetectionOK, Version: version,
-			Detail: "token 缺少 read:user 权限，账号信息不可读（仅仓库场景可用）"}
+		scopeNotes = append(scopeNotes, "账号信息不可读（缺 read:user 权限）")
 	default:
 		return ForgeProbe{Status: model.DeploymentDetectionFailed,
 			Detail: fmt.Sprintf("实例返回 HTTP %d（GET user）", status)}
 	}
 
+	detail := ""
+	if len(scopeNotes) > 0 {
+		detail = "token 权限受限：" + strings.Join(scopeNotes, "；") + "（仅仓库场景可用）"
+	}
 	return ForgeProbe{
 		Status:   model.DeploymentDetectionOK,
 		Version:  version,
 		Username: username,
-		Detail:   "",
+		Detail:   detail,
 	}
 }
 

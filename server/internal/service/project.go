@@ -481,13 +481,15 @@ const repoHostGitHub = "github.com"
 //   - host/o/r、https://host/o/r、https://host:port/o/r（自建 Forgejo 等）。
 //
 // host 判定：无 scheme 时首段含 `.` 或 `:` 视为 host，否则视为 owner；带
-// scheme 时首段一律是 host。尾部归一先剥尾斜杠再剥 `.git` 后缀（「…/r.git/」
-// 剥得干净）；owner/repo 之外的第三段非空直接拒绝（/pulls/1 等页面路径与
-// 多余层级不再静默丢弃）。
-func parseRepositoryURL(raw string) (host, owner, repo string, err error) {
+// scheme 时首段一律是 host。explicit 标记输入是否显式写了主机段（裸
+// owner/repo 为 false）——「github.com/o/r」与「o/r」归一后同为 github.com，
+// 但 GHE 部署对两者的处理不同（见 parseRepoBinding）。尾部归一先剥尾斜杠再
+// 剥 `.git` 后缀（「…/r.git/」剥得干净）；owner/repo 之外的第三段非空直接
+// 拒绝（/pulls/1 等页面路径与多余层级不再静默丢弃）。
+func parseRepositoryURL(raw string) (host, owner, repo string, explicit bool, err error) {
 	s := strings.TrimSpace(raw)
 	if s == "" {
-		return "", "", "", errors.New("仓库链接不能为空")
+		return "", "", "", false, errors.New("仓库链接不能为空")
 	}
 
 	scheme := ""
@@ -498,7 +500,7 @@ func parseRepositoryURL(raw string) (host, owner, repo string, err error) {
 	// 只认 http(s)：ssh://、ftp:// 这类非 HTTP 协议若静默当 https 归一，会
 	// 命中 https 集成的 host_key 把仓库绑到与输入协议不符的集成上。
 	if scheme != "" && scheme != "http" && scheme != "https" {
-		return "", "", "", errors.New("仓库链接协议无效，应为 http 或 https")
+		return "", "", "", false, errors.New("仓库链接协议无效，应为 http 或 https")
 	}
 
 	parts := strings.SplitN(s, "/", 3)
@@ -509,6 +511,7 @@ func parseRepositoryURL(raw string) (host, owner, repo string, err error) {
 	if scheme == "" && !strings.ContainsAny(first, ".:") {
 		host = repoHostGitHub
 	} else {
+		explicit = true
 		host = strings.ToLower(first)
 		if len(first) < len(s) {
 			s = s[len(first)+1:] // 连 host 后的 "/" 一起剥掉
@@ -538,27 +541,27 @@ func parseRepositoryURL(raw string) (host, owner, repo string, err error) {
 
 	parts = strings.SplitN(s, "/", 3)
 	if len(parts) < 2 {
-		return host, "", "", errors.New("仓库链接格式无效，应为 owner/repo 或 https://github.com/owner/repo")
+		return host, "", "", explicit, errors.New("仓库链接格式无效，应为 owner/repo 或 https://github.com/owner/repo")
 	}
 	// 第三段非空 = 链接不是仓库根（/pulls/1、/issues 等页面路径或多余层级，
 	// 裸形态 a/b/c 同口径）：拒绝而不是静默丢弃——丢掉后拼出的 owner/repo
 	// 不是用户指的仓库。
 	if len(parts) > 2 && strings.TrimSpace(parts[2]) != "" {
-		return host, "", "", errors.New("仓库链接包含多余路径段，请填写仓库根地址（owner/repo 或 https://host/owner/repo）")
+		return host, "", "", explicit, errors.New("仓库链接包含多余路径段，请填写仓库根地址（owner/repo 或 https://host/owner/repo）")
 	}
 
 	owner = strings.TrimSpace(parts[0])
 	repo = strings.TrimSpace(parts[1])
 
 	if owner == "" || repo == "" {
-		return host, "", "", errors.New("仓库链接格式无效，owner 和 repo 不能为空")
+		return host, "", "", explicit, errors.New("仓库链接格式无效，owner 和 repo 不能为空")
 	}
 
 	if !repoNameRegex.MatchString(owner) || !repoNameRegex.MatchString(repo) {
-		return host, "", "", errors.New("仓库链接包含非法字符")
+		return host, "", "", explicit, errors.New("仓库链接包含非法字符")
 	}
 
-	return host, owner, repo, nil
+	return host, owner, repo, explicit, nil
 }
 
 // repoHostKey 仓库 URL 主机的归一键：小写 host + 端口；无端口按 https 缺省
@@ -591,11 +594,20 @@ func forgeBaseHostKey(baseURL string) string {
 // 主机一律拒绝——公开仓的 issue 镜像与发文本期仍是 GitHub only，命中
 // forgejo 集成的报错会点明这一层。
 func (s *ProjectService) parseRepoBinding(raw string, forPublic bool) (owner, repo, integrationID, hostKey string, appErr *errs.AppError) {
-	host, owner, repo, err := parseRepositoryURL(raw)
+	host, owner, repo, explicit, err := parseRepositoryURL(raw)
 	if err != nil {
 		return "", "", "", "", errs.New(errs.ErrInvalidParams.Code, errs.ErrInvalidParams.Message+": "+err.Error())
 	}
 	if host == repoHostGitHub {
+		// 裸 owner/repo = 「本部署的 GitHub」，归内置无歧义；显式写
+		// github.com 的地址在 GHE 部署下是本部署 App 够不到的公共实例
+		// ——绑上去 code_repo_url/审查 API 全指向错主机。拒收并点明
+		// 本部署实例，比按内置静默收下诚实。
+		if explicit && forges.HostKey(s.ghWebBase) != repoHostKey(repoHostGitHub) {
+			ghHost := strings.TrimPrefix(s.ghWebBase, "https://")
+			return "", "", "", "", errs.New(errs.ErrInvalidParams.Code,
+				errs.ErrInvalidParams.Message+": 该地址指向公共 github.com，本部署 GitHub 实例为 "+ghHost+"；请改用 "+ghHost+"/owner/repo 或 owner/repo")
+		}
 		return owner, repo, "", "", nil
 	}
 	key := repoHostKey(host)

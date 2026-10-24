@@ -18,8 +18,8 @@ func TestForgeLinksPullURL(t *testing.T) {
 		links forgeLinks
 		want  string
 	}{
-		// 零值 = 内置 github-default 口径（与旧拼接逐字一致）。
-		{"zero value falls back to github", forgeLinks{}, "https://github.com/o/r/pull/7"},
+		// 零值无基址：链接不可渲染（回落 github.com 会在 GHE 部署指错主机）。
+		{"zero value has no base", forgeLinks{}, ""},
 		{"builtin github", githubLinks("https://github.com"), "https://github.com/o/r/pull/7"},
 		{"forgejo", forgeLinks{kind: model.ForgeIntegrationKindForgejo, baseURL: "https://git.example.com"}, "https://git.example.com/o/r/pulls/7"},
 		{"forgejo base trailing slash", forgeLinks{kind: model.ForgeIntegrationKindForgejo, baseURL: "https://git.example.com/"}, "https://git.example.com/o/r/pulls/7"},
@@ -41,9 +41,8 @@ func TestForgeLinksBlobLineURL(t *testing.T) {
 		line  int
 		want  string
 	}{
-		// 与旧 reviewBlobURL 输出逐字一致。
-		{"github verbatim", forgeLinks{}, "internal/service/project.go", 12,
-			"https://github.com/o/r/blob/abc123/internal/service/project.go#L12"},
+		// 零值无基址：链接不可渲染（与 PullURL 同口径）。
+		{"zero value has no base", forgeLinks{}, "internal/service/project.go", 12, ""},
 		{"builtin github", githubLinks("https://github.com"), "main.go", 1,
 			"https://github.com/o/r/blob/abc123/main.go#L1"},
 		{"path segments escaped (spaces/parens/hash)", githubLinks("https://github.com"), "docs/a b (v2)/file#1.go", 3,

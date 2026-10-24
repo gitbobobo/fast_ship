@@ -248,7 +248,7 @@ func TestParseRepositoryURL(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotHost, gotOwner, gotRepo, err := parseRepositoryURL(tt.input)
+			gotHost, gotOwner, gotRepo, _, err := parseRepositoryURL(tt.input)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("expected error containing %q, got nil", tt.errContains)
@@ -303,6 +303,25 @@ func TestRepoHostKeys(t *testing.T) {
 				t.Fatalf("got %q, want %q", tc.got, tc.want)
 			}
 		})
+	}
+}
+
+// GHE 部署下显式 github.com 地址指向本部署 App 够不到的公共实例：拒收并
+// 点明实例主机；裸 owner/repo 与实例主机地址才归内置（INT-166 R9）。
+func TestParseRepoBindingGHERejectsPublicGitHubURL(t *testing.T) {
+	svc := setupTestServices(t)
+	svc.cfg.GitHubApp.APIBaseURL = "https://ghe.corp.example/api/v3"
+	ps := newTestProjectService(svc)
+
+	_, _, _, _, appErr := ps.parseRepoBinding("https://github.com/o/r", false)
+	if appErr == nil || !strings.Contains(appErr.Error(), "ghe.corp.example") {
+		t.Fatalf("explicit github.com under GHE: err = %v", appErr)
+	}
+	for _, in := range []string{"o/r", "ghe.corp.example/o/r", "https://ghe.corp.example/o/r"} {
+		owner, repo, id, _, appErr := ps.parseRepoBinding(in, false)
+		if appErr != nil || id != "" || owner != "o" || repo != "r" {
+			t.Fatalf("%q → owner=%q repo=%q id=%q err=%v", in, owner, repo, id, appErr)
+		}
 	}
 }
 
