@@ -15,10 +15,10 @@ describe("normalizeCodeRepoRef", () => {
     }
   });
 
-  it("非 github 主机归一小写 host/owner/repo；显式端口保留在 host 段", () => {
-    // 端口缺省补齐（443/80）是后端 parseRepositoryURL 的主机键口径，前端
-    // 归一只做小写——两侧输入走同一函数，比较不受影响。
-    const same = "git.example.com/godbobo/fast_ship";
+  it("非 github 主机归一小写 host:port/owner/repo；显式端口保留", () => {
+    // 端口缺省补齐（443/80）与后端 parseRepositoryURL 的主机键同口径：
+    // 无 scheme 与 https 都归 :443。
+    const same = "git.example.com:443/godbobo/fast_ship";
     for (const input of [
       "git.example.com/godbobo/fast_ship",
       "https://Git.Example.com/godbobo/fast_ship/",
@@ -29,6 +29,25 @@ describe("normalizeCodeRepoRef", () => {
     expect(
       normalizeCodeRepoRef("https://git.example.com:8443/godbobo/fast_ship.git/"),
     ).toBe("git.example.com:8443/godbobo/fast_ship");
+  });
+
+  it("scheme 决定默认端口：http/https 同主机归一不同（集成切换不被判未改动）", () => {
+    expect(normalizeCodeRepoRef("http://git.example.com/a/b")).toBe(
+      "git.example.com:80/a/b",
+    );
+    expect(normalizeCodeRepoRef("http://git.example.com/a/b")).not.toBe(
+      normalizeCodeRepoRef("https://git.example.com/a/b"),
+    );
+    // github.com 任意 scheme/默认端口归回裸主机名（内置 github-default）。
+    expect(normalizeCodeRepoRef("http://github.com/a/b")).toBe(
+      "github.com/a/b",
+    );
+    expect(normalizeCodeRepoRef("https://github.com:443/a/b")).toBe(
+      "github.com/a/b",
+    );
+    expect(normalizeCodeRepoRef("https://github.com:8443/a/b")).toBe(
+      "github.com:8443/a/b",
+    );
   });
 
   it("剥除顺序先尾斜杠后 .git：「…/r.git/」剥得干净（对齐后端同序）", () => {

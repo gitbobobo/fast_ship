@@ -69,26 +69,42 @@ export async function formatSyncError(
 
 
 // normalizeCodeRepoRef 把代码仓引用归一成「host[:端口]/owner/repo」小写形态
-// 供比较：scheme 有无与大小写、尾部斜杠与 .git 后缀不算改动（剥除顺序与
-// 后端 parseRepositoryURL 一致：先一个尾斜杠再 .git，.git 大小写敏感）；
-// 裸 owner/repo 输入按 github.com 处理。解析不出 owner/repo 时返回空串，
-// 调用方按「有输入待服务端校验」处理，不能当成未改动。owner/repo 之外的
-// 多余路径段（后端 40001 拒绝的输入）直接返回原始输入——归一结果必然与
-// 任何现值不等，原样发后端由 40001 表态，不静默丢弃第三段。
+// 供比较：scheme 大小写、尾部斜杠与 .git 后缀不算改动（剥除顺序与后端
+// parseRepositoryURL 一致：先一个尾斜杠再 .git，.git 大小写敏感）；裸
+// owner/repo 输入按 github.com 处理。host 无显式端口时按 scheme 补默认端口
+// （http→80，其余→443，与后端主机键同口径）——http/https 同主机的两条集成
+// 之间切换会归一出不同引用，表单不会误判「未改动」而漏发新地址；github.com
+// 任意 scheme/默认端口归回裸主机名（内置 github-default）。解析不出
+// owner/repo 时返回空串，调用方按「有输入待服务端校验」处理，不能当成未
+// 改动。owner/repo 之外的多余路径段（后端 40001 拒绝的输入）直接返回原始
+// 输入——归一结果必然与任何现值不等，原样发后端由 40001 表态，不静默丢弃
+// 第三段。
 export function normalizeCodeRepoRef(raw: string): string {
   let rest = raw.trim();
   if (!rest) return "";
+  let scheme = "";
   const protoIdx = rest.indexOf("://");
-  if (protoIdx !== -1) rest = rest.slice(protoIdx + 3);
+  if (protoIdx !== -1) {
+    scheme = rest.slice(0, protoIdx).toLowerCase();
+    rest = rest.slice(protoIdx + 3);
+  }
   const slash = rest.indexOf("/");
   const first = slash === -1 ? rest : rest.slice(0, slash);
   let tail = slash === -1 ? "" : rest.slice(slash);
   let host: string;
-  if (first.includes(".") || first.includes(":")) {
-    host = first.toLowerCase();
-  } else {
+  if (scheme === "" && !first.includes(".") && !first.includes(":")) {
     host = "github.com";
     tail = "/" + first + tail; // 首段是 owner，不是 host
+  } else {
+    // 与后端 SplitHostPort 同口径的端口判定：单个冒号（host:port）或
+    // 方括号 IPv6 带端口（[::1]:8443）算显式端口，其余按 scheme 补默认。
+    const colonCount = (first.match(/:/g) || []).length;
+    const hasPort = colonCount === 1 || /^\[.*\]:[^:]+$/.test(first);
+    host =
+      first.toLowerCase() + (hasPort ? "" : scheme === "http" ? ":80" : ":443");
+    if (host === "github.com:80" || host === "github.com:443") {
+      host = "github.com";
+    }
   }
   // 与后端同序：先剥一个尾斜杠再剥 .git 后缀（大小写敏感，不加 i 标志）。
   const path = tail.slice(1).replace(/\/$/, "").replace(/\.git$/, "");
