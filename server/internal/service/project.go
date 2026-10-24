@@ -602,11 +602,14 @@ func (s *ProjectService) parseRepoBinding(raw string, forPublic bool) (owner, re
 		return "", "", "", "", errs.New(errs.ErrInvalidParams.Code, errs.ErrInvalidParams.Message+": "+err.Error())
 	}
 	if host == repoHostGitHub {
-		// 裸 owner/repo = 「本部署的 GitHub」，归内置无歧义；显式写
+		// 裸 owner/repo = 「本部署的 GitHub」，归内置无歧义；代码仓显式写
 		// github.com 的地址在 GHE 部署下是本部署 App 够不到的公共实例
 		// ——绑上去 code_repo_url/审查 API 全指向错主机。拒收并点明
-		// 本部署实例，比按内置静默收下诚实。
-		if explicit && forges.HostKey(s.ghWebBase) != repoHostKey(repoHostGitHub) {
+		// 本部署实例，比按内置静默收下诚实。公开仓不拒：github_owner/
+		// github_repo 是存量数据字段（github.com 语义=公共 GitHub，基线
+		// 一直允许，同步可达性本是部署自己的事），且前端回填恒为
+		// github.com 形态，拒掉会让 GHE 部署下改个名字都报 40001。
+		if explicit && !forPublic && forges.HostKey(s.ghWebBase) != repoHostKey(repoHostGitHub) {
 			ghHost := strings.TrimPrefix(s.ghWebBase, "https://")
 			return "", "", "", "", errs.New(errs.ErrInvalidParams.Code,
 				errs.ErrInvalidParams.Message+": 该地址指向公共 github.com，本部署 GitHub 实例为 "+ghHost+"；请改用 "+ghHost+"/owner/repo 或 owner/repo")

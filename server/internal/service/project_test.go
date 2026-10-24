@@ -335,6 +335,12 @@ func TestParseRepoBindingGHERejectsPublicGitHubURL(t *testing.T) {
 	if appErr == nil || !strings.Contains(appErr.Error(), "ghe.corp.example") {
 		t.Fatalf("explicit github.com under GHE: err = %v", appErr)
 	}
+	// 公开仓是存量数据字段：显式 github.com 在 GHE 下放行（基线语义，
+	// 前端回填恒为 github.com 形态，拒掉会把普通编辑挡住）。
+	owner, repo, id, _, appErr := ps.parseRepoBinding("https://github.com/o/r", true)
+	if appErr != nil || id != "" || owner != "o" || repo != "r" {
+		t.Fatalf("public github.com under GHE → owner=%q repo=%q id=%q err=%v", owner, repo, id, appErr)
+	}
 	for _, in := range []string{"o/r", "ghe.corp.example/o/r", "https://ghe.corp.example/o/r"} {
 		owner, repo, id, _, appErr := ps.parseRepoBinding(in, false)
 		if appErr != nil || id != "" || owner != "o" || repo != "r" {

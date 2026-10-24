@@ -460,6 +460,12 @@ func isBlockedPrivateMode(ip net.IP) bool {
 // 一律精确拒绝。
 var awsIMDSv6Endpoint = net.ParseIP("fd00:ec2::254")
 
+// alibabaIMDSEndpoint 阿里云 ECS/ENS 实例元数据端点（官方文档地址）。它落在
+// CGNAT 100.64.0.0/10 里，私网放行口径会把解析到它的主机当内网 Forgejo 放
+// 过去——PAT 探测请求直接送进元数据服务，与 AWS 端点同级的偷凭证通道，
+// 两口径一律精确拒绝。
+var alibabaIMDSEndpoint = net.ParseIP("100.100.100.200")
+
 // blockedByPolicy 地址段判定核心。strict=true 是公网口径（一切私网/保留段
 // 拒绝），false 是私网放行口径（只拒绝放了也危险的段）。
 func blockedByPolicy(ip net.IP, strict bool) bool {
@@ -473,6 +479,10 @@ func blockedByPolicy(ip net.IP, strict bool) bool {
 		return true
 	}
 	if ip4 := ip.To4(); ip4 != nil {
+		// 阿里云元数据端点：CGNAT 段里的例外，两个口径都精确拒绝。
+		if ip.Equal(alibabaIMDSEndpoint) {
+			return true
+		}
 		// RFC1918（IsPrivate 对 IPv4 即私网三段）与 CGNAT 只在公网口径拒绝；
 		// 私网放行恰恰是放行它们。169.254.0.0/16 已由 IsLinkLocalUnicast 覆盖。
 		if strict && (ip.IsPrivate() || isCGNAT(ip4)) {

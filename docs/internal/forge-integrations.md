@@ -44,11 +44,13 @@ user_github_tokens 同一模式）。
   的仓库 URL 才匹配得上）。无 scheme 时首段含 `.` 或 `:` 视为 host，否则
   视为 owner。非 github.com 主机必须匹配某条已配置 forgejo 集成（双方都
   归一成「小写 host:端口」后比较），匹配不到 → 40001「主机未匹配任何已
-  配置集成」，不再像旧实现那样把 host 静默解析成 owner。**GHE 部署下显式
-  `github.com` 地址拒收**（`explicit` 位区分裸 `o/r` 与 `github.com/o/r`）：
+  配置集成」，不再像旧实现那样把 host 静默解析成 owner。**GHE 部署下代码仓
+  显式 `github.com` 地址拒收**（`explicit` 位区分裸 `o/r` 与 `github.com/o/r`）：
   该地址指向本部署 App 够不到的公共实例，绑上去 code_repo_url/审查 API
   全指错主机——裸 `o/r` 与本部署 GHE 主机地址才归内置（「本部署的
-  GitHub」）。尾部归一先剥尾
+  GitHub」）。**公开仓不拒**：github_owner/github_repo 是存量数据字段
+  （github.com 语义=公共 GitHub，基线一直允许），前端回填恒为 github.com
+  形态，拒掉会把普通编辑挡住。尾部归一先剥尾
   斜杠再剥 `.git` 后缀（「…/r.git/」剥得干净，repo 不带后缀）；owner/repo
   之外的第三段非空直接 40001（`/pulls/1` 等页面路径与 `a/b/c` 裸形态都不
   收——静默丢弃会拼出用户没指的仓库）。匹配走 `FindByHostKey` 点查（
@@ -218,7 +220,9 @@ Forgejo 基址是管理员可填的任意 URL，必须把「内网探测」挡�
   `net.Dialer.Control`**（DNS 解析后、建连前）：私网口径只放宽 IP 段表，回环、
   链路本地（含元数据 169.254.169.254）、多播、未指定与保留段照拒，保存后 DNS
   改指、rebinding 后的第二次解析照样拦。私网口径放行的段：RFC1918、ULA
-  fc00::/7、CGNAT 100.64.0.0/10 与公网。
+  fc00::/7、CGNAT 100.64.0.0/10 与公网。**放行段里的云元数据端点是精确例外、
+  两口径恒拒**：AWS IMDS `fd00:ec2::254`（ULA 段内）与阿里云 `100.100.100.200`
+  （CGNAT 段内）——否则 PAT 探测直接送进元数据服务。
 - **重定向规则**：目标 host:port 必须与首个请求一致（跨主机拒绝）；未开私网
   放行时每一跳都必须 https；**任何配置下 https→http 的降级跳转都拒绝**
   （`ErrSchemeDowngrade`——明文 http 只该来自管理员配置的基址，不该被响应
