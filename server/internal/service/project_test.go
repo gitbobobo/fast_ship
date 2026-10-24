@@ -173,6 +173,24 @@ func TestParseRepositoryURL(t *testing.T) {
 			wantErr:   false,
 		},
 		{
+			// github.com 带 DNS 根点尾缀 + 非默认口径：与 github.com 同主机，
+			// 归内置 github（与前端归一、repoHostKey 同口径）。
+			name:      "github.com trailing dot http",
+			input:     "http://github.com./godbobo/fast_ship",
+			wantHost:  "github.com",
+			wantOwner: "godbobo",
+			wantRepo:  "fast_ship",
+			wantErr:   false,
+		},
+		{
+			name:      "github.com trailing dot https",
+			input:     "https://github.com./godbobo/fast_ship",
+			wantHost:  "github.com",
+			wantOwner: "godbobo",
+			wantRepo:  "fast_ship",
+			wantErr:   false,
+		},
+		{
 			// 非 HTTP(S) scheme 拒绝（审查修复）：ssh:// 若静默当 https 归一，
 			// 会命中 https 集成的 host_key 把仓库绑到协议不符的集成。
 			name:        "ssh scheme rejected",

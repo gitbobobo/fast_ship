@@ -529,7 +529,10 @@ func parseRepositoryURL(raw string) (host, owner, repo string, explicit bool, er
 				host += ":443"
 			}
 		}
-		if host == repoHostGitHub+":443" || host == repoHostGitHub+":80" {
+		// github.com 判定走归一后的 repoHostKey（剥尾点、数字端口归一）：
+		// 「github.com.:80」「github.com.:443」这类写法与 github.com 同主机，
+		// 字面比较漏判会落到集成匹配报「主机未匹配」，前后端口径还分叉。
+		if key := repoHostKey(host); key == repoHostKey(repoHostGitHub) || key == repoHostGitHub+":80" {
 			host = repoHostGitHub
 		}
 	}

@@ -651,17 +651,18 @@ func truncateProbeField(s string) string {
 	return s
 }
 
-// apiPathPrefix 取 API 基址的路径段作凭证作用域前缀（/api/v1 惯例）；解析
-// 失败或根路径返回空串——没有可界定的前缀时不启用路径范围判定（同主机
-// 拦截与拨号校验仍生效）。
+// apiPathPrefix 取 API 基址的路径段作凭证作用域前缀（/api/v1 惯例）。根
+// 路径（显式把 api_base_url 钉在站点根）返回 "/"——整个主机即 API 作用域，
+// 同主机跳转一律保留 Authorization；与「解析失败返回空串、不启用路径判定」
+// 区分开，语义上不把「钉死在根」误读成「没配作用域」。
 func apiPathPrefix(apiBase string) string {
 	u, err := url.Parse(apiBase)
 	if err != nil || u == nil {
 		return ""
 	}
 	p := strings.TrimRight(u.Path, "/")
-	if p == "" || p == "/" {
-		return ""
+	if p == "" {
+		return "/"
 	}
 	return p
 }
