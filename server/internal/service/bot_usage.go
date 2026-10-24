@@ -371,7 +371,9 @@ func (s *BotService) GetBotUsageOverview(userID, rangeParam, botID string) (*api
 		}
 		day := dayOf(row.CreatedAt)
 		if day != nil {
-			if agg.Total > 0 {
+			// hasReq 门槛与 botCost 累加同口径：run 级有价但请求行缺失的存量
+			// 数据也要进当日 bots，否则堆叠柱总高含它而分层里没这一层。
+			if agg.Total > 0 || row.CostEstimate != nil {
 				day.hasReq[row.BotID] = true
 			}
 			if row.CostEstimate != nil {

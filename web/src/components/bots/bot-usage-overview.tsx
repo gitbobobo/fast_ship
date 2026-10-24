@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router";
 import { TriangleAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -164,13 +164,18 @@ export function BotUsageOverviewPanel({
     [data],
   );
 
-  // 定位参数指向的任务行：渲染完成后滚进视野并短暂高亮。
+  // 定位参数指向的任务行：渲染完成后滚进视野并短暂高亮。usage 会被多处
+  // 失效重取（run 终态、任务开关、窗口聚焦），同一 focusTaskId 只滚一次，
+  // 不把已滚离的用户反复拽回；行还没渲染出来时不记账，等下次数据到位再试。
+  const lastFocusedRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!focusTaskId) return;
+    if (!focusTaskId || lastFocusedRef.current === focusTaskId) return;
     const el = document.querySelector(
       `[data-usage-task="${CSS.escape(focusTaskId)}"]`,
     );
-    el?.scrollIntoView({ block: "center" });
+    if (!el) return;
+    el.scrollIntoView({ block: "center" });
+    lastFocusedRef.current = focusTaskId;
   }, [focusTaskId, data]);
 
   const share = data ? unpricedShare(data.totals) : null;
