@@ -136,8 +136,11 @@ func NewClient(cfg Config) (*http.Client, error) {
 		timeout = DefaultTimeout
 	}
 	return &http.Client{
-		Timeout:   timeout,
-		Transport: transport,
+		Timeout: timeout,
+		// 凭证作用域放在 transport 层而不是 CheckRedirect：Go 的重定向
+		// header 是从初始请求复制的，在 CheckRedirect 里删只影响那一跳，
+		// 再下一跳又从原请求复制回来——必须在每个请求实际发出前判定。
+		Transport: &authScopeTransport{base: transport, prefix: cfg.AuthPathPrefix},
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= 5 {
 				return errors.New("重定向次数过多")
@@ -158,16 +161,26 @@ func NewClient(cfg Config) (*http.Client, error) {
 				effectivePort(req.URL) != effectivePort(via[0].URL) {
 				return ErrCrossHostRedirect
 			}
-			// 凭证作用域（Config.AuthPathPrefix 配置了才生效）：跳转出 API
-			// 前缀或路径含 . / .. 歧义段（编码穿越经代理归一可能指出前缀外）
-			// 时剥掉 Authorization。带凭证的请求都走这一层——探测、未来的
-			// webhook/轮询调用不再各自包一遍。
-			if cfg.AuthPathPrefix != "" && !authPathInScope(req.URL.Path, cfg.AuthPathPrefix) {
-				req.Header.Del("Authorization")
-			}
 			return nil
 		},
 	}, nil
+}
+
+// authScopeTransport 凭证作用域的 transport 层把关：prefix 非空时，每个发
+// 出的请求（含重定向链的每一跳）路径不在 API 前缀下就剥掉 Authorization——
+// PAT 不落进实例上非 API 端点的访问日志。探测、未来的 webhook/轮询调用
+// 复用同一层，不再各自包一遍。
+type authScopeTransport struct {
+	base   http.RoundTripper
+	prefix string
+}
+
+func (t *authScopeTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if t.prefix != "" && !authPathInScope(req.URL, t.prefix) {
+		req = req.Clone(req.Context())
+		req.Header.Del("Authorization")
+	}
+	return t.base.RoundTrip(req)
 }
 
 // effectivePort 端口的生效值：无显式端口按 scheme 缺省补齐（https→443、
@@ -183,16 +196,30 @@ func effectivePort(u *url.URL) string {
 	return "443"
 }
 
-// authPathInScope 判定解码后的目标路径是否仍在凭证作用域内：含 . / .. 歧义
-// 段（字面命中前缀也不能信任，代理/服务端归一后可能指出前缀外）或清理后
-// 不带前缀，都不算在作用域内。
-func authPathInScope(p, prefix string) bool {
-	for _, seg := range strings.Split(p, "/") {
+// authPathInScope 判定目标路径是否仍在凭证作用域内：解码后的段含 . / ..
+// 歧义段（字面命中前缀也不能信任，代理/服务端归一后可能指出前缀外）、
+// 转义形态层层解码后是 . / .. 或夹带 / \（%2e、%252e、%2f 等，上游二次
+// 解码会穿到前缀外），或清理后不带前缀，都不算在作用域内。
+func authPathInScope(u *url.URL, prefix string) bool {
+	for _, seg := range strings.Split(u.Path, "/") {
 		if seg == "." || seg == ".." {
 			return false
 		}
 	}
-	return strings.HasPrefix(path.Clean(p), strings.TrimRight(prefix, "/")+"/")
+	for _, raw := range strings.Split(u.EscapedPath(), "/") {
+		seg := raw
+		for i := 0; i < 3; i++ {
+			dec, err := url.PathUnescape(seg)
+			if err != nil || dec == seg {
+				break
+			}
+			seg = dec
+		}
+		if seg == "." || seg == ".." || strings.ContainsAny(seg, `/\`) {
+			return false
+		}
+	}
+	return strings.HasPrefix(path.Clean(u.Path), strings.TrimRight(prefix, "/")+"/")
 }
 
 // dialGuard 生成 net.Dialer.Control：在 DNS 解析之后、建连之前判定实际目标
@@ -528,6 +555,15 @@ func blockedByPolicy(ip net.IP, strict bool) bool {
 	// 的都是该拒的废弃形态。
 	if allZero(ipv6[0:12]) {
 		return true
+	}
+	// ::ffff:0:0/96 IPv4-translated（RFC 6052）与 ISATAP（IID 0000/0200:
+	// 5efe:v4）：末 4 字节内嵌 IPv4，与 NAT64 同口径解出递归判定。
+	if allZero(ipv6[0:8]) && ipv6[8] == 0xff && ipv6[9] == 0xff && allZero(ipv6[10:12]) {
+		return blockedByPolicy(net.IP(append([]byte{}, ipv6[12:16]...)), strict)
+	}
+	if (ipv6[8] == 0x00 || ipv6[8] == 0x02) && ipv6[9] == 0x00 &&
+		ipv6[10] == 0x5e && ipv6[11] == 0xfe {
+		return blockedByPolicy(net.IP(append([]byte{}, ipv6[12:16]...)), strict)
 	}
 	// NAT64：只有 well-known 前缀 64:ff9b::/96（bytes 4-11 全零）按末 4 字节
 	// 解出内嵌 IPv4 递归判定（同一口径——私网放行时载荷是 RFC1918 的 Forgejo

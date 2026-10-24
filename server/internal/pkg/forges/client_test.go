@@ -40,6 +40,8 @@ func TestIsBlockedIP(t *testing.T) {
 		"64:ff9b::0a00:0001",                      // NAT64 载荷 10.0.0.1
 		"64:ff9a::0808:0808",                      // local-use NAT64 整体拒绝
 		"::10.0.0.1", "::127.0.0.1",               // ::/96 已废弃 IPv4-compatible（前 12 字节全零整体拒）
+		"::ffff:0:7f00:1", "::ffff:0:a00:1", // IPv4-translated ::ffff:0:0/96 载荷内网
+		"::5efe:7f00:1", "::5efe:a00:1", // ISATAP 载荷内网
 	}
 	for _, addr := range blocked {
 		if !isBlockedIP(net.ParseIP(addr)) {
@@ -93,6 +95,8 @@ func TestIsBlockedPrivateMode(t *testing.T) {
 		"fd00:ec2::254",             // AWS IMDS IPv6 端点（ULA 放行的恒拒例外）
 		"100.100.100.200",           // 阿里云 IMDS 端点（CGNAT 段内的恒拒例外）
 		"::10.0.0.1", "::127.0.0.1", // ::/96 已废弃 IPv4-compatible
+		"::ffff:0:7f00:1",    // IPv4-translated 载荷回环
+		"::5efe:7f00:1",      // ISATAP 载荷回环
 		"64:ff9a::0808:0808", // local-use NAT64
 		"64:ff9b::7f00:0001", // NAT64 载荷回环
 		"2002:7f00:0001::",   // 6to4 载荷回环
@@ -135,8 +139,10 @@ func TestClientRedirectStripsAuthOutsidePrefix(t *testing.T) {
 		case "/api/v1/version":
 			http.Redirect(w, r, "/api/v1/user", http.StatusFound)
 		case "/api/v1/user":
-			http.Redirect(w, r, "/api/v1/../logs", http.StatusFound)
-		case "/logs":
+			// 双重编码穿越：Location 里的 %252e 到服务端解码一次是
+			// %2e%2e，上游再解码才是 .. ——歧义段必须剥凭证。
+			http.Redirect(w, r, "/api/v1/%252e%252e/logs", http.StatusFound)
+		case "/api/v1/%2e%2e/logs":
 			http.Redirect(w, r, "/api/v1/me", http.StatusFound)
 		default:
 			w.WriteHeader(http.StatusOK)
@@ -166,17 +172,18 @@ func TestClientRedirectStripsAuthOutsidePrefix(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	// /api/v1/../logs 的跳转：解码路径含 .. 歧义段 → 剥凭证（该字面路径落
-	// default 分支，链路就此结束，共 3 跳）。
-	if len(sawAuth) != 3 {
+	// 链：version→user（API 树内，凭证保留）→%252e%252e 段（剥）→me（回到
+	// 前缀内，凭证恢复）——作用域按每跳路径判定，不是链路粘性。共 4 跳。
+	if len(sawAuth) != 4 {
 		t.Fatalf("requests = %v", sawAuth)
 	}
-	if !strings.HasSuffix(sawAuth[0], "token secret-pat") ||
-		!strings.HasSuffix(sawAuth[1], "token secret-pat") {
-		t.Fatalf("API 树内跳转应保留凭证: %v", sawAuth)
+	for _, i := range []int{0, 1, 3} {
+		if !strings.HasSuffix(sawAuth[i], "token secret-pat") {
+			t.Fatalf("API 树内跳转应保留凭证: %v", sawAuth)
+		}
 	}
 	if strings.HasSuffix(sawAuth[2], "token secret-pat") {
-		t.Fatalf("歧义段的跳转仍带凭证: %v", sawAuth)
+		t.Fatalf("双重编码穿越段仍带凭证: %v", sawAuth)
 	}
 }
 

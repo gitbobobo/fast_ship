@@ -236,8 +236,10 @@ func (s *ForgeIntegrationService) Update(ctx context.Context, id string, req *ap
 		allowPrivate = *req.AllowPrivateNetwork
 	}
 
-	// base_url / api_base_url 三态：null 保留、空串重置为默认、其余替换。
-	// 只在值或开关真的变化时才做保存时 DNS 校验，无关更新（改名）不碰网络。
+	// api_base_url 三态：null 保留、空串重置为推导、其余替换；base_url
+	// 只有两态（null 保留、非空替换——base 无默认可重置，空串走
+	// errForgeIntegrationBaseRequired 40001）。只在值或开关真的变化时才做
+	// 保存时 DNS 校验，无关更新（改名）不碰网络。
 	baseChanged := req.BaseUrl != nil && strings.TrimSpace(*req.BaseUrl) != strings.TrimSpace(row.BaseURL)
 	apiChanged := req.ApiBaseUrl != nil && strings.TrimSpace(*req.ApiBaseUrl) != strings.TrimSpace(row.APIBaseURL)
 	if baseChanged || apiChanged || flagChanged {
