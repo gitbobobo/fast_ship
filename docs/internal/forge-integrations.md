@@ -257,7 +257,10 @@ Key 在 RequireJWT 已被 40301 拒）。
 连接检测：解密 token 后调 `GET {api_base_url}/version` 与 `GET {api_base_url}/user`，
 返回 `{status, version, username, detail}`。status 沿用 `unchecked / ok /
 invalid / failed` 口径（unchecked 不会由该端点产生）：ok=两个请求都成功；
-invalid=401/403（PAT 被拒）；failed=网络错误或其他状态码。**结论只随响应返回、
+invalid=401（PAT 被拒）；failed=网络错误或其他状态码。`/user` 的 403 是例外：
+Forgejo 把 `read:user` 划为独立 scope，仓库只读 PAT 在这里拿 403 是「已认证但
+缺权限」而非「被拒」，按 ok 返回、`username` 留空、detail 注明缺 scope——最小
+权限 token 不该被误报 invalid。**结论只随响应返回、
 不落库**（表里没有检测三列——没有后台轮询去消费它，落库只会制造过期状态）。
 检测走的是同一个 forges client，私网/自签 CA 的实例因此天然可测。
 

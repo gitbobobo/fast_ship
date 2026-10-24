@@ -612,9 +612,14 @@ func probeForge(ctx context.Context, client *http.Client, apiBaseURL, token stri
 				Detail: "user 响应不是预期的 Forgejo API 格式，请确认 token 具有读取账号信息的权限"}
 		}
 		username = strings.TrimSpace(parsed.Login)
-	case status == http.StatusUnauthorized || status == http.StatusForbidden:
+	case status == http.StatusUnauthorized:
 		return ForgeProbe{Status: model.DeploymentDetectionInvalid,
 			Detail: fmt.Sprintf("token 被实例拒绝（HTTP %d），请检查机器人 PAT", status)}
+	case status == http.StatusForbidden:
+		// 已认证但缺 read:user scope——仓库只读 PAT 在 /user 拿 403，
+		// token 本身有效，不误报 invalid；401 才是真被拒。
+		return ForgeProbe{Status: model.DeploymentDetectionOK, Version: version,
+			Detail: "token 缺少 read:user 权限，账号信息不可读（仅仓库场景可用）"}
 	default:
 		return ForgeProbe{Status: model.DeploymentDetectionFailed,
 			Detail: fmt.Sprintf("实例返回 HTTP %d（GET user）", status)}

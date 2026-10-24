@@ -583,6 +583,28 @@ func TestForgeAPIGetRedirectStripsAuthOutsideAPIPrefix(t *testing.T) {
 	}
 }
 
+// 仓库只读 PAT（无 read:user scope）在 GET /user 拿 403：已认证而非被拒，
+// 探测应判 ok 并说明缺 scope，不误报 invalid。
+func TestProbeForgeUserScopeForbidden(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/version":
+			_, _ = w.Write([]byte(`{"version":"1.22.0"}`))
+		case "/api/v1/user":
+			w.WriteHeader(http.StatusForbidden)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	probe := probeForge(context.Background(), srv.Client(), srv.URL+"/api/v1", "pat")
+	if probe.Status != model.DeploymentDetectionOK || probe.Username != "" ||
+		!strings.Contains(probe.Detail, "read:user") {
+		t.Fatalf("probe = %+v", probe)
+	}
+}
+
 // ---- 小工具 ----
 
 func ptrStr(s string) *string { return &s }
