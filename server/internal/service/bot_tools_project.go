@@ -24,7 +24,10 @@ func (s *BotService) execProjectRead(ctx context.Context, call *model.BotToolCal
 		if err != nil {
 			return "", err
 		}
-		items, total, err := s.projects.List(userID, page, pageSize)
+		// 默认排除搁置中的项目（INT-165）：项目清单是「接下来操作哪个」的
+		// 挑选面；include_shelved=true 时连搁置项目一起返回（总数字段同口径）。
+		items, total, err := s.projects.List(userID, page, pageSize,
+			args.IncludeShelved != nil && *args.IncludeShelved)
 		if err != nil {
 			return "", err
 		}
@@ -168,10 +171,15 @@ func botSlimPage[T any](kind string, items []T, total int64, page, pageSize int)
 }
 
 // botSlimProject 投影为工具专用精简对象（不含 token 引用等敏感细节）。
+// 搁置三字段恒带（INT-165）：is_shelved 按响应生成时刻判定，未搁置时两个
+// 时间为 null——模型据此区分「没搁置」与「搁置已到期」。
 func botSlimProject(p *ProjectResponse) map[string]interface{} {
 	out := map[string]interface{}{
-		"id":   p.Id,
-		"name": p.Name,
+		"id":            p.Id,
+		"name":          p.Name,
+		"shelved_at":    p.ShelvedAt,
+		"shelved_until": p.ShelvedUntil,
+		"is_shelved":    p.IsShelved,
 	}
 	if p.Description != "" {
 		out["description"] = p.Description

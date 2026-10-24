@@ -29,7 +29,7 @@ const botToolsetV11FrozenHash = "7ef3e64ba0ba992e6cf0955b992e8454a658d8bb1dd7390
 // ---------- 1. 工具集 v11：描述演进、字节钉死、冻结基线不动 ----------
 
 func TestBotInt156ToolsetV11(t *testing.T) {
-	// v11 自 INT-156 起冻结为基线；当前发布版本（v13 = INT-160）在其之上
+	// v11 自 INT-156 起冻结为基线；当前发布版本（v14 = INT-165）在其之上
 	// 演进，但不得低于 v11，否则下方 v11 基线断言失去路由前提。
 	if botToolsetVersion < 13 {
 		t.Fatalf("v11 基线断言要求当前版本至少为 13，实得 %d", botToolsetVersion)

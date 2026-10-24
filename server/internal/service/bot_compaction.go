@@ -2145,6 +2145,12 @@ func botToolsetUserNote(from, to int64) string {
 	// 跨档升级逐档并列（INT-139 云端复审）：只报最高档会把中间档的用户
 	// 可感知变化吞掉（如 from=8→10 时 v9 线程能力）。
 	var parts []string
+	if to >= 14 && from < 14 {
+		parts = append(parts, "项目列表默认不再显示搁置中的项目，需要看搁置项目时让机器人带上包含搁置项目的选项")
+	}
+	if to >= 13 && from < 13 {
+		parts = append(parts, "机器人可以挂起等待某个线程有动静再继续，不用反复查询")
+	}
 	if to >= 12 && from < 12 {
 		parts = append(parts, "创建线程时可以指定模型等执行配置，线程列表和详情会显示实际生效的模型")
 	}
@@ -2164,6 +2170,24 @@ func botToolsetUserNote(from, to int64) string {
 }
 
 func botToolsetChangeNote(from, to int64) string {
+	// INT-165 搁置过滤（v14）：fs_project list 的默认挑选面变化。
+	if to >= 14 && from < 14 {
+		note := "工具集已升级：fs_project list 默认排除搁置中的项目，include_shelved=true 才连搁置项目一起返回；搁置中的项目在 dashboard、推荐汇总等挑选面同样被排除，get/写操作按 id 照常可用；include_shelved 只对 list 合法，get/create/update 携带会被拒绝"
+		if from < 13 {
+			// INT-165 的搁置告知与 INT-160 的 wait 告知互不替代，跨过 v13 时级联补发。
+			note += "；" + strings.TrimPrefix(botToolsetChangeNote(from, 13), "工具集已升级：")
+		}
+		return note
+	}
+	// INT-160 异步等待（v13）：fs_thread 新增 wait，用挂起等待替代反复轮询。
+	if to >= 13 && from < 13 {
+		note := "工具集已升级：fs_thread 新增异步动作 wait——挂起等待线程变化后唤醒：受理即 running、不进执行队列、无写副作用；on 选触发条件（idle/needs_reply/error，缺省全部；idle 需线程稳定约 20 秒），timeout_minutes 是等待上限（1-30 分钟，缺省 10；定时任务会话内不得超过 15）；约 60 秒内线程始终没开始运行以 not_started 唤醒，到超时按 outcome 如实区分确实没动/在动未到终态/连接不可信/线程已消失；唤醒结果自带字段前后对比与最近条目摘要，醒来通常不必再 get；on/timeout_minutes 只对 wait 合法，其它动作携带会被拒绝；每机器人同时最多 3 个、同一线程 1 个、同一线程 1 小时内最多挂 6 次，取消用 fs_cancel"
+		if from < 12 {
+			// INT-160 的 wait 告知与 INT-159 的执行配置告知互不替代，跨过 v12 时级联补发。
+			note += "；" + strings.TrimPrefix(botToolsetChangeNote(from, 12), "工具集已升级：")
+		}
+		return note
+	}
 	// INT-159 执行配置（v12）：launch 可选配置与 composer_options 模型目录。
 	if to >= 12 && from < 12 {
 		note := "工具集已升级：fs_thread launch 新增可选执行配置——model_selection（instance_id/model/options[{id,value}]，取值用 composer_options 返回的 providers 清单）、runtime_mode、workspace，省略时模型沿用项目默认、runtime_mode 为 full-access、workspace 用项目主检出；composer_options 返回 projects（含 default_model_selection）、providers（按实例归一化的可用模型目录）与 not_settable（机器人不能指定的配置项）；list/get 的线程摘要新增 provider/model/branch 回显实际生效配置；这三个字段只对 launch 合法，其余动作携带会被拒绝"

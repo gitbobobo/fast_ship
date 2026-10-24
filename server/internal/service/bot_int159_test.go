@@ -358,7 +358,8 @@ func TestBotInt159ComposerOptionsExec(t *testing.T) {
 // composer_options 的 not_settable 版本门按「发起调用的请求所冻结的
 // 工具集版本」判定（call.RequestID → bot_model_requests），不读 bots
 // 表活值——另一条对话线先激活 v12 会把行版本推进，本会话仍冻结 v11
-// 时必须照常标注不可用（代码审查 r30）。
+// 时必须照常标注不可用（代码审查 r30）。门值是能力引入版本 12：v12/v13
+// 的冻结 schema 已带执行配置字段，不得因当前发布版本推进而误标（F1）。
 func TestBotInt159ComposerOptionsFrozenVersionGate(t *testing.T) {
 	env := setupBotTestEnv(t)
 	userID := createBotTestUser(t, env.db, "t3compgate")
@@ -419,6 +420,14 @@ func TestBotInt159ComposerOptionsFrozenVersionGate(t *testing.T) {
 	}
 	if !hasGateNote(newReq(11).ID) {
 		t.Fatalf("v11 冻结会话的 not_settable 应标注 launch 配置字段不可用")
+	}
+	// 能力门按引入版本（v12）判：v12/v13 的冻结 schema 已带这三个字段，当前
+	// 发布版本升到 14 后它们也不应被误标（代码审查 F1）。
+	if hasGateNote(newReq(12).ID) {
+		t.Fatalf("v12 冻结会话不应出现版本门标注（执行配置自 v12 引入）")
+	}
+	if hasGateNote(newReq(13).ID) {
+		t.Fatalf("v13 冻结会话不应出现版本门标注（执行配置自 v12 引入）")
 	}
 	if hasGateNote(newReq(botToolsetVersion).ID) {
 		t.Fatalf("v%d 冻结会话不应出现版本门标注", botToolsetVersion)

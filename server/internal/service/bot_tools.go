@@ -149,6 +149,8 @@ type botCancelArgs struct {
 	CallID string `json:"call_id" jsonschema:"description=要取消的本机器人后台调用 ID（必填，required）"`
 }
 
+// botProjectArgs 是 fs_project 的参数超集（v14 = INT-165 起含 include_shelved）。
+// v13 及更早版本的形态由 bot_args_frozen.go 的 botProjectArgsV13Frozen 冻结。
 type botProjectArgs struct {
 	Action        string  `json:"action" jsonschema:"enum=list,enum=get,enum=create,enum=update,required"`
 	ID            string  `json:"id,omitempty" jsonschema:"description=项目 ID（get/update 必填）"`
@@ -157,6 +159,9 @@ type botProjectArgs struct {
 	Name          string  `json:"name,omitempty" jsonschema:"description=项目名（create 必填；update 可改）"`
 	Description   *string `json:"description,omitempty" jsonschema:"description=项目描述；update 提供空串即清空"`
 	RepositoryURL string  `json:"repository_url,omitempty" jsonschema:"description=仓库 URL（http/ssh）"`
+	// IncludeShelved 只配合 list（INT-165）：true 时连搁置中的项目一起返回；
+	// 默认排除搁置项目——项目清单是挑选面，巡检不该撞上暂缓的项目。
+	IncludeShelved *bool `json:"include_shelved,omitempty" jsonschema:"description=list 可选；true 时连搁置中的项目一起返回（默认 false，只返回未搁置项目）"`
 }
 
 // botIssueArgs 是 fs_issue 的参数超集：schema 描述并集，服务端按 action
@@ -658,12 +663,14 @@ func botToolRegistryV11() []*botToolDef {
 	return tools
 }
 
-// botToolRegistryV13 是当前发布注册表（INT-160 线程等待）：在 v12（INT-159）
-// 之上只演进 fs_thread——新增异步动作 wait（挂起等待线程变化，受理即
-// running、由评估器按现有 5s 扫描评估，不进 worker 队列），参数新增 on
-// （触发条件子集）与 timeout_minutes（等待上限），工具描述追加 wait 语义。
+// botToolRegistryV13 是 INT-160 发布、自 INT-165 起冻结的注册表：在 v12
+// （INT-159）之上只演进 fs_thread——新增异步动作 wait（挂起等待线程变化，
+// 受理即 running、由评估器按现有 5s 扫描评估，不进 worker 队列），参数新增
+// on（触发条件子集）与 timeout_minutes（等待上限），工具描述追加 wait 语义。
 // v12 及更早版本是冻结副本——本注册表的任何变化（含共享工具的描述调整）
-// 不得影响它们，否则存量会话的前缀/tools_hash 失稳。
+// 不得影响它们，否则存量会话的前缀/tools_hash 失稳。INT-165 起 v13 的
+// fs_project 参数换用冻结副本 botProjectArgsV13Frozen，include_shelved 只进
+// v14。
 func botToolRegistryV13() []*botToolDef {
 	tools := botToolRegistryV12()
 	for _, tool := range tools {
@@ -680,6 +687,35 @@ func botToolRegistryV13() []*botToolDef {
 			Description: "挂起等待线程变化后唤醒（受理即 running，不进执行队列，无写副作用）：on 选触发条件（idle/needs_reply/error，缺省全部），线程开始运行并命中条件（idle 需稳定约 20 秒）即唤醒；约 60 秒内线程始终没开始运行以 not_started 唤醒；到 timeout_minutes 上限按 outcome 区分 timeout_unchanged（确实没动）/timeout_progressing（在动但未到终态）/watch_degraded（连接不可信，结论仅供参考）/thread_gone。唤醒的「平台后台结果」带 wait_result：变化字段前后对比、queue.held、最近 3 条条目摘要。每机器人同时最多 3 个、同一线程 1 个（重复挂立即返回 already_waiting 与已有调用 ID）、同一线程 1 小时内最多挂 6 次；定时任务会话内 timeout_minutes 不得超过 15。取消用 fs_cancel。",
 			Mode:        model.BotExecutionAsync,
 		})
+	}
+	// INT-165 起 v13 冻结：fs_project 的 include_shelved 只进 v14，本版换回
+	// 冻结副本，wire 字节与 INT-160 发布时逐字节一致（基线见
+	// bot_int160_wait_test.go 的 botToolsetV13FrozenHash）。
+	botUseFrozenArgs(13, tools)
+	return tools
+}
+
+// botToolRegistryV14 是当前发布注册表（INT-165 项目搁置）：在 v13（INT-160）
+// 之上只演进 fs_project——list 默认排除搁置中的项目、include_shelved=true
+// 时连搁置项目一起返回，工具描述同步提及（get/create/update 不接受
+// include_shelved，botActionRules 拒绝）。v13 及更早版本是冻结副本——本注册
+// 表的任何变化（含共享工具的描述调整）不得影响它们，否则存量会话的前缀/
+// tools_hash 失稳。
+func botToolRegistryV14() []*botToolDef {
+	tools := botToolRegistryV13()
+	for _, tool := range tools {
+		if tool.Name != "fs_project" {
+			continue
+		}
+		tool.Description = "操作 Fast Ship 项目：list/get 读取，create/update 为需确认的写操作（首期只开放名称、描述、仓库 URL）。list 默认排除搁置中的项目，include_shelved=true 时连搁置项目一起返回；搁置中的项目在 dashboard、推荐汇总等挑选面同样被排除，但读写照常可用。"
+		// v14 用活跃参数结构体：include_shelved 随本版新增；v13 的 wire 字节
+		// 由冻结副本 botProjectArgsV13Frozen 保留。
+		tool.ArgsType = reflect.TypeOf(botProjectArgs{})
+		for i := range tool.Actions {
+			if tool.Actions[i].Name == "list" {
+				tool.Actions[i].Description = "列出当前用户项目（默认排除搁置中项目；include_shelved=true 时包含）"
+			}
+		}
 	}
 	return tools
 }
@@ -1023,8 +1059,10 @@ func botToolsetVersionOf(version int64) *botToolsetHolder {
 		tools = botToolRegistryV11()
 	case 12:
 		tools = botToolRegistryV12()
-	default:
+	case 13:
 		tools = botToolRegistryV13()
+	default:
+		tools = botToolRegistryV14()
 	}
 	holder := botBuildToolset(version, tools)
 	botToolsetsByID[version] = holder
@@ -1090,10 +1128,11 @@ func botBuildToolset(version int64, tools []*botToolDef) *botToolsetHolder {
 
 // botUseFrozenArgs 把已发布版本的 schema 参数换回冻结结构体：活跃版本演进
 // 后（v4 修正枚举、v5 修正 fs_thread 的 list 语义与描述、v9 给 fs_thread 加
-// 结算类动作、v12 给 launch 加执行配置、v13 给 fs_thread 加 wait），冻结
-// 副本保证已发布版本的 tools_hash 不回退。v1 的 fs_memory 是 status 占位
-// （用 botScheduleArgs），不在此替换；v9–v11 的 fs_thread 参数相同，沿用
-// INT-148 发布 v9 时的结构体，v10/v11 只演进工具描述。
+// 结算类动作、v12 给 launch 加执行配置、v13 给 fs_thread 加 wait、v14 给
+// fs_project 加 include_shelved），冻结副本保证已发布版本的 tools_hash 不回
+// 退。v1 的 fs_memory 是 status 占位（用 botScheduleArgs），不在此替换；
+// v9–v11 的 fs_thread 参数相同，沿用 INT-148 发布 v9 时的结构体，v10/v11 只
+// 演进工具描述。
 func botUseFrozenArgs(version int64, tools []*botToolDef) {
 	frozen := map[string]reflect.Type{
 		"fs_project":     reflect.TypeOf(botProjectArgsFrozen{}),
@@ -1109,23 +1148,43 @@ func botUseFrozenArgs(version int64, tools []*botToolDef) {
 		frozen["fs_schedule"] = reflect.TypeOf(botScheduleTaskArgsFrozen{})
 	case 4:
 		// v4 已含 INT-110 修正后的枚举与字段，其余结构体与 v5 一致，只冻结
-		// v5 改过标签的 fs_thread。
-		frozen = map[string]reflect.Type{"fs_thread": reflect.TypeOf(botThreadArgsV4{})}
+		// v5 改过标签的 fs_thread。INT-165 起 fs_project 一并换冻结副本：
+		// v4–v13 的 fs_project 标签一直未变（共用 botProjectArgsV13Frozen），
+		// include_shelved 只进 v14。
+		frozen = map[string]reflect.Type{
+			"fs_thread":  reflect.TypeOf(botThreadArgsV4{}),
+			"fs_project": reflect.TypeOf(botProjectArgsV13Frozen{}),
+		}
 	case 5, 6, 7, 8:
 		// v5–v8 的 fs_thread 标签自 v5 起一直未变，共用一份冻结副本
-		// （botThreadArgsV5Frozen）。只换 fs_thread：v6/v7/v8 各自设置的
-		// fs_schedule 参数结构体不能被覆盖。
-		frozen = map[string]reflect.Type{"fs_thread": reflect.TypeOf(botThreadArgsV5Frozen{})}
+		// （botThreadArgsV5Frozen）。只换 fs_thread 与 fs_project：v6/v7/v8
+		// 各自设置的 fs_schedule 参数结构体不能被覆盖。
+		frozen = map[string]reflect.Type{
+			"fs_thread":  reflect.TypeOf(botThreadArgsV5Frozen{}),
+			"fs_project": reflect.TypeOf(botProjectArgsV13Frozen{}),
+		}
 	case 9, 10, 11:
 		// v9–v11 的 fs_thread 参数一致（v10 只演进 fs_schedule 描述，v11 只
 		// 演进 fs_thread/fs_schedule 描述），共用一份冻结副本
-		// （botThreadArgsV9Frozen）。只换 fs_thread：v10/v11 各自设置的
-		// fs_schedule 参数结构体不能被覆盖；launch 执行配置是 v12 字段。
-		frozen = map[string]reflect.Type{"fs_thread": reflect.TypeOf(botThreadArgsV9Frozen{})}
+		// （botThreadArgsV9Frozen）。只换 fs_thread 与 fs_project：v10/v11
+		// 各自设置的 fs_schedule 参数结构体不能被覆盖；launch 执行配置是
+		// v12 字段。
+		frozen = map[string]reflect.Type{
+			"fs_thread":  reflect.TypeOf(botThreadArgsV9Frozen{}),
+			"fs_project": reflect.TypeOf(botProjectArgsV13Frozen{}),
+		}
 	case 12:
 		// v12 的 fs_thread 参数由 botThreadArgsV12Frozen 冻结：INT-160 的
 		// wait 动作与 on/timeout_minutes 只进 v13。
-		frozen = map[string]reflect.Type{"fs_thread": reflect.TypeOf(botThreadArgsV12Frozen{})}
+		frozen = map[string]reflect.Type{
+			"fs_thread":  reflect.TypeOf(botThreadArgsV12Frozen{}),
+			"fs_project": reflect.TypeOf(botProjectArgsV13Frozen{}),
+		}
+	case 13:
+		// v13 的 fs_project 参数由 botProjectArgsV13Frozen 冻结：INT-165 的
+		// include_shelved 只进 v14；其余工具自 v13 起未再演进，沿用活跃
+		// 结构体（fs_thread 的活跃形态即 v13 发布时的 wait 版本）。
+		frozen = map[string]reflect.Type{"fs_project": reflect.TypeOf(botProjectArgsV13Frozen{})}
 	}
 	for _, tool := range tools {
 		if typ, ok := frozen[tool.Name]; ok {
@@ -1530,10 +1589,12 @@ var botThreadLaunchWaitForbidden = append(
 // 起的 schema 描述都由它生成，避免中文描述与机器校验各说各话。列出的动作
 // 才被接受；未列出的动作一律返回 40001。
 var botActionRules = map[string]botActionRule{
+	// include_shelved（INT-165）只对 list 生效：get/create/update 携带即拒，
+	// 否则会被静默丢弃、模型却以为读到了搁置项目或把它写进了项目配置。
 	"fs_project/list":   {},
-	"fs_project/get":    {Required: req("id")},
-	"fs_project/update": {Required: req("id")},
-	"fs_project/create": {Required: req("name"), Forbidden: []string{"id"}},
+	"fs_project/get":    {Required: req("id"), Forbidden: []string{"include_shelved"}},
+	"fs_project/update": {Required: req("id"), Forbidden: []string{"include_shelved"}},
+	"fs_project/create": {Required: req("name"), Forbidden: []string{"id", "include_shelved"}},
 
 	"fs_issue/list":              {Required: req("project_id")},
 	"fs_issue/get":               {Required: req("issue_id")},
