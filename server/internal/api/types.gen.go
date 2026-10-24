@@ -3127,6 +3127,9 @@ type Project struct {
 	GithubRepo        string `json:"github_repo"`
 	Id                string `json:"id"`
 
+	// IsShelved 响应生成时刻是否处于搁置中；到期自动恢复，无后台任务（INT-165）
+	IsShelved bool `json:"is_shelved"`
+
 	// IssueCount omitempty，仅在列表项中出现；项目 Issue 总数（不区分状态）
 	IssueCount *int `json:"issue_count,omitempty"`
 
@@ -3142,7 +3145,13 @@ type Project struct {
 
 	// PublicGithubTokenId 公开仓库 Token 引用；未配置为空串
 	PublicGithubTokenId string `json:"public_github_token_id"`
-	UpdatedAt           string `json:"updated_at"`
+
+	// ShelvedAt 搁置开始时间；null 表示未搁置（INT-165）
+	ShelvedAt *string `json:"shelved_at"`
+
+	// ShelvedUntil 搁置截止时间；null 表示无限期或未搁置（INT-165）
+	ShelvedUntil *string `json:"shelved_until"`
+	UpdatedAt    string  `json:"updated_at"`
 }
 
 // ProjectT3Binding Fast Ship 项目在某 T3 环境绑定的 T3 项目（INT-89）。t3_project_title /
@@ -4063,6 +4072,12 @@ type SendT3ThreadMessageRequest struct {
 
 	// Text 正文；仅图片消息时为空串。text 与 attachments 不能同时空
 	Text string `json:"text"`
+}
+
+// ShelveProjectRequest 搁置项目请求体；整包可省略或为空对象，表示无限期搁置（INT-165）
+type ShelveProjectRequest struct {
+	// Until 搁置截止时间（RFC3339）；提供时必须晚于当前时间，缺省表示无限期
+	Until *string `json:"until,omitempty"`
 }
 
 // ShipCheck defines model for ShipCheck.
@@ -7117,6 +7132,26 @@ type UploadScreenshot200JSONResponseBody struct {
 	Message string `json:"message"`
 }
 
+// UnshelveProject200JSONResponseBody defines parameters for UnshelveProject.
+type UnshelveProject200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int      `json:"code"`
+	Data *Project `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// ShelveProject200JSONResponseBody defines parameters for ShelveProject.
+type ShelveProject200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int      `json:"code"`
+	Data *Project `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
 // ListProjectT3Bindings200JSONResponseBody_Data defines parameters for ListProjectT3Bindings.
 type ListProjectT3Bindings200JSONResponseBody_Data struct {
 	Items []ProjectT3Binding `json:"items"`
@@ -7918,6 +7953,9 @@ type BatchScreenshotAnnotationsJSONRequestBody = ScreenshotAnnotationBatchReques
 
 // UploadScreenshotMultipartRequestBody defines body for UploadScreenshot for multipart/form-data ContentType.
 type UploadScreenshotMultipartRequestBody UploadScreenshotMultipartBody
+
+// ShelveProjectJSONRequestBody defines body for ShelveProject for application/json ContentType.
+type ShelveProjectJSONRequestBody = ShelveProjectRequest
 
 // UpsertProjectT3BindingJSONRequestBody defines body for UpsertProjectT3Binding for application/json ContentType.
 type UpsertProjectT3BindingJSONRequestBody = UpsertT3BindingRequest
