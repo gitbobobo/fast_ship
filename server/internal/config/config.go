@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"strings"
 	"time"
 
@@ -129,6 +130,32 @@ type ReviewMediaConfig struct {
 	// 加入名单前确认它没有允许未登录 GET 访问的敏感接口，也没有「来自
 	// 内网即免登录」这类规则。
 	TrustedPrivateHosts []string `mapstructure:"trusted_private_hosts"`
+}
+
+// validate 名单条目校验：匹配按拨号主机名完全一致，所以含端口、通配符、
+// scheme/路径、IPv6 方括号或尾点的条目永远不可能命中——配了等于没配，
+// 排障时还会被误判成功能失效。非法条目直接拒绝启动，让部署立刻看到。
+func (c ReviewMediaConfig) validate() error {
+	for i, h := range c.TrustedPrivateHosts {
+		t := strings.TrimSpace(h)
+		switch {
+		case t == "":
+			return fmt.Errorf("review_media.trusted_private_hosts[%d] 是空条目", i)
+		case strings.ContainsAny(t, "*/\\[]\"' \t"):
+			return fmt.Errorf("review_media.trusted_private_hosts[%d] %q 含通配符/路径/括号等字符：名单只接受确切主机名或 IP 字面量（不支持通配符、端口、scheme）", i, h)
+		case strings.HasSuffix(t, "."):
+			return fmt.Errorf("review_media.trusted_private_hosts[%d] %q 以点结尾：拨号主机名不带尾点，该条目永远不会命中", i, h)
+		case strings.Contains(t, ":"):
+			if _, _, err := net.SplitHostPort(t); err == nil {
+				return fmt.Errorf("review_media.trusted_private_hosts[%d] %q 带端口：匹配只按主机名，端口部分会让条目永远不命中", i, h)
+			}
+			if net.ParseIP(t) == nil {
+				return fmt.Errorf("review_media.trusted_private_hosts[%d] %q 不是合法主机名或 IP 字面量", i, h)
+			}
+			// 裸 IPv6 字面量（如 ::1）：与拨号主机名的字面量形态一致，允许。
+		}
+	}
+	return nil
 }
 
 // BotsConfig 是机器人（INT-101/INT-102）的部署配置：上下文压缩阈值、记忆
@@ -495,6 +522,9 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 	if err := cfg.Bots.validate(); err != nil {
+		return nil, err
+	}
+	if err := cfg.ReviewMedia.validate(); err != nil {
 		return nil, err
 	}
 

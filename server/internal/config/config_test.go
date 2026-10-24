@@ -215,6 +215,50 @@ func TestLoadReviewMediaTrustedPrivateHosts(t *testing.T) {
 	}
 }
 
+// 名单条目的死配置陷阱（INT-168 复审 Note）：含端口、尾点、通配符、
+// scheme/路径、IPv6 方括号的写法按「拨号主机名完全一致」永远不可能命中，
+// 静默通过等于没配还误判功能失效——Load 直接拒绝启动。裸主机名与 IPv6
+// 字面量放行。
+func TestLoadReviewMediaTrustedHostsValidation(t *testing.T) {
+	writeConfig := func(t *testing.T, entry string) string {
+		t.Helper()
+		configPath := filepath.Join(t.TempDir(), "config.yaml")
+		body := "\nreview_media:\n  trusted_private_hosts: [" + entry + "]\n"
+		if err := os.WriteFile(configPath, []byte(baseConfigYAML+body), 0o644); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+		return configPath
+	}
+
+	for _, entry := range []string{
+		`"uiv.example.com:443"`,     // 带端口：拨号主机名不含端口，永不命中
+		`"[::1]:443"`,               // 带端口的 IPv6：同上
+		`"uiv.example.com."`,        // 尾点：FQDN 形态对不上拨号主机名
+		`"*.example.com"`,           // 通配符：不支持
+		`"https://uiv.example.com"`, // scheme：不是主机名
+		`"uiv.example.com/x"`,       // 路径：不是主机名
+		`"[::1]"`,                   // IPv6 方括号：拨号主机名是裸 ::1
+		`""`,                        // 空条目
+		`"a:b:c"`,                   // 多冒号且不是合法 IPv6 字面量
+	} {
+		if _, err := Load(writeConfig(t, entry)); err == nil {
+			t.Fatalf("entry %s 应被拒绝，Load 却成功了", entry)
+		}
+	}
+
+	for _, entry := range []string{
+		`"uiv.example.com"`, // 常规主机名
+		`"UIV.EXAMPLE.COM"`, // 大写（匹配不区分大小写）
+		`"::1"`,             // 裸 IPv6 字面量
+		`"fe80::1"`,         // IPv6 链路本地字面量
+		`"192.168.31.31"`,   // IPv4 字面量
+	} {
+		if _, err := Load(writeConfig(t, entry)); err != nil {
+			t.Fatalf("entry %s 应通过校验，got %v", entry, err)
+		}
+	}
+}
+
 // 环境变量覆盖：FAST_SHIP_REVIEW_MEDIA_TRUSTED_PRIVATE_HOSTS 逗号分隔。
 func TestLoadReviewMediaTrustedHostsFromEnv(t *testing.T) {
 	t.Setenv("FAST_SHIP_REVIEW_MEDIA_TRUSTED_PRIVATE_HOSTS", "uiv.local,img.local")
