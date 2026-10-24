@@ -399,6 +399,23 @@ func TestForgeIntegrationUpdateDerivedAPIBaseFollows(t *testing.T) {
 	if row.APIBaseURL != "" {
 		t.Fatalf("unpinned api should store empty intent, got %q", row.APIBaseURL)
 	}
+
+	// 旧 base 展开值回显：GET→改 base→PUT 的调用方回写的是「旧生效值」，
+	// 只比新推导值会把它钉死在旧主机上——必须同样判回显保持推导。
+	out, err = env.svc.Update(ctx, created.Id, &api.UpdateForgeIntegrationRequest{
+		BaseUrl:    ptrStr("https://e.example.com"),
+		ApiBaseUrl: ptrStr("https://c.example.com/api/v1"), // 上一响应的展开值
+	})
+	if err != nil {
+		t.Fatalf("echo old-base effective api: %v", err)
+	}
+	if out.ApiBaseUrl != "https://e.example.com/api/v1" {
+		t.Fatalf("old-base echo must stay derived and follow new base, got %q", out.ApiBaseUrl)
+	}
+	row, _ = env.repo.FindByID(created.Id)
+	if row.APIBaseURL != "" {
+		t.Fatalf("old-base echo must store empty intent, got %q", row.APIBaseURL)
+	}
 }
 
 func TestForgeIntegrationDeleteRules(t *testing.T) {

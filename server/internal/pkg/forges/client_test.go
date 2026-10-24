@@ -187,6 +187,40 @@ func TestClientRedirectStripsAuthOutsidePrefix(t *testing.T) {
 	}
 }
 
+func TestClientRedirectHTTPtoHTTPSUpgrade(t *testing.T) {
+	// 同主机 http→https 升级放行端口差：http 基址被实例/反代 301 到 https
+	// 是常见部署形态；https→http 降级与跨主机仍拒（其他用例覆盖）。
+	relaxLoopbackForTest(t)
+	httpsSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer httpsSrv.Close()
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: httpsSrv.Certificate().Raw})
+
+	httpSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, httpsSrv.URL+r.URL.Path, http.StatusMovedPermanently)
+	}))
+	defer httpSrv.Close()
+
+	u, _ := url.Parse(httpSrv.URL)
+	client, err := NewClient(Config{
+		AllowedHosts:        []string{u.Hostname()},
+		AllowPrivateNetwork: true,
+		CACertPEM:           string(certPEM),
+	})
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	resp, err := client.Get(httpSrv.URL + "/api/v1/version")
+	if err != nil {
+		t.Fatalf("http→https 同主机升级应放行: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+}
+
 func TestAuthPathInScope(t *testing.T) {
 	cases := []struct {
 		raw    string

@@ -156,9 +156,12 @@ func NewClient(cfg Config) (*http.Client, error) {
 			// 只跟随同主机跳转：Forgejo 反代可能把 / 跳到登录页，但不会跨到
 			// 别的主机；跨主机在集成场景里就是 SSRF 或劫持信号。主机名按
 			// normHost 比（尾点写法等价），端口按生效值比（缺省补齐后
-			// https://host 与 https://host:443 同端点）。
-			if normHost(req.URL.Hostname()) != normHost(via[0].URL.Hostname()) ||
-				effectivePort(req.URL) != effectivePort(via[0].URL) {
+			// https://host 与 https://host:443 同端点）。例外：同主机的
+			// http→https 升级放行端口差——http 基址被实例/反代 301 到 https
+			// 是常见部署形态（安全只升不降，https→http 已被降级拦截挡掉）。
+			sameHost := normHost(req.URL.Hostname()) == normHost(via[0].URL.Hostname())
+			upgrade := via[0].URL.Scheme == "http" && req.URL.Scheme == "https"
+			if !sameHost || (!upgrade && effectivePort(req.URL) != effectivePort(via[0].URL)) {
 				return ErrCrossHostRedirect
 			}
 			return nil

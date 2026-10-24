@@ -284,6 +284,11 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 	if err := s.syncTargetStillCurrent(ledger, epoch); err != nil {
 		return err
 	}
+	// 链接身份随运行起始快照钉死：本轮的账本与 client 都指向进入时的
+	// GitHub PR，同步中途项目改绑 Forgejo 会推进 epoch（写前复核会中止
+	// 本轮），但复核与取用之间仍有窗口——每次都现读会把 Forgejo blob
+	// 链接写进 GitHub 评论。快照一次让链接与本轮实际发布目标同源。
+	links := forgeLinksForProject(ctx, s.db, ledger.ProjectID, githubWebBase(s.cfg))
 	// PR 已关闭/合并：不写任何 GitHub 产出（合并后 head 不再变化，下面的
 	// SHA 让路判断不会拦住写入，必须先判关闭）。同一事务清 pending、推进
 	// epoch 并取消在途运行——与 webhook closed 分支同口径；ledger 更新带
@@ -432,7 +437,7 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 					RepoFullName: ledger.RepoFullName,
 					HeadSHA:      ledger.HeadSHA,
 					RoundNumber:  ledger.RoundNumber,
-					links:        forgeLinksForProject(ctx, s.db, ledger.ProjectID, githubWebBase(s.cfg)),
+					links:        links,
 				}, outcome.PriorRuns)
 				if err := s.upsertPRComment(ctx, client, ledger, reviewVisualCommentMarker,
 					body, "visual_comment_id", ledger.VisualCommentID); err != nil {
@@ -499,7 +504,7 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 			if outcome.FingerprintToStore != "" {
 				ledger.VisualScreensFingerprint = outcome.FingerprintToStore
 			}
-			if err := s.upsertVisualComment(ctx, client, ledger, nil, outcome.PriorRuns, true, now); err != nil {
+			if err := s.upsertVisualComment(ctx, client, ledger, nil, outcome.PriorRuns, true, now, links); err != nil {
 				return err
 			}
 		case visualCarrySuccess:
@@ -592,7 +597,7 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 		HeadSHA:         ledger.HeadSHA,
 		RoundNumber:     ledger.RoundNumber,
 		DiffUnavailable: diffUnavailable,
-		links:           forgeLinksForProject(ctx, s.db, ledger.ProjectID, githubWebBase(s.cfg)),
+		links:           links,
 	}, codeRuns, inlineLines, visualPending, visualCarry)
 	// upsertPRComment 自己按正文去重：diff 读不到的重试里正文没变就不 PATCH，
 	// 变了照常更新（等 diff 读得到时再补「未行内标注」注记）。
@@ -648,7 +653,7 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 			ledger.VisualStatus = vs
 		}
 		if vs != "pending" {
-			if err := s.upsertVisualComment(ctx, client, ledger, visualRuns, nil, false, now); err != nil {
+			if err := s.upsertVisualComment(ctx, client, ledger, visualRuns, nil, false, now, links); err != nil {
 				return err
 			}
 		}
@@ -775,12 +780,13 @@ func (s *ReviewService) recordCommentID(ledger *model.ReviewPullRequest, idColum
 
 // upsertVisualComment 视觉顶层评论：本 head 的视觉运行结论或沿用提醒。
 func (s *ReviewService) upsertVisualComment(ctx context.Context, client githubapi.GitHubClient,
-	ledger *model.ReviewPullRequest, visualRuns []model.ReviewRun, priorRuns []model.ReviewRun, carried bool, now time.Time) error {
+	ledger *model.ReviewPullRequest, visualRuns []model.ReviewRun, priorRuns []model.ReviewRun, carried bool, now time.Time,
+	links forgeLinks) error {
 	meta := reviewCommentMeta{
 		RepoFullName: ledger.RepoFullName,
 		HeadSHA:      ledger.HeadSHA,
 		RoundNumber:  ledger.RoundNumber,
-		links:        forgeLinksForProject(ctx, s.db, ledger.ProjectID, githubWebBase(s.cfg)),
+		links:        links,
 	}
 	body := buildVisualComment(meta, visualRuns, priorRuns, carried)
 	return s.upsertPRComment(ctx, client, ledger, reviewVisualCommentMarker, body, "visual_comment_id", ledger.VisualCommentID)

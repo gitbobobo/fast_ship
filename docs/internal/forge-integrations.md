@@ -132,7 +132,11 @@ PR 审查执行面是 GitHub only，设置面也按同一口径表达「不可�
 - **base_url 只收站点根**：路径必须为空或 `/`，否则 40001——审查链接与
   `code_repo_url` 都按 `{base_url}/{owner}/{repo}` 拼接，带路径的基址会拼出
   错误 URL（自托管子路径部署请配反代，或让 API 前缀走 `api_base_url`）。
-  **`api_base_url` 不受限**，可以带路径（`/api/v1` 是惯例）。
+  **`api_base_url` 不受限**，可以带路径（`/api/v1` 是惯例），也刻意允许
+  与 `base_url` 不同主机：网关/分体部署（web 与 API 分离反代）是支持的
+  形态。注意 PAT 随探测请求发往的是 **api 主机**，私网放行名单
+  （`Config.AllowedHosts`）也同时纳入 api 主机；「同归一主机只允许一个
+  集成」的查重只管 `base_url`。
 - **不收 userinfo**：`https://user:pass@host` 直接 40001——凭证随 base_url
   明文落库、回显并被拼进审查链接。保存返回的 base_url 是按 URL 重编码的归一
   串（scheme 小写、去尾斜杠），不是原始输入。
@@ -223,10 +227,12 @@ Forgejo 基址是管理员可填的任意 URL，必须把「内网探测」挡�
   fc00::/7、CGNAT 100.64.0.0/10 与公网。**放行段里的云元数据端点是精确例外、
   两口径恒拒**：AWS IMDS `fd00:ec2::254`（ULA 段内）与阿里云 `100.100.100.200`
   （CGNAT 段内）——否则 PAT 探测直接送进元数据服务。
-- **重定向规则**：目标 host:port 必须与首个请求一致（跨主机拒绝）；未开私网
-  放行时每一跳都必须 https；**任何配置下 https→http 的降级跳转都拒绝**
-  （`ErrSchemeDowngrade`——明文 http 只该来自管理员配置的基址，不该被响应
-  悄悄带出来）。凭证作用域是 client 层的固定政策（`Config.AuthPathPrefix`，
+- **重定向规则**：目标 host:port 必须与首个请求一致（跨主机拒绝，端口按
+  scheme 缺省补齐后比较）；未开私网放行时每一跳都必须 https；**任何配置下
+  https→http 的降级跳转都拒绝**（`ErrSchemeDowngrade`——明文 http 只该来自
+  管理员配置的基址，不该被响应悄悄带出来）；同主机 http→https 升级放行
+  端口差（http 基址被实例/反代 301 到 https 是常见形态）。凭证作用域是
+  client 层的固定政策（`Config.AuthPathPrefix`，
   探测端点传 API 基址的路径段）：同主机跳转的解码路径 `path.Clean` 后不在
   API 前缀下（或含 `.`/`..` 歧义段，`%2e%2e` 编码穿越经代理归一可能指出
   前缀外）就剥掉 `Authorization`——PAT 不落进实例上非 API 端点的访问日
