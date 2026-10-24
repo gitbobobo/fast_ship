@@ -124,7 +124,7 @@ export default function BotUsageRunPage() {
           </Card>
         ) : !data ? null : (
           <>
-            <RunSummary run={data.run} />
+            <RunSummary run={data.run} requests={data.requests} />
             <RequestList requests={data.requests} />
             <MaintenanceRunList runs={data.maintenance_runs} />
           </>
@@ -135,9 +135,29 @@ export default function BotUsageRunPage() {
 }
 
 /** run 摘要：身份 + 状态 + display_cost 与其拆分 + token/时间口径。 */
-function RunSummary({ run }: { run: BotUsageRun }) {
+function RunSummary({
+  run,
+  requests,
+}: {
+  run: BotUsageRun;
+  requests: BotUsageRequest[];
+}) {
+  // run 级 token 列缺写而请求行有值时按请求汇总兜底（标注口径），避免汇总
+  // 行全「—」与下方明细自相矛盾；请求行也无值仍显示「—」（缺失 ≠ 0）。
+  const sum = (pick: (r: BotUsageRequest) => number | null | undefined) => {
+    let total = 0;
+    let any = false;
+    for (const r of requests) {
+      const v = pick(r);
+      if (v != null) {
+        total += v;
+        any = true;
+      }
+    }
+    return any ? total : null;
+  };
   const tokenText = run.usage_complete
-    ? `${formatTokens(run.prompt_tokens)} 输入 · ${formatTokens(run.cached_tokens)} 缓存 · ${formatTokens(run.completion_tokens)} 输出 · ${formatTokens(run.total_tokens)} 合计`
+    ? `${formatTokens(run.prompt_tokens ?? sum((r) => r.prompt_tokens))} 输入 · ${formatTokens(run.cached_tokens ?? sum((r) => r.cached_tokens))} 缓存 · ${formatTokens(run.completion_tokens ?? sum((r) => r.completion_tokens))} 输出 · ${formatTokens(run.total_tokens ?? sum((r) => r.total_tokens))} 合计`
     : "usage 未收齐，token 计数不可信";
 
   const rows: { label: string; value: ReactNode; title?: string }[] = [
