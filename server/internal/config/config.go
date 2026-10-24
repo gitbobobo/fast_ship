@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"strings"
 	"time"
 
@@ -9,16 +10,17 @@ import (
 )
 
 type Config struct {
-	Server     ServerConfig     `mapstructure:"server"`
-	Database   DatabaseConfig   `mapstructure:"database"`
-	JWT        JWTConfig        `mapstructure:"jwt"`
-	Upload     UploadConfig     `mapstructure:"upload"`
-	Encryption EncryptionConfig `mapstructure:"encryption"`
-	Issues     IssuesConfig     `mapstructure:"issues"`
-	Logging    LoggingConfig    `mapstructure:"logging"`
-	GitHubApp  GitHubAppConfig  `mapstructure:"github_app"`
-	Bots       BotsConfig       `mapstructure:"bots"`
-	Quota      QuotaConfig      `mapstructure:"quota"`
+	Server      ServerConfig      `mapstructure:"server"`
+	Database    DatabaseConfig    `mapstructure:"database"`
+	JWT         JWTConfig         `mapstructure:"jwt"`
+	Upload      UploadConfig      `mapstructure:"upload"`
+	Encryption  EncryptionConfig  `mapstructure:"encryption"`
+	Issues      IssuesConfig      `mapstructure:"issues"`
+	Logging     LoggingConfig     `mapstructure:"logging"`
+	GitHubApp   GitHubAppConfig   `mapstructure:"github_app"`
+	ReviewMedia ReviewMediaConfig `mapstructure:"review_media"`
+	Bots        BotsConfig        `mapstructure:"bots"`
+	Quota       QuotaConfig       `mapstructure:"quota"`
 }
 
 type ServerConfig struct {
@@ -114,6 +116,66 @@ type GitHubAppConfig struct {
 	APIBaseURL string `mapstructure:"api_base_url"`
 	// Fake 仅 server.mode=debug 时允许 true：注入假 GitHub 实现，本地自测评审链路。
 	Fake bool `mapstructure:"fake"`
+}
+
+// ReviewMediaConfig PR 审查截图下载面（githubmedia.NewReviewMediaService）的
+// 部署配置。只作用于审查截图下载这一处，GitHub 媒体代理不受影响。
+type ReviewMediaConfig struct {
+	// TrustedPrivateHosts 可信内网主机名单：拨号时的主机名与名单完全一致
+	// （不区分大小写、不含端口、不支持通配符）即跳过内网 IP 检查——内网 DNS
+	// 把自建服务（如 UIV）直接解析到内网地址的部署靠它放行。默认为空，即
+	// 全部主机照旧过内网检查；名单外主机、以及从名单内主机 302 跳出的建连
+	// 都仍走内网检查。放行粒度是主机名不是 IP：同一内网地址上反代挂着的
+	// 其他服务不会被连带放行，但该主机任意端口的服务都在放行范围内——
+	// 加入名单前确认它没有允许未登录 GET 访问的敏感接口，也没有「来自
+	// 内网即免登录」这类规则。
+	TrustedPrivateHosts []string `mapstructure:"trusted_private_hosts"`
+}
+
+// validate 名单条目校验：匹配按拨号主机名完全一致，所以含端口、通配符、
+// scheme/路径、IPv6 方括号或尾点的条目永远不可能命中——配了等于没配，
+// 排障时还会被误判成功能失效。非法条目直接拒绝启动，让部署立刻看到。
+// 字符判定用白名单（拨号主机名只可能含字母数字、. - _，IPv6 走冒号分支），
+// 不维护黑名单——黑名单永远会漏掉 @ # % 换行之类的字符。
+func (c ReviewMediaConfig) validate() error {
+	for i, h := range c.TrustedPrivateHosts {
+		t := strings.TrimSpace(h)
+		// 空段（env 尾逗号、YAML 空项）没有可判语义，与 normalize 一样丢弃；
+		// 为它拒绝启动，代价大于收益。
+		if t == "" {
+			continue
+		}
+		switch {
+		case strings.HasSuffix(t, "."):
+			return fmt.Errorf("review_media.trusted_private_hosts[%d] %q 以点结尾：拨号主机名不带尾点，该条目永远不会命中", i, h)
+		case strings.Contains(t, ":"):
+			if _, _, err := net.SplitHostPort(t); err == nil {
+				return fmt.Errorf("review_media.trusted_private_hosts[%d] %q 带端口：匹配只按主机名，端口部分会让条目永远不命中", i, h)
+			}
+			if net.ParseIP(t) == nil {
+				return fmt.Errorf("review_media.trusted_private_hosts[%d] %q 不是合法主机名或 IP 字面量", i, h)
+			}
+			// 裸 IPv6 字面量（如 ::1）：与拨号主机名的字面量形态一致，允许。
+		case !isDialedHostnameCharset(t):
+			return fmt.Errorf("review_media.trusted_private_hosts[%d] %q 含拨号主机名不可能出现的字符：名单只接受确切主机名（不支持通配符、端口、scheme；IDN 用 punycode 写法）", i, h)
+		}
+	}
+	return nil
+}
+
+// isDialedHostnameCharset 判定字符串是否只由拨号主机名可能出现的字符组成：
+// 字母数字、点、连字符、下划线（真实 DNS 名可出现）。冒号由 validate 的
+// IPv6 分支单独判定，不在此放行。
+func isDialedHostnameCharset(s string) bool {
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '.', r == '-', r == '_':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // BotsConfig 是机器人（INT-101/INT-102）的部署配置：上下文压缩阈值、记忆
@@ -442,6 +504,7 @@ func Load(path string) (*Config, error) {
 	_ = viper.BindEnv("github_app.webhook_secret", "FAST_SHIP_GITHUB_APP_WEBHOOK_SECRET")
 	_ = viper.BindEnv("github_app.api_base_url", "FAST_SHIP_GITHUB_APP_API_BASE_URL")
 	_ = viper.BindEnv("github_app.fake", "FAST_SHIP_GITHUB_APP_FAKE")
+	_ = viper.BindEnv("review_media.trusted_private_hosts", "FAST_SHIP_REVIEW_MEDIA_TRUSTED_PRIVATE_HOSTS")
 	_ = viper.BindEnv("bots.context.window_tokens", "FAST_SHIP_BOTS_CONTEXT_WINDOW_TOKENS")
 	_ = viper.BindEnv("bots.context.compression_ratio", "FAST_SHIP_BOTS_CONTEXT_COMPRESSION_RATIO")
 	_ = viper.BindEnv("bots.context.target_ratio", "FAST_SHIP_BOTS_CONTEXT_TARGET_RATIO")
@@ -479,6 +542,9 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 	if err := cfg.Bots.validate(); err != nil {
+		return nil, err
+	}
+	if err := cfg.ReviewMedia.validate(); err != nil {
 		return nil, err
 	}
 

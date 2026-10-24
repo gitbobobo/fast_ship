@@ -1,0 +1,129 @@
+package githubmedia
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"testing"
+)
+
+// INT-168 可信内网主机名单（review_media.trusted_private_hosts）：名单内
+// 主机名跳过拨号 IP 检查——内网 DNS 把自建服务（UIV 等）直接解析到内网
+// 地址的部署靠它放行；名单外主机、以及名单内主机 302 跳出的建连照旧走
+// guardDialControl。匹配按 DialContext 收到的拨号主机名完全一致（不区分
+// 大小写、不含端口、不支持通配符），不看解析出的 IP——同一内网地址上
+// 挂着的其他服务不会被连带放行。
+
+// trustedHostTestConfig 截图下载面语义（guardAddress + imagesOnly + 任意
+// host 准入），requireHTTPS 关掉让 httptest 上场。
+func trustedHostTestConfig(trusted []string) serviceConfig {
+	return serviceConfig{
+		cacheSubdir:         "review-screenshot-cache",
+		allowURL:            allowPublicImageHost,
+		imagesOnly:          true,
+		guardAddress:        true,
+		trustedPrivateHosts: trusted,
+	}
+}
+
+// pngUpstream 位图上游：任意路径返回 image/png。
+func pngUpstream(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write([]byte("png-data"))
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// localhostURL 把 httptest 的 127.0.0.1 地址换成 localhost：拨号主机名走
+// 「主机名解析出回环地址」的路径，而不是 IP 字面量直连。
+func localhostURL(t *testing.T, srv *httptest.Server, path string) string {
+	t.Helper()
+	parsed, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("parse upstream url: %v", err)
+	}
+	_, port, err := net.SplitHostPort(parsed.Host)
+	if err != nil {
+		t.Fatalf("split upstream host: %v", err)
+	}
+	return fmt.Sprintf("http://localhost:%s%s", port, path)
+}
+
+// 名单内主机解析到内网地址可以下载：localhost 解析到回环，名单写大写的
+// LOCALHOST（顺带验证匹配不区分大小写）即放行。
+func TestReviewMediaTrustedPrivateHostSkipsInternalCheck(t *testing.T) {
+	upstream := pngUpstream(t)
+	svc := newService(t.TempDir(), trustedHostTestConfig([]string{"LOCALHOST"}))
+	cached, err := svc.FetchAndCache(context.Background(), localhostURL(t, upstream, "/ok.png"))
+	if err != nil {
+		t.Fatalf("trusted host fetch: %v", err)
+	}
+	if cached.Metadata.ContentType != "image/png" {
+		t.Fatalf("content type = %q, want image/png", cached.Metadata.ContentType)
+	}
+}
+
+// 匹配按拨号主机名，不看解析出的 IP：名单只有 localhost 时，同一台服务器
+// 用 127.0.0.1 字面量直连仍被拒——放行的是名字不是地址。
+func TestReviewMediaTrustedListMatchesHostnameNotResolvedIP(t *testing.T) {
+	upstream := pngUpstream(t)
+	svc := newService(t.TempDir(), trustedHostTestConfig([]string{"localhost"}))
+	_, err := svc.FetchAndCache(context.Background(), upstream.URL+"/ok.png")
+	if !errors.Is(err, ErrBlockedUpstreamAddress) {
+		t.Fatalf("err = %v, want ErrBlockedUpstreamAddress", err)
+	}
+}
+
+// 空名单与旧行为一致：localhost 解析回环照旧被拒。
+func TestReviewMediaEmptyTrustedListStillGuards(t *testing.T) {
+	upstream := pngUpstream(t)
+	svc := newService(t.TempDir(), trustedHostTestConfig(nil))
+	_, err := svc.FetchAndCache(context.Background(), localhostURL(t, upstream, "/ok.png"))
+	if !errors.Is(err, ErrBlockedUpstreamAddress) {
+		t.Fatalf("err = %v, want ErrBlockedUpstreamAddress", err)
+	}
+}
+
+// 名单内主机 302 跳到名单外内网主机仍被拒：每次新建连都按拨号主机名
+// 重新判定。
+func TestReviewMediaRedirectFromTrustedToUntrustedBlocked(t *testing.T) {
+	target := pngUpstream(t)
+	var targetURL string
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, targetURL, http.StatusFound)
+	}))
+	t.Cleanup(origin.Close)
+	targetURL = target.URL + "/ok.png"
+
+	svc := newService(t.TempDir(), trustedHostTestConfig([]string{"localhost"}))
+	_, err := svc.FetchAndCache(context.Background(), localhostURL(t, origin, "/start"))
+	if !errors.Is(err, ErrBlockedUpstreamAddress) {
+		t.Fatalf("err = %v, want ErrBlockedUpstreamAddress（名单内主机跳名单外内网主机仍应被拒）", err)
+	}
+}
+
+// 名单规整：去空白、统一小写去重、丢弃空项。
+func TestNormalizeTrustedPrivateHosts(t *testing.T) {
+	set := normalizeTrustedPrivateHosts([]string{" UIV.Example.COM ", "uiv.example.com", "", "  ", "img.local"})
+	if len(set) != 2 {
+		t.Fatalf("set = %v, want 2 项（空白与重复规整后）", set)
+	}
+	for _, h := range []string{"uiv.example.com", "img.local"} {
+		if _, ok := set[h]; !ok {
+			t.Fatalf("set 缺 %q", h)
+		}
+	}
+	if normalizeTrustedPrivateHosts(nil) != nil {
+		t.Fatal("nil 输入应返回 nil")
+	}
+	if got := normalizeTrustedPrivateHosts([]string{" ", ""}); len(got) != 0 {
+		t.Fatalf("全空项应规整为空集合，got %v", got)
+	}
+}
