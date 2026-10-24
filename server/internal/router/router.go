@@ -382,6 +382,10 @@ func Setup(
 		bots.POST("/:id/calls/:callId/cancel", botHandler.CancelCall)
 		bots.GET("/:id/authorizations", botHandler.ListAuthorizations)
 		bots.DELETE("/:id/authorizations/:authorizationId", botHandler.RevokeAuthorization)
+		// 分级放行规则（INT-160）：tier1 规则的独立开关与误判状态；规则的
+		// 分档与前置条件都在服务端，这里只暴露开关。
+		bots.GET("/:id/policy-rules", botHandler.ListWritePolicyRules)
+		bots.PUT("/:id/policy-rules/:ruleId", botHandler.SetWritePolicyRuleEnabled)
 		// 定时任务（INT-103）：用户只能查看与开关，没有创建/编辑/删除端点；
 		// 任务的创建/修改/删除只经机器人 fs_schedule 工具。INT-123 起可清空
 		// 任务小状态（幂等），写入仍只经机器人 state_set。

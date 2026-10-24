@@ -32,6 +32,11 @@ type botToolOutcome struct {
 	ResultChars int64
 	ResultItems int64
 	Truncated   bool
+	// WaitResult 是 fs_thread/wait 的完整结构化收尾结果（INT-160）：随「平台
+	// 后台结果」消息的 wait_result 字段进入模型上下文（整条消息已被围栏，不
+	// 再内层转义），与 ResultJSON 同值——结果太短不会截断，这里只是让它以
+	// 结构化对象出现在唤醒消息里。非 wait 调用恒空。
+	WaitResult json.RawMessage `json:"-"`
 }
 
 // botBuildOutcome 由执行结果构造产出；执行失败时给模型结构化错误。
@@ -251,6 +256,7 @@ const botHelpText = `Fast Ship 机器人工具说明：
 - fs_thread stop 是 run.interrupt + holdQueue：仅当线程存在可中断 run/后台工作才派发停止命令，并挂起该线程的排队消息（队列 held，此后新消息也进队列但不执行）、结束该线程的 PR 监听、停掉它委派的子任务；线程只剩 PR 监听这类不可中断占位时 stop 是空操作（stopped=false），PR 监听继续；回执只表示受理，是否真的停了用 fs_thread get 的 activity.stopping 判断。
 - fs_thread send 在线程运行中会把消息排队；队列里已有被挂起的排队消息（stop 或 T3 重启恢复所致）时，新消息也会继承挂起，要先 resume_queue。
 - fs_thread settle 把线程收进 T3 历史区：list 默认不含已结算线程，要带 settled=true 才看得到；结算会清掉置顶与该线程所有 PR 监听；线程还在跑、有排队消息或有待应答的审批/提问时会被拒绝（先停止或先应答再结算）。unsettle 撤销、放回默认列表。resume_queue 恢复该线程被挂起的队列，排队消息继续执行。
+- fs_thread wait 挂起等待线程变化（异步动作，受理即 running，不进执行队列，无写副作用；本动作自工具集 v13 起提供，更早版本的会话不可调用）：on 选触发条件（idle/needs_reply/error，逗号分隔子集，缺省全部），timeout_minutes 是等待上限（1-30，缺省 10；定时任务会话内不得超过 15）。线程开始运行并命中条件（idle 需稳定约 20 秒）即唤醒；约 60 秒内线程始终没开始运行会以 not_started 唤醒；到超时按 outcome 区分 timeout_unchanged（监听可信、确实没动）/timeout_progressing（在动但没到终态）/watch_degraded（连接不可信，结论仅供参考）/thread_gone。唤醒的「平台后台结果」带 wait_result：变化字段前后对比（status/run_status/activity/queue.held/PR 状态）、条目绝对数、等待期间更新过的条目数 new_items（updated_at 晚于挂上时刻的条目数）与最近 3 条条目摘要，醒来通常不必再 get。取消用 fs_cancel；每机器人同时最多 3 个、同一线程 1 个（重复挂立即返回 already_waiting 与已有 call_id）、同一线程 1 小时内最多挂 6 次。
 - 大结果被截断时（truncated=true）结果体只给开头预览（preview），用 fs_result action=read call_id=<call_id> offset=next_offset 续读，单位是 Unicode 字符；续读返回体标明切片范围与 next_offset，按它继续不会漏内容。
 - fs_stop.stop 结束当前主线运行；用户点「停止」只是发来一条「停止」消息，是否停止由你决定，可用 fs_stop 执行。fs_cancel.cancel 取消本机器人的某个后台调用。
 - 中断（如服务重启、调用被取消）后结果可能无法核实（effect_may_have_occurred=true）：不要断言失败、不要自动重放副作用，先用读取类工具核实现状。

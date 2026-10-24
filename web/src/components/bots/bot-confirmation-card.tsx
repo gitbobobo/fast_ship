@@ -317,6 +317,24 @@ export function BotConfirmationCard({
   const approveLabel = isScheduleCall
     ? `批准${SCHEDULE_ACTION_LABELS[call.action] ?? ""}`
     : "批准";
+  // 分级放行降级卡（INT-160）：tier1 候选因前置/配额/规则开关不满足而交回
+  // 确认，卡上如实说明原因与过期时间（过期后批准入队的调用在执行前复检
+  // 即失败）。
+  const downgradeReason =
+    typeof call.policy?.downgrade_reason === "string"
+      ? call.policy.downgrade_reason
+      : "";
+  const expiryText = (() => {
+    if (!call.policy?.expiry) return "";
+    const when = new Date(call.policy.expiry);
+    return Number.isNaN(when.getTime())
+      ? ""
+      : when.toLocaleTimeString([], {
+          hour: "2-digit",
+          minute: "2-digit",
+          hour12: false,
+        });
+  })();
   // 折叠的「查看原始参数」展开态：闭合的 <details> 里 JsonBlock 子树没有
   // 布局盒，溢出检测要等展开后重测（视觉审查）。
   const [rawParamsOpen, setRawParamsOpen] = useState(false);
@@ -408,8 +426,25 @@ export function BotConfirmationCard({
       )}
       {canAlwaysAllow && (
         <p className="text-xs text-muted-foreground">
-          「始终允许」按本次调用的 action、范围与写入字段精确授权，可在授权管理中撤销。
+          「始终允许」按本次调用的动作、范围与写入字段精确授权，可在授权管理中撤销。
         </p>
+      )}
+      {(downgradeReason || expiryText) && (
+        <div
+          data-testid="bot-confirmation-policy-note"
+          className="space-y-0.5 rounded-lg border border-amber-500/30 bg-background/60 px-3 py-2 text-xs"
+        >
+          {downgradeReason && (
+            <p className="text-amber-700 dark:text-amber-400">
+              自动放行未生效：{downgradeReason}
+            </p>
+          )}
+          {expiryText && (
+            <p className="text-muted-foreground">
+              本卡 {expiryText} 过期；过期后批准的调用会在执行前复检并拒绝，请重新发起。
+            </p>
+          )}
+        </div>
       )}
       {error !== undefined && error !== null && (
         <p

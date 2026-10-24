@@ -585,9 +585,27 @@ func (s *BotService) tryFinishScheduleRun(bot *model.Bot, run *model.BotRun) boo
 		// 失败或「需要汇报且非静默」才追加事件；成功静默只记录。任务在运行
 		// 期间被删掉时用派发时冻结的「需要汇报」与任务名兜底：这次运行已经
 		// 跑完并产出了要汇报的内容，用户也再无法从任务查询看到它。
-		if !silent && run.ScheduleTaskID != nil {
-			task := model.BotScheduleTask{ID: *run.ScheduleTaskID, Name: botScheduleTaskNameFromContext(run)}
-			needsReport := botScheduleNeedsReportFromContext(run)
+		// INT-160：本轮出现过 tier3 同步拒绝时强制汇报——模型拿到的失败回复
+		// 要求它向用户说明，主线必须收到这条说明，不能被 needs_report=false
+		// 或静默哨兵吞掉。静默运行 summary 为空，拒绝原因拼不进模型汇报，
+		// 所以把本轮被拒清单（工具/动作+拒绝原因）直接拼进事件内容。
+		denied, deniedErr := repository.NewBotToolCallRepository(tx).CountScheduleDeniedByRun(run.ID)
+		if deniedErr != nil {
+			return deniedErr
+		}
+		forceReport := denied > 0
+		reportSummary := summary
+		if forceReport {
+			deniedRows, listErr := repository.NewBotToolCallRepository(tx).ListScheduleDeniedByRunTx(tx, run.ID)
+			if listErr != nil {
+				return listErr
+			}
+			reportSummary = strings.TrimSpace(summary + "\n" + botScheduleDeniedNote(deniedRows))
+		}
+		var task model.BotScheduleTask
+		needsReport := botScheduleNeedsReportFromContext(run)
+		if run.ScheduleTaskID != nil {
+			task = model.BotScheduleTask{ID: *run.ScheduleTaskID, Name: botScheduleTaskNameFromContext(run)}
 			var stored model.BotScheduleTask
 			if err := tx.Where("id = ?", *run.ScheduleTaskID).First(&stored).Error; err == nil {
 				task = stored
@@ -595,13 +613,17 @@ func (s *BotService) tryFinishScheduleRun(bot *model.Bot, run *model.BotRun) boo
 			} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 				return err
 			}
-			if needsReport {
-				if err := s.appendScheduleEventTx(tx, bot.ID, &task, run,
-					model.BotRunStatusCompleted, summary, "", "", now); err != nil {
-					return err
-				}
-				appendedEvent = true
+		} else {
+			// ScheduleTaskID 为空的 schedule run（防御口径外真实存在）：被拒
+			// 强制汇报仍要落到主线，任务名用运行时上下文兜底。
+			task.Name = botScheduleTaskNameFromContext(run)
+		}
+		if (needsReport || forceReport) && (!silent || forceReport) {
+			if err := s.appendScheduleEventTx(tx, bot.ID, &task, run,
+				model.BotRunStatusCompleted, reportSummary, "", "", now); err != nil {
+				return err
 			}
+			appendedEvent = true
 		}
 		return nil
 	})
@@ -616,6 +638,33 @@ func (s *BotService) tryFinishScheduleRun(bot *model.Bot, run *model.BotRun) boo
 		}
 	}
 	return finished
+}
+
+// botScheduleDeniedNote 把本轮被 tier3 同步拒绝的调用清单拼成汇报附注：每行
+// 「工具/动作：拒绝原因」。清单读不出来时至少说明有拒绝发生——主线必须能
+// 看到「哪些动作被拒、为什么」，静默哨兵与 needs_report=false 都压不过它。
+func botScheduleDeniedNote(rows []model.BotToolCall) string {
+	if len(rows) == 0 {
+		return "本轮有写操作被定时任务会话同步拒绝（拒绝清单读取失败），请查看调用账本"
+	}
+	lines := make([]string, 0, len(rows)+1)
+	lines = append(lines, fmt.Sprintf("本轮有 %d 个动作被定时任务会话拒绝，需在主线重新发起并由用户确认：", len(rows)))
+	for i := range rows {
+		// 真实拒绝原因在 policy_json.downgrade_reason 里；ErrorMessage 是
+		// 受理端通用文案，只说「不可执行」看不出为何被拒。
+		reason := ""
+		var pol map[string]interface{}
+		if err := json.Unmarshal([]byte(rows[i].PolicyJSON), &pol); err == nil {
+			if dr, _ := pol["downgrade_reason"].(string); dr != "" {
+				reason = dr
+			}
+		}
+		if reason == "" && rows[i].ErrorMessage != nil {
+			reason = *rows[i].ErrorMessage
+		}
+		lines = append(lines, fmt.Sprintf("- %s/%s：%s", rows[i].ToolName, rows[i].Action, reason))
+	}
+	return strings.Join(lines, "\n")
 }
 
 // finishScheduleFailed 落 failed 终态并同事务追加运行事件（失败必报）。

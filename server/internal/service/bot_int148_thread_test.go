@@ -59,8 +59,8 @@ func TestBotInt148ThreadToolsetV9(t *testing.T) {
 			t.Fatalf("%s 的字段规则应为 env_id+thread_id: %+v", action, rule)
 		}
 	}
-	// v9/v10 的 fs_thread 参数自 INT-159 起冻结在 botThreadArgsV9Frozen
-	// （launch 执行配置只进 v12 的活跃结构体）；v8 仍冻结在更早的共享副本。
+	// v9–v11 的 fs_thread 参数冻结在 botThreadArgsV9Frozen，v12（INT-159）
+	// 冻结在 botThreadArgsV12Frozen；v8 仍冻结在更早的共享副本。
 	if thread.ArgsType.Name() != "botThreadArgsV9Frozen" {
 		t.Fatalf("v9 fs_thread 应冻结在 botThreadArgsV9Frozen，实得 %s", thread.ArgsType.Name())
 	}
@@ -70,8 +70,11 @@ func TestBotInt148ThreadToolsetV9(t *testing.T) {
 	if botToolsetVersionOf(11).byName["fs_thread"].ArgsType.Name() != "botThreadArgsV9Frozen" {
 		t.Fatalf("v11 fs_thread 应冻结在 botThreadArgsV9Frozen（INT-156 只演进描述）")
 	}
-	if botToolsetVersionOf(12).byName["fs_thread"].ArgsType.Name() != "botThreadArgs" {
-		t.Fatalf("v12 fs_thread 应使用活跃参数结构体")
+	if botToolsetVersionOf(12).byName["fs_thread"].ArgsType.Name() != "botThreadArgsV12Frozen" {
+		t.Fatalf("v12 fs_thread 应冻结在 botThreadArgsV12Frozen（INT-160 的 wait 只进 v13）")
+	}
+	if botToolsetVersionOf(13).byName["fs_thread"].ArgsType.Name() != "botThreadArgs" {
+		t.Fatalf("v13 fs_thread 应使用活跃参数结构体")
 	}
 	if v8.byName["fs_thread"].ArgsType.Name() != "botThreadArgsV5Frozen" {
 		t.Fatalf("v8 fs_thread 应冻结在 botThreadArgsV5Frozen")

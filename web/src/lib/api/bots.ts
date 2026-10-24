@@ -74,6 +74,8 @@ export interface BotMessageContent {
   error_code?: string;
   error_message?: string;
   effect_may_have_occurred?: boolean;
+  /** background_result：分级放行评估结论（INT-160），自动执行的调用据此在聊天流里显示徽标。 */
+  policy?: BotCallPolicy;
   decision?: string;
   event?: string;
   detail?: unknown;
@@ -115,6 +117,23 @@ export type BotCallStatus =
 
 export type BotCallDecision = "approve" | "reject" | "always_allow";
 
+/**
+ * 分级放行（INT-160）的评估结论：服务端按「动作+参数+目标线程状态」算档，
+ * 前端只渲染不判断。auto 且 tier=tier1 时工具卡显示「自动执行」徽标；
+ * downgrade_reason/expiry 只出现在降级确认卡上。
+ */
+export interface BotCallPolicy {
+  tier: "tier1" | "tier2" | "tier3";
+  rule_id?: string;
+  auto: boolean;
+  source?: string;
+  facts?: Record<string, unknown>;
+  downgrade_reason?: string;
+  expiry?: string;
+  approved_call_id?: string;
+  schedule_denied?: boolean;
+}
+
 export interface BotCall {
   id: string;
   bot_id: string;
@@ -130,6 +149,8 @@ export interface BotCall {
   error_message?: string | null;
   /** 服务端生成的执行身份与授权范围；fs_schedule 确认卡的预览在 execution_context.schedule。 */
   execution_context?: Record<string, unknown> | null;
+  /** 分级放行评估结论（INT-160）；历史行为空即「策略上线前」。 */
+  policy?: BotCallPolicy | null;
   /** 副作用可能已发生（取消竞速、重启恢复等）；如实展示，不声称已回滚。 */
   effect_may_have_occurred?: boolean;
   /** 进入模型上下文的受限结果预览；完整结果经 result 端点按需读取。 */
@@ -191,6 +212,9 @@ export interface BotRun {
 }
 
 export type BotAuthorization = Schemas["BotAuthorization"];
+
+/** 分级放行 tier1 规则的开关与误判状态（INT-160）；行缺失按启用展示。 */
+export type BotWritePolicyRule = Schemas["BotWritePolicyRule"];
 
 /** 契约同名的指标口径；进行中或 usage 未收齐时 token 计数为 null。 */
 export type BotRequestMetrics = Schemas["BotRequestMetrics"];
@@ -442,6 +466,25 @@ export const botApi = {
           options(),
         )
         .json<ApiResponse<null>>(),
+    ),
+
+  /** 分级放行规则清单（tier1 规则开关与误判状态，INT-160）。 */
+  policyRules: (botId: string, signal?: AbortSignal) =>
+    decodeApiError(
+      api
+        .get(`${botPath(botId)}/policy-rules`, options(signal))
+        .json<ApiResponse<{ items: BotWritePolicyRule[] }>>(),
+    ),
+
+  /** 开关一条分级放行规则；手动重开会清自动降级痕迹与误判计数。 */
+  setPolicyRuleEnabled: (botId: string, ruleId: string, enabled: boolean) =>
+    write(
+      api
+        .put(`${botPath(botId)}/policy-rules/${encodeURIComponent(ruleId)}`, {
+          json: { enabled },
+          ...options(),
+        })
+        .json<ApiResponse<BotWritePolicyRule>>(),
     ),
 
   scheduleTasks: (botId: string, signal?: AbortSignal) =>

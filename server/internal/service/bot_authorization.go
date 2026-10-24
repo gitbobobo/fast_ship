@@ -93,6 +93,7 @@ type BotToolCallResponse struct {
 	DecidedAt             *string         `json:"decided_at"`
 	AuthorizationID       *string         `json:"authorization_id"`
 	ExecutionContext      json.RawMessage `json:"execution_context"`
+	Policy                json.RawMessage `json:"policy,omitempty"`
 	CancelRequested       bool            `json:"cancel_requested"`
 	ResultPreview         json.RawMessage `json:"result_preview"`
 	ResultChars           int64           `json:"result_chars"`
@@ -135,6 +136,11 @@ func botToolCallResponseOf(call *model.BotToolCall) BotToolCallResponse {
 	if call.ExecutionContextJSON != "" {
 		resp.ExecutionContext = json.RawMessage(call.ExecutionContextJSON)
 	}
+	if call.PolicyJSON != "" {
+		// 分级放行（INT-160）：评估结论进 API 投影，前端据此渲染「自动执行」
+		// 徽标与降级/过期说明。
+		resp.Policy = json.RawMessage(call.PolicyJSON)
+	}
 	if call.ResultPreviewJSON != nil {
 		resp.ResultPreview = json.RawMessage(*call.ResultPreviewJSON)
 	}
@@ -151,6 +157,7 @@ type BotAuthorizationResponse struct {
 	EnvironmentID *string         `json:"environment_id"`
 	Constraints   json.RawMessage `json:"constraints"`
 	CreatedAt     string          `json:"created_at"`
+	ExpiresAt     *string         `json:"expires_at"`
 	RevokedAt     *string         `json:"revoked_at"`
 }
 
@@ -164,6 +171,7 @@ func botAuthorizationResponseOf(a *model.BotAuthorization) BotAuthorizationRespo
 		EnvironmentID: a.EnvironmentID,
 		Constraints:   json.RawMessage(a.ConstraintsJSON),
 		CreatedAt:     a.CreatedAt.UTC().Format(time.RFC3339Nano),
+		ExpiresAt:     rfc3339(a.ExpiresAt),
 		RevokedAt:     rfc3339(a.RevokedAt),
 	}
 }
@@ -236,19 +244,44 @@ func (s *BotService) DecideCall(userID, botID, callID string, req *CallDecisionR
 			"decision":   decisionStr,
 			"decided_at": now,
 		}
+		if decision == model.BotDecisionAlwaysAllow && call.PolicyJSON != "" {
+			// 「始终允许」批准的调用与存量授权放行的调用同口径：把 source
+			// 改写为 always_allow，执行前复检对 always_allow 直接豁免——
+			// 否则降级卡（source=confirmation）点了「始终允许」仍被复检
+			// 推翻，而新授权却已建出、后续同类调用反而自动放行，自相矛盾。
+			var pol map[string]interface{}
+			if json.Unmarshal([]byte(call.PolicyJSON), &pol) == nil {
+				pol["source"] = "always_allow"
+				if raw, err := json.Marshal(pol); err == nil {
+					cols["policy_json"] = string(raw)
+				}
+			}
+		}
 		if decision == model.BotDecisionReject {
 			cols["status"] = model.BotCallStatusRejected
 			cols["finished_at"] = now
 		}
 		if newAuthz != nil {
-			if err := repository.NewBotAuthorizationRepository(tx).CreateTx(tx, newAuthz); err != nil {
-				// 活跃规则唯一冲突：复用已有授权。
-				existing, findErr := repository.NewBotAuthorizationRepository(tx).
-					FindActiveRuleTx(tx, botID, newAuthz.RuleHash)
-				if findErr != nil {
-					return findErr
+			authzRepo := repository.NewBotAuthorizationRepository(tx)
+			if err := authzRepo.CreateTx(tx, newAuthz); err != nil {
+				// 活跃规则唯一冲突：过期行也占着部分唯一索引（按
+				// revoked_at IS NULL 判活跃）——惰性撤销过期行后重试一次；
+				// 仍有活跃行则复用已有授权。
+				if _, revErr := authzRepo.RevokeExpiredRuleTx(tx, botID, newAuthz.RuleHash, now); revErr != nil {
+					return revErr
 				}
-				newAuthz = existing
+				existing, findErr := authzRepo.FindActiveRuleTx(tx, botID, newAuthz.RuleHash)
+				switch {
+				case errors.Is(findErr, gorm.ErrRecordNotFound):
+					// 撤销过期占位后已无活跃行：重试创建。
+					if err2 := authzRepo.CreateTx(tx, newAuthz); err2 != nil {
+						return err2
+					}
+				case findErr != nil:
+					return findErr
+				default:
+					newAuthz = existing
+				}
 			}
 			cols["authorization_id"] = newAuthz.ID
 		}
@@ -288,6 +321,9 @@ func (s *BotService) DecideCall(userID, botID, callID string, req *CallDecisionR
 
 	// 决定后事件与 worker 唤醒（事务外）。
 	callIDCopy := callID
+	// 分级放行误判检测（INT-160）：用户方向是事实源——拒批同目标写、或批准
+	// 与刚自动放行动作方向相反的写，都按 (rule, scope) 记一次误判。
+	s.detectPolicyMisjudgeOnDecision(botID, call, decisionStr)
 	s.emitEvent(botID, nil, callIDCopy, model.BotEventToolResult, botEventEnvelope{
 		Kind: "tool_result", Phase: "decision",
 		Payload: map[string]interface{}{"decision": decisionStr, "status": map[bool]string{
@@ -358,6 +394,9 @@ func (s *BotService) buildAlwaysAllowValue(botID string, call *model.BotToolCall
 	if envID != "" {
 		envPtr = &envID
 	}
+	// INT-160：新建「始终允许」一律限时（默认 30 天）——永久、范围宽的授权
+	// 是实测中最不安全的放宽形态；到期由匹配查询挡掉并惰性补 revoked_at。
+	expiresAt := time.Now().UTC().Add(botPolicyAlwaysAllowTTL)
 	return &model.BotAuthorization{
 		ID:              uuid.NewString(),
 		BotID:           botID,
@@ -369,6 +408,7 @@ func (s *BotService) buildAlwaysAllowValue(botID string, call *model.BotToolCall
 		ConstraintsJSON: string(constraintsRaw),
 		RuleHash:        botRuleHash(rule),
 		CreatedAt:       time.Now().UTC(),
+		ExpiresAt:       &expiresAt,
 	}
 }
 
@@ -439,6 +479,20 @@ func (s *BotService) RevokeAuthorization(userID, botID, authzID string) error {
 		botID, authzID, model.BotCallStatusQueued).Find(&queued).Error; err == nil {
 		for _, call := range queued {
 			s.revertQueuedCall(call)
+		}
+	}
+	// 分级放行误判检测（INT-160）：撤销同目标的授权说明此前按该规则的自动
+	// 放行不合用户预期。授权行带工具/动作/范围，按事实匹配窗口内的自动放行。
+	authzRow, err := s.authz.FindByIDAndBot(authzID, botID)
+	if err == nil {
+		if ruleID := botPolicyRuleForAction(authzRow.ToolName, authzRow.Action); ruleID != "" {
+			envID := ""
+			if authzRow.EnvironmentID != nil {
+				envID = *authzRow.EnvironmentID
+			}
+			if s.policyRecentAutoOnThread(botID, ruleID, envID, authzRow.ScopeID) {
+				s.recordPolicyMisjudgment(botID, ruleID, "用户撤销了同目标的授权")
+			}
 		}
 	}
 	return nil

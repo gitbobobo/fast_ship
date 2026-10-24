@@ -33,15 +33,15 @@ func TestBotInt159ToolsetV12(t *testing.T) {
 	if v11.hash == v12.hash {
 		t.Fatalf("v11/v12 相邻版本应字节不同")
 	}
-	if botToolsetOf().hash != v12.hash {
-		t.Fatalf("botToolsetOf 应指向 v12")
+	if botToolsetOf().hash == v12.hash {
+		t.Fatalf("botToolsetOf 应指向 v12 之后的版本（v12 已冻结）")
 	}
 	thread := v12.byName["fs_thread"]
 	if thread == nil || len(thread.Actions) != 11 {
 		t.Fatalf("v12 fs_thread 应仍是 11 个动作: %+v", thread)
 	}
-	if thread.ArgsType.Name() != "botThreadArgs" {
-		t.Fatalf("v12 fs_thread 应使用活跃参数结构体: %s", thread.ArgsType.Name())
+	if thread.ArgsType.Name() != "botThreadArgsV12Frozen" {
+		t.Fatalf("v12 fs_thread 自 INT-160 起冻结在 botThreadArgsV12Frozen: %s", thread.ArgsType.Name())
 	}
 	// v12 的 fs_thread schema 带 launch 配置字段；v9–v11 冻结版没有。
 	raw12, _ := json.Marshal(thread.Parameters)

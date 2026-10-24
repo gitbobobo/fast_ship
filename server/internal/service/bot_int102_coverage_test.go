@@ -828,9 +828,9 @@ func TestBotFoldBatchThreshold(t *testing.T) {
 	env3.fake.strict = true
 	u3 := createBotTestUser(t, env3.db, "foldok")
 	bot3 := env3.createBot(t, u3)
-	// INT-156/INT-159 合并后前缀再重定标：实测 afterFold=8498 > 旧 G=8235，
-	// 25600 的 G≈8650 才能继续验证「折叠已足够、不发摘要」。
-	env3.cfg.Bots.Context.WindowTokens = 25600
+	// INT-156/INT-159/INT-160 合并后前缀再重定标：实测 afterFold=8762 > 旧
+	// G=8640，27000 的 G≈9112 才能继续验证「折叠已足够、不发摘要」。
+	env3.cfg.Bots.Context.WindowTokens = 27000
 	seedBotUserMessage(t, env3, bot3.ID, "old")
 	seedBotAssistantToolBlock(t, env3, bot3.ID, "huge", "fs_issue", strings.Repeat("很长的工具结果", 8000))
 	for i := 1; i <= 3; i++ {

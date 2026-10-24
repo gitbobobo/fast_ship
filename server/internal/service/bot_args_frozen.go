@@ -219,12 +219,13 @@ type botThreadArgsV5Frozen struct {
 	ItemOffset int `json:"item_offset,omitempty" jsonschema:"description=get 可选；条目偏移（从 0 起，配合 item_limit 向前翻完整历史）"`
 }
 
-// botThreadArgsV9Frozen 是 v9/v10 共用的 fs_thread 参数冻结副本（v9 由
-// INT-148 发布、v10 由 INT-136 发布时两者的 fs_thread 标签一致——v10 只演进
-// fs_schedule 描述）。INT-159 给 launch 新增 model_selection/runtime_mode/
-// workspace 只进 v12，v9/v10 的 wire 字节由本副本逐字节保留（基线见
-// bot_int148_thread_test.go 的 botToolsetV9FrozenHash 与 bot_int136_test.go
-// 的 botToolsetV10FrozenHash）。不要改动本结构体的任何字段或标签。
+// botThreadArgsV9Frozen 是 v9–v11 共用的 fs_thread 参数冻结副本（v9 由
+// INT-148 发布，v10/v11 只演进工具与动作描述、参数标签不变）。INT-159 给
+// launch 新增 model_selection/runtime_mode/workspace 只进 v12，INT-160 的
+// wait 动作与 on/timeout_minutes 参数只进 v13，v9–v11 的 wire 字节由本副本
+// 逐字节保留（基线见 bot_int148_thread_test.go 的 botToolsetV9FrozenHash、
+// bot_int136_test.go 的 botToolsetV10FrozenHash 与 bot_int156_test.go）。
+// 不要改动本结构体的任何字段或标签。
 type botThreadArgsV9Frozen struct {
 	Action    string `json:"action" jsonschema:"enum=list,enum=get,enum=item,enum=composer_options,enum=workspace_options,enum=launch,enum=send,enum=stop,enum=settle,enum=unsettle,enum=resume_queue,required"`
 	EnvID     string `json:"env_id,omitempty" jsonschema:"description=T3 环境 ID（除 list 外的动作必填；list 可选，只保留该环境的线程）"`
@@ -235,6 +236,38 @@ type botThreadArgsV9Frozen struct {
 	Cursor    *int   `json:"cursor,omitempty" jsonschema:"description=上一页返回的 next_cursor（workspace_options）"`
 	Text      string `json:"text,omitempty" jsonschema:"description=消息正文（launch/send 必填）"`
 	Title     string `json:"title,omitempty" jsonschema:"description=线程标题（launch 可选，缺省由 T3 生成）"`
+	// list 过滤与分页：默认只看未归档、未结算线程（归档/已结算不属于巡检范围）。
+	IncludeArchived *bool  `json:"include_archived,omitempty" jsonschema:"description=list 可选；true 时连归档线程一起返回（默认 false，只返回未归档线程）"`
+	Settled         *bool  `json:"settled,omitempty" jsonschema:"description=list 可选；默认只返回未结算线程，true 只看已收进历史区的线程，false 与默认一致"`
+	Status          string `json:"status,omitempty" jsonschema:"description=list 可选；按运行态过滤（running/idle/waiting/archived/error 等，服务端原样比较）"`
+	UpdatedAfter    string `json:"updated_after,omitempty" jsonschema:"description=list 可选；只返回 updated_at 晚于该 RFC3339 时间的线程"`
+	Page            int    `json:"page,omitempty" jsonschema:"description=页码（从 1 起，list 用；过滤后稳定排序再切片）"`
+	PageSize        int    `json:"page_size,omitempty" jsonschema:"description=页长（1-100，list 用，默认 50；服务端强制上限，不允许一次拉全量）"`
+	// get 的条目分页：详情默认只回最近若干条，完整历史按 offset 向前读。
+	ItemLimit  int `json:"item_limit,omitempty" jsonschema:"description=get 可选；返回的线程条目条数（默认 50，上限 200）"`
+	ItemOffset int `json:"item_offset,omitempty" jsonschema:"description=get 可选；条目偏移（从 0 起，配合 item_limit 向前翻完整历史）"`
+}
+
+// botThreadArgsV12Frozen 是 v12（INT-159）的 fs_thread 参数冻结副本：launch
+// 可选执行配置 model_selection/runtime_mode/workspace 随本版发布。INT-160
+// 的 wait 动作与 on/timeout_minutes 参数只进 v13，v12 的 wire 字节由本副本
+// 逐字节保留。不要改动本结构体的任何字段或标签。
+type botThreadArgsV12Frozen struct {
+	Action    string `json:"action" jsonschema:"enum=list,enum=get,enum=item,enum=composer_options,enum=workspace_options,enum=launch,enum=send,enum=stop,enum=settle,enum=unsettle,enum=resume_queue,required"`
+	EnvID     string `json:"env_id,omitempty" jsonschema:"description=T3 环境 ID（除 list 外的动作必填；list 可选，只保留该环境的线程）"`
+	ThreadID  string `json:"thread_id,omitempty" jsonschema:"description=T3 线程 ID（按线程的动作必填，逐项见 action 描述）"`
+	ItemID    string `json:"item_id,omitempty" jsonschema:"description=T3 线程条目 ID（item 必填；条目 ID 由 get 返回的 items[].id 提供）"`
+	ProjectID string `json:"project_id,omitempty" jsonschema:"description=T3 项目 ID（workspace_options/launch 必填；list 可选，只保留该项目的线程）"`
+	Query     string `json:"query,omitempty" jsonschema:"description=关键词过滤（list 可选：线程 id/标题/项目名/项目 id/环境名，不区分大小写包含匹配；workspace_options 为引用名过滤）"`
+	Cursor    *int   `json:"cursor,omitempty" jsonschema:"description=上一页返回的 next_cursor（workspace_options）"`
+	Text      string `json:"text,omitempty" jsonschema:"description=消息正文（launch/send 必填）"`
+	Title     string `json:"title,omitempty" jsonschema:"description=线程标题（launch 可选，缺省由 T3 生成）"`
+	// launch 可选执行配置（INT-159）：缺省行为各字段不同——model_selection
+	// 沿用项目默认模型、runtime_mode 为 full-access、workspace 用项目主检出；
+	// 其它动作携带即被拒绝（不静默忽略）。
+	ModelSelection *botThreadModelSelection `json:"model_selection,omitempty" jsonschema:"description=模型选择（launch 可选）：instance_id/model/options 的取值用 composer_options 返回的 providers 清单；省略沿用项目默认"`
+	RuntimeMode    string                   `json:"runtime_mode,omitempty" jsonschema:"enum=approval-required,enum=auto-accept-edits,enum=auto,enum=full-access,description=运行模式（launch 可选）；省略沿用服务端默认"`
+	Workspace      *botThreadWorkspace      `json:"workspace,omitempty" jsonschema:"description=工作区策略（launch 可选）；省略为项目主检出"`
 	// list 过滤与分页：默认只看未归档、未结算线程（归档/已结算不属于巡检范围）。
 	IncludeArchived *bool  `json:"include_archived,omitempty" jsonschema:"description=list 可选；true 时连归档线程一起返回（默认 false，只返回未归档线程）"`
 	Settled         *bool  `json:"settled,omitempty" jsonschema:"description=list 可选；默认只返回未结算线程，true 只看已收进历史区的线程，false 与默认一致"`

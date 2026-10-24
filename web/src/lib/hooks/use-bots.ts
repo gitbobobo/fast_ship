@@ -52,6 +52,12 @@ export const botKeys = {
     "authorizations",
     botId,
   ],
+  policyRules: (userId: string | null, botId: string) => [
+    BOTS_ROOT,
+    userId,
+    "policy-rules",
+    botId,
+  ],
   /** 聊天页一致快照：messages/calls/runs/detail 缓存的水合来源。 */
   snapshot: (userId: string | null, botId: string) => [
     BOTS_ROOT,
@@ -184,6 +190,31 @@ export function useRevokeAuthorization(botId: string) {
     onSettled: () =>
       queryClient.invalidateQueries({
         queryKey: botKeys.authorizations(userId, botId),
+      }),
+  });
+}
+
+/** 分级放行规则清单（INT-160）：与授权管理同区展示、同区开关。 */
+export function useBotPolicyRules(botId: string) {
+  const userId = useUserId();
+  return useQuery({
+    queryKey: botKeys.policyRules(userId, botId),
+    queryFn: async ({ signal }) =>
+      (await botApi.policyRules(botId, signal)).data.items,
+    enabled: Boolean(userId && botId),
+    refetchOnMount: "always",
+  });
+}
+
+export function useSetPolicyRuleEnabled(botId: string) {
+  const queryClient = useQueryClient();
+  const userId = useUserId();
+  return useMutation({
+    mutationFn: (input: { ruleId: string; enabled: boolean }) =>
+      botApi.setPolicyRuleEnabled(botId, input.ruleId, input.enabled),
+    onSettled: () =>
+      queryClient.invalidateQueries({
+        queryKey: botKeys.policyRules(userId, botId),
       }),
   });
 }

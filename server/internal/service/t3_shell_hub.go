@@ -273,6 +273,19 @@ func (h *t3ShellHub) View(ctx context.Context, env *model.T3Environment, token s
 	return e.waitView(ctx)
 }
 
+// Peek 读取环境的 shell 状态当前值，不等待首次同步：entry 不存在时只注册
+// （订阅照常在后台建立），随即按内存现状回答（Syncing/Failed 时无快照）。
+// wait 评估器（INT-160）每轮扫描只读内存，绝不阻塞等待。
+func (h *t3ShellHub) Peek(env *model.T3Environment, token string) (*t3ShellView, error) {
+	e, err := h.admitEntry(env, token)
+	if err != nil {
+		return nil, err
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.viewLocked(), nil
+}
+
 // t3ShellFloorTTL 是配置世代 floor 的保留时长。floor 的用途是拒掉「配置变更前
 // 读出、变更后才到达」的在途请求，这类请求的生命周期是几十秒量级；按**记录
 // 时刻**保留 1 小时后清理，floors 表不随时间增长。清理只能以记录时刻为准：

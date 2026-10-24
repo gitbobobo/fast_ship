@@ -3424,6 +3424,45 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/bots/{id}/policy-rules": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** 分级放行规则清单（tier1 规则开关与误判状态，INT-160） */
+        get: operations["listBotWritePolicyRules"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/bots/{id}/policy-rules/{ruleId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * 开关一条分级放行规则（INT-160）
+         * @description 开关 tier1 规则；行不存在则落行。手动重新启用会清空自动降级时间戳
+         *     与误判计数（窗口重新开始）。误判自动降级（24 小时内 2 次用户反向
+         *     操作）也会写本开关并给主线追加生命周期消息。
+         */
+        put: operations["setBotWritePolicyRuleEnabled"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -6204,6 +6243,15 @@ export interface components {
             authorization_id?: string | null;
             /** @description 服务端生成的执行身份（T3 command/thread/message ID 等）与授权范围 */
             execution_context: Record<string, never>;
+            /**
+             * @description 分级放行评估结论（INT-160）：{tier, rule_id?, auto, source, facts?,
+             *     downgrade_reason?, expiry?, schedule_denied?}。凡经过策略评估的写
+             *     调用都有：自动执行（auto=true）、确认卡（含降级原因与过期时间）、
+             *     定时任务会话 tier3 同步拒绝三类；历史行为空即「策略上线前」
+             */
+            policy?: {
+                [key: string]: unknown;
+            };
             cancel_requested?: boolean;
             /** @description 进入模型上下文的受限结果（完整结果走 result 端点） */
             result_preview?: Record<string, never>;
@@ -6249,8 +6297,34 @@ export interface components {
             };
             /** Format: date-time */
             created_at: string;
+            /**
+             * Format: date-time
+             * @description 到期时间（INT-160）：新建「始终允许」默认创建后 30 天；到期后不再命中（视为已失效，惰性补 revoked_at）。历史行可能为 null
+             */
+            expires_at?: string | null;
             /** Format: date-time */
             revoked_at?: string | null;
+        };
+        /** @description 分级放行 tier1 规则的独立开关与误判状态（INT-160）。分档与前置条件由服务端按「动作+参数+目标线程内存状态」计算，本端点只暴露开关 */
+        BotWritePolicyRule: {
+            /** @description 规则 ID（thread_send_continue / thread_settle_idle / thread_unsettle） */
+            rule_id: string;
+            name: string;
+            description: string;
+            /** @description 行不存在即启用；误判自动降级或手动关闭后为 false */
+            enabled: boolean;
+            /** @description 24 小时窗口内的误判次数（用户反向操作按事实计数） */
+            false_positive_count_24h: number;
+            /**
+             * Format: date-time
+             * @description 误判自动降级的落库时间；手动重新启用后清空
+             */
+            auto_disabled_at?: string | null;
+            /** Format: date-time */
+            updated_at?: string | null;
+        };
+        BotWritePolicyRuleToggleRequest: {
+            enabled: boolean;
         };
         /** @description SSE 重放账本条目（GET /events 的 HTTP 语义只用于流；本 schema 描述单帧 data） */
         BotEvent: {
@@ -14420,6 +14494,70 @@ export interface operations {
         requestBody?: never;
         responses: {
             200: components["responses"]["EmptySuccess"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listBotWritePolicyRules: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description API Key ID */
+                id: components["parameters"]["ProjectOrKeyId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 规则清单（静态目录全量，行缺失按启用） */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"] & {
+                        data?: {
+                            items: components["schemas"]["BotWritePolicyRule"][];
+                        };
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    setBotWritePolicyRuleEnabled: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description API Key ID */
+                id: components["parameters"]["ProjectOrKeyId"];
+                ruleId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BotWritePolicyRuleToggleRequest"];
+            };
+        };
+        responses: {
+            /** @description 开关后的规则状态 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"] & {
+                        data?: components["schemas"]["BotWritePolicyRule"];
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             404: components["responses"]["NotFound"];
             500: components["responses"]["InternalError"];

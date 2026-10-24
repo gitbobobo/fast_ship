@@ -367,6 +367,40 @@ func (h *BotHandler) RevokeAuthorization(c *gin.Context) {
 	response.SuccessEmpty(c)
 }
 
+// ---------- 分级放行规则（INT-160） ----------
+
+// ListWritePolicyRules 列出 tier1 规则的开关与误判状态。
+func (h *BotHandler) ListWritePolicyRules(c *gin.Context) {
+	items, err := h.bots.ListWritePolicyRules(middleware.GetUserID(c), c.Param("id"))
+	if err != nil {
+		middleware.HandleAppError(c, err)
+		return
+	}
+	response.Success(c, gin.H{"items": items})
+}
+
+// SetWritePolicyRuleEnabled 开关一条 tier1 规则；body 只有 {"enabled":bool}，
+// 未知字段与缺省 enabled 都按 400 拒绝。
+func (h *BotHandler) SetWritePolicyRuleEnabled(c *gin.Context) {
+	var req service.SetWritePolicyRuleEnabledRequest
+	dec := json.NewDecoder(c.Request.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		response.BadRequest(c, 40001, "请求参数无效: body 只接受 {\"enabled\":bool}")
+		return
+	}
+	if req.Enabled == nil {
+		response.BadRequest(c, 40001, "请求参数无效: enabled 必填")
+		return
+	}
+	result, err := h.bots.SetWritePolicyRuleEnabled(middleware.GetUserID(c), c.Param("id"), c.Param("ruleId"), *req.Enabled)
+	if err != nil {
+		middleware.HandleAppError(c, err)
+		return
+	}
+	response.Success(c, result)
+}
+
 func parseSeqParam(c *gin.Context, name string) int64 {
 	raw := c.Query(name)
 	if raw == "" {

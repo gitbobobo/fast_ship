@@ -269,6 +269,13 @@ func (s *BotService) resolveThreadScope(prepared *botPreparedCall, raw map[strin
 		prepared.ScopeKind = botScopeThreadQueue
 		prepared.ScopeID = rawString(raw["thread_id"])
 		prepared.EnvironmentID = &envID
+	case "wait":
+		// wait（INT-160）无副作用、不写远端，受理即 running、不走确认/授权；
+		// 范围只用于账本自描述（执行上下文带 env_id/thread_id，限额与恢复
+		// 分支据此识别同线程）。
+		prepared.ScopeKind = botScopeThread
+		prepared.ScopeID = rawString(raw["thread_id"])
+		prepared.EnvironmentID = &envID
 	}
 }
 

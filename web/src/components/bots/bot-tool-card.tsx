@@ -1,9 +1,9 @@
 import { useState, type ReactNode } from "react";
 import { Link } from "react-router";
-import { ChevronDown, ChevronUp, Wrench } from "lucide-react";
+import { ChevronDown, ChevronUp, Sparkles, Wrench } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ApiRequestError } from "@/lib/api/client";
-import { botApi, type BotCall } from "@/lib/api/bots";
+import { botApi, type BotCall, type BotCallPolicy } from "@/lib/api/bots";
 import { cn } from "@/lib/utils";
 import {
   bidiSafeText,
@@ -126,6 +126,41 @@ export function ParamChips({ chips }: { chips: ToolParamChip[] }) {
 }
 
 /**
+ * 自动执行判定（INT-160）：只有 tier1 策略放行（source=tier1）算「自动
+ * 执行」——always-allow 接管的降级候选行同样写 tier=tier1+auto=true，
+ * 但那是用户明示的持久授权执行，不在这里重复标记；定时任务默认放行走
+ * schedule_default，同样不算。
+ */
+export function isPolicyAuto(policy?: BotCallPolicy | null): boolean {
+  return Boolean(
+    policy && policy.auto && policy.tier === "tier1" && policy.source === "tier1",
+  );
+}
+
+/** 「自动执行」徽标：审计不只放面板——聊天流与后台面板都能看到。 */
+export function PolicyAutoBadge({ policy }: { policy?: BotCallPolicy | null }) {
+  if (!isPolicyAuto(policy)) return null;
+  const ruleSuffix =
+    policy?.rule_id === "thread_send_continue"
+      ? " · 继续"
+      : policy?.rule_id === "thread_settle_idle"
+        ? " · 结算"
+        : policy?.rule_id === "thread_unsettle"
+          ? " · 撤销结算"
+          : "";
+  return (
+    <span
+      data-testid="bot-call-auto-badge"
+      title={`分级放行规则 ${policy?.rule_id ?? ""} 自动放行（服务端按前置条件现算，不建持久授权）`}
+      className="inline-flex items-center gap-1 rounded-full bg-sky-500/15 px-2 py-0.5 text-xs font-medium text-sky-700 dark:text-sky-400"
+    >
+      <Sparkles className="h-3 w-3" />
+      自动执行{ruleSuffix}
+    </span>
+  );
+}
+
+/**
  * 工具调用卡：状态从调用账本派生。标题是中文标签，状态徽标贴在
  * 卡片右侧；参数摘要与完整 JSON 属于
  * 确认依据，只在写操作确认卡上呈现，这里不再重复。「查看完整结果」
@@ -180,12 +215,16 @@ export function BotToolCard({
           {title}
         </span>
         {call && (
-          <span
-            data-testid="bot-call-status"
-            className={`ml-auto rounded-full px-2 py-0.5 text-xs font-medium ${STATUS_BADGE[call.status] ?? "bg-muted text-muted-foreground"}`}
-          >
-            {callStatusLabel(call.status)}
-          </span>
+          <>
+            {/* 自动执行标记（INT-160）：紧贴状态徽标左侧，审计不只放面板。 */}
+            <PolicyAutoBadge policy={call.policy} />
+            <span
+              data-testid="bot-call-status"
+              className={`ml-auto rounded-full px-2 py-0.5 text-xs font-medium ${STATUS_BADGE[call.status] ?? "bg-muted text-muted-foreground"}`}
+            >
+              {callStatusLabel(call.status)}
+            </span>
+          </>
         )}
         {cancellable && (
           <Button

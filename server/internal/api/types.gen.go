@@ -1559,8 +1559,11 @@ type BotAuthorization struct {
 	Constraints   map[string]interface{} `json:"constraints"`
 	CreatedAt     string                 `json:"created_at"`
 	EnvironmentId *string                `json:"environment_id,omitempty"`
-	Id            string                 `json:"id"`
-	RevokedAt     *string                `json:"revoked_at,omitempty"`
+
+	// ExpiresAt 到期时间（INT-160）：新建「始终允许」默认创建后 30 天；到期后不再命中（视为已失效，惰性补 revoked_at）。历史行可能为 null
+	ExpiresAt *string `json:"expires_at,omitempty"`
+	Id        string  `json:"id"`
+	RevokedAt *string `json:"revoked_at,omitempty"`
 
 	// ScopeId 范围主体 ID（项目/Issue 所属项目/T3 项目/线程；project_collection 时为用户 ID）
 	ScopeId string `json:"scope_id"`
@@ -1882,6 +1885,12 @@ type BotToolCall struct {
 	// Id 平台调用 ID，同时是执行幂等键
 	Id string `json:"id"`
 
+	// Policy 分级放行评估结论（INT-160）：{tier, rule_id?, auto, source, facts?,
+	// downgrade_reason?, expiry?, schedule_denied?}。凡经过策略评估的写
+	// 调用都有：自动执行（auto=true）、确认卡（含降级原因与过期时间）、
+	// 定时任务会话 tier3 同步拒绝三类；历史行为空即「策略上线前」
+	Policy map[string]interface{} `json:"policy,omitempty"`
+
 	// ProviderToolCallId 模型协议配对 ID
 	ProviderToolCallId   string `json:"provider_tool_call_id"`
 	RequestId            string `json:"request_id"`
@@ -1896,6 +1905,29 @@ type BotToolCall struct {
 	Status    string `json:"status"`
 	ToolName  string `json:"tool_name"`
 	Truncated bool   `json:"truncated"`
+}
+
+// BotWritePolicyRule 分级放行 tier1 规则的独立开关与误判状态（INT-160）。分档与前置条件由服务端按「动作+参数+目标线程内存状态」计算，本端点只暴露开关
+type BotWritePolicyRule struct {
+	// AutoDisabledAt 误判自动降级的落库时间；手动重新启用后清空
+	AutoDisabledAt *string `json:"auto_disabled_at,omitempty"`
+	Description    string  `json:"description"`
+
+	// Enabled 行不存在即启用；误判自动降级或手动关闭后为 false
+	Enabled bool `json:"enabled"`
+
+	// FalsePositiveCount24h 24 小时窗口内的误判次数（用户反向操作按事实计数）
+	FalsePositiveCount24h int    `json:"false_positive_count_24h"`
+	Name                  string `json:"name"`
+
+	// RuleId 规则 ID（thread_send_continue / thread_settle_idle / thread_unsettle）
+	RuleId    string  `json:"rule_id"`
+	UpdatedAt *string `json:"updated_at,omitempty"`
+}
+
+// BotWritePolicyRuleToggleRequest defines model for BotWritePolicyRuleToggleRequest.
+type BotWritePolicyRuleToggleRequest struct {
+	Enabled bool `json:"enabled"`
 }
 
 // Branch defines model for Branch.
@@ -5533,6 +5565,33 @@ type SendBotMessage200JSONResponseBody struct {
 	Message string `json:"message"`
 }
 
+// ListBotWritePolicyRules200JSONResponseBody_Data defines parameters for ListBotWritePolicyRules.
+type ListBotWritePolicyRules200JSONResponseBody_Data struct {
+	Items []BotWritePolicyRule `json:"items"`
+}
+
+// ListBotWritePolicyRules200JSONResponseBody defines parameters for ListBotWritePolicyRules.
+type ListBotWritePolicyRules200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                                              `json:"code"`
+	Data *ListBotWritePolicyRules200JSONResponseBody_Data `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// SetBotWritePolicyRuleEnabled200JSONResponseBody defines parameters for SetBotWritePolicyRuleEnabled.
+type SetBotWritePolicyRuleEnabled200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int `json:"code"`
+
+	// Data 分级放行 tier1 规则的独立开关与误判状态（INT-160）。分档与前置条件由服务端按「动作+参数+目标线程内存状态」计算，本端点只暴露开关
+	Data *BotWritePolicyRule `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
 // ListBotRunsParams defines parameters for ListBotRuns.
 type ListBotRunsParams struct {
 	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
@@ -7721,6 +7780,9 @@ type DecideBotCallJSONRequestBody = BotCallDecisionRequest
 
 // SendBotMessageJSONRequestBody defines body for SendBotMessage for application/json ContentType.
 type SendBotMessageJSONRequestBody = SendBotMessageRequest
+
+// SetBotWritePolicyRuleEnabledJSONRequestBody defines body for SetBotWritePolicyRuleEnabled for application/json ContentType.
+type SetBotWritePolicyRuleEnabledJSONRequestBody = BotWritePolicyRuleToggleRequest
 
 // SetBotScheduleTaskEnabledJSONRequestBody defines body for SetBotScheduleTaskEnabled for application/json ContentType.
 type SetBotScheduleTaskEnabledJSONRequestBody SetBotScheduleTaskEnabledJSONBody

@@ -85,6 +85,11 @@ type fakeT3Environment struct {
 	gotRPC        []t3RecordedRPC // WS 请求（方法+payload，含订阅）
 
 	tokenGate chan struct{} // 非空时 /oauth/token 阻塞直到关闭（并发交错测试用）
+
+	// onDispatch 非空时在收到 orchestration.dispatchCommand 后同步调用（先于
+	// 回执写出）：用于让 send 一类写操作在受理瞬间同步改变快照，复现
+	// 「写操作生效与 wait 采基线」的先后竞态。
+	onDispatch func(payload json.RawMessage)
 }
 
 // fakeT3WSStream 是 fake 上一条已注册的订阅流：写帧经连接级互斥串行化，
@@ -654,6 +659,12 @@ func (f *fakeT3Environment) serveWS(conn *websocket.Conn) {
 				}
 				_ = write(exitSuccessFrame(frame.ID, json.RawMessage(`{"item":`+item+`}`)))
 			case "orchestration.dispatchCommand":
+				f.mu.Lock()
+				hook := f.onDispatch
+				f.mu.Unlock()
+				if hook != nil {
+					hook(frame.Payload)
+				}
 				// 一次性命令受理：真实形状 {"sequence":N}。
 				_ = write(exitSuccessFrame(frame.ID, json.RawMessage(`{"sequence":1}`)))
 			case "orchestration.launchThread":
