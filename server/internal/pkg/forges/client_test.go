@@ -288,6 +288,9 @@ func TestValidateBaseURL(t *testing.T) {
 	t.Run("形状非法", func(t *testing.T) {
 		for _, raw := range []string{
 			"", "  ", "forge.example.com", "https://", "https://a.com?x=1", "https://a.com#frag",
+			// 尾部裸 ?（ForceQuery）：RawQuery 为空但拼接保留 ?，推导的
+			// /api/v1 会被当 query 文本。
+			"https://a.com?", "https://forge.example:8443?",
 			// url.Parse 只查端口纯数字不查范围：:0、:65536 落库即永远连不上。
 			"https://forge.example:0", "https://forge.example:65536",
 			// 路径 . / .. 段拒收：代理归一后请求路径与字面前缀不同，

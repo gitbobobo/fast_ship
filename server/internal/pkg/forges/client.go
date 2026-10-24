@@ -400,7 +400,10 @@ func parseBaseURL(raw string) (*url.URL, error) {
 		return nil, ErrInvalidBaseURL
 	}
 	// userinfo 拒收：凭证随 base_url 明文落库、回显并被拼进审查链接。
-	if u.User != nil || u.Host == "" || u.Opaque != "" || u.RawQuery != "" || u.Fragment != "" {
+	// ForceQuery（尾部裸 ?）同样拒：RawQuery 为空但拼接时保留 ? 标记，
+	// 推导出的 /api/v1 会被当成 query 文本而不是路径。
+	if u.User != nil || u.Host == "" || u.Opaque != "" || u.RawQuery != "" ||
+		u.ForceQuery || u.Fragment != "" {
 		return nil, ErrInvalidBaseURL
 	}
 	// url.Parse 只查端口是否纯数字，不查范围——:0、:65536 能落库但永远连
