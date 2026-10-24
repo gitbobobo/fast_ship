@@ -6447,7 +6447,7 @@ export interface components {
             linked_main_cost: number | null;
             /**
              * Format: double
-             * @description 单次平均 × 未来 30 天触发次数（parseScheduleCron）；停用、已删除、无已计价平均或 cron 解析失败为 null
+             * @description （单次定时运行平均 + 每次触发摊到的连带主线成本）× 未来 30 天触发次数（parseScheduleCron）；停用、已删除、无已计价平均或 cron 解析失败为 null
              */
             estimated_monthly_cost: number | null;
         };
