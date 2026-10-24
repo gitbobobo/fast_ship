@@ -135,7 +135,11 @@ export default function BotUsageRunPage() {
           </Card>
         ) : !data ? null : (
           <>
-            <RunSummary run={data.run} requests={data.requests} />
+            <RunSummary
+              run={data.run}
+              requests={data.requests}
+              truncated={data.requests_truncated}
+            />
             <RequestList
               requests={data.requests}
               truncated={data.requests_truncated}
@@ -152,9 +156,11 @@ export default function BotUsageRunPage() {
 function RunSummary({
   run,
   requests,
+  truncated,
 }: {
   run: BotUsageRun;
   requests: BotUsageRequest[];
+  truncated?: boolean;
 }) {
   // run 级 token 列缺写而请求行有值时按请求汇总兜底（标注口径），避免汇总
   // 行全「—」与下方明细自相矛盾；请求行也无值仍显示「—」（缺失 ≠ 0）。
@@ -170,8 +176,15 @@ function RunSummary({
     }
     return any ? total : null;
   };
+  // 截断后兜底汇总只覆盖最近 500 条，须显式标注，否则数字系统性偏低。
+  const runTokensMissing =
+    run.prompt_tokens == null ||
+    run.cached_tokens == null ||
+    run.completion_tokens == null ||
+    run.total_tokens == null;
+  const partial = truncated && runTokensMissing;
   const tokenText = run.usage_complete
-    ? `${formatTokens(run.prompt_tokens ?? sum((r) => r.prompt_tokens))} 输入 · ${formatTokens(run.cached_tokens ?? sum((r) => r.cached_tokens))} 缓存 · ${formatTokens(run.completion_tokens ?? sum((r) => r.completion_tokens))} 输出 · ${formatTokens(run.total_tokens ?? sum((r) => r.total_tokens))} 合计`
+    ? `${formatTokens(run.prompt_tokens ?? sum((r) => r.prompt_tokens))} 输入 · ${formatTokens(run.cached_tokens ?? sum((r) => r.cached_tokens))} 缓存 · ${formatTokens(run.completion_tokens ?? sum((r) => r.completion_tokens))} 输出 · ${formatTokens(run.total_tokens ?? sum((r) => r.total_tokens))} 合计${partial ? "（仅最近 500 条）" : ""}`
     : "usage 未收齐，token 计数不可信";
 
   const rows: { label: string; value: ReactNode; title?: string }[] = [
@@ -255,7 +268,7 @@ function RequestList({
     <section className="space-y-2">
       <h3 className="text-sm font-medium">
         模型请求{requests.length ? ` · ${requests.length}` : ""}
-        {truncated ? "（更多已截断）" : ""}
+        {truncated ? "（仅最新 500 条，较早请求已省略）" : ""}
       </h3>
       {!requests.length ? (
         <div className="rounded-lg border bg-muted/40 py-8 text-center text-sm text-muted-foreground">

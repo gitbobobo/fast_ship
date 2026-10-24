@@ -316,12 +316,20 @@ func (r *BotUsageRepository) ScheduleTaskIDsByRunIDs(runIDs []string) (map[strin
 // ---------- 单次运行花费明细（GET /api/bots/usage/runs/:runId） ----------
 
 // ListRequestsByRun 返回 run 的模型请求（含失败重试），按 ordinal 正序，
-// 至多 limit 条——多取一行判截断由调用方负责（传 limit+1）。
+// 至多 limit 条。截断时保留**最新**的请求（先 ordinal DESC 取再反转）——
+// 明细页轮询关注的正是最新活动，保留最早段会让新请求永远不可见；多取
+// 一行判截断由调用方负责（传 limit+1）。
 func (r *BotUsageRepository) ListRequestsByRun(runID string, limit int) ([]model.BotModelRequest, error) {
 	var rows []model.BotModelRequest
 	err := r.db.Where("run_id = ?", runID).
-		Order("ordinal ASC").Limit(limit).Find(&rows).Error
-	return rows, err
+		Order("ordinal DESC").Limit(limit).Find(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	for i, j := 0, len(rows)-1; i < j; i, j = i+1, j-1 {
+		rows[i], rows[j] = rows[j], rows[i]
+	}
+	return rows, nil
 }
 
 // ListToolCallsByRequestIDs 返回一批模型请求的工具调用（请求侧按 created_at
