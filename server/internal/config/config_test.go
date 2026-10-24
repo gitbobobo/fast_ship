@@ -238,7 +238,6 @@ func TestLoadReviewMediaTrustedHostsValidation(t *testing.T) {
 		`"https://uiv.example.com"`, // scheme：不是主机名
 		`"uiv.example.com/x"`,       // 路径：不是主机名
 		`"[::1]"`,                   // IPv6 方括号：拨号主机名是裸 ::1
-		`""`,                        // 空条目
 		`"a:b:c"`,                   // 多冒号且不是合法 IPv6 字面量
 		`"user@uiv.internal"`,       // userinfo 形态：拨号主机名不含 @
 		`"uiv.internal#x"`,          // fragment：同上
@@ -261,6 +260,8 @@ func TestLoadReviewMediaTrustedHostsValidation(t *testing.T) {
 		`"192.168.31.31"`,   // IPv4 字面量
 		`"_dmarc.internal"`, // 下划线：真实 DNS 名可出现，可命中
 		`"xn--fsq.com"`,     // punycode IDN：ASCII 形态可命中
+		`""`,                // 空段（env 尾逗号 / YAML 空项）：丢弃不报错
+		`"   "`,             // 纯空白段：同上
 	} {
 		if _, err := Load(writeConfig(t, entry)); err != nil {
 			t.Fatalf("entry %s 应通过校验，got %v", entry, err)

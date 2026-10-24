@@ -140,9 +140,12 @@ type ReviewMediaConfig struct {
 func (c ReviewMediaConfig) validate() error {
 	for i, h := range c.TrustedPrivateHosts {
 		t := strings.TrimSpace(h)
+		// 空段（env 尾逗号、YAML 空项）没有可判语义，与 normalize 一样丢弃；
+		// 为它拒绝启动，代价大于收益。
+		if t == "" {
+			continue
+		}
 		switch {
-		case t == "":
-			return fmt.Errorf("review_media.trusted_private_hosts[%d] 是空条目", i)
 		case strings.HasSuffix(t, "."):
 			return fmt.Errorf("review_media.trusted_private_hosts[%d] %q 以点结尾：拨号主机名不带尾点，该条目永远不会命中", i, h)
 		case strings.Contains(t, ":"):
