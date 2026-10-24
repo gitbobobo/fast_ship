@@ -173,6 +173,11 @@ type serviceConfig struct {
 	requireHTTPS      bool
 	imagesOnly        bool
 	guardAddress      bool
+	// trustedPrivateHosts 可信内网主机名单（仅 guardAddress 时有意义）：
+	// 拨号时的主机名与名单完全一致（不区分大小写、不含端口、不支持
+	// 通配符）即跳过解析 IP 的内网检查；名单外主机与名单内主机重定向
+	// 出去的建连照旧检查。
+	trustedPrivateHosts []string
 	// githubWebHost 部署的 GitHub Web 地址 host[:port]（同
 	// ProxyService.githubWebHost）：凭证闸门据此放行部署实例自己的附件路径，
 	// 空值按公共 GitHub 处理。
@@ -194,14 +199,19 @@ func NewProxyService(cacheRoot string) *ProxyService {
 // githubWebHost 是部署的 GitHub Web 地址 host[:port]（GitHubWebHost 从
 // github_app.api_base_url 推导）：私有仓库附件的 App 安装令牌只发给它（见
 // IsGitHubMediaURLFor），GHE 部署的附件才不会卡在凭证闸门上。
-func NewReviewMediaService(cacheRoot, githubWebHost string) *ProxyService {
+// trustedPrivateHosts 是部署配置的可信内网主机名单：拨号主机名与名单完全
+// 一致（不区分大小写、不含端口、不支持通配符）时跳过内网 IP 检查——内网
+// DNS 把自建服务（如 UIV）直接解析到内网地址的部署靠它放行，空名单与
+// 旧行为一致。
+func NewReviewMediaService(cacheRoot, githubWebHost string, trustedPrivateHosts []string) *ProxyService {
 	return newService(cacheRoot, serviceConfig{
-		cacheSubdir:   "review-screenshot-cache",
-		allowURL:      allowPublicImageHost,
-		requireHTTPS:  true,
-		imagesOnly:    true,
-		guardAddress:  true,
-		githubWebHost: githubWebHost,
+		cacheSubdir:         "review-screenshot-cache",
+		allowURL:            allowPublicImageHost,
+		requireHTTPS:        true,
+		imagesOnly:          true,
+		guardAddress:        true,
+		trustedPrivateHosts: trustedPrivateHosts,
+		githubWebHost:       githubWebHost,
 	})
 }
 
@@ -227,6 +237,7 @@ func newService(cacheRoot string, cfg serviceConfig) *ProxyService {
 	if cfg.client == nil {
 		webHost := cfg.githubWebHost
 		cfg.client = newGuardedClient(cfg.requireHTTPS, cfg.allowURL, cfg.guardAddress,
+			cfg.trustedPrivateHosts,
 			func(u *url.URL) bool { return IsGitHubMediaURLFor(u.String(), webHost) })
 	}
 	s := &ProxyService{
@@ -288,18 +299,39 @@ func newProxyService(cacheRoot string, cacheTTL time.Duration, maxCacheEntrySize
 // Go http.Client 会把敏感头透传给同域及子域目标，GHE 部署的兄弟子域
 // （x.ghe.corp.com 对 ghe.corp.com）也在其列——目标过不了闸门就剥掉，
 // nil 一律剥。Transport 克隆自 DefaultTransport，保留连接池参数。
-func newGuardedClient(requireHTTPS bool, allowURL func(*url.URL) bool, guardAddress bool, bearerGate func(*url.URL) bool) *http.Client {
+func newGuardedClient(requireHTTPS bool, allowURL func(*url.URL) bool, guardAddress bool, trustedPrivateHosts []string, bearerGate func(*url.URL) bool) *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	if guardAddress {
 		// 必须自己拨到目标才能校验目标 IP：走环境代理时校验到的会是代理地址
 		// （公网代理→防线失效，回环代理→全部误拒）。代价是这条下载面不支持
 		// HTTPS_PROXY 等环境代理；GitHub 媒体面不 guard，仍走环境代理。
 		transport.Proxy = nil
-		transport.DialContext = (&net.Dialer{
+		guarded := &net.Dialer{
 			Timeout:   30 * time.Second,
 			KeepAlive: 30 * time.Second,
 			Control:   guardDialControl,
-		}).DialContext
+		}
+		if trusted := normalizeTrustedPrivateHosts(trustedPrivateHosts); len(trusted) > 0 {
+			// 名单内主机走不带 Control 的拨号器：判定用 DialContext 收到的
+			// addr 主机名（URL 的 host 部分，DNS 解析之前），不看解析出的
+			// IP——放行粒度是主机名，同一内网地址上反代挂着的其他服务不会
+			// 被连带放行。名单外主机、以及名单内主机 302 跳出的每次新建连
+			// 仍走 guarded 照常校验。
+			direct := &net.Dialer{
+				Timeout:   30 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}
+			transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+				if host, _, err := net.SplitHostPort(addr); err == nil {
+					if _, ok := trusted[strings.ToLower(host)]; ok {
+						return direct.DialContext(ctx, network, addr)
+					}
+				}
+				return guarded.DialContext(ctx, network, addr)
+			}
+		} else {
+			transport.DialContext = guarded.DialContext
+		}
 	}
 	return &http.Client{
 		Timeout:   defaultRequestTimeout,
@@ -321,6 +353,23 @@ func newGuardedClient(requireHTTPS bool, allowURL func(*url.URL) bool, guardAddr
 			return nil
 		},
 	}
+}
+
+// normalizeTrustedPrivateHosts 配置的名单规整成小写主机名集合：去空白、
+// 统一小写、丢弃空项。匹配在 DialContext 收到的主机名上做完全一致比较
+// ——不写端口、不支持通配符；IP 字面量写进名单同样按字符串匹配，只放行
+// 该地址的直连，不是 IP 段放行。
+func normalizeTrustedPrivateHosts(hosts []string) map[string]struct{} {
+	if len(hosts) == 0 {
+		return nil
+	}
+	set := make(map[string]struct{}, len(hosts))
+	for _, h := range hosts {
+		if h = strings.ToLower(strings.TrimSpace(h)); h != "" {
+			set[h] = struct{}{}
+		}
+	}
+	return set
 }
 
 // guardDialControl 拨号前校验已解析的上游地址。net.Dialer.Control 在 DNS

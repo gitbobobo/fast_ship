@@ -179,6 +179,61 @@ func TestLoadQuotaDefaultsWhenSectionMissing(t *testing.T) {
 	}
 }
 
+// INT-168：review_media.trusted_private_hosts 可信内网主机名单——yaml 列表
+// 与环境变量（逗号分隔）两条路都要进结构体；段落缺失时为空（不跳过内网
+// IP 检查的旧行为）。
+func TestLoadReviewMediaTrustedPrivateHosts(t *testing.T) {
+	writeConfig := func(t *testing.T, body string) string {
+		t.Helper()
+		configPath := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(configPath, []byte(baseConfigYAML+body), 0o644); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+		return configPath
+	}
+
+	cfg, err := Load(writeConfig(t, ""))
+	if err != nil {
+		t.Fatalf("load without review_media section: %v", err)
+	}
+	if len(cfg.ReviewMedia.TrustedPrivateHosts) != 0 {
+		t.Fatalf("段落缺失时名单应为空，got %v", cfg.ReviewMedia.TrustedPrivateHosts)
+	}
+
+	cfg, err = Load(writeConfig(t, "\nreview_media:\n  trusted_private_hosts: [\"uiv.internal.example.com\", \"IMG.LOCAL\"]\n"))
+	if err != nil {
+		t.Fatalf("load with review_media section: %v", err)
+	}
+	want := []string{"uiv.internal.example.com", "IMG.LOCAL"}
+	if len(cfg.ReviewMedia.TrustedPrivateHosts) != len(want) {
+		t.Fatalf("trusted_private_hosts = %v, want %v", cfg.ReviewMedia.TrustedPrivateHosts, want)
+	}
+	for i := range want {
+		if cfg.ReviewMedia.TrustedPrivateHosts[i] != want[i] {
+			t.Fatalf("trusted_private_hosts = %v, want %v", cfg.ReviewMedia.TrustedPrivateHosts, want)
+		}
+	}
+}
+
+// 环境变量覆盖：FAST_SHIP_REVIEW_MEDIA_TRUSTED_PRIVATE_HOSTS 逗号分隔。
+func TestLoadReviewMediaTrustedHostsFromEnv(t *testing.T) {
+	t.Setenv("FAST_SHIP_REVIEW_MEDIA_TRUSTED_PRIVATE_HOSTS", "uiv.local,img.local")
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configPath, []byte(baseConfigYAML), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	want := []string{"uiv.local", "img.local"}
+	if len(cfg.ReviewMedia.TrustedPrivateHosts) != len(want) ||
+		cfg.ReviewMedia.TrustedPrivateHosts[0] != want[0] ||
+		cfg.ReviewMedia.TrustedPrivateHosts[1] != want[1] {
+		t.Fatalf("trusted_private_hosts = %v, want %v", cfg.ReviewMedia.TrustedPrivateHosts, want)
+	}
+}
+
 // baseConfigYAML 是 quota 段之外的最小可加载配置。
 const baseConfigYAML = `server:
   port: 4888

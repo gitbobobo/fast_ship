@@ -113,7 +113,7 @@ func TestFetchAndCacheLocalCacheFailureTagged(t *testing.T) {
 	if err := os.WriteFile(root, []byte("x"), 0o600); err != nil {
 		t.Fatalf("seed regular file: %v", err)
 	}
-	svc := NewReviewMediaService(root, "")
+	svc := NewReviewMediaService(root, "", nil)
 	_, err := svc.FetchAndCache(context.Background(), "https://uiv.example.com/f/x.png")
 	if !errors.Is(err, ErrLocalCache) {
 		t.Fatalf("err = %v, want ErrLocalCache", err)
@@ -538,7 +538,7 @@ func TestFetchAndCacheDownloadWaitRespectsContext(t *testing.T) {
 }
 
 func TestScreenshotServiceRequiresHTTPS(t *testing.T) {
-	svc := NewReviewMediaService(t.TempDir(), "")
+	svc := NewReviewMediaService(t.TempDir(), "", nil)
 	if _, err := svc.FetchAndCache(context.Background(), "http://uiv.example.com/f/x.png"); !errors.Is(err, ErrInvalidMediaURL) {
 		t.Fatalf("err = %v, want ErrInvalidMediaURL", err)
 	}
@@ -553,12 +553,12 @@ func TestScreenshotServiceRequiresHTTPS(t *testing.T) {
 // guardAddress 的客户端必须自己拨目标（不走环境代理）才能校验目标 IP；
 // GitHub 媒体面不 guard，保留 ProxyFromEnvironment。
 func TestGuardedClientProxyPolicy(t *testing.T) {
-	guarded := newGuardedClient(true, allowPublicImageHost, true, nil)
+	guarded := newGuardedClient(true, allowPublicImageHost, true, nil, nil)
 	gtr, ok := guarded.Transport.(*http.Transport)
 	if !ok || gtr.Proxy != nil {
 		t.Fatal("guard 客户端 transport proxy 应为 nil（拨号校验要求直连目标）")
 	}
-	plain := newGuardedClient(false, isAllowedGitHubMediaURL, false, nil)
+	plain := newGuardedClient(false, isAllowedGitHubMediaURL, false, nil, nil)
 	ptr, ok := plain.Transport.(*http.Transport)
 	if !ok || ptr.Proxy == nil {
 		t.Fatalf("GitHub 媒体面 transport proxy 不应被清空，want ProxyFromEnvironment")
@@ -585,7 +585,7 @@ func TestGuardedClientStripsBearerOnRedirect(t *testing.T) {
 	siblingURL = sibling.URL
 
 	// 闸门只认 origin（本部署 GitHub）；origin→sibling 的 302 必须剥头。
-	client := newGuardedClient(false, allowPublicImageHost, false,
+	client := newGuardedClient(false, allowPublicImageHost, false, nil,
 		func(u *url.URL) bool { return u.Host == origin.Listener.Addr().String() })
 	req, err := http.NewRequest(http.MethodGet, origin.URL, nil)
 	if err != nil {
@@ -614,7 +614,7 @@ func TestGuardedClientStripsBearerOnRedirect(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer gated.Close()
-	client2 := newGuardedClient(false, allowPublicImageHost, false,
+	client2 := newGuardedClient(false, allowPublicImageHost, false, nil,
 		func(u *url.URL) bool { return u.Host == gated.Listener.Addr().String() })
 	req2, err := http.NewRequest(http.MethodGet, gated.URL+"/start", nil)
 	if err != nil {

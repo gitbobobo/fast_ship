@@ -9,16 +9,17 @@ import (
 )
 
 type Config struct {
-	Server     ServerConfig     `mapstructure:"server"`
-	Database   DatabaseConfig   `mapstructure:"database"`
-	JWT        JWTConfig        `mapstructure:"jwt"`
-	Upload     UploadConfig     `mapstructure:"upload"`
-	Encryption EncryptionConfig `mapstructure:"encryption"`
-	Issues     IssuesConfig     `mapstructure:"issues"`
-	Logging    LoggingConfig    `mapstructure:"logging"`
-	GitHubApp  GitHubAppConfig  `mapstructure:"github_app"`
-	Bots       BotsConfig       `mapstructure:"bots"`
-	Quota      QuotaConfig      `mapstructure:"quota"`
+	Server      ServerConfig      `mapstructure:"server"`
+	Database    DatabaseConfig    `mapstructure:"database"`
+	JWT         JWTConfig         `mapstructure:"jwt"`
+	Upload      UploadConfig      `mapstructure:"upload"`
+	Encryption  EncryptionConfig  `mapstructure:"encryption"`
+	Issues      IssuesConfig      `mapstructure:"issues"`
+	Logging     LoggingConfig     `mapstructure:"logging"`
+	GitHubApp   GitHubAppConfig   `mapstructure:"github_app"`
+	ReviewMedia ReviewMediaConfig `mapstructure:"review_media"`
+	Bots        BotsConfig        `mapstructure:"bots"`
+	Quota       QuotaConfig       `mapstructure:"quota"`
 }
 
 type ServerConfig struct {
@@ -114,6 +115,20 @@ type GitHubAppConfig struct {
 	APIBaseURL string `mapstructure:"api_base_url"`
 	// Fake 仅 server.mode=debug 时允许 true：注入假 GitHub 实现，本地自测评审链路。
 	Fake bool `mapstructure:"fake"`
+}
+
+// ReviewMediaConfig PR 审查截图下载面（githubmedia.NewReviewMediaService）的
+// 部署配置。只作用于审查截图下载这一处，GitHub 媒体代理不受影响。
+type ReviewMediaConfig struct {
+	// TrustedPrivateHosts 可信内网主机名单：拨号时的主机名与名单完全一致
+	// （不区分大小写、不含端口、不支持通配符）即跳过内网 IP 检查——内网 DNS
+	// 把自建服务（如 UIV）直接解析到内网地址的部署靠它放行。默认为空，即
+	// 全部主机照旧过内网检查；名单外主机、以及从名单内主机 302 跳出的建连
+	// 都仍走内网检查。放行粒度是主机名不是 IP：同一内网地址上反代挂着的
+	// 其他服务不会被连带放行，但该主机任意端口的服务都在放行范围内——
+	// 加入名单前确认它没有允许未登录 GET 访问的敏感接口，也没有「来自
+	// 内网即免登录」这类规则。
+	TrustedPrivateHosts []string `mapstructure:"trusted_private_hosts"`
 }
 
 // BotsConfig 是机器人（INT-101/INT-102）的部署配置：上下文压缩阈值、记忆
@@ -442,6 +457,7 @@ func Load(path string) (*Config, error) {
 	_ = viper.BindEnv("github_app.webhook_secret", "FAST_SHIP_GITHUB_APP_WEBHOOK_SECRET")
 	_ = viper.BindEnv("github_app.api_base_url", "FAST_SHIP_GITHUB_APP_API_BASE_URL")
 	_ = viper.BindEnv("github_app.fake", "FAST_SHIP_GITHUB_APP_FAKE")
+	_ = viper.BindEnv("review_media.trusted_private_hosts", "FAST_SHIP_REVIEW_MEDIA_TRUSTED_PRIVATE_HOSTS")
 	_ = viper.BindEnv("bots.context.window_tokens", "FAST_SHIP_BOTS_CONTEXT_WINDOW_TOKENS")
 	_ = viper.BindEnv("bots.context.compression_ratio", "FAST_SHIP_BOTS_CONTEXT_COMPRESSION_RATIO")
 	_ = viper.BindEnv("bots.context.target_ratio", "FAST_SHIP_BOTS_CONTEXT_TARGET_RATIO")
