@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/config"
@@ -134,8 +135,11 @@ func (s *ProjectService) Get(id, userID string) (*ProjectResponse, error) {
 	return s.toResponse(project, s.syncStateFor(project.ID)), nil
 }
 
-func (s *ProjectService) List(userID string, page, pageSize int) ([]ProjectResponse, int64, error) {
-	projects, total, err := s.projectRepo.List(userID, page, pageSize)
+// List 分页返回项目；includeShelved 控制是否包含搁置中的项目（INT-165）。
+// HTTP GET /api/projects 传 true（搁置项目照常列出），fs_project list 缺省
+// 排除搁置项目、include_shelved=true 时传 true。
+func (s *ProjectService) List(userID string, page, pageSize int, includeShelved bool) ([]ProjectResponse, int64, error) {
+	projects, total, err := s.projectRepo.List(userID, page, pageSize, includeShelved)
 	if err != nil {
 		return nil, 0, errs.ErrInternal
 	}
@@ -317,6 +321,66 @@ func (s *ProjectService) Delete(id, userID string) error {
 	return nil
 }
 
+// Shelve 搁置项目（INT-165）：写 shelved_at 与可选的 shelved_until（RFC3339，
+// 必须晚于当前时间，否则 40001）；until 缺省表示无限期搁置。重复搁置按覆盖
+// 处理（重新计时/改期）。搁置不拦截任何读写，只影响聚合面（dashboard、
+// 推荐汇总、fs_project list 的默认口径）。
+func (s *ProjectService) Shelve(id, userID string, req *api.ShelveProjectRequest) (*ProjectResponse, error) {
+	if _, err := s.projectRepo.FindByID(id, userID); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errs.ErrProjectNotFound
+		}
+		return nil, errs.ErrInternal
+	}
+
+	var until *time.Time
+	if req != nil && req.Until != nil {
+		parsed, err := time.Parse(time.RFC3339, *req.Until)
+		if err != nil {
+			return nil, errs.New(errs.ErrInvalidParams.Code, "until 必须是 RFC3339 时间")
+		}
+		parsed = parsed.UTC()
+		if !parsed.After(time.Now()) {
+			return nil, errs.New(errs.ErrInvalidParams.Code, "until 必须晚于当前时间")
+		}
+		until = &parsed
+	}
+
+	now := time.Now().UTC()
+	if err := s.projectRepo.Shelve(id, userID, &now, until); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errs.ErrProjectNotFound
+		}
+		return nil, errs.ErrInternal
+	}
+	return s.shelveResponse(id, userID)
+}
+
+// Unshelve 取消搁置（INT-165）：清空 shelved_at/shelved_until 并刷新
+// updated_at；幂等，未搁置的项目同样返回成功。到期自动恢复没有定时任务，
+// 全部恢复动作（手动取消与到期）都表现为「字段为空，读取侧不再判搁置」。
+func (s *ProjectService) Unshelve(id, userID string) (*ProjectResponse, error) {
+	if err := s.projectRepo.Unshelve(id, userID); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errs.ErrProjectNotFound
+		}
+		return nil, errs.ErrInternal
+	}
+	return s.shelveResponse(id, userID)
+}
+
+// shelveResponse 回读更新后的行组装响应，与 Get 同一出口。
+func (s *ProjectService) shelveResponse(id, userID string) (*ProjectResponse, error) {
+	project, err := s.projectRepo.FindByID(id, userID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errs.ErrProjectNotFound
+		}
+		return nil, errs.ErrInternal
+	}
+	return s.toResponse(project, s.syncStateFor(project.ID)), nil
+}
+
 // GetBranches fetches all branches from the project's GitHub repository.
 func (s *ProjectService) GetBranches(ctx context.Context, id, userID string) ([]BranchResponse, string, error) {
 	project, err := s.projectRepo.FindByID(id, userID)
@@ -401,7 +465,8 @@ func parseRepositoryURL(raw string) (owner, repo string, err error) {
 
 // toResponse 组装项目响应；syncState 由调用方提供——单项目路径用
 // syncStateFor 现取，列表路径经 GetOrCreateByProjectIDs 批量预取后逐条传入，
-// nil 表示同步状态缺省。
+// nil 表示同步状态缺省。is_shelved 按响应生成时刻判定（INT-165）：到期
+// 自动恢复没有定时任务，同一行在截止前后两次读取会得到不同的 is_shelved。
 func (s *ProjectService) toResponse(p *model.Project, syncState *model.IssueSyncState) *ProjectResponse {
 	resp := &ProjectResponse{
 		Id:                  p.ID,
@@ -413,6 +478,9 @@ func (s *ProjectService) toResponse(p *model.Project, syncState *model.IssueSync
 		CodeGithubRepo:      p.CodeGithubRepo,
 		PublicGithubTokenId: p.PublicGitHubTokenID,
 		CodeGithubTokenId:   p.CodeGitHubTokenID,
+		ShelvedAt:           formatTimePtr(p.ShelvedAt),
+		ShelvedUntil:        formatTimePtr(p.ShelvedUntil),
+		IsShelved:           p.IsShelved(time.Now()),
 		CreatedAt:           p.CreatedAt.Format("2006-01-02T15:04:05Z"),
 		UpdatedAt:           p.UpdatedAt.Format("2006-01-02T15:04:05Z"),
 	}
