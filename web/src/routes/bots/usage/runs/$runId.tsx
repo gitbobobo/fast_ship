@@ -38,6 +38,7 @@ const RUN_STATUS_LABELS: Record<string, string> = {
   completed: "已完成",
   failed: "已失败",
   stopped: "已停止",
+  skipped: "已跳过",
 };
 
 const REQUEST_STATUS_LABELS: Record<string, string> = {

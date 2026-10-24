@@ -14,6 +14,7 @@ import {
 } from "@/components/ui/table";
 import {
   MetricChart,
+  MetricChartLegend,
   type MetricChartSeriesPoint,
 } from "@/components/dashboard/metric-chart";
 import { errorText } from "@/lib/api/client";
@@ -127,7 +128,7 @@ function StatCard({
       className="rounded-xl border border-border/60 px-4 py-3"
       title={title}
     >
-      <p className="text-xs text-muted-foreground">{label}</p>
+      <p className="truncate text-xs text-muted-foreground">{label}</p>
       <p className="mt-1 text-xl font-semibold tabular-nums">{value}</p>
       {sub && <p className="mt-0.5 text-xs text-muted-foreground">{sub}</p>}
     </div>
@@ -176,7 +177,10 @@ export function BotUsageOverviewPanel({
   const singleBot = data?.bots.length === 1 ? data.bots[0] : null;
 
   return (
-    <div className="space-y-5" data-testid="bot-usage-overview">
+    <div
+      className={cn("space-y-5", embedded && "pb-4")}
+      data-testid="bot-usage-overview"
+    >
       <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
         <div
           role="group"
@@ -247,7 +251,10 @@ export function BotUsageOverviewPanel({
           )}
 
           <section className="space-y-2">
-            <h3 className="text-sm font-medium">按天</h3>
+            <div className="flex items-baseline justify-between gap-3">
+              <h3 className="text-sm font-medium">按天</h3>
+              <MetricChartLegend points={dailyPoints} />
+            </div>
             <MetricChart
               points={dailyPoints}
               variant="columns"

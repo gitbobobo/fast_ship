@@ -28,6 +28,7 @@ const TERMINAL_RUN_BADGE: Record<string, string> = {
   completed: "已完成",
   failed: "已失败",
   stopped: "已停止",
+  skipped: "已跳过",
 };
 
 /**
@@ -166,7 +167,7 @@ export function BotChat({ botId }: { botId: string }) {
               (chat.stopRequested ? (
                 // 说明「再点会发生什么」：强制停止会丢弃未完成的回复，不能只靠
                 // 文字变化表达升级（视觉审查：两个状态样式一致，用户看不出）。
-                <span className="text-xs text-muted-foreground">
+                <span className="min-w-0 truncate text-xs text-muted-foreground">
                   已请求停止；再点「强制停止」将立即中断并丢弃未完成的回复
                 </span>
               ) : activeProgress ? (
@@ -187,7 +188,7 @@ export function BotChat({ botId }: { botId: string }) {
                       : "正在整理上下文…")}
                 </span>
               ) : (
-                <span className="text-xs text-muted-foreground">
+                <span className="min-w-0 truncate text-xs text-muted-foreground">
                   新消息将在安全点交给机器人
                 </span>
               ))}

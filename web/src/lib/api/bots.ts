@@ -318,6 +318,8 @@ export function botScheduleRunStatusLabel(status: BotScheduleRunStatus): string 
     case "skipped":
       return "已跳过";
   }
+  // 词表外的存量/未来状态兜底显示原词，不把 undefined 渲染进界面。
+  return status;
 }
 
 // ---- 花费总览（INT-162）----

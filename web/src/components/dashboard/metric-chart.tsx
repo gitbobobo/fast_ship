@@ -233,6 +233,32 @@ interface StackedDatum {
   stacks: (SeriesMeta & { value: number; bottom: number; top: number })[];
 }
 
+/** 多系列静态图例：色块 + 系列名，与悬浮 tooltip 用同一配色分配（系列顺序即首次出现序）。 */
+export function MetricChartLegend({
+  points,
+}: {
+  points: MetricChartSeriesPoint[];
+}) {
+  const seriesMeta = useSeriesMeta(points);
+  if (seriesMeta.length <= 1) return null;
+  return (
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+      {seriesMeta.map((meta) => (
+        <span
+          key={meta.id}
+          className="inline-flex items-center gap-1.5 text-xs text-muted-foreground"
+        >
+          <span
+            className="inline-block h-2 w-2 shrink-0 rounded-full"
+            style={{ backgroundColor: meta.color }}
+          />
+          <span className="max-w-40 truncate">{meta.name}</span>
+        </span>
+      ))}
+    </div>
+  );
+}
+
 /** 系列清单按首次出现次序分配颜色：同一 id 跨点归入同一层。 */
 function useSeriesMeta(points: MetricChartSeriesPoint[]): SeriesMeta[] {
   return useMemo(() => {
