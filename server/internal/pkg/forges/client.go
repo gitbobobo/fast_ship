@@ -152,9 +152,10 @@ func NewClient(cfg Config) (*http.Client, error) {
 			}
 			// 只跟随同主机跳转：Forgejo 反代可能把 / 跳到登录页，但不会跨到
 			// 别的主机；跨主机在集成场景里就是 SSRF 或劫持信号。主机名按
-			// normHost 比（尾点写法等价），端口仍要求字面一致。
+			// normHost 比（尾点写法等价），端口按生效值比（缺省补齐后
+			// https://host 与 https://host:443 同端点）。
 			if normHost(req.URL.Hostname()) != normHost(via[0].URL.Hostname()) ||
-				req.URL.Port() != via[0].URL.Port() {
+				effectivePort(req.URL) != effectivePort(via[0].URL) {
 				return ErrCrossHostRedirect
 			}
 			// 凭证作用域（Config.AuthPathPrefix 配置了才生效）：跳转出 API
@@ -167,6 +168,19 @@ func NewClient(cfg Config) (*http.Client, error) {
 			return nil
 		},
 	}, nil
+}
+
+// effectivePort 端口的生效值：无显式端口按 scheme 缺省补齐（https→443、
+// http→80）——「https://host」与「https://host:443」是同端点，反代把
+// Location 写成显式默认端口是合法形态，字面比较会误报跨主机。
+func effectivePort(u *url.URL) string {
+	if p := u.Port(); p != "" {
+		return p
+	}
+	if strings.EqualFold(u.Scheme, "http") {
+		return "80"
+	}
+	return "443"
 }
 
 // authPathInScope 判定解码后的目标路径是否仍在凭证作用域内：含 . / .. 歧义
@@ -506,6 +520,13 @@ func blockedByPolicy(ip net.IP, strict bool) bool {
 	// fec0::/10 已废弃的 site-local（RFC 3879）：第二字节高两位为 11，
 	// 与 fe80::/10（10）区分；两个口径都拒。
 	if ipv6[0] == 0xfe && ipv6[1]&0xc0 == 0xc0 {
+		return true
+	}
+	// ::/96 已废弃的 IPv4-compatible 形态（RFC 4291）：To4() 只认 ::ffff/96
+	// mapped，::10.0.0.1 这类落到本分支又不命中任何内嵌特判会漏出放行。
+	// 前 12 字节全零即整体拒绝——::/::1/::ffff 已被前面的判定覆盖，剩下
+	// 的都是该拒的废弃形态。
+	if allZero(ipv6[0:12]) {
 		return true
 	}
 	// NAT64：只有 well-known 前缀 64:ff9b::/96（bytes 4-11 全零）按末 4 字节

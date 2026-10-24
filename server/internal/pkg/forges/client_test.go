@@ -39,6 +39,7 @@ func TestIsBlockedIP(t *testing.T) {
 		"2001:0000:0000:0000:0000:0000:ffff:ffff", // Teredo 载荷 0.0.0.0
 		"64:ff9b::0a00:0001",                      // NAT64 载荷 10.0.0.1
 		"64:ff9a::0808:0808",                      // local-use NAT64 整体拒绝
+		"::10.0.0.1", "::127.0.0.1",               // ::/96 已废弃 IPv4-compatible（前 12 字节全零整体拒）
 	}
 	for _, addr := range blocked {
 		if !isBlockedIP(net.ParseIP(addr)) {
@@ -88,9 +89,10 @@ func TestIsBlockedPrivateMode(t *testing.T) {
 		"0.0.0.0",                  // 未指定
 		"192.0.0.9", "192.88.99.1", // IETF 协议分配 / 废弃 anycast
 		"198.18.0.1", "240.0.0.1", "255.255.255.255", // 基准测试 / 保留段
-		"fec0::1",            // 已废弃 site-local
-		"fd00:ec2::254",      // AWS IMDS IPv6 端点（ULA 放行的恒拒例外）
-		"100.100.100.200",    // 阿里云 IMDS 端点（CGNAT 段内的恒拒例外）
+		"fec0::1",                   // 已废弃 site-local
+		"fd00:ec2::254",             // AWS IMDS IPv6 端点（ULA 放行的恒拒例外）
+		"100.100.100.200",           // 阿里云 IMDS 端点（CGNAT 段内的恒拒例外）
+		"::10.0.0.1", "::127.0.0.1", // ::/96 已废弃 IPv4-compatible
 		"64:ff9a::0808:0808", // local-use NAT64
 		"64:ff9b::7f00:0001", // NAT64 载荷回环
 		"2002:7f00:0001::",   // 6to4 载荷回环
@@ -355,6 +357,26 @@ func TestClientDialGuard(t *testing.T) {
 			t.Fatalf("err = %v, want ErrPrivateAddress", err)
 		}
 	})
+}
+
+// effectivePort 把「https://host」与「https://host:443」归一成同端点——
+// 反代把 Location 写成显式默认端口是合法形态，字面比较会误报跨主机。
+func TestEffectivePort(t *testing.T) {
+	for _, tc := range []struct{ raw, want string }{
+		{"https://h.example.com", "443"},
+		{"https://h.example.com:443", "443"},
+		{"https://h.example.com:8443", "8443"},
+		{"http://h.example.com", "80"},
+		{"http://h.example.com:80", "80"},
+	} {
+		u, err := url.Parse(tc.raw)
+		if err != nil {
+			t.Fatalf("parse %q: %v", tc.raw, err)
+		}
+		if got := effectivePort(u); got != tc.want {
+			t.Fatalf("effectivePort(%q) = %q, want %q", tc.raw, got, tc.want)
+		}
+	}
 }
 
 func TestClientRedirectPolicy(t *testing.T) {
