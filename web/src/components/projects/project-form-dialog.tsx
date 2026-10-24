@@ -155,8 +155,10 @@ export function ProjectFormDialog({
 
   // 悬空绑定：绑定了代码仓集成但投影 code_repo_url 为空（集成行已删等）。
   // 回填与提交都按「保留现状」处理，不再回落 github 同名地址；界面上给出
-  // 提示，填写新地址才重新绑定。
+  // 提示，填写新地址才重新绑定。解除悬空绑定走显式勾选——空输入本身无法
+  // 区分「没动」与「清空」，每次无关保存都当清空发 null 会静默掉绑定。
   const bindingBroken = !!project?.code_integration_id && !project?.code_repo_url;
+  const [clearBrokenBinding, setClearBrokenBinding] = useState(false);
 
   useEffect(() => {
     if (open && isEdit && section === "t3") {
@@ -170,6 +172,7 @@ export function ProjectFormDialog({
 
   useEffect(() => {
     if (isEdit && project) {
+      setClearBrokenBinding(false);
       reset({
         name: project.name,
         description: project.description || "",
@@ -221,10 +224,12 @@ export function ProjectFormDialog({
           const currentRepoUrl = project.code_repo_url ?? "";
           if (raw === "") {
             // 悬空绑定（bindingBroken）留空视为未改动，不携带该字段：只保存
-            // 其它字段不再把悬空绑定静默改绑回 github 同名仓库。普通空输入仍
-            // 是显式清空（回落公开仓库，集成绑定一并清）——当前本就没有代码
-            // 仓（code_repo_url 为 null）时同样不携带。
-            if (!bindingBroken && currentRepoUrl !== "") {
+            // 其它字段不再把悬空绑定静默改绑回 github 同名仓库。解除走显式
+            // 「清除绑定」勾选——勾选后按清空提交（回落公开仓库，集成绑定
+            // 一并清）。普通空输入仍是显式清空——当前本就没有代码仓
+            // （code_repo_url 为 null）时同样不携带。
+            if ((bindingBroken && clearBrokenBinding) ||
+              (!bindingBroken && currentRepoUrl !== "")) {
               payload.code_repository_url = null;
             }
           } else {
@@ -373,9 +378,19 @@ export function ProjectFormDialog({
                 PR 审查盯的仓库；留空则审查公开仓库
               </p>
               {bindingBroken && (
-                <p className="text-xs text-amber-700 dark:text-amber-400">
-                  原绑定的代码仓集成已失效；留空将保留现状，填写新地址可重新绑定
-                </p>
+                <div className="space-y-1">
+                  <p className="text-xs text-amber-700 dark:text-amber-400">
+                    原绑定的代码仓集成已失效；留空将保留现状，填写新地址可重新绑定
+                  </p>
+                  <label className="flex items-center gap-2 text-xs text-amber-700 dark:text-amber-400">
+                    <input
+                      type="checkbox"
+                      checked={clearBrokenBinding}
+                      onChange={(e) => setClearBrokenBinding(e.target.checked)}
+                    />
+                    清除失效的代码仓绑定（回落到公开仓库）
+                  </label>
+                </div>
               )}
               {errors.code_repository_url && (
                 <p className="text-xs text-destructive">

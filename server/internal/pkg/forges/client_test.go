@@ -219,6 +219,32 @@ func TestClientRedirectHTTPtoHTTPSUpgrade(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d", resp.StatusCode)
 	}
+
+	// 升级之后的 https→https 换端口不放行：升级例外只对上一跳是 http 的
+	// 那一跳生效，端口漂移仍按跨主机拒。
+	httpsSrv2 := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer httpsSrv2.Close()
+	certPEM2 := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: httpsSrv2.Certificate().Raw})
+
+	httpsSrv3 := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, httpsSrv2.URL+r.URL.Path, http.StatusFound)
+	}))
+	defer httpsSrv3.Close()
+	certPEM3 := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: httpsSrv3.Certificate().Raw})
+
+	client2, err := NewClient(Config{
+		AllowedHosts:        []string{u.Hostname()},
+		AllowPrivateNetwork: true,
+		CACertPEM:           string(certPEM2) + string(certPEM3),
+	})
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	if _, err := client2.Get(httpsSrv3.URL + "/api/v1/version"); !errors.Is(err, ErrCrossHostRedirect) {
+		t.Fatalf("https→https 换端口应拒, err = %v", err)
+	}
 }
 
 func TestAuthPathInScope(t *testing.T) {

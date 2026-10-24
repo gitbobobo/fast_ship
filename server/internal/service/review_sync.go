@@ -928,7 +928,13 @@ func writeCodeFinding(b *strings.Builder, meta reviewCommentMeta, f api.ReviewCo
 	head := "**" + string(f.Level) + "** "
 	switch {
 	case f.Line != nil && *f.Line > 0:
-		head += fmt.Sprintf("[%s:%d](%s)", markdownLinkText(f.File), *f.Line, reviewBlobURL(meta, f.File, *f.Line))
+		if blobURL := reviewBlobURL(meta, f.File, *f.Line); blobURL != "" {
+			head += fmt.Sprintf("[%s:%d](%s)", markdownLinkText(f.File), *f.Line, blobURL)
+		} else {
+			// 集成行解析失败（改绑竞态窗口）拼不出链接：纯文本位置，不发
+			// []() 形态的空链接。
+			head += f.File + ":" + strconv.Itoa(*f.Line)
+		}
 		// inlineLines == nil 表示本轮没读 diff（例如没有可标注的行内发现），
 		// 无从判断行号是否有效，不臆断加注。
 		if inlineLines != nil && !inlineLines[f.File][*f.Line] {

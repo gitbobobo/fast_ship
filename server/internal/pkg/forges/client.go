@@ -154,14 +154,16 @@ func NewClient(cfg Config) (*http.Client, error) {
 				return ErrSchemeDowngrade
 			}
 			// 只跟随同主机跳转：Forgejo 反代可能把 / 跳到登录页，但不会跨到
-			// 别的主机；跨主机在集成场景里就是 SSRF 或劫持信号。主机名按
-			// normHost 比（尾点写法等价），端口按生效值比（缺省补齐后
-			// https://host 与 https://host:443 同端点）。例外：同主机的
-			// http→https 升级放行端口差——http 基址被实例/反代 301 到 https
-			// 是常见部署形态（安全只升不降，https→http 已被降级拦截挡掉）。
+			// 别的主机；跨主机在集成场景里就是 SSRF 或劫持信号。主机名始终
+			// 对首跳比（normHost 口径，尾点写法等价）；端口对上一跳的生效
+			// 值比（缺省补齐后 https://host 与 https://host:443 同端点）。
+			// 例外：上一跳 http→本跳 https 的同主机升级放行端口差——http
+			// 基址被实例/反代 301 到 https 是常见部署形态，升级后的后续
+			// https 跳仍按端口对齐（https→http 降级已被降级拦截挡掉）。
 			sameHost := normHost(req.URL.Hostname()) == normHost(via[0].URL.Hostname())
-			upgrade := via[0].URL.Scheme == "http" && req.URL.Scheme == "https"
-			if !sameHost || (!upgrade && effectivePort(req.URL) != effectivePort(via[0].URL)) {
+			prev := via[len(via)-1].URL
+			upgrade := prev.Scheme == "http" && req.URL.Scheme == "https"
+			if !sameHost || (!upgrade && effectivePort(req.URL) != effectivePort(prev)) {
 				return ErrCrossHostRedirect
 			}
 			return nil
@@ -346,6 +348,18 @@ func HostKey(baseURL string) string {
 		return host + ":80"
 	}
 	return host + ":443"
+}
+
+// URLKey 完整 URL 的等价键：scheme 小写 + HostKey + EscapedPath——同端点
+// 的不同拼写（显式默认端口、DNS 尾点、host 大小写）归一成同键。回显判定
+// 这类「同 URL 不同拼写」的比较用它而不是字面相等。解析失败或缺 host 返
+// 回空串。
+func URLKey(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	return strings.ToLower(u.Scheme) + "://" + HostKey(raw) + u.EscapedPath()
 }
 
 // AllowedHosts 从一组基址提取 host 记账（小写、去端口、去空白、去重、按输入

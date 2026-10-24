@@ -416,6 +416,23 @@ func TestForgeIntegrationUpdateDerivedAPIBaseFollows(t *testing.T) {
 	if row.APIBaseURL != "" {
 		t.Fatalf("old-base echo must store empty intent, got %q", row.APIBaseURL)
 	}
+
+	// 归一化变体回显：客户端对展开值做过自己的归一（显式默认端口、尾
+	// 斜杠），按 URLKey 等价键仍判回显保持推导，不误钉死。
+	out, err = env.svc.Update(ctx, created.Id, &api.UpdateForgeIntegrationRequest{
+		BaseUrl:    ptrStr("https://f.example.com"),
+		ApiBaseUrl: ptrStr("https://e.example.com:443/api/v1/"),
+	})
+	if err != nil {
+		t.Fatalf("normalized-variant echo api: %v", err)
+	}
+	if out.ApiBaseUrl != "https://f.example.com/api/v1" {
+		t.Fatalf("variant echo must stay derived and follow new base, got %q", out.ApiBaseUrl)
+	}
+	row, _ = env.repo.FindByID(created.Id)
+	if row.APIBaseURL != "" {
+		t.Fatalf("variant echo must store empty intent, got %q", row.APIBaseURL)
+	}
 }
 
 func TestForgeIntegrationDeleteRules(t *testing.T) {

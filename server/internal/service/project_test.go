@@ -247,6 +247,24 @@ func TestParseRepositoryURL(t *testing.T) {
 			errContains: "非法字符",
 		},
 		{
+			name:        "dot-segment owner rejected",
+			input:       "https://git.example.com/../app",
+			wantErr:     true,
+			errContains: "不能是 . 或 ..",
+		},
+		{
+			name:        "dot-segment repo rejected",
+			input:       "godbobo/..",
+			wantErr:     true,
+			errContains: "不能是 . 或 ..",
+		},
+		{
+			name:        "single-dot owner rejected",
+			input:       "https://github.com/./app",
+			wantErr:     true,
+			errContains: "不能是 . 或 ..",
+		},
+		{
 			name:      "repo with dot and hyphen",
 			input:     "godbobo/fast-ship.v2",
 			wantHost:  "github.com",

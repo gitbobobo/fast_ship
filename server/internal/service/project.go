@@ -563,6 +563,11 @@ func parseRepositoryURL(raw string) (host, owner, repo string, explicit bool, er
 	if !repoNameRegex.MatchString(owner) || !repoNameRegex.MatchString(repo) {
 		return host, "", "", explicit, errors.New("仓库链接包含非法字符")
 	}
+	// 纯点段单独拒：字符集放行但 . / .. 拼出的链接（{base}/../r）经 URL
+	// 归一会指向别的仓库，落库后回填与审查链接全是错目标。
+	if owner == "." || owner == ".." || repo == "." || repo == ".." {
+		return host, "", "", explicit, errors.New("仓库链接 owner/repo 不能是 . 或 ..")
+	}
 
 	return host, owner, repo, explicit, nil
 }

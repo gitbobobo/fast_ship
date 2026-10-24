@@ -459,20 +459,24 @@ func (s *ForgeIntegrationService) resolveURLs(ctx context.Context, currentBase, 
 		// 按当前 base 展开——改 base_url 自动跟随。
 		return base, "", nil
 	}
+	// 先按落库同口径归一 apiInput，再判回显：客户端可能对 GET 到的展开
+	// 值做过自己的归一（显式 :443、尾斜杠、大小写/DNS 尾点拼写差），字面
+	// 比较会把「保持推导」误当显式钉死。按 URLKey 等价键（scheme+归一
+	// host+path）比较，同端点不同拼写都判回显。
+	apiStore, err = s.validateBaseURL(ctx, apiInput, allowPrivate)
+	if err != nil {
+		return "", "", paramError(err)
+	}
 	// 回显守卫：存量是推导行（currentAPI 空）而客户端把「生效值」原样
 	// 提交——编辑框预填的就是展开值，回显不等于显式钉死，保持推导。生效
 	// 值要和新、旧两个 base 的推导值都比：同一次 Update 改 base_url 时，
 	// GET→改 base→PUT 的调用方回写的是「旧 base 的展开值」，只比新推导值
 	// 会把它当显式钉死在旧主机上。真要把推导值钉成显式：先行已显式
-	// （currentAPI 非空）或提交值与两个推导值都不同。
+	// （currentAPI 非空）或提交值与两个推导值都不等价。
 	if strings.TrimSpace(currentAPI) == "" &&
-		(apiInput == forges.DefaultAPIBaseURL(base) ||
-			(currentBase != "" && apiInput == forges.DefaultAPIBaseURL(currentBase))) {
+		(forges.URLKey(apiStore) == forges.URLKey(forges.DefaultAPIBaseURL(base)) ||
+			(currentBase != "" && forges.URLKey(apiStore) == forges.URLKey(forges.DefaultAPIBaseURL(currentBase)))) {
 		return base, "", nil
-	}
-	apiStore, err = s.validateBaseURL(ctx, apiInput, allowPrivate)
-	if err != nil {
-		return "", "", paramError(err)
 	}
 	return base, apiStore, nil
 }
