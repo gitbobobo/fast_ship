@@ -195,7 +195,8 @@ describe("BotScheduleSection", () => {
     expect(rows[0]).toHaveTextContent(
       `下次运行 ${formatDate("2026-10-18T01:00:00Z")}`,
     );
-    expect(rows[0]).toHaveTextContent("已完成 · 已汇总 3 条变化");
+    expect(rows[0]).toHaveTextContent("已完成");
+    expect(rows[0]).toHaveTextContent("已汇总 3 条变化");
     expect(
       within(rows[0]).getByRole("switch", { name: "停用 每日汇总" }),
     ).toHaveAttribute("aria-checked", "true");

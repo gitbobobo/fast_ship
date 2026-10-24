@@ -56,15 +56,19 @@ function triggerText(run: BotScheduleRun) {
   return run.trigger_source === "manual" ? "手动触发" : "定时触发";
 }
 
-/** 最近一次结果的一行摘要：状态 + 摘要或错误；从未运行如实标注。
- *  空白摘要不出「·」悬空空段。 */
-function lastRunText(run: BotScheduleRun | null) {
+/** 最近一次结果的状态标签：从未运行如实标注。 */
+function lastRunLabel(run: BotScheduleRun | null) {
   if (!run) return "尚未运行";
-  const label = botScheduleRunStatusLabel(run.status);
-  const detail = (
-    run.status === "failed" ? run.error_message || run.summary : run.summary
-  )?.trim();
-  return detail ? `${label} · ${detail}` : label;
+  return botScheduleRunStatusLabel(run.status);
+}
+
+/** 最近一次结果的摘要/错误明细：空白视为无，不产出悬空空段。 */
+function lastRunDetail(run: BotScheduleRun | null): string | null {
+  if (!run) return null;
+  return (
+    (run.status === "failed" ? run.error_message || run.summary : run.summary)
+      ?.trim() || null
+  );
 }
 
 function formatDuration(ms: number | null) {
@@ -229,16 +233,22 @@ export function BotScheduleSection({
                     <span className="block truncate text-xs text-muted-foreground">
                       {scheduleText(task)}
                     </span>
-                    {/* 窄卡片里摘要会被省略号截到只剩残影，完整行放 title。 */}
-                    <span
-                      className="block truncate text-xs text-muted-foreground"
-                      title={`下次运行 ${task.next_run_at ? formatDate(task.next_run_at) : "—"} · ${lastRunText(task.last_run)}`}
-                    >
+                    <span className="block truncate text-xs text-muted-foreground">
                       下次运行{" "}
                       {task.next_run_at ? formatDate(task.next_run_at) : "—"}
                       {" · "}
-                      {lastRunText(task.last_run)}
+                      {lastRunLabel(task.last_run)}
                     </span>
+                    {/* 最近结果摘要单独成行：窄卡上与「下次运行」同行会被省略号
+                        截成「已完成 ·」悬空空分隔符的观感。 */}
+                    {lastRunDetail(task.last_run) && (
+                      <span
+                        className="block truncate text-xs text-muted-foreground"
+                        title={lastRunDetail(task.last_run) ?? undefined}
+                      >
+                        {lastRunDetail(task.last_run)}
+                      </span>
+                    )}
                   </button>
                   {/* 近 7 天花费入口（INT-162）：可空是「未计价」显示「—」；
                       跳总览页并定位到该任务行。不能放进上面的 button（交互嵌套）。 */}
