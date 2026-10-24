@@ -187,6 +187,37 @@ func TestClientRedirectStripsAuthOutsidePrefix(t *testing.T) {
 	}
 }
 
+func TestAuthPathInScope(t *testing.T) {
+	cases := []struct {
+		raw    string
+		prefix string
+		want   bool
+	}{
+		{"/api/v1/version", "/api/v1", true},
+		{"/api/v1", "/api/v1", true},                   // 前缀根本身也在作用域内
+		{"/api/v1/branches/feat%2Fx", "/api/v1", true}, // %2F 是合法路径参数
+		{"/api/v1/branches/feat%2Fx/commits", "/api/v1", true},
+		{"/api/v1/../logs", "/api/v1", false},
+		{"/api/v1/%2e%2e/logs", "/api/v1", false},
+		{"/api/v1/%252e%252e/logs", "/api/v1", false},     // 双重编码穿越
+		{"/api/v1/%25252e%25252e/logs", "/api/v1", false}, // 三层编码穿越
+		{"/api/v1/x%2f..%2fy", "/api/v1", false},          // 解码出 .. 子段
+		{"/api/v1/x%5c..%5cy", "/api/v1", false},          // 反斜杠同口径
+		{"/api/v1/logs%2f..%2fsecret", "/api/v1", false},
+		{"/api/v2/version", "/api/v1", false},
+		{"/login", "/api/v1", false},
+	}
+	for _, c := range cases {
+		u, err := url.Parse("https://forge.example" + c.raw)
+		if err != nil {
+			t.Fatalf("parse %q: %v", c.raw, err)
+		}
+		if got := authPathInScope(u, c.prefix); got != c.want {
+			t.Errorf("authPathInScope(%q, %q) = %v, want %v", c.raw, c.prefix, got, c.want)
+		}
+	}
+}
+
 func TestValidateBaseURL(t *testing.T) {
 	// 归一化与形状校验用公网 IP 字面量：不做真实 DNS（沙箱/CI 环境的解析器
 	// 不可依赖），域名的 DNS 分支由下面注入假解析器的用例覆盖。

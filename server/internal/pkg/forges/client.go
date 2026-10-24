@@ -198,8 +198,10 @@ func effectivePort(u *url.URL) string {
 
 // authPathInScope 判定目标路径是否仍在凭证作用域内：解码后的段含 . / ..
 // 歧义段（字面命中前缀也不能信任，代理/服务端归一后可能指出前缀外）、
-// 转义形态层层解码后是 . / .. 或夹带 / \（%2e、%252e、%2f 等，上游二次
-// 解码会穿到前缀外），或清理后不带前缀，都不算在作用域内。
+// 转义形态层层解码后按 / \ 切出的子段是 . / ..（%2e、%252e、%2f 拼出的
+// 穿越，上游二次解码会指出前缀外），或清理后不在前缀下，都不算在作用域
+// 内。解码出普通子段是合法形态——/branches/feat%2Fx 之类路径参数里的
+// 斜杠不该丢凭证。
 func authPathInScope(u *url.URL, prefix string) bool {
 	for _, seg := range strings.Split(u.Path, "/") {
 		if seg == "." || seg == ".." {
@@ -215,11 +217,18 @@ func authPathInScope(u *url.URL, prefix string) bool {
 			}
 			seg = dec
 		}
-		if seg == "." || seg == ".." || strings.ContainsAny(seg, `/\`) {
-			return false
+		for _, sub := range strings.FieldsFunc(seg, func(r rune) bool {
+			return r == '/' || r == '\\'
+		}) {
+			if sub == "." || sub == ".." {
+				return false
+			}
 		}
 	}
-	return strings.HasPrefix(path.Clean(u.Path), strings.TrimRight(prefix, "/")+"/")
+	// 前缀根本身（GET {api_base} 无尾段）也在作用域内。
+	cleaned := path.Clean(u.Path)
+	trimmed := strings.TrimRight(prefix, "/")
+	return cleaned == trimmed || strings.HasPrefix(cleaned, trimmed+"/")
 }
 
 // dialGuard 生成 net.Dialer.Control：在 DNS 解析之后、建连之前判定实际目标
