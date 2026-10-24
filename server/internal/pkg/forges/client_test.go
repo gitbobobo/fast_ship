@@ -119,19 +119,19 @@ func TestValidateBaseURL(t *testing.T) {
 	// 归一化与形状校验用公网 IP 字面量：不做真实 DNS（沙箱/CI 环境的解析器
 	// 不可依赖），域名的 DNS 分支由下面注入假解析器的用例覆盖。
 	t.Run("https 归一去尾部斜杠", func(t *testing.T) {
-		got, err := ValidateBaseURL("https://192.0.2.10:8443/", false)
+		got, err := ValidateBaseURL(context.Background(), "https://192.0.2.10:8443/", false)
 		if err != nil || got != "https://192.0.2.10:8443" {
 			t.Fatalf("got %q, %v", got, err)
 		}
 	})
 	t.Run("默认拒绝 http", func(t *testing.T) {
-		if _, err := ValidateBaseURL("http://forge.example.com", false); !errors.Is(err, ErrSchemeNotAllowed) {
+		if _, err := ValidateBaseURL(context.Background(), "http://forge.example.com", false); !errors.Is(err, ErrSchemeNotAllowed) {
 			t.Fatalf("err = %v, want ErrSchemeNotAllowed", err)
 		}
 	})
 	t.Run("私网放行时允许 http", func(t *testing.T) {
 		// RFC1918 字面量：私网口径放行且不做真实 DNS（沙箱/CI 无解析依赖）。
-		if _, err := ValidateBaseURL("http://10.1.2.3", true); err != nil {
+		if _, err := ValidateBaseURL(context.Background(), "http://10.1.2.3", true); err != nil {
 			t.Fatalf("err = %v", err)
 		}
 	})
@@ -142,7 +142,7 @@ func TestValidateBaseURL(t *testing.T) {
 			"http://127.0.0.1:3000", "http://169.254.169.254",
 			"http://[fd00:ec2::254]", "http://[::1]",
 		} {
-			if _, err := ValidateBaseURL(raw, true); !errors.Is(err, ErrPrivateAddress) {
+			if _, err := ValidateBaseURL(context.Background(), raw, true); !errors.Is(err, ErrPrivateAddress) {
 				t.Errorf("ValidateBaseURL(%s, private) err = %v, want ErrPrivateAddress", raw, err)
 			}
 		}
@@ -152,7 +152,7 @@ func TestValidateBaseURL(t *testing.T) {
 			"https://127.0.0.1", "https://10.0.0.5", "https://192.168.1.1",
 			"https://169.254.169.254", "https://[::1]", "https://172.16.9.9",
 		} {
-			if _, err := ValidateBaseURL(raw, false); !errors.Is(err, ErrPrivateAddress) {
+			if _, err := ValidateBaseURL(context.Background(), raw, false); !errors.Is(err, ErrPrivateAddress) {
 				t.Errorf("ValidateBaseURL(%s) err = %v, want ErrPrivateAddress", raw, err)
 			}
 		}
@@ -160,7 +160,7 @@ func TestValidateBaseURL(t *testing.T) {
 	t.Run("回环域名默认拒绝", func(t *testing.T) {
 		// localhost 在正常机器上解析到回环；即使解析失败这里也必须报错——
 		// 保存时连不上的基址不该进库。
-		if _, err := ValidateBaseURL("https://localhost:3000", false); err == nil {
+		if _, err := ValidateBaseURL(context.Background(), "https://localhost:3000", false); err == nil {
 			t.Fatal("https://localhost:3000 should be rejected")
 		}
 	})
@@ -186,7 +186,7 @@ func TestValidateBaseURL(t *testing.T) {
 		for _, raw := range []string{
 			"", "  ", "forge.example.com", "https://", "https://a.com?x=1", "https://a.com#frag",
 		} {
-			if _, err := ValidateBaseURL(raw, false); !errors.Is(err, ErrInvalidBaseURL) {
+			if _, err := ValidateBaseURL(context.Background(), raw, false); !errors.Is(err, ErrInvalidBaseURL) {
 				t.Errorf("ValidateBaseURL(%q) err = %v, want ErrInvalidBaseURL", raw, err)
 			}
 		}
@@ -198,7 +198,7 @@ func TestValidateBaseURL(t *testing.T) {
 			"https://bot@forge.example.com",
 			"https://user:pass@192.0.2.10",
 		} {
-			if _, err := ValidateBaseURL(raw, false); !errors.Is(err, ErrInvalidBaseURL) {
+			if _, err := ValidateBaseURL(context.Background(), raw, false); !errors.Is(err, ErrInvalidBaseURL) {
 				t.Errorf("ValidateBaseURL(%q) err = %v, want ErrInvalidBaseURL", raw, err)
 			}
 		}
@@ -206,7 +206,7 @@ func TestValidateBaseURL(t *testing.T) {
 	t.Run("返回重编码后的归一串", func(t *testing.T) {
 		// scheme 小写、去默认之外的手写斜杠；输入原样回传会把大小写等杂音
 		// 落库（主机唯一判定按归一键，但展示与拼接用原串）。
-		got, err := ValidateBaseURL("HTTPS://192.0.2.10:8443/", false)
+		got, err := ValidateBaseURL(context.Background(), "HTTPS://192.0.2.10:8443/", false)
 		if err != nil || got != "https://192.0.2.10:8443" {
 			t.Fatalf("got %q, %v", got, err)
 		}

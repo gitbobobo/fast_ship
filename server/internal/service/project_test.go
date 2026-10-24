@@ -172,6 +172,20 @@ func TestParseRepositoryURL(t *testing.T) {
 			wantErr:   false,
 		},
 		{
+			// 非 HTTP(S) scheme 拒绝（审查修复）：ssh:// 若静默当 https 归一，
+			// 会命中 https 集成的 host_key 把仓库绑到协议不符的集成。
+			name:        "ssh scheme rejected",
+			input:       "ssh://git.example.com/godbobo/fast_ship",
+			wantErr:     true,
+			errContains: "协议无效",
+		},
+		{
+			name:        "ftp scheme rejected",
+			input:       "ftp://github.com/godbobo/fast_ship",
+			wantErr:     true,
+			errContains: "协议无效",
+		},
+		{
 			name:        "empty string",
 			input:       "",
 			wantErr:     true,

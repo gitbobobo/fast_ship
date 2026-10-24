@@ -460,7 +460,7 @@ const repoHostGitHub = "github.com"
 // host:port 供集成匹配）、owner 与 repo。接受形态：
 //   - owner/repo（纯 owner/repo 视为内置 GitHub）；
 //   - github.com/o/r、https://github.com/o/r、http://github.com/o/r（GitHub
-//     所有 scheme 一律当 github 处理，行为兼容旧实现）；
+//     的 http/https 写法一律当 github 处理，行为兼容旧实现）；
 //   - host/o/r、https://host/o/r、https://host:port/o/r（自建 Forgejo 等）。
 //
 // host 判定：无 scheme 时首段含 `.` 或 `:` 视为 host，否则视为 owner；带
@@ -477,6 +477,11 @@ func parseRepositoryURL(raw string) (host, owner, repo string, err error) {
 	if idx := strings.Index(s, "://"); idx != -1 {
 		scheme = strings.ToLower(s[:idx])
 		s = s[idx+3:]
+	}
+	// 只认 http(s)：ssh://、ftp:// 这类非 HTTP 协议若静默当 https 归一，会
+	// 命中 https 集成的 host_key 把仓库绑到与输入协议不符的集成上。
+	if scheme != "" && scheme != "http" && scheme != "https" {
+		return "", "", "", errors.New("仓库链接协议无效，应为 http 或 https")
 	}
 
 	parts := strings.SplitN(s, "/", 3)

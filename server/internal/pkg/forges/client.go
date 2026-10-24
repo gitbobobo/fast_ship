@@ -173,13 +173,18 @@ func dialGuard(blocked func(net.IP) bool) func(string, string, syscall.RawConn) 
 	}
 }
 
+// saveResolveTimeout 保存时 DNS 校验的解析上限：调用方 ctx（管理端请求）可能
+// 远超请求生命周期才到期，解析器卡顿（NS 黑洞、串行重试）不能把 handler 协程
+// 一直挂在 LookupIPAddr 上。
+const saveResolveTimeout = 5 * time.Second
+
 // ValidateBaseURL 校验并归一集成基址：https 必需（allow_private_network 时
 // 该集成可用 http）、host 非空、不带 userinfo/query/fragment、去尾部 /；并做
 // 一次保存时 DNS 校验（解析逐 IP 过 blocked 口径，解析失败按拒绝处理）。
 // allow_private_network=true 用私网放行口径而非跳过校验：RFC1918/ULA/CGNAT
 // 放行，但回环、链路本地/元数据、保留段两口径恒拒——http://127.0.0.1 这类
 // 「落库即永远连不通」的基址在保存时就挡掉。返回归一后的基址。
-func ValidateBaseURL(raw string, allowPrivateNetwork bool) (string, error) {
+func ValidateBaseURL(ctx context.Context, raw string, allowPrivateNetwork bool) (string, error) {
 	u, err := parseBaseURL(raw)
 	if err != nil {
 		return "", err
@@ -187,11 +192,16 @@ func ValidateBaseURL(raw string, allowPrivateNetwork bool) (string, error) {
 	if u.Scheme != "https" && !(allowPrivateNetwork && u.Scheme == "http") {
 		return "", ErrSchemeNotAllowed
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	resolveCtx, cancel := context.WithTimeout(ctx, saveResolveTimeout)
+	defer cancel()
 	blocked := isBlockedIP
 	if allowPrivateNetwork {
 		blocked = privateModeBlocked
 	}
-	if err := checkHostAddrs(context.Background(), u.Hostname(), nil, blocked); err != nil {
+	if err := checkHostAddrs(resolveCtx, u.Hostname(), nil, blocked); err != nil {
 		return "", err
 	}
 	// 回传重编码后的 URL 而不是原始输入：percent 编码、默认端口等由 url 包

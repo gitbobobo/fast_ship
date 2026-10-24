@@ -88,6 +88,11 @@ export function normalizeCodeRepoRef(raw: string): string {
     scheme = rest.slice(0, protoIdx).toLowerCase();
     rest = rest.slice(protoIdx + 3);
   }
+  // 与后端同口径：scheme 非空只认 http/https，ssh://、ftp:// 原样返回交
+  // 后端 40001——静默当 https 归一会把仓库绑到与输入协议不符的集成。
+  if (scheme !== "" && scheme !== "http" && scheme !== "https") {
+    return raw;
+  }
   const slash = rest.indexOf("/");
   const first = slash === -1 ? rest : rest.slice(0, slash);
   let tail = slash === -1 ? "" : rest.slice(slash);

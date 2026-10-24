@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path"
 	"strings"
 
 	"github.com/godbobo/fast_ship/server/internal/api"
@@ -36,7 +37,7 @@ type ForgeIntegrationService struct {
 	probe func(ctx context.Context, client *http.Client, apiBaseURL, token string) ForgeProbe
 	// validateBaseURL 基址校验入口，main 缺省接 forges.ValidateBaseURL；测试
 	// 注入假的以避开真实 DNS。
-	validateBaseURL func(raw string, allowPrivateNetwork bool) (string, error)
+	validateBaseURL func(ctx context.Context, raw string, allowPrivateNetwork bool) (string, error)
 }
 
 // ForgeProbe 一次连接检测的结论：status 沿用 model.DeploymentDetection* 口径
@@ -76,7 +77,7 @@ func (s *ForgeIntegrationService) SetProbe(fn func(ctx context.Context, client *
 }
 
 // SetValidateBaseURL 注入基址校验函数（测试用，避开真实 DNS）。
-func (s *ForgeIntegrationService) SetValidateBaseURL(fn func(raw string, allowPrivateNetwork bool) (string, error)) {
+func (s *ForgeIntegrationService) SetValidateBaseURL(fn func(ctx context.Context, raw string, allowPrivateNetwork bool) (string, error)) {
 	s.validateBaseURL = fn
 }
 
@@ -126,7 +127,7 @@ func (s *ForgeIntegrationService) Create(ctx context.Context, req *api.CreateFor
 
 	// 合并成最终值后统一校验：base 与 api 各校验一次（含保存时 DNS），口径与
 	// Update 完全一致。
-	base, apiBase, err := s.resolveURLs("", strings.TrimSpace(req.BaseUrl),
+	base, apiBase, err := s.resolveURLs(ctx, "", strings.TrimSpace(req.BaseUrl),
 		"", derefString(req.ApiBaseUrl), false, allowPrivate)
 	if err != nil {
 		return nil, err
@@ -233,7 +234,7 @@ func (s *ForgeIntegrationService) Update(ctx context.Context, id string, req *ap
 		if apiChanged {
 			reqAPI = strings.TrimSpace(*req.ApiBaseUrl)
 		}
-		base, apiBase, err := s.resolveURLs(row.BaseURL, reqBase, row.APIBaseURL, reqAPI,
+		base, apiBase, err := s.resolveURLs(ctx, row.BaseURL, reqBase, row.APIBaseURL, reqAPI,
 			apiChanged && reqAPI == "", allowPrivate)
 		if err != nil {
 			return nil, err
@@ -406,15 +407,16 @@ func (s *ForgeIntegrationService) builtinProjection(ctx context.Context) (*api.F
 
 // resolveURLs 校验并归一 base / api 两个基址：reqBase 为空回落 currentBase
 // （Update 的部分更新语义）；api 为空按 {base}/api/v1 推导；allow_private_
-// network 关闭时逐 IP 做保存时 DNS 校验。apiReset=true 表示 Update 显式传了
+// network 控制保存时 DNS 校验的口径（公网/私网，两口径都逐 IP 校验）。
+// apiReset=true 表示 Update 显式传了
 // 空串，要把 api_base_url 重置为推导值而不是保留 currentAPI。任何校验失败
 // 都折成 40001。
-func (s *ForgeIntegrationService) resolveURLs(currentBase, reqBase, currentAPI, reqAPI string, apiReset, allowPrivate bool) (base, apiBase string, err error) {
+func (s *ForgeIntegrationService) resolveURLs(ctx context.Context, currentBase, reqBase, currentAPI, reqAPI string, apiReset, allowPrivate bool) (base, apiBase string, err error) {
 	baseInput := reqBase
 	if baseInput == "" {
 		baseInput = currentBase
 	}
-	base, err = s.validateBaseURL(baseInput, allowPrivate)
+	base, err = s.validateBaseURL(ctx, baseInput, allowPrivate)
 	if err != nil {
 		return "", "", paramError(err)
 	}
@@ -431,7 +433,7 @@ func (s *ForgeIntegrationService) resolveURLs(currentBase, reqBase, currentAPI, 
 		// 空串（Create 省略 / Update 显式重置 / 存量空列）按 Forgejo 惯例推导。
 		return base, forges.DefaultAPIBaseURL(base), nil
 	}
-	apiBase, err = s.validateBaseURL(apiInput, allowPrivate)
+	apiBase, err = s.validateBaseURL(ctx, apiInput, allowPrivate)
 	if err != nil {
 		return "", "", paramError(err)
 	}
@@ -616,7 +618,9 @@ func truncateProbeField(s string) string {
 }
 
 // forgeAPIGet 发起带 PAT 的 GET，返回状态码与响应体；网络层失败（含响应体
-// 读取中断）返回 err。
+// 读取中断）返回 err。同主机重定向仍被 client 放行，但跳出 API 路径前缀的
+// 跳转会被剥掉 Authorization——集成端把 /api/v1/* 指到记录请求头的同主机
+// 端点时，PAT 不落进那边的访问日志。
 func forgeAPIGet(ctx context.Context, client *http.Client, url, token string) (int, []byte, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -628,7 +632,20 @@ func forgeAPIGet(ctx context.Context, client *http.Client, url, token string) (i
 	// Forgejo/Gitea 的 PAT 认证头惯例。
 	req.Header.Set("Authorization", "token "+token)
 	req.Header.Set("Accept", "application/json")
-	resp, err := client.Do(req)
+
+	apiPrefix := path.Dir(req.URL.Path)
+	c := *client
+	base := c.CheckRedirect
+	c.CheckRedirect = func(r *http.Request, via []*http.Request) error {
+		if !strings.HasPrefix(r.URL.Path, apiPrefix+"/") {
+			r.Header.Del("Authorization")
+		}
+		if base != nil {
+			return base(r, via)
+		}
+		return nil
+	}
+	resp, err := c.Do(req)
 	if err != nil {
 		return 0, nil, err
 	}

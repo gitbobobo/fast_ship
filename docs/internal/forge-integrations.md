@@ -191,7 +191,11 @@ Forgejo 基址是管理员可填的任意 URL，必须把「内网探测」挡�
 - **重定向规则**：目标 host:port 必须与首个请求一致（跨主机拒绝）；未开私网
   放行时每一跳都必须 https；**任何配置下 https→http 的降级跳转都拒绝**
   （`ErrSchemeDowngrade`——明文 http 只该来自管理员配置的基址，不该被响应
-  悄悄带出来）。
+  悄悄带出来）。连接检测的 PAT 跟随跳转有范围限制：跳出 API 路径前缀
+  （如 `/api/v1`）的同主机跳转会被剥掉 `Authorization`，PAT 不落进实例上
+  非 API 端点的访问日志。
+- **保存时解析有上限**：`ValidateBaseURL` 的 DNS 校验透传管理端请求 ctx 并
+  封顶 5s，解析器卡顿不会把 HTTP handler 挂住。
 - **自定义 CA 追加系统池**：公网签发的证书照常验证；**不使用
   InsecureSkipVerify**（测试里机器断言了这一点）。
 - 统一 `Proxy = nil`：走环境代理时校验到的会是代理地址，防线失效（与

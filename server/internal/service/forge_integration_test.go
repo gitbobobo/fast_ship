@@ -11,7 +11,9 @@ import (
 	"errors"
 	"math/big"
 	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -59,7 +61,7 @@ func forgeTestService(t *testing.T) *forgeTestEnv {
 	// 假校验：与 forges.ValidateBaseURL 同口径的形状规则（https 放行、http 仅
 	// 私网放行、host 含 "private" 视为解析到私网、其余拒绝），但不做真实 DNS。
 	baseCalls := &[]string{}
-	svc.SetValidateBaseURL(func(raw string, allowPrivateNetwork bool) (string, error) {
+	svc.SetValidateBaseURL(func(_ context.Context, raw string, allowPrivateNetwork bool) (string, error) {
 		*baseCalls = append(*baseCalls, raw)
 		trimmed := strings.TrimSpace(raw)
 		if !allowPrivateNetwork && strings.Contains(trimmed, "private") {
@@ -474,6 +476,44 @@ func TestForgeIntegrationRealValidatorScheme(t *testing.T) {
 	}
 	if out.BaseUrl != "https://192.0.2.10:8443" {
 		t.Fatalf("normalization = %q", out.BaseUrl)
+	}
+}
+
+// forgeAPIGet 的同主机重定向：跳出 API 路径前缀的跳转必须剥掉 PAT——集成端
+// 把 /api/v1/* 指到记录请求头的同主机端点时，凭证不落进那边的访问日志；
+// 仍在 API 树内的跳转保留 Authorization（反代正规化路径属正常跳转）。
+func TestForgeAPIGetRedirectStripsAuthOutsideAPIPrefix(t *testing.T) {
+	var mu sync.Mutex
+	var sawAuth []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		sawAuth = append(sawAuth, r.URL.Path+"|"+r.Header.Get("Authorization"))
+		mu.Unlock()
+		switch r.URL.Path {
+		case "/api/v1/version":
+			http.Redirect(w, r, "/api/v1/user", http.StatusFound)
+		case "/api/v1/user":
+			http.Redirect(w, r, "/logs", http.StatusFound)
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer srv.Close()
+
+	status, _, err := forgeAPIGet(context.Background(), srv.Client(), srv.URL+"/api/v1/version", "secret-pat")
+	if err != nil || status != http.StatusOK {
+		t.Fatalf("status=%d err=%v", status, err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(sawAuth) != 3 {
+		t.Fatalf("requests = %v", sawAuth)
+	}
+	if !strings.HasSuffix(sawAuth[0], "token secret-pat") || !strings.HasSuffix(sawAuth[1], "token secret-pat") {
+		t.Fatalf("API 树内跳转应保留凭证: %v", sawAuth)
+	}
+	if strings.HasSuffix(sawAuth[2], "token secret-pat") {
+		t.Fatalf("跳出 API 前缀的跳转仍带凭证: %v", sawAuth)
 	}
 }
 

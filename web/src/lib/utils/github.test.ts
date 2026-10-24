@@ -92,6 +92,19 @@ describe("normalizeCodeRepoRef", () => {
       "github.com/godbobo/fast_ship",
     );
   });
+
+  it("非 http(s) scheme 原样返回：与后端「协议无效 40001」同口径，不静默当 https", () => {
+    for (const input of [
+      "ssh://git.example.com/acme/app",
+      "ftp://github.com/acme/app",
+      "git://git.example.com/acme/app",
+    ]) {
+      expect(normalizeCodeRepoRef(input)).toBe(input);
+    }
+    expect(normalizeCodeRepoRef("ssh://git.example.com/a/b")).not.toBe(
+      normalizeCodeRepoRef("https://git.example.com/a/b"),
+    );
+  });
 });
 
 describe("codeRepoUrlForInput", () => {

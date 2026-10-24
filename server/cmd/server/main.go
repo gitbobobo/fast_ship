@@ -621,7 +621,9 @@ func runBootMigrations(db *gorm.DB, fileStorage storage.Storage, logger *zap.Log
 		return fmt.Errorf("代码集成 host_key 回填失败: %w", err)
 	}
 
-	createBootIndexes(db)
+	if err := createBootIndexes(db); err != nil {
+		return fmt.Errorf("创建手工索引失败: %w", err)
+	}
 
 	// 用户角色（INT-129）：AutoMigrate 补齐 users.role 后，存量库可能一个
 	// admin 都没有——把最早创建的用户提为 admin（幂等）。
@@ -659,7 +661,9 @@ func runBootMigrations(db *gorm.DB, fileStorage storage.Storage, logger *zap.Log
 }
 
 // createBootIndexes 登记全部手工索引：复合/部分/表达式索引 AutoMigrate 建不了。
-func createBootIndexes(db *gorm.DB) {
+// 普通索引创建失败按幂等忽略（历史口径），唯一约束索引失败返回 error 让启动
+// 失败——索引没建上而服务照常跑，查重就只剩应用层兜底。
+func createBootIndexes(db *gorm.DB) error {
 	// 创建唯一索引
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_user_name ON projects(user_id, name)")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_versions_project_version ON versions(project_id, version_number)")
@@ -707,14 +711,18 @@ func createBootIndexes(db *gorm.DB) {
 	// 同归一主机只允许一条 forgejo 集成（INT-166）：保存时 service 层先查重
 	// 并返回带集成名的 40001（idx_forge_integrations_host_key 的归一键在 SQL
 	// 里算不出来），这条部分唯一索引兜查重通过后同主机被并发抢注的窗口；
-	// host_key 为空串的存量脏行不参与唯一约束。
-	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_forge_integrations_host_key ON forge_integrations(host_key) WHERE host_key <> ''")
+	// host_key 为空串的存量脏行不参与唯一约束。建不上（如存量数据已有同
+	// host_key 冲突）必须启动失败——带缺口跑等于并发抢注窗口裸奔。
+	if err := db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_forge_integrations_host_key ON forge_integrations(host_key) WHERE host_key <> ''").Error; err != nil {
+		return fmt.Errorf("创建 idx_forge_integrations_host_key 失败: %w", err)
+	}
 	// 截图源地址唯一索引由 model.ReviewAsset 的 uniqueIndex 标签随 AutoMigrate
 	// 建出（idx_review_assets_source）；按 (repo, pr, head) 的查询也走它的前缀。
 	db.Exec("DROP INDEX IF EXISTS idx_review_assets_pr_head")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_notifications_user_dedup ON notifications(user_id, dedup_key)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_notifications_user_updated ON notifications(user_id, updated_at DESC, id)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_notifications_unread ON notifications(user_id, updated_at DESC) WHERE read_at IS NULL")
+	return nil
 }
 
 // selfLogMinLevel 把配置中的级别名转为 slog 级别；未知取值按 INFO。
