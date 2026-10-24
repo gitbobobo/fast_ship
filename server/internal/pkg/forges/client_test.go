@@ -130,8 +130,21 @@ func TestValidateBaseURL(t *testing.T) {
 		}
 	})
 	t.Run("私网放行时允许 http", func(t *testing.T) {
-		if _, err := ValidateBaseURL("http://forge.lan", true); err != nil {
+		// RFC1918 字面量：私网口径放行且不做真实 DNS（沙箱/CI 无解析依赖）。
+		if _, err := ValidateBaseURL("http://10.1.2.3", true); err != nil {
 			t.Fatalf("err = %v", err)
+		}
+	})
+	t.Run("私网放行仍拒两口径恒禁地址", func(t *testing.T) {
+		// 保存侧与拨号同口径：回环、链路本地/元数据、AWS IPv6 IMDS 在私网
+		// 模式下也拒——这类基址落库即永远连不通。
+		for _, raw := range []string{
+			"http://127.0.0.1:3000", "http://169.254.169.254",
+			"http://[fd00:ec2::254]", "http://[::1]",
+		} {
+			if _, err := ValidateBaseURL(raw, true); !errors.Is(err, ErrPrivateAddress) {
+				t.Errorf("ValidateBaseURL(%s, private) err = %v, want ErrPrivateAddress", raw, err)
+			}
 		}
 	})
 	t.Run("IP 字面量私网拒绝", func(t *testing.T) {
@@ -155,7 +168,7 @@ func TestValidateBaseURL(t *testing.T) {
 		err := checkHostAddrs(context.Background(), "forge.internal",
 			func(context.Context, string) ([]net.IP, error) {
 				return []net.IP{net.ParseIP("10.1.2.3"), net.ParseIP("203.0.113.7")}, nil
-			})
+			}, nil)
 		if !errors.Is(err, ErrPrivateAddress) {
 			t.Fatalf("err = %v, want ErrPrivateAddress", err)
 		}
@@ -164,7 +177,7 @@ func TestValidateBaseURL(t *testing.T) {
 		err := checkHostAddrs(context.Background(), "nope.example.com",
 			func(context.Context, string) ([]net.IP, error) {
 				return nil, errors.New("no such host")
-			})
+			}, nil)
 		if err == nil {
 			t.Fatal("resolution failure should be rejected")
 		}

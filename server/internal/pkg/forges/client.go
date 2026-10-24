@@ -175,9 +175,10 @@ func dialGuard(blocked func(net.IP) bool) func(string, string, syscall.RawConn) 
 
 // ValidateBaseURL 校验并归一集成基址：https 必需（allow_private_network 时
 // 该集成可用 http）、host 非空、不带 userinfo/query/fragment、去尾部 /；并做
-// 一次保存时 DNS 校验（解析逐 IP 过 isBlockedIP，解析失败按拒绝处理）。返回
-// 归一后的基址。allow_private_network=true 时跳过 IP 校验——放行粒度就是
-// 该主机。
+// 一次保存时 DNS 校验（解析逐 IP 过 blocked 口径，解析失败按拒绝处理）。
+// allow_private_network=true 用私网放行口径而非跳过校验：RFC1918/ULA/CGNAT
+// 放行，但回环、链路本地/元数据、保留段两口径恒拒——http://127.0.0.1 这类
+// 「落库即永远连不通」的基址在保存时就挡掉。返回归一后的基址。
 func ValidateBaseURL(raw string, allowPrivateNetwork bool) (string, error) {
 	u, err := parseBaseURL(raw)
 	if err != nil {
@@ -186,10 +187,12 @@ func ValidateBaseURL(raw string, allowPrivateNetwork bool) (string, error) {
 	if u.Scheme != "https" && !(allowPrivateNetwork && u.Scheme == "http") {
 		return "", ErrSchemeNotAllowed
 	}
-	if !allowPrivateNetwork {
-		if err := checkHostAddrs(context.Background(), u.Hostname(), nil); err != nil {
-			return "", err
-		}
+	blocked := isBlockedIP
+	if allowPrivateNetwork {
+		blocked = privateModeBlocked
+	}
+	if err := checkHostAddrs(context.Background(), u.Hostname(), nil, blocked); err != nil {
+		return "", err
 	}
 	// 回传重编码后的 URL 而不是原始输入：percent 编码、默认端口等由 url 包
 	// 口径统一，杜绝「输入里夹带的东西原样落库」。
@@ -324,13 +327,17 @@ var resolveHostIPs = func(ctx context.Context, host string) ([]net.IP, error) {
 
 // checkHostAddrs 解析主机名并逐 IP 校验；任一 IP 落在拒绝段即拒绝（域名指向
 // 多个地址时，放行意味着客户端可能连到被拒的那个）。解析失败按拒绝处理——
-// 保存时连不上的基址不该进库。lookup 为 nil 用 resolveHostIPs。
-func checkHostAddrs(ctx context.Context, host string, lookup func(context.Context, string) ([]net.IP, error)) error {
+// 保存时连不上的基址不该进库。lookup 为 nil 用 resolveHostIPs；blocked 为
+// nil 用公网口径 isBlockedIP，私网放行场景传 privateModeBlocked。
+func checkHostAddrs(ctx context.Context, host string, lookup func(context.Context, string) ([]net.IP, error), blocked func(net.IP) bool) error {
 	if host == "" {
 		return ErrInvalidBaseURL
 	}
+	if blocked == nil {
+		blocked = isBlockedIP
+	}
 	if ip := net.ParseIP(host); ip != nil {
-		if isBlockedIP(ip) {
+		if blocked(ip) {
 			return ErrPrivateAddress
 		}
 		return nil
@@ -347,7 +354,7 @@ func checkHostAddrs(ctx context.Context, host string, lookup func(context.Contex
 		return fmt.Errorf("主机 %q 没有可用的解析结果", host)
 	}
 	for _, ip := range addrs {
-		if isBlockedIP(ip) {
+		if blocked(ip) {
 			return ErrPrivateAddress
 		}
 	}
