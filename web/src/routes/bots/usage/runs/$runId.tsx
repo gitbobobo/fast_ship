@@ -136,7 +136,10 @@ export default function BotUsageRunPage() {
         ) : !data ? null : (
           <>
             <RunSummary run={data.run} requests={data.requests} />
-            <RequestList requests={data.requests} />
+            <RequestList
+              requests={data.requests}
+              truncated={data.requests_truncated}
+            />
             <MaintenanceRunList runs={data.maintenance_runs} />
           </>
         )}
@@ -241,11 +244,18 @@ function RunSummary({
 }
 
 /** 模型请求列表：每次请求一行（含失败重试标记），下方挂该次的工具调用。 */
-function RequestList({ requests }: { requests: BotUsageRequest[] }) {
+function RequestList({
+  requests,
+  truncated,
+}: {
+  requests: BotUsageRequest[];
+  truncated?: boolean;
+}) {
   return (
     <section className="space-y-2">
       <h3 className="text-sm font-medium">
         模型请求{requests.length ? ` · ${requests.length}` : ""}
+        {truncated ? "（更多已截断）" : ""}
       </h3>
       {!requests.length ? (
         <div className="rounded-lg border bg-muted/40 py-8 text-center text-sm text-muted-foreground">

@@ -315,11 +315,12 @@ func (r *BotUsageRepository) ScheduleTaskIDsByRunIDs(runIDs []string) (map[strin
 
 // ---------- 单次运行花费明细（GET /api/bots/usage/runs/:runId） ----------
 
-// ListRequestsByRun 返回 run 的全部模型请求（含失败重试），按 ordinal 正序。
-func (r *BotUsageRepository) ListRequestsByRun(runID string) ([]model.BotModelRequest, error) {
+// ListRequestsByRun 返回 run 的模型请求（含失败重试），按 ordinal 正序，
+// 至多 limit 条——多取一行判截断由调用方负责（传 limit+1）。
+func (r *BotUsageRepository) ListRequestsByRun(runID string, limit int) ([]model.BotModelRequest, error) {
 	var rows []model.BotModelRequest
 	err := r.db.Where("run_id = ?", runID).
-		Order("ordinal ASC").Find(&rows).Error
+		Order("ordinal ASC").Limit(limit).Find(&rows).Error
 	return rows, err
 }
 

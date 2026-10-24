@@ -6447,7 +6447,7 @@ export interface components {
             linked_main_cost: number | null;
             /**
              * Format: double
-             * @description （单次定时运行平均 + 每次触发摊到的连带主线成本）× 未来 30 天触发次数（parseScheduleCron）；停用、已删除、无已计价平均或 cron 解析失败为 null
+             * @description （单次定时运行平均 + 每次触发摊到的连带主线成本）× 未来 30 天触发次数（parseScheduleCron）；单次统计取最近 30 个当地日的固定窗口，与所选 range 无关；停用、已删除、无已计价平均或 cron 解析失败为 null
              */
             estimated_monthly_cost: number | null;
         };
@@ -6615,8 +6615,10 @@ export interface components {
         };
         BotUsageRunDetail: {
             run: components["schemas"]["BotUsageRun"];
-            /** @description run 的每次模型请求（含失败重试），按 ordinal 正序 */
+            /** @description run 的每次模型请求（含失败重试），按 ordinal 正序；超过上限时截断 */
             requests: components["schemas"]["BotUsageRequest"][];
+            /** @description 请求数超过上限（500）被截断时为 true */
+            requests_truncated: boolean;
             /** @description parent_run_id 指向本 run 的维护运行及其请求 */
             maintenance_runs: components["schemas"]["BotUsageMaintenanceRun"][];
         };

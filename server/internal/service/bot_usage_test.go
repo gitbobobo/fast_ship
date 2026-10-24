@@ -355,12 +355,22 @@ func TestBotUsageTaskCountsAndMonthlyEstimate(t *testing.T) {
 		r.Status = model.BotRunStatusSkipped
 	})
 	// schedule_event 唤醒的连带主线：经 trigger_key 反查归任务，进
-	// linked_main_cost 与月推算口径（3 次定时 run 摊 0.3 → 每次 0.1）。
+	// linked_main_cost 与月推算口径（4 次定时 run 摊 0.3 → 每次 0.075）。
 	seedUsageRun(t, env, bot.ID, func(r *model.BotRun) {
 		r.TriggerSource = model.BotTriggerScheduleEvent
 		r.TriggerKey = "schedule_event:" + skipped.ID + ":completed"
 		r.SessionKind = model.BotSessionKindMain
 		r.CostEstimate = ptrCost(0.3)
+	})
+	// 10 天前的已计价 run：在 7d 所选窗口之外、固定 30 天估算窗口之内。
+	// 月推算用它但不影响行内 runs/avg（行内仍按所选窗口统计）。
+	seedUsageRun(t, env, bot.ID, func(r *model.BotRun) {
+		r.TriggerSource = model.BotTriggerSchedule
+		r.SessionKind = model.BotSessionKindSchedule
+		taskID := task.ID
+		r.ScheduleTaskID = &taskID
+		r.CostEstimate = ptrCost(0.2)
+		r.CreatedAt = time.Now().UTC().AddDate(0, 0, -10)
 	})
 
 	disabled := seedScheduleTask(t, env, bot.ID, nil)
@@ -402,10 +412,26 @@ func TestBotUsageTaskCountsAndMonthlyEstimate(t *testing.T) {
 	if enabled.avg == nil || !costEq(*enabled.avg, 0.075) {
 		t.Fatalf("平均应只含有已计价 run = 0.075，实得 %v", enabled.avg)
 	}
-	// 上海无夏令时，(now, now+30d] 恰含 30 次每日触发；单次口径含连带
-	// 主线摊销：30 × (0.075 + 0.3/3) = 5.25。
-	if enabled.estimated == nil || *enabled.estimated < 5.24 || *enabled.estimated > 5.26 {
-		t.Fatalf("月推算应为 30 × (0.075 + 0.1) = 5.25，实得 %v", enabled.estimated)
+	// 上海无夏令时，(now, now+30d] 恰含 30 次每日触发；单次口径来自固定
+	// 30 天窗（4 个已计价 run：0.1/0.05/0.2 均值 0.1167 + 连带 0.3/4）：
+	// 30 × (0.35/3 + 0.075) ≈ 5.75。
+	if enabled.estimated == nil || *enabled.estimated < 5.7 || *enabled.estimated > 5.8 {
+		t.Fatalf("月推算应为 30 × (0.1167 + 0.075) ≈ 5.75，实得 %v", enabled.estimated)
+	}
+	// 固定窗口让 today/7d/30d 的推算一致（所选 range 内无已计价 run 也
+	// 不消失）。
+	todayOverview, err := env.bots.GetBotUsageOverview(userID, "today", "")
+	if err != nil {
+		t.Fatalf("today overview: %v", err)
+	}
+	for i := range todayOverview.ScheduleTasks {
+		item := todayOverview.ScheduleTasks[i]
+		if item.TaskId == task.ID {
+			if item.EstimatedMonthlyCost == nil ||
+				*item.EstimatedMonthlyCost < 5.7 || *item.EstimatedMonthlyCost > 5.8 {
+				t.Fatalf("today 月推算应与 7d 一致 ≈5.75，实得 %v", item.EstimatedMonthlyCost)
+			}
+		}
 	}
 	disabledItem := byTask[disabled.ID]
 	if disabledItem.estimated != nil {

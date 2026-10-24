@@ -2141,9 +2141,12 @@ type BotUsageRunDetail struct {
 	// MaintenanceRuns parent_run_id 指向本 run 的维护运行及其请求
 	MaintenanceRuns []BotUsageMaintenanceRun `json:"maintenance_runs"`
 
-	// Requests run 的每次模型请求（含失败重试），按 ordinal 正序
+	// Requests run 的每次模型请求（含失败重试），按 ordinal 正序；超过上限时截断
 	Requests []BotUsageRequest `json:"requests"`
-	Run      BotUsageRun       `json:"run"`
+
+	// RequestsTruncated 请求数超过上限（500）被截断时为 true
+	RequestsTruncated bool        `json:"requests_truncated"`
+	Run               BotUsageRun `json:"run"`
 }
 
 // BotUsageScheduleTask defines model for BotUsageScheduleTask.
@@ -2162,7 +2165,7 @@ type BotUsageScheduleTask struct {
 	// Enabled 已删除任务恒 false
 	Enabled bool `json:"enabled"`
 
-	// EstimatedMonthlyCost 单次平均 × 未来 30 天触发次数（parseScheduleCron）；停用、已删除、无已计价平均或 cron 解析失败为 null
+	// EstimatedMonthlyCost （单次定时运行平均 + 每次触发摊到的连带主线成本）× 未来 30 天触发次数（parseScheduleCron）；单次统计取最近 30 个当地日的固定窗口，与所选 range 无关；停用、已删除、无已计价平均或 cron 解析失败为 null
 	EstimatedMonthlyCost *float64 `json:"estimated_monthly_cost"`
 	Failed               int64    `json:"failed"`
 

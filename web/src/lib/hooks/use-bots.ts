@@ -328,6 +328,9 @@ export function useBotUsage(range: BotUsageRange, botId?: string) {
 /** 未终态 run 的花费仍在累计：明细页按 5s 轮询，拿到终态后停。 */
 export const BOT_USAGE_RUN_POLL_MS = 5_000;
 
+/** 终态后的宽限期：关联维护可在父 run 结束后才产生/计价，宽限内继续轮询。 */
+export const BOT_USAGE_RUN_GRACE_MS = 90_000;
+
 const TERMINAL_USAGE_RUN_STATUSES: ReadonlySet<string> = new Set([
   "completed",
   "failed",
@@ -345,11 +348,20 @@ export function useBotUsageRun(runId: string) {
     refetchOnMount: "always",
     refetchOnWindowFocus: true,
     refetchInterval: (query) => {
-      const status = query.state.data?.run.status;
-      if (status == null || TERMINAL_USAGE_RUN_STATUSES.has(status)) {
+      const run = query.state.data?.run;
+      if (run == null) {
         return false;
       }
-      return BOT_USAGE_RUN_POLL_MS;
+      if (!TERMINAL_USAGE_RUN_STATUSES.has(run.status)) {
+        return BOT_USAGE_RUN_POLL_MS;
+      }
+      // 刚结束不久的 run 继续轮询一段宽限期：迟到的关联维护入账会让
+      // display_cost 继续增长，此刻停轮询数字就偏低且不自愈。
+      const finishedAt = run.finished_at ? Date.parse(run.finished_at) : NaN;
+      if (Number.isFinite(finishedAt) && Date.now() - finishedAt < BOT_USAGE_RUN_GRACE_MS) {
+        return BOT_USAGE_RUN_POLL_MS;
+      }
+      return false;
     },
   });
 }

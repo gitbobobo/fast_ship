@@ -118,6 +118,101 @@ func botUsageMonthlyTriggerCount(expression, timezone string, now time.Time) (in
 	return n, true
 }
 
+// usageRunDetailMaxRequests 单次运行花费明细返回的请求上限：超出截断并置
+// requests_truncated，防止极端长跑 run 的明细响应体积无界。
+const usageRunDetailMaxRequests = 500
+
+// usageEstimateStat 是任务月推算的固定窗口统计：最近 30 个当地日内
+// schedule run 的单次成本（自身 + 关联维护）与其连带主线摊销。
+type usageEstimateStat struct {
+	runs       int64
+	priced     int64
+	displaySum *float64
+	linked     *float64
+}
+
+// botUsageEstimateStats 按固定窗口统计启用任务的单次触发成本，独立于所选
+// range——切到「今天」无已计价 run 时不该让月推算消失或在 today/7d/30d
+// 间漂移。窗口起止与总览 30d 同规则（当地日）；父在窗口内的维护必落在
+// 窗内（维护 created_at 不早于父 run），故按父归集取全量即可。
+func (s *BotService) botUsageEstimateStats(
+	tasks map[string]model.BotScheduleTask, loc *time.Location, now time.Time,
+) (map[string]*usageEstimateStat, error) {
+	out := map[string]*usageEstimateStat{}
+	byBot := map[string][]string{}
+	for id, t := range tasks {
+		if t.Enabled {
+			byBot[t.BotID] = append(byBot[t.BotID], id)
+		}
+	}
+	if len(byBot) == 0 {
+		return out, nil
+	}
+	start, _ := botUsageWindow(30, loc, now)
+	repo := repository.NewBotUsageRepository(s.db)
+	for botID, taskIDs := range byBot {
+		inSet := make(map[string]bool, len(taskIDs))
+		for _, id := range taskIDs {
+			inSet[id] = true
+			out[id] = &usageEstimateStat{}
+		}
+		schedRuns, err := repo.ListScheduleRunsForTasksSince(botID, taskIDs, start)
+		if err != nil {
+			return nil, err
+		}
+		eventMains, err := repo.ListScheduleEventMainRunsSince(botID, start)
+		if err != nil {
+			return nil, err
+		}
+		parentIDs := make([]string, 0, len(schedRuns)+len(eventMains))
+		refIDs := make([]string, 0, len(eventMains))
+		for i := range schedRuns {
+			parentIDs = append(parentIDs, schedRuns[i].ID)
+		}
+		for i := range eventMains {
+			parentIDs = append(parentIDs, eventMains[i].ID)
+			if ref := botScheduleEventRunIDOf(eventMains[i].TriggerKey); ref != "" {
+				refIDs = append(refIDs, ref)
+			}
+		}
+		maintByParent, err := repo.MaintenanceCostsByParentRun(parentIDs)
+		if err != nil {
+			return nil, err
+		}
+		taskByRefRun, err := repo.ScheduleTaskIDsByRunIDs(refIDs)
+		if err != nil {
+			return nil, err
+		}
+		for i := range schedRuns {
+			row := &schedRuns[i]
+			if row.ScheduleTaskID == nil || !inSet[*row.ScheduleTaskID] {
+				continue
+			}
+			acc := out[*row.ScheduleTaskID]
+			acc.runs++
+			if disp := botSumOptional(row.CostEstimate, maintByParent[row.ID]); disp != nil {
+				acc.priced++
+				acc.displaySum = botSumOptional(acc.displaySum, disp)
+			}
+		}
+		for i := range eventMains {
+			row := &eventMains[i]
+			ref := botScheduleEventRunIDOf(row.TriggerKey)
+			if ref == "" {
+				continue
+			}
+			taskID, ok := taskByRefRun[ref]
+			if !ok || !inSet[taskID] {
+				continue
+			}
+			acc := out[taskID]
+			acc.linked = botSumOptional(acc.linked,
+				botSumOptional(row.CostEstimate, maintByParent[row.ID]))
+		}
+	}
+	return out, nil
+}
+
 // botUsageCostLess 按已计价金额降序的比较谓词：nil（无已计价）永远排最后。
 func botUsageCostLess(a, b *float64) bool {
 	switch {
@@ -539,6 +634,13 @@ func (s *BotService) GetBotUsageOverview(userID, rangeParam, botID string) (*api
 			taskRows[row.ID] = row
 		}
 	}
+	// 月推算统计走固定窗口（最近 30 个当地日），独立于所选 range：
+	// 否则 range=today 无已计价 run 时估算直接消失，且同一任务在不同
+	// range 下推算值跳变。
+	estStats, err := s.botUsageEstimateStats(taskRows, loc, now)
+	if err != nil {
+		return nil, errs.ErrInternal
+	}
 	taskItems := make([]api.BotUsageScheduleTask, 0, len(taskAccs))
 	for taskID, acc := range taskAccs {
 		item := api.BotUsageScheduleTask{
@@ -576,14 +678,17 @@ func (s *BotService) GetBotUsageOverview(userID, rangeParam, botID string) (*api
 			// 月推算 = 单次运行口径平均 × 未来 30 天触发次数；单次口径与行内
 			// 「总花费」一致：定时 run 平均 + 每次触发摊到的连带主线成本
 			// （schedule_event 主线写回是这类任务的主路径，不含它会系统性
-			// 低估）。停用、已删除、无已计价平均或 cron 解析失败都不估算。
-			if task.Enabled && item.AvgRunCost != nil {
-				if n, ok := botUsageMonthlyTriggerCount(task.CronExpression, task.Timezone, now); ok {
-					perRun := *item.AvgRunCost
-					if item.LinkedMainCost != nil && item.Runs > 0 {
-						perRun += *item.LinkedMainCost / float64(item.Runs)
+			// 低估）。统计来自固定 30 天窗而非所选 range。停用、已删除、
+			// 无已计价平均或 cron 解析失败都不估算。
+			if task.Enabled {
+				if st := estStats[taskID]; st != nil && st.priced > 0 && st.runs > 0 {
+					if n, ok := botUsageMonthlyTriggerCount(task.CronExpression, task.Timezone, now); ok {
+						perRun := *st.displaySum / float64(st.priced)
+						if st.linked != nil {
+							perRun += *st.linked / float64(st.runs)
+						}
+						item.EstimatedMonthlyCost = ptrFloat64(perRun * float64(n))
 					}
-					item.EstimatedMonthlyCost = ptrFloat64(perRun * float64(n))
 				}
 			}
 		}
@@ -635,9 +740,15 @@ func (s *BotService) GetBotUsageRunDetail(userID, runID string) (*api.BotUsageRu
 	}
 
 	repo := repository.NewBotUsageRepository(s.db)
-	requestRows, err := repo.ListRequestsByRun(run.ID)
+	// 明细请求数有上限：长跑 run 数百请求 × 非终态 5s 轮询会让响应体积
+	// 无界；超出部分截断并置 requests_truncated。
+	requestRows, err := repo.ListRequestsByRun(run.ID, usageRunDetailMaxRequests+1)
 	if err != nil {
 		return nil, errs.ErrInternal
+	}
+	requestsTruncated := len(requestRows) > usageRunDetailMaxRequests
+	if requestsTruncated {
+		requestRows = requestRows[:usageRunDetailMaxRequests]
 	}
 	requestIDs := make([]string, 0, len(requestRows))
 	for _, r := range requestRows {
@@ -767,8 +878,9 @@ func (s *BotService) GetBotUsageRunDetail(userID, runID string) (*api.BotUsageRu
 	}
 
 	detail := &api.BotUsageRunDetail{
-		Requests:        requests,
-		MaintenanceRuns: maintRuns,
+		Requests:          requests,
+		RequestsTruncated: requestsTruncated,
+		MaintenanceRuns:   maintRuns,
 		Run: api.BotUsageRun{
 			Id:               run.ID,
 			BotId:            run.BotID,

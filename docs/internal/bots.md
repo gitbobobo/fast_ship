@@ -446,7 +446,9 @@ next_offset}`；`fs_result.read` 按 Unicode 字符续读，不切断 UTF-8。
   `enabled=false`。`estimated_monthly_cost` =（有已计价 run 的平均显示
   成本 + `linked_main_cost`/runs 的每次触发连带摊销）× 未来 30 个
   **任务当地日**的 cron 触发次数（`now.In(loc).AddDate(0,0,30)`；停用、
-  已删除、无平均或解析失败为 null）。
+  已删除、无平均或解析失败为 null）。单次统计取**固定**最近 30 个
+  当地日窗口（与所选 range 无关），同一份 schedule run + 关联维护 +
+  连带主线口径。
 - **未计价计数**：`unpriced_requests` 按 bot_model_requests +
   bot_maintenance_requests 计；`bot_model_requests` 没有 usage_complete 列，
   聚合沿用聊天页口径「落过 usage 计数列 = prompt_tokens IS NOT NULL」。

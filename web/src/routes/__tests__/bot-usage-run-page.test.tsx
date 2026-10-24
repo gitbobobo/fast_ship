@@ -89,6 +89,7 @@ const detail: BotUsageRunDetail = {
       ],
     },
   ],
+  requests_truncated: false,
   maintenance_runs: [
     {
       id: "m-1",

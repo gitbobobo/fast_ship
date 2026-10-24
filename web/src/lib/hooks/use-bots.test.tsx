@@ -7,6 +7,7 @@ import {
 } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  BOT_USAGE_RUN_GRACE_MS,
   BOT_USAGE_RUN_POLL_MS,
   useBotUsage,
   useBotUsageRun,
@@ -61,6 +62,7 @@ const runDetail = (status: string): { data: BotUsageRunDetail } => ({
       display_cost: null,
     },
     requests: [],
+    requests_truncated: false,
     maintenance_runs: [],
   },
 });
@@ -135,6 +137,37 @@ describe("usage 查询（INT-162 F11）", () => {
       vi.advanceTimersByTime(BOT_USAGE_RUN_POLL_MS * 4);
     });
     expect(api.usageRun).toHaveBeenCalledTimes(3);
+  });
+
+  it("终态后宽限期内仍轮询，宽限期过后停", async () => {
+    vi.useFakeTimers();
+    const detail = runDetail("completed");
+    detail.data.run.finished_at = new Date().toISOString();
+    api.usageRun.mockResolvedValue(detail);
+    const { wrapper } = setup();
+    renderHook(() => useBotUsageRun("r1"), { wrapper });
+    await act(async () => {});
+    expect(api.usageRun).toHaveBeenCalledTimes(1);
+
+    // 宽限期内：迟到入账的关联维护还有机会进 detail。
+    await act(async () => {
+      vi.advanceTimersByTime(BOT_USAGE_RUN_POLL_MS);
+    });
+    expect(api.usageRun).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      vi.advanceTimersByTime(BOT_USAGE_RUN_POLL_MS);
+    });
+    expect(api.usageRun).toHaveBeenCalledTimes(3);
+
+    // 过了宽限期即停。
+    await act(async () => {
+      vi.advanceTimersByTime(BOT_USAGE_RUN_GRACE_MS);
+    });
+    const calls = api.usageRun.mock.calls.length;
+    await act(async () => {
+      vi.advanceTimersByTime(BOT_USAGE_RUN_POLL_MS * 3);
+    });
+    expect(api.usageRun).toHaveBeenCalledTimes(calls);
   });
 
   it("run 一开始就是终态时不轮询", async () => {
