@@ -271,6 +271,10 @@ describe("IntegrationsPage member view", () => {
     ).not.toBeInTheDocument();
     expect(screen.queryByLabelText("App ID")).not.toBeInTheDocument();
     expect(screen.queryByLabelText(/组织名/)).not.toBeInTheDocument();
+
+    // 代码托管集成卡片不进 member 视图：列表接口 RequireAdmin，member
+    // 只会拿到不可恢复的 40305，渲染它没有意义。
+    expect(screen.queryByText("代码托管集成")).not.toBeInTheDocument();
   });
 
   it("opens the install page in a new window", async () => {

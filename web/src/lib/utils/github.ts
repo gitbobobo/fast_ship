@@ -66,3 +66,45 @@ export async function formatSyncError(
   }
   return fallback;
 }
+
+
+// normalizeCodeRepoRef 把代码仓引用归一成「host[:端口]/owner/repo」小写形态
+// 供比较：scheme 有无与大小写、尾部斜杠与 .git 后缀不算改动（剥除顺序与
+// 后端 parseRepositoryURL 一致：先 .git 再一个尾斜杠）；裸 owner/repo 输入
+// 按 github.com 处理。解析不出 owner/repo 时返回空串，调用方按「有输入待
+// 服务端校验」处理，不能当成未改动。
+export function normalizeCodeRepoRef(raw: string): string {
+  let rest = raw.trim();
+  if (!rest) return "";
+  const protoIdx = rest.indexOf("://");
+  if (protoIdx !== -1) rest = rest.slice(protoIdx + 3);
+  const slash = rest.indexOf("/");
+  const first = slash === -1 ? rest : rest.slice(0, slash);
+  let tail = slash === -1 ? "" : rest.slice(slash);
+  let host: string;
+  if (first.includes(".") || first.includes(":")) {
+    host = first.toLowerCase();
+  } else {
+    host = "github.com";
+    tail = "/" + first + tail; // 首段是 owner，不是 host
+  }
+  tail = tail.replace(/\.git$/i, "").replace(/\/$/, "");
+  const parts = tail.split("/").filter(Boolean);
+  if (parts.length < 2) return "";
+  return `${host}/${parts[0]}/${parts[1]}`.toLowerCase();
+}
+
+// codeRepoUrlForInput 编辑回填的代码仓输入值：优先服务端投影的 code_repo_url
+// （forgejo 集成时是实例基址形态）；为 null 且 owner/repo 还在时兜底 github
+// 形态（覆盖集成行缺失的存量行）；都没有给空串。
+export function codeRepoUrlForInput(project: {
+  code_repo_url?: string | null;
+  code_github_owner?: string;
+  code_github_repo?: string;
+}): string {
+  if (project.code_repo_url) return project.code_repo_url;
+  if (project.code_github_owner && project.code_github_repo) {
+    return `https://github.com/${project.code_github_owner}/${project.code_github_repo}`;
+  }
+  return "";
+}

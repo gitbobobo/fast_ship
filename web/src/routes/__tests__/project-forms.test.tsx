@@ -109,6 +109,7 @@ describe("ProjectAndVersionForms", () => {
         github_repo: "old-repo",
         code_github_owner: "code-owner",
         code_github_repo: "code-repo",
+        code_repo_url: "https://github.com/code-owner/code-repo",
         created_at: "2026-04-06T10:00:00Z",
         updated_at: "2026-04-06T10:00:00Z",
       },
@@ -358,6 +359,51 @@ describe("ProjectAndVersionForms", () => {
     expect(
       updateProjectMutateAsync.mock.calls[0][0],
     ).not.toHaveProperty("code_repository_url");
+  });
+
+  it("edit form submits a cross-host code repository change instead of dropping it", async () => {
+    // INT-166：forgejo 绑定的项目改成 github 同名仓库时，owner/repo 相等
+    // 不再判「未改动」——按 code_repo_url 归一比较识别出跨主机真改动，
+    // 必须提交（服务端按新 host 换绑集成），否则改动被静默丢弃。
+    vi.mocked(useProject).mockReturnValue({
+      data: {
+        id: "proj-1",
+        user_id: "user-1",
+        name: "fast-ship",
+        description: "old desc",
+        github_owner: "acme",
+        github_repo: "app",
+        code_github_owner: "acme",
+        code_github_repo: "app",
+        code_repo_url: "https://git.example.com/acme/app",
+        created_at: "2026-04-06T10:00:00Z",
+        updated_at: "2026-04-06T10:00:00Z",
+      },
+      isLoading: false,
+    } as unknown as ReturnType<typeof useProject>);
+
+    const user = userEvent.setup();
+
+    renderWithRoute(
+      <ProjectFormDialog
+        open={true}
+        onOpenChange={vi.fn()}
+        mode="edit"
+        projectId="proj-1"
+      />,
+      { path: "/projects", initialEntry: "/projects" },
+    );
+
+    const input = screen.getByLabelText("代码仓库（可选，默认同公开仓库）");
+    expect(input).toHaveValue("https://git.example.com/acme/app");
+    await user.clear(input);
+    await user.type(input, "acme/app"); // 裸形态 = github.com 上的同名仓库
+    await user.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => expect(updateProjectMutateAsync).toHaveBeenCalled());
+    expect(
+      updateProjectMutateAsync.mock.calls[0][0].code_repository_url,
+    ).toBe("acme/app");
   });
 
   it("edit form treats a rewritten-but-equal code repository as unchanged", async () => {
