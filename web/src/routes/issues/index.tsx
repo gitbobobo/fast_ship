@@ -39,6 +39,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useProjects } from "@/lib/hooks/use-projects";
+import { getActiveProjectId } from "@/lib/projects";
 import {
   useIssueFilterOptions,
   useIssues,
@@ -98,20 +99,6 @@ function IssueProgressBadge({
       进度 {progress}%
     </span>
   );
-}
-
-function getActiveProjectId(
-  projects: Project[],
-  selectedId: string,
-  urlId: string | null,
-): string {
-  if (projects.some((p) => p.id === selectedId)) {
-    return selectedId;
-  }
-  if (urlId && projects.some((p) => p.id === urlId)) {
-    return urlId;
-  }
-  return projects[0]?.id ?? "";
 }
 
 function IssueCardActions({

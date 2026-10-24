@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo } from "react";
 import { Link, useSearchParams } from "react-router";
 import { Plus, Package } from "lucide-react";
 import { VersionFormDialog } from "@/components/versions/version-form-dialog";
-import { getActiveProjectId } from "@/routes/board/lib/utils";
+import { getActiveProjectId } from "@/lib/projects";
 import { useProjectPreferenceStore } from "@/lib/store/project-preference-store";
 import { ProjectSwitcher } from "@/components/projects/project-switcher";
 import { Header } from "@/components/layout/header";

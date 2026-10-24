@@ -571,7 +571,7 @@ func TestProjectServiceList_IssueCount(t *testing.T) {
 		}
 	}
 
-	resp, total, err := projectSvc.List(user.ID, 1, 10)
+	resp, total, err := projectSvc.List(user.ID, 1, 10, true)
 	if err != nil {
 		t.Fatalf("list projects: %v", err)
 	}
@@ -679,7 +679,7 @@ func TestProjectServiceList_LatestVersion(t *testing.T) {
 		t.Fatalf("register create callback: %v", err)
 	}
 
-	resp, total, err := projectSvc.List(user.ID, 1, 10)
+	resp, total, err := projectSvc.List(user.ID, 1, 10, true)
 	if err != nil {
 		t.Fatalf("list projects: %v", err)
 	}

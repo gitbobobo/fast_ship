@@ -34,6 +34,12 @@ GORM 的坑：同一关联在 has-many/has-one（父侧）与 belongs-to（子�
 - 防回归靠 `TestAutoMigrate_AllForeignKeysCascade`（cmd/server）：新建库遍历 `PRAGMA foreign_key_list`，断言全库外键都是 CASCADE，例外须进白名单并注明理由。
 - GORM 默认命名策略会把 `PublicGitHubTokenID` 蛇形化成 `public_git_hub_token_id`；需要特定列名时在模型上显式写 `gorm:"column:..."`（projects 的两个引用列即如此）。
 
+## 项目搁置列（INT-165）
+
+`projects` 新增 `shelved_at` / `shelved_until` 两列（TIMESTAMP，nullable，存量行 NULL），由 AutoMigrate 补齐、无回填。「搁置中」= `shelved_at` 非 NULL 且（`shelved_until` 为 NULL 即无限期，或截止未到）；**到期自动恢复没有定时任务**——读取侧按查询时刻判定，截止一过即视为未搁置。
+
+同一口径的两处投影，改动判定必须同步修改：`model.Project.IsShelved(now)` 与 repository 层的等价 SQL 条件 `projectNotShelvedSQL`（`shelved_at IS NULL OR (shelved_until IS NOT NULL AND shelved_until <= now)`，dashboard 三条聚合查询与 fs_project list 的默认过滤用它）。时间列按 UTC 写入，驱动（glebarez）的存储格式与绑定参数格式一致，TEXT 比较即时间序。搁置不拦截任何读写，只影响聚合与挑选面（dashboard、推荐汇总、fs_project list）；写入走 `ProjectRepository.Shelve/Unshelve`（只动搁置三列），不走带审查联动副作用的 `Update`。
+
 ## 启动迁移顺序
 
 main.go 依次：

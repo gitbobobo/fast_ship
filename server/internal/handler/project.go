@@ -3,6 +3,7 @@ package handler
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"strconv"
 
 	"github.com/gin-gonic/gin"
@@ -69,7 +70,9 @@ func (h *ProjectHandler) List(c *gin.Context) {
 		pageSize = 20
 	}
 
-	projects, total, err := h.projectService.List(userID, page, pageSize)
+	// HTTP 项目列表不过滤搁置项目（INT-165）：搁置只影响聚合与挑选面，
+	// 列表照常返回全部，由响应里的 is_shelved 标注。
+	projects, total, err := h.projectService.List(userID, page, pageSize, true)
 	if err != nil {
 		middleware.HandleAppError(c, err)
 		return
@@ -168,6 +171,41 @@ func (h *ProjectHandler) Delete(c *gin.Context) {
 	}
 
 	response.SuccessEmpty(c)
+}
+
+// Shelve 搁置项目（仅 JWT，路由层 RequireJWT 已挡 API Key）。body 全可选：
+// 空 body 容忍（EOF），省略或空对象即无限期搁置；畸形 JSON 仍 400。
+func (h *ProjectHandler) Shelve(c *gin.Context) {
+	id := c.Param("id")
+
+	var req api.ShelveProjectRequest
+	if err := c.ShouldBindJSON(&req); err != nil && !errors.Is(err, io.EOF) {
+		response.BadRequest(c, 40001, "请求参数无效: "+err.Error())
+		return
+	}
+
+	userID := middleware.GetUserID(c)
+	result, err := h.projectService.Shelve(id, userID, &req)
+	if err != nil {
+		middleware.HandleAppError(c, err)
+		return
+	}
+
+	response.Success(c, result)
+}
+
+// Unshelve 取消搁置（仅 JWT）；幂等，未搁置的项目也返回当前项目。
+func (h *ProjectHandler) Unshelve(c *gin.Context) {
+	id := c.Param("id")
+	userID := middleware.GetUserID(c)
+
+	result, err := h.projectService.Unshelve(id, userID)
+	if err != nil {
+		middleware.HandleAppError(c, err)
+		return
+	}
+
+	response.Success(c, result)
 }
 
 func (h *ProjectHandler) GetBranches(c *gin.Context) {

@@ -18,6 +18,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useDashboardOverview } from "@/lib/hooks/use-dashboard";
+import { useProjects } from "@/lib/hooks/use-projects";
 import { cn } from "@/lib/utils";
 
 function formatDateLabel(date: string) {
@@ -53,6 +54,10 @@ function getGreeting() {
 
 export default function DashboardPage() {
   const { data, isLoading, isError, refetch } = useDashboardOverview();
+  const { data: projectsData } = useProjects();
+  // 仪表盘统计口径不含搁置项目（后端排除）；这里只提示它们存在，可去项目页查看
+  const shelvedCount =
+    projectsData?.items.filter((p) => p.is_shelved).length ?? 0;
   // 失败但已有缓存时（refetch 失败，isLoading=false、data 仍是旧值）也不能把旧数字
   // 当成当前状态：所有数字与趋势展示统一走这一个条件。
   const unavailable = isLoading || isError;
@@ -179,6 +184,12 @@ export default function DashboardPage() {
             }
           />
         </section>
+
+        {shelvedCount > 0 && (
+          <p className="-mt-4 text-xs text-muted-foreground">
+            另有 {shelvedCount} 个项目已搁置
+          </p>
+        )}
 
         {/* Charts */}
         <section className="grid gap-6 xl:grid-cols-2">

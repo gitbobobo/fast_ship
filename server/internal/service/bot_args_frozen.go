@@ -20,6 +20,21 @@ type botProjectArgsFrozen struct {
 	RepositoryURL string  `json:"repository_url,omitempty" jsonschema:"description=仓库 URL（http/ssh）"`
 }
 
+// botProjectArgsV13Frozen 是 v4–v13 的 fs_project 参数冻结副本（v4 起枚举
+// 修正为逐项声明，此后标签一直未变，v4–v13 直接用当时的活跃结构体）。INT-165
+// 给 list 新增 include_shelved 只进 v14，v4–v13 的 wire 字节由本副本逐字节
+// 保留（v1–v3 仍用上面的 botProjectArgsFrozen）。不要改动本结构体的任何
+// 字段或标签。
+type botProjectArgsV13Frozen struct {
+	Action        string  `json:"action" jsonschema:"enum=list,enum=get,enum=create,enum=update,required"`
+	ID            string  `json:"id,omitempty" jsonschema:"description=项目 ID（get/update 必填）"`
+	Page          int     `json:"page,omitempty" jsonschema:"description=页码（从 1 起，list 用）"`
+	PageSize      int     `json:"page_size,omitempty" jsonschema:"description=页长（1-100，list 用）"`
+	Name          string  `json:"name,omitempty" jsonschema:"description=项目名（create 必填；update 可改）"`
+	Description   *string `json:"description,omitempty" jsonschema:"description=项目描述；update 提供空串即清空"`
+	RepositoryURL string  `json:"repository_url,omitempty" jsonschema:"description=仓库 URL（http/ssh）"`
+}
+
 // botIssueArgsFrozen 是 v1/v2 的 fs_issue 参数。
 type botIssueArgsFrozen struct {
 	Action string `json:"action" jsonschema:"enum=list,get,comments,timeline,create,update,set_workflow,replace_checklist,comment,required"`

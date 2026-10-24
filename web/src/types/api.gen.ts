@@ -1365,6 +1365,24 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/projects/{id}/shelve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** 搁置项目（仅 JWT）。body 可省略或为空对象表示无限期；until 提供时必须晚于当前时间（INT-165） */
+        post: operations["shelveProject"];
+        /** 取消项目搁置（仅 JWT）；幂等，未搁置的项目也返回 200（INT-165） */
+        delete: operations["unshelveProject"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/projects/{id}/branches": {
         parameters: {
             query?: never;
@@ -4103,10 +4121,30 @@ export interface components {
             issue_count?: number;
             issue_workflow_counts?: components["schemas"]["IssueWorkflowCounts"];
             issue_sync?: components["schemas"]["IssueSyncState"];
+            /**
+             * Format: date-time
+             * @description 搁置开始时间；null 表示未搁置（INT-165）
+             */
+            shelved_at: string | null;
+            /**
+             * Format: date-time
+             * @description 搁置截止时间；null 表示无限期或未搁置（INT-165）
+             */
+            shelved_until: string | null;
+            /** @description 响应生成时刻是否处于搁置中；到期自动恢复，无后台任务（INT-165） */
+            is_shelved: boolean;
             /** Format: date-time */
             created_at: string;
             /** Format: date-time */
             updated_at: string;
+        };
+        /** @description 搁置项目请求体；整包可省略或为空对象，表示无限期搁置（INT-165） */
+        ShelveProjectRequest: {
+            /**
+             * Format: date-time
+             * @description 搁置截止时间（RFC3339）；提供时必须晚于当前时间，缺省表示无限期
+             */
+            until?: string;
         };
         /** @description omitempty，仅在列表项中出现；仅统计 state=open 的 Issue，按内部状态分组 */
         IssueWorkflowCounts: {
@@ -9847,6 +9885,69 @@ export interface operations {
         requestBody?: never;
         responses: {
             200: components["responses"]["EmptySuccess"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    shelveProject: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description 项目 ID（UUID） */
+                id: components["parameters"]["ProjectId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["ShelveProjectRequest"];
+            };
+        };
+        responses: {
+            /** @description 搁置后的项目 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"] & {
+                        data?: components["schemas"]["Project"];
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    unshelveProject: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description 项目 ID（UUID） */
+                id: components["parameters"]["ProjectId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 取消搁置后的项目 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"] & {
+                        data?: components["schemas"]["Project"];
+                    };
+                };
+            };
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];

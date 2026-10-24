@@ -3313,6 +3313,71 @@ paths:
           $ref: '#/components/responses/NotFound'
         '500':
           $ref: '#/components/responses/InternalError'
+  /api/projects/{id}/shelve:
+    post:
+      tags: [projects]
+      operationId: shelveProject
+      summary: 搁置项目（仅 JWT）。body 可省略或为空对象表示无限期；until 提供时必须晚于当前时间（INT-165）
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ShelveProjectRequest'
+      responses:
+        '200':
+          description: 搁置后的项目
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Project'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      tags: [projects]
+      operationId: unshelveProject
+      summary: 取消项目搁置（仅 JWT）；幂等，未搁置的项目也返回 200（INT-165）
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+      responses:
+        '200':
+          description: 取消搁置后的项目
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Project'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
   /api/projects/{id}/branches:
     get:
       tags: [projects]
@@ -10070,7 +10135,7 @@ components:
           description: 三态——key 缺省保留现值；显式 null 或空串清空该用途引用；非空替换（须属于当前用户，否则 40420）
     Project:
       type: object
-      required: [id, name, description, github_owner, github_repo, code_github_owner, code_github_repo, public_github_token_id, code_github_token_id, created_at, updated_at]
+      required: [id, name, description, github_owner, github_repo, code_github_owner, code_github_repo, public_github_token_id, code_github_token_id, shelved_at, shelved_until, is_shelved, created_at, updated_at]
       properties:
         id:
           type: string
@@ -10103,12 +10168,33 @@ components:
           $ref: '#/components/schemas/IssueWorkflowCounts'
         issue_sync:
           $ref: '#/components/schemas/IssueSyncState'
+        shelved_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: 搁置开始时间；null 表示未搁置（INT-165）
+        shelved_until:
+          type: string
+          format: date-time
+          nullable: true
+          description: 搁置截止时间；null 表示无限期或未搁置（INT-165）
+        is_shelved:
+          type: boolean
+          description: 响应生成时刻是否处于搁置中；到期自动恢复，无后台任务（INT-165）
         created_at:
           type: string
           format: date-time
         updated_at:
           type: string
           format: date-time
+    ShelveProjectRequest:
+      type: object
+      description: 搁置项目请求体；整包可省略或为空对象，表示无限期搁置（INT-165）
+      properties:
+        until:
+          type: string
+          format: date-time
+          description: 搁置截止时间（RFC3339）；提供时必须晚于当前时间，缺省表示无限期
     IssueWorkflowCounts:
       type: object
       description: omitempty，仅在列表项中出现；仅统计 state=open 的 Issue，按内部状态分组

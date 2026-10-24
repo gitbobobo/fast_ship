@@ -31,9 +31,10 @@ const (
 	// 激活跨过该水位后，下一个 run 边界强制压缩一次，把旧风格的长回复收进
 	// 摘要，避免模型继续模仿自己的历史回复（INT-133）。
 	botStylePromptVersion int64 = 9
-	// botToolsetVersion 是当前发布的工具集版本（v13 = INT-160：fs_thread 新增
-	// 异步动作 wait——挂起等待线程变化、受理即 running 由评估器收尾，参数新增
-	// on 与 timeout_minutes；v12 = INT-159：fs_thread launch 新增可选执行配置
+	// botToolsetVersion 是当前发布的工具集版本（v14 = INT-165：fs_project
+	// list 新增 include_shelved——默认排除搁置中的项目、true 时包含；v13 =
+	// INT-160：fs_thread 新增异步动作 wait——挂起等待线程变化、受理即
+	// running 由评估器收尾，参数新增 on 与 timeout_minutes；v12 = INT-159：fs_thread launch 新增可选执行配置
 	// model_selection/runtime_mode/workspace，composer_options 返回 providers
 	// 模型目录与不可设置项；v11 = INT-156 巡检降本：fs_thread list 每项自带
 	// activity 与末条回复摘要 last_reply、fs_schedule 说明运行时上下文已带任务
@@ -45,7 +46,7 @@ const (
 	// v8 = INT-138：fs_schedule 时区默认改为用户时区，并补任务指令写法指导；
 	// v7 = INT-123：fs_schedule 新增 state_get/state_set 读写任务跨运行保留的
 	// 小状态）；存量对话线冻结在旧版本，只在压缩/重启边界升级。
-	botToolsetVersion int64 = 13
+	botToolsetVersion int64 = 14
 )
 
 // botIdentityRules 是系统自动注入的默认人设（身份与说话方式）：拼在提示词
