@@ -901,3 +901,61 @@ func TestBotUsageMonthlyTriggerCountLocalDays(t *testing.T) {
 		t.Fatalf("跨夏令时的 30 当地日应计 30 次触发，实得 %d, ok=%v", n, ok)
 	}
 }
+
+// 反向窗口边界（INT-162 复审 P2）：窗口内父 run + 窗口外维护——维护发生在
+// 窗口外，不进桶也不进任何天柱；run 显示口径（单次平均等统计）仍含全量。
+// 顺带钉死 totals.cost 与分桶同口径：run 级有价、请求行全未计价时不为 null。
+func TestBotUsageMaintenanceBeforeWindowNotCounted(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "usagemaintpre")
+	bot := env.createBot(t, userID)
+
+	// 窗口内 run：自身有价 1.0，唯一请求行未计价（成本只在 run 列上）。
+	main := seedUsageRun(t, env, bot.ID, func(r *model.BotRun) {
+		r.CostEstimate = ptrCost(1.0)
+	})
+	seedUsageRequest(t, env, main.ID, nil, "hash-unpriced")
+	// 10 天前的维护挂窗口内父 run：0.5 不计入窗口记账。
+	oldMaint := seedUsageMaintenance(t, env, bot.ID, &main.ID, ptrCost(0.5))
+	if err := env.db.Model(&model.BotMaintenanceRun{}).Where("id = ?", oldMaint.ID).
+		Update("created_at", time.Now().UTC().AddDate(0, 0, -10)).Error; err != nil {
+		t.Fatalf("backdate maintenance: %v", err)
+	}
+
+	seven, err := env.bots.GetBotUsageOverview(userID, "7d", "")
+	if err != nil {
+		t.Fatalf("7d: %v", err)
+	}
+	if len(seven.Bots) != 1 {
+		t.Fatalf("应有 1 个机器人，实得 %d", len(seven.Bots))
+	}
+	b := seven.Bots[0]
+	if b.CostMain == nil || !costEq(*b.CostMain, 1.0) {
+		t.Fatalf("主线桶只含窗口内自身成本 1.0，实得 %v", b.CostMain)
+	}
+	if b.CostMaintenance != nil {
+		t.Fatalf("有父 run 的维护不进维护桶，实得 %v", b.CostMaintenance)
+	}
+	// 显示口径：单次平均含全量关联维护（1.0 + 0.5）。
+	if b.AvgRunCost == nil || !costEq(*b.AvgRunCost, 1.5) {
+		t.Fatalf("avg_run_cost 应为全量显示成本 1.5，实得 %v", b.AvgRunCost)
+	}
+	if b.Cost == nil || !costEq(*b.Cost, 1.0) {
+		t.Fatalf("机器人总成本应为 1.0，实得 %v", b.Cost)
+	}
+	// totals.cost 不再以 priced 请求行为门槛：run 级有价即输出。
+	if seven.Totals.Cost == nil || !costEq(*seven.Totals.Cost, 1.0) {
+		t.Fatalf("totals.cost 应为 1.0（run 级价目），实得 %v", seven.Totals.Cost)
+	}
+	if seven.Totals.PricedRequests != 0 || seven.Totals.UnpricedRequests != 1 {
+		t.Fatalf("请求计数应为 0 priced / 1 unpriced，实得 %+v", seven.Totals)
+	}
+	// Σ按天 = 总花费：窗口外维护不进任何天柱。
+	var daySum float64
+	for _, d := range seven.Days {
+		daySum += d.Cost
+	}
+	if !costEq(daySum, *seven.Totals.Cost) {
+		t.Fatalf("Σ按天 %.4f 应等于总花费 %.4f", daySum, *seven.Totals.Cost)
+	}
+}

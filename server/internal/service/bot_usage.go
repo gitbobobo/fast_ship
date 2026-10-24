@@ -329,6 +329,20 @@ func (s *BotService) GetBotUsageOverview(userID, rangeParam, botID string) (*api
 		}
 	}
 
+	// 窗口内 run 的桶金额只吸收窗口内维护：维护按自身发生日记「按天」，
+	// 窗口外维护若随父显示成本进桶，三桶之和就会大于 Σ按天、用户对不上账。
+	// run 的显示成本与单次统计仍用全量关联维护（maintByParent 无窗口下限）
+	// ——那是 run 的展示口径，不是窗口记账。
+	maintInWindowByParent := make(map[string]float64, len(maintRows))
+	for _, m := range maintRows {
+		if m.ParentRunID == nil || runByID[*m.ParentRunID] == nil {
+			continue
+		}
+		if agg := maintAgg[m.ID]; agg.CostSum != nil {
+			maintInWindowByParent[*m.ParentRunID] += *agg.CostSum
+		}
+	}
+
 	// ---------- 主线 / 定时 run ----------
 	for i := range runRows {
 		row := &runRows[i]
@@ -347,7 +361,13 @@ func (s *BotService) GetBotUsageOverview(userID, rangeParam, botID string) (*api
 		display := botSumOptional(row.CostEstimate, maintByParent[row.ID])
 		if display != nil {
 			acc.displayCosts = append(acc.displayCosts, *display)
-			applyRunBucket(row, *display)
+		}
+		var inWindowMaint *float64
+		if v, ok := maintInWindowByParent[row.ID]; ok {
+			inWindowMaint = &v
+		}
+		if bucketAmount := botSumOptional(row.CostEstimate, inWindowMaint); bucketAmount != nil {
+			applyRunBucket(row, *bucketAmount)
 		}
 		day := dayOf(row.CreatedAt)
 		if day != nil {
@@ -574,11 +594,12 @@ func (s *BotService) GetBotUsageOverview(userID, rangeParam, botID string) (*api
 	})
 	overview.ScheduleTasks = taskItems
 
-	if overview.Totals.PricedRequests > 0 {
+	// totals.cost 与分桶同口径：任一已计价成分（含 run 级价目，不必依赖请求
+	// 行有价）存在即输出；全空才是「未计价」的 null，不能出现按机器人表有
+	// 金额而总卡片「—」的自相矛盾。
+	if totalCost != nil {
 		overview.Totals.Cost = totalCost
-		if totalCost != nil {
-			overview.Totals.DailyAverage = ptrFloat64(*totalCost / float64(len(dayAccs)))
-		}
+		overview.Totals.DailyAverage = ptrFloat64(*totalCost / float64(len(dayAccs)))
 	}
 	return overview, nil
 }
