@@ -202,6 +202,8 @@ export interface BotRun {
   cost_estimate?: number | null;
   /** 计价来源（catalog）；cost_estimate 为 null 时同 null。 */
   cost_source?: string | null;
+  /** 显示口径成本（INT-162）：本 run 已计价成本 + 关联维护已计价成本；都为 null 时为 null。 */
+  display_cost_estimate?: number | null;
   error_code?: string | null;
   error_message?: string | null;
   /** 可操作失败的动作提示；仅 run_error 事件携带，REST 快照缺省。 */
@@ -316,7 +318,34 @@ export function botScheduleRunStatusLabel(status: BotScheduleRunStatus): string 
     case "skipped":
       return "已跳过";
   }
+  // 词表外的存量/未来状态兜底显示原词，不把 undefined 渲染进界面。
+  return status;
 }
+
+// ---- 花费总览（INT-162）----
+// 类型直接引用生成契约：金额一律是内置目录单价估算（USD），可空字段表示
+// 「未计价」——缺失 ≠ 0，展示写「—」而不是 $0。
+
+export type BotUsageRange = "today" | "7d" | "30d";
+
+export type BotUsageOverview = Schemas["BotUsageOverview"];
+
+export type BotUsageBot = Schemas["BotUsageBot"];
+
+export type BotUsageDay = Schemas["BotUsageDay"];
+
+export type BotUsageScheduleTask = Schemas["BotUsageScheduleTask"];
+
+export type BotUsageRunDetail = Schemas["BotUsageRunDetail"];
+
+export type BotUsageRun = Schemas["BotUsageRun"];
+
+export type BotUsageRequest = Schemas["BotUsageRequest"];
+
+export type BotUsageMaintenanceRun = Schemas["BotUsageMaintenanceRun"];
+
+export type BotUsageMaintenanceRequest =
+  Schemas["BotUsageMaintenanceRequest"];
 
 export const BOT_REQUEST_TIMEOUT_MS = 35_000;
 
@@ -336,7 +365,7 @@ const scheduleTaskPath = (botId: string, taskId: string) =>
   `${botPath(botId)}/schedule-tasks/${encodeURIComponent(taskId)}`;
 
 /** searchParams 只收已定义字段，避免 undefined 被序列化成字符串。 */
-function definedParams(params: Record<string, number | undefined>) {
+function definedParams(params: Record<string, string | number | undefined>) {
   const searchParams: Record<string, string> = {};
   for (const [key, value] of Object.entries(params)) {
     if (value !== undefined) searchParams[key] = String(value);
@@ -550,5 +579,30 @@ export const botApi = {
           ...options(),
         })
         .json<ApiResponse<BotScheduleTask>>(),
+    ),
+
+  /** 花费总览（INT-162）：bot_id 缺省为全部机器人；窗口按服务端生效时区切日。 */
+  usage: (
+    query: { range?: BotUsageRange; botId?: string } = {},
+    signal?: AbortSignal,
+  ) =>
+    decodeApiError(
+      api
+        .get("bots/usage", {
+          ...options(signal),
+          searchParams: definedParams({
+            range: query.range,
+            bot_id: query.botId,
+          }),
+        })
+        .json<ApiResponse<BotUsageOverview>>(),
+    ),
+
+  /** 单次运行花费明细：自身每次模型请求 + 关联维护运行。 */
+  usageRun: (runId: string, signal?: AbortSignal) =>
+    decodeApiError(
+      api
+        .get(`bots/usage/runs/${encodeURIComponent(runId)}`, options(signal))
+        .json<ApiResponse<BotUsageRunDetail>>(),
     ),
 };

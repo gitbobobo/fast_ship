@@ -82,6 +82,34 @@ func (r *BotRunRepository) LatestByScheduleTask(botID, taskID string) (*model.Bo
 	return &run, nil
 }
 
+// LatestRunsByScheduleTasks 批量返回每个任务的最新一条运行记录（任务 ID →
+// run；无运行记录的任务不在结果里），排序口径与 LatestByScheduleTask 一致
+// （created_at DESC, id DESC）。任务列表投影一次取全，不做逐任务 N+1。
+func (r *BotRunRepository) LatestRunsByScheduleTasks(botID string, taskIDs []string) (map[string]*model.BotRun, error) {
+	out := map[string]*model.BotRun{}
+	if len(taskIDs) == 0 {
+		return out, nil
+	}
+	var rows []model.BotRun
+	err := r.db.Raw(`
+SELECT * FROM (
+	SELECT bot_runs.*, ROW_NUMBER() OVER (
+		PARTITION BY schedule_task_id ORDER BY created_at DESC, id DESC
+	) AS rn
+	FROM bot_runs
+	WHERE bot_id = ? AND session_kind = ? AND schedule_task_id IN ?
+) WHERE rn = 1`, botID, model.BotSessionKindSchedule, taskIDs).Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	for i := range rows {
+		if rows[i].ScheduleTaskID != nil {
+			out[*rows[i].ScheduleTaskID] = &rows[i]
+		}
+	}
+	return out, nil
+}
+
 // LatestFinishedByScheduleTask 返回任务最近一条已结束的运行记录，供 schedule
 // 运行时上下文取「上一次运行」的时间/状态/摘要（进行中的当前 run 不会选中
 // 自己）；没有返回 gorm.ErrRecordNotFound。

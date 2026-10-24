@@ -543,7 +543,7 @@ func (s *BotService) RequestStop(userID, botID, runID string) (*BotRunResponse, 
 	if err != nil {
 		return nil, errs.ErrInternal
 	}
-	resp := botRunResponseOf(fresh)
+	resp := s.botRunResponseWithDisplayWrite(fresh, "request_stop")
 	return &resp, nil
 }
 
@@ -599,36 +599,70 @@ type BotRunResponse struct {
 	// null，前端整项隐藏（缺失 ≠ 0，INT-139）。
 	CostEstimate *float64 `json:"cost_estimate"`
 	CostSource   *string  `json:"cost_source"`
-	ErrorCode    *string  `json:"error_code"`
-	ErrorMessage *string  `json:"error_message"`
-	CreatedAt    string   `json:"created_at"`
-	StartedAt    *string  `json:"started_at"`
-	FinishedAt   *string  `json:"finished_at"`
+	// DisplayCostEstimate 是显示口径成本（INT-162）：本 run 已计价成本 +
+	// 关联维护运行已计价成本；两者都为 null 时为 null。cost_estimate 列
+	// 本身口径不变。
+	DisplayCostEstimate *float64 `json:"display_cost_estimate"`
+	ErrorCode           *string  `json:"error_code"`
+	ErrorMessage        *string  `json:"error_message"`
+	CreatedAt           string   `json:"created_at"`
+	StartedAt           *string  `json:"started_at"`
+	FinishedAt          *string  `json:"finished_at"`
 }
 
-func botRunResponseOf(run *model.BotRun) BotRunResponse {
+// botRunResponseOf run 的 API 投影；maintCost 是关联维护运行的已计价成本
+// 合计（无已计价维护传 nil）。显示口径成本在这里与 run 自身成本合成；列表
+// 调用方批量取全（displayCostEstimatesOf / MaintenanceCostsByParentRun），
+// 不做逐 run 查询。
+func botRunResponseOf(run *model.BotRun, maintCost *float64) BotRunResponse {
 	return BotRunResponse{
-		ID:               run.ID,
-		BotID:            run.BotID,
-		TriggerSource:    string(run.TriggerSource),
-		TriggerKey:       run.TriggerKey,
-		Status:           string(run.Status),
-		ConfigSnapshot:   run.ConfigSnapshotJSON,
-		InputThroughSeq:  run.InputThroughSeq,
-		StopRequested:    run.StopRequestedAt != nil,
-		PromptTokens:     run.PromptTokens,
-		CompletionTokens: run.CompletionTokens,
-		TotalTokens:      run.TotalTokens,
-		CachedTokens:     run.CachedTokens,
-		UsageComplete:    run.UsageComplete,
-		CostEstimate:     run.CostEstimate,
-		CostSource:       run.CostSource,
-		ErrorCode:        run.ErrorCode,
-		ErrorMessage:     run.ErrorMessage,
-		CreatedAt:        run.CreatedAt.UTC().Format(time.RFC3339Nano),
-		StartedAt:        rfc3339(run.StartedAt),
-		FinishedAt:       rfc3339(run.FinishedAt),
+		ID:                  run.ID,
+		BotID:               run.BotID,
+		TriggerSource:       string(run.TriggerSource),
+		TriggerKey:          run.TriggerKey,
+		Status:              string(run.Status),
+		ConfigSnapshot:      run.ConfigSnapshotJSON,
+		InputThroughSeq:     run.InputThroughSeq,
+		StopRequested:       run.StopRequestedAt != nil,
+		PromptTokens:        run.PromptTokens,
+		CompletionTokens:    run.CompletionTokens,
+		TotalTokens:         run.TotalTokens,
+		CachedTokens:        run.CachedTokens,
+		UsageComplete:       run.UsageComplete,
+		CostEstimate:        run.CostEstimate,
+		CostSource:          run.CostSource,
+		DisplayCostEstimate: botSumOptional(run.CostEstimate, maintCost),
+		ErrorCode:           run.ErrorCode,
+		ErrorMessage:        run.ErrorMessage,
+		CreatedAt:           run.CreatedAt.UTC().Format(time.RFC3339Nano),
+		StartedAt:           rfc3339(run.StartedAt),
+		FinishedAt:          rfc3339(run.FinishedAt),
 	}
+}
+
+// botRunResponseWithDisplay 单条 run 的投影：现查关联维护成本（单条响应，
+// 非列表热路径）。维护成本查询失败返回 error（与列表路径一致），不把失败
+// 伪装成「没有维护」。
+func (s *BotService) botRunResponseWithDisplay(run *model.BotRun) (BotRunResponse, error) {
+	maint, err := s.maintenanceCostsOf([]string{run.ID})
+	if err != nil {
+		return BotRunResponse{}, err
+	}
+	return botRunResponseOf(run, maint[run.ID]), nil
+}
+
+// botRunResponseWithDisplayWrite 写路径的展示投影降级（INT-162 复审）：
+// 写操作在事务提交后才做展示成本聚合，聚合失败不能把已生效的写报成
+// 500——降级为 display_cost_estimate=null 并记日志。只读接口仍用严格版。
+func (s *BotService) botRunResponseWithDisplayWrite(run *model.BotRun, op string) BotRunResponse {
+	resp, err := s.botRunResponseWithDisplay(run)
+	if err != nil {
+		s.logger.Warn("写路径运行投影的维护成本聚合失败，降级为未计价显示",
+			zap.String("op", op), zap.String("run_id", run.ID), zap.Error(err))
+		resp = botRunResponseOf(run, nil)
+		resp.DisplayCostEstimate = nil
+	}
+	return resp
 }
 
 // BotMessageResponse 是消息的 API 投影；content 原样透传（已是 JSON）。
