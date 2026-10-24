@@ -191,7 +191,14 @@ func TestClientRedirectHTTPtoHTTPSUpgrade(t *testing.T) {
 	// 同主机 http→https 升级放行端口差：http 基址被实例/反代 301 到 https
 	// 是常见部署形态；https→http 降级与跨主机仍拒（其他用例覆盖）。
 	relaxLoopbackForTest(t)
+	var httpURL string
 	httpsSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/bounce" {
+			// 升上去再被跳回 http：末跳是 https→http 降级，必须拒（明文
+			// 请求会落到管理员从未配置过的端口）。
+			http.Redirect(w, r, httpURL+r.URL.Path, http.StatusFound)
+			return
+		}
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer httpsSrv.Close()
@@ -201,6 +208,7 @@ func TestClientRedirectHTTPtoHTTPSUpgrade(t *testing.T) {
 		http.Redirect(w, r, httpsSrv.URL+r.URL.Path, http.StatusMovedPermanently)
 	}))
 	defer httpSrv.Close()
+	httpURL = httpSrv.URL
 
 	u, _ := url.Parse(httpSrv.URL)
 	client, err := NewClient(Config{
@@ -218,6 +226,10 @@ func TestClientRedirectHTTPtoHTTPSUpgrade(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d", resp.StatusCode)
+	}
+
+	if _, err := client.Get(httpSrv.URL + "/bounce"); !errors.Is(err, ErrSchemeDowngrade) {
+		t.Fatalf("升级后跳回 http 应按降级拒, err = %v", err)
 	}
 
 	// 升级之后的 https→https 换端口不放行：升级例外只对上一跳是 http 的

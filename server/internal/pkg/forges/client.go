@@ -149,8 +149,10 @@ func NewClient(cfg Config) (*http.Client, error) {
 				return ErrSchemeNotAllowed
 			}
 			// https→http 降级一律拒绝：即使私网放行开着（明文 http 只该来自
-			// 管理员配置的基址，不该被响应悄悄带出来）。
-			if via[0].URL.Scheme == "https" && req.URL.Scheme == "http" {
+			// 管理员配置的基址，不该被响应悄悄带出来）。按上一跳 scheme 判
+			// ——http 基址升到 https 后再被跳回 http（如 http://h:443）也是
+			// 降级，明文请求会落到从未配置过的端口。
+			if via[len(via)-1].URL.Scheme == "https" && req.URL.Scheme == "http" {
 				return ErrSchemeDowngrade
 			}
 			// 只跟随同主机跳转：Forgejo 反代可能把 / 跳到登录页，但不会跨到
@@ -350,16 +352,16 @@ func HostKey(baseURL string) string {
 	return host + ":443"
 }
 
-// URLKey 完整 URL 的等价键：scheme 小写 + HostKey + EscapedPath——同端点
-// 的不同拼写（显式默认端口、DNS 尾点、host 大小写）归一成同键。回显判定
-// 这类「同 URL 不同拼写」的比较用它而不是字面相等。解析失败或缺 host 返
-// 回空串。
+// URLKey 完整 URL 的等价键：scheme 小写 + HostKey + 去尾斜杠的
+// EscapedPath——同端点的不同拼写（显式默认端口、DNS 尾点、host 大小写、
+// 尾部斜杠）归一成同键。回显判定这类「同 URL 不同拼写」的比较用它而不是
+// 字面相等。解析失败或缺 host 返回空串。
 func URLKey(raw string) string {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || u.Host == "" {
 		return ""
 	}
-	return strings.ToLower(u.Scheme) + "://" + HostKey(raw) + u.EscapedPath()
+	return strings.ToLower(u.Scheme) + "://" + HostKey(raw) + strings.TrimRight(u.EscapedPath(), "/")
 }
 
 // AllowedHosts 从一组基址提取 host 记账（小写、去端口、去空白、去重、按输入

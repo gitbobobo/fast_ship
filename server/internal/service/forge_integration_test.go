@@ -433,6 +433,27 @@ func TestForgeIntegrationUpdateDerivedAPIBaseFollows(t *testing.T) {
 	if row.APIBaseURL != "" {
 		t.Fatalf("variant echo must store empty intent, got %q", row.APIBaseURL)
 	}
+
+	// 回显不碰网络：命中新旧推导值的提交在 validateBaseURL（含保存时
+	// DNS 校验）之前短路——回显值主机已下线（base 迁移正是旧主机退役后
+	// 才改 base_url）时「保持推导」的更新不该被 40001 挡。断言 apiInput
+	// 根本没进校验器（baseCalls 只新增 base 一条）。
+	callsBefore := len(*env.baseCalls)
+	out, err = env.svc.Update(ctx, created.Id, &api.UpdateForgeIntegrationRequest{
+		BaseUrl:    ptrStr("https://g.example.com"),
+		ApiBaseUrl: ptrStr("https://f.example.com/api/v1"), // 旧 base 的展开值
+	})
+	if err != nil {
+		t.Fatalf("echo must not be blocked by dns validation: %v", err)
+	}
+	if out.ApiBaseUrl != "https://g.example.com/api/v1" {
+		t.Fatalf("echo must stay derived and follow new base, got %q", out.ApiBaseUrl)
+	}
+	for _, c := range (*env.baseCalls)[callsBefore:] {
+		if strings.Contains(c, "/api/") {
+			t.Fatalf("echoed api must not reach validateBaseURL, calls %v", (*env.baseCalls)[callsBefore:])
+		}
+	}
 }
 
 func TestForgeIntegrationDeleteRules(t *testing.T) {
