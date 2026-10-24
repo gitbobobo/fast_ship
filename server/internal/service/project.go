@@ -149,7 +149,7 @@ func (s *ProjectService) Create(userID string, req *CreateProjectRequest) (*Proj
 		return nil, errs.ErrInternal
 	}
 
-	return s.toResponse(project, s.syncStateFor(project.ID)), nil
+	return s.toResponse(project, s.syncStateFor(project.ID))
 }
 
 func (s *ProjectService) Get(id, userID string) (*ProjectResponse, error) {
@@ -160,7 +160,7 @@ func (s *ProjectService) Get(id, userID string) (*ProjectResponse, error) {
 		}
 		return nil, errs.ErrInternal
 	}
-	return s.toResponse(project, s.syncStateFor(project.ID)), nil
+	return s.toResponse(project, s.syncStateFor(project.ID))
 }
 
 // List 分页返回项目；includeShelved 控制是否包含搁置中的项目（INT-165）。
@@ -195,10 +195,18 @@ func (s *ProjectService) List(userID string, page, pageSize int, includeShelved 
 		}
 	}
 
-	integrations := s.forgeIntegrationsByIDs(projects)
+	integrations, err := s.forgeIntegrationsByIDs(projects)
+	if err != nil {
+		// 集成查询瞬时失败不能让 code_repo_url 静默落 null——前端会把
+		// 健康绑定显示成「已失效」，管理员顺手清除就把真绑定清掉了。
+		return nil, 0, errs.ErrInternal
+	}
 	resp := make([]ProjectResponse, len(projects))
 	for i, p := range projects {
-		projectResp := s.toResponseWithIntegrations(&p, syncStates[p.ID], integrations)
+		projectResp, err := s.toResponseWithIntegrations(&p, syncStates[p.ID], integrations)
+		if err != nil {
+			return nil, 0, errs.ErrInternal
+		}
 		if count, ok := issueCounts[p.ID]; ok {
 			projectResp.IssueCount = &count.Total
 			projectResp.IssueWorkflowCounts = &api.IssueWorkflowCounts{
@@ -335,7 +343,7 @@ func (s *ProjectService) Update(id, userID string, req *UpdateProjectRequest) (*
 		return nil, errs.ErrInternal
 	}
 
-	return s.toResponse(project, s.syncStateFor(project.ID)), nil
+	return s.toResponse(project, s.syncStateFor(project.ID))
 }
 
 func (s *ProjectService) Delete(id, userID string) error {
@@ -417,7 +425,7 @@ func (s *ProjectService) shelveResponse(id, userID string) (*ProjectResponse, er
 		}
 		return nil, errs.ErrInternal
 	}
-	return s.toResponse(project, s.syncStateFor(project.ID)), nil
+	return s.toResponse(project, s.syncStateFor(project.ID))
 }
 
 // GetBranches fetches all branches from the project's GitHub repository.
@@ -650,7 +658,10 @@ func (s *ProjectService) parseRepoBinding(raw string, forPublic bool) (owner, re
 			return "", "", "", "", errs.New(errs.ErrInvalidParams.Code,
 				errs.ErrInvalidParams.Message+": 公开仓库仅支持 GitHub，"+host+" 是已配置的 Forgejo 集成（issue 镜像与发版仍只支持 GitHub）")
 		}
-		return "", "", "", "", errRepoHostUnmatched(host)
+		// 未匹配也要先点明公开仓约束：只报「主机未匹配」会引导管理员去配
+		// 一条该主机的 Forgejo 集成，提交时仍撞 GitHub-only 约束——白配一次。
+		return "", "", "", "", errs.New(errs.ErrInvalidParams.Code,
+			errs.ErrInvalidParams.Message+": 公开仓库仅支持 GitHub，"+host+" 不是本部署的 GitHub 实例")
 	}
 	if !found {
 		return "", "", "", "", errRepoHostUnmatched(host)
@@ -687,13 +698,15 @@ var errForgeBindingGone = errs.New(errs.ErrInvalidParams.Code,
 // syncStateFor 现取，列表路径经 GetOrCreateByProjectIDs 批量预取后逐条传入，
 // nil 表示同步状态缺省。is_shelved 按响应生成时刻判定（INT-165）：到期
 // 自动恢复没有定时任务，同一行在截止前后两次读取会得到不同的 is_shelved。
-func (s *ProjectService) toResponse(p *model.Project, syncState *model.IssueSyncState) *ProjectResponse {
+func (s *ProjectService) toResponse(p *model.Project, syncState *model.IssueSyncState) (*ProjectResponse, error) {
 	return s.toResponseWithIntegrations(p, syncState, nil)
 }
 
 // toResponseWithIntegrations 带预取集成行的响应组装：列表路径一次批量取回
 // 全部被引用集成（避免 N+1）；integrations 传 nil 时单项目路径现场查一次。
-func (s *ProjectService) toResponseWithIntegrations(p *model.Project, syncState *model.IssueSyncState, integrations map[string]model.ForgeIntegration) *ProjectResponse {
+// 集成行查询失败返回 error 让外层 500——不能把「查询挂了」投影成
+// code_repo_url=null（前端会显示「绑定已失效」，误导管理员去清真绑定）。
+func (s *ProjectService) toResponseWithIntegrations(p *model.Project, syncState *model.IssueSyncState, integrations map[string]model.ForgeIntegration) (*ProjectResponse, error) {
 	resp := &ProjectResponse{
 		Id:                  p.ID,
 		Name:                p.Name,
@@ -714,7 +727,11 @@ func (s *ProjectService) toResponseWithIntegrations(p *model.Project, syncState 
 		CreatedAt:           p.CreatedAt.Format("2006-01-02T15:04:05Z"),
 		UpdatedAt:           p.UpdatedAt.Format("2006-01-02T15:04:05Z"),
 	}
-	resp.CodeRepoUrl = s.codeRepoUrl(p, integrations)
+	codeRepoURL, err := s.codeRepoUrl(p, integrations)
+	if err != nil {
+		return nil, err
+	}
+	resp.CodeRepoUrl = codeRepoURL
 
 	if syncState != nil {
 		resp.IssueSync = &api.IssueSyncState{
@@ -735,7 +752,7 @@ func (s *ProjectService) toResponseWithIntegrations(p *model.Project, syncState 
 		}
 	}
 
-	return resp
+	return resp, nil
 }
 
 // syncStateFor 单项目路径现取同步状态；repo 未挂载或读取失败时容错为 nil。
@@ -761,46 +778,51 @@ func nilIfEmpty(s string) *string {
 
 // codeRepoUrl 项目代码仓的页面地址（INT-166）：无代码仓（owner/repo 缺一）
 // 返回 nil；空集成引用按内置 github 拼 https://github.com/{o}/{r}；forgejo
-// 集成拼 {base_url}/{o}/{r}。绑定的集成行查不到（并发删除窗口 / 查询失败 /
-// repo 未注入）返回 nil——不把私有 owner/repo 发到 github.com。
-func (s *ProjectService) codeRepoUrl(p *model.Project, integrations map[string]model.ForgeIntegration) *string {
+// 集成拼 {base_url}/{o}/{r}。绑定的集成行查不到（并发删除窗口 / repo 未
+// 注入）返回 nil——不把私有 owner/repo 发到 github.com；查询本身失败则
+// 返回 error 让外层 500，区分「行已删除」与「查询瞬时故障」。
+func (s *ProjectService) codeRepoUrl(p *model.Project, integrations map[string]model.ForgeIntegration) (*string, error) {
 	owner, repo := p.CodeRepo()
 	if owner == "" || repo == "" {
-		return nil
+		return nil, nil
 	}
 	if p.CodeIntegrationID == "" {
 		url := s.ghWebBase + "/" + owner + "/" + repo
-		return &url
+		return &url, nil
 	}
 	row, ok := integrations[p.CodeIntegrationID]
 	if !ok {
 		if integrations != nil || s.forgeIntegrations == nil {
-			return nil
+			return nil, nil
 		}
 		found, err := s.forgeIntegrations.FindByID(p.CodeIntegrationID)
 		if err != nil {
-			return nil
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				// 行确实已删（应用层拦在前的并发窗口残余）——投影 null。
+				return nil, nil
+			}
+			return nil, err
 		}
 		row = *found
 	}
 	base := strings.TrimRight(strings.TrimSpace(row.BaseURL), "/")
 	if base == "" {
-		return nil
+		return nil, nil
 	}
 	if row.Kind == model.ForgeIntegrationKindGitHub {
 		base = s.ghWebBase
 	}
 	url := base + "/" + owner + "/" + repo
-	return &url
+	return &url, nil
 }
 
 // forgeIntegrationsByIDs 批量取项目引用的集成行：列表路径给 codeRepoUrl 用，
-// 一次查询避免 N+1。repo 未注入或查询失败返回空表——响应按「集成不可解析」
-// 降级为 null，不拖垮列表。
-func (s *ProjectService) forgeIntegrationsByIDs(projects []model.Project) map[string]model.ForgeIntegration {
+// 一次查询避免 N+1。repo 未注入返回空表（无集成可引用）；查询失败返回 error
+// 让列表整体 500——响应降级成 null 会把健康绑定显示成「已失效」。
+func (s *ProjectService) forgeIntegrationsByIDs(projects []model.Project) (map[string]model.ForgeIntegration, error) {
 	out := map[string]model.ForgeIntegration{}
 	if s.forgeIntegrations == nil {
-		return out
+		return out, nil
 	}
 	ids := make([]string, 0, len(projects))
 	for i := range projects {
@@ -810,10 +832,10 @@ func (s *ProjectService) forgeIntegrationsByIDs(projects []model.Project) map[st
 	}
 	rows, err := s.forgeIntegrations.ListByIDs(ids)
 	if err != nil {
-		return out
+		return nil, err
 	}
 	for _, row := range rows {
 		out[row.ID] = row
 	}
-	return out
+	return out, nil
 }

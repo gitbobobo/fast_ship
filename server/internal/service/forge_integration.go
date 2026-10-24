@@ -615,6 +615,7 @@ func probeForge(ctx context.Context, client *http.Client, apiBaseURL, token stri
 	status, body, err := forgeAPIGet(ctx, client, apiBase+"/version", token)
 	version := ""
 	var scopeNotes []string
+	versionOK := false
 	switch {
 	case err != nil:
 		return ForgeProbe{Status: model.DeploymentDetectionFailed, Detail: probeErrDetail(err)}
@@ -625,6 +626,7 @@ func probeForge(ctx context.Context, client *http.Client, apiBaseURL, token stri
 				Detail: "version 响应不是预期的 Forgejo API 格式，请确认实例地址与 API 版本"}
 		}
 		version = truncateProbeField(strings.TrimSpace(parsed.Version))
+		versionOK = true
 	case status == http.StatusUnauthorized:
 		return ForgeProbe{Status: model.DeploymentDetectionInvalid,
 			Detail: fmt.Sprintf("token 被实例拒绝（HTTP %d），请检查机器人 PAT", status)}
@@ -639,6 +641,7 @@ func probeForge(ctx context.Context, client *http.Client, apiBaseURL, token stri
 
 	status, body, err = forgeAPIGet(ctx, client, apiBase+"/user", token)
 	username := ""
+	userOK := false
 	switch {
 	case err != nil:
 		return ForgeProbe{Status: model.DeploymentDetectionFailed, Detail: probeErrDetail(err)}
@@ -649,6 +652,7 @@ func probeForge(ctx context.Context, client *http.Client, apiBaseURL, token stri
 				Detail: "user 响应不是预期的 Forgejo API 格式，请确认 token 具有读取账号信息的权限"}
 		}
 		username = strings.TrimSpace(parsed.Login)
+		userOK = true
 	case status == http.StatusUnauthorized:
 		return ForgeProbe{Status: model.DeploymentDetectionInvalid,
 			Detail: fmt.Sprintf("token 被实例拒绝（HTTP %d），请检查机器人 PAT", status)}
@@ -661,6 +665,12 @@ func probeForge(ctx context.Context, client *http.Client, apiBaseURL, token stri
 			Detail: fmt.Sprintf("实例返回 HTTP %d（GET user）", status)}
 	}
 
+	if !versionOK && !userOK {
+		// 两端点都 403：可能 token 对 API 完全无读权限，也可能是 WAF/反代
+		// 按来源整体拦——报「连接正常」会误导管理员以为实例与凭证可用。
+		return ForgeProbe{Status: model.DeploymentDetectionFailed,
+			Detail: "version 与 user 端点均被拒绝（HTTP 403），请确认 token 权限与实例访问策略"}
+	}
 	detail := ""
 	if len(scopeNotes) > 0 {
 		detail = "token 权限受限：" + strings.Join(scopeNotes, "；") + "（仅仓库场景可用）"

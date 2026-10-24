@@ -612,14 +612,20 @@ func TestForgeIntegrationGet(t *testing.T) {
 // 有值非 null。
 func TestForgeProjectResponseIntegrationRefs(t *testing.T) {
 	empty := model.Project{ID: uuid.NewString(), UserID: uuid.NewString(), Name: "p1"}
-	resp := (&ProjectService{}).toResponse(&empty, nil)
+	resp, err := (&ProjectService{}).toResponse(&empty, nil)
+	if err != nil {
+		t.Fatalf("toResponse: %v", err)
+	}
 	if resp.CodeIntegrationId != nil || resp.PublicIntegrationId != nil {
 		t.Fatalf("empty refs should be nil, got %+v", resp)
 	}
 
 	refd := model.Project{ID: uuid.NewString(), UserID: uuid.NewString(), Name: "p2",
 		CodeIntegrationID: "int-1", PublicIntegrationID: "int-2"}
-	resp = (&ProjectService{}).toResponse(&refd, nil)
+	resp, err = (&ProjectService{}).toResponse(&refd, nil)
+	if err != nil {
+		t.Fatalf("toResponse: %v", err)
+	}
 	if resp.CodeIntegrationId == nil || *resp.CodeIntegrationId != "int-1" ||
 		resp.PublicIntegrationId == nil || *resp.PublicIntegrationId != "int-2" {
 		t.Fatalf("refs = %+v", resp)

@@ -122,8 +122,10 @@ func forgeLinksForProject(ctx context.Context, db *gorm.DB, projectID, ghBase st
 
 // forgeLinksByProjects 批量解析项目 → 链接构造面：一次取被引用的
 // forge_integrations 行。projects 由调用方加载（活动列表在同一事务里已取出
-// 完整行），缺失或解析不了的条目兜底 github-default；ghBase 是本部署的
-// GitHub Web 基址（githubWebBase）。
+// 完整行）。未绑定集成的项目（code_integration_id 空）回内置
+// github-default；绑定行查不到（已删除/查询失败）标 unresolved、链接为空串
+// ——绝不把私有 owner/repo 拼到 github.com 上。ghBase 是本部署的 GitHub
+// Web 基址（githubWebBase）。
 func forgeLinksByProjects(ctx context.Context, db *gorm.DB, projects []model.Project, ghBase string) map[string]forgeLinks {
 	ids := make([]string, 0, len(projects))
 	for _, p := range projects {
