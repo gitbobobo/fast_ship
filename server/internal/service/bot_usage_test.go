@@ -458,6 +458,20 @@ func TestBotUsageRunDetailProjection(t *testing.T) {
 	first := seedUsageRequest(t, env, run.ID, ptrCost(0.3), "same-hash")
 	seedUsageRequest(t, env, run.ID, nil, "same-hash") // 重试：同指纹、未计价
 	maint := seedUsageMaintenance(t, env, bot.ID, &run.ID, ptrCost(0.2))
+	// usage 未收齐（usage_complete=false）但已写 prompt_tokens 的维护请求：
+	// 投影必须用真实列，不能按 tokens 非空推断成「已收齐」。
+	now := time.Now().UTC()
+	partial := int64(200)
+	if err := env.db.Create(&model.BotMaintenanceRequest{
+		ID: uuid.NewString(), MaintenanceRunID: maint.ID, Ordinal: 2,
+		Purpose: model.BotPurposeSummary, Model: "fake-model",
+		Status:     model.BotModelRequestSucceeded,
+		PrefixHash: "p", ToolsHash: "", ToolsetVersion: 1,
+		UsageComplete: false, PromptTokens: &partial, TotalTokens: &partial,
+		StartedAt: now, FinishedAt: &now,
+	}).Error; err != nil {
+		t.Fatalf("seed partial maintenance request: %v", err)
+	}
 
 	detail, err := env.bots.GetBotUsageRunDetail(userID, run.ID)
 	if err != nil {
@@ -507,8 +521,14 @@ func TestBotUsageRunDetailProjection(t *testing.T) {
 	if mr.Id != maint.ID || mr.CostEstimate == nil || !costEq(*mr.CostEstimate, 0.2) {
 		t.Fatalf("维护运行投影不符: %+v", mr)
 	}
-	if len(mr.Requests) != 1 || mr.Requests[0].Purpose != "summary" {
+	if len(mr.Requests) != 2 || mr.Requests[0].Purpose != "summary" {
 		t.Fatalf("维护请求应随行返回: %+v", mr.Requests)
+	}
+	if !mr.Requests[0].UsageComplete {
+		t.Fatalf("已收齐请求的 usage_complete 应为 true: %+v", mr.Requests[0])
+	}
+	if mr.Requests[1].UsageComplete {
+		t.Fatalf("usage_complete=false 的维护请求应按实投影，不能按 tokens 推断: %+v", mr.Requests[1])
 	}
 }
 

@@ -695,7 +695,7 @@ func (s *BotService) GetBotUsageRunDetail(userID, runID string) (*api.BotUsageRu
 			Purpose:          string(row.Purpose),
 			Model:            row.Model,
 			Status:           string(row.Status),
-			UsageComplete:    row.PromptTokens != nil,
+			UsageComplete:    row.UsageComplete,
 			PromptTokens:     row.PromptTokens,
 			CachedTokens:     row.CachedTokens,
 			CompletionTokens: row.CompletionTokens,
