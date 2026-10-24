@@ -900,6 +900,15 @@ func TestBotUsageMonthlyTriggerCountLocalDays(t *testing.T) {
 	if !ok || n != 30 {
 		t.Fatalf("跨夏令时的 30 当地日应计 30 次触发，实得 %d, ok=%v", n, ok)
 	}
+
+	// 钉死迭代时区：正午纽约任务在当地 12:00 触发。now=10-24 10:00 EDT，
+	// horizon=11-23 10:00 EST；正确口径 10-24..11-22 共 30 次（11-23 正午
+	// =17:00Z 超出 horizon）。若 Next 误按服务器 UTC 迭代，11-23 12:00Z 会
+	// 落在 horizon(15:00Z) 内，得出 31。
+	n, ok = botUsageMonthlyTriggerCount("0 12 * * *", "America/New_York", now)
+	if !ok || n != 30 {
+		t.Fatalf("正午纽约任务应按任务时区迭代计 30 次，实得 %d, ok=%v", n, ok)
+	}
 }
 
 // 反向窗口边界（INT-162 复审 P2）：窗口内父 run + 窗口外维护——维护发生在
