@@ -543,10 +543,7 @@ func (s *BotService) RequestStop(userID, botID, runID string) (*BotRunResponse, 
 	if err != nil {
 		return nil, errs.ErrInternal
 	}
-	resp, err := s.botRunResponseWithDisplay(fresh)
-	if err != nil {
-		return nil, errs.ErrInternal
-	}
+	resp := s.botRunResponseWithDisplayWrite(fresh, "request_stop")
 	return &resp, nil
 }
 
@@ -652,6 +649,20 @@ func (s *BotService) botRunResponseWithDisplay(run *model.BotRun) (BotRunRespons
 		return BotRunResponse{}, err
 	}
 	return botRunResponseOf(run, maint[run.ID]), nil
+}
+
+// botRunResponseWithDisplayWrite 写路径的展示投影降级（INT-162 复审）：
+// 写操作在事务提交后才做展示成本聚合，聚合失败不能把已生效的写报成
+// 500——降级为 display_cost_estimate=null 并记日志。只读接口仍用严格版。
+func (s *BotService) botRunResponseWithDisplayWrite(run *model.BotRun, op string) BotRunResponse {
+	resp, err := s.botRunResponseWithDisplay(run)
+	if err != nil {
+		s.logger.Warn("写路径运行投影的维护成本聚合失败，降级为未计价显示",
+			zap.String("op", op), zap.String("run_id", run.ID), zap.Error(err))
+		resp = botRunResponseOf(run, nil)
+		resp.DisplayCostEstimate = nil
+	}
+	return resp
 }
 
 // BotMessageResponse 是消息的 API 投影；content 原样透传（已是 JSON）。

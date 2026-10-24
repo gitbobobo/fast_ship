@@ -16,6 +16,7 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/repository"
 	"github.com/google/uuid"
 	"github.com/openai/openai-go/v2"
+	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
 
@@ -1005,14 +1006,7 @@ func (s *BotService) SetScheduleTaskEnabled(userID, botID, taskID string, enable
 	if err != nil {
 		return nil, err
 	}
-	costs, err := s.ScheduleTaskCostsLast7d(userID, botID, []string{task.ID})
-	if err != nil {
-		return nil, errs.ErrInternal
-	}
-	lastRun, err := s.lastScheduleRunResponseOf(botID, task.ID)
-	if err != nil {
-		return nil, errs.ErrInternal
-	}
+	costs, lastRun := s.scheduleTaskWriteResponseParts(userID, botID, task.ID, "set_schedule_task_enabled")
 	resp := s.scheduleTaskResponseOf(task, costs[task.ID], lastRun)
 	return &resp, nil
 }
@@ -1054,16 +1048,29 @@ func (s *BotService) ClearScheduleTaskState(userID, botID, taskID string) (*BotS
 		}
 		return nil, errs.ErrInternal
 	}
-	costs, err := s.ScheduleTaskCostsLast7d(userID, botID, []string{task.ID})
-	if err != nil {
-		return nil, errs.ErrInternal
-	}
-	lastRun, err := s.lastScheduleRunResponseOf(botID, task.ID)
-	if err != nil {
-		return nil, errs.ErrInternal
-	}
+	costs, lastRun := s.scheduleTaskWriteResponseParts(userID, botID, task.ID, "clear_schedule_task_state")
 	resp := s.scheduleTaskResponseOf(task, costs[task.ID], lastRun)
 	return &resp, nil
+}
+
+// scheduleTaskWriteResponseParts 写路径的任务投影部件降级（INT-162 复审）：
+// 任务写操作在提交后才聚合近 7 天花费与最新运行投影，聚合失败不能把已
+// 生效的写报成 500——分别按未计价/无最近运行降级并记日志。只读接口仍用
+// 严格版。
+func (s *BotService) scheduleTaskWriteResponseParts(userID, botID, taskID, op string) (map[string]*float64, *BotScheduleRunResponse) {
+	costs, err := s.ScheduleTaskCostsLast7d(userID, botID, []string{taskID})
+	if err != nil {
+		s.logger.Warn("写路径任务近 7 天花费聚合失败，降级为未计价显示",
+			zap.String("op", op), zap.String("task_id", taskID), zap.Error(err))
+		costs = nil
+	}
+	lastRun, err := s.lastScheduleRunResponseOf(botID, taskID)
+	if err != nil {
+		s.logger.Warn("写路径任务最新运行投影失败，降级为空",
+			zap.String("op", op), zap.String("task_id", taskID), zap.Error(err))
+		lastRun = nil
+	}
+	return costs, lastRun
 }
 
 // SetScheduleTaskEnabledRequest 是开关请求体：enabled 是唯一可写字段，
@@ -1118,10 +1125,7 @@ func (s *BotService) StopScheduleRun(userID, botID, taskID, runID string) (*BotR
 	if err != nil {
 		return nil, errs.ErrInternal
 	}
-	resp, err := s.botRunResponseWithDisplay(fresh)
-	if err != nil {
-		return nil, errs.ErrInternal
-	}
+	resp := s.botRunResponseWithDisplayWrite(fresh, "stop_schedule_run")
 	return &resp, nil
 }
 
