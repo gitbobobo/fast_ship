@@ -61,18 +61,19 @@ func TestForgeLinksBlobLineURL(t *testing.T) {
 	}
 }
 
-// 解析器兜底（INT-166）：项目不存在、未绑定集成（空列）→ 兜底 github-default；
-// 绑定的集成行已被删（删除前应用层会拦引用，这里只防并发窗口）→ 不可解析、
-// 链接为空串；命中 forgejo 集成 → forgejo 形态。
+// 解析器兜底（INT-166）：未绑定集成（空列）→ 兜底 github-default；项目行
+// 查不到（含已删除与查询故障）、绑定的集成行已被删（删除前应用层会拦引用，
+// 这里只防并发窗口）→ 不可解析、链接为空串；命中 forgejo 集成 → forgejo
+// 形态。
 func TestForgeLinksForProject(t *testing.T) {
 	svc := setupTestServices(t)
 	ctx := context.Background()
 	user := createTestUser(t, svc.db, "user-forge-links")
 	forge := createTestForgeIntegration(t, svc.db, "https://git.example.com")
 
-	// 项目不存在 → github 兜底。
-	if links := forgeLinksForProject(ctx, svc.db, "no-such-project"); links.PullURL("o/r", 1) != "https://github.com/o/r/pull/1" {
-		t.Fatalf("missing project should fall back to github, got %q", links.PullURL("o/r", 1))
+	// 项目不存在 → 不可解析：确认不了集成归属就不猜 github，链接为空串。
+	if links := forgeLinksForProject(ctx, svc.db, "no-such-project"); links.PullURL("o/r", 1) != "" {
+		t.Fatalf("missing project should yield empty pr url, got %q", links.PullURL("o/r", 1))
 	}
 
 	// 空列（= 内置 github-default）→ github。

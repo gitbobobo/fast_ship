@@ -231,6 +231,29 @@ func DefaultAPIBaseURL(baseURL string) string {
 	return strings.TrimRight(baseURL, "/") + "/api/v1"
 }
 
+// HostKey 集成基址的归一键：小写 host + 端口，空端口按 scheme 缺省补齐
+// （https→443、http→80）。解析失败或缺 host 返回空串（保存时已校验过，空键
+// 只防御存量脏行，调用方把它排除在比较与唯一约束之外）。同主机查重、项目侧
+// 仓库 URL 匹配与启动迁移的 host_key 回填（forge_integrations.host_key）共用
+// 这一个实现。
+func HostKey(baseURL string) string {
+	u, err := url.Parse(strings.TrimSpace(baseURL))
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	host := strings.ToLower(u.Hostname())
+	if host == "" {
+		return ""
+	}
+	if port := u.Port(); port != "" {
+		return host + ":" + port
+	}
+	if strings.EqualFold(u.Scheme, "http") {
+		return host + ":80"
+	}
+	return host + ":443"
+}
+
 // AllowedHosts 从一组基址提取 host 记账（小写、去端口、去空白、去重、按输入
 // 顺序），供 Config.AllowedHosts 使用。解析失败的条目跳过——传入的都是保存时
 // 校验过的基址，这里只是防御。
@@ -350,6 +373,12 @@ func isBlockedPrivateMode(ip net.IP) bool {
 	return blockedByPolicy(ip, false)
 }
 
+// awsIMDSv6Endpoint AWS IMDS 的 IPv6 端点（EC2 实例元数据服务在 IPv6-only
+// 实例上的固定地址）。它落在 ULA fd00::/8 里，私网放行口径会把它当「内网
+// Forgejo」放过去——但那是元数据服务，偷到凭证等于整个云账号失守，两口径
+// 一律精确拒绝。
+var awsIMDSv6Endpoint = net.ParseIP("fd00:ec2::254")
+
 // blockedByPolicy 地址段判定核心。strict=true 是公网口径（一切私网/保留段
 // 拒绝），false 是私网放行口径（只拒绝放了也危险的段）。
 func blockedByPolicy(ip net.IP, strict bool) bool {
@@ -376,6 +405,11 @@ func blockedByPolicy(ip net.IP, strict bool) bool {
 	}
 	// ULA fc00::/7（IsPrivate 对 IPv6 即 ULA）只在公网口径拒绝。
 	if strict && ip.IsPrivate() {
+		return true
+	}
+	// AWS IMDS 的 IPv6 端点：ULA 段放不拦的例外，精确匹配（相邻 ULA 如
+	// fd00:ec2::1 不受影响）。
+	if ip.Equal(awsIMDSv6Endpoint) {
 		return true
 	}
 	// fec0::/10 已废弃的 site-local（RFC 3879）：第二字节高两位为 11，

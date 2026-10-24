@@ -13,6 +13,12 @@ import (
 // 与 CheckTokenReference 之后、项目行落库之前被删掉的竞态对应。
 var ErrGitHubTokenMissing = errors.New("referenced github token missing")
 
+// ErrForgeIntegrationMissing 表示写入项目绑定时，引用的代码仓集成行已经不在。
+// 与 parseRepoBinding 匹配集成之后、项目行落库之前集成被并发删除的竞态对应
+// （与删除侧的 DeleteIfUnreferenced 原子条件双向关闭悬空引用窗口，见
+// docs/internal/forge-integrations.md）。
+var ErrForgeIntegrationMissing = errors.New("referenced code integration missing")
+
 type ProjectRepository struct {
 	db *gorm.DB
 }
@@ -30,6 +36,11 @@ func (r *ProjectRepository) Create(project *model.Project) error {
 		project.UpdatedAt = now
 	}
 	pred, args := ownedTokenWritePredicate(project.UserID, project.PublicGitHubTokenID, project.CodeGitHubTokenID)
+	// 集成存在性条件与 Token 条件并列（public_integration_id 本期恒为空列 =
+	// 内置 github，不加 EXISTS）：parseRepoBinding 匹配集成与 INSERT 之间集成
+	// 被并发删除时，这条 INSERT 落不下行，由下方 RowsAffected=0 分支区分原因。
+	pred += " AND (? = '' OR EXISTS (SELECT 1 FROM forge_integrations WHERE id = ?))"
+	args = append(args, project.CodeIntegrationID, project.CodeIntegrationID)
 	args = append([]interface{}{
 		project.ID,
 		project.UserID,
@@ -59,6 +70,9 @@ func (r *ProjectRepository) Create(project *model.Project) error {
 		return res.Error
 	}
 	if res.RowsAffected == 0 {
+		if err := missingForgeIntegration(r.db, project.CodeIntegrationID); err != nil {
+			return err
+		}
 		return ErrGitHubTokenMissing
 	}
 	return nil
@@ -70,6 +84,25 @@ func ownedTokenWritePredicate(userID, publicID, codeID string) (string, []interf
 	return `(? = '' OR EXISTS (SELECT 1 FROM user_github_tokens WHERE id = ? AND user_id = ?))
 		AND (? = '' OR EXISTS (SELECT 1 FROM user_github_tokens WHERE id = ? AND user_id = ?))`,
 		[]interface{}{publicID, publicID, userID, codeID, codeID, userID}
+}
+
+// missingForgeIntegration 判定项目写入被 0 行影响是否因代码集成绑定失效：
+// 绑定非空且集成行已不在 → ErrForgeIntegrationMissing；否则 nil（调用方继续
+// 按 Token 缺失等其他原因处理）。绑定值是模型字段的归一值（NULL 列读侧折
+// 空串），无需再判 NULL。
+func missingForgeIntegration(db *gorm.DB, codeIntegrationID string) error {
+	if codeIntegrationID == "" {
+		return nil
+	}
+	var n int64
+	if err := db.Model(&model.ForgeIntegration{}).
+		Where("id = ?", codeIntegrationID).Count(&n).Error; err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrForgeIntegrationMissing
+	}
+	return nil
 }
 
 // projectNotShelvedSQL 是「未处于搁置中」的 SQL 条件（INT-165），与
@@ -200,9 +233,15 @@ func (r *ProjectRepository) Update(project *model.Project) error {
 			return err
 		}
 		pred, args := ownedTokenWritePredicate(project.UserID, project.PublicGitHubTokenID, project.CodeGitHubTokenID)
+		// 集成存在性条件（public_integration_id 本期恒为空列，不加 EXISTS）：
+		// code_integration_id 非空时集成行必须在，否则不落行——删除集成与项目
+		// 更新并发的反向窗口由这里关掉（删除侧是 DeleteIfUnreferenced 的原子
+		// NOT EXISTS）。绑定值是模型字段的归一值（NULL 列读侧折空串）。
 		res := tx.Model(&model.Project{}).
 			Where("id = ? AND user_id = ?", project.ID, project.UserID).
 			Where(pred, args...).
+			Where("(? = '' OR EXISTS (SELECT 1 FROM forge_integrations WHERE id = ?))",
+				project.CodeIntegrationID, project.CodeIntegrationID).
 			Updates(map[string]interface{}{
 				"name":                   project.Name,
 				"description":            project.Description,
@@ -284,6 +323,11 @@ func (r *ProjectRepository) Update(project *model.Project) error {
 		}
 		if n == 0 {
 			return gorm.ErrRecordNotFound
+		}
+		// 项目行还在：写入是被引用存在性条件挡下的，集成失效优先于 Token 缺失
+		// 上报（两个条件同时失效时只报其一，重试都会得到确定结论）。
+		if err := missingForgeIntegration(tx, project.CodeIntegrationID); err != nil {
+			return err
 		}
 		return ErrGitHubTokenMissing
 	})

@@ -3892,9 +3892,9 @@ export interface components {
             base_url?: string | null;
             /** @description null 保留；空串重置为 {base_url}/api/v1；其余重新校验 */
             api_base_url?: string | null;
-            /** @description 新 PAT；省略、null 或空串 = 保留旧值 */
+            /** @description 新 PAT；留空（省略、null 或空串）= 保留现值；不支持单独清空，需删除集成重建 */
             token?: string | null;
-            /** @description 新验签密钥；省略、null 或空串 = 保留旧值 */
+            /** @description 新验签密钥；留空（省略、null 或空串）= 保留现值；不支持单独清空，需删除集成重建 */
             webhook_secret?: string | null;
             /** @description null = 保留；空串 = 清空；其余替换并校验 PEM */
             ca_cert_pem?: string | null;

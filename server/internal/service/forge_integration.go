@@ -169,12 +169,17 @@ func (s *ForgeIntegrationService) Create(ctx context.Context, req *api.CreateFor
 		Name:                   name,
 		BaseURL:                base,
 		APIBaseURL:             apiBase,
+		HostKey:                forges.HostKey(base),
 		TokenEncrypted:         tokenEnc,
 		WebhookSecretEncrypted: webhookEnc,
 		CACertPEM:              caCert,
 		AllowPrivateNetwork:    allowPrivate,
 	}
 	if err := s.repo.Create(&row); err != nil {
+		if errors.Is(err, repository.ErrForgeHostTaken) {
+			// 唯一索引兜底触发（应用层查重后的并发窗口），折回同类 40001。
+			return nil, s.hostTakenErr(row.HostKey)
+		}
 		s.logger.Error("保存代码集成失败", zap.Error(err))
 		return nil, errs.ErrInternal
 	}
@@ -241,8 +246,12 @@ func (s *ForgeIntegrationService) Update(ctx context.Context, id string, req *ap
 		}
 		row.BaseURL = base
 		row.APIBaseURL = apiBase
+		// host_key 与 base_url 同步落库：同归一主机的部分唯一索引在这里兜
+		// ensureHostAvailable 之后的并发窗口。
+		row.HostKey = forges.HostKey(base)
 		fields["base_url"] = base
 		fields["api_base_url"] = apiBase
+		fields["host_key"] = row.HostKey
 	}
 	if flagChanged {
 		row.AllowPrivateNetwork = allowPrivate
@@ -288,6 +297,10 @@ func (s *ForgeIntegrationService) Update(ctx context.Context, id string, req *ap
 		if err := s.repo.UpdateColumns(id, fields); err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return nil, errs.ErrForgeIntegrationNotFound
+			}
+			if errors.Is(err, repository.ErrForgeHostTaken) {
+				// 唯一索引兜底触发（改基址的并发窗口），折回同类 40001。
+				return nil, s.hostTakenErr(row.HostKey)
 			}
 			s.logger.Error("更新代码集成失败", zap.Error(err))
 			return nil, errs.ErrInternal
@@ -434,6 +447,23 @@ func paramError(err error) *errs.AppError {
 func errForgeHostTaken(name string) *errs.AppError {
 	return errs.New(errs.ErrInvalidParams.Code,
 		"该主机已被集成 "+name+" 占用，同一 Forgejo 主机只能配置一条集成")
+}
+
+// hostTakenErr 数据库唯一索引兜底触发（应用层查重通过后同主机被并发抢注）时
+// 的 40001：尽力点出占用集成的名字（应用层查重没看见的行是竞态对手方刚提交
+// 的，按归一键现查一次），查不到就用不带名字的泛化文案，与应用层查重同口径。
+func (s *ForgeIntegrationService) hostTakenErr(key string) *errs.AppError {
+	if key != "" {
+		if rows, err := s.repo.List(); err == nil {
+			for i := range rows {
+				if forges.HostKey(rows[i].BaseURL) == key {
+					return errForgeHostTaken(rows[i].Name)
+				}
+			}
+		}
+	}
+	return errs.New(errs.ErrInvalidParams.Code,
+		"该主机已被其他集成占用，同一 Forgejo 主机只能配置一条集成")
 }
 
 // errForgeBaseRootRequired base_url 只收站点根（40001）。

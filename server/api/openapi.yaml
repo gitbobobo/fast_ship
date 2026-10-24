@@ -9877,11 +9877,11 @@ components:
         token:
           type: string
           nullable: true
-          description: 新 PAT；省略、null 或空串 = 保留旧值
+          description: 新 PAT；留空（省略、null 或空串）= 保留现值；不支持单独清空，需删除集成重建
         webhook_secret:
           type: string
           nullable: true
-          description: 新验签密钥；省略、null 或空串 = 保留旧值
+          description: 新验签密钥；留空（省略、null 或空串）= 保留现值；不支持单独清空，需删除集成重建
         ca_cert_pem:
           type: string
           nullable: true

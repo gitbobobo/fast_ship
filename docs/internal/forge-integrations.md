@@ -22,6 +22,7 @@ web 设置页、webhook 出站、issue 轮询与 Forgejo 仓库的审查执行�
 | `name` | 显示名 |
 | `base_url` | Forgejo 实例基址，保存时已归一（去尾部 `/`） |
 | `api_base_url` | API 基址；省略时按 `{base_url}/api/v1` 推导后**展开落库**，读取侧不再推导（列可空，历史 NULL 与空串同义） |
+| `host_key` | base_url 的归一键（`forges.HostKey`：小写 host + scheme 缺省端口），保存/迁移时按 base_url 现算落库；同归一主机的部分唯一索引靠它兜并发窗口（见「基址形状与同主机唯一」），解析不出主机键的脏行为空串、不参与唯一约束 |
 | `token_encrypted` / `webhook_secret_encrypted` | 各自独立 AES-256-GCM 密文（密钥 `encryption.key`） |
 | `ca_cert_pem` | 自定义 CA（可空）；追加系统根证书池，不是替换 |
 | `allow_private_network` | 私网放行开关（默认 false），只作用于本集成的 client |
@@ -43,9 +44,10 @@ user_github_tokens 同一模式）。
   的仓库 URL 才匹配得上）。无 scheme 时首段含 `.` 或 `:` 视为 host，否则
   视为 owner。非 github.com 主机必须匹配某条已配置 forgejo 集成（双方都
   归一成「小写 host:端口」后比较），匹配不到 → 40001「主机未匹配任何已
-  配置集成」，不再像旧实现那样把 host 静默解析成 owner。`.git` 后缀与尾
-  斜杠的修剪顺序与旧实现
-  一致（「`.git` + 尾斜杠」组合剥不到 `.git`，repo 名保留后缀——历史行为照旧）。
+  配置集成」，不再像旧实现那样把 host 静默解析成 owner。尾部归一先剥尾
+  斜杠再剥 `.git` 后缀（「…/r.git/」剥得干净，repo 不带后缀）；owner/repo
+  之外的第三段非空直接 40001（`/pulls/1` 等页面路径与 `a/b/c` 裸形态都不
+  收——静默丢弃会拼出用户没指的仓库）。
 - **`repository_url`（公开仓）只允许 GitHub**（host=github.com 或纯
   owner/repo）→ `public_integration_id` 恒为空列。命中 forgejo 集成 → 40001
   且消息点明「公开仓库仅支持 GitHub」（issue 镜像 / release 本期仍是 GitHub
@@ -79,11 +81,12 @@ repo/sha 原样拼接。
 
 review 侧只有 `project_id` / `repo_full_name` 快照，解析链路是
 `forgeLinksForProject` / `forgeLinksByProjects`（`ReviewService` 直接查库）：
-`project.code_integration_id` 空 = github-default；**绑定的集成行已不存在
-（删除集成前应用层拦引用，此处只防并发窗口）或查询失败 → 链接不可解析，
-`PullURL`/`BlobLineURL` 返回空串**——审查链接断掉不让读路径/同步失败，但
-私有 owner/repo 也不能被拼到 github.com 上发出去。github 兜底只保留给空
-集成引用（与零值口径）；`pr_url` 为空串时前端不渲染链接。
+`project.code_integration_id` 空 = github-default；**项目行查不到（含已删除
+与查询故障）、绑定的集成行已不存在（删除集成前应用层拦引用，此处只防并发
+窗口）或查询失败 → 链接不可解析，`PullURL`/`BlobLineURL` 返回空串**——审查
+链接断掉不让读路径/同步失败，确认不了集成归属就绝不把私有 owner/repo 拼到
+github.com 上发出去。github 兜底只保留给空集成引用（与零值口径）；`pr_url`
+为空串时前端不渲染链接。
 
 ## 基址形状与同主机唯一
 
@@ -94,11 +97,16 @@ review 侧只有 `project_id` / `repo_full_name` 快照，解析链路是
 - **不收 userinfo**：`https://user:pass@host` 直接 40001——凭证随 base_url
   明文落库、回显并被拼进审查链接。保存返回的 base_url 是按 URL 重编码的归一
   串（scheme 小写、去尾斜杠），不是原始输入。
-- **同归一主机唯一**：新建与改基址（`forgeBaseHostKey`：小写 host + scheme
+- **同归一主机唯一**：新建与改基址（`forges.HostKey`：小写 host + scheme
   缺省端口，https→443 / http→80）命中其他 forgejo 行即 40001 并点名占用
   集成名。http 与 https 因缺省端口不同算两个主机，与项目侧仓库 URL 的匹配
-  口径一致。查重在 service 层先做，数据库不设唯一约束（归一键在 SQL 里算
-  不出来）；并发创建两条同主机的窗口接受——后果是多一条集成，不是数据损坏。
+  口径一致。查重在 service 层先做（归一键在 SQL 里算不出来，错误消息也更
+  友好）；`host_key` 列上的部分唯一索引
+  `idx_forge_integrations_host_key … WHERE host_key <> ''` 兜查重通过后同
+  主机被并发抢注的窗口——后写者从唯一索引冲突折回同类 40001（按归一键现查
+  点名占用集成，查不到用不带名字的泛化文案），不会再多出一条同主机集成。
+  启动迁移 `migrateForgeHostKeys` 给存量行按 base_url 回填 host_key（在
+  建索引之前跑）。
 
 ## 删除的原子性与残余窗口
 
@@ -107,10 +115,13 @@ review 侧只有 `project_id` / `repo_full_name` 快照，解析链路是
 「先查后删」之间项目并发绑定成功不会留下悬空引用。service.Delete 拿 0 行受
 影响时再查行存在性区分 40435（不存在）与 40935（被引用，消息列项目名）。
 
-接受的残余窗口在 service 层之上：项目侧 `parseRepoBinding` 先按
-`forgeIntegrationByHost` 列集成再绑定，删除可以发生在「已匹配、未落库」之间，
-后果是项目绑到一个不存在的集成 id（链接构造降级 null，见下节），不是数据
-损坏。要彻底关掉得把项目写入与集成行放进同一事务的外键方案，本期不做。
+反向窗口（项目写入时绑定的集成正被并发删除）同样已关闭：项目 Create/Update
+把「`code_integration_id` 非空则 forge_integrations 行必须在」写进同一条
+INSERT..SELECT / UPDATE 的 WHERE（`repository/project.go`），删掉的集成落不进
+绑定；0 行受影响时按 `repository.ErrForgeIntegrationMissing` 折成 40001
+「代码仓集成不存在或已被删除，请重试」（与 Token 缺失的 `ErrGitHubTokenMissing`
+同一模式，`public_integration_id` 本期恒为空列不加条件）。删除与写入在提交点
+互斥，任何一方都不会留下悬空引用——彻底关掉跨表一致性的外键方案仍不需要。
 
 ## 项目响应的 code_repo_url
 
@@ -130,8 +141,9 @@ null**——绝不回落 github.com，私有 owner/repo 不能被发到 github.c
 
 写接口三态：
 
-- `token` / `webhook_secret`：缺省、null、空串都 = 保留旧值（空串不清空；
-  这两个密钥没有「显式清空」的 UI 语义，删集成即可整体作废）。
+- `token` / `webhook_secret`：缺省、null、空串都 = 保留旧值（留空即保留现值；
+  **不支持单独清空**，要作废就删除集成重建——这两个密钥没有「显式清空」的
+  UI 语义）。
 - `ca_cert_pem`：缺省 = 保留，空串 = 清空，其余替换并校验 PEM 可解析。
 - `api_base_url`：缺省/null = 保留，空串 = 重置为 `{base_url}/api/v1` 推导。
 

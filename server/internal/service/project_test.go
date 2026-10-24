@@ -98,12 +98,12 @@ func TestParseRepositoryURL(t *testing.T) {
 			wantErr:   false,
 		},
 		{
-			name:      "with extra path segments",
-			input:     "https://github.com/godbobo/fast_ship/issues",
-			wantHost:  "github.com",
-			wantOwner: "godbobo",
-			wantRepo:  "fast_ship",
-			wantErr:   false,
+			// 页面路径不再静默丢弃第三段（审查修复：丢掉后拼出的 owner/repo
+			// 不是用户指的仓库），直接拒绝。
+			name:        "extra path segment rejected",
+			input:       "https://github.com/godbobo/fast_ship/issues",
+			wantErr:     true,
+			errContains: "多余路径段",
 		},
 		// 裸 host/o/r：自建 Forgejo 等非 github 主机（INT-166）。无显式端口
 		// 时按 scheme 补默认端口（无 scheme / https → 443，http → 80）。
@@ -132,14 +132,36 @@ func TestParseRepositoryURL(t *testing.T) {
 			wantErr:   false,
 		},
 		{
-			// 「.git + 尾斜杠」组合的旧行为照旧：修剪顺序是先 .git 后 /，
-			// 剥不到 .git，repo 名保留后缀（与 github.com 形态同一口径）。
+			// 「.git + 尾斜杠」组合剥得干净（审查修复：先剥尾斜杠再剥 .git）。
 			name:      "https non-github host with port",
 			input:     "https://git.example.com:8443/godbobo/fast_ship.git/",
 			wantHost:  "git.example.com:8443",
 			wantOwner: "godbobo",
-			wantRepo:  "fast_ship.git",
+			wantRepo:  "fast_ship",
 			wantErr:   false,
+		},
+		{
+			// 正常 .git 后缀不受影响。
+			name:      "bare owner/repo with .git suffix",
+			input:     "godbobo/fast_ship.git",
+			wantHost:  "github.com",
+			wantOwner: "godbobo",
+			wantRepo:  "fast_ship",
+			wantErr:   false,
+		},
+		{
+			// 裸形态三段拒绝（同 URL 形态口径，第三段不再静默丢弃）。
+			name:        "bare three segments rejected",
+			input:       "a/b/c",
+			wantErr:     true,
+			errContains: "多余路径段",
+		},
+		{
+			// PR 页面链接拒绝：它不是仓库根。
+			name:        "pr page url rejected",
+			input:       "https://forge.example.com/acme/app/pulls/1",
+			wantErr:     true,
+			errContains: "多余路径段",
 		},
 		{
 			name:      "non-github host upper case",
@@ -402,6 +424,81 @@ func TestProjectRepoUpdate_RejectsDeletedToken(t *testing.T) {
 	project.Name = "renamed"
 	if err := svc.projectRepo.Update(project); !errors.Is(err, repository.ErrGitHubTokenMissing) {
 		t.Fatalf("expected ErrGitHubTokenMissing, got %v", err)
+	}
+}
+
+// 项目写路径的集成存在性条件（INT-166 审查修复）：绑定的集成行在匹配之后、
+// 落库之前被并发删除时，Create/Update 都落不下行，repository 返回可区分的
+// ErrForgeIntegrationMissing（与删除侧 DeleteIfUnreferenced 的原子条件双向
+// 关闭悬空引用窗口）。
+func TestProjectRepoWrite_GoneIntegrationRejected(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-gone-integration")
+
+	// Create：绑定非空但集成行不在 → ErrForgeIntegrationMissing（Token 条件
+	// 全空放行，排除误报为 Token 缺失）。
+	err := svc.projectRepo.Create(&model.Project{
+		ID:                uuid.NewString(),
+		UserID:            user.ID,
+		Name:              "gone-integration",
+		GithubOwner:       "acme",
+		GithubRepo:        "app",
+		CodeIntegrationID: "missing-integration",
+		CodeGithubOwner:   "acme",
+		CodeGithubRepo:    "app",
+		CreatedAt:         time.Now(),
+		UpdatedAt:         time.Now(),
+	})
+	if !errors.Is(err, repository.ErrForgeIntegrationMissing) {
+		t.Fatalf("create with gone integration err = %v, want ErrForgeIntegrationMissing", err)
+	}
+	var rows int64
+	svc.db.Model(&model.Project{}).Where("user_id = ?", user.ID).Count(&rows)
+	if rows != 0 {
+		t.Fatalf("rows = %d, want 0（失效绑定未落库）", rows)
+	}
+
+	// Update：已有绑定在落库前失效同样拦下。
+	forge := createTestForgeIntegration(t, svc.db, "https://git.example.com")
+	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.CodeIntegrationID = forge.ID
+	})
+	if err := svc.db.Where("id = ?", forge.ID).Delete(&model.ForgeIntegration{}).Error; err != nil {
+		t.Fatalf("delete forge: %v", err)
+	}
+	project.Name = "renamed"
+	if err := svc.projectRepo.Update(project); !errors.Is(err, repository.ErrForgeIntegrationMissing) {
+		t.Fatalf("update with gone integration err = %v, want ErrForgeIntegrationMissing", err)
+	}
+
+	// 对照：项目本身不存在仍优先报 NotFound（项目存在性先于集成条件）。
+	ghost := *project
+	ghost.ID = "no-such-project"
+	if err := svc.projectRepo.Update(&ghost); !errors.Is(err, gorm.ErrRecordNotFound) {
+		t.Fatalf("update missing project err = %v, want ErrRecordNotFound", err)
+	}
+
+	// service 层把集成失效折成 40001「代码仓集成不存在或已被删除，请重试」。
+	psvc := newTestProjectService(svc)
+	_, err = psvc.Update(project.ID, user.ID, &UpdateProjectRequest{Name: api.Ptr("renamed-2")})
+	gone := appErr(t, err)
+	if gone.Code != errs.ErrInvalidParams.Code || !strings.Contains(gone.Message, "代码仓集成不存在或已被删除") {
+		t.Fatalf("service update = %d %q, want 40001 gone-integration", gone.Code, gone.Message)
+	}
+
+	// 逃生口：显式清空 code_repository_url 的更新照常落库（cid='' 放行），
+	// 用户可以解除失效绑定而不必先恢复集成。
+	if _, err := psvc.Update(project.ID, user.ID, &UpdateProjectRequest{
+		CodeRepositoryUrl: OptionalStringUpdate{Set: true},
+	}); err != nil {
+		t.Fatalf("clear binding update: %v", err)
+	}
+	var got model.Project
+	if err := svc.db.Where("id = ?", project.ID).First(&got).Error; err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if got.CodeIntegrationID != "" || got.CodeGithubOwner != "" || got.CodeGithubRepo != "" {
+		t.Fatalf("binding clear failed: cid=%q owner=%q repo=%q", got.CodeIntegrationID, got.CodeGithubOwner, got.CodeGithubRepo)
 	}
 }
 

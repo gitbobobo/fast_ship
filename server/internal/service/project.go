@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -14,6 +13,7 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/config"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
+	"github.com/godbobo/fast_ship/server/internal/pkg/forges"
 	ghclient "github.com/godbobo/fast_ship/server/internal/pkg/github"
 	"github.com/godbobo/fast_ship/server/internal/pkg/storage"
 	"github.com/godbobo/fast_ship/server/internal/repository"
@@ -128,6 +128,9 @@ func (s *ProjectService) Create(userID string, req *CreateProjectRequest) (*Proj
 	if err := s.projectRepo.Create(project); err != nil {
 		if errors.Is(err, repository.ErrGitHubTokenMissing) {
 			return nil, errs.ErrGitHubTokenNotFound
+		}
+		if errors.Is(err, repository.ErrForgeIntegrationMissing) {
+			return nil, errForgeBindingGone
 		}
 		return nil, errs.ErrInternal
 	}
@@ -306,6 +309,9 @@ func (s *ProjectService) Update(id, userID string, req *UpdateProjectRequest) (*
 		if errors.Is(err, repository.ErrGitHubTokenMissing) {
 			return nil, errs.ErrGitHubTokenNotFound
 		}
+		if errors.Is(err, repository.ErrForgeIntegrationMissing) {
+			return nil, errForgeBindingGone
+		}
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, errs.ErrProjectNotFound
 		}
@@ -458,8 +464,9 @@ const repoHostGitHub = "github.com"
 //   - host/o/r、https://host/o/r、https://host:port/o/r（自建 Forgejo 等）。
 //
 // host 判定：无 scheme 时首段含 `.` 或 `:` 视为 host，否则视为 owner；带
-// scheme 时首段一律是 host。`.git` 后缀、尾斜杠、host 大小写不敏感的修剪
-// 顺序与旧实现一致。
+// scheme 时首段一律是 host。尾部归一先剥尾斜杠再剥 `.git` 后缀（「…/r.git/」
+// 剥得干净）；owner/repo 之外的第三段非空直接拒绝（/pulls/1 等页面路径与
+// 多余层级不再静默丢弃）。
 func parseRepositoryURL(raw string) (host, owner, repo string, err error) {
 	s := strings.TrimSpace(raw)
 	if s == "" {
@@ -502,12 +509,20 @@ func parseRepositoryURL(raw string) (host, owner, repo string, err error) {
 		}
 	}
 
-	s = strings.TrimSuffix(s, ".git")
+	// 尾部归一先斜杠后 .git：「…/o/r.git/」这类尾巴先去掉斜杠才能剥到 .git
+	// （旧顺序剥不到，repo 名会带着 .git 后缀落库）。
 	s = strings.TrimSuffix(s, "/")
+	s = strings.TrimSuffix(s, ".git")
 
 	parts = strings.SplitN(s, "/", 3)
 	if len(parts) < 2 {
 		return host, "", "", errors.New("仓库链接格式无效，应为 owner/repo 或 https://github.com/owner/repo")
+	}
+	// 第三段非空 = 链接不是仓库根（/pulls/1、/issues 等页面路径或多余层级，
+	// 裸形态 a/b/c 同口径）：拒绝而不是静默丢弃——丢掉后拼出的 owner/repo
+	// 不是用户指的仓库。
+	if len(parts) > 2 && strings.TrimSpace(parts[2]) != "" {
+		return host, "", "", errors.New("仓库链接包含多余路径段，请填写仓库根地址（owner/repo 或 https://host/owner/repo）")
 	}
 
 	owner = strings.TrimSpace(parts[0])
@@ -536,23 +551,10 @@ func repoHostKey(host string) string {
 
 // forgeBaseHostKey 集成 base_url 的归一键：小写 host + 端口，空端口按 scheme
 // 缺省补齐（https→443、http→80）。解析失败返回空串（保存时已校验过，这里
-// 只防御存量脏行参与比较）。
+// 只防御存量脏行参与比较）。实现在 pkg/forges.HostKey——与 forge_integrations
+// .host_key 的落库、唯一索引共用同一份逻辑。
 func forgeBaseHostKey(baseURL string) string {
-	u, err := url.Parse(strings.TrimSpace(baseURL))
-	if err != nil || u.Host == "" {
-		return ""
-	}
-	host := strings.ToLower(u.Hostname())
-	if host == "" {
-		return ""
-	}
-	if port := u.Port(); port != "" {
-		return host + ":" + port
-	}
-	if strings.EqualFold(u.Scheme, "http") {
-		return host + ":80"
-	}
-	return host + ":443"
+	return forges.HostKey(baseURL)
 }
 
 // parseRepoBinding 解析仓库地址并按用途派生集成绑定（INT-166）：GitHub 主机
@@ -616,6 +618,12 @@ func errRepoHostUnmatched(host string) *errs.AppError {
 	return errs.New(errs.ErrInvalidParams.Code,
 		errs.ErrInvalidParams.Message+": 仓库主机 "+host+" 未匹配任何已配置集成")
 }
+
+// errForgeBindingGone 项目写路径的存在性条件拦下的集成失效（40001）：
+// parseRepoBinding/读行 之后、项目落库之前集成被并发删除，重试即可拿到
+// 「集成不存在」的确定结论或重新选择集成。
+var errForgeBindingGone = errs.New(errs.ErrInvalidParams.Code,
+	"代码仓集成不存在或已被删除，请重试")
 
 // toResponse 组装项目响应；syncState 由调用方提供——单项目路径用
 // syncStateFor 现取，列表路径经 GetOrCreateByProjectIDs 批量预取后逐条传入，

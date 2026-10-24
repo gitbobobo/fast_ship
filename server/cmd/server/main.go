@@ -99,7 +99,9 @@ var autoMigrateModels = []interface{}{
 	&model.Invite{},
 	&model.DeploymentSettings{},
 	// 代码仓集成（INT-166）：forgejo 行表；projects 的两个集成引用列随
-	// model.Project 迁移，存量行为 NULL（= 内置 github-default）。
+	// model.Project 迁移，存量行为 NULL（= 内置 github-default）。存量行的
+	// host_key 回填见 migrateForgeHostKeys（必须先于 createBootIndexes 的
+	// 同归一主机唯一索引）。
 	&model.ForgeIntegration{},
 }
 
@@ -613,6 +615,12 @@ func runBootMigrations(db *gorm.DB, fileStorage storage.Storage, logger *zap.Log
 		return fmt.Errorf("存量定时任务复核提示迁移失败: %w", err)
 	}
 
+	// 代码集成 host_key 回填（INT-166）：必须在 createBootIndexes 之前——
+	// 同归一主机的部分唯一索引建在回填完的数据上。
+	if err := migrateForgeHostKeys(db, logger); err != nil {
+		return fmt.Errorf("代码集成 host_key 回填失败: %w", err)
+	}
+
 	createBootIndexes(db)
 
 	// 用户角色（INT-129）：AutoMigrate 补齐 users.role 后，存量库可能一个
@@ -696,6 +704,11 @@ func createBootIndexes(db *gorm.DB) {
 	// 同一仓库只允许一个项目开启审查（开轮/同步按仓库反查唯一项目的前提）：
 	// 设置保存时先在事务内检查并返回 40922，这条部分唯一索引兜并发竞态。
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_project_review_settings_repo ON project_review_settings(repo_full_name) WHERE enabled = 1")
+	// 同归一主机只允许一条 forgejo 集成（INT-166）：保存时 service 层先查重
+	// 并返回带集成名的 40001（idx_forge_integrations_host_key 的归一键在 SQL
+	// 里算不出来），这条部分唯一索引兜查重通过后同主机被并发抢注的窗口；
+	// host_key 为空串的存量脏行不参与唯一约束。
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_forge_integrations_host_key ON forge_integrations(host_key) WHERE host_key <> ''")
 	// 截图源地址唯一索引由 model.ReviewAsset 的 uniqueIndex 标签随 AutoMigrate
 	// 建出（idx_review_assets_source）；按 (repo, pr, head) 的查询也走它的前缀。
 	db.Exec("DROP INDEX IF EXISTS idx_review_assets_pr_head")

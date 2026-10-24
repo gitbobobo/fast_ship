@@ -4864,10 +4864,10 @@ type UpdateForgeIntegrationRequest struct {
 	// Name 显示名；null 或空串拒绝（name 不允许为空）
 	Name *string `json:"name,omitempty"`
 
-	// Token 新 PAT；省略、null 或空串 = 保留旧值
+	// Token 新 PAT；留空（省略、null 或空串）= 保留现值；不支持单独清空，需删除集成重建
 	Token *string `json:"token,omitempty"`
 
-	// WebhookSecret 新验签密钥；省略、null 或空串 = 保留旧值
+	// WebhookSecret 新验签密钥；留空（省略、null 或空串）= 保留现值；不支持单独清空，需删除集成重建
 	WebhookSecret *string `json:"webhook_secret,omitempty"`
 }
 

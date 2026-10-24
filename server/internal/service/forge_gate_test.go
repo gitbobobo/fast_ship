@@ -8,6 +8,8 @@ import (
 
 	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/model"
+	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
+	"github.com/google/uuid"
 )
 
 // INT-166 审查修复的定向测试：同归一主机唯一、base_url 站点根收口、集成身份
@@ -56,6 +58,75 @@ func TestForgeIntegrationHostUniqueness(t *testing.T) {
 		ApiBaseUrl: ptrStr("https://other.example.com/api/v2"),
 	}); err != nil {
 		t.Fatalf("update api base should not trigger host check: %v", err)
+	}
+}
+
+// 同归一主机的数据库唯一索引兜底（审查修复）：应用层查重（ensureHostAvailable）
+// 通过之后同主机被并发抢注的窗口由 idx_forge_integrations_host_key 关掉，唯一
+// 索引冲突折回同类 40001；host_key 随 base_url 落库与更新。
+func TestForgeIntegrationHostKeyDBBackstop(t *testing.T) {
+	env := forgeTestService(t)
+	ctx := context.Background()
+	// 测试库 AutoMigrate 不建手工索引，按生产 createBootIndexes 的 DDL 补上。
+	if err := env.db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_forge_integrations_host_key ON forge_integrations(host_key) WHERE host_key <> ''").Error; err != nil {
+		t.Fatalf("create index: %v", err)
+	}
+
+	// 竞态对手方的确定性替身：base_url 脏行（算不出归一键，应用层查重看不见
+	// 它），host_key 却已占住 forge.example.com:443。
+	rival := &model.ForgeIntegration{
+		ID:        uuid.NewString(),
+		Kind:      model.ForgeIntegrationKindForgejo,
+		Name:      "rival",
+		HostKey:   "forge.example.com:443",
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}
+	if err := env.db.Create(rival).Error; err != nil {
+		t.Fatalf("seed rival: %v", err)
+	}
+
+	// 应用层查重放行（rival 算不出键），落库撞唯一索引 → 40001 泛化文案
+	// （按键点名不到占用者时不硬安名字）。
+	_, err := env.svc.Create(ctx, forgeCreateReq("b", "https://forge.example.com", "tok"))
+	taken := appErr(t, err)
+	if taken.Code != errs.ErrInvalidParams.Code || strings.Contains(taken.Message, "rival") ||
+		!strings.Contains(taken.Message, "已被其他集成占用") {
+		t.Fatalf("backstop create = %d %q, want 40001 generic taken", taken.Code, taken.Message)
+	}
+	if rows, _ := env.repo.List(); len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1（撞索引的创建未落库）", len(rows))
+	}
+
+	// 正常创建的行带归一键；hostTakenErr 按键现查点名占用集成。
+	named, err := env.svc.Create(ctx, forgeCreateReq("a", "https://named.example.com", "tok"))
+	if err != nil {
+		t.Fatalf("create named: %v", err)
+	}
+	row, err := env.repo.FindByID(named.Id)
+	if err != nil {
+		t.Fatalf("find named: %v", err)
+	}
+	if row.HostKey != "named.example.com:443" {
+		t.Fatalf("stored host_key = %q, want named.example.com:443", row.HostKey)
+	}
+	mention := env.svc.hostTakenErr("named.example.com:443")
+	if mention.Code != errs.ErrInvalidParams.Code || !strings.Contains(mention.Message, "a") {
+		t.Fatalf("hostTakenErr = %d %q, want 40001 mentioning a", mention.Code, mention.Message)
+	}
+
+	// Update 换基址同步改写 host_key。
+	if _, err := env.svc.Update(ctx, named.Id, &api.UpdateForgeIntegrationRequest{
+		BaseUrl: ptrStr("https://named.example.com:8443"),
+	}); err != nil {
+		t.Fatalf("update base: %v", err)
+	}
+	row, err = env.repo.FindByID(named.Id)
+	if err != nil {
+		t.Fatalf("find named 2: %v", err)
+	}
+	if row.HostKey != "named.example.com:8443" {
+		t.Fatalf("updated host_key = %q, want named.example.com:8443", row.HostKey)
 	}
 }
 

@@ -25,6 +25,11 @@ type ForgeIntegration struct {
 	// APIBaseURL 为空表示按 {base_url}/api/v1 推导（保存时已展开成具体值落库，
 	// 读取侧不再推导）。列保留可空语义，历史行为 NULL 时与空串同义。
 	APIBaseURL string `gorm:"column:api_base_url;type:text" json:"api_base_url"`
+	// HostKey 是 base_url 的归一键（forges.HostKey：小写 host + scheme 缺省
+	// 端口），同归一主机的部分唯一索引（idx_forge_integrations_host_key）靠它
+	// 兜应用层查重的并发窗口。保存/回填时按 base_url 现算落库；解析不出主机键
+	// 的脏行为空串（部分唯一索引排除空串，不挡启动）。内置 github 行不落本表。
+	HostKey string `gorm:"column:host_key;type:text" json:"-"`
 	// TokenEncrypted / WebhookSecretEncrypted 各自独立加密：PAT 与验签密钥
 	// 生命周期不同，分开存让「只换 token」不触碰 webhook_secret 密文。
 	TokenEncrypted         []byte `gorm:"type:blob" json:"-"`

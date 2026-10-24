@@ -62,6 +62,8 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 		&model.UserIssuePromptSetting{},
 		&model.ApiKey{},
 		&model.Project{},
+		// 项目写路径的集成存在性条件引用 forge_integrations（生产恒有）。
+		&model.ForgeIntegration{},
 		&model.Version{},
 		&model.Issue{},
 		&model.IssueGitHubMeta{},

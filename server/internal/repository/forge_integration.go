@@ -1,11 +1,17 @@
 package repository
 
 import (
+	"errors"
 	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"gorm.io/gorm"
 )
+
+// ErrForgeHostTaken 同归一主机的数据库唯一索引（idx_forge_integrations_
+// host_key）兜底触发：应用层查重（ensureHostAvailable）通过之后、写入之前，
+// 并发请求抢占了同一主机。service 层折成 40001（尽力点名占用集成）。
+var ErrForgeHostTaken = errors.New("forge integration host key already taken")
 
 // ForgeIntegrationRepository 读写部署级代码仓集成（INT-166）。被项目引用检查
 // 不走数据库外键（projects→forge_integrations 无外键），由 ReferencingProjects
@@ -19,7 +25,13 @@ func NewForgeIntegrationRepository(db *gorm.DB) *ForgeIntegrationRepository {
 }
 
 func (r *ForgeIntegrationRepository) Create(row *model.ForgeIntegration) error {
-	return r.db.Create(row).Error
+	if err := r.db.Create(row).Error; err != nil {
+		if isUniqueConstraintError(err) {
+			return ErrForgeHostTaken
+		}
+		return err
+	}
+	return nil
 }
 
 // List 全量集成按创建时间升序：列表投影首条恒为内置 github-default，forgejo
@@ -59,6 +71,9 @@ func (r *ForgeIntegrationRepository) UpdateColumns(id string, fields map[string]
 	updates["updated_at"] = time.Now().UTC()
 	res := r.db.Model(&model.ForgeIntegration{}).Where("id = ?", id).Updates(updates)
 	if res.Error != nil {
+		if isUniqueConstraintError(res.Error) {
+			return ErrForgeHostTaken
+		}
 		return res.Error
 	}
 	if res.RowsAffected == 0 {

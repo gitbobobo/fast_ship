@@ -101,16 +101,17 @@ func (l forgeLinks) BlobLineURL(repoFullName, sha, path string, line int) string
 
 // forgeLinksForProject 单项目的链接构造面解析：读项目行的
 // code_integration_id（空 = 内置 github-default），非空时查 forge_integrations
-// 行取 (kind, base_url)。集成行已不存在（删除集成前应用层会拦引用，这里只防
-// 并发窗口）或查询失败时返回不可解析标记，链接为空串——审查链接断掉不该让
-// 读路径失败，更不该把私有仓库地址发去 github.com。
+// 行取 (kind, base_url)。项目行查不到（含已删除与查询故障）、集成行已不存在
+// （删除集成前应用层会拦引用，这里只防并发窗口）或任何查询失败时返回不可
+// 解析标记，链接为空串——审查链接断掉不该让读路径失败，确认不了集成归属就
+// 更不该把私有仓库地址发去 github.com。
 func forgeLinksForProject(ctx context.Context, db *gorm.DB, projectID string) forgeLinks {
 	var project model.Project
 	if err := db.WithContext(ctx).
 		Select("id, code_integration_id").
 		Where("id = ?", projectID).
 		First(&project).Error; err != nil {
-		return githubLinks()
+		return forgeLinks{unresolved: true}
 	}
 	return forgeLinksByProjects(ctx, db, []model.Project{project})[projectID]
 }
