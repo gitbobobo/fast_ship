@@ -44,6 +44,18 @@ describe("normalizeCodeRepoRef", () => {
     );
   });
 
+  it("DNS 根点尾缀等价：forge.example. 与 forge.example 归一成同一主机键", () => {
+    expect(normalizeCodeRepoRef("https://git.example.com./o/r")).toBe(
+      "git.example.com:443/o/r",
+    );
+    expect(normalizeCodeRepoRef("https://git.example.com.:8443/o/r")).toBe(
+      "git.example.com:8443/o/r",
+    );
+    expect(normalizeCodeRepoRef("git.example.com./o/r")).toBe(
+      normalizeCodeRepoRef("git.example.com/o/r"),
+    );
+  });
+
   it("scheme 决定默认端口：http/https 同主机归一不同（集成切换不被判未改动）", () => {
     expect(normalizeCodeRepoRef("http://git.example.com/a/b")).toBe(
       "git.example.com:80/a/b",

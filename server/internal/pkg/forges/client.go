@@ -122,7 +122,7 @@ func NewClient(cfg Config) (*http.Client, error) {
 			}
 			transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 				if host, _, err := net.SplitHostPort(addr); err == nil {
-					if _, ok := allowed[strings.ToLower(host)]; ok {
+					if _, ok := allowed[normHost(host)]; ok {
 						return relaxed.DialContext(ctx, network, addr)
 					}
 				}
@@ -151,8 +151,10 @@ func NewClient(cfg Config) (*http.Client, error) {
 				return ErrSchemeDowngrade
 			}
 			// 只跟随同主机跳转：Forgejo 反代可能把 / 跳到登录页，但不会跨到
-			// 别的主机；跨主机在集成场景里就是 SSRF 或劫持信号。
-			if req.URL.Host != via[0].URL.Host {
+			// 别的主机；跨主机在集成场景里就是 SSRF 或劫持信号。主机名按
+			// normHost 比（尾点写法等价），端口仍要求字面一致。
+			if normHost(req.URL.Hostname()) != normHost(via[0].URL.Hostname()) ||
+				req.URL.Port() != via[0].URL.Port() {
 				return ErrCrossHostRedirect
 			}
 			// 凭证作用域（Config.AuthPathPrefix 配置了才生效）：跳转出 API
@@ -280,7 +282,7 @@ func HostKey(baseURL string) string {
 	if err != nil || u.Host == "" {
 		return ""
 	}
-	host := strings.ToLower(u.Hostname())
+	host := normHost(u.Hostname())
 	if host == "" {
 		return ""
 	}
@@ -304,7 +306,7 @@ func AllowedHosts(baseURLs ...string) []string {
 		if err != nil {
 			continue
 		}
-		host := strings.ToLower(u.Hostname())
+		host := normHost(u.Hostname())
 		if host == "" {
 			continue
 		}
@@ -317,12 +319,19 @@ func AllowedHosts(baseURLs ...string) []string {
 	return hosts
 }
 
+// normHost 主机名归一：小写 + 剥 DNS 根点尾缀（「forge.example.」≡
+// 「forge.example」）。凡是把两个主机名放一起判等的地方都走这一份——
+// host_key、allowlist、重定向同主机判定。
+func normHost(host string) string {
+	return strings.ToLower(strings.TrimRight(host, "."))
+}
+
 // allowedHostSet 规整成小写主机名集合：与 AllowedHosts 相同的口径，NewClient
 // 每次现算，调用方不需要预先归一。
 func allowedHostSet(hosts []string) map[string]struct{} {
 	set := make(map[string]struct{}, len(hosts))
 	for _, h := range hosts {
-		if h = strings.ToLower(strings.TrimSpace(h)); h != "" {
+		if h = normHost(strings.TrimSpace(h)); h != "" {
 			set[h] = struct{}{}
 		}
 	}
@@ -353,6 +362,16 @@ func parseBaseURL(raw string) (*url.URL, error) {
 			return nil, ErrInvalidBaseURL
 		}
 		u.Host = net.JoinHostPort(u.Hostname(), strconv.Itoa(n))
+	}
+	// DNS 根点尾缀归一：「forge.example.」与「forge.example」是同一主机，
+	// 但字符串不同会让 host_key、唯一索引与 allowlist 比对分叉，TLS SNI
+	// 也照原样发出。落库前改写成无尾点规范形。
+	if host := u.Hostname(); host != strings.TrimRight(host, ".") {
+		if port := u.Port(); port != "" {
+			u.Host = net.JoinHostPort(strings.TrimRight(host, "."), port)
+		} else {
+			u.Host = strings.TrimRight(host, ".")
+		}
 	}
 	// 路径里的 . / .. 段拒收：服务端/代理归一后请求路径与字面前缀不同——
 	// api_base_url 的 /api/../x 会被代理归一到别的端点，探测莫名失败；且

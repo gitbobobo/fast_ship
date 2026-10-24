@@ -571,9 +571,9 @@ func repoHostKey(host string) string {
 		if n, err := strconv.Atoi(port); err == nil {
 			port = strconv.Itoa(n)
 		}
-		return strings.ToLower(h) + ":" + port
+		return strings.ToLower(strings.TrimRight(h, ".")) + ":" + port
 	}
-	return strings.ToLower(host) + ":443"
+	return strings.ToLower(strings.TrimRight(host, ".")) + ":443"
 }
 
 // forgeBaseHostKey 集成 base_url 的归一键：小写 host + 端口，空端口按 scheme

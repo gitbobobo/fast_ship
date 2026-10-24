@@ -53,6 +53,10 @@ user_github_tokens 同一模式）。
 - **数字端口统一拼写**：`parseBaseURL` 把 `:0443` 这类写法归一成数值
   （`:443`），同一端点的不同拼写归一出同一 host_key；`:0`/`:65536` 等
   超界端口保存即拒。
+- **DNS 根点尾缀等价**：`forge.example.` 与 `forge.example` 是同一主机——
+  `normHost`（forges 包）剥尾点后小写，host_key、allowlist、重定向同主机
+  判定、服务层 repoHostKey 与前端归一全走这一口径；落库的 base_url 在
+  `parseBaseURL` 阶段就改写成无尾点规范形，TLS SNI 不带尾点。
 - **`repository_url`（公开仓）只允许 GitHub**（host=github.com 或纯
   owner/repo）→ `public_integration_id` 恒为空列。命中 forgejo 集成 → 40001
   且消息点明「公开仓库仅支持 GitHub」（issue 镜像 / release 本期仍是 GitHub

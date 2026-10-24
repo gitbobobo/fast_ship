@@ -106,11 +106,12 @@ export function normalizeCodeRepoRef(raw: string): string {
     const colonCount = (first.match(/:/g) || []).length;
     const hasPort = colonCount === 1 || /^\[.*\]:[^:]+$/.test(first);
     let port = "";
-    let name = first.toLowerCase();
+    // 与后端 normHost 同口径剥 DNS 根点尾缀（forge.example. ≡ forge.example）。
+    let name = first.toLowerCase().replace(/\.+$/, "");
     if (hasPort) {
       const sep = first.startsWith("[") ? first.lastIndexOf("]:") : first.lastIndexOf(":");
       port = first.slice(sep + (first.startsWith("[") ? 2 : 1));
-      name = first.slice(0, sep + (first.startsWith("[") ? 1 : 0)).toLowerCase();
+      name = first.slice(0, sep + (first.startsWith("[") ? 1 : 0)).toLowerCase().replace(/\.+$/, "");
       // 数字端口统一拼写（:0443 → :443），与后端 parseBaseURL/repoHostKey
       // 同口径——同一端点的不同写法归一出同一个主机键。
       if (/^\d+$/.test(port)) port = String(parseInt(port, 10));
