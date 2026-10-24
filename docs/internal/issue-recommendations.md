@@ -52,6 +52,10 @@ GET 响应为 `{items: [...]}`，单条含 `issue` 摘要（id / project_id / pr
 
 错误码：`ErrRecommendationNotFound`（40411）、`ErrIssueNotRecommendable`（40910）、`ErrRecommendationDeferred`（40911），均在 `errs` 对应区间 var 块。
 
+## 搁置项目的排除（INT-165）
+
+`GET /api/recommendations` **不带** `project_id` 的汇总路径只统计当前用户**未处于搁置中**的项目（`shelved_at` 为空，或已设截止且已到期（`shelved_until <= now`）；判定见 `model.Project.IsShelved` 与 `docs/internal/database.md`「项目搁置列」）——推荐清单是「接下来做什么」的挑选面，搁置项目暂不进入。**带** `project_id` 的单项目查询不做搁置过滤：指定查看某个搁置项目的推荐仍照常返回。排除发生在 service 层取项目集合之后（`IssueRecommendationService.List`），推荐行本身不动；项目取消搁置或到期后自动重新出现在汇总里。
+
 ## 延后处理（defer）
 
 延后=压制而非遗忘：用户在 Web 端把某条推荐「以后再说」，整条推荐行（reason/priority/dependencies/created_by）原样冻结保留，仅 `deferred_at`/`defer_note`/`updated_at` 变化。语义要点：
