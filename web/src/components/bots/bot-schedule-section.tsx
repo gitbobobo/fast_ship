@@ -56,12 +56,14 @@ function triggerText(run: BotScheduleRun) {
   return run.trigger_source === "manual" ? "手动触发" : "定时触发";
 }
 
-/** 最近一次结果的一行摘要：状态 + 摘要或错误；从未运行如实标注。 */
+/** 最近一次结果的一行摘要：状态 + 摘要或错误；从未运行如实标注。
+ *  空白摘要不出「·」悬空空段。 */
 function lastRunText(run: BotScheduleRun | null) {
   if (!run) return "尚未运行";
   const label = botScheduleRunStatusLabel(run.status);
-  const detail =
-    run.status === "failed" ? run.error_message || run.summary : run.summary;
+  const detail = (
+    run.status === "failed" ? run.error_message || run.summary : run.summary
+  )?.trim();
   return detail ? `${label} · ${detail}` : label;
 }
 

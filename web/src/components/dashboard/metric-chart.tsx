@@ -323,11 +323,17 @@ function yTickSpec(maxTotal: number): { step: number; intervals: number } {
 
 /** 横轴标签：从最后一个点按固定步长往前取，保证相邻标签间隔一致，
  *  且最后一个标签永远落在最后一个点正下方。首点可能因此没有标签（30 个点时
- *  是 4/9/14/19/24/29），不要在中间插一个不均匀的间隔。 */
-function xLabelIndexes(count: number): number[] {
+ *  是 4/9/14/19/24/29），不要在中间插一个不均匀的间隔。步长取两档的较大者：
+ *  常规每 6 点一档；窄图（如详情面板内嵌）里相邻标签不足约 48px 时进一步
+ *  加稀，避免 7 天全标签连排成「10-1910-20…」。 */
+function xLabelIndexes(count: number, chartWidth: number): number[] {
   const last = count - 1;
   if (last < 1) return count === 1 ? [0] : [];
-  const stride = Math.max(Math.ceil(last / 6), 1);
+  const stride = Math.max(
+    Math.ceil(last / 6),
+    Math.ceil((48 * last) / Math.max(chartWidth, 1)),
+    1,
+  );
   const indexes: number[] = [];
   for (let index = last; index >= 0; index -= stride) indexes.push(index);
   return indexes.reverse();
@@ -550,7 +556,10 @@ function StackedSeriesChart({
     value: tickStep * index,
   }));
 
-  const labelIndexes = useMemo(() => xLabelIndexes(points.length), [points.length]);
+  const labelIndexes = useMemo(
+    () => xLabelIndexes(points.length, chartWidth),
+    [points.length, chartWidth],
+  );
 
   const { hoveredIndex, tooltipPos, onMouseMove, onMouseLeave } = useSeriesHover(
     svgRef,

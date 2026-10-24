@@ -128,7 +128,9 @@ function StatCard({
       className="rounded-xl border border-border/60 px-4 py-3"
       title={title}
     >
-      <p className="truncate text-xs text-muted-foreground">{label}</p>
+      {/* 标签是固定短语，窄面板（内嵌详情页）里 truncate 会把「未计价请求」
+          裁成「未计价…」；短文案直接完整展示。 */}
+      <p className="text-xs text-muted-foreground">{label}</p>
       <p className="mt-1 text-xl font-semibold tabular-nums">{value}</p>
       {sub && <p className="mt-0.5 text-xs text-muted-foreground">{sub}</p>}
     </div>
@@ -243,7 +245,7 @@ export function BotUsageOverviewPanel({
               title={USAGE_PRICE_NOTE}
             />
             <StatCard
-              label="未计价请求"
+              label="未计价"
               value={share ? `${share.unpriced} 次` : "—"}
               sub={share ? `占 ${share.percent}%` : undefined}
               title={UNPRICED_REASON_NOTE}

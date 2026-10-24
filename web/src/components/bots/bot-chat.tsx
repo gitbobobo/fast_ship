@@ -212,7 +212,7 @@ export function BotChat({ botId }: { botId: string }) {
                 <div className="ml-auto flex items-center gap-2">
                   <Link
                     to={`/bots/usage/runs/${r.id}`}
-                    className="text-xs text-muted-foreground hover:text-foreground hover:underline"
+                    className="whitespace-nowrap text-xs text-muted-foreground hover:text-foreground hover:underline"
                     title={
                       r.display_cost_estimate != null
                         ? "成本按内置目录单价估算，仅供参考；无价模型不显示。点击查看本运行花费明细"
