@@ -470,7 +470,15 @@ func (s *ForgeIntegrationService) resolveURLs(ctx context.Context, currentBase, 
 	// 拼写差归一成同键），不走 validateBaseURL：回显值主机已下线时 DNS
 	// 校验会把「保持推导」的 Update 整体 40001——base 迁移场景正是旧
 	// 主机退役后才改 base_url。不命中才落到完整校验。
-	if strings.TrimSpace(currentAPI) == "" &&
+	//
+	// 先过一道纯解析形状检查：URLKey 不含 query/fragment/userinfo，
+	// 「推导值+多余成分」的提交（?x=1、u:p@、#f、尾裸 ?）形状不合法就
+	// 不短路——落回完整校验报 40001，而不是被抹平成推导静默放行。
+	shapeOK := false
+	if u, perr := url.Parse(apiInput); perr == nil && u.Host != "" {
+		shapeOK = u.User == nil && u.RawQuery == "" && !u.ForceQuery && u.Fragment == ""
+	}
+	if shapeOK && strings.TrimSpace(currentAPI) == "" &&
 		(forges.URLKey(apiInput) == forges.URLKey(forges.DefaultAPIBaseURL(base)) ||
 			(currentBase != "" && forges.URLKey(apiInput) == forges.URLKey(forges.DefaultAPIBaseURL(currentBase)))) {
 		return base, "", nil

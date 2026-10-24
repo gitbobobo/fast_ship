@@ -12,6 +12,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -58,13 +59,18 @@ func forgeTestService(t *testing.T) *forgeTestEnv {
 	svc := NewForgeIntegrationService(repo, githubSvc, cfg, zap.NewNop())
 
 	// 假校验：与 forges.ValidateBaseURL 同口径的形状规则（https 放行、http 仅
-	// 私网放行、host 含 "private" 视为解析到私网、其余拒绝），但不做真实 DNS。
+	// 私网放行、userinfo/query/fragment 拒收、host 含 "private" 视为解析到
+	// 私网、其余拒绝），但不做真实 DNS。
 	baseCalls := &[]string{}
 	svc.SetValidateBaseURL(func(_ context.Context, raw string, allowPrivateNetwork bool) (string, error) {
 		*baseCalls = append(*baseCalls, raw)
 		trimmed := strings.TrimSpace(raw)
 		if !allowPrivateNetwork && strings.Contains(trimmed, "private") {
 			return "", forges.ErrPrivateAddress
+		}
+		u, perr := url.Parse(trimmed)
+		if perr != nil || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+			return "", forges.ErrInvalidBaseURL
 		}
 		switch {
 		case strings.HasPrefix(trimmed, "https://"):
@@ -453,6 +459,26 @@ func TestForgeIntegrationUpdateDerivedAPIBaseFollows(t *testing.T) {
 		if strings.Contains(c, "/api/") {
 			t.Fatalf("echoed api must not reach validateBaseURL, calls %v", (*env.baseCalls)[callsBefore:])
 		}
+	}
+
+	// 「推导值+多余成分」不算回显：query/fragment/userinfo/尾裸 ? 形状不
+	// 合法就不短路，落回完整校验报 40001——显式输入不能被抹平成推导
+	// 静默放行。
+	for _, bad := range []string{
+		"https://g.example.com/api/v1?x=1",
+		"https://u:p@g.example.com/api/v1",
+		"https://g.example.com/api/v1#f",
+		"https://g.example.com/api/v1?",
+	} {
+		if _, err := env.svc.Update(ctx, created.Id, &api.UpdateForgeIntegrationRequest{
+			ApiBaseUrl: ptrStr(bad),
+		}); err == nil {
+			t.Fatalf("api_base_url %q should be rejected, not echoed to derived", bad)
+		}
+	}
+	row, _ = env.repo.FindByID(created.Id)
+	if row.APIBaseURL != "" {
+		t.Fatalf("bad-shape submissions must not alter stored intent, got %q", row.APIBaseURL)
 	}
 }
 
