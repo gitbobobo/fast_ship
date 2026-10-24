@@ -228,12 +228,19 @@ func (s *ReviewService) UpdateSettings(ctx context.Context, userID, projectID st
 		// （唯一占用与账本分区都按旧键写错）。事务时刻与快照不一致一律 400，
 		// 让用户刷新重来。
 		var fresh model.Project
-		if err := tx.Select("id", "github_owner", "github_repo", "code_github_owner", "code_github_repo").
+		if err := tx.Select("id", "github_owner", "github_repo", "code_github_owner", "code_github_repo", "code_integration_id").
 			Where("id = ?", projectID).First(&fresh).Error; err != nil {
 			return err
 		}
 		if !strings.EqualFold(fresh.CodeRepoFullName(), project.CodeRepoFullName()) {
 			return errs.New(errs.ErrInvalidParams.Code, "项目仓库已变更，请刷新后重试")
+		}
+		// 事务内复核集成身份（与入参侧的启用检查同一口径）：入参侧读的是事务
+		// 外快照，「读旧状态→并发改绑 Forgejo→重启用」的窗口在这里关掉。只对
+		// 启用保存把关——改绑侧 repository.Update 已把设置行压回 disabled，
+		// 停用保存放行。
+		if row.Enabled && fresh.CodeIntegrationID != "" {
+			return reviewComboError("Forgejo 代码仓的 PR 审查将在后续版本接入")
 		}
 		if row.Enabled {
 			var otherID string
@@ -445,46 +452,56 @@ func (s *ReviewService) reviewPrerequisites(ctx context.Context, project *model.
 		out = append(out, p)
 	}
 
-	// 1. 部署 GitHub App 已配置：debug fake 视为已配置，否则问部署集成。
-	appConfigured := s.cfg != nil && s.cfg.GitHubApp.Fake && s.cfg.Server.Mode == "debug"
-	if !appConfigured && s.appSource != nil {
-		_, ok, err := s.appSource.Current(ctx)
-		if err != nil {
-			return nil, err
-		}
-		appConfigured = ok
-	}
-	appDetail := ""
-	if !appConfigured {
-		appDetail = "请在「设置 → 部署」配置 GitHub App"
-	}
-	add(api.GithubApp, "部署已配置 GitHub App", !appConfigured, appDetail)
-
-	repoOwner, repoName := project.CodeRepo()
-	repoFullName := repoOwner + "/" + repoName
-	repoLinked := repoOwner != "" && repoName != ""
-
-	// 2. App 已安装到该仓库：保存/读取前实时调一次 GitHub（安装令牌
-	// GetRepository），失败即缺项。部署未配置 App 时不发起调用。
-	installed := false
-	installDetail := "部署未配置 GitHub App"
-	if appConfigured && repoLinked && s.gh != nil {
-		client, err := s.gh.ClientFor(ctx)
-		switch {
-		case err != nil:
-			installDetail = "GitHub App 访问面不可用：" + err.Error()
-		default:
-			if err := client.GetRepository(ctx, 0, repoFullName); err != nil {
-				installDetail = "App 未安装到该仓库或仓库不可访问：" + err.Error()
-			} else {
-				installed = true
-				installDetail = ""
+	// 1&2. GitHub App 两项前置条件。Forgejo 代码仓走「不支持」分支：仓库名
+	// 不发往 GitHub 查安装（同名 GitHub 仓的安装也不代表 Forgejo 仓可用），
+	// 结论按「不支持/未配置」口径缺项，与 enable 的拒绝语义一致——审查对
+	// Forgejo 仓不可用。
+	if project.CodeIntegrationID != "" {
+		reason := "Forgejo 代码仓的 PR 审查将在后续版本接入"
+		add(api.GithubApp, "部署已配置 GitHub App", true, reason)
+		add(api.GithubAppInstallation, "GitHub App 已安装到该仓库", true, reason)
+	} else {
+		// 1. 部署 GitHub App 已配置：debug fake 视为已配置，否则问部署集成。
+		appConfigured := s.cfg != nil && s.cfg.GitHubApp.Fake && s.cfg.Server.Mode == "debug"
+		if !appConfigured && s.appSource != nil {
+			_, ok, err := s.appSource.Current(ctx)
+			if err != nil {
+				return nil, err
 			}
+			appConfigured = ok
 		}
-	} else if appConfigured && !repoLinked {
-		installDetail = "项目未关联 GitHub 仓库"
+		appDetail := ""
+		if !appConfigured {
+			appDetail = "请在「设置 → 部署」配置 GitHub App"
+		}
+		add(api.GithubApp, "部署已配置 GitHub App", !appConfigured, appDetail)
+
+		repoOwner, repoName := project.CodeRepo()
+		repoFullName := repoOwner + "/" + repoName
+		repoLinked := repoOwner != "" && repoName != ""
+
+		// 2. App 已安装到该仓库：保存/读取前实时调一次 GitHub（安装令牌
+		// GetRepository），失败即缺项。部署未配置 App 时不发起调用。
+		installed := false
+		installDetail := "部署未配置 GitHub App"
+		if appConfigured && repoLinked && s.gh != nil {
+			client, err := s.gh.ClientFor(ctx)
+			switch {
+			case err != nil:
+				installDetail = "GitHub App 访问面不可用：" + err.Error()
+			default:
+				if err := client.GetRepository(ctx, 0, repoFullName); err != nil {
+					installDetail = "App 未安装到该仓库或仓库不可访问：" + err.Error()
+				} else {
+					installed = true
+					installDetail = ""
+				}
+			}
+		} else if appConfigured && !repoLinked {
+			installDetail = "项目未关联 GitHub 仓库"
+		}
+		add(api.GithubAppInstallation, "GitHub App 已安装到该仓库", !installed, installDetail)
 	}
-	add(api.GithubAppInstallation, "GitHub App 已安装到该仓库", !installed, installDetail)
 
 	// 3. public_url 已配置。
 	publicURL := ""

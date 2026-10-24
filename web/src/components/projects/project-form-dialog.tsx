@@ -153,6 +153,11 @@ export function ProjectFormDialog({
   const [creatingFor, setCreatingFor] = useState<"public" | "code">("public");
   const t3SectionRef = useRef<HTMLElement | null>(null);
 
+  // 悬空绑定：绑定了代码仓集成但投影 code_repo_url 为空（集成行已删等）。
+  // 回填与提交都按「保留现状」处理，不再回落 github 同名地址；界面上给出
+  // 提示，填写新地址才重新绑定。
+  const bindingBroken = !!project?.code_integration_id && !project?.code_repo_url;
+
   useEffect(() => {
     if (open && isEdit && section === "t3") {
       // 等弹框动画与内容就位后再滚动
@@ -215,9 +220,11 @@ export function ProjectFormDialog({
           const raw = (data.code_repository_url || "").trim();
           const currentRepoUrl = project.code_repo_url ?? "";
           if (raw === "") {
-            // 输入空：当前本就没有代码仓（code_repo_url 为 null）才算未改动；
-            // 否则是显式清空（回落公开仓库，集成绑定一并清）。
-            if (currentRepoUrl !== "") {
+            // 悬空绑定（bindingBroken）留空视为未改动，不携带该字段：只保存
+            // 其它字段不再把悬空绑定静默改绑回 github 同名仓库。普通空输入仍
+            // 是显式清空（回落公开仓库，集成绑定一并清）——当前本就没有代码
+            // 仓（code_repo_url 为 null）时同样不携带。
+            if (!bindingBroken && currentRepoUrl !== "") {
               payload.code_repository_url = null;
             }
           } else {
@@ -365,6 +372,11 @@ export function ProjectFormDialog({
               <p className="text-xs text-muted-foreground">
                 PR 审查盯的仓库；留空则审查公开仓库
               </p>
+              {bindingBroken && (
+                <p className="text-xs text-amber-700 dark:text-amber-400">
+                  原绑定的代码仓集成已失效；留空将保留现状，填写新地址可重新绑定
+                </p>
+              )}
               {errors.code_repository_url && (
                 <p className="text-xs text-destructive">
                   {errors.code_repository_url.message}

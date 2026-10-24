@@ -70,9 +70,11 @@ export async function formatSyncError(
 
 // normalizeCodeRepoRef 把代码仓引用归一成「host[:端口]/owner/repo」小写形态
 // 供比较：scheme 有无与大小写、尾部斜杠与 .git 后缀不算改动（剥除顺序与
-// 后端 parseRepositoryURL 一致：先 .git 再一个尾斜杠）；裸 owner/repo 输入
-// 按 github.com 处理。解析不出 owner/repo 时返回空串，调用方按「有输入待
-// 服务端校验」处理，不能当成未改动。
+// 后端 parseRepositoryURL 一致：先一个尾斜杠再 .git，.git 大小写敏感）；
+// 裸 owner/repo 输入按 github.com 处理。解析不出 owner/repo 时返回空串，
+// 调用方按「有输入待服务端校验」处理，不能当成未改动。owner/repo 之外的
+// 多余路径段（后端 40001 拒绝的输入）直接返回原始输入——归一结果必然与
+// 任何现值不等，原样发后端由 40001 表态，不静默丢弃第三段。
 export function normalizeCodeRepoRef(raw: string): string {
   let rest = raw.trim();
   if (!rest) return "";
@@ -88,22 +90,33 @@ export function normalizeCodeRepoRef(raw: string): string {
     host = "github.com";
     tail = "/" + first + tail; // 首段是 owner，不是 host
   }
-  tail = tail.replace(/\.git$/i, "").replace(/\/$/, "");
-  const parts = tail.split("/").filter(Boolean);
-  if (parts.length < 2) return "";
+  // 与后端同序：先剥一个尾斜杠再剥 .git 后缀（大小写敏感，不加 i 标志）。
+  const path = tail.slice(1).replace(/\/$/, "").replace(/\.git$/, "");
+  const parts = path.split("/");
+  if (parts.length > 2 && parts[2].trim() !== "") {
+    return raw; // 多余路径段不是仓库根：原样交后端拒绝
+  }
+  if (parts.length < 2 || parts[0] === "" || parts[1] === "") return "";
   return `${host}/${parts[0]}/${parts[1]}`.toLowerCase();
 }
 
 // codeRepoUrlForInput 编辑回填的代码仓输入值：优先服务端投影的 code_repo_url
-// （forgejo 集成时是实例基址形态）；为 null 且 owner/repo 还在时兜底 github
-// 形态（覆盖集成行缺失的存量行）；都没有给空串。
+// （forgejo 集成时是实例基址形态）；为 null 且未绑定集成（code_integration_id
+// 为空 = 内置 github 存量行）时按 owner/repo 兜底 github 形态。绑定了集成但
+// 投影为空（悬空绑定）返回空串——不再回落 github.com/{o}/{r}：那会把
+// forgejo 的 owner/repo 显示成 github 地址，保存时被静默改绑。
 export function codeRepoUrlForInput(project: {
   code_repo_url?: string | null;
+  code_integration_id?: string | null;
   code_github_owner?: string;
   code_github_repo?: string;
 }): string {
   if (project.code_repo_url) return project.code_repo_url;
-  if (project.code_github_owner && project.code_github_repo) {
+  if (
+    !project.code_integration_id &&
+    project.code_github_owner &&
+    project.code_github_repo
+  ) {
     return `https://github.com/${project.code_github_owner}/${project.code_github_repo}`;
   }
   return "";

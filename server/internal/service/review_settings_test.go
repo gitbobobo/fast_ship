@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/api"
+	"github.com/godbobo/fast_ship/server/internal/githubapi"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	"github.com/godbobo/fast_ship/server/internal/pkg/githubapp"
@@ -431,5 +432,104 @@ func TestUpdateSettingsDisableCancelsRuns(t *testing.T) {
 	svc.db.Model(&model.ReviewDebounce{}).Where("project_id = ?", project.ID).Count(&debounces)
 	if debounces != 0 {
 		t.Fatalf("debounce rows = %d, want 0", debounces)
+	}
+}
+
+// forgejoBoundClient 包装一层 GitHub 客户端：前置条件的 GetRepository 一过就
+// 把项目改绑到 forgejo 集成——模拟「入参快照之后、写事务之前」的并发改绑；
+// 写事务的集成身份复核必须拦下这次启用。
+type forgejoBoundClient struct {
+	githubapi.GitHubClient
+	db        *gorm.DB
+	projectID string
+	done      bool
+}
+
+func (c *forgejoBoundClient) GetRepository(ctx context.Context, inst int64, repo string) error {
+	if !c.done {
+		c.done = true
+		if err := c.db.Model(&model.Project{}).Where("id = ?", c.projectID).
+			Update("code_integration_id", "forge-concurrent").Error; err != nil {
+			return err
+		}
+	}
+	return c.GitHubClient.GetRepository(ctx, inst, repo)
+}
+
+// TestGetSettings_ForgejoBinding_SkipsGitHubChecks C：Forgejo 绑定项目的
+// GetSettings 不向 GitHub 发请求——仓库名不该拿去查 App 安装，同名 GitHub
+// 仓已安装也不能误报为可用。两项 GitHub 前置条件按「不支持」口径缺项并
+// 点明 Forgejo，其余前置条件照常计算。
+func TestGetSettings_ForgejoBinding_SkipsGitHubChecks(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "forgejo-u")
+	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.GithubOwner = "octocat" // 同名 GitHub 仓的安装状态与 Forgejo 仓无关
+		p.GithubRepo = "hello"
+		p.CodeIntegrationID = "forge-any"
+	})
+
+	fake := githubapp.NewFake()
+	rs := newReviewTestService(t, svc,
+		githubapp.StaticClients{Client: fake},
+		fakeReviewAppSource{ok: true},
+		fakeReviewPublicURL("https://fs.example.com"))
+
+	got, err := rs.GetSettings(context.Background(), user.ID, project.ID)
+	if err != nil {
+		t.Fatalf("GetSettings: %v", err)
+	}
+	if n := fake.CallCounts()["GetRepository"]; n != 0 {
+		t.Fatalf("GetRepository 调了 %d 次，want 0（Forgejo 仓库名不发 GitHub）", n)
+	}
+	byCode := map[api.ReviewPrerequisiteCode]api.ReviewPrerequisite{}
+	for _, p := range got.Prerequisites {
+		byCode[p.Code] = p
+	}
+	for _, code := range []api.ReviewPrerequisiteCode{api.GithubApp, api.GithubAppInstallation} {
+		p, ok := byCode[code]
+		if !ok {
+			t.Fatalf("缺 %s 前置项", code)
+		}
+		if !p.Missing || p.Detail == nil || !strings.Contains(*p.Detail, "Forgejo") {
+			t.Fatalf("%s = %+v，want 缺项且点明 Forgejo 不支持", code, p)
+		}
+	}
+	if byCode[api.PublicUrl].Missing || byCode[api.GithubToken].Missing {
+		t.Fatalf("其余前置条件不应缺项: %+v", byCode)
+	}
+}
+
+// TestUpdateSettings_ForgejoBoundInTx_Rejected D：入参侧快照（事务外）还没
+// 有 forgejo 绑定、前置校验与写事务之间项目被并发改绑 → 启用保存 40001 且
+// 点明 Forgejo 暂不支持，设置不落库——重启用竞态由事务内复核关掉。
+func TestUpdateSettings_ForgejoBoundInTx_Rejected(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "u1")
+	project := createTestProject(t, svc.db, user.ID)
+	env := createT3TestEnv(t, svc.db, user.ID, "env1")
+	createTestT3Binding(t, svc.db, project.ID, env.ID, "t3-1")
+
+	fake := githubapp.NewFake()
+	rs := newReviewTestService(t, svc,
+		githubapp.StaticClients{Client: &forgejoBoundClient{
+			GitHubClient: fake, db: svc.db, projectID: project.ID,
+		}},
+		fakeReviewAppSource{ok: true},
+		fakeReviewPublicURL("https://fs.example.com"))
+
+	_, err := rs.UpdateSettings(context.Background(), user.ID, project.ID,
+		validSettingsInput(env.ID))
+	if code := appErrorCode(t, err); code != 40001 {
+		t.Fatalf("code = %d, want 40001 (err=%v)", code, err)
+	}
+	if !strings.Contains(err.Error(), "Forgejo") {
+		t.Fatalf("message = %q, want 点明 Forgejo 暂不支持", err)
+	}
+	var n int64
+	svc.db.Model(&model.ProjectReviewSettings{}).
+		Where("project_id = ?", project.ID).Count(&n)
+	if n != 0 {
+		t.Fatal("集成身份复核拒绝时设置不得落库")
 	}
 }

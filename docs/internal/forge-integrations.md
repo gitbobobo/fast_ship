@@ -88,6 +88,24 @@ review 侧只有 `project_id` / `repo_full_name` 快照，解析链路是
 github.com 上发出去。github 兜底只保留给空集成引用（与零值口径）；`pr_url`
 为空串时前端不渲染链接。
 
+## 审查设置面对 forgejo 绑定项目关门
+
+PR 审查执行面是 GitHub only，设置面也按同一口径表达「不可用」而不是报错
+（`review_settings.go`）：
+
+- **GetSettings**：`code_integration_id` 非空时跳过两项 GitHub 前置条件——
+  `github_app` / `github_app_installation` 按「不支持」口径缺项并点明
+  Forgejo，仓库名不发往 GitHub 查安装（同名 GitHub 仓的安装不代表 forgejo
+  仓可用）；public_url / Token / 环境绑定照常计算。
+- **UpdateSettings（enabled）**：入参侧快照与写事务内复核（`fresh` 重查）
+  都检查 `code_integration_id`，非空一律 40001——入参侧只看得到事务外快
+  照，「读旧状态→并发改绑→重启用」的窗口由事务内复核关掉。停用保存放行
+  （改绑侧 `repository.Update` 已把设置行压回 disabled，用户仍能保存关闭）。
+- **前端**：`normalizeCodeRepoRef` 与后端 `parseRepositoryURL` 同序同大小写
+  剥尾斜杠/`.git`；多余路径段原样回传交后端 40001，不静默丢弃。编辑弹框对
+  悬空绑定（有集成引用、`code_repo_url` 投影为 null）回填空串、留空提交不
+  携带该字段——只改其它字段不再把悬空绑定静默改绑回 github 同名仓。
+
 ## 基址形状与同主机唯一
 
 - **base_url 只收站点根**：路径必须为空或 `/`，否则 40001——审查链接与
