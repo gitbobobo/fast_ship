@@ -160,7 +160,16 @@ export function BotChat({ botId }: { botId: string }) {
             data-testid="bot-run-bar"
             className="flex items-center gap-2 rounded-lg bg-muted/50 px-3 py-2 text-sm"
           >
-            <Badge variant="secondary" data-testid="bot-run-status">
+            <Badge
+              variant="secondary"
+              data-testid="bot-run-status"
+              // 窄栏放不下完整提示：悬浮「运行中」说明安全点语义，不内联截断长句。
+              title={
+                chat.runActive && !chat.stopRequested && !activeProgress
+                  ? "新消息将在安全点交给机器人"
+                  : undefined
+              }
+            >
               {runBadge}
             </Badge>
             {chat.runActive &&
@@ -170,27 +179,25 @@ export function BotChat({ botId }: { botId: string }) {
                 <span className="min-w-0 truncate text-xs text-muted-foreground">
                   已请求停止；再点「强制停止」将立即中断并丢弃未完成的回复
                 </span>
-              ) : activeProgress ? (
-                // 压缩阶段/失败原因（INT-115）：phase=failed 用醒目但非报错的
-                // 样式——压缩会继续在安全点重试或最终给出明确失败，不是致命错误。
-                <span
-                  data-testid="bot-maintenance-progress"
-                  className={cn(
-                    "text-xs",
-                    activeProgress.phase === "failed"
-                      ? "font-medium text-amber-600 dark:text-amber-400"
-                      : "text-muted-foreground",
-                  )}
-                >
-                  {activeProgress.message ||
-                    (activeProgress.phase === "failed"
-                      ? "上下文压缩遇到问题"
-                      : "正在整理上下文…")}
-                </span>
               ) : (
-                <span className="min-w-0 truncate text-xs text-muted-foreground">
-                  新消息将在安全点交给机器人
-                </span>
+                activeProgress && (
+                  // 压缩阶段/失败原因（INT-115）：phase=failed 用醒目但非报错的
+                  // 样式——压缩会继续在安全点重试或最终给出明确失败，不是致命错误。
+                  <span
+                    data-testid="bot-maintenance-progress"
+                    className={cn(
+                      "min-w-0 truncate text-xs",
+                      activeProgress.phase === "failed"
+                        ? "font-medium text-amber-600 dark:text-amber-400"
+                        : "text-muted-foreground",
+                    )}
+                  >
+                    {activeProgress.message ||
+                      (activeProgress.phase === "failed"
+                        ? "上下文压缩遇到问题"
+                        : "正在整理上下文…")}
+                  </span>
+                )
               ))}
             {(() => {
               const r = chat.activeRun;

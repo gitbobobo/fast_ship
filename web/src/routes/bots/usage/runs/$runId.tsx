@@ -184,7 +184,7 @@ function RunSummary({
     run.total_tokens == null;
   const partial = truncated && runTokensMissing;
   const tokenText = run.usage_complete
-    ? `${formatTokens(run.prompt_tokens ?? sum((r) => r.prompt_tokens))} 输入 · ${formatTokens(run.cached_tokens ?? sum((r) => r.cached_tokens))} 缓存 · ${formatTokens(run.completion_tokens ?? sum((r) => r.completion_tokens))} 输出 · ${formatTokens(run.total_tokens ?? sum((r) => r.total_tokens))} 合计${partial ? "（仅最近 500 条）" : ""}`
+    ? `${formatTokens(run.prompt_tokens ?? sum((r) => r.prompt_tokens))} 输入（含缓存 ${formatTokens(run.cached_tokens ?? sum((r) => r.cached_tokens))}）· ${formatTokens(run.completion_tokens ?? sum((r) => r.completion_tokens))} 输出 · ${formatTokens(run.total_tokens ?? sum((r) => r.total_tokens))} 合计${partial ? "（仅最近 500 条）" : ""}`
     : "usage 未收齐，token 计数不可信";
 
   const rows: { label: string; value: ReactNode; title?: string }[] = [
@@ -287,9 +287,10 @@ function RequestList({
 }
 
 function RequestRow({ request }: { request: BotUsageRequest }) {
-  // usage 未收齐时实际计数不可信，只展示服务端估算列。
+  // usage 未收齐时实际计数不可信，只展示服务端估算列。合计口径：
+  // 输入（含其中缓存命中部分）+ 输出，各字段可直接相加自验。
   const actual = request.usage_complete
-    ? `输入 ${formatTokens(request.prompt_tokens)} · 缓存 ${formatTokens(request.cached_tokens)} · 输出 ${formatTokens(request.completion_tokens)} · 合计 ${formatTokens(request.total_tokens)}`
+    ? `输入 ${formatTokens(request.prompt_tokens)}（含缓存 ${formatTokens(request.cached_tokens)}）· 输出 ${formatTokens(request.completion_tokens)} · 合计 ${formatTokens(request.total_tokens)}`
     : "usage 未收齐";
 
   return (
@@ -323,7 +324,7 @@ function RequestRow({ request }: { request: BotUsageRequest }) {
         </span>
       </div>
       <p className="text-xs text-muted-foreground">
-        输入估算 {formatTokens(request.input_tokens_estimate)} · {actual} ·
+        估算输入 {formatTokens(request.input_tokens_estimate)} · {actual} ·
         工具定义 {formatTokens(request.tools_tokens_estimate)}
       </p>
       {request.error_message && (
@@ -427,7 +428,7 @@ function MaintenanceRequestRow({
       </Badge>
       <span>
         {request.usage_complete
-          ? `输入 ${formatTokens(request.prompt_tokens)} · 缓存 ${formatTokens(request.cached_tokens)} · 输出 ${formatTokens(request.completion_tokens)}`
+          ? `输入 ${formatTokens(request.prompt_tokens)}（含缓存 ${formatTokens(request.cached_tokens)}）· 输出 ${formatTokens(request.completion_tokens)}`
           : "usage 未收齐"}
       </span>
       <span className="ml-auto tabular-nums">

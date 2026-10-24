@@ -229,7 +229,11 @@ export function BotScheduleSection({
                     <span className="block truncate text-xs text-muted-foreground">
                       {scheduleText(task)}
                     </span>
-                    <span className="block truncate text-xs text-muted-foreground">
+                    {/* 窄卡片里摘要会被省略号截到只剩残影，完整行放 title。 */}
+                    <span
+                      className="block truncate text-xs text-muted-foreground"
+                      title={`下次运行 ${task.next_run_at ? formatDate(task.next_run_at) : "—"} · ${lastRunText(task.last_run)}`}
+                    >
                       下次运行{" "}
                       {task.next_run_at ? formatDate(task.next_run_at) : "—"}
                       {" · "}
