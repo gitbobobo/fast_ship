@@ -125,7 +125,8 @@ describe("ForgeIntegrationsCard", () => {
       .getByText("自建 Forgejo")
       .closest("div.border-b") as HTMLElement;
     expect(row).toHaveTextContent("Forgejo");
-    expect(row).toHaveTextContent("https://forge.example.com");
+    expect(row).toHaveTextContent("站点 https://forge.example.com");
+    expect(row).toHaveTextContent("API https://forge.example.com/api/v1");
     expect(row).toHaveTextContent("凭证已配置");
     expect(row).toHaveTextContent("允许内网");
     expect(row).toHaveTextContent("自定义 CA");

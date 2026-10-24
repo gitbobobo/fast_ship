@@ -178,10 +178,10 @@ function ForgejoRow({
           )}
         </div>
         <p className="truncate font-mono text-xs text-muted-foreground">
-          {integration.base_url}
+          <span className="font-sans">站点</span> {integration.base_url}
         </p>
         <p className="truncate font-mono text-xs text-muted-foreground">
-          {integration.api_base_url}
+          <span className="font-sans">API</span> {integration.api_base_url}
         </p>
       </div>
       {isAdmin && (
