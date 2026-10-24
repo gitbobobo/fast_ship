@@ -226,6 +226,19 @@ func TestForgeIntegrationCreateValidation(t *testing.T) {
 	if appErr(t, err).Code != 40001 {
 		t.Fatalf("bad CA code = %d", appErr(t, err).Code)
 	}
+
+	// 指向 github.com 的 Forgejo 集成是死配置（parseRepoBinding 对该主机
+	// 永远先归内置 github-default）——保存期直接拒绝并点明原因。
+	_, err = env.svc.Create(ctx, forgeCreateReq("n", "https://github.com", "tok"))
+	if aerr := appErr(t, err); aerr.Code != 40001 || !strings.Contains(aerr.Message, "GitHub 主机") {
+		t.Fatalf("dead github host should be rejected with clear message, got %v", err)
+	}
+
+	// token 必填先于基址校验：缺 token 的请求不该先做 DNS/SSRF 校验再报基址。
+	_, err = env.svc.Create(ctx, forgeCreateReq("n", "not-a-url", ""))
+	if aerr := appErr(t, err); aerr.Code != 40001 || !strings.Contains(aerr.Message, "token") {
+		t.Fatalf("missing token should report token required first, got %v", err)
+	}
 }
 
 func TestForgeIntegrationUpdateThreeStates(t *testing.T) {
@@ -710,6 +723,49 @@ func TestProbeForgeUserScopeForbidden(t *testing.T) {
 	if probe.Status != model.DeploymentDetectionOK || probe.Username != "" ||
 		!strings.Contains(probe.Detail, "read:user") {
 		t.Fatalf("probe = %+v", probe)
+	}
+}
+
+// 实例返回的超长 login 与 version 同口径截断（64 rune）——异常/恶意实例
+// 的探测字段不能不受控地进响应。
+func TestProbeForgeLongFieldsTruncated(t *testing.T) {
+	longLogin := strings.Repeat("超", 200)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/version":
+			_, _ = w.Write([]byte(`{"version":"` + strings.Repeat("9", 200) + `"}`))
+		case "/api/v1/user":
+			_, _ = w.Write([]byte(`{"login":"` + longLogin + `"}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	probe := probeForge(context.Background(), srv.Client(), srv.URL+"/api/v1", "pat")
+	if probe.Status != model.DeploymentDetectionOK {
+		t.Fatalf("probe = %+v", probe)
+	}
+	if got := len([]rune(probe.Username)); got != 64 {
+		t.Fatalf("username should truncate to 64 runes, got %d", got)
+	}
+	if got := len([]rune(probe.Version)); got != 64 {
+		t.Fatalf("version should truncate to 64 runes, got %d", got)
+	}
+}
+
+// /version 与 /user 双双 403：可能是 WAF 按来源拦或 token 无 API 读权限，
+// 判 failed 而不是「连接正常」。
+func TestProbeForgeBothForbiddenFails(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer srv.Close()
+
+	probe := probeForge(context.Background(), srv.Client(), srv.URL+"/api/v1", "pat")
+	if probe.Status != model.DeploymentDetectionFailed ||
+		!strings.Contains(probe.Detail, "403") {
+		t.Fatalf("both-403 probe = %+v", probe)
 	}
 }
 

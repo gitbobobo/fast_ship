@@ -142,6 +142,9 @@ func (s *ForgeIntegrationService) Create(ctx context.Context, req *api.CreateFor
 		return nil, errForgeIntegrationBaseRequired
 	}
 	allowPrivate := req.AllowPrivateNetwork != nil && *req.AllowPrivateNetwork
+	if strings.TrimSpace(req.Token) == "" {
+		return nil, errForgeIntegrationTokenRequired
+	}
 
 	// 合并成最终值后统一校验：base 与 api 各校验一次（含保存时 DNS），口径与
 	// Update 完全一致。
@@ -154,9 +157,6 @@ func (s *ForgeIntegrationService) Create(ctx context.Context, req *api.CreateFor
 	// 项目绑定会互相踩。
 	if err := s.ensureHostAvailable(base, ""); err != nil {
 		return nil, err
-	}
-	if strings.TrimSpace(req.Token) == "" {
-		return nil, errForgeIntegrationTokenRequired
 	}
 	caCert := ""
 	if req.CaCertPem != nil && strings.TrimSpace(*req.CaCertPem) != "" {
@@ -463,6 +463,12 @@ func (s *ForgeIntegrationService) resolveURLs(ctx context.Context, currentBase, 
 	if err := requireBaseRoot(base); err != nil {
 		return "", "", err
 	}
+	// github.com 与本部署 GitHub Web 主机（GHE）的仓库 URL 永远先归内置
+	// github-default（parseRepoBinding 的主机判定次序）——指向这两类主机的
+	// Forgejo 集成可保存却永远绑不上，保存期直接拒绝而不是留一条死配置。
+	if err := s.rejectDeadForgeHost(base); err != nil {
+		return "", "", err
+	}
 	apiInput := strings.TrimSpace(reqAPI)
 	if apiInput == "" {
 		apiInput = strings.TrimSpace(currentAPI)
@@ -531,11 +537,30 @@ func (s *ForgeIntegrationService) hostTakenErr(key string) *errs.AppError {
 var errForgeBaseRootRequired = errs.New(errs.ErrInvalidParams.Code,
 	"base_url 必须是站点根地址（不带路径）")
 
+// errForgeDeadHost base_url 指向 GitHub 主机（40001）：配了也绑不上的死配置。
+var errForgeDeadHost = errs.New(errs.ErrInvalidParams.Code,
+	"base_url 指向 GitHub 主机——github.com 与本部署 GitHub 实例的仓库归内置 GitHub 集成，Forgejo 集成不会命中")
+
 // requireBaseRoot base_url 形状收口：空路径与 "/" 都算站点根。
 func requireBaseRoot(baseURL string) error {
 	u, err := url.Parse(baseURL)
 	if err == nil && u.Path != "" && u.Path != "/" {
 		return errForgeBaseRootRequired
+	}
+	return nil
+}
+
+// rejectDeadForgeHost 拒绝永远绑不上的死主机：parseRepoBinding 对
+// github.com（含 :80/:443 归一形态）与本部署 GitHub Web 主机一律先归内置
+// github-default，指向它们的 Forgejo 集成不会被任何仓库 URL 命中。
+func (s *ForgeIntegrationService) rejectDeadForgeHost(base string) error {
+	key := forges.HostKey(base)
+	if key == "" {
+		return nil
+	}
+	if key == forges.HostKey(githubWebBase(s.cfg)) ||
+		key == "github.com:443" || key == "github.com:80" {
+		return errForgeDeadHost
 	}
 	return nil
 }
@@ -651,7 +676,7 @@ func probeForge(ctx context.Context, client *http.Client, apiBaseURL, token stri
 			return ForgeProbe{Status: model.DeploymentDetectionFailed,
 				Detail: "user 响应不是预期的 Forgejo API 格式，请确认 token 具有读取账号信息的权限"}
 		}
-		username = strings.TrimSpace(parsed.Login)
+		username = truncateProbeField(strings.TrimSpace(parsed.Login))
 		userOK = true
 	case status == http.StatusUnauthorized:
 		return ForgeProbe{Status: model.DeploymentDetectionInvalid,
