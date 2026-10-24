@@ -277,7 +277,10 @@ Key 在 RequireJWT 已被 40301 拒）。
 连接检测：解密 token 后调 `GET {api_base_url}/version` 与 `GET {api_base_url}/user`，
 返回 `{status, version, username, detail}`。status 沿用 `unchecked / ok /
 invalid / failed` 口径（unchecked 不会由该端点产生）：ok=两个请求都成功；
-invalid=401（PAT 被拒）；failed=网络错误或其他状态码。`/user` 与 `/version`
+invalid=401（PAT 被拒）；failed=网络错误或其他状态码——其中 SSRF 防护
+主动拦截（`ErrPrivateAddress`/`ErrCrossHostRedirect`/`ErrSchemeNotAllowed`/
+`ErrSchemeDowngrade`）的 detail 透出「被安全策略拒绝：<原因>」，与真实断网
+区分，管理员该改集成配置或跳转目标而不是去查网络。`/user` 与 `/version`
 的 403 是例外：403 是「已认证但缺对应 scope」而非「被拒」（Forgejo 把
 read:user 等划为独立 scope，实例也可能对 /version 做 scope 拦截），对应字段
 留空、detail 汇总缺的 scope——最小权限 token 不该被误报 invalid。**结论只随

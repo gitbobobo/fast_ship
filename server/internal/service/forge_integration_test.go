@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -301,6 +302,9 @@ func TestForgeIntegrationUpdateThreeStates(t *testing.T) {
 	}); appErr(t, err).Code != 40001 {
 		// 关闭放行后，http 基址按公网口径复核必须失败，且行保持原值。
 		t.Fatalf("flag-off revalidation code = %d", appErr(t, err).Code)
+	} else if aerr := appErr(t, err); !strings.Contains(aerr.Message, "公网 https 基址") {
+		// 单关开关撞上基址校验时，消息要点明操作顺序而不是只有校验原文。
+		t.Fatalf("flag-off message should hint base_url order, got %q", aerr.Message)
 	}
 	row, _ = env.repo.FindByID(created.Id)
 	if !row.AllowPrivateNetwork {
@@ -661,6 +665,23 @@ func TestForgeAPIGetRedirectStripsAuthOutsideAPIPrefix(t *testing.T) {
 	}
 	if len(sawAuth) != 1 || !strings.HasSuffix(sawAuth[0], "token secret-pat") {
 		t.Fatalf("requests = %v", sawAuth)
+	}
+}
+
+// 安全策略拦截的探测错误透出具体哨兵（含被 %w 包进拨号错误的形态），
+// 与真实断网文案区分——管理员该改配置/跳转目标而不是查网络。
+func TestProbeErrDetailPolicyVsNetwork(t *testing.T) {
+	for _, sentinel := range []error{
+		forges.ErrPrivateAddress, forges.ErrCrossHostRedirect,
+		forges.ErrSchemeNotAllowed, forges.ErrSchemeDowngrade,
+	} {
+		detail := probeErrDetail(fmt.Errorf("dial: %w", sentinel))
+		if !strings.Contains(detail, "安全策略") || !strings.Contains(detail, sentinel.Error()) {
+			t.Fatalf("policy detail = %q (sentinel %v)", detail, sentinel)
+		}
+	}
+	if detail := probeErrDetail(errors.New("connection refused")); detail != "网络错误，未能连接 Forgejo" {
+		t.Fatalf("network detail = %q", detail)
 	}
 }
 

@@ -151,11 +151,34 @@ func TestParseRepositoryURL(t *testing.T) {
 			wantErr:   false,
 		},
 		{
-			// 裸形态三段拒绝（同 URL 形态口径，第三段不再静默丢弃）。
+			// 裸形态三段拒绝（同 URL 形态口径，第三段不再静默丢弃）；
+			// 消息同时点出「首段可能是内网主机名」的另一种修法。
 			name:        "bare three segments rejected",
 			input:       "a/b/c",
 			wantErr:     true,
 			errContains: "多余路径段",
+		},
+		{
+			// 单标签内网主机裸写 myhost/o/r 落入同一拒绝，提示写全 https。
+			name:        "bare single-label host three segments",
+			input:       "myhost/o/r",
+			wantErr:     true,
+			errContains: "内网主机名",
+		},
+		{
+			// SCP 风格 git@host:o/r：首段含 @ 单独识别，SSH 本期不支持——
+			// 不再被首段含 : 判成主机后报「主机未匹配」。
+			name:        "scp-style ssh rejected",
+			input:       "git@git.example.com:godbobo/fast_ship",
+			wantErr:     true,
+			errContains: "SSH 地址",
+		},
+		{
+			// https URL 带 userinfo 同拒：凭证不该拼进仓库链接落库回显。
+			name:        "https url with userinfo rejected",
+			input:       "https://u:p@git.example.com/godbobo/fast_ship",
+			wantErr:     true,
+			errContains: "SSH 地址",
 		},
 		{
 			// PR 页面链接拒绝：它不是仓库根。

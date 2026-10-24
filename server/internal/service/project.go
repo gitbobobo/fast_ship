@@ -505,6 +505,13 @@ func parseRepositoryURL(raw string) (host, owner, repo string, explicit bool, er
 
 	parts := strings.SplitN(s, "/", 3)
 	first := parts[0]
+	// 首段含 @：SCP 风格 git@host:o/r（无 scheme，含 : 会被当主机）与带
+	// userinfo 的 https://u@h/o/r 同拒——SSH 链路本期不支持、userinfo
+	// 不该出现在仓库链接里，各自按主机名归一都会报出指向性错误的
+	// 「主机未匹配」，单独识别给明确文案。
+	if strings.Contains(first, "@") {
+		return "", "", "", false, errors.New("仓库链接不支持 SSH 地址或含用户信息的 URL，请改用 https://host/owner/repo")
+	}
 	// 无 scheme 时首段含 `.` 或 `:` 才是 host（owner 名可能带点，但纯
 	// owner/repo 永远不含端口分隔符）；有 scheme 的 URL 首段必是 host。
 	// host 形态剥掉首段，owner/repo 形态整体保留。
@@ -550,6 +557,11 @@ func parseRepositoryURL(raw string) (host, owner, repo string, explicit bool, er
 	// 裸形态 a/b/c 同口径）：拒绝而不是静默丢弃——丢掉后拼出的 owner/repo
 	// 不是用户指的仓库。
 	if len(parts) > 2 && strings.TrimSpace(parts[2]) != "" {
+		if !explicit {
+			// 裸形态 a/b/c：既是「owner/repo 拖了多余段」，也可能是单标签
+			// 内网主机 myhost/o/r（无 . 无 : 被当 owner）——两种修法都点明。
+			return host, "", "", explicit, errors.New("仓库链接包含多余路径段；若首段是内网主机名，请写全 https://host/owner/repo")
+		}
 		return host, "", "", explicit, errors.New("仓库链接包含多余路径段，请填写仓库根地址（owner/repo 或 https://host/owner/repo）")
 	}
 

@@ -257,6 +257,15 @@ func (s *ForgeIntegrationService) Update(ctx context.Context, id string, req *ap
 		base, apiBase, err := s.resolveURLs(ctx, row.BaseURL, reqBase, row.APIBaseURL, reqAPI,
 			apiChanged && reqAPI == "", allowPrivate)
 		if err != nil {
+			// 单独关开关（不改基址）必然撞公网口径复核：把「先换公网 https
+			// 基址、再关内网放行」的操作顺序写进消息，不然管理员只看到基址
+			// 校验原文，悟不出要在同一次请求里先改 base_url。
+			if flagChanged && !allowPrivate {
+				if appErr, ok := err.(*errs.AppError); ok {
+					return nil, errs.New(appErr.Code,
+						appErr.Message+"；请先改用公网 https 基址再关闭内网放行")
+				}
+			}
 			return nil, err
 		}
 		// 只在基址真的变化时查重：改 api_base_url 或翻转开关不动 base。
@@ -362,6 +371,10 @@ func (s *ForgeIntegrationService) Delete(ctx context.Context, id string) error {
 	names := make([]string, 0, len(refs))
 	for _, ref := range refs {
 		names = append(names, ref.Name)
+	}
+	if len(names) == 0 {
+		// 竞态窗口：删 0 行但行还在时引用已消失，消息别拖一条裸「：」。
+		return errs.ErrForgeIntegrationInUse
 	}
 	return errs.New(errs.ErrForgeIntegrationInUse.Code,
 		errs.ErrForgeIntegrationInUse.Message+"："+strings.Join(names, "、"))
@@ -604,7 +617,7 @@ func probeForge(ctx context.Context, client *http.Client, apiBaseURL, token stri
 	var scopeNotes []string
 	switch {
 	case err != nil:
-		return ForgeProbe{Status: model.DeploymentDetectionFailed, Detail: "网络错误，未能连接 Forgejo"}
+		return ForgeProbe{Status: model.DeploymentDetectionFailed, Detail: probeErrDetail(err)}
 	case status == http.StatusOK:
 		var parsed forgeVersionResponse
 		if json.Unmarshal(body, &parsed) != nil || strings.TrimSpace(parsed.Version) == "" {
@@ -628,7 +641,7 @@ func probeForge(ctx context.Context, client *http.Client, apiBaseURL, token stri
 	username := ""
 	switch {
 	case err != nil:
-		return ForgeProbe{Status: model.DeploymentDetectionFailed, Detail: "网络错误，未能连接 Forgejo"}
+		return ForgeProbe{Status: model.DeploymentDetectionFailed, Detail: probeErrDetail(err)}
 	case status == http.StatusOK:
 		var parsed forgeUserResponse
 		if json.Unmarshal(body, &parsed) != nil || strings.TrimSpace(parsed.Login) == "" {
@@ -658,6 +671,21 @@ func probeForge(ctx context.Context, client *http.Client, apiBaseURL, token stri
 		Username: username,
 		Detail:   detail,
 	}
+}
+
+// probeErrDetail 网络层错误的 detail：SSRF 防护主动拦截（拨号私网判定、
+// 重定向政策）与真实断网分开——前者该改集成配置或跳转目标而不是查网络，
+// 文案透出策略哨兵的人话描述（哨兵是常量，不含请求细节与凭证）。
+func probeErrDetail(err error) string {
+	for _, sentinel := range []error{
+		forges.ErrPrivateAddress, forges.ErrCrossHostRedirect,
+		forges.ErrSchemeNotAllowed, forges.ErrSchemeDowngrade,
+	} {
+		if errors.Is(err, sentinel) {
+			return "地址或重定向被安全策略拒绝：" + sentinel.Error()
+		}
+	}
+	return "网络错误，未能连接 Forgejo"
 }
 
 // truncateProbeField 防御性截断：实例版本字段理论上很短，超长按 64 个字符
