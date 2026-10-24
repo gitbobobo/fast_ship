@@ -573,11 +573,17 @@ func (s *BotService) GetBotUsageOverview(userID, rangeParam, botID string) (*api
 			item.Name = task.Name
 			item.CronExpression = task.CronExpression
 			item.Timezone = task.Timezone
-			// 月推算 = 单次平均 × 未来 30 天触发次数；停用、已删除、无已计价
-			// 平均或 cron 解析失败都不估算。
+			// 月推算 = 单次运行口径平均 × 未来 30 天触发次数；单次口径与行内
+			// 「总花费」一致：定时 run 平均 + 每次触发摊到的连带主线成本
+			// （schedule_event 主线写回是这类任务的主路径，不含它会系统性
+			// 低估）。停用、已删除、无已计价平均或 cron 解析失败都不估算。
 			if task.Enabled && item.AvgRunCost != nil {
 				if n, ok := botUsageMonthlyTriggerCount(task.CronExpression, task.Timezone, now); ok {
-					item.EstimatedMonthlyCost = ptrFloat64(*item.AvgRunCost * float64(n))
+					perRun := *item.AvgRunCost
+					if item.LinkedMainCost != nil && item.Runs > 0 {
+						perRun += *item.LinkedMainCost / float64(item.Runs)
+					}
+					item.EstimatedMonthlyCost = ptrFloat64(perRun * float64(n))
 				}
 			}
 		}

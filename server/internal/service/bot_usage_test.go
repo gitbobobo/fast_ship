@@ -347,7 +347,21 @@ func TestBotUsageTaskCountsAndMonthlyEstimate(t *testing.T) {
 	}
 	mk(model.BotRunStatusCompleted, ptrCost(0.1))
 	mk(model.BotRunStatusFailed, ptrCost(0.05))
-	mk(model.BotRunStatusSkipped, nil)
+	skipped := seedUsageRun(t, env, bot.ID, func(r *model.BotRun) {
+		r.TriggerSource = model.BotTriggerSchedule
+		r.SessionKind = model.BotSessionKindSchedule
+		taskID := task.ID
+		r.ScheduleTaskID = &taskID
+		r.Status = model.BotRunStatusSkipped
+	})
+	// schedule_event 唤醒的连带主线：经 trigger_key 反查归任务，进
+	// linked_main_cost 与月推算口径（3 次定时 run 摊 0.3 → 每次 0.1）。
+	seedUsageRun(t, env, bot.ID, func(r *model.BotRun) {
+		r.TriggerSource = model.BotTriggerScheduleEvent
+		r.TriggerKey = "schedule_event:" + skipped.ID + ":completed"
+		r.SessionKind = model.BotSessionKindMain
+		r.CostEstimate = ptrCost(0.3)
+	})
 
 	disabled := seedScheduleTask(t, env, bot.ID, nil)
 	// enabled 列带 default:true，Create 会省略零值——先建后改才是真实停用路径。
@@ -388,9 +402,10 @@ func TestBotUsageTaskCountsAndMonthlyEstimate(t *testing.T) {
 	if enabled.avg == nil || !costEq(*enabled.avg, 0.075) {
 		t.Fatalf("平均应只含有已计价 run = 0.075，实得 %v", enabled.avg)
 	}
-	// 上海无夏令时，(now, now+30d] 恰含 30 次每日触发：30 × 0.075 = 2.25。
-	if enabled.estimated == nil || *enabled.estimated < 2.24 || *enabled.estimated > 2.26 {
-		t.Fatalf("月推算应为 30 × 0.075 = 2.25，实得 %v", enabled.estimated)
+	// 上海无夏令时，(now, now+30d] 恰含 30 次每日触发；单次口径含连带
+	// 主线摊销：30 × (0.075 + 0.3/3) = 5.25。
+	if enabled.estimated == nil || *enabled.estimated < 5.24 || *enabled.estimated > 5.26 {
+		t.Fatalf("月推算应为 30 × (0.075 + 0.1) = 5.25，实得 %v", enabled.estimated)
 	}
 	disabledItem := byTask[disabled.ID]
 	if disabledItem.estimated != nil {

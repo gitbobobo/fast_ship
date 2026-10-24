@@ -443,9 +443,10 @@ next_offset}`；`fs_result.read` 按 Unicode 字符续读，不切断 UTF-8。
   整页批量取维护合计，不做 N+1）。
 - **任务聚合**：按 schedule_task_id，LEFT JOIN 任务表拿名称/开关/cron；任务
   已删除（运行记录不建外键）仍带花费，`deleted=true`、名称与表达式空串、
-  `enabled=false`。`estimated_monthly_cost` = 有已计价 run 的平均显示成本 ×
-  未来 30 个**任务当地日**的 cron 触发次数（`now.In(loc).AddDate(0,0,30)`；
-  停用、已删除、无平均或解析失败为 null）。
+  `enabled=false`。`estimated_monthly_cost` =（有已计价 run 的平均显示
+  成本 + `linked_main_cost`/runs 的每次触发连带摊销）× 未来 30 个
+  **任务当地日**的 cron 触发次数（`now.In(loc).AddDate(0,0,30)`；停用、
+  已删除、无平均或解析失败为 null）。
 - **未计价计数**：`unpriced_requests` 按 bot_model_requests +
   bot_maintenance_requests 计；`bot_model_requests` 没有 usage_complete 列，
   聚合沿用聊天页口径「落过 usage 计数列 = prompt_tokens IS NOT NULL」。

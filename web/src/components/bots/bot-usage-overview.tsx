@@ -449,7 +449,7 @@ function TasksUsageTable({
                 <TableHead title="定时任务运行结果写回主线时的连带成本（近似）">
                   连带主线≈
                 </TableHead>
-                <TableHead title="按单次平均与计划频率推算的未来 30 天成本">
+                <TableHead title="按单次平均（含连带主线摊销）与计划频率推算的未来 30 天成本">
                   推算月花费
                 </TableHead>
               </TableRow>
