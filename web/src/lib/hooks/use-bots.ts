@@ -1,3 +1,4 @@
+import { useRef } from "react";
 import {
   useMutation,
   useQuery,
@@ -341,6 +342,9 @@ const TERMINAL_USAGE_RUN_STATUSES: ReadonlySet<string> = new Set([
 /** 单次运行花费明细。 */
 export function useBotUsageRun(runId: string) {
   const userId = useUserId();
+  // 宽限期以「客户端首次观察到终态」的本地时间起算：不拿服务端 finished_at
+  // 与本地钟直接相减——两端时钟不同源时，落后的客户端会把宽限期无限拉长。
+  const terminalObservedRef = useRef<{ runId: string; at: number } | null>(null);
   return useQuery({
     queryKey: botKeys.usageRun(userId, runId),
     queryFn: async ({ signal }) => (await botApi.usageRun(runId, signal)).data,
@@ -353,12 +357,22 @@ export function useBotUsageRun(runId: string) {
         return false;
       }
       if (!TERMINAL_USAGE_RUN_STATUSES.has(run.status)) {
+        terminalObservedRef.current = null;
         return BOT_USAGE_RUN_POLL_MS;
       }
       // 刚结束不久的 run 继续轮询一段宽限期：迟到的关联维护入账会让
-      // display_cost 继续增长，此刻停轮询数字就偏低且不自愈。
+      // display_cost 继续增长，此刻停轮询数字就偏低且不自愈。宽限起点用
+      // 客户端首次观察到终态的本地时刻（两端时钟不同源，不能拿本地钟直接
+      // 减 finished_at）；但 finished_at 已过宽限的老 run 不重开轮询。
       const finishedAt = run.finished_at ? Date.parse(run.finished_at) : NaN;
-      if (Number.isFinite(finishedAt) && Date.now() - finishedAt < BOT_USAGE_RUN_GRACE_MS) {
+      if (Number.isFinite(finishedAt) && Date.now() - finishedAt >= BOT_USAGE_RUN_GRACE_MS) {
+        terminalObservedRef.current = null;
+        return false;
+      }
+      if (terminalObservedRef.current?.runId !== run.id) {
+        terminalObservedRef.current = { runId: run.id, at: Date.now() };
+      }
+      if (Date.now() - terminalObservedRef.current.at < BOT_USAGE_RUN_GRACE_MS) {
         return BOT_USAGE_RUN_POLL_MS;
       }
       return false;

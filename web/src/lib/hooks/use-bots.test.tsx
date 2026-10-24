@@ -127,8 +127,12 @@ describe("usage 查询（INT-162 F11）", () => {
     });
     expect(api.usageRun).toHaveBeenCalledTimes(2);
 
-    // 下一轮返回终态：轮询就此停止。
-    api.usageRun.mockResolvedValue(runDetail("completed"));
+    // 下一轮返回终态（finished_at 远在宽限期前）：轮询就此停止。
+    const done = runDetail("completed");
+    done.data.run.finished_at = new Date(
+      Date.now() - BOT_USAGE_RUN_GRACE_MS * 2,
+    ).toISOString();
+    api.usageRun.mockResolvedValue(done);
     await act(async () => {
       vi.advanceTimersByTime(BOT_USAGE_RUN_POLL_MS);
     });
@@ -170,9 +174,13 @@ describe("usage 查询（INT-162 F11）", () => {
     expect(api.usageRun).toHaveBeenCalledTimes(calls);
   });
 
-  it("run 一开始就是终态时不轮询", async () => {
+  it("run 一开始就是终态且早已结束时不轮询", async () => {
     vi.useFakeTimers();
-    api.usageRun.mockResolvedValue(runDetail("completed"));
+    const done = runDetail("completed");
+    done.data.run.finished_at = new Date(
+      Date.now() - BOT_USAGE_RUN_GRACE_MS * 2,
+    ).toISOString();
+    api.usageRun.mockResolvedValue(done);
     const { wrapper } = setup();
     renderHook(() => useBotUsageRun("r1"), { wrapper });
     await act(async () => {});
