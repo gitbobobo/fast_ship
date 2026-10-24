@@ -9873,7 +9873,7 @@ components:
         api_base_url:
           type: string
           nullable: true
-          description: null 保留；空串重置为 {base_url}/api/v1；其余重新校验
+          description: null 保留（存量恰为旧 base_url 推导值时随新 base_url 重新推导）；空串重置为 {base_url}/api/v1；其余重新校验
         token:
           type: string
           nullable: true

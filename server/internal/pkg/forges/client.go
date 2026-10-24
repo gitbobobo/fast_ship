@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -317,6 +318,14 @@ func parseBaseURL(raw string) (*url.URL, error) {
 	// userinfo 拒收：凭证随 base_url 明文落库、回显并被拼进审查链接。
 	if u.User != nil || u.Host == "" || u.Opaque != "" || u.RawQuery != "" || u.Fragment != "" {
 		return nil, ErrInvalidBaseURL
+	}
+	// url.Parse 只查端口是否纯数字，不查范围——:0、:65536 能落库但永远连
+	// 不上。保存时把超出 TCP 端口的写法挡掉。
+	if port := u.Port(); port != "" {
+		n, err := strconv.Atoi(port)
+		if err != nil || n < 1 || n > 65535 {
+			return nil, ErrInvalidBaseURL
+		}
 	}
 	return u, nil
 }

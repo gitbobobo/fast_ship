@@ -296,7 +296,9 @@ describe("ForgeIntegrationsCard", () => {
     expect(input.token).toBeUndefined();
     expect(input.webhook_secret).toBeUndefined();
     expect(input.ca_cert_pem).toBe("");
-    expect(input.api_base_url).toBe("https://forge.example.com/api/v1");
+    // api_base_url 未改动不提交：预填值原样回发会让服务端误判为显式钉死，
+    // 改 base_url 后推导值无法跟随新实例（P1 修复）。
+    expect(input.api_base_url).toBeUndefined();
   });
 
   it("编辑：清空 API 基址提交空串 = 重置为默认", async () => {

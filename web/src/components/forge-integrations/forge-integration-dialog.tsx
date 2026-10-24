@@ -129,10 +129,15 @@ function ForgeIntegrationDialogInner({
     const payload: UpdateForgeIntegrationRequest = {
       name: values.name.trim(),
       base_url: values.base_url.trim(),
-      // 空串 = 重置为 {base_url}/api/v1；非空原样提交（服务端重新校验）。
-      api_base_url: values.api_base_url.trim(),
       allow_private_network: values.allow_private_network,
     };
+    // api_base_url 只在字段值真的变了才提交（空串 = 重置为 {base_url}/api/v1
+    // 推导值）：预填的存量值原样回发会让服务端误以为管理员显式钉死了它，
+    // 改 base_url 后推导值无法跟随新实例。
+    const apiBaseUrl = values.api_base_url.trim();
+    if (apiBaseUrl !== (integration?.api_base_url ?? "")) {
+      payload.api_base_url = apiBaseUrl;
+    }
     // 凭证留空 = 保留旧值（契约：省略即保留），只在填了新值时提交。
     const token = values.token.trim();
     if (token) payload.token = token;

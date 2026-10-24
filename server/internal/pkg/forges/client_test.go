@@ -185,6 +185,8 @@ func TestValidateBaseURL(t *testing.T) {
 	t.Run("形状非法", func(t *testing.T) {
 		for _, raw := range []string{
 			"", "  ", "forge.example.com", "https://", "https://a.com?x=1", "https://a.com#frag",
+			// url.Parse 只查端口纯数字不查范围：:0、:65536 落库即永远连不上。
+			"https://forge.example:0", "https://forge.example:65536",
 		} {
 			if _, err := ValidateBaseURL(context.Background(), raw, false); !errors.Is(err, ErrInvalidBaseURL) {
 				t.Errorf("ValidateBaseURL(%q) err = %v, want ErrInvalidBaseURL", raw, err)

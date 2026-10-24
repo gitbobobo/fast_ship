@@ -320,6 +320,50 @@ func TestForgeIntegrationUpdateThreeStates(t *testing.T) {
 	}
 }
 
+// 只改 base_url 不动 api_base_url 时：存量 api 若是旧 base 的推导值
+// ({old}/api/v1) 必须跟随新 base——落库的是展开值，不跟随会把 PAT 发往旧
+// 主机；管理员显式钉死的 api 则保留不跟随。
+func TestForgeIntegrationUpdateDerivedAPIBaseFollows(t *testing.T) {
+	env := forgeTestService(t)
+	ctx := context.Background()
+	created, err := env.svc.Create(ctx, &api.CreateForgeIntegrationRequest{
+		Name: "forge", BaseUrl: "https://a.example.com", Token: "tok",
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if created.ApiBaseUrl != "https://a.example.com/api/v1" {
+		t.Fatalf("create api derived = %q", created.ApiBaseUrl)
+	}
+
+	// 推导值跟随：只改 base，api 未显式变更 → 落到新 base 的推导值。
+	out, err := env.svc.Update(ctx, created.Id, &api.UpdateForgeIntegrationRequest{
+		BaseUrl: ptrStr("https://b.example.com"),
+	})
+	if err != nil {
+		t.Fatalf("update base: %v", err)
+	}
+	if out.ApiBaseUrl != "https://b.example.com/api/v1" {
+		t.Fatalf("derived api should follow new base, got %q", out.ApiBaseUrl)
+	}
+
+	// 显式钉死：自定义 api 后再改 base，api 保留显式值。
+	if _, err := env.svc.Update(ctx, created.Id, &api.UpdateForgeIntegrationRequest{
+		ApiBaseUrl: ptrStr("https://api.custom.example.com/v1"),
+	}); err != nil {
+		t.Fatalf("pin custom api: %v", err)
+	}
+	out, err = env.svc.Update(ctx, created.Id, &api.UpdateForgeIntegrationRequest{
+		BaseUrl: ptrStr("https://c.example.com"),
+	})
+	if err != nil {
+		t.Fatalf("update base again: %v", err)
+	}
+	if out.ApiBaseUrl != "https://api.custom.example.com/v1" {
+		t.Fatalf("explicit api must not follow, got %q", out.ApiBaseUrl)
+	}
+}
+
 func TestForgeIntegrationDeleteRules(t *testing.T) {
 	env := forgeTestService(t)
 	ctx := context.Background()

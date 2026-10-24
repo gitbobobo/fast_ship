@@ -433,6 +433,14 @@ func (s *ForgeIntegrationService) resolveURLs(ctx context.Context, currentBase, 
 		// 空串（Create 省略 / Update 显式重置 / 存量空列）按 Forgejo 惯例推导。
 		return base, forges.DefaultAPIBaseURL(base), nil
 	}
+	// 推导值跟随：存量 api 恰是旧 base 的推导值（{old}/api/v1）且本次只改了
+	// base——落库的是展开值，分不清「推导」与「显式」，不跟随会把 PAT 发往
+	// 旧主机、code_repo_url 却按新 base 拼接，两侧指向不同实例。显式值
+	// （apiInput != currentAPI）不受影响，照走下面的校验。
+	if apiInput == strings.TrimSpace(currentAPI) &&
+		apiInput == forges.DefaultAPIBaseURL(currentBase) && base != currentBase {
+		return base, forges.DefaultAPIBaseURL(base), nil
+	}
 	apiBase, err = s.validateBaseURL(ctx, apiInput, allowPrivate)
 	if err != nil {
 		return "", "", paramError(err)

@@ -11802,7 +11802,7 @@ ca_cert_pem 省略 = 保留、空串 = 清空；api_base_url 空串 = 重置为
 | --- | --- | --- | --- |
 | `name` | string（可空） | 否 | 显示名；null 或空串拒绝（name 不允许为空） |
 | `base_url` | string（可空） | 否 | 基址变更时重新校验（含 DNS）；null 保留 |
-| `api_base_url` | string（可空） | 否 | null 保留；空串重置为 {base_url}/api/v1；其余重新校验 |
+| `api_base_url` | string（可空） | 否 | null 保留（存量恰为旧 base_url 推导值时随新 base_url 重新推导）；空串重置为 {base_url}/api/v1；其余重新校验 |
 | `token` | string（可空） | 否 | 新 PAT；留空（省略、null 或空串）= 保留现值；不支持单独清空，需删除集成重建 |
 | `webhook_secret` | string（可空） | 否 | 新验签密钥；留空（省略、null 或空串）= 保留现值；不支持单独清空，需删除集成重建 |
 | `ca_cert_pem` | string（可空） | 否 | null = 保留；空串 = 清空；其余替换并校验 PEM |

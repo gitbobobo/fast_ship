@@ -4852,7 +4852,7 @@ type UpdateForgeIntegrationRequest struct {
 	// AllowPrivateNetwork null = 保留；变更后按新开关复核现有基址
 	AllowPrivateNetwork *bool `json:"allow_private_network,omitempty"`
 
-	// ApiBaseUrl null 保留；空串重置为 {base_url}/api/v1；其余重新校验
+	// ApiBaseUrl null 保留（存量恰为旧 base_url 推导值时随新 base_url 重新推导）；空串重置为 {base_url}/api/v1；其余重新校验
 	ApiBaseUrl *string `json:"api_base_url,omitempty"`
 
 	// BaseUrl 基址变更时重新校验（含 DNS）；null 保留
