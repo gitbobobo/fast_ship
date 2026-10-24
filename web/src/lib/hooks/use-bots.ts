@@ -296,10 +296,16 @@ export function useSetBotScheduleTaskEnabled(botId: string) {
   return useMutation({
     mutationFn: ({ taskId, enabled }: { taskId: string; enabled: boolean }) =>
       botApi.setScheduleTaskEnabled(botId, taskId, enabled),
-    onSettled: () =>
-      queryClient.invalidateQueries({
+    onSettled: () => {
+      void queryClient.invalidateQueries({
         queryKey: botKeys.scheduleTasks(userId, botId),
-      }),
+      });
+      // 停用任务的推算月花费应为 null：keepMounted 的花费查询不会自重取，
+      // 按前缀失效让「花费」标签/总览页的估算随开关收敛。
+      void queryClient.invalidateQueries({
+        queryKey: [BOTS_ROOT, userId, "usage"],
+      });
+    },
   });
 }
 
