@@ -160,11 +160,14 @@ func NewClient(cfg Config) (*http.Client, error) {
 			// 对首跳比（normHost 口径，尾点写法等价）；端口对上一跳的生效
 			// 值比（缺省补齐后 https://host 与 https://host:443 同端点）。
 			// 例外：上一跳 http→本跳 https 的同主机升级放行端口差——http
-			// 基址被实例/反代 301 到 https 是常见部署形态，升级后的后续
-			// https 跳仍按端口对齐（https→http 降级已被降级拦截挡掉）。
+			// 基址被实例/反代 301 到 https 是常见部署形态。升级目标限标准
+			// 443：跳到同主机其它 https 端口可能是另一个服务，PAT 不能随
+			// 端口漂移流到未配置的端点；升级后的后续 https 跳仍按端口对齐
+			// （https→http 降级已被降级拦截挡掉）。
 			sameHost := normHost(req.URL.Hostname()) == normHost(via[0].URL.Hostname())
 			prev := via[len(via)-1].URL
-			upgrade := prev.Scheme == "http" && req.URL.Scheme == "https"
+			upgrade := prev.Scheme == "http" && req.URL.Scheme == "https" &&
+				effectivePort(req.URL) == "443"
 			if !sameHost || (!upgrade && effectivePort(req.URL) != effectivePort(prev)) {
 				return ErrCrossHostRedirect
 			}

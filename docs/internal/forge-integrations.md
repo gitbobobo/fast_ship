@@ -231,7 +231,9 @@ Forgejo 基址是管理员可填的任意 URL，必须把「内网探测」挡�
   scheme 缺省补齐后比较）；未开私网放行时每一跳都必须 https；**任何配置下
   https→http 的降级跳转都拒绝**（`ErrSchemeDowngrade`——明文 http 只该来自
   管理员配置的基址，不该被响应悄悄带出来）；同主机 http→https 升级放行
-  端口差（http 基址被实例/反代 301 到 https 是常见形态）。凭证作用域是
+  但目标限标准 443 端口（http 基址被实例/反代 301 到 https 是常见形态，
+  跳到同主机其它 https 端口可能是另一个服务，PAT 不能随端口漂移流过去）。
+  凭证作用域是
   client 层的固定政策（`Config.AuthPathPrefix`，
   探测端点传 API 基址的路径段）：同主机跳转的解码路径 `path.Clean` 后不在
   API 前缀下（或含 `.`/`..` 歧义段，`%2e%2e` 编码穿越经代理归一可能指出

@@ -187,75 +187,55 @@ func TestClientRedirectStripsAuthOutsidePrefix(t *testing.T) {
 	}
 }
 
-func TestClientRedirectHTTPtoHTTPSUpgrade(t *testing.T) {
-	// 同主机 http→https 升级放行端口差：http 基址被实例/反代 301 到 https
-	// 是常见部署形态；https→http 降级与跨主机仍拒（其他用例覆盖）。
-	relaxLoopbackForTest(t)
-	var httpURL string
-	httpsSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/bounce" {
-			// 升上去再被跳回 http：末跳是 https→http 降级，必须拒（明文
-			// 请求会落到管理员从未配置过的端口）。
-			http.Redirect(w, r, httpURL+r.URL.Path, http.StatusFound)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer httpsSrv.Close()
-	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: httpsSrv.Certificate().Raw})
-
-	httpSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, httpsSrv.URL+r.URL.Path, http.StatusMovedPermanently)
-	}))
-	defer httpSrv.Close()
-	httpURL = httpSrv.URL
-
-	u, _ := url.Parse(httpSrv.URL)
+func TestCheckRedirectEndpointRules(t *testing.T) {
+	// 同主机判定主机名始终对首跳、端口对上一跳生效值；http→https 升级只
+	// 放行标准 443，升级后回跳 http 按降级拒。直接调 CheckRedirect 合成
+	// via 链，不依赖真实端口（httptest 给不了 :443）。
 	client, err := NewClient(Config{
-		AllowedHosts:        []string{u.Hostname()},
+		AllowedHosts:        []string{"forge.example"},
 		AllowPrivateNetwork: true,
-		CACertPEM:           string(certPEM),
 	})
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
-	resp, err := client.Get(httpSrv.URL + "/api/v1/version")
-	if err != nil {
-		t.Fatalf("http→https 同主机升级应放行: %v", err)
+	mk := func(raw string) *http.Request {
+		r, err := http.NewRequest(http.MethodGet, raw, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
 	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d", resp.StatusCode)
+	cases := []struct {
+		name string
+		via  []string
+		next string
+		want error
+	}{
+		{"同主机同端口", []string{"https://forge.example/api/v1/version"}, "https://forge.example/api/v1/user", nil},
+		{"显式默认端口同端点", []string{"https://forge.example/x"}, "https://forge.example:443/y", nil},
+		{"http 显式默认端口同端点", []string{"http://forge.example/x"}, "http://forge.example:80/y", nil},
+		{"http→https:443 升级", []string{"http://forge.example/x"}, "https://forge.example/y", nil},
+		{"http:8080→https:443 升级", []string{"http://forge.example:8080/x"}, "https://forge.example/y", nil},
+		{"升级后同端口续跳", []string{"http://forge.example/x", "https://forge.example/y"}, "https://forge.example:443/z", nil},
+		{"升级到非 443 端口拒", []string{"http://forge.example/x"}, "https://forge.example:8443/y", ErrCrossHostRedirect},
+		{"升级后再漂移端口拒", []string{"http://forge.example/x", "https://forge.example/y"}, "https://forge.example:8443/z", ErrCrossHostRedirect},
+		{"https→http 降级拒", []string{"https://forge.example/x"}, "http://forge.example/y", ErrSchemeDowngrade},
+		{"升级后回跳 http 降级拒", []string{"http://forge.example/x", "https://forge.example/y"}, "http://forge.example:443/z", ErrSchemeDowngrade},
+		{"https 换端口拒", []string{"https://forge.example/x"}, "https://forge.example:8443/y", ErrCrossHostRedirect},
+		{"跨主机拒", []string{"https://forge.example/x"}, "https://other.example/y", ErrCrossHostRedirect},
+		{"尾点主机名等价", []string{"https://forge.example/x"}, "https://forge.example./y", nil},
 	}
-
-	if _, err := client.Get(httpSrv.URL + "/bounce"); !errors.Is(err, ErrSchemeDowngrade) {
-		t.Fatalf("升级后跳回 http 应按降级拒, err = %v", err)
-	}
-
-	// 升级之后的 https→https 换端口不放行：升级例外只对上一跳是 http 的
-	// 那一跳生效，端口漂移仍按跨主机拒。
-	httpsSrv2 := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer httpsSrv2.Close()
-	certPEM2 := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: httpsSrv2.Certificate().Raw})
-
-	httpsSrv3 := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, httpsSrv2.URL+r.URL.Path, http.StatusFound)
-	}))
-	defer httpsSrv3.Close()
-	certPEM3 := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: httpsSrv3.Certificate().Raw})
-
-	client2, err := NewClient(Config{
-		AllowedHosts:        []string{u.Hostname()},
-		AllowPrivateNetwork: true,
-		CACertPEM:           string(certPEM2) + string(certPEM3),
-	})
-	if err != nil {
-		t.Fatalf("new client: %v", err)
-	}
-	if _, err := client2.Get(httpsSrv3.URL + "/api/v1/version"); !errors.Is(err, ErrCrossHostRedirect) {
-		t.Fatalf("https→https 换端口应拒, err = %v", err)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			via := make([]*http.Request, len(c.via))
+			for i, raw := range c.via {
+				via[i] = mk(raw)
+			}
+			err := client.CheckRedirect(mk(c.next), via)
+			if !errors.Is(err, c.want) {
+				t.Fatalf("CheckRedirect(%v → %s) = %v, want %v", c.via, c.next, err, c.want)
+			}
+		})
 	}
 }
 
