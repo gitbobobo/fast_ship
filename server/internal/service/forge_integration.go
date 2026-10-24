@@ -1,0 +1,659 @@
+package service
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"path"
+	"strings"
+
+	"github.com/godbobo/fast_ship/server/internal/api"
+	"github.com/godbobo/fast_ship/server/internal/config"
+	"github.com/godbobo/fast_ship/server/internal/model"
+	"github.com/godbobo/fast_ship/server/internal/pkg/crypto"
+	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
+	"github.com/godbobo/fast_ship/server/internal/pkg/forges"
+	"github.com/godbobo/fast_ship/server/internal/repository"
+	"github.com/google/uuid"
+	"go.uber.org/zap"
+	"gorm.io/gorm"
+)
+
+// ForgeIntegrationService 部署级代码仓集成（INT-166）：forgejo 行的 CRUD 与
+// 连接检测，加内置 github-default 的只读投影。凭证加密落库只回 *_set 标记；
+// 基址在保存时做 SSRF 校验（含 DNS 解析），连接检测按集成现建 forges client。
+// github-default 不在本表存储——读侧映射 IntegrationService 的部署级 GitHub App
+// 身份，写侧一律拒绝。
+type ForgeIntegrationService struct {
+	repo   *repository.ForgeIntegrationRepository
+	github *IntegrationService
+	cfg    *config.Config
+	logger *zap.Logger
+	// probe 连接检测入口，main 缺省接 probeForge；测试注入 fake。
+	probe func(ctx context.Context, client *http.Client, apiBaseURL, token string) ForgeProbe
+	// validateBaseURL 基址校验入口，main 缺省接 forges.ValidateBaseURL；测试
+	// 注入假的以避开真实 DNS。
+	validateBaseURL func(ctx context.Context, raw string, allowPrivateNetwork bool) (string, error)
+}
+
+// ForgeProbe 一次连接检测的结论：status 沿用 model.DeploymentDetection* 口径
+// （unchecked/ok/invalid/failed），version 与 username 是检测成功带回的实例
+// 版本与机器人账号名，detail 是给人看的补充说明（不含任何密钥）。
+type ForgeProbe struct {
+	Status   string
+	Version  string
+	Username string
+	Detail   string
+}
+
+var (
+	errForgeIntegrationNameRequired  = errs.New(40001, "集成名称必填")
+	errForgeIntegrationBaseRequired  = errs.New(40001, "base_url 必填")
+	errForgeIntegrationTokenRequired = errs.New(40001, "token（仓库范围 PAT）必填")
+	// errForgeIntegrationBuiltin 内置集成为只读映射：修改与删除都引导回既有的
+	// deployment/github-app 端点。
+	errForgeIntegrationBuiltin = errs.New(40001, "内置 GitHub 集成是只读映射，请通过 /api/deployment/github-app 端点管理")
+	errForgeIntegrationDecrypt = errs.New(errs.ErrInternal.Code, "集成凭证解密失败")
+)
+
+func NewForgeIntegrationService(repo *repository.ForgeIntegrationRepository, github *IntegrationService, cfg *config.Config, logger *zap.Logger) *ForgeIntegrationService {
+	return &ForgeIntegrationService{
+		repo:            repo,
+		github:          github,
+		cfg:             cfg,
+		logger:          logger,
+		probe:           probeForge,
+		validateBaseURL: forges.ValidateBaseURL,
+	}
+}
+
+// SetProbe 注入连接检测函数（测试用）。
+func (s *ForgeIntegrationService) SetProbe(fn func(ctx context.Context, client *http.Client, apiBaseURL, token string) ForgeProbe) {
+	s.probe = fn
+}
+
+// SetValidateBaseURL 注入基址校验函数（测试用，避开真实 DNS）。
+func (s *ForgeIntegrationService) SetValidateBaseURL(fn func(ctx context.Context, raw string, allowPrivateNetwork bool) (string, error)) {
+	s.validateBaseURL = fn
+}
+
+// List GET /api/deployment/integrations：首条恒为内置 github-default，后接
+// forgejo 行（按创建顺序）。
+func (s *ForgeIntegrationService) List(ctx context.Context) ([]api.ForgeIntegration, error) {
+	builtin, err := s.builtinProjection(ctx)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.repo.List()
+	if err != nil {
+		s.logger.Error("读取代码集成列表失败", zap.Error(err))
+		return nil, errs.ErrInternal
+	}
+	out := make([]api.ForgeIntegration, 0, len(rows)+1)
+	out = append(out, *builtin)
+	for i := range rows {
+		out = append(out, *projectForgeRow(&rows[i]))
+	}
+	return out, nil
+}
+
+// Get GET /api/deployment/integrations/:id
+func (s *ForgeIntegrationService) Get(ctx context.Context, id string) (*api.ForgeIntegration, error) {
+	if id == model.ForgeIntegrationBuiltinGitHubID {
+		return s.builtinProjection(ctx)
+	}
+	row, err := s.repo.FindByID(id)
+	if err != nil {
+		return nil, s.notFound(err)
+	}
+	return projectForgeRow(row), nil
+}
+
+// Create POST /api/deployment/integrations：本期 kind 固定 forgejo（请求不设
+// kind 字段——内置 GitHub App 走 deployment/github-app 端点）。
+func (s *ForgeIntegrationService) Create(ctx context.Context, req *api.CreateForgeIntegrationRequest) (*api.ForgeIntegration, error) {
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		return nil, errForgeIntegrationNameRequired
+	}
+	if strings.TrimSpace(req.BaseUrl) == "" {
+		return nil, errForgeIntegrationBaseRequired
+	}
+	allowPrivate := req.AllowPrivateNetwork != nil && *req.AllowPrivateNetwork
+
+	// 合并成最终值后统一校验：base 与 api 各校验一次（含保存时 DNS），口径与
+	// Update 完全一致。
+	base, apiBase, err := s.resolveURLs(ctx, "", strings.TrimSpace(req.BaseUrl),
+		"", derefString(req.ApiBaseUrl), false, allowPrivate)
+	if err != nil {
+		return nil, err
+	}
+	// 同一归一主机只允许一条集成：同实例换 scheme/端口写法再来一条，凭证与
+	// 项目绑定会互相踩。
+	if err := s.ensureHostAvailable(base, ""); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(req.Token) == "" {
+		return nil, errForgeIntegrationTokenRequired
+	}
+	caCert := ""
+	if req.CaCertPem != nil && strings.TrimSpace(*req.CaCertPem) != "" {
+		if err := forges.ValidateCACertPEM(*req.CaCertPem); err != nil {
+			return nil, paramError(err)
+		}
+		caCert = *req.CaCertPem
+	}
+
+	encKey := []byte(s.cfg.Encryption.Key)
+	tokenEnc, err := crypto.Encrypt([]byte(strings.TrimSpace(req.Token)), encKey)
+	if err != nil {
+		s.logger.Error("加密集成 token 失败", zap.Error(err))
+		return nil, errs.ErrInternal
+	}
+	webhookSecret := strings.TrimSpace(derefString(req.WebhookSecret))
+	var webhookEnc []byte
+	if webhookSecret != "" {
+		webhookEnc, err = crypto.Encrypt([]byte(webhookSecret), encKey)
+		if err != nil {
+			s.logger.Error("加密集成 webhook 密钥失败", zap.Error(err))
+			return nil, errs.ErrInternal
+		}
+	}
+
+	row := model.ForgeIntegration{
+		ID:                     uuid.NewString(),
+		Kind:                   model.ForgeIntegrationKindForgejo,
+		Name:                   name,
+		BaseURL:                base,
+		APIBaseURL:             apiBase,
+		HostKey:                forges.HostKey(base),
+		TokenEncrypted:         tokenEnc,
+		WebhookSecretEncrypted: webhookEnc,
+		CACertPEM:              caCert,
+		AllowPrivateNetwork:    allowPrivate,
+	}
+	if err := s.repo.Create(&row); err != nil {
+		if errors.Is(err, repository.ErrForgeHostTaken) {
+			// 唯一索引兜底触发（应用层查重后的并发窗口），折回同类 40001。
+			return nil, s.hostTakenErr(row.HostKey)
+		}
+		s.logger.Error("保存代码集成失败", zap.Error(err))
+		return nil, errs.ErrInternal
+	}
+	return projectForgeRow(&row), nil
+}
+
+// Update PUT /api/deployment/integrations/:id：部分更新。url / allow_private_
+// network 变更按最终值重新校验（flag 关闭会按公网口径复核现有基址）；token /
+// webhook_secret 缺省、null 或空串 = 保留旧值；ca_cert_pem 空串 = 清空；
+// api_base_url 空串 = 重置为 {base_url}/api/v1 推导。
+func (s *ForgeIntegrationService) Update(ctx context.Context, id string, req *api.UpdateForgeIntegrationRequest) (*api.ForgeIntegration, error) {
+	if id == model.ForgeIntegrationBuiltinGitHubID {
+		return nil, errForgeIntegrationBuiltin
+	}
+	row, err := s.repo.FindByID(id)
+	if err != nil {
+		return nil, s.notFound(err)
+	}
+
+	fields := map[string]any{}
+	if req.Name != nil {
+		name := strings.TrimSpace(*req.Name)
+		if name == "" {
+			return nil, errForgeIntegrationNameRequired
+		}
+		row.Name = name
+		fields["name"] = name
+	}
+
+	// 开关变更先记下「要变更」这个事实（不落 row——校验失败时既不写库也不改
+	// 响应投影），等基址按新开关复核通过后再应用。
+	flagChanged := req.AllowPrivateNetwork != nil && *req.AllowPrivateNetwork != row.AllowPrivateNetwork
+	allowPrivate := row.AllowPrivateNetwork
+	if req.AllowPrivateNetwork != nil {
+		allowPrivate = *req.AllowPrivateNetwork
+	}
+
+	// base_url / api_base_url 三态：null 保留、空串重置为默认、其余替换。
+	// 只在值或开关真的变化时才做保存时 DNS 校验，无关更新（改名）不碰网络。
+	baseChanged := req.BaseUrl != nil && strings.TrimSpace(*req.BaseUrl) != strings.TrimSpace(row.BaseURL)
+	apiChanged := req.ApiBaseUrl != nil && strings.TrimSpace(*req.ApiBaseUrl) != strings.TrimSpace(row.APIBaseURL)
+	if baseChanged || apiChanged || flagChanged {
+		reqBase := row.BaseURL
+		if baseChanged {
+			reqBase = strings.TrimSpace(*req.BaseUrl)
+			if reqBase == "" {
+				return nil, errForgeIntegrationBaseRequired
+			}
+		}
+		reqAPI := row.APIBaseURL
+		if apiChanged {
+			reqAPI = strings.TrimSpace(*req.ApiBaseUrl)
+		}
+		base, apiBase, err := s.resolveURLs(ctx, row.BaseURL, reqBase, row.APIBaseURL, reqAPI,
+			apiChanged && reqAPI == "", allowPrivate)
+		if err != nil {
+			return nil, err
+		}
+		// 只在基址真的变化时查重：改 api_base_url 或翻转开关不动 base。
+		if baseChanged {
+			if err := s.ensureHostAvailable(base, row.ID); err != nil {
+				return nil, err
+			}
+		}
+		row.BaseURL = base
+		row.APIBaseURL = apiBase
+		// host_key 与 base_url 同步落库：同归一主机的部分唯一索引在这里兜
+		// ensureHostAvailable 之后的并发窗口。
+		row.HostKey = forges.HostKey(base)
+		fields["base_url"] = base
+		fields["api_base_url"] = apiBase
+		fields["host_key"] = row.HostKey
+	}
+	if flagChanged {
+		row.AllowPrivateNetwork = allowPrivate
+		fields["allow_private_network"] = allowPrivate
+	}
+
+	encKey := []byte(s.cfg.Encryption.Key)
+	if req.Token != nil {
+		if token := strings.TrimSpace(*req.Token); token != "" {
+			tokenEnc, err := crypto.Encrypt([]byte(token), encKey)
+			if err != nil {
+				s.logger.Error("加密集成 token 失败", zap.Error(err))
+				return nil, errs.ErrInternal
+			}
+			fields["token_encrypted"] = tokenEnc
+		}
+	}
+	if req.WebhookSecret != nil {
+		if secret := strings.TrimSpace(*req.WebhookSecret); secret != "" {
+			secretEnc, err := crypto.Encrypt([]byte(secret), encKey)
+			if err != nil {
+				s.logger.Error("加密集成 webhook 密钥失败", zap.Error(err))
+				return nil, errs.ErrInternal
+			}
+			fields["webhook_secret_encrypted"] = secretEnc
+		}
+	}
+	if req.CaCertPem != nil {
+		// 空串 = 清空（ca_cert_pem 支持清空）；其余替换并校验 PEM。
+		if strings.TrimSpace(*req.CaCertPem) == "" {
+			row.CACertPEM = ""
+			fields["ca_cert_pem"] = ""
+		} else {
+			if err := forges.ValidateCACertPEM(*req.CaCertPem); err != nil {
+				return nil, paramError(err)
+			}
+			row.CACertPEM = *req.CaCertPem
+			fields["ca_cert_pem"] = *req.CaCertPem
+		}
+	}
+
+	if len(fields) > 0 {
+		if err := s.repo.UpdateColumns(id, fields); err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil, errs.ErrForgeIntegrationNotFound
+			}
+			if errors.Is(err, repository.ErrForgeHostTaken) {
+				// 唯一索引兜底触发（改基址的并发窗口），折回同类 40001。
+				return nil, s.hostTakenErr(row.HostKey)
+			}
+			s.logger.Error("更新代码集成失败", zap.Error(err))
+			return nil, errs.ErrInternal
+		}
+		// updated_at 由 UpdateColumns 写库，回读保证响应带着新值。
+		if row, err = s.repo.FindByID(id); err != nil {
+			return nil, s.notFound(err)
+		}
+	}
+	return projectForgeRow(row), nil
+}
+
+// Delete DELETE /api/deployment/integrations/:id：内置拒绝；被项目引用拒绝并
+// 在消息里列出引用项目名。删除提交点原子：引用判定写进同一条 DELETE
+// （DeleteIfUnreferenced），「先查后删」之间项目并发绑定成功不会留下悬空
+// 引用——残余窗口只剩服务层之上的读取面（见 docs/internal/forge-integrations.md）。
+func (s *ForgeIntegrationService) Delete(ctx context.Context, id string) error {
+	if id == model.ForgeIntegrationBuiltinGitHubID {
+		return errForgeIntegrationBuiltin
+	}
+	affected, err := s.repo.DeleteIfUnreferenced(id)
+	if err != nil {
+		s.logger.Error("删除代码集成失败", zap.Error(err))
+		return errs.ErrInternal
+	}
+	if affected > 0 {
+		return nil
+	}
+	// 0 行：行不存在报 40435；行还在说明被引用，列出引用项目名。
+	if _, err := s.repo.FindByID(id); err != nil {
+		return s.notFound(err)
+	}
+	refs, err := s.repo.ReferencingProjects(id)
+	if err != nil {
+		s.logger.Error("统计集成引用项目失败", zap.Error(err))
+		return errs.ErrInternal
+	}
+	names := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		names = append(names, ref.Name)
+	}
+	return errs.New(errs.ErrForgeIntegrationInUse.Code,
+		errs.ErrForgeIntegrationInUse.Message+"："+strings.Join(names, "、"))
+}
+
+// Test POST /api/deployment/integrations/:id/test：解密 token 后按集成现建
+// forges client，调 GET version 与 GET user。结论只随响应返回、不落库。
+func (s *ForgeIntegrationService) Test(ctx context.Context, id string) (*api.ForgeIntegrationTest, error) {
+	if id == model.ForgeIntegrationBuiltinGitHubID {
+		return nil, errs.New(40001, "内置 GitHub 集成请使用 POST /api/deployment/github-app/test 检测")
+	}
+	row, err := s.repo.FindByID(id)
+	if err != nil {
+		return nil, s.notFound(err)
+	}
+	token, err := crypto.Decrypt(row.TokenEncrypted, []byte(s.cfg.Encryption.Key))
+	if err != nil {
+		return nil, errForgeIntegrationDecrypt
+	}
+	client, err := forges.NewClient(forges.Config{
+		AllowedHosts:        forges.AllowedHosts(row.BaseURL, row.APIBaseURL),
+		CACertPEM:           row.CACertPEM,
+		AllowPrivateNetwork: row.AllowPrivateNetwork,
+	})
+	if err != nil {
+		s.logger.Error("构建集成 client 失败", zap.Error(err))
+		return nil, errs.ErrInternal
+	}
+	probe := s.probe(ctx, client, forgeAPIBaseURL(row), string(token))
+	return &api.ForgeIntegrationTest{
+		Status:   api.ForgeIntegrationTestStatus(probe.Status),
+		Version:  probe.Version,
+		Username: probe.Username,
+		Detail:   probe.Detail,
+	}, nil
+}
+
+// builtinProjection 内置 github-default 的只读投影：映射部署级 GitHub App 当前
+// 生效身份（部署设置行 > config 兜底）。解密失败 50000 直接透出，与
+// IntegrationService 同口径、不回落 config。
+func (s *ForgeIntegrationService) builtinProjection(ctx context.Context) (*api.ForgeIntegration, error) {
+	appCfg, ok, err := s.github.Current(ctx)
+	if err != nil {
+		return nil, err
+	}
+	apiBase := strings.TrimSpace(s.cfg.GitHubApp.APIBaseURL)
+	if apiBase == "" {
+		apiBase = "https://api.github.com"
+	}
+	return &api.ForgeIntegration{
+		Id:                  model.ForgeIntegrationBuiltinGitHubID,
+		Kind:                api.Github,
+		Name:                "GitHub（内置）",
+		BaseUrl:             "https://github.com",
+		ApiBaseUrl:          apiBase,
+		TokenSet:            ok,
+		WebhookSecretSet:    strings.TrimSpace(appCfg.WebhookSecret) != "",
+		HasCaCert:           false,
+		AllowPrivateNetwork: false,
+		Builtin:             true,
+	}, nil
+}
+
+// resolveURLs 校验并归一 base / api 两个基址：reqBase 为空回落 currentBase
+// （Update 的部分更新语义）；api 为空按 {base}/api/v1 推导；allow_private_
+// network 控制保存时 DNS 校验的口径（公网/私网，两口径都逐 IP 校验）。
+// apiReset=true 表示 Update 显式传了
+// 空串，要把 api_base_url 重置为推导值而不是保留 currentAPI。任何校验失败
+// 都折成 40001。
+func (s *ForgeIntegrationService) resolveURLs(ctx context.Context, currentBase, reqBase, currentAPI, reqAPI string, apiReset, allowPrivate bool) (base, apiBase string, err error) {
+	baseInput := reqBase
+	if baseInput == "" {
+		baseInput = currentBase
+	}
+	base, err = s.validateBaseURL(ctx, baseInput, allowPrivate)
+	if err != nil {
+		return "", "", paramError(err)
+	}
+	// base_url 只收站点根：审查链接与 code_repo_url 都按 {base_url}/{o}/{r}
+	// 拼接，带路径的基址会拼出错误 URL。api_base_url 不受限（可带 /api/v1）。
+	if err := requireBaseRoot(base); err != nil {
+		return "", "", err
+	}
+	apiInput := strings.TrimSpace(reqAPI)
+	if apiInput == "" {
+		apiInput = strings.TrimSpace(currentAPI)
+	}
+	if apiReset || apiInput == "" {
+		// 空串（Create 省略 / Update 显式重置 / 存量空列）按 Forgejo 惯例推导。
+		return base, forges.DefaultAPIBaseURL(base), nil
+	}
+	apiBase, err = s.validateBaseURL(ctx, apiInput, allowPrivate)
+	if err != nil {
+		return "", "", paramError(err)
+	}
+	return base, apiBase, nil
+}
+
+// paramError 把校验层的具体原因折成 40001（消息原文透出，不含密钥）。
+func paramError(err error) *errs.AppError {
+	return errs.New(40001, err.Error())
+}
+
+// errForgeHostTaken 同一归一主机已被其他集成占用（40001）。
+func errForgeHostTaken(name string) *errs.AppError {
+	return errs.New(errs.ErrInvalidParams.Code,
+		"该主机已被集成 "+name+" 占用，同一 Forgejo 主机只能配置一条集成")
+}
+
+// hostTakenErr 数据库唯一索引兜底触发（应用层查重通过后同主机被并发抢注）时
+// 的 40001：尽力点出占用集成的名字（应用层查重没看见的行是竞态对手方刚提交
+// 的，按归一键现查一次），查不到就用不带名字的泛化文案，与应用层查重同口径。
+func (s *ForgeIntegrationService) hostTakenErr(key string) *errs.AppError {
+	if key != "" {
+		if rows, err := s.repo.List(); err == nil {
+			for i := range rows {
+				if forges.HostKey(rows[i].BaseURL) == key {
+					return errForgeHostTaken(rows[i].Name)
+				}
+			}
+		}
+	}
+	return errs.New(errs.ErrInvalidParams.Code,
+		"该主机已被其他集成占用，同一 Forgejo 主机只能配置一条集成")
+}
+
+// errForgeBaseRootRequired base_url 只收站点根（40001）。
+var errForgeBaseRootRequired = errs.New(errs.ErrInvalidParams.Code,
+	"base_url 必须是站点根地址（不带路径）")
+
+// requireBaseRoot base_url 形状收口：空路径与 "/" 都算站点根。
+func requireBaseRoot(baseURL string) error {
+	u, err := url.Parse(baseURL)
+	if err == nil && u.Path != "" && u.Path != "/" {
+		return errForgeBaseRootRequired
+	}
+	return nil
+}
+
+// ensureHostAvailable 新基址的归一主机（小写 host + scheme 缺省端口）不得与
+// 其他 forgejo 集成重复。excludeID 传被更新行的 id（自身不与自己冲突），空串
+// 表示新建。存量脏行解析不出主机键的不参与比较。
+func (s *ForgeIntegrationService) ensureHostAvailable(baseURL, excludeID string) error {
+	key := forgeBaseHostKey(baseURL)
+	if key == "" {
+		return nil
+	}
+	rows, err := s.repo.List()
+	if err != nil {
+		s.logger.Error("读取代码集成列表失败", zap.Error(err))
+		return errs.ErrInternal
+	}
+	for i := range rows {
+		row := &rows[i]
+		if row.ID == excludeID {
+			continue
+		}
+		if forgeBaseHostKey(row.BaseURL) == key {
+			return errForgeHostTaken(row.Name)
+		}
+	}
+	return nil
+}
+
+// notFound 行不存在时报 40435；查询本身失败按 50000。
+func (s *ForgeIntegrationService) notFound(err error) error {
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return errs.ErrForgeIntegrationNotFound
+	}
+	s.logger.Error("读取代码集成失败", zap.Error(err))
+	return errs.ErrInternal
+}
+
+// forgeAPIBaseURL 行的 API 基址：空列（历史行）按 {base_url}/api/v1 推导。
+func forgeAPIBaseURL(row *model.ForgeIntegration) string {
+	if api := strings.TrimSpace(row.APIBaseURL); api != "" {
+		return api
+	}
+	return forges.DefaultAPIBaseURL(row.BaseURL)
+}
+
+// projectForgeRow forgejo 行的响应投影：凭证本体永不回显，只有 *_set 标记。
+func projectForgeRow(row *model.ForgeIntegration) *api.ForgeIntegration {
+	created, updated := row.CreatedAt, row.UpdatedAt
+	return &api.ForgeIntegration{
+		Id:                  row.ID,
+		Kind:                api.Forgejo,
+		Name:                row.Name,
+		BaseUrl:             row.BaseURL,
+		ApiBaseUrl:          forgeAPIBaseURL(row),
+		TokenSet:            len(row.TokenEncrypted) > 0,
+		WebhookSecretSet:    len(row.WebhookSecretEncrypted) > 0,
+		HasCaCert:           strings.TrimSpace(row.CACertPEM) != "",
+		AllowPrivateNetwork: row.AllowPrivateNetwork,
+		Builtin:             false,
+		CreatedAt:           api.JSONTimePtr(&created),
+		UpdatedAt:           api.JSONTimePtr(&updated),
+	}
+}
+
+// forgeVersionResponse / forgeUserResponse Forgejo REST 的最小读取面。
+type forgeVersionResponse struct {
+	Version string `json:"version"`
+}
+
+type forgeUserResponse struct {
+	Login string `json:"login"`
+}
+
+// probeForge 连接检测的缺省实现：GET {api}/version 与 GET {api}/user（PAT 走
+// Forgejo 惯例的 Authorization: token 头）。401/403 是 invalid（token 被拒）；
+// 网络错误与其他状态码是 failed；两者都成功才是 ok。200 但响应不是预期 JSON
+// 形态同样按 failed 处理——body 原样回显会把实例的错误页（最大 1MB）泄漏进
+// 结论，一律不透传。
+func probeForge(ctx context.Context, client *http.Client, apiBaseURL, token string) ForgeProbe {
+	apiBase := strings.TrimRight(apiBaseURL, "/")
+
+	status, body, err := forgeAPIGet(ctx, client, apiBase+"/version", token)
+	version := ""
+	switch {
+	case err != nil:
+		return ForgeProbe{Status: model.DeploymentDetectionFailed, Detail: "网络错误，未能连接 Forgejo"}
+	case status == http.StatusOK:
+		var parsed forgeVersionResponse
+		if json.Unmarshal(body, &parsed) != nil || strings.TrimSpace(parsed.Version) == "" {
+			return ForgeProbe{Status: model.DeploymentDetectionFailed,
+				Detail: "version 响应不是预期的 Forgejo API 格式，请确认实例地址与 API 版本"}
+		}
+		version = truncateProbeField(strings.TrimSpace(parsed.Version))
+	case status == http.StatusUnauthorized || status == http.StatusForbidden:
+		return ForgeProbe{Status: model.DeploymentDetectionInvalid,
+			Detail: fmt.Sprintf("token 被实例拒绝（HTTP %d），请检查机器人 PAT", status)}
+	default:
+		return ForgeProbe{Status: model.DeploymentDetectionFailed,
+			Detail: fmt.Sprintf("实例返回 HTTP %d（GET version）", status)}
+	}
+
+	status, body, err = forgeAPIGet(ctx, client, apiBase+"/user", token)
+	username := ""
+	switch {
+	case err != nil:
+		return ForgeProbe{Status: model.DeploymentDetectionFailed, Detail: "网络错误，未能连接 Forgejo"}
+	case status == http.StatusOK:
+		var parsed forgeUserResponse
+		if json.Unmarshal(body, &parsed) != nil || strings.TrimSpace(parsed.Login) == "" {
+			return ForgeProbe{Status: model.DeploymentDetectionFailed,
+				Detail: "user 响应不是预期的 Forgejo API 格式，请确认 token 具有读取账号信息的权限"}
+		}
+		username = strings.TrimSpace(parsed.Login)
+	case status == http.StatusUnauthorized || status == http.StatusForbidden:
+		return ForgeProbe{Status: model.DeploymentDetectionInvalid,
+			Detail: fmt.Sprintf("token 被实例拒绝（HTTP %d），请检查机器人 PAT", status)}
+	default:
+		return ForgeProbe{Status: model.DeploymentDetectionFailed,
+			Detail: fmt.Sprintf("实例返回 HTTP %d（GET user）", status)}
+	}
+
+	return ForgeProbe{
+		Status:   model.DeploymentDetectionOK,
+		Version:  version,
+		Username: username,
+		Detail:   "",
+	}
+}
+
+// truncateProbeField 防御性截断：实例版本字段理论上很短，超长按 64 个字符
+// 截断（按 rune，不切坏多字节字符）。
+func truncateProbeField(s string) string {
+	runes := []rune(s)
+	if len(runes) > 64 {
+		return string(runes[:64])
+	}
+	return s
+}
+
+// forgeAPIGet 发起带 PAT 的 GET，返回状态码与响应体；网络层失败（含响应体
+// 读取中断）返回 err。同主机重定向仍被 client 放行，但跳出 API 路径前缀的
+// 跳转会被剥掉 Authorization——集成端把 /api/v1/* 指到记录请求头的同主机
+// 端点时，PAT 不落进那边的访问日志。
+func forgeAPIGet(ctx context.Context, client *http.Client, url, token string) (int, []byte, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return 0, nil, err
+	}
+	// Forgejo/Gitea 的 PAT 认证头惯例。
+	req.Header.Set("Authorization", "token "+token)
+	req.Header.Set("Accept", "application/json")
+
+	apiPrefix := path.Dir(req.URL.Path)
+	c := *client
+	base := c.CheckRedirect
+	c.CheckRedirect = func(r *http.Request, via []*http.Request) error {
+		if !strings.HasPrefix(r.URL.Path, apiPrefix+"/") {
+			r.Header.Del("Authorization")
+		}
+		if base != nil {
+			return base(r, via)
+		}
+		return nil
+	}
+	resp, err := c.Do(req)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+	// 响应体只用于 version/user 两个字段，读满 1MB 就不再扩大。
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return 0, nil, err
+	}
+	return resp.StatusCode, body, nil
+}

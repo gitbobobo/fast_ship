@@ -174,13 +174,16 @@ func (s *ReviewService) ListPullRequestActivity(ctx context.Context, userID, pro
 
 	// 全量分组后再切片：counts/total 是过滤范围内全部 PR 的统计。
 	now := time.Now().UTC()
+	// PR 链接兜底按各项目的代码仓集成构造（INT-166）：事务里已取出项目完整行，
+	// 集成引用批量解析成构造面。
+	linksByProject := forgeLinksByProjects(ctx, s.db, projects)
 	entries := make([]reviewActivityEntry, 0, len(scoped))
 	for _, pr := range scoped {
 		key := pr.ProjectID + "#" + pr.RepoFullName + "#" + strconv.Itoa(pr.PRNumber) + "#" + strconv.Itoa(pr.RoundNumber) + "#" + pr.HeadSHA
 		item, sortAt, ok := buildPullRequestActivity(pr, nameByProject[pr.ProjectID],
 			settingsByProject[pr.ProjectID], visualCombosByProject[pr.ProjectID],
 			debounceByPR[pr.ProjectID+"#"+pr.RepoFullName+"#"+strconv.Itoa(pr.PRNumber)],
-			runsByPR[key], now)
+			runsByPR[key], now, linksByProject[pr.ProjectID])
 		if !ok {
 			continue
 		}
@@ -250,9 +253,11 @@ func reviewActivityGroupOrder(g api.ReviewPullRequestActivityGroup) int {
 
 // buildPullRequestActivity 单个总账行 → 动态行（契约「数据分组算法」）。
 // 返回是否纳入首页与组内排序时间；防抖优先，其次按当前轮运行的执行状态判定。
+// links 按项目代码仓集成解析，PR 标题/URL 快照缺失时兜底构造 PR 链接。
 func buildPullRequestActivity(pr *model.ReviewPullRequest, projectName string,
 	settings model.ProjectReviewSettings, visualComboCount int,
 	debounce *model.ReviewDebounce, runs []model.ReviewRun, now time.Time,
+	links forgeLinks,
 ) (api.ReviewPullRequestActivity, time.Time, bool) {
 	// 防抖优先：窗口内的最新推送只显示「约 N 秒后开始」，不看任何运行。
 	if debounce != nil {
@@ -275,7 +280,7 @@ func buildPullRequestActivity(pr *model.ReviewPullRequest, projectName string,
 			CanRerun:       reviewActivityCanRerun(settings, pr),
 		}
 		if item.PrUrl == "" {
-			item.PrUrl = "https://github.com/" + pr.RepoFullName + "/pull/" + strconv.Itoa(pr.PRNumber)
+			item.PrUrl = links.PullURL(pr.RepoFullName, pr.PRNumber)
 		}
 		return item, pr.UpdatedAt, true
 	}
@@ -448,7 +453,7 @@ func buildPullRequestActivity(pr *model.ReviewPullRequest, projectName string,
 		CanRerun:     reviewActivityCanRerun(settings, pr),
 	}
 	if item.PrUrl == "" {
-		item.PrUrl = "https://github.com/" + pr.RepoFullName + "/pull/" + strconv.Itoa(pr.PRNumber)
+		item.PrUrl = links.PullURL(pr.RepoFullName, pr.PRNumber)
 	}
 	sortAt := pr.UpdatedAt
 	if group == api.ReviewPullRequestActivityGroupRecentlyPassed && latestFinished != nil {
@@ -701,6 +706,7 @@ func (s *ReviewService) GetPullRequestRecord(ctx context.Context, userID, projec
 		roundMap[r.RoundNumber] = append(roundMap[r.RoundNumber], *r)
 	}
 	envNames := s.reviewRunEnvNames(ctx, runs)
-	rec := buildReviewPRRecord(&pr, roundMap, envNames, settings.RepoFullName)
+	rec := buildReviewPRRecord(&pr, roundMap, envNames, settings.RepoFullName,
+		forgeLinksForProject(ctx, s.db, projectID))
 	return &rec, nil
 }

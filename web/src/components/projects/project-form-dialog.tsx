@@ -31,7 +31,12 @@ import {
 } from "@/lib/hooks/use-projects";
 import { useGithubTokens } from "@/lib/hooks/use-github-tokens";
 import { projectApi } from "@/lib/api/projects";
-import { parseRepoUrl, hasGitHubRepo } from "@/lib/utils/github";
+import {
+  parseRepoUrl,
+  hasGitHubRepo,
+  codeRepoUrlForInput,
+  normalizeCodeRepoRef,
+} from "@/lib/utils/github";
 import { toast } from "sonner";
 
 interface ProjectFormDialogProps {
@@ -148,6 +153,11 @@ export function ProjectFormDialog({
   const [creatingFor, setCreatingFor] = useState<"public" | "code">("public");
   const t3SectionRef = useRef<HTMLElement | null>(null);
 
+  // 悬空绑定：绑定了代码仓集成但投影 code_repo_url 为空（集成行已删等）。
+  // 回填与提交都按「保留现状」处理，不再回落 github 同名地址；界面上给出
+  // 提示，填写新地址才重新绑定。
+  const bindingBroken = !!project?.code_integration_id && !project?.code_repo_url;
+
   useEffect(() => {
     if (open && isEdit && section === "t3") {
       // 等弹框动画与内容就位后再滚动
@@ -166,10 +176,7 @@ export function ProjectFormDialog({
         repository_url: hasGitHubRepo(project)
           ? `https://github.com/${project.github_owner}/${project.github_repo}`
           : "",
-        code_repository_url:
-          project.code_github_owner && project.code_github_repo
-            ? `https://github.com/${project.code_github_owner}/${project.code_github_repo}`
-            : "",
+        code_repository_url: codeRepoUrlForInput(project),
         public_github_token_id: project.public_github_token_id || "",
         code_github_token_id: project.code_github_token_id || "",
       });
@@ -206,26 +213,30 @@ export function ProjectFormDialog({
         }
         if (data.repository_url) payload.repository_url = data.repository_url;
         // 代码仓库同 Token 引用走三态：与现值等价则不携带 key，清空传 null
-        // 回落公开仓库。等价判定只认解析出非空 owner/repo 的输入——parseRepoUrl
-        // 很宽松（"https://github.com/" 也是空 owner/repo），拿它跟空的现值比较
-        // 会把非法输入判成「未改动」而静默丢弃；这类输入一律原样发出去交给
-        // 服务端校验（40001），失败语义与公开仓库链接一致。
+        // 回落公开仓库。等价判定按归一后的 code_repo_url 比较（见
+        // normalizeCodeRepoRef）；归一不出 owner/repo 的输入不算等价，原样
+        // 发出去交给服务端校验（40001），失败语义与公开仓库链接一致。
         if (project && data.code_repository_url !== undefined) {
           const raw = (data.code_repository_url || "").trim();
-          const current =
-            (project.code_github_owner || "") +
-            "/" +
-            (project.code_github_repo || "");
-          const next = parseRepoUrl(raw);
-          const parsed = next.owner !== "" && next.repo !== "";
-          const unchanged =
-            raw === ""
-              ? current === "/" // 输入空、当前也没配（"owner/repo" 为 "/"）= 未改动
-              : parsed &&
-                current.toLowerCase() ===
-                  (next.owner + "/" + next.repo).toLowerCase();
-          if (!unchanged) {
-            payload.code_repository_url = raw || null;
+          const currentRepoUrl = project.code_repo_url ?? "";
+          if (raw === "") {
+            // 悬空绑定（bindingBroken）留空视为未改动，不携带该字段：只保存
+            // 其它字段不再把悬空绑定静默改绑回 github 同名仓库。普通空输入仍
+            // 是显式清空（回落公开仓库，集成绑定一并清）——当前本就没有代码
+            // 仓（code_repo_url 为 null）时同样不携带。
+            if (!bindingBroken && currentRepoUrl !== "") {
+              payload.code_repository_url = null;
+            }
+          } else {
+            // 归一后与现值不同才提交：scheme 有无与大小写、尾部斜杠与 .git、
+            // 裸 owner/repo 形态都不算改动。按 code_repo_url 比较才能识别
+            // 跨主机的真改动——forgejo acme/app 改成 github 同名时，旧逻辑
+            // 拿 owner/repo 相等判「未改动」把改动静默丢掉。
+            const next = normalizeCodeRepoRef(raw);
+            const current = normalizeCodeRepoRef(currentRepoUrl);
+            if (next === "" || next !== current) {
+              payload.code_repository_url = raw;
+            }
           }
         }
         if (project && data.public_github_token_id !== undefined) {
@@ -361,6 +372,11 @@ export function ProjectFormDialog({
               <p className="text-xs text-muted-foreground">
                 PR 审查盯的仓库；留空则审查公开仓库
               </p>
+              {bindingBroken && (
+                <p className="text-xs text-amber-700 dark:text-amber-400">
+                  原绑定的代码仓集成已失效；留空将保留现状，填写新地址可重新绑定
+                </p>
+              )}
               {errors.code_repository_url && (
                 <p className="text-xs text-destructive">
                   {errors.code_repository_url.message}

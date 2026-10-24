@@ -266,6 +266,12 @@ func (s *ReviewService) findEnabledReviewProjectTx(tx *gorm.DB, repoFullName str
 	if err := tx.Where("id = ?", settings.ProjectID).First(&project).Error; err != nil {
 		return nil, nil, err
 	}
+	// GitHub webhook 只认内置 github-default 的项目：绑定 Forgejo 集成的项目
+	// 即使设置行里存在同名 repo_full_name 快照（跨实例撞名）也不进 GitHub
+	// 审查链路，按未命中处理。
+	if project.CodeIntegrationID != "" {
+		return nil, nil, nil
+	}
 	return &project, settings, nil
 }
 

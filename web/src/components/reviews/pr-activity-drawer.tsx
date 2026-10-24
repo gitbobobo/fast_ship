@@ -97,15 +97,19 @@ function DrawerBody({ item }: { item: ReviewPullRequestActivity }) {
         </SheetTitle>
         <div className="flex items-center gap-2 text-xs text-muted-foreground">
           <span className="truncate">{repo}</span>
-          <a
-            href={prUrl}
-            target="_blank"
-            rel="noreferrer"
-            className="inline-flex shrink-0 items-center gap-1 text-primary hover:underline"
-          >
-            在 GitHub 打开
-            <ExternalLink className="h-3 w-3" />
-          </a>
+          {/* pr_url 为空串（forgejo 集成行缺失等不可解析场景）时不渲染链接，
+              避免 href="" 跳回当前页。 */}
+          {prUrl !== "" && (
+            <a
+              href={prUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex shrink-0 items-center gap-1 text-primary hover:underline"
+            >
+              在 GitHub 打开
+              <ExternalLink className="h-3 w-3" />
+            </a>
+          )}
         </div>
       </SheetHeader>
 

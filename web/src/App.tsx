@@ -12,6 +12,7 @@ import { watchBotsIdentity } from "@/lib/hooks/use-bots";
 import { watchAIProvidersIdentity } from "@/lib/hooks/use-ai-providers";
 import { watchQuotaIdentity } from "@/lib/hooks/use-quota";
 import { watchDeploymentIdentity } from "@/lib/hooks/use-deployment";
+import { watchForgeIntegrationsIdentity } from "@/lib/hooks/use-forge-integrations";
 import { watchMembersIdentity } from "@/lib/hooks/use-members";
 import { watchReviewsIdentity } from "@/lib/hooks/use-reviews";
 
@@ -93,6 +94,7 @@ export default function App() {
     const stopAIProviders = watchAIProvidersIdentity(queryClient);
     const stopQuota = watchQuotaIdentity(queryClient);
     const stopDeployment = watchDeploymentIdentity(queryClient);
+    const stopForgeIntegrations = watchForgeIntegrationsIdentity(queryClient);
     const stopMembers = watchMembersIdentity(queryClient);
     const stopReviews = watchReviewsIdentity(queryClient);
     return () => {
@@ -102,6 +104,7 @@ export default function App() {
       stopAIProviders();
       stopQuota();
       stopDeployment();
+      stopForgeIntegrations();
       stopMembers();
       stopReviews();
     };
