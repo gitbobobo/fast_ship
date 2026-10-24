@@ -67,6 +67,17 @@ const MAINTENANCE_PURPOSE_LABELS: Record<string, string> = {
   nightly: "夜间整理",
 };
 
+const TOOL_CALL_STATUS_LABELS: Record<string, string> = {
+  pending_confirmation: "待确认",
+  queued: "排队中",
+  running: "运行中",
+  succeeded: "已成功",
+  failed: "已失败",
+  rejected: "已拒绝",
+  cancelled: "已取消",
+  not_executed: "未执行",
+};
+
 const labelOf = (map: Record<string, string>, value: string) =>
   map[value] ?? value;
 
@@ -310,7 +321,7 @@ function RequestRow({ request }: { request: BotUsageRequest }) {
                 {call.action ? `:${call.action}` : ""}
               </span>
               <Badge variant="secondary" className="h-4 px-1.5 text-[10px]">
-                {call.status}
+                {labelOf(TOOL_CALL_STATUS_LABELS, call.status)}
               </Badge>
               <span>耗时 {formatSpan(call.created_at, call.finished_at)}</span>
               {call.error_code && (

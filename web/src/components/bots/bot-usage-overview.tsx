@@ -48,7 +48,7 @@ export const USAGE_PRICE_NOTE =
 
 /** 未计价常见原因：与契约 unpriced_requests 的口径注释一致。 */
 export const UNPRICED_REASON_NOTE =
-  "常见原因：自定义提供商、目录无价、请求缺 usage 或旧版本记录";
+  "常见原因：自定义提供商、目录无价、请求缺用量数据或旧版本记录";
 
 /** 可空金额：未计价显示「—」，真实 $0（免费模型）照常显示。 */
 export function formatUsageCost(value: number | null | undefined): string {
