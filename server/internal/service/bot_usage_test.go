@@ -958,4 +958,27 @@ func TestBotUsageMaintenanceBeforeWindowNotCounted(t *testing.T) {
 	if !costEq(daySum, *seven.Totals.Cost) {
 		t.Fatalf("Σ按天 %.4f 应等于总花费 %.4f", daySum, *seven.Totals.Cost)
 	}
+
+	// cost_last_7d 同口径：窗口内 schedule run（自身 2.0）挂 10 天前维护
+	// 0.5——近 7 天只计 2.0，窗口外维护不摊进来。
+	task := seedScheduleTask(t, env, bot.ID, nil)
+	sched := seedUsageRun(t, env, bot.ID, func(r *model.BotRun) {
+		r.TriggerSource = model.BotTriggerSchedule
+		r.SessionKind = model.BotSessionKindSchedule
+		taskID := task.ID
+		r.ScheduleTaskID = &taskID
+		r.CostEstimate = ptrCost(2.0)
+	})
+	oldMaint2 := seedUsageMaintenance(t, env, bot.ID, &sched.ID, ptrCost(0.5))
+	if err := env.db.Model(&model.BotMaintenanceRun{}).Where("id = ?", oldMaint2.ID).
+		Update("created_at", time.Now().UTC().AddDate(0, 0, -10)).Error; err != nil {
+		t.Fatalf("backdate maintenance: %v", err)
+	}
+	tasks, err := env.bots.ListScheduleTasks(userID, bot.ID)
+	if err != nil {
+		t.Fatalf("list tasks: %v", err)
+	}
+	if len(tasks) != 1 || tasks[0].CostLast7d == nil || !costEq(*tasks[0].CostLast7d, 2.0) {
+		t.Fatalf("cost_last_7d 应为 2.0（窗口外维护不计），实得 %+v", tasks)
+	}
 }

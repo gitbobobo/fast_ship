@@ -865,10 +865,43 @@ func (s *BotService) ScheduleTaskCostsLast7d(userID, botID string, taskIDs []str
 	if err != nil {
 		return nil, err
 	}
-	// 关联维护成本按父 run 归集：schedule run 与连带主线一次取全。
-	maint, err := repo.MaintenanceCostsByParentRun(append(runIDs, mainIDs...))
+	// 关联维护与总览同口径只算窗口内发生的部分：父在窗口内的维护按维护
+	// 自身 created_at 落在 7 天窗口内计，窗口外维护不摊进近 7 天（总览桶
+	// 的 maintInWindowByParent 同规则）；父在窗口外的窗口内维护由下方反查
+	// 按父归属补记。
+	maintRows, err := repo.ListMaintenanceRunsInWindow([]string{botID}, windowStart, now)
 	if err != nil {
 		return nil, err
+	}
+	coveredParent := make(map[string]bool, len(runIDs)+len(mainIDs))
+	for _, id := range runIDs {
+		coveredParent[id] = true
+	}
+	for _, id := range mainIDs {
+		coveredParent[id] = true
+	}
+	maintIDs := make([]string, 0, len(maintRows))
+	for _, m := range maintRows {
+		maintIDs = append(maintIDs, m.ID)
+	}
+	maintAgg, err := repo.MaintenanceRequestAggregatesByRun(maintIDs)
+	if err != nil {
+		return nil, err
+	}
+	maint := make(map[string]*float64)
+	var lateParentIDs []string
+	for _, m := range maintRows {
+		if m.ParentRunID == nil {
+			continue
+		}
+		if coveredParent[*m.ParentRunID] {
+			agg := maintAgg[m.ID]
+			if agg.CostSum != nil {
+				maint[*m.ParentRunID] = botSumOptional(maint[*m.ParentRunID], agg.CostSum)
+			}
+		} else {
+			lateParentIDs = append(lateParentIDs, *m.ParentRunID)
+		}
 	}
 	for runID, cost := range maint {
 		taskID, ok := runTaskOf[runID]
@@ -893,25 +926,6 @@ func (s *BotService) ScheduleTaskCostsLast7d(userID, botID string, taskIDs []str
 	// 窗口内维护、父 run 在窗口外（与总览同口径：记日跟维护、桶跟父走）：
 	// 父是任务的 schedule run 或指向任务的连带主线时，维护也计入近 7 天。
 	// 父在窗口内的维护已由上面的 maint 映射覆盖，不重复累加。
-	maintRows, err := repo.ListMaintenanceRunsInWindow([]string{botID}, windowStart, now)
-	if err != nil {
-		return nil, err
-	}
-	coveredParent := make(map[string]bool, len(runIDs)+len(mainIDs))
-	for _, id := range runIDs {
-		coveredParent[id] = true
-	}
-	for _, id := range mainIDs {
-		coveredParent[id] = true
-	}
-	var lateParentIDs, lateMaintIDs []string
-	for _, m := range maintRows {
-		if m.ParentRunID == nil || coveredParent[*m.ParentRunID] {
-			continue
-		}
-		lateParentIDs = append(lateParentIDs, *m.ParentRunID)
-		lateMaintIDs = append(lateMaintIDs, m.ID)
-	}
 	if len(lateParentIDs) > 0 {
 		parentByID, err := repo.ListRunsByIDs(lateParentIDs)
 		if err != nil {
@@ -931,10 +945,6 @@ func (s *BotService) ScheduleTaskCostsLast7d(userID, botID string, taskIDs []str
 			}
 		}
 		lateTaskByRef, err := repo.ScheduleTaskIDsByRunIDs(lateRefIDs)
-		if err != nil {
-			return nil, err
-		}
-		maintAgg, err := repo.MaintenanceRequestAggregatesByRun(lateMaintIDs)
 		if err != nil {
 			return nil, err
 		}
