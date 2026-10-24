@@ -1032,3 +1032,32 @@ func TestBotUsageMaintenanceBeforeWindowNotCounted(t *testing.T) {
 		t.Fatalf("cost_last_7d 应为 2.0（窗口外维护不计），实得 %+v", tasks)
 	}
 }
+
+// 明细截断：请求数超过上限时保留**最新** 500 条（ordinal 最大），置
+// requests_truncated；截掉的是最早请求而非最新——明细页轮询关注最新活动。
+func TestBotUsageRunDetailTruncatesToNewest(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "usagetrunc")
+	bot := env.createBot(t, userID)
+	run := seedUsageRun(t, env, bot.ID, func(r *model.BotRun) {
+		r.CostEstimate = ptrCost(0.5)
+	})
+	for i := 0; i < usageRunDetailMaxRequests+1; i++ {
+		seedUsageRequest(t, env, run.ID, nil, "")
+	}
+	detail, err := env.bots.GetBotUsageRunDetail(userID, run.ID)
+	if err != nil {
+		t.Fatalf("run detail: %v", err)
+	}
+	if !detail.RequestsTruncated {
+		t.Fatalf("超出 %d 条时应置 requests_truncated", usageRunDetailMaxRequests)
+	}
+	if len(detail.Requests) != usageRunDetailMaxRequests {
+		t.Fatalf("请求数应截为 %d，实得 %d", usageRunDetailMaxRequests, len(detail.Requests))
+	}
+	first, last := detail.Requests[0], detail.Requests[len(detail.Requests)-1]
+	if first.Ordinal != 2 || last.Ordinal != int64(usageRunDetailMaxRequests+1) {
+		t.Fatalf("截断应保留最新 %d 条（ordinal 2..%d），实得 %d..%d",
+			usageRunDetailMaxRequests, usageRunDetailMaxRequests+1, first.Ordinal, last.Ordinal)
+	}
+}

@@ -741,14 +741,15 @@ func (s *BotService) GetBotUsageRunDetail(userID, runID string) (*api.BotUsageRu
 
 	repo := repository.NewBotUsageRepository(s.db)
 	// 明细请求数有上限：长跑 run 数百请求 × 非终态 5s 轮询会让响应体积
-	// 无界；超出部分截断并置 requests_truncated。
+	// 无界；截断保留**最新**的 500 条（仓库层已按 ordinal 正序返回最新
+	// limit+1 条，故去掉切片最前端的较旧那条），并置 requests_truncated。
 	requestRows, err := repo.ListRequestsByRun(run.ID, usageRunDetailMaxRequests+1)
 	if err != nil {
 		return nil, errs.ErrInternal
 	}
 	requestsTruncated := len(requestRows) > usageRunDetailMaxRequests
 	if requestsTruncated {
-		requestRows = requestRows[:usageRunDetailMaxRequests]
+		requestRows = requestRows[len(requestRows)-usageRunDetailMaxRequests:]
 	}
 	requestIDs := make([]string, 0, len(requestRows))
 	for _, r := range requestRows {
