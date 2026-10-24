@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Link } from "react-router";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { CalendarClock, ChevronRight, Loader2, Trash2 } from "lucide-react";
 import { toast } from "sonner";
@@ -233,6 +234,18 @@ export function BotScheduleSection({
                       {lastRunText(task.last_run)}
                     </span>
                   </button>
+                  {/* 近 7 天花费入口（INT-162）：可空是「未计价」显示「—」；
+                      跳总览页并定位到该任务行。不能放进上面的 button（交互嵌套）。 */}
+                  <Link
+                    to={`/bots/usage?task=${task.id}`}
+                    className="shrink-0 text-xs whitespace-nowrap text-muted-foreground hover:text-foreground hover:underline"
+                    title="该任务近 7 天花费；点击查看花费总览"
+                  >
+                    近 7 天{" "}
+                    {task.cost_last_7d != null
+                      ? formatCostEstimate(task.cost_last_7d)
+                      : "—"}
+                  </Link>
                   <EnabledSwitch
                     enabled={task.enabled}
                     pending={toggle.isPending}
@@ -442,17 +455,24 @@ export function BotScheduleTaskDialog({
                           <span className="text-xs text-muted-foreground">
                             {runTime(run)}
                           </span>
-                          {run.cost_estimate != null && (
-                            <span
-                              className="ml-auto text-xs text-muted-foreground"
-                              title="成本按内置目录单价估算，仅供参考；无价模型不显示"
-                            >
-                              ≈{formatCostEstimate(run.cost_estimate)}
-                            </span>
-                          )}
-                          <span
-                            className={`${run.cost_estimate == null ? "ml-auto " : ""}text-xs text-muted-foreground`}
+                          {/* INT-162：运行行始终可点进花费明细——未计价的运行
+                              同样有状态/错误/请求可看，金额位显示「—」
+                              （缺失 ≠ 0）；金额口径 display_cost_estimate
+                              含关联维护已计价。 */}
+                          <Link
+                            to={`/bots/usage/runs/${run.id}`}
+                            className="ml-auto text-xs text-muted-foreground hover:text-foreground hover:underline"
+                            title={
+                              run.display_cost_estimate != null
+                                ? "成本按内置目录单价估算（含关联维护），仅供参考；无价模型不显示"
+                                : "本运行未计价，点击查看花费明细"
+                            }
                           >
+                            {run.display_cost_estimate != null
+                              ? `≈${formatCostEstimate(run.display_cost_estimate)}`
+                              : "—"}
+                          </Link>
+                          <span className="text-xs text-muted-foreground">
                             {formatDuration(run.duration_ms)}
                           </span>
                           {run.status === "running" && (

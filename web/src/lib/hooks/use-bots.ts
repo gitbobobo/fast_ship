@@ -7,6 +7,7 @@ import {
 import {
   botApi,
   type BotConnectionTestInput,
+  type BotUsageRange,
   type CreateBotInput,
   type UpdateBotInput,
 } from "@/lib/api/bots";
@@ -77,6 +78,20 @@ export const botKeys = {
     "schedule-task-runs",
     botId,
     taskId,
+  ],
+  /** 花费总览（INT-162）：botId 空串表示全部机器人。 */
+  usage: (userId: string | null, range: BotUsageRange, botId: string) => [
+    BOTS_ROOT,
+    userId,
+    "usage",
+    range,
+    botId,
+  ],
+  usageRun: (userId: string | null, runId: string) => [
+    BOTS_ROOT,
+    userId,
+    "usage-run",
+    runId,
   ],
 };
 
@@ -285,5 +300,50 @@ export function useSetBotScheduleTaskEnabled(botId: string) {
       queryClient.invalidateQueries({
         queryKey: botKeys.scheduleTasks(userId, botId),
       }),
+  });
+}
+
+/**
+ * 花费总览（INT-162）：botId 缺省为全部机器人总览。usage 数据没有推送源，
+ * 窗口聚焦补一次重取；机器人 run 到终态时聊天 hook 另按前缀失效。
+ */
+export function useBotUsage(range: BotUsageRange, botId?: string) {
+  const userId = useUserId();
+  return useQuery({
+    queryKey: botKeys.usage(userId, range, botId ?? ""),
+    queryFn: async ({ signal }) =>
+      (await botApi.usage({ range, botId }, signal)).data,
+    enabled: Boolean(userId),
+    refetchOnMount: "always",
+    refetchOnWindowFocus: true,
+  });
+}
+
+/** 未终态 run 的花费仍在累计：明细页按 5s 轮询，拿到终态后停。 */
+export const BOT_USAGE_RUN_POLL_MS = 5_000;
+
+const TERMINAL_USAGE_RUN_STATUSES: ReadonlySet<string> = new Set([
+  "completed",
+  "failed",
+  "stopped",
+  "skipped",
+]);
+
+/** 单次运行花费明细。 */
+export function useBotUsageRun(runId: string) {
+  const userId = useUserId();
+  return useQuery({
+    queryKey: botKeys.usageRun(userId, runId),
+    queryFn: async ({ signal }) => (await botApi.usageRun(runId, signal)).data,
+    enabled: Boolean(userId && runId),
+    refetchOnMount: "always",
+    refetchOnWindowFocus: true,
+    refetchInterval: (query) => {
+      const status = query.state.data?.run.status;
+      if (status == null || TERMINAL_USAGE_RUN_STATUSES.has(status)) {
+        return false;
+      }
+      return BOT_USAGE_RUN_POLL_MS;
+    },
   });
 }

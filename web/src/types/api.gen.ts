@@ -2999,6 +2999,57 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/bots/usage": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 花费总览（按天 / 按机器人 / 按定时任务，INT-162）
+         * @description 只用现有账本（bot_runs / bot_model_requests / bot_maintenance_*）实时
+         *     聚合，不新增表、不回填。窗口按 users.timezone 切日，空值回退部署配置
+         *     bots.memory.timezone，再回退 UTC。金额一律来自内置 models.dev 目录单价
+         *     估算：目录无价、自定义提供商、缺 usage 的请求为「未计价」——已计价
+         *     字段缺省为 null（缺失 ≠ 0），未计价请求计入 unpriced_requests。
+         *     归属：session_kind='schedule' 的 run 按 schedule_task_id 归定时任务；
+         *     触发来源 schedule_event 的主线 run 经 trigger_key 反查任务，计入该
+         *     任务 linked_main_cost（近似，一次主线 run 可能同时处理多条输入），
+         *     解析不出时计入主线；维护请求经 parent_run_id 计入所属 run 的显示
+         *     成本，无父 run 的计入机器人维护项。仅返回当前用户自己的机器人数据。
+         */
+        get: operations["getBotUsage"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/bots/usage/runs/{runId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 单次运行花费明细（INT-162）
+         * @description 单次 run 的完整账单：每次模型请求（含失败重试）及其工具调用、关联的
+         *     压缩/维护运行与请求。display_cost = 自身已计价成本 + 关联维护已计价
+         *     成本；不改写 run 的 cost_estimate 列。
+         */
+        get: operations["getBotUsageRun"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/bots/{id}": {
         parameters: {
             query?: never;
@@ -6140,6 +6191,11 @@ export interface components {
             cost_estimate?: number | null;
             /** @description 计价来源（catalog）；cost_estimate 为 null 时同 null */
             cost_source?: string | null;
+            /**
+             * Format: double
+             * @description 显示口径成本（INT-162）：本 run 已计价成本 + 关联维护运行已计价成本；两者都为 null 时为 null。cost_estimate 列本身口径不变
+             */
+            display_cost_estimate: number | null;
             error_code?: string | null;
             error_message?: string | null;
             /** Format: date-time */
@@ -6176,6 +6232,11 @@ export interface components {
              * @description 状态最近一次写入时间（UTC）；无状态为 null
              */
             state_updated_at: string | null;
+            /**
+             * Format: double
+             * @description 近 7 天该任务已计价成本合计（schedule run 自身+关联维护 + 连带主线成本，INT-162）；无已计价记录为 null
+             */
+            cost_last_7d: number | null;
             /** Format: date-time */
             created_at: string;
             /** Format: date-time */
@@ -6219,6 +6280,307 @@ export interface components {
             cost_estimate?: number;
             /** @description 计价来源（catalog） */
             cost_source?: string;
+            /**
+             * Format: double
+             * @description 显示口径成本（INT-162）：本 run 已计价成本 + 关联维护运行已计价成本；两者都为 null 时为 null
+             */
+            display_cost_estimate: number | null;
+        };
+        BotUsageTotals: {
+            /**
+             * Format: double
+             * @description 窗口内已计价成本合计（USD）；无任何已计价请求为 null（缺失 ≠ 0）
+             */
+            cost: number | null;
+            /**
+             * Format: double
+             * @description cost / 窗口天数；cost 为 null 时同 null
+             */
+            daily_average: number | null;
+            /**
+             * Format: int64
+             * @description 模型请求总数（主线/定时 + 维护）
+             */
+            total_requests: number;
+            /** Format: int64 */
+            priced_requests: number;
+            /**
+             * Format: int64
+             * @description 未计价请求数（自定义提供商、目录无价、缺 usage、v0.1.63 前旧记录）
+             */
+            unpriced_requests: number;
+        };
+        BotUsageDay: {
+            /** @description 生效时区的当地日期 YYYY-MM-DD；窗口内每天一行（含无数据日） */
+            date: string;
+            /**
+             * Format: double
+             * @description 当日已计价成本合计；全未计价或无记录为 0
+             */
+            cost: number;
+            /** @description 当日有模型请求（含未计价）的机器人 */
+            bots: {
+                bot_id: string;
+                /** Format: double */
+                cost: number;
+            }[];
+        };
+        BotUsageBot: {
+            bot_id: string;
+            name: string;
+            /**
+             * Format: double
+             * @description 已计价合计 = cost_main + cost_schedule + cost_maintenance
+             */
+            cost: number | null;
+            /**
+             * Format: double
+             * @description 主线桶：非 schedule_event 触发的 main run（自身成本+关联维护）
+             */
+            cost_main: number | null;
+            /**
+             * Format: double
+             * @description 定时任务桶：schedule run（自身+关联维护）+ schedule_event 连带主线成本
+             */
+            cost_schedule: number | null;
+            /**
+             * Format: double
+             * @description cost_schedule 中连带主线成本部分（近似，UI 标注）
+             */
+            cost_schedule_linked_approx: number | null;
+            /**
+             * Format: double
+             * @description 无父 run 的维护请求合计（如夜间整理）
+             */
+            cost_maintenance: number | null;
+            /**
+             * Format: int64
+             * @description 窗口内 run 数（main + schedule）
+             */
+            runs: number;
+            /**
+             * Format: double
+             * @description 单次运行平均显示成本（自身+关联维护）；只统计有已计价成本的 run
+             */
+            avg_run_cost: number | null;
+            /** Format: double */
+            max_run_cost: number | null;
+            /**
+             * Format: double
+             * @description cached / prompt，只算 usage 完整的请求；无完整 usage 为 null
+             */
+            cache_hit_rate: number | null;
+            /** Format: int64 */
+            unpriced_requests: number;
+        };
+        BotUsageScheduleTask: {
+            /** @description 聚合键；已删除任务仍取其运行记录上的 schedule_task_id */
+            task_id: string;
+            bot_id: string;
+            bot_name: string;
+            /** @description 现存任务名；已删除任务为空串（UI 显示「已删除的任务」） */
+            name: string;
+            deleted: boolean;
+            /** @description 已删除任务恒 false */
+            enabled: boolean;
+            /** @description 已删除任务为空串 */
+            cron_expression: string;
+            /** @description 任务 IANA 时区；空串 = UTC */
+            timezone: string;
+            /** Format: int64 */
+            runs: number;
+            /** Format: int64 */
+            failed: number;
+            /** Format: int64 */
+            skipped: number;
+            /**
+             * Format: double
+             * @description schedule run 自身+关联维护已计价合计（不含连带主线）
+             */
+            cost: number | null;
+            /** Format: double */
+            avg_run_cost: number | null;
+            /** Format: double */
+            max_run_cost: number | null;
+            /**
+             * Format: double
+             * @description schedule_event 主线 run 的连带成本（近似）
+             */
+            linked_main_cost: number | null;
+            /**
+             * Format: double
+             * @description 单次平均 × 未来 30 天触发次数（parseScheduleCron）；停用、已删除、无已计价平均或 cron 解析失败为 null
+             */
+            estimated_monthly_cost: number | null;
+        };
+        BotUsageOverview: {
+            /** @enum {string} */
+            range: "today" | "7d" | "30d";
+            /** @description 实际生效的切日时区（IANA） */
+            timezone: string;
+            /**
+             * Format: date-time
+             * @description 统计窗口起点 UTC（含）
+             */
+            start: string;
+            /**
+             * Format: date-time
+             * @description 统计窗口终点 UTC（不含，即查询时刻）
+             */
+            end: string;
+            totals: components["schemas"]["BotUsageTotals"];
+            days: components["schemas"]["BotUsageDay"][];
+            bots: components["schemas"]["BotUsageBot"][];
+            schedule_tasks: components["schemas"]["BotUsageScheduleTask"][];
+        };
+        BotUsageRun: {
+            id: string;
+            bot_id: string;
+            bot_name: string;
+            /** @description main / schedule */
+            session_kind: string;
+            schedule_task_id?: string | null;
+            /** @description 现存任务名；任务已删除或无关联时为 null */
+            schedule_task_name?: string | null;
+            trigger_source: string;
+            trigger_key: string;
+            status: string;
+            summary: string;
+            silent: boolean;
+            /** Format: date-time */
+            scheduled_for?: string | null;
+            /** Format: int64 */
+            prompt_tokens?: number | null;
+            /** Format: int64 */
+            completion_tokens?: number | null;
+            /** Format: int64 */
+            total_tokens?: number | null;
+            /** Format: int64 */
+            cached_tokens?: number | null;
+            usage_complete: boolean;
+            /** Format: double */
+            cost_estimate: number | null;
+            cost_source: string | null;
+            /**
+             * Format: double
+             * @description 关联维护运行已计价成本合计
+             */
+            maintenance_cost: number | null;
+            /**
+             * Format: double
+             * @description cost_estimate + maintenance_cost；都为 null 时为 null
+             */
+            display_cost: number | null;
+            error_code?: string | null;
+            error_message?: string | null;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            started_at?: string | null;
+            /** Format: date-time */
+            finished_at?: string | null;
+        };
+        BotUsageToolCall: {
+            id: string;
+            tool_name: string;
+            action: string;
+            status: string;
+            error_code?: string | null;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            finished_at?: string | null;
+        };
+        BotUsageRequest: {
+            id: string;
+            /** Format: int64 */
+            ordinal: number;
+            /** @description running / succeeded / failed */
+            status: string;
+            /** @description 与同 run 更早请求 request_hash 相同即视为重试（每次重试单独一行） */
+            is_retry: boolean;
+            /** Format: int64 */
+            input_through_seq: number;
+            /** Format: int64 */
+            input_tokens_estimate: number;
+            input_estimator: string;
+            /** Format: int64 */
+            prompt_tokens?: number | null;
+            /** Format: int64 */
+            cached_tokens?: number | null;
+            /** Format: int64 */
+            completion_tokens?: number | null;
+            /** Format: int64 */
+            total_tokens?: number | null;
+            /** Format: int64 */
+            tools_tokens_estimate: number;
+            usage_complete: boolean;
+            /** Format: double */
+            cost_estimate: number | null;
+            cost_source: string | null;
+            /** Format: date-time */
+            started_at: string;
+            /** Format: date-time */
+            first_delta_at?: string | null;
+            /** Format: date-time */
+            finished_at?: string | null;
+            error_code?: string | null;
+            error_message?: string | null;
+            tool_calls: components["schemas"]["BotUsageToolCall"][];
+        };
+        BotUsageMaintenanceRequest: {
+            id: string;
+            /** Format: int64 */
+            ordinal: number;
+            /** @description summary / archive / nightly */
+            purpose: string;
+            model: string;
+            /** @description running / succeeded / failed */
+            status: string;
+            usage_complete: boolean;
+            /** Format: int64 */
+            prompt_tokens?: number | null;
+            /** Format: int64 */
+            cached_tokens?: number | null;
+            /** Format: int64 */
+            completion_tokens?: number | null;
+            /** Format: int64 */
+            total_tokens?: number | null;
+            /** Format: double */
+            cost_estimate: number | null;
+            cost_source: string | null;
+            error_code?: string | null;
+            error_message?: string | null;
+            /** Format: date-time */
+            started_at: string;
+            /** Format: date-time */
+            finished_at?: string | null;
+        };
+        BotUsageMaintenanceRun: {
+            id: string;
+            /** @description compaction / nightly */
+            kind: string;
+            /** @description running / succeeded / failed */
+            status: string;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            started_at?: string | null;
+            /** Format: date-time */
+            finished_at?: string | null;
+            /**
+             * Format: double
+             * @description 本维护运行已计价请求合计
+             */
+            cost_estimate: number | null;
+            requests: components["schemas"]["BotUsageMaintenanceRequest"][];
+        };
+        BotUsageRunDetail: {
+            run: components["schemas"]["BotUsageRun"];
+            /** @description run 的每次模型请求（含失败重试），按 ordinal 正序 */
+            requests: components["schemas"]["BotUsageRequest"][];
+            /** @description parent_run_id 指向本 run 的维护运行及其请求 */
+            maintenance_runs: components["schemas"]["BotUsageMaintenanceRun"][];
         };
         BotToolCall: {
             /** @description 平台调用 ID，同时是执行幂等键 */
@@ -13745,6 +14107,64 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getBotUsage: {
+        parameters: {
+            query?: {
+                /** @description 统计窗口；today = 生效时区的当天 */
+                range?: "today" | "7d" | "30d";
+                /** @description 限定单个机器人（须属于当前用户）；缺省为全部机器人总览 */
+                bot_id?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 花费总览 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"] & {
+                        data?: components["schemas"]["BotUsageOverview"];
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getBotUsageRun: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                runId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 运行花费明细 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"] & {
+                        data?: components["schemas"]["BotUsageRunDetail"];
+                    };
+                };
+            };
             401: components["responses"]["Unauthorized"];
             404: components["responses"]["NotFound"];
             500: components["responses"]["InternalError"];
