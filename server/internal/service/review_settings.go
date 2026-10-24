@@ -133,6 +133,12 @@ func (s *ReviewService) UpdateSettings(ctx context.Context, userID, projectID st
 	}
 
 	if input.Enabled {
+		// Forgejo 代码仓本期不进 GitHub 审查链路（派发、diff 读取、行内评论
+		// 都依赖 GitHub API 与 App 安装）：开启前显式拒绝，不落一条只会一直
+		// 失败的设置。
+		if project.CodeIntegrationID != "" {
+			return nil, reviewComboError("Forgejo 代码仓的 PR 审查将在后续版本接入")
+		}
 		if cOwner, cRepo := project.CodeRepo(); cOwner == "" || cRepo == "" {
 			return nil, errs.ErrProjectGitHubNotConfigured
 		}

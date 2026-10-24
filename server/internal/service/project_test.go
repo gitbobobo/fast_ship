@@ -19,6 +19,7 @@ func TestParseRepositoryURL(t *testing.T) {
 	tests := []struct {
 		name        string
 		input       string
+		wantHost    string
 		wantOwner   string
 		wantRepo    string
 		wantErr     bool
@@ -27,6 +28,7 @@ func TestParseRepositoryURL(t *testing.T) {
 		{
 			name:      "owner/repo format",
 			input:     "godbobo/fast_ship",
+			wantHost:  "github.com",
 			wantOwner: "godbobo",
 			wantRepo:  "fast_ship",
 			wantErr:   false,
@@ -34,6 +36,7 @@ func TestParseRepositoryURL(t *testing.T) {
 		{
 			name:      "https full url",
 			input:     "https://github.com/godbobo/fast_ship",
+			wantHost:  "github.com",
 			wantOwner: "godbobo",
 			wantRepo:  "fast_ship",
 			wantErr:   false,
@@ -41,6 +44,7 @@ func TestParseRepositoryURL(t *testing.T) {
 		{
 			name:      "https with .git suffix",
 			input:     "https://github.com/godbobo/fast_ship.git",
+			wantHost:  "github.com",
 			wantOwner: "godbobo",
 			wantRepo:  "fast_ship",
 			wantErr:   false,
@@ -48,6 +52,7 @@ func TestParseRepositoryURL(t *testing.T) {
 		{
 			name:      "http url",
 			input:     "http://github.com/godbobo/fast_ship",
+			wantHost:  "github.com",
 			wantOwner: "godbobo",
 			wantRepo:  "fast_ship",
 			wantErr:   false,
@@ -55,6 +60,23 @@ func TestParseRepositoryURL(t *testing.T) {
 		{
 			name:      "github.com prefix without protocol",
 			input:     "github.com/godbobo/fast_ship",
+			wantHost:  "github.com",
+			wantOwner: "godbobo",
+			wantRepo:  "fast_ship",
+			wantErr:   false,
+		},
+		{
+			name:      "github.com host upper case",
+			input:     "GitHub.COM/godbobo/fast_ship",
+			wantHost:  "github.com",
+			wantOwner: "godbobo",
+			wantRepo:  "fast_ship",
+			wantErr:   false,
+		},
+		{
+			name:      "https github host upper case",
+			input:     "https://GitHub.com/godbobo/fast_ship",
+			wantHost:  "github.com",
 			wantOwner: "godbobo",
 			wantRepo:  "fast_ship",
 			wantErr:   false,
@@ -64,11 +86,13 @@ func TestParseRepositoryURL(t *testing.T) {
 			input:     "https://github.com/godbobo/fast_ship/",
 			wantOwner: "godbobo",
 			wantRepo:  "fast_ship",
+			wantHost:  "github.com",
 			wantErr:   false,
 		},
 		{
 			name:      "with leading/trailing spaces",
 			input:     "  godbobo/fast_ship  ",
+			wantHost:  "github.com",
 			wantOwner: "godbobo",
 			wantRepo:  "fast_ship",
 			wantErr:   false,
@@ -76,6 +100,51 @@ func TestParseRepositoryURL(t *testing.T) {
 		{
 			name:      "with extra path segments",
 			input:     "https://github.com/godbobo/fast_ship/issues",
+			wantHost:  "github.com",
+			wantOwner: "godbobo",
+			wantRepo:  "fast_ship",
+			wantErr:   false,
+		},
+		// 裸 host/o/r：自建 Forgejo 等非 github 主机（INT-166）。无显式端口
+		// 时按 scheme 补默认端口（无 scheme / https → 443，http → 80）。
+		{
+			name:      "bare non-github host",
+			input:     "git.example.com/godbobo/fast_ship",
+			wantHost:  "git.example.com:443",
+			wantOwner: "godbobo",
+			wantRepo:  "fast_ship",
+			wantErr:   false,
+		},
+		{
+			name:      "https non-github host",
+			input:     "https://git.example.com/godbobo/fast_ship",
+			wantHost:  "git.example.com:443",
+			wantOwner: "godbobo",
+			wantRepo:  "fast_ship",
+			wantErr:   false,
+		},
+		{
+			name:      "http non-github host",
+			input:     "http://git.example.com/godbobo/fast_ship",
+			wantHost:  "git.example.com:80",
+			wantOwner: "godbobo",
+			wantRepo:  "fast_ship",
+			wantErr:   false,
+		},
+		{
+			// 「.git + 尾斜杠」组合的旧行为照旧：修剪顺序是先 .git 后 /，
+			// 剥不到 .git，repo 名保留后缀（与 github.com 形态同一口径）。
+			name:      "https non-github host with port",
+			input:     "https://git.example.com:8443/godbobo/fast_ship.git/",
+			wantHost:  "git.example.com:8443",
+			wantOwner: "godbobo",
+			wantRepo:  "fast_ship.git",
+			wantErr:   false,
+		},
+		{
+			name:      "non-github host upper case",
+			input:     "https://Git.Example.com/godbobo/fast_ship",
+			wantHost:  "git.example.com:443",
 			wantOwner: "godbobo",
 			wantRepo:  "fast_ship",
 			wantErr:   false,
@@ -125,6 +194,7 @@ func TestParseRepositoryURL(t *testing.T) {
 		{
 			name:      "repo with dot and hyphen",
 			input:     "godbobo/fast-ship.v2",
+			wantHost:  "github.com",
 			wantOwner: "godbobo",
 			wantRepo:  "fast-ship.v2",
 			wantErr:   false,
@@ -132,6 +202,7 @@ func TestParseRepositoryURL(t *testing.T) {
 		{
 			name:      "owner with underscore",
 			input:     "god_bobo/fast-ship",
+			wantHost:  "github.com",
 			wantOwner: "god_bobo",
 			wantRepo:  "fast-ship",
 			wantErr:   false,
@@ -140,7 +211,7 @@ func TestParseRepositoryURL(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotOwner, gotRepo, err := parseRepositoryURL(tt.input)
+			gotHost, gotOwner, gotRepo, err := parseRepositoryURL(tt.input)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("expected error containing %q, got nil", tt.errContains)
@@ -153,6 +224,9 @@ func TestParseRepositoryURL(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
+			if gotHost != tt.wantHost {
+				t.Errorf("host = %q, want %q", gotHost, tt.wantHost)
+			}
 			if gotOwner != tt.wantOwner {
 				t.Errorf("owner = %q, want %q", gotOwner, tt.wantOwner)
 			}
@@ -163,8 +237,37 @@ func TestParseRepositoryURL(t *testing.T) {
 	}
 }
 
+// 主机归一键：仓库 URL 与集成 base_url 双方都归一成「小写 host + 端口
+// （空端口按 scheme 缺省 443/80）」后比较（INT-166）。
+func TestRepoHostKeys(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		got  string
+		want string
+	}{
+		{"bare host assumes https default", repoHostKey("git.example.com"), "git.example.com:443"},
+		{"explicit port kept", repoHostKey("git.example.com:8443"), "git.example.com:8443"},
+		{"host lower cased", repoHostKey("Git.Example.com"), "git.example.com:443"},
+		{"ipv6 brackets stripped", repoHostKey("[::1]:3000"), "::1:3000"},
+		{"https base default port", forgeBaseHostKey("https://git.example.com"), "git.example.com:443"},
+		{"http base default port", forgeBaseHostKey("http://git.lan"), "git.lan:80"},
+		{"base explicit port", forgeBaseHostKey("https://git.example.com:8443"), "git.example.com:8443"},
+		{"base trailing slash", forgeBaseHostKey("https://git.example.com/"), "git.example.com:443"},
+		{"base upper host", forgeBaseHostKey("HTTPS://GIT.EXAMPLE.COM"), "git.example.com:443"},
+		{"base invalid", forgeBaseHostKey("not a url"), ""},
+		{"scheme default differs", forgeBaseHostKey("http://git.lan:80") + "|" + repoHostKey("git.lan"), "git.lan:80|git.lan:443"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.got != tc.want {
+				t.Fatalf("got %q, want %q", tc.got, tc.want)
+			}
+		})
+	}
+}
+
 func newTestProjectService(svc *testServices) *ProjectService {
-	return NewProjectService(svc.projectRepo, svc.versionRepo, svc.syncStateRepo, svc.tokenRepo, svc.storage, svc.cfg, zap.NewNop())
+	return NewProjectService(svc.projectRepo, svc.versionRepo, svc.syncStateRepo, svc.tokenRepo, svc.storage, svc.cfg, zap.NewNop(),
+		repository.NewForgeIntegrationRepository(svc.db))
 }
 
 func TestProjectServiceCreate_WithoutGitHub(t *testing.T) {
@@ -1070,5 +1173,227 @@ func TestProjectRepoUpdate_CodeRepoSyncsReviewSettings(t *testing.T) {
 	}
 	if gotFallback.Enabled || gotFallback.RepoFullName != "new/repo" {
 		t.Fatalf("fallback 项目改公开仓库应停用并刷新: enabled=%v repo=%q", gotFallback.Enabled, gotFallback.RepoFullName)
+	}
+}
+
+// createTestForgeIntegration 测试用 forgejo 集成行：base_url 原样落库
+// （生产保存时已归一，用例里直接写归一后的形态）。
+func createTestForgeIntegration(t *testing.T, db *gorm.DB, baseURL string) *model.ForgeIntegration {
+	t.Helper()
+	row := &model.ForgeIntegration{
+		ID:         uuid.NewString(),
+		Kind:       model.ForgeIntegrationKindForgejo,
+		Name:       "forge-" + baseURL,
+		BaseURL:    baseURL,
+		APIBaseURL: baseURL + "/api/v1",
+		CreatedAt:  time.Now().UTC(),
+		UpdatedAt:  time.Now().UTC(),
+	}
+	if err := db.Create(row).Error; err != nil {
+		t.Fatalf("create forge integration: %v", err)
+	}
+	return row
+}
+
+// 项目↔集成绑定（INT-166）创建侧：代码仓 URL 命中已配置 forgejo 主机 →
+// code_integration_id 落该集成 id；公开仓 URL 非 github 主机 → 40001 明确
+// 报错（命中 forgejo 与未匹配两种消息）；public_integration_id 恒为空。
+func TestProjectServiceCreate_ForgeIntegrationBinding(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-forge-bind")
+	forgeSvc := newTestProjectService(svc)
+	forge := createTestForgeIntegration(t, svc.db, "https://git.example.com")
+	forgePort := createTestForgeIntegration(t, svc.db, "https://git.local:8443")
+
+	// 命中 forgejo：code_integration_id 落集成 id，公开仓引用列为空。
+	created, err := forgeSvc.Create(user.ID, &CreateProjectRequest{
+		Name:              "forge-bind",
+		RepositoryUrl:     api.Ptr("https://github.com/liuyincs/musiver"),
+		CodeRepositoryUrl: api.Ptr("git.example.com/gitbobobo/musiver.git"),
+	})
+	if err != nil {
+		t.Fatalf("create with forgejo code repo: %v", err)
+	}
+	var stored model.Project
+	if err := svc.db.First(&stored, "id = ?", created.Id).Error; err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if stored.CodeIntegrationID != forge.ID {
+		t.Fatalf("code_integration_id = %q, want %q", stored.CodeIntegrationID, forge.ID)
+	}
+	if stored.CodeGithubOwner != "gitbobobo" || stored.CodeGithubRepo != "musiver" {
+		t.Fatalf("code repo = %q/%q", stored.CodeGithubOwner, stored.CodeGithubRepo)
+	}
+	if stored.PublicIntegrationID != "" {
+		t.Fatalf("public_integration_id 应恒为空, got %q", stored.PublicIntegrationID)
+	}
+	if created.CodeIntegrationId == nil || *created.CodeIntegrationId != forge.ID {
+		t.Fatalf("响应应带出集成 id, got %v", created.CodeIntegrationId)
+	}
+
+	// 自定义端口：带端口的 URL 命中带端口的集成。
+	withPort, err := forgeSvc.Create(user.ID, &CreateProjectRequest{
+		Name:              "forge-bind-port",
+		CodeRepositoryUrl: api.Ptr("https://git.local:8443/o/r"),
+	})
+	if err != nil {
+		t.Fatalf("create with ported forgejo: %v", err)
+	}
+	var storedPort model.Project
+	if err := svc.db.First(&storedPort, "id = ?", withPort.Id).Error; err != nil {
+		t.Fatalf("reload 2: %v", err)
+	}
+	if storedPort.CodeIntegrationID != forgePort.ID {
+		t.Fatalf("ported code_integration_id = %q, want %q", storedPort.CodeIntegrationID, forgePort.ID)
+	}
+
+	// 端口不匹配（缺省 443 vs 配置的 8443）→ 未匹配。
+	_, err = forgeSvc.Create(user.ID, &CreateProjectRequest{
+		Name:              "forge-bind-port-mismatch",
+		CodeRepositoryUrl: api.Ptr("https://git.local/o/r"),
+	})
+	appErr, ok := err.(*errs.AppError)
+	if !ok || appErr.Code != errs.ErrInvalidParams.Code || !strings.Contains(appErr.Message, "未匹配任何已配置集成") {
+		t.Fatalf("expected 40001 未匹配, got %v", err)
+	}
+
+	// http 集成（allow_private_network 场景）：URL 也必须显式写 http://
+	// 才能命中——http scheme 归一到 :80 与 :443 的 https 集成互不混淆。
+	forgeHTTP := createTestForgeIntegration(t, svc.db, "http://git.lan")
+	httpBound, err := forgeSvc.Create(user.ID, &CreateProjectRequest{
+		Name:              "forge-bind-http",
+		CodeRepositoryUrl: api.Ptr("http://git.lan/o/r"),
+	})
+	if err != nil {
+		t.Fatalf("create with http forgejo: %v", err)
+	}
+	var storedHTTP model.Project
+	if err := svc.db.First(&storedHTTP, "id = ?", httpBound.Id).Error; err != nil {
+		t.Fatalf("reload http: %v", err)
+	}
+	if storedHTTP.CodeIntegrationID != forgeHTTP.ID {
+		t.Fatalf("http code_integration_id = %q, want %q", storedHTTP.CodeIntegrationID, forgeHTTP.ID)
+	}
+	// 同一主机 https 写法（git.lan:443）不命中 http 集成（git.lan:80）。
+	_, err = forgeSvc.Create(user.ID, &CreateProjectRequest{
+		Name:              "forge-bind-http-mismatch",
+		CodeRepositoryUrl: api.Ptr("git.lan/o/r"),
+	})
+	appErr, ok = err.(*errs.AppError)
+	if !ok || appErr.Code != errs.ErrInvalidParams.Code || !strings.Contains(appErr.Message, "未匹配任何已配置集成") {
+		t.Fatalf("expected 40001 scheme mismatch, got %v", err)
+	}
+
+	// 未知主机 → 明确报错，不再静默解析成 owner。
+	_, err = forgeSvc.Create(user.ID, &CreateProjectRequest{
+		Name:          "unknown-host",
+		RepositoryUrl: api.Ptr("https://nowhere.example.org/o/r"),
+	})
+	appErr, ok = err.(*errs.AppError)
+	if !ok || appErr.Code != errs.ErrInvalidParams.Code || !strings.Contains(appErr.Message, "nowhere.example.org") {
+		t.Fatalf("expected 40001 unknown host, got %v", err)
+	}
+
+	// 公开仓命中 forgejo 集成 → 拒绝且消息点明「公开仓库仅支持 GitHub」。
+	_, err = forgeSvc.Create(user.ID, &CreateProjectRequest{
+		Name:          "public-forgejo",
+		RepositoryUrl: api.Ptr("https://git.example.com/o/r"),
+	})
+	appErr, ok = err.(*errs.AppError)
+	if !ok || appErr.Code != errs.ErrInvalidParams.Code || !strings.Contains(appErr.Message, "公开仓库仅支持 GitHub") {
+		t.Fatalf("expected 40001 public GitHub-only, got %v", err)
+	}
+}
+
+// 项目↔集成绑定（INT-166）更新侧三态与归一：显式空清空代码仓时集成绑定
+// 一并清；替换时按新 host 重新派生；forgejo 代码仓与 github 公开仓同
+// owner/repo 不归一（归一会丢集成绑定）。
+func TestProjectServiceUpdate_ForgeIntegrationBinding(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-forge-bind-upd")
+	projectSvc := newTestProjectService(svc)
+	forge := createTestForgeIntegration(t, svc.db, "https://git.example.com")
+
+	created, err := projectSvc.Create(user.ID, &CreateProjectRequest{
+		Name:              "forge-bind-upd",
+		RepositoryUrl:     api.Ptr("liuyincs/musiver"),
+		CodeRepositoryUrl: api.Ptr("git.example.com/gitbobobo/musiver"),
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	project, err := svc.projectRepo.FindByID(created.Id, user.ID)
+	if err != nil {
+		t.Fatalf("find: %v", err)
+	}
+
+	storedBinding := func() (string, string, string) {
+		t.Helper()
+		var stored model.Project
+		if err := svc.db.First(&stored, "id = ?", project.ID).Error; err != nil {
+			t.Fatalf("reload project: %v", err)
+		}
+		return stored.CodeGithubOwner, stored.CodeGithubOwner + "/" + stored.CodeGithubRepo, stored.CodeIntegrationID
+	}
+
+	// key 缺省：保留绑定。
+	if _, err := projectSvc.Update(project.ID, user.ID, &UpdateProjectRequest{
+		Description: api.Ptr("binding untouched"),
+	}); err != nil {
+		t.Fatalf("update without code repo: %v", err)
+	}
+	if owner, _, id := storedBinding(); id != forge.ID || owner != "gitbobobo" {
+		t.Fatalf("expected binding preserved, got owner=%q id=%q", owner, id)
+	}
+
+	// 替换为 github 代码仓 → 集成绑定清空。
+	if _, err := projectSvc.Update(project.ID, user.ID, &UpdateProjectRequest{
+		CodeRepositoryUrl: OptionalStringUpdate{Set: true, Value: "https://github.com/other/code"},
+	}); err != nil {
+		t.Fatalf("update to github code repo: %v", err)
+	}
+	if owner, _, id := storedBinding(); owner != "other" || id != "" {
+		t.Fatalf("expected github binding cleared, got owner=%q id=%q", owner, id)
+	}
+
+	// 替换为 forgejo 代码仓 → 绑定重新派生。
+	if _, err := projectSvc.Update(project.ID, user.ID, &UpdateProjectRequest{
+		CodeRepositoryUrl: OptionalStringUpdate{Set: true, Value: "git.example.com/gitbobobo/musiver"},
+	}); err != nil {
+		t.Fatalf("update to forgejo code repo: %v", err)
+	}
+	if _, _, id := storedBinding(); id != forge.ID {
+		t.Fatalf("expected binding %q, got %q", forge.ID, id)
+	}
+
+	// 显式空：代码仓与集成绑定一起清。
+	if _, err := projectSvc.Update(project.ID, user.ID, &UpdateProjectRequest{
+		CodeRepositoryUrl: OptionalStringUpdate{Set: true},
+	}); err != nil {
+		t.Fatalf("clear code repo: %v", err)
+	}
+	if owner, full, id := storedBinding(); owner != "" || full != "/" || id != "" {
+		t.Fatalf("expected cleared, got owner=%q full=%q id=%q", owner, full, id)
+	}
+
+	// 跨 host 同 owner/repo 不归一：forgejo 代码仓 liuyincs/MUSIVER 与 github
+	// 公开仓 liuyincs/musiver 大小写不敏感相同，但不是同一仓库。
+	if _, err := projectSvc.Update(project.ID, user.ID, &UpdateProjectRequest{
+		CodeRepositoryUrl: OptionalStringUpdate{Set: true, Value: "git.example.com/LIUYINCS/MUSIVER"},
+	}); err != nil {
+		t.Fatalf("update cross-host same repo: %v", err)
+	}
+	if owner, _, id := storedBinding(); owner != "LIUYINCS" || id != forge.ID {
+		t.Fatalf("跨 host 同 owner/repo 不得归一, got owner=%q id=%q", owner, id)
+	}
+
+	// 替换为未知主机 → 40001 且不改动现值。
+	if _, err := projectSvc.Update(project.ID, user.ID, &UpdateProjectRequest{
+		CodeRepositoryUrl: OptionalStringUpdate{Set: true, Value: "https://nowhere.example.org/o/r"},
+	}); err == nil {
+		t.Fatal("expected unknown host error")
+	}
+	if _, _, id := storedBinding(); id != forge.ID {
+		t.Fatalf("failed update must leave binding, got %q", id)
 	}
 }

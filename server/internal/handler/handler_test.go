@@ -166,7 +166,7 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 		attachmentHandler:  NewIssueAttachmentHandler(issueAttachmentService, cfg),
 		screenshotHandler:  NewScreenshotHandler(screenshotService, cfg),
 		annotationHandler:  NewScreenshotAnnotationHandler(screenshotAnnotationService),
-		projectHandler:     NewProjectHandler(service.NewProjectService(projectRepo, versionRepo, issueSyncStateRepo, githubTokenRepo, fileStorage, cfg, zap.NewNop())),
+		projectHandler:     NewProjectHandler(service.NewProjectService(projectRepo, versionRepo, issueSyncStateRepo, githubTokenRepo, fileStorage, cfg, zap.NewNop(), nil)),
 		githubTokenHandler: NewGitHubTokenHandler(service.NewGitHubTokenService(githubTokenRepo, cfg, zap.NewNop())),
 	}
 }

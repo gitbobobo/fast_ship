@@ -15,6 +15,10 @@ type Project struct {
 	CodeGithubRepo      string `gorm:"column:code_github_repo;type:text" json:"code_github_repo"`
 	PublicGitHubTokenID string `gorm:"column:public_github_token_id;type:text" json:"-"`
 	CodeGitHubTokenID   string `gorm:"column:code_github_token_id;type:text" json:"-"`
+	// 代码集成引用（INT-166）：可空，NULL/空串 = 内置 github-default（现有
+	// GitHub App 链路）。写入接线由后续任务完成，本期只随响应带出。
+	PublicIntegrationID string `gorm:"column:public_integration_id;type:text" json:"-"`
+	CodeIntegrationID   string `gorm:"column:code_integration_id;type:text" json:"-"`
 	// 搁置（INT-165）：两列可空，存量行为 NULL。「搁置中」的判定见 IsShelved；
 	// 到期自动恢复没有定时任务，由读取侧按 now 判定，SQL 过滤处用等价条件。
 	ShelvedAt    *time.Time `gorm:"type:timestamp" json:"shelved_at"`

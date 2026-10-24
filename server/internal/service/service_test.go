@@ -104,6 +104,8 @@ func setupTestServices(t *testing.T) *testServices {
 		&model.Notification{},
 		&model.GitHubWebhookDelivery{},
 		&model.GitHubWebhookRedelivery{},
+		// 代码仓集成（INT-166）：项目绑定与链接兜底测试要用。
+		&model.ForgeIntegration{},
 		&model.ProjectReviewSettings{},
 		&model.ReviewRun{},
 		&model.ReviewRunToken{},

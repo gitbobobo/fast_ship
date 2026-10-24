@@ -949,6 +949,8 @@ func setupRouterTestEnvMaybeLogs(t *testing.T, captureLogs bool, opts ...routerC
 		// 成员与邀请（INT-129）：router 测试的邀请注册通道需要 invites 表。
 		&model.Invite{},
 		&model.DeploymentSettings{},
+		// 代码仓集成（INT-166）。
+		&model.ForgeIntegration{},
 	); err != nil {
 		t.Fatalf("migrate test db: %v", err)
 	}
@@ -1045,7 +1047,7 @@ func setupRouterTestEnvMaybeLogs(t *testing.T, captureLogs bool, opts ...routerC
 	apiKeyService := service.NewApiKeyService(apiKeyRepo, loggerOrNil(appLogger, "api_key"))
 	githubTokenService := service.NewGitHubTokenService(githubTokenRepo, cfg, zap.NewNop())
 	dashboardService := service.NewDashboardService(dashboardRepo)
-	projectService := service.NewProjectService(projectRepo, versionRepo, issueSyncStateRepo, githubTokenRepo, fileStorage, cfg, zap.NewNop())
+	projectService := service.NewProjectService(projectRepo, versionRepo, issueSyncStateRepo, githubTokenRepo, fileStorage, cfg, zap.NewNop(), nil)
 	versionService := service.NewVersionService(versionRepo, projectRepo, githubTokenRepo, fileStorage, cfg, zap.NewNop())
 	githubRepoLabelRepo := repository.NewGitHubRepoLabelRepository(db)
 	recommendationRepo := repository.NewIssueRecommendationRepository(db)
@@ -1107,6 +1109,7 @@ func setupRouterTestEnvMaybeLogs(t *testing.T, captureLogs bool, opts ...routerC
 	deploymentGitHubAppHandler := handler.NewDeploymentGitHubAppHandler(integrationService, manifestService)
 	memberHandler := handler.NewMemberHandler(service.NewMemberService(userRepo, repository.NewInviteRepository(db), nil))
 	deploymentSettingsHandler := handler.NewDeploymentSettingsHandler(deploymentSettingsService)
+	forgeIntegrationHandler := handler.NewForgeIntegrationHandler(service.NewForgeIntegrationService(repository.NewForgeIntegrationRepository(db), integrationService, cfg, zap.NewNop()))
 
 	selfLogHandler := handler.NewSelfLogHandler(service.NewSelfLogService(selfLogStore))
 
@@ -1114,7 +1117,7 @@ func setupRouterTestEnvMaybeLogs(t *testing.T, captureLogs bool, opts ...routerC
 	if captureLogs && appLogger != nil {
 		r.Use(middleware.RequestLog(appLogger))
 	}
-	Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, githubTokenHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, screenshotAnnotationHandler, mediaProxyHandler, t3EnvironmentHandler, t3BindingHandler, notificationHandler, reviewHandler, reviewAgentHandler, reviewService, botHandler, aiProviderHandler, selfLogHandler, githubWebhookHandler, quotaHandler, deploymentGitHubAppHandler, memberHandler, deploymentSettingsHandler, authService, apiKeyRepo)
+	Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, githubTokenHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, screenshotAnnotationHandler, mediaProxyHandler, t3EnvironmentHandler, t3BindingHandler, notificationHandler, reviewHandler, reviewAgentHandler, reviewService, botHandler, aiProviderHandler, selfLogHandler, githubWebhookHandler, quotaHandler, deploymentGitHubAppHandler, memberHandler, deploymentSettingsHandler, forgeIntegrationHandler, authService, apiKeyRepo)
 
 	return &routerTestEnv{
 		router:          r,

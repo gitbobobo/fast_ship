@@ -39,6 +39,8 @@ func (r *ProjectRepository) Create(project *model.Project) error {
 		project.GithubRepo,
 		project.CodeGithubOwner,
 		project.CodeGithubRepo,
+		project.CodeIntegrationID,
+		project.PublicIntegrationID,
 		project.PublicGitHubTokenID,
 		project.CodeGitHubTokenID,
 		project.CreatedAt,
@@ -48,9 +50,10 @@ func (r *ProjectRepository) Create(project *model.Project) error {
 		INSERT INTO projects (
 			id, user_id, name, description, github_owner, github_repo,
 			code_github_owner, code_github_repo,
+			code_integration_id, public_integration_id,
 			public_github_token_id, code_github_token_id, created_at, updated_at
 		)
-		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 		WHERE `+pred, args...)
 	if res.Error != nil {
 		return res.Error
@@ -187,9 +190,11 @@ func (r *ProjectRepository) Update(project *model.Project) error {
 		// 设置里缓存的 repo_full_name 必须跟着走：否则旧仓库的设置会继续占着
 		// 唯一索引，而新仓库可能和另一个已启用项目重复。审查仓库变了就停用
 		// 审查并刷新缓存键，由用户按新仓库重新开启；只改公开仓库（代码仓库
-		// 显式配置时）不影响审查。
+		// 显式配置时）不影响审查。集成身份（绑定到哪个 Forgejo 实例）也算
+		// 审查仓库的一部分：owner/repo 字面相同、换了实例就是换了仓库，缓存
+		// 键与既有 GitHub 账本不能张冠李戴。
 		var before model.Project
-		if err := tx.Select("github_owner", "github_repo", "code_github_owner", "code_github_repo").
+		if err := tx.Select("github_owner", "github_repo", "code_github_owner", "code_github_repo", "code_integration_id").
 			Where("id = ? AND user_id = ?", project.ID, project.UserID).
 			First(&before).Error; err != nil {
 			return err
@@ -205,6 +210,8 @@ func (r *ProjectRepository) Update(project *model.Project) error {
 				"github_repo":            project.GithubRepo,
 				"code_github_owner":      project.CodeGithubOwner,
 				"code_github_repo":       project.CodeGithubRepo,
+				"code_integration_id":    project.CodeIntegrationID,
+				"public_integration_id":  project.PublicIntegrationID,
 				"public_github_token_id": project.PublicGitHubTokenID,
 				"code_github_token_id":   project.CodeGitHubTokenID,
 				"updated_at":             time.Now().UTC(),
@@ -213,7 +220,9 @@ func (r *ProjectRepository) Update(project *model.Project) error {
 			return res.Error
 		}
 		if res.RowsAffected > 0 {
-			if !strings.EqualFold(before.CodeRepoFullName(), project.CodeRepoFullName()) {
+			reviewRepoChanged := !strings.EqualFold(before.CodeRepoFullName(), project.CodeRepoFullName()) ||
+				before.CodeIntegrationID != project.CodeIntegrationID
+			if reviewRepoChanged {
 				reviewOwner, reviewRepo := project.CodeRepo()
 				now := time.Now().UTC()
 				if err := tx.Model(&model.ProjectReviewSettings{}).
