@@ -2377,6 +2377,9 @@ type ForgeIntegration struct {
 	// TokenSet 凭证是否已配置（内置=GitHub App 身份可用；本体永不回显）
 	TokenSet bool `json:"token_set"`
 
+	// Unavailable omitempty；仅内置 github-default 可能出现：true 表示内置投影读取 失败（如 App 密文解不开），该条目仅作占位展示、凭证状态不可信， 请检查部署级 GitHub App 配置。forgejo 行恒无此字段。
+	Unavailable *bool `json:"unavailable,omitempty"`
+
 	// UpdatedAt 最近保存时间；内置集成为 null
 	UpdatedAt *string `json:"updated_at"`
 

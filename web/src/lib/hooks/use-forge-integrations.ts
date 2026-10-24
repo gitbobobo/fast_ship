@@ -25,8 +25,9 @@ export function watchForgeIntegrationsIdentity(queryClient: QueryClient) {
   });
 }
 
-// 集成列表所有登录用户可读、写操作仅管理员；缓存按登录用户隔离（与
-// deployment 同一口径），非管理员的 40305 结果也不串号。
+// 集成端点全部仅管理员（RequireAdmin）；缓存按登录用户隔离（与 deployment
+// 同一口径），非管理员的 40305 结果也不串号。调用方需自行保证只在管理员
+// 视图渲染此 hook。
 export function useForgeIntegrations() {
   const userId = useUserId();
   return useQuery({

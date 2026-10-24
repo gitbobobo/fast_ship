@@ -3842,6 +3842,8 @@ export interface components {
             allow_private_network: boolean;
             /** @description 内置集成恒为 true，不可修改、不可删除、不可走 test 端点 */
             builtin: boolean;
+            /** @description omitempty；仅内置 github-default 可能出现：true 表示内置投影读取 失败（如 App 密文解不开），该条目仅作占位展示、凭证状态不可信， 请检查部署级 GitHub App 配置。forgejo 行恒无此字段。 */
+            unavailable?: boolean;
             /**
              * Format: date-time
              * @description 创建时间；内置集成无落库行，为 null

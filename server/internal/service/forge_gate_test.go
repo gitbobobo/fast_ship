@@ -86,13 +86,13 @@ func TestForgeIntegrationHostKeyDBBackstop(t *testing.T) {
 		t.Fatalf("seed rival: %v", err)
 	}
 
-	// 应用层查重放行（rival 算不出键），落库撞唯一索引 → 40001 泛化文案
-	// （按键点名不到占用者时不硬安名字）。
+	// 应用层查重放行（rival 的 base_url 算不出键），落库撞唯一索引 →
+	// hostTakenErr 按 host_key 列点查，占用行的 base_url 虽脏但 host_key 是
+	// 占键的那一份，照样能点名占用者。
 	_, err := env.svc.Create(ctx, forgeCreateReq("b", "https://forge.example.com", "tok"))
 	taken := appErr(t, err)
-	if taken.Code != errs.ErrInvalidParams.Code || strings.Contains(taken.Message, "rival") ||
-		!strings.Contains(taken.Message, "已被其他集成占用") {
-		t.Fatalf("backstop create = %d %q, want 40001 generic taken", taken.Code, taken.Message)
+	if taken.Code != errs.ErrInvalidParams.Code || !strings.Contains(taken.Message, "rival") {
+		t.Fatalf("backstop create = %d %q, want 40001 naming rival", taken.Code, taken.Message)
 	}
 	if rows, _ := env.repo.List(); len(rows) != 1 {
 		t.Fatalf("rows = %d, want 1（撞索引的创建未落库）", len(rows))

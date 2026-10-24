@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -42,6 +43,11 @@ type ProjectService struct {
 	// github 主机按 base_url 匹配 forgejo 集成。nil 时视为「没有已配置集成」，
 	// 非 github 主机一律报未匹配。
 	forgeIntegrations *repository.ForgeIntegrationRepository
+	// ghWebBase 本部署的 GitHub Web 基址（构造时由 cfg 推导一次）：内置
+	// github 的 code_repo_url 与仓库 URL 的 GitHub 主机识别共用；GHE 部署
+	// 不回落公共 github.com。
+	ghWebBase string
+	logger    *zap.Logger
 }
 
 // SetReviewCleaner 绑定删除项目前的审查远端清理（main.go 注入）。
@@ -57,6 +63,10 @@ func NewProjectService(
 	logger *zap.Logger,
 	forgeIntegrations *repository.ForgeIntegrationRepository,
 ) *ProjectService {
+	ghBase := "https://github.com"
+	if cfg != nil {
+		ghBase = githubWebBase(cfg)
+	}
 	return &ProjectService{
 		projectRepo:       projectRepo,
 		versionRepo:       versionRepo,
@@ -64,6 +74,8 @@ func NewProjectService(
 		storage:           storage,
 		credentials:       newProjectCredentials(projectRepo, tokenRepo, cfg, logger),
 		forgeIntegrations: forgeIntegrations,
+		ghWebBase:         ghBase,
+		logger:            logger,
 		newClient: func(token, owner, repo string) ghclient.Client {
 			return ghclient.NewClient(token, owner, repo)
 		},
@@ -82,7 +94,7 @@ func (s *ProjectService) Create(userID string, req *CreateProjectRequest) (*Proj
 	var owner, repo string
 	if repositoryURL := api.Deref(req.RepositoryUrl); repositoryURL != "" {
 		var appErr *errs.AppError
-		owner, repo, _, appErr = s.parseRepoBinding(repositoryURL, true)
+		owner, repo, _, _, appErr = s.parseRepoBinding(repositoryURL, true)
 		if appErr != nil {
 			return nil, appErr
 		}
@@ -90,10 +102,10 @@ func (s *ProjectService) Create(userID string, req *CreateProjectRequest) (*Proj
 
 	// 代码仓库（PR 审查用）：解析后落 code 字段并按 host 派生集成绑定；与
 	// 公开仓库相同的归一在 normalizeCodeRepo 统一做（与 Update 同一条规则）。
-	var codeOwner, codeRepo, codeIntegrationID string
+	var codeOwner, codeRepo, codeIntegrationID, codeHostKey string
 	if codeURL := api.Deref(req.CodeRepositoryUrl); codeURL != "" {
 		var appErr *errs.AppError
-		codeOwner, codeRepo, codeIntegrationID, appErr = s.parseRepoBinding(codeURL, false)
+		codeOwner, codeRepo, codeIntegrationID, codeHostKey, appErr = s.parseRepoBinding(codeURL, false)
 		if appErr != nil {
 			return nil, appErr
 		}
@@ -110,17 +122,19 @@ func (s *ProjectService) Create(userID string, req *CreateProjectRequest) (*Proj
 	}
 
 	project := &model.Project{
-		ID:                  uuid.New().String(),
-		UserID:              userID,
-		Name:                req.Name,
-		Description:         api.Deref(req.Description),
-		GithubOwner:         owner,
-		GithubRepo:          repo,
-		CodeGithubOwner:     codeOwner,
-		CodeGithubRepo:      codeRepo,
-		CodeIntegrationID:   codeIntegrationID,
-		PublicGitHubTokenID: publicTokenID,
-		CodeGitHubTokenID:   codeTokenID,
+		ID:                uuid.New().String(),
+		UserID:            userID,
+		Name:              req.Name,
+		Description:       api.Deref(req.Description),
+		GithubOwner:       owner,
+		GithubRepo:        repo,
+		CodeGithubOwner:   codeOwner,
+		CodeGithubRepo:    codeRepo,
+		CodeIntegrationID: codeIntegrationID,
+		// 新解析出的绑定带期望主机键进写谓词（见 model 字段注释）。
+		CodeIntegrationHostKey: codeHostKey,
+		PublicGitHubTokenID:    publicTokenID,
+		CodeGitHubTokenID:      codeTokenID,
 	}
 
 	normalizeCodeRepo(project)
@@ -259,7 +273,7 @@ func (s *ProjectService) Update(id, userID string, req *UpdateProjectRequest) (*
 	}
 
 	if repositoryURL := api.Deref(req.RepositoryUrl); repositoryURL != "" {
-		owner, repo, _, appErr := s.parseRepoBinding(repositoryURL, true)
+		owner, repo, _, _, appErr := s.parseRepoBinding(repositoryURL, true)
 		if appErr != nil {
 			return nil, appErr
 		}
@@ -273,13 +287,16 @@ func (s *ProjectService) Update(id, userID string, req *UpdateProjectRequest) (*
 	// 下面应用完全部仓库字段后统一做。
 	if req.CodeRepositoryUrl.Set {
 		if req.CodeRepositoryUrl.Value != "" {
-			owner, repo, integrationID, appErr := s.parseRepoBinding(req.CodeRepositoryUrl.Value, false)
+			owner, repo, integrationID, hostKey, appErr := s.parseRepoBinding(req.CodeRepositoryUrl.Value, false)
 			if appErr != nil {
 				return nil, appErr
 			}
 			project.CodeGithubOwner = owner
 			project.CodeGithubRepo = repo
 			project.CodeIntegrationID = integrationID
+			// 重新按 URL 解析的绑定把期望主机键带给写谓词：落库时集成行
+			// host_key 必须仍是解析时的值，否则本次绑定按失效拒绝。
+			project.CodeIntegrationHostKey = hostKey
 		} else {
 			project.CodeGithubOwner = ""
 			project.CodeGithubRepo = ""
@@ -546,9 +563,14 @@ func parseRepositoryURL(raw string) (host, owner, repo string, err error) {
 
 // repoHostKey 仓库 URL 主机的归一键：小写 host + 端口；无端口按 https 缺省
 // 443（无 scheme 的裸形态与 https 同口径）。带端口的输入经 SplitHostPort
-// 归一（顺带剥掉 IPv6 字面量的方括号，与 forgeBaseHostKey 同形态）。
+// 归一（顺带剥掉 IPv6 字面量的方括号，与 forgeBaseHostKey 同形态）；数字
+// 端口统一拼写（:0443 → :443），与 parseBaseURL 落库前的归一同口径——同
+// 一端点的不同写法必须点查出同一个 host_key。
 func repoHostKey(host string) string {
 	if h, port, err := net.SplitHostPort(host); err == nil {
+		if n, err := strconv.Atoi(port); err == nil {
+			port = strconv.Itoa(n)
+		}
 		return strings.ToLower(h) + ":" + port
 	}
 	return strings.ToLower(host) + ":443"
@@ -568,54 +590,50 @@ func forgeBaseHostKey(baseURL string) string {
 // 不再像旧实现那样把 host 静默解析成 owner。forPublic=true 时非 github.com
 // 主机一律拒绝——公开仓的 issue 镜像与发文本期仍是 GitHub only，命中
 // forgejo 集成的报错会点明这一层。
-func (s *ProjectService) parseRepoBinding(raw string, forPublic bool) (owner, repo, integrationID string, appErr *errs.AppError) {
+func (s *ProjectService) parseRepoBinding(raw string, forPublic bool) (owner, repo, integrationID, hostKey string, appErr *errs.AppError) {
 	host, owner, repo, err := parseRepositoryURL(raw)
 	if err != nil {
-		return "", "", "", errs.New(errs.ErrInvalidParams.Code, errs.ErrInvalidParams.Message+": "+err.Error())
+		return "", "", "", "", errs.New(errs.ErrInvalidParams.Code, errs.ErrInvalidParams.Message+": "+err.Error())
 	}
 	if host == repoHostGitHub {
-		return owner, repo, "", nil
+		return owner, repo, "", "", nil
+	}
+	key := repoHostKey(host)
+	// 部署的 GitHub Web 主机（GHE 的 <host>[:port]）同按内置 github 处理：
+	// 该主机就是本部署的 GitHub 实例，去 forgejo 匹配会误报「主机未匹配
+	// 任何已配置集成」。
+	if key == forges.HostKey(s.ghWebBase) {
+		return owner, repo, "", "", nil
 	}
 	id, found, matchErr := s.forgeIntegrationByHost(host)
 	if matchErr != nil {
-		return "", "", "", errs.ErrInternal
+		s.logger.Error("forge 集成主机匹配查询失败", zap.String("host", host), zap.Error(matchErr))
+		return "", "", "", "", errs.ErrInternal
 	}
 	if forPublic {
 		if found {
-			return "", "", "", errs.New(errs.ErrInvalidParams.Code,
+			return "", "", "", "", errs.New(errs.ErrInvalidParams.Code,
 				errs.ErrInvalidParams.Message+": 公开仓库仅支持 GitHub，"+host+" 是已配置的 Forgejo 集成（issue 镜像与发版仍只支持 GitHub）")
 		}
-		return "", "", "", errRepoHostUnmatched(host)
+		return "", "", "", "", errRepoHostUnmatched(host)
 	}
 	if !found {
-		return "", "", "", errRepoHostUnmatched(host)
+		return "", "", "", "", errRepoHostUnmatched(host)
 	}
-	return owner, repo, id, nil
+	return owner, repo, id, key, nil
 }
 
 // forgeIntegrationByHost 按 base_url 主机匹配已配置的 forgejo 集成（INT-166）。
-// 双方都归一成「小写 host + 端口（空端口按 scheme 缺省 443/80）」后比较。
+// 仓库 URL 归一成「小写 host + 端口（空端口按 scheme 缺省 443/80）」后按
+// host_key 点查（idx_forge_integrations_host_key 索引），只取 id 一列。
 // 集成仓库未注入（部分测试）视为没有已配置集成；查询失败按错误上抛，不用
 // 「未匹配」顶替真实故障。
 func (s *ProjectService) forgeIntegrationByHost(host string) (id string, found bool, err error) {
 	if s.forgeIntegrations == nil {
 		return "", false, nil
 	}
-	rows, listErr := s.forgeIntegrations.List()
-	if listErr != nil {
-		return "", false, listErr
-	}
-	key := repoHostKey(host)
-	for i := range rows {
-		row := &rows[i]
-		if row.Kind != model.ForgeIntegrationKindForgejo {
-			continue
-		}
-		if forgeBaseHostKey(row.BaseURL) == key {
-			return row.ID, true, nil
-		}
-	}
-	return "", false, nil
+	id, _, found, err = s.forgeIntegrations.FindByHostKey(repoHostKey(host), "")
+	return id, found, err
 }
 
 // errRepoHostUnmatched 仓库 URL 主机未命中任何已配置集成（40001 系）。
@@ -716,7 +734,7 @@ func (s *ProjectService) codeRepoUrl(p *model.Project, integrations map[string]m
 		return nil
 	}
 	if p.CodeIntegrationID == "" {
-		url := "https://github.com/" + owner + "/" + repo
+		url := s.ghWebBase + "/" + owner + "/" + repo
 		return &url
 	}
 	row, ok := integrations[p.CodeIntegrationID]
@@ -735,7 +753,7 @@ func (s *ProjectService) codeRepoUrl(p *model.Project, integrations map[string]m
 		return nil
 	}
 	if row.Kind == model.ForgeIntegrationKindGitHub {
-		base = "https://github.com"
+		base = s.ghWebBase
 	}
 	url := base + "/" + owner + "/" + repo
 	return &url

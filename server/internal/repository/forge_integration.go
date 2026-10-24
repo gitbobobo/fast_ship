@@ -42,6 +42,28 @@ func (r *ForgeIntegrationRepository) List() ([]model.ForgeIntegration, error) {
 	return rows, err
 }
 
+// FindByHostKey 按归一主机键点查 forgejo 集成的 id+name：项目绑定的主机
+// 匹配、保存侧同主机查重与兜底报错都走这条——只取两列、走
+// idx_forge_integrations_host_key 索引，不全表 List 也不把凭证密文读进内存。
+// excludeID 传被更新行的 id（自身不与自己冲突），空串不排除。未命中
+// found=false。
+func (r *ForgeIntegrationRepository) FindByHostKey(key, excludeID string) (id, name string, found bool, err error) {
+	var row model.ForgeIntegration
+	q := r.db.Select("id", "name").
+		Where("host_key = ? AND kind = ?", key, model.ForgeIntegrationKindForgejo)
+	if excludeID != "" {
+		q = q.Where("id <> ?", excludeID)
+	}
+	err = q.Take(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return "", "", false, nil
+	}
+	if err != nil {
+		return "", "", false, err
+	}
+	return row.ID, row.Name, true, nil
+}
+
 // ListByIDs 按 id 批量取集成行：项目响应的 code_repo_url 等投影一次取回，
 // 避免列表路径 N+1。空入参直接返回空。
 func (r *ForgeIntegrationRepository) ListByIDs(ids []string) ([]model.ForgeIntegration, error) {

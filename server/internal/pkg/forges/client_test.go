@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -115,6 +116,66 @@ func relaxLoopbackForTest(t *testing.T) {
 	t.Cleanup(func() { privateModeBlocked = orig })
 }
 
+// TestClientRedirectStripsAuthOutsidePrefix 凭证作用域（Config.AuthPathPrefix）：
+// API 前缀内的同主机跳转保留 Authorization，跳出前缀或含 . / .. 歧义段的
+// 跳转剥掉——政策只有 client 这一份，调用方不再各自包装。
+func TestClientRedirectStripsAuthOutsidePrefix(t *testing.T) {
+	relaxLoopbackForTest(t)
+	var mu sync.Mutex
+	var sawAuth []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		sawAuth = append(sawAuth, r.URL.EscapedPath()+"|"+r.Header.Get("Authorization"))
+		mu.Unlock()
+		switch r.URL.Path {
+		case "/api/v1/version":
+			http.Redirect(w, r, "/api/v1/user", http.StatusFound)
+		case "/api/v1/user":
+			http.Redirect(w, r, "/api/v1/../logs", http.StatusFound)
+		case "/logs":
+			http.Redirect(w, r, "/api/v1/me", http.StatusFound)
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer srv.Close()
+
+	u, _ := url.Parse(srv.URL)
+	client, err := NewClient(Config{
+		AllowedHosts:        []string{u.Hostname()},
+		AllowPrivateNetwork: true,
+		AuthPathPrefix:      "/api/v1",
+	})
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	req, err := http.NewRequest(http.MethodGet, srv.URL+"/api/v1/version", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "token secret-pat")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	resp.Body.Close()
+
+	mu.Lock()
+	defer mu.Unlock()
+	// /api/v1/../logs 的跳转：解码路径含 .. 歧义段 → 剥凭证（该字面路径落
+	// default 分支，链路就此结束，共 3 跳）。
+	if len(sawAuth) != 3 {
+		t.Fatalf("requests = %v", sawAuth)
+	}
+	if !strings.HasSuffix(sawAuth[0], "token secret-pat") ||
+		!strings.HasSuffix(sawAuth[1], "token secret-pat") {
+		t.Fatalf("API 树内跳转应保留凭证: %v", sawAuth)
+	}
+	if strings.HasSuffix(sawAuth[2], "token secret-pat") {
+		t.Fatalf("歧义段的跳转仍带凭证: %v", sawAuth)
+	}
+}
+
 func TestValidateBaseURL(t *testing.T) {
 	// 归一化与形状校验用公网 IP 字面量：不做真实 DNS（沙箱/CI 环境的解析器
 	// 不可依赖），域名的 DNS 分支由下面注入假解析器的用例覆盖。
@@ -187,6 +248,9 @@ func TestValidateBaseURL(t *testing.T) {
 			"", "  ", "forge.example.com", "https://", "https://a.com?x=1", "https://a.com#frag",
 			// url.Parse 只查端口纯数字不查范围：:0、:65536 落库即永远连不上。
 			"https://forge.example:0", "https://forge.example:65536",
+			// 路径 . / .. 段拒收：代理归一后请求路径与字面前缀不同，
+			// api_base_url 前缀保护语义先统一（%2e%2e 解码后同样命中）。
+			"https://forge.example/api/../x", "https://forge.example/api/%2e%2e/x",
 		} {
 			if _, err := ValidateBaseURL(context.Background(), raw, false); !errors.Is(err, ErrInvalidBaseURL) {
 				t.Errorf("ValidateBaseURL(%q) err = %v, want ErrInvalidBaseURL", raw, err)

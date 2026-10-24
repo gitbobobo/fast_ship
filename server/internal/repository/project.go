@@ -39,8 +39,12 @@ func (r *ProjectRepository) Create(project *model.Project) error {
 	// 集成存在性条件与 Token 条件并列（public_integration_id 本期恒为空列 =
 	// 内置 github，不加 EXISTS）：parseRepoBinding 匹配集成与 INSERT 之间集成
 	// 被并发删除时，这条 INSERT 落不下行，由下方 RowsAffected=0 分支区分原因。
-	pred += " AND (? = '' OR EXISTS (SELECT 1 FROM forge_integrations WHERE id = ?))"
-	args = append(args, project.CodeIntegrationID, project.CodeIntegrationID)
+	// 绑定按 URL 新解析出时另要求集成行 host_key 仍是解析时的值——管理员
+	// 此时改集成 base_url 等于换了主机身份，绑定按失效拒绝。
+	pred += ` AND (? = '' OR EXISTS (SELECT 1 FROM forge_integrations WHERE id = ?
+		AND (? = '' OR host_key = ?)))`
+	args = append(args, project.CodeIntegrationID, project.CodeIntegrationID,
+		project.CodeIntegrationHostKey, project.CodeIntegrationHostKey)
 	args = append([]interface{}{
 		project.ID,
 		project.UserID,
@@ -70,7 +74,7 @@ func (r *ProjectRepository) Create(project *model.Project) error {
 		return res.Error
 	}
 	if res.RowsAffected == 0 {
-		if err := missingForgeIntegration(r.db, project.CodeIntegrationID); err != nil {
+		if err := missingForgeIntegration(r.db, project.CodeIntegrationID, project.CodeIntegrationHostKey); err != nil {
 			return err
 		}
 		return ErrGitHubTokenMissing
@@ -87,19 +91,27 @@ func ownedTokenWritePredicate(userID, publicID, codeID string) (string, []interf
 }
 
 // missingForgeIntegration 判定项目写入被 0 行影响是否因代码集成绑定失效：
-// 绑定非空且集成行已不在 → ErrForgeIntegrationMissing；否则 nil（调用方继续
-// 按 Token 缺失等其他原因处理）。绑定值是模型字段的归一值（NULL 列读侧折
-// 空串），无需再判 NULL。
-func missingForgeIntegration(db *gorm.DB, codeIntegrationID string) error {
+// 绑定非空时，集成行不存在（并发删除）或 host_key 已变（并发改基址——绑定
+// 的是当时解析出的那台实例）都折成 ErrForgeIntegrationMissing；否则 nil
+// （调用方继续按 Token 缺失等其他原因处理）。expectedHostKey 只在本次写入
+// 按 URL 重新解析出绑定时非空；保留原绑定的写入传空串，退化为仅存在性。
+// 绑定值是模型字段的归一值（NULL 列读侧折空串），无需再判 NULL。
+func missingForgeIntegration(db *gorm.DB, codeIntegrationID, expectedHostKey string) error {
 	if codeIntegrationID == "" {
 		return nil
 	}
-	var n int64
-	if err := db.Model(&model.ForgeIntegration{}).
-		Where("id = ?", codeIntegrationID).Count(&n).Error; err != nil {
+	var row model.ForgeIntegration
+	err := db.Model(&model.ForgeIntegration{}).
+		Select("host_key").
+		Where("id = ?", codeIntegrationID).
+		Take(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return ErrForgeIntegrationMissing
+	}
+	if err != nil {
 		return err
 	}
-	if n == 0 {
+	if expectedHostKey != "" && row.HostKey != expectedHostKey {
 		return ErrForgeIntegrationMissing
 	}
 	return nil
@@ -240,8 +252,10 @@ func (r *ProjectRepository) Update(project *model.Project) error {
 		res := tx.Model(&model.Project{}).
 			Where("id = ? AND user_id = ?", project.ID, project.UserID).
 			Where(pred, args...).
-			Where("(? = '' OR EXISTS (SELECT 1 FROM forge_integrations WHERE id = ?))",
-				project.CodeIntegrationID, project.CodeIntegrationID).
+			Where(`(? = '' OR EXISTS (SELECT 1 FROM forge_integrations WHERE id = ?
+				AND (? = '' OR host_key = ?)))`,
+				project.CodeIntegrationID, project.CodeIntegrationID,
+				project.CodeIntegrationHostKey, project.CodeIntegrationHostKey).
 			Updates(map[string]interface{}{
 				"name":                   project.Name,
 				"description":            project.Description,
@@ -326,7 +340,7 @@ func (r *ProjectRepository) Update(project *model.Project) error {
 		}
 		// 项目行还在：写入是被引用存在性条件挡下的，集成失效优先于 Token 缺失
 		// 上报（两个条件同时失效时只报其一，重试都会得到确定结论）。
-		if err := missingForgeIntegration(tx, project.CodeIntegrationID); err != nil {
+		if err := missingForgeIntegration(tx, project.CodeIntegrationID, project.CodeIntegrationHostKey); err != nil {
 			return err
 		}
 		return ErrGitHubTokenMissing

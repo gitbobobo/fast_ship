@@ -19,6 +19,11 @@ type Project struct {
 	// GitHub App 链路）。写入接线由后续任务完成，本期只随响应带出。
 	PublicIntegrationID string `gorm:"column:public_integration_id;type:text" json:"-"`
 	CodeIntegrationID   string `gorm:"column:code_integration_id;type:text" json:"-"`
+	// CodeIntegrationHostKey 瞬态（不落库）：仅在本次写入按仓库 URL 重新解析
+	// 出绑定时带期望主机键，写谓词据此要求集成行 host_key 仍是解析时的值——
+	// 管理员在解析与落库之间改集成 base_url 时本次绑定按失效拒绝。未重解析
+	// 的写入（保留原绑定）留空，谓词退化为仅存在性。
+	CodeIntegrationHostKey string `gorm:"-" json:"-"`
 	// 搁置（INT-165）：两列可空，存量行为 NULL。「搁置中」的判定见 IsShelved；
 	// 到期自动恢复没有定时任务，由读取侧按 now 判定，SQL 过滤处用等价条件。
 	ShelvedAt    *time.Time `gorm:"type:timestamp" json:"shelved_at"`

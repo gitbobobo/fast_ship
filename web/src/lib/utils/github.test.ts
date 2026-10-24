@@ -31,6 +31,19 @@ describe("normalizeCodeRepoRef", () => {
     ).toBe("git.example.com:8443/godbobo/fast_ship");
   });
 
+  it("数字端口统一拼写：:0443 与 :443 归一成同一主机键（对齐后端 repoHostKey）", () => {
+    expect(
+      normalizeCodeRepoRef("https://git.example.com:0443/o/r"),
+    ).toBe("git.example.com:443/o/r");
+    expect(normalizeCodeRepoRef("https://git.example.com:0443/o/r")).toBe(
+      normalizeCodeRepoRef("https://git.example.com:443/o/r"),
+    );
+    // IPv6 带端口剥方括号（与 SplitHostPort 同口径）。
+    expect(normalizeCodeRepoRef("https://[::1]:8443/o/r")).toBe(
+      "::1:8443/o/r",
+    );
+  });
+
   it("scheme 决定默认端口：http/https 同主机归一不同（集成切换不被判未改动）", () => {
     expect(normalizeCodeRepoRef("http://git.example.com/a/b")).toBe(
       "git.example.com:80/a/b",

@@ -11652,6 +11652,7 @@ INT-166 实现。首条恒为内置 `github-default`（只读映射到部署级 
 | `has_ca_cert` | boolean | 是 | 是否配置了自定义 CA（本体永不回显） |
 | `allow_private_network` | boolean | 是 | 是否放行本集成配置主机解析到私网地址（http 同样仅在开启时可用） |
 | `builtin` | boolean | 是 | 内置集成恒为 true，不可修改、不可删除、不可走 test 端点 |
+| `unavailable` | boolean | 否 | omitempty；仅内置 github-default 可能出现：true 表示内置投影读取 失败（如 App 密文解不开），该条目仅作占位展示、凭证状态不可信， 请检查部署级 GitHub App 配置。forgejo 行恒无此字段。 |
 | `created_at` | string（date-time，可空） | 是 | 创建时间；内置集成无落库行，为 null |
 | `updated_at` | string（date-time，可空） | 是 | 最近保存时间；内置集成为 null |
 
@@ -11714,6 +11715,7 @@ webhook_secret 加密落库、永不回显。allow_private_network=true 放行�
 | `has_ca_cert` | boolean | 是 | 是否配置了自定义 CA（本体永不回显） |
 | `allow_private_network` | boolean | 是 | 是否放行本集成配置主机解析到私网地址（http 同样仅在开启时可用） |
 | `builtin` | boolean | 是 | 内置集成恒为 true，不可修改、不可删除、不可走 test 端点 |
+| `unavailable` | boolean | 否 | omitempty；仅内置 github-default 可能出现：true 表示内置投影读取 失败（如 App 密文解不开），该条目仅作占位展示、凭证状态不可信， 请检查部署级 GitHub App 配置。forgejo 行恒无此字段。 |
 | `created_at` | string（date-time，可空） | 是 | 创建时间；内置集成无落库行，为 null |
 | `updated_at` | string（date-time，可空） | 是 | 最近保存时间；内置集成为 null |
 
@@ -11760,6 +11762,7 @@ webhook_secret 加密落库、永不回显。allow_private_network=true 放行�
 | `has_ca_cert` | boolean | 是 | 是否配置了自定义 CA（本体永不回显） |
 | `allow_private_network` | boolean | 是 | 是否放行本集成配置主机解析到私网地址（http 同样仅在开启时可用） |
 | `builtin` | boolean | 是 | 内置集成恒为 true，不可修改、不可删除、不可走 test 端点 |
+| `unavailable` | boolean | 否 | omitempty；仅内置 github-default 可能出现：true 表示内置投影读取 失败（如 App 密文解不开），该条目仅作占位展示、凭证状态不可信， 请检查部署级 GitHub App 配置。forgejo 行恒无此字段。 |
 | `created_at` | string（date-time，可空） | 是 | 创建时间；内置集成无落库行，为 null |
 | `updated_at` | string（date-time，可空） | 是 | 最近保存时间；内置集成为 null |
 
@@ -11828,6 +11831,7 @@ ca_cert_pem 省略 = 保留、空串 = 清空；api_base_url 空串 = 重置为
 | `has_ca_cert` | boolean | 是 | 是否配置了自定义 CA（本体永不回显） |
 | `allow_private_network` | boolean | 是 | 是否放行本集成配置主机解析到私网地址（http 同样仅在开启时可用） |
 | `builtin` | boolean | 是 | 内置集成恒为 true，不可修改、不可删除、不可走 test 端点 |
+| `unavailable` | boolean | 否 | omitempty；仅内置 github-default 可能出现：true 表示内置投影读取 失败（如 App 密文解不开），该条目仅作占位展示、凭证状态不可信， 请检查部署级 GitHub App 配置。forgejo 行恒无此字段。 |
 | `created_at` | string（date-time，可空） | 是 | 创建时间；内置集成无落库行，为 null |
 | `updated_at` | string（date-time，可空） | 是 | 最近保存时间；内置集成为 null |
 

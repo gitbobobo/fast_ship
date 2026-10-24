@@ -21,7 +21,7 @@ web 设置页、webhook 出站、issue 轮询与 Forgejo 仓库的审查执行�
 | `kind` | `forgejo`（本期唯一落库值）；`github` 只出现在内置投影 |
 | `name` | 显示名 |
 | `base_url` | Forgejo 实例基址，保存时已归一（去尾部 `/`） |
-| `api_base_url` | API 基址；省略时按 `{base_url}/api/v1` 推导后**展开落库**，读取侧不再推导（列可空，历史 NULL 与空串同义） |
+| `api_base_url` | **意图存储**：空串/NULL = 按 `{base_url}/api/v1` 推导（读取侧 `forgeAPIBaseURL` 展开为生效值），非空 = 管理员显式钉死的端点。改 `base_url` 时推导行自然跟随、显式行保持钉住；存量展开值由 `migrateForgeAPIDerived` 一次性回收（恰等于推导值的显式配置会被收成推导，生效值不变） |
 | `host_key` | base_url 的归一键（`forges.HostKey`：小写 host + scheme 缺省端口），保存/迁移时按 base_url 现算落库；同归一主机的部分唯一索引靠它兜并发窗口（见「基址形状与同主机唯一」），解析不出主机键的脏行为空串、不参与唯一约束 |
 | `token_encrypted` / `webhook_secret_encrypted` | 各自独立 AES-256-GCM 密文（密钥 `encryption.key`） |
 | `ca_cert_pem` | 自定义 CA（可空）；追加系统根证书池，不是替换 |
@@ -47,7 +47,12 @@ user_github_tokens 同一模式）。
   配置集成」，不再像旧实现那样把 host 静默解析成 owner。尾部归一先剥尾
   斜杠再剥 `.git` 后缀（「…/r.git/」剥得干净，repo 不带后缀）；owner/repo
   之外的第三段非空直接 40001（`/pulls/1` 等页面路径与 `a/b/c` 裸形态都不
-  收——静默丢弃会拼出用户没指的仓库）。
+  收——静默丢弃会拼出用户没指的仓库）。匹配走 `FindByHostKey` 点查（
+  `idx_forge_integrations_host_key`，只取 id/name 两列）——不全表 List、
+  不把凭证密文读进内存；同主机查重与唯一索引兜底报错同走这条点查。
+- **数字端口统一拼写**：`parseBaseURL` 把 `:0443` 这类写法归一成数值
+  （`:443`），同一端点的不同拼写归一出同一 host_key；`:0`/`:65536` 等
+  超界端口保存即拒。
 - **`repository_url`（公开仓）只允许 GitHub**（host=github.com 或纯
   owner/repo）→ `public_integration_id` 恒为空列。命中 forgejo 集成 → 40001
   且消息点明「公开仓库仅支持 GitHub」（issue 镜像 / release 本期仍是 GitHub
@@ -87,6 +92,12 @@ review 侧只有 `project_id` / `repo_full_name` 快照，解析链路是
 链接断掉不让读路径/同步失败，确认不了集成归属就绝不把私有 owner/repo 拼到
 github.com 上发出去。github 兜底只保留给空集成引用（与零值口径）；`pr_url`
 为空串时前端不渲染链接。
+
+**历史记录的链接兜底恒按 GitHub 身份**：审查执行本期只有 GitHub 一条链路
+（forgejo 绑定在审查设置侧被拦），存量运行的 forge 身份就是 github——项目
+改绑 forgejo 后，无存储 `pr_url` 的历史记录不随当前绑定改写（
+review_records / review_activity 用 `githubLinks(githubWebBase)`）。P1 接入
+Forgejo 审查执行时须随运行记录存 forge 身份再按记录解析。
 
 ## 审查设置面对 forgejo 绑定项目关门
 
@@ -141,14 +152,22 @@ INSERT..SELECT / UPDATE 的 WHERE（`repository/project.go`），删掉的集成
 同一模式，`public_integration_id` 本期恒为空列不加条件）。删除与写入在提交点
 互斥，任何一方都不会留下悬空引用——彻底关掉跨表一致性的外键方案仍不需要。
 
+按 URL 新解析出的绑定还把**期望主机键**（`CodeIntegrationHostKey` 瞬态字段）
+带进同一条谓词：`EXISTS … AND host_key = ?`。解析绑定与落库之间管理员把
+集成的 base_url 改去别的主机，本次绑定按失效拒绝——绑的是「当时解析出的
+那台实例」，不是「id 还在就行」。未重解析 URL 的写入（保留原绑定）不带键，
+谓词退化为仅存在性：管理员迁移实例后，存量绑定有意跟随新地址。
+
 ## 项目响应的 code_repo_url
 
 `GET /api/projects*` 的 `Project.code_repo_url`（可空）：无代码仓（owner/repo
-缺一）为 null；`code_integration_id` 空按内置 github 拼
-`https://github.com/{owner}/{repo}`；绑定 forgejo 集成拼
-`{base_url}/{owner}/{repo}`；**绑定的集成行查不到（并发删除窗口）为
-null**——绝不回落 github.com，私有 owner/repo 不能被发到 github.com。列表
-路径一次批量取回涉及的集成行（`forge_integrations` ListByIDs），没有 N+1。
+缺一）为 null；`code_integration_id` 空按本部署 GitHub Web 基址拼
+`{ghWebBase}/{owner}/{repo}`（`githubWebBase`：`github_app.api_base_url`
+推出 `api.github.com→github.com`，GHE 推出实例 `host[:port]`）；绑定
+forgejo 集成拼 `{base_url}/{owner}/{repo}`；**绑定的集成行查不到（并发
+删除窗口）为 null**——绝不回落 github.com，私有 owner/repo 不能被发到
+github.com。列表路径一次批量取回涉及的集成行（`forge_integrations`
+ListByIDs），没有 N+1。
 
 ## 密钥存储
 
@@ -163,7 +182,11 @@ null**——绝不回落 github.com，私有 owner/repo 不能被发到 github.c
   **不支持单独清空**，要作废就删除集成重建——这两个密钥没有「显式清空」的
   UI 语义）。
 - `ca_cert_pem`：缺省 = 保留，空串 = 清空，其余替换并校验 PEM 可解析。
-- `api_base_url`：缺省/null = 保留，空串 = 重置为 `{base_url}/api/v1` 推导。
+- `api_base_url`：缺省/null = 保留（推导行仍是推导、显式行仍显式），空串 =
+  解除钉死回到推导，非空 = 显式钉死该端点。响应投影恒返回**生效值**（推导
+  行展开 `{base_url}/api/v1`）；编辑框预填的生效值原样回显提交不算显式
+  钉死（`resolveURLs` 回显守卫：存量为推导行且提交值恰等于新 base 推导
+  值 → 保持推导）。
 
 ## SSRF 规则（`pkg/forges`）
 
@@ -191,9 +214,11 @@ Forgejo 基址是管理员可填的任意 URL，必须把「内网探测」挡�
 - **重定向规则**：目标 host:port 必须与首个请求一致（跨主机拒绝）；未开私网
   放行时每一跳都必须 https；**任何配置下 https→http 的降级跳转都拒绝**
   （`ErrSchemeDowngrade`——明文 http 只该来自管理员配置的基址，不该被响应
-  悄悄带出来）。连接检测的 PAT 跟随跳转有范围限制：跳出 API 路径前缀
-  （如 `/api/v1`）的同主机跳转会被剥掉 `Authorization`，PAT 不落进实例上
-  非 API 端点的访问日志。
+  悄悄带出来）。凭证作用域是 client 层的固定政策（`Config.AuthPathPrefix`，
+  探测端点传 API 基址的路径段）：同主机跳转的解码路径 `path.Clean` 后不在
+  API 前缀下（或含 `.`/`..` 歧义段，`%2e%2e` 编码穿越经代理归一可能指出
+  前缀外）就剥掉 `Authorization`——PAT 不落进实例上非 API 端点的访问日
+  志；未来 webhook/轮询调用复用同一层，不再各自包装。
 - **保存时解析有上限**：`ValidateBaseURL` 的 DNS 校验透传管理端请求 ctx 并
   封顶 5s，解析器卡顿不会把 HTTP handler 挂住。
 - **自定义 CA 追加系统池**：公网签发的证书照常验证；**不使用
@@ -205,13 +230,17 @@ Forgejo 基址是管理员可填的任意 URL，必须把「内网探测」挡�
 
 ## 内置 github-default 语义
 
-列表首条恒为它：`kind=github`、`base_url=https://github.com`、`api_base_url`
+列表首条恒为它：`kind=github`、`base_url` 是本部署 GitHub Web 基址
+（`githubWebBase` 推导，GHE 部署为实例 host[:port]）、`api_base_url`
 取部署 App 的 API base（config 缺省 https://api.github.com）、`builtin=true`。
 `token_set` 映射「App 身份当前可用」（`IntegrationService.Current` 的 ok），
 `webhook_secret_set` 映射当前生效验签密钥非空。它不可修改、不可删除、不可走
 forge test 端点（40001，test 引导去 `POST /api/deployment/github-app/test`）；
 写侧修改永远走既有 deployment/github-app 端点，**不搬数据、不建影子行**。
-App 密文解密失败时列表整体 50000——与 integrations.md「不回落 config」同一规则。
+App 密文解密失败时列表不整体 50000 也不静默少行：占位条目
+`unavailable=true` + 日志，forgejo 行照常返回——GitHub App 的故障不该
+挡住 forgejo 管理面，但管理员要能区分「没有内置集成」与「App 密文解
+不开」。
 
 ## 路由与错误码
 

@@ -6,7 +6,9 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/godbobo/fast_ship/server/internal/config"
 	"github.com/godbobo/fast_ship/server/internal/model"
+	"github.com/godbobo/fast_ship/server/internal/pkg/githubmedia"
 	"gorm.io/gorm"
 )
 
@@ -32,10 +34,19 @@ type forgeLinks struct {
 	unresolved bool
 }
 
-// githubLinks 内置 github-default 的构造面：base 恒 https://github.com，与
-// 此前的硬编码拼接逐字一致。
-func githubLinks() forgeLinks {
-	return forgeLinks{kind: model.ForgeIntegrationKindGitHub, baseURL: "https://github.com"}
+// githubWebBase 本部署的 GitHub Web 基址：从 github_app.api_base_url 推导
+// （api.github.com → github.com；GHE 的 https://<host>[:port]/api/v3 → 该
+// host[:port]），与 review 附件的部署口径共用同一份推导。写死 github.com
+// 会让 GHE 部署的审查链接与 code_repo_url 指向公共 GitHub——私有 owner/repo
+// 落到错误主机，正是 forgejo 侧明确禁止的那类错误。
+func githubWebBase(cfg *config.Config) string {
+	return "https://" + githubmedia.GitHubWebHost(cfg.GitHubApp.APIBaseURL)
+}
+
+// githubLinks 内置 github-default 的构造面：base 是本部署的 GitHub Web 基址
+// （见 githubWebBase），与部署口径一致，不再是写死的公共 github.com。
+func githubLinks(base string) forgeLinks {
+	return forgeLinks{kind: model.ForgeIntegrationKindGitHub, baseURL: base}
 }
 
 // forgeBase 集成基址去尾部 /（保存时已归一，这里防御存量 NULL 等历史形态）。
@@ -105,7 +116,7 @@ func (l forgeLinks) BlobLineURL(repoFullName, sha, path string, line int) string
 // （删除集成前应用层会拦引用，这里只防并发窗口）或任何查询失败时返回不可
 // 解析标记，链接为空串——审查链接断掉不该让读路径失败，确认不了集成归属就
 // 更不该把私有仓库地址发去 github.com。
-func forgeLinksForProject(ctx context.Context, db *gorm.DB, projectID string) forgeLinks {
+func forgeLinksForProject(ctx context.Context, db *gorm.DB, projectID, ghBase string) forgeLinks {
 	var project model.Project
 	if err := db.WithContext(ctx).
 		Select("id, code_integration_id").
@@ -113,13 +124,14 @@ func forgeLinksForProject(ctx context.Context, db *gorm.DB, projectID string) fo
 		First(&project).Error; err != nil {
 		return forgeLinks{unresolved: true}
 	}
-	return forgeLinksByProjects(ctx, db, []model.Project{project})[projectID]
+	return forgeLinksByProjects(ctx, db, []model.Project{project}, ghBase)[projectID]
 }
 
 // forgeLinksByProjects 批量解析项目 → 链接构造面：一次取被引用的
 // forge_integrations 行。projects 由调用方加载（活动列表在同一事务里已取出
-// 完整行），缺失或解析不了的条目兜底 github-default。
-func forgeLinksByProjects(ctx context.Context, db *gorm.DB, projects []model.Project) map[string]forgeLinks {
+// 完整行），缺失或解析不了的条目兜底 github-default；ghBase 是本部署的
+// GitHub Web 基址（githubWebBase）。
+func forgeLinksByProjects(ctx context.Context, db *gorm.DB, projects []model.Project, ghBase string) map[string]forgeLinks {
 	ids := make([]string, 0, len(projects))
 	for _, p := range projects {
 		if p.CodeIntegrationID != "" {
@@ -139,7 +151,7 @@ func forgeLinksByProjects(ctx context.Context, db *gorm.DB, projects []model.Pro
 	out := make(map[string]forgeLinks, len(projects))
 	for _, p := range projects {
 		if p.CodeIntegrationID == "" {
-			out[p.ID] = githubLinks()
+			out[p.ID] = githubLinks(ghBase)
 			continue
 		}
 		if row, ok := rows[p.CodeIntegrationID]; ok {

@@ -20,7 +20,7 @@ func TestForgeLinksPullURL(t *testing.T) {
 	}{
 		// 零值 = 内置 github-default 口径（与旧拼接逐字一致）。
 		{"zero value falls back to github", forgeLinks{}, "https://github.com/o/r/pull/7"},
-		{"builtin github", githubLinks(), "https://github.com/o/r/pull/7"},
+		{"builtin github", githubLinks("https://github.com"), "https://github.com/o/r/pull/7"},
 		{"forgejo", forgeLinks{kind: model.ForgeIntegrationKindForgejo, baseURL: "https://git.example.com"}, "https://git.example.com/o/r/pulls/7"},
 		{"forgejo base trailing slash", forgeLinks{kind: model.ForgeIntegrationKindForgejo, baseURL: "https://git.example.com/"}, "https://git.example.com/o/r/pulls/7"},
 		{"unknown kind uses github convention", forgeLinks{kind: "mystery", baseURL: "https://x.example.com"}, "https://x.example.com/o/r/pull/7"},
@@ -44,9 +44,9 @@ func TestForgeLinksBlobLineURL(t *testing.T) {
 		// 与旧 reviewBlobURL 输出逐字一致。
 		{"github verbatim", forgeLinks{}, "internal/service/project.go", 12,
 			"https://github.com/o/r/blob/abc123/internal/service/project.go#L12"},
-		{"builtin github", githubLinks(), "main.go", 1,
+		{"builtin github", githubLinks("https://github.com"), "main.go", 1,
 			"https://github.com/o/r/blob/abc123/main.go#L1"},
-		{"path segments escaped (spaces/parens/hash)", githubLinks(), "docs/a b (v2)/file#1.go", 3,
+		{"path segments escaped (spaces/parens/hash)", githubLinks("https://github.com"), "docs/a b (v2)/file#1.go", 3,
 			"https://github.com/o/r/blob/abc123/docs/a%20b%20%28v2%29/file%231.go#L3"},
 		{"forgejo src/commit", forgeLinks{kind: model.ForgeIntegrationKindForgejo, baseURL: "https://git.example.com"}, "pkg/x/y.go", 42,
 			"https://git.example.com/o/r/src/commit/abc123/pkg/x/y.go#L42"},
@@ -72,13 +72,13 @@ func TestForgeLinksForProject(t *testing.T) {
 	forge := createTestForgeIntegration(t, svc.db, "https://git.example.com")
 
 	// 项目不存在 → 不可解析：确认不了集成归属就不猜 github，链接为空串。
-	if links := forgeLinksForProject(ctx, svc.db, "no-such-project"); links.PullURL("o/r", 1) != "" {
+	if links := forgeLinksForProject(ctx, svc.db, "no-such-project", "https://github.com"); links.PullURL("o/r", 1) != "" {
 		t.Fatalf("missing project should yield empty pr url, got %q", links.PullURL("o/r", 1))
 	}
 
 	// 空列（= 内置 github-default）→ github。
 	bare := createTestProject(t, svc.db, user.ID)
-	links := forgeLinksForProject(ctx, svc.db, bare.ID)
+	links := forgeLinksForProject(ctx, svc.db, bare.ID, "https://github.com")
 	if links.PullURL("o/r", 1) != "https://github.com/o/r/pull/1" {
 		t.Fatalf("empty binding should fall back to github, got %q", links.PullURL("o/r", 1))
 	}
@@ -87,7 +87,7 @@ func TestForgeLinksForProject(t *testing.T) {
 	bound := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
 		p.CodeIntegrationID = forge.ID
 	})
-	links = forgeLinksForProject(ctx, svc.db, bound.ID)
+	links = forgeLinksForProject(ctx, svc.db, bound.ID, "https://github.com")
 	if got := links.PullURL("o/r", 2); got != "https://git.example.com/o/r/pulls/2" {
 		t.Fatalf("forgejo bound project PullURL = %q", got)
 	}
@@ -97,7 +97,7 @@ func TestForgeLinksForProject(t *testing.T) {
 	if err := svc.db.Where("id = ?", forge.ID).Delete(&model.ForgeIntegration{}).Error; err != nil {
 		t.Fatalf("delete forge integration: %v", err)
 	}
-	links = forgeLinksForProject(ctx, svc.db, bound.ID)
+	links = forgeLinksForProject(ctx, svc.db, bound.ID, "https://github.com")
 	if got := links.PullURL("o/r", 2); got != "" {
 		t.Fatalf("deleted integration should yield empty pr url, got %q", got)
 	}
@@ -118,7 +118,7 @@ func TestForgeLinksByProjects(t *testing.T) {
 	bare := createTestProject(t, svc.db, user.ID)
 
 	projects := []model.Project{*bound, *bare}
-	linksByProject := forgeLinksByProjects(ctx, svc.db, projects)
+	linksByProject := forgeLinksByProjects(ctx, svc.db, projects, "https://github.com")
 	if got := linksByProject[bound.ID].PullURL("o/r", 9); got != "https://forge.batch.org/o/r/pulls/9" {
 		t.Fatalf("bound project = %q", got)
 	}

@@ -9,6 +9,7 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
+	"github.com/godbobo/fast_ship/server/internal/pkg/forges"
 	"github.com/godbobo/fast_ship/server/internal/repository"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
@@ -283,6 +284,7 @@ func TestRepoHostKeys(t *testing.T) {
 	}{
 		{"bare host assumes https default", repoHostKey("git.example.com"), "git.example.com:443"},
 		{"explicit port kept", repoHostKey("git.example.com:8443"), "git.example.com:8443"},
+		{"numeric port spelling normalized", repoHostKey("git.example.com:0443"), "git.example.com:443"},
 		{"host lower cased", repoHostKey("Git.Example.com"), "git.example.com:443"},
 		{"ipv6 brackets stripped", repoHostKey("[::1]:3000"), "::1:3000"},
 		{"https base default port", forgeBaseHostKey("https://git.example.com"), "git.example.com:443"},
@@ -1288,7 +1290,8 @@ func TestProjectRepoUpdate_CodeRepoSyncsReviewSettings(t *testing.T) {
 }
 
 // createTestForgeIntegration 测试用 forgejo 集成行：base_url 原样落库
-// （生产保存时已归一，用例里直接写归一后的形态）。
+// （生产保存时已归一，用例里直接写归一后的形态），host_key 与生产一致
+// 按 base_url 归一写入——绑定匹配按 host_key 点查。
 func createTestForgeIntegration(t *testing.T, db *gorm.DB, baseURL string) *model.ForgeIntegration {
 	t.Helper()
 	row := &model.ForgeIntegration{
@@ -1297,6 +1300,7 @@ func createTestForgeIntegration(t *testing.T, db *gorm.DB, baseURL string) *mode
 		Name:       "forge-" + baseURL,
 		BaseURL:    baseURL,
 		APIBaseURL: baseURL + "/api/v1",
+		HostKey:    forges.HostKey(baseURL),
 		CreatedAt:  time.Now().UTC(),
 		UpdatedAt:  time.Now().UTC(),
 	}

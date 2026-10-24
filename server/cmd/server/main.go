@@ -621,6 +621,11 @@ func runBootMigrations(db *gorm.DB, fileStorage storage.Storage, logger *zap.Log
 		return fmt.Errorf("代码集成 host_key 回填失败: %w", err)
 	}
 
+	// api_base_url 列语义改「空 = 推导」：存量展开值一次性回收（幂等）。
+	if err := migrateForgeAPIDerived(db, logger); err != nil {
+		return fmt.Errorf("代码集成 api_base_url 迁移失败: %w", err)
+	}
+
 	if err := createBootIndexes(db); err != nil {
 		return fmt.Errorf("创建手工索引失败: %w", err)
 	}

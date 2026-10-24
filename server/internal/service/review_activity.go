@@ -174,16 +174,18 @@ func (s *ReviewService) ListPullRequestActivity(ctx context.Context, userID, pro
 
 	// 全量分组后再切片：counts/total 是过滤范围内全部 PR 的统计。
 	now := time.Now().UTC()
-	// PR 链接兜底按各项目的代码仓集成构造（INT-166）：事务里已取出项目完整行，
-	// 集成引用批量解析成构造面。
-	linksByProject := forgeLinksByProjects(ctx, s.db, projects)
+	// PR 链接兜底按 GitHub 身份构造：审查执行本期只有 GitHub 一条链路，
+	// 历史运行的 forge 身份就是 github——项目改绑 forgejo 后历史链接不
+	// 该改写过去（INT-166 方向审计结论；P1 接入 Forgejo 执行时随运行记
+	// 录存 forge 身份）。
+	ghLinks := githubLinks(githubWebBase(s.cfg))
 	entries := make([]reviewActivityEntry, 0, len(scoped))
 	for _, pr := range scoped {
 		key := pr.ProjectID + "#" + pr.RepoFullName + "#" + strconv.Itoa(pr.PRNumber) + "#" + strconv.Itoa(pr.RoundNumber) + "#" + pr.HeadSHA
 		item, sortAt, ok := buildPullRequestActivity(pr, nameByProject[pr.ProjectID],
 			settingsByProject[pr.ProjectID], visualCombosByProject[pr.ProjectID],
 			debounceByPR[pr.ProjectID+"#"+pr.RepoFullName+"#"+strconv.Itoa(pr.PRNumber)],
-			runsByPR[key], now, linksByProject[pr.ProjectID])
+			runsByPR[key], now, ghLinks)
 		if !ok {
 			continue
 		}
@@ -706,7 +708,8 @@ func (s *ReviewService) GetPullRequestRecord(ctx context.Context, userID, projec
 		roundMap[r.RoundNumber] = append(roundMap[r.RoundNumber], *r)
 	}
 	envNames := s.reviewRunEnvNames(ctx, runs)
+	// 历史运行记录同按 GitHub 身份兜底（与列表路径同口径，见上方注释）。
 	rec := buildReviewPRRecord(&pr, roundMap, envNames, settings.RepoFullName,
-		forgeLinksForProject(ctx, s.db, projectID))
+		githubLinks(githubWebBase(s.cfg)))
 	return &rec, nil
 }

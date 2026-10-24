@@ -53,7 +53,13 @@ function BuiltinRow({ integration }: { integration: ForgeIntegration }) {
         <div className="flex flex-wrap items-center gap-2">
           <p className="font-medium">{integration.name}</p>
           <Badge variant="outline">内置</Badge>
-          {credentialBadge(integration.token_set, true)}
+          {integration.unavailable ? (
+            <Badge variant="secondary" className="text-amber-600 dark:text-amber-400">
+              不可用——请检查 GitHub App 配置
+            </Badge>
+          ) : (
+            credentialBadge(integration.token_set, true)
+          )}
         </div>
         <p className="truncate font-mono text-xs text-muted-foreground">
           {integration.base_url}

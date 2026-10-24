@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"path"
 	"strconv"
 	"strings"
 	"syscall"
@@ -63,6 +64,11 @@ type Config struct {
 	CACertPEM string
 	// AllowPrivateNetwork 放行配置主机解析到私网地址；http 同样只在开启时可用。
 	AllowPrivateNetwork bool
+	// AuthPathPrefix 凭证作用域前缀（如集成 api_base_url 的路径 /api/v1）：
+	// 非空时，跟随跳转的请求若解码路径清理后不在该前缀之下，Authorization
+	// 被剥掉——PAT 不落到同主机 API 树外的端点日志（含 %2e%2e 编码穿越经
+	// 代理归一指出前缀外的情形）。空串不做路径范围判定。
+	AuthPathPrefix string
 	// Timeout 单请求超时；0 取 DefaultTimeout。
 	Timeout time.Duration
 }
@@ -149,9 +155,28 @@ func NewClient(cfg Config) (*http.Client, error) {
 			if req.URL.Host != via[0].URL.Host {
 				return ErrCrossHostRedirect
 			}
+			// 凭证作用域（Config.AuthPathPrefix 配置了才生效）：跳转出 API
+			// 前缀或路径含 . / .. 歧义段（编码穿越经代理归一可能指出前缀外）
+			// 时剥掉 Authorization。带凭证的请求都走这一层——探测、未来的
+			// webhook/轮询调用不再各自包一遍。
+			if cfg.AuthPathPrefix != "" && !authPathInScope(req.URL.Path, cfg.AuthPathPrefix) {
+				req.Header.Del("Authorization")
+			}
 			return nil
 		},
 	}, nil
+}
+
+// authPathInScope 判定解码后的目标路径是否仍在凭证作用域内：含 . / .. 歧义
+// 段（字面命中前缀也不能信任，代理/服务端归一后可能指出前缀外）或清理后
+// 不带前缀，都不算在作用域内。
+func authPathInScope(p, prefix string) bool {
+	for _, seg := range strings.Split(p, "/") {
+		if seg == "." || seg == ".." {
+			return false
+		}
+	}
+	return strings.HasPrefix(path.Clean(p), strings.TrimRight(prefix, "/")+"/")
 }
 
 // dialGuard 生成 net.Dialer.Control：在 DNS 解析之后、建连之前判定实际目标
@@ -320,10 +345,21 @@ func parseBaseURL(raw string) (*url.URL, error) {
 		return nil, ErrInvalidBaseURL
 	}
 	// url.Parse 只查端口是否纯数字，不查范围——:0、:65536 能落库但永远连
-	// 不上。保存时把超出 TCP 端口的写法挡掉。
+	// 不上。保存时把超出 TCP 端口的写法挡掉；数字端口统一拼写（:0443 →
+	// :443），同一端点的不同写法归一出同一 host_key。
 	if port := u.Port(); port != "" {
 		n, err := strconv.Atoi(port)
 		if err != nil || n < 1 || n > 65535 {
+			return nil, ErrInvalidBaseURL
+		}
+		u.Host = net.JoinHostPort(u.Hostname(), strconv.Itoa(n))
+	}
+	// 路径里的 . / .. 段拒收：服务端/代理归一后请求路径与字面前缀不同——
+	// api_base_url 的 /api/../x 会被代理归一到别的端点，探测莫名失败；且
+	// forgeAPIGet 的 PAT 前缀保护按字面前缀判定，字面前缀语义先统一。
+	// u.Path 已解码 percent 编码，%2e%2e 同样命中。
+	for _, seg := range strings.Split(u.Path, "/") {
+		if seg == "." || seg == ".." {
 			return nil, ErrInvalidBaseURL
 		}
 	}

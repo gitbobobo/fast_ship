@@ -234,8 +234,12 @@ func (s *ReviewService) ListReviewRecords(ctx context.Context, userID, projectID
 
 	// 批量补 environment_name。
 	envNames := s.reviewRunEnvNames(ctx, runs)
-	// PR 链接兜底按项目的代码仓集成构造（INT-166）。
-	links := forgeLinksForProject(ctx, s.db, projectID)
+	// PR 链接兜底按 GitHub 身份构造：审查执行本期只有 GitHub 一条链路
+	// （forgejo 绑定的项目在审查设置侧进不来），存量运行的 forge 身份就是
+	// github——项目后来被改绑 forgejo，也不能把历史运行的链接改写到新
+	// 实例上。P1 接入 Forgejo 审查执行时须随运行记录存 forge 身份再按
+	// 记录解析（INT-166 方向审计结论）。
+	links := githubLinks(githubWebBase(s.cfg))
 
 	// (repo, pr) → rounds。
 	type prKey struct {

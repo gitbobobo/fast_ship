@@ -432,7 +432,7 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 					RepoFullName: ledger.RepoFullName,
 					HeadSHA:      ledger.HeadSHA,
 					RoundNumber:  ledger.RoundNumber,
-					links:        forgeLinksForProject(ctx, s.db, ledger.ProjectID),
+					links:        forgeLinksForProject(ctx, s.db, ledger.ProjectID, githubWebBase(s.cfg)),
 				}, outcome.PriorRuns)
 				if err := s.upsertPRComment(ctx, client, ledger, reviewVisualCommentMarker,
 					body, "visual_comment_id", ledger.VisualCommentID); err != nil {
@@ -592,7 +592,7 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 		HeadSHA:         ledger.HeadSHA,
 		RoundNumber:     ledger.RoundNumber,
 		DiffUnavailable: diffUnavailable,
-		links:           forgeLinksForProject(ctx, s.db, ledger.ProjectID),
+		links:           forgeLinksForProject(ctx, s.db, ledger.ProjectID, githubWebBase(s.cfg)),
 	}, codeRuns, inlineLines, visualPending, visualCarry)
 	// upsertPRComment 自己按正文去重：diff 读不到的重试里正文没变就不 PATCH，
 	// 变了照常更新（等 diff 读得到时再补「未行内标注」注记）。
@@ -780,7 +780,7 @@ func (s *ReviewService) upsertVisualComment(ctx context.Context, client githubap
 		RepoFullName: ledger.RepoFullName,
 		HeadSHA:      ledger.HeadSHA,
 		RoundNumber:  ledger.RoundNumber,
-		links:        forgeLinksForProject(ctx, s.db, ledger.ProjectID),
+		links:        forgeLinksForProject(ctx, s.db, ledger.ProjectID, githubWebBase(s.cfg)),
 	}
 	body := buildVisualComment(meta, visualRuns, priorRuns, carried)
 	return s.upsertPRComment(ctx, client, ledger, reviewVisualCommentMarker, body, "visual_comment_id", ledger.VisualCommentID)

@@ -105,8 +105,19 @@ export function normalizeCodeRepoRef(raw: string): string {
     // 方括号 IPv6 带端口（[::1]:8443）算显式端口，其余按 scheme 补默认。
     const colonCount = (first.match(/:/g) || []).length;
     const hasPort = colonCount === 1 || /^\[.*\]:[^:]+$/.test(first);
-    host =
-      first.toLowerCase() + (hasPort ? "" : scheme === "http" ? ":80" : ":443");
+    let port = "";
+    let name = first.toLowerCase();
+    if (hasPort) {
+      const sep = first.startsWith("[") ? first.lastIndexOf("]:") : first.lastIndexOf(":");
+      port = first.slice(sep + (first.startsWith("[") ? 2 : 1));
+      name = first.slice(0, sep + (first.startsWith("[") ? 1 : 0)).toLowerCase();
+      // 数字端口统一拼写（:0443 → :443），与后端 parseBaseURL/repoHostKey
+      // 同口径——同一端点的不同写法归一出同一个主机键。
+      if (/^\d+$/.test(port)) port = String(parseInt(port, 10));
+      // 与 SplitHostPort 同口径剥掉 IPv6 方括号。
+      if (name.startsWith("[") && name.endsWith("]")) name = name.slice(1, -1);
+    }
+    host = name + (hasPort ? ":" + port : scheme === "http" ? ":80" : ":443");
     if (host === "github.com:80" || host === "github.com:443") {
       host = "github.com";
     }

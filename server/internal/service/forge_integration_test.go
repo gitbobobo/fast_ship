@@ -13,7 +13,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -321,8 +320,9 @@ func TestForgeIntegrationUpdateThreeStates(t *testing.T) {
 }
 
 // 只改 base_url 不动 api_base_url 时：存量 api 若是旧 base 的推导值
-// ({old}/api/v1) 必须跟随新 base——落库的是展开值，不跟随会把 PAT 发往旧
-// 主机；管理员显式钉死的 api 则保留不跟随。
+// ({old}/api/v1) 必须跟随新 base——落库的是意图（空=推导），改 base 后
+// 生效值自然指向新主机，不跟随会把 PAT 发往旧主机；管理员显式钉死的 api
+// 则保留不跟随。
 func TestForgeIntegrationUpdateDerivedAPIBaseFollows(t *testing.T) {
 	env := forgeTestService(t)
 	ctx := context.Background()
@@ -335,8 +335,13 @@ func TestForgeIntegrationUpdateDerivedAPIBaseFollows(t *testing.T) {
 	if created.ApiBaseUrl != "https://a.example.com/api/v1" {
 		t.Fatalf("create api derived = %q", created.ApiBaseUrl)
 	}
+	// 存储意图：推导行的 api_base_url 列存空串，响应投影展开生效值。
+	row, _ := env.repo.FindByID(created.Id)
+	if row.APIBaseURL != "" {
+		t.Fatalf("derived api should store empty intent, got %q", row.APIBaseURL)
+	}
 
-	// 推导值跟随：只改 base，api 未显式变更 → 落到新 base 的推导值。
+	// 推导值跟随：只改 base，api 未显式变更 → 生效值落到新 base 的推导值。
 	out, err := env.svc.Update(ctx, created.Id, &api.UpdateForgeIntegrationRequest{
 		BaseUrl: ptrStr("https://b.example.com"),
 	})
@@ -347,11 +352,28 @@ func TestForgeIntegrationUpdateDerivedAPIBaseFollows(t *testing.T) {
 		t.Fatalf("derived api should follow new base, got %q", out.ApiBaseUrl)
 	}
 
-	// 显式钉死：自定义 api 后再改 base，api 保留显式值。
+	// 回显守卫：客户端把生效值原样提交（编辑框预填）不等于显式钉死——
+	// 存储仍是推导意图，继续跟随 base。
+	if _, err := env.svc.Update(ctx, created.Id, &api.UpdateForgeIntegrationRequest{
+		BaseUrl:    ptrStr("https://d.example.com"),
+		ApiBaseUrl: ptrStr("https://d.example.com/api/v1"),
+	}); err != nil {
+		t.Fatalf("echo effective api: %v", err)
+	}
+	row, _ = env.repo.FindByID(created.Id)
+	if row.APIBaseURL != "" {
+		t.Fatalf("echo of derived effective must stay derived, stored %q", row.APIBaseURL)
+	}
+
+	// 显式钉死：自定义 api 后再改 base，api 保留显式值（列存展开值）。
 	if _, err := env.svc.Update(ctx, created.Id, &api.UpdateForgeIntegrationRequest{
 		ApiBaseUrl: ptrStr("https://api.custom.example.com/v1"),
 	}); err != nil {
 		t.Fatalf("pin custom api: %v", err)
+	}
+	row, _ = env.repo.FindByID(created.Id)
+	if row.APIBaseURL != "https://api.custom.example.com/v1" {
+		t.Fatalf("explicit api should store expanded value, got %q", row.APIBaseURL)
 	}
 	out, err = env.svc.Update(ctx, created.Id, &api.UpdateForgeIntegrationRequest{
 		BaseUrl: ptrStr("https://c.example.com"),
@@ -361,6 +383,21 @@ func TestForgeIntegrationUpdateDerivedAPIBaseFollows(t *testing.T) {
 	}
 	if out.ApiBaseUrl != "https://api.custom.example.com/v1" {
 		t.Fatalf("explicit api must not follow, got %q", out.ApiBaseUrl)
+	}
+
+	// 显式空串解除钉死回到推导。
+	out, err = env.svc.Update(ctx, created.Id, &api.UpdateForgeIntegrationRequest{
+		ApiBaseUrl: ptrStr(""),
+	})
+	if err != nil {
+		t.Fatalf("unpin api: %v", err)
+	}
+	if out.ApiBaseUrl != "https://c.example.com/api/v1" {
+		t.Fatalf("unpinned api should derive from current base, got %q", out.ApiBaseUrl)
+	}
+	row, _ = env.repo.FindByID(created.Id)
+	if row.APIBaseURL != "" {
+		t.Fatalf("unpinned api should store empty intent, got %q", row.APIBaseURL)
 	}
 }
 
@@ -527,20 +564,13 @@ func TestForgeIntegrationRealValidatorScheme(t *testing.T) {
 // 把 /api/v1/* 指到记录请求头的同主机端点时，凭证不落进那边的访问日志；
 // 仍在 API 树内的跳转保留 Authorization（反代正规化路径属正常跳转）。
 func TestForgeAPIGetRedirectStripsAuthOutsideAPIPrefix(t *testing.T) {
-	var mu sync.Mutex
+	// 凭证作用域政策已在 pkg/forges 的 client 层（Config.AuthPathPrefix），
+	// 端到端跳转剥头用例见 forges.TestClientRedirectStripsAuthOutsidePrefix；
+	// 这里只断言 forgeAPIGet 不再自带第二套政策——client 是什么政策就用什么。
 	var sawAuth []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
 		sawAuth = append(sawAuth, r.URL.Path+"|"+r.Header.Get("Authorization"))
-		mu.Unlock()
-		switch r.URL.Path {
-		case "/api/v1/version":
-			http.Redirect(w, r, "/api/v1/user", http.StatusFound)
-		case "/api/v1/user":
-			http.Redirect(w, r, "/logs", http.StatusFound)
-		default:
-			w.WriteHeader(http.StatusOK)
-		}
+		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
 
@@ -548,16 +578,8 @@ func TestForgeAPIGetRedirectStripsAuthOutsideAPIPrefix(t *testing.T) {
 	if err != nil || status != http.StatusOK {
 		t.Fatalf("status=%d err=%v", status, err)
 	}
-	mu.Lock()
-	defer mu.Unlock()
-	if len(sawAuth) != 3 {
+	if len(sawAuth) != 1 || !strings.HasSuffix(sawAuth[0], "token secret-pat") {
 		t.Fatalf("requests = %v", sawAuth)
-	}
-	if !strings.HasSuffix(sawAuth[0], "token secret-pat") || !strings.HasSuffix(sawAuth[1], "token secret-pat") {
-		t.Fatalf("API 树内跳转应保留凭证: %v", sawAuth)
-	}
-	if strings.HasSuffix(sawAuth[2], "token secret-pat") {
-		t.Fatalf("跳出 API 前缀的跳转仍带凭证: %v", sawAuth)
 	}
 }
 

@@ -41,3 +41,23 @@ func migrateForgeHostKeys(db *gorm.DB, logger *zap.Logger) error {
 	}
 	return nil
 }
+
+// migrateForgeAPIDerived 把存量 api_base_url 的展开值收成意图存储（INT-166
+// 审查修复）：列语义改为「空串 = 按 base_url 推导，非空 = 显式钉死」。早期
+// 写入把推导结果（{base}/api/v1）原样落库，分不清推导与显式——一次性把与
+// 推导值相等的存量展开值清回空串。本就是显式配置却恰好等于推导值的行会被
+// 一并收成推导（原始意图已不可恢复，取多数情形），其生效 URL 不变。
+//
+// 幂等：只动仍等于推导值的非空列，重复启动无副作用。
+func migrateForgeAPIDerived(db *gorm.DB, logger *zap.Logger) error {
+	res := db.Exec(`UPDATE forge_integrations SET api_base_url = ''
+		WHERE api_base_url <> '' AND api_base_url = RTRIM(base_url, '/') || '/api/v1'`)
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected > 0 && logger != nil {
+		logger.Info("代码集成 api_base_url 展开值已收成推导存储",
+			zap.Int64("rows", res.RowsAffected))
+	}
+	return nil
+}

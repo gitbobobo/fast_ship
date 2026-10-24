@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"path"
 	"strings"
 
 	"github.com/godbobo/fast_ship/server/internal/api"
@@ -81,12 +80,18 @@ func (s *ForgeIntegrationService) SetValidateBaseURL(fn func(ctx context.Context
 	s.validateBaseURL = fn
 }
 
+// unavailableTrue 内置占位条目的不可用标记（取地址用的包级变量）。
+var unavailableTrue = true
+
 // List GET /api/deployment/integrations：首条恒为内置 github-default，后接
-// forgejo 行（按创建顺序）。
+// forgejo 行（按创建顺序）。内置投影失败（GitHub App 部署设置行解密异常等
+// 与 forgejo 无关的故障）不静默少行也不拖垮整表：列一条
+// unavailable=true 的占位条目并记日志——管理员能区分「没有内置集成」与
+// 「App 密文解不开」。
 func (s *ForgeIntegrationService) List(ctx context.Context) ([]api.ForgeIntegration, error) {
 	builtin, err := s.builtinProjection(ctx)
 	if err != nil {
-		return nil, err
+		s.logger.Error("内置 github-default 集成投影失败，列表降级为不可用占位", zap.Error(err))
 	}
 	rows, err := s.repo.List()
 	if err != nil {
@@ -94,7 +99,20 @@ func (s *ForgeIntegrationService) List(ctx context.Context) ([]api.ForgeIntegrat
 		return nil, errs.ErrInternal
 	}
 	out := make([]api.ForgeIntegration, 0, len(rows)+1)
-	out = append(out, *builtin)
+	if builtin != nil {
+		out = append(out, *builtin)
+	} else {
+		// 投影失败不静默少行：占位条目标记 unavailable——管理员要能区分
+		// 「没有内置集成」与「App 密文解不开」，凭证状态一律不可信。
+		out = append(out, api.ForgeIntegration{
+			Id:          model.ForgeIntegrationBuiltinGitHubID,
+			Kind:        api.Github,
+			Name:        "GitHub（内置）",
+			BaseUrl:     githubWebBase(s.cfg),
+			Builtin:     true,
+			Unavailable: &unavailableTrue,
+		})
+	}
 	for i := range rows {
 		out = append(out, *projectForgeRow(&rows[i]))
 	}
@@ -361,16 +379,18 @@ func (s *ForgeIntegrationService) Test(ctx context.Context, id string) (*api.For
 	if err != nil {
 		return nil, errForgeIntegrationDecrypt
 	}
+	apiBase := forgeAPIBaseURL(row)
 	client, err := forges.NewClient(forges.Config{
-		AllowedHosts:        forges.AllowedHosts(row.BaseURL, row.APIBaseURL),
+		AllowedHosts:        forges.AllowedHosts(row.BaseURL, apiBase),
 		CACertPEM:           row.CACertPEM,
 		AllowPrivateNetwork: row.AllowPrivateNetwork,
+		AuthPathPrefix:      apiPathPrefix(apiBase),
 	})
 	if err != nil {
 		s.logger.Error("构建集成 client 失败", zap.Error(err))
 		return nil, errs.ErrInternal
 	}
-	probe := s.probe(ctx, client, forgeAPIBaseURL(row), string(token))
+	probe := s.probe(ctx, client, apiBase, string(token))
 	return &api.ForgeIntegrationTest{
 		Status:   api.ForgeIntegrationTestStatus(probe.Status),
 		Version:  probe.Version,
@@ -395,7 +415,7 @@ func (s *ForgeIntegrationService) builtinProjection(ctx context.Context) (*api.F
 		Id:                  model.ForgeIntegrationBuiltinGitHubID,
 		Kind:                api.Github,
 		Name:                "GitHub（内置）",
-		BaseUrl:             "https://github.com",
+		BaseUrl:             githubWebBase(s.cfg),
 		ApiBaseUrl:          apiBase,
 		TokenSet:            ok,
 		WebhookSecretSet:    strings.TrimSpace(appCfg.WebhookSecret) != "",
@@ -406,12 +426,15 @@ func (s *ForgeIntegrationService) builtinProjection(ctx context.Context) (*api.F
 }
 
 // resolveURLs 校验并归一 base / api 两个基址：reqBase 为空回落 currentBase
-// （Update 的部分更新语义）；api 为空按 {base}/api/v1 推导；allow_private_
-// network 控制保存时 DNS 校验的口径（公网/私网，两口径都逐 IP 校验）。
-// apiReset=true 表示 Update 显式传了
-// 空串，要把 api_base_url 重置为推导值而不是保留 currentAPI。任何校验失败
-// 都折成 40001。
-func (s *ForgeIntegrationService) resolveURLs(ctx context.Context, currentBase, reqBase, currentAPI, reqAPI string, apiReset, allowPrivate bool) (base, apiBase string, err error) {
+// （Update 的部分更新语义）；allow_private_network 控制保存时 DNS 校验的
+// 口径（公网/私网，两口径都逐 IP 校验）。apiReset=true 表示 Update 显式传了
+// 空串，解除显式钉死回到推导。
+//
+// 返回的 apiStore 是存储值不是展开值：空串 = 「按 {base_url}/api/v1 推导」
+// （读取侧 forgeAPIBaseURL 展开），非空 = 管理员显式钉死的端点。意图存进
+// 列里，改 base_url 时推导行自然跟随、显式行自然钉住，不再靠字符串相等性
+// 去猜当初是推导还是显式。任何校验失败都折成 40001。
+func (s *ForgeIntegrationService) resolveURLs(ctx context.Context, currentBase, reqBase, currentAPI, reqAPI string, apiReset, allowPrivate bool) (base, apiStore string, err error) {
 	baseInput := reqBase
 	if baseInput == "" {
 		baseInput = currentBase
@@ -430,22 +453,22 @@ func (s *ForgeIntegrationService) resolveURLs(ctx context.Context, currentBase, 
 		apiInput = strings.TrimSpace(currentAPI)
 	}
 	if apiReset || apiInput == "" {
-		// 空串（Create 省略 / Update 显式重置 / 存量空列）按 Forgejo 惯例推导。
-		return base, forges.DefaultAPIBaseURL(base), nil
+		// 推导（Create 省略 / Update 显式重置 / 存量空列）：存空串，读取侧
+		// 按当前 base 展开——改 base_url 自动跟随。
+		return base, "", nil
 	}
-	// 推导值跟随：存量 api 恰是旧 base 的推导值（{old}/api/v1）且本次只改了
-	// base——落库的是展开值，分不清「推导」与「显式」，不跟随会把 PAT 发往
-	// 旧主机、code_repo_url 却按新 base 拼接，两侧指向不同实例。显式值
-	// （apiInput != currentAPI）不受影响，照走下面的校验。
-	if apiInput == strings.TrimSpace(currentAPI) &&
-		apiInput == forges.DefaultAPIBaseURL(currentBase) && base != currentBase {
-		return base, forges.DefaultAPIBaseURL(base), nil
+	// 回显守卫：存量是推导行（currentAPI 空）而客户端把「生效值」（恰是新
+	// base 的推导 URL）原样提交——编辑框预填的就是展开值，回显不等于显式
+	// 钉死，保持推导。真要把推导值钉成显式：先行已显式（currentAPI 非空）
+	// 或提交值与新 base 推导值不同。
+	if strings.TrimSpace(currentAPI) == "" && apiInput == forges.DefaultAPIBaseURL(base) {
+		return base, "", nil
 	}
-	apiBase, err = s.validateBaseURL(ctx, apiInput, allowPrivate)
+	apiStore, err = s.validateBaseURL(ctx, apiInput, allowPrivate)
 	if err != nil {
 		return "", "", paramError(err)
 	}
-	return base, apiBase, nil
+	return base, apiStore, nil
 }
 
 // paramError 把校验层的具体原因折成 40001（消息原文透出，不含密钥）。
@@ -464,12 +487,8 @@ func errForgeHostTaken(name string) *errs.AppError {
 // 的，按归一键现查一次），查不到就用不带名字的泛化文案，与应用层查重同口径。
 func (s *ForgeIntegrationService) hostTakenErr(key string) *errs.AppError {
 	if key != "" {
-		if rows, err := s.repo.List(); err == nil {
-			for i := range rows {
-				if forges.HostKey(rows[i].BaseURL) == key {
-					return errForgeHostTaken(rows[i].Name)
-				}
-			}
+		if _, name, found, err := s.repo.FindByHostKey(key, ""); err == nil && found {
+			return errForgeHostTaken(name)
 		}
 	}
 	return errs.New(errs.ErrInvalidParams.Code,
@@ -497,19 +516,13 @@ func (s *ForgeIntegrationService) ensureHostAvailable(baseURL, excludeID string)
 	if key == "" {
 		return nil
 	}
-	rows, err := s.repo.List()
+	_, name, found, err := s.repo.FindByHostKey(key, excludeID)
 	if err != nil {
-		s.logger.Error("读取代码集成列表失败", zap.Error(err))
+		s.logger.Error("查询集成主机占用失败", zap.Error(err))
 		return errs.ErrInternal
 	}
-	for i := range rows {
-		row := &rows[i]
-		if row.ID == excludeID {
-			continue
-		}
-		if forgeBaseHostKey(row.BaseURL) == key {
-			return errForgeHostTaken(row.Name)
-		}
+	if found {
+		return errForgeHostTaken(name)
 	}
 	return nil
 }
@@ -625,10 +638,25 @@ func truncateProbeField(s string) string {
 	return s
 }
 
+// apiPathPrefix 取 API 基址的路径段作凭证作用域前缀（/api/v1 惯例）；解析
+// 失败或根路径返回空串——没有可界定的前缀时不启用路径范围判定（同主机
+// 拦截与拨号校验仍生效）。
+func apiPathPrefix(apiBase string) string {
+	u, err := url.Parse(apiBase)
+	if err != nil || u == nil {
+		return ""
+	}
+	p := strings.TrimRight(u.Path, "/")
+	if p == "" || p == "/" {
+		return ""
+	}
+	return p
+}
+
 // forgeAPIGet 发起带 PAT 的 GET，返回状态码与响应体；网络层失败（含响应体
-// 读取中断）返回 err。同主机重定向仍被 client 放行，但跳出 API 路径前缀的
-// 跳转会被剥掉 Authorization——集成端把 /api/v1/* 指到记录请求头的同主机
-// 端点时，PAT 不落进那边的访问日志。
+// 读取中断）返回 err。凭证作用域由 client 的 Config.AuthPathPrefix 统一
+// 把关：同主机跳转清理后路径仍在 API 前缀下才保留 Authorization，跳出或
+// 含歧义段的跳转剥掉——PAT 不落进实例上非 API 端点的访问日志。
 func forgeAPIGet(ctx context.Context, client *http.Client, url, token string) (int, []byte, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -641,19 +669,7 @@ func forgeAPIGet(ctx context.Context, client *http.Client, url, token string) (i
 	req.Header.Set("Authorization", "token "+token)
 	req.Header.Set("Accept", "application/json")
 
-	apiPrefix := path.Dir(req.URL.Path)
-	c := *client
-	base := c.CheckRedirect
-	c.CheckRedirect = func(r *http.Request, via []*http.Request) error {
-		if !strings.HasPrefix(r.URL.Path, apiPrefix+"/") {
-			r.Header.Del("Authorization")
-		}
-		if base != nil {
-			return base(r, via)
-		}
-		return nil
-	}
-	resp, err := c.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return 0, nil, err
 	}
