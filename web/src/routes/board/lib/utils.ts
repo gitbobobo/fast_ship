@@ -11,17 +11,3 @@ export function getColumnStatusValue(columnId: ColumnId): (typeof COLUMNS)[numbe
   const col = COLUMNS.find((c) => c.id === columnId);
   return col ? col.statusValue : "";
 }
-
-export function getActiveProjectId(
-  projects: Project[],
-  selectedId: string,
-  urlId: string | null,
-): string {
-  if (projects.some((p) => p.id === selectedId)) {
-    return selectedId;
-  }
-  if (urlId && projects.some((p) => p.id === urlId)) {
-    return urlId;
-  }
-  return projects[0]?.id ?? "";
-}

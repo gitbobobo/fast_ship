@@ -18,11 +18,11 @@ import { useProjects } from "@/lib/hooks/use-projects";
 import { useUpdateIssueWorkflowStatus } from "@/lib/hooks/use-issues";
 import { useProjectPreferenceStore } from "@/lib/store/project-preference-store";
 import { toast } from "sonner";
+import { getActiveProjectId } from "@/lib/projects";
 import {
   COLUMNS,
   type ColumnId,
   getColumnStatusValue,
-  getActiveProjectId,
 } from "@/routes/board/lib/utils";
 import { usePersistedScroll } from "@/lib/hooks/use-persisted-scroll";
 import { BoardColumn } from "@/routes/board/components/board-column";

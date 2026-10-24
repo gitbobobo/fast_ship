@@ -9,6 +9,9 @@ type CreateProjectRequest = Schemas["CreateProjectRequest"];
 // 更新请求的仓库与 Token 引用字段是三态：缺省保留、null 或空串清空、非空替换。
 type UpdateProjectRequest = Schemas["UpdateProjectRequest"];
 
+// until 缺省表示无限期搁置，请求体可为空对象。
+type ShelveProjectRequest = Schemas["ShelveProjectRequest"];
+
 export const projectApi = {
   list: (page = 1, pageSize = 20) =>
     api
@@ -26,6 +29,16 @@ export const projectApi = {
 
   delete: (id: string) =>
     api.delete(`projects/${id}`).json<ApiResponse<null>>(),
+
+  shelve: (id: string, until?: string) => {
+    const json: ShelveProjectRequest = until ? { until } : {};
+    return api
+      .post(`projects/${id}/shelve`, { json })
+      .json<ApiResponse<Project>>();
+  },
+
+  unshelve: (id: string) =>
+    api.delete(`projects/${id}/shelve`).json<ApiResponse<Project>>(),
 
   getBranches: (id: string) =>
     api.get(`projects/${id}/branches`).json<ApiResponse<ProjectBranchesResponse>>(),

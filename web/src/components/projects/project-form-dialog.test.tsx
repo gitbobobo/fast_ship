@@ -36,6 +36,9 @@ const projectFixture: Project = {
   code_github_repo: "",
   public_github_token_id: "",
   code_github_token_id: "",
+  shelved_at: null,
+  shelved_until: null,
+  is_shelved: false,
   created_at: "2026-10-01T00:00:00Z",
   updated_at: "2026-10-01T00:00:00Z",
 };
