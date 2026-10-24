@@ -240,6 +240,13 @@ func TestLoadReviewMediaTrustedHostsValidation(t *testing.T) {
 		`"[::1]"`,                   // IPv6 方括号：拨号主机名是裸 ::1
 		`""`,                        // 空条目
 		`"a:b:c"`,                   // 多冒号且不是合法 IPv6 字面量
+		`"user@uiv.internal"`,       // userinfo 形态：拨号主机名不含 @
+		`"uiv.internal#x"`,          // fragment：同上
+		`"uiv.internal?x=1"`,        // query：同上
+		`"uiv.internal%x"`,          // % 编码残留
+		`"uiv.internal\nx"`,         // 换行（YAML 双引号转义出真实 \n）
+		`"uiv .internal"`,           // 内部空格
+		`"例え.jp"`,                   // Unicode IDN：要求写 punycode
 	} {
 		if _, err := Load(writeConfig(t, entry)); err == nil {
 			t.Fatalf("entry %s 应被拒绝，Load 却成功了", entry)
@@ -252,6 +259,8 @@ func TestLoadReviewMediaTrustedHostsValidation(t *testing.T) {
 		`"::1"`,             // 裸 IPv6 字面量
 		`"fe80::1"`,         // IPv6 链路本地字面量
 		`"192.168.31.31"`,   // IPv4 字面量
+		`"_dmarc.internal"`, // 下划线：真实 DNS 名可出现，可命中
+		`"xn--fsq.com"`,     // punycode IDN：ASCII 形态可命中
 	} {
 		if _, err := Load(writeConfig(t, entry)); err != nil {
 			t.Fatalf("entry %s 应通过校验，got %v", entry, err)

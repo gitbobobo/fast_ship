@@ -135,14 +135,14 @@ type ReviewMediaConfig struct {
 // validate 名单条目校验：匹配按拨号主机名完全一致，所以含端口、通配符、
 // scheme/路径、IPv6 方括号或尾点的条目永远不可能命中——配了等于没配，
 // 排障时还会被误判成功能失效。非法条目直接拒绝启动，让部署立刻看到。
+// 字符判定用白名单（拨号主机名只可能含字母数字、. - _，IPv6 走冒号分支），
+// 不维护黑名单——黑名单永远会漏掉 @ # % 换行之类的字符。
 func (c ReviewMediaConfig) validate() error {
 	for i, h := range c.TrustedPrivateHosts {
 		t := strings.TrimSpace(h)
 		switch {
 		case t == "":
 			return fmt.Errorf("review_media.trusted_private_hosts[%d] 是空条目", i)
-		case strings.ContainsAny(t, "*/\\[]\"' \t"):
-			return fmt.Errorf("review_media.trusted_private_hosts[%d] %q 含通配符/路径/括号等字符：名单只接受确切主机名或 IP 字面量（不支持通配符、端口、scheme）", i, h)
 		case strings.HasSuffix(t, "."):
 			return fmt.Errorf("review_media.trusted_private_hosts[%d] %q 以点结尾：拨号主机名不带尾点，该条目永远不会命中", i, h)
 		case strings.Contains(t, ":"):
@@ -153,9 +153,26 @@ func (c ReviewMediaConfig) validate() error {
 				return fmt.Errorf("review_media.trusted_private_hosts[%d] %q 不是合法主机名或 IP 字面量", i, h)
 			}
 			// 裸 IPv6 字面量（如 ::1）：与拨号主机名的字面量形态一致，允许。
+		case !isDialedHostnameCharset(t):
+			return fmt.Errorf("review_media.trusted_private_hosts[%d] %q 含拨号主机名不可能出现的字符：名单只接受确切主机名（不支持通配符、端口、scheme；IDN 用 punycode 写法）", i, h)
 		}
 	}
 	return nil
+}
+
+// isDialedHostnameCharset 判定字符串是否只由拨号主机名可能出现的字符组成：
+// 字母数字、点、连字符、下划线（真实 DNS 名可出现）。冒号由 validate 的
+// IPv6 分支单独判定，不在此放行。
+func isDialedHostnameCharset(s string) bool {
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '.', r == '-', r == '_':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // BotsConfig 是机器人（INT-101/INT-102）的部署配置：上下文压缩阈值、记忆
