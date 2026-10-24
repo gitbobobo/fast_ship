@@ -74,6 +74,29 @@ export function useDeleteProject() {
   });
 }
 
+export function useShelveProject() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, until }: { id: string; until?: string }) =>
+      projectApi.shelve(id, until),
+    onSuccess: (_res, { id }) => {
+      queryClient.invalidateQueries({ queryKey: ["projects"] });
+      queryClient.invalidateQueries({ queryKey: ["projects", id] });
+    },
+  });
+}
+
+export function useUnshelveProject() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => projectApi.unshelve(id),
+    onSuccess: (_res, id) => {
+      queryClient.invalidateQueries({ queryKey: ["projects"] });
+      queryClient.invalidateQueries({ queryKey: ["projects", id] });
+    },
+  });
+}
+
 export function useProjectBranches(projectId: string, enabled = true) {
   return useQuery({
     queryKey: ["projects", projectId, "branches"],

@@ -34,7 +34,7 @@ import {
   useLogRuns,
 } from "@/lib/hooks/use-logs";
 import { useProjectPreferenceStore } from "@/lib/store/project-preference-store";
-import { getActiveProjectId } from "@/routes/board/lib/utils";
+import { getActiveProjectId } from "@/lib/projects";
 import { copyWithToast } from "@/lib/copy";
 import { toast } from "sonner";
 

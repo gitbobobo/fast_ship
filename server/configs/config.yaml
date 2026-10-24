@@ -55,6 +55,17 @@ github_app:
   api_base_url: ""  # GitHub API base；留空取官方 https://api.github.com（本地端到端可指向 mock GitHub）
   fake: false  # 仅 server.mode=debug 允许 true：注入假 GitHub 实现（本地自测，不读部署配置）
 
+# PR 审查截图下载面（INT-168）：可信内网主机名单。
+# 内网 DNS 把自建服务（如 UIV）直接解析到内网地址时，把主机名写进名单放行：
+# 拨号主机名与名单完全一致（不区分大小写、不含端口、不支持通配符）时跳过
+# 内网 IP 检查；名单外主机、以及从名单内主机 302 跳出的建连照旧检查。
+# 只作用于审查截图下载面，GitHub 媒体代理（/api/github/media-proxy）不受影响。
+# 注意：PR 作者可诱导服务器向名单内主机任意端口发 GET 请求——加入名单前
+# 确认该主机没有允许未登录 GET 访问的敏感接口，也没有「来自内网即免登录」
+# 这类规则；同一地址上挂着多个服务时按主机名区分，不要按 IP 放行。
+review_media:
+  trusted_private_hosts: []  # 如 ["uiv.internal.example.com"]；也可用 FAST_SHIP_REVIEW_MEDIA_TRUSTED_PRIVATE_HOSTS 逗号分隔覆盖
+
 # 机器人（INT-102）：上下文压缩阈值、记忆限额与夜间整理时程。
 # 全部为部署级配置；三个辅助模型留空即继承各机器人自己的主模型。
 bots:

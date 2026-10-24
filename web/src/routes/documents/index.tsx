@@ -40,7 +40,7 @@ import {
   useUpdateDocument,
 } from "@/lib/hooks/use-documents";
 import { useProjectPreferenceStore } from "@/lib/store/project-preference-store";
-import { getActiveProjectId } from "@/routes/board/lib/utils";
+import { getActiveProjectId } from "@/lib/projects";
 import { usePersistedScroll } from "@/lib/hooks/use-persisted-scroll";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";

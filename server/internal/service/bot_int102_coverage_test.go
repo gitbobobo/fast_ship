@@ -1353,7 +1353,10 @@ func TestBotMemorySnapshotFrozen(t *testing.T) {
 	}
 	// INT-159 v11 前缀后重定标：实测 F≈8708，F+256≈8964，
 	// 旧窗口 11200 的 T=8400 不可达；12400 的 T=9300 可验证注入刷新。
-	env.cfg.Bots.Context.WindowTokens = 12400
+	// INT-165 v14 前缀后重定标：fs_project 的 include_shelved 使工具字节
+	// 23831→24369（≈+135 token），折叠后固定前缀随之增大，12400 已触到
+	// 「固定前缀超窗口」的快速失败；12800 恢复裕量。
+	env.cfg.Bots.Context.WindowTokens = 12800
 	seedCompactableLedger(t, env, bot.ID, "压缩刷新")
 	botRow, _ = env.bots.bots.Get(bot.ID)
 	markHistoryConsumed(t, env, botRow, run)

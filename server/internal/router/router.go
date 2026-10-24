@@ -138,6 +138,9 @@ func Setup(
 			projectWrite.POST("", projectHandler.Create)
 			projectWrite.PUT("/:id", projectHandler.Update)
 			projectWrite.DELETE("/:id", projectHandler.Delete)
+			// 搁置/取消搁置（INT-165）：仅 JWT，API Key（Agent）不得改搁置状态。
+			projectWrite.POST("/:id/shelve", projectHandler.Shelve)
+			projectWrite.DELETE("/:id/shelve", projectHandler.Unshelve)
 		}
 
 		// JWT / API Key 均可 — 项目读操作

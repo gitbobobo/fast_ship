@@ -1,6 +1,9 @@
 package model
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestIsGitHubConfigured(t *testing.T) {
 	tests := []struct {
@@ -122,6 +125,37 @@ func TestCodeRepo(t *testing.T) {
 			}
 			if got := tt.input.CodeRepoFullName(); got != tt.wantFullName {
 				t.Errorf("CodeRepoFullName() = %q, want %q", got, tt.wantFullName)
+			}
+		})
+	}
+}
+
+// IsShelved 是「搁置中」的唯一判定（INT-165）：shelved_at 非空且（无截止即
+// 无限期，或截止未到）。到期自动恢复没有定时任务，边界落在调用时刻——
+// 截止恰好等于 now 视为已到期。repository 层的 SQL 过滤与此同口径。
+func TestIsShelved(t *testing.T) {
+	now := time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC)
+	past := now.Add(-time.Hour)
+	future := now.Add(time.Hour)
+
+	tests := []struct {
+		name    string
+		shelved *Project
+		want    bool
+	}{
+		{"not shelved", &Project{}, false},
+		{"indefinite shelved", &Project{ShelvedAt: &past}, true},
+		{"shelved until future", &Project{ShelvedAt: &past, ShelvedUntil: &future}, true},
+		{"shelved until passed", &Project{ShelvedAt: &past, ShelvedUntil: &past}, false},
+		{"shelved until exactly now expires", &Project{ShelvedAt: &past, ShelvedUntil: &now}, false},
+		// 只有截止、没有开始时刻不是搁置（防御脏数据）。
+		{"until without shelved_at", &Project{ShelvedUntil: &future}, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.shelved.IsShelved(now); got != tt.want {
+				t.Errorf("IsShelved() = %v, want %v", got, tt.want)
 			}
 		})
 	}

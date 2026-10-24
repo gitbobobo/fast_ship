@@ -146,10 +146,13 @@ v10（INT-136）在 v9 上只改 `fs_schedule` 的工具/动作描述（说明�
 可选执行配置 `model_selection`/`runtime_mode`/`workspace`（省略时模型沿用项目默认、runtime_mode 为 full-access、workspace 用项目主检出），
 `composer_options` 返回归一化的 `providers` 模型目录与 `not_settable`
 不可设置项清单，list/get 摘要回显 `provider`/`model`/`branch`；
-非 launch 动作携带这三个字段会被拒绝而不是静默忽略（`botActionRules`）。
+非 launch 动作携带这三个字段会被拒绝而不是静默忽略（`botActionRules`）；
+v13（INT-160）演进 `fs_thread`——新增异步动作 `wait`（线程等待，见下节）；
+v14（INT-165）演进 `fs_project`——`list` 新增 `include_shelved`
+（默认排除搁置中的项目，见「fs_project 搁置过滤」节）。
 INT-148 的线程结算与 INT-136 的确认、围栏是独立约束，
-同时保留。已发布版本（v1–v11）的注册表都是**冻结副本**——新版本变化不得改写旧版本的字节
-（存量会话的 tools_hash 失稳即前缀失稳；v1–v11 的 hash 逐字节钉死在测试基线里）。版本只在 run 入口或压缩边界推进（重建平台规则并递增 prompt_revision）：
+同时保留。已发布版本（v1–v13）的注册表都是**冻结副本**——新版本变化不得改写旧版本的字节
+（存量会话的 tools_hash 失稳即前缀失稳；v1–v14 的 hash 逐字节钉死在测试基线里）。版本只在 run 入口或压缩边界推进（重建平台规则并递增 prompt_revision）：
 run 入口的 `activateBotPrompt` 在一个短事务里读行、
 判 stale、按**该行**人设重建提示词并写回，主线与定时任务会话都适用（在冻结
 本次 run 的配置与会话快照之前完成）；提示词始终由事务内读到的行生成——
@@ -1609,6 +1612,28 @@ hub 按「用户 × 环境」维持的内存 ThreadShell（INT-116）与异步�
   `{"outcome":"server_restarted"}`，后台结果同带 wait_result——模型拿到的
   是「等待中断」而不是「执行失败」（error_message 同口径：等待中断，不是
   「结果未知」）。评估现场不跨重启恢复（调用行已落 failed，不残留）。
+
+## fs_project 搁置过滤（INT-165，工具集 v14）
+
+用户可把项目搁置（可选截止时间，到期自动恢复、无定时任务；判定与列定义见
+`docs/internal/database.md`「项目搁置列」）。对机器人只改 fs_project 的读取面：
+**`list` 默认排除搁置中的项目**——项目清单是「接下来操作哪个」的挑选面，巡检
+不该撞上暂缓的项目；`include_shelved=true` 时连搁置项目一起返回（total 同
+口径）。list/get 每项的瘦身投影恒带 `shelved_at`（null=未搁置）、
+`shelved_until`（null=无限期或未搁置）与 `is_shelved`（按响应生成时刻判定），
+模型据此区分「没搁置」与「已到期」。
+
+约束的落点：
+
+- **参数只进 v14**：`botProjectArgs` 新增 `include_shelved`（`*bool`），v4–v13
+  的 fs_project 参数冻结在 `botProjectArgsV13Frozen`——v13 及更早会话携带该
+  字段按未知参数拒绝，参数面不回写已发布版本。
+- **`include_shelved` 只对 list 生效**（`botActionRules`）：get/create/update
+  携带即拒——放行会被静默丢弃，模型却以为读到了搁置项目或把它写进了项目配置。
+- **搁置状态本身不对机器人开放**：REST 的 shelve/unshelve 仅 JWT（API Key 被
+  403 拦在路由层），fs_project 没有 shelve 动作——搁置/恢复是用户的产品决策，
+  不交给 Agent。搁置不拦截 fs_issue 等读写：用户明确要求操作某个搁置项目时，
+  get/issue 写照常可用。
 
 ## 写操作分级放行（INT-160）
 

@@ -69,6 +69,19 @@ func ownedTokenWritePredicate(userID, publicID, codeID string) (string, []interf
 		[]interface{}{publicID, publicID, userID, codeID, codeID, userID}
 }
 
+// projectNotShelvedSQL 是「未处于搁置中」的 SQL 条件（INT-165），与
+// model.Project.IsShelved 互为否定：shelved_at 为空，或已设截止且截止已过
+// （到期自动恢复没有定时任务，读取侧按绑定进去的 now 判定）。alias 是
+// projects 表在当前查询里的别名，空串表示无别名；调用方须绑定一个
+// time.Time 类型的 now 参数。两处判定必须同步修改。
+func projectNotShelvedSQL(alias string) string {
+	prefix := ""
+	if alias != "" {
+		prefix = alias + "."
+	}
+	return "(" + prefix + "shelved_at IS NULL OR (" + prefix + "shelved_until IS NOT NULL AND " + prefix + "shelved_until <= ?))"
+}
+
 func (r *ProjectRepository) FindByID(id, userID string) (*model.Project, error) {
 	return r.FindByIDTx(r.db, id, userID)
 }
@@ -92,11 +105,17 @@ func (r *ProjectRepository) FindByIDTx(tx *gorm.DB, id, userID string) (*model.P
 	return &project, nil
 }
 
-func (r *ProjectRepository) List(userID string, page, pageSize int) ([]model.Project, int64, error) {
+// List 分页返回用户项目；includeShelved=false 时排除搁置中项目（INT-165，
+// fs_project list 的默认口径）。HTTP GET /api/projects 不过滤——搁置项目
+// 照常出现在项目列表，由响应里的 is_shelved 标注。
+func (r *ProjectRepository) List(userID string, page, pageSize int, includeShelved bool) ([]model.Project, int64, error) {
 	var projects []model.Project
 	var total int64
 
 	query := r.db.Where("user_id = ?", userID)
+	if !includeShelved {
+		query = query.Where(projectNotShelvedSQL(""), time.Now().UTC())
+	}
 	query.Model(&model.Project{}).Count(&total)
 
 	err := query.Offset((page - 1) * pageSize).Limit(pageSize).
@@ -263,6 +282,44 @@ func (r *ProjectRepository) Update(project *model.Project) error {
 
 func (r *ProjectRepository) Delete(id, userID string) error {
 	return r.db.Where("id = ? AND user_id = ?", id, userID).Delete(&model.Project{}).Error
+}
+
+// Shelve 写搁置字段并刷新 updated_at（INT-165）；until 为 nil 表示无限期。
+// 只动搁置三列，不走 Update——后者带审查设置联动等副作用，搁置不该触发。
+func (r *ProjectRepository) Shelve(id, userID string, at, until *time.Time) error {
+	res := r.db.Model(&model.Project{}).
+		Where("id = ? AND user_id = ?", id, userID).
+		Updates(map[string]interface{}{
+			"shelved_at":    at,
+			"shelved_until": until,
+			"updated_at":    time.Now().UTC(),
+		})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	return nil
+}
+
+// Unshelve 清空搁置字段并刷新 updated_at（INT-165）；幂等，未搁置的项目
+// 同样命中行返回成功。项目不存在或不属于该用户时 0 行受影响。
+func (r *ProjectRepository) Unshelve(id, userID string) error {
+	res := r.db.Model(&model.Project{}).
+		Where("id = ? AND user_id = ?", id, userID).
+		Updates(map[string]interface{}{
+			"shelved_at":    nil,
+			"shelved_until": nil,
+			"updated_at":    time.Now().UTC(),
+		})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	return nil
 }
 
 func (r *ProjectRepository) ExistsByName(userID, name string) (bool, error) {

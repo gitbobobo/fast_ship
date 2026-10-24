@@ -91,8 +91,12 @@ func (s *BotService) execThreadRead(ctx context.Context, call *model.BotToolCall
 				botToolsetVer = bot.ToolsetVersion
 			}
 		}
-		if botToolsetVer > 0 && botToolsetVer < botToolsetVersion {
-			// 冻结旧工具集的会话也看得到 providers 目录：如实标注这些字段
+		// 能力门按能力引入版本（v12 = INT-159）判，不按当前发布版本：这三个
+		// 字段自 v12 起就在冻结 schema 里，v12/v13 会话携带照常受理——若按
+		// botToolsetVersion 判，当前版本升到 14 后它们会被误标成不可用，模型
+		// 白白放弃可用配置。只有冻结在 v11 及更早的会话才真的不含这些字段。
+		if botToolsetVer > 0 && botToolsetVer < 12 {
+			// 冻结在 v11 及更早的会话也看得到 providers 目录：如实标注这些字段
 			// 本版本不可用，避免模型被引导去传会被受理拒绝的参数（云端审查）。
 			notSettable = append(append([]map[string]string{}, botThreadNotSettable...),
 				map[string]string{

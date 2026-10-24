@@ -331,9 +331,16 @@ func (s *IssueRecommendationService) List(userID, projectID string) (*IssueRecom
 		if err != nil {
 			return nil, errs.ErrInternal
 		}
-		for _, p := range projects {
-			projectIDs = append(projectIDs, p.ID)
-			projectNames[p.ID] = p.Name
+		// 汇总路径排除搁置中的项目（INT-165）：推荐清单是「接下来做什么」
+		// 的挑选面，搁置项目暂不出现在的推荐里；带 project_id 的单项目查询
+		// 不过滤——指定查看某个搁置项目的推荐仍照常返回。
+		now := time.Now()
+		for i := range projects {
+			if projects[i].IsShelved(now) {
+				continue
+			}
+			projectIDs = append(projectIDs, projects[i].ID)
+			projectNames[projects[i].ID] = projects[i].Name
 		}
 	}
 

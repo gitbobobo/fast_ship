@@ -33,7 +33,7 @@ import {
 import { useProjects } from "@/lib/hooks/use-projects";
 import { useScreenshotScreens } from "@/lib/hooks/use-screenshots";
 import { useScreenshotAnnotations } from "@/lib/hooks/use-screenshot-annotations";
-import { getActiveProjectId } from "@/routes/board/lib/utils";
+import { getActiveProjectId } from "@/lib/projects";
 import { useProjectPreferenceStore } from "@/lib/store/project-preference-store";
 
 export default function ScreenshotsPage() {

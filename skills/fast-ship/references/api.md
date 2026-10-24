@@ -1037,6 +1037,9 @@ API Key 管理（仅 JWT）
 | `items[].issue_sync.last_synced_at` | string（date-time） | 否 | omitempty |
 | `items[].issue_sync.last_successful_sync_at` | string（date-time） | 否 | omitempty |
 | `items[].issue_sync.last_error` | string | 是 |  |
+| `items[].shelved_at` | string（date-time，可空） | 是 | 搁置开始时间；null 表示未搁置（INT-165） |
+| `items[].shelved_until` | string（date-time，可空） | 是 | 搁置截止时间；null 表示无限期或未搁置（INT-165） |
+| `items[].is_shelved` | boolean | 是 | 响应生成时刻是否处于搁置中；到期自动恢复，无后台任务（INT-165） |
 | `items[].created_at` | string（date-time） | 是 |  |
 | `items[].updated_at` | string（date-time） | 是 |  |
 | `total` | integer（int64） | 是 | 符合条件的总条数 |
@@ -1105,6 +1108,9 @@ API Key 管理（仅 JWT）
 | `issue_sync.last_synced_at` | string（date-time） | 否 | omitempty |
 | `issue_sync.last_successful_sync_at` | string（date-time） | 否 | omitempty |
 | `issue_sync.last_error` | string | 是 |  |
+| `shelved_at` | string（date-time，可空） | 是 | 搁置开始时间；null 表示未搁置（INT-165） |
+| `shelved_until` | string（date-time，可空） | 是 | 搁置截止时间；null 表示无限期或未搁置（INT-165） |
+| `is_shelved` | boolean | 是 | 响应生成时刻是否处于搁置中；到期自动恢复，无后台任务（INT-165） |
 | `created_at` | string（date-time） | 是 |  |
 | `updated_at` | string（date-time） | 是 |  |
 
@@ -1167,6 +1173,9 @@ API Key 管理（仅 JWT）
 | `issue_sync.last_synced_at` | string（date-time） | 否 | omitempty |
 | `issue_sync.last_successful_sync_at` | string（date-time） | 否 | omitempty |
 | `issue_sync.last_error` | string | 是 |  |
+| `shelved_at` | string（date-time，可空） | 是 | 搁置开始时间；null 表示未搁置（INT-165） |
+| `shelved_until` | string（date-time，可空） | 是 | 搁置截止时间；null 表示无限期或未搁置（INT-165） |
+| `is_shelved` | boolean | 是 | 响应生成时刻是否处于搁置中；到期自动恢复，无后台任务（INT-165） |
 | `created_at` | string（date-time） | 是 |  |
 | `updated_at` | string（date-time） | 是 |  |
 
@@ -1239,6 +1248,9 @@ API Key 管理（仅 JWT）
 | `issue_sync.last_synced_at` | string（date-time） | 否 | omitempty |
 | `issue_sync.last_successful_sync_at` | string（date-time） | 否 | omitempty |
 | `issue_sync.last_error` | string | 是 |  |
+| `shelved_at` | string（date-time，可空） | 是 | 搁置开始时间；null 表示未搁置（INT-165） |
+| `shelved_until` | string（date-time，可空） | 是 | 搁置截止时间；null 表示无限期或未搁置（INT-165） |
+| `is_shelved` | boolean | 是 | 响应生成时刻是否处于搁置中；到期自动恢复，无后台任务（INT-165） |
 | `created_at` | string（date-time） | 是 |  |
 | `updated_at` | string（date-time） | 是 |  |
 
@@ -1272,6 +1284,143 @@ API Key 管理（仅 JWT）
 **200** 操作成功（data 为 null）
 
 `data` 为 null。
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 已认证但无权限（40300-40399；40301=API Key 越权，40303=仅限 API Key） |
+| 404 | 资源不存在（40400-40499） |
+| 500 | 服务器内部错误（50000） |
+
+### POST `/api/projects/{id}/shelve`
+
+<!-- operationId: shelveProject -->
+
+搁置项目（仅 JWT）。body 可省略或为空对象表示无限期；until 提供时必须晚于当前时间（INT-165）
+
+**鉴权**：仅 JWT
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | 项目 ID（UUID） |
+
+**请求体**
+
+`application/json`，可选。
+
+搁置项目请求体；整包可省略或为空对象，表示无限期搁置（INT-165）
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `until` | string（date-time） | 否 | 搁置截止时间（RFC3339）；提供时必须晚于当前时间，缺省表示无限期 |
+
+**成功响应**
+
+**200** 搁置后的项目
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 |  |
+| `name` | string | 是 |  |
+| `description` | string | 是 |  |
+| `github_owner` | string | 是 |  |
+| `github_repo` | string | 是 |  |
+| `code_github_owner` | string | 是 | 代码仓库（PR 审查用）owner；未单独配置为空串，表示与公开仓库相同 |
+| `code_github_repo` | string | 是 | 代码仓库（PR 审查用）repo 名；未单独配置为空串，表示与公开仓库相同 |
+| `public_github_token_id` | string | 是 | 公开仓库 Token 引用；未配置为空串 |
+| `code_github_token_id` | string | 是 | 代码仓库 Token 引用；未配置为空串 |
+| `latest_version` | object | 否 | omitempty，仅在列表项中出现 |
+| `latest_version.id` | string | 是 |  |
+| `latest_version.version_number` | string | 是 |  |
+| `latest_version.status` | string（enum: pending \| shipped） | 是 |  |
+| `latest_version.created_at` | string（date-time） | 是 |  |
+| `issue_count` | integer | 否 | omitempty，仅在列表项中出现；项目 Issue 总数（不区分状态） |
+| `issue_workflow_counts` | object | 否 | omitempty，仅在列表项中出现；仅统计 state=open 的 Issue，按内部状态分组 |
+| `issue_workflow_counts.unset` | integer | 是 | 未设置内部状态的 Issue 数（含无 internal meta 行的 Issue） |
+| `issue_workflow_counts.todo` | integer | 是 |  |
+| `issue_workflow_counts.in_progress` | integer | 是 |  |
+| `issue_workflow_counts.done` | integer | 是 |  |
+| `issue_sync` | object | 否 | omitempty，项目 GitHub 同步状态 |
+| `issue_sync.status` | string（enum: idle \| running \| failed \| completed） | 是 |  |
+| `issue_sync.last_issue_updated_at` | string（date-time） | 否 | omitempty |
+| `issue_sync.last_synced_at` | string（date-time） | 否 | omitempty |
+| `issue_sync.last_successful_sync_at` | string（date-time） | 否 | omitempty |
+| `issue_sync.last_error` | string | 是 |  |
+| `shelved_at` | string（date-time，可空） | 是 | 搁置开始时间；null 表示未搁置（INT-165） |
+| `shelved_until` | string（date-time，可空） | 是 | 搁置截止时间；null 表示无限期或未搁置（INT-165） |
+| `is_shelved` | boolean | 是 | 响应生成时刻是否处于搁置中；到期自动恢复，无后台任务（INT-165） |
+| `created_at` | string（date-time） | 是 |  |
+| `updated_at` | string（date-time） | 是 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 400 | 请求参数无效（40001-40099） |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 已认证但无权限（40300-40399；40301=API Key 越权，40303=仅限 API Key） |
+| 404 | 资源不存在（40400-40499） |
+| 500 | 服务器内部错误（50000） |
+
+### DELETE `/api/projects/{id}/shelve`
+
+<!-- operationId: unshelveProject -->
+
+取消项目搁置（仅 JWT）；幂等，未搁置的项目也返回 200（INT-165）
+
+**鉴权**：仅 JWT
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | 项目 ID（UUID） |
+
+**成功响应**
+
+**200** 取消搁置后的项目
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 |  |
+| `name` | string | 是 |  |
+| `description` | string | 是 |  |
+| `github_owner` | string | 是 |  |
+| `github_repo` | string | 是 |  |
+| `code_github_owner` | string | 是 | 代码仓库（PR 审查用）owner；未单独配置为空串，表示与公开仓库相同 |
+| `code_github_repo` | string | 是 | 代码仓库（PR 审查用）repo 名；未单独配置为空串，表示与公开仓库相同 |
+| `public_github_token_id` | string | 是 | 公开仓库 Token 引用；未配置为空串 |
+| `code_github_token_id` | string | 是 | 代码仓库 Token 引用；未配置为空串 |
+| `latest_version` | object | 否 | omitempty，仅在列表项中出现 |
+| `latest_version.id` | string | 是 |  |
+| `latest_version.version_number` | string | 是 |  |
+| `latest_version.status` | string（enum: pending \| shipped） | 是 |  |
+| `latest_version.created_at` | string（date-time） | 是 |  |
+| `issue_count` | integer | 否 | omitempty，仅在列表项中出现；项目 Issue 总数（不区分状态） |
+| `issue_workflow_counts` | object | 否 | omitempty，仅在列表项中出现；仅统计 state=open 的 Issue，按内部状态分组 |
+| `issue_workflow_counts.unset` | integer | 是 | 未设置内部状态的 Issue 数（含无 internal meta 行的 Issue） |
+| `issue_workflow_counts.todo` | integer | 是 |  |
+| `issue_workflow_counts.in_progress` | integer | 是 |  |
+| `issue_workflow_counts.done` | integer | 是 |  |
+| `issue_sync` | object | 否 | omitempty，项目 GitHub 同步状态 |
+| `issue_sync.status` | string（enum: idle \| running \| failed \| completed） | 是 |  |
+| `issue_sync.last_issue_updated_at` | string（date-time） | 否 | omitempty |
+| `issue_sync.last_synced_at` | string（date-time） | 否 | omitempty |
+| `issue_sync.last_successful_sync_at` | string（date-time） | 否 | omitempty |
+| `issue_sync.last_error` | string | 是 |  |
+| `shelved_at` | string（date-time，可空） | 是 | 搁置开始时间；null 表示未搁置（INT-165） |
+| `shelved_until` | string（date-time，可空） | 是 | 搁置截止时间；null 表示无限期或未搁置（INT-165） |
+| `is_shelved` | boolean | 是 | 响应生成时刻是否处于搁置中；到期自动恢复，无后台任务（INT-165） |
+| `created_at` | string（date-time） | 是 |  |
+| `updated_at` | string（date-time） | 是 |  |
 
 **错误**
 

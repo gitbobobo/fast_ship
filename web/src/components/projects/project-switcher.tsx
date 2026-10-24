@@ -2,6 +2,8 @@ import { useRef, useState } from "react";
 import { Popover } from "@base-ui/react/popover";
 import { ChevronDown } from "lucide-react";
 import { Input } from "@/components/ui/input";
+import { Badge } from "@/components/ui/badge";
+import { shelvedStatusLabel } from "@/lib/projects";
 import { cn } from "@/lib/utils";
 
 // 状态计数点：颜色与看板语义一致——未设置灰、待处理琥珀、开发中天蓝、已完成翠绿
@@ -41,7 +43,9 @@ export function ProjectSwitcher({
   const search = query.trim().toLowerCase();
   // 顺序由 useProjects 统一提供（Issue 总数降序，含已关闭）；这里只按搜索词过滤，
   // 过滤不改变先后。卡片第二行仍展示开启口径的状态分布。
+  // 搁置项目默认不列出；输入搜索词后可被搜到，卡片上带搁置标记。
   const filteredProjects = projects.filter((project) => {
+    if (!search && project.is_shelved) return false;
     const fields = [project.name, project.description ?? ""];
     if (project.github_owner && project.github_repo) {
       fields.push(`${project.github_owner}/${project.github_repo}`);
@@ -81,6 +85,11 @@ export function ProjectSwitcher({
         >
           {activeProject?.name ?? placeholder}
         </span>
+        {activeProject?.is_shelved && (
+          <Badge variant="secondary">
+            {shelvedStatusLabel(activeProject)}
+          </Badge>
+        )}
         <ChevronDown
           aria-hidden="true"
           className="pointer-events-none size-4 shrink-0 text-muted-foreground"
@@ -154,6 +163,11 @@ export function ProjectSwitcher({
                         )}
                       </span>
                       <span className="mt-1 flex min-h-4 items-center gap-2.5 text-xs text-muted-foreground">
+                        {project.is_shelved && (
+                          <Badge variant="secondary">
+                            {shelvedStatusLabel(project)}
+                          </Badge>
+                        )}
                         {counts &&
                           WORKFLOW_COUNT_SEGMENTS.map((segment) => {
                             const count = counts[segment.key];

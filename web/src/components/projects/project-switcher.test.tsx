@@ -15,6 +15,9 @@ const projects: Project[] = [
     public_github_token_id: "",
     code_github_token_id: "",
     issue_workflow_counts: { unset: 1, todo: 2, in_progress: 3, done: 4 },
+    shelved_at: null,
+    shelved_until: null,
+    is_shelved: false,
     created_at: "2026-10-01T00:00:00Z",
     updated_at: "2026-10-01T00:00:00Z",
   },
@@ -29,10 +32,24 @@ const projects: Project[] = [
     public_github_token_id: "",
     code_github_token_id: "",
     issue_workflow_counts: { unset: 0, todo: 5, in_progress: 0, done: 1 },
+    shelved_at: null,
+    shelved_until: null,
+    is_shelved: false,
     created_at: "2026-10-01T00:00:00Z",
     updated_at: "2026-10-01T00:00:00Z",
   },
 ];
+
+// 搁置项目：默认列表隐藏，搜索可命中并带标记
+const shelvedProject: Project = {
+  ...projects[1],
+  id: "shelved",
+  name: "Shelved App",
+  description: "暂停维护",
+  shelved_at: "2026-10-10T00:00:00Z",
+  shelved_until: null,
+  is_shelved: true,
+};
 
 function renderSwitcher() {
   const onValueChange = vi.fn();
@@ -358,5 +375,54 @@ describe("ProjectSwitcher", () => {
     expect(trigger).toBeDisabled();
     await user.click(trigger);
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("默认列表不显示搁置项目", async () => {
+    const user = userEvent.setup();
+    render(
+      <ProjectSwitcher
+        projects={[...projects, shelvedProject]}
+        value="fast-ship"
+        onValueChange={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "切换项目：Fast Ship" }));
+    const popup = await screen.findByRole("dialog", { name: "切换项目" });
+    expect(within(popup).getAllByRole("button")).toHaveLength(2);
+    expect(
+      within(popup).queryByRole("button", { name: /Shelved App/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("搜索词命中搁置项目时可被搜到并带已搁置标记", async () => {
+    const user = userEvent.setup();
+    render(
+      <ProjectSwitcher
+        projects={[...projects, shelvedProject]}
+        value="fast-ship"
+        onValueChange={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "切换项目：Fast Ship" }));
+    await user.type(screen.getByRole("textbox", { name: "搜索项目" }), "shelved");
+    const popup = screen.getByRole("dialog", { name: "切换项目" });
+    const card = within(popup).getByRole("button", { name: /Shelved App/ });
+    expect(card).toHaveTextContent("已搁置");
+  });
+
+  it("当前选中项是搁置项目时触发器显示已搁置标记", () => {
+    render(
+      <ProjectSwitcher
+        projects={[...projects, shelvedProject]}
+        value="shelved"
+        onValueChange={vi.fn()}
+      />,
+    );
+
+    const trigger = screen.getByRole("button", { name: "切换项目：Shelved App" });
+    expect(trigger).toHaveTextContent("Shelved App");
+    expect(trigger).toHaveTextContent("已搁置");
   });
 });

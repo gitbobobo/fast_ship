@@ -51,6 +51,8 @@ func (r *DashboardRepository) GetOpenIssueCounts(userID string) ([]DashboardProj
 		Joins("LEFT JOIN issues i ON i.project_id = p.id").
 		Joins("LEFT JOIN issue_internal_meta m ON m.issue_id = i.id").
 		Where("p.user_id = ?", userID).
+		// 搁置中的项目不进概览（INT-165）：整行消失，而不是计数归零。
+		Where(projectNotShelvedSQL("p"), time.Now().UTC()).
 		Group("p.id, p.name, p.created_at").
 		Order("p.created_at DESC").
 		Scan(&rows).Error
@@ -69,6 +71,8 @@ func (r *DashboardRepository) GetDailyResolvedCounts(
 		Joins("JOIN issues i ON i.id = m.issue_id").
 		Joins("JOIN projects p ON p.id = i.project_id").
 		Where("p.user_id = ?", userID).
+		// 搁置中的项目不进每日完成趋势（INT-165）；看历史仍以项目列表页为准。
+		Where(projectNotShelvedSQL("p"), time.Now().UTC()).
 		Where("m.completed_at IS NOT NULL").
 		Where("m.completed_at >= ? AND m.completed_at < ?", startInclusive, endExclusive).
 		Group("DATE(m.completed_at)").
@@ -89,6 +93,8 @@ func (r *DashboardRepository) GetDailyResolvedCountsByProject(
 		Joins("JOIN issues i ON i.id = m.issue_id").
 		Joins("JOIN projects p ON p.id = i.project_id").
 		Where("p.user_id = ?", userID).
+		// 同上：搁置中的项目不进每日完成趋势（INT-165）。
+		Where(projectNotShelvedSQL("p"), time.Now().UTC()).
 		Where("m.completed_at IS NOT NULL").
 		Where("m.completed_at >= ? AND m.completed_at < ?", startInclusive, endExclusive).
 		Group("DATE(m.completed_at), p.id, p.name").

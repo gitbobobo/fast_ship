@@ -1080,10 +1080,10 @@ func TestBotApproval(t *testing.T) {
 	}
 
 	waitForBot(t, "项目创建", 20*time.Second, func() bool {
-		projects, _, err := env.bots.projects.List(userID, 1, 50)
+		projects, _, err := env.bots.projects.List(userID, 1, 50, true)
 		return err == nil && len(projects) > 0
 	})
-	projects, _, _ := env.bots.projects.List(userID, 1, 50)
+	projects, _, _ := env.bots.projects.List(userID, 1, 50, true)
 	if projects[0].Name != "机器人建的项目" || projects[0].Description != "描述" {
 		t.Fatalf("项目内容不符: %+v", projects[0])
 	}
@@ -1132,7 +1132,7 @@ func TestBotReject(t *testing.T) {
 		}
 		return false
 	})
-	projects, _, _ := env.bots.projects.List(userID, 1, 50)
+	projects, _, _ := env.bots.projects.List(userID, 1, 50, true)
 	if len(projects) != 0 {
 		t.Fatalf("拒绝后不应创建项目")
 	}
@@ -1193,7 +1193,7 @@ func TestBotAuthorization(t *testing.T) {
 
 func botProjectExists(t *testing.T, env *botTestEnv, userID, name string) bool {
 	t.Helper()
-	projects, _, _ := env.bots.projects.List(userID, 1, 50)
+	projects, _, _ := env.bots.projects.List(userID, 1, 50, true)
 	for _, p := range projects {
 		if p.Name == name {
 			return true

@@ -1,10 +1,10 @@
-import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useLocation } from "react-router";
 import { vi } from "vitest";
 import ProjectsPage from "@/routes/projects/index";
 import { renderWithRoute } from "@/test/render";
-import { useProjects, useDeleteProject, useCreateProject, useUpdateProject, useProject } from "@/lib/hooks/use-projects";
+import { useProjects, useDeleteProject, useCreateProject, useUpdateProject, useProject, useShelveProject, useUnshelveProject } from "@/lib/hooks/use-projects";
 
 const { mockNavigate } = vi.hoisted(() => ({
   mockNavigate: vi.fn(),
@@ -24,6 +24,8 @@ vi.mock("@/lib/hooks/use-projects", () => ({
   useCreateProject: vi.fn(),
   useUpdateProject: vi.fn(),
   useProject: vi.fn(),
+  useShelveProject: vi.fn(),
+  useUnshelveProject: vi.fn(),
 }));
 
 // 观察地址栏：深链参数应被消费后移除
@@ -87,6 +89,16 @@ describe("ProjectsPage", () => {
       data: undefined,
       isLoading: false,
     } as unknown as ReturnType<typeof useProject>);
+
+    vi.mocked(useShelveProject).mockReturnValue({
+      mutateAsync: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useShelveProject>);
+
+    vi.mocked(useUnshelveProject).mockReturnValue({
+      mutateAsync: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useUnshelveProject>);
   });
 
   afterEach(() => {
@@ -282,5 +294,161 @@ describe("ProjectsPage", () => {
 
     await user.click(screen.getByRole("button", { name: "确认删除" }));
     expect(deleteMutateAsync).toHaveBeenCalledWith("p1");
+  });
+
+  describe("搁置", () => {
+    const shelvedItem = {
+      id: "p3",
+      user_id: "u1",
+      name: "Dormant Tool",
+      description: "暂停的项目",
+      github_owner: "",
+      github_repo: "",
+      latest_version: null,
+      issue_count: 4,
+      shelved_at: "2026-10-10T00:00:00Z",
+      shelved_until: null,
+      is_shelved: true,
+      created_at: "2026-04-06T09:00:00Z",
+      updated_at: "2026-04-06T09:00:00Z",
+    };
+
+    function mockProjectsWithShelved() {
+      const items = [
+        {
+          id: "p1",
+          user_id: "u1",
+          name: "Alpha App",
+          description: "iOS release pipeline",
+          github_owner: "acme",
+          github_repo: "alpha",
+          latest_version: null,
+          shelved_at: null,
+          shelved_until: null,
+          is_shelved: false,
+          created_at: "2026-04-06T09:00:00Z",
+          updated_at: "2026-04-06T09:00:00Z",
+        },
+        shelvedItem,
+      ];
+      vi.mocked(useProjects).mockReturnValue({
+        data: { items, total: items.length, page: 1, page_size: 100 },
+        isLoading: false,
+      } as unknown as ReturnType<typeof useProjects>);
+    }
+
+    it("搁置项目收进默认折叠的分组，展开后可见且带标记", async () => {
+      const user = userEvent.setup();
+      mockProjectsWithShelved();
+      renderWithRoute(<ProjectsPage />, { path: "/projects", initialEntry: "/projects" });
+
+      // 默认折叠：日常网格只有未搁置项目
+      expect(screen.getByText("Alpha App")).toBeInTheDocument();
+      expect(screen.queryByText("Dormant Tool")).not.toBeInTheDocument();
+
+      const toggle = screen.getByRole("button", { name: /已搁置 \(1\)/ });
+      expect(toggle).toHaveAttribute("aria-expanded", "false");
+      await user.click(toggle);
+      expect(toggle).toHaveAttribute("aria-expanded", "true");
+
+      expect(screen.getByText("Dormant Tool")).toBeInTheDocument();
+      // 无限期搁置的卡片显示「已搁置」徽标
+      expect(screen.getByText("已搁置")).toBeInTheDocument();
+    });
+
+    it("有截止日期的搁置卡片显示「搁置至 YYYY-MM-DD」", async () => {
+      const user = userEvent.setup();
+      mockProjectsWithShelved();
+      vi.mocked(useProjects).mockReturnValue({
+        data: {
+          items: [
+            {
+              ...shelvedItem,
+              shelved_until: "2026-11-20T12:00:00Z",
+            },
+          ],
+          total: 1,
+          page: 1,
+          page_size: 100,
+        },
+        isLoading: false,
+      } as unknown as ReturnType<typeof useProjects>);
+      renderWithRoute(<ProjectsPage />, { path: "/projects", initialEntry: "/projects" });
+
+      await user.click(screen.getByRole("button", { name: /已搁置 \(1\)/ }));
+      expect(screen.getByText(/^搁置至 \d{4}-\d{2}-\d{2}$/)).toBeInTheDocument();
+    });
+
+    it("未搁置卡片菜单提供「搁置…」入口，确认后调用搁置 mutation", async () => {
+      const user = userEvent.setup();
+      const shelveMutateAsync = vi.fn().mockResolvedValue(undefined);
+      vi.mocked(useShelveProject).mockReturnValue({
+        mutateAsync: shelveMutateAsync,
+        isPending: false,
+      } as unknown as ReturnType<typeof useShelveProject>);
+      mockProjectsWithShelved();
+      renderWithRoute(<ProjectsPage />, { path: "/projects", initialEntry: "/projects" });
+
+      await user.click(screen.getAllByLabelText("更多操作")[0]);
+      await user.click(screen.getByRole("menuitem", { name: /^搁置/ }));
+
+      const dialog = await screen.findByRole("dialog", { name: "搁置项目" });
+      expect(within(dialog).getByLabelText(/截止日期/)).toBeInTheDocument();
+
+      // 留空截止日期按无限期搁置
+      await user.click(within(dialog).getByRole("button", { name: "确认搁置" }));
+      expect(shelveMutateAsync).toHaveBeenCalledWith({ id: "p1", until: undefined });
+    });
+
+    it("搁置对话框选了日期后按当天结束时间提交", async () => {
+      const user = userEvent.setup();
+      const shelveMutateAsync = vi.fn().mockResolvedValue(undefined);
+      vi.mocked(useShelveProject).mockReturnValue({
+        mutateAsync: shelveMutateAsync,
+        isPending: false,
+      } as unknown as ReturnType<typeof useShelveProject>);
+      mockProjectsWithShelved();
+      renderWithRoute(<ProjectsPage />, { path: "/projects", initialEntry: "/projects" });
+
+      await user.click(screen.getAllByLabelText("更多操作")[0]);
+      await user.click(screen.getByRole("menuitem", { name: /^搁置/ }));
+      const dialog = await screen.findByRole("dialog", { name: "搁置项目" });
+
+      fireEvent.change(within(dialog).getByLabelText(/截止日期/), {
+        target: { value: "2027-01-15" },
+      });
+      await user.click(within(dialog).getByRole("button", { name: "确认搁置" }));
+
+      expect(shelveMutateAsync).toHaveBeenCalledWith({
+        id: "p1",
+        until: expect.any(String),
+      });
+      const until = shelveMutateAsync.mock.calls[0][0].until as string;
+      const parsed = new Date(until);
+      // 截止日期语义为「搁置到当天结束」
+      expect(parsed.getFullYear()).toBe(2027);
+      expect(parsed.getMonth()).toBe(0);
+      expect(parsed.getDate()).toBe(15);
+      expect(parsed.getHours()).toBe(23);
+      expect(parsed.getMinutes()).toBe(59);
+    });
+
+    it("搁置卡片菜单提供「取消搁置」入口", async () => {
+      const user = userEvent.setup();
+      const unshelveMutateAsync = vi.fn().mockResolvedValue(undefined);
+      vi.mocked(useUnshelveProject).mockReturnValue({
+        mutateAsync: unshelveMutateAsync,
+        isPending: false,
+      } as unknown as ReturnType<typeof useUnshelveProject>);
+      mockProjectsWithShelved();
+      renderWithRoute(<ProjectsPage />, { path: "/projects", initialEntry: "/projects" });
+
+      await user.click(screen.getByRole("button", { name: /已搁置 \(1\)/ }));
+      // 展开后第二个「更多操作」属于搁置卡片
+      const menuButtons = screen.getAllByLabelText("更多操作");
+      await user.click(menuButtons[1]);
+      await user.click(screen.getByRole("menuitem", { name: /取消搁置/ }));
+      expect(unshelveMutateAsync).toHaveBeenCalledWith("p3");
+    });
   });
 });
