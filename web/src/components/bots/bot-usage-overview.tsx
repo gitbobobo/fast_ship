@@ -404,7 +404,8 @@ function CompactBotUsage({ bot }: { bot: BotUsageBot }) {
           </div>
         ))}
       </dl>
-      <p className="text-xs text-muted-foreground">
+      {/* pb-4：末行嵌在面板滚动容器里，无留白时滚到底文字贴视口底边。 */}
+      <p className="pb-4 text-xs text-muted-foreground">
         {bot.runs} 次运行 · 平均 {formatUsageCost(bot.avg_run_cost)} · 最高{" "}
         {formatUsageCost(bot.max_run_cost)} · 缓存命中率{" "}
         {formatCacheHitRate(bot.cache_hit_rate)} · 未计价{" "}
