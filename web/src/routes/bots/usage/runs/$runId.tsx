@@ -314,7 +314,7 @@ function RunContextGrowth({
         formatXLabel={(ordinal) => `#${ordinal}`}
         chartTitle="输入上下文增长"
         titleId="usage-run-context-growth-title"
-        emptyMessage="没有模型请求记录"
+        emptyMessage="暂无可用的输入 token 数据"
       />
     </section>
   );
