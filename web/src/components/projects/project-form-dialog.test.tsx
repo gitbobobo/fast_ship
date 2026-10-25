@@ -503,6 +503,21 @@ describe("ProjectFormDialog", () => {
     expect(updateMutateAsync).not.toHaveBeenCalled();
   });
 
+  it("新建项目：选 forge 集成但 slug 留空时就地报错且不创建（不静默绑回 github）", async () => {
+    const user = userEvent.setup();
+    renderDialog("create");
+
+    await user.type(screen.getByLabelText("项目名称"), "new-proj");
+    await user.click(screen.getByRole("combobox", { name: "代码仓集成" }));
+    await user.click(await screen.findByRole("option", { name: /自建 Forgejo/ }));
+    await user.click(screen.getByRole("button", { name: "创建项目" }));
+
+    expect(
+      await screen.findByText("更换代码仓集成时需填写 owner/repo"),
+    ).toBeInTheDocument();
+    expect(createMutateAsync).not.toHaveBeenCalled();
+  });
+
   it("新建项目：不显示停用提示，forge 集成合成完整 URL", async () => {
     const user = userEvent.setup();
     renderDialog("create");

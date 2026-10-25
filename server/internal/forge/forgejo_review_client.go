@@ -17,15 +17,25 @@ import (
 // 3）：持有 SSRF 安全 http client（service 侧按集成配置构建）+ API 基址 + 机器人
 // PAT，方法面把 Forgejo v1 REST 的响应转成 forge 中性类型。错误统一包装成
 // *StatusError，service 的 IsForbidden/IsNotFound 按同一口径判定。
+// ForgejoLoginCache PAT 所属账号的共享缓存：resolver 每次现取现建适配器，
+// 仓库级 PAT 下 GET /user 恒 403，写响应学到的 login 随实例丢弃会让自评
+// 标记永久失效（自己的行内评论回流下一轮历史）。缓存放 resolver 侧按
+// integrationID 分槽随进程生命周期——PAT 轮换后下一次写响应重新覆盖，
+// 探测成功同样覆盖，不留陈旧身份。
+type ForgejoLoginCache struct {
+	mu    sync.Mutex
+	login string
+}
+
 type ForgejoReviewClient struct {
 	h       *http.Client
 	apiBase string
 	token   string
 
-	// loginMu 保护 PAT 所属账号的缓存（FindPullRequestComment 认自己的评论
-	// 用）。只缓存成功结果——探测失败不记档，下次调用重试。
-	loginMu sync.Mutex
-	login   string
+	// loginCache PAT 所属账号缓存（FindPullRequestComment 认自己的评论、
+	// Self 标记用）。默认实例私有；resolver 注入按 integrationID 分槽的
+	// 共享槽让学到的身份跨实例存活。只缓存成功结果——探测失败不记档。
+	loginCache *ForgejoLoginCache
 }
 
 // 编译期钉住适配器满足审查访问面契约。
@@ -38,7 +48,21 @@ func NewForgejoReviewClient(httpClient *http.Client, apiBaseURL, token string) *
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
-	return &ForgejoReviewClient{h: httpClient, apiBase: strings.TrimRight(apiBaseURL, "/"), token: token}
+	return &ForgejoReviewClient{
+		h:          httpClient,
+		apiBase:    strings.TrimRight(apiBaseURL, "/"),
+		token:      token,
+		loginCache: &ForgejoLoginCache{},
+	}
+}
+
+// withLoginCache 换用共享 login 缓存（resolver 按 integrationID 分槽注入，
+// 跨现取现建的实例保留学到的身份）。
+func (c *ForgejoReviewClient) withLoginCache(cache *ForgejoLoginCache) *ForgejoReviewClient {
+	if cache != nil {
+		c.loginCache = cache
+	}
+	return c
 }
 
 // Kind 报告集成 kind。
@@ -201,8 +225,11 @@ func (c *ForgejoReviewClient) ListReviewComments(ctx context.Context, repoFullNa
 	if err != nil {
 		return nil, err
 	}
-	// 自评标记用 PAT 所属 login；探测失败退化为全 false（不过滤）。
-	selfLogin, _ := c.botLogin(ctx)
+	// 自评标记用 PAT 所属 login；探测确定性不可用时退化为全 false（不过滤）。
+	selfLogin, err := c.selfLogin(ctx)
+	if err != nil {
+		return nil, err
+	}
 	var out []ReviewComment
 	for _, r := range reviews {
 		// 单条 review 的 comments 也按 ListOptions 分页——裸 do() 只回默认页
@@ -250,7 +277,10 @@ func (c *ForgejoReviewClient) ListIssueCommentsForPR(ctx context.Context, repoFu
 	if err != nil {
 		return nil, err
 	}
-	selfLogin, _ := c.botLogin(ctx)
+	selfLogin, err := c.selfLogin(ctx)
+	if err != nil {
+		return nil, err
+	}
 	out := make([]IssueComment, 0, len(wire))
 	for _, w := range wire {
 		out = append(out, IssueComment{
@@ -267,17 +297,32 @@ func (c *ForgejoReviewClient) ListIssueCommentsForPR(ctx context.Context, repoFu
 // token）——此时由写接口响应的 user.login 学到登录名（learnLogin），首次写
 // 之前仍不可知。
 func (c *ForgejoReviewClient) botLogin(ctx context.Context) (string, error) {
-	c.loginMu.Lock()
-	defer c.loginMu.Unlock()
-	if c.login != "" {
-		return c.login, nil
+	c.loginCache.mu.Lock()
+	defer c.loginCache.mu.Unlock()
+	if c.loginCache.login != "" {
+		return c.loginCache.login, nil
 	}
 	var wire forgejoUser
 	if err := c.do(ctx, http.MethodGet, "/user", nil, &wire); err != nil {
 		return "", err
 	}
-	c.login = wire.Login
-	return c.login, nil
+	c.loginCache.login = wire.Login
+	return c.loginCache.login, nil
+}
+
+// selfLogin 自评判定用的 PAT 账号探测：只有 403/404（仓库级 PAT 拿不到
+// read:user 的确定性信号）才退化空 login；瞬时网络错误、5xx、非预期 401
+// 照旧传播挂起本轮——瞬时故障若也降级 marker-only，「作者==自己」过滤就
+// 形同虚设，且 PAT 有仓库管理权限时 PATCH 覆写他人评论连 403 兜底都没有。
+func (c *ForgejoReviewClient) selfLogin(ctx context.Context) (string, error) {
+	login, err := c.botLogin(ctx)
+	if err == nil {
+		return login, nil
+	}
+	if IsForbidden(err) || IsNotFound(err) {
+		return "", nil
+	}
+	return "", err
 }
 
 // learnLogin 从写接口响应的 user.login 学 PAT 所属账号（仓库级 PAT 下
@@ -286,9 +331,9 @@ func (c *ForgejoReviewClient) learnLogin(login string) {
 	if login == "" {
 		return
 	}
-	c.loginMu.Lock()
-	c.login = login
-	c.loginMu.Unlock()
+	c.loginCache.mu.Lock()
+	c.loginCache.login = login
+	c.loginCache.mu.Unlock()
 }
 
 // FindPullRequestComment 按 marker 找机器人顶层评论：GitHub 侧认
@@ -298,7 +343,10 @@ func (c *ForgejoReviewClient) learnLogin(login string) {
 // 文档推荐的 token 契约永远发不出评论（两害相权取其轻，详见
 // docs/internal/forge-integrations.md 的 PAT 契约段）。
 func (c *ForgejoReviewClient) FindPullRequestComment(ctx context.Context, repoFullName string, number int, marker string) (int64, bool, error) {
-	login, _ := c.botLogin(ctx)
+	login, err := c.selfLogin(ctx)
+	if err != nil {
+		return 0, false, err
+	}
 	repo, err := repoPath(repoFullName)
 	if err != nil {
 		return 0, false, err

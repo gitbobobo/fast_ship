@@ -218,6 +218,74 @@ func TestForgejoClient_FindPullRequestComment_NoUserScope(t *testing.T) {
 	}
 }
 
+// TestForgejoClient_SelfLogin_TransientErrorPropagates /user 抖动不降级：
+// 5xx/网络错误照旧传播挂起本轮——瞬时故障降级 marker-only 会把伪造覆写
+// 窗口扩大到任意故障时刻（fsb 第 4 轮 P2）。403/404 才是退化信号。
+func TestForgejoClient_SelfLogin_TransientErrorPropagates(t *testing.T) {
+	client, _ := newForgejoTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/user" {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		_, _ = w.Write([]byte(`[]`))
+	})
+	_, _, err := client.FindPullRequestComment(context.Background(), "o/r", 5, "<!-- m -->")
+	if err == nil {
+		t.Fatal("/user 5xx 应传播错误，不得退化 marker-only")
+	}
+	var se *StatusError
+	if !errors.As(err, &se) || se.StatusCode != http.StatusBadGateway {
+		t.Fatalf("err = %v, want *StatusError 502", err)
+	}
+}
+
+// TestForgejoClient_SharedLoginCache 跨实例身份：写响应学到的 login 存进
+// resolver 分槽共享缓存（/user 恒 403 的仓库级 PAT 下 Self 标记才不致随
+// 实例重建永久失效）——第二个实例不再探测 /user 也能标 Self。
+func TestForgejoClient_SharedLoginCache(t *testing.T) {
+	var userCalls int
+	client, _ := newForgejoTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Query().Get("page") != "" && r.URL.Query().Get("page") != "1":
+			_, _ = w.Write([]byte(`[]`))
+		case r.URL.Path == "/api/v1/user":
+			userCalls++
+			w.WriteHeader(http.StatusForbidden)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/comments"):
+			_, _ = w.Write([]byte(`{"id": 30, "body": "x", "user": {"login": "fast-ship-bot"}}`))
+		case strings.HasSuffix(r.URL.Path, "/comments"):
+			_, _ = w.Write([]byte(`[
+				{"id": 1, "body": "b1", "user": {"login": "fast-ship-bot"}},
+				{"id": 2, "body": "b2", "user": {"login": "mallory"}}
+			]`))
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	ctx := context.Background()
+	shared := &ForgejoLoginCache{}
+
+	// 实例 A：一次写学到 login（/user 403 → 写响应 user.login）。
+	a := client.withLoginCache(shared)
+	if _, err := a.CreatePullRequestComment(ctx, "o/r", 5, "b"); err != nil {
+		t.Fatalf("CreatePullRequestComment: %v", err)
+	}
+
+	// 实例 B：换共享槽的新适配器——不再发 /user 探测，Self 直接生效。
+	b := NewForgejoReviewClient(client.h, client.apiBase, client.token).withLoginCache(shared)
+	before := userCalls
+	got, err := b.ListIssueCommentsForPR(ctx, "o/r", 5)
+	if err != nil {
+		t.Fatalf("ListIssueCommentsForPR: %v", err)
+	}
+	if userCalls != before {
+		t.Fatalf("共享缓存命中后不应再探测 /user，calls=%d→%d", before, userCalls)
+	}
+	if len(got) != 2 || !got[0].Self || got[1].Self {
+		t.Fatalf("Self 标记 = %+v，want [true,false]", got)
+	}
+}
+
 func TestForgejoClient_ListReviewsAndComments(t *testing.T) {
 	// ListReviews 映射 id/commit_id/state/submitted_at；ListReviewComments 经
 	// review 列表逐个取 comments 展平。
@@ -419,6 +487,10 @@ func TestForgejoClient_StatusErrors(t *testing.T) {
 // 空页才停。
 func TestForgejoClient_Pagination(t *testing.T) {
 	client, logs := newForgejoTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/user" {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
 		switch r.URL.Query().Get("page") {
 		case "1", "2":
 			items := strings.TrimSpace(strings.Repeat(`{"id": 1, "body": "b", "user": {"login": "u"}},`, 20))

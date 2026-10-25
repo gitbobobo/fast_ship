@@ -176,12 +176,19 @@ Forgejo 仓库的 PR 审查与 GitHub 走同一条协调管线（webhook 事务�
   （`read:user` scope——仓库范围 PAT 拿不到，Forgejo 的 user/* scope 组
   不能授给 specific-repository token，见 token-scope 文档），再从写接口
   响应（`POST …/comments`、`PATCH …/comments/{id}`、`POST …/reviews`）的
-  `user.login` 学习并缓存。两者都不可得时对账退化到 marker-only 认领——
-  伪造 marker 的他人评论可能被覆写一次（PATCH 403 时按「非己评论」改走
-  新建），但不会因此发不出评论；login 学到之后立刻恢复按作者过滤。同一
-  登录名也用于给行内/会话评论标 `ReviewComment.Self`/`IssueComment.Self`
-  ——历史上下文组装靠它把系统自己的 Forgejo 发言挡在下一轮提示之外
-  （那边行内评论没有隐藏标记、login 也不以 [bot] 结尾）。
+  `user.login` 学习并缓存。**退化边界是 403/404**——仓库级 PAT 拿不到
+  `read:user` 的确定性信号才落到 marker-only 认领（伪造 marker 的他人
+  评论可能被覆写一次，PATCH 403 时按「非己评论」改走新建，但不会因此
+  发不出评论）；瞬时网络错误、5xx、非预期 401 一律传播挂起本轮重试——
+  瞬时故障也降级会把伪造覆写窗口从「仅仓库级 PAT 契约」扩大到任意故障
+  时刻，且 PAT 有仓库管理权限时覆写他人评论连 403 兜底都没有。login
+  学到之后立刻恢复按作者过滤。学到的 login 存进 resolver 按
+  `integrationID` 分槽的共享缓存（`ReviewClients.forgejoLogins`）跨适配器
+  实例存活——适配器每次现取现建，仓库级 PAT 下不共享则 Self 标记随实例
+  重建永久失效；PAT 轮换由下一次写响应/探测成功自然覆盖。同一登录名也
+  用于给行内/会话评论标 `ReviewComment.Self`/`IssueComment.Self`——历史
+  上下文组装靠它把系统自己的 Forgejo 发言挡在下一轮提示之外（那边行内
+  评论没有隐藏标记、login 也不以 [bot] 结尾）。
 - **错误归一**：Forgejo 适配器把非 2xx 包成 `*forge.StatusError`，与 GitHub
   透传的 `githubapi.StatusError` 同构，service 的 `IsNotFound`/`IsForbidden`/
   `IsDiffTooLarge` 按同一口径判定（`forge/errors.go`）。diff 超本端读入

@@ -403,6 +403,13 @@ export function ProjectFormDialog({
           const synthesized = synthesizeRepoUrl();
           if (synthesized === null) return;
           payload.code_repository_url = synthesized;
+        } else if (codeIntegrationId !== defaultIntegrationId) {
+          // 选了非内置集成但 slug 留空：API 不收单独的集成字段，创建出来
+          // 会静默绑回 github——与编辑路径同口径就地报错要求填写。
+          setError("code_repository_url", {
+            message: "更换代码仓集成时需填写 owner/repo",
+          });
+          return;
         }
         if (createData.public_github_token_id) {
           payload.public_github_token_id = createData.public_github_token_id;

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sync"
 
 	"github.com/godbobo/fast_ship/server/internal/githubapi"
 	"github.com/godbobo/fast_ship/server/internal/model"
@@ -36,6 +37,10 @@ type ForgejoSource interface {
 type ReviewClients struct {
 	gh      GitHubApps
 	forgejo ForgejoSource
+	// forgejoLogins 各集成的 PAT 账号共享缓存槽（key=integrationID）：Forgejo
+	// 适配器每次现取现建，写响应学到的 login 不跨实例保留的话，仓库级 PAT
+	// （/user 恒 403）下 Self 标记永不生效、自己的行内评论回流下一轮历史。
+	forgejoLogins sync.Map
 }
 
 // 编译期钉住实现满足 resolver 契约。
@@ -56,7 +61,9 @@ func (r *ReviewClients) ClientFor(ctx context.Context, integrationID, repoFullNa
 		if err != nil {
 			return nil, err
 		}
-		return NewForgejoReviewClient(httpClient, apiBase, token), nil
+		slot, _ := r.forgejoLogins.LoadOrStore(integrationID, &ForgejoLoginCache{})
+		return NewForgejoReviewClient(httpClient, apiBase, token).
+			withLoginCache(slot.(*ForgejoLoginCache)), nil
 	}
 	if r.gh == nil {
 		return nil, errors.New("GitHub 访问面未配置")
