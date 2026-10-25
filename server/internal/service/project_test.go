@@ -442,6 +442,28 @@ func TestParseRepoBindingGHERejectsPublicGitHubURL(t *testing.T) {
 	}
 }
 
+// http 部署（本地 GHE / 调试）：githubWebBase 恒拼 https 会让 http 仓库
+// URL 的归一键（host:80）与部署键（host:443）错配成「主机未匹配」（R42
+// Note）——保留 http scheme 才归内置 github-default。
+func TestParseRepoBindingHTTPDeployment(t *testing.T) {
+	svc := setupTestServices(t)
+	svc.cfg.GitHubApp.APIBaseURL = "http://ghe.lan:8080/api/v3"
+	ps := newTestProjectService(svc)
+
+	for _, in := range []string{"o/r", "http://ghe.lan:8080/o/r", "ghe.lan:8080/o/r"} {
+		owner, repo, id, _, publicHost, appErr := ps.parseRepoBinding(in, false)
+		if appErr != nil || id != "" || owner != "o" || repo != "r" || publicHost != "" {
+			t.Fatalf("%q → owner=%q repo=%q id=%q host=%q err=%v", in, owner, repo, id, publicHost, appErr)
+		}
+	}
+	// 仓库链接渲染同样按 http 基址。
+	p := &model.Project{GithubOwner: "o", GithubRepo: "r"}
+	got, err := ps.codeRepoUrl(p, nil)
+	if err != nil || got == nil || *got != "http://ghe.lan:8080/o/r" {
+		t.Fatalf("http deploy code_repo_url = %v, %v", got, err)
+	}
+}
+
 // GHE 部署下公开仓显式 github.com：未单独配代码仓时 code_repo_url 必须
 // 渲染公共实例主机，而不是错拼到本部署 GHE（R31 P2）。
 func TestCodeRepoUrlGHEExplicitPublicGitHub(t *testing.T) {

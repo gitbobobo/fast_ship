@@ -722,9 +722,15 @@ func createBootIndexes(db *gorm.DB) error {
 	// 同归一主机只允许一条 forgejo 集成（INT-166）：保存时 service 层先查重
 	// 并返回带集成名的 40001（idx_forge_integrations_host_key 的归一键在 SQL
 	// 里算不出来），这条部分唯一索引兜查重通过后同主机被并发抢注的窗口；
-	// host_key 为空串的存量脏行不参与唯一约束。建不上（如存量数据已有同
-	// host_key 冲突）必须启动失败——带缺口跑等于并发抢注窗口裸奔。
-	if err := db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_forge_integrations_host_key ON forge_integrations(host_key) WHERE host_key <> ''").Error; err != nil {
+	// host_key 为空串的存量脏行不参与唯一约束。谓词含 kind='forgejo'——与
+	// FindByHostKey/ensureHostAvailable 的过滤同口径，未来其它 kind 落表不
+	// 会被索引拦截却查重看不见。建不上（如存量数据已有同 host_key 冲突）
+	// 必须启动失败——带缺口跑等于并发抢注窗口裸奔。IF NOT EXISTS 不更新
+	// 存量谓词，先 DROP 再建（表小，重建成本可忽略）。
+	if err := db.Exec("DROP INDEX IF EXISTS idx_forge_integrations_host_key").Error; err != nil {
+		return fmt.Errorf("重建 idx_forge_integrations_host_key 失败: %w", err)
+	}
+	if err := db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_forge_integrations_host_key ON forge_integrations(host_key) WHERE host_key <> '' AND kind = 'forgejo'").Error; err != nil {
 		return fmt.Errorf("创建 idx_forge_integrations_host_key 失败: %w", err)
 	}
 	// 截图源地址唯一索引由 model.ReviewAsset 的 uniqueIndex 标签随 AutoMigrate

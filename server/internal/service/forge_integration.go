@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 
 	"github.com/godbobo/fast_ship/server/internal/api"
@@ -813,7 +816,10 @@ func probeForge(ctx context.Context, client *http.Client, apiBaseURL, token stri
 
 // probeErrDetail 网络层错误的 detail：SSRF 防护主动拦截（拨号私网判定、
 // 重定向政策）与真实断网分开——前者该改集成配置或跳转目标而不是查网络，
-// 文案透出策略哨兵的人话描述（哨兵是常量，不含请求细节与凭证）。
+// 文案透出策略哨兵的人话描述（哨兵是常量，不含请求细节与凭证）。其余错误
+// 按类别透出内层原因（url.Error 的 Err 不含请求 URL 与凭证，主机本就是
+// 管理员自己配置的）：自签 TLS、DNS、拒绝、超时的修法各不同，折叠成一句
+// 「网络错误」会让连接检测失去排障能力。
 func probeErrDetail(err error) string {
 	for _, sentinel := range []error{
 		forges.ErrPrivateAddress, forges.ErrCrossHostRedirect,
@@ -823,7 +829,31 @@ func probeErrDetail(err error) string {
 			return "地址或重定向被安全策略拒绝：" + sentinel.Error()
 		}
 	}
-	return "网络错误，未能连接 Forgejo"
+	inner := err
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) && urlErr.Err != nil {
+		inner = urlErr.Err
+	}
+	var certInvalid x509.CertificateInvalidError
+	var unknownAuth x509.UnknownAuthorityError
+	var hostErr x509.HostnameError
+	var recErr tls.RecordHeaderError
+	var dnsErr *net.DNSError
+	var opErr *net.OpError
+	switch {
+	case errors.As(inner, &certInvalid), errors.As(inner, &unknownAuth),
+		errors.As(inner, &hostErr):
+		return "TLS 证书校验失败：" + inner.Error() + "（自签名实例请配置自定义 CA 证书）"
+	case errors.As(inner, &recErr):
+		return "TLS 握手失败，对端未按 TLS 应答（http 端口配了 https？）：" + inner.Error()
+	case errors.As(inner, &dnsErr):
+		return "DNS 解析失败：" + inner.Error()
+	case errors.Is(err, context.DeadlineExceeded) || os.IsTimeout(err):
+		return "连接超时，请检查实例地址与网络可达性"
+	case errors.As(inner, &opErr):
+		return "连接失败：" + inner.Error()
+	}
+	return "网络错误，未能连接 Forgejo：" + inner.Error()
 }
 
 // truncateProbeField 防御性截断：实例版本字段理论上很短，超长按 64 个字符

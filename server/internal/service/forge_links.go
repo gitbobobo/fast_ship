@@ -38,9 +38,16 @@ type forgeLinks struct {
 // （api.github.com → github.com；GHE 的 https://<host>[:port]/api/v3 → 该
 // host[:port]），与 review 附件的部署口径共用同一份推导。写死 github.com
 // 会让 GHE 部署的审查链接与 code_repo_url 指向公共 GitHub——私有 owner/repo
-// 落到错误主机，正是 forgejo 侧明确禁止的那类错误。
+// 落到错误主机，正是 forgejo 侧明确禁止的那类错误。http 部署（本地 GHE /
+// 调试）保留 http——恒拼 https 会让用户输入的 http 仓库 URL（归一键
+// host:80）与部署键（host:443）错配、链接也渲染错 scheme。
 func githubWebBase(cfg *config.Config) string {
-	return "https://" + githubmedia.GitHubWebHost(cfg.GitHubApp.APIBaseURL)
+	apiBase := strings.TrimSpace(cfg.GitHubApp.APIBaseURL)
+	scheme := "https"
+	if u, err := url.Parse(apiBase); err == nil && u.Scheme == "http" {
+		scheme = "http"
+	}
+	return scheme + "://" + githubmedia.GitHubWebHost(apiBase)
 }
 
 // githubLinks 内置 github-default 的构造面：base 是本部署的 GitHub Web 基址

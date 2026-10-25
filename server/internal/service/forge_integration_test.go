@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -806,8 +807,28 @@ func TestProbeErrDetailPolicyVsNetwork(t *testing.T) {
 			t.Fatalf("policy detail = %q (sentinel %v)", detail, sentinel)
 		}
 	}
-	if detail := probeErrDetail(errors.New("connection refused")); detail != "网络错误，未能连接 Forgejo" {
+	if detail := probeErrDetail(errors.New("connection refused")); !strings.Contains(detail, "connection refused") {
 		t.Fatalf("network detail = %q", detail)
+	}
+}
+
+// 探测失败按错误类别透出排障方向（R42 P2）：自签 TLS 提示配 CA、DNS/
+// 拒绝/超时各归其类，不再折叠成一句「网络错误」。
+func TestProbeErrDetailClassification(t *testing.T) {
+	urlErr := func(inner error) error {
+		return &url.Error{Op: "Get", URL: "https://forge.example.com/api/v1/version", Err: inner}
+	}
+	if detail := probeErrDetail(urlErr(x509.UnknownAuthorityError{})); !strings.Contains(detail, "TLS 证书校验失败") {
+		t.Fatalf("cert detail = %q", detail)
+	}
+	if detail := probeErrDetail(urlErr(&net.DNSError{Err: "no such host", Name: "forge.example.com"})); !strings.Contains(detail, "DNS") {
+		t.Fatalf("dns detail = %q", detail)
+	}
+	if detail := probeErrDetail(urlErr(&net.OpError{Op: "dial", Err: errors.New("connect: connection refused")})); !strings.Contains(detail, "connection refused") {
+		t.Fatalf("refused detail = %q", detail)
+	}
+	if detail := probeErrDetail(urlErr(context.DeadlineExceeded)); !strings.Contains(detail, "超时") {
+		t.Fatalf("timeout detail = %q", detail)
 	}
 }
 
