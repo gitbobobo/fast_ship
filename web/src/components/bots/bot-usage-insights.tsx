@@ -502,7 +502,7 @@ function CacheHitSection({ data }: { data: BotUsageInsights }) {
       note="缓存命中 token / 输入 token（cached/prompt），按天，只统计 usage 完整的请求；条长按 0–100% 画满轨道"
       testId="usage-insights-cache"
     >
-      {!days.length ? (
+      {!days.length || days.every((day) => day.rate == null) ? (
         <EmptyRow>窗口内没有完整用量数据</EmptyRow>
       ) : (
         <div className="space-y-1">
@@ -581,7 +581,10 @@ function ToolsShareSection({
               )}
               title={`工具定义 ≈${formatTokens(bot.tools.tools_tokens_estimate)} / 输入 ${formatTokens(bot.tools.prompt_tokens)}（按工具结构 schema 字节估算）`}
             >
-              <dt className="truncate text-muted-foreground">{bot.name}</dt>
+              {/* 窄栏名称优先：最多折两行，不像 truncate 那样 3 字就截 */}
+              <dt className="line-clamp-2 min-w-[5em] text-muted-foreground">
+                {bot.name}
+              </dt>
               <dd className="tabular-nums">
                 {bot.tools.share == null ? (
                   // 与宽表同口径：未计价只显「—」，不印 ≈0 / 0 的假分子分母。
@@ -672,7 +675,10 @@ function MaintenanceShareSection({
               )}
             >
               <div className="flex items-baseline justify-between gap-3">
-                <dt className="truncate text-muted-foreground">{bot.name}</dt>
+                {/* 窄栏名称优先：最多折两行，不像 truncate 那样 3 字就截 */}
+                <dt className="line-clamp-2 min-w-[5em] text-muted-foreground">
+                  {bot.name}
+                </dt>
                 <dd className="tabular-nums">
                   {bot.maintenance.cost == null
                     ? "—"
@@ -786,11 +792,17 @@ function IdleSection({
               </TableHead>
               <TableHead>空转率</TableHead>
               <TableHead>浪费</TableHead>
-              <TableHead title="条件一：静默哨兵（silent=true）">静默</TableHead>
-              <TableHead title="条件二：整次运行没有任何工具调用行">
+              <TableHead className="text-right" title="条件一：静默哨兵（silent=true）">静默</TableHead>
+              <TableHead
+                className="text-right"
+                title="条件二：整次运行没有任何工具调用行"
+              >
                 无工具
               </TableHead>
-              <TableHead title="条件三：没有任何写操作调用（只读之外的动作）">
+              <TableHead
+                className="text-right"
+                title="条件三：没有任何写操作调用（只读之外的动作）"
+              >
                 无写
               </TableHead>
               <TableHead>缓存命中率</TableHead>
@@ -894,7 +906,10 @@ function FailuresSection({
               )}
             >
               <div className="flex items-baseline justify-between gap-3">
-                <dt className="truncate text-muted-foreground">{bot.name}</dt>
+                {/* 窄栏名称优先：最多折两行，不像 truncate 那样 3 字就截 */}
+                <dt className="line-clamp-2 min-w-[5em] text-muted-foreground">
+                  {bot.name}
+                </dt>
                 <dd className="tabular-nums">
                   请求浪费 {formatUsageCost(bot.failures.failed_requests_cost)}
                 </dd>
@@ -924,9 +939,12 @@ function FailuresSection({
               <TableRow>
                 <TableHead>机器人</TableHead>
                 <TableHead title="失败请求中已计价金额合计">请求浪费</TableHead>
-                <TableHead>失败运行</TableHead>
+                <TableHead className="text-right">失败运行</TableHead>
                 <TableHead>失败运行花费</TableHead>
-                <TableHead title="与同次运行（run）内更早请求指纹（request_hash）相同的请求行数">
+                <TableHead
+                  className="text-right"
+                  title="与同次运行（run）内更早请求指纹（request_hash）相同的请求行数"
+                >
                   重试请求
                 </TableHead>
               </TableRow>

@@ -421,6 +421,22 @@ describe("BotUsageInsightsPanel", () => {
       screen.getByText("窗口内没有已计价请求，无法比较模型差价"),
     ).toBeInTheDocument();
   });
+
+  it("缓存命中率全缺：收成单条空态，不逐行铺占位", () => {
+    mockInsights({
+      ...insights,
+      cache_hit_by_day: [
+        { date: "2026-10-17", rate: null },
+        { date: "2026-10-18", rate: null },
+      ],
+    });
+    renderPanel();
+
+    const cache = within(screen.getByTestId("usage-insights-cache"));
+    expect(cache.getByText("窗口内没有完整用量数据")).toBeInTheDocument();
+    expect(cache.queryAllByTestId("usage-insights-cache-row")).toHaveLength(0);
+    expect(cache.queryByText(/其中 .* 天无完整用量数据/)).toBeNull();
+  });
 });
 
 describe("errorCodeLabel", () => {
