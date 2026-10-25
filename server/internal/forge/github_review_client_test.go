@@ -204,7 +204,7 @@ func TestGitHubReviewClientConvertsListAndSubmitTypes(t *testing.T) {
 			// PENDING 未提交草稿对读者不可见，「已提交」契约内不回传。
 			{ID: 4, CommitID: "sha", Body: "draft", State: "PENDING", CreatedAt: at},
 		},
-		foundID:        8, found: true, createdID: 9, reviewID: 10,
+		foundID: 8, found: true, createdID: 9, reviewID: 10,
 	}
 	client := NewGitHubReviewClient(api, 1)
 	ctx := context.Background()
