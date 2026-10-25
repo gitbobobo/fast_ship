@@ -26,6 +26,9 @@ type PullRequest struct {
 	HeadRef      string
 	BaseRef      string
 	AuthorLogin  string
+	// UpdatedAt pulls/{n} 响应的 updated_at——webhook 复核路径用它落
+	// seen/总账的 pr_updated_at 基准（Forgejo 适配器同源字段）。
+	UpdatedAt *time.Time
 }
 
 // ReviewComment 是 PR 的 review 评论（行内评论，不含 issue 评论）。

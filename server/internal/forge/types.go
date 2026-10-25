@@ -23,9 +23,8 @@ type PullRequest struct {
 	HeadRef      string
 	BaseRef      string
 	AuthorLogin  string
-	// UpdatedAt 平台侧的 PR 最后更新时间（Forgejo updated_at）：轮询补漏的
-	// 过期判定靠它给「读到快照后平台又推了新 head」的乱序兜底；GitHub
-	// 适配器不填（webhook 自带 updated_at，没有走对象判定的路径）。
+	// UpdatedAt 平台侧的 PR 最后更新时间（Forgejo/GitHub updated_at）：轮询
+	// 快照与 webhook 同刻复核把它落成 seen/总账的 pr_updated_at 判定基准。
 	UpdatedAt *time.Time
 }
 

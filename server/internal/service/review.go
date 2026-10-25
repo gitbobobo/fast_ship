@@ -274,7 +274,8 @@ func (s *ReviewService) revalidateTiedWebhook(ctx context.Context, integrationID
 	}
 	// PR 在投递与复核间隙关闭/合并 → 该触发已无意义；live head 指向别处 →
 	// payload 是旧态。两种都是确定态，静默丢弃（非瞬时失败）。
-	if live == nil || live.Draft || live.State == "closed" || live.State == "merged" ||
+	if live == nil || live.Draft || live.Merged ||
+		live.State == "closed" || live.State == "merged" ||
 		!strings.EqualFold(live.HeadSHA, p.PR.Head.SHA) {
 		return nil
 	}

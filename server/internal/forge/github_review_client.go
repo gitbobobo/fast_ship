@@ -27,6 +27,7 @@ func PullRequestFromGitHub(pr *githubapi.PullRequest) *PullRequest {
 		HeadRef:      pr.HeadRef,
 		BaseRef:      pr.BaseRef,
 		AuthorLogin:  pr.AuthorLogin,
+		UpdatedAt:    pr.UpdatedAt,
 	}
 }
 

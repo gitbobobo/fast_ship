@@ -141,7 +141,10 @@ func (s *ReviewService) pollAcceptPR(ctx context.Context, fetcher singlePRFetche
 	if err != nil {
 		return err
 	}
-	if live == nil || live.Draft || live.HeadSHA == "" {
+	// PR 在列表快照与实拉之间被关闭/合并 → 与 webhook 复核同口径丢弃：
+	// 已关 PR 不开轮（closed 语义由 closed 投递或自然超时收尾）。
+	if live == nil || live.Draft || live.Merged || live.HeadSHA == "" ||
+		live.State == "closed" || live.State == "merged" {
 		return nil
 	}
 	err = s.pollAcceptSnapshotTx(settings, repo, live, tied.observedHead, now)
