@@ -529,7 +529,9 @@ export function ProjectFormDialog({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="flex max-h-[90vh] flex-col overflow-hidden sm:max-w-lg">
-        <DialogHeader>
+        {/* 底栏有 border-t 分隔，标题栏同侧补 border-b——内容滚动时被裁
+            到一半的字段标签不会直接贴着标题。负外边距让分隔线贯通弹窗宽。 */}
+        <DialogHeader className="-mx-4 border-b border-foreground/10 px-4 pb-3">
           <DialogTitle>{isEdit ? "编辑项目" : "新建项目"}</DialogTitle>
         </DialogHeader>
 
@@ -635,7 +637,7 @@ export function ProjectFormDialog({
                     type="button"
                     variant="link"
                     size="sm"
-                    className="h-auto px-2 py-1.5 underline underline-offset-2"
+                    className="h-auto rounded-md px-2 py-1.5 underline underline-offset-2 hover:bg-foreground/10"
                     onClick={() => void refetchIntegrations()}
                   >
                     重试
