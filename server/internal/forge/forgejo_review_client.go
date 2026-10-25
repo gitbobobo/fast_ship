@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -210,7 +211,9 @@ func (c *ForgejoReviewClient) GetPullRequestDiff(ctx context.Context, repoFullNa
 
 // forgejoReviewExpandMax 单次 ListReviewComments 展开评论的已提交 review
 // 数上限：逐 review 再分页没有总约束时，review 数百上千的 PR 会把一次调用
-// 放大到上万请求，拖垮同步预算与实例配额。
+// 放大到上万请求，拖垮同步预算与实例配额。超上限保留最新段——最新 review
+// 恰是用户最新行内讨论与机器人最近一轮自评所在，截断它会让历史组装丢
+// 最关键的发言。
 const forgejoReviewExpandMax = 200
 
 // ListReviewComments PR 级行内评论：Forgejo 没有 PR 级平铺端点，经 review
@@ -241,18 +244,24 @@ func (c *ForgejoReviewClient) ListReviewComments(ctx context.Context, repoFullNa
 		return nil, err
 	}
 	var out []ReviewComment
-	expanded := 0
+	// 先滤出已提交 review 再取尾部最新：列表按 id 升序返回，从头数满上限
+	// 会恰好把最新 review（含用户最新行内讨论、机器人最近一轮自评）截掉。
+	submitted := make([]forgejoReview, 0, len(reviews))
 	for _, r := range reviews {
 		if strings.EqualFold(r.State, "PENDING") {
 			continue
 		}
-		if expanded >= forgejoReviewExpandMax {
-			slog.WarnContext(ctx, "Forgejo 行内评论展开 review 数到顶截断",
-				slog.String("repo", repoFullName), slog.Int("pr", number),
-				slog.Int("max_reviews", forgejoReviewExpandMax))
-			break
-		}
-		expanded++
+		submitted = append(submitted, r)
+	}
+	sort.Slice(submitted, func(i, j int) bool { return submitted[i].ID < submitted[j].ID })
+	if len(submitted) > forgejoReviewExpandMax {
+		slog.WarnContext(ctx, "Forgejo 行内评论展开 review 数到顶截断，只保留最新段",
+			slog.String("repo", repoFullName), slog.Int("pr", number),
+			slog.Int("total_reviews", len(submitted)),
+			slog.Int("max_reviews", forgejoReviewExpandMax))
+		submitted = submitted[len(submitted)-forgejoReviewExpandMax:]
+	}
+	for _, r := range submitted {
 		// 单条 review 的 comments 也按 ListOptions 分页——裸 do() 只回默认页
 		// 大小，评论多时会静默截断。
 		var wire []forgejoComment

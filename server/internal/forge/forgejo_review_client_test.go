@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -392,6 +393,59 @@ func TestForgejoClient_ListReviewsAndComments(t *testing.T) {
 		paths[5] != "/api/v1/repos/o/r/pulls/4/reviews/9/comments?limit=50&page=1" ||
 		paths[6] != "/api/v1/repos/o/r/pulls/4/reviews/9/comments?limit=50&page=2" {
 		t.Fatalf("请求顺序: %v", paths)
+	}
+}
+
+// TestForgejoClient_ListReviewComments_KeepsNewest 展开数超上限时保留最新段：
+// 列表按 id 升序返回，从头数满会恰好把最新 review（用户最新行内讨论所在）
+// 截掉。喂 forgejoReviewExpandMax+1 条已提交 review，断言最旧一条的评论
+// 端点不被请求、最新一条照常展开、总展开数恰为上限。
+func TestForgejoClient_ListReviewComments_KeepsNewest(t *testing.T) {
+	var reviewsJSON strings.Builder
+	reviewsJSON.WriteString("[")
+	for i := 1; i <= forgejoReviewExpandMax+1; i++ {
+		if i > 1 {
+			reviewsJSON.WriteString(",")
+		}
+		fmt.Fprintf(&reviewsJSON,
+			`{"id":%d,"body":"r","state":"COMMENT","commit_id":"c","user":{"login":"bot"}}`, i)
+	}
+	reviewsJSON.WriteString("]")
+	body := reviewsJSON.String()
+
+	client, logs := newForgejoTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Query().Get("page") != "" && r.URL.Query().Get("page") != "1":
+			_, _ = w.Write([]byte(`[]`))
+		case r.URL.Path == "/api/v1/user":
+			_, _ = w.Write([]byte(`{"login": "bot"}`))
+		case strings.HasSuffix(r.URL.Path, "/reviews") && r.Method == http.MethodGet:
+			_, _ = w.Write([]byte(body))
+		case strings.Contains(r.URL.Path, "/comments"):
+			_, _ = w.Write([]byte(`[]`))
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	if _, err := client.ListReviewComments(context.Background(), "o/r", 4); err != nil {
+		t.Fatalf("ListReviewComments: %v", err)
+	}
+	expanded := map[int]bool{}
+	for _, l := range *logs {
+		var id int
+		if n, _ := fmt.Sscanf(l.path,
+			"/api/v1/repos/o/r/pulls/4/reviews/%d/comments", &id); n == 1 {
+			expanded[id] = true
+		}
+	}
+	if expanded[1] {
+		t.Fatal("最旧 review 应被截断，其 comments 端点不应请求")
+	}
+	if !expanded[forgejoReviewExpandMax+1] {
+		t.Fatal("最新 review 的 comments 端点必须展开")
+	}
+	if len(expanded) != forgejoReviewExpandMax {
+		t.Fatalf("展开 review 数 = %d, want %d", len(expanded), forgejoReviewExpandMax)
 	}
 }
 
