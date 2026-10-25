@@ -484,17 +484,21 @@ type FirstRequestInputRow struct {
 // （窗口内每个有可用输入的 run 一行）。子查询先求各 run 的 MIN(ordinal)，
 // 不把 run 的全部请求行拉回来；回退仅在估算 > 0 时发生——WHERE 过滤掉
 // prompt 与估算皆无的首请求，不出 input_tokens=0、estimated=true 的点。
+// 「可信实测」除 prompt 非空外还要求内部自洽：cached>prompt 的异常行
+// 同样走估算路径画空心点，与运行明细页取数口径一致。
 func (r *BotUsageRepository) FirstRequestInputByRun(runIDs []string) (map[string]FirstRequestInputRow, error) {
 	out := map[string]FirstRequestInputRow{}
 	for _, batch := range ChunkIDs(runIDs, UsageQueryBatch) {
 		var rows []FirstRequestInputRow
+		// trusted = prompt 非空且 cached 未超过 prompt（NULL 视为无缓存）。
 		err := r.db.Model(&model.BotModelRequest{}).
 			Select("bot_model_requests.run_id AS run_id, "+
-				"COALESCE(bot_model_requests.prompt_tokens, bot_model_requests.input_tokens_estimate) AS input_tokens, "+
-				"(bot_model_requests.prompt_tokens IS NULL) AS estimated").
+				"CASE WHEN bot_model_requests.prompt_tokens IS NOT NULL AND (bot_model_requests.cached_tokens IS NULL OR bot_model_requests.cached_tokens <= bot_model_requests.prompt_tokens) "+
+				"THEN bot_model_requests.prompt_tokens ELSE bot_model_requests.input_tokens_estimate END AS input_tokens, "+
+				"NOT(bot_model_requests.prompt_tokens IS NOT NULL AND (bot_model_requests.cached_tokens IS NULL OR bot_model_requests.cached_tokens <= bot_model_requests.prompt_tokens)) AS estimated").
 			Joins("JOIN (SELECT run_id, MIN(ordinal) AS ordinal FROM bot_model_requests WHERE run_id IN ? GROUP BY run_id) first "+
 				"ON first.run_id = bot_model_requests.run_id AND first.ordinal = bot_model_requests.ordinal", batch).
-			Where("bot_model_requests.prompt_tokens IS NOT NULL OR bot_model_requests.input_tokens_estimate > 0").
+			Where("(bot_model_requests.prompt_tokens IS NOT NULL AND (bot_model_requests.cached_tokens IS NULL OR bot_model_requests.cached_tokens <= bot_model_requests.prompt_tokens)) OR bot_model_requests.input_tokens_estimate > 0").
 			// ordinal 无唯一约束：同一 run 并列最小 ordinal 时按 id 降序，
 			// 后写覆盖先写，out 里确定性留下最小 id 那行——与「首个请求」
 			// 语义及 RequestHashesBeforeOrdinal 的 (ordinal,id) 字典序

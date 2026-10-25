@@ -305,6 +305,35 @@ func TestInsightsQueriesBatchIN(t *testing.T) {
 	if len(first) != runs || first[runIDs[0]].InputTokens != 1000 || first[runIDs[0]].Estimated {
 		t.Fatalf("首请求扫描不符: %+v", first[runIDs[0]])
 	}
+
+	// 首请求内部不自洽（cached>prompt）：按估算列画点并标 estimated，
+	// 与运行明细页「不可信实测」口径一致。
+	anomalyRun := &model.BotRun{
+		ID: uuid.NewString(), BotID: "bot-1",
+		TriggerSource: model.BotTriggerUserMessage, TriggerKey: "first-anomaly-" + uuid.NewString(),
+		Status: model.BotRunStatusFailed, SessionKind: model.BotSessionKindMain,
+		ConfigSnapshotJSON: "{}", CreatedAt: now, StartedAt: &now, FinishedAt: &now,
+	}
+	if err := db.Create(anomalyRun).Error; err != nil {
+		t.Fatalf("seed anomaly run: %v", err)
+	}
+	anomalyFirst := &model.BotModelRequest{
+		ID: uuid.NewString(), RunID: anomalyRun.ID, Ordinal: 1,
+		Status: model.BotModelRequestSucceeded, StartedAt: now,
+		PrefixHash: "p", ToolsHash: "t", TokenEstimator: "chars/4",
+		PromptTokens: &anomalyPrompt, CachedTokens: &anomalyCached,
+		InputTokensEstimate: 1600,
+	}
+	if err := db.Create(anomalyFirst).Error; err != nil {
+		t.Fatalf("seed anomaly first request: %v", err)
+	}
+	got, err := repo.FirstRequestInputByRun([]string{anomalyRun.ID})
+	if err != nil {
+		t.Fatalf("FirstRequestInputByRun anomaly: %v", err)
+	}
+	if !got[anomalyRun.ID].Estimated || got[anomalyRun.ID].InputTokens != 1600 {
+		t.Fatalf("cached>prompt 首请求应取估算并标 estimated: %+v", got[anomalyRun.ID])
+	}
 	retries, err := repo.RetryCountsByRun(runIDs)
 	if err != nil {
 		t.Fatalf("RetryCountsByRun: %v", err)
