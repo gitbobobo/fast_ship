@@ -360,7 +360,7 @@ func (s *BotService) GetBotUsageInsights(userID, rangeParam, botID string) (*api
 
 	// ---------- 投影 ----------
 	insights := &api.BotUsageInsights{
-		Range:         api.BotUsageInsightsRange(rangeParam),
+		Range:         api.BotUsageInsightsRange(led.rangeParam),
 		Timezone:      led.tzName,
 		Start:         led.start.UTC().Format(time.RFC3339Nano),
 		End:           led.end.UTC().Format(time.RFC3339Nano),

@@ -281,13 +281,16 @@ type botUsageTaskAcc struct {
 // 总览与优化参考都从这里投影——insights 不再二次扫描账本，维护占比的分子
 // 分母同源（同一扫描快照）。
 type botUsageLedger struct {
-	start    time.Time
-	end      time.Time
-	dates    []string
-	loc      *time.Location
-	tzName   string
-	bots     map[string]model.Bot
-	botNames map[string]string
+	// rangeParam 是归一化后的窗口参数（空串已在入口归一为 7d），
+	// 供投影直接回显，保证响应 range 字段与实际窗口一致。
+	rangeParam string
+	start      time.Time
+	end        time.Time
+	dates      []string
+	loc        *time.Location
+	tzName     string
+	bots       map[string]model.Bot
+	botNames   map[string]string
 
 	runRows   []repository.UsageRunRow
 	runByID   map[string]*repository.UsageRunRow
@@ -686,7 +689,8 @@ func (s *BotService) loadBotUsageLedger(userID, rangeParam, botID string, maintD
 	}
 
 	return &botUsageLedger{
-		start: start, end: now, dates: dates, loc: loc, tzName: tzName,
+		rangeParam: rangeParam,
+		start:      start, end: now, dates: dates, loc: loc, tzName: tzName,
 		bots: botByID, botNames: botNames,
 		runRows: runRows, runByID: runByID, maintRows: maintRows,
 		runAgg: runAgg, maintAgg: maintAgg, maintReqRows: maintReqRows,
@@ -709,7 +713,7 @@ func (s *BotService) GetBotUsageOverview(userID, rangeParam, botID string) (*api
 
 	// ---------- 投影（月推算只跑在本端点，insights 不触发） ----------
 	overview := &api.BotUsageOverview{
-		Range:    api.BotUsageOverviewRange(rangeParam),
+		Range:    api.BotUsageOverviewRange(led.rangeParam),
 		Timezone: led.tzName,
 		Start:    led.start.UTC().Format(time.RFC3339Nano),
 		End:      led.end.UTC().Format(time.RFC3339Nano),
