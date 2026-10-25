@@ -98,6 +98,11 @@ var autoMigrateModels = []interface{}{
 	// 表在 B 轮删除，见 migrateDropIntegrations。
 	&model.Invite{},
 	&model.DeploymentSettings{},
+	// 代码仓集成（INT-166）：forgejo 行表；projects 的两个集成引用列随
+	// model.Project 迁移，存量行为 NULL（= 内置 github-default）。存量行的
+	// host_key 回填见 migrateForgeHostKeys（必须先于 createBootIndexes 的
+	// 同归一主机唯一索引）。
+	&model.ForgeIntegration{},
 }
 
 func init() {
@@ -256,6 +261,8 @@ func main() {
 	// 部署级 App 与邀请注册（INT-129）。
 	inviteRepo := repository.NewInviteRepository(db)
 	deploymentSettingsRepo := repository.NewDeploymentSettingsRepository(db)
+	// 代码仓集成（INT-166）。
+	forgeIntegrationRepo := repository.NewForgeIntegrationRepository(db)
 
 	// 业务库就绪后再注入归属解析器：注入前的入库日志只能是启动类（显式 system_scope）。
 	selfLogPipeline.SetOwnerResolver(service.NewSelfLogOwnerResolver(db))
@@ -280,12 +287,17 @@ func main() {
 	// 集成（INT-129）：部署级 GitHub App 身份，管理员配置、保存即生效。
 	integrationService := service.NewIntegrationService(deploymentSettingsRepo, cfg, githubLogger)
 	integrationService.SetPublicURLSource(deploymentSettingsService)
+	// 代码仓集成（INT-166）：forgejo CRUD 与连接检测；github-default 只读映射
+	// 上一行的部署级 App 身份。
+	forgeIntegrationService := service.NewForgeIntegrationService(forgeIntegrationRepo, integrationService, cfg, githubLogger)
 	// Manifest 一键创建（INT-129）：state 与换凭证的流程面，落库后的读取/验签
 	// 仍走 integrationService。
 	manifestService := service.NewGitHubAppManifestService(deploymentSettingsRepo, deploymentSettingsService, cfg, githubLogger)
 	memberService := service.NewMemberService(userRepo, inviteRepo, appLogger.With(slog.String("module", "member")))
 	dashboardService := service.NewDashboardService(dashboardRepo)
-	projectService := service.NewProjectService(projectRepo, versionRepo, issueSyncStateRepo, githubTokenRepo, fileStorage, cfg, githubLogger)
+	// 代码仓集成（INT-166）：项目仓库 URL 的非 github 主机按 base_url 匹配
+	// forgejo 集成并派生 code_integration_id 绑定。
+	projectService := service.NewProjectService(projectRepo, versionRepo, issueSyncStateRepo, githubTokenRepo, fileStorage, cfg, githubLogger, forgeIntegrationRepo)
 	versionService := service.NewVersionService(versionRepo, projectRepo, githubTokenRepo, fileStorage, cfg, githubLogger)
 	issueService := service.NewIssueService(issueRepo, issueGitHubMetaRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueShipHookService, issueChecklistRepo, issueSyncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, githubTokenRepo, userRepo, githubRepoLabelRepo, issueReadStateRepo, recommendationRepo, issuePullRequestRepo, issueAttachmentRepo, fileStorage, cfg, githubLogger, screenshotAnnotationRepo)
 	issueCollabService := service.NewIssueCollabService(issueCollabRepo, issueRepo, projectRepo, userRepo)
@@ -420,6 +432,7 @@ func main() {
 	deploymentGitHubAppHandler := handler.NewDeploymentGitHubAppHandler(integrationService, manifestService)
 	memberHandler := handler.NewMemberHandler(memberService)
 	deploymentSettingsHandler := handler.NewDeploymentSettingsHandler(deploymentSettingsService)
+	forgeIntegrationHandler := handler.NewForgeIntegrationHandler(forgeIntegrationService)
 
 	cleanAuthArtifacts := func() {
 		if err := jwtBlacklistRepo.CleanExpired(); err != nil {
@@ -494,7 +507,7 @@ func main() {
 	r.MaxMultipartMemory = uploadMultipartMemoryLimit(cfg.Upload.MaxFileSize)
 
 	// 注册路由
-	router.Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, githubTokenHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, screenshotAnnotationHandler, mediaProxyHandler, t3EnvironmentHandler, t3BindingHandler, notificationHandler, reviewHandler, reviewAgentHandler, reviewService, botHandler, aiProviderHandler, selfLogHandler, githubWebhookHandler, quotaHandler, deploymentGitHubAppHandler, memberHandler, deploymentSettingsHandler, authService, apiKeyRepo)
+	router.Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, githubTokenHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, screenshotAnnotationHandler, mediaProxyHandler, t3EnvironmentHandler, t3BindingHandler, notificationHandler, reviewHandler, reviewAgentHandler, reviewService, botHandler, aiProviderHandler, selfLogHandler, githubWebhookHandler, quotaHandler, deploymentGitHubAppHandler, memberHandler, deploymentSettingsHandler, forgeIntegrationHandler, authService, apiKeyRepo)
 
 	// 启动服务。ReadHeaderTimeout 挡慢速请求头长期占连接；不设 Read/WriteTimeout
 	// 保住上传/下载/媒体代理等长传输；IdleTimeout 回收 keep-alive 空闲连接。
@@ -602,7 +615,26 @@ func runBootMigrations(db *gorm.DB, fileStorage storage.Storage, logger *zap.Log
 		return fmt.Errorf("存量定时任务复核提示迁移失败: %w", err)
 	}
 
-	createBootIndexes(db)
+	// 代码集成 host_key 回填（INT-166）：必须在 createBootIndexes 之前——
+	// 同归一主机的部分唯一索引建在回填完的数据上。
+	if err := migrateForgeHostKeys(db, logger); err != nil {
+		return fmt.Errorf("代码集成 host_key 回填失败: %w", err)
+	}
+
+	// api_base_url 列语义改「空 = 推导」：存量展开值一次性回收（幂等）。
+	if err := migrateForgeAPIDerived(db, logger); err != nil {
+		return fmt.Errorf("代码集成 api_base_url 迁移失败: %w", err)
+	}
+
+	// projects.github_host 回填（INT-166）：NULL 存量行的旧渲染语义是公共
+	// github.com，收成 'github.com' 保住 GHE 部署下的 code_repo_url 链接。
+	if err := migrateProjectGithubHosts(db, logger); err != nil {
+		return fmt.Errorf("项目 github_host 迁移失败: %w", err)
+	}
+
+	if err := createBootIndexes(db); err != nil {
+		return fmt.Errorf("创建手工索引失败: %w", err)
+	}
 
 	// 用户角色（INT-129）：AutoMigrate 补齐 users.role 后，存量库可能一个
 	// admin 都没有——把最早创建的用户提为 admin（幂等）。
@@ -640,7 +672,9 @@ func runBootMigrations(db *gorm.DB, fileStorage storage.Storage, logger *zap.Log
 }
 
 // createBootIndexes 登记全部手工索引：复合/部分/表达式索引 AutoMigrate 建不了。
-func createBootIndexes(db *gorm.DB) {
+// 普通索引创建失败按幂等忽略（历史口径），唯一约束索引失败返回 error 让启动
+// 失败——索引没建上而服务照常跑，查重就只剩应用层兜底。
+func createBootIndexes(db *gorm.DB) error {
 	// 创建唯一索引
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_user_name ON projects(user_id, name)")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_versions_project_version ON versions(project_id, version_number)")
@@ -685,12 +719,38 @@ func createBootIndexes(db *gorm.DB) {
 	// 同一仓库只允许一个项目开启审查（开轮/同步按仓库反查唯一项目的前提）：
 	// 设置保存时先在事务内检查并返回 40922，这条部分唯一索引兜并发竞态。
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_project_review_settings_repo ON project_review_settings(repo_full_name) WHERE enabled = 1")
+	// 同归一主机只允许一条 forgejo 集成（INT-166）：保存时 service 层先查重
+	// 并返回带集成名的 40001（idx_forge_integrations_host_key 的归一键在 SQL
+	// 里算不出来），这条部分唯一索引兜查重通过后同主机被并发抢注的窗口；
+	// host_key 为空串的存量脏行不参与唯一约束。谓词含 kind='forgejo'——与
+	// FindByHostKey/ensureHostAvailable 的过滤同口径，未来其它 kind 落表不
+	// 会被索引拦截却查重看不见。建不上（如存量数据已有同 host_key 冲突）
+	// 必须启动失败——带缺口跑等于并发抢注窗口裸奔。IF NOT EXISTS 不更新
+	// 存量谓词：比对 sqlite_master 存稿（入库文本即建索引原文去掉
+	// IF NOT EXISTS），与期望定义不等才 DROP 重建——子串匹配会在谓词
+	// 再次演进时漏重建，无条件重建又留下约束失效窗口。
+	const hostKeyIndexSQL = "CREATE UNIQUE INDEX IF NOT EXISTS idx_forge_integrations_host_key ON forge_integrations(host_key) WHERE host_key <> '' AND kind = 'forgejo'"
+	var idxDef []struct {
+		SQL string `gorm:"column:sql"`
+	}
+	if err := db.Raw("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_forge_integrations_host_key'").Scan(&idxDef).Error; err != nil {
+		return fmt.Errorf("读取 idx_forge_integrations_host_key 定义失败: %w", err)
+	}
+	if len(idxDef) > 0 && idxDef[0].SQL != strings.Replace(hostKeyIndexSQL, " IF NOT EXISTS", "", 1) {
+		if err := db.Exec("DROP INDEX IF EXISTS idx_forge_integrations_host_key").Error; err != nil {
+			return fmt.Errorf("重建 idx_forge_integrations_host_key 失败: %w", err)
+		}
+	}
+	if err := db.Exec(hostKeyIndexSQL).Error; err != nil {
+		return fmt.Errorf("创建 idx_forge_integrations_host_key 失败: %w", err)
+	}
 	// 截图源地址唯一索引由 model.ReviewAsset 的 uniqueIndex 标签随 AutoMigrate
 	// 建出（idx_review_assets_source）；按 (repo, pr, head) 的查询也走它的前缀。
 	db.Exec("DROP INDEX IF EXISTS idx_review_assets_pr_head")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_notifications_user_dedup ON notifications(user_id, dedup_key)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_notifications_user_updated ON notifications(user_id, updated_at DESC, id)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_notifications_unread ON notifications(user_id, updated_at DESC) WHERE read_at IS NULL")
+	return nil
 }
 
 // selfLogMinLevel 把配置中的级别名转为 slog 级别；未知取值按 INFO。

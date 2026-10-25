@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"html"
-	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -285,6 +284,11 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 	if err := s.syncTargetStillCurrent(ledger, epoch); err != nil {
 		return err
 	}
+	// 链接身份随运行起始快照钉死：本轮的账本与 client 都指向进入时的
+	// GitHub PR，同步中途项目改绑 Forgejo 会推进 epoch（写前复核会中止
+	// 本轮），但复核与取用之间仍有窗口——每次都现读会把 Forgejo blob
+	// 链接写进 GitHub 评论。快照一次让链接与本轮实际发布目标同源。
+	links := forgeLinksForProject(ctx, s.db, ledger.ProjectID, githubWebBase(s.cfg))
 	// PR 已关闭/合并：不写任何 GitHub 产出（合并后 head 不再变化，下面的
 	// SHA 让路判断不会拦住写入，必须先判关闭）。同一事务清 pending、推进
 	// epoch 并取消在途运行——与 webhook closed 分支同口径；ledger 更新带
@@ -433,6 +437,7 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 					RepoFullName: ledger.RepoFullName,
 					HeadSHA:      ledger.HeadSHA,
 					RoundNumber:  ledger.RoundNumber,
+					links:        links,
 				}, outcome.PriorRuns)
 				if err := s.upsertPRComment(ctx, client, ledger, reviewVisualCommentMarker,
 					body, "visual_comment_id", ledger.VisualCommentID); err != nil {
@@ -499,7 +504,7 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 			if outcome.FingerprintToStore != "" {
 				ledger.VisualScreensFingerprint = outcome.FingerprintToStore
 			}
-			if err := s.upsertVisualComment(ctx, client, ledger, nil, outcome.PriorRuns, true, now); err != nil {
+			if err := s.upsertVisualComment(ctx, client, ledger, nil, outcome.PriorRuns, true, now, links); err != nil {
 				return err
 			}
 		case visualCarrySuccess:
@@ -592,6 +597,7 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 		HeadSHA:         ledger.HeadSHA,
 		RoundNumber:     ledger.RoundNumber,
 		DiffUnavailable: diffUnavailable,
+		links:           links,
 	}, codeRuns, inlineLines, visualPending, visualCarry)
 	// upsertPRComment 自己按正文去重：diff 读不到的重试里正文没变就不 PATCH，
 	// 变了照常更新（等 diff 读得到时再补「未行内标注」注记）。
@@ -647,7 +653,7 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 			ledger.VisualStatus = vs
 		}
 		if vs != "pending" {
-			if err := s.upsertVisualComment(ctx, client, ledger, visualRuns, nil, false, now); err != nil {
+			if err := s.upsertVisualComment(ctx, client, ledger, visualRuns, nil, false, now, links); err != nil {
 				return err
 			}
 		}
@@ -774,8 +780,14 @@ func (s *ReviewService) recordCommentID(ledger *model.ReviewPullRequest, idColum
 
 // upsertVisualComment 视觉顶层评论：本 head 的视觉运行结论或沿用提醒。
 func (s *ReviewService) upsertVisualComment(ctx context.Context, client githubapi.GitHubClient,
-	ledger *model.ReviewPullRequest, visualRuns []model.ReviewRun, priorRuns []model.ReviewRun, carried bool, now time.Time) error {
-	meta := reviewCommentMeta{RepoFullName: ledger.RepoFullName, HeadSHA: ledger.HeadSHA, RoundNumber: ledger.RoundNumber}
+	ledger *model.ReviewPullRequest, visualRuns []model.ReviewRun, priorRuns []model.ReviewRun, carried bool, now time.Time,
+	links forgeLinks) error {
+	meta := reviewCommentMeta{
+		RepoFullName: ledger.RepoFullName,
+		HeadSHA:      ledger.HeadSHA,
+		RoundNumber:  ledger.RoundNumber,
+		links:        links,
+	}
 	body := buildVisualComment(meta, visualRuns, priorRuns, carried)
 	return s.upsertPRComment(ctx, client, ledger, reviewVisualCommentMarker, body, "visual_comment_id", ledger.VisualCommentID)
 }
@@ -854,13 +866,18 @@ func summarizeVisualRuns(runs []model.ReviewRun) (state, description string) {
 }
 
 // reviewCommentMeta 顶层评论的定位信息：标题带短 SHA 与轮次，发现链接指向
-// head blob 的行锚点。DiffUnavailable 表示 GitHub 拒绝返回 diff（超限，确定性
-// 失败），本轮无行内 review，评论按此注明原因。
+// head blob 的行锚点（按项目代码仓集成构造，links）。DiffUnavailable 表示
+// GitHub 拒绝返回 diff（超限，确定性失败），本轮无行内 review，评论按此注明
+// 原因。
 type reviewCommentMeta struct {
 	RepoFullName    string
 	HeadSHA         string
 	RoundNumber     int
 	DiffUnavailable bool
+	// links 行锚链接的集成构造面（INT-166）：零值 = 内置 github-default 口径
+	// （forgeBase 对空串去尾后为空，仅测试手写 meta 时出现；生产路径一律经
+	// forgeLinksForProject 解析并自带兜底）。
+	links forgeLinks
 }
 
 // reviewRunStatusText 总览表的状态列文案：非终态一律「审查中」。
@@ -878,16 +895,11 @@ func reviewRunStatusText(s model.ReviewRunStatus) string {
 	return "审查中"
 }
 
-// reviewBlobURL 指向 head 提交中文件行锚点的 GitHub 链接。文件路径按 `/`
-// 分段编码——路径里的括号/空格/`#` 不编码会断链（`#` 尤其会被当成锚点截断）；
-// repo/sha 只含 GitHub 合法字符，原样拼接。
+// reviewBlobURL 指向 head 提交中文件行锚点的链接（INT-166 起按项目代码仓
+// 集成的 base_url 构造，GitHub 形态与旧硬编码逐字一致；分段 PathEscape 规则
+// 见 forgeLinks.BlobLineURL）。
 func reviewBlobURL(meta reviewCommentMeta, file string, line int) string {
-	segments := strings.Split(file, "/")
-	for i, seg := range segments {
-		segments[i] = url.PathEscape(seg)
-	}
-	return fmt.Sprintf("https://github.com/%s/blob/%s/%s#L%d",
-		meta.RepoFullName, meta.HeadSHA, strings.Join(segments, "/"), line)
+	return meta.links.BlobLineURL(meta.RepoFullName, meta.HeadSHA, file, line)
 }
 
 // markdownLinkText 转义 Markdown 链接文本里的结构性字符：`[`、`]` 会截断
@@ -916,7 +928,13 @@ func writeCodeFinding(b *strings.Builder, meta reviewCommentMeta, f api.ReviewCo
 	head := "**" + string(f.Level) + "** "
 	switch {
 	case f.Line != nil && *f.Line > 0:
-		head += fmt.Sprintf("[%s:%d](%s)", markdownLinkText(f.File), *f.Line, reviewBlobURL(meta, f.File, *f.Line))
+		if blobURL := reviewBlobURL(meta, f.File, *f.Line); blobURL != "" {
+			head += fmt.Sprintf("[%s:%d](%s)", markdownLinkText(f.File), *f.Line, blobURL)
+		} else {
+			// 集成行解析失败（改绑竞态窗口）拼不出链接：纯文本位置，不发
+			// []() 形态的空链接。
+			head += f.File + ":" + strconv.Itoa(*f.Line)
+		}
 		// inlineLines == nil 表示本轮没读 diff（例如没有可标注的行内发现），
 		// 无从判断行号是否有效，不臆断加注。
 		if inlineLines != nil && !inlineLines[f.File][*f.Line] {

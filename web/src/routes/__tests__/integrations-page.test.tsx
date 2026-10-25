@@ -104,7 +104,7 @@ describe("IntegrationsPage admin view", () => {
       await screen.findByRole("button", { name: "在 GitHub 上创建 App" }),
     ).toBeEnabled();
     expect(
-      screen.getByRole("button", { name: "测试连接" }),
+      screen.getByRole("button", { name: "测试 GitHub App 连接" }),
     ).toBeInTheDocument();
     expect(screen.getByLabelText(/组织名/)).toBeInTheDocument();
     expect(screen.getByText("手动配置（已有 App）")).toBeInTheDocument();
@@ -233,7 +233,7 @@ describe("IntegrationsPage admin view", () => {
     renderPage();
 
     expect(await screen.findByText("已连接")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "测试连接" }));
+    await user.click(screen.getByRole("button", { name: "测试 GitHub App 连接" }));
 
     await waitFor(() =>
       expect(screen.getByText("凭证无效")).toBeInTheDocument(),
@@ -264,13 +264,17 @@ describe("IntegrationsPage member view", () => {
       screen.queryByRole("button", { name: "在 GitHub 上创建 App" }),
     ).not.toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: "测试连接" }),
+      screen.queryByRole("button", { name: "测试 GitHub App 连接" }),
     ).not.toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "保存" }),
     ).not.toBeInTheDocument();
     expect(screen.queryByLabelText("App ID")).not.toBeInTheDocument();
     expect(screen.queryByLabelText(/组织名/)).not.toBeInTheDocument();
+
+    // 代码托管集成卡片不进 member 视图：列表接口 RequireAdmin，member
+    // 只会拿到不可恢复的 40305，渲染它没有意义。
+    expect(screen.queryByText("代码托管集成")).not.toBeInTheDocument();
   });
 
   it("opens the install page in a new window", async () => {

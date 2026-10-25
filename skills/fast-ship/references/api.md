@@ -1016,10 +1016,14 @@ API Key 管理（仅 JWT）
 | `items[].description` | string | 是 |  |
 | `items[].github_owner` | string | 是 |  |
 | `items[].github_repo` | string | 是 |  |
+| `items[].repository_url` | string（可空） | 是 | 公开仓页面地址（INT-166）。无公开仓（owner/repo 缺一）为 null；github_host='github.com' 为 https://github.com/{owner}/{repo}，空串（本部署 GitHub/GHE）按部署 GitHub Web 基址拼。编辑表单据此回填，不自行拼主机 |
 | `items[].code_github_owner` | string | 是 | 代码仓库（PR 审查用）owner；未单独配置为空串，表示与公开仓库相同 |
 | `items[].code_github_repo` | string | 是 | 代码仓库（PR 审查用）repo 名；未单独配置为空串，表示与公开仓库相同 |
 | `items[].public_github_token_id` | string | 是 | 公开仓库 Token 引用；未配置为空串 |
 | `items[].code_github_token_id` | string | 是 | 代码仓库 Token 引用；未配置为空串 |
+| `items[].code_integration_id` | string（可空） | 是 | 代码仓集成引用（INT-166）；null 或空串 = 内置 github-default。写入接线由后续任务完成，本期只随响应带出 |
+| `items[].public_integration_id` | string（可空） | 是 | 公开仓库集成引用（INT-166）；null 或空串 = 内置 github-default。写入接线由后续任务完成，本期只随响应带出 |
+| `items[].code_repo_url` | string（可空） | 是 | 代码仓页面地址（INT-166）。无代码仓（owner/repo 缺一）为 null；内置 github 集成为 https://github.com/{owner}/{repo}；forgejo 集成为 {base_url}/{owner}/{repo}；绑定的集成行已删除时为 null（不回落 github.com，避免私有仓库地址外发） |
 | `items[].latest_version` | object | 否 | omitempty，仅在列表项中出现 |
 | `items[].latest_version.id` | string | 是 |  |
 | `items[].latest_version.version_number` | string | 是 |  |
@@ -1087,10 +1091,14 @@ API Key 管理（仅 JWT）
 | `description` | string | 是 |  |
 | `github_owner` | string | 是 |  |
 | `github_repo` | string | 是 |  |
+| `repository_url` | string（可空） | 是 | 公开仓页面地址（INT-166）。无公开仓（owner/repo 缺一）为 null；github_host='github.com' 为 https://github.com/{owner}/{repo}，空串（本部署 GitHub/GHE）按部署 GitHub Web 基址拼。编辑表单据此回填，不自行拼主机 |
 | `code_github_owner` | string | 是 | 代码仓库（PR 审查用）owner；未单独配置为空串，表示与公开仓库相同 |
 | `code_github_repo` | string | 是 | 代码仓库（PR 审查用）repo 名；未单独配置为空串，表示与公开仓库相同 |
 | `public_github_token_id` | string | 是 | 公开仓库 Token 引用；未配置为空串 |
 | `code_github_token_id` | string | 是 | 代码仓库 Token 引用；未配置为空串 |
+| `code_integration_id` | string（可空） | 是 | 代码仓集成引用（INT-166）；null 或空串 = 内置 github-default。写入接线由后续任务完成，本期只随响应带出 |
+| `public_integration_id` | string（可空） | 是 | 公开仓库集成引用（INT-166）；null 或空串 = 内置 github-default。写入接线由后续任务完成，本期只随响应带出 |
+| `code_repo_url` | string（可空） | 是 | 代码仓页面地址（INT-166）。无代码仓（owner/repo 缺一）为 null；内置 github 集成为 https://github.com/{owner}/{repo}；forgejo 集成为 {base_url}/{owner}/{repo}；绑定的集成行已删除时为 null（不回落 github.com，避免私有仓库地址外发） |
 | `latest_version` | object | 否 | omitempty，仅在列表项中出现 |
 | `latest_version.id` | string | 是 |  |
 | `latest_version.version_number` | string | 是 |  |
@@ -1152,10 +1160,14 @@ API Key 管理（仅 JWT）
 | `description` | string | 是 |  |
 | `github_owner` | string | 是 |  |
 | `github_repo` | string | 是 |  |
+| `repository_url` | string（可空） | 是 | 公开仓页面地址（INT-166）。无公开仓（owner/repo 缺一）为 null；github_host='github.com' 为 https://github.com/{owner}/{repo}，空串（本部署 GitHub/GHE）按部署 GitHub Web 基址拼。编辑表单据此回填，不自行拼主机 |
 | `code_github_owner` | string | 是 | 代码仓库（PR 审查用）owner；未单独配置为空串，表示与公开仓库相同 |
 | `code_github_repo` | string | 是 | 代码仓库（PR 审查用）repo 名；未单独配置为空串，表示与公开仓库相同 |
 | `public_github_token_id` | string | 是 | 公开仓库 Token 引用；未配置为空串 |
 | `code_github_token_id` | string | 是 | 代码仓库 Token 引用；未配置为空串 |
+| `code_integration_id` | string（可空） | 是 | 代码仓集成引用（INT-166）；null 或空串 = 内置 github-default。写入接线由后续任务完成，本期只随响应带出 |
+| `public_integration_id` | string（可空） | 是 | 公开仓库集成引用（INT-166）；null 或空串 = 内置 github-default。写入接线由后续任务完成，本期只随响应带出 |
+| `code_repo_url` | string（可空） | 是 | 代码仓页面地址（INT-166）。无代码仓（owner/repo 缺一）为 null；内置 github 集成为 https://github.com/{owner}/{repo}；forgejo 集成为 {base_url}/{owner}/{repo}；绑定的集成行已删除时为 null（不回落 github.com，避免私有仓库地址外发） |
 | `latest_version` | object | 否 | omitempty，仅在列表项中出现 |
 | `latest_version.id` | string | 是 |  |
 | `latest_version.version_number` | string | 是 |  |
@@ -1227,10 +1239,14 @@ API Key 管理（仅 JWT）
 | `description` | string | 是 |  |
 | `github_owner` | string | 是 |  |
 | `github_repo` | string | 是 |  |
+| `repository_url` | string（可空） | 是 | 公开仓页面地址（INT-166）。无公开仓（owner/repo 缺一）为 null；github_host='github.com' 为 https://github.com/{owner}/{repo}，空串（本部署 GitHub/GHE）按部署 GitHub Web 基址拼。编辑表单据此回填，不自行拼主机 |
 | `code_github_owner` | string | 是 | 代码仓库（PR 审查用）owner；未单独配置为空串，表示与公开仓库相同 |
 | `code_github_repo` | string | 是 | 代码仓库（PR 审查用）repo 名；未单独配置为空串，表示与公开仓库相同 |
 | `public_github_token_id` | string | 是 | 公开仓库 Token 引用；未配置为空串 |
 | `code_github_token_id` | string | 是 | 代码仓库 Token 引用；未配置为空串 |
+| `code_integration_id` | string（可空） | 是 | 代码仓集成引用（INT-166）；null 或空串 = 内置 github-default。写入接线由后续任务完成，本期只随响应带出 |
+| `public_integration_id` | string（可空） | 是 | 公开仓库集成引用（INT-166）；null 或空串 = 内置 github-default。写入接线由后续任务完成，本期只随响应带出 |
+| `code_repo_url` | string（可空） | 是 | 代码仓页面地址（INT-166）。无代码仓（owner/repo 缺一）为 null；内置 github 集成为 https://github.com/{owner}/{repo}；forgejo 集成为 {base_url}/{owner}/{repo}；绑定的集成行已删除时为 null（不回落 github.com，避免私有仓库地址外发） |
 | `latest_version` | object | 否 | omitempty，仅在列表项中出现 |
 | `latest_version.id` | string | 是 |  |
 | `latest_version.version_number` | string | 是 |  |
@@ -1331,10 +1347,14 @@ API Key 管理（仅 JWT）
 | `description` | string | 是 |  |
 | `github_owner` | string | 是 |  |
 | `github_repo` | string | 是 |  |
+| `repository_url` | string（可空） | 是 | 公开仓页面地址（INT-166）。无公开仓（owner/repo 缺一）为 null；github_host='github.com' 为 https://github.com/{owner}/{repo}，空串（本部署 GitHub/GHE）按部署 GitHub Web 基址拼。编辑表单据此回填，不自行拼主机 |
 | `code_github_owner` | string | 是 | 代码仓库（PR 审查用）owner；未单独配置为空串，表示与公开仓库相同 |
 | `code_github_repo` | string | 是 | 代码仓库（PR 审查用）repo 名；未单独配置为空串，表示与公开仓库相同 |
 | `public_github_token_id` | string | 是 | 公开仓库 Token 引用；未配置为空串 |
 | `code_github_token_id` | string | 是 | 代码仓库 Token 引用；未配置为空串 |
+| `code_integration_id` | string（可空） | 是 | 代码仓集成引用（INT-166）；null 或空串 = 内置 github-default。写入接线由后续任务完成，本期只随响应带出 |
+| `public_integration_id` | string（可空） | 是 | 公开仓库集成引用（INT-166）；null 或空串 = 内置 github-default。写入接线由后续任务完成，本期只随响应带出 |
+| `code_repo_url` | string（可空） | 是 | 代码仓页面地址（INT-166）。无代码仓（owner/repo 缺一）为 null；内置 github 集成为 https://github.com/{owner}/{repo}；forgejo 集成为 {base_url}/{owner}/{repo}；绑定的集成行已删除时为 null（不回落 github.com，避免私有仓库地址外发） |
 | `latest_version` | object | 否 | omitempty，仅在列表项中出现 |
 | `latest_version.id` | string | 是 |  |
 | `latest_version.version_number` | string | 是 |  |
@@ -1395,10 +1415,14 @@ API Key 管理（仅 JWT）
 | `description` | string | 是 |  |
 | `github_owner` | string | 是 |  |
 | `github_repo` | string | 是 |  |
+| `repository_url` | string（可空） | 是 | 公开仓页面地址（INT-166）。无公开仓（owner/repo 缺一）为 null；github_host='github.com' 为 https://github.com/{owner}/{repo}，空串（本部署 GitHub/GHE）按部署 GitHub Web 基址拼。编辑表单据此回填，不自行拼主机 |
 | `code_github_owner` | string | 是 | 代码仓库（PR 审查用）owner；未单独配置为空串，表示与公开仓库相同 |
 | `code_github_repo` | string | 是 | 代码仓库（PR 审查用）repo 名；未单独配置为空串，表示与公开仓库相同 |
 | `public_github_token_id` | string | 是 | 公开仓库 Token 引用；未配置为空串 |
 | `code_github_token_id` | string | 是 | 代码仓库 Token 引用；未配置为空串 |
+| `code_integration_id` | string（可空） | 是 | 代码仓集成引用（INT-166）；null 或空串 = 内置 github-default。写入接线由后续任务完成，本期只随响应带出 |
+| `public_integration_id` | string（可空） | 是 | 公开仓库集成引用（INT-166）；null 或空串 = 内置 github-default。写入接线由后续任务完成，本期只随响应带出 |
+| `code_repo_url` | string（可空） | 是 | 代码仓页面地址（INT-166）。无代码仓（owner/repo 缺一）为 null；内置 github 集成为 https://github.com/{owner}/{repo}；forgejo 集成为 {base_url}/{owner}/{repo}；绑定的集成行已删除时为 null（不回落 github.com，避免私有仓库地址外发） |
 | `latest_version` | object | 否 | omitempty，仅在列表项中出现 |
 | `latest_version.id` | string | 是 |  |
 | `latest_version.version_number` | string | 是 |  |
@@ -8784,7 +8808,7 @@ bots.memory.timezone，再回退 UTC。金额一律来自内置 models.dev 目�
 | `schedule_tasks[].avg_run_cost` | number（double，可空） | 是 |  |
 | `schedule_tasks[].max_run_cost` | number（double，可空） | 是 |  |
 | `schedule_tasks[].linked_main_cost` | number（double，可空） | 是 | schedule_event 主线 run 的连带成本（近似） |
-| `schedule_tasks[].estimated_monthly_cost` | number（double，可空） | 是 | 单次平均 × 未来 30 天触发次数（parseScheduleCron）；停用、已删除、无已计价平均或 cron 解析失败为 null |
+| `schedule_tasks[].estimated_monthly_cost` | number（double，可空） | 是 | （单次定时运行平均 + 每次触发摊到的连带主线成本）× 未来 30 天触发次数（parseScheduleCron）；单次统计取最近 30 个当地日的固定窗口，与所选 range 无关；停用、已删除、无已计价平均或 cron 解析失败为 null |
 
 **错误**
 
@@ -8848,7 +8872,7 @@ bots.memory.timezone，再回退 UTC。金额一律来自内置 models.dev 目�
 | `run.created_at` | string（date-time） | 是 |  |
 | `run.started_at` | string（date-time，可空） | 否 |  |
 | `run.finished_at` | string（date-time，可空） | 否 |  |
-| `requests` | object[] | 是 | run 的每次模型请求（含失败重试），按 ordinal 正序 |
+| `requests` | object[] | 是 | run 的每次模型请求（含失败重试），按 ordinal 正序；超过上限时截断 |
 | `requests[].id` | string | 是 |  |
 | `requests[].ordinal` | integer（int64） | 是 |  |
 | `requests[].status` | string | 是 | running / succeeded / failed |
@@ -8877,6 +8901,7 @@ bots.memory.timezone，再回退 UTC。金额一律来自内置 models.dev 目�
 | `requests[].tool_calls[].error_code` | string（可空） | 否 |  |
 | `requests[].tool_calls[].created_at` | string（date-time） | 是 |  |
 | `requests[].tool_calls[].finished_at` | string（date-time，可空） | 否 |  |
+| `requests_truncated` | boolean | 是 | 请求数超过上限（500）被截断时为 true |
 | `maintenance_runs` | object[] | 是 | parent_run_id 指向本 run 的维护运行及其请求 |
 | `maintenance_runs[].id` | string | 是 |  |
 | `maintenance_runs[].kind` | string | 是 | compaction / nightly |
@@ -11824,3 +11849,316 @@ B 轮实现。GitHub 创建 App 后回跳 `/settings/integrations/github/callbac
 | 403 | 非管理员（40305） |
 | 500 | 服务器内部错误（50000） |
 | 502 | GitHub App Manifest 转换失败（50205） |
+
+### GET `/api/deployment/integrations`
+
+<!-- operationId: listForgeIntegrations -->
+
+列出部署级代码仓集成（仅管理员）
+
+INT-166 实现。首条恒为内置 `github-default`（只读映射到部署级 GitHub App
+配置，builtin=true），后接 forgejo 集成行。token 与 webhook_secret 本体
+永不回显，只回「是否已设置」标记。
+
+**鉴权**：仅 JWT
+
+**成功响应**
+
+**200** 集成列表（首条 github-default）
+
+`data` 为数组。
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | 内置集成固定为 github-default；forgejo 行为 forge_integrations 行 ID |
+| `kind` | string（enum: github \| forgejo） | 是 | github=内置 GitHub App（只读映射）；forgejo=机器人账号 + 仓库范围 PAT |
+| `name` | string | 是 | 显示名 |
+| `base_url` | string | 是 | Forgejo 实例基址（内置集成为 https://github.com） |
+| `api_base_url` | string | 是 | API 基址（forgejo 保存时已推导展开；内置集成为部署 GitHub App 的 api_base_url） |
+| `api_base_url_derived` | boolean | 是 | true=api_base_url 是按 {base_url}/api/v1 推导的展开值（改 base_url 时跟随 重新推导）；false=管理员显式钉死的端点（不随 base_url 变化）。内置集成恒 false。 |
+| `token_set` | boolean | 是 | 凭证是否已配置（内置=GitHub App 身份可用；本体永不回显） |
+| `webhook_secret_set` | boolean | 是 | webhook 验签密钥是否已配置（本体永不回显） |
+| `has_ca_cert` | boolean | 是 | 是否配置了自定义 CA（本体永不回显） |
+| `allow_private_network` | boolean | 是 | 是否放行本集成配置主机解析到私网地址（http 同样仅在开启时可用） |
+| `builtin` | boolean | 是 | 内置集成恒为 true，不可修改、不可删除、不可走 test 端点 |
+| `unavailable` | boolean | 否 | omitempty；仅内置 github-default 可能出现：true 表示内置投影读取 失败（如 App 密文解不开），该条目仅作占位展示、凭证状态不可信， 请检查部署级 GitHub App 配置。forgejo 行恒无此字段。 |
+| `created_at` | string（date-time，可空） | 是 | 创建时间；内置集成无落库行，为 null |
+| `updated_at` | string（date-time，可空） | 是 | 最近保存时间；内置集成为 null |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 非管理员（40305） |
+| 500 | 服务器内部错误（50000） |
+
+### POST `/api/deployment/integrations`
+
+<!-- operationId: createForgeIntegration -->
+
+新建 forgejo 集成（仅管理员）
+
+仅管理员。本期只接受 forgejo 种类（内置 GitHub App 走 deployment/github-app
+端点，请求不设 kind 字段）。base_url 必填并做 SSRF 校验（含保存时 DNS
+解析校验）；api_base_url 省略时按 `{base_url}/api/v1` 推导；token 必填
+（仓库范围 PAT）；webhook_secret / ca_cert_pem 可选；token 与
+webhook_secret 加密落库、永不回显。allow_private_network=true 放行该
+集成配置主机解析到私网地址（http 基址同样只在开启时可用）。
+
+**鉴权**：仅 JWT
+
+**请求体**
+
+`application/json`，必填。
+
+新建 forgejo 集成请求；本期不接受 github 种类（内置 App 走 deployment/github-app）
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `name` | string | 是 | 显示名（必填） |
+| `base_url` | string | 是 | Forgejo 实例基址；必须 https（开启 allow_private_network 后可用 http）且解析不到内网地址 |
+| `api_base_url` | string（可空） | 否 | API 基址；省略或 null 按 {base_url}/api/v1 推导 |
+| `token` | string | 是 | 仓库范围 PAT（必填）；加密落库、只写不回显 |
+| `webhook_secret` | string（可空） | 否 | webhook 验签密钥（可选）；加密落库、只写不回显 |
+| `ca_cert_pem` | string（可空） | 否 | 自定义 CA（PEM，可选）；追加系统根证书池 |
+| `allow_private_network` | boolean | 否 | 放行该集成配置主机解析到私网地址；缺省 false |
+
+**成功响应**
+
+**200** 创建后的集成投影
+
+`data`：
+
+部署级代码仓集成投影（INT-166）；内置 github-default 与 forgejo 行同形
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | 内置集成固定为 github-default；forgejo 行为 forge_integrations 行 ID |
+| `kind` | string（enum: github \| forgejo） | 是 | github=内置 GitHub App（只读映射）；forgejo=机器人账号 + 仓库范围 PAT |
+| `name` | string | 是 | 显示名 |
+| `base_url` | string | 是 | Forgejo 实例基址（内置集成为 https://github.com） |
+| `api_base_url` | string | 是 | API 基址（forgejo 保存时已推导展开；内置集成为部署 GitHub App 的 api_base_url） |
+| `api_base_url_derived` | boolean | 是 | true=api_base_url 是按 {base_url}/api/v1 推导的展开值（改 base_url 时跟随 重新推导）；false=管理员显式钉死的端点（不随 base_url 变化）。内置集成恒 false。 |
+| `token_set` | boolean | 是 | 凭证是否已配置（内置=GitHub App 身份可用；本体永不回显） |
+| `webhook_secret_set` | boolean | 是 | webhook 验签密钥是否已配置（本体永不回显） |
+| `has_ca_cert` | boolean | 是 | 是否配置了自定义 CA（本体永不回显） |
+| `allow_private_network` | boolean | 是 | 是否放行本集成配置主机解析到私网地址（http 同样仅在开启时可用） |
+| `builtin` | boolean | 是 | 内置集成恒为 true，不可修改、不可删除、不可走 test 端点 |
+| `unavailable` | boolean | 否 | omitempty；仅内置 github-default 可能出现：true 表示内置投影读取 失败（如 App 密文解不开），该条目仅作占位展示、凭证状态不可信， 请检查部署级 GitHub App 配置。forgejo 行恒无此字段。 |
+| `created_at` | string（date-time，可空） | 是 | 创建时间；内置集成无落库行，为 null |
+| `updated_at` | string（date-time，可空） | 是 | 最近保存时间；内置集成为 null |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 400 | 参数缺失或非法（40001）：name/token 缺失、基址不是合法 https 绝对 URL、基址解析到内网地址、CA PEM 不可解析等 |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 非管理员（40305） |
+| 500 | 服务器内部错误（50000） |
+
+### GET `/api/deployment/integrations/{id}`
+
+<!-- operationId: getForgeIntegration -->
+
+读取单个集成投影（仅管理员）
+
+**鉴权**：仅 JWT
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | 代码仓集成 ID（内置 github-default 或 forge_integrations 行 ID） |
+
+**成功响应**
+
+**200** 集成投影
+
+`data`：
+
+部署级代码仓集成投影（INT-166）；内置 github-default 与 forgejo 行同形
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | 内置集成固定为 github-default；forgejo 行为 forge_integrations 行 ID |
+| `kind` | string（enum: github \| forgejo） | 是 | github=内置 GitHub App（只读映射）；forgejo=机器人账号 + 仓库范围 PAT |
+| `name` | string | 是 | 显示名 |
+| `base_url` | string | 是 | Forgejo 实例基址（内置集成为 https://github.com） |
+| `api_base_url` | string | 是 | API 基址（forgejo 保存时已推导展开；内置集成为部署 GitHub App 的 api_base_url） |
+| `api_base_url_derived` | boolean | 是 | true=api_base_url 是按 {base_url}/api/v1 推导的展开值（改 base_url 时跟随 重新推导）；false=管理员显式钉死的端点（不随 base_url 变化）。内置集成恒 false。 |
+| `token_set` | boolean | 是 | 凭证是否已配置（内置=GitHub App 身份可用；本体永不回显） |
+| `webhook_secret_set` | boolean | 是 | webhook 验签密钥是否已配置（本体永不回显） |
+| `has_ca_cert` | boolean | 是 | 是否配置了自定义 CA（本体永不回显） |
+| `allow_private_network` | boolean | 是 | 是否放行本集成配置主机解析到私网地址（http 同样仅在开启时可用） |
+| `builtin` | boolean | 是 | 内置集成恒为 true，不可修改、不可删除、不可走 test 端点 |
+| `unavailable` | boolean | 否 | omitempty；仅内置 github-default 可能出现：true 表示内置投影读取 失败（如 App 密文解不开），该条目仅作占位展示、凭证状态不可信， 请检查部署级 GitHub App 配置。forgejo 行恒无此字段。 |
+| `created_at` | string（date-time，可空） | 是 | 创建时间；内置集成无落库行，为 null |
+| `updated_at` | string（date-time，可空） | 是 | 最近保存时间；内置集成为 null |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 非管理员（40305） |
+| 404 | 集成不存在（40435） |
+| 500 | 服务器内部错误（50000） |
+
+### PUT `/api/deployment/integrations/{id}`
+
+<!-- operationId: updateForgeIntegration -->
+
+部分更新集成（仅管理员）
+
+仅管理员。部分更新：省略的字段保持不变。base_url / api_base_url 变更时
+重新做 SSRF 校验（含 DNS）；allow_private_network 关闭会按公网口径
+复核现有基址。token 省略/null = 保留、空串 = 40001（必需凭证不可清空）；
+webhook_secret / ca_cert_pem 省略或 null = 保留、空串 = 清空；
+api_base_url 空串 = 重置为
+`{base_url}/api/v1`。内置 github-default 不可通过本端点修改（40001）。
+base_url 归一主机变更等同迁移全部项目绑定：仍有项目引用时拒绝
+（40935，消息列引用项目名），须先解除项目绑定或走「新建集成 +
+项目逐个改绑」的显式迁移路径。
+
+**鉴权**：仅 JWT
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | 代码仓集成 ID（内置 github-default 或 forge_integrations 行 ID） |
+
+**请求体**
+
+`application/json`，必填。
+
+部分更新请求；省略的字段保持不变
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `name` | string（可空） | 否 | 显示名；null 或空串拒绝（name 不允许为空） |
+| `base_url` | string（可空） | 否 | 基址变更时重新校验（含 DNS）；null 保留 |
+| `api_base_url` | string（可空） | 否 | null 保留（存量恰为旧 base_url 推导值时随新 base_url 重新推导）；空串重置为 {base_url}/api/v1；其余重新校验 |
+| `token` | string（可空） | 否 | 新 PAT；省略或 null = 保留现值；空串 = 40001（必需凭证不可清空，需删除集成重建）；其余替换并加密落库 |
+| `webhook_secret` | string（可空） | 否 | 新验签密钥；省略或 null = 保留现值；空串 = 清空已存密钥；其余替换并加密落库 |
+| `ca_cert_pem` | string（可空） | 否 | null = 保留；空串 = 清空；其余替换并校验 PEM |
+| `allow_private_network` | boolean（可空） | 否 | null = 保留；变更后按新开关复核现有基址 |
+
+**成功响应**
+
+**200** 更新后的集成投影
+
+`data`：
+
+部署级代码仓集成投影（INT-166）；内置 github-default 与 forgejo 行同形
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | 内置集成固定为 github-default；forgejo 行为 forge_integrations 行 ID |
+| `kind` | string（enum: github \| forgejo） | 是 | github=内置 GitHub App（只读映射）；forgejo=机器人账号 + 仓库范围 PAT |
+| `name` | string | 是 | 显示名 |
+| `base_url` | string | 是 | Forgejo 实例基址（内置集成为 https://github.com） |
+| `api_base_url` | string | 是 | API 基址（forgejo 保存时已推导展开；内置集成为部署 GitHub App 的 api_base_url） |
+| `api_base_url_derived` | boolean | 是 | true=api_base_url 是按 {base_url}/api/v1 推导的展开值（改 base_url 时跟随 重新推导）；false=管理员显式钉死的端点（不随 base_url 变化）。内置集成恒 false。 |
+| `token_set` | boolean | 是 | 凭证是否已配置（内置=GitHub App 身份可用；本体永不回显） |
+| `webhook_secret_set` | boolean | 是 | webhook 验签密钥是否已配置（本体永不回显） |
+| `has_ca_cert` | boolean | 是 | 是否配置了自定义 CA（本体永不回显） |
+| `allow_private_network` | boolean | 是 | 是否放行本集成配置主机解析到私网地址（http 同样仅在开启时可用） |
+| `builtin` | boolean | 是 | 内置集成恒为 true，不可修改、不可删除、不可走 test 端点 |
+| `unavailable` | boolean | 否 | omitempty；仅内置 github-default 可能出现：true 表示内置投影读取 失败（如 App 密文解不开），该条目仅作占位展示、凭证状态不可信， 请检查部署级 GitHub App 配置。forgejo 行恒无此字段。 |
+| `created_at` | string（date-time，可空） | 是 | 创建时间；内置集成无落库行，为 null |
+| `updated_at` | string（date-time，可空） | 是 | 最近保存时间；内置集成为 null |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 400 | 参数非法（40001）：内置集成不可修改、基址校验失败、CA PEM 不可解析等 |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 非管理员（40305） |
+| 404 | 集成不存在（40435） |
+| 500 | 服务器内部错误（50000） |
+
+### DELETE `/api/deployment/integrations/{id}`
+
+<!-- operationId: deleteForgeIntegration -->
+
+删除集成（仅管理员）
+
+仅管理员。内置 github-default 不可删除（40001）；仍被项目
+（code_integration_id / public_integration_id 任一）引用时拒绝（40935），
+消息列出引用项目名。
+
+**鉴权**：仅 JWT
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | 代码仓集成 ID（内置 github-default 或 forge_integrations 行 ID） |
+
+**成功响应**
+
+**200** 删除成功（data 为 null）
+
+`data`：any
+
+响应负载；形状随端点而变，由 allOf 组合的兄弟 schema 收窄
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 400 | 内置集成不可删除（40001） |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 非管理员（40305） |
+| 404 | 集成不存在（40435） |
+| 409 | 仍被项目引用（40935，消息含项目名） |
+| 500 | 服务器内部错误（50000） |
+
+### POST `/api/deployment/integrations/{id}/test`
+
+<!-- operationId: testForgeIntegration -->
+
+连接检测（仅管理员）
+
+仅管理员。用配置的 token 调 Forgejo `GET {api_base_url}/version` 与
+`GET {api_base_url}/user`，返回实例版本与机器人账号名。检测结论随响应
+返回、不落库；token 被拒绝时 status=invalid，网络/5xx 时 status=failed，
+都不是 500。内置 github-default 走本端点报错（40001），引导用已有的
+`POST /api/deployment/github-app/test`。
+
+**鉴权**：仅 JWT
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | 代码仓集成 ID（内置 github-default 或 forge_integrations 行 ID） |
+
+**成功响应**
+
+**200** 检测结论（status 含失败口径，非 500）
+
+`data`：
+
+Forgejo 连接检测结论；不落库，只随本次响应返回
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `status` | string（enum: unchecked \| ok \| invalid \| failed） | 是 | ok=version+user 均成功；invalid=凭证被拒（401/403）；failed=网络/5xx 等检测失败。unchecked 仅为口径对齐，本端点不会返回 |
+| `version` | string | 是 | Forgejo 实例版本（检测成功时非空） |
+| `username` | string | 是 | 机器人账号名（检测成功时非空） |
+| `detail` | string | 是 | 给人看的补充说明（失败原因等），不含任何密钥 |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 400 | 内置集成不支持本端点（40001） |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 非管理员（40305） |
+| 404 | 集成不存在（40435） |
+| 500 | 服务器内部错误（50000） |

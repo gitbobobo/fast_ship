@@ -96,6 +96,8 @@ var (
 	// ErrReviewPullRequestNotFound PR 审查详情（INT-141）：项目没有设置行，
 	// 或按设置行仓库找不到对应账本行。
 	ErrReviewPullRequestNotFound = New(40434, "审查 PR 记录不存在")
+	// 部署级代码仓集成（INT-166）。
+	ErrForgeIntegrationNotFound = New(40435, "代码集成不存在")
 )
 
 // 业务冲突 40900-40999
@@ -146,6 +148,9 @@ var (
 	ErrInviteUsed = New(40932, "邀请链接已被使用")
 	// AI 提供商（INT-133）：仍被机器人引用时不可删除，先解除或更换引用。
 	ErrAIProviderInUse = New(40933, "该 AI 提供商仍被机器人引用，请先更换或删除相关机器人")
+	// 代码仓集成（INT-166）：仍被项目引用时不可删除；消息由 service 用
+	// New(40935, ...) 追加引用项目名。
+	ErrForgeIntegrationInUse = New(40935, "该集成仍被项目引用，请先解除或更换引用")
 )
 
 // 请求过于频繁 42900-42999

@@ -9,12 +9,26 @@ type Project struct {
 	Description string `gorm:"type:text" json:"description"`
 	GithubOwner string `gorm:"type:text" json:"github_owner"`
 	GithubRepo  string `gorm:"type:text" json:"github_repo"`
+	// GithubHost 公开仓写入时解析出的主机标识：空串 = 本部署 GitHub（裸
+	// owner/repo 或部署 GHE 主机，存量行同义）；仅「显式 github.com」记
+	// "github.com"——GHE 部署下 code_repo_url 回落渲染靠它区分两类存储值，
+	// 否则公共 github.com 的仓会被错拼到本部署 GHE 主机上。
+	GithubHost string `gorm:"column:github_host;type:text" json:"-"`
 	// CodeGithubOwner/CodeGithubRepo 代码仓库（PR 审查用）：未单独配置时为空，
 	// 审查经 CodeRepo() 回落到公开仓库；与公开仓库（Issue 同步/发版）互不影响。
 	CodeGithubOwner     string `gorm:"column:code_github_owner;type:text" json:"code_github_owner"`
 	CodeGithubRepo      string `gorm:"column:code_github_repo;type:text" json:"code_github_repo"`
 	PublicGitHubTokenID string `gorm:"column:public_github_token_id;type:text" json:"-"`
 	CodeGitHubTokenID   string `gorm:"column:code_github_token_id;type:text" json:"-"`
+	// 代码集成引用（INT-166）：可空，NULL/空串 = 内置 github-default（现有
+	// GitHub App 链路）。写入接线由后续任务完成，本期只随响应带出。
+	PublicIntegrationID string `gorm:"column:public_integration_id;type:text" json:"-"`
+	CodeIntegrationID   string `gorm:"column:code_integration_id;type:text" json:"-"`
+	// CodeIntegrationHostKey 瞬态（不落库）：仅在本次写入按仓库 URL 重新解析
+	// 出绑定时带期望主机键，写谓词据此要求集成行 host_key 仍是解析时的值——
+	// 管理员在解析与落库之间改集成 base_url 时本次绑定按失效拒绝。未重解析
+	// 的写入（保留原绑定）留空，谓词退化为仅存在性。
+	CodeIntegrationHostKey string `gorm:"-" json:"-"`
 	// 搁置（INT-165）：两列可空，存量行为 NULL。「搁置中」的判定见 IsShelved；
 	// 到期自动恢复没有定时任务，由读取侧按 now 判定，SQL 过滤处用等价条件。
 	ShelvedAt    *time.Time `gorm:"type:timestamp" json:"shelved_at"`

@@ -206,7 +206,7 @@ func TestValidateVisualResultPriorOpenRequiresLevel(t *testing.T) {
 // E.1 评论与历史：只写进 prior(open) 的未解决项在评论「仍未解决」段、下一轮
 // 视觉历史的「仍未解决（更早一轮）」小节里都能看到，不会凭空消失。
 func TestVisualPriorOpenStaysVisibleInCommentAndHistory(t *testing.T) {
-	meta := reviewCommentMeta{RepoFullName: "o/r", HeadSHA: "abcdef1234567890", RoundNumber: 4}
+	meta := reviewCommentMeta{RepoFullName: "o/r", HeadSHA: "abcdef1234567890", links: githubLinks("https://github.com"), RoundNumber: 4}
 	body := buildVisualComment(meta, []model.ReviewRun{visComboRun(model.ReviewRunCompleted, int150Result)}, nil, false)
 	// 遵守契约的返回（findings 只写本轮新问题，未解决项只标 prior(open)）分区
 	// 各归其位：minor 在「本轮新发现」、worth_fixing 在「仍未解决」。
@@ -455,7 +455,7 @@ func TestVisualSyncSameContentDifferentURLsCarries(t *testing.T) {
 // 评论开头指向上轮轮次与 head，被沿用的发现归入「仍未解决」；「截图无法下
 // 载」评论同样带标题；两段都空时只输出标题+summary。
 func TestBuildVisualCommentTitleAndSections(t *testing.T) {
-	meta := reviewCommentMeta{RepoFullName: "o/r", HeadSHA: "abcdef1234567890", RoundNumber: 3}
+	meta := reviewCommentMeta{RepoFullName: "o/r", HeadSHA: "abcdef1234567890", links: githubLinks("https://github.com"), RoundNumber: 3}
 	result := `{"summary":"两处问题","findings":[` +
 		`{"severity":"minor","screenshot":"s2","dimension":"spacing","body":"次要点","fix":"微调"},` +
 		`{"severity":"blocker","screenshot":"s1","dimension":"hierarchy","body":"按钮重叠","fix":"调层级"}],` +

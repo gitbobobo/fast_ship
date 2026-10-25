@@ -77,6 +77,48 @@ func (e DeploymentSettingsPublicUrlSource) Valid() bool {
 	}
 }
 
+// Defines values for ForgeIntegrationKind.
+const (
+	Forgejo ForgeIntegrationKind = "forgejo"
+	Github  ForgeIntegrationKind = "github"
+)
+
+// Valid indicates whether the value is a known member of the ForgeIntegrationKind enum.
+func (e ForgeIntegrationKind) Valid() bool {
+	switch e {
+	case Forgejo:
+		return true
+	case Github:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ForgeIntegrationTestStatus.
+const (
+	ForgeIntegrationTestStatusFailed    ForgeIntegrationTestStatus = "failed"
+	ForgeIntegrationTestStatusInvalid   ForgeIntegrationTestStatus = "invalid"
+	ForgeIntegrationTestStatusOk        ForgeIntegrationTestStatus = "ok"
+	ForgeIntegrationTestStatusUnchecked ForgeIntegrationTestStatus = "unchecked"
+)
+
+// Valid indicates whether the value is a known member of the ForgeIntegrationTestStatus enum.
+func (e ForgeIntegrationTestStatus) Valid() bool {
+	switch e {
+	case ForgeIntegrationTestStatusFailed:
+		return true
+	case ForgeIntegrationTestStatusInvalid:
+		return true
+	case ForgeIntegrationTestStatusOk:
+		return true
+	case ForgeIntegrationTestStatusUnchecked:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for GitHubAppDeploymentDetectionStatus.
 const (
 	GitHubAppDeploymentDetectionStatusFailed    GitHubAppDeploymentDetectionStatus = "failed"
@@ -2315,6 +2357,30 @@ type CreateDocumentRequest struct {
 	Title string `json:"title"`
 }
 
+// CreateForgeIntegrationRequest 新建 forgejo 集成请求；本期不接受 github 种类（内置 App 走 deployment/github-app）
+type CreateForgeIntegrationRequest struct {
+	// AllowPrivateNetwork 放行该集成配置主机解析到私网地址；缺省 false
+	AllowPrivateNetwork *bool `json:"allow_private_network,omitempty"`
+
+	// ApiBaseUrl API 基址；省略或 null 按 {base_url}/api/v1 推导
+	ApiBaseUrl *string `json:"api_base_url,omitempty"`
+
+	// BaseUrl Forgejo 实例基址；必须 https（开启 allow_private_network 后可用 http）且解析不到内网地址
+	BaseUrl string `json:"base_url"`
+
+	// CaCertPem 自定义 CA（PEM，可选）；追加系统根证书池
+	CaCertPem *string `json:"ca_cert_pem,omitempty"`
+
+	// Name 显示名（必填）
+	Name string `json:"name"`
+
+	// Token 仓库范围 PAT（必填）；加密落库、只写不回显
+	Token string `json:"token"`
+
+	// WebhookSecret webhook 验签密钥（可选）；加密落库、只写不回显
+	WebhookSecret *string `json:"webhook_secret,omitempty"`
+}
+
 // CreateGitHubTokenRequest defines model for CreateGitHubTokenRequest.
 type CreateGitHubTokenRequest struct {
 	// Title Token 标题（如「主仓库发布 Token」）
@@ -2583,6 +2649,72 @@ type ErrorEnvelope struct {
 	Data    map[string]interface{} `json:"data"`
 	Message string                 `json:"message"`
 }
+
+// ForgeIntegration 部署级代码仓集成投影（INT-166）；内置 github-default 与 forgejo 行同形
+type ForgeIntegration struct {
+	// AllowPrivateNetwork 是否放行本集成配置主机解析到私网地址（http 同样仅在开启时可用）
+	AllowPrivateNetwork bool `json:"allow_private_network"`
+
+	// ApiBaseUrl API 基址（forgejo 保存时已推导展开；内置集成为部署 GitHub App 的 api_base_url）
+	ApiBaseUrl string `json:"api_base_url"`
+
+	// ApiBaseUrlDerived true=api_base_url 是按 {base_url}/api/v1 推导的展开值（改 base_url 时跟随 重新推导）；false=管理员显式钉死的端点（不随 base_url 变化）。内置集成恒 false。
+	ApiBaseUrlDerived bool `json:"api_base_url_derived"`
+
+	// BaseUrl Forgejo 实例基址（内置集成为 https://github.com）
+	BaseUrl string `json:"base_url"`
+
+	// Builtin 内置集成恒为 true，不可修改、不可删除、不可走 test 端点
+	Builtin bool `json:"builtin"`
+
+	// CreatedAt 创建时间；内置集成无落库行，为 null
+	CreatedAt *string `json:"created_at"`
+
+	// HasCaCert 是否配置了自定义 CA（本体永不回显）
+	HasCaCert bool `json:"has_ca_cert"`
+
+	// Id 内置集成固定为 github-default；forgejo 行为 forge_integrations 行 ID
+	Id string `json:"id"`
+
+	// Kind github=内置 GitHub App（只读映射）；forgejo=机器人账号 + 仓库范围 PAT
+	Kind ForgeIntegrationKind `json:"kind"`
+
+	// Name 显示名
+	Name string `json:"name"`
+
+	// TokenSet 凭证是否已配置（内置=GitHub App 身份可用；本体永不回显）
+	TokenSet bool `json:"token_set"`
+
+	// Unavailable omitempty；仅内置 github-default 可能出现：true 表示内置投影读取 失败（如 App 密文解不开），该条目仅作占位展示、凭证状态不可信， 请检查部署级 GitHub App 配置。forgejo 行恒无此字段。
+	Unavailable *bool `json:"unavailable,omitempty"`
+
+	// UpdatedAt 最近保存时间；内置集成为 null
+	UpdatedAt *string `json:"updated_at"`
+
+	// WebhookSecretSet webhook 验签密钥是否已配置（本体永不回显）
+	WebhookSecretSet bool `json:"webhook_secret_set"`
+}
+
+// ForgeIntegrationKind github=内置 GitHub App（只读映射）；forgejo=机器人账号 + 仓库范围 PAT
+type ForgeIntegrationKind string
+
+// ForgeIntegrationTest Forgejo 连接检测结论；不落库，只随本次响应返回
+type ForgeIntegrationTest struct {
+	// Detail 给人看的补充说明（失败原因等），不含任何密钥
+	Detail string `json:"detail"`
+
+	// Status ok=version+user 均成功；invalid=凭证被拒（401/403）；failed=网络/5xx 等检测失败。unchecked 仅为口径对齐，本端点不会返回
+	Status ForgeIntegrationTestStatus `json:"status"`
+
+	// Username 机器人账号名（检测成功时非空）
+	Username string `json:"username"`
+
+	// Version Forgejo 实例版本（检测成功时非空）
+	Version string `json:"version"`
+}
+
+// ForgeIntegrationTestStatus ok=version+user 均成功；invalid=凭证被拒（401/403）；failed=网络/5xx 等检测失败。unchecked 仅为口径对齐，本端点不会返回
+type ForgeIntegrationTestStatus string
 
 // GenerateTitleResponse defines model for GenerateTitleResponse.
 type GenerateTitleResponse struct {
@@ -3426,11 +3558,17 @@ type Project struct {
 
 	// CodeGithubTokenId 代码仓库 Token 引用；未配置为空串
 	CodeGithubTokenId string `json:"code_github_token_id"`
-	CreatedAt         string `json:"created_at"`
-	Description       string `json:"description"`
-	GithubOwner       string `json:"github_owner"`
-	GithubRepo        string `json:"github_repo"`
-	Id                string `json:"id"`
+
+	// CodeIntegrationId 代码仓集成引用（INT-166）；null 或空串 = 内置 github-default。写入接线由后续任务完成，本期只随响应带出
+	CodeIntegrationId *string `json:"code_integration_id"`
+
+	// CodeRepoUrl 代码仓页面地址（INT-166）。无代码仓（owner/repo 缺一）为 null；内置 github 集成为 https://github.com/{owner}/{repo}；forgejo 集成为 {base_url}/{owner}/{repo}；绑定的集成行已删除时为 null（不回落 github.com，避免私有仓库地址外发）
+	CodeRepoUrl *string `json:"code_repo_url"`
+	CreatedAt   string  `json:"created_at"`
+	Description string  `json:"description"`
+	GithubOwner string  `json:"github_owner"`
+	GithubRepo  string  `json:"github_repo"`
+	Id          string  `json:"id"`
 
 	// IsShelved 响应生成时刻是否处于搁置中；到期自动恢复，无后台任务（INT-165）
 	IsShelved bool `json:"is_shelved"`
@@ -3450,6 +3588,12 @@ type Project struct {
 
 	// PublicGithubTokenId 公开仓库 Token 引用；未配置为空串
 	PublicGithubTokenId string `json:"public_github_token_id"`
+
+	// PublicIntegrationId 公开仓库集成引用（INT-166）；null 或空串 = 内置 github-default。写入接线由后续任务完成，本期只随响应带出
+	PublicIntegrationId *string `json:"public_integration_id"`
+
+	// RepositoryUrl 公开仓页面地址（INT-166）。无公开仓（owner/repo 缺一）为 null；github_host='github.com' 为 https://github.com/{owner}/{repo}，空串（本部署 GitHub/GHE）按部署 GitHub Web 基址拼。编辑表单据此回填，不自行拼主机
+	RepositoryUrl *string `json:"repository_url"`
 
 	// ShelvedAt 搁置开始时间；null 表示未搁置（INT-165）
 	ShelvedAt *string `json:"shelved_at"`
@@ -5017,6 +5161,30 @@ type UpdateDocumentRequest struct {
 	Title *string `json:"title,omitempty"`
 }
 
+// UpdateForgeIntegrationRequest 部分更新请求；省略的字段保持不变
+type UpdateForgeIntegrationRequest struct {
+	// AllowPrivateNetwork null = 保留；变更后按新开关复核现有基址
+	AllowPrivateNetwork *bool `json:"allow_private_network,omitempty"`
+
+	// ApiBaseUrl null 保留（存量恰为旧 base_url 推导值时随新 base_url 重新推导）；空串重置为 {base_url}/api/v1；其余重新校验
+	ApiBaseUrl *string `json:"api_base_url,omitempty"`
+
+	// BaseUrl 基址变更时重新校验（含 DNS）；null 保留
+	BaseUrl *string `json:"base_url,omitempty"`
+
+	// CaCertPem null = 保留；空串 = 清空；其余替换并校验 PEM
+	CaCertPem *string `json:"ca_cert_pem,omitempty"`
+
+	// Name 显示名；null 或空串拒绝（name 不允许为空）
+	Name *string `json:"name,omitempty"`
+
+	// Token 新 PAT；省略或 null = 保留现值；空串 = 40001（必需凭证不可清空，需删除集成重建）；其余替换并加密落库
+	Token *string `json:"token,omitempty"`
+
+	// WebhookSecret 新验签密钥；省略或 null = 保留现值；空串 = 清空已存密钥；其余替换并加密落库
+	WebhookSecret *string `json:"webhook_secret,omitempty"`
+}
+
 // UpdateGitHubAppDeploymentRequest defines model for UpdateGitHubAppDeploymentRequest.
 type UpdateGitHubAppDeploymentRequest struct {
 	// AppId GitHub App ID（纯数字）
@@ -5290,6 +5458,9 @@ type VersionStatus = model.VersionStatus
 
 // DocId defines model for DocId.
 type DocId = string
+
+// ForgeIntegrationId defines model for ForgeIntegrationId.
+type ForgeIntegrationId = string
 
 // IssueId defines model for IssueId.
 type IssueId = string
@@ -6120,6 +6291,64 @@ type TestGitHubAppDeployment200JSONResponseBody struct {
 	// Code 业务错误码；0 表示成功
 	Code int                  `json:"code"`
 	Data *GitHubAppDeployment `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// ListForgeIntegrations200JSONResponseBody defines parameters for ListForgeIntegrations.
+type ListForgeIntegrations200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                `json:"code"`
+	Data []ForgeIntegration `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// CreateForgeIntegration200JSONResponseBody defines parameters for CreateForgeIntegration.
+type CreateForgeIntegration200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int `json:"code"`
+
+	// Data 部署级代码仓集成投影（INT-166）；内置 github-default 与 forgejo 行同形
+	Data *ForgeIntegration `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// GetForgeIntegration200JSONResponseBody defines parameters for GetForgeIntegration.
+type GetForgeIntegration200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int `json:"code"`
+
+	// Data 部署级代码仓集成投影（INT-166）；内置 github-default 与 forgejo 行同形
+	Data *ForgeIntegration `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// UpdateForgeIntegration200JSONResponseBody defines parameters for UpdateForgeIntegration.
+type UpdateForgeIntegration200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int `json:"code"`
+
+	// Data 部署级代码仓集成投影（INT-166）；内置 github-default 与 forgejo 行同形
+	Data *ForgeIntegration `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// TestForgeIntegration200JSONResponseBody defines parameters for TestForgeIntegration.
+type TestForgeIntegration200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int `json:"code"`
+
+	// Data Forgejo 连接检测结论；不落库，只随本次响应返回
+	Data *ForgeIntegrationTest `json:"data,omitempty"`
 
 	// Message 人类可读信息；成功时为 "success"
 	Message string `json:"message"`
@@ -8167,6 +8396,12 @@ type CreateGitHubAppManifestJSONRequestBody = GitHubAppManifestRequest
 
 // CompleteGitHubAppManifestJSONRequestBody defines body for CompleteGitHubAppManifest for application/json ContentType.
 type CompleteGitHubAppManifestJSONRequestBody = CompleteGitHubAppManifestRequest
+
+// CreateForgeIntegrationJSONRequestBody defines body for CreateForgeIntegration for application/json ContentType.
+type CreateForgeIntegrationJSONRequestBody = CreateForgeIntegrationRequest
+
+// UpdateForgeIntegrationJSONRequestBody defines body for UpdateForgeIntegration for application/json ContentType.
+type UpdateForgeIntegrationJSONRequestBody = UpdateForgeIntegrationRequest
 
 // UpdateDeploymentSettingsJSONRequestBody defines body for UpdateDeploymentSettings for application/json ContentType.
 type UpdateDeploymentSettingsJSONRequestBody = UpdateDeploymentSettingsRequest

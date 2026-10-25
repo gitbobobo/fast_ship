@@ -1147,6 +1147,96 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/deployment/integrations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 列出部署级代码仓集成（仅管理员）
+         * @description INT-166 实现。首条恒为内置 `github-default`（只读映射到部署级 GitHub App
+         *     配置，builtin=true），后接 forgejo 集成行。token 与 webhook_secret 本体
+         *     永不回显，只回「是否已设置」标记。
+         */
+        get: operations["listForgeIntegrations"];
+        put?: never;
+        /**
+         * 新建 forgejo 集成（仅管理员）
+         * @description 仅管理员。本期只接受 forgejo 种类（内置 GitHub App 走 deployment/github-app
+         *     端点，请求不设 kind 字段）。base_url 必填并做 SSRF 校验（含保存时 DNS
+         *     解析校验）；api_base_url 省略时按 `{base_url}/api/v1` 推导；token 必填
+         *     （仓库范围 PAT）；webhook_secret / ca_cert_pem 可选；token 与
+         *     webhook_secret 加密落库、永不回显。allow_private_network=true 放行该
+         *     集成配置主机解析到私网地址（http 基址同样只在开启时可用）。
+         */
+        post: operations["createForgeIntegration"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/deployment/integrations/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** 读取单个集成投影（仅管理员） */
+        get: operations["getForgeIntegration"];
+        /**
+         * 部分更新集成（仅管理员）
+         * @description 仅管理员。部分更新：省略的字段保持不变。base_url / api_base_url 变更时
+         *     重新做 SSRF 校验（含 DNS）；allow_private_network 关闭会按公网口径
+         *     复核现有基址。token 省略/null = 保留、空串 = 40001（必需凭证不可清空）；
+         *     webhook_secret / ca_cert_pem 省略或 null = 保留、空串 = 清空；
+         *     api_base_url 空串 = 重置为
+         *     `{base_url}/api/v1`。内置 github-default 不可通过本端点修改（40001）。
+         *     base_url 归一主机变更等同迁移全部项目绑定：仍有项目引用时拒绝
+         *     （40935，消息列引用项目名），须先解除项目绑定或走「新建集成 +
+         *     项目逐个改绑」的显式迁移路径。
+         */
+        put: operations["updateForgeIntegration"];
+        post?: never;
+        /**
+         * 删除集成（仅管理员）
+         * @description 仅管理员。内置 github-default 不可删除（40001）；仍被项目
+         *     （code_integration_id / public_integration_id 任一）引用时拒绝（40935），
+         *     消息列出引用项目名。
+         */
+        delete: operations["deleteForgeIntegration"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/deployment/integrations/{id}/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 连接检测（仅管理员）
+         * @description 仅管理员。用配置的 token 调 Forgejo `GET {api_base_url}/version` 与
+         *     `GET {api_base_url}/user`，返回实例版本与机器人账号名。检测结论随响应
+         *     返回、不落库；token 被拒绝时 status=invalid，网络/5xx 时 status=failed，
+         *     都不是 500。内置 github-default 走本端点报错（40001），引导用已有的
+         *     `POST /api/deployment/github-app/test`。
+         */
+        post: operations["testForgeIntegration"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/quota/providers": {
         parameters: {
             query?: never;
@@ -3782,6 +3872,94 @@ export interface components {
             /** @description webhook 验签密钥；省略或 null 表示保留已有值，空串表示清空 */
             webhook_secret?: string | null;
         };
+        /** @description 部署级代码仓集成投影（INT-166）；内置 github-default 与 forgejo 行同形 */
+        ForgeIntegration: {
+            /** @description 内置集成固定为 github-default；forgejo 行为 forge_integrations 行 ID */
+            id: string;
+            /**
+             * @description github=内置 GitHub App（只读映射）；forgejo=机器人账号 + 仓库范围 PAT
+             * @enum {string}
+             */
+            kind: "github" | "forgejo";
+            /** @description 显示名 */
+            name: string;
+            /** @description Forgejo 实例基址（内置集成为 https://github.com） */
+            base_url: string;
+            /** @description API 基址（forgejo 保存时已推导展开；内置集成为部署 GitHub App 的 api_base_url） */
+            api_base_url: string;
+            /** @description true=api_base_url 是按 {base_url}/api/v1 推导的展开值（改 base_url 时跟随 重新推导）；false=管理员显式钉死的端点（不随 base_url 变化）。内置集成恒 false。 */
+            api_base_url_derived: boolean;
+            /** @description 凭证是否已配置（内置=GitHub App 身份可用；本体永不回显） */
+            token_set: boolean;
+            /** @description webhook 验签密钥是否已配置（本体永不回显） */
+            webhook_secret_set: boolean;
+            /** @description 是否配置了自定义 CA（本体永不回显） */
+            has_ca_cert: boolean;
+            /** @description 是否放行本集成配置主机解析到私网地址（http 同样仅在开启时可用） */
+            allow_private_network: boolean;
+            /** @description 内置集成恒为 true，不可修改、不可删除、不可走 test 端点 */
+            builtin: boolean;
+            /** @description omitempty；仅内置 github-default 可能出现：true 表示内置投影读取 失败（如 App 密文解不开），该条目仅作占位展示、凭证状态不可信， 请检查部署级 GitHub App 配置。forgejo 行恒无此字段。 */
+            unavailable?: boolean;
+            /**
+             * Format: date-time
+             * @description 创建时间；内置集成无落库行，为 null
+             */
+            created_at: string | null;
+            /**
+             * Format: date-time
+             * @description 最近保存时间；内置集成为 null
+             */
+            updated_at: string | null;
+        };
+        /** @description Forgejo 连接检测结论；不落库，只随本次响应返回 */
+        ForgeIntegrationTest: {
+            /**
+             * @description ok=version+user 均成功；invalid=凭证被拒（401/403）；failed=网络/5xx 等检测失败。unchecked 仅为口径对齐，本端点不会返回
+             * @enum {string}
+             */
+            status: "unchecked" | "ok" | "invalid" | "failed";
+            /** @description Forgejo 实例版本（检测成功时非空） */
+            version: string;
+            /** @description 机器人账号名（检测成功时非空） */
+            username: string;
+            /** @description 给人看的补充说明（失败原因等），不含任何密钥 */
+            detail: string;
+        };
+        /** @description 新建 forgejo 集成请求；本期不接受 github 种类（内置 App 走 deployment/github-app） */
+        CreateForgeIntegrationRequest: {
+            /** @description 显示名（必填） */
+            name: string;
+            /** @description Forgejo 实例基址；必须 https（开启 allow_private_network 后可用 http）且解析不到内网地址 */
+            base_url: string;
+            /** @description API 基址；省略或 null 按 {base_url}/api/v1 推导 */
+            api_base_url?: string | null;
+            /** @description 仓库范围 PAT（必填）；加密落库、只写不回显 */
+            token: string;
+            /** @description webhook 验签密钥（可选）；加密落库、只写不回显 */
+            webhook_secret?: string | null;
+            /** @description 自定义 CA（PEM，可选）；追加系统根证书池 */
+            ca_cert_pem?: string | null;
+            /** @description 放行该集成配置主机解析到私网地址；缺省 false */
+            allow_private_network?: boolean;
+        };
+        /** @description 部分更新请求；省略的字段保持不变 */
+        UpdateForgeIntegrationRequest: {
+            /** @description 显示名；null 或空串拒绝（name 不允许为空） */
+            name?: string | null;
+            /** @description 基址变更时重新校验（含 DNS）；null 保留 */
+            base_url?: string | null;
+            /** @description null 保留（存量恰为旧 base_url 推导值时随新 base_url 重新推导）；空串重置为 {base_url}/api/v1；其余重新校验 */
+            api_base_url?: string | null;
+            /** @description 新 PAT；省略或 null = 保留现值；空串 = 40001（必需凭证不可清空，需删除集成重建）；其余替换并加密落库 */
+            token?: string | null;
+            /** @description 新验签密钥；省略或 null = 保留现值；空串 = 清空已存密钥；其余替换并加密落库 */
+            webhook_secret?: string | null;
+            /** @description null = 保留；空串 = 清空；其余替换并校验 PEM */
+            ca_cert_pem?: string | null;
+            /** @description null = 保留；变更后按新开关复核现有基址 */
+            allow_private_network?: boolean | null;
+        };
         /** @description 原样 POST 给 GitHub 的 App Manifest（形状由 GitHub Manifest 流程约定） */
         GitHubAppManifest: {
             /** @description App 名称（取自部署，如 Fast Ship） */
@@ -4159,6 +4337,8 @@ export interface components {
             description: string;
             github_owner: string;
             github_repo: string;
+            /** @description 公开仓页面地址（INT-166）。无公开仓（owner/repo 缺一）为 null；github_host='github.com' 为 https://github.com/{owner}/{repo}，空串（本部署 GitHub/GHE）按部署 GitHub Web 基址拼。编辑表单据此回填，不自行拼主机 */
+            repository_url: string | null;
             /** @description 代码仓库（PR 审查用）owner；未单独配置为空串，表示与公开仓库相同 */
             code_github_owner: string;
             /** @description 代码仓库（PR 审查用）repo 名；未单独配置为空串，表示与公开仓库相同 */
@@ -4167,6 +4347,12 @@ export interface components {
             public_github_token_id: string;
             /** @description 代码仓库 Token 引用；未配置为空串 */
             code_github_token_id: string;
+            /** @description 代码仓集成引用（INT-166）；null 或空串 = 内置 github-default。写入接线由后续任务完成，本期只随响应带出 */
+            code_integration_id: string | null;
+            /** @description 公开仓库集成引用（INT-166）；null 或空串 = 内置 github-default。写入接线由后续任务完成，本期只随响应带出 */
+            public_integration_id: string | null;
+            /** @description 代码仓页面地址（INT-166）。无代码仓（owner/repo 缺一）为 null；内置 github 集成为 https://github.com/{owner}/{repo}；forgejo 集成为 {base_url}/{owner}/{repo}；绑定的集成行已删除时为 null（不回落 github.com，避免私有仓库地址外发） */
+            code_repo_url: string | null;
             latest_version?: components["schemas"]["LatestVersion"];
             /** @description omitempty，仅在列表项中出现；项目 Issue 总数（不区分状态） */
             issue_count?: number;
@@ -6833,6 +7019,8 @@ export interface components {
         ProjectId: string;
         /** @description T3 环境 ID（UUID，归属当前用户，跨用户一律 40417） */
         T3EnvironmentId: string;
+        /** @description 代码仓集成 ID（内置 github-default 或 forge_integrations 行 ID） */
+        ForgeIntegrationId: string;
         /** @description 通知 ID（UUID，归属当前用户，跨用户一律 404） */
         NotificationId: string;
         /** @description T3 threadId */
@@ -9716,6 +9904,303 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
+        };
+    };
+    listForgeIntegrations: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 集成列表（首条 github-default） */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"] & {
+                        data?: components["schemas"]["ForgeIntegration"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            /** @description 非管理员（40305） */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            500: components["responses"]["InternalError"];
+        };
+    };
+    createForgeIntegration: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateForgeIntegrationRequest"];
+            };
+        };
+        responses: {
+            /** @description 创建后的集成投影 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"] & {
+                        data?: components["schemas"]["ForgeIntegration"];
+                    };
+                };
+            };
+            /** @description 参数缺失或非法（40001）：name/token 缺失、基址不是合法 https 绝对 URL、基址解析到内网地址、CA PEM 不可解析等 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            /** @description 非管理员（40305） */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getForgeIntegration: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description 代码仓集成 ID（内置 github-default 或 forge_integrations 行 ID） */
+                id: components["parameters"]["ForgeIntegrationId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 集成投影 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"] & {
+                        data?: components["schemas"]["ForgeIntegration"];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            /** @description 非管理员（40305） */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description 集成不存在（40435） */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            500: components["responses"]["InternalError"];
+        };
+    };
+    updateForgeIntegration: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description 代码仓集成 ID（内置 github-default 或 forge_integrations 行 ID） */
+                id: components["parameters"]["ForgeIntegrationId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateForgeIntegrationRequest"];
+            };
+        };
+        responses: {
+            /** @description 更新后的集成投影 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"] & {
+                        data?: components["schemas"]["ForgeIntegration"];
+                    };
+                };
+            };
+            /** @description 参数非法（40001）：内置集成不可修改、基址校验失败、CA PEM 不可解析等 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            /** @description 非管理员（40305） */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description 集成不存在（40435） */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            500: components["responses"]["InternalError"];
+        };
+    };
+    deleteForgeIntegration: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description 代码仓集成 ID（内置 github-default 或 forge_integrations 行 ID） */
+                id: components["parameters"]["ForgeIntegrationId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 删除成功（data 为 null） */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"];
+                };
+            };
+            /** @description 内置集成不可删除（40001） */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            /** @description 非管理员（40305） */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description 集成不存在（40435） */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description 仍被项目引用（40935，消息含项目名） */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            500: components["responses"]["InternalError"];
+        };
+    };
+    testForgeIntegration: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description 代码仓集成 ID（内置 github-default 或 forge_integrations 行 ID） */
+                id: components["parameters"]["ForgeIntegrationId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 检测结论（status 含失败口径，非 500） */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"] & {
+                        data?: components["schemas"]["ForgeIntegrationTest"];
+                    };
+                };
+            };
+            /** @description 内置集成不支持本端点（40001） */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            /** @description 非管理员（40305） */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description 集成不存在（40435） */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            500: components["responses"]["InternalError"];
         };
     };
     listQuotaProviders: {

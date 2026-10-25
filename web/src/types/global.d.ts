@@ -84,6 +84,15 @@ declare global {
   type CompleteGitHubAppManifestRequest =
     components["schemas"]["CompleteGitHubAppManifestRequest"];
 
+  /* ---------- 部署级代码仓集成（INT-166） ---------- */
+
+  type ForgeIntegration = components["schemas"]["ForgeIntegration"];
+  type ForgeIntegrationTest = components["schemas"]["ForgeIntegrationTest"];
+  type CreateForgeIntegrationRequest =
+    components["schemas"]["CreateForgeIntegrationRequest"];
+  type UpdateForgeIntegrationRequest =
+    components["schemas"]["UpdateForgeIntegrationRequest"];
+
   /** 契约名为 UpdateProjectRequest；字段三态见 schema 的 @description。 */
   type UpdateProjectPayload = components["schemas"]["UpdateProjectRequest"];
 

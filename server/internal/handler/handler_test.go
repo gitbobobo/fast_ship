@@ -62,6 +62,8 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 		&model.UserIssuePromptSetting{},
 		&model.ApiKey{},
 		&model.Project{},
+		// 项目写路径的集成存在性条件引用 forge_integrations（生产恒有）。
+		&model.ForgeIntegration{},
 		&model.Version{},
 		&model.Issue{},
 		&model.IssueGitHubMeta{},
@@ -166,7 +168,7 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 		attachmentHandler:  NewIssueAttachmentHandler(issueAttachmentService, cfg),
 		screenshotHandler:  NewScreenshotHandler(screenshotService, cfg),
 		annotationHandler:  NewScreenshotAnnotationHandler(screenshotAnnotationService),
-		projectHandler:     NewProjectHandler(service.NewProjectService(projectRepo, versionRepo, issueSyncStateRepo, githubTokenRepo, fileStorage, cfg, zap.NewNop())),
+		projectHandler:     NewProjectHandler(service.NewProjectService(projectRepo, versionRepo, issueSyncStateRepo, githubTokenRepo, fileStorage, cfg, zap.NewNop(), nil)),
 		githubTokenHandler: NewGitHubTokenHandler(service.NewGitHubTokenService(githubTokenRepo, cfg, zap.NewNop())),
 	}
 }
