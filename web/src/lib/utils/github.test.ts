@@ -255,6 +255,8 @@ describe("hostFromRepoInput", () => {
     expect(hostFromRepoInput("https://forge.example.com:443/o/r")).toBe("forge.example.com");
     expect(hostFromRepoInput("http://forge.example.com:80/o/r")).toBe("forge.example.com");
     expect(hostFromRepoInput("https://forge.example.com:8443/o/r")).toBe("forge.example.com:8443");
+    // userinfo 不属于主机。
+    expect(hostFromRepoInput("https://user:pass@forge-b.example.com/o/r")).toBe("forge-b.example.com");
     expect(hostFromRepoInput("github.com/acme/app")).toBe("github.com");
   });
   it("两段式裸输入不是主机（含点 owner），三段以上首段含点才当主机段", () => {

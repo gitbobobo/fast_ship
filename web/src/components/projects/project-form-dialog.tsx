@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router";
 import { useForm, useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { Plus } from "lucide-react";
+import { Plus, TriangleAlert } from "lucide-react";
 import { GitHubTokenHelpDialog } from "@/components/projects/github-token-help-dialog";
 import { GithubTokenCreateDialog } from "@/components/settings/github-token-create-dialog";
 import { T3BindingsSection } from "@/components/projects/t3-bindings-section";
@@ -261,9 +261,11 @@ export function ProjectFormDialog({
         message:
           hostMismatch && integrationHost !== ""
             ? `仓库地址主机 ${inputHost} 与所选集成（${integrationHost}）不一致`
-            : selectedIntegration
-              ? "格式：owner/repo（或完整仓库地址）"
-              : "所选代码仓集成不可用，请重新选择",
+            : hostMismatch
+              ? "所选代码仓库集成的地址不可用，请重新选择集成"
+              : selectedIntegration
+                ? "格式：owner/repo（或完整仓库地址）"
+                : "所选代码仓库集成不可用，请重新选择",
       });
       return null;
     }
@@ -526,7 +528,7 @@ export function ProjectFormDialog({
             </p>
 
             <div className="space-y-2">
-              <Label htmlFor="project-code_integration_id">代码仓集成</Label>
+              <Label htmlFor="project-code_integration_id">代码仓库集成</Label>
               <OptionSelect
                 value={codeIntegrationId}
                 onValueChange={(next) =>
@@ -560,7 +562,7 @@ export function ProjectFormDialog({
 
             <div className="space-y-2">
               <Label htmlFor="project-code_repository_url">
-                owner / repo（可选，默认同公开仓库）
+                代码仓库（可选，默认同公开仓库）
               </Label>
               <Input
                 id="project-code_repository_url"
@@ -574,14 +576,17 @@ export function ProjectFormDialog({
                   : "PR 审查盯的仓库；留空则审查公开仓库"}
               </p>
               {showRepoChangeWarning && (
-                <p className="text-xs text-amber-700 dark:text-amber-400">
-                  修改代码仓将自动停用 PR 审查，保存后需重新开启
-                </p>
+                <div className="flex items-start gap-2 rounded-md border border-amber-300/70 bg-amber-50 px-3 py-2 dark:border-amber-500/40 dark:bg-amber-950/40">
+                  <TriangleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-700 dark:text-amber-400" />
+                  <p className="text-xs leading-5 text-amber-900 dark:text-amber-200">
+                    修改代码仓库将自动停用 PR 审查，保存后需重新开启
+                  </p>
+                </div>
               )}
               {bindingBroken && (
                 <div className="space-y-1">
                   <p className="text-xs text-amber-700 dark:text-amber-400">
-                    原绑定的代码仓集成已失效；留空将保留现状，填写新地址可重新绑定
+                    原绑定的代码仓库集成已失效；留空将保留现状，填写新地址可重新绑定
                   </p>
                   <label className="flex items-center gap-2 text-xs text-amber-700 dark:text-amber-400">
                     <input
@@ -589,7 +594,7 @@ export function ProjectFormDialog({
                       checked={clearBrokenBinding}
                       onChange={(e) => setClearBrokenBinding(e.target.checked)}
                     />
-                    清除失效的代码仓绑定（回落到公开仓库）
+                    清除失效的代码仓库绑定（回落到公开仓库）
                   </label>
                 </div>
               )}
@@ -617,7 +622,7 @@ export function ProjectFormDialog({
               <T3BindingsSection ref={t3SectionRef} projectId={projectId} />
             )}
 
-            <div className="flex gap-3 pt-2">
+            <div className="sticky bottom-0 -mx-4 -mb-4 mt-2 flex gap-3 border-t border-foreground/10 bg-popover/95 px-4 pt-3 pb-4 backdrop-blur-sm shadow-[0_-8px_16px_-8px_rgba(0,0,0,0.3)]">
               <Button type="submit" disabled={isSubmitting}>
                 {isSubmitting
                   ? isEdit

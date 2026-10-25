@@ -110,7 +110,7 @@ describe("ProjectFormDialog", () => {
   }
 
   const repoChangeWarning =
-    "修改代码仓将自动停用 PR 审查，保存后需重新开启";
+    "修改代码仓库将自动停用 PR 审查，保存后需重新开启";
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -197,9 +197,9 @@ describe("ProjectFormDialog", () => {
     );
 
     expect(
-      await screen.findByRole("combobox", { name: "代码仓集成" }),
+      await screen.findByRole("combobox", { name: "代码仓库集成" }),
     ).toHaveTextContent("自建 Forgejo");
-    expect(screen.getByLabelText(/owner \/ repo/)).toHaveValue("acme/api");
+    expect(screen.getByLabelText(/代码仓库（可选/)).toHaveValue("acme/api");
   });
 
   it("编辑回填：github 绑定剥出 owner/repo；未改动保存不携带代码仓字段", async () => {
@@ -212,7 +212,7 @@ describe("ProjectFormDialog", () => {
       }),
     );
 
-    expect(await screen.findByLabelText(/owner \/ repo/)).toHaveValue("acme/api");
+    expect(await screen.findByLabelText(/代码仓库（可选/)).toHaveValue("acme/api");
     await user.click(screen.getByRole("button", { name: "保存" }));
 
     await waitFor(() => expect(updateMutateAsync).toHaveBeenCalled());
@@ -231,7 +231,7 @@ describe("ProjectFormDialog", () => {
       }),
     );
 
-    const input = await screen.findByLabelText(/owner \/ repo/);
+    const input = await screen.findByLabelText(/代码仓库（可选/);
     expect(screen.queryByText(repoChangeWarning)).not.toBeInTheDocument();
     await user.clear(input);
     await user.type(input, "acme/other");
@@ -255,7 +255,7 @@ describe("ProjectFormDialog", () => {
       }),
     );
 
-    const input = await screen.findByLabelText(/owner \/ repo/);
+    const input = await screen.findByLabelText(/代码仓库（可选/);
     await user.clear(input);
     await user.type(input, "acme/other");
     await user.click(screen.getByRole("button", { name: "保存" }));
@@ -279,8 +279,8 @@ describe("ProjectFormDialog", () => {
       }),
     );
 
-    await screen.findByLabelText(/owner \/ repo/);
-    await user.click(screen.getByRole("combobox", { name: "代码仓集成" }));
+    await screen.findByLabelText(/代码仓库（可选/);
+    await user.click(screen.getByRole("combobox", { name: "代码仓库集成" }));
     await user.click(await screen.findByRole("option", { name: /自建 Forgejo/ }));
     await user.click(screen.getByRole("button", { name: "保存" }));
 
@@ -303,7 +303,7 @@ describe("ProjectFormDialog", () => {
       }),
     );
 
-    await user.clear(await screen.findByLabelText(/owner \/ repo/));
+    await user.clear(await screen.findByLabelText(/代码仓库（可选/));
     await user.click(screen.getByRole("button", { name: "保存" }));
 
     await waitFor(() =>
@@ -321,7 +321,7 @@ describe("ProjectFormDialog", () => {
     );
 
     expect(
-      await screen.findByRole("combobox", { name: "代码仓集成" }),
+      await screen.findByRole("combobox", { name: "代码仓库集成" }),
     ).toHaveTextContent("已失效");
     await user.click(screen.getByRole("button", { name: "保存" }));
 
@@ -338,9 +338,9 @@ describe("ProjectFormDialog", () => {
       makeProject({ code_integration_id: "dead-row", code_repo_url: null }),
     );
 
-    await screen.findByLabelText(/owner \/ repo/);
+    await screen.findByLabelText(/代码仓库（可选/);
     await user.click(
-      screen.getByLabelText("清除失效的代码仓绑定（回落到公开仓库）"),
+      screen.getByLabelText("清除失效的代码仓库绑定（回落到公开仓库）"),
     );
     await user.click(screen.getByRole("button", { name: "保存" }));
 
@@ -364,10 +364,10 @@ describe("ProjectFormDialog", () => {
     );
 
     // slug 从 code_github_owner/repo 预填非空——勾选语义须优先于输入内容。
-    const slug = await screen.findByLabelText(/owner \/ repo/);
+    const slug = await screen.findByLabelText(/代码仓库（可选/);
     expect(slug).toHaveValue("acme/api");
     await user.click(
-      screen.getByLabelText("清除失效的代码仓绑定（回落到公开仓库）"),
+      screen.getByLabelText("清除失效的代码仓库绑定（回落到公开仓库）"),
     );
     await user.click(screen.getByRole("button", { name: "保存" }));
 
@@ -385,11 +385,11 @@ describe("ProjectFormDialog", () => {
       makeProject({ code_integration_id: "dead-row", code_repo_url: null }),
     );
 
-    await user.type(await screen.findByLabelText(/owner \/ repo/), "acme/api");
+    await user.type(await screen.findByLabelText(/代码仓库（可选/), "acme/api");
     await user.click(screen.getByRole("button", { name: "保存" }));
 
     expect(
-      await screen.findByText("所选代码仓集成不可用，请重新选择"),
+      await screen.findByText("所选代码仓库集成不可用，请重新选择"),
     ).toBeInTheDocument();
     expect(updateMutateAsync).not.toHaveBeenCalled();
   });
@@ -406,13 +406,13 @@ describe("ProjectFormDialog", () => {
     );
 
     expect(
-      await screen.findByRole("combobox", { name: "代码仓集成" }),
+      await screen.findByRole("combobox", { name: "代码仓库集成" }),
     ).toHaveTextContent("内置 GitHub");
     expect(screen.getByText(/集成列表加载失败/)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "重试" }));
     expect(refetchIntegrations).toHaveBeenCalled();
 
-    const input = screen.getByLabelText(/owner \/ repo/);
+    const input = screen.getByLabelText(/代码仓库（可选/);
     await user.clear(input);
     await user.type(input, "acme/other");
     await user.click(screen.getByRole("button", { name: "保存" }));
@@ -435,7 +435,7 @@ describe("ProjectFormDialog", () => {
 
     expect(await screen.findByText("正在加载集成列表...")).toBeInTheDocument();
     expect(
-      screen.getByRole("combobox", { name: "代码仓集成" }),
+      screen.getByRole("combobox", { name: "代码仓库集成" }),
     ).toHaveTextContent("内置 GitHub");
   });
 
@@ -452,7 +452,7 @@ describe("ProjectFormDialog", () => {
       }),
     );
 
-    expect(await screen.findByLabelText(/owner \/ repo/)).toHaveValue("acme/api");
+    expect(await screen.findByLabelText(/代码仓库（可选/)).toHaveValue("acme/api");
     const nameInput = screen.getByLabelText("项目名称");
     await user.clear(nameInput);
     await user.type(nameInput, "renamed");
@@ -477,8 +477,8 @@ describe("ProjectFormDialog", () => {
       }),
     );
 
-    await screen.findByRole("combobox", { name: "代码仓集成" });
-    await user.click(screen.getByRole("combobox", { name: "代码仓集成" }));
+    await screen.findByRole("combobox", { name: "代码仓库集成" });
+    await user.click(screen.getByRole("combobox", { name: "代码仓库集成" }));
     await user.click(await screen.findByRole("option", { name: /自建 Forgejo/ }));
     await user.click(screen.getByRole("button", { name: "保存" }));
 
@@ -500,7 +500,7 @@ describe("ProjectFormDialog", () => {
       }),
     );
 
-    await screen.findByLabelText(/owner \/ repo/);
+    await screen.findByLabelText(/代码仓库（可选/);
     expect(screen.queryByText(repoChangeWarning)).not.toBeInTheDocument();
   });
 
@@ -517,14 +517,14 @@ describe("ProjectFormDialog", () => {
       }),
     );
 
-    const input = await screen.findByLabelText(/owner \/ repo/);
+    const input = await screen.findByLabelText(/代码仓库（可选/);
     await user.clear(input);
     await user.type(input, "acme/other");
     await user.click(screen.getByRole("button", { name: "保存" }));
 
     await waitFor(() =>
       expect(
-        screen.getByText(/所选代码仓集成不可用/),
+        screen.getByText(/所选代码仓库集成不可用/),
       ).toBeInTheDocument(),
     );
     expect(updateMutateAsync).not.toHaveBeenCalled();
@@ -535,7 +535,7 @@ describe("ProjectFormDialog", () => {
     renderDialog("create");
 
     await user.type(screen.getByLabelText("项目名称"), "new-proj");
-    await user.click(screen.getByRole("combobox", { name: "代码仓集成" }));
+    await user.click(screen.getByRole("combobox", { name: "代码仓库集成" }));
     await user.click(await screen.findByRole("option", { name: /自建 Forgejo/ }));
     await user.click(screen.getByRole("button", { name: "创建项目" }));
 
@@ -550,9 +550,9 @@ describe("ProjectFormDialog", () => {
     renderDialog("create");
 
     await user.type(screen.getByLabelText("项目名称"), "new-proj");
-    await user.click(screen.getByRole("combobox", { name: "代码仓集成" }));
+    await user.click(screen.getByRole("combobox", { name: "代码仓库集成" }));
     await user.click(await screen.findByRole("option", { name: /自建 Forgejo/ }));
-    await user.type(screen.getByLabelText(/owner \/ repo/), "acme/api");
+    await user.type(screen.getByLabelText(/代码仓库（可选/), "acme/api");
     expect(screen.queryByText(repoChangeWarning)).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "创建项目" }));

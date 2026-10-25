@@ -144,6 +144,9 @@ export function hostFromRepoInput(raw: string): string {
   if (protoIdx !== -1) {
     const slash = rest.indexOf("/", protoIdx + 3);
     let host = slash === -1 ? rest.slice(protoIdx + 3) : rest.slice(protoIdx + 3, slash);
+    // userinfo 不属于主机：https://user:pass@host/o/r 取 @ 后段。
+    const atIdx = host.lastIndexOf("@");
+    if (atIdx !== -1) host = host.slice(atIdx + 1);
     // scheme 缺省端口与 new URL().host 的归一同口径——https://x:443 与
     // https://x 是同一主机，不剥会把等价地址误报成主机不一致。
     const scheme = rest.slice(0, protoIdx).toLowerCase();

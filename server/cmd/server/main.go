@@ -339,10 +339,11 @@ func main() {
 			}
 			rows, lerr := forgeIntegrationRepo.List()
 			if lerr != nil {
-				// 出错同样推进时间戳：DB 持续故障时每条新连接都打一次
-				// List 反而放大压力，短窗内返回 nil 走守卫即可。
+				// 出错沿用上次成功的名单并推进时间戳：DB 持续故障时每条
+				// 新连接都打 List 反而放大压力；对正在下载的内网附件，
+				// 几秒旧名单比瞬间收紧成空名单更平滑。
 				dynamicTrustedHostsAt = time.Now()
-				return nil
+				return dynamicTrustedHostsCache
 			}
 			var hosts []string
 			for i := range rows {
