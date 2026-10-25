@@ -533,7 +533,7 @@ function CacheHitSection({ data }: { data: BotUsageInsights }) {
                   )}
                 </div>
               </div>
-              <div className="min-w-[2rem] shrink-0 text-right text-xs font-semibold tabular-nums text-muted-foreground">
+              <div className="min-w-[2rem] shrink-0 pr-2 text-right text-xs font-semibold tabular-nums text-muted-foreground">
                 {formatCacheHitRate(day.rate)}
               </div>
             </div>
