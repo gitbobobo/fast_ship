@@ -308,6 +308,8 @@ func botParseProviderCost(extra map[string]respjson.Field, openrouter bool) (*fl
 	var rawNote *string
 	if v, ok := field(extra["cost"]); ok {
 		if openrouter {
+			// 豁免审计：OpenRouter 的 cost 是唯一被文档锚定 USD 的字段，
+			// 来源无歧义——raw 只为「哪个字段胜出」存在，这里答案恒为 cost。
 			return v, nil
 		}
 		// 非 OpenRouter 的 cost 币别不明：记 raw 但继续按优先级找置信

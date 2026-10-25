@@ -256,14 +256,17 @@ WHERE tool_name = 'fs_thread' AND action = 'wait' AND status = 'running'
 	// 全链路漏计。把含 ±HH:MM 偏移后缀的存量行统一重写为 UTC 规范文本
 	// （瞬时不变、毫秒尾数原样保留）；受影响 bot 的汇总标记作废交给
 	// 启动回填按新时间轴重算——否则探针水位低于标记，错账会固住。
-	// 幂等：规范行不匹配模式，二次执行影响 0 行。
-	tzFix := []string{
-		`CREATE TEMPORARY TABLE IF NOT EXISTS int164_tz_bots AS
+	// 幂等：规范行不匹配模式，二次执行影响 0 行。四条语句包进一个事务，
+	// 固定到同一连接——TEMPORARY TABLE 是会话级的，连接池里逐条执行会
+	// 在第二条报 no such table。
+	tzErr := db.Transaction(func(tx *gorm.DB) error {
+		tzFix := []string{
+			`CREATE TEMPORARY TABLE IF NOT EXISTS int164_tz_bots AS
 SELECT DISTINCT bot_id FROM bot_runs
 WHERE (created_at GLOB '*+[0-9][0-9]:[0-9][0-9]' OR created_at GLOB '*-[0-9][0-9]:[0-9][0-9]')
   AND created_at NOT LIKE '%+00:00'`,
-		`DELETE FROM bot_usage_rollup_days WHERE bot_id IN (SELECT bot_id FROM int164_tz_bots)`,
-		`UPDATE bot_runs SET created_at =
+			`DELETE FROM bot_usage_rollup_days WHERE bot_id IN (SELECT bot_id FROM int164_tz_bots)`,
+			`UPDATE bot_runs SET created_at =
     strftime('%Y-%m-%d %H:%M:%S', created_at) ||
     CASE WHEN instr(created_at, '.') > 0
          THEN substr(created_at, instr(created_at, '.'),
@@ -271,13 +274,19 @@ WHERE (created_at GLOB '*+[0-9][0-9]:[0-9][0-9]' OR created_at GLOB '*-[0-9][0-9
          ELSE '' END ||
     '+00:00'
 WHERE (created_at GLOB '*+[0-9][0-9]:[0-9][0-9]' OR created_at GLOB '*-[0-9][0-9]:[0-9][0-9]')
-  AND created_at NOT LIKE '%+00:00'`,
-		`DROP TABLE IF EXISTS int164_tz_bots`,
-	}
-	for _, stmt := range tzFix {
-		if err := db.Exec(stmt).Error; err != nil {
-			return fmt.Errorf("bot schema: normalize run created_at offsets: %w", err)
+  AND created_at NOT LIKE '%+00:00'
+  AND strftime('%Y-%m-%d %H:%M:%S', created_at) IS NOT NULL`,
+			`DROP TABLE IF EXISTS int164_tz_bots`,
 		}
+		for _, stmt := range tzFix {
+			if err := tx.Exec(stmt).Error; err != nil {
+				return fmt.Errorf("normalize run created_at offsets: %w", err)
+			}
+		}
+		return nil
+	})
+	if tzErr != nil {
+		return fmt.Errorf("bot schema: %w", tzErr)
 	}
 	for _, ddls := range [][]string{botSchemaDDL, BotBudgetDDL} {
 		for _, ddl := range ddls {
