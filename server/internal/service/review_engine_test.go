@@ -236,6 +236,31 @@ func TestReviewWebhookDeliveryIdempotent(t *testing.T) {
 	}
 }
 
+// TestReviewWebhookDeliveryLegacyBareKey 升级前的裸 GUID 幂等账（集成前缀
+// 账键引入前的行没有前缀）对 GitHub 同 GUID 重投仍须命中去重——只查
+// 前缀键的话升级窗口内的重投会重走一遍受理路径。
+func TestReviewWebhookDeliveryLegacyBareKey(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	e.enableReview(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	ctx := context.Background()
+
+	// 模拟升级前登记的裸键行（无 integration_id 前缀）。
+	if err := e.svc.db.Create(&model.GitHubWebhookDelivery{
+		DeliveryID: "legacy-1", Event: "pull_request", ReceivedAt: time.Now().UTC(),
+	}).Error; err != nil {
+		t.Fatalf("seed legacy delivery: %v", err)
+	}
+	err := e.review.HandleGitHubWebhook(ctx, "pull_request", "legacy-1",
+		prPayload("opened", repo, 6, "sha-1", false, false))
+	if err != ErrDeliveryDuplicated {
+		t.Fatalf("legacy bare-key redelivery err = %v, want ErrDeliveryDuplicated", err)
+	}
+	if got := e.debounceCount(t); got != 0 {
+		t.Fatalf("debounce rows = %d, want 0（裸键命中不得受理）", got)
+	}
+}
+
 // TestReviewWebhookSupersedesStaleSHA 新 head 覆盖防抖行并取消旧 head 的在途运行。
 func TestReviewWebhookSupersedesStaleSHA(t *testing.T) {
 	e := newReviewEngineEnv(t)

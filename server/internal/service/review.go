@@ -232,6 +232,21 @@ func deliveryLedgerKey(integrationID, deliveryID string) string {
 func (s *ReviewService) runWebhookDeliveryTx(ctx context.Context, integrationID, event, deliveryID string, body []byte, tiedBase string, override *reviewWebhookTrigger) error {
 	now := time.Now().UTC()
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// 存量裸键兼容：集成前缀账键（deliveryLedgerKey）引入前的行是裸
+		// GUID——升级窗口内 GitHub 对同 GUID 重投时仅按前缀键登记会重复
+		// 受理一遍（下游 seen/防抖去重兜住正确性，但仍白跑一次实拉）。
+		// 升级前这张表只有 GitHub 写入，裸键只可能属于 github-default；
+		// Forgejo 无存量行，不查。
+		if integrationID == model.ForgeIntegrationBuiltinGitHubID {
+			var legacy int64
+			if err := tx.Model(&model.GitHubWebhookDelivery{}).
+				Where("delivery_id = ?", deliveryID).Count(&legacy).Error; err != nil {
+				return err
+			}
+			if legacy > 0 {
+				return ErrDeliveryDuplicated
+			}
+		}
 		inserted, err := s.deliveries.InsertTx(tx, &model.GitHubWebhookDelivery{
 			DeliveryID: deliveryLedgerKey(integrationID, deliveryID),
 			Event:      event,
