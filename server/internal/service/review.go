@@ -185,7 +185,7 @@ const reviewTiedRevalidateMax = 4
 // PR 复核——payload head 仍是平台现状才带 tiedBase（绑观察到的总账 head）
 // 重进；重进时总账已前进则哨兵再触发、按新快照重验，直到收敛或到上限。
 func (s *ReviewService) handlePlatformWebhook(ctx context.Context, integrationID, source, event, deliveryID string, body []byte) error {
-	err := s.runWebhookDeliveryTx(ctx, integrationID, event, deliveryID, body, "")
+	err := s.runWebhookDeliveryTx(ctx, integrationID, event, deliveryID, body, "", nil)
 	for i := 0; i < reviewTiedRevalidateMax; i++ {
 		var tied *tiedHeadError
 		if !errors.As(err, &tied) {
@@ -217,7 +217,7 @@ func (s *ReviewService) handlePlatformWebhook(ctx context.Context, integrationID
 // runWebhookDeliveryTx 幂等登记 + 触发处理的单事务（零网络调用）。tiedBase
 // 由复验重进时绑定观察到的总账 head——首趟回滚连幂等登记一起撤销，重进
 // 时重新登记同一 delivery id，对平台仍是一次投递。
-func (s *ReviewService) runWebhookDeliveryTx(ctx context.Context, integrationID, event, deliveryID string, body []byte, tiedBase string) error {
+func (s *ReviewService) runWebhookDeliveryTx(ctx context.Context, integrationID, event, deliveryID string, body []byte, tiedBase string, override *reviewWebhookTrigger) error {
 	now := time.Now().UTC()
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		inserted, err := s.deliveries.InsertTx(tx, &model.GitHubWebhookDelivery{
@@ -231,16 +231,22 @@ func (s *ReviewService) runWebhookDeliveryTx(ctx context.Context, integrationID,
 		if !inserted {
 			return ErrDeliveryDuplicated
 		}
+		// override 走 trigger 直进（复核后以 live 快照重建，pr_updated_at
+		// 是实时戳）；否则从 body 解析——两条路径共用同一受理事务。
+		if override != nil {
+			return s.handleReviewTriggerTx(tx, integrationID, override, now)
+		}
 		return s.handleWebhookTx(tx, integrationID, event, body, now, tiedBase)
 	})
 }
 
 // revalidateTiedWebhook 同刻异 head 投递的复核：事务已回滚，事务外现拉实时
 // PR——live head 与 payload head 一致说明该投递就是平台现状（乱序到达的才
-// 是总账里的那条），以观察到的总账 head 作 tiedBase 重进受理；不一致或拉
-// 不到则丢弃，总账不回滚到疑似旧 head（Forgejo 由轮询兜底、live head 的
-// 自身事件照常受理）。复核结论只绑观察时刻的总账快照——重进期间总账若又
-// 前进，事务内 tiedBase 失配会再报歧义，由本调用方按新快照重验。
+// 是总账里的那条），以观察到的总账 head 作 tiedBase、用 live 快照重建
+// trigger 重进受理（pr_updated_at 取实时戳而非旧 payload 的）。live 指向
+// 别的 head 或 PR 已关 → 丢弃，总账不回滚到疑似旧 head；客户端构造/实拉
+// 失败是瞬时错误——返回 error 让 handler 回 500，平台重投会重走全流程
+// （GitHub 无轮询兜底，静默丢弃会永久漏审这个 head）。
 func (s *ReviewService) revalidateTiedWebhook(ctx context.Context, integrationID, source, event, deliveryID string, body []byte, observedHead string) error {
 	var p prWebhookPayload
 	if err := json.Unmarshal(body, &p); err != nil {
@@ -254,22 +260,44 @@ func (s *ReviewService) revalidateTiedWebhook(ctx context.Context, integrationID
 	defer cancel()
 	client, err := s.reviewClient(ctx, integrationID, repo, p.Installation.ID)
 	if err != nil {
-		s.logger.Warn("同刻异 head 复核构造客户端失败，丢弃投递",
+		s.logger.Warn("同刻异 head 复核构造客户端失败",
 			zap.String("integration", integrationID),
 			zap.String("delivery", deliveryID), zap.Error(err))
-		return nil
+		return err
 	}
 	live, err := client.GetPullRequest(ctx, repo, p.Number)
 	if err != nil {
-		s.logger.Warn("同刻异 head 复核实拉失败，丢弃投递",
+		s.logger.Warn("同刻异 head 复核实拉失败",
 			zap.String("integration", integrationID),
 			zap.String("delivery", deliveryID), zap.Error(err))
+		return err
+	}
+	// PR 在投递与复核间隙关闭/合并 → 该触发已无意义；live head 指向别处 →
+	// payload 是旧态。两种都是确定态，静默丢弃（非瞬时失败）。
+	if live == nil || live.Draft || live.State == "closed" || live.State == "merged" ||
+		!strings.EqualFold(live.HeadSHA, p.PR.Head.SHA) {
 		return nil
 	}
-	if live == nil || live.Draft || !strings.EqualFold(live.HeadSHA, p.PR.Head.SHA) {
-		return nil
+	trigger := &reviewWebhookTrigger{
+		action:         p.Action,
+		number:         p.Number,
+		repoFullName:   repo,
+		headSHA:        live.HeadSHA,
+		draft:          live.Draft,
+		headRepoFull:   p.PR.Head.Repo.FullName,
+		baseRepoFull:   p.PR.Base.Repo.FullName,
+		title:          firstNonEmpty(live.Title, p.PR.Title),
+		htmlURL:        firstNonEmpty(live.HTMLURL, p.PR.HTMLURL),
+		baseRef:        firstNonEmpty(live.BaseRef, p.PR.Base.Ref),
+		headRef:        firstNonEmpty(live.HeadRef, p.PR.Head.Ref),
+		updatedAt:      live.UpdatedAt,
+		tiedBase:       observedHead,
+		installationID: p.Installation.ID,
 	}
-	return s.runWebhookDeliveryTx(ctx, integrationID, event, deliveryID, body, observedHead)
+	if trigger.updatedAt == nil {
+		trigger.updatedAt = p.PR.UpdatedAt
+	}
+	return s.runWebhookDeliveryTx(ctx, integrationID, event, deliveryID, body, observedHead, trigger)
 }
 
 // lockProject 项目级互斥：launchRun 与删除项目的清理互斥。返回解锁函数。

@@ -153,9 +153,11 @@ seen SHA、取消旧轮全部失效）。
    `review_pull_requests.head_sha`；payload `pull_request.updated_at` 严格早于
    已受理 head 的 `pr_updated_at` → 忽略；同刻同 head → 重复投递早退；
    **同刻异 head 是歧义**（秒级粒度下同秒连推与乱序投递/旧快照分不出）——
-   事务回滚并交调用方现拉实时 PR 复核：live head 与 payload head 一致才带
-   `tiedVerified` 重进受理，不一致或拉不到则丢弃（Forgejo 轮询兜底、live
-   head 的自身事件照常受理），总账不回滚到疑似旧 head。该 SHA 已在本项目
+   事务回滚并交调用方现拉实时 PR 复核：live head 与 payload head 一致才以
+   `tiedBase`（绑观察到的总账 head）重进受理；live 指向别处或 PR 已关 →
+   丢弃，实拉失败 → 返回错误（handler 500 → 平台重投，GitHub 无轮询兜底
+   不静默丢）；重进期间总账又前进 → tiedBase 失配、哨兵再触发按新快照
+   重验（上限 4 次）。总账不回滚到疑似旧 head。该 SHA 已在本项目
    `review_seen_shas` 但不是当前 head → 忽略；`action=opened` 且当前 head
    非空 → 忽略；该 SHA 本项目已有运行 → 忽略。force-push 回已见过的 SHA
    不再开轮。
