@@ -630,18 +630,21 @@ export function ProjectFormDialog({
                 </p>
               )}
               {integrationsError && (
-                <p className="text-xs text-muted-foreground">
-                  集成列表加载失败，暂仅提供 GitHub（内置）
-                  {" · "}
-                  <Button
-                    type="button"
-                    variant="link"
-                    size="sm"
-                    className="h-auto rounded-md px-2 py-1.5 underline underline-offset-2 hover:bg-foreground/10"
-                    onClick={() => void refetchIntegrations()}
-                  >
-                    重试
-                  </Button>
+                <p className="flex items-center gap-1.5 text-xs text-amber-700 dark:text-amber-400">
+                  <TriangleAlert className="h-3.5 w-3.5 shrink-0" />
+                  <span>
+                    集成列表加载失败，暂仅提供 GitHub（内置）
+                    {" ·"}
+                    <Button
+                      type="button"
+                      variant="link"
+                      size="sm"
+                      className="ml-1 h-auto rounded-md px-2 py-1.5 underline underline-offset-2 hover:bg-foreground/10"
+                      onClick={() => void refetchIntegrations()}
+                    >
+                      重试
+                    </Button>
+                  </span>
                 </p>
               )}
               {integrationError !== "" && (
@@ -651,9 +654,11 @@ export function ProjectFormDialog({
 
             <div className="space-y-2">
               <Label htmlFor="project-code_repository_url">
-                {selectedIntegration?.kind === "forgejo"
-                  ? "代码仓库（该集成下必填）"
-                  : "代码仓库（可选，默认同公开仓库）"}
+                {selectedIntegration == null
+                  ? "代码仓库"
+                  : selectedIntegration.kind === "forgejo"
+                    ? "代码仓库（该集成下必填）"
+                    : "代码仓库（可选，默认同公开仓库）"}
               </Label>
               <Input
                 id="project-code_repository_url"
@@ -662,9 +667,11 @@ export function ProjectFormDialog({
                 onChange={(e) => setCodeRepoSlug(e.target.value)}
               />
               <p className="text-xs text-muted-foreground">
-                {selectedIntegration?.kind === "forgejo"
-                  ? "该集成上的 owner/repo，PR 审查在此进行"
-                  : "PR 审查盯的仓库；留空则审查公开仓库"}
+                {selectedIntegration == null
+                  ? "选择集成后确认该仓库"
+                  : selectedIntegration.kind === "forgejo"
+                    ? "该集成上的 owner/repo，PR 审查在此进行"
+                    : "PR 审查盯的仓库；留空则审查公开仓库"}
               </p>
               {showRepoChangeWarning && (
                 <div className="flex items-start gap-2 rounded-md border border-amber-300/70 bg-amber-50 px-3 py-2 dark:border-amber-500/40 dark:bg-amber-950/40">
