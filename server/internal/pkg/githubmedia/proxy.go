@@ -348,12 +348,11 @@ func newGuardedClient(requireHTTPS bool, allowURL func(*url.URL) bool, guardAddr
 					if _, ok := trusted[host]; ok {
 						return direct.DialContext(ctx, network, addr)
 					}
-					if trustedHostsFunc != nil {
-						for _, h := range trustedHostsFunc() {
-							if strings.ToLower(strings.TrimSpace(h)) == host {
-								return privateMode.DialContext(ctx, network, addr)
-							}
-						}
+					// 动态名单按 host:port 匹配：集成基址归一带端口（默认
+					// 端口按其 scheme 补），私网口径守卫只放到配置过的
+					// 端口——同主机其他端口上的服务不被连带信任。
+					if trustedHostsFunc != nil && dynamicTrustedAddrMatch(addr, trustedHostsFunc()) {
+						return privateMode.DialContext(ctx, network, addr)
 					}
 				}
 				return guarded.DialContext(ctx, network, addr)
@@ -382,6 +381,24 @@ func newGuardedClient(requireHTTPS bool, allowURL func(*url.URL) bool, guardAddr
 			return nil
 		},
 	}
+}
+
+// dynamicTrustedAddrMatch 动态名单的拨号地址判定：名单项是 host:port
+// 规范键（默认端口由集成侧按其基址 scheme 补好），拨号地址规范化成同
+// 键后完全一致比较——放行粒度是配置过的端口，主机名相同但端口不同不
+// 算数（同一内网主机上挂着的其他服务不会被连带放行）。
+func dynamicTrustedAddrMatch(addr string, hosts []string) bool {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	hostPort := net.JoinHostPort(strings.ToLower(host), port)
+	for _, h := range hosts {
+		if strings.ToLower(strings.TrimSpace(h)) == hostPort {
+			return true
+		}
+	}
+	return false
 }
 
 // normalizeTrustedPrivateHosts 配置的名单规整成小写主机名集合：去空白、

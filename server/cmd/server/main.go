@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -328,6 +329,8 @@ func main() {
 			// allow_private_network 的 Forgejo 集成主机随名单动态放行：自建
 			// 实例常在内网，API 已获准私网拨号，截图面不能把同一主机的附件
 			// 全拦成 ErrBlockedUpstreamAddress。名单外主机仍走 IP 校验。
+			// 名单项归一成 host:port——只放行配置过的端口，同主机其他端口
+			// 上的服务不被连带信任（私网口径守卫本身不约束端口）。
 			// 拨号路径每次都会调本函数，结果加短 TTL 缓存——List 每次拨号
 			// 都打 DB 会把媒体抓取的延迟与压力叠到数据库上；几秒内的配置
 			// 变更延迟生效可接受（放行收紧方向上的最坏情况只是多用几秒
@@ -353,7 +356,14 @@ func main() {
 				}
 				for _, raw := range []string{row.BaseURL, row.APIBaseURL} {
 					if u, perr := url.Parse(strings.TrimSpace(raw)); perr == nil && u.Hostname() != "" {
-						hosts = append(hosts, u.Hostname())
+						port := u.Port()
+						if port == "" {
+							port = "443"
+							if u.Scheme == "http" {
+								port = "80"
+							}
+						}
+						hosts = append(hosts, net.JoinHostPort(u.Hostname(), port))
 					}
 				}
 			}

@@ -45,6 +45,13 @@ func pngUpstream(t *testing.T) *httptest.Server {
 // 「主机名解析出回环地址」的路径，而不是 IP 字面量直连。
 func localhostURL(t *testing.T, srv *httptest.Server, path string) string {
 	t.Helper()
+	return fmt.Sprintf("http://%s%s", localhostHostPort(t, srv), path)
+}
+
+// localhostHostPort 上游的 localhost:port 键：动态名单项按 host:port
+// 匹配，测试名单要写这个形态才会命中。
+func localhostHostPort(t *testing.T, srv *httptest.Server) string {
+	t.Helper()
 	parsed, err := url.Parse(srv.URL)
 	if err != nil {
 		t.Fatalf("parse upstream url: %v", err)
@@ -53,7 +60,7 @@ func localhostURL(t *testing.T, srv *httptest.Server, path string) string {
 	if err != nil {
 		t.Fatalf("split upstream host: %v", err)
 	}
-	return fmt.Sprintf("http://localhost:%s%s", port, path)
+	return "localhost:" + port
 }
 
 // 名单内主机解析到内网地址可以下载：localhost 解析到回环，名单写大写的
@@ -116,7 +123,7 @@ func TestReviewMediaRedirectFromTrustedToUntrustedBlocked(t *testing.T) {
 func TestReviewMediaDynamicTrustedHostFunc(t *testing.T) {
 	upstream := pngUpstream(t)
 	cfg := trustedHostTestConfig(nil)
-	trusted := []string{"localhost"}
+	trusted := []string{localhostHostPort(t, upstream)}
 	cfg.trustedPrivateHostsFunc = func() []string { return trusted }
 	svc := newService(t.TempDir(), cfg)
 	if _, err := svc.FetchAndCache(context.Background(), localhostURL(t, upstream, "/ok.png")); !errors.Is(err, ErrBlockedUpstreamAddress) {
@@ -168,11 +175,35 @@ func TestReviewMediaDynamicTrustedRedirectStillGuarded(t *testing.T) {
 	targetURL = target.URL + "/ok.png"
 
 	cfg := trustedHostTestConfig(nil)
-	cfg.trustedPrivateHostsFunc = func() []string { return []string{"localhost"} }
+	cfg.trustedPrivateHostsFunc = func() []string { return []string{localhostHostPort(t, origin)} }
 	svc := newService(t.TempDir(), cfg)
 	_, err := svc.FetchAndCache(context.Background(), localhostURL(t, origin, "/start"))
 	if !errors.Is(err, ErrBlockedUpstreamAddress) {
 		t.Fatalf("err = %v, want ErrBlockedUpstreamAddress（动态名单内主机跳名单外仍应被拒）", err)
+	}
+}
+
+// 动态名单按 host:port 匹配：放行只到配置过的端口，同主机其他端口不
+// 连带信任（Codex R19：私网口径守卫放行 RFC1918，不限端口就会够到
+// 同主机的其他服务）。大小写不敏感；静态名单仍是 host-only 不受影响。
+func TestDynamicTrustedAddrMatch(t *testing.T) {
+	hosts := []string{"forge.example.com:443", " [::1]:8443 "}
+	for _, c := range []struct {
+		addr string
+		want bool
+	}{
+		{"forge.example.com:443", true},
+		{"Forge.Example.COM:443", true},
+		{"forge.example.com:8443", false}, // 同主机异端口不放行
+		{"forge.example.com:80", false},
+		{"other.example.com:443", false},
+		{"[::1]:8443", true},
+		{"::1:8443", false}, // 缺方括号 SplitHostPort 拆分失败
+		{"no-port", false},
+	} {
+		if got := dynamicTrustedAddrMatch(c.addr, hosts); got != c.want {
+			t.Fatalf("match(%q) = %v, want %v", c.addr, got, c.want)
+		}
 	}
 }
 

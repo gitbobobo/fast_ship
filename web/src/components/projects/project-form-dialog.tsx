@@ -207,11 +207,27 @@ export function ProjectFormDialog({
   const integrationSelectOptions = useMemo(
     () =>
       withMissingOption(
-        integrationList.map((option) => ({
-          value: option.id,
-          label: option.name,
-          itemLabel: `${option.name}（${option.base_url}）`,
-        })),
+        integrationList.map((option) => {
+          // 管理员起的名字里可能带半角括号，与内置名的全角混排；展示层统一
+          // 全角。地址只显主机（次要样式）——name（url） 两组括号连读太挤。
+          const displayName = option.name.replace(/\(([^)]*)\)/g, "（$1）");
+          let host = option.base_url;
+          try {
+            host = new URL(option.base_url).host;
+          } catch {
+            // 基址非 URL 时原样展示，管理侧保存时已校验过。
+          }
+          return {
+            value: option.id,
+            label: displayName,
+            itemLabel: (
+              <span className="flex items-baseline gap-2">
+                <span>{displayName}</span>
+                <span className="text-xs text-muted-foreground">{host}</span>
+              </span>
+            ),
+          };
+        }),
         codeIntegrationId,
         missingIntegrationLabel,
       ),
@@ -593,7 +609,9 @@ export function ProjectFormDialog({
 
             <div className="space-y-2">
               <Label htmlFor="project-code_repository_url">
-                代码仓库（可选，默认同公开仓库）
+                {selectedIntegration?.kind === "forgejo"
+                  ? "代码仓库（可选，留空则在该 Forgejo 集成上按公开仓库的 owner/repo 审查）"
+                  : "代码仓库（可选，默认同公开仓库）"}
               </Label>
               <Input
                 id="project-code_repository_url"
@@ -603,7 +621,7 @@ export function ProjectFormDialog({
               />
               <p className="text-xs text-muted-foreground">
                 {selectedIntegration?.kind === "forgejo"
-                  ? "PR 审查盯的仓库；webhook 与补漏轮询都走该 Forgejo 集成"
+                  ? "PR 审查在该 Forgejo 集成上进行：自动接收推送并定期补查遗漏"
                   : "PR 审查盯的仓库；留空则审查公开仓库"}
               </p>
               {showRepoChangeWarning && (
@@ -653,7 +671,7 @@ export function ProjectFormDialog({
               <T3BindingsSection ref={t3SectionRef} projectId={projectId} />
             )}
 
-            <div className="sticky bottom-0 -mx-4 -mb-4 mt-2 flex gap-3 border-t border-foreground/10 bg-popover/95 px-4 pt-3 pb-4 backdrop-blur-sm shadow-[0_-8px_16px_-8px_rgba(0,0,0,0.3)]">
+            <div className="sticky bottom-0 -mx-4 -mb-4 mt-2 flex items-center gap-3 border-t border-foreground/10 bg-popover px-4 py-3 shadow-[0_-8px_16px_-8px_rgba(0,0,0,0.3)]">
               <Button type="submit" disabled={isSubmitting}>
                 {isSubmitting
                   ? isEdit

@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 
@@ -28,6 +29,13 @@ const reviewForgejoPollTimeout = 60 * time.Second
 // 轮询）。返回的 PR 已由适配器过滤 fork head 与已删 fork。
 type openPRLister interface {
 	ListOpenPullRequests(ctx context.Context, repoFullName string) ([]forge.PullRequest, error)
+}
+
+// singlePRFetcher 单 PR 实时拉取：轮询快照与已受理 head 同刻异 SHA 时用来
+// 复核——列表快照可能在 webhook 受理前读到旧 head，平局歧义只能现拉分辨。
+// 与 openPRLister 同由 Forgejo 适配器实现。
+type singlePRFetcher interface {
+	GetPullRequest(ctx context.Context, repoFullName string, number int) (*forge.PullRequest, error)
 }
 
 // forgejoPollLoop 轮询循环：与调度循环共用同一个 cancel，tick 驱动，启动不
@@ -95,11 +103,12 @@ func (s *ReviewService) pollForgejoProject(settings *model.ProjectReviewSettings
 	if err != nil {
 		return s.disableReviewOnDeterministic(settings, err)
 	}
+	fetcher, _ := client.(singlePRFetcher)
 	for _, pr := range prs {
 		if pr.Draft || pr.HeadSHA == "" {
 			continue
 		}
-		if err := s.pollAcceptPR(ctx, settings, repo, &pr, now); err != nil {
+		if err := s.pollAcceptPR(ctx, fetcher, settings, repo, &pr, now); err != nil {
 			s.logger.Warn("Forgejo 轮询受理 PR 失败",
 				zap.String("project", settings.ProjectID), zap.Int("pr", pr.Number), zap.Error(err))
 			continue
@@ -114,7 +123,32 @@ func (s *ReviewService) pollForgejoProject(settings *model.ProjectReviewSettings
 // 去重都在受理事务内复核：事务外先读一遍只用来组装，竞态窗口（webhook 在
 // 读取与受理之间抢先）由 handleReviewTriggerTx 的「迟到 opened 忽略 +
 // runCount 去重」与事务内 current 重读关掉。
-func (s *ReviewService) pollAcceptPR(ctx context.Context, settings *model.ProjectReviewSettings, repo string, pr *forge.PullRequest, now time.Time) error {
+func (s *ReviewService) pollAcceptPR(ctx context.Context, fetcher singlePRFetcher, settings *model.ProjectReviewSettings, repo string, pr *forge.PullRequest, now time.Time) error {
+	err := s.pollAcceptSnapshotTx(settings, repo, pr, true, now)
+	if !errors.Is(err, errPollSnapshotTied) {
+		return err
+	}
+	// 同刻异 head：列表快照不可信，现拉实时 PR 分辨——实时 head 与总账
+	// 相同则无事可补，不同则是平台当前真 head，按正常受理路径进（不再
+	// 走同刻守卫）。拉不了的适配器丢快照保总账：真实时序里落后的是
+	// 快照，下次 tick 用更新的列表再判。
+	if fetcher == nil {
+		return nil
+	}
+	live, err := fetcher.GetPullRequest(ctx, repo, pr.Number)
+	if err != nil {
+		return err
+	}
+	if live == nil || live.Draft || live.HeadSHA == "" {
+		return nil
+	}
+	return s.pollAcceptSnapshotTx(settings, repo, live, false, now)
+}
+
+// pollAcceptSnapshotTx 单个快照的补漏受理事务：fromPoll 标记数据来源是
+// 列表快照（受理事务内对「同刻异 head」报 errPollSnapshotTied 由调用方
+// 复核），实时拉到的数据传 false 走与 webhook 相同的判定。
+func (s *ReviewService) pollAcceptSnapshotTx(settings *model.ProjectReviewSettings, repo string, pr *forge.PullRequest, fromPoll bool, now time.Time) error {
 	trigger := &reviewWebhookTrigger{
 		number:       pr.Number,
 		repoFullName: repo,
@@ -130,6 +164,7 @@ func (s *ReviewService) pollAcceptPR(ctx context.Context, settings *model.Projec
 		// 受理更新的 head，没带时间戳的旧 head 会绕过 seen 去重把总账退回
 		// 旧 SHA（新 SHA 反而因「seen 但非当前 head」被永久忽略）。
 		updatedAt: pr.UpdatedAt,
+		fromPoll:  fromPoll,
 	}
 	return s.db.Transaction(func(tx *gorm.DB) error {
 		// 事务内重读当前 head：与受理同一读快照，归类/跳过判定才可靠。

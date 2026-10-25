@@ -211,6 +211,7 @@ type pollStubClient struct {
 	forge.ReviewClient
 	byRepo    map[string][]forge.PullRequest
 	errByRepo map[string]error
+	live      *forge.PullRequest // 单拉复核返回的「实时」PR
 }
 
 func (c *pollStubClient) ListOpenPullRequests(_ context.Context, repo string) ([]forge.PullRequest, error) {
@@ -224,6 +225,9 @@ func (c *pollStubClient) ListOpenPullRequests(_ context.Context, repo string) ([
 func (c *pollStubClient) GetPullRequest(_ context.Context, repo string, number int) (*forge.PullRequest, error) {
 	if err, ok := c.errByRepo[repo]; ok {
 		return nil, err
+	}
+	if c.live != nil {
+		return c.live, nil
 	}
 	return &forge.PullRequest{RepoFullName: repo, Number: number, State: "open"}, nil
 }
@@ -894,5 +898,71 @@ func TestHandleForgejoWebhook_SameTimestampDifferentHead(t *testing.T) {
 	}
 	if debounce.HeadSHA != "sha-t2" {
 		t.Fatalf("debounce head after redelivery = %q, want sha-t2", debounce.HeadSHA)
+	}
+}
+
+// TestForgejoPoll_TiedSnapshotRevalidated 轮询快照与已受理 head 同刻异 SHA：
+// 快照可能先于 webhook 受理被捕获（opened 丢件、列表读到旧 head）——受理
+// 它会把总账回滚、取消新 head 的轮次并留下永久漏审；必须先现拉实时 PR。
+// 实时 head 与总账相同 → 快照是旧态，无事可补；实时又前进 → 受理新 head。
+func TestForgejoPoll_TiedSnapshotRevalidated(t *testing.T) {
+	svc := setupTestServices(t)
+	forgeID := createTestForgeIntegration(t, svc.db, "https://forge.example.com").ID
+	project, _ := seedForgejoReviewProject(t, svc, forgeID, "fj-tied", "acme/app", nil)
+	review := newReviewTestService(t, svc, nil, nil, nil)
+
+	// webhook 先受理 sha-b（payload updated_at 固定 2026-01-02T03:04:05Z）。
+	if err := review.HandleForgejoWebhook(context.Background(), forgeID, "pull_request", "d-b",
+		forgejoPullPayload("synchronized", "acme/app", 71, "sha-b", false)); err != nil {
+		t.Fatalf("webhook: %v", err)
+	}
+	ts := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC) // 与 payload 同刻
+	client := &pollStubClient{
+		byRepo: map[string][]forge.PullRequest{
+			// 列表快照还是旧 head sha-a（webhook 受理前读的），与 sha-b 同刻。
+			"acme/app": {{Number: 71, RepoFullName: "acme/app", HeadSHA: "sha-a", UpdatedAt: &ts}},
+		},
+		live: &forge.PullRequest{Number: 71, RepoFullName: "acme/app", HeadSHA: "sha-b", UpdatedAt: &ts, State: "open"},
+	}
+	review.clients = pollStubResolver{byIntegration: map[string]forge.ReviewClient{forgeID: client}}
+	review.pollForgejoOpenPRs(time.Now().UTC())
+
+	// 快照回滚不得发生：总账与防抖仍是 sha-b，sha-a 未登记 seen。
+	var ledger model.ReviewPullRequest
+	if err := svc.db.Where("project_id = ? AND pr_number = ?", project.ID, 71).First(&ledger).Error; err != nil {
+		t.Fatalf("ledger: %v", err)
+	}
+	if ledger.HeadSHA != "sha-b" {
+		t.Fatalf("ledger head = %q, want sha-b（旧快照不得回滚总账）", ledger.HeadSHA)
+	}
+	var debounce model.ReviewDebounce
+	if err := svc.db.Where("project_id = ? AND pr_number = ?", project.ID, 71).First(&debounce).Error; err != nil {
+		t.Fatalf("debounce: %v", err)
+	}
+	if debounce.HeadSHA != "sha-b" {
+		t.Fatalf("debounce head = %q, want sha-b", debounce.HeadSHA)
+	}
+	var n int64
+	svc.db.Model(&model.ReviewSeenSHA{}).Where("project_id = ? AND pr_number = ? AND head_sha = ?",
+		project.ID, 71, "sha-a").Count(&n)
+	if n != 0 {
+		t.Fatalf("旧快照 sha-a 不得登记 seen, rows = %d", n)
+	}
+
+	// 实时拉到的 head 又前进到 sha-c（快照依旧 sha-a 同刻）：按正常受理
+	// 路径进，C 成为新 head 并获得防抖行——平局复核后新 head 不漏审。
+	client.live = &forge.PullRequest{Number: 71, RepoFullName: "acme/app", HeadSHA: "sha-c", UpdatedAt: &ts, State: "open"}
+	review.pollForgejoOpenPRs(time.Now().UTC())
+	if err := svc.db.Where("project_id = ? AND pr_number = ?", project.ID, 71).First(&ledger).Error; err != nil {
+		t.Fatalf("ledger2: %v", err)
+	}
+	if ledger.HeadSHA != "sha-c" {
+		t.Fatalf("ledger head = %q, want sha-c", ledger.HeadSHA)
+	}
+	if err := svc.db.Where("project_id = ? AND pr_number = ?", project.ID, 71).First(&debounce).Error; err != nil {
+		t.Fatalf("debounce3: %v", err)
+	}
+	if debounce.HeadSHA != "sha-c" {
+		t.Fatalf("debounce head = %q, want sha-c", debounce.HeadSHA)
 	}
 }
