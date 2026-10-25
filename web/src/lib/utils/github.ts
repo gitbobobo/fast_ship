@@ -154,7 +154,8 @@ export function hostFromRepoInput(raw: string): string {
     if (defaultPort !== "" && host.toLowerCase().endsWith(defaultPort)) {
       host = host.slice(0, -defaultPort.length);
     }
-    return host.toLowerCase();
+    // DNS 根点尾缀与后端主机键同口径归一：forge.example. ≡ forge.example。
+    return host.toLowerCase().replace(/\.+$/, "");
   }
   // 裸形态与 ownerRepoFromInput 会剥的口径对齐：只有 github.com/ 前缀会被
   // 剥掉，故只有它算显式主机；两段式 my.org/repo 是含点 owner（剥掉只剩
@@ -166,7 +167,7 @@ export function hostFromRepoInput(raw: string): string {
   if (first.toLowerCase() === "github.com") return "github.com";
   const tailSegments = rest.slice(slash + 1).split("/").length;
   if (tailSegments >= 2 && (first.includes(".") || first.includes(":"))) {
-    return first.toLowerCase();
+    return first.toLowerCase().replace(/\.+$/, "");
   }
   return "";
 }

@@ -238,11 +238,13 @@ export function ProjectFormDialog({
     !!project?.code_repo_url &&
     (repoChanged || integrationChanged);
 
-  // 所选集成 base_url 的 origin 键（scheme+host，缺省端口由 URL 归一）。
+  // 所选集成 base_url 的 origin 键（scheme+host，缺省端口由 URL 归一，
+  // 尾点与后端主机键同口径剥除）。
   const integrationOriginKey = (): string => {
     if (!selectedIntegration) return "";
     try {
-      return new URL(selectedIntegration.base_url).origin;
+      const u = new URL(selectedIntegration.base_url);
+      return `${u.protocol}//${u.host.replace(/\.+$/, "")}`;
     } catch {
       return "";
     }
@@ -252,13 +254,20 @@ export function ProjectFormDialog({
   // 端口区分主机键（http→:80、https→:443），http/https 同主机是不同绑定。
   // 裸主机段无 scheme 时借集成的——合成地址反正用它。
   const inputOriginKey = (raw: string): string => {
-    const host = hostFromRepoInput(raw);
+    let host = hostFromRepoInput(raw);
     if (host === "") return "";
     const i = raw.trim().indexOf("://");
     const scheme =
       i === -1
         ? integrationOriginKey().split(":")[0] || "https"
         : raw.trim().slice(0, i).toLowerCase();
+    // 裸 host:port 无输入 scheme 可剥默认端口（hostFromRepoInput 只认输入
+    // 自带的 scheme），按推导出的 scheme 再剥一次，与后端 normalizeCode-
+    // RepoRef 同口径——forge.example.com:443 对 https 集成是同一主机键。
+    const defaultPort = scheme === "https" ? ":443" : scheme === "http" ? ":80" : "";
+    if (defaultPort !== "" && host.endsWith(defaultPort)) {
+      host = host.slice(0, -defaultPort.length);
+    }
     return `${scheme}://${host}`;
   };
 

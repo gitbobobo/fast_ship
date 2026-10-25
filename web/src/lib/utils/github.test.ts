@@ -258,6 +258,8 @@ describe("hostFromRepoInput", () => {
     // userinfo 不属于主机。
     expect(hostFromRepoInput("https://user:pass@forge-b.example.com/o/r")).toBe("forge-b.example.com");
     expect(hostFromRepoInput("github.com/acme/app")).toBe("github.com");
+    // DNS 根点尾缀与后端主机键同口径剥除。
+    expect(hostFromRepoInput("https://forge.example.com./o/r")).toBe("forge.example.com");
   });
   it("两段式裸输入不是主机（含点 owner），三段以上首段含点才当主机段", () => {
     // Forgejo 允许组织名含点：my.org/repo 是 owner/repo，不是主机。

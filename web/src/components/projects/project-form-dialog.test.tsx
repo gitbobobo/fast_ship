@@ -310,6 +310,50 @@ describe("ProjectFormDialog", () => {
     expect(updateMutateAsync).not.toHaveBeenCalled();
   });
 
+  it("主机带 DNS 根点尾缀：归一成同主机键，判未改动不报错", async () => {
+    const user = userEvent.setup();
+    renderDialog(
+      "edit",
+      makeProject({
+        code_integration_id: "forge-1",
+        code_repo_url: "https://forge.example.com/acme/api",
+      }),
+    );
+
+    const input = await screen.findByLabelText(/代码仓库（可选/);
+    await user.clear(input);
+    // forge.example.com. 与 forge.example.com 是同一主机键（后端 normalize-
+    // CodeRepoRef 剥尾点）——不能误报主机不一致，等价地址按未改动处理。
+    await user.type(input, "https://forge.example.com./acme/api");
+    await user.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => expect(updateMutateAsync).toHaveBeenCalled());
+    expect(updateMutateAsync.mock.calls[0][0]).not.toHaveProperty(
+      "code_repository_url",
+    );
+  });
+
+  it("裸 host:port 默认端口：不报主机不一致，退到格式错误", async () => {
+    const user = userEvent.setup();
+    renderDialog(
+      "edit",
+      makeProject({
+        code_integration_id: "forge-1",
+        code_repo_url: "https://forge.example.com/acme/api",
+      }),
+    );
+
+    const input = await screen.findByLabelText(/代码仓库（可选/);
+    await user.clear(input);
+    // forge.example.com:443 对 https 集成是同一主机键——主机比对放行后
+    // 三段式解析失败，报格式错误而非误报主机不一致。
+    await user.type(input, "forge.example.com:443/acme/api");
+    await user.click(screen.getByRole("button", { name: "保存" }));
+
+    await screen.findByText(/格式：owner\/repo/);
+    expect(updateMutateAsync).not.toHaveBeenCalled();
+  });
+
   it("下拉切换集成：github 换 forge 后按新集成合成 URL", async () => {
     const user = userEvent.setup();
     renderDialog(
