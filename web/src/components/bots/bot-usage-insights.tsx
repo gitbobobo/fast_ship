@@ -152,6 +152,7 @@ const X_LABEL_MIN_GAP_PX = 48;
  * 横轴标签按像素间距抽稀：本图的点按真实时间线性布局，时间分布不均时
  * 按数组下标抽稀会让多个标签挤进同一片像素。从最后一个点向左贪心（末点
  * 标签必保留，与 MetricChart 的口径一致），相邻已选标签保持 ≥ minGap；
+ * 首点标签也强制保留——最左侧的点不能没有日期参照。
  * 全部点同刻（xSpan=0）或单点时自然只剩 1 个标签。
  */
 export function selectXLabelIndexes(
@@ -161,7 +162,14 @@ export function selectXLabelIndexes(
   const indexes: number[] = [];
   let lastCx = Number.NaN;
   for (let i = cxs.length - 1; i >= 0; i--) {
-    if (indexes.length === 0 || Math.abs(lastCx - cxs[i]) >= minGap) {
+    // 首点强制入选，但与已选点几乎同位（同刻）时跳过——同位标签文字
+    // 相同，重画只是叠字。
+    const firstWorth = i === 0 && Math.abs(lastCx - cxs[0]) >= 8;
+    if (
+      firstWorth ||
+      indexes.length === 0 ||
+      Math.abs(lastCx - cxs[i]) >= minGap
+    ) {
       indexes.push(i);
       lastCx = cxs[i];
     }
@@ -291,7 +299,7 @@ export function ContextGrowthChart({
                 <circle
                   cx={c.cx}
                   cy={c.cy}
-                  r={4}
+                  r={3.5}
                   style={{
                     fill: c.estimated ? "none" : LINE_COLOR,
                     stroke: LINE_COLOR,
@@ -519,11 +527,11 @@ function CacheHitSection({ data }: { data: BotUsageInsights }) {
                 {day.date.slice(5)}
               </div>
               <div className="relative flex-1">
-                <div className="relative h-6 overflow-hidden rounded-full bg-muted/60">
+                <div className="relative h-6 overflow-hidden rounded-md bg-muted">
                   {/* 真零不画条：一段短灰条会被误读成「有少量命中率」。 */}
                   {day.rate != null && day.rate > 0 && (
                     <div
-                      className="absolute left-0 top-0 h-full rounded-full bg-primary/70 transition-colors duration-200 group-hover:bg-primary"
+                      className="absolute left-0 top-0 h-full rounded-md bg-primary/70 transition-colors duration-200 group-hover:bg-primary"
                       data-testid="usage-insights-cache-bar"
                       style={{ width: `${(day.rate * 100).toFixed(1)}%` }}
                     />
@@ -535,7 +543,7 @@ function CacheHitSection({ data }: { data: BotUsageInsights }) {
                   )}
                 </div>
               </div>
-              <div className="min-w-[2rem] shrink-0 pr-3 text-right text-xs font-semibold tabular-nums text-muted-foreground">
+              <div className="w-11 shrink-0 pr-3 text-right text-xs font-semibold tabular-nums text-muted-foreground">
                 {formatCacheHitRate(day.rate)}
               </div>
             </div>
@@ -603,8 +611,11 @@ function ToolsShareSection({
           <TableHeader>
             <TableRow>
               <TableHead>机器人</TableHead>
-              <TableHead>占比</TableHead>
-              <TableHead title="分子：工具定义估算 token（按工具结构 schema 字节）；分母：usage 完整请求的输入 token 合计">
+              <TableHead className="text-right">占比</TableHead>
+              <TableHead
+                className="text-right"
+                title="分子：工具定义估算 token（按工具结构 schema 字节）；分母：usage 完整请求的输入 token 合计"
+              >
                 明细
               </TableHead>
             </TableRow>
@@ -613,11 +624,11 @@ function ToolsShareSection({
             {bots.map((bot) => (
               <TableRow key={bot.bot_id} data-testid="usage-insights-tools-row">
                 <TableCell className="font-medium">{bot.name}</TableCell>
-                <TableCell className="tabular-nums">
+                <TableCell className="text-right tabular-nums">
                   {formatPercent(bot.tools.share)}
                 </TableCell>
                 <TableCell
-                  className="tabular-nums text-muted-foreground"
+                  className="text-right tabular-nums text-muted-foreground"
                   title={`工具定义 ≈${formatTokens(bot.tools.tools_tokens_estimate)} / 输入 ${formatTokens(bot.tools.prompt_tokens)}（按工具结构 schema 字节估算）`}
                 >
                   {bot.tools.share == null
@@ -702,8 +713,11 @@ function MaintenanceShareSection({
           <TableHeader>
             <TableRow>
               <TableHead>机器人</TableHead>
-              <TableHead>维护花费</TableHead>
-              <TableHead title="维护花费 / 该机器人总花费（总览三桶之和）；任一未计价时为空">
+              <TableHead className="text-right">维护花费</TableHead>
+              <TableHead
+                className="text-right"
+                title="维护花费 / 该机器人总花费（总览三桶之和）；任一未计价时为空"
+              >
                 占比
               </TableHead>
               <TableHead>用途拆分</TableHead>
@@ -716,10 +730,10 @@ function MaintenanceShareSection({
                 data-testid="usage-insights-maintenance-row"
               >
                 <TableCell className="font-medium">{bot.name}</TableCell>
-                <TableCell className="tabular-nums">
+                <TableCell className="text-right tabular-nums">
                   {formatUsageCost(bot.maintenance.cost)}
                 </TableCell>
-                <TableCell className="tabular-nums">
+                <TableCell className="text-right tabular-nums">
                   {formatPercent(bot.maintenance.share)}
                 </TableCell>
                 <TableCell className="text-muted-foreground">
@@ -791,11 +805,14 @@ function IdleSection({
             <TableRow>
               <TableHead>任务</TableHead>
               <TableHead>机器人</TableHead>
-              <TableHead title={`空转 / 评估分母：${IDLE_CRITERIA_NOTE}`}>
+              <TableHead
+                className="text-right"
+                title={`空转 / 评估分母：${IDLE_CRITERIA_NOTE}`}
+              >
                 空转/评估
               </TableHead>
-              <TableHead>空转率</TableHead>
-              <TableHead>浪费</TableHead>
+              <TableHead className="text-right">空转率</TableHead>
+              <TableHead className="text-right">浪费</TableHead>
               <TableHead className="text-right" title="条件一：静默哨兵（silent=true）">静默</TableHead>
               <TableHead
                 className="text-right"
@@ -809,7 +826,7 @@ function IdleSection({
               >
                 无写
               </TableHead>
-              <TableHead>缓存命中率</TableHead>
+              <TableHead className="text-right">缓存命中率</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -835,13 +852,13 @@ function IdleSection({
                     {task.bot_name}
                   </Link>
                 </TableCell>
-                <TableCell className="tabular-nums">
+                <TableCell className="text-right tabular-nums">
                   {task.idle_runs}/{task.evaluated_runs}
                 </TableCell>
-                <TableCell className="tabular-nums">
+                <TableCell className="text-right tabular-nums">
                   {formatPercent(task.idle_rate)}
                 </TableCell>
-                <TableCell className="tabular-nums">
+                <TableCell className="text-right tabular-nums">
                   {formatUsageCost(task.idle_cost)}
                 </TableCell>
                 <TableCell className="text-right tabular-nums">
@@ -853,7 +870,7 @@ function IdleSection({
                 <TableCell className="text-right tabular-nums">
                   {task.no_write_call_runs}
                 </TableCell>
-                <TableCell className="tabular-nums">
+                <TableCell className="text-right tabular-nums">
                   {formatCacheHitRate(task.cache_hit_rate)}
                 </TableCell>
               </TableRow>
@@ -945,9 +962,14 @@ function FailuresSection({
             <TableHeader>
               <TableRow>
                 <TableHead>机器人</TableHead>
-                <TableHead title="失败请求中已计价金额合计">请求浪费</TableHead>
+                <TableHead
+                  className="text-right"
+                  title="失败请求中已计价金额合计"
+                >
+                  请求浪费
+                </TableHead>
                 <TableHead className="text-right">失败运行</TableHead>
-                <TableHead>失败运行花费</TableHead>
+                <TableHead className="text-right">失败运行花费</TableHead>
                 <TableHead
                   className="text-right"
                   title="与同次运行（run）内更早请求指纹（request_hash）相同的请求行数"
@@ -963,13 +985,13 @@ function FailuresSection({
                   data-testid="usage-insights-failures-row"
                 >
                   <TableCell className="font-medium">{bot.name}</TableCell>
-                  <TableCell className="tabular-nums">
+                  <TableCell className="text-right tabular-nums">
                     {formatUsageCost(bot.failures.failed_requests_cost)}
                   </TableCell>
                   <TableCell className="text-right tabular-nums">
                     {bot.failures.failed_runs}
                   </TableCell>
-                  <TableCell className="tabular-nums">
+                  <TableCell className="text-right tabular-nums">
                     {formatUsageCost(bot.failures.failed_runs_cost)}
                   </TableCell>
                   <TableCell className="text-right tabular-nums">
@@ -986,7 +1008,7 @@ function FailuresSection({
                   <TableHead>机器人</TableHead>
                   <TableHead>错误码</TableHead>
                   <TableHead className="text-right">请求</TableHead>
-                  <TableHead>花费</TableHead>
+                  <TableHead className="text-right">花费</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -1004,7 +1026,7 @@ function FailuresSection({
                     <TableCell className="text-right tabular-nums">
                       {error.requests}
                     </TableCell>
-                    <TableCell className="tabular-nums">
+                    <TableCell className="text-right tabular-nums">
                       {formatUsageCost(error.cost)}
                     </TableCell>
                   </TableRow>
@@ -1049,13 +1071,20 @@ function ModelAlternativesSection({ bots }: { bots: BotUsageInsightsBot[] }) {
                 className="space-y-1 rounded-lg border px-3 py-2"
                 data-testid="usage-insights-model-group"
               >
-                <p className="text-xs">
-                  <span className="font-medium">{bot.name}</span>
-                  <span className="ml-2 font-mono">{group.model}</span>
-                  <span className="ml-2 text-muted-foreground">
-                    {group.catalog_id} · {group.requests} 次请求 · 当前实际{" "}
-                    {formatCostEstimate(group.actual_cost)}
+                {/* 组头两行：行1 机器人 + 当前模型（模型名不断词、放不下时
+                    省略号截断，title 补全名）；行2 目录与样本量。 */}
+                <p className="flex items-baseline gap-2 text-xs">
+                  <span className="shrink-0 font-medium">{bot.name}</span>
+                  <span
+                    className="min-w-0 truncate font-mono"
+                    title={group.model}
+                  >
+                    {group.model}
                   </span>
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  {group.catalog_id} · {group.requests} 次请求 · 当前实际{" "}
+                  {formatCostEstimate(group.actual_cost)}
                 </p>
                 <ul className="space-y-0.5">
                   {group.candidates.map((candidate) => (
@@ -1064,7 +1093,13 @@ function ModelAlternativesSection({ bots }: { bots: BotUsageInsightsBot[] }) {
                       className="flex flex-wrap items-baseline gap-x-3 text-xs"
                       data-testid="usage-insights-model-candidate"
                     >
-                      <span className="font-mono">{candidate.model}</span>
+                      {/* 等宽模型名不在连字符处断行；窄栏放不下时整词省略。 */}
+                      <span
+                        className="max-w-full truncate font-mono"
+                        title={candidate.model}
+                      >
+                        {candidate.model}
+                      </span>
                       <span className="whitespace-nowrap tabular-nums">
                         {formatCostEstimate(candidate.cost)}
                       </span>
