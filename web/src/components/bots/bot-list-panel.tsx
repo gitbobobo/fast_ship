@@ -1,5 +1,5 @@
 import { Link } from "react-router";
-import { Plus } from "lucide-react";
+import { ChartColumn, Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
@@ -42,21 +42,38 @@ export function BotListPanel({
           )}
         </div>
         <TooltipProvider delay={0}>
-          <Tooltip>
-            <TooltipTrigger
-              render={
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  aria-label="新建机器人"
-                  onClick={onCreate}
-                />
-              }
-            >
-              <Plus className="h-4 w-4" />
-            </TooltipTrigger>
-            <TooltipContent>新建机器人</TooltipContent>
-          </Tooltip>
+          <div className="flex items-center">
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    aria-label="花费总览"
+                    render={<Link to="/bots/usage" />}
+                  />
+                }
+              >
+                <ChartColumn className="h-4 w-4" />
+              </TooltipTrigger>
+              <TooltipContent>花费总览</TooltipContent>
+            </Tooltip>
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    aria-label="新建机器人"
+                    onClick={onCreate}
+                  />
+                }
+              >
+                <Plus className="h-4 w-4" />
+              </TooltipTrigger>
+              <TooltipContent>新建机器人</TooltipContent>
+            </Tooltip>
+          </div>
         </TooltipProvider>
       </div>
 

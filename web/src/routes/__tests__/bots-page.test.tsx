@@ -482,6 +482,7 @@ describe("BotDetailPage", () => {
         status: "running",
         usage_complete: true,
         total_tokens: 456,
+        display_cost_estimate: 0.0123,
         created_at: "2026-10-15T00:00:20Z",
       },
       backgroundCalls: [
@@ -504,7 +505,11 @@ describe("BotDetailPage", () => {
     // 主线停止与后台取消是两个入口。
     const runBar = await screen.findByTestId("bot-run-bar");
     expect(within(runBar).getByTestId("bot-run-status")).toHaveTextContent("运行中");
-    expect(within(runBar).getByText("456 tokens")).toBeInTheDocument();
+    // INT-162：token 与「本轮 ≈$x」成本同链到运行花费明细。
+    const usageLink = within(runBar).getByRole("link");
+    expect(usageLink).toHaveAttribute("href", "/bots/usage/runs/r1");
+    expect(usageLink).toHaveTextContent("456 tokens");
+    expect(usageLink).toHaveTextContent("本轮 ≈$0.0123");
 
     const background = await screen.findByTestId("bot-background-calls");
     expect(within(background).getByText("后台调用（1）")).toBeInTheDocument();

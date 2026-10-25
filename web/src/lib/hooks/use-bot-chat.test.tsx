@@ -8,6 +8,7 @@ import {
   foldStreamEvent,
   mergeCallSnapshots,
   mergeRunSnapshots,
+  pickActiveRun,
   pickRunError,
 } from "./use-bot-chat";
 import { botKeys, useBots } from "./use-bots";
@@ -545,9 +546,72 @@ describe("useBotChat", () => {
     await waitFor(() => expect(result.current.backgroundCalls).toHaveLength(1));
 
     emit("done", { run_id: "r1", payload: { status: "completed" } }, 30);
-    await waitFor(() => expect(result.current.activeRun).toBeNull());
+    // run 到终态：runActive 落 false，但运行栏仍挂最近一条（本轮成本）。
+    await waitFor(() => expect(result.current.runActive).toBe(false));
+    expect(result.current.activeRun?.id).toBe("r1");
+    expect(result.current.activeRun?.status).toBe("completed");
     // run 完成不隐藏后台调用状态。
     expect(result.current.backgroundCalls).toHaveLength(1);
+  });
+
+  it("run 到终态后运行栏继续展示最近一条，新 run 开始即切换", async () => {
+    // done 事件只带 status；终态 run 的花费字段由随后的快照重读补齐
+    // （mergeRunSnapshots 终态整行替换）。
+    api.getChatSnapshot
+      .mockResolvedValueOnce(snapshotWith({ runs: [activeRun] }))
+      .mockResolvedValue(
+        snapshotWith({
+          runs: [
+            {
+              ...activeRun,
+              status: "completed",
+              finished_at: "2026-10-15T00:05:00Z",
+              display_cost_estimate: 0.0123,
+            },
+          ],
+        }),
+      );
+    const { result } = hook();
+    await waitFor(() => expect(result.current.runActive).toBe(true));
+
+    emit("done", { run_id: "r1", payload: { status: "completed" } }, 30);
+    await waitFor(() => expect(result.current.runActive).toBe(false));
+    // 栏还在：终态 run 与其花费仍展示（「本轮 ≈$x」）。
+    expect(result.current.activeRun?.id).toBe("r1");
+    await waitFor(() =>
+      expect(result.current.activeRun?.display_cost_estimate).toBe(0.0123),
+    );
+
+    // 新 run 开始即换成本 run 的活跃态。
+    emit(
+      "delta",
+      {
+        kind: "run_started",
+        run_id: "r2",
+        payload: { created_at: "2026-10-15T00:10:00Z" },
+      },
+      31,
+    );
+    await waitFor(() => expect(result.current.activeRun?.id).toBe("r2"));
+    expect(result.current.runActive).toBe(true);
+  });
+
+  it("run done 后 usage 总览缓存按前缀失效（F11）", async () => {
+    const { client } = hook();
+    await waitFor(() => expect(stream.subscribe).toHaveBeenCalled());
+    client.setQueryData(botKeys.usage("A", "7d", ""), { pinned: true });
+    client.setQueryData(botKeys.usage("A", "7d", "b1"), { pinned: true });
+
+    emit("done", { run_id: "r1", payload: { status: "completed" } }, 10);
+
+    await waitFor(() =>
+      expect(
+        client.getQueryState(botKeys.usage("A", "7d", ""))?.isInvalidated,
+      ).toBe(true),
+    );
+    expect(
+      client.getQueryState(botKeys.usage("A", "7d", "b1"))?.isInvalidated,
+    ).toBe(true);
   });
 
   it("sends with an idempotency key and reuses it across retries", async () => {
@@ -918,9 +982,11 @@ describe("useBotChat", () => {
     await act(() => result.current.stopRun());
     await waitFor(() => expect(result.current.stopRequested).toBe(true));
 
-    // run 结束：activeRun 消失，软停止标记随 run id 失配自然失效。
+    // run 结束：活跃标记随终态落下，软停止标记随 runActive 失配自然失效。
     emit("done", { run_id: "r1", payload: { status: "completed" } }, 30);
-    await waitFor(() => expect(result.current.activeRun).toBeNull());
+    await waitFor(() => expect(result.current.runActive).toBe(false));
+    // 终态 run 仍展示在运行栏（本轮成本），但停止语义已不在。
+    expect(result.current.activeRun?.id).toBe("r1");
     expect(result.current.stopRequested).toBe(false);
 
     // 新 run 开始：不继承上一个 run 的软停止状态。
@@ -1747,5 +1813,63 @@ describe("pickRunError", () => {
     const laterOk = run({ id: "r-ok", status: "completed", created_at: undefined });
     // 后追加的缺时间戳成功 run 同样盖过前面的失败。
     expect(pickRunError([first, laterOk])).toBeNull();
+  });
+});
+
+describe("pickActiveRun", () => {
+  const run = (overrides: Partial<BotRun>): BotRun =>
+    ({
+      id: "r1",
+      bot_id: "b1",
+      trigger_source: "user_message",
+      status: "running",
+      stop_requested: false,
+      created_at: "2026-10-15T00:00:30Z",
+      ...overrides,
+    }) as BotRun;
+
+  it("无 run 返回 null；有活跃 run 取活跃那条", () => {
+    expect(pickActiveRun(undefined)).toBeNull();
+    expect(pickActiveRun([])).toBeNull();
+    expect(
+      pickActiveRun([
+        run({ id: "r-old", status: "completed", finished_at: "2026-10-15T00:01:00Z" }),
+        run({ id: "r-live", status: "running", created_at: "2026-10-15T00:10:00Z" }),
+      ])?.id,
+    ).toBe("r-live");
+  });
+
+  it("活跃 run 优先于时间上更新的终态 run", () => {
+    // 构造上不出现（至多一个未完结 run），但合并语义下防御成立：
+    // SSE 折叠次序不保证时仍把可停的那条顶到运行栏。
+    expect(
+      pickActiveRun([
+        run({ id: "r-live", status: "queued", created_at: "2026-10-15T00:00:30Z" }),
+        run({
+          id: "r-done",
+          status: "completed",
+          created_at: "2026-10-15T00:09:00Z",
+          finished_at: "2026-10-15T00:10:00Z",
+        }),
+      ])?.id,
+    ).toBe("r-live");
+  });
+
+  it("全为终态时取最新一条（运行栏继续展示本轮成本）", () => {
+    expect(
+      pickActiveRun([
+        run({
+          id: "r-1",
+          status: "completed",
+          finished_at: "2026-10-15T00:01:00Z",
+        }),
+        run({
+          id: "r-2",
+          status: "failed",
+          created_at: "2026-10-15T00:05:00Z",
+          finished_at: "2026-10-15T00:06:00Z",
+        }),
+      ])?.id,
+    ).toBe("r-2");
   });
 });

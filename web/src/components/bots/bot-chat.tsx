@@ -23,6 +23,14 @@ function loadErrorText(error: unknown) {
   return "主线加载失败，请稍后重试。";
 }
 
+/** 运行栏徽标的终态文案；表外状态兜底由调用方处理。 */
+const TERMINAL_RUN_BADGE: Record<string, string> = {
+  completed: "已完成",
+  failed: "已失败",
+  stopped: "已停止",
+  skipped: "已跳过",
+};
+
 /**
  * 机器人唯一主线：没有会话列表、没有新建会话。运行状态、流式回答、
  * 工具卡、确认卡与后台调用都在这一条时间线上；「停止主线」在运行栏，
@@ -97,13 +105,18 @@ export function BotChat({ botId }: { botId: string }) {
   const stopTitle = chat.stopRequested
     ? "立即中断当前模型请求"
     : "向机器人发送一条「停止」消息，由它结合上下文决定是否结束运行";
-  const runBadge = chat.stopRequested
-    ? "停止中"
-    : chat.activeRun?.status === "queued"
-      ? "排队中"
-      : "运行中";
+  // 运行栏在 run 终态后继续展示最近一条（INT-162）：徽标落终态文案，
+  // 运行中状态、进度与停止按钮只对未终态 run 渲染。
+  const runBadge = chat.runActive
+    ? chat.stopRequested
+      ? "停止中"
+      : chat.activeRun?.status === "queued"
+        ? "排队中"
+        : "运行中"
+    : TERMINAL_RUN_BADGE[chat.activeRun?.status ?? ""] ?? "已结束";
   // 进度只属于它自己的 run：旧 run 的事件/快照不得显示在当前 run 的运行栏。
   const activeProgress =
+    chat.runActive &&
     chat.maintenanceProgress &&
     chat.activeRun &&
     chat.maintenanceProgress.runId === chat.activeRun.id
@@ -140,90 +153,108 @@ export function BotChat({ botId }: { botId: string }) {
           </div>
         )}
 
-        {chat.runActive && (
+        {/* 运行栏（INT-162）：run 到终态后仍展示最近一条的「本轮」成本与
+            明细链接，直到新 run 开始或离开页面；未终态时才可停止。 */}
+        {chat.activeRun != null && (
           <div
             data-testid="bot-run-bar"
             className="flex items-center gap-2 rounded-lg bg-muted/50 px-3 py-2 text-sm"
           >
-            <Badge variant="secondary" data-testid="bot-run-status">
+            <Badge
+              variant="secondary"
+              data-testid="bot-run-status"
+              // 窄栏放不下完整提示：悬浮「运行中」说明安全点语义，不内联截断长句。
+              title={
+                chat.runActive && !chat.stopRequested && !activeProgress
+                  ? "新消息将在安全点交给机器人"
+                  : undefined
+              }
+            >
               {runBadge}
             </Badge>
-            {chat.stopRequested ? (
-              // 说明「再点会发生什么」：强制停止会丢弃未完成的回复，不能只靠
-              // 文字变化表达升级（视觉审查：两个状态样式一致，用户看不出）。
-              <span className="text-xs text-muted-foreground">
-                已请求停止；再点「强制停止」将立即中断并丢弃未完成的回复
-              </span>
-            ) : activeProgress ? (
-              // 压缩阶段/失败原因（INT-115）：phase=failed 用醒目但非报错的
-              // 样式——压缩会继续在安全点重试或最终给出明确失败，不是致命错误。
-              <span
-                data-testid="bot-maintenance-progress"
-                className={cn(
-                  "text-xs",
-                  activeProgress.phase === "failed"
-                    ? "font-medium text-amber-600 dark:text-amber-400"
-                    : "text-muted-foreground",
-                )}
-              >
-                {activeProgress.message ||
-                  (activeProgress.phase === "failed"
-                    ? "上下文压缩遇到问题"
-                    : "正在整理上下文…")}
-              </span>
-            ) : (
-              <span className="text-xs text-muted-foreground">
-                新消息将在安全点交给机器人
-              </span>
-            )}
+            {chat.runActive &&
+              (chat.stopRequested ? (
+                // 说明「再点会发生什么」：强制停止会丢弃未完成的回复，不能只靠
+                // 文字变化表达升级（视觉审查：两个状态样式一致，用户看不出）。
+                <span className="min-w-0 truncate text-xs text-muted-foreground">
+                  已请求停止；再点「强制停止」将立即中断并丢弃未完成的回复
+                </span>
+              ) : (
+                activeProgress && (
+                  // 压缩阶段/失败原因（INT-115）：phase=failed 用醒目但非报错的
+                  // 样式——压缩会继续在安全点重试或最终给出明确失败，不是致命错误。
+                  <span
+                    data-testid="bot-maintenance-progress"
+                    className={cn(
+                      "min-w-0 truncate text-xs",
+                      activeProgress.phase === "failed"
+                        ? "font-medium text-amber-600 dark:text-amber-400"
+                        : "text-muted-foreground",
+                    )}
+                  >
+                    {activeProgress.message ||
+                      (activeProgress.phase === "failed"
+                        ? "上下文压缩遇到问题"
+                        : "正在整理上下文…")}
+                  </span>
+                )
+              ))}
             {(() => {
               const r = chat.activeRun;
               if (r == null) return null;
-              // 成本与 token 各自独立成段：全部请求为已计价失败的 run 没有
-              // usage_complete 也照常显示「本次 ≈$x」（与 schedule 运行列表
-              // 同口径，INT-139 云端复审）。
+              // 成本用 display_cost_estimate（自身 + 关联维护已计价，INT-162）：
+              // 全部请求为已计价失败的 run 没有 usage_complete 也照常显示；
+              // 可空字段是「未计价」显示「—」，不当 0。点击进运行花费明细。
               const tokens =
                 r.usage_complete && r.total_tokens != null
                   ? `${r.total_tokens} tokens`
                   : null;
               const cost =
-                r.cost_estimate != null
-                  ? `本次 ≈${formatCostEstimate(r.cost_estimate)}`
-                  : null;
-              if (tokens == null && cost == null) return null;
+                r.display_cost_estimate != null
+                  ? `本轮 ≈${formatCostEstimate(r.display_cost_estimate)}`
+                  : "本轮 —";
               return (
-                <span
-                  className="ml-auto text-xs text-muted-foreground"
-                  title={
-                    cost != null
-                      ? "成本按内置目录单价估算，仅供参考；无价模型不显示"
-                      : undefined
-                  }
-                >
-                  {[tokens, cost].filter(Boolean).join(" · ")}
-                </span>
+                // 成本链接与停止按钮同属右端：ml-auto 只在容器上，两个元素
+                // 各占一半剩余空间是错的（视觉审查）。
+                <div className="ml-auto flex items-center gap-2">
+                  <Link
+                    to={`/bots/usage/runs/${r.id}`}
+                    className="whitespace-nowrap text-xs text-muted-foreground hover:text-foreground hover:underline"
+                    title={
+                      r.display_cost_estimate != null
+                        ? "成本按内置目录单价估算，仅供参考；无价模型不显示。点击查看本运行花费明细"
+                        : "本运行未计价，点击查看明细"
+                    }
+                  >
+                    {tokens == null ? cost : `${tokens} · ${cost}`}
+                  </Link>
+                  {chat.runActive && (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="destructive"
+                      // 强制停止比普通停止更具破坏性（丢弃草稿、立即终止）：升级后
+                      // 用实心红底白字拉开层级，点击区域也放大到可点范围。
+                      className={cn(
+                        "h-8 px-3",
+                        chat.stopRequested &&
+                          "bg-destructive text-white hover:bg-destructive/90 focus-visible:ring-destructive/30",
+                      )}
+                      disabled={chat.stopping}
+                      aria-label={stopLabel}
+                      title={stopTitle}
+                      onClick={() => void chat.stopRun()}
+                    >
+                      {chat.stopping && (
+                        <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+                      )}
+                      <Square className="mr-1 h-3.5 w-3.5 fill-current" />
+                      {stopLabel}
+                    </Button>
+                  )}
+                </div>
               );
             })()}
-            <Button
-              type="button"
-              size="sm"
-              variant="destructive"
-              // 强制停止比普通停止更具破坏性（丢弃草稿、立即终止）：升级后
-              // 用实心红底白字拉开层级，点击区域也放大到可点范围。
-              className={cn(
-                "ml-auto h-8 px-3",
-                chat.stopRequested &&
-                  "bg-destructive text-white hover:bg-destructive/90 focus-visible:ring-destructive/30",
-              )}
-              disabled={chat.stopping}
-              aria-label={stopLabel}
-              title={stopTitle}
-              onClick={() => void chat.stopRun()}
-            >
-              {chat.stopping && <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />}
-              <Square className="mr-1 h-3.5 w-3.5 fill-current" />
-              {stopLabel}
-            </Button>
           </div>
         )}
 
