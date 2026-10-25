@@ -171,10 +171,12 @@ func TestGitHubReviewClientPassesZeroInstallationID(t *testing.T) {
 func TestGitHubReviewClientConvertsPullRequest(t *testing.T) {
 	mergedAt := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	closedAt := mergedAt.Add(time.Hour)
+	updatedAt := closedAt.Add(time.Hour)
 	api := &recordingAPI{pr: &githubapi.PullRequest{
 		RepoFullName: "base/repo", Number: 9, Title: "t", Body: "b", HTMLURL: "u",
 		State: "open", Draft: true, Merged: true, MergedAt: &mergedAt, ClosedAt: &closedAt,
 		HeadSHA: "sha", HeadRef: "feature", BaseRef: "main", AuthorLogin: "alice",
+		UpdatedAt: &updatedAt,
 	}}
 	pr, err := NewGitHubReviewClient(api, 1).GetPullRequest(context.Background(), "o/r", 9)
 	if err != nil {
@@ -184,6 +186,7 @@ func TestGitHubReviewClientConvertsPullRequest(t *testing.T) {
 		RepoFullName: "base/repo", Number: 9, Title: "t", Body: "b", HTMLURL: "u",
 		State: "open", Draft: true, Merged: true, MergedAt: &mergedAt, ClosedAt: &closedAt,
 		HeadSHA: "sha", HeadRef: "feature", BaseRef: "main", AuthorLogin: "alice",
+		UpdatedAt: &updatedAt,
 	}
 	if *pr != want {
 		t.Fatalf("pr = %+v, want %+v", *pr, want)

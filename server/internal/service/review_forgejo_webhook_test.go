@@ -1022,6 +1022,44 @@ func TestReviewTrigger_TiedBaseBindsObservedHead(t *testing.T) {
 	}
 }
 
+// TestForgejoPoll_TiedLiveClosedDropped 轮询复核的 live PR 在快照与实拉之间
+// 被关闭 → 与 webhook 复核同口径丢弃：已关 PR 不开轮、不回滚总账。
+func TestForgejoPoll_TiedLiveClosedDropped(t *testing.T) {
+	svc := setupTestServices(t)
+	forgeID := createTestForgeIntegration(t, svc.db, "https://forge.example.com").ID
+	project, _ := seedForgejoReviewProject(t, svc, forgeID, "fj-tiedcl", "acme/app", nil)
+	review := newReviewTestService(t, svc, nil, nil, nil)
+
+	if err := review.HandleForgejoWebhook(context.Background(), forgeID, "pull_request", "d-b",
+		forgejoPullPayload("synchronized", "acme/app", 74, "sha-b", false)); err != nil {
+		t.Fatalf("webhook: %v", err)
+	}
+	ts := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC) // 与 payload 同刻
+	client := &pollStubClient{
+		byRepo: map[string][]forge.PullRequest{
+			"acme/app": {{Number: 74, RepoFullName: "acme/app", HeadSHA: "sha-a", UpdatedAt: &ts}},
+		},
+		// 实拉时 PR 已关：同刻快照虽是歧义，closed 是确定态——丢弃。
+		live: &forge.PullRequest{Number: 74, RepoFullName: "acme/app", HeadSHA: "sha-c", UpdatedAt: &ts, State: "closed"},
+	}
+	review.clients = pollStubResolver{byIntegration: map[string]forge.ReviewClient{forgeID: client}}
+	review.pollForgejoOpenPRs(time.Now().UTC())
+
+	var ledger model.ReviewPullRequest
+	if err := svc.db.Where("project_id = ? AND pr_number = ?", project.ID, 74).First(&ledger).Error; err != nil {
+		t.Fatalf("ledger: %v", err)
+	}
+	if ledger.HeadSHA != "sha-b" {
+		t.Fatalf("ledger head = %q, want sha-b（已关 PR 的 live 不得受理）", ledger.HeadSHA)
+	}
+	var n int64
+	svc.db.Model(&model.ReviewSeenSHA{}).Where("project_id = ? AND pr_number = ? AND head_sha IN ?",
+		project.ID, 74, []string{"sha-a", "sha-c"}).Count(&n)
+	if n != 0 {
+		t.Fatalf("已关 PR 的 head 不得登记 seen, rows = %d", n)
+	}
+}
+
 // TestForgejoPoll_TiedSnapshotRevalidated 轮询快照与已受理 head 同刻异 SHA：
 // 快照可能先于 webhook 受理被捕获（opened 丢件、列表读到旧 head）——受理
 // 它会把总账回滚、取消新 head 的轮次并留下永久漏审；必须先现拉实时 PR。
