@@ -138,7 +138,7 @@ func (s *ProjectService) Create(userID string, req *CreateProjectRequest) (*Proj
 		CodeGitHubTokenID:      codeTokenID,
 	}
 
-	normalizeCodeRepo(project)
+	s.normalizeCodeRepo(project)
 
 	if err := s.projectRepo.Create(project); err != nil {
 		if errors.Is(err, repository.ErrGitHubTokenMissing) {
@@ -316,7 +316,7 @@ func (s *ProjectService) Update(id, userID string, req *UpdateProjectRequest) (*
 
 	// 归一收尾：公开与代码仓库字段都已应用完（含请求不带 code key、只改
 	// 公开仓库撞上存量 code 仓库的情形），同一规则统一判一次。
-	normalizeCodeRepo(project)
+	s.normalizeCodeRepo(project)
 
 	// Token 引用三态：key 缺省保留、显式空清空、非空替换（须属于当前用户）。
 	if req.PublicGithubTokenId.Set {
@@ -470,8 +470,18 @@ func (s *ProjectService) GetBranches(ctx context.Context, id, userID string) ([]
 // （GitHub）代码仓生效——forgejo 代码仓与 github 公开仓的 owner/repo 相同也
 // 不是同一仓库，归一会丢掉 forgejo 绑定。必须在应用完全部仓库字段之后调用，
 // Create/Update 共用这一条规则，写侧不另设第二处归一判断。
-func normalizeCodeRepo(p *model.Project) {
+//
+// 吞并还要求主机等价：code 字段不记主机（恒归本部署 GitHub），公开仓
+// github_host='github.com' 表示公共实例——GHE 部署下两边同 owner/repo
+// 是不同主机的不同仓库，吞并会让 code_repo_url 回落渲染成公共实例、
+// 审查目标静默改指。本部署实例本身就是 github.com（非 GHE）时两边同指
+// 公共实例，吞并仍成立。
+func (s *ProjectService) normalizeCodeRepo(p *model.Project) {
 	if p.CodeIntegrationID != "" {
+		return
+	}
+	if p.GithubHost == repoHostGitHub &&
+		forges.HostKey(s.ghWebBase) != repoHostKey(repoHostGitHub) {
 		return
 	}
 	if p.CodeGithubOwner != "" && strings.EqualFold(

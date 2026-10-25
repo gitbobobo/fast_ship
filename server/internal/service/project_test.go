@@ -496,6 +496,99 @@ func TestCodeRepoUrlGHEExplicitPublicGitHub(t *testing.T) {
 	}
 }
 
+// GHE 部署下公开仓显式 github.com、代码仓写本部署主机（裸写或 GHE 地址）：
+// 两边同 owner/repo 也是不同实例，normalizeCodeRepo 不得吞并 code 字段——
+// 吞并会让 code_repo_url 回落渲染到公共 github.com 同名仓（R38 P1 回归）。
+func TestNormalizeCodeRepoGHECrossHost(t *testing.T) {
+	svc := setupTestServices(t)
+	svc.cfg.GitHubApp.APIBaseURL = "https://ghe.corp.example/api/v3"
+	ps := newTestProjectService(svc)
+	user := createTestUser(t, svc.db, "ghe-cross")
+
+	loadCode := func(id string) model.Project {
+		var stored model.Project
+		if err := svc.db.First(&stored, "id = ?", id).Error; err != nil {
+			t.Fatalf("reload %s: %v", id, err)
+		}
+		return stored
+	}
+
+	// Create：公开仓显式 github.com + 代码仓裸写同字面（=本部署 GHE）。
+	proj, err := ps.Create(user.ID, &CreateProjectRequest{
+		Name:              "cross-host",
+		RepositoryUrl:     api.Ptr("https://github.com/o/r"),
+		CodeRepositoryUrl: api.Ptr("o/r"),
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	stored := loadCode(proj.Id)
+	if stored.CodeGithubOwner != "o" || stored.CodeGithubRepo != "r" {
+		t.Fatalf("code fields collapsed: %q/%q", stored.CodeGithubOwner, stored.CodeGithubRepo)
+	}
+	got, _ := ps.codeRepoUrl(&stored, nil)
+	if got == nil || *got != "https://ghe.corp.example/o/r" {
+		t.Fatalf("code_repo_url = %v, want ghe host", got)
+	}
+
+	// Update：只把公开仓改成显式 github.com/o/r，存量 GHE code o/r 不吞并。
+	proj2, err := ps.Create(user.ID, &CreateProjectRequest{
+		Name:              "cross-host-2",
+		RepositoryUrl:     api.Ptr("https://ghe.corp.example/a/b"),
+		CodeRepositoryUrl: api.Ptr("o/r"),
+	})
+	if err != nil {
+		t.Fatalf("create2: %v", err)
+	}
+	if _, err := ps.Update(proj2.Id, user.ID, &UpdateProjectRequest{
+		RepositoryUrl: api.Ptr("https://github.com/o/r"),
+	}); err != nil {
+		t.Fatalf("update public only: %v", err)
+	}
+	stored = loadCode(proj2.Id)
+	if stored.CodeGithubOwner != "o" || stored.CodeGithubRepo != "r" {
+		t.Fatalf("update collapsed code fields: %q/%q", stored.CodeGithubOwner, stored.CodeGithubRepo)
+	}
+
+	// 同主机仍吞并：公开仓裸写（=本部署）+ 代码仓同字面 → code 字段清空。
+	proj3, err := ps.Create(user.ID, &CreateProjectRequest{
+		Name:              "same-host",
+		RepositoryUrl:     api.Ptr("o/r"),
+		CodeRepositoryUrl: api.Ptr("https://ghe.corp.example/o/r"),
+	})
+	if err != nil {
+		t.Fatalf("create3: %v", err)
+	}
+	stored = loadCode(proj3.Id)
+	if stored.CodeGithubOwner != "" || stored.CodeGithubRepo != "" {
+		t.Fatalf("same-host code fields = %q/%q, want normalized empty", stored.CodeGithubOwner, stored.CodeGithubRepo)
+	}
+}
+
+// 非 GHE 部署（实例即 github.com）：公开仓显式 github.com + 代码仓裸写同
+// 字面，两边都指公共实例，吞并仍成立。
+func TestNormalizeCodeRepoPublicGitHubCollapse(t *testing.T) {
+	svc := setupTestServices(t)
+	ps := newTestProjectService(svc)
+	user := createTestUser(t, svc.db, "gh-collapse")
+
+	proj, err := ps.Create(user.ID, &CreateProjectRequest{
+		Name:              "public-collapse",
+		RepositoryUrl:     api.Ptr("https://github.com/o/r"),
+		CodeRepositoryUrl: api.Ptr("o/r"),
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	var stored model.Project
+	if err := svc.db.First(&stored, "id = ?", proj.Id).Error; err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if stored.CodeGithubOwner != "" || stored.CodeGithubRepo != "" {
+		t.Fatalf("code fields = %q/%q, want normalized empty", stored.CodeGithubOwner, stored.CodeGithubRepo)
+	}
+}
+
 func newTestProjectService(svc *testServices) *ProjectService {
 	return NewProjectService(svc.projectRepo, svc.versionRepo, svc.syncStateRepo, svc.tokenRepo, svc.storage, svc.cfg, zap.NewNop(),
 		repository.NewForgeIntegrationRepository(svc.db))
