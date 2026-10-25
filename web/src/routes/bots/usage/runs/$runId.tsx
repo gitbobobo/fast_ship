@@ -268,8 +268,9 @@ function RunSummary({
 /**
  * 输入上下文增长（INT-163）：x=请求 ordinal 原值（agent 侧 0 基序号，
  * 与请求列表的 #n 标签一致），y=输入 token。
- * 值取 prompt_tokens ?? input_tokens_estimate：usage 未收齐（prompt_tokens
- * 为 null）的请求只能给估算值，图上以空心点标注并在图注说明。
+ * 实测值只在 usage_complete 时取 prompt_tokens；usage 未收齐或内部
+ * 不自洽（如缓存数大于输入数）的请求改取 input_tokens_estimate 并画
+ * 空心点——实测计数不可信时画实线会让读者误读上下文突变。
  */
 function RunContextGrowth({
   requests,
@@ -282,15 +283,27 @@ function RunContextGrowth({
     () =>
       requests
         .filter(
-          // 与服务端口径一致：usage 未收齐且无估算值的请求不产点，
-          // 避免把「没有数据」画成真实的 0 输入。
+          // usage 不可信且无估算值的请求不产点，避免把「没有数据」画
+          // 成真实的 0 输入。
           (request) =>
-            request.prompt_tokens != null ||
+            (request.usage_complete && request.prompt_tokens != null) ||
             request.input_tokens_estimate > 0,
         )
         .map((request) => {
-          const tokens = request.prompt_tokens ?? request.input_tokens_estimate;
-          const estimated = request.prompt_tokens == null;
+          // 请求级 usage_complete 之外再验内部一致性：缓存数大于输入数
+          // 的实测明显不自洽，改取估算值画空心点。
+          const inconsistent =
+            request.prompt_tokens != null &&
+            request.cached_tokens != null &&
+            request.cached_tokens > request.prompt_tokens;
+          const actual =
+            request.usage_complete &&
+            request.prompt_tokens != null &&
+            !inconsistent;
+          const tokens = actual
+            ? request.prompt_tokens!
+            : request.input_tokens_estimate;
+          const estimated = !actual;
           return {
             x: request.ordinal,
             y: tokens,

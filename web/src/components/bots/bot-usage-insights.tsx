@@ -201,6 +201,7 @@ export function ContextGrowthChart({
   emptyMessage,
   chartTitle,
   titleId,
+  xDomain,
 }: {
   points: ContextGrowthPoint[];
   formatXLabel: (x: number) => string;
@@ -209,6 +210,11 @@ export function ContextGrowthChart({
   chartTitle: string;
   /** 标题元素 id；同页多张图时须唯一。 */
   titleId: string;
+  /**
+   * 共享横轴域 [minX, maxX]：同排多张图上下对照时，同一日期落在同一
+   * 横向位置。缺省用本图数据域。
+   */
+  xDomain?: [number, number];
 }) {
   const svgRef = useRef<SVGSVGElement>(null);
   const { boxRef, chartWidth } = useChartWidth();
@@ -223,8 +229,11 @@ export function ContextGrowthChart({
     const baselineY = GROWTH_HEIGHT - pad.bottom;
     const plotHeight = baselineY - pad.top;
     const xs = points.map((p) => p.x);
-    const minX = Math.min(...xs);
-    const xSpan = Math.max(Math.max(...xs) - minX, 0);
+    const minX = xDomain ? xDomain[0] : Math.min(...xs);
+    const xSpan = Math.max(
+      (xDomain ? xDomain[1] : Math.max(...xs)) - minX,
+      0,
+    );
     // 点半径留边：首尾的空心圆不压坐标轴，也不被容器裁剪。
     const usable = Math.max(plotWidth - 16, 1);
     const getX = (x: number) =>
@@ -245,7 +254,7 @@ export function ContextGrowthChart({
       coords,
       labelIndexes: selectXLabelIndexes(coords.map((c) => c.cx)),
     };
-  }, [points, chartWidth]);
+  }, [points, chartWidth, xDomain]);
 
   return (
     <div className="relative">
@@ -400,7 +409,7 @@ function Section({
   return (
     <div className="space-y-1.5" data-testid={testId}>
       <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
-        <h4 className="text-xs font-medium text-muted-foreground">{title}</h4>
+        <h4 className="text-sm font-semibold">{title}</h4>
         {note && <p className="text-xs text-muted-foreground/70">{note}</p>}
       </div>
       {children}
@@ -437,6 +446,16 @@ function ContextGrowthSection({
   timezone: string;
 }) {
   const series = bots.filter((bot) => bot.context_growth.length > 0);
+  // 多张小图上下对照：横轴统一为全体点的起止域，同一日期在各图落
+  // 在同一横向位置；纵轴各自独立，机器人名旁注明峰值避免误读量级。
+  const xDomain = useMemo<[number, number] | undefined>(() => {
+    const xs = series.flatMap((bot) =>
+      bot.context_growth.map((point) => Date.parse(point.at)),
+    );
+    return xs.length
+      ? [Math.min(...xs), Math.max(...xs)]
+      : undefined;
+  }, [series]);
   // 点按真实时间布局，但日期归属要与同一面板的按天缓存柱一致：
   // 横轴与点悬浮都用服务端切日时区格式化，不用浏览器时区。
   const formatAxisDay = useMemo(
@@ -477,8 +496,17 @@ function ContextGrowthSection({
                 {bot.context_growth_truncated && (
                   <span className="text-muted-foreground">仅最近 200 次</span>
                 )}
+                <span className="text-muted-foreground">
+                  峰值{" "}
+                  {formatTokens(
+                    Math.max(
+                      ...bot.context_growth.map((p) => p.input_tokens),
+                    ),
+                  )}
+                </span>
               </p>
               <ContextGrowthChart
+                xDomain={xDomain}
                 points={bot.context_growth.map((point) => ({
                   x: Date.parse(point.at),
                   y: point.input_tokens,
@@ -533,7 +561,15 @@ function CacheHitSection({ data }: { data: BotUsageInsights }) {
                 {day.date.slice(5)}
               </div>
               <div className="relative flex-1">
-                <div className="relative h-6 overflow-hidden rounded-md bg-muted">
+                <div
+                  className={cn(
+                    "relative h-6 overflow-hidden rounded-md",
+                    day.rate == null
+                      ? // 缺数据行画虚线空槽：与 0% 的实色空轨道形态分开。
+                        "border border-dashed border-muted-foreground/40"
+                      : "bg-muted",
+                  )}
+                >
                   {/* 真零不画条：一段短灰条会被误读成「有少量命中率」。 */}
                   {day.rate != null && day.rate > 0 && (
                     <div
@@ -599,8 +635,15 @@ function ToolsShareSection({
                   {bot.name}
                 </dt>
                 <dd className="whitespace-nowrap tabular-nums">
-                  {/* 与宽表同口径：未计价只显「—」，不印 ≈0 / 0 的假分子分母。 */}
-                  {bot.tools.share == null ? "—" : formatPercent(bot.tools.share)}
+                  {/* 与宽表同口径：无完整用量不印 ≈0 / 0 的假分子分母；
+                      embedded 用文字空态代替裸「—」，各分区写法统一。 */}
+                  {bot.tools.share == null ? (
+                    <span className="text-xs font-normal text-muted-foreground">
+                      无完整数据
+                    </span>
+                  ) : (
+                    formatPercent(bot.tools.share)
+                  )}
                 </dd>
               </div>
               {bot.tools.share != null && (
@@ -693,7 +736,13 @@ function MaintenanceShareSection({
                   {bot.name}
                 </dt>
                 <dd className="whitespace-nowrap tabular-nums">
-                  {formatUsageCost(bot.maintenance.cost)}
+                  {bot.maintenance.cost == null ? (
+                    <span className="text-xs font-normal text-muted-foreground">
+                      无维护记录
+                    </span>
+                  ) : (
+                    formatUsageCost(bot.maintenance.cost)
+                  )}
                 </dd>
               </div>
               {(bot.maintenance.share != null ||
@@ -824,13 +873,13 @@ function IdleSection({
                 className="text-right"
                 title="条件二：整次运行没有任何工具调用行"
               >
-                无工具
+                无工具调用
               </TableHead>
               <TableHead
                 className="text-right"
                 title="条件三：没有任何写操作调用（只读之外的动作）"
               >
-                无写
+                无写操作
               </TableHead>
               <TableHead className="text-right">缓存命中率</TableHead>
             </TableRow>
@@ -941,13 +990,22 @@ function FailuresSection({
                   className="whitespace-nowrap tabular-nums"
                   title="请求浪费：失败请求中已计价金额合计"
                 >
-                  {formatUsageCost(bot.failures.failed_requests_cost)}
+                  {bot.failures.failed_requests_cost == null &&
+                  bot.failures.failed_runs === 0 &&
+                  bot.failures.retried_requests === 0 ? (
+                    <span className="text-xs font-normal text-muted-foreground">
+                      无失败记录
+                    </span>
+                  ) : (
+                    formatUsageCost(bot.failures.failed_requests_cost)
+                  )}
                 </dd>
               </div>
               <p className="text-xs text-muted-foreground">
-                失败运行 {bot.failures.failed_runs} 次（
-                {formatUsageCost(bot.failures.failed_runs_cost)}）· 重试{" "}
-                {bot.failures.retried_requests} 次
+                {bot.failures.failed_runs === 0 &&
+                bot.failures.retried_requests === 0
+                  ? "窗口内无失败与重试记录"
+                  : `失败运行 ${bot.failures.failed_runs} 次（${formatUsageCost(bot.failures.failed_runs_cost)}）· 重试 ${bot.failures.retried_requests} 次`}
               </p>
               {bot.failures.by_error.map((error, index) => (
                 <p
@@ -1023,7 +1081,9 @@ function FailuresSection({
                     key={`${bot.bot_id}-${i}-${error.error_code ?? "none"}`}
                     data-testid="usage-insights-error-row"
                   >
-                    <TableCell>{bot.name}</TableCell>
+                    <TableCell className="font-medium">
+                      {bot.name}
+                    </TableCell>
                     <TableCell
                       className={cn(!error.error_code && "text-muted-foreground")}
                     >
@@ -1077,14 +1137,12 @@ function ModelAlternativesSection({ bots }: { bots: BotUsageInsightsBot[] }) {
                 className="space-y-1 rounded-lg border px-3 py-2"
                 data-testid="usage-insights-model-group"
               >
-                {/* 组头两行：行1 机器人 + 当前模型（模型名不断词、放不下时
-                    省略号截断，title 补全名）；行2 目录与样本量。 */}
-                <p className="flex items-baseline gap-2 text-xs">
+                {/* 组头两行：行1 机器人 + 当前模型；行2 目录与样本量。
+                    窄栏下模型名独占一行（basis-full）全量显示，绝不截断
+                    后缀（后缀恰是区分候选的关键标识）。 */}
+                <p className="flex flex-wrap items-baseline gap-x-2 text-xs">
                   <span className="shrink-0 font-medium">{bot.name}</span>
-                  <span
-                    className="min-w-0 truncate font-mono"
-                    title={group.model}
-                  >
+                  <span className="min-w-0 basis-full break-all font-mono sm:basis-auto">
                     {group.model}
                   </span>
                 </p>
@@ -1094,24 +1152,23 @@ function ModelAlternativesSection({ bots }: { bots: BotUsageInsightsBot[] }) {
                 </p>
                 <ul className="space-y-0.5">
                   {group.candidates.map((candidate) => (
+                    // 宽屏三列网格（模型 | 重算价 | 差额，后两列定宽右对
+                    // 齐可比价）；窄屏退两行——模型名独占行1 全量显示
+                    // （break-all，不截断后缀），价格差额并列行2。
                     <li
                       key={candidate.model}
-                      className="flex flex-wrap items-baseline gap-x-3 text-xs"
+                      className="grid grid-cols-[auto_auto] items-baseline gap-x-3 text-xs sm:grid-cols-[minmax(0,1fr)_auto_auto]"
                       data-testid="usage-insights-model-candidate"
                     >
-                      {/* 等宽模型名不在连字符处断行；窄栏放不下时整词省略。 */}
-                      <span
-                        className="max-w-full truncate font-mono"
-                        title={candidate.model}
-                      >
+                      <span className="col-span-2 min-w-0 break-all font-mono sm:col-span-1">
                         {candidate.model}
                       </span>
-                      <span className="whitespace-nowrap tabular-nums">
+                      <span className="whitespace-nowrap text-right tabular-nums">
                         {formatCostEstimate(candidate.cost)}
                       </span>
                       <span
                         className={cn(
-                          "whitespace-nowrap tabular-nums",
+                          "whitespace-nowrap text-right tabular-nums",
                           savingClass(candidate.saving),
                         )}
                       >
@@ -1149,7 +1206,7 @@ export function BotUsageInsightsPanel({
   );
 
   return (
-    <section className="space-y-4" data-testid="usage-insights">
+    <section className="space-y-6" data-testid="usage-insights">
       <h3 className="text-sm font-medium">优化参考</h3>
       {isLoading ? (
         <div className="space-y-3">

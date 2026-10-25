@@ -389,8 +389,10 @@ describe("BotUsageInsightsPanel", () => {
     // 工具定义占比紧凑行：名字 + 占比 + 分子/分母。
     const tools = within(screen.getByTestId("usage-insights-tools"));
     expect(tools.getByText("15%")).toBeInTheDocument();
-    // share 为 null 的机器人只显「—」，不并排印 ≈0 / 0 的假分子分母。
-    expect(tools.getByText("巡检").closest("div")).toHaveTextContent("—");
+    // share 为 null 的机器人显文字空态，不并排印 ≈0 / 0 的假分子分母。
+    expect(tools.getByText("巡检").closest("div")).toHaveTextContent(
+      "无完整数据",
+    );
     expect(tools.queryByText("≈0 / 0")).toBeNull();
     // 空转紧凑清单：口径 title 与条件计数在同一行说明里。
     const idle = within(screen.getByTestId("usage-insights-idle"));
