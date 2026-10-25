@@ -115,13 +115,15 @@ func TestReviewTablesNeedRebuildDetectsLegacySchema(t *testing.T) {
 	}
 }
 
-// 并发下载同一截图源时只能留一行：唯一索引 (repo,pr,head,source_url) + 冲突目标。
+// 并发下载同一截图源时只能留一行：唯一索引 (集成,repo,pr,head,source_url) +
+// 冲突目标。integration_id 键首：同名仓库在两个集成下的图源互不吞行。
 func TestReviewAssetsUniquePerSource(t *testing.T) {
 	db, err := gorm.Open(sqlite.Open("file:"+t.Name()+"?mode=memory&cache=shared"), &gorm.Config{})
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
-	if err := db.AutoMigrate(&model.ReviewAsset{}); err != nil {
+	// createBootIndexes 会在 project_review_settings 上建唯一索引，一并迁出来。
+	if err := db.AutoMigrate(&model.ReviewAsset{}, &model.ProjectReviewSettings{}); err != nil {
 		t.Fatalf("migrate assets: %v", err)
 	}
 	createBootIndexes(db)
@@ -134,7 +136,7 @@ func TestReviewAssetsUniquePerSource(t *testing.T) {
 		}
 		err := db.Clauses(clause.OnConflict{
 			Columns: []clause.Column{
-				{Name: "repo_full_name"}, {Name: "pr_number"},
+				{Name: "integration_id"}, {Name: "repo_full_name"}, {Name: "pr_number"},
 				{Name: "head_sha"}, {Name: "source_url"},
 			},
 			DoNothing: true,

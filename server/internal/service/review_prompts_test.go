@@ -12,7 +12,8 @@ import (
 // 含真实 fsr_ 令牌（首条消息传输方式不变）。
 func TestRenderReviewPromptCredentials(t *testing.T) {
 	run := &model.ReviewRun{
-		RepoFullName: "o/r", PRNumber: 7, PRTitle: "t", PRURL: "https://x/pr/7",
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		RepoFullName:  "o/r", PRNumber: 7, PRTitle: "t", PRURL: "https://x/pr/7",
 		HeadSHA: "sha", BaseRef: "main", HeadRef: "feat",
 	}
 	for _, kind := range []model.ReviewKind{model.ReviewKindCode, model.ReviewKindVisual} {

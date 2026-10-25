@@ -26,7 +26,8 @@ func createActivitySettings(t *testing.T, db *gorm.DB, userID, projectID, repo s
 	t.Helper()
 	now := time.Now().UTC()
 	if err := db.Create(&model.ProjectReviewSettings{
-		ProjectID: projectID, UserID: userID, RepoFullName: repo, Enabled: enabled,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     projectID, UserID: userID, RepoFullName: repo, Enabled: enabled,
 		TriggerOpened: true, TriggerSynchronize: true,
 		CodeCombinationsJSON:   testActivityCombosJSON(codeCombos),
 		VisualCombinationsJSON: testActivityCombosJSON(visualCombos),
@@ -41,7 +42,8 @@ func createActivityDebounce(t *testing.T, db *gorm.DB, projectID, repo string, p
 	t.Helper()
 	now := time.Now().UTC().Truncate(time.Second)
 	d := &model.ReviewDebounce{
-		ProjectID: projectID, RepoFullName: repo, PRNumber: prNumber,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     projectID, RepoFullName: repo, PRNumber: prNumber,
 		HeadSHA: "sha-new", Action: "synchronize", InstallationID: 1,
 		PRTitle: "debounce title",
 		PRURL:   fmt.Sprintf("https://github.com/%s/pull/%d", repo, prNumber),
@@ -1023,5 +1025,46 @@ func TestListPullRequestActivity_StageTotalExcludesCancelled(t *testing.T) {
 	item := page.Items[0]
 	if len(item.Stages) == 0 || item.Stages[0].Total != 1 || item.Stages[0].Completed != 0 {
 		t.Fatalf("cancelled 不应计入进度分母: %+v", item.Stages)
+	}
+}
+
+// TestListPullRequestActivity_ForgejoFallbackLink PR 标题/URL 快照缺失时的
+// 兜底链接按账本行自身的集成身份构造：forgejo 行渲染成
+// {base}/{o}/{r}/pulls/{n}，绝不能拼到 github.com。
+func TestListPullRequestActivity_ForgejoFallbackLink(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "u-fj")
+	project := createTestProject(t, svc.db, user.ID)
+	forgeID := createTestForgeIntegration(t, svc.db, "https://forge.example.com").ID
+	repo := "acme/app"
+	now := time.Now().UTC()
+	if err := svc.db.Create(&model.ProjectReviewSettings{
+		IntegrationID: forgeID, ProjectID: project.ID, UserID: user.ID,
+		RepoFullName: repo, Enabled: true,
+		TriggerOpened: true, TriggerSynchronize: true,
+		CodeCombinationsJSON:   testActivityCombosJSON(1),
+		VisualCombinationsJSON: "[]",
+		CreatedAt:              now, UpdatedAt: now,
+	}).Error; err != nil {
+		t.Fatalf("create settings: %v", err)
+	}
+	createTestReviewPR(t, svc.db, user.ID, project.ID, repo, 7, 1, func(p *model.ReviewPullRequest) {
+		p.IntegrationID = forgeID
+		p.VisualStatus = ""
+	})
+	// 防抖行 PRURL 快照缺失 → 兜底分支按 forgejo 链接构造。
+	createActivityDebounce(t, svc.db, project.ID, repo, 7, func(d *model.ReviewDebounce) {
+		d.IntegrationID = forgeID
+		d.PRURL = ""
+	})
+
+	rs, _ := readyReviewService(t, svc)
+	page := listActivity(t, rs, user.ID, "", 0, 0)
+	if page.Total != 1 {
+		t.Fatalf("total = %d, want 1", page.Total)
+	}
+	want := "https://forge.example.com/acme/app/pulls/7"
+	if page.Items[0].PrUrl != want {
+		t.Fatalf("PrUrl = %q, want %q", page.Items[0].PrUrl, want)
 	}
 }

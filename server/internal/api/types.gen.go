@@ -100,16 +100,16 @@ func (e DeploymentSettingsPublicUrlSource) Valid() bool {
 
 // Defines values for ForgeIntegrationKind.
 const (
-	Forgejo ForgeIntegrationKind = "forgejo"
-	Github  ForgeIntegrationKind = "github"
+	ForgeIntegrationKindForgejo ForgeIntegrationKind = "forgejo"
+	ForgeIntegrationKindGithub  ForgeIntegrationKind = "github"
 )
 
 // Valid indicates whether the value is a known member of the ForgeIntegrationKind enum.
 func (e ForgeIntegrationKind) Valid() bool {
 	switch e {
-	case Forgejo:
+	case ForgeIntegrationKindForgejo:
 		return true
-	case Github:
+	case ForgeIntegrationKindGithub:
 		return true
 	default:
 		return false
@@ -314,6 +314,24 @@ func (e GitHubTokenDetectionTokenType) Valid() bool {
 	case GitHubTokenDetectionTokenTypeFineGrained:
 		return true
 	case GitHubTokenDetectionTokenTypeUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for IntegrationOptionKind.
+const (
+	IntegrationOptionKindForgejo IntegrationOptionKind = "forgejo"
+	IntegrationOptionKindGithub  IntegrationOptionKind = "github"
+)
+
+// Valid indicates whether the value is a known member of the IntegrationOptionKind enum.
+func (e IntegrationOptionKind) Valid() bool {
+	switch e {
+	case IntegrationOptionKindForgejo:
+		return true
+	case IntegrationOptionKindGithub:
 		return true
 	default:
 		return false
@@ -3139,6 +3157,27 @@ type GitHubTokenProjectRef struct {
 	Id   string `json:"id"`
 	Name string `json:"name"`
 }
+
+// IntegrationOption 项目表单用的代码仓集成精简投影（INT-167）；无凭证标记等管理字段
+type IntegrationOption struct {
+	// BaseUrl 实例基址（仓库 URL 按 {base_url}/{owner}/{repo} 解析到本集成）
+	BaseUrl string `json:"base_url"`
+
+	// Builtin 内置集成恒为 true
+	Builtin bool `json:"builtin"`
+
+	// Id 内置集成固定为 github-default；forgejo 行为 forge_integrations 行 ID
+	Id string `json:"id"`
+
+	// Kind github=内置 GitHub App；forgejo=机器人账号 + 仓库范围 PAT
+	Kind IntegrationOptionKind `json:"kind"`
+
+	// Name 显示名
+	Name string `json:"name"`
+}
+
+// IntegrationOptionKind github=内置 GitHub App；forgejo=机器人账号 + 仓库范围 PAT
+type IntegrationOptionKind string
 
 // Invite 邀请投影，不含 token 明文（明文只在创建响应里出现一次）
 type Invite struct {
@@ -6992,6 +7031,16 @@ type ReceiveGitHubWebhookParams struct {
 	XGitHubEvent     string `json:"X-GitHub-Event"`
 	XGitHubDelivery  string `json:"X-GitHub-Delivery"`
 	XHubSignature256 string `json:"X-Hub-Signature-256"`
+}
+
+// ListIntegrationOptions200JSONResponseBody defines parameters for ListIntegrationOptions.
+type ListIntegrationOptions200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                 `json:"code"`
+	Data []IntegrationOption `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
 }
 
 // ListInvites200JSONResponseBody_Data defines parameters for ListInvites.

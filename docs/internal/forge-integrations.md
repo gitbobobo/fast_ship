@@ -8,8 +8,9 @@ Fast Ship 的第二种代码仓集成：`forge_integrations` 表存 Forgejo/Gite
 
 本期覆盖部署级配置面与项目侧的服务端接线：仓库 URL 解析（`parseRepositoryURL`
 承认非 GitHub 主机）、项目 ↔ 集成绑定写入、审查链接按集成构造（见下两节）。
-web 设置页、webhook 出站、issue 轮询与 Forgejo 仓库的审查执行面是后续任务；
-`pkg/forges` 的 client 已按可复用设计。
+INT-167 P1 起 Forgejo 仓库的 PR 审查执行面接入（适配器、入站 webhook、轮询
+补漏、设置开门，见「Forgejo 审查执行面」）；web 设置页与 issue 轮询仍是后续
+任务。
 
 ## 表结构
 
@@ -109,29 +110,250 @@ review 侧只有 `project_id` / `repo_full_name` 快照，解析链路是
 github.com 上发出去。github 兜底只保留给空集成引用（与零值口径）；`pr_url`
 为空串时前端不渲染链接。
 
-**历史记录的链接兜底恒按 GitHub 身份**：审查执行本期只有 GitHub 一条链路
-（forgejo 绑定在审查设置侧被拦），存量运行的 forge 身份就是 github——项目
-改绑 forgejo 后，无存储 `pr_url` 的历史记录不随当前绑定改写（
-review_records / review_activity 用 `githubLinks(githubWebBase)`）。P1 接入
-Forgejo 审查执行时须随运行记录存 forge 身份再按记录解析。
+**历史记录的链接兜底**：运行/总账行已带 `integration_id`（INT-167 数据模型
+步骤），Forgejo 运行在开轮时快照 `pr_url`，记录页/时间线优先用快照——链接
+正确。**兜底路径（快照缺失时）仍按 GitHub 身份构造**（review_records /
+review_activity 用 `githubLinks(githubWebBase)`）：存量行都是 GitHub 运行
+没问题；Forgejo 运行若 `pr_url` 快照缺失，兜底链接会错指 GitHub——待记录
+层按行上的 `integration_id` 逐行解析后收口。审查执行路径（同步/行内评论
+锚链接）已按项目绑定解析（`forgeLinksForProject`），forgejo 拼 Forgejo
+URL。
 
-## 审查设置面对 forgejo 绑定项目关门
+## 审查设置对 forgejo 开放（INT-167 P1 任务 3）
 
-PR 审查执行面是 GitHub only，设置面也按同一口径表达「不可用」而不是报错
-（`review_settings.go`）：
+审查执行面接入 Forgejo 适配器后，设置面同步开门（`review_settings.go`）。
+前置条件码位不变（`github_app` / `github_app_installation` 五项骨架），但
+forgejo 绑定项目换语义不换码：
 
-- **GetSettings**：`code_integration_id` 非空时跳过两项 GitHub 前置条件——
-  `github_app` / `github_app_installation` 按「不支持」口径缺项并点明
-  Forgejo，仓库名不发往 GitHub 查安装（同名 GitHub 仓的安装不代表 forgejo
-  仓可用）；public_url / Token / 环境绑定照常计算。
-- **UpdateSettings（enabled）**：入参侧快照与写事务内复核（`fresh` 重查）
-  都检查 `code_integration_id`，非空一律 40001——入参侧只看得到事务外快
-  照，「读旧状态→并发改绑→重启用」的窗口由事务内复核关掉。停用保存放行
-  （改绑侧 `repository.Update` 已把设置行压回 disabled，用户仍能保存关闭）。
+- **GetSettings**：`code_integration_id` 非空时两项平台前置条件改为
+  「代码仓集成已配置（Forgejo）」（集成行存在且 `kind=forgejo`）与「代码仓
+  集成可访问该仓库」（经 resolver 取 Forgejo 适配器实时 `GetRepository`，
+  `installationID=0`——安装语义对 Forgejo 不存在）。仓库名不发往 GitHub 查
+  安装：同名 GitHub 仓的安装不代表 forgejo 仓可用。Token 项同样换语义：
+  「代码仓集成 PAT 已配置（Forgejo）」按集成行 `token_encrypted` 非空判定
+  ——纯 Forgejo 部署没有 GitHub 凭证可绑，项目侧 Token 绑定对 Forgejo 仓
+  无访问效力，不计入。public_url / 环境绑定照常计算。
+- **UpdateSettings（enabled）**：入参侧先按 `code_integration_id` 查集成行
+  ——不存在或 `kind != forgejo` → 40001 点明（fail fast）；仓库级可访问性
+  走前置条件的实时检查（41202 缺项明细，与 GitHub 段落同一映射风格）。
+  写事务内复核两道：绑定的集成行再查一次（经事务句柄，行被删或改 kind →
+  40001「代码仓集成已失效」）；`fresh.CodeIntegrationID` 与快照不一致走既有
+  「仓库已变更，请刷新后重试」。停用保存放行。
+- **GitHub 分支零变化**：绑定空串（内置 github-default）的项目仍走 App 配置
+  + 安装检查的两项，语义与文案不变。
 - **前端**：`normalizeCodeRepoRef` 与后端 `parseRepositoryURL` 同序同大小写
   剥尾斜杠/`.git`；多余路径段原样回传交后端 40001，不静默丢弃。编辑弹框对
   悬空绑定（有集成引用、`code_repo_url` 投影为 null）回填空串、留空提交不
   携带该字段——只改其它字段不再把悬空绑定静默改绑回 github 同名仓。
+
+## Forgejo 审查执行面（INT-167 P1 任务 3）
+
+Forgejo 仓库的 PR 审查与 GitHub 走同一条协调管线（webhook 事务、防抖、
+调度、开轮、同步、产出），平台差异全部收在适配器层：
+
+- **`forge.ReviewClient`（11 方法 + `Kind()`）**：审查链路对平台的中性访问
+  面。GitHub 适配器包安装 id 透传 githubapi（行为零变化）；Forgejo 适配器
+  `internal/forge/forgejo_review_client.go` 直连 v1 REST——认证头
+  `Authorization: token {PAT}`，API 基址取集成行展开值，http client 由
+  `ForgeClientSource` 按 `pkg/forges` 构建（SSRF 防护与连接检测同一入口，
+  但显式传 60s 单请求预算——`forges.DefaultTimeout`(10s) 是给连接检测
+  同步等待设计的兜底，`.diff` 生成/大 diff 下载/慢实例分页列表按数据
+  传输预算放宽一档）。
+  请求映射：PR 元数据 `GET /repos/{o}/{r}/pulls/{n}`；diff
+  `GET …/pulls/{n}.diff`（text/plain 整段读）；PR 会话评论
+  `GET/POST /repos/{o}/{r}/issues/{n}/comments`、`PATCH …/issues/comments/{id}`
+  （Forgejo 里 PR 与 issue 共用评论空间）；行内 review
+  `POST …/pulls/{n}/reviews`（`{event, body, commit_id, comments:[{path, body,
+  new_position}]}`，RIGHT 侧行号映射 `new_position`、LEFT 映射
+  `old_position`，`commit_id` 把 review 钉在运行绑定的 head 上）；对账
+  `GET …/pulls/{n}/reviews`；commit status `POST …/statuses/{sha}`；
+  仓库检查 `GET /repos/{o}/{r}`。**Forgejo 没有 PR 级行内评论平铺端点**：
+  `ListReviewComments` 先列 reviews 再逐个取 `…/reviews/{id}/comments` 展平
+  （每个端点同样走 `limit=50` 空页止分页；InReplyToID 恒空——Forgejo 的
+  review comment 无回复关系字段）。机器人顶层评论的认领：GitHub 认
+  `user.type=Bot`，Forgejo 的机器人是普通账号，适配器按「作者 == PAT 所属
+  账号 + marker 前缀」命中。**自身 login 有两条来源**：先试 `GET /user`
+  （`read:user` scope——仓库范围 PAT 拿不到，Forgejo 的 user/* scope 组
+  不能授给 specific-repository token，见 token-scope 文档），再从写接口
+  响应（`POST …/comments`、`POST …/reviews`）的 `user.login` 学习并缓存——
+  **PATCH 路径不学**：评论对象的 user 是原作者不是编辑者，marker-only
+  退化命中他人伪造评论且 PAT 有权编辑他人评论时会把攻击者 login 学进
+  缓存，Self 标记与对账认领随之持久认敌为己。**退化边界只有非限流的
+  403**——仓库级 PAT 拿不到 `read:user` 的确定性信号是 403 才落到
+  marker-only 认领；`/user` 404 不降级（更像 `api_base_url` 指错路径
+  前缀，静默降级会让 Self 过滤失效且无报错线索）。403 降级前先判
+  `forge.IsRateLimit`（body 含 rate
+  limit/abuse detection 字样），限流 403 与权限 403 无法从状态码区分，
+  静默降级会在限流窗口整窗关掉「作者==自己」过滤（伪造 marker 的他人
+  评论可能被覆写一次，PATCH 403 时按「非己评论」改走新建，但不会因此
+  发不出评论——该 403 回退已排除限流：body 含 rate limit 字样的
+  403/429 落到报错重试，否则限流窗口每次同步都多发一条重复顶层评论）；
+  瞬时网络错误、5xx、非预期 401 一律传播挂起本轮重试——
+  瞬时故障也降级会把伪造覆写窗口从「仅仓库级 PAT 契约」扩大到任意故障
+  时刻，且 PAT 有仓库管理权限时覆写他人评论连 403 兜底都没有。login
+  学到之后立刻恢复按作者过滤。学到的 login 存进 resolver 按
+  `(integrationID, PAT)` 分槽的共享缓存（`ReviewClients.forgejoLogins`）
+  跨适配器实例存活——适配器每次现取现建，仓库级 PAT 下不共享则 Self
+  标记随实例重建永久失效；命中即不再探测 /user，PAT 轮换到不同账号自动
+  换槽，旧身份不滞留。同一登录名也
+  用于给行内/会话评论标 `ReviewComment.Self`/`IssueComment.Self`——历史
+  上下文组装靠它把系统自己的 Forgejo 发言挡在下一轮提示之外（那边行内
+  评论没有隐藏标记、login 也不以 [bot] 结尾）。
+- **错误归一**：Forgejo 适配器把非 2xx 包成 `*forge.StatusError`，与 GitHub
+  透传的 `githubapi.StatusError` 同构，service 的 `IsNotFound`/`IsForbidden`/
+  `IsDiffTooLarge` 按同一口径判定（`forge/errors.go`）。响应体超 512B
+  截断头尾入 `Body` 前，限流字样判定已在完整 body 上做并落
+  `StatusError.RateLimited`——大 HTML 错误页把限流说明写在中段时判定不丢。diff 超本端读入
+  上限（`respBodyMaxBytes`，64MB）时平台并未拒绝、无 HTTP 状态码可言——
+  适配器返回 `ErrDiffTooLarge` 哨兵，`IsDiffTooLarge` 与平台 too_large
+  同口径命中：service 走确定性降级收尾（顶层评论降级），不按可重试
+  错误无限退避挂住 `sync_pending`。
+- **resolver**：`forge.ReviewClients.ClientFor` 三分支——空串/`github-default`
+  → GitHub 适配器；其余 id → 经 `ForgejoSource`（`service/forge_client_source.go`
+  的 `ForgeClientSource`）现取「SSRF client + 展开基址 + 解密 PAT」组装
+  Forgejo 适配器（每次现取现建，不缓存凭证——轮换立即生效）；来源缺失/集成
+  不存在/kind 不符/解密失败都在这条链上明确报错，不静默回落 GitHub。
+- **入站 webhook `POST /api/forge/:id/webhooks`**（公开端点，
+  `handler/forge_webhook.go`）：按 ID 查集成（不存在与验签失败同回
+  401/40107——无行即无签可验，分开回 404 会开放集成 id 存在性探测）→
+  解密 webhook
+  secret（行存在但未配置 503，密文损坏 50000）→ `io.LimitReader` 读体 →
+  `X-Forgejo-Signature` 验签（**纯 hex HMAC-SHA256，无 `sha256=` 前缀**，
+  大小写不敏感、`hmac.Equal` 常量时间；缺失/不等/带任何前缀一律 40107）→
+  `X-Forgejo-Delivery` 幂等 + `X-Forgejo-Event` 事件名 → 与 GitHub 入口共用
+  的触发事务。**任何写操作都在验签之后**——验签失败路径零写入（含 delivery
+  幂等账）。Forgejo 不发 `X-Hub-Signature-256`，该头不参与验签。
+- **幂等账复用**：Forgejo 的 delivery 幂等复用 `github_webhook_deliveries`
+  表与 repo——两边的 delivery id 都是平台 UUID（`X-Forgejo-Delivery` 同为
+  UUID），随机碰撞概率为零，不值得为第二张表多一套清理与查询；表名里的
+  "GitHub" 是历史命名，语义是「webhook 投递幂等账」。已知残余面：Forgejo
+  的 delivery id 由管理员在实例侧可控（手工重发/自定义投递工具可指定任意
+  GUID），恶意投递方若精确重放某个 GitHub delivery id 会让该 GitHub 投递
+  被误判已送达——需要知道目标 GUID 且过验签，无实际利用路径；若未来接入
+  第三家平台，幂等账应加 integration/source 列分区。
+- **动作名归一**：Forgejo/Gitea 的推送动作叫 `synchronized`（GitHub 是
+  `synchronize`），入口处归一成 GitHub 拼法再进触发面（`normalizeReview-
+  Action`）——勾选位映射、防抖行、开轮记录存的都是归一值。GitHub 的动作
+  集合里没有 `synchronized`，此归一对 GitHub 入口零影响。`closed`（含合并）
+  两边同形，取消在途语义共用。
+- **轮询补漏（`review_forgejo_poll.go`）**：webhook 可能丢投递，5 分钟
+  ticker 对每个「启用审查且绑定 Forgejo」的项目拉 `GET …/pulls?state=open`
+  分页，把 webhook 没落账的 SHA 经与 webhook 完全相同的受理路径补上。
+  动作归类：该 PR 从未受理过任何 head → `opened`（受 TriggerOpened 勾选位
+  约束），已受理过 → `synchronize`（受 TriggerSynchronize 约束）——补漏不
+  绕过用户没勾选的动作。跨仓库 PR（head.repo.full_name ≠ base.repo.
+  full_name，含已删 fork 的 head.repo=null）在适配器枚举与 webhook 触发面
+  过滤——判定按 head/base 归属比较，不看 `repo.fork` 布尔（仓库本身是
+  fork 时同仓库 PR 的该字段也是 true，照它过滤会误杀正常 PR）。draft 在
+  受理面照常忽略。**启用基线**：`project_review_settings.enabled_at` 在
+  false→true 翻转时打点（停用清空、再启用重新打点），`updated_at` 早于
+  基线（留 1 分钟时偏宽限）的快照跳过——启用前就存在的 open PR 不是丢
+  的 webhook 事件，首 tick 全量开轮与 GitHub「只审开启后的新事件」不
+  对称；基线前启用/升级的行 `enabled_at` 为 NULL，下一次 enabled 保存
+  时回溯到该行 `created_at`（不晚于实际启用时点，宁可多收不漏）。去重由
+  现有机制保证（seen_sha/
+  防抖/总账按 (项目, 集成) 分区），webhook 先受理的 SHA 轮询再见到会被跳过；
+  轮询快照带平台 `updated_at`，受理事务内重读当前 head 判重——webhook 已
+  受理更新 head 后，迟到的旧快照按 stale 丢弃不回退；**同刻异 head**（秒级
+  粒度下同秒连推与乱序投递/旧快照分不出）对快照与 webhook 投递都是歧义，
+  受理事务一律回滚并交调用方现拉实时 PR 复核，live head 一致才重进；head
+  未变的重复轮询不再合成新事件。**head 未变的重开同样是 no-op**——`reopened` 对同一
+  SHA 不开轮是 webhook 受理面的既定不变量（`runCount`/`seen` 去重，GitHub
+  侧同义），轮询 `headSHA == current` 早退与之对称而非漏补；真补会绕过
+  `TriggerReopened` 勾选位并破坏「一 SHA 一运行」键控模型。已知角落：丢
+  webhook 时 `ready_for_review`/`reopened` 无法还原真实动作，轮询把 draft
+  转正/重开的 PR 归为 `opened`（受
+  TriggerOpened 约束）——只勾 `ready_for_review` 不勾 `opened` 的项目此
+  场景漏补。另一已知角落：轮询只枚举 `state=open`，closed 事件丢投递
+  时对账不到——该 PR 的在途/排队运行与防抖行会自然超时收尾，不会永久
+  悬挂，但比 webhook 送达时慢一拍。枚举分页 `limit=50` 封顶 20 页
+  （`forgejoMaxPages`）：open PR 数超 1000 的源仓截断面外的 PR 轮询
+  永久漏补（日志有 warn 留痕，webhook 送达路径不受影响）——当前规模下
+  接受该上限，超出时需放量或按 updated 排序收窄。单项目 60s 预算
+  （`reviewForgejoPollTimeout`）只罩网络调用：受理事务不占预算，open PR
+  数百且均需复核的源仓整轮串行拉长、后续项目顺延到下 tick——滞后而非
+  错误，可接受。单项目/单 PR 失败只记日志继续下一个，
+  不中断整轮。**确定性
+  失败（仓库/PR 404、凭证 401/403、集成行缺失/kind 不符、PAT 密文解密
+  失败）自动停用该项目的审查设置**——每 tick 重试结果相同，继续 enabled
+  只会按固定节律刷错且审查静默停摆；停用走与显式停用同一事务收尾
+  （取消在途/排队运行、消费令牌、删防抖、推进 epoch 清 sync_pending），
+  且谓词带本轮快照的 (integration_id, repo_full_name)——轮询在途期间
+  用户改绑/换仓库的话，旧快照的错误不会关掉新绑定。停用后设置页可见，
+  人工修复集成后重新开启即可恢复（与改绑压回 disabled 同一先例）。瞬时错误（网络/
+  超时/5xx）照常 warn 重试；**限流 403/429 也按瞬时归类**——GitHub 主/
+  二次限流正是回 403（body 含 rate limit/abuse detection 字样时经
+  `forge.IsRateLimit` 排除），与权限 403 无法从状态码区分，若按确定性
+  处理会在限流高峰误删防抖行/误停用项目审查。启动不立即
+  跑首轮（进程刚起来时 webhook backlog 还在路上），第一个 tick 在 5 分钟后。
+- **GitHub 行为零变化**：`/api/github/webhooks` 端点、验签、`handleWebhookTx`
+  对 `github-default` 的判定与写库路径全部原样（触发判定抽成
+  `handleReviewTriggerTx` 后由两个入口共用同一份逻辑）。
+- **私有媒体 bearer 重试是 GitHub 专属**：截图/附件匿名拉取失败后带安装
+  令牌重试的路径显式限定 `github-default` 集成 + GitHub 媒体域
+  （`review_assets.go` `downloadScreenshot`）——Forgejo 私有仓库附件暂以
+  「匿名可拉」为前提，匿名 401/403 报独立 sentinel
+  「Forgejo 私有附件暂不支持带凭证下载，请改用公开图片链接」（公开仓
+  匿名可拉，401/403 多半是私有附件；404 不归类——附件真被删同样回
+  404，归私有附件会误导），也不是把 PAT 当 Bearer 发出（凭证不得随
+  Bearer 出域到非集成主机；Forgejo 侧要不要补 PAT 媒体重试是后续任务）。
+
+### 已核实的平台事实（适配器据此实现）
+
+- **commit status description 上限 255**（Gitea `CreateStatusOption` 的
+  binding `MaxSize(255)`，超限整单 422）：适配器内按 rune 截断到 255，
+  `target_url`/`context` 原样。状态集 pending/success/failure/error 与
+  ReviewClient 语义一致。
+- **webhook 签名只有 `X-Forgejo-Signature`**：纯 hex HMAC-SHA256（无
+  `sha256=` 前缀）；Forgejo 不发送 `X-Hub-Signature-256`，带了该头也不看。
+  Signature/Delivery/Event 三个头缺省时回退读 `X-Gitea-*`——Gitea <1.19
+  的旧实例只发旧头，新 Gitea/Forgejo 两套都发。
+- **T3/PR 关联面不经 GitHub API**（迁移可行性结论）：`githubapi` 的全部
+  消费面是 issue 侧（issue 镜像同步、issue↔PR 关联的 attach/状态刷新，
+  `issue_pull_request.go`/`issue_service.go`）与审查链路（resolver GitHub
+  分支、投递对账）；`t3_*`/`bot_*` 代码不 import `githubapi`——审查线程与
+  bot 在工作区内对 PR 的感知来自 git 操作与启动上下文，不依赖部署的
+  GitHub 访问面。因此项目迁到 Forgejo 后：审查链路走 Forgejo 适配器（本期
+  接入），issue 镜像本就 GitHub only（公开仓绑定恒 github），issue↔PR 关联
+  的 PR 状态刷新对 Forgejo PR 不可用（表上留了 `provider` 列，sync client
+  仍是 GitHub 形态）——迁移清单里「手动关 GitHub 侧触发」指的就是这条残余。
+
+### 迁移清单（GitHub → Forgejo，机器人账号 + Forgejo 推镜像模式）
+
+迁移完成后 **Forgejo 是唯一真源**，GitHub 仓库退化为 Forgejo 推镜像的只读
+目标（镜像同步过去的分支，仅供依赖 GitHub 生态的存量工具读）。
+
+1. 在 Forgejo 实例建机器人账号，生成仓库范围 PAT（`write:repository` +
+   `write:issue`——写评论、review、commit status）。**不需要也拿不到
+   `read:user`**：specific-repository token 只允许 repository/issue 四档
+   scope，`GET /user` 走不通——适配器改从写接口响应学自身 login（见
+   上节「机器人顶层评论的认领」）。
+2. 在 Forgejo 仓库 Settings → Repository → Push Mirror 配到 GitHub 镜像
+   仓库，并开启 **Sync on commit**（Forgejo 收到推送即同步到 GitHub 镜像）。
+3. **推镜像无分支过滤会强推**：Forgejo 侧的所有分支/标签原样同步到
+   GitHub，包括 force-push——GitHub 镜像上任何非同步来源的改动都会被覆盖。
+4. 迁移后**不要直推 GitHub 镜像仓库**（GitHub 侧加分支保护/移除写权限），
+   一切改动先进 Forgejo，经镜像同步过去。
+5. Fast Ship「设置 → 部署 → 集成」配 Forgejo 集成（base_url、PAT、可选
+   `allow_private_network` / 自定义 CA），跑一次连接检测确认 ok。
+6. 配 Forgejo webhook：URL `https://<fast-ship>/api/forge/<集成id>/webhooks`，
+   事件选 **Pull Request 与 Pull Request Sync 两项**（推送新提交走独立的
+   `pull_request_sync`，不勾它推送更新只能靠 5 分钟轮询补漏），secret 与
+   集成 `webhook_secret` 一致。受理面同时认 `pull_request` /
+   `pull_request_sync` 两个事件名——新版本把细型放进 `X-Forgejo-Event-Type`
+   而 `X-Forgejo-Event` 送归一名 `pull_request`，旧 Gitea/自定义投递可能
+   直接把 `pull_request_sync` 放进 Event 头，两种形态等价受理。
+7. Forgejo `app.ini` 的 `[webhook] ALLOWED_HOST_LIST` 加本服务 host（默认
+   只允许私网段外联 webhook，公网部署会被拒发）。
+8. 项目改绑 Forgejo（编辑项目代码仓库选 Forgejo 集成 + owner/repo；改绑
+   会把审查设置压回 disabled），重新开启审查——前置条件换 Forgejo 语义。
+9. 手动关掉 GitHub 侧触发：删除 GitHub App 的仓库安装或该仓库的 webhook
+   （否则双平台同时开轮、双份产出）。issue 镜像与 issue↔PR 状态刷新是
+   GitHub 面功能，Forgejo PR 不适用（见上节结论）。
+10. T3 工作区 origin 改 Forgejo（重新配对或更新绑定后新建的工作区自然指
+    新 origin；存量工作区需手动 `git remote set-url`）。
+11. 之后**永不直推 GitHub 镜像**（Forgejo 推镜像会把直推改动冲掉）：一切
+    改动进 Forgejo 源仓库，经镜像同步到 GitHub。
 
 ## 基址形状与同主机唯一
 
@@ -273,6 +495,16 @@ Forgejo 基址是管理员可填的任意 URL，必须把「内网探测」挡�
   IP**：DNS 重绑或解析漂移可把带 PAT 的探测导向内网其他主机——这是私网
   放行的定义内残余面（回环/链路本地/元数据仍恒拒），只在 DNS 可信的环境
   开启。
+- **审查截图下载面同源放行**：PR 附件走的是审查媒体服务
+  （`githubmedia`）独立的拨号守卫，不认识上面的 `AllowedHosts`。为此媒体
+  服务接了一个动态可信名单：每次拨号时现查 `allow_private_network=true`
+  的集成行并放行其 base_url/api_base_url 的 **host:port**（默认端口按
+  基址 scheme 补）——但**放行的是私网口径不是裸放行**，与 API 面同判定
+  源（`forges.IsBlockedPrivateMode`）：RFC1918/ULA/CGNAT 放行，回环、
+  链路本地（含云元数据）、多播、保留段恒拒，DNS 重绑后解析漂移也受同一
+  口径约束。名单经 10s TTL 缓存随配置即时生效；名单外主机与跨主机
+  重定向照常走公网口径校验，同主机未配置端口也不放行——「只放行这个
+  实例」的语义与 API 面完全一致。
 - **重定向规则**：目标 host:port 必须与首个请求一致（跨主机拒绝，端口按
   scheme 缺省补齐后比较）；未开私网放行时每一跳都必须 https；**任何配置下
   https→http 的降级跳转都拒绝**（`ErrSchemeDowngrade`——明文 http 只该来自
@@ -336,7 +568,8 @@ read:user 等划为独立 scope，实例也可能对 /version 做 scope 拦截�
 ## 本期不做（后续任务）
 
 - 设置页卡片（web）。
-- Forgejo webhook 出站、issue 轮询、Forgejo 仓库的 PR 审查执行面（派发、
-  diff 读取、行内 review 等 GitHub API 依赖仍是 GitHub only；P1 复用
-  `pkg/forges`）。
+- issue 轮询、issue↔PR 关联对 Forgejo PR 的支持（sync client 仍是 GitHub
+  形态，表上 `provider` 列已留位）。
 - 检测结论落库与定时巡检。
+- 审查记录/时间线的兜底链接按行上 `integration_id` 逐行解析（见「审查链接
+  按集成构造」一节的兜底说明）。

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/godbobo/fast_ship/server/internal/forge"
 	"github.com/godbobo/fast_ship/server/internal/githubapi"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/githubapp"
@@ -127,9 +128,13 @@ func (s *ReviewService) reconcileWebhookDeliveries(now time.Time) {
 	if len(pending) == 0 {
 		return
 	}
-	guids := make([]string, len(pending))
-	for i, st := range pending {
-		guids[i] = st.GUID
+	// 幂等账键带集成前缀（deliveryLedgerKey）：本循环只对账 GitHub 投递；
+	// 裸 guid 一并带上——存量行是未加前缀的 GitHub 键，只查前缀会在保留期
+	// 内漏掉旧行误报未送达。
+	guids := make([]string, 0, len(pending)*2)
+	for _, st := range pending {
+		guids = append(guids,
+			deliveryLedgerKey(model.ForgeIntegrationBuiltinGitHubID, st.GUID), st.GUID)
 	}
 	// 本地幂等账一次查全（含超限组）：否则「GitHub 侧三次都超时、但某次重投
 	// 实际已在本地落库」的 guid 会被误报故障通知。
@@ -170,7 +175,8 @@ func (s *ReviewService) reconcileWebhookDeliveries(now time.Time) {
 		if ctx.Err() != nil {
 			break // 总超时到了，别再发请求
 		}
-		if existing[st.GUID] {
+		if existing[st.GUID] ||
+			existing[deliveryLedgerKey(model.ForgeIntegrationBuiltinGitHubID, st.GUID)] {
 			continue // 已送达（GitHub 侧记录滞后于本地登记），不重投
 		}
 		if ledger[st.GUID].Closed {
@@ -332,7 +338,9 @@ func (p *redeliveryPRProbe) lookup(ctx context.Context, deliveryID int64) (redel
 	if err != nil {
 		return check, err
 	}
-	reviewable := prReviewable(pr)
+	// 重投是 GitHub 专属路径（deliveries API 不在 forge.ReviewClient 方法面），
+	// 实况判定与审查链路同一口径：经共享转换后复用 prReviewable。
+	reviewable := prReviewable(forge.PullRequestFromGitHub(pr))
 	p.prStates[key] = reviewable
 	check.Known, check.Reviewable = true, reviewable
 	return check, nil

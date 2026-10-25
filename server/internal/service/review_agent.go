@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/api"
-	"github.com/godbobo/fast_ship/server/internal/githubapi"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	"gorm.io/gorm"
@@ -78,13 +77,6 @@ func (s *ReviewService) loadAgentRun(ctx context.Context, runID string) (*model.
 	return &run, nil
 }
 
-func (s *ReviewService) ghClient(ctx context.Context) (githubapi.GitHubClient, error) {
-	if s.gh == nil {
-		return nil, errs.New(errs.ErrGitHubAPI.Code, "GitHub 访问面未配置")
-	}
-	return s.gh.ClientFor(ctx)
-}
-
 // AgentPullRequest GET /api/review-agent/pull-request：运行绑定身份 + 实时
 // PR 元数据（body 要拿最新——视觉审查的截图说明来自这里）。
 func (s *ReviewService) AgentPullRequest(ctx context.Context, runID string) (*api.ReviewAgentPullRequest, error) {
@@ -92,11 +84,11 @@ func (s *ReviewService) AgentPullRequest(ctx context.Context, runID string) (*ap
 	if err != nil {
 		return nil, err
 	}
-	client, err := s.ghClient(ctx)
+	client, err := s.reviewClient(ctx, run.IntegrationID, run.RepoFullName, run.InstallationID)
 	if err != nil {
 		return nil, err
 	}
-	pr, err := client.GetPullRequest(ctx, run.InstallationID, run.RepoFullName, run.PRNumber)
+	pr, err := client.GetPullRequest(ctx, run.RepoFullName, run.PRNumber)
 	if err != nil {
 		return nil, errs.New(errs.ErrGitHubAPI.Code, "读取 PR 失败: "+err.Error())
 	}
@@ -121,11 +113,11 @@ func (s *ReviewService) AgentDiff(ctx context.Context, runID string) (*api.Revie
 	if err != nil {
 		return nil, err
 	}
-	client, err := s.ghClient(ctx)
+	client, err := s.reviewClient(ctx, run.IntegrationID, run.RepoFullName, run.InstallationID)
 	if err != nil {
 		return nil, err
 	}
-	diff, err := client.GetPullRequestDiff(ctx, run.InstallationID, run.RepoFullName, run.PRNumber)
+	diff, err := client.GetPullRequestDiff(ctx, run.RepoFullName, run.PRNumber)
 	if err != nil {
 		return nil, errs.New(errs.ErrGitHubAPI.Code, "读取 diff 失败: "+err.Error())
 	}
@@ -205,15 +197,15 @@ func (s *ReviewService) codeHistory(ctx context.Context, run *model.ReviewRun) (
 // appendNewDiscussion 把 after 之后的行内评论与会话评论按时间正序写进 b。
 // 本系统自己发的结论（机器人标记/自身 review）过滤掉。limit 最近 50 条。
 func (s *ReviewService) appendNewDiscussion(ctx context.Context, run *model.ReviewRun, b *strings.Builder, after time.Time, all bool) error {
-	client, err := s.ghClient(ctx)
+	client, err := s.reviewClient(ctx, run.IntegrationID, run.RepoFullName, run.InstallationID)
 	if err != nil {
 		return err
 	}
-	reviewComments, err := client.ListReviewComments(ctx, run.InstallationID, run.RepoFullName, run.PRNumber)
+	reviewComments, err := client.ListReviewComments(ctx, run.RepoFullName, run.PRNumber)
 	if err != nil {
 		return errs.New(errs.ErrGitHubAPI.Code, "读取行内评论失败: "+err.Error())
 	}
-	issueComments, err := client.ListIssueCommentsForPR(ctx, run.InstallationID, run.RepoFullName, run.PRNumber)
+	issueComments, err := client.ListIssueCommentsForPR(ctx, run.RepoFullName, run.PRNumber)
 	if err != nil {
 		return errs.New(errs.ErrGitHubAPI.Code, "读取会话评论失败: "+err.Error())
 	}
@@ -224,7 +216,9 @@ func (s *ReviewService) appendNewDiscussion(ctx context.Context, run *model.Revi
 	}
 	var entries []entry
 	for _, c := range reviewComments {
-		if strings.HasSuffix(c.User, "[bot]") || (!c.CreatedAt.After(after) && !all) {
+		// c.Self 覆盖 Forgejo：那边的机器人是普通账号，不以 [bot] 结尾，
+		// 行内评论又没有隐藏标记可拦。
+		if c.Self || strings.HasSuffix(c.User, "[bot]") || (!c.CreatedAt.After(after) && !all) {
 			continue
 		}
 		head := "行内评论"
@@ -235,7 +229,7 @@ func (s *ReviewService) appendNewDiscussion(ctx context.Context, run *model.Revi
 	}
 	for _, c := range issueComments {
 		// 系统自己的顶层结论评论（隐藏标记）与机器人发言不进历史。
-		if strings.HasSuffix(c.User, "[bot]") || strings.Contains(c.Body, "<!-- fast-ship-") ||
+		if c.Self || strings.HasSuffix(c.User, "[bot]") || strings.Contains(c.Body, "<!-- fast-ship-") ||
 			(!c.CreatedAt.After(after) && !all) {
 			continue
 		}
@@ -256,11 +250,11 @@ func (s *ReviewService) appendNewDiscussion(ctx context.Context, run *model.Revi
 // 而没重写进 findings，不补这段的话未解决项会从下一轮历史里消失，复核断链。
 func (s *ReviewService) visualHistory(ctx context.Context, run *model.ReviewRun) (string, error) {
 	// 最近一轮「确有视觉运行」的轮次：中间轮可能只跑了代码审查，
-	// round-1 会拿到空历史。历史只在本项目账本内取。
+	// round-1 会拿到空历史。历史只在本 (项目, 集成) 账本内取。
 	var prevRound *int
 	if err := s.db.WithContext(ctx).Model(&model.ReviewRun{}).
-		Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND kind = ? AND round_number < ?",
-			run.ProjectID, run.RepoFullName, run.PRNumber, model.ReviewKindVisual, run.RoundNumber).
+		Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ? AND kind = ? AND round_number < ?",
+			run.ProjectID, run.RepoFullName, run.PRNumber, run.IntegrationID, model.ReviewKindVisual, run.RoundNumber).
 		Select("MAX(round_number)").Scan(&prevRound).Error; err != nil {
 		return "", errs.ErrInternal
 	}
@@ -309,15 +303,15 @@ func (s *ReviewService) visualHistory(ctx context.Context, run *model.ReviewRun)
 	return strings.TrimRight(b.String(), "\n"), nil
 }
 
-// runsAtRound 取本项目同 PR 指定轮次、指定 kind 的运行（按创建序）。
+// runsAtRound 取本 (项目, 集成) 同 PR 指定轮次、指定 kind 的运行（按创建序）。
 func (s *ReviewService) runsAtRound(ctx context.Context, run *model.ReviewRun, round int, kind model.ReviewKind) ([]model.ReviewRun, error) {
 	if round < 1 {
 		return nil, nil
 	}
 	var runs []model.ReviewRun
 	if err := s.db.WithContext(ctx).
-		Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND round_number = ? AND kind = ?",
-			run.ProjectID, run.RepoFullName, run.PRNumber, round, kind).
+		Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ? AND round_number = ? AND kind = ?",
+			run.ProjectID, run.RepoFullName, run.PRNumber, run.IntegrationID, round, kind).
 		Order("created_at ASC").Find(&runs).Error; err != nil {
 		return nil, errs.ErrInternal
 	}
@@ -443,11 +437,11 @@ func (s *ReviewService) AgentSubmitResult(ctx context.Context, runID string, bod
 	}
 
 	// 提交前核对 PR 实时状态：已关闭或 head 已前进 → 本轮作废（取消 + 消费令牌 + sync）。
-	client, err := s.ghClient(ctx)
+	client, err := s.reviewClient(ctx, run.IntegrationID, run.RepoFullName, run.InstallationID)
 	if err != nil {
 		return err
 	}
-	pr, err := client.GetPullRequest(ctx, run.InstallationID, run.RepoFullName, run.PRNumber)
+	pr, err := client.GetPullRequest(ctx, run.RepoFullName, run.PRNumber)
 	if err != nil {
 		return errs.New(errs.ErrGitHubAPI.Code, "读取 PR head 失败: "+err.Error())
 	}
@@ -466,7 +460,7 @@ func (s *ReviewService) AgentSubmitResult(ctx context.Context, runID string, bod
 			tx.Model(&model.ReviewRunToken{}).
 				Where("run_id = ? AND consumed_at IS NULL", run.ID).
 				Update("consumed_at", now)
-			return s.markPRSyncPendingByRepoTx(tx, run.ProjectID, run.RepoFullName, run.PRNumber, now)
+			return s.markPRSyncPendingByRepoTx(tx, run.IntegrationID, run.ProjectID, run.RepoFullName, run.PRNumber, now)
 		})
 		return errs.ErrReviewHeadChanged
 	}
@@ -515,7 +509,7 @@ func (s *ReviewService) AgentSubmitResult(ctx context.Context, runID string, bod
 						Update("consumed_at", now).Error; err != nil {
 						return err
 					}
-					if err := s.markPRSyncPendingByRepoTx(tx, run.ProjectID, run.RepoFullName, run.PRNumber, now); err != nil {
+					if err := s.markPRSyncPendingByRepoTx(tx, run.IntegrationID, run.ProjectID, run.RepoFullName, run.PRNumber, now); err != nil {
 						return err
 					}
 					notifyTimeout = true
@@ -530,7 +524,7 @@ func (s *ReviewService) AgentSubmitResult(ctx context.Context, runID string, bod
 			Update("consumed_at", now).Error; err != nil {
 			return err
 		}
-		return s.markPRSyncPendingByRepoTx(tx, run.ProjectID, run.RepoFullName, run.PRNumber, now)
+		return s.markPRSyncPendingByRepoTx(tx, run.IntegrationID, run.ProjectID, run.RepoFullName, run.PRNumber, now)
 	})
 	if err != nil {
 		return err
@@ -691,17 +685,45 @@ func (s *ReviewService) RerunReview(ctx context.Context, userID, projectID strin
 	if repo == "" || repo == "/" {
 		return nil, errs.ErrProjectGitHubNotConfigured
 	}
-	client, err := s.ghClient(ctx)
+	// 账本按 (项目, 集成, 仓库, pr) 分区：项目改绑集成后同仓库同号 PR 的
+	// 旧平台记录仓库名相同但归属不同。当前集成下没有账本、其他集成下却
+	// 有同号记录时，请求只可能来自旧记录（can_rerun 对这类记录已置否）——
+	// 拒绝，否则会把旧集成的同号 PR 当成本平台的 PR 误审。从未审过的 PR
+	// （任何集成下都没账本）不受影响，仍可手动重跑开轮。
+	var ledgerCount, otherLedgerCount int64
+	if err := s.db.WithContext(ctx).Model(&model.ReviewPullRequest{}).
+		Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ?",
+			project.ID, repo, prNumber, settings.IntegrationID).
+		Count(&ledgerCount).Error; err != nil {
+		return nil, errs.ErrInternal
+	}
+	if err := s.db.WithContext(ctx).Model(&model.ReviewPullRequest{}).
+		Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id <> ?",
+			project.ID, repo, prNumber, settings.IntegrationID).
+		Count(&otherLedgerCount).Error; err != nil {
+		return nil, errs.ErrInternal
+	}
+	if ledgerCount == 0 && otherLedgerCount > 0 {
+		return nil, errs.New(errs.ErrInvalidParams.Code,
+			"该审查记录属于其他集成的历史记录，不能重跑")
+	}
+	// rerun 没有 webhook installation 快照：GitHub 先解析真实安装 id 再取
+	// PR，解析失败不得拿 0 当安装 id 继续写库；非 GitHub 集成没有安装语义，
+	// installationID=0 经 resolver 走集成凭证取 PR——ResolveInstallation 是
+	// GitHub App 专有概念，不进 forge.ReviewClient 方法面。
+	var installationID int64
+	if reviewIntegrationID(settings.IntegrationID) == model.ForgeIntegrationBuiltinGitHubID {
+		resolved, err := s.resolveGitHubInstallation(ctx, repo)
+		if err != nil {
+			return nil, err
+		}
+		installationID = resolved
+	}
+	client, err := s.reviewClient(ctx, settings.IntegrationID, repo, installationID)
 	if err != nil {
 		return nil, err
 	}
-	// rerun 没有 webhook installation 快照：先解析真实安装 id，再取 PR；
-	// 解析不支持/失败时不得拿 0 当安装 id 继续写库。
-	installationID, err := client.ResolveInstallation(ctx, repo)
-	if err != nil {
-		return nil, errs.New(errs.ErrGitHubAPI.Code, "解析仓库安装失败: "+err.Error())
-	}
-	pr, err := client.GetPullRequest(ctx, installationID, repo, prNumber)
+	pr, err := client.GetPullRequest(ctx, repo, prNumber)
 	if err != nil {
 		return nil, errs.New(errs.ErrGitHubAPI.Code, "读取 PR head 失败: "+err.Error())
 	}
@@ -715,31 +737,32 @@ func (s *ReviewService) RerunReview(ctx context.Context, userID, projectID strin
 	now := time.Now().UTC()
 	var round int
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		// 取 PR 与开轮之间可能发生停用/换仓库/新 webhook：事务内复核设置行的
-		// 仓库快照与启用状态，否则会用旧快照开一轮（甚至取消新 head 的运行）。
+		// 取 PR 与开轮之间可能发生停用/换仓库/改绑集成/新 webhook：事务内复核
+		// 设置行的 (集成, 仓库) 快照与启用状态，否则会用旧快照开一轮（甚至
+		// 取消新 head 的运行）。
 		var fresh model.ProjectReviewSettings
-		if err := tx.Select("repo_full_name", "enabled").
+		if err := tx.Select("repo_full_name", "integration_id", "enabled").
 			Where("project_id = ?", project.ID).First(&fresh).Error; err != nil {
 			return errs.ErrReviewNotEnabled
 		}
 		if !fresh.Enabled {
 			return errs.ErrReviewNotEnabled
 		}
-		if !strings.EqualFold(fresh.RepoFullName, repo) {
+		if !strings.EqualFold(fresh.RepoFullName, repo) || fresh.IntegrationID != settings.IntegrationID {
 			return errs.New(errs.ErrInvalidParams.Code, "项目仓库已变更，请刷新后重试")
 		}
-		latest, err := s.currentAcceptedHeadTx(tx, project.ID, repo, prNumber)
+		latest, err := s.currentAcceptedHeadTx(tx, settings.IntegrationID, project.ID, repo, prNumber)
 		if err != nil {
 			return err
 		}
 		if latest != "" && !strings.EqualFold(latest, pr.HeadSHA) {
 			return errs.ErrReviewHeadMoved
 		}
-		if err := s.supersedePRRunsTx(tx, project.ID, repo, prNumber, now); err != nil {
+		if err := s.supersedePRRunsTx(tx, settings.IntegrationID, project.ID, repo, prNumber, now); err != nil {
 			return err
 		}
-		if err := tx.Where("project_id = ? AND repo_full_name = ? AND pr_number = ?",
-			project.ID, repo, prNumber).
+		if err := tx.Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ?",
+			project.ID, repo, prNumber, settings.IntegrationID).
 			Delete(&model.ReviewDebounce{}).Error; err != nil {
 			return err
 		}

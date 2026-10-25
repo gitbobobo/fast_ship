@@ -46,7 +46,8 @@ func seedVisualSyncEnv(t *testing.T, e *reviewEngineEnv, repo string, prNumber i
 		"result_json": `{"summary":"干净","findings":[],"prior":[],"ui_changed":true,"ui_changed_since_last_visual":true}`,
 	})
 	if err := e.svc.db.Create(&model.ReviewPullRequest{
-		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: prNumber, UserID: e.user.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: repo, PRNumber: prNumber, UserID: e.user.ID,
 		InstallationID: 1, HeadSHA: head, RoundNumber: 1,
 		SyncPending: true, SyncEpoch: 1, UpdatedAt: now,
 	}).Error; err != nil {
@@ -463,7 +464,8 @@ func TestVisualSyncIgnoresStaleAssets(t *testing.T) {
 
 	// 上一轮留下的陈旧资产行：URL 已不在当前描述里，storage_path 非空。
 	stale := &model.ReviewAsset{
-		ID: "stale-asset", RepoFullName: repo, PRNumber: 85, HeadSHA: "sha-s",
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ID:            "stale-asset", RepoFullName: repo, PRNumber: 85, HeadSHA: "sha-s",
 		Position: 0, Label: "旧图", SourceURL: "https://uiv.frp.musiver.cn/f/old.png",
 		StoragePath: "/cache/old.png", MimeType: "image/png", SizeBytes: 10,
 		CreatedAt: now,
@@ -520,7 +522,8 @@ func TestVisualSyncProbeSkippedCarriesPriorFailure(t *testing.T) {
 	})
 	fp := screenshotFingerprint(collectScreenshotURLs(body))
 	if err := e.svc.db.Create(&model.ReviewPullRequest{
-		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 86, UserID: e.user.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: repo, PRNumber: 86, UserID: e.user.ID,
 		InstallationID: 1, HeadSHA: "sha-cf", RoundNumber: 2,
 		VisualScreensFingerprint: fp, SyncPending: true, SyncEpoch: 1, UpdatedAt: now,
 	}).Error; err != nil {
@@ -596,7 +599,8 @@ func TestVisualSyncProbeSkippedKeepsPriorSuccess(t *testing.T) {
 	})
 	fp := screenshotFingerprint(collectScreenshotURLs(body))
 	if err := e.svc.db.Create(&model.ReviewPullRequest{
-		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 87, UserID: e.user.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: repo, PRNumber: 87, UserID: e.user.ID,
 		InstallationID: 1, HeadSHA: "sha-cs", RoundNumber: 2,
 		VisualScreensFingerprint: fp, SyncPending: true, SyncEpoch: 1, UpdatedAt: now,
 	}).Error; err != nil {
@@ -666,7 +670,8 @@ func TestVisualSyncScreensUnavailableUpdatesExistingVisualComment(t *testing.T) 
 	})
 	fp := screenshotFingerprint(collectScreenshotURLs(body))
 	if err := e.svc.db.Create(&model.ReviewPullRequest{
-		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 88, UserID: e.user.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: repo, PRNumber: 88, UserID: e.user.ID,
 		InstallationID: 1, HeadSHA: "sha-cu", RoundNumber: 2,
 		VisualScreensFingerprint: fp, SyncPending: true, SyncEpoch: 1, UpdatedAt: now,
 	}).Error; err != nil {
@@ -751,7 +756,8 @@ func TestVisualSyncScreensUnavailableRewritesCarryCommentWithoutLedgerID(t *test
 	})
 	fp := screenshotFingerprint(collectScreenshotURLs(body))
 	if err := e.svc.db.Create(&model.ReviewPullRequest{
-		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 91, UserID: e.user.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: repo, PRNumber: 91, UserID: e.user.ID,
 		InstallationID: 1, HeadSHA: "sha-lr", RoundNumber: 2,
 		VisualScreensFingerprint: fp, SyncPending: true, SyncEpoch: 1, UpdatedAt: now,
 	}).Error; err != nil {
@@ -865,7 +871,8 @@ func TestVisualSyncScreensUnavailableCarriesPriorHint(t *testing.T) {
 		"result_json": `{"summary":"干净","findings":[],"prior":[],"ui_changed":true,"ui_changed_since_last_visual":true}`,
 	})
 	if err := e.svc.db.Create(&model.ReviewPullRequest{
-		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 90, UserID: e.user.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: repo, PRNumber: 90, UserID: e.user.ID,
 		InstallationID: 1, HeadSHA: "sha-sh", RoundNumber: 2,
 		SyncPending: true, SyncEpoch: 1, UpdatedAt: now,
 	}).Error; err != nil {
@@ -912,7 +919,7 @@ func TestProbeScreenshotsAttemptTimeoutLetsLaterScreensThrough(t *testing.T) {
 
 	body := "![a](" + hangURL + ") ![b](" + okURL + ")"
 	start := time.Now()
-	probe := review.probeScreenshots(context.Background(), 1, body)
+	probe := review.probeScreenshots(context.Background(), model.ForgeIntegrationBuiltinGitHubID, 1, body)
 	elapsed := time.Since(start)
 
 	if probe.result != probeReady {
@@ -950,7 +957,7 @@ func TestProbeScreenshotsAllBlockedStopsAtBudget(t *testing.T) {
 	}()
 
 	start := time.Now()
-	probe := review.probeScreenshots(context.Background(), 1, strings.Join(refs, " "))
+	probe := review.probeScreenshots(context.Background(), model.ForgeIntegrationBuiltinGitHubID, 1, strings.Join(refs, " "))
 	elapsed := time.Since(start)
 
 	if probe.result != probeUnavailable {
@@ -973,12 +980,12 @@ func TestReviewAssetsNoBearerForExternalHost(t *testing.T) {
 	ctx := context.Background()
 	cached := &githubmedia.CachedMedia{Path: "/cache/shot.png"}
 	media := &fakeReviewMedia{cached: cached, anonErr: errors.New("forbidden anon")}
-	review := e.withT3(nil, media, func(context.Context, int64) (string, error) {
+	review := e.withT3(nil, media, func(context.Context, string, int64) (string, error) {
 		return "installation-token-1", nil
 	})
 	body := "![界面](https://uiv.example.com/f/x.png)"
 
-	_, assets, err := review.ensureAssets(ctx, repo, 71, "sha-ext", body, 42)
+	_, assets, err := review.ensureAssets(ctx, model.ForgeIntegrationBuiltinGitHubID, repo, 71, "sha-ext", body, 42)
 	if err != nil {
 		t.Fatalf("ensureAssets: %v", err)
 	}
@@ -1004,9 +1011,9 @@ func TestDownloadScreenshotUnconfiguredMedia(t *testing.T) {
 		githubapp.StaticClients{Client: e.fake},
 		fakeReviewAppSource{ok: true},
 		fakeReviewPublicURL("https://fs.example.com"),
-		nil, nil, nil, e.svc.cfg, zap.NewNop())
+		nil, nil, nil, repository.NewForgeIntegrationRepository(e.svc.db), e.svc.cfg, zap.NewNop())
 
-	_, err := review.downloadScreenshot(context.Background(), 1, "https://uiv.example.com/f/x.png")
+	_, err := review.downloadScreenshot(context.Background(), model.ForgeIntegrationBuiltinGitHubID, 1, "https://uiv.example.com/f/x.png")
 	if !errors.Is(err, errReviewMediaUnconfigured) {
 		t.Fatalf("err = %v, want errReviewMediaUnconfigured", err)
 	}
@@ -1022,7 +1029,7 @@ func TestDownloadScreenshotUnconfiguredMedia(t *testing.T) {
 func TestDownloadScreenshotBearerRetryOnlyOnAuthFailure(t *testing.T) {
 	e := newReviewEngineEnv(t)
 	mediaURL := "https://github.com/user-attachments/assets/xyz"
-	bearer := func(context.Context, int64) (string, error) { return "installation-token-1", nil }
+	bearer := func(context.Context, string, int64) (string, error) { return "installation-token-1", nil }
 
 	deterministic := []struct {
 		name string
@@ -1037,7 +1044,7 @@ func TestDownloadScreenshotBearerRetryOnlyOnAuthFailure(t *testing.T) {
 	for _, c := range deterministic {
 		media := &fakeReviewMedia{cached: &githubmedia.CachedMedia{Path: "/cache/shot.png"}, anonErr: c.err}
 		review := e.withT3(nil, media, bearer)
-		if _, err := review.downloadScreenshot(context.Background(), 42, mediaURL); !errors.Is(err, c.err) {
+		if _, err := review.downloadScreenshot(context.Background(), model.ForgeIntegrationBuiltinGitHubID, 42, mediaURL); !errors.Is(err, c.err) {
 			t.Fatalf("%s: err = %v, want 原样返回匿名错误", c.name, err)
 		}
 		if media.anonCalls != 1 || media.bearerCalls != 0 {
@@ -1050,7 +1057,7 @@ func TestDownloadScreenshotBearerRetryOnlyOnAuthFailure(t *testing.T) {
 	media := &fakeReviewMedia{cached: &githubmedia.CachedMedia{Path: "/cache/shot.png"},
 		anonErr: &githubmedia.UpstreamStatusError{StatusCode: 404}}
 	review := e.withT3(nil, media, bearer)
-	got, err := review.downloadScreenshot(context.Background(), 42, mediaURL)
+	got, err := review.downloadScreenshot(context.Background(), model.ForgeIntegrationBuiltinGitHubID, 42, mediaURL)
 	if err != nil {
 		t.Fatalf("404 + bearer 重试: %v", err)
 	}

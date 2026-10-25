@@ -165,7 +165,10 @@ type prWire struct {
 	Merged   bool       `json:"merged"`
 	MergedAt *time.Time `json:"merged_at"`
 	ClosedAt *time.Time `json:"closed_at"`
-	User     struct {
+	// UpdatedAt 平台侧的 PR 最后更新戳：webhook 复核路径把它落成
+	// seen/总账的 pr_updated_at 判定基准（Forgejo 适配器同源字段）。
+	UpdatedAt *time.Time `json:"updated_at"`
+	User      struct {
 		Login string `json:"login"`
 	} `json:"user"`
 	Head struct {
@@ -214,6 +217,7 @@ func (c *restClient) GetPullRequest(ctx context.Context, installationID int64, r
 		HeadRef:      pr.Head.Ref,
 		BaseRef:      pr.Base.Ref,
 		AuthorLogin:  pr.User.Login,
+		UpdatedAt:    pr.UpdatedAt,
 	}, nil
 }
 

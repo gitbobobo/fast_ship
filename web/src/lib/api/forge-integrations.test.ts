@@ -1,5 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { FORGE_LIVE_REQUEST_TIMEOUT_MS, forgeIntegrationsApi } from "./forge-integrations";
+import {
+  FORGE_LIVE_REQUEST_TIMEOUT_MS,
+  forgeIntegrationsApi,
+  integrationOptionsApi,
+} from "./forge-integrations";
 
 const { get, post, put, delete: del } = vi.hoisted(() => {
   const json = () => ({
@@ -87,5 +91,12 @@ describe("forge integrations api requests", () => {
       retry: 0,
     });
     expect(calls(post)[0][1]?.timeout).toBeUndefined();
+  });
+
+  it("集成选项走独立的 integrations 路径，不落 deployment 管理端点", async () => {
+    await integrationOptionsApi.list();
+    expect(calls(get)).toHaveLength(1);
+    expect(calls(get)[0][0]).toBe("integrations");
+    expect(calls(get)[0][1]?.timeout).toBeUndefined();
   });
 });

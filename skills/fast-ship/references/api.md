@@ -12278,3 +12278,37 @@ Forgejo 连接检测结论；不落库，只随本次响应返回
 | 403 | 非管理员（40305） |
 | 404 | 集成不存在（40435） |
 | 500 | 服务器内部错误（50000） |
+
+### GET `/api/integrations`
+
+<!-- operationId: listIntegrationOptions -->
+
+列出可选代码仓集成（登录用户）
+
+INT-167 新增。项目编辑表单的代码仓集成选择器数据源：返回精简投影
+（id/kind/name/base_url/builtin），不含凭证标记等管理字段；首条恒为
+内置 github-default。所有登录用户可读——绑定项目只需知道集成存在
+与基址，写配置仍仅管理员（/api/deployment/integrations）。
+
+**鉴权**：仅 JWT
+
+**成功响应**
+
+**200** 可选项列表（首条 github-default）
+
+`data` 为数组。
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | 内置集成固定为 github-default；forgejo 行为 forge_integrations 行 ID |
+| `kind` | string（enum: github \| forgejo） | 是 | github=内置 GitHub App；forgejo=机器人账号 + 仓库范围 PAT |
+| `name` | string | 是 | 显示名 |
+| `base_url` | string | 是 | 实例基址（仓库 URL 按 {base_url}/{owner}/{repo} 解析到本集成） |
+| `builtin` | boolean | 是 | 内置集成恒为 true |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 500 | 服务器内部错误（50000） |

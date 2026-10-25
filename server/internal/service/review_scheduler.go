@@ -2,10 +2,11 @@ package service
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 
-	"github.com/godbobo/fast_ship/server/internal/githubapi"
+	"github.com/godbobo/fast_ship/server/internal/forge"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
@@ -33,7 +34,8 @@ const (
 // 回收不会被拖到几十分钟后。超预算的剩余行本来就还在库里，下个 tick 再处理。
 const reviewNetworkStageBudget = 60 * time.Second
 
-// Start 启动审查调度循环（幂等：重复调用不叠加第二个循环）。
+// Start 启动审查调度循环（幂等：重复调用不叠加第二个循环）。Forgejo 轮询
+// 补漏挂在同一组循环里（INT-167 任务 3）：共用 cancel，tick 频率更低。
 func (s *ReviewService) Start() {
 	s.mu.Lock()
 	if s.cancel != nil {
@@ -47,6 +49,7 @@ func (s *ReviewService) Start() {
 	s.mu.Unlock()
 	go s.reviewLoop(cancel, kickCh)
 	go s.redeliveryLoop(cancel)
+	go s.forgejoPollLoop(cancel)
 }
 
 // Stop 停止调度循环；幂等，未启动时为空操作。
@@ -175,6 +178,20 @@ func (s *ReviewService) processDueDebounces(now time.Time) {
 	}
 }
 
+// deterministicReviewAccessErr 实况读/轮询的确定性失败：仓库或 PR 已删
+// （404）、凭证被拒或吊销（401/403）、集成行缺失/kind 不符、密文损坏——
+// 每轮重试结果相同，按瞬时故障无限推后只会让行/项目卡死刷错；网络超时
+// 与 5xx 不在此列（推后重试才有意义）。
+func deterministicReviewAccessErr(err error) bool {
+	if forge.IsRateLimit(err) {
+		// 限流 403（GitHub 主/二次限流正是回 403）是瞬时失败——推后重试，
+		// 不删行不停用。
+		return false
+	}
+	return forge.IsNotFound(err) || forge.IsForbidden(err) || forge.IsUnauthorized(err) ||
+		errors.Is(err, gorm.ErrRecordNotFound) || errors.Is(err, errForgeIntegrationDecrypt)
+}
+
 // consumeDebounce 一行防抖的消费：先在事务外读 PR 实况——防抖行可能是已
 // 合并/已关闭 PR 的旧账（重投的 closed 投递被有意排除、payload 又是旧快照），
 // PR 已关闭或远端 head 与防抖行不一致则删行不开轮。读 PR 失败不开轮也不删
@@ -186,13 +203,27 @@ func (s *ReviewService) consumeDebounce(row *model.ReviewDebounce, now time.Time
 	// 单次 PR 实况读 10s：这是「读一次 PR 状态」的检查而非数据传输，超时只
 	// 意味着本轮不开轮（fire_at 推后），10s 足够，别占满整个阶段预算。
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	client, err := s.ghClient(ctx)
-	var pr *githubapi.PullRequest
+	client, err := s.reviewClient(ctx, row.IntegrationID, row.RepoFullName, row.InstallationID)
+	var pr *forge.PullRequest
 	if err == nil {
-		pr, err = client.GetPullRequest(ctx, row.InstallationID, row.RepoFullName, row.PRNumber)
+		pr, err = client.GetPullRequest(ctx, row.RepoFullName, row.PRNumber)
 	}
 	cancel()
 	if err != nil {
+		// 确定性失败（仓库/PR 已删、凭证被拒 401/403、集成不存在、密文损坏）
+		// 每轮重试结果相同——直接删行不再推后，否则防抖行永远消费不掉还按
+		// 周期刷错；后续新事件会重建防抖行。
+		if deterministicReviewAccessErr(err) {
+			s.logger.Warn("防抖实况读确定性失败，删除防抖行",
+				zap.String("repo", row.RepoFullName), zap.Int("pr", row.PRNumber), zap.Error(err))
+			if delErr := s.db.Where(
+				"project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ? AND head_sha = ? AND fire_at <= ?",
+				row.ProjectID, row.RepoFullName, row.PRNumber, row.IntegrationID, row.HeadSHA, now,
+			).Delete(&model.ReviewDebounce{}).Error; delErr != nil {
+				s.logger.Error("删除确定性失败的防抖行失败", zap.Error(delErr))
+			}
+			return
+		}
 		s.logger.Warn("防抖消费前读取 PR 失败，推后重试",
 			zap.String("repo", row.RepoFullName), zap.Int("pr", row.PRNumber), zap.Error(err))
 		// 推后用当前时刻而不是 tick 开始的 now：一个阶段预算内本批次可能已
@@ -200,8 +231,8 @@ func (s *ReviewService) consumeDebounce(row *model.ReviewDebounce, now time.Time
 		// 被选中继续失败。
 		pushTo := time.Now().UTC().Add(reviewDebounceSeconds * time.Second)
 		if retryErr := s.db.Where(
-			"project_id = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ? AND fire_at <= ?",
-			row.ProjectID, row.RepoFullName, row.PRNumber, row.HeadSHA, now,
+			"project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ? AND head_sha = ? AND fire_at <= ?",
+			row.ProjectID, row.RepoFullName, row.PRNumber, row.IntegrationID, row.HeadSHA, now,
 		).Model(&model.ReviewDebounce{}).
 			Update("fire_at", pushTo).Error; retryErr != nil {
 			s.logger.Error("推后防抖行失败",
@@ -214,8 +245,8 @@ func (s *ReviewService) consumeDebounce(row *model.ReviewDebounce, now time.Time
 	reviewable := prReviewable(pr) && strings.EqualFold(pr.HeadSHA, row.HeadSHA)
 	err = s.db.Transaction(func(tx *gorm.DB) error {
 		res := tx.Where(
-			"project_id = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ? AND fire_at <= ?",
-			row.ProjectID, row.RepoFullName, row.PRNumber, row.HeadSHA, now,
+			"project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ? AND head_sha = ? AND fire_at <= ?",
+			row.ProjectID, row.RepoFullName, row.PRNumber, row.IntegrationID, row.HeadSHA, now,
 		).Delete(&model.ReviewDebounce{})
 		if res.Error != nil {
 			return res.Error
@@ -234,14 +265,14 @@ func (s *ReviewService) consumeDebounce(row *model.ReviewDebounce, now time.Time
 		if err := tx.Where("project_id = ?", row.ProjectID).First(&settings).Error; err != nil {
 			return err
 		}
-		// 复核：仍启用、动作仍勾选、仓库（enabled 设置行的 repo_full_name 快照，
-		// 与 webhook 反查、syncOnePR 准入复核同口径）仍是该防抖行对应的仓库。
-		// 两个键写库时都是小写，直接等值比较；不回读项目行的 live 仓库字段——
-		// 快照是本项目审查仓库的唯一真相。
+		// 复核：仍启用、动作仍勾选、(集成, 仓库)（enabled 设置行的归一快照，
+		// 与 webhook 反查、syncOnePR 准入复核同口径）仍是该防抖行对应的键。
+		// 两个键写库时都是归一值，直接等值比较；不回读项目行的 live 字段——
+		// 快照是本项目审查对象的唯一真相。
 		if !settings.Enabled || !reviewTriggerEnabled(&settings, row.Action) {
 			return nil
 		}
-		if settings.RepoFullName != row.RepoFullName {
+		if settings.RepoFullName != row.RepoFullName || settings.IntegrationID != row.IntegrationID {
 			return nil
 		}
 		_, err := s.openRoundTx(tx, &project, &settings,
@@ -344,7 +375,7 @@ func (s *ReviewService) markTimeouts(now time.Time) {
 				Update("consumed_at", now).Error; err != nil {
 				return err
 			}
-			return s.markPRSyncPendingByRepoTx(tx, run.ProjectID, run.RepoFullName, run.PRNumber, now)
+			return s.markPRSyncPendingByRepoTx(tx, run.IntegrationID, run.ProjectID, run.RepoFullName, run.PRNumber, now)
 		})
 		if err != nil {
 			s.logger.Error("标记审查超时失败", zap.String("run", run.ID), zap.Error(err))

@@ -26,7 +26,7 @@ func (stubRunTokenResolver) ResolveRunToken(context.Context, string, bool) (*ser
 func TestReviewAgentSubmitResultBodyLimit(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	review := service.NewReviewService(nil, nil, nil, nil, nil, nil, nil,
-		nil, nil, nil, nil, zap.NewNop())
+		nil, nil, nil, nil, nil, zap.NewNop())
 	r := gin.New()
 	r.POST("/api/review-agent/result",
 		middleware.RequireRunToken(stubRunTokenResolver{}, false),

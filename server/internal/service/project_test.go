@@ -834,11 +834,11 @@ func TestProjectRepoWrite_GoneIntegrationRejected(t *testing.T) {
 		t.Fatalf("update missing project err = %v, want ErrRecordNotFound", err)
 	}
 
-	// service 层把集成失效折成 40001「代码仓集成不存在或已被删除，请重试」。
+	// service 层把集成失效折成 40001「代码仓库集成不存在或已被删除，请重试」。
 	psvc := newTestProjectService(svc)
 	_, err = psvc.Update(project.ID, user.ID, &UpdateProjectRequest{Name: api.Ptr("renamed-2")})
 	gone := appErr(t, err)
-	if gone.Code != errs.ErrInvalidParams.Code || !strings.Contains(gone.Message, "代码仓集成不存在或已被删除") {
+	if gone.Code != errs.ErrInvalidParams.Code || !strings.Contains(gone.Message, "代码仓库集成不存在或已被删除") {
 		t.Fatalf("service update = %d %q, want 40001 gone-integration", gone.Code, gone.Message)
 	}
 
@@ -899,7 +899,8 @@ func TestProjectRepoUpdate_RepoSyncsReviewSettings(t *testing.T) {
 	// 换仓库要推进 epoch 并清 pending：在途同步不能再向旧仓库发布。
 	var ledger model.ReviewPullRequest
 	if err := svc.db.Create(&model.ReviewPullRequest{
-		ProjectID: project.ID, RepoFullName: "oldowner/oldrepo", PRNumber: 1,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     project.ID, RepoFullName: "oldowner/oldrepo", PRNumber: 1,
 		UserID: user.ID, HeadSHA: "sha", SyncPending: true, SyncEpoch: 4, UpdatedAt: now,
 	}).Error; err != nil {
 		t.Fatalf("seed ledger: %v", err)
@@ -1631,18 +1632,20 @@ func TestProjectRepoUpdate_CodeRepoSyncsReviewSettings(t *testing.T) {
 
 // createTestForgeIntegration 测试用 forgejo 集成行：base_url 原样落库
 // （生产保存时已归一，用例里直接写归一后的形态），host_key 与生产一致
-// 按 base_url 归一写入——绑定匹配按 host_key 点查。
+// 按 base_url 归一写入——绑定匹配按 host_key 点查。TokenEncrypted 置非空：
+// 生产 Create 恒有 PAT，且审查前置条件按「PAT 已配置」判凭证就绪。
 func createTestForgeIntegration(t *testing.T, db *gorm.DB, baseURL string) *model.ForgeIntegration {
 	t.Helper()
 	row := &model.ForgeIntegration{
-		ID:         uuid.NewString(),
-		Kind:       model.ForgeIntegrationKindForgejo,
-		Name:       "forge-" + baseURL,
-		BaseURL:    baseURL,
-		APIBaseURL: baseURL + "/api/v1",
-		HostKey:    forges.HostKey(baseURL),
-		CreatedAt:  time.Now().UTC(),
-		UpdatedAt:  time.Now().UTC(),
+		ID:             uuid.NewString(),
+		Kind:           model.ForgeIntegrationKindForgejo,
+		Name:           "forge-" + baseURL,
+		BaseURL:        baseURL,
+		APIBaseURL:     baseURL + "/api/v1",
+		HostKey:        forges.HostKey(baseURL),
+		TokenEncrypted: []byte("test-token"),
+		CreatedAt:      time.Now().UTC(),
+		UpdatedAt:      time.Now().UTC(),
 	}
 	if err := db.Create(row).Error; err != nil {
 		t.Fatalf("create forge integration: %v", err)

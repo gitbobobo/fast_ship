@@ -118,7 +118,7 @@ func TestForgeIntegrationListBuiltinFirst(t *testing.T) {
 	}
 	builtin := list[0]
 	if builtin.Id != model.ForgeIntegrationBuiltinGitHubID || !builtin.Builtin ||
-		builtin.Kind != api.Github || builtin.BaseUrl != "https://github.com" {
+		builtin.Kind != api.ForgeIntegrationKindGithub || builtin.BaseUrl != "https://github.com" {
 		t.Fatalf("builtin projection = %+v", builtin)
 	}
 	if builtin.ApiBaseUrl != "https://api.github.com" {
@@ -143,7 +143,7 @@ func TestForgeIntegrationListBuiltinFirst(t *testing.T) {
 		list[1].Name != "b-second" || list[2].Name != "a-first" {
 		t.Fatalf("list order = %+v", list)
 	}
-	if list[1].Builtin || list[1].Kind != api.Forgejo {
+	if list[1].Builtin || list[1].Kind != api.ForgeIntegrationKindForgejo {
 		t.Fatalf("forgejo row = %+v", list[1])
 	}
 }
@@ -165,7 +165,7 @@ func TestForgeIntegrationCreateEncryptsAndDefaults(t *testing.T) {
 	if out.TokenSet != true || out.WebhookSecretSet != true || out.HasCaCert || out.Builtin {
 		t.Fatalf("projection flags = %+v", out)
 	}
-	if out.Kind != api.Forgejo || out.BaseUrl != "http://forge.lan" {
+	if out.Kind != api.ForgeIntegrationKindForgejo || out.BaseUrl != "http://forge.lan" {
 		t.Fatalf("kind/base = %s/%s", out.Kind, out.BaseUrl)
 	}
 	if out.ApiBaseUrl != "http://forge.lan/api/v1" {

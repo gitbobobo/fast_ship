@@ -156,7 +156,8 @@ func TestBuildCodeCommentAllPass(t *testing.T) {
 // 选项而 label（模型 · 实例）完整。
 func TestRunCombinationOptions(t *testing.T) {
 	run := &model.ReviewRun{
-		Model: "glm-5.3", InstanceID: "claude-code",
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		Model:         "glm-5.3", InstanceID: "claude-code",
 		ModelOptionsJSON: `[{"id":"effort","value":"high"},{"id":"mode","value":"accept-edits"},` +
 			`{"id":"thinking","value":true},{"id":"max_turns","value":40}]`,
 	}
@@ -171,7 +172,8 @@ func TestRunCombinationOptions(t *testing.T) {
 	}
 
 	long := &model.ReviewRun{
-		Model: strings.Repeat("模", 90), InstanceID: strings.Repeat("实", 90),
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		Model:         strings.Repeat("模", 90), InstanceID: strings.Repeat("实", 90),
 		ModelOptionsJSON: `[{"id":"k","value":"` + strings.Repeat("值", 100) + `"}]`,
 	}
 	if want := strings.Repeat("模", 90) + " · " + strings.Repeat("实", 90); runCombinationLabel(long) != want {

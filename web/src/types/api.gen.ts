@@ -1237,6 +1237,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/integrations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 列出可选代码仓集成（登录用户）
+         * @description INT-167 新增。项目编辑表单的代码仓集成选择器数据源：返回精简投影
+         *     （id/kind/name/base_url/builtin），不含凭证标记等管理字段；首条恒为
+         *     内置 github-default。所有登录用户可读——绑定项目只需知道集成存在
+         *     与基址，写配置仍仅管理员（/api/deployment/integrations）。
+         */
+        get: operations["listIntegrationOptions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/quota/providers": {
         parameters: {
             query?: never;
@@ -3948,6 +3971,22 @@ export interface components {
              * @description 最近保存时间；内置集成为 null
              */
             updated_at: string | null;
+        };
+        /** @description 项目表单用的代码仓集成精简投影（INT-167）；无凭证标记等管理字段 */
+        IntegrationOption: {
+            /** @description 内置集成固定为 github-default；forgejo 行为 forge_integrations 行 ID */
+            id: string;
+            /**
+             * @description github=内置 GitHub App；forgejo=机器人账号 + 仓库范围 PAT
+             * @enum {string}
+             */
+            kind: "github" | "forgejo";
+            /** @description 显示名 */
+            name: string;
+            /** @description 实例基址（仓库 URL 按 {base_url}/{owner}/{repo} 解析到本集成） */
+            base_url: string;
+            /** @description 内置集成恒为 true */
+            builtin: boolean;
         };
         /** @description Forgejo 连接检测结论；不落库，只随本次响应返回 */
         ForgeIntegrationTest: {
@@ -10475,6 +10514,30 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listIntegrationOptions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 可选项列表（首条 github-default） */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"] & {
+                        data?: components["schemas"]["IntegrationOption"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
             500: components["responses"]["InternalError"];
         };
     };

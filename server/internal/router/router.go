@@ -41,6 +41,7 @@ func Setup(
 	aiProviderHandler *handler.AIProviderHandler,
 	selfLogHandler *handler.SelfLogHandler,
 	githubWebhookHandler *handler.GitHubWebhookHandler,
+	forgeWebhookHandler *handler.ForgeWebhookHandler,
 	quotaHandler *handler.QuotaHandler,
 	deploymentGitHubAppHandler *handler.DeploymentGitHubAppHandler,
 	memberHandler *handler.MemberHandler,
@@ -314,6 +315,9 @@ func Setup(
 		// JWT 必须 — 部署设置读取（INT-129）：public_url 当前生效值与来源，
 		// 所有登录用户可读；写入在下方管理员组。
 		api.GET("/deployment/settings", middleware.RequireJWT(cfg, authService), deploymentSettingsHandler.Get)
+		// 代码仓集成选择器数据源（INT-167）：登录用户可读的精简投影，
+		// 项目编辑表单按它拼仓库 URL；CRUD/检测仍在下方管理员组。
+		api.GET("/integrations", middleware.RequireJWT(cfg, authService), forgeIntegrationHandler.ListOptions)
 
 		// 管理员（INT-129）：JWT + RequireAdmin，角色每请求查库现判，API Key
 		// 在 RequireJWT 已被 40301 拒绝。成员与邀请、部署设置写入、部署级
@@ -443,6 +447,11 @@ func Setup(
 
 	// GitHub App webhook 入站（INT-93）：公开端点，X-Hub-Signature-256 验签。
 	api.POST("/github/webhooks", githubWebhookHandler.Handle)
+
+	// Forgejo webhook 入站（INT-167 任务 3）：公开端点，按集成的 webhook
+	// secret 以 X-Forgejo-Signature（纯 hex HMAC-SHA256）验签，任何写操作都在
+	// 验签之后。
+	api.POST("/forge/:id/webhooks", forgeWebhookHandler.Handle)
 
 	// 自测观察面（INT-93）：仅 fake + debug 模式有内容；JWT 必须，不进 OpenAPI。
 	api.GET("/debug/github-review-log", middleware.RequireJWT(cfg, authService), githubWebhookHandler.DebugReviewLog)

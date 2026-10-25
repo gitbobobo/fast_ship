@@ -134,23 +134,112 @@ export function normalizeCodeRepoRef(raw: string): string {
   return `${host}/${parts[0]}/${parts[1]}`.toLowerCase();
 }
 
-// codeRepoPointsToForge 输入按代码仓归一口径判定为「显式非 github.com 主机」：
-// 这类地址走代码托管集成匹配（Forgejo 行或部署 GHE 的内置 GitHub）。表单
-// 用它切换代码仓字段提示——不再对 Forgejo 地址显示「PR 审查盯的仓库」。
-// 裸 owner/repo 与 github.com 归回 github.com 判否；解析不出的输入原样
-// 回传也不以 github.com 开头，会命中「非 github」一侧——该输入本身要被
-// 后端 40001 拒，提示走向无关紧要。
-export function codeRepoPointsToForge(raw: string): boolean {
-  const norm = normalizeCodeRepoRef(raw);
-  return norm !== "" && !norm.startsWith("github.com/");
+// hostFromRepoInput 提取输入里的显式主机：scheme 之后的首段，或裸形态
+// 首段含点/冒号（o.r/o:r）的主机段。无主机输入（owner/repo）返回 ""。
+// 用于提交前比对所选集成主机——ownerRepoFromInput 会剥掉主机段，不比
+// 会把 forgejo-B 的 URL 静默绑到 forgejo-A 下。
+export function hostFromRepoInput(raw: string): string {
+  const rest = raw.trim();
+  const protoIdx = rest.indexOf("://");
+  if (protoIdx !== -1) {
+    const slash = rest.indexOf("/", protoIdx + 3);
+    let host = slash === -1 ? rest.slice(protoIdx + 3) : rest.slice(protoIdx + 3, slash);
+    // userinfo 不属于主机：https://user:pass@host/o/r 取 @ 后段。
+    const atIdx = host.lastIndexOf("@");
+    if (atIdx !== -1) host = host.slice(atIdx + 1);
+    // DNS 根点尾缀与后端主机键同口径归一：后端 SplitHostPort 后剥点，故
+    // 端口前的尾点（host.:443）和串末尾点（host.）都要剥。
+    host = host.toLowerCase().replace(/\.+:/g, ":").replace(/\.+$/, "");
+    // scheme 缺省端口与 new URL().host 的归一同口径——https://x:443 与
+    // https://x 是同一主机，不剥会把等价地址误报成主机不一致。
+    const scheme = rest.slice(0, protoIdx).toLowerCase();
+    const defaultPort = scheme === "https" ? ":443" : scheme === "http" ? ":80" : "";
+    if (defaultPort !== "" && host.endsWith(defaultPort)) {
+      host = host.slice(0, -defaultPort.length);
+    }
+    return host;
+  }
+  // 裸形态与 ownerRepoFromInput 会剥的口径对齐：只有 github.com/ 前缀会被
+  // 剥掉，故只有它算显式主机；两段式 my.org/repo 是含点 owner（剥掉只剩
+  // 一段，本就不是主机），三段以上 host/o/r 反正解析失败——取首段只为把
+  // 「格式错误」换成更准的「主机不一致」。
+  const slash = rest.indexOf("/");
+  if (slash === -1) return "";
+  const first = rest.slice(0, slash);
+  if (first.toLowerCase() === "github.com") return "github.com";
+  const tailSegments = rest.slice(slash + 1).split("/").length;
+  if (tailSegments >= 2 && (first.includes(".") || first.includes(":"))) {
+    // 同上：先剥端口前的尾点（host.:443 → host:443）再剥串末尾点。
+    return first.toLowerCase().replace(/\.+:/g, ":").replace(/\.+$/, "");
+  }
+  return "";
 }
 
-// codeRepoUrlForInput 编辑回填的代码仓输入值：直接用服务端投影的
-// code_repo_url——它已按绑定集成/本部署主机/github_host 选好主机，前端
-// 无从分辨、不得自拼 github.com（GHE 部署会把部署实例显示成公共地址，
-// 保存时静默改绑）。投影为 null（无代码仓或悬空绑定）回填空串。
-export function codeRepoUrlForInput(project: {
-  code_repo_url?: string | null;
-}): string {
-  return project.code_repo_url ?? "";
+// ownerRepoFromInput 解析选择器的 owner/repo 输入：剥 scheme（其后首段必是
+// 主机，连主机一起剥）或裸 github.com/ 前缀后，必须恰好剩 owner/repo 两段。
+// 无 scheme 的多余主机段（my.org/a/b）不猜——把它当主机剥掉会把 Forgejo
+// 含点的组织名静默错绑到别的路径，解析不出就交表单就地报错。
+export function ownerRepoFromInput(raw: string): { owner: string; repo: string } {
+  let rest = raw.trim();
+  const protoIdx = rest.indexOf("://");
+  if (protoIdx !== -1) {
+    const slash = rest.indexOf("/", protoIdx + 3);
+    rest = slash === -1 ? "" : rest.slice(slash + 1);
+  } else if (rest.toLowerCase().startsWith("github.com/")) {
+    rest = rest.slice(11);
+  }
+  // 与后端同序：先一个尾斜杠再 .git（大小写敏感）。
+  rest = rest.replace(/\/$/, "").replace(/\.git$/, "");
+  const parts = rest.split("/");
+  if (parts.length !== 2 || !parts[0] || !parts[1]) {
+    return { owner: "", repo: "" };
+  }
+  return { owner: parts[0], repo: parts[1] };
+}
+
+// codeRepoSlugFromSaved 从服务端投影的 code_repo_url 剥出无主机的 owner/repo
+// 供选择器回填。投影由后端按绑定集成选好主机，前端不拼 scheme；剥法与
+// normalizeCodeRepoRef 的裸形态主机判定同口径：首段含点或冒号视为主机段，
+// 且剥掉后仍须剩 owner/repo 两段——含点的组织名（裸形态 my.org/repo）剥完
+// 只剩一段，说明首段本来就是 owner，不剥。
+export function codeRepoSlugFromSaved(raw: string): { owner: string; repo: string } {
+  let rest = raw.trim();
+  const protoIdx = rest.indexOf("://");
+  if (protoIdx !== -1) {
+    // scheme 后首段必是主机，连主机一起剥
+    const slash = rest.indexOf("/", protoIdx + 3);
+    rest = slash === -1 ? "" : rest.slice(slash + 1);
+  } else {
+    const slash = rest.indexOf("/");
+    if (slash !== -1) {
+      const first = rest.slice(0, slash);
+      const tail = rest.slice(slash + 1);
+      if (
+        (first.includes(".") || first.includes(":")) &&
+        tail.split("/").length >= 2
+      ) {
+        rest = tail;
+      }
+    }
+  }
+  // 与后端同序：先一个尾斜杠再 .git（大小写敏感）。
+  rest = rest.replace(/\/$/, "").replace(/\.git$/, "");
+  const parts = rest.split("/");
+  if (parts.length !== 2 || !parts[0] || !parts[1]) {
+    return { owner: "", repo: "" };
+  }
+  return { owner: parts[0], repo: parts[1] };
+}
+
+// codeRepoUrlFromSlug 按所选集成把 owner/repo 合成提交用的
+// code_repository_url：内置 github 传裸 owner/repo（后端按 github.com 解析，
+// scheme 有无都归回同一主机，前端不自拼 https://github.com）；forgejo 传
+// {base_url}/{owner}/{repo}，与后端 parseRepositoryURL 的主机匹配同口径。
+export function codeRepoUrlFromSlug(
+  integration: Pick<IntegrationOption, "kind" | "base_url">,
+  ownerRepo: { owner: string; repo: string },
+): string {
+  const slug = `${ownerRepo.owner}/${ownerRepo.repo}`;
+  if (integration.kind === "github") return slug;
+  return `${integration.base_url.replace(/\/+$/, "")}/${slug}`;
 }

@@ -32,6 +32,7 @@ type Fake struct {
 	reviewInputs     []githubapi.ReviewInput                   // SubmitReview 的完整入参
 	submittedReviews []githubapi.ReviewSummary                 // 已提交 review（对账用）
 	repoErrs         map[string]error                          // repo -> GetRepository 注入的错误（nil=可访问）
+	prErrs           map[string]error                          // repo -> GetPullRequest 注入的错误（nil=按登记表返回）
 	hookDeliveries   []HookDelivery                            // 投递记录（SetHookDeliveries 覆盖，重投时追加行）
 	hookPayloads     map[int64]json.RawMessage                 // delivery id -> 投递 payload（SetHookDeliveryPayload 登记）
 	redeliveredIDs   []int64                                   // 已触发重投的 delivery id（调用序）
@@ -80,6 +81,7 @@ func NewFake() *Fake {
 		comments:       map[string]map[int][]fakeComment{},
 		reviews:        map[string][]fakeComment{},
 		repoErrs:       map[string]error{},
+		prErrs:         map[string]error{},
 		hookPayloads:   map[int64]json.RawMessage{},
 		diffText:       "diff --git a/main.go b/main.go\n+func main() {}\n",
 		nextID:         1000,
@@ -234,10 +236,22 @@ func (f *Fake) AddReviewComment(repo string, user, path, body string, createdAt 
 		fakeComment{ID: f.nextID, User: user, Path: path, Body: body, CreatedAt: createdAt})
 }
 
+// SetPRError 注入 PR 级读取错误：err 非 nil 时该 repo 的 GetPullRequest 一律
+// 返回它（如 &githubapi.StatusError{StatusCode: 403} 模拟凭证被拒）；传 nil
+// 恢复按登记表返回。
+func (f *Fake) SetPRError(repo string, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.prErrs[fakeRepoKey(repo)] = err
+}
+
 func (f *Fake) GetPullRequest(ctx context.Context, installationID int64, repoFullName string, number int) (*githubapi.PullRequest, error) {
 	f.record("GetPullRequest", repoFullName, number, "")
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := f.prErrs[fakeRepoKey(repoFullName)]; err != nil {
+		return nil, err
+	}
 	pr, ok := f.prs[fakeRepoKey(repoFullName)][number]
 	if !ok {
 		return nil, fmt.Errorf("githubapp fake: 未登记的 PR %s#%d", repoFullName, number)
