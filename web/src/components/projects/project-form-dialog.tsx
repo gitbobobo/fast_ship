@@ -383,7 +383,7 @@ export function ProjectFormDialog({
               />
               <p className="text-xs text-muted-foreground">
                 {codeRepoPointsToForge(codeRepoInput)
-                  ? "将绑定主机匹配的代码托管集成；Forgejo 仓库本期暂不参与 PR 审查"
+                  ? "将绑定主机匹配的代码托管集成；若为 Forgejo 集成，本期暂不参与 PR 审查"
                   : "PR 审查盯的仓库；留空则审查公开仓库"}
               </p>
               {bindingBroken && (

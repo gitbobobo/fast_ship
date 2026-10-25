@@ -680,15 +680,15 @@ func (s *ProjectService) parseRepoBinding(raw string, forPublic bool) (owner, re
 	if forPublic {
 		if found {
 			return "", "", "", "", "", errs.New(errs.ErrInvalidParams.Code,
-				errs.ErrInvalidParams.Message+": 公开仓库仅支持 GitHub，"+host+" 是已配置的 Forgejo 集成（issue 镜像与发版仍只支持 GitHub）")
+				errs.ErrInvalidParams.Message+": 公开仓库仅支持 GitHub，"+displayRepoHost(raw, host)+" 是已配置的 Forgejo 集成（issue 镜像与发版仍只支持 GitHub）")
 		}
 		// 未匹配也要先点明公开仓约束：只报「主机未匹配」会引导管理员去配
 		// 一条该主机的 Forgejo 集成，提交时仍撞 GitHub-only 约束——白配一次。
 		return "", "", "", "", "", errs.New(errs.ErrInvalidParams.Code,
-			errs.ErrInvalidParams.Message+": 公开仓库仅支持 GitHub，"+host+" 不是本部署的 GitHub 实例")
+			errs.ErrInvalidParams.Message+": 公开仓库仅支持 GitHub，"+displayRepoHost(raw, host)+" 不是本部署的 GitHub 实例")
 	}
 	if !found {
-		return "", "", "", "", "", errRepoHostUnmatched(host)
+		return "", "", "", "", "", errRepoHostUnmatched(displayRepoHost(raw, host))
 	}
 	return owner, repo, id, key, "", nil
 }
@@ -704,6 +704,17 @@ func (s *ProjectService) forgeIntegrationByHost(host string) (id string, found b
 	}
 	id, _, found, err = s.forgeIntegrations.FindByHostKey(repoHostKey(host), "")
 	return id, found, err
+}
+
+// displayRepoHost 报错用的用户可辨识主机：host 是补了 scheme 默认端口的
+// 归一形态（unknown.example.com → unknown.example.com:443），直接透出会让
+// 用户以为自己多写了端口。按原始输入的 scheme 剥回默认端口；用户显式写的
+// 端口（含非默认端口）原样保留。
+func displayRepoHost(raw, host string) string {
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(raw)), "http://") {
+		return strings.TrimSuffix(host, ":80")
+	}
+	return strings.TrimSuffix(host, ":443")
 }
 
 // errRepoHostUnmatched 仓库 URL 主机未命中任何已配置集成（40001 系）。

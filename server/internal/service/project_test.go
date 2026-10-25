@@ -1528,6 +1528,11 @@ func TestProjectServiceCreate_ForgeIntegrationBinding(t *testing.T) {
 	if !ok || appErr.Code != errs.ErrInvalidParams.Code || !strings.Contains(appErr.Message, "未匹配任何已配置集成") {
 		t.Fatalf("expected 40001 未匹配, got %v", err)
 	}
+	// 报错透出用户输入的主机形态——补默认端口是内部归一细节，不回显
+	// 「:443」让人误以为自己写了端口。
+	if strings.Contains(appErr.Message, "git.local:") || !strings.Contains(appErr.Message, "git.local") {
+		t.Fatalf("error should echo user host without normalized default port, got %q", appErr.Message)
+	}
 
 	// http 集成（allow_private_network 场景）：URL 也必须显式写 http://
 	// 才能命中——http scheme 归一到 :80 与 :443 的 https 集成互不混淆。

@@ -105,7 +105,9 @@ function DeleteIntegrationAlert({
         </AlertDialogHeader>
         <AlertDialogFooter>
           <AlertDialogCancel>取消</AlertDialogCancel>
-          <AlertDialogAction onClick={onDelete}>确认删除</AlertDialogAction>
+          <AlertDialogAction variant="destructive" onClick={onDelete}>
+            确认删除
+          </AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>
