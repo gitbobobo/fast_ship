@@ -214,6 +214,14 @@ func (s *ReviewService) handlePlatformWebhook(ctx context.Context, integrationID
 	return nil
 }
 
+// deliveryLedgerKey 幂等账键：delivery_id 由各集成平台各自发放（GitHub/
+// Forgejo 都是 GUID），同值在两个集成下是不同的投递——键上拼集成前缀，
+// 自托管实例或前置代理复用/改写投递 ID 时两个集成不互相误去重而静默丢
+// webhook。存量行是未加前缀的 GitHub GUID，与新键天然不撞。
+func deliveryLedgerKey(integrationID, deliveryID string) string {
+	return integrationID + ":" + deliveryID
+}
+
 // runWebhookDeliveryTx 幂等登记 + 触发处理的单事务（零网络调用）。tiedBase
 // 由复验重进时绑定观察到的总账 head——首趟回滚连幂等登记一起撤销，重进
 // 时重新登记同一 delivery id，对平台仍是一次投递。
@@ -221,7 +229,7 @@ func (s *ReviewService) runWebhookDeliveryTx(ctx context.Context, integrationID,
 	now := time.Now().UTC()
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		inserted, err := s.deliveries.InsertTx(tx, &model.GitHubWebhookDelivery{
-			DeliveryID: deliveryID,
+			DeliveryID: deliveryLedgerKey(integrationID, deliveryID),
 			Event:      event,
 			ReceivedAt: now,
 		})
@@ -280,7 +288,7 @@ func (s *ReviewService) revalidateTiedWebhook(ctx context.Context, integrationID
 	if live == nil || live.Draft || live.Merged ||
 		live.State == "closed" || live.State == "merged" ||
 		!strings.EqualFold(live.HeadSHA, p.PR.Head.SHA) {
-		s.recordDroppedDelivery(ctx, deliveryID, event)
+		s.recordDroppedDelivery(ctx, integrationID, deliveryID, event)
 		return nil
 	}
 	trigger := &reviewWebhookTrigger{
@@ -309,13 +317,13 @@ func (s *ReviewService) revalidateTiedWebhook(ctx context.Context, integrationID
 // runWebhookDeliveryTx（首趟登记随回滚撤销），单独一行小事务把 delivery id
 // 记下；已登记（比如并发投递抢先提交）时 InsertTx 的 inserted=false 不算错。
 // 登记失败只告警不阻断——最坏不过是重投时再判一次，结果同样是丢弃。
-func (s *ReviewService) recordDroppedDelivery(ctx context.Context, deliveryID, event string) {
+func (s *ReviewService) recordDroppedDelivery(ctx context.Context, integrationID, deliveryID, event string) {
 	if deliveryID == "" {
 		return
 	}
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		_, err := s.deliveries.InsertTx(tx, &model.GitHubWebhookDelivery{
-			DeliveryID: deliveryID,
+			DeliveryID: deliveryLedgerKey(integrationID, deliveryID),
 			Event:      event,
 			ReceivedAt: time.Now().UTC(),
 		})

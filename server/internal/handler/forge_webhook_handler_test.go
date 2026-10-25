@@ -112,10 +112,10 @@ func (e *forgeWebhookEnv) postForgeWebhook(t *testing.T, integrationID, delivery
 	return w
 }
 
-func (e *forgeWebhookEnv) forgeDeliveryCount(t *testing.T, delivery string) int64 {
+func (e *forgeWebhookEnv) forgeDeliveryCount(t *testing.T, integrationID, delivery string) int64 {
 	t.Helper()
 	var n int64
-	if err := e.db.Model(&model.GitHubWebhookDelivery{}).Where("delivery_id = ?", delivery).Count(&n).Error; err != nil {
+	if err := e.db.Model(&model.GitHubWebhookDelivery{}).Where("delivery_id = ?", integrationID+":"+delivery).Count(&n).Error; err != nil {
 		t.Fatalf("count deliveries: %v", err)
 	}
 	return n
@@ -148,7 +148,7 @@ func TestForgeWebhookHandler_SignatureMatrix(t *testing.T) {
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("valid = %d %s", w.Code, w.Body.String())
 	}
-	if n := env.forgeDeliveryCount(t, "fw-1"); n != 1 {
+	if n := env.forgeDeliveryCount(t, row.ID, "fw-1"); n != 1 {
 		t.Fatalf("deliveries = %d, want 1", n)
 	}
 
@@ -187,7 +187,7 @@ func TestForgeWebhookHandler_SignatureMatrix(t *testing.T) {
 		t.Fatalf("no secret = %d %s, want 503/50300", w.Code, w.Body.String())
 	}
 	// 拒收路径同样零写入。
-	if n := env.forgeDeliveryCount(t, "fw-6"); n != 0 {
+	if n := env.forgeDeliveryCount(t, row.ID, "fw-6"); n != 0 {
 		t.Fatalf("503 writes = %d, want 0", n)
 	}
 }
@@ -209,7 +209,7 @@ func TestForgeWebhookHandler_GiteaHeaderFallback(t *testing.T) {
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("gitea headers = %d %s, want 202", w.Code, w.Body.String())
 	}
-	if n := env.forgeDeliveryCount(t, "fw-gitea"); n != 1 {
+	if n := env.forgeDeliveryCount(t, row.ID, "fw-gitea"); n != 1 {
 		t.Fatalf("deliveries = %d, want 1", n)
 	}
 
@@ -226,7 +226,7 @@ func TestForgeWebhookHandler_GiteaHeaderFallback(t *testing.T) {
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("forgejo precedence = %d, want 202", w.Code)
 	}
-	if n := env.forgeDeliveryCount(t, "fw-both"); n != 1 {
+	if n := env.forgeDeliveryCount(t, row.ID, "fw-both"); n != 1 {
 		t.Fatalf("deliveries = %d, want 1", n)
 	}
 }
@@ -262,7 +262,7 @@ func TestForgeWebhookHandler_DeliveryIdempotent(t *testing.T) {
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("replay = %d", w.Code)
 	}
-	if n := env.forgeDeliveryCount(t, "fw-idem"); n != 1 {
+	if n := env.forgeDeliveryCount(t, row.ID, "fw-idem"); n != 1 {
 		t.Fatalf("deliveries = %d, want 1", n)
 	}
 }

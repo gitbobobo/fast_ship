@@ -158,7 +158,7 @@ func TestHandleForgejoWebhook_IgnoreAndDedup(t *testing.T) {
 	if !errors.Is(err, ErrDeliveryDuplicated) {
 		t.Fatalf("replay err = %v, want ErrDeliveryDuplicated", err)
 	}
-	svc.db.Model(&model.GitHubWebhookDelivery{}).Where("delivery_id = ?", "d-replay").Count(&n)
+	svc.db.Model(&model.GitHubWebhookDelivery{}).Where("delivery_id = ?", deliveryLedgerKey(forgeID, "d-replay")).Count(&n)
 	if n != 1 {
 		t.Fatalf("delivery rows = %d, want 1", n)
 	}
@@ -1026,7 +1026,7 @@ func TestHandleForgejoWebhook_MissingTimestampAmbiguous(t *testing.T) {
 		t.Fatalf("sha-a 不得登记 seen, rows = %d", n)
 	}
 	// 复核判丢弃的投递已补登幂等账：同 GUID 手动 redeliver 直接 202 去重。
-	svc.db.Model(&model.GitHubWebhookDelivery{}).Where("delivery_id = ?", "d-a").Count(&n)
+	svc.db.Model(&model.GitHubWebhookDelivery{}).Where("delivery_id = ?", deliveryLedgerKey(forgeID, "d-a")).Count(&n)
 	if n != 1 {
 		t.Fatalf("dropped delivery d-a 应补登幂等账, rows = %d", n)
 	}

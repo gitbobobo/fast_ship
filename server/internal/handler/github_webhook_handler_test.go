@@ -145,7 +145,7 @@ func prWebhookPayload(action, repo string, number int, sha string) []byte {
 func (e *webhookHandlerEnv) deliveryCount(t *testing.T, delivery string) int64 {
 	t.Helper()
 	var n int64
-	if err := e.db.Model(&model.GitHubWebhookDelivery{}).Where("delivery_id = ?", delivery).Count(&n).Error; err != nil {
+	if err := e.db.Model(&model.GitHubWebhookDelivery{}).Where("delivery_id = ?", model.ForgeIntegrationBuiltinGitHubID+":"+delivery).Count(&n).Error; err != nil {
 		t.Fatalf("count deliveries: %v", err)
 	}
 	return n
