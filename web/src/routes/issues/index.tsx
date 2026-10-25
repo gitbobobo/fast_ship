@@ -494,7 +494,7 @@ export default function IssuesPage() {
                         aria-label="在 GitHub 打开仓库"
                         render={
                           <a
-                            href={`https://github.com/${activeProject!.github_owner}/${activeProject!.github_repo}`}
+                            href={activeProject!.repository_url ?? undefined}
                             target="_blank"
                             rel="noopener noreferrer"
                           />

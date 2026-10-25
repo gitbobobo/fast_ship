@@ -119,6 +119,7 @@ function mockProjects(items: Project[] = [
     description: "",
     github_owner: "acme",
     github_repo: "alpha",
+    repository_url: "https://github.com/acme/alpha",
     code_github_owner: "",
     code_repo_url: null,
     code_github_repo: "",

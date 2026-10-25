@@ -140,9 +140,12 @@ PR 审查执行面是 GitHub only，设置面也按同一口径表达「不可�
   错误 URL（自托管子路径部署请配反代，或让 API 前缀走 `api_base_url`）。
   **`api_base_url` 不受限**，可以带路径（`/api/v1` 是惯例），也刻意允许
   与 `base_url` 不同主机：网关/分体部署（web 与 API 分离反代）是支持的
-  形态。注意 PAT 随探测请求发往的是 **api 主机**，私网放行名单
-  （`Config.AllowedHosts`）也同时纳入 api 主机；「同归一主机只允许一个
-  集成」的查重只管 `base_url`。
+  形态。注意 PAT 以 `Authorization: token` 头随探测与 API 请求发往的是
+  **api 主机**——钉到第三方主机会把该集成的 PAT 发给那台主机，这是管理
+  员对自己凭证的显式选择（仅限其可控基础设施，SSRF 私网防护照常生效），
+  `rejectDeadForgeHost` 的死主机拦截只管 `base_url`、不管 api 端点。私网
+  放行名单（`Config.AllowedHosts`）也同时纳入 api 主机；「同归一主机只
+  允许一个集成」的查重只管 `base_url`。
 - **不收 userinfo**：`https://user:pass@host` 直接 40001——凭证随 base_url
   明文落库、回显并被拼进审查链接。保存返回的 base_url 是按 URL 重编码的归一
   串（scheme 小写、去尾斜杠），不是原始输入。

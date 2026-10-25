@@ -1016,6 +1016,7 @@ API Key 管理（仅 JWT）
 | `items[].description` | string | 是 |  |
 | `items[].github_owner` | string | 是 |  |
 | `items[].github_repo` | string | 是 |  |
+| `items[].repository_url` | string（可空） | 是 | 公开仓页面地址（INT-166）。无公开仓（owner/repo 缺一）为 null；github_host='github.com' 为 https://github.com/{owner}/{repo}，空串（本部署 GitHub/GHE）按部署 GitHub Web 基址拼。编辑表单据此回填，不自行拼主机 |
 | `items[].code_github_owner` | string | 是 | 代码仓库（PR 审查用）owner；未单独配置为空串，表示与公开仓库相同 |
 | `items[].code_github_repo` | string | 是 | 代码仓库（PR 审查用）repo 名；未单独配置为空串，表示与公开仓库相同 |
 | `items[].public_github_token_id` | string | 是 | 公开仓库 Token 引用；未配置为空串 |
@@ -1090,6 +1091,7 @@ API Key 管理（仅 JWT）
 | `description` | string | 是 |  |
 | `github_owner` | string | 是 |  |
 | `github_repo` | string | 是 |  |
+| `repository_url` | string（可空） | 是 | 公开仓页面地址（INT-166）。无公开仓（owner/repo 缺一）为 null；github_host='github.com' 为 https://github.com/{owner}/{repo}，空串（本部署 GitHub/GHE）按部署 GitHub Web 基址拼。编辑表单据此回填，不自行拼主机 |
 | `code_github_owner` | string | 是 | 代码仓库（PR 审查用）owner；未单独配置为空串，表示与公开仓库相同 |
 | `code_github_repo` | string | 是 | 代码仓库（PR 审查用）repo 名；未单独配置为空串，表示与公开仓库相同 |
 | `public_github_token_id` | string | 是 | 公开仓库 Token 引用；未配置为空串 |
@@ -1158,6 +1160,7 @@ API Key 管理（仅 JWT）
 | `description` | string | 是 |  |
 | `github_owner` | string | 是 |  |
 | `github_repo` | string | 是 |  |
+| `repository_url` | string（可空） | 是 | 公开仓页面地址（INT-166）。无公开仓（owner/repo 缺一）为 null；github_host='github.com' 为 https://github.com/{owner}/{repo}，空串（本部署 GitHub/GHE）按部署 GitHub Web 基址拼。编辑表单据此回填，不自行拼主机 |
 | `code_github_owner` | string | 是 | 代码仓库（PR 审查用）owner；未单独配置为空串，表示与公开仓库相同 |
 | `code_github_repo` | string | 是 | 代码仓库（PR 审查用）repo 名；未单独配置为空串，表示与公开仓库相同 |
 | `public_github_token_id` | string | 是 | 公开仓库 Token 引用；未配置为空串 |
@@ -1236,6 +1239,7 @@ API Key 管理（仅 JWT）
 | `description` | string | 是 |  |
 | `github_owner` | string | 是 |  |
 | `github_repo` | string | 是 |  |
+| `repository_url` | string（可空） | 是 | 公开仓页面地址（INT-166）。无公开仓（owner/repo 缺一）为 null；github_host='github.com' 为 https://github.com/{owner}/{repo}，空串（本部署 GitHub/GHE）按部署 GitHub Web 基址拼。编辑表单据此回填，不自行拼主机 |
 | `code_github_owner` | string | 是 | 代码仓库（PR 审查用）owner；未单独配置为空串，表示与公开仓库相同 |
 | `code_github_repo` | string | 是 | 代码仓库（PR 审查用）repo 名；未单独配置为空串，表示与公开仓库相同 |
 | `public_github_token_id` | string | 是 | 公开仓库 Token 引用；未配置为空串 |
@@ -1343,6 +1347,7 @@ API Key 管理（仅 JWT）
 | `description` | string | 是 |  |
 | `github_owner` | string | 是 |  |
 | `github_repo` | string | 是 |  |
+| `repository_url` | string（可空） | 是 | 公开仓页面地址（INT-166）。无公开仓（owner/repo 缺一）为 null；github_host='github.com' 为 https://github.com/{owner}/{repo}，空串（本部署 GitHub/GHE）按部署 GitHub Web 基址拼。编辑表单据此回填，不自行拼主机 |
 | `code_github_owner` | string | 是 | 代码仓库（PR 审查用）owner；未单独配置为空串，表示与公开仓库相同 |
 | `code_github_repo` | string | 是 | 代码仓库（PR 审查用）repo 名；未单独配置为空串，表示与公开仓库相同 |
 | `public_github_token_id` | string | 是 | 公开仓库 Token 引用；未配置为空串 |
@@ -1410,6 +1415,7 @@ API Key 管理（仅 JWT）
 | `description` | string | 是 |  |
 | `github_owner` | string | 是 |  |
 | `github_repo` | string | 是 |  |
+| `repository_url` | string（可空） | 是 | 公开仓页面地址（INT-166）。无公开仓（owner/repo 缺一）为 null；github_host='github.com' 为 https://github.com/{owner}/{repo}，空串（本部署 GitHub/GHE）按部署 GitHub Web 基址拼。编辑表单据此回填，不自行拼主机 |
 | `code_github_owner` | string | 是 | 代码仓库（PR 审查用）owner；未单独配置为空串，表示与公开仓库相同 |
 | `code_github_repo` | string | 是 | 代码仓库（PR 审查用）repo 名；未单独配置为空串，表示与公开仓库相同 |
 | `public_github_token_id` | string | 是 | 公开仓库 Token 引用；未配置为空串 |

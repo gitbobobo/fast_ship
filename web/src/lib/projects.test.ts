@@ -12,6 +12,7 @@ function makeProject(
     description: "",
     github_owner: "",
     github_repo: "",
+    repository_url: null,
     code_github_owner: "",
     code_repo_url: null,
     code_github_repo: "",

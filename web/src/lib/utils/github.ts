@@ -144,24 +144,12 @@ export function codeRepoPointsToForge(raw: string): boolean {
   return norm !== "" && !norm.startsWith("github.com/");
 }
 
-// codeRepoUrlForInput 编辑回填的代码仓输入值：优先服务端投影的 code_repo_url
-// （forgejo 集成时是实例基址形态）；为 null 且未绑定集成（code_integration_id
-// 为空 = 内置 github 存量行）时按 owner/repo 兜底 github 形态。绑定了集成但
-// 投影为空（悬空绑定）返回空串——不再回落 github.com/{o}/{r}：那会把
-// forgejo 的 owner/repo 显示成 github 地址，保存时被静默改绑。
+// codeRepoUrlForInput 编辑回填的代码仓输入值：直接用服务端投影的
+// code_repo_url——它已按绑定集成/本部署主机/github_host 选好主机，前端
+// 无从分辨、不得自拼 github.com（GHE 部署会把部署实例显示成公共地址，
+// 保存时静默改绑）。投影为 null（无代码仓或悬空绑定）回填空串。
 export function codeRepoUrlForInput(project: {
   code_repo_url?: string | null;
-  code_integration_id?: string | null;
-  code_github_owner?: string;
-  code_github_repo?: string;
 }): string {
-  if (project.code_repo_url) return project.code_repo_url;
-  if (
-    !project.code_integration_id &&
-    project.code_github_owner &&
-    project.code_github_repo
-  ) {
-    return `https://github.com/${project.code_github_owner}/${project.code_github_repo}`;
-  }
-  return "";
+  return project.code_repo_url ?? "";
 }

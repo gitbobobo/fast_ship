@@ -496,6 +496,38 @@ func TestCodeRepoUrlGHEExplicitPublicGitHub(t *testing.T) {
 	}
 }
 
+// repository_url 投影透出公开仓主机（R41 P2）：前端不再自拼 github.com——
+// GHE 部署下 github_host 空的行要回本部署地址，显式 github.com 回公共实例。
+func TestRepositoryUrlProjection(t *testing.T) {
+	svc := setupTestServices(t)
+	svc.cfg.GitHubApp.APIBaseURL = "https://ghe.corp.example/api/v3"
+	ps := newTestProjectService(svc)
+
+	for _, tc := range []struct {
+		name, host, want string
+	}{
+		{"显式公共 github.com", "github.com", "https://github.com/o/r"},
+		{"本部署 GHE", "", "https://ghe.corp.example/o/r"},
+	} {
+		p := &model.Project{
+			ID: uuid.NewString(), Name: tc.name,
+			GithubOwner: "o", GithubRepo: "r", GithubHost: tc.host,
+		}
+		resp, err := ps.toResponse(p, nil)
+		if err != nil {
+			t.Fatalf("%s toResponse: %v", tc.name, err)
+		}
+		if resp.RepositoryUrl == nil || *resp.RepositoryUrl != tc.want {
+			t.Fatalf("%s repository_url = %v, want %s", tc.name, resp.RepositoryUrl, tc.want)
+		}
+	}
+	// 无公开仓：null。
+	resp, err := ps.toResponse(&model.Project{ID: uuid.NewString(), Name: "empty"}, nil)
+	if err != nil || resp.RepositoryUrl != nil {
+		t.Fatalf("empty repo repository_url = %v, want nil", resp.RepositoryUrl)
+	}
+}
+
 // GHE 部署下公开仓显式 github.com、代码仓写本部署主机（裸写或 GHE 地址）：
 // 两边同 owner/repo 也是不同实例，normalizeCodeRepo 不得吞并 code 字段——
 // 吞并会让 code_repo_url 回落渲染到公共 github.com 同名仓（R38 P1 回归）。

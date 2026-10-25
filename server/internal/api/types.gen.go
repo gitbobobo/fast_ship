@@ -3287,6 +3287,9 @@ type Project struct {
 	// PublicIntegrationId 公开仓库集成引用（INT-166）；null 或空串 = 内置 github-default。写入接线由后续任务完成，本期只随响应带出
 	PublicIntegrationId *string `json:"public_integration_id"`
 
+	// RepositoryUrl 公开仓页面地址（INT-166）。无公开仓（owner/repo 缺一）为 null；github_host='github.com' 为 https://github.com/{owner}/{repo}，空串（本部署 GitHub/GHE）按部署 GitHub Web 基址拼。编辑表单据此回填，不自行拼主机
+	RepositoryUrl *string `json:"repository_url"`
+
 	// ShelvedAt 搁置开始时间；null 表示未搁置（INT-165）
 	ShelvedAt *string `json:"shelved_at"`
 

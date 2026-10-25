@@ -179,9 +179,10 @@ export function ProjectFormDialog({
       reset({
         name: project.name,
         description: project.description || "",
-        repository_url: hasGitHubRepo(project)
-          ? `https://github.com/${project.github_owner}/${project.github_repo}`
-          : "",
+        // 回填服务端投影的 repository_url：github_host 语义（公共 github.com
+        // vs 本部署 GHE）前端无从分辨，自拼 github.com 会把部署实例的项目在
+        // 保存时静默改写成公共主机（R41 P2）。
+        repository_url: project.repository_url ?? "",
         code_repository_url: codeRepoUrlForInput(project),
         public_github_token_id: project.public_github_token_id || "",
         code_github_token_id: project.code_github_token_id || "",

@@ -10553,7 +10553,7 @@ components:
           description: 三态——key 缺省保留现值；显式 null 或空串清空该用途引用；非空替换（须属于当前用户，否则 40420）
     Project:
       type: object
-      required: [id, name, description, github_owner, github_repo, code_github_owner, code_github_repo, public_github_token_id, code_github_token_id, code_integration_id, public_integration_id, code_repo_url, shelved_at, shelved_until, is_shelved, created_at, updated_at]
+      required: [id, name, description, github_owner, github_repo, repository_url, code_github_owner, code_github_repo, public_github_token_id, code_github_token_id, code_integration_id, public_integration_id, code_repo_url, shelved_at, shelved_until, is_shelved, created_at, updated_at]
       properties:
         id:
           type: string
@@ -10565,6 +10565,10 @@ components:
           type: string
         github_repo:
           type: string
+        repository_url:
+          type: string
+          nullable: true
+          description: 公开仓页面地址（INT-166）。无公开仓（owner/repo 缺一）为 null；github_host='github.com' 为 https://github.com/{owner}/{repo}，空串（本部署 GitHub/GHE）按部署 GitHub Web 基址拼。编辑表单据此回填，不自行拼主机
         code_github_owner:
           type: string
           description: 代码仓库（PR 审查用）owner；未单独配置为空串，表示与公开仓库相同

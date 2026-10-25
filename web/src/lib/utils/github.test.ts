@@ -133,29 +133,24 @@ describe("normalizeCodeRepoRef", () => {
 });
 
 describe("codeRepoUrlForInput", () => {
-  const base = { code_github_owner: "acme", code_github_repo: "app" };
-
   it("服务端投影有值时原样回填（forgejo 集成是实例基址形态）", () => {
     expect(
       codeRepoUrlForInput({
-        ...base,
-        code_integration_id: "int-1",
         code_repo_url: "https://forge.example.com/acme/app",
       }),
     ).toBe("https://forge.example.com/acme/app");
   });
 
-  it("悬空绑定（有集成引用、投影为 null）回填空串，不再回落 github 地址", () => {
-    expect(codeRepoUrlForInput({ ...base, code_integration_id: "int-1" })).toBe(
-      "",
-    );
+  it("GHE/公共主机由服务端选好：回填不自拼 github.com", () => {
+    expect(
+      codeRepoUrlForInput({
+        code_repo_url: "https://ghe.corp.example/acme/app",
+      }),
+    ).toBe("https://ghe.corp.example/acme/app");
   });
 
-  it("未绑定集成的存量项目（内置 github）按 owner/repo 兜底 github 形态", () => {
-    expect(codeRepoUrlForInput({ ...base, code_integration_id: null })).toBe(
-      "https://github.com/acme/app",
-    );
-    // owner/repo 缺一时没有兜底。
-    expect(codeRepoUrlForInput({ code_integration_id: null })).toBe("");
+  it("投影为 null（无代码仓或悬空绑定）回填空串，不回落 github 地址", () => {
+    expect(codeRepoUrlForInput({ code_repo_url: null })).toBe("");
+    expect(codeRepoUrlForInput({})).toBe("");
   });
 });

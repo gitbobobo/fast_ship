@@ -781,6 +781,17 @@ func (s *ProjectService) toResponseWithIntegrations(p *model.Project, syncState 
 		CreatedAt:           p.CreatedAt.Format("2006-01-02T15:04:05Z"),
 		UpdatedAt:           p.UpdatedAt.Format("2006-01-02T15:04:05Z"),
 	}
+	// 公开仓页面地址随响应透出：编辑表单与仓库直链直接回填，不在前端拼
+	// 主机——github_host='github.com' 是公共实例，空串按本部署 GitHub Web
+	// 基址（GHE 部署拼 github.com 会静默改写 github_host 语义）。
+	if p.GithubOwner != "" && p.GithubRepo != "" {
+		base := s.ghWebBase
+		if p.GithubHost != "" {
+			base = "https://" + p.GithubHost
+		}
+		url := base + "/" + p.GithubOwner + "/" + p.GithubRepo
+		resp.RepositoryUrl = &url
+	}
 	codeRepoURL, err := s.codeRepoUrl(p, integrations)
 	if err != nil {
 		return nil, err
