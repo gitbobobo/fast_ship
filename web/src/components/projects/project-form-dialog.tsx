@@ -337,12 +337,29 @@ export function ProjectFormDialog({
               payload.code_repository_url = null;
             }
           } else {
-            const synthesized = synthesizeRepoUrl();
-            if (synthesized === null) return;
-            const next = normalizeCodeRepoRef(synthesized);
-            const current = normalizeCodeRepoRef(currentRepoUrl);
-            if (next === "" || next !== current) {
-              payload.code_repository_url = synthesized;
+            // 绑定等价（集成 id + owner/repo 归一相同）直接不携带——集成列表
+            // 还在加载/加载失败时 selectedIntegration 解析不出，合成会中止
+            // 提交；此时用户只改项目名等无关字段也应能保存。只有真改动才要求
+            // 选项解析成功。
+            const savedParts =
+              project.code_github_owner && project.code_github_repo
+                ? { owner: project.code_github_owner, repo: project.code_github_repo }
+                : codeRepoSlugFromSaved(currentRepoUrl);
+            const inputParts = ownerRepoFromInput(codeRepoSlug);
+            const bindingUnchanged =
+              codeIntegrationId === savedIntegrationId &&
+              !!inputParts.owner &&
+              !!inputParts.repo &&
+              inputParts.owner.toLowerCase() === savedParts.owner.toLowerCase() &&
+              inputParts.repo.toLowerCase() === savedParts.repo.toLowerCase();
+            if (!bindingUnchanged) {
+              const synthesized = synthesizeRepoUrl();
+              if (synthesized === null) return;
+              const next = normalizeCodeRepoRef(synthesized);
+              const current = normalizeCodeRepoRef(currentRepoUrl);
+              if (next === "" || next !== current) {
+                payload.code_repository_url = synthesized;
+              }
             }
           }
         }

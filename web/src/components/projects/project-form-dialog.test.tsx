@@ -412,6 +412,57 @@ describe("ProjectFormDialog", () => {
     ).toHaveTextContent("内置 GitHub");
   });
 
+  it("集成列表加载中：forge 绑定未改动时保存不携带代码仓字段（合成不要求选项就绪）", async () => {
+    mockIntegrationOptions({ data: undefined, isLoading: true });
+    const user = userEvent.setup();
+    renderDialog(
+      "edit",
+      makeProject({
+        code_integration_id: "forge-1",
+        code_repo_url: "https://forge.example.com/acme/api",
+        code_github_owner: "acme",
+        code_github_repo: "api",
+      }),
+    );
+
+    expect(await screen.findByLabelText(/owner \/ repo/)).toHaveValue("acme/api");
+    const nameInput = screen.getByLabelText("项目名称");
+    await user.clear(nameInput);
+    await user.type(nameInput, "renamed");
+    await user.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => expect(updateMutateAsync).toHaveBeenCalled());
+    const payload = updateMutateAsync.mock.calls[0][0];
+    expect(payload.name).toBe("renamed");
+    expect(payload).not.toHaveProperty("code_repository_url");
+  });
+
+  it("集成列表加载中：forge 绑定改动 owner/repo 时就地报错且不提交", async () => {
+    mockIntegrationOptions({ data: undefined, isLoading: true });
+    const user = userEvent.setup();
+    renderDialog(
+      "edit",
+      makeProject({
+        code_integration_id: "forge-1",
+        code_repo_url: "https://forge.example.com/acme/api",
+        code_github_owner: "acme",
+        code_github_repo: "api",
+      }),
+    );
+
+    const input = await screen.findByLabelText(/owner \/ repo/);
+    await user.clear(input);
+    await user.type(input, "acme/other");
+    await user.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() =>
+      expect(
+        screen.getByText(/所选代码仓集成不可用/),
+      ).toBeInTheDocument(),
+    );
+    expect(updateMutateAsync).not.toHaveBeenCalled();
+  });
+
   it("新建项目：不显示停用提示，forge 集成合成完整 URL", async () => {
     const user = userEvent.setup();
     renderDialog("create");
