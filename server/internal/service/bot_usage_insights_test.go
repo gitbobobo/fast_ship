@@ -478,6 +478,51 @@ func TestBotUsageInsightsFailureRetry(t *testing.T) {
 	}
 }
 
+// by_error 契约「null 组排最后」恒定优先（复审修复）：null 组即使 cost 最高、
+// 与其余组不并列也排最后——排序先分出 null 组，再按 cost 降序比其余组。
+func TestBotUsageInsightsByErrorNullGroupLast(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "insightnulllast")
+	bot := env.createBot(t, userID)
+
+	run := seedUsageRun(t, env, bot.ID, nil)
+	seedInsightRequest(t, env, run.ID, func(r *model.BotModelRequest) {
+		r.Status = model.BotModelRequestFailed
+		r.CostEstimate = ptrCost(1.0) // null 组 cost 最高，按旧实现会排第一
+	})
+	seedInsightRequest(t, env, run.ID, func(r *model.BotModelRequest) {
+		r.Status = model.BotModelRequestFailed
+		r.ErrorCode = ptrString("rate_limit")
+		r.CostEstimate = ptrCost(0.5)
+	})
+	seedInsightRequest(t, env, run.ID, func(r *model.BotModelRequest) {
+		r.Status = model.BotModelRequestFailed
+		r.ErrorCode = ptrString("server_error") // 全未计价
+	})
+
+	ins, err := env.bots.GetBotUsageInsights(userID, "7d", "")
+	if err != nil {
+		t.Fatalf("insights: %v", err)
+	}
+	f := insightBotOf(t, ins, bot.ID).Failures
+	if len(f.ByError) != 3 {
+		t.Fatalf("应有 3 个错误码组: %+v", f.ByError)
+	}
+	if f.ByError[0].ErrorCode == nil || *f.ByError[0].ErrorCode != "rate_limit" ||
+		f.ByError[0].Cost == nil || !costEq(*f.ByError[0].Cost, 0.5) {
+		t.Fatalf("非 null 组应按 cost 降序，rate_limit 0.5 居首: %+v", f.ByError[0])
+	}
+	if f.ByError[1].ErrorCode == nil || *f.ByError[1].ErrorCode != "server_error" || f.ByError[1].Cost != nil {
+		t.Fatalf("未计价 server_error 应排非 null 组末位: %+v", f.ByError[1])
+	}
+	if f.ByError[2].ErrorCode != nil {
+		t.Fatalf("null 组即使 cost 最高也应恒定排最后: %+v", f.ByError[2])
+	}
+	if f.ByError[2].Cost == nil || !costEq(*f.ByError[2].Cost, 1.0) {
+		t.Fatalf("null 组金额应保留 1.0: %+v", f.ByError[2])
+	}
+}
+
 // 空转：silent / 无工具调用 / 无写操作三种 run 分别被识别（条件可叠加命中），
 // skipped 与进行中 run 不进分母；idle_cost 只含空转 run 的显示成本。
 func TestBotUsageInsightsIdle(t *testing.T) {
@@ -687,7 +732,9 @@ func TestBotUsageInsightsModelAlternatives(t *testing.T) {
 }
 
 // context_growth：每个有请求的 run 取 ordinal 最小的请求，usage 完整取
-// prompt_tokens、缺 usage 回退 input_tokens_estimate 并标 estimated，按时间升序。
+// prompt_tokens、缺 usage 且估算 > 0 回退估算并标 estimated；prompt 与估算
+// 皆无的首请求（估算列 NOT NULL default 0 分不出「未写估算」与真 0）不出点，
+// 按 run 创建时间升序。
 func TestBotUsageInsightsContextGrowth(t *testing.T) {
 	env := setupBotTestEnv(t)
 	userID := createBotTestUser(t, env.db, "insightgrowth")
@@ -709,6 +756,10 @@ func TestBotUsageInsightsContextGrowth(t *testing.T) {
 	seedInsightRequest(t, env, fresh.ID, func(r *model.BotModelRequest) {
 		r.InputTokensEstimate = 800 // 缺 usage：回退估算并标 estimated
 	})
+	// 缺 usage 且未写估算（estimate=0）：不产出 input_tokens=0、estimated=true
+	// 的误导点，该 run 在 context_growth 里缺席。
+	blind := seedUsageRun(t, env, bot.ID, nil)
+	seedInsightRequest(t, env, blind.ID, nil)
 
 	ins, err := env.bots.GetBotUsageInsights(userID, "7d", "")
 	if err != nil {
@@ -728,16 +779,22 @@ func TestBotUsageInsightsContextGrowth(t *testing.T) {
 	if !(first.At < second.At) {
 		t.Fatalf("点应按时间升序: %s -> %s", first.At, second.At)
 	}
+	for _, p := range b.ContextGrowth {
+		if p.RunId == blind.ID {
+			t.Fatalf("缺 usage 且估算为 0 的 run 不应产出点: %+v", p)
+		}
+	}
 }
 
-// context_growth 截断：超过 200 点保留最新 200 个并置 truncated。
+// context_growth 截断：超过 200 点保留最新 200 个并置 truncated。估算值从 1
+// 起——estimate=0 的首请求按修复口径不出点，不再计入点数。
 func TestBotUsageInsightsContextGrowthTruncates(t *testing.T) {
 	env := setupBotTestEnv(t)
 	userID := createBotTestUser(t, env.db, "insighttrunc")
 	bot := env.createBot(t, userID)
 	for i := 0; i < usageContextGrowthMaxPoints+1; i++ {
 		run := seedUsageRun(t, env, bot.ID, nil)
-		estimate := int64(i)
+		estimate := int64(i) + 1
 		seedInsightRequest(t, env, run.ID, func(r *model.BotModelRequest) {
 			r.InputTokensEstimate = estimate
 		})
@@ -753,7 +810,8 @@ func TestBotUsageInsightsContextGrowthTruncates(t *testing.T) {
 	if len(b.ContextGrowth) != usageContextGrowthMaxPoints {
 		t.Fatalf("应保留最新 %d 点，实得 %d", usageContextGrowthMaxPoints, len(b.ContextGrowth))
 	}
-	if b.ContextGrowth[0].InputTokens != 1 || b.ContextGrowth[len(b.ContextGrowth)-1].InputTokens != int64(usageContextGrowthMaxPoints) {
+	// 201 个点（估算 1..201）保留最新 200 个：丢掉估算 1 的最早点。
+	if b.ContextGrowth[0].InputTokens != 2 || b.ContextGrowth[len(b.ContextGrowth)-1].InputTokens != int64(usageContextGrowthMaxPoints+1) {
 		t.Fatalf("截断应保留最新点（丢掉最早 run）: 首 %v 末 %v",
 			b.ContextGrowth[0], b.ContextGrowth[len(b.ContextGrowth)-1])
 	}

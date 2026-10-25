@@ -57,19 +57,20 @@ func NewBotUsageRepository(db *gorm.DB) *BotUsageRepository {
 }
 
 // UsageRunRow 是窗口内 run 的聚合扫描行：只取花费页用到的列。INT-163 起带
-// silent（空转条件一）与 config_snapshot_json（换模型差价的目录/模型归属）。
+// silent（空转条件一）。config_snapshot_json 单行可达数 KB 且总览不消费，
+// 不随这两条扫描回读（30 天窗口会把整列快照读回内存）；换模型差价的快照
+// 归属由 insights 经 RunConfigSnapshotsByIDs 按 runIDs 单独补查。
 type UsageRunRow struct {
-	ID                 string
-	BotID              string
-	SessionKind        string
-	TriggerSource      string
-	TriggerKey         string
-	Status             string
-	ScheduleTaskID     *string
-	CostEstimate       *float64
-	Silent             bool
-	ConfigSnapshotJSON string
-	CreatedAt          time.Time
+	ID             string
+	BotID          string
+	SessionKind    string
+	TriggerSource  string
+	TriggerKey     string
+	Status         string
+	ScheduleTaskID *string
+	CostEstimate   *float64
+	Silent         bool
+	CreatedAt      time.Time
 }
 
 // ListRunsInWindow 返回机器人集合在 [start, end) 内创建的 run（main 与
@@ -82,7 +83,7 @@ func (r *BotUsageRepository) ListRunsInWindow(botIDs []string, start, end time.T
 	for _, batch := range ChunkIDs(botIDs, UsageQueryBatch) {
 		var part []UsageRunRow
 		err := r.db.Model(&model.BotRun{}).
-			Select("id, bot_id, session_kind, trigger_source, trigger_key, status, schedule_task_id, cost_estimate, silent, config_snapshot_json, created_at").
+			Select("id, bot_id, session_kind, trigger_source, trigger_key, status, schedule_task_id, cost_estimate, silent, created_at").
 			Where("bot_id IN ?", batch).
 			Where("created_at >= ? AND created_at < ?", start, end).
 			Order("created_at ASC, id ASC").
@@ -103,7 +104,7 @@ func (r *BotUsageRepository) ListRunsByIDs(runIDs []string) (map[string]UsageRun
 	for _, batch := range ChunkIDs(runIDs, UsageQueryBatch) {
 		var rows []UsageRunRow
 		err := r.db.Model(&model.BotRun{}).
-			Select("id, bot_id, session_kind, trigger_source, trigger_key, status, schedule_task_id, cost_estimate, silent, config_snapshot_json, created_at").
+			Select("id, bot_id, session_kind, trigger_source, trigger_key, status, schedule_task_id, cost_estimate, silent, created_at").
 			Where("id IN ?", batch).
 			Scan(&rows).Error
 		if err != nil {
@@ -440,8 +441,34 @@ func (r *BotUsageRepository) ListMaintenanceRequests(maintRunIDs []string) ([]mo
 
 // ---------- 成本优化参考（INT-163：GET /api/bots/usage/insights） ----------
 
+// RunConfigSnapshotsByIDs 按 runIDs 批量补查 run 冻结快照（换模型差价分组的
+// 目录/模型归属）：快照列单行可达数 KB，总览不消费它，不随共享账本扫描回读，
+// 只有 insights 按需取这一列。
+func (r *BotUsageRepository) RunConfigSnapshotsByIDs(runIDs []string) (map[string]string, error) {
+	out := map[string]string{}
+	for _, batch := range ChunkIDs(runIDs, UsageQueryBatch) {
+		var rows []struct {
+			ID                 string `gorm:"column:id"`
+			ConfigSnapshotJSON string `gorm:"column:config_snapshot_json"`
+		}
+		err := r.db.Model(&model.BotRun{}).
+			Select("id, config_snapshot_json").
+			Where("id IN ?", batch).
+			Scan(&rows).Error
+		if err != nil {
+			return nil, err
+		}
+		for _, row := range rows {
+			out[row.ID] = row.ConfigSnapshotJSON
+		}
+	}
+	return out, nil
+}
+
 // FirstRequestInputRow 是 run 首次请求的输入 token 扫描行（context_growth 用）：
-// usage 完整取 prompt_tokens，否则回退发送前的 input_tokens_estimate 并标 estimated。
+// usage 完整取 prompt_tokens，缺 usage 回退发送前的 input_tokens_estimate 并标
+// estimated；估算列 NOT NULL default 0 分不出「未写估算」与真 0，prompt 与
+// 估算皆无的首请求不产出点（该 run 在 context_growth 里缺席）。
 type FirstRequestInputRow struct {
 	RunID       string `gorm:"column:run_id"`
 	InputTokens int64  `gorm:"column:input_tokens"`
@@ -449,8 +476,9 @@ type FirstRequestInputRow struct {
 }
 
 // FirstRequestInputByRun 返回每个 run ordinal 最小的那次请求的输入 token
-// （窗口内每个有请求的 run 一行，无请求的 run 不出现）。子查询先求各 run 的
-// MIN(ordinal)，不把 run 的全部请求行拉回来。
+// （窗口内每个有可用输入的 run 一行）。子查询先求各 run 的 MIN(ordinal)，
+// 不把 run 的全部请求行拉回来；回退仅在估算 > 0 时发生——WHERE 过滤掉
+// prompt 与估算皆无的首请求，不出 input_tokens=0、estimated=true 的点。
 func (r *BotUsageRepository) FirstRequestInputByRun(runIDs []string) (map[string]FirstRequestInputRow, error) {
 	out := map[string]FirstRequestInputRow{}
 	for _, batch := range ChunkIDs(runIDs, UsageQueryBatch) {
@@ -461,6 +489,7 @@ func (r *BotUsageRepository) FirstRequestInputByRun(runIDs []string) (map[string
 				"(bot_model_requests.prompt_tokens IS NULL) AS estimated").
 			Joins("JOIN (SELECT run_id, MIN(ordinal) AS ordinal FROM bot_model_requests WHERE run_id IN ? GROUP BY run_id) first "+
 				"ON first.run_id = bot_model_requests.run_id AND first.ordinal = bot_model_requests.ordinal", batch).
+			Where("bot_model_requests.prompt_tokens IS NOT NULL OR bot_model_requests.input_tokens_estimate > 0").
 			Scan(&rows).Error
 		if err != nil {
 			return nil, err

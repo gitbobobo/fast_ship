@@ -16,9 +16,9 @@ import (
 // 花费页第二期（INT-163）：成本优化参考。与总览共用 loadBotUsageLedger 的
 // 同一次账本扫描（bot_usage.go：窗口/机器人集合/统一请求聚合/三桶累加/任务
 // 行都在共享层完成），这里只补本端点特有的请求级查询（首请求、重试计数、
-// 失败聚合、工具调用三元组）再投影。insights 不触发总览的月推算等投影；
-// 维护占比的分子（维护明细）与分母（共享累加器的三桶之和）来自同一扫描
-// 快照，中间落账不会出现 share > 100%。
+// 失败聚合、工具调用三元组、run 冻结快照）再投影。insights 不触发总览的月
+// 推算等投影；维护占比的分子（维护明细）与分母（共享累加器的三桶之和）来
+// 自同一扫描快照，中间落账不会出现 share > 100%。
 
 // usageContextGrowthMaxPoints 每机器人 context_growth 保留的最新点数上限
 // （超出截掉最早点并置 context_growth_truncated）。
@@ -93,6 +93,12 @@ func (s *BotService) GetBotUsageInsights(userID, rangeParam, botID string) (*api
 		return nil, errs.ErrInternal
 	}
 	callTriples, err := repo.RunToolCallTriples(runIDs)
+	if err != nil {
+		return nil, errs.ErrInternal
+	}
+	// 换模型差价分组的 run 冻结快照单独补查：快照列单行可达数 KB，总览不
+	// 消费它，不随共享账本扫描回读（30 天窗口会把整列读回内存）。
+	snapshots, err := repo.RunConfigSnapshotsByIDs(runIDs)
 	if err != nil {
 		return nil, errs.ErrInternal
 	}
@@ -215,7 +221,7 @@ func (s *BotService) GetBotUsageInsights(userID, rangeParam, botID string) (*api
 		// 换模型差价分组：run 冻结快照的 (catalog_id, model)。快照缺 catalog_id
 		// 的 run 不参与（理由见 usageRunCatalogModelOf），不用机器人当前目录
 		// 填洞；custom 目录不计候选。
-		catalogID, modelID, ok := usageRunCatalogModelOf(row.ConfigSnapshotJSON)
+		catalogID, modelID, ok := usageRunCatalogModelOf(snapshots[row.ID])
 		if !ok {
 			continue
 		}
@@ -422,6 +428,12 @@ func (s *BotService) GetBotUsageInsights(userID, rangeParam, botID string) (*api
 			byError = append(byError, api.BotUsageFailureError{ErrorCode: code, Requests: merged.requests, Cost: merged.cost})
 		}
 		sort.Slice(byError, func(i, j int) bool {
+			// 契约「null 组排最后」恒定优先：先分出 null 组，其余再按 cost
+			// 降序、requests 降序、码升序并列——null 组不参与后面的比较，
+			// cost 再高也垫底。
+			if (byError[i].ErrorCode == nil) != (byError[j].ErrorCode == nil) {
+				return byError[j].ErrorCode == nil
+			}
 			if botUsageCostLess(byError[i].Cost, byError[j].Cost) {
 				return true
 			}

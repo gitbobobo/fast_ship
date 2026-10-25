@@ -2,6 +2,7 @@ package repository
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -327,6 +328,89 @@ func TestInsightsQueriesBatchIN(t *testing.T) {
 	}
 	if len(triples) != runs || triples[0].ToolName != "fs_project" || triples[0].Action != "list" {
 		t.Fatalf("工具调用组合不符: %+v", triples)
+	}
+}
+
+// 总览路径不回读 config_snapshot_json（P2 复审修复）：ListRunsInWindow /
+// ListRunsByIDs 的 SELECT 不含快照列（单行数 KB、总览不消费），快照只经
+// RunConfigSnapshotsByIDs 按 runIDs 单独补查。用查询回调捕获实际执行的 SQL
+// 断言查询行为。
+func TestUsageRunQueriesSkipSnapshotColumn(t *testing.T) {
+	dsn := "file:" + uuid.NewString() + "?mode=memory&cache=shared"
+	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open test db: %v", err)
+	}
+	if err := db.AutoMigrate(BotModels()...); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	var sqls []string
+	captureSQL := func(tx *gorm.DB) {
+		sqls = append(sqls, tx.Statement.SQL.String())
+	}
+	// 花费页查询全部走 Scan → Row 处理器（gorm:row），Find 走 Query 处理器
+	// （gorm:query），两条都挂上才捕获得全。
+	if err := db.Callback().Query().After("gorm:query").Register("test:capture_sql_query", captureSQL); err != nil {
+		t.Fatalf("register query capture callback: %v", err)
+	}
+	if err := db.Callback().Row().After("gorm:row").Register("test:capture_sql_row", captureSQL); err != nil {
+		t.Fatalf("register row capture callback: %v", err)
+	}
+
+	now := time.Now().UTC()
+	run := &model.BotRun{
+		ID: uuid.NewString(), BotID: "bot-snap",
+		TriggerSource: model.BotTriggerUserMessage, TriggerKey: "snap-" + uuid.NewString(),
+		Status: model.BotRunStatusCompleted, SessionKind: model.BotSessionKindMain,
+		ConfigSnapshotJSON: `{"catalog_id":"deepseek","model":"deepseek-flash"}`,
+		CreatedAt:          now, StartedAt: &now, FinishedAt: &now,
+	}
+	if err := db.Create(run).Error; err != nil {
+		t.Fatalf("seed run: %v", err)
+	}
+
+	repo := NewBotUsageRepository(db)
+	capture := func(run func()) []string {
+		sqls = nil
+		run()
+		return sqls
+	}
+	assertNoSnapshot := func(what string, got []string) {
+		t.Helper()
+		for _, s := range got {
+			if strings.Contains(s, "config_snapshot_json") {
+				t.Fatalf("%s 的 SELECT 不应含 config_snapshot_json: %s", what, s)
+			}
+		}
+	}
+	assertNoSnapshot("ListRunsInWindow", capture(func() {
+		if _, err := repo.ListRunsInWindow([]string{run.BotID}, now.Add(-time.Hour), now.Add(time.Hour)); err != nil {
+			t.Fatalf("ListRunsInWindow: %v", err)
+		}
+	}))
+	assertNoSnapshot("ListRunsByIDs", capture(func() {
+		if _, err := repo.ListRunsByIDs([]string{run.ID}); err != nil {
+			t.Fatalf("ListRunsByIDs: %v", err)
+		}
+	}))
+
+	snapshotSQLs := capture(func() {
+		snaps, err := repo.RunConfigSnapshotsByIDs([]string{run.ID})
+		if err != nil {
+			t.Fatalf("RunConfigSnapshotsByIDs: %v", err)
+		}
+		if snaps[run.ID] != run.ConfigSnapshotJSON {
+			t.Fatalf("快照补查应取回原值，实得 %q", snaps[run.ID])
+		}
+	})
+	foundSnapshotQuery := false
+	for _, s := range snapshotSQLs {
+		if strings.Contains(s, "config_snapshot_json") {
+			foundSnapshotQuery = true
+		}
+	}
+	if !foundSnapshotQuery {
+		t.Fatalf("RunConfigSnapshotsByIDs 应查询 config_snapshot_json 列: %v", snapshotSQLs)
 	}
 }
 
