@@ -276,16 +276,24 @@ function RunContextGrowth({
 }) {
   const points = useMemo(
     () =>
-      requests.map((request) => {
-        const tokens = request.prompt_tokens ?? request.input_tokens_estimate;
-        const estimated = request.prompt_tokens == null;
-        return {
-          x: request.ordinal,
-          y: tokens,
-          estimated,
-          label: `#${request.ordinal} · ${tokens.toLocaleString("en-US")} 输入${estimated ? "（估算）" : ""}`,
-        };
-      }),
+      requests
+        .filter(
+          // 与服务端口径一致：usage 未收齐且无估算值的请求不产点，
+          // 避免把「没有数据」画成真实的 0 输入。
+          (request) =>
+            request.prompt_tokens != null ||
+            request.input_tokens_estimate > 0,
+        )
+        .map((request) => {
+          const tokens = request.prompt_tokens ?? request.input_tokens_estimate;
+          const estimated = request.prompt_tokens == null;
+          return {
+            x: request.ordinal,
+            y: tokens,
+            estimated,
+            label: `#${request.ordinal} · ${tokens.toLocaleString("en-US")} 输入${estimated ? "（估算）" : ""}`,
+          };
+        }),
     [requests],
   );
   // 没有请求记录时请求列表已有空态，图不重复占位。

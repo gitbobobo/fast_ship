@@ -366,6 +366,9 @@ func botUsageP90(values []float64) *float64 {
 // 不把窗口内全部明细行读回内存；insights 还要用途拆分、失败统计与按天命中，
 // 才拉明细行并在内存里推导同一份聚合（两路喂给累加器的字段同口径）。
 func (s *BotService) loadBotUsageLedger(userID, rangeParam, botID string, maintDetail bool) (*botUsageLedger, error) {
+	if rangeParam == "" {
+		rangeParam = botUsageRange7d
+	}
 	days, ok := botUsageRangeDays(rangeParam)
 	if !ok {
 		return nil, errs.New(errs.ErrInvalidParams.Code, "range 必须是 today、7d 或 30d")
