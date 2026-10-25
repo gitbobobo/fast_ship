@@ -576,29 +576,27 @@ function ToolsShareSection({
             <div
               key={bot.bot_id}
               className={cn(
-                "flex items-baseline justify-between gap-3 px-3 py-2 text-sm",
+                "space-y-0.5 px-3 py-2 text-sm",
                 i > 0 && "border-t",
               )}
               title={`工具定义 ≈${formatTokens(bot.tools.tools_tokens_estimate)} / 输入 ${formatTokens(bot.tools.prompt_tokens)}（按工具结构 schema 字节估算）`}
             >
-              {/* 窄栏名称优先：最多折两行，不像 truncate 那样 3 字就截 */}
-              <dt className="line-clamp-2 min-w-[5em] text-muted-foreground">
-                {bot.name}
-              </dt>
-              <dd className="tabular-nums">
-                {bot.tools.share == null ? (
-                  // 与宽表同口径：未计价只显「—」，不印 ≈0 / 0 的假分子分母。
-                  "—"
-                ) : (
-                  <>
-                    <span>{formatPercent(bot.tools.share)}</span>
-                    <span className="ml-2 text-xs text-muted-foreground">
-                      ≈{formatTokens(bot.tools.tools_tokens_estimate)} /{" "}
-                      {formatTokens(bot.tools.prompt_tokens)}
-                    </span>
-                  </>
-                )}
-              </dd>
+              <div className="flex items-baseline justify-between gap-3">
+                {/* 窄栏名称优先：最多折两行；算式整组挪到第二行不拆开折 */}
+                <dt className="line-clamp-2 min-w-[5em] text-muted-foreground">
+                  {bot.name}
+                </dt>
+                <dd className="whitespace-nowrap tabular-nums">
+                  {/* 与宽表同口径：未计价只显「—」，不印 ≈0 / 0 的假分子分母。 */}
+                  {bot.tools.share == null ? "—" : formatPercent(bot.tools.share)}
+                </dd>
+              </div>
+              {bot.tools.share != null && (
+                <p className="whitespace-nowrap text-xs text-muted-foreground">
+                  ≈{formatTokens(bot.tools.tools_tokens_estimate)} /{" "}
+                  {formatTokens(bot.tools.prompt_tokens)}
+                </p>
+              )}
             </div>
           ))}
         </dl>
@@ -675,19 +673,27 @@ function MaintenanceShareSection({
               )}
             >
               <div className="flex items-baseline justify-between gap-3">
-                {/* 窄栏名称优先：最多折两行，不像 truncate 那样 3 字就截 */}
+                {/* 窄栏名称优先：最多折两行；占比挪到次行不拆算式 */}
                 <dt className="line-clamp-2 min-w-[5em] text-muted-foreground">
                   {bot.name}
                 </dt>
-                <dd className="tabular-nums">
-                  {bot.maintenance.cost == null
-                    ? "—"
-                    : `${formatUsageCost(bot.maintenance.cost)} · ${formatPercent(bot.maintenance.share)}`}
+                <dd className="whitespace-nowrap tabular-nums">
+                  {formatUsageCost(bot.maintenance.cost)}
                 </dd>
               </div>
-              {bot.maintenance.by_purpose.length > 0 && (
+              {(bot.maintenance.share != null ||
+                bot.maintenance.by_purpose.length > 0) && (
                 <p className="text-xs text-muted-foreground">
-                  {maintenancePurposeText(bot)}
+                  {[
+                    bot.maintenance.share != null
+                      ? `占比 ${formatPercent(bot.maintenance.share)}`
+                      : null,
+                    bot.maintenance.by_purpose.length > 0
+                      ? maintenancePurposeText(bot)
+                      : null,
+                  ]
+                    .filter(Boolean)
+                    .join(" · ")}
                 </p>
               )}
             </div>
@@ -906,12 +912,15 @@ function FailuresSection({
               )}
             >
               <div className="flex items-baseline justify-between gap-3">
-                {/* 窄栏名称优先：最多折两行，不像 truncate 那样 3 字就截 */}
+                {/* 窄栏名称优先：最多折两行；行1只放主值不拆算式 */}
                 <dt className="line-clamp-2 min-w-[5em] text-muted-foreground">
                   {bot.name}
                 </dt>
-                <dd className="tabular-nums">
-                  请求浪费 {formatUsageCost(bot.failures.failed_requests_cost)}
+                <dd
+                  className="whitespace-nowrap tabular-nums"
+                  title="请求浪费：失败请求中已计价金额合计"
+                >
+                  {formatUsageCost(bot.failures.failed_requests_cost)}
                 </dd>
               </div>
               <p className="text-xs text-muted-foreground">

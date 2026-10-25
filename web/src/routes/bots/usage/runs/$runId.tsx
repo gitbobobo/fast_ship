@@ -266,7 +266,8 @@ function RunSummary({
 }
 
 /**
- * 输入上下文增长（INT-163）：x=请求序号（#1..#n），y=输入 token。
+ * 输入上下文增长（INT-163）：x=请求 ordinal 原值（agent 侧 0 基序号，
+ * 与请求列表的 #n 标签一致），y=输入 token。
  * 值取 prompt_tokens ?? input_tokens_estimate：usage 未收齐（prompt_tokens
  * 为 null）的请求只能给估算值，图上以空心点标注并在图注说明。
  */
