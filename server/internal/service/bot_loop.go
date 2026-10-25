@@ -347,7 +347,7 @@ runLoop:
 			assistantMsgID = uuid.NewString()
 			deltas := s.newDeltaBuffer(bot.ID, run.ID, assistantMsgID)
 			var streamErr error
-			reply, streamErr = botStreamChat(ctx, &streamClient, built.Request, s.botStreamTimeoutsOf(), deltas.onDelta)
+			reply, streamErr = botStreamChat(ctx, &streamClient, freeze.BaseURL, built.Request, s.botStreamTimeoutsOf(), deltas.onDelta)
 			deltas.flush()
 			s.warnToolCallAnomalies(reply,
 				zap.String("bot_id", bot.ID), zap.String("run_id", run.ID))
@@ -854,6 +854,18 @@ func (s *BotService) finishModelRequest(row *model.BotModelRequest, reply *botMo
 			cols["completion_tokens"] = reply.CompletionTokens
 			cols["total_tokens"] = reply.TotalTokens
 			cols["cached_tokens"] = reply.CachedTokens
+			// 推理 token 与供应商实际金额同为可选 usage 字段：未返回不写列，
+			// 保持 NULL，缺失 ≠ 0。provider_cost 只落置信 USD 的值，其余记
+			// provider_cost_raw（INT-164）。
+			if reply.ReasoningTokens != nil {
+				cols["reasoning_tokens"] = *reply.ReasoningTokens
+			}
+			if reply.ProviderCost != nil {
+				cols["provider_cost"] = *reply.ProviderCost
+			}
+			if reply.ProviderCostRaw != nil {
+				cols["provider_cost_raw"] = *reply.ProviderCostRaw
+			}
 			if usd, ok := botRequestCost(run, bot, reply); ok {
 				cols["cost_estimate"] = usd
 				cols["cost_source"] = botCostSourceCatalog
@@ -868,6 +880,8 @@ func (s *BotService) finishModelRequest(row *model.BotModelRequest, reply *botMo
 		s.logger.Warn("落模型请求终态失败", zap.String("request_id", row.ID), zap.Error(err))
 		return
 	}
+	// usage/成本落账后通知预算评估（INT-164）：信号合并，不背评估成本。
+	s.kickBudgetEval()
 	// 内存行回写与 run 累计必须在 UPDATE 成功之后（INT-139 云端复审）：
 	// 落库失败时两处口径同为 NULL，不得让 run 记进一条请求行上并不
 	// 存在的成本。成功路径的 run 累计在调用方 accumulateRunUsage 读取

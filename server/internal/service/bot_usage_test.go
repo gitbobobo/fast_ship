@@ -623,6 +623,8 @@ func TestBotUsageParamsAndOwnership(t *testing.T) {
 }
 
 // 运行列表投影带显示成本（自身 + 关联维护），且列表只做一次批量维护查询。
+// 请求行只有实收没有估算的 run：显示成本也要给出实收金额——聊天/任务历史
+// 与花费页同口径（INT-164 评审回归）。
 func TestBotUsageListRunsDisplayCost(t *testing.T) {
 	env := setupBotTestEnv(t)
 	userID := createBotTestUser(t, env.db, "usagelist")
@@ -632,12 +634,18 @@ func TestBotUsageListRunsDisplayCost(t *testing.T) {
 	seedUsageMaintenance(t, env, bot.ID, &priced.ID, ptrCost(0.15))
 	seedUsageRun(t, env, bot.ID, nil) // 未计价、无维护 → display null
 
+	pcOnly := seedUsageRun(t, env, bot.ID, nil)
+	preq := seedUsageRequest(t, env, pcOnly.ID, nil, "hash-pc")
+	if err := env.db.Model(preq).Update("provider_cost", 0.4).Error; err != nil {
+		t.Fatalf("seed provider_cost: %v", err)
+	}
+
 	runs, err := env.bots.ListRuns(userID, bot.ID, 10)
 	if err != nil {
 		t.Fatalf("list runs: %v", err)
 	}
-	if len(runs) != 2 {
-		t.Fatalf("应有 2 条 run，实得 %d", len(runs))
+	if len(runs) != 3 {
+		t.Fatalf("应有 3 条 run，实得 %d", len(runs))
 	}
 	byID := map[string]BotRunResponse{}
 	for _, r := range runs {
@@ -645,6 +653,9 @@ func TestBotUsageListRunsDisplayCost(t *testing.T) {
 	}
 	if got := byID[priced.ID].DisplayCostEstimate; got == nil || !costEq(*got, 0.75) {
 		t.Fatalf("显示成本应为 0.6+0.15，实得 %v", got)
+	}
+	if got := byID[pcOnly.ID].DisplayCostEstimate; got == nil || !costEq(*got, 0.4) {
+		t.Fatalf("仅有实收的 run 显示成本应为 0.4，实得 %v", got)
 	}
 }
 

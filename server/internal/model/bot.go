@@ -212,6 +212,16 @@ type BotModelRequest struct {
 	CompletionTokens *int64 `json:"completion_tokens"`
 	TotalTokens      *int64 `json:"total_tokens"`
 	CachedTokens     *int64 `json:"cached_tokens"`
+	// ReasoningTokens 是 completion_tokens_details.reasoning_tokens（供应商
+	// 可选返回）：未返回保持 NULL，缺失 ≠ 0。reasoning ⊆ completion 已计费，
+	// 不进计价公式。
+	ReasoningTokens *int64 `json:"reasoning_tokens"`
+	// ProviderCost 是供应商 usage 里返回的实际金额，只在币别置信 USD
+	// 时落库（OpenRouter cost / total_cost / *_usd 字段）；本列可安全求和。
+	// 币别不明或非用户实收的金额不进本列，原始字段名与值记进
+	// ProviderCostRaw（只记录不展示，INT-164）。
+	ProviderCost    *float64 `json:"provider_cost"`
+	ProviderCostRaw *string  `json:"provider_cost_raw"`
 	// CostEstimate 是按 run 冻结的目录单价估算的本次请求成本（USD，可空）：
 	// 无价模型或缺 usage 时保持 NULL；CostSource 标记计价来源（INT-139）。
 	CostEstimate *float64 `json:"cost_estimate"`

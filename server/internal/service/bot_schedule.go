@@ -700,24 +700,28 @@ func (s *BotService) setScheduleTaskEnabled(botID, taskID string, enabled bool, 
 }
 
 // deleteScheduleTask 删除任务；运行记录保留（账本供排查）。
-// deleteScheduleTask 删除任务，并在同一事务里请求停止它未完成的运行：运行记录
-// 只能按任务查询，任务一删这些 run 就既查不到也停不了，却仍会挡住机器人删除。
-// 已跑了很久的 run 不受影响，会在下一个安全点收尾为 stopped。
+// 同一事务里请求停止它未完成的运行：运行记录只能按任务查询，任务一删这些
+// run 就既查不到也停不了，却仍会挡住机器人删除。已跑了很久的 run 不受
+// 影响，会在下一个安全点收尾为 stopped。删除前把任务名写进墓碑表——
+// 之后任何一天的重算（含时区整表重建）都能取回名字。
 func (s *BotService) deleteScheduleTask(botID, taskID, expectedUpdatedAt string) error {
 	var stoppedRunIDs []string
 	txErr := s.db.Transaction(func(tx *gorm.DB) error {
+		repo := repository.NewBotScheduleTaskRepository(tx)
+		// 删除前总要取到任务：名字要在同一事务里落墓碑（见下方墓碑写入），
+		// 顺带把不带受理水位的删除也统一成「不存在即 404」。
+		task, err := repo.FindByIDAndBot(taskID, botID)
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return errs.ErrBotScheduleTaskNotFound
+			}
+			return err
+		}
 		if expectedUpdatedAt != "" {
 			// delete 同样按「确认时看到的那一版」执行：期间被改过（例如指令被
 			// 换成写操作密集的内容）就拒绝，让用户重新看一眼再决定。
-			current, err := repository.NewBotScheduleTaskRepository(tx).FindByIDAndBot(taskID, botID)
-			if err != nil {
-				if errors.Is(err, gorm.ErrRecordNotFound) {
-					return errs.ErrBotScheduleTaskNotFound
-				}
-				return err
-			}
 			// 删除旧卡也要核对整行受理水位，不能只因敏感指纹没变就删掉新配置。
-			if err := botScheduleRevisionChanged(current, expectedUpdatedAt); err != nil {
+			if err := botScheduleRevisionChanged(task, expectedUpdatedAt); err != nil {
 				return err
 			}
 		}
@@ -738,7 +742,14 @@ func (s *BotService) deleteScheduleTask(botID, taskID, expectedUpdatedAt string)
 				stoppedRunIDs = append(stoppedRunIDs, runs[i].ID)
 			}
 		}
-		return repository.NewBotScheduleTaskRepository(tx).Delete(botID, taskID)
+		// 名字墓碑（INT-164）：汇总行的任务名快照随整日替换与时区清空重建，
+		// 删除后只有这张独立表还能给重算提供任务名。任务可能从未滚过日（今天
+		// 建今天删），也有数据仍实时归到它名下——墓碑保证那天的汇总行有名。
+		if err := repository.NewBotUsageRollupRepository(tx).
+			TombstoneTaskNameTx(tx, task.ID, task.BotID, task.Name); err != nil {
+			return err
+		}
+		return repo.Delete(botID, taskID)
 	})
 	if txErr != nil {
 		// 修订冲突（确认期间任务被改过）是正常业务拒绝，原样透传 40001，
@@ -779,8 +790,9 @@ type BotScheduleRunResponse struct {
 	TotalTokens   *int64   `json:"total_tokens,omitempty"`
 	CostEstimate  *float64 `json:"cost_estimate,omitempty"`
 	CostSource    *string  `json:"cost_source,omitempty"`
-	// DisplayCostEstimate 是显示口径成本（INT-162）：本 run 已计价成本 +
-	// 关联维护运行已计价成本；两者都为 null 时为 null（缺失 ≠ 0）。
+	// DisplayCostEstimate 是显示口径成本：本 run 显示成本（请求级实收优先，
+	// 无请求行退回 run 快照）+ 关联维护显示成本；两者都为 null 时为 null
+	//（缺失 ≠ 0）。
 	DisplayCostEstimate *float64 `json:"display_cost_estimate"`
 }
 
@@ -793,9 +805,10 @@ func botTriggerSourceLabel(src model.BotRunTrigger) string {
 	return "cron"
 }
 
-// botScheduleRunResponseOf 定时任务 run 的投影；maintCost 是关联维护运行的
-// 已计价成本合计（无已计价维护传 nil），列表调用方批量取全，不做逐 run 查询。
-func botScheduleRunResponseOf(run *model.BotRun, maintCost *float64) BotScheduleRunResponse {
+// botScheduleRunResponseOf 定时任务 run 的投影；ownCost 是本 run 的显示
+// 成本（请求级实收优先），maintCost 是关联维护的显示成本合计（无金额传
+// nil），列表调用方批量取全，不做逐 run 查询。
+func botScheduleRunResponseOf(run *model.BotRun, ownCost, maintCost *float64) BotScheduleRunResponse {
 	resp := BotScheduleRunResponse{
 		ID:                  run.ID,
 		TaskID:              run.ScheduleTaskID,
@@ -813,7 +826,7 @@ func botScheduleRunResponseOf(run *model.BotRun, maintCost *float64) BotSchedule
 		TotalTokens:         run.TotalTokens,
 		CostEstimate:        run.CostEstimate,
 		CostSource:          run.CostSource,
-		DisplayCostEstimate: botSumOptional(run.CostEstimate, maintCost),
+		DisplayCostEstimate: botSumOptional(ownCost, maintCost),
 	}
 	if run.StartedAt != nil && run.FinishedAt != nil {
 		ms := run.FinishedAt.Sub(*run.StartedAt).Milliseconds()
@@ -883,11 +896,11 @@ func (s *BotService) lastScheduleRunResponseOf(botID, taskID string) (*BotSchedu
 		}
 		return nil, err
 	}
-	maint, err := s.maintenanceCostsOf([]string{run.ID})
+	own, maint, err := s.displayCostsOf(s.db, []model.BotRun{*run})
 	if err != nil {
 		return nil, err
 	}
-	out := botScheduleRunResponseOf(run, maint[run.ID])
+	out := botScheduleRunResponseOf(run, own[run.ID], maint[run.ID])
 	return &out, nil
 }
 
@@ -915,11 +928,11 @@ func (s *BotService) ListScheduleTasks(userID, botID string) ([]BotScheduleTaskR
 	if err != nil {
 		return nil, errs.ErrInternal
 	}
-	lastRunIDs := make([]string, 0, len(latest))
+	lastRuns := make([]model.BotRun, 0, len(latest))
 	for _, run := range latest {
-		lastRunIDs = append(lastRunIDs, run.ID)
+		lastRuns = append(lastRuns, *run)
 	}
-	maint, err := s.maintenanceCostsOf(lastRunIDs)
+	own, maint, err := s.displayCostsOf(s.db, lastRuns)
 	if err != nil {
 		return nil, errs.ErrInternal
 	}
@@ -927,7 +940,7 @@ func (s *BotService) ListScheduleTasks(userID, botID string) ([]BotScheduleTaskR
 	for i := range rows {
 		var lastRun *BotScheduleRunResponse
 		if run, ok := latest[rows[i].ID]; ok {
-			resp := botScheduleRunResponseOf(run, maint[run.ID])
+			resp := botScheduleRunResponseOf(run, own[run.ID], maint[run.ID])
 			lastRun = &resp
 		}
 		out = append(out, s.scheduleTaskResponseOf(&rows[i], costs[rows[i].ID], lastRun))
@@ -978,17 +991,13 @@ func (s *BotService) ListScheduleTaskRuns(userID, botID, taskID string, limit, o
 	if err != nil {
 		return nil, errs.ErrInternal
 	}
-	runIDs := make([]string, 0, len(rows))
-	for i := range rows {
-		runIDs = append(runIDs, rows[i].ID)
-	}
-	display, err := s.maintenanceCostsOf(runIDs)
+	own, maint, err := s.displayCostsOf(s.db, rows)
 	if err != nil {
 		return nil, errs.ErrInternal
 	}
 	out := make([]BotScheduleRunResponse, 0, len(rows))
 	for i := range rows {
-		out = append(out, botScheduleRunResponseOf(&rows[i], display[rows[i].ID]))
+		out = append(out, botScheduleRunResponseOf(&rows[i], own[rows[i].ID], maint[rows[i].ID]))
 	}
 	return out, nil
 }
@@ -1606,17 +1615,13 @@ func (s *BotService) execScheduleRuns(call *model.BotToolCall, args *botSchedule
 	if err != nil {
 		return "", errs.ErrInternal
 	}
-	runIDs := make([]string, 0, len(rows))
-	for i := range rows {
-		runIDs = append(runIDs, rows[i].ID)
-	}
-	display, err := s.maintenanceCostsOf(runIDs)
+	own, maint, err := s.displayCostsOf(s.db, rows)
 	if err != nil {
 		return "", errs.ErrInternal
 	}
 	items := make([]BotScheduleRunResponse, 0, len(rows))
 	for i := range rows {
-		items = append(items, botScheduleRunResponseOf(&rows[i], display[rows[i].ID]))
+		items = append(items, botScheduleRunResponseOf(&rows[i], own[rows[i].ID], maint[rows[i].ID]))
 	}
 	return botMarshalResult(map[string]interface{}{
 		"items": items, "task_id": taskID, "limit": limit, "offset": offset,

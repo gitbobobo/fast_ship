@@ -45,3 +45,19 @@ type BotScheduleTask struct {
 func (BotScheduleTask) TableName() string {
 	return "bot_schedule_tasks"
 }
+
+// BotScheduleTaskName 是已删除任务的名字墓碑（INT-164）：bot_usage_daily 的
+// 任务名快照会随整日替换与有效时区清空重建，任务删除时把名字落到这张独立
+// 小表，之后任何重算（含整表重建、首滚前删除）仍能取回。只对任务删除路径
+// 写入；bot 级联删除任务时无需墓碑——删除前汇总已带着活名落库，且无后续
+// 重算（bot 删除事务顺手按 bot_id 清掉墓碑，不建级联外键）。
+type BotScheduleTaskName struct {
+	TaskID    string    `gorm:"type:text;primaryKey"`
+	BotID     string    `gorm:"type:text;not null"`
+	TaskName  string    `gorm:"type:text;not null"`
+	UpdatedAt time.Time `gorm:"not null"`
+}
+
+func (BotScheduleTaskName) TableName() string {
+	return "bot_schedule_task_names"
+}

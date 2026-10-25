@@ -2,9 +2,13 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -12,6 +16,7 @@ import (
 	"github.com/openai/openai-go/v2"
 	"github.com/openai/openai-go/v2/option"
 	"github.com/openai/openai-go/v2/packages/param"
+	"github.com/openai/openai-go/v2/packages/respjson"
 	"github.com/openai/openai-go/v2/shared"
 	"go.uber.org/zap"
 )
@@ -51,6 +56,15 @@ type botModelReply struct {
 	CompletionTokens int64
 	TotalTokens      int64
 	CachedTokens     int64
+	// ReasoningTokens 是 completion_tokens_details.reasoning_tokens（供应商
+	// 可选返回）：未返回为 nil。reasoning ⊆ completion 已计费，这里只记账，
+	// 不改计价公式。
+	ReasoningTokens *int64
+	// ProviderCost 是供应商 usage 返回的实际金额，只收置信 USD 的值
+	// （解析见 botParseProviderCost）；币别不明或非用户实收的金额保留在
+	// ProviderCostRaw（原始字段名与值的 JSON，只记录不展示，INT-164）。
+	ProviderCost    *float64
+	ProviderCostRaw *string
 	// SynthesizedToolCallIDs 是聚合时为缺失 id 的流式工具调用合成的平台
 	// id 个数（INT-139 R12）：部分兼容服务流式不给 id，配对键是我们账本
 	// 里的 provider_tool_call_id，本地合成不影响协议配对。
@@ -85,11 +99,13 @@ type botStreamTimeouts struct {
 
 // botStreamChat 发起流式请求并聚合：finish_reason 之后继续读取可能随后到达
 // 的 usage chunk；文本增量经 onDelta 透出（由调用方合并批量落 SSE）。
+// baseURL 是供应商身份来源（与 client 构造同值），用于识别 OpenRouter 语义
+// 的实际金额字段；其余字段只看响应形状。
 // 看门狗（INT-137）：首包与片段间空闲超时经派生 context 只杀本条流，以
 // *botStreamTimeoutError 返回；父 ctx 的取消（用户停止）不改写成超时。
 // 失败时同样返回已聚合的部分回复（正文与工具调用片段），供调用方判断
 // 「本次尝试是否已有输出」。
-func botStreamChat(ctx context.Context, client *openai.Client, req botStreamRequest, timeouts botStreamTimeouts, onDelta func(text string)) (*botModelReply, error) {
+func botStreamChat(ctx context.Context, client *openai.Client, baseURL string, req botStreamRequest, timeouts botStreamTimeouts, onDelta func(text string)) (*botModelReply, error) {
 	params := openai.ChatCompletionNewParams{
 		Model:    req.Model,
 		Messages: req.Messages,
@@ -144,6 +160,15 @@ func botStreamChat(ctx context.Context, client *openai.Client, req botStreamRequ
 			reply.CompletionTokens = chunk.Usage.CompletionTokens
 			reply.TotalTokens = chunk.Usage.TotalTokens
 			reply.CachedTokens = chunk.Usage.PromptTokensDetails.CachedTokens
+			// 推理 token 与供应商实际金额都是可选字段：SDK 未建模的部分在
+			// ExtraFields 里按原始 JSON 解析；未返回保持 nil，缺失 ≠ 0。
+			if d := chunk.Usage.CompletionTokensDetails; chunk.Usage.JSON.CompletionTokensDetails.Valid() &&
+				d.JSON.ReasoningTokens.Valid() {
+				v := d.ReasoningTokens
+				reply.ReasoningTokens = &v
+			}
+			reply.ProviderCost, reply.ProviderCostRaw = botParseProviderCost(
+				chunk.Usage.JSON.ExtraFields, botIsOpenRouterBase(baseURL))
 		}
 		for _, choice := range chunk.Choices {
 			if choice.FinishReason != "" {
@@ -226,6 +251,95 @@ func botStreamChat(ctx context.Context, client *openai.Client, req botStreamRequ
 		return reply, io.ErrUnexpectedEOF
 	}
 	return reply, nil
+}
+
+// ---------- usage 里的供应商实际金额 ----------
+
+// botIsOpenRouterBase 按 base_url host 识别 OpenRouter（host 含 openrouter.ai，
+// 按域名边界判定）：只有它的 usage.cost / cost_details.upstream_inference_cost
+// 是官方语义的美元实收金额，别家同名字段币别不明。
+func botIsOpenRouterBase(baseURL string) bool {
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	return host == "openrouter.ai" || strings.HasSuffix(host, ".openrouter.ai")
+}
+
+// botParseProviderCost 从 usage 的非标准字段（ExtraFields）解析供应商实际
+// 金额。返回两个通道：置信 USD 的值走 provider_cost（本列可安全求和）；
+// 币别不明或非用户实收的金额走 provider_cost_raw（{"field","value"} 的
+// JSON 记录，只记录不展示）。金额可能以数字或字符串到达，解析失败按缺失
+// 处理；多字段并存按固定优先级取首个可解析值，同一响应解析结果稳定：
+//  1. cost —— OpenRouter 语义按 USD 展示，其余地址币别不明只进 raw；
+//  2. total_cost / 名字含 _usd 的字段 —— 按美元命名的约定视为 USD；
+//  3. cost_details.upstream_inference_cost —— OpenRouter 付给上游的金额
+//     而非用户实收，币别虽是 USD 也只进 raw。
+func botParseProviderCost(extra map[string]respjson.Field, openrouter bool) (*float64, *string) {
+	// ExtraFields 里的字段没经过类型化解码，SDK 一律记为 invalid——Valid()
+	// 恒 false（「无对应模型字段」与「值坏掉」同状态）；存在性按原始文本判，
+	// 缺失是空串、显式 null 是 "null"。
+	field := func(raw respjson.Field) (*float64, bool) {
+		v := raw.Raw()
+		if v == "" || v == "null" {
+			return nil, false
+		}
+		return botParseCostText(v)
+	}
+	rawRecord := func(name string, raw respjson.Field) *string {
+		b, err := json.Marshal(map[string]string{"field": name, "value": raw.Raw()})
+		if err != nil {
+			return nil
+		}
+		s := string(b)
+		return &s
+	}
+	if v, ok := field(extra["cost"]); ok {
+		if openrouter {
+			return v, nil
+		}
+		return nil, rawRecord("cost", extra["cost"])
+	}
+	if v, ok := field(extra["total_cost"]); ok {
+		return v, nil
+	}
+	if raw, ok := extra["cost_details"]; ok && raw.Raw() != "" && raw.Raw() != "null" {
+		var details struct {
+			UpstreamInferenceCost json.RawMessage `json:"upstream_inference_cost"`
+		}
+		if err := json.Unmarshal([]byte(raw.Raw()), &details); err == nil &&
+			len(details.UpstreamInferenceCost) > 0 {
+			if _, ok := botParseCostText(string(details.UpstreamInferenceCost)); ok {
+				return nil, rawRecord("cost_details.upstream_inference_cost", raw)
+			}
+		}
+	}
+	// *_usd 字段按名字排序取首个可解析的：map 遍历无序，不稳定会让同一
+	// 响应两次解析选出不同字段。
+	names := make([]string, 0, len(extra))
+	for name := range extra {
+		if strings.Contains(strings.ToLower(name), "_usd") {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if v, ok := field(extra[name]); ok {
+			return v, nil
+		}
+	}
+	return nil, nil
+}
+
+// botParseCostText 解析金额文本：裸数字（respjson 原始值）或 JSON 字符串
+// （部分供应商以字符串回金额）都接受，去掉两侧引号后交给 ParseFloat。
+func botParseCostText(s string) (*float64, bool) {
+	f, err := strconv.ParseFloat(strings.Trim(strings.TrimSpace(s), `"`), 64)
+	if err != nil {
+		return nil, false
+	}
+	return &f, true
 }
 
 // ---------- 连接探测 ----------

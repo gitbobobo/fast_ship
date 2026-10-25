@@ -244,7 +244,7 @@ func TestInsightsQueriesBatchIN(t *testing.T) {
 	// runIDs[0] 多一条异常行：cached 合计 = 400 + MIN(500,300) = 700，
 	// prompt 合计 = 1000 + 300 = 1300（usage 完整与已计价口径各自一致）。
 	agg0 := aggs[runIDs[0]]
-	if agg0.Total != 3 || agg0.Priced != 2 || agg0.Unpriced != 1 {
+	if agg0.Total != 3 || agg0.Priced != 2 || agg0.Counted != 2 {
 		t.Fatalf("异常行计数不符: %+v", agg0)
 	}
 	if agg0.PromptSum != 1300 || agg0.CachedSum != 700 || agg0.CompletionSum != 100 || agg0.ToolsSum != 50 {

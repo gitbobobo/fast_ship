@@ -7958,11 +7958,13 @@ paths:
       operationId: getBotUsage
       summary: 花费总览（按天 / 按机器人 / 按定时任务，INT-162）
       description: |
-        只用现有账本（bot_runs / bot_model_requests / bot_maintenance_*）实时
-        聚合，不新增表、不回填。窗口按 users.timezone 切日，空值回退部署配置
-        bots.memory.timezone，再回退 UTC。金额一律来自内置 models.dev 目录单价
-        估算：目录无价、自定义提供商、缺 usage 的请求为「未计价」——已计价
-        字段缺省为 null（缺失 ≠ 0），未计价请求计入 unpriced_requests。
+        历史日期读按天汇总表（bot_usage_daily），今天与缺失/脏日期实时扫描
+        现有账本（bot_runs / bot_model_requests / bot_maintenance_*）。窗口
+        按 users.timezone 切日，空值回退部署配置 bots.memory.timezone，再回退
+        UTC。金额为请求级实收优先（COALESCE(provider_cost, cost_estimate)，
+        INT-164）：提供商回报的置信 USD 实收覆盖目录价估算；两者皆空的请求
+        为「未计价」——金额字段缺省为 null（缺失 ≠ 0），未计价请求计入
+        unpriced_requests。
         归属：session_kind='schedule' 的 run 按 schedule_task_id 归定时任务；
         触发来源 schedule_event 的主线 run 经 trigger_key 反查任务，计入该
         任务 linked_main_cost（近似，一次主线 run 可能同时处理多条输入），
@@ -8011,16 +8013,17 @@ paths:
       summary: 花费优化参考（上下文增长 / 缓存命中 / 工具定义占比 / 维护占比 / 失败重试浪费 / 空转 / 换模型差价，INT-163）
       description: |
         与花费总览同一窗口、同一机器人集合的只读聚合，回答「钱花在哪、怎么省」。
-        全部指标复用现有账本实时计算：金额仍是目录单价估算（缺失 ≠ 0），token
-        估算列（input_tokens_estimate / tools_tokens_estimate）标 estimated。
+        全部指标复用现有账本实时计算：展示金额与总览同口径（请求级实收优先，
+        缺失 ≠ 0）；换模型差价是假设对比，按目录单价估算。token 估算列
+        （input_tokens_estimate / tools_tokens_estimate）标 estimated。
         口径要点：
         - 缓存命中率：cached / prompt，只统计 usage 完整的请求；按天维度把请求
           计入所属 run（或维护运行）自身 created_at 的当地日，与总览记日一致。
         - 工具定义占比：tools_tokens_estimate / prompt_tokens，同一 usage 完整
           请求集合；分子是按 schema 字节的估算值。
-        - 维护占比：窗口内全部维护请求已计价花费（含挂到 run 名下的，口径大于
+        - 维护占比：窗口内全部维护请求显示花费（含挂到 run 名下的，口径大于
           总览「维护」桶）占该机器人总花费（总览三桶之和）的比例，按用途拆分。
-        - 失败和重试浪费：status=failed 的请求行中已计价金额、status=failed 的
+        - 失败和重试浪费：status=failed 的请求行中显示金额、status=failed 的
           run 的显示成本合计、重复 request_hash 的重试次数；按 error_code 分组。
         - 空转：非 skipped 的终态 schedule run 中满足任一条件即算空转——
           silent=true、整次运行没有任何工具调用行、没有任何写操作调用（写操作
@@ -8071,8 +8074,9 @@ paths:
       summary: 单次运行花费明细（INT-162）
       description: |
         单次 run 的完整账单：每次模型请求（含失败重试）及其工具调用、关联的
-        压缩/维护运行与请求。display_cost = 自身已计价成本 + 关联维护已计价
-        成本；不改写 run 的 cost_estimate 列。
+        压缩/维护运行与请求。金额均为请求级实收优先（provider_cost 覆盖
+        cost_estimate）：display_cost = 自身 + 关联维护的显示成本合计；
+        不改写 run 的 cost_estimate 列（保持目录价快照语义）。
       security:
         - jwtAuth: []
       parameters:
@@ -8746,6 +8750,246 @@ paths:
                     properties:
                       data:
                         $ref: '#/components/schemas/BotScheduleTask'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/bots/{id}/budgets:
+    get:
+      tags: [bots]
+      operationId: listBotBudgets
+      summary: 机器人周期预算列表（INT-164）
+      description: |
+        返回该机器人的预算（每日/每月各至多一条）与当前周期的已计价花费。
+        花费为实收优先（provider_cost 覆盖 cost_estimate，与花费页展示同
+        口径，未计价请求不计入），周期按用户有效时区切日/切月。未设置预算
+        时返回空列表，系统行为与没有预算完全一致。
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectOrKeyId'
+      responses:
+        '200':
+          description: 预算列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [items]
+                        properties:
+                          items:
+                            type: array
+                            items:
+                              $ref: '#/components/schemas/BotBudget'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/bots/{id}/budgets/{period}:
+    put:
+      tags: [bots]
+      operationId: upsertBotBudget
+      summary: 设置机器人预算（按周期覆盖）
+      description: |
+        覆盖该机器人某周期的预算。阈值是相对预算金额的比例（0.8 = 80%，
+        1 = 100%，允许大于 1）；服务端规范化（去重、升序、整数基点）后保存。
+        越过阈值只发站内通知与主线事件，不停止运行；同一周期同一阈值只告警
+        一次。
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectOrKeyId'
+        - name: period
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [daily, monthly]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BotBudgetUpsertRequest'
+      responses:
+        '200':
+          description: 保存后的预算与当前周期花费
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/BotBudget'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      tags: [bots]
+      operationId: deleteBotBudget
+      summary: 删除机器人预算
+      description: 删除该机器人某周期的预算；不存在也算成功（幂等）。
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectOrKeyId'
+        - name: period
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [daily, monthly]
+      responses:
+        '200':
+          description: 删除成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/bots/{id}/schedule-tasks/{taskId}/budgets:
+    get:
+      tags: [bots]
+      operationId: listBotScheduleTaskBudgets
+      summary: 定时任务周期预算列表（INT-164）
+      description: |
+        返回该定时任务的预算与当前周期花费。任务花费只算任务口径：该任务的
+        schedule run、解析到该任务的 schedule_event 连带主线 run 及它们的关联
+        维护；未计价请求不计入。
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectOrKeyId'
+        - name: taskId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 预算列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [items]
+                        properties:
+                          items:
+                            type: array
+                            items:
+                              $ref: '#/components/schemas/BotBudget'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/bots/{id}/schedule-tasks/{taskId}/budgets/{period}:
+    put:
+      tags: [bots]
+      operationId: upsertBotScheduleTaskBudget
+      summary: 设置定时任务预算（按周期覆盖）
+      description: |
+        覆盖该定时任务某周期的预算；阈值语义同机器人预算。任务必须属于该
+        机器人（否则 404），机器人与任务都必须属于当前用户。
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectOrKeyId'
+        - name: taskId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: period
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [daily, monthly]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BotBudgetUpsertRequest'
+      responses:
+        '200':
+          description: 保存后的预算与当前周期花费
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/BotBudget'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      tags: [bots]
+      operationId: deleteBotScheduleTaskBudget
+      summary: 删除定时任务预算
+      description: 删除该定时任务某周期的预算；不存在也算成功（幂等）。
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectOrKeyId'
+        - name: taskId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: period
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [daily, monthly]
+      responses:
+        '200':
+          description: 删除成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':
@@ -13095,7 +13339,7 @@ components:
           type: string
         kind:
           type: string
-          enum: [review_dispatch_failed, review_run_timeout, review_cleanup_failed, review_redelivery_failed]
+          enum: [review_dispatch_failed, review_run_timeout, review_cleanup_failed, review_redelivery_failed, bot_budget_threshold]
         title:
           type: string
         body:
@@ -14399,7 +14643,7 @@ components:
           type: number
           format: double
           nullable: true
-          description: 显示口径成本（INT-162）：本 run 已计价成本 + 关联维护运行已计价成本；两者都为 null 时为 null。cost_estimate 列本身口径不变
+          description: 显示口径成本（INT-162）：本 run + 关联维护运行的显示成本合计（请求级实收优先，INT-164）；两者都为 null 时为 null。cost_estimate 列本身口径不变
         error_code:
           type: string
           nullable: true
@@ -14463,7 +14707,7 @@ components:
           type: number
           format: double
           nullable: true
-          description: 近 7 天该任务已计价成本合计（schedule run 自身+关联维护 + 连带主线成本，INT-162）；无已计价记录为 null
+          description: 近 7 天该任务显示成本合计（schedule run 自身+关联维护 + 连带主线成本，请求级实收优先，INT-162/164）；无金额记录为 null
         created_at:
           type: string
           format: date-time
@@ -14538,7 +14782,64 @@ components:
           type: number
           format: double
           nullable: true
-          description: 显示口径成本（INT-162）：本 run 已计价成本 + 关联维护运行已计价成本；两者都为 null 时为 null
+          description: 显示口径成本（INT-162）：本 run + 关联维护运行的显示成本合计（请求级实收优先，INT-164）；两者都为 null 时为 null
+
+    BotBudget:
+      type: object
+      required: [id, period, amount_usd, thresholds, spend_usd, period_key, spend_window_start, spend_window_end, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        period:
+          type: string
+          enum: [daily, monthly]
+          description: 预算周期；每日按用户有效时区的当地日，每月按当地月
+        amount_usd:
+          type: number
+          format: double
+          description: 预算金额（美元，大于 0）
+        thresholds:
+          type: array
+          items:
+            type: number
+            format: double
+          description: 告警阈值（相对预算金额的比例，0.8 = 80%、1 = 100%；服务端规范化去重升序）
+        spend_usd:
+          type: number
+          format: double
+          description: 当前周期花费（USD）；实收优先（provider_cost 覆盖 cost_estimate），无金额请求不计入，无花费为 0
+        period_key:
+          type: string
+          description: 当前周期的规范键（daily = 当地日期 2006-01-02，monthly = 2006-01）
+        spend_window_start:
+          type: string
+          format: date-time
+          description: 当前周期统计窗口起点（UTC）
+        spend_window_end:
+          type: string
+          format: date-time
+          description: 当前周期统计窗口终点（UTC，= 评估时刻）
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    BotBudgetUpsertRequest:
+      type: object
+      required: [amount_usd, thresholds]
+      properties:
+        amount_usd:
+          type: number
+          format: double
+          description: 预算金额（美元，必须大于 0）
+        thresholds:
+          type: array
+          items:
+            type: number
+            format: double
+          description: 告警阈值（(0, 100]，1 = 100%，允许超过 100% 的档位；至少一个，服务端去重升序）
 
     BotUsageTotals:
       type: object
@@ -14548,7 +14849,7 @@ components:
           type: number
           format: double
           nullable: true
-          description: 窗口内已计价成本合计（USD）；无任何已计价请求为 null（缺失 ≠ 0）
+          description: 窗口内显示成本合计（USD，请求级实收优先）；无任何金额请求为 null（缺失 ≠ 0）
         daily_average:
           type: number
           format: double
@@ -14561,10 +14862,11 @@ components:
         priced_requests:
           type: integer
           format: int64
+          description: 有金额请求数（估算或实收任一非空）
         unpriced_requests:
           type: integer
           format: int64
-          description: 未计价请求数（自定义提供商、目录无价、缺 usage、v0.1.63 前旧记录）
+          description: 无金额请求数（估算与实收都为空：自定义提供商、目录无价、缺 usage、v0.1.63 前旧记录）
 
     BotUsageDay:
       type: object
@@ -14576,7 +14878,7 @@ components:
         cost:
           type: number
           format: double
-          description: 当日已计价成本合计；全未计价或无记录为 0
+          description: 当日显示成本合计（请求级实收优先）；全无金额或无记录为 0
         bots:
           type: array
           description: 当日有模型请求（含未计价）的机器人
@@ -14598,11 +14900,14 @@ components:
           type: string
         name:
           type: string
+        deleted:
+          type: boolean
+          description: omitempty；true = 机器人已删除——明细已级联清理，name 是删除时快照，历史维度读按天汇总表（INT-164）
         cost:
           type: number
           format: double
           nullable: true
-          description: 已计价合计 = cost_main + cost_schedule + cost_maintenance
+          description: 显示成本合计 = cost_main + cost_schedule + cost_maintenance（请求级实收优先）
         cost_main:
           type: number
           format: double
@@ -14809,7 +15114,7 @@ components:
           type: number
           format: double
           nullable: true
-          description: 关联维护运行已计价成本合计
+          description: 关联维护运行显示成本合计（实收优先）
         display_cost:
           type: number
           format: double
@@ -14895,6 +15200,16 @@ components:
           type: integer
           format: int64
           nullable: true
+        reasoning_tokens:
+          type: integer
+          format: int64
+          nullable: true
+          description: completion_tokens_details.reasoning_tokens；供应商未返回为 null
+        provider_cost:
+          type: number
+          format: double
+          nullable: true
+          description: 供应商 usage 返回的实际金额（USD）；仅币别置信 USD 时落库并返回，否则 null
         tools_tokens_estimate:
           type: integer
           format: int64
@@ -14964,6 +15279,16 @@ components:
           type: integer
           format: int64
           nullable: true
+        reasoning_tokens:
+          type: integer
+          format: int64
+          nullable: true
+          description: completion_tokens_details.reasoning_tokens；供应商未返回为 null
+        provider_cost:
+          type: number
+          format: double
+          nullable: true
+          description: 供应商 usage 返回的实际金额（USD）；仅币别置信 USD 时落库并返回，否则 null
         cost_estimate:
           type: number
           format: double
@@ -15012,7 +15337,7 @@ components:
           type: number
           format: double
           nullable: true
-          description: 本维护运行已计价请求合计
+          description: 本维护运行显示成本合计（请求级实收优先）
         requests:
           type: array
           items:
@@ -15102,7 +15427,7 @@ components:
           type: number
           format: double
           nullable: true
-          description: 该用途下已计价请求合计；全部未计价为 null（缺失 ≠ 0）
+          description: 该用途下显示成本合计（实收优先）；全无金额为 null（缺失 ≠ 0）
 
     BotUsageMaintenanceShare:
       type: object
@@ -15112,7 +15437,7 @@ components:
           type: number
           format: double
           nullable: true
-          description: 窗口内该机器人全部维护请求已计价合计（含挂到 run 名下的压缩/归档，口径大于总览「维护」桶）
+          description: 窗口内该机器人全部维护请求显示成本合计（实收优先，含挂到 run 名下的压缩/归档，口径大于总览「维护」桶）
         share:
           type: number
           format: double
@@ -15139,7 +15464,7 @@ components:
           type: number
           format: double
           nullable: true
-          description: 该组失败请求中已计价金额合计
+          description: 该组失败请求中显示金额合计（实收优先）
 
     BotUsageFailureStats:
       type: object
@@ -15153,7 +15478,7 @@ components:
           type: number
           format: double
           nullable: true
-          description: 失败请求中已计价金额合计——重试浪费口径：失败尝试若送过 usage 就已计价，其花费即浪费
+          description: 失败请求中显示金额合计（实收优先）——重试浪费口径：失败尝试若有金额，其花费即浪费
         failed_runs:
           type: integer
           format: int64
@@ -15162,7 +15487,7 @@ components:
           type: number
           format: double
           nullable: true
-          description: 失败 run 的显示成本合计（自身 + 关联维护已计价）
+          description: 失败 run 的显示成本合计（自身 + 关联维护，实收优先）
         retried_requests:
           type: integer
           format: int64
@@ -15280,7 +15605,7 @@ components:
           type: number
           format: double
           nullable: true
-          description: 空转 run 的显示成本合计（自身 + 关联维护已计价）
+          description: 空转 run 的显示成本合计（自身 + 关联维护，实收优先）
         silent_runs:
           type: integer
           format: int64

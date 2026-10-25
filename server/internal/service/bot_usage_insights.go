@@ -228,11 +228,11 @@ func (s *BotService) GetBotUsageInsights(userID, rangeParam, botID string) (*api
 		acc.toolsTokens += agg.ToolsSum
 		acc.retriedRequests += retries[row.ID]
 
-		// 失败 run：计数与显示成本（自身 + 关联维护已计价）。
+		// 失败 run：计数与显示成本（自身 + 关联维护，实收优先）。
 		if model.BotRunStatus(row.Status) == model.BotRunStatusFailed {
 			acc.failedRuns++
 			acc.failedRunsCost = botSumOptional(acc.failedRunsCost,
-				botSumOptional(row.CostEstimate, led.maintByParent[row.ID]))
+				botSumOptional(runDisplayOwn(row.CostEstimate, agg), led.maintByParent[row.ID]))
 		}
 
 		// context_growth：有请求的 run 各取一个点，runRows 已按时间升序。
@@ -300,16 +300,17 @@ func (s *BotService) GetBotUsageInsights(userID, rangeParam, botID string) (*api
 		if acc == nil {
 			continue
 		}
-		if row.CostEstimate != nil {
-			acc.maintCost = botSumOptional(acc.maintCost, row.CostEstimate)
-			acc.maintPurposes[row.Purpose] = botSumOptional(acc.maintPurposes[row.Purpose], row.CostEstimate)
+		displayCost := requestDisplayCost(row.ProviderCost, row.CostEstimate)
+		if displayCost != nil {
+			acc.maintCost = botSumOptional(acc.maintCost, displayCost)
+			acc.maintPurposes[row.Purpose] = botSumOptional(acc.maintPurposes[row.Purpose], displayCost)
 		} else if _, seen := acc.maintPurposes[row.Purpose]; !seen {
 			// 用途在窗口内出现过即列出（全部未计价时 cost 为 null）。
 			acc.maintPurposes[row.Purpose] = nil
 		}
 		if model.BotModelRequestStatus(row.Status) == model.BotModelRequestFailed {
 			acc.failedRequests++
-			acc.failedRequestsCost = botSumOptional(acc.failedRequestsCost, row.CostEstimate)
+			acc.failedRequestsCost = botSumOptional(acc.failedRequestsCost, displayCost)
 			key := failureErrorKeyOf(row.ErrorCode)
 			merged := acc.byError[key]
 			if merged == nil {
@@ -317,7 +318,7 @@ func (s *BotService) GetBotUsageInsights(userID, rangeParam, botID string) (*api
 				acc.byError[key] = merged
 			}
 			merged.requests++
-			merged.cost = botSumOptional(merged.cost, row.CostEstimate)
+			merged.cost = botSumOptional(merged.cost, displayCost)
 		}
 	}
 
@@ -362,7 +363,7 @@ func (s *BotService) GetBotUsageInsights(userID, rangeParam, botID string) (*api
 			if idle {
 				acc.idle++
 				acc.idleCost = botSumOptional(acc.idleCost,
-					botSumOptional(row.CostEstimate, led.maintByParent[row.ID]))
+					botSumOptional(runDisplayOwn(row.CostEstimate, agg), led.maintByParent[row.ID]))
 			}
 		}
 	}

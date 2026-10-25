@@ -88,6 +88,12 @@ type BotMaintenanceRequest struct {
 	CompletionTokens *int64 `json:"completion_tokens"`
 	TotalTokens      *int64 `json:"total_tokens"`
 	CachedTokens     *int64 `json:"cached_tokens"`
+	// ReasoningTokens / ProviderCost / ProviderCostRaw 同 bot_model_requests
+	// 口径（INT-164）：供应商未返回保持 NULL；provider_cost 只落置信 USD
+	// 的值，币别不明或非用户实收的金额记进 provider_cost_raw 不展示。
+	ReasoningTokens *int64   `json:"reasoning_tokens"`
+	ProviderCost    *float64 `json:"provider_cost"`
+	ProviderCostRaw *string  `json:"provider_cost_raw"`
 	// CostEstimate / CostSource 同 bot_model_requests 口径（INT-139）。
 	CostEstimate *float64 `json:"cost_estimate"`
 	CostSource   *string  `json:"cost_source"`

@@ -11,6 +11,24 @@ import (
 	openapi_types "github.com/oapi-codegen/runtime/types"
 )
 
+// Defines values for BotBudgetPeriod.
+const (
+	BotBudgetPeriodDaily   BotBudgetPeriod = "daily"
+	BotBudgetPeriodMonthly BotBudgetPeriod = "monthly"
+)
+
+// Valid indicates whether the value is a known member of the BotBudgetPeriod enum.
+func (e BotBudgetPeriod) Valid() bool {
+	switch e {
+	case BotBudgetPeriodDaily:
+		return true
+	case BotBudgetPeriodMonthly:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for BotUsageInsightsRange.
 const (
 	BotUsageInsightsRangeN30d  BotUsageInsightsRange = "30d"
@@ -340,6 +358,7 @@ func (e IssueRecommendationStatus) Valid() bool {
 
 // Defines values for NotificationKind.
 const (
+	BotBudgetThreshold     NotificationKind = "bot_budget_threshold"
 	ReviewCleanupFailed    NotificationKind = "review_cleanup_failed"
 	ReviewDispatchFailed   NotificationKind = "review_dispatch_failed"
 	ReviewRedeliveryFailed NotificationKind = "review_redelivery_failed"
@@ -349,6 +368,8 @@ const (
 // Valid indicates whether the value is a known member of the NotificationKind enum.
 func (e NotificationKind) Valid() bool {
 	switch e {
+	case BotBudgetThreshold:
+		return true
 	case ReviewCleanupFailed:
 		return true
 	case ReviewDispatchFailed:
@@ -436,25 +457,25 @@ func (e QuotaProbeStatus) Valid() bool {
 
 // Defines values for QuotaWindowKind.
 const (
-	Daily    QuotaWindowKind = "daily"
-	FiveHour QuotaWindowKind = "five_hour"
-	Monthly  QuotaWindowKind = "monthly"
-	Other    QuotaWindowKind = "other"
-	Weekly   QuotaWindowKind = "weekly"
+	QuotaWindowKindDaily    QuotaWindowKind = "daily"
+	QuotaWindowKindFiveHour QuotaWindowKind = "five_hour"
+	QuotaWindowKindMonthly  QuotaWindowKind = "monthly"
+	QuotaWindowKindOther    QuotaWindowKind = "other"
+	QuotaWindowKindWeekly   QuotaWindowKind = "weekly"
 )
 
 // Valid indicates whether the value is a known member of the QuotaWindowKind enum.
 func (e QuotaWindowKind) Valid() bool {
 	switch e {
-	case Daily:
+	case QuotaWindowKindDaily:
 		return true
-	case FiveHour:
+	case QuotaWindowKindFiveHour:
 		return true
-	case Monthly:
+	case QuotaWindowKindMonthly:
 		return true
-	case Other:
+	case QuotaWindowKindOther:
 		return true
-	case Weekly:
+	case QuotaWindowKindWeekly:
 		return true
 	default:
 		return false
@@ -1256,6 +1277,78 @@ func (e GetBotUsageInsightsParamsRange) Valid() bool {
 	}
 }
 
+// Defines values for DeleteBotBudgetParamsPeriod.
+const (
+	DeleteBotBudgetParamsPeriodDaily   DeleteBotBudgetParamsPeriod = "daily"
+	DeleteBotBudgetParamsPeriodMonthly DeleteBotBudgetParamsPeriod = "monthly"
+)
+
+// Valid indicates whether the value is a known member of the DeleteBotBudgetParamsPeriod enum.
+func (e DeleteBotBudgetParamsPeriod) Valid() bool {
+	switch e {
+	case DeleteBotBudgetParamsPeriodDaily:
+		return true
+	case DeleteBotBudgetParamsPeriodMonthly:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for UpsertBotBudgetParamsPeriod.
+const (
+	UpsertBotBudgetParamsPeriodDaily   UpsertBotBudgetParamsPeriod = "daily"
+	UpsertBotBudgetParamsPeriodMonthly UpsertBotBudgetParamsPeriod = "monthly"
+)
+
+// Valid indicates whether the value is a known member of the UpsertBotBudgetParamsPeriod enum.
+func (e UpsertBotBudgetParamsPeriod) Valid() bool {
+	switch e {
+	case UpsertBotBudgetParamsPeriodDaily:
+		return true
+	case UpsertBotBudgetParamsPeriodMonthly:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for DeleteBotScheduleTaskBudgetParamsPeriod.
+const (
+	DeleteBotScheduleTaskBudgetParamsPeriodDaily   DeleteBotScheduleTaskBudgetParamsPeriod = "daily"
+	DeleteBotScheduleTaskBudgetParamsPeriodMonthly DeleteBotScheduleTaskBudgetParamsPeriod = "monthly"
+)
+
+// Valid indicates whether the value is a known member of the DeleteBotScheduleTaskBudgetParamsPeriod enum.
+func (e DeleteBotScheduleTaskBudgetParamsPeriod) Valid() bool {
+	switch e {
+	case DeleteBotScheduleTaskBudgetParamsPeriodDaily:
+		return true
+	case DeleteBotScheduleTaskBudgetParamsPeriodMonthly:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for UpsertBotScheduleTaskBudgetParamsPeriod.
+const (
+	UpsertBotScheduleTaskBudgetParamsPeriodDaily   UpsertBotScheduleTaskBudgetParamsPeriod = "daily"
+	UpsertBotScheduleTaskBudgetParamsPeriodMonthly UpsertBotScheduleTaskBudgetParamsPeriod = "monthly"
+)
+
+// Valid indicates whether the value is a known member of the UpsertBotScheduleTaskBudgetParamsPeriod enum.
+func (e UpsertBotScheduleTaskBudgetParamsPeriod) Valid() bool {
+	switch e {
+	case UpsertBotScheduleTaskBudgetParamsPeriodDaily:
+		return true
+	case UpsertBotScheduleTaskBudgetParamsPeriodMonthly:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for ListIssuesParamsWorkflowStatus.
 const (
 	ListIssuesParamsWorkflowStatusDone       ListIssuesParamsWorkflowStatus = "done"
@@ -1699,6 +1792,45 @@ type BotAuthorization struct {
 	ToolName  string `json:"tool_name"`
 }
 
+// BotBudget defines model for BotBudget.
+type BotBudget struct {
+	// AmountUsd 预算金额（美元，大于 0）
+	AmountUsd float64 `json:"amount_usd"`
+	CreatedAt string  `json:"created_at"`
+	Id        string  `json:"id"`
+
+	// Period 预算周期；每日按用户有效时区的当地日，每月按当地月
+	Period BotBudgetPeriod `json:"period"`
+
+	// PeriodKey 当前周期的规范键（daily = 当地日期 2006-01-02，monthly = 2006-01）
+	PeriodKey string `json:"period_key"`
+
+	// SpendUsd 当前周期花费（USD）；实收优先（provider_cost 覆盖 cost_estimate），无金额请求不计入，无花费为 0
+	SpendUsd float64 `json:"spend_usd"`
+
+	// SpendWindowEnd 当前周期统计窗口终点（UTC，= 评估时刻）
+	SpendWindowEnd string `json:"spend_window_end"`
+
+	// SpendWindowStart 当前周期统计窗口起点（UTC）
+	SpendWindowStart string `json:"spend_window_start"`
+
+	// Thresholds 告警阈值（相对预算金额的比例，0.8 = 80%、1 = 100%；服务端规范化去重升序）
+	Thresholds []float64 `json:"thresholds"`
+	UpdatedAt  string    `json:"updated_at"`
+}
+
+// BotBudgetPeriod 预算周期；每日按用户有效时区的当地日，每月按当地月
+type BotBudgetPeriod string
+
+// BotBudgetUpsertRequest defines model for BotBudgetUpsertRequest.
+type BotBudgetUpsertRequest struct {
+	// AmountUsd 预算金额（美元，必须大于 0）
+	AmountUsd float64 `json:"amount_usd"`
+
+	// Thresholds 告警阈值（(0, 100]，1 = 100%，允许超过 100% 的档位；至少一个，服务端去重升序）
+	Thresholds []float64 `json:"thresholds"`
+}
+
 // BotCallDecisionRequest defines model for BotCallDecisionRequest.
 type BotCallDecisionRequest struct {
 	// Decision approve / reject / always_allow
@@ -1876,7 +2008,7 @@ type BotRun struct {
 	CostSource *string `json:"cost_source,omitempty"`
 	CreatedAt  string  `json:"created_at"`
 
-	// DisplayCostEstimate 显示口径成本（INT-162）：本 run 已计价成本 + 关联维护运行已计价成本；两者都为 null 时为 null。cost_estimate 列本身口径不变
+	// DisplayCostEstimate 显示口径成本（INT-162）：本 run + 关联维护运行的显示成本合计（请求级实收优先，INT-164）；两者都为 null 时为 null。cost_estimate 列本身口径不变
 	DisplayCostEstimate *float64 `json:"display_cost_estimate"`
 	ErrorCode           *string  `json:"error_code,omitempty"`
 	ErrorMessage        *string  `json:"error_message,omitempty"`
@@ -1909,7 +2041,7 @@ type BotScheduleRun struct {
 	// CostSource 计价来源（catalog）
 	CostSource *string `json:"cost_source,omitempty"`
 
-	// DisplayCostEstimate 显示口径成本（INT-162）：本 run 已计价成本 + 关联维护运行已计价成本；两者都为 null 时为 null
+	// DisplayCostEstimate 显示口径成本（INT-162）：本 run + 关联维护运行的显示成本合计（请求级实收优先，INT-164）；两者都为 null 时为 null
 	DisplayCostEstimate *float64 `json:"display_cost_estimate"`
 	DurationMs          *int64   `json:"duration_ms"`
 	ErrorCode           *string  `json:"error_code,omitempty"`
@@ -1941,7 +2073,7 @@ type BotScheduleRun struct {
 type BotScheduleTask struct {
 	BotId string `json:"bot_id"`
 
-	// CostLast7d 近 7 天该任务已计价成本合计（schedule run 自身+关联维护 + 连带主线成本，INT-162）；无已计价记录为 null
+	// CostLast7d 近 7 天该任务显示成本合计（schedule run 自身+关联维护 + 连带主线成本，请求级实收优先，INT-162/164）；无金额记录为 null
 	CostLast7d *float64 `json:"cost_last_7d"`
 	CreatedAt  string   `json:"created_at"`
 
@@ -2051,7 +2183,7 @@ type BotUsageBot struct {
 	// CacheHitRate cached / prompt，只算 usage 完整的请求；无完整 usage 为 null
 	CacheHitRate *float64 `json:"cache_hit_rate"`
 
-	// Cost 已计价合计 = cost_main + cost_schedule + cost_maintenance
+	// Cost 显示成本合计 = cost_main + cost_schedule + cost_maintenance（请求级实收优先）
 	Cost *float64 `json:"cost"`
 
 	// CostMain 主线桶：非 schedule_event 触发的 main run（自身成本+关联维护）
@@ -2065,8 +2197,11 @@ type BotUsageBot struct {
 
 	// CostScheduleLinkedApprox cost_schedule 中连带主线成本部分（近似，UI 标注）
 	CostScheduleLinkedApprox *float64 `json:"cost_schedule_linked_approx"`
-	MaxRunCost               *float64 `json:"max_run_cost"`
-	Name                     string   `json:"name"`
+
+	// Deleted omitempty；true = 机器人已删除——明细已级联清理，name 是删除时快照，历史维度读按天汇总表（INT-164）
+	Deleted    *bool    `json:"deleted,omitempty"`
+	MaxRunCost *float64 `json:"max_run_cost"`
+	Name       string   `json:"name"`
 
 	// P90RunCost 单次运行显示成本的 P90（nearest-rank，与 avg/max 同一已计价 run 集合）；无已计价 run 为 null
 	P90RunCost *float64 `json:"p90_run_cost"`
@@ -2099,7 +2234,7 @@ type BotUsageDay struct {
 	// Bots 当日有模型请求（含未计价）的机器人
 	Bots []BotUsageDay_Bots `json:"bots"`
 
-	// Cost 当日已计价成本合计；全未计价或无记录为 0
+	// Cost 当日显示成本合计（请求级实收优先）；全无金额或无记录为 0
 	Cost float64 `json:"cost"`
 
 	// Date 生效时区的当地日期 YYYY-MM-DD；窗口内每天一行（含无数据日）
@@ -2123,7 +2258,7 @@ type BotUsageDayCacheHit struct {
 
 // BotUsageFailureError defines model for BotUsageFailureError.
 type BotUsageFailureError struct {
-	// Cost 该组失败请求中已计价金额合计
+	// Cost 该组失败请求中显示金额合计（实收优先）
 	Cost *float64 `json:"cost"`
 
 	// ErrorCode 失败请求的 error_code；无错误码的失败归到 null 一组
@@ -2139,13 +2274,13 @@ type BotUsageFailureStats struct {
 	// FailedRequests status=failed 的模型请求行数（bot_model_requests + bot_maintenance_requests）
 	FailedRequests int64 `json:"failed_requests"`
 
-	// FailedRequestsCost 失败请求中已计价金额合计——重试浪费口径：失败尝试若送过 usage 就已计价，其花费即浪费
+	// FailedRequestsCost 失败请求中显示金额合计（实收优先）——重试浪费口径：失败尝试若有金额，其花费即浪费
 	FailedRequestsCost *float64 `json:"failed_requests_cost"`
 
 	// FailedRuns status=failed 的 bot_runs 数（main + schedule）
 	FailedRuns int64 `json:"failed_runs"`
 
-	// FailedRunsCost 失败 run 的显示成本合计（自身 + 关联维护已计价）
+	// FailedRunsCost 失败 run 的显示成本合计（自身 + 关联维护，实收优先）
 	FailedRunsCost *float64 `json:"failed_runs_cost"`
 
 	// RetriedRequests 与同 run 内更早请求 request_hash 相同的请求行数（每次重复尝试计 1，含最终成功那次）
@@ -2211,7 +2346,7 @@ type BotUsageInsightsTask struct {
 	// EvaluatedRuns 空转判定分母：非 skipped 的终态 schedule run（completed/failed/stopped）；进行中与排队不计
 	EvaluatedRuns int64 `json:"evaluated_runs"`
 
-	// IdleCost 空转 run 的显示成本合计（自身 + 关联维护已计价）
+	// IdleCost 空转 run 的显示成本合计（自身 + 关联维护，实收优先）
 	IdleCost *float64 `json:"idle_cost"`
 
 	// IdleRate idle_runs / evaluated_runs；分母为 0 时 null
@@ -2236,7 +2371,7 @@ type BotUsageInsightsTask struct {
 
 // BotUsageMaintenancePurpose defines model for BotUsageMaintenancePurpose.
 type BotUsageMaintenancePurpose struct {
-	// Cost 该用途下已计价请求合计；全部未计价为 null（缺失 ≠ 0）
+	// Cost 该用途下显示成本合计（实收优先）；全无金额为 null（缺失 ≠ 0）
 	Cost *float64 `json:"cost"`
 
 	// Purpose 维护用途：summary / archive / nightly（窗口内出现过的才列出）
@@ -2257,9 +2392,15 @@ type BotUsageMaintenanceRequest struct {
 	Ordinal          int64    `json:"ordinal"`
 	PromptTokens     *int64   `json:"prompt_tokens,omitempty"`
 
+	// ProviderCost 供应商 usage 返回的实际金额（USD）；仅币别置信 USD 时落库并返回，否则 null
+	ProviderCost *float64 `json:"provider_cost,omitempty"`
+
 	// Purpose summary / archive / nightly
-	Purpose   string `json:"purpose"`
-	StartedAt string `json:"started_at"`
+	Purpose string `json:"purpose"`
+
+	// ReasoningTokens completion_tokens_details.reasoning_tokens；供应商未返回为 null
+	ReasoningTokens *int64 `json:"reasoning_tokens,omitempty"`
+	StartedAt       string `json:"started_at"`
 
 	// Status running / succeeded / failed
 	Status        string `json:"status"`
@@ -2269,7 +2410,7 @@ type BotUsageMaintenanceRequest struct {
 
 // BotUsageMaintenanceRun defines model for BotUsageMaintenanceRun.
 type BotUsageMaintenanceRun struct {
-	// CostEstimate 本维护运行已计价请求合计
+	// CostEstimate 本维护运行显示成本合计（请求级实收优先）
 	CostEstimate *float64 `json:"cost_estimate"`
 	CreatedAt    string   `json:"created_at"`
 	FinishedAt   *string  `json:"finished_at,omitempty"`
@@ -2289,7 +2430,7 @@ type BotUsageMaintenanceShare struct {
 	// ByPurpose 按用途拆分，按 cost 降序
 	ByPurpose []BotUsageMaintenancePurpose `json:"by_purpose"`
 
-	// Cost 窗口内该机器人全部维护请求已计价合计（含挂到 run 名下的压缩/归档，口径大于总览「维护」桶）
+	// Cost 窗口内该机器人全部维护请求显示成本合计（实收优先，含挂到 run 名下的压缩/归档，口径大于总览「维护」桶）
 	Cost *float64 `json:"cost"`
 
 	// Share cost / 该机器人总花费（总览三桶之和）；任一未计价或总花费为 0 时为 null
@@ -2366,7 +2507,13 @@ type BotUsageRequest struct {
 	IsRetry      bool   `json:"is_retry"`
 	Ordinal      int64  `json:"ordinal"`
 	PromptTokens *int64 `json:"prompt_tokens,omitempty"`
-	StartedAt    string `json:"started_at"`
+
+	// ProviderCost 供应商 usage 返回的实际金额（USD）；仅币别置信 USD 时落库并返回，否则 null
+	ProviderCost *float64 `json:"provider_cost,omitempty"`
+
+	// ReasoningTokens completion_tokens_details.reasoning_tokens；供应商未返回为 null
+	ReasoningTokens *int64 `json:"reasoning_tokens,omitempty"`
+	StartedAt       string `json:"started_at"`
 
 	// Status running / succeeded / failed
 	Status              string             `json:"status"`
@@ -2393,7 +2540,7 @@ type BotUsageRun struct {
 	FinishedAt   *string  `json:"finished_at,omitempty"`
 	Id           string   `json:"id"`
 
-	// MaintenanceCost 关联维护运行已计价成本合计
+	// MaintenanceCost 关联维护运行显示成本合计（实收优先）
 	MaintenanceCost *float64 `json:"maintenance_cost"`
 	PromptTokens    *int64   `json:"prompt_tokens,omitempty"`
 	ScheduleTaskId  *string  `json:"schedule_task_id,omitempty"`
@@ -2491,17 +2638,19 @@ type BotUsageToolsShare struct {
 
 // BotUsageTotals defines model for BotUsageTotals.
 type BotUsageTotals struct {
-	// Cost 窗口内已计价成本合计（USD）；无任何已计价请求为 null（缺失 ≠ 0）
+	// Cost 窗口内显示成本合计（USD，请求级实收优先）；无任何金额请求为 null（缺失 ≠ 0）
 	Cost *float64 `json:"cost"`
 
 	// DailyAverage cost / 窗口天数；cost 为 null 时同 null
-	DailyAverage   *float64 `json:"daily_average"`
-	PricedRequests int64    `json:"priced_requests"`
+	DailyAverage *float64 `json:"daily_average"`
+
+	// PricedRequests 有金额请求数（估算或实收任一非空）
+	PricedRequests int64 `json:"priced_requests"`
 
 	// TotalRequests 模型请求总数（主线/定时 + 维护）
 	TotalRequests int64 `json:"total_requests"`
 
-	// UnpricedRequests 未计价请求数（自定义提供商、目录无价、缺 usage、v0.1.63 前旧记录）
+	// UnpricedRequests 无金额请求数（估算与实收都为空：自定义提供商、目录无价、缺 usage、v0.1.63 前旧记录）
 	UnpricedRequests int64 `json:"unpriced_requests"`
 }
 
@@ -6239,6 +6388,37 @@ type ListBotAuthorizations200JSONResponseBody struct {
 	Message string `json:"message"`
 }
 
+// ListBotBudgets200JSONResponseBody_Data defines parameters for ListBotBudgets.
+type ListBotBudgets200JSONResponseBody_Data struct {
+	Items []BotBudget `json:"items"`
+}
+
+// ListBotBudgets200JSONResponseBody defines parameters for ListBotBudgets.
+type ListBotBudgets200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                                     `json:"code"`
+	Data *ListBotBudgets200JSONResponseBody_Data `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// DeleteBotBudgetParamsPeriod defines parameters for DeleteBotBudget.
+type DeleteBotBudgetParamsPeriod string
+
+// UpsertBotBudgetParamsPeriod defines parameters for UpsertBotBudget.
+type UpsertBotBudgetParamsPeriod string
+
+// UpsertBotBudget200JSONResponseBody defines parameters for UpsertBotBudget.
+type UpsertBotBudget200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int        `json:"code"`
+	Data *BotBudget `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
 // ListBotCallsParams defines parameters for ListBotCalls.
 type ListBotCallsParams struct {
 	// Status 逗号分隔的状态过滤
@@ -6448,6 +6628,37 @@ type GetBotScheduleTask200JSONResponseBody struct {
 	// Code 业务错误码；0 表示成功
 	Code int              `json:"code"`
 	Data *BotScheduleTask `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// ListBotScheduleTaskBudgets200JSONResponseBody_Data defines parameters for ListBotScheduleTaskBudgets.
+type ListBotScheduleTaskBudgets200JSONResponseBody_Data struct {
+	Items []BotBudget `json:"items"`
+}
+
+// ListBotScheduleTaskBudgets200JSONResponseBody defines parameters for ListBotScheduleTaskBudgets.
+type ListBotScheduleTaskBudgets200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                                                 `json:"code"`
+	Data *ListBotScheduleTaskBudgets200JSONResponseBody_Data `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// DeleteBotScheduleTaskBudgetParamsPeriod defines parameters for DeleteBotScheduleTaskBudget.
+type DeleteBotScheduleTaskBudgetParamsPeriod string
+
+// UpsertBotScheduleTaskBudgetParamsPeriod defines parameters for UpsertBotScheduleTaskBudget.
+type UpsertBotScheduleTaskBudgetParamsPeriod string
+
+// UpsertBotScheduleTaskBudget200JSONResponseBody defines parameters for UpsertBotScheduleTaskBudget.
+type UpsertBotScheduleTaskBudget200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int        `json:"code"`
+	Data *BotBudget `json:"data,omitempty"`
 
 	// Message 人类可读信息；成功时为 "success"
 	Message string `json:"message"`
@@ -8649,6 +8860,9 @@ type TestBotConnectionJSONRequestBody = TestBotConnectionRequest
 // UpdateBotJSONRequestBody defines body for UpdateBot for application/json ContentType.
 type UpdateBotJSONRequestBody = UpdateBotRequest
 
+// UpsertBotBudgetJSONRequestBody defines body for UpsertBotBudget for application/json ContentType.
+type UpsertBotBudgetJSONRequestBody = BotBudgetUpsertRequest
+
 // DecideBotCallJSONRequestBody defines body for DecideBotCall for application/json ContentType.
 type DecideBotCallJSONRequestBody = BotCallDecisionRequest
 
@@ -8657,6 +8871,9 @@ type SendBotMessageJSONRequestBody = SendBotMessageRequest
 
 // SetBotWritePolicyRuleEnabledJSONRequestBody defines body for SetBotWritePolicyRuleEnabled for application/json ContentType.
 type SetBotWritePolicyRuleEnabledJSONRequestBody = BotWritePolicyRuleToggleRequest
+
+// UpsertBotScheduleTaskBudgetJSONRequestBody defines body for UpsertBotScheduleTaskBudget for application/json ContentType.
+type UpsertBotScheduleTaskBudgetJSONRequestBody = BotBudgetUpsertRequest
 
 // SetBotScheduleTaskEnabledJSONRequestBody defines body for SetBotScheduleTaskEnabled for application/json ContentType.
 type SetBotScheduleTaskEnabledJSONRequestBody SetBotScheduleTaskEnabledJSONBody

@@ -396,10 +396,11 @@ func TestBotUsageInsightsFailureRetry(t *testing.T) {
 	userID := createBotTestUser(t, env.db, "insightfail")
 	bot := env.createBot(t, userID)
 
-	// 两次 429 失败（一次已计价一次未计价）后第三次成功。
+	// 两次 429 失败（一次已计价一次未计价）后第三次成功。快照与请求合计一致
+	// （0.05+0.2=0.25，生产上 run.cost_estimate 就是请求估算合计的冻结）。
 	runF := seedUsageRun(t, env, bot.ID, func(r *model.BotRun) {
 		r.Status = model.BotRunStatusFailed
-		r.CostEstimate = ptrCost(0.5)
+		r.CostEstimate = ptrCost(0.25)
 	})
 	seedInsightRequest(t, env, runF.ID, func(r *model.BotModelRequest) {
 		r.Status = model.BotModelRequestFailed
@@ -461,8 +462,8 @@ func TestBotUsageInsightsFailureRetry(t *testing.T) {
 	if f.FailedRuns != 1 {
 		t.Fatalf("failed_runs 应为 1，实得 %d", f.FailedRuns)
 	}
-	if f.FailedRunsCost == nil || !costEq(*f.FailedRunsCost, 0.75) {
-		t.Fatalf("failed_runs_cost 应为 0.5+0.25，实得 %v", f.FailedRunsCost)
+	if f.FailedRunsCost == nil || !costEq(*f.FailedRunsCost, 0.5) {
+		t.Fatalf("failed_runs_cost 应为 0.25+0.25，实得 %v", f.FailedRunsCost)
 	}
 	if len(f.ByError) != 3 {
 		t.Fatalf("应有 3 个错误码组: %+v", f.ByError)

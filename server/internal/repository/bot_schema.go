@@ -9,8 +9,9 @@ import (
 
 // BotModels 返回机器人的全部表模型（七张主线表 + INT-102 的压缩/记忆/维护
 // 表 + INT-103 的定时任务表 + INT-115 的模型窗口缓存表 + INT-133 的 AI 提供
-// 商表 + INT-160 的写操作分级规则表），供 AutoMigrate 与测试建库共用。FTS5
-// 虚表与触发器不在 GORM 模型体系内，由 botSchemaDDL 创建。
+// 商表 + INT-160 的写操作分级规则表 + INT-164 的花费按天汇总表），供
+// AutoMigrate 与测试建库共用。FTS5 虚表与触发器不在 GORM 模型体系内，由
+// botSchemaDDL 创建。
 func BotModels() []interface{} {
 	return []interface{}{
 		&model.AIProvider{},
@@ -28,8 +29,12 @@ func BotModels() []interface{} {
 		&model.BotMaintenanceRun{},
 		&model.BotMaintenanceRequest{},
 		&model.BotScheduleTask{},
+		&model.BotScheduleTaskName{},
 		&model.BotModelWindow{},
 		&model.BotWritePolicyRule{},
+		&model.BotUsageDaily{},
+		&model.BotUsageRollupDay{},
+		&model.BotBudget{},
 	}
 }
 
@@ -173,6 +178,20 @@ END`,
 	// bot_events：会话隔离读（聊天页只返回 main）。
 	`CREATE INDEX IF NOT EXISTS idx_bot_events_bot_session_seq ON bot_events(bot_id, session_kind, seq)`,
 
+	// ---------- INT-164：花费页按天汇总 ----------
+
+	// bot_usage_daily：一行 = (bot, date, kind, schedule_task_id)。SQLite 复合
+	// UNIQUE 把 NULL 互不相同，对 task_id 可空的键只能用部分唯一索引兜底：
+	// task 为空走 (bot_id,date,kind)，非空走四列全键。
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_bot_usage_daily_bucket ON bot_usage_daily(bot_id, date, kind) WHERE schedule_task_id IS NULL`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_bot_usage_daily_bucket_task ON bot_usage_daily(bot_id, date, kind, schedule_task_id) WHERE schedule_task_id IS NOT NULL`,
+	// 汇总任务按 (bot,date) 整日替换；混合查询按 (user,date) 窗口读。
+	`CREATE INDEX IF NOT EXISTS idx_bot_usage_daily_bot_date ON bot_usage_daily(bot_id, date)`,
+	`CREATE INDEX IF NOT EXISTS idx_bot_usage_daily_user_date ON bot_usage_daily(user_id, date)`,
+
+	// ---------- INT-164：预算（部分唯一索引见 repository/bot_budget.go 的
+	// BotBudgetDDL，EnsureBotSchema 统一执行） ----------
+
 	// bot_memory_fts 是派生全文索引（trigram），事实来源是文件/版本表；
 	// 只索引未删除文件的当前正文，不索引历史版本。同步由文件表触发器完成，
 	// 墓碑文件不进入索引。
@@ -231,9 +250,11 @@ WHERE tool_name = 'fs_thread' AND action = 'wait' AND status = 'running'
 	if err := db.Exec(dupWaitCleanup).Error; err != nil {
 		return fmt.Errorf("bot schema: dedupe running waits: %w", err)
 	}
-	for _, ddl := range botSchemaDDL {
-		if err := db.Exec(ddl).Error; err != nil {
-			return fmt.Errorf("bot schema: %w", err)
+	for _, ddls := range [][]string{botSchemaDDL, BotBudgetDDL} {
+		for _, ddl := range ddls {
+			if err := db.Exec(ddl).Error; err != nil {
+				return fmt.Errorf("bot schema: %w", err)
+			}
 		}
 	}
 	return nil
