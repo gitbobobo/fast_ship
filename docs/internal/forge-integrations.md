@@ -185,9 +185,10 @@ Forgejo 仓库的 PR 审查与 GitHub 走同一条协调管线（webhook 事务�
   瞬时故障也降级会把伪造覆写窗口从「仅仓库级 PAT 契约」扩大到任意故障
   时刻，且 PAT 有仓库管理权限时覆写他人评论连 403 兜底都没有。login
   学到之后立刻恢复按作者过滤。学到的 login 存进 resolver 按
-  `integrationID` 分槽的共享缓存（`ReviewClients.forgejoLogins`）跨适配器
-  实例存活——适配器每次现取现建，仓库级 PAT 下不共享则 Self 标记随实例
-  重建永久失效；PAT 轮换由下一次写响应/探测成功自然覆盖。同一登录名也
+  `(integrationID, PAT)` 分槽的共享缓存（`ReviewClients.forgejoLogins`）
+  跨适配器实例存活——适配器每次现取现建，仓库级 PAT 下不共享则 Self
+  标记随实例重建永久失效；命中即不再探测 /user，PAT 轮换到不同账号自动
+  换槽，旧身份不滞留。同一登录名也
   用于给行内/会话评论标 `ReviewComment.Self`/`IssueComment.Self`——历史
   上下文组装靠它把系统自己的 Forgejo 发言挡在下一轮提示之外（那边行内
   评论没有隐藏标记、login 也不以 [bot] 结尾）。

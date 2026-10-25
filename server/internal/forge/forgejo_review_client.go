@@ -21,8 +21,8 @@ import (
 // ForgejoLoginCache PAT 所属账号的共享缓存：resolver 每次现取现建适配器，
 // 仓库级 PAT 下 GET /user 恒 403，写响应学到的 login 随实例丢弃会让自评
 // 标记永久失效（自己的行内评论回流下一轮历史）。缓存放 resolver 侧按
-// integrationID 分槽随进程生命周期——PAT 轮换后下一次写响应重新覆盖，
-// 探测成功同样覆盖，不留陈旧身份。
+// (integrationID, PAT) 分槽随进程生命周期——命中即不再探测 /user，PAT
+// 轮换到不同账号时自动换槽，旧身份不滞留。
 type ForgejoLoginCache struct {
 	mu    sync.Mutex
 	login string

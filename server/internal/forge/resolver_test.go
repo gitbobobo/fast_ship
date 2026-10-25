@@ -110,6 +110,38 @@ func TestResolverForgejoBranch(t *testing.T) {
 	}
 }
 
+// TestResolverForgejoLoginCacheKeyByPAT 身份共享缓存按 (integrationID, PAT)
+// 分槽：同 PAT 的两次 ClientFor 共槽（学到的 login 跨实例存活）；PAT 轮换到
+// 不同凭证自动换槽——缓存命中即不再探测 /user，旧账号身份不滞留（fsb 第 6
+// 轮 Note）。
+func TestResolverForgejoLoginCacheKeyByPAT(t *testing.T) {
+	fj := &forgejoSourceStub{http: &http.Client{}, apiBase: "https://forge.example.com/api/v1", token: "pat-a"}
+	resolver := NewReviewClients(nil, fj)
+	ctx := context.Background()
+
+	c1, err := resolver.ClientFor(ctx, "forgejo-abc", "o/r", 0)
+	if err != nil {
+		t.Fatalf("ClientFor: %v", err)
+	}
+	c1b, err := resolver.ClientFor(ctx, "forgejo-abc", "o/r", 0)
+	if err != nil {
+		t.Fatalf("ClientFor: %v", err)
+	}
+	cache1 := c1.(*ForgejoReviewClient).loginCache
+	if c1b.(*ForgejoReviewClient).loginCache != cache1 {
+		t.Fatal("同集成同 PAT 的两次 ClientFor 应共享 login 缓存槽")
+	}
+
+	fj.token = "pat-b" // PAT 轮换
+	c2, err := resolver.ClientFor(ctx, "forgejo-abc", "o/r", 0)
+	if err != nil {
+		t.Fatalf("ClientFor: %v", err)
+	}
+	if c2.(*ForgejoReviewClient).loginCache == cache1 {
+		t.Fatal("PAT 轮换后应换新缓存槽，旧身份不得滞留")
+	}
+}
+
 func TestResolverNilGitHubSource(t *testing.T) {
 	resolver := NewReviewClients(nil, nil)
 	if _, err := resolver.ClientFor(context.Background(), "", "o/r", 1); err == nil {
