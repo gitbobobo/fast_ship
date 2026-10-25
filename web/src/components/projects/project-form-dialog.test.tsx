@@ -351,6 +351,33 @@ describe("ProjectFormDialog", () => {
     );
   });
 
+  it("悬空绑定：slug 被结构化字段预填时勾选清除仍提交 null", async () => {
+    const user = userEvent.setup();
+    renderDialog(
+      "edit",
+      makeProject({
+        code_integration_id: "dead-row",
+        code_repo_url: null,
+        code_github_owner: "acme",
+        code_github_repo: "api",
+      }),
+    );
+
+    // slug 从 code_github_owner/repo 预填非空——勾选语义须优先于输入内容。
+    const slug = await screen.findByLabelText(/owner \/ repo/);
+    expect(slug).toHaveValue("acme/api");
+    await user.click(
+      screen.getByLabelText("清除失效的代码仓绑定（回落到公开仓库）"),
+    );
+    await user.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() =>
+      expect(updateMutateAsync).toHaveBeenCalledWith(
+        expect.objectContaining({ code_repository_url: null }),
+      ),
+    );
+  });
+
   it("悬空绑定：输入了 owner/repo 但集成失效时就地报错且不提交", async () => {
     const user = userEvent.setup();
     renderDialog(

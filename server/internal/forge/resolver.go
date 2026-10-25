@@ -2,6 +2,8 @@ package forge
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
@@ -37,11 +39,13 @@ type ForgejoSource interface {
 type ReviewClients struct {
 	gh      GitHubApps
 	forgejo ForgejoSource
-	// forgejoLogins 各凭证的 PAT 账号共享缓存槽（key=integrationID+"\x00"+PAT）：
+	// forgejoLogins 各凭证的 PAT 账号共享缓存槽
+	// （key=integrationID+"\x00"+sha256(PAT)）：
 	// Forgejo 适配器每次现取现建，写响应学到的 login 不跨实例保留的话，仓库级
 	// PAT（/user 恒 403）下 Self 标记永不生效、自己的行内评论回流下一轮历史。
-	// 键里带 PAT：轮换到不同账号自动换槽，旧身份连同旧凭证一并隔离——缓存
-	// 命中即不再探测，按键分槽才不会有陈旧 login 滞留窗口。
+	// 键里带凭证摘要：轮换到不同账号自动换槽，旧身份连同旧凭证一并隔离——
+	// 缓存命中即不再探测，按键分槽才不会有陈旧 login 滞留窗口；裸 PAT 不进
+	// 常驻 map key（条目随 resolver 终身存活，明文凭证不该常驻内存）。
 	forgejoLogins sync.Map
 }
 
@@ -63,7 +67,8 @@ func (r *ReviewClients) ClientFor(ctx context.Context, integrationID, repoFullNa
 		if err != nil {
 			return nil, err
 		}
-		slot, _ := r.forgejoLogins.LoadOrStore(integrationID+"\x00"+token, &ForgejoLoginCache{})
+		tokenDigest := sha256.Sum256([]byte(token))
+		slot, _ := r.forgejoLogins.LoadOrStore(integrationID+"\x00"+hex.EncodeToString(tokenDigest[:]), &ForgejoLoginCache{})
 		return NewForgejoReviewClient(httpClient, apiBase, token).
 			withLoginCache(slot.(*ForgejoLoginCache)), nil
 	}

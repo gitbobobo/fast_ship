@@ -327,14 +327,16 @@ export function ProjectFormDialog({
         // 误判「未改动」而静默丢掉。
         if (project) {
           const currentRepoUrl = project.code_repo_url ?? "";
-          if (codeRepoSlug.trim() === "") {
+          if (bindingBroken && clearBrokenBinding) {
+            // 显式清除失效绑定：即使 slug 从结构化字段预填了旧值也按清空
+            // 提交——勾选语义优先于输入框内容。
+            payload.code_repository_url = null;
+          } else if (codeRepoSlug.trim() === "") {
             // 悬空绑定（bindingBroken）留空视为未改动，不携带该字段：只保存
             // 其它字段不再把悬空绑定静默改绑回 github 同名仓库。解除走显式
-            // 「清除绑定」勾选——勾选后按清空提交（回落公开仓库，集成绑定
-            // 一并清）。普通空输入仍是显式清空——当前本就没有代码仓
-            // （code_repo_url 为 null）时同样不携带。
-            if ((bindingBroken && clearBrokenBinding) ||
-              (!bindingBroken && currentRepoUrl !== "")) {
+            // 「清除绑定」勾选（上面已先判）。普通空输入仍是显式清空——当前
+            // 本就没有代码仓（code_repo_url 为 null）时同样不携带。
+            if (!bindingBroken && currentRepoUrl !== "") {
               payload.code_repository_url = null;
             } else if (codeIntegrationId !== savedIntegrationId) {
               // 选了别的集成但 slug 留空：改动无法表达（API 不收单独的
