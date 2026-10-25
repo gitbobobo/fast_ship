@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/godbobo/fast_ship/server/internal/forge"
 	"github.com/godbobo/fast_ship/server/internal/githubapi"
 	"github.com/godbobo/fast_ship/server/internal/model"
 )
@@ -156,6 +157,46 @@ func TestReviewDebounceDeterministicErrorDropsRow(t *testing.T) {
 	e.svc.db.Model(&model.ReviewRun{}).Count(&runs)
 	if runs != 0 || len(t3.created) != 0 {
 		t.Fatalf("确定性失败不得开轮/建线程：runs=%d created=%d", runs, len(t3.created))
+	}
+}
+
+// TestReviewDebounceRateLimitRetries 限流 403（GitHub 主/二次限流正是回
+// 403，响应体含 rate limit）是瞬时失败：不删行、fire_at 推后；同测试里
+// 真权限 403（无 rate limit 字样）对照删行。
+func TestReviewDebounceRateLimitRetries(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	e.enableReview(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	t3 := &fakeReviewT3{}
+	review := e.withT3(t3, nil, nil)
+
+	review.clients = pollStubResolver{byIntegration: map[string]forge.ReviewClient{
+		model.ForgeIntegrationBuiltinGitHubID: &pollStubClient{errByRepo: map[string]error{
+			repo: &forge.StatusError{StatusCode: 403, Body: "API rate limit exceeded for user"},
+		}},
+	}}
+	seedClosedDebounce(t, e, repo, 72, "sha-72", now)
+	review.processDueDebounces(now)
+
+	if got := e.debounceCount(t); got != 1 {
+		t.Fatalf("限流 403 不应删行，防抖行 = %d，want 1", got)
+	}
+	var row model.ReviewDebounce
+	e.svc.db.Where("repo_full_name = ? AND pr_number = 72", repo).First(&row)
+	if !row.FireAt.After(now) {
+		t.Fatalf("限流 403 应推后 fire_at: %v", row.FireAt)
+	}
+
+	// 对照：无 rate limit 字样的真权限 403 → 确定性，删行。
+	review.clients = pollStubResolver{byIntegration: map[string]forge.ReviewClient{
+		model.ForgeIntegrationBuiltinGitHubID: &pollStubClient{errByRepo: map[string]error{
+			repo: &forge.StatusError{StatusCode: 403, Body: "Forbidden"},
+		}},
+	}}
+	review.processDueDebounces(row.FireAt.Add(time.Second))
+	if got := e.debounceCount(t); got != 0 {
+		t.Fatalf("权限 403 应删行，剩 %d", got)
 	}
 }
 

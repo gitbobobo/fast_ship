@@ -220,6 +220,14 @@ func (c *pollStubClient) ListOpenPullRequests(_ context.Context, repo string) ([
 	return c.byRepo[repo], nil
 }
 
+// GetPullRequest 防抖实况读路径用：errByRepo 命中的仓库返回错误。
+func (c *pollStubClient) GetPullRequest(_ context.Context, repo string, number int) (*forge.PullRequest, error) {
+	if err, ok := c.errByRepo[repo]; ok {
+		return nil, err
+	}
+	return &forge.PullRequest{RepoFullName: repo, Number: number, State: "open"}, nil
+}
+
 // pollStubResolver 按集成 id 返回各自客户端（bad/good 集成分开注入）。
 type pollStubResolver struct {
 	byIntegration map[string]forge.ReviewClient
@@ -579,17 +587,20 @@ func TestForgejoPoll_DeterministicErrorDisablesReview(t *testing.T) {
 	project, _ := seedForgejoReviewProject(t, svc, forgeID, "fj-dead", "dead/app", nil)
 	projectFlaky, _ := seedForgejoReviewProject(t, svc, forgeID, "fj-flaky", "flaky/app", nil)
 
+	projectLimit, _ := seedForgejoReviewProject(t, svc, forgeID, "fj-limit", "limited/app", nil)
+
 	review := newReviewTestService(t, svc, nil, nil, nil)
 	review.clients = pollStubResolver{byIntegration: map[string]forge.ReviewClient{
 		forgeID: &pollStubClient{errByRepo: map[string]error{
-			"dead/app":  &forge.StatusError{StatusCode: 404, Body: "repo gone"},
-			"flaky/app": errors.New("dial tcp: i/o timeout"),
+			"dead/app":    &forge.StatusError{StatusCode: 404, Body: "repo gone"},
+			"flaky/app":   errors.New("dial tcp: i/o timeout"),
+			"limited/app": &forge.StatusError{StatusCode: 403, Body: "API rate limit exceeded"},
 		}},
 	}}
 
 	review.pollForgejoOpenPRs(time.Now().UTC())
 
-	var dead, flaky model.ProjectReviewSettings
+	var dead, flaky, limited model.ProjectReviewSettings
 	if err := svc.db.First(&dead, "project_id = ?", project.ID).Error; err != nil {
 		t.Fatalf("dead settings: %v", err)
 	}
@@ -601,6 +612,14 @@ func TestForgejoPoll_DeterministicErrorDisablesReview(t *testing.T) {
 	}
 	if !flaky.Enabled {
 		t.Fatal("瞬时错误不得停用审查设置")
+	}
+	// 限流 403（GitHub 主/二次限流正是回 403）是瞬时失败：不得停用，
+	// 否则限流高峰会把整个项目的审查永久关掉。
+	if err := svc.db.First(&limited, "project_id = ?", projectLimit.ID).Error; err != nil {
+		t.Fatalf("limited settings: %v", err)
+	}
+	if !limited.Enabled {
+		t.Fatal("限流 403 不得停用审查设置")
 	}
 }
 

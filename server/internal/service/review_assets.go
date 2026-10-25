@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"regexp"
@@ -363,10 +364,14 @@ func (s *ReviewService) downloadScreenshot(ctx context.Context, integrationID st
 	}
 	// 带凭证重试只面向 GitHub 媒体：forge 集成显式短路（今天恰好靠
 	// installationID=0 挡住；未来迁移工具若回填非零 installation，PAT 也不
-	// 得随 Bearer 出域到 github 主机）。Forgejo 私有附件匿名被拒时打独立
-	// sentinel：review_assets.error 要分得清「私有附件不支持」和「下载失败」。
+	// 得随 Bearer 出域到 github 主机）。Forgejo 附件匿名 401/403 打独立
+	// sentinel（公开仓匿名也能拉，401/403 多半是私有附件）；404 不归类
+	// ——公开仓附件被删同样回 404，报「请改用公开图片链接」是误导。
 	if reviewIntegrationID(integrationID) != model.ForgeIntegrationBuiltinGitHubID {
-		return nil, fmt.Errorf("%w（upstream %d）: %w", errForgejoMediaPrivate, upstream.StatusCode, err)
+		if upstream.StatusCode != http.StatusNotFound {
+			return nil, fmt.Errorf("%w（upstream %d）: %w", errForgejoMediaPrivate, upstream.StatusCode, err)
+		}
+		return nil, err
 	}
 	if !githubmedia.IsGitHubMediaURLFor(url, s.githubWebHost()) || s.mediaBearer == nil || installationID == 0 {
 		return nil, err

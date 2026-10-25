@@ -183,6 +183,11 @@ func (s *ReviewService) processDueDebounces(now time.Time) {
 // 每轮重试结果相同，按瞬时故障无限推后只会让行/项目卡死刷错；网络超时
 // 与 5xx 不在此列（推后重试才有意义）。
 func deterministicReviewAccessErr(err error) bool {
+	if forge.IsRateLimit(err) {
+		// 限流 403（GitHub 主/二次限流正是回 403）是瞬时失败——推后重试，
+		// 不删行不停用。
+		return false
+	}
 	return forge.IsNotFound(err) || forge.IsForbidden(err) || forge.IsUnauthorized(err) ||
 		errors.Is(err, gorm.ErrRecordNotFound) || errors.Is(err, errForgeIntegrationDecrypt)
 }

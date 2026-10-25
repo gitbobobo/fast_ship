@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/godbobo/fast_ship/server/internal/githubapi"
 )
@@ -67,6 +68,35 @@ func IsNotFound(err error) bool {
 func IsUnauthorized(err error) bool {
 	code, ok := statusOf(err)
 	return ok && code == http.StatusUnauthorized
+}
+
+// IsRateLimit 判断 err 是否限流响应（瞬时）：HTTP 429，或 403 且响应体含
+// rate limit/abuse detection 字样——GitHub 主/二次限流正是回 403（含
+// Retry-After），与权限 403 无法从状态码区分，识别口径与
+// issue_pull_request.go 的 pullRequestAccessHint 一致。限流 403 若被归为
+// 确定性失败会误删防抖行/误停用项目审查。
+func IsRateLimit(err error) bool {
+	code, ok := statusOf(err)
+	if !ok {
+		return false
+	}
+	if code == http.StatusTooManyRequests {
+		return true
+	}
+	if code != http.StatusForbidden {
+		return false
+	}
+	var se *StatusError
+	var ge *githubapi.StatusError
+	body := ""
+	switch {
+	case errors.As(err, &se):
+		body = se.Body
+	case errors.As(err, &ge):
+		body = ge.Body
+	}
+	body = strings.ToLower(body)
+	return strings.Contains(body, "rate limit") || strings.Contains(body, "abuse detection")
 }
 
 // IsDiffTooLarge 判断 err 是否「PR diff 超出上限」的确定性拒绝。两种来源：
