@@ -179,6 +179,26 @@ func (h *BotHandler) GetUsageRun(c *gin.Context) {
 	response.Success(c, result)
 }
 
+// GetUsageInsights 花费优化参考（INT-163）：range 校验与 bot_id 归属同 GetUsage。
+func (h *BotHandler) GetUsageInsights(c *gin.Context) {
+	rangeParam := c.Query("range")
+	switch rangeParam {
+	case "", "today", "7d", "30d":
+	default:
+		response.BadRequest(c, 40001, "请求参数无效: range 必须是 today、7d 或 30d")
+		return
+	}
+	if rangeParam == "" {
+		rangeParam = "7d"
+	}
+	result, err := h.bots.GetBotUsageInsights(middleware.GetUserID(c), rangeParam, c.Query("bot_id"))
+	if err != nil {
+		middleware.HandleAppError(c, err)
+		return
+	}
+	response.Success(c, result)
+}
+
 // ---------- run ----------
 
 func (h *BotHandler) ListRuns(c *gin.Context) {

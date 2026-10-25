@@ -377,8 +377,10 @@ func Setup(
 		bots.GET("", botHandler.List)
 		bots.POST("", botHandler.Create)
 		bots.POST("/test-connection", botHandler.TestConnection)
-		// 花费页（INT-162，只读聚合）：range/bot_id 过滤与单次运行明细。
+		// 花费页（INT-162/163，只读聚合）：range/bot_id 过滤、单次运行明细与
+		// 成本优化参考（静态段，优先于 :id 匹配）。
 		bots.GET("/usage", botHandler.GetUsage)
+		bots.GET("/usage/insights", botHandler.GetUsageInsights)
 		bots.GET("/usage/runs/:runId", botHandler.GetUsageRun)
 		bots.GET("/:id", botHandler.Get)
 		bots.PUT("/:id", botHandler.Update)

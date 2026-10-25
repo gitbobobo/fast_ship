@@ -9,15 +9,22 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   BOT_USAGE_RUN_GRACE_MS,
   BOT_USAGE_RUN_POLL_MS,
+  botKeys,
   useBotUsage,
+  useBotUsageInsights,
   useBotUsageRun,
 } from "./use-bots";
-import type { BotUsageOverview, BotUsageRunDetail } from "@/lib/api/bots";
+import type {
+  BotUsageInsights,
+  BotUsageOverview,
+  BotUsageRunDetail,
+} from "@/lib/api/bots";
 import { signInAs, teardownAuth } from "@/test/auth";
 
 const api = vi.hoisted(() => ({
   usage: vi.fn(),
   usageRun: vi.fn(),
+  usageInsights: vi.fn(),
 }));
 
 vi.mock("@/lib/api/bots", async (importOriginal) => ({
@@ -190,5 +197,44 @@ describe("usage 查询（INT-162 F11）", () => {
       vi.advanceTimersByTime(BOT_USAGE_RUN_POLL_MS * 3);
     });
     expect(api.usageRun).toHaveBeenCalledTimes(1);
+  });
+});
+
+const emptyInsights: BotUsageInsights = {
+  range: "7d",
+  timezone: "Asia/Shanghai",
+  start: "2026-10-11T16:00:00Z",
+  end: "2026-10-18T16:00:00Z",
+  cache_hit_by_day: [],
+  bots: [],
+  schedule_tasks: [],
+};
+
+describe("insights 查询（INT-163）", () => {
+  it("缓存键嵌在 usage 前缀下：run 终态/任务开关按前缀失效自动覆盖", () => {
+    expect(botKeys.usageInsights("u1", "7d", "b1")).toEqual([
+      "bots",
+      "u1",
+      "usage",
+      "insights",
+      "7d",
+      "b1",
+    ]);
+  });
+
+  it("带 range/botId 请求且在窗口聚焦时重取", async () => {
+    api.usageInsights.mockResolvedValue({ data: emptyInsights });
+    const { wrapper } = setup();
+    renderHook(() => useBotUsageInsights("30d", "b1"), { wrapper });
+    await waitFor(() => expect(api.usageInsights).toHaveBeenCalledTimes(1));
+    expect(api.usageInsights).toHaveBeenCalledWith(
+      { range: "30d", botId: "b1" },
+      expect.anything(),
+    );
+
+    act(() => focusManager.setFocused(false));
+    act(() => focusManager.setFocused(true));
+
+    await waitFor(() => expect(api.usageInsights).toHaveBeenCalledTimes(2));
   });
 });

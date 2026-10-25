@@ -8004,6 +8004,66 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /api/bots/usage/insights:
+    get:
+      tags: [bots]
+      operationId: getBotUsageInsights
+      summary: 花费优化参考（上下文增长 / 缓存命中 / 工具定义占比 / 维护占比 / 失败重试浪费 / 空转 / 换模型差价，INT-163）
+      description: |
+        与花费总览同一窗口、同一机器人集合的只读聚合，回答「钱花在哪、怎么省」。
+        全部指标复用现有账本实时计算：金额仍是目录单价估算（缺失 ≠ 0），token
+        估算列（input_tokens_estimate / tools_tokens_estimate）标 estimated。
+        口径要点：
+        - 缓存命中率：cached / prompt，只统计 usage 完整的请求；按天维度把请求
+          计入所属 run（或维护运行）自身 created_at 的当地日，与总览记日一致。
+        - 工具定义占比：tools_tokens_estimate / prompt_tokens，同一 usage 完整
+          请求集合；分子是按 schema 字节的估算值。
+        - 维护占比：窗口内全部维护请求已计价花费（含挂到 run 名下的，口径大于
+          总览「维护」桶）占该机器人总花费（总览三桶之和）的比例，按用途拆分。
+        - 失败和重试浪费：status=failed 的请求行中已计价金额、status=failed 的
+          run 的显示成本合计、重复 request_hash 的重试次数；按 error_code 分组。
+        - 空转：非 skipped 的终态 schedule run 中满足任一条件即算空转——
+          silent=true、整次运行没有任何工具调用行、没有任何写操作调用（写操作
+          按当前工具注册表 ReadOnly 之外的 action 判定，未知动作按写处理）。
+        - 换模型差价：按 run 冻结快照的目录归属分组，用同一批 usage 完整请求的
+          token 数按同目录其他模型单价重算，取最便宜至多 3 个候选；只按价格
+          重算，不代表效果一样，也不考虑不同模型 tokenizer 的差异。
+      security:
+        - jwtAuth: []
+      parameters:
+        - name: range
+          in: query
+          schema:
+            type: string
+            enum: [today, 7d, 30d]
+            default: 7d
+          description: 统计窗口；today = 生效时区的当天
+        - name: bot_id
+          in: query
+          schema:
+            type: string
+          description: 限定单个机器人（须属于当前用户）；缺省为全部机器人总览
+      responses:
+        '200':
+          description: 花费优化参考
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/BotUsageInsights'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /api/bots/usage/runs/{runId}:
     get:
       tags: [bots]
@@ -14532,7 +14592,7 @@ components:
 
     BotUsageBot:
       type: object
-      required: [bot_id, name, cost, cost_main, cost_schedule, cost_schedule_linked_approx, cost_maintenance, runs, avg_run_cost, max_run_cost, cache_hit_rate, unpriced_requests]
+      required: [bot_id, name, cost, cost_main, cost_schedule, cost_schedule_linked_approx, cost_maintenance, runs, avg_run_cost, max_run_cost, p90_run_cost, cache_hit_rate, unpriced_requests]
       properties:
         bot_id:
           type: string
@@ -14576,6 +14636,11 @@ components:
           type: number
           format: double
           nullable: true
+        p90_run_cost:
+          type: number
+          format: double
+          nullable: true
+          description: 单次运行显示成本的 P90（nearest-rank，与 avg/max 同一已计价 run 集合）；无已计价 run 为 null
         cache_hit_rate:
           type: number
           format: double
@@ -14587,7 +14652,7 @@ components:
 
     BotUsageScheduleTask:
       type: object
-      required: [task_id, bot_id, bot_name, name, deleted, enabled, cron_expression, timezone, runs, failed, skipped, cost, avg_run_cost, max_run_cost, linked_main_cost, estimated_monthly_cost]
+      required: [task_id, bot_id, bot_name, name, deleted, enabled, cron_expression, timezone, runs, failed, skipped, cost, avg_run_cost, max_run_cost, p90_run_cost, linked_main_cost, estimated_monthly_cost]
       properties:
         task_id:
           type: string
@@ -14632,6 +14697,11 @@ components:
           type: number
           format: double
           nullable: true
+        p90_run_cost:
+          type: number
+          format: double
+          nullable: true
+          description: 单次运行显示成本的 P90（nearest-rank，与 avg/max 同一已计价 run 集合）；无已计价 run 为 null
         linked_main_cost:
           type: number
           format: double
@@ -14967,6 +15037,301 @@ components:
           description: parent_run_id 指向本 run 的维护运行及其请求
           items:
             $ref: '#/components/schemas/BotUsageMaintenanceRun'
+
+    BotUsageDayCacheHit:
+      type: object
+      required: [date, rate]
+      properties:
+        date:
+          type: string
+          description: 生效时区的当地日期 YYYY-MM-DD；窗口内每天一行（含无数据日）
+        rate:
+          type: number
+          format: double
+          nullable: true
+          description: 当日 cached / prompt；只统计 usage 完整的请求（按所属 run/维护运行自身 created_at 记日），当日无完整 usage 请求为 null
+
+    BotUsageContextPoint:
+      type: object
+      required: [run_id, at, input_tokens, estimated, session_kind]
+      properties:
+        run_id:
+          type: string
+          description: 产生该点的 run ID（前端可链接到运行明细）
+        at:
+          type: string
+          format: date-time
+          description: run.created_at（UTC）
+        input_tokens:
+          type: integer
+          format: int64
+          description: 该 run 第一次请求的输入 token；estimated=false 取 prompt_tokens，否则取 input_tokens_estimate
+        estimated:
+          type: boolean
+          description: true = 数值为服务端估算（该请求缺 usage），UI 须标注
+        session_kind:
+          type: string
+          description: main / schedule
+
+    BotUsageToolsShare:
+      type: object
+      required: [prompt_tokens, tools_tokens_estimate, share]
+      properties:
+        prompt_tokens:
+          type: integer
+          format: int64
+          description: 分母：主线/定时 run 中 usage 完整请求的 prompt 合计（维护请求无工具定义列，不参与）
+        tools_tokens_estimate:
+          type: integer
+          format: int64
+          description: 分子：同一请求集合的 tools_tokens_estimate 合计（按 schema 字节的估算值，非精确 token 数）
+        share:
+          type: number
+          format: double
+          nullable: true
+          description: tools_tokens_estimate / prompt_tokens；分母为 0（无完整 usage 请求）时 null
+
+    BotUsageMaintenancePurpose:
+      type: object
+      required: [purpose, cost]
+      properties:
+        purpose:
+          type: string
+          description: 维护用途：summary / archive / nightly（窗口内出现过的才列出）
+        cost:
+          type: number
+          format: double
+          nullable: true
+          description: 该用途下已计价请求合计；全部未计价为 null（缺失 ≠ 0）
+
+    BotUsageMaintenanceShare:
+      type: object
+      required: [cost, share, by_purpose]
+      properties:
+        cost:
+          type: number
+          format: double
+          nullable: true
+          description: 窗口内该机器人全部维护请求已计价合计（含挂到 run 名下的压缩/归档，口径大于总览「维护」桶）
+        share:
+          type: number
+          format: double
+          nullable: true
+          description: cost / 该机器人总花费（总览三桶之和）；任一未计价或总花费为 0 时为 null
+        by_purpose:
+          type: array
+          description: 按用途拆分，按 cost 降序
+          items:
+            $ref: '#/components/schemas/BotUsageMaintenancePurpose'
+
+    BotUsageFailureError:
+      type: object
+      required: [error_code, requests, cost]
+      properties:
+        error_code:
+          type: string
+          nullable: true
+          description: 失败请求的 error_code；无错误码的失败归到 null 一组
+        requests:
+          type: integer
+          format: int64
+        cost:
+          type: number
+          format: double
+          nullable: true
+          description: 该组失败请求中已计价金额合计
+
+    BotUsageFailureStats:
+      type: object
+      required: [failed_requests, failed_requests_cost, failed_runs, failed_runs_cost, retried_requests, by_error]
+      properties:
+        failed_requests:
+          type: integer
+          format: int64
+          description: status=failed 的模型请求行数（bot_model_requests + bot_maintenance_requests）
+        failed_requests_cost:
+          type: number
+          format: double
+          nullable: true
+          description: 失败请求中已计价金额合计——重试浪费口径：失败尝试若送过 usage 就已计价，其花费即浪费
+        failed_runs:
+          type: integer
+          format: int64
+          description: status=failed 的 bot_runs 数（main + schedule）
+        failed_runs_cost:
+          type: number
+          format: double
+          nullable: true
+          description: 失败 run 的显示成本合计（自身 + 关联维护已计价）
+        retried_requests:
+          type: integer
+          format: int64
+          description: 与同 run 内更早请求 request_hash 相同的请求行数（每次重复尝试计 1，含最终成功那次）
+        by_error:
+          type: array
+          description: 失败请求按 error_code 分组，按 cost 降序（null 组排最后）
+          items:
+            $ref: '#/components/schemas/BotUsageFailureError'
+
+    BotUsageModelCandidate:
+      type: object
+      required: [model, cost, saving]
+      properties:
+        model:
+          type: string
+          description: 同目录内的候选模型名
+        cost:
+          type: number
+          format: double
+          description: 同一批请求的 token 数按该模型目录单价重算的总价（缓存命中按 cache_read，缺失回退 input）
+        saving:
+          type: number
+          format: double
+          description: actual_cost − cost；正值 = 省钱，负值 = 更贵
+
+    BotUsageModelGroup:
+      type: object
+      required: [catalog_id, model, requests, actual_cost, candidates]
+      properties:
+        catalog_id:
+          type: string
+          description: run 冻结快照的目录归属；快照缺 catalog_id 或 model 的 run 不参与分组（旧账无法证明目录）
+        model:
+          type: string
+          description: 该组 run 实际使用的模型
+        requests:
+          type: integer
+          format: int64
+          description: 参与重算的请求数（只含 usage 完整且当前模型已计价的请求）
+        actual_cost:
+          type: number
+          format: double
+          description: 这批请求在当前模型下的已计价合计（与重算同分母）
+        candidates:
+          type: array
+          description: 同目录内单价完整（input+output 非空）的其他模型按同一 token 数重算，最便宜至多 3 个；只按价格重算，不代表效果一样
+          items:
+            $ref: '#/components/schemas/BotUsageModelCandidate'
+
+    BotUsageInsightsBot:
+      type: object
+      required: [bot_id, name, cache_hit_rate, tools, maintenance, failures, context_growth, context_growth_truncated, model_alternatives]
+      properties:
+        bot_id:
+          type: string
+        name:
+          type: string
+        cache_hit_rate:
+          type: number
+          format: double
+          nullable: true
+          description: cached / prompt（主线/定时 + 维护请求的完整 usage 合计）；与总览同口径
+        tools:
+          $ref: '#/components/schemas/BotUsageToolsShare'
+        maintenance:
+          $ref: '#/components/schemas/BotUsageMaintenanceShare'
+        failures:
+          $ref: '#/components/schemas/BotUsageFailureStats'
+        context_growth:
+          type: array
+          description: 每次运行第一次请求的输入 token 随时间变化（升序）；有请求的 run 才有点
+          items:
+            $ref: '#/components/schemas/BotUsageContextPoint'
+        context_growth_truncated:
+          type: boolean
+          description: run 数超过每机器人点数上限（200）时为 true，已保留最新点
+        model_alternatives:
+          type: array
+          description: 按（目录归属, 模型）分组的换模型差价；没有已计价请求的组不出现；维护请求不参与
+          items:
+            $ref: '#/components/schemas/BotUsageModelGroup'
+
+    BotUsageInsightsTask:
+      type: object
+      required: [task_id, bot_id, bot_name, name, deleted, enabled, evaluated_runs, idle_runs, idle_rate, idle_cost, silent_runs, no_tool_call_runs, no_write_call_runs, cache_hit_rate]
+      properties:
+        task_id:
+          type: string
+        bot_id:
+          type: string
+        bot_name:
+          type: string
+        name:
+          type: string
+          description: 现存任务名；已删除任务为空串
+        deleted:
+          type: boolean
+        enabled:
+          type: boolean
+        evaluated_runs:
+          type: integer
+          format: int64
+          description: 空转判定分母：非 skipped 的终态 schedule run（completed/failed/stopped）；进行中与排队不计
+        idle_runs:
+          type: integer
+          format: int64
+          description: 满足任一空转条件的 run 数（各条件可叠加命中）
+        idle_rate:
+          type: number
+          format: double
+          nullable: true
+          description: idle_runs / evaluated_runs；分母为 0 时 null
+        idle_cost:
+          type: number
+          format: double
+          nullable: true
+          description: 空转 run 的显示成本合计（自身 + 关联维护已计价）
+        silent_runs:
+          type: integer
+          format: int64
+          description: 条件一：silent=true（静默哨兵）的 run 数
+        no_tool_call_runs:
+          type: integer
+          format: int64
+          description: 条件二：整次运行没有任何工具调用行的 run 数（调用行各状态都计）
+        no_write_call_runs:
+          type: integer
+          format: int64
+          description: 条件三：没有任何有效写操作调用的 run 数；写操作 = 当前工具注册表 ReadOnly 之外的 action（未知动作按写处理），且仅 status=succeeded 或 effect_may_have_occurred 的调用算有效——被拒/取消/失败/未执行的写调用不计
+        cache_hit_rate:
+          type: number
+          format: double
+          nullable: true
+          description: 该任务 schedule run 名下 usage 完整请求的 cached / prompt；无完整 usage 为 null
+
+    BotUsageInsights:
+      type: object
+      required: [range, timezone, start, end, cache_hit_by_day, bots, schedule_tasks]
+      properties:
+        range:
+          type: string
+          enum: [today, 7d, 30d]
+        timezone:
+          type: string
+          description: 实际生效的切日时区（IANA）
+        start:
+          type: string
+          format: date-time
+          description: 统计窗口起点 UTC（含）
+        end:
+          type: string
+          format: date-time
+          description: 统计窗口终点 UTC（不含，即查询时刻）
+        cache_hit_by_day:
+          type: array
+          description: 按天缓存命中率（窗口内每天一行）
+          items:
+            $ref: '#/components/schemas/BotUsageDayCacheHit'
+        bots:
+          type: array
+          description: 查询集合内每个机器人一行（含无数据机器人），按总花费降序
+          items:
+            $ref: '#/components/schemas/BotUsageInsightsBot'
+        schedule_tasks:
+          type: array
+          description: 窗口内有 schedule run 的任务一行（已删除任务保留）
+          items:
+            $ref: '#/components/schemas/BotUsageInsightsTask'
 
     BotToolCall:
       type: object
