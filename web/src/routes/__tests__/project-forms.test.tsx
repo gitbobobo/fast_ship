@@ -425,9 +425,9 @@ describe("ProjectAndVersionForms", () => {
       { path: "/projects", initialEntry: "/projects" },
     );
 
-    // 回填剥主机的 slug 且选择器落在 forge 绑定上；迁回 github 通过把
-    // 选择器切到「内置 GitHub」表达，slug 保持同名。
-    const input = screen.getByLabelText(/代码仓库（可选/);
+    // 回填剥主机的 slug 且选择器落在 forge 绑定上（标签随集成切为必填）；
+    // 迁回 github 通过把选择器切到「内置 GitHub」表达，slug 保持同名。
+    const input = screen.getByLabelText(/代码仓库（该集成下必填/);
     expect(input).toHaveValue("acme/app");
     await user.click(screen.getByRole("combobox", { name: "代码仓库集成" }));
     await user.click(await screen.findByRole("option", { name: /内置 GitHub/ }));
