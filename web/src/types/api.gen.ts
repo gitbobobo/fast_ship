@@ -3046,6 +3046,43 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/bots/usage/insights": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 花费优化参考（上下文增长 / 缓存命中 / 工具定义占比 / 维护占比 / 失败重试浪费 / 空转 / 换模型差价，INT-163）
+         * @description 与花费总览同一窗口、同一机器人集合的只读聚合，回答「钱花在哪、怎么省」。
+         *     全部指标复用现有账本实时计算：金额仍是目录单价估算（缺失 ≠ 0），token
+         *     估算列（input_tokens_estimate / tools_tokens_estimate）标 estimated。
+         *     口径要点：
+         *     - 缓存命中率：cached / prompt，只统计 usage 完整的请求；按天维度把请求
+         *       计入所属 run（或维护运行）自身 created_at 的当地日，与总览记日一致。
+         *     - 工具定义占比：tools_tokens_estimate / prompt_tokens，同一 usage 完整
+         *       请求集合；分子是按 schema 字节的估算值。
+         *     - 维护占比：窗口内全部维护请求已计价花费（含挂到 run 名下的，口径大于
+         *       总览「维护」桶）占该机器人总花费（总览三桶之和）的比例，按用途拆分。
+         *     - 失败和重试浪费：status=failed 的请求行中已计价金额、status=failed 的
+         *       run 的显示成本合计、重复 request_hash 的重试次数；按 error_code 分组。
+         *     - 空转：非 skipped 的终态 schedule run 中满足任一条件即算空转——
+         *       silent=true、整次运行没有任何工具调用行、没有任何写操作调用（写操作
+         *       按当前工具注册表 ReadOnly 之外的 action 判定，未知动作按写处理）。
+         *     - 换模型差价：按 run 冻结快照的目录归属分组，用同一批 usage 完整请求的
+         *       token 数按同目录其他模型单价重算，取最便宜至多 3 个候选；只按价格
+         *       重算，不代表效果一样，也不考虑不同模型 tokenizer 的差异。
+         */
+        get: operations["getBotUsageInsights"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/bots/usage/runs/{runId}": {
         parameters: {
             query?: never;
@@ -6405,6 +6442,11 @@ export interface components {
             max_run_cost: number | null;
             /**
              * Format: double
+             * @description 单次运行显示成本的 P90（nearest-rank，与 avg/max 同一已计价 run 集合）；无已计价 run 为 null
+             */
+            p90_run_cost: number | null;
+            /**
+             * Format: double
              * @description cached / prompt，只算 usage 完整的请求；无完整 usage 为 null
              */
             cache_hit_rate: number | null;
@@ -6440,6 +6482,11 @@ export interface components {
             avg_run_cost: number | null;
             /** Format: double */
             max_run_cost: number | null;
+            /**
+             * Format: double
+             * @description 单次运行显示成本的 P90（nearest-rank，与 avg/max 同一已计价 run 集合）；无已计价 run 为 null
+             */
+            p90_run_cost: number | null;
             /**
              * Format: double
              * @description schedule_event 主线 run 的连带成本（近似）
@@ -6621,6 +6668,234 @@ export interface components {
             requests_truncated: boolean;
             /** @description parent_run_id 指向本 run 的维护运行及其请求 */
             maintenance_runs: components["schemas"]["BotUsageMaintenanceRun"][];
+        };
+        BotUsageDayCacheHit: {
+            /** @description 生效时区的当地日期 YYYY-MM-DD；窗口内每天一行（含无数据日） */
+            date: string;
+            /**
+             * Format: double
+             * @description 当日 cached / prompt；只统计 usage 完整的请求（按所属 run/维护运行自身 created_at 记日），当日无完整 usage 请求为 null
+             */
+            rate: number | null;
+        };
+        BotUsageContextPoint: {
+            /** @description 产生该点的 run ID（前端可链接到运行明细） */
+            run_id: string;
+            /**
+             * Format: date-time
+             * @description run.created_at（UTC）
+             */
+            at: string;
+            /**
+             * Format: int64
+             * @description 该 run 第一次请求的输入 token；estimated=false 取 prompt_tokens，否则取 input_tokens_estimate
+             */
+            input_tokens: number;
+            /** @description true = 数值为服务端估算（该请求缺 usage），UI 须标注 */
+            estimated: boolean;
+            /** @description main / schedule */
+            session_kind: string;
+        };
+        BotUsageToolsShare: {
+            /**
+             * Format: int64
+             * @description 分母：主线/定时 run 中 usage 完整请求的 prompt 合计（维护请求无工具定义列，不参与）
+             */
+            prompt_tokens: number;
+            /**
+             * Format: int64
+             * @description 分子：同一请求集合的 tools_tokens_estimate 合计（按 schema 字节的估算值，非精确 token 数）
+             */
+            tools_tokens_estimate: number;
+            /**
+             * Format: double
+             * @description tools_tokens_estimate / prompt_tokens；分母为 0（无完整 usage 请求）时 null
+             */
+            share: number | null;
+        };
+        BotUsageMaintenancePurpose: {
+            /** @description 维护用途：summary / archive / nightly（窗口内出现过的才列出） */
+            purpose: string;
+            /**
+             * Format: double
+             * @description 该用途下已计价请求合计；全部未计价为 null（缺失 ≠ 0）
+             */
+            cost: number | null;
+        };
+        BotUsageMaintenanceShare: {
+            /**
+             * Format: double
+             * @description 窗口内该机器人全部维护请求已计价合计（含挂到 run 名下的压缩/归档，口径大于总览「维护」桶）
+             */
+            cost: number | null;
+            /**
+             * Format: double
+             * @description cost / 该机器人总花费（总览三桶之和）；任一未计价或总花费为 0 时为 null
+             */
+            share: number | null;
+            /** @description 按用途拆分，按 cost 降序 */
+            by_purpose: components["schemas"]["BotUsageMaintenancePurpose"][];
+        };
+        BotUsageFailureError: {
+            /** @description 失败请求的 error_code；无错误码的失败归到 null 一组 */
+            error_code: string | null;
+            /** Format: int64 */
+            requests: number;
+            /**
+             * Format: double
+             * @description 该组失败请求中已计价金额合计
+             */
+            cost: number | null;
+        };
+        BotUsageFailureStats: {
+            /**
+             * Format: int64
+             * @description status=failed 的模型请求行数（bot_model_requests + bot_maintenance_requests）
+             */
+            failed_requests: number;
+            /**
+             * Format: double
+             * @description 失败请求中已计价金额合计——重试浪费口径：失败尝试若送过 usage 就已计价，其花费即浪费
+             */
+            failed_requests_cost: number | null;
+            /**
+             * Format: int64
+             * @description status=failed 的 bot_runs 数（main + schedule）
+             */
+            failed_runs: number;
+            /**
+             * Format: double
+             * @description 失败 run 的显示成本合计（自身 + 关联维护已计价）
+             */
+            failed_runs_cost: number | null;
+            /**
+             * Format: int64
+             * @description 与同 run 内更早请求 request_hash 相同的请求行数（每次重复尝试计 1，含最终成功那次）
+             */
+            retried_requests: number;
+            /** @description 失败请求按 error_code 分组，按 cost 降序（null 组排最后） */
+            by_error: components["schemas"]["BotUsageFailureError"][];
+        };
+        BotUsageModelCandidate: {
+            /** @description 同目录内的候选模型名 */
+            model: string;
+            /**
+             * Format: double
+             * @description 同一批请求的 token 数按该模型目录单价重算的总价（缓存命中按 cache_read，缺失回退 input）
+             */
+            cost: number;
+            /**
+             * Format: double
+             * @description actual_cost − cost；正值 = 省钱，负值 = 更贵
+             */
+            saving: number;
+        };
+        BotUsageModelGroup: {
+            /** @description run 冻结快照的目录归属；快照缺 catalog_id 或 model 的 run 不参与分组（旧账无法证明目录） */
+            catalog_id: string;
+            /** @description 该组 run 实际使用的模型 */
+            model: string;
+            /**
+             * Format: int64
+             * @description 参与重算的请求数（只含 usage 完整且当前模型已计价的请求）
+             */
+            requests: number;
+            /**
+             * Format: double
+             * @description 这批请求在当前模型下的已计价合计（与重算同分母）
+             */
+            actual_cost: number;
+            /** @description 同目录内单价完整（input+output 非空）的其他模型按同一 token 数重算，最便宜至多 3 个；只按价格重算，不代表效果一样 */
+            candidates: components["schemas"]["BotUsageModelCandidate"][];
+        };
+        BotUsageInsightsBot: {
+            bot_id: string;
+            name: string;
+            /**
+             * Format: double
+             * @description cached / prompt（主线/定时 + 维护请求的完整 usage 合计）；与总览同口径
+             */
+            cache_hit_rate: number | null;
+            tools: components["schemas"]["BotUsageToolsShare"];
+            maintenance: components["schemas"]["BotUsageMaintenanceShare"];
+            failures: components["schemas"]["BotUsageFailureStats"];
+            /** @description 每次运行第一次请求的输入 token 随时间变化（升序）；有请求的 run 才有点 */
+            context_growth: components["schemas"]["BotUsageContextPoint"][];
+            /** @description run 数超过每机器人点数上限（200）时为 true，已保留最新点 */
+            context_growth_truncated: boolean;
+            /** @description 按（目录归属, 模型）分组的换模型差价；没有已计价请求的组不出现；维护请求不参与 */
+            model_alternatives: components["schemas"]["BotUsageModelGroup"][];
+        };
+        BotUsageInsightsTask: {
+            task_id: string;
+            bot_id: string;
+            bot_name: string;
+            /** @description 现存任务名；已删除任务为空串 */
+            name: string;
+            deleted: boolean;
+            enabled: boolean;
+            /**
+             * Format: int64
+             * @description 空转判定分母：非 skipped 的终态 schedule run（completed/failed/stopped）；进行中与排队不计
+             */
+            evaluated_runs: number;
+            /**
+             * Format: int64
+             * @description 满足任一空转条件的 run 数（各条件可叠加命中）
+             */
+            idle_runs: number;
+            /**
+             * Format: double
+             * @description idle_runs / evaluated_runs；分母为 0 时 null
+             */
+            idle_rate: number | null;
+            /**
+             * Format: double
+             * @description 空转 run 的显示成本合计（自身 + 关联维护已计价）
+             */
+            idle_cost: number | null;
+            /**
+             * Format: int64
+             * @description 条件一：silent=true（静默哨兵）的 run 数
+             */
+            silent_runs: number;
+            /**
+             * Format: int64
+             * @description 条件二：整次运行没有任何工具调用行的 run 数（调用行各状态都计）
+             */
+            no_tool_call_runs: number;
+            /**
+             * Format: int64
+             * @description 条件三：没有任何写操作调用的 run 数；写操作 = 当前工具注册表 ReadOnly 之外的 action（未知动作按写处理），调用行各状态都计
+             */
+            no_write_call_runs: number;
+            /**
+             * Format: double
+             * @description 该任务 schedule run 名下 usage 完整请求的 cached / prompt；无完整 usage 为 null
+             */
+            cache_hit_rate: number | null;
+        };
+        BotUsageInsights: {
+            /** @enum {string} */
+            range: "today" | "7d" | "30d";
+            /** @description 实际生效的切日时区（IANA） */
+            timezone: string;
+            /**
+             * Format: date-time
+             * @description 统计窗口起点 UTC（含）
+             */
+            start: string;
+            /**
+             * Format: date-time
+             * @description 统计窗口终点 UTC（不含，即查询时刻）
+             */
+            end: string;
+            /** @description 按天缓存命中率（窗口内每天一行） */
+            cache_hit_by_day: components["schemas"]["BotUsageDayCacheHit"][];
+            /** @description 查询集合内每个机器人一行（含无数据机器人），按总花费降序 */
+            bots: components["schemas"]["BotUsageInsightsBot"][];
+            /** @description 窗口内有 schedule run 的任务一行（已删除任务保留） */
+            schedule_tasks: components["schemas"]["BotUsageInsightsTask"][];
         };
         BotToolCall: {
             /** @description 平台调用 ID，同时是执行幂等键 */
@@ -14237,6 +14512,37 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["Envelope"] & {
                         data?: components["schemas"]["BotUsageOverview"];
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getBotUsageInsights: {
+        parameters: {
+            query?: {
+                /** @description 统计窗口；today = 生效时区的当天 */
+                range?: "today" | "7d" | "30d";
+                /** @description 限定单个机器人（须属于当前用户）；缺省为全部机器人总览 */
+                bot_id?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 花费优化参考 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"] & {
+                        data?: components["schemas"]["BotUsageInsights"];
                     };
                 };
             };

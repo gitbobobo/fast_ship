@@ -28,6 +28,7 @@ import type {
 import { useBotUsage } from "@/lib/hooks/use-bots";
 import { cn } from "@/lib/utils";
 import { formatCostEstimate } from "./bot-metrics";
+import { BotUsageInsightsPanel } from "./bot-usage-insights";
 
 /**
  * 花费总览（INT-162）：范围切换 + 总计卡 + 按天柱状图 + 按机器人表 +
@@ -50,14 +51,23 @@ export const USAGE_PRICE_NOTE =
 export const UNPRICED_REASON_NOTE =
   "常见原因：自定义提供商、目录无价、请求缺用量数据或旧版本记录";
 
+/** P90/次 口径：与 avg/max 同一已计价 run 集合（INT-163 加入该列）。 */
+const P90_NOTE =
+  "单次运行显示成本的 P90（nearest-rank），与平均/最高同一已计价 run 集合";
+
 /** 可空金额：未计价显示「—」，真实 $0（免费模型）照常显示。 */
 export function formatUsageCost(value: number | null | undefined): string {
   return value == null ? "—" : formatCostEstimate(value);
 }
 
-/** 缓存命中率：0–1 小数转整百分数；无完整 usage 为 null → 「—」。 */
+/**
+ * 缓存命中率：0–1 小数转整百分数；无完整 usage 为 null → 「—」。
+ * 0 < rate < 0.005 四舍五入会得到 0%，与真零无法区分 → 「<1%」。
+ */
 export function formatCacheHitRate(rate: number | null | undefined): string {
-  return rate == null ? "—" : `${Math.round(rate * 100)}%`;
+  if (rate == null) return "—";
+  if (rate > 0 && rate < 0.005) return "<1%";
+  return `${Math.round(rate * 100)}%`;
 }
 
 /** 定时任务显示名：已删除任务名恒为空串，统一落「已删除的任务」。 */
@@ -290,6 +300,9 @@ export function BotUsageOverviewPanel({
               focusTaskId={focusTaskId}
             />
           )}
+
+          {/* 优化参考（INT-163）：与总览同一 range/botId，在按定时任务之后。 */}
+          <BotUsageInsightsPanel range={range} botId={botId} embedded={embedded} />
         </>
       )}
     </div>
@@ -319,6 +332,7 @@ function BotsUsageTable({ bots }: { bots: BotUsageBot[] }) {
                 <TableHead>合计</TableHead>
                 <TableHead className="text-right">运行</TableHead>
                 <TableHead>平均/次</TableHead>
+                <TableHead title={P90_NOTE}>P90/次</TableHead>
                 <TableHead>最高/次</TableHead>
                 <TableHead>缓存命中率</TableHead>
                 <TableHead className="text-right">未计价</TableHead>
@@ -353,6 +367,7 @@ function BotsUsageTable({ bots }: { bots: BotUsageBot[] }) {
                     {bot.runs}
                   </TableCell>
                   <CostCell value={bot.avg_run_cost} />
+                  <CostCell value={bot.p90_run_cost} />
                   <CostCell value={bot.max_run_cost} />
                   <TableCell className="tabular-nums">
                     {formatCacheHitRate(bot.cache_hit_rate)}
@@ -406,7 +421,8 @@ function CompactBotUsage({ bot }: { bot: BotUsageBot }) {
       </dl>
       {/* pb-4：末行嵌在面板滚动容器里，无留白时滚到底文字贴视口底边。 */}
       <p className="pb-4 text-xs text-muted-foreground">
-        {bot.runs} 次运行 · 平均 {formatUsageCost(bot.avg_run_cost)} · 最高{" "}
+        {bot.runs} 次运行 · 平均 {formatUsageCost(bot.avg_run_cost)} · P90{" "}
+        {formatUsageCost(bot.p90_run_cost)} · 最高{" "}
         {formatUsageCost(bot.max_run_cost)} · 缓存命中率{" "}
         {formatCacheHitRate(bot.cache_hit_rate)} · 未计价{" "}
         {bot.unpriced_requests} 次
@@ -448,6 +464,7 @@ function TasksUsageTable({
                   总花费
                 </TableHead>
                 <TableHead>平均/次</TableHead>
+                <TableHead title={P90_NOTE}>P90/次</TableHead>
                 <TableHead>最高/次</TableHead>
                 <TableHead title="定时任务运行结果写回主线时的连带成本（近似）">
                   连带主线≈
@@ -496,6 +513,7 @@ function TasksUsageTable({
                   </TableCell>
                   <CostCell value={taskTotalCost(task)} />
                   <CostCell value={task.avg_run_cost} />
+                  <CostCell value={task.p90_run_cost} />
                   <CostCell value={task.max_run_cost} />
                   <CostCell value={task.linked_main_cost} />
                   <CostCell value={task.estimated_monthly_cost} />
@@ -554,7 +572,8 @@ function CompactTaskUsage({
                 总花费 {formatUsageCost(taskTotalCost(task))}
               </p>
               <p className="text-xs text-muted-foreground">
-                平均 {formatUsageCost(task.avg_run_cost)} · 最高{" "}
+                平均 {formatUsageCost(task.avg_run_cost)} · P90{" "}
+                {formatUsageCost(task.p90_run_cost)} · 最高{" "}
                 {formatUsageCost(task.max_run_cost)} · 连带主线≈
                 {formatUsageCost(task.linked_main_cost)} · 推算月{" "}
                 {formatUsageCost(task.estimated_monthly_cost)}

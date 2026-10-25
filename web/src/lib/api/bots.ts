@@ -338,6 +338,18 @@ export type BotUsageScheduleTask = Schemas["BotUsageScheduleTask"];
 
 export type BotUsageRunDetail = Schemas["BotUsageRunDetail"];
 
+/**
+ * 花费优化参考（INT-163）：与总览同窗口的只读聚合。子类型一并引出，
+ * 组件层按需解构（BotUsageContextPoint / BotUsageModelGroup 等）。
+ */
+export type BotUsageInsights = Schemas["BotUsageInsights"];
+
+export type BotUsageInsightsBot = Schemas["BotUsageInsightsBot"];
+
+export type BotUsageInsightsTask = Schemas["BotUsageInsightsTask"];
+
+export type BotUsageContextPoint = Schemas["BotUsageContextPoint"];
+
 export type BotUsageRun = Schemas["BotUsageRun"];
 
 export type BotUsageRequest = Schemas["BotUsageRequest"];
@@ -604,5 +616,22 @@ export const botApi = {
       api
         .get(`bots/usage/runs/${encodeURIComponent(runId)}`, options(signal))
         .json<ApiResponse<BotUsageRunDetail>>(),
+    ),
+
+  /** 花费优化参考（INT-163）：与 usage 同参（range / bot_id），同窗口口径。 */
+  usageInsights: (
+    query: { range?: BotUsageRange; botId?: string } = {},
+    signal?: AbortSignal,
+  ) =>
+    decodeApiError(
+      api
+        .get("bots/usage/insights", {
+          ...options(signal),
+          searchParams: definedParams({
+            range: query.range,
+            bot_id: query.botId,
+          }),
+        })
+        .json<ApiResponse<BotUsageInsights>>(),
     ),
 };

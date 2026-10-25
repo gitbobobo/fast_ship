@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { useMemo } from "react";
 import { Link, useParams } from "react-router";
 import { Inbox, TriangleAlert } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -6,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Header } from "@/components/layout/header";
+import { ContextGrowthChart } from "@/components/bots/bot-usage-insights";
 import { errorText } from "@/lib/api/client";
 import type {
   BotUsageMaintenanceRequest,
@@ -140,6 +142,10 @@ export default function BotUsageRunPage() {
               requests={data.requests}
               truncated={data.requests_truncated}
             />
+            <RunContextGrowth
+              requests={data.requests}
+              truncated={data.requests_truncated}
+            />
             <RequestList
               requests={data.requests}
               truncated={data.requests_truncated}
@@ -253,6 +259,54 @@ function RunSummary({
         )}
       </CardContent>
     </Card>
+  );
+}
+
+/**
+ * 输入上下文增长（INT-163）：x=请求序号（#1..#n），y=输入 token。
+ * 值取 prompt_tokens ?? input_tokens_estimate：usage 未收齐（prompt_tokens
+ * 为 null）的请求只能给估算值，图上以空心点标注并在图注说明。
+ */
+function RunContextGrowth({
+  requests,
+  truncated,
+}: {
+  requests: BotUsageRequest[];
+  truncated?: boolean;
+}) {
+  const points = useMemo(
+    () =>
+      requests.map((request) => {
+        const tokens = request.prompt_tokens ?? request.input_tokens_estimate;
+        const estimated = request.prompt_tokens == null;
+        return {
+          x: request.ordinal,
+          y: tokens,
+          estimated,
+          label: `#${request.ordinal} · ${tokens.toLocaleString("en-US")} 输入${estimated ? "（估算）" : ""}`,
+        };
+      }),
+    [requests],
+  );
+  // 没有请求记录时请求列表已有空态，图不重复占位。
+  if (!requests.length) return null;
+  return (
+    <section className="space-y-2" data-testid="usage-run-context-growth">
+      <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
+        <h3 className="text-sm font-medium">输入上下文增长</h3>
+        <p className="text-xs text-muted-foreground">
+          {truncated ? "仅最新 500 条 · " : ""}
+          空心点 = 估算值（该请求缺 usage，取估算输入）
+        </p>
+      </div>
+      <ContextGrowthChart
+        points={points}
+        formatXLabel={(ordinal) => `#${ordinal}`}
+        chartTitle="输入上下文增长"
+        titleId="usage-run-context-growth-title"
+        emptyMessage="没有模型请求记录"
+      />
+    </section>
   );
 }
 
