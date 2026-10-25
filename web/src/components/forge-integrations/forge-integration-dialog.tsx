@@ -278,7 +278,7 @@ function ForgeIntegrationDialogInner({
               id="forge-token"
               type="password"
               autoComplete="off"
-              placeholder={isEdit ? "••••••••" : "仓库范围的访问令牌"}
+              placeholder={isEdit ? "已设置，不修改请留空" : "仓库范围的访问令牌"}
               {...register("token")}
             />
             {errors.token ? (
