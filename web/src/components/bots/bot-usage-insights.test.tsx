@@ -6,6 +6,7 @@ import { renderWithRoute } from "@/test/render";
 import {
   BotUsageInsightsPanel,
   ContextGrowthChart,
+  errorCodeLabel,
   selectXLabelIndexes,
   zonedFormatter,
 } from "./bot-usage-insights";
@@ -53,6 +54,8 @@ const insights: BotUsageInsights = {
         retried_requests: 2,
         by_error: [
           { error_code: "timeout", requests: 2, cost: 0.08 },
+          { error_code: "rate_limit", requests: 1, cost: 0.06 },
+          { error_code: "flaky_upstream_9x", requests: 1, cost: 0.01 },
           { error_code: "", requests: 1, cost: 0.02 },
           { error_code: null, requests: 1, cost: 0.04 },
         ],
@@ -218,20 +221,43 @@ describe("BotUsageInsightsPanel", () => {
     expect(failureRows[1]).toHaveTextContent("—");
 
     // 按错误码分组：无错误码的失败归「无错误码」一组；旧数据的空串码同样
-    // 落占位文案，不渲染成空白单元格。
+    // 落占位文案，不渲染成空白单元格。已知码附中文释义（含 title 悬浮），
+    // 未知码只显原码、不崩。
     const errorRows = failures.getAllByTestId("usage-insights-error-row");
-    expect(errorRows).toHaveLength(3);
+    expect(errorRows).toHaveLength(5);
     expect(errorRows[0]).toHaveTextContent("timeout");
-    expect(errorRows[1]).toHaveTextContent("无错误码");
-    expect(errorRows[2]).toHaveTextContent("无错误码");
+    expect(errorRows[0]).toHaveTextContent("超时");
+    expect(errorRows[1]).toHaveTextContent("rate_limit");
+    expect(errorRows[1]).toHaveTextContent("限流");
+    expect(
+      within(errorRows[1]).getByTitle("rate_limit：限流"),
+    ).toBeInTheDocument();
+    expect(errorRows[2]).toHaveTextContent("flaky_upstream_9x");
+    expect(errorRows[2]).not.toHaveTextContent("限流");
+    expect(errorRows[3]).toHaveTextContent("无错误码");
+    expect(errorRows[4]).toHaveTextContent("无错误码");
+  });
+
+  it("分区说明中文为主、原字段名以括注保留", () => {
+    renderPanel();
+
+    expect(
+      screen.getByText(/缓存命中 token \/ 输入 token（cached\/prompt），按天/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/按非「跳过」（skipped）终态运行评估/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/重试按重复请求指纹（request_hash）计数/),
+    ).toBeInTheDocument();
   });
 
   it("定时任务空转：口径标题、比率与三条件计数，分母 0 为「—」", () => {
     renderPanel();
 
     const idle = within(screen.getByTestId("usage-insights-idle"));
-    // 口径写进表头 title：非 skipped 终态运行。
-    expect(idle.getByTitle(/非 skipped 的终态运行/)).toBeInTheDocument();
+    // 口径写进表头 title：非「跳过」（skipped）终态运行。
+    expect(idle.getByTitle(/非「跳过」（skipped）的终态运行/)).toBeInTheDocument();
     const rows = idle.getAllByTestId("usage-insights-idle-row");
     expect(rows[0]).toHaveTextContent("3/8");
     expect(within(rows[0]).getByText("38%")).toBeInTheDocument();
@@ -394,6 +420,30 @@ describe("BotUsageInsightsPanel", () => {
     expect(
       screen.getByText("窗口内没有已计价请求，无法比较模型差价"),
     ).toBeInTheDocument();
+  });
+});
+
+describe("errorCodeLabel", () => {
+  it("已知码给中文释义（覆盖服务端分类码与通用码），未知码返回 undefined", () => {
+    // 服务端分类层（bot_model_errors.go）的产出码。
+    expect(errorCodeLabel("provider_rate_limited")).toBe("限流");
+    expect(errorCodeLabel("provider_quota_exhausted")).toBe("额度不足");
+    expect(errorCodeLabel("provider_auth_failed")).toBe("鉴权失败");
+    expect(errorCodeLabel("provider_unavailable")).toBe("服务端错误");
+    expect(errorCodeLabel("model_not_found")).toBe("模型不存在");
+    expect(errorCodeLabel("model_stream_timeout")).toBe("超时");
+    expect(errorCodeLabel("model_request_failed")).toBe("请求失败");
+    // 历史/通用码。
+    expect(errorCodeLabel("timeout")).toBe("超时");
+    expect(errorCodeLabel("github_unauthorized")).toBe("鉴权失败");
+    expect(errorCodeLabel("http_5xx")).toBe("服务端错误");
+    expect(errorCodeLabel("context_length")).toBe("上下文超限");
+    expect(errorCodeLabel("context_uncompressible")).toBe("上下文超限");
+    expect(errorCodeLabel("network_error")).toBe("网络错误");
+    expect(errorCodeLabel("server_restarted")).toBe("服务重启中断");
+    // 未知码：不强行释义，只显原码。
+    expect(errorCodeLabel("e40001")).toBeUndefined();
+    expect(errorCodeLabel("flaky_upstream_9x")).toBeUndefined();
   });
 });
 

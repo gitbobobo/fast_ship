@@ -44,7 +44,7 @@ function insightTaskName(task: Pick<BotUsageInsightsTask, "name" | "deleted">) {
 
 /** 空转判定口径：与契约 BotUsageInsightsTask 字段注释一致，表头 title 引用。 */
 const IDLE_CRITERIA_NOTE =
-  "空转按非 skipped 的终态运行（completed/failed/stopped）评估；三条件可叠加命中：silent=true、没有任何工具调用行、没有任何写操作调用";
+  "空转按非「跳过」（skipped）的终态运行（completed/failed/stopped）评估；三条件可叠加命中：静默哨兵（silent=true）、没有任何工具调用行、没有任何写操作调用";
 
 const MAINTENANCE_PURPOSE_LABELS: Record<string, string> = {
   summary: "摘要",
@@ -54,6 +54,37 @@ const MAINTENANCE_PURPOSE_LABELS: Record<string, string> = {
 
 const maintenancePurposeLabel = (purpose: string) =>
   MAINTENANCE_PURPOSE_LABELS[purpose] ?? purpose;
+
+/**
+ * 常见错误码的中文释义：按码包含匹配（provider_auth_failed 命中 auth），
+ * 覆盖服务端分类层（bot_model_errors.go）的产出码与历史数据里的通用码。
+ * 码值本身始终原样保留供排查；未知码不显示释义、只显原码。
+ */
+const ERROR_CODE_HINTS: ReadonlyArray<readonly [pattern: string, label: string]> = [
+  ["unavailable", "服务端错误"],
+  ["auth", "鉴权失败"],
+  ["rate_limit", "限流"],
+  ["quota", "额度不足"],
+  ["timeout", "超时"],
+  ["context_length", "上下文超限"],
+  ["context_uncompressible", "上下文超限"],
+  ["network", "网络错误"],
+  ["server_error", "服务端错误"],
+  ["5xx", "服务端错误"],
+  ["server_restarted", "服务重启中断"],
+  ["model_not_found", "模型不存在"],
+  ["tool_calls_dropped", "工具调用被丢弃"],
+  ["request_failed", "请求失败"],
+];
+
+/** 错误码的中文释义；未知码返回 undefined。 */
+export function errorCodeLabel(code: string): string | undefined {
+  const lower = code.toLowerCase();
+  for (const [pattern, label] of ERROR_CODE_HINTS) {
+    if (lower.includes(pattern)) return label;
+  }
+  return undefined;
+}
 
 /** 换模型差价的相对色：省钱绿、更贵红、持平灰（与状态徽标同一配色系）。 */
 function savingClass(saving: number) {
@@ -464,7 +495,7 @@ function CacheHitSection({ data }: { data: BotUsageInsights }) {
   return (
     <Section
       title="缓存命中率"
-      note="cached / prompt，按天，只统计 usage 完整的请求；条长按 0–100% 画满轨道"
+      note="缓存命中 token / 输入 token（cached/prompt），按天，只统计 usage 完整的请求；条长按 0–100% 画满轨道"
       testId="usage-insights-cache"
     >
       {!days.length ? (
@@ -530,7 +561,7 @@ function ToolsShareSection({
   return (
     <Section
       title="工具定义占比"
-      note="工具定义 token 占输入 token 的比例；分子按工具 schema 字节估算，非精确 token 数"
+      note="工具定义 token 占输入 token 的比例；分子按工具结构（schema）字节估算，非精确 token 数"
       testId="usage-insights-tools"
     >
       {!bots.length ? (
@@ -544,7 +575,7 @@ function ToolsShareSection({
                 "flex items-baseline justify-between gap-3 px-3 py-2 text-sm",
                 i > 0 && "border-t",
               )}
-              title={`工具定义 ≈${formatTokens(bot.tools.tools_tokens_estimate)} / 输入 ${formatTokens(bot.tools.prompt_tokens)}（按 schema 字节估算）`}
+              title={`工具定义 ≈${formatTokens(bot.tools.tools_tokens_estimate)} / 输入 ${formatTokens(bot.tools.prompt_tokens)}（按工具结构 schema 字节估算）`}
             >
               <dt className="truncate text-muted-foreground">{bot.name}</dt>
               <dd className="tabular-nums">
@@ -570,7 +601,7 @@ function ToolsShareSection({
             <TableRow>
               <TableHead>机器人</TableHead>
               <TableHead>占比</TableHead>
-              <TableHead title="分子：工具定义估算 token（按 schema 字节）；分母：usage 完整请求的输入 token 合计">
+              <TableHead title="分子：工具定义估算 token（按工具结构 schema 字节）；分母：usage 完整请求的输入 token 合计">
                 明细
               </TableHead>
             </TableRow>
@@ -584,7 +615,7 @@ function ToolsShareSection({
                 </TableCell>
                 <TableCell
                   className="tabular-nums text-muted-foreground"
-                  title={`工具定义 ≈${formatTokens(bot.tools.tools_tokens_estimate)} / 输入 ${formatTokens(bot.tools.prompt_tokens)}（按 schema 字节估算）`}
+                  title={`工具定义 ≈${formatTokens(bot.tools.tools_tokens_estimate)} / 输入 ${formatTokens(bot.tools.prompt_tokens)}（按工具结构 schema 字节估算）`}
                 >
                   {bot.tools.share == null
                     ? "—"
@@ -621,7 +652,7 @@ function MaintenanceShareSection({
   return (
     <Section
       title="维护占比"
-      note="全部维护请求（含挂到 run 名下的压缩/归档，口径大于总览「维护」桶）占该机器人总花费"
+      note="全部维护请求（含挂到运行 run 名下的压缩/归档，口径大于总览「维护」桶）占该机器人总花费"
       testId="usage-insights-maintenance"
     >
       {!bots.length ? (
@@ -698,7 +729,7 @@ function IdleSection({
   return (
     <Section
       title="定时任务空转"
-      note="白跑的定时任务：按非 skipped 终态运行评估，三条件可叠加命中"
+      note="白跑的定时任务：按非「跳过」（skipped）终态运行评估，三条件可叠加命中"
       testId="usage-insights-idle"
     >
       {!tasks.length ? (
@@ -748,7 +779,7 @@ function IdleSection({
               </TableHead>
               <TableHead>空转率</TableHead>
               <TableHead>浪费</TableHead>
-              <TableHead title="条件一：silent=true（静默哨兵）">静默</TableHead>
+              <TableHead title="条件一：静默哨兵（silent=true）">静默</TableHead>
               <TableHead title="条件二：整次运行没有任何工具调用行">
                 无工具
               </TableHead>
@@ -813,6 +844,20 @@ function IdleSection({
 
 /* ─── 6. 失败与重试浪费 ─── */
 
+/** 错误码内容：码值原样保留，已知码附小字中文副标并写进 title 悬浮。 */
+function ErrorCodeValue({ code }: { code?: string | null }) {
+  if (!code) return <>无错误码</>;
+  const label = errorCodeLabel(code);
+  return (
+    <span title={label ? `${code}：${label}` : undefined}>
+      {code}
+      {label && (
+        <span className="ml-1.5 text-xs text-muted-foreground">{label}</span>
+      )}
+    </span>
+  );
+}
+
 function FailuresSection({
   bots,
   embedded,
@@ -826,7 +871,7 @@ function FailuresSection({
   return (
     <Section
       title="失败与重试浪费"
-      note="失败尝试若送过 usage 就已计价，其花费即浪费；重试按重复 request_hash 计数"
+      note="失败尝试若送过 usage 就已计价，其花费即浪费；重试按重复请求指纹（request_hash）计数"
       testId="usage-insights-failures"
     >
       {!bots.length ? (
@@ -858,8 +903,8 @@ function FailuresSection({
                   className="text-xs text-muted-foreground"
                   data-testid="usage-insights-error-row"
                 >
-                  {error.error_code || "无错误码"} · {error.requests} 次 ·{" "}
-                  {formatUsageCost(error.cost)}
+                  <ErrorCodeValue code={error.error_code} /> ·{" "}
+                  {error.requests} 次 · {formatUsageCost(error.cost)}
                 </p>
               ))}
             </div>
@@ -874,7 +919,7 @@ function FailuresSection({
                 <TableHead title="失败请求中已计价金额合计">请求浪费</TableHead>
                 <TableHead>失败运行</TableHead>
                 <TableHead>失败运行花费</TableHead>
-                <TableHead title="与同 run 内更早请求 request_hash 相同的请求行数">
+                <TableHead title="与同次运行（run）内更早请求指纹（request_hash）相同的请求行数">
                   重试请求
                 </TableHead>
               </TableRow>
@@ -922,7 +967,7 @@ function FailuresSection({
                     <TableCell
                       className={cn(!error.error_code && "text-muted-foreground")}
                     >
-                      {error.error_code || "无错误码"}
+                      <ErrorCodeValue code={error.error_code} />
                     </TableCell>
                     <TableCell className="text-right tabular-nums">
                       {error.requests}
