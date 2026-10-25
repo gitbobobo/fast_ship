@@ -99,8 +99,7 @@ function DeleteIntegrationAlert({
         <AlertDialogHeader>
           <AlertDialogTitle>删除 {integration.name}？</AlertDialogTitle>
           <AlertDialogDescription>
-            删除后使用该集成访问仓库的项目将无法连接。仍被项目引用时删除会被拒绝，
-            需先在项目中换用其它集成。
+            删除后使用该集成访问仓库的项目将无法连接。仍被项目引用时删除会被拒绝，需先在项目中换用其它集成。
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
