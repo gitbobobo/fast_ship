@@ -116,8 +116,15 @@ func (s *BotService) GetBotUsageInsights(userID, rangeParam, botID string) (*api
 		return nil, errs.ErrInternal
 	}
 	// 换模型差价分组的 run 冻结快照单独补查：快照列单行可达数 KB，总览不
-	// 消费它，不随共享账本扫描回读（30 天窗口会把整列读回内存）。
-	snapshots, err := repo.RunConfigSnapshotsByIDs(runIDs)
+	// 消费它，不随共享账本扫描回读（30 天窗口会把整列读回内存）。再按
+	// runAgg.Priced>0 过滤——无已计价请求的 run 不产生分组输入，连读都不必。
+	pricedRunIDs := make([]string, 0, len(runIDs))
+	for _, id := range runIDs {
+		if led.runAgg[id].Priced > 0 {
+			pricedRunIDs = append(pricedRunIDs, id)
+		}
+	}
+	snapshots, err := repo.RunConfigSnapshotsByIDs(pricedRunIDs)
 	if err != nil {
 		return nil, errs.ErrInternal
 	}

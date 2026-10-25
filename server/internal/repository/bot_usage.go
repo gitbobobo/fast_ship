@@ -490,6 +490,9 @@ func (r *BotUsageRepository) FirstRequestInputByRun(runIDs []string) (map[string
 			Joins("JOIN (SELECT run_id, MIN(ordinal) AS ordinal FROM bot_model_requests WHERE run_id IN ? GROUP BY run_id) first "+
 				"ON first.run_id = bot_model_requests.run_id AND first.ordinal = bot_model_requests.ordinal", batch).
 			Where("bot_model_requests.prompt_tokens IS NOT NULL OR bot_model_requests.input_tokens_estimate > 0").
+			// ordinal 无唯一约束：同一 run 并列最小 ordinal 时按 id 升序，
+			// 后写覆盖先写，out 里确定性留下最大 id 那行，消除取值抖动。
+			Order("bot_model_requests.id").
 			Scan(&rows).Error
 		if err != nil {
 			return nil, err
