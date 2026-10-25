@@ -53,7 +53,7 @@ const MAINTENANCE_PURPOSE_LABELS: Record<string, string> = {
 };
 
 const maintenancePurposeLabel = (purpose: string) =>
-  MAINTENANCE_PURPOSE_LABELS[purpose] ?? purpose;
+  MAINTENANCE_PURPOSE_LABELS[purpose] ?? (purpose || "未标注");
 
 /**
  * 常见错误码的中文释义：按码包含匹配（provider_auth_failed 命中 auth），
@@ -965,9 +965,9 @@ function FailuresSection({
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {errorRows.map(({ bot, error }) => (
+                {errorRows.map(({ bot, error }, i) => (
                   <TableRow
-                    key={`${bot.bot_id}-${error.error_code ?? "none"}`}
+                    key={`${bot.bot_id}-${i}-${error.error_code ?? "none"}`}
                     data-testid="usage-insights-error-row"
                   >
                     <TableCell>{bot.name}</TableCell>

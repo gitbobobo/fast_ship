@@ -58,6 +58,9 @@ const TRIGGER_LABELS: Record<string, string> = {
   schedule_event: "定时任务事件",
 };
 
+// 与服务端 usageRunDetailMaxRequests（internal/service/bot_usage.go）保持一致。
+const MAX_RETAINED_REQUESTS = 500;
+
 const MAINTENANCE_KIND_LABELS: Record<string, string> = {
   compaction: "上下文压缩",
   nightly: "夜间整理",
@@ -306,7 +309,8 @@ function RunContextGrowth({
           className="min-w-0 text-xs text-muted-foreground"
           title="空心点 = 估算值：该请求缺 usage，取估算输入"
         >
-          {truncated ? "仅最新 500 条 · " : ""}空心点 = 估算值
+          {truncated ? `仅最新 ${MAX_RETAINED_REQUESTS} 条 · ` : ""}空心点 =
+          估算值
         </p>
       </div>
       <ContextGrowthChart
@@ -332,7 +336,9 @@ function RequestList({
     <section className="space-y-2">
       <h3 className="text-sm font-medium">
         模型请求{requests.length ? ` · ${requests.length}` : ""}
-        {truncated ? "（仅最新 500 条，较早请求已省略）" : ""}
+        {truncated
+          ? `（仅最新 ${MAX_RETAINED_REQUESTS} 条，较早请求已省略）`
+          : ""}
       </h3>
       {!requests.length ? (
         <div className="rounded-lg border bg-muted/40 py-8 text-center text-sm text-muted-foreground">

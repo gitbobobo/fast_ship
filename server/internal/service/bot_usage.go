@@ -127,7 +127,8 @@ func botUsageMonthlyTriggerCount(expression, timezone string, now time.Time) (in
 }
 
 // usageRunDetailMaxRequests 单次运行花费明细返回的请求上限：超出截断并置
-// requests_truncated，防止极端长跑 run 的明细响应体积无界。
+// requests_truncated，防止极端长跑 run 的明细响应体积无界。调整时同步
+// web/src/routes/bots/usage/runs/$runId.tsx 的 MAX_RETAINED_REQUESTS。
 const usageRunDetailMaxRequests = 500
 
 // usageEstimateStat 是任务月推算的固定窗口统计：最近 30 个当地日内
