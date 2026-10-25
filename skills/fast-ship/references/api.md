@@ -8808,7 +8808,7 @@ bots.memory.timezone，再回退 UTC。金额一律来自内置 models.dev 目�
 | `schedule_tasks[].avg_run_cost` | number（double，可空） | 是 |  |
 | `schedule_tasks[].max_run_cost` | number（double，可空） | 是 |  |
 | `schedule_tasks[].linked_main_cost` | number（double，可空） | 是 | schedule_event 主线 run 的连带成本（近似） |
-| `schedule_tasks[].estimated_monthly_cost` | number（double，可空） | 是 | 单次平均 × 未来 30 天触发次数（parseScheduleCron）；停用、已删除、无已计价平均或 cron 解析失败为 null |
+| `schedule_tasks[].estimated_monthly_cost` | number（double，可空） | 是 | （单次定时运行平均 + 每次触发摊到的连带主线成本）× 未来 30 天触发次数（parseScheduleCron）；单次统计取最近 30 个当地日的固定窗口，与所选 range 无关；停用、已删除、无已计价平均或 cron 解析失败为 null |
 
 **错误**
 
@@ -8872,7 +8872,7 @@ bots.memory.timezone，再回退 UTC。金额一律来自内置 models.dev 目�
 | `run.created_at` | string（date-time） | 是 |  |
 | `run.started_at` | string（date-time，可空） | 否 |  |
 | `run.finished_at` | string（date-time，可空） | 否 |  |
-| `requests` | object[] | 是 | run 的每次模型请求（含失败重试），按 ordinal 正序 |
+| `requests` | object[] | 是 | run 的每次模型请求（含失败重试），按 ordinal 正序；超过上限时截断 |
 | `requests[].id` | string | 是 |  |
 | `requests[].ordinal` | integer（int64） | 是 |  |
 | `requests[].status` | string | 是 | running / succeeded / failed |
@@ -8901,6 +8901,7 @@ bots.memory.timezone，再回退 UTC。金额一律来自内置 models.dev 目�
 | `requests[].tool_calls[].error_code` | string（可空） | 否 |  |
 | `requests[].tool_calls[].created_at` | string（date-time） | 是 |  |
 | `requests[].tool_calls[].finished_at` | string（date-time，可空） | 否 |  |
+| `requests_truncated` | boolean | 是 | 请求数超过上限（500）被截断时为 true |
 | `maintenance_runs` | object[] | 是 | parent_run_id 指向本 run 的维护运行及其请求 |
 | `maintenance_runs[].id` | string | 是 |  |
 | `maintenance_runs[].kind` | string | 是 | compaction / nightly |
