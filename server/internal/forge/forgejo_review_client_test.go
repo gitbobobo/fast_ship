@@ -175,6 +175,48 @@ func TestForgejoClient_FindPullRequestComment(t *testing.T) {
 	}
 }
 
+// TestForgejoClient_FindPullRequestComment_NoUserScope 仓库范围 PAT 下
+// GET /user 403（Forgejo 不给 specific-repo token 授 user/* scope）：对账
+// 不得挂死——退化 marker-only 命中首条 marker 评论；一次写响应学到 login
+// 后恢复「作者==自己」过滤。
+func TestForgejoClient_FindPullRequestComment_NoUserScope(t *testing.T) {
+	client, _ := newForgejoTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Query().Get("page") != "" && r.URL.Query().Get("page") != "1":
+			_, _ = w.Write([]byte(`[]`))
+		case r.URL.Path == "/api/v1/user":
+			w.WriteHeader(http.StatusForbidden)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/comments"):
+			// CreatePullRequestComment 响应：Forgejo 返回完整评论对象。
+			_, _ = w.Write([]byte(`{"id": 30, "body": "x", "user": {"login": "fast-ship-bot"}}`))
+		case strings.HasSuffix(r.URL.Path, "/comments"):
+			_, _ = w.Write([]byte(`[
+				{"id": 1, "body": "<!-- fast-ship-code-review --> 冒充", "user": {"login": "mallory"}},
+				{"id": 2, "body": "<!-- fast-ship-code-review --> 真身", "user": {"login": "fast-ship-bot"}}
+			]`))
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	ctx := context.Background()
+
+	// /user 403：退化 marker-only，命中列表首条 marker（残余的伪造覆写
+	// 窗口，文档已注明）——但不能返回错误让评论永远发不出。
+	id, found, err := client.FindPullRequestComment(ctx, "o/r", 5, "<!-- fast-ship-code-review -->")
+	if err != nil || !found || id != 1 {
+		t.Fatalf("no-scope FindPullRequestComment = (%d,%v,%v), want (1,true,nil)", id, found, err)
+	}
+
+	// 一次写响应学到 login 后，同一调用恢复按作者过滤（伪造评论被跳过）。
+	if _, err := client.CreatePullRequestComment(ctx, "o/r", 5, "b"); err != nil {
+		t.Fatalf("CreatePullRequestComment: %v", err)
+	}
+	id, found, err = client.FindPullRequestComment(ctx, "o/r", 5, "<!-- fast-ship-code-review -->")
+	if err != nil || !found || id != 2 {
+		t.Fatalf("learned-login FindPullRequestComment = (%d,%v,%v), want (2,true,nil)", id, found, err)
+	}
+}
+
 func TestForgejoClient_ListReviewsAndComments(t *testing.T) {
 	// ListReviews 映射 id/commit_id/state/submitted_at；ListReviewComments 经
 	// review 列表逐个取 comments 展平。

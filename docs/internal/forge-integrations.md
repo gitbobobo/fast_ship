@@ -166,11 +166,17 @@ Forgejo 仓库的 PR 审查与 GitHub 走同一条协调管线（webhook 事务�
   `ListReviewComments` 先列 reviews 再逐个取 `…/reviews/{id}/comments` 展平
   （每个端点同样走 `limit=50` 空页止分页；InReplyToID 恒空——Forgejo 的
   review comment 无回复关系字段）。机器人顶层评论的认领：GitHub 认
-  `user.type=Bot`，Forgejo 的机器人是普通账号，适配器先 `GET /user` 学到
-  PAT 所属账号再按「作者==自己 + marker 前缀」命中，用户引用 marker 不能
-  劫持落点。同一登录名也用于给行内/会话评论标 `ReviewComment.Self`/
-  `IssueComment.Self`——历史上下文组装靠它把系统自己的 Forgejo 发言挡在
-  下一轮提示之外（那边行内评论没有隐藏标记、login 也不以 [bot] 结尾）。
+  `user.type=Bot`，Forgejo 的机器人是普通账号，适配器按「作者 == PAT 所属
+  账号 + marker 前缀」命中。**自身 login 有两条来源**：先试 `GET /user`
+  （`read:user` scope——仓库范围 PAT 拿不到，Forgejo 的 user/* scope 组
+  不能授给 specific-repository token，见 token-scope 文档），再从写接口
+  响应（`POST …/comments`、`PATCH …/comments/{id}`、`POST …/reviews`）的
+  `user.login` 学习并缓存。两者都不可得时对账退化到 marker-only 认领——
+  伪造 marker 的他人评论可能被覆写一次（PATCH 403 时按「非己评论」改走
+  新建），但不会因此发不出评论；login 学到之后立刻恢复按作者过滤。同一
+  登录名也用于给行内/会话评论标 `ReviewComment.Self`/`IssueComment.Self`
+  ——历史上下文组装靠它把系统自己的 Forgejo 发言挡在下一轮提示之外
+  （那边行内评论没有隐藏标记、login 也不以 [bot] 结尾）。
 - **错误归一**：Forgejo 适配器把非 2xx 包成 `*forge.StatusError`，与 GitHub
   透传的 `githubapi.StatusError` 同构，service 的 `IsNotFound`/`IsForbidden`/
   `IsDiffTooLarge` 按同一口径判定（`forge/errors.go`）。
@@ -250,7 +256,10 @@ Forgejo 仓库的 PR 审查与 GitHub 走同一条协调管线（webhook 事务�
 目标（镜像同步过去的分支，仅供依赖 GitHub 生态的存量工具读）。
 
 1. 在 Forgejo 实例建机器人账号，生成仓库范围 PAT（`write:repository` +
-   `write:issue`——写评论、review、commit status）。
+   `write:issue`——写评论、review、commit status）。**不需要也拿不到
+   `read:user`**：specific-repository token 只允许 repository/issue 四档
+   scope，`GET /user` 走不通——适配器改从写接口响应学自身 login（见
+   上节「机器人顶层评论的认领」）。
 2. 在 Forgejo 仓库 Settings → Repository → Push Mirror 配到 GitHub 镜像
    仓库，并开启 **Sync on commit**（Forgejo 收到推送即同步到 GitHub 镜像）。
 3. **推镜像无分支过滤会强推**：Forgejo 侧的所有分支/标签原样同步到

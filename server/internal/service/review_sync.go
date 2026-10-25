@@ -713,7 +713,11 @@ func (s *ReviewService) upsertPRComment(ctx context.Context, client forge.Review
 			if savedID != 0 {
 				own = c.ID == savedID
 			} else {
-				own = strings.HasSuffix(c.User, "[bot]") && strings.HasPrefix(strings.TrimSpace(c.Body), marker)
+				// c.Self 覆盖 Forgejo（机器人是普通账号，不以 [bot] 结尾）；
+				// login 不可知的 Forgejo 行 Self=false，落到下方
+				// FindPullRequestComment 的 marker-only 退化路径。
+				own = (c.Self || strings.HasSuffix(c.User, "[bot]")) &&
+					strings.HasPrefix(strings.TrimSpace(c.Body), marker)
 			}
 			if !own {
 				continue
@@ -751,6 +755,11 @@ func (s *ReviewService) upsertPRComment(ctx context.Context, client forge.Review
 		if found {
 			if err := client.UpdatePullRequestComment(ctx, ledger.RepoFullName, commentID, body); err != nil {
 				if forge.IsNotFound(err) {
+					found = false
+				} else if forge.IsForbidden(err) {
+					// Forgejo login 不可知时 marker-only 可能命中伪造的他人
+					// 评论：PATCH 403 视为「不是我们的」，走新建而不是把
+					// 整个同步挂死。
 					found = false
 				} else {
 					return errs.New(errs.ErrGitHubAPI.Code, "更新顶层评论失败: "+err.Error())

@@ -260,7 +260,10 @@ func (c *ForgejoReviewClient) ListIssueCommentsForPR(ctx context.Context, repoFu
 }
 
 // botLogin PAT 所属账号（GET /user）：FindPullRequestComment 只认机器人自己
-// 发的评论。只缓存成功；探测失败返回错误且不记档，下次调用重试。
+// 发的评论。只缓存成功；探测失败返回错误且不记档，下次调用重试。仓库范围
+// PAT 拿不到 read:user（Forgejo 的 user/* scope 组不能授给 specific-repo
+// token）——此时由写接口响应的 user.login 学到登录名（learnLogin），首次写
+// 之前仍不可知。
 func (c *ForgejoReviewClient) botLogin(ctx context.Context) (string, error) {
 	c.loginMu.Lock()
 	defer c.loginMu.Unlock()
@@ -275,14 +278,25 @@ func (c *ForgejoReviewClient) botLogin(ctx context.Context) (string, error) {
 	return c.login, nil
 }
 
+// learnLogin 从写接口响应的 user.login 学 PAT 所属账号（仓库级 PAT 下
+// GET /user 不可用时的唯一来源）。与 botLogin 共用同一份缓存。
+func (c *ForgejoReviewClient) learnLogin(login string) {
+	if login == "" {
+		return
+	}
+	c.loginMu.Lock()
+	c.login = login
+	c.loginMu.Unlock()
+}
+
 // FindPullRequestComment 按 marker 找机器人顶层评论：GitHub 侧认
 // user.type=Bot，Forgejo 的机器人是普通账号——改为「作者 == PAT 所属账号 +
-// 正文以 marker 开头」，用户引用 marker 仍不能劫持落点。
+// 正文以 marker 开头」。login 不可知（仓库级 PAT + 尚无写响应可学）时退化
+// 到 marker-only 认领：用户伪造 marker 会被覆写一次，但按原样传播错误会让
+// 文档推荐的 token 契约永远发不出评论（两害相权取其轻，详见
+// docs/internal/forge-integrations.md 的 PAT 契约段）。
 func (c *ForgejoReviewClient) FindPullRequestComment(ctx context.Context, repoFullName string, number int, marker string) (int64, bool, error) {
-	login, err := c.botLogin(ctx)
-	if err != nil {
-		return 0, false, err
-	}
+	login, _ := c.botLogin(ctx)
 	repo, err := repoPath(repoFullName)
 	if err != nil {
 		return 0, false, err
@@ -301,7 +315,8 @@ func (c *ForgejoReviewClient) FindPullRequestComment(ctx context.Context, repoFu
 		return 0, false, err
 	}
 	for _, w := range comments {
-		if w.User.Login == login && strings.HasPrefix(strings.TrimSpace(w.Body), marker) {
+		if (login == "" || w.User.Login == login) &&
+			strings.HasPrefix(strings.TrimSpace(w.Body), marker) {
 			return w.ID, true, nil
 		}
 	}
@@ -314,13 +329,15 @@ func (c *ForgejoReviewClient) CreatePullRequestComment(ctx context.Context, repo
 		return 0, err
 	}
 	var wire struct {
-		ID int64 `json:"id"`
+		ID   int64       `json:"id"`
+		User forgejoUser `json:"user"`
 	}
 	if err := c.do(ctx, http.MethodPost,
 		"/repos/"+repo+"/issues/"+strconv.Itoa(number)+"/comments",
 		map[string]string{"body": body}, &wire); err != nil {
 		return 0, err
 	}
+	c.learnLogin(wire.User.Login)
 	return wire.ID, nil
 }
 
@@ -329,9 +346,16 @@ func (c *ForgejoReviewClient) UpdatePullRequestComment(ctx context.Context, repo
 	if err != nil {
 		return err
 	}
-	return c.do(ctx, http.MethodPatch,
+	var wire struct {
+		User forgejoUser `json:"user"`
+	}
+	if err := c.do(ctx, http.MethodPatch,
 		"/repos/"+repo+"/issues/comments/"+strconv.FormatInt(commentID, 10),
-		map[string]string{"body": body}, nil)
+		map[string]string{"body": body}, &wire); err != nil {
+		return err
+	}
+	c.learnLogin(wire.User.Login)
+	return nil
 }
 
 func (c *ForgejoReviewClient) ListReviews(ctx context.Context, repoFullName string, number int) ([]ReviewSummary, error) {
@@ -386,12 +410,14 @@ func (c *ForgejoReviewClient) SubmitReview(ctx context.Context, repoFullName str
 		}
 	}
 	var wire struct {
-		ID int64 `json:"id"`
+		ID   int64       `json:"id"`
+		User forgejoUser `json:"user"`
 	}
 	if err := c.do(ctx, http.MethodPost,
 		"/repos/"+repo+"/pulls/"+strconv.Itoa(number)+"/reviews", payload, &wire); err != nil {
 		return 0, err
 	}
+	c.learnLogin(wire.User.Login)
 	return wire.ID, nil
 }
 
