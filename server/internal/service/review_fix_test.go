@@ -724,6 +724,9 @@ func TestReviewWebhookUncheckedAction(t *testing.T) {
 		t.Fatalf("seed ledger: %v", err)
 	}
 	old := e.seedRun(t, repo, 61, "sha-old", model.ReviewRunRunning, now)
+	// 种子账本无 pr_updated_at（存量行形态）：异 head 投递按歧义走实拉
+	// 复核——登记 live PR（head 即投递的 sha-new）让复核通过。
+	e.fake.SetPR(repo, 61, &githubapi.PullRequest{HeadSHA: "sha-new"})
 	if err := e.review.HandleGitHubWebhook(ctx, "pull_request", "d-u1",
 		prPayload("synchronize", repo, 61, "sha-new", false, false)); err != nil {
 		t.Fatalf("webhook: %v", err)

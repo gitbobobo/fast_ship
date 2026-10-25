@@ -215,11 +215,13 @@ func (s *ReviewService) handleReviewTriggerTx(tx *gorm.DB, integrationID string,
 	}
 
 	// 过期 SHA 判定：trigger.updated_at 严格早于已受理 head 的 pr_updated_at
-	// → 忽略（迟到的旧快照）；时间戳相等时按 head 区分——Forgejo updated_at
-	// 是秒级粒度，同一秒内连推两个不同 head 会带相同时间戳，「同时刻不同
-	// head」是歧义：可能真新（同秒连推）也可能真旧（乱序投递/旧快照），
-	// 未复核一律交调用方现拉分辨，丢了或盲收都会漏审/回滚总账；同时刻
-	// 同 head 是同一状态的重复投递，早退省一次去重查询。
+	// → 忽略（迟到的旧快照）；时间戳相等或任一侧缺失时按 head 区分——
+	// Forgejo updated_at 是秒级粒度，同一秒内连推两个不同 head 会带相同
+	// 时间戳，「同时刻不同 head」与「缺时间戳的异 head」都是歧义：可能真
+	// 新（同秒连推/字段被代理剥掉）也可能真旧（乱序投递/旧快照），未复核
+	// 一律交调用方现拉分辨——缺戳放行会把总账回滚到旧 head，而旧 head 已
+	// 在 seen 登记为「非当前 head」，同 SHA 重投被去重永久吞掉；同 head
+	// 重复投递早退省一次去重查询（缺戳时落下方常规去重路径，不变）。
 	// 账本按 (项目, 集成) 分区：seen/总账/运行一律带 project_id 与
 	// integration_id，其他项目/其他集成的同仓库残留行不进入本项目判定。
 	if currentHead != "" {
@@ -229,16 +231,25 @@ func (s *ReviewService) handleReviewTriggerTx(tx *gorm.DB, integrationID string,
 		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
 		}
-		if accepted.PRUpdatedAt != nil && t.updatedAt != nil {
-			// 同刻异 head：tiedBase 必须命中当前已受理 head 才算复核有效；
-			// 总账在复核与重进之间前进了就重新报歧义，按新快照再验。
-			if t.updatedAt.Equal(*accepted.PRUpdatedAt) && headSHA != currentHead && t.tiedBase != currentHead {
-				return &tiedHeadError{observedHead: currentHead}
-			}
-			if t.updatedAt.Before(*accepted.PRUpdatedAt) ||
-				(t.updatedAt.Equal(*accepted.PRUpdatedAt) && headSHA == currentHead) {
+		if headSHA == currentHead {
+			// 同 head 且时间戳可判：不晚于已受理快照的是重复/旧投递。
+			if accepted.PRUpdatedAt != nil && t.updatedAt != nil &&
+				!t.updatedAt.After(*accepted.PRUpdatedAt) {
 				return nil
 			}
+		} else if accepted.PRUpdatedAt != nil && t.updatedAt != nil {
+			if t.updatedAt.Before(*accepted.PRUpdatedAt) {
+				return nil
+			}
+			// 同刻异 head：tiedBase 必须命中当前已受理 head 才算复核有效；
+			// 总账在复核与重进之间前进了就重新报歧义，按新快照再验。
+			if t.updatedAt.Equal(*accepted.PRUpdatedAt) && t.tiedBase != currentHead {
+				return &tiedHeadError{observedHead: currentHead}
+			}
+		} else if t.tiedBase != currentHead {
+			// 任一侧缺时间戳且 head 不同：判不出新旧，按歧义交实拉复核；
+			// tiedBase 命中的触发是复核后的实时快照，放行。
+			return &tiedHeadError{observedHead: currentHead}
 		}
 	}
 

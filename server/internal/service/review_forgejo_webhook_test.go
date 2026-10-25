@@ -34,6 +34,22 @@ func forgejoPullPayload(action, repo string, number int, sha string, draft bool)
 	}`)
 }
 
+// forgejoPullPayloadNoTS 不带 updated_at 的投递：自托管实例版本参差或代
+// 理改写 payload 时该字段可能缺失。
+func forgejoPullPayloadNoTS(action, repo string, number int, sha string) []byte {
+	return []byte(`{
+		"action": "` + action + `", "number": ` + strconv.Itoa(number) + `,
+		"pull_request": {
+			"draft": false,
+			"html_url": "https://forge.example.com/` + repo + `/pulls/` + strconv.Itoa(number) + `",
+			"title": "T",
+			"head": {"sha": "` + sha + `", "ref": "feat", "repo": {"fork": false, "full_name": "` + repo + `"}},
+			"base": {"ref": "main", "repo": {"full_name": "` + repo + `"}}
+		},
+		"repository": {"full_name": "` + repo + `"}
+	}`)
+}
+
 // seedForgejoReviewProject 落一个绑定 Forgejo 且启用审查的项目：设置行
 // integration_id 是真实集成 id，触发项可指定。
 func seedForgejoReviewProject(t *testing.T, svc *testServices, integrationID, username, repo string, triggers map[string]bool) (*model.Project, *model.User) {
@@ -967,6 +983,69 @@ func TestHandleForgejoWebhook_TiedDeliveryRevalidatesLive(t *testing.T) {
 	}
 	if debounce.HeadSHA != "sha-a" {
 		t.Fatalf("debounce head = %q, want sha-a", debounce.HeadSHA)
+	}
+}
+
+// TestHandleForgejoWebhook_MissingTimestampAmbiguous 缺 updated_at 的异
+// head 投递不得直放：判不出新旧按歧义交实拉复核——live 与 payload head 不
+// 符（旧态）→ 丢弃且不回滚总账；live 一致（真回滚）→ 复核后受理。同时
+// 覆盖「复核判丢弃的投递补登幂等账」：确定态丢弃后 delivery 已登记，平台
+// 手动 redeliver 同 GUID 直接 202 去重。
+func TestHandleForgejoWebhook_MissingTimestampAmbiguous(t *testing.T) {
+	svc := setupTestServices(t)
+	forgeID := createTestForgeIntegration(t, svc.db, "https://forge.example.com").ID
+	project, _ := seedForgejoReviewProject(t, svc, forgeID, "fj-nots", "acme/app", nil)
+	review := newReviewTestService(t, svc, nil, nil, nil)
+	client := &pollStubClient{
+		live: &forge.PullRequest{Number: 90, RepoFullName: "acme/app", HeadSHA: "sha-b", State: "open"},
+	}
+	review.clients = pollStubResolver{byIntegration: map[string]forge.ReviewClient{forgeID: client}}
+
+	// sha-b 正常受理（带时间戳）。
+	if err := review.HandleForgejoWebhook(context.Background(), forgeID, "pull_request", "d-b",
+		forgejoPullPayload("synchronized", "acme/app", 90, "sha-b", false)); err != nil {
+		t.Fatalf("webhook sha-b: %v", err)
+	}
+	// 缺时间戳的乱序旧投递 sha-a：live 仍是 sha-b → 复核判旧态丢弃，
+	// 总账不得回滚到 sha-a。
+	if err := review.HandleForgejoWebhook(context.Background(), forgeID, "pull_request", "d-a",
+		forgejoPullPayloadNoTS("synchronized", "acme/app", 90, "sha-a")); err != nil {
+		t.Fatalf("webhook sha-a no-ts: %v", err)
+	}
+	var ledger model.ReviewPullRequest
+	if err := svc.db.Where("project_id = ? AND pr_number = ?", project.ID, 90).First(&ledger).Error; err != nil {
+		t.Fatalf("ledger: %v", err)
+	}
+	if ledger.HeadSHA != "sha-b" {
+		t.Fatalf("ledger head = %q, want sha-b（缺时间戳旧投递不得回滚总账）", ledger.HeadSHA)
+	}
+	var n int64
+	svc.db.Model(&model.ReviewSeenSHA{}).Where("project_id = ? AND pr_number = ? AND head_sha = ?",
+		project.ID, 90, "sha-a").Count(&n)
+	if n != 0 {
+		t.Fatalf("sha-a 不得登记 seen, rows = %d", n)
+	}
+	// 复核判丢弃的投递已补登幂等账：同 GUID 手动 redeliver 直接 202 去重。
+	svc.db.Model(&model.GitHubWebhookDelivery{}).Where("delivery_id = ?", "d-a").Count(&n)
+	if n != 1 {
+		t.Fatalf("dropped delivery d-a 应补登幂等账, rows = %d", n)
+	}
+	if err := review.HandleForgejoWebhook(context.Background(), forgeID, "pull_request", "d-a",
+		forgejoPullPayloadNoTS("synchronized", "acme/app", 90, "sha-a")); !errors.Is(err, ErrDeliveryDuplicated) {
+		t.Fatalf("redelivery d-a: err=%v, want ErrDeliveryDuplicated", err)
+	}
+
+	// 平台真回滚到 sha-a：live=sha-a 时缺时间戳的投递经复核放行受理。
+	client.live = &forge.PullRequest{Number: 90, RepoFullName: "acme/app", HeadSHA: "sha-a", State: "open"}
+	if err := review.HandleForgejoWebhook(context.Background(), forgeID, "pull_request", "d-a3",
+		forgejoPullPayloadNoTS("synchronized", "acme/app", 90, "sha-a")); err != nil {
+		t.Fatalf("webhook sha-a3: %v", err)
+	}
+	if err := svc.db.Where("project_id = ? AND pr_number = ?", project.ID, 90).First(&ledger).Error; err != nil {
+		t.Fatalf("ledger2: %v", err)
+	}
+	if ledger.HeadSHA != "sha-a" {
+		t.Fatalf("ledger head = %q, want sha-a（复核通过的缺戳投递须受理）", ledger.HeadSHA)
 	}
 }
 

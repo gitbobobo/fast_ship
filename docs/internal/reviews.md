@@ -153,11 +153,17 @@ seen SHA、取消旧轮全部失效）。
    `review_pull_requests.head_sha`；payload `pull_request.updated_at` 严格早于
    已受理 head 的 `pr_updated_at` → 忽略；同刻同 head → 重复投递早退；
    **同刻异 head 是歧义**（秒级粒度下同秒连推与乱序投递/旧快照分不出）——
+   **任一侧缺 `updated_at`/`pr_updated_at` 的异 head 同样按歧义处理**（旧
+   数据行与被代理剥掉字段的投递都判不出新旧，放行会把总账回滚到旧
+   head，而旧 head 在 seen 里记为「非当前」后同 SHA 重投被去重永吞）——
    事务回滚并交调用方现拉实时 PR 复核：live head 与 payload head 一致才以
    `tiedBase`（绑观察到的总账 head）重进受理；live 指向别处或 PR 已关 →
-   丢弃，实拉失败 → 返回错误（handler 500 → 平台重投，GitHub 无轮询兜底
-   不静默丢）；重进期间总账又前进 → tiedBase 失配、哨兵再触发按新快照
-   重验（上限 4 次）。总账不回滚到疑似旧 head。该 SHA 已在本项目
+   丢弃并**补登幂等账**（确定态丢弃后 delivery 落账，平台手动 redeliver
+   同 GUID 直接 202 去重，不重走实拉），实拉失败 → 返回错误（handler
+   500 → 平台重投，GitHub 无轮询兜底不静默丢）；重进期间总账又前进 →
+   tiedBase 失配、哨兵再触发按新快照重验（上限 4 次，仍不收敛则丢弃且
+   不登记——收敛失败的投递可能是真新 head，留给重投再判）。总账不
+   回滚到疑似旧 head。该 SHA 已在本项目
    `review_seen_shas` 但不是当前 head → 忽略；`action=opened` 且当前 head
    非空 → 忽略；该 SHA 本项目已有运行 → 忽略。force-push 回已见过的 SHA
    不再开轮。

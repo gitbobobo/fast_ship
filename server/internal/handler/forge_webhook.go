@@ -61,7 +61,10 @@ func (h *ForgeWebhookHandler) Handle(c *gin.Context) {
 	}
 
 	if !forge.VerifyForgejoSignature(secret, body, forgeHeader(c, "Signature")) {
-		response.Unauthorized(c, 40107, "Webhook 签名无效或缺失")
+		// 文案点明只认原生头：实例端若错配成 GitHub 兼容格式
+		// （X-Hub-Signature-256），401 时管理员能直接看出是头格式问题。
+		response.Unauthorized(c, 40107,
+			"Webhook 签名无效或缺失（仅支持 X-Forgejo-Signature / X-Gitea-Signature）")
 		return
 	}
 

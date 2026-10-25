@@ -230,6 +230,9 @@ func TestReviewWebhookNoInstallationID(t *testing.T) {
 	delete(payload, "installation")
 	body, _ := json.Marshal(payload)
 
+	// seen 行无 pr_updated_at（存量行形态）：异 head 投递按歧义实拉
+	// 复核——登记 live PR（head 即投递的 sha-new-i）让复核通过。
+	e.fake.SetPR(repo, 66, &githubapi.PullRequest{HeadSHA: "sha-new-i"})
 	if err := e.review.HandleGitHubWebhook(context.Background(), "pull_request", "d-ni", body); err != nil {
 		t.Fatalf("webhook: %v", err)
 	}

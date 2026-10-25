@@ -273,10 +273,14 @@ func (s *ReviewService) revalidateTiedWebhook(ctx context.Context, integrationID
 		return err
 	}
 	// PR 在投递与复核间隙关闭/合并 → 该触发已无意义；live head 指向别处 →
-	// payload 是旧态。两种都是确定态，静默丢弃（非瞬时失败）。
+	// payload 是旧态。两种都是确定态，静默丢弃（非瞬时失败）。丢弃前补登
+	// 幂等账：首趟事务已回滚、本路径不进触发事务，不登记的话实例后台手动
+	// redeliver 同 GUID 会重走全流程（多一次实拉）——既然已判旧态，登记
+	// 让重投直接按重复投递 202 去重。
 	if live == nil || live.Draft || live.Merged ||
 		live.State == "closed" || live.State == "merged" ||
 		!strings.EqualFold(live.HeadSHA, p.PR.Head.SHA) {
+		s.recordDroppedDelivery(ctx, deliveryID, event)
 		return nil
 	}
 	trigger := &reviewWebhookTrigger{
@@ -299,6 +303,28 @@ func (s *ReviewService) revalidateTiedWebhook(ctx context.Context, integrationID
 		trigger.updatedAt = p.PR.UpdatedAt
 	}
 	return s.runWebhookDeliveryTx(ctx, integrationID, event, deliveryID, body, observedHead, trigger)
+}
+
+// recordDroppedDelivery 在触发事务之外补登幂等账：复核判丢弃的路径不进
+// runWebhookDeliveryTx（首趟登记随回滚撤销），单独一行小事务把 delivery id
+// 记下；已登记（比如并发投递抢先提交）时 InsertTx 的 inserted=false 不算错。
+// 登记失败只告警不阻断——最坏不过是重投时再判一次，结果同样是丢弃。
+func (s *ReviewService) recordDroppedDelivery(ctx context.Context, deliveryID, event string) {
+	if deliveryID == "" {
+		return
+	}
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		_, err := s.deliveries.InsertTx(tx, &model.GitHubWebhookDelivery{
+			DeliveryID: deliveryID,
+			Event:      event,
+			ReceivedAt: time.Now().UTC(),
+		})
+		return err
+	})
+	if err != nil {
+		s.logger.Warn("补登已丢弃投递的幂等账失败",
+			zap.String("delivery", deliveryID), zap.String("event", event), zap.Error(err))
+	}
 }
 
 // lockProject 项目级互斥：launchRun 与删除项目的清理互斥。返回解锁函数。
