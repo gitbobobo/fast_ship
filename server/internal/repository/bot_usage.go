@@ -346,7 +346,9 @@ func (r *BotUsageRepository) ScheduleTaskIDsByRunIDs(runIDs []string) (map[strin
 func (r *BotUsageRepository) ListRequestsByRun(runID string, limit int) ([]model.BotModelRequest, error) {
 	var rows []model.BotModelRequest
 	err := r.db.Where("run_id = ?", runID).
-		Order("ordinal DESC").Limit(limit).Find(&rows).Error
+		// ordinal 无唯一约束：加 id 次排序让「最新一段」的保留边界确定，
+		// 与 RequestHashesBeforeOrdinal 的 (ordinal,id) 字典序口径一致。
+		Order("ordinal DESC, id DESC").Limit(limit).Find(&rows).Error
 	if err != nil {
 		return nil, err
 	}
@@ -357,11 +359,11 @@ func (r *BotUsageRepository) ListRequestsByRun(runID string, limit int) ([]model
 }
 
 // RequestHashesBeforeOrdinal 对给定非空 request_hash 集合做存在性查询，返回
-// 其中在同 run 内更小 ordinal 的更早请求里出现过的子集：明细截断只保留最新
+// 其中在同 run 内 (ordinal,id) 字典序更早的请求里出现过的子集：明细截断只保留最新
 // 一段，被截掉的更早行不在内存里，is_retry 的「同 run 更早同 hash」口径由
 // 这次查询补齐。保留行至多 usageRunDetailMaxRequests 条，hash 集合不会逼近
 // IN 参数上限，单次查询即可。
-func (r *BotUsageRepository) RequestHashesBeforeOrdinal(runID string, hashes []string, before int64) (map[string]bool, error) {
+func (r *BotUsageRepository) RequestHashesBeforeOrdinal(runID string, hashes []string, beforeOrdinal int64, beforeID string) (map[string]bool, error) {
 	out := make(map[string]bool, len(hashes))
 	if len(hashes) == 0 {
 		return out, nil
@@ -369,9 +371,12 @@ func (r *BotUsageRepository) RequestHashesBeforeOrdinal(runID string, hashes []s
 	var rows []struct {
 		RequestHash string `gorm:"column:request_hash"`
 	}
+	// 「更早」按 ListRequestsByRun 保留边界的 (ordinal,id) 字典序判定：
+	// ordinal 可并列时，同 ordinal 但 id 更小的行仍是更早请求，不能漏查。
 	err := r.db.Model(&model.BotModelRequest{}).
 		Select("DISTINCT request_hash").
-		Where("run_id = ? AND ordinal < ? AND request_hash IN ?", runID, before, hashes).
+		Where("run_id = ? AND (ordinal < ? OR (ordinal = ? AND id < ?)) AND request_hash IN ?",
+			runID, beforeOrdinal, beforeOrdinal, beforeID, hashes).
 		Scan(&rows).Error
 	if err != nil {
 		return nil, err

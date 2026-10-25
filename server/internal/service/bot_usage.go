@@ -937,8 +937,8 @@ func (s *BotService) GetBotUsageRunDetail(userID, runID string) (*api.BotUsageRu
 	requests := make([]api.BotUsageRequest, 0, len(requestRows))
 	// is_retry 的契约口径是「与同 run 内更早请求 request_hash 相同」。截断
 	// 保留的是最新一段，更早的同 hash 行可能已被截掉、不在内存去重里——对
-	// 保留行的非空 hash 集合做一次存在性查询（同 run、更小 ordinal），与
-	// 保留窗口内的内存去重合并后判定。
+	// 保留行的非空 hash 集合做一次存在性查询（同 run、按 (ordinal,id)
+	// 字典序更早），与保留窗口内的内存去重合并后判定。
 	earlierHashes := map[string]bool{}
 	if requestsTruncated {
 		hashes := make([]string, 0, len(requestRows))
@@ -947,7 +947,7 @@ func (s *BotService) GetBotUsageRunDetail(userID, runID string) (*api.BotUsageRu
 				hashes = append(hashes, h)
 			}
 		}
-		if earlierHashes, err = repo.RequestHashesBeforeOrdinal(run.ID, hashes, requestRows[0].Ordinal); err != nil {
+		if earlierHashes, err = repo.RequestHashesBeforeOrdinal(run.ID, hashes, requestRows[0].Ordinal, requestRows[0].ID); err != nil {
 			return nil, errs.ErrInternal
 		}
 	}
