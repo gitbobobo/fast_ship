@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 
 	"github.com/godbobo/fast_ship/server/internal/githubapi"
@@ -45,7 +46,7 @@ type ReviewClients struct {
 	// PAT（/user 恒 403）下 Self 标记永不生效、自己的行内评论回流下一轮历史。
 	// 键里带凭证摘要：轮换到不同账号自动换槽，旧身份连同旧凭证一并隔离——
 	// 缓存命中即不再探测，按键分槽才不会有陈旧 login 滞留窗口；裸 PAT 不进
-	// 常驻 map key（条目随 resolver 终身存活，明文凭证不该常驻内存）。
+	// 常驻 map key（明文凭证不该常驻内存），同集成旧槽在新槽建立时逐出。
 	forgejoLogins sync.Map
 }
 
@@ -68,7 +69,19 @@ func (r *ReviewClients) ClientFor(ctx context.Context, integrationID, repoFullNa
 			return nil, err
 		}
 		tokenDigest := sha256.Sum256([]byte(token))
-		slot, _ := r.forgejoLogins.LoadOrStore(integrationID+"\x00"+hex.EncodeToString(tokenDigest[:]), &ForgejoLoginCache{})
+		key := integrationID + "\x00" + hex.EncodeToString(tokenDigest[:])
+		slot, loaded := r.forgejoLogins.LoadOrStore(key, &ForgejoLoginCache{})
+		if !loaded {
+			// 换槽逐出同集成旧 PAT 槽：槽随 resolver 终身存活，PAT 轮换
+			// 后旧身份不该常驻（集成数量级小，Range 前缀过滤代价可忽略）。
+			prefix := integrationID + "\x00"
+			r.forgejoLogins.Range(func(k, _ any) bool {
+				if ks, ok := k.(string); ok && ks != key && strings.HasPrefix(ks, prefix) {
+					r.forgejoLogins.Delete(k)
+				}
+				return true
+			})
+		}
 		return NewForgejoReviewClient(httpClient, apiBase, token).
 			withLoginCache(slot.(*ForgejoLoginCache)), nil
 	}

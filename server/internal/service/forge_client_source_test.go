@@ -83,6 +83,69 @@ func TestForgeClientSource_ForgejoClient(t *testing.T) {
 	}
 }
 
+// TestForgeClientSource_ClientCache 传输层按配置指纹复用：同指纹返回同一
+// client（一轮审查的分页/写评论共享连接池）；基址/私网开关等传输配置变化
+// 重建；行被删后缓存逐出。
+func TestForgeClientSource_ClientCache(t *testing.T) {
+	db, cfg := forgeSourceTestDB(t)
+	repo := repository.NewForgeIntegrationRepository(db)
+	if err := db.AutoMigrate(&model.ForgeIntegration{}); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	enc, err := crypto.Encrypt([]byte("pat-secret"), []byte(cfg.Encryption.Key))
+	if err != nil {
+		t.Fatalf("encrypt: %v", err)
+	}
+	if err := db.Create(&model.ForgeIntegration{
+		ID: "fj-1", Kind: model.ForgeIntegrationKindForgejo, Name: "forge",
+		BaseURL: "https://forge.example.com", TokenEncrypted: enc,
+	}).Error; err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	src := NewForgeClientSource(repo, cfg, zap.NewNop())
+	ctx := context.Background()
+
+	c1, _, _, err := src.ForgejoClient(ctx, "fj-1")
+	if err != nil {
+		t.Fatalf("ForgejoClient: %v", err)
+	}
+	c2, _, _, err := src.ForgejoClient(ctx, "fj-1")
+	if err != nil || c2 != c1 {
+		t.Fatalf("同指纹应复用同一 client (err=%v)", err)
+	}
+
+	// PAT 轮换不动传输层指纹——凭证随每次调用现解密，不进缓存键。
+	if err := db.Model(&model.ForgeIntegration{}).Where("id = ?", "fj-1").
+		Update("token_encrypted", enc).Error; err != nil {
+		t.Fatalf("rotate: %v", err)
+	}
+	c3, _, _, err := src.ForgejoClient(ctx, "fj-1")
+	if err != nil || c3 != c1 {
+		t.Fatalf("PAT 不变传输层应复用 (err=%v)", err)
+	}
+
+	// 传输配置变化（私网开关）→ 新 client。
+	if err := db.Model(&model.ForgeIntegration{}).Where("id = ?", "fj-1").
+		Update("allow_private_network", true).Error; err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	c4, _, _, err := src.ForgejoClient(ctx, "fj-1")
+	if err != nil || c4 == c1 {
+		t.Fatalf("配置变化应重建 client (err=%v)", err)
+	}
+
+	// 行被删 → 错误透出且缓存逐出。
+	if err := db.Where("id = ?", "fj-1").Delete(&model.ForgeIntegration{}).Error; err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if _, _, _, err := src.ForgejoClient(ctx, "fj-1"); err == nil {
+		t.Fatal("集成删除后应报错")
+	}
+	if _, ok := src.clients.Load("fj-1"); ok {
+		t.Fatal("集成删除后缓存槽应逐出")
+	}
+}
+
 // TestForgeClientSource_WebhookSecret 密钥三态：已配置（trim 后透出）、行存在
 // 未配置（空串）、行不存在（found=false）；密文损坏 → 50000 语义错误。
 func TestForgeClientSource_WebhookSecret(t *testing.T) {

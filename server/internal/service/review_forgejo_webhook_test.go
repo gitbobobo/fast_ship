@@ -1022,6 +1022,44 @@ func TestReviewTrigger_TiedBaseBindsObservedHead(t *testing.T) {
 	}
 }
 
+// TestForgejoPoll_RespectsEnabledBaseline 启用前的存量 open PR 不算「丢的
+// webhook 事件」——首 tick 全量开轮与 GitHub 只审开启后新事件不对称：
+// updated_at 早于 enabled_at 基线（含时偏宽限外）的快照跳过，基线后的照常。
+func TestForgejoPoll_RespectsEnabledBaseline(t *testing.T) {
+	svc := setupTestServices(t)
+	forgeID := createTestForgeIntegration(t, svc.db, "https://forge.example.com").ID
+	project, _ := seedForgejoReviewProject(t, svc, forgeID, "fj-base", "acme/app", nil)
+	review := newReviewTestService(t, svc, nil, nil, nil)
+
+	baseline := time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC)
+	if err := svc.db.Model(&model.ProjectReviewSettings{}).
+		Where("project_id = ?", project.ID).Update("enabled_at", baseline).Error; err != nil {
+		t.Fatalf("baseline: %v", err)
+	}
+	stale := baseline.Add(-2 * time.Minute)  // 早于 基线-宽限：存量
+	fresh := baseline.Add(-30 * time.Second) // 宽限内：可能是刚丢的事件
+	client := &pollStubClient{byRepo: map[string][]forge.PullRequest{
+		"acme/app": {
+			{Number: 1, RepoFullName: "acme/app", HeadSHA: "stale-sha", UpdatedAt: &stale},
+			{Number: 2, RepoFullName: "acme/app", HeadSHA: "fresh-sha", UpdatedAt: &fresh},
+		},
+	}}
+	review.clients = pollStubResolver{byIntegration: map[string]forge.ReviewClient{forgeID: client}}
+	review.pollForgejoOpenPRs(time.Now().UTC())
+
+	var n int64
+	svc.db.Model(&model.ReviewPullRequest{}).
+		Where("project_id = ? AND pr_number = 1", project.ID).Count(&n)
+	if n != 0 {
+		t.Fatalf("存量 PR 不该被首 tick 开轮（账本 %d 行）", n)
+	}
+	var ledger model.ReviewPullRequest
+	if err := svc.db.Where("project_id = ? AND pr_number = 2", project.ID).
+		First(&ledger).Error; err != nil || ledger.HeadSHA != "fresh-sha" {
+		t.Fatalf("基线后的 PR 应受理: err=%v head=%q", err, ledger.HeadSHA)
+	}
+}
+
 // TestForgejoPoll_TiedLiveClosedDropped 轮询复核的 live PR 在快照与实拉之间
 // 被关闭 → 与 webhook 复核同口径丢弃：已关 PR 不开轮、不回滚总账。
 func TestForgejoPoll_TiedLiveClosedDropped(t *testing.T) {

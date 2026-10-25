@@ -76,6 +76,12 @@ type ProjectReviewSettings struct {
 	TriggerReadyForReview bool `gorm:"column:trigger_ready_for_review;not null;default:false" json:"trigger_ready_for_review"`
 	TriggerReopened       bool `gorm:"column:trigger_reopened;not null;default:false" json:"trigger_reopened"`
 
+	// EnabledAt 当前启用的打点（INT-167 轮询基线）：false→true 翻转时写入，
+	// 停用清空、再启用重新打点。Forgejo 轮询用它区分「启用后丢的 webhook
+	// 事件」与「启用前就存在的存量 open PR」——后者不该被首 tick 全部开轮
+	// （GitHub 侧只审开启后的新事件）。存量升级行为 NULL：按无基线受理。
+	EnabledAt *time.Time `gorm:"column:enabled_at" json:"-"`
+
 	// CodeCombinationsJSON / VisualCombinationsJSON 是 ReviewCombination 数组。
 	// 代码审查 1–5 个（启用时必填），视觉审查 0–3 个（0 个即从不启动视觉审查）。
 	CodeCombinationsJSON   string `gorm:"column:code_combinations_json;type:text" json:"code_combinations_json"`

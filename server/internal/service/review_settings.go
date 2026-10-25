@@ -288,11 +288,24 @@ func (s *ReviewService) UpdateSettings(ctx context.Context, userID, projectID st
 		switch {
 		case errors.Is(findErr, gorm.ErrRecordNotFound):
 			row.CreatedAt = now
-			return tx.Create(&row).Error
 		case findErr != nil:
 			return findErr
+		default:
+			row.CreatedAt = existing.CreatedAt
 		}
-		row.CreatedAt = existing.CreatedAt
+		if row.Enabled {
+			// 启用基线（INT-167 轮询）：false→true 翻转重新打点；已启用
+			// 期间改组合等无关保存沿用原基线，存量不重启判定窗口。改绑
+			// 集成/仓库先经 repository.Update 压回 disabled，重回启用也
+			// 走翻转分支。
+			row.EnabledAt = existing.EnabledAt
+			if !existing.Enabled || row.EnabledAt == nil {
+				row.EnabledAt = &now
+			}
+		}
+		if errors.Is(findErr, gorm.ErrRecordNotFound) {
+			return tx.Create(&row).Error
+		}
 		return tx.Save(&row).Error
 	})
 	if err != nil {

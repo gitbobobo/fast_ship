@@ -342,6 +342,55 @@ func TestUpdateSettings_SaveAndRead_Consistent(t *testing.T) {
 	}
 }
 
+// 启用基线打点（INT-167 轮询）：false→true 翻转写 enabled_at；启用中的
+// 无关保存沿用原值；停用清空、再启用重新打点。
+func TestUpdateSettings_EnabledAtBaseline(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "u1")
+	project := createTestProject(t, svc.db, user.ID)
+	env := createT3TestEnv(t, svc.db, user.ID, "env1")
+	createTestT3Binding(t, svc.db, project.ID, env.ID, "t3-1")
+	rs, _ := readyReviewService(t, svc)
+	ctx := context.Background()
+
+	readBaseline := func() *time.Time {
+		var row model.ProjectReviewSettings
+		if err := svc.db.Where("project_id = ?", project.ID).First(&row).Error; err != nil {
+			t.Fatalf("settings row: %v", err)
+		}
+		return row.EnabledAt
+	}
+	if _, err := rs.UpdateSettings(ctx, user.ID, project.ID, validSettingsInput(env.ID)); err != nil {
+		t.Fatalf("enable: %v", err)
+	}
+	first := readBaseline()
+	if first == nil {
+		t.Fatal("启用后 enabled_at 应有打点")
+	}
+	// 启用中改触发项等无关保存沿用基线——存量判定窗口不重启。
+	in := validSettingsInput(env.ID)
+	in.TriggerReadyForReview = true
+	if _, err := rs.UpdateSettings(ctx, user.ID, project.ID, in); err != nil {
+		t.Fatalf("resave: %v", err)
+	}
+	if got := readBaseline(); got == nil || !got.Equal(*first) {
+		t.Fatalf("无关保存应沿用基线: %v -> %v", first, got)
+	}
+	// 停用清空基线；再启用重新打点。
+	if _, err := rs.UpdateSettings(ctx, user.ID, project.ID, &api.ReviewSettingsInput{Enabled: false}); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+	if got := readBaseline(); got != nil {
+		t.Fatalf("停用应清空基线, got %v", got)
+	}
+	if _, err := rs.UpdateSettings(ctx, user.ID, project.ID, validSettingsInput(env.ID)); err != nil {
+		t.Fatalf("re-enable: %v", err)
+	}
+	if got := readBaseline(); got == nil || got.Before(*first) {
+		t.Fatalf("再启用应重新打点: first=%v got=%v", first, got)
+	}
+}
+
 // 部署未配置 App 时 GetSettings 的 prerequisites 标出缺项，且不发起仓库调用。
 func TestGetSettings_Prerequisites_MissingApp(t *testing.T) {
 	svc := setupTestServices(t)

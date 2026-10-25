@@ -140,6 +140,12 @@ func TestResolverForgejoLoginCacheKeyByPAT(t *testing.T) {
 	if c2.(*ForgejoReviewClient).loginCache == cache1 {
 		t.Fatal("PAT 轮换后应换新缓存槽，旧身份不得滞留")
 	}
+	// 换槽后同集成旧 PAT 槽被逐出，不随 resolver 终身滞留。
+	n := 0
+	resolver.forgejoLogins.Range(func(_, _ any) bool { n++; return true })
+	if n != 1 {
+		t.Fatalf("同集成应只剩当前 PAT 槽, slots = %d", n)
+	}
 }
 
 func TestResolverNilGitHubSource(t *testing.T) {

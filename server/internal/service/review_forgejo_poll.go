@@ -20,6 +20,11 @@ import (
 
 const reviewForgejoPollInterval = 5 * time.Minute
 
+// forgejoPollBaselineGrace 启用基线的时偏宽限：自托管实例与部署机的时钟
+// 未必同步，updated_at 秒级精度叠加时钟漂移会把「启用前后一脚」的推送
+// 错划进存量——宽限内照常受理（最多多审一个刚推过的 PR，代价远低于漏）。
+const forgejoPollBaselineGrace = time.Minute
+
 // reviewForgejoPollTimeout 单项目一轮的网络预算：open PR 分页 + 若干次受理
 // 事务，与调度循环的网络阶段预算同量级；超时只放弃本项目，不拖累其他项目。
 const reviewForgejoPollTimeout = 60 * time.Second
@@ -106,6 +111,15 @@ func (s *ReviewService) pollForgejoProject(settings *model.ProjectReviewSettings
 	fetcher, _ := client.(singlePRFetcher)
 	for _, pr := range prs {
 		if pr.Draft || pr.HeadSHA == "" {
+			continue
+		}
+		// 启用基线（INT-167）：启用前就存在的 open PR 不是丢的 webhook
+		// 事件——首 tick 把存量全量开轮与 GitHub「只审开启后的新事件」
+		// 不对称，PR 多的源仓会一次开出几十上百个审查线程。updated_at
+		// 早于基线（留时偏宽限）的跳过；快照缺时间戳判不出新旧照常
+		// 受理；无基线的存量升级行（EnabledAt NULL）维持原行为。
+		if settings.EnabledAt != nil && pr.UpdatedAt != nil &&
+			pr.UpdatedAt.Before(settings.EnabledAt.Add(-forgejoPollBaselineGrace)) {
 			continue
 		}
 		if err := s.pollAcceptPR(ctx, fetcher, settings, repo, &pr, now); err != nil {

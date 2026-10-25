@@ -236,7 +236,12 @@ Forgejo 仓库的 PR 审查与 GitHub 走同一条协调管线（webhook 事务�
   full_name，含已删 fork 的 head.repo=null）在适配器枚举与 webhook 触发面
   过滤——判定按 head/base 归属比较，不看 `repo.fork` 布尔（仓库本身是
   fork 时同仓库 PR 的该字段也是 true，照它过滤会误杀正常 PR）。draft 在
-  受理面照常忽略。去重由现有机制保证（seen_sha/
+  受理面照常忽略。**启用基线**：`project_review_settings.enabled_at` 在
+  false→true 翻转时打点（停用清空、再启用重新打点），`updated_at` 早于
+  基线（留 1 分钟时偏宽限）的快照跳过——启用前就存在的 open PR 不是丢
+  的 webhook 事件，首 tick 全量开轮与 GitHub「只审开启后的新事件」不
+  对称；基线前启用/升级的行 `enabled_at` 为 NULL 时维持旧行为。去重由
+  现有机制保证（seen_sha/
   防抖/总账按 (项目, 集成) 分区），webhook 先受理的 SHA 轮询再见到会被跳过；
   轮询快照带平台 `updated_at`，受理事务内重读当前 head 判重——webhook 已
   受理更新 head 后，迟到的旧快照按 stale 丢弃不回退；**同刻异 head**（秒级

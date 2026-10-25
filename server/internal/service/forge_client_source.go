@@ -2,10 +2,14 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/config"
@@ -33,6 +37,16 @@ type ForgeClientSource struct {
 	repo   forgeIntegrationLookup
 	key    []byte
 	logger *zap.Logger
+	// httpClients 传输层按「集成 × 影响 Transport 的配置指纹」缓存复用：
+	// 一轮审查的分页/写评论/提交 review 共用一副连接池。PAT/密钥不入指纹
+	// （随每次调用重新解密、不进常驻内存键值）；行被删或 kind 不符时逐出。
+	clients sync.Map // integrationID -> cachedForgeClient
+}
+
+// cachedForgeClient 缓存槽：fingerprint 变（基址/CA/私网开关被编辑）即重建。
+type cachedForgeClient struct {
+	fingerprint string
+	client      *http.Client
 }
 
 // NewForgeClientSource 组装来源；cfg.Encryption.Key 与集成行写入同一密钥。
@@ -50,12 +64,14 @@ func NewForgeClientSource(repo forgeIntegrationLookup, cfg *config.Config, logge
 // diff 生成再宽一档。
 const forgeReviewClientTimeout = 60 * time.Second
 
-// ForgejoClient 集成行必须存在且 kind=forgejo：解密 PAT 后按集成配置构建
+// ForgejoClient 集成行必须存在且 kind=forgejo：解密 PAT 后按集成配置取
 // SSRF 安全 client（allow_private_network / 自定义 CA / 基址主机名单透传，
-// 与连接检测 Test 同一套构建入口，不另起第二套防护）。
+// 与连接检测 Test 同一套构建入口，不另起第二套防护）。传输层按配置指纹
+// 缓存：基址/CA/私网开关任一变化重建，否则同集成共享连接池。
 func (s *ForgeClientSource) ForgejoClient(_ context.Context, integrationID string) (*http.Client, string, string, error) {
 	row, err := s.findForgejoRow(integrationID)
 	if err != nil {
+		s.clients.Delete(integrationID)
 		return nil, "", "", err
 	}
 	token, err := crypto.Decrypt(row.TokenEncrypted, s.key)
@@ -63,6 +79,12 @@ func (s *ForgeClientSource) ForgejoClient(_ context.Context, integrationID strin
 		return nil, "", "", errForgeIntegrationDecrypt
 	}
 	apiBase := forgeAPIBaseURL(row)
+	fingerprint := forgeTransportFingerprint(row, apiBase)
+	if cached, ok := s.clients.Load(integrationID); ok {
+		if entry := cached.(cachedForgeClient); entry.fingerprint == fingerprint {
+			return entry.client, apiBase, string(token), nil
+		}
+	}
 	httpClient, err := forges.NewClient(forges.Config{
 		AllowedHosts:        forges.AllowedHosts(row.BaseURL, apiBase),
 		CACertPEM:           row.CACertPEM,
@@ -74,7 +96,18 @@ func (s *ForgeClientSource) ForgejoClient(_ context.Context, integrationID strin
 		s.logger.Error("构建 Forgejo 集成 client 失败", zap.String("integration", integrationID), zap.Error(err))
 		return nil, "", "", errors.New("构建 Forgejo 集成访问 client 失败")
 	}
+	s.clients.Store(integrationID, cachedForgeClient{fingerprint: fingerprint, client: httpClient})
 	return httpClient, apiBase, string(token), nil
+}
+
+// forgeTransportFingerprint 影响 Transport 行为的配置摘要：任一变化都必须
+// 换新 client（旧 Transport 的 DialContext/TLS 池已按旧配置固化）。PAT 与
+// webhook 密钥不影响传输层、不进指纹——随调用现解密，不常驻内存键值。
+func forgeTransportFingerprint(row *model.ForgeIntegration, apiBase string) string {
+	sum := sha256.Sum256([]byte(
+		row.BaseURL + "\x00" + apiBase + "\x00" + row.CACertPEM + "\x00" +
+			strconv.FormatBool(row.AllowPrivateNetwork)))
+	return hex.EncodeToString(sum[:])
 }
 
 // WebhookSecret Forgejo webhook 验签密钥：found=false 表示集成不存在（handler
