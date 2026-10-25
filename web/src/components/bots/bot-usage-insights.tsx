@@ -526,12 +526,10 @@ function CacheHitSection({ data }: { data: BotUsageInsights }) {
                       className="absolute left-0 top-0 h-full rounded-full bg-primary/70 transition-colors duration-200 group-hover:bg-primary"
                       data-testid="usage-insights-cache-bar"
                       style={{ width: `${(day.rate * 100).toFixed(1)}%` }}
-                    >
-                      <div className="absolute inset-0 -translate-x-full animate-[shimmer_2s_infinite] bg-gradient-to-r from-transparent via-white/20 to-transparent" />
-                    </div>
+                    />
                   )}
                   {day.rate == null && (
-                    <span className="absolute inset-0 flex items-center justify-center whitespace-nowrap text-[10px] text-muted-foreground/60">
+                    <span className="absolute inset-0 flex items-center justify-center whitespace-nowrap text-[10px] text-muted-foreground">
                       无完整数据
                     </span>
                   )}
