@@ -237,8 +237,8 @@ describe("BotUsageOverviewPanel", () => {
     // 「总花费」出现在总计卡与任务表头两处。
     expect(screen.getAllByText("总花费")).toHaveLength(2);
     expect(screen.getByText("$1.23")).toBeInTheDocument();
-    // 未计价占比 + 原因提示。
-    expect(screen.getByText("未计价请求")).toBeInTheDocument();
+    // 未计价占比 + 原因提示（「未计价」出现在总计卡与按机器人表头两处）。
+    expect(screen.getAllByText("未计价")).toHaveLength(2);
     expect(screen.getByText(/占 20%/)).toBeInTheDocument();
     expect(screen.getByText(/目录无价/)).toBeInTheDocument();
 
