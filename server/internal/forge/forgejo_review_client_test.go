@@ -239,6 +239,30 @@ func TestForgejoClient_SelfLogin_TransientErrorPropagates(t *testing.T) {
 	}
 }
 
+// TestForgejoClient_SelfLogin_RateLimited403Propagates 限流 403 与权限 403
+// 无法从状态码区分（GitHub 主/二次限流正是回 403）——自评探测把限流窗口的
+// /user 403 当「仓库级 PAT 无 read:user」确定性信号静默降级的话，整窗关
+// 掉「作者==自己」过滤：伪造 marker 可被覆写、机器人自己的评论 Self=false
+// 回流历史。先判 IsRateLimit，限流 403 照旧传播挂起本轮。
+func TestForgejoClient_SelfLogin_RateLimited403Propagates(t *testing.T) {
+	client, _ := newForgejoTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/user" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"message":"API rate limit exceeded for user"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`[]`))
+	})
+	_, _, err := client.FindPullRequestComment(context.Background(), "o/r", 5, "<!-- m -->")
+	if err == nil {
+		t.Fatal("限流 403 应传播错误挂起本轮，不得退化 marker-only")
+	}
+	if !IsRateLimit(err) {
+		t.Fatalf("err = %v, want IsRateLimit", err)
+	}
+}
+
 // TestForgejoClient_UpdateComment_NoLearnForeignLogin PATCH 响应的 user 是
 // 原作者不是编辑者：marker-only 命中他人伪造评论时不得把其 login 学进缓存
 // （否则 Self/对账认攻击者为自己且持久中毒——fsb 第 5 轮 P2）。

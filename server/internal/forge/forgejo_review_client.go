@@ -318,12 +318,16 @@ func (c *ForgejoReviewClient) botLogin(ctx context.Context) (string, error) {
 // read:user 的确定性信号）才退化空 login；瞬时网络错误、5xx、非预期 401
 // 照旧传播挂起本轮——瞬时故障若也降级 marker-only，「作者==自己」过滤就
 // 形同虚设，且 PAT 有仓库管理权限时 PATCH 覆写他人评论连 403 兜底都没有。
+// 403 降级前先判 IsRateLimit：GitHub/前置代理的限流正是回 403（body 含
+// rate limit/abuse detection 字样），与权限 403 无法从状态码区分——限流
+// 窗口静默降级会整窗关掉自评过滤，限流 403 与权限 403 同按「可重试的
+// 非确定性」处理照旧透出挂起。
 func (c *ForgejoReviewClient) selfLogin(ctx context.Context) (string, error) {
 	login, err := c.botLogin(ctx)
 	if err == nil {
 		return login, nil
 	}
-	if IsForbidden(err) || IsNotFound(err) {
+	if (IsForbidden(err) || IsNotFound(err)) && !IsRateLimit(err) {
 		return "", nil
 	}
 	return "", err

@@ -191,6 +191,10 @@ export function ProjectFormDialog({
   const [codeIntegrationId, setCodeIntegrationId] =
     useState(defaultIntegrationId);
   const [codeRepoSlug, setCodeRepoSlug] = useState("");
+  // slug 经 useEffect 回填：首帧渲染时还是 ""——记回填完成的项目 id，
+  // 未完成前不渲染「修改代码仓库将停用 PR 审查」警示，否则空串与已存
+  // code_repo_url 必然不等、警示闪一帧才消失。
+  const [slugHydratedId, setSlugHydratedId] = useState<string | null>(null);
   // 保存时服务端报「集成不存在/已删除」的字段级回显：toast 之外把错误钉在
   // 选择器上，并重拉列表让失效 id 落到「原绑定集成（已失效）」占位——选中
   // 态继续显示已删名称会误导用户改错字段。
@@ -256,6 +260,7 @@ export function ProjectFormDialog({
   const integrationChanged = isEdit && codeIntegrationId !== savedIntegrationId;
   const showRepoChangeWarning =
     isEdit &&
+    slugHydratedId === projectId &&
     !!project?.code_repo_url &&
     (repoChanged || integrationChanged);
 
@@ -346,6 +351,7 @@ export function ProjectFormDialog({
           : null;
       const parts = structured ?? codeRepoSlugFromSaved(project.code_repo_url ?? "");
       setCodeRepoSlug(parts.owner ? `${parts.owner}/${parts.repo}` : "");
+      setSlugHydratedId(projectId ?? null);
       reset({
         name: project.name,
         description: project.description || "",
@@ -359,6 +365,7 @@ export function ProjectFormDialog({
     } else if (!isEdit && open) {
       setCodeIntegrationId(defaultIntegrationId);
       setCodeRepoSlug("");
+      setSlugHydratedId(null);
       setIntegrationError("");
       reset({
         name: "",
@@ -368,7 +375,7 @@ export function ProjectFormDialog({
         code_github_token_id: "",
       });
     }
-  }, [isEdit, project, open, reset]);
+  }, [isEdit, project, projectId, open, reset]);
 
   const openCreateDialog = (purpose: "public" | "code") => {
     setCreatingFor(purpose);
