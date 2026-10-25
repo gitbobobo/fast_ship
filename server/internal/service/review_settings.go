@@ -133,7 +133,7 @@ func (s *ReviewService) UpdateSettings(ctx context.Context, userID, projectID st
 	}
 
 	if input.Enabled {
-		// 代码仓集成（INT-167 任务 3）：绑定 Forgejo 集成的项目开启前校验集成
+		// 代码仓库集成（INT-167 任务 3）：绑定 Forgejo 集成的项目开启前校验集成
 		// 行存在且 kind=forgejo；仓库级可访问性走前置条件的实时 GetRepository
 		// 检查（41202 语义，与下方 GitHub 段落同一映射风格）。
 		if project.CodeIntegrationID != "" {
@@ -245,11 +245,11 @@ func (s *ReviewService) UpdateSettings(ctx context.Context, userID, projectID st
 			findErr := tx.Where("id = ?", fresh.CodeIntegrationID).First(&txRow).Error
 			switch {
 			case errors.Is(findErr, gorm.ErrRecordNotFound):
-				return reviewComboError("代码仓集成已失效，请刷新后重试")
+				return reviewComboError("代码仓库集成已失效，请刷新后重试")
 			case findErr != nil:
 				return findErr
 			case txRow.Kind != model.ForgeIntegrationKindForgejo:
-				return reviewComboError("代码仓集成已失效，请刷新后重试")
+				return reviewComboError("代码仓库集成已失效，请刷新后重试")
 			}
 		}
 		if !strings.EqualFold(fresh.CodeRepoFullName(), project.CodeRepoFullName()) ||
@@ -355,18 +355,18 @@ func (s *ReviewService) forgeIntegrationRow(integrationID string) (*model.ForgeI
 // 语义，缺项明细随响应逐条列出）。
 func (s *ReviewService) checkForgejoIntegrationRow(integrationID string) error {
 	if s.forgeIntegrations == nil {
-		return reviewComboError("代码仓集成不可用，请重新选择集成")
+		return reviewComboError("代码仓库集成不可用，请重新选择集成")
 	}
 	row, err := s.forgeIntegrations.FindByID(integrationID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return reviewComboError("代码仓集成 %s 不存在或已删除，请重新选择集成", integrationID)
+			return reviewComboError("代码仓库集成 %s 不存在或已删除，请重新选择集成", integrationID)
 		}
-		s.logger.Error("读取代码仓集成失败", zap.String("integration", integrationID), zap.Error(err))
+		s.logger.Error("读取代码仓库集成失败", zap.String("integration", integrationID), zap.Error(err))
 		return errs.ErrInternal
 	}
 	if row.Kind != model.ForgeIntegrationKindForgejo {
-		return reviewComboError("代码仓集成 %s 不是 Forgejo 类型", integrationID)
+		return reviewComboError("代码仓库集成 %s 不是 Forgejo 类型", integrationID)
 	}
 	return nil
 }
@@ -539,26 +539,26 @@ func (s *ReviewService) reviewPrerequisites(ctx context.Context, project *model.
 	var forgeRow *model.ForgeIntegration
 	if project.CodeIntegrationID != "" {
 		integrationConfigured := false
-		appDetail := "Forgejo 代码仓集成不可用"
+		appDetail := "Forgejo 代码仓库集成不可用"
 		row, rowErr := s.forgeIntegrationRow(project.CodeIntegrationID)
 		forgeRow = row
 		switch {
 		case rowErr != nil:
 			appDetail = "Forgejo 集成不存在或已删除，请重新绑定"
 		case row.Kind != model.ForgeIntegrationKindForgejo:
-			appDetail = "代码仓集成不是 Forgejo 类型"
+			appDetail = "代码仓库集成不是 Forgejo 类型"
 		default:
 			integrationConfigured = true
 			appDetail = ""
 		}
-		add(api.GithubApp, "代码仓集成已配置（Forgejo）", !integrationConfigured, appDetail)
+		add(api.GithubApp, "代码仓库集成已配置（Forgejo）", !integrationConfigured, appDetail)
 
 		repoOwner, repoName := project.CodeRepo()
 		repoFullName := repoOwner + "/" + repoName
 		repoLinked := repoOwner != "" && repoName != ""
 
 		installed := false
-		installDetail := "Forgejo 代码仓集成不可用"
+		installDetail := "Forgejo 代码仓库集成不可用"
 		if integrationConfigured && repoLinked {
 			client, err := s.reviewClient(ctx, reviewIntegrationID(project.CodeIntegrationID), repoFullName, 0)
 			switch {
@@ -575,7 +575,7 @@ func (s *ReviewService) reviewPrerequisites(ctx context.Context, project *model.
 		} else if integrationConfigured && !repoLinked {
 			installDetail = "项目未关联代码仓库"
 		}
-		add(api.GithubAppInstallation, "代码仓集成可访问该仓库（Forgejo）", !installed, installDetail)
+		add(api.GithubAppInstallation, "代码仓库集成可访问该仓库（Forgejo）", !installed, installDetail)
 	} else {
 		// 1. 部署 GitHub App 已配置：debug fake 视为已配置，否则问部署集成。
 		appConfigured := s.cfg != nil && s.cfg.GitHubApp.Fake && s.cfg.Server.Mode == "debug"
@@ -639,9 +639,9 @@ func (s *ReviewService) reviewPrerequisites(ctx context.Context, project *model.
 		tokenReady := forgeRow != nil && len(forgeRow.TokenEncrypted) > 0
 		tokenDetail := ""
 		if !tokenReady {
-			tokenDetail = "请在「设置 → 部署 → 集成」为代码仓集成配置访问令牌"
+			tokenDetail = "请在「设置 → 部署 → 集成」为代码仓库集成配置访问令牌"
 		}
-		add(api.GithubToken, "代码仓集成 PAT 已配置（Forgejo）", !tokenReady, tokenDetail)
+		add(api.GithubToken, "代码仓库集成 PAT 已配置（Forgejo）", !tokenReady, tokenDetail)
 	} else {
 		tokenBound := project.PublicGitHubTokenID != "" || project.CodeGitHubTokenID != ""
 		tokenDetail := ""

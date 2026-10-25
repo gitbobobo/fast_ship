@@ -515,7 +515,7 @@ describe("ProjectFormDialog", () => {
 
     expect(
       await screen.findByRole("combobox", { name: "代码仓库集成" }),
-    ).toHaveTextContent("内置 GitHub");
+    ).toHaveTextContent("GitHub（内置）");
     expect(screen.getByText(/集成列表加载失败/)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "重试" }));
     expect(refetchIntegrations).toHaveBeenCalled();
@@ -544,7 +544,7 @@ describe("ProjectFormDialog", () => {
     expect(await screen.findByText("正在加载集成列表...")).toBeInTheDocument();
     expect(
       screen.getByRole("combobox", { name: "代码仓库集成" }),
-    ).toHaveTextContent("内置 GitHub");
+    ).toHaveTextContent("GitHub（内置）");
   });
 
   it("集成列表加载中：forge 绑定未改动时保存不携带代码仓字段（合成不要求选项就绪）", async () => {

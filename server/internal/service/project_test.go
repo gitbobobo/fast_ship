@@ -834,11 +834,11 @@ func TestProjectRepoWrite_GoneIntegrationRejected(t *testing.T) {
 		t.Fatalf("update missing project err = %v, want ErrRecordNotFound", err)
 	}
 
-	// service 层把集成失效折成 40001「代码仓集成不存在或已被删除，请重试」。
+	// service 层把集成失效折成 40001「代码仓库集成不存在或已被删除，请重试」。
 	psvc := newTestProjectService(svc)
 	_, err = psvc.Update(project.ID, user.ID, &UpdateProjectRequest{Name: api.Ptr("renamed-2")})
 	gone := appErr(t, err)
-	if gone.Code != errs.ErrInvalidParams.Code || !strings.Contains(gone.Message, "代码仓集成不存在或已被删除") {
+	if gone.Code != errs.ErrInvalidParams.Code || !strings.Contains(gone.Message, "代码仓库集成不存在或已被删除") {
 		t.Fatalf("service update = %d %q, want 40001 gone-integration", gone.Code, gone.Message)
 	}
 

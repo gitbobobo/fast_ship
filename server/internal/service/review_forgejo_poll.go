@@ -117,7 +117,9 @@ func (s *ReviewService) pollForgejoProject(settings *model.ProjectReviewSettings
 		// 事件——首 tick 把存量全量开轮与 GitHub「只审开启后的新事件」
 		// 不对称，PR 多的源仓会一次开出几十上百个审查线程。updated_at
 		// 早于基线（留时偏宽限）的跳过；快照缺时间戳判不出新旧照常
-		// 受理；无基线的存量升级行（EnabledAt NULL）维持原行为。
+		// 受理；无基线的存量升级行（EnabledAt NULL）维持原行为。这跳
+		// 的是快照基线的廉价预筛——权威判定在受理事务内按实时设置行
+		// 重查（快照与受理之间停用再启用会前移基线，照样拦截）。
 		if settings.EnabledAt != nil && pr.UpdatedAt != nil &&
 			pr.UpdatedAt.Before(settings.EnabledAt.Add(-forgejoPollBaselineGrace)) {
 			continue

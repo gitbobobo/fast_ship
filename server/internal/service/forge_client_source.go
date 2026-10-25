@@ -119,7 +119,7 @@ func (s *ForgeClientSource) WebhookSecret(_ context.Context, integrationID strin
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return "", false, nil
 		}
-		return "", false, fmt.Errorf("读取代码仓集成失败: %w", err)
+		return "", false, fmt.Errorf("读取代码仓库集成失败: %w", err)
 	}
 	// 端点只受理 Forgejo 投递：kind 不符的行按「不存在」404——当前 Create
 	// 恒写 forgejo，属防御；未来新增 kind 时其 secret 不能用于此验签。
@@ -144,12 +144,12 @@ func (s *ForgeClientSource) findForgejoRow(integrationID string) (*model.ForgeIn
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			// 哨兵透出：防抖实况读/轮询把「集成不存在」按确定性失败归类
 			// （删行/停用），不随瞬时故障无限重试。
-			return nil, fmt.Errorf("代码仓集成 %s 不存在或已删除: %w", integrationID, gorm.ErrRecordNotFound)
+			return nil, fmt.Errorf("代码仓库集成 %s 不存在或已删除: %w", integrationID, gorm.ErrRecordNotFound)
 		}
-		return nil, fmt.Errorf("读取代码仓集成失败: %w", err)
+		return nil, fmt.Errorf("读取代码仓库集成失败: %w", err)
 	}
 	if row.Kind != model.ForgeIntegrationKindForgejo {
-		return nil, fmt.Errorf("代码仓集成 %s 不是 Forgejo 类型: %w", integrationID, gorm.ErrRecordNotFound)
+		return nil, fmt.Errorf("代码仓库集成 %s 不是 Forgejo 类型: %w", integrationID, gorm.ErrRecordNotFound)
 	}
 	return row, nil
 }

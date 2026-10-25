@@ -37,6 +37,8 @@ export function OptionSelect({
   className,
   contentClassName,
   size,
+  invalid,
+  alignItemWithTrigger,
   "aria-label": ariaLabel,
 }: {
   options: readonly OptionSelectOption[];
@@ -47,12 +49,16 @@ export function OptionSelect({
   /** 收起态显示内容的整体覆盖；缺省按 options 的 label 查。 */
   valueLabel?: ReactNode;
   disabled?: boolean;
-  /** 以下四个属性透传给 SelectTrigger。 */
+  /** 以下属性透传给 SelectTrigger/SelectContent。 */
   id?: string;
   className?: string;
   /** 下拉面板自身的 class（触发器较窄、选项较长时用它放宽面板）。 */
   contentClassName?: string;
   size?: "sm" | "default";
+  /** 校验失败态：trigger 描边/光环转 destructive。 */
+  invalid?: boolean;
+  /** 浮层对齐方式：缺省走 SelectContent 的条目对齐；false 与 trigger 同宽贴齐。 */
+  alignItemWithTrigger?: boolean;
   "aria-label"?: string;
 }) {
   // value 传 undefined 会让 Base UI 落入非受控模式，统一归一为 null；
@@ -76,12 +82,16 @@ export function OptionSelect({
         className={className}
         size={size}
         aria-label={ariaLabel}
+        aria-invalid={invalid || undefined}
       >
         <SelectValue placeholder={placeholder}>
           {hasValue ? valueLabel : undefined}
         </SelectValue>
       </SelectTrigger>
-      <SelectContent className={contentClassName}>
+      <SelectContent
+        className={contentClassName}
+        alignItemWithTrigger={alignItemWithTrigger ?? true}
+      >
         {options.map((option) => (
           <SelectItem
             key={option.value}

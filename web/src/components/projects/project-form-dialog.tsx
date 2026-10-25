@@ -62,7 +62,7 @@ const fallbackIntegrationOptions: IntegrationOption[] = [
   {
     id: defaultIntegrationId,
     kind: "github",
-    name: "内置 GitHub",
+    name: "GitHub（内置）",
     base_url: "https://github.com",
     builtin: true,
   },
@@ -191,6 +191,10 @@ export function ProjectFormDialog({
   const [codeIntegrationId, setCodeIntegrationId] =
     useState(defaultIntegrationId);
   const [codeRepoSlug, setCodeRepoSlug] = useState("");
+  // 保存时服务端报「集成不存在/已删除」的字段级回显：toast 之外把错误钉在
+  // 选择器上，并重拉列表让失效 id 落到「原绑定集成（已失效）」占位——选中
+  // 态继续显示已删名称会误导用户改错字段。
+  const [integrationError, setIntegrationError] = useState("");
 
   // 接口未就绪/失败时降级用保底列表；失效绑定（id 不在列表里）交给
   // withMissingOption 显示占位项，不静默改绑回 github。
@@ -209,8 +213,9 @@ export function ProjectFormDialog({
       withMissingOption(
         integrationList.map((option) => {
           // 管理员起的名字里可能带半角括号，与内置名的全角混排；展示层统一
-          // 全角。地址只显主机（次要样式）——name（url） 两组括号连读太挤。
-          const displayName = option.name.replace(/\(([^)]*)\)/g, "（$1）");
+          // 全角，并吃掉括号前遗留的空格（"Forgejo (内部)" → "Forgejo（内部）"）。
+          // 地址只显主机（次要样式）——name（url） 两组括号连读太挤。
+          const displayName = option.name.replace(/ ?\(([^)]*)\)/g, "（$1）");
           let host = option.base_url;
           try {
             host = new URL(option.base_url).host;
@@ -328,6 +333,7 @@ export function ProjectFormDialog({
   useEffect(() => {
     if (isEdit && project) {
       setClearBrokenBinding(false);
+      setIntegrationError("");
       // 集成选择按已保存绑定回填（悬空绑定的失效 id 原样保留，交给
       // withMissingOption 显示）；owner/repo 优先取结构化字段——带路径前缀
       // 的集成基址（https://forge.example/git/o/r）从 code_repo_url 剥主机
@@ -353,6 +359,7 @@ export function ProjectFormDialog({
     } else if (!isEdit && open) {
       setCodeIntegrationId(defaultIntegrationId);
       setCodeRepoSlug("");
+      setIntegrationError("");
       reset({
         name: "",
         description: "",
@@ -495,9 +502,17 @@ export function ProjectFormDialog({
     } catch (err) {
       // 服务端 40001 的具体原因（主机未匹配集成、端口无效、多余路径段等）
       // 透出来——吞成通用提示会让 Forgejo 绑定失败只剩「检查输入」无从定位。
-      toast.error(
-        errorText(err, isEdit ? "更新失败，请检查输入" : "创建失败，请检查输入"),
+      const msg = errorText(
+        err,
+        isEdit ? "更新失败，请检查输入" : "创建失败，请检查输入",
       );
+      toast.error(msg);
+      // 集成在打开弹窗后被删/失效：重试不会成功——把错误钉到选择器上，
+      // 并重拉选项让失效 id 落到「已失效」占位而不是继续显示旧名。
+      if (/集成.*(不存在|已删除|失效|不可用)/.test(msg)) {
+        setIntegrationError(msg);
+        void refetchIntegrations();
+      }
     }
   };
 
@@ -586,13 +601,16 @@ export function ProjectFormDialog({
               <Label htmlFor="project-code_integration_id">代码仓库集成</Label>
               <OptionSelect
                 value={codeIntegrationId}
-                onValueChange={(next) =>
-                  setCodeIntegrationId(next ?? defaultIntegrationId)
-                }
+                onValueChange={(next) => {
+                  setCodeIntegrationId(next ?? defaultIntegrationId);
+                  setIntegrationError("");
+                }}
                 options={integrationSelectOptions}
                 id="project-code_integration_id"
                 className="w-full"
                 size="default"
+                invalid={integrationError !== ""}
+                alignItemWithTrigger={false}
               />
               {integrationsLoading && (
                 <p className="text-xs text-muted-foreground">
@@ -601,17 +619,21 @@ export function ProjectFormDialog({
               )}
               {integrationsError && (
                 <p className="text-xs text-muted-foreground">
-                  集成列表加载失败，暂仅提供内置 GitHub
+                  集成列表加载失败，暂仅提供 GitHub（内置）
+                  {" · "}
                   <Button
                     type="button"
                     variant="link"
                     size="sm"
-                    className="h-auto px-1"
+                    className="h-auto px-2 py-1.5 underline underline-offset-2"
                     onClick={() => void refetchIntegrations()}
                   >
                     重试
                   </Button>
                 </p>
+              )}
+              {integrationError !== "" && (
+                <p className="text-xs text-destructive">{integrationError}</p>
               )}
             </div>
 

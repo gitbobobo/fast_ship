@@ -192,6 +192,17 @@ func (s *ReviewService) handleReviewTriggerTx(tx *gorm.DB, integrationID string,
 		return err
 	}
 
+	// 启用基线（INT-167）：trigger 带平台 updated_at 早于 enabled_at 基线
+	// （含时偏宽限）→ 启用前的存量状态不是丢的事件，忽略。判定必须用
+	// 事务内实时设置行：轮询/投递拿着旧快照受理时用户「停用再启用」把
+	// 基线前移，旧快照照放就是 Codex R27 的竞态——实时行同时兜住停用
+	// （反查不命中）与改绑（快照键不符）。真实事件的 updated_at 即事件
+	// 时刻恒在基线之后，被拦的只有重放/迟到的启用前投递。
+	if settings.EnabledAt != nil && t.updatedAt != nil &&
+		t.updatedAt.Before(settings.EnabledAt.Add(-forgejoPollBaselineGrace)) {
+		return nil
+	}
+
 	// 写库键统一小写：payload 里是平台规范大小写，rerun 侧用的是项目里
 	// 用户输入的原样大小写——SQLite BINARY 排序下大小写不同即两套账本，
 	// 旧 SHA 取消、去重、幂等全部失效。
