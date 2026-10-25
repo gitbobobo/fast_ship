@@ -199,7 +199,7 @@ describe("ProjectFormDialog", () => {
     expect(
       await screen.findByRole("combobox", { name: "代码仓库集成" }),
     ).toHaveTextContent("自建 Forgejo");
-    expect(screen.getByLabelText(/代码仓库（可选/)).toHaveValue("acme/api");
+    expect(screen.getByLabelText(/代码仓库（/)).toHaveValue("acme/api");
   });
 
   it("编辑回填：github 绑定剥出 owner/repo；未改动保存不携带代码仓字段", async () => {
@@ -212,7 +212,7 @@ describe("ProjectFormDialog", () => {
       }),
     );
 
-    expect(await screen.findByLabelText(/代码仓库（可选/)).toHaveValue("acme/api");
+    expect(await screen.findByLabelText(/代码仓库（/)).toHaveValue("acme/api");
     await user.click(screen.getByRole("button", { name: "保存" }));
 
     await waitFor(() => expect(updateMutateAsync).toHaveBeenCalled());
@@ -231,7 +231,7 @@ describe("ProjectFormDialog", () => {
       }),
     );
 
-    const input = await screen.findByLabelText(/代码仓库（可选/);
+    const input = await screen.findByLabelText(/代码仓库（/);
     expect(screen.queryByText(repoChangeWarning)).not.toBeInTheDocument();
     await user.clear(input);
     await user.type(input, "acme/other");
@@ -255,7 +255,7 @@ describe("ProjectFormDialog", () => {
       }),
     );
 
-    const input = await screen.findByLabelText(/代码仓库（可选/);
+    const input = await screen.findByLabelText(/代码仓库（/);
     await user.clear(input);
     await user.type(input, "acme/other");
     await user.click(screen.getByRole("button", { name: "保存" }));
@@ -279,7 +279,7 @@ describe("ProjectFormDialog", () => {
       }),
     );
 
-    const input = await screen.findByLabelText(/代码仓库（可选/);
+    const input = await screen.findByLabelText(/代码仓库（/);
     await user.clear(input);
     // forgejo-B 的完整地址，owner/repo 与已存相同——host 不同才算改动。
     await user.type(input, "https://forge-b.example.com/acme/api");
@@ -299,7 +299,7 @@ describe("ProjectFormDialog", () => {
       }),
     );
 
-    const input = await screen.findByLabelText(/代码仓库（可选/);
+    const input = await screen.findByLabelText(/代码仓库（/);
     await user.clear(input);
     // scheme 不同即不同绑定（服务端按 scheme 补默认端口）——host 相等
     // 也不算未改动，更不能合成时静默改写成 https。
@@ -320,7 +320,7 @@ describe("ProjectFormDialog", () => {
       }),
     );
 
-    const input = await screen.findByLabelText(/代码仓库（可选/);
+    const input = await screen.findByLabelText(/代码仓库（/);
     await user.clear(input);
     // forge.example.com. 与 forge.example.com 是同一主机键（后端 normalize-
     // CodeRepoRef 剥尾点）——不能误报主机不一致，等价地址按未改动处理。
@@ -343,7 +343,7 @@ describe("ProjectFormDialog", () => {
       }),
     );
 
-    const input = await screen.findByLabelText(/代码仓库（可选/);
+    const input = await screen.findByLabelText(/代码仓库（/);
     await user.clear(input);
     // forge.example.com.:443 的尾点在端口前——后端 SplitHostPort 后剥点
     // 归一成 forge.example.com:443，与所选集成同主机键，判未改动。
@@ -366,7 +366,7 @@ describe("ProjectFormDialog", () => {
       }),
     );
 
-    const input = await screen.findByLabelText(/代码仓库（可选/);
+    const input = await screen.findByLabelText(/代码仓库（/);
     await user.clear(input);
     // forge.example.com:443 对 https 集成是同一主机键——主机比对放行后
     // 三段式解析失败，报格式错误而非误报主机不一致。
@@ -387,7 +387,7 @@ describe("ProjectFormDialog", () => {
       }),
     );
 
-    await screen.findByLabelText(/代码仓库（可选/);
+    await screen.findByLabelText(/代码仓库（/);
     await user.click(screen.getByRole("combobox", { name: "代码仓库集成" }));
     await user.click(await screen.findByRole("option", { name: /自建 Forgejo/ }));
     await user.click(screen.getByRole("button", { name: "保存" }));
@@ -411,7 +411,7 @@ describe("ProjectFormDialog", () => {
       }),
     );
 
-    await user.clear(await screen.findByLabelText(/代码仓库（可选/));
+    await user.clear(await screen.findByLabelText(/代码仓库（/));
     await user.click(screen.getByRole("button", { name: "保存" }));
 
     await waitFor(() =>
@@ -446,7 +446,7 @@ describe("ProjectFormDialog", () => {
       makeProject({ code_integration_id: "dead-row", code_repo_url: null }),
     );
 
-    await screen.findByLabelText(/代码仓库（可选/);
+    await screen.findByLabelText(/代码仓库（/);
     await user.click(
       screen.getByLabelText("清除失效的代码仓库绑定（回落到公开仓库）"),
     );
@@ -472,7 +472,7 @@ describe("ProjectFormDialog", () => {
     );
 
     // slug 从 code_github_owner/repo 预填非空——勾选语义须优先于输入内容。
-    const slug = await screen.findByLabelText(/代码仓库（可选/);
+    const slug = await screen.findByLabelText(/代码仓库（/);
     expect(slug).toHaveValue("acme/api");
     await user.click(
       screen.getByLabelText("清除失效的代码仓库绑定（回落到公开仓库）"),
@@ -493,7 +493,7 @@ describe("ProjectFormDialog", () => {
       makeProject({ code_integration_id: "dead-row", code_repo_url: null }),
     );
 
-    await user.type(await screen.findByLabelText(/代码仓库（可选/), "acme/api");
+    await user.type(await screen.findByLabelText(/代码仓库（/), "acme/api");
     await user.click(screen.getByRole("button", { name: "保存" }));
 
     expect(
@@ -520,7 +520,7 @@ describe("ProjectFormDialog", () => {
     await user.click(screen.getByRole("button", { name: "重试" }));
     expect(refetchIntegrations).toHaveBeenCalled();
 
-    const input = screen.getByLabelText(/代码仓库（可选/);
+    const input = screen.getByLabelText(/代码仓库（/);
     await user.clear(input);
     await user.type(input, "acme/other");
     await user.click(screen.getByRole("button", { name: "保存" }));
@@ -560,7 +560,7 @@ describe("ProjectFormDialog", () => {
       }),
     );
 
-    expect(await screen.findByLabelText(/代码仓库（可选/)).toHaveValue("acme/api");
+    expect(await screen.findByLabelText(/代码仓库（/)).toHaveValue("acme/api");
     const nameInput = screen.getByLabelText("项目名称");
     await user.clear(nameInput);
     await user.type(nameInput, "renamed");
@@ -608,7 +608,7 @@ describe("ProjectFormDialog", () => {
       }),
     );
 
-    await screen.findByLabelText(/代码仓库（可选/);
+    await screen.findByLabelText(/代码仓库（/);
     expect(screen.queryByText(repoChangeWarning)).not.toBeInTheDocument();
   });
 
@@ -625,7 +625,7 @@ describe("ProjectFormDialog", () => {
       }),
     );
 
-    const input = await screen.findByLabelText(/代码仓库（可选/);
+    const input = await screen.findByLabelText(/代码仓库（/);
     await user.clear(input);
     await user.type(input, "acme/other");
     await user.click(screen.getByRole("button", { name: "保存" }));
@@ -660,7 +660,7 @@ describe("ProjectFormDialog", () => {
     await user.type(screen.getByLabelText("项目名称"), "new-proj");
     await user.click(screen.getByRole("combobox", { name: "代码仓库集成" }));
     await user.click(await screen.findByRole("option", { name: /自建 Forgejo/ }));
-    await user.type(screen.getByLabelText(/代码仓库（可选/), "acme/api");
+    await user.type(screen.getByLabelText(/代码仓库（/), "acme/api");
     expect(screen.queryByText(repoChangeWarning)).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "创建项目" }));

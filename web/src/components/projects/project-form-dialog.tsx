@@ -503,7 +503,7 @@ export function ProjectFormDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-lg max-h-[90vh] overflow-y-auto">
+      <DialogContent className="flex max-h-[90vh] flex-col overflow-hidden sm:max-w-lg">
         <DialogHeader>
           <DialogTitle>{isEdit ? "编辑项目" : "新建项目"}</DialogTitle>
         </DialogHeader>
@@ -516,7 +516,14 @@ export function ProjectFormDialog({
             <Skeleton className="h-10 w-full" />
           </div>
         ) : (
-          <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
+          <form
+            onSubmit={handleSubmit(onSubmit)}
+            className="flex min-h-0 flex-col"
+          >
+            {/* 滚动区与固定底栏分行：sticky 底栏会相对滚动容器内容盒贴底，
+                容器下 padding 处透出滚动内容；独立行无叠压。负外边距让
+                滚动条贴弹窗边缘、底栏 bleed 到圆角边。 */}
+            <div className="-mx-4 min-h-0 flex-1 space-y-4 overflow-y-auto px-4 pb-3">
             <div className="space-y-2">
               <Label htmlFor="project-name">项目名称</Label>
               <Input
@@ -611,7 +618,7 @@ export function ProjectFormDialog({
             <div className="space-y-2">
               <Label htmlFor="project-code_repository_url">
                 {selectedIntegration?.kind === "forgejo"
-                  ? "代码仓库（可选，留空则在该 Forgejo 集成上按公开仓库的 owner/repo 审查）"
+                  ? "代码仓库（该集成下必填）"
                   : "代码仓库（可选，默认同公开仓库）"}
               </Label>
               <Input
@@ -622,7 +629,7 @@ export function ProjectFormDialog({
               />
               <p className="text-xs text-muted-foreground">
                 {selectedIntegration?.kind === "forgejo"
-                  ? "PR 审查在该 Forgejo 集成上进行：自动接收推送并定期补查遗漏"
+                  ? "该集成上的 owner/repo，PR 审查在此进行"
                   : "PR 审查盯的仓库；留空则审查公开仓库"}
               </p>
               {showRepoChangeWarning && (
@@ -671,8 +678,9 @@ export function ProjectFormDialog({
             {isEdit && projectId && (
               <T3BindingsSection ref={t3SectionRef} projectId={projectId} />
             )}
+            </div>
 
-            <div className="sticky bottom-0 -mx-4 -mb-4 mt-2 flex items-center gap-3 border-t border-foreground/10 bg-popover px-4 py-3 shadow-[0_-8px_16px_-8px_rgba(0,0,0,0.3)]">
+            <div className="-mx-4 -mb-4 mt-3 flex items-center gap-3 rounded-b-xl border-t border-foreground/10 bg-popover px-4 py-3">
               <Button type="submit" disabled={isSubmitting}>
                 {isSubmitting
                   ? isEdit
