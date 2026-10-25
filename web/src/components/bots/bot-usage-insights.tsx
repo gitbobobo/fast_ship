@@ -152,7 +152,8 @@ const X_LABEL_MIN_GAP_PX = 48;
  * 横轴标签按像素间距抽稀：本图的点按真实时间线性布局，时间分布不均时
  * 按数组下标抽稀会让多个标签挤进同一片像素。从最后一个点向左贪心（末点
  * 标签必保留，与 MetricChart 的口径一致），相邻已选标签保持 ≥ minGap；
- * 首点标签也强制保留——最左侧的点不能没有日期参照。
+ * 首点标签也强制保留——最左侧的点不能没有日期参照；若与最近已选
+ * 标签间距不足 minGap，舍弃那个邻近标签换首点，避免叠字。
  * 全部点同刻（xSpan=0）或单点时自然只剩 1 个标签。
  */
 export function selectXLabelIndexes(
@@ -162,16 +163,18 @@ export function selectXLabelIndexes(
   const indexes: number[] = [];
   let lastCx = Number.NaN;
   for (let i = cxs.length - 1; i >= 0; i--) {
-    // 首点强制入选，但与已选点几乎同位（同刻）时跳过——同位标签文字
-    // 相同，重画只是叠字。
-    const firstWorth = i === 0 && Math.abs(lastCx - cxs[0]) >= 8;
-    if (
-      firstWorth ||
-      indexes.length === 0 ||
-      Math.abs(lastCx - cxs[i]) >= minGap
-    ) {
+    if (indexes.length === 0 || Math.abs(lastCx - cxs[i]) >= minGap) {
       indexes.push(i);
       lastCx = cxs[i];
+    }
+  }
+  // 首点必留：与最近已选点距离足够则追加，不足则顶掉那个近邻。
+  if (indexes.length && indexes[indexes.length - 1] !== 0) {
+    const nearest = indexes[indexes.length - 1];
+    if (Math.abs(cxs[nearest] - cxs[0]) >= minGap) {
+      indexes.push(0);
+    } else {
+      indexes[indexes.length - 1] = 0;
     }
   }
   return indexes.reverse();
@@ -317,7 +320,7 @@ export function ContextGrowthChart({
                   className="cursor-pointer"
                 >
                   <title>{c.label}</title>
-                  {/* 透明命中圆：可视圆点 r=4 太小，外罩 r=10 保证点击
+                  {/* 透明命中圆：可视圆点太小，外罩 r=10 保证点击
                       目标 ≥20px（fill=transparent 才参与命中，none 不行）。 */}
                   <circle cx={c.cx} cy={c.cy} r={10} fill="transparent" />
                   {circle}

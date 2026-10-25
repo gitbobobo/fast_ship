@@ -484,15 +484,15 @@ describe("上下文增长图助手", () => {
   });
 
   it("selectXLabelIndexes：按像素间距贪心，末点必保留，同刻只留 1 个", () => {
-    // 时间集中：前 8 个点挤在 14px 内，中间标签按 ≥48px 抽稀，但首点
-    // 标签强制保留（最左侧的点需要日期参照）。
+    // 时间集中：前 8 个点挤在 14px 内。首点标签强制保留——它与最近
+    // 已选点（cx=78）间距不足 48px，顶掉那个近邻而不叠字。
     expect(selectXLabelIndexes([64, 66, 68, 70, 72, 74, 76, 78, 696])).toEqual([
-      0, 7, 8,
+      0, 8,
     ]);
     // 间距充足时全部保留。
     expect(selectXLabelIndexes([0, 100, 200, 300])).toEqual([0, 1, 2, 3]);
-    // 全部同刻（xSpan=0）：只保留末点 1 个标签。
-    expect(selectXLabelIndexes([100, 100, 100])).toEqual([2]);
+    // 全部同刻（xSpan=0）：同位标签只画 1 个，首点顶替末点。
+    expect(selectXLabelIndexes([100, 100, 100])).toEqual([0]);
     expect(selectXLabelIndexes([64])).toEqual([0]);
     expect(selectXLabelIndexes([])).toEqual([]);
   });
