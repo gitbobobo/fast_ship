@@ -36,6 +36,8 @@ import (
 // 的同一次账本扫描：range/归属校验、窗口、run 与维护行、统一请求聚合、关联
 // 维护合计、归属解析与三桶/按天/任务累加都在共享层完成，两端点只做各自的
 // 投影——insights 不再调总览、不重复扫同一批账本，月推算只在总览端点触发。
+// 维护请求按消费方取粒度：总览走仓库层 SQL 聚合，insights 才拉明细行（维护
+// 占比的分子分母仍出自同一次扫描快照）。
 
 const (
 	botUsageRangeToday = "today"
@@ -293,7 +295,7 @@ type botUsageLedger struct {
 
 	runAgg        map[string]repository.RequestUsageAgg
 	maintAgg      map[string]repository.RequestUsageAgg
-	maintReqRows  []repository.MaintenanceRequestDetailRow
+	maintReqRows  []repository.MaintenanceRequestDetailRow // 仅 insights 路径填充；总览不消费明细行
 	maintByParent map[string]*float64
 	parentByID    map[string]repository.UsageRunRow
 	eventTaskOf   map[string]string
@@ -307,9 +309,10 @@ type botUsageLedger struct {
 }
 
 // botUsageMaintAggOf 从维护请求明细行推导按维护运行的聚合（与仓库层 SQL 聚合
-// 同口径）：共享加载层本就要拉明细行（用途拆分、失败统计、按天命中都在
-// insights 消费），聚合在内存里做，同一批行不再跑第二次聚合查询。cached 逐行
-// 钳制与主线一致；CostSum 对齐 SQL SUM 语义——没有任何已计价行为 nil。
+// 同口径）：insights 路径本就要拉明细行（用途拆分、失败统计、按天命中都在
+// insights 消费），聚合在内存里做，同一批行不再跑第二次聚合查询；总览只要
+// 聚合，直接走仓库层 SQL。cached 逐行钳制与主线一致；CostSum 对齐 SQL SUM
+// 语义——没有任何已计价行为 nil。
 func botUsageMaintAggOf(rows []repository.MaintenanceRequestDetailRow) map[string]repository.RequestUsageAgg {
 	out := map[string]repository.RequestUsageAgg{}
 	for _, row := range rows {
@@ -359,7 +362,10 @@ func botUsageP90(values []float64) *float64 {
 // 归属校验（他人/未知一律 404）、时区与窗口、一次账本扫描（run、维护行、
 // 统一请求聚合、关联维护合计、父 run 与任务反查）与三桶/按天/任务累加。
 // 此后总览做投影 + 月推算，insights 只补自己的请求级查询。
-func (s *BotService) loadBotUsageLedger(userID, rangeParam, botID string) (*botUsageLedger, error) {
+// maintDetail 决定维护请求的读取粒度：总览只要聚合，走仓库层 SQL 聚合，
+// 不把窗口内全部明细行读回内存；insights 还要用途拆分、失败统计与按天命中，
+// 才拉明细行并在内存里推导同一份聚合（两路喂给累加器的字段同口径）。
+func (s *BotService) loadBotUsageLedger(userID, rangeParam, botID string, maintDetail bool) (*botUsageLedger, error) {
 	days, ok := botUsageRangeDays(rangeParam)
 	if !ok {
 		return nil, errs.New(errs.ErrInvalidParams.Code, "range 必须是 today、7d 或 30d")
@@ -421,13 +427,25 @@ func (s *BotService) loadBotUsageLedger(userID, rangeParam, botID string) (*botU
 	if err != nil {
 		return nil, errs.ErrInternal
 	}
-	// 维护请求明细一次扫描：聚合在内存里推导（botUsageMaintAggOf），insights
-	// 的用途拆分、失败统计与按天命中也吃同一份明细行，同一批行不扫两遍。
-	maintReqRows, err := repo.ListMaintenanceRequestRows(maintRunIDs)
-	if err != nil {
-		return nil, errs.ErrInternal
+	// 维护请求聚合按消费方取粒度：总览只要聚合，走仓库层 SQL 聚合（30 天
+	// 窗口 + 维护请求多时不再放大读取与内存）；insights 才拉明细行，聚合在
+	// 内存里推导（botUsageMaintAggOf），用途拆分、失败统计与按天命中也吃
+	// 同一份明细行，同一批行不扫两遍。两条路径的 CostSum（空集合为 nil）、
+	// cached 逐行钳制与请求计数同口径。
+	var maintReqRows []repository.MaintenanceRequestDetailRow
+	var maintAgg map[string]repository.RequestUsageAgg
+	if maintDetail {
+		maintReqRows, err = repo.ListMaintenanceRequestRows(maintRunIDs)
+		if err != nil {
+			return nil, errs.ErrInternal
+		}
+		maintAgg = botUsageMaintAggOf(maintReqRows)
+	} else {
+		maintAgg, err = repo.MaintenanceRequestAggregatesByRun(maintRunIDs)
+		if err != nil {
+			return nil, errs.ErrInternal
+		}
 	}
-	maintAgg := botUsageMaintAggOf(maintReqRows)
 
 	// 父 run 反查（不受窗口限制）：有父 run 的维护金额按维护自己的 created_at
 	// 记日、桶跟父 run 走；父 run 不在窗口内时同样要解析它的归属。
@@ -679,7 +697,9 @@ func (s *BotService) loadBotUsageLedger(userID, rangeParam, botID string) (*botU
 // ---------- 总览：GET /api/bots/usage ----------
 
 func (s *BotService) GetBotUsageOverview(userID, rangeParam, botID string) (*api.BotUsageOverview, error) {
-	led, err := s.loadBotUsageLedger(userID, rangeParam, botID)
+	// 总览不消费维护请求明细行：maintAgg 走仓库层 SQL 聚合（细节见
+	// loadBotUsageLedger），不把 30 天窗口的明细读回内存。
+	led, err := s.loadBotUsageLedger(userID, rangeParam, botID, false)
 	if err != nil {
 		return nil, err
 	}

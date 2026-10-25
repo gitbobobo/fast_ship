@@ -3,6 +3,7 @@ package service
 import (
 	"fmt"
 	"math"
+	"strings"
 	"testing"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 // 花费页（INT-162）服务层测试：时区切日、三桶之和、schedule_event 连带成本、
@@ -1103,5 +1105,84 @@ func TestBotUsageRunDetailTruncatesToNewest(t *testing.T) {
 	if first.Ordinal != 2 || last.Ordinal != int64(usageRunDetailMaxRequests+1) {
 		t.Fatalf("截断应保留最新 %d 条（ordinal 2..%d），实得 %d..%d",
 			usageRunDetailMaxRequests, usageRunDetailMaxRequests+1, first.Ordinal, last.Ordinal)
+	}
+}
+
+// 总览路径不回读维护请求明细行（P2 复审修复）：账本层按消费方取粒度——
+// 总览只要聚合，走仓库层 SQL（MaintenanceRequestAggregatesByRun），30 天窗口
+// + 维护请求多时不再把整批明细读回内存；insights 仍拉明细行（用途拆分、失败
+// 统计、按天命中消费）。用查询回调捕获实际执行的 SQL 断言两条路径各自的
+// 读取粒度（手法同 repository 的 TestUsageRunQueriesSkipSnapshotColumn）。
+func TestBotUsageOverviewSkipsMaintenanceDetailRows(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "usagemaintdetail")
+	bot := env.createBot(t, userID)
+	run := seedUsageRun(t, env, bot.ID, func(r *model.BotRun) { r.CostEstimate = ptrCost(0.4) })
+	seedUsageRequest(t, env, run.ID, ptrCost(0.4), "hash-md")
+	// 窗口内有维护运行 + 明细请求：若总览仍拉明细，下面的捕获必然出现该查询。
+	seedUsageMaintenance(t, env, bot.ID, nil, ptrCost(0.3))
+
+	var sqls []string
+	captureSQL := func(tx *gorm.DB) {
+		sqls = append(sqls, tx.Statement.SQL.String())
+	}
+	// 花费页查询全部走 Scan → Row 处理器，Find 走 Query 处理器，两条都挂上
+	// 才捕获得全。
+	if err := env.db.Callback().Query().After("gorm:query").Register("test:capture_usage_query", captureSQL); err != nil {
+		t.Fatalf("register query capture: %v", err)
+	}
+	if err := env.db.Callback().Row().After("gorm:row").Register("test:capture_usage_row", captureSQL); err != nil {
+		t.Fatalf("register row capture: %v", err)
+	}
+
+	// 总览：不得发出明细扫描（账本路径里只有 ListMaintenanceRequestRows 的
+	// SELECT 含 purpose 列），聚合必须走维护表 SQL（COUNT + maintenance_run_id
+	// 组合唯一对应 MaintenanceRequestAggregatesByRun）；维护金额照常进维护桶。
+	sqls = nil
+	overview, err := env.bots.GetBotUsageOverview(userID, "7d", "")
+	if err != nil {
+		t.Fatalf("overview: %v", err)
+	}
+	for _, sql := range sqls {
+		if strings.Contains(sql, "purpose") {
+			t.Fatalf("总览路径不应回读维护请求明细行: %s", sql)
+		}
+	}
+	aggRan := false
+	for _, sql := range sqls {
+		if strings.Contains(sql, "COUNT(*)") && strings.Contains(sql, "maintenance_run_id") {
+			aggRan = true
+		}
+	}
+	if !aggRan {
+		t.Fatalf("总览路径应走维护请求 SQL 聚合，捕获的 SQL: %v", sqls)
+	}
+	var maintCost *float64
+	for _, b := range overview.Bots {
+		if b.BotId == bot.ID {
+			maintCost = b.CostMaintenance
+		}
+	}
+	if maintCost == nil || !costEq(*maintCost, 0.3) {
+		t.Fatalf("SQL 聚合应照常喂出维护桶 0.3，实得 %v", maintCost)
+	}
+
+	// 正向对照：insights 仍拉明细行（purpose 出现在捕获里），维护金额不回归。
+	sqls = nil
+	ins, err := env.bots.GetBotUsageInsights(userID, "7d", "")
+	if err != nil {
+		t.Fatalf("insights: %v", err)
+	}
+	sawDetail := false
+	for _, sql := range sqls {
+		if strings.Contains(sql, "purpose") {
+			sawDetail = true
+		}
+	}
+	if !sawDetail {
+		t.Fatalf("insights 路径应回读维护请求明细行，捕获的 SQL: %v", sqls)
+	}
+	if b := insightBotOf(t, ins, bot.ID); b.Maintenance.Cost == nil || !costEq(*b.Maintenance.Cost, 0.3) {
+		t.Fatalf("insights 维护金额应保持 0.3，实得 %v", b.Maintenance.Cost)
 	}
 }

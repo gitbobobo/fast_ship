@@ -62,8 +62,9 @@ func botUsageCandidateCost(m catalog.Model, prompt, cached, completion int64) fl
 // GetBotUsageInsights 花费优化参考（INT-163）。
 func (s *BotService) GetBotUsageInsights(userID, rangeParam, botID string) (*api.BotUsageInsights, error) {
 	// 共享加载先行：range 校验、bot_id 校验 404、机器人集合、窗口与三桶
-	// 累加全部来自同一次账本扫描（不再调 GetBotUsageOverview）。
-	led, err := s.loadBotUsageLedger(userID, rangeParam, botID)
+	// 累加全部来自同一次账本扫描（不再调 GetBotUsageOverview）；维护请求
+	// 明细行只有本端点拉取（用途拆分、失败统计、按天命中都吃它）。
+	led, err := s.loadBotUsageLedger(userID, rangeParam, botID, true)
 	if err != nil {
 		return nil, err
 	}
