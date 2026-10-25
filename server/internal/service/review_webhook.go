@@ -64,10 +64,12 @@ type reviewWebhookTrigger struct {
 	baseRef      string
 	headRef      string
 	updatedAt    *time.Time
-	// tiedVerified 标记「同刻异 head」歧义已被调用方实时复核（现拉 PR
-	// 比对过 head）：跳过 tied 守卫直接受理。webhook 与轮询快照都可能
-	// 在乱序投递下与总账同刻异 SHA，未复核的都要经调用方分辨再进。
-	tiedVerified bool
+	// tiedBase 复核绑定：调用方现拉实时 PR 复核「同刻异 head」歧义时
+	// 观察到的已受理 head（空串 = 未复核）。重进事务时总账必须仍停在
+	// 该 head 才放行——复核与重进之间若有第三个同秒 push 抢先受理，
+	// tiedBase 失配，守卫再次报歧义交调用方按新快照重验，复核结论不
+	// 能跨一次总账前进沿用（否则无条件旁路照样回滚到新 head）。
+	tiedBase string
 	// installationID 仅 GitHub 有：App 安装快照。Forgejo 恒 0（无安装语义，
 	// advancePRHeadTx 对 0 不覆盖既有快照）。
 	installationID int64
@@ -76,9 +78,19 @@ type reviewWebhookTrigger struct {
 // errTiedHeadAmbiguous 触发 head 与已受理 head 同刻异 SHA：直接丢弃丢的
 // 可能是真 head（R17 修复面），直接受理又会把总账回滚到旧 head、取消新
 // head 的在途轮次并把新 head 留成「seen 但非当前」永久漏审——交给调用方
-// 现拉实时 PR 分辨（webhook 与轮询共用此歧义），复核通过以 tiedVerified
-// 重进，实时数据不走同刻守卫。
+// 现拉实时 PR 分辨（webhook 与轮询共用此歧义），复核通过以 tiedBase 绑定
+// 观察到的总账 head 重进，实时数据不走同刻守卫。
 var errTiedHeadAmbiguous = errors.New("trigger head tied with accepted head")
+
+// tiedHeadError 同刻歧义哨兵：携带守卫观察到的已受理 head，调用方复核后
+// 以此绑定重进（复核结论只对该快照有效）。
+type tiedHeadError struct{ observedHead string }
+
+func (e *tiedHeadError) Error() string {
+	return "trigger head tied with accepted head " + e.observedHead
+}
+
+func (e *tiedHeadError) Is(target error) bool { return target == errTiedHeadAmbiguous }
 
 // normalizeReviewAction 平台动作名归一：Forgejo/Gitea 的推送动作叫
 // synchronized（GitHub 是 synchronize），触发面（可受理判定、勾选位映射、
@@ -97,7 +109,7 @@ func normalizeReviewAction(action string) string {
 // github-default，Forgejo 入口传 forge_integrations.id；反查命中后所有键控
 // 读写（seen/总账/运行/防抖）都以它过滤——反查既然按它命中设置行，其余键
 // 与设置行必然同值。
-func (s *ReviewService) handleWebhookTx(tx *gorm.DB, integrationID string, event string, body []byte, now time.Time, tiedVerified bool) error {
+func (s *ReviewService) handleWebhookTx(tx *gorm.DB, integrationID string, event string, body []byte, now time.Time, tiedBase string) error {
 	// Forgejo/Gitea 的推送更新是独立订阅项 pull_request_sync（payload 与
 	// pull_request 同形，action=synchronized）。新实例的 X-Forgejo-Event
 	// 头送归一名 pull_request，但旧 Gitea/自定义投递会把细型放进 Event
@@ -124,7 +136,7 @@ func (s *ReviewService) handleWebhookTx(tx *gorm.DB, integrationID string, event
 		baseRef:        p.PR.Base.Ref,
 		headRef:        p.PR.Head.Ref,
 		updatedAt:      p.PR.UpdatedAt,
-		tiedVerified:   tiedVerified,
+		tiedBase:       tiedBase,
 		installationID: p.Installation.ID,
 	}, now)
 }
@@ -207,8 +219,10 @@ func (s *ReviewService) handleReviewTriggerTx(tx *gorm.DB, integrationID string,
 			return err
 		}
 		if accepted.PRUpdatedAt != nil && t.updatedAt != nil {
-			if t.updatedAt.Equal(*accepted.PRUpdatedAt) && headSHA != currentHead && !t.tiedVerified {
-				return errTiedHeadAmbiguous
+			// 同刻异 head：tiedBase 必须命中当前已受理 head 才算复核有效；
+			// 总账在复核与重进之间前进了就重新报歧义，按新快照再验。
+			if t.updatedAt.Equal(*accepted.PRUpdatedAt) && headSHA != currentHead && t.tiedBase != currentHead {
+				return &tiedHeadError{observedHead: currentHead}
 			}
 			if t.updatedAt.Before(*accepted.PRUpdatedAt) ||
 				(t.updatedAt.Equal(*accepted.PRUpdatedAt) && headSHA == currentHead) {

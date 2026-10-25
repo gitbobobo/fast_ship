@@ -10,6 +10,7 @@ import (
 
 	"github.com/godbobo/fast_ship/server/internal/forge"
 	"github.com/godbobo/fast_ship/server/internal/model"
+	"gorm.io/gorm"
 )
 
 // Forgejo webhook 入口与轮询补漏（INT-167 任务 3）的 service 层定向测试：
@@ -966,6 +967,58 @@ func TestHandleForgejoWebhook_TiedDeliveryRevalidatesLive(t *testing.T) {
 	}
 	if debounce.HeadSHA != "sha-a" {
 		t.Fatalf("debounce head = %q, want sha-a", debounce.HeadSHA)
+	}
+}
+
+// TestReviewTrigger_TiedBaseBindsObservedHead tiedBase 必须绑定复核时观察
+// 到的已受理 head：复核与重进之间总账前进了（同秒第三个 push 抢先），
+// tiedBase 失配 → 守卫再报歧义交调用方按新快照重验；命中才放行受理。
+func TestReviewTrigger_TiedBaseBindsObservedHead(t *testing.T) {
+	svc := setupTestServices(t)
+	forgeID := createTestForgeIntegration(t, svc.db, "https://forge.example.com").ID
+	project, _ := seedForgejoReviewProject(t, svc, forgeID, "fj-tiedbase", "acme/app", nil)
+	review := newReviewTestService(t, svc, nil, nil, nil)
+	ts := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+
+	// 总账停在 sha-b（payload 固定同刻）。
+	if err := review.HandleForgejoWebhook(context.Background(), forgeID, "pull_request", "d-b",
+		forgejoPullPayload("synchronized", "acme/app", 73, "sha-b", false)); err != nil {
+		t.Fatalf("webhook sha-b: %v", err)
+	}
+	mkTrigger := func(head, tiedBase string) *reviewWebhookTrigger {
+		return &reviewWebhookTrigger{
+			action: "synchronize", number: 73, repoFullName: "acme/app",
+			headSHA: head, headRepoFull: "acme/app", baseRepoFull: "acme/app",
+			updatedAt: &ts, tiedBase: tiedBase,
+		}
+	}
+	// tiedBase 与当前 head 失配（总账在复核后前进到别的 head）→ 哨兵再
+	// 触发并携带新观察值。
+	var tied *tiedHeadError
+	err := svc.db.Transaction(func(tx *gorm.DB) error {
+		return review.handleReviewTriggerTx(tx, forgeID, mkTrigger("sha-a", "sha-x"), time.Now().UTC())
+	})
+	if !errors.As(err, &tied) || tied.observedHead != "sha-b" {
+		t.Fatalf("stale tiedBase: err=%v observed=%v", err, tied)
+	}
+	var ledger model.ReviewPullRequest
+	if err := svc.db.Where("project_id = ? AND pr_number = ?", project.ID, 73).First(&ledger).Error; err != nil {
+		t.Fatalf("ledger: %v", err)
+	}
+	if ledger.HeadSHA != "sha-b" {
+		t.Fatalf("ledger head = %q, want sha-b（失配复核不得受理）", ledger.HeadSHA)
+	}
+	// tiedBase 命中当前 head → 复核有效，放行受理。
+	if err := svc.db.Transaction(func(tx *gorm.DB) error {
+		return review.handleReviewTriggerTx(tx, forgeID, mkTrigger("sha-a", "sha-b"), time.Now().UTC())
+	}); err != nil {
+		t.Fatalf("matched tiedBase: %v", err)
+	}
+	if err := svc.db.Where("project_id = ? AND pr_number = ?", project.ID, 73).First(&ledger).Error; err != nil {
+		t.Fatalf("ledger2: %v", err)
+	}
+	if ledger.HeadSHA != "sha-a" {
+		t.Fatalf("ledger head = %q, want sha-a", ledger.HeadSHA)
 	}
 }
 

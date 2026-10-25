@@ -175,13 +175,30 @@ func (s *ReviewService) HandleForgejoWebhook(ctx context.Context, integrationID,
 	return s.handlePlatformWebhook(ctx, integrationID, "Forgejo", event, deliveryID, body)
 }
 
+// reviewTiedRevalidateMax 同刻歧义复核的重试上限：复核与重进之间总账可能又
+// 前进（同秒第三个 push 抢先受理），每轮重验都有一次实拉成本，收敛不了就
+// 丢弃——同刻歧义下总有某个 head 已受理，丢弃不腐化总账。
+const reviewTiedRevalidateMax = 4
+
 // handlePlatformWebhook 平台 webhook 的共同壳：幂等登记 → 触发事务 → 提交后
 // 踢调度循环。source 只进日志文案。同刻异 head 的歧义投递先回滚、现拉实时
-// PR 复核——payload head 仍是平台现状才带 tiedVerified 重进。
+// PR 复核——payload head 仍是平台现状才带 tiedBase（绑观察到的总账 head）
+// 重进；重进时总账已前进则哨兵再触发、按新快照重验，直到收敛或到上限。
 func (s *ReviewService) handlePlatformWebhook(ctx context.Context, integrationID, source, event, deliveryID string, body []byte) error {
-	err := s.runWebhookDeliveryTx(ctx, integrationID, event, deliveryID, body, false)
+	err := s.runWebhookDeliveryTx(ctx, integrationID, event, deliveryID, body, "")
+	for i := 0; i < reviewTiedRevalidateMax; i++ {
+		var tied *tiedHeadError
+		if !errors.As(err, &tied) {
+			break
+		}
+		err = s.revalidateTiedWebhook(ctx, integrationID, source, event, deliveryID, body, tied.observedHead)
+	}
 	if errors.Is(err, errTiedHeadAmbiguous) {
-		err = s.revalidateTiedWebhook(ctx, integrationID, source, event, deliveryID, body)
+		// 上限内没收敛：总账在同刻内持续前进，丢弃该投递不腐化账本。
+		s.logger.Warn("同刻异 head 复核未收敛，丢弃投递",
+			zap.String("integration", integrationID),
+			zap.String("delivery", deliveryID), zap.String("event", event))
+		err = nil
 	}
 	if err != nil {
 		if errors.Is(err, ErrDeliveryDuplicated) {
@@ -197,10 +214,10 @@ func (s *ReviewService) handlePlatformWebhook(ctx context.Context, integrationID
 	return nil
 }
 
-// runWebhookDeliveryTx 幂等登记 + 触发处理的单事务（零网络调用）。tiedVerified
-// 由复验重进时置位——首趟回滚连幂等登记一起撤销，重进时重新登记同一
-// delivery id，对平台仍是一次投递。
-func (s *ReviewService) runWebhookDeliveryTx(ctx context.Context, integrationID, event, deliveryID string, body []byte, tiedVerified bool) error {
+// runWebhookDeliveryTx 幂等登记 + 触发处理的单事务（零网络调用）。tiedBase
+// 由复验重进时绑定观察到的总账 head——首趟回滚连幂等登记一起撤销，重进
+// 时重新登记同一 delivery id，对平台仍是一次投递。
+func (s *ReviewService) runWebhookDeliveryTx(ctx context.Context, integrationID, event, deliveryID string, body []byte, tiedBase string) error {
 	now := time.Now().UTC()
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		inserted, err := s.deliveries.InsertTx(tx, &model.GitHubWebhookDelivery{
@@ -214,15 +231,17 @@ func (s *ReviewService) runWebhookDeliveryTx(ctx context.Context, integrationID,
 		if !inserted {
 			return ErrDeliveryDuplicated
 		}
-		return s.handleWebhookTx(tx, integrationID, event, body, now, tiedVerified)
+		return s.handleWebhookTx(tx, integrationID, event, body, now, tiedBase)
 	})
 }
 
 // revalidateTiedWebhook 同刻异 head 投递的复核：事务已回滚，事务外现拉实时
 // PR——live head 与 payload head 一致说明该投递就是平台现状（乱序到达的才
-// 是总账里的那条），带 tiedVerified 重进受理；不一致或拉不到则丢弃，总账
-// 不回滚到疑似旧 head（Forgejo 由轮询兜底、live head 的自身事件照常受理）。
-func (s *ReviewService) revalidateTiedWebhook(ctx context.Context, integrationID, source, event, deliveryID string, body []byte) error {
+// 是总账里的那条），以观察到的总账 head 作 tiedBase 重进受理；不一致或拉
+// 不到则丢弃，总账不回滚到疑似旧 head（Forgejo 由轮询兜底、live head 的
+// 自身事件照常受理）。复核结论只绑观察时刻的总账快照——重进期间总账若又
+// 前进，事务内 tiedBase 失配会再报歧义，由本调用方按新快照重验。
+func (s *ReviewService) revalidateTiedWebhook(ctx context.Context, integrationID, source, event, deliveryID string, body []byte, observedHead string) error {
 	var p prWebhookPayload
 	if err := json.Unmarshal(body, &p); err != nil {
 		return nil
@@ -250,7 +269,7 @@ func (s *ReviewService) revalidateTiedWebhook(ctx context.Context, integrationID
 	if live == nil || live.Draft || !strings.EqualFold(live.HeadSHA, p.PR.Head.SHA) {
 		return nil
 	}
-	return s.runWebhookDeliveryTx(ctx, integrationID, event, deliveryID, body, true)
+	return s.runWebhookDeliveryTx(ctx, integrationID, event, deliveryID, body, observedHead)
 }
 
 // lockProject 项目级互斥：launchRun 与删除项目的清理互斥。返回解锁函数。

@@ -124,14 +124,16 @@ func (s *ReviewService) pollForgejoProject(settings *model.ProjectReviewSettings
 // 读取与受理之间抢先）由 handleReviewTriggerTx 的「迟到 opened 忽略 +
 // runCount 去重」与事务内 current 重读关掉。
 func (s *ReviewService) pollAcceptPR(ctx context.Context, fetcher singlePRFetcher, settings *model.ProjectReviewSettings, repo string, pr *forge.PullRequest, now time.Time) error {
-	err := s.pollAcceptSnapshotTx(settings, repo, pr, false, now)
-	if !errors.Is(err, errTiedHeadAmbiguous) {
+	err := s.pollAcceptSnapshotTx(settings, repo, pr, "", now)
+	var tied *tiedHeadError
+	if !errors.As(err, &tied) {
 		return err
 	}
 	// 同刻异 head：列表快照不可信，现拉实时 PR 分辨——实时 head 与总账
-	// 相同则无事可补，不同则是平台当前真 head，按已复核路径进（不再
-	// 走同刻守卫）。拉不了的适配器丢快照保总账：真实时序里落后的是
-	// 快照，下次 tick 用更新的列表再判。
+	// 相同则无事可补，不同则是平台当前真 head，按已复核路径进（复核
+	// 结论绑观察到的总账 head：复核与重进之间总账又前进则哨兵再触发，
+	// 本 tick 放弃、下 tick 用更新快照重判）。拉不了的适配器丢快照保
+	// 总账：真实时序里落后的是快照，下次 tick 用更新的列表再判。
 	if fetcher == nil {
 		return nil
 	}
@@ -142,13 +144,17 @@ func (s *ReviewService) pollAcceptPR(ctx context.Context, fetcher singlePRFetche
 	if live == nil || live.Draft || live.HeadSHA == "" {
 		return nil
 	}
-	return s.pollAcceptSnapshotTx(settings, repo, live, true, now)
+	err = s.pollAcceptSnapshotTx(settings, repo, live, tied.observedHead, now)
+	if errors.Is(err, errTiedHeadAmbiguous) {
+		return nil // 复核期间总账又前进：本 tick 放弃，下一 tick 用新快照重判
+	}
+	return err
 }
 
-// pollAcceptSnapshotTx 单个快照的补漏受理事务：tiedVerified 标记同刻歧义
-// 已被调用方实时复核（现拉到的 PR 数据），列表快照传 false——受理事务
-// 内对「同刻异 head」报 errTiedHeadAmbiguous 由本层分辨后再进。
-func (s *ReviewService) pollAcceptSnapshotTx(settings *model.ProjectReviewSettings, repo string, pr *forge.PullRequest, tiedVerified bool, now time.Time) error {
+// pollAcceptSnapshotTx 单个快照的补漏受理事务：tiedBase 是复核时观察到的
+// 已受理 head（空串 = 未复核的列表快照）——受理事务内对「同刻异 head」
+// 报 errTiedHeadAmbiguous 由本层分辨后再进，重进时总账必须仍停在该 head。
+func (s *ReviewService) pollAcceptSnapshotTx(settings *model.ProjectReviewSettings, repo string, pr *forge.PullRequest, tiedBase string, now time.Time) error {
 	trigger := &reviewWebhookTrigger{
 		number:       pr.Number,
 		repoFullName: repo,
@@ -163,8 +169,8 @@ func (s *ReviewService) pollAcceptSnapshotTx(settings *model.ProjectReviewSettin
 		// 平台 updated_at 是过期判定的凭据：轮询快照读到后 webhook 可能已
 		// 受理更新的 head，没带时间戳的旧 head 会绕过 seen 去重把总账退回
 		// 旧 SHA（新 SHA 反而因「seen 但非当前 head」被永久忽略）。
-		updatedAt:    pr.UpdatedAt,
-		tiedVerified: tiedVerified,
+		updatedAt: pr.UpdatedAt,
+		tiedBase:  tiedBase,
 	}
 	return s.db.Transaction(func(tx *gorm.DB) error {
 		// 事务内重读当前 head：与受理同一读快照，归类/跳过判定才可靠。
