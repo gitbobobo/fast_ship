@@ -52,6 +52,10 @@ func TestBotUsageRESTRequiresJWT(t *testing.T) {
 	if code != http.StatusUnauthorized {
 		t.Fatalf("未认证明细应为 401，实得 %d", code)
 	}
+	code, _ = e.doJSONAs(t, "", http.MethodGet, "/api/bots/usage/insights", nil)
+	if code != http.StatusUnauthorized {
+		t.Fatalf("未认证优化参考应为 401，实得 %d", code)
+	}
 }
 
 func TestBotUsageRESTOverviewAndOwnership(t *testing.T) {
@@ -345,4 +349,76 @@ func TestBotUsageRESTNullableMoneyKeysAlwaysPresent(t *testing.T) {
 		t.Fatalf("有运行的任务应带 last_run: %v", first)
 	}
 	mustNullKey(t, lastRun, "display_cost_estimate")
+}
+
+// 花费优化参考（INT-163）：/api/bots/usage/insights 的鉴权、参数校验、归属与
+// 响应形状。服务层口径细节见 service/bot_usage_insights_test.go。
+func TestBotUsageRESTInsights(t *testing.T) {
+	e := setupE2E(t)
+	botID := e.createBot(t)
+	seedUsageBotRun(t, e, botID, 0.4)
+
+	code, body := e.doJSON(t, http.MethodGet, "/api/bots/usage/insights?range=today", nil)
+	if code != http.StatusOK {
+		t.Fatalf("insights: %d %v", code, body)
+	}
+	data, _ := body["data"].(map[string]interface{})
+	if data == nil || data["cache_hit_by_day"] == nil || data["bots"] == nil ||
+		data["schedule_tasks"] == nil || data["range"] != "today" ||
+		data["timezone"] == nil || data["start"] == nil || data["end"] == nil {
+		t.Fatalf("优化参考响应形状不符: %v", data)
+	}
+	bots, _ := data["bots"].([]interface{})
+	if len(bots) != 1 {
+		t.Fatalf("应只含集合内机器人: %v", data["bots"])
+	}
+	bot0, _ := bots[0].(map[string]interface{})
+	if bot0["bot_id"] != botID || bot0["name"] == nil {
+		t.Fatalf("机器人行头不符: %v", bot0)
+	}
+	// 必填键显式存在：可空字段为 null，数组字段为 [] 而不是缺键。
+	for _, key := range []string{"tools", "maintenance", "failures", "context_growth", "model_alternatives"} {
+		if _, ok := bot0[key]; !ok {
+			t.Fatalf("键 %s 必须存在: %v", key, bot0)
+		}
+	}
+	tools, _ := bot0["tools"].(map[string]interface{})
+	if tools == nil {
+		t.Fatalf("tools 应为对象: %v", bot0)
+	}
+	mustNullKey(t, tools, "share")
+	failures, _ := bot0["failures"].(map[string]interface{})
+	if failures == nil {
+		t.Fatalf("failures 应为对象: %v", bot0)
+	}
+	mustNullKey(t, failures, "failed_requests_cost")
+	mustNullKey(t, failures, "failed_runs_cost")
+	maintenance, _ := bot0["maintenance"].(map[string]interface{})
+	if maintenance == nil {
+		t.Fatalf("maintenance 应为对象: %v", maintenance)
+	}
+	mustNullKey(t, maintenance, "cost")
+	mustNullKey(t, maintenance, "share")
+
+	// 非法 range 400；bot_id 限定自己 200。
+	code, body = e.doJSON(t, http.MethodGet, "/api/bots/usage/insights?range=4d", nil)
+	if code != http.StatusBadRequest {
+		t.Fatalf("非法 range 应 400，实得 %d %v", code, body)
+	}
+	code, body = e.doJSON(t, http.MethodGet, "/api/bots/usage/insights?bot_id="+botID, nil)
+	if code != http.StatusOK {
+		t.Fatalf("bot_id 过滤: %d %v", code, body)
+	}
+
+	// 他人 bot_id 404（公开注册关闭：第二个用户凭邀请注册）。
+	other := registerAndLoginInvitedRouterUser(t, e.env.router, e.auth.Token,
+		"insightother", "insightother@example.com", "Password123")
+	otherJWT := "Bearer " + other.Token
+	code, body = e.doJSONAs(t, otherJWT, http.MethodGet, "/api/bots/usage/insights?bot_id="+botID, nil)
+	if code != http.StatusNotFound {
+		t.Fatalf("他人 bot_id 应 404，实得 %d %v", code, body)
+	}
+	if got, _ := body["code"].(float64); got != 40424 {
+		t.Fatalf("他人 bot_id 错误码应为 40424: %v", body)
+	}
 }

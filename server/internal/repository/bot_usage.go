@@ -56,18 +56,20 @@ func NewBotUsageRepository(db *gorm.DB) *BotUsageRepository {
 	return &BotUsageRepository{db: db}
 }
 
-// UsageRunRow 是窗口内 run 的聚合扫描行：只取花费页用到的列，不搬运配置
-// 快照等大字段。
+// UsageRunRow 是窗口内 run 的聚合扫描行：只取花费页用到的列。INT-163 起带
+// silent（空转条件一）与 config_snapshot_json（换模型差价的目录/模型归属）。
 type UsageRunRow struct {
-	ID             string
-	BotID          string
-	SessionKind    string
-	TriggerSource  string
-	TriggerKey     string
-	Status         string
-	ScheduleTaskID *string
-	CostEstimate   *float64
-	CreatedAt      time.Time
+	ID                 string
+	BotID              string
+	SessionKind        string
+	TriggerSource      string
+	TriggerKey         string
+	Status             string
+	ScheduleTaskID     *string
+	CostEstimate       *float64
+	Silent             bool
+	ConfigSnapshotJSON string
+	CreatedAt          time.Time
 }
 
 // ListRunsInWindow 返回机器人集合在 [start, end) 内创建的 run（main 与
@@ -80,7 +82,7 @@ func (r *BotUsageRepository) ListRunsInWindow(botIDs []string, start, end time.T
 	for _, batch := range ChunkIDs(botIDs, UsageQueryBatch) {
 		var part []UsageRunRow
 		err := r.db.Model(&model.BotRun{}).
-			Select("id, bot_id, session_kind, trigger_source, trigger_key, status, schedule_task_id, cost_estimate, created_at").
+			Select("id, bot_id, session_kind, trigger_source, trigger_key, status, schedule_task_id, cost_estimate, silent, config_snapshot_json, created_at").
 			Where("bot_id IN ?", batch).
 			Where("created_at >= ? AND created_at < ?", start, end).
 			Order("created_at ASC, id ASC").
@@ -101,7 +103,7 @@ func (r *BotUsageRepository) ListRunsByIDs(runIDs []string) (map[string]UsageRun
 	for _, batch := range ChunkIDs(runIDs, UsageQueryBatch) {
 		var rows []UsageRunRow
 		err := r.db.Model(&model.BotRun{}).
-			Select("id, bot_id, session_kind, trigger_source, trigger_key, status, schedule_task_id, cost_estimate, created_at").
+			Select("id, bot_id, session_kind, trigger_source, trigger_key, status, schedule_task_id, cost_estimate, silent, config_snapshot_json, created_at").
 			Where("id IN ?", batch).
 			Scan(&rows).Error
 		if err != nil {
@@ -158,37 +160,57 @@ func (r *BotUsageRepository) ListMaintenanceRunsInWindow(botIDs []string, start,
 	return rows, nil
 }
 
-// requestUsageAgg 是一组模型请求的计数与用量合计（按 run 或维护运行分组）。
+// RequestUsageAgg 是一组模型请求的计数与用量合计（按 run 或维护运行分组）：
+// INT-162 的计数/成本口径与 INT-163 的 token 口径合成同一次聚合，总览与优化
+// 参考共用一份结果。usage 完整的请求才进缓存命中与 token 合计，cost_estimate
+// 非空才算已计价（缺失 ≠ 0）；cached 逐行按 MIN(cached_tokens, prompt_tokens)
+// 钳制（与 botCostEstimate 的异常钳制同口径，cached>prompt 的异常行不会把
+// 命中率推过 1）；priced_* 只统计已计价行的 token 合计，供换模型差价用同一
+// 分母（已计价必以 usage 完整为前提）。
 type RequestUsageAgg struct {
-	GroupID   string   `gorm:"column:group_id"`
-	Total     int64    `gorm:"column:total"`
-	Priced    int64    `gorm:"column:priced"`
-	Unpriced  int64    `gorm:"column:unpriced"`
-	CostSum   *float64 `gorm:"column:cost_sum"`
-	CachedSum float64  `gorm:"column:cached_sum"`
-	PromptSum float64  `gorm:"column:prompt_sum"`
+	GroupID             string   `gorm:"column:group_id"`
+	Total               int64    `gorm:"column:total"`
+	Priced              int64    `gorm:"column:priced"`
+	Unpriced            int64    `gorm:"column:unpriced"`
+	CostSum             *float64 `gorm:"column:cost_sum"`
+	PromptSum           int64    `gorm:"column:prompt_sum"`
+	CachedSum           int64    `gorm:"column:cached_sum"`
+	CompletionSum       int64    `gorm:"column:completion_sum"`
+	ToolsSum            int64    `gorm:"column:tools_sum"`
+	PricedPromptSum     int64    `gorm:"column:priced_prompt_sum"`
+	PricedCachedSum     int64    `gorm:"column:priced_cached_sum"`
+	PricedCompletionSum int64    `gorm:"column:priced_completion_sum"`
 }
 
-// requestAggSelect 是请求聚合的公共投影：usage 完整的请求才进缓存命中统计，
-// cost_estimate 非空才算已计价（缺失 ≠ 0）。usage 完整的判定分两张表：
-// bot_maintenance_requests 有 usage_complete 列；bot_model_requests 没有，
-// 沿用聊天页指标口径「落过 usage 计数列 = prompt_tokens IS NOT NULL」。
+// requestAggSelect 是请求聚合的公共投影：%1 = 分组列、%2 = 表名、
+// %3 = usage 完整判定表达式、%4 = tools 合计表达式（bot_maintenance_requests
+// 无工具定义列，传 0）。usage 完整的判定分两张表：bot_maintenance_requests
+// 有 usage_complete 列；bot_model_requests 没有，沿用聊天页指标口径「落过
+// usage 计数列 = prompt_tokens IS NOT NULL」。cached 的两处（usage 完整合计
+// 与已计价合计）都逐行 MIN(cached_tokens, prompt_tokens) 钳制。
 const requestAggSelect = "COALESCE(%[1]s, '') AS group_id, " +
 	"COUNT(*) AS total, " +
 	"SUM(CASE WHEN %[2]s.cost_estimate IS NOT NULL THEN 1 ELSE 0 END) AS priced, " +
 	"SUM(CASE WHEN %[2]s.cost_estimate IS NULL THEN 1 ELSE 0 END) AS unpriced, " +
 	"SUM(%[2]s.cost_estimate) AS cost_sum, " +
-	"COALESCE(SUM(CASE WHEN %[3]s THEN COALESCE(%[2]s.cached_tokens, 0) ELSE 0 END), 0) AS cached_sum, " +
-	"COALESCE(SUM(CASE WHEN %[3]s THEN COALESCE(%[2]s.prompt_tokens, 0) ELSE 0 END), 0) AS prompt_sum"
+	"COALESCE(SUM(CASE WHEN %[3]s THEN COALESCE(%[2]s.prompt_tokens, 0) ELSE 0 END), 0) AS prompt_sum, " +
+	"COALESCE(SUM(CASE WHEN %[3]s THEN MIN(COALESCE(%[2]s.cached_tokens, 0), COALESCE(%[2]s.prompt_tokens, 0)) ELSE 0 END), 0) AS cached_sum, " +
+	"COALESCE(SUM(CASE WHEN %[3]s THEN COALESCE(%[2]s.completion_tokens, 0) ELSE 0 END), 0) AS completion_sum, " +
+	"%[4]s AS tools_sum, " +
+	"COALESCE(SUM(CASE WHEN %[2]s.cost_estimate IS NOT NULL THEN COALESCE(%[2]s.prompt_tokens, 0) ELSE 0 END), 0) AS priced_prompt_sum, " +
+	"COALESCE(SUM(CASE WHEN %[2]s.cost_estimate IS NOT NULL THEN MIN(COALESCE(%[2]s.cached_tokens, 0), COALESCE(%[2]s.prompt_tokens, 0)) ELSE 0 END), 0) AS priced_cached_sum, " +
+	"COALESCE(SUM(CASE WHEN %[2]s.cost_estimate IS NOT NULL THEN COALESCE(%[2]s.completion_tokens, 0) ELSE 0 END), 0) AS priced_completion_sum"
 
-// RequestAggregatesByRun 按主线/定时 run 聚合模型请求计数与用量；runIDs 为空
-// 返回空表。
+// RequestAggregatesByRun 按主线/定时 run 聚合模型请求计数、成本与用量；
+// runIDs 为空返回空表。总览与优化参考（INT-163）共用这一份聚合。
 func (r *BotUsageRepository) RequestAggregatesByRun(runIDs []string) (map[string]RequestUsageAgg, error) {
 	out := map[string]RequestUsageAgg{}
 	for _, batch := range ChunkIDs(runIDs, UsageQueryBatch) {
 		var rows []RequestUsageAgg
 		err := r.db.Model(&model.BotModelRequest{}).
-			Select(fmt.Sprintf(requestAggSelect, "run_id", "bot_model_requests", "bot_model_requests.prompt_tokens IS NOT NULL")).
+			Select(fmt.Sprintf(requestAggSelect, "run_id", "bot_model_requests",
+				"bot_model_requests.prompt_tokens IS NOT NULL",
+				"COALESCE(SUM(CASE WHEN bot_model_requests.prompt_tokens IS NOT NULL THEN bot_model_requests.tools_tokens_estimate ELSE 0 END), 0)")).
 			Where("run_id IN ?", batch).
 			Group("run_id").
 			Scan(&rows).Error
@@ -202,14 +224,15 @@ func (r *BotUsageRepository) RequestAggregatesByRun(runIDs []string) (map[string
 	return out, nil
 }
 
-// MaintenanceRequestAggregatesByRun 按维护运行聚合其模型请求；形状与
-// RequestAggregatesByRun 一致。
+// MaintenanceRequestAggregatesByRun 按维护运行聚合其模型请求；投影与
+// RequestAggregatesByRun 一致（维护请求无工具定义列，tools_sum 恒 0）。
 func (r *BotUsageRepository) MaintenanceRequestAggregatesByRun(maintRunIDs []string) (map[string]RequestUsageAgg, error) {
 	out := map[string]RequestUsageAgg{}
 	for _, batch := range ChunkIDs(maintRunIDs, UsageQueryBatch) {
 		var rows []RequestUsageAgg
 		err := r.db.Model(&model.BotMaintenanceRequest{}).
-			Select(fmt.Sprintf(requestAggSelect, "maintenance_run_id", "bot_maintenance_requests", "bot_maintenance_requests.usage_complete")).
+			Select(fmt.Sprintf(requestAggSelect, "maintenance_run_id", "bot_maintenance_requests",
+				"bot_maintenance_requests.usage_complete", "0")).
 			Where("maintenance_run_id IN ?", batch).
 			Group("maintenance_run_id").
 			Scan(&rows).Error
@@ -386,5 +409,153 @@ func (r *BotUsageRepository) ListMaintenanceRequests(maintRunIDs []string) ([]mo
 		}
 		return rows[i].Ordinal < rows[j].Ordinal
 	})
+	return rows, nil
+}
+
+// ---------- 成本优化参考（INT-163：GET /api/bots/usage/insights） ----------
+
+// FirstRequestInputRow 是 run 首次请求的输入 token 扫描行（context_growth 用）：
+// usage 完整取 prompt_tokens，否则回退发送前的 input_tokens_estimate 并标 estimated。
+type FirstRequestInputRow struct {
+	RunID       string `gorm:"column:run_id"`
+	InputTokens int64  `gorm:"column:input_tokens"`
+	Estimated   bool   `gorm:"column:estimated"`
+}
+
+// FirstRequestInputByRun 返回每个 run ordinal 最小的那次请求的输入 token
+// （窗口内每个有请求的 run 一行，无请求的 run 不出现）。子查询先求各 run 的
+// MIN(ordinal)，不把 run 的全部请求行拉回来。
+func (r *BotUsageRepository) FirstRequestInputByRun(runIDs []string) (map[string]FirstRequestInputRow, error) {
+	out := map[string]FirstRequestInputRow{}
+	for _, batch := range ChunkIDs(runIDs, UsageQueryBatch) {
+		var rows []FirstRequestInputRow
+		err := r.db.Model(&model.BotModelRequest{}).
+			Select("bot_model_requests.run_id AS run_id, "+
+				"COALESCE(bot_model_requests.prompt_tokens, bot_model_requests.input_tokens_estimate) AS input_tokens, "+
+				"(bot_model_requests.prompt_tokens IS NULL) AS estimated").
+			Joins("JOIN (SELECT run_id, MIN(ordinal) AS ordinal FROM bot_model_requests WHERE run_id IN ? GROUP BY run_id) first "+
+				"ON first.run_id = bot_model_requests.run_id AND first.ordinal = bot_model_requests.ordinal", batch).
+			Scan(&rows).Error
+		if err != nil {
+			return nil, err
+		}
+		for _, row := range rows {
+			out[row.RunID] = row
+		}
+	}
+	return out, nil
+}
+
+// RetryCountRow 是 run 的重试行数（retried_requests 用）：同 run 内与更早请求
+// request_hash 相同的行数，每次重复尝试计 1（含最终成功那次）；空 hash 不参与。
+type RetryCountRow struct {
+	RunID   string `gorm:"column:run_id"`
+	Retries int64  `gorm:"column:retries"`
+}
+
+// RetryCountsByRun 按 run 统计重复 request_hash 的重试行数。
+func (r *BotUsageRepository) RetryCountsByRun(runIDs []string) (map[string]int64, error) {
+	out := map[string]int64{}
+	for _, batch := range ChunkIDs(runIDs, UsageQueryBatch) {
+		var rows []RetryCountRow
+		err := r.db.Raw("SELECT run_id, SUM(cnt - 1) AS retries FROM ("+
+			"SELECT run_id, request_hash, COUNT(*) AS cnt FROM bot_model_requests "+
+			"WHERE run_id IN ? AND request_hash != '' GROUP BY run_id, request_hash"+
+			") GROUP BY run_id", batch).Scan(&rows).Error
+		if err != nil {
+			return nil, err
+		}
+		for _, row := range rows {
+			out[row.RunID] = row.Retries
+		}
+	}
+	return out, nil
+}
+
+// FailedRequestAggRow 是失败请求按 (run, error_code) 的聚合行（failures 用）：
+// error_code 为 NULL 的失败归到 null 一组（扫描为 nil 指针）；cost_sum 只含
+// 已计价行，全未计价为 nil（缺失 ≠ 0）。
+type FailedRequestAggRow struct {
+	RunID     string   `gorm:"column:run_id"`
+	ErrorCode *string  `gorm:"column:error_code"`
+	Requests  int64    `gorm:"column:requests"`
+	CostSum   *float64 `gorm:"column:cost_sum"`
+}
+
+// FailedRequestAggsByRun 聚合窗口内 run 的 status=failed 请求行。
+func (r *BotUsageRepository) FailedRequestAggsByRun(runIDs []string) ([]FailedRequestAggRow, error) {
+	var rows []FailedRequestAggRow
+	for _, batch := range ChunkIDs(runIDs, UsageQueryBatch) {
+		var part []FailedRequestAggRow
+		err := r.db.Model(&model.BotModelRequest{}).
+			Select("run_id, error_code, COUNT(*) AS requests, SUM(cost_estimate) AS cost_sum").
+			Where("run_id IN ? AND status = ?", batch, model.BotModelRequestFailed).
+			Group("run_id, error_code").
+			Scan(&part).Error
+		if err != nil {
+			return nil, err
+		}
+		rows = append(rows, part...)
+	}
+	return rows, nil
+}
+
+// MaintenanceRequestDetailRow 是维护请求的明细扫描行（INT-163）：用途拆分、
+// 失败统计与按维护运行记日的缓存命中都在服务层归并，这里只按维护运行分批
+// 拉回需要的列。
+type MaintenanceRequestDetailRow struct {
+	MaintenanceRunID string   `gorm:"column:maintenance_run_id"`
+	Purpose          string   `gorm:"column:purpose"`
+	Status           string   `gorm:"column:status"`
+	UsageComplete    bool     `gorm:"column:usage_complete"`
+	PromptTokens     *int64   `gorm:"column:prompt_tokens"`
+	CachedTokens     *int64   `gorm:"column:cached_tokens"`
+	CostEstimate     *float64 `gorm:"column:cost_estimate"`
+	ErrorCode        *string  `gorm:"column:error_code"`
+}
+
+// ListMaintenanceRequestRows 扫描维护运行的请求明细（无排序要求，消费方按
+// 维护运行归并）。
+func (r *BotUsageRepository) ListMaintenanceRequestRows(maintRunIDs []string) ([]MaintenanceRequestDetailRow, error) {
+	var rows []MaintenanceRequestDetailRow
+	for _, batch := range ChunkIDs(maintRunIDs, UsageQueryBatch) {
+		var part []MaintenanceRequestDetailRow
+		err := r.db.Model(&model.BotMaintenanceRequest{}).
+			Select("maintenance_run_id, purpose, status, usage_complete, prompt_tokens, cached_tokens, cost_estimate, error_code").
+			Where("maintenance_run_id IN ?", batch).
+			Scan(&part).Error
+		if err != nil {
+			return nil, err
+		}
+		rows = append(rows, part...)
+	}
+	return rows, nil
+}
+
+// RunToolCallTriple 是 run 名下出现过的 (tool_name, action) 去重组合（空转判定
+// 用）：读/写判定的事实源 botReadOnlyActions 是服务层的 Go 映射，无法下推成
+// SQL 条件，取去重组合回内存过滤，行数远小于调用行总数。
+type RunToolCallTriple struct {
+	RunID    string `gorm:"column:run_id"`
+	ToolName string `gorm:"column:tool_name"`
+	Action   string `gorm:"column:action"`
+}
+
+// RunToolCallTriples 返回一批 run 经 bot_model_requests 关联的工具调用去重
+// 组合（调用行各状态都计，不做状态过滤）。
+func (r *BotUsageRepository) RunToolCallTriples(runIDs []string) ([]RunToolCallTriple, error) {
+	var rows []RunToolCallTriple
+	for _, batch := range ChunkIDs(runIDs, UsageQueryBatch) {
+		var part []RunToolCallTriple
+		err := r.db.Table("bot_tool_calls").
+			Select("DISTINCT bot_model_requests.run_id AS run_id, bot_tool_calls.tool_name AS tool_name, bot_tool_calls.action AS action").
+			Joins("JOIN bot_model_requests ON bot_model_requests.id = bot_tool_calls.request_id").
+			Where("bot_model_requests.run_id IN ?", batch).
+			Scan(&part).Error
+		if err != nil {
+			return nil, err
+		}
+		rows = append(rows, part...)
+	}
 	return rows, nil
 }

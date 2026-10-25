@@ -8766,6 +8766,7 @@ bots.memory.timezone，再回退 UTC。金额一律来自内置 models.dev 目�
 | `bots[].runs` | integer（int64） | 是 | 窗口内 run 数（main + schedule） |
 | `bots[].avg_run_cost` | number（double，可空） | 是 | 单次运行平均显示成本（自身+关联维护）；只统计有已计价成本的 run |
 | `bots[].max_run_cost` | number（double，可空） | 是 |  |
+| `bots[].p90_run_cost` | number（double，可空） | 是 | 单次运行显示成本的 P90（nearest-rank，与 avg/max 同一已计价 run 集合）；无已计价 run 为 null |
 | `bots[].cache_hit_rate` | number（double，可空） | 是 | cached / prompt，只算 usage 完整的请求；无完整 usage 为 null |
 | `bots[].unpriced_requests` | integer（int64） | 是 |  |
 | `schedule_tasks` | object[] | 是 |  |
@@ -8783,8 +8784,123 @@ bots.memory.timezone，再回退 UTC。金额一律来自内置 models.dev 目�
 | `schedule_tasks[].cost` | number（double，可空） | 是 | schedule run 自身+关联维护已计价合计（不含连带主线） |
 | `schedule_tasks[].avg_run_cost` | number（double，可空） | 是 |  |
 | `schedule_tasks[].max_run_cost` | number（double，可空） | 是 |  |
+| `schedule_tasks[].p90_run_cost` | number（double，可空） | 是 | 单次运行显示成本的 P90（nearest-rank，与 avg/max 同一已计价 run 集合）；无已计价 run 为 null |
 | `schedule_tasks[].linked_main_cost` | number（double，可空） | 是 | schedule_event 主线 run 的连带成本（近似） |
-| `schedule_tasks[].estimated_monthly_cost` | number（double，可空） | 是 | 单次平均 × 未来 30 天触发次数（parseScheduleCron）；停用、已删除、无已计价平均或 cron 解析失败为 null |
+| `schedule_tasks[].estimated_monthly_cost` | number（double，可空） | 是 | （单次定时运行平均 + 每次触发摊到的连带主线成本）× 未来 30 天触发次数（parseScheduleCron）；单次统计取最近 30 个当地日的固定窗口，与所选 range 无关；停用、已删除、无已计价平均或 cron 解析失败为 null |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 400 | 请求参数无效（40001-40099） |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 404 | 资源不存在（40400-40499） |
+| 500 | 服务器内部错误（50000） |
+
+### GET `/api/bots/usage/insights`
+
+<!-- operationId: getBotUsageInsights -->
+
+花费优化参考（上下文增长 / 缓存命中 / 工具定义占比 / 维护占比 / 失败重试浪费 / 空转 / 换模型差价，INT-163）
+
+与花费总览同一窗口、同一机器人集合的只读聚合，回答「钱花在哪、怎么省」。
+全部指标复用现有账本实时计算：金额仍是目录单价估算（缺失 ≠ 0），token
+估算列（input_tokens_estimate / tools_tokens_estimate）标 estimated。
+口径要点：
+- 缓存命中率：cached / prompt，只统计 usage 完整的请求；按天维度把请求
+  计入所属 run（或维护运行）自身 created_at 的当地日，与总览记日一致。
+- 工具定义占比：tools_tokens_estimate / prompt_tokens，同一 usage 完整
+  请求集合；分子是按 schema 字节的估算值。
+- 维护占比：窗口内全部维护请求已计价花费（含挂到 run 名下的，口径大于
+  总览「维护」桶）占该机器人总花费（总览三桶之和）的比例，按用途拆分。
+- 失败和重试浪费：status=failed 的请求行中已计价金额、status=failed 的
+  run 的显示成本合计、重复 request_hash 的重试次数；按 error_code 分组。
+- 空转：非 skipped 的终态 schedule run 中满足任一条件即算空转——
+  silent=true、整次运行没有任何工具调用行、没有任何写操作调用（写操作
+  按当前工具注册表 ReadOnly 之外的 action 判定，未知动作按写处理）。
+- 换模型差价：按 run 冻结快照的目录归属分组，用同一批 usage 完整请求的
+  token 数按同目录其他模型单价重算，取最便宜至多 3 个候选；只按价格
+  重算，不代表效果一样，也不考虑不同模型 tokenizer 的差异。
+
+**鉴权**：仅 JWT
+
+**Query 参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `range` | string（enum: today \| 7d \| 30d，默认 7d） | 否 | 统计窗口；today = 生效时区的当天 |
+| `bot_id` | string | 否 | 限定单个机器人（须属于当前用户）；缺省为全部机器人总览 |
+
+**成功响应**
+
+**200** 花费优化参考
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `range` | string（enum: today \| 7d \| 30d） | 是 |  |
+| `timezone` | string | 是 | 实际生效的切日时区（IANA） |
+| `start` | string（date-time） | 是 | 统计窗口起点 UTC（含） |
+| `end` | string（date-time） | 是 | 统计窗口终点 UTC（不含，即查询时刻） |
+| `cache_hit_by_day` | object[] | 是 | 按天缓存命中率（窗口内每天一行） |
+| `cache_hit_by_day[].date` | string | 是 | 生效时区的当地日期 YYYY-MM-DD；窗口内每天一行（含无数据日） |
+| `cache_hit_by_day[].rate` | number（double，可空） | 是 | 当日 cached / prompt；只统计 usage 完整的请求（按所属 run/维护运行自身 created_at 记日），当日无完整 usage 请求为 null |
+| `bots` | object[] | 是 | 查询集合内每个机器人一行（含无数据机器人），按总花费降序 |
+| `bots[].bot_id` | string | 是 |  |
+| `bots[].name` | string | 是 |  |
+| `bots[].cache_hit_rate` | number（double，可空） | 是 | cached / prompt（主线/定时 + 维护请求的完整 usage 合计）；与总览同口径 |
+| `bots[].tools` | object | 是 |  |
+| `bots[].tools.prompt_tokens` | integer（int64） | 是 | 分母：主线/定时 run 中 usage 完整请求的 prompt 合计（维护请求无工具定义列，不参与） |
+| `bots[].tools.tools_tokens_estimate` | integer（int64） | 是 | 分子：同一请求集合的 tools_tokens_estimate 合计（按 schema 字节的估算值，非精确 token 数） |
+| `bots[].tools.share` | number（double，可空） | 是 | tools_tokens_estimate / prompt_tokens；分母为 0（无完整 usage 请求）时 null |
+| `bots[].maintenance` | object | 是 |  |
+| `bots[].maintenance.cost` | number（double，可空） | 是 | 窗口内该机器人全部维护请求已计价合计（含挂到 run 名下的压缩/归档，口径大于总览「维护」桶） |
+| `bots[].maintenance.share` | number（double，可空） | 是 | cost / 该机器人总花费（总览三桶之和）；任一未计价或总花费为 0 时为 null |
+| `bots[].maintenance.by_purpose` | object[] | 是 | 按用途拆分，按 cost 降序 |
+| `bots[].maintenance.by_purpose[].purpose` | string | 是 | 维护用途：summary / archive / nightly（窗口内出现过的才列出） |
+| `bots[].maintenance.by_purpose[].cost` | number（double，可空） | 是 | 该用途下已计价请求合计；全部未计价为 null（缺失 ≠ 0） |
+| `bots[].failures` | object | 是 |  |
+| `bots[].failures.failed_requests` | integer（int64） | 是 | status=failed 的模型请求行数（bot_model_requests + bot_maintenance_requests） |
+| `bots[].failures.failed_requests_cost` | number（double，可空） | 是 | 失败请求中已计价金额合计——重试浪费口径：失败尝试若送过 usage 就已计价，其花费即浪费 |
+| `bots[].failures.failed_runs` | integer（int64） | 是 | status=failed 的 bot_runs 数（main + schedule） |
+| `bots[].failures.failed_runs_cost` | number（double，可空） | 是 | 失败 run 的显示成本合计（自身 + 关联维护已计价） |
+| `bots[].failures.retried_requests` | integer（int64） | 是 | 与同 run 内更早请求 request_hash 相同的请求行数（每次重复尝试计 1，含最终成功那次） |
+| `bots[].failures.by_error` | object[] | 是 | 失败请求按 error_code 分组，按 cost 降序（null 组排最后） |
+| `bots[].failures.by_error[].error_code` | string（可空） | 是 | 失败请求的 error_code；无错误码的失败归到 null 一组 |
+| `bots[].failures.by_error[].requests` | integer（int64） | 是 |  |
+| `bots[].failures.by_error[].cost` | number（double，可空） | 是 | 该组失败请求中已计价金额合计 |
+| `bots[].context_growth` | object[] | 是 | 每次运行第一次请求的输入 token 随时间变化（升序）；有请求的 run 才有点 |
+| `bots[].context_growth[].run_id` | string | 是 | 产生该点的 run ID（前端可链接到运行明细） |
+| `bots[].context_growth[].at` | string（date-time） | 是 | run.created_at（UTC） |
+| `bots[].context_growth[].input_tokens` | integer（int64） | 是 | 该 run 第一次请求的输入 token；estimated=false 取 prompt_tokens，否则取 input_tokens_estimate |
+| `bots[].context_growth[].estimated` | boolean | 是 | true = 数值为服务端估算（该请求缺 usage），UI 须标注 |
+| `bots[].context_growth[].session_kind` | string | 是 | main / schedule |
+| `bots[].context_growth_truncated` | boolean | 是 | run 数超过每机器人点数上限（200）时为 true，已保留最新点 |
+| `bots[].model_alternatives` | object[] | 是 | 按（目录归属, 模型）分组的换模型差价；没有已计价请求的组不出现；维护请求不参与 |
+| `bots[].model_alternatives[].catalog_id` | string | 是 | run 冻结快照的目录归属；快照缺 catalog_id 或 model 的 run 不参与分组（旧账无法证明目录） |
+| `bots[].model_alternatives[].model` | string | 是 | 该组 run 实际使用的模型 |
+| `bots[].model_alternatives[].requests` | integer（int64） | 是 | 参与重算的请求数（只含 usage 完整且当前模型已计价的请求） |
+| `bots[].model_alternatives[].actual_cost` | number（double） | 是 | 这批请求在当前模型下的已计价合计（与重算同分母） |
+| `bots[].model_alternatives[].candidates` | object[] | 是 | 同目录内单价完整（input+output 非空）的其他模型按同一 token 数重算，最便宜至多 3 个；只按价格重算，不代表效果一样 |
+| `bots[].model_alternatives[].candidates[].model` | string | 是 | 同目录内的候选模型名 |
+| `bots[].model_alternatives[].candidates[].cost` | number（double） | 是 | 同一批请求的 token 数按该模型目录单价重算的总价（缓存命中按 cache_read，缺失回退 input） |
+| `bots[].model_alternatives[].candidates[].saving` | number（double） | 是 | actual_cost − cost；正值 = 省钱，负值 = 更贵 |
+| `schedule_tasks` | object[] | 是 | 窗口内有 schedule run 的任务一行（已删除任务保留） |
+| `schedule_tasks[].task_id` | string | 是 |  |
+| `schedule_tasks[].bot_id` | string | 是 |  |
+| `schedule_tasks[].bot_name` | string | 是 |  |
+| `schedule_tasks[].name` | string | 是 | 现存任务名；已删除任务为空串 |
+| `schedule_tasks[].deleted` | boolean | 是 |  |
+| `schedule_tasks[].enabled` | boolean | 是 |  |
+| `schedule_tasks[].evaluated_runs` | integer（int64） | 是 | 空转判定分母：非 skipped 的终态 schedule run（completed/failed/stopped）；进行中与排队不计 |
+| `schedule_tasks[].idle_runs` | integer（int64） | 是 | 满足任一空转条件的 run 数（各条件可叠加命中） |
+| `schedule_tasks[].idle_rate` | number（double，可空） | 是 | idle_runs / evaluated_runs；分母为 0 时 null |
+| `schedule_tasks[].idle_cost` | number（double，可空） | 是 | 空转 run 的显示成本合计（自身 + 关联维护已计价） |
+| `schedule_tasks[].silent_runs` | integer（int64） | 是 | 条件一：silent=true（静默哨兵）的 run 数 |
+| `schedule_tasks[].no_tool_call_runs` | integer（int64） | 是 | 条件二：整次运行没有任何工具调用行的 run 数（调用行各状态都计） |
+| `schedule_tasks[].no_write_call_runs` | integer（int64） | 是 | 条件三：没有任何写操作调用的 run 数；写操作 = 当前工具注册表 ReadOnly 之外的 action（未知动作按写处理），调用行各状态都计 |
+| `schedule_tasks[].cache_hit_rate` | number（double，可空） | 是 | 该任务 schedule run 名下 usage 完整请求的 cached / prompt；无完整 usage 为 null |
 
 **错误**
 
@@ -8848,7 +8964,7 @@ bots.memory.timezone，再回退 UTC。金额一律来自内置 models.dev 目�
 | `run.created_at` | string（date-time） | 是 |  |
 | `run.started_at` | string（date-time，可空） | 否 |  |
 | `run.finished_at` | string（date-time，可空） | 否 |  |
-| `requests` | object[] | 是 | run 的每次模型请求（含失败重试），按 ordinal 正序 |
+| `requests` | object[] | 是 | run 的每次模型请求（含失败重试），按 ordinal 正序；超过上限时截断 |
 | `requests[].id` | string | 是 |  |
 | `requests[].ordinal` | integer（int64） | 是 |  |
 | `requests[].status` | string | 是 | running / succeeded / failed |
@@ -8877,6 +8993,7 @@ bots.memory.timezone，再回退 UTC。金额一律来自内置 models.dev 目�
 | `requests[].tool_calls[].error_code` | string（可空） | 否 |  |
 | `requests[].tool_calls[].created_at` | string（date-time） | 是 |  |
 | `requests[].tool_calls[].finished_at` | string（date-time，可空） | 否 |  |
+| `requests_truncated` | boolean | 是 | 请求数超过上限（500）被截断时为 true |
 | `maintenance_runs` | object[] | 是 | parent_run_id 指向本 run 的维护运行及其请求 |
 | `maintenance_runs[].id` | string | 是 |  |
 | `maintenance_runs[].kind` | string | 是 | compaction / nightly |

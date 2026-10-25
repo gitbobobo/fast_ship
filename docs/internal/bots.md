@@ -25,7 +25,8 @@ service/bot_tools_project.go / bot_tools_issue.go / bot_tools_thread.go   工具
 service/bot_tool_runner.go assistant 回合提交、同步执行、后台 worker、取消与终态
 service/bot_authorization.go 确认决定、结构化「始终允许」、撤销
 service/bot_results.go     结果瘦身、截断、fs_result.read 续读、能力查询与帮助
-service/bot_usage.go       花费页只读聚合（INT-162：按天/按机器人/按定时任务与单次运行明细）
+service/bot_usage.go       花费页只读聚合（INT-162：按天/按机器人/按定时任务与单次运行明细）；总览与优化参考共享 loadBotUsageLedger 一次账本扫描
+service/bot_usage_insights.go 花费页优化参考（INT-163：缓存/工具占比/维护占比/失败重试/空转/换模型差价，共享加载层之上的端点特有查询与投影）
 service/bot_recovery.go    启动恢复
 handler/bot.go             REST（全部仅 JWT）
 handler/bot_stream.go      SSE 重放与订阅
@@ -452,6 +453,75 @@ next_offset}`；`fs_result.read` 按 Unicode 字符续读，不切断 UTF-8。
 - **未计价计数**：`unpriced_requests` 按 bot_model_requests +
   bot_maintenance_requests 计；`bot_model_requests` 没有 usage_complete 列，
   聚合沿用聊天页口径「落过 usage 计数列 = prompt_tokens IS NOT NULL」。
+
+### 花费页第二期：成本优化参考（INT-163）
+
+`GET /api/bots/usage/insights`（`range=today|7d|30d` 缺省 7d、`bot_id`
+可选，仅 JWT），实现 `service/bot_usage_insights.go`，仍然只读、不新增表。
+总览与 insights 共用 `loadBotUsageLedger`（`service/bot_usage.go`）的
+**同一次账本扫描**：range 校验、bot_id 归属 404、时区与窗口、run/维护行、
+统一请求聚合（`RequestAggregatesByRun`，原 INT-162 计数/成本口径与 INT-163
+token 口径合成一次聚合）、关联维护合计、父 run 与任务反查、三桶/按天/任务
+累加都在共享层完成，两端点只做各自投影——insights 不再调总览、不重复扫
+同一批账本，月推算等总览特有投影只在总览端点触发；维护占比的分子（维护
+明细）与分母（共享累加器的三桶之和）同源，中间落账不会出现 share > 100%。
+总览的 bot/task 投影带 `p90_run_cost`（nearest-rank：升序取
+`ceil(0.9*n)-1`，无已计价 run 为 null）。各指标口径：
+
+- **缓存命中率**：cached / prompt，只统计 usage 完整请求；cached 逐行按
+  `MIN(cached_tokens, prompt_tokens)` 钳制，机器人级、总览、按天、按任务
+  同一分子（统一聚合；原总览聚合不钳制、按天/按任务钳制的分裂口径已合并
+  ——总览缓存命中率在 cached>prompt 的异常行下从可能超 1 变为钳制 ≤1，
+  总览其余字段不变）。按天记请求所属 run / 维护运行自己的 created_at 的
+  当地日，分母为 0 → null。
+- **工具定义占比**：分母 = 主线/定时 run 名下 usage 完整请求的 prompt
+  合计，分子 = 同一集合的 tools_tokens_estimate（维护请求无工具定义列，
+  不参与）。
+- **维护占比**：窗口内该机器人全部维护请求的已计价合计——含挂到 run 名下
+  的（口径大于总览「维护」桶，后者只算无父 run 的），按维护运行自己的
+  created_at 记窗口；share 分母 = 共享累加器的三桶之和（同一扫描快照，
+  分子分母同源），任一边未计价或分母 0 → null；by_purpose 列窗口内出现过
+  的用途（cost 降序、全未计价 null 最后）。
+- **失败与重试浪费**：`failed_requests` / `failed_requests_cost` = status=
+  failed 的请求行（主线 + 维护）及其已计价合计；`failed_runs` /
+  `failed_runs_cost` = status=failed 的 run 及显示成本（自身 + 关联维护，
+  复用 `MaintenanceCostsByParentRun`）；`retried_requests` = 同 run 内重复
+  request_hash 的行数（`GROUP BY run_id, request_hash` 后 SUM(cnt-1)，空
+  hash 不参与，每次重复尝试计 1、含最终成功那次）；`by_error` 按 error_code
+  分组（NULL 归 null 组，cost 降序、null 组最后）。
+- **空转**：对任务的非 skipped 终态 schedule run（completed/failed/stopped；
+  queued/running 不进分母）独立计三个条件——`silent=true`；整次 run 没有任何
+  工具调用行（经 bot_model_requests 关联，各状态都计）；没有任何写操作调用。
+  写/读判定的事实源是服务层 `botReadOnlyActions`（键 `tool_name/action`），
+  未列出的动作按写处理；因是 Go 映射无法下推 SQL，查询按
+  `SELECT DISTINCT run_id, tool_name, action` 取去重组合回内存过滤。
+  `idle_rate` 分母 0 → null；`idle_cost` 只累计空转 run 的显示成本。
+- **context_growth**：窗口内每个有请求的 run 取 ordinal 最小的请求
+  （`JOIN (SELECT run_id, MIN(ordinal)…) ` 子查询，不拉全量请求行），
+  usage 完整取 prompt_tokens，缺 usage 回退 input_tokens_estimate 并标
+  estimated；按时间升序，每机器人最多保留最新 200 点（超出截掉最早并置
+  context_growth_truncated）。
+- **换模型差价**：按 run 冻结快照的 (catalog_id, model) 分组窗口内请求，
+  快照缺 catalog_id（INT-133 之前的旧快照）的 run 不参与分组——模型名跨
+  目录重名（同名模型在多家目录各有现价），回退机器人当前目录会让旧目录的
+  actual_cost 对上新目录的现价候选；组进响应前先过目录双重校验——
+  `catalog.FindProvider` 命中且 `catalog.FindModel(catalog, model)` 命中
+  （先精确后 EqualFold，与候选跳过同语义），custom、目录查无、模型已不在
+  该目录、组内无已计价请求、候选为空（目录里没有其他 Input/Output 单价
+  完整的模型）的组都不出现——actual_cost 是历史落库的 cost_estimate
+  合计，跟另一套目录的现价候选相减没有意义。每组只保留 usage 完整且已计价
+  的请求（已计价必以 usage 完整为前提），候选 = 同目录 Input/Output 单价
+  完整的其他模型，按同一批 token 合计重算——`botCostEstimate` 对 token 是
+  线性函数（Σf(x) = f(Σx)），故对组内 prompt/cached/completion 合计一次
+  求价即可，cached 钳 prompt 的异常按合计口径处理；按 cost 升序取至多 3 个，
+  saving = actual − cost。只按价格重算，不代表效果一样，也不考虑不同
+  tokenizer 的差异。
+
+新增仓库查询都在 `repository/bot_usage.go`（统一请求聚合、每 run 首请求、
+重试计数、失败聚合、维护请求明细扫描、工具调用去重组合），全部走
+`ChunkIDs` + `UsageQueryBatch` 分批；维护请求的按运行聚合由服务层从明细行
+推导（`botUsageMaintAggOf`，共享加载层本就要拉明细做用途拆分/失败统计/按天
+命中），同一批行不再跑第二次聚合查询。
 
 ### 用户时区与当地语义（INT-138）
 
