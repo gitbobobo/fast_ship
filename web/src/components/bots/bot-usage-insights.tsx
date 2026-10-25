@@ -670,13 +670,16 @@ function MaintenanceShareSection({
               <div className="flex items-baseline justify-between gap-3">
                 <dt className="truncate text-muted-foreground">{bot.name}</dt>
                 <dd className="tabular-nums">
-                  {formatUsageCost(bot.maintenance.cost)} ·{" "}
-                  {formatPercent(bot.maintenance.share)}
+                  {bot.maintenance.cost == null
+                    ? "—"
+                    : `${formatUsageCost(bot.maintenance.cost)} · ${formatPercent(bot.maintenance.share)}`}
                 </dd>
               </div>
-              <p className="text-xs text-muted-foreground">
-                {maintenancePurposeText(bot)}
-              </p>
+              {bot.maintenance.by_purpose.length > 0 && (
+                <p className="text-xs text-muted-foreground">
+                  {maintenancePurposeText(bot)}
+                </p>
+              )}
             </div>
           ))}
         </dl>

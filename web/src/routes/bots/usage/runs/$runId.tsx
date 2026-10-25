@@ -302,9 +302,11 @@ function RunContextGrowth({
     <section className="space-y-2" data-testid="usage-run-context-growth">
       <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
         <h3 className="text-sm font-medium">输入上下文增长</h3>
-        <p className="text-xs text-muted-foreground">
-          {truncated ? "仅最新 500 条 · " : ""}
-          空心点 = 估算值（该请求缺 usage，取估算输入）
+        <p
+          className="min-w-0 text-xs text-muted-foreground"
+          title="空心点 = 估算值：该请求缺 usage，取估算输入"
+        >
+          {truncated ? "仅最新 500 条 · " : ""}空心点 = 估算值
         </p>
       </div>
       <ContextGrowthChart
