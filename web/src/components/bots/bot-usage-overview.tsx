@@ -319,7 +319,8 @@ function BotsUsageTable({ bots }: { bots: BotUsageBot[] }) {
           窗口内没有运行记录
         </p>
       ) : (
-        <div className="overflow-hidden rounded-lg border">
+        <div className="overflow-hidden rounded-lg border [&_td:last-child]:pr-3 [&_th:last-child]:pr-3">
+          {/* 末列补到 12px 右内边距：通宽表格右缘留白与左侧对齐（同 TableFrame） */}
           <Table>
             <TableHeader>
               <TableRow>
@@ -451,7 +452,8 @@ function TasksUsageTable({
           窗口内没有定时任务运行
         </p>
       ) : (
-        <div className="overflow-hidden rounded-lg border">
+        <div className="overflow-hidden rounded-lg border [&_td:last-child]:pr-3 [&_th:last-child]:pr-3">
+          {/* 末列补到 12px 右内边距：通宽表格右缘留白与左侧对齐（同 TableFrame） */}
           <Table>
             <TableHeader>
               <TableRow>
