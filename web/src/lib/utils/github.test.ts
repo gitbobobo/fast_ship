@@ -260,6 +260,9 @@ describe("hostFromRepoInput", () => {
     expect(hostFromRepoInput("github.com/acme/app")).toBe("github.com");
     // DNS 根点尾缀与后端主机键同口径剥除。
     expect(hostFromRepoInput("https://forge.example.com./o/r")).toBe("forge.example.com");
+    // 尾点在端口前的拼写（host.:443）同后端 SplitHostPort 后剥点归一。
+    expect(hostFromRepoInput("https://forge.example.com.:8443/o/r")).toBe("forge.example.com:8443");
+    expect(hostFromRepoInput("https://forge.example.com.:443/o/r")).toBe("forge.example.com");
   });
   it("两段式裸输入不是主机（含点 owner），三段以上首段含点才当主机段", () => {
     // Forgejo 允许组织名含点：my.org/repo 是 owner/repo，不是主机。
@@ -269,5 +272,6 @@ describe("hostFromRepoInput", () => {
     // host/o/r 反正解析失败——取出主机只为报「主机不一致」而非泛泛格式错。
     expect(hostFromRepoInput("forge-b.example.com/acme/app")).toBe("forge-b.example.com");
     expect(hostFromRepoInput("forge.example.com:8443/acme/app")).toBe("forge.example.com:8443");
+    expect(hostFromRepoInput("forge.example.com.:443/acme/app")).toBe("forge.example.com:443");
   });
 });

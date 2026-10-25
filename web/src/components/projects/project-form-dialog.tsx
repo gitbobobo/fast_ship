@@ -260,7 +260,8 @@ export function ProjectFormDialog({
     if (!selectedIntegration) return "";
     try {
       const u = new URL(selectedIntegration.base_url);
-      return `${u.protocol}//${u.host.replace(/\.+$/, "")}`;
+      // 与后端 SplitHostPort 后剥点同序：端口前尾点（host.:8443）也归一。
+      return `${u.protocol}//${u.host.replace(/\.+:/g, ":").replace(/\.+$/, "")}`;
     } catch {
       return "";
     }

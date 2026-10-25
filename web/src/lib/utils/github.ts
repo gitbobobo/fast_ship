@@ -147,15 +147,17 @@ export function hostFromRepoInput(raw: string): string {
     // userinfo 不属于主机：https://user:pass@host/o/r 取 @ 后段。
     const atIdx = host.lastIndexOf("@");
     if (atIdx !== -1) host = host.slice(atIdx + 1);
+    // DNS 根点尾缀与后端主机键同口径归一：后端 SplitHostPort 后剥点，故
+    // 端口前的尾点（host.:443）和串末尾点（host.）都要剥。
+    host = host.toLowerCase().replace(/\.+:/g, ":").replace(/\.+$/, "");
     // scheme 缺省端口与 new URL().host 的归一同口径——https://x:443 与
     // https://x 是同一主机，不剥会把等价地址误报成主机不一致。
     const scheme = rest.slice(0, protoIdx).toLowerCase();
     const defaultPort = scheme === "https" ? ":443" : scheme === "http" ? ":80" : "";
-    if (defaultPort !== "" && host.toLowerCase().endsWith(defaultPort)) {
+    if (defaultPort !== "" && host.endsWith(defaultPort)) {
       host = host.slice(0, -defaultPort.length);
     }
-    // DNS 根点尾缀与后端主机键同口径归一：forge.example. ≡ forge.example。
-    return host.toLowerCase().replace(/\.+$/, "");
+    return host;
   }
   // 裸形态与 ownerRepoFromInput 会剥的口径对齐：只有 github.com/ 前缀会被
   // 剥掉，故只有它算显式主机；两段式 my.org/repo 是含点 owner（剥掉只剩
@@ -167,7 +169,8 @@ export function hostFromRepoInput(raw: string): string {
   if (first.toLowerCase() === "github.com") return "github.com";
   const tailSegments = rest.slice(slash + 1).split("/").length;
   if (tailSegments >= 2 && (first.includes(".") || first.includes(":"))) {
-    return first.toLowerCase().replace(/\.+$/, "");
+    // 同上：先剥端口前的尾点（host.:443 → host:443）再剥串末尾点。
+    return first.toLowerCase().replace(/\.+:/g, ":").replace(/\.+$/, "");
   }
   return "";
 }

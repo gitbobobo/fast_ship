@@ -333,6 +333,29 @@ describe("ProjectFormDialog", () => {
     );
   });
 
+  it("主机带端口前尾点：host.:443 归一成同主机键，判未改动不报错", async () => {
+    const user = userEvent.setup();
+    renderDialog(
+      "edit",
+      makeProject({
+        code_integration_id: "forge-1",
+        code_repo_url: "https://forge.example.com/acme/api",
+      }),
+    );
+
+    const input = await screen.findByLabelText(/代码仓库（可选/);
+    await user.clear(input);
+    // forge.example.com.:443 的尾点在端口前——后端 SplitHostPort 后剥点
+    // 归一成 forge.example.com:443，与所选集成同主机键，判未改动。
+    await user.type(input, "https://forge.example.com.:443/acme/api");
+    await user.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => expect(updateMutateAsync).toHaveBeenCalled());
+    expect(updateMutateAsync.mock.calls[0][0]).not.toHaveProperty(
+      "code_repository_url",
+    );
+  });
+
   it("裸 host:port 默认端口：不报主机不一致，退到格式错误", async () => {
     const user = userEvent.setup();
     renderDialog(
