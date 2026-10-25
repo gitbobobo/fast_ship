@@ -80,6 +80,72 @@ func TestMigrateForgeHostKeys(t *testing.T) {
 	}
 }
 
+// host_key 索引谓词升级（R42/R43）：存量库的旧谓词缺 kind='forgejo'——
+// sqlite_master 存稿比对出过期的 DROP 重建，当期定义直接跳过不留下
+// 唯一约束失效窗口。
+func TestForgeHostKeyIndexRebuild(t *testing.T) {
+	dsn := "file:" + uuid.NewString() + "?mode=memory&cache=shared"
+	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if err := db.AutoMigrate(&model.ForgeIntegration{}); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	now := time.Now().UTC()
+	seed := model.ForgeIntegration{
+		ID: uuid.NewString(), Kind: model.ForgeIntegrationKindForgejo, Name: "a",
+		BaseURL: "https://forge.example.com", HostKey: "forge.example.com:443",
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := db.Create(&seed).Error; err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	// 模拟谓词升级前的存量索引：只有 host_key <> ''。
+	if err := db.Exec("CREATE UNIQUE INDEX idx_forge_integrations_host_key ON forge_integrations(host_key) WHERE host_key <> ''").Error; err != nil {
+		t.Fatalf("create stale index: %v", err)
+	}
+	if err := createBootIndexes(db); err != nil {
+		t.Fatalf("rebuild stale index: %v", err)
+	}
+	indexSQL := func() string {
+		var def string
+		if err := db.Raw("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_forge_integrations_host_key'").Scan(&def).Error; err != nil {
+			t.Fatalf("read index def: %v", err)
+		}
+		return def
+	}
+	if def := indexSQL(); !strings.Contains(def, "kind = 'forgejo'") {
+		t.Fatalf("index not rebuilt, def = %q", def)
+	}
+	// 谓词已含 kind：未来其它 kind 的同主机行不被索引拦截（与 FindByHostKey
+	// 过滤口径一致）。
+	other := model.ForgeIntegration{
+		ID: uuid.NewString(), Kind: "gitea", Name: "g",
+		BaseURL: "https://forge.example.com", HostKey: "forge.example.com:443",
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := db.Create(&other).Error; err != nil {
+		t.Fatalf("non-forgejo same host_key must coexist: %v", err)
+	}
+	// 重复启动：当期定义跳过重建，幂等不报错、定义不变。
+	if err := createBootIndexes(db); err != nil {
+		t.Fatalf("second boot: %v", err)
+	}
+	if def := indexSQL(); !strings.Contains(def, "kind = 'forgejo'") {
+		t.Fatalf("index def changed unexpectedly: %q", def)
+	}
+	// forgejo 同主机行仍被唯一索引拦截。
+	dup := model.ForgeIntegration{
+		ID: uuid.NewString(), Kind: model.ForgeIntegrationKindForgejo, Name: "dup",
+		BaseURL: "https://forge.example.com", HostKey: "forge.example.com:443",
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := db.Create(&dup).Error; err == nil || !strings.Contains(err.Error(), "UNIQUE constraint failed") {
+		t.Fatalf("duplicate forgejo host_key err = %v, want UNIQUE constraint failed", err)
+	}
+}
+
 // github_host 回填（INT-166 R37 Note）：列上线前的存量行是 NULL，旧渲染语义
 // 恒为公共 github.com——一次性收成 'github.com'；新写入的空串（=本部署
 // GitHub）与已写的 'github.com' 都不能被动。

@@ -726,9 +726,18 @@ func createBootIndexes(db *gorm.DB) error {
 	// FindByHostKey/ensureHostAvailable 的过滤同口径，未来其它 kind 落表不
 	// 会被索引拦截却查重看不见。建不上（如存量数据已有同 host_key 冲突）
 	// 必须启动失败——带缺口跑等于并发抢注窗口裸奔。IF NOT EXISTS 不更新
-	// 存量谓词，先 DROP 再建（表小，重建成本可忽略）。
-	if err := db.Exec("DROP INDEX IF EXISTS idx_forge_integrations_host_key").Error; err != nil {
-		return fmt.Errorf("重建 idx_forge_integrations_host_key 失败: %w", err)
+	// 存量谓词：比对 sqlite_master 存稿，谓词过期才 DROP 重建——无条件重建
+	// 会在 DROP→CREATE 间隙留下唯一约束失效窗口。
+	var idxDef []struct {
+		SQL string `gorm:"column:sql"`
+	}
+	if err := db.Raw("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_forge_integrations_host_key'").Scan(&idxDef).Error; err != nil {
+		return fmt.Errorf("读取 idx_forge_integrations_host_key 定义失败: %w", err)
+	}
+	if len(idxDef) > 0 && !strings.Contains(idxDef[0].SQL, "kind = 'forgejo'") {
+		if err := db.Exec("DROP INDEX IF EXISTS idx_forge_integrations_host_key").Error; err != nil {
+			return fmt.Errorf("重建 idx_forge_integrations_host_key 失败: %w", err)
+		}
 	}
 	if err := db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_forge_integrations_host_key ON forge_integrations(host_key) WHERE host_key <> '' AND kind = 'forgejo'").Error; err != nil {
 		return fmt.Errorf("创建 idx_forge_integrations_host_key 失败: %w", err)
