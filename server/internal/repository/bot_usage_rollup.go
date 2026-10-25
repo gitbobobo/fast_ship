@@ -156,7 +156,7 @@ func (r *BotUsageRollupRepository) DayFingerprints(botID string, spans []UsageDa
 	for _, batch := range ChunkIDs(runIDs, UsageQueryBatch) {
 		var rows []reqRow
 		err := r.db.Model(&model.BotModelRequest{}).
-			Select("run_id, COUNT(*) AS cnt, MAX(strftime('%Y-%m-%d %H:%M:%f', COALESCE(finished_at, started_at))) AS last_write").
+			Select("run_id, COUNT(*) AS cnt, MAX(COALESCE(finished_at, started_at)) AS last_write").
 			Where("run_id IN ?", batch).
 			Group("run_id").
 			Scan(&rows).Error
@@ -171,7 +171,7 @@ func (r *BotUsageRollupRepository) DayFingerprints(botID string, spans []UsageDa
 			fp := out[date]
 			fp.RequestCount += row.Cnt
 			out[date] = fp
-			if ts, ok := usageParseWriteStamp(row.LastWrite); ok {
+			if ts, ok := usageParseWriteStampNs(row.LastWrite); ok {
 				bump(date, ts, time.Time{})
 			}
 		}
@@ -241,7 +241,7 @@ func (r *BotUsageRollupRepository) DayFingerprints(botID string, spans []UsageDa
 	for _, batch := range ChunkIDs(maintIDs, UsageQueryBatch) {
 		var rows []maintReqRow
 		err := r.db.Model(&model.BotMaintenanceRequest{}).
-			Select("maintenance_run_id, COUNT(*) AS cnt, MAX(strftime('%Y-%m-%d %H:%M:%f', COALESCE(finished_at, started_at))) AS last_write").
+			Select("maintenance_run_id, COUNT(*) AS cnt, MAX(COALESCE(finished_at, started_at)) AS last_write").
 			Where("maintenance_run_id IN ?", batch).
 			Group("maintenance_run_id").
 			Scan(&rows).Error
@@ -253,7 +253,7 @@ func (r *BotUsageRollupRepository) DayFingerprints(botID string, spans []UsageDa
 				fp := out[date]
 				fp.MaintRequestCount += row.Cnt
 				out[date] = fp
-				if ts, ok := usageParseWriteStamp(row.LastWrite); ok {
+				if ts, ok := usageParseWriteStampNs(row.LastWrite); ok {
 					bump(date, ts, time.Time{})
 				}
 			}
@@ -273,7 +273,7 @@ func (r *BotUsageRollupRepository) SpanWriteMax(botID string, start, end time.Ti
 	maintInScope := "SELECT id FROM bot_maintenance_runs WHERE bot_id = ? AND " + maintScope
 	var raw *string
 	err := r.db.Raw(
-		"SELECT strftime('%Y-%m-%d %H:%M:%f', MAX(ts)) FROM ("+
+		"SELECT MAX(ts) FROM ("+
 			"SELECT COALESCE(finished_at, created_at) AS ts FROM bot_runs "+
 			"WHERE bot_id = ? AND created_at >= ? AND created_at < ? "+
 			"UNION ALL SELECT COALESCE(finished_at, started_at) FROM bot_model_requests "+
@@ -290,7 +290,7 @@ func (r *BotUsageRollupRepository) SpanWriteMax(botID string, start, end time.Ti
 	if err != nil {
 		return nil, err
 	}
-	if ts, ok := usageParseWriteStamp(raw); ok {
+	if ts, ok := usageParseWriteStampNs(raw); ok {
 		return &ts, nil
 	}
 	return nil, nil
@@ -305,6 +305,25 @@ func usageParseWriteStamp(s *string) (time.Time, bool) {
 	}
 	t, err := time.Parse("2006-01-02 15:04:05.000", *s)
 	return t, err == nil
+}
+
+// usageParseWriteStampNs 解析账本里直接存出的时刻文本（驱动落库格式
+// "2006-01-02 15:04:05.999999+00:00"，纳秒精度），同时兼容 RFC3339 的
+// T 分隔与 Z 后缀形态。与标记 LastWriteNs 的比值必须是同一精度——毫秒
+// 截断会让同毫秒的迟到写入永远压不过水位。
+func usageParseWriteStampNs(s *string) (time.Time, bool) {
+	if s == nil {
+		return time.Time{}, false
+	}
+	for _, layout := range []string{
+		"2006-01-02 15:04:05.999999999Z07:00",
+		"2006-01-02T15:04:05.999999999Z07:00",
+	} {
+		if t, err := time.Parse(layout, *s); err == nil {
+			return t, true
+		}
+	}
+	return time.Time{}, false
 }
 
 // MarksByBot 返回该 bot 的全部覆盖标记（历史无界但单行极小，整取）。

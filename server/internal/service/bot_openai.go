@@ -168,8 +168,15 @@ func botStreamChat(ctx context.Context, client *openai.Client, baseURL string, r
 				v := d.ReasoningTokens
 				reply.ReasoningTokens = &v
 			}
-			reply.ProviderCost, reply.ProviderCostRaw = botParseProviderCost(
-				chunk.Usage.JSON.ExtraFields, botIsOpenRouterBase(baseURL))
+			// 分多次回 usage 的上游只在其中一个 chunk 带金额：空解析不覆写，
+			// 否则后到的空 chunk 会把已收到的实收抹掉（与 reasoning_tokens
+			// 「有才写」同口径）。
+			if cost, raw := botParseProviderCost(
+				chunk.Usage.JSON.ExtraFields, botIsOpenRouterBase(baseURL)); cost != nil {
+				reply.ProviderCost, reply.ProviderCostRaw = cost, raw
+			} else if raw != nil && reply.ProviderCost == nil {
+				reply.ProviderCostRaw = raw
+			}
 		}
 		for _, choice := range chunk.Choices {
 			if choice.FinishReason != "" {
@@ -273,8 +280,9 @@ func botIsOpenRouterBase(baseURL string) bool {
 // 币别不明或非用户实收的金额走 provider_cost_raw（{"field","value"} 的
 // JSON 记录，只记录不展示）。金额可能以数字或字符串到达，解析失败按缺失
 // 处理；多字段并存按固定优先级取首个可解析值，同一响应解析结果稳定：
-//  1. cost —— OpenRouter 语义按 USD 展示，其余地址币别不明只进 raw；
-//  2. total_cost / 名字含 _usd 的字段 —— 按美元命名的约定视为 USD；
+//  1. cost / total_cost —— 裸名不带币别声明，仅 OpenRouter 语义按 USD
+//     展示，其余地址币别不明只进 raw；
+//  2. 名字含 _usd 的字段 —— 字段名自身声明币别，按约定视为 USD；
 //  3. cost_details.upstream_inference_cost —— OpenRouter 付给上游的金额
 //     而非用户实收，币别虽是 USD 也只进 raw。
 func botParseProviderCost(extra map[string]respjson.Field, openrouter bool) (*float64, *string) {
@@ -303,14 +311,20 @@ func botParseProviderCost(extra map[string]respjson.Field, openrouter bool) (*fl
 			return v, nil
 		}
 		// 非 OpenRouter 的 cost 币别不明：记 raw 但继续按优先级找置信
-		// USD 字段，不早退——同响应带 cost+total_cost 时 USD 应胜出。
+		// USD 字段，不早退——同响应带 cost+*_usd 时 _usd 应胜出。
 		rawNote = rawRecord("cost", extra["cost"])
 	}
 	var usd *float64
 	usdField := ""
 	if v, ok := field(extra["total_cost"]); ok {
-		usd = v
-		usdField = "total_cost"
+		if openrouter {
+			usd = v
+			usdField = "total_cost"
+		} else if rawNote == nil {
+			// 与裸 cost 同一口径：字段名不带币别声明，非 OpenRouter 地址
+			// 币别不明只记录不置信（积分/分/其他币种会静默错价）。
+			rawNote = rawRecord("total_cost", extra["total_cost"])
+		}
 	}
 	// *_usd 字段按名字排序取首个可解析的：map 遍历无序，不稳定会让同一
 	// 响应两次解析选出不同字段。

@@ -79,7 +79,7 @@ func TestBotStreamChatProviderCost(t *testing.T) {
 			t.Fatalf("币别不明的 cost 应记录进 provider_cost_raw")
 		}
 	})
-	t.Run("total_cost 视为 USD 字符串金额也接受", func(t *testing.T) {
+	t.Run("非 OpenRouter 的 total_cost 币别不明只记录", func(t *testing.T) {
 		f := newFakeModelServer(t, fakeModelTurn{Text: "ok", RawUsage: int164Usage(map[string]interface{}{
 			"total_cost": "0.25",
 		})})
@@ -89,9 +89,11 @@ func TestBotStreamChatProviderCost(t *testing.T) {
 		if err != nil {
 			t.Fatalf("stream: %v", err)
 		}
-		if reply.ProviderCost == nil || math.Abs(*reply.ProviderCost-0.25) > 1e-12 ||
-			reply.ProviderCostRaw == nil || !strings.Contains(*reply.ProviderCostRaw, "total_cost") {
-			t.Fatalf("total_cost 应按 USD 解析并记来源字段: %+v", reply)
+		if reply.ProviderCost != nil {
+			t.Fatalf("币别不明的 total_cost 不得进 provider_cost: %+v", reply.ProviderCost)
+		}
+		if reply.ProviderCostRaw == nil || !strings.Contains(*reply.ProviderCostRaw, "total_cost") {
+			t.Fatalf("币别不明的 total_cost 应记录进 provider_cost_raw")
 		}
 	})
 	t.Run("OpenRouter 地址的 cost 置信 USD", func(t *testing.T) {
@@ -116,6 +118,7 @@ func TestBotStreamChatProviderCost(t *testing.T) {
 // 字段并存按固定优先级：cost > total_cost > cost_details.upstream_inference_cost
 // > *_usd；解析失败的字段跳过，不吞掉后面可解析的。置信 USD 的值进
 // provider_cost；币别不明或非用户实收的金额进 provider_cost_raw。
+// cost / total_cost 裸名不带币别声明，仅 OpenRouter 置信；*_usd 名即声明。
 func TestBotParseProviderCostPrecedence(t *testing.T) {
 	f := func(raw string) respjson.Field { return respjson.NewField(raw) }
 	none := map[string]respjson.Field{}
@@ -134,9 +137,9 @@ func TestBotParseProviderCostPrecedence(t *testing.T) {
 			"cost": f("null"), "total_cost": f("NaN"),
 			"prompt_usd": f("-0.5"), "upstream_usd": f("Inf"),
 		}},
-		{name: "非 OR 的 cost 记 raw 但置信 total_cost 仍胜出", extra: map[string]respjson.Field{
+		{name: "非 OR 的 cost 与 total_cost 都币别不明", extra: map[string]respjson.Field{
 			"cost": f("0.5"), "total_cost": f("0.9"),
-		}, wantCost: ptrCost(0.9), wantRaw: true},
+		}, wantRaw: true},
 		{name: "非 OR 的 cost 记 raw 且不挡 _usd 字段", extra: map[string]respjson.Field{
 			"cost": f("0.5"), "prompt_usd": f("0.07"),
 		}, wantCost: ptrCost(0.07), wantRaw: true},
@@ -153,6 +156,9 @@ func TestBotParseProviderCostPrecedence(t *testing.T) {
 		{name: "字段名含 _usd 视为 USD", extra: map[string]respjson.Field{
 			"total_tokens_billed_usd": f("0.07"),
 		}, wantCost: ptrCost(0.07), wantRaw: true},
+		{name: "OR 的 total_cost 置信 USD 并记来源字段", extra: map[string]respjson.Field{
+			"total_cost": f("0.9"),
+		}, openrouter: true, wantCost: ptrCost(0.9), wantRaw: true},
 		{name: "非 OR 的裸 cost 币别不明", extra: map[string]respjson.Field{
 			"cost": f("0.3"),
 		}, wantRaw: true},
@@ -271,7 +277,7 @@ func TestFinishModelRequestUsageFieldsPersisted(t *testing.T) {
 func TestAuxModelRequestUsageFieldsPersisted(t *testing.T) {
 	env := setupBotTestEnv(t, fakeModelTurn{Text: "ok", RawUsage: int164Usage(map[string]interface{}{
 		"completion_tokens_details": map[string]interface{}{"reasoning_tokens": 7},
-		"total_cost":                0.125,
+		"cost_usd":                  0.125,
 	})})
 	userID := createBotTestUser(t, env.db, "int164aux")
 	created := env.createBot(t, userID)
@@ -303,8 +309,9 @@ func TestAuxModelRequestUsageFieldsPersisted(t *testing.T) {
 	if req.ReasoningTokens == nil || *req.ReasoningTokens != 7 {
 		t.Fatalf("维护请求应落 reasoning_tokens = 7: %+v", req)
 	}
-	if req.ProviderCost == nil || math.Abs(*req.ProviderCost-0.125) > 1e-12 || req.ProviderCostRaw != nil {
-		t.Fatalf("total_cost 应按 USD 落库: %+v", req)
+	if req.ProviderCost == nil || math.Abs(*req.ProviderCost-0.125) > 1e-12 ||
+		req.ProviderCostRaw == nil || !strings.Contains(*req.ProviderCostRaw, "cost_usd") {
+		t.Fatalf("cost_usd 应按 USD 落库并记来源字段: %+v", req)
 	}
 }
 
@@ -313,7 +320,7 @@ func TestAuxModelRequestUsageFieldsPersisted(t *testing.T) {
 func TestBotRunUsageFieldsEndToEnd(t *testing.T) {
 	withFields := int164Usage(map[string]interface{}{
 		"completion_tokens_details": map[string]interface{}{"reasoning_tokens": 33},
-		"total_cost":                "0.75",
+		"cost_usd":                  "0.75",
 	})
 	env := setupBotTestEnv(t,
 		fakeModelTurn{Text: "第一轮", RawUsage: withFields},
@@ -335,8 +342,9 @@ func TestBotRunUsageFieldsEndToEnd(t *testing.T) {
 	if reqs[0].ReasoningTokens == nil || *reqs[0].ReasoningTokens != 33 {
 		t.Fatalf("请求行 reasoning_tokens 应为 33: %+v", reqs[0])
 	}
-	if reqs[0].ProviderCost == nil || math.Abs(*reqs[0].ProviderCost-0.75) > 1e-12 || reqs[0].ProviderCostRaw != nil {
-		t.Fatalf("请求行 provider_cost 应为 USD 0.75: %+v", reqs[0])
+	if reqs[0].ProviderCost == nil || math.Abs(*reqs[0].ProviderCost-0.75) > 1e-12 ||
+		reqs[0].ProviderCostRaw == nil || !strings.Contains(*reqs[0].ProviderCostRaw, "cost_usd") {
+		t.Fatalf("请求行 provider_cost 应为 USD 0.75 并记来源字段: %+v", reqs[0])
 	}
 
 	// 第二轮不带这两个字段：请求行保持 NULL。

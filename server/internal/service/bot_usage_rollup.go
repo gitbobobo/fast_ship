@@ -147,9 +147,9 @@ func (s *BotService) usageRollupPlan(db *gorm.DB, bot *model.Bot, now time.Time,
 			markMax = m.LastWriteNs
 		}
 	}
-	// 探针经 strftime 毫秒截断，标记 LastWriteNs 带亚毫秒尾数——统一截到毫秒
-	// 再比，消除混合精度比较（同毫秒写入由最近两日兜底重算覆盖）。
-	markMax -= markMax % int64(time.Millisecond)
+	// 探针与标记 LastWriteNs 同为纳秒精度（账本原文解析，不经 strftime
+	// 毫秒截断）——同毫秒的迟到写入仍能在纳秒上越过水位被判新写，避免
+	// 「截断后相等 ⇒ 误判无新写」的盲区。
 	probe, err := repo.SpanWriteMax(bot.ID, spans[0].Start, spans[len(spans)-1].End)
 	if err != nil {
 		return nil, err

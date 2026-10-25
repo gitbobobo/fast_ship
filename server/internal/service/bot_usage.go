@@ -413,9 +413,9 @@ func (s *BotService) usageRollupCovered(botIDs, pastDates []string, loc *time.Lo
 				markMax = m.LastWriteNs
 			}
 		}
-		// 探针经 strftime 毫秒截断，而标记 LastWriteNs 带亚毫秒尾数——统一截到
-		// 毫秒再比，否则落在同一毫秒内的更晚写入永远越不过标记水位。
-		markMax -= markMax % int64(time.Millisecond)
+		// 探针与标记 LastWriteNs 同为纳秒精度（账本原文解析）——同毫秒的
+		// 迟到写入仍能在纳秒上越过水位被判新写（写路径 usageRollupPlan
+		// 同规则），截断比较会误判相等而放行脏日。
 		probe, err := repo.SpanWriteMax(botID, spans[0].Start, spans[len(spans)-1].End)
 		if err != nil {
 			return nil, err
@@ -1028,6 +1028,25 @@ func (s *BotService) loadBotUsageLedger(userID, rangeParam, botID string, maintD
 		}
 		for _, row := range rows {
 			taskRows[row.ID] = row
+		}
+	}
+	// 已删除任务没有活名来源：实时累加的桶在覆盖日外拿不到汇总行快照，
+	// 回退名字墓碑（与 run 明细 TaskNameTombstonesTx 同口径），窗口内各日
+	// 显示同一个名字而不是「已删除的任务」。
+	var tombIDs []string
+	for id, acc := range taskAccs {
+		if _, ok := taskRows[id]; !ok && acc.name == "" {
+			tombIDs = append(tombIDs, id)
+		}
+	}
+	if len(tombIDs) > 0 {
+		if tomb, err := repository.NewBotUsageRollupRepository(s.db).
+			TaskNameTombstonesTx(s.db, tombIDs); err == nil {
+			for id, name := range tomb {
+				if acc := taskAccs[id]; acc != nil && acc.name == "" && name != "" {
+					acc.name = name
+				}
+			}
 		}
 	}
 

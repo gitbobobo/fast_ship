@@ -580,7 +580,8 @@ cost_estimate)` 实际金额优先），`SpendInWindow` 一次窗口扫描服务
 publishEvent。告警只作提示，不停止运行；文案注明未计价部分未计入。
 
 **供应商实际金额**：usage chunk 的 ExtraFields 按优先级解析
-`cost`（仅 OpenRouter 地址置信 USD）> `total_cost` > `*_usd` 命名字段 >
+`cost` / `total_cost`（裸名不带币别声明，仅 OpenRouter 地址置信 USD）>
+`*_usd` 命名字段（字段名自身声明币别）>
 `cost_details.upstream_inference_cost`（上游成本非用户实收）。置信 USD
 的值落 `provider_cost`（本列可直接 SUM）；币别不明或非用户实收的金额进
 `provider_cost_raw`（`{"field","value"}` JSON，只记录不展示）。两表落库
