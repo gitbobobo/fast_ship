@@ -196,13 +196,18 @@ code_repository_url 到新主机即重新解析绑定）→ 删除旧集成。�
 ## 项目响应的 code_repo_url
 
 `GET /api/projects*` 的 `Project.code_repo_url`（可空）：无代码仓（owner/repo
-缺一）为 null；`code_integration_id` 空按本部署 GitHub Web 基址拼
-`{ghWebBase}/{owner}/{repo}`（`githubWebBase`：`github_app.api_base_url`
-推出 `api.github.com→github.com`，GHE 推出实例 `host[:port]`）；绑定
-forgejo 集成拼 `{base_url}/{owner}/{repo}`；**绑定的集成行查不到（并发
-删除窗口）为 null**——绝不回落 github.com，私有 owner/repo 不能被发到
-github.com。列表路径一次批量取回涉及的集成行（`forge_integrations`
-ListByIDs），没有 N+1。
+缺一）为 null；`code_integration_id` 空按 `projects.github_host` 选择渲染
+主机——`'github.com'` 拼 `https://github.com`（显式写公共 github.com 的公开
+仓），空串拼本部署 GitHub Web 基址 `{ghWebBase}`（`githubWebBase`：
+`github_app.api_base_url` 推出 `api.github.com→github.com`，GHE 推出实例
+`host[:port]`）；绑定 forgejo 集成拼 `{base_url}/{owner}/{repo}`；**绑定的
+集成行查不到（并发删除窗口）为 null**——绝不回落 github.com，私有
+owner/repo 不能被发到 github.com。列表路径一次批量取回涉及的集成行
+（`forge_integrations` ListByIDs），没有 N+1。
+
+存量兼容：`github_host` 列上线前的行是 NULL——那时 code_repo_url 恒按公共
+github.com 渲染，启动迁移 `migrateProjectGithubHosts` 把 NULL 一次性收成
+`'github.com'` 保住旧语义（新写入的行恒为 `''`/`'github.com'`，不会被误收）。
 
 ## 密钥存储
 
@@ -213,9 +218,11 @@ ListByIDs），没有 N+1。
 
 写接口三态：
 
-- `token` / `webhook_secret`：缺省、null、空串都 = 保留旧值（留空即保留现值；
-  **不支持单独清空**，要作废就删除集成重建——这两个密钥没有「显式清空」的
-  UI 语义）。
+- `token`：缺省、null、空串都 = 保留旧值（必填凭证，**不支持清空**——要
+  作废就删除集成重建）。
+- `webhook_secret`：缺省、null = 保留；空串 = 清空已存密钥（与 ca_cert_pem
+  同口径——设错或撤掉验签时不用删集成重建，编辑框有「清空已存密钥」
+  勾选）；其余替换并加密落库。
 - `ca_cert_pem`：缺省 = 保留，空串 = 清空，其余替换并校验 PEM 可解析。
 - `api_base_url`：缺省/null = 保留（推导行仍是推导、显式行仍显式），空串 =
   解除钉死回到推导，非空 = 显式钉死该端点。响应投影恒返回**生效值**（推导

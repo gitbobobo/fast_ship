@@ -74,8 +74,10 @@ function ForgeIntegrationDialogInner({
   const isEdit = integration !== null;
   const createIntegration = useCreateForgeIntegration();
   const updateIntegration = useUpdateForgeIntegration();
-  // 「清空已存证书」是表单外状态：勾选后提交 ca_cert_pem: ""，与留空保留区分。
+  // 「清空已存证书」「清空已存密钥」是表单外状态：勾选后分别提交
+  // ca_cert_pem: "" / webhook_secret: ""（空串=清空），与留空保留区分。
   const [clearCaCert, setClearCaCert] = useState(false);
+  const [clearWebhookSecret, setClearWebhookSecret] = useState(false);
 
   // api_base_url 推导态不预填展开值——展开值留在占位符里跟随 base_url 动态
   // 展示，预填会让「跟随推导」与「显式钉死」同形，管理员分不清当前语义。
@@ -146,11 +148,16 @@ function ForgeIntegrationDialogInner({
     if (apiBaseUrl !== apiBasePrefill) {
       payload.api_base_url = apiBaseUrl;
     }
-    // 凭证留空 = 保留旧值（契约：省略即保留），只在填了新值时提交。
+    // 凭证留空 = 保留旧值（契约：省略即保留），只在填了新值时提交；
+    // webhook_secret 勾选「清空已存密钥」时显式提交空串=清空。
     const token = values.token.trim();
     if (token) payload.token = token;
     const secret = values.webhook_secret.trim();
-    if (secret) payload.webhook_secret = secret;
+    if (clearWebhookSecret) {
+      payload.webhook_secret = "";
+    } else if (secret) {
+      payload.webhook_secret = secret;
+    }
     if (clearCaCert) {
       payload.ca_cert_pem = "";
     } else {
@@ -293,13 +300,31 @@ function ForgeIntegrationDialogInner({
               id="forge-webhook-secret"
               type="password"
               autoComplete="off"
+              disabled={clearWebhookSecret}
               {...register("webhook_secret")}
             />
-            <p className="text-xs text-muted-foreground">
-              {isEdit && integration?.webhook_secret_set
-                ? "已设置，留空保持不变"
-                : "用于校验 Forgejo 事件来源"}
-            </p>
+            {isEdit && integration?.webhook_secret_set ? (
+              <>
+                <p className="text-xs text-muted-foreground">
+                  已设置，留空保持不变
+                </p>
+                <Label className="flex items-center gap-2 text-sm font-normal">
+                  <input
+                    type="checkbox"
+                    checked={clearWebhookSecret}
+                    onChange={(event) =>
+                      setClearWebhookSecret(event.target.checked)
+                    }
+                    className="h-4 w-4 rounded border-input accent-primary"
+                  />
+                  清空已存密钥
+                </Label>
+              </>
+            ) : (
+              <p className="text-xs text-muted-foreground">
+                用于校验 Forgejo 事件来源
+              </p>
+            )}
           </div>
 
           <div className="space-y-2">

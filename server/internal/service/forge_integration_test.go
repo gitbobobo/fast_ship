@@ -273,7 +273,8 @@ func TestForgeIntegrationUpdateThreeStates(t *testing.T) {
 		t.Fatal("omitted webhook secret must keep old ciphertext")
 	}
 
-	// 显式空串：token / webhook_secret 保留旧值；ca_cert_pem 清空。
+	// 显式空串：token 保留旧值（必填项不支持清空）；webhook_secret 与
+	// ca_cert_pem 同口径清空——设错或撤掉验签时不用删集成重建。
 	_, err = env.svc.Update(ctx, created.Id, &api.UpdateForgeIntegrationRequest{
 		Token: ptrStr(""), WebhookSecret: ptrStr(""), CaCertPem: ptrStr(""),
 	})
@@ -281,9 +282,11 @@ func TestForgeIntegrationUpdateThreeStates(t *testing.T) {
 		t.Fatalf("update empty strings: %v", err)
 	}
 	row, _ = env.repo.FindByID(created.Id)
-	if !bytesEqual(row.TokenEncrypted, rowAtCreate.TokenEncrypted) ||
-		!bytesEqual(row.WebhookSecretEncrypted, rowAtCreate.WebhookSecretEncrypted) {
-		t.Fatal("empty string secrets must keep old ciphertext")
+	if !bytesEqual(row.TokenEncrypted, rowAtCreate.TokenEncrypted) {
+		t.Fatal("empty token must keep old ciphertext")
+	}
+	if len(row.WebhookSecretEncrypted) != 0 {
+		t.Fatal("empty webhook_secret should clear stored secret")
 	}
 	if row.CACertPEM != "" {
 		t.Fatal("empty ca_cert_pem should clear")

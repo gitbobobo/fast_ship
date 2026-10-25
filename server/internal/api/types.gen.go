@@ -4873,7 +4873,7 @@ type UpdateForgeIntegrationRequest struct {
 	// Token 新 PAT；留空（省略、null 或空串）= 保留现值；不支持单独清空，需删除集成重建
 	Token *string `json:"token,omitempty"`
 
-	// WebhookSecret 新验签密钥；留空（省略、null 或空串）= 保留现值；不支持单独清空，需删除集成重建
+	// WebhookSecret 新验签密钥；省略或 null = 保留现值；空串 = 清空已存密钥；其余替换并加密落库
 	WebhookSecret *string `json:"webhook_secret,omitempty"`
 }
 

@@ -3901,7 +3901,7 @@ export interface components {
             api_base_url?: string | null;
             /** @description 新 PAT；留空（省略、null 或空串）= 保留现值；不支持单独清空，需删除集成重建 */
             token?: string | null;
-            /** @description 新验签密钥；留空（省略、null 或空串）= 保留现值；不支持单独清空，需删除集成重建 */
+            /** @description 新验签密钥；省略或 null = 保留现值；空串 = 清空已存密钥；其余替换并加密落库 */
             webhook_secret?: string | null;
             /** @description null = 保留；空串 = 清空；其余替换并校验 PEM */
             ca_cert_pem?: string | null;

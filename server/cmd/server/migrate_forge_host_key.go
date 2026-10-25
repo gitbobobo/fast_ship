@@ -61,3 +61,25 @@ func migrateForgeAPIDerived(db *gorm.DB, logger *zap.Logger) error {
 	}
 	return nil
 }
+
+// migrateProjectGithubHosts 给存量 projects 行回填 github_host（INT-166）。
+//
+// github_host 列上线前写入的项目没有主机标识：那时的 code_repo_url 投影恒按
+// github.com 渲染（无 GHE/Forgejo 概念），所以存量行的真实意图全是「公共
+// github.com」。新语义下空串 = 本部署 GitHub——GHE 部署上存量行会被渲染成
+// {ghe}/o/r（大概率不存在），AutoMigrate 给存量行留的 NULL 正好区分「旧行」
+// 与新写入的空串，一次性把 NULL 收成 'github.com' 保住旧渲染。
+//
+// 幂等：只动 github_host IS NULL 的行，重复启动无副作用。
+func migrateProjectGithubHosts(db *gorm.DB, logger *zap.Logger) error {
+	res := db.Exec(`UPDATE projects SET github_host = 'github.com'
+		WHERE github_host IS NULL`)
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected > 0 && logger != nil {
+		logger.Info("存量项目 github_host 已回填",
+			zap.Int64("rows", res.RowsAffected))
+	}
+	return nil
+}

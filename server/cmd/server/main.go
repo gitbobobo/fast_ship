@@ -626,6 +626,12 @@ func runBootMigrations(db *gorm.DB, fileStorage storage.Storage, logger *zap.Log
 		return fmt.Errorf("代码集成 api_base_url 迁移失败: %w", err)
 	}
 
+	// projects.github_host 回填（INT-166）：NULL 存量行的旧渲染语义是公共
+	// github.com，收成 'github.com' 保住 GHE 部署下的 code_repo_url 链接。
+	if err := migrateProjectGithubHosts(db, logger); err != nil {
+		return fmt.Errorf("项目 github_host 迁移失败: %w", err)
+	}
+
 	if err := createBootIndexes(db); err != nil {
 		return fmt.Errorf("创建手工索引失败: %w", err)
 	}

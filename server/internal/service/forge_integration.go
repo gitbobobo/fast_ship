@@ -207,8 +207,8 @@ func (s *ForgeIntegrationService) Create(ctx context.Context, req *api.CreateFor
 }
 
 // Update PUT /api/deployment/integrations/:id：部分更新。url / allow_private_
-// network 变更按最终值重新校验（flag 关闭会按公网口径复核现有基址）；token /
-// webhook_secret 缺省、null 或空串 = 保留旧值；ca_cert_pem 空串 = 清空；
+// network 变更按最终值重新校验（flag 关闭会按公网口径复核现有基址）；token
+// 缺省、null 或空串 = 保留旧值；webhook_secret / ca_cert_pem 空串 = 清空；
 // api_base_url 空串 = 重置为 {base_url}/api/v1 推导。base_url 归一主机变更
 // 等同迁移全部项目绑定，仍有引用时 40935 拒绝（同 Delete 口径），同主机的
 // 写法级改写（尾斜杠、默认端口）不触发。
@@ -321,7 +321,11 @@ func (s *ForgeIntegrationService) Update(ctx context.Context, id string, req *ap
 		}
 	}
 	if req.WebhookSecret != nil {
-		if secret := strings.TrimSpace(*req.WebhookSecret); secret != "" {
+		if secret := strings.TrimSpace(*req.WebhookSecret); secret == "" {
+			// 空串 = 清空已存密钥（与 ca_cert_pem 同口径）：设错或要撤掉
+			// 验签时不再只能替换或删集成重建。缺省/null 仍是保留。
+			fields["webhook_secret_encrypted"] = ""
+		} else {
 			secretEnc, err := crypto.Encrypt([]byte(secret), encKey)
 			if err != nil {
 				s.logger.Error("加密集成 webhook 密钥失败", zap.Error(err))

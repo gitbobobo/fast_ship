@@ -79,3 +79,51 @@ func TestMigrateForgeHostKeys(t *testing.T) {
 		t.Fatalf("second empty-key row must coexist: %v", err)
 	}
 }
+
+// github_host 回填（INT-166 R37 Note）：列上线前的存量行是 NULL，旧渲染语义
+// 恒为公共 github.com——一次性收成 'github.com'；新写入的空串（=本部署
+// GitHub）与已写的 'github.com' 都不能被动。
+func TestMigrateProjectGithubHosts(t *testing.T) {
+	dsn := "file:" + uuid.NewString() + "?mode=memory&cache=shared"
+	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if err := db.AutoMigrate(&model.Project{}); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	rows := []model.Project{
+		{ID: uuid.NewString(), UserID: "u", Name: "legacy"},
+		{ID: uuid.NewString(), UserID: "u", Name: "bare-ghe", GithubHost: ""},
+		{ID: uuid.NewString(), UserID: "u", Name: "public-gh", GithubHost: "github.com"},
+	}
+	if err := db.Create(&rows).Error; err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	// 模拟存量库：github_host 列上线前的行是 NULL（'' 的 bare-ghe 代表新写）。
+	if err := db.Exec("UPDATE projects SET github_host = NULL WHERE name = 'legacy'").Error; err != nil {
+		t.Fatalf("reset legacy: %v", err)
+	}
+
+	if err := migrateProjectGithubHosts(db, zap.NewNop()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if err := migrateProjectGithubHosts(db, zap.NewNop()); err != nil {
+		t.Fatalf("migrate again: %v", err)
+	}
+
+	for _, tc := range []struct{ name, want string }{
+		{"legacy", "github.com"},
+		{"bare-ghe", ""},
+		{"public-gh", "github.com"},
+	} {
+		var got model.Project
+		if err := db.Where("name = ?", tc.name).First(&got).Error; err != nil {
+			t.Fatalf("load %s: %v", tc.name, err)
+		}
+		if got.GithubHost != tc.want {
+			t.Errorf("%s github_host = %q, want %q", tc.name, got.GithubHost, tc.want)
+		}
+	}
+}
