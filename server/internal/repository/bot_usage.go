@@ -575,6 +575,7 @@ type MaintenanceRequestDetailRow struct {
 	UsageComplete    bool     `gorm:"column:usage_complete"`
 	PromptTokens     *int64   `gorm:"column:prompt_tokens"`
 	CachedTokens     *int64   `gorm:"column:cached_tokens"`
+	CompletionTokens *int64   `gorm:"column:completion_tokens"`
 	CostEstimate     *float64 `gorm:"column:cost_estimate"`
 	ErrorCode        *string  `gorm:"column:error_code"`
 }
@@ -586,7 +587,7 @@ func (r *BotUsageRepository) ListMaintenanceRequestRows(maintRunIDs []string) ([
 	for _, batch := range ChunkIDs(maintRunIDs, UsageQueryBatch) {
 		var part []MaintenanceRequestDetailRow
 		err := r.db.Model(&model.BotMaintenanceRequest{}).
-			Select("maintenance_run_id, purpose, status, usage_complete, prompt_tokens, cached_tokens, cost_estimate, error_code").
+			Select("maintenance_run_id, purpose, status, usage_complete, prompt_tokens, cached_tokens, completion_tokens, cost_estimate, error_code").
 			Where("maintenance_run_id IN ?", batch).
 			Scan(&part).Error
 		if err != nil {

@@ -322,26 +322,36 @@ func botUsageMaintAggOf(rows []repository.MaintenanceRequestDetailRow) map[strin
 	for _, row := range rows {
 		agg := out[row.MaintenanceRunID]
 		agg.Total++
+		var prompt, cached, completion int64
+		if row.PromptTokens != nil {
+			prompt = *row.PromptTokens
+		}
+		if row.CachedTokens != nil {
+			cached = *row.CachedTokens
+		}
+		if row.CompletionTokens != nil {
+			completion = *row.CompletionTokens
+		}
+		clamped := cached
+		if clamped > prompt {
+			clamped = prompt
+		}
 		if row.CostEstimate != nil {
 			agg.Priced++
 			agg.CostSum = botSumOptional(agg.CostSum, row.CostEstimate)
+			// priced_* 与 SQL 同口径：只按已计价行累加，不要求 usage 完整。
+			agg.PricedPromptSum += prompt
+			agg.PricedCachedSum += clamped
+			agg.PricedCompletionSum += completion
 		} else {
 			agg.Unpriced++
 		}
 		if row.UsageComplete {
-			var prompt, cached int64
-			if row.PromptTokens != nil {
-				prompt = *row.PromptTokens
-			}
-			if row.CachedTokens != nil {
-				cached = *row.CachedTokens
-			}
-			if cached > prompt {
-				cached = prompt
-			}
 			agg.PromptSum += prompt
-			agg.CachedSum += cached
+			agg.CachedSum += clamped
+			agg.CompletionSum += completion
 		}
+		// ToolsSum 恒 0：维护请求无工具定义列（SQL 投影同口径传 0）。
 		out[row.MaintenanceRunID] = agg
 	}
 	return out

@@ -282,13 +282,6 @@ function RunContextGrowth({
   const points = useMemo(
     () =>
       requests
-        .filter(
-          // usage 不可信且无估算值的请求不产点，避免把「没有数据」画
-          // 成真实的 0 输入。
-          (request) =>
-            (request.usage_complete && request.prompt_tokens != null) ||
-            request.input_tokens_estimate > 0,
-        )
         .map((request) => {
           // 请求级 usage_complete 之外再验内部一致性：缓存数大于输入数
           // 的实测明显不自洽，改取估算值画空心点。
@@ -303,14 +296,19 @@ function RunContextGrowth({
           const tokens = actual
             ? request.prompt_tokens!
             : request.input_tokens_estimate;
-          const estimated = !actual;
-          return {
-            x: request.ordinal,
-            y: tokens,
-            estimated,
-            label: `#${request.ordinal} · ${tokens.toLocaleString("en-US")} 输入${estimated ? "（估算）" : ""}`,
-          };
-        }),
+          return { request, tokens, estimated: !actual };
+        })
+        .filter(
+          // 估算路径要求 estimate>0（与服务端 FirstRequestInputByRun 同口
+          // 径）：不可信又无估算值的请求不产点，避免画出虚假的 0 低谷。
+          (p) => !p.estimated || p.tokens > 0,
+        )
+        .map(({ request, tokens, estimated }) => ({
+          x: request.ordinal,
+          y: tokens,
+          estimated,
+          label: `#${request.ordinal} · ${tokens.toLocaleString("en-US")} 输入${estimated ? "（估算）" : ""}`,
+        })),
     [requests],
   );
   // 没有请求记录时请求列表已有空态，图不重复占位。
