@@ -45,6 +45,7 @@ func Setup(
 	deploymentGitHubAppHandler *handler.DeploymentGitHubAppHandler,
 	memberHandler *handler.MemberHandler,
 	deploymentSettingsHandler *handler.DeploymentSettingsHandler,
+	forgeIntegrationHandler *handler.ForgeIntegrationHandler,
 	authService *service.AuthService,
 	apiKeyRepo *repository.ApiKeyRepository,
 ) {
@@ -316,7 +317,7 @@ func Setup(
 
 		// 管理员（INT-129）：JWT + RequireAdmin，角色每请求查库现判，API Key
 		// 在 RequireJWT 已被 40301 拒绝。成员与邀请、部署设置写入、部署级
-		// GitHub App 的配置与 Manifest 创建。
+		// GitHub App 的配置与 Manifest 创建、代码仓集成（INT-166）。
 		admin := api.Group("", middleware.RequireJWT(cfg, authService), middleware.RequireAdmin(authService))
 		{
 			admin.GET("/members", memberHandler.List)
@@ -329,6 +330,13 @@ func Setup(
 			admin.POST("/deployment/github-app/test", deploymentGitHubAppHandler.Test)
 			admin.POST("/deployment/github-app/manifest", deploymentGitHubAppHandler.CreateManifest)
 			admin.POST("/deployment/github-app/manifest/complete", deploymentGitHubAppHandler.CompleteManifest)
+			// 代码仓集成（INT-166）：CRUD 与连接检测全部仅管理员。
+			admin.GET("/deployment/integrations", forgeIntegrationHandler.List)
+			admin.POST("/deployment/integrations", forgeIntegrationHandler.Create)
+			admin.GET("/deployment/integrations/:id", forgeIntegrationHandler.Get)
+			admin.PUT("/deployment/integrations/:id", forgeIntegrationHandler.Update)
+			admin.DELETE("/deployment/integrations/:id", forgeIntegrationHandler.Delete)
+			admin.POST("/deployment/integrations/:id/test", forgeIntegrationHandler.Test)
 		}
 	}
 

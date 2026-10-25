@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -12,6 +14,7 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/config"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
+	"github.com/godbobo/fast_ship/server/internal/pkg/forges"
 	ghclient "github.com/godbobo/fast_ship/server/internal/pkg/github"
 	"github.com/godbobo/fast_ship/server/internal/pkg/storage"
 	"github.com/godbobo/fast_ship/server/internal/repository"
@@ -36,6 +39,15 @@ type ProjectService struct {
 	credentials   *ProjectCredentials
 	newClient     ghclient.ClientFactory
 	reviewCleaner ProjectReviewCleaner
+	// forgeIntegrations 部署级代码仓集成查找（INT-166）：仓库 URL 的非
+	// github 主机按 base_url 匹配 forgejo 集成。nil 时视为「没有已配置集成」，
+	// 非 github 主机一律报未匹配。
+	forgeIntegrations *repository.ForgeIntegrationRepository
+	// ghWebBase 本部署的 GitHub Web 基址（构造时由 cfg 推导一次）：内置
+	// github 的 code_repo_url 与仓库 URL 的 GitHub 主机识别共用；GHE 部署
+	// 不回落公共 github.com。
+	ghWebBase string
+	logger    *zap.Logger
 }
 
 // SetReviewCleaner 绑定删除项目前的审查远端清理（main.go 注入）。
@@ -49,13 +61,21 @@ func NewProjectService(
 	storage storage.Storage,
 	cfg *config.Config,
 	logger *zap.Logger,
+	forgeIntegrations *repository.ForgeIntegrationRepository,
 ) *ProjectService {
+	ghBase := "https://github.com"
+	if cfg != nil {
+		ghBase = githubWebBase(cfg)
+	}
 	return &ProjectService{
-		projectRepo:   projectRepo,
-		versionRepo:   versionRepo,
-		syncStateRepo: syncStateRepo,
-		storage:       storage,
-		credentials:   newProjectCredentials(projectRepo, tokenRepo, cfg, logger),
+		projectRepo:       projectRepo,
+		versionRepo:       versionRepo,
+		syncStateRepo:     syncStateRepo,
+		storage:           storage,
+		credentials:       newProjectCredentials(projectRepo, tokenRepo, cfg, logger),
+		forgeIntegrations: forgeIntegrations,
+		ghWebBase:         ghBase,
+		logger:            logger,
 		newClient: func(token, owner, repo string) ghclient.Client {
 			return ghclient.NewClient(token, owner, repo)
 		},
@@ -71,21 +91,23 @@ func (s *ProjectService) Create(userID string, req *CreateProjectRequest) (*Proj
 		return nil, errs.ErrProjectNameExists
 	}
 
-	var owner, repo string
+	var owner, repo, publicHost string
 	if repositoryURL := api.Deref(req.RepositoryUrl); repositoryURL != "" {
-		owner, repo, err = parseRepositoryURL(repositoryURL)
-		if err != nil {
-			return nil, errs.New(errs.ErrInvalidParams.Code, errs.ErrInvalidParams.Message+": "+err.Error())
+		var appErr *errs.AppError
+		owner, repo, _, _, publicHost, appErr = s.parseRepoBinding(repositoryURL, true)
+		if appErr != nil {
+			return nil, appErr
 		}
 	}
 
-	// 代码仓库（PR 审查用）：解析后落 code 字段；与公开仓库相同的归一在
-	// normalizeCodeRepo 统一做（与 Update 同一条规则）。
-	var codeOwner, codeRepo string
+	// 代码仓库（PR 审查用）：解析后落 code 字段并按 host 派生集成绑定；与
+	// 公开仓库相同的归一在 normalizeCodeRepo 统一做（与 Update 同一条规则）。
+	var codeOwner, codeRepo, codeIntegrationID, codeHostKey string
 	if codeURL := api.Deref(req.CodeRepositoryUrl); codeURL != "" {
-		codeOwner, codeRepo, err = parseRepositoryURL(codeURL)
-		if err != nil {
-			return nil, errs.New(errs.ErrInvalidParams.Code, errs.ErrInvalidParams.Message+": "+err.Error())
+		var appErr *errs.AppError
+		codeOwner, codeRepo, codeIntegrationID, codeHostKey, _, appErr = s.parseRepoBinding(codeURL, false)
+		if appErr != nil {
+			return nil, appErr
 		}
 	}
 
@@ -100,28 +122,35 @@ func (s *ProjectService) Create(userID string, req *CreateProjectRequest) (*Proj
 	}
 
 	project := &model.Project{
-		ID:                  uuid.New().String(),
-		UserID:              userID,
-		Name:                req.Name,
-		Description:         api.Deref(req.Description),
-		GithubOwner:         owner,
-		GithubRepo:          repo,
-		CodeGithubOwner:     codeOwner,
-		CodeGithubRepo:      codeRepo,
-		PublicGitHubTokenID: publicTokenID,
-		CodeGitHubTokenID:   codeTokenID,
+		ID:                uuid.New().String(),
+		UserID:            userID,
+		Name:              req.Name,
+		Description:       api.Deref(req.Description),
+		GithubOwner:       owner,
+		GithubRepo:        repo,
+		GithubHost:        publicHost,
+		CodeGithubOwner:   codeOwner,
+		CodeGithubRepo:    codeRepo,
+		CodeIntegrationID: codeIntegrationID,
+		// 新解析出的绑定带期望主机键进写谓词（见 model 字段注释）。
+		CodeIntegrationHostKey: codeHostKey,
+		PublicGitHubTokenID:    publicTokenID,
+		CodeGitHubTokenID:      codeTokenID,
 	}
 
-	normalizeCodeRepo(project)
+	s.normalizeCodeRepo(project)
 
 	if err := s.projectRepo.Create(project); err != nil {
 		if errors.Is(err, repository.ErrGitHubTokenMissing) {
 			return nil, errs.ErrGitHubTokenNotFound
 		}
+		if errors.Is(err, repository.ErrForgeIntegrationMissing) {
+			return nil, errForgeBindingGone
+		}
 		return nil, errs.ErrInternal
 	}
 
-	return s.toResponse(project, s.syncStateFor(project.ID)), nil
+	return s.toResponse(project, s.syncStateFor(project.ID))
 }
 
 func (s *ProjectService) Get(id, userID string) (*ProjectResponse, error) {
@@ -132,7 +161,7 @@ func (s *ProjectService) Get(id, userID string) (*ProjectResponse, error) {
 		}
 		return nil, errs.ErrInternal
 	}
-	return s.toResponse(project, s.syncStateFor(project.ID)), nil
+	return s.toResponse(project, s.syncStateFor(project.ID))
 }
 
 // List 分页返回项目；includeShelved 控制是否包含搁置中的项目（INT-165）。
@@ -167,9 +196,18 @@ func (s *ProjectService) List(userID string, page, pageSize int, includeShelved 
 		}
 	}
 
+	integrations, err := s.forgeIntegrationsByIDs(projects)
+	if err != nil {
+		// 集成查询瞬时失败不能让 code_repo_url 静默落 null——前端会把
+		// 健康绑定显示成「已失效」，管理员顺手清除就把真绑定清掉了。
+		return nil, 0, errs.ErrInternal
+	}
 	resp := make([]ProjectResponse, len(projects))
 	for i, p := range projects {
-		projectResp := s.toResponse(&p, syncStates[p.ID])
+		projectResp, err := s.toResponseWithIntegrations(&p, syncStates[p.ID], integrations)
+		if err != nil {
+			return nil, 0, errs.ErrInternal
+		}
 		if count, ok := issueCounts[p.ID]; ok {
 			projectResp.IssueCount = &count.Total
 			projectResp.IssueWorkflowCounts = &api.IssueWorkflowCounts{
@@ -244,33 +282,41 @@ func (s *ProjectService) Update(id, userID string, req *UpdateProjectRequest) (*
 	}
 
 	if repositoryURL := api.Deref(req.RepositoryUrl); repositoryURL != "" {
-		owner, repo, err := parseRepositoryURL(repositoryURL)
-		if err != nil {
-			return nil, errs.New(errs.ErrInvalidParams.Code, errs.ErrInvalidParams.Message+": "+err.Error())
+		owner, repo, _, _, publicHost, appErr := s.parseRepoBinding(repositoryURL, true)
+		if appErr != nil {
+			return nil, appErr
 		}
 		project.GithubOwner = owner
 		project.GithubRepo = repo
+		project.GithubHost = publicHost
+		// 公开仓恒为 GitHub（public_integration_id 保持空列），无需改动。
 	}
 
-	// 代码仓库三态：key 缺省保留、显式空清空（回落公开仓库）、非空替换。
-	// 与公开仓库相同的归一在下面应用完全部仓库字段后统一做。
+	// 代码仓库三态：key 缺省保留、显式空清空（回落公开仓库，集成绑定一并
+	// 清）、非空替换并按新 host 重新派生集成绑定。与公开仓库相同的归一在
+	// 下面应用完全部仓库字段后统一做。
 	if req.CodeRepositoryUrl.Set {
 		if req.CodeRepositoryUrl.Value != "" {
-			owner, repo, err := parseRepositoryURL(req.CodeRepositoryUrl.Value)
-			if err != nil {
-				return nil, errs.New(errs.ErrInvalidParams.Code, errs.ErrInvalidParams.Message+": "+err.Error())
+			owner, repo, integrationID, hostKey, _, appErr := s.parseRepoBinding(req.CodeRepositoryUrl.Value, false)
+			if appErr != nil {
+				return nil, appErr
 			}
 			project.CodeGithubOwner = owner
 			project.CodeGithubRepo = repo
+			project.CodeIntegrationID = integrationID
+			// 重新按 URL 解析的绑定把期望主机键带给写谓词：落库时集成行
+			// host_key 必须仍是解析时的值，否则本次绑定按失效拒绝。
+			project.CodeIntegrationHostKey = hostKey
 		} else {
 			project.CodeGithubOwner = ""
 			project.CodeGithubRepo = ""
+			project.CodeIntegrationID = ""
 		}
 	}
 
 	// 归一收尾：公开与代码仓库字段都已应用完（含请求不带 code key、只改
 	// 公开仓库撞上存量 code 仓库的情形），同一规则统一判一次。
-	normalizeCodeRepo(project)
+	s.normalizeCodeRepo(project)
 
 	// Token 引用三态：key 缺省保留、显式空清空、非空替换（须属于当前用户）。
 	if req.PublicGithubTokenId.Set {
@@ -290,13 +336,16 @@ func (s *ProjectService) Update(id, userID string, req *UpdateProjectRequest) (*
 		if errors.Is(err, repository.ErrGitHubTokenMissing) {
 			return nil, errs.ErrGitHubTokenNotFound
 		}
+		if errors.Is(err, repository.ErrForgeIntegrationMissing) {
+			return nil, errForgeBindingGone
+		}
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, errs.ErrProjectNotFound
 		}
 		return nil, errs.ErrInternal
 	}
 
-	return s.toResponse(project, s.syncStateFor(project.ID)), nil
+	return s.toResponse(project, s.syncStateFor(project.ID))
 }
 
 func (s *ProjectService) Delete(id, userID string) error {
@@ -378,7 +427,7 @@ func (s *ProjectService) shelveResponse(id, userID string) (*ProjectResponse, er
 		}
 		return nil, errs.ErrInternal
 	}
-	return s.toResponse(project, s.syncStateFor(project.ID)), nil
+	return s.toResponse(project, s.syncStateFor(project.ID))
 }
 
 // GetBranches fetches all branches from the project's GitHub repository.
@@ -416,58 +465,322 @@ func (s *ProjectService) GetBranches(ctx context.Context, id, userID string) ([]
 	return resp, defaultBranch, nil
 }
 
-// normalizeCodeRepo 归一收尾：代码仓库与公开仓库大小写不敏感相同时清空 code
-// 字段（空 = 同公开仓库，规范存储不存冗余值）。必须在应用完全部仓库字段之后
-// 调用，Create/Update 共用这一条规则，写侧不另设第二处归一判断。
-func normalizeCodeRepo(p *model.Project) {
+// normalizeCodeRepo 归一收尾：GitHub 代码仓库与公开仓库大小写不敏感相同时
+// 清空 code 字段（空 = 同公开仓库，规范存储不存冗余值）。仅对未绑定集成的
+// （GitHub）代码仓生效——forgejo 代码仓与 github 公开仓的 owner/repo 相同也
+// 不是同一仓库，归一会丢掉 forgejo 绑定。必须在应用完全部仓库字段之后调用，
+// Create/Update 共用这一条规则，写侧不另设第二处归一判断。
+//
+// 吞并还要求主机等价：code 字段不记主机（恒归本部署 GitHub），公开仓
+// github_host='github.com' 表示公共实例——GHE 部署下两边同 owner/repo
+// 是不同主机的不同仓库，吞并会让 code_repo_url 回落渲染成公共实例、
+// 审查目标静默改指。本部署实例本身就是 github.com（非 GHE）时两边同指
+// 公共实例，吞并仍成立。
+func (s *ProjectService) normalizeCodeRepo(p *model.Project) {
+	if p.CodeIntegrationID != "" {
+		return
+	}
+	if p.GithubHost == repoHostGitHub &&
+		forges.HostKey(s.ghWebBase) != repoHostKey(repoHostGitHub) {
+		return
+	}
 	if p.CodeGithubOwner != "" && strings.EqualFold(
 		p.CodeGithubOwner+"/"+p.CodeGithubRepo, p.GithubOwner+"/"+p.GithubRepo) {
 		p.CodeGithubOwner, p.CodeGithubRepo = "", ""
 	}
 }
 
-func parseRepositoryURL(raw string) (owner, repo string, err error) {
+// repoHostGitHub 内置 GitHub 集成的归一主机。
+const repoHostGitHub = "github.com"
+
+// parseRepositoryURL 解析仓库地址，返回归一 host（小写；URL 带端口时保留
+// host:port 供集成匹配）、owner 与 repo。接受形态：
+//   - owner/repo（纯 owner/repo 视为内置 GitHub）；
+//   - github.com/o/r、https://github.com/o/r、http://github.com/o/r（GitHub
+//     的 http/https 写法一律当 github 处理，行为兼容旧实现）；
+//   - host/o/r、https://host/o/r、https://host:port/o/r（自建 Forgejo 等）。
+//
+// host 判定：无 scheme 时首段含 `.` 或 `:` 视为 host，否则视为 owner；带
+// scheme 时首段一律是 host。explicit 标记输入是否显式写了主机段（裸
+// owner/repo 为 false）——「github.com/o/r」与「o/r」归一后同为 github.com，
+// 但 GHE 部署对两者的处理不同（见 parseRepoBinding）。尾部归一先剥尾斜杠再
+// 剥 `.git` 后缀（「…/r.git/」剥得干净）；owner/repo 之外的第三段非空直接
+// 拒绝（/pulls/1 等页面路径与多余层级不再静默丢弃）。
+func parseRepositoryURL(raw string) (host, owner, repo string, explicit bool, err error) {
 	s := strings.TrimSpace(raw)
 	if s == "" {
-		return "", "", errors.New("仓库链接不能为空")
+		return "", "", "", false, errors.New("仓库链接不能为空")
 	}
 
+	scheme := ""
 	if idx := strings.Index(s, "://"); idx != -1 {
+		scheme = strings.ToLower(s[:idx])
 		s = s[idx+3:]
 	}
-
-	lower := strings.ToLower(s)
-	if strings.HasPrefix(lower, "github.com/") {
-		s = s[11:]
+	// 只认 http(s)：ssh://、ftp:// 这类非 HTTP 协议若静默当 https 归一，会
+	// 命中 https 集成的 host_key 把仓库绑到与输入协议不符的集成上。
+	if scheme != "" && scheme != "http" && scheme != "https" {
+		return "", "", "", false, errors.New("仓库链接协议无效，应为 http 或 https")
 	}
 
-	s = strings.TrimSuffix(s, ".git")
-	s = strings.TrimSuffix(s, "/")
-
 	parts := strings.SplitN(s, "/", 3)
+	first := parts[0]
+	// 首段含 @：SCP 风格 git@host:o/r（无 scheme，含 : 会被当主机）与带
+	// userinfo 的 https://u@h/o/r 同拒——SSH 链路本期不支持、userinfo
+	// 不该出现在仓库链接里，各自按主机名归一都会报出指向性错误的
+	// 「主机未匹配」，单独识别给明确文案。
+	if strings.Contains(first, "@") {
+		return "", "", "", false, errors.New("仓库链接不支持 SSH 地址或含用户信息的 URL，请改用 https://host/owner/repo")
+	}
+	// 无 scheme 时首段含 `.` 或 `:` 才是 host（owner 名可能带点，但纯
+	// owner/repo 永远不含端口分隔符）；有 scheme 的 URL 首段必是 host。
+	// host 形态剥掉首段，owner/repo 形态整体保留。刻意把单标签首段
+	// （myhost/o/r、localhost/o/r）归 github.com 的 owner/repo：裸形态与
+	// 合法 owner/repo 无法区分，绑错主机的代价（code_repo_url 指向
+	// github.com/myhost/r）由用户自己写错简写承担，写全 https:// 即按
+	// 主机解析。
+	if scheme == "" && !strings.ContainsAny(first, ".:") {
+		host = repoHostGitHub
+	} else {
+		explicit = true
+		host = strings.ToLower(first)
+		if len(first) < len(s) {
+			s = s[len(first)+1:] // 连 host 后的 "/" 一起剥掉
+		} else {
+			s = ""
+		}
+		// 无显式端口的非 github 主机按 scheme 补默认端口（http→80，其余→
+		// 443），与集成 base_url 的归一（forgeBaseHostKey）同口径：http
+		// 集成只有显式写 http:// 的仓库 URL 才匹配得上。github.com 的任何
+		// scheme/默认端口写法都归一回裸主机名（= 内置 github-default）。
+		if _, port, err := net.SplitHostPort(host); err != nil {
+			// 首段带冒号却不是合法 host[:port]/[v6]:port（forge:、无括号
+			// ::1、破损括号）是输入格式错误，不是「缺端口」——补默认端口
+			// 只会归一成永不命中的键，把写错格式误报成「主机未匹配」、
+			// 将管理员引向去配一条不可能的集成。完整括号形态（[::1] 无
+			// 端口）仍按缺端口补默认。
+			bracketed := strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]")
+			if strings.Contains(host, ":") && !bracketed {
+				return "", "", "", false, errors.New("仓库链接主机格式无效（IPv6 地址需以 [] 包裹，端口须为数字）")
+			}
+			if scheme == "http" {
+				host += ":80"
+			} else {
+				host += ":443"
+			}
+		} else if n, perr := strconv.Atoi(port); perr != nil || n < 1 || n > 65535 {
+			// host:abc、host:0、host:99999 这类非法端口会落到集成匹配报
+			// 「主机未匹配」，把管理员引向去配一条不可能的集成（base_url
+			// 保存侧同口径拒越界端口）——端口非法按输入错误直接报。
+			return "", "", "", false, errors.New("仓库链接端口无效：" + port)
+		}
+		// github.com 判定走归一后的 repoHostKey（剥尾点、数字端口归一）：
+		// 「github.com.:80」「github.com.:443」这类写法与 github.com 同主机，
+		// 字面比较漏判会落到集成匹配报「主机未匹配」，前后端口径还分叉。
+		if key := repoHostKey(host); key == repoHostKey(repoHostGitHub) || key == repoHostGitHub+":80" {
+			host = repoHostGitHub
+		}
+	}
+
+	// 尾部归一先斜杠后 .git：「…/o/r.git/」这类尾巴先去掉斜杠才能剥到 .git
+	// （旧顺序剥不到，repo 名会带着 .git 后缀落库）。
+	s = strings.TrimSuffix(s, "/")
+	s = strings.TrimSuffix(s, ".git")
+
+	parts = strings.SplitN(s, "/", 3)
 	if len(parts) < 2 {
-		return "", "", errors.New("仓库链接格式无效，应为 owner/repo 或 https://github.com/owner/repo")
+		return host, "", "", explicit, errors.New("仓库链接格式无效，应为 owner/repo 或 https://github.com/owner/repo")
+	}
+	// 第三段非空 = 链接不是仓库根（/pulls/1、/issues 等页面路径或多余层级，
+	// 裸形态 a/b/c 同口径）：拒绝而不是静默丢弃——丢掉后拼出的 owner/repo
+	// 不是用户指的仓库。
+	if len(parts) > 2 && strings.TrimSpace(parts[2]) != "" {
+		if !explicit {
+			// 裸形态 a/b/c：既是「owner/repo 拖了多余段」，也可能是单标签
+			// 内网主机 myhost/o/r（无 . 无 : 被当 owner）——两种修法都点明。
+			return host, "", "", explicit, errors.New("仓库链接包含多余路径段；若首段是内网主机名，请写全 https://host/owner/repo")
+		}
+		return host, "", "", explicit, errors.New("仓库链接包含多余路径段，请填写仓库根地址（owner/repo 或 https://host/owner/repo）")
 	}
 
 	owner = strings.TrimSpace(parts[0])
 	repo = strings.TrimSpace(parts[1])
 
 	if owner == "" || repo == "" {
-		return "", "", errors.New("仓库链接格式无效，owner 和 repo 不能为空")
+		return host, "", "", explicit, errors.New("仓库链接格式无效，owner 和 repo 不能为空")
 	}
 
 	if !repoNameRegex.MatchString(owner) || !repoNameRegex.MatchString(repo) {
-		return "", "", errors.New("仓库链接包含非法字符")
+		return host, "", "", explicit, errors.New("仓库链接包含非法字符")
+	}
+	// 纯点段单独拒：字符集放行但 . / .. 拼出的链接（{base}/../r）经 URL
+	// 归一会指向别的仓库，落库后回填与审查链接全是错目标。
+	if owner == "." || owner == ".." || repo == "." || repo == ".." {
+		return host, "", "", explicit, errors.New("仓库链接 owner/repo 不能是 . 或 ..")
 	}
 
-	return owner, repo, nil
+	return host, owner, repo, explicit, nil
 }
+
+// repoHostKey 仓库 URL 主机的归一键：小写 host + 端口；无端口按 https 缺省
+// 443（无 scheme 的裸形态与 https 同口径）。带端口的输入经 SplitHostPort
+// 归一（顺带剥掉 IPv6 字面量的方括号，与 forgeBaseHostKey 同形态）；数字
+// 端口统一拼写（:0443 → :443），与 parseBaseURL 落库前的归一同口径——同
+// 一端点的不同写法必须点查出同一个 host_key。
+//
+// 归一键刻意不含 scheme（host:port 即端点身份）：显式写错协议的极端形态
+// （https://forge:80/o/r 绑到 http://forge 集成）仍命中同一条集成——协议
+// 正确性由集成自身 api_base_url 保证（探测与 API 调用都走它），code_repo_url
+// 按集成基址渲染。把 scheme 纳入匹配会让「同机不同 scheme 写法」变成不可
+// 解释的「主机未匹配」，收益不抵多一类报错。
+func repoHostKey(host string) string {
+	if h, port, err := net.SplitHostPort(host); err == nil {
+		if n, err := strconv.Atoi(port); err == nil {
+			port = strconv.Itoa(n)
+		}
+		return strings.ToLower(strings.TrimRight(h, ".")) + ":" + port
+	}
+	return strings.ToLower(strings.TrimRight(host, ".")) + ":443"
+}
+
+// forgeBaseHostKey 集成 base_url 的归一键：小写 host + 端口，空端口按 scheme
+// 缺省补齐（https→443、http→80）。解析失败返回空串（保存时已校验过，这里
+// 只防御存量脏行参与比较）。实现在 pkg/forges.HostKey——与 forge_integrations
+// .host_key 的落库、唯一索引共用同一份逻辑。
+func forgeBaseHostKey(baseURL string) string {
+	return forges.HostKey(baseURL)
+}
+
+// parseRepoBinding 解析仓库地址并按用途派生集成绑定（INT-166）：GitHub 主机
+// （或纯 owner/repo）返回空集成 id（= 内置 github-default）；其余主机必须命中
+// 一条已配置 forgejo 集成并返回其 id，否则报「主机未匹配任何已配置集成」，
+// 不再像旧实现那样把 host 静默解析成 owner。forPublic=true 时非 github.com
+// 主机一律拒绝——公开仓的 issue 镜像与发文本期仍是 GitHub only，命中
+// forgejo 集成的报错会点明这一层。
+func (s *ProjectService) parseRepoBinding(raw string, forPublic bool) (owner, repo, integrationID, hostKey, publicHost string, appErr *errs.AppError) {
+	host, owner, repo, explicit, err := parseRepositoryURL(raw)
+	if err != nil {
+		return "", "", "", "", "", errs.New(errs.ErrInvalidParams.Code, errs.ErrInvalidParams.Message+": "+err.Error())
+	}
+	if host == repoHostGitHub {
+		// 裸 owner/repo = 「本部署的 GitHub」，归内置无歧义；代码仓显式写
+		// github.com 的地址在 GHE 部署下是本部署 App 够不到的公共实例
+		// ——绑上去 code_repo_url/审查 API 全指向错主机。拒收并点明
+		// 本部署实例，比按内置静默收下诚实。公开仓不拒：github_owner/
+		// github_repo 是存量数据字段（github.com 语义=公共 GitHub，基线
+		// 一直允许，同步可达性本是部署自己的事），且前端回填恒为
+		// github.com 形态，拒掉会让 GHE 部署下改个名字都报 40001。
+		if explicit && !forPublic && forges.HostKey(s.ghWebBase) != repoHostKey(repoHostGitHub) {
+			ghHost := strings.TrimPrefix(s.ghWebBase, "https://")
+			return "", "", "", "", "", errs.New(errs.ErrInvalidParams.Code,
+				errs.ErrInvalidParams.Message+": 该地址指向公共 github.com，本部署 GitHub 实例为 "+ghHost+"；请改用 "+ghHost+"/owner/repo 或 owner/repo")
+		}
+		// publicHost 只记「显式 github.com」一种形态：裸 owner/repo 与 GHE
+		// 主机地址都归本部署 GitHub（空串），显式 github.com 才是公共实例
+		// ——GHE 部署下 code_repo_url 回落渲染靠它区分两类存储值。
+		publicHost := ""
+		if forPublic && explicit {
+			publicHost = repoHostGitHub
+		}
+		return owner, repo, "", "", publicHost, nil
+	}
+	key := repoHostKey(host)
+	// 部署的 GitHub Web 主机（GHE 的 <host>[:port]）同按内置 github 处理：
+	// 该主机就是本部署的 GitHub 实例，去 forgejo 匹配会误报「主机未匹配
+	// 任何已配置集成」。
+	if key == forges.HostKey(s.ghWebBase) {
+		return owner, repo, "", "", "", nil
+	}
+	id, found, matchErr := s.forgeIntegrationByHost(host)
+	if matchErr != nil {
+		s.logger.Error("forge 集成主机匹配查询失败", zap.String("host", host), zap.Error(matchErr))
+		return "", "", "", "", "", errs.ErrInternal
+	}
+	if forPublic {
+		if found {
+			return "", "", "", "", "", errs.New(errs.ErrInvalidParams.Code,
+				errs.ErrInvalidParams.Message+": 公开仓库仅支持 GitHub，"+displayRepoHost(raw, host)+" 是已配置的 Forgejo 集成（issue 镜像与发版仍只支持 GitHub）")
+		}
+		// 未匹配也要先点明公开仓约束：只报「主机未匹配」会引导管理员去配
+		// 一条该主机的 Forgejo 集成，提交时仍撞 GitHub-only 约束——白配一次。
+		return "", "", "", "", "", errs.New(errs.ErrInvalidParams.Code,
+			errs.ErrInvalidParams.Message+": 公开仓库仅支持 GitHub，"+displayRepoHost(raw, host)+" 不是本部署的 GitHub 实例")
+	}
+	if !found {
+		// 无 scheme 的裸主机按 https 归一（host:443 键）：http-only 集成
+		// （host:80 键）匹配不上时点明写全 http://，报错才有指向性。
+		return "", "", "", "", "", errRepoHostUnmatched(displayRepoHost(raw, host), !strings.Contains(raw, "://"))
+	}
+	return owner, repo, id, key, "", nil
+}
+
+// forgeIntegrationByHost 按 base_url 主机匹配已配置的 forgejo 集成（INT-166）。
+// 仓库 URL 归一成「小写 host + 端口（空端口按 scheme 缺省 443/80）」后按
+// host_key 点查（idx_forge_integrations_host_key 索引），只取 id 一列。
+// 集成仓库未注入（部分测试）视为没有已配置集成；查询失败按错误上抛，不用
+// 「未匹配」顶替真实故障。
+func (s *ProjectService) forgeIntegrationByHost(host string) (id string, found bool, err error) {
+	if s.forgeIntegrations == nil {
+		return "", false, nil
+	}
+	id, _, found, err = s.forgeIntegrations.FindByHostKey(repoHostKey(host), "")
+	return id, found, err
+}
+
+// displayRepoHost 报错用的用户可辨识主机：host 是补了 scheme 默认端口的
+// 归一形态（unknown.example.com → unknown.example.com:443），直接透出会让
+// 用户以为自己多写了端口。按原始输入剥回默认端口；用户显式写的端口
+// （含无 scheme 的 host:port 形态与默认端口值本身）原样保留。
+func displayRepoHost(raw, host string) string {
+	rest := strings.TrimSpace(raw)
+	isHTTP := strings.HasPrefix(strings.ToLower(rest), "http://")
+	if i := strings.Index(rest, "://"); i >= 0 {
+		rest = rest[i+3:]
+	}
+	if i := strings.Index(rest, "/"); i >= 0 {
+		rest = rest[:i]
+	}
+	// 首段带显式端口（host:port 或 [v6]:port 形态）：剥默认端口会把用户
+	// 写的端口藏掉，回显原样（无 scheme 裸主机带端口语义同带 scheme）。
+	colons := strings.Count(rest, ":")
+	if colons == 1 || (strings.HasPrefix(rest, "[") && strings.Contains(rest, "]:")) {
+		return host
+	}
+	if isHTTP {
+		return strings.TrimSuffix(host, ":80")
+	}
+	return strings.TrimSuffix(host, ":443")
+}
+
+// errRepoHostUnmatched 仓库 URL 主机未命中任何已配置集成（40001 系）。
+// schemeless 为 true（用户没写 http(s)://）时补一条 http 实例写法提示。
+func errRepoHostUnmatched(host string, schemeless bool) *errs.AppError {
+	msg := errs.ErrInvalidParams.Message + ": 仓库主机 " + host + " 未匹配任何已配置集成"
+	if schemeless {
+		msg += "（若实例为 http 服务，请写全 http://" + host + "/owner/repo）"
+	}
+	return errs.New(errs.ErrInvalidParams.Code, msg)
+}
+
+// errForgeBindingGone 项目写路径的存在性条件拦下的集成失效（40001）：
+// parseRepoBinding/读行 之后、项目落库之前集成被并发删除，重试即可拿到
+// 「集成不存在」的确定结论或重新选择集成。
+var errForgeBindingGone = errs.New(errs.ErrInvalidParams.Code,
+	"代码仓集成不存在或已被删除，请重试")
 
 // toResponse 组装项目响应；syncState 由调用方提供——单项目路径用
 // syncStateFor 现取，列表路径经 GetOrCreateByProjectIDs 批量预取后逐条传入，
 // nil 表示同步状态缺省。is_shelved 按响应生成时刻判定（INT-165）：到期
 // 自动恢复没有定时任务，同一行在截止前后两次读取会得到不同的 is_shelved。
-func (s *ProjectService) toResponse(p *model.Project, syncState *model.IssueSyncState) *ProjectResponse {
+func (s *ProjectService) toResponse(p *model.Project, syncState *model.IssueSyncState) (*ProjectResponse, error) {
+	return s.toResponseWithIntegrations(p, syncState, nil)
+}
+
+// toResponseWithIntegrations 带预取集成行的响应组装：列表路径一次批量取回
+// 全部被引用集成（避免 N+1）；integrations 传 nil 时单项目路径现场查一次。
+// 集成行查询失败返回 error 让外层 500——不能把「查询挂了」投影成
+// code_repo_url=null（前端会显示「绑定已失效」，误导管理员去清真绑定）。
+func (s *ProjectService) toResponseWithIntegrations(p *model.Project, syncState *model.IssueSyncState, integrations map[string]model.ForgeIntegration) (*ProjectResponse, error) {
 	resp := &ProjectResponse{
 		Id:                  p.ID,
 		Name:                p.Name,
@@ -478,12 +791,32 @@ func (s *ProjectService) toResponse(p *model.Project, syncState *model.IssueSync
 		CodeGithubRepo:      p.CodeGithubRepo,
 		PublicGithubTokenId: p.PublicGitHubTokenID,
 		CodeGithubTokenId:   p.CodeGitHubTokenID,
+		// 集成引用（INT-166）：空列映射为 null（= 内置 github-default）；写入
+		// 接线由后续任务完成，本期只随响应带出。
+		CodeIntegrationId:   nilIfEmpty(p.CodeIntegrationID),
+		PublicIntegrationId: nilIfEmpty(p.PublicIntegrationID),
 		ShelvedAt:           formatTimePtr(p.ShelvedAt),
 		ShelvedUntil:        formatTimePtr(p.ShelvedUntil),
 		IsShelved:           p.IsShelved(time.Now()),
 		CreatedAt:           p.CreatedAt.Format("2006-01-02T15:04:05Z"),
 		UpdatedAt:           p.UpdatedAt.Format("2006-01-02T15:04:05Z"),
 	}
+	// 公开仓页面地址随响应透出：编辑表单与仓库直链直接回填，不在前端拼
+	// 主机——github_host='github.com' 是公共实例，空串按本部署 GitHub Web
+	// 基址（GHE 部署拼 github.com 会静默改写 github_host 语义）。
+	if p.GithubOwner != "" && p.GithubRepo != "" {
+		base := s.ghWebBase
+		if p.GithubHost != "" {
+			base = "https://" + p.GithubHost
+		}
+		url := base + "/" + p.GithubOwner + "/" + p.GithubRepo
+		resp.RepositoryUrl = &url
+	}
+	codeRepoURL, err := s.codeRepoUrl(p, integrations)
+	if err != nil {
+		return nil, err
+	}
+	resp.CodeRepoUrl = codeRepoURL
 
 	if syncState != nil {
 		resp.IssueSync = &api.IssueSyncState{
@@ -504,7 +837,7 @@ func (s *ProjectService) toResponse(p *model.Project, syncState *model.IssueSync
 		}
 	}
 
-	return resp
+	return resp, nil
 }
 
 // syncStateFor 单项目路径现取同步状态；repo 未挂载或读取失败时容错为 nil。
@@ -517,4 +850,89 @@ func (s *ProjectService) syncStateFor(projectID string) *model.IssueSyncState {
 		return nil
 	}
 	return state
+}
+
+// nilIfEmpty 空串映射为 nil：集成引用列的空值（= 内置 github-default）在
+// 项目响应里统一为 null，与「显式引用了某个集成」区分开。
+func nilIfEmpty(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
+}
+
+// codeRepoUrl 项目代码仓的页面地址（INT-166）：无代码仓（owner/repo 缺一）
+// 返回 nil；空集成引用按内置 github 拼 https://github.com/{o}/{r}；forgejo
+// 集成拼 {base_url}/{o}/{r}。绑定的集成行查不到（并发删除窗口 / repo 未
+// 注入）返回 nil——不把私有 owner/repo 发到 github.com；查询本身失败则
+// 返回 error 让外层 500，区分「行已删除」与「查询瞬时故障」。
+func (s *ProjectService) codeRepoUrl(p *model.Project, integrations map[string]model.ForgeIntegration) (*string, error) {
+	owner, repo := p.CodeRepo()
+	if owner == "" || repo == "" {
+		return nil, nil
+	}
+	if p.CodeIntegrationID == "" {
+		base := s.ghWebBase
+		// 回落到公开仓且公开仓是显式 github.com：仓在公共实例上，按本部署
+		// GHE 拼会指向不存在的主机。code 字段显式配置不存在此歧义——code
+		// URL 的显式 github.com 在 GHE 部署写入时就已被拒。
+		if p.CodeGithubOwner == "" && p.GithubHost != "" {
+			base = "https://" + p.GithubHost
+		}
+		url := base + "/" + owner + "/" + repo
+		return &url, nil
+	}
+	row, ok := integrations[p.CodeIntegrationID]
+	if !ok {
+		if integrations != nil || s.forgeIntegrations == nil {
+			return nil, nil
+		}
+		found, err := s.forgeIntegrations.FindByID(p.CodeIntegrationID)
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				// 行确实已删（应用层拦在前的并发窗口残余）——投影 null。
+				return nil, nil
+			}
+			return nil, err
+		}
+		row = *found
+	}
+	base := strings.TrimRight(strings.TrimSpace(row.BaseURL), "/")
+	if base == "" {
+		return nil, nil
+	}
+	if row.Kind == model.ForgeIntegrationKindGitHub {
+		base = s.ghWebBase
+	}
+	url := base + "/" + owner + "/" + repo
+	return &url, nil
+}
+
+// forgeIntegrationsByIDs 批量取项目引用的集成行：列表路径给 codeRepoUrl 用，
+// 一次查询避免 N+1。repo 未注入返回空表（无集成可引用）；查询失败返回 error
+// 让列表整体 500——响应降级成 null 会把健康绑定显示成「已失效」。
+func (s *ProjectService) forgeIntegrationsByIDs(projects []model.Project) (map[string]model.ForgeIntegration, error) {
+	out := map[string]model.ForgeIntegration{}
+	if s.forgeIntegrations == nil {
+		return out, nil
+	}
+	// public_integration_id 本期恒为空（公开仓 GitHub-only），仍一并收集——
+	// 未来启用公开仓集成绑定时渲染路径不会再漏取该行。
+	ids := make([]string, 0, len(projects))
+	for i := range projects {
+		if projects[i].CodeIntegrationID != "" {
+			ids = append(ids, projects[i].CodeIntegrationID)
+		}
+		if projects[i].PublicIntegrationID != "" {
+			ids = append(ids, projects[i].PublicIntegrationID)
+		}
+	}
+	rows, err := s.forgeIntegrations.ListByIDs(ids)
+	if err != nil {
+		return nil, err
+	}
+	for _, row := range rows {
+		out[row.ID] = row
+	}
+	return out, nil
 }

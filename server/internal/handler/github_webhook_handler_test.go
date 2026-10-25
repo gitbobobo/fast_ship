@@ -56,6 +56,8 @@ func setupWebhookEnv(t *testing.T, secrets WebhookSecretSource) *webhookHandlerE
 	}
 	if err := db.AutoMigrate(
 		&model.User{}, &model.Project{}, &model.Notification{},
+		// 项目写路径的集成存在性条件引用 forge_integrations（生产恒有）。
+		&model.ForgeIntegration{},
 		&model.GitHubWebhookDelivery{},
 		&model.ProjectReviewSettings{}, &model.ReviewRun{}, &model.ReviewRunToken{},
 		&model.ReviewPullRequest{}, &model.ReviewAsset{}, &model.ReviewDebounce{},

@@ -14,6 +14,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import { GithubIcon } from "@/components/ui/github-icon";
 import { HeaderActions } from "@/components/layout/header-actions";
+import { ForgeIntegrationsCard } from "@/components/forge-integrations/forge-integrations-card";
 import { SettingsPageShell } from "@/routes/settings/layout";
 import {
   useCreateGitHubAppManifest,
@@ -322,6 +323,7 @@ function AdminView({ data }: { data: GitHubAppDeployment }) {
         <HeaderActions
           primary={
             <Button
+              variant="outline"
               size="sm"
               disabled={createManifest.isPending || publicUrlMissing}
               onClick={handleCreate}
@@ -339,7 +341,7 @@ function AdminView({ data }: { data: GitHubAppDeployment }) {
               onClick={handleTest}
             >
               <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
-              {testDeployment.isPending ? "检测中..." : "测试连接"}
+              {testDeployment.isPending ? "检测中..." : "测试 GitHub App 连接"}
             </Button>,
           ]}
         />
@@ -347,6 +349,7 @@ function AdminView({ data }: { data: GitHubAppDeployment }) {
     >
       <div className="space-y-6">
         <IntegrationsIntro />
+        <ForgeIntegrationsCard />
         <div className="rounded-xl border">
           <StatusCard data={data} />
 
@@ -434,6 +437,8 @@ function AdminView({ data }: { data: GitHubAppDeployment }) {
 }
 
 // 成员视角：只看状态与安装入口，没有任何配置/测试/创建入口。
+// member 视角不渲染代码仓集成卡片：列表接口 RequireAdmin，member 拉不到
+// 数据（40305，无恢复路径），GitHub App 状态卡对所有成员可见即可。
 function MemberView({ data }: { data: GitHubAppDeployment }) {
   return (
     <SettingsPageShell>
@@ -465,7 +470,7 @@ function IntegrationsIntro() {
     <div>
       <h2 className="text-lg font-medium">集成</h2>
       <p className="text-sm text-muted-foreground">
-        部署级 GitHub App，用于 PR 评审与 webhook 事件。
+        部署级集成：代码托管连接与 GitHub App（PR 评审与 webhook 事件）。
       </p>
     </div>
   );

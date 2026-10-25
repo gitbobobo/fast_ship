@@ -303,7 +303,7 @@ func setupBotTestEnv(t *testing.T, turns ...fakeModelTurn) *botTestEnv {
 		repository.NewVersionRepository(base.db),
 		repository.NewIssueSyncStateRepository(base.db),
 		repository.NewUserGitHubTokenRepository(base.db),
-		base.storage, base.cfg, zap.NewNop())
+		base.storage, base.cfg, zap.NewNop(), nil)
 	t3EnvRepo := repository.NewT3EnvironmentRepository(base.db)
 	t3ShellHub := NewT3ShellHub(zap.NewNop())
 	t.Cleanup(t3ShellHub.Close)

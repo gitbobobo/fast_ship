@@ -4,6 +4,10 @@ Fast Ship 用 GitHub App 身份代发 PR 审查评论与行内 review、写 comm
 并接收 App 的 webhook 投递。INT-119 曾把身份做成**用户级**（每个用户自己建 App），INT-129 收回
 **部署级**：一套部署一个 App，管理员在网页上配置，成员只看状态。
 
+> Forgejo 集成（INT-166）见 `docs/internal/forge-integrations.md`；GitHub App
+> 在那边的集成列表里以内置 `github-default` 只读投影出现，身份仍由本文描述的
+> 链路管理。
+
 部署地址（`public_url`）与 manifest 一键创建的完整流程见
 `docs/internal/deployment-settings.md`；本文只描述身份本身、检测与 webhook。
 

@@ -234,6 +234,12 @@ func (s *ReviewService) ListReviewRecords(ctx context.Context, userID, projectID
 
 	// 批量补 environment_name。
 	envNames := s.reviewRunEnvNames(ctx, runs)
+	// PR 链接兜底按 GitHub 身份构造：审查执行本期只有 GitHub 一条链路
+	// （forgejo 绑定的项目在审查设置侧进不来），存量运行的 forge 身份就是
+	// github——项目后来被改绑 forgejo，也不能把历史运行的链接改写到新
+	// 实例上。P1 接入 Forgejo 审查执行时须随运行记录存 forge 身份再按
+	// 记录解析（INT-166 方向审计结论）。
+	links := githubLinks(githubWebBase(s.cfg))
 
 	// (repo, pr) → rounds。
 	type prKey struct {
@@ -252,16 +258,17 @@ func (s *ReviewService) ListReviewRecords(ctx context.Context, userID, projectID
 
 	for _, pr := range prs {
 		key := prKey{pr.RepoFullName, pr.PRNumber}
-		out = append(out, buildReviewPRRecord(&pr, roundsByPR[key], envNames, currentRepo))
+		out = append(out, buildReviewPRRecord(&pr, roundsByPR[key], envNames, currentRepo, links))
 	}
 	return out, nil
 }
 
 // buildReviewPRRecord 单条 PR 记录投影：PR 元信息 + 轮次列表（round_number
 // DESC）。records 列表与跨项目详情共用；currentRepo 是设置行的审查仓库
-// 快照（can_rerun 判定键），为空表示项目没有设置行。
+// 快照（can_rerun 判定键），为空表示项目没有设置行。links 按项目代码仓
+// 集成解析，PR 标题/URL 快照缺失时兜底构造 PR 链接。
 func buildReviewPRRecord(pr *model.ReviewPullRequest, roundMap map[int][]model.ReviewRun,
-	envNames map[string]string, currentRepo string) api.ReviewPullRequestRecord {
+	envNames map[string]string, currentRepo string, links forgeLinks) api.ReviewPullRequestRecord {
 	rec := api.ReviewPullRequestRecord{
 		PrNumber:     pr.PRNumber,
 		RepoFullName: pr.RepoFullName,
@@ -293,7 +300,7 @@ func buildReviewPRRecord(pr *model.ReviewPullRequest, roundMap map[int][]model.R
 		rec.PrUrl = meta.PRURL
 	}
 	if rec.PrUrl == "" {
-		rec.PrUrl = "https://github.com/" + pr.RepoFullName + "/pull/" + strconv.Itoa(pr.PRNumber)
+		rec.PrUrl = links.PullURL(pr.RepoFullName, pr.PRNumber)
 	}
 
 	numbers := make([]int, 0, len(roundMap))

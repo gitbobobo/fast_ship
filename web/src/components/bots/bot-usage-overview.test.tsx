@@ -263,8 +263,8 @@ describe("BotUsageOverviewPanel", () => {
     // 「总花费」出现在总计卡与任务表头两处。
     expect(screen.getAllByText("总花费")).toHaveLength(2);
     expect(screen.getByText("$1.23")).toBeInTheDocument();
-    // 未计价占比 + 原因提示。（标签是短词「未计价」，见 StatCard 注释的
-    // 窄栏截断考虑；这里断卡值与占比。02b2ccb0 改短标签时测试断言漏更。）
+    // 未计价占比 + 原因提示（「未计价」出现在总计卡与按机器人表头两处）。
+    expect(screen.getAllByText("未计价")).toHaveLength(2);
     expect(screen.getByText("2 次")).toBeInTheDocument();
     expect(screen.getByText(/占 20%/)).toBeInTheDocument();
     expect(screen.getByText(/目录无价/)).toBeInTheDocument();
