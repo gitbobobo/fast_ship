@@ -199,7 +199,9 @@ Forgejo 仓库的 PR 审查与 GitHub 走同一条协调管线（webhook 事务�
   评论没有隐藏标记、login 也不以 [bot] 结尾）。
 - **错误归一**：Forgejo 适配器把非 2xx 包成 `*forge.StatusError`，与 GitHub
   透传的 `githubapi.StatusError` 同构，service 的 `IsNotFound`/`IsForbidden`/
-  `IsDiffTooLarge` 按同一口径判定（`forge/errors.go`）。diff 超本端读入
+  `IsDiffTooLarge` 按同一口径判定（`forge/errors.go`）。响应体超 512B
+  截断头尾入 `Body` 前，限流字样判定已在完整 body 上做并落
+  `StatusError.RateLimited`——大 HTML 错误页把限流说明写在中段时判定不丢。diff 超本端读入
   上限（`respBodyMaxBytes`，64MB）时平台并未拒绝、无 HTTP 状态码可言——
   适配器返回 `ErrDiffTooLarge` 哨兵，`IsDiffTooLarge` 与平台 too_large
   同口径命中：service 走确定性降级收尾（顶层评论降级），不按可重试
@@ -210,7 +212,9 @@ Forgejo 仓库的 PR 审查与 GitHub 走同一条协调管线（webhook 事务�
   Forgejo 适配器（每次现取现建，不缓存凭证——轮换立即生效）；来源缺失/集成
   不存在/kind 不符/解密失败都在这条链上明确报错，不静默回落 GitHub。
 - **入站 webhook `POST /api/forge/:id/webhooks`**（公开端点，
-  `handler/forge_webhook.go`）：按 ID 查集成（不存在 404）→ 解密 webhook
+  `handler/forge_webhook.go`）：按 ID 查集成（不存在与验签失败同回
+  401/40107——无行即无签可验，分开回 404 会开放集成 id 存在性探测）→
+  解密 webhook
   secret（行存在但未配置 503，密文损坏 50000）→ `io.LimitReader` 读体 →
   `X-Forgejo-Signature` 验签（**纯 hex HMAC-SHA256，无 `sha256=` 前缀**，
   大小写不敏感、`hmac.Equal` 常量时间；缺失/不等/带任何前缀一律 40107）→

@@ -136,7 +136,8 @@ func forgejoSyncPayload() []byte {
 }
 
 // TestForgeWebhookHandler_SignatureMatrix 验签矩阵：合法 hex → 202 且落账；
-// 错误密钥/缺头/带 sha256= 前缀 → 401 且零写入；未知集成 404；行未配密钥 503。
+// 错误密钥/缺头/带 sha256= 前缀 → 401 且零写入；未知集成与验签失败同回
+// 401（不开放集成 id 存在性探测）；行未配密钥 503。
 func TestForgeWebhookHandler_SignatureMatrix(t *testing.T) {
 	env := setupForgeWebhookEnv(t)
 	row := env.seedForgeIntegration(t, "whsec-forge")
@@ -175,10 +176,11 @@ func TestForgeWebhookHandler_SignatureMatrix(t *testing.T) {
 		t.Fatalf("rejected writes = %d, want 0", n)
 	}
 
-	// 未知集成 → 404。
+	// 未知集成 → 与验签失败同回 401/40107：无行即无签可验，分开回 404
+	// 会开放集成 id 存在性探测。
 	w = env.postForgeWebhook(t, "no-such-integration", "fw-5", "pull_request", body, sig)
-	if w.Code != http.StatusNotFound {
-		t.Fatalf("unknown integration = %d, want 404", w.Code)
+	if w.Code != http.StatusUnauthorized || !strings.Contains(w.Body.String(), "40107") {
+		t.Fatalf("unknown integration = %d %s, want 401/40107", w.Code, w.Body.String())
 	}
 	// 行存在但密钥未配置 → 503（拒收，没有可验签的身份）。
 	bare := env.seedForgeIntegration(t, "")

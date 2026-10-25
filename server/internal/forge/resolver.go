@@ -70,18 +70,18 @@ func (r *ReviewClients) ClientFor(ctx context.Context, integrationID, repoFullNa
 		}
 		tokenDigest := sha256.Sum256([]byte(token))
 		key := integrationID + "\x00" + hex.EncodeToString(tokenDigest[:])
-		slot, loaded := r.forgejoLogins.LoadOrStore(key, &ForgejoLoginCache{})
-		if !loaded {
-			// 换槽逐出同集成旧 PAT 槽：槽随 resolver 终身存活，PAT 轮换
-			// 后旧身份不该常驻（集成数量级小，Range 前缀过滤代价可忽略）。
-			prefix := integrationID + "\x00"
-			r.forgejoLogins.Range(func(k, _ any) bool {
-				if ks, ok := k.(string); ok && ks != key && strings.HasPrefix(ks, prefix) {
-					r.forgejoLogins.Delete(k)
-				}
-				return true
-			})
-		}
+		// 换槽逐出同集成旧 PAT 槽：每次解析都清扫而不只新建槽时——并发
+		// ClientFor 在轮换窗口竞争时拿到旧槽的一方跳过逐出会让旧身份残留到
+		// 下一次轮换。槽随 resolver 终身存活，集成数量级小，Range 前缀过滤
+		// 代价可忽略。
+		prefix := integrationID + "\x00"
+		r.forgejoLogins.Range(func(k, _ any) bool {
+			if ks, ok := k.(string); ok && ks != key && strings.HasPrefix(ks, prefix) {
+				r.forgejoLogins.Delete(k)
+			}
+			return true
+		})
+		slot, _ := r.forgejoLogins.LoadOrStore(key, &ForgejoLoginCache{})
 		return NewForgejoReviewClient(httpClient, apiBase, token).
 			withLoginCache(slot.(*ForgejoLoginCache)), nil
 	}

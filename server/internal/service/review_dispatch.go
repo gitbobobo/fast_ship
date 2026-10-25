@@ -93,7 +93,9 @@ func (s *ReviewService) launchRun(ctx context.Context, runID string, now time.Ti
 	// closed 投递丢失」——closed 有意不进重投，对账不会补）。已关闭/合并
 	// 直接落 cancelled/pr_closed 终态，不建线程。检查必须在签发令牌之前：
 	// 只有从未签发的运行才会被 dispatchRuns 的认领超窗重新认领——读 PR 失败
-	// 时同样不落终态、不签令牌，留给下一轮。
+	// 时同样不落终态、不签令牌，留给下一轮。确定性失败（仓库/PR 已删、凭证
+	// 被拒/吊销、集成行缺失、密文损坏）每轮重认领结果相同：按消费防抖/轮询
+	// 的同一口径直接落终态报真实原因，不空转到 deadline 误报超时。
 	prCtx, prCancel := context.WithTimeout(ctx, 30*time.Second)
 	client, clientErr := s.reviewClient(prCtx, run.IntegrationID, run.RepoFullName, run.InstallationID)
 	var pr *forge.PullRequest
@@ -102,8 +104,16 @@ func (s *ReviewService) launchRun(ctx context.Context, runID string, now time.Ti
 	}
 	prCancel()
 	if clientErr != nil {
-		s.logger.Warn("派发前读取 PR 失败，运行等待重新认领",
-			zap.String("run", run.ID), zap.Error(clientErr))
+		switch {
+		case forge.IsNotFound(clientErr):
+			// 仓库/PR 已删——与「PR 已关」同为正常终局，不另发失败通知。
+			s.cancelRunPRClosed(&run, now)
+		case deterministicReviewAccessErr(clientErr):
+			s.failRunDispatch(run.ID, "access_denied", clientErr.Error(), now)
+		default:
+			s.logger.Warn("派发前读取 PR 失败，运行等待重新认领",
+				zap.String("run", run.ID), zap.Error(clientErr))
+		}
 		return
 	}
 	if !prReviewable(pr) {

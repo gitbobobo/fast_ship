@@ -75,20 +75,22 @@ func (c *ForgejoReviewClient) Kind() string { return KindForgejo }
 func (c *ForgejoReviewClient) Bearer(context.Context) (string, error) { return c.token, nil }
 
 // statusErr 非 2xx 响应统一包装：body 截断防大 payload 撑爆日志，结构与
-// GitHub 适配器透传的 githubapi.StatusError 同构。
+// GitHub 适配器透传的 githubapi.StatusError 同构。限流判定在截断前对完整
+// body 做（限流字样落在被丢弃中段时也不丢判定），Body 文本只做展示与日志。
 func (c *ForgejoReviewClient) statusErr(method, path string, resp *http.Response, body []byte) *StatusError {
 	snippet := string(body)
+	rateLimited := bodySuggestsRateLimit(snippet)
 	if len(snippet) > 512 {
-		// 保留头尾两段：前置反代/WAF 的限流说明可能落在大 HTML 错误页
-		// 尾部，纯头部截断会让 forge.IsRateLimit 把限流 403 误判成权限
-		// 403（确定性失败 → 误删防抖行/误停用审查）。
+		// 保留头尾两段便于日志定位；限流判定不依赖这段截断面（已由
+		// RateLimited 在完整 body 上钉死），中段被丢弃不影响判定。
 		snippet = snippet[:384] + "…" + snippet[len(snippet)-128:]
 	}
 	return &StatusError{
-		StatusCode: resp.StatusCode,
-		Method:     method,
-		URL:        c.url(path),
-		Body:       snippet,
+		StatusCode:  resp.StatusCode,
+		Method:      method,
+		URL:         c.url(path),
+		Body:        snippet,
+		RateLimited: rateLimited,
 	}
 }
 
@@ -489,7 +491,7 @@ func (c *ForgejoReviewClient) SubmitReview(ctx context.Context, repoFullName str
 	if err != nil {
 		return 0, err
 	}
-	payload := forgejoSubmitReview{Event: in.Event, Body: in.Body, CommitID: in.CommitID}
+	payload := forgejoSubmitReview{Event: forgejoReviewEvent(in.Event), Body: in.Body, CommitID: in.CommitID}
 	if len(in.Comments) > 0 {
 		payload.Comments = make([]forgejoReviewLine, 0, len(in.Comments))
 		for _, w := range in.Comments {
@@ -517,6 +519,16 @@ func (c *ForgejoReviewClient) SubmitReview(ctx context.Context, repoFullName str
 // forgejoStatusDescriptionMax Forgejo/Gitea 的 CreateStatusOption description
 // 上限（binding MaxSize(255)），超出被整单 422——适配器内按 rune 截断。
 const forgejoStatusDescriptionMax = 255
+
+// forgejoReviewEvent GitHub 事件名 → Forgejo/Gitea 事件名：Gitea 用过去式
+// APPROVED（GitHub 是 APPROVE），COMMENT/REQUEST_CHANGES 同名透传。审查链路
+// 当前只发 COMMENT，映射是防未来启用 APPROVE 类事件时被平台拒单。
+func forgejoReviewEvent(event string) string {
+	if event == "APPROVE" {
+		return "APPROVED"
+	}
+	return event
+}
 
 func (c *ForgejoReviewClient) CreateCommitStatus(ctx context.Context, repoFullName, sha, state, statusContext, description, targetURL string) error {
 	repo, err := repoPath(repoFullName)

@@ -29,6 +29,9 @@ type StatusError struct {
 	Method     string
 	URL        string
 	Body       string
+	// RateLimited 由构造处按完整响应体预判定：Body 截断后限流字样可能落在
+	// 被丢弃的中段（大 HTML 错误页），置位时 IsRateLimit 不再依赖 Body 文本。
+	RateLimited bool
 }
 
 func (e *StatusError) Error() string {
@@ -91,10 +94,19 @@ func IsRateLimit(err error) bool {
 	body := ""
 	switch {
 	case errors.As(err, &se):
+		if se.RateLimited {
+			return true
+		}
 		body = se.Body
 	case errors.As(err, &ge):
 		body = ge.Body
 	}
+	return bodySuggestsRateLimit(body)
+}
+
+// bodySuggestsRateLimit 响应体是否含限流说明字样。构造处对完整 body 调用
+// （结论存 StatusError.RateLimited），判定函数对截断后 Body 再查一次兜底。
+func bodySuggestsRateLimit(body string) bool {
 	body = strings.ToLower(body)
 	return strings.Contains(body, "rate limit") || strings.Contains(body, "abuse detection")
 }

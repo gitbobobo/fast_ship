@@ -276,7 +276,8 @@ func TestReviewClosedDispatchCancelsRun(t *testing.T) {
 		t.Fatal("已关闭 PR 不得建线程")
 	}
 
-	// 读 PR 失败（fake 未登记）：不落终态也不签令牌——认领超窗后重试。
+	// 读 PR 失败（fake 未登记、非确定性错误）：不落终态也不签令牌——
+	// 认领超窗后重试。
 	noPR := e.seedRun(t, repo, 55, "sha-c55", model.ReviewRunDispatched, now)
 	e.svc.db.Model(noPR).Update("environment_id", env.ID)
 	review.launchRun(context.Background(), noPR.ID, now)
@@ -292,6 +293,70 @@ func TestReviewClosedDispatchCancelsRun(t *testing.T) {
 	}
 	if len(t3.created) != 0 {
 		t.Fatal("读 PR 失败不得建线程")
+	}
+}
+
+// TestReviewDispatchAccessErrTerminals 派发前实况读的确定性失败不再等认领
+// 超窗空转到 timeout：404（PR/仓库已删）按 PR 关闭终局 cancelled/pr_closed；
+// 权限 403（凭证被拒、非限流）落 failed/access_denied + dispatch_failed 通知；
+// 均不建线程不签令牌，与防抖/轮询的确定性口径一致。
+func TestReviewDispatchAccessErrTerminals(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	env := createT3TestEnv(t, e.svc.db, e.user.ID, "env-det-acc")
+	createTestT3Binding(t, e.svc.db, e.project.ID, env.ID, "t3p")
+	t3 := &fakeReviewT3{}
+	review := e.withT3(t3, nil, nil)
+
+	e.svc.db.Create(&model.ReviewPullRequest{
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: repo, PRNumber: 60, UserID: e.user.ID,
+		InstallationID: 42, HeadSHA: "sha-c60", RoundNumber: 1, UpdatedAt: now,
+	})
+	gone := e.seedRun(t, repo, 60, "sha-c60", model.ReviewRunDispatched, now)
+	e.svc.db.Model(gone).Update("environment_id", env.ID)
+	e.fake.SetPRError(repo, &githubapi.StatusError{
+		StatusCode: 404, Method: "GET", URL: "pulls/60", Body: "not found",
+	})
+	review.launchRun(context.Background(), gone.ID, now)
+	var after404 model.ReviewRun
+	e.svc.db.First(&after404, "id = ?", gone.ID)
+	if after404.Status != model.ReviewRunCancelled || after404.ErrorCode != "pr_closed" || after404.FinishedAt == nil {
+		t.Fatalf("404 run = %q/%q, want cancelled/pr_closed", after404.Status, after404.ErrorCode)
+	}
+	var ledger model.ReviewPullRequest
+	e.svc.db.First(&ledger, "repo_full_name = ? AND pr_number = 60", repo)
+	if !ledger.SyncPending {
+		t.Fatal("404 收尾应置 sync_pending（交给同步阶段清账）")
+	}
+
+	denied := e.seedRun(t, repo, 61, "sha-c61", model.ReviewRunDispatched, now)
+	e.svc.db.Model(denied).Update("environment_id", env.ID)
+	e.fake.SetPRError(repo, &githubapi.StatusError{
+		StatusCode: 403, Method: "GET", URL: "pulls/61", Body: "forbidden",
+	})
+	review.launchRun(context.Background(), denied.ID, now)
+	var after403 model.ReviewRun
+	e.svc.db.First(&after403, "id = ?", denied.ID)
+	if after403.Status != model.ReviewRunFailed || after403.ErrorCode != "access_denied" || after403.FinishedAt == nil {
+		t.Fatalf("403 run = %q/%q, want failed/access_denied", after403.Status, after403.ErrorCode)
+	}
+	var notifCount int64
+	e.svc.db.Model(&model.Notification{}).
+		Where("kind = ?", model.NotificationReviewDispatchFailed).Count(&notifCount)
+	if notifCount == 0 {
+		t.Fatal("access_denied 应发 dispatch_failed 通知（凭证问题需用户处置）")
+	}
+
+	if len(t3.created) != 0 {
+		t.Fatal("确定性失败不得建线程")
+	}
+	var tokCount int64
+	e.svc.db.Model(&model.ReviewRunToken{}).
+		Where("run_id IN ?", []string{gone.ID, denied.ID}).Count(&tokCount)
+	if tokCount != 0 {
+		t.Fatal("确定性失败不得签发令牌")
 	}
 }
 

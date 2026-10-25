@@ -46,7 +46,10 @@ func (h *ForgeWebhookHandler) Handle(c *gin.Context) {
 		return
 	}
 	if !found {
-		response.Error(c, 404, 40400, "集成不存在")
+		// 与验签失败同回 401：验签要用行内密钥，行不存在时无签可验——
+		// 回 404 会让未鉴权调用方拿响应码探测集成 id 是否存在。
+		response.Unauthorized(c, 40107,
+			"Webhook 签名无效或缺失（仅支持 X-Forgejo-Signature / X-Gitea-Signature）")
 		return
 	}
 	if secret == "" {

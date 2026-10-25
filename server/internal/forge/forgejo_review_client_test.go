@@ -264,6 +264,29 @@ func TestForgejoClient_SelfLogin_RateLimited403Propagates(t *testing.T) {
 	}
 }
 
+// TestForgejoClient_StatusErr_RateLimitInTruncatedMiddle 大 HTML 错误页的
+// 限流字样恰好落在被截断丢弃的中段时，IsRateLimit 仍按构造处对完整 body
+// 的预判定为真——否则限流 403 被误判成权限 403（确定性失败 → 误删防抖行/
+// 误停用审查，与自评探测防的是同一类误判）。
+func TestForgejoClient_StatusErr_RateLimitInTruncatedMiddle(t *testing.T) {
+	big := strings.Repeat("x", 1000) + " rate limit exceeded " + strings.Repeat("y", 1000)
+	client, _ := newForgejoTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(big))
+	})
+	_, err := client.GetPullRequest(context.Background(), "o/r", 5)
+	if err == nil {
+		t.Fatal("403 应返回错误")
+	}
+	var se *StatusError
+	if !errors.As(err, &se) || len(se.Body) >= len(big) {
+		t.Fatalf("Body 应已被截断: %v", err)
+	}
+	if !IsRateLimit(err) {
+		t.Fatalf("中段限流字样被截断后仍应判 IsRateLimit: %v", err)
+	}
+}
+
 // TestForgejoClient_UpdateComment_NoLearnForeignLogin PATCH 响应的 user 是
 // 原作者不是编辑者：marker-only 命中他人伪造评论时不得把其 login 学进缓存
 // （否则 Self/对账认攻击者为自己且持久中毒——fsb 第 5 轮 P2）。
