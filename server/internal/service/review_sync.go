@@ -759,10 +759,12 @@ func (s *ReviewService) upsertPRComment(ctx context.Context, client forge.Review
 			if err := client.UpdatePullRequestComment(ctx, ledger.RepoFullName, commentID, body); err != nil {
 				if forge.IsNotFound(err) {
 					found = false
-				} else if forge.IsForbidden(err) {
+				} else if forge.IsForbidden(err) && !forge.IsRateLimit(err) {
 					// Forgejo login 不可知时 marker-only 可能命中伪造的他人
 					// 评论：PATCH 403 视为「不是我们的」，走新建而不是把
-					// 整个同步挂死。
+					// 整个同步挂死。限流 403/429（GitHub 主/二次限流正是
+					// 回 403）不在此列——落到 else 报错等下轮重试，否则
+					// 限流窗口每次同步都会多发一条重复顶层评论。
 					found = false
 				} else {
 					return errs.New(errs.ErrGitHubAPI.Code, "更新顶层评论失败: "+err.Error())

@@ -646,6 +646,61 @@ func TestForgejoPoll_DecryptErrorDisablesReview(t *testing.T) {
 	}
 }
 
+// TestUpsertPRCommentRateLimitDoesNotDuplicate marker 找回的顶层评论 PATCH
+// 撞限流 403：报错重试而不是当「不是我们的」回退新建——否则限流窗口每次
+// 同步都会多发一条重复顶层审查评论。对照：真权限 403 照常回退新建。
+func TestUpsertPRCommentRateLimitDoesNotDuplicate(t *testing.T) {
+	svc := setupTestServices(t)
+	review := newReviewTestService(t, svc, nil, nil, nil)
+	ledger := &model.ReviewPullRequest{
+		IntegrationID: "forge-x", ProjectID: "p1",
+		RepoFullName: "acme/app", PRNumber: 5,
+	}
+
+	rateLimited := &upsertStubClient{patchErr: &forge.StatusError{StatusCode: 403, Body: "API rate limit exceeded"}}
+	if err := review.upsertPRComment(context.Background(), rateLimited, ledger,
+		"<!-- m -->", "body", "code_comment_id", 0); err == nil {
+		t.Fatal("限流 403 应返回错误走重试")
+	}
+	if rateLimited.created != 0 {
+		t.Fatalf("限流 403 不得新建重复顶层评论, created=%d", rateLimited.created)
+	}
+
+	forbidden := &upsertStubClient{patchErr: &forge.StatusError{StatusCode: 403, Body: "Forbidden"}}
+	if err := review.upsertPRComment(context.Background(), forbidden, ledger,
+		"<!-- m -->", "body", "code_comment_id", 0); err != nil {
+		t.Fatalf("权限 403 应回退新建: %v", err)
+	}
+	if forbidden.created != 1 {
+		t.Fatalf("权限 403 应回退新建一条, created=%d", forbidden.created)
+	}
+}
+
+// upsertStubClient 顶层评论 upsert 路径桩：marker 找回已存评论，PATCH
+// 结果与新建计数可观测。
+type upsertStubClient struct {
+	forge.ReviewClient
+	patchErr error
+	created  int
+}
+
+func (c *upsertStubClient) ListIssueCommentsForPR(context.Context, string, int) ([]forge.IssueComment, error) {
+	return nil, nil
+}
+
+func (c *upsertStubClient) FindPullRequestComment(context.Context, string, int, string) (int64, bool, error) {
+	return 900, true, nil
+}
+
+func (c *upsertStubClient) UpdatePullRequestComment(context.Context, string, int64, string) error {
+	return c.patchErr
+}
+
+func (c *upsertStubClient) CreatePullRequestComment(context.Context, string, int, string) (int64, error) {
+	c.created++
+	return 901, nil
+}
+
 // decryptFailClient 密文损坏场景桩：reviewClient 的解密在 resolver 内发生——
 // 桩绕过 resolver，让 ListOpenPullRequests 直接返回解密哨兵（同一判定面）。
 type decryptFailClient struct{ forge.ReviewClient }

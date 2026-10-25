@@ -78,7 +78,10 @@ func (c *ForgejoReviewClient) Bearer(context.Context) (string, error) { return c
 func (c *ForgejoReviewClient) statusErr(method, path string, resp *http.Response, body []byte) *StatusError {
 	snippet := string(body)
 	if len(snippet) > 512 {
-		snippet = snippet[:512]
+		// 保留头尾两段：前置反代/WAF 的限流说明可能落在大 HTML 错误页
+		// 尾部，纯头部截断会让 forge.IsRateLimit 把限流 403 误判成权限
+		// 403（确定性失败 → 误删防抖行/误停用审查）。
+		snippet = snippet[:384] + "…" + snippet[len(snippet)-128:]
 	}
 	return &StatusError{
 		StatusCode: resp.StatusCode,
