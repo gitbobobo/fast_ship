@@ -404,7 +404,9 @@ function EmptyRow({ children }: { children: React.ReactNode }) {
 
 function TableFrame({ children }: { children: React.ReactNode }) {
   return (
-    <div className="overflow-hidden rounded-lg border">
+    // 末列补到 12px 右内边距：表格在卡片内通宽排布时，p-2 的 8px 末列
+    // 与卡片右缘几乎相贴（数值列右对齐尤为明显），统一与左侧留白对称。
+    <div className="overflow-hidden rounded-lg border [&_td:last-child]:pr-3 [&_th:last-child]:pr-3">
       <Table>{children}</Table>
     </div>
   );
