@@ -437,6 +437,30 @@ describe("ProjectFormDialog", () => {
     expect(payload).not.toHaveProperty("code_repository_url");
   });
 
+  it("无显式代码仓：换 forge 集成但 slug 留空时就地报错且不提交", async () => {
+    const user = userEvent.setup();
+    renderDialog(
+      "edit",
+      makeProject({
+        github_owner: "acme",
+        github_repo: "app",
+        repository_url: "https://github.com/acme/app",
+        code_integration_id: "github-default",
+        code_repo_url: null,
+      }),
+    );
+
+    await screen.findByRole("combobox", { name: "代码仓集成" });
+    await user.click(screen.getByRole("combobox", { name: "代码仓集成" }));
+    await user.click(await screen.findByRole("option", { name: /自建 Forgejo/ }));
+    await user.click(screen.getByRole("button", { name: "保存" }));
+
+    expect(
+      await screen.findByText("更换代码仓集成时需填写 owner/repo"),
+    ).toBeInTheDocument();
+    expect(updateMutateAsync).not.toHaveBeenCalled();
+  });
+
   it("集成列表加载中：forge 绑定改动 owner/repo 时就地报错且不提交", async () => {
     mockIntegrationOptions({ data: undefined, isLoading: true });
     const user = userEvent.setup();

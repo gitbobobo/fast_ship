@@ -10,11 +10,11 @@ type forgejoUser struct {
 	Login string `json:"login"`
 }
 
-// forgejoRepoRef head/base 的仓库面：fork head 与已删 fork（repo=null）是
-// 轮询与 webhook 共同的忽略条件。
+// forgejoRepoRef head/base 的仓库面：跨仓 fork 与已删 fork（repo=null）是
+// 轮询与 webhook 共同的忽略条件（判定靠 head/base 仓库全名比对，不用 repo
+// 级 fork 标志——本仓库自身是 fork 时该标志恒 true，会误杀同仓分支 PR）。
 type forgejoRepoRef struct {
 	FullName string `json:"full_name"`
-	Fork     bool   `json:"fork"`
 }
 
 // forgejoPR GET /repos/{o}/{r}/pulls/{n} 与 open PR 枚举列表共用的元素形态。

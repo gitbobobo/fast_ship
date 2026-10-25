@@ -174,18 +174,17 @@ func (s *ReviewService) ListPullRequestActivity(ctx context.Context, userID, pro
 
 	// 全量分组后再切片：counts/total 是过滤范围内全部 PR 的统计。
 	now := time.Now().UTC()
-	// PR 链接兜底按 GitHub 身份构造：审查执行本期只有 GitHub 一条链路，
-	// 历史运行的 forge 身份就是 github——项目改绑 forgejo 后历史链接不
-	// 该改写过去（INT-166 方向审计结论；P1 接入 Forgejo 执行时随运行记
-	// 录存 forge 身份）。
-	ghLinks := githubLinks(githubWebBase(s.cfg))
+	// PR 链接兜底按每行账本自身的 forge 身份构造（与记录列表同口径）：
+	// 项目改绑 forgejo 后历史链接不该改写过去，Forgejo 行也不能拼到
+	// github.com。
+	prLinks := s.recordForgeLinks(ctx, prs)
 	entries := make([]reviewActivityEntry, 0, len(scoped))
 	for _, pr := range scoped {
 		key := pr.ProjectID + "#" + pr.IntegrationID + "#" + pr.RepoFullName + "#" + strconv.Itoa(pr.PRNumber) + "#" + strconv.Itoa(pr.RoundNumber) + "#" + pr.HeadSHA
 		item, sortAt, ok := buildPullRequestActivity(pr, nameByProject[pr.ProjectID],
 			settingsByProject[pr.ProjectID], visualCombosByProject[pr.ProjectID],
 			debounceByPR[pr.ProjectID+"#"+pr.IntegrationID+"#"+pr.RepoFullName+"#"+strconv.Itoa(pr.PRNumber)],
-			runsByPR[key], now, ghLinks)
+			runsByPR[key], now, prLinks[reviewIntegrationID(pr.IntegrationID)])
 		if !ok {
 			continue
 		}

@@ -182,6 +182,8 @@ func TestForgejoClient_ListReviewsAndComments(t *testing.T) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Query().Get("page") != "" && r.URL.Query().Get("page") != "1":
 			_, _ = w.Write([]byte(`[]`))
+		case r.URL.Path == "/api/v1/user":
+			_, _ = w.Write([]byte(`{"login": "bot"}`))
 		case strings.HasSuffix(r.URL.Path, "/reviews") && r.Method == http.MethodGet:
 			_, _ = w.Write([]byte(`[{"id": 9, "body": "r", "state": "COMMENT", "commit_id": "abc", "submitted_at": "2026-01-02T03:04:05Z", "user": {"login": "bot"}}]`))
 		case strings.Contains(r.URL.Path, "/reviews/9/comments"):
@@ -205,17 +207,26 @@ func TestForgejoClient_ListReviewsAndComments(t *testing.T) {
 	if comments[0].ID != 31 || comments[0].Path != "a.go" || comments[0].InReplyToID != nil {
 		t.Fatalf("行内评论映射不符: %+v", comments[0])
 	}
-	// 请求序列：ListReviews 数据页 + 空页探测，ListReviewComments（review
-	// 列表重查数据页 + 空页探测 + review 9 的 comments）。
-	if len(*logs) != 5 {
-		t.Fatalf("请求数 = %d, want 5", len(*logs))
+	if !comments[0].Self {
+		t.Fatalf("评论作者与 PAT login 相同应标 Self: %+v", comments[0])
 	}
-	paths := []string{(*logs)[0].path, (*logs)[1].path, (*logs)[2].path, (*logs)[3].path, (*logs)[4].path}
+	// 请求序列：ListReviews 数据页 + 空页探测；ListReviewComments 内 review
+	// 列表重查两页 → /user 探测自评身份 → review 9 的 comments 数据页 +
+	// 空页探测。
+	if len(*logs) != 7 {
+		t.Fatalf("请求数 = %d, want 7", len(*logs))
+	}
+	paths := []string{
+		(*logs)[0].path, (*logs)[1].path, (*logs)[2].path, (*logs)[3].path,
+		(*logs)[4].path, (*logs)[5].path, (*logs)[6].path,
+	}
 	if paths[0] != "/api/v1/repos/o/r/pulls/4/reviews?limit=50&page=1" ||
 		paths[1] != "/api/v1/repos/o/r/pulls/4/reviews?limit=50&page=2" ||
 		paths[2] != "/api/v1/repos/o/r/pulls/4/reviews?limit=50&page=1" ||
 		paths[3] != "/api/v1/repos/o/r/pulls/4/reviews?limit=50&page=2" ||
-		paths[4] != "/api/v1/repos/o/r/pulls/4/reviews/9/comments" {
+		paths[4] != "/api/v1/user" ||
+		paths[5] != "/api/v1/repos/o/r/pulls/4/reviews/9/comments?limit=50&page=1" ||
+		paths[6] != "/api/v1/repos/o/r/pulls/4/reviews/9/comments?limit=50&page=2" {
 		t.Fatalf("请求顺序: %v", paths)
 	}
 }
@@ -294,8 +305,9 @@ func TestForgejoClient_GetRepository(t *testing.T) {
 	}
 }
 
-// TestForgejoClient_ListOpenPullRequests open PR 枚举：fork head 与已删 fork
-// （head 缺失）的 PR 跳过，同仓库分支保留且映射完整。
+// TestForgejoClient_ListOpenPullRequests open PR 枚举：跨仓库 fork head
+// （head≠base）与已删 fork（head 缺失）的 PR 跳过；仓库本身是 fork 但
+// head/base 同仓库的 PR 保留——过滤按 head/base 归属而非 repo.fork。
 func TestForgejoClient_ListOpenPullRequests(t *testing.T) {
 	client, logs := newForgejoTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("state") != "open" {
@@ -310,15 +322,18 @@ func TestForgejoClient_ListOpenPullRequests(t *testing.T) {
 			{"number": 1, "title": "same", "head": {"sha": "s1", "ref": "f1", "repo": {"full_name": "o/r", "fork": false}}, "base": {"ref": "main", "repo": {"full_name": "o/r"}}},
 			{"number": 2, "title": "fork", "head": {"sha": "s2", "ref": "f2", "repo": {"full_name": "o/other", "fork": true}}, "base": {"ref": "main", "repo": {"full_name": "o/r"}}},
 			{"number": 3, "title": "deleted-fork", "head": {"sha": "s3", "ref": "f3"}},
-			{"number": 4, "title": "case", "head": {"sha": "s4", "ref": "f4", "repo": {"full_name": "O/R", "fork": false}}, "base": {"ref": "main", "repo": {"full_name": "o/r"}}}
+			{"number": 4, "title": "case", "head": {"sha": "s4", "ref": "f4", "repo": {"full_name": "O/R", "fork": false}}, "base": {"ref": "main", "repo": {"full_name": "o/r"}}},
+			{"number": 5, "title": "forked-repo-same-head", "head": {"sha": "s5", "ref": "f5", "repo": {"full_name": "o/r", "fork": true}}, "base": {"ref": "main", "repo": {"full_name": "o/r", "fork": true}}}
 		]`))
 	})
 	prs, err := client.ListOpenPullRequests(context.Background(), "o/r")
 	if err != nil {
 		t.Fatalf("ListOpenPullRequests: %v", err)
 	}
-	if len(prs) != 2 || prs[0].Number != 1 || prs[1].Number != 4 {
-		t.Fatalf("应只剩同仓库分支 1/4: %+v", prs)
+	// PR5 的仓库本身是 fork（head.repo.fork=true），但 head/base 同仓库——
+	// 过滤按 head/base 归属判定，不看 repo.fork，必须保留。
+	if len(prs) != 3 || prs[0].Number != 1 || prs[1].Number != 4 || prs[2].Number != 5 {
+		t.Fatalf("应只剩同仓库分支 1/4/5: %+v", prs)
 	}
 	if prs[0].RepoFullName != "o/r" || prs[0].HeadSHA != "s1" {
 		t.Fatalf("映射不符: %+v", prs[0])
@@ -374,8 +389,9 @@ func TestForgejoClient_Pagination(t *testing.T) {
 	if err != nil || len(comments) != 40 {
 		t.Fatalf("comments = %d, %v, want 40（缩页不得截断后续页）", len(comments), err)
 	}
-	if n := len(*logs); n != 3 {
-		t.Fatalf("请求数 = %d, want 3（两页数据 + 一页空页）", n)
+	// 两页数据 + 一页空页 + 一次 /user 自评身份探测。
+	if n := len(*logs); n != 4 {
+		t.Fatalf("请求数 = %d, want 4", n)
 	}
 }
 

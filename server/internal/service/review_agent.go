@@ -216,7 +216,9 @@ func (s *ReviewService) appendNewDiscussion(ctx context.Context, run *model.Revi
 	}
 	var entries []entry
 	for _, c := range reviewComments {
-		if strings.HasSuffix(c.User, "[bot]") || (!c.CreatedAt.After(after) && !all) {
+		// c.Self 覆盖 Forgejo：那边的机器人是普通账号，不以 [bot] 结尾，
+		// 行内评论又没有隐藏标记可拦。
+		if c.Self || strings.HasSuffix(c.User, "[bot]") || (!c.CreatedAt.After(after) && !all) {
 			continue
 		}
 		head := "行内评论"
@@ -227,7 +229,7 @@ func (s *ReviewService) appendNewDiscussion(ctx context.Context, run *model.Revi
 	}
 	for _, c := range issueComments {
 		// 系统自己的顶层结论评论（隐藏标记）与机器人发言不进历史。
-		if strings.HasSuffix(c.User, "[bot]") || strings.Contains(c.Body, "<!-- fast-ship-") ||
+		if c.Self || strings.HasSuffix(c.User, "[bot]") || strings.Contains(c.Body, "<!-- fast-ship-") ||
 			(!c.CreatedAt.After(after) && !all) {
 			continue
 		}

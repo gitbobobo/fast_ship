@@ -37,6 +37,10 @@ type ReviewComment struct {
 	InReplyToID *int64
 	Path        string
 	CreatedAt   time.Time
+	// Self 该评论是本系统机器人账号所发：GitHub 靠 login 的 [bot] 后缀，
+	// Forgejo 机器人是普通账号，由适配器按 PAT 所属 login 标出——历史
+	// 上下文组装的「过滤自己的发言」按它判定，不依赖平台特定命名。
+	Self bool
 }
 
 // IssueComment 是 PR 会话页的顶层评论（含机器人与人工，按时间正序过滤由调用方负责）。
@@ -45,6 +49,8 @@ type IssueComment struct {
 	User      string
 	Body      string
 	CreatedAt time.Time
+	// Self 同 ReviewComment.Self。
+	Self bool
 }
 
 // ReviewInlineComment 随 review 一起提交的行内评论。Side 评论所在侧；行内

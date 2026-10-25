@@ -119,8 +119,7 @@ func (s *ReviewService) pollAcceptPR(ctx context.Context, settings *model.Projec
 		number:       pr.Number,
 		repoFullName: repo,
 		headSHA:      pr.HeadSHA,
-		// 补漏只处理同仓库分支的 PR（适配器已过滤 fork head），head/base 同仓。
-		headFork:     false,
+		// 补漏只处理同仓库分支的 PR（适配器已过滤跨仓 fork），head/base 同仓。
 		headRepoFull: repo,
 		baseRepoFull: repo,
 		title:        pr.Title,

@@ -335,6 +335,13 @@ export function ProjectFormDialog({
             if ((bindingBroken && clearBrokenBinding) ||
               (!bindingBroken && currentRepoUrl !== "")) {
               payload.code_repository_url = null;
+            } else if (codeIntegrationId !== savedIntegrationId) {
+              // 选了别的集成但 slug 留空：改动无法表达（API 不收单独的
+              // 集成字段），保存会静默回弹选择器——就地报错要求填写。
+              setError("code_repository_url", {
+                message: "更换代码仓集成时需填写 owner/repo",
+              });
+              return;
             }
           } else {
             // 绑定等价（集成 id + owner/repo 归一相同）直接不携带——集成列表

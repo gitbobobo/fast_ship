@@ -569,3 +569,54 @@ func TestForgejoPoll_ProjectFailureIsolated(t *testing.T) {
 		t.Fatalf("drift PR32 不得登记, rows = %d", n)
 	}
 }
+
+// TestHandleForgejoWebhook_CrossRepoForkRejected webhook 的 fork 过滤按
+// head/base 仓库归属判定而非 repo.fork 布尔：head 在别的仓库的 PR 不受理；
+// 仓库本身是 fork（payload 里 fork:true）但 head/base 同仓库的 PR 照常受理。
+func TestHandleForgejoWebhook_CrossRepoForkRejected(t *testing.T) {
+	svc := setupTestServices(t)
+	forgeID := createTestForgeIntegration(t, svc.db, "https://forge.example.com").ID
+	project, _ := seedForgejoReviewProject(t, svc, forgeID, "fj-fork", "acme/app", nil)
+	review := newReviewTestService(t, svc, nil, nil, nil)
+	ctx := context.Background()
+
+	// head 在 fork 仓库（o/other）、base 在本仓库 → 跨仓库 PR 不受理。
+	crossRepo := []byte(`{
+		"action": "opened", "number": 31,
+		"pull_request": {
+			"draft": false, "title": "fork pr", "updated_at": "2026-01-02T03:04:05Z",
+			"head": {"sha": "sha-fork", "ref": "feat", "repo": {"full_name": "other/app"}},
+			"base": {"ref": "main", "repo": {"full_name": "acme/app"}}
+		},
+		"repository": {"full_name": "acme/app"}
+	}`)
+	if err := review.HandleForgejoWebhook(ctx, forgeID, "pull_request", "d-fork-1", crossRepo); err != nil {
+		t.Fatalf("cross-repo webhook: %v", err)
+	}
+	var n int64
+	svc.db.Model(&model.ReviewSeenSHA{}).Where("project_id = ?", project.ID).Count(&n)
+	if n != 0 {
+		t.Fatalf("跨仓库 fork PR 不得登记 seen, rows = %d", n)
+	}
+
+	// 仓库本身是 fork（repo.fork=true）但 head/base 同仓库 → 照常受理。
+	sameRepoOnFork := []byte(`{
+		"action": "opened", "number": 32,
+		"pull_request": {
+			"draft": false, "title": "same-repo on a fork", "updated_at": "2026-01-02T03:04:05Z",
+			"head": {"sha": "sha-same", "ref": "feat", "repo": {"fork": true, "full_name": "acme/app"}},
+			"base": {"ref": "main", "repo": {"fork": true, "full_name": "acme/app"}}
+		},
+		"repository": {"full_name": "acme/app", "fork": true}
+	}`)
+	if err := review.HandleForgejoWebhook(ctx, forgeID, "pull_request", "d-fork-2", sameRepoOnFork); err != nil {
+		t.Fatalf("same-repo-on-fork webhook: %v", err)
+	}
+	var seen model.ReviewSeenSHA
+	if err := svc.db.Where("project_id = ? AND pr_number = ?", project.ID, 32).First(&seen).Error; err != nil {
+		t.Fatalf("同仓库 PR（仓库本身是 fork）应受理: %v", err)
+	}
+	if seen.HeadSHA != "sha-same" {
+		t.Fatalf("seen head = %q", seen.HeadSHA)
+	}
+}

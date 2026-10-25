@@ -31,7 +31,6 @@ type prWebhookPayload struct {
 			SHA  string `json:"sha"`
 			Ref  string `json:"ref"`
 			Repo struct {
-				Fork     bool   `json:"fork"`
 				FullName string `json:"full_name"`
 			} `json:"repo"`
 		} `json:"head"`
@@ -58,7 +57,6 @@ type reviewWebhookTrigger struct {
 	repoFullName string // base/repository 全名（payload 大小写原样）
 	headSHA      string
 	draft        bool
-	headFork     bool
 	headRepoFull string // head 仓库全名
 	baseRepoFull string // base 仓库全名
 	title        string
@@ -102,7 +100,6 @@ func (s *ReviewService) handleWebhookTx(tx *gorm.DB, integrationID string, event
 		repoFullName:   p.Repository.FullName,
 		headSHA:        p.PR.Head.SHA,
 		draft:          p.PR.Draft,
-		headFork:       p.PR.Head.Repo.Fork,
 		headRepoFull:   p.PR.Head.Repo.FullName,
 		baseRepoFull:   p.PR.Base.Repo.FullName,
 		title:          p.PR.Title,
@@ -151,9 +148,10 @@ func (s *ReviewService) handleReviewTriggerTx(tx *gorm.DB, integrationID string,
 	if !reviewTriggerableAction(t.action) {
 		return nil
 	}
-	// draft 与 fork（head 仓库 ≠ base 仓库）一律忽略。
-	if t.draft || t.headFork ||
-		!strings.EqualFold(t.headRepoFull, t.baseRepoFull) {
+	// draft 与跨仓 fork 一律忽略。判定用 head/base 仓库全名比对，不用
+	// head.repo.fork 标志：本仓库自身是 fork 时该标志恒 true，同仓分支的
+	// PR 会被误杀；已删 fork 的 head.repo 为 null，全名不等也命中。
+	if t.draft || !strings.EqualFold(t.headRepoFull, t.baseRepoFull) {
 		return nil
 	}
 

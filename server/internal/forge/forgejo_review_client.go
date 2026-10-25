@@ -199,18 +199,31 @@ func (c *ForgejoReviewClient) ListReviewComments(ctx context.Context, repoFullNa
 	if err != nil {
 		return nil, err
 	}
+	// 自评标记用 PAT 所属 login；探测失败退化为全 false（不过滤）。
+	selfLogin, _ := c.botLogin(ctx)
 	var out []ReviewComment
 	for _, r := range reviews {
+		// 单条 review 的 comments 也按 ListOptions 分页——裸 do() 只回默认页
+		// 大小，评论多时会静默截断。
 		var wire []forgejoComment
-		if err := c.do(ctx, http.MethodGet,
+		err := c.pagedPages(ctx,
 			"/repos/"+repo+"/pulls/"+strconv.Itoa(number)+"/reviews/"+strconv.FormatInt(r.ID, 10)+"/comments",
-			nil, &wire); err != nil {
+			func(raw []byte) (int, error) {
+				var items []forgejoComment
+				if err := json.Unmarshal(raw, &items); err != nil {
+					return 0, err
+				}
+				wire = append(wire, items...)
+				return len(items), nil
+			})
+		if err != nil {
 			return nil, err
 		}
 		for _, w := range wire {
 			out = append(out, ReviewComment{
 				ID: w.ID, User: w.User.Login, Body: w.Body,
 				InReplyToID: nil, Path: w.Path, CreatedAt: w.CreatedAt,
+				Self: selfLogin != "" && w.User.Login == selfLogin,
 			})
 		}
 	}
@@ -235,9 +248,13 @@ func (c *ForgejoReviewClient) ListIssueCommentsForPR(ctx context.Context, repoFu
 	if err != nil {
 		return nil, err
 	}
+	selfLogin, _ := c.botLogin(ctx)
 	out := make([]IssueComment, 0, len(wire))
 	for _, w := range wire {
-		out = append(out, IssueComment{ID: w.ID, User: w.User.Login, Body: w.Body, CreatedAt: w.CreatedAt})
+		out = append(out, IssueComment{
+			ID: w.ID, User: w.User.Login, Body: w.Body, CreatedAt: w.CreatedAt,
+			Self: selfLogin != "" && w.User.Login == selfLogin,
+		})
 	}
 	return out, nil
 }
@@ -426,10 +443,14 @@ func (c *ForgejoReviewClient) ListOpenPullRequests(ctx context.Context, repoFull
 	}
 	out := make([]PullRequest, 0, len(raws))
 	for _, w := range raws {
-		// fork 判定只看 head.repo：fork 的改动不属于本仓库镜像的审查对象；
-		// head.repo 缺失（已删 fork、异常 payload）时保守跳过。
+		// fork 判定看 head/base 的仓库关系而非 head.repo.fork 标志：仓库本身
+		// 是 fork 时该标志恒 true，会把同仓分支的 PR 误杀；head.repo 缺失
+		// （已删 fork、异常 payload）或 head 仓库 ≠ base 仓库时保守跳过。
 		head := w.Head.Repo
-		if head == nil || head.Fork || !strings.EqualFold(head.FullName, repoFullName) {
+		if head == nil || !strings.EqualFold(head.FullName, repoFullName) {
+			continue
+		}
+		if w.Base.Repo != nil && !strings.EqualFold(head.FullName, w.Base.Repo.FullName) {
 			continue
 		}
 		out = append(out, *w.toPullRequest())

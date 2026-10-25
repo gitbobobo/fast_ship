@@ -423,3 +423,50 @@ func TestProjectCodeRepoUrl(t *testing.T) {
 		t.Fatalf("no-repo project code_repo_url = %q, want null", *bare.CodeRepoUrl)
 	}
 }
+
+// discussionStubClient 讨论历史测试桩：只实现 appendNewDiscussion 用到的两
+// 个列表方法，返回固定数据。
+type discussionStubClient struct {
+	forge.ReviewClient
+	reviewComments []forge.ReviewComment
+	issueComments  []forge.IssueComment
+}
+
+func (c *discussionStubClient) ListReviewComments(context.Context, string, int) ([]forge.ReviewComment, error) {
+	return c.reviewComments, nil
+}
+
+func (c *discussionStubClient) ListIssueCommentsForPR(context.Context, string, int) ([]forge.IssueComment, error) {
+	return c.issueComments, nil
+}
+
+// TestAppendNewDiscussion_SelfCommentsFiltered Forgejo 机器人是普通账号、
+// 行内评论没有隐藏标记，全靠适配器标的 Self 把自己发言挡在下一轮历史
+// 之外；人工评论照常进历史。
+func TestAppendNewDiscussion_SelfCommentsFiltered(t *testing.T) {
+	svc := setupTestServices(t)
+	review, _ := readyReviewService(t, svc)
+	now := time.Now()
+	review.clients = stubReviewResolver{client: &discussionStubClient{
+		reviewComments: []forge.ReviewComment{
+			{User: "forgejo-bot", Body: "机器自查行内结论", Path: "a.go", CreatedAt: now, Self: true},
+			{User: "alice", Body: "人工行内追问", Path: "b.go", CreatedAt: now.Add(time.Second)},
+		},
+		issueComments: []forge.IssueComment{
+			{User: "forgejo-bot", Body: "机器自查会话结论", CreatedAt: now, Self: true},
+			{User: "alice", Body: "人工会话回复", CreatedAt: now.Add(time.Second)},
+		},
+	}}
+	var b strings.Builder
+	run := &model.ReviewRun{IntegrationID: "forge-1", RepoFullName: "o/r", PRNumber: 4}
+	if err := review.appendNewDiscussion(context.Background(), run, &b, time.Time{}, true); err != nil {
+		t.Fatalf("appendNewDiscussion: %v", err)
+	}
+	out := b.String()
+	if strings.Contains(out, "机器自查") {
+		t.Fatalf("Self 评论不应回流进历史:\n%s", out)
+	}
+	if !strings.Contains(out, "人工行内追问") || !strings.Contains(out, "人工会话回复") {
+		t.Fatalf("人工评论应保留:\n%s", out)
+	}
+}

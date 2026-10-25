@@ -80,6 +80,11 @@ func (s *ForgeClientSource) WebhookSecret(_ context.Context, integrationID strin
 		}
 		return "", false, fmt.Errorf("读取代码仓集成失败: %w", err)
 	}
+	// 端点只受理 Forgejo 投递：kind 不符的行按「不存在」404——当前 Create
+	// 恒写 forgejo，属防御；未来新增 kind 时其 secret 不能用于此验签。
+	if row.Kind != model.ForgeIntegrationKindForgejo {
+		return "", false, nil
+	}
 	if len(row.WebhookSecretEncrypted) == 0 {
 		return "", true, nil
 	}

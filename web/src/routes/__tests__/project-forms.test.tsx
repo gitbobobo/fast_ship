@@ -12,6 +12,7 @@ import {
   useProjects,
 } from "@/lib/hooks/use-projects";
 import { useCreateVersion } from "@/lib/hooks/use-versions";
+import { useIntegrationOptions } from "@/lib/hooks/use-integration-options";
 import { toast } from "sonner";
 
 const { mockNavigate } = vi.hoisted(() => ({
@@ -45,6 +46,10 @@ vi.mock("@/lib/hooks/use-versions", () => ({
   useCreateVersion: vi.fn(),
 }));
 
+vi.mock("@/lib/hooks/use-integration-options", () => ({
+  useIntegrationOptions: vi.fn(),
+}));
+
 vi.mock("@/lib/hooks/use-github-tokens", () => ({
   useGithubTokens: vi.fn(),
   useCreateGithubToken: vi.fn(() => ({
@@ -61,6 +66,28 @@ describe("ProjectAndVersionForms", () => {
   const createVersionMutateAsync = vi.fn();
 
   beforeEach(() => {
+    vi.mocked(useIntegrationOptions).mockReturnValue({
+      data: [
+        {
+          id: "github-default",
+          kind: "github",
+          name: "内置 GitHub",
+          base_url: "https://github.com",
+          builtin: true,
+        },
+        {
+          id: "forge-1",
+          kind: "forgejo",
+          name: "自建 Forgejo",
+          base_url: "https://git.example.com",
+          builtin: false,
+        },
+      ],
+      isLoading: false,
+      isError: false,
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useIntegrationOptions>);
+
     vi.mocked(useGithubTokens).mockReturnValue({
       data: [
         {
@@ -364,9 +391,9 @@ describe("ProjectAndVersionForms", () => {
   });
 
   it("edit form submits a cross-host code repository change instead of dropping it", async () => {
-    // INT-166：forgejo 绑定的项目改成 github 同名仓库时，owner/repo 相等
-    // 不再判「未改动」——按 code_repo_url 归一比较识别出跨主机真改动，
-    // 必须提交（服务端按新 host 换绑集成），否则改动被静默丢弃。
+    // INT-167：forgejo 绑定的项目把代码仓迁回 github 同名仓库——选择器切到
+    // 内置 GitHub、owner/repo 相等也属跨集成真改动，必须提交（服务端按新
+    // host 换绑集成），否则改动被静默丢弃。
     vi.mocked(useProject).mockReturnValue({
       data: {
         id: "proj-1",
@@ -379,6 +406,7 @@ describe("ProjectAndVersionForms", () => {
         code_github_owner: "acme",
         code_github_repo: "app",
         code_repo_url: "https://git.example.com/acme/app",
+        code_integration_id: "forge-1",
         created_at: "2026-04-06T10:00:00Z",
         updated_at: "2026-04-06T10:00:00Z",
       },
@@ -397,12 +425,12 @@ describe("ProjectAndVersionForms", () => {
       { path: "/projects", initialEntry: "/projects" },
     );
 
-    // 回填剥主机的 slug；mock 项目 code_integration_id 为空 → 选择器按内置
-    // github-default 合成裸 slug。
+    // 回填剥主机的 slug 且选择器落在 forge 绑定上；迁回 github 通过把
+    // 选择器切到「内置 GitHub」表达，slug 保持同名。
     const input = screen.getByLabelText(/owner \/ repo/);
     expect(input).toHaveValue("acme/app");
-    await user.clear(input);
-    await user.type(input, "acme/app"); // 裸形态 = github.com 上的同名仓库
+    await user.click(screen.getByRole("combobox", { name: "代码仓集成" }));
+    await user.click(await screen.findByRole("option", { name: /内置 GitHub/ }));
     await user.click(screen.getByRole("button", { name: "保存" }));
 
     await waitFor(() => expect(updateProjectMutateAsync).toHaveBeenCalled());

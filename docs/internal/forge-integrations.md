@@ -164,10 +164,13 @@ Forgejo 仓库的 PR 审查与 GitHub 走同一条协调管线（webhook 事务�
   `GET …/pulls/{n}/reviews`；commit status `POST …/statuses/{sha}`；
   仓库检查 `GET /repos/{o}/{r}`。**Forgejo 没有 PR 级行内评论平铺端点**：
   `ListReviewComments` 先列 reviews 再逐个取 `…/reviews/{id}/comments` 展平
-  （InReplyToID 恒空——Forgejo 的 review comment 无回复关系字段）。机器人
-  顶层评论的认领：GitHub 认 `user.type=Bot`，Forgejo 的机器人是普通账号，
-  适配器先 `GET /user` 学到 PAT 所属账号再按「作者==自己 + marker 前缀」
-  命中，用户引用 marker 不能劫持落点。
+  （每个端点同样走 `limit=50` 空页止分页；InReplyToID 恒空——Forgejo 的
+  review comment 无回复关系字段）。机器人顶层评论的认领：GitHub 认
+  `user.type=Bot`，Forgejo 的机器人是普通账号，适配器先 `GET /user` 学到
+  PAT 所属账号再按「作者==自己 + marker 前缀」命中，用户引用 marker 不能
+  劫持落点。同一登录名也用于给行内/会话评论标 `ReviewComment.Self`/
+  `IssueComment.Self`——历史上下文组装靠它把系统自己的 Forgejo 发言挡在
+  下一轮提示之外（那边行内评论没有隐藏标记、login 也不以 [bot] 结尾）。
 - **错误归一**：Forgejo 适配器把非 2xx 包成 `*forge.StatusError`，与 GitHub
   透传的 `githubapi.StatusError` 同构，service 的 `IsNotFound`/`IsForbidden`/
   `IsDiffTooLarge` 按同一口径判定（`forge/errors.go`）。
@@ -198,8 +201,11 @@ Forgejo 仓库的 PR 审查与 GitHub 走同一条协调管线（webhook 事务�
   分页，把 webhook 没落账的 SHA 经与 webhook 完全相同的受理路径补上。
   动作归类：该 PR 从未受理过任何 head → `opened`（受 TriggerOpened 勾选位
   约束），已受理过 → `synchronize`（受 TriggerSynchronize 约束）——补漏不
-  绕过用户没勾选的动作。fork head 与已删 fork（head.repo=null）的 PR 在
-  适配器枚举处过滤；draft 在受理面照常忽略。去重由现有机制保证（seen_sha/
+  绕过用户没勾选的动作。跨仓库 PR（head.repo.full_name ≠ base.repo.
+  full_name，含已删 fork 的 head.repo=null）在适配器枚举与 webhook 触发面
+  过滤——判定按 head/base 归属比较，不看 `repo.fork` 布尔（仓库本身是
+  fork 时同仓库 PR 的该字段也是 true，照它过滤会误杀正常 PR）。draft 在
+  受理面照常忽略。去重由现有机制保证（seen_sha/
   防抖/总账按 (项目, 集成) 分区），webhook 先受理的 SHA 轮询再见到会被跳过；
   轮询快照带平台 `updated_at`，受理事务内重读当前 head 判重——webhook 已
   受理更新 head 后，迟到的旧快照按 stale 丢弃不回退；head 未变的重复轮询
@@ -211,6 +217,12 @@ Forgejo 仓库的 PR 审查与 GitHub 走同一条协调管线（webhook 事务�
 - **GitHub 行为零变化**：`/api/github/webhooks` 端点、验签、`handleWebhookTx`
   对 `github-default` 的判定与写库路径全部原样（触发判定抽成
   `handleReviewTriggerTx` 后由两个入口共用同一份逻辑）。
+- **私有媒体 bearer 重试是 GitHub 专属**：截图/附件匿名拉取失败后带安装
+  令牌重试的路径显式限定 `github-default` 集成 + GitHub 媒体域
+  （`review_assets.go` `downloadScreenshot`）——Forgejo 私有仓库附件暂以
+  「匿名可拉」为前提，匿名失败的私有附件报下载失败而不是把 PAT 当 Bearer
+  发出（凭证不得随 Bearer 出域到非集成主机；Forgejo 侧要不要补 PAT 媒体
+  重试是后续任务）。
 
 ### 已核实的平台事实（适配器据此实现）
 
