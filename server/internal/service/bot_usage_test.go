@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	"github.com/google/uuid"
@@ -1030,6 +1031,49 @@ func TestBotUsageMaintenanceBeforeWindowNotCounted(t *testing.T) {
 	}
 	if len(tasks) != 1 || tasks[0].CostLast7d == nil || !costEq(*tasks[0].CostLast7d, 2.0) {
 		t.Fatalf("cost_last_7d 应为 2.0（窗口外维护不计），实得 %+v", tasks)
+	}
+}
+
+// 明细截断后的 is_retry（基线修复回归）：契约口径是「与同 run 内更早请求
+// request_hash 相同」，被截掉的更早行也要参与判定——保留窗口内首个同 hash
+// 行不能因为前驱在截断线之外而漏标。
+func TestBotUsageRunDetailRetryAcrossTruncation(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "usageretrytrunc")
+	bot := env.createBot(t, userID)
+	run := seedUsageRun(t, env, bot.ID, nil)
+
+	seedUsageRequest(t, env, run.ID, nil, "trunc-hash") // ordinal 1：会截断截掉
+	for i := 0; i < usageRunDetailMaxRequests-2; i++ {
+		seedUsageRequest(t, env, run.ID, nil, "") // ordinal 2..499：空 hash 填充
+	}
+	seedUsageRequest(t, env, run.ID, nil, "pair-hash")  // ordinal 500：保留窗口内首现
+	seedUsageRequest(t, env, run.ID, nil, "trunc-hash") // ordinal 501：前驱已截掉
+	seedUsageRequest(t, env, run.ID, nil, "pair-hash")  // ordinal 502：窗口内第二条
+
+	detail, err := env.bots.GetBotUsageRunDetail(userID, run.ID)
+	if err != nil {
+		t.Fatalf("run detail: %v", err)
+	}
+	if !detail.RequestsTruncated || len(detail.Requests) != usageRunDetailMaxRequests {
+		t.Fatalf("应截断保留 %d 条: truncated=%v len=%d",
+			usageRunDetailMaxRequests, detail.RequestsTruncated, len(detail.Requests))
+	}
+	byOrdinal := map[int64]api.BotUsageRequest{}
+	for _, r := range detail.Requests {
+		byOrdinal[r.Ordinal] = r
+	}
+	// 保留窗口 = ordinal 3..502。ordinal 500（pair-hash 在保留窗口内首现，
+	// 且截断线之前没有它的行）不标重试。
+	if r := byOrdinal[int64(usageRunDetailMaxRequests)]; r.Id == "" || r.IsRetry {
+		t.Fatalf("保留窗口内首现的 pair-hash 不应标重试: %+v", r)
+	}
+	// 前驱 ordinal 1 已在截断线之外：同 hash 的保留行仍要标重试（修复前漏标）。
+	if r := byOrdinal[int64(usageRunDetailMaxRequests+1)]; r.Id == "" || !r.IsRetry {
+		t.Fatalf("与被截掉的更早请求同 hash 的保留行应标 is_retry: %+v", r)
+	}
+	if r := byOrdinal[int64(usageRunDetailMaxRequests+2)]; r.Id == "" || !r.IsRetry {
+		t.Fatalf("保留窗口内的第二条同 hash 仍应标重试: %+v", r)
 	}
 }
 

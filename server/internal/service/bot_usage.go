@@ -908,12 +908,29 @@ func (s *BotService) GetBotUsageRunDetail(userID, runID string) (*api.BotUsageRu
 	}
 
 	requests := make([]api.BotUsageRequest, 0, len(requestRows))
+	// is_retry 的契约口径是「与同 run 内更早请求 request_hash 相同」。截断
+	// 保留的是最新一段，更早的同 hash 行可能已被截掉、不在内存去重里——对
+	// 保留行的非空 hash 集合做一次存在性查询（同 run、更小 ordinal），与
+	// 保留窗口内的内存去重合并后判定。
+	earlierHashes := map[string]bool{}
+	if requestsTruncated {
+		hashes := make([]string, 0, len(requestRows))
+		for i := range requestRows {
+			if h := requestRows[i].RequestHash; h != "" {
+				hashes = append(hashes, h)
+			}
+		}
+		if earlierHashes, err = repo.RequestHashesBeforeOrdinal(run.ID, hashes, requestRows[0].Ordinal); err != nil {
+			return nil, errs.ErrInternal
+		}
+	}
 	seenHash := map[string]bool{}
 	for i := range requestRows {
 		row := &requestRows[i]
 		// is_retry：与同 run 更早请求 request_hash 相同即视为重试（重试每次
-		// 尝试单独一行，同一逻辑尝试的指纹相同）。
-		isRetry := row.RequestHash != "" && seenHash[row.RequestHash]
+		// 尝试单独一行，同一逻辑尝试的指纹相同）；截断线之前的更早行经
+		// earlierHashes 参与判定，保留窗口之内仍走内存去重。
+		isRetry := row.RequestHash != "" && (earlierHashes[row.RequestHash] || seenHash[row.RequestHash])
 		if row.RequestHash != "" {
 			seenHash[row.RequestHash] = true
 		}

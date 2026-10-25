@@ -355,6 +355,32 @@ func (r *BotUsageRepository) ListRequestsByRun(runID string, limit int) ([]model
 	return rows, nil
 }
 
+// RequestHashesBeforeOrdinal 对给定非空 request_hash 集合做存在性查询，返回
+// 其中在同 run 内更小 ordinal 的更早请求里出现过的子集：明细截断只保留最新
+// 一段，被截掉的更早行不在内存里，is_retry 的「同 run 更早同 hash」口径由
+// 这次查询补齐。保留行至多 usageRunDetailMaxRequests 条，hash 集合不会逼近
+// IN 参数上限，单次查询即可。
+func (r *BotUsageRepository) RequestHashesBeforeOrdinal(runID string, hashes []string, before int64) (map[string]bool, error) {
+	out := make(map[string]bool, len(hashes))
+	if len(hashes) == 0 {
+		return out, nil
+	}
+	var rows []struct {
+		RequestHash string `gorm:"column:request_hash"`
+	}
+	err := r.db.Model(&model.BotModelRequest{}).
+		Select("DISTINCT request_hash").
+		Where("run_id = ? AND ordinal < ? AND request_hash IN ?", runID, before, hashes).
+		Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	for _, row := range rows {
+		out[row.RequestHash] = true
+	}
+	return out, nil
+}
+
 // ListToolCallsByRequestIDs 返回一批模型请求的工具调用（请求侧按 created_at
 // 稳定排序，分组在服务层做）。
 func (r *BotUsageRepository) ListToolCallsByRequestIDs(requestIDs []string) ([]model.BotToolCall, error) {
