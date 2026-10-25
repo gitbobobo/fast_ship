@@ -513,7 +513,7 @@ function CacheHitSection({ data }: { data: BotUsageInsights }) {
               data-testid="usage-insights-cache-row"
             >
               <div
-                className="w-24 shrink-0 truncate text-right text-xs text-muted-foreground"
+                className="w-14 shrink-0 truncate text-right text-xs text-muted-foreground"
                 title={day.date}
               >
                 {day.date.slice(5)}
@@ -531,7 +531,7 @@ function CacheHitSection({ data }: { data: BotUsageInsights }) {
                     </div>
                   )}
                   {day.rate == null && (
-                    <span className="absolute inset-0 flex items-center justify-center text-[10px] text-muted-foreground/60">
+                    <span className="absolute inset-0 flex items-center justify-center whitespace-nowrap text-[10px] text-muted-foreground/60">
                       无完整数据
                     </span>
                   )}
