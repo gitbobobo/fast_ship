@@ -7995,7 +7995,7 @@ PR 审查（INT-135，仅 JWT）：项目级审查设置、审查总览与审查
 | --- | --- | --- | --- |
 | `items` | object[] | 是 |  |
 | `items[].id` | string | 是 |  |
-| `items[].kind` | string（enum: review_dispatch_failed \| review_run_timeout \| review_cleanup_failed \| review_redelivery_failed） | 是 |  |
+| `items[].kind` | string（enum: review_dispatch_failed \| review_run_timeout \| review_cleanup_failed \| review_redelivery_failed \| bot_budget_threshold） | 是 |  |
 | `items[].title` | string | 是 |  |
 | `items[].body` | string | 是 |  |
 | `items[].environment_id` | string（可空） | 否 |  |
@@ -8735,11 +8735,13 @@ streaming 与 tool_call 两项检查分别返回；HTTP 200 且 ok=false 表示
 
 花费总览（按天 / 按机器人 / 按定时任务，INT-162）
 
-只用现有账本（bot_runs / bot_model_requests / bot_maintenance_*）实时
-聚合，不新增表、不回填。窗口按 users.timezone 切日，空值回退部署配置
-bots.memory.timezone，再回退 UTC。金额一律来自内置 models.dev 目录单价
-估算：目录无价、自定义提供商、缺 usage 的请求为「未计价」——已计价
-字段缺省为 null（缺失 ≠ 0），未计价请求计入 unpriced_requests。
+历史日期读按天汇总表（bot_usage_daily），今天与缺失/脏日期实时扫描
+现有账本（bot_runs / bot_model_requests / bot_maintenance_*）。窗口
+按 users.timezone 切日，空值回退部署配置 bots.memory.timezone，再回退
+UTC。金额为请求级实收优先（COALESCE(provider_cost, cost_estimate)，
+INT-164）：提供商回报的置信 USD 实收覆盖目录价估算；两者皆空的请求
+为「未计价」——金额字段缺省为 null（缺失 ≠ 0），未计价请求计入
+unpriced_requests。
 归属：session_kind='schedule' 的 run 按 schedule_task_id 归定时任务；
 触发来源 schedule_event 的主线 run 经 trigger_key 反查任务，计入该
 任务 linked_main_cost（近似，一次主线 run 可能同时处理多条输入），
@@ -8768,21 +8770,22 @@ bots.memory.timezone，再回退 UTC。金额一律来自内置 models.dev 目�
 | `start` | string（date-time） | 是 | 统计窗口起点 UTC（含） |
 | `end` | string（date-time） | 是 | 统计窗口终点 UTC（不含，即查询时刻） |
 | `totals` | object | 是 |  |
-| `totals.cost` | number（double，可空） | 是 | 窗口内已计价成本合计（USD）；无任何已计价请求为 null（缺失 ≠ 0） |
+| `totals.cost` | number（double，可空） | 是 | 窗口内显示成本合计（USD，请求级实收优先）；无任何金额请求为 null（缺失 ≠ 0） |
 | `totals.daily_average` | number（double，可空） | 是 | cost / 窗口天数；cost 为 null 时同 null |
 | `totals.total_requests` | integer（int64） | 是 | 模型请求总数（主线/定时 + 维护） |
-| `totals.priced_requests` | integer（int64） | 是 |  |
-| `totals.unpriced_requests` | integer（int64） | 是 | 未计价请求数（自定义提供商、目录无价、缺 usage、v0.1.63 前旧记录） |
+| `totals.priced_requests` | integer（int64） | 是 | 有金额请求数（估算或实收任一非空） |
+| `totals.unpriced_requests` | integer（int64） | 是 | 无金额请求数（估算与实收都为空：自定义提供商、目录无价、缺 usage、v0.1.63 前旧记录） |
 | `days` | object[] | 是 |  |
 | `days[].date` | string | 是 | 生效时区的当地日期 YYYY-MM-DD；窗口内每天一行（含无数据日） |
-| `days[].cost` | number（double） | 是 | 当日已计价成本合计；全未计价或无记录为 0 |
+| `days[].cost` | number（double） | 是 | 当日显示成本合计（请求级实收优先）；全无金额或无记录为 0 |
 | `days[].bots` | object[] | 是 | 当日有模型请求（含未计价）的机器人 |
 | `days[].bots[].bot_id` | string | 是 |  |
 | `days[].bots[].cost` | number（double） | 是 |  |
 | `bots` | object[] | 是 |  |
 | `bots[].bot_id` | string | 是 |  |
 | `bots[].name` | string | 是 |  |
-| `bots[].cost` | number（double，可空） | 是 | 已计价合计 = cost_main + cost_schedule + cost_maintenance |
+| `bots[].deleted` | boolean | 否 | omitempty；true = 机器人已删除——明细已级联清理，name 是删除时快照，历史维度读按天汇总表（INT-164） |
+| `bots[].cost` | number（double，可空） | 是 | 显示成本合计 = cost_main + cost_schedule + cost_maintenance（请求级实收优先） |
 | `bots[].cost_main` | number（double，可空） | 是 | 主线桶：非 schedule_event 触发的 main run（自身成本+关联维护） |
 | `bots[].cost_schedule` | number（double，可空） | 是 | 定时任务桶：schedule run（自身+关联维护）+ schedule_event 连带主线成本 |
 | `bots[].cost_schedule_linked_approx` | number（double，可空） | 是 | cost_schedule 中连带主线成本部分（近似，UI 标注） |
@@ -8828,16 +8831,17 @@ bots.memory.timezone，再回退 UTC。金额一律来自内置 models.dev 目�
 花费优化参考（上下文增长 / 缓存命中 / 工具定义占比 / 维护占比 / 失败重试浪费 / 空转 / 换模型差价，INT-163）
 
 与花费总览同一窗口、同一机器人集合的只读聚合，回答「钱花在哪、怎么省」。
-全部指标复用现有账本实时计算：金额仍是目录单价估算（缺失 ≠ 0），token
-估算列（input_tokens_estimate / tools_tokens_estimate）标 estimated。
+全部指标复用现有账本实时计算：展示金额与总览同口径（请求级实收优先，
+缺失 ≠ 0）；换模型差价是假设对比，按目录单价估算。token 估算列
+（input_tokens_estimate / tools_tokens_estimate）标 estimated。
 口径要点：
 - 缓存命中率：cached / prompt，只统计 usage 完整的请求；按天维度把请求
   计入所属 run（或维护运行）自身 created_at 的当地日，与总览记日一致。
 - 工具定义占比：tools_tokens_estimate / prompt_tokens，同一 usage 完整
   请求集合；分子是按 schema 字节的估算值。
-- 维护占比：窗口内全部维护请求已计价花费（含挂到 run 名下的，口径大于
+- 维护占比：窗口内全部维护请求显示花费（含挂到 run 名下的，口径大于
   总览「维护」桶）占该机器人总花费（总览三桶之和）的比例，按用途拆分。
-- 失败和重试浪费：status=failed 的请求行中已计价金额、status=failed 的
+- 失败和重试浪费：status=failed 的请求行中显示金额、status=failed 的
   run 的显示成本合计、重复 request_hash 的重试次数；按 error_code 分组。
 - 空转：非 skipped 的终态 schedule run 中满足任一条件即算空转——
   silent=true、整次运行没有任何工具调用行、没有任何写操作调用（写操作
@@ -8879,21 +8883,21 @@ bots.memory.timezone，再回退 UTC。金额一律来自内置 models.dev 目�
 | `bots[].tools.tools_tokens_estimate` | integer（int64） | 是 | 分子：同一请求集合的 tools_tokens_estimate 合计（按 schema 字节的估算值，非精确 token 数） |
 | `bots[].tools.share` | number（double，可空） | 是 | tools_tokens_estimate / prompt_tokens；分母为 0（无完整 usage 请求）时 null |
 | `bots[].maintenance` | object | 是 |  |
-| `bots[].maintenance.cost` | number（double，可空） | 是 | 窗口内该机器人全部维护请求已计价合计（含挂到 run 名下的压缩/归档，口径大于总览「维护」桶） |
+| `bots[].maintenance.cost` | number（double，可空） | 是 | 窗口内该机器人全部维护请求显示成本合计（实收优先，含挂到 run 名下的压缩/归档，口径大于总览「维护」桶） |
 | `bots[].maintenance.share` | number（double，可空） | 是 | cost / 该机器人总花费（总览三桶之和）；任一未计价或总花费为 0 时为 null |
 | `bots[].maintenance.by_purpose` | object[] | 是 | 按用途拆分，按 cost 降序 |
 | `bots[].maintenance.by_purpose[].purpose` | string | 是 | 维护用途：summary / archive / nightly（窗口内出现过的才列出） |
-| `bots[].maintenance.by_purpose[].cost` | number（double，可空） | 是 | 该用途下已计价请求合计；全部未计价为 null（缺失 ≠ 0） |
+| `bots[].maintenance.by_purpose[].cost` | number（double，可空） | 是 | 该用途下显示成本合计（实收优先）；全无金额为 null（缺失 ≠ 0） |
 | `bots[].failures` | object | 是 |  |
 | `bots[].failures.failed_requests` | integer（int64） | 是 | status=failed 的模型请求行数（bot_model_requests + bot_maintenance_requests） |
-| `bots[].failures.failed_requests_cost` | number（double，可空） | 是 | 失败请求中已计价金额合计——重试浪费口径：失败尝试若送过 usage 就已计价，其花费即浪费 |
+| `bots[].failures.failed_requests_cost` | number（double，可空） | 是 | 失败请求中显示金额合计（实收优先）——重试浪费口径：失败尝试若有金额，其花费即浪费 |
 | `bots[].failures.failed_runs` | integer（int64） | 是 | status=failed 的 bot_runs 数（main + schedule） |
-| `bots[].failures.failed_runs_cost` | number（double，可空） | 是 | 失败 run 的显示成本合计（自身 + 关联维护已计价） |
+| `bots[].failures.failed_runs_cost` | number（double，可空） | 是 | 失败 run 的显示成本合计（自身 + 关联维护，实收优先） |
 | `bots[].failures.retried_requests` | integer（int64） | 是 | 与同 run 内更早请求 request_hash 相同的请求行数（每次重复尝试计 1，含最终成功那次） |
 | `bots[].failures.by_error` | object[] | 是 | 失败请求按 error_code 分组，按 cost 降序（null 组排最后） |
 | `bots[].failures.by_error[].error_code` | string（可空） | 是 | 失败请求的 error_code；无错误码的失败归到 null 一组 |
 | `bots[].failures.by_error[].requests` | integer（int64） | 是 |  |
-| `bots[].failures.by_error[].cost` | number（double，可空） | 是 | 该组失败请求中已计价金额合计 |
+| `bots[].failures.by_error[].cost` | number（double，可空） | 是 | 该组失败请求中显示金额合计（实收优先） |
 | `bots[].context_growth` | object[] | 是 | 每次运行第一次请求的输入 token 随时间变化（升序）；有请求的 run 才有点 |
 | `bots[].context_growth[].run_id` | string | 是 | 产生该点的 run ID（前端可链接到运行明细） |
 | `bots[].context_growth[].at` | string（date-time） | 是 | run.created_at（UTC） |
@@ -8920,7 +8924,7 @@ bots.memory.timezone，再回退 UTC。金额一律来自内置 models.dev 目�
 | `schedule_tasks[].evaluated_runs` | integer（int64） | 是 | 空转判定分母：非 skipped 的终态 schedule run（completed/failed/stopped）；进行中与排队不计 |
 | `schedule_tasks[].idle_runs` | integer（int64） | 是 | 满足任一空转条件的 run 数（各条件可叠加命中） |
 | `schedule_tasks[].idle_rate` | number（double，可空） | 是 | idle_runs / evaluated_runs；分母为 0 时 null |
-| `schedule_tasks[].idle_cost` | number（double，可空） | 是 | 空转 run 的显示成本合计（自身 + 关联维护已计价） |
+| `schedule_tasks[].idle_cost` | number（double，可空） | 是 | 空转 run 的显示成本合计（自身 + 关联维护，实收优先） |
 | `schedule_tasks[].silent_runs` | integer（int64） | 是 | 条件一：silent=true（静默哨兵）的 run 数 |
 | `schedule_tasks[].no_tool_call_runs` | integer（int64） | 是 | 条件二：整次运行没有任何工具调用行的 run 数（调用行各状态都计） |
 | `schedule_tasks[].no_write_call_runs` | integer（int64） | 是 | 条件三：没有任何有效写操作调用的 run 数；写操作 = 当前工具注册表 ReadOnly 之外的 action（未知动作按写处理），且仅 status=succeeded 或 effect_may_have_occurred 的调用算有效——被拒/取消/失败/未执行的写调用不计 |
@@ -8942,8 +8946,9 @@ bots.memory.timezone，再回退 UTC。金额一律来自内置 models.dev 目�
 单次运行花费明细（INT-162）
 
 单次 run 的完整账单：每次模型请求（含失败重试）及其工具调用、关联的
-压缩/维护运行与请求。display_cost = 自身已计价成本 + 关联维护已计价
-成本；不改写 run 的 cost_estimate 列。
+压缩/维护运行与请求。金额均为请求级实收优先（provider_cost 覆盖
+cost_estimate）：display_cost = 自身 + 关联维护的显示成本合计；
+不改写 run 的 cost_estimate 列（保持目录价快照语义）。
 
 **鉴权**：仅 JWT
 
@@ -8981,7 +8986,7 @@ bots.memory.timezone，再回退 UTC。金额一律来自内置 models.dev 目�
 | `run.usage_complete` | boolean | 是 |  |
 | `run.cost_estimate` | number（double，可空） | 是 |  |
 | `run.cost_source` | string（可空） | 是 |  |
-| `run.maintenance_cost` | number（double，可空） | 是 | 关联维护运行已计价成本合计 |
+| `run.maintenance_cost` | number（double，可空） | 是 | 关联维护运行显示成本合计（实收优先） |
 | `run.display_cost` | number（double，可空） | 是 | cost_estimate + maintenance_cost；都为 null 时为 null |
 | `run.error_code` | string（可空） | 否 |  |
 | `run.error_message` | string（可空） | 否 |  |
@@ -9000,6 +9005,8 @@ bots.memory.timezone，再回退 UTC。金额一律来自内置 models.dev 目�
 | `requests[].cached_tokens` | integer（int64，可空） | 否 |  |
 | `requests[].completion_tokens` | integer（int64，可空） | 否 |  |
 | `requests[].total_tokens` | integer（int64，可空） | 否 |  |
+| `requests[].reasoning_tokens` | integer（int64，可空） | 否 | completion_tokens_details.reasoning_tokens；供应商未返回为 null |
+| `requests[].provider_cost` | number（double，可空） | 否 | 供应商 usage 返回的实际金额（USD）；仅币别置信 USD 时落库并返回，否则 null |
 | `requests[].tools_tokens_estimate` | integer（int64） | 是 |  |
 | `requests[].usage_complete` | boolean | 是 |  |
 | `requests[].cost_estimate` | number（double，可空） | 是 |  |
@@ -9025,7 +9032,7 @@ bots.memory.timezone，再回退 UTC。金额一律来自内置 models.dev 目�
 | `maintenance_runs[].created_at` | string（date-time） | 是 |  |
 | `maintenance_runs[].started_at` | string（date-time，可空） | 否 |  |
 | `maintenance_runs[].finished_at` | string（date-time，可空） | 否 |  |
-| `maintenance_runs[].cost_estimate` | number（double，可空） | 是 | 本维护运行已计价请求合计 |
+| `maintenance_runs[].cost_estimate` | number（double，可空） | 是 | 本维护运行显示成本合计（请求级实收优先） |
 | `maintenance_runs[].requests` | object[] | 是 |  |
 | `maintenance_runs[].requests[].id` | string | 是 |  |
 | `maintenance_runs[].requests[].ordinal` | integer（int64） | 是 |  |
@@ -9037,6 +9044,8 @@ bots.memory.timezone，再回退 UTC。金额一律来自内置 models.dev 目�
 | `maintenance_runs[].requests[].cached_tokens` | integer（int64，可空） | 否 |  |
 | `maintenance_runs[].requests[].completion_tokens` | integer（int64，可空） | 否 |  |
 | `maintenance_runs[].requests[].total_tokens` | integer（int64，可空） | 否 |  |
+| `maintenance_runs[].requests[].reasoning_tokens` | integer（int64，可空） | 否 | completion_tokens_details.reasoning_tokens；供应商未返回为 null |
+| `maintenance_runs[].requests[].provider_cost` | number（double，可空） | 否 | 供应商 usage 返回的实际金额（USD）；仅币别置信 USD 时落库并返回，否则 null |
 | `maintenance_runs[].requests[].cost_estimate` | number（double，可空） | 是 |  |
 | `maintenance_runs[].requests[].cost_source` | string（可空） | 是 |  |
 | `maintenance_runs[].requests[].error_code` | string（可空） | 否 |  |
@@ -9351,7 +9360,7 @@ client_message_id 必填（幂等键）：同键同正文返回已有消息；�
 | `run.usage_complete` | boolean | 是 | false 表示上游未报 usage（缺失与零严格区分） |
 | `run.cost_estimate` | number（double，可空） | 否 | 本 run 已计价请求的成本累计（USD，含送过 usage 的失败请求）；目录无价/全缺 usage 时为 null（缺失 ≠ 0，INT-139） |
 | `run.cost_source` | string（可空） | 否 | 计价来源（catalog）；cost_estimate 为 null 时同 null |
-| `run.display_cost_estimate` | number（double，可空） | 是 | 显示口径成本（INT-162）：本 run 已计价成本 + 关联维护运行已计价成本；两者都为 null 时为 null。cost_estimate 列本身口径不变 |
+| `run.display_cost_estimate` | number（double，可空） | 是 | 显示口径成本（INT-162）：本 run + 关联维护运行的显示成本合计（请求级实收优先，INT-164）；两者都为 null 时为 null。cost_estimate 列本身口径不变 |
 | `run.error_code` | string（可空） | 否 |  |
 | `run.error_message` | string（可空） | 否 |  |
 | `run.created_at` | string（date-time） | 是 |  |
@@ -9476,7 +9485,7 @@ client_message_id 必填（幂等键）：同键同正文返回已有消息；�
 | `runs[].usage_complete` | boolean | 是 | false 表示上游未报 usage（缺失与零严格区分） |
 | `runs[].cost_estimate` | number（double，可空） | 否 | 本 run 已计价请求的成本累计（USD，含送过 usage 的失败请求）；目录无价/全缺 usage 时为 null（缺失 ≠ 0，INT-139） |
 | `runs[].cost_source` | string（可空） | 否 | 计价来源（catalog）；cost_estimate 为 null 时同 null |
-| `runs[].display_cost_estimate` | number（double，可空） | 是 | 显示口径成本（INT-162）：本 run 已计价成本 + 关联维护运行已计价成本；两者都为 null 时为 null。cost_estimate 列本身口径不变 |
+| `runs[].display_cost_estimate` | number（double，可空） | 是 | 显示口径成本（INT-162）：本 run + 关联维护运行的显示成本合计（请求级实收优先，INT-164）；两者都为 null 时为 null。cost_estimate 列本身口径不变 |
 | `runs[].error_code` | string（可空） | 否 |  |
 | `runs[].error_message` | string（可空） | 否 |  |
 | `runs[].created_at` | string（date-time） | 是 |  |
@@ -9609,7 +9618,7 @@ done 携带 run 终态，error 携带 code/message（顺序固定 error → done
 | `items[].usage_complete` | boolean | 是 | false 表示上游未报 usage（缺失与零严格区分） |
 | `items[].cost_estimate` | number（double，可空） | 否 | 本 run 已计价请求的成本累计（USD，含送过 usage 的失败请求）；目录无价/全缺 usage 时为 null（缺失 ≠ 0，INT-139） |
 | `items[].cost_source` | string（可空） | 否 | 计价来源（catalog）；cost_estimate 为 null 时同 null |
-| `items[].display_cost_estimate` | number（double，可空） | 是 | 显示口径成本（INT-162）：本 run 已计价成本 + 关联维护运行已计价成本；两者都为 null 时为 null。cost_estimate 列本身口径不变 |
+| `items[].display_cost_estimate` | number（double，可空） | 是 | 显示口径成本（INT-162）：本 run + 关联维护运行的显示成本合计（请求级实收优先，INT-164）；两者都为 null 时为 null。cost_estimate 列本身口径不变 |
 | `items[].error_code` | string（可空） | 否 |  |
 | `items[].error_message` | string（可空） | 否 |  |
 | `items[].created_at` | string（date-time） | 是 |  |
@@ -9662,7 +9671,7 @@ done 携带 run 终态，error 携带 code/message（顺序固定 error → done
 | `usage_complete` | boolean | 是 | false 表示上游未报 usage（缺失与零严格区分） |
 | `cost_estimate` | number（double，可空） | 否 | 本 run 已计价请求的成本累计（USD，含送过 usage 的失败请求）；目录无价/全缺 usage 时为 null（缺失 ≠ 0，INT-139） |
 | `cost_source` | string（可空） | 否 | 计价来源（catalog）；cost_estimate 为 null 时同 null |
-| `display_cost_estimate` | number（double，可空） | 是 | 显示口径成本（INT-162）：本 run 已计价成本 + 关联维护运行已计价成本；两者都为 null 时为 null。cost_estimate 列本身口径不变 |
+| `display_cost_estimate` | number（double，可空） | 是 | 显示口径成本（INT-162）：本 run + 关联维护运行的显示成本合计（请求级实收优先，INT-164）；两者都为 null 时为 null。cost_estimate 列本身口径不变 |
 | `error_code` | string（可空） | 否 |  |
 | `error_message` | string（可空） | 否 |  |
 | `created_at` | string（date-time） | 是 |  |
@@ -9722,7 +9731,7 @@ stop:<runId> 幂等）并唤醒机器人，由它结合上下文决定后续动�
 | `usage_complete` | boolean | 是 | false 表示上游未报 usage（缺失与零严格区分） |
 | `cost_estimate` | number（double，可空） | 否 | 本 run 已计价请求的成本累计（USD，含送过 usage 的失败请求）；目录无价/全缺 usage 时为 null（缺失 ≠ 0，INT-139） |
 | `cost_source` | string（可空） | 否 | 计价来源（catalog）；cost_estimate 为 null 时同 null |
-| `display_cost_estimate` | number（double，可空） | 是 | 显示口径成本（INT-162）：本 run 已计价成本 + 关联维护运行已计价成本；两者都为 null 时为 null。cost_estimate 列本身口径不变 |
+| `display_cost_estimate` | number（double，可空） | 是 | 显示口径成本（INT-162）：本 run + 关联维护运行的显示成本合计（请求级实收优先，INT-164）；两者都为 null 时为 null。cost_estimate 列本身口径不变 |
 | `error_code` | string（可空） | 否 |  |
 | `error_message` | string（可空） | 否 |  |
 | `created_at` | string（date-time） | 是 |  |
@@ -9775,7 +9784,7 @@ stop:<runId> 幂等）并唤醒机器人，由它结合上下文决定后续动�
 | `items[].next_run_at` | string（date-time，可空） | 是 | 下一次计划触发时间（UTC）；停用或调度暂停时为 null |
 | `items[].state` | string（可空） | 是 | 任务小状态的原始 JSON 文本（INT-123，无损；无状态为 null）。写入只经机器人 fs_schedule 的 state_set，用户只能经 DELETE .../state 清空 |
 | `items[].state_updated_at` | string（date-time，可空） | 是 | 状态最近一次写入时间（UTC）；无状态为 null |
-| `items[].cost_last_7d` | number（double，可空） | 是 | 近 7 天该任务已计价成本合计（schedule run 自身+关联维护 + 连带主线成本，INT-162）；无已计价记录为 null |
+| `items[].cost_last_7d` | number（double，可空） | 是 | 近 7 天该任务显示成本合计（schedule run 自身+关联维护 + 连带主线成本，请求级实收优先，INT-162/164）；无金额记录为 null |
 | `items[].created_at` | string（date-time） | 是 |  |
 | `items[].updated_at` | string（date-time） | 是 |  |
 | `items[].last_run` | object（可空） | 是 |  |
@@ -9796,7 +9805,7 @@ stop:<runId> 幂等）并唤醒机器人，由它结合上下文决定后续动�
 | `items[].last_run.total_tokens` | integer（int64） | 否 |  |
 | `items[].last_run.cost_estimate` | number（double） | 否 | 本 run 已计价请求的成本累计（USD，含送过 usage 的失败请求）；目录无价时缺省（缺失 ≠ 0，INT-139） |
 | `items[].last_run.cost_source` | string | 否 | 计价来源（catalog） |
-| `items[].last_run.display_cost_estimate` | number（double，可空） | 是 | 显示口径成本（INT-162）：本 run 已计价成本 + 关联维护运行已计价成本；两者都为 null 时为 null |
+| `items[].last_run.display_cost_estimate` | number（double，可空） | 是 | 显示口径成本（INT-162）：本 run + 关联维护运行的显示成本合计（请求级实收优先，INT-164）；两者都为 null 时为 null |
 
 **错误**
 
@@ -9841,7 +9850,7 @@ stop:<runId> 幂等）并唤醒机器人，由它结合上下文决定后续动�
 | `next_run_at` | string（date-time，可空） | 是 | 下一次计划触发时间（UTC）；停用或调度暂停时为 null |
 | `state` | string（可空） | 是 | 任务小状态的原始 JSON 文本（INT-123，无损；无状态为 null）。写入只经机器人 fs_schedule 的 state_set，用户只能经 DELETE .../state 清空 |
 | `state_updated_at` | string（date-time，可空） | 是 | 状态最近一次写入时间（UTC）；无状态为 null |
-| `cost_last_7d` | number（double，可空） | 是 | 近 7 天该任务已计价成本合计（schedule run 自身+关联维护 + 连带主线成本，INT-162）；无已计价记录为 null |
+| `cost_last_7d` | number（double，可空） | 是 | 近 7 天该任务显示成本合计（schedule run 自身+关联维护 + 连带主线成本，请求级实收优先，INT-162/164）；无金额记录为 null |
 | `created_at` | string（date-time） | 是 |  |
 | `updated_at` | string（date-time） | 是 |  |
 | `last_run` | object（可空） | 是 |  |
@@ -9862,7 +9871,7 @@ stop:<runId> 幂等）并唤醒机器人，由它结合上下文决定后续动�
 | `last_run.total_tokens` | integer（int64） | 否 |  |
 | `last_run.cost_estimate` | number（double） | 否 | 本 run 已计价请求的成本累计（USD，含送过 usage 的失败请求）；目录无价时缺省（缺失 ≠ 0，INT-139） |
 | `last_run.cost_source` | string | 否 | 计价来源（catalog） |
-| `last_run.display_cost_estimate` | number（double，可空） | 是 | 显示口径成本（INT-162）：本 run 已计价成本 + 关联维护运行已计价成本；两者都为 null 时为 null |
+| `last_run.display_cost_estimate` | number（double，可空） | 是 | 显示口径成本（INT-162）：本 run + 关联维护运行的显示成本合计（请求级实收优先，INT-164）；两者都为 null 时为 null |
 
 **错误**
 
@@ -9920,7 +9929,7 @@ stop:<runId> 幂等）并唤醒机器人，由它结合上下文决定后续动�
 | `items[].total_tokens` | integer（int64） | 否 |  |
 | `items[].cost_estimate` | number（double） | 否 | 本 run 已计价请求的成本累计（USD，含送过 usage 的失败请求）；目录无价时缺省（缺失 ≠ 0，INT-139） |
 | `items[].cost_source` | string | 否 | 计价来源（catalog） |
-| `items[].display_cost_estimate` | number（double，可空） | 是 | 显示口径成本（INT-162）：本 run 已计价成本 + 关联维护运行已计价成本；两者都为 null 时为 null |
+| `items[].display_cost_estimate` | number（double，可空） | 是 | 显示口径成本（INT-162）：本 run + 关联维护运行的显示成本合计（请求级实收优先，INT-164）；两者都为 null 时为 null |
 
 **错误**
 
@@ -9974,7 +9983,7 @@ stopped，不追加主线事件（用户主动停止不是需要汇报的运行�
 | `usage_complete` | boolean | 是 | false 表示上游未报 usage（缺失与零严格区分） |
 | `cost_estimate` | number（double，可空） | 否 | 本 run 已计价请求的成本累计（USD，含送过 usage 的失败请求）；目录无价/全缺 usage 时为 null（缺失 ≠ 0，INT-139） |
 | `cost_source` | string（可空） | 否 | 计价来源（catalog）；cost_estimate 为 null 时同 null |
-| `display_cost_estimate` | number（double，可空） | 是 | 显示口径成本（INT-162）：本 run 已计价成本 + 关联维护运行已计价成本；两者都为 null 时为 null。cost_estimate 列本身口径不变 |
+| `display_cost_estimate` | number（double，可空） | 是 | 显示口径成本（INT-162）：本 run + 关联维护运行的显示成本合计（请求级实收优先，INT-164）；两者都为 null 时为 null。cost_estimate 列本身口径不变 |
 | `error_code` | string（可空） | 否 |  |
 | `error_message` | string（可空） | 否 |  |
 | `created_at` | string（date-time） | 是 |  |
@@ -10036,7 +10045,7 @@ stopped，不追加主线事件（用户主动停止不是需要汇报的运行�
 | `next_run_at` | string（date-time，可空） | 是 | 下一次计划触发时间（UTC）；停用或调度暂停时为 null |
 | `state` | string（可空） | 是 | 任务小状态的原始 JSON 文本（INT-123，无损；无状态为 null）。写入只经机器人 fs_schedule 的 state_set，用户只能经 DELETE .../state 清空 |
 | `state_updated_at` | string（date-time，可空） | 是 | 状态最近一次写入时间（UTC）；无状态为 null |
-| `cost_last_7d` | number（double，可空） | 是 | 近 7 天该任务已计价成本合计（schedule run 自身+关联维护 + 连带主线成本，INT-162）；无已计价记录为 null |
+| `cost_last_7d` | number（double，可空） | 是 | 近 7 天该任务显示成本合计（schedule run 自身+关联维护 + 连带主线成本，请求级实收优先，INT-162/164）；无金额记录为 null |
 | `created_at` | string（date-time） | 是 |  |
 | `updated_at` | string（date-time） | 是 |  |
 | `last_run` | object（可空） | 是 |  |
@@ -10057,7 +10066,7 @@ stopped，不追加主线事件（用户主动停止不是需要汇报的运行�
 | `last_run.total_tokens` | integer（int64） | 否 |  |
 | `last_run.cost_estimate` | number（double） | 否 | 本 run 已计价请求的成本累计（USD，含送过 usage 的失败请求）；目录无价时缺省（缺失 ≠ 0，INT-139） |
 | `last_run.cost_source` | string | 否 | 计价来源（catalog） |
-| `last_run.display_cost_estimate` | number（double，可空） | 是 | 显示口径成本（INT-162）：本 run 已计价成本 + 关联维护运行已计价成本；两者都为 null 时为 null |
+| `last_run.display_cost_estimate` | number（double，可空） | 是 | 显示口径成本（INT-162）：本 run + 关联维护运行的显示成本合计（请求级实收优先，INT-164）；两者都为 null 时为 null |
 
 **错误**
 
@@ -10107,7 +10116,7 @@ stopped，不追加主线事件（用户主动停止不是需要汇报的运行�
 | `next_run_at` | string（date-time，可空） | 是 | 下一次计划触发时间（UTC）；停用或调度暂停时为 null |
 | `state` | string（可空） | 是 | 任务小状态的原始 JSON 文本（INT-123，无损；无状态为 null）。写入只经机器人 fs_schedule 的 state_set，用户只能经 DELETE .../state 清空 |
 | `state_updated_at` | string（date-time，可空） | 是 | 状态最近一次写入时间（UTC）；无状态为 null |
-| `cost_last_7d` | number（double，可空） | 是 | 近 7 天该任务已计价成本合计（schedule run 自身+关联维护 + 连带主线成本，INT-162）；无已计价记录为 null |
+| `cost_last_7d` | number（double，可空） | 是 | 近 7 天该任务显示成本合计（schedule run 自身+关联维护 + 连带主线成本，请求级实收优先，INT-162/164）；无金额记录为 null |
 | `created_at` | string（date-time） | 是 |  |
 | `updated_at` | string（date-time） | 是 |  |
 | `last_run` | object（可空） | 是 |  |
@@ -10128,7 +10137,281 @@ stopped，不追加主线事件（用户主动停止不是需要汇报的运行�
 | `last_run.total_tokens` | integer（int64） | 否 |  |
 | `last_run.cost_estimate` | number（double） | 否 | 本 run 已计价请求的成本累计（USD，含送过 usage 的失败请求）；目录无价时缺省（缺失 ≠ 0，INT-139） |
 | `last_run.cost_source` | string | 否 | 计价来源（catalog） |
-| `last_run.display_cost_estimate` | number（double，可空） | 是 | 显示口径成本（INT-162）：本 run 已计价成本 + 关联维护运行已计价成本；两者都为 null 时为 null |
+| `last_run.display_cost_estimate` | number（double，可空） | 是 | 显示口径成本（INT-162）：本 run + 关联维护运行的显示成本合计（请求级实收优先，INT-164）；两者都为 null 时为 null |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 404 | 资源不存在（40400-40499） |
+| 500 | 服务器内部错误（50000） |
+
+### GET `/api/bots/{id}/budgets`
+
+<!-- operationId: listBotBudgets -->
+
+机器人周期预算列表（INT-164）
+
+返回该机器人的预算（每日/每月各至多一条）与当前周期的已计价花费。
+花费为实收优先（provider_cost 覆盖 cost_estimate，与花费页展示同
+口径，未计价请求不计入），周期按用户有效时区切日/切月。未设置预算
+时返回空列表，系统行为与没有预算完全一致。
+
+**鉴权**：仅 JWT
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | API Key ID |
+
+**成功响应**
+
+**200** 预算列表
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `items` | object[] | 是 |  |
+| `items[].id` | string | 是 |  |
+| `items[].period` | string（enum: daily \| monthly） | 是 | 预算周期；每日按用户有效时区的当地日，每月按当地月 |
+| `items[].amount_usd` | number（double） | 是 | 预算金额（美元，大于 0） |
+| `items[].thresholds` | number[]（double） | 是 | 告警阈值（相对预算金额的比例，0.8 = 80%、1 = 100%；服务端规范化去重升序） |
+| `items[].spend_usd` | number（double） | 是 | 当前周期花费（USD）；实收优先（provider_cost 覆盖 cost_estimate），无金额请求不计入，无花费为 0 |
+| `items[].period_key` | string | 是 | 当前周期的规范键（daily = 当地日期 2006-01-02，monthly = 2006-01） |
+| `items[].spend_window_start` | string（date-time） | 是 | 当前周期统计窗口起点（UTC） |
+| `items[].spend_window_end` | string（date-time） | 是 | 当前周期统计窗口终点（UTC，= 评估时刻） |
+| `items[].created_at` | string（date-time） | 是 |  |
+| `items[].updated_at` | string（date-time） | 是 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 404 | 资源不存在（40400-40499） |
+| 500 | 服务器内部错误（50000） |
+
+### PUT `/api/bots/{id}/budgets/{period}`
+
+<!-- operationId: upsertBotBudget -->
+
+设置机器人预算（按周期覆盖）
+
+覆盖该机器人某周期的预算。阈值是相对预算金额的比例（0.8 = 80%，
+1 = 100%，允许大于 1）；服务端规范化（去重、升序、整数基点）后保存。
+越过阈值只发站内通知与主线事件，不停止运行；同一周期同一阈值只告警
+一次。
+
+**鉴权**：仅 JWT
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | API Key ID |
+| `period` | string（enum: daily \| monthly） | 是 |  |
+
+**请求体**
+
+`application/json`，必填。
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `amount_usd` | number（double） | 是 | 预算金额（美元，必须大于 0） |
+| `thresholds` | number[]（double） | 是 | 告警阈值（(0, 100]，1 = 100%，允许超过 100% 的档位；至少一个，服务端去重升序） |
+
+**成功响应**
+
+**200** 保存后的预算与当前周期花费
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 |  |
+| `period` | string（enum: daily \| monthly） | 是 | 预算周期；每日按用户有效时区的当地日，每月按当地月 |
+| `amount_usd` | number（double） | 是 | 预算金额（美元，大于 0） |
+| `thresholds` | number[]（double） | 是 | 告警阈值（相对预算金额的比例，0.8 = 80%、1 = 100%；服务端规范化去重升序） |
+| `spend_usd` | number（double） | 是 | 当前周期花费（USD）；实收优先（provider_cost 覆盖 cost_estimate），无金额请求不计入，无花费为 0 |
+| `period_key` | string | 是 | 当前周期的规范键（daily = 当地日期 2006-01-02，monthly = 2006-01） |
+| `spend_window_start` | string（date-time） | 是 | 当前周期统计窗口起点（UTC） |
+| `spend_window_end` | string（date-time） | 是 | 当前周期统计窗口终点（UTC，= 评估时刻） |
+| `created_at` | string（date-time） | 是 |  |
+| `updated_at` | string（date-time） | 是 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 400 | 请求参数无效（40001-40099） |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 404 | 资源不存在（40400-40499） |
+| 500 | 服务器内部错误（50000） |
+
+### DELETE `/api/bots/{id}/budgets/{period}`
+
+<!-- operationId: deleteBotBudget -->
+
+删除机器人预算
+
+删除该机器人某周期的预算；不存在也算成功（幂等）。
+
+**鉴权**：仅 JWT
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | API Key ID |
+| `period` | string（enum: daily \| monthly） | 是 |  |
+
+**成功响应**
+
+**200** 删除成功
+
+`data`：any
+
+响应负载；形状随端点而变，由 allOf 组合的兄弟 schema 收窄
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 404 | 资源不存在（40400-40499） |
+| 500 | 服务器内部错误（50000） |
+
+### GET `/api/bots/{id}/schedule-tasks/{taskId}/budgets`
+
+<!-- operationId: listBotScheduleTaskBudgets -->
+
+定时任务周期预算列表（INT-164）
+
+返回该定时任务的预算与当前周期花费。任务花费只算任务口径：该任务的
+schedule run、解析到该任务的 schedule_event 连带主线 run 及它们的关联
+维护；未计价请求不计入。
+
+**鉴权**：仅 JWT
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | API Key ID |
+| `taskId` | string | 是 |  |
+
+**成功响应**
+
+**200** 预算列表
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `items` | object[] | 是 |  |
+| `items[].id` | string | 是 |  |
+| `items[].period` | string（enum: daily \| monthly） | 是 | 预算周期；每日按用户有效时区的当地日，每月按当地月 |
+| `items[].amount_usd` | number（double） | 是 | 预算金额（美元，大于 0） |
+| `items[].thresholds` | number[]（double） | 是 | 告警阈值（相对预算金额的比例，0.8 = 80%、1 = 100%；服务端规范化去重升序） |
+| `items[].spend_usd` | number（double） | 是 | 当前周期花费（USD）；实收优先（provider_cost 覆盖 cost_estimate），无金额请求不计入，无花费为 0 |
+| `items[].period_key` | string | 是 | 当前周期的规范键（daily = 当地日期 2006-01-02，monthly = 2006-01） |
+| `items[].spend_window_start` | string（date-time） | 是 | 当前周期统计窗口起点（UTC） |
+| `items[].spend_window_end` | string（date-time） | 是 | 当前周期统计窗口终点（UTC，= 评估时刻） |
+| `items[].created_at` | string（date-time） | 是 |  |
+| `items[].updated_at` | string（date-time） | 是 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 404 | 资源不存在（40400-40499） |
+| 500 | 服务器内部错误（50000） |
+
+### PUT `/api/bots/{id}/schedule-tasks/{taskId}/budgets/{period}`
+
+<!-- operationId: upsertBotScheduleTaskBudget -->
+
+设置定时任务预算（按周期覆盖）
+
+覆盖该定时任务某周期的预算；阈值语义同机器人预算。任务必须属于该
+机器人（否则 404），机器人与任务都必须属于当前用户。
+
+**鉴权**：仅 JWT
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | API Key ID |
+| `taskId` | string | 是 |  |
+| `period` | string（enum: daily \| monthly） | 是 |  |
+
+**请求体**
+
+`application/json`，必填。
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `amount_usd` | number（double） | 是 | 预算金额（美元，必须大于 0） |
+| `thresholds` | number[]（double） | 是 | 告警阈值（(0, 100]，1 = 100%，允许超过 100% 的档位；至少一个，服务端去重升序） |
+
+**成功响应**
+
+**200** 保存后的预算与当前周期花费
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 |  |
+| `period` | string（enum: daily \| monthly） | 是 | 预算周期；每日按用户有效时区的当地日，每月按当地月 |
+| `amount_usd` | number（double） | 是 | 预算金额（美元，大于 0） |
+| `thresholds` | number[]（double） | 是 | 告警阈值（相对预算金额的比例，0.8 = 80%、1 = 100%；服务端规范化去重升序） |
+| `spend_usd` | number（double） | 是 | 当前周期花费（USD）；实收优先（provider_cost 覆盖 cost_estimate），无金额请求不计入，无花费为 0 |
+| `period_key` | string | 是 | 当前周期的规范键（daily = 当地日期 2006-01-02，monthly = 2006-01） |
+| `spend_window_start` | string（date-time） | 是 | 当前周期统计窗口起点（UTC） |
+| `spend_window_end` | string（date-time） | 是 | 当前周期统计窗口终点（UTC，= 评估时刻） |
+| `created_at` | string（date-time） | 是 |  |
+| `updated_at` | string（date-time） | 是 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 400 | 请求参数无效（40001-40099） |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 404 | 资源不存在（40400-40499） |
+| 500 | 服务器内部错误（50000） |
+
+### DELETE `/api/bots/{id}/schedule-tasks/{taskId}/budgets/{period}`
+
+<!-- operationId: deleteBotScheduleTaskBudget -->
+
+删除定时任务预算
+
+删除该定时任务某周期的预算；不存在也算成功（幂等）。
+
+**鉴权**：仅 JWT
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | API Key ID |
+| `taskId` | string | 是 |  |
+| `period` | string（enum: daily \| monthly） | 是 |  |
+
+**成功响应**
+
+**200** 删除成功
+
+`data`：any
+
+响应负载；形状随端点而变，由 allOf 组合的兄弟 schema 收窄
 
 **错误**
 

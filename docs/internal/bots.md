@@ -25,8 +25,10 @@ service/bot_tools_project.go / bot_tools_issue.go / bot_tools_thread.go   工具
 service/bot_tool_runner.go assistant 回合提交、同步执行、后台 worker、取消与终态
 service/bot_authorization.go 确认决定、结构化「始终允许」、撤销
 service/bot_results.go     结果瘦身、截断、fs_result.read 续读、能力查询与帮助
-service/bot_usage.go       花费页只读聚合（INT-162：按天/按机器人/按定时任务与单次运行明细）；总览与优化参考共享 loadBotUsageLedger 一次账本扫描
+service/bot_usage.go       花费页只读聚合（INT-162：按天/按机器人/按定时任务与单次运行明细）；总览与优化参考共享 loadBotUsageLedger 一次账本扫描；INT-164 起历史日期经 bot_usage_daily 汇总行、今天/未覆盖日回退实时（loadUsageHybridScan）
 service/bot_usage_insights.go 花费页优化参考（INT-163：缓存/工具占比/维护占比/失败重试/空转/换模型差价，共享加载层之上的端点特有查询与投影）
+service/bot_usage_rollup.go INT-164 按天汇总维护：逐 (bot,date) 小事务重算、覆盖标记与脏日判定、删除前补齐；模型在 model/bot_usage_daily.go，仓库在 repository/bot_usage_rollup.go
+service/bot_budget.go      INT-164 预算与阈值告警：60s 评估循环 + usage 落账 kick、固定 dedup 键的站内通知与 lifecycle；模型/仓库/处理器在 model|repository|handler/bot_budget.go
 service/bot_recovery.go    启动恢复
 handler/bot.go             REST（全部仅 JWT）
 handler/bot_stream.go      SSE 重放与订阅
@@ -424,10 +426,12 @@ next_offset}`；`fs_result.read` 按 Unicode 字符续读，不切断 UTF-8。
 - **切日时区** = 查询用户的有效时区（INT-138 回退链）；`7d`/`30d` 是含今天
   的最近 N 个当地日，`days` 每天一行（含无数据日）。UTC 16:30 在
   Asia/Shanghai 计入次日。
-- **金额**全部来自目录单价估算（INT-139 的 cost_estimate 列），`cost_estimate
-  IS NULL` 即「未计价」（自定义 provider、目录无价、缺 usage、旧记录），
-  已计价金额字段在没有任何已计价成分时输出 null（缺失 ≠ 0）；只有
-  `days[].cost`/`days[].bots[].cost` 是必填数值，全未计价就是 0。
+- **金额**展示口径为请求级实收优先 `COALESCE(provider_cost,
+  cost_estimate)`（INT-164）：供应商回报的置信 USD 实收覆盖目录价估算；
+  `cost_estimate` 列仍是目录价快照（INT-139）不改写。两者皆空的请求
+  即「无金额」（自定义 provider、目录无价、缺 usage、旧记录），金额字段
+  在没有任何金额成分时输出 null（缺失 ≠ 0）；只有
+  `days[].cost`/`days[].bots[].cost` 是必填数值，全无金额就是 0。
 - **三桶归属**：主线桶 = 非 schedule_event 触发的 main run；定时任务桶 =
   schedule run + schedule_event 连带主线成本（经 trigger_key
   `schedule_event:<runID>:<status>` 反查被引用 schedule run 的
@@ -437,8 +441,10 @@ next_offset}`；`fs_result.read` 按 Unicode 字符续读，不切断 UTF-8。
   运行自己的 created_at** 记日、**桶跟父 run 走**（父在窗口外经
   `ListRunsByIDs` 反查，schedule/schedule_event 父同样解析归属；父行不
   存在才进维护桶）——同一笔费用不因查询范围切换换日换桶。
-- **显示成本 display_cost** = run 自身已计价成本 + 关联维护（parent_run_id）
-  已计价成本，不改写账本列。`BotRun` / `BotScheduleRun` 响应新增
+- **显示成本 display_cost** = run 自身显示成本 + 关联维护（parent_run_id）
+  显示成本（INT-164 起均为请求级实收优先），不改写账本列。run 自身金额
+  在有请求行时按请求聚合实算（`runDisplayOwn`），存量请求行缺失时退回
+  `bot_runs.cost_estimate` 快照。`BotRun` / `BotScheduleRun` 响应新增
   `display_cost_estimate`，定时任务列表新增 `cost_last_7d`（与总览一致的
   当地日 7 天窗：schedule 自身 + 关联维护 + 连带主线自身与其维护；列表
   整页批量取维护合计，不做 N+1）。
@@ -450,9 +456,11 @@ next_offset}`；`fs_result.read` 按 Unicode 字符续读，不切断 UTF-8。
   已删除、无平均或解析失败为 null）。单次统计取**固定**最近 30 个
   当地日窗口（与所选 range 无关），同一份 schedule run + 关联维护 +
   连带主线口径。
-- **未计价计数**：`unpriced_requests` 按 bot_model_requests +
-  bot_maintenance_requests 计；`bot_model_requests` 没有 usage_complete 列，
-  聚合沿用聊天页口径「落过 usage 计数列 = prompt_tokens IS NOT NULL」。
+- **未计价计数**：`unpriced_requests` = 估算与实收都为空的请求数
+  （INT-164 起按展示口径），按 bot_model_requests + bot_maintenance_requests
+  计；实收覆盖的请求已按实收进合计，不算未计价。`bot_model_requests` 没有
+  usage_complete 列，聚合沿用聊天页口径「落过 usage 计数列 =
+  prompt_tokens IS NOT NULL」。
 
 ### 花费页第二期：成本优化参考（INT-163）
 
@@ -477,15 +485,16 @@ token 口径合成一次聚合）、关联维护合计、父 run 与任务反查
 - **工具定义占比**：分母 = 主线/定时 run 名下 usage 完整请求的 prompt
   合计，分子 = 同一集合的 tools_tokens_estimate（维护请求无工具定义列，
   不参与）。
-- **维护占比**：窗口内该机器人全部维护请求的已计价合计——含挂到 run 名下
-  的（口径大于总览「维护」桶，后者只算无父 run 的），按维护运行自己的
+- **维护占比**：窗口内该机器人全部维护请求的显示成本合计——含挂到 run
+  名下的（口径大于总览「维护」桶，后者只算无父 run 的），按维护运行自己的
   created_at 记窗口；share 分母 = 共享累加器的三桶之和（同一扫描快照，
-  分子分母同源），任一边未计价或分母 0 → null；by_purpose 列窗口内出现过
-  的用途（cost 降序、全未计价 null 最后）。
+  分子分母同源），任一边无金额或分母 0 → null；by_purpose 列窗口内出现过
+  的用途（cost 降序、全无金额 null 最后）。
 - **失败与重试浪费**：`failed_requests` / `failed_requests_cost` = status=
-  failed 的请求行（主线 + 维护）及其已计价合计；`failed_runs` /
-  `failed_runs_cost` = status=failed 的 run 及显示成本（自身 + 关联维护，
-  复用 `MaintenanceCostsByParentRun`）；`retried_requests` = 同 run 内重复
+  failed 的请求行（主线 + 维护）及其显示金额合计（实收优先）；
+  `failed_runs` / `failed_runs_cost` = status=failed 的 run 及显示成本
+  （自身 + 关联维护，复用 `MaintenanceCostsByParentRun`）；
+  `retried_requests` = 同 run 内重复
   request_hash 的行数（`GROUP BY run_id, request_hash` 后 SUM(cnt-1)，空
   hash 不参与，每次重复尝试计 1、含最终成功那次）；`by_error` 按 error_code
   分组（NULL 归 null 组，cost 降序、null 组最后）。
@@ -525,6 +534,63 @@ token 口径合成一次聚合）、关联维护合计、父 run 与任务反查
 `ChunkIDs` + `UsageQueryBatch` 分批；维护请求的按运行聚合由服务层从明细行
 推导（`botUsageMaintAggOf`，共享加载层本就要拉明细做用途拆分/失败统计/按天
 命中），同一批行不再跑第二次聚合查询。
+
+### 花费页第三期：按天汇总、预算告警与供应商实际金额（INT-164）
+
+**按天汇总**：`bot_usage_daily`（一行 = `user_id, bot_id, date, kind,
+schedule_task_id`）把实时账本按「用户有效时区的当地日 × 归属桶」预聚合，
+`bot_usage_rollup_days` 是逐 `(bot,date)` 的覆盖标记（写入时 timezone +
+四类明细计数 + `last_write_ns` 指纹）。总览的历史日期读汇总行、今天与
+未覆盖日回退实时明细（`loadUsageHybridScan`），insights 仍走完整实时
+账本（重试/失败/工具/context_growth 需要明细，汇总表不提供）。`display_cost`
+列是请求级实收优先的桶合计（与总览/明细/预算同一口径），金额/token
+沿用缺失 ≠ 0；`display_costs` JSON 样本保精确 P90。`bot_id`/
+`schedule_task_id` 不建外键（历史不随删除级联，`bot_name`/`task_name`
+是写入时快照；任务删除路径另写 `bot_schedule_task_names` 墓碑表——
+快照行会随整日替换与时区清空重建，墓碑是唯一跨重建存活的名字来源），
+唯一性靠两条部分唯一索引（task_id 可空）。维护：`usage
+RollupLoop` 60s 扫「有明细的现存 bot」把未覆盖/指纹不符/最近 2 日的日期
+各走一个小事务重算；启动立即异步跑一遍同一扫描（首次上线的全量回填 =
+全部未覆盖的同路径）；时区变化（标记 timezone ≠ 当前有效时区）整表清空
+该 bot 汇总重算。**删除**：`Delete` 先做事务外冲突预检 +
+`rollupBotUsageRange` 补齐全部缺口含今天的部分快照（失败中止删除——
+历史宁可不删也不丢），删除事务内复检冲突（新增活动维护运行检查）+
+`rollupBotDaysTx` 补事务期间新脏的日期与今天 + `StampBotNameTx` 刷最终名
+快照，然后级联删除；总览对已删 bot 投影 `deleted:true`，名称用快照、不
+生成 /bots/:id 链接，已删 bot 的当天花费同样来自删除时落盘的汇总行（
+明细已不存在）。
+
+**预算与告警**：`bot_budgets` 一行 = （机器人或定时任务，二选一，check
+约束 + 两条部分唯一索引）×（daily|monthly）；`amount_usd` + `thresholds`
+（比例数组，规范化整数基点去重升序，(0,100] 允许超 100%）。REST：
+`GET/PUT/DELETE /api/bots/{id}/budgets[/{period}]` 与
+`/api/bots/{id}/schedule-tasks/{taskId}/budgets[/{period}]`（仅 JWT）。
+花费口径与花费页一致（已计价金额、`COALESCE(provider_cost,
+cost_estimate)` 实际金额优先），`SpendInWindow` 一次窗口扫描服务同用户
+全部预算。`budgetEvalLoop` 首轮立即 + 60s tick + usage 落账后 `budgetKick`
+信号评估；评估当前周期并回看上一周期（迟写/停摆期间跨界补报）。同一
+（预算，周期键，整数基点阈值）只告警一次：主线 lifecycle 消息 dedup 键与
+站内通知 problemKey 都用该三元组且**不含金额**（金额变化不改键，不会把
+已读通知反复刷未读）；告警事务内写通知 + lifecycle + 事件行，提交后
+publishEvent。告警只作提示，不停止运行；文案注明未计价部分未计入。
+
+**供应商实际金额**：usage chunk 的 ExtraFields 按优先级解析
+`cost`（仅 OpenRouter 地址置信 USD）> `total_cost` > `*_usd` 命名字段 >
+`cost_details.upstream_inference_cost`（上游成本非用户实收）。置信 USD
+的值落 `provider_cost`（本列可直接 SUM）；币别不明或非用户实收的金额进
+`provider_cost_raw`（`{"field","value"}` JSON，只记录不展示）。两表落库
+同口径，运行明细 API 透出 provider_cost 时前端显示「供应商返回」徽记替代
+估算值。**展示金额统一实收优先**：总览/明细/按天汇总/任务合计/预算花费/
+优化参考的浪费与维护展示全部按请求级 `COALESCE(provider_cost,
+cost_estimate)`；`cost_estimate` 列保持目录价快照语义不改写，`bot_runs.
+cost_estimate` 亦然（存量请求行缺失时它才是金额回退来源）。换模型差价
+（actual_cost 与重算候选）是唯一例外——假设对比必须整组同口径按目录价。
+**推理 token**：`completion_tokens_details.reasoning_tokens` 经
+`usage.JSON.CompletionTokensDetails.Valid()` +
+`d.JSON.ReasoningTokens.Valid()` 判定落 `reasoning_tokens`（未返回保持
+NULL，缺失 ≠ 0），不计入计价公式（已含在 completion 计费内）；汇总表与
+API 投影同口径可空透出。SDK 的 ExtraFields 对未建模字段 `Valid()` 恒
+false，存在性按 `Raw()` 原始文本判定。
 
 ### 用户时区与当地语义（INT-138）
 
