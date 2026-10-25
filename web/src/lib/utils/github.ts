@@ -115,9 +115,10 @@ export function normalizeCodeRepoRef(raw: string): string {
       // 数字端口统一拼写（:0443 → :443），与后端 parseBaseURL/repoHostKey
       // 同口径——同一端点的不同写法归一出同一个主机键。
       if (/^\d+$/.test(port)) port = String(parseInt(port, 10));
-      // 与 SplitHostPort 同口径剥掉 IPv6 方括号。
-      if (name.startsWith("[") && name.endsWith("]")) name = name.slice(1, -1);
     }
+    // 与 SplitHostPort 同口径剥掉 IPv6 方括号：[::1] 与 [::1]:443 两种
+    // 写法归一出同一个主机键，不能只剥带端口的一支。
+    if (name.startsWith("[") && name.endsWith("]")) name = name.slice(1, -1);
     host = name + (hasPort ? ":" + port : scheme === "http" ? ":80" : ":443");
     if (host === "github.com:80" || host === "github.com:443") {
       host = "github.com";

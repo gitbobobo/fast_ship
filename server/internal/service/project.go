@@ -729,10 +729,24 @@ func (s *ProjectService) forgeIntegrationByHost(host string) (id string, found b
 
 // displayRepoHost 报错用的用户可辨识主机：host 是补了 scheme 默认端口的
 // 归一形态（unknown.example.com → unknown.example.com:443），直接透出会让
-// 用户以为自己多写了端口。按原始输入的 scheme 剥回默认端口；用户显式写的
-// 端口（含非默认端口）原样保留。
+// 用户以为自己多写了端口。按原始输入剥回默认端口；用户显式写的端口
+// （含无 scheme 的 host:port 形态与默认端口值本身）原样保留。
 func displayRepoHost(raw, host string) string {
-	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(raw)), "http://") {
+	rest := strings.TrimSpace(raw)
+	isHTTP := strings.HasPrefix(strings.ToLower(rest), "http://")
+	if i := strings.Index(rest, "://"); i >= 0 {
+		rest = rest[i+3:]
+	}
+	if i := strings.Index(rest, "/"); i >= 0 {
+		rest = rest[:i]
+	}
+	// 首段带显式端口（host:port 或 [v6]:port 形态）：剥默认端口会把用户
+	// 写的端口藏掉，回显原样（无 scheme 裸主机带端口语义同带 scheme）。
+	colons := strings.Count(rest, ":")
+	if colons == 1 || (strings.HasPrefix(rest, "[") && strings.Contains(rest, "]:")) {
+		return host
+	}
+	if isHTTP {
 		return strings.TrimSuffix(host, ":80")
 	}
 	return strings.TrimSuffix(host, ":443")

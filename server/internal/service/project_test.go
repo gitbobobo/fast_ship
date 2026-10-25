@@ -1716,6 +1716,16 @@ func TestProjectServiceCreate_ForgeIntegrationBinding(t *testing.T) {
 	if strings.Contains(appErr.Message, "git.local:") || !strings.Contains(appErr.Message, "git.local") {
 		t.Fatalf("error should echo user host without normalized default port, got %q", appErr.Message)
 	}
+	// 显式写了端口（含默认端口值本身）原样回显——剥掉会让用户以为
+	// 端口没生效（R48 Note）。
+	_, err = forgeSvc.Create(user.ID, &CreateProjectRequest{
+		Name:              "forge-bind-explicit-port",
+		CodeRepositoryUrl: api.Ptr("git.local:443/o/r"),
+	})
+	appErr, ok = err.(*errs.AppError)
+	if !ok || !strings.Contains(appErr.Message, "git.local:443") {
+		t.Fatalf("explicit port should echo verbatim, got %q", appErr.Message)
+	}
 
 	// http 集成（allow_private_network 场景）：URL 也必须显式写 http://
 	// 才能命中——http scheme 归一到 :80 与 :443 的 https 集成互不混淆。

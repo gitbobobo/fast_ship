@@ -42,6 +42,10 @@ describe("normalizeCodeRepoRef", () => {
     expect(normalizeCodeRepoRef("https://[::1]:8443/o/r")).toBe(
       "::1:8443/o/r",
     );
+    // 无端口与默认端口两种写法剥括号后归一键相同（R48 Note）。
+    expect(normalizeCodeRepoRef("https://[::1]/o/r")).toBe(
+      normalizeCodeRepoRef("https://[::1]:443/o/r"),
+    );
   });
 
   it("DNS 根点尾缀等价：forge.example. 与 forge.example 归一成同一主机键", () => {
