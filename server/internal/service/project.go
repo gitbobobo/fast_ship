@@ -537,12 +537,16 @@ func parseRepositoryURL(raw string) (host, owner, repo string, explicit bool, er
 		// 443），与集成 base_url 的归一（forgeBaseHostKey）同口径：http
 		// 集成只有显式写 http:// 的仓库 URL 才匹配得上。github.com 的任何
 		// scheme/默认端口写法都归一回裸主机名（= 内置 github-default）。
-		if _, _, err := net.SplitHostPort(host); err != nil {
+		if _, port, err := net.SplitHostPort(host); err != nil {
 			if scheme == "http" {
 				host += ":80"
 			} else {
 				host += ":443"
 			}
+		} else if _, perr := strconv.Atoi(port); perr != nil {
+			// host:abc 这类非数字端口会落到集成匹配报「主机未匹配」，把管理
+			// 员引向去配一条不可能的集成——端口非法按输入错误直接报。
+			return "", "", "", false, errors.New("仓库链接端口无效：" + port)
 		}
 		// github.com 判定走归一后的 repoHostKey（剥尾点、数字端口归一）：
 		// 「github.com.:80」「github.com.:443」这类写法与 github.com 同主机，

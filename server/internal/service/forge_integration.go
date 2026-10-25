@@ -56,7 +56,7 @@ var (
 	// errForgeIntegrationBuiltin 内置集成为只读映射：修改与删除都引导回既有的
 	// deployment/github-app 端点。
 	errForgeIntegrationBuiltin = errs.New(40001, "内置 GitHub 集成是只读映射，请通过 /api/deployment/github-app 端点管理")
-	errForgeIntegrationDecrypt = errs.New(errs.ErrInternal.Code, "集成凭证解密失败")
+	errForgeIntegrationDecrypt = errs.New(errs.ErrInternal.Code, "集成凭证解密失败（密钥轮换或数据损坏），请在编辑集成中重新保存访问令牌后重试")
 )
 
 func NewForgeIntegrationService(repo *repository.ForgeIntegrationRepository, github *IntegrationService, cfg *config.Config, logger *zap.Logger) *ForgeIntegrationService {
@@ -259,11 +259,19 @@ func (s *ForgeIntegrationService) Update(ctx context.Context, id string, req *ap
 		if err != nil {
 			// 单独关开关（不改基址）必然撞公网口径复核：把「先换公网 https
 			// 基址、再关内网放行」的操作顺序写进消息，不然管理员只看到基址
-			// 校验原文，悟不出要在同一次请求里先改 base_url。
+			// 校验原文，悟不出要在同一次请求里先改基址。只对私网/协议类
+			// 哨兵追加并按失败字段分开措辞——钉死的 api_base_url 挂了别
+			// 把管理员引向只改 base_url。
 			if flagChanged && !allowPrivate {
-				if appErr, ok := err.(*errs.AppError); ok {
-					return nil, errs.New(appErr.Code,
-						appErr.Message+"；请先改用公网 https 基址再关闭内网放行")
+				var fe *urlFieldErr
+				if errors.As(err, &fe) &&
+					(errors.Is(fe.cause, forges.ErrPrivateAddress) ||
+						errors.Is(fe.cause, forges.ErrSchemeNotAllowed)) {
+					hint := "；请先将站点地址改用公网 https 再关闭内网放行"
+					if fe.field == "api_base_url" {
+						hint = "；请先将 API 基址改用公网 https（或清空回到跟随站点推导）再关闭内网放行"
+					}
+					return nil, errs.New(fe.appErr.Code, fe.appErr.Message+hint)
 				}
 			}
 			return nil, err
@@ -456,7 +464,7 @@ func (s *ForgeIntegrationService) resolveURLs(ctx context.Context, currentBase, 
 	}
 	base, err = s.validateBaseURL(ctx, baseInput, allowPrivate)
 	if err != nil {
-		return "", "", paramError(err)
+		return "", "", &urlFieldErr{field: "base_url", cause: err, appErr: paramError(err)}
 	}
 	// base_url 只收站点根：审查链接与 code_repo_url 都按 {base_url}/{o}/{r}
 	// 拼接，带路径的基址会拼出错误 URL。api_base_url 不受限（可带 /api/v1）。
@@ -504,7 +512,7 @@ func (s *ForgeIntegrationService) resolveURLs(ctx context.Context, currentBase, 
 	}
 	apiStore, err = s.validateBaseURL(ctx, apiInput, allowPrivate)
 	if err != nil {
-		return "", "", paramError(err)
+		return "", "", &urlFieldErr{field: "api_base_url", cause: err, appErr: paramError(err)}
 	}
 	return base, apiStore, nil
 }
@@ -513,6 +521,21 @@ func (s *ForgeIntegrationService) resolveURLs(ctx context.Context, currentBase, 
 func paramError(err error) *errs.AppError {
 	return errs.New(40001, err.Error())
 }
+
+// urlFieldErr 标记 resolveURLs 里哪个基址校验失败并保留原始哨兵：Update
+// 关闭内网放行触发复核时，需要区分「站点地址」与「API 基址」给字段级操作
+// 提示，且只对私网/协议类安全哨兵追加（DNS 抖动不算「先换公网」能解决的）。
+type urlFieldErr struct {
+	field  string
+	cause  error
+	appErr *errs.AppError
+}
+
+func (e *urlFieldErr) Error() string { return e.appErr.Error() }
+
+// Unwrap 双链：errors.As(*errs.AppError) 让 HandleAppError 照常按 40001
+// 出响应，errors.Is(forges 哨兵) 让 Update 判定该不该追加操作提示。
+func (e *urlFieldErr) Unwrap() []error { return []error{e.cause, e.appErr} }
 
 // errForgeHostTaken 同一归一主机已被其他集成占用（40001）。
 func errForgeHostTaken(name string) *errs.AppError {

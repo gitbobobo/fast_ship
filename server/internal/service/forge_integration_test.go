@@ -315,7 +315,7 @@ func TestForgeIntegrationUpdateThreeStates(t *testing.T) {
 	}); appErr(t, err).Code != 40001 {
 		// 关闭放行后，http 基址按公网口径复核必须失败，且行保持原值。
 		t.Fatalf("flag-off revalidation code = %d", appErr(t, err).Code)
-	} else if aerr := appErr(t, err); !strings.Contains(aerr.Message, "公网 https 基址") {
+	} else if aerr := appErr(t, err); !strings.Contains(aerr.Message, "站点地址改用公网 https") {
 		// 单关开关撞上基址校验时，消息要点明操作顺序而不是只有校验原文。
 		t.Fatalf("flag-off message should hint base_url order, got %q", aerr.Message)
 	}
@@ -324,12 +324,27 @@ func TestForgeIntegrationUpdateThreeStates(t *testing.T) {
 		t.Fatal("failed validation must not flip the stored flag")
 	}
 
-	// api_base_url 三态：自定义值写入；显式空串重置为 {base_url}/api/v1（当前
-	// base 为 http://forge.lan，私网放行仍开）。
+	// base 先换成 https，让后面的复核失败落在钉死的 api_base_url 字段上
+	// （resolveURLs 先校 base——两边都违规时提示指向 base 是对的）。
+	if _, err := env.svc.Update(ctx, created.Id, &api.UpdateForgeIntegrationRequest{
+		BaseUrl: ptrStr("https://forge.lan"),
+	}); err != nil {
+		t.Fatalf("update base to https: %v", err)
+	}
+	// api_base_url 三态：自定义值写入；显式空串重置为 {base_url}/api/v1。
 	if _, err := env.svc.Update(ctx, created.Id, &api.UpdateForgeIntegrationRequest{
 		ApiBaseUrl: ptrStr("http://forge.lan/custom/api"),
 	}); err != nil {
 		t.Fatalf("update custom api base: %v", err)
+	}
+	// 钉死的 api_base_url 撞复核时提示要指向 API 基址，别把管理员引向
+	// 只改 base_url（R28 P2：按失败字段分开措辞）。
+	if _, err := env.svc.Update(ctx, created.Id, &api.UpdateForgeIntegrationRequest{
+		AllowPrivateNetwork: ptrBool(false),
+	}); appErr(t, err).Code != 40001 {
+		t.Fatalf("flag-off on pinned api code = %d", appErr(t, err).Code)
+	} else if aerr := appErr(t, err); !strings.Contains(aerr.Message, "API 基址") {
+		t.Fatalf("flag-off message should point at api_base_url, got %q", aerr.Message)
 	}
 	out, err = env.svc.Update(ctx, created.Id, &api.UpdateForgeIntegrationRequest{
 		ApiBaseUrl: ptrStr(""),
@@ -337,7 +352,7 @@ func TestForgeIntegrationUpdateThreeStates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reset api base: %v", err)
 	}
-	if out.ApiBaseUrl != "http://forge.lan/api/v1" {
+	if out.ApiBaseUrl != "https://forge.lan/api/v1" {
 		t.Fatalf("empty api_base_url should reset to derived default, got %q", out.ApiBaseUrl)
 	}
 }

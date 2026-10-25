@@ -188,6 +188,14 @@ func TestParseRepositoryURL(t *testing.T) {
 			errContains: "多余路径段",
 		},
 		{
+			// 非数字端口按输入错误直接报，不再落到集成匹配报「主机未匹配」
+			// 误导管理员去配一条不可能的集成。
+			name:        "non-numeric port rejected",
+			input:       "https://git.example.com:abc/godbobo/fast_ship",
+			wantErr:     true,
+			errContains: "端口无效",
+		},
+		{
 			name:      "non-github host upper case",
 			input:     "https://Git.Example.com/godbobo/fast_ship",
 			wantHost:  "git.example.com:443",
