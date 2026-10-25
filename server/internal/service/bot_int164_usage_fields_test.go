@@ -128,9 +128,20 @@ func TestBotParseProviderCostPrecedence(t *testing.T) {
 		{name: "null 与坏值都跳过", extra: map[string]respjson.Field{
 			"cost": f("null"), "total_cost": f(`"abc"`), "prompt_usd": f("x"),
 		}},
-		{name: "非 OR 的 cost 优先于 total_cost 但只进 raw", extra: map[string]respjson.Field{
+		{name: "NaN/Inf/负数不算金额", extra: map[string]respjson.Field{
+			"cost": f("null"), "total_cost": f("NaN"),
+			"prompt_usd": f("-0.5"), "upstream_usd": f("Inf"),
+		}},
+		{name: "非 OR 的 cost 记 raw 但置信 total_cost 仍胜出", extra: map[string]respjson.Field{
 			"cost": f("0.5"), "total_cost": f("0.9"),
-		}, wantRaw: true},
+		}, wantCost: ptrCost(0.9), wantRaw: true},
+		{name: "非 OR 的 cost 记 raw 且不挡 _usd 字段", extra: map[string]respjson.Field{
+			"cost": f("0.5"), "prompt_usd": f("0.07"),
+		}, wantCost: ptrCost(0.07), wantRaw: true},
+		{name: "upstream 记 raw 但不挡 _usd 字段", extra: map[string]respjson.Field{
+			"cost_details": f(`{"upstream_inference_cost":0.01}`),
+			"prompt_usd":   f("0.07"),
+		}, wantCost: ptrCost(0.07), wantRaw: true},
 		{name: "OR 的 cost 置信 USD", extra: map[string]respjson.Field{
 			"cost": f("0.5"), "total_cost": f("0.9"),
 		}, openrouter: true, wantCost: ptrCost(0.5)},

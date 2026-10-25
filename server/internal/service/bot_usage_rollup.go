@@ -126,16 +126,43 @@ func (s *BotService) usageRollupPlan(db *gorm.DB, bot *model.Bot, now time.Time,
 	if len(spans) == 0 {
 		return plan, nil
 	}
-
-	fps, err := repo.DayFingerprints(bot.ID, spans)
-	if err != nil {
-		return nil, err
+	if plan.wipe {
+		// 时区变更清空后全部日期按未覆盖重算，指纹比对无意义，直接全选。
+		plan.spans = spans
+		return plan, nil
 	}
+
 	// 最近 2 个当地日无条件重算：收尾 UPDATE/迟到写入的兜底窗口（指纹
 	// 判定之外的第二道保险）。
 	recent := map[string]bool{}
 	for _, s := range spans[max(0, len(spans)-2):] {
 		recent[s.Date] = true
+	}
+	// 廉价闸：账本水位探针不超标记所记最大写入时，已覆盖日自上次汇总
+	// 后没有任何新写——指纹不可能变，只有「未覆盖 ∪ 最近 2 日」要算，
+	// 跳过全历史 DayFingerprints（每 60s × 每 bot 的全账本聚合）。
+	var markMax int64
+	for _, m := range marks {
+		if m.LastWriteNs > markMax {
+			markMax = m.LastWriteNs
+		}
+	}
+	probe, err := repo.SpanWriteMax(bot.ID, spans[0].Start, spans[len(spans)-1].End)
+	if err != nil {
+		return nil, err
+	}
+	if probe == nil || !probe.After(time.Unix(0, markMax)) {
+		for _, span := range spans {
+			if _, ok := markBy[span.Date]; !ok || recent[span.Date] {
+				plan.spans = append(plan.spans, span)
+			}
+		}
+		return plan, nil
+	}
+
+	fps, err := repo.DayFingerprints(bot.ID, spans)
+	if err != nil {
+		return nil, err
 	}
 	for _, span := range spans {
 		mark, ok := markBy[span.Date]

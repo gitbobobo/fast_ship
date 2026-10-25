@@ -592,3 +592,69 @@ func TestBotUsageRollupTaskNameTombstone(t *testing.T) {
 	}
 	assertTaskName(task.Name)
 }
+
+// 水位闸（评审回归）：全部已覆盖日自上次汇总后没有新写时，计划只产出
+// 「未覆盖 ∪ 最近 2 日」，全历史指纹不跑也能判净；而老日上来一笔
+// straggler 写入（水位超标记）必须重新把该日判脏。两侧都钉——闸关
+// （省全量指纹）与闸开（不丢脏日）。
+func TestBotUsageRollupWriteProbeGate(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "rollupgate")
+	setUserTimezone(t, env, userID, "UTC")
+	created := env.createBot(t, userID)
+	bot, err := env.bots.bots.Get(created.ID)
+	if err != nil {
+		t.Fatalf("读 bot: %v", err)
+	}
+	fixed := time.Now().UTC().Truncate(time.Hour)
+	env.bots.nowFn = func() time.Time { return fixed }
+
+	oldDay := usageDayAt(fixed, 4).Format("2006-01-02")
+	run := seedUsageRun(t, env, bot.ID, func(r *model.BotRun) {
+		r.CreatedAt = usageDayAt(fixed, 4) // 四天前——在「最近 2 日」外
+		r.CostEstimate = ptrCost(0.5)
+	})
+	seedUsageRequest(t, env, run.ID, ptrCost(0.5), "gate-1")
+	env.bots.scanUsageRollupOnce() // 全历史覆盖落标记
+
+	spansOf := func() []string {
+		t.Helper()
+		plan, err := env.bots.usageRollupPlan(env.db, bot, fixed, false)
+		if err != nil {
+			t.Fatalf("plan: %v", err)
+		}
+		out := make([]string, 0, len(plan.spans))
+		for _, s := range plan.spans {
+			out = append(out, s.Date)
+		}
+		return out
+	}
+	contains := func(list []string, day string) bool {
+		for _, d := range list {
+			if d == day {
+				return true
+			}
+		}
+		return false
+	}
+
+	if got := spansOf(); contains(got, oldDay) {
+		t.Fatalf("无新写时老日不应入选（闸应判净）: %v", got)
+	}
+
+	// straggler：给四天前的 run 补一条请求并把收尾时刻拨到标记水位之
+	// 上——水位探针必须开闸，让该日重新判脏。
+	late := seedUsageRequest(t, env, run.ID, ptrCost(0.9), "gate-late")
+	if err := env.db.Model(&model.BotModelRequest{}).Where("id = ?", late.ID).
+		Update("finished_at", time.Now().UTC().Add(time.Second)).Error; err != nil {
+		t.Fatalf("bump late write: %v", err)
+	}
+	if got := spansOf(); !contains(got, oldDay) {
+		t.Fatalf("straggler 写入后老日应判脏入选（闸应打开）: %v", got)
+	}
+
+	env.bots.scanUsageRollupOnce()
+	if got := spansOf(); contains(got, oldDay) {
+		t.Fatalf("重算后老日应重新判净: %v", got)
+	}
+}

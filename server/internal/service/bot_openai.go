@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/url"
 	"sort"
 	"strconv"
@@ -295,48 +296,58 @@ func botParseProviderCost(extra map[string]respjson.Field, openrouter bool) (*fl
 		s := string(b)
 		return &s
 	}
+	// rawNote 只记一条：多个非 USD 字段并存时按声明优先级留更早的那个。
+	var rawNote *string
 	if v, ok := field(extra["cost"]); ok {
 		if openrouter {
 			return v, nil
 		}
-		return nil, rawRecord("cost", extra["cost"])
+		// 非 OpenRouter 的 cost 币别不明：记 raw 但继续按优先级找置信
+		// USD 字段，不早退——同响应带 cost+total_cost 时 USD 应胜出。
+		rawNote = rawRecord("cost", extra["cost"])
 	}
+	var usd *float64
 	if v, ok := field(extra["total_cost"]); ok {
-		return v, nil
-	}
-	if raw, ok := extra["cost_details"]; ok && raw.Raw() != "" && raw.Raw() != "null" {
-		var details struct {
-			UpstreamInferenceCost json.RawMessage `json:"upstream_inference_cost"`
-		}
-		if err := json.Unmarshal([]byte(raw.Raw()), &details); err == nil &&
-			len(details.UpstreamInferenceCost) > 0 {
-			if _, ok := botParseCostText(string(details.UpstreamInferenceCost)); ok {
-				return nil, rawRecord("cost_details.upstream_inference_cost", raw)
-			}
-		}
+		usd = v
 	}
 	// *_usd 字段按名字排序取首个可解析的：map 遍历无序，不稳定会让同一
 	// 响应两次解析选出不同字段。
-	names := make([]string, 0, len(extra))
-	for name := range extra {
-		if strings.Contains(strings.ToLower(name), "_usd") {
-			names = append(names, name)
+	if usd == nil {
+		names := make([]string, 0, len(extra))
+		for name := range extra {
+			if strings.Contains(strings.ToLower(name), "_usd") {
+				names = append(names, name)
+			}
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			if v, ok := field(extra[name]); ok {
+				usd = v
+				break
+			}
 		}
 	}
-	sort.Strings(names)
-	for _, name := range names {
-		if v, ok := field(extra[name]); ok {
-			return v, nil
+	if rawNote == nil {
+		if raw, ok := extra["cost_details"]; ok && raw.Raw() != "" && raw.Raw() != "null" {
+			var details struct {
+				UpstreamInferenceCost json.RawMessage `json:"upstream_inference_cost"`
+			}
+			if err := json.Unmarshal([]byte(raw.Raw()), &details); err == nil &&
+				len(details.UpstreamInferenceCost) > 0 {
+				if _, ok := botParseCostText(string(details.UpstreamInferenceCost)); ok {
+					rawNote = rawRecord("cost_details.upstream_inference_cost", raw)
+				}
+			}
 		}
 	}
-	return nil, nil
+	return usd, rawNote
 }
 
 // botParseCostText 解析金额文本：裸数字（respjson 原始值）或 JSON 字符串
 // （部分供应商以字符串回金额）都接受，去掉两侧引号后交给 ParseFloat。
 func botParseCostText(s string) (*float64, bool) {
 	f, err := strconv.ParseFloat(strings.Trim(strings.TrimSpace(s), `"`), 64)
-	if err != nil {
+	if err != nil || math.IsNaN(f) || math.IsInf(f, 0) || f < 0 {
 		return nil, false
 	}
 	return &f, true

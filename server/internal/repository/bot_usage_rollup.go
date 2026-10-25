@@ -262,6 +262,40 @@ func (r *BotUsageRollupRepository) DayFingerprints(botID string, spans []UsageDa
 	return out, nil
 }
 
+// SpanWriteMax 返回指纹统计范围内全部明细行的最大写入时刻（与指纹取数
+// 口径一致：run/维护按 COALESCE(finished_at, created_at)，请求按
+// COALESCE(finished_at, started_at)；维护集合是「区间内创建 ∪ 父 run 属
+// 区间」）。汇总扫描用它做廉价闸：探针值不超标记所记最大写入时，已覆盖
+// 日不可能变脏，不必跑全历史 DayFingerprints。范围内无行返回 nil。
+func (r *BotUsageRollupRepository) SpanWriteMax(botID string, start, end time.Time) (*time.Time, error) {
+	parentRuns := "SELECT id FROM bot_runs WHERE bot_id = ? AND created_at >= ? AND created_at < ?"
+	maintScope := "(created_at >= ? AND created_at < ? OR parent_run_id IN (" + parentRuns + "))"
+	maintInScope := "SELECT id FROM bot_maintenance_runs WHERE bot_id = ? AND " + maintScope
+	var raw *string
+	err := r.db.Raw(
+		"SELECT strftime('%Y-%m-%d %H:%M:%f', MAX(ts)) FROM ("+
+			"SELECT COALESCE(finished_at, created_at) AS ts FROM bot_runs "+
+			"WHERE bot_id = ? AND created_at >= ? AND created_at < ? "+
+			"UNION ALL SELECT COALESCE(finished_at, started_at) FROM bot_model_requests "+
+			"WHERE run_id IN ("+parentRuns+") "+
+			"UNION ALL SELECT COALESCE(finished_at, created_at) FROM bot_maintenance_runs "+
+			"WHERE bot_id = ? AND "+maintScope+" "+
+			"UNION ALL SELECT COALESCE(finished_at, started_at) FROM bot_maintenance_requests "+
+			"WHERE maintenance_run_id IN ("+maintInScope+"))",
+		botID, start, end,
+		botID, start, end,
+		botID, start, end, botID, start, end,
+		botID, start, end, botID, start, end,
+	).Scan(&raw).Error
+	if err != nil {
+		return nil, err
+	}
+	if ts, ok := usageParseWriteStamp(raw); ok {
+		return &ts, nil
+	}
+	return nil, nil
+}
+
 // usageParseWriteStamp 解析指纹 SQL 里 strftime 规整出的 UTC 时刻
 // （"2006-01-02 15:04:05.000"，毫秒精度）。毫秒内的同刻二次写入靠「最近 2
 // 个当地日无条件重算」兜底——指纹只是脏判定的第一道。
