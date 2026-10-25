@@ -135,6 +135,19 @@ func TestForgeHostKeyIndexRebuild(t *testing.T) {
 	if def := indexSQL(); !strings.Contains(def, "kind = 'forgejo'") {
 		t.Fatalf("index def changed unexpectedly: %q", def)
 	}
+	// 谓词再次演进的形式：含子串但定义不同的索引必须被整段比对认出重建。
+	if err := db.Exec("DROP INDEX idx_forge_integrations_host_key").Error; err != nil {
+		t.Fatalf("drop for restale: %v", err)
+	}
+	if err := db.Exec("CREATE UNIQUE INDEX idx_forge_integrations_host_key ON forge_integrations(host_key) WHERE host_key <> '' AND kind = 'forgejo' AND name <> ''").Error; err != nil {
+		t.Fatalf("create divergent index: %v", err)
+	}
+	if err := createBootIndexes(db); err != nil {
+		t.Fatalf("rebuild divergent index: %v", err)
+	}
+	if def := indexSQL(); strings.Contains(def, "name <> ''") || !strings.Contains(def, "kind = 'forgejo'") {
+		t.Fatalf("divergent index not rebuilt, def = %q", def)
+	}
 	// forgejo 同主机行仍被唯一索引拦截。
 	dup := model.ForgeIntegration{
 		ID: uuid.NewString(), Kind: model.ForgeIntegrationKindForgejo, Name: "dup",
