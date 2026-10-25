@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { useMemo } from "react";
 import { Link, useParams } from "react-router";
 import { Inbox, TriangleAlert } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -6,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Header } from "@/components/layout/header";
+import { ContextGrowthChart } from "@/components/bots/bot-usage-insights";
 import { errorText } from "@/lib/api/client";
 import type {
   BotUsageMaintenanceRequest,
@@ -55,6 +57,9 @@ const TRIGGER_LABELS: Record<string, string> = {
   manual: "手动触发",
   schedule_event: "定时任务事件",
 };
+
+// 与服务端 usageRunDetailMaxRequests（internal/service/bot_usage.go）保持一致。
+const MAX_RETAINED_REQUESTS = 500;
 
 const MAINTENANCE_KIND_LABELS: Record<string, string> = {
   compaction: "上下文压缩",
@@ -137,6 +142,10 @@ export default function BotUsageRunPage() {
           <>
             <RunSummary
               run={data.run}
+              requests={data.requests}
+              truncated={data.requests_truncated}
+            />
+            <RunContextGrowth
               requests={data.requests}
               truncated={data.requests_truncated}
             />
@@ -256,6 +265,77 @@ function RunSummary({
   );
 }
 
+/**
+ * 输入上下文增长（INT-163）：x=请求 ordinal 原值（agent 侧 0 基序号，
+ * 与请求列表的 #n 标签一致），y=输入 token。
+ * 实测值只在 usage_complete 时取 prompt_tokens；usage 未收齐或内部
+ * 不自洽（如缓存数大于输入数）的请求改取 input_tokens_estimate 并画
+ * 空心点——实测计数不可信时画实线会让读者误读上下文突变。
+ */
+function RunContextGrowth({
+  requests,
+  truncated,
+}: {
+  requests: BotUsageRequest[];
+  truncated?: boolean;
+}) {
+  const points = useMemo(
+    () =>
+      requests
+        .map((request) => {
+          // 请求级 usage_complete 之外再验内部一致性：缓存数大于输入数
+          // 的实测明显不自洽，改取估算值画空心点。
+          const inconsistent =
+            request.prompt_tokens != null &&
+            request.cached_tokens != null &&
+            request.cached_tokens > request.prompt_tokens;
+          const actual =
+            request.usage_complete &&
+            request.prompt_tokens != null &&
+            !inconsistent;
+          const tokens = actual
+            ? request.prompt_tokens!
+            : request.input_tokens_estimate;
+          return { request, tokens, estimated: !actual };
+        })
+        .filter(
+          // 估算路径要求 estimate>0（与服务端 FirstRequestInputByRun 同口
+          // 径）：不可信又无估算值的请求不产点，避免画出虚假的 0 低谷。
+          (p) => !p.estimated || p.tokens > 0,
+        )
+        .map(({ request, tokens, estimated }) => ({
+          x: request.ordinal,
+          y: tokens,
+          estimated,
+          label: `#${request.ordinal} · ${tokens.toLocaleString("en-US")} 输入${estimated ? "（估算）" : ""}`,
+        })),
+    [requests],
+  );
+  // 没有请求记录时请求列表已有空态，图不重复占位。
+  if (!requests.length) return null;
+  return (
+    <section className="space-y-2" data-testid="usage-run-context-growth">
+      <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
+        <h3 className="text-sm font-medium">输入上下文增长</h3>
+        <p
+          className="min-w-0 text-xs text-muted-foreground"
+          title="空心点 = 估算值：该请求缺 usage，取估算输入"
+        >
+          {truncated ? `仅最新 ${MAX_RETAINED_REQUESTS} 条 · ` : ""}空心点 =
+          估算值
+        </p>
+      </div>
+      <ContextGrowthChart
+        points={points}
+        formatXLabel={(ordinal) => `#${ordinal}`}
+        chartTitle="输入上下文增长"
+        titleId="usage-run-context-growth-title"
+        emptyMessage="暂无可用的输入 token 数据"
+      />
+    </section>
+  );
+}
+
 /** 模型请求列表：每次请求一行（含失败重试标记），下方挂该次的工具调用。 */
 function RequestList({
   requests,
@@ -268,7 +348,9 @@ function RequestList({
     <section className="space-y-2">
       <h3 className="text-sm font-medium">
         模型请求{requests.length ? ` · ${requests.length}` : ""}
-        {truncated ? "（仅最新 500 条，较早请求已省略）" : ""}
+        {truncated
+          ? `（仅最新 ${MAX_RETAINED_REQUESTS} 条，较早请求已省略）`
+          : ""}
       </h3>
       {!requests.length ? (
         <div className="rounded-lg border bg-muted/40 py-8 text-center text-sm text-muted-foreground">

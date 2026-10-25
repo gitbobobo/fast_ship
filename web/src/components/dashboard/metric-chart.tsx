@@ -325,7 +325,8 @@ function yTickSpec(maxTotal: number): { step: number; intervals: number } {
  *  且最后一个标签永远落在最后一个点正下方。首点可能因此没有标签（30 个点时
  *  是 4/9/14/19/24/29），不要在中间插一个不均匀的间隔。步长取两档的较大者：
  *  常规每 6 点一档；窄图（如详情面板内嵌）里相邻标签不足约 48px 时进一步
- *  加稀，避免 7 天全标签连排成「10-1910-20…」。 */
+ *  加稀，避免 7 天全标签连排成「10-1910-20…」。本图按槽位均分布点，下标
+ *  间距即像素间距；按真实时间布局的图（bot-usage-insights）用像素抽稀。 */
 function xLabelIndexes(count: number, chartWidth: number): number[] {
   const last = count - 1;
   if (last < 1) return count === 1 ? [0] : [];
@@ -340,8 +341,8 @@ function xLabelIndexes(count: number, chartWidth: number): number[] {
 }
 
 /** 用实测宽度画图（1:1 像素坐标）：viewBox 缩放会把坐标轴文字一起缩小，
- *  也会让横轴日期和数据点错位。 */
-function useChartWidth() {
+ *  也会让横轴日期和数据点错位。同风格的散点/折线图（bot-usage-insights）复用。 */
+export function useChartWidth() {
   const boxRef = useRef<HTMLDivElement>(null);
   const [chartWidth, setChartWidth] = useState(720);
 

@@ -206,4 +206,46 @@ describe("BotUsageRunPage", () => {
     expect(summary.textContent).not.toContain("$0");
     expect(screen.queryByTestId("usage-maintenance-run")).toBeNull();
   });
+
+  it("输入上下文增长：点数=请求数，缺 usage 的请求标估算", () => {
+    mockRun(detail);
+    renderPage();
+
+    const section = screen.getByTestId("usage-run-context-growth");
+    const points = within(section).getAllByTestId("usage-context-point");
+    expect(points).toHaveLength(2);
+    // #1 缺 usage（prompt_tokens=null）→ 取估算输入并标估算；#2 实测。
+    expect(points[0]).toHaveAttribute("data-estimated", "true");
+    expect(points[1]).not.toHaveAttribute("data-estimated");
+    expect(
+      within(section).getByText(/空心点 = 估算值/),
+    ).toBeInTheDocument();
+    // 无链接点声明成图片并带可访问名（此前只有悬浮 <title>）。
+    expect(points[0]).toHaveAttribute("role", "img");
+    expect(points[0].getAttribute("aria-label")).toMatch(/^#1 · 11,000 输入/);
+  });
+
+  it("输入上下文增长图：中文可访问名经 aria-labelledby，svg 无 role=img", () => {
+    mockRun(detail);
+    renderPage();
+
+    const svg = screen
+      .getByTestId("usage-run-context-growth")
+      .querySelector("svg");
+    expect(svg).not.toHaveAttribute("role");
+    const titleId = svg!.getAttribute("aria-labelledby");
+    expect(titleId).toBeTruthy();
+    expect(document.getElementById(titleId!)).toHaveTextContent(
+      "输入上下文增长",
+    );
+  });
+
+  it("请求截断时上下文图标注仅最新 500 条", () => {
+    mockRun({ ...detail, requests_truncated: true });
+    renderPage();
+
+    expect(screen.getByTestId("usage-run-context-growth")).toHaveTextContent(
+      "仅最新 500 条",
+    );
+  });
 });

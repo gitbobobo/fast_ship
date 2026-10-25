@@ -88,6 +88,16 @@ export const botKeys = {
     range,
     botId,
   ],
+  /**
+   * 花费优化参考（INT-163）：刻意嵌在 "usage" 前缀之下而不是平行键——
+   * run 终态（use-bot-chat）与任务开关按 [BOTS_ROOT, userId, "usage"]
+   * 前缀失效的地方自动连 insights 一起失效，失效面不用第二处维护。
+   */
+  usageInsights: (
+    userId: string | null,
+    range: BotUsageRange,
+    botId: string,
+  ) => [BOTS_ROOT, userId, "usage", "insights", range, botId],
   usageRun: (userId: string | null, runId: string) => [
     BOTS_ROOT,
     userId,
@@ -320,6 +330,22 @@ export function useBotUsage(range: BotUsageRange, botId?: string) {
     queryKey: botKeys.usage(userId, range, botId ?? ""),
     queryFn: async ({ signal }) =>
       (await botApi.usage({ range, botId }, signal)).data,
+    enabled: Boolean(userId),
+    refetchOnMount: "always",
+    refetchOnWindowFocus: true,
+  });
+}
+
+/**
+ * 花费优化参考（INT-163）：与 usage 同一套约定——挂载即重取、窗口聚焦
+ * 重取；失效由 "usage" 前缀覆盖（run 终态、任务开关），这里不用重复写。
+ */
+export function useBotUsageInsights(range: BotUsageRange, botId?: string) {
+  const userId = useUserId();
+  return useQuery({
+    queryKey: botKeys.usageInsights(userId, range, botId ?? ""),
+    queryFn: async ({ signal }) =>
+      (await botApi.usageInsights({ range, botId }, signal)).data,
     enabled: Boolean(userId),
     refetchOnMount: "always",
     refetchOnWindowFocus: true,

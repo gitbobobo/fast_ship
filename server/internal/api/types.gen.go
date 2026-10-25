@@ -11,6 +11,27 @@ import (
 	openapi_types "github.com/oapi-codegen/runtime/types"
 )
 
+// Defines values for BotUsageInsightsRange.
+const (
+	BotUsageInsightsRangeN30d  BotUsageInsightsRange = "30d"
+	BotUsageInsightsRangeN7d   BotUsageInsightsRange = "7d"
+	BotUsageInsightsRangeToday BotUsageInsightsRange = "today"
+)
+
+// Valid indicates whether the value is a known member of the BotUsageInsightsRange enum.
+func (e BotUsageInsightsRange) Valid() bool {
+	switch e {
+	case BotUsageInsightsRangeN30d:
+		return true
+	case BotUsageInsightsRangeN7d:
+		return true
+	case BotUsageInsightsRangeToday:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for BotUsageOverviewRange.
 const (
 	BotUsageOverviewRangeN30d  BotUsageOverviewRange = "30d"
@@ -1232,6 +1253,27 @@ func (e GetBotUsageParamsRange) Valid() bool {
 	}
 }
 
+// Defines values for GetBotUsageInsightsParamsRange.
+const (
+	GetBotUsageInsightsParamsRangeN30d  GetBotUsageInsightsParamsRange = "30d"
+	GetBotUsageInsightsParamsRangeN7d   GetBotUsageInsightsParamsRange = "7d"
+	GetBotUsageInsightsParamsRangeToday GetBotUsageInsightsParamsRange = "today"
+)
+
+// Valid indicates whether the value is a known member of the GetBotUsageInsightsParamsRange enum.
+func (e GetBotUsageInsightsParamsRange) Valid() bool {
+	switch e {
+	case GetBotUsageInsightsParamsRangeN30d:
+		return true
+	case GetBotUsageInsightsParamsRangeN7d:
+		return true
+	case GetBotUsageInsightsParamsRangeToday:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for ListIssuesParamsWorkflowStatus.
 const (
 	ListIssuesParamsWorkflowStatusDone       ListIssuesParamsWorkflowStatus = "done"
@@ -2044,9 +2086,30 @@ type BotUsageBot struct {
 	MaxRunCost               *float64 `json:"max_run_cost"`
 	Name                     string   `json:"name"`
 
+	// P90RunCost 单次运行显示成本的 P90（nearest-rank，与 avg/max 同一已计价 run 集合）；无已计价 run 为 null
+	P90RunCost *float64 `json:"p90_run_cost"`
+
 	// Runs 窗口内 run 数（main + schedule）
 	Runs             int64 `json:"runs"`
 	UnpricedRequests int64 `json:"unpriced_requests"`
+}
+
+// BotUsageContextPoint defines model for BotUsageContextPoint.
+type BotUsageContextPoint struct {
+	// At run.created_at（UTC）
+	At string `json:"at"`
+
+	// Estimated true = 数值为服务端估算（该请求缺 usage），UI 须标注
+	Estimated bool `json:"estimated"`
+
+	// InputTokens 该 run 第一次请求的输入 token；estimated=false 取 prompt_tokens，否则取 input_tokens_estimate
+	InputTokens int64 `json:"input_tokens"`
+
+	// RunId 产生该点的 run ID（前端可链接到运行明细）
+	RunId string `json:"run_id"`
+
+	// SessionKind main / schedule
+	SessionKind string `json:"session_kind"`
 }
 
 // BotUsageDay defines model for BotUsageDay.
@@ -2065,6 +2128,137 @@ type BotUsageDay struct {
 type BotUsageDay_Bots struct {
 	BotId string  `json:"bot_id"`
 	Cost  float64 `json:"cost"`
+}
+
+// BotUsageDayCacheHit defines model for BotUsageDayCacheHit.
+type BotUsageDayCacheHit struct {
+	// Date 生效时区的当地日期 YYYY-MM-DD；窗口内每天一行（含无数据日）
+	Date string `json:"date"`
+
+	// Rate 当日 cached / prompt；只统计 usage 完整的请求（按所属 run/维护运行自身 created_at 记日），当日无完整 usage 请求为 null
+	Rate *float64 `json:"rate"`
+}
+
+// BotUsageFailureError defines model for BotUsageFailureError.
+type BotUsageFailureError struct {
+	// Cost 该组失败请求中已计价金额合计
+	Cost *float64 `json:"cost"`
+
+	// ErrorCode 失败请求的 error_code；无错误码的失败归到 null 一组
+	ErrorCode *string `json:"error_code"`
+	Requests  int64   `json:"requests"`
+}
+
+// BotUsageFailureStats defines model for BotUsageFailureStats.
+type BotUsageFailureStats struct {
+	// ByError 失败请求按 error_code 分组，按 cost 降序（null 组排最后）
+	ByError []BotUsageFailureError `json:"by_error"`
+
+	// FailedRequests status=failed 的模型请求行数（bot_model_requests + bot_maintenance_requests）
+	FailedRequests int64 `json:"failed_requests"`
+
+	// FailedRequestsCost 失败请求中已计价金额合计——重试浪费口径：失败尝试若送过 usage 就已计价，其花费即浪费
+	FailedRequestsCost *float64 `json:"failed_requests_cost"`
+
+	// FailedRuns status=failed 的 bot_runs 数（main + schedule）
+	FailedRuns int64 `json:"failed_runs"`
+
+	// FailedRunsCost 失败 run 的显示成本合计（自身 + 关联维护已计价）
+	FailedRunsCost *float64 `json:"failed_runs_cost"`
+
+	// RetriedRequests 与同 run 内更早请求 request_hash 相同的请求行数（每次重复尝试计 1，含最终成功那次）
+	RetriedRequests int64 `json:"retried_requests"`
+}
+
+// BotUsageInsights defines model for BotUsageInsights.
+type BotUsageInsights struct {
+	// Bots 查询集合内每个机器人一行（含无数据机器人），按总花费降序
+	Bots []BotUsageInsightsBot `json:"bots"`
+
+	// CacheHitByDay 按天缓存命中率（窗口内每天一行）
+	CacheHitByDay []BotUsageDayCacheHit `json:"cache_hit_by_day"`
+
+	// End 统计窗口终点 UTC（不含，即查询时刻）
+	End   string                `json:"end"`
+	Range BotUsageInsightsRange `json:"range"`
+
+	// ScheduleTasks 窗口内有 schedule run 的任务一行（已删除任务保留）
+	ScheduleTasks []BotUsageInsightsTask `json:"schedule_tasks"`
+
+	// Start 统计窗口起点 UTC（含）
+	Start string `json:"start"`
+
+	// Timezone 实际生效的切日时区（IANA）
+	Timezone string `json:"timezone"`
+}
+
+// BotUsageInsightsRange defines model for BotUsageInsights.Range.
+type BotUsageInsightsRange string
+
+// BotUsageInsightsBot defines model for BotUsageInsightsBot.
+type BotUsageInsightsBot struct {
+	BotId string `json:"bot_id"`
+
+	// CacheHitRate cached / prompt（主线/定时 + 维护请求的完整 usage 合计）；与总览同口径
+	CacheHitRate *float64 `json:"cache_hit_rate"`
+
+	// ContextGrowth 每次运行第一次请求的输入 token 随时间变化（升序）；有请求的 run 才有点
+	ContextGrowth []BotUsageContextPoint `json:"context_growth"`
+
+	// ContextGrowthTruncated run 数超过每机器人点数上限（200）时为 true，已保留最新点
+	ContextGrowthTruncated bool                     `json:"context_growth_truncated"`
+	Failures               BotUsageFailureStats     `json:"failures"`
+	Maintenance            BotUsageMaintenanceShare `json:"maintenance"`
+
+	// ModelAlternatives 按（目录归属, 模型）分组的换模型差价；没有已计价请求的组不出现；维护请求不参与
+	ModelAlternatives []BotUsageModelGroup `json:"model_alternatives"`
+	Name              string               `json:"name"`
+	Tools             BotUsageToolsShare   `json:"tools"`
+}
+
+// BotUsageInsightsTask defines model for BotUsageInsightsTask.
+type BotUsageInsightsTask struct {
+	BotId   string `json:"bot_id"`
+	BotName string `json:"bot_name"`
+
+	// CacheHitRate 该任务 schedule run 名下 usage 完整请求的 cached / prompt；无完整 usage 为 null
+	CacheHitRate *float64 `json:"cache_hit_rate"`
+	Deleted      bool     `json:"deleted"`
+	Enabled      bool     `json:"enabled"`
+
+	// EvaluatedRuns 空转判定分母：非 skipped 的终态 schedule run（completed/failed/stopped）；进行中与排队不计
+	EvaluatedRuns int64 `json:"evaluated_runs"`
+
+	// IdleCost 空转 run 的显示成本合计（自身 + 关联维护已计价）
+	IdleCost *float64 `json:"idle_cost"`
+
+	// IdleRate idle_runs / evaluated_runs；分母为 0 时 null
+	IdleRate *float64 `json:"idle_rate"`
+
+	// IdleRuns 满足任一空转条件的 run 数（各条件可叠加命中）
+	IdleRuns int64 `json:"idle_runs"`
+
+	// Name 现存任务名；已删除任务为空串
+	Name string `json:"name"`
+
+	// NoToolCallRuns 条件二：整次运行没有任何工具调用行的 run 数（调用行各状态都计）
+	NoToolCallRuns int64 `json:"no_tool_call_runs"`
+
+	// NoWriteCallRuns 条件三：没有任何有效写操作调用的 run 数；写操作 = 当前工具注册表 ReadOnly 之外的 action（未知动作按写处理），且仅 status=succeeded 或 effect_may_have_occurred 的调用算有效——被拒/取消/失败/未执行的写调用不计
+	NoWriteCallRuns int64 `json:"no_write_call_runs"`
+
+	// SilentRuns 条件一：silent=true（静默哨兵）的 run 数
+	SilentRuns int64  `json:"silent_runs"`
+	TaskId     string `json:"task_id"`
+}
+
+// BotUsageMaintenancePurpose defines model for BotUsageMaintenancePurpose.
+type BotUsageMaintenancePurpose struct {
+	// Cost 该用途下已计价请求合计；全部未计价为 null（缺失 ≠ 0）
+	Cost *float64 `json:"cost"`
+
+	// Purpose 维护用途：summary / archive / nightly（窗口内出现过的才列出）
+	Purpose string `json:"purpose"`
 }
 
 // BotUsageMaintenanceRequest defines model for BotUsageMaintenanceRequest.
@@ -2106,6 +2300,48 @@ type BotUsageMaintenanceRun struct {
 
 	// Status running / succeeded / failed
 	Status string `json:"status"`
+}
+
+// BotUsageMaintenanceShare defines model for BotUsageMaintenanceShare.
+type BotUsageMaintenanceShare struct {
+	// ByPurpose 按用途拆分，按 cost 降序
+	ByPurpose []BotUsageMaintenancePurpose `json:"by_purpose"`
+
+	// Cost 窗口内该机器人全部维护请求已计价合计（含挂到 run 名下的压缩/归档，口径大于总览「维护」桶）
+	Cost *float64 `json:"cost"`
+
+	// Share cost / 该机器人总花费（总览三桶之和）；任一未计价或总花费为 0 时为 null
+	Share *float64 `json:"share"`
+}
+
+// BotUsageModelCandidate defines model for BotUsageModelCandidate.
+type BotUsageModelCandidate struct {
+	// Cost 同一批请求的 token 数按该模型目录单价重算的总价（缓存命中按 cache_read，缺失回退 input）
+	Cost float64 `json:"cost"`
+
+	// Model 同目录内的候选模型名
+	Model string `json:"model"`
+
+	// Saving actual_cost − cost；正值 = 省钱，负值 = 更贵
+	Saving float64 `json:"saving"`
+}
+
+// BotUsageModelGroup defines model for BotUsageModelGroup.
+type BotUsageModelGroup struct {
+	// ActualCost 这批请求在当前模型下的已计价合计（与重算同分母）
+	ActualCost float64 `json:"actual_cost"`
+
+	// Candidates 同目录内单价完整（input+output 非空）的其他模型按同一 token 数重算，最便宜至多 3 个；只按价格重算，不代表效果一样
+	Candidates []BotUsageModelCandidate `json:"candidates"`
+
+	// CatalogId run 冻结快照的目录归属；快照缺 catalog_id 或 model 的 run 不参与分组（旧账无法证明目录）
+	CatalogId string `json:"catalog_id"`
+
+	// Model 该组 run 实际使用的模型
+	Model string `json:"model"`
+
+	// Requests 参与重算的请求数（只含 usage 完整且当前模型已计价的请求）
+	Requests int64 `json:"requests"`
 }
 
 // BotUsageOverview defines model for BotUsageOverview.
@@ -2234,9 +2470,12 @@ type BotUsageScheduleTask struct {
 	MaxRunCost     *float64 `json:"max_run_cost"`
 
 	// Name 现存任务名；已删除任务为空串（UI 显示「已删除的任务」）
-	Name    string `json:"name"`
-	Runs    int64  `json:"runs"`
-	Skipped int64  `json:"skipped"`
+	Name string `json:"name"`
+
+	// P90RunCost 单次运行显示成本的 P90（nearest-rank，与 avg/max 同一已计价 run 集合）；无已计价 run 为 null
+	P90RunCost *float64 `json:"p90_run_cost"`
+	Runs       int64    `json:"runs"`
+	Skipped    int64    `json:"skipped"`
 
 	// TaskId 聚合键；已删除任务仍取其运行记录上的 schedule_task_id
 	TaskId string `json:"task_id"`
@@ -2254,6 +2493,18 @@ type BotUsageToolCall struct {
 	Id         string  `json:"id"`
 	Status     string  `json:"status"`
 	ToolName   string  `json:"tool_name"`
+}
+
+// BotUsageToolsShare defines model for BotUsageToolsShare.
+type BotUsageToolsShare struct {
+	// PromptTokens 分母：主线/定时 run 中 usage 完整请求的 prompt 合计（维护请求无工具定义列，不参与）
+	PromptTokens int64 `json:"prompt_tokens"`
+
+	// Share tools_tokens_estimate / prompt_tokens；分母为 0（无完整 usage 请求）时 null
+	Share *float64 `json:"share"`
+
+	// ToolsTokensEstimate 分子：同一请求集合的 tools_tokens_estimate 合计（按 schema 字节的估算值，非精确 token 数）
+	ToolsTokensEstimate int64 `json:"tools_tokens_estimate"`
 }
 
 // BotUsageTotals defines model for BotUsageTotals.
@@ -5949,6 +6200,28 @@ type GetBotUsage200JSONResponseBody struct {
 	// Code 业务错误码；0 表示成功
 	Code int               `json:"code"`
 	Data *BotUsageOverview `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// GetBotUsageInsightsParams defines parameters for GetBotUsageInsights.
+type GetBotUsageInsightsParams struct {
+	// Range 统计窗口；today = 生效时区的当天
+	Range *GetBotUsageInsightsParamsRange `form:"range,omitempty" json:"range,omitempty"`
+
+	// BotId 限定单个机器人（须属于当前用户）；缺省为全部机器人总览
+	BotId *string `form:"bot_id,omitempty" json:"bot_id,omitempty"`
+}
+
+// GetBotUsageInsightsParamsRange defines parameters for GetBotUsageInsights.
+type GetBotUsageInsightsParamsRange string
+
+// GetBotUsageInsights200JSONResponseBody defines parameters for GetBotUsageInsights.
+type GetBotUsageInsights200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int               `json:"code"`
+	Data *BotUsageInsights `json:"data,omitempty"`
 
 	// Message 人类可读信息；成功时为 "success"
 	Message string `json:"message"`
