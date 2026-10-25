@@ -31,11 +31,13 @@ import {
 } from "@/lib/hooks/use-projects";
 import { useGithubTokens } from "@/lib/hooks/use-github-tokens";
 import { projectApi } from "@/lib/api/projects";
+import { errorText } from "@/lib/api/client";
 import {
   parseRepoUrl,
   hasGitHubRepo,
   codeRepoUrlForInput,
   normalizeCodeRepoRef,
+  codeRepoPointsToForge,
 } from "@/lib/utils/github";
 import { toast } from "sonner";
 
@@ -144,6 +146,7 @@ export function ProjectFormDialog({
   });
 
   const repositoryUrl = useWatch({ control, name: "repository_url" }) || "";
+  const codeRepoInput = useWatch({ control, name: "code_repository_url" }) || "";
   const publicTokenId = useWatch({ control, name: "public_github_token_id" }) || "";
   const codeTokenId = useWatch({ control, name: "code_github_token_id" }) || "";
   const { owner, repo } = parseRepoUrl(repositoryUrl);
@@ -286,8 +289,12 @@ export function ProjectFormDialog({
         onOpenChange(false);
         navigate(`/issues?project=${res.data.id}`);
       }
-    } catch {
-      toast.error(isEdit ? "更新失败，请检查输入" : "创建失败，请检查输入");
+    } catch (err) {
+      // 服务端 40001 的具体原因（主机未匹配集成、端口无效、多余路径段等）
+      // 透出来——吞成通用提示会让 Forgejo 绑定失败只剩「检查输入」无从定位。
+      toast.error(
+        errorText(err, isEdit ? "更新失败，请检查输入" : "创建失败，请检查输入"),
+      );
     }
   };
 
@@ -375,7 +382,9 @@ export function ProjectFormDialog({
                 {...register("code_repository_url")}
               />
               <p className="text-xs text-muted-foreground">
-                PR 审查盯的仓库；留空则审查公开仓库
+                {codeRepoPointsToForge(codeRepoInput)
+                  ? "将绑定主机匹配的代码托管集成；Forgejo 仓库本期暂不参与 PR 审查"
+                  : "PR 审查盯的仓库；留空则审查公开仓库"}
               </p>
               {bindingBroken && (
                 <div className="space-y-1">

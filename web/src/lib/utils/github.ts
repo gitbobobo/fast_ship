@@ -133,6 +133,17 @@ export function normalizeCodeRepoRef(raw: string): string {
   return `${host}/${parts[0]}/${parts[1]}`.toLowerCase();
 }
 
+// codeRepoPointsToForge 输入按代码仓归一口径判定为「显式非 github.com 主机」：
+// 这类地址走代码托管集成匹配（Forgejo 行或部署 GHE 的内置 GitHub）。表单
+// 用它切换代码仓字段提示——不再对 Forgejo 地址显示「PR 审查盯的仓库」。
+// 裸 owner/repo 与 github.com 归回 github.com 判否；解析不出的输入原样
+// 回传也不以 github.com 开头，会命中「非 github」一侧——该输入本身要被
+// 后端 40001 拒，提示走向无关紧要。
+export function codeRepoPointsToForge(raw: string): boolean {
+  const norm = normalizeCodeRepoRef(raw);
+  return norm !== "" && !norm.startsWith("github.com/");
+}
+
 // codeRepoUrlForInput 编辑回填的代码仓输入值：优先服务端投影的 code_repo_url
 // （forgejo 集成时是实例基址形态）；为 null 且未绑定集成（code_integration_id
 // 为空 = 内置 github 存量行）时按 owner/repo 兜底 github 形态。绑定了集成但

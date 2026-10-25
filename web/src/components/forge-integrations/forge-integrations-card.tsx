@@ -17,12 +17,6 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
 import { useAuthStore } from "@/lib/store/auth-store";
 import { ApiRequestError, errorText } from "@/lib/api/client";
 import {
@@ -88,27 +82,19 @@ function DeleteIntegrationAlert({
 }) {
   return (
     <AlertDialog>
-      <TooltipProvider delay={0}>
-        <Tooltip>
-          <AlertDialogTrigger
-            render={
-              <TooltipTrigger
-                render={
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="text-muted-foreground hover:text-destructive"
-                    aria-label={`删除 ${integration.name}`}
-                  />
-                }
-              />
-            }
-          >
-            <Trash2 className="h-4 w-4" />
-          </AlertDialogTrigger>
-          <TooltipContent>删除</TooltipContent>
-        </Tooltip>
-      </TooltipProvider>
+      <AlertDialogTrigger
+        render={
+          <Button
+            variant="ghost"
+            size="sm"
+            className="text-muted-foreground hover:text-destructive"
+            aria-label={`删除 ${integration.name}`}
+          />
+        }
+      >
+        <Trash2 className="mr-1 h-3.5 w-3.5" />
+        删除
+      </AlertDialogTrigger>
       <AlertDialogContent>
         <AlertDialogHeader>
           <AlertDialogTitle>删除 {integration.name}？</AlertDialogTitle>
@@ -215,23 +201,15 @@ function ForgejoRow({
             <RefreshCw className="mr-1 h-3.5 w-3.5" />
             {testConnection.isPending ? "检测中..." : "测试连接"}
           </Button>
-          <TooltipProvider delay={0}>
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    aria-label={`编辑 ${integration.name}`}
-                    onClick={onEdit}
-                  />
-                }
-              >
-                <Pencil className="h-4 w-4" />
-              </TooltipTrigger>
-              <TooltipContent>编辑</TooltipContent>
-            </Tooltip>
-          </TooltipProvider>
+          <Button
+            variant="ghost"
+            size="sm"
+            aria-label={`编辑 ${integration.name}`}
+            onClick={onEdit}
+          >
+            <Pencil className="mr-1 h-3.5 w-3.5" />
+            编辑
+          </Button>
           <DeleteIntegrationAlert
             integration={integration}
             onDelete={() => void handleDelete()}

@@ -323,6 +323,7 @@ function AdminView({ data }: { data: GitHubAppDeployment }) {
         <HeaderActions
           primary={
             <Button
+              variant="outline"
               size="sm"
               disabled={createManifest.isPending || publicUrlMissing}
               onClick={handleCreate}

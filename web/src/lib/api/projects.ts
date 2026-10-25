@@ -1,5 +1,5 @@
 import type { components } from "@/types/api.gen";
-import { api } from "./client";
+import { api, decodeApiError } from "./client";
 
 /** 契约类型直接引用 api.gen.ts；请求体字段语义见 openapi.yaml 的 @description。 */
 type Schemas = components["schemas"];
@@ -22,10 +22,14 @@ export const projectApi = {
     api.get(`projects/${id}`).json<ApiResponse<Project>>(),
 
   create: (data: CreateProjectRequest) =>
-    api.post("projects", { json: data }).json<ApiResponse<Project>>(),
+    decodeApiError(
+      api.post("projects", { json: data }).json<ApiResponse<Project>>(),
+    ),
 
   update: (id: string, data: UpdateProjectRequest) =>
-    api.put(`projects/${id}`, { json: data }).json<ApiResponse<Project>>(),
+    decodeApiError(
+      api.put(`projects/${id}`, { json: data }).json<ApiResponse<Project>>(),
+    ),
 
   delete: (id: string) =>
     api.delete(`projects/${id}`).json<ApiResponse<null>>(),
