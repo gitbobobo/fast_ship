@@ -5,7 +5,7 @@ import { api, decodeApiError } from "./client";
 // member 请求返回 40305）；token 等凭证只写不回显。
 // test 端点会在服务端同步访问 Forgejo 实例，ky 默认 10s 超时不够；retry:0 防重复打。
 
-/** 连接检测在服务端同步访问 Forgejo 实例（服务端默认 20s 超时）。 */
+/** 连接检测在服务端同步访问 Forgejo 实例（服务端默认 10s 超时）。 */
 export const FORGE_LIVE_REQUEST_TIMEOUT_MS = 30_000;
 
 const basePath = "deployment/integrations";

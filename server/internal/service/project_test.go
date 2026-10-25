@@ -196,6 +196,13 @@ func TestParseRepositoryURL(t *testing.T) {
 			errContains: "端口无效",
 		},
 		{
+			// 越界端口同口径拒收（与 base_url 保存侧 parseBaseURL 一致）。
+			name:        "out-of-range port rejected",
+			input:       "https://git.example.com:99999/godbobo/fast_ship",
+			wantErr:     true,
+			errContains: "端口无效",
+		},
+		{
 			name:      "non-github host upper case",
 			input:     "https://Git.Example.com/godbobo/fast_ship",
 			wantHost:  "git.example.com:443",

@@ -549,9 +549,10 @@ func parseRepositoryURL(raw string) (host, owner, repo string, explicit bool, er
 			} else {
 				host += ":443"
 			}
-		} else if _, perr := strconv.Atoi(port); perr != nil {
-			// host:abc 这类非数字端口会落到集成匹配报「主机未匹配」，把管理
-			// 员引向去配一条不可能的集成——端口非法按输入错误直接报。
+		} else if n, perr := strconv.Atoi(port); perr != nil || n < 1 || n > 65535 {
+			// host:abc、host:0、host:99999 这类非法端口会落到集成匹配报
+			// 「主机未匹配」，把管理员引向去配一条不可能的集成（base_url
+			// 保存侧同口径拒越界端口）——端口非法按输入错误直接报。
 			return "", "", "", false, errors.New("仓库链接端口无效：" + port)
 		}
 		// github.com 判定走归一后的 repoHostKey（剥尾点、数字端口归一）：

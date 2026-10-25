@@ -514,6 +514,82 @@ func TestForgeIntegrationUpdateDerivedAPIBaseFollows(t *testing.T) {
 	}
 }
 
+// TestForgeIntegrationUpdateStaleBaseNotChained 覆盖存量 base 失效场景：
+// 实例 DNS 失效/迁移期间，「只改 api_base_url」「只开内网放行」的无关
+// 字段更新不该被 base 的保存时复验连坐 40001——管理员正是靠这两条路径
+// 自救。收窄开关（公网口径复核）与 base 变更仍必须全量校验。创建后把
+// 校验器换成对旧主机必败的版本，模拟 DNS 失效。
+func TestForgeIntegrationUpdateStaleBaseNotChained(t *testing.T) {
+	env := forgeTestService(t)
+	ctx := context.Background()
+	created, err := env.svc.Create(ctx, &api.CreateForgeIntegrationRequest{
+		Name: "forge", BaseUrl: "https://stale.example.com", Token: "tok",
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	env.svc.SetValidateBaseURL(func(_ context.Context, raw string, allowPrivate bool) (string, error) {
+		*env.baseCalls = append(*env.baseCalls, raw)
+		trimmed := strings.TrimSpace(raw)
+		if strings.Contains(trimmed, "stale") {
+			return "", forges.ErrPrivateAddress
+		}
+		switch {
+		case strings.HasPrefix(trimmed, "https://"):
+			return strings.TrimRight(trimmed, "/"), nil
+		case strings.HasPrefix(trimmed, "http://") && allowPrivate:
+			return strings.TrimRight(trimmed, "/"), nil
+		default:
+			return "", forges.ErrSchemeNotAllowed
+		}
+	})
+
+	// 只改 api_base_url：base 不碰校验器，更新放行——把 API 端点钉到
+	// 可达主机正是 base 失效时的自救路径。
+	out, err := env.svc.Update(ctx, created.Id, &api.UpdateForgeIntegrationRequest{
+		ApiBaseUrl: ptrStr("https://api.example.com/v1"),
+	})
+	if err != nil {
+		t.Fatalf("api-only update must not revalidate unchanged base: %v", err)
+	}
+	if out.ApiBaseUrl != "https://api.example.com/v1" {
+		t.Fatalf("api pin lost, got %q", out.ApiBaseUrl)
+	}
+
+	// 只开内网放行（放宽口径，存量 base 依然合法）：同样不该复验。
+	if _, err := env.svc.Update(ctx, created.Id, &api.UpdateForgeIntegrationRequest{
+		AllowPrivateNetwork: ptrBool(true),
+	}); err != nil {
+		t.Fatalf("enable private-network flag must not revalidate unchanged base: %v", err)
+	}
+
+	// 收窄开关（关闭内网放行）必须复核存量 base 的公网口径——失效
+	// 主机在这里仍然拦得住。
+	if _, err := env.svc.Update(ctx, created.Id, &api.UpdateForgeIntegrationRequest{
+		AllowPrivateNetwork: ptrBool(false),
+	}); err == nil {
+		t.Fatal("disabling private-network on a stale base must be rejected")
+	}
+
+	// base 变更本身仍全量校验：改成另一失效主机被拒，改成可达主机放行
+	// （后者也是另一条自救路径）。
+	if _, err := env.svc.Update(ctx, created.Id, &api.UpdateForgeIntegrationRequest{
+		BaseUrl: ptrStr("https://stale2.example.com"),
+	}); err == nil {
+		t.Fatal("changing base to a stale host must be rejected")
+	}
+	out, err = env.svc.Update(ctx, created.Id, &api.UpdateForgeIntegrationRequest{
+		BaseUrl: ptrStr("https://migrated.example.com"),
+	})
+	if err != nil {
+		t.Fatalf("changing base to a reachable host must succeed: %v", err)
+	}
+	if out.BaseUrl != "https://migrated.example.com" {
+		t.Fatalf("base migration lost, got %q", out.BaseUrl)
+	}
+}
+
 func TestForgeIntegrationDeleteRules(t *testing.T) {
 	env := forgeTestService(t)
 	ctx := context.Background()

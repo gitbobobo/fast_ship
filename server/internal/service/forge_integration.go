@@ -150,7 +150,7 @@ func (s *ForgeIntegrationService) Create(ctx context.Context, req *api.CreateFor
 	// 合并成最终值后统一校验：base 与 api 各校验一次（含保存时 DNS），口径与
 	// Update 完全一致。
 	base, apiBase, err := s.resolveURLs(ctx, "", strings.TrimSpace(req.BaseUrl),
-		"", derefString(req.ApiBaseUrl), false, allowPrivate)
+		"", derefString(req.ApiBaseUrl), false, allowPrivate, true, true)
 	if err != nil {
 		return nil, err
 	}
@@ -239,8 +239,10 @@ func (s *ForgeIntegrationService) Update(ctx context.Context, id string, req *ap
 
 	// api_base_url 三态：null 保留、空串重置为推导、其余替换；base_url
 	// 只有两态（null 保留、非空替换——base 无默认可重置，空串走
-	// errForgeIntegrationBaseRequired 40001）。只在值或开关真的变化时才做
-	// 保存时 DNS 校验，无关更新（改名）不碰网络。
+	// errForgeIntegrationBaseRequired 40001）。
+	// 只在「值真的变化」或「开关收紧」时才做保存时 DNS 校验：无关更新
+	// （改名、只开内网放行）不碰网络，存量基址 DNS 失效不该连坐无关
+	// 字段更新——改 api 到可达端点、开内网放行正是失效期的自救路径。
 	baseChanged := req.BaseUrl != nil && strings.TrimSpace(*req.BaseUrl) != strings.TrimSpace(row.BaseURL)
 	apiChanged := req.ApiBaseUrl != nil && strings.TrimSpace(*req.ApiBaseUrl) != strings.TrimSpace(row.APIBaseURL)
 	if baseChanged || apiChanged || flagChanged {
@@ -255,15 +257,16 @@ func (s *ForgeIntegrationService) Update(ctx context.Context, id string, req *ap
 		if apiChanged {
 			reqAPI = strings.TrimSpace(*req.ApiBaseUrl)
 		}
+		tightened := flagChanged && !allowPrivate
 		base, apiBase, err := s.resolveURLs(ctx, row.BaseURL, reqBase, row.APIBaseURL, reqAPI,
-			apiChanged && reqAPI == "", allowPrivate)
+			apiChanged && reqAPI == "", allowPrivate, baseChanged || tightened, apiChanged || tightened)
 		if err != nil {
 			// 单独关开关（不改基址）必然撞公网口径复核：把「先换公网 https
 			// 基址、再关内网放行」的操作顺序写进消息，不然管理员只看到基址
 			// 校验原文，悟不出要在同一次请求里先改基址。只对私网/协议类
 			// 哨兵追加并按失败字段分开措辞——钉死的 api_base_url 挂了别
 			// 把管理员引向只改 base_url。
-			if flagChanged && !allowPrivate {
+			if tightened {
 				var fe *urlFieldErr
 				if errors.As(err, &fe) &&
 					(errors.Is(fe.cause, forges.ErrPrivateAddress) ||
@@ -452,31 +455,39 @@ func (s *ForgeIntegrationService) builtinProjection(ctx context.Context) (*api.F
 // resolveURLs 校验并归一 base / api 两个基址：reqBase 为空回落 currentBase
 // （Update 的部分更新语义）；allow_private_network 控制保存时 DNS 校验的
 // 口径（公网/私网，两口径都逐 IP 校验）。apiReset=true 表示 Update 显式传了
-// 空串，解除显式钉死回到推导。
+// 空串，解除显式钉死回到推导。baseRevalidate/apiRevalidate=false 时跳过
+// 对应基址的保存时复验（存量值是保存时验过的归一值，原样用回）——基址未
+// 变更且开关未收紧的更新（只改 api_base_url、只开内网放行）不该被实例
+// DNS 失效连坐 40001；收窄开关（公网口径复核）与基址变更仍必须全量校验。
 //
 // 返回的 apiStore 是存储值不是展开值：空串 = 「按 {base_url}/api/v1 推导」
 // （读取侧 forgeAPIBaseURL 展开），非空 = 管理员显式钉死的端点。意图存进
 // 列里，改 base_url 时推导行自然跟随、显式行自然钉住，不再靠字符串相等性
 // 去猜当初是推导还是显式。任何校验失败都折成 40001。
-func (s *ForgeIntegrationService) resolveURLs(ctx context.Context, currentBase, reqBase, currentAPI, reqAPI string, apiReset, allowPrivate bool) (base, apiStore string, err error) {
+func (s *ForgeIntegrationService) resolveURLs(ctx context.Context, currentBase, reqBase, currentAPI, reqAPI string, apiReset, allowPrivate, baseRevalidate, apiRevalidate bool) (base, apiStore string, err error) {
 	baseInput := reqBase
 	if baseInput == "" {
 		baseInput = currentBase
 	}
-	base, err = s.validateBaseURL(ctx, baseInput, allowPrivate)
-	if err != nil {
-		return "", "", &urlFieldErr{field: "base_url", cause: err, appErr: paramError(err)}
-	}
-	// base_url 只收站点根：审查链接与 code_repo_url 都按 {base_url}/{o}/{r}
-	// 拼接，带路径的基址会拼出错误 URL。api_base_url 不受限（可带 /api/v1）。
-	if err := requireBaseRoot(base); err != nil {
-		return "", "", err
-	}
-	// github.com 与本部署 GitHub Web 主机（GHE）的仓库 URL 永远先归内置
-	// github-default（parseRepoBinding 的主机判定次序）——指向这两类主机的
-	// Forgejo 集成可保存却永远绑不上，保存期直接拒绝而不是留一条死配置。
-	if err := s.rejectDeadForgeHost(base); err != nil {
-		return "", "", err
+	if baseRevalidate {
+		base, err = s.validateBaseURL(ctx, baseInput, allowPrivate)
+		if err != nil {
+			return "", "", &urlFieldErr{field: "base_url", cause: err, appErr: paramError(err)}
+		}
+		// base_url 只收站点根：审查链接与 code_repo_url 都按 {base_url}/{o}/{r}
+		// 拼接，带路径的基址会拼出错误 URL。api_base_url 不受限（可带 /api/v1）。
+		if err := requireBaseRoot(base); err != nil {
+			return "", "", err
+		}
+		// github.com 与本部署 GitHub Web 主机（GHE）的仓库 URL 永远先归内置
+		// github-default（parseRepoBinding 的主机判定次序）——指向这两类主机的
+		// Forgejo 集成可保存却永远绑不上，保存期直接拒绝而不是留一条死配置。
+		if err := s.rejectDeadForgeHost(base); err != nil {
+			return "", "", err
+		}
+	} else {
+		// 存量值原样用回（保存时已过完整校验；去尾斜杠保持与归一值同形态）。
+		base = strings.TrimRight(strings.TrimSpace(baseInput), "/")
 	}
 	apiInput := strings.TrimSpace(reqAPI)
 	if apiInput == "" {
@@ -510,6 +521,11 @@ func (s *ForgeIntegrationService) resolveURLs(ctx context.Context, currentBase, 
 		(forges.URLKey(apiInput) == forges.URLKey(forges.DefaultAPIBaseURL(base)) ||
 			(currentBase != "" && forges.URLKey(apiInput) == forges.URLKey(forges.DefaultAPIBaseURL(currentBase)))) {
 		return base, "", nil
+	}
+	if !apiRevalidate {
+		// 与 base 同口径：存量钉死值保存时已验过，未变更且开关未收紧时
+		// 不复验——api 主机 DNS 失效同样不该连坐「只改 base」的迁移路径。
+		return base, strings.TrimRight(apiInput, "/"), nil
 	}
 	apiStore, err = s.validateBaseURL(ctx, apiInput, allowPrivate)
 	if err != nil {
