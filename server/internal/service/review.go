@@ -195,6 +195,10 @@ func (s *ReviewService) handlePlatformWebhook(ctx context.Context, integrationID
 	}
 	if errors.Is(err, errTiedHeadAmbiguous) {
 		// 上限内没收敛：总账在同刻内持续前进，丢弃该投递不腐化账本。
+		// 丢弃前补登幂等账：首趟事务已回滚、本路径不进复核事务——不登记
+		// 的话实例后台手动 redeliver 同 GUID 会重走整个歧义→实拉循环；
+		// 登记后重投按重复投递 202 去重（与复核判丢弃同口径）。
+		s.recordDroppedDelivery(ctx, integrationID, deliveryID, event)
 		s.logger.Warn("同刻异 head 复核未收敛，丢弃投递",
 			zap.String("integration", integrationID),
 			zap.String("delivery", deliveryID), zap.String("event", event))
@@ -253,8 +257,10 @@ func (s *ReviewService) runWebhookDeliveryTx(ctx context.Context, integrationID,
 // 是总账里的那条），以观察到的总账 head 作 tiedBase、用 live 快照重建
 // trigger 重进受理（pr_updated_at 取实时戳而非旧 payload 的）。live 指向
 // 别的 head 或 PR 已关 → 丢弃，总账不回滚到疑似旧 head；客户端构造/实拉
-// 失败是瞬时错误——返回 error 让 handler 回 500，平台重投会重走全流程
-// （GitHub 无轮询兜底，静默丢弃会永久漏审这个 head）。
+// 失败按 deterministicReviewAccessErr 归类——确定性失败（凭证吊销/仓库或
+// PR 已删/集成缺失）重投结果相同，判丢弃并补登幂等账；只有瞬时错误才
+// 返回 error 让 handler 回 500（GitHub 无轮询兜底，静默丢弃会永久漏审
+// 这个 head）。
 func (s *ReviewService) revalidateTiedWebhook(ctx context.Context, integrationID, source, event, deliveryID string, body []byte, observedHead string) error {
 	var p prWebhookPayload
 	if err := json.Unmarshal(body, &p); err != nil {
@@ -268,6 +274,15 @@ func (s *ReviewService) revalidateTiedWebhook(ctx context.Context, integrationID
 	defer cancel()
 	client, err := s.reviewClient(ctx, integrationID, repo, p.Installation.ID)
 	if err != nil {
+		// 确定性失败（集成行已删/密文损坏）重投只会得到同一错误——判丢弃
+		// 并补登幂等账，不让平台无限重投；瞬时错误才透出 500。
+		if deterministicReviewAccessErr(err) {
+			s.logger.Warn("同刻异 head 复核构造客户端确定性失败，丢弃投递",
+				zap.String("integration", integrationID),
+				zap.String("delivery", deliveryID), zap.Error(err))
+			s.recordDroppedDelivery(ctx, integrationID, deliveryID, event)
+			return nil
+		}
 		s.logger.Warn("同刻异 head 复核构造客户端失败",
 			zap.String("integration", integrationID),
 			zap.String("delivery", deliveryID), zap.Error(err))
@@ -275,6 +290,16 @@ func (s *ReviewService) revalidateTiedWebhook(ctx context.Context, integrationID
 	}
 	live, err := client.GetPullRequest(ctx, repo, p.Number)
 	if err != nil {
+		// PR 已删/凭证吊销/仓库删除——确定性失败重投结果相同：判丢弃并
+		// 补登幂等账（本投递不进触发事务，不登记同 GUID 重投会重走复核
+		// 全流程），瞬时错误才透出 500 让平台重投。
+		if deterministicReviewAccessErr(err) {
+			s.logger.Warn("同刻异 head 复核实拉确定性失败，丢弃投递",
+				zap.String("integration", integrationID),
+				zap.String("delivery", deliveryID), zap.Error(err))
+			s.recordDroppedDelivery(ctx, integrationID, deliveryID, event)
+			return nil
+		}
 		s.logger.Warn("同刻异 head 复核实拉失败",
 			zap.String("integration", integrationID),
 			zap.String("delivery", deliveryID), zap.Error(err))

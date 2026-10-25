@@ -111,6 +111,9 @@ func TestForgejoClient_CommentsRoundTrip(t *testing.T) {
 	// 顶层评论：issue comments 端点 + PATCH /issues/comments/{id}。
 	client, logs := newForgejoTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.URL.Path == "/api/v1/user":
+			// 仓库级 PAT：/user 403 → marker-only 退化（本用例不关心自评标记）。
+			w.WriteHeader(http.StatusForbidden)
 		case r.Method == http.MethodGet && r.URL.Query().Get("page") != "" && r.URL.Query().Get("page") != "1":
 			_, _ = w.Write([]byte(`[]`))
 		case strings.HasSuffix(r.URL.Path, "/comments") && r.Method == http.MethodGet:
@@ -221,7 +224,7 @@ func TestForgejoClient_FindPullRequestComment_NoUserScope(t *testing.T) {
 
 // TestForgejoClient_SelfLogin_TransientErrorPropagates /user 抖动不降级：
 // 5xx/网络错误照旧传播挂起本轮——瞬时故障降级 marker-only 会把伪造覆写
-// 窗口扩大到任意故障时刻（fsb 第 4 轮 P2）。403/404 才是退化信号。
+// 窗口扩大到任意故障时刻（fsb 第 4 轮 P2）。非限流 403 才是退化信号。
 func TestForgejoClient_SelfLogin_TransientErrorPropagates(t *testing.T) {
 	client, _ := newForgejoTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/user" {
@@ -237,6 +240,27 @@ func TestForgejoClient_SelfLogin_TransientErrorPropagates(t *testing.T) {
 	var se *StatusError
 	if !errors.As(err, &se) || se.StatusCode != http.StatusBadGateway {
 		t.Fatalf("err = %v, want *StatusError 502", err)
+	}
+}
+
+// TestForgejoClient_SelfLogin_NotFoundPropagates /user 404 不降级：仓库级
+// PAT 缺 read:user 的确定性信号是 403 不是 404——404 更像 api_base_url
+// 指错路径前缀，静默降级会把「作者==自己」过滤关掉且不留报错线索。
+func TestForgejoClient_SelfLogin_NotFoundPropagates(t *testing.T) {
+	client, _ := newForgejoTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/user" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_, _ = w.Write([]byte(`[]`))
+	})
+	_, _, err := client.FindPullRequestComment(context.Background(), "o/r", 5, "<!-- m -->")
+	if err == nil {
+		t.Fatal("/user 404 应传播错误，不得退化 marker-only")
+	}
+	var se *StatusError
+	if !errors.As(err, &se) || se.StatusCode != http.StatusNotFound {
+		t.Fatalf("err = %v, want *StatusError 404", err)
 	}
 }
 

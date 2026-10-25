@@ -159,10 +159,13 @@ seen SHA、取消旧轮全部失效）。
    事务回滚并交调用方现拉实时 PR 复核：live head 与 payload head 一致才以
    `tiedBase`（绑观察到的总账 head）重进受理；live 指向别处或 PR 已关 →
    丢弃并**补登幂等账**（确定态丢弃后 delivery 落账，平台手动 redeliver
-   同 GUID 直接 202 去重，不重走实拉），实拉失败 → 返回错误（handler
-   500 → 平台重投，GitHub 无轮询兜底不静默丢）；重进期间总账又前进 →
-   tiedBase 失配、哨兵再触发按新快照重验（上限 4 次，仍不收敛则丢弃且
-   不登记——收敛失败的投递可能是真新 head，留给重投再判）。总账不
+   同 GUID 直接 202 去重，不重走实拉）；实拉/构造客户端失败按
+   `deterministicReviewAccessErr` 归类——确定性失败（401/403/404、集成
+   缺失、密文损坏）重投结果相同 → 同样判丢弃并补登幂等账，瞬时错误
+   （5xx/网络/限流 403）才返回错误（handler 500 → 平台重投，GitHub 无
+   轮询兜底不静默丢）；重进期间总账又前进 →
+   tiedBase 失配、哨兵再触发按新快照重验（上限 4 次，仍不收敛则丢弃
+   并补登幂等账——手动 redeliver 重走歧义循环没有意义）。总账不
    回滚到疑似旧 head。该 SHA 已在本项目
    `review_seen_shas` 但不是当前 head → 忽略；`action=opened` 且当前 head
    非空 → 忽略；该 SHA 本项目已有运行 → 忽略。force-push 回已见过的 SHA

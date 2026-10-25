@@ -178,9 +178,11 @@ Forgejo 仓库的 PR 审查与 GitHub 走同一条协调管线（webhook 事务�
   响应（`POST …/comments`、`POST …/reviews`）的 `user.login` 学习并缓存——
   **PATCH 路径不学**：评论对象的 user 是原作者不是编辑者，marker-only
   退化命中他人伪造评论且 PAT 有权编辑他人评论时会把攻击者 login 学进
-  缓存，Self 标记与对账认领随之持久认敌为己。**退化边界是非限流的
-  403/404**——仓库级 PAT 拿不到 `read:user` 的确定性信号才落到
-  marker-only 认领；403 降级前先判 `forge.IsRateLimit`（body 含 rate
+  缓存，Self 标记与对账认领随之持久认敌为己。**退化边界只有非限流的
+  403**——仓库级 PAT 拿不到 `read:user` 的确定性信号是 403 才落到
+  marker-only 认领；`/user` 404 不降级（更像 `api_base_url` 指错路径
+  前缀，静默降级会让 Self 过滤失效且无报错线索）。403 降级前先判
+  `forge.IsRateLimit`（body 含 rate
   limit/abuse detection 字样），限流 403 与权限 403 无法从状态码区分，
   静默降级会在限流窗口整窗关掉「作者==自己」过滤（伪造 marker 的他人
   评论可能被覆写一次，PATCH 403 时按「非己评论」改走新建，但不会因此

@@ -155,6 +155,12 @@ func (s *ReviewService) pollAcceptPR(ctx context.Context, fetcher singlePRFetche
 	}
 	live, err := fetcher.GetPullRequest(ctx, repo, pr.Number)
 	if err != nil {
+		// PR 已删/凭证失效——每 tick 重拉只会得到同一错误：丢快照不再刷错
+		// （集成级确定性失败由 pollForgejoOpenPRs 的列表路径停用审查收口）；
+		// 瞬时错误才透出等下一 tick。
+		if deterministicReviewAccessErr(err) {
+			return nil
+		}
 		return err
 	}
 	// PR 在列表快照与实拉之间被关闭/合并 → 与 webhook 复核同口径丢弃：

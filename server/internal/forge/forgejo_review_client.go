@@ -342,10 +342,12 @@ func (c *ForgejoReviewClient) botLogin(ctx context.Context) (string, error) {
 	return c.loginCache.login, nil
 }
 
-// selfLogin 自评判定用的 PAT 账号探测：只有 403/404（仓库级 PAT 拿不到
-// read:user 的确定性信号）才退化空 login；瞬时网络错误、5xx、非预期 401
+// selfLogin 自评判定用的 PAT 账号探测：只有非限流 403（仓库级 PAT 拿不到
+// read:user 的确定性信号）才退化空 login；瞬时网络错误、5xx、401/404
 // 照旧传播挂起本轮——瞬时故障若也降级 marker-only，「作者==自己」过滤就
 // 形同虚设，且 PAT 有仓库管理权限时 PATCH 覆写他人评论连 403 兜底都没有。
+// /user 404 不降级：仓库级 PAT 的缺 scope 信号是 403 不是 404——404 更像
+// api_base_url 指错路径前缀，静默降级会让 Self 过滤失效且无任何报错线索。
 // 403 降级前先判 IsRateLimit：GitHub/前置代理的限流正是回 403（body 含
 // rate limit/abuse detection 字样），与权限 403 无法从状态码区分——限流
 // 窗口静默降级会整窗关掉自评过滤，限流 403 与权限 403 同按「可重试的
@@ -355,7 +357,7 @@ func (c *ForgejoReviewClient) selfLogin(ctx context.Context) (string, error) {
 	if err == nil {
 		return login, nil
 	}
-	if (IsForbidden(err) || IsNotFound(err)) && !IsRateLimit(err) {
+	if IsForbidden(err) && !IsRateLimit(err) {
 		return "", nil
 	}
 	return "", err

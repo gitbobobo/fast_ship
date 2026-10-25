@@ -229,6 +229,8 @@ type pollStubClient struct {
 	byRepo    map[string][]forge.PullRequest
 	errByRepo map[string]error
 	live      *forge.PullRequest // 单拉复核返回的「实时」PR
+	liveErr   error              // 单拉复核注入错误（errByRepo 同伤列表+实拉，只伤实拉用它）
+	onGet     func()             // 单拉期间的竞争写回调（模拟复核与重进之间总账被抢先推进）
 }
 
 func (c *pollStubClient) ListOpenPullRequests(_ context.Context, repo string) ([]forge.PullRequest, error) {
@@ -238,8 +240,14 @@ func (c *pollStubClient) ListOpenPullRequests(_ context.Context, repo string) ([
 	return c.byRepo[repo], nil
 }
 
-// GetPullRequest 防抖实况读路径用：errByRepo 命中的仓库返回错误。
+// GetPullRequest 防抖实况读路径用：errByRepo/liveErr 命中的返回错误。
 func (c *pollStubClient) GetPullRequest(_ context.Context, repo string, number int) (*forge.PullRequest, error) {
+	if c.onGet != nil {
+		c.onGet()
+	}
+	if c.liveErr != nil {
+		return nil, c.liveErr
+	}
 	if err, ok := c.errByRepo[repo]; ok {
 		return nil, err
 	}
@@ -1240,5 +1248,152 @@ func TestForgejoPoll_TiedSnapshotRevalidated(t *testing.T) {
 	}
 	if debounce.HeadSHA != "sha-c" {
 		t.Fatalf("debounce head = %q, want sha-c", debounce.HeadSHA)
+	}
+}
+
+// TestHandleForgejoWebhook_TiedRevalidateErrClassified 同刻歧义复核的实拉
+// 错误按确定性归类：PR/仓库已删、凭证吊销（401/403/404）重投结果相同——
+// 判丢弃并补登幂等账，不透出 500 让平台无限重投刷外呼；瞬时错误（5xx/网络）
+// 才透出等重投。
+func TestHandleForgejoWebhook_TiedRevalidateErrClassified(t *testing.T) {
+	svc := setupTestServices(t)
+	forgeID := createTestForgeIntegration(t, svc.db, "https://forge.example.com").ID
+	project, _ := seedForgejoReviewProject(t, svc, forgeID, "fj-tiederr", "acme/app", nil)
+	review := newReviewTestService(t, svc, nil, nil, nil)
+	client := &pollStubClient{}
+	review.clients = pollStubResolver{byIntegration: map[string]forge.ReviewClient{forgeID: client}}
+
+	if err := review.HandleForgejoWebhook(context.Background(), forgeID, "pull_request", "d-b",
+		forgejoPullPayload("synchronized", "acme/app", 76, "sha-b", false)); err != nil {
+		t.Fatalf("webhook sha-b: %v", err)
+	}
+
+	// 瞬时失败（5xx）：透出错误 → handler 500 → 平台重投，幂等账不登记。
+	client.liveErr = &forge.StatusError{StatusCode: 500, Body: "boom"}
+	if err := review.HandleForgejoWebhook(context.Background(), forgeID, "pull_request", "d-t",
+		forgejoPullPayload("synchronized", "acme/app", 76, "sha-a", false)); err == nil {
+		t.Fatal("瞬时复核错误应透出（平台重投才有意义）")
+	}
+	var n int64
+	svc.db.Model(&model.GitHubWebhookDelivery{}).Where("delivery_id = ?", deliveryLedgerKey(forgeID, "d-t")).Count(&n)
+	if n != 0 {
+		t.Fatalf("瞬时失败的投递不得登记幂等账（要允许重投）, rows = %d", n)
+	}
+
+	// 确定性失败（404 PR/仓库已删）：判丢弃 + 补登幂等账，总账不回滚。
+	client.liveErr = &forge.StatusError{StatusCode: 404, Body: "not found"}
+	if err := review.HandleForgejoWebhook(context.Background(), forgeID, "pull_request", "d-a",
+		forgejoPullPayload("synchronized", "acme/app", 76, "sha-a", false)); err != nil {
+		t.Fatalf("确定性复核错误应判丢弃，不得 500 无限重投, err = %v", err)
+	}
+	var ledger model.ReviewPullRequest
+	if err := svc.db.Where("project_id = ? AND pr_number = ?", project.ID, 76).First(&ledger).Error; err != nil {
+		t.Fatalf("ledger: %v", err)
+	}
+	if ledger.HeadSHA != "sha-b" {
+		t.Fatalf("ledger head = %q, want sha-b（丢弃不得回滚总账）", ledger.HeadSHA)
+	}
+	svc.db.Model(&model.GitHubWebhookDelivery{}).Where("delivery_id = ?", deliveryLedgerKey(forgeID, "d-a")).Count(&n)
+	if n != 1 {
+		t.Fatalf("确定性丢弃的投递应补登幂等账, rows = %d", n)
+	}
+	// 同 GUID 手动 redeliver 直接 202 去重，不再重走实拉。
+	if err := review.HandleForgejoWebhook(context.Background(), forgeID, "pull_request", "d-a",
+		forgejoPullPayload("synchronized", "acme/app", 76, "sha-a", false)); !errors.Is(err, ErrDeliveryDuplicated) {
+		t.Fatalf("redelivery d-a: err=%v, want ErrDeliveryDuplicated", err)
+	}
+}
+
+// TestHandleForgejoWebhook_TiedAmbiguousCapDropped 复核上限内不收敛（每轮
+// 实拉与重进之间总账都被同刻第三个 push 抢先推进）→ 投递判丢弃并补登
+// 幂等账：不登记的话实例后台手动 redeliver 同 GUID 会重走整个歧义→实拉
+// 循环。
+func TestHandleForgejoWebhook_TiedAmbiguousCapDropped(t *testing.T) {
+	svc := setupTestServices(t)
+	forgeID := createTestForgeIntegration(t, svc.db, "https://forge.example.com").ID
+	project, _ := seedForgejoReviewProject(t, svc, forgeID, "fj-tiedcap", "acme/app", nil)
+	review := newReviewTestService(t, svc, nil, nil, nil)
+	ts := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC) // 与 payload 同刻
+	client := &pollStubClient{
+		live: &forge.PullRequest{Number: 77, RepoFullName: "acme/app", HeadSHA: "sha-a", UpdatedAt: &ts, State: "open"},
+	}
+	review.clients = pollStubResolver{byIntegration: map[string]forge.ReviewClient{forgeID: client}}
+
+	if err := review.HandleForgejoWebhook(context.Background(), forgeID, "pull_request", "d-b",
+		forgejoPullPayload("synchronized", "acme/app", 77, "sha-b", false)); err != nil {
+		t.Fatalf("webhook sha-b: %v", err)
+	}
+	// 每轮复核的实拉与重进之间，同刻第三个 push 又把已受理 head 推进
+	// 一步（current 优先取未开火防抖行——抢先事件留下的就是它）——
+	// 重进的 tiedBase 永远失配，复核跑到上限也不收敛。
+	bumps := 0
+	client.onGet = func() {
+		bumps++
+		svc.db.Model(&model.ReviewDebounce{}).
+			Where("project_id = ? AND pr_number = ?", project.ID, 77).
+			Update("head_sha", "sha-race-"+strconv.Itoa(bumps))
+	}
+	if err := review.HandleForgejoWebhook(context.Background(), forgeID, "pull_request", "d-a",
+		forgejoPullPayload("synchronized", "acme/app", 77, "sha-a", false)); err != nil {
+		t.Fatalf("上限丢弃应返回 nil, err = %v", err)
+	}
+	if bumps != reviewTiedRevalidateMax {
+		t.Fatalf("复核实拉次数 = %d, want %d（跑到上限才放弃）", bumps, reviewTiedRevalidateMax)
+	}
+	var n int64
+	svc.db.Model(&model.GitHubWebhookDelivery{}).Where("delivery_id = ?", deliveryLedgerKey(forgeID, "d-a")).Count(&n)
+	if n != 1 {
+		t.Fatalf("上限丢弃的投递应补登幂等账, rows = %d", n)
+	}
+	if err := review.HandleForgejoWebhook(context.Background(), forgeID, "pull_request", "d-a",
+		forgejoPullPayload("synchronized", "acme/app", 77, "sha-a", false)); !errors.Is(err, ErrDeliveryDuplicated) {
+		t.Fatalf("redelivery d-a: err=%v, want ErrDeliveryDuplicated", err)
+	}
+}
+
+// TestForgejoPoll_TiedFetchErrClassified 轮询同刻歧义复核的实拉错误按确定
+// 性归类：PR 已删/凭证失效的快照直接丢弃（每 tick 重拉结果相同，集成级
+// 确定性失败由列表路径停用审查收口），瞬时错误透出记 warn 等下一 tick。
+func TestForgejoPoll_TiedFetchErrClassified(t *testing.T) {
+	svc := setupTestServices(t)
+	forgeID := createTestForgeIntegration(t, svc.db, "https://forge.example.com").ID
+	project, _ := seedForgejoReviewProject(t, svc, forgeID, "fj-pollerr", "acme/app", nil)
+	review := newReviewTestService(t, svc, nil, nil, nil)
+	review.clients = pollStubResolver{byIntegration: map[string]forge.ReviewClient{forgeID: &pollStubClient{}}}
+
+	if err := review.HandleForgejoWebhook(context.Background(), forgeID, "pull_request", "d-b",
+		forgejoPullPayload("synchronized", "acme/app", 78, "sha-b", false)); err != nil {
+		t.Fatalf("webhook sha-b: %v", err)
+	}
+	var settings model.ProjectReviewSettings
+	if err := svc.db.Where("project_id = ?", project.ID).First(&settings).Error; err != nil {
+		t.Fatalf("settings: %v", err)
+	}
+	ts := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC) // 与已受理 head 同刻 → 触发歧义复核
+	snap := &forge.PullRequest{Number: 78, RepoFullName: "acme/app", HeadSHA: "sha-a", UpdatedAt: &ts}
+
+	// 确定性失败：丢快照返回 nil（每 tick 重拉同一错误只会刷错）。
+	det := &pollStubClient{liveErr: &forge.StatusError{StatusCode: 404, Body: "not found"}}
+	if err := review.pollAcceptPR(context.Background(), det, &settings, "acme/app", snap, time.Now().UTC()); err != nil {
+		t.Fatalf("确定性实拉错误应丢快照返回 nil, err = %v", err)
+	}
+	// 瞬时失败：透出错误等下一 tick。
+	tr := &pollStubClient{liveErr: &forge.StatusError{StatusCode: 503, Body: "unavailable"}}
+	if err := review.pollAcceptPR(context.Background(), tr, &settings, "acme/app", snap, time.Now().UTC()); err == nil {
+		t.Fatal("瞬时实拉错误应透出等下一 tick 重试")
+	}
+	// 两条路径都不得动总账、不得登记 sha-a。
+	var ledger model.ReviewPullRequest
+	if err := svc.db.Where("project_id = ? AND pr_number = ?", project.ID, 78).First(&ledger).Error; err != nil {
+		t.Fatalf("ledger: %v", err)
+	}
+	if ledger.HeadSHA != "sha-b" {
+		t.Fatalf("ledger head = %q, want sha-b", ledger.HeadSHA)
+	}
+	var n int64
+	svc.db.Model(&model.ReviewSeenSHA{}).Where("project_id = ? AND pr_number = ? AND head_sha = ?",
+		project.ID, 78, "sha-a").Count(&n)
+	if n != 0 {
+		t.Fatalf("歧义快照 sha-a 不得登记 seen, rows = %d", n)
 	}
 }
