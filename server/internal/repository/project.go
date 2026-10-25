@@ -52,6 +52,7 @@ func (r *ProjectRepository) Create(project *model.Project) error {
 		project.Description,
 		project.GithubOwner,
 		project.GithubRepo,
+		project.GithubHost,
 		project.CodeGithubOwner,
 		project.CodeGithubRepo,
 		project.CodeIntegrationID,
@@ -63,12 +64,12 @@ func (r *ProjectRepository) Create(project *model.Project) error {
 	}, args...)
 	res := r.db.Exec(`
 		INSERT INTO projects (
-			id, user_id, name, description, github_owner, github_repo,
+			id, user_id, name, description, github_owner, github_repo, github_host,
 			code_github_owner, code_github_repo,
 			code_integration_id, public_integration_id,
 			public_github_token_id, code_github_token_id, created_at, updated_at
 		)
-		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 		WHERE `+pred, args...)
 	if res.Error != nil {
 		return res.Error
@@ -261,6 +262,7 @@ func (r *ProjectRepository) Update(project *model.Project) error {
 				"description":            project.Description,
 				"github_owner":           project.GithubOwner,
 				"github_repo":            project.GithubRepo,
+				"github_host":            project.GithubHost,
 				"code_github_owner":      project.CodeGithubOwner,
 				"code_github_repo":       project.CodeGithubRepo,
 				"code_integration_id":    project.CodeIntegrationID,

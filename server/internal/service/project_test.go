@@ -429,6 +429,28 @@ func TestCodeRepoUrlGHEExplicitPublicGitHub(t *testing.T) {
 	if got == nil || *got != "https://ghe.corp.example/co/cr" {
 		t.Fatalf("code-field code_repo_url = %v, want ghe host", got)
 	}
+
+	// 写路径端到端：显式 github.com 公开仓落库 github_host（R32 P1 回归——
+	// 仓储层 INSERT/Updates 显式列清单曾把该列静默丢掉）。
+	user := createTestUser(t, svc.db, "ghe-user")
+	proj, err := ps.Create(user.ID, &CreateProjectRequest{
+		Name:          "ghe-public-repo",
+		RepositoryUrl: api.Ptr("https://github.com/o/r"),
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	var stored model.Project
+	if err := svc.db.First(&stored, "id = ?", proj.Id).Error; err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if stored.GithubHost != "github.com" {
+		t.Fatalf("persisted github_host = %q, want github.com", stored.GithubHost)
+	}
+	got, _ = ps.codeRepoUrl(&stored, nil)
+	if got == nil || *got != "https://github.com/o/r" {
+		t.Fatalf("persisted code_repo_url = %v, want https://github.com/o/r", got)
+	}
 }
 
 func newTestProjectService(svc *testServices) *ProjectService {
