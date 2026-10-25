@@ -602,18 +602,25 @@ type RunToolCallTriple struct {
 	RunID    string `gorm:"column:run_id"`
 	ToolName string `gorm:"column:tool_name"`
 	Action   string `gorm:"column:action"`
+	// EffectiveWrite 表示该 (run,tool,action) 组合下是否有实际/可能落效的
+	// 调用：succeeded 或 effect_may_have_occurred。被拒、取消、未执行、
+	// 失败的调用不产生写入，不计入空转判定的「有写」。
+	EffectiveWrite bool `gorm:"column:effective_write"`
 }
 
 // RunToolCallTriples 返回一批 run 经 bot_model_requests 关联的工具调用去重
-// 组合（调用行各状态都计，不做状态过滤）。
+// 组合。工具调用行各状态都计（attempt 即算有调用），另给出每组合是否含
+// 有效写（供服务层判「有写」用）。
 func (r *BotUsageRepository) RunToolCallTriples(runIDs []string) ([]RunToolCallTriple, error) {
 	var rows []RunToolCallTriple
 	for _, batch := range ChunkIDs(runIDs, UsageQueryBatch) {
 		var part []RunToolCallTriple
 		err := r.db.Table("bot_tool_calls").
-			Select("DISTINCT bot_model_requests.run_id AS run_id, bot_tool_calls.tool_name AS tool_name, bot_tool_calls.action AS action").
+			Select("bot_model_requests.run_id AS run_id, bot_tool_calls.tool_name AS tool_name, bot_tool_calls.action AS action, "+
+				"MAX(bot_tool_calls.status = 'succeeded' OR bot_tool_calls.effect_may_have_occurred) AS effective_write").
 			Joins("JOIN bot_model_requests ON bot_model_requests.id = bot_tool_calls.request_id").
 			Where("bot_model_requests.run_id IN ?", batch).
+			Group("bot_model_requests.run_id, bot_tool_calls.tool_name, bot_tool_calls.action").
 			Scan(&part).Error
 		if err != nil {
 			return nil, err

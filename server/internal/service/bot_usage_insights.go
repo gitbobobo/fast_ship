@@ -134,7 +134,9 @@ func (s *BotService) GetBotUsageInsights(userID, rangeParam, botID string) (*api
 	writeCallRuns := make(map[string]bool, len(scheduleRunIDs))
 	for _, t := range callTriples {
 		toolCallRuns[t.RunID] = true
-		if !botReadOnlyActions[t.ToolName+"/"+t.Action] {
+		// 「有写」要求调用实际/可能落效：被拒、取消、未执行或失败的写
+		// 调用没有产生写入，该 run 仍算白跑（EffectiveWrite 见仓库层）。
+		if t.EffectiveWrite && !botReadOnlyActions[t.ToolName+"/"+t.Action] {
 			writeCallRuns[t.RunID] = true
 		}
 	}
