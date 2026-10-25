@@ -247,9 +247,11 @@ function BudgetPeriodForm({
           />
         </div>
       </div>
-      <p className="text-xs text-muted-foreground">
-        阈值是相对金额的比例，可超过 100%（如 150%）；越过阈值只发提醒，不会停止运行。
-      </p>
+      {period === "daily" && (
+        <p className="text-xs text-muted-foreground">
+          阈值是相对金额的比例，可超过 100%（如 150%）；越过阈值只发提醒，不会停止运行。
+        </p>
+      )}
 
       {problem && (
         <p role="alert" className="text-xs text-destructive">
