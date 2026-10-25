@@ -129,8 +129,10 @@ forgejo 绑定项目换语义不换码：
   「代码仓集成已配置（Forgejo）」（集成行存在且 `kind=forgejo`）与「代码仓
   集成可访问该仓库」（经 resolver 取 Forgejo 适配器实时 `GetRepository`，
   `installationID=0`——安装语义对 Forgejo 不存在）。仓库名不发往 GitHub 查
-  安装：同名 GitHub 仓的安装不代表 forgejo 仓可用。public_url / Token /
-  环境绑定照常计算。
+  安装：同名 GitHub 仓的安装不代表 forgejo 仓可用。Token 项同样换语义：
+  「代码仓集成 PAT 已配置（Forgejo）」按集成行 `token_encrypted` 非空判定
+  ——纯 Forgejo 部署没有 GitHub 凭证可绑，项目侧 Token 绑定对 Forgejo 仓
+  无访问效力，不计入。public_url / 环境绑定照常计算。
 - **UpdateSettings（enabled）**：入参侧先按 `code_integration_id` 查集成行
   ——不存在或 `kind != forgejo` → 40001 点明（fail fast）；仓库级可访问性
   走前置条件的实时检查（41202 缺项明细，与 GitHub 段落同一映射风格）。
@@ -153,7 +155,10 @@ Forgejo 仓库的 PR 审查与 GitHub 走同一条协调管线（webhook 事务�
   面。GitHub 适配器包安装 id 透传 githubapi（行为零变化）；Forgejo 适配器
   `internal/forge/forgejo_review_client.go` 直连 v1 REST——认证头
   `Authorization: token {PAT}`，API 基址取集成行展开值，http client 由
-  `ForgeClientSource` 按 `pkg/forges` 构建（SSRF 防护与连接检测同一入口）。
+  `ForgeClientSource` 按 `pkg/forges` 构建（SSRF 防护与连接检测同一入口，
+  但显式传 60s 单请求预算——`forges.DefaultTimeout`(10s) 是给连接检测
+  同步等待设计的兜底，`.diff` 生成/大 diff 下载/慢实例分页列表按数据
+  传输预算放宽一档）。
   请求映射：PR 元数据 `GET /repos/{o}/{r}/pulls/{n}`；diff
   `GET …/pulls/{n}.diff`（text/plain 整段读）；PR 会话评论
   `GET/POST /repos/{o}/{r}/issues/{n}/comments`、`PATCH …/issues/comments/{id}`
@@ -179,7 +184,11 @@ Forgejo 仓库的 PR 审查与 GitHub 走同一条协调管线（webhook 事务�
   （那边行内评论没有隐藏标记、login 也不以 [bot] 结尾）。
 - **错误归一**：Forgejo 适配器把非 2xx 包成 `*forge.StatusError`，与 GitHub
   透传的 `githubapi.StatusError` 同构，service 的 `IsNotFound`/`IsForbidden`/
-  `IsDiffTooLarge` 按同一口径判定（`forge/errors.go`）。
+  `IsDiffTooLarge` 按同一口径判定（`forge/errors.go`）。diff 超本端读入
+  上限（`respBodyMaxBytes`，64MB）时平台并未拒绝、无 HTTP 状态码可言——
+  适配器返回 `ErrDiffTooLarge` 哨兵，`IsDiffTooLarge` 与平台 too_large
+  同口径命中：service 走确定性降级收尾（顶层评论降级），不按可重试
+  错误无限退避挂住 `sync_pending`。
 - **resolver**：`forge.ReviewClients.ClientFor` 三分支——空串/`github-default`
   → GitHub 适配器；其余 id → 经 `ForgejoSource`（`service/forge_client_source.go`
   的 `ForgeClientSource`）现取「SSRF client + 展开基址 + 解密 PAT」组装

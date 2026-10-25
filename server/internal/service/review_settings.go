@@ -513,10 +513,12 @@ func (s *ReviewService) reviewPrerequisites(ctx context.Context, project *model.
 	// 取 Forgejo 适配器实时 GetRepository，installationID=0——安装语义对
 	// Forgejo 不存在）。仓库名不发往 GitHub 查安装：同名 GitHub 仓的安装状态
 	// 与 Forgejo 仓无关。
+	var forgeRow *model.ForgeIntegration
 	if project.CodeIntegrationID != "" {
 		integrationConfigured := false
 		appDetail := "Forgejo 代码仓集成不可用"
 		row, rowErr := s.forgeIntegrationRow(project.CodeIntegrationID)
+		forgeRow = row
 		switch {
 		case rowErr != nil:
 			appDetail = "Forgejo 集成不存在或已删除，请重新绑定"
@@ -607,13 +609,24 @@ func (s *ReviewService) reviewPrerequisites(ctx context.Context, project *model.
 	}
 	add(api.PublicUrl, "已配置对外访问地址（public_url）", publicURL == "", urlDetail)
 
-	// 4. 项目绑定了公开或代码仓库 Token。
-	tokenBound := project.PublicGitHubTokenID != "" || project.CodeGitHubTokenID != ""
-	tokenDetail := ""
-	if !tokenBound {
-		tokenDetail = "请在项目设置中绑定公开或代码仓库 Token"
+	// 4. 审查凭证就绪：GitHub 项目查 Token 绑定；Forgejo 项目查集成 PAT 已
+	// 配置（纯 Forgejo 部署没有 GitHub 凭证可绑，绑了对 Forgejo 仓也无访问
+	// 效力——凭证判定随集成泛化）。
+	if project.CodeIntegrationID != "" {
+		tokenReady := forgeRow != nil && len(forgeRow.TokenEncrypted) > 0
+		tokenDetail := ""
+		if !tokenReady {
+			tokenDetail = "请在「设置 → 部署 → 集成」为代码仓集成配置访问令牌"
+		}
+		add(api.GithubToken, "代码仓集成 PAT 已配置（Forgejo）", !tokenReady, tokenDetail)
+	} else {
+		tokenBound := project.PublicGitHubTokenID != "" || project.CodeGitHubTokenID != ""
+		tokenDetail := ""
+		if !tokenBound {
+			tokenDetail = "请在项目设置中绑定公开或代码仓库 Token"
+		}
+		add(api.GithubToken, "项目已绑定 GitHub Token", !tokenBound, tokenDetail)
 	}
-	add(api.GithubToken, "项目已绑定 GitHub Token", !tokenBound, tokenDetail)
 
 	// 5. 每个组合的环境属于当前用户且已绑定该项目（无组合视为满足）。
 	envDetail := ""

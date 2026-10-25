@@ -222,12 +222,13 @@ export function ProjectFormDialog({
   // 的项目不提示。等价判定沿用归一口径——scheme 有无、尾斜杠、.git、裸
   // owner/repo 形态都不算改动。
   const savedIntegrationId = project?.code_integration_id || defaultIntegrationId;
+  // selectedIntegration 解析不出（加载中/失败，forge 绑定不在保底列表）时
+  // 不判 repoChanged——空合成与已存 URL 必然不等，打开弹框就误警示。
   const repoChanged =
     isEdit &&
+    !!selectedIntegration &&
     normalizeCodeRepoRef(
-      selectedIntegration
-        ? codeRepoUrlFromSlug(selectedIntegration, ownerRepoFromInput(codeRepoSlug))
-        : "",
+      codeRepoUrlFromSlug(selectedIntegration, ownerRepoFromInput(codeRepoSlug)),
     ) !==
       normalizeCodeRepoRef(project?.code_repo_url ?? "");
   const integrationChanged = isEdit && codeIntegrationId !== savedIntegrationId;

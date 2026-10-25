@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/config"
 	"github.com/godbobo/fast_ship/server/internal/model"
@@ -43,6 +44,12 @@ func NewForgeClientSource(repo forgeIntegrationLookup, cfg *config.Config, logge
 	return &ForgeClientSource{repo: repo, key: key, logger: logger}
 }
 
+// forgeReviewClientTimeout 审查链路单请求预算：`.diff` 生成与大 diff 下载、
+// 慢实例分页列表都走它——forges.DefaultTimeout(10s) 是给连接检测同步等待
+// 设计的兜底，不是数据传输预算；GitHub 共享 client 是 30s，自托管实例的
+// diff 生成再宽一档。
+const forgeReviewClientTimeout = 60 * time.Second
+
 // ForgejoClient 集成行必须存在且 kind=forgejo：解密 PAT 后按集成配置构建
 // SSRF 安全 client（allow_private_network / 自定义 CA / 基址主机名单透传，
 // 与连接检测 Test 同一套构建入口，不另起第二套防护）。
@@ -61,6 +68,7 @@ func (s *ForgeClientSource) ForgejoClient(_ context.Context, integrationID strin
 		CACertPEM:           row.CACertPEM,
 		AllowPrivateNetwork: row.AllowPrivateNetwork,
 		AuthPathPrefix:      apiPathPrefix(apiBase),
+		Timeout:             forgeReviewClientTimeout,
 	})
 	if err != nil {
 		s.logger.Error("构建 Forgejo 集成 client 失败", zap.String("integration", integrationID), zap.Error(err))

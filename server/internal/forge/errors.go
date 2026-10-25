@@ -16,6 +16,11 @@ import (
 // ErrForbidden 平台拒绝操作（如缺 statuses:write 权限）。
 var ErrForbidden = errors.New("forge: forbidden")
 
+// ErrDiffTooLarge 客户端侧判定 diff 超本端读入上限的确定性失败（适配器本地
+// 探测，平台并未拒绝——无 HTTP 状态码可言）。与平台的 too_large 响应归一到
+// 同一判定：service 只认 IsDiffTooLarge，不区分两种来源。
+var ErrDiffTooLarge = errors.New("forge: diff too large")
+
 // StatusError 非 2xx 响应。字段与 githubapi.StatusError 同构，便于判定函数
 // 在两种形态间按同一口径取值。
 type StatusError struct {
@@ -57,10 +62,14 @@ func IsNotFound(err error) bool {
 	return ok && code == http.StatusNotFound
 }
 
-// IsDiffTooLarge 判断 err 是否平台对「PR diff 超出上限」的确定性拒绝。语义
-// 与 githubapi.IsDiffTooLarge 完全一致（4xx 且 errors[] 里有 code=too_large）
-// ——借同构字段转成 githubapi.StatusError 复用其判定，两份口径不会漂移。
+// IsDiffTooLarge 判断 err 是否「PR diff 超出上限」的确定性拒绝。两种来源：
+// 平台 4xx+errors[code=too_large]（语义与 githubapi.IsDiffTooLarge 完全一致
+// ——借同构字段转成 githubapi.StatusError 复用其判定，两份口径不会漂移），
+// 或适配器本端截断探测的 ErrDiffTooLarge 哨兵。
 func IsDiffTooLarge(err error) bool {
+	if errors.Is(err, ErrDiffTooLarge) {
+		return true
+	}
 	var ge *githubapi.StatusError
 	if errors.As(err, &ge) {
 		return githubapi.IsDiffTooLarge(err)

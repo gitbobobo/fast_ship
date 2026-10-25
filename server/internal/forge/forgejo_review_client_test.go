@@ -3,6 +3,7 @@ package forge
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -458,5 +459,22 @@ func TestForgejoClient_InvalidRepoName(t *testing.T) {
 	}
 	if len(*logs) != 0 {
 		t.Fatal("非法仓库名不应发出请求")
+	}
+}
+
+// TestForgejoClient_GetPullRequestDiff_TooLarge 本端截断探测超上限返回
+// ErrDiffTooLarge 哨兵，IsDiffTooLarge 与平台 too_large 同口径命中——
+// service 侧进降级收尾，不再按可重试错误无限退避。
+func TestForgejoClient_GetPullRequestDiff_TooLarge(t *testing.T) {
+	client, _ := newForgejoTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = w.Write(make([]byte, respBodyMaxBytes+1))
+	})
+	_, err := client.GetPullRequestDiff(context.Background(), "o/r", 3)
+	if !IsDiffTooLarge(err) {
+		t.Fatalf("超限 diff 应命中 IsDiffTooLarge, got %v", err)
+	}
+	if !errors.Is(err, ErrDiffTooLarge) {
+		t.Fatalf("应保留 ErrDiffTooLarge 哨兵, got %v", err)
 	}
 }

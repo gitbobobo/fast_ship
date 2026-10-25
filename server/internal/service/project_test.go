@@ -1632,18 +1632,20 @@ func TestProjectRepoUpdate_CodeRepoSyncsReviewSettings(t *testing.T) {
 
 // createTestForgeIntegration 测试用 forgejo 集成行：base_url 原样落库
 // （生产保存时已归一，用例里直接写归一后的形态），host_key 与生产一致
-// 按 base_url 归一写入——绑定匹配按 host_key 点查。
+// 按 base_url 归一写入——绑定匹配按 host_key 点查。TokenEncrypted 置非空：
+// 生产 Create 恒有 PAT，且审查前置条件按「PAT 已配置」判凭证就绪。
 func createTestForgeIntegration(t *testing.T, db *gorm.DB, baseURL string) *model.ForgeIntegration {
 	t.Helper()
 	row := &model.ForgeIntegration{
-		ID:         uuid.NewString(),
-		Kind:       model.ForgeIntegrationKindForgejo,
-		Name:       "forge-" + baseURL,
-		BaseURL:    baseURL,
-		APIBaseURL: baseURL + "/api/v1",
-		HostKey:    forges.HostKey(baseURL),
-		CreatedAt:  time.Now().UTC(),
-		UpdatedAt:  time.Now().UTC(),
+		ID:             uuid.NewString(),
+		Kind:           model.ForgeIntegrationKindForgejo,
+		Name:           "forge-" + baseURL,
+		BaseURL:        baseURL,
+		APIBaseURL:     baseURL + "/api/v1",
+		HostKey:        forges.HostKey(baseURL),
+		TokenEncrypted: []byte("test-token"),
+		CreatedAt:      time.Now().UTC(),
+		UpdatedAt:      time.Now().UTC(),
 	}
 	if err := db.Create(row).Error; err != nil {
 		t.Fatalf("create forge integration: %v", err)

@@ -497,8 +497,49 @@ func TestGetSettings_ForgejoBinding_SkipsGitHubChecks(t *testing.T) {
 			t.Fatalf("%s = %+v，want 缺项且点明 Forgejo 不支持", code, p)
 		}
 	}
-	if byCode[api.PublicUrl].Missing || byCode[api.GithubToken].Missing {
-		t.Fatalf("其余前置条件不应缺项: %+v", byCode)
+	if byCode[api.PublicUrl].Missing {
+		t.Fatalf("public_url 前置条件不应缺项: %+v", byCode)
+	}
+	// Forgejo 项目的凭证前置看集成 PAT：绑定的 "forge-any" 行不存在 →
+	// GithubToken 项按「集成 PAT 未配置」缺项——项目上的 GitHub Token
+	// 绑定对 Forgejo 仓无效，不计入。
+	if !byCode[api.GithubToken].Missing {
+		t.Fatalf("Forgejo 项目凭证前置应看集成 PAT: %+v", byCode[api.GithubToken])
+	}
+}
+
+// TestGetSettings_ForgejoBinding_PATConfigured 凭证前置正向：绑定行存在且
+// PAT 已配置时 GithubToken 项就绪——项目侧 GitHub Token 为空也不缺项。
+func TestGetSettings_ForgejoBinding_PATConfigured(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "forgejo-u2")
+	integration := createTestForgeIntegration(t, svc.db, "https://forge.example.com")
+	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.CodeIntegrationID = integration.ID
+	})
+
+	fake := githubapp.NewFake()
+	rs := newReviewTestService(t, svc,
+		githubapp.StaticClients{Client: fake},
+		fakeReviewAppSource{ok: true},
+		fakeReviewPublicURL("https://fs.example.com"))
+	rs.forgeIntegrations = &stubForgeIntegrationLookup{rows: map[string]*model.ForgeIntegration{
+		integration.ID: integration,
+	}}
+
+	got, err := rs.GetSettings(context.Background(), user.ID, project.ID)
+	if err != nil {
+		t.Fatalf("GetSettings: %v", err)
+	}
+	byCode := map[api.ReviewPrerequisiteCode]api.ReviewPrerequisite{}
+	for _, p := range got.Prerequisites {
+		byCode[p.Code] = p
+	}
+	if p := byCode[api.GithubToken]; p.Missing {
+		t.Fatalf("集成 PAT 已配置时凭证前置不应缺项: %+v", p)
+	}
+	if p := byCode[api.GithubApp]; p.Missing {
+		t.Fatalf("集成行存在且 kind=forgejo 时集成前置不应缺项: %+v", p)
 	}
 }
 

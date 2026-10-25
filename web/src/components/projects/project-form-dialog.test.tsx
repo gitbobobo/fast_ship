@@ -461,6 +461,22 @@ describe("ProjectFormDialog", () => {
     expect(updateMutateAsync).not.toHaveBeenCalled();
   });
 
+  it("集成列表加载中：forge 绑定未改动不显示停用提示（不误报仓库变更）", async () => {
+    mockIntegrationOptions({ data: undefined, isLoading: true });
+    renderDialog(
+      "edit",
+      makeProject({
+        code_integration_id: "forge-1",
+        code_repo_url: "https://forge.example.com/acme/api",
+        code_github_owner: "acme",
+        code_github_repo: "api",
+      }),
+    );
+
+    await screen.findByLabelText(/owner \/ repo/);
+    expect(screen.queryByText(repoChangeWarning)).not.toBeInTheDocument();
+  });
+
   it("集成列表加载中：forge 绑定改动 owner/repo 时就地报错且不提交", async () => {
     mockIntegrationOptions({ data: undefined, isLoading: true });
     const user = userEvent.setup();
