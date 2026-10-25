@@ -11,6 +11,27 @@ import (
 	openapi_types "github.com/oapi-codegen/runtime/types"
 )
 
+// Defines values for BotUsageOverviewRange.
+const (
+	BotUsageOverviewRangeN30d  BotUsageOverviewRange = "30d"
+	BotUsageOverviewRangeN7d   BotUsageOverviewRange = "7d"
+	BotUsageOverviewRangeToday BotUsageOverviewRange = "today"
+)
+
+// Valid indicates whether the value is a known member of the BotUsageOverviewRange enum.
+func (e BotUsageOverviewRange) Valid() bool {
+	switch e {
+	case BotUsageOverviewRangeN30d:
+		return true
+	case BotUsageOverviewRangeN7d:
+		return true
+	case BotUsageOverviewRangeToday:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for CreateT3ThreadRequestRuntimeMode.
 const (
 	ApprovalRequired CreateT3ThreadRequestRuntimeMode = "approval-required"
@@ -1172,6 +1193,27 @@ func (e SelfLogOrder) Valid() bool {
 	}
 }
 
+// Defines values for GetBotUsageParamsRange.
+const (
+	GetBotUsageParamsRangeN30d  GetBotUsageParamsRange = "30d"
+	GetBotUsageParamsRangeN7d   GetBotUsageParamsRange = "7d"
+	GetBotUsageParamsRangeToday GetBotUsageParamsRange = "today"
+)
+
+// Valid indicates whether the value is a known member of the GetBotUsageParamsRange enum.
+func (e GetBotUsageParamsRange) Valid() bool {
+	switch e {
+	case GetBotUsageParamsRangeN30d:
+		return true
+	case GetBotUsageParamsRangeN7d:
+		return true
+	case GetBotUsageParamsRangeToday:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for ListIssuesParamsWorkflowStatus.
 const (
 	ListIssuesParamsWorkflowStatusDone       ListIssuesParamsWorkflowStatus = "done"
@@ -1789,15 +1831,18 @@ type BotRun struct {
 	CostEstimate *float64 `json:"cost_estimate,omitempty"`
 
 	// CostSource 计价来源（catalog）；cost_estimate 为 null 时同 null
-	CostSource      *string `json:"cost_source,omitempty"`
-	CreatedAt       string  `json:"created_at"`
-	ErrorCode       *string `json:"error_code,omitempty"`
-	ErrorMessage    *string `json:"error_message,omitempty"`
-	FinishedAt      *string `json:"finished_at,omitempty"`
-	Id              string  `json:"id"`
-	InputThroughSeq int64   `json:"input_through_seq"`
-	PromptTokens    *int64  `json:"prompt_tokens,omitempty"`
-	StartedAt       *string `json:"started_at,omitempty"`
+	CostSource *string `json:"cost_source,omitempty"`
+	CreatedAt  string  `json:"created_at"`
+
+	// DisplayCostEstimate 显示口径成本（INT-162）：本 run 已计价成本 + 关联维护运行已计价成本；两者都为 null 时为 null。cost_estimate 列本身口径不变
+	DisplayCostEstimate *float64 `json:"display_cost_estimate"`
+	ErrorCode           *string  `json:"error_code,omitempty"`
+	ErrorMessage        *string  `json:"error_message,omitempty"`
+	FinishedAt          *string  `json:"finished_at,omitempty"`
+	Id                  string   `json:"id"`
+	InputThroughSeq     int64    `json:"input_through_seq"`
+	PromptTokens        *int64   `json:"prompt_tokens,omitempty"`
+	StartedAt           *string  `json:"started_at,omitempty"`
 
 	// Status queued / running / completed / failed / stopped
 	Status        string `json:"status"`
@@ -1820,13 +1865,16 @@ type BotScheduleRun struct {
 	CostEstimate *float64 `json:"cost_estimate,omitempty"`
 
 	// CostSource 计价来源（catalog）
-	CostSource   *string `json:"cost_source,omitempty"`
-	DurationMs   *int64  `json:"duration_ms"`
-	ErrorCode    *string `json:"error_code,omitempty"`
-	ErrorMessage *string `json:"error_message,omitempty"`
-	FinishedAt   *string `json:"finished_at"`
-	Id           string  `json:"id"`
-	PromptTokens *int64  `json:"prompt_tokens,omitempty"`
+	CostSource *string `json:"cost_source,omitempty"`
+
+	// DisplayCostEstimate 显示口径成本（INT-162）：本 run 已计价成本 + 关联维护运行已计价成本；两者都为 null 时为 null
+	DisplayCostEstimate *float64 `json:"display_cost_estimate"`
+	DurationMs          *int64   `json:"duration_ms"`
+	ErrorCode           *string  `json:"error_code,omitempty"`
+	ErrorMessage        *string  `json:"error_message,omitempty"`
+	FinishedAt          *string  `json:"finished_at"`
+	Id                  string   `json:"id"`
+	PromptTokens        *int64   `json:"prompt_tokens,omitempty"`
 
 	// ScheduledFor 本 run 对应的计划时间（UTC）
 	ScheduledFor *string `json:"scheduled_for"`
@@ -1849,8 +1897,11 @@ type BotScheduleRun struct {
 
 // BotScheduleTask defines model for BotScheduleTask.
 type BotScheduleTask struct {
-	BotId     string `json:"bot_id"`
-	CreatedAt string `json:"created_at"`
+	BotId string `json:"bot_id"`
+
+	// CostLast7d 近 7 天该任务已计价成本合计（schedule run 自身+关联维护 + 连带主线成本，INT-162）；无已计价记录为 null
+	CostLast7d *float64 `json:"cost_last_7d"`
+	CreatedAt  string   `json:"created_at"`
 
 	// CronExpression 标准五字段 cron（分 时 日 月 周）
 	CronExpression string `json:"cron_expression"`
@@ -1947,6 +1998,260 @@ type BotToolCall struct {
 	Status    string `json:"status"`
 	ToolName  string `json:"tool_name"`
 	Truncated bool   `json:"truncated"`
+}
+
+// BotUsageBot defines model for BotUsageBot.
+type BotUsageBot struct {
+	// AvgRunCost 单次运行平均显示成本（自身+关联维护）；只统计有已计价成本的 run
+	AvgRunCost *float64 `json:"avg_run_cost"`
+	BotId      string   `json:"bot_id"`
+
+	// CacheHitRate cached / prompt，只算 usage 完整的请求；无完整 usage 为 null
+	CacheHitRate *float64 `json:"cache_hit_rate"`
+
+	// Cost 已计价合计 = cost_main + cost_schedule + cost_maintenance
+	Cost *float64 `json:"cost"`
+
+	// CostMain 主线桶：非 schedule_event 触发的 main run（自身成本+关联维护）
+	CostMain *float64 `json:"cost_main"`
+
+	// CostMaintenance 无父 run 的维护请求合计（如夜间整理）
+	CostMaintenance *float64 `json:"cost_maintenance"`
+
+	// CostSchedule 定时任务桶：schedule run（自身+关联维护）+ schedule_event 连带主线成本
+	CostSchedule *float64 `json:"cost_schedule"`
+
+	// CostScheduleLinkedApprox cost_schedule 中连带主线成本部分（近似，UI 标注）
+	CostScheduleLinkedApprox *float64 `json:"cost_schedule_linked_approx"`
+	MaxRunCost               *float64 `json:"max_run_cost"`
+	Name                     string   `json:"name"`
+
+	// Runs 窗口内 run 数（main + schedule）
+	Runs             int64 `json:"runs"`
+	UnpricedRequests int64 `json:"unpriced_requests"`
+}
+
+// BotUsageDay defines model for BotUsageDay.
+type BotUsageDay struct {
+	// Bots 当日有模型请求（含未计价）的机器人
+	Bots []BotUsageDay_Bots `json:"bots"`
+
+	// Cost 当日已计价成本合计；全未计价或无记录为 0
+	Cost float64 `json:"cost"`
+
+	// Date 生效时区的当地日期 YYYY-MM-DD；窗口内每天一行（含无数据日）
+	Date string `json:"date"`
+}
+
+// BotUsageDay_Bots defines model for BotUsageDay.Bots.
+type BotUsageDay_Bots struct {
+	BotId string  `json:"bot_id"`
+	Cost  float64 `json:"cost"`
+}
+
+// BotUsageMaintenanceRequest defines model for BotUsageMaintenanceRequest.
+type BotUsageMaintenanceRequest struct {
+	CachedTokens     *int64   `json:"cached_tokens,omitempty"`
+	CompletionTokens *int64   `json:"completion_tokens,omitempty"`
+	CostEstimate     *float64 `json:"cost_estimate"`
+	CostSource       *string  `json:"cost_source"`
+	ErrorCode        *string  `json:"error_code,omitempty"`
+	ErrorMessage     *string  `json:"error_message,omitempty"`
+	FinishedAt       *string  `json:"finished_at,omitempty"`
+	Id               string   `json:"id"`
+	Model            string   `json:"model"`
+	Ordinal          int64    `json:"ordinal"`
+	PromptTokens     *int64   `json:"prompt_tokens,omitempty"`
+
+	// Purpose summary / archive / nightly
+	Purpose   string `json:"purpose"`
+	StartedAt string `json:"started_at"`
+
+	// Status running / succeeded / failed
+	Status        string `json:"status"`
+	TotalTokens   *int64 `json:"total_tokens,omitempty"`
+	UsageComplete bool   `json:"usage_complete"`
+}
+
+// BotUsageMaintenanceRun defines model for BotUsageMaintenanceRun.
+type BotUsageMaintenanceRun struct {
+	// CostEstimate 本维护运行已计价请求合计
+	CostEstimate *float64 `json:"cost_estimate"`
+	CreatedAt    string   `json:"created_at"`
+	FinishedAt   *string  `json:"finished_at,omitempty"`
+	Id           string   `json:"id"`
+
+	// Kind compaction / nightly
+	Kind      string                       `json:"kind"`
+	Requests  []BotUsageMaintenanceRequest `json:"requests"`
+	StartedAt *string                      `json:"started_at,omitempty"`
+
+	// Status running / succeeded / failed
+	Status string `json:"status"`
+}
+
+// BotUsageOverview defines model for BotUsageOverview.
+type BotUsageOverview struct {
+	Bots []BotUsageBot `json:"bots"`
+	Days []BotUsageDay `json:"days"`
+
+	// End 统计窗口终点 UTC（不含，即查询时刻）
+	End           string                 `json:"end"`
+	Range         BotUsageOverviewRange  `json:"range"`
+	ScheduleTasks []BotUsageScheduleTask `json:"schedule_tasks"`
+
+	// Start 统计窗口起点 UTC（含）
+	Start string `json:"start"`
+
+	// Timezone 实际生效的切日时区（IANA）
+	Timezone string         `json:"timezone"`
+	Totals   BotUsageTotals `json:"totals"`
+}
+
+// BotUsageOverviewRange defines model for BotUsageOverview.Range.
+type BotUsageOverviewRange string
+
+// BotUsageRequest defines model for BotUsageRequest.
+type BotUsageRequest struct {
+	CachedTokens        *int64   `json:"cached_tokens,omitempty"`
+	CompletionTokens    *int64   `json:"completion_tokens,omitempty"`
+	CostEstimate        *float64 `json:"cost_estimate"`
+	CostSource          *string  `json:"cost_source"`
+	ErrorCode           *string  `json:"error_code,omitempty"`
+	ErrorMessage        *string  `json:"error_message,omitempty"`
+	FinishedAt          *string  `json:"finished_at,omitempty"`
+	FirstDeltaAt        *string  `json:"first_delta_at,omitempty"`
+	Id                  string   `json:"id"`
+	InputEstimator      string   `json:"input_estimator"`
+	InputThroughSeq     int64    `json:"input_through_seq"`
+	InputTokensEstimate int64    `json:"input_tokens_estimate"`
+
+	// IsRetry 与同 run 更早请求 request_hash 相同即视为重试（每次重试单独一行）
+	IsRetry      bool   `json:"is_retry"`
+	Ordinal      int64  `json:"ordinal"`
+	PromptTokens *int64 `json:"prompt_tokens,omitempty"`
+	StartedAt    string `json:"started_at"`
+
+	// Status running / succeeded / failed
+	Status              string             `json:"status"`
+	ToolCalls           []BotUsageToolCall `json:"tool_calls"`
+	ToolsTokensEstimate int64              `json:"tools_tokens_estimate"`
+	TotalTokens         *int64             `json:"total_tokens,omitempty"`
+	UsageComplete       bool               `json:"usage_complete"`
+}
+
+// BotUsageRun defines model for BotUsageRun.
+type BotUsageRun struct {
+	BotId            string   `json:"bot_id"`
+	BotName          string   `json:"bot_name"`
+	CachedTokens     *int64   `json:"cached_tokens,omitempty"`
+	CompletionTokens *int64   `json:"completion_tokens,omitempty"`
+	CostEstimate     *float64 `json:"cost_estimate"`
+	CostSource       *string  `json:"cost_source"`
+	CreatedAt        string   `json:"created_at"`
+
+	// DisplayCost cost_estimate + maintenance_cost；都为 null 时为 null
+	DisplayCost  *float64 `json:"display_cost"`
+	ErrorCode    *string  `json:"error_code,omitempty"`
+	ErrorMessage *string  `json:"error_message,omitempty"`
+	FinishedAt   *string  `json:"finished_at,omitempty"`
+	Id           string   `json:"id"`
+
+	// MaintenanceCost 关联维护运行已计价成本合计
+	MaintenanceCost *float64 `json:"maintenance_cost"`
+	PromptTokens    *int64   `json:"prompt_tokens,omitempty"`
+	ScheduleTaskId  *string  `json:"schedule_task_id,omitempty"`
+
+	// ScheduleTaskName 现存任务名；任务已删除或无关联时为 null
+	ScheduleTaskName *string `json:"schedule_task_name,omitempty"`
+	ScheduledFor     *string `json:"scheduled_for,omitempty"`
+
+	// SessionKind main / schedule
+	SessionKind   string  `json:"session_kind"`
+	Silent        bool    `json:"silent"`
+	StartedAt     *string `json:"started_at,omitempty"`
+	Status        string  `json:"status"`
+	Summary       string  `json:"summary"`
+	TotalTokens   *int64  `json:"total_tokens,omitempty"`
+	TriggerKey    string  `json:"trigger_key"`
+	TriggerSource string  `json:"trigger_source"`
+	UsageComplete bool    `json:"usage_complete"`
+}
+
+// BotUsageRunDetail defines model for BotUsageRunDetail.
+type BotUsageRunDetail struct {
+	// MaintenanceRuns parent_run_id 指向本 run 的维护运行及其请求
+	MaintenanceRuns []BotUsageMaintenanceRun `json:"maintenance_runs"`
+
+	// Requests run 的每次模型请求（含失败重试），按 ordinal 正序；超过上限时截断
+	Requests []BotUsageRequest `json:"requests"`
+
+	// RequestsTruncated 请求数超过上限（500）被截断时为 true
+	RequestsTruncated bool        `json:"requests_truncated"`
+	Run               BotUsageRun `json:"run"`
+}
+
+// BotUsageScheduleTask defines model for BotUsageScheduleTask.
+type BotUsageScheduleTask struct {
+	AvgRunCost *float64 `json:"avg_run_cost"`
+	BotId      string   `json:"bot_id"`
+	BotName    string   `json:"bot_name"`
+
+	// Cost schedule run 自身+关联维护已计价合计（不含连带主线）
+	Cost *float64 `json:"cost"`
+
+	// CronExpression 已删除任务为空串
+	CronExpression string `json:"cron_expression"`
+	Deleted        bool   `json:"deleted"`
+
+	// Enabled 已删除任务恒 false
+	Enabled bool `json:"enabled"`
+
+	// EstimatedMonthlyCost （单次定时运行平均 + 每次触发摊到的连带主线成本）× 未来 30 天触发次数（parseScheduleCron）；单次统计取最近 30 个当地日的固定窗口，与所选 range 无关；停用、已删除、无已计价平均或 cron 解析失败为 null
+	EstimatedMonthlyCost *float64 `json:"estimated_monthly_cost"`
+	Failed               int64    `json:"failed"`
+
+	// LinkedMainCost schedule_event 主线 run 的连带成本（近似）
+	LinkedMainCost *float64 `json:"linked_main_cost"`
+	MaxRunCost     *float64 `json:"max_run_cost"`
+
+	// Name 现存任务名；已删除任务为空串（UI 显示「已删除的任务」）
+	Name    string `json:"name"`
+	Runs    int64  `json:"runs"`
+	Skipped int64  `json:"skipped"`
+
+	// TaskId 聚合键；已删除任务仍取其运行记录上的 schedule_task_id
+	TaskId string `json:"task_id"`
+
+	// Timezone 任务 IANA 时区；空串 = UTC
+	Timezone string `json:"timezone"`
+}
+
+// BotUsageToolCall defines model for BotUsageToolCall.
+type BotUsageToolCall struct {
+	Action     string  `json:"action"`
+	CreatedAt  string  `json:"created_at"`
+	ErrorCode  *string `json:"error_code,omitempty"`
+	FinishedAt *string `json:"finished_at,omitempty"`
+	Id         string  `json:"id"`
+	Status     string  `json:"status"`
+	ToolName   string  `json:"tool_name"`
+}
+
+// BotUsageTotals defines model for BotUsageTotals.
+type BotUsageTotals struct {
+	// Cost 窗口内已计价成本合计（USD）；无任何已计价请求为 null（缺失 ≠ 0）
+	Cost *float64 `json:"cost"`
+
+	// DailyAverage cost / 窗口天数；cost 为 null 时同 null
+	DailyAverage   *float64 `json:"daily_average"`
+	PricedRequests int64    `json:"priced_requests"`
+
+	// TotalRequests 模型请求总数（主线/定时 + 维护）
+	TotalRequests int64 `json:"total_requests"`
+
+	// UnpricedRequests 未计价请求数（自定义提供商、目录无价、缺 usage、v0.1.63 前旧记录）
+	UnpricedRequests int64 `json:"unpriced_requests"`
 }
 
 // BotWritePolicyRule 分级放行 tier1 规则的独立开关与误判状态（INT-160）。分档与前置条件由服务端按「动作+参数+目标线程内存状态」计算，本端点只暴露开关
@@ -5583,6 +5888,38 @@ type TestBotConnection200JSONResponseBody struct {
 	// Code 业务错误码；0 表示成功
 	Code int                 `json:"code"`
 	Data *BotConnectionCheck `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// GetBotUsageParams defines parameters for GetBotUsage.
+type GetBotUsageParams struct {
+	// Range 统计窗口；today = 生效时区的当天
+	Range *GetBotUsageParamsRange `form:"range,omitempty" json:"range,omitempty"`
+
+	// BotId 限定单个机器人（须属于当前用户）；缺省为全部机器人总览
+	BotId *string `form:"bot_id,omitempty" json:"bot_id,omitempty"`
+}
+
+// GetBotUsageParamsRange defines parameters for GetBotUsage.
+type GetBotUsageParamsRange string
+
+// GetBotUsage200JSONResponseBody defines parameters for GetBotUsage.
+type GetBotUsage200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int               `json:"code"`
+	Data *BotUsageOverview `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// GetBotUsageRun200JSONResponseBody defines parameters for GetBotUsageRun.
+type GetBotUsageRun200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                `json:"code"`
+	Data *BotUsageRunDetail `json:"data,omitempty"`
 
 	// Message 人类可读信息；成功时为 "success"
 	Message string `json:"message"`

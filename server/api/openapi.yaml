@@ -7952,6 +7952,94 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /api/bots/usage:
+    get:
+      tags: [bots]
+      operationId: getBotUsage
+      summary: 花费总览（按天 / 按机器人 / 按定时任务，INT-162）
+      description: |
+        只用现有账本（bot_runs / bot_model_requests / bot_maintenance_*）实时
+        聚合，不新增表、不回填。窗口按 users.timezone 切日，空值回退部署配置
+        bots.memory.timezone，再回退 UTC。金额一律来自内置 models.dev 目录单价
+        估算：目录无价、自定义提供商、缺 usage 的请求为「未计价」——已计价
+        字段缺省为 null（缺失 ≠ 0），未计价请求计入 unpriced_requests。
+        归属：session_kind='schedule' 的 run 按 schedule_task_id 归定时任务；
+        触发来源 schedule_event 的主线 run 经 trigger_key 反查任务，计入该
+        任务 linked_main_cost（近似，一次主线 run 可能同时处理多条输入），
+        解析不出时计入主线；维护请求经 parent_run_id 计入所属 run 的显示
+        成本，无父 run 的计入机器人维护项。仅返回当前用户自己的机器人数据。
+      security:
+        - jwtAuth: []
+      parameters:
+        - name: range
+          in: query
+          schema:
+            type: string
+            enum: [today, 7d, 30d]
+            default: 7d
+          description: 统计窗口；today = 生效时区的当天
+        - name: bot_id
+          in: query
+          schema:
+            type: string
+          description: 限定单个机器人（须属于当前用户）；缺省为全部机器人总览
+      responses:
+        '200':
+          description: 花费总览
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/BotUsageOverview'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/bots/usage/runs/{runId}:
+    get:
+      tags: [bots]
+      operationId: getBotUsageRun
+      summary: 单次运行花费明细（INT-162）
+      description: |
+        单次 run 的完整账单：每次模型请求（含失败重试）及其工具调用、关联的
+        压缩/维护运行与请求。display_cost = 自身已计价成本 + 关联维护已计价
+        成本；不改写 run 的 cost_estimate 列。
+      security:
+        - jwtAuth: []
+      parameters:
+        - name: runId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 运行花费明细
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/BotUsageRunDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /api/bots/{id}:
     get:
       tags: [bots]
@@ -14197,7 +14285,7 @@ components:
 
     BotRun:
       type: object
-      required: [id, bot_id, trigger_source, trigger_key, status, config_snapshot, input_through_seq, stop_requested, usage_complete, created_at]
+      required: [id, bot_id, trigger_source, trigger_key, status, config_snapshot, input_through_seq, stop_requested, usage_complete, created_at, display_cost_estimate]
       properties:
         id:
           type: string
@@ -14247,6 +14335,11 @@ components:
           type: string
           nullable: true
           description: 计价来源（catalog）；cost_estimate 为 null 时同 null
+        display_cost_estimate:
+          type: number
+          format: double
+          nullable: true
+          description: 显示口径成本（INT-162）：本 run 已计价成本 + 关联维护运行已计价成本；两者都为 null 时为 null。cost_estimate 列本身口径不变
         error_code:
           type: string
           nullable: true
@@ -14267,7 +14360,7 @@ components:
 
     BotScheduleTask:
       type: object
-      required: [id, bot_id, name, cron_expression, timezone, instruction, model, needs_report, enabled, next_run_at, state, state_updated_at, created_at, updated_at, last_run]
+      required: [id, bot_id, name, cron_expression, timezone, instruction, model, needs_report, enabled, next_run_at, state, state_updated_at, cost_last_7d, created_at, updated_at, last_run]
       properties:
         id:
           type: string
@@ -14306,6 +14399,11 @@ components:
           format: date-time
           nullable: true
           description: 状态最近一次写入时间（UTC）；无状态为 null
+        cost_last_7d:
+          type: number
+          format: double
+          nullable: true
+          description: 近 7 天该任务已计价成本合计（schedule run 自身+关联维护 + 连带主线成本，INT-162）；无已计价记录为 null
         created_at:
           type: string
           format: date-time
@@ -14320,7 +14418,7 @@ components:
 
     BotScheduleRun:
       type: object
-      required: [id, task_id, status, summary, silent, trigger_source, scheduled_for, started_at, finished_at, duration_ms]
+      required: [id, task_id, status, summary, silent, trigger_source, scheduled_for, started_at, finished_at, duration_ms, display_cost_estimate]
       properties:
         id:
           type: string
@@ -14376,6 +14474,499 @@ components:
         cost_source:
           type: string
           description: 计价来源（catalog）
+        display_cost_estimate:
+          type: number
+          format: double
+          nullable: true
+          description: 显示口径成本（INT-162）：本 run 已计价成本 + 关联维护运行已计价成本；两者都为 null 时为 null
+
+    BotUsageTotals:
+      type: object
+      required: [cost, daily_average, total_requests, priced_requests, unpriced_requests]
+      properties:
+        cost:
+          type: number
+          format: double
+          nullable: true
+          description: 窗口内已计价成本合计（USD）；无任何已计价请求为 null（缺失 ≠ 0）
+        daily_average:
+          type: number
+          format: double
+          nullable: true
+          description: cost / 窗口天数；cost 为 null 时同 null
+        total_requests:
+          type: integer
+          format: int64
+          description: 模型请求总数（主线/定时 + 维护）
+        priced_requests:
+          type: integer
+          format: int64
+        unpriced_requests:
+          type: integer
+          format: int64
+          description: 未计价请求数（自定义提供商、目录无价、缺 usage、v0.1.63 前旧记录）
+
+    BotUsageDay:
+      type: object
+      required: [date, cost, bots]
+      properties:
+        date:
+          type: string
+          description: 生效时区的当地日期 YYYY-MM-DD；窗口内每天一行（含无数据日）
+        cost:
+          type: number
+          format: double
+          description: 当日已计价成本合计；全未计价或无记录为 0
+        bots:
+          type: array
+          description: 当日有模型请求（含未计价）的机器人
+          items:
+            type: object
+            required: [bot_id, cost]
+            properties:
+              bot_id:
+                type: string
+              cost:
+                type: number
+                format: double
+
+    BotUsageBot:
+      type: object
+      required: [bot_id, name, cost, cost_main, cost_schedule, cost_schedule_linked_approx, cost_maintenance, runs, avg_run_cost, max_run_cost, cache_hit_rate, unpriced_requests]
+      properties:
+        bot_id:
+          type: string
+        name:
+          type: string
+        cost:
+          type: number
+          format: double
+          nullable: true
+          description: 已计价合计 = cost_main + cost_schedule + cost_maintenance
+        cost_main:
+          type: number
+          format: double
+          nullable: true
+          description: 主线桶：非 schedule_event 触发的 main run（自身成本+关联维护）
+        cost_schedule:
+          type: number
+          format: double
+          nullable: true
+          description: 定时任务桶：schedule run（自身+关联维护）+ schedule_event 连带主线成本
+        cost_schedule_linked_approx:
+          type: number
+          format: double
+          nullable: true
+          description: cost_schedule 中连带主线成本部分（近似，UI 标注）
+        cost_maintenance:
+          type: number
+          format: double
+          nullable: true
+          description: 无父 run 的维护请求合计（如夜间整理）
+        runs:
+          type: integer
+          format: int64
+          description: 窗口内 run 数（main + schedule）
+        avg_run_cost:
+          type: number
+          format: double
+          nullable: true
+          description: 单次运行平均显示成本（自身+关联维护）；只统计有已计价成本的 run
+        max_run_cost:
+          type: number
+          format: double
+          nullable: true
+        cache_hit_rate:
+          type: number
+          format: double
+          nullable: true
+          description: cached / prompt，只算 usage 完整的请求；无完整 usage 为 null
+        unpriced_requests:
+          type: integer
+          format: int64
+
+    BotUsageScheduleTask:
+      type: object
+      required: [task_id, bot_id, bot_name, name, deleted, enabled, cron_expression, timezone, runs, failed, skipped, cost, avg_run_cost, max_run_cost, linked_main_cost, estimated_monthly_cost]
+      properties:
+        task_id:
+          type: string
+          description: 聚合键；已删除任务仍取其运行记录上的 schedule_task_id
+        bot_id:
+          type: string
+        bot_name:
+          type: string
+        name:
+          type: string
+          description: 现存任务名；已删除任务为空串（UI 显示「已删除的任务」）
+        deleted:
+          type: boolean
+        enabled:
+          type: boolean
+          description: 已删除任务恒 false
+        cron_expression:
+          type: string
+          description: 已删除任务为空串
+        timezone:
+          type: string
+          description: 任务 IANA 时区；空串 = UTC
+        runs:
+          type: integer
+          format: int64
+        failed:
+          type: integer
+          format: int64
+        skipped:
+          type: integer
+          format: int64
+        cost:
+          type: number
+          format: double
+          nullable: true
+          description: schedule run 自身+关联维护已计价合计（不含连带主线）
+        avg_run_cost:
+          type: number
+          format: double
+          nullable: true
+        max_run_cost:
+          type: number
+          format: double
+          nullable: true
+        linked_main_cost:
+          type: number
+          format: double
+          nullable: true
+          description: schedule_event 主线 run 的连带成本（近似）
+        estimated_monthly_cost:
+          type: number
+          format: double
+          nullable: true
+          description: （单次定时运行平均 + 每次触发摊到的连带主线成本）× 未来 30 天触发次数（parseScheduleCron）；单次统计取最近 30 个当地日的固定窗口，与所选 range 无关；停用、已删除、无已计价平均或 cron 解析失败为 null
+
+    BotUsageOverview:
+      type: object
+      required: [range, timezone, start, end, totals, days, bots, schedule_tasks]
+      properties:
+        range:
+          type: string
+          enum: [today, 7d, 30d]
+        timezone:
+          type: string
+          description: 实际生效的切日时区（IANA）
+        start:
+          type: string
+          format: date-time
+          description: 统计窗口起点 UTC（含）
+        end:
+          type: string
+          format: date-time
+          description: 统计窗口终点 UTC（不含，即查询时刻）
+        totals:
+          $ref: '#/components/schemas/BotUsageTotals'
+        days:
+          type: array
+          items:
+            $ref: '#/components/schemas/BotUsageDay'
+        bots:
+          type: array
+          items:
+            $ref: '#/components/schemas/BotUsageBot'
+        schedule_tasks:
+          type: array
+          items:
+            $ref: '#/components/schemas/BotUsageScheduleTask'
+
+    BotUsageRun:
+      type: object
+      required: [id, bot_id, bot_name, session_kind, trigger_source, trigger_key, status, summary, silent, usage_complete, created_at, cost_estimate, cost_source, maintenance_cost, display_cost]
+      properties:
+        id:
+          type: string
+        bot_id:
+          type: string
+        bot_name:
+          type: string
+        session_kind:
+          type: string
+          description: main / schedule
+        schedule_task_id:
+          type: string
+          nullable: true
+        schedule_task_name:
+          type: string
+          nullable: true
+          description: 现存任务名；任务已删除或无关联时为 null
+        trigger_source:
+          type: string
+        trigger_key:
+          type: string
+        status:
+          type: string
+        summary:
+          type: string
+        silent:
+          type: boolean
+        scheduled_for:
+          type: string
+          format: date-time
+          nullable: true
+        prompt_tokens:
+          type: integer
+          format: int64
+          nullable: true
+        completion_tokens:
+          type: integer
+          format: int64
+          nullable: true
+        total_tokens:
+          type: integer
+          format: int64
+          nullable: true
+        cached_tokens:
+          type: integer
+          format: int64
+          nullable: true
+        usage_complete:
+          type: boolean
+        cost_estimate:
+          type: number
+          format: double
+          nullable: true
+        cost_source:
+          type: string
+          nullable: true
+        maintenance_cost:
+          type: number
+          format: double
+          nullable: true
+          description: 关联维护运行已计价成本合计
+        display_cost:
+          type: number
+          format: double
+          nullable: true
+          description: cost_estimate + maintenance_cost；都为 null 时为 null
+        error_code:
+          type: string
+          nullable: true
+        error_message:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+        finished_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    BotUsageToolCall:
+      type: object
+      required: [id, tool_name, action, status, created_at]
+      properties:
+        id:
+          type: string
+        tool_name:
+          type: string
+        action:
+          type: string
+        status:
+          type: string
+        error_code:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        finished_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    BotUsageRequest:
+      type: object
+      required: [id, ordinal, status, is_retry, input_through_seq, input_tokens_estimate, input_estimator, tools_tokens_estimate, usage_complete, started_at, tool_calls, cost_estimate, cost_source]
+      properties:
+        id:
+          type: string
+        ordinal:
+          type: integer
+          format: int64
+        status:
+          type: string
+          description: running / succeeded / failed
+        is_retry:
+          type: boolean
+          description: 与同 run 更早请求 request_hash 相同即视为重试（每次重试单独一行）
+        input_through_seq:
+          type: integer
+          format: int64
+        input_tokens_estimate:
+          type: integer
+          format: int64
+        input_estimator:
+          type: string
+        prompt_tokens:
+          type: integer
+          format: int64
+          nullable: true
+        cached_tokens:
+          type: integer
+          format: int64
+          nullable: true
+        completion_tokens:
+          type: integer
+          format: int64
+          nullable: true
+        total_tokens:
+          type: integer
+          format: int64
+          nullable: true
+        tools_tokens_estimate:
+          type: integer
+          format: int64
+        usage_complete:
+          type: boolean
+        cost_estimate:
+          type: number
+          format: double
+          nullable: true
+        cost_source:
+          type: string
+          nullable: true
+        started_at:
+          type: string
+          format: date-time
+        first_delta_at:
+          type: string
+          format: date-time
+          nullable: true
+        finished_at:
+          type: string
+          format: date-time
+          nullable: true
+        error_code:
+          type: string
+          nullable: true
+        error_message:
+          type: string
+          nullable: true
+        tool_calls:
+          type: array
+          items:
+            $ref: '#/components/schemas/BotUsageToolCall'
+
+    BotUsageMaintenanceRequest:
+      type: object
+      required: [id, ordinal, purpose, model, status, usage_complete, started_at, cost_estimate, cost_source]
+      properties:
+        id:
+          type: string
+        ordinal:
+          type: integer
+          format: int64
+        purpose:
+          type: string
+          description: summary / archive / nightly
+        model:
+          type: string
+        status:
+          type: string
+          description: running / succeeded / failed
+        usage_complete:
+          type: boolean
+        prompt_tokens:
+          type: integer
+          format: int64
+          nullable: true
+        cached_tokens:
+          type: integer
+          format: int64
+          nullable: true
+        completion_tokens:
+          type: integer
+          format: int64
+          nullable: true
+        total_tokens:
+          type: integer
+          format: int64
+          nullable: true
+        cost_estimate:
+          type: number
+          format: double
+          nullable: true
+        cost_source:
+          type: string
+          nullable: true
+        error_code:
+          type: string
+          nullable: true
+        error_message:
+          type: string
+          nullable: true
+        started_at:
+          type: string
+          format: date-time
+        finished_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    BotUsageMaintenanceRun:
+      type: object
+      required: [id, kind, status, created_at, requests, cost_estimate]
+      properties:
+        id:
+          type: string
+        kind:
+          type: string
+          description: compaction / nightly
+        status:
+          type: string
+          description: running / succeeded / failed
+        created_at:
+          type: string
+          format: date-time
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+        finished_at:
+          type: string
+          format: date-time
+          nullable: true
+        cost_estimate:
+          type: number
+          format: double
+          nullable: true
+          description: 本维护运行已计价请求合计
+        requests:
+          type: array
+          items:
+            $ref: '#/components/schemas/BotUsageMaintenanceRequest'
+
+    BotUsageRunDetail:
+      type: object
+      required: [run, requests, requests_truncated, maintenance_runs]
+      properties:
+        run:
+          $ref: '#/components/schemas/BotUsageRun'
+        requests:
+          type: array
+          description: run 的每次模型请求（含失败重试），按 ordinal 正序；超过上限时截断
+          items:
+            $ref: '#/components/schemas/BotUsageRequest'
+        requests_truncated:
+          type: boolean
+          description: 请求数超过上限（500）被截断时为 true
+        maintenance_runs:
+          type: array
+          description: parent_run_id 指向本 run 的维护运行及其请求
+          items:
+            $ref: '#/components/schemas/BotUsageMaintenanceRun'
 
     BotToolCall:
       type: object

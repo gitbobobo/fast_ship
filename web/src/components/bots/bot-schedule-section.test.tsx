@@ -69,6 +69,7 @@ const enabledTask: BotScheduleTask = {
   state_updated_at: "2026-10-17T01:02:10Z",
   created_at: "2026-10-15T00:00:00Z",
   updated_at: "2026-10-15T00:00:00Z",
+  cost_last_7d: null,
   last_run: {
     id: "r1",
     task_id: "t1",
@@ -80,6 +81,7 @@ const enabledTask: BotScheduleTask = {
     started_at: "2026-10-17T01:00:02Z",
     finished_at: "2026-10-17T01:02:10Z",
     duration_ms: 128_000,
+    display_cost_estimate: null,
   },
 };
 
@@ -193,7 +195,8 @@ describe("BotScheduleSection", () => {
     expect(rows[0]).toHaveTextContent(
       `下次运行 ${formatDate("2026-10-18T01:00:00Z")}`,
     );
-    expect(rows[0]).toHaveTextContent("已完成 · 已汇总 3 条变化");
+    expect(rows[0]).toHaveTextContent("已完成");
+    expect(rows[0]).toHaveTextContent("已汇总 3 条变化");
     expect(
       within(rows[0]).getByRole("switch", { name: "停用 每日汇总" }),
     ).toHaveAttribute("aria-checked", "true");
@@ -250,6 +253,28 @@ describe("BotScheduleSection", () => {
     expect(run).toHaveTextContent(formatDate("2026-10-17T01:00:02Z"));
     expect(run).toHaveTextContent("2 分 8 秒");
     expect(run).toHaveTextContent("模型限流");
+    // 未计价的运行同样有明细链接（F9），金额位显示「—」。
+    const link = within(run).getByRole("link");
+    expect(link).toHaveAttribute("href", "/bots/usage/runs/r9");
+    expect(link).toHaveTextContent("—");
+  });
+
+  it("运行行金额链接：已计价显示 ≈ 金额，未计价显示「—」，都可点进明细", async () => {
+    mockRuns([
+      { ...completedRun, display_cost_estimate: 0.3 },
+      { ...completedRun, id: "r-unpriced", display_cost_estimate: null },
+    ]);
+    renderDialog();
+    const dialog = await screen.findByRole("dialog");
+    const rows = within(dialog).getAllByTestId("bot-schedule-run");
+
+    const priced = within(rows[0]).getByRole("link");
+    expect(priced).toHaveAttribute("href", "/bots/usage/runs/r-done");
+    expect(priced).toHaveTextContent("≈$0.3");
+
+    const unpriced = within(rows[1]).getByRole("link");
+    expect(unpriced).toHaveAttribute("href", "/bots/usage/runs/r-unpriced");
+    expect(unpriced).toHaveTextContent("—");
   });
 
   it("开关只切换 enabled", async () => {
@@ -447,6 +472,7 @@ describe("BotScheduleSection", () => {
     started_at: "2026-10-18T01:00:02Z",
     finished_at: null,
     duration_ms: null,
+    display_cost_estimate: null,
   };
   const completedRun: BotScheduleRun = {
     ...runningRun,

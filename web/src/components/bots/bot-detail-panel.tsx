@@ -1,11 +1,18 @@
 import { KeyRound, Pencil, Trash2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import {
+  Tabs,
+  TabsContent,
+  TabsList,
+  TabsTrigger,
+} from "@/components/ui/tabs";
 import type { Bot } from "@/lib/api/bots";
 import { formatDate } from "@/lib/utils/format";
 import { BotAvatar } from "./bot-avatar";
 import { CONTEXT_SOURCE_LABELS } from "./bot-metrics";
 import { BotScheduleSection } from "./bot-schedule-section";
+import { BotUsageOverviewPanel } from "./bot-usage-overview";
 
 /**
  * 定时任务区的共享状态：桌面 aside 与移动 Sheet 各挂一份面板，
@@ -18,10 +25,10 @@ export interface BotDetailPanelSchedule {
 }
 
 /**
- * 工作台右栏：机器人详情（纯展示）。头部是身份与「编辑」「授权管理」
- * 入口，内容区为定时任务（只读 + 启停）与配置摘要，底部是删除入口。
- * 编辑/授权/删除的弹窗与 mutation 都在工作台持有一份；onHide 在两个
- * 场景分别对应「隐藏右栏」与「关闭 Sheet」，由宿主传入。
+ * 工作台右栏：机器人详情。「详情」标签是身份、「编辑」「授权管理」入口、
+ * 定时任务（只读 + 启停）与配置摘要；「花费」标签（INT-162）嵌入同一个
+ * 花费总览组件、只看本机器人。编辑/授权/删除的弹窗与 mutation 都在工作台
+ * 持有一份；onHide 在两个场景分别对应「隐藏右栏」与「关闭 Sheet」。
  */
 export function BotDetailPanel({
   bot,
@@ -65,79 +72,112 @@ export function BotDetailPanel({
 
   return (
     <div data-testid="bot-detail-panel" className="flex h-full min-h-0 flex-col">
-      <div className="min-h-0 flex-1 overflow-y-auto">
-        <div className="flex flex-col gap-5 px-4 py-4">
-          <div className="flex items-start gap-3">
-            <BotAvatar name={bot.name} size="lg" />
-            <div className="min-w-0 flex-1 pt-1">
-              <p className="truncate text-base font-semibold">{bot.name}</p>
-              <p className="truncate text-xs text-muted-foreground">
-                {bot.model}
-              </p>
-            </div>
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              aria-label="隐藏详情"
-              onClick={onHide}
-            >
-              <X className="h-4 w-4" />
-            </Button>
-          </div>
-
-          <div className="flex gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              className="flex-1"
-              onClick={onEdit}
-            >
-              <Pencil className="mr-1.5 h-3.5 w-3.5" />
-              编辑
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              className="flex-1"
-              onClick={onAuthorize}
-            >
-              <KeyRound className="mr-1.5 h-3.5 w-3.5" />
-              授权管理
-            </Button>
-          </div>
-
-          <BotScheduleSection botId={bot.id} {...schedule} />
-
-          <section className="space-y-2">
-            <h3 className="text-xs font-medium text-muted-foreground">配置</h3>
-            <dl className="space-y-1.5">
-              {configRows.map((row) => (
-                <div
-                  key={row.label}
-                  className="flex items-baseline justify-between gap-3 text-sm"
-                >
-                  <dt className="shrink-0 text-muted-foreground">{row.label}</dt>
-                  <dd className="truncate" title={row.title ?? row.value}>
-                    {row.value}
-                  </dd>
-                </div>
-              ))}
-            </dl>
-          </section>
+      {/* keepMounted：切标签不卸载两侧——详情滚动位置与花费页的范围选择都保留。 */}
+      <Tabs
+        defaultValue="detail"
+        className="flex min-h-0 flex-1 flex-col gap-0"
+      >
+        <div className="flex items-center justify-between gap-2 px-4 pt-3">
+          <TabsList aria-label="详情面板">
+            <TabsTrigger value="detail">详情</TabsTrigger>
+            <TabsTrigger value="usage">花费</TabsTrigger>
+          </TabsList>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            aria-label="隐藏详情"
+            onClick={onHide}
+          >
+            <X className="h-4 w-4" />
+          </Button>
         </div>
-      </div>
 
-      <div className="shrink-0 border-t px-4 py-3">
-        <Button
-          variant="destructive"
-          size="sm"
-          className="w-full"
-          onClick={onDelete}
+        <TabsContent
+          value="detail"
+          keepMounted
+          className="flex min-h-0 flex-1 flex-col"
         >
-          <Trash2 className="mr-1.5 h-3.5 w-3.5" />
-          删除机器人
-        </Button>
-      </div>
+          <div className="min-h-0 flex-1 overflow-y-auto">
+            <div className="flex flex-col gap-5 px-4 py-4">
+              <div className="flex items-start gap-3">
+                <BotAvatar name={bot.name} size="lg" />
+                <div className="min-w-0 flex-1 pt-1">
+                  <p className="truncate text-base font-semibold">{bot.name}</p>
+                  <p className="truncate text-xs text-muted-foreground">
+                    {bot.model}
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="flex-1"
+                  onClick={onEdit}
+                >
+                  <Pencil className="mr-1.5 h-3.5 w-3.5" />
+                  编辑
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="flex-1"
+                  onClick={onAuthorize}
+                >
+                  <KeyRound className="mr-1.5 h-3.5 w-3.5" />
+                  授权管理
+                </Button>
+              </div>
+
+              <BotScheduleSection botId={bot.id} {...schedule} />
+
+              <section className="space-y-2">
+                <h3 className="text-xs font-medium text-muted-foreground">
+                  配置
+                </h3>
+                <dl className="space-y-1.5">
+                  {configRows.map((row) => (
+                    <div
+                      key={row.label}
+                      className="flex items-baseline justify-between gap-3 text-sm"
+                    >
+                      <dt className="shrink-0 text-muted-foreground">
+                        {row.label}
+                      </dt>
+                      <dd className="truncate" title={row.title ?? row.value}>
+                        {row.value}
+                      </dd>
+                    </div>
+                  ))}
+                </dl>
+              </section>
+            </div>
+          </div>
+
+          <div className="shrink-0 border-t px-4 py-3">
+            <Button
+              variant="destructive"
+              size="sm"
+              className="w-full"
+              onClick={onDelete}
+            >
+              <Trash2 className="mr-1.5 h-3.5 w-3.5" />
+              删除机器人
+            </Button>
+          </div>
+        </TabsContent>
+
+        <TabsContent
+          value="usage"
+          keepMounted
+          className="min-h-0 flex-1 overflow-y-auto"
+        >
+          <div className="px-4 py-4">
+            <BotUsageOverviewPanel botId={bot.id} embedded />
+          </div>
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }

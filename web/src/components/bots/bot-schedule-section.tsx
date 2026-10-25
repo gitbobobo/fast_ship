@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Link } from "react-router";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { CalendarClock, ChevronRight, Loader2, Trash2 } from "lucide-react";
 import { toast } from "sonner";
@@ -55,13 +56,19 @@ function triggerText(run: BotScheduleRun) {
   return run.trigger_source === "manual" ? "手动触发" : "定时触发";
 }
 
-/** 最近一次结果的一行摘要：状态 + 摘要或错误；从未运行如实标注。 */
-function lastRunText(run: BotScheduleRun | null) {
+/** 最近一次结果的状态标签：从未运行如实标注。 */
+function lastRunLabel(run: BotScheduleRun | null) {
   if (!run) return "尚未运行";
-  const label = botScheduleRunStatusLabel(run.status);
-  const detail =
-    run.status === "failed" ? run.error_message || run.summary : run.summary;
-  return detail ? `${label} · ${detail}` : label;
+  return botScheduleRunStatusLabel(run.status);
+}
+
+/** 最近一次结果的摘要/错误明细：空白视为无，不产出悬空空段。 */
+function lastRunDetail(run: BotScheduleRun | null): string | null {
+  if (!run) return null;
+  return (
+    (run.status === "failed" ? run.error_message || run.summary : run.summary)
+      ?.trim() || null
+  );
 }
 
 function formatDuration(ms: number | null) {
@@ -230,9 +237,31 @@ export function BotScheduleSection({
                       下次运行{" "}
                       {task.next_run_at ? formatDate(task.next_run_at) : "—"}
                       {" · "}
-                      {lastRunText(task.last_run)}
+                      {lastRunLabel(task.last_run)}
                     </span>
+                    {/* 最近结果摘要单独成行：窄卡上与「下次运行」同行会被省略号
+                        截成「已完成 ·」悬空空分隔符的观感。 */}
+                    {lastRunDetail(task.last_run) && (
+                      <span
+                        className="block truncate text-xs text-muted-foreground"
+                        title={lastRunDetail(task.last_run) ?? undefined}
+                      >
+                        {lastRunDetail(task.last_run)}
+                      </span>
+                    )}
                   </button>
+                  {/* 近 7 天花费入口（INT-162）：可空是「未计价」显示「—」；
+                      跳总览页并定位到该任务行。不能放进上面的 button（交互嵌套）。 */}
+                  <Link
+                    to={`/bots/usage?task=${task.id}`}
+                    className="shrink-0 text-xs whitespace-nowrap text-muted-foreground hover:text-foreground hover:underline"
+                    title="该任务近 7 天花费；点击查看花费总览"
+                  >
+                    近 7 天{" "}
+                    {task.cost_last_7d != null
+                      ? formatCostEstimate(task.cost_last_7d)
+                      : "—"}
+                  </Link>
                   <EnabledSwitch
                     enabled={task.enabled}
                     pending={toggle.isPending}
@@ -442,17 +471,24 @@ export function BotScheduleTaskDialog({
                           <span className="text-xs text-muted-foreground">
                             {runTime(run)}
                           </span>
-                          {run.cost_estimate != null && (
-                            <span
-                              className="ml-auto text-xs text-muted-foreground"
-                              title="成本按内置目录单价估算，仅供参考；无价模型不显示"
-                            >
-                              ≈{formatCostEstimate(run.cost_estimate)}
-                            </span>
-                          )}
-                          <span
-                            className={`${run.cost_estimate == null ? "ml-auto " : ""}text-xs text-muted-foreground`}
+                          {/* INT-162：运行行始终可点进花费明细——未计价的运行
+                              同样有状态/错误/请求可看，金额位显示「—」
+                              （缺失 ≠ 0）；金额口径 display_cost_estimate
+                              含关联维护已计价。 */}
+                          <Link
+                            to={`/bots/usage/runs/${run.id}`}
+                            className="ml-auto text-xs text-muted-foreground hover:text-foreground hover:underline"
+                            title={
+                              run.display_cost_estimate != null
+                                ? "成本按内置目录单价估算（含关联维护），仅供参考；无价模型不显示"
+                                : "本运行未计价，点击查看花费明细"
+                            }
                           >
+                            {run.display_cost_estimate != null
+                              ? `≈${formatCostEstimate(run.display_cost_estimate)}`
+                              : "—"}
+                          </Link>
+                          <span className="text-xs text-muted-foreground">
                             {formatDuration(run.duration_ms)}
                           </span>
                           {run.status === "running" && (

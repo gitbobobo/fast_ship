@@ -1,3 +1,4 @@
+import { useRef } from "react";
 import {
   useMutation,
   useQuery,
@@ -7,6 +8,7 @@ import {
 import {
   botApi,
   type BotConnectionTestInput,
+  type BotUsageRange,
   type CreateBotInput,
   type UpdateBotInput,
 } from "@/lib/api/bots";
@@ -77,6 +79,20 @@ export const botKeys = {
     "schedule-task-runs",
     botId,
     taskId,
+  ],
+  /** 花费总览（INT-162）：botId 空串表示全部机器人。 */
+  usage: (userId: string | null, range: BotUsageRange, botId: string) => [
+    BOTS_ROOT,
+    userId,
+    "usage",
+    range,
+    botId,
+  ],
+  usageRun: (userId: string | null, runId: string) => [
+    BOTS_ROOT,
+    userId,
+    "usage-run",
+    runId,
   ],
 };
 
@@ -281,9 +297,85 @@ export function useSetBotScheduleTaskEnabled(botId: string) {
   return useMutation({
     mutationFn: ({ taskId, enabled }: { taskId: string; enabled: boolean }) =>
       botApi.setScheduleTaskEnabled(botId, taskId, enabled),
-    onSettled: () =>
-      queryClient.invalidateQueries({
+    onSettled: () => {
+      void queryClient.invalidateQueries({
         queryKey: botKeys.scheduleTasks(userId, botId),
-      }),
+      });
+      // 停用任务的推算月花费应为 null：keepMounted 的花费查询不会自重取，
+      // 按前缀失效让「花费」标签/总览页的估算随开关收敛。
+      void queryClient.invalidateQueries({
+        queryKey: [BOTS_ROOT, userId, "usage"],
+      });
+    },
+  });
+}
+
+/**
+ * 花费总览（INT-162）：botId 缺省为全部机器人总览。usage 数据没有推送源，
+ * 窗口聚焦补一次重取；机器人 run 到终态时聊天 hook 另按前缀失效。
+ */
+export function useBotUsage(range: BotUsageRange, botId?: string) {
+  const userId = useUserId();
+  return useQuery({
+    queryKey: botKeys.usage(userId, range, botId ?? ""),
+    queryFn: async ({ signal }) =>
+      (await botApi.usage({ range, botId }, signal)).data,
+    enabled: Boolean(userId),
+    refetchOnMount: "always",
+    refetchOnWindowFocus: true,
+  });
+}
+
+/** 未终态 run 的花费仍在累计：明细页按 5s 轮询，拿到终态后停。 */
+export const BOT_USAGE_RUN_POLL_MS = 5_000;
+
+/** 终态后的宽限期：关联维护可在父 run 结束后才产生/计价，宽限内继续轮询。 */
+export const BOT_USAGE_RUN_GRACE_MS = 90_000;
+
+const TERMINAL_USAGE_RUN_STATUSES: ReadonlySet<string> = new Set([
+  "completed",
+  "failed",
+  "stopped",
+  "skipped",
+]);
+
+/** 单次运行花费明细。 */
+export function useBotUsageRun(runId: string) {
+  const userId = useUserId();
+  // 宽限期以「客户端首次观察到终态」的本地时间起算：不拿服务端 finished_at
+  // 与本地钟直接相减——两端时钟不同源时，落后的客户端会把宽限期无限拉长。
+  const terminalObservedRef = useRef<{ runId: string; at: number } | null>(null);
+  return useQuery({
+    queryKey: botKeys.usageRun(userId, runId),
+    queryFn: async ({ signal }) => (await botApi.usageRun(runId, signal)).data,
+    enabled: Boolean(userId && runId),
+    refetchOnMount: "always",
+    refetchOnWindowFocus: true,
+    refetchInterval: (query) => {
+      const run = query.state.data?.run;
+      if (run == null) {
+        return false;
+      }
+      if (!TERMINAL_USAGE_RUN_STATUSES.has(run.status)) {
+        terminalObservedRef.current = null;
+        return BOT_USAGE_RUN_POLL_MS;
+      }
+      // 刚结束不久的 run 继续轮询一段宽限期：迟到的关联维护入账会让
+      // display_cost 继续增长，此刻停轮询数字就偏低且不自愈。宽限起点用
+      // 客户端首次观察到终态的本地时刻（两端时钟不同源，不能拿本地钟直接
+      // 减 finished_at）；但 finished_at 已过宽限的老 run 不重开轮询。
+      const finishedAt = run.finished_at ? Date.parse(run.finished_at) : NaN;
+      if (Number.isFinite(finishedAt) && Date.now() - finishedAt >= BOT_USAGE_RUN_GRACE_MS) {
+        terminalObservedRef.current = null;
+        return false;
+      }
+      if (terminalObservedRef.current?.runId !== run.id) {
+        terminalObservedRef.current = { runId: run.id, at: Date.now() };
+      }
+      if (Date.now() - terminalObservedRef.current.at < BOT_USAGE_RUN_GRACE_MS) {
+        return BOT_USAGE_RUN_POLL_MS;
+      }
+      return false;
+    },
   });
 }

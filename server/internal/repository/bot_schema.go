@@ -67,6 +67,9 @@ END`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_bot_runs_bot_trigger ON bot_runs(bot_id, trigger_key)`,
 	`CREATE INDEX IF NOT EXISTS idx_bot_runs_bot_created ON bot_runs(bot_id, created_at DESC, id)`,
 	`CREATE INDEX IF NOT EXISTS idx_bot_runs_schedule_task ON bot_runs(schedule_task_id, created_at DESC)`,
+	// INT-162 花费页：按（机器人 × 会话 × 时间窗）实时聚合主线/定时成本，
+	// 全部只读扫描走这一条复合索引。
+	`CREATE INDEX IF NOT EXISTS idx_bot_runs_bot_kind_created ON bot_runs(bot_id, session_kind, created_at)`,
 
 	// bot_model_requests：run 内请求序号唯一。
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_bot_model_requests_run_ordinal ON bot_model_requests(run_id, ordinal)`,
@@ -154,6 +157,10 @@ END`,
 	// bot_maintenance_runs：触发幂等 + 扫描索引。
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_bot_maintenance_runs_bot_kind_trigger ON bot_maintenance_runs(bot_id, kind, trigger_key)`,
 	`CREATE INDEX IF NOT EXISTS idx_bot_maintenance_runs_scan ON bot_maintenance_runs(kind, status, created_at)`,
+	// INT-162 花费页：无父 run 的维护成本按机器人按天聚合走这一条索引。
+	`CREATE INDEX IF NOT EXISTS idx_bot_maintenance_runs_bot_created ON bot_maintenance_runs(bot_id, created_at)`,
+	// INT-162 花费页：有父 run 的维护成本按 parent_run_id 反查归属 run 走这一条。
+	`CREATE INDEX IF NOT EXISTS idx_bot_maintenance_runs_parent ON bot_maintenance_runs(parent_run_id)`,
 	// bot_maintenance_requests：运行内请求序号唯一。
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_bot_maintenance_requests_run_ordinal ON bot_maintenance_requests(maintenance_run_id, ordinal)`,
 

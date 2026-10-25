@@ -107,6 +107,7 @@ function MetricRing({
  * 浅灰中性色，靠明暗而非色相区分）+ 右侧速度数值。口径都是快照里「最近一次主线模型请求」；任何一项
  * 缺失渲染「—」或不画弧，绝不把缺失当成 0。usage 未收齐时 token 计数
  * 不可用；上下文占比是服务端估算值（≠精确 token 数）。
+ * 单次成本不再在这里展示（INT-162）：花费统一去花费页/运行明细看。
  */
 export function BotMetrics({ metrics }: { metrics?: BotMetricsData | null }) {
   const request = metrics?.request ?? null;
@@ -157,15 +158,6 @@ export function BotMetrics({ metrics }: { metrics?: BotMetricsData | null }) {
       ? `缓存命中率 ${cachePct}% = cached_tokens / prompt_tokens · 最近一次模型请求`
       : "暂无缓存命中率：最近一次请求的 usage 不可用";
 
-  // 成本只在目录有价且请求报了 usage 时才有值；无价模型/自定义 provider
-  // 为 null，整项隐藏（缺失 ≠ 0）。
-  const cost =
-    request?.cost_estimate != null ? formatCostEstimate(request.cost_estimate) : null;
-  const costTitle =
-    cost != null
-      ? `本次请求成本估算 ≈$${request?.cost_estimate}（按内置目录单价：输入 × 单价 + 缓存读取 × 缓存价 + 输出 × 输出价；仅供参考）`
-      : null;
-
   return (
     <div
       data-testid="bot-metrics"
@@ -200,13 +192,6 @@ export function BotMetrics({ metrics }: { metrics?: BotMetricsData | null }) {
       {speed != null && (
         <span data-testid="bot-metric-speed" title={speedTitle}>
           <span className="font-mono">{speed}</span>
-        </span>
-      )}
-      {cost != null && (
-        <span data-testid="bot-metric-cost" title={costTitle ?? undefined}>
-          <span className="font-mono">
-            本次 {cost.startsWith("<") ? cost : `≈${cost}`}
-          </span>
         </span>
       )}
     </div>

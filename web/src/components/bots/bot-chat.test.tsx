@@ -146,3 +146,61 @@ describe("BotChat 停止按钮（INT-137 强制停止）", () => {
     expect(screen.getByRole("button", { name: "请求停止" })).toBeDisabled();
   });
 });
+
+describe("BotChat 运行栏（INT-162）：终态后仍展示本轮成本", () => {
+  const finishedRun: BotRun = {
+    ...runningRun,
+    status: "completed",
+    usage_complete: true,
+    total_tokens: 456,
+    display_cost_estimate: 0.0123,
+    finished_at: "2026-10-15T00:05:00Z",
+  };
+
+  it("终态 run：徽标落终态文案，「本轮 ≈$x」可点进明细，无停止按钮", () => {
+    chat.value = chatState({
+      activeRun: finishedRun,
+      runActive: false,
+    });
+    renderWithRoute(<BotChat botId="b1" />);
+
+    const bar = screen.getByTestId("bot-run-bar");
+    expect(within(bar).getByTestId("bot-run-status")).toHaveTextContent(
+      "已完成",
+    );
+    const link = within(bar).getByRole("link");
+    expect(link).toHaveAttribute("href", "/bots/usage/runs/r1");
+    expect(link).toHaveTextContent("456 tokens");
+    expect(link).toHaveTextContent("本轮 ≈$0.0123");
+    expect(
+      within(bar).queryByRole("button", { name: /停止/ }),
+    ).not.toBeInTheDocument();
+    // 终态不再显示「在安全点交给机器人」提示与打字动画。
+    expect(bar).not.toHaveTextContent("安全点");
+    expect(screen.queryByTestId("bot-typing-indicator")).toBeNull();
+  });
+
+  it("终态未计价 run：显示「本轮 —」，链接保留", () => {
+    chat.value = chatState({
+      activeRun: { ...finishedRun, status: "failed", display_cost_estimate: null },
+      runActive: false,
+    });
+    renderWithRoute(<BotChat botId="b1" />);
+
+    const bar = screen.getByTestId("bot-run-bar");
+    expect(within(bar).getByTestId("bot-run-status")).toHaveTextContent(
+      "已失败",
+    );
+    const link = within(bar).getByRole("link");
+    expect(link).toHaveAttribute("href", "/bots/usage/runs/r1");
+    expect(link).toHaveTextContent("本轮 —");
+    expect(
+      within(bar).queryByRole("button", { name: /停止/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("没有 run 时不渲染运行栏", () => {
+    renderWithRoute(<BotChat botId="b1" />);
+    expect(screen.queryByTestId("bot-run-bar")).toBeNull();
+  });
+});

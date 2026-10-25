@@ -743,13 +743,15 @@ func (s *BotService) SendMessage(userID, botID string, req *SendMessageRequest) 
 	}, nil
 }
 
-// currentRunResponse 读当前活动 run 概要；没有则为 nil。
+// currentRunResponse 读当前活动 run 概要；没有则为 nil。供写路径使用：
+// 展示成本聚合失败按 display_cost_estimate=null 降级并记日志，不把已
+// 提交的写入报成 500。
 func (s *BotService) currentRunResponse(botID string) *BotRunResponse {
 	run, err := s.runs.FindActiveByBot(botID)
 	if err != nil {
 		return nil
 	}
-	resp := botRunResponseOf(run)
+	resp := s.botRunResponseWithDisplayWrite(run, "send_message")
 	return &resp
 }
 

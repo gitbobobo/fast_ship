@@ -66,6 +66,10 @@ const ReviewProjectPage = lazy(() => import("@/routes/reviews/$projectId"));
 const NotificationsPage = lazy(() => import("@/routes/notifications/index"));
 const QuotaPage = lazy(() => import("@/routes/quota/index"));
 const BotsPage = lazy(() => import("@/routes/bots/index"));
+const BotUsagePage = lazy(() => import("@/routes/bots/usage/index"));
+const BotUsageRunPage = lazy(
+  () => import("@/routes/bots/usage/runs/$runId"),
+);
 const BotDetailPage = lazy(() => import("@/routes/bots/$botId"));
 const ThreadsLayout = lazy(() => import("@/routes/threads/layout"));
 const ThreadsPage = lazy(() => import("@/routes/threads/index"));
@@ -275,6 +279,15 @@ export default function App() {
                 element={<LazyPage render={<QuotaPage />} />}
               />
               <Route path="/bots" element={<LazyPage render={<BotsPage />} />} />
+              {/* 静态路由必须在 :botId 之前，避免 "usage" 被当成机器人 id。 */}
+              <Route
+                path="/bots/usage"
+                element={<LazyPage render={<BotUsagePage />} />}
+              />
+              <Route
+                path="/bots/usage/runs/:runId"
+                element={<LazyPage render={<BotUsageRunPage />} />}
+              />
               <Route
                 path="/bots/:botId"
                 element={<LazyPage render={<BotDetailPage />} />}

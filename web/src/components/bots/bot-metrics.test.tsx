@@ -208,17 +208,15 @@ describe("BotMetrics", () => {
     );
   });
 
-  it("cost_estimate 非空时显示「本次 ≈$x」成本（INT-139），为空时整项隐藏", () => {
+  it("cost_estimate 不再展示（INT-162）：花费统一去花费页/运行明细看", () => {
     render(
       <BotMetrics
         metrics={makeMetrics({ ...fullRequest, cost_estimate: 0.0002112 })}
       />,
     );
-    const cost = screen.getByTestId("bot-metric-cost");
-    // 「本次」标明口径为最近一次请求；毫厘以下写 <$0.001，精确值在 tooltip。
-    expect(cost).toHaveTextContent("本次 <$0.001");
-    expect(cost).toHaveAttribute("title", expect.stringContaining("0.0002112"));
-    expect(cost).toHaveAttribute("title", expect.stringContaining("目录单价"));
+    expect(screen.queryByTestId("bot-metric-cost")).toBeNull();
+    expect(screen.getByTestId("bot-metrics").textContent).not.toContain("$");
+    expect(screen.getByTestId("bot-metrics").textContent).not.toContain("本次");
   });
 
   it("成本分段：大额两位小数、毫厘两位有效数字、更小写 <$0.001", () => {
@@ -231,16 +229,6 @@ describe("BotMetrics", () => {
     // 分位段剥尾零：$0.5000 → $0.5（云端复审），非整段保留四位小数。
     expect(formatCostEstimate(0.5)).toBe("$0.5");
     expect(formatCostEstimate(0.0123)).toBe("$0.0123");
-  });
-
-  it("cost_estimate 为 null 时不渲染成本项（缺失 ≠ 0）", () => {
-    render(
-      <BotMetrics
-        metrics={makeMetrics({ ...fullRequest, cost_estimate: null })}
-      />,
-    );
-    expect(screen.queryByTestId("bot-metric-cost")).toBeNull();
-    expect(screen.getByTestId("bot-metrics").textContent).not.toContain("$");
   });
 
   it("有数据时 aria-label 汇总两项可读值", () => {

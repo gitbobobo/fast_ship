@@ -24,7 +24,7 @@ import {
 } from "@/lib/bot-stream";
 import { useAuthStore } from "@/lib/store/auth-store";
 import { uuid } from "@/lib/uuid";
-import { botKeys } from "./use-bots";
+import { BOTS_ROOT, botKeys } from "./use-bots";
 
 /** 主线历史每页条数；「加载更早」沿用同值判断是否还有更早消息。 */
 export const BOT_HISTORY_PAGE = 50;
@@ -41,13 +41,31 @@ export function isTerminalCall(call: Pick<BotCall, "status">) {
   return TERMINAL_CALL_STATUSES.includes(call.status);
 }
 
-/** 活动主线 run：数据库保证至多一个未完结 run；列表兜底取最新一条。 */
+/** run 未完结（可停）：queued/running 且尚未写 finished_at。 */
+export function isLiveRun(run: BotRun): boolean {
+  return !run.finished_at && (run.status === "queued" || run.status === "running");
+}
+
+/** 严格活跃 run：进度锚定等只认未完结 run 的场景用；数据库保证至多一个。 */
+function pickLiveRun(runs: BotRun[] | undefined): BotRun | null {
+  if (!runs?.length) return null;
+  const active = runs.filter(isLiveRun);
+  return active.length > 0 ? active[active.length - 1] : null;
+}
+
+/**
+ * 运行栏的 run：优先未完结的活跃 run；没有活跃 run 时取最新一条（按
+ * created_at）——run 到终态后运行栏继续展示「本轮」成本与明细链接，直到
+ * 新 run 开始或离开页面（INT-162）。
+ */
 export function pickActiveRun(runs: BotRun[] | undefined): BotRun | null {
   if (!runs?.length) return null;
-  const active = runs.filter(
-    (r) => !r.finished_at && (r.status === "queued" || r.status === "running"),
+  return (
+    pickLiveRun(runs) ??
+    runs.reduce((newest, run) =>
+      compareRunCreatedAt(run, newest) >= 0 ? run : newest,
+    )
   );
-  return active.length > 0 ? active[active.length - 1] : null;
 }
 
 /**
@@ -613,9 +631,10 @@ export function useBotChat(botId: string) {
         if (previous !== null || !progress) return previous;
         if (activeRunIdRef.current === null) {
           // 本地还没有更新的 run 事件：快照是权威。进度存在意味着服务端有活动
-          // run，即使快照的 runs 列表被截断也能用它锚定。
+          // run，即使快照的 runs 列表被截断也能用它锚定。只认未完结 run——
+          // pickActiveRun 会退回最新终态，不能拿来锚定活动进度。
           activeRunIdRef.current =
-            pickActiveRun(snapshot.runs)?.id ?? progress.run_id ?? null;
+            pickLiveRun(snapshot.runs)?.id ?? progress.run_id ?? null;
         } else if (progress.run_id && progress.run_id !== activeRunIdRef.current) {
           // 旧 run 期间的快照晚到：不得把旧阶段挂到当前 run。
           return previous;
@@ -749,6 +768,11 @@ export function useBotChat(botId: string) {
           void queryClient.invalidateQueries({
             queryKey: botKeys.scheduleTasks(userId, botId),
           });
+          // run 到终态才落定花费口径（INT-162）：usage 查询没有事件源，
+          // 按前缀失效，「花费」标签 keepMounted 的旧数随重取收敛。
+          void queryClient.invalidateQueries({
+            queryKey: [BOTS_ROOT, userId, "usage"],
+          });
         }
       },
       onStatus: (status, detail) => {
@@ -816,17 +840,21 @@ export function useBotChat(botId: string) {
     [botId, queryClient, sending, userId],
   );
 
+  // 运行栏的 run：最新一条（优先活跃），可能是终态——终态后栏仍展示
+  // 「本轮」成本；runActive 只报告它未完结（运行中状态/停止按钮的门槛）。
   const activeRun = useMemo(
     () => pickActiveRun(runsQuery.data ?? []),
     [runsQuery.data],
   );
+  const runActive = activeRun != null && isLiveRun(activeRun);
   // 内容区顶部的可操作错误条：最近一次失败 run 的 auth/quota 失败。
   const runError = useMemo(() => pickRunError(runsQuery.data), [runsQuery.data]);
 
   const stopRun = useCallback(async () => {
     // stopping 期间仍挡重复提交；已受理后再点（stopRequested=true）刻意
     // 放行——服务端对已有停止消息的同 client_message_id 请求会立即硬取消。
-    if (!activeRun || stopping || !userId) return;
+    // activeRun 可能是终态（终态后运行栏仍展示本轮成本）：只停未完结 run。
+    if (!activeRun || !runActive || stopping || !userId) return;
     setStopError(null);
     setStopping(true);
     try {
@@ -841,7 +869,7 @@ export function useBotChat(botId: string) {
     } finally {
       setStopping(false);
     }
-  }, [activeRun, botId, queryClient, stopping, userId]);
+  }, [activeRun, runActive, botId, queryClient, stopping, userId]);
 
   const decide = useCallback(
     async (callId: string, decision: BotCallDecision) => {
@@ -939,10 +967,13 @@ export function useBotChat(botId: string) {
     /** 运行栏的维护进度（压缩阶段/失败原因）；run 结束或新 run 开始时为 null。 */
     maintenanceProgress,
     calls: callsQuery.data ?? [],
+    /** 运行栏展示的 run（最新一条，优先活跃）；可能已到终态。 */
     activeRun,
-    runActive: Boolean(activeRun),
+    /** 运行栏的 run 未完结：运行中状态、停止按钮与打字动画的门槛。 */
+    runActive,
     stopRequested:
-      Boolean(activeRun?.stop_requested) || softStopRunId === activeRun?.id,
+      runActive &&
+      (Boolean(activeRun?.stop_requested) || softStopRunId === activeRun?.id),
     /** 可操作错误条（auth/quota 失败）；其它失败为 null，视图不渲染。 */
     runError,
     backgroundCalls,
