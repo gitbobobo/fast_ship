@@ -297,10 +297,20 @@ func (s *ReviewService) UpdateSettings(ctx context.Context, userID, projectID st
 			// 启用基线（INT-167 轮询）：false→true 翻转重新打点；已启用
 			// 期间改组合等无关保存沿用原基线，存量不重启判定窗口。改绑
 			// 集成/仓库先经 repository.Update 压回 disabled，重回启用也
-			// 走翻转分支。
+			// 走翻转分支。存量升级行（enabled 且无基线）首次保存回溯到
+			// 行创建时刻——created_at 不晚于实际启用时点，把「启用期间
+			// 漏网事件」留在受理窗口内，打 now 会把刚丢的 webhook 事件
+			// 误划成存量。
 			row.EnabledAt = existing.EnabledAt
-			if !existing.Enabled || row.EnabledAt == nil {
+			switch {
+			case !existing.Enabled:
 				row.EnabledAt = &now
+			case row.EnabledAt == nil:
+				if existing.CreatedAt.IsZero() {
+					row.EnabledAt = &now
+				} else {
+					row.EnabledAt = &existing.CreatedAt
+				}
 			}
 		}
 		if errors.Is(findErr, gorm.ErrRecordNotFound) {

@@ -79,7 +79,8 @@ type ProjectReviewSettings struct {
 	// EnabledAt 当前启用的打点（INT-167 轮询基线）：false→true 翻转时写入，
 	// 停用清空、再启用重新打点。Forgejo 轮询用它区分「启用后丢的 webhook
 	// 事件」与「启用前就存在的存量 open PR」——后者不该被首 tick 全部开轮
-	// （GitHub 侧只审开启后的新事件）。存量升级行为 NULL：按无基线受理。
+	// （GitHub 侧只审开启后的新事件）。存量升级行为 NULL：下一次 enabled
+	// 保存时回填 created_at（不晚于实际启用时点，宁可多收不漏）。
 	EnabledAt *time.Time `gorm:"column:enabled_at" json:"-"`
 
 	// CodeCombinationsJSON / VisualCombinationsJSON 是 ReviewCombination 数组。

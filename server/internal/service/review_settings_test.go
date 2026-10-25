@@ -389,6 +389,32 @@ func TestUpdateSettings_EnabledAtBaseline(t *testing.T) {
 	if got := readBaseline(); got == nil || got.Before(*first) {
 		t.Fatalf("再启用应重新打点: first=%v got=%v", first, got)
 	}
+
+	// 存量升级行（enabled 且 enabled_at NULL）首次保存回填 created_at：
+	// 打 now 会把「保存前刚丢的 webhook 事件」误划成存量。
+	legacy := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.GithubRepo = "legacy-repo"
+	})
+	createTestT3Binding(t, svc.db, legacy.ID, env.ID, "t3-legacy")
+	legacyCreated := time.Now().UTC().Add(-48 * time.Hour)
+	if err := svc.db.Create(&model.ProjectReviewSettings{
+		ProjectID: legacy.ID, UserID: user.ID,
+		RepoFullName:  strings.ToLower(legacy.CodeRepoFullName()),
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		Enabled:       true, CreatedAt: legacyCreated, UpdatedAt: legacyCreated,
+	}).Error; err != nil {
+		t.Fatalf("seed legacy: %v", err)
+	}
+	if _, err := rs.UpdateSettings(ctx, user.ID, legacy.ID, validSettingsInput(env.ID)); err != nil {
+		t.Fatalf("legacy resave: %v", err)
+	}
+	var row model.ProjectReviewSettings
+	if err := svc.db.Where("project_id = ?", legacy.ID).First(&row).Error; err != nil {
+		t.Fatalf("legacy row: %v", err)
+	}
+	if row.EnabledAt == nil || !row.EnabledAt.Equal(legacyCreated) {
+		t.Fatalf("存量行应回填 created_at: got %v want %v", row.EnabledAt, legacyCreated)
+	}
 }
 
 // 部署未配置 App 时 GetSettings 的 prerequisites 标出缺项，且不发起仓库调用。
