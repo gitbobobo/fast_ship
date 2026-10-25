@@ -213,8 +213,12 @@ function RunSummary({
     { label: "触发", value: labelOf(TRIGGER_LABELS, run.trigger_source) },
     {
       label: "成本拆分",
-      value: `自身 ${formatUsageCost(run.cost_estimate)} + 维护 ${formatUsageCost(run.maintenance_cost)}`,
-      title: `display_cost = 本 run 已计价成本 + 关联维护已计价成本；${USAGE_PRICE_NOTE}`,
+      value: `自身 ${formatUsageCost(
+        run.display_cost != null
+          ? run.display_cost - (run.maintenance_cost ?? 0)
+          : run.cost_estimate,
+      )} + 维护 ${formatUsageCost(run.maintenance_cost)}`,
+      title: `自身 = display_cost − 维护（与头部总价同一实收优先口径）；${USAGE_PRICE_NOTE}`,
     },
     { label: "Token", value: tokenText },
     {

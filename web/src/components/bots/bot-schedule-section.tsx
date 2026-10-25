@@ -480,7 +480,7 @@ export function BotScheduleTaskDialog({
                             className="ml-auto text-xs text-muted-foreground hover:text-foreground hover:underline"
                             title={
                               run.display_cost_estimate != null
-                                ? "成本按内置目录单价估算（含关联维护），仅供参考；无价模型不显示"
+                                ? "成本实收优先、缺失按目录估算（含关联维护），仅供参考；无价模型不显示"
                                 : "本运行未计价，点击查看花费明细"
                             }
                           >

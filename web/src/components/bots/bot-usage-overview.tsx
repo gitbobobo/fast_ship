@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router";
-import { TriangleAlert } from "lucide-react";
+import { Settings2, TriangleAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -46,7 +46,7 @@ export const USAGE_RANGE_OPTIONS: { value: BotUsageRange; label: string }[] = [
 
 /** 计价口径说明：整页只写一次，两个挂载点共用。 */
 export const USAGE_PRICE_NOTE =
-  "按内置目录单价估算，可能与实际账单不同（不含折扣、套餐、最低消费）";
+  "优先使用供应商返回的实收金额，缺失时按内置目录单价估算（不含折扣、套餐、最低消费）";
 
 /** 未计价常见原因：与契约 unpriced_requests 的口径注释一致。 */
 export const UNPRICED_REASON_NOTE =
@@ -424,13 +424,14 @@ function BotsUsageTable({
                   <TableCell className="text-right">
                     {!bot.deleted && (
                       <Button
-                        variant="ghost"
+                        variant="outline"
                         size="xs"
                         aria-label={`设置 ${bot.name} 的预算`}
                         onClick={() =>
-                          onBudget({ kind: "bot", botId: bot.bot_id })
+                          onBudget({ kind: "bot", botId: bot.bot_id, name: bot.name })
                         }
                       >
+                        <Settings2 className="h-3 w-3" />
                         预算
                       </Button>
                     )}
@@ -606,7 +607,7 @@ function TasksUsageTable({
                   <TableCell className="text-right">
                     {!task.deleted && !deletedBotIds.has(task.bot_id) && (
                       <Button
-                        variant="ghost"
+                        variant="outline"
                         size="xs"
                         aria-label={`设置 ${usageTaskName(task)} 的预算`}
                         onClick={() =>
@@ -614,9 +615,11 @@ function TasksUsageTable({
                             kind: "task",
                             botId: task.bot_id,
                             taskId: task.task_id,
+                            name: usageTaskName(task),
                           })
                         }
                       >
+                        <Settings2 className="h-3 w-3" />
                         预算
                       </Button>
                     )}

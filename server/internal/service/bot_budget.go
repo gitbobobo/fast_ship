@@ -154,8 +154,12 @@ func botBudgetThresholdReached(amountUSD, threshold, spendUSD float64) bool {
 	return math.Round(spendUSD*10000) >= math.Round(amountUSD*threshold*10000)
 }
 
-// botBudgetMoney 是文案里的美元金额（分位显示）。
+// botBudgetMoney 是文案里的美元金额：小于 $1 保留 4 位小数（与花费页
+// 的小额口径一致），更大金额按分位显示。
 func botBudgetMoney(v float64) string {
+	if math.Abs(v) < 1 {
+		return "$" + strconv.FormatFloat(v, 'f', 4, 64)
+	}
 	return "$" + strconv.FormatFloat(v, 'f', 2, 64)
 }
 
@@ -374,15 +378,22 @@ func (s *BotService) alertBudgetThreshold(alert botBudgetAlert) error {
 	amount := botBudgetMoney(b.AmountUSD)
 	label := botBudgetPeriodLabel(b.Period)
 
+	actualPct := alert.spendUSD / b.AmountUSD * 100
 	var title string
-	if b.ScheduleTaskID != nil {
-		title = fmt.Sprintf("定时任务「%s」每%s预算已达 %s", alert.taskName, label, pct)
+	if actualPct >= 100 {
+		if b.ScheduleTaskID != nil {
+			title = fmt.Sprintf("定时任务「%s」已超出每%s预算（阈值 %s，当前 %.0f%%）", alert.taskName, label, pct, actualPct)
+		} else {
+			title = fmt.Sprintf("机器人「%s」已超出每%s预算（阈值 %s，当前 %.0f%%）", alert.botName, label, pct, actualPct)
+		}
+	} else if b.ScheduleTaskID != nil {
+		title = fmt.Sprintf("定时任务「%s」每%s预算已达 %s（当前 %.0f%%）", alert.taskName, label, pct, actualPct)
 	} else {
-		title = fmt.Sprintf("机器人「%s」每%s预算已达 %s", alert.botName, label, pct)
+		title = fmt.Sprintf("机器人「%s」每%s预算已达 %s（当前 %.0f%%）", alert.botName, label, pct, actualPct)
 	}
-	body := fmt.Sprintf("周期 %s 已花费 %s，预算 %s，告警阈值 %s。"+
+	body := fmt.Sprintf("周期 %s 已花费 %s，预算 %s，当前占比 %.0f%%，告警阈值 %s。"+
 		"只统计已计价金额，未计价请求未计入；告警只作提示，不会停止运行。",
-		alert.periodKey, money, amount, pct)
+		alert.periodKey, money, amount, actualPct, pct)
 
 	scope := "bot"
 	taskID := ""

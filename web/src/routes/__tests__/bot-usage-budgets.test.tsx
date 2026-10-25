@@ -378,7 +378,7 @@ describe("花费总览的预算入口", () => {
     await user.click(
       await screen.findByRole("button", { name: "设置 发布助手 的预算" }),
     );
-    expect(await screen.findByText("预算设置")).toBeInTheDocument();
+    expect(await screen.findByText(/预算设置/)).toBeInTheDocument();
     await flushRequest("GET", "/api/bots/b1/budgets");
   });
 
@@ -395,7 +395,7 @@ describe("花费总览的预算入口", () => {
     await user.click(
       await screen.findByRole("button", { name: "设置 每日巡检 的预算" }),
     );
-    expect(await screen.findByText("预算设置")).toBeInTheDocument();
+    expect(await screen.findByText(/预算设置/)).toBeInTheDocument();
     await flushRequest("GET", "/api/bots/b1/schedule-tasks/t1/budgets");
   });
 });

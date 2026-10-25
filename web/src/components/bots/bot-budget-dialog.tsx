@@ -1,6 +1,7 @@
 import { useState } from "react";
-import { Loader2 } from "lucide-react";
+import { Loader2, TriangleAlert } from "lucide-react";
 import { toast } from "sonner";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -35,10 +36,10 @@ import { formatCostEstimate } from "./bot-metrics";
  * （USD，目录单价估算），未计价请求不计入。
  */
 
-/** 预算目标：机器人整体，或某个定时任务（花费只算任务口径）。 */
+/** 预算目标：机器人整体，或某个定时任务（花费只算任务口径）；name 仅用于标题展示。 */
 export type BotBudgetTarget =
-  | { kind: "bot"; botId: string }
-  | { kind: "task"; botId: string; taskId: string };
+  | { kind: "bot"; botId: string; name?: string }
+  | { kind: "task"; botId: string; taskId: string; name?: string };
 
 const PERIOD_OPTIONS: { period: BotBudgetPeriod; label: string }[] = [
   { period: "daily", label: "每日预算" },
@@ -164,11 +165,24 @@ function BudgetPeriodForm({
         <span className="text-xs text-muted-foreground">
           {budget ? `当前周期 ${budget.period_key}` : "未设置"}
         </span>
+        {budget && spendPct >= 100 && (
+          <Badge variant="destructive" className="gap-1">
+            <TriangleAlert className="h-3 w-3" />
+            已超出
+          </Badge>
+        )}
       </div>
 
       {budget && (
         <div className="space-y-1">
-          <p className="text-xs text-muted-foreground tabular-nums">
+          <p
+            className={cn(
+              "text-xs tabular-nums",
+              spendPct >= 100
+                ? "font-medium text-destructive"
+                : "text-muted-foreground",
+            )}
+          >
             已花费 {formatCostEstimate(budget.spend_usd)} /{" "}
             {formatCostEstimate(budget.amount_usd)}
             （{Math.round(spendPct)}%）
@@ -265,11 +279,13 @@ function BudgetsBody({
   onSave,
   onDelete,
   onClose,
+  name,
 }: {
   isLoading: boolean;
   isError: boolean;
   error: unknown;
   budgets: BotBudget[] | undefined;
+  name?: string;
   onRetry: () => void;
   pending: boolean;
   onSave: (
@@ -283,10 +299,12 @@ function BudgetsBody({
     <Dialog open onOpenChange={(next) => !next && onClose()}>
       <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>预算设置</DialogTitle>
+          <DialogTitle>
+            预算设置{name ? ` · ${name}` : ""}
+          </DialogTitle>
           <DialogDescription>
             预算只用于告警提醒，不会停止机器人运行；金额口径是已计价花费
-            （USD，按内置目录单价估算）。
+            （USD，实收优先，缺失时按目录估算）。
           </DialogDescription>
         </DialogHeader>
         {isError ? (
@@ -331,15 +349,18 @@ function BudgetsBody({
 function BotBudgetsDialogContent({
   botId,
   onClose,
+  name,
 }: {
   botId: string;
   onClose: () => void;
+  name?: string;
 }) {
   const budgetsQuery = useBotBudgets(botId);
   const setBudget = useSetBotBudget(botId);
   const removeBudget = useDeleteBotBudget(botId);
   return (
     <BudgetsBody
+      name={name}
       isLoading={budgetsQuery.isLoading}
       isError={budgetsQuery.isError}
       error={budgetsQuery.error}
@@ -357,16 +378,19 @@ function TaskBudgetsDialogContent({
   botId,
   taskId,
   onClose,
+  name,
 }: {
   botId: string;
   taskId: string;
   onClose: () => void;
+  name?: string;
 }) {
   const budgetsQuery = useTaskBudgets(botId, taskId);
   const setBudget = useSetTaskBudget(botId, taskId);
   const removeBudget = useDeleteTaskBudget(botId, taskId);
   return (
     <BudgetsBody
+      name={name}
       isLoading={budgetsQuery.isLoading}
       isError={budgetsQuery.isError}
       error={budgetsQuery.error}
@@ -397,12 +421,14 @@ export function BotBudgetDialog({
       botId={target.botId}
       taskId={target.taskId}
       onClose={onClose}
+      name={target.name}
     />
   ) : (
     <BotBudgetsDialogContent
       key={target.botId}
       botId={target.botId}
       onClose={onClose}
+      name={target.name}
     />
   );
 }
