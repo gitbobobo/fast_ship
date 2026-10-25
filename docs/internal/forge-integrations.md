@@ -241,7 +241,12 @@ Forgejo 仓库的 PR 审查与 GitHub 走同一条协调管线（webhook 事务�
   webhook 时 `ready_for_review`/`reopened` 无法还原真实动作，轮询把 draft
   转正/重开的 PR 归为 `opened`（受
   TriggerOpened 约束）——只勾 `ready_for_review` 不勾 `opened` 的项目此
-  场景漏补。单项目/单 PR 失败只记日志继续下一个，不中断整轮。启动不立即
+  场景漏补。单项目/单 PR 失败只记日志继续下一个，不中断整轮。**确定性
+  失败（仓库/PR 404、凭证 401/403、集成行缺失/kind 不符、PAT 密文解密
+  失败）自动停用该项目的审查设置**——每 tick 重试结果相同，继续 enabled
+  只会按固定节律刷错且审查静默停摆；停用后设置页可见，人工修复集成
+  后重新开启即可恢复（与改绑压回 disabled 同一先例）。瞬时错误（网络/
+  超时/5xx）照常 warn 重试。启动不立即
   跑首轮（进程刚起来时 webhook backlog 还在路上），第一个 tick 在 5 分钟后。
 - **GitHub 行为零变化**：`/api/github/webhooks` 端点、验签、`handleWebhookTx`
   对 `github-default` 的判定与写库路径全部原样（触发判定抽成
@@ -249,9 +254,10 @@ Forgejo 仓库的 PR 审查与 GitHub 走同一条协调管线（webhook 事务�
 - **私有媒体 bearer 重试是 GitHub 专属**：截图/附件匿名拉取失败后带安装
   令牌重试的路径显式限定 `github-default` 集成 + GitHub 媒体域
   （`review_assets.go` `downloadScreenshot`）——Forgejo 私有仓库附件暂以
-  「匿名可拉」为前提，匿名失败的私有附件报下载失败而不是把 PAT 当 Bearer
-  发出（凭证不得随 Bearer 出域到非集成主机；Forgejo 侧要不要补 PAT 媒体
-  重试是后续任务）。
+  「匿名可拉」为前提，匿名被拒（401/403/404）报独立 sentinel
+  「Forgejo 私有附件暂不支持带凭证下载，请改用公开图片链接」而不是笼统的
+  下载失败，也不是把 PAT 当 Bearer 发出（凭证不得随 Bearer 出域到非集成
+  主机；Forgejo 侧要不要补 PAT 媒体重试是后续任务）。
 
 ### 已核实的平台事实（适配器据此实现）
 

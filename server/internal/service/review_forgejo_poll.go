@@ -83,7 +83,7 @@ func (s *ReviewService) pollForgejoProject(settings *model.ProjectReviewSettings
 	defer cancel()
 	client, err := s.reviewClient(ctx, settings.IntegrationID, repo, 0)
 	if err != nil {
-		return err
+		return s.disableReviewOnDeterministic(settings, err)
 	}
 	lister, ok := client.(openPRLister)
 	if !ok {
@@ -93,7 +93,7 @@ func (s *ReviewService) pollForgejoProject(settings *model.ProjectReviewSettings
 	}
 	prs, err := lister.ListOpenPullRequests(ctx, repo)
 	if err != nil {
-		return err
+		return s.disableReviewOnDeterministic(settings, err)
 	}
 	for _, pr := range prs {
 		if pr.Draft || pr.HeadSHA == "" {
@@ -148,4 +148,29 @@ func (s *ReviewService) pollAcceptPR(ctx context.Context, settings *model.Projec
 		}
 		return s.handleReviewTriggerTx(tx, settings.IntegrationID, trigger, now)
 	})
+}
+
+// disableReviewOnDeterministic 轮询确定性失败时停用该项目审查：集成误删/
+// 密文损坏/凭证被拒后每 tick 都只会得到同一错误——继续 enabled 既无产出又
+// 按固定节律刷错，压回 disabled 让设置页可见、人工修复后可重新开启（与
+// repository.Update 改绑压回 disabled 同一先例）。瞬时错误原样透出照常
+// warn 重试。
+func (s *ReviewService) disableReviewOnDeterministic(settings *model.ProjectReviewSettings, err error) error {
+	if !deterministicReviewAccessErr(err) {
+		return err
+	}
+	res := s.db.Model(&model.ProjectReviewSettings{}).
+		Where("project_id = ? AND enabled", settings.ProjectID).
+		Updates(map[string]any{"enabled": false, "updated_at": time.Now().UTC()})
+	if res.Error != nil {
+		s.logger.Error("确定性失败后停用审查设置失败",
+			zap.String("project", settings.ProjectID), zap.Error(res.Error))
+		return res.Error
+	}
+	if res.RowsAffected > 0 {
+		s.logger.Error("Forgejo 轮询确定性失败，已停用该项目 PR 审查",
+			zap.String("project", settings.ProjectID),
+			zap.String("integration", settings.IntegrationID), zap.Error(err))
+	}
+	return nil
 }

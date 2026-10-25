@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 
@@ -177,6 +178,15 @@ func (s *ReviewService) processDueDebounces(now time.Time) {
 	}
 }
 
+// deterministicReviewAccessErr 实况读/轮询的确定性失败：仓库或 PR 已删
+// （404）、凭证被拒或吊销（401/403）、集成行缺失/kind 不符、密文损坏——
+// 每轮重试结果相同，按瞬时故障无限推后只会让行/项目卡死刷错；网络超时
+// 与 5xx 不在此列（推后重试才有意义）。
+func deterministicReviewAccessErr(err error) bool {
+	return forge.IsNotFound(err) || forge.IsForbidden(err) || forge.IsUnauthorized(err) ||
+		errors.Is(err, gorm.ErrRecordNotFound) || errors.Is(err, errForgeIntegrationDecrypt)
+}
+
 // consumeDebounce 一行防抖的消费：先在事务外读 PR 实况——防抖行可能是已
 // 合并/已关闭 PR 的旧账（重投的 closed 投递被有意排除、payload 又是旧快照），
 // PR 已关闭或远端 head 与防抖行不一致则删行不开轮。读 PR 失败不开轮也不删
@@ -195,6 +205,20 @@ func (s *ReviewService) consumeDebounce(row *model.ReviewDebounce, now time.Time
 	}
 	cancel()
 	if err != nil {
+		// 确定性失败（仓库/PR 已删、凭证被拒 401/403、集成不存在、密文损坏）
+		// 每轮重试结果相同——直接删行不再推后，否则防抖行永远消费不掉还按
+		// 周期刷错；后续新事件会重建防抖行。
+		if deterministicReviewAccessErr(err) {
+			s.logger.Warn("防抖实况读确定性失败，删除防抖行",
+				zap.String("repo", row.RepoFullName), zap.Int("pr", row.PRNumber), zap.Error(err))
+			if delErr := s.db.Where(
+				"project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ? AND head_sha = ? AND fire_at <= ?",
+				row.ProjectID, row.RepoFullName, row.PRNumber, row.IntegrationID, row.HeadSHA, now,
+			).Delete(&model.ReviewDebounce{}).Error; delErr != nil {
+				s.logger.Error("删除确定性失败的防抖行失败", zap.Error(delErr))
+			}
+			return
+		}
 		s.logger.Warn("防抖消费前读取 PR 失败，推后重试",
 			zap.String("repo", row.RepoFullName), zap.Int("pr", row.PRNumber), zap.Error(err))
 		// 推后用当前时刻而不是 tick 开始的 now：一个阶段预算内本批次可能已

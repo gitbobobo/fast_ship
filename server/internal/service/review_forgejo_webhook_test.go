@@ -570,6 +570,71 @@ func TestForgejoPoll_ProjectFailureIsolated(t *testing.T) {
 	}
 }
 
+// TestForgejoPoll_DeterministicErrorDisablesReview 轮询确定性失败（仓库已删
+// 404、集成密文损坏）自动停用该项目审查设置——不每 tick 固定刷错；瞬时错误
+// 不碰设置。修复后人工重开即可恢复（与改绑压回 disabled 同一先例）。
+func TestForgejoPoll_DeterministicErrorDisablesReview(t *testing.T) {
+	svc := setupTestServices(t)
+	forgeID := createTestForgeIntegration(t, svc.db, "https://forge.example.com").ID
+	project, _ := seedForgejoReviewProject(t, svc, forgeID, "fj-dead", "dead/app", nil)
+	projectFlaky, _ := seedForgejoReviewProject(t, svc, forgeID, "fj-flaky", "flaky/app", nil)
+
+	review := newReviewTestService(t, svc, nil, nil, nil)
+	review.clients = pollStubResolver{byIntegration: map[string]forge.ReviewClient{
+		forgeID: &pollStubClient{errByRepo: map[string]error{
+			"dead/app":  &forge.StatusError{StatusCode: 404, Body: "repo gone"},
+			"flaky/app": errors.New("dial tcp: i/o timeout"),
+		}},
+	}}
+
+	review.pollForgejoOpenPRs(time.Now().UTC())
+
+	var dead, flaky model.ProjectReviewSettings
+	if err := svc.db.First(&dead, "project_id = ?", project.ID).Error; err != nil {
+		t.Fatalf("dead settings: %v", err)
+	}
+	if dead.Enabled {
+		t.Fatal("404 确定性失败后审查设置应被停用")
+	}
+	if err := svc.db.First(&flaky, "project_id = ?", projectFlaky.ID).Error; err != nil {
+		t.Fatalf("flaky settings: %v", err)
+	}
+	if !flaky.Enabled {
+		t.Fatal("瞬时错误不得停用审查设置")
+	}
+}
+
+// TestForgejoPoll_DecryptErrorDisablesReview 集成密文损坏（解密失败哨兵）
+// 同属确定性失败：resolver 构造即错 → 设置被停用而不是每 tick 刷错。
+func TestForgejoPoll_DecryptErrorDisablesReview(t *testing.T) {
+	svc := setupTestServices(t)
+	forgeID := createTestForgeIntegration(t, svc.db, "https://forge.example.com").ID
+	project, _ := seedForgejoReviewProject(t, svc, forgeID, "fj-crypt", "crypt/app", nil)
+
+	review := newReviewTestService(t, svc, nil, nil, nil)
+	review.clients = pollStubResolver{byIntegration: map[string]forge.ReviewClient{
+		forgeID: decryptFailClient{},
+	}}
+
+	review.pollForgejoOpenPRs(time.Now().UTC())
+
+	var settings model.ProjectReviewSettings
+	if err := svc.db.First(&settings, "project_id = ?", project.ID).Error; err != nil {
+		t.Fatalf("settings: %v", err)
+	}
+	if settings.Enabled {
+		t.Fatal("密文损坏确定性失败后审查设置应被停用")
+	}
+}
+
+// decryptFailClient 密文损坏场景桩：reviewClient 的解密在 resolver 内发生——
+// 桩绕过 resolver，让 ListOpenPullRequests 直接返回解密哨兵（同一判定面）。
+type decryptFailClient struct{ forge.ReviewClient }
+
+func (decryptFailClient) ListOpenPullRequests(context.Context, string) ([]forge.PullRequest, error) {
+	return nil, errForgeIntegrationDecrypt
+}
+
 // TestHandleForgejoWebhook_CrossRepoForkRejected webhook 的 fork 过滤按
 // head/base 仓库归属判定而非 repo.fork 布尔：head 在别的仓库的 PR 不受理；
 // 仓库本身是 fork（payload 里 fork:true）但 head/base 同仓库的 PR 照常受理。

@@ -62,6 +62,13 @@ func IsNotFound(err error) bool {
 	return ok && code == http.StatusNotFound
 }
 
+// IsUnauthorized 判断 err 是否 401（凭证缺失/吊销）。与 403 同属「这轮重试
+// 也无意义」的确定性失败——防抖实况读与轮询按确定性口径用它归类。
+func IsUnauthorized(err error) bool {
+	code, ok := statusOf(err)
+	return ok && code == http.StatusUnauthorized
+}
+
 // IsDiffTooLarge 判断 err 是否「PR diff 超出上限」的确定性拒绝。两种来源：
 // 平台 4xx+errors[code=too_large]（语义与 githubapi.IsDiffTooLarge 完全一致
 // ——借同构字段转成 githubapi.StatusError 复用其判定，两份口径不会漂移），

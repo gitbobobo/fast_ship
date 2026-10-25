@@ -109,12 +109,14 @@ func (s *ForgeClientSource) findForgejoRow(integrationID string) (*model.ForgeIn
 	row, err := s.repo.FindByID(integrationID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, fmt.Errorf("代码仓集成 %s 不存在或已删除", integrationID)
+			// 哨兵透出：防抖实况读/轮询把「集成不存在」按确定性失败归类
+			// （删行/停用），不随瞬时故障无限重试。
+			return nil, fmt.Errorf("代码仓集成 %s 不存在或已删除: %w", integrationID, gorm.ErrRecordNotFound)
 		}
 		return nil, fmt.Errorf("读取代码仓集成失败: %w", err)
 	}
 	if row.Kind != model.ForgeIntegrationKindForgejo {
-		return nil, fmt.Errorf("代码仓集成 %s 不是 Forgejo 类型", integrationID)
+		return nil, fmt.Errorf("代码仓集成 %s 不是 Forgejo 类型: %w", integrationID, gorm.ErrRecordNotFound)
 	}
 	return row, nil
 }

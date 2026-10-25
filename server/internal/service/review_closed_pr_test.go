@@ -126,6 +126,39 @@ func TestReviewDebounceReadFailureRetries(t *testing.T) {
 	}
 }
 
+// TestReviewDebounceDeterministicErrorDropsRow 实况读确定性失败（集成已删/
+// 密文损坏/401/403/404）直接删行不推后：每轮重试结果相同，留着只会让行
+// 永远消费不掉并按周期刷错；后续新事件会重建防抖行。
+func TestReviewDebounceDeterministicErrorDropsRow(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	e.enableReview(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	t3 := &fakeReviewT3{}
+	review := e.withT3(t3, nil, nil)
+
+	// 绑定不存在的 Forgejo 集成：resolver → findForgejoRow 行不存在
+	// （ErrRecordNotFound）→ 确定性失败，直接删行不推后。
+	if err := e.svc.db.Create(&model.ReviewDebounce{
+		IntegrationID: "forge-gone", ProjectID: e.project.ID,
+		RepoFullName: repo, PRNumber: 71, HeadSHA: "sha-71", Action: "synchronize",
+		PRTitle: "t", PRURL: "u", BaseRef: "main", HeadRef: "f",
+		FireAt: now.Add(-time.Second), UpdatedAt: now.Add(-time.Minute),
+	}).Error; err != nil {
+		t.Fatalf("seed debounce: %v", err)
+	}
+	review.processDueDebounces(now)
+
+	if got := e.debounceCount(t); got != 0 {
+		t.Fatalf("确定性失败的防抖行应删除，剩 %d", got)
+	}
+	var runs int64
+	e.svc.db.Model(&model.ReviewRun{}).Count(&runs)
+	if runs != 0 || len(t3.created) != 0 {
+		t.Fatalf("确定性失败不得开轮/建线程：runs=%d created=%d", runs, len(t3.created))
+	}
+}
+
 // TestReviewClosedDispatchCancelsRun 派发阶段 PR 已关闭：不建线程，运行
 // cancelled + error_code=pr_closed，令牌已消费、总账 sync_pending 置位；
 // 读 PR 失败（未登记）不落终态不签令牌，留给认领超窗重试。

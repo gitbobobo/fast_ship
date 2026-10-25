@@ -139,9 +139,11 @@ func (c guardedSyncClient) SubmitReview(ctx context.Context, repoFullName string
 	return c.ReviewClient.SubmitReview(ctx, repoFullName, number, in)
 }
 
-// lockForPR 每 PR 一把进程内锁。
-func (s *ReviewService) lockForPR(repo string, prNumber int) *sync.Mutex {
-	key := repo + "#" + strconv.Itoa(prNumber)
+// lockForPR 每 PR 一把进程内锁：键含集成 + 项目 + 仓库 + PR——ledger 按
+// (integration_id, project_id, repo, pr) 分区，跨集成/跨项目的同名 PR
+// 互不串行（GitHub 镜像仓与 Forgejo 源仓同名时不再互相排队）。
+func (s *ReviewService) lockForPR(integrationID, projectID, repo string, prNumber int) *sync.Mutex {
+	key := integrationID + "\x00" + projectID + "\x00" + repo + "#" + strconv.Itoa(prNumber)
 	s.prLocksMu.Lock()
 	defer s.prLocksMu.Unlock()
 	lock, ok := s.prLocks[key]
@@ -188,8 +190,9 @@ func (s *ReviewService) syncPendingPRs(now time.Time) {
 // 本轮的活直接放弃，不发任何 GitHub 请求也不写库；通过后 epoch 即重读值，
 // 失败写 sync_error（epoch 守卫），成功按 epoch 清 pending。
 func (s *ReviewService) syncOnePR(ledger *model.ReviewPullRequest) {
-	key := ledger.RepoFullName + "#" + strconv.Itoa(ledger.PRNumber)
-	lock := s.lockForPR(ledger.RepoFullName, ledger.PRNumber)
+	key := ledger.IntegrationID + "\x00" + ledger.ProjectID + "\x00" +
+		ledger.RepoFullName + "#" + strconv.Itoa(ledger.PRNumber)
+	lock := s.lockForPR(ledger.IntegrationID, ledger.ProjectID, ledger.RepoFullName, ledger.PRNumber)
 	lock.Lock()
 	defer func() {
 		// 摘除锁条目：syncOnePR 只被单进程调度循环串行调用，不存在等在同

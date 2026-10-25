@@ -332,6 +332,11 @@ func scrubLogURLs(s string) string {
 // 查网络，而真正的原因是本部署不支持截图审查。
 var errReviewMediaUnconfigured = errors.New("截图下载面未配置")
 
+// errForgejoMediaPrivate Forgejo 附件匿名下载被拒：PAT 不随 Bearer 出域
+// （媒体主机 ≠ API 作用域，无令牌面），目前不支持私有附件带凭证下载——
+// 给用户可见的「私有附件不支持」而不是笼统的「无法连接图片服务器」。
+var errForgejoMediaPrivate = errors.New("Forgejo 私有附件暂不支持带凭证下载，请改用公开图片链接")
+
 // downloadScreenshot 单张截图下载：匿名优先；匿名失败且失败是「可能靠令牌
 // 解决」的（GitHub 媒体域的 401/403/404——私有仓库附件对匿名请求正是回
 // 404/403，GitHub 不区分不存在与无权限）才带安装令牌重试一次。协议
@@ -358,9 +363,12 @@ func (s *ReviewService) downloadScreenshot(ctx context.Context, integrationID st
 	}
 	// 带凭证重试只面向 GitHub 媒体：forge 集成显式短路（今天恰好靠
 	// installationID=0 挡住；未来迁移工具若回填非零 installation，PAT 也不
-	// 得随 Bearer 出域到 github 主机）。
-	if !githubmedia.IsGitHubMediaURLFor(url, s.githubWebHost()) || s.mediaBearer == nil ||
-		reviewIntegrationID(integrationID) != model.ForgeIntegrationBuiltinGitHubID || installationID == 0 {
+	// 得随 Bearer 出域到 github 主机）。Forgejo 私有附件匿名被拒时打独立
+	// sentinel：review_assets.error 要分得清「私有附件不支持」和「下载失败」。
+	if reviewIntegrationID(integrationID) != model.ForgeIntegrationBuiltinGitHubID {
+		return nil, fmt.Errorf("%w（upstream %d）: %w", errForgejoMediaPrivate, upstream.StatusCode, err)
+	}
+	if !githubmedia.IsGitHubMediaURLFor(url, s.githubWebHost()) || s.mediaBearer == nil || installationID == 0 {
 		return nil, err
 	}
 	bearer, berr := s.mediaBearer(ctx, integrationID, installationID)
@@ -398,6 +406,7 @@ func screenshotErrorText(err error) string {
 	}
 	for _, sentinel := range []error{
 		errReviewMediaUnconfigured,
+		errForgejoMediaPrivate,
 		githubmedia.ErrInvalidMediaURL,
 		githubmedia.ErrUnsupportedUpstreamMedia,
 		githubmedia.ErrBlockedUpstreamAddress,
