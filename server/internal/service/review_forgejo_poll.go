@@ -31,9 +31,9 @@ type openPRLister interface {
 	ListOpenPullRequests(ctx context.Context, repoFullName string) ([]forge.PullRequest, error)
 }
 
-// singlePRFetcher 单 PR 实时拉取：轮询快照与已受理 head 同刻异 SHA 时用来
+// singlePRFetcher 单 PR 实时拉取：快照/投递与已受理 head 同刻异 SHA 时用来
 // 复核——列表快照可能在 webhook 受理前读到旧 head，平局歧义只能现拉分辨。
-// 与 openPRLister 同由 Forgejo 适配器实现。
+// Forgejo 适配器实现；webhook 侧复核直接用 forge.ReviewClient 的同名方法。
 type singlePRFetcher interface {
 	GetPullRequest(ctx context.Context, repoFullName string, number int) (*forge.PullRequest, error)
 }
@@ -124,12 +124,12 @@ func (s *ReviewService) pollForgejoProject(settings *model.ProjectReviewSettings
 // 读取与受理之间抢先）由 handleReviewTriggerTx 的「迟到 opened 忽略 +
 // runCount 去重」与事务内 current 重读关掉。
 func (s *ReviewService) pollAcceptPR(ctx context.Context, fetcher singlePRFetcher, settings *model.ProjectReviewSettings, repo string, pr *forge.PullRequest, now time.Time) error {
-	err := s.pollAcceptSnapshotTx(settings, repo, pr, true, now)
-	if !errors.Is(err, errPollSnapshotTied) {
+	err := s.pollAcceptSnapshotTx(settings, repo, pr, false, now)
+	if !errors.Is(err, errTiedHeadAmbiguous) {
 		return err
 	}
 	// 同刻异 head：列表快照不可信，现拉实时 PR 分辨——实时 head 与总账
-	// 相同则无事可补，不同则是平台当前真 head，按正常受理路径进（不再
+	// 相同则无事可补，不同则是平台当前真 head，按已复核路径进（不再
 	// 走同刻守卫）。拉不了的适配器丢快照保总账：真实时序里落后的是
 	// 快照，下次 tick 用更新的列表再判。
 	if fetcher == nil {
@@ -142,13 +142,13 @@ func (s *ReviewService) pollAcceptPR(ctx context.Context, fetcher singlePRFetche
 	if live == nil || live.Draft || live.HeadSHA == "" {
 		return nil
 	}
-	return s.pollAcceptSnapshotTx(settings, repo, live, false, now)
+	return s.pollAcceptSnapshotTx(settings, repo, live, true, now)
 }
 
-// pollAcceptSnapshotTx 单个快照的补漏受理事务：fromPoll 标记数据来源是
-// 列表快照（受理事务内对「同刻异 head」报 errPollSnapshotTied 由调用方
-// 复核），实时拉到的数据传 false 走与 webhook 相同的判定。
-func (s *ReviewService) pollAcceptSnapshotTx(settings *model.ProjectReviewSettings, repo string, pr *forge.PullRequest, fromPoll bool, now time.Time) error {
+// pollAcceptSnapshotTx 单个快照的补漏受理事务：tiedVerified 标记同刻歧义
+// 已被调用方实时复核（现拉到的 PR 数据），列表快照传 false——受理事务
+// 内对「同刻异 head」报 errTiedHeadAmbiguous 由本层分辨后再进。
+func (s *ReviewService) pollAcceptSnapshotTx(settings *model.ProjectReviewSettings, repo string, pr *forge.PullRequest, tiedVerified bool, now time.Time) error {
 	trigger := &reviewWebhookTrigger{
 		number:       pr.Number,
 		repoFullName: repo,
@@ -163,8 +163,8 @@ func (s *ReviewService) pollAcceptSnapshotTx(settings *model.ProjectReviewSettin
 		// 平台 updated_at 是过期判定的凭据：轮询快照读到后 webhook 可能已
 		// 受理更新的 head，没带时间戳的旧 head 会绕过 seen 去重把总账退回
 		// 旧 SHA（新 SHA 反而因「seen 但非当前 head」被永久忽略）。
-		updatedAt: pr.UpdatedAt,
-		fromPoll:  fromPoll,
+		updatedAt:    pr.UpdatedAt,
+		tiedVerified: tiedVerified,
 	}
 	return s.db.Transaction(func(tx *gorm.DB) error {
 		// 事务内重读当前 head：与受理同一读快照，归类/跳过判定才可靠。

@@ -150,10 +150,15 @@ seen SHA、取消旧轮全部失效）。
 4. action 未被该项目触发条件勾选 → 忽略（不取消、不改 seen）。
 5. 过期 SHA 判定（全部按 `project_id + repo + pr`，其他项目的同仓库残留行
    不进入判定）：当前 head 优先取未开火的防抖行，否则取本项目
-   `review_pull_requests.head_sha`；payload `pull_request.updated_at` ≤ 已受理
-   head 的 `pr_updated_at` → 忽略；该 SHA 已在本项目 `review_seen_shas` 但不是
-   当前 head → 忽略；`action=opened` 且当前 head 非空 → 忽略；该 SHA 本项目
-   已有运行 → 忽略。force-push 回已见过的 SHA 不再开轮。
+   `review_pull_requests.head_sha`；payload `pull_request.updated_at` 严格早于
+   已受理 head 的 `pr_updated_at` → 忽略；同刻同 head → 重复投递早退；
+   **同刻异 head 是歧义**（秒级粒度下同秒连推与乱序投递/旧快照分不出）——
+   事务回滚并交调用方现拉实时 PR 复核：live head 与 payload head 一致才带
+   `tiedVerified` 重进受理，不一致或拉不到则丢弃（Forgejo 轮询兜底、live
+   head 的自身事件照常受理），总账不回滚到疑似旧 head。该 SHA 已在本项目
+   `review_seen_shas` 但不是当前 head → 忽略；`action=opened` 且当前 head
+   非空 → 忽略；该 SHA 本项目已有运行 → 忽略。force-push 回已见过的 SHA
+   不再开轮。
 6. 写 `review_seen_shas`（含 `project_id` 与 `pr_updated_at`）。
 7. 新 head ≠ 当前 head：把该 PR 下**本项目**所有未终态运行置 `cancelled`、
    `error_code='superseded'`、`finished_at=now`，消费其令牌；删除该 PR 本项目的

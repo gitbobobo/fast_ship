@@ -64,20 +64,21 @@ type reviewWebhookTrigger struct {
 	baseRef      string
 	headRef      string
 	updatedAt    *time.Time
-	// fromPoll 标记轮询补漏的快照触发：快照在读取与受理之间可能已被
-	// webhook 的更新 head 覆盖——「同刻异 head」对它是歧义（可能是同秒
-	// 连推的新 head，也可能是读旧了），必须由调用方重新拉实时 PR 再判。
-	fromPoll bool
+	// tiedVerified 标记「同刻异 head」歧义已被调用方实时复核（现拉 PR
+	// 比对过 head）：跳过 tied 守卫直接受理。webhook 与轮询快照都可能
+	// 在乱序投递下与总账同刻异 SHA，未复核的都要经调用方分辨再进。
+	tiedVerified bool
 	// installationID 仅 GitHub 有：App 安装快照。Forgejo 恒 0（无安装语义，
 	// advancePRHeadTx 对 0 不覆盖既有快照）。
 	installationID int64
 }
 
-// errPollSnapshotTied 轮询快照与已受理 head 同刻异 SHA：直接丢弃丢的是
-// 真 head（R17 修复面），直接受理又会把总账回滚到旧快照、取消新 head
-// 的在途轮次并把新 head 留成「seen 但非当前」永久漏审——交给调用方重拉
-// 实时 PR 再进一次，实时数据不走同刻守卫。
-var errPollSnapshotTied = errors.New("poll snapshot tied with accepted head")
+// errTiedHeadAmbiguous 触发 head 与已受理 head 同刻异 SHA：直接丢弃丢的
+// 可能是真 head（R17 修复面），直接受理又会把总账回滚到旧 head、取消新
+// head 的在途轮次并把新 head 留成「seen 但非当前」永久漏审——交给调用方
+// 现拉实时 PR 分辨（webhook 与轮询共用此歧义），复核通过以 tiedVerified
+// 重进，实时数据不走同刻守卫。
+var errTiedHeadAmbiguous = errors.New("trigger head tied with accepted head")
 
 // normalizeReviewAction 平台动作名归一：Forgejo/Gitea 的推送动作叫
 // synchronized（GitHub 是 synchronize），触发面（可受理判定、勾选位映射、
@@ -96,7 +97,7 @@ func normalizeReviewAction(action string) string {
 // github-default，Forgejo 入口传 forge_integrations.id；反查命中后所有键控
 // 读写（seen/总账/运行/防抖）都以它过滤——反查既然按它命中设置行，其余键
 // 与设置行必然同值。
-func (s *ReviewService) handleWebhookTx(tx *gorm.DB, integrationID string, event string, body []byte, now time.Time) error {
+func (s *ReviewService) handleWebhookTx(tx *gorm.DB, integrationID string, event string, body []byte, now time.Time, tiedVerified bool) error {
 	// Forgejo/Gitea 的推送更新是独立订阅项 pull_request_sync（payload 与
 	// pull_request 同形，action=synchronized）。新实例的 X-Forgejo-Event
 	// 头送归一名 pull_request，但旧 Gitea/自定义投递会把细型放进 Event
@@ -123,6 +124,7 @@ func (s *ReviewService) handleWebhookTx(tx *gorm.DB, integrationID string, event
 		baseRef:        p.PR.Base.Ref,
 		headRef:        p.PR.Head.Ref,
 		updatedAt:      p.PR.UpdatedAt,
+		tiedVerified:   tiedVerified,
 		installationID: p.Installation.ID,
 	}, now)
 }
@@ -192,8 +194,9 @@ func (s *ReviewService) handleReviewTriggerTx(tx *gorm.DB, integrationID string,
 	// 过期 SHA 判定：trigger.updated_at 严格早于已受理 head 的 pr_updated_at
 	// → 忽略（迟到的旧快照）；时间戳相等时按 head 区分——Forgejo updated_at
 	// 是秒级粒度，同一秒内连推两个不同 head 会带相同时间戳，「同时刻不同
-	// head」不能按过期丢弃（webhook 与轮询共用此守卫，丢了就是永久漏审）；
-	// 同时刻同 head 是同一状态的重复投递，早退省一次去重查询。
+	// head」是歧义：可能真新（同秒连推）也可能真旧（乱序投递/旧快照），
+	// 未复核一律交调用方现拉分辨，丢了或盲收都会漏审/回滚总账；同时刻
+	// 同 head 是同一状态的重复投递，早退省一次去重查询。
 	// 账本按 (项目, 集成) 分区：seen/总账/运行一律带 project_id 与
 	// integration_id，其他项目/其他集成的同仓库残留行不进入本项目判定。
 	if currentHead != "" {
@@ -204,8 +207,8 @@ func (s *ReviewService) handleReviewTriggerTx(tx *gorm.DB, integrationID string,
 			return err
 		}
 		if accepted.PRUpdatedAt != nil && t.updatedAt != nil {
-			if t.fromPoll && t.updatedAt.Equal(*accepted.PRUpdatedAt) && headSHA != currentHead {
-				return errPollSnapshotTied
+			if t.updatedAt.Equal(*accepted.PRUpdatedAt) && headSHA != currentHead && !t.tiedVerified {
+				return errTiedHeadAmbiguous
 			}
 			if t.updatedAt.Before(*accepted.PRUpdatedAt) ||
 				(t.updatedAt.Equal(*accepted.PRUpdatedAt) && headSHA == currentHead) {

@@ -857,13 +857,20 @@ func TestHandleForgejoWebhook_CrossRepoForkRejected(t *testing.T) {
 }
 
 // TestHandleForgejoWebhook_SameTimestampDifferentHead 秒级 updated_at 下连推：
-// payload 固定同一时间戳，两个不同 head 的投递都必须受理——同刻谓词只对
-// 「同时刻同 head」（重复投递）早退，不同 head 放行交给去重路径。
+// payload 固定同一时间戳，两个不同 head 的投递都须受理——同刻异 head 先经
+// 实时复核（live head 与 payload 一致才进），同刻同 head 早退。
 func TestHandleForgejoWebhook_SameTimestampDifferentHead(t *testing.T) {
 	svc := setupTestServices(t)
 	forgeID := createTestForgeIntegration(t, svc.db, "https://forge.example.com").ID
 	project, _ := seedForgejoReviewProject(t, svc, forgeID, "fj-ts", "acme/app", nil)
 	review := newReviewTestService(t, svc, nil, nil, nil)
+	ts := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC) // 与 payload 同刻
+	review.clients = pollStubResolver{byIntegration: map[string]forge.ReviewClient{
+		// sha-t2 投递与 sha-t1 同刻：复核现拉到 sha-t2 才放行受理。
+		forgeID: &pollStubClient{
+			live: &forge.PullRequest{Number: 62, RepoFullName: "acme/app", HeadSHA: "sha-t2", UpdatedAt: &ts, State: "open"},
+		},
+	}}
 
 	if err := review.HandleForgejoWebhook(context.Background(), forgeID, "pull_request", "d-t1",
 		forgejoPullPayload("synchronized", "acme/app", 62, "sha-t1", false)); err != nil {
@@ -898,6 +905,67 @@ func TestHandleForgejoWebhook_SameTimestampDifferentHead(t *testing.T) {
 	}
 	if debounce.HeadSHA != "sha-t2" {
 		t.Fatalf("debounce head after redelivery = %q, want sha-t2", debounce.HeadSHA)
+	}
+}
+
+// TestHandleForgejoWebhook_TiedDeliveryRevalidatesLive 同刻异 head 的 webhook
+// 投递：payload head 不是平台现状（现拉到别的 head）→ 丢弃不回滚总账；
+// payload head 即平台现状 → 复核放行受理（乱序到达的是总账里那条）。
+func TestHandleForgejoWebhook_TiedDeliveryRevalidatesLive(t *testing.T) {
+	svc := setupTestServices(t)
+	forgeID := createTestForgeIntegration(t, svc.db, "https://forge.example.com").ID
+	project, _ := seedForgejoReviewProject(t, svc, forgeID, "fj-tiedwh", "acme/app", nil)
+	review := newReviewTestService(t, svc, nil, nil, nil)
+	ts := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC) // 与 payload 同刻
+	client := &pollStubClient{
+		live: &forge.PullRequest{Number: 72, RepoFullName: "acme/app", HeadSHA: "sha-b", UpdatedAt: &ts, State: "open"},
+	}
+	review.clients = pollStubResolver{byIntegration: map[string]forge.ReviewClient{forgeID: client}}
+
+	// sha-b 先受理（无既有 head，不走同刻守卫）。
+	if err := review.HandleForgejoWebhook(context.Background(), forgeID, "pull_request", "d-b",
+		forgejoPullPayload("synchronized", "acme/app", 72, "sha-b", false)); err != nil {
+		t.Fatalf("webhook sha-b: %v", err)
+	}
+	// sha-a 迟到的同刻投递：live 仍是 sha-b → 该 payload 是旧态，丢弃，
+	// 总账与防抖不得回滚到 sha-a。
+	if err := review.HandleForgejoWebhook(context.Background(), forgeID, "pull_request", "d-a",
+		forgejoPullPayload("synchronized", "acme/app", 72, "sha-a", false)); err != nil {
+		t.Fatalf("webhook sha-a: %v", err)
+	}
+	var ledger model.ReviewPullRequest
+	if err := svc.db.Where("project_id = ? AND pr_number = ?", project.ID, 72).First(&ledger).Error; err != nil {
+		t.Fatalf("ledger: %v", err)
+	}
+	if ledger.HeadSHA != "sha-b" {
+		t.Fatalf("ledger head = %q, want sha-b（旧投递不得回滚总账）", ledger.HeadSHA)
+	}
+	var n int64
+	svc.db.Model(&model.ReviewSeenSHA{}).Where("project_id = ? AND pr_number = ? AND head_sha = ?",
+		project.ID, 72, "sha-a").Count(&n)
+	if n != 0 {
+		t.Fatalf("旧投递 sha-a 不得登记 seen, rows = %d", n)
+	}
+
+	// 平台实际已回到 sha-a（force-push 回退）：live=sha-a 时同一 head 的
+	// 投递复核放行——受理并把总账推进回 sha-a。
+	client.live = &forge.PullRequest{Number: 72, RepoFullName: "acme/app", HeadSHA: "sha-a", UpdatedAt: &ts, State: "open"}
+	if err := review.HandleForgejoWebhook(context.Background(), forgeID, "pull_request", "d-a2",
+		forgejoPullPayload("synchronized", "acme/app", 72, "sha-a", false)); err != nil {
+		t.Fatalf("webhook sha-a2: %v", err)
+	}
+	if err := svc.db.Where("project_id = ? AND pr_number = ?", project.ID, 72).First(&ledger).Error; err != nil {
+		t.Fatalf("ledger2: %v", err)
+	}
+	if ledger.HeadSHA != "sha-a" {
+		t.Fatalf("ledger head = %q, want sha-a（复核通过须受理）", ledger.HeadSHA)
+	}
+	var debounce model.ReviewDebounce
+	if err := svc.db.Where("project_id = ? AND pr_number = ?", project.ID, 72).First(&debounce).Error; err != nil {
+		t.Fatalf("debounce: %v", err)
+	}
+	if debounce.HeadSHA != "sha-a" {
+		t.Fatalf("debounce head = %q, want sha-a", debounce.HeadSHA)
 	}
 }
 

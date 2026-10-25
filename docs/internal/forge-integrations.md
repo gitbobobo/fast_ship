@@ -239,8 +239,10 @@ Forgejo 仓库的 PR 审查与 GitHub 走同一条协调管线（webhook 事务�
   受理面照常忽略。去重由现有机制保证（seen_sha/
   防抖/总账按 (项目, 集成) 分区），webhook 先受理的 SHA 轮询再见到会被跳过；
   轮询快照带平台 `updated_at`，受理事务内重读当前 head 判重——webhook 已
-  受理更新 head 后，迟到的旧快照按 stale 丢弃不回退；head 未变的重复轮询
-  不再合成新事件。**head 未变的重开同样是 no-op**——`reopened` 对同一
+  受理更新 head 后，迟到的旧快照按 stale 丢弃不回退；**同刻异 head**（秒级
+  粒度下同秒连推与乱序投递/旧快照分不出）对快照与 webhook 投递都是歧义，
+  受理事务一律回滚并交调用方现拉实时 PR 复核，live head 一致才重进；head
+  未变的重复轮询不再合成新事件。**head 未变的重开同样是 no-op**——`reopened` 对同一
   SHA 不开轮是 webhook 受理面的既定不变量（`runCount`/`seen` 去重，GitHub
   侧同义），轮询 `headSHA == current` 早退与之对称而非漏补；真补会绕过
   `TriggerReopened` 勾选位并破坏「一 SHA 一运行」键控模型。已知角落：丢
