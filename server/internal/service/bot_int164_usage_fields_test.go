@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"math"
+	"strings"
 	"testing"
 	"time"
 
@@ -88,8 +89,9 @@ func TestBotStreamChatProviderCost(t *testing.T) {
 		if err != nil {
 			t.Fatalf("stream: %v", err)
 		}
-		if reply.ProviderCost == nil || math.Abs(*reply.ProviderCost-0.25) > 1e-12 || reply.ProviderCostRaw != nil {
-			t.Fatalf("total_cost 应按 USD 解析: %+v", reply)
+		if reply.ProviderCost == nil || math.Abs(*reply.ProviderCost-0.25) > 1e-12 ||
+			reply.ProviderCostRaw == nil || !strings.Contains(*reply.ProviderCostRaw, "total_cost") {
+			t.Fatalf("total_cost 应按 USD 解析并记来源字段: %+v", reply)
 		}
 	})
 	t.Run("OpenRouter 地址的 cost 置信 USD", func(t *testing.T) {
@@ -150,7 +152,7 @@ func TestBotParseProviderCostPrecedence(t *testing.T) {
 		}, openrouter: true, wantRaw: true},
 		{name: "字段名含 _usd 视为 USD", extra: map[string]respjson.Field{
 			"total_tokens_billed_usd": f("0.07"),
-		}, wantCost: ptrCost(0.07)},
+		}, wantCost: ptrCost(0.07), wantRaw: true},
 		{name: "非 OR 的裸 cost 币别不明", extra: map[string]respjson.Field{
 			"cost": f("0.3"),
 		}, wantRaw: true},

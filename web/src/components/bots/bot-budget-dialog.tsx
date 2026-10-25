@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Loader2, TriangleAlert } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
@@ -112,11 +112,21 @@ function BudgetPeriodForm({
   );
   const [problem, setProblem] = useState<string | null>(null);
 
-  // refetch 返回新 budget 对象时回填输入（二次打开在缓存态挂载、refetch
-  // 完成后 spend 更新了而输入仍是旧值——budget 身份变化即同步）。
+  // refetch 返回新 budget 对象时按字段回填：未编辑的字段跟随新数据，
+  // 已编辑（dirty）的字段保留用户输入——保存另一周期触发的整组 refetch
+  // 不会覆盖本框正在编辑的内容。
+  const prevBudget = useRef(budget);
   useEffect(() => {
-    setAmount(budget ? String(budget.amount_usd) : "");
-    setThresholds(budget ? budget.thresholds.map(ratioToText).join("，") : "");
+    const prev = prevBudget.current;
+    prevBudget.current = budget;
+    if (prev === budget) return;
+    const amountOf = (b?: BotBudget) => (b ? String(b.amount_usd) : "");
+    const thresholdsOf = (b?: BotBudget) =>
+      b ? b.thresholds.map(ratioToText).join("，") : "";
+    setAmount((cur) => (cur === amountOf(prev) ? amountOf(budget) : cur));
+    setThresholds((cur) =>
+      cur === thresholdsOf(prev) ? thresholdsOf(budget) : cur,
+    );
   }, [budget]);
 
   const spendPct =

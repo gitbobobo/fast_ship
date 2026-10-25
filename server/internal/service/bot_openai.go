@@ -307,8 +307,10 @@ func botParseProviderCost(extra map[string]respjson.Field, openrouter bool) (*fl
 		rawNote = rawRecord("cost", extra["cost"])
 	}
 	var usd *float64
+	usdField := ""
 	if v, ok := field(extra["total_cost"]); ok {
 		usd = v
+		usdField = "total_cost"
 	}
 	// *_usd 字段按名字排序取首个可解析的：map 遍历无序，不稳定会让同一
 	// 响应两次解析选出不同字段。
@@ -323,9 +325,15 @@ func botParseProviderCost(extra map[string]respjson.Field, openrouter bool) (*fl
 		for _, name := range names {
 			if v, ok := field(extra[name]); ok {
 				usd = v
+				usdField = name
 				break
 			}
 		}
+	}
+	// 置信命中时把胜出字段名与原值写进 raw，事后可审计 provider_cost 出自
+	// 哪个字段（歧义证据让位于实际采用的来源）。
+	if usd != nil {
+		rawNote = rawRecord(usdField, extra[usdField])
 	}
 	if rawNote == nil {
 		if raw, ok := extra["cost_details"]; ok && raw.Raw() != "" && raw.Raw() != "null" {
