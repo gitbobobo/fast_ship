@@ -404,11 +404,31 @@ func (s *BotService) usageRollupCovered(botIDs, pastDates []string, loc *time.Lo
 		by[m.Date] = m
 	}
 	for _, botID := range botIDs {
-		fps, err := repo.DayFingerprints(botID, spans)
+		// 水位闸（与写路径 usageRollupPlan 同探针）：窗口内账本最大写入
+		// 不超该 bot 标记所记时，已覆盖日零新写，标记全部可信——省掉
+		// 每次页面加载的全历史指纹聚合。
+		var markMax int64
+		for _, m := range markBy[botID] {
+			if m.LastWriteNs > markMax {
+				markMax = m.LastWriteNs
+			}
+		}
+		probe, err := repo.SpanWriteMax(botID, spans[0].Start, spans[len(spans)-1].End)
 		if err != nil {
 			return nil, err
 		}
 		cov := map[string]bool{}
+		if probe == nil || !probe.After(time.Unix(0, markMax)) {
+			for date := range markBy[botID] {
+				cov[date] = true
+			}
+			covered[botID] = cov
+			continue
+		}
+		fps, err := repo.DayFingerprints(botID, spans)
+		if err != nil {
+			return nil, err
+		}
 		for date, mark := range markBy[botID] {
 			if fps[date].Equal(mark) {
 				cov[date] = true

@@ -146,6 +146,8 @@ describe("parseThresholdInput", () => {
     // 可超 100%（150% = 1.5）；重复档位去重。
     expect(parseThresholdInput("150%")).toEqual({ ratios: [1.5] });
     expect(parseThresholdInput("80% 80%")).toEqual({ ratios: [0.8] });
+    // 显式百分号一律按百分数：「0.8%」= 0.008，不放大成 80%。
+    expect(parseThresholdInput("0.8%")).toEqual({ ratios: [0.008] });
   });
 
   it("空输入、非法数字与越界档位报错", () => {

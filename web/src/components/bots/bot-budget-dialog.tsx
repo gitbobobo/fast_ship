@@ -67,11 +67,14 @@ export function parseThresholdInput(
   }
   const ratios: number[] = [];
   for (const token of tokens) {
+    // 显式百分号一律按百分数处理（「0.8%」= 0.008），不带符号才走
+    // >1 启发式——否则小数加 % 会被静默放大 100 倍。
+    const hasPercent = /[%％]$/.test(token);
     const raw = Number.parseFloat(token.replace(/[%％]$/, ""));
     if (!Number.isFinite(raw) || raw <= 0) {
       return { error: `阈值「${token}」无效，请填写 80% 或 0.8 这样的正数` };
     }
-    const ratio = raw > 1 ? raw / 100 : raw;
+    const ratio = hasPercent || raw > 1 ? raw / 100 : raw;
     if (ratio > 100) {
       return { error: `阈值「${token}」超出范围（最高 10000%）` };
     }

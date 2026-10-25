@@ -254,6 +254,12 @@ func (s *BotService) evalUserBudgets(repo *repository.BotBudgetRepository, userI
 		}
 		task, err := s.schedTasks.FindByID(*b.ScheduleTaskID)
 		if err != nil {
+			// 任务不存在是正常路径（预算通常已被级联清理）；其他错误是
+			// 瞬时读库失败，记 warn 便于排查预算为何长期不生效。
+			if !errors.Is(err, gorm.ErrRecordNotFound) {
+				s.logger.Warn("预算评估读取任务失败",
+					zap.String("task_id", *b.ScheduleTaskID), zap.Error(err))
+			}
 			continue
 		}
 		tasks[task.ID] = task
