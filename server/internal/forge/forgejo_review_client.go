@@ -208,9 +208,15 @@ func (c *ForgejoReviewClient) GetPullRequestDiff(ctx context.Context, repoFullNa
 	return string(data), nil
 }
 
+// forgejoReviewExpandMax 单次 ListReviewComments 展开评论的已提交 review
+// 数上限：逐 review 再分页没有总约束时，review 数百上千的 PR 会把一次调用
+// 放大到上万请求，拖垮同步预算与实例配额。
+const forgejoReviewExpandMax = 200
+
 // ListReviewComments PR 级行内评论：Forgejo 没有 PR 级平铺端点，经 review
 // 列表逐个取 review comments 后展平。InReplyToID 恒 nil（Forgejo 的 review
-// comment 不带回复关系字段，审查链路不用它）。
+// comment 不带回复关系字段，审查链路不用它）。state=PENDING 的未提交草稿
+// 对其他用户不可见，其评论不算已发帖历史——跳过既挡污染也省请求。
 func (c *ForgejoReviewClient) ListReviewComments(ctx context.Context, repoFullName string, number int) ([]ReviewComment, error) {
 	repo, err := repoPath(repoFullName)
 	if err != nil {
@@ -235,7 +241,18 @@ func (c *ForgejoReviewClient) ListReviewComments(ctx context.Context, repoFullNa
 		return nil, err
 	}
 	var out []ReviewComment
+	expanded := 0
 	for _, r := range reviews {
+		if strings.EqualFold(r.State, "PENDING") {
+			continue
+		}
+		if expanded >= forgejoReviewExpandMax {
+			slog.WarnContext(ctx, "Forgejo 行内评论展开 review 数到顶截断",
+				slog.String("repo", repoFullName), slog.Int("pr", number),
+				slog.Int("max_reviews", forgejoReviewExpandMax))
+			break
+		}
+		expanded++
 		// 单条 review 的 comments 也按 ListOptions 分页——裸 do() 只回默认页
 		// 大小，评论多时会静默截断。
 		var wire []forgejoComment
@@ -439,6 +456,12 @@ func (c *ForgejoReviewClient) ListReviews(ctx context.Context, repoFullName stri
 	}
 	out := make([]ReviewSummary, 0, len(wire))
 	for _, w := range wire {
+		// PENDING 是未提交草稿（Web UI/他端中断残留），对读者不可见——
+		// 「已提交」契约内不可认，否则认领会把 pending 运行的行内
+		// findings 误判已投递而静默漏投。
+		if strings.EqualFold(w.State, "PENDING") {
+			continue
+		}
 		summary := ReviewSummary{ID: w.ID, CommitID: w.CommitID, Body: w.Body, State: w.State}
 		if w.SubmittedAt != nil {
 			summary.CreatedAt = *w.SubmittedAt

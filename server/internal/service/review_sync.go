@@ -1313,6 +1313,11 @@ func (s *ReviewService) postInlineReviews(ctx context.Context, client forge.Revi
 	posted := map[string][]int64{} // summary -> review ids（旧评论没有运行标记时的兜底）
 	postedByRun := map[string]int64{}
 	for _, rev := range existing {
+		// 只认已提交态：未提交的 PENDING 草稿及其行内评论对其他用户不可见，
+		// 认领其内容会把 pending 运行的 findings 误判已投递而静默漏投。
+		if strings.EqualFold(rev.State, "PENDING") {
+			continue
+		}
 		if !strings.EqualFold(rev.CommitID, ledger.HeadSHA) {
 			continue
 		}

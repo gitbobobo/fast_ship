@@ -260,7 +260,10 @@ Forgejo 仓库的 PR 审查与 GitHub 走同一条协调管线（webhook 事务�
   TriggerOpened 约束）——只勾 `ready_for_review` 不勾 `opened` 的项目此
   场景漏补。另一已知角落：轮询只枚举 `state=open`，closed 事件丢投递
   时对账不到——该 PR 的在途/排队运行与防抖行会自然超时收尾，不会永久
-  悬挂，但比 webhook 送达时慢一拍。单项目/单 PR 失败只记日志继续下一个，
+  悬挂，但比 webhook 送达时慢一拍。枚举分页 `limit=50` 封顶 20 页
+  （`forgejoMaxPages`）：open PR 数超 1000 的源仓截断面外的 PR 轮询
+  永久漏补（日志有 warn 留痕，webhook 送达路径不受影响）——当前规模下
+  接受该上限，超出时需放量或按 updated 排序收窄。单项目/单 PR 失败只记日志继续下一个，
   不中断整轮。**确定性
   失败（仓库/PR 404、凭证 401/403、集成行缺失/kind 不符、PAT 密文解密
   失败）自动停用该项目的审查设置**——每 tick 重试结果相同，继续 enabled

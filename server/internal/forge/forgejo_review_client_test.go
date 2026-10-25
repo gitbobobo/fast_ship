@@ -335,7 +335,8 @@ func TestForgejoClient_SharedLoginCache(t *testing.T) {
 
 func TestForgejoClient_ListReviewsAndComments(t *testing.T) {
 	// ListReviews 映射 id/commit_id/state/submitted_at；ListReviewComments 经
-	// review 列表逐个取 comments 展平。
+	// review 列表逐个取 comments 展平。PENDING 草稿（id 10）对读者不可见：
+	// 两边都排除——ListReviews 不回、ListReviewComments 不展开其评论端点。
 	client, logs := newForgejoTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Query().Get("page") != "" && r.URL.Query().Get("page") != "1":
@@ -343,7 +344,12 @@ func TestForgejoClient_ListReviewsAndComments(t *testing.T) {
 		case r.URL.Path == "/api/v1/user":
 			_, _ = w.Write([]byte(`{"login": "bot"}`))
 		case strings.HasSuffix(r.URL.Path, "/reviews") && r.Method == http.MethodGet:
-			_, _ = w.Write([]byte(`[{"id": 9, "body": "r", "state": "COMMENT", "commit_id": "abc", "submitted_at": "2026-01-02T03:04:05Z", "user": {"login": "bot"}}]`))
+			_, _ = w.Write([]byte(`[
+				{"id": 9, "body": "r", "state": "COMMENT", "commit_id": "abc", "submitted_at": "2026-01-02T03:04:05Z", "user": {"login": "bot"}},
+				{"id": 10, "body": "draft", "state": "PENDING", "commit_id": "abc", "user": {"login": "bot"}}
+			]`))
+		case strings.Contains(r.URL.Path, "/reviews/10/comments"):
+			t.Error("PENDING review 的评论端点不得被请求")
 		case strings.Contains(r.URL.Path, "/reviews/9/comments"):
 			_, _ = w.Write([]byte(`[{"id": 31, "body": "n", "path": "a.go", "user": {"login": "bot"}, "created_at": "2026-01-02T03:04:06Z"}]`))
 		default:

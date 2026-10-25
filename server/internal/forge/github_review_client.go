@@ -2,6 +2,7 @@ package forge
 
 import (
 	"context"
+	"strings"
 
 	"github.com/godbobo/fast_ship/server/internal/githubapi"
 )
@@ -110,6 +111,11 @@ func (c *GitHubReviewClient) ListReviews(ctx context.Context, repoFullName strin
 	}
 	out := make([]ReviewSummary, 0, len(list))
 	for _, w := range list {
+		// PENDING 是未提交草稿，对读者不可见——「已提交」契约内不可认，
+		// 否则对账认领会把 pending 运行的 findings 误判已投递。
+		if strings.EqualFold(w.State, "PENDING") {
+			continue
+		}
 		out = append(out, ReviewSummary{
 			ID: w.ID, CommitID: w.CommitID, Body: w.Body, State: w.State, CreatedAt: w.CreatedAt,
 		})

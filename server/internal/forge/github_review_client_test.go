@@ -199,7 +199,11 @@ func TestGitHubReviewClientConvertsListAndSubmitTypes(t *testing.T) {
 	api := &recordingAPI{
 		reviewComments: []githubapi.ReviewComment{{ID: 1, User: "u", Body: "b", InReplyToID: &reply, Path: "a.go", CreatedAt: at}},
 		issueComments:  []githubapi.IssueComment{{ID: 2, User: "u2", Body: "b2", CreatedAt: at}},
-		reviews:        []githubapi.ReviewSummary{{ID: 3, CommitID: "sha", Body: "rb", State: "COMMENT", CreatedAt: at}},
+		reviews: []githubapi.ReviewSummary{
+			{ID: 3, CommitID: "sha", Body: "rb", State: "COMMENT", CreatedAt: at},
+			// PENDING 未提交草稿对读者不可见，「已提交」契约内不回传。
+			{ID: 4, CommitID: "sha", Body: "draft", State: "PENDING", CreatedAt: at},
+		},
 		foundID:        8, found: true, createdID: 9, reviewID: 10,
 	}
 	client := NewGitHubReviewClient(api, 1)
