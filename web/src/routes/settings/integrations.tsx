@@ -340,7 +340,7 @@ function AdminView({ data }: { data: GitHubAppDeployment }) {
               onClick={handleTest}
             >
               <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
-              {testDeployment.isPending ? "检测中..." : "测试连接"}
+              {testDeployment.isPending ? "检测中..." : "测试 GitHub App 连接"}
             </Button>,
           ]}
         />

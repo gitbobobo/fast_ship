@@ -601,6 +601,12 @@ func parseRepositoryURL(raw string) (host, owner, repo string, explicit bool, er
 // 归一（顺带剥掉 IPv6 字面量的方括号，与 forgeBaseHostKey 同形态）；数字
 // 端口统一拼写（:0443 → :443），与 parseBaseURL 落库前的归一同口径——同
 // 一端点的不同写法必须点查出同一个 host_key。
+//
+// 归一键刻意不含 scheme（host:port 即端点身份）：显式写错协议的极端形态
+// （https://forge:80/o/r 绑到 http://forge 集成）仍命中同一条集成——协议
+// 正确性由集成自身 api_base_url 保证（探测与 API 调用都走它），code_repo_url
+// 按集成基址渲染。把 scheme 纳入匹配会让「同机不同 scheme 写法」变成不可
+// 解释的「主机未匹配」，收益不抵多一类报错。
 func repoHostKey(host string) string {
 	if h, port, err := net.SplitHostPort(host); err == nil {
 		if n, err := strconv.Atoi(port); err == nil {

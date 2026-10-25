@@ -22,8 +22,9 @@ type ForgeIntegration struct {
 	Kind    string `gorm:"type:text;not null" json:"kind"`
 	Name    string `gorm:"type:text;not null" json:"name"`
 	BaseURL string `gorm:"type:text;not null" json:"base_url"`
-	// APIBaseURL 为空表示按 {base_url}/api/v1 推导（保存时已展开成具体值落库，
-	// 读取侧不再推导）。列保留可空语义，历史行为 NULL 时与空串同义。
+	// APIBaseURL 存「意图」而非展开值：空串 = 按 {base_url}/api/v1 推导
+	// （读取侧由 forgeAPIBaseURL 展开，改 base_url 自动跟随），非空 = 管理
+	// 员显式钉死的端点。列保留可空语义，历史行为 NULL 时与空串同义。
 	APIBaseURL string `gorm:"column:api_base_url;type:text" json:"api_base_url"`
 	// HostKey 是 base_url 的归一键（forges.HostKey：小写 host + scheme 缺省
 	// 端口），同归一主机的部分唯一索引（idx_forge_integrations_host_key）靠它
