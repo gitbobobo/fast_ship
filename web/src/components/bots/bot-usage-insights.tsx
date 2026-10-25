@@ -153,7 +153,9 @@ const X_LABEL_MIN_GAP_PX = 48;
  * 按数组下标抽稀会让多个标签挤进同一片像素。从最后一个点向左贪心（末点
  * 标签必保留，与 MetricChart 的口径一致），相邻已选标签保持 ≥ minGap；
  * 首点标签也强制保留——最左侧的点不能没有日期参照；若与最近已选
- * 标签间距不足 minGap，舍弃那个邻近标签换首点，避免叠字。
+ * 标签间距不足 minGap，舍弃那个邻近标签换首点，避免叠字。例外是
+ * 唯一已选标签就是末点（全部点跨度不足 minGap）：首尾近同刻，
+ * 保留末点，最新一端的日期更有参考价值。
  * 全部点同刻（xSpan=0）或单点时自然只剩 1 个标签。
  */
 export function selectXLabelIndexes(
@@ -168,8 +170,9 @@ export function selectXLabelIndexes(
       lastCx = cxs[i];
     }
   }
-  // 首点必留：与最近已选点距离足够则追加，不足则顶掉那个近邻。
-  if (indexes.length && indexes[indexes.length - 1] !== 0) {
+  // 首点必留：与最近已选点距离足够则追加，不足则顶掉那个近邻——
+  // 但近邻就是唯一标签（末点）时保留末点，最新端日期优先。
+  if (indexes.length > 1 && indexes[indexes.length - 1] !== 0) {
     const nearest = indexes[indexes.length - 1];
     if (Math.abs(cxs[nearest] - cxs[0]) >= minGap) {
       indexes.push(0);

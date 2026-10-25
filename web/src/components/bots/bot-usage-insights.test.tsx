@@ -491,8 +491,9 @@ describe("上下文增长图助手", () => {
     ]);
     // 间距充足时全部保留。
     expect(selectXLabelIndexes([0, 100, 200, 300])).toEqual([0, 1, 2, 3]);
-    // 全部同刻（xSpan=0）：同位标签只画 1 个，首点顶替末点。
-    expect(selectXLabelIndexes([100, 100, 100])).toEqual([0]);
+    // 全部点跨度不足 minGap：唯一标签保留末点（最新端日期优先）。
+    expect(selectXLabelIndexes([100, 100, 100])).toEqual([2]);
+    expect(selectXLabelIndexes([64, 68, 72])).toEqual([2]);
     expect(selectXLabelIndexes([64])).toEqual([0]);
     expect(selectXLabelIndexes([])).toEqual([]);
   });
