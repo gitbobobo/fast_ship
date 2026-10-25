@@ -178,6 +178,10 @@ type serviceConfig struct {
 	// 通配符）即跳过解析 IP 的内网检查；名单外主机与名单内主机重定向
 	// 出去的建连照旧检查。
 	trustedPrivateHosts []string
+	// trustedPrivateHostsFunc 动态可信内网主机清单：每次拨号现取（新配的
+	// 集成主机不用重启即生效）。与 trustedPrivateHosts 取并集——面向
+	// 「allow_private_network 的 Forgejo 集成主机」这类运行时来源。
+	trustedPrivateHostsFunc func() []string
 	// githubWebHost 部署的 GitHub Web 地址 host[:port]（同
 	// ProxyService.githubWebHost）：凭证闸门据此放行部署实例自己的附件路径，
 	// 空值按公共 GitHub 处理。
@@ -203,15 +207,18 @@ func NewProxyService(cacheRoot string) *ProxyService {
 // 一致（不区分大小写、不含端口、不支持通配符）时跳过内网 IP 检查——内网
 // DNS 把自建服务（如 UIV）直接解析到内网地址的部署靠它放行，空名单与
 // 旧行为一致。
-func NewReviewMediaService(cacheRoot, githubWebHost string, trustedPrivateHosts []string) *ProxyService {
+// trustedPrivateHostsFunc 是可选的动态可信主机来源（如允许私网的 Forgejo
+// 集成主机清单）——每次拨号现取，与静态名单取并集，传 nil 与旧行为一致。
+func NewReviewMediaService(cacheRoot, githubWebHost string, trustedPrivateHosts []string, trustedPrivateHostsFunc func() []string) *ProxyService {
 	return newService(cacheRoot, serviceConfig{
-		cacheSubdir:         "review-screenshot-cache",
-		allowURL:            allowPublicImageHost,
-		requireHTTPS:        true,
-		imagesOnly:          true,
-		guardAddress:        true,
-		trustedPrivateHosts: trustedPrivateHosts,
-		githubWebHost:       githubWebHost,
+		cacheSubdir:             "review-screenshot-cache",
+		allowURL:                allowPublicImageHost,
+		requireHTTPS:            true,
+		imagesOnly:              true,
+		guardAddress:            true,
+		trustedPrivateHosts:     trustedPrivateHosts,
+		trustedPrivateHostsFunc: trustedPrivateHostsFunc,
+		githubWebHost:           githubWebHost,
 	})
 }
 
@@ -237,7 +244,7 @@ func newService(cacheRoot string, cfg serviceConfig) *ProxyService {
 	if cfg.client == nil {
 		webHost := cfg.githubWebHost
 		cfg.client = newGuardedClient(cfg.requireHTTPS, cfg.allowURL, cfg.guardAddress,
-			cfg.trustedPrivateHosts,
+			cfg.trustedPrivateHosts, cfg.trustedPrivateHostsFunc,
 			func(u *url.URL) bool { return IsGitHubMediaURLFor(u.String(), webHost) })
 	}
 	s := &ProxyService{
@@ -299,7 +306,7 @@ func newProxyService(cacheRoot string, cacheTTL time.Duration, maxCacheEntrySize
 // Go http.Client 会把敏感头透传给同域及子域目标，GHE 部署的兄弟子域
 // （x.ghe.corp.com 对 ghe.corp.com）也在其列——目标过不了闸门就剥掉，
 // nil 一律剥。Transport 克隆自 DefaultTransport，保留连接池参数。
-func newGuardedClient(requireHTTPS bool, allowURL func(*url.URL) bool, guardAddress bool, trustedPrivateHosts []string, bearerGate func(*url.URL) bool) *http.Client {
+func newGuardedClient(requireHTTPS bool, allowURL func(*url.URL) bool, guardAddress bool, trustedPrivateHosts []string, trustedHostsFunc func() []string, bearerGate func(*url.URL) bool) *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	if guardAddress {
 		// 必须自己拨到目标才能校验目标 IP：走环境代理时校验到的会是代理地址
@@ -311,20 +318,30 @@ func newGuardedClient(requireHTTPS bool, allowURL func(*url.URL) bool, guardAddr
 			KeepAlive: 30 * time.Second,
 			Control:   guardDialControl,
 		}
-		if trusted := normalizeTrustedPrivateHosts(trustedPrivateHosts); len(trusted) > 0 {
+		trusted := normalizeTrustedPrivateHosts(trustedPrivateHosts)
+		if len(trusted) > 0 || trustedHostsFunc != nil {
 			// 名单内主机走不带 Control 的拨号器：判定用 DialContext 收到的
 			// addr 主机名（URL 的 host 部分，DNS 解析之前），不看解析出的
 			// IP——放行粒度是主机名，同一内网地址上反代挂着的其他服务不会
 			// 被连带放行。名单外主机、以及名单内主机 302 跳出的每次新建连
-			// 仍走 guarded 照常校验。
+			// 仍走 guarded 照常校验。trustedHostsFunc 每次拨号现取：新配
+			// 的集成主机无需重启即生效。
 			direct := &net.Dialer{
 				Timeout:   30 * time.Second,
 				KeepAlive: 30 * time.Second,
 			}
 			transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 				if host, _, err := net.SplitHostPort(addr); err == nil {
-					if _, ok := trusted[strings.ToLower(host)]; ok {
+					host = strings.ToLower(host)
+					if _, ok := trusted[host]; ok {
 						return direct.DialContext(ctx, network, addr)
+					}
+					if trustedHostsFunc != nil {
+						for _, h := range trustedHostsFunc() {
+							if strings.ToLower(strings.TrimSpace(h)) == host {
+								return direct.DialContext(ctx, network, addr)
+							}
+						}
 					}
 				}
 				return guarded.DialContext(ctx, network, addr)

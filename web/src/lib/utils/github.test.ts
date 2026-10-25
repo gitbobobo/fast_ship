@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   codeRepoSlugFromSaved,
+  hostFromRepoInput,
   codeRepoUrlFromSlug,
   normalizeCodeRepoRef,
   ownerRepoFromInput,
@@ -244,5 +245,17 @@ describe("codeRepoUrlFromSlug", () => {
     expect(
       normalizeCodeRepoRef(codeRepoUrlFromSlug(forgejo, { owner: "acme", repo: "app" })),
     ).toBe(normalizeCodeRepoRef("https://forge.example.com/acme/app"));
+  });
+});
+
+describe("hostFromRepoInput", () => {
+  it("scheme 形态与裸主机段都能取出主机，owner/repo 与裸 github.com 前缀返回空", () => {
+    expect(hostFromRepoInput("https://forge-b.example.com/acme/app")).toBe("forge-b.example.com");
+    expect(hostFromRepoInput("forge-b.example.com/acme/app")).toBe("forge-b.example.com");
+    expect(hostFromRepoInput("forge.example.com:8443/acme/app")).toBe("forge.example.com:8443");
+    expect(hostFromRepoInput("acme/app")).toBe("");
+    expect(hostFromRepoInput("")).toBe("");
+    // github.com/ 前缀是裸主机段（含点）——跨主机比对仍生效。
+    expect(hostFromRepoInput("github.com/acme/app")).toBe("github.com");
   });
 });

@@ -40,6 +40,7 @@ import {
   codeRepoSlugFromSaved,
   ownerRepoFromInput,
   codeRepoUrlFromSlug,
+  hostFromRepoInput,
 } from "@/lib/utils/github";
 import { toast } from "sonner";
 
@@ -241,11 +242,30 @@ export function ProjectFormDialog({
   // 所选集成不在列表里）就 setError 中止提交——不静默丢弃也不猜主机。
   const synthesizeRepoUrl = (): string | null => {
     const parts = ownerRepoFromInput(codeRepoSlug);
-    if (!selectedIntegration || !parts.owner || !parts.repo) {
+    // 显式主机必须与所选集成同主机——解析会剥掉主机段，不比对会把
+    // forgejo-B 的完整地址静默绑到 forgejo-A 下。
+    const inputHost = hostFromRepoInput(codeRepoSlug);
+    let integrationHost = "";
+    if (selectedIntegration) {
+      try {
+        integrationHost = new URL(selectedIntegration.base_url).host.toLowerCase();
+      } catch {
+        integrationHost = "";
+      }
+    }
+    if (
+      !selectedIntegration ||
+      !parts.owner ||
+      !parts.repo ||
+      (inputHost !== "" && integrationHost !== "" && inputHost !== integrationHost)
+    ) {
       setError("code_repository_url", {
-        message: selectedIntegration
-          ? "格式：owner/repo（或完整仓库地址）"
-          : "所选代码仓集成不可用，请重新选择",
+        message:
+          inputHost !== "" && integrationHost !== "" && inputHost !== integrationHost
+            ? `仓库地址主机 ${inputHost} 与所选集成（${integrationHost}）不一致`
+            : selectedIntegration
+              ? "格式：owner/repo（或完整仓库地址）"
+              : "所选代码仓集成不可用，请重新选择",
       });
       return null;
     }

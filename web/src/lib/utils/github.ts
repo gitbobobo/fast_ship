@@ -134,6 +134,25 @@ export function normalizeCodeRepoRef(raw: string): string {
   return `${host}/${parts[0]}/${parts[1]}`.toLowerCase();
 }
 
+// hostFromRepoInput 提取输入里的显式主机：scheme 之后的首段，或裸形态
+// 首段含点/冒号（o.r/o:r）的主机段。无主机输入（owner/repo）返回 ""。
+// 用于提交前比对所选集成主机——ownerRepoFromInput 会剥掉主机段，不比
+// 会把 forgejo-B 的 URL 静默绑到 forgejo-A 下。
+export function hostFromRepoInput(raw: string): string {
+  const rest = raw.trim();
+  const protoIdx = rest.indexOf("://");
+  if (protoIdx !== -1) {
+    const slash = rest.indexOf("/", protoIdx + 3);
+    const host = slash === -1 ? rest.slice(protoIdx + 3) : rest.slice(protoIdx + 3, slash);
+    return host.toLowerCase();
+  }
+  const slash = rest.indexOf("/");
+  if (slash === -1) return "";
+  const first = rest.slice(0, slash);
+  if (first.includes(".") || first.includes(":")) return first.toLowerCase();
+  return "";
+}
+
 // ownerRepoFromInput 解析选择器的 owner/repo 输入：剥 scheme（其后首段必是
 // 主机，连主机一起剥）或裸 github.com/ 前缀后，必须恰好剩 owner/repo 两段。
 // 无 scheme 的多余主机段（my.org/a/b）不猜——把它当主机剥掉会把 Forgejo

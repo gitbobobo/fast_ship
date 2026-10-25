@@ -109,6 +109,45 @@ func TestReviewMediaRedirectFromTrustedToUntrustedBlocked(t *testing.T) {
 	}
 }
 
+// 动态名单（allow_private_network 集成主机随拨号现查）：func 返回的主机
+// 与静态名单等价放行，且每次拨号重查——名单变化不重启即生效。
+func TestReviewMediaDynamicTrustedHostFunc(t *testing.T) {
+	upstream := pngUpstream(t)
+	cfg := trustedHostTestConfig(nil)
+	trusted := []string{"localhost"}
+	cfg.trustedPrivateHostsFunc = func() []string { return trusted }
+	svc := newService(t.TempDir(), cfg)
+	if _, err := svc.FetchAndCache(context.Background(), localhostURL(t, upstream, "/ok.png")); err != nil {
+		t.Fatalf("dynamic trusted host fetch: %v", err)
+	}
+	// 动态名单收窄后新连接立刻回到守卫——不是构造期快照（已建立的
+	// keep-alive 连接复用是 HTTP 语义，换 service 强制新拨号）。
+	trusted = nil
+	svc2 := newService(t.TempDir(), cfg)
+	if _, err := svc2.FetchAndCache(context.Background(), localhostURL(t, upstream, "/ok2.png")); !errors.Is(err, ErrBlockedUpstreamAddress) {
+		t.Fatalf("err = %v, want ErrBlockedUpstreamAddress（动态名单撤销后应恢复拦截）", err)
+	}
+}
+
+// 动态名单内主机跳到名单外内网主机同样被拦：每一跳独立判定。
+func TestReviewMediaDynamicTrustedRedirectStillGuarded(t *testing.T) {
+	target := pngUpstream(t)
+	var targetURL string
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, targetURL, http.StatusFound)
+	}))
+	t.Cleanup(origin.Close)
+	targetURL = target.URL + "/ok.png"
+
+	cfg := trustedHostTestConfig(nil)
+	cfg.trustedPrivateHostsFunc = func() []string { return []string{"localhost"} }
+	svc := newService(t.TempDir(), cfg)
+	_, err := svc.FetchAndCache(context.Background(), localhostURL(t, origin, "/start"))
+	if !errors.Is(err, ErrBlockedUpstreamAddress) {
+		t.Fatalf("err = %v, want ErrBlockedUpstreamAddress（动态名单内主机跳名单外仍应被拒）", err)
+	}
+}
+
 // 名单规整：去空白、统一小写去重、丢弃空项。
 func TestNormalizeTrustedPrivateHosts(t *testing.T) {
 	set := normalizeTrustedPrivateHosts([]string{" UIV.Example.COM ", "uiv.example.com", "", "  ", "img.local"})

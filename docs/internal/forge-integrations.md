@@ -243,7 +243,10 @@ Forgejo 仓库的 PR 审查与 GitHub 走同一条协调管线（webhook 事务�
   webhook 时 `ready_for_review`/`reopened` 无法还原真实动作，轮询把 draft
   转正/重开的 PR 归为 `opened`（受
   TriggerOpened 约束）——只勾 `ready_for_review` 不勾 `opened` 的项目此
-  场景漏补。单项目/单 PR 失败只记日志继续下一个，不中断整轮。**确定性
+  场景漏补。另一已知角落：轮询只枚举 `state=open`，closed 事件丢投递
+  时对账不到——该 PR 的在途/排队运行与防抖行会自然超时收尾，不会永久
+  悬挂，但比 webhook 送达时慢一拍。单项目/单 PR 失败只记日志继续下一个，
+  不中断整轮。**确定性
   失败（仓库/PR 404、凭证 401/403、集成行缺失/kind 不符、PAT 密文解密
   失败）自动停用该项目的审查设置**——每 tick 重试结果相同，继续 enabled
   只会按固定节律刷错且审查静默停摆；停用走与显式停用同一事务收尾
@@ -307,7 +310,12 @@ Forgejo 仓库的 PR 审查与 GitHub 走同一条协调管线（webhook 事务�
 5. Fast Ship「设置 → 部署 → 集成」配 Forgejo 集成（base_url、PAT、可选
    `allow_private_network` / 自定义 CA），跑一次连接检测确认 ok。
 6. 配 Forgejo webhook：URL `https://<fast-ship>/api/forge/<集成id>/webhooks`，
-   事件选 Pull Request，secret 与集成 `webhook_secret` 一致。
+   事件选 **Pull Request 与 Pull Request Sync 两项**（推送新提交走独立的
+   `pull_request_sync`，不勾它推送更新只能靠 5 分钟轮询补漏），secret 与
+   集成 `webhook_secret` 一致。受理面同时认 `pull_request` /
+   `pull_request_sync` 两个事件名——新版本把细型放进 `X-Forgejo-Event-Type`
+   而 `X-Forgejo-Event` 送归一名 `pull_request`，旧 Gitea/自定义投递可能
+   直接把 `pull_request_sync` 放进 Event 头，两种形态等价受理。
 7. Forgejo `app.ini` 的 `[webhook] ALLOWED_HOST_LIST` 加本服务 host（默认
    只允许私网段外联 webhook，公网部署会被拒发）。
 8. 项目改绑 Forgejo（编辑项目代码仓库选 Forgejo 集成 + owner/repo；改绑
@@ -460,6 +468,13 @@ Forgejo 基址是管理员可填的任意 URL，必须把「内网探测」挡�
   IP**：DNS 重绑或解析漂移可把带 PAT 的探测导向内网其他主机——这是私网
   放行的定义内残余面（回环/链路本地/元数据仍恒拒），只在 DNS 可信的环境
   开启。
+- **审查截图下载面同源放行**：PR 附件走的是审查媒体服务
+  （`githubmedia`）独立的拨号守卫，不认识上面的 `AllowedHosts`。为此媒体
+  服务接了一个动态可信名单：每次拨号时现查 `allow_private_network=true`
+  的集成行并放行其 base_url/api_base_url 主机（绕过私网 IP 拦截，回环/
+  链路本地等仍由直连拨号承担）。名单随集成配置即时生效、不落缓存；
+  名单外主机与跨主机重定向照常走 IP 校验——同 API 面「只放行这个实例」
+  的口径。
 - **重定向规则**：目标 host:port 必须与首个请求一致（跨主机拒绝，端口按
   scheme 缺省补齐后比较）；未开私网放行时每一跳都必须 https；**任何配置下
   https→http 的降级跳转都拒绝**（`ErrSchemeDowngrade`——明文 http 只该来自

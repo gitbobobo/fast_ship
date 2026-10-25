@@ -87,7 +87,13 @@ func normalizeReviewAction(action string) string {
 // 读写（seen/总账/运行/防抖）都以它过滤——反查既然按它命中设置行，其余键
 // 与设置行必然同值。
 func (s *ReviewService) handleWebhookTx(tx *gorm.DB, integrationID string, event string, body []byte, now time.Time) error {
-	if event != "pull_request" {
+	// Forgejo/Gitea 的推送更新是独立订阅项 pull_request_sync（payload 与
+	// pull_request 同形，action=synchronized）。新实例的 X-Forgejo-Event
+	// 头送归一名 pull_request，但旧 Gitea/自定义投递会把细型放进 Event
+	// 头——两个名字都受理，GitHub 从不发此名所以 GitHub 面零影响。webhook
+	// 订阅仍要把 Pull Request Sync 一并勾上（文档有指引），否则平台根本
+	// 不投递这条。
+	if event != "pull_request" && event != "pull_request_sync" {
 		return nil
 	}
 	var p prWebhookPayload

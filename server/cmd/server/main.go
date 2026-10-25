@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -318,7 +319,29 @@ func main() {
 	// 同一实例（host[:port]）的附件路径带 App 安装令牌重试，公共 GitHub 部署
 	// 下即 github.com。
 	reviewMediaService := githubmedia.NewReviewMediaService(cfg.Upload.StoragePath,
-		githubmedia.GitHubWebHost(cfg.GitHubApp.APIBaseURL), cfg.ReviewMedia.TrustedPrivateHosts)
+		githubmedia.GitHubWebHost(cfg.GitHubApp.APIBaseURL), cfg.ReviewMedia.TrustedPrivateHosts,
+		func() []string {
+			// allow_private_network 的 Forgejo 集成主机随名单动态放行：自建
+			// 实例常在内网，API 已获准私网拨号，截图面不能把同一主机的附件
+			// 全拦成 ErrBlockedUpstreamAddress。名单外主机仍走 IP 校验。
+			rows, lerr := forgeIntegrationRepo.List()
+			if lerr != nil {
+				return nil
+			}
+			var hosts []string
+			for i := range rows {
+				row := &rows[i]
+				if !row.AllowPrivateNetwork {
+					continue
+				}
+				for _, raw := range []string{row.BaseURL, row.APIBaseURL} {
+					if u, perr := url.Parse(strings.TrimSpace(raw)); perr == nil && u.Hostname() != "" {
+						hosts = append(hosts, u.Hostname())
+					}
+				}
+			}
+			return hosts
+		})
 	// shell 订阅 hub（INT-116）：每环境常驻活跃/归档两条 WS，列表与运行态读取
 	// 从内存回答；环境重配/删除时由环境服务清 entry。这里注册停机钩子：当前
 	// main 进程没有优雅停机路径、defer 通常不会执行（进程被信号终止时由 OS

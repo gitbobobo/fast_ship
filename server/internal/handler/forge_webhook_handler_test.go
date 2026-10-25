@@ -311,3 +311,44 @@ func TestForgeWebhookHandler_SynchronizedAcceptsPR(t *testing.T) {
 		t.Fatalf("seen rows = %d, want 1", seen)
 	}
 }
+
+// TestForgeWebhookHandler_PullRequestSyncEvent 独立订阅项 pull_request_sync
+// 与 pull_request 同形受理（payload 共享、action=synchronized 归一）——旧
+// Gitea/自定义投递会把细型放进 X-Forgejo-Event 头，受理面两个名字都认。
+func TestForgeWebhookHandler_PullRequestSyncEvent(t *testing.T) {
+	env := setupForgeWebhookEnv(t)
+	row := env.seedForgeIntegration(t, "whsec-forge")
+
+	user := &model.User{Username: "fw-u2", Email: "fw2@example.com", PasswordHash: "x"}
+	if err := env.db.Create(user).Error; err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	project := &model.Project{UserID: user.ID, Name: "app", GithubOwner: "acme", GithubRepo: "app", CodeIntegrationID: row.ID}
+	if err := env.db.Create(project).Error; err != nil {
+		t.Fatalf("seed project: %v", err)
+	}
+	now := time.Now().UTC()
+	if err := env.db.Create(&model.ProjectReviewSettings{
+		ProjectID: project.ID, UserID: user.ID,
+		RepoFullName: "acme/app", IntegrationID: row.ID, Enabled: true,
+		TriggerOpened: true, TriggerSynchronize: true,
+		CodeCombinationsJSON: "[]", VisualCombinationsJSON: "[]",
+		CreatedAt: now, UpdatedAt: now,
+	}).Error; err != nil {
+		t.Fatalf("seed settings: %v", err)
+	}
+
+	body := forgejoSyncPayload()
+	w := env.postForgeWebhook(t, row.ID, "fw-prs", "pull_request_sync", body, forge.SignForgejoSignature("whsec-forge", body))
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("pull_request_sync 投递未受理 = %d %s", w.Code, w.Body.String())
+	}
+	var debounce model.ReviewDebounce
+	if err := env.db.Where("project_id = ? AND integration_id = ?", project.ID, row.ID).
+		First(&debounce).Error; err != nil {
+		t.Fatalf("debounce: %v", err)
+	}
+	if debounce.Action != "synchronize" {
+		t.Fatalf("action = %s, want synchronize", debounce.Action)
+	}
+}
