@@ -7,6 +7,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -297,9 +298,11 @@ func TestReviewClosedDispatchCancelsRun(t *testing.T) {
 }
 
 // TestReviewDispatchAccessErrTerminals 派发前实况读的确定性失败不再等认领
-// 超窗空转到 timeout：404（PR/仓库已删）按 PR 关闭终局 cancelled/pr_closed；
-// 权限 403（凭证被拒、非限流）落 failed/access_denied + dispatch_failed 通知；
-// 均不建线程不签令牌，与防抖/轮询的确定性口径一致。
+// 超窗空转到 timeout：PR 404 且仓库可读按 PR 关闭终局 cancelled/pr_closed
+// （GitHub/Forgejo 对无权限资源也回 404，用仓库级复核消歧）；权限 403 与
+// PR+仓库双 404（凭证吊销/仓库转私有）落 failed/access_denied +
+// dispatch_failed 通知；仓库复核瞬时失败保持 dispatched 等重认领；均不建
+// 线程不签令牌，与防抖/轮询的确定性口径一致。
 func TestReviewDispatchAccessErrTerminals(t *testing.T) {
 	e := newReviewEngineEnv(t)
 	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
@@ -349,12 +352,41 @@ func TestReviewDispatchAccessErrTerminals(t *testing.T) {
 		t.Fatal("access_denied 应发 dispatch_failed 通知（凭证问题需用户处置）")
 	}
 
+	// PR 404 且仓库级同样确定性读不到（凭证吊销/仓库转私有也回 404）——
+	// 不当「PR 已删」静默取消，按 access_denied 报真实原因。
+	repo404 := e.seedRun(t, repo, 62, "sha-c62", model.ReviewRunDispatched, now)
+	e.svc.db.Model(repo404).Update("environment_id", env.ID)
+	e.fake.SetPRError(repo, &githubapi.StatusError{
+		StatusCode: 404, Method: "GET", URL: "pulls/62", Body: "not found",
+	})
+	e.fake.SetRepoError(repo, &githubapi.StatusError{
+		StatusCode: 404, Method: "GET", URL: "repos/x", Body: "not found",
+	})
+	review.launchRun(context.Background(), repo404.ID, now)
+	var afterRepo404 model.ReviewRun
+	e.svc.db.First(&afterRepo404, "id = ?", repo404.ID)
+	if afterRepo404.Status != model.ReviewRunFailed || afterRepo404.ErrorCode != "access_denied" {
+		t.Fatalf("双 404 run = %q/%q, want failed/access_denied",
+			afterRepo404.Status, afterRepo404.ErrorCode)
+	}
+
+	// PR 404 但仓库级复核本身瞬时失败：不证明任何一边，等重认领。
+	e.fake.SetRepoError(repo, fmt.Errorf("network down"))
+	retry := e.seedRun(t, repo, 63, "sha-c63", model.ReviewRunDispatched, now)
+	e.svc.db.Model(retry).Update("environment_id", env.ID)
+	review.launchRun(context.Background(), retry.ID, now)
+	var kept model.ReviewRun
+	e.svc.db.First(&kept, "id = ?", retry.ID)
+	if kept.Status != model.ReviewRunDispatched || kept.FinishedAt != nil {
+		t.Fatalf("仓库复核瞬时失败应保持 dispatched 等重试: %q", kept.Status)
+	}
+
 	if len(t3.created) != 0 {
 		t.Fatal("确定性失败不得建线程")
 	}
 	var tokCount int64
 	e.svc.db.Model(&model.ReviewRunToken{}).
-		Where("run_id IN ?", []string{gone.ID, denied.ID}).Count(&tokCount)
+		Where("run_id IN ?", []string{gone.ID, denied.ID, repo404.ID, retry.ID}).Count(&tokCount)
 	if tokCount != 0 {
 		t.Fatal("确定性失败不得签发令牌")
 	}

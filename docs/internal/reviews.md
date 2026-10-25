@@ -388,10 +388,13 @@ GitHub App 投递失败（公网隧道超时/502）不会自动重试，一次�
   `dispatch_started_at` 是认领时刻、`dispatched_at` 是建线程确认时刻。
 - **建线程前查 PR 实况**：`launchRun` 在签发令牌之前读 PR，不是 open
   就落 `cancelled`/`error_code=pr_closed`（消费令牌、置 `sync_pending`），
-  不建线程；读 PR 失败按确定性归类——404（仓库/PR 已删）同 `pr_closed`
-  终局，其余确定性失败（凭证 401/403、集成行缺失、密文损坏）落
-  `failed`/`error_code=access_denied` + `review_dispatch_failed` 通知，
-  只有瞬时错误才不落终态不签令牌、等认领超窗重试。
+  不建线程；读 PR 失败按确定性归类——404 先经仓库级 `GetRepository`
+  复核消歧（GitHub/Forgejo 对无权限资源也回 404）：仓库可读而 PR 404 =
+  PR 真已删同 `pr_closed` 终局，仓库同样确定性读不到（凭证吊销、仓库
+  转私有、仓库已删）与其余确定性失败（凭证 401/403、集成行缺失、密文
+  损坏）同落 `failed`/`error_code=access_denied` +
+  `review_dispatch_failed` 通知；只有瞬时错误才不落终态不签令牌、等
+  认领超窗重试。
 - 提示词系统写死（`review_prompts.go` 常量）：代码审查要求自查证（git diff
   + 读文件）、以找 bug 为主、P0/P1/P2/Note 分级、历史处置规则、判断
   `ui_changed` 与 `ui_changed_since_last_visual`；视觉审查按层级/间距/排版/

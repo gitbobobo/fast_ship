@@ -106,8 +106,26 @@ func (s *ReviewService) launchRun(ctx context.Context, runID string, now time.Ti
 	if clientErr != nil {
 		switch {
 		case forge.IsNotFound(clientErr):
-			// 仓库/PR 已删——与「PR 已关」同为正常终局，不另发失败通知。
-			s.cancelRunPRClosed(&run, now)
+			// GitHub/Forgejo 对无权限资源也回 404（凭证吊销、仓库转私有、
+			// 安装被卸）——仓库级复核消歧：仓库可读而 PR 404 = PR 真已删，
+			// 同「PR 已关」终局不另发通知；仓库同样确定性读不到 = 访问权
+			// 丧失，报 access_denied 真实原因；探测本身瞬时失败不证明任何
+			// 一边，等重认领。
+			var probeErr error
+			if client != nil {
+				repoCtx, repoCancel := context.WithTimeout(ctx, 10*time.Second)
+				probeErr = client.GetRepository(repoCtx, run.RepoFullName)
+				repoCancel()
+			}
+			switch {
+			case probeErr == nil:
+				s.cancelRunPRClosed(&run, now)
+			case deterministicReviewAccessErr(probeErr):
+				s.failRunDispatch(run.ID, "access_denied", clientErr.Error(), now)
+			default:
+				s.logger.Warn("派发前仓库级复核失败，运行等待重新认领",
+					zap.String("run", run.ID), zap.Error(probeErr))
+			}
 		case deterministicReviewAccessErr(clientErr):
 			s.failRunDispatch(run.ID, "access_denied", clientErr.Error(), now)
 		default:
