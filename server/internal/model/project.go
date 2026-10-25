@@ -9,6 +9,11 @@ type Project struct {
 	Description string `gorm:"type:text" json:"description"`
 	GithubOwner string `gorm:"type:text" json:"github_owner"`
 	GithubRepo  string `gorm:"type:text" json:"github_repo"`
+	// GithubHost 公开仓写入时解析出的主机标识：空串 = 本部署 GitHub（裸
+	// owner/repo 或部署 GHE 主机，存量行同义）；仅「显式 github.com」记
+	// "github.com"——GHE 部署下 code_repo_url 回落渲染靠它区分两类存储值，
+	// 否则公共 github.com 的仓会被错拼到本部署 GHE 主机上。
+	GithubHost string `gorm:"column:github_host;type:text" json:"-"`
 	// CodeGithubOwner/CodeGithubRepo 代码仓库（PR 审查用）：未单独配置时为空，
 	// 审查经 CodeRepo() 回落到公开仓库；与公开仓库（Issue 同步/发版）互不影响。
 	CodeGithubOwner     string `gorm:"column:code_github_owner;type:text" json:"code_github_owner"`

@@ -380,21 +380,54 @@ func TestParseRepoBindingGHERejectsPublicGitHubURL(t *testing.T) {
 	svc.cfg.GitHubApp.APIBaseURL = "https://ghe.corp.example/api/v3"
 	ps := newTestProjectService(svc)
 
-	_, _, _, _, appErr := ps.parseRepoBinding("https://github.com/o/r", false)
+	_, _, _, _, _, appErr := ps.parseRepoBinding("https://github.com/o/r", false)
 	if appErr == nil || !strings.Contains(appErr.Error(), "ghe.corp.example") {
 		t.Fatalf("explicit github.com under GHE: err = %v", appErr)
 	}
 	// 公开仓是存量数据字段：显式 github.com 在 GHE 下放行（基线语义，
-	// 前端回填恒为 github.com 形态，拒掉会把普通编辑挡住）。
-	owner, repo, id, _, appErr := ps.parseRepoBinding("https://github.com/o/r", true)
-	if appErr != nil || id != "" || owner != "o" || repo != "r" {
-		t.Fatalf("public github.com under GHE → owner=%q repo=%q id=%q err=%v", owner, repo, id, appErr)
+	// 前端回填恒为 github.com 形态，拒掉会把普通编辑挡住）；publicHost
+	// 记 github.com 供 code_repo_url 回落渲染选主机。
+	owner, repo, id, _, publicHost, appErr := ps.parseRepoBinding("https://github.com/o/r", true)
+	if appErr != nil || id != "" || owner != "o" || repo != "r" || publicHost != "github.com" {
+		t.Fatalf("public github.com under GHE → owner=%q repo=%q id=%q host=%q err=%v", owner, repo, id, publicHost, appErr)
 	}
 	for _, in := range []string{"o/r", "ghe.corp.example/o/r", "https://ghe.corp.example/o/r"} {
-		owner, repo, id, _, appErr := ps.parseRepoBinding(in, false)
-		if appErr != nil || id != "" || owner != "o" || repo != "r" {
-			t.Fatalf("%q → owner=%q repo=%q id=%q err=%v", in, owner, repo, id, appErr)
+		owner, repo, id, _, publicHost, appErr := ps.parseRepoBinding(in, false)
+		if appErr != nil || id != "" || owner != "o" || repo != "r" || publicHost != "" {
+			t.Fatalf("%q → owner=%q repo=%q id=%q host=%q err=%v", in, owner, repo, id, publicHost, appErr)
 		}
+	}
+}
+
+// GHE 部署下公开仓显式 github.com：未单独配代码仓时 code_repo_url 必须
+// 渲染公共实例主机，而不是错拼到本部署 GHE（R31 P2）。
+func TestCodeRepoUrlGHEExplicitPublicGitHub(t *testing.T) {
+	svc := setupTestServices(t)
+	svc.cfg.GitHubApp.APIBaseURL = "https://ghe.corp.example/api/v3"
+	ps := newTestProjectService(svc)
+
+	p := &model.Project{
+		GithubOwner: "o", GithubRepo: "r",
+		GithubHost: "github.com",
+	}
+	got, err := ps.codeRepoUrl(p, nil)
+	if err != nil {
+		t.Fatalf("codeRepoUrl: %v", err)
+	}
+	if got == nil || *got != "https://github.com/o/r" {
+		t.Fatalf("code_repo_url = %v, want https://github.com/o/r", got)
+	}
+
+	// 同部署下存量行（GithubHost 空）与显式 code 字段仍按本部署 GHE 拼。
+	p.GithubHost = ""
+	got, _ = ps.codeRepoUrl(p, nil)
+	if got == nil || *got != "https://ghe.corp.example/o/r" {
+		t.Fatalf("legacy row code_repo_url = %v, want ghe host", got)
+	}
+	p.CodeGithubOwner, p.CodeGithubRepo = "co", "cr"
+	got, _ = ps.codeRepoUrl(p, nil)
+	if got == nil || *got != "https://ghe.corp.example/co/cr" {
+		t.Fatalf("code-field code_repo_url = %v, want ghe host", got)
 	}
 }
 

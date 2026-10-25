@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -581,8 +582,15 @@ func (s *ForgeIntegrationService) rejectDeadForgeHost(base string) error {
 	if key == "" {
 		return nil
 	}
-	if key == forges.HostKey(githubWebBase(s.cfg)) ||
-		key == "github.com:443" || key == "github.com:80" {
+	if key == forges.HostKey(githubWebBase(s.cfg)) {
+		return errForgeDeadHost
+	}
+	// github.com 属主机按主机名（不管端口）全拒：github.com:8443、
+	// api./gist. 等子域的归一键与 github.com:443 不等，能逃过按键比较，
+	// 但它们是 GitHub 基础设施不是 Forgejo 实例，且仓库 URL 的 github.com
+	// 归内置判定在集成匹配之前——这类集成永远绑不上。
+	if h, _, err := net.SplitHostPort(key); err == nil &&
+		(h == "github.com" || strings.HasSuffix(h, ".github.com")) {
 		return errForgeDeadHost
 	}
 	return nil

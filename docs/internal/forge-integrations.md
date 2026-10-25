@@ -42,7 +42,9 @@ user_github_tokens 同一模式）。
   `https://host[:port]/o/r` → 小写主机，非 github 主机恒带端口（无显式端口
   按 scheme 补齐：http→80、其余→443，因此 http 集成只有显式 `http://`
   的仓库 URL 才匹配得上）。无 scheme 时首段含 `.` 或 `:` 视为 host，否则
-  视为 owner。非 github.com 主机必须匹配某条已配置 forgejo 集成（双方都
+  视为 owner——裸单标签主机（`myhost/o/r`、`localhost/o/r`）与合法
+  owner/repo 无法区分，**刻意一律归 github.com**；要指内网短主机名必须
+  写全 `https://host/o/r`。非 github.com 主机必须匹配某条已配置 forgejo 集成（双方都
   归一成「小写 host:端口」后比较），匹配不到 → 40001「主机未匹配任何已
   配置集成」，不再像旧实现那样把 host 静默解析成 owner。**GHE 部署下代码仓
   显式 `github.com` 地址拒收**（`explicit` 位区分裸 `o/r` 与 `github.com/o/r`）：
@@ -66,7 +68,11 @@ user_github_tokens 同一模式）。
 - **`repository_url`（公开仓）只允许 GitHub**（host=github.com 或纯
   owner/repo）→ `public_integration_id` 恒为空列。命中 forgejo 集成 → 40001
   且消息点明「公开仓库仅支持 GitHub」（issue 镜像 / release 本期仍是 GitHub
-  only）；未知主机同上 40001。
+  only）；未知主机同上 40001。落库同时记 `github_host`：空串=本部署
+  GitHub（裸 `o/r`/GHE 主机/存量行），仅显式 `github.com` 记 `github.com`
+  ——code_repo_url 回落到公开仓时按它选渲染主机，GHE 部署下公共
+  github.com 仓不再被错拼到 GHE（code 字段无此歧义：code URL 的显式
+  github.com 在 GHE 写入时已被拒）。
 - **`code_repository_url`**：github.com/纯 owner/repo → `code_integration_id`
   空；命中 forgejo → 存该集成 id。Create 与 Update 同口径；Update 三态（key
   缺省保留、显式空把 owner/repo 与集成 id 一起清、非空替换并按新 host 重新
