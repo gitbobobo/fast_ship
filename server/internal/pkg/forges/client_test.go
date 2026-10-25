@@ -258,6 +258,11 @@ func TestAuthPathInScope(t *testing.T) {
 		{"/api/v1/logs%2f..%2fsecret", "/api/v1", false},
 		{"/api/v2/version", "/api/v1", false},
 		{"/login", "/api/v1", false},
+		// 根前缀（api_base_url 钉在站点根）：trimmed 为空 → HasPrefix(cleaned,"/")
+		// 恒真，整个主机即 API 作用域——不是「永不命中」。
+		{"/api/v1/version", "/", true},
+		{"/login", "/", true},
+		{"/", "/", true},
 	}
 	for _, c := range cases {
 		u, err := url.Parse("https://forge.example" + c.raw)

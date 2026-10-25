@@ -175,9 +175,11 @@ Forgejo 仓库的 PR 审查与 GitHub 走同一条协调管线（webhook 事务�
   账号 + marker 前缀」命中。**自身 login 有两条来源**：先试 `GET /user`
   （`read:user` scope——仓库范围 PAT 拿不到，Forgejo 的 user/* scope 组
   不能授给 specific-repository token，见 token-scope 文档），再从写接口
-  响应（`POST …/comments`、`PATCH …/comments/{id}`、`POST …/reviews`）的
-  `user.login` 学习并缓存。**退化边界是 403/404**——仓库级 PAT 拿不到
-  `read:user` 的确定性信号才落到 marker-only 认领（伪造 marker 的他人
+  响应（`POST …/comments`、`POST …/reviews`）的 `user.login` 学习并缓存——
+  **PATCH 路径不学**：评论对象的 user 是原作者不是编辑者，marker-only
+  退化命中他人伪造评论且 PAT 有权编辑他人评论时会把攻击者 login 学进
+  缓存，Self 标记与对账认领随之持久认敌为己。**退化边界是 403/404**——
+  仓库级 PAT 拿不到 `read:user` 的确定性信号才落到 marker-only 认领（伪造 marker 的他人
   评论可能被覆写一次，PATCH 403 时按「非己评论」改走新建，但不会因此
   发不出评论）；瞬时网络错误、5xx、非预期 401 一律传播挂起本轮重试——
   瞬时故障也降级会把伪造覆写窗口从「仅仓库级 PAT 契约」扩大到任意故障
@@ -231,8 +233,12 @@ Forgejo 仓库的 PR 审查与 GitHub 走同一条协调管线（webhook 事务�
   防抖/总账按 (项目, 集成) 分区），webhook 先受理的 SHA 轮询再见到会被跳过；
   轮询快照带平台 `updated_at`，受理事务内重读当前 head 判重——webhook 已
   受理更新 head 后，迟到的旧快照按 stale 丢弃不回退；head 未变的重复轮询
-  不再合成新事件。已知角落：丢 webhook 时 `ready_for_review`/`reopened` 无
-  法还原真实动作，轮询把 draft 转正/重开的 PR 归为 `opened`（受
+  不再合成新事件。**head 未变的重开同样是 no-op**——`reopened` 对同一
+  SHA 不开轮是 webhook 受理面的既定不变量（`runCount`/`seen` 去重，GitHub
+  侧同义），轮询 `headSHA == current` 早退与之对称而非漏补；真补会绕过
+  `TriggerReopened` 勾选位并破坏「一 SHA 一运行」键控模型。已知角落：丢
+  webhook 时 `ready_for_review`/`reopened` 无法还原真实动作，轮询把 draft
+  转正/重开的 PR 归为 `opened`（受
   TriggerOpened 约束）——只勾 `ready_for_review` 不勾 `opened` 的项目此
   场景漏补。单项目/单 PR 失败只记日志继续下一个，不中断整轮。启动不立即
   跑首轮（进程刚起来时 webhook backlog 还在路上），第一个 tick 在 5 分钟后。

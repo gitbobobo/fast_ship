@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -326,7 +327,10 @@ func (c *ForgejoReviewClient) selfLogin(ctx context.Context) (string, error) {
 }
 
 // learnLogin 从写接口响应的 user.login 学 PAT 所属账号（仓库级 PAT 下
-// GET /user 不可用时的唯一来源）。与 botLogin 共用同一份缓存。
+// GET /user 不可用时的唯一来源）。只在「响应 user 必然是自己」的 POST
+// 路径调用（create/review 的作者就是 PAT 所属账号）——PATCH 响应用的
+// user 是评论原作者，marker-only 退化命中伪造评论时会把攻击者 login 学
+// 进缓存。与 botLogin 共用同一份缓存。
 func (c *ForgejoReviewClient) learnLogin(login string) {
 	if login == "" {
 		return
@@ -396,15 +400,15 @@ func (c *ForgejoReviewClient) UpdatePullRequestComment(ctx context.Context, repo
 	if err != nil {
 		return err
 	}
-	var wire struct {
-		User forgejoUser `json:"user"`
-	}
+	// PATCH 响应不学 login：评论对象的 user 是原作者不是编辑者——marker-only
+	// 退化命中他人伪造评论且 PAT 有权编辑他人评论时，会把攻击者 login 学进
+	// 共享缓存（中毒是持久的：Self 把攻击者当自己、真机器人评论回流历史）。
+	// 学习只走「响应 user 必然等于 PAT 所属账号」的 POST 路径（create/review）。
 	if err := c.do(ctx, http.MethodPatch,
 		"/repos/"+repo+"/issues/comments/"+strconv.FormatInt(commentID, 10),
-		map[string]string{"body": body}, &wire); err != nil {
+		map[string]string{"body": body}, nil); err != nil {
 		return err
 	}
-	c.learnLogin(wire.User.Login)
 	return nil
 }
 
@@ -558,5 +562,9 @@ func (c *ForgejoReviewClient) pagedPages(ctx context.Context, basePath string, c
 			return nil
 		}
 	}
+	// 页数到顶（limit×maxPages 条）还没见空页 = 静默截断：降级不挂起但留痕——
+	// 超大 PR 的 marker 评论可能在截断面外，FindPullRequestComment 会再发一条。
+	slog.WarnContext(ctx, "Forgejo 分页到达上限，结果可能被截断",
+		slog.String("path", basePath), slog.Int("max_pages", forgejoMaxPages))
 	return nil
 }

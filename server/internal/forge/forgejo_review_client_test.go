@@ -239,6 +239,29 @@ func TestForgejoClient_SelfLogin_TransientErrorPropagates(t *testing.T) {
 	}
 }
 
+// TestForgejoClient_UpdateComment_NoLearnForeignLogin PATCH 响应的 user 是
+// 原作者不是编辑者：marker-only 命中他人伪造评论时不得把其 login 学进缓存
+// （否则 Self/对账认攻击者为自己且持久中毒——fsb 第 5 轮 P2）。
+func TestForgejoClient_UpdateComment_NoLearnForeignLogin(t *testing.T) {
+	client, _ := newForgejoTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/v1/user":
+			w.WriteHeader(http.StatusForbidden)
+		case r.Method == http.MethodPatch:
+			// Forgejo PATCH 回评论对象：user=原作者（伪造者），不是 PAT 账号。
+			_, _ = w.Write([]byte(`{"id": 1, "body": "x", "user": {"login": "mallory"}}`))
+		default:
+			_, _ = w.Write([]byte(`[]`))
+		}
+	})
+	if err := client.UpdatePullRequestComment(context.Background(), "o/r", 1, "b"); err != nil {
+		t.Fatalf("UpdatePullRequestComment: %v", err)
+	}
+	if got := client.loginCache.login; got != "" {
+		t.Fatalf("PATCH 响应不得学习 login，got %q", got)
+	}
+}
+
 // TestForgejoClient_SharedLoginCache 跨实例身份：写响应学到的 login 存进
 // resolver 分槽共享缓存（/user 恒 403 的仓库级 PAT 下 Self 标记才不致随
 // 实例重建永久失效）——第二个实例不再探测 /user 也能标 Self。
