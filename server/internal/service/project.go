@@ -707,7 +707,9 @@ func (s *ProjectService) parseRepoBinding(raw string, forPublic bool) (owner, re
 			errs.ErrInvalidParams.Message+": 公开仓库仅支持 GitHub，"+displayRepoHost(raw, host)+" 不是本部署的 GitHub 实例")
 	}
 	if !found {
-		return "", "", "", "", "", errRepoHostUnmatched(displayRepoHost(raw, host))
+		// 无 scheme 的裸主机按 https 归一（host:443 键）：http-only 集成
+		// （host:80 键）匹配不上时点明写全 http://，报错才有指向性。
+		return "", "", "", "", "", errRepoHostUnmatched(displayRepoHost(raw, host), !strings.Contains(raw, "://"))
 	}
 	return owner, repo, id, key, "", nil
 }
@@ -737,9 +739,13 @@ func displayRepoHost(raw, host string) string {
 }
 
 // errRepoHostUnmatched 仓库 URL 主机未命中任何已配置集成（40001 系）。
-func errRepoHostUnmatched(host string) *errs.AppError {
-	return errs.New(errs.ErrInvalidParams.Code,
-		errs.ErrInvalidParams.Message+": 仓库主机 "+host+" 未匹配任何已配置集成")
+// schemeless 为 true（用户没写 http(s)://）时补一条 http 实例写法提示。
+func errRepoHostUnmatched(host string, schemeless bool) *errs.AppError {
+	msg := errs.ErrInvalidParams.Message + ": 仓库主机 " + host + " 未匹配任何已配置集成"
+	if schemeless {
+		msg += "（若实例为 http 服务，请写全 http://" + host + "/owner/repo）"
+	}
+	return errs.New(errs.ErrInvalidParams.Code, msg)
 }
 
 // errForgeBindingGone 项目写路径的存在性条件拦下的集成失效（40001）：
@@ -896,10 +902,15 @@ func (s *ProjectService) forgeIntegrationsByIDs(projects []model.Project) (map[s
 	if s.forgeIntegrations == nil {
 		return out, nil
 	}
+	// public_integration_id 本期恒为空（公开仓 GitHub-only），仍一并收集——
+	// 未来启用公开仓集成绑定时渲染路径不会再漏取该行。
 	ids := make([]string, 0, len(projects))
 	for i := range projects {
 		if projects[i].CodeIntegrationID != "" {
 			ids = append(ids, projects[i].CodeIntegrationID)
+		}
+		if projects[i].PublicIntegrationID != "" {
+			ids = append(ids, projects[i].PublicIntegrationID)
 		}
 	}
 	rows, err := s.forgeIntegrations.ListByIDs(ids)

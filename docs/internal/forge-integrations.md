@@ -142,8 +142,10 @@ PR 审查执行面是 GitHub only，设置面也按同一口径表达「不可�
   与 `base_url` 不同主机：网关/分体部署（web 与 API 分离反代）是支持的
   形态。注意 PAT 以 `Authorization: token` 头随探测与 API 请求发往的是
   **api 主机**——钉到第三方主机会把该集成的 PAT 发给那台主机，这是管理
-  员对自己凭证的显式选择（仅限其可控基础设施，SSRF 私网防护照常生效），
-  `rejectDeadForgeHost` 的死主机拦截只管 `base_url`、不管 api 端点。私网
+  员对自己凭证的显式选择（仅限其可控基础设施，SSRF 私网防护照常生效）。
+  `rejectDeadForgeHost` 的死主机拦截对两个基址同口径：api 端点钉到
+  github.com / 本部署 GitHub 主机会 40001（死配置之外还会把 PAT 发往
+  GitHub 基础设施）。私网
   放行名单（`Config.AllowedHosts`）也同时纳入 api 主机；「同归一主机只
   允许一个集成」的查重只管 `base_url`。
 - **不收 userinfo**：`https://user:pass@host` 直接 40001——凭证随 base_url
@@ -154,7 +156,8 @@ PR 审查执行面是 GitHub only，设置面也按同一口径表达「不可�
   集成名。http 与 https 因缺省端口不同算两个主机，与项目侧仓库 URL 的匹配
   口径一致。查重在 service 层先做（归一键在 SQL 里算不出来，错误消息也更
   友好）；`host_key` 列上的部分唯一索引
-  `idx_forge_integrations_host_key … WHERE host_key <> ''` 兜查重通过后同
+  `idx_forge_integrations_host_key … WHERE host_key <> '' AND kind = 'forgejo'`
+  兜查重通过后同
   主机被并发抢注的窗口——后写者从唯一索引冲突折回同类 40001（按归一键现查
   点名占用集成，查不到用不带名字的泛化文案），不会再多出一条同主机集成。
   启动迁移 `migrateForgeHostKeys` 给存量行按 base_url 回填 host_key（在
@@ -265,7 +268,11 @@ Forgejo 基址是管理员可填的任意 URL，必须把「内网探测」挡�
   改指、rebinding 后的第二次解析照样拦。私网口径放行的段：RFC1918、ULA
   fc00::/7、CGNAT 100.64.0.0/10 与公网。**放行段里的云元数据端点是精确例外、
   两口径恒拒**：AWS IMDS `fd00:ec2::254`（ULA 段内）与阿里云 `100.100.100.200`
-  （CGNAT 段内）——否则 PAT 探测直接送进元数据服务。
+  （CGNAT 段内）——否则 PAT 探测直接送进元数据服务。**注意放行粒度是
+  「配置主机解析到的任意 RFC1918/ULA/CGNAT 地址」，不钉保存时解析出的具体
+  IP**：DNS 重绑或解析漂移可把带 PAT 的探测导向内网其他主机——这是私网
+  放行的定义内残余面（回环/链路本地/元数据仍恒拒），只在 DNS 可信的环境
+  开启。
 - **重定向规则**：目标 host:port 必须与首个请求一致（跨主机拒绝，端口按
   scheme 缺省补齐后比较）；未开私网放行时每一跳都必须 https；**任何配置下
   https→http 的降级跳转都拒绝**（`ErrSchemeDowngrade`——明文 http 只该来自

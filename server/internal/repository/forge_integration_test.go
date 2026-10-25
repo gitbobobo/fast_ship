@@ -158,12 +158,12 @@ func TestForgeIntegrationReferencingProjects(t *testing.T) {
 	mkProject("公开引用", "", integrationID)
 	mkProject("无引用", "", "")
 
-	refs, err := repo.ReferencingProjects(integrationID)
+	refs, total, err := repo.ReferencingProjects(integrationID, 20)
 	if err != nil {
 		t.Fatalf("refs: %v", err)
 	}
-	if len(refs) != 2 {
-		t.Fatalf("refs = %+v, want 2 projects", refs)
+	if len(refs) != 2 || total != 2 {
+		t.Fatalf("refs = %+v (total %d), want 2 projects", refs, total)
 	}
 	names := map[string]bool{}
 	for _, ref := range refs {
@@ -173,8 +173,13 @@ func TestForgeIntegrationReferencingProjects(t *testing.T) {
 		t.Fatalf("refs missing expected projects: %+v", refs)
 	}
 
-	refs, err = repo.ReferencingProjects(uuid.NewString())
-	if err != nil || len(refs) != 0 {
-		t.Fatalf("unreferenced refs = %+v, %v", refs, err)
+	refs, total, err = repo.ReferencingProjects(uuid.NewString(), 20)
+	if err != nil || len(refs) != 0 || total != 0 {
+		t.Fatalf("unreferenced refs = %+v (total %d), %v", refs, total, err)
+	}
+	// limit 截断：只回前 limit 条但 total 仍是全量计数。
+	refs, total, err = repo.ReferencingProjects(integrationID, 1)
+	if err != nil || len(refs) != 1 || total != 2 {
+		t.Fatalf("limited refs = %+v (total %d), %v", refs, total, err)
 	}
 }

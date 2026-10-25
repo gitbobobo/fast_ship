@@ -235,6 +235,16 @@ func TestForgeIntegrationCreateValidation(t *testing.T) {
 		t.Fatalf("dead github host should be rejected with clear message, got %v", err)
 	}
 
+	// api_base_url 钉到 GitHub 属主机同口径拒收：死配置之外还会把集成
+	// PAT 随探测请求发往 GitHub 基础设施（R46 P2）。
+	_, err = env.svc.Create(ctx, &api.CreateForgeIntegrationRequest{
+		Name: "n", BaseUrl: "https://forge.example.com", Token: "tok",
+		ApiBaseUrl: ptrStr("https://api.github.com"),
+	})
+	if aerr := appErr(t, err); aerr.Code != 40001 || !strings.Contains(aerr.Message, "api_base_url 指向 GitHub 主机") {
+		t.Fatalf("dead api host should be rejected, got %v", err)
+	}
+
 	// token 必填先于基址校验：缺 token 的请求不该先做 DNS/SSRF 校验再报基址。
 	_, err = env.svc.Create(ctx, forgeCreateReq("n", "not-a-url", ""))
 	if aerr := appErr(t, err); aerr.Code != 40001 || !strings.Contains(aerr.Message, "token") {
@@ -633,6 +643,28 @@ func TestForgeIntegrationDeleteRules(t *testing.T) {
 	}
 	if !strings.Contains(delErr.Message, "引用项目A") {
 		t.Fatalf("message should list project name: %s", delErr.Message)
+	}
+
+	// 超量引用：名串截断为前 20 条 + 「等 N 个项目」收尾，不随引用数
+	// 膨胀（R46 P2——部署级集成的引用项目不分属主）。
+	many := forgeCreateReq("forge-many", "https://fm.example.com", "tok")
+	createdMany, err := env.svc.Create(ctx, many)
+	if err != nil {
+		t.Fatalf("create many-ref integration: %v", err)
+	}
+	for i := 0; i < 25; i++ {
+		p := model.Project{ID: uuid.NewString(), UserID: uuid.NewString(),
+			Name: fmt.Sprintf("p%02d", i), CodeIntegrationID: createdMany.Id}
+		if err := env.db.Create(&p).Error; err != nil {
+			t.Fatalf("create ref project %d: %v", i, err)
+		}
+	}
+	delErr = appErr(t, env.svc.Delete(ctx, createdMany.Id))
+	if delErr.Code != 40935 || !strings.Contains(delErr.Message, "等 25 个项目") {
+		t.Fatalf("truncated in-use message should end with count, got: %s", delErr.Message)
+	}
+	if strings.Contains(delErr.Message, "p00") {
+		t.Fatalf("preview should be limited to 20 names, got: %s", delErr.Message)
 	}
 
 	// 解除引用后可删。

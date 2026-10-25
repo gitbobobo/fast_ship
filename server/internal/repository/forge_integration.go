@@ -145,14 +145,23 @@ func (r *ForgeIntegrationRepository) DeleteIfUnreferenced(id string) (int64, err
 }
 
 // ReferencingProjects 返回 code_integration_id / public_integration_id 任一引用了
-// 该集成的项目（id+name，按创建时间倒序）。删除集成前调用：非空即被引用，
-// 返回 ErrForgeIntegrationInUse 并把项目名拼进消息。
-func (r *ForgeIntegrationRepository) ReferencingProjects(id string) ([]ReferencingProject, error) {
+// 该集成的项目（id+name，按创建时间倒序，limit 条预览）与引用总数。删除集成
+// 前调用：非空即被引用，返回 ErrForgeIntegrationInUse 并把项目名拼进消息——
+// limit 截断防报错随引用数膨胀（部署级集成的引用项目不分属主，名串是全量
+// 用户项目名，只给前几条够指明阻塞对象）。
+func (r *ForgeIntegrationRepository) ReferencingProjects(id string, limit int) ([]ReferencingProject, int64, error) {
+	var total int64
+	if err := r.db.Model(&model.Project{}).
+		Where("code_integration_id = ? OR public_integration_id = ?", id, id).
+		Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
 	var projects []ReferencingProject
 	err := r.db.Model(&model.Project{}).
 		Select("id, name").
 		Where("code_integration_id = ? OR public_integration_id = ?", id, id).
 		Order("created_at DESC").
+		Limit(limit).
 		Scan(&projects).Error
-	return projects, err
+	return projects, total, err
 }

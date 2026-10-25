@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/godbobo/fast_ship/server/internal/api"
@@ -407,21 +408,42 @@ func (s *ForgeIntegrationService) Delete(ctx context.Context, id string) error {
 	if _, err := s.repo.FindByID(id); err != nil {
 		return s.notFound(err)
 	}
-	refs, err := s.repo.ReferencingProjects(id)
+	names, err := s.referencingNames(id)
+	if err != nil {
+		return err
+	}
+	if names == "" {
+		// 竞态窗口：删 0 行但行还在时引用已消失，消息别拖一条裸「：」。
+		return errs.ErrForgeIntegrationInUse
+	}
+	return errs.New(errs.ErrForgeIntegrationInUse.Code,
+		errs.ErrForgeIntegrationInUse.Message+"："+names)
+}
+
+// referencingProjectsPreview 报错里项目名预览上限：部署级集成的引用项目
+// 不分属主，名串是全量用户项目名——截断防消息膨胀，总数另以「等 N 个」收尾。
+const referencingProjectsPreview = 20
+
+// referencingNames 引用项目名拼串：前 referencingProjectsPreview 个名顿号
+// 相连，总数超出时追加「…等 N 个项目」；无引用返回空串。
+func (s *ForgeIntegrationService) referencingNames(id string) (string, error) {
+	refs, total, err := s.repo.ReferencingProjects(id, referencingProjectsPreview)
 	if err != nil {
 		s.logger.Error("统计集成引用项目失败", zap.Error(err))
-		return errs.ErrInternal
+		return "", errs.ErrInternal
 	}
 	names := make([]string, 0, len(refs))
 	for _, ref := range refs {
 		names = append(names, ref.Name)
 	}
 	if len(names) == 0 {
-		// 竞态窗口：删 0 行但行还在时引用已消失，消息别拖一条裸「：」。
-		return errs.ErrForgeIntegrationInUse
+		return "", nil
 	}
-	return errs.New(errs.ErrForgeIntegrationInUse.Code,
-		errs.ErrForgeIntegrationInUse.Message+"："+strings.Join(names, "、"))
+	text := strings.Join(names, "、")
+	if total > int64(len(refs)) {
+		text += " 等 " + strconv.FormatInt(total, 10) + " 个项目"
+	}
+	return text, nil
 }
 
 // hostMigrationInUseErr 归一主机变更仍被项目引用时的拒绝：UpdateColumnsIf-
@@ -431,20 +453,15 @@ func (s *ForgeIntegrationService) hostMigrationInUseErr(id string) error {
 	if _, err := s.repo.FindByID(id); err != nil {
 		return s.notFound(err)
 	}
-	refs, err := s.repo.ReferencingProjects(id)
+	names, err := s.referencingNames(id)
 	if err != nil {
-		s.logger.Error("统计集成引用项目失败", zap.Error(err))
-		return errs.ErrInternal
+		return err
 	}
-	names := make([]string, 0, len(refs))
-	for _, ref := range refs {
-		names = append(names, ref.Name)
-	}
-	if len(names) == 0 {
+	if names == "" {
 		return errs.ErrForgeIntegrationInUse
 	}
 	return errs.New(errs.ErrForgeIntegrationInUse.Code,
-		"该集成仍被项目引用，不能更改站点主机（改主机等同迁移全部绑定，请先解除项目绑定或新建集成后逐个改绑）："+strings.Join(names, "、"))
+		"该集成仍被项目引用，不能更改站点主机（改主机等同迁移全部绑定，请先解除项目绑定或新建集成后逐个改绑）："+names)
 }
 
 // Test POST /api/deployment/integrations/:id/test：解密 token 后按集成现建
@@ -587,6 +604,13 @@ func (s *ForgeIntegrationService) resolveURLs(ctx context.Context, currentBase, 
 	if err != nil {
 		return "", "", &urlFieldErr{field: "api_base_url", cause: err, appErr: paramError(err)}
 	}
+	// api 基址同口径拒 GitHub 属主机：钉到 github.com / 本部署 GitHub 的
+	// api_base_url 永远不是 Forgejo 端点——死配置之外还会把集成 PAT 随
+	// 探测请求发往 GitHub 基础设施（凭证外带通道）。跨主机钉到可控的
+	// 自建网关仍放行（管理员对自身凭证的显式选择）。
+	if s.rejectDeadForgeHost(apiStore) != nil {
+		return "", "", errForgeDeadHostAPI
+	}
 	return base, apiStore, nil
 }
 
@@ -636,6 +660,11 @@ var errForgeBaseRootRequired = errs.New(errs.ErrInvalidParams.Code,
 // errForgeDeadHost base_url 指向 GitHub 主机（40001）：配了也绑不上的死配置。
 var errForgeDeadHost = errs.New(errs.ErrInvalidParams.Code,
 	"base_url 指向 GitHub 主机——github.com 与本部署 GitHub 实例的仓库归内置 GitHub 集成，Forgejo 集成不会命中")
+
+// errForgeDeadHostAPI api_base_url 指向 GitHub 主机（40001）：死配置之外
+// 还会把集成 PAT 随探测请求发往 GitHub 基础设施。
+var errForgeDeadHostAPI = errs.New(errs.ErrInvalidParams.Code,
+	"api_base_url 指向 GitHub 主机——github.com 与本部署 GitHub 实例归内置集成，Forgejo API 基址不会命中")
 
 // requireBaseRoot base_url 形状收口：空路径与 "/" 都算站点根。
 func requireBaseRoot(baseURL string) error {

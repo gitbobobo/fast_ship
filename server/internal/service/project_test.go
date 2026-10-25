@@ -1743,6 +1743,19 @@ func TestProjectServiceCreate_ForgeIntegrationBinding(t *testing.T) {
 	if !ok || appErr.Code != errs.ErrInvalidParams.Code || !strings.Contains(appErr.Message, "未匹配任何已配置集成") {
 		t.Fatalf("expected 40001 scheme mismatch, got %v", err)
 	}
+	// 无 scheme 输入补 http 写法提示（http-only 实例的归一键是 host:80）。
+	if !strings.Contains(appErr.Message, "http://git.lan") {
+		t.Fatalf("schemeless input should hint http:// form, got %q", appErr.Message)
+	}
+	// 已带 scheme 的输入不追加该提示。
+	_, err = forgeSvc.Create(user.ID, &CreateProjectRequest{
+		Name:              "forge-bind-http-mismatch2",
+		CodeRepositoryUrl: api.Ptr("https://git.lan/o/r"),
+	})
+	appErr, ok = err.(*errs.AppError)
+	if !ok || strings.Contains(appErr.Message, "http://git.lan/o") {
+		t.Fatalf("schemed input should not get http hint, got %q", appErr.Message)
+	}
 
 	// 未知主机 → 明确报错，不再静默解析成 owner。
 	_, err = forgeSvc.Create(user.ID, &CreateProjectRequest{
