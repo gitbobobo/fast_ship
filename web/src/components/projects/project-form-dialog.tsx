@@ -253,15 +253,13 @@ export function ProjectFormDialog({
         integrationHost = "";
       }
     }
-    if (
-      !selectedIntegration ||
-      !parts.owner ||
-      !parts.repo ||
-      (inputHost !== "" && integrationHost !== "" && inputHost !== integrationHost)
-    ) {
+    // 输入带显式主机时，集成主机解析不出不能静默跳过比对——回退通用错误，
+    // 跨主机错绑不放行。
+    const hostMismatch = inputHost !== "" && inputHost !== integrationHost;
+    if (!selectedIntegration || !parts.owner || !parts.repo || hostMismatch) {
       setError("code_repository_url", {
         message:
-          inputHost !== "" && integrationHost !== "" && inputHost !== integrationHost
+          hostMismatch && integrationHost !== ""
             ? `仓库地址主机 ${inputHost} 与所选集成（${integrationHost}）不一致`
             : selectedIntegration
               ? "格式：owner/repo（或完整仓库地址）"

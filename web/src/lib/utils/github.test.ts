@@ -249,13 +249,21 @@ describe("codeRepoUrlFromSlug", () => {
 });
 
 describe("hostFromRepoInput", () => {
-  it("scheme 形态与裸主机段都能取出主机，owner/repo 与裸 github.com 前缀返回空", () => {
+  it("scheme 形态取主机并剥缺省端口；裸 github.com 前缀算显式主机", () => {
     expect(hostFromRepoInput("https://forge-b.example.com/acme/app")).toBe("forge-b.example.com");
-    expect(hostFromRepoInput("forge-b.example.com/acme/app")).toBe("forge-b.example.com");
-    expect(hostFromRepoInput("forge.example.com:8443/acme/app")).toBe("forge.example.com:8443");
+    // scheme 缺省端口与 new URL().host 同口径归一。
+    expect(hostFromRepoInput("https://forge.example.com:443/o/r")).toBe("forge.example.com");
+    expect(hostFromRepoInput("http://forge.example.com:80/o/r")).toBe("forge.example.com");
+    expect(hostFromRepoInput("https://forge.example.com:8443/o/r")).toBe("forge.example.com:8443");
+    expect(hostFromRepoInput("github.com/acme/app")).toBe("github.com");
+  });
+  it("两段式裸输入不是主机（含点 owner），三段以上首段含点才当主机段", () => {
+    // Forgejo 允许组织名含点：my.org/repo 是 owner/repo，不是主机。
+    expect(hostFromRepoInput("my.org/repo")).toBe("");
     expect(hostFromRepoInput("acme/app")).toBe("");
     expect(hostFromRepoInput("")).toBe("");
-    // github.com/ 前缀是裸主机段（含点）——跨主机比对仍生效。
-    expect(hostFromRepoInput("github.com/acme/app")).toBe("github.com");
+    // host/o/r 反正解析失败——取出主机只为报「主机不一致」而非泛泛格式错。
+    expect(hostFromRepoInput("forge-b.example.com/acme/app")).toBe("forge-b.example.com");
+    expect(hostFromRepoInput("forge.example.com:8443/acme/app")).toBe("forge.example.com:8443");
   });
 });

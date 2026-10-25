@@ -143,13 +143,28 @@ export function hostFromRepoInput(raw: string): string {
   const protoIdx = rest.indexOf("://");
   if (protoIdx !== -1) {
     const slash = rest.indexOf("/", protoIdx + 3);
-    const host = slash === -1 ? rest.slice(protoIdx + 3) : rest.slice(protoIdx + 3, slash);
+    let host = slash === -1 ? rest.slice(protoIdx + 3) : rest.slice(protoIdx + 3, slash);
+    // scheme 缺省端口与 new URL().host 的归一同口径——https://x:443 与
+    // https://x 是同一主机，不剥会把等价地址误报成主机不一致。
+    const scheme = rest.slice(0, protoIdx).toLowerCase();
+    const defaultPort = scheme === "https" ? ":443" : scheme === "http" ? ":80" : "";
+    if (defaultPort !== "" && host.toLowerCase().endsWith(defaultPort)) {
+      host = host.slice(0, -defaultPort.length);
+    }
     return host.toLowerCase();
   }
+  // 裸形态与 ownerRepoFromInput 会剥的口径对齐：只有 github.com/ 前缀会被
+  // 剥掉，故只有它算显式主机；两段式 my.org/repo 是含点 owner（剥掉只剩
+  // 一段，本就不是主机），三段以上 host/o/r 反正解析失败——取首段只为把
+  // 「格式错误」换成更准的「主机不一致」。
   const slash = rest.indexOf("/");
   if (slash === -1) return "";
   const first = rest.slice(0, slash);
-  if (first.includes(".") || first.includes(":")) return first.toLowerCase();
+  if (first.toLowerCase() === "github.com") return "github.com";
+  const tailSegments = rest.slice(slash + 1).split("/").length;
+  if (tailSegments >= 2 && (first.includes(".") || first.includes(":"))) {
+    return first.toLowerCase();
+  }
   return "";
 }
 

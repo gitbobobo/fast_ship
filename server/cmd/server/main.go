@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -318,14 +319,29 @@ func main() {
 	// 截图下载面的凭证闸门要知道本部署的 GitHub 实例（GHE 拉私有附件）：只对
 	// 同一实例（host[:port]）的附件路径带 App 安装令牌重试，公共 GitHub 部署
 	// 下即 github.com。
+	var dynamicTrustedHostsMu sync.Mutex
+	var dynamicTrustedHostsCache []string
+	var dynamicTrustedHostsAt time.Time
 	reviewMediaService := githubmedia.NewReviewMediaService(cfg.Upload.StoragePath,
 		githubmedia.GitHubWebHost(cfg.GitHubApp.APIBaseURL), cfg.ReviewMedia.TrustedPrivateHosts,
 		func() []string {
 			// allow_private_network 的 Forgejo 集成主机随名单动态放行：自建
 			// 实例常在内网，API 已获准私网拨号，截图面不能把同一主机的附件
 			// 全拦成 ErrBlockedUpstreamAddress。名单外主机仍走 IP 校验。
+			// 拨号路径每次都会调本函数，结果加短 TTL 缓存——List 每次拨号
+			// 都打 DB 会把媒体抓取的延迟与压力叠到数据库上；几秒内的配置
+			// 变更延迟生效可接受（放行收紧方向上的最坏情况只是多用几秒
+			// 旧名单，主机校验本身不变弱）。
+			dynamicTrustedHostsMu.Lock()
+			defer dynamicTrustedHostsMu.Unlock()
+			if time.Since(dynamicTrustedHostsAt) < 10*time.Second {
+				return dynamicTrustedHostsCache
+			}
 			rows, lerr := forgeIntegrationRepo.List()
 			if lerr != nil {
+				// 出错同样推进时间戳：DB 持续故障时每条新连接都打一次
+				// List 反而放大压力，短窗内返回 nil 走守卫即可。
+				dynamicTrustedHostsAt = time.Now()
 				return nil
 			}
 			var hosts []string
@@ -340,6 +356,8 @@ func main() {
 					}
 				}
 			}
+			dynamicTrustedHostsCache = hosts
+			dynamicTrustedHostsAt = time.Now()
 			return hosts
 		})
 	// shell 订阅 hub（INT-116）：每环境常驻活跃/归档两条 WS，列表与运行态读取
