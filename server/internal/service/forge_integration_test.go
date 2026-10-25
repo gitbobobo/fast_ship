@@ -273,17 +273,30 @@ func TestForgeIntegrationUpdateThreeStates(t *testing.T) {
 		t.Fatal("omitted webhook secret must keep old ciphertext")
 	}
 
-	// 显式空串：token 保留旧值（必填项不支持清空）；webhook_secret 与
-	// ca_cert_pem 同口径清空——设错或撤掉验签时不用删集成重建。
+	// 显式空串 token：必需凭证不可清空，40001 报错且密文不动——粘贴空白的
+	// 轮换场景需要明确失败信号（R39 P2）。
 	_, err = env.svc.Update(ctx, created.Id, &api.UpdateForgeIntegrationRequest{
-		Token: ptrStr(""), WebhookSecret: ptrStr(""), CaCertPem: ptrStr(""),
+		Token: ptrStr("   "),
+	})
+	if appErrorCode(t, err) != 40001 {
+		t.Fatalf("empty token code = %d, want 40001", appErrorCode(t, err))
+	}
+	row, _ = env.repo.FindByID(created.Id)
+	if !bytesEqual(row.TokenEncrypted, rowAtCreate.TokenEncrypted) {
+		t.Fatal("rejected empty token must keep old ciphertext")
+	}
+
+	// webhook_secret 与 ca_cert_pem 空串清空——设错或撤掉验签时不用删集成
+	// 重建。
+	_, err = env.svc.Update(ctx, created.Id, &api.UpdateForgeIntegrationRequest{
+		WebhookSecret: ptrStr(""), CaCertPem: ptrStr(""),
 	})
 	if err != nil {
 		t.Fatalf("update empty strings: %v", err)
 	}
 	row, _ = env.repo.FindByID(created.Id)
 	if !bytesEqual(row.TokenEncrypted, rowAtCreate.TokenEncrypted) {
-		t.Fatal("empty token must keep old ciphertext")
+		t.Fatal("omitted token must keep old ciphertext")
 	}
 	if len(row.WebhookSecretEncrypted) != 0 {
 		t.Fatal("empty webhook_secret should clear stored secret")

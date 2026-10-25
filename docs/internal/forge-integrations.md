@@ -209,6 +209,12 @@ owner/repo 不能被发到 github.com。列表路径一次批量取回涉及的�
 github.com 渲染，启动迁移 `migrateProjectGithubHosts` 把 NULL 一次性收成
 `'github.com'` 保住旧语义（新写入的行恒为 `''`/`'github.com'`，不会被误收）。
 
+已知取舍：两类意图在存量数据上无法区分。GHE 部署上历史项目的公开仓若实际
+在部署实例上（彼时 code_repo_url 渲染 github.com 本就是错链），回填会把这些
+行永久锁定为公共 github.com——Update 仅在 repository_url 非空时重解析，
+旧行不自愈；GHE 部署的存量行需管理员手动重存一次仓库地址（改成 GHE 主机
+形态或裸 `o/r`）以纠正主机归属。
+
 ## 密钥存储
 
 与部署级 GitHub App 同一模式（`integration.go`）：明文只在 service 层内存里
@@ -218,8 +224,9 @@ github.com 渲染，启动迁移 `migrateProjectGithubHosts` 把 NULL 一次性�
 
 写接口三态：
 
-- `token`：缺省、null、空串都 = 保留旧值（必填凭证，**不支持清空**——要
-  作废就删除集成重建）。
+- `token`：缺省、null = 保留旧值；**空串 = 40001**（必填凭证不支持清空，
+  要作废就删除集成重建）——显式空串/纯空白按「想改没改成」报错，避免
+  粘贴空白的轮换场景被静默保留、管理员误以为已轮换。
 - `webhook_secret`：缺省、null = 保留；空串 = 清空已存密钥（与 ca_cert_pem
   同口径——设错或撤掉验签时不用删集成重建，编辑框有「清空已存密钥」
   勾选）；其余替换并加密落库。

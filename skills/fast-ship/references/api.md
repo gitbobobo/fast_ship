@@ -11786,8 +11786,9 @@ webhook_secret 加密落库、永不回显。allow_private_network=true 放行�
 
 仅管理员。部分更新：省略的字段保持不变。base_url / api_base_url 变更时
 重新做 SSRF 校验（含 DNS）；allow_private_network 关闭会按公网口径
-复核现有基址。token / webhook_secret 省略、null 或空串 = 保留旧值；
-ca_cert_pem 省略 = 保留、空串 = 清空；api_base_url 空串 = 重置为
+复核现有基址。token 省略/null = 保留、空串 = 40001（必需凭证不可清空）；
+webhook_secret / ca_cert_pem 省略或 null = 保留、空串 = 清空；
+api_base_url 空串 = 重置为
 `{base_url}/api/v1`。内置 github-default 不可通过本端点修改（40001）。
 base_url 归一主机变更等同迁移全部项目绑定：仍有项目引用时拒绝
 （40935，消息列引用项目名），须先解除项目绑定或走「新建集成 +
@@ -11812,7 +11813,7 @@ base_url 归一主机变更等同迁移全部项目绑定：仍有项目引用�
 | `name` | string（可空） | 否 | 显示名；null 或空串拒绝（name 不允许为空） |
 | `base_url` | string（可空） | 否 | 基址变更时重新校验（含 DNS）；null 保留 |
 | `api_base_url` | string（可空） | 否 | null 保留（存量恰为旧 base_url 推导值时随新 base_url 重新推导）；空串重置为 {base_url}/api/v1；其余重新校验 |
-| `token` | string（可空） | 否 | 新 PAT；留空（省略、null 或空串）= 保留现值；不支持单独清空，需删除集成重建 |
+| `token` | string（可空） | 否 | 新 PAT；省略或 null = 保留现值；空串 = 40001（必需凭证不可清空，需删除集成重建）；其余替换并加密落库 |
 | `webhook_secret` | string（可空） | 否 | 新验签密钥；省略或 null = 保留现值；空串 = 清空已存密钥；其余替换并加密落库 |
 | `ca_cert_pem` | string（可空） | 否 | null = 保留；空串 = 清空；其余替换并校验 PEM |
 | `allow_private_network` | boolean（可空） | 否 | null = 保留；变更后按新开关复核现有基址 |

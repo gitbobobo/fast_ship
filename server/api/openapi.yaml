@@ -2887,8 +2887,9 @@ paths:
       description: |
         仅管理员。部分更新：省略的字段保持不变。base_url / api_base_url 变更时
         重新做 SSRF 校验（含 DNS）；allow_private_network 关闭会按公网口径
-        复核现有基址。token / webhook_secret 省略、null 或空串 = 保留旧值；
-        ca_cert_pem 省略 = 保留、空串 = 清空；api_base_url 空串 = 重置为
+        复核现有基址。token 省略/null = 保留、空串 = 40001（必需凭证不可清空）；
+        webhook_secret / ca_cert_pem 省略或 null = 保留、空串 = 清空；
+        api_base_url 空串 = 重置为
         `{base_url}/api/v1`。内置 github-default 不可通过本端点修改（40001）。
         base_url 归一主机变更等同迁移全部项目绑定：仍有项目引用时拒绝
         （40935，消息列引用项目名），须先解除项目绑定或走「新建集成 +
@@ -9891,7 +9892,7 @@ components:
         token:
           type: string
           nullable: true
-          description: 新 PAT；留空（省略、null 或空串）= 保留现值；不支持单独清空，需删除集成重建
+          description: 新 PAT；省略或 null = 保留现值；空串 = 40001（必需凭证不可清空，需删除集成重建）；其余替换并加密落库
         webhook_secret:
           type: string
           nullable: true
