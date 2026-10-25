@@ -2184,7 +2184,7 @@ type BotUsageInsightsTask struct {
 	// NoToolCallRuns 条件二：整次运行没有任何工具调用行的 run 数（调用行各状态都计）
 	NoToolCallRuns int64 `json:"no_tool_call_runs"`
 
-	// NoWriteCallRuns 条件三：没有任何写操作调用的 run 数；写操作 = 当前工具注册表 ReadOnly 之外的 action（未知动作按写处理），调用行各状态都计
+	// NoWriteCallRuns 条件三：没有任何有效写操作调用的 run 数；写操作 = 当前工具注册表 ReadOnly 之外的 action（未知动作按写处理），且仅 status=succeeded 或 effect_may_have_occurred 的调用算有效——被拒/取消/失败/未执行的写调用不计
 	NoWriteCallRuns int64 `json:"no_write_call_runs"`
 
 	// SilentRuns 条件一：silent=true（静默哨兵）的 run 数

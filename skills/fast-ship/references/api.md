@@ -8899,7 +8899,7 @@ bots.memory.timezone，再回退 UTC。金额一律来自内置 models.dev 目�
 | `schedule_tasks[].idle_cost` | number（double，可空） | 是 | 空转 run 的显示成本合计（自身 + 关联维护已计价） |
 | `schedule_tasks[].silent_runs` | integer（int64） | 是 | 条件一：silent=true（静默哨兵）的 run 数 |
 | `schedule_tasks[].no_tool_call_runs` | integer（int64） | 是 | 条件二：整次运行没有任何工具调用行的 run 数（调用行各状态都计） |
-| `schedule_tasks[].no_write_call_runs` | integer（int64） | 是 | 条件三：没有任何写操作调用的 run 数；写操作 = 当前工具注册表 ReadOnly 之外的 action（未知动作按写处理），调用行各状态都计 |
+| `schedule_tasks[].no_write_call_runs` | integer（int64） | 是 | 条件三：没有任何有效写操作调用的 run 数；写操作 = 当前工具注册表 ReadOnly 之外的 action（未知动作按写处理），且仅 status=succeeded 或 effect_may_have_occurred 的调用算有效——被拒/取消/失败/未执行的写调用不计 |
 | `schedule_tasks[].cache_hit_rate` | number（double，可空） | 是 | 该任务 schedule run 名下 usage 完整请求的 cached / prompt；无完整 usage 为 null |
 
 **错误**

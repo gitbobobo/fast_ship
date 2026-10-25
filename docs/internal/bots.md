@@ -491,12 +491,15 @@ token 口径合成一次聚合）、关联维护合计、父 run 与任务反查
   分组（NULL 归 null 组，cost 降序、null 组最后）。
 - **空转**：对任务的非 skipped 终态 schedule run（completed/failed/stopped；
   queued/running 不进分母）独立计三个条件——`silent=true`；整次 run 没有任何
-  工具调用行（经 bot_model_requests 关联，各状态都计）；没有任何写操作调用。
+  工具调用行（经 bot_model_requests 关联，各状态都计）；没有任何**有效**写
+  操作调用——仅 `status=succeeded` 或 `effect_may_have_occurred` 的写调用算
+  有效，被拒/取消/失败/未执行的不挡空转（仓库层 triple 查询带
+  `effective_write` 聚合列）。
   写/读判定的事实源是服务层 `botReadOnlyActions`（键 `tool_name/action`），
   未列出的动作按写处理；因是 Go 映射无法下推 SQL，查询按
   `SELECT DISTINCT run_id, tool_name, action` 取去重组合回内存过滤。
   `idle_rate` 分母 0 → null；`idle_cost` 只累计空转 run 的显示成本。
-- **context_growth**：窗口内每个有请求的 run 取 ordinal 最小的请求
+- **context_growth**：窗口内每个有请求的 run 按 (ordinal,id) 字典序取首个请求
   （`JOIN (SELECT run_id, MIN(ordinal)…) ` 子查询，不拉全量请求行），
   usage 完整取 prompt_tokens，缺 usage 回退 input_tokens_estimate 并标
   estimated；按时间升序，每机器人最多保留最新 200 点（超出截掉最早并置

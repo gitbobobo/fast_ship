@@ -6866,7 +6866,7 @@ export interface components {
             no_tool_call_runs: number;
             /**
              * Format: int64
-             * @description 条件三：没有任何写操作调用的 run 数；写操作 = 当前工具注册表 ReadOnly 之外的 action（未知动作按写处理），调用行各状态都计
+             * @description 条件三：没有任何有效写操作调用的 run 数；写操作 = 当前工具注册表 ReadOnly 之外的 action（未知动作按写处理），且仅 status=succeeded 或 effect_may_have_occurred 的调用算有效——被拒/取消/失败/未执行的写调用不计
              */
             no_write_call_runs: number;
             /**
