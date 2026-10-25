@@ -23,6 +23,8 @@ import (
 
 	"golang.org/x/net/html"
 	"golang.org/x/net/html/atom"
+
+	"github.com/godbobo/fast_ship/server/internal/pkg/forges"
 )
 
 const ProxyPath = "/api/github/media-proxy"
@@ -320,15 +322,25 @@ func newGuardedClient(requireHTTPS bool, allowURL func(*url.URL) bool, guardAddr
 		}
 		trusted := normalizeTrustedPrivateHosts(trustedPrivateHosts)
 		if len(trusted) > 0 || trustedHostsFunc != nil {
-			// 名单内主机走不带 Control 的拨号器：判定用 DialContext 收到的
-			// addr 主机名（URL 的 host 部分，DNS 解析之前），不看解析出的
-			// IP——放行粒度是主机名，同一内网地址上反代挂着的其他服务不会
-			// 被连带放行。名单外主机、以及名单内主机 302 跳出的每次新建连
-			// 仍走 guarded 照常校验。trustedHostsFunc 每次拨号现取：新配
-			// 的集成主机无需重启即生效。
+			// 名单内主机跳过 IP 校验：判定用 DialContext 收到的 addr 主机名
+			// （URL 的 host 部分，DNS 解析之前），不看解析出的 IP——放行粒度
+			// 是主机名，同一内网地址上反代挂着的其他服务不会被连带放行。
+			// 名单外主机、以及名单内主机 302 跳出的每次新建连仍走 guarded
+			// 照常校验。trustedHostsFunc 每次拨号现取：新配的集成主机无需
+			// 重启即生效。
+			// 动态名单（allow_private_network 集成主机）不裸放行走私网口径
+			// 守卫——与 Forgejo API 面的 AllowPrivateNetwork 同策略：放行
+			// RFC1918/ULA/CGNAT，但回环、链路本地（含云元数据）、多播、
+			// 未指定与保留段仍恒拒。静态名单保留裸放行（管理员显式声明，
+			// UIV 等回环/私网服务靠它）。
 			direct := &net.Dialer{
 				Timeout:   30 * time.Second,
 				KeepAlive: 30 * time.Second,
+			}
+			privateMode := &net.Dialer{
+				Timeout:   30 * time.Second,
+				KeepAlive: 30 * time.Second,
+				Control:   guardPrivateDialControl,
 			}
 			transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 				if host, _, err := net.SplitHostPort(addr); err == nil {
@@ -339,7 +351,7 @@ func newGuardedClient(requireHTTPS bool, allowURL func(*url.URL) bool, guardAddr
 					if trustedHostsFunc != nil {
 						for _, h := range trustedHostsFunc() {
 							if strings.ToLower(strings.TrimSpace(h)) == host {
-								return direct.DialContext(ctx, network, addr)
+								return privateMode.DialContext(ctx, network, addr)
 							}
 						}
 					}
@@ -402,6 +414,25 @@ func guardDialControl(_, address string, _ syscall.RawConn) error {
 		return fmt.Errorf("上游地址 %q 不是合法 IP", host)
 	}
 	if isBlockedIP(ip) {
+		return ErrBlockedUpstreamAddress
+	}
+	return nil
+}
+
+// guardPrivateDialControl 私网放行口径的拨号校验（allow_private_network
+// 集成主机专用）：复用 forges 包的同一判定源——RFC1918/ULA/CGNAT 放行，
+// 回环、链路本地（含云元数据）、多播、未指定与保留段恒拒。报错统一落
+// ErrBlockedUpstreamAddress 保持下游分类一致。
+func guardPrivateDialControl(_, address string, _ syscall.RawConn) error {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return fmt.Errorf("解析上游地址 %q 失败: %w", address, err)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return fmt.Errorf("上游地址 %q 不是合法 IP", host)
+	}
+	if forges.IsBlockedPrivateMode(ip) {
 		return ErrBlockedUpstreamAddress
 	}
 	return nil

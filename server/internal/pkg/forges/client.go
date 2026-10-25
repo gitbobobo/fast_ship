@@ -529,6 +529,14 @@ func isBlockedPrivateMode(ip net.IP) bool {
 	return blockedByPolicy(ip, false)
 }
 
+// IsBlockedPrivateMode 私网放行口径的导出形态，供本包之外的拨号守卫复用
+// 同一判定源（如审查媒体下载面对 allow_private_network 集成主机的放行）：
+// 语义与 isBlockedPrivateMode 一致——放行 RFC1918/ULA/CGNAT/公网，恒拒
+// 回环、链路本地（含云元数据）、多播、未指定与保留段。
+func IsBlockedPrivateMode(ip net.IP) bool {
+	return isBlockedPrivateMode(ip)
+}
+
 // awsIMDSv6Endpoint AWS IMDS 的 IPv6 端点（EC2 实例元数据服务在 IPv6-only
 // 实例上的固定地址）。它落在 ULA fd00::/8 里，私网放行口径会把它当「内网
 // Forgejo」放过去——但那是元数据服务，偷到凭证等于整个云账号失守，两口径

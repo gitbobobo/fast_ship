@@ -471,10 +471,12 @@ Forgejo 基址是管理员可填的任意 URL，必须把「内网探测」挡�
 - **审查截图下载面同源放行**：PR 附件走的是审查媒体服务
   （`githubmedia`）独立的拨号守卫，不认识上面的 `AllowedHosts`。为此媒体
   服务接了一个动态可信名单：每次拨号时现查 `allow_private_network=true`
-  的集成行并放行其 base_url/api_base_url 主机（绕过私网 IP 拦截，回环/
-  链路本地等仍由直连拨号承担）。名单随集成配置即时生效、不落缓存；
-  名单外主机与跨主机重定向照常走 IP 校验——同 API 面「只放行这个实例」
-  的口径。
+  的集成行并放行其 base_url/api_base_url 主机——但**放行的是私网口径
+  不是裸放行**，与 API 面同判定源（`forges.IsBlockedPrivateMode`）：
+  RFC1918/ULA/CGNAT 放行，回环、链路本地（含云元数据）、多播、保留段
+  恒拒，DNS 重绑后解析漂移也受同一口径约束。名单经 10s TTL 缓存随配置
+  即时生效；名单外主机与跨主机重定向照常走公网口径校验——「只放行这个
+  实例」的语义与 API 面完全一致。
 - **重定向规则**：目标 host:port 必须与首个请求一致（跨主机拒绝，端口按
   scheme 缺省补齐后比较）；未开私网放行时每一跳都必须 https；**任何配置下
   https→http 的降级跳转都拒绝**（`ErrSchemeDowngrade`——明文 http 只该来自

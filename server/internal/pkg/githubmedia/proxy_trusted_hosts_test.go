@@ -109,23 +109,51 @@ func TestReviewMediaRedirectFromTrustedToUntrustedBlocked(t *testing.T) {
 	}
 }
 
-// 动态名单（allow_private_network 集成主机随拨号现查）：func 返回的主机
-// 与静态名单等价放行，且每次拨号重查——名单变化不重启即生效。
+// 动态名单（allow_private_network 集成主机随拨号现查）走私网口径守卫，
+// 不是裸放行——与 Forgejo API 面 AllowPrivateNetwork 同策略：RFC1918/
+// ULA/CGNAT 放行，回环/链路本地/元数据恒拒。localhost 解析回环，即使
+// 主机名在动态名单里也必须被拦（裸拨号路径下本用例会成功）。
 func TestReviewMediaDynamicTrustedHostFunc(t *testing.T) {
 	upstream := pngUpstream(t)
 	cfg := trustedHostTestConfig(nil)
 	trusted := []string{"localhost"}
 	cfg.trustedPrivateHostsFunc = func() []string { return trusted }
 	svc := newService(t.TempDir(), cfg)
-	if _, err := svc.FetchAndCache(context.Background(), localhostURL(t, upstream, "/ok.png")); err != nil {
-		t.Fatalf("dynamic trusted host fetch: %v", err)
+	if _, err := svc.FetchAndCache(context.Background(), localhostURL(t, upstream, "/ok.png")); !errors.Is(err, ErrBlockedUpstreamAddress) {
+		t.Fatalf("err = %v, want ErrBlockedUpstreamAddress（动态名单主机解析回环应被私网口径恒拒）", err)
 	}
-	// 动态名单收窄后新连接立刻回到守卫——不是构造期快照（已建立的
-	// keep-alive 连接复用是 HTTP 语义，换 service 强制新拨号）。
+	// 名单撤销后同一主机仍被拦——私网口径与公网口径对回环结论一致，
+	// 此项防的是「名单失效后回落到无守卫路径」的回归。
 	trusted = nil
 	svc2 := newService(t.TempDir(), cfg)
 	if _, err := svc2.FetchAndCache(context.Background(), localhostURL(t, upstream, "/ok2.png")); !errors.Is(err, ErrBlockedUpstreamAddress) {
 		t.Fatalf("err = %v, want ErrBlockedUpstreamAddress（动态名单撤销后应恢复拦截）", err)
+	}
+}
+
+// guardPrivateDialControl 的段表与 Forgejo API 面同判定源：RFC1918 与
+// CGNAT 放行，回环/链路本地/云元数据（含 CGNAT 段内的阿里云端点）恒拒。
+func TestGuardPrivateDialControl(t *testing.T) {
+	cases := []struct {
+		addr    string
+		blocked bool
+	}{
+		{"10.0.0.1:443", false},       // RFC1918 放行
+		{"172.16.5.4:443", false},     // RFC1918 放行
+		{"192.168.1.2:443", false},    // RFC1918 放行
+		{"100.64.1.1:443", false},     // CGNAT 放行
+		{"8.8.8.8:443", false},        // 公网放行
+		{"127.0.0.1:443", true},       // 回环恒拒
+		{"169.254.169.254:443", true}, // 链路本地/元数据恒拒
+		{"100.100.100.200:443", true}, // CGNAT 段内阿里云元数据恒拒
+		{"0.0.0.0:443", true},         // 未指定恒拒
+		{"224.0.0.1:443", true},       // 多播恒拒
+	}
+	for _, c := range cases {
+		err := guardPrivateDialControl("", c.addr, nil)
+		if c.blocked != errors.Is(err, ErrBlockedUpstreamAddress) {
+			t.Fatalf("%s: err=%v, want blocked=%v", c.addr, err, c.blocked)
+		}
 	}
 }
 
