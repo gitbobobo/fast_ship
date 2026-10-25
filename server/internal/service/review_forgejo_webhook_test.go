@@ -851,3 +851,48 @@ func TestHandleForgejoWebhook_CrossRepoForkRejected(t *testing.T) {
 		t.Fatalf("seen head = %q", seen.HeadSHA)
 	}
 }
+
+// TestHandleForgejoWebhook_SameTimestampDifferentHead 秒级 updated_at 下连推：
+// payload 固定同一时间戳，两个不同 head 的投递都必须受理——同刻谓词只对
+// 「同时刻同 head」（重复投递）早退，不同 head 放行交给去重路径。
+func TestHandleForgejoWebhook_SameTimestampDifferentHead(t *testing.T) {
+	svc := setupTestServices(t)
+	forgeID := createTestForgeIntegration(t, svc.db, "https://forge.example.com").ID
+	project, _ := seedForgejoReviewProject(t, svc, forgeID, "fj-ts", "acme/app", nil)
+	review := newReviewTestService(t, svc, nil, nil, nil)
+
+	if err := review.HandleForgejoWebhook(context.Background(), forgeID, "pull_request", "d-t1",
+		forgejoPullPayload("synchronized", "acme/app", 62, "sha-t1", false)); err != nil {
+		t.Fatalf("webhook sha-t1: %v", err)
+	}
+	if err := review.HandleForgejoWebhook(context.Background(), forgeID, "pull_request", "d-t2",
+		forgejoPullPayload("synchronized", "acme/app", 62, "sha-t2", false)); err != nil {
+		t.Fatalf("webhook sha-t2: %v", err)
+	}
+	// 同时刻第二个 head 不得按过期丢弃：seen 登记 + 防抖指向最新 head。
+	var n int64
+	svc.db.Model(&model.ReviewSeenSHA{}).Where("project_id = ? AND pr_number = ? AND head_sha = ?",
+		project.ID, 62, "sha-t2").Count(&n)
+	if n != 1 {
+		t.Fatalf("同时刻不同 head 必须登记 seen, rows = %d", n)
+	}
+	var debounce model.ReviewDebounce
+	if err := svc.db.Where("project_id = ? AND pr_number = ?", project.ID, 62).First(&debounce).Error; err != nil {
+		t.Fatalf("debounce: %v", err)
+	}
+	if debounce.HeadSHA != "sha-t2" {
+		t.Fatalf("debounce head = %q, want sha-t2", debounce.HeadSHA)
+	}
+	// 同时刻同 head 的重复投递仍早退（不产生第二条防抖写差异——再次投递
+	// 后 head 不变即可证明未误开轮）。
+	if err := review.HandleForgejoWebhook(context.Background(), forgeID, "pull_request", "d-t3",
+		forgejoPullPayload("synchronized", "acme/app", 62, "sha-t2", false)); err != nil {
+		t.Fatalf("redelivery: %v", err)
+	}
+	if err := svc.db.Where("project_id = ? AND pr_number = ?", project.ID, 62).First(&debounce).Error; err != nil {
+		t.Fatalf("debounce2: %v", err)
+	}
+	if debounce.HeadSHA != "sha-t2" {
+		t.Fatalf("debounce head after redelivery = %q, want sha-t2", debounce.HeadSHA)
+	}
+}

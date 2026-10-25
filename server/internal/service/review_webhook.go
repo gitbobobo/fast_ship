@@ -179,7 +179,11 @@ func (s *ReviewService) handleReviewTriggerTx(tx *gorm.DB, integrationID string,
 		return err
 	}
 
-	// 过期 SHA 判定：trigger.updated_at ≤ 已受理 head 的 pr_updated_at → 忽略。
+	// 过期 SHA 判定：trigger.updated_at 严格早于已受理 head 的 pr_updated_at
+	// → 忽略（迟到的旧快照）；时间戳相等时按 head 区分——Forgejo updated_at
+	// 是秒级粒度，同一秒内连推两个不同 head 会带相同时间戳，「同时刻不同
+	// head」不能按过期丢弃（webhook 与轮询共用此守卫，丢了就是永久漏审）；
+	// 同时刻同 head 是同一状态的重复投递，早退省一次去重查询。
 	// 账本按 (项目, 集成) 分区：seen/总账/运行一律带 project_id 与
 	// integration_id，其他项目/其他集成的同仓库残留行不进入本项目判定。
 	if currentHead != "" {
@@ -190,7 +194,8 @@ func (s *ReviewService) handleReviewTriggerTx(tx *gorm.DB, integrationID string,
 			return err
 		}
 		if accepted.PRUpdatedAt != nil && t.updatedAt != nil &&
-			!t.updatedAt.After(*accepted.PRUpdatedAt) {
+			(t.updatedAt.Before(*accepted.PRUpdatedAt) ||
+				(t.updatedAt.Equal(*accepted.PRUpdatedAt) && headSHA == currentHead)) {
 			return nil
 		}
 	}

@@ -303,7 +303,7 @@ describe("ProjectAndVersionForms", () => {
       "liuyincs/musiver",
     );
     await user.type(
-      screen.getByLabelText(/owner \/ repo/),
+      screen.getByLabelText(/代码仓库（可选/),
       "gitbobobo/musiver",
     );
     await user.click(screen.getByRole("button", { name: "创建项目" }));
@@ -331,7 +331,7 @@ describe("ProjectAndVersionForms", () => {
     );
 
     // 回填的是剥掉主机的 owner/repo slug（集成选择器单独回填）。
-    const input = screen.getByLabelText(/owner \/ repo/);
+    const input = screen.getByLabelText(/代码仓库（可选/);
     expect(input).toHaveValue("code-owner/code-repo");
 
     await user.clear(input);
@@ -358,7 +358,7 @@ describe("ProjectAndVersionForms", () => {
 
     // INT-167 起合成 owner/repo 失败在表单内报错拦截：不静默丢弃，也不再
     // 把无法归一的输入透传给服务端（集成化后前端握有合成所需的主机）。
-    const input = screen.getByLabelText(/owner \/ repo/);
+    const input = screen.getByLabelText(/代码仓库（可选/);
     await user.clear(input);
     await user.type(input, "https://github.com/");
     await user.click(screen.getByRole("button", { name: "保存" }));
@@ -427,9 +427,9 @@ describe("ProjectAndVersionForms", () => {
 
     // 回填剥主机的 slug 且选择器落在 forge 绑定上；迁回 github 通过把
     // 选择器切到「内置 GitHub」表达，slug 保持同名。
-    const input = screen.getByLabelText(/owner \/ repo/);
+    const input = screen.getByLabelText(/代码仓库（可选/);
     expect(input).toHaveValue("acme/app");
-    await user.click(screen.getByRole("combobox", { name: "代码仓集成" }));
+    await user.click(screen.getByRole("combobox", { name: "代码仓库集成" }));
     await user.click(await screen.findByRole("option", { name: /内置 GitHub/ }));
     await user.click(screen.getByRole("button", { name: "保存" }));
 
@@ -453,7 +453,7 @@ describe("ProjectAndVersionForms", () => {
     );
 
     // 解析后 owner/repo 相同（大小写、写法不同）不算变更，不产生多余提交。
-    const input = screen.getByLabelText(/owner \/ repo/);
+    const input = screen.getByLabelText(/代码仓库（可选/);
     await user.clear(input);
     await user.type(input, "CODE-OWNER/Code-Repo");
     await user.click(screen.getByRole("button", { name: "保存" }));

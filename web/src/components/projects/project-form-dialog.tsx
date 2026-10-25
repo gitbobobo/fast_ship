@@ -376,8 +376,21 @@ export function ProjectFormDialog({
                 ? { owner: project.code_github_owner, repo: project.code_github_repo }
                 : codeRepoSlugFromSaved(currentRepoUrl);
             const inputParts = ownerRepoFromInput(codeRepoSlug);
+            // 显式主机不一致不算「未改动」——owner/repo 同名而主机不同
+            // 会让 bindingUnchanged 吞掉主机校验旁路，先判主机再走
+            // synthesizeRepoUrl 的报错路径。
+            const inputHost = hostFromRepoInput(codeRepoSlug);
+            let integrationHost = "";
+            if (selectedIntegration) {
+              try {
+                integrationHost = new URL(selectedIntegration.base_url).host.toLowerCase();
+              } catch {
+                integrationHost = "";
+              }
+            }
             const bindingUnchanged =
               codeIntegrationId === savedIntegrationId &&
+              !(inputHost !== "" && inputHost !== integrationHost) &&
               !!inputParts.owner &&
               !!inputParts.repo &&
               inputParts.owner.toLowerCase() === savedParts.owner.toLowerCase() &&

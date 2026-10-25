@@ -216,8 +216,12 @@ Forgejo 仓库的 PR 审查与 GitHub 走同一条协调管线（webhook 事务�
   幂等账）。Forgejo 不发 `X-Hub-Signature-256`，该头不参与验签。
 - **幂等账复用**：Forgejo 的 delivery 幂等复用 `github_webhook_deliveries`
   表与 repo——两边的 delivery id 都是平台 UUID（`X-Forgejo-Delivery` 同为
-  UUID），碰撞概率为零，不值得为第二张表多一套清理与查询；表名里的
-  "GitHub" 是历史命名，语义是「webhook 投递幂等账」。
+  UUID），随机碰撞概率为零，不值得为第二张表多一套清理与查询；表名里的
+  "GitHub" 是历史命名，语义是「webhook 投递幂等账」。已知残余面：Forgejo
+  的 delivery id 由管理员在实例侧可控（手工重发/自定义投递工具可指定任意
+  GUID），恶意投递方若精确重放某个 GitHub delivery id 会让该 GitHub 投递
+  被误判已送达——需要知道目标 GUID 且过验签，无实际利用路径；若未来接入
+  第三家平台，幂等账应加 integration/source 列分区。
 - **动作名归一**：Forgejo/Gitea 的推送动作叫 `synchronized`（GitHub 是
   `synchronize`），入口处归一成 GitHub 拼法再进触发面（`normalizeReview-
   Action`）——勾选位映射、防抖行、开轮记录存的都是归一值。GitHub 的动作

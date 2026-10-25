@@ -269,6 +269,26 @@ describe("ProjectFormDialog", () => {
     );
   });
 
+  it("粘贴异主机同 slug 完整地址：报主机不一致而非静默判未改动", async () => {
+    const user = userEvent.setup();
+    renderDialog(
+      "edit",
+      makeProject({
+        code_integration_id: "forge-1",
+        code_repo_url: "https://forge.example.com/acme/api",
+      }),
+    );
+
+    const input = await screen.findByLabelText(/代码仓库（可选/);
+    await user.clear(input);
+    // forgejo-B 的完整地址，owner/repo 与已存相同——host 不同才算改动。
+    await user.type(input, "https://forge-b.example.com/acme/api");
+    await user.click(screen.getByRole("button", { name: "保存" }));
+
+    await screen.findByText(/与所选集成（forge\.example\.com）不一致/);
+    expect(updateMutateAsync).not.toHaveBeenCalled();
+  });
+
   it("下拉切换集成：github 换 forge 后按新集成合成 URL", async () => {
     const user = userEvent.setup();
     renderDialog(
