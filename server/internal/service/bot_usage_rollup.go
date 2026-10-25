@@ -147,6 +147,9 @@ func (s *BotService) usageRollupPlan(db *gorm.DB, bot *model.Bot, now time.Time,
 			markMax = m.LastWriteNs
 		}
 	}
+	// 探针经 strftime 毫秒截断，标记 LastWriteNs 带亚毫秒尾数——统一截到毫秒
+	// 再比，消除混合精度比较（同毫秒写入由最近两日兜底重算覆盖）。
+	markMax -= markMax % int64(time.Millisecond)
 	probe, err := repo.SpanWriteMax(bot.ID, spans[0].Start, spans[len(spans)-1].End)
 	if err != nil {
 		return nil, err

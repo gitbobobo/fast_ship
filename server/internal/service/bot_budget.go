@@ -33,7 +33,10 @@ import (
 
 const (
 	// botBudgetEvalInterval 是预算评估周期；60s 与夜间整理扫描同频。
-	botBudgetEvalInterval = 60 * time.Second
+	// botBudgetKickMinInterval 是落账 kick 轮次的最小间隔，防止高频写入
+	// 让窗口重扫近似连续执行。
+	botBudgetEvalInterval    = 60 * time.Second
+	botBudgetKickMinInterval = 10 * time.Second
 	// botBudgetThresholdMax 是阈值上限（100 = 10000%）：允许超过 100% 的
 	// 档位，但不接受离谱值。
 	botBudgetThresholdMax = 100.0
@@ -176,19 +179,29 @@ func botBudgetPercentText(bp int) string {
 //
 // 上一周期窗口只在首轮（停摆兜底）或 kick 触发的轮次里重扫：该窗口的花费
 // 只可能因跨界前创建、切换后才落账的写而增长，而每一笔 usage 落账都会
-// kick——纯 tick 轮次扫它是固定开销却没有新数据可看。
+// kick——纯 tick 轮次扫它是固定开销却没有新数据可看。kick 轮次带最小间隔：
+// 高频落账时每条写都 kick，不节流会让月窗 SpendInWindow 重扫近似连续执行；
+// 被节流的 kick 挂起 prev 重扫需求，并入下一次 tick/kick 合并执行。
 func (s *BotService) budgetEvalLoop() {
+	lastEval := time.Now()
 	s.evalBudgetsOnce(true)
 	ticker := time.NewTicker(botBudgetEvalInterval)
 	defer ticker.Stop()
+	pendingPrev := false
 	for {
-		includePrev := false
+		includePrev := pendingPrev
+		pendingPrev = false
 		select {
 		case <-ticker.C:
 		case <-s.budgetKick:
+			if time.Since(lastEval) < botBudgetKickMinInterval {
+				pendingPrev = true
+				continue
+			}
 			includePrev = true
 		}
 		s.evalBudgetsOnce(includePrev)
+		lastEval = time.Now()
 	}
 }
 

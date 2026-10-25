@@ -413,6 +413,9 @@ func (s *BotService) usageRollupCovered(botIDs, pastDates []string, loc *time.Lo
 				markMax = m.LastWriteNs
 			}
 		}
+		// 探针经 strftime 毫秒截断，而标记 LastWriteNs 带亚毫秒尾数——统一截到
+		// 毫秒再比，否则落在同一毫秒内的更晚写入永远越不过标记水位。
+		markMax -= markMax % int64(time.Millisecond)
 		probe, err := repo.SpanWriteMax(botID, spans[0].Start, spans[len(spans)-1].End)
 		if err != nil {
 			return nil, err

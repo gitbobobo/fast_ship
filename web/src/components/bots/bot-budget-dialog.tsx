@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Loader2, TriangleAlert } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
@@ -111,6 +111,13 @@ function BudgetPeriodForm({
     budget ? budget.thresholds.map(ratioToText).join("，") : "",
   );
   const [problem, setProblem] = useState<string | null>(null);
+
+  // refetch 返回新 budget 对象时回填输入（二次打开在缓存态挂载、refetch
+  // 完成后 spend 更新了而输入仍是旧值——budget 身份变化即同步）。
+  useEffect(() => {
+    setAmount(budget ? String(budget.amount_usd) : "");
+    setThresholds(budget ? budget.thresholds.map(ratioToText).join("，") : "");
+  }, [budget]);
 
   const spendPct =
     budget && budget.amount_usd > 0
