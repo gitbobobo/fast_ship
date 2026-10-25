@@ -28,6 +28,7 @@ import type {
 import { useBotUsage } from "@/lib/hooks/use-bots";
 import { cn } from "@/lib/utils";
 import { formatCostEstimate } from "./bot-metrics";
+import { BotBudgetDialog, type BotBudgetTarget } from "./bot-budget-dialog";
 import { BotUsageInsightsPanel } from "./bot-usage-insights";
 
 /**
@@ -70,9 +71,9 @@ export function formatCacheHitRate(rate: number | null | undefined): string {
   return `${Math.round(rate * 100)}%`;
 }
 
-/** 定时任务显示名：已删除任务名恒为空串，统一落「已删除的任务」。 */
+/** 定时任务显示名：有名字（含已删任务的汇总快照名）显示名字，无名才落「已删除的任务」。 */
 export function usageTaskName(task: BotUsageScheduleTask): string {
-  return task.deleted || !task.name ? "已删除的任务" : task.name;
+  return task.name || "已删除的任务";
 }
 
 /**
@@ -166,6 +167,9 @@ export function BotUsageOverviewPanel({
   embedded?: boolean;
 }) {
   const [range, setRange] = useState<BotUsageRange>("7d");
+  const [budgetTarget, setBudgetTarget] = useState<BotBudgetTarget | null>(
+    null,
+  );
   const { data, isLoading, isError, error, refetch } = useBotUsage(
     range,
     botId,
@@ -173,6 +177,18 @@ export function BotUsageOverviewPanel({
 
   const dailyPoints = useMemo(
     () => (data ? buildDailyCostPoints(data.days, data.bots) : []),
+    [data],
+  );
+
+  // 已删除机器人的 bot_id 集合（INT-164）：任务表「机器人」列据此不再链到
+  // 404 的详情页（task 行自身只有 bot_name 快照，没有 deleted 标记）。
+  const deletedBotIds = useMemo(
+    () =>
+      new Set(
+        (data?.bots ?? [])
+          .filter((bot) => bot.deleted)
+          .map((bot) => bot.bot_id),
+      ),
     [data],
   );
 
@@ -289,7 +305,7 @@ export function BotUsageOverviewPanel({
               </p>
             )
           ) : (
-            <BotsUsageTable bots={data.bots} />
+            <BotsUsageTable bots={data.bots} onBudget={setBudgetTarget} />
           )}
 
           {embedded ? (
@@ -298,11 +314,22 @@ export function BotUsageOverviewPanel({
             <TasksUsageTable
               tasks={data.schedule_tasks}
               focusTaskId={focusTaskId}
+              deletedBotIds={deletedBotIds}
+              onBudget={setBudgetTarget}
             />
           )}
 
           {/* 优化参考（INT-163）：与总览同一 range/botId，在按定时任务之后。 */}
           <BotUsageInsightsPanel range={range} botId={botId} embedded={embedded} />
+
+          {/* 预算设置（INT-164）：宽表的行内入口打开；紧凑视图不加入口。 */}
+          {budgetTarget && (
+            <BotBudgetDialog
+              target={budgetTarget}
+              open
+              onClose={() => setBudgetTarget(null)}
+            />
+          )}
         </>
       )}
     </div>
@@ -310,7 +337,13 @@ export function BotUsageOverviewPanel({
 }
 
 /** 按机器人表格：三列成本拆分 + 合计 + 次数/均值/峰值 + 缓存命中率 + 未计价。 */
-function BotsUsageTable({ bots }: { bots: BotUsageBot[] }) {
+function BotsUsageTable({
+  bots,
+  onBudget,
+}: {
+  bots: BotUsageBot[];
+  onBudget: (target: BotBudgetTarget) => void;
+}) {
   return (
     <section className="space-y-2" data-testid="usage-bots-section">
       <h3 className="text-sm font-medium">按机器人</h3>
@@ -337,18 +370,30 @@ function BotsUsageTable({ bots }: { bots: BotUsageBot[] }) {
                 <TableHead>最高/次</TableHead>
                 <TableHead>缓存命中率</TableHead>
                 <TableHead className="text-right">未计价</TableHead>
+                <TableHead className="text-right">预算</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {bots.map((bot) => (
                 <TableRow key={bot.bot_id} data-testid="usage-bot-row">
                   <TableCell className="font-medium">
-                    <Link
-                      to={`/bots/${bot.bot_id}`}
-                      className="hover:underline"
-                    >
-                      {bot.name}
-                    </Link>
+                    {/* 已删除机器人明细已级联清理，详情页 404：名字取删除时快照，
+                        弱化展示，不再渲染链接（同「已停用」的 secondary 徽记）。 */}
+                    {bot.deleted ? (
+                      <span className="text-muted-foreground">{bot.name}</span>
+                    ) : (
+                      <Link
+                        to={`/bots/${bot.bot_id}`}
+                        className="hover:underline"
+                      >
+                        {bot.name}
+                      </Link>
+                    )}
+                    {bot.deleted && (
+                      <Badge variant="secondary" className="ml-1.5">
+                        已删除
+                      </Badge>
+                    )}
                   </TableCell>
                   <CostCell value={bot.cost_main} />
                   <TableCell
@@ -375,6 +420,20 @@ function BotsUsageTable({ bots }: { bots: BotUsageBot[] }) {
                   </TableCell>
                   <TableCell className="text-right tabular-nums">
                     {bot.unpriced_requests}
+                  </TableCell>
+                  <TableCell className="text-right">
+                    {!bot.deleted && (
+                      <Button
+                        variant="ghost"
+                        size="xs"
+                        aria-label={`设置 ${bot.name} 的预算`}
+                        onClick={() =>
+                          onBudget({ kind: "bot", botId: bot.bot_id })
+                        }
+                      >
+                        预算
+                      </Button>
+                    )}
                   </TableCell>
                 </TableRow>
               ))}
@@ -405,6 +464,13 @@ function CompactBotUsage({ bot }: { bot: BotUsageBot }) {
   return (
     <section className="space-y-2" data-testid="usage-bots-section">
       <h3 className="text-sm font-medium">成本构成</h3>
+      {/* 已删除机器人（删除后停留在详情页的窗口）：明细已清理，名字是快照。 */}
+      {bot.deleted && (
+        <p className="flex items-center gap-1.5 text-sm font-medium">
+          <span className="text-muted-foreground">{bot.name}</span>
+          <Badge variant="secondary">已删除</Badge>
+        </p>
+      )}
       <dl className="rounded-lg border">
         {rows.map((row, i) => (
           <div
@@ -440,9 +506,14 @@ function taskFocusClass(focused: boolean) {
 function TasksUsageTable({
   tasks,
   focusTaskId,
+  deletedBotIds,
+  onBudget,
 }: {
   tasks: BotUsageScheduleTask[];
   focusTaskId?: string | null;
+  /** 已删除机器人的 bot_id 集合：「机器人」列据此不再渲染链接。 */
+  deletedBotIds: ReadonlySet<string>;
+  onBudget: (target: BotBudgetTarget) => void;
 }) {
   return (
     <section className="space-y-2" data-testid="usage-tasks-section">
@@ -474,6 +545,7 @@ function TasksUsageTable({
                 <TableHead title="按单次平均（含连带主线摊销）与计划频率推算的未来 30 天成本">
                   推算月花费
                 </TableHead>
+                <TableHead className="text-right">预算</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -495,14 +567,26 @@ function TasksUsageTable({
                         已停用
                       </Badge>
                     )}
+                    {task.deleted && task.name && (
+                      <Badge variant="secondary" className="ml-1.5">
+                        已删除
+                      </Badge>
+                    )}
                   </TableCell>
                   <TableCell>
-                    <Link
-                      to={`/bots/${task.bot_id}`}
-                      className="hover:underline"
-                    >
-                      {task.bot_name}
-                    </Link>
+                    {/* 机器人已删除时名字是快照，详情页 404，弱化展示不链接。 */}
+                    {deletedBotIds.has(task.bot_id) ? (
+                      <span className="text-muted-foreground">
+                        {task.bot_name}
+                      </span>
+                    ) : (
+                      <Link
+                        to={`/bots/${task.bot_id}`}
+                        className="hover:underline"
+                      >
+                        {task.bot_name}
+                      </Link>
+                    )}
                   </TableCell>
                   <TableCell className="text-right tabular-nums">
                     {task.runs}
@@ -519,6 +603,24 @@ function TasksUsageTable({
                   <CostCell value={task.max_run_cost} />
                   <CostCell value={task.linked_main_cost} />
                   <CostCell value={task.estimated_monthly_cost} />
+                  <TableCell className="text-right">
+                    {!task.deleted && !deletedBotIds.has(task.bot_id) && (
+                      <Button
+                        variant="ghost"
+                        size="xs"
+                        aria-label={`设置 ${usageTaskName(task)} 的预算`}
+                        onClick={() =>
+                          onBudget({
+                            kind: "task",
+                            botId: task.bot_id,
+                            taskId: task.task_id,
+                          })
+                        }
+                      >
+                        预算
+                      </Button>
+                    )}
+                  </TableCell>
                 </TableRow>
               ))}
             </TableBody>

@@ -7,6 +7,8 @@ import {
 } from "@tanstack/react-query";
 import {
   botApi,
+  type BotBudgetPeriod,
+  type BotBudgetUpsertInput,
   type BotConnectionTestInput,
   type BotUsageRange,
   type CreateBotInput,
@@ -103,6 +105,22 @@ export const botKeys = {
     userId,
     "usage-run",
     runId,
+  ],
+  /** 周期预算（INT-164）：bot 与 task 各一段，互不覆盖。 */
+  budgets: (userId: string | null, botId: string) => [
+    BOTS_ROOT,
+    userId,
+    "budgets",
+    "bot",
+    botId,
+  ],
+  taskBudgets: (userId: string | null, botId: string, taskId: string) => [
+    BOTS_ROOT,
+    userId,
+    "budgets",
+    "task",
+    botId,
+    taskId,
   ],
 };
 
@@ -403,5 +421,81 @@ export function useBotUsageRun(runId: string) {
       }
       return false;
     },
+  });
+}
+
+// ---- 周期预算（INT-164）----
+// 对话框打开期间才挂载读取；保存/清除后按自身键失效，让进度与列表随
+// 服务端规范化结果（阈值去重升序）收敛。
+
+export function useBotBudgets(botId: string) {
+  const userId = useUserId();
+  return useQuery({
+    queryKey: botKeys.budgets(userId, botId),
+    queryFn: async ({ signal }) => (await botApi.budgets(botId, signal)).data.items,
+    enabled: Boolean(userId && botId),
+    refetchOnMount: "always",
+  });
+}
+
+export function useTaskBudgets(botId: string, taskId: string) {
+  const userId = useUserId();
+  return useQuery({
+    queryKey: botKeys.taskBudgets(userId, botId, taskId),
+    queryFn: async ({ signal }) =>
+      (await botApi.taskBudgets(botId, taskId, signal)).data.items,
+    enabled: Boolean(userId && botId && taskId),
+    refetchOnMount: "always",
+  });
+}
+
+export function useSetBotBudget(botId: string) {
+  const queryClient = useQueryClient();
+  const userId = useUserId();
+  return useMutation({
+    mutationFn: (input: { period: BotBudgetPeriod; input: BotBudgetUpsertInput }) =>
+      botApi.setBudget(botId, input.period, input.input),
+    onSettled: () =>
+      queryClient.invalidateQueries({
+        queryKey: botKeys.budgets(userId, botId),
+      }),
+  });
+}
+
+export function useDeleteBotBudget(botId: string) {
+  const queryClient = useQueryClient();
+  const userId = useUserId();
+  return useMutation({
+    mutationFn: (period: BotBudgetPeriod) => botApi.deleteBudget(botId, period),
+    onSettled: () =>
+      queryClient.invalidateQueries({
+        queryKey: botKeys.budgets(userId, botId),
+      }),
+  });
+}
+
+export function useSetTaskBudget(botId: string, taskId: string) {
+  const queryClient = useQueryClient();
+  const userId = useUserId();
+  return useMutation({
+    mutationFn: (input: { period: BotBudgetPeriod; input: BotBudgetUpsertInput }) =>
+      botApi.setTaskBudget(botId, taskId, input.period, input.input),
+    onSettled: () =>
+      queryClient.invalidateQueries({
+        queryKey: botKeys.taskBudgets(userId, botId, taskId),
+      }),
+  });
+}
+
+export function useDeleteTaskBudget(botId: string, taskId: string) {
+  const queryClient = useQueryClient();
+  const userId = useUserId();
+  return useMutation({
+    mutationFn: (period: BotBudgetPeriod) =>
+      botApi.deleteTaskBudget(botId, taskId, period),
+    onSettled: () =>
+      queryClient.invalidateQueries({
+        queryKey: botKeys.taskBudgets(userId, botId, taskId),
+      }),
   });
 }

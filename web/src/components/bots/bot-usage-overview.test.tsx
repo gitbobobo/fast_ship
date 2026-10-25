@@ -149,6 +149,24 @@ const unpricedOverview: BotUsageOverview = {
   schedule_tasks: [],
 };
 
+/** 已删除机器人（INT-164）：明细已级联清理，name 是删除时快照。 */
+const deletedBot: BotUsageOverview["bots"][number] = {
+  bot_id: "b9",
+  name: "退役机器人",
+  deleted: true,
+  cost: 0.2,
+  cost_main: null,
+  cost_schedule: 0.2,
+  cost_schedule_linked_approx: null,
+  cost_maintenance: null,
+  runs: 1,
+  avg_run_cost: 0.2,
+  max_run_cost: 0.2,
+  p90_run_cost: 0.2,
+  cache_hit_rate: null,
+  unpriced_requests: 0,
+};
+
 function mockUsage(data: BotUsageOverview | undefined) {
   vi.mocked(useBotUsage).mockReturnValue({
     data,
@@ -189,9 +207,10 @@ describe("usage 格式化助手", () => {
     expect(formatCacheHitRate(0.005)).toBe("1%");
   });
 
-  it("任务名：deleted 或空名落「已删除的任务」", () => {
+  it("任务名：deleted 或空名落「已删除的任务」，有快照名仍显示原名", () => {
     const task = pricedOverview.schedule_tasks[0];
     expect(usageTaskName(task)).toBe("每日巡检");
+    expect(usageTaskName({ ...task, deleted: true })).toBe("每日巡检");
     expect(usageTaskName({ ...task, name: "", deleted: true })).toBe(
       "已删除的任务",
     );
@@ -359,5 +378,77 @@ describe("BotUsageOverviewPanel", () => {
     expect(screen.getByText(/P90 \$0\.15/)).toBeInTheDocument();
     // 紧凑任务清单的「总花费」同样含连带主线（0.3 + 0.1）。
     expect(screen.getByText(/总花费 \$0\.4/)).toBeInTheDocument();
+  });
+
+  it("已删除机器人行：无链接、「已删除」徽记、名字弱化且无预算入口（INT-164）", () => {
+    mockUsage({
+      ...pricedOverview,
+      bots: [...pricedOverview.bots, deletedBot],
+      // t9 挂在已删除机器人 b9 上；另留一条 b1 的存活任务对照。
+      schedule_tasks: [
+        pricedOverview.schedule_tasks[0],
+        {
+          ...pricedOverview.schedule_tasks[0],
+          task_id: "t9",
+          bot_id: "b9",
+          bot_name: "退役机器人",
+        },
+      ],
+    });
+    renderWithRoute(<BotUsageOverviewPanel />, {
+      path: "/bots/usage",
+      initialEntry: "/bots/usage",
+    });
+
+    const botRows = screen.getAllByTestId("usage-bot-row");
+    expect(botRows).toHaveLength(3);
+    const deletedRow = botRows[2];
+    const deletedName = within(deletedRow).getByText("退役机器人");
+    expect(deletedName).not.toHaveAttribute("href");
+    expect(deletedName).toHaveClass("text-muted-foreground");
+    expect(within(deletedRow).getByText("已删除")).toBeInTheDocument();
+    expect(within(deletedRow).queryByRole("button")).toBeNull();
+
+    // 存活机器人行不受影响：详情链接与「预算」入口都在。
+    const liveRow = botRows[0];
+    expect(
+      within(liveRow).getByRole("link", { name: "发布助手" }),
+    ).toHaveAttribute("href", "/bots/b1");
+    expect(
+      within(liveRow).getByRole("button", { name: "设置 发布助手 的预算" }),
+    ).toBeInTheDocument();
+
+    // 任务表的「机器人」列同口径：已删除机器人的快照名不链接、弱化，
+    // 行内没有预算入口（预算挂在 bot/task 目标上，删除后无从设置）。
+    const taskRows = screen.getAllByTestId("usage-task-row");
+    expect(taskRows).toHaveLength(2);
+    const orphanTaskRow = taskRows[1];
+    const orphanBotName = within(orphanTaskRow).getByText("退役机器人");
+    expect(orphanBotName.closest("a")).toBeNull();
+    expect(orphanBotName).toHaveClass("text-muted-foreground");
+    expect(within(orphanTaskRow).queryByRole("button")).toBeNull();
+    expect(
+      within(taskRows[0]).getByRole("button", {
+        name: "设置 每日巡检 的预算",
+      }),
+    ).toBeInTheDocument();
+  });
+
+  it("embedded 已删除机器人：显示快照名与「已删除」徽记", () => {
+    mockUsage({
+      ...pricedOverview,
+      bots: [{ ...pricedOverview.bots[0], deleted: true }],
+    });
+    renderWithRoute(<BotUsageOverviewPanel botId="b1" embedded />, {
+      path: "/bots/b1",
+      initialEntry: "/bots/b1",
+    });
+
+    // 图例里也有机器人名，断言限定在紧凑拆分区内。
+    const section = screen.getByTestId("usage-bots-section");
+    expect(within(section).getByText("发布助手")).toHaveClass(
+      "text-muted-foreground",
+    );
+    expect(within(section).getByText("已删除")).toBeInTheDocument();
   });
 });

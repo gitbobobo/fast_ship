@@ -26,7 +26,9 @@ import {
 /**
  * 单次运行花费明细（INT-162）：run 摘要 + 每次模型请求（含失败重试）及其
  * 工具调用 + 关联维护运行与请求。金额口径：display_cost = 自身已计价 +
- * 关联维护已计价；可空字段为「未计价」显示「—」。
+ * 关联维护已计价；可空字段为「未计价」显示「—」。请求行另带推理 token
+ * 与供应商返回的实际金额（INT-164）：前者供应商未返回显示「—」，后者
+ * 仅币别置信 USD 时由 API 透出，有值优先于目录估算展示。
  */
 
 const SESSION_KIND_LABELS: Record<string, string> = {
@@ -88,6 +90,9 @@ const labelOf = (map: Record<string, string>, value: string) =>
 
 const formatTokens = (n: number | null | undefined) =>
   n == null ? "—" : n.toLocaleString("en-US");
+
+/** 供应商返回金额的展示口径说明：API 只透出币别置信 USD 的记录。 */
+const PROVIDER_COST_NOTE = "供应商 usage 返回的实际金额（USD）；无则按目录单价估算";
 
 /** 起止时间差的可读时长；缺任一端（未开始/进行中）显示「—」。 */
 function formatSpan(start: string | null | undefined, end: string | null | undefined) {
@@ -368,11 +373,51 @@ function RequestList({
   );
 }
 
+/**
+ * 请求成本槽位：供应商返回金额（provider_cost，API 仅在币别置信 USD 时
+ * 才有值）优先展示并打徽记；否则回落到目录估算 cost_estimate。
+ */
+function RequestCost({
+  providerCost,
+  costEstimate,
+}: {
+  providerCost: number | null | undefined;
+  costEstimate: number | null | undefined;
+}) {
+  if (providerCost != null) {
+    return (
+      <span
+        className="ml-auto flex items-center gap-1.5"
+        title={PROVIDER_COST_NOTE}
+        data-testid="usage-provider-cost"
+      >
+        <Badge variant="secondary" className="h-4 px-1.5 text-[10px]">
+          供应商返回
+        </Badge>
+        <span className="text-sm font-medium tabular-nums">
+          {formatUsageCost(providerCost)}
+        </span>
+      </span>
+    );
+  }
+  return (
+    <span
+      className="ml-auto text-sm font-medium tabular-nums"
+      title={
+        costEstimate != null ? USAGE_PRICE_NOTE : `未计价；${UNPRICED_REASON_NOTE}`
+      }
+    >
+      {formatUsageCost(costEstimate)}
+    </span>
+  );
+}
+
 function RequestRow({ request }: { request: BotUsageRequest }) {
   // usage 未收齐时实际计数不可信，只展示服务端估算列。合计口径：
-  // 输入（含其中缓存命中部分）+ 输出，各字段可直接相加自验。
+  // 输入（含其中缓存命中部分）+ 输出（含其中推理部分），各字段可直接
+  // 相加自验；推理 token 供应商未返回显示「—」（缺失 ≠ 0）。
   const actual = request.usage_complete
-    ? `输入 ${formatTokens(request.prompt_tokens)}（含缓存 ${formatTokens(request.cached_tokens)}）· 输出 ${formatTokens(request.completion_tokens)} · 合计 ${formatTokens(request.total_tokens)}`
+    ? `输入 ${formatTokens(request.prompt_tokens)}（含缓存 ${formatTokens(request.cached_tokens)}）· 输出 ${formatTokens(request.completion_tokens)}（含推理 ${formatTokens(request.reasoning_tokens)}）· 合计 ${formatTokens(request.total_tokens)}`
     : "usage 未收齐";
 
   return (
@@ -394,16 +439,10 @@ function RequestRow({ request }: { request: BotUsageRequest }) {
         <span className="text-xs text-muted-foreground">
           耗时 {formatSpan(request.started_at, request.finished_at)}
         </span>
-        <span
-          className="ml-auto text-sm font-medium tabular-nums"
-          title={
-            request.cost_estimate != null
-              ? USAGE_PRICE_NOTE
-              : `未计价；${UNPRICED_REASON_NOTE}`
-          }
-        >
-          {formatUsageCost(request.cost_estimate)}
-        </span>
+        <RequestCost
+          providerCost={request.provider_cost}
+          costEstimate={request.cost_estimate}
+        />
       </div>
       <p className="text-xs text-muted-foreground">
         估算输入 {formatTokens(request.input_tokens_estimate)} · {actual} ·
@@ -510,12 +549,13 @@ function MaintenanceRequestRow({
       </Badge>
       <span>
         {request.usage_complete
-          ? `输入 ${formatTokens(request.prompt_tokens)}（含缓存 ${formatTokens(request.cached_tokens)}）· 输出 ${formatTokens(request.completion_tokens)}`
+          ? `输入 ${formatTokens(request.prompt_tokens)}（含缓存 ${formatTokens(request.cached_tokens)}）· 输出 ${formatTokens(request.completion_tokens)}（含推理 ${formatTokens(request.reasoning_tokens)}）`
           : "usage 未收齐"}
       </span>
-      <span className="ml-auto tabular-nums">
-        {formatUsageCost(request.cost_estimate)}
-      </span>
+      <RequestCost
+        providerCost={request.provider_cost}
+        costEstimate={request.cost_estimate}
+      />
       {request.error_message && (
         <span className="basis-full text-destructive">
           {request.error_code ? `${request.error_code}：` : ""}

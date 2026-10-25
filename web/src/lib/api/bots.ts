@@ -359,6 +359,17 @@ export type BotUsageMaintenanceRun = Schemas["BotUsageMaintenanceRun"];
 export type BotUsageMaintenanceRequest =
   Schemas["BotUsageMaintenanceRequest"];
 
+// ---- 周期预算（INT-164）----
+// thresholds 是相对金额的比例（0.8 = 80%、1 = 100%，可超 1），服务端
+// 规范化去重升序；spend_usd 只统计已计价花费，预算越线只告警不停止运行。
+
+export type BotBudget = Schemas["BotBudget"];
+
+export type BotBudgetPeriod = BotBudget["period"];
+
+/** 契约名为 BotBudgetUpsertRequest。 */
+export type BotBudgetUpsertInput = Schemas["BotBudgetUpsertRequest"];
+
 export const BOT_REQUEST_TIMEOUT_MS = 35_000;
 
 function options(signal?: AbortSignal) {
@@ -633,5 +644,63 @@ export const botApi = {
           }),
         })
         .json<ApiResponse<BotUsageInsights>>(),
+    ),
+
+  /** 机器人周期预算（INT-164）：每日/每月各至多一条，带当前周期已计价花费。 */
+  budgets: (botId: string, signal?: AbortSignal) =>
+    decodeApiError(
+      api
+        .get(`${botPath(botId)}/budgets`, options(signal))
+        .json<ApiResponse<{ items: BotBudget[] }>>(),
+    ),
+
+  /** 覆盖某周期的预算；阈值比例由服务端规范化（去重、升序）。 */
+  setBudget: (
+    botId: string,
+    period: BotBudgetPeriod,
+    input: BotBudgetUpsertInput,
+  ) =>
+    write(
+      api
+        .put(`${botPath(botId)}/budgets/${period}`, { json: input, ...options() })
+        .json<ApiResponse<BotBudget>>(),
+    ),
+
+  /** 删除某周期的预算；不存在也算成功（幂等）。 */
+  deleteBudget: (botId: string, period: BotBudgetPeriod) =>
+    write(
+      api
+        .delete(`${botPath(botId)}/budgets/${period}`, options())
+        .json<ApiResponse<null>>(),
+    ),
+
+  /** 定时任务周期预算（INT-164）：花费只算任务口径（含连带主线与关联维护）。 */
+  taskBudgets: (botId: string, taskId: string, signal?: AbortSignal) =>
+    decodeApiError(
+      api
+        .get(`${scheduleTaskPath(botId, taskId)}/budgets`, options(signal))
+        .json<ApiResponse<{ items: BotBudget[] }>>(),
+    ),
+
+  setTaskBudget: (
+    botId: string,
+    taskId: string,
+    period: BotBudgetPeriod,
+    input: BotBudgetUpsertInput,
+  ) =>
+    write(
+      api
+        .put(`${scheduleTaskPath(botId, taskId)}/budgets/${period}`, {
+          json: input,
+          ...options(),
+        })
+        .json<ApiResponse<BotBudget>>(),
+    ),
+
+  deleteTaskBudget: (botId: string, taskId: string, period: BotBudgetPeriod) =>
+    write(
+      api
+        .delete(`${scheduleTaskPath(botId, taskId)}/budgets/${period}`, options())
+        .json<ApiResponse<null>>(),
     ),
 };
