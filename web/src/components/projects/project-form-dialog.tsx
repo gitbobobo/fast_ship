@@ -238,29 +238,46 @@ export function ProjectFormDialog({
     !!project?.code_repo_url &&
     (repoChanged || integrationChanged);
 
+  // 所选集成 base_url 的 origin 键（scheme+host，缺省端口由 URL 归一）。
+  const integrationOriginKey = (): string => {
+    if (!selectedIntegration) return "";
+    try {
+      return new URL(selectedIntegration.base_url).origin;
+    } catch {
+      return "";
+    }
+  };
+
+  // 输入显式主机的 scheme+host 键：比对带 scheme——服务端按 scheme 补默认
+  // 端口区分主机键（http→:80、https→:443），http/https 同主机是不同绑定。
+  // 裸主机段无 scheme 时借集成的——合成地址反正用它。
+  const inputOriginKey = (raw: string): string => {
+    const host = hostFromRepoInput(raw);
+    if (host === "") return "";
+    const i = raw.trim().indexOf("://");
+    const scheme =
+      i === -1
+        ? integrationOriginKey().split(":")[0] || "https"
+        : raw.trim().slice(0, i).toLowerCase();
+    return `${scheme}://${host}`;
+  };
+
   // 合成提交用的 code_repository_url；解析不出（输入非 owner/repo 两段，或
   // 所选集成不在列表里）就 setError 中止提交——不静默丢弃也不猜主机。
   const synthesizeRepoUrl = (): string | null => {
     const parts = ownerRepoFromInput(codeRepoSlug);
-    // 显式主机必须与所选集成同主机——解析会剥掉主机段，不比对会把
+    // 显式主机必须与所选集成同 origin——解析会剥掉主机段，不比对会把
     // forgejo-B 的完整地址静默绑到 forgejo-A 下。
-    const inputHost = hostFromRepoInput(codeRepoSlug);
-    let integrationHost = "";
-    if (selectedIntegration) {
-      try {
-        integrationHost = new URL(selectedIntegration.base_url).host.toLowerCase();
-      } catch {
-        integrationHost = "";
-      }
-    }
+    const inputKey = inputOriginKey(codeRepoSlug);
+    const integrationKey = integrationOriginKey();
     // 输入带显式主机时，集成主机解析不出不能静默跳过比对——回退通用错误，
     // 跨主机错绑不放行。
-    const hostMismatch = inputHost !== "" && inputHost !== integrationHost;
+    const hostMismatch = inputKey !== "" && inputKey !== integrationKey;
     if (!selectedIntegration || !parts.owner || !parts.repo || hostMismatch) {
       setError("code_repository_url", {
         message:
-          hostMismatch && integrationHost !== ""
-            ? `仓库地址主机 ${inputHost} 与所选集成（${integrationHost}）不一致`
+          hostMismatch && integrationKey !== ""
+            ? `仓库地址 ${inputKey} 与所选集成（${integrationKey}）不一致`
             : hostMismatch
               ? "所选代码仓库集成的地址不可用，请重新选择集成"
               : selectedIntegration
@@ -376,21 +393,13 @@ export function ProjectFormDialog({
                 ? { owner: project.code_github_owner, repo: project.code_github_repo }
                 : codeRepoSlugFromSaved(currentRepoUrl);
             const inputParts = ownerRepoFromInput(codeRepoSlug);
-            // 显式主机不一致不算「未改动」——owner/repo 同名而主机不同
-            // 会让 bindingUnchanged 吞掉主机校验旁路，先判主机再走
-            // synthesizeRepoUrl 的报错路径。
-            const inputHost = hostFromRepoInput(codeRepoSlug);
-            let integrationHost = "";
-            if (selectedIntegration) {
-              try {
-                integrationHost = new URL(selectedIntegration.base_url).host.toLowerCase();
-              } catch {
-                integrationHost = "";
-              }
-            }
+            // 显式 origin 不一致不算「未改动」——owner/repo 同名而
+            // scheme+host 不同会让 bindingUnchanged 吞掉主机校验旁路，
+            // 先判 origin 再走 synthesizeRepoUrl 的报错路径。
+            const inputKey = inputOriginKey(codeRepoSlug);
             const bindingUnchanged =
               codeIntegrationId === savedIntegrationId &&
-              !(inputHost !== "" && inputHost !== integrationHost) &&
+              !(inputKey !== "" && inputKey !== integrationOriginKey()) &&
               !!inputParts.owner &&
               !!inputParts.repo &&
               inputParts.owner.toLowerCase() === savedParts.owner.toLowerCase() &&

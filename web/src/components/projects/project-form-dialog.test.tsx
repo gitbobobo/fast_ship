@@ -285,7 +285,28 @@ describe("ProjectFormDialog", () => {
     await user.type(input, "https://forge-b.example.com/acme/api");
     await user.click(screen.getByRole("button", { name: "保存" }));
 
-    await screen.findByText(/与所选集成（forge\.example\.com）不一致/);
+    await screen.findByText(/与所选集成（https:\/\/forge\.example\.com）不一致/);
+    expect(updateMutateAsync).not.toHaveBeenCalled();
+  });
+
+  it("粘贴异 scheme 同主机同 slug 地址：报不一致而非静默判未改动", async () => {
+    const user = userEvent.setup();
+    renderDialog(
+      "edit",
+      makeProject({
+        code_integration_id: "forge-1",
+        code_repo_url: "https://forge.example.com/acme/api",
+      }),
+    );
+
+    const input = await screen.findByLabelText(/代码仓库（可选/);
+    await user.clear(input);
+    // scheme 不同即不同绑定（服务端按 scheme 补默认端口）——host 相等
+    // 也不算未改动，更不能合成时静默改写成 https。
+    await user.type(input, "http://forge.example.com/acme/api");
+    await user.click(screen.getByRole("button", { name: "保存" }));
+
+    await screen.findByText(/与所选集成（https:\/\/forge\.example\.com）不一致/);
     expect(updateMutateAsync).not.toHaveBeenCalled();
   });
 
