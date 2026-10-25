@@ -153,21 +153,38 @@ func (s *ReviewService) pollAcceptPR(ctx context.Context, settings *model.Projec
 // disableReviewOnDeterministic 轮询确定性失败时停用该项目审查：集成误删/
 // 密文损坏/凭证被拒后每 tick 都只会得到同一错误——继续 enabled 既无产出又
 // 按固定节律刷错，压回 disabled 让设置页可见、人工修复后可重新开启（与
-// repository.Update 改绑压回 disabled 同一先例）。瞬时错误原样透出照常
-// warn 重试。
+// repository.Update 改绑压回 disabled 同一先例）。谓词带上本轮快照的
+// (integration_id, repo_full_name)：轮询在途期间用户已改绑/换仓库的话，
+// 旧快照的错误不能关掉新绑定。停用与显式路径同口径收尾：取消在途/排队
+// 运行、消费令牌、删防抖、推进 epoch 清 sync_pending——否则调度仍按
+// status 捡走残留运行继续开线程。瞬时错误原样透出照常 warn 重试。
 func (s *ReviewService) disableReviewOnDeterministic(settings *model.ProjectReviewSettings, err error) error {
 	if !deterministicReviewAccessErr(err) {
 		return err
 	}
-	res := s.db.Model(&model.ProjectReviewSettings{}).
-		Where("project_id = ? AND enabled", settings.ProjectID).
-		Updates(map[string]any{"enabled": false, "updated_at": time.Now().UTC()})
-	if res.Error != nil {
+	now := time.Now().UTC()
+	disabled := false
+	txErr := s.db.Transaction(func(tx *gorm.DB) error {
+		res := tx.Model(&model.ProjectReviewSettings{}).
+			Where(`project_id = ? AND enabled
+				AND integration_id = ? AND repo_full_name = ?`,
+				settings.ProjectID, settings.IntegrationID, settings.RepoFullName).
+			Updates(map[string]any{"enabled": false, "updated_at": now})
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			return nil // 快照已过期：新绑定/已停用都不归本次轮询管
+		}
+		disabled = true
+		return cancelProjectReviewRunsTx(tx, settings.ProjectID, "disabled", now)
+	})
+	if txErr != nil {
 		s.logger.Error("确定性失败后停用审查设置失败",
-			zap.String("project", settings.ProjectID), zap.Error(res.Error))
-		return res.Error
+			zap.String("project", settings.ProjectID), zap.Error(txErr))
+		return txErr
 	}
-	if res.RowsAffected > 0 {
+	if disabled {
 		s.logger.Error("Forgejo 轮询确定性失败，已停用该项目 PR 审查",
 			zap.String("project", settings.ProjectID),
 			zap.String("integration", settings.IntegrationID), zap.Error(err))

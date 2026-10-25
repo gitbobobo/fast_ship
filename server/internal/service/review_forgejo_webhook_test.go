@@ -623,6 +623,98 @@ func TestForgejoPoll_DeterministicErrorDisablesReview(t *testing.T) {
 	}
 }
 
+// TestForgejoPoll_DisableCancelsRuns 确定性停用与显式停用同口径收尾：在途
+// 运行 cancelled/disabled + 令牌消费 + 防抖删行 + sync_pending 清除 epoch
+// 推进——否则调度按 status 捡走残留运行继续开线程。
+func TestForgejoPoll_DisableCancelsRuns(t *testing.T) {
+	svc := setupTestServices(t)
+	forgeID := createTestForgeIntegration(t, svc.db, "https://forge.example.com").ID
+	project, user := seedForgejoReviewProject(t, svc, forgeID, "fj-cancels", "cancels/app", nil)
+	now := time.Now().UTC()
+	run := &model.ReviewRun{
+		IntegrationID: forgeID, ID: "run-cancel-1", UserID: user.ID, ProjectID: project.ID,
+		Kind: model.ReviewKindCode, RepoFullName: "cancels/app", PRNumber: 7, HeadSHA: "sha-7",
+		RoundNumber: 1, EnvironmentID: "env", InstanceID: "i", Model: "m",
+		ThreadID: "th", LaunchCommandID: "lc", InitialMessageID: "im",
+		Status: model.ReviewRunDispatched, DeadlineAt: now.Add(time.Hour), CreatedAt: now, UpdatedAt: now,
+	}
+	if err := svc.db.Create(run).Error; err != nil {
+		t.Fatalf("seed run: %v", err)
+	}
+	svc.db.Create(&model.ReviewRunToken{RunID: run.ID, TokenHash: "h", CreatedAt: now, ExpiresAt: now.Add(time.Hour)})
+	svc.db.Create(&model.ReviewDebounce{
+		IntegrationID: forgeID, ProjectID: project.ID, RepoFullName: "cancels/app",
+		PRNumber: 7, HeadSHA: "sha-7", Action: "opened", FireAt: now.Add(time.Minute), UpdatedAt: now,
+	})
+	svc.db.Create(&model.ReviewPullRequest{
+		IntegrationID: forgeID, ProjectID: project.ID, RepoFullName: "cancels/app",
+		PRNumber: 7, HeadSHA: "sha-7", RoundNumber: 1, SyncPending: true, SyncEpoch: 3, UpdatedAt: now,
+	})
+
+	review := newReviewTestService(t, svc, nil, nil, nil)
+	review.clients = pollStubResolver{byIntegration: map[string]forge.ReviewClient{
+		forgeID: &pollStubClient{errByRepo: map[string]error{
+			"cancels/app": &forge.StatusError{StatusCode: 404, Body: "repo gone"},
+		}},
+	}}
+	review.pollForgejoOpenPRs(now)
+
+	var after model.ReviewRun
+	svc.db.First(&after, "id = ?", run.ID)
+	if after.Status != model.ReviewRunCancelled || after.ErrorCode != "disabled" {
+		t.Fatalf("在途运行 = %q/%q, want cancelled/disabled", after.Status, after.ErrorCode)
+	}
+	var tok model.ReviewRunToken
+	svc.db.First(&tok, "run_id = ?", run.ID)
+	if tok.ConsumedAt == nil {
+		t.Fatal("停用应消费令牌")
+	}
+	var n int64
+	svc.db.Model(&model.ReviewDebounce{}).Where("project_id = ?", project.ID).Count(&n)
+	if n != 0 {
+		t.Fatalf("停用应删防抖行, rows=%d", n)
+	}
+	var ledger model.ReviewPullRequest
+	svc.db.First(&ledger, "project_id = ?", project.ID)
+	if ledger.SyncPending || ledger.SyncEpoch != 4 {
+		t.Fatalf("ledger = pending=%v epoch=%d, want false/4", ledger.SyncPending, ledger.SyncEpoch)
+	}
+}
+
+// TestForgejoPoll_StaleSnapshotCannotDisable 轮询在途期间用户改绑/换仓库并
+// 重新启用：旧快照的确定性错误不得关掉新绑定（谓词带快照 integration_id+
+// repo_full_name，RowsAffected=0 → 不取消不日志）。
+func TestForgejoPoll_StaleSnapshotCannotDisable(t *testing.T) {
+	svc := setupTestServices(t)
+	forgeID := createTestForgeIntegration(t, svc.db, "https://forge.example.com").ID
+	project, _ := seedForgejoReviewProject(t, svc, forgeID, "fj-stale", "stale/app", nil)
+	var snapshot model.ProjectReviewSettings
+	if err := svc.db.First(&snapshot, "project_id = ?", project.ID).Error; err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+
+	// 模拟轮询在途期间的改绑：存储行换成新集成+新仓库，快照仍是旧值。
+	newForge := createTestForgeIntegration(t, svc.db, "https://new.example.com")
+	if err := svc.db.Model(&model.ProjectReviewSettings{}).
+		Where("project_id = ?", project.ID).
+		Updates(map[string]any{
+			"integration_id": newForge.ID, "repo_full_name": "fresh/app",
+		}).Error; err != nil {
+		t.Fatalf("rebind: %v", err)
+	}
+
+	review := newReviewTestService(t, svc, nil, nil, nil)
+	if err := review.disableReviewOnDeterministic(&snapshot,
+		&forge.StatusError{StatusCode: 404, Body: "repo gone"}); err != nil {
+		t.Fatalf("旧快照确定性错误应被吞掉: %v", err)
+	}
+	var stored model.ProjectReviewSettings
+	svc.db.First(&stored, "project_id = ?", project.ID)
+	if !stored.Enabled {
+		t.Fatal("旧快照不得停用新绑定的审查设置")
+	}
+}
+
 // TestForgejoPoll_DecryptErrorDisablesReview 集成密文损坏（解密失败哨兵）
 // 同属确定性失败：resolver 构造即错 → 设置被停用而不是每 tick 刷错。
 func TestForgejoPoll_DecryptErrorDisablesReview(t *testing.T) {
