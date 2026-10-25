@@ -149,7 +149,8 @@ func (s BotBudgetSpend) Task(taskID string) float64 { return s.TaskUSD[taskID] }
 //   - 请求行按「实际金额优先」计价：provider_cost（只落置信 USD 的行）
 //     覆盖 cost_estimate，与花费页展示口径一致（INT-164）；
 //   - run（主线与 schedule 都算）按其请求行合计记入所属机器人；无请求
-//     行时回退 run.cost_estimate（历史行口径不变）；
+//     行或请求行全未计价时回退 run.cost_estimate（存量行口径不变，与全站
+//     runDisplayOwn 一致）；
 //   - 维护请求按维护运行自己的 created_at 落在窗口内计入机器人（有父无父都
 //     算，父 run 可能在窗口外）；任务归属按父 run 反查——父在窗口内经
 //     parentUSD 消费，父在窗口外的单独补一轮（与花费页
@@ -214,11 +215,11 @@ func (r *BotBudgetRepository) SpendInWindow(botIDs []string, start, end time.Tim
 	}
 	for i := range runs {
 		row := &runs[i]
-		// 优先按请求行合计（含实际金额覆盖）；无请求行回退 run 快照值。
-		var runUSD *float64
-		if sum, ok := reqSums[row.ID]; ok {
-			runUSD = sum
-		} else {
+		// 请求行有已计价金额时按实收优先合计；请求行缺失或全未计价都回退
+		// run 冻结快照——与全站 runDisplayOwn 同口径（缺失 ≠ 0，存量「成本
+		// 只在 run 列上」的钱不能丢）。
+		runUSD := reqSums[row.ID]
+		if runUSD == nil {
 			runUSD = row.CostEstimate
 		}
 		if runUSD != nil {

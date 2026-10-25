@@ -34,6 +34,11 @@ import (
 const (
 	// botBudgetEvalInterval 是预算评估周期；60s 与夜间整理扫描同频。
 	botBudgetEvalInterval = 60 * time.Second
+	// botBudgetPrevPeriodGrace 是周期切换后继续扫描上一周期花费的宽限：
+	// 跨界前创建、切换后才跑完的 run 的花费仍落在上一窗口，宽限内重扫
+	// 才能兜住它们的越阈告警；宽限外窗口花费已固定，dedup 键又让重扫
+	// 无意义（每分钟每用户一次全窗口聚合是纯浪费）。
+	botBudgetPrevPeriodGrace = 5 * time.Minute
 	// botBudgetThresholdMax 是阈值上限（100 = 10000%）：允许超过 100% 的
 	// 档位，但不接受离谱值。
 	botBudgetThresholdMax = 100.0
@@ -147,12 +152,11 @@ func botBudgetPeriodLabel(period model.BotBudgetPeriod) string {
 	return "日"
 }
 
-// botBudgetThresholdReached 用整数基点比较花费与「金额 × 阈值」，避免浮点
-// 误差把恰好等于阈值的边界判丢。
+// botBudgetThresholdReached 用基点比较花费与「金额 × 阈值」，避免浮点误差
+// 把恰好等于阈值的边界判丢。全程 float64（math.Round 返回 float64），
+// 不做 int64 转换——天文数字金额下 int64 溢出是实现定义行为。
 func botBudgetThresholdReached(amountUSD, threshold, spendUSD float64) bool {
-	required := int64(math.Round(amountUSD * threshold * 10000))
-	spent := int64(math.Round(spendUSD * 10000))
-	return spent >= required
+	return math.Round(spendUSD*10000) >= math.Round(amountUSD*threshold*10000)
 }
 
 // botBudgetMoney 是文案里的美元金额（分位显示）。
@@ -171,7 +175,7 @@ func botBudgetPercentText(bp int) string {
 // 一轮（容量 1 的 channel 天然合并连续写入）。首轮立即执行：启动即补一次
 // 上一周期/当前周期已越过的阈值。评估失败只记日志，绝不影响机器人运行。
 func (s *BotService) budgetEvalLoop() {
-	s.evalBudgetsOnce()
+	s.evalBudgetsOnce(true)
 	ticker := time.NewTicker(botBudgetEvalInterval)
 	defer ticker.Stop()
 	for {
@@ -179,7 +183,7 @@ func (s *BotService) budgetEvalLoop() {
 		case <-ticker.C:
 		case <-s.budgetKick:
 		}
-		s.evalBudgetsOnce()
+		s.evalBudgetsOnce(false)
 	}
 }
 
@@ -193,7 +197,9 @@ func (s *BotService) kickBudgetEval() {
 }
 
 // evalBudgetsOnce 按用户分组评估全部预算：同一用户的窗口花费只扫描一次。
-func (s *BotService) evalBudgetsOnce() {
+// firstEval 为 true 时无条件评一次上一周期（进程停摆期间跨界阈值的兜底）；
+// 之后的轮次只在周期刚切换后的宽限内重扫上一周期，其余时间跳过。
+func (s *BotService) evalBudgetsOnce(firstEval bool) {
 	repo := repository.NewBotBudgetRepository(s.db)
 	budgets, err := repo.ListAll()
 	if err != nil {
@@ -213,7 +219,7 @@ func (s *BotService) evalBudgetsOnce() {
 		byUser[userID] = append(byUser[userID], budgets[i])
 	}
 	for _, userID := range order {
-		s.evalUserBudgets(repo, userID, byUser[userID])
+		s.evalUserBudgets(repo, userID, byUser[userID], firstEval)
 	}
 }
 
@@ -226,7 +232,7 @@ type botBudgetWindowKey struct {
 
 // evalUserBudgets 评估一个用户的全部预算。预算或目标缺失（目标已删除由
 // 外键级联清理，理论上不会出现）只跳过该条，不影响其他预算。
-func (s *BotService) evalUserBudgets(repo *repository.BotBudgetRepository, userID string, budgets []model.BotBudget) {
+func (s *BotService) evalUserBudgets(repo *repository.BotBudgetRepository, userID string, budgets []model.BotBudget, firstEval bool) {
 	_, loc := s.botUserTimezoneOf(userID)
 	now := s.now()
 
@@ -300,7 +306,15 @@ func (s *BotService) evalUserBudgets(repo *repository.BotBudgetRepository, userI
 				zap.String("budget_id", b.ID), zap.Error(err))
 			continue
 		}
+		// 上一周期窗口只在首轮（停摆兜底）或周期切换后的宽限内扫描——
+		// 跨界前创建、切换后才跑完的 run 仍会把花费落进上一窗口，宽限外
+		// 花费已固定，dedup 键使重扫无意义。
+		curStart, _, _ := botBudgetWindow(b.Period, now, loc, false)
+		evalPrev := firstEval || now.Sub(curStart) < botBudgetPrevPeriodGrace
 		for _, previous := range []bool{false, true} {
+			if previous && !evalPrev {
+				continue
+			}
 			key := botBudgetWindowKey{period: b.Period, previous: previous}
 			spend, ok := loadSpend(key)
 			if !ok {

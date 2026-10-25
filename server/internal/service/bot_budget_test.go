@@ -137,7 +137,7 @@ func TestBotBudgetDailyThresholdAlertsOnce(t *testing.T) {
 		t.Fatalf("周期键应为当地日期，实得 %s", saved.PeriodKey)
 	}
 
-	env.bots.evalBudgetsOnce()
+	env.bots.evalBudgetsOnce(true)
 	if n := countBudgetNotifications(t, env, userID); n != 1 {
 		t.Fatalf("80%% 阈值应告警 1 次，实得 %d", n)
 	}
@@ -149,8 +149,8 @@ func TestBotBudgetDailyThresholdAlertsOnce(t *testing.T) {
 	}
 
 	// 同日重复评估：不再告警（金额与调用次数都不改变键）。
-	env.bots.evalBudgetsOnce()
-	env.bots.evalBudgetsOnce()
+	env.bots.evalBudgetsOnce(true)
+	env.bots.evalBudgetsOnce(true)
 	if n := countBudgetNotifications(t, env, userID); n != 1 {
 		t.Fatalf("同日重复评估不应重复告警，实得 %d", n)
 	}
@@ -160,7 +160,7 @@ func TestBotBudgetDailyThresholdAlertsOnce(t *testing.T) {
 
 	// 再花 0.2（累计 1.0）：只补 100% 档一条，80% 档不重复。
 	seedBudgetRun(t, env, bot.ID, 0.2, now.Add(-30*time.Minute))
-	env.bots.evalBudgetsOnce()
+	env.bots.evalBudgetsOnce(true)
 	if n := countBudgetNotifications(t, env, userID); n != 2 {
 		t.Fatalf("100%% 阈值应再告警一条，实得 %d", n)
 	}
@@ -216,7 +216,7 @@ func TestBotBudgetMonthlyPreviousPeriodBackfill(t *testing.T) {
 		t.Fatalf("周期键应为 2026-03，实得 %s", saved.PeriodKey)
 	}
 
-	env.bots.evalBudgetsOnce()
+	env.bots.evalBudgetsOnce(true)
 	if n := countBudgetNotifications(t, env, userID); n != 1 {
 		t.Fatalf("上一周期越线应补一条告警，实得 %d", n)
 	}
@@ -224,9 +224,37 @@ func TestBotBudgetMonthlyPreviousPeriodBackfill(t *testing.T) {
 		t.Fatalf("上一周期告警的周期键应是 2026-02")
 	}
 	// 再评估一次不重复。
-	env.bots.evalBudgetsOnce()
+	env.bots.evalBudgetsOnce(true)
 	if n := countBudgetNotifications(t, env, userID); n != 1 {
 		t.Fatalf("上一周期告警不应重复，实得 %d", n)
+	}
+}
+
+// TestBotBudgetPreviousWindowSkippedAfterGrace 评审回归：非首轮评估且当前已
+// 远离周期起点（宽限外）时，上一周期窗口不再扫描——该窗口花费已固定，每
+// 分钟重扫是纯浪费。首轮评估（停摆兜底）仍照常回看。
+func TestBotBudgetPreviousWindowSkippedAfterGrace(t *testing.T) {
+	env := setupBotBudgetEnv(t)
+	userID := createBotTestUser(t, env.db, "budgetprevskip")
+	bot := env.createBot(t, userID)
+
+	// 3 月 10 日（宽限早已过），上一周期二月花费已越阈。
+	now := time.Date(2026, 3, 10, 10, 0, 0, 0, time.UTC)
+	env.bots.nowFn = func() time.Time { return now }
+	seedBudgetRun(t, env, bot.ID, 0.9, time.Date(2026, 2, 20, 8, 0, 0, 0, time.UTC))
+	if _, err := env.bots.UpsertBotBudget(userID, bot.ID, "monthly", &BotBudgetUpsertRequest{
+		AmountUSD: 1, Thresholds: []float64{0.8},
+	}); err != nil {
+		t.Fatalf("upsert budget: %v", err)
+	}
+
+	env.bots.evalBudgetsOnce(false)
+	if n := countBudgetNotifications(t, env, userID); n != 0 {
+		t.Fatalf("宽限外的非首轮评估不应扫上一周期，实得 %d 条告警", n)
+	}
+	env.bots.evalBudgetsOnce(true)
+	if n := countBudgetNotifications(t, env, userID); n != 1 {
+		t.Fatalf("首轮评估应照常回看上一周期，实得 %d 条告警", n)
 	}
 }
 
@@ -269,7 +297,7 @@ func TestBotBudgetTaskScopeAndLinkedMain(t *testing.T) {
 		t.Fatalf("任务预算不应出现在机器人预算里: %v", botBudgets)
 	}
 
-	env.bots.evalBudgetsOnce()
+	env.bots.evalBudgetsOnce(true)
 	if n := countBudgetNotifications(t, env, userID); n != 1 {
 		t.Fatalf("任务预算越线应告警一次，实得 %d", n)
 	}
@@ -313,6 +341,40 @@ func TestBotBudgetLateParentMaintenance(t *testing.T) {
 	}
 	if !costEq(spend.TaskUSD[task.ID], 0.6) {
 		t.Fatalf("维护应按窗口外父 run 归到任务 0.6，实得 %v", spend.TaskUSD)
+	}
+}
+
+// TestBotBudgetUnpricedRequestsFallback 评审回归：run 有请求行但全未计价
+// （provider_cost 与 cost_estimate 均空）时，花费聚合必须回退 run 冻结
+// 快照——与全站 runDisplayOwn 同口径；修复前请求行存在即吞掉快照，存量
+// 「成本只在 run 列上」的 run 会让预算花费永远少算。
+func TestBotBudgetUnpricedRequestsFallback(t *testing.T) {
+	env := setupBotBudgetEnv(t)
+	userID := createBotTestUser(t, env.db, "budgetunpriced")
+	bot := env.createBot(t, userID)
+
+	day := time.Now().UTC().Truncate(24 * time.Hour)
+	start, end := day, day.Add(24*time.Hour)
+	run := seedBudgetRun(t, env, bot.ID, 1.5, start.Add(time.Hour))
+	now := time.Now().UTC()
+	// 请求行存在但两个金额字段都空：SUM 出 nil，不是「无请求行」。
+	req := &model.BotModelRequest{
+		ID: uuid.NewString(), RunID: run.ID, Ordinal: 1,
+		Status: model.BotModelRequestSucceeded, PromptRevision: 1,
+		ToolsetVersion: botToolsetVersion,
+		StartedAt:      now, FinishedAt: &now,
+	}
+	if err := env.db.Create(req).Error; err != nil {
+		t.Fatalf("seed unpriced request: %v", err)
+	}
+
+	spend, err := repository.NewBotBudgetRepository(env.db).
+		SpendInWindow([]string{bot.ID}, start, end)
+	if err != nil {
+		t.Fatalf("spend: %v", err)
+	}
+	if !costEq(spend.BotUSD[bot.ID], 1.5) {
+		t.Fatalf("请求行全未计价应回退 run 快照 1.5，实得 %v", spend.BotUSD)
 	}
 }
 
@@ -377,7 +439,7 @@ func TestBotBudgetUnsetKeepsBehavior(t *testing.T) {
 	env.bots.nowFn = func() time.Time { return now }
 	seedBudgetRun(t, env, bot.ID, 42, now.Add(-time.Minute))
 
-	env.bots.evalBudgetsOnce()
+	env.bots.evalBudgetsOnce(true)
 	if n := countBudgetNotifications(t, env, userID); n != 0 {
 		t.Fatalf("未设预算不应产生通知，实得 %d", n)
 	}
