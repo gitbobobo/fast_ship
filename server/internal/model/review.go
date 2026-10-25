@@ -52,13 +52,20 @@ const (
 )
 
 // ProjectReviewSettings 项目级审查开关与组合配置。仓库（github_owner/repo）
-// 取自项目本身；整个部署内同一仓库只允许一个项目开启。
+// 取自项目本身；同一集成内同一仓库只允许一个项目开启（INT-167 起唯一键带
+// integration_id，同名仓库在两个集成下可各自被启用）。
 type ProjectReviewSettings struct {
 	ProjectID string `gorm:"column:project_id;type:text;primaryKey" json:"project_id"`
 	UserID    string `gorm:"column:user_id;type:text;not null;index" json:"user_id"`
 	// RepoFullName 小写的 owner/repo 快照：同仓库唯一占用由部分唯一索引
-	// (repo_full_name) WHERE enabled 兜底，开两个项目抢同一仓库时后写者失败。
+	// (integration_id, repo_full_name) WHERE enabled 兜底，同一集成下开两个
+	// 项目抢同一仓库时后写者失败。
 	RepoFullName string `gorm:"column:repo_full_name;type:text" json:"repo_full_name"`
+	// IntegrationID 审查侧的集成身份快照（INT-167）：保存设置时取项目绑定的
+	// 归一值——内置 GitHub 记 ForgeIntegrationBuiltinGitHubID，Forgejo 记
+	// forge_integrations.id。占用判定、webhook 反查、同步过滤与账本分区都带
+	// 这一维：owner/repo 字面相同、换了实例就是换了仓库。
+	IntegrationID string `gorm:"column:integration_id;type:text;not null" json:"integration_id"`
 
 	// TriggerOpened/TriggerSynchronize 不带 default 标签：GORM Create 会把零值
 	// 替换成列默认，首次显式保存 false 会被写成 true。新项目默认勾选由
@@ -97,11 +104,15 @@ type ReviewRun struct {
 	HeadSHA        string `gorm:"column:head_sha;type:text;not null" json:"head_sha"`
 	RoundNumber    int    `gorm:"column:round_number;not null" json:"round_number"`
 	InstallationID int64  `gorm:"column:installation_id" json:"installation_id"`
-	TriggerAction  string `gorm:"column:trigger_action;type:text" json:"trigger_action"`
-	PRTitle        string `gorm:"column:pr_title;type:text" json:"pr_title"`
-	PRURL          string `gorm:"column:pr_url;type:text" json:"pr_url"`
-	BaseRef        string `gorm:"column:base_ref;type:text" json:"base_ref"`
-	HeadRef        string `gorm:"column:head_ref;type:text" json:"head_ref"`
+	// IntegrationID 本运行所属集成（INT-167，归一值）：按集成选 client、按
+	// 集成隔离同名仓库的历史；入 idx_review_runs_combination 组合幂等键
+	// （同名仓库换集成后是不同组合，不能被 OnConflict 吞行）。
+	IntegrationID string `gorm:"column:integration_id;type:text;not null" json:"integration_id"`
+	TriggerAction string `gorm:"column:trigger_action;type:text" json:"trigger_action"`
+	PRTitle       string `gorm:"column:pr_title;type:text" json:"pr_title"`
+	PRURL         string `gorm:"column:pr_url;type:text" json:"pr_url"`
+	BaseRef       string `gorm:"column:base_ref;type:text" json:"base_ref"`
+	HeadRef       string `gorm:"column:head_ref;type:text" json:"head_ref"`
 
 	// 组合：环境 + harness（instance_id）+ 模型 + 选项（思考强度等）。
 	EnvironmentID    string `gorm:"column:environment_id;type:text;not null" json:"environment_id"`
@@ -177,13 +188,15 @@ type ReviewRunToken struct {
 func (ReviewRunToken) TableName() string { return "review_run_tokens" }
 
 // ReviewPullRequest 一个 PR 的审查总账（评论落点、状态汇总、视觉审核进度）。
-// 主键 (project_id, repo_full_name, pr_number)：执行态按项目分区——同一仓库
-// 换项目接管后各自一本账，互不吞事件、不混结果；GitHub 产出（评论、状态、
-// 行内 review）仍按仓库归一（同一仓库只允许一个项目 enabled）。
+// 主键 (project_id, repo_full_name, pr_number, integration_id)：执行态按项目
+// 分区——同一仓库换项目接管后各自一本账，互不吞事件、不混结果；GitHub 产出
+// （评论、状态、行内 review）按 (integration_id, repo_full_name) 归一（同一
+// 集成的同一仓库只允许一个项目 enabled）。
 type ReviewPullRequest struct {
-	ProjectID    string `gorm:"column:project_id;type:text;primaryKey" json:"project_id"`
-	RepoFullName string `gorm:"column:repo_full_name;type:text;primaryKey" json:"repo_full_name"`
-	PRNumber     int    `gorm:"column:pr_number;primaryKey" json:"pr_number"`
+	ProjectID     string `gorm:"column:project_id;type:text;primaryKey" json:"project_id"`
+	RepoFullName  string `gorm:"column:repo_full_name;type:text;primaryKey" json:"repo_full_name"`
+	PRNumber      int    `gorm:"column:pr_number;primaryKey" json:"pr_number"`
+	IntegrationID string `gorm:"column:integration_id;type:text;primaryKey" json:"integration_id"`
 
 	UserID         string `gorm:"column:user_id;type:text;not null;index" json:"user_id"`
 	InstallationID int64  `gorm:"column:installation_id" json:"installation_id"`
@@ -220,15 +233,18 @@ func (ReviewPullRequest) TableName() string { return "review_pull_requests" }
 // 私有仓库的 user-attachments 走 App 令牌取）。
 type ReviewAsset struct {
 	ID string `gorm:"type:text;primaryKey" json:"id"`
-	// 同一 (repo, pr, head, 源地址) 只允许一行：并发视觉运行时两个 Agent
-	// 都会先读到空列表，随机 id 不会撞，必须靠唯一索引兜住重复。
-	RepoFullName string `gorm:"column:repo_full_name;type:text;not null;uniqueIndex:idx_review_assets_source,priority:1" json:"repo_full_name"`
-	PRNumber     int    `gorm:"column:pr_number;not null;uniqueIndex:idx_review_assets_source,priority:2" json:"pr_number"`
-	HeadSHA      string `gorm:"column:head_sha;type:text;not null;uniqueIndex:idx_review_assets_source,priority:3" json:"head_sha"`
+	// 同一 (集成, repo, pr, head, 源地址) 只允许一行：并发视觉运行时两个 Agent
+	// 都会先读到空列表，随机 id 不会撞，必须靠唯一索引兜住重复。integration_id
+	// 键首：资产保持仓库级共享（无 project_id），但同名仓库在两个集成下是不同
+	// 实例的图源，互不吞行。
+	IntegrationID string `gorm:"column:integration_id;type:text;not null;uniqueIndex:idx_review_assets_source,priority:1" json:"integration_id"`
+	RepoFullName  string `gorm:"column:repo_full_name;type:text;not null;uniqueIndex:idx_review_assets_source,priority:2" json:"repo_full_name"`
+	PRNumber      int    `gorm:"column:pr_number;not null;uniqueIndex:idx_review_assets_source,priority:3" json:"pr_number"`
+	HeadSHA       string `gorm:"column:head_sha;type:text;not null;uniqueIndex:idx_review_assets_source,priority:4" json:"head_sha"`
 
 	Position    int    `gorm:"not null" json:"position"`
 	Label       string `gorm:"type:text" json:"label"`
-	SourceURL   string `gorm:"column:source_url;type:text;not null;uniqueIndex:idx_review_assets_source,priority:4" json:"source_url"`
+	SourceURL   string `gorm:"column:source_url;type:text;not null;uniqueIndex:idx_review_assets_source,priority:5" json:"source_url"`
 	StoragePath string `gorm:"column:storage_path;type:text;not null" json:"storage_path"`
 	MimeType    string `gorm:"column:mime_type;type:text" json:"mime_type"`
 	SizeBytes   int64  `gorm:"column:size_bytes" json:"size_bytes"`
@@ -240,11 +256,13 @@ type ReviewAsset struct {
 func (ReviewAsset) TableName() string { return "review_assets" }
 
 // ReviewDebounce 同一项目+PR 的防抖窗口：窗口内的新推送只更新 head SHA 并推后
-// fire_at，到点按最新 SHA 开轮（防抖固定 60s，不提供配置）。
+// fire_at，到点按最新 SHA 开轮（防抖固定 60s，不提供配置）。主键带
+// integration_id：同名仓库在两个集成下的推送各算各的窗口。
 type ReviewDebounce struct {
-	ProjectID    string `gorm:"column:project_id;type:text;primaryKey" json:"project_id"`
-	RepoFullName string `gorm:"column:repo_full_name;type:text;primaryKey" json:"repo_full_name"`
-	PRNumber     int    `gorm:"column:pr_number;primaryKey" json:"pr_number"`
+	ProjectID     string `gorm:"column:project_id;type:text;primaryKey" json:"project_id"`
+	RepoFullName  string `gorm:"column:repo_full_name;type:text;primaryKey" json:"repo_full_name"`
+	PRNumber      int    `gorm:"column:pr_number;primaryKey" json:"pr_number"`
+	IntegrationID string `gorm:"column:integration_id;type:text;primaryKey" json:"integration_id"`
 
 	HeadSHA        string    `gorm:"column:head_sha;type:text;not null" json:"head_sha"`
 	Action         string    `gorm:"column:action;type:text;not null" json:"action"`
@@ -260,15 +278,17 @@ type ReviewDebounce struct {
 func (ReviewDebounce) TableName() string { return "review_debounces" }
 
 // ReviewSeenSHA 某项目已受理过的 head SHA（force-push 回旧 SHA 不再开轮）。
-// 主键含 project_id：接管后新项目对同仓库同一 SHA 重新受理（各项目一本
-// 已受理账，旧项目的已见集合不沿用）。
+// 主键 (project_id, repo_full_name, pr_number, head_sha, integration_id)：
+// 接管后新项目对同仓库同一 SHA 重新受理（各项目一本已受理账，旧项目的已见
+// 集合不沿用）；同名仓库在两个集成下也各记各的受理账。
 type ReviewSeenSHA struct {
-	ProjectID    string     `gorm:"column:project_id;type:text;primaryKey" json:"project_id"`
-	RepoFullName string     `gorm:"column:repo_full_name;type:text;primaryKey" json:"repo_full_name"`
-	PRNumber     int        `gorm:"column:pr_number;primaryKey" json:"pr_number"`
-	HeadSHA      string     `gorm:"column:head_sha;type:text;primaryKey" json:"head_sha"`
-	PRUpdatedAt  *time.Time `gorm:"column:pr_updated_at" json:"pr_updated_at,omitempty"`
-	AcceptedAt   time.Time  `gorm:"column:accepted_at;not null" json:"accepted_at"`
+	ProjectID     string     `gorm:"column:project_id;type:text;primaryKey" json:"project_id"`
+	RepoFullName  string     `gorm:"column:repo_full_name;type:text;primaryKey" json:"repo_full_name"`
+	PRNumber      int        `gorm:"column:pr_number;primaryKey" json:"pr_number"`
+	HeadSHA       string     `gorm:"column:head_sha;type:text;primaryKey" json:"head_sha"`
+	IntegrationID string     `gorm:"column:integration_id;type:text;primaryKey" json:"integration_id"`
+	PRUpdatedAt   *time.Time `gorm:"column:pr_updated_at" json:"pr_updated_at,omitempty"`
+	AcceptedAt    time.Time  `gorm:"column:accepted_at;not null" json:"accepted_at"`
 }
 
 func (ReviewSeenSHA) TableName() string { return "review_seen_shas" }

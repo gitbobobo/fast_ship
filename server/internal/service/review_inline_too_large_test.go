@@ -60,12 +60,13 @@ func TestReviewSyncDiffTooLargeDowngradesThenSelfHeals(t *testing.T) {
 		githubapp.StaticClients{Client: client},
 		fakeReviewAppSource{ok: true},
 		fakeReviewPublicURL("https://fs.example.com"),
-		nil, e.media, nil, e.svc.cfg, zap.NewNop())
+		nil, e.media, nil, repository.NewForgeIntegrationRepository(e.svc.db), e.svc.cfg, zap.NewNop())
 	// 带行号 P1 才会触发 diff 读取（fetchInlineLines 只在这种发现存在时读）。
 	run := e.seedRunWithFindings(t, repo, 78, "sha-tl", now)
 	e.enableReview(t)
 	e.svc.db.Create(&model.ReviewPullRequest{
-		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 78, UserID: e.user.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: repo, PRNumber: 78, UserID: e.user.ID,
 		InstallationID: 1, HeadSHA: "sha-tl", RoundNumber: 1,
 		SyncPending: true, SyncEpoch: 1, UpdatedAt: now,
 	})
@@ -192,7 +193,8 @@ func TestReviewSyncDiff406WithoutTooLargeStaysRetryable(t *testing.T) {
 	run := e.seedRunWithFindings(t, repo, 81, "sha-406", now)
 	e.enableReview(t)
 	e.svc.db.Create(&model.ReviewPullRequest{
-		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 81, UserID: e.user.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: repo, PRNumber: 81, UserID: e.user.ID,
 		InstallationID: 1, HeadSHA: "sha-406", RoundNumber: 1,
 		SyncPending: true, SyncEpoch: 1, UpdatedAt: now,
 	})
@@ -202,7 +204,7 @@ func TestReviewSyncDiff406WithoutTooLargeStaysRetryable(t *testing.T) {
 		githubapp.StaticClients{Client: &diff406NoCodeClient{GitHubClient: e.fake}},
 		fakeReviewAppSource{ok: true},
 		fakeReviewPublicURL("https://fs.example.com"),
-		nil, e.media, nil, e.svc.cfg, zap.NewNop())
+		nil, e.media, nil, repository.NewForgeIntegrationRepository(e.svc.db), e.svc.cfg, zap.NewNop())
 	review.syncPendingPRs(now)
 
 	if got := len(e.fake.StatusesForContext(reviewCodeStatusContext)); got == 0 {
@@ -260,7 +262,7 @@ func TestReviewSyncDiffTooLargeKeepsAllFindingsAndClearsStaleFailure(t *testing.
 		githubapp.StaticClients{Client: client},
 		fakeReviewAppSource{ok: true},
 		fakeReviewPublicURL("https://fs.example.com"),
-		nil, e.media, nil, e.svc.cfg, zap.NewNop())
+		nil, e.media, nil, repository.NewForgeIntegrationRepository(e.svc.db), e.svc.cfg, zap.NewNop())
 
 	// 组合 A：已发行内 review（posted_at 非空），降级不得把它的终态改回去。
 	postedAt := now.Add(-time.Hour)
@@ -283,7 +285,8 @@ func TestReviewSyncDiffTooLargeKeepsAllFindingsAndClearsStaleFailure(t *testing.
 	})
 	// 历史退避留下的失败状态：updated_at 推过退避窗口，模拟退避后的这一次重试。
 	e.svc.db.Create(&model.ReviewPullRequest{
-		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 82, UserID: e.user.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: repo, PRNumber: 82, UserID: e.user.ID,
 		InstallationID: 1, HeadSHA: "sha-mix", RoundNumber: 1,
 		SyncPending: true, SyncEpoch: 5, SyncFailedEpoch: 5, SyncError: "上一次同步失败",
 		UpdatedAt: now.Add(-reviewSyncRetryBackoff - time.Minute),
@@ -424,7 +427,8 @@ func TestReviewSyncDiffTooLargeDoesNotClearNewPending(t *testing.T) {
 	e.enableReview(t)
 	e.seedRunWithFindings(t, repo, 83, "sha-epoch", now)
 	e.svc.db.Create(&model.ReviewPullRequest{
-		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 83, UserID: e.user.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: repo, PRNumber: 83, UserID: e.user.ID,
 		InstallationID: 1, HeadSHA: "sha-epoch", RoundNumber: 1,
 		SyncPending: true, SyncEpoch: 1, UpdatedAt: now,
 	})
@@ -434,7 +438,7 @@ func TestReviewSyncDiffTooLargeDoesNotClearNewPending(t *testing.T) {
 		githubapp.StaticClients{Client: &epochBumpTooLargeClient{GitHubClient: e.fake, db: e.svc.db, repo: repo, pr: 83}},
 		fakeReviewAppSource{ok: true},
 		fakeReviewPublicURL("https://fs.example.com"),
-		nil, e.media, nil, e.svc.cfg, zap.NewNop())
+		nil, e.media, nil, repository.NewForgeIntegrationRepository(e.svc.db), e.svc.cfg, zap.NewNop())
 	review.syncPendingPRs(now)
 
 	var ledger model.ReviewPullRequest

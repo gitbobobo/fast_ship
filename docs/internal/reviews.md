@@ -23,29 +23,36 @@
 （派发失败、超时、工作区回收失败），审查发现不发通知。单进程部署假设。
 
 **账本按项目分区**：GitHub 产出（commit status、顶层评论、行内 review、
-每 PR 进程锁）按仓库归一——同一仓库任一时刻只有一个项目 enabled。但执行态
-（运行、令牌、防抖、seen SHA、PR 总账）全部按 `project_id` 分区：项目换成
-另一个项目接管同一仓库时各记一本账，互不吞事件、不混结果。接管语义见
-「开启前置与同仓库唯一」。
+每 PR 进程锁）按 (集成, 仓库) 归一——同一集成的同一仓库任一时刻只有一个
+项目 enabled。但执行态（运行、令牌、防抖、seen SHA、PR 总账）全部按
+`project_id + integration_id` 分区：项目换成另一个项目接管同一仓库、或改绑
+另一集成时各记一本账，互不吞事件、不混结果。接管语义见「开启前置与同仓库
+唯一」；集成维度是 INT-167 加的（Forgejo 第二集成），存量语义见
+docs/internal/forge-integrations.md。
 
 **审查仓库 = 代码仓库**：项目可以单独配置代码仓库
 （`projects.code_github_owner/code_github_repo`，musiver 场景：公开仓库放
 Issue 与 Release、无代码；代码在另一仓库）。`project.CodeRepo()` 表达的是
 「这个项目审查哪个仓库」的候选值：两个 code 字段都非空时用显式配置，否则
-回落公开仓库；Issue 同步/发版/发货仍只走公开仓库，两者互不影响。
+回落公开仓库；Issue 同步/发版/发货仍只走公开仓库，两者互不影响。集成身份
+（`projects.code_integration_id`，空 = 内置 `github-default`）也算审查对象
+的一部分：owner/repo 字面相同、换了实例就是换了仓库。
 
 ### 审查仓库的读取口径
 
 同一个事实存了两份：项目行的 `CodeRepo()`（候选值）与设置行的
-`repo_full_name`（生效值，小写）。两条写入路径保证它们恒等：项目改仓库时
-`ProjectRepository.Update` 同事务停用审查并刷新快照（disabled 行也刷新），
-保存审查设置时 `UpdateSettings` 用 `CodeRepo()` 写入快照并在事务内复核。
-因此**不需要**在两者之间做「谁更可信」的兜底，需要的是按用途选列：
+`repo_full_name`（生效值，小写）；INT-167 起伴随一份集成身份快照
+`integration_id`（归一值：空绑定记 `github-default`，Forgejo 记
+`forge_integrations.id`）。三条写入路径保证它们恒等：项目改仓库/改绑集成时
+`ProjectRepository.Update` 同事务停用审查并刷新两份快照（disabled 行也刷
+新），保存审查设置时 `UpdateSettings` 用 `CodeRepo()` 与项目绑定归一值写入
+快照并在事务内复核。因此**不需要**在两者之间做「谁更可信」的兜底，需要的
+是按用途选列：
 
 | 用途 | 读什么 | 允许出现的位置 |
 | --- | --- | --- |
-| 写入侧：生成快照、以及必须等于「即将写入的键」的预占预判 | `CodeRepo()` | `UpdateSettings`、`ProjectRepository.Update`、`reviewPrerequisites`、`reviewTakenBy`、`reviewOccupiers` |
-| 运行侧：基于已有状态做判定 | 设置行 `repo_full_name`（不按 `enabled` 过滤，除非该判定本身要求已启用） | 触发反查、防抖复核、同步过滤/准入、rerun、记录与总览的「当前仓库」 |
+| 写入侧：生成快照、以及必须等于「即将写入的键」的预占预判 | `CodeRepo()` + `code_integration_id` 归一值 | `UpdateSettings`、`ProjectRepository.Update`、`reviewPrerequisites`、`reviewTakenBy`、`reviewOccupiers` |
+| 运行侧：基于已有状态做判定 | 设置行 `(integration_id, repo_full_name)`（不按 `enabled` 过滤，除非该判定本身要求已启用） | 触发反查、防抖复核、同步过滤/准入、rerun、记录与总览的「当前仓库」 |
 | 展示：保留用户输入的原样大小写 | `CodeRepo()` | 总览的 owner/repo、`GetSettings.repo_full_name` |
 
 `service` 包里的 `TestReviewChainReadsReviewRepoFromSettingsSnapshot` 用 AST
@@ -59,25 +66,32 @@ Issue 与 Release、无代码；代码在另一仓库）。`project.CodeRepo()` 
 
 | 表 | 关键列 | 说明 |
 | --- | --- | --- |
-| `project_review_settings` | PK `project_id`；`user_id`；`enabled`；`trigger_opened/synchronize/ready_for_review/reopened`；`code_combinations_json`/`visual_combinations_json` | 项目级开关与组合。组合元素：`environment_id`、`instance_id`（harness/provider 实例）、`model`、`options`（canonical `[{id,value}]` 数组，思考强度等）、`t3_project_id`（保存时由 `project_t3_bindings` 快照，不信任客户端回传）。代码组合启用时 1–5 个必填；视觉组合 0–3 个，0 个即从不启动视觉审查。 |
-| `review_runs` | `kind(code\|visual)`、`repo_full_name/pr_number/head_sha/round_number`、`installation_id`、`trigger_action`、`pr_title/pr_url/base_ref/head_ref`、组合列 `environment_id/t3_project_id/instance_id/model/model_options_json`、预分配 `thread_id/launch_command_id/initial_message_id`、`status(queued\|dispatched\|running\|completed\|failed\|timed_out\|cancelled)`、`dispatch_started_at/dispatched_at/started_at/finished_at/deadline_at`、`error_code/error_message`、`prep_retry_count`、`summary/result_json`、`review_id/posted_at`、`worktree_path/worktree_state/worktree_error`、`stop_attempted_at`、`archived_at` | 一次审查运行 = 一轮 × 一个组合。同一 (repo, pr, head_sha) 的代码与视觉运行共享 `round_number`（视觉是同一轮内的第二段）。`dispatched_at` 在启动 RPC 结果确认或 Agent 首次持令牌鉴权时写入，为空 = 线程是否建成未确认。`prep_retry_count` 是 T3 工作区准备失败后的自动重试次数（INT-147，须持久化：进程重启不能把已用掉的重试名额清零）。`archived_at` 是终态后线程归档写回的时刻；归档有限重试超限后也写入（不再重试），失败原因见 `worktree_error` 与 `review_cleanup_failed` 通知。 |
+| `project_review_settings` | PK `project_id`；`user_id`；`integration_id/repo_full_name`（审查对象快照，INT-167）；`enabled`；`trigger_opened/synchronize/ready_for_review/reopened`；`code_combinations_json`/`visual_combinations_json` | 项目级开关与组合。组合元素：`environment_id`、`instance_id`（harness/provider 实例）、`model`、`options`（canonical `[{id,value}]` 数组，思考强度等）、`t3_project_id`（保存时由 `project_t3_bindings` 快照，不信任客户端回传）。代码组合启用时 1–5 个必填；视觉组合 0–3 个，0 个即从不启动视觉审查。`integration_id` 是归一值（空绑定 = `github-default`），保存设置与改绑项目时同点写入。 |
+| `review_runs` | `kind(code\|visual)`、`repo_full_name/pr_number/head_sha/round_number/integration_id`、`installation_id`、`trigger_action`、`pr_title/pr_url/base_ref/head_ref`、组合列 `environment_id/t3_project_id/instance_id/model/model_options_json`、预分配 `thread_id/launch_command_id/initial_message_id`、`status(queued\|dispatched\|running\|completed\|failed\|timed_out\|cancelled)`、`dispatch_started_at/dispatched_at/started_at/finished_at/deadline_at`、`error_code/error_message`、`prep_retry_count`、`summary/result_json`、`review_id/posted_at`、`worktree_path/worktree_state/worktree_error`、`stop_attempted_at`、`archived_at` | 一次审查运行 = 一轮 × 一个组合。同一 (集成, repo, pr, head_sha) 的代码与视觉运行共享 `round_number`（视觉是同一轮内的第二段）。`integration_id` 是普通列不入键（INT-167）：按集成选 client、按集成隔离同名仓库的历史。`dispatched_at` 在启动 RPC 结果确认或 Agent 首次持令牌鉴权时写入，为空 = 线程是否建成未确认。`prep_retry_count` 是 T3 工作区准备失败后的自动重试次数（INT-147，须持久化：进程重启不能把已用掉的重试名额清零）。`archived_at` 是终态后线程归档写回的时刻；归档有限重试超限后也写入（不再重试），失败原因见 `worktree_error` 与 `review_cleanup_failed` 通知。 |
 | `review_run_tokens` | PK `run_id`；`token_hash`（UNIQUE）；`expires_at`；`consumed_at` | 每次运行一个 `fsr_` 令牌，只存完整令牌的 SHA-256。 |
-| `review_pull_requests` | PK `(project_id, repo_full_name, pr_number)`；`user_id/installation_id`；`round_number/head_sha`；`code_comment_id/visual_comment_id`；`code_status/visual_status`；`visual_screens_fingerprint`（`c:<urlFP>:<contentFP>` / `u:<urlFP>`，见「视觉审查衔接」）；`sync_pending/sync_epoch/sync_error` | 一个 PR 的审查总账：评论落点、最近一次推送的 commit status 结论、视觉截图指纹、事务外同步标记（置 pending 时 epoch+1，清标记按开始时 epoch 条件写）。主键含 `project_id`：同仓库换项目接管后各一本账。 |
-| `review_assets` | `(repo_full_name, pr_number, head_sha, position)`；`label`；`source_url`；`storage_path`；`mime_type`；`size_bytes` | 视觉审查截图：PR 描述里的图片链接经截图下载面（`NewReviewMediaService`）下载后本地落盘。内容是仓库归一的共享产物（同一 head 同一批截图），不按项目分区。 |
-| `review_debounces` | PK `(project_id, repo_full_name, pr_number)`；`head_sha/action/installation_id/pr_title/pr_url/base_ref/head_ref`；`fire_at` | 防抖窗口。窗口内新推送只更新 head 并推后 `fire_at`；固定 60s，不提供配置。 |
-| `review_seen_shas` | PK `(project_id, repo_full_name, pr_number, head_sha)`；`pr_updated_at`；`accepted_at` | 某项目已受理过的 head SHA：force-push 回旧 SHA 不再开轮。按项目分区——接管后新项目对同仓库同一 SHA 重新受理。 |
+| `review_pull_requests` | PK `(project_id, repo_full_name, pr_number, integration_id)`；`user_id/installation_id`；`round_number/head_sha`；`code_comment_id/visual_comment_id`；`code_status/visual_status`；`visual_screens_fingerprint`（`c:<urlFP>:<contentFP>` / `u:<urlFP>`，见「视觉审查衔接」）；`sync_pending/sync_epoch/sync_error` | 一个 PR 的审查总账：评论落点、最近一次推送的 commit status 结论、视觉截图指纹、事务外同步标记（置 pending 时 epoch+1，清标记按开始时 epoch 条件写）。主键含 `project_id` 与 `integration_id`：同仓库换项目接管或改绑集成后各一本账。 |
+| `review_assets` | 唯一键 `(integration_id, repo_full_name, pr_number, head_sha, source_url)`；`position`；`label`；`storage_path`；`mime_type`；`size_bytes` | 视觉审查截图：PR 描述里的图片链接经截图下载面（`NewReviewMediaService`）下载后本地落盘。内容按 (集成, 仓库) 归一共享（同一 head 同一批截图），不按项目分区；同名仓库在两个集成下是不同实例的图源，各留一行。 |
+| `review_debounces` | PK `(project_id, repo_full_name, pr_number, integration_id)`；`head_sha/action/installation_id/pr_title/pr_url/base_ref/head_ref`；`fire_at` | 防抖窗口。窗口内新推送只更新 head 并推后 `fire_at`；固定 60s，不提供配置。 |
+| `review_seen_shas` | PK `(project_id, repo_full_name, pr_number, head_sha, integration_id)`；`pr_updated_at`；`accepted_at` | 某项目已受理过的 head SHA：force-push 回旧 SHA 不再开轮。按 (项目, 集成) 分区——接管或改绑后新键对同仓库同一 SHA 重新受理。 |
+
+所有审查键里的 `integration_id` 都是**归一值**（INT-167）：内置 GitHub 记
+字面量 `github-default`（`model.ForgeIntegrationBuiltinGitHubID`），Forgejo
+记 `forge_integrations.id`；写侧一律经归一（项目空绑定折成
+`github-default`），库里不存空串。存量行由 `migrate_review_integration.go`
+一次性回填 `github-default`——三张键表整表重建（SQLite 不能 ALTER 主键）、
+三张加列表 ALTER + UPDATE，幂等可重复执行。
 
 外键：`project_review_settings` → `projects`/`users` CASCADE；
 `review_run_tokens.run_id` → `review_runs` CASCADE；`review_runs` →
 `users`/`projects` CASCADE。T3 项目/线程/命令 ID 不建 FK（远端生命周期
 不由本库管理）。
 
-`project_review_settings.repo_full_name` 是项目**实际审查的代码仓库**快照
-（`project.CodeRepo()` 小写，未单独配置代码仓库即公开仓库）：同仓库唯一
-占用、webhook 反查、同步过滤都只认它。项目行新增
+`project_review_settings` 的 `(integration_id, repo_full_name)` 是项目
+**实际审查的代码仓库 + 集成**快照（`project.CodeRepo()` 小写；集成取绑定
+归一值）：同仓库唯一占用、webhook 反查、同步过滤都只认这对键。项目行新增
 `code_github_owner/code_github_repo` 两列（空 = 与公开仓库相同），
-`ProjectRepository.Update` 检测到 `CodeRepo()` 变更时同事务停用审查并刷新
-该快照。
+`ProjectRepository.Update` 检测到 `CodeRepo()` 或绑定变更时同事务停用审查
+并刷新两份快照。
 
 所有表的 `repo_full_name` 一律小写：webhook 侧取 payload 规范名、rerun 侧
 取启用设置行的 `repo_full_name` 快照，写库前统一 `strings.ToLower`——GitHub
@@ -98,21 +112,41 @@ seen SHA、取消旧轮全部失效）。
   `(sync_pending) WHERE sync_pending = 1`；
 - `review_debounces(fire_at)` —— 到期扫描；
 - `project_review_settings(user_id)`；
-- `review_assets(repo_full_name, pr_number, head_sha, position)`。
+- `project_review_settings(integration_id, repo_full_name) WHERE enabled = 1`
+  UNIQUE —— 同仓库唯一占用的并发兜底（INT-167 起带 integration_id，同名
+  仓库在两个集成下可各自被一个项目启用）；
+- `review_assets(integration_id, repo_full_name, pr_number, head_sha,
+  source_url)` UNIQUE（模型标签建出）—— 截图源地址去重，integration_id
+  键首。
 
-## 触发与防抖（`review.go` 的 webhook 事务）
+## 触发与防抖（`review_webhook.go` 的 webhook 事务）
 
-`POST /api/github/webhooks` 路径与验签不变（`github_webhook.go` +
-`pkg/githubapp`：密钥未配置 503、签名不符 40107、`X-GitHub-Delivery`
-重复投递幂等 202）。幂等登记之后同一事务内：
+两个公开入口共用同一条幂等壳与触发事务（`handlePlatformWebhook` →
+`handleWebhookTx` → `handleReviewTriggerTx`）：
+
+- `POST /api/github/webhooks`（INT-93 起）：`pkg/githubapp` 验签，密钥未配置
+  503、签名不符 40107、`X-GitHub-Delivery` 重复投递幂等 202；集成身份固定
+  传内置 `github-default`。
+- `POST /api/forge/:id/webhooks`（INT-167 任务 3，`forge_webhook.go`）：按
+  集成行解密验签密钥（集成不存在 404、未配置 503、密文损坏 50000），
+  `X-Forgejo-Signature` 纯 hex HMAC-SHA256 常量时间比对（缺失/不等/带
+  `sha256=` 前缀一律 40107），`X-Forgejo-Delivery` 幂等；集成身份是
+  `forge_integrations.id`。任何写操作都在验签之后。delivery 幂等账与
+  GitHub 共用 `github_webhook_deliveries`（id 都是平台 UUID，碰撞概率为零）。
+  动作名入口归一：Forgejo 的 `synchronized` 折成 GitHub 拼法
+  `synchronize`（GitHub 动作集合里没有前者，零影响）。
+
+幂等登记之后同一事务内：
 
 1. 只处理 `pull_request` 的 `opened` / `synchronize` / `ready_for_review` /
-   `reopened`；其余事件与 action 忽略。
+   `reopened`；其余事件与 action 忽略。closed（含合并）单独走取消分支。
 2. draft、fork（head repo ≠ base repo）忽略。
-3. 反查项目：`project_review_settings.enabled AND repo_full_name = LOWER(?)`
-   （只按设置行的仓库快照，一个部署内最多一个，见「同仓库唯一」）。没开启
-   → 忽略，不取消、不开轮。公开仓库 ≠ 代码仓库时，只有代码仓库的事件能
-   反查到项目；公开仓库的事件静默忽略。
+3. 反查项目：`project_review_settings.enabled AND integration_id = ? AND
+   repo_full_name = LOWER(?)`（按设置行的 (集成, 仓库) 快照；GitHub webhook
+   传 `github-default`、Forgejo webhook 传集成 id，同一集成内最多一个，见
+   「同仓库唯一」）。没开启 → 忽略，不取消、不开轮。公开仓库 ≠ 代码仓库时，
+   只有代码仓库的事件能反查到项目；公开仓库的事件静默忽略。两个集成的
+   同名仓库互不误触：设置行快照键不同，反查天然分区。
 4. action 未被该项目触发条件勾选 → 忽略（不取消、不改 seen）。
 5. 过期 SHA 判定（全部按 `project_id + repo + pr`，其他项目的同仓库残留行
    不进入判定）：当前 head 优先取未开火的防抖行，否则取本项目
@@ -132,6 +166,31 @@ seen SHA、取消旧轮全部失效）。
 投递本身也可能失败：GitHub 发出但没送达（公网隧道超时/502）时 GitHub App
 不会自动重试，这次推送就永远不会进入上面的任何一步。独立低频循环里的对账
 兜底这一层，见「投递失败对账」。
+
+## 审查访问面与 Forgejo 补漏（INT-167）
+
+审查链路对平台的全部访问收在 `forge.ReviewClient`（11 方法 + `Kind()`）：
+GitHub 适配器包安装 id 透传 githubapi（请求序列与错误原样，行为零变化）；
+Forgejo 适配器（`internal/forge/forgejo_review_client.go`）直连 v1 REST
+（认证 `Authorization: token {PAT}`，详见 docs/internal/forge-integrations.md）。
+`forge.ReviewClients.ClientFor` 三分支：空串/`github-default` → GitHub；其余
+id → `ForgejoSource`（service 层 `ForgeClientSource`，按集成行现取 SSRF
+client + 展开基址 + 解密 PAT，不缓存凭证）组装 Forgejo 适配器。调用方
+（调度/同步/资产/设置）只认 resolver，媒体下载 bearer 经 `BearerSource`
+接口按集成解析——GitHub 是安装令牌、Forgejo 是机器人 PAT（review_assets
+只对 GitHub 实例的附件路径带凭证）。
+
+**Forgejo 轮询补漏（`review_forgejo_poll.go`）**：webhook 丢投递的兜底。5
+分钟 ticker（挂在 `Start()` 的循环组，启动不立即跑首轮）对每个「启用审查且
+绑定 Forgejo」的项目（`integration_id <> 'github-default'`）联查项目行复核
+「仍绑该集成 + 代码仓未变更」（防漂移；受理键仍取设置行快照，live 读只用于
+跳过漂移行），拉 open PR 分页后逐个经 `reviewWebhookTrigger`（触发事实的
+中性形态）走与 webhook 完全相同的 `handleReviewTriggerTx`。动作按「该 PR
+从未受理过 → opened（受 TriggerOpened 约束），已受理过 → synchronize（受
+TriggerSynchronize 约束）」归类，补漏不绕过勾选位；updatedAt 不传（过期
+判定需要两端都有值，补漏只依赖 SHA 去重）。适配器侧过滤 fork head 与已删
+fork；draft 在受理面照常忽略。webhook 先受理的 SHA 由 seen/运行计数去重，
+不会开出第二轮；单项目/单 PR 失败只记日志，不中断整轮。
 
 ## 调度循环（`review_scheduler.go`）
 
@@ -889,11 +948,13 @@ options canonical JSON` 判重（同一搭配不同思考强度算不同组合�
 只读会话在保存时直接 400，前置条件也会把它标成缺项——否则每次派发都只会落
 `dispatch_failed`。
 
-**同仓库唯一**：整个部署内同一**代码仓库**（`repo_full_name` 快照，大小写
-不敏感）只允许一个项目 `enabled=true`；其他用户的同仓库项目在 `GET`/`PUT`
-里得到 `taken_by`（占用者登录名），开启返回 40922。占用判定只读 enabled
-设置行的快照列（联 `users` 取登录名），不回联项目的 live 仓库字段。写入
-路径双保险：保存事务内先查占用者，部分唯一索引
+**同仓库唯一**：整个部署内同一**集成**下的同一**代码仓库**
+（`(integration_id, repo_full_name)` 快照，仓库名大小写不敏感）只允许一个
+项目 `enabled=true`；其他用户的同仓库项目在 `GET`/`PUT` 里得到 `taken_by`
+（占用者登录名），开启返回 40922。INT-167 起唯一键带集成维度：同名仓库在
+GitHub 与 Forgejo 两个集成下可各自被一个项目启用，互不算占用。占用判定只
+读 enabled 设置行的快照列（联 `users` 取登录名），不回联项目的 live 仓库
+字段。写入路径双保险：保存事务内先查占用者，部分唯一索引
 `idx_project_review_settings_repo` 兜并发竞态。
 
 **保存并发复核**：`PUT` 写入事务内会重读项目的审查仓库（`CodeRepo()`，
@@ -902,9 +963,9 @@ options canonical JSON` 判重（同一搭配不同思考强度算不同组合�
 账本分区键）。项目侧改**代码仓库**走 `ProjectRepository.Update`——同事务
 停用审查并刷新 `repo_full_name` 快照。
 
-**接管**：某项目成功 `enabled=true` 保存时，同一事务内对同仓库其他项目
-做收尾（唯一占用保证此时没有其他 enabled 项目，残留来自曾开启后停用或
-换仓库的项目）：
+**接管**：某项目成功 `enabled=true` 保存时，同一事务内对同 (集成, 仓库) 的
+其他项目做收尾（唯一占用保证此时没有其他 enabled 项目，残留来自曾开启后
+停用、或换过仓库/改绑集成的项目；其他集成下的同名仓库不受影响）：
 
 - 其未终态运行（queued/dispatched/running）全部置 `cancelled`、
   `error_code='taken_over'`、`finished_at=now`，运行令牌一并消费；线程
@@ -928,7 +989,11 @@ options canonical JSON` 判重（同一搭配不同思考强度算不同组合�
 - **单进程**：调度循环、per-PR 锁、防抖消费都在同一进程内；多副本部署会
   重复派发与重复写状态（唯一索引只保证运行行唯一）。
 - **fork PR 不审**：head repo ≠ base repo 一律忽略，fork 仓库的 PR 永远
-  不会进入审查。
+  不会进入审查（Forgejo 轮询补漏同样只在适配器枚举处收同仓库分支的 PR）。
+- **Forgejo 运行的兜底链接仍按 GitHub**：记录/时间线的 `pr_url` 优先用运行
+  快照（Forgejo 运行开轮时快照的是 Forgejo URL）；快照缺失时的兜底构造仍
+  按 GitHub 身份——待记录层按行上 `integration_id` 逐行解析后收口（见
+  docs/internal/forge-integrations.md）。
 - **私有仓库截图下载仍可能失败**：截图由独立的截图下载面拉取——匿名优先，
   匿名被 401/403/404 拒且有安装 id 时带 App 安装令牌重试一次（App 令牌只对
   GitHub 附件有意义，外部图床始终匿名）；仍拉不到的截图不会进入审查素材，
@@ -954,12 +1019,12 @@ options canonical JSON` 判重（同一搭配不同思考强度算不同组合�
   令牌一旦签发即不再重认领（随机原值不可恢复，重签会让已建成线程的令牌
   失效），这类运行靠 `deadline_at` 超时兜底；已建线程若存活，首次鉴权
   会补 `dispatched_at` 并照常进入 running/归档路径。
-- **改代码仓库 URL 会自动停用审查**：项目更新**代码仓库**地址（未单独配置
-  代码仓库时，改公开仓库等同改代码仓库）时，同一个事务里把
-  `project_review_settings` 置 `enabled=false` 并把 `repo_full_name` 快照改成
-  新审查仓库——避免旧仓库继续占着唯一索引、新仓库与别的已启用项目重复。
-  代码仓库已显式配置时只改公开仓库不影响审查。用户需要在
-  新仓库上重新开启（前置条件都按新仓库重算）。
+- **改代码仓库 URL 或集成绑定会自动停用审查**：项目更新**代码仓库**地址
+  （未单独配置代码仓库时，改公开仓库等同改代码仓库）或改绑代码集成时，
+  同一个事务里把 `project_review_settings` 置 `enabled=false` 并把
+  `(integration_id, repo_full_name)` 快照刷成新审查对象——避免旧键继续占着
+  唯一索引、新键与别的已启用项目重复。代码仓库已显式配置时只改公开仓库不
+  影响审查。用户需要在新仓库上重新开启（前置条件都按新仓库重算）。
 - **重投的旧事件走上游既有触发判定**：投递失败对账把旧投递原样重投，触发
   判定仍是 webhook 入口的既有逻辑（seen SHA / `pull_request.updated_at`
   水位 / epoch），重放的 payload 里 PR 仍写着 open。但「投递失败后 PR 已

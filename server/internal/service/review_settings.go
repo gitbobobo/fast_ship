@@ -133,11 +133,13 @@ func (s *ReviewService) UpdateSettings(ctx context.Context, userID, projectID st
 	}
 
 	if input.Enabled {
-		// Forgejo 代码仓本期不进 GitHub 审查链路（派发、diff 读取、行内评论
-		// 都依赖 GitHub API 与 App 安装）：开启前显式拒绝，不落一条只会一直
-		// 失败的设置。
+		// 代码仓集成（INT-167 任务 3）：绑定 Forgejo 集成的项目开启前校验集成
+		// 行存在且 kind=forgejo；仓库级可访问性走前置条件的实时 GetRepository
+		// 检查（41202 语义，与下方 GitHub 段落同一映射风格）。
 		if project.CodeIntegrationID != "" {
-			return nil, reviewComboError("Forgejo 代码仓的 PR 审查将在后续版本接入")
+			if err := s.checkForgejoIntegrationRow(project.CodeIntegrationID); err != nil {
+				return nil, err
+			}
 		}
 		if cOwner, cRepo := project.CodeRepo(); cOwner == "" || cRepo == "" {
 			return nil, errs.ErrProjectGitHubNotConfigured
@@ -210,6 +212,7 @@ func (s *ReviewService) UpdateSettings(ctx context.Context, userID, projectID st
 		ProjectID:              projectID,
 		UserID:                 userID,
 		RepoFullName:           strings.ToLower(project.CodeRepoFullName()),
+		IntegrationID:          reviewIntegrationID(project.CodeIntegrationID),
 		Enabled:                input.Enabled,
 		TriggerOpened:          input.TriggerOpened,
 		TriggerSynchronize:     input.TriggerSynchronize,
@@ -223,29 +226,41 @@ func (s *ReviewService) UpdateSettings(ctx context.Context, userID, projectID st
 	// 同仓库占用（此前那次在事务外，两个并发保存可能都通过），并由部分唯一
 	// 索引 idx_project_review_settings_repo 兜底。
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		// 事务内复核项目仓库（代码仓库，未单独配置即公开仓库）：此前前置条件
-		// 校验用的是事务外的项目快照，并发改仓库可能让 enabled 落到旧仓库上
-		// （唯一占用与账本分区都按旧键写错）。事务时刻与快照不一致一律 400，
-		// 让用户刷新重来。
+		// 事务内复核项目仓库（代码仓库，未单独配置即公开仓库）与集成身份：
+		// 此前前置条件校验用的是事务外的项目快照，并发改仓库/改绑集成可能让
+		// enabled 落到旧键上（唯一占用与账本分区都按旧键写错）。事务时刻与
+		// 快照不一致一律 400，让用户刷新重来。
 		var fresh model.Project
 		if err := tx.Select("id", "github_owner", "github_repo", "code_github_owner", "code_github_repo", "code_integration_id").
 			Where("id = ?", projectID).First(&fresh).Error; err != nil {
 			return err
 		}
-		if !strings.EqualFold(fresh.CodeRepoFullName(), project.CodeRepoFullName()) {
-			return errs.New(errs.ErrInvalidParams.Code, "项目仓库已变更，请刷新后重试")
-		}
-		// 事务内复核集成身份（与入参侧的启用检查同一口径）：入参侧读的是事务
-		// 外快照，「读旧状态→并发改绑 Forgejo→重启用」的窗口在这里关掉。只对
-		// 启用保存把关——改绑侧 repository.Update 已把设置行压回 disabled，
-		// 停用保存放行。
+		// 事务内复核集成身份：入参侧读的是事务外快照，「读旧状态→并发改绑/
+		// 删集成→重启用」的窗口在这里关掉。绑定 Forgejo 时在事务内再查一次
+		// 集成行（经事务句柄，INT-97；行被删或改 kind 报「集成已失效」）；
+		// 身份与快照不一致走下方「仓库已变更」。只对启用保存把关——改绑侧
+		// repository.Update 已把设置行压回 disabled，停用保存放行。
 		if row.Enabled && fresh.CodeIntegrationID != "" {
-			return reviewComboError("Forgejo 代码仓的 PR 审查将在后续版本接入")
+			var txRow model.ForgeIntegration
+			findErr := tx.Where("id = ?", fresh.CodeIntegrationID).First(&txRow).Error
+			switch {
+			case errors.Is(findErr, gorm.ErrRecordNotFound):
+				return reviewComboError("代码仓集成已失效，请刷新后重试")
+			case findErr != nil:
+				return findErr
+			case txRow.Kind != model.ForgeIntegrationKindForgejo:
+				return reviewComboError("代码仓集成已失效，请刷新后重试")
+			}
+		}
+		if !strings.EqualFold(fresh.CodeRepoFullName(), project.CodeRepoFullName()) ||
+			fresh.CodeIntegrationID != project.CodeIntegrationID {
+			return errs.New(errs.ErrInvalidParams.Code, "项目仓库已变更，请刷新后重试")
 		}
 		if row.Enabled {
 			var otherID string
 			err := tx.Model(&model.ProjectReviewSettings{}).
-				Where("enabled = 1 AND repo_full_name = ? AND project_id <> ?", row.RepoFullName, projectID).
+				Where("enabled = 1 AND integration_id = ? AND repo_full_name = ? AND project_id <> ?",
+					row.IntegrationID, row.RepoFullName, projectID).
 				Limit(1).Pluck("project_id", &otherID).Error
 			if err != nil {
 				return err
@@ -257,7 +272,7 @@ func (s *ReviewService) UpdateSettings(ctx context.Context, userID, projectID st
 			// 开启过该仓库的其他项目留下的执行态——未终态运行置
 			// cancelled/taken_over 并消费令牌、删防抖、清总账
 			// sync_pending（不让旧项目继续发 GitHub 产出）。
-			if err := s.takeoverRepoTx(tx, row.RepoFullName, projectID, now); err != nil {
+			if err := s.takeoverRepoTx(tx, row.IntegrationID, row.RepoFullName, projectID, now); err != nil {
 				return err
 			}
 		}
@@ -297,15 +312,53 @@ func (s *ReviewService) UpdateSettings(ctx context.Context, userID, projectID st
 	return s.GetSettings(ctx, userID, projectID)
 }
 
-// takeoverRepoTx 启用某仓库时的接管收尾：同仓库其他项目残留的未终态运行
-// 全部 cancelled/taken_over 并消费令牌、删除防抖行、清掉总账 sync_pending。
-// 调用前已由部分唯一索引语义保证没有其他 enabled 项目——残留行来自曾
-// 开启后停用、或换过仓库的项目。
-func (s *ReviewService) takeoverRepoTx(tx *gorm.DB, repo, projectID string, now time.Time) error {
+// forgeIntegrationRow 前置条件展示用的集成行读取：读取面缺失或任何查询失败
+// 都按「行不存在」口径返回——前置条件是展示面，失败不把 GET 设置变成 500；
+// 启用保存路径的严格校验（含 DB 错误透出）在 checkForgejoIntegrationRow。
+func (s *ReviewService) forgeIntegrationRow(integrationID string) (*model.ForgeIntegration, error) {
+	if s.forgeIntegrations == nil {
+		return nil, gorm.ErrRecordNotFound
+	}
+	row, err := s.forgeIntegrations.FindByID(integrationID)
+	if err != nil {
+		return nil, gorm.ErrRecordNotFound
+	}
+	return row, nil
+}
+
+// checkForgejoIntegrationRow 启用审查前对绑定集成的落库校验（INT-167 任务 3）：
+// 行必须存在且 kind=forgejo（内置 github-default 不经此处——绑定空串走 GitHub
+// 段落）。仓库级可访问性不在这里查，交给前置条件的实时 GetRepository（41202
+// 语义，缺项明细随响应逐条列出）。
+func (s *ReviewService) checkForgejoIntegrationRow(integrationID string) error {
+	if s.forgeIntegrations == nil {
+		return reviewComboError("代码仓集成不可用，请重新选择集成")
+	}
+	row, err := s.forgeIntegrations.FindByID(integrationID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return reviewComboError("代码仓集成 %s 不存在或已删除，请重新选择集成", integrationID)
+		}
+		s.logger.Error("读取代码仓集成失败", zap.String("integration", integrationID), zap.Error(err))
+		return errs.ErrInternal
+	}
+	if row.Kind != model.ForgeIntegrationKindForgejo {
+		return reviewComboError("代码仓集成 %s 不是 Forgejo 类型", integrationID)
+	}
+	return nil
+}
+
+// takeoverRepoTx 启用某仓库时的接管收尾：同一 (集成, 仓库) 下其他项目残留
+// 的未终态运行全部 cancelled/taken_over 并消费令牌、删除防抖行、清掉总账
+// sync_pending。调用前已由部分唯一索引语义保证同 (集成, 仓库) 没有其他
+// enabled 项目——残留行来自曾开启后停用、或换过仓库/换绑集成的项目。其他
+// 集成下的同名仓库不归本次接管管。
+func (s *ReviewService) takeoverRepoTx(tx *gorm.DB, integrationID, repo, projectID string, now time.Time) error {
 	active := []model.ReviewRunStatus{model.ReviewRunQueued, model.ReviewRunDispatched, model.ReviewRunRunning}
 	var runIDs []string
 	if err := tx.Model(&model.ReviewRun{}).
-		Where("repo_full_name = ? AND project_id <> ? AND status IN ?", repo, projectID, active).
+		Where("integration_id = ? AND repo_full_name = ? AND project_id <> ? AND status IN ?",
+			integrationID, repo, projectID, active).
 		Pluck("id", &runIDs).Error; err != nil {
 		return err
 	}
@@ -326,12 +379,14 @@ func (s *ReviewService) takeoverRepoTx(tx *gorm.DB, repo, projectID string, now 
 			return err
 		}
 	}
-	if err := tx.Where("repo_full_name = ? AND project_id <> ?", repo, projectID).
+	if err := tx.Where("integration_id = ? AND repo_full_name = ? AND project_id <> ?",
+		integrationID, repo, projectID).
 		Delete(&model.ReviewDebounce{}).Error; err != nil {
 		return err
 	}
 	return tx.Model(&model.ReviewPullRequest{}).
-		Where("repo_full_name = ? AND project_id <> ? AND sync_pending", repo, projectID).
+		Where("integration_id = ? AND repo_full_name = ? AND project_id <> ? AND sync_pending",
+			integrationID, repo, projectID).
 		Updates(map[string]any{"sync_pending": false, "updated_at": now}).Error
 }
 
@@ -452,14 +507,50 @@ func (s *ReviewService) reviewPrerequisites(ctx context.Context, project *model.
 		out = append(out, p)
 	}
 
-	// 1&2. GitHub App 两项前置条件。Forgejo 代码仓走「不支持」分支：仓库名
-	// 不发往 GitHub 查安装（同名 GitHub 仓的安装也不代表 Forgejo 仓可用），
-	// 结论按「不支持/未配置」口径缺项，与 enable 的拒绝语义一致——审查对
-	// Forgejo 仓不可用。
+	// 1&2. 平台前置条件两项。Forgejo 代码仓（INT-167 任务 3）换语义不换码位：
+	// 「部署已配置 GitHub App」→「Forgejo 集成已配置（行存在且 kind=forgejo）」，
+	// 「GitHub App 已安装到该仓库」→「Forgejo 集成可访问该仓库」（经 resolver
+	// 取 Forgejo 适配器实时 GetRepository，installationID=0——安装语义对
+	// Forgejo 不存在）。仓库名不发往 GitHub 查安装：同名 GitHub 仓的安装状态
+	// 与 Forgejo 仓无关。
 	if project.CodeIntegrationID != "" {
-		reason := "Forgejo 代码仓的 PR 审查将在后续版本接入"
-		add(api.GithubApp, "部署已配置 GitHub App", true, reason)
-		add(api.GithubAppInstallation, "GitHub App 已安装到该仓库", true, reason)
+		integrationConfigured := false
+		appDetail := "Forgejo 代码仓集成不可用"
+		row, rowErr := s.forgeIntegrationRow(project.CodeIntegrationID)
+		switch {
+		case rowErr != nil:
+			appDetail = "Forgejo 集成不存在或已删除，请重新绑定"
+		case row.Kind != model.ForgeIntegrationKindForgejo:
+			appDetail = "代码仓集成不是 Forgejo 类型"
+		default:
+			integrationConfigured = true
+			appDetail = ""
+		}
+		add(api.GithubApp, "代码仓集成已配置（Forgejo）", !integrationConfigured, appDetail)
+
+		repoOwner, repoName := project.CodeRepo()
+		repoFullName := repoOwner + "/" + repoName
+		repoLinked := repoOwner != "" && repoName != ""
+
+		installed := false
+		installDetail := "Forgejo 代码仓集成不可用"
+		if integrationConfigured && repoLinked {
+			client, err := s.reviewClient(ctx, reviewIntegrationID(project.CodeIntegrationID), repoFullName, 0)
+			switch {
+			case err != nil:
+				installDetail = "Forgejo 集成访问面不可用：" + err.Error()
+			default:
+				if err := client.GetRepository(ctx, repoFullName); err != nil {
+					installDetail = "Forgejo 集成无法访问该仓库：" + err.Error()
+				} else {
+					installed = true
+					installDetail = ""
+				}
+			}
+		} else if integrationConfigured && !repoLinked {
+			installDetail = "项目未关联代码仓库"
+		}
+		add(api.GithubAppInstallation, "代码仓集成可访问该仓库（Forgejo）", !installed, installDetail)
 	} else {
 		// 1. 部署 GitHub App 已配置：debug fake 视为已配置，否则问部署集成。
 		appConfigured := s.cfg != nil && s.cfg.GitHubApp.Fake && s.cfg.Server.Mode == "debug"
@@ -481,16 +572,18 @@ func (s *ReviewService) reviewPrerequisites(ctx context.Context, project *model.
 		repoLinked := repoOwner != "" && repoName != ""
 
 		// 2. App 已安装到该仓库：保存/读取前实时调一次 GitHub（安装令牌
-		// GetRepository），失败即缺项。部署未配置 App 时不发起调用。
+		// GetRepository），失败即缺项。部署未配置 App 时不发起调用。仓库级
+		// 检查经 resolver 取审查客户端：installationID=0 传给适配器后由
+		// githubapp.Client 保留「先解析安装再查仓库」的既有语义。
 		installed := false
 		installDetail := "部署未配置 GitHub App"
 		if appConfigured && repoLinked && s.gh != nil {
-			client, err := s.gh.ClientFor(ctx)
+			client, err := s.reviewClient(ctx, model.ForgeIntegrationBuiltinGitHubID, repoFullName, 0)
 			switch {
 			case err != nil:
 				installDetail = "GitHub App 访问面不可用：" + err.Error()
 			default:
-				if err := client.GetRepository(ctx, 0, repoFullName); err != nil {
+				if err := client.GetRepository(ctx, repoFullName); err != nil {
 					installDetail = "App 未安装到该仓库或仓库不可访问：" + err.Error()
 				} else {
 					installed = true
@@ -547,9 +640,10 @@ func (s *ReviewService) reviewPrerequisites(ctx context.Context, project *model.
 	return out, nil
 }
 
-// reviewTakenBy 查同仓库已启用审查的其他项目，返回其拥有者登录名；
-// 无占用返回空串。占用判定只看设置行的 repo_full_name 快照（enabled 行的
-// 唯一真相，项目行改仓库会刷新它），不再回联 projects。
+// reviewTakenBy 查同一 (集成, 仓库) 下已启用审查的其他项目，返回其拥有者
+// 登录名；无占用返回空串。占用判定只看设置行的 (integration_id,
+// repo_full_name) 快照（enabled 行的唯一真相，项目行改仓库/改绑会同事务
+// 刷新它们），不再回联 projects。
 func (s *ReviewService) reviewTakenBy(ctx context.Context, project *model.Project) (string, error) {
 	repoOwner, repoName := project.CodeRepo()
 	if repoOwner == "" || repoName == "" {
@@ -559,8 +653,9 @@ func (s *ReviewService) reviewTakenBy(ctx context.Context, project *model.Projec
 	err := s.db.WithContext(ctx).
 		Table("project_review_settings AS s").
 		Joins("JOIN users u ON u.id = s.user_id").
-		Where("s.enabled AND s.project_id <> ? AND s.repo_full_name = ?",
-			project.ID, strings.ToLower(repoOwner+"/"+repoName)).
+		Where("s.enabled AND s.project_id <> ? AND s.integration_id = ? AND s.repo_full_name = ?",
+			project.ID, reviewIntegrationID(project.CodeIntegrationID),
+			strings.ToLower(repoOwner+"/"+repoName)).
 		Limit(1).
 		Pluck("u.username", &logins).Error
 	if err != nil {

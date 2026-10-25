@@ -899,7 +899,8 @@ func TestProjectRepoUpdate_RepoSyncsReviewSettings(t *testing.T) {
 	// 换仓库要推进 epoch 并清 pending：在途同步不能再向旧仓库发布。
 	var ledger model.ReviewPullRequest
 	if err := svc.db.Create(&model.ReviewPullRequest{
-		ProjectID: project.ID, RepoFullName: "oldowner/oldrepo", PRNumber: 1,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     project.ID, RepoFullName: "oldowner/oldrepo", PRNumber: 1,
 		UserID: user.ID, HeadSHA: "sha", SyncPending: true, SyncEpoch: 4, UpdatedAt: now,
 	}).Error; err != nil {
 		t.Fatalf("seed ledger: %v", err)

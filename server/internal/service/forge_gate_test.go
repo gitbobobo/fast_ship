@@ -7,9 +7,11 @@ import (
 	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/api"
+	"github.com/godbobo/fast_ship/server/internal/forge"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 // INT-166 审查修复的定向测试：同归一主机唯一、base_url 站点根收口、集成身份
@@ -216,27 +218,92 @@ func TestProjectRepoUpdate_IntegrationChangeStopsReview(t *testing.T) {
 	}
 }
 
-func TestUpdateSettings_ForgejoRepoRejected(t *testing.T) {
+// stubForgeIntegrationLookup 集成行读取面的可控桩（生产接
+// repository.ForgeIntegrationRepository）。
+type stubForgeIntegrationLookup struct {
+	rows map[string]*model.ForgeIntegration
+}
+
+func (s *stubForgeIntegrationLookup) FindByID(id string) (*model.ForgeIntegration, error) {
+	if row, ok := s.rows[id]; ok {
+		return row, nil
+	}
+	return nil, gorm.ErrRecordNotFound
+}
+
+// stubForgejoClient 审查客户端桩：GetRepository 放行（其余方法不在本测试路径）。
+type stubForgejoClient struct {
+	forge.ReviewClient
+}
+
+func (c *stubForgejoClient) GetRepository(context.Context, string) error { return nil }
+
+// stubReviewResolver 恒返回同一审查客户端。
+type stubReviewResolver struct {
+	client forge.ReviewClient
+}
+
+func (r stubReviewResolver) ClientFor(context.Context, string, string, int64) (forge.ReviewClient, error) {
+	return r.client, nil
+}
+
+// TestUpdateSettings_ForgejoRepoEnabled INT-167 任务 3：绑定 Forgejo 的项目可以
+// 开启审查——设置行 integration_id 快照是真实集成 id；集成不存在 / kind 不是
+// forgejo 在入参侧 40001 点明，不落库。
+func TestUpdateSettings_ForgejoRepoEnabled(t *testing.T) {
 	svc := setupTestServices(t)
-	user := createTestUser(t, svc.db, "user-forge-review-gate")
+	user := createTestUser(t, svc.db, "user-forge-review-on")
+	forgeRow := createTestForgeIntegration(t, svc.db, "https://git.example.com")
 	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
 		p.GithubOwner = "acme"
 		p.GithubRepo = "app"
-		p.CodeIntegrationID = "forge-any"
+		p.CodeIntegrationID = forgeRow.ID
 	})
-	review, _ := readyReviewService(t, svc)
+	env := createT3TestEnv(t, svc.db, user.ID, "env-forge")
+	createTestT3Binding(t, svc.db, project.ID, env.ID, "t3-forge")
 
-	// Forgejo 代码仓不进 GitHub 审查链路：开启前显式拒绝，不落必败设置。
-	_, err := review.UpdateSettings(context.Background(), user.ID, project.ID,
-		&api.ReviewSettingsInput{Enabled: true})
-	gate := appErr(t, err)
-	if gate.Code != 40001 || !strings.Contains(gate.Message, "后续版本") {
-		t.Fatalf("enable forgejo review = %d %q, want 40001 后续版本", gate.Code, gate.Message)
+	review, _ := readyReviewService(t, svc)
+	// 前置条件的集成面桩：行存在 + 仓库可访问（GetRepository 放行）。
+	review.forgeIntegrations = &stubForgeIntegrationLookup{rows: map[string]*model.ForgeIntegration{
+		forgeRow.ID: forgeRow,
+	}}
+	review.clients = stubReviewResolver{client: &stubForgejoClient{}}
+
+	got, err := review.UpdateSettings(context.Background(), user.ID, project.ID, validSettingsInput(env.ID))
+	if err != nil {
+		t.Fatalf("enable forgejo review: %v", err)
 	}
-	var rows int64
-	svc.db.Model(&model.ProjectReviewSettings{}).Where("project_id = ?", project.ID).Count(&rows)
-	if rows != 0 {
-		t.Fatalf("rejected enable must not persist settings, rows = %d", rows)
+	if !got.Enabled {
+		t.Fatal("enabled 应为 true")
+	}
+	var row model.ProjectReviewSettings
+	if err := svc.db.Where("project_id = ?", project.ID).First(&row).Error; err != nil {
+		t.Fatalf("load settings: %v", err)
+	}
+	if !row.Enabled || row.IntegrationID != forgeRow.ID {
+		t.Fatalf("settings = enabled=%v integration_id=%q, want true/%s", row.Enabled, row.IntegrationID, forgeRow.ID)
+	}
+
+	// 集成行不存在 → 40001 且不落库。
+	review.forgeIntegrations = &stubForgeIntegrationLookup{rows: map[string]*model.ForgeIntegration{}}
+	_, err = review.UpdateSettings(context.Background(), user.ID, project.ID, validSettingsInput(env.ID))
+	missing := appErr(t, err)
+	if missing.Code != 40001 || !strings.Contains(missing.Message, "不存在") {
+		t.Fatalf("missing integration = %d %q, want 40001 不存在", missing.Code, missing.Message)
+	}
+	// kind 不是 forgejo → 40001。
+	review.forgeIntegrations = &stubForgeIntegrationLookup{rows: map[string]*model.ForgeIntegration{
+		forgeRow.ID: {ID: forgeRow.ID, Kind: model.ForgeIntegrationKindGitHub, Name: "x", BaseURL: "https://git.example.com"},
+	}}
+	_, err = review.UpdateSettings(context.Background(), user.ID, project.ID, validSettingsInput(env.ID))
+	wrongKind := appErr(t, err)
+	if wrongKind.Code != 40001 || !strings.Contains(wrongKind.Message, "Forgejo") {
+		t.Fatalf("wrong kind = %d %q, want 40001 点明 Forgejo", wrongKind.Code, wrongKind.Message)
+	}
+	var n int64
+	svc.db.Model(&model.ProjectReviewSettings{}).Where("project_id = ?", project.ID).Count(&n)
+	if n != 1 {
+		t.Fatalf("失败重存不得新增设置行, rows = %d", n)
 	}
 }
 
@@ -247,9 +314,11 @@ func TestFindEnabledReviewProjectSkipsForgejoBound(t *testing.T) {
 		p.CodeIntegrationID = "forge-x"
 	})
 	now := time.Now().UTC()
+	// 设置行的 integration_id 快照与项目绑定同值（UpdateSettings/repository.Update
+	// 同事务写入的口径）：forgejo 绑定项目的快照是真实集成 id。
 	if err := svc.db.Create(&model.ProjectReviewSettings{
 		ProjectID: project.ID, UserID: user.ID,
-		RepoFullName: "acme/app", Enabled: true,
+		RepoFullName: "acme/app", IntegrationID: "forge-x", Enabled: true,
 		CodeCombinationsJSON: "[]", VisualCombinationsJSON: "[]",
 		CreatedAt: now, UpdatedAt: now,
 	}).Error; err != nil {
@@ -257,18 +326,34 @@ func TestFindEnabledReviewProjectSkipsForgejoBound(t *testing.T) {
 	}
 	review := newReviewTestService(t, svc, nil, nil, nil)
 
-	// 绑定 Forgejo 的项目不进 GitHub webhook 审查链路：按未命中处理。
-	got, settings, err := review.findEnabledReviewProjectTx(svc.db, "acme/app")
+	// 绑定 Forgejo 的项目不进 GitHub webhook 审查链路：其设置行
+	// integration_id 是真实集成 id，天然不命中 github-default 反查——即使
+	// 同名 repo 快照存在也按未命中处理。
+	got, settings, err := review.findEnabledReviewProjectTx(svc.db,
+		model.ForgeIntegrationBuiltinGitHubID, "acme/app")
 	if err != nil || got != nil || settings != nil {
 		t.Fatalf("forgejo-bound project should not match, got %+v %+v %v", got, settings, err)
 	}
 
-	// 对照：解除绑定后同仓库命中。
+	// 对照（INT-167 任务 3）：按该 Forgejo 集成 id 反查命中——Forgejo webhook
+	// 与轮询补漏走同一条反查，只是集成身份不同。
+	got, settings, err = review.findEnabledReviewProjectTx(svc.db, "forge-x", "acme/app")
+	if err != nil || got == nil || settings == nil {
+		t.Fatalf("forgejo lookup should match its own project, got %+v %+v %v", got, settings, err)
+	}
+
+	// 对照：解除绑定后（设置行快照随 repository.Update 刷回 github-default）
+	// 同仓库命中。
 	if err := svc.db.Model(&model.Project{}).Where("id = ?", project.ID).
 		Update("code_integration_id", "").Error; err != nil {
 		t.Fatalf("clear binding: %v", err)
 	}
-	got, settings, err = review.findEnabledReviewProjectTx(svc.db, "acme/app")
+	if err := svc.db.Model(&model.ProjectReviewSettings{}).Where("project_id = ?", project.ID).
+		Update("integration_id", model.ForgeIntegrationBuiltinGitHubID).Error; err != nil {
+		t.Fatalf("refresh snapshot: %v", err)
+	}
+	got, settings, err = review.findEnabledReviewProjectTx(svc.db,
+		model.ForgeIntegrationBuiltinGitHubID, "acme/app")
 	if err != nil || got == nil || settings == nil {
 		t.Fatalf("unbound project should match, got %+v %+v %v", got, settings, err)
 	}

@@ -17,7 +17,8 @@ import (
 // reviewDebounceSeconds 防抖窗口（固定，不提供配置）。
 const reviewDebounceSeconds = 60
 
-// prWebhookPayload pull_request 事件的最小字段面（其余字段原样丢弃）。
+// prWebhookPayload pull_request 事件的最小字段面（其余字段原样丢弃）。GitHub
+// 与 Forgejo 的 pull_request payload 同形，共用这一份解析。
 type prWebhookPayload struct {
 	Action string `json:"action"`
 	Number int    `json:"number"`
@@ -49,9 +50,45 @@ type prWebhookPayload struct {
 	} `json:"installation"`
 }
 
+// reviewWebhookTrigger 触发事实的中性形态（payload 解析之后）：webhook 与
+// 轮询补漏共用同一条受理路径，判定逻辑只维护一份。
+type reviewWebhookTrigger struct {
+	action       string
+	number       int
+	repoFullName string // base/repository 全名（payload 大小写原样）
+	headSHA      string
+	draft        bool
+	headFork     bool
+	headRepoFull string // head 仓库全名
+	baseRepoFull string // base 仓库全名
+	title        string
+	htmlURL      string
+	baseRef      string
+	headRef      string
+	updatedAt    *time.Time
+	// installationID 仅 GitHub 有：App 安装快照。Forgejo 恒 0（无安装语义，
+	// advancePRHeadTx 对 0 不覆盖既有快照）。
+	installationID int64
+}
+
+// normalizeReviewAction 平台动作名归一：Forgejo/Gitea 的推送动作叫
+// synchronized（GitHub 是 synchronize），触发面（可受理判定、勾选位映射、
+// 防抖行、开轮记录）统一按 GitHub 拼法落库。GitHub 的动作集合里没有
+// synchronized，此归一对 GitHub 入口零影响。
+func normalizeReviewAction(action string) string {
+	if action == "synchronized" {
+		return "synchronize"
+	}
+	return action
+}
+
 // handleWebhookTx delivery 已落账后的触发处理（同一事务内）。忽略场景一律
-// 返回 nil——未关联仓库/未勾选动作/draft/fork/过期 SHA 不向 GitHub 区分。
-func (s *ReviewService) handleWebhookTx(tx *gorm.DB, event string, body []byte, now time.Time) error {
+// 返回 nil——未关联仓库/未勾选动作/draft/fork/过期 SHA 不向平台区分。
+// integrationID 是触发链路的集成身份（归一值）：GitHub 入口固定传内置
+// github-default，Forgejo 入口传 forge_integrations.id；反查命中后所有键控
+// 读写（seen/总账/运行/防抖）都以它过滤——反查既然按它命中设置行，其余键
+// 与设置行必然同值。
+func (s *ReviewService) handleWebhookTx(tx *gorm.DB, integrationID string, event string, body []byte, now time.Time) error {
 	if event != "pull_request" {
 		return nil
 	}
@@ -59,72 +96,97 @@ func (s *ReviewService) handleWebhookTx(tx *gorm.DB, event string, body []byte, 
 	if err := json.Unmarshal(body, &p); err != nil {
 		return nil
 	}
-	if p.Number <= 0 || p.Repository.FullName == "" || p.PR.Head.SHA == "" {
+	return s.handleReviewTriggerTx(tx, integrationID, &reviewWebhookTrigger{
+		action:         p.Action,
+		number:         p.Number,
+		repoFullName:   p.Repository.FullName,
+		headSHA:        p.PR.Head.SHA,
+		draft:          p.PR.Draft,
+		headFork:       p.PR.Head.Repo.Fork,
+		headRepoFull:   p.PR.Head.Repo.FullName,
+		baseRepoFull:   p.PR.Base.Repo.FullName,
+		title:          p.PR.Title,
+		htmlURL:        p.PR.HTMLURL,
+		baseRef:        p.PR.Base.Ref,
+		headRef:        p.PR.Head.Ref,
+		updatedAt:      p.PR.UpdatedAt,
+		installationID: p.Installation.ID,
+	}, now)
+}
+
+// handleReviewTriggerTx 受理判定与写库（同一事务内）：closed 取消在途、draft/
+// fork 忽略、过期/重复 SHA 去重、登记 seen、推进总账 head、写防抖行。轮询
+// 补漏构造同一形态的 trigger 走这条路径，seen 去重保证同一 SHA 只受理一次。
+func (s *ReviewService) handleReviewTriggerTx(tx *gorm.DB, integrationID string, t *reviewWebhookTrigger, now time.Time) error {
+	t.action = normalizeReviewAction(t.action)
+	if t.number <= 0 || t.repoFullName == "" || t.headSHA == "" {
 		return nil
 	}
 	// PR 关闭/合并：取消该 PR 的防抖与在途运行（含排队），不再开轮。关闭事件
 	// 不区分触发条件——继续审一个已关闭的 PR 没有意义。
-	if p.Action == "closed" {
-		project, err := s.findEnabledProjectByRepoTx(tx, p.Repository.FullName)
+	if t.action == "closed" {
+		project, err := s.findEnabledProjectByRepoTx(tx, integrationID, t.repoFullName)
 		if err != nil || project == nil {
 			return err
 		}
-		repo := strings.ToLower(p.Repository.FullName)
-		if err := s.supersedePRRunsTx(tx, project.ID, repo, p.Number, now); err != nil {
+		repo := strings.ToLower(t.repoFullName)
+		if err := s.supersedePRRunsTx(tx, integrationID, project.ID, repo, t.number, now); err != nil {
 			return err
 		}
-		if err := tx.Where("project_id = ? AND repo_full_name = ? AND pr_number = ?",
-			project.ID, repo, p.Number).Delete(&model.ReviewDebounce{}).Error; err != nil {
+		if err := tx.Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ?",
+			project.ID, repo, t.number, integrationID).Delete(&model.ReviewDebounce{}).Error; err != nil {
 			return err
 		}
 		// 保留账本 head（记录页仍显示最后审过的提交），只清 pending 并推进
 		// epoch，让在途同步停下。
 		return tx.Model(&model.ReviewPullRequest{}).
-			Where("project_id = ? AND repo_full_name = ? AND pr_number = ?", project.ID, repo, p.Number).
+			Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ?",
+				project.ID, repo, t.number, integrationID).
 			Updates(map[string]any{
 				"sync_pending": false,
 				"sync_epoch":   gorm.Expr("sync_epoch + 1"),
 				"updated_at":   now,
 			}).Error
 	}
-	if !reviewTriggerableAction(p.Action) {
+	if !reviewTriggerableAction(t.action) {
 		return nil
 	}
 	// draft 与 fork（head 仓库 ≠ base 仓库）一律忽略。
-	if p.PR.Draft || p.PR.Head.Repo.Fork ||
-		!strings.EqualFold(p.PR.Head.Repo.FullName, p.PR.Base.Repo.FullName) {
+	if t.draft || t.headFork ||
+		!strings.EqualFold(t.headRepoFull, t.baseRepoFull) {
 		return nil
 	}
 
-	// 反查启用项目：同仓库最多一个 enabled；project_review_settings 联查 projects。
-	project, settings, err := s.findEnabledReviewProjectTx(tx, p.Repository.FullName)
+	// 反查启用项目：同一集成内同仓库最多一个 enabled；project_review_settings
+	// 联查 projects。
+	project, settings, err := s.findEnabledReviewProjectTx(tx, integrationID, t.repoFullName)
 	if err != nil || project == nil {
 		return err
 	}
 
-	// 写库键统一小写：payload 里是 GitHub 规范大小写，rerun 侧用的是项目里
+	// 写库键统一小写：payload 里是平台规范大小写，rerun 侧用的是项目里
 	// 用户输入的原样大小写——SQLite BINARY 排序下大小写不同即两套账本，
 	// 旧 SHA 取消、去重、幂等全部失效。
-	repo, prNumber, headSHA := strings.ToLower(p.Repository.FullName), p.Number, p.PR.Head.SHA
+	repo, prNumber, headSHA := strings.ToLower(t.repoFullName), t.number, t.headSHA
 
 	// 当前 head：未开火的防抖行优先，否则用总账 head。
-	currentHead, err := s.currentAcceptedHeadTx(tx, project.ID, repo, prNumber)
+	currentHead, err := s.currentAcceptedHeadTx(tx, integrationID, project.ID, repo, prNumber)
 	if err != nil {
 		return err
 	}
 
-	// 过期 SHA 判定：payload.updated_at ≤ 已受理 head 的 pr_updated_at → 忽略。
-	// 账本按项目分区：seen/总账/运行一律带 project_id，其他项目的同仓库
-	// 残留行不进入本项目判定。
+	// 过期 SHA 判定：trigger.updated_at ≤ 已受理 head 的 pr_updated_at → 忽略。
+	// 账本按 (项目, 集成) 分区：seen/总账/运行一律带 project_id 与
+	// integration_id，其他项目/其他集成的同仓库残留行不进入本项目判定。
 	if currentHead != "" {
 		var accepted model.ReviewSeenSHA
-		err := tx.Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ?",
-			project.ID, repo, prNumber, currentHead).First(&accepted).Error
+		err := tx.Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ? AND integration_id = ?",
+			project.ID, repo, prNumber, currentHead, integrationID).First(&accepted).Error
 		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
 		}
-		if accepted.PRUpdatedAt != nil && p.PR.UpdatedAt != nil &&
-			!p.PR.UpdatedAt.After(*accepted.PRUpdatedAt) {
+		if accepted.PRUpdatedAt != nil && t.updatedAt != nil &&
+			!t.updatedAt.After(*accepted.PRUpdatedAt) {
 			return nil
 		}
 	}
@@ -133,8 +195,8 @@ func (s *ReviewService) handleWebhookTx(tx *gorm.DB, event string, body []byte, 
 	if headSHA != currentHead {
 		var n int64
 		if err := tx.Model(&model.ReviewSeenSHA{}).
-			Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ?",
-				project.ID, repo, prNumber, headSHA).
+			Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ? AND integration_id = ?",
+				project.ID, repo, prNumber, headSHA, integrationID).
 			Count(&n).Error; err != nil {
 			return err
 		}
@@ -142,15 +204,17 @@ func (s *ReviewService) handleWebhookTx(tx *gorm.DB, event string, body []byte, 
 			return nil
 		}
 	}
-	// 迟到的 opened（已有受理 head）→ 忽略。
-	if p.Action == "opened" && currentHead != "" {
+	// 迟到的 opened（已有受理 head）→ 忽略。轮询补漏的动作按「从未受理过 →
+	// opened，已受理过 → synchronize」归类（见 review_forgejo_poll.go），这条
+	// 守卫同时兜住补漏读 head 与受理落库之间 webhook 抢先受理的竞态窗口。
+	if t.action == "opened" && currentHead != "" {
 		return nil
 	}
 	// 该 SHA 已有运行 → 忽略。
 	var runCount int64
 	if err := tx.Model(&model.ReviewRun{}).
-		Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ?",
-			project.ID, repo, prNumber, headSHA).
+		Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ? AND integration_id = ?",
+			project.ID, repo, prNumber, headSHA, integrationID).
 		Count(&runCount).Error; err != nil {
 		return err
 	}
@@ -162,7 +226,8 @@ func (s *ReviewService) handleWebhookTx(tx *gorm.DB, event string, body []byte, 
 	seen := &model.ReviewSeenSHA{
 		ProjectID:    project.ID,
 		RepoFullName: repo, PRNumber: prNumber, HeadSHA: headSHA,
-		PRUpdatedAt: p.PR.UpdatedAt, AcceptedAt: now,
+		IntegrationID: integrationID,
+		PRUpdatedAt:   t.updatedAt, AcceptedAt: now,
 	}
 	if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(seen).Error; err != nil {
 		return err
@@ -173,22 +238,22 @@ func (s *ReviewService) handleWebhookTx(tx *gorm.DB, event string, body []byte, 
 	// 内不再同步旧轮：否则调度会拿新 head 的 PR 描述给旧 SHA 建视觉运行，而
 	// 这些运行不会被随后开轮的新 SHA 取消。
 	if headSHA != currentHead {
-		if err := s.supersedePRRunsTx(tx, project.ID, repo, prNumber, now); err != nil {
+		if err := s.supersedePRRunsTx(tx, integrationID, project.ID, repo, prNumber, now); err != nil {
 			return err
 		}
-		if err := tx.Where("project_id = ? AND repo_full_name = ? AND pr_number = ?",
-			project.ID, repo, prNumber).
+		if err := tx.Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ?",
+			project.ID, repo, prNumber, integrationID).
 			Delete(&model.ReviewDebounce{}).Error; err != nil {
 			return err
 		}
-		if err := s.advancePRHeadTx(tx, project, repo, prNumber, headSHA, p.Installation.ID, now); err != nil {
+		if err := s.advancePRHeadTx(tx, project, repo, prNumber, headSHA, integrationID, t.installationID, now); err != nil {
 			return err
 		}
 	}
 
-	// 未勾选的动作不开新轮、也不发 GitHub 产出：只登记 seen、取消旧运行、
+	// 未勾选的动作不开新轮、也不发平台产出：只登记 seen、取消旧运行、
 	// 删防抖、推进 head（同 SHA 的下一次已勾选动作不会被当成回旧 SHA 忽略）。
-	if !reviewTriggerEnabled(settings, p.Action) {
+	if !reviewTriggerEnabled(settings, t.action) {
 		return nil
 	}
 	// sync_pending 由开轮（防抖到期后的 openRoundTx）置位：此刻还没有新轮的
@@ -199,13 +264,14 @@ func (s *ReviewService) handleWebhookTx(tx *gorm.DB, event string, body []byte, 
 		ProjectID:      project.ID,
 		RepoFullName:   repo,
 		PRNumber:       prNumber,
+		IntegrationID:  integrationID,
 		HeadSHA:        headSHA,
-		Action:         p.Action,
-		InstallationID: p.Installation.ID,
-		PRTitle:        p.PR.Title,
-		PRURL:          p.PR.HTMLURL,
-		BaseRef:        p.PR.Base.Ref,
-		HeadRef:        p.PR.Head.Ref,
+		Action:         t.action,
+		InstallationID: t.installationID,
+		PRTitle:        t.title,
+		PRURL:          t.htmlURL,
+		BaseRef:        t.baseRef,
+		HeadRef:        t.headRef,
 		FireAt:         now.Add(reviewDebounceSeconds * time.Second),
 		UpdatedAt:      now,
 	}
@@ -237,24 +303,28 @@ func reviewTriggerEnabled(s *model.ProjectReviewSettings, action string) bool {
 }
 
 // findEnabledProjectByRepoTx 只取启用审查的项目（关闭事件不需要设置内容）。
-func (s *ReviewService) findEnabledProjectByRepoTx(tx *gorm.DB, repoFullName string) (*model.Project, error) {
-	project, _, err := s.findEnabledReviewProjectTx(tx, repoFullName)
+func (s *ReviewService) findEnabledProjectByRepoTx(tx *gorm.DB, integrationID, repoFullName string) (*model.Project, error) {
+	project, _, err := s.findEnabledReviewProjectTx(tx, integrationID, repoFullName)
 	return project, err
 }
 
-// findEnabledReviewProjectTx 按仓库全名（大小写不敏感）找到启用审查的项目
-// 及其设置；无命中返回 (nil, nil, nil)。按设置行的 repo_full_name 快照反查：
-// 同仓库唯一索引建在这一列上，判定与约束用同一列；快照与项目行 live 值由
-// ProjectRepository.Update 同事务保持一致（读取口径见 docs/internal/reviews.md）。
-func (s *ReviewService) findEnabledReviewProjectTx(tx *gorm.DB, repoFullName string) (*model.Project, *model.ProjectReviewSettings, error) {
+// findEnabledReviewProjectTx 按 (integration_id, 仓库全名大小写不敏感) 找到
+// 启用审查的项目及其设置；无命中返回 (nil, nil, nil)。按设置行的
+// (integration_id, repo_full_name) 快照反查：同仓库唯一索引建在这两列上，
+// 判定与约束用同两列；快照与项目行 live 值由 ProjectRepository.Update /
+// UpdateSettings 同事务保持一致（读取口径见 docs/internal/reviews.md）。
+// integrationID 传归一值（GitHub 入口固定 github-default，Forgejo 入口传真实
+// 集成 id）：绑定 GitHub 的项目快照是 github-default，绑定 Forgejo 的是真实
+// 集成 id，两边的同名仓库投递互不误触。
+func (s *ReviewService) findEnabledReviewProjectTx(tx *gorm.DB, integrationID, repoFullName string) (*model.Project, *model.ProjectReviewSettings, error) {
 	owner, repo, ok := strings.Cut(repoFullName, "/")
 	if !ok || owner == "" || repo == "" {
 		return nil, nil, nil
 	}
 	var rows []model.ProjectReviewSettings
 	if err := tx.
-		Where("project_review_settings.enabled AND project_review_settings.repo_full_name = ?",
-			strings.ToLower(repoFullName)).
+		Where("project_review_settings.enabled AND project_review_settings.repo_full_name = ? AND project_review_settings.integration_id = ?",
+			strings.ToLower(repoFullName), integrationID).
 		Limit(1).Find(&rows).Error; err != nil {
 		return nil, nil, err
 	}
@@ -266,20 +336,14 @@ func (s *ReviewService) findEnabledReviewProjectTx(tx *gorm.DB, repoFullName str
 	if err := tx.Where("id = ?", settings.ProjectID).First(&project).Error; err != nil {
 		return nil, nil, err
 	}
-	// GitHub webhook 只认内置 github-default 的项目：绑定 Forgejo 集成的项目
-	// 即使设置行里存在同名 repo_full_name 快照（跨实例撞名）也不进 GitHub
-	// 审查链路，按未命中处理。
-	if project.CodeIntegrationID != "" {
-		return nil, nil, nil
-	}
 	return &project, settings, nil
 }
 
 // currentAcceptedHeadTx 当前已受理 head：未开火的防抖行优先，否则总账 head_sha。
-func (s *ReviewService) currentAcceptedHeadTx(tx *gorm.DB, projectID, repo string, prNumber int) (string, error) {
+func (s *ReviewService) currentAcceptedHeadTx(tx *gorm.DB, integrationID, projectID, repo string, prNumber int) (string, error) {
 	var debounce model.ReviewDebounce
-	err := tx.Where("project_id = ? AND repo_full_name = ? AND pr_number = ?",
-		projectID, repo, prNumber).First(&debounce).Error
+	err := tx.Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ?",
+		projectID, repo, prNumber, integrationID).First(&debounce).Error
 	switch {
 	case err == nil:
 		return debounce.HeadSHA, nil
@@ -287,8 +351,8 @@ func (s *ReviewService) currentAcceptedHeadTx(tx *gorm.DB, projectID, repo strin
 		return "", err
 	}
 	var ledger model.ReviewPullRequest
-	err = tx.Where("project_id = ? AND repo_full_name = ? AND pr_number = ?",
-		projectID, repo, prNumber).First(&ledger).Error
+	err = tx.Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ?",
+		projectID, repo, prNumber, integrationID).First(&ledger).Error
 	switch {
 	case err == nil:
 		return ledger.HeadSHA, nil
@@ -301,13 +365,14 @@ func (s *ReviewService) currentAcceptedHeadTx(tx *gorm.DB, projectID, repo strin
 
 // supersedePRRunsTx 取消该 PR 全部未终态运行（含 queued/dispatched/running），
 // error_code=superseded；运行令牌一并消费。线程中断由调度阶段补发。
-// 只动本项目的运行——账本分区后其他项目的同仓库运行由各自的接管/超时收敛。
-func (s *ReviewService) supersedePRRunsTx(tx *gorm.DB, projectID, repo string, prNumber int, now time.Time) error {
+// 只动本 (项目, 集成) 的运行——账本分区后其他项目/其他集成的同仓库运行由
+// 各自的接管/超时收敛。
+func (s *ReviewService) supersedePRRunsTx(tx *gorm.DB, integrationID, projectID, repo string, prNumber int, now time.Time) error {
 	active := []model.ReviewRunStatus{model.ReviewRunQueued, model.ReviewRunDispatched, model.ReviewRunRunning}
 	var runIDs []string
 	if err := tx.Model(&model.ReviewRun{}).
-		Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND status IN ?",
-			projectID, repo, prNumber, active).
+		Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ? AND status IN ?",
+			projectID, repo, prNumber, integrationID, active).
 		Pluck("id", &runIDs).Error; err != nil {
 		return err
 	}
@@ -331,15 +396,16 @@ func (s *ReviewService) supersedePRRunsTx(tx *gorm.DB, projectID, repo string, p
 
 // advancePRHeadTx 只推进总账 head（不置 sync_pending）：动作未勾选时不该
 // 发布旧轮结论，但 head 必须前进，供后续已勾选动作按同一 SHA 正常开轮。
-func (s *ReviewService) advancePRHeadTx(tx *gorm.DB, project *model.Project, repo string, prNumber int, headSHA string, installationID int64, now time.Time) error {
+func (s *ReviewService) advancePRHeadTx(tx *gorm.DB, project *model.Project, repo string, prNumber int, headSHA, integrationID string, installationID int64, now time.Time) error {
 	var ledger model.ReviewPullRequest
-	err := tx.Where("project_id = ? AND repo_full_name = ? AND pr_number = ?",
-		project.ID, repo, prNumber).First(&ledger).Error
+	err := tx.Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ?",
+		project.ID, repo, prNumber, integrationID).First(&ledger).Error
 	switch {
 	case errors.Is(err, gorm.ErrRecordNotFound):
 		return tx.Create(&model.ReviewPullRequest{
 			ProjectID: project.ID, RepoFullName: repo, PRNumber: prNumber,
-			UserID: project.UserID, InstallationID: installationID,
+			IntegrationID: integrationID,
+			UserID:        project.UserID, InstallationID: installationID,
 			HeadSHA: headSHA, UpdatedAt: now,
 		}).Error
 	case err != nil:
@@ -357,7 +423,7 @@ func (s *ReviewService) advancePRHeadTx(tx *gorm.DB, project *model.Project, rep
 		updates["installation_id"] = installationID
 	}
 	return tx.Model(&model.ReviewPullRequest{}).
-		Where("project_id = ? AND repo_full_name = ? AND pr_number = ?",
-			project.ID, repo, prNumber).
+		Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ?",
+			project.ID, repo, prNumber, integrationID).
 		Updates(updates).Error
 }

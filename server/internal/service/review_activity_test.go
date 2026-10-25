@@ -26,7 +26,8 @@ func createActivitySettings(t *testing.T, db *gorm.DB, userID, projectID, repo s
 	t.Helper()
 	now := time.Now().UTC()
 	if err := db.Create(&model.ProjectReviewSettings{
-		ProjectID: projectID, UserID: userID, RepoFullName: repo, Enabled: enabled,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     projectID, UserID: userID, RepoFullName: repo, Enabled: enabled,
 		TriggerOpened: true, TriggerSynchronize: true,
 		CodeCombinationsJSON:   testActivityCombosJSON(codeCombos),
 		VisualCombinationsJSON: testActivityCombosJSON(visualCombos),
@@ -41,7 +42,8 @@ func createActivityDebounce(t *testing.T, db *gorm.DB, projectID, repo string, p
 	t.Helper()
 	now := time.Now().UTC().Truncate(time.Second)
 	d := &model.ReviewDebounce{
-		ProjectID: projectID, RepoFullName: repo, PRNumber: prNumber,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     projectID, RepoFullName: repo, PRNumber: prNumber,
 		HeadSHA: "sha-new", Action: "synchronize", InstallationID: 1,
 		PRTitle: "debounce title",
 		PRURL:   fmt.Sprintf("https://github.com/%s/pull/%d", repo, prNumber),

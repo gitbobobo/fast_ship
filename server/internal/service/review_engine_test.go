@@ -48,7 +48,7 @@ func newReviewEngineEnv(t *testing.T) *reviewEngineEnv {
 		githubapp.StaticClients{Client: fake},
 		fakeReviewAppSource{ok: true},
 		fakeReviewPublicURL("https://fs.example.com"),
-		nil, media, nil, svc.cfg, zap.NewNop())
+		nil, media, nil, repository.NewForgeIntegrationRepository(svc.db), svc.cfg, zap.NewNop())
 	user := createTestUser(t, svc.db, "reviewer")
 	project := createTestProject(t, svc.db, user.ID)
 	return &reviewEngineEnv{svc: svc, review: review, fake: fake, media: media, user: user, project: project}
@@ -66,6 +66,7 @@ func (e *reviewEngineEnv) enableReview(t *testing.T, opts ...func(*model.Project
 		ProjectID:             e.project.ID,
 		UserID:                e.user.ID,
 		RepoFullName:          strings.ToLower(e.project.CodeRepoFullName()),
+		IntegrationID:         model.ForgeIntegrationBuiltinGitHubID,
 		Enabled:               true,
 		TriggerOpened:         true,
 		TriggerSynchronize:    true,
@@ -245,7 +246,8 @@ func TestReviewWebhookSupersedesStaleSHA(t *testing.T) {
 
 	// 旧 head 有一条 running 运行。
 	old := &model.ReviewRun{
-		ID: uuid.NewString(), UserID: e.user.ID, ProjectID: e.project.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ID:            uuid.NewString(), UserID: e.user.ID, ProjectID: e.project.ID,
 		Kind: model.ReviewKindCode, RepoFullName: repo, PRNumber: 4,
 		HeadSHA: "sha-old", RoundNumber: 1, EnvironmentID: "env-1",
 		InstanceID: "claude", Model: "m",
@@ -281,7 +283,8 @@ func TestReviewDebounceConsumeOpensRound(t *testing.T) {
 
 	e.fake.SetPR(repo, 9, &githubapi.PullRequest{HeadSHA: "sha-9"})
 	e.svc.db.Create(&model.ReviewDebounce{
-		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 9,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: repo, PRNumber: 9,
 		HeadSHA: "sha-9", Action: "synchronize", InstallationID: 42,
 		PRTitle: "t", PRURL: "u", BaseRef: "main", HeadRef: "feature",
 		FireAt: now.Add(-time.Second), UpdatedAt: now.Add(-time.Minute),
@@ -358,7 +361,8 @@ func TestReviewMarkTimeouts(t *testing.T) {
 		RunID: run.ID, TokenHash: "h", CreatedAt: now.Add(-time.Hour), ExpiresAt: now.Add(time.Hour),
 	})
 	e.svc.db.Create(&model.ReviewPullRequest{
-		RepoFullName: repo, PRNumber: 11, ProjectID: e.project.ID, UserID: e.user.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		RepoFullName:  repo, PRNumber: 11, ProjectID: e.project.ID, UserID: e.user.ID,
 		UpdatedAt: now,
 	})
 
@@ -391,7 +395,8 @@ func TestReviewMarkTimeouts(t *testing.T) {
 func (e *reviewEngineEnv) seedRun(t *testing.T, repo string, pr int, head string, status model.ReviewRunStatus, now time.Time) *model.ReviewRun {
 	t.Helper()
 	run := &model.ReviewRun{
-		ID: uuid.NewString(), UserID: e.user.ID, ProjectID: e.project.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ID:            uuid.NewString(), UserID: e.user.ID, ProjectID: e.project.ID,
 		Kind: model.ReviewKindCode, RepoFullName: repo, PRNumber: pr,
 		HeadSHA: head, RoundNumber: 1, EnvironmentID: "env-1",
 		InstanceID: "claude", Model: "m",
@@ -417,7 +422,8 @@ func TestReviewResultValidation(t *testing.T) {
 		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
 	})
 	e.svc.db.Create(&model.ReviewPullRequest{
-		RepoFullName: repo, PRNumber: 12, ProjectID: e.project.ID, UserID: e.user.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		RepoFullName:  repo, PRNumber: 12, ProjectID: e.project.ID, UserID: e.user.ID,
 		InstallationID: 42, HeadSHA: "sha-r", RoundNumber: 1, UpdatedAt: now,
 	})
 
@@ -469,7 +475,8 @@ func TestReviewResultHeadChanged(t *testing.T) {
 		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
 	})
 	e.svc.db.Create(&model.ReviewPullRequest{
-		RepoFullName: repo, PRNumber: 13, ProjectID: e.project.ID, UserID: e.user.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		RepoFullName:  repo, PRNumber: 13, ProjectID: e.project.ID, UserID: e.user.ID,
 		HeadSHA: "sha-old", RoundNumber: 1, UpdatedAt: now,
 	})
 	run := e.seedRun(t, repo, 13, "sha-old", model.ReviewRunRunning, now)

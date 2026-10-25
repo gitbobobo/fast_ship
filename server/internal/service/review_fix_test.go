@@ -153,7 +153,7 @@ func (f *fakeReviewT3) RetryPreparation(ctx context.Context, _, _, threadID, t3R
 // withT3 在共享测试库上组装一个带 T3/媒体桩的 ReviewService。media 传 nil
 // 时用环境的默认成功桩（没有截图引用的 PR 不受影响）。
 func (e *reviewEngineEnv) withT3(t3 reviewT3, media reviewMedia,
-	bearer func(context.Context, int64) (string, error)) *ReviewService {
+	bearer func(context.Context, string, int64) (string, error)) *ReviewService {
 	if media == nil {
 		media = e.media
 	}
@@ -163,7 +163,7 @@ func (e *reviewEngineEnv) withT3(t3 reviewT3, media reviewMedia,
 		githubapp.StaticClients{Client: e.fake},
 		fakeReviewAppSource{ok: true},
 		fakeReviewPublicURL("https://fs.example.com"),
-		t3, media, bearer, e.svc.cfg, zap.NewNop())
+		t3, media, bearer, repository.NewForgeIntegrationRepository(e.svc.db), e.svc.cfg, zap.NewNop())
 }
 
 // seedDispatchedRun 落一行已确认派发的运行（dispatched_at 非空），可指定
@@ -620,12 +620,14 @@ func TestReviewStatusResetOnNewHead(t *testing.T) {
 	})
 	// 总账带旧 head 的已发布结论。
 	e.svc.db.Create(&model.ReviewPullRequest{
-		RepoFullName: repo, PRNumber: 41, ProjectID: e.project.ID, UserID: e.user.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		RepoFullName:  repo, PRNumber: 41, ProjectID: e.project.ID, UserID: e.user.ID,
 		InstallationID: 42, HeadSHA: "sha-1", RoundNumber: 1,
 		CodeStatus: "success", VisualStatus: "failure", UpdatedAt: now,
 	})
 	e.svc.db.Create(&model.ReviewSeenSHA{
-		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 41, HeadSHA: "sha-1", AcceptedAt: now,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: repo, PRNumber: 41, HeadSHA: "sha-1", AcceptedAt: now,
 	})
 
 	if err := e.review.HandleGitHubWebhook(context.Background(), "pull_request", "d-new",
@@ -678,7 +680,8 @@ func TestReviewResultAfterDeadline(t *testing.T) {
 		RunID: run.ID, TokenHash: "h-late", CreatedAt: now, ExpiresAt: now.Add(time.Hour),
 	})
 	e.svc.db.Create(&model.ReviewPullRequest{
-		RepoFullName: repo, PRNumber: 51, ProjectID: e.project.ID, UserID: e.user.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		RepoFullName:  repo, PRNumber: 51, ProjectID: e.project.ID, UserID: e.user.ID,
 		HeadSHA: "sha-d", RoundNumber: 1, UpdatedAt: now,
 	})
 
@@ -713,7 +716,8 @@ func TestReviewWebhookUncheckedAction(t *testing.T) {
 
 	// 先制造一条 pending 的旧账本：未勾选的新 head 必须把它清掉。
 	if err := e.svc.db.Create(&model.ReviewPullRequest{
-		ProjectID: e.project.ID, RepoFullName: strings.ToLower(repo), PRNumber: 61,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: strings.ToLower(repo), PRNumber: 61,
 		UserID: e.user.ID, HeadSHA: "sha-old", RoundNumber: 1,
 		SyncPending: true, SyncEpoch: 3, UpdatedAt: now,
 	}).Error; err != nil {
@@ -828,13 +832,13 @@ func TestReviewAssetsBearerRetry(t *testing.T) {
 	ctx := context.Background()
 	cached := &githubmedia.CachedMedia{Path: "/cache/shot.png"}
 	media := &fakeReviewMedia{cached: cached, anonErr: &githubmedia.UpstreamStatusError{StatusCode: 404}}
-	review := e.withT3(nil, media, func(context.Context, int64) (string, error) {
+	review := e.withT3(nil, media, func(context.Context, string, int64) (string, error) {
 		return "installation-token-1", nil
 	})
 	body := "intro ![a](https://github.com/user-attachments/assets/xyz) tail"
 
 	// 匿名失败 → Bearer 重试成功 → 行带 storage_path。
-	_, assets, err := review.ensureAssets(ctx, repo, 71, "sha-a", body, 42)
+	_, assets, err := review.ensureAssets(ctx, model.ForgeIntegrationBuiltinGitHubID, repo, 71, "sha-a", body, 42)
 	if err != nil {
 		t.Fatalf("ensureAssets: %v", err)
 	}
@@ -849,7 +853,7 @@ func TestReviewAssetsBearerRetry(t *testing.T) {
 	e.svc.db.Model(&model.ReviewAsset{}).Where("source_url LIKE ?", "%xyz%").
 		Updates(map[string]any{"storage_path": "", "error": "prev failure"})
 	media.anonErr = nil
-	_, assets, err = review.ensureAssets(ctx, repo, 71, "sha-a", body, 42)
+	_, assets, err = review.ensureAssets(ctx, model.ForgeIntegrationBuiltinGitHubID, repo, 71, "sha-a", body, 42)
 	if err != nil {
 		t.Fatalf("ensureAssets retry: %v", err)
 	}

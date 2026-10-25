@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/godbobo/fast_ship/server/internal/githubapi"
+	"github.com/godbobo/fast_ship/server/internal/forge"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
@@ -33,7 +33,8 @@ const (
 // 回收不会被拖到几十分钟后。超预算的剩余行本来就还在库里，下个 tick 再处理。
 const reviewNetworkStageBudget = 60 * time.Second
 
-// Start 启动审查调度循环（幂等：重复调用不叠加第二个循环）。
+// Start 启动审查调度循环（幂等：重复调用不叠加第二个循环）。Forgejo 轮询
+// 补漏挂在同一组循环里（INT-167 任务 3）：共用 cancel，tick 频率更低。
 func (s *ReviewService) Start() {
 	s.mu.Lock()
 	if s.cancel != nil {
@@ -47,6 +48,7 @@ func (s *ReviewService) Start() {
 	s.mu.Unlock()
 	go s.reviewLoop(cancel, kickCh)
 	go s.redeliveryLoop(cancel)
+	go s.forgejoPollLoop(cancel)
 }
 
 // Stop 停止调度循环；幂等，未启动时为空操作。
@@ -186,10 +188,10 @@ func (s *ReviewService) consumeDebounce(row *model.ReviewDebounce, now time.Time
 	// 单次 PR 实况读 10s：这是「读一次 PR 状态」的检查而非数据传输，超时只
 	// 意味着本轮不开轮（fire_at 推后），10s 足够，别占满整个阶段预算。
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	client, err := s.ghClient(ctx)
-	var pr *githubapi.PullRequest
+	client, err := s.reviewClient(ctx, row.IntegrationID, row.RepoFullName, row.InstallationID)
+	var pr *forge.PullRequest
 	if err == nil {
-		pr, err = client.GetPullRequest(ctx, row.InstallationID, row.RepoFullName, row.PRNumber)
+		pr, err = client.GetPullRequest(ctx, row.RepoFullName, row.PRNumber)
 	}
 	cancel()
 	if err != nil {
@@ -200,8 +202,8 @@ func (s *ReviewService) consumeDebounce(row *model.ReviewDebounce, now time.Time
 		// 被选中继续失败。
 		pushTo := time.Now().UTC().Add(reviewDebounceSeconds * time.Second)
 		if retryErr := s.db.Where(
-			"project_id = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ? AND fire_at <= ?",
-			row.ProjectID, row.RepoFullName, row.PRNumber, row.HeadSHA, now,
+			"project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ? AND head_sha = ? AND fire_at <= ?",
+			row.ProjectID, row.RepoFullName, row.PRNumber, row.IntegrationID, row.HeadSHA, now,
 		).Model(&model.ReviewDebounce{}).
 			Update("fire_at", pushTo).Error; retryErr != nil {
 			s.logger.Error("推后防抖行失败",
@@ -214,8 +216,8 @@ func (s *ReviewService) consumeDebounce(row *model.ReviewDebounce, now time.Time
 	reviewable := prReviewable(pr) && strings.EqualFold(pr.HeadSHA, row.HeadSHA)
 	err = s.db.Transaction(func(tx *gorm.DB) error {
 		res := tx.Where(
-			"project_id = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ? AND fire_at <= ?",
-			row.ProjectID, row.RepoFullName, row.PRNumber, row.HeadSHA, now,
+			"project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ? AND head_sha = ? AND fire_at <= ?",
+			row.ProjectID, row.RepoFullName, row.PRNumber, row.IntegrationID, row.HeadSHA, now,
 		).Delete(&model.ReviewDebounce{})
 		if res.Error != nil {
 			return res.Error
@@ -234,14 +236,14 @@ func (s *ReviewService) consumeDebounce(row *model.ReviewDebounce, now time.Time
 		if err := tx.Where("project_id = ?", row.ProjectID).First(&settings).Error; err != nil {
 			return err
 		}
-		// 复核：仍启用、动作仍勾选、仓库（enabled 设置行的 repo_full_name 快照，
-		// 与 webhook 反查、syncOnePR 准入复核同口径）仍是该防抖行对应的仓库。
-		// 两个键写库时都是小写，直接等值比较；不回读项目行的 live 仓库字段——
-		// 快照是本项目审查仓库的唯一真相。
+		// 复核：仍启用、动作仍勾选、(集成, 仓库)（enabled 设置行的归一快照，
+		// 与 webhook 反查、syncOnePR 准入复核同口径）仍是该防抖行对应的键。
+		// 两个键写库时都是归一值，直接等值比较；不回读项目行的 live 字段——
+		// 快照是本项目审查对象的唯一真相。
 		if !settings.Enabled || !reviewTriggerEnabled(&settings, row.Action) {
 			return nil
 		}
-		if settings.RepoFullName != row.RepoFullName {
+		if settings.RepoFullName != row.RepoFullName || settings.IntegrationID != row.IntegrationID {
 			return nil
 		}
 		_, err := s.openRoundTx(tx, &project, &settings,
@@ -344,7 +346,7 @@ func (s *ReviewService) markTimeouts(now time.Time) {
 				Update("consumed_at", now).Error; err != nil {
 				return err
 			}
-			return s.markPRSyncPendingByRepoTx(tx, run.ProjectID, run.RepoFullName, run.PRNumber, now)
+			return s.markPRSyncPendingByRepoTx(tx, run.IntegrationID, run.ProjectID, run.RepoFullName, run.PRNumber, now)
 		})
 		if err != nil {
 			s.logger.Error("标记审查超时失败", zap.String("run", run.ID), zap.Error(err))

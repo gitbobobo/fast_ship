@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/api"
+	"github.com/godbobo/fast_ship/server/internal/forge"
 	"github.com/godbobo/fast_ship/server/internal/githubapi"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/githubapp"
@@ -42,7 +43,7 @@ func newCodeRepoEnv(t *testing.T) *codeRepoEnv {
 		githubapp.StaticClients{Client: fake},
 		fakeReviewAppSource{ok: true},
 		fakeReviewPublicURL("https://fs.example.com"),
-		nil, nil, nil, svc.cfg, zap.NewNop())
+		nil, nil, nil, repository.NewForgeIntegrationRepository(svc.db), svc.cfg, zap.NewNop())
 	user := createTestUser(t, svc.db, "code-repo-user")
 	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
 		p.GithubOwner = "pub"
@@ -56,6 +57,7 @@ func newCodeRepoEnv(t *testing.T) *codeRepoEnv {
 		t.Fatalf("marshal combos: %v", err)
 	}
 	if err := svc.db.Create(&model.ProjectReviewSettings{
+		IntegrationID:        model.ForgeIntegrationBuiltinGitHubID,
 		ProjectID:            project.ID,
 		UserID:               user.ID,
 		RepoFullName:         strings.ToLower(project.CodeRepoFullName()),
@@ -113,7 +115,8 @@ func TestReviewDebounceConsumeWithCodeRepo(t *testing.T) {
 	now := time.Now().UTC()
 	e.fake.SetPR(e.codeRepo, 21, &githubapi.PullRequest{HeadSHA: "sha-c"})
 	e.svc.db.Create(&model.ReviewDebounce{
-		ProjectID: e.project.ID, RepoFullName: e.codeRepo, PRNumber: 21,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: e.codeRepo, PRNumber: 21,
 		HeadSHA: "sha-c", Action: "synchronize", InstallationID: 42,
 		FireAt: now.Add(-time.Second), UpdatedAt: now,
 	})
@@ -154,7 +157,8 @@ func TestReviewSettingsTakenByCodeRepo(t *testing.T) {
 	})
 	now := time.Now().UTC()
 	if err := svc.db.Create(&model.ProjectReviewSettings{
-		ProjectID: otherProject.ID, UserID: other.ID, RepoFullName: "octo/shared", Enabled: true,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     otherProject.ID, UserID: other.ID, RepoFullName: "octo/shared", Enabled: true,
 		CodeCombinationsJSON: "[]", VisualCombinationsJSON: "[]",
 		CreatedAt: now, UpdatedAt: now,
 	}).Error; err != nil {
@@ -212,13 +216,15 @@ func TestSyncPendingPRsFiltersByCodeRepoSnapshot(t *testing.T) {
 		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
 	})
 	e.svc.db.Create(&model.ReviewPullRequest{
-		ProjectID: e.project.ID, RepoFullName: e.codeRepo, PRNumber: 31, UserID: e.user.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: e.codeRepo, PRNumber: 31, UserID: e.user.ID,
 		InstallationID: 1, HeadSHA: "sha-sync", RoundNumber: 1,
 		SyncPending: true, SyncEpoch: 1, UpdatedAt: now,
 	})
 	// 公开仓库的历史账本行也置了 pending：快照不匹配，不该发 GitHub 产出。
 	e.svc.db.Create(&model.ReviewPullRequest{
-		ProjectID: e.project.ID, RepoFullName: e.pubRepo, PRNumber: 32, UserID: e.user.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: e.pubRepo, PRNumber: 32, UserID: e.user.ID,
 		InstallationID: 1, HeadSHA: "sha-old", RoundNumber: 1,
 		SyncPending: true, SyncEpoch: 1, UpdatedAt: now,
 	})
@@ -290,7 +296,8 @@ func TestSyncOnePRGivesUpAfterRepoChanged(t *testing.T) {
 		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
 	})
 	ledger := &model.ReviewPullRequest{
-		ProjectID: e.project.ID, RepoFullName: e.codeRepo, PRNumber: 71, UserID: e.user.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: e.codeRepo, PRNumber: 71, UserID: e.user.ID,
 		InstallationID: 1, HeadSHA: "sha-stale", RoundNumber: 1,
 		SyncPending: true, SyncEpoch: 1, UpdatedAt: now,
 	}
@@ -385,7 +392,8 @@ func TestReviewTakenBySnapshotNotLiveCodeRepo(t *testing.T) {
 	})
 	now := time.Now().UTC()
 	if err := svc.db.Create(&model.ProjectReviewSettings{
-		ProjectID: occupied.ID, UserID: other.ID, RepoFullName: "octo/shared", Enabled: true,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     occupied.ID, UserID: other.ID, RepoFullName: "octo/shared", Enabled: true,
 		CodeCombinationsJSON: "[]", VisualCombinationsJSON: "[]",
 		CreatedAt: now, UpdatedAt: now,
 	}).Error; err != nil {
@@ -445,7 +453,8 @@ func TestSyncPendingPRsUsesSnapshotNotLiveCodeRepo(t *testing.T) {
 		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
 	})
 	e.svc.db.Create(&model.ReviewPullRequest{
-		ProjectID: e.project.ID, RepoFullName: e.codeRepo, PRNumber: 61, UserID: e.user.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: e.codeRepo, PRNumber: 61, UserID: e.user.ID,
 		InstallationID: 1, HeadSHA: "sha-snap", RoundNumber: 1,
 		SyncPending: true, SyncEpoch: 1, UpdatedAt: now,
 	})
@@ -473,7 +482,8 @@ func TestReviewDebounceConsumeUsesSnapshotNotLiveCodeRepo(t *testing.T) {
 	now := time.Now().UTC()
 	e.fake.SetPR(e.codeRepo, 22, &githubapi.PullRequest{HeadSHA: "sha-snap"})
 	if err := e.svc.db.Create(&model.ReviewDebounce{
-		ProjectID: e.project.ID, RepoFullName: e.codeRepo, PRNumber: 22,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: e.codeRepo, PRNumber: 22,
 		HeadSHA: "sha-snap", Action: "synchronize", InstallationID: 42,
 		FireAt: now.Add(-time.Second), UpdatedAt: now,
 	}).Error; err != nil {
@@ -522,7 +532,8 @@ func TestGuardedSyncClientBlocksWritesAfterRepoChanged(t *testing.T) {
 	e := newCodeRepoEnv(t)
 	now := time.Now().UTC()
 	ledger := &model.ReviewPullRequest{
-		ProjectID: e.project.ID, RepoFullName: e.codeRepo, PRNumber: 81, UserID: e.user.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: e.codeRepo, PRNumber: 81, UserID: e.user.ID,
 		InstallationID: 1, HeadSHA: "sha-guard", RoundNumber: 1,
 		SyncPending: true, SyncEpoch: 1, UpdatedAt: now,
 	}
@@ -531,11 +542,11 @@ func TestGuardedSyncClientBlocksWritesAfterRepoChanged(t *testing.T) {
 	}
 
 	client := guardedSyncClient{
-		GitHubClient: e.fake,
+		ReviewClient: forge.NewGitHubReviewClient(e.fake, 1),
 		check:        func() error { return e.review.syncTargetStillCurrent(ledger, 1) },
 	}
 	ctx := context.Background()
-	if err := client.CreateCommitStatus(ctx, 1, e.codeRepo, "sha-guard", "success", "代码审查", "", ""); err != nil {
+	if err := client.CreateCommitStatus(ctx, e.codeRepo, "sha-guard", "success", "代码审查", "", ""); err != nil {
 		t.Fatalf("目标仍有效时写应放行: %v", err)
 	}
 	before := e.fake.TotalCalls()
@@ -547,7 +558,7 @@ func TestGuardedSyncClientBlocksWritesAfterRepoChanged(t *testing.T) {
 		t.Fatalf("update code repo: %v", err)
 	}
 
-	if err := client.CreateCommitStatus(ctx, 1, e.codeRepo, "sha-guard", "success", "代码审查", "", ""); !errors.Is(err, errReviewSyncAbandoned) {
+	if err := client.CreateCommitStatus(ctx, e.codeRepo, "sha-guard", "success", "代码审查", "", ""); !errors.Is(err, errReviewSyncAbandoned) {
 		t.Fatalf("换仓库后写应被拦, err = %v", err)
 	}
 	if e.fake.TotalCalls() != before {
@@ -561,7 +572,8 @@ func TestDoSyncPRStopsBeforeFirstWriteAfterRepoChanged(t *testing.T) {
 	e := newCodeRepoEnv(t)
 	now := time.Now().UTC()
 	ledger := &model.ReviewPullRequest{
-		ProjectID: e.project.ID, RepoFullName: e.codeRepo, PRNumber: 91, UserID: e.user.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: e.codeRepo, PRNumber: 91, UserID: e.user.ID,
 		InstallationID: 1, HeadSHA: "sha-dsync", RoundNumber: 1,
 		SyncPending: true, SyncEpoch: 1, UpdatedAt: now,
 	}

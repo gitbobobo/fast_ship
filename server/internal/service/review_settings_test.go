@@ -39,7 +39,7 @@ func newReviewTestService(t *testing.T, svc *testServices, gh PRGitHubClients, a
 	t.Helper()
 	return NewReviewService(svc.db, svc.projectRepo,
 		repository.NewGitHubWebhookDeliveryRepository(svc.db),
-		NewNotificationSink(svc.db), gh, app, url, nil, nil, nil, svc.cfg, zap.NewNop())
+		NewNotificationSink(svc.db), gh, app, url, nil, nil, nil, repository.NewForgeIntegrationRepository(svc.db), svc.cfg, zap.NewNop())
 }
 
 // readyReviewService 所有前置条件就绪的 ReviewService：App 已配置、安装可达、
@@ -388,7 +388,8 @@ func TestUpdateSettingsDisableCancelsRuns(t *testing.T) {
 	now := time.Now().UTC()
 
 	queued := &model.ReviewRun{
-		ID: uuid.NewString(), UserID: user.ID, ProjectID: project.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ID:            uuid.NewString(), UserID: user.ID, ProjectID: project.ID,
 		Kind: model.ReviewKindCode, RepoFullName: "o/r", PRNumber: 3, HeadSHA: "sha",
 		RoundNumber: 1, EnvironmentID: env.ID, InstanceID: "i", Model: "m",
 		ThreadID: uuid.NewString(), LaunchCommandID: uuid.NewString(), InitialMessageID: uuid.NewString(),
@@ -403,7 +404,8 @@ func TestUpdateSettingsDisableCancelsRuns(t *testing.T) {
 		t.Fatalf("seed token: %v", err)
 	}
 	if err := svc.db.Create(&model.ReviewDebounce{
-		ProjectID: project.ID, RepoFullName: "o/r", PRNumber: 3, HeadSHA: "sha2",
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     project.ID, RepoFullName: "o/r", PRNumber: 3, HeadSHA: "sha2",
 		Action: "synchronize", FireAt: now.Add(time.Hour), UpdatedAt: now,
 	}).Error; err != nil {
 		t.Fatalf("seed debounce: %v", err)
@@ -502,7 +504,9 @@ func TestGetSettings_ForgejoBinding_SkipsGitHubChecks(t *testing.T) {
 
 // TestUpdateSettings_ForgejoBoundInTx_Rejected D：入参侧快照（事务外）还没
 // 有 forgejo 绑定、前置校验与写事务之间项目被并发改绑 → 启用保存 40001 且
-// 点明 Forgejo 暂不支持，设置不落库——重启用竞态由事务内复核关掉。
+// 设置不落库。INT-167 任务 3 起 forgejo 可启用，事务内复核改为校验「绑定的
+// 集成行存在且 kind=forgejo」：并发改绑指向不存在的集成报「集成已失效」，
+// 快照与库内身份不一致由既有的「仓库已变更」复核兜住。
 func TestUpdateSettings_ForgejoBoundInTx_Rejected(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "u1")
@@ -523,8 +527,9 @@ func TestUpdateSettings_ForgejoBoundInTx_Rejected(t *testing.T) {
 	if code := appErrorCode(t, err); code != 40001 {
 		t.Fatalf("code = %d, want 40001 (err=%v)", code, err)
 	}
-	if !strings.Contains(err.Error(), "Forgejo") {
-		t.Fatalf("message = %q, want 点明 Forgejo 暂不支持", err)
+	msg := err.Error()
+	if !strings.Contains(msg, "集成已失效") && !strings.Contains(msg, "仓库已变更") {
+		t.Fatalf("message = %q, want 点明集成失效或仓库已变更", msg)
 	}
 	var n int64
 	svc.db.Model(&model.ProjectReviewSettings{}).

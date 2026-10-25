@@ -8,8 +8,9 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/service"
 )
 
-// ForgeIntegrationHandler 部署级代码仓集成（INT-166）：全部端点挂在管理员组
-// （路由层 RequireJWT + RequireAdmin）。
+// ForgeIntegrationHandler 部署级代码仓集成（INT-166）：除 ListOptions（登录
+// 用户的项目表单选择器数据源）外全部端点挂在管理员组（路由层
+// RequireJWT + RequireAdmin）。
 type ForgeIntegrationHandler struct {
 	svc *service.ForgeIntegrationService
 }
@@ -21,6 +22,17 @@ func NewForgeIntegrationHandler(svc *service.ForgeIntegrationService) *ForgeInte
 // List GET /api/deployment/integrations
 func (h *ForgeIntegrationHandler) List(c *gin.Context) {
 	out, err := h.svc.List(c.Request.Context())
+	if err != nil {
+		middleware.HandleAppError(c, err)
+		return
+	}
+	response.Success(c, out)
+}
+
+// ListOptions GET /api/integrations（INT-167）：登录用户可读的最精简投影，
+// 项目编辑表单的代码仓集成选择器数据源。
+func (h *ForgeIntegrationHandler) ListOptions(c *gin.Context) {
+	out, err := h.svc.ListOptions(c.Request.Context())
 	if err != nil {
 		middleware.HandleAppError(c, err)
 		return

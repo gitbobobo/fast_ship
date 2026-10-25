@@ -14,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
 	"github.com/godbobo/fast_ship/server/internal/config"
+	"github.com/godbobo/fast_ship/server/internal/forge"
 	"github.com/godbobo/fast_ship/server/internal/handler"
 	"github.com/godbobo/fast_ship/server/internal/middleware"
 	"github.com/godbobo/fast_ship/server/internal/model"
@@ -374,23 +375,26 @@ func main() {
 	// PR 审查（INT-135）：webhook 幂等入口 + 审查调度循环（防抖/排队/派发/
 	// 超时/同步/工作区清理）。ghPR 是 App 访问面，App 身份与 public_url
 	// 分别取部署集成与部署设置服务；T3 线程/工作区与截图缓存复用现有服务。
-	// 截图下载的 App 令牌来源：真实客户端经 InstallationTokenStore 取安装
-	// bearer；fake/不支持凭证的实现保持匿名（返回空串）。
-	mediaBearer := func(ctx context.Context, installationID int64) (string, error) {
-		client, err := ghPR.ClientFor(ctx)
+	// 截图下载的令牌来源（INT-167）：按运行/设置的集成身份解析审查客户端，
+	// 再向支持凭证的实现取 bearer——GitHub 是安装令牌，Forgejo 是机器人 PAT
+	// （经 forgeSource 现取，review_assets 只对 GitHub 实例的附件路径使用）；
+	// fake/不支持凭证的实现保持匿名（返回空串）。
+	forgeSource := service.NewForgeClientSource(forgeIntegrationRepo, cfg, reviewLogger)
+	reviewClients := forge.NewReviewClients(ghPR, forgeSource)
+	mediaBearer := func(ctx context.Context, integrationID string, installationID int64) (string, error) {
+		client, err := reviewClients.ClientFor(ctx, integrationID, "", installationID)
 		if err != nil {
 			return "", err
 		}
-		source, ok := client.(interface {
-			Bearer(context.Context, int64) (string, error)
-		})
+		source, ok := client.(forge.BearerSource)
 		if !ok {
 			return "", nil
 		}
-		return source.Bearer(ctx, installationID)
+		return source.Bearer(ctx)
 	}
 	reviewService := service.NewReviewService(db, projectRepo, webhookDeliveryRepo, notificationSink,
-		ghPR, integrationService, deploymentSettingsService, t3ThreadsService, reviewMediaService, mediaBearer, cfg, reviewLogger)
+		ghPR, integrationService, deploymentSettingsService, t3ThreadsService, reviewMediaService, mediaBearer,
+		forgeIntegrationRepo, cfg, reviewLogger)
 	// 删除项目会 CASCADE 掉审查运行行，先让审查服务尽力停线程/归档/回收工作区。
 	projectService.SetReviewCleaner(reviewService)
 	reviewService.Start()
@@ -428,6 +432,9 @@ func main() {
 		webhookSecrets = handler.StaticWebhookSecret(cfg.GitHubApp.WebhookSecret)
 	}
 	githubWebhookHandler := handler.NewGitHubWebhookHandler(reviewService, webhookSecrets, ghFake)
+	// Forgejo webhook（INT-167 任务 3）：按集成行的 webhook secret 验签，同一
+	// 凭证来源现取（forgeSource），集成密钥保存后立即生效。
+	forgeWebhookHandler := handler.NewForgeWebhookHandler(reviewService, forgeSource)
 	quotaHandler := handler.NewQuotaHandler(quotaService)
 	deploymentGitHubAppHandler := handler.NewDeploymentGitHubAppHandler(integrationService, manifestService)
 	memberHandler := handler.NewMemberHandler(memberService)
@@ -507,7 +514,7 @@ func main() {
 	r.MaxMultipartMemory = uploadMultipartMemoryLimit(cfg.Upload.MaxFileSize)
 
 	// 注册路由
-	router.Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, githubTokenHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, screenshotAnnotationHandler, mediaProxyHandler, t3EnvironmentHandler, t3BindingHandler, notificationHandler, reviewHandler, reviewAgentHandler, reviewService, botHandler, aiProviderHandler, selfLogHandler, githubWebhookHandler, quotaHandler, deploymentGitHubAppHandler, memberHandler, deploymentSettingsHandler, forgeIntegrationHandler, authService, apiKeyRepo)
+	router.Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, githubTokenHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, screenshotAnnotationHandler, mediaProxyHandler, t3EnvironmentHandler, t3BindingHandler, notificationHandler, reviewHandler, reviewAgentHandler, reviewService, botHandler, aiProviderHandler, selfLogHandler, githubWebhookHandler, forgeWebhookHandler, quotaHandler, deploymentGitHubAppHandler, memberHandler, deploymentSettingsHandler, forgeIntegrationHandler, authService, apiKeyRepo)
 
 	// 启动服务。ReadHeaderTimeout 挡慢速请求头长期占连接；不设 Read/WriteTimeout
 	// 保住上传/下载/媒体代理等长传输；IdleTimeout 回收 keep-alive 空闲连接。
@@ -575,6 +582,13 @@ func runBootMigrations(db *gorm.DB, fileStorage storage.Storage, logger *zap.Log
 	// 必须在 AutoMigrate 之前执行，避免旧模型外键/索引干扰新表。
 	if err := migrateReviewTables(db, logger); err != nil {
 		return fmt.Errorf("审查表切换迁移失败: %w", err)
+	}
+
+	// 审查表加 integration_id 维度（INT-167）：键表整表重建（SQLite 不能 ALTER
+	// 主键）、非键表加列回填，必须在 AutoMigrate 之前——重建出的就是新结构，
+	// AutoMigrate 只补普通索引。
+	if err := migrateReviewIntegrationIDs(db, logger); err != nil {
+		return fmt.Errorf("审查表 integration_id 迁移失败: %w", err)
 	}
 
 	// 用户级 integrations 表删除（INT-129 B 轮）：GitHub App 身份改为部署级
@@ -706,19 +720,37 @@ func createBootIndexes(db *gorm.DB) error {
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_review_runs_pr_head ON review_runs(project_id, repo_full_name, pr_number, head_sha)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_review_runs_user_created ON review_runs(user_id, created_at DESC)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_review_runs_active_deadline ON review_runs(deadline_at) WHERE status IN ('dispatched', 'running')")
-	// 组合幂等唯一索引列定义历经两次演变（补 round_number、补 environment_id），
-	// 只能 DROP 重建：同模型不同环境是合法的不同组合，旧键缺 environment_id
-	// 会把它们静默吞掉（DoNothing 当幂等命中）。
+	// 组合幂等唯一索引列定义历经三次演变（补 round_number、补 environment_id、
+	// 补 integration_id），只能 DROP 重建：同模型不同环境是合法的不同组合，
+	// 同名仓库跨集成也是不同组合，旧键缺列会把它们静默吞掉（DoNothing 当幂等命中）。
 	db.Exec("DROP INDEX IF EXISTS idx_review_runs_combination")
 	db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_review_runs_combination
-	ON review_runs(project_id, repo_full_name, pr_number, head_sha, round_number, kind, environment_id, instance_id, model, model_options_json)`)
+	ON review_runs(project_id, integration_id, repo_full_name, pr_number, head_sha, round_number, kind, environment_id, instance_id, model, model_options_json)`)
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_review_pull_requests_project_updated ON review_pull_requests(project_id, updated_at DESC)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_review_pull_requests_sync_pending ON review_pull_requests(sync_pending) WHERE sync_pending = 1")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_review_debounces_fire ON review_debounces(fire_at)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_project_review_settings_user ON project_review_settings(user_id)")
-	// 同一仓库只允许一个项目开启审查（开轮/同步按仓库反查唯一项目的前提）：
-	// 设置保存时先在事务内检查并返回 40922，这条部分唯一索引兜并发竞态。
-	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_project_review_settings_repo ON project_review_settings(repo_full_name) WHERE enabled = 1")
+	// 同一集成内的同一仓库只允许一个项目开启审查（开轮/同步按集成+仓库反查
+	// 唯一项目的前提）：设置保存时先在事务内检查并返回 40922，这条部分唯一
+	// 索引兜并发竞态。integration_id 键首（INT-167）：同名仓库在 GitHub 与
+	// Forgejo 两个集成下可各自被一个项目启用。列定义历经一次演变（旧定义不
+	// 带 integration_id），参照 idx_forge_integrations_host_key 的 sqlite_master
+	// 存稿比对模式：与期望定义不等才 DROP 重建，当期定义跳过。
+	const reviewRepoIndexSQL = "CREATE UNIQUE INDEX IF NOT EXISTS idx_project_review_settings_repo ON project_review_settings(integration_id, repo_full_name) WHERE enabled = 1"
+	var reviewRepoIdxDef []struct {
+		SQL string `gorm:"column:sql"`
+	}
+	if err := db.Raw("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_project_review_settings_repo'").Scan(&reviewRepoIdxDef).Error; err != nil {
+		return fmt.Errorf("读取 idx_project_review_settings_repo 定义失败: %w", err)
+	}
+	if len(reviewRepoIdxDef) > 0 && reviewRepoIdxDef[0].SQL != strings.Replace(reviewRepoIndexSQL, " IF NOT EXISTS", "", 1) {
+		if err := db.Exec("DROP INDEX IF EXISTS idx_project_review_settings_repo").Error; err != nil {
+			return fmt.Errorf("重建 idx_project_review_settings_repo 失败: %w", err)
+		}
+	}
+	if err := db.Exec(reviewRepoIndexSQL).Error; err != nil {
+		return fmt.Errorf("创建 idx_project_review_settings_repo 失败: %w", err)
+	}
 	// 同归一主机只允许一条 forgejo 集成（INT-166）：保存时 service 层先查重
 	// 并返回带集成名的 40001（idx_forge_integrations_host_key 的归一键在 SQL
 	// 里算不出来），这条部分唯一索引兜查重通过后同主机被并发抢注的窗口；
@@ -745,7 +777,8 @@ func createBootIndexes(db *gorm.DB) error {
 		return fmt.Errorf("创建 idx_forge_integrations_host_key 失败: %w", err)
 	}
 	// 截图源地址唯一索引由 model.ReviewAsset 的 uniqueIndex 标签随 AutoMigrate
-	// 建出（idx_review_assets_source）；按 (repo, pr, head) 的查询也走它的前缀。
+	// 建出（idx_review_assets_source，integration_id 键首）；按 (repo, pr, head)
+	// 的查询走它的第二段前缀。
 	db.Exec("DROP INDEX IF EXISTS idx_review_assets_pr_head")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_notifications_user_dedup ON notifications(user_id, dedup_key)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_notifications_user_updated ON notifications(user_id, updated_at DESC, id)")

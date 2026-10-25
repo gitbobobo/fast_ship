@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/godbobo/fast_ship/server/internal/forge"
 	"github.com/godbobo/fast_ship/server/internal/githubapi"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/githubapp"
@@ -332,7 +333,9 @@ func (p *redeliveryPRProbe) lookup(ctx context.Context, deliveryID int64) (redel
 	if err != nil {
 		return check, err
 	}
-	reviewable := prReviewable(pr)
+	// 重投是 GitHub 专属路径（deliveries API 不在 forge.ReviewClient 方法面），
+	// 实况判定与审查链路同一口径：经共享转换后复用 prReviewable。
+	reviewable := prReviewable(forge.PullRequestFromGitHub(pr))
 	p.prStates[key] = reviewable
 	check.Known, check.Reviewable = true, reviewable
 	return check, nil

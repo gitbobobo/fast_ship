@@ -1,0 +1,404 @@
+package forge
+
+import (
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+)
+
+// Forgejo 适配器（INT-167 任务 3）httptest 定向测试：每方法 happy path +
+// 关键字段映射 + 404→IsNotFound + status description 255 rune 截断 + Bearer。
+// 适配器直连 httptest（不经过 service 侧的 SSRF client 构建），这里验证的是
+// 请求形状与响应映射。
+
+// newForgejoTestClient 起 httptest 服务并返回适配器；handler 记录最近一次
+// 请求供断言（method/path/Authorization/body）。
+type forgejoServeLog struct {
+	method string
+	path   string
+	auth   string
+	body   []byte
+}
+
+func newForgejoTestClient(t *testing.T, handler http.HandlerFunc) (*ForgejoReviewClient, *[]forgejoServeLog) {
+	t.Helper()
+	logs := &[]forgejoServeLog{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body []byte
+		if r.Body != nil {
+			body, _ = io.ReadAll(r.Body)
+		}
+		*logs = append(*logs, forgejoServeLog{method: r.Method, path: r.URL.RequestURI(), auth: r.Header.Get("Authorization"), body: body})
+		handler(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	return NewForgejoReviewClient(srv.Client(), srv.URL+"/api/v1", "pat-123"), logs
+}
+
+func lastServeLog(t *testing.T, logs *[]forgejoServeLog) forgejoServeLog {
+	t.Helper()
+	if n := len(*logs); n > 0 {
+		return (*logs)[n-1]
+	}
+	t.Fatal("没有请求发出")
+	return forgejoServeLog{}
+}
+
+func jsonBody(t *testing.T, raw []byte) map[string]any {
+	t.Helper()
+	var out map[string]any
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatalf("请求体不是 JSON: %v (%s)", err, raw)
+	}
+	return out
+}
+
+func TestForgejoClient_GetPullRequest(t *testing.T) {
+	client, logs := newForgejoTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"number": 7, "title": "T", "body": "B", "state": "open",
+			"html_url": "https://forge.example.com/o/r/pulls/7",
+			"merged": false, "merged_at": null,
+			"closed_at": "2026-01-02T03:04:05Z",
+			"head": {"ref": "feat", "sha": "abc", "repo": {"full_name": "o/r", "fork": false}},
+			"base": {"ref": "main", "repo": {"full_name": "o/r"}},
+			"user": {"login": "bot"}
+		}`))
+	})
+	pr, err := client.GetPullRequest(context.Background(), "o/r", 7)
+	if err != nil {
+		t.Fatalf("GetPullRequest: %v", err)
+	}
+	if pr.Number != 7 || pr.Title != "T" || pr.HeadSHA != "abc" || pr.HeadRef != "feat" ||
+		pr.BaseRef != "main" || pr.RepoFullName != "o/r" || pr.AuthorLogin != "bot" {
+		t.Fatalf("映射不符: %+v", pr)
+	}
+	if pr.ClosedAt == nil || pr.MergedAt != nil {
+		t.Fatalf("时间映射不符: %+v", pr)
+	}
+	got := lastServeLog(t, logs)
+	if got.method != http.MethodGet || got.path != "/api/v1/repos/o/r/pulls/7" {
+		t.Fatalf("请求形状: %s %s", got.method, got.path)
+	}
+	if got.auth != "token pat-123" {
+		t.Fatalf("认证头 = %q, want token pat-123", got.auth)
+	}
+}
+
+func TestForgejoClient_GetPullRequestDiff(t *testing.T) {
+	client, logs := newForgejoTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = w.Write([]byte("diff --git a/f b/f\n"))
+	})
+	diff, err := client.GetPullRequestDiff(context.Background(), "o/r", 3)
+	if err != nil || !strings.HasPrefix(diff, "diff --git a/f b/f") {
+		t.Fatalf("diff = %q, %v", diff, err)
+	}
+	got := lastServeLog(t, logs)
+	if got.path != "/api/v1/repos/o/r/pulls/3.diff" || got.auth != "token pat-123" {
+		t.Fatalf("请求形状: %s %s %q", got.method, got.path, got.auth)
+	}
+}
+
+func TestForgejoClient_CommentsRoundTrip(t *testing.T) {
+	// 顶层评论：issue comments 端点 + PATCH /issues/comments/{id}。
+	client, logs := newForgejoTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Query().Get("page") != "" && r.URL.Query().Get("page") != "1":
+			_, _ = w.Write([]byte(`[]`))
+		case strings.HasSuffix(r.URL.Path, "/comments") && r.Method == http.MethodGet:
+			_, _ = w.Write([]byte(`[{"id": 11, "body": "hi", "user": {"login": "u"}, "created_at": "2026-01-02T03:04:05Z"}]`))
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/comments"):
+			_, _ = w.Write([]byte(`{"id": 22}`))
+		case r.Method == http.MethodPatch:
+			_, _ = w.Write([]byte(`{"id": 22}`))
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	ctx := context.Background()
+	comments, err := client.ListIssueCommentsForPR(ctx, "o/r", 5)
+	if err != nil || len(comments) != 1 || comments[0].ID != 11 || comments[0].User != "u" {
+		t.Fatalf("ListIssueCommentsForPR = %+v, %v", comments, err)
+	}
+	id, err := client.CreatePullRequestComment(ctx, "o/r", 5, "body")
+	if err != nil || id != 22 {
+		t.Fatalf("CreatePullRequestComment = %d, %v", id, err)
+	}
+	log := lastServeLog(t, logs)
+	if log.path != "/api/v1/repos/o/r/issues/5/comments" {
+		t.Fatalf("create path = %s", log.path)
+	}
+	if got := jsonBody(t, log.body); got["body"] != "body" {
+		t.Fatalf("create body = %v", got)
+	}
+	if err := client.UpdatePullRequestComment(ctx, "o/r", 22, "v2"); err != nil {
+		t.Fatalf("UpdatePullRequestComment: %v", err)
+	}
+	log = lastServeLog(t, logs)
+	if log.method != http.MethodPatch || log.path != "/api/v1/repos/o/r/issues/comments/22" {
+		t.Fatalf("update 形状: %s %s", log.method, log.path)
+	}
+}
+
+// TestForgejoClient_FindPullRequestComment 认自己的评论：先 GET /user 学到
+// PAT 所属账号，再按「作者 == 自己 + marker 前缀」命中；用户评论引用 marker
+// 不算。
+func TestForgejoClient_FindPullRequestComment(t *testing.T) {
+	client, logs := newForgejoTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Query().Get("page") != "" && r.URL.Query().Get("page") != "1":
+			_, _ = w.Write([]byte(`[]`))
+		case r.URL.Path == "/api/v1/user":
+			_, _ = w.Write([]byte(`{"login": "fast-ship-bot"}`))
+		case strings.HasSuffix(r.URL.Path, "/comments"):
+			_, _ = w.Write([]byte(`[
+				{"id": 1, "body": "<!-- fast-ship-code-review --> 冒充", "user": {"login": "mallory"}},
+				{"id": 2, "body": "<!-- fast-ship-code-review --> 真身", "user": {"login": "fast-ship-bot"}}
+			]`))
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	id, found, err := client.FindPullRequestComment(context.Background(), "o/r", 5, "<!-- fast-ship-code-review -->")
+	if err != nil || !found || id != 2 {
+		t.Fatalf("FindPullRequestComment = (%d,%v,%v), want (2,true,nil)", id, found, err)
+	}
+	first := (*logs)[0]
+	if first.path != "/api/v1/user" {
+		t.Fatalf("第一请求应先学账号, got %s", first.path)
+	}
+}
+
+func TestForgejoClient_ListReviewsAndComments(t *testing.T) {
+	// ListReviews 映射 id/commit_id/state/submitted_at；ListReviewComments 经
+	// review 列表逐个取 comments 展平。
+	client, logs := newForgejoTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Query().Get("page") != "" && r.URL.Query().Get("page") != "1":
+			_, _ = w.Write([]byte(`[]`))
+		case strings.HasSuffix(r.URL.Path, "/reviews") && r.Method == http.MethodGet:
+			_, _ = w.Write([]byte(`[{"id": 9, "body": "r", "state": "COMMENT", "commit_id": "abc", "submitted_at": "2026-01-02T03:04:05Z", "user": {"login": "bot"}}]`))
+		case strings.Contains(r.URL.Path, "/reviews/9/comments"):
+			_, _ = w.Write([]byte(`[{"id": 31, "body": "n", "path": "a.go", "user": {"login": "bot"}, "created_at": "2026-01-02T03:04:06Z"}]`))
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	ctx := context.Background()
+	reviews, err := client.ListReviews(ctx, "o/r", 4)
+	if err != nil || len(reviews) != 1 {
+		t.Fatalf("ListReviews = %+v, %v", reviews, err)
+	}
+	if reviews[0].ID != 9 || reviews[0].CommitID != "abc" || reviews[0].State != "COMMENT" || reviews[0].CreatedAt.IsZero() {
+		t.Fatalf("review 映射不符: %+v", reviews[0])
+	}
+	comments, err := client.ListReviewComments(ctx, "o/r", 4)
+	if err != nil || len(comments) != 1 {
+		t.Fatalf("ListReviewComments = %+v, %v", comments, err)
+	}
+	if comments[0].ID != 31 || comments[0].Path != "a.go" || comments[0].InReplyToID != nil {
+		t.Fatalf("行内评论映射不符: %+v", comments[0])
+	}
+	// 请求序列：ListReviews 数据页 + 空页探测，ListReviewComments（review
+	// 列表重查数据页 + 空页探测 + review 9 的 comments）。
+	if len(*logs) != 5 {
+		t.Fatalf("请求数 = %d, want 5", len(*logs))
+	}
+	paths := []string{(*logs)[0].path, (*logs)[1].path, (*logs)[2].path, (*logs)[3].path, (*logs)[4].path}
+	if paths[0] != "/api/v1/repos/o/r/pulls/4/reviews?limit=50&page=1" ||
+		paths[1] != "/api/v1/repos/o/r/pulls/4/reviews?limit=50&page=2" ||
+		paths[2] != "/api/v1/repos/o/r/pulls/4/reviews?limit=50&page=1" ||
+		paths[3] != "/api/v1/repos/o/r/pulls/4/reviews?limit=50&page=2" ||
+		paths[4] != "/api/v1/repos/o/r/pulls/4/reviews/9/comments" {
+		t.Fatalf("请求顺序: %v", paths)
+	}
+}
+
+// TestForgejoClient_SubmitReview 行内评论映射：RIGHT→new_position（缺省侧同）、
+// LEFT→old_position；commit_id 与 event/body 原样带上。
+func TestForgejoClient_SubmitReview(t *testing.T) {
+	client, logs := newForgejoTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"id": 77}`))
+	})
+	id, err := client.SubmitReview(context.Background(), "o/r", 4, ReviewInput{
+		Event: "COMMENT", Body: "结论", CommitID: "abc",
+		Comments: []ReviewInlineComment{
+			{Path: "a.go", Line: 12, Side: "RIGHT", Body: "n1"},
+			{Path: "b.go", Line: 3, Side: "LEFT", Body: "n2"},
+		},
+	})
+	if err != nil || id != 77 {
+		t.Fatalf("SubmitReview = %d, %v", id, err)
+	}
+	log := lastServeLog(t, logs)
+	if log.path != "/api/v1/repos/o/r/pulls/4/reviews" || log.method != http.MethodPost {
+		t.Fatalf("形状: %s %s", log.method, log.path)
+	}
+	got := jsonBody(t, log.body)
+	if got["event"] != "COMMENT" || got["commit_id"] != "abc" {
+		t.Fatalf("顶层字段: %v", got)
+	}
+	lines, ok := got["comments"].([]any)
+	if !ok || len(lines) != 2 {
+		t.Fatalf("comments = %v", got["comments"])
+	}
+	first := lines[0].(map[string]any)
+	second := lines[1].(map[string]any)
+	if first["new_position"] != float64(12) || first["path"] != "a.go" {
+		t.Fatalf("RIGHT 行映射: %v", first)
+	}
+	if second["old_position"] != float64(3) || second["path"] != "b.go" {
+		t.Fatalf("LEFT 行映射: %v", second)
+	}
+}
+
+// TestForgejoClient_CommitStatusTruncatesDescription description 按 rune 截断
+// 到 255（Gitea CreateStatusOption MaxSize(255)，超出整单 422）。
+func TestForgejoClient_CommitStatusTruncatesDescription(t *testing.T) {
+	client, logs := newForgejoTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+	})
+	long := strings.Repeat("好", 300) + "tail"
+	if err := client.CreateCommitStatus(context.Background(), "o/r", "abc", "success",
+		"代码审查", long, "https://fs.example.com"); err != nil {
+		t.Fatalf("CreateCommitStatus: %v", err)
+	}
+	got := jsonBody(t, lastServeLog(t, logs).body)
+	desc, _ := got["description"].(string)
+	if runeCount := len([]rune(desc)); runeCount != 255 {
+		t.Fatalf("description rune 数 = %d, want 255", runeCount)
+	}
+	if !strings.HasSuffix(desc, "好") {
+		t.Fatal("应按 rune 截断（不留半字符）")
+	}
+	if got["state"] != "success" || got["context"] != "代码审查" || got["target_url"] == "" {
+		t.Fatalf("其余字段: %v", got)
+	}
+}
+
+func TestForgejoClient_GetRepository(t *testing.T) {
+	client, logs := newForgejoTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"full_name": "o/r"}`))
+	})
+	if err := client.GetRepository(context.Background(), "o/r"); err != nil {
+		t.Fatalf("GetRepository: %v", err)
+	}
+	if got := lastServeLog(t, logs); got.path != "/api/v1/repos/o/r" {
+		t.Fatalf("path = %s", got.path)
+	}
+}
+
+// TestForgejoClient_ListOpenPullRequests open PR 枚举：fork head 与已删 fork
+// （head 缺失）的 PR 跳过，同仓库分支保留且映射完整。
+func TestForgejoClient_ListOpenPullRequests(t *testing.T) {
+	client, logs := newForgejoTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("state") != "open" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.URL.Query().Get("page") != "1" {
+			_, _ = w.Write([]byte(`[]`))
+			return
+		}
+		_, _ = w.Write([]byte(`[
+			{"number": 1, "title": "same", "head": {"sha": "s1", "ref": "f1", "repo": {"full_name": "o/r", "fork": false}}, "base": {"ref": "main", "repo": {"full_name": "o/r"}}},
+			{"number": 2, "title": "fork", "head": {"sha": "s2", "ref": "f2", "repo": {"full_name": "o/other", "fork": true}}, "base": {"ref": "main", "repo": {"full_name": "o/r"}}},
+			{"number": 3, "title": "deleted-fork", "head": {"sha": "s3", "ref": "f3"}},
+			{"number": 4, "title": "case", "head": {"sha": "s4", "ref": "f4", "repo": {"full_name": "O/R", "fork": false}}, "base": {"ref": "main", "repo": {"full_name": "o/r"}}}
+		]`))
+	})
+	prs, err := client.ListOpenPullRequests(context.Background(), "o/r")
+	if err != nil {
+		t.Fatalf("ListOpenPullRequests: %v", err)
+	}
+	if len(prs) != 2 || prs[0].Number != 1 || prs[1].Number != 4 {
+		t.Fatalf("应只剩同仓库分支 1/4: %+v", prs)
+	}
+	if prs[0].RepoFullName != "o/r" || prs[0].HeadSHA != "s1" {
+		t.Fatalf("映射不符: %+v", prs[0])
+	}
+	got := (*logs)[0]
+	if got.path != "/api/v1/repos/o/r/pulls?state=open&limit=50&page=1" {
+		t.Fatalf("请求形状: %s", got.path)
+	}
+}
+
+// TestForgejoClient_StatusErrors 404 → IsNotFound 命中（forge.StatusError 形态）；
+// 403 → IsForbidden；错误文案含方法与状态码。
+func TestForgejoClient_StatusErrors(t *testing.T) {
+	client, _ := newForgejoTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/repos/o/r/pulls/404":
+			http.NotFound(w, r)
+		case "/api/v1/repos/o/r":
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"message": "no access"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	ctx := context.Background()
+	_, err := client.GetPullRequest(ctx, "o/r", 404)
+	if !IsNotFound(err) {
+		t.Fatalf("404 应命中 IsNotFound, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "404") {
+		t.Fatalf("错误文案缺状态码: %v", err)
+	}
+	if err := client.GetRepository(ctx, "o/r"); !IsForbidden(err) {
+		t.Fatalf("403 应命中 IsForbidden, got %v", err)
+	}
+}
+
+// TestForgejoClient_Pagination 分页到空页止：服务端按部署 MaxResponseItems
+// 收缩实际页大小（每页 20 条、不足 limit=50 也要继续翻），结果按序拼接；
+// 空页才停。
+func TestForgejoClient_Pagination(t *testing.T) {
+	client, logs := newForgejoTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("page") {
+		case "1", "2":
+			items := strings.TrimSpace(strings.Repeat(`{"id": 1, "body": "b", "user": {"login": "u"}},`, 20))
+			items = strings.TrimSuffix(items, ",")
+			_, _ = w.Write([]byte("[" + items + "]"))
+		default:
+			_, _ = w.Write([]byte(`[]`))
+		}
+	})
+	comments, err := client.ListIssueCommentsForPR(context.Background(), "o/r", 5)
+	if err != nil || len(comments) != 40 {
+		t.Fatalf("comments = %d, %v, want 40（缩页不得截断后续页）", len(comments), err)
+	}
+	if n := len(*logs); n != 3 {
+		t.Fatalf("请求数 = %d, want 3（两页数据 + 一页空页）", n)
+	}
+}
+
+func TestForgejoClient_KindAndBearer(t *testing.T) {
+	client, _ := newForgejoTestClient(t, func(w http.ResponseWriter, r *http.Request) {})
+	if client.Kind() != KindForgejo {
+		t.Fatalf("Kind = %q", client.Kind())
+	}
+	tok, err := client.Bearer(context.Background())
+	if err != nil || tok != "pat-123" {
+		t.Fatalf("Bearer = (%q,%v), want (pat-123,nil)", tok, err)
+	}
+}
+
+// TestForgejoClient_InvalidRepoName 非法仓库名在发出请求前报错。
+func TestForgejoClient_InvalidRepoName(t *testing.T) {
+	client, logs := newForgejoTestClient(t, func(w http.ResponseWriter, r *http.Request) {})
+	for _, repo := range []string{"", "o", "o/r/e"} {
+		if _, err := client.GetPullRequest(context.Background(), repo, 1); err == nil {
+			t.Fatalf("repo=%q 应报错", repo)
+		}
+	}
+	if len(*logs) != 0 {
+		t.Fatal("非法仓库名不应发出请求")
+	}
+}

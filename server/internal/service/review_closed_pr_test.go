@@ -19,7 +19,8 @@ import (
 func seedClosedDebounce(t *testing.T, e *reviewEngineEnv, repo string, pr int, head string, now time.Time) {
 	t.Helper()
 	if err := e.svc.db.Create(&model.ReviewDebounce{
-		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: pr,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: repo, PRNumber: pr,
 		HeadSHA: head, Action: "synchronize", InstallationID: 42,
 		PRTitle: "t", PRURL: "u", BaseRef: "main", HeadRef: "feature",
 		FireAt: now.Add(-time.Second), UpdatedAt: now.Add(-time.Minute),
@@ -142,7 +143,8 @@ func TestReviewClosedDispatchCancelsRun(t *testing.T) {
 		HeadSHA: "sha-c54", Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
 	})
 	e.svc.db.Create(&model.ReviewPullRequest{
-		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 54, UserID: e.user.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: repo, PRNumber: 54, UserID: e.user.ID,
 		InstallationID: 42, HeadSHA: "sha-c54", RoundNumber: 1, UpdatedAt: now,
 	})
 
@@ -233,7 +235,8 @@ func TestReviewClosedSyncWritesNothing(t *testing.T) {
 		HeadSHA: "sha-c56", Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
 	})
 	e.svc.db.Create(&model.ReviewPullRequest{
-		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 56, UserID: e.user.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: repo, PRNumber: 56, UserID: e.user.ID,
 		InstallationID: 1, HeadSHA: "sha-c56", RoundNumber: 1,
 		SyncPending: true, SyncEpoch: 1, SyncError: "上一次同步失败：github 502", UpdatedAt: now,
 	})
@@ -311,7 +314,8 @@ func TestReviewClosedResultSuperseded(t *testing.T) {
 		HeadSHA: "sha-c58", Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
 	})
 	e.svc.db.Create(&model.ReviewPullRequest{
-		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 58, UserID: e.user.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: repo, PRNumber: 58, UserID: e.user.ID,
 		HeadSHA: "sha-c58", RoundNumber: 1, UpdatedAt: now,
 	})
 	run := e.seedRun(t, repo, 58, "sha-c58", model.ReviewRunRunning, now)

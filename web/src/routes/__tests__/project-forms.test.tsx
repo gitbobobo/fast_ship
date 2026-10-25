@@ -276,7 +276,7 @@ describe("ProjectAndVersionForms", () => {
       "liuyincs/musiver",
     );
     await user.type(
-      screen.getByLabelText("代码仓库（可选，默认同公开仓库）"),
+      screen.getByLabelText(/owner \/ repo/),
       "gitbobobo/musiver",
     );
     await user.click(screen.getByRole("button", { name: "创建项目" }));
@@ -303,8 +303,9 @@ describe("ProjectAndVersionForms", () => {
       { path: "/projects", initialEntry: "/projects" },
     );
 
-    const input = screen.getByLabelText("代码仓库（可选，默认同公开仓库）");
-    expect(input).toHaveValue("https://github.com/code-owner/code-repo");
+    // 回填的是剥掉主机的 owner/repo slug（集成选择器单独回填）。
+    const input = screen.getByLabelText(/owner \/ repo/);
+    expect(input).toHaveValue("code-owner/code-repo");
 
     await user.clear(input);
     await user.click(screen.getByRole("button", { name: "保存" }));
@@ -315,7 +316,7 @@ describe("ProjectAndVersionForms", () => {
     ).toBeNull();
   });
 
-  it("edit form sends unparseable code repository to the server instead of dropping it", async () => {
+  it("edit form blocks unparseable code repository with a field error", async () => {
     const user = userEvent.setup();
 
     renderWithRoute(
@@ -328,17 +329,17 @@ describe("ProjectAndVersionForms", () => {
       { path: "/projects", initialEntry: "/projects" },
     );
 
-    // 宽松解析会得到空 owner/repo：不能当成「未改动」而省略 key（否则服务端
-    // 的格式校验被绕过，输入被静默丢弃），必须原样发出去交给服务端报 40001。
-    const input = screen.getByLabelText("代码仓库（可选，默认同公开仓库）");
+    // INT-167 起合成 owner/repo 失败在表单内报错拦截：不静默丢弃，也不再
+    // 把无法归一的输入透传给服务端（集成化后前端握有合成所需的主机）。
+    const input = screen.getByLabelText(/owner \/ repo/);
     await user.clear(input);
     await user.type(input, "https://github.com/");
     await user.click(screen.getByRole("button", { name: "保存" }));
 
-    await waitFor(() => expect(updateProjectMutateAsync).toHaveBeenCalled());
-    expect(
-      updateProjectMutateAsync.mock.calls[0][0].code_repository_url,
-    ).toBe("https://github.com/");
+    await waitFor(() =>
+      expect(screen.getByText(/格式：owner\/repo/)).toBeInTheDocument(),
+    );
+    expect(updateProjectMutateAsync).not.toHaveBeenCalled();
   });
 
   it("edit form leaves code repository out of payload when untouched", async () => {
@@ -396,8 +397,10 @@ describe("ProjectAndVersionForms", () => {
       { path: "/projects", initialEntry: "/projects" },
     );
 
-    const input = screen.getByLabelText("代码仓库（可选，默认同公开仓库）");
-    expect(input).toHaveValue("https://git.example.com/acme/app");
+    // 回填剥主机的 slug；mock 项目 code_integration_id 为空 → 选择器按内置
+    // github-default 合成裸 slug。
+    const input = screen.getByLabelText(/owner \/ repo/);
+    expect(input).toHaveValue("acme/app");
     await user.clear(input);
     await user.type(input, "acme/app"); // 裸形态 = github.com 上的同名仓库
     await user.click(screen.getByRole("button", { name: "保存" }));
@@ -422,7 +425,7 @@ describe("ProjectAndVersionForms", () => {
     );
 
     // 解析后 owner/repo 相同（大小写、写法不同）不算变更，不产生多余提交。
-    const input = screen.getByLabelText("代码仓库（可选，默认同公开仓库）");
+    const input = screen.getByLabelText(/owner \/ repo/);
     await user.clear(input);
     await user.type(input, "CODE-OWNER/Code-Repo");
     await user.click(screen.getByRole("button", { name: "保存" }));

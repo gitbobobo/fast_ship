@@ -280,11 +280,19 @@ func (r *ProjectRepository) Update(project *model.Project) error {
 			if reviewRepoChanged {
 				reviewOwner, reviewRepo := project.CodeRepo()
 				now := time.Now().UTC()
+				// integration_id 与 repo_full_name 快照同点刷新：写入侧归一
+				// （空绑定 = 内置 github-default），占用/反查/同步都以这对键
+				// 判定，不能留旧集成的值。
+				reviewIntegration := project.CodeIntegrationID
+				if reviewIntegration == "" {
+					reviewIntegration = model.ForgeIntegrationBuiltinGitHubID
+				}
 				if err := tx.Model(&model.ProjectReviewSettings{}).
 					Where("project_id = ?", project.ID).
 					Updates(map[string]interface{}{
 						"enabled":        false,
 						"repo_full_name": strings.ToLower(reviewOwner + "/" + reviewRepo),
+						"integration_id": reviewIntegration,
 						"updated_at":     now,
 					}).Error; err != nil {
 					return err

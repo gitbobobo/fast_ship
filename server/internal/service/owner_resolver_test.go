@@ -194,6 +194,7 @@ func createReviewRunForUser(t *testing.T, db *gorm.DB, userID string) *model.Rev
 	now := time.Now().UTC()
 	project := createTestProject(t, db, userID)
 	run := &model.ReviewRun{
+		IntegrationID:    model.ForgeIntegrationBuiltinGitHubID,
 		ID:               uuid.NewString(),
 		UserID:           userID,
 		ProjectID:        project.ID,

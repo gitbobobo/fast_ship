@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { codeRepoUrlForInput, normalizeCodeRepoRef } from "./github";
+import {
+  codeRepoSlugFromSaved,
+  codeRepoUrlFromSlug,
+  normalizeCodeRepoRef,
+  ownerRepoFromInput,
+} from "./github";
 
 describe("normalizeCodeRepoRef", () => {
   it("scheme 有无与大小写、尾斜杠、.git 后缀都是同一形态（与后端 parseRepositoryURL 同口径）", () => {
@@ -136,25 +141,108 @@ describe("normalizeCodeRepoRef", () => {
   });
 });
 
-describe("codeRepoUrlForInput", () => {
-  it("服务端投影有值时原样回填（forgejo 集成是实例基址形态）", () => {
+describe("codeRepoSlugFromSaved", () => {
+  it("剥掉 scheme 与主机段：forgejo 投影剥出 owner/repo", () => {
+    expect(codeRepoSlugFromSaved("https://forge.example.com/acme/app")).toEqual({
+      owner: "acme",
+      repo: "app",
+    });
+  });
+
+  it("GHE 投影同样剥出 owner/repo，主机归属服务端（R41 P2）", () => {
+    expect(codeRepoSlugFromSaved("https://ghe.corp.example/acme/app")).toEqual({
+      owner: "acme",
+      repo: "app",
+    });
+  });
+
+  it("裸 owner/repo 与裸 github.com/ 前缀形态都剥出 owner/repo", () => {
+    expect(codeRepoSlugFromSaved("acme/app")).toEqual({ owner: "acme", repo: "app" });
+    expect(codeRepoSlugFromSaved("github.com/acme/app")).toEqual({
+      owner: "acme",
+      repo: "app",
+    });
+  });
+
+  it("尾斜杠与 .git 后缀剥掉（与后端同序）", () => {
+    expect(codeRepoSlugFromSaved("https://forge.example.com/acme/app.git/")).toEqual({
+      owner: "acme",
+      repo: "app",
+    });
+  });
+
+  it("含点的组织名（裸形态两段）不被误当主机剥掉", () => {
+    expect(codeRepoSlugFromSaved("my.org/app")).toEqual({ owner: "my.org", repo: "app" });
+  });
+
+  it("解析不出两段时返回空 owner（悬空绑定/null 投影回填为空）", () => {
+    expect(codeRepoSlugFromSaved("")).toEqual({ owner: "", repo: "" });
+    expect(codeRepoSlugFromSaved("https://forge.example.com/acme")).toEqual({
+      owner: "",
+      repo: "",
+    });
+  });
+});
+
+describe("ownerRepoFromInput", () => {
+  it("接受裸 owner/repo、带 scheme 的完整地址与 github.com/ 前缀", () => {
+    expect(ownerRepoFromInput("acme/app")).toEqual({ owner: "acme", repo: "app" });
+    expect(ownerRepoFromInput("https://forge.example.com/acme/app")).toEqual({
+      owner: "acme",
+      repo: "app",
+    });
+    expect(ownerRepoFromInput("github.com/acme/app")).toEqual({
+      owner: "acme",
+      repo: "app",
+    });
+  });
+
+  it("无 scheme 的三段输入不猜主机：含点的首段可能是组织名", () => {
+    expect(ownerRepoFromInput("my.org/a/b")).toEqual({ owner: "", repo: "" });
+  });
+
+  it("单段、空段与 .git/尾斜杠外的残段返回空 owner", () => {
+    expect(ownerRepoFromInput("acme")).toEqual({ owner: "", repo: "" });
+    expect(ownerRepoFromInput("acme/")).toEqual({ owner: "", repo: "" });
+    expect(ownerRepoFromInput("https://forge.example.com/")).toEqual({
+      owner: "",
+      repo: "",
+    });
+  });
+
+  it("尾斜杠与 .git 后缀剥掉", () => {
+    expect(ownerRepoFromInput("acme/app.git/")).toEqual({ owner: "acme", repo: "app" });
+  });
+});
+
+describe("codeRepoUrlFromSlug", () => {
+  const githubDefault: Pick<IntegrationOption, "kind" | "base_url"> = {
+    kind: "github",
+    base_url: "https://github.com",
+  };
+  const forgejo: Pick<IntegrationOption, "kind" | "base_url"> = {
+    kind: "forgejo",
+    base_url: "https://forge.example.com",
+  };
+
+  it("内置 github 传裸 owner/repo，不自拼 scheme（部署 GHE 由服务端分辨）", () => {
+    expect(codeRepoUrlFromSlug(githubDefault, { owner: "acme", repo: "app" })).toBe(
+      "acme/app",
+    );
+  });
+
+  it("forgejo 传 {base_url}/{owner}/{repo}，基址尾斜杠归一", () => {
+    expect(codeRepoUrlFromSlug(forgejo, { owner: "acme", repo: "app" })).toBe(
+      "https://forge.example.com/acme/app",
+    );
     expect(
-      codeRepoUrlForInput({
-        code_repo_url: "https://forge.example.com/acme/app",
-      }),
+      codeRepoUrlFromSlug({ kind: "forgejo", base_url: "https://forge.example.com/" }, { owner: "acme", repo: "app" }),
     ).toBe("https://forge.example.com/acme/app");
   });
 
-  it("GHE/公共主机由服务端选好：回填不自拼 github.com", () => {
+  it("合成结果与归一口径互通：未改动的 forgejo 绑定归一相等", () => {
     expect(
-      codeRepoUrlForInput({
-        code_repo_url: "https://ghe.corp.example/acme/app",
-      }),
-    ).toBe("https://ghe.corp.example/acme/app");
-  });
-
-  it("投影为 null（无代码仓或悬空绑定）回填空串，不回落 github 地址", () => {
-    expect(codeRepoUrlForInput({ code_repo_url: null })).toBe("");
-    expect(codeRepoUrlForInput({})).toBe("");
+      normalizeCodeRepoRef(codeRepoUrlFromSlug(forgejo, { owner: "acme", repo: "app" })),
+    ).toBe(normalizeCodeRepoRef("https://forge.example.com/acme/app"));
   });
 });

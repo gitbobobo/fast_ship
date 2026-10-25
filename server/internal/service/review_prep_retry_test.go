@@ -436,7 +436,8 @@ func TestPrepRetrySchedulerCapFailsRun(t *testing.T) {
 		RunID: run.ID, TokenHash: "hash-cap", CreatedAt: seedAt, ExpiresAt: seedAt.Add(time.Hour),
 	})
 	e.svc.db.Create(&model.ReviewPullRequest{
-		RepoFullName: repo, PRNumber: 33, ProjectID: e.project.ID, UserID: e.user.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		RepoFullName:  repo, PRNumber: 33, ProjectID: e.project.ID, UserID: e.user.ID,
 		InstallationID: 42, HeadSHA: run.HeadSHA, RoundNumber: 1, UpdatedAt: seedAt,
 	})
 	t3 := &fakeReviewT3{prepFailed: map[string]*T3FailedPreparation{

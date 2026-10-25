@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/githubmedia"
 )
 
@@ -42,10 +43,10 @@ func TestScreenshotAttachmentURLsByDeploymentHost(t *testing.T) {
 		cached:  &githubmedia.CachedMedia{Path: "/cache/ghe.png"},
 		anonErr: &githubmedia.UpstreamStatusError{StatusCode: 404},
 	}
-	review = e.withT3(nil, media, func(context.Context, int64) (string, error) {
+	review = e.withT3(nil, media, func(context.Context, string, int64) (string, error) {
 		return "ghe-installation-token", nil
 	})
-	_, assets, err := review.ensureAssets(context.Background(), repo, 91, "sha-ghe", body, 7)
+	_, assets, err := review.ensureAssets(context.Background(), model.ForgeIntegrationBuiltinGitHubID, repo, 91, "sha-ghe", body, 7)
 	if err != nil {
 		t.Fatalf("ensureAssets: %v", err)
 	}

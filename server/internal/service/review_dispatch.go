@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/api"
-	"github.com/godbobo/fast_ship/server/internal/githubapi"
+	"github.com/godbobo/fast_ship/server/internal/forge"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
@@ -95,10 +95,10 @@ func (s *ReviewService) launchRun(ctx context.Context, runID string, now time.Ti
 	// 只有从未签发的运行才会被 dispatchRuns 的认领超窗重新认领——读 PR 失败
 	// 时同样不落终态、不签令牌，留给下一轮。
 	prCtx, prCancel := context.WithTimeout(ctx, 30*time.Second)
-	client, clientErr := s.ghClient(prCtx)
-	var pr *githubapi.PullRequest
+	client, clientErr := s.reviewClient(prCtx, run.IntegrationID, run.RepoFullName, run.InstallationID)
+	var pr *forge.PullRequest
 	if clientErr == nil {
-		pr, clientErr = client.GetPullRequest(prCtx, run.InstallationID, run.RepoFullName, run.PRNumber)
+		pr, clientErr = client.GetPullRequest(prCtx, run.RepoFullName, run.PRNumber)
 	}
 	prCancel()
 	if clientErr != nil {
@@ -219,7 +219,7 @@ func (s *ReviewService) failRunDispatch(runID, code, msg string, now time.Time) 
 			Update("consumed_at", now).Error; err != nil {
 			return err
 		}
-		return s.markPRSyncPendingByRepoTx(tx, run.ProjectID, run.RepoFullName, run.PRNumber, now)
+		return s.markPRSyncPendingByRepoTx(tx, run.IntegrationID, run.ProjectID, run.RepoFullName, run.PRNumber, now)
 	})
 	s.publishReviewNotification(&run, model.NotificationReviewDispatchFailed, msg, now)
 }
@@ -249,18 +249,19 @@ func (s *ReviewService) cancelRunPRClosed(run *model.ReviewRun, now time.Time) {
 			Update("consumed_at", now).Error; err != nil {
 			return err
 		}
-		return s.markPRSyncPendingByRepoTx(tx, run.ProjectID, run.RepoFullName, run.PRNumber, now)
+		return s.markPRSyncPendingByRepoTx(tx, run.IntegrationID, run.ProjectID, run.RepoFullName, run.PRNumber, now)
 	})
 	if err != nil {
 		s.logger.Error("PR 关闭收尾运行失败", zap.String("run", run.ID), zap.Error(err))
 	}
 }
 
-// markPRSyncPendingByRepoTx 本项目总账置 sync_pending（不重取项目——行已
-// 存在）。主键含 project_id：其他项目的同仓库账本不置。
-func (s *ReviewService) markPRSyncPendingByRepoTx(tx *gorm.DB, projectID, repo string, prNumber int, now time.Time) error {
+// markPRSyncPendingByRepoTx 本 (项目, 集成) 总账置 sync_pending（不重取项目
+// ——行已存在）。主键含 project_id 与 integration_id：其他键的同仓库账本不置。
+func (s *ReviewService) markPRSyncPendingByRepoTx(tx *gorm.DB, integrationID, projectID, repo string, prNumber int, now time.Time) error {
 	return tx.Model(&model.ReviewPullRequest{}).
-		Where("project_id = ? AND repo_full_name = ? AND pr_number = ?", projectID, repo, prNumber).
+		Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ?",
+			projectID, repo, prNumber, integrationID).
 		Updates(map[string]any{
 			"sync_pending": true,
 			"sync_epoch":   gorm.Expr("sync_epoch + 1"),
