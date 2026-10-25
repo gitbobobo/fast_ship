@@ -7,6 +7,7 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
+	"github.com/godbobo/fast_ship/server/internal/repository"
 	"github.com/google/uuid"
 )
 
@@ -523,6 +524,73 @@ func TestBotUsageInsightsByErrorNullGroupLast(t *testing.T) {
 	}
 }
 
+// 空串（含纯空白）error_code 归 null 组（无错误码语义，主线与维护归并路径
+// 同一入口）：不再单独成组渲染成空白单元格，且 null 组恒定排最后——即使
+// 合并后的 cost 比其余组高。
+func TestBotUsageInsightsByErrorEmptyCodeMergesIntoNullGroup(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "insightemptycode")
+	bot := env.createBot(t, userID)
+
+	run := seedUsageRun(t, env, bot.ID, nil)
+	seedInsightRequest(t, env, run.ID, func(r *model.BotModelRequest) {
+		r.Status = model.BotModelRequestFailed
+		r.ErrorCode = ptrString("") // 空串 → null 组
+		r.CostEstimate = ptrCost(0.3)
+	})
+	seedInsightRequest(t, env, run.ID, func(r *model.BotModelRequest) {
+		r.Status = model.BotModelRequestFailed
+		r.ErrorCode = ptrString("   ") // 纯空白 → null 组
+		r.CostEstimate = ptrCost(0.2)
+	})
+	seedInsightRequest(t, env, run.ID, func(r *model.BotModelRequest) {
+		r.Status = model.BotModelRequestFailed
+		r.ErrorCode = ptrString("rate_limit")
+		r.CostEstimate = ptrCost(0.5)
+	})
+	// 维护侧失败行同样走 failureErrorKeyOf：空串归 null 组。
+	maint := seedInsightMaintenance(t, env, bot.ID, nil, nil)
+	seedInsightMaintenanceRequest(t, env, maint.ID, func(r *model.BotMaintenanceRequest) {
+		r.Status = model.BotModelRequestFailed
+		r.ErrorCode = ptrString("")
+		r.CostEstimate = ptrCost(0.1)
+	})
+
+	ins, err := env.bots.GetBotUsageInsights(userID, "7d", "")
+	if err != nil {
+		t.Fatalf("insights: %v", err)
+	}
+	f := insightBotOf(t, ins, bot.ID).Failures
+	if len(f.ByError) != 2 {
+		t.Fatalf("空串/纯空白应并入 null 组，共 2 组: %+v", f.ByError)
+	}
+	if f.ByError[0].ErrorCode == nil || *f.ByError[0].ErrorCode != "rate_limit" ||
+		f.ByError[0].Requests != 1 || f.ByError[0].Cost == nil || !costEq(*f.ByError[0].Cost, 0.5) {
+		t.Fatalf("rate_limit 组应为 1 次 / 0.5: %+v", f.ByError[0])
+	}
+	if f.ByError[1].ErrorCode != nil || f.ByError[1].Requests != 3 {
+		t.Fatalf("null 组应合并主线空串/纯空白与维护空串共 3 次: %+v", f.ByError[1])
+	}
+	if f.ByError[1].Cost == nil || !costEq(*f.ByError[1].Cost, 0.6) {
+		t.Fatalf("null 组金额应为 0.3+0.2+0.1=0.6 且恒定排最后: %+v", f.ByError[1])
+	}
+}
+
+// 三元组查询的 runID 收窄（审查第三轮修复 1）：只收 schedule 且挂了任务的
+// run；主线 run（含带工具调用的）与没挂任务的 schedule run 都不进集合。
+func TestScheduleIdleRunIDsFiltersMainLine(t *testing.T) {
+	taskA := "task-a"
+	rows := []repository.UsageRunRow{
+		{ID: "main-1", SessionKind: model.BotSessionKindMain},
+		{ID: "sched-no-task", SessionKind: model.BotSessionKindSchedule},
+		{ID: "sched-a", SessionKind: model.BotSessionKindSchedule, ScheduleTaskID: &taskA},
+	}
+	got := scheduleIdleRunIDs(rows)
+	if len(got) != 1 || got[0] != "sched-a" {
+		t.Fatalf("过滤后应只含 sched-a，实得 %v", got)
+	}
+}
+
 // 空转：silent / 无工具调用 / 无写操作三种 run 分别被识别（条件可叠加命中），
 // skipped 与进行中 run 不进分母；idle_cost 只含空转 run 的显示成本。
 func TestBotUsageInsightsIdle(t *testing.T) {
@@ -560,6 +628,11 @@ func TestBotUsageInsightsIdle(t *testing.T) {
 	run4 := mk(model.BotRunStatusCompleted, false, nil)
 	req4 := seedInsightRequest(t, env, run4.ID, nil)
 	seedInsightToolCall(t, env, bot.ID, req4.ID, "fs_schedule", "run")
+	// 主线 run 带写操作调用：三元组查询只收 schedule run（与空转分母同口径），
+	// 主线调用不进任何任务的空转计数——上方断言值不受它影响。
+	mainRun := seedUsageRun(t, env, bot.ID, nil)
+	mainReq := seedInsightRequest(t, env, mainRun.ID, nil)
+	seedInsightToolCall(t, env, bot.ID, mainReq.ID, "fs_issue", "create")
 	// 进行中与 skipped：不进分母。
 	mk(model.BotRunStatusRunning, false, nil)
 	mk(model.BotRunStatusSkipped, true, nil)

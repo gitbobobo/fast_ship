@@ -858,7 +858,7 @@ function FailuresSection({
                   className="text-xs text-muted-foreground"
                   data-testid="usage-insights-error-row"
                 >
-                  {error.error_code ?? "无错误码"} · {error.requests} 次 ·{" "}
+                  {error.error_code || "无错误码"} · {error.requests} 次 ·{" "}
                   {formatUsageCost(error.cost)}
                 </p>
               ))}
@@ -922,7 +922,7 @@ function FailuresSection({
                     <TableCell
                       className={cn(!error.error_code && "text-muted-foreground")}
                     >
-                      {error.error_code ?? "无错误码"}
+                      {error.error_code || "无错误码"}
                     </TableCell>
                     <TableCell className="text-right tabular-nums">
                       {error.requests}

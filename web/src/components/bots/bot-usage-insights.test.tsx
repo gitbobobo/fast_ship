@@ -53,6 +53,7 @@ const insights: BotUsageInsights = {
         retried_requests: 2,
         by_error: [
           { error_code: "timeout", requests: 2, cost: 0.08 },
+          { error_code: "", requests: 1, cost: 0.02 },
           { error_code: null, requests: 1, cost: 0.04 },
         ],
       },
@@ -216,11 +217,13 @@ describe("BotUsageInsightsPanel", () => {
     expect(failureRows[0]).toHaveTextContent("2");
     expect(failureRows[1]).toHaveTextContent("—");
 
-    // 按错误码分组：无错误码的失败归「无错误码」一组。
+    // 按错误码分组：无错误码的失败归「无错误码」一组；旧数据的空串码同样
+    // 落占位文案，不渲染成空白单元格。
     const errorRows = failures.getAllByTestId("usage-insights-error-row");
-    expect(errorRows).toHaveLength(2);
+    expect(errorRows).toHaveLength(3);
     expect(errorRows[0]).toHaveTextContent("timeout");
     expect(errorRows[1]).toHaveTextContent("无错误码");
+    expect(errorRows[2]).toHaveTextContent("无错误码");
   });
 
   it("定时任务空转：口径标题、比率与三条件计数，分母 0 为「—」", () => {

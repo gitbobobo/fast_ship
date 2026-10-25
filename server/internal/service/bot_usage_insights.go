@@ -27,6 +27,20 @@ const usageContextGrowthMaxPoints = 200
 // usageModelCandidatesMax 换模型差价每组保留的最便宜候选数。
 const usageModelCandidatesMax = 3
 
+// scheduleIdleRunIDs 返回参与空转判定的 run ID（工具调用三元组查询与 taskAccs
+// 分母同口径）：SessionKind == schedule 且 ScheduleTaskID 非空；主线 run 不进
+// 空转判定，也不进三元组的连接查询。
+func scheduleIdleRunIDs(runRows []repository.UsageRunRow) []string {
+	ids := make([]string, 0, len(runRows))
+	for i := range runRows {
+		row := &runRows[i]
+		if row.SessionKind == model.BotSessionKindSchedule && row.ScheduleTaskID != nil {
+			ids = append(ids, row.ID)
+		}
+	}
+	return ids
+}
+
 // usageRunCatalogModelOf 聚合扫描行的 (catalog_id, model)：两个字段都取 run
 // 冻结快照值。快照缺 catalog_id（INT-133 之前的旧快照）或 model 时 ok=false，
 // 调用方跳过换模型差价分组——模型名跨目录重名（同名模型在多家目录各有现价），
@@ -76,6 +90,10 @@ func (s *BotService) GetBotUsageInsights(userID, rangeParam, botID string) (*api
 		runIDs = append(runIDs, led.runRows[i].ID)
 		runIdx[led.runRows[i].ID] = i
 	}
+	// 工具调用三元组只服务定时任务空转判定：runIDs 单独收窄为 schedule 且挂
+	// 了任务的 run（scheduleIdleRunIDs，与 taskAccs/空转分母同口径），主线
+	// run 不进该连接查询。
+	scheduleRunIDs := scheduleIdleRunIDs(led.runRows)
 	maintIdx := make(map[string]int, len(led.maintRows))
 	for i := range led.maintRows {
 		maintIdx[led.maintRows[i].ID] = i
@@ -93,7 +111,7 @@ func (s *BotService) GetBotUsageInsights(userID, rangeParam, botID string) (*api
 	if err != nil {
 		return nil, errs.ErrInternal
 	}
-	callTriples, err := repo.RunToolCallTriples(runIDs)
+	callTriples, err := repo.RunToolCallTriples(scheduleRunIDs)
 	if err != nil {
 		return nil, errs.ErrInternal
 	}
@@ -105,8 +123,8 @@ func (s *BotService) GetBotUsageInsights(userID, rangeParam, botID string) (*api
 	}
 	// 读/写判定的事实源是服务层注册表：命中 botReadOnlyActions 为读，未列出
 	// 的（含未知动作）按写处理。
-	toolCallRuns := make(map[string]bool, len(led.runRows))
-	writeCallRuns := make(map[string]bool, len(led.runRows))
+	toolCallRuns := make(map[string]bool, len(scheduleRunIDs))
+	writeCallRuns := make(map[string]bool, len(scheduleRunIDs))
 	for _, t := range callTriples {
 		toolCallRuns[t.RunID] = true
 		if !botReadOnlyActions[t.ToolName+"/"+t.Action] {
@@ -253,10 +271,7 @@ func (s *BotService) GetBotUsageInsights(userID, rangeParam, botID string) (*api
 		}
 		acc.failedRequests += f.Requests
 		acc.failedRequestsCost = botSumOptional(acc.failedRequestsCost, f.CostSum)
-		key := failureErrorKey{present: f.ErrorCode != nil}
-		if f.ErrorCode != nil {
-			key.code = *f.ErrorCode
-		}
+		key := failureErrorKeyOf(f.ErrorCode)
 		merged := acc.byError[key]
 		if merged == nil {
 			merged = &float64Acc{}
@@ -286,10 +301,7 @@ func (s *BotService) GetBotUsageInsights(userID, rangeParam, botID string) (*api
 		if model.BotModelRequestStatus(row.Status) == model.BotModelRequestFailed {
 			acc.failedRequests++
 			acc.failedRequestsCost = botSumOptional(acc.failedRequestsCost, row.CostEstimate)
-			key := failureErrorKey{present: row.ErrorCode != nil}
-			if row.ErrorCode != nil {
-				key.code = *row.ErrorCode
-			}
+			key := failureErrorKeyOf(row.ErrorCode)
 			merged := acc.byError[key]
 			if merged == nil {
 				merged = &float64Acc{}
@@ -582,11 +594,21 @@ func (s *BotService) GetBotUsageInsights(userID, rangeParam, botID string) (*api
 	return insights, nil
 }
 
-// failureErrorKey 是失败请求 error_code 分组的键：NULL（无错误码）与空串
-// 分开（present=false 才是 null 组）。
+// failureErrorKey 是失败请求 error_code 分组的键：NULL 与空串（含纯空白）
+// 都归 null 组（present=false，「无错误码」语义，前端渲染占位文案而非空白
+// 单元格），非空串才进 present 组。
 type failureErrorKey struct {
 	present bool
 	code    string
+}
+
+// failureErrorKeyOf 把失败行的 error_code 归组：nil / 空串 / 纯空白都归 null
+// 组；非空串保持原码进 present 组（码本身不做 trim）。
+func failureErrorKeyOf(code *string) failureErrorKey {
+	if code == nil || strings.TrimSpace(*code) == "" {
+		return failureErrorKey{}
+	}
+	return failureErrorKey{present: true, code: *code}
 }
 
 // failureErrorKeyLess 错误码组的确定性并列排序：null 组排后、其余按码升序。
