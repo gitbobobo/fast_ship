@@ -86,18 +86,20 @@ export function errorCodeLabel(code: string): string | undefined {
   return undefined;
 }
 
-/** 换模型差价的相对色：省钱绿、更贵红、持平灰（与状态徽标同一配色系）。 */
+/** 换模型差价的相对色：省钱绿、更贵红、差价可忽略灰（与状态徽标同一配色系）。 */
 function savingClass(saving: number) {
-  if (saving > 0) return "text-emerald-700 dark:text-emerald-400";
-  if (saving < 0) return "text-destructive";
+  if (saving >= 0.001) return "text-emerald-700 dark:text-emerald-400";
+  if (saving <= -0.001) return "text-destructive";
   return "text-muted-foreground";
 }
 
-/** 换模型差价的差额文案： saving>0 省、<0 贵、=0 持平。 */
+/** 换模型差价的差额文案：|saving|≥$0.001（最小展示精度）才标省/贵，
+ * 低于精度时标「差价可忽略」——亚厘级差异是噪声，标绿「省 <$0.001」会
+ * 误导成有可感知节省。 */
 function savingText(saving: number) {
-  if (saving > 0) return `省 ${formatCostEstimate(saving)}`;
-  if (saving < 0) return `贵 ${formatCostEstimate(-saving)}`;
-  return "持平";
+  if (saving >= 0.001) return `省 ${formatCostEstimate(saving)}`;
+  if (saving <= -0.001) return `贵 ${formatCostEstimate(-saving)}`;
+  return "差价可忽略";
 }
 
 /**
@@ -408,7 +410,7 @@ function TableFrame({ children }: { children: React.ReactNode }) {
   );
 }
 
-/* ─── 1. 上下文增长 ─── */
+/* ─── 1. 输入上下文增长 ─── */
 
 function ContextGrowthSection({
   bots,
@@ -438,7 +440,7 @@ function ContextGrowthSection({
   );
   return (
     <Section
-      title="上下文增长"
+      title="输入上下文增长"
       note="每次运行第一次请求的输入 token 随时间变化；点可打开对应运行明细"
       testId="usage-insights-context"
     >
@@ -469,7 +471,7 @@ function ContextGrowthSection({
                   href: `/bots/usage/runs/${point.run_id}`,
                 }))}
                 formatXLabel={formatAxisDay}
-                chartTitle="上下文增长"
+                chartTitle="输入上下文增长"
                 titleId={`usage-insights-context-title-${bot.bot_id}`}
                 emptyMessage="窗口内没有运行记录"
               />
