@@ -506,12 +506,15 @@ export function ProjectFormDialog({
         err,
         isEdit ? "更新失败，请检查输入" : "创建失败，请检查输入",
       );
-      toast.error(msg);
       // 集成在打开弹窗后被删/失效：重试不会成功——把错误钉到选择器上，
-      // 并重拉选项让失效 id 落到「已失效」占位而不是继续显示旧名。
+      // 并重拉选项让失效 id 落到「已失效」占位而不是继续显示旧名。不再
+      // 另发 toast：字段级红字与 toast 文案一字不差，顶部 toast 还会压住
+      // 弹窗标题栏——同一错误在相邻位置出现两次没有增量信息。
       if (/集成.*(不存在|已删除|失效|不可用)/.test(msg)) {
         setIntegrationError(msg);
         void refetchIntegrations();
+      } else {
+        toast.error(msg);
       }
     }
   };
