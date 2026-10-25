@@ -6787,6 +6787,10 @@ export interface components {
              * @description cached / prompt，只算 usage 完整的请求；无完整 usage 为 null
              */
             cache_hit_rate: number | null;
+            /** @description omitempty；true = 该机器人设有 bot 级预算（行内状态提示，INT-164） */
+            budget_set?: boolean;
+            /** @description omitempty；true = 任一已设预算周期当前花费 ≥ 预算金额 */
+            budget_exceeded?: boolean;
             /** Format: int64 */
             unpriced_requests: number;
         };
@@ -6834,6 +6838,10 @@ export interface components {
              * @description （单次定时运行平均 + 每次触发摊到的连带主线成本）× 未来 30 天触发次数（parseScheduleCron）；单次统计取最近 30 个当地日的固定窗口，与所选 range 无关；停用、已删除、无已计价平均或 cron 解析失败为 null
              */
             estimated_monthly_cost: number | null;
+            /** @description omitempty；true = 该任务设有任务级预算（行内状态提示，INT-164） */
+            budget_set?: boolean;
+            /** @description omitempty；true = 任一已设预算周期当前花费 ≥ 预算金额 */
+            budget_exceeded?: boolean;
         };
         BotUsageOverview: {
             /** @enum {string} */

@@ -2180,6 +2180,12 @@ type BotUsageBot struct {
 	AvgRunCost *float64 `json:"avg_run_cost"`
 	BotId      string   `json:"bot_id"`
 
+	// BudgetExceeded omitempty；true = 任一已设预算周期当前花费 ≥ 预算金额
+	BudgetExceeded *bool `json:"budget_exceeded,omitempty"`
+
+	// BudgetSet omitempty；true = 该机器人设有 bot 级预算（行内状态提示，INT-164）
+	BudgetSet *bool `json:"budget_set,omitempty"`
+
 	// CacheHitRate cached / prompt，只算 usage 完整的请求；无完整 usage 为 null
 	CacheHitRate *float64 `json:"cache_hit_rate"`
 
@@ -2579,6 +2585,12 @@ type BotUsageScheduleTask struct {
 	AvgRunCost *float64 `json:"avg_run_cost"`
 	BotId      string   `json:"bot_id"`
 	BotName    string   `json:"bot_name"`
+
+	// BudgetExceeded omitempty；true = 任一已设预算周期当前花费 ≥ 预算金额
+	BudgetExceeded *bool `json:"budget_exceeded,omitempty"`
+
+	// BudgetSet omitempty；true = 该任务设有任务级预算（行内状态提示，INT-164）
+	BudgetSet *bool `json:"budget_set,omitempty"`
 
 	// Cost schedule run 自身+关联维护已计价合计（不含连带主线）
 	Cost *float64 `json:"cost"`

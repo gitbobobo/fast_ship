@@ -74,6 +74,31 @@ export function formatUsageStatCost(value: number | null | undefined): string {
   return `$${value.toFixed(4)}`;
 }
 
+/** 预算列的行内状态徽标：超出优先于「已设」，未设置不渲染（视觉审查）。 */
+function BudgetStateBadge({
+  set,
+  exceeded,
+}: {
+  set?: boolean;
+  exceeded?: boolean;
+}) {
+  if (exceeded) {
+    return (
+      <Badge variant="destructive" className="h-4 px-1.5 text-[10px]">
+        已超出
+      </Badge>
+    );
+  }
+  if (set) {
+    return (
+      <Badge variant="secondary" className="h-4 px-1.5 text-[10px]">
+        已设
+      </Badge>
+    );
+  }
+  return null;
+}
+
 /**
  * 缓存命中率：0–1 小数转整百分数；无完整 usage 为 null → 「—」。
  * 0 < rate < 0.005 四舍五入会得到 0%，与真零无法区分 → 「<1%」。
@@ -436,17 +461,23 @@ function BotsUsageTable({
                   </TableCell>
                   <TableCell className="text-right">
                     {!bot.deleted && (
-                      <Button
-                        variant="outline"
-                        size="xs"
-                        aria-label={`设置 ${bot.name} 的预算`}
-                        onClick={() =>
-                          onBudget({ kind: "bot", botId: bot.bot_id, name: bot.name })
-                        }
-                      >
-                        <Settings2 className="h-3 w-3" />
-                        预算
-                      </Button>
+                      <span className="inline-flex items-center justify-end gap-1">
+                        <BudgetStateBadge
+                          set={bot.budget_set}
+                          exceeded={bot.budget_exceeded}
+                        />
+                        <Button
+                          variant="outline"
+                          size="xs"
+                          aria-label={`设置 ${bot.name} 的预算`}
+                          onClick={() =>
+                            onBudget({ kind: "bot", botId: bot.bot_id, name: bot.name })
+                          }
+                        >
+                          <Settings2 className="h-3 w-3" />
+                          预算
+                        </Button>
+                      </span>
                     )}
                   </TableCell>
                 </TableRow>
@@ -619,22 +650,28 @@ function TasksUsageTable({
                   <CostCell value={task.estimated_monthly_cost} />
                   <TableCell className="text-right">
                     {!task.deleted && !deletedBotIds.has(task.bot_id) && (
-                      <Button
-                        variant="outline"
-                        size="xs"
-                        aria-label={`设置 ${usageTaskName(task)} 的预算`}
-                        onClick={() =>
-                          onBudget({
-                            kind: "task",
-                            botId: task.bot_id,
-                            taskId: task.task_id,
-                            name: usageTaskName(task),
-                          })
-                        }
-                      >
-                        <Settings2 className="h-3 w-3" />
-                        预算
-                      </Button>
+                      <span className="inline-flex items-center justify-end gap-1">
+                        <BudgetStateBadge
+                          set={task.budget_set}
+                          exceeded={task.budget_exceeded}
+                        />
+                        <Button
+                          variant="outline"
+                          size="xs"
+                          aria-label={`设置 ${usageTaskName(task)} 的预算`}
+                          onClick={() =>
+                            onBudget({
+                              kind: "task",
+                              botId: task.bot_id,
+                              taskId: task.task_id,
+                              name: usageTaskName(task),
+                            })
+                          }
+                        >
+                          <Settings2 className="h-3 w-3" />
+                          预算
+                        </Button>
+                      </span>
                     )}
                   </TableCell>
                 </TableRow>

@@ -1239,6 +1239,10 @@ func (s *BotService) GetBotUsageOverview(userID, rangeParam, botID string) (*api
 	})
 	overview.ScheduleTasks = taskItems
 
+	// 行内预算态：预算列只有入口按钮时看不出「已设 / 已超」（视觉审查）。
+	// 读失败不拖垮总览——预算态是附属提示，缺省即无徽标。
+	s.botUsageApplyBudgetMarks(overview, led.loc)
+
 	// totals.cost 与分桶同口径：任一已计价成分（含 run 级价目，不必依赖请求
 	// 行有价）存在即输出；全空才是「未计价」的 null，不能出现按机器人表有
 	// 金额而总卡片「—」的自相矛盾。
@@ -1247,6 +1251,71 @@ func (s *BotService) GetBotUsageOverview(userID, rangeParam, botID string) (*api
 		overview.Totals.DailyAverage = ptrFloat64(*totalCost / float64(len(led.dayAccs)))
 	}
 	return overview, nil
+}
+
+// botUsageApplyBudgetMarks 给总览的机器人/任务行打预算态徽标：按周期分组
+// 后每周期一次 SpendInWindow 批量计算（O(周期数) 而非 O(目标数)）。花费
+// 口径与预算评估同源——同日窗口、任务花费挂所属 bot 窗口。
+func (s *BotService) botUsageApplyBudgetMarks(overview *api.BotUsageOverview, loc *time.Location) {
+	budgets, err := repository.NewBotBudgetRepository(s.db).ListAll()
+	if err != nil || len(budgets) == 0 {
+		return
+	}
+	botItems := make(map[string]*api.BotUsageBot, len(overview.Bots))
+	taskItems := make(map[string]*api.BotUsageScheduleTask, len(overview.ScheduleTasks))
+	ownerSet := map[string]bool{}
+	for i := range overview.Bots {
+		botItems[overview.Bots[i].BotId] = &overview.Bots[i]
+		ownerSet[overview.Bots[i].BotId] = true
+	}
+	for i := range overview.ScheduleTasks {
+		taskItems[overview.ScheduleTasks[i].TaskId] = &overview.ScheduleTasks[i]
+		ownerSet[overview.ScheduleTasks[i].BotId] = true
+	}
+	byPeriod := map[model.BotBudgetPeriod][]model.BotBudget{}
+	for i := range budgets {
+		b := budgets[i]
+		if b.BotID != nil && botItems[*b.BotID] != nil {
+			byPeriod[b.Period] = append(byPeriod[b.Period], b)
+		} else if b.ScheduleTaskID != nil && taskItems[*b.ScheduleTaskID] != nil {
+			byPeriod[b.Period] = append(byPeriod[b.Period], b)
+		}
+	}
+	if len(byPeriod) == 0 {
+		return
+	}
+	ownerIDs := make([]string, 0, len(ownerSet))
+	for id := range ownerSet {
+		ownerIDs = append(ownerIDs, id)
+	}
+	repo := repository.NewBotBudgetRepository(s.db)
+	now := time.Now()
+	for period, list := range byPeriod {
+		start, end, _ := botBudgetWindow(period, now, loc, false)
+		sp, err := repo.SpendInWindow(ownerIDs, start, end)
+		if err != nil {
+			continue
+		}
+		for i := range list {
+			b := &list[i]
+			var itemSet, itemExceeded **bool
+			var spend float64
+			if b.ScheduleTaskID != nil {
+				item := taskItems[*b.ScheduleTaskID]
+				itemSet, itemExceeded = &item.BudgetSet, &item.BudgetExceeded
+				spend = sp.Task(*b.ScheduleTaskID)
+			} else {
+				item := botItems[*b.BotID]
+				itemSet, itemExceeded = &item.BudgetSet, &item.BudgetExceeded
+				spend = sp.Bot(*b.BotID)
+			}
+			tru := true
+			*itemSet = &tru
+			if spend >= b.AmountUSD {
+				*itemExceeded = &tru
+			}
+		}
+	}
 }
 
 func ptrFloat64(v float64) *float64 { return &v }
