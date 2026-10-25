@@ -2353,6 +2353,9 @@ type ForgeIntegration struct {
 	// ApiBaseUrl API 基址（forgejo 保存时已推导展开；内置集成为部署 GitHub App 的 api_base_url）
 	ApiBaseUrl string `json:"api_base_url"`
 
+	// ApiBaseUrlDerived true=api_base_url 是按 {base_url}/api/v1 推导的展开值（改 base_url 时跟随 重新推导）；false=管理员显式钉死的端点（不随 base_url 变化）。内置集成恒 false。
+	ApiBaseUrlDerived bool `json:"api_base_url_derived"`
+
 	// BaseUrl Forgejo 实例基址（内置集成为 https://github.com）
 	BaseUrl string `json:"base_url"`
 

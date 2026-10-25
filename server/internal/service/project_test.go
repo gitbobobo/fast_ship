@@ -203,6 +203,42 @@ func TestParseRepositoryURL(t *testing.T) {
 			errContains: "端口无效",
 		},
 		{
+			// 空端口走既有的端口无效分支（SplitHostPort 解析出空 port）。
+			name:        "empty port rejected",
+			input:       "forge:/o/r",
+			wantErr:     true,
+			errContains: "端口无效",
+		},
+		{
+			// 无 scheme 且首段含冒号的畸形主机按格式错误直接报：补默认
+			// 端口只会归一成永不命中的键，误报成「主机未匹配」。
+			name:        "unbracketed ipv6 rejected",
+			input:       "::1/o/r",
+			wantErr:     true,
+			errContains: "主机格式无效",
+		},
+		{
+			name:        "unbracketed ipv6 with scheme rejected",
+			input:       "https://::1/o/r",
+			wantErr:     true,
+			errContains: "主机格式无效",
+		},
+		{
+			name:        "broken ipv6 bracket rejected",
+			input:       "https://[::1/o/r",
+			wantErr:     true,
+			errContains: "主机格式无效",
+		},
+		{
+			// 完整括号的 IPv6 无端口仍是合法形态，按缺端口补默认。
+			name:      "bracketed ipv6 default port",
+			input:     "https://[::1]/o/r",
+			wantHost:  "[::1]:443",
+			wantOwner: "o",
+			wantRepo:  "r",
+			wantErr:   false,
+		},
+		{
 			name:      "non-github host upper case",
 			input:     "https://Git.Example.com/godbobo/fast_ship",
 			wantHost:  "git.example.com:443",

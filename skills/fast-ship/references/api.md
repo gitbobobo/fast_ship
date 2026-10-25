@@ -11647,6 +11647,7 @@ INT-166 实现。首条恒为内置 `github-default`（只读映射到部署级 
 | `name` | string | 是 | 显示名 |
 | `base_url` | string | 是 | Forgejo 实例基址（内置集成为 https://github.com） |
 | `api_base_url` | string | 是 | API 基址（forgejo 保存时已推导展开；内置集成为部署 GitHub App 的 api_base_url） |
+| `api_base_url_derived` | boolean | 是 | true=api_base_url 是按 {base_url}/api/v1 推导的展开值（改 base_url 时跟随 重新推导）；false=管理员显式钉死的端点（不随 base_url 变化）。内置集成恒 false。 |
 | `token_set` | boolean | 是 | 凭证是否已配置（内置=GitHub App 身份可用；本体永不回显） |
 | `webhook_secret_set` | boolean | 是 | webhook 验签密钥是否已配置（本体永不回显） |
 | `has_ca_cert` | boolean | 是 | 是否配置了自定义 CA（本体永不回显） |
@@ -11710,6 +11711,7 @@ webhook_secret 加密落库、永不回显。allow_private_network=true 放行�
 | `name` | string | 是 | 显示名 |
 | `base_url` | string | 是 | Forgejo 实例基址（内置集成为 https://github.com） |
 | `api_base_url` | string | 是 | API 基址（forgejo 保存时已推导展开；内置集成为部署 GitHub App 的 api_base_url） |
+| `api_base_url_derived` | boolean | 是 | true=api_base_url 是按 {base_url}/api/v1 推导的展开值（改 base_url 时跟随 重新推导）；false=管理员显式钉死的端点（不随 base_url 变化）。内置集成恒 false。 |
 | `token_set` | boolean | 是 | 凭证是否已配置（内置=GitHub App 身份可用；本体永不回显） |
 | `webhook_secret_set` | boolean | 是 | webhook 验签密钥是否已配置（本体永不回显） |
 | `has_ca_cert` | boolean | 是 | 是否配置了自定义 CA（本体永不回显） |
@@ -11757,6 +11759,7 @@ webhook_secret 加密落库、永不回显。allow_private_network=true 放行�
 | `name` | string | 是 | 显示名 |
 | `base_url` | string | 是 | Forgejo 实例基址（内置集成为 https://github.com） |
 | `api_base_url` | string | 是 | API 基址（forgejo 保存时已推导展开；内置集成为部署 GitHub App 的 api_base_url） |
+| `api_base_url_derived` | boolean | 是 | true=api_base_url 是按 {base_url}/api/v1 推导的展开值（改 base_url 时跟随 重新推导）；false=管理员显式钉死的端点（不随 base_url 变化）。内置集成恒 false。 |
 | `token_set` | boolean | 是 | 凭证是否已配置（内置=GitHub App 身份可用；本体永不回显） |
 | `webhook_secret_set` | boolean | 是 | webhook 验签密钥是否已配置（本体永不回显） |
 | `has_ca_cert` | boolean | 是 | 是否配置了自定义 CA（本体永不回显） |
@@ -11786,6 +11789,9 @@ webhook_secret 加密落库、永不回显。allow_private_network=true 放行�
 复核现有基址。token / webhook_secret 省略、null 或空串 = 保留旧值；
 ca_cert_pem 省略 = 保留、空串 = 清空；api_base_url 空串 = 重置为
 `{base_url}/api/v1`。内置 github-default 不可通过本端点修改（40001）。
+base_url 归一主机变更等同迁移全部项目绑定：仍有项目引用时拒绝
+（40935，消息列引用项目名），须先解除项目绑定或走「新建集成 +
+项目逐个改绑」的显式迁移路径。
 
 **鉴权**：仅 JWT
 
@@ -11826,6 +11832,7 @@ ca_cert_pem 省略 = 保留、空串 = 清空；api_base_url 空串 = 重置为
 | `name` | string | 是 | 显示名 |
 | `base_url` | string | 是 | Forgejo 实例基址（内置集成为 https://github.com） |
 | `api_base_url` | string | 是 | API 基址（forgejo 保存时已推导展开；内置集成为部署 GitHub App 的 api_base_url） |
+| `api_base_url_derived` | boolean | 是 | true=api_base_url 是按 {base_url}/api/v1 推导的展开值（改 base_url 时跟随 重新推导）；false=管理员显式钉死的端点（不随 base_url 变化）。内置集成恒 false。 |
 | `token_set` | boolean | 是 | 凭证是否已配置（内置=GitHub App 身份可用；本体永不回显） |
 | `webhook_secret_set` | boolean | 是 | webhook 验签密钥是否已配置（本体永不回显） |
 | `has_ca_cert` | boolean | 是 | 是否配置了自定义 CA（本体永不回显） |

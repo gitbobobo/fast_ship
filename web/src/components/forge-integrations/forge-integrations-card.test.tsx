@@ -41,6 +41,7 @@ const builtinRow: ForgeIntegration = {
   name: "github-default",
   base_url: "https://github.com",
   api_base_url: "https://api.github.com",
+  api_base_url_derived: false,
   token_set: true,
   webhook_secret_set: false,
   has_ca_cert: false,
@@ -56,6 +57,7 @@ const forgejoRow: ForgeIntegration = {
   name: "自建 Forgejo",
   base_url: "https://forge.example.com",
   api_base_url: "https://forge.example.com/api/v1",
+  api_base_url_derived: false,
   token_set: true,
   webhook_secret_set: true,
   has_ca_cert: true,
@@ -319,5 +321,29 @@ describe("ForgeIntegrationsCard", () => {
     await waitFor(() => expect(updateMutateAsync).toHaveBeenCalled());
     const { input } = updateMutateAsync.mock.calls[0][0];
     expect(input.api_base_url).toBe("");
+  });
+
+  it("编辑：推导态 API 基址不预填展开值，留空提交不发送该字段", async () => {
+    signInAs("A", "admin");
+    const derivedRow: ForgeIntegration = {
+      ...forgejoRow,
+      api_base_url_derived: true,
+    };
+    mockList([builtinRow, derivedRow]);
+    updateMutateAsync.mockResolvedValue({ data: derivedRow });
+    const user = userEvent.setup();
+    render(<ForgeIntegrationsCard />);
+
+    await user.click(screen.getByRole("button", { name: "编辑 自建 Forgejo" }));
+    const dialog = await screen.findByRole("dialog");
+    // 推导值只出现在占位符与提示里，字段本体留空——预填会让「跟随推导」
+    // 与「显式钉死」同形。
+    expect(within(dialog).getByLabelText(/API 基址/)).toHaveValue("");
+    expect(dialog).toHaveTextContent("当前跟随实例地址推导");
+    await user.click(within(dialog).getByRole("button", { name: "保存" }));
+
+    await waitFor(() => expect(updateMutateAsync).toHaveBeenCalled());
+    const { input } = updateMutateAsync.mock.calls[0][0];
+    expect(input.api_base_url).toBeUndefined();
   });
 });

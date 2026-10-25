@@ -104,6 +104,32 @@ func (r *ForgeIntegrationRepository) UpdateColumns(id string, fields map[string]
 	return nil
 }
 
+// UpdateColumnsIfUnreferenced 同 UpdateColumns，但把「无项目引用」写进同一条
+// UPDATE（NOT EXISTS 子查询）——归一主机变更路径用它防「先查后改」窗口：
+// 项目并发绑定成功时本次更新 0 行，调用方按仍被引用拒绝，已绑定项目不会被
+// 静默改指新主机。返回 0 表示行不存在或仍被引用，由调用方区分两种情况。
+func (r *ForgeIntegrationRepository) UpdateColumnsIfUnreferenced(id string, fields map[string]any) (int64, error) {
+	updates := make(map[string]any, len(fields)+1)
+	for k, v := range fields {
+		updates[k] = v
+	}
+	updates["updated_at"] = time.Now().UTC()
+	res := r.db.Model(&model.ForgeIntegration{}).
+		Where("id = ?", id).
+		Where(`NOT EXISTS (
+			SELECT 1 FROM projects
+			WHERE code_integration_id = ? OR public_integration_id = ?
+		)`, id, id).
+		Updates(updates)
+	if res.Error != nil {
+		if isUniqueConstraintError(res.Error) {
+			return 0, ErrForgeHostTaken
+		}
+		return 0, res.Error
+	}
+	return res.RowsAffected, nil
+}
+
 // DeleteIfUnreferenced 原子删除未被项目引用的集成行：引用判定写进同一条
 // DELETE（NOT EXISTS 子查询），「先查后删」之间项目并发绑定成功也不会留下
 // 悬空引用。返回删除行数——0 表示行不存在或仍被引用，由调用方区分两种情况。

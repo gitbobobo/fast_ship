@@ -176,7 +176,22 @@ INSERT..SELECT / UPDATE 的 WHERE（`repository/project.go`），删掉的集成
 带进同一条谓词：`EXISTS … AND host_key = ?`。解析绑定与落库之间管理员把
 集成的 base_url 改去别的主机，本次绑定按失效拒绝——绑的是「当时解析出的
 那台实例」，不是「id 还在就行」。未重解析 URL 的写入（保留原绑定）不带键，
-谓词退化为仅存在性：管理员迁移实例后，存量绑定有意跟随新地址。
+谓词退化为仅存在性。
+
+## base_url 主机变更的引用拦截
+
+归一主机键（`forges.HostKey`）变更等同迁移全部项目绑定：绑定按集成 id
+持久化，改主机后同 owner/repo 在新实例上可能是完全不同的仓库，code_repo_url、
+审查链接等投影会静默改指。因此 **仍有项目引用时拒绝改主机**——与删除
+同口径：`UpdateColumnsIfUnreferenced` 把「无引用」写进同一条
+`UPDATE … WHERE NOT EXISTS`（提交点原子，先查后改窗口里项目并发绑定
+写不进去），service 拿 0 行时先确认行还在再按 `ReferencingProjects`
+列名返回 40935。同归一主机的写法级改写（尾斜杠、scheme 默认端口）、
+非基址更新（改名、换凭证、翻转开关）都不触发拦截。
+
+实例迁移的显式路径：**新建**指向新地址的集成 → 各项目改绑（更新
+code_repository_url 到新主机即重新解析绑定）→ 删除旧集成。无引用时
+直接改主机放行（更新 host_key 随 base_url 落库）。
 
 ## 项目响应的 code_repo_url
 
@@ -204,9 +219,10 @@ ListByIDs），没有 N+1。
 - `ca_cert_pem`：缺省 = 保留，空串 = 清空，其余替换并校验 PEM 可解析。
 - `api_base_url`：缺省/null = 保留（推导行仍是推导、显式行仍显式），空串 =
   解除钉死回到推导，非空 = 显式钉死该端点。响应投影恒返回**生效值**（推导
-  行展开 `{base_url}/api/v1`）；编辑框预填的生效值原样回显提交不算显式
-  钉死（`resolveURLs` 回显守卫：存量为推导行且提交值恰等于新 base 推导
-  值 → 保持推导）。
+  行展开 `{base_url}/api/v1`），另返回 `api_base_url_derived` 区分两种状态：
+  编辑框据此对推导行留空字段（占位符动态展示推导值）、对钉死行预填钉死值；
+  即便展开值被原样回显提交也不算显式钉死（`resolveURLs` 回显守卫：存量为
+  推导行且提交值恰等于新 base 推导值 → 保持推导）。
 
 ## SSRF 规则（`pkg/forges`）
 

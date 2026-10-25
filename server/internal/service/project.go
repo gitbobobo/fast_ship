@@ -544,6 +544,15 @@ func parseRepositoryURL(raw string) (host, owner, repo string, explicit bool, er
 		// 集成只有显式写 http:// 的仓库 URL 才匹配得上。github.com 的任何
 		// scheme/默认端口写法都归一回裸主机名（= 内置 github-default）。
 		if _, port, err := net.SplitHostPort(host); err != nil {
+			// 首段带冒号却不是合法 host[:port]/[v6]:port（forge:、无括号
+			// ::1、破损括号）是输入格式错误，不是「缺端口」——补默认端口
+			// 只会归一成永不命中的键，把写错格式误报成「主机未匹配」、
+			// 将管理员引向去配一条不可能的集成。完整括号形态（[::1] 无
+			// 端口）仍按缺端口补默认。
+			bracketed := strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]")
+			if strings.Contains(host, ":") && !bracketed {
+				return "", "", "", false, errors.New("仓库链接主机格式无效（IPv6 地址需以 [] 包裹，端口须为数字）")
+			}
 			if scheme == "http" {
 				host += ":80"
 			} else {

@@ -860,6 +860,112 @@ func TestProbeForgeBothForbiddenFails(t *testing.T) {
 	}
 }
 
+func TestForgeIntegrationUpdateHostMigrationBlocked(t *testing.T) {
+	env := forgeTestService(t)
+	ctx := context.Background()
+
+	created, err := env.svc.Create(ctx, forgeCreateReq("forge", "https://old.example.com", "tok"))
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	// 无引用时归一主机迁移放行。
+	got, err := env.svc.Update(ctx, created.Id, &api.UpdateForgeIntegrationRequest{
+		BaseUrl: ptrStr("https://new.example.com"),
+	})
+	if err != nil || got.BaseUrl != "https://new.example.com" {
+		t.Fatalf("unreferenced host migration = %v, %+v", err, got)
+	}
+
+	// 建项目引用后改主机：40935 且消息列项目名，存量基址/主机键不被写动。
+	proj := model.Project{ID: uuid.NewString(), UserID: uuid.NewString(), Name: "绑定项目B", CodeIntegrationID: created.Id}
+	if err := env.db.Create(&proj).Error; err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	_, err = env.svc.Update(ctx, created.Id, &api.UpdateForgeIntegrationRequest{
+		BaseUrl: ptrStr("https://else.example.com"),
+	})
+	upErr := appErr(t, err)
+	if upErr.Code != 40935 || !strings.Contains(upErr.Message, "绑定项目B") {
+		t.Fatalf("referenced host migration should be 40935 with project name, got %v", err)
+	}
+	row, err := env.repo.FindByID(created.Id)
+	if err != nil || row.BaseURL != "https://new.example.com" {
+		t.Fatalf("base_url must stay put after blocked migration, got %+v (%v)", row, err)
+	}
+
+	// 有引用但同归一主机的写法级改写（尾斜杠）不触发拦截。
+	if _, err := env.svc.Update(ctx, created.Id, &api.UpdateForgeIntegrationRequest{
+		BaseUrl: ptrStr("https://new.example.com/"),
+	}); err != nil {
+		t.Fatalf("same-host rewrite should pass, got %v", err)
+	}
+	// 有引用的非基址更新（改名）不受影响。
+	if _, err := env.svc.Update(ctx, created.Id, &api.UpdateForgeIntegrationRequest{
+		Name: ptrStr("改名"),
+	}); err != nil {
+		t.Fatalf("name-only update should pass, got %v", err)
+	}
+
+	// 解除引用后迁移放行（显式迁移路径：先解绑，或新建集成逐个改绑）。
+	if err := env.db.Model(&model.Project{}).Where("id = ?", proj.ID).
+		Update("code_integration_id", "").Error; err != nil {
+		t.Fatalf("clear ref: %v", err)
+	}
+	got, err = env.svc.Update(ctx, created.Id, &api.UpdateForgeIntegrationRequest{
+		BaseUrl: ptrStr("https://else.example.com"),
+	})
+	if err != nil || got.BaseUrl != "https://else.example.com" {
+		t.Fatalf("host migration after unref = %v, %+v", err, got)
+	}
+}
+
+func TestForgeIntegrationApiBaseDerivedFlag(t *testing.T) {
+	env := forgeTestService(t)
+	ctx := context.Background()
+
+	// 默认创建：api 按 {base}/api/v1 推导，投影标记 derived。
+	derived, err := env.svc.Create(ctx, forgeCreateReq("d", "https://d.example.com", "tok"))
+	if err != nil {
+		t.Fatalf("create derived: %v", err)
+	}
+	if !derived.ApiBaseUrlDerived || derived.ApiBaseUrl != "https://d.example.com/api/v1" {
+		t.Fatalf("derived flag/expansion wrong: %+v", derived)
+	}
+
+	// 显式钉死 api：derived=false，改 base_url 时不跟随。
+	pinned, err := env.svc.Create(ctx, &api.CreateForgeIntegrationRequest{
+		Name: "p", BaseUrl: "https://p.example.com", Token: "tok",
+		ApiBaseUrl: ptrStr("https://api-p.example.com/v1"),
+	})
+	if err != nil {
+		t.Fatalf("create pinned: %v", err)
+	}
+	if pinned.ApiBaseUrlDerived || pinned.ApiBaseUrl != "https://api-p.example.com/v1" {
+		t.Fatalf("pinned flag wrong: %+v", pinned)
+	}
+	got, err := env.svc.Update(ctx, pinned.Id, &api.UpdateForgeIntegrationRequest{
+		BaseUrl: ptrStr("https://p2.example.com"),
+	})
+	if err != nil {
+		t.Fatalf("update base: %v", err)
+	}
+	if got.ApiBaseUrl != "https://api-p.example.com/v1" || got.ApiBaseUrlDerived {
+		t.Fatalf("pinned api must not follow base change: %+v", got)
+	}
+
+	// 推导行改 base_url 后 api 跟随重新推导，derived 保持 true。
+	got, err = env.svc.Update(ctx, derived.Id, &api.UpdateForgeIntegrationRequest{
+		BaseUrl: ptrStr("https://d2.example.com"),
+	})
+	if err != nil {
+		t.Fatalf("update derived base: %v", err)
+	}
+	if got.ApiBaseUrl != "https://d2.example.com/api/v1" || !got.ApiBaseUrlDerived {
+		t.Fatalf("derived api must follow base change: %+v", got)
+	}
+}
+
 // ---- 小工具 ----
 
 func ptrStr(s string) *string { return &s }

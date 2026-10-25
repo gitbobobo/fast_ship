@@ -209,7 +209,9 @@ func (s *ForgeIntegrationService) Create(ctx context.Context, req *api.CreateFor
 // Update PUT /api/deployment/integrations/:id：部分更新。url / allow_private_
 // network 变更按最终值重新校验（flag 关闭会按公网口径复核现有基址）；token /
 // webhook_secret 缺省、null 或空串 = 保留旧值；ca_cert_pem 空串 = 清空；
-// api_base_url 空串 = 重置为 {base_url}/api/v1 推导。
+// api_base_url 空串 = 重置为 {base_url}/api/v1 推导。base_url 归一主机变更
+// 等同迁移全部项目绑定，仍有引用时 40935 拒绝（同 Delete 口径），同主机的
+// 写法级改写（尾斜杠、默认端口）不触发。
 func (s *ForgeIntegrationService) Update(ctx context.Context, id string, req *api.UpdateForgeIntegrationRequest) (*api.ForgeIntegration, error) {
 	if id == model.ForgeIntegrationBuiltinGitHubID {
 		return nil, errForgeIntegrationBuiltin
@@ -245,6 +247,7 @@ func (s *ForgeIntegrationService) Update(ctx context.Context, id string, req *ap
 	// 字段更新——改 api 到可达端点、开内网放行正是失效期的自救路径。
 	baseChanged := req.BaseUrl != nil && strings.TrimSpace(*req.BaseUrl) != strings.TrimSpace(row.BaseURL)
 	apiChanged := req.ApiBaseUrl != nil && strings.TrimSpace(*req.ApiBaseUrl) != strings.TrimSpace(row.APIBaseURL)
+	hostMigrating := false
 	if baseChanged || apiChanged || flagChanged {
 		reqBase := row.BaseURL
 		if baseChanged {
@@ -286,6 +289,12 @@ func (s *ForgeIntegrationService) Update(ctx context.Context, id string, req *ap
 				return nil, err
 			}
 		}
+		// 归一主机变更等同迁移全部项目绑定：绑定按集成 id 持久化，改主机后
+		// 同 owner/repo 在新实例上可能是完全不同的仓库——存在引用时与删除
+		// 同口径拒绝（写入走 UpdateColumnsIfUnreferenced），让管理员先解绑
+		// 或走「新建集成 + 项目逐个改绑」的显式迁移路径。判定用归一 host_key
+		// 而非字符串：尾斜杠、scheme 默认端口这类同主机改写不触发拦截。
+		hostMigrating = baseChanged && forges.HostKey(base) != row.HostKey
 		row.BaseURL = base
 		row.APIBaseURL = apiBase
 		// host_key 与 base_url 同步落库：同归一主机的部分唯一索引在这里兜
@@ -336,15 +345,25 @@ func (s *ForgeIntegrationService) Update(ctx context.Context, id string, req *ap
 	}
 
 	if len(fields) > 0 {
-		if err := s.repo.UpdateColumns(id, fields); err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
+		var updateErr error
+		if hostMigrating {
+			affected, err := s.repo.UpdateColumnsIfUnreferenced(id, fields)
+			if err == nil && affected == 0 {
+				return nil, s.hostMigrationInUseErr(id)
+			}
+			updateErr = err
+		} else {
+			updateErr = s.repo.UpdateColumns(id, fields)
+		}
+		if updateErr != nil {
+			if errors.Is(updateErr, gorm.ErrRecordNotFound) {
 				return nil, errs.ErrForgeIntegrationNotFound
 			}
-			if errors.Is(err, repository.ErrForgeHostTaken) {
+			if errors.Is(updateErr, repository.ErrForgeHostTaken) {
 				// 唯一索引兜底触发（改基址的并发窗口），折回同类 40001。
 				return nil, s.hostTakenErr(row.HostKey)
 			}
-			s.logger.Error("更新代码集成失败", zap.Error(err))
+			s.logger.Error("更新代码集成失败", zap.Error(updateErr))
 			return nil, errs.ErrInternal
 		}
 		// updated_at 由 UpdateColumns 写库，回读保证响应带着新值。
@@ -390,6 +409,29 @@ func (s *ForgeIntegrationService) Delete(ctx context.Context, id string) error {
 	}
 	return errs.New(errs.ErrForgeIntegrationInUse.Code,
 		errs.ErrForgeIntegrationInUse.Message+"："+strings.Join(names, "、"))
+}
+
+// hostMigrationInUseErr 归一主机变更仍被项目引用时的拒绝：UpdateColumnsIf-
+// Unreferenced 写 0 行时先确认行还在（并发删除按 40435），再列引用项目名——
+// 与 Delete 同口径，指明先解绑或新建集成逐个改绑。
+func (s *ForgeIntegrationService) hostMigrationInUseErr(id string) error {
+	if _, err := s.repo.FindByID(id); err != nil {
+		return s.notFound(err)
+	}
+	refs, err := s.repo.ReferencingProjects(id)
+	if err != nil {
+		s.logger.Error("统计集成引用项目失败", zap.Error(err))
+		return errs.ErrInternal
+	}
+	names := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		names = append(names, ref.Name)
+	}
+	if len(names) == 0 {
+		return errs.ErrForgeIntegrationInUse
+	}
+	return errs.New(errs.ErrForgeIntegrationInUse.Code,
+		"该集成仍被项目引用，不能更改站点主机（改主机等同迁移全部绑定，请先解除项目绑定或新建集成后逐个改绑）："+strings.Join(names, "、"))
 }
 
 // Test POST /api/deployment/integrations/:id/test：解密 token 后按集成现建
@@ -444,6 +486,7 @@ func (s *ForgeIntegrationService) builtinProjection(ctx context.Context) (*api.F
 		Name:                "GitHub（内置）",
 		BaseUrl:             githubWebBase(s.cfg),
 		ApiBaseUrl:          apiBase,
+		ApiBaseUrlDerived:   false,
 		TokenSet:            ok,
 		WebhookSecretSet:    strings.TrimSpace(appCfg.WebhookSecret) != "",
 		HasCaCert:           false,
@@ -652,11 +695,14 @@ func forgeAPIBaseURL(row *model.ForgeIntegration) string {
 func projectForgeRow(row *model.ForgeIntegration) *api.ForgeIntegration {
 	created, updated := row.CreatedAt, row.UpdatedAt
 	return &api.ForgeIntegration{
-		Id:                  row.ID,
-		Kind:                api.Forgejo,
-		Name:                row.Name,
-		BaseUrl:             row.BaseURL,
-		ApiBaseUrl:          forgeAPIBaseURL(row),
+		Id:         row.ID,
+		Kind:       api.Forgejo,
+		Name:       row.Name,
+		BaseUrl:    row.BaseURL,
+		ApiBaseUrl: forgeAPIBaseURL(row),
+		// 存储空串 = 跟随 base_url 推导；响应里区分推导与钉死，编辑端才能
+		// 提示「原样提交仍是推导」而不是把展开值当已钉死值回显。
+		ApiBaseUrlDerived:   strings.TrimSpace(row.APIBaseURL) == "",
 		TokenSet:            len(row.TokenEncrypted) > 0,
 		WebhookSecretSet:    len(row.WebhookSecretEncrypted) > 0,
 		HasCaCert:           strings.TrimSpace(row.CACertPEM) != "",

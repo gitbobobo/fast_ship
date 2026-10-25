@@ -77,6 +77,13 @@ function ForgeIntegrationDialogInner({
   // 「清空已存证书」是表单外状态：勾选后提交 ca_cert_pem: ""，与留空保留区分。
   const [clearCaCert, setClearCaCert] = useState(false);
 
+  // api_base_url 推导态不预填展开值——展开值留在占位符里跟随 base_url 动态
+  // 展示，预填会让「跟随推导」与「显式钉死」同形，管理员分不清当前语义。
+  // 钉死态预填钉死值，原样回发被下面的提交守卫收成 null=保留。
+  const apiBasePrefill = integration?.api_base_url_derived
+    ? ""
+    : (integration?.api_base_url ?? "");
+
   const {
     register,
     handleSubmit,
@@ -89,7 +96,7 @@ function ForgeIntegrationDialogInner({
     defaultValues: {
       name: integration?.name ?? "",
       base_url: integration?.base_url ?? "",
-      api_base_url: integration?.api_base_url ?? "",
+      api_base_url: apiBasePrefill,
       token: "",
       webhook_secret: "",
       ca_cert_pem: "",
@@ -132,10 +139,11 @@ function ForgeIntegrationDialogInner({
       allow_private_network: values.allow_private_network,
     };
     // api_base_url 只在字段值真的变了才提交（空串 = 重置为 {base_url}/api/v1
-    // 推导值）：预填的存量值原样回发会让服务端误以为管理员显式钉死了它，
-    // 改 base_url 后推导值无法跟随新实例。
+    // 推导值）：预填值原样回发会让服务端误以为管理员显式钉死了它，改
+    // base_url 后推导值无法跟随新实例。比较基准是预填值不是响应展开值：
+    // 推导态预填空串，留空提交本就表示保持推导。
     const apiBaseUrl = values.api_base_url.trim();
-    if (apiBaseUrl !== (integration?.api_base_url ?? "")) {
+    if (apiBaseUrl !== apiBasePrefill) {
       payload.api_base_url = apiBaseUrl;
     }
     // 凭证留空 = 保留旧值（契约：省略即保留），只在填了新值时提交。
@@ -249,8 +257,11 @@ function ForgeIntegrationDialogInner({
               {...register("api_base_url")}
             />
             <p className="text-xs text-muted-foreground">
-              留空按 {derivedApiBase} 推导
-              {isEdit && "；清空后提交即重置为默认"}
+              {isEdit
+                ? integration?.api_base_url_derived
+                  ? `当前跟随实例地址推导；填写则钉死该值`
+                  : "当前已显式钉死；清空提交回到跟随实例地址推导"
+                : `留空按 ${derivedApiBase} 推导`}
             </p>
           </div>
 
