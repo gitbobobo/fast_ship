@@ -230,10 +230,12 @@ func TestBotBudgetMonthlyPreviousPeriodBackfill(t *testing.T) {
 	}
 }
 
-// TestBotBudgetPreviousWindowSkippedAfterGrace 评审回归：非首轮评估且当前已
-// 远离周期起点（宽限外）时，上一周期窗口不再扫描——该窗口花费已固定，每
-// 分钟重扫是纯浪费。首轮评估（停摆兜底）仍照常回看。
-func TestBotBudgetPreviousWindowSkippedAfterGrace(t *testing.T) {
+// TestBotBudgetPreviousWindowSkippedOnTick 评审回归：纯 tick 轮次
+// （includePrev=false）不扫上一周期窗口——该窗口花费只可能因跨界
+// straggler 落账而增长，而每笔 usage 落账都会 kick 一轮含回看的评估，
+// 纯 tick 扫它是固定开销却没有新数据可看。首轮评估（停摆兜底）仍照常
+// 回看。
+func TestBotBudgetPreviousWindowSkippedOnTick(t *testing.T) {
 	env := setupBotBudgetEnv(t)
 	userID := createBotTestUser(t, env.db, "budgetprevskip")
 	bot := env.createBot(t, userID)
@@ -247,10 +249,17 @@ func TestBotBudgetPreviousWindowSkippedAfterGrace(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("upsert budget: %v", err)
 	}
+	// 预算写入应 kick 一轮含回看的评估——运行中途新建的预算也能补一次
+	// 上一周期 catch-up，不必等停摆重启。
+	select {
+	case <-env.bots.budgetKick:
+	default:
+		t.Fatal("Upsert 后应 kick 一轮含回看的预算评估")
+	}
 
 	env.bots.evalBudgetsOnce(false)
 	if n := countBudgetNotifications(t, env, userID); n != 0 {
-		t.Fatalf("宽限外的非首轮评估不应扫上一周期，实得 %d 条告警", n)
+		t.Fatalf("无新落账的 tick 轮次不应扫上一周期，实得 %d 条告警", n)
 	}
 	env.bots.evalBudgetsOnce(true)
 	if n := countBudgetNotifications(t, env, userID); n != 1 {
