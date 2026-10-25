@@ -537,7 +537,7 @@ function CacheHitSection({ data }: { data: BotUsageInsights }) {
                   )}
                 </div>
               </div>
-              <div className="min-w-[2rem] shrink-0 pr-2 text-right text-xs font-semibold tabular-nums text-muted-foreground">
+              <div className="min-w-[2rem] shrink-0 pr-3 text-right text-xs font-semibold tabular-nums text-muted-foreground">
                 {formatCacheHitRate(day.rate)}
               </div>
             </div>
@@ -1040,11 +1040,14 @@ function ModelAlternativesSection({ bots }: { bots: BotUsageInsightsBot[] }) {
                       data-testid="usage-insights-model-candidate"
                     >
                       <span className="font-mono">{candidate.model}</span>
-                      <span className="tabular-nums">
+                      <span className="whitespace-nowrap tabular-nums">
                         {formatCostEstimate(candidate.cost)}
                       </span>
                       <span
-                        className={cn("tabular-nums", savingClass(candidate.saving))}
+                        className={cn(
+                          "whitespace-nowrap tabular-nums",
+                          savingClass(candidate.saving),
+                        )}
                       >
                         {savingText(candidate.saving)}
                       </span>
