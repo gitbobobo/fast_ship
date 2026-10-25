@@ -243,7 +243,7 @@ function BudgetPeriodForm({
             data-testid={`budget-thresholds-${period}`}
             value={thresholds}
             onChange={(e) => setThresholds(e.target.value)}
-            placeholder="例如：80%,100%"
+            placeholder="例如：80%、100%"
           />
         </div>
       </div>
@@ -322,8 +322,7 @@ function BudgetsBody({
             预算设置{name ? ` · ${name}` : ""}
           </DialogTitle>
           <DialogDescription>
-            预算只用于告警提醒，不会停止机器人运行；金额口径是已计价花费
-            （USD，实收优先，缺失时按目录估算）。
+            预算只用于告警提醒，不会停止机器人运行；金额口径是已计价花费（USD，实收优先，缺失时按目录估算）。
           </DialogDescription>
         </DialogHeader>
         {isError ? (

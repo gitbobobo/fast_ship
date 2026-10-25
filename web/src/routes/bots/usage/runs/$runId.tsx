@@ -9,6 +9,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Header } from "@/components/layout/header";
 import { ContextGrowthChart } from "@/components/bots/bot-usage-insights";
 import { errorText } from "@/lib/api/client";
+import { toolActionLabel } from "@/lib/bots/tool-labels";
 import type {
   BotUsageMaintenanceRequest,
   BotUsageMaintenanceRun,
@@ -465,16 +466,28 @@ function RequestRow({ request }: { request: BotUsageRequest }) {
               key={call.id}
               className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground"
             >
-              <span className="font-mono text-foreground">
-                {call.tool_name}
-                {call.action ? `:${call.action}` : ""}
+              <span className="text-foreground">
+                {toolActionLabel(call.tool_name, call.action)}
+                <span className="ml-1.5 font-mono text-muted-foreground">
+                  {call.tool_name}
+                  {call.action ? `:${call.action}` : ""}
+                </span>
               </span>
               <Badge variant="secondary" className="h-4 px-1.5 text-[10px]">
                 {labelOf(TOOL_CALL_STATUS_LABELS, call.status)}
               </Badge>
               <span>耗时 {formatSpan(call.created_at, call.finished_at)}</span>
-              {call.error_code && (
-                <span className="text-destructive">{call.error_code}</span>
+              {(call.error_message || call.error_code) && (
+                // 与工具卡同口径：错误码进 title 备查，正文剥掉 [NNNNN] 前缀；
+                // 历史行可能只有 error_code，无 message 时仍露出码值。
+                <span
+                  title={call.error_code ?? undefined}
+                  className="basis-full text-destructive"
+                >
+                  {call.error_message
+                    ? call.error_message.replace(/^\[\d{5}\]\s*/, "")
+                    : call.error_code}
+                </span>
               )}
             </li>
           ))}

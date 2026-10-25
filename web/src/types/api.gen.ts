@@ -6908,6 +6908,7 @@ export interface components {
             action: string;
             status: string;
             error_code?: string | null;
+            error_message?: string | null;
             /** Format: date-time */
             created_at: string;
             /** Format: date-time */

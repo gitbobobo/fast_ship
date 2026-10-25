@@ -15153,6 +15153,9 @@ components:
         error_code:
           type: string
           nullable: true
+        error_message:
+          type: string
+          nullable: true
         created_at:
           type: string
           format: date-time

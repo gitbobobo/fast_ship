@@ -414,7 +414,7 @@ func (r *BotUsageRepository) ListToolCallsByRequestIDs(requestIDs []string) ([]m
 		// 明细投影只需展示列；arguments_json/result_json 可为瘦身前大文本，
 		// 非终态明细每 5s 轮询，整行拉取会让响应体积无界。
 		err := r.db.Select("id", "request_id", "tool_name", "action", "status",
-			"error_code", "created_at", "finished_at").
+			"error_code", "error_message", "created_at", "finished_at").
 			Where("request_id IN ?", batch).
 			Order("created_at ASC, id ASC").Find(&part).Error
 		if err != nil {

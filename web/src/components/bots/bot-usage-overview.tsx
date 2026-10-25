@@ -62,6 +62,19 @@ export function formatUsageCost(value: number | null | undefined): string {
 }
 
 /**
+ * 总览统计卡的金额：同一行卡片位数一致——$1 以下固定 4 位小数不剥尾零
+ * （视觉审查：$0.1399 / $0.02 / $0.007 并排时精度随值跳变），更大金额按
+ * 分位；未计价仍「—」。
+ */
+export function formatUsageStatCost(value: number | null | undefined): string {
+  if (value == null) return "—";
+  if (value <= 0) return "$0";
+  if (value >= 1) return `$${value.toFixed(2)}`;
+  if (value < 0.001) return "<$0.001";
+  return `$${value.toFixed(4)}`;
+}
+
+/**
  * 缓存命中率：0–1 小数转整百分数；无完整 usage 为 null → 「—」。
  * 0 < rate < 0.005 四舍五入会得到 0%，与真零无法区分 → 「<1%」。
  */
@@ -261,13 +274,13 @@ export function BotUsageOverviewPanel({
           <div className="grid gap-3 sm:grid-cols-3">
             <StatCard
               label="总花费"
-              value={formatUsageCost(data.totals.cost)}
+              value={formatUsageStatCost(data.totals.cost)}
               sub={`${data.totals.total_requests} 次模型请求`}
               title={USAGE_PRICE_NOTE}
             />
             <StatCard
               label="日均花费"
-              value={formatUsageCost(data.totals.daily_average)}
+              value={formatUsageStatCost(data.totals.daily_average)}
               title={USAGE_PRICE_NOTE}
             />
             <StatCard

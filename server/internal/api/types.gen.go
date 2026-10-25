@@ -2615,13 +2615,14 @@ type BotUsageScheduleTask struct {
 
 // BotUsageToolCall defines model for BotUsageToolCall.
 type BotUsageToolCall struct {
-	Action     string  `json:"action"`
-	CreatedAt  string  `json:"created_at"`
-	ErrorCode  *string `json:"error_code,omitempty"`
-	FinishedAt *string `json:"finished_at,omitempty"`
-	Id         string  `json:"id"`
-	Status     string  `json:"status"`
-	ToolName   string  `json:"tool_name"`
+	Action       string  `json:"action"`
+	CreatedAt    string  `json:"created_at"`
+	ErrorCode    *string `json:"error_code,omitempty"`
+	ErrorMessage *string `json:"error_message,omitempty"`
+	FinishedAt   *string `json:"finished_at,omitempty"`
+	Id           string  `json:"id"`
+	Status       string  `json:"status"`
+	ToolName     string  `json:"tool_name"`
 }
 
 // BotUsageToolsShare defines model for BotUsageToolsShare.

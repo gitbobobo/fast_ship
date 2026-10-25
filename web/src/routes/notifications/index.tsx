@@ -85,13 +85,13 @@ export default function NotificationsPage() {
           </div>
         ) : (
           <div className="overflow-x-auto rounded-lg border">
-            <Table>
+            <Table className="table-fixed">
               <TableHeader>
                 <TableRow>
-                  <TableHead>类型</TableHead>
-                  <TableHead className="min-w-[200px]">内容</TableHead>
-                  <TableHead className="w-[140px] whitespace-nowrap">时间</TableHead>
-                  <TableHead className="text-right">操作</TableHead>
+                  <TableHead className="w-[96px]">类型</TableHead>
+                  <TableHead>内容</TableHead>
+                  <TableHead className="w-[150px] whitespace-nowrap">时间</TableHead>
+                  <TableHead className="w-[96px] text-right">操作</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -128,7 +128,7 @@ function NotificationRow({
       <TableCell>
         <Badge variant="secondary">{notificationKindLabel(notification.kind)}</Badge>
       </TableCell>
-      <TableCell className="min-w-0">
+      <TableCell className="min-w-0 whitespace-normal">
         <p className="break-words text-sm font-medium">
           {unread && (
             <span

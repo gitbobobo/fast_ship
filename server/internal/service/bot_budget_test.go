@@ -183,7 +183,7 @@ func TestBotBudgetDailyThresholdAlertsOnce(t *testing.T) {
 	if !strings.Contains(notice.Body, "未计价") || !strings.Contains(notice.Body, "不会停止运行") {
 		t.Fatalf("通知正文应说明未计价口径与不停止运行: %s", notice.Body)
 	}
-	if !strings.Contains(notice.Body, "$0.80") || !strings.Contains(notice.Body, "$1.00") {
+	if !strings.Contains(notice.Body, "$0.8") || !strings.Contains(notice.Body, "$1") {
 		t.Fatalf("通知正文应含首次触发快照金额: %s", notice.Body)
 	}
 	if !strings.Contains(notice.Title, "每日预算") || !strings.Contains(notice.Title, "80%") {

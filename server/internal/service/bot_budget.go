@@ -7,6 +7,7 @@ import (
 	"math"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/model"
@@ -157,11 +158,13 @@ func botBudgetThresholdReached(amountUSD, threshold, spendUSD float64) bool {
 	return math.Round(spendUSD*10000) >= math.Round(amountUSD*threshold*10000)
 }
 
-// botBudgetMoney 是文案里的美元金额：小于 $1 保留 4 位小数（与花费页
-// 的小额口径一致），更大金额按分位显示。
+// botBudgetMoney 是文案里的美元金额：小于 $1 保留至多 4 位小数并剥尾零
+// （与 web formatCostEstimate 的分位段同口径，$0.0050 → $0.005），更大
+// 金额按分位显示。
 func botBudgetMoney(v float64) string {
 	if math.Abs(v) < 1 {
-		return "$" + strconv.FormatFloat(v, 'f', 4, 64)
+		s := strings.TrimRight(strconv.FormatFloat(v, 'f', 4, 64), "0")
+		return "$" + strings.TrimRight(s, ".")
 	}
 	return "$" + strconv.FormatFloat(v, 'f', 2, 64)
 }

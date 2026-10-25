@@ -1301,13 +1301,14 @@ func (s *BotService) GetBotUsageRunDetail(userID, runID string) (*api.BotUsageRu
 	callsByRequest := make(map[string][]api.BotUsageToolCall, len(requestRows))
 	for _, c := range callRows {
 		callsByRequest[c.RequestID] = append(callsByRequest[c.RequestID], api.BotUsageToolCall{
-			Id:         c.ID,
-			ToolName:   c.ToolName,
-			Action:     c.Action,
-			Status:     string(c.Status),
-			ErrorCode:  c.ErrorCode,
-			CreatedAt:  c.CreatedAt.UTC().Format(time.RFC3339Nano),
-			FinishedAt: rfc3339(c.FinishedAt),
+			Id:           c.ID,
+			ToolName:     c.ToolName,
+			Action:       c.Action,
+			Status:       string(c.Status),
+			ErrorCode:    c.ErrorCode,
+			ErrorMessage: c.ErrorMessage,
+			CreatedAt:    c.CreatedAt.UTC().Format(time.RFC3339Nano),
+			FinishedAt:   rfc3339(c.FinishedAt),
 		})
 	}
 
