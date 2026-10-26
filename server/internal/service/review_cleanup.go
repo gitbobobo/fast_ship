@@ -339,11 +339,21 @@ func (s *ReviewService) worktreeReclaimDue(run *model.ReviewRun, now time.Time) 
 	if run.WorktreeState == model.ReviewWorktreeBranchPending {
 		return s.worktreeBackoffDue(run.ID, worktreeReasonBranchPending, now)
 	}
-	switch run.WorktreeReason {
-	case worktreeReasonRegistryIncomplete, worktreeReasonRemoveUncertain, worktreeReasonRemoveBudgetPending:
+	if isWorktreePendingReason(run.WorktreeReason) {
 		return s.worktreeBackoffDue(run.ID, run.WorktreeReason, now)
 	}
 	return true
+}
+
+// isWorktreePendingReason 报告该分类码是否为「保持 none 挂退避」的持续待确
+// 认原因：到期预判与行内退避闸门两处共用同一份名单——新增待确认键漏挂任
+// 何一处都会让行绕过节流每 tick 重读大登记（复审 P2 的漂移源）。
+func isWorktreePendingReason(reason string) bool {
+	switch reason {
+	case worktreeReasonRegistryIncomplete, worktreeReasonRemoveUncertain, worktreeReasonRemoveBudgetPending:
+		return true
+	}
+	return false
 }
 
 // worktreeFinish 是单条运行回收终态出口的闭包形状，实现统一委托给
@@ -420,11 +430,8 @@ func (s *ReviewService) cleanupRunWorktree(run *model.ReviewRun, now time.Time) 
 	// 持续待确认的行（登记未读完 / 删除结果待确认）按退避节流：未到点整个
 	// 跳过——登记读取是大头，且这些行的远端真值在退避窗口内不会变，每 10s
 	// 重读一遍大登记既浪费又给上游添堵。
-	switch run.WorktreeReason {
-	case worktreeReasonRegistryIncomplete, worktreeReasonRemoveUncertain:
-		if !s.worktreeBackoffDue(run.ID, run.WorktreeReason, now) {
-			return
-		}
+	if isWorktreePendingReason(run.WorktreeReason) && !s.worktreeBackoffDue(run.ID, run.WorktreeReason, now) {
+		return
 	}
 
 	finish := worktreeFinish(func(state model.ReviewWorktreeState, reason, errMsg string, notify bool) {

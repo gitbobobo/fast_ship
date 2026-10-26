@@ -100,7 +100,8 @@ type ReviewService struct {
 	// worktreeTries：归档/工作区读取等回收阶段的有限重试计数（进程内即可：
 	// 进程重启后未完成的运行下个 tick 重新计，上限内不会漏终态）。
 	// worktreeBackoff：持续待确认问题（INT-170：branch_pending 复查、
-	// registry_incomplete 与 remove_uncertain 重试）的指数退避表，按
+	// registry_incomplete / remove_uncertain / remove_budget_pending 重
+	// 试）的指数退避表，按
 	// runID|reason 存下次允许尝试的时刻与已排次数。进程重启丢失无所谓——
 	// 下个 tick 即可重查，代价只是一次提前的登记读。终态转移时随
 	// worktreeTries 一并释放（worktreeMu 同时护着两张表：访问总在同一段

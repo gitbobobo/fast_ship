@@ -175,8 +175,9 @@ type ReviewRun struct {
 	WorktreeError  string              `gorm:"column:worktree_error;type:text" json:"worktree_error,omitempty"`
 	// WorktreeReason 回收问题的分类码（INT-170，见 review_cleanup.go 的
 	// worktreeReason* 常量）：removed 时清空；failed/branch_pending 与持续
-	// 待确认（none + registry_incomplete/remove_uncertain）时写入。聚合通知
-	// 按 (environment_id, repo_full_name, worktree_reason) 分键查询受影响
+	// 待确认（none + registry_incomplete / remove_uncertain /
+	// remove_budget_pending）时写入。聚合通知按
+	// (environment_id, repo_full_name, worktree_reason) 分键查询受影响
 	// 运行清单。
 	WorktreeReason string `gorm:"column:worktree_reason;type:text" json:"worktree_reason,omitempty"`
 
