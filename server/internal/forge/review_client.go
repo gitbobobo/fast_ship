@@ -17,6 +17,8 @@ const (
 type ReviewClient interface {
 	// 元数据
 	GetPullRequest(ctx context.Context, repoFullName string, number int) (*PullRequest, error)
+	// GetPullRequestDiff err 为 ErrDiffTooLarge 时返回值是尽量读到的前缀
+	// （可能为空）——前缀仍是真实内容，调用方按不完整件处置。
 	GetPullRequestDiff(ctx context.Context, repoFullName string, number int) (string, error)
 	ListReviewComments(ctx context.Context, repoFullName string, number int) ([]ReviewComment, error)
 	// ListIssueCommentsForPR PR 会话评论（review 行内之外的顶层讨论，INT-135

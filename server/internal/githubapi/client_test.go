@@ -132,8 +132,9 @@ func TestRESTClient_PersistentUnauthorizedPropagatesStatusError(t *testing.T) {
 	}
 }
 
-// 2xx 响应体超上限确定性报 ErrBodyTooLarge——静默截断的 diff 会被当成完整
-// 变更清单，不能放行；非 2xx 大响应仍截断走 StatusError（错误路径语义不变）。
+// 2xx 响应体超上限确定性报 ErrBodyTooLarge 并携带已读前缀（前缀仍是真实
+// 内容，AgentDiff 端点按截断件用）——静默截断的 diff 会被当成完整变更清单，
+// 不能放行；非 2xx 大响应仍截断走 StatusError（错误路径语义不变）。
 func TestBodyTooLargeDetection(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/pulls/7") {
@@ -148,9 +149,12 @@ func TestBodyTooLargeDetection(t *testing.T) {
 
 	auth := &fakeAuth{token: "t"}
 	c := NewClient(auth, ts.URL)
-	_, err := c.GetPullRequestDiff(context.Background(), 1, "octocat/hw", 7)
+	diff, err := c.GetPullRequestDiff(context.Background(), 1, "octocat/hw", 7)
 	if !errors.Is(err, ErrBodyTooLarge) {
 		t.Fatalf("超限 diff 应报 ErrBodyTooLarge, got %v", err)
+	}
+	if len(diff) != diffBodyMaxBytes {
+		t.Fatalf("前缀 len = %d, want %d", len(diff), diffBodyMaxBytes)
 	}
 
 	err = c.GetRepository(context.Background(), 1, "octocat/hw")

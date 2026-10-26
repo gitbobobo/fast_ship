@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/api"
+	"github.com/godbobo/fast_ship/server/internal/forge"
 	"github.com/godbobo/fast_ship/server/internal/githubapi"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
@@ -542,5 +543,93 @@ func TestResolveRunTokenMismatchTerminalConsumed(t *testing.T) {
 	})
 	if _, err := e.review.ResolveRunToken(context.Background(), raw, false, "run-other"); err != errs.ErrReviewRunMismatch {
 		t.Fatalf("terminal+consumed mismatch = %v, want ErrReviewRunMismatch", err)
+	}
+}
+
+// failOnceResolver 首次 ClientFor 注入失败的解析器包装：模拟并发完全相同
+// 提交在客户端解析窗口完成的场景。
+type failOnceResolver struct {
+	inner  forge.ReviewClientResolver
+	failed bool
+	onFail func()
+}
+
+func (f *failOnceResolver) ClientFor(ctx context.Context, integrationID, repoFullName string, installationID int64) (forge.ReviewClient, error) {
+	if !f.failed {
+		f.failed = true
+		f.onFail()
+		return nil, errors.New("resolver down")
+	}
+	return f.inner.ClientFor(ctx, integrationID, repoFullName, installationID)
+}
+
+// TestAgentSubmitResultConcurrentReplayAtClientResolve client 解析失败出口
+// （r6 Note）：并发完全相同提交在 reviewClient 调用前完成——解析失败不得
+// 把合法重放顶成 502，复核后按幂等成功返回。
+func TestAgentSubmitResultConcurrentReplayAtClientResolve(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	e.fake.SetPR(repo, 34, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 34, HeadSHA: "sha-c",
+		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
+	})
+	e.svc.db.Create(&model.ReviewPullRequest{
+		RepoFullName: repo, PRNumber: 34, ProjectID: e.project.ID, UserID: e.user.ID,
+		InstallationID: 42, HeadSHA: "sha-c", RoundNumber: 1, UpdatedAt: now,
+	})
+	e.fake.SetTreeFiles(repo, "sha-c", "a.go")
+	run := e.seedRun(t, repo, 34, "sha-c", model.ReviewRunRunning, now)
+
+	body := `{"findings":[{"level":"P1","file":"a.go","body":"x"}],"prior":[],"summary":"s","ui_changed":false,"ui_changed_since_last_visual":false}`
+	expected, err := json.Marshal(&api.ReviewCodeResult{
+		Findings: []api.ReviewCodeFinding{{Level: api.P1, File: "a.go", Body: "x"}},
+		Prior:    []api.ReviewPriorDecision{},
+		Summary:  "s", UiChanged: false, UiChangedSinceLastVisual: false,
+	})
+	if err != nil {
+		t.Fatalf("marshal canonical: %v", err)
+	}
+	e.review.clients = &failOnceResolver{inner: e.review.clients, onFail: func() {
+		e.svc.db.Model(&model.ReviewRun{}).Where("id = ?", run.ID).
+			Updates(map[string]any{"status": model.ReviewRunCompleted, "result_json": string(expected)})
+	}}
+
+	if err := e.review.AgentSubmitResult(context.Background(), run.ID, []byte(body)); err != nil {
+		t.Fatalf("client-resolve exit must honor concurrent replay: %v", err)
+	}
+}
+
+// TestAgentDiffOversizedFallsBackToTruncated diff 超本端读入上限时端点给
+// 截断件（前缀可能为空）而非 50200（r6 Note）——超巨型 PR 每次拉取失败
+// 会把运行卡到 deadline；未超限 diff 保持原口径。
+func TestAgentDiffOversizedFallsBackToTruncated(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	run := e.seedRun(t, repo, 35, "sha-d", model.ReviewRunRunning, now)
+
+	// 未超限 diff 原样返回。
+	e.fake.SetDiff("diff --git a/a.go b/a.go\n")
+	out, err := e.review.AgentDiff(context.Background(), run.ID)
+	if err != nil || out.Truncated {
+		t.Fatalf("small diff = %+v, %v", out, err)
+	}
+
+	// >1MB → 截断标记。
+	e.fake.SetDiff(strings.Repeat("x", reviewDiffMaxBytes+10))
+	out, err = e.review.AgentDiff(context.Background(), run.ID)
+	if err != nil || !out.Truncated || len(out.Content) != reviewDiffMaxBytes {
+		t.Fatalf(">1MB diff = truncated=%v len=%d, %v", out.Truncated, len(out.Content), err)
+	}
+
+	// 超本端读入上限 → 截断件兜底（前缀为空也返回 truncated:true），不 50200。
+	e.fake.SetDiffError(githubapi.ErrBodyTooLarge)
+	out, err = e.review.AgentDiff(context.Background(), run.ID)
+	if err != nil {
+		t.Fatalf("oversized diff must not 50200: %v", err)
+	}
+	if !out.Truncated || out.Content != "" {
+		t.Fatalf("oversized diff = truncated=%v content=%q", out.Truncated, out.Content)
 	}
 }

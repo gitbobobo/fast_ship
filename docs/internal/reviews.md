@@ -492,7 +492,7 @@ Agent 执行，服务端的 run 强校验是兜底。
 | 端点（前缀 `/api/review-agent/runs/:runId`） | 说明 |
 | --- | --- |
 | `GET /pull-request` | PR 元数据（repo、PR 号、标题、正文、base/head ref、head SHA、URL）；身份全部取自运行行，不接受请求参数。 |
-| `GET /pull-request/diff` | PR diff，>1MB 按字节截断并标 `truncated:true`。 |
+| `GET /pull-request/diff` | PR diff，>1MB 按字节截断并标 `truncated:true`；diff 超本端读入上限（64MiB/64MB）时给已读前缀（可能为空）同样标 `truncated:true`，不让 Agent 每次拉取都 50200 卡到 deadline。 |
 | `GET /history` | 系统生成的历史上下文 Markdown（无历史时空串）。代码：上一轮（`round_number-1`）所有组合的结构化发现（含组合名）+ 上一轮结论之后的新行内/会话评论；首次审查给全部讨论（最近 50 条）。视觉：上一轮视觉 findings + unmeasurable，再加该轮 `prior` 里仍未解决（`status=open`）的条目（独立小节「仍未解决（更早一轮）」）——模型把遗留只写进 `prior(open)` 时也不会从下一轮历史里消失。**只识别本系统自己发的结论**（按评论隐藏标记找回），不兼容旧 Review Bot / Code Bot 评论。 |
 | `GET /screenshots` | 仅视觉运行。`{items:[{id,label,url}], changed}`：`url` 指向图片端点；`changed` = 本次 head 的截图 URL 集合 ≠ 上一轮视觉运行绑定 head 的截图 URL 集合（只作审查员的「是否要对比上一轮」提示；**是否开视觉轮由总账的内容指纹决定**，两者口径不同，别拿它推结论）。 |
 | `GET /screenshots/{assetId}` | 仅视觉运行。图片字节 + Content-Type，按运行所属 PR/SHA 校验；未下载成功 404。 |

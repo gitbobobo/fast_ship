@@ -690,18 +690,22 @@ func TestForgejoClient_InvalidRepoName(t *testing.T) {
 
 // TestForgejoClient_GetPullRequestDiff_TooLarge 本端截断探测超上限返回
 // ErrDiffTooLarge 哨兵，IsDiffTooLarge 与平台 too_large 同口径命中——
-// service 侧进降级收尾，不再按可重试错误无限退避。
+// service 侧进降级收尾，不再按可重试错误无限退避；返回值携带已读前缀
+// （AgentDiff 端点按截断件给 Agent，不每次 50200 卡到 deadline）。
 func TestForgejoClient_GetPullRequestDiff_TooLarge(t *testing.T) {
 	client, _ := newForgejoTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = w.Write(make([]byte, respBodyMaxBytes+1))
 	})
-	_, err := client.GetPullRequestDiff(context.Background(), "o/r", 3)
+	diff, err := client.GetPullRequestDiff(context.Background(), "o/r", 3)
 	if !IsDiffTooLarge(err) {
 		t.Fatalf("超限 diff 应命中 IsDiffTooLarge, got %v", err)
 	}
 	if !errors.Is(err, ErrDiffTooLarge) {
 		t.Fatalf("应保留 ErrDiffTooLarge 哨兵, got %v", err)
+	}
+	if len(diff) != respBodyMaxBytes {
+		t.Fatalf("前缀 len = %d, want %d", len(diff), respBodyMaxBytes)
 	}
 }
 

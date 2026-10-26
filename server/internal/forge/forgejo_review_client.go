@@ -205,8 +205,10 @@ func (c *ForgejoReviewClient) GetPullRequestDiff(ctx context.Context, repoFullNa
 	}
 	if len(data) > respBodyMaxBytes {
 		// 确定性失败走 ErrDiffTooLarge 哨兵：service 的 IsDiffTooLarge 把它
-		// 与平台 too_large 归一，进降级收尾而不是无限退避重试。
-		return "", fmt.Errorf("%w: forge: PR #%d 的 diff 超过 %d 字节上限", ErrDiffTooLarge, number, respBodyMaxBytes)
+		// 与平台 too_large 归一，进降级收尾而不是无限退避重试。已读前缀
+		// 原样返回——前缀仍是真实内容，调用方按不完整件处置。
+		return string(data[:respBodyMaxBytes]),
+			fmt.Errorf("%w: forge: PR #%d 的 diff 超过 %d 字节上限", ErrDiffTooLarge, number, respBodyMaxBytes)
 	}
 	return string(data), nil
 }

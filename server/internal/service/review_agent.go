@@ -133,10 +133,12 @@ func (s *ReviewService) AgentDiff(ctx context.Context, runID string) (*api.Revie
 		return nil, err
 	}
 	diff, err := client.GetPullRequestDiff(ctx, run.RepoFullName, run.PRNumber)
-	if err != nil {
+	if err != nil && !forge.IsDiffTooLarge(err) {
 		return nil, errs.New(errs.ErrGitHubAPI.Code, "读取 diff 失败: "+err.Error())
 	}
-	truncated := false
+	// IsDiffTooLarge：超本端读入上限——给已读前缀（可能为空）按截断件
+	// 返回，Agent 有 truncated:true 契约可降级，不每次 50200 卡到 deadline。
+	truncated := err != nil
 	if len(diff) > reviewDiffMaxBytes {
 		diff = diff[:reviewDiffMaxBytes]
 		truncated = true
@@ -466,6 +468,9 @@ func (s *ReviewService) AgentSubmitResult(ctx context.Context, runID string, bod
 	// 提交前核对 PR 实时状态：已关闭或 head 已前进 → 本轮作废（取消 + 消费令牌 + sync）。
 	client, err := s.reviewClient(ctx, run.IntegrationID, run.RepoFullName, run.InstallationID)
 	if err != nil {
+		if completedReplay() {
+			return nil
+		}
 		return err
 	}
 	pr, err := client.GetPullRequest(ctx, run.RepoFullName, run.PRNumber)

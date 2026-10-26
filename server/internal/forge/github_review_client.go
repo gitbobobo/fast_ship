@@ -67,8 +67,8 @@ func (c *GitHubReviewClient) GetPullRequestDiff(ctx context.Context, repoFullNam
 	diff, err := c.api.GetPullRequestDiff(ctx, c.installationID, repoFullName, number)
 	if errors.Is(err, githubapi.ErrBodyTooLarge) {
 		// 本端截断探测与 Forgejo 适配器同一哨兵口径：service 只认
-		// IsDiffTooLarge，不区分两种来源。
-		return "", fmt.Errorf("%w: github: %s #%d 的 diff 超过本端读入上限", ErrDiffTooLarge, repoFullName, number)
+		// IsDiffTooLarge，不区分两种来源；前缀原样透传。
+		return diff, fmt.Errorf("%w: github: %s #%d 的 diff 超过本端读入上限", ErrDiffTooLarge, repoFullName, number)
 	}
 	return diff, err
 }

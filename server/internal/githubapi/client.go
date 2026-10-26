@@ -107,8 +107,9 @@ func (h *httpClient) do(ctx context.Context, method, url, accept, bearer string,
 	return h.doLimit(ctx, method, url, accept, bearer, in, bodyReadMaxBytes)
 }
 
-// doLimit 同 do，按 max 读响应体：2xx 超限返回 ErrBodyTooLarge（截断件不能
-// 当完整件用）；非 2xx 仍按限长截断返回，供 StatusError 消息使用。
+// doLimit 同 do，按 max 读响应体：2xx 超限返回「截断前缀 + ErrBodyTooLarge」
+// （截断件不能当完整件用，但前缀仍是真实内容）；非 2xx 仍按限长截断返回，
+// 供 StatusError 消息使用。
 func (h *httpClient) doLimit(ctx context.Context, method, url, accept, bearer string, in any, max int64) (int, []byte, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -143,10 +144,12 @@ func (h *httpClient) doLimit(ctx context.Context, method, url, accept, bearer st
 		return resp.StatusCode, nil, err
 	}
 	if int64(len(raw)) > max {
-		if resp.StatusCode < 300 {
-			return resp.StatusCode, nil, fmt.Errorf("%w: %s %s 超过 %d 字节", ErrBodyTooLarge, method, url, max)
-		}
 		raw = raw[:max]
+		if resp.StatusCode < 300 {
+			// 超限的 2xx：返回已截断前缀 + ErrBodyTooLarge，调用方按
+			// 「不完整件」处置（diff 端点的前缀仍是真实内容）。
+			return resp.StatusCode, raw, fmt.Errorf("%w: %s %s 超过 %d 字节", ErrBodyTooLarge, method, url, max)
+		}
 	}
 	return resp.StatusCode, raw, nil
 }
@@ -243,11 +246,12 @@ func (c *restClient) GetPullRequest(ctx context.Context, installationID int64, r
 }
 
 // diffBodyMaxBytes diff 端点读取上限，与 Forgejo 适配器的 respBodyMaxBytes
-// 对齐；超限走 ErrBodyTooLarge 而非静默截断（半截 diff 不能当完整变更清单）。
+// 对齐；超限走 ErrBodyTooLarge 而非静默截断（半截 diff 不能当完整变更清单，
+// 但前缀仍是真实内容——err=ErrBodyTooLarge 时返回值是尽量读到的前缀）。
 const diffBodyMaxBytes = 64 << 20
 
 // GetPullRequestDiff diff 端点返回 text/plain（Accept: vnd.github.v3.diff），
-// 不走 JSON 解析。
+// 不走 JSON 解析。err 为 ErrBodyTooLarge 时返回值是已截断前缀。
 func (c *restClient) GetPullRequestDiff(ctx context.Context, installationID int64, repoFullName string, number int) (string, error) {
 	owner, name, err := splitRepo(repoFullName)
 	if err != nil {
@@ -258,6 +262,7 @@ func (c *restClient) GetPullRequestDiff(ctx context.Context, installationID int6
 	err = c.withToken(ctx, installationID, func(bearer string) error {
 		code, raw, err := c.h.doLimit(ctx, http.MethodGet, c.h.baseURL+path, "application/vnd.github.v3.diff", bearer, nil, diffBodyMaxBytes)
 		if err != nil {
+			diff = string(raw) // ErrBodyTooLarge 时 raw 是已截断前缀
 			return err
 		}
 		if code >= 300 {
@@ -267,7 +272,7 @@ func (c *restClient) GetPullRequestDiff(ctx context.Context, installationID int6
 		return nil
 	})
 	if err != nil {
-		return "", err
+		return diff, err
 	}
 	return diff, nil
 }
