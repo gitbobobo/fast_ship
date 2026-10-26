@@ -63,6 +63,10 @@ const (
 	// 失败，远端必然没执行）的有限重试计数——与「结果不可见」的复查退避
 	// 分开计数：前者直接重试即可，后者每轮都要先复查远端实际状态。
 	worktreeTryRemoveAttempt = "remove-attempt"
+	// worktreeTryOwnership 归属核验的 DB 读失败（行快照/认领统计）：与登记
+	// 读取分键——登记读成功每 tick 都复位 registry 键，共用会把核验错误的
+	// 宽限刷成永远 1 次，持续性核验失败永远到不了上限（复审 P2）。
+	worktreeTryOwnership = "ownership"
 )
 
 // 回收问题分类码（INT-170，写入 review_runs.worktree_reason）：聚合通知按
@@ -263,6 +267,9 @@ func (s *ReviewService) cleanupWorktrees(now time.Time) {
 	}
 	var runs []model.ReviewRun
 	if err := s.db.
+		// result_json 是结构化结论大字段，回收链路不读——全量扫描常驻
+		// pending 行时按行载荷减负（codex 复审意见）。
+		Omit("result_json").
 		Where("kind = ? AND worktree_state IN ? AND status IN ?",
 			model.ReviewKindCode,
 			[]model.ReviewWorktreeState{model.ReviewWorktreeNone, model.ReviewWorktreeBranchPending},
@@ -610,16 +617,17 @@ func (s *ReviewService) worktreeStep(ctx context.Context, run *model.ReviewRun, 
 	}
 	verdict, reason, err := s.verifyWorktreeOwnership(run, path, branch, reg)
 	if err != nil {
-		// 暂时读不到（运行行/认领统计）：有限重试，超限记失败。登记读取失败
-		// 不会出现在这里——调用方已读好登记传入。
-		if tries := s.bumpWorktreeTries(run.ID, worktreeTryRegistry); tries < reviewWorktreeMaxTries {
+		// 暂时读不到（运行行/认领统计）：有限重试，超限记失败。与登记读取
+		// 分键（worktreeTryOwnership）——登记读成功每 tick 复位 registry 键，
+		// 共用会让核验错误的宽限永远刷回 1、持续失败永远到不了上限。
+		if tries := s.bumpWorktreeTries(run.ID, worktreeTryOwnership); tries < reviewWorktreeMaxTries {
 			return false
 		}
 		finish(model.ReviewWorktreeFailed, worktreeReasonRegistryError, err.Error(), true)
 		return false
 	}
-	// 归属核验读成功同样复位连续失败计数（与登记读共用 worktreeTryRegistry）。
-	s.resetWorktreeTries(run.ID, worktreeTryRegistry)
+	// 归属核验读成功复位其连续失败计数。
+	s.resetWorktreeTries(run.ID, worktreeTryOwnership)
 	switch verdict {
 	case worktreeGone:
 		return true

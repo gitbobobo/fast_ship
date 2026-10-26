@@ -27,8 +27,8 @@ func (s *ReviewService) publishCleanupAggregate(run *model.ReviewRun, reason str
 	}
 	var affected []model.ReviewRun
 	if err := s.db.
-		Where("environment_id = ? AND repo_full_name = ? AND worktree_reason = ? AND worktree_state IN ?",
-			run.EnvironmentID, run.RepoFullName, reason,
+		Where("environment_id = ? AND repo_full_name = ? AND worktree_reason = ? AND user_id = ? AND worktree_state IN ?",
+			run.EnvironmentID, run.RepoFullName, reason, run.UserID,
 			[]model.ReviewWorktreeState{model.ReviewWorktreeNone,
 				model.ReviewWorktreeBranchPending, model.ReviewWorktreeFailed}).
 		Order("finished_at ASC").Limit(reviewStageBatch + 1).Find(&affected).Error; err != nil {

@@ -628,3 +628,76 @@ func TestCleanupBranchPendingLateWorktreeReclaimed(t *testing.T) {
 		t.Fatalf("歧义 worktree 不得删除, removed = %v", t3.removed)
 	}
 }
+
+// TestCleanupOwnershipErrorsUseOwnCounter（复审2轮 P2）归属核验的 DB 读失败
+// 与登记读取分键：登记读成功每 tick 复位 registry 键，不再把核验错误的
+// 宽限刷回 1——持续性核验失败能累积到上限收尾。
+func TestCleanupOwnershipErrorsUseOwnCounter(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	env := createT3TestEnv(t, e.svc.db, e.user.ID, "env-own")
+	createTestT3Binding(t, e.svc.db, e.project.ID, env.ID, "t3p")
+
+	// 种一条正常可回收费运行再删库行：对象各门字段齐全，核验阶段读行
+	// 快照必失败（record not found）——模拟行读持续性故障。
+	run := e.seedCleanableRun(t, repo, 530, env, model.ReviewRunCompleted, "/wt/x", now)
+	run.WorktreeBranch = "br-x"
+	if err := e.svc.db.Delete(&model.ReviewRun{}, "id = ?", run.ID).Error; err != nil {
+		t.Fatalf("delete phantom run: %v", err)
+	}
+	t3 := &fakeReviewT3{
+		threadWorktrees: map[string]T3ThreadWorktree{
+			run.ThreadID: {Path: "/wt/x", Branch: "br-x"},
+		},
+		worktrees: []T3Worktree{{Path: "/wt/x", RefNames: []string{"br-x"}}},
+	}
+	review := e.withT3(t3, nil, nil)
+
+	review.cleanupRunWorktree(run, now)
+	if got := review.worktreeTries[run.ID+"|"+worktreeTryOwnership]; got != 1 {
+		t.Fatalf("核验错误应记 ownership 键, got %d", got)
+	}
+	if got := review.worktreeTries[run.ID+"|"+worktreeTryRegistry]; got != 0 {
+		t.Fatalf("核验错误不得记 registry 键, got %d", got)
+	}
+	// 后续每轮登记读都成功（复位 registry），核验错误照常累计到上限。
+	review.cleanupRunWorktree(run, now.Add(time.Second))
+	review.cleanupRunWorktree(run, now.Add(2*time.Second))
+	if _, ok := review.worktreeTries[run.ID+"|"+worktreeTryOwnership]; ok {
+		t.Fatal("到上限收尾后计数应随 releaseWorktreeTries 释放")
+	}
+}
+
+// TestCleanupAggregateFiltersByUser（复审2轮 Note）聚合清单按 user_id 过滤：
+// 环境已按用户隔离，同（env, 仓库, 原因）下其他用户的行不得进本用户通知。
+func TestCleanupAggregateFiltersByUser(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	env := createT3TestEnv(t, e.svc.db, e.user.ID, "env-usr")
+	createTestT3Binding(t, e.svc.db, e.project.ID, env.ID, "t3p")
+
+	mine := e.seedCleanableRun(t, repo, 540, env, model.ReviewRunFailed, "", now)
+	e.svc.db.Model(mine).Updates(map[string]any{
+		"worktree_state": model.ReviewWorktreeFailed, "worktree_reason": worktreeReasonRegistryError,
+	})
+	other := e.seedCleanableRun(t, repo, 541, env, model.ReviewRunFailed, "", now)
+	user2 := createTestUser(t, e.svc.db, "someone-else")
+	e.svc.db.Model(other).Updates(map[string]any{
+		"user_id": user2.ID, "worktree_state": model.ReviewWorktreeFailed,
+		"worktree_reason": worktreeReasonRegistryError,
+	})
+
+	review := e.withT3(&fakeReviewT3{}, nil, nil)
+	review.publishCleanupAggregate(mine, worktreeReasonRegistryError, now)
+
+	var note model.Notification
+	e.svc.db.First(&note, "kind = ? AND user_id = ?", model.NotificationReviewCleanupFailed, e.user.ID)
+	if !strings.Contains(note.Body, mine.ID[:8]) {
+		t.Fatalf("本用户的失败行应在清单: %q", note.Body)
+	}
+	if strings.Contains(note.Body, other.ID[:8]) {
+		t.Fatalf("其他用户的行不得进本用户清单: %q", note.Body)
+	}
+}
