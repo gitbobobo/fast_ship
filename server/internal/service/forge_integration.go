@@ -111,7 +111,7 @@ func (s *ForgeIntegrationService) List(ctx context.Context) ([]api.ForgeIntegrat
 		// 「没有内置集成」与「App 密文解不开」，凭证状态一律不可信。
 		out = append(out, api.ForgeIntegration{
 			Id:          model.ForgeIntegrationBuiltinGitHubID,
-			Kind:        api.Github,
+			Kind:        api.ForgeIntegrationKindGithub,
 			Name:        "GitHub（内置）",
 			BaseUrl:     githubWebBase(s.cfg),
 			Builtin:     true,
@@ -120,6 +120,27 @@ func (s *ForgeIntegrationService) List(ctx context.Context) ([]api.ForgeIntegrat
 	}
 	for i := range rows {
 		out = append(out, *projectForgeRow(&rows[i]))
+	}
+	return out, nil
+}
+
+// ListOptions GET /api/integrations：项目表单集成选择器的精简投影（INT-167），
+// 所有登录用户可读——绑定项目只需知道集成存在与基址。直接复用 List 的完整
+// 投影再裁掉管理字段，保证首条恒为内置 github-default 的顺序语义不变。
+func (s *ForgeIntegrationService) ListOptions(ctx context.Context) ([]api.IntegrationOption, error) {
+	items, err := s.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]api.IntegrationOption, 0, len(items))
+	for _, it := range items {
+		out = append(out, api.IntegrationOption{
+			Id:      it.Id,
+			Kind:    api.IntegrationOptionKind(it.Kind),
+			Name:    it.Name,
+			BaseUrl: it.BaseUrl,
+			Builtin: it.Builtin,
+		})
 	}
 	return out, nil
 }
@@ -512,7 +533,7 @@ func (s *ForgeIntegrationService) builtinProjection(ctx context.Context) (*api.F
 	}
 	return &api.ForgeIntegration{
 		Id:                  model.ForgeIntegrationBuiltinGitHubID,
-		Kind:                api.Github,
+		Kind:                api.ForgeIntegrationKindGithub,
 		Name:                "GitHub（内置）",
 		BaseUrl:             githubWebBase(s.cfg),
 		ApiBaseUrl:          apiBase,
@@ -738,7 +759,7 @@ func projectForgeRow(row *model.ForgeIntegration) *api.ForgeIntegration {
 	created, updated := row.CreatedAt, row.UpdatedAt
 	return &api.ForgeIntegration{
 		Id:         row.ID,
-		Kind:       api.Forgejo,
+		Kind:       api.ForgeIntegrationKindForgejo,
 		Name:       row.Name,
 		BaseUrl:    row.BaseURL,
 		ApiBaseUrl: forgeAPIBaseURL(row),

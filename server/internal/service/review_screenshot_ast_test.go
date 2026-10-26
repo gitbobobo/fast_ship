@@ -179,7 +179,7 @@ func TestProbeScreenshotsClassifiesNotAnImage(t *testing.T) {
 	// 全部「不是图」→ probeNone。
 	e.media.failURLs = map[string]error{badge: githubmedia.ErrUnsupportedUpstreamMedia}
 	e.media.anonErr = githubmedia.ErrUnsupportedUpstreamMedia
-	probe := review.probeScreenshots(context.Background(), 1, body)
+	probe := review.probeScreenshots(context.Background(), model.ForgeIntegrationBuiltinGitHubID, 1, body)
 	if probe.result != probeNone {
 		t.Fatalf("probe = %+v, want probeNone（全部不是图）", probe)
 	}
@@ -190,7 +190,7 @@ func TestProbeScreenshotsClassifiesNotAnImage(t *testing.T) {
 		badge: githubmedia.ErrUnsupportedUpstreamMedia,
 		png:   errors.New("connection refused"),
 	}
-	probe = review.probeScreenshots(context.Background(), 1, body)
+	probe = review.probeScreenshots(context.Background(), model.ForgeIntegrationBuiltinGitHubID, 1, body)
 	if probe.result != probeUnavailable {
 		t.Fatalf("probe = %+v, want probeUnavailable（存在拉不到）", probe)
 	}
@@ -203,7 +203,7 @@ func TestProbeScreenshotsClassifiesNotAnImage(t *testing.T) {
 		badge: githubmedia.ErrInvalidMediaURL,
 		png:   githubmedia.ErrInvalidMediaURL,
 	}
-	probe = review.probeScreenshots(context.Background(), 1, body)
+	probe = review.probeScreenshots(context.Background(), model.ForgeIntegrationBuiltinGitHubID, 1, body)
 	if probe.result != probeNone {
 		t.Fatalf("probe = %+v, want probeNone（形态不支持=不是图）", probe)
 	}
@@ -241,7 +241,8 @@ func TestVisualSyncCarryMessageWithoutScreenshots(t *testing.T) {
 	})
 	fp := screenshotFingerprint(collectScreenshotURLs(oldBody))
 	if err := e.svc.db.Create(&model.ReviewPullRequest{
-		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 93, UserID: e.user.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: repo, PRNumber: 93, UserID: e.user.ID,
 		InstallationID: 1, HeadSHA: "sha-cg", RoundNumber: 2,
 		VisualScreensFingerprint: fp, SyncPending: true, SyncEpoch: 1, UpdatedAt: now,
 	}).Error; err != nil {
@@ -307,7 +308,8 @@ func TestVisualSyncCarryMessageWhenAllNotImages(t *testing.T) {
 	// 账本指纹是旧描述的：新描述只有徽章 → 集合指纹不同 → 探测真的发生。
 	fp := screenshotFingerprint(collectScreenshotURLs(oldBody))
 	if err := e.svc.db.Create(&model.ReviewPullRequest{
-		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 94, UserID: e.user.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: repo, PRNumber: 94, UserID: e.user.ID,
 		InstallationID: 1, HeadSHA: "sha-cm", RoundNumber: 2,
 		VisualScreensFingerprint: fp, SyncPending: true, SyncEpoch: 1, UpdatedAt: now,
 	}).Error; err != nil {
@@ -367,7 +369,8 @@ func TestVisualSyncProbeNoneSettlesFingerprint(t *testing.T) {
 		"result_json": `{"summary":"干净","findings":[],"prior":[],"ui_changed":true,"ui_changed_since_last_visual":true}`,
 	})
 	ledger := &model.ReviewPullRequest{
-		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 96, UserID: e.user.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: repo, PRNumber: 96, UserID: e.user.ID,
 		InstallationID: 1, HeadSHA: "sha-pn", RoundNumber: 1,
 		// 账本指纹是旧集合的：新描述只有徽章 → 指纹不同 → 探测发生。
 		VisualScreensFingerprint: "old-set-fp", SyncPending: true, SyncEpoch: 1, UpdatedAt: now,
@@ -472,13 +475,15 @@ func TestAgentScreenshotsFiltersStaleRows(t *testing.T) {
 
 	// 当前 URL 的行 + 一个旧口径残留行（URL 已不在当前描述里）。
 	current := &model.ReviewAsset{
-		ID: "asset-current", RepoFullName: repo, PRNumber: 95, HeadSHA: "sha-st",
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ID:            "asset-current", RepoFullName: repo, PRNumber: 95, HeadSHA: "sha-st",
 		Position: 0, Label: "界面", SourceURL: "https://uiv.frp.musiver.cn/f/x.png",
 		StoragePath: "/cache/x.png", MimeType: "image/png", SizeBytes: 10,
 		CreatedAt: now,
 	}
 	stale := &model.ReviewAsset{
-		ID: "asset-stale", RepoFullName: repo, PRNumber: 95, HeadSHA: "sha-st",
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ID:            "asset-stale", RepoFullName: repo, PRNumber: 95, HeadSHA: "sha-st",
 		Position: 1, Label: "旧图", SourceURL: "https://uiv.frp.musiver.cn/f/old-uiv.png",
 		StoragePath: "/cache/old.png", MimeType: "image/png", SizeBytes: 10,
 		CreatedAt: now,

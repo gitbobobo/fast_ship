@@ -14,6 +14,7 @@ import (
 func createTestReviewPR(t *testing.T, db *gorm.DB, userID, projectID, repo string, prNumber, round int, opts ...func(*model.ReviewPullRequest)) *model.ReviewPullRequest {
 	t.Helper()
 	pr := &model.ReviewPullRequest{
+		IntegrationID:  model.ForgeIntegrationBuiltinGitHubID,
 		RepoFullName:   repo,
 		PRNumber:       prNumber,
 		ProjectID:      projectID,
@@ -39,6 +40,7 @@ func createTestReviewRun(t *testing.T, db *gorm.DB, userID, projectID string, op
 	t.Helper()
 	now := time.Now().UTC()
 	r := &model.ReviewRun{
+		IntegrationID:    model.ForgeIntegrationBuiltinGitHubID,
 		ID:               uuid.NewString(),
 		UserID:           userID,
 		ProjectID:        projectID,
@@ -203,7 +205,8 @@ func TestListReviewProjects_TakenBy(t *testing.T) {
 	// repo_full_name 快照，与大写无关）。
 	now := time.Now().UTC()
 	if err := svc.db.Create(&model.ProjectReviewSettings{
-		ProjectID: otherProject.ID, UserID: other.ID, RepoFullName: "octo/repo", Enabled: true,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     otherProject.ID, UserID: other.ID, RepoFullName: "octo/repo", Enabled: true,
 		TriggerOpened: true, TriggerSynchronize: true,
 		CodeCombinationsJSON: `[{"environment_id":"e1","instance_id":"i","model":"m","t3_project_id":"t3p"}]`,
 		CreatedAt:            now, UpdatedAt: now,
@@ -212,7 +215,8 @@ func TestListReviewProjects_TakenBy(t *testing.T) {
 	}
 	// 我的项目没有开启（停用）但保存过设置：最近状态按这条设置行的快照挑账本。
 	if err := svc.db.Create(&model.ProjectReviewSettings{
-		ProjectID: myProject.ID, UserID: me.ID, RepoFullName: "octo/repo", Enabled: false,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     myProject.ID, UserID: me.ID, RepoFullName: "octo/repo", Enabled: false,
 		CodeCombinationsJSON: "[]", VisualCombinationsJSON: "[]",
 		CreatedAt: now, UpdatedAt: now,
 	}).Error; err != nil {
@@ -258,7 +262,8 @@ func TestListReviewProjects_StatusIgnoresHistoricalRepo(t *testing.T) {
 	now := time.Now().UTC()
 	// 当前审查仓库由设置行的 repo_full_name 决定（停用也保留设置行）。
 	if err := svc.db.Create(&model.ProjectReviewSettings{
-		ProjectID: project.ID, UserID: me.ID, RepoFullName: "octo/new", Enabled: false,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     project.ID, UserID: me.ID, RepoFullName: "octo/new", Enabled: false,
 		CodeCombinationsJSON: "[]", VisualCombinationsJSON: "[]",
 		CreatedAt: now, UpdatedAt: now,
 	}).Error; err != nil {
@@ -266,13 +271,15 @@ func TestListReviewProjects_StatusIgnoresHistoricalRepo(t *testing.T) {
 	}
 	// 旧仓库的记录更新时间更晚，也不能被选中。
 	if err := svc.db.Create(&model.ReviewPullRequest{
-		ProjectID: project.ID, RepoFullName: "octo/old", PRNumber: 1, UserID: me.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     project.ID, RepoFullName: "octo/old", PRNumber: 1, UserID: me.ID,
 		HeadSHA: "sha-old", CodeStatus: "failure", VisualStatus: "failure", UpdatedAt: now,
 	}).Error; err != nil {
 		t.Fatalf("seed old ledger: %v", err)
 	}
 	if err := svc.db.Create(&model.ReviewPullRequest{
-		ProjectID: project.ID, RepoFullName: "octo/new", PRNumber: 2, UserID: me.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     project.ID, RepoFullName: "octo/new", PRNumber: 2, UserID: me.ID,
 		HeadSHA: "sha-new", CodeStatus: "success", UpdatedAt: now.Add(-time.Hour),
 	}).Error; err != nil {
 		t.Fatalf("seed new ledger: %v", err)

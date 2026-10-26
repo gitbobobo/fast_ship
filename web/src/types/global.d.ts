@@ -87,6 +87,8 @@ declare global {
   /* ---------- 部署级代码仓集成（INT-166） ---------- */
 
   type ForgeIntegration = components["schemas"]["ForgeIntegration"];
+  /** 项目表单的集成选项投影（INT-167，GET /api/integrations，全用户可读）。 */
+  type IntegrationOption = components["schemas"]["IntegrationOption"];
   type ForgeIntegrationTest = components["schemas"]["ForgeIntegrationTest"];
   type CreateForgeIntegrationRequest =
     components["schemas"]["CreateForgeIntegrationRequest"];

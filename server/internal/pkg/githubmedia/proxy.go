@@ -23,6 +23,8 @@ import (
 
 	"golang.org/x/net/html"
 	"golang.org/x/net/html/atom"
+
+	"github.com/godbobo/fast_ship/server/internal/pkg/forges"
 )
 
 const ProxyPath = "/api/github/media-proxy"
@@ -178,6 +180,10 @@ type serviceConfig struct {
 	// 通配符）即跳过解析 IP 的内网检查；名单外主机与名单内主机重定向
 	// 出去的建连照旧检查。
 	trustedPrivateHosts []string
+	// trustedPrivateHostsFunc 动态可信内网主机清单：每次拨号现取（新配的
+	// 集成主机不用重启即生效）。与 trustedPrivateHosts 取并集——面向
+	// 「allow_private_network 的 Forgejo 集成主机」这类运行时来源。
+	trustedPrivateHostsFunc func() []string
 	// githubWebHost 部署的 GitHub Web 地址 host[:port]（同
 	// ProxyService.githubWebHost）：凭证闸门据此放行部署实例自己的附件路径，
 	// 空值按公共 GitHub 处理。
@@ -203,15 +209,18 @@ func NewProxyService(cacheRoot string) *ProxyService {
 // 一致（不区分大小写、不含端口、不支持通配符）时跳过内网 IP 检查——内网
 // DNS 把自建服务（如 UIV）直接解析到内网地址的部署靠它放行，空名单与
 // 旧行为一致。
-func NewReviewMediaService(cacheRoot, githubWebHost string, trustedPrivateHosts []string) *ProxyService {
+// trustedPrivateHostsFunc 是可选的动态可信主机来源（如允许私网的 Forgejo
+// 集成主机清单）——每次拨号现取，与静态名单取并集，传 nil 与旧行为一致。
+func NewReviewMediaService(cacheRoot, githubWebHost string, trustedPrivateHosts []string, trustedPrivateHostsFunc func() []string) *ProxyService {
 	return newService(cacheRoot, serviceConfig{
-		cacheSubdir:         "review-screenshot-cache",
-		allowURL:            allowPublicImageHost,
-		requireHTTPS:        true,
-		imagesOnly:          true,
-		guardAddress:        true,
-		trustedPrivateHosts: trustedPrivateHosts,
-		githubWebHost:       githubWebHost,
+		cacheSubdir:             "review-screenshot-cache",
+		allowURL:                allowPublicImageHost,
+		requireHTTPS:            true,
+		imagesOnly:              true,
+		guardAddress:            true,
+		trustedPrivateHosts:     trustedPrivateHosts,
+		trustedPrivateHostsFunc: trustedPrivateHostsFunc,
+		githubWebHost:           githubWebHost,
 	})
 }
 
@@ -237,7 +246,7 @@ func newService(cacheRoot string, cfg serviceConfig) *ProxyService {
 	if cfg.client == nil {
 		webHost := cfg.githubWebHost
 		cfg.client = newGuardedClient(cfg.requireHTTPS, cfg.allowURL, cfg.guardAddress,
-			cfg.trustedPrivateHosts,
+			cfg.trustedPrivateHosts, cfg.trustedPrivateHostsFunc,
 			func(u *url.URL) bool { return IsGitHubMediaURLFor(u.String(), webHost) })
 	}
 	s := &ProxyService{
@@ -299,7 +308,7 @@ func newProxyService(cacheRoot string, cacheTTL time.Duration, maxCacheEntrySize
 // Go http.Client 会把敏感头透传给同域及子域目标，GHE 部署的兄弟子域
 // （x.ghe.corp.com 对 ghe.corp.com）也在其列——目标过不了闸门就剥掉，
 // nil 一律剥。Transport 克隆自 DefaultTransport，保留连接池参数。
-func newGuardedClient(requireHTTPS bool, allowURL func(*url.URL) bool, guardAddress bool, trustedPrivateHosts []string, bearerGate func(*url.URL) bool) *http.Client {
+func newGuardedClient(requireHTTPS bool, allowURL func(*url.URL) bool, guardAddress bool, trustedPrivateHosts []string, trustedHostsFunc func() []string, bearerGate func(*url.URL) bool) *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	if guardAddress {
 		// 必须自己拨到目标才能校验目标 IP：走环境代理时校验到的会是代理地址
@@ -311,20 +320,39 @@ func newGuardedClient(requireHTTPS bool, allowURL func(*url.URL) bool, guardAddr
 			KeepAlive: 30 * time.Second,
 			Control:   guardDialControl,
 		}
-		if trusted := normalizeTrustedPrivateHosts(trustedPrivateHosts); len(trusted) > 0 {
-			// 名单内主机走不带 Control 的拨号器：判定用 DialContext 收到的
-			// addr 主机名（URL 的 host 部分，DNS 解析之前），不看解析出的
-			// IP——放行粒度是主机名，同一内网地址上反代挂着的其他服务不会
-			// 被连带放行。名单外主机、以及名单内主机 302 跳出的每次新建连
-			// 仍走 guarded 照常校验。
+		trusted := normalizeTrustedPrivateHosts(trustedPrivateHosts)
+		if len(trusted) > 0 || trustedHostsFunc != nil {
+			// 名单内主机跳过 IP 校验：判定用 DialContext 收到的 addr 主机名
+			// （URL 的 host 部分，DNS 解析之前），不看解析出的 IP——放行粒度
+			// 是主机名，同一内网地址上反代挂着的其他服务不会被连带放行。
+			// 名单外主机、以及名单内主机 302 跳出的每次新建连仍走 guarded
+			// 照常校验。trustedHostsFunc 每次拨号现取：新配的集成主机无需
+			// 重启即生效。
+			// 动态名单（allow_private_network 集成主机）不裸放行走私网口径
+			// 守卫——与 Forgejo API 面的 AllowPrivateNetwork 同策略：放行
+			// RFC1918/ULA/CGNAT，但回环、链路本地（含云元数据）、多播、
+			// 未指定与保留段仍恒拒。静态名单保留裸放行（管理员显式声明，
+			// UIV 等回环/私网服务靠它）。
 			direct := &net.Dialer{
 				Timeout:   30 * time.Second,
 				KeepAlive: 30 * time.Second,
 			}
+			privateMode := &net.Dialer{
+				Timeout:   30 * time.Second,
+				KeepAlive: 30 * time.Second,
+				Control:   guardPrivateDialControl,
+			}
 			transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 				if host, _, err := net.SplitHostPort(addr); err == nil {
-					if _, ok := trusted[strings.ToLower(host)]; ok {
+					host = strings.ToLower(host)
+					if _, ok := trusted[host]; ok {
 						return direct.DialContext(ctx, network, addr)
+					}
+					// 动态名单按 host:port 匹配：集成基址归一带端口（默认
+					// 端口按其 scheme 补），私网口径守卫只放到配置过的
+					// 端口——同主机其他端口上的服务不被连带信任。
+					if trustedHostsFunc != nil && dynamicTrustedAddrMatch(addr, trustedHostsFunc()) {
+						return privateMode.DialContext(ctx, network, addr)
 					}
 				}
 				return guarded.DialContext(ctx, network, addr)
@@ -353,6 +381,24 @@ func newGuardedClient(requireHTTPS bool, allowURL func(*url.URL) bool, guardAddr
 			return nil
 		},
 	}
+}
+
+// dynamicTrustedAddrMatch 动态名单的拨号地址判定：名单项是 host:port
+// 规范键（默认端口由集成侧按其基址 scheme 补好），拨号地址规范化成同
+// 键后完全一致比较——放行粒度是配置过的端口，主机名相同但端口不同不
+// 算数（同一内网主机上挂着的其他服务不会被连带放行）。
+func dynamicTrustedAddrMatch(addr string, hosts []string) bool {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	hostPort := net.JoinHostPort(strings.ToLower(host), port)
+	for _, h := range hosts {
+		if strings.ToLower(strings.TrimSpace(h)) == hostPort {
+			return true
+		}
+	}
+	return false
 }
 
 // normalizeTrustedPrivateHosts 配置的名单规整成小写主机名集合：去空白、
@@ -385,6 +431,25 @@ func guardDialControl(_, address string, _ syscall.RawConn) error {
 		return fmt.Errorf("上游地址 %q 不是合法 IP", host)
 	}
 	if isBlockedIP(ip) {
+		return ErrBlockedUpstreamAddress
+	}
+	return nil
+}
+
+// guardPrivateDialControl 私网放行口径的拨号校验（allow_private_network
+// 集成主机专用）：复用 forges 包的同一判定源——RFC1918/ULA/CGNAT 放行，
+// 回环、链路本地（含云元数据）、多播、未指定与保留段恒拒。报错统一落
+// ErrBlockedUpstreamAddress 保持下游分类一致。
+func guardPrivateDialControl(_, address string, _ syscall.RawConn) error {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return fmt.Errorf("解析上游地址 %q 失败: %w", address, err)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return fmt.Errorf("上游地址 %q 不是合法 IP", host)
+	}
+	if forges.IsBlockedPrivateMode(ip) {
 		return ErrBlockedUpstreamAddress
 	}
 	return nil

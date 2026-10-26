@@ -39,7 +39,7 @@ type ProjectService struct {
 	credentials   *ProjectCredentials
 	newClient     ghclient.ClientFactory
 	reviewCleaner ProjectReviewCleaner
-	// forgeIntegrations 部署级代码仓集成查找（INT-166）：仓库 URL 的非
+	// forgeIntegrations 部署级代码仓库集成查找（INT-166）：仓库 URL 的非
 	// github 主机按 base_url 匹配 forgejo 集成。nil 时视为「没有已配置集成」，
 	// 非 github 主机一律报未匹配。
 	forgeIntegrations *repository.ForgeIntegrationRepository
@@ -766,7 +766,7 @@ func errRepoHostUnmatched(host string, schemeless bool) *errs.AppError {
 // parseRepoBinding/读行 之后、项目落库之前集成被并发删除，重试即可拿到
 // 「集成不存在」的确定结论或重新选择集成。
 var errForgeBindingGone = errs.New(errs.ErrInvalidParams.Code,
-	"代码仓集成不存在或已被删除，请重试")
+	"代码仓库集成不存在或已被删除，请重新选择集成")
 
 // toResponse 组装项目响应；syncState 由调用方提供——单项目路径用
 // syncStateFor 现取，列表路径经 GetOrCreateByProjectIDs 批量预取后逐条传入，

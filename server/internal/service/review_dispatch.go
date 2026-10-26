@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/api"
-	"github.com/godbobo/fast_ship/server/internal/githubapi"
+	"github.com/godbobo/fast_ship/server/internal/forge"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
@@ -93,17 +93,45 @@ func (s *ReviewService) launchRun(ctx context.Context, runID string, now time.Ti
 	// closed 投递丢失」——closed 有意不进重投，对账不会补）。已关闭/合并
 	// 直接落 cancelled/pr_closed 终态，不建线程。检查必须在签发令牌之前：
 	// 只有从未签发的运行才会被 dispatchRuns 的认领超窗重新认领——读 PR 失败
-	// 时同样不落终态、不签令牌，留给下一轮。
+	// 时同样不落终态、不签令牌，留给下一轮。确定性失败（仓库/PR 已删、凭证
+	// 被拒/吊销、集成行缺失、密文损坏）每轮重认领结果相同：按消费防抖/轮询
+	// 的同一口径直接落终态报真实原因，不空转到 deadline 误报超时。
 	prCtx, prCancel := context.WithTimeout(ctx, 30*time.Second)
-	client, clientErr := s.ghClient(prCtx)
-	var pr *githubapi.PullRequest
+	client, clientErr := s.reviewClient(prCtx, run.IntegrationID, run.RepoFullName, run.InstallationID)
+	var pr *forge.PullRequest
 	if clientErr == nil {
-		pr, clientErr = client.GetPullRequest(prCtx, run.InstallationID, run.RepoFullName, run.PRNumber)
+		pr, clientErr = client.GetPullRequest(prCtx, run.RepoFullName, run.PRNumber)
 	}
 	prCancel()
 	if clientErr != nil {
-		s.logger.Warn("派发前读取 PR 失败，运行等待重新认领",
-			zap.String("run", run.ID), zap.Error(clientErr))
+		switch {
+		case forge.IsNotFound(clientErr):
+			// GitHub/Forgejo 对无权限资源也回 404（凭证吊销、仓库转私有、
+			// 安装被卸）——仓库级复核消歧：仓库可读而 PR 404 = PR 真已删，
+			// 同「PR 已关」终局不另发通知；仓库同样确定性读不到 = 访问权
+			// 丧失，报 access_denied 真实原因；探测本身瞬时失败不证明任何
+			// 一边，等重认领。
+			var probeErr error
+			if client != nil {
+				repoCtx, repoCancel := context.WithTimeout(ctx, 10*time.Second)
+				probeErr = client.GetRepository(repoCtx, run.RepoFullName)
+				repoCancel()
+			}
+			switch {
+			case probeErr == nil:
+				s.cancelRunPRClosed(&run, now)
+			case deterministicReviewAccessErr(probeErr):
+				s.failRunDispatch(run.ID, "access_denied", clientErr.Error(), now)
+			default:
+				s.logger.Warn("派发前仓库级复核失败，运行等待重新认领",
+					zap.String("run", run.ID), zap.Error(probeErr))
+			}
+		case deterministicReviewAccessErr(clientErr):
+			s.failRunDispatch(run.ID, "access_denied", clientErr.Error(), now)
+		default:
+			s.logger.Warn("派发前读取 PR 失败，运行等待重新认领",
+				zap.String("run", run.ID), zap.Error(clientErr))
+		}
 		return
 	}
 	if !prReviewable(pr) {
@@ -219,7 +247,7 @@ func (s *ReviewService) failRunDispatch(runID, code, msg string, now time.Time) 
 			Update("consumed_at", now).Error; err != nil {
 			return err
 		}
-		return s.markPRSyncPendingByRepoTx(tx, run.ProjectID, run.RepoFullName, run.PRNumber, now)
+		return s.markPRSyncPendingByRepoTx(tx, run.IntegrationID, run.ProjectID, run.RepoFullName, run.PRNumber, now)
 	})
 	s.publishReviewNotification(&run, model.NotificationReviewDispatchFailed, msg, now)
 }
@@ -249,18 +277,19 @@ func (s *ReviewService) cancelRunPRClosed(run *model.ReviewRun, now time.Time) {
 			Update("consumed_at", now).Error; err != nil {
 			return err
 		}
-		return s.markPRSyncPendingByRepoTx(tx, run.ProjectID, run.RepoFullName, run.PRNumber, now)
+		return s.markPRSyncPendingByRepoTx(tx, run.IntegrationID, run.ProjectID, run.RepoFullName, run.PRNumber, now)
 	})
 	if err != nil {
 		s.logger.Error("PR 关闭收尾运行失败", zap.String("run", run.ID), zap.Error(err))
 	}
 }
 
-// markPRSyncPendingByRepoTx 本项目总账置 sync_pending（不重取项目——行已
-// 存在）。主键含 project_id：其他项目的同仓库账本不置。
-func (s *ReviewService) markPRSyncPendingByRepoTx(tx *gorm.DB, projectID, repo string, prNumber int, now time.Time) error {
+// markPRSyncPendingByRepoTx 本 (项目, 集成) 总账置 sync_pending（不重取项目
+// ——行已存在）。主键含 project_id 与 integration_id：其他键的同仓库账本不置。
+func (s *ReviewService) markPRSyncPendingByRepoTx(tx *gorm.DB, integrationID, projectID, repo string, prNumber int, now time.Time) error {
 	return tx.Model(&model.ReviewPullRequest{}).
-		Where("project_id = ? AND repo_full_name = ? AND pr_number = ?", projectID, repo, prNumber).
+		Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ?",
+			projectID, repo, prNumber, integrationID).
 		Updates(map[string]any{
 			"sync_pending": true,
 			"sync_epoch":   gorm.Expr("sync_epoch + 1"),

@@ -49,24 +49,29 @@ func TestReviewLedgerPartitionedByProject(t *testing.T) {
 	otherUser := createTestUser(t, e.svc.db, "other-owner")
 	other := createTestProject(t, e.svc.db, otherUser.ID) // 默认同仓库 owner/repo
 	e.svc.db.Create(&model.ProjectReviewSettings{
-		ProjectID: other.ID, UserID: otherUser.ID, RepoFullName: repo,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     other.ID, UserID: otherUser.ID, RepoFullName: repo,
 		Enabled: false, CreatedAt: now, UpdatedAt: now,
 	})
 	e.svc.db.Create(&model.ReviewPullRequest{
-		ProjectID: other.ID, RepoFullName: repo, PRNumber: 55, UserID: otherUser.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     other.ID, RepoFullName: repo, PRNumber: 55, UserID: otherUser.ID,
 		InstallationID: 7, HeadSHA: "sha-b-head", RoundNumber: 3,
 		CodeStatus: "success", SyncPending: true, SyncEpoch: 5, UpdatedAt: now,
 	})
 	e.svc.db.Create(&model.ReviewSeenSHA{
-		ProjectID: other.ID, RepoFullName: repo, PRNumber: 55, HeadSHA: "sha-x",
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     other.ID, RepoFullName: repo, PRNumber: 55, HeadSHA: "sha-x",
 		AcceptedAt: now,
 	})
 	e.svc.db.Create(&model.ReviewDebounce{
-		ProjectID: other.ID, RepoFullName: repo, PRNumber: 55, HeadSHA: "sha-x",
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     other.ID, RepoFullName: repo, PRNumber: 55, HeadSHA: "sha-x",
 		Action: "synchronize", FireAt: now.Add(time.Hour), UpdatedAt: now,
 	})
 	e.svc.db.Create(&model.ReviewRun{
-		ID: uuid.NewString(), UserID: otherUser.ID, ProjectID: other.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ID:            uuid.NewString(), UserID: otherUser.ID, ProjectID: other.ID,
 		Kind: model.ReviewKindCode, RepoFullName: repo, PRNumber: 55,
 		HeadSHA: "sha-x", RoundNumber: 3, EnvironmentID: "env-1",
 		InstanceID: "claude", Model: "m",
@@ -155,7 +160,8 @@ func TestReviewSyncSkipsDisabledProjectLedger(t *testing.T) {
 		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
 	})
 	e.svc.db.Create(&model.ReviewPullRequest{
-		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 77, UserID: e.user.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: repo, PRNumber: 77, UserID: e.user.ID,
 		InstallationID: 1, HeadSHA: "sha-s", RoundNumber: 1,
 		SyncPending: true, SyncEpoch: 1, UpdatedAt: now,
 	})
@@ -188,7 +194,8 @@ func TestDispatchSkipsTokenIssuedClaim(t *testing.T) {
 	e := newReviewEngineEnv(t)
 	now := time.Now().UTC()
 	run := &model.ReviewRun{
-		ID: "run-token-issued", UserID: e.user.ID, ProjectID: e.project.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ID:            "run-token-issued", UserID: e.user.ID, ProjectID: e.project.ID,
 		Kind: model.ReviewKindCode, RepoFullName: "o/r", PRNumber: 8,
 		HeadSHA: "sha", RoundNumber: 1,
 		EnvironmentID: "env-1", InstanceID: "claude", Model: "m",
@@ -237,7 +244,7 @@ func TestResolveRunTokenBackfillsDispatchedAt(t *testing.T) {
 		RunID: run.ID, TokenHash: sha256Hex(raw), CreatedAt: now, ExpiresAt: now.Add(time.Hour),
 	})
 
-	if _, err := e.review.ResolveRunToken(context.Background(), raw, true); err != nil {
+	if _, err := e.review.ResolveRunToken(context.Background(), raw, true, run.ID); err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
 	var after model.ReviewRun
@@ -259,7 +266,7 @@ func TestResolveRunTokenBackfillsDispatchedAt(t *testing.T) {
 	e.svc.db.Create(&model.ReviewRunToken{
 		RunID: run2.ID, TokenHash: sha256Hex(raw2), CreatedAt: now, ExpiresAt: now.Add(time.Hour),
 	})
-	if _, err := e.review.ResolveRunToken(context.Background(), raw2, true); err != nil {
+	if _, err := e.review.ResolveRunToken(context.Background(), raw2, true, run2.ID); err != nil {
 		t.Fatalf("resolve2: %v", err)
 	}
 	var after2 model.ReviewRun
@@ -338,11 +345,13 @@ func TestUpdateSettingsTakeoverCleansUpOtherProjects(t *testing.T) {
 
 	// B 曾开启同仓库后停用：设置行 disabled + 完整残留执行态。
 	svc.db.Create(&model.ProjectReviewSettings{
-		ProjectID: pB.ID, UserID: other.ID, RepoFullName: repo,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     pB.ID, UserID: other.ID, RepoFullName: repo,
 		Enabled: false, CreatedAt: now, UpdatedAt: now,
 	})
 	runB := &model.ReviewRun{
-		ID: uuid.NewString(), UserID: other.ID, ProjectID: pB.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ID:            uuid.NewString(), UserID: other.ID, ProjectID: pB.ID,
 		Kind: model.ReviewKindCode, RepoFullName: repo, PRNumber: 9,
 		HeadSHA: "sha-b", RoundNumber: 2, EnvironmentID: "env-1",
 		InstanceID: "claude", Model: "m",
@@ -358,20 +367,24 @@ func TestUpdateSettingsTakeoverCleansUpOtherProjects(t *testing.T) {
 		CreatedAt: now, ExpiresAt: now.Add(time.Hour),
 	})
 	svc.db.Create(&model.ReviewDebounce{
-		ProjectID: pB.ID, RepoFullName: repo, PRNumber: 9, HeadSHA: "sha-b",
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     pB.ID, RepoFullName: repo, PRNumber: 9, HeadSHA: "sha-b",
 		Action: "synchronize", FireAt: now.Add(time.Hour), UpdatedAt: now,
 	})
 	svc.db.Create(&model.ReviewPullRequest{
-		ProjectID: pB.ID, RepoFullName: repo, PRNumber: 9, UserID: other.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     pB.ID, RepoFullName: repo, PRNumber: 9, UserID: other.ID,
 		HeadSHA: "sha-b", RoundNumber: 2, SyncPending: true, SyncEpoch: 3, UpdatedAt: now,
 	})
 	svc.db.Create(&model.ReviewSeenSHA{
-		ProjectID: pB.ID, RepoFullName: repo, PRNumber: 9, HeadSHA: "sha-b",
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     pB.ID, RepoFullName: repo, PRNumber: 9, HeadSHA: "sha-b",
 		AcceptedAt: now,
 	})
 	// B 的已终态运行不被动。
 	doneB := &model.ReviewRun{
-		ID: uuid.NewString(), UserID: other.ID, ProjectID: pB.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ID:            uuid.NewString(), UserID: other.ID, ProjectID: pB.ID,
 		Kind: model.ReviewKindCode, RepoFullName: repo, PRNumber: 9,
 		HeadSHA: "sha-b0", RoundNumber: 1, EnvironmentID: "env-1",
 		InstanceID: "claude", Model: "m",
@@ -496,7 +509,8 @@ func TestReviewSyncSkipsHistoricalRepoLedger(t *testing.T) {
 		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
 	})
 	e.svc.db.Create(&model.ReviewPullRequest{
-		ProjectID: e.project.ID, RepoFullName: historical, PRNumber: 77, UserID: e.user.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: historical, PRNumber: 77, UserID: e.user.ID,
 		InstallationID: 1, HeadSHA: "sha-h", RoundNumber: 1,
 		SyncPending: true, SyncEpoch: 1, UpdatedAt: now,
 	})
@@ -519,7 +533,8 @@ func TestReviewSyncSkipsWhenRemoteHeadAdvanced(t *testing.T) {
 		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
 	})
 	e.svc.db.Create(&model.ReviewPullRequest{
-		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 88, UserID: e.user.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: repo, PRNumber: 88, UserID: e.user.ID,
 		InstallationID: 1, HeadSHA: "sha-old", RoundNumber: 1,
 		SyncPending: true, SyncEpoch: 1, UpdatedAt: now,
 	})
@@ -576,7 +591,8 @@ func TestReviewInlineReviewRechecksEpoch(t *testing.T) {
 	e.fake.SetDiff("@@ -1,1 +1,2 @@\n a\n+b\n")
 	e.seedRunWithFindings(t, repo, 99, "sha-i", now)
 	e.svc.db.Create(&model.ReviewPullRequest{
-		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 99, UserID: e.user.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: repo, PRNumber: 99, UserID: e.user.ID,
 		InstallationID: 1, HeadSHA: "sha-i", RoundNumber: 1,
 		SyncPending: true, SyncEpoch: 1, UpdatedAt: now,
 	})
@@ -587,7 +603,7 @@ func TestReviewInlineReviewRechecksEpoch(t *testing.T) {
 		githubapp.StaticClients{Client: &epochBumpOnDiffClient{GitHubClient: e.fake, db: e.svc.db, repo: repo, pr: 99}},
 		fakeReviewAppSource{ok: true},
 		fakeReviewPublicURL("https://fs.example.com"),
-		nil, nil, nil, e.svc.cfg, zap.NewNop())
+		nil, nil, nil, repository.NewForgeIntegrationRepository(e.svc.db), e.svc.cfg, zap.NewNop())
 	review.syncPendingPRs(now)
 
 	if got := e.fake.ReviewEvents(repo); len(got) != 0 {
@@ -645,7 +661,8 @@ func TestReviewInlineReviewReconcilesLostResponse(t *testing.T) {
 	e.svc.db.Model(run).Update("posted_at", nil)
 	e.enableReview(t)
 	e.svc.db.Create(&model.ReviewPullRequest{
-		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 72, UserID: e.user.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: repo, PRNumber: 72, UserID: e.user.ID,
 		InstallationID: 1, HeadSHA: "sha-r", RoundNumber: 1,
 		SyncPending: true, SyncEpoch: 1, UpdatedAt: now,
 	})
@@ -668,7 +685,8 @@ func TestListReviewRecordsScopesRunsByRepo(t *testing.T) {
 	now := time.Now().UTC()
 	for _, repo := range []string{"oldowner/repo", "newowner/repo"} {
 		if err := e.svc.db.Create(&model.ReviewPullRequest{
-			ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 1,
+			IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+			ProjectID:     e.project.ID, RepoFullName: repo, PRNumber: 1,
 			UserID: e.user.ID, HeadSHA: "sha-" + repo, RoundNumber: 1, UpdatedAt: now,
 		}).Error; err != nil {
 			t.Fatalf("seed ledger: %v", err)
@@ -738,7 +756,8 @@ func TestCreateVisualRunsStopsWhenDisabled(t *testing.T) {
 	e.svc.db.Model(run).Update("result_json",
 		`{"summary":"干净","findings":[],"prior":[],"ui_changed":true,"ui_changed_since_last_visual":true}`)
 	e.svc.db.Create(&model.ReviewPullRequest{
-		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 81, UserID: e.user.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: repo, PRNumber: 81, UserID: e.user.ID,
 		InstallationID: 1, HeadSHA: "sha-v", RoundNumber: 1,
 		SyncPending: true, SyncEpoch: 1, UpdatedAt: now,
 	})
@@ -748,7 +767,7 @@ func TestCreateVisualRunsStopsWhenDisabled(t *testing.T) {
 		githubapp.StaticClients{Client: &disableOnPRClient{GitHubClient: e.fake, db: e.svc.db, projectID: e.project.ID}},
 		fakeReviewAppSource{ok: true},
 		fakeReviewPublicURL("https://fs.example.com"),
-		nil, nil, nil, e.svc.cfg, zap.NewNop())
+		nil, nil, nil, repository.NewForgeIntegrationRepository(e.svc.db), e.svc.cfg, zap.NewNop())
 	review.syncPendingPRs(now)
 
 	var visual int64
@@ -785,7 +804,8 @@ func TestReviewInlineReviewReconcileByRunMarker(t *testing.T) {
 	e.svc.db.Model(run2).Update("posted_at", nil)
 	e.enableReview(t)
 	e.svc.db.Create(&model.ReviewPullRequest{
-		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 82, UserID: e.user.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: repo, PRNumber: 82, UserID: e.user.ID,
 		InstallationID: 1, HeadSHA: "sha-m", RoundNumber: 1,
 		SyncPending: true, SyncEpoch: 1, UpdatedAt: now,
 	})
@@ -809,7 +829,8 @@ func TestReviewWebhookClosedCancelsWork(t *testing.T) {
 	now := time.Now().UTC()
 	run := e.seedRun(t, repo, 91, "sha-c", model.ReviewRunRunning, now)
 	if err := e.svc.db.Create(&model.ReviewDebounce{
-		ProjectID: e.project.ID, RepoFullName: strings.ToLower(repo), PRNumber: 91,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: strings.ToLower(repo), PRNumber: 91,
 		HeadSHA: "sha-c2", Action: "synchronize", FireAt: now.Add(time.Hour), UpdatedAt: now,
 	}).Error; err != nil {
 		t.Fatalf("seed debounce: %v", err)
@@ -845,7 +866,7 @@ func TestRerunRejectsWhenDisabledMidFlight(t *testing.T) {
 		githubapp.StaticClients{Client: client},
 		fakeReviewAppSource{ok: true},
 		fakeReviewPublicURL("https://fs.example.com"),
-		nil, nil, nil, e.svc.cfg, zap.NewNop())
+		nil, nil, nil, repository.NewForgeIntegrationRepository(e.svc.db), e.svc.cfg, zap.NewNop())
 
 	_, err := review.RerunReview(context.Background(), e.user.ID, e.project.ID, 92, "")
 	if err == nil {
@@ -889,7 +910,8 @@ func TestRerunRejectsWhenHeadMoved(t *testing.T) {
 	})
 	e.enableReview(t)
 	if err := e.svc.db.Create(&model.ReviewPullRequest{
-		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 93, UserID: e.user.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: repo, PRNumber: 93, UserID: e.user.ID,
 		HeadSHA: "sha-new", RoundNumber: 2, UpdatedAt: now,
 	}).Error; err != nil {
 		t.Fatalf("seed ledger: %v", err)
@@ -968,7 +990,8 @@ func TestVisualCarrySuccessOnRerun(t *testing.T) {
 	})
 	fp := screenshotFingerprint(collectScreenshotURLs(body))
 	if err := e.svc.db.Create(&model.ReviewPullRequest{
-		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 96, UserID: e.user.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: repo, PRNumber: 96, UserID: e.user.ID,
 		InstallationID: 1, HeadSHA: "sha-vs", RoundNumber: 2,
 		VisualScreensFingerprint: fp, SyncPending: true, SyncEpoch: 1, UpdatedAt: now,
 	}).Error; err != nil {
@@ -1038,7 +1061,7 @@ func TestAgentScreenshotsSkipFailedAssets(t *testing.T) {
 		anonErr:   errors.New("anon forbidden"),
 		bearerErr: errors.New("bearer forbidden"),
 	}
-	review := e.withT3(nil, media, func(context.Context, int64) (string, error) {
+	review := e.withT3(nil, media, func(context.Context, string, int64) (string, error) {
 		return "tok", nil
 	})
 

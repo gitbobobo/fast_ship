@@ -1237,6 +1237,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/integrations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 列出可选代码仓集成（登录用户）
+         * @description INT-167 新增。项目编辑表单的代码仓集成选择器数据源：返回精简投影
+         *     （id/kind/name/base_url/builtin），不含凭证标记等管理字段；首条恒为
+         *     内置 github-default。所有登录用户可读——绑定项目只需知道集成存在
+         *     与基址，写配置仍仅管理员（/api/deployment/integrations）。
+         */
+        get: operations["listIntegrationOptions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/quota/providers": {
         parameters: {
             query?: never;
@@ -2837,7 +2860,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/review-agent/pull-request": {
+    "/api/review-agent/runs/{runId}/pull-request": {
         parameters: {
             query?: never;
             header?: never;
@@ -2846,7 +2869,7 @@ export interface paths {
         };
         /**
          * 本运行审查的 PR 元数据
-         * @description 只接受运行令牌；PR 身份全部取自运行行，不接受请求参数。
+         * @description 只接受运行令牌；PR 身份全部取自运行行，不接受请求参数。路径中的 runId 必须与令牌所属运行一致（错配 40307）。
          */
         get: operations["reviewAgentPullRequest"];
         put?: never;
@@ -2857,7 +2880,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/review-agent/pull-request/diff": {
+    "/api/review-agent/runs/{runId}/pull-request/diff": {
         parameters: {
             query?: never;
             header?: never;
@@ -2866,7 +2889,7 @@ export interface paths {
         };
         /**
          * 本运行的 PR diff
-         * @description 超过 1MB 截断并标记 truncated。
+         * @description 超过 1MB 截断并标记 truncated。路径中的 runId 必须与令牌所属运行一致（错配 40307）。
          */
         get: operations["reviewAgentPullRequestDiff"];
         put?: never;
@@ -2877,7 +2900,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/review-agent/history": {
+    "/api/review-agent/runs/{runId}/history": {
         parameters: {
             query?: never;
             header?: never;
@@ -2887,7 +2910,7 @@ export interface paths {
         /**
          * 历史处置上下文（系统生成 Markdown）
          * @description 代码审查：上一轮各组合的结构化发现 + 上一轮结论之后的新评论/行内回复；首次审查给全部讨论。
-         *     视觉审查：上一轮视觉发现与 unmeasurable。只识别本系统自己发的结论。
+         *     视觉审查：上一轮视觉发现与 unmeasurable。只识别本系统自己发的结论。路径中的 runId 必须与令牌所属运行一致（错配 40307）。
          */
         get: operations["reviewAgentHistory"];
         put?: never;
@@ -2898,7 +2921,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/review-agent/screenshots": {
+    "/api/review-agent/runs/{runId}/screenshots": {
         parameters: {
             query?: never;
             header?: never;
@@ -2907,7 +2930,7 @@ export interface paths {
         };
         /**
          * 视觉审查截图清单
-         * @description 只有视觉审查运行可调用；图片本体走下面的图片端点。
+         * @description 只有视觉审查运行可调用；图片本体走下面的图片端点。路径中的 runId 必须与令牌所属运行一致（错配 40307）。
          */
         get: operations["reviewAgentScreenshots"];
         put?: never;
@@ -2918,7 +2941,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/review-agent/screenshots/{assetId}": {
+    "/api/review-agent/runs/{runId}/screenshots/{assetId}": {
         parameters: {
             query?: never;
             header?: never;
@@ -2927,7 +2950,7 @@ export interface paths {
         };
         /**
          * 截图图片本体
-         * @description 按运行所属 PR/SHA 校验；返回原始字节与 Content-Type。
+         * @description 按运行所属 PR/SHA 校验；返回原始字节与 Content-Type。路径中的 runId 必须与令牌所属运行一致（错配 40307）。
          */
         get: operations["reviewAgentScreenshotImage"];
         put?: never;
@@ -2938,7 +2961,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/review-agent/result": {
+    "/api/review-agent/runs/{runId}/result": {
         parameters: {
             query?: never;
             header?: never;
@@ -2951,6 +2974,8 @@ export interface paths {
          * 提交结构化审查结论
          * @description 请求体按运行类型二选一：代码审查 `ReviewCodeResult`、视觉审查 `ReviewVisualResult`（字段校验失败返回 400，
          *     提示修正重交；PR HEAD 与运行绑定 SHA 不一致返回 40920 并作废本轮）。
+         *     路径中的 runId 必须与令牌所属运行一致（错配 40307，不写结果、不消费令牌、不推进状态）。
+         *     代码审查 findings 的文件必须存在于本运行 head_sha 的仓库树中，不存在的路径返回 40004。
          */
         post: operations["reviewAgentSubmitResult"];
         delete?: never;
@@ -4049,6 +4074,22 @@ export interface components {
              * @description 最近保存时间；内置集成为 null
              */
             updated_at: string | null;
+        };
+        /** @description 项目表单用的代码仓集成精简投影（INT-167）；无凭证标记等管理字段 */
+        IntegrationOption: {
+            /** @description 内置集成固定为 github-default；forgejo 行为 forge_integrations 行 ID */
+            id: string;
+            /**
+             * @description github=内置 GitHub App；forgejo=机器人账号 + 仓库范围 PAT
+             * @enum {string}
+             */
+            kind: "github" | "forgejo";
+            /** @description 显示名 */
+            name: string;
+            /** @description 实例基址（仓库 URL 按 {base_url}/{owner}/{repo} 解析到本集成） */
+            base_url: string;
+            /** @description 内置集成恒为 true */
+            builtin: boolean;
         };
         /** @description Forgejo 连接检测结论；不落库，只随本次响应返回 */
         ForgeIntegrationTest: {
@@ -10658,6 +10699,30 @@ export interface operations {
             500: components["responses"]["InternalError"];
         };
     };
+    listIntegrationOptions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 可选项列表（首条 github-default） */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"] & {
+                        data?: components["schemas"]["IntegrationOption"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
     listQuotaProviders: {
         parameters: {
             query?: never;
@@ -14683,7 +14748,10 @@ export interface operations {
         parameters: {
             query?: never;
             header?: never;
-            path?: never;
+            path: {
+                /** @description 审查运行 ID */
+                runId: string;
+            };
             cookie?: never;
         };
         requestBody?: never;
@@ -14708,7 +14776,10 @@ export interface operations {
         parameters: {
             query?: never;
             header?: never;
-            path?: never;
+            path: {
+                /** @description 审查运行 ID */
+                runId: string;
+            };
             cookie?: never;
         };
         requestBody?: never;
@@ -14733,7 +14804,10 @@ export interface operations {
         parameters: {
             query?: never;
             header?: never;
-            path?: never;
+            path: {
+                /** @description 审查运行 ID */
+                runId: string;
+            };
             cookie?: never;
         };
         requestBody?: never;
@@ -14761,7 +14835,10 @@ export interface operations {
         parameters: {
             query?: never;
             header?: never;
-            path?: never;
+            path: {
+                /** @description 审查运行 ID */
+                runId: string;
+            };
             cookie?: never;
         };
         requestBody?: never;
@@ -14791,6 +14868,8 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
+                /** @description 审查运行 ID */
+                runId: string;
                 assetId: string;
             };
             cookie?: never;
@@ -14818,7 +14897,10 @@ export interface operations {
         parameters: {
             query?: never;
             header?: never;
-            path?: never;
+            path: {
+                /** @description 审查运行 ID */
+                runId: string;
+            };
             cookie?: never;
         };
         requestBody: {

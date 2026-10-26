@@ -13,9 +13,10 @@ import (
 	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/api"
-	"github.com/godbobo/fast_ship/server/internal/githubapi"
+	"github.com/godbobo/fast_ship/server/internal/forge"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
+	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
 
@@ -26,8 +27,10 @@ import (
 // requireLive=true：令牌未过期、未消费且运行在途（dispatched/running）才通过；
 // requireLive=false（result 端点）：终态运行与已消费令牌也放行——是否重放
 // 由 SubmitResult 比对 result_json 决定。
-// 首次成功鉴权把 dispatched → running（条件 UPDATE）。
-func (s *ReviewService) ResolveRunToken(ctx context.Context, raw string, requireLive bool) (*RunTokenIdentity, error) {
+// expectedRunID 非空时按 INT-169 做强校验：URL 目标运行与令牌所属运行不
+// 一致 → 40307，且在下面的状态推进之前返回——错配请求对双方运行零副作用。
+// 首次合法鉴权把 dispatched → running（条件 UPDATE）。
+func (s *ReviewService) ResolveRunToken(ctx context.Context, raw string, requireLive bool, expectedRunID string) (*RunTokenIdentity, error) {
 	if !strings.HasPrefix(raw, "fsr_") {
 		return nil, errs.ErrRunTokenInvalid
 	}
@@ -54,6 +57,17 @@ func (s *ReviewService) ResolveRunToken(ctx context.Context, raw string, require
 	} else if token.ConsumedAt != nil && !run.Status.Terminal() {
 		return nil, errs.ErrRunTokenInvalid
 	}
+	// 运行归属强校验（INT-169）：在 dispatched→running 推进之前拒绝错配。
+	// 日志只记运行/线程身份与原因，不记令牌内容。
+	if expectedRunID != "" && run.ID != expectedRunID {
+		s.logger.Warn("审查 Agent 运行归属错配，拒绝请求",
+			zap.String("target_run_id", expectedRunID),
+			zap.String("token_run_id", run.ID),
+			zap.String("thread_id", run.ThreadID),
+			zap.String("reason", "run_id_mismatch"),
+		)
+		return nil, errs.ErrReviewRunMismatch
+	}
 	// 首次成功鉴权：dispatched → running（条件更新，失败即并发状态已变）。
 	// 顺带补 dispatched_at：令牌只经启动提示词交给线程，Agent 能出示即证明
 	// 线程已建成——即使启动 RPC 结果没确认。归档阶段以 dispatched_at 非空
@@ -66,7 +80,7 @@ func (s *ReviewService) ResolveRunToken(ctx context.Context, raw string, require
 			"dispatched_at": gorm.Expr("COALESCE(dispatched_at, ?)", now),
 			"updated_at":    now,
 		})
-	return &RunTokenIdentity{UserID: run.UserID, RunID: run.ID}, nil
+	return &RunTokenIdentity{UserID: run.UserID, RunID: run.ID, ThreadID: run.ThreadID}, nil
 }
 
 // loadAgentRun 端点共用的运行加载（令牌身份 → 运行行）。
@@ -78,25 +92,18 @@ func (s *ReviewService) loadAgentRun(ctx context.Context, runID string) (*model.
 	return &run, nil
 }
 
-func (s *ReviewService) ghClient(ctx context.Context) (githubapi.GitHubClient, error) {
-	if s.gh == nil {
-		return nil, errs.New(errs.ErrGitHubAPI.Code, "GitHub 访问面未配置")
-	}
-	return s.gh.ClientFor(ctx)
-}
-
-// AgentPullRequest GET /api/review-agent/pull-request：运行绑定身份 + 实时
+// AgentPullRequest GET /api/review-agent/runs/:runId/pull-request：运行绑定身份 + 实时
 // PR 元数据（body 要拿最新——视觉审查的截图说明来自这里）。
 func (s *ReviewService) AgentPullRequest(ctx context.Context, runID string) (*api.ReviewAgentPullRequest, error) {
 	run, err := s.loadAgentRun(ctx, runID)
 	if err != nil {
 		return nil, err
 	}
-	client, err := s.ghClient(ctx)
+	client, err := s.reviewClient(ctx, run.IntegrationID, run.RepoFullName, run.InstallationID)
 	if err != nil {
 		return nil, err
 	}
-	pr, err := client.GetPullRequest(ctx, run.InstallationID, run.RepoFullName, run.PRNumber)
+	pr, err := client.GetPullRequest(ctx, run.RepoFullName, run.PRNumber)
 	if err != nil {
 		return nil, errs.New(errs.ErrGitHubAPI.Code, "读取 PR 失败: "+err.Error())
 	}
@@ -115,21 +122,23 @@ func (s *ReviewService) AgentPullRequest(ctx context.Context, runID string) (*ap
 // reviewDiffMaxBytes diff 端点截断阈值。
 const reviewDiffMaxBytes = 1 << 20
 
-// AgentDiff GET /api/review-agent/pull-request/diff：>1MB 按字节截断。
+// AgentDiff GET /api/review-agent/runs/:runId/pull-request/diff：>1MB 按字节截断。
 func (s *ReviewService) AgentDiff(ctx context.Context, runID string) (*api.ReviewAgentDiff, error) {
 	run, err := s.loadAgentRun(ctx, runID)
 	if err != nil {
 		return nil, err
 	}
-	client, err := s.ghClient(ctx)
+	client, err := s.reviewClient(ctx, run.IntegrationID, run.RepoFullName, run.InstallationID)
 	if err != nil {
 		return nil, err
 	}
-	diff, err := client.GetPullRequestDiff(ctx, run.InstallationID, run.RepoFullName, run.PRNumber)
-	if err != nil {
+	diff, err := client.GetPullRequestDiff(ctx, run.RepoFullName, run.PRNumber)
+	if err != nil && !forge.IsDiffTooLarge(err) {
 		return nil, errs.New(errs.ErrGitHubAPI.Code, "读取 diff 失败: "+err.Error())
 	}
-	truncated := false
+	// IsDiffTooLarge：超本端读入上限——给已读前缀（可能为空）按截断件
+	// 返回，Agent 有 truncated:true 契约可降级，不每次 50200 卡到 deadline。
+	truncated := err != nil
 	if len(diff) > reviewDiffMaxBytes {
 		diff = diff[:reviewDiffMaxBytes]
 		truncated = true
@@ -137,7 +146,7 @@ func (s *ReviewService) AgentDiff(ctx context.Context, runID string) (*api.Revie
 	return &api.ReviewAgentDiff{Content: diff, Truncated: truncated}, nil
 }
 
-// AgentHistory GET /api/review-agent/history：按运行类型拼历史上下文 Markdown。
+// AgentHistory GET /api/review-agent/runs/:runId/history：按运行类型拼历史上下文 Markdown。
 func (s *ReviewService) AgentHistory(ctx context.Context, runID string) (string, error) {
 	run, err := s.loadAgentRun(ctx, runID)
 	if err != nil {
@@ -205,15 +214,15 @@ func (s *ReviewService) codeHistory(ctx context.Context, run *model.ReviewRun) (
 // appendNewDiscussion 把 after 之后的行内评论与会话评论按时间正序写进 b。
 // 本系统自己发的结论（机器人标记/自身 review）过滤掉。limit 最近 50 条。
 func (s *ReviewService) appendNewDiscussion(ctx context.Context, run *model.ReviewRun, b *strings.Builder, after time.Time, all bool) error {
-	client, err := s.ghClient(ctx)
+	client, err := s.reviewClient(ctx, run.IntegrationID, run.RepoFullName, run.InstallationID)
 	if err != nil {
 		return err
 	}
-	reviewComments, err := client.ListReviewComments(ctx, run.InstallationID, run.RepoFullName, run.PRNumber)
+	reviewComments, err := client.ListReviewComments(ctx, run.RepoFullName, run.PRNumber)
 	if err != nil {
 		return errs.New(errs.ErrGitHubAPI.Code, "读取行内评论失败: "+err.Error())
 	}
-	issueComments, err := client.ListIssueCommentsForPR(ctx, run.InstallationID, run.RepoFullName, run.PRNumber)
+	issueComments, err := client.ListIssueCommentsForPR(ctx, run.RepoFullName, run.PRNumber)
 	if err != nil {
 		return errs.New(errs.ErrGitHubAPI.Code, "读取会话评论失败: "+err.Error())
 	}
@@ -224,7 +233,9 @@ func (s *ReviewService) appendNewDiscussion(ctx context.Context, run *model.Revi
 	}
 	var entries []entry
 	for _, c := range reviewComments {
-		if strings.HasSuffix(c.User, "[bot]") || (!c.CreatedAt.After(after) && !all) {
+		// c.Self 覆盖 Forgejo：那边的机器人是普通账号，不以 [bot] 结尾，
+		// 行内评论又没有隐藏标记可拦。
+		if c.Self || strings.HasSuffix(c.User, "[bot]") || (!c.CreatedAt.After(after) && !all) {
 			continue
 		}
 		head := "行内评论"
@@ -235,7 +246,7 @@ func (s *ReviewService) appendNewDiscussion(ctx context.Context, run *model.Revi
 	}
 	for _, c := range issueComments {
 		// 系统自己的顶层结论评论（隐藏标记）与机器人发言不进历史。
-		if strings.HasSuffix(c.User, "[bot]") || strings.Contains(c.Body, "<!-- fast-ship-") ||
+		if c.Self || strings.HasSuffix(c.User, "[bot]") || strings.Contains(c.Body, "<!-- fast-ship-") ||
 			(!c.CreatedAt.After(after) && !all) {
 			continue
 		}
@@ -256,11 +267,11 @@ func (s *ReviewService) appendNewDiscussion(ctx context.Context, run *model.Revi
 // 而没重写进 findings，不补这段的话未解决项会从下一轮历史里消失，复核断链。
 func (s *ReviewService) visualHistory(ctx context.Context, run *model.ReviewRun) (string, error) {
 	// 最近一轮「确有视觉运行」的轮次：中间轮可能只跑了代码审查，
-	// round-1 会拿到空历史。历史只在本项目账本内取。
+	// round-1 会拿到空历史。历史只在本 (项目, 集成) 账本内取。
 	var prevRound *int
 	if err := s.db.WithContext(ctx).Model(&model.ReviewRun{}).
-		Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND kind = ? AND round_number < ?",
-			run.ProjectID, run.RepoFullName, run.PRNumber, model.ReviewKindVisual, run.RoundNumber).
+		Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ? AND kind = ? AND round_number < ?",
+			run.ProjectID, run.RepoFullName, run.PRNumber, run.IntegrationID, model.ReviewKindVisual, run.RoundNumber).
 		Select("MAX(round_number)").Scan(&prevRound).Error; err != nil {
 		return "", errs.ErrInternal
 	}
@@ -309,15 +320,15 @@ func (s *ReviewService) visualHistory(ctx context.Context, run *model.ReviewRun)
 	return strings.TrimRight(b.String(), "\n"), nil
 }
 
-// runsAtRound 取本项目同 PR 指定轮次、指定 kind 的运行（按创建序）。
+// runsAtRound 取本 (项目, 集成) 同 PR 指定轮次、指定 kind 的运行（按创建序）。
 func (s *ReviewService) runsAtRound(ctx context.Context, run *model.ReviewRun, round int, kind model.ReviewKind) ([]model.ReviewRun, error) {
 	if round < 1 {
 		return nil, nil
 	}
 	var runs []model.ReviewRun
 	if err := s.db.WithContext(ctx).
-		Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND round_number = ? AND kind = ?",
-			run.ProjectID, run.RepoFullName, run.PRNumber, round, kind).
+		Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ? AND round_number = ? AND kind = ?",
+			run.ProjectID, run.RepoFullName, run.PRNumber, run.IntegrationID, round, kind).
 		Order("created_at ASC").Find(&runs).Error; err != nil {
 		return nil, errs.ErrInternal
 	}
@@ -380,7 +391,7 @@ func runCombinationOptions(run *model.ReviewRun) string {
 	return truncateRunes(strings.Join(parts, " · "), reviewOptionsMaxRunes)
 }
 
-// AgentSubmitResult POST /api/review-agent/result：结构化结论的校验与落地。
+// AgentSubmitResult POST /api/review-agent/runs/:runId/result：结构化结论的校验与落地。
 // 终态运行只允许完全相同 body 的重放（result_json 比对）；HEAD 已前进 →
 // 40920 且运行作废。
 func (s *ReviewService) AgentSubmitResult(ctx context.Context, runID string, body []byte) error {
@@ -406,6 +417,8 @@ func (s *ReviewService) AgentSubmitResult(ctx context.Context, runID string, bod
 	// 严格校验：按 kind 反序列化 + 字段校验（不允许未知字段）。
 	var canonical []byte
 	summary := ""
+	// codeFindings 仅代码 kind 有值：供事务前的文件归属校验（INT-169）。
+	var codeFindings []api.ReviewCodeFinding
 	switch run.Kind {
 	case model.ReviewKindCode:
 		var result api.ReviewCodeResult
@@ -417,6 +430,7 @@ func (s *ReviewService) AgentSubmitResult(ctx context.Context, runID string, bod
 		}
 		canonical, _ = json.Marshal(&result)
 		summary = result.Summary
+		codeFindings = result.Findings
 	case model.ReviewKindVisual:
 		var result api.ReviewVisualResult
 		if err := decodeStrict(body, &result); err != nil {
@@ -442,19 +456,35 @@ func (s *ReviewService) AgentSubmitResult(ctx context.Context, runID string, bod
 		return errs.ErrRunTokenInvalid
 	}
 
+	// completedReplay 复核运行是否已被并发完全相同提交完成：本次加载时
+	// 运行在途，校验/复核期间另一提交落库——与函数头终态重放判定同口径，
+	// 命中按幂等成功返回，避免合法重放被 502/40004/40920 顶掉。
+	completedReplay := func() bool {
+		var cur model.ReviewRun
+		return s.db.WithContext(ctx).Where("id = ?", run.ID).First(&cur).Error == nil &&
+			cur.Status == model.ReviewRunCompleted && cur.ResultJSON != "" && cur.ResultJSON == string(canonical)
+	}
+
 	// 提交前核对 PR 实时状态：已关闭或 head 已前进 → 本轮作废（取消 + 消费令牌 + sync）。
-	client, err := s.ghClient(ctx)
+	client, err := s.reviewClient(ctx, run.IntegrationID, run.RepoFullName, run.InstallationID)
 	if err != nil {
+		if completedReplay() {
+			return nil
+		}
 		return err
 	}
-	pr, err := client.GetPullRequest(ctx, run.InstallationID, run.RepoFullName, run.PRNumber)
+	pr, err := client.GetPullRequest(ctx, run.RepoFullName, run.PRNumber)
 	if err != nil {
+		if completedReplay() {
+			return nil
+		}
 		return errs.New(errs.ErrGitHubAPI.Code, "读取 PR head 失败: "+err.Error())
 	}
 	now := time.Now().UTC()
 	// 已关闭/合并或 head 已前进 → 本轮作废（取消 + 消费令牌 + sync）。
-	// 关闭后 head 不再前进，仅比对 SHA 会漏掉「PR 已关」。
-	if !prReviewable(pr) || (pr.HeadSHA != "" && !strings.EqualFold(pr.HeadSHA, run.HeadSHA)) {
+	// 关闭后 head 不再前进，仅比对 SHA 会漏掉「PR 已关」。supersede 封成
+	// 闭包：文件归属校验后还要以同一口径复核一次（校验期间 head 可能前进）。
+	supersede := func() error {
 		_ = s.db.Transaction(func(tx *gorm.DB) error {
 			tx.Model(&model.ReviewRun{}).
 				Where("id = ? AND status IN ?", run.ID,
@@ -466,9 +496,48 @@ func (s *ReviewService) AgentSubmitResult(ctx context.Context, runID string, bod
 			tx.Model(&model.ReviewRunToken{}).
 				Where("run_id = ? AND consumed_at IS NULL", run.ID).
 				Update("consumed_at", now)
-			return s.markPRSyncPendingByRepoTx(tx, run.ProjectID, run.RepoFullName, run.PRNumber, now)
+			return s.markPRSyncPendingByRepoTx(tx, run.IntegrationID, run.ProjectID, run.RepoFullName, run.PRNumber, now)
 		})
+		// TOCTOU：事务提交后、返回作废错误前并发完全相同重放可能已落库
+		// （CAS 不匹配不会改坏状态）——再复核一次，命中按幂等成功返回。
+		if completedReplay() {
+			return nil
+		}
 		return errs.ErrReviewHeadChanged
+	}
+	if !prReviewable(pr) || (pr.HeadSHA != "" && !strings.EqualFold(pr.HeadSHA, run.HeadSHA)) {
+		if completedReplay() {
+			return nil
+		}
+		return supersede()
+	}
+
+	// 新发现文件归属校验（INT-169）：代码审查 findings 的文件必须存在于
+	// 本轮 head_sha 的仓库树中；不存在的路径 40004 拒收并要求核对审查
+	// 对象（不改运行状态，可修正后重交）。prior 不查——历史意见里已删除/
+	// 重命名的路径合法。位置在终态重放判定之后（合法重放不受新检查影响）
+	// 与事务之前（无任何状态副作用）。
+	if err := s.checkFindingFilesInTree(ctx, client, run, codeFindings); err != nil {
+		if completedReplay() {
+			return nil
+		}
+		return err
+	}
+	// 文件归属校验是多次 GitHub 调用，可能耗时数秒——进入写入事务前重取
+	// 时间并复核 PR head（校验期间 head 可能前进，缩小提交陈旧结果窗口）。
+	now = time.Now().UTC()
+	pr2, err := client.GetPullRequest(ctx, run.RepoFullName, run.PRNumber)
+	if err != nil {
+		if completedReplay() {
+			return nil
+		}
+		return errs.New(errs.ErrGitHubAPI.Code, "复核 PR head 失败: "+err.Error())
+	}
+	if !prReviewable(pr2) || (pr2.HeadSHA != "" && !strings.EqualFold(pr2.HeadSHA, run.HeadSHA)) {
+		if completedReplay() {
+			return nil
+		}
+		return supersede()
 	}
 
 	// submitErr 承载「超时作废」的返回错误：超时收尾（timed_out + 消费令牌 +
@@ -498,6 +567,11 @@ func (s *ReviewService) AgentSubmitResult(ctx context.Context, runID string, bod
 			if err := tx.Where("id = ?", run.ID).First(&cur).Error; err != nil {
 				return err
 			}
+			// 并发完全相同重放：另一提交已先完成且正文一致 → 按幂等成功返回，
+			// 与函数头的终态重放判定口径一致（那处只覆盖请求到达时已终态）。
+			if cur.Status == model.ReviewRunCompleted && cur.ResultJSON != "" && cur.ResultJSON == string(canonical) {
+				return nil
+			}
 			if cur.Status.Active() && !cur.DeadlineAt.After(now) {
 				cas := tx.Model(&model.ReviewRun{}).
 					Where("id = ? AND status IN ?", run.ID,
@@ -515,7 +589,7 @@ func (s *ReviewService) AgentSubmitResult(ctx context.Context, runID string, bod
 						Update("consumed_at", now).Error; err != nil {
 						return err
 					}
-					if err := s.markPRSyncPendingByRepoTx(tx, run.ProjectID, run.RepoFullName, run.PRNumber, now); err != nil {
+					if err := s.markPRSyncPendingByRepoTx(tx, run.IntegrationID, run.ProjectID, run.RepoFullName, run.PRNumber, now); err != nil {
 						return err
 					}
 					notifyTimeout = true
@@ -530,7 +604,7 @@ func (s *ReviewService) AgentSubmitResult(ctx context.Context, runID string, bod
 			Update("consumed_at", now).Error; err != nil {
 			return err
 		}
-		return s.markPRSyncPendingByRepoTx(tx, run.ProjectID, run.RepoFullName, run.PRNumber, now)
+		return s.markPRSyncPendingByRepoTx(tx, run.IntegrationID, run.ProjectID, run.RepoFullName, run.PRNumber, now)
 	})
 	if err != nil {
 		return err
@@ -542,6 +616,73 @@ func (s *ReviewService) AgentSubmitResult(ctx context.Context, runID string, bod
 		return submitErr
 	}
 	s.notifyReviewLoop()
+	return nil
+}
+
+// checkFindingFilesInTree INT-169 文件归属：代码审查新发现的仓库相对路径
+// 逐个在运行 head_sha 的树中查存在性（同一路径去重，去重后上限 64 条——
+// 每个唯一路径一次平台调用，需要整体预算）。不存在 → 40004 要求核对
+// 审查对象；平台调用失败 → 50200（调用方可重交）。树未命中的路径再用
+// 本轮 PR 变更文件清单兜底一次：PR 删除/重命名走的文件仍是合法审查
+// 对象（「不该删这个文件」指向的正是已删文件本身），只在 head 树与
+// 变更清单里都查不到才算路径错误。清单来自分页 files 端点而非 diff 文本
+// ——平台对超大 PR 的 diff 可能无标记静默截断，不能当否决证据；清单
+// 本身不完整（如 GitHub 3000 文件封顶）时缺席同样不作否决，放行并 Warn。
+const findingFileCheckLimit = 64
+
+func (s *ReviewService) checkFindingFilesInTree(ctx context.Context, client forge.ReviewClient, run *model.ReviewRun, findings []api.ReviewCodeFinding) error {
+	seen := map[string]bool{}
+	var prFiles map[string]bool
+	filesTried, filesComplete := false, true
+	for i, f := range findings {
+		if seen[f.File] {
+			continue
+		}
+		seen[f.File] = true
+		if len(seen) > findingFileCheckLimit {
+			return reviewResultErr("findings 涉及的不同文件路径超过 %d 个，超出归属校验预算——请合并同文件发现或裁剪次要条目后重交", findingFileCheckLimit)
+		}
+		exists, err := client.PathExistsAtRef(ctx, run.RepoFullName, f.File, run.HeadSHA)
+		if err != nil {
+			if errors.Is(err, forge.ErrTreeTruncated) {
+				// 树条目截断：「不在截断清单内」不等于不存在——与清单
+				// 兜底不可证同口径放行并 Warn，不按调用失败把合法提交
+				// 卡成永久 50200（重试只拿到同一份截断树）。
+				s.logger.Warn("审查文件归属树响应截断，路径存在性不可判定，放行",
+					zap.String("run_id", run.ID),
+					zap.String("repo", run.RepoFullName),
+					zap.String("file", f.File),
+				)
+				continue
+			}
+			return errs.New(errs.ErrGitHubAPI.Code, "校验 findings 文件归属失败: "+err.Error())
+		}
+		if exists {
+			continue
+		}
+		if !filesTried {
+			filesTried = true
+			var paths []string
+			paths, filesComplete, err = client.ListPullRequestFiles(ctx, run.RepoFullName, run.PRNumber)
+			if err != nil {
+				return errs.New(errs.ErrGitHubAPI.Code, "校验 findings 文件归属失败: "+err.Error())
+			}
+			prFiles = map[string]bool{}
+			for _, p := range paths {
+				prFiles[p] = true
+			}
+			if !filesComplete {
+				s.logger.Warn("审查文件归属兜底清单不完整，树未命中路径按可采信放行",
+					zap.String("run_id", run.ID),
+					zap.String("repo", run.RepoFullName),
+					zap.Int("pr", run.PRNumber),
+				)
+			}
+		}
+		if filesComplete && !prFiles[f.File] {
+			return reviewResultErr("findings[%d].file %q 在 head %s 的仓库树中不存在，请核对审查对象后重交", i, f.File, reviewShortSHA(run.HeadSHA))
+		}
+	}
 	return nil
 }
 
@@ -691,17 +832,45 @@ func (s *ReviewService) RerunReview(ctx context.Context, userID, projectID strin
 	if repo == "" || repo == "/" {
 		return nil, errs.ErrProjectGitHubNotConfigured
 	}
-	client, err := s.ghClient(ctx)
+	// 账本按 (项目, 集成, 仓库, pr) 分区：项目改绑集成后同仓库同号 PR 的
+	// 旧平台记录仓库名相同但归属不同。当前集成下没有账本、其他集成下却
+	// 有同号记录时，请求只可能来自旧记录（can_rerun 对这类记录已置否）——
+	// 拒绝，否则会把旧集成的同号 PR 当成本平台的 PR 误审。从未审过的 PR
+	// （任何集成下都没账本）不受影响，仍可手动重跑开轮。
+	var ledgerCount, otherLedgerCount int64
+	if err := s.db.WithContext(ctx).Model(&model.ReviewPullRequest{}).
+		Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ?",
+			project.ID, repo, prNumber, settings.IntegrationID).
+		Count(&ledgerCount).Error; err != nil {
+		return nil, errs.ErrInternal
+	}
+	if err := s.db.WithContext(ctx).Model(&model.ReviewPullRequest{}).
+		Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id <> ?",
+			project.ID, repo, prNumber, settings.IntegrationID).
+		Count(&otherLedgerCount).Error; err != nil {
+		return nil, errs.ErrInternal
+	}
+	if ledgerCount == 0 && otherLedgerCount > 0 {
+		return nil, errs.New(errs.ErrInvalidParams.Code,
+			"该审查记录属于其他集成的历史记录，不能重跑")
+	}
+	// rerun 没有 webhook installation 快照：GitHub 先解析真实安装 id 再取
+	// PR，解析失败不得拿 0 当安装 id 继续写库；非 GitHub 集成没有安装语义，
+	// installationID=0 经 resolver 走集成凭证取 PR——ResolveInstallation 是
+	// GitHub App 专有概念，不进 forge.ReviewClient 方法面。
+	var installationID int64
+	if reviewIntegrationID(settings.IntegrationID) == model.ForgeIntegrationBuiltinGitHubID {
+		resolved, err := s.resolveGitHubInstallation(ctx, repo)
+		if err != nil {
+			return nil, err
+		}
+		installationID = resolved
+	}
+	client, err := s.reviewClient(ctx, settings.IntegrationID, repo, installationID)
 	if err != nil {
 		return nil, err
 	}
-	// rerun 没有 webhook installation 快照：先解析真实安装 id，再取 PR；
-	// 解析不支持/失败时不得拿 0 当安装 id 继续写库。
-	installationID, err := client.ResolveInstallation(ctx, repo)
-	if err != nil {
-		return nil, errs.New(errs.ErrGitHubAPI.Code, "解析仓库安装失败: "+err.Error())
-	}
-	pr, err := client.GetPullRequest(ctx, installationID, repo, prNumber)
+	pr, err := client.GetPullRequest(ctx, repo, prNumber)
 	if err != nil {
 		return nil, errs.New(errs.ErrGitHubAPI.Code, "读取 PR head 失败: "+err.Error())
 	}
@@ -715,31 +884,32 @@ func (s *ReviewService) RerunReview(ctx context.Context, userID, projectID strin
 	now := time.Now().UTC()
 	var round int
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		// 取 PR 与开轮之间可能发生停用/换仓库/新 webhook：事务内复核设置行的
-		// 仓库快照与启用状态，否则会用旧快照开一轮（甚至取消新 head 的运行）。
+		// 取 PR 与开轮之间可能发生停用/换仓库/改绑集成/新 webhook：事务内复核
+		// 设置行的 (集成, 仓库) 快照与启用状态，否则会用旧快照开一轮（甚至
+		// 取消新 head 的运行）。
 		var fresh model.ProjectReviewSettings
-		if err := tx.Select("repo_full_name", "enabled").
+		if err := tx.Select("repo_full_name", "integration_id", "enabled").
 			Where("project_id = ?", project.ID).First(&fresh).Error; err != nil {
 			return errs.ErrReviewNotEnabled
 		}
 		if !fresh.Enabled {
 			return errs.ErrReviewNotEnabled
 		}
-		if !strings.EqualFold(fresh.RepoFullName, repo) {
+		if !strings.EqualFold(fresh.RepoFullName, repo) || fresh.IntegrationID != settings.IntegrationID {
 			return errs.New(errs.ErrInvalidParams.Code, "项目仓库已变更，请刷新后重试")
 		}
-		latest, err := s.currentAcceptedHeadTx(tx, project.ID, repo, prNumber)
+		latest, err := s.currentAcceptedHeadTx(tx, settings.IntegrationID, project.ID, repo, prNumber)
 		if err != nil {
 			return err
 		}
 		if latest != "" && !strings.EqualFold(latest, pr.HeadSHA) {
 			return errs.ErrReviewHeadMoved
 		}
-		if err := s.supersedePRRunsTx(tx, project.ID, repo, prNumber, now); err != nil {
+		if err := s.supersedePRRunsTx(tx, settings.IntegrationID, project.ID, repo, prNumber, now); err != nil {
 			return err
 		}
-		if err := tx.Where("project_id = ? AND repo_full_name = ? AND pr_number = ?",
-			project.ID, repo, prNumber).
+		if err := tx.Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ?",
+			project.ID, repo, prNumber, settings.IntegrationID).
 			Delete(&model.ReviewDebounce{}).Error; err != nil {
 			return err
 		}

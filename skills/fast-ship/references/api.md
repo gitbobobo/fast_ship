@@ -8136,15 +8136,21 @@ GitHub 官方 pull_request 事件 payload（原样验签，服务端只取 owner
 | 500 | 服务器内部错误（50000） |
 | 503 | 部署未配置 webhook 验签密钥（50300），拒绝接受请求 |
 
-### GET `/api/review-agent/pull-request`
+### GET `/api/review-agent/runs/{runId}/pull-request`
 
 <!-- operationId: reviewAgentPullRequest -->
 
 本运行审查的 PR 元数据
 
-只接受运行令牌；PR 身份全部取自运行行，不接受请求参数。
+只接受运行令牌；PR 身份全部取自运行行，不接受请求参数。路径中的 runId 必须与令牌所属运行一致（错配 40307）。
 
 **鉴权**：runTokenAuth
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `runId` | string | 是 | 审查运行 ID |
 
 **成功响应**
 
@@ -8171,15 +8177,21 @@ GitHub 官方 pull_request 事件 payload（原样验签，服务端只取 owner
 | 403 | 已认证但无权限（40300-40399；40301=API Key 越权，40303=仅限 API Key） |
 | 500 | 服务器内部错误（50000） |
 
-### GET `/api/review-agent/pull-request/diff`
+### GET `/api/review-agent/runs/{runId}/pull-request/diff`
 
 <!-- operationId: reviewAgentPullRequestDiff -->
 
 本运行的 PR diff
 
-超过 1MB 截断并标记 truncated。
+超过 1MB 截断并标记 truncated。路径中的 runId 必须与令牌所属运行一致（错配 40307）。
 
 **鉴权**：runTokenAuth
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `runId` | string | 是 | 审查运行 ID |
 
 **成功响应**
 
@@ -8200,16 +8212,22 @@ GitHub 官方 pull_request 事件 payload（原样验签，服务端只取 owner
 | 403 | 已认证但无权限（40300-40399；40301=API Key 越权，40303=仅限 API Key） |
 | 500 | 服务器内部错误（50000） |
 
-### GET `/api/review-agent/history`
+### GET `/api/review-agent/runs/{runId}/history`
 
 <!-- operationId: reviewAgentHistory -->
 
 历史处置上下文（系统生成 Markdown）
 
 代码审查：上一轮各组合的结构化发现 + 上一轮结论之后的新评论/行内回复；首次审查给全部讨论。
-视觉审查：上一轮视觉发现与 unmeasurable。只识别本系统自己发的结论。
+视觉审查：上一轮视觉发现与 unmeasurable。只识别本系统自己发的结论。路径中的 runId 必须与令牌所属运行一致（错配 40307）。
 
 **鉴权**：runTokenAuth
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `runId` | string | 是 | 审查运行 ID |
 
 **成功响应**
 
@@ -8229,15 +8247,21 @@ GitHub 官方 pull_request 事件 payload（原样验签，服务端只取 owner
 | 403 | 已认证但无权限（40300-40399；40301=API Key 越权，40303=仅限 API Key） |
 | 500 | 服务器内部错误（50000） |
 
-### GET `/api/review-agent/screenshots`
+### GET `/api/review-agent/runs/{runId}/screenshots`
 
 <!-- operationId: reviewAgentScreenshots -->
 
 视觉审查截图清单
 
-只有视觉审查运行可调用；图片本体走下面的图片端点。
+只有视觉审查运行可调用；图片本体走下面的图片端点。路径中的 runId 必须与令牌所属运行一致（错配 40307）。
 
 **鉴权**：runTokenAuth
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `runId` | string | 是 | 审查运行 ID |
 
 **成功响应**
 
@@ -8262,13 +8286,13 @@ GitHub 官方 pull_request 事件 payload（原样验签，服务端只取 owner
 | 403 | 已认证但无权限（40300-40399；40301=API Key 越权，40303=仅限 API Key） |
 | 500 | 服务器内部错误（50000） |
 
-### GET `/api/review-agent/screenshots/{assetId}`
+### GET `/api/review-agent/runs/{runId}/screenshots/{assetId}`
 
 <!-- operationId: reviewAgentScreenshotImage -->
 
 截图图片本体
 
-按运行所属 PR/SHA 校验；返回原始字节与 Content-Type。
+按运行所属 PR/SHA 校验；返回原始字节与 Content-Type。路径中的 runId 必须与令牌所属运行一致（错配 40307）。
 
 **鉴权**：runTokenAuth
 
@@ -8276,6 +8300,7 @@ GitHub 官方 pull_request 事件 payload（原样验签，服务端只取 owner
 
 | 名称 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
+| `runId` | string | 是 | 审查运行 ID |
 | `assetId` | string | 是 |  |
 
 **成功响应**
@@ -8292,7 +8317,7 @@ GitHub 官方 pull_request 事件 payload（原样验签，服务端只取 owner
 | 403 | 已认证但无权限（40300-40399；40301=API Key 越权，40303=仅限 API Key） |
 | 404 | 资源不存在（40400-40499） |
 
-### POST `/api/review-agent/result`
+### POST `/api/review-agent/runs/{runId}/result`
 
 <!-- operationId: reviewAgentSubmitResult -->
 
@@ -8300,8 +8325,16 @@ GitHub 官方 pull_request 事件 payload（原样验签，服务端只取 owner
 
 请求体按运行类型二选一：代码审查 `ReviewCodeResult`、视觉审查 `ReviewVisualResult`（字段校验失败返回 400，
 提示修正重交；PR HEAD 与运行绑定 SHA 不一致返回 40920 并作废本轮）。
+路径中的 runId 必须与令牌所属运行一致（错配 40307，不写结果、不消费令牌、不推进状态）。
+代码审查 findings 的文件必须存在于本运行 head_sha 的仓库树中，不存在的路径返回 40004。
 
 **鉴权**：runTokenAuth
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `runId` | string | 是 | 审查运行 ID |
 
 **请求体**
 
@@ -12560,4 +12593,38 @@ Forgejo 连接检测结论；不落库，只随本次响应返回
 | 401 | 未提供或提供无效凭证（40100-40199） |
 | 403 | 非管理员（40305） |
 | 404 | 集成不存在（40435） |
+| 500 | 服务器内部错误（50000） |
+
+### GET `/api/integrations`
+
+<!-- operationId: listIntegrationOptions -->
+
+列出可选代码仓集成（登录用户）
+
+INT-167 新增。项目编辑表单的代码仓集成选择器数据源：返回精简投影
+（id/kind/name/base_url/builtin），不含凭证标记等管理字段；首条恒为
+内置 github-default。所有登录用户可读——绑定项目只需知道集成存在
+与基址，写配置仍仅管理员（/api/deployment/integrations）。
+
+**鉴权**：仅 JWT
+
+**成功响应**
+
+**200** 可选项列表（首条 github-default）
+
+`data` 为数组。
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | 内置集成固定为 github-default；forgejo 行为 forge_integrations 行 ID |
+| `kind` | string（enum: github \| forgejo） | 是 | github=内置 GitHub App；forgejo=机器人账号 + 仓库范围 PAT |
+| `name` | string | 是 | 显示名 |
+| `base_url` | string | 是 | 实例基址（仓库 URL 按 {base_url}/{owner}/{repo} 解析到本集成） |
+| `builtin` | boolean | 是 | 内置集成恒为 true |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
 | 500 | 服务器内部错误（50000） |

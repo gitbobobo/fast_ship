@@ -41,6 +41,7 @@ func Setup(
 	aiProviderHandler *handler.AIProviderHandler,
 	selfLogHandler *handler.SelfLogHandler,
 	githubWebhookHandler *handler.GitHubWebhookHandler,
+	forgeWebhookHandler *handler.ForgeWebhookHandler,
 	quotaHandler *handler.QuotaHandler,
 	deploymentGitHubAppHandler *handler.DeploymentGitHubAppHandler,
 	memberHandler *handler.MemberHandler,
@@ -314,6 +315,9 @@ func Setup(
 		// JWT 必须 — 部署设置读取（INT-129）：public_url 当前生效值与来源，
 		// 所有登录用户可读；写入在下方管理员组。
 		api.GET("/deployment/settings", middleware.RequireJWT(cfg, authService), deploymentSettingsHandler.Get)
+		// 代码仓集成选择器数据源（INT-167）：登录用户可读的精简投影，
+		// 项目编辑表单按它拼仓库 URL；CRUD/检测仍在下方管理员组。
+		api.GET("/integrations", middleware.RequireJWT(cfg, authService), forgeIntegrationHandler.ListOptions)
 
 		// 管理员（INT-129）：JWT + RequireAdmin，角色每请求查库现判，API Key
 		// 在 RequireJWT 已被 40301 拒绝。成员与邀请、部署设置写入、部署级
@@ -427,9 +431,13 @@ func Setup(
 	// 审查 Agent 端点（/api/review-agent，INT-135）：仅 Bearer 运行令牌
 	// （fsr_）。读/上下文端点 requireLive（运行终态即拒）；result 允许
 	// 结束后完全相同正文的结束回报重放。
-	reviewAgent := api.Group("/review-agent")
+	// INT-169 起全部端点改为 run 作用域：URL 中 :runId 必须与令牌所属运行
+	// 一致（RequireRunToken 把路径参数作为预期运行交给 resolver 强校验，
+	// 错配 40307 且对双方运行零副作用）；旧的仅凭令牌端点整体移除
+	// （在途旧提示词线程的请求 404，运行按 deadline 超时收尾）。
+	reviewAgent := api.Group("/review-agent/runs/:runId")
 	{
-		live := reviewAgent.Group("", middleware.RequireRunToken(reviewResolver, true))
+		live := reviewAgent.Group("", middleware.RequireRunToken(reviewResolver, true, "runId"))
 		{
 			live.GET("/pull-request", reviewAgentHandler.PullRequest)
 			live.GET("/pull-request/diff", reviewAgentHandler.Diff)
@@ -437,7 +445,7 @@ func Setup(
 			live.GET("/screenshots", reviewAgentHandler.Screenshots)
 			live.GET("/screenshots/:assetId", reviewAgentHandler.ScreenshotImage)
 		}
-		reviewAgent.POST("/result", middleware.RequireRunToken(reviewResolver, false), reviewAgentHandler.SubmitResult)
+		reviewAgent.POST("/result", middleware.RequireRunToken(reviewResolver, false, "runId"), reviewAgentHandler.SubmitResult)
 	}
 
 	// Fast Ship 自身日志查询（INT-94，只读）：JWT（Web 管理员）与 fsk_ API Key
@@ -451,6 +459,11 @@ func Setup(
 
 	// GitHub App webhook 入站（INT-93）：公开端点，X-Hub-Signature-256 验签。
 	api.POST("/github/webhooks", githubWebhookHandler.Handle)
+
+	// Forgejo webhook 入站（INT-167 任务 3）：公开端点，按集成的 webhook
+	// secret 以 X-Forgejo-Signature（纯 hex HMAC-SHA256）验签，任何写操作都在
+	// 验签之后。
+	api.POST("/forge/:id/webhooks", forgeWebhookHandler.Handle)
 
 	// 自测观察面（INT-93）：仅 fake + debug 模式有内容；JWT 必须，不进 OpenAPI。
 	api.GET("/debug/github-review-log", middleware.RequireJWT(cfg, authService), githubWebhookHandler.DebugReviewLog)

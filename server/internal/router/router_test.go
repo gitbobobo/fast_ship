@@ -1072,7 +1072,7 @@ func setupRouterTestEnvMaybeLogs(t *testing.T, captureLogs bool, opts ...routerC
 	t3BindingService := service.NewT3BindingService(t3ThreadsService, projectRepo, repository.NewProjectT3BindingRepository(db))
 	notificationSink := service.NewNotificationSink(db)
 	notificationService := service.NewNotificationService(repository.NewNotificationRepository(db))
-	reviewService := service.NewReviewService(db, projectRepo, repository.NewGitHubWebhookDeliveryRepository(db), notificationSink, nil, nil, nil, nil, nil, nil, cfg, zap.NewNop())
+	reviewService := service.NewReviewService(db, projectRepo, repository.NewGitHubWebhookDeliveryRepository(db), notificationSink, nil, nil, nil, nil, nil, nil, nil, cfg, zap.NewNop())
 	botService := service.NewBotService(db, cfg, zap.NewNop(), projectService, issueService, t3ThreadsService, t3BindingService)
 	aiProviderHandler := handler.NewAIProviderHandler(service.NewAIProviderService(db, cfg, zap.NewNop()))
 
@@ -1101,6 +1101,8 @@ func setupRouterTestEnvMaybeLogs(t *testing.T, captureLogs bool, opts ...routerC
 	reviewAgentHandler := handler.NewReviewAgentHandler(reviewService)
 	botHandler := handler.NewBotHandler(botService)
 	githubWebhookHandler := handler.NewGitHubWebhookHandler(reviewService, handler.StaticWebhookSecret(""), nil)
+	forgeWebhookHandler := handler.NewForgeWebhookHandler(reviewService,
+		service.NewForgeClientSource(repository.NewForgeIntegrationRepository(db), cfg, zap.NewNop()))
 	quotaHandler := handler.NewQuotaHandler(service.NewQuotaService(repository.NewQuotaAccountRepository(db), cfg, zap.NewNop(), nil))
 	deploymentSettingsRepo := repository.NewDeploymentSettingsRepository(db)
 	deploymentSettingsService := service.NewDeploymentSettingsService(deploymentSettingsRepo, cfg)
@@ -1117,7 +1119,7 @@ func setupRouterTestEnvMaybeLogs(t *testing.T, captureLogs bool, opts ...routerC
 	if captureLogs && appLogger != nil {
 		r.Use(middleware.RequestLog(appLogger))
 	}
-	Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, githubTokenHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, screenshotAnnotationHandler, mediaProxyHandler, t3EnvironmentHandler, t3BindingHandler, notificationHandler, reviewHandler, reviewAgentHandler, reviewService, botHandler, aiProviderHandler, selfLogHandler, githubWebhookHandler, quotaHandler, deploymentGitHubAppHandler, memberHandler, deploymentSettingsHandler, forgeIntegrationHandler, authService, apiKeyRepo)
+	Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, githubTokenHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, screenshotAnnotationHandler, mediaProxyHandler, t3EnvironmentHandler, t3BindingHandler, notificationHandler, reviewHandler, reviewAgentHandler, reviewService, botHandler, aiProviderHandler, selfLogHandler, githubWebhookHandler, forgeWebhookHandler, quotaHandler, deploymentGitHubAppHandler, memberHandler, deploymentSettingsHandler, forgeIntegrationHandler, authService, apiKeyRepo)
 
 	return &routerTestEnv{
 		router:          r,

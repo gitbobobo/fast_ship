@@ -33,7 +33,8 @@ func reviewTimeout(kind model.ReviewKind) time.Duration {
 // openRoundTx 在一个事务里开一轮代码审查（视觉运行不在此创建——它们由代码
 // 全部干净落地后的视觉衔接阶段按条件创建）。
 // 轮次：manual 恒新轮（同 head 也要新轮，否则去重索引吃掉）；其余情况同
-// (project,repo,pr,head) 已有运行沿其 round_number，否则 1+max(round)。
+// (project,repo,pr,head,集成) 已有运行沿其 round_number，否则 1+max(round)。
+// 集成身份取设置行的归一快照（防抖消费/rerun 都在同事务重读过设置行）。
 // meta 由防抖行/rerun 传入的 PR 快照字段。
 func (s *ReviewService) openRoundTx(
 	tx *gorm.DB,
@@ -44,16 +45,17 @@ func (s *ReviewService) openRoundTx(
 	installationID int64,
 	now time.Time,
 ) (int, error) {
-	round, err := nextReviewRoundTx(tx, project.ID, repo, prNumber, headSHA, action)
+	integrationID := reviewIntegrationID(settings.IntegrationID)
+	round, err := nextReviewRoundTx(tx, integrationID, project.ID, repo, prNumber, headSHA, action)
 	if err != nil {
 		return 0, err
 	}
 
-	// 总账推进到本轮 head/round 并置 sync_pending（无行则建）。总账按项目
-	// 分区：只读本项目行，其他项目的同仓库账本不受影响。
+	// 总账推进到本轮 head/round 并置 sync_pending（无行则建）。总账按
+	// (项目, 集成) 分区：只读本行，其他项目/其他集成的同仓库账本不受影响。
 	var ledger model.ReviewPullRequest
-	err = tx.Where("project_id = ? AND repo_full_name = ? AND pr_number = ?",
-		project.ID, repo, prNumber).First(&ledger).Error
+	err = tx.Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ?",
+		project.ID, repo, prNumber, integrationID).First(&ledger).Error
 	switch {
 	case err != nil && !errors.Is(err, gorm.ErrRecordNotFound):
 		return 0, err
@@ -61,10 +63,12 @@ func (s *ReviewService) openRoundTx(
 		ledger = model.ReviewPullRequest{
 			RepoFullName: repo, PRNumber: prNumber,
 			ProjectID: project.ID, UserID: project.UserID,
+			IntegrationID: integrationID,
 		}
 	}
 	ledger.ProjectID = project.ID
 	ledger.UserID = project.UserID
+	ledger.IntegrationID = integrationID
 	// 与 markPRSyncPendingTx 同口径：payload 未带 installation.id（0）时保留
 	// 总账旧值，运行行也用这个生效值。
 	if installationID == 0 {
@@ -80,7 +84,7 @@ func (s *ReviewService) openRoundTx(
 	ledger.SyncPending = true
 	ledger.SyncEpoch = ledger.SyncEpoch + 1
 	ledger.UpdatedAt = now
-	// 主键 (project_id,repo,pr) 存在即更新，否则插入——Save 两种情况都覆盖。
+	// 主键 (project_id,repo,pr,集成) 存在即更新，否则插入——Save 两种情况都覆盖。
 	if err := tx.Save(&ledger).Error; err != nil {
 		return 0, err
 	}
@@ -107,6 +111,7 @@ func (s *ReviewService) openRoundTx(
 			HeadSHA:          headSHA,
 			RoundNumber:      round,
 			InstallationID:   installationID,
+			IntegrationID:    integrationID,
 			TriggerAction:    action,
 			PRTitle:          prTitle,
 			PRURL:            prURL,
@@ -135,15 +140,15 @@ func (s *ReviewService) openRoundTx(
 	return round, s.promoteQueuedRunsTx(tx, project.UserID, now)
 }
 
-// nextReviewRoundTx 轮次分配：manual 恒 1+max；其余同 (project,repo,pr,head)
-// 已有运行沿其 round_number，否则 1+max。轮次只在项目内分配——接管后新项目
-// 不受旧项目已跑轮次的影响。
-func nextReviewRoundTx(tx *gorm.DB, projectID, repo string, prNumber int, headSHA, action string) (int, error) {
+// nextReviewRoundTx 轮次分配：manual 恒 1+max；其余同 (project,repo,pr,head,
+// 集成) 已有运行沿其 round_number，否则 1+max。轮次只在 (项目, 集成) 内
+// 分配——接管或改绑后新键不受旧键已跑轮次的影响。
+func nextReviewRoundTx(tx *gorm.DB, integrationID, projectID, repo string, prNumber int, headSHA, action string) (int, error) {
 	if action != "manual" {
 		var rounds []int
 		if err := tx.Model(&model.ReviewRun{}).
-			Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ?",
-				projectID, repo, prNumber, headSHA).
+			Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ? AND integration_id = ?",
+				projectID, repo, prNumber, headSHA, integrationID).
 			Limit(1).Pluck("round_number", &rounds).Error; err != nil {
 			return 0, err
 		}
@@ -153,8 +158,8 @@ func nextReviewRoundTx(tx *gorm.DB, projectID, repo string, prNumber int, headSH
 	}
 	var maxRound *int
 	if err := tx.Model(&model.ReviewRun{}).
-		Where("project_id = ? AND repo_full_name = ? AND pr_number = ?",
-			projectID, repo, prNumber).
+		Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ?",
+			projectID, repo, prNumber, integrationID).
 		Select("MAX(round_number)").Scan(&maxRound).Error; err != nil {
 		return 0, err
 	}

@@ -21,7 +21,9 @@ func TestMigrateForgeHostKeys(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
-	if err := db.AutoMigrate(&model.ForgeIntegration{}); err != nil {
+	// createBootIndexes 会在 project_review_settings 上建唯一索引（同仓库占用
+	// 键 INT-167 起带 integration_id），一并迁出来。
+	if err := db.AutoMigrate(&model.ForgeIntegration{}, &model.ProjectReviewSettings{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 
@@ -89,7 +91,7 @@ func TestForgeHostKeyIndexRebuild(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
-	if err := db.AutoMigrate(&model.ForgeIntegration{}); err != nil {
+	if err := db.AutoMigrate(&model.ForgeIntegration{}, &model.ProjectReviewSettings{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	now := time.Now().UTC()

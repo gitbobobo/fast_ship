@@ -10,8 +10,9 @@ import (
 )
 
 const (
-	ContextKeyRunID  = "run_id"
-	AuthTypeRunToken = "run_token"
+	ContextKeyRunID       = "run_id"
+	ContextKeyRunThreadID = "run_thread_id"
+	AuthTypeRunToken      = "run_token"
 )
 
 // RequireRunToken 审查 Agent 端点专用：仅接受 Bearer 运行令牌（fsr_）。
@@ -21,7 +22,11 @@ const (
 // requireLive=true 的端点在运行结束后立即拒绝（令牌已消费）；
 // requireLive=false 仅供回报端点：结束后仍允许完全相同的结束回报重放。
 // resolver 由 ReviewService 实现（INT-135，/api/review-agent 端点在 1c 接入）。
-func RequireRunToken(resolver service.RunTokenResolver, requireLive bool) gin.HandlerFunc {
+//
+// runParam 非空时（INT-169 run 作用域路由，约定 "runId"）把该路径参数作为
+// 预期运行传入解析：令牌所属运行与 URL 目标不一致 → 40307，且在 resolver
+// 做任何状态推进之前拒绝——错配请求对双方运行零副作用。
+func RequireRunToken(resolver service.RunTokenResolver, requireLive bool, runParam string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		raw := runTokenFromHeader(c)
 		if raw == "" {
@@ -34,7 +39,18 @@ func RequireRunToken(resolver service.RunTokenResolver, requireLive bool) gin.Ha
 			c.Abort()
 			return
 		}
-		identity, err := resolver.ResolveRunToken(c.Request.Context(), raw, requireLive)
+		expected := ""
+		if runParam != "" {
+			expected = c.Param(runParam)
+			if expected == "" {
+				// Gin 允许 :runId 匹配空段（/runs//... 双斜杠）：空目标无法做
+				// 归属校验，按错配拒绝——不给仅凭令牌的旁路入口（INT-169）。
+				response.Forbidden(c, errs.ErrReviewRunMismatch.Code, errs.ErrReviewRunMismatch.Message)
+				c.Abort()
+				return
+			}
+		}
+		identity, err := resolver.ResolveRunToken(c.Request.Context(), raw, requireLive, expected)
 		if err != nil {
 			HandleAppError(c, err)
 			c.Abort()
@@ -42,6 +58,7 @@ func RequireRunToken(resolver service.RunTokenResolver, requireLive bool) gin.Ha
 		}
 		c.Set(ContextKeyUserID, identity.UserID)
 		c.Set(ContextKeyRunID, identity.RunID)
+		c.Set(ContextKeyRunThreadID, identity.ThreadID)
 		c.Set(ContextKeyAuthType, AuthTypeRunToken)
 		BindRequestUser(c)
 		c.Next()
@@ -65,4 +82,10 @@ func runTokenFromHeader(c *gin.Context) string {
 // GetRunID 从上下文获取运行令牌对应的运行 ID。
 func GetRunID(c *gin.Context) string {
 	return c.GetString(ContextKeyRunID)
+}
+
+// GetRunThreadID 从上下文获取运行令牌对应运行的 T3 线程 ID（INT-169，
+// 错配拒绝等日志定位用）。
+func GetRunThreadID(c *gin.Context) string {
+	return c.GetString(ContextKeyRunThreadID)
 }

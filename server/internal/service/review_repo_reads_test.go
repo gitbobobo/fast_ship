@@ -31,6 +31,7 @@ var reviewRepoReadAllowlist = map[string]string{
 	"reviewOccupiers":     "写入侧：总览里预测同仓库占用",
 	"ListReviewProjects":  "展示：总览的 owner/repo 字段（原样大小写）",
 	"normalizeCodeRepo":   "写入侧：项目更新时的归一收尾",
+	"pollForgejoProject":  "一致性复核：轮询补漏受理键取设置行快照，live 读只用于跳过「改绑/换仓未同步」的漂移行",
 	"CodeRepo":            "定义本身",
 	"CodeRepoFullName":    "定义本身",
 }
@@ -108,6 +109,7 @@ func TestListReviewRecordsCanRerunUsesSettingsSnapshot(t *testing.T) {
 	now := time.Now().UTC()
 	if err := svc.db.Create(&model.ProjectReviewSettings{
 		ProjectID: project.ID, UserID: user.ID, RepoFullName: "octo/snap", Enabled: true,
+		IntegrationID:        model.ForgeIntegrationBuiltinGitHubID,
 		CodeCombinationsJSON: "[]", VisualCombinationsJSON: "[]",
 		CreatedAt: now, UpdatedAt: now,
 	}).Error; err != nil {

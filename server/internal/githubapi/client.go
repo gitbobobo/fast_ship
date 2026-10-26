@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -51,6 +53,15 @@ type GitHubClient interface {
 	// 的 id 字段）：rerun 等没有 webhook installation 快照的路径用。
 	// 静态 token / 匿名实现不支持解析，返回错误（调用方不得把 0 当安装 id 继续）。
 	ResolveInstallation(ctx context.Context, repoFullName string) (int64, error)
+	// PathExistsAtRef 仓库相对路径在指定 ref（commit SHA 等）的树中是否存在
+	// （GET /repos/{o}/{r}/git/trees/{ref}:{dir} 取父目录条目精确匹配末段；
+	// INT-169 审查结果文件归属校验）。true=存在（blob/tree/commit 条目均可），
+	// 不存在→false；tree 响应截断且未命中时报错（无法判定，不猜不存在）。
+	PathExistsAtRef(ctx context.Context, installationID int64, repoFullName, path, ref string) (bool, error)
+	// ListPullRequestFiles PR 变更文件清单（GET pulls/N/files 分页）：rename
+	// 两侧（filename+previous_filename）都收，去重。complete=false 表示清单
+	// 被平台封顶截断（GitHub 3000 文件上限）——缺席不能当不存在证据。
+	ListPullRequestFiles(ctx context.Context, installationID int64, repoFullName string, number int) (paths []string, complete bool, err error)
 }
 
 // githubHTTP GitHub 调用的共享客户端。Timeout 是 ctx 缺失时的兜底；调用方
@@ -93,8 +104,18 @@ type httpClient struct {
 	baseURL string
 }
 
-// do 发任意请求，返回状态码与（截到 8MB 的）响应体。ctx 取消时中止等待。
+// bodyReadMaxBytes 一般端点响应体读取上限；diff 端点走 doLimit 单独放宽。
+const bodyReadMaxBytes = 8 << 20
+
+// do 发任意请求，返回状态码与响应体。ctx 取消时中止等待。
 func (h *httpClient) do(ctx context.Context, method, url, accept, bearer string, in any) (int, []byte, error) {
+	return h.doLimit(ctx, method, url, accept, bearer, in, bodyReadMaxBytes)
+}
+
+// doLimit 同 do，按 max 读响应体：2xx 超限返回「截断前缀 + ErrBodyTooLarge」
+// （截断件不能当完整件用，但前缀仍是真实内容）；非 2xx 仍按限长截断返回，
+// 供 StatusError 消息使用。
+func (h *httpClient) doLimit(ctx context.Context, method, url, accept, bearer string, in any, max int64) (int, []byte, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -123,9 +144,17 @@ func (h *httpClient) do(ctx context.Context, method, url, accept, bearer string,
 		return 0, nil, err
 	}
 	defer resp.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, max+1))
 	if err != nil {
 		return resp.StatusCode, nil, err
+	}
+	if int64(len(raw)) > max {
+		raw = raw[:max]
+		if resp.StatusCode < 300 {
+			// 超限的 2xx：返回已截断前缀 + ErrBodyTooLarge，调用方按
+			// 「不完整件」处置（diff 端点的前缀仍是真实内容）。
+			return resp.StatusCode, raw, fmt.Errorf("%w: %s %s 超过 %d 字节", ErrBodyTooLarge, method, url, max)
+		}
 	}
 	return resp.StatusCode, raw, nil
 }
@@ -165,7 +194,10 @@ type prWire struct {
 	Merged   bool       `json:"merged"`
 	MergedAt *time.Time `json:"merged_at"`
 	ClosedAt *time.Time `json:"closed_at"`
-	User     struct {
+	// UpdatedAt 平台侧的 PR 最后更新戳：webhook 复核路径把它落成
+	// seen/总账的 pr_updated_at 判定基准（Forgejo 适配器同源字段）。
+	UpdatedAt *time.Time `json:"updated_at"`
+	User      struct {
 		Login string `json:"login"`
 	} `json:"user"`
 	Head struct {
@@ -214,11 +246,17 @@ func (c *restClient) GetPullRequest(ctx context.Context, installationID int64, r
 		HeadRef:      pr.Head.Ref,
 		BaseRef:      pr.Base.Ref,
 		AuthorLogin:  pr.User.Login,
+		UpdatedAt:    pr.UpdatedAt,
 	}, nil
 }
 
+// diffBodyMaxBytes diff 端点读取上限，与 Forgejo 适配器的 respBodyMaxBytes
+// 对齐；超限走 ErrBodyTooLarge 而非静默截断（半截 diff 不能当完整变更清单，
+// 但前缀仍是真实内容——err=ErrBodyTooLarge 时返回值是尽量读到的前缀）。
+const diffBodyMaxBytes = 64 << 20
+
 // GetPullRequestDiff diff 端点返回 text/plain（Accept: vnd.github.v3.diff），
-// 不走 JSON 解析。
+// 不走 JSON 解析。err 为 ErrBodyTooLarge 时返回值是已截断前缀。
 func (c *restClient) GetPullRequestDiff(ctx context.Context, installationID int64, repoFullName string, number int) (string, error) {
 	owner, name, err := splitRepo(repoFullName)
 	if err != nil {
@@ -227,8 +265,9 @@ func (c *restClient) GetPullRequestDiff(ctx context.Context, installationID int6
 	path := fmt.Sprintf("/repos/%s/%s/pulls/%d", owner, name, number)
 	var diff string
 	err = c.withToken(ctx, installationID, func(bearer string) error {
-		code, raw, err := c.h.do(ctx, http.MethodGet, c.h.baseURL+path, "application/vnd.github.v3.diff", bearer, nil)
+		code, raw, err := c.h.doLimit(ctx, http.MethodGet, c.h.baseURL+path, "application/vnd.github.v3.diff", bearer, nil, diffBodyMaxBytes)
 		if err != nil {
+			diff = string(raw) // ErrBodyTooLarge 时 raw 是已截断前缀
 			return err
 		}
 		if code >= 300 {
@@ -238,7 +277,7 @@ func (c *restClient) GetPullRequestDiff(ctx context.Context, installationID int6
 		return nil
 	})
 	if err != nil {
-		return "", err
+		return diff, err
 	}
 	return diff, nil
 }
@@ -485,6 +524,143 @@ func (c *restClient) GetRepository(ctx context.Context, installationID int64, re
 // 需要解析的调用方应使用 githubapp.Client（它覆盖本方法）。
 func (c *restClient) ResolveInstallation(ctx context.Context, repoFullName string) (int64, error) {
 	return 0, fmt.Errorf("githubapi: 该客户端不支持 installation 解析")
+}
+
+// gitTreeWire git/trees 响应：非递归时给该 tree 的直接子条目。
+type gitTreeWire struct {
+	Tree      []gitTreeEntry `json:"tree"`
+	Truncated bool           `json:"truncated"`
+}
+
+type gitTreeEntry struct {
+	Path string `json:"path"`
+	Type string `json:"type"` // blob / tree / commit（子模块）
+}
+
+// PathExistsAtRef 用非递归 git/trees 判路径存在性：拉取父目录的直接条目、
+// 精确匹配末段名——contents API 会把目录/符号链接/子模块和大文件都混进
+// 2xx，无法严格回答「树中是否有此路径」。路径必须是规范的仓库相对形态：
+// 前导 /、空段、「.」「..」一律按不存在处理——不静默归一化（校验过的
+// 形态会被原样存进结果，别名会造成校验对象与存储值不一致，且转义拦不下
+// 它们，HTTP 层归一化可能把请求拼到别的端点上）。
+func (c *restClient) PathExistsAtRef(ctx context.Context, installationID int64, repoFullName, path, ref string) (bool, error) {
+	owner, name, err := splitRepo(repoFullName)
+	if err != nil {
+		return false, err
+	}
+	segs := strings.Split(path, "/")
+	for _, s := range segs {
+		if s == "" || s == "." || s == ".." {
+			return false, nil
+		}
+	}
+	base := segs[len(segs)-1]
+	dir := strings.Join(segs[:len(segs)-1], "/")
+	escapedRef := url.PathEscape(ref)
+	treeish := escapedRef
+	if dir != "" {
+		escaped := make([]string, 0, len(segs)-1)
+		for _, s := range segs[:len(segs)-1] {
+			escaped = append(escaped, url.PathEscape(s))
+		}
+		treeish += ":" + strings.Join(escaped, "/")
+	}
+	var out gitTreeWire
+	err = c.withToken(ctx, installationID, func(bearer string) error {
+		return c.h.doJSON(ctx, http.MethodGet,
+			fmt.Sprintf("/repos/%s/%s/git/trees/%s", owner, name, treeish), bearer, nil, &out)
+	})
+	if err != nil {
+		// 目录清单超读入上限（>8MiB 的大目录）——与 truncated=true 同属
+		// 不完整证据：不可判定，不可当缺席证明，也不该 50200 卡死重试。
+		if errors.Is(err, ErrBodyTooLarge) {
+			return false, fmt.Errorf("%w: %q 的目录清单超读入上限，无法判定是否存在", ErrTreeTruncated, path)
+		}
+		if !IsNotFound(err) {
+			return false, err
+		}
+		// 404 有歧义：dir 级可能是「目录真不存在」，也可能是 ref/仓库本身
+		// 不可达——后者报「文件不存在」会把基础设施故障误报成 Agent 的
+		// 审查对象错误。探一次根树区分：根 404/出错 → 按调用失败上报；
+		// 根在 → dir 确实缺，路径不存在。根级请求本身 404 即 ref 无效。
+		if dir == "" {
+			return false, err
+		}
+		var root gitTreeWire
+		rootErr := c.withToken(ctx, installationID, func(bearer string) error {
+			return c.h.doJSON(ctx, http.MethodGet,
+				fmt.Sprintf("/repos/%s/%s/git/trees/%s", owner, name, escapedRef), bearer, nil, &root)
+		})
+		if rootErr != nil {
+			if errors.Is(rootErr, ErrBodyTooLarge) {
+				return false, fmt.Errorf("%w: 根树清单超读入上限，无法判定 %q 是否存在", ErrTreeTruncated, path)
+			}
+			return false, rootErr
+		}
+		return false, nil
+	}
+	for _, e := range out.Tree {
+		if e.Path == base {
+			return true, nil
+		}
+	}
+	if out.Truncated {
+		return false, fmt.Errorf("%w: 无法判定 %q 是否存在", ErrTreeTruncated, path)
+	}
+	return false, nil
+}
+
+// pullRequestFileWire pulls/N/files 元素：status=renamed 时 previous_filename
+// 是旧路径（「不该删它」类 finding 指向旧名，两侧都收）。
+type pullRequestFileWire struct {
+	Filename         string `json:"filename"`
+	PreviousFilename string `json:"previous_filename"`
+}
+
+// prFilesHardCap GitHub files 端点硬封顶：单 PR 最多返回 3000 个文件，
+// 打满即按不完整清单处理（缺席不作否决证据）。
+const prFilesHardCap = 3000
+
+// ListPullRequestFiles 分页拉 PR 变更文件清单（每页 100）。平台对超大 PR 的
+// diff 文本可能无标记截断——否决类证据必须用这份权威分页清单。
+func (c *restClient) ListPullRequestFiles(ctx context.Context, installationID int64, repoFullName string, number int) ([]string, bool, error) {
+	owner, name, err := splitRepo(repoFullName)
+	if err != nil {
+		return nil, false, err
+	}
+	seen := map[string]bool{}
+	var paths []string
+	add := func(p string) {
+		if p != "" && !seen[p] {
+			seen[p] = true
+			paths = append(paths, p)
+		}
+	}
+	for page := 1; ; page++ {
+		var items []pullRequestFileWire
+		err := c.withToken(ctx, installationID, func(bearer string) error {
+			return c.h.doJSON(ctx, http.MethodGet,
+				fmt.Sprintf("/repos/%s/%s/pulls/%d/files?per_page=100&page=%d", owner, name, number, page), bearer, nil, &items)
+		})
+		if err != nil {
+			// 单页带 patch 负载可超 8MiB 读上限：清单判不完整——缺席不作
+			// 否决证据，比每次 50200 卡死重试强。
+			if errors.Is(err, ErrBodyTooLarge) {
+				return paths, false, nil
+			}
+			return nil, false, err
+		}
+		for _, f := range items {
+			add(f.Filename)
+			add(f.PreviousFilename)
+		}
+		if len(items) < 100 {
+			return paths, true, nil
+		}
+		if len(paths) >= prFilesHardCap {
+			return paths, false, nil
+		}
+	}
 }
 
 func (c *restClient) CreateCommitStatus(ctx context.Context, installationID int64, repoFullName, sha, state, statusContext, description, targetURL string) error {

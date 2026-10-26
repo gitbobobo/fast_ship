@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/api"
+	"github.com/godbobo/fast_ship/server/internal/forge"
 	"github.com/godbobo/fast_ship/server/internal/githubapi"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/githubapp"
@@ -45,7 +46,8 @@ func TestReviewDiffFailureKeepsTopLevelOutput(t *testing.T) {
 	run := e.seedRunWithFindings(t, repo, 78, "sha-d", now)
 	e.enableReview(t)
 	e.svc.db.Create(&model.ReviewPullRequest{
-		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 78, UserID: e.user.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: repo, PRNumber: 78, UserID: e.user.ID,
 		InstallationID: 1, HeadSHA: "sha-d", RoundNumber: 1,
 		SyncPending: true, SyncEpoch: 1, UpdatedAt: now,
 	})
@@ -55,7 +57,7 @@ func TestReviewDiffFailureKeepsTopLevelOutput(t *testing.T) {
 		githubapp.StaticClients{Client: &diffFailClient{GitHubClient: e.fake}},
 		fakeReviewAppSource{ok: true},
 		fakeReviewPublicURL("https://fs.example.com"),
-		nil, e.media, nil, e.svc.cfg, zap.NewNop())
+		nil, e.media, nil, repository.NewForgeIntegrationRepository(e.svc.db), e.svc.cfg, zap.NewNop())
 	review.syncPendingPRs(now)
 
 	if got := len(e.fake.StatusesForContext(reviewCodeStatusContext)); got == 0 {
@@ -135,7 +137,8 @@ func TestReviewDiffFailureWithoutPendingInlineKeepsSyncPending(t *testing.T) {
 	e.svc.db.Model(run).Updates(map[string]any{"posted_at": now, "review_id": 7})
 	e.enableReview(t)
 	e.svc.db.Create(&model.ReviewPullRequest{
-		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 79, UserID: e.user.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: repo, PRNumber: 79, UserID: e.user.ID,
 		InstallationID: 1, HeadSHA: "sha-n", RoundNumber: 1,
 		CodeStatus: "failure", SyncPending: true, SyncEpoch: 1, UpdatedAt: now,
 	})
@@ -145,7 +148,7 @@ func TestReviewDiffFailureWithoutPendingInlineKeepsSyncPending(t *testing.T) {
 		githubapp.StaticClients{Client: &diffFailClient{GitHubClient: e.fake}},
 		fakeReviewAppSource{ok: true},
 		fakeReviewPublicURL("https://fs.example.com"),
-		nil, e.media, nil, e.svc.cfg, zap.NewNop())
+		nil, e.media, nil, repository.NewForgeIntegrationRepository(e.svc.db), e.svc.cfg, zap.NewNop())
 	review.syncPendingPRs(now)
 
 	var ledger model.ReviewPullRequest
@@ -193,7 +196,8 @@ func TestReviewDiffFailureRewritesCommentWhenBodyChanges(t *testing.T) {
 	seedCombo("m-b", "s2", model.ReviewRunCompleted)
 	seedCombo("m-c", "", model.ReviewRunRunning) // 还在跑：代码状态保持 pending
 	e.svc.db.Create(&model.ReviewPullRequest{
-		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 80, UserID: e.user.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: repo, PRNumber: 80, UserID: e.user.ID,
 		InstallationID: 1, HeadSHA: "sha-b", RoundNumber: 1,
 		CodeStatus: "pending", SyncPending: true, SyncEpoch: 1, UpdatedAt: now,
 	})
@@ -203,7 +207,7 @@ func TestReviewDiffFailureRewritesCommentWhenBodyChanges(t *testing.T) {
 		githubapp.StaticClients{Client: &diffFailClient{GitHubClient: e.fake}},
 		fakeReviewAppSource{ok: true},
 		fakeReviewPublicURL("https://fs.example.com"),
-		nil, e.media, nil, e.svc.cfg, zap.NewNop())
+		nil, e.media, nil, repository.NewForgeIntegrationRepository(e.svc.db), e.svc.cfg, zap.NewNop())
 	review.syncPendingPRs(now)
 
 	var ledger model.ReviewPullRequest
@@ -245,7 +249,8 @@ func TestUpsertPRCommentDedupesOwnComment(t *testing.T) {
 	ctx := context.Background()
 	const marker = reviewCodeCommentMarker
 	ledger := &model.ReviewPullRequest{
-		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 84, UserID: e.user.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: repo, PRNumber: 84, UserID: e.user.ID,
 		InstallationID: 1, HeadSHA: "sha-c", RoundNumber: 1, UpdatedAt: time.Now().UTC(),
 	}
 	if err := e.svc.db.Create(ledger).Error; err != nil {
@@ -258,7 +263,7 @@ func TestUpsertPRCommentDedupesOwnComment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed bot comment: %v", err)
 	}
-	if err := review.upsertPRComment(ctx, e.fake, ledger, marker, marker+"\n本轮正文", "code_comment_id", botID); err != nil {
+	if err := review.upsertPRComment(ctx, forge.NewGitHubReviewClient(e.fake, ledger.InstallationID), ledger, marker, marker+"\n本轮正文", "code_comment_id", botID); err != nil {
 		t.Fatalf("upsert: %v", err)
 	}
 	if got := e.fake.CallCounts(); got["UpdatePullRequestComment"] != 1 {
@@ -268,7 +273,7 @@ func TestUpsertPRCommentDedupesOwnComment(t *testing.T) {
 	// 正文一致 → 不 PATCH；id 不可用时按 bot+marker 找回并补记回账本。
 	ledger.CodeCommentID = 0
 	countsBefore := e.fake.CallCounts()["UpdatePullRequestComment"]
-	if err := review.upsertPRComment(ctx, e.fake, ledger, marker, marker+"\n本轮正文", "code_comment_id", 0); err != nil {
+	if err := review.upsertPRComment(ctx, forge.NewGitHubReviewClient(e.fake, ledger.InstallationID), ledger, marker, marker+"\n本轮正文", "code_comment_id", 0); err != nil {
 		t.Fatalf("upsert dedupe: %v", err)
 	}
 	if got := e.fake.CallCounts()["UpdatePullRequestComment"]; got != countsBefore {
@@ -304,7 +309,8 @@ func TestReviewSyncFailureBacksOff(t *testing.T) {
 	now := time.Now().UTC()
 	e.enableReview(t)
 	e.svc.db.Create(&model.ReviewPullRequest{
-		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 90, UserID: e.user.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: repo, PRNumber: 90, UserID: e.user.ID,
 		InstallationID: 1, HeadSHA: "sha-f", RoundNumber: 1,
 		SyncPending: true, SyncEpoch: 1, UpdatedAt: now,
 	})
@@ -315,7 +321,7 @@ func TestReviewSyncFailureBacksOff(t *testing.T) {
 		githubapp.StaticClients{Client: client},
 		fakeReviewAppSource{ok: true},
 		fakeReviewPublicURL("https://fs.example.com"),
-		nil, e.media, nil, e.svc.cfg, zap.NewNop())
+		nil, e.media, nil, repository.NewForgeIntegrationRepository(e.svc.db), e.svc.cfg, zap.NewNop())
 	review.syncPendingPRs(now)
 	calls := client.calls
 	var ledger model.ReviewPullRequest
@@ -381,7 +387,8 @@ func TestReviewSyncCarriesVisualSuccessStatusOnce(t *testing.T) {
 	e.seedRunWithFindings(t, repo, 91, "sha-w", now)
 	fp := screenshotFingerprint(collectScreenshotURLs(body))
 	e.svc.db.Create(&model.ReviewPullRequest{
-		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 91, UserID: e.user.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: repo, PRNumber: 91, UserID: e.user.ID,
 		InstallationID: 1, HeadSHA: "sha-w", RoundNumber: 2,
 		VisualScreensFingerprint: fp, SyncPending: true, SyncEpoch: 1, UpdatedAt: now,
 	})
@@ -391,7 +398,7 @@ func TestReviewSyncCarriesVisualSuccessStatusOnce(t *testing.T) {
 		githubapp.StaticClients{Client: &diffFailClient{GitHubClient: e.fake}},
 		fakeReviewAppSource{ok: true},
 		fakeReviewPublicURL("https://fs.example.com"),
-		nil, e.media, nil, e.svc.cfg, zap.NewNop())
+		nil, e.media, nil, repository.NewForgeIntegrationRepository(e.svc.db), e.svc.cfg, zap.NewNop())
 	review.syncPendingPRs(now)
 	if got := len(e.fake.StatusesForContext(reviewVisualStatusContext)); got != 1 {
 		t.Fatalf("沿用上一轮通过应写 1 条视觉状态，实际 %d", got)
@@ -449,7 +456,8 @@ func TestReviewSyncRetryKeepsVisualStatusSingle(t *testing.T) {
 	})
 	fp := screenshotFingerprint(collectScreenshotURLs(body))
 	if err := e.svc.db.Create(&model.ReviewPullRequest{
-		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 92, UserID: e.user.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: repo, PRNumber: 92, UserID: e.user.ID,
 		InstallationID: 1, HeadSHA: "sha-cf2", RoundNumber: 2,
 		VisualScreensFingerprint: fp, SyncPending: true, SyncEpoch: 1, UpdatedAt: now,
 	}).Error; err != nil {
@@ -462,7 +470,7 @@ func TestReviewSyncRetryKeepsVisualStatusSingle(t *testing.T) {
 		githubapp.StaticClients{Client: client},
 		fakeReviewAppSource{ok: true},
 		fakeReviewPublicURL("https://fs.example.com"),
-		nil, e.media, nil, e.svc.cfg, zap.NewNop())
+		nil, e.media, nil, repository.NewForgeIntegrationRepository(e.svc.db), e.svc.cfg, zap.NewNop())
 	review.syncPendingPRs(now)
 	if got := len(e.fake.StatusesForContext(reviewVisualStatusContext)); got != 1 {
 		t.Fatalf("首次应写 1 条视觉状态，实际 %d", got)

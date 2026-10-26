@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"regexp"
@@ -332,14 +333,19 @@ func scrubLogURLs(s string) string {
 // 查网络，而真正的原因是本部署不支持截图审查。
 var errReviewMediaUnconfigured = errors.New("截图下载面未配置")
 
+// errForgejoMediaPrivate Forgejo 附件匿名下载被拒：PAT 不随 Bearer 出域
+// （媒体主机 ≠ API 作用域，无令牌面），目前不支持私有附件带凭证下载——
+// 给用户可见的「私有附件不支持」而不是笼统的「无法连接图片服务器」。
+var errForgejoMediaPrivate = errors.New("Forgejo 私有附件暂不支持带凭证下载，请改用公开图片链接")
+
 // downloadScreenshot 单张截图下载：匿名优先；匿名失败且失败是「可能靠令牌
 // 解决」的（GitHub 媒体域的 401/403/404——私有仓库附件对匿名请求正是回
-// 404/403，GitHub 不区分不存在与无权限）才带 App 安装令牌重试一次。协议
+// 404/403，GitHub 不区分不存在与无权限）才带安装令牌重试一次。协议
 // 不支持、内容不是图片、超过大小上限、内网地址这类确定性失败换令牌也一样
 // 失败，不白铸令牌（每次同步都会重来，探测路径还占预算）。令牌是仓库凭证，
 // 外部图床一律不发（防止 PR 描述里的外链图床靠回 403 换走安装令牌）。media
 // 未配置视为该部署不支持截图审查。
-func (s *ReviewService) downloadScreenshot(ctx context.Context, installationID int64, url string) (*githubmedia.CachedMedia, error) {
+func (s *ReviewService) downloadScreenshot(ctx context.Context, integrationID string, installationID int64, url string) (*githubmedia.CachedMedia, error) {
 	if s.media == nil {
 		return nil, errReviewMediaUnconfigured
 	}
@@ -356,10 +362,21 @@ func (s *ReviewService) downloadScreenshot(ctx context.Context, installationID i
 	default:
 		return nil, err
 	}
+	// 带凭证重试只面向 GitHub 媒体：forge 集成显式短路（今天恰好靠
+	// installationID=0 挡住；未来迁移工具若回填非零 installation，PAT 也不
+	// 得随 Bearer 出域到 github 主机）。Forgejo 附件匿名 401/403 打独立
+	// sentinel（公开仓匿名也能拉，401/403 多半是私有附件）；404 不归类
+	// ——公开仓附件被删同样回 404，报「请改用公开图片链接」是误导。
+	if reviewIntegrationID(integrationID) != model.ForgeIntegrationBuiltinGitHubID {
+		if upstream.StatusCode != http.StatusNotFound {
+			return nil, fmt.Errorf("%w（upstream %d）: %w", errForgejoMediaPrivate, upstream.StatusCode, err)
+		}
+		return nil, err
+	}
 	if !githubmedia.IsGitHubMediaURLFor(url, s.githubWebHost()) || s.mediaBearer == nil || installationID == 0 {
 		return nil, err
 	}
-	bearer, berr := s.mediaBearer(ctx, installationID)
+	bearer, berr := s.mediaBearer(ctx, integrationID, installationID)
 	if berr != nil || bearer == "" {
 		return nil, err
 	}
@@ -394,6 +411,7 @@ func screenshotErrorText(err error) string {
 	}
 	for _, sentinel := range []error{
 		errReviewMediaUnconfigured,
+		errForgejoMediaPrivate,
 		githubmedia.ErrInvalidMediaURL,
 		githubmedia.ErrUnsupportedUpstreamMedia,
 		githubmedia.ErrBlockedUpstreamAddress,
@@ -432,19 +450,19 @@ func (s *ReviewService) githubWebHost() string {
 	return githubmedia.GitHubWebHost(s.cfg.GitHubApp.APIBaseURL)
 }
 
-// ensureAssets 保证 (repo,pr,head) 的截图资产已落账：逐引用查重 → 未下载的
-// 走 downloadScreenshot；失败行（storage_path 为空）每次重试下载，成功则
+// ensureAssets 保证 (集成,repo,pr,head) 的截图资产已落账：逐引用查重 → 未下
+// 载的走 downloadScreenshot；失败行（storage_path 为空）每次重试下载，成功则
 // 更新原行。私有仓库附件匿名拉不到：GitHub 媒体域（含部署实例附件路径）
 // 失败且有安装 id 时带 App 令牌重试一次。下载失败也落一行（error 非空、
 // storage_path 空），图片端点据此回 404。返回本次指纹与资产列表。
-func (s *ReviewService) ensureAssets(ctx context.Context, repo string, prNumber int, headSHA, prBody string, installationID int64) (string, []model.ReviewAsset, error) {
+func (s *ReviewService) ensureAssets(ctx context.Context, integrationID, repo string, prNumber int, headSHA, prBody string, installationID int64) (string, []model.ReviewAsset, error) {
 	refs := collectScreenshotURLsAt(prBody, s.githubWebHost())
 	fingerprint := screenshotFingerprint(refs)
 	now := time.Now().UTC()
 
 	var assets []model.ReviewAsset
-	if err := s.db.Where("repo_full_name = ? AND pr_number = ? AND head_sha = ?",
-		repo, prNumber, headSHA).Order("position ASC").Find(&assets).Error; err != nil {
+	if err := s.db.Where("integration_id = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ?",
+		integrationID, repo, prNumber, headSHA).Order("position ASC").Find(&assets).Error; err != nil {
 		return "", nil, errs.ErrInternal
 	}
 	have := map[string]model.ReviewAsset{}
@@ -458,7 +476,7 @@ func (s *ReviewService) ensureAssets(ctx context.Context, repo string, prNumber 
 		}
 		var storagePath, mime, errText string
 		var size int64
-		if cached, err := s.downloadScreenshot(ctx, installationID, ref.URL); err != nil {
+		if cached, err := s.downloadScreenshot(ctx, integrationID, installationID, ref.URL); err != nil {
 			// 原始错误（含网络层英文文案）只进日志，落库的是中文可读原因；
 			// URL 与错误文本先脱敏——*url.Error 内嵌重定向后的完整地址，预签
 			// 名 query 不落日志。
@@ -482,25 +500,26 @@ func (s *ReviewService) ensureAssets(ctx context.Context, repo string, prNumber 
 			continue
 		}
 		asset := &model.ReviewAsset{
-			ID:           uuid.NewString(),
-			RepoFullName: repo,
-			PRNumber:     prNumber,
-			HeadSHA:      headSHA,
-			Position:     pos,
-			Label:        ref.Label,
-			SourceURL:    ref.URL,
-			StoragePath:  storagePath,
-			MimeType:     mime,
-			SizeBytes:    size,
-			Error:        errText,
-			CreatedAt:    now,
+			ID:            uuid.NewString(),
+			IntegrationID: integrationID,
+			RepoFullName:  repo,
+			PRNumber:      prNumber,
+			HeadSHA:       headSHA,
+			Position:      pos,
+			Label:         ref.Label,
+			SourceURL:     ref.URL,
+			StoragePath:   storagePath,
+			MimeType:      mime,
+			SizeBytes:     size,
+			Error:         errText,
+			CreatedAt:     now,
 		}
-		// 并发/重入安全：同 (repo,pr,head,source_url) 只保留先到的行
+		// 并发/重入安全：同 (集成,repo,pr,head,source_url) 只保留先到的行
 		// （唯一索引 idx_review_assets_source 是冲突目标）。
 		res := s.db.Clauses(clause.OnConflict{
 			Columns: []clause.Column{
-				{Name: "repo_full_name"}, {Name: "pr_number"},
-				{Name: "head_sha"}, {Name: "source_url"},
+				{Name: "integration_id"}, {Name: "repo_full_name"},
+				{Name: "pr_number"}, {Name: "head_sha"}, {Name: "source_url"},
 			},
 			DoNothing: true,
 		}).Create(asset)
@@ -510,8 +529,8 @@ func (s *ReviewService) ensureAssets(ctx context.Context, repo string, prNumber 
 		assets = append(assets, *asset)
 	}
 	// 重查一次拿全量（含并发他方先建的行）。
-	if err := s.db.Where("repo_full_name = ? AND pr_number = ? AND head_sha = ?",
-		repo, prNumber, headSHA).Order("position ASC").Find(&assets).Error; err != nil {
+	if err := s.db.Where("integration_id = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ?",
+		integrationID, repo, prNumber, headSHA).Order("position ASC").Find(&assets).Error; err != nil {
 		return "", nil, errs.ErrInternal
 	}
 	return fingerprint, assets, nil
@@ -585,7 +604,7 @@ type screenshotProbe struct {
 // 没有再取第一条失败原因。探测不写 review_assets——资产行仍由视觉运行时的
 // ensureAssets 落账，这里不按资产行计数，避免「已不在描述里的陈旧资产」被
 // 当成可用截图。
-func (s *ReviewService) probeScreenshots(ctx context.Context, installationID int64, prBody string) screenshotProbe {
+func (s *ReviewService) probeScreenshots(ctx context.Context, integrationID string, installationID int64, prBody string) screenshotProbe {
 	refs := collectScreenshotURLsAt(prBody, s.githubWebHost())
 	if len(refs) == 0 {
 		return screenshotProbe{result: probeNone}
@@ -601,7 +620,7 @@ func (s *ReviewService) probeScreenshots(ctx context.Context, installationID int
 		// 单张限时：挂死图只吃掉自己的时限，还有剩余预算就继续试下一张；
 		// 总预算吃满才放弃（剩下的引用继续探测只会继续超时，同步循环还在等）。
 		attemptCtx, cancel := context.WithTimeout(ctx, screenshotProbeAttemptTimeout)
-		cached, err := s.downloadScreenshot(attemptCtx, installationID, ref.URL)
+		cached, err := s.downloadScreenshot(attemptCtx, integrationID, installationID, ref.URL)
 		cancel()
 		if err == nil {
 			// 每张开始哈希前检查总预算：前面的图把预算吃光时这张不再读盘
@@ -665,7 +684,7 @@ func (s *ReviewService) probeScreenshots(ctx context.Context, installationID int
 	return screenshotProbe{result: probeNone}
 }
 
-// AgentScreenshots GET /api/review-agent/screenshots：仅视觉运行可用。
+// AgentScreenshots GET /api/review-agent/runs/:runId/screenshots：仅视觉运行可用。
 // items 的 url 是本端点图片路径（相对 public_url）；changed 表示截图集合
 // 相对上一轮视觉审查是否有变化。
 func (s *ReviewService) AgentScreenshots(ctx context.Context, runID string) ([]api.ReviewAgentScreenshot, bool, error) {
@@ -676,33 +695,33 @@ func (s *ReviewService) AgentScreenshots(ctx context.Context, runID string) ([]a
 	if run.Kind != model.ReviewKindVisual {
 		return nil, false, errs.ErrCredentialNotAllowed
 	}
-	client, err := s.ghClient(ctx)
+	client, err := s.reviewClient(ctx, run.IntegrationID, run.RepoFullName, run.InstallationID)
 	if err != nil {
 		return nil, false, err
 	}
-	pr, err := client.GetPullRequest(ctx, run.InstallationID, run.RepoFullName, run.PRNumber)
+	pr, err := client.GetPullRequest(ctx, run.RepoFullName, run.PRNumber)
 	if err != nil {
 		return nil, false, errs.New(errs.ErrGitHubAPI.Code, "读取 PR 失败: "+err.Error())
 	}
-	fingerprint, assets, err := s.ensureAssets(ctx, run.RepoFullName, run.PRNumber, run.HeadSHA, pr.Body, run.InstallationID)
+	fingerprint, assets, err := s.ensureAssets(ctx, run.IntegrationID, run.RepoFullName, run.PRNumber, run.HeadSHA, pr.Body, run.InstallationID)
 	if err != nil {
 		return nil, false, err
 	}
 
 	// changed：本轮指纹与上一轮视觉运行（更早 round）绑定 head 的资产指纹
-	// 比较。上一轮运行只在本项目账本内找——资产本身是仓库归一的共享产物，
-	// 「何时做过视觉审查」属于执行态，按项目分区。
+	// 比较。上一轮运行只在本 (项目, 集成) 账本内找——资产本身按 (集成, 仓库)
+	// 归一共享，「何时做过视觉审查」属于执行态，按项目分区。
 	changed := true
 	var prevRuns []model.ReviewRun
-	if err := s.db.Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND kind = ? AND round_number < ?",
-		run.ProjectID, run.RepoFullName, run.PRNumber, model.ReviewKindVisual, run.RoundNumber).
+	if err := s.db.Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ? AND kind = ? AND round_number < ?",
+		run.ProjectID, run.RepoFullName, run.PRNumber, run.IntegrationID, model.ReviewKindVisual, run.RoundNumber).
 		Order("round_number DESC").Limit(1).Find(&prevRuns).Error; err != nil {
 		return nil, false, errs.ErrInternal
 	}
 	if len(prevRuns) > 0 {
 		var prevAssets []model.ReviewAsset
-		if err := s.db.Where("repo_full_name = ? AND pr_number = ? AND head_sha = ?",
-			run.RepoFullName, run.PRNumber, prevRuns[0].HeadSHA).
+		if err := s.db.Where("integration_id = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ?",
+			run.IntegrationID, run.RepoFullName, run.PRNumber, prevRuns[0].HeadSHA).
 			Order("position ASC").Find(&prevAssets).Error; err != nil {
 			return nil, false, errs.ErrInternal
 		}
@@ -737,14 +756,16 @@ func (s *ReviewService) AgentScreenshots(ctx context.Context, runID string) ([]a
 			items = append(items, item)
 			continue
 		}
-		item.Url = "/api/review-agent/screenshots/" + a.ID
+		// 图片地址带本轮 run 作用域（INT-169）：端点按 runId+令牌双重绑定，
+		// URL 只能取本运行 id，不能从其他运行借。
+		item.Url = "/api/review-agent/runs/" + runID + "/screenshots/" + a.ID
 		items = append(items, item)
 	}
 	return items, changed, nil
 }
 
 // AgentScreenshotImage 取图片本体：(路径, MIME)。仅视觉运行；校验资产与运行
-// 同 repo/pr/head；下载失败或路径缺失 → 40406。
+// 同 (集成,repo,pr,head)；下载失败或路径缺失 → 40406。
 func (s *ReviewService) AgentScreenshotImage(ctx context.Context, runID, assetID string) (string, string, error) {
 	run, err := s.loadAgentRun(ctx, runID)
 	if err != nil {
@@ -755,8 +776,8 @@ func (s *ReviewService) AgentScreenshotImage(ctx context.Context, runID, assetID
 	}
 	var asset model.ReviewAsset
 	if err := s.db.WithContext(ctx).
-		Where("id = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ?",
-			assetID, run.RepoFullName, run.PRNumber, run.HeadSHA).
+		Where("id = ? AND integration_id = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ?",
+			assetID, run.IntegrationID, run.RepoFullName, run.PRNumber, run.HeadSHA).
 		First(&asset).Error; err != nil {
 		return "", "", errs.ErrIssueAssetNotFound
 	}

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router";
 import { useForm, useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { Plus } from "lucide-react";
+import { Plus, TriangleAlert } from "lucide-react";
 import { GitHubTokenHelpDialog } from "@/components/projects/github-token-help-dialog";
 import { GithubTokenCreateDialog } from "@/components/settings/github-token-create-dialog";
 import { T3BindingsSection } from "@/components/projects/t3-bindings-section";
@@ -10,7 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { OptionSelect } from "@/components/ui/option-select";
+import { OptionSelect, withMissingOption } from "@/components/ui/option-select";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   Dialog,
@@ -30,14 +30,17 @@ import {
   useUpdateProject,
 } from "@/lib/hooks/use-projects";
 import { useGithubTokens } from "@/lib/hooks/use-github-tokens";
+import { useIntegrationOptions } from "@/lib/hooks/use-integration-options";
 import { projectApi } from "@/lib/api/projects";
 import { errorText } from "@/lib/api/client";
 import {
   parseRepoUrl,
   hasGitHubRepo,
-  codeRepoUrlForInput,
   normalizeCodeRepoRef,
-  codeRepoPointsToForge,
+  codeRepoSlugFromSaved,
+  ownerRepoFromInput,
+  codeRepoUrlFromSlug,
+  hostFromRepoInput,
 } from "@/lib/utils/github";
 import { toast } from "sonner";
 
@@ -51,6 +54,19 @@ interface ProjectFormDialogProps {
 }
 
 const emptyTokenOption = "__none__";
+const defaultIntegrationId = "github-default";
+
+// 接口加载中/失败时的保底选项（契约保证首条恒为内置 github-default）：
+// 选择器至少给出内置 GitHub，github 仓的新增与编辑不被集成列表故障卡住。
+const fallbackIntegrationOptions: IntegrationOption[] = [
+  {
+    id: defaultIntegrationId,
+    kind: "github",
+    name: "GitHub（内置）",
+    base_url: "https://github.com",
+    builtin: true,
+  },
+];
 
 // Token 引用选择器：选项来自用户级 Token 库，可空；「新建 Token」打开共用
 // 的创建对话框，成功后自动选中新记录。
@@ -130,6 +146,12 @@ export function ProjectFormDialog({
   const createProject = useCreateProject();
   const updateProject = useUpdateProject(projectId ?? "");
   const { data: tokens, isLoading: tokensLoading } = useGithubTokens();
+  const {
+    data: integrationOptions,
+    isLoading: integrationsLoading,
+    isError: integrationsError,
+    refetch: refetchIntegrations,
+  } = useIntegrationOptions();
 
   const schema = isEdit ? projectEditSchema : projectSchema;
   type FormData = ProjectInput | ProjectEditInput;
@@ -140,13 +162,13 @@ export function ProjectFormDialog({
     handleSubmit,
     reset,
     setValue,
+    setError,
     formState: { errors, isSubmitting },
   } = useForm<FormData>({
     resolver: zodResolver(schema),
   });
 
   const repositoryUrl = useWatch({ control, name: "repository_url" }) || "";
-  const codeRepoInput = useWatch({ control, name: "code_repository_url" }) || "";
   const publicTokenId = useWatch({ control, name: "public_github_token_id" }) || "";
   const codeTokenId = useWatch({ control, name: "code_github_token_id" }) || "";
   const { owner, repo } = parseRepoUrl(repositoryUrl);
@@ -163,6 +185,146 @@ export function ProjectFormDialog({
   const bindingBroken = !!project?.code_integration_id && !project?.code_repo_url;
   const [clearBrokenBinding, setClearBrokenBinding] = useState(false);
 
+  // 集成选择与 owner/repo 是表单内的独立状态：提交时按所选集成合成
+  // code_repository_url（服务端按 URL 主机派生集成绑定，选择器只是合成
+  // 辅助，本身不作为字段提交）。code_integration_id 为空串按内置处理。
+  const [codeIntegrationId, setCodeIntegrationId] =
+    useState(defaultIntegrationId);
+  const [codeRepoSlug, setCodeRepoSlug] = useState("");
+  // slug 经 useEffect 回填：首帧渲染时还是 ""——记回填完成的项目 id，
+  // 未完成前不渲染「修改代码仓库将停用 PR 审查」警示，否则空串与已存
+  // code_repo_url 必然不等、警示闪一帧才消失。
+  const [slugHydratedId, setSlugHydratedId] = useState<string | null>(null);
+  // 保存时服务端报「集成不存在/已删除」的字段级回显：toast 之外把错误钉在
+  // 选择器上，并重拉列表让失效 id 落到「原绑定集成（已失效）」占位——选中
+  // 态继续显示已删名称会误导用户改错字段。
+  const [integrationError, setIntegrationError] = useState("");
+
+  // 接口未就绪/失败时降级用保底列表；失效绑定（id 不在列表里）交给
+  // withMissingOption 显示占位项，不静默改绑回 github。
+  const integrationList = integrationOptions ?? fallbackIntegrationOptions;
+  const selectedIntegration = integrationList.find(
+    (option) => option.id === codeIntegrationId,
+  );
+  // 占位项文案按数据态区分：加载中 ≠ 加载失败 ≠ 真失效。
+  const missingIntegrationLabel = integrationsLoading
+    ? "正在加载集成列表..."
+    : integrationsError
+      ? "集成列表不可用"
+      : "原绑定集成（已失效）";
+  const integrationSelectOptions = useMemo(
+    () =>
+      withMissingOption(
+        integrationList.map((option) => {
+          // 管理员起的名字里可能带半角括号，与内置名的全角混排；展示层统一
+          // 全角，并吃掉括号前遗留的空格（"Forgejo (内部)" → "Forgejo（内部）"）。
+          // 地址只显主机（次要样式）——name（url） 两组括号连读太挤。
+          const displayName = option.name.replace(/ ?\(([^)]*)\)/g, "（$1）");
+          let host = option.base_url;
+          try {
+            host = new URL(option.base_url).host;
+          } catch {
+            // 基址非 URL 时原样展示，管理侧保存时已校验过。
+          }
+          return {
+            value: option.id,
+            label: displayName,
+            itemLabel: (
+              <span className="flex items-baseline gap-2">
+                <span>{displayName}</span>
+                <span className="text-xs text-muted-foreground">{host}</span>
+              </span>
+            ),
+          };
+        }),
+        codeIntegrationId,
+        missingIntegrationLabel,
+      ),
+    [integrationList, codeIntegrationId, missingIntegrationLabel],
+  );
+
+  // 修改提示：已有代码仓的项目，owner/repo 或集成选择相对已保存值有变化时
+  // 提醒 PR 审查会被停用（服务端改绑即重置审查状态）；新建项目与无代码仓
+  // 的项目不提示。等价判定沿用归一口径——scheme 有无、尾斜杠、.git、裸
+  // owner/repo 形态都不算改动。
+  const savedIntegrationId = project?.code_integration_id || defaultIntegrationId;
+  // selectedIntegration 解析不出（加载中/失败，forge 绑定不在保底列表）时
+  // 不判 repoChanged——空合成与已存 URL 必然不等，打开弹框就误警示。
+  const repoChanged =
+    isEdit &&
+    !!selectedIntegration &&
+    normalizeCodeRepoRef(
+      codeRepoUrlFromSlug(selectedIntegration, ownerRepoFromInput(codeRepoSlug)),
+    ) !==
+      normalizeCodeRepoRef(project?.code_repo_url ?? "");
+  const integrationChanged = isEdit && codeIntegrationId !== savedIntegrationId;
+  const showRepoChangeWarning =
+    isEdit &&
+    slugHydratedId === projectId &&
+    !!project?.code_repo_url &&
+    (repoChanged || integrationChanged);
+
+  // 所选集成 base_url 的 origin 键（scheme+host，缺省端口由 URL 归一，
+  // 尾点与后端主机键同口径剥除）。
+  const integrationOriginKey = (): string => {
+    if (!selectedIntegration) return "";
+    try {
+      const u = new URL(selectedIntegration.base_url);
+      // 与后端 SplitHostPort 后剥点同序：端口前尾点（host.:8443）也归一。
+      return `${u.protocol}//${u.host.replace(/\.+:/g, ":").replace(/\.+$/, "")}`;
+    } catch {
+      return "";
+    }
+  };
+
+  // 输入显式主机的 scheme+host 键：比对带 scheme——服务端按 scheme 补默认
+  // 端口区分主机键（http→:80、https→:443），http/https 同主机是不同绑定。
+  // 裸主机段无 scheme 时借集成的——合成地址反正用它。
+  const inputOriginKey = (raw: string): string => {
+    let host = hostFromRepoInput(raw);
+    if (host === "") return "";
+    const i = raw.trim().indexOf("://");
+    const scheme =
+      i === -1
+        ? integrationOriginKey().split(":")[0] || "https"
+        : raw.trim().slice(0, i).toLowerCase();
+    // 裸 host:port 无输入 scheme 可剥默认端口（hostFromRepoInput 只认输入
+    // 自带的 scheme），按推导出的 scheme 再剥一次，与后端 normalizeCode-
+    // RepoRef 同口径——forge.example.com:443 对 https 集成是同一主机键。
+    const defaultPort = scheme === "https" ? ":443" : scheme === "http" ? ":80" : "";
+    if (defaultPort !== "" && host.endsWith(defaultPort)) {
+      host = host.slice(0, -defaultPort.length);
+    }
+    return `${scheme}://${host}`;
+  };
+
+  // 合成提交用的 code_repository_url；解析不出（输入非 owner/repo 两段，或
+  // 所选集成不在列表里）就 setError 中止提交——不静默丢弃也不猜主机。
+  const synthesizeRepoUrl = (): string | null => {
+    const parts = ownerRepoFromInput(codeRepoSlug);
+    // 显式主机必须与所选集成同 origin——解析会剥掉主机段，不比对会把
+    // forgejo-B 的完整地址静默绑到 forgejo-A 下。
+    const inputKey = inputOriginKey(codeRepoSlug);
+    const integrationKey = integrationOriginKey();
+    // 输入带显式主机时，集成主机解析不出不能静默跳过比对——回退通用错误，
+    // 跨主机错绑不放行。
+    const hostMismatch = inputKey !== "" && inputKey !== integrationKey;
+    if (!selectedIntegration || !parts.owner || !parts.repo || hostMismatch) {
+      setError("code_repository_url", {
+        message:
+          hostMismatch && integrationKey !== ""
+            ? `仓库地址 ${inputKey} 与所选集成（${integrationKey}）不一致`
+            : hostMismatch
+              ? "所选代码仓库集成的地址不可用，请重新选择集成"
+              : selectedIntegration
+                ? "格式：owner/repo（或完整仓库地址）"
+                : "所选代码仓库集成不可用，请重新选择",
+      });
+      return null;
+    }
+    return codeRepoUrlFromSlug(selectedIntegration, parts);
+  };
+
   useEffect(() => {
     if (open && isEdit && section === "t3") {
       // 等弹框动画与内容就位后再滚动
@@ -176,6 +338,20 @@ export function ProjectFormDialog({
   useEffect(() => {
     if (isEdit && project) {
       setClearBrokenBinding(false);
+      setIntegrationError("");
+      // 集成选择按已保存绑定回填（悬空绑定的失效 id 原样保留，交给
+      // withMissingOption 显示）；owner/repo 优先取结构化字段——带路径前缀
+      // 的集成基址（https://forge.example/git/o/r）从 code_repo_url 剥主机
+      // 会解析不出两段而退化成「未绑定」，只改项目名也会被当成清空提交。
+      // 结构化字段缺失（旧行）再回落 URL 剥主机。
+      setCodeIntegrationId(project.code_integration_id || defaultIntegrationId);
+      const structured =
+        project.code_github_owner && project.code_github_repo
+          ? { owner: project.code_github_owner, repo: project.code_github_repo }
+          : null;
+      const parts = structured ?? codeRepoSlugFromSaved(project.code_repo_url ?? "");
+      setCodeRepoSlug(parts.owner ? `${parts.owner}/${parts.repo}` : "");
+      setSlugHydratedId(projectId ?? null);
       reset({
         name: project.name,
         description: project.description || "",
@@ -183,21 +359,23 @@ export function ProjectFormDialog({
         // vs 本部署 GHE）前端无从分辨，自拼 github.com 会把部署实例的项目在
         // 保存时静默改写成公共主机（R41 P2）。
         repository_url: project.repository_url ?? "",
-        code_repository_url: codeRepoUrlForInput(project),
         public_github_token_id: project.public_github_token_id || "",
         code_github_token_id: project.code_github_token_id || "",
       });
     } else if (!isEdit && open) {
+      setCodeIntegrationId(defaultIntegrationId);
+      setCodeRepoSlug("");
+      setSlugHydratedId(null);
+      setIntegrationError("");
       reset({
         name: "",
         description: "",
         repository_url: "",
-        code_repository_url: "",
         public_github_token_id: "",
         code_github_token_id: "",
       });
     }
-  }, [isEdit, project, open, reset]);
+  }, [isEdit, project, projectId, open, reset]);
 
   const openCreateDialog = (purpose: "public" | "code") => {
     setCreatingFor(purpose);
@@ -220,31 +398,60 @@ export function ProjectFormDialog({
         }
         if (data.repository_url) payload.repository_url = data.repository_url;
         // 代码仓库同 Token 引用走三态：与现值等价则不携带 key，清空传 null
-        // 回落公开仓库。等价判定按归一后的 code_repo_url 比较（见
-        // normalizeCodeRepoRef）；归一不出 owner/repo 的输入不算等价，原样
-        // 发出去交给服务端校验（40001），失败语义与公开仓库链接一致。
-        if (project && data.code_repository_url !== undefined) {
-          const raw = (data.code_repository_url || "").trim();
+        // 回落公开仓库。输入先按所选集成合成完整 URL 再归一比较（见
+        // normalizeCodeRepoRef）：scheme 有无与大小写、尾部斜杠与 .git、裸
+        // owner/repo 形态都不算改动；跨主机的真改动归一出不同引用，不会被
+        // 误判「未改动」而静默丢掉。
+        if (project) {
           const currentRepoUrl = project.code_repo_url ?? "";
-          if (raw === "") {
+          if (bindingBroken && clearBrokenBinding) {
+            // 显式清除失效绑定：即使 slug 从结构化字段预填了旧值也按清空
+            // 提交——勾选语义优先于输入框内容。
+            payload.code_repository_url = null;
+          } else if (codeRepoSlug.trim() === "") {
             // 悬空绑定（bindingBroken）留空视为未改动，不携带该字段：只保存
             // 其它字段不再把悬空绑定静默改绑回 github 同名仓库。解除走显式
-            // 「清除绑定」勾选——勾选后按清空提交（回落公开仓库，集成绑定
-            // 一并清）。普通空输入仍是显式清空——当前本就没有代码仓
-            // （code_repo_url 为 null）时同样不携带。
-            if ((bindingBroken && clearBrokenBinding) ||
-              (!bindingBroken && currentRepoUrl !== "")) {
+            // 「清除绑定」勾选（上面已先判）。普通空输入仍是显式清空——当前
+            // 本就没有代码仓（code_repo_url 为 null）时同样不携带。
+            if (!bindingBroken && currentRepoUrl !== "") {
               payload.code_repository_url = null;
+            } else if (codeIntegrationId !== savedIntegrationId) {
+              // 选了别的集成但 slug 留空：改动无法表达（API 不收单独的
+              // 集成字段），保存会静默回弹选择器——就地报错要求填写。
+              setError("code_repository_url", {
+                message: "更换代码仓集成时需填写 owner/repo",
+              });
+              return;
             }
           } else {
-            // 归一后与现值不同才提交：scheme 有无与大小写、尾部斜杠与 .git、
-            // 裸 owner/repo 形态都不算改动。按 code_repo_url 比较才能识别
-            // 跨主机的真改动——forgejo acme/app 改成 github 同名时，旧逻辑
-            // 拿 owner/repo 相等判「未改动」把改动静默丢掉。
-            const next = normalizeCodeRepoRef(raw);
-            const current = normalizeCodeRepoRef(currentRepoUrl);
-            if (next === "" || next !== current) {
-              payload.code_repository_url = raw;
+            // 绑定等价（集成 id + owner/repo 归一相同）直接不携带——集成列表
+            // 还在加载/加载失败时 selectedIntegration 解析不出，合成会中止
+            // 提交；此时用户只改项目名等无关字段也应能保存。只有真改动才要求
+            // 选项解析成功。
+            const savedParts =
+              project.code_github_owner && project.code_github_repo
+                ? { owner: project.code_github_owner, repo: project.code_github_repo }
+                : codeRepoSlugFromSaved(currentRepoUrl);
+            const inputParts = ownerRepoFromInput(codeRepoSlug);
+            // 显式 origin 不一致不算「未改动」——owner/repo 同名而
+            // scheme+host 不同会让 bindingUnchanged 吞掉主机校验旁路，
+            // 先判 origin 再走 synthesizeRepoUrl 的报错路径。
+            const inputKey = inputOriginKey(codeRepoSlug);
+            const bindingUnchanged =
+              codeIntegrationId === savedIntegrationId &&
+              !(inputKey !== "" && inputKey !== integrationOriginKey()) &&
+              !!inputParts.owner &&
+              !!inputParts.repo &&
+              inputParts.owner.toLowerCase() === savedParts.owner.toLowerCase() &&
+              inputParts.repo.toLowerCase() === savedParts.repo.toLowerCase();
+            if (!bindingUnchanged) {
+              const synthesized = synthesizeRepoUrl();
+              if (synthesized === null) return;
+              const next = normalizeCodeRepoRef(synthesized);
+              const current = normalizeCodeRepoRef(currentRepoUrl);
+              if (next === "" || next !== current) {
+                payload.code_repository_url = synthesized;
+              }
             }
           }
         }
@@ -276,8 +483,17 @@ export function ProjectFormDialog({
         if (createData.repository_url) {
           payload.repository_url = createData.repository_url;
         }
-        if (createData.code_repository_url) {
-          payload.code_repository_url = createData.code_repository_url;
+        if (codeRepoSlug.trim() !== "") {
+          const synthesized = synthesizeRepoUrl();
+          if (synthesized === null) return;
+          payload.code_repository_url = synthesized;
+        } else if (codeIntegrationId !== defaultIntegrationId) {
+          // 选了非内置集成但 slug 留空：API 不收单独的集成字段，创建出来
+          // 会静默绑回 github——与编辑路径同口径就地报错要求填写。
+          setError("code_repository_url", {
+            message: "更换代码仓集成时需填写 owner/repo",
+          });
+          return;
         }
         if (createData.public_github_token_id) {
           payload.public_github_token_id = createData.public_github_token_id;
@@ -293,16 +509,29 @@ export function ProjectFormDialog({
     } catch (err) {
       // 服务端 40001 的具体原因（主机未匹配集成、端口无效、多余路径段等）
       // 透出来——吞成通用提示会让 Forgejo 绑定失败只剩「检查输入」无从定位。
-      toast.error(
-        errorText(err, isEdit ? "更新失败，请检查输入" : "创建失败，请检查输入"),
+      const msg = errorText(
+        err,
+        isEdit ? "更新失败，请检查输入" : "创建失败，请检查输入",
       );
+      // 集成在打开弹窗后被删/失效：重试不会成功——把错误钉到选择器上，
+      // 并重拉选项让失效 id 落到「已失效」占位而不是继续显示旧名。不再
+      // 另发 toast：字段级红字与 toast 文案一字不差，顶部 toast 还会压住
+      // 弹窗标题栏——同一错误在相邻位置出现两次没有增量信息。
+      if (/集成.*(不存在|已删除|失效|不可用)/.test(msg)) {
+        setIntegrationError(msg);
+        void refetchIntegrations();
+      } else {
+        toast.error(msg);
+      }
     }
   };
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-lg max-h-[90vh] overflow-y-auto">
-        <DialogHeader>
+      <DialogContent className="flex max-h-[90vh] flex-col overflow-hidden sm:max-w-lg">
+        {/* 底栏有 border-t 分隔，标题栏同侧补 border-b——内容滚动时被裁
+            到一半的字段标签不会直接贴着标题。负外边距让分隔线贯通弹窗宽。 */}
+        <DialogHeader className="-mx-4 border-b border-foreground/10 px-4 pb-3">
           <DialogTitle>{isEdit ? "编辑项目" : "新建项目"}</DialogTitle>
         </DialogHeader>
 
@@ -314,7 +543,14 @@ export function ProjectFormDialog({
             <Skeleton className="h-10 w-full" />
           </div>
         ) : (
-          <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
+          <form
+            onSubmit={handleSubmit(onSubmit)}
+            className="flex min-h-0 flex-col"
+          >
+            {/* 滚动区与固定底栏分行：sticky 底栏会相对滚动容器内容盒贴底，
+                容器下 padding 处透出滚动内容；独立行无叠压。负外边距让
+                滚动条贴弹窗边缘、底栏 bleed 到圆角边。 */}
+            <div className="-mx-4 min-h-0 flex-1 space-y-4 overflow-y-auto px-4 pb-3">
             <div className="space-y-2">
               <Label htmlFor="project-name">项目名称</Label>
               <Input
@@ -374,23 +610,81 @@ export function ProjectFormDialog({
             </p>
 
             <div className="space-y-2">
+              <Label htmlFor="project-code_integration_id">代码仓库集成</Label>
+              <OptionSelect
+                value={codeIntegrationId}
+                onValueChange={(next) => {
+                  setCodeIntegrationId(next ?? defaultIntegrationId);
+                  setIntegrationError("");
+                }}
+                options={integrationSelectOptions}
+                id="project-code_integration_id"
+                className="w-full"
+                size="default"
+                invalid={integrationError !== ""}
+                alignItemWithTrigger={false}
+              />
+              {integrationsLoading && (
+                <p className="text-xs text-muted-foreground">
+                  正在加载集成列表...
+                </p>
+              )}
+              {integrationsError && (
+                <p className="flex items-center gap-1.5 text-xs text-amber-700 dark:text-amber-400">
+                  <TriangleAlert className="h-3.5 w-3.5 shrink-0" />
+                  <span>
+                    集成列表加载失败，暂仅提供 GitHub（内置）
+                    {" ·"}
+                    <Button
+                      type="button"
+                      variant="link"
+                      size="sm"
+                      className="ml-1 h-auto rounded-md px-2 py-1.5 underline underline-offset-2 hover:bg-foreground/10"
+                      onClick={() => void refetchIntegrations()}
+                    >
+                      重试
+                    </Button>
+                  </span>
+                </p>
+              )}
+              {integrationError !== "" && (
+                <p className="text-xs text-destructive">{integrationError}</p>
+              )}
+            </div>
+
+            <div className="space-y-2">
               <Label htmlFor="project-code_repository_url">
-                代码仓库（可选，默认同公开仓库）
+                {selectedIntegration == null
+                  ? "代码仓库"
+                  : selectedIntegration.kind === "forgejo"
+                    ? "代码仓库（该集成下必填）"
+                    : "代码仓库（可选，默认同公开仓库）"}
               </Label>
               <Input
                 id="project-code_repository_url"
-                placeholder="https://github.com/owner/repo 或 owner/repo"
-                {...register("code_repository_url")}
+                placeholder="owner/repo"
+                value={codeRepoSlug}
+                onChange={(e) => setCodeRepoSlug(e.target.value)}
               />
               <p className="text-xs text-muted-foreground">
-                {codeRepoPointsToForge(codeRepoInput)
-                  ? "将绑定主机匹配的代码托管集成；若为 Forgejo 集成，本期暂不参与 PR 审查"
-                  : "PR 审查盯的仓库；留空则审查公开仓库"}
+                {selectedIntegration == null
+                  ? "选择集成后确认该仓库"
+                  : selectedIntegration.kind === "forgejo"
+                    ? "该集成上的 owner/repo，PR 审查在此进行"
+                    : "PR 审查盯的仓库；留空则审查公开仓库"}
               </p>
+              {showRepoChangeWarning && (
+                <div className="flex items-start gap-2 rounded-md border border-amber-300/70 bg-amber-50 px-3 py-2 dark:border-amber-500/40 dark:bg-amber-950/40">
+                  <TriangleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-700 dark:text-amber-400" />
+                  <p className="text-xs leading-5 text-amber-900 dark:text-amber-200">
+                    修改代码仓库将自动停用 PR 审查，保存后需重新开启
+                  </p>
+                </div>
+              )}
               {bindingBroken && (
                 <div className="space-y-1">
                   <p className="text-xs text-amber-700 dark:text-amber-400">
-                    原绑定的代码仓集成已失效；留空将保留现状，填写新地址可重新绑定
+                    原绑定的代码仓库集成已失效；留空将保留现状，填写新地址可重新绑定
                   </p>
                   <label className="flex items-center gap-2 text-xs text-amber-700 dark:text-amber-400">
                     <input
@@ -398,7 +692,7 @@ export function ProjectFormDialog({
                       checked={clearBrokenBinding}
                       onChange={(e) => setClearBrokenBinding(e.target.checked)}
                     />
-                    清除失效的代码仓绑定（回落到公开仓库）
+                    清除失效的代码仓库绑定（回落到公开仓库）
                   </label>
                 </div>
               )}
@@ -425,8 +719,9 @@ export function ProjectFormDialog({
             {isEdit && projectId && (
               <T3BindingsSection ref={t3SectionRef} projectId={projectId} />
             )}
+            </div>
 
-            <div className="flex gap-3 pt-2">
+            <div className="-mx-4 -mb-4 mt-3 flex items-center gap-3 rounded-b-xl border-t border-foreground/10 bg-popover px-4 py-3">
               <Button type="submit" disabled={isSubmitting}>
                 {isSubmitting
                   ? isEdit

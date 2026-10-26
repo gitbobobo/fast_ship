@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/api"
-	"github.com/godbobo/fast_ship/server/internal/githubapi"
+	"github.com/godbobo/fast_ship/server/internal/forge"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	"github.com/google/uuid"
@@ -75,7 +75,8 @@ func statusDesc(s string) string {
 var errReviewSyncAbandoned = errors.New("review sync abandoned: target changed")
 
 // syncTargetStillCurrent 同步中途复核本轮仍有效：账本 epoch 未被推进，且项目
-// enabled 设置行的仓库快照仍是本仓库（项目改仓库/停用审查会同事务改这两处）。
+// enabled 设置行的 (集成, 仓库) 快照仍是本账本的键（项目改仓库/改绑集成/停用
+// 审查会同事务改这两处）。
 func (s *ReviewService) syncTargetStillCurrent(ledger *model.ReviewPullRequest, epoch int) error {
 	current, err := s.ledgerEpochCurrent(ledger, epoch)
 	if err != nil {
@@ -85,7 +86,7 @@ func (s *ReviewService) syncTargetStillCurrent(ledger *model.ReviewPullRequest, 
 		return errReviewSyncAbandoned
 	}
 	var settings model.ProjectReviewSettings
-	err = s.db.Select("repo_full_name").
+	err = s.db.Select("repo_full_name", "integration_id").
 		Where("project_id = ? AND enabled", ledger.ProjectID).First(&settings).Error
 	switch {
 	case errors.Is(err, gorm.ErrRecordNotFound):
@@ -96,51 +97,53 @@ func (s *ReviewService) syncTargetStillCurrent(ledger *model.ReviewPullRequest, 
 		// 记 sync_error 下轮重试，不要静默吞掉一个真正的错误。
 		return err
 	}
-	if settings.RepoFullName != ledger.RepoFullName {
+	if settings.RepoFullName != ledger.RepoFullName || settings.IntegrationID != ledger.IntegrationID {
 		return errReviewSyncAbandoned
 	}
 	return nil
 }
 
-// guardedSyncClient 在每次 GitHub 写之前复核本轮仍有效：远端副作用无法回滚，
-// 复核只能放在写之前。读操作原样透传（Embedding 提供），只有会改变 GitHub
+// guardedSyncClient 在每次平台写之前复核本轮仍有效：远端副作用无法回滚，
+// 复核只能放在写之前。读操作原样透传（Embedding 提供），只有会改变远端
 // 状态的四个方法被拦。
 type guardedSyncClient struct {
-	githubapi.GitHubClient
+	forge.ReviewClient
 	check func() error
 }
 
-func (c guardedSyncClient) CreateCommitStatus(ctx context.Context, installationID int64, repoFullName, sha, state, statusContext, description, targetURL string) error {
+func (c guardedSyncClient) CreateCommitStatus(ctx context.Context, repoFullName, sha, state, statusContext, description, targetURL string) error {
 	if err := c.check(); err != nil {
 		return err
 	}
-	return c.GitHubClient.CreateCommitStatus(ctx, installationID, repoFullName, sha, state, statusContext, description, targetURL)
+	return c.ReviewClient.CreateCommitStatus(ctx, repoFullName, sha, state, statusContext, description, targetURL)
 }
 
-func (c guardedSyncClient) CreatePullRequestComment(ctx context.Context, installationID int64, repoFullName string, number int, body string) (int64, error) {
+func (c guardedSyncClient) CreatePullRequestComment(ctx context.Context, repoFullName string, number int, body string) (int64, error) {
 	if err := c.check(); err != nil {
 		return 0, err
 	}
-	return c.GitHubClient.CreatePullRequestComment(ctx, installationID, repoFullName, number, body)
+	return c.ReviewClient.CreatePullRequestComment(ctx, repoFullName, number, body)
 }
 
-func (c guardedSyncClient) UpdatePullRequestComment(ctx context.Context, installationID int64, repoFullName string, commentID int64, body string) error {
+func (c guardedSyncClient) UpdatePullRequestComment(ctx context.Context, repoFullName string, commentID int64, body string) error {
 	if err := c.check(); err != nil {
 		return err
 	}
-	return c.GitHubClient.UpdatePullRequestComment(ctx, installationID, repoFullName, commentID, body)
+	return c.ReviewClient.UpdatePullRequestComment(ctx, repoFullName, commentID, body)
 }
 
-func (c guardedSyncClient) SubmitReview(ctx context.Context, installationID int64, repoFullName string, number int, in githubapi.ReviewInput) (int64, error) {
+func (c guardedSyncClient) SubmitReview(ctx context.Context, repoFullName string, number int, in forge.ReviewInput) (int64, error) {
 	if err := c.check(); err != nil {
 		return 0, err
 	}
-	return c.GitHubClient.SubmitReview(ctx, installationID, repoFullName, number, in)
+	return c.ReviewClient.SubmitReview(ctx, repoFullName, number, in)
 }
 
-// lockForPR 每 PR 一把进程内锁。
-func (s *ReviewService) lockForPR(repo string, prNumber int) *sync.Mutex {
-	key := repo + "#" + strconv.Itoa(prNumber)
+// lockForPR 每 PR 一把进程内锁：键含集成 + 项目 + 仓库 + PR——ledger 按
+// (integration_id, project_id, repo, pr) 分区，跨集成/跨项目的同名 PR
+// 互不串行（GitHub 镜像仓与 Forgejo 源仓同名时不再互相排队）。
+func (s *ReviewService) lockForPR(integrationID, projectID, repo string, prNumber int) *sync.Mutex {
+	key := integrationID + "\x00" + projectID + "\x00" + repo + "#" + strconv.Itoa(prNumber)
 	s.prLocksMu.Lock()
 	defer s.prLocksMu.Unlock()
 	lock, ok := s.prLocks[key]
@@ -156,10 +159,10 @@ func (s *ReviewService) lockForPR(repo string, prNumber int) *sync.Mutex {
 // 状态与评论由当前 enabled 项目独占。
 func (s *ReviewService) syncPendingPRs(now time.Time) {
 	var rows []model.ReviewPullRequest
-	// 三重要求：pending、所属项目仍启用、且账本仓库就是该项目 enabled 设置行
-	// 的 repo_full_name 快照（审查仓库的唯一真相）。项目换过仓库后旧仓库的
-	// ledger 可能因旧运行收尾再次置 pending，不能在新仓库的项目上把它同步
-	// 出去；公开仓库 ≠ 代码仓库时，公开仓库的账本行同样不再同步。
+	// 三重要求：pending、所属项目仍启用、且账本的 (集成, 仓库) 键就是该项目
+	// enabled 设置行的归一快照（审查对象的唯一真相）。项目换过仓库或改绑集成
+	// 后旧键的 ledger 可能因旧运行收尾再次置 pending，不能在新键的项目上把它
+	// 同步出去；公开仓库 ≠ 代码仓库时，公开仓库的账本行同样不再同步。
 	// 退避：同一 epoch 最近失败过的行等 reviewSyncRetryBackoff 再试（新事件
 	// 推进 epoch 后立即入队，见常量注释）。
 	if err := s.db.Where(`sync_pending
@@ -168,6 +171,7 @@ func (s *ReviewService) syncPendingPRs(now time.Time) {
 			SELECT 1 FROM project_review_settings s
 			WHERE s.project_id = review_pull_requests.project_id
 			  AND s.enabled
+			  AND s.integration_id = review_pull_requests.integration_id
 			  AND s.repo_full_name = review_pull_requests.repo_full_name
 		)`, now.Add(-reviewSyncRetryBackoff)).
 		Order("updated_at ASC").Limit(reviewStageBatch).
@@ -186,8 +190,9 @@ func (s *ReviewService) syncPendingPRs(now time.Time) {
 // 本轮的活直接放弃，不发任何 GitHub 请求也不写库；通过后 epoch 即重读值，
 // 失败写 sync_error（epoch 守卫），成功按 epoch 清 pending。
 func (s *ReviewService) syncOnePR(ledger *model.ReviewPullRequest) {
-	key := ledger.RepoFullName + "#" + strconv.Itoa(ledger.PRNumber)
-	lock := s.lockForPR(ledger.RepoFullName, ledger.PRNumber)
+	key := ledger.IntegrationID + "\x00" + ledger.ProjectID + "\x00" +
+		ledger.RepoFullName + "#" + strconv.Itoa(ledger.PRNumber)
+	lock := s.lockForPR(ledger.IntegrationID, ledger.ProjectID, ledger.RepoFullName, ledger.PRNumber)
 	lock.Lock()
 	defer func() {
 		// 摘除锁条目：syncOnePR 只被单进程调度循环串行调用，不存在等在同
@@ -205,20 +210,21 @@ func (s *ReviewService) syncOnePR(ledger *model.ReviewPullRequest) {
 	defer cancel()
 
 	var cur model.ReviewPullRequest
-	if err := s.db.Where("project_id = ? AND repo_full_name = ? AND pr_number = ?",
-		ledger.ProjectID, ledger.RepoFullName, ledger.PRNumber).First(&cur).Error; err != nil {
+	if err := s.db.Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ?",
+		ledger.ProjectID, ledger.RepoFullName, ledger.PRNumber, ledger.IntegrationID).First(&cur).Error; err != nil {
 		return
 	}
-	// 准入复核：项目换仓库/停用审查会同事务清 pending、推进 epoch、刷新设置行
-	// 快照，任一不成立说明本行已被移出本轮，直接放弃（这是放弃，不是让路）。
+	// 准入复核：项目换仓库/改绑集成/停用审查会同事务清 pending、推进 epoch、
+	// 刷新设置行快照，任一不成立说明本行已被移出本轮，直接放弃（这是放弃，
+	// 不是让路）。
 	var settings model.ProjectReviewSettings
-	if err := s.db.Select("repo_full_name").
+	if err := s.db.Select("repo_full_name", "integration_id").
 		Where("project_id = ? AND enabled", cur.ProjectID).
 		First(&settings).Error; err != nil {
 		return
 	}
 	if !cur.SyncPending || cur.SyncEpoch != ledger.SyncEpoch ||
-		settings.RepoFullName != cur.RepoFullName {
+		settings.RepoFullName != cur.RepoFullName || settings.IntegrationID != cur.IntegrationID {
 		return
 	}
 	epoch := cur.SyncEpoch
@@ -235,8 +241,8 @@ func (s *ReviewService) syncOnePR(ledger *model.ReviewPullRequest) {
 	}
 	if syncErr != nil {
 		s.db.Model(&model.ReviewPullRequest{}).
-			Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND sync_epoch = ?",
-				cur.ProjectID, cur.RepoFullName, cur.PRNumber, epoch).
+			Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ? AND sync_epoch = ?",
+				cur.ProjectID, cur.RepoFullName, cur.PRNumber, cur.IntegrationID, epoch).
 			Updates(map[string]any{
 				"sync_error":        syncErr.Error(),
 				"sync_failed_epoch": epoch,
@@ -247,8 +253,8 @@ func (s *ReviewService) syncOnePR(ledger *model.ReviewPullRequest) {
 		return
 	}
 	s.db.Model(&model.ReviewPullRequest{}).
-		Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND sync_epoch = ?",
-			cur.ProjectID, cur.RepoFullName, cur.PRNumber, epoch).
+		Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ? AND sync_epoch = ?",
+			cur.ProjectID, cur.RepoFullName, cur.PRNumber, cur.IntegrationID, epoch).
 		Updates(map[string]any{
 			"sync_pending":      false,
 			"sync_error":        "",
@@ -265,18 +271,18 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 	if ledger.HeadSHA == "" {
 		return nil
 	}
-	client, err := s.ghClient(ctx)
+	client, err := s.reviewClient(ctx, ledger.IntegrationID, ledger.RepoFullName, ledger.InstallationID)
 	if err != nil {
 		return err
 	}
-	// 每次 GitHub 写之前复核本轮仍有效（账本 epoch 未推进、项目审查仓库仍是
+	// 每次平台写之前复核本轮仍有效（账本 epoch 未推进、项目审查仓库仍是
 	// 本仓库）：同步可能持续数十秒，期间项目改仓库/停用审查不该把产出写到
 	// 已切换掉的旧仓库，而远端副作用发出去就收不回来。
 	client = guardedSyncClient{
-		GitHubClient: client,
+		ReviewClient: client,
 		check:        func() error { return s.syncTargetStillCurrent(ledger, epoch) },
 	}
-	pr, err := client.GetPullRequest(ctx, ledger.InstallationID, ledger.RepoFullName, ledger.PRNumber)
+	pr, err := client.GetPullRequest(ctx, ledger.RepoFullName, ledger.PRNumber)
 	if err != nil {
 		return errs.New(errs.ErrGitHubAPI.Code, "读取 PR 失败: "+err.Error())
 	}
@@ -298,8 +304,8 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 		var done bool
 		err := s.db.Transaction(func(tx *gorm.DB) error {
 			res := tx.Model(&model.ReviewPullRequest{}).
-				Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND sync_epoch = ?",
-					ledger.ProjectID, ledger.RepoFullName, ledger.PRNumber, epoch).
+				Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ? AND sync_epoch = ?",
+					ledger.ProjectID, ledger.RepoFullName, ledger.PRNumber, ledger.IntegrationID, epoch).
 				Updates(map[string]any{
 					"sync_pending": false,
 					"sync_epoch":   gorm.Expr("sync_epoch + 1"),
@@ -315,7 +321,7 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 				return nil
 			}
 			done = true
-			return s.supersedePRRunsTx(tx, ledger.ProjectID, ledger.RepoFullName, ledger.PRNumber, now)
+			return s.supersedePRRunsTx(tx, ledger.IntegrationID, ledger.ProjectID, ledger.RepoFullName, ledger.PRNumber, now)
 		})
 		if err != nil {
 			return errs.New(errs.ErrInternal.Code, "PR 关闭收尾失败: "+err.Error())
@@ -340,13 +346,13 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 	}
 
 	var codeRuns, visualRuns []model.ReviewRun
-	if err := s.db.Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ? AND round_number = ? AND kind = ?",
-		ledger.ProjectID, ledger.RepoFullName, ledger.PRNumber, ledger.HeadSHA, ledger.RoundNumber, model.ReviewKindCode).
+	if err := s.db.Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ? AND head_sha = ? AND round_number = ? AND kind = ?",
+		ledger.ProjectID, ledger.RepoFullName, ledger.PRNumber, ledger.IntegrationID, ledger.HeadSHA, ledger.RoundNumber, model.ReviewKindCode).
 		Order("created_at ASC").Find(&codeRuns).Error; err != nil {
 		return errs.ErrInternal
 	}
-	if err := s.db.Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ? AND round_number = ? AND kind = ?",
-		ledger.ProjectID, ledger.RepoFullName, ledger.PRNumber, ledger.HeadSHA, ledger.RoundNumber, model.ReviewKindVisual).
+	if err := s.db.Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ? AND head_sha = ? AND round_number = ? AND kind = ?",
+		ledger.ProjectID, ledger.RepoFullName, ledger.PRNumber, ledger.IntegrationID, ledger.HeadSHA, ledger.RoundNumber, model.ReviewKindVisual).
 		Order("created_at ASC").Find(&visualRuns).Error; err != nil {
 		return errs.ErrInternal
 	}
@@ -354,7 +360,7 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 	// 1. 代码 commit status（状态变化才写）。
 	codeState, codeDesc := summarizeCodeRuns(codeRuns)
 	if codeState != ledger.CodeStatus {
-		if err := client.CreateCommitStatus(ctx, ledger.InstallationID, ledger.RepoFullName,
+		if err := client.CreateCommitStatus(ctx, ledger.RepoFullName,
 			ledger.HeadSHA, codeState, reviewCodeStatusContext, statusDesc(codeDesc), targetURL); err != nil {
 			return errs.New(errs.ErrGitHubAPI.Code, "写代码审查状态失败: "+err.Error())
 		}
@@ -405,7 +411,7 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 			}
 			desc := "截图无法下载，未做视觉审查：" + reason
 			if !(retrying && ledger.VisualStatus == "failure") {
-				if err := client.CreateCommitStatus(ctx, ledger.InstallationID, ledger.RepoFullName,
+				if err := client.CreateCommitStatus(ctx, ledger.RepoFullName,
 					ledger.HeadSHA, "failure", reviewVisualStatusContext, statusDesc(desc), targetURL); err != nil {
 					return errs.New(errs.ErrGitHubAPI.Code, "写视觉审查状态失败: "+err.Error())
 				}
@@ -462,7 +468,7 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 				break
 			}
 			visualRuns = created
-			if err := client.CreateCommitStatus(ctx, ledger.InstallationID, ledger.RepoFullName,
+			if err := client.CreateCommitStatus(ctx, ledger.RepoFullName,
 				ledger.HeadSHA, "pending", reviewVisualStatusContext, statusDesc("视觉审查中"), targetURL); err != nil {
 				return errs.New(errs.ErrGitHubAPI.Code, "写视觉审查状态失败: "+err.Error())
 			}
@@ -482,7 +488,7 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 			visualCarry = true
 			desc := visualCarryDescription(outcome.PriorRuns)
 			if !(retrying && ledger.VisualStatus == "failure") {
-				if err := client.CreateCommitStatus(ctx, ledger.InstallationID, ledger.RepoFullName,
+				if err := client.CreateCommitStatus(ctx, ledger.RepoFullName,
 					ledger.HeadSHA, "failure", reviewVisualStatusContext, statusDesc(desc), targetURL); err != nil {
 					return errs.New(errs.ErrGitHubAPI.Code, "写视觉审查状态失败: "+err.Error())
 				}
@@ -519,7 +525,7 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 				if outcome.HasScreenshots && !outcome.ScreensChanged {
 					desc = "审查通过（沿用上一轮，截图未变化）"
 				}
-				if err := client.CreateCommitStatus(ctx, ledger.InstallationID, ledger.RepoFullName,
+				if err := client.CreateCommitStatus(ctx, ledger.RepoFullName,
 					ledger.HeadSHA, "success", reviewVisualStatusContext,
 					statusDesc(desc), targetURL); err != nil {
 					return errs.New(errs.ErrGitHubAPI.Code, "写视觉审查状态失败: "+err.Error())
@@ -639,7 +645,7 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 		}
 		vs, vdesc := summarizeVisualRuns(visualRuns)
 		if vs != ledger.VisualStatus {
-			if err := client.CreateCommitStatus(ctx, ledger.InstallationID, ledger.RepoFullName,
+			if err := client.CreateCommitStatus(ctx, ledger.RepoFullName,
 				ledger.HeadSHA, vs, reviewVisualStatusContext, statusDesc(vdesc), targetURL); err != nil {
 				return errs.New(errs.ErrGitHubAPI.Code, "写视觉审查状态失败: "+err.Error())
 			}
@@ -672,8 +678,8 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 func (s *ReviewService) ledgerEpochCurrent(ledger *model.ReviewPullRequest, epoch int) (bool, error) {
 	var cur int
 	if err := s.db.Model(&model.ReviewPullRequest{}).
-		Where("project_id = ? AND repo_full_name = ? AND pr_number = ?",
-			ledger.ProjectID, ledger.RepoFullName, ledger.PRNumber).
+		Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ?",
+			ledger.ProjectID, ledger.RepoFullName, ledger.PRNumber, ledger.IntegrationID).
 		Select("sync_epoch").Scan(&cur).Error; err != nil {
 		return false, err
 	}
@@ -682,8 +688,8 @@ func (s *ReviewService) ledgerEpochCurrent(ledger *model.ReviewPullRequest, epoc
 
 func (s *ReviewService) updateLedgerEpoch(ledger *model.ReviewPullRequest, epoch int, fields map[string]any) (bool, error) {
 	res := s.db.Model(&model.ReviewPullRequest{}).
-		Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND sync_epoch = ?",
-			ledger.ProjectID, ledger.RepoFullName, ledger.PRNumber, epoch).
+		Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ? AND sync_epoch = ?",
+			ledger.ProjectID, ledger.RepoFullName, ledger.PRNumber, ledger.IntegrationID, epoch).
 		Updates(fields)
 	if res.Error != nil {
 		return false, res.Error
@@ -701,16 +707,20 @@ func (s *ReviewService) updateLedgerEpoch(ledger *model.ReviewPullRequest, epoch
 // 口径的「作者是 bot + 正文以 marker 开头」——只看「正文含 marker」会把用户
 // 复制粘贴的同一段正文当成自己的评论。正文已是最新时顺手把找回的 id 补记回
 // 账本（写回失败只记日志，下一轮多一次列表读而已）。
-func (s *ReviewService) upsertPRComment(ctx context.Context, client githubapi.GitHubClient,
+func (s *ReviewService) upsertPRComment(ctx context.Context, client forge.ReviewClient,
 	ledger *model.ReviewPullRequest, marker, body, idColumn string, savedID int64) error {
 	want := strings.TrimSpace(body)
-	if comments, err := client.ListIssueCommentsForPR(ctx, ledger.InstallationID, ledger.RepoFullName, ledger.PRNumber); err == nil {
+	if comments, err := client.ListIssueCommentsForPR(ctx, ledger.RepoFullName, ledger.PRNumber); err == nil {
 		for _, c := range comments {
 			own := false
 			if savedID != 0 {
 				own = c.ID == savedID
 			} else {
-				own = strings.HasSuffix(c.User, "[bot]") && strings.HasPrefix(strings.TrimSpace(c.Body), marker)
+				// c.Self 覆盖 Forgejo（机器人是普通账号，不以 [bot] 结尾）；
+				// login 不可知的 Forgejo 行 Self=false，落到下方
+				// FindPullRequestComment 的 marker-only 退化路径。
+				own = (c.Self || strings.HasSuffix(c.User, "[bot]")) &&
+					strings.HasPrefix(strings.TrimSpace(c.Body), marker)
 			}
 			if !own {
 				continue
@@ -728,8 +738,8 @@ func (s *ReviewService) upsertPRComment(ctx context.Context, client githubapi.Gi
 	found := false
 	if savedID != 0 {
 		found = true
-		if err := client.UpdatePullRequestComment(ctx, ledger.InstallationID, ledger.RepoFullName, savedID, body); err != nil {
-			if githubapi.IsNotFound(err) {
+		if err := client.UpdatePullRequestComment(ctx, ledger.RepoFullName, savedID, body); err != nil {
+			if forge.IsNotFound(err) {
 				found = false // 已存评论被删，回退按 marker 找回
 			} else {
 				return errs.New(errs.ErrGitHubAPI.Code, "更新顶层评论失败: "+err.Error())
@@ -740,14 +750,21 @@ func (s *ReviewService) upsertPRComment(ctx context.Context, client githubapi.Gi
 	}
 	if !found {
 		var err error
-		commentID, found, err = client.FindPullRequestComment(ctx, ledger.InstallationID,
+		commentID, found, err = client.FindPullRequestComment(ctx,
 			ledger.RepoFullName, ledger.PRNumber, marker)
 		if err != nil {
 			return errs.New(errs.ErrGitHubAPI.Code, "查找顶层评论失败: "+err.Error())
 		}
 		if found {
-			if err := client.UpdatePullRequestComment(ctx, ledger.InstallationID, ledger.RepoFullName, commentID, body); err != nil {
-				if githubapi.IsNotFound(err) {
+			if err := client.UpdatePullRequestComment(ctx, ledger.RepoFullName, commentID, body); err != nil {
+				if forge.IsNotFound(err) {
+					found = false
+				} else if forge.IsForbidden(err) && !forge.IsRateLimit(err) {
+					// Forgejo login 不可知时 marker-only 可能命中伪造的他人
+					// 评论：PATCH 403 视为「不是我们的」，走新建而不是把
+					// 整个同步挂死。限流 403/429（GitHub 主/二次限流正是
+					// 回 403）不在此列——落到 else 报错等下轮重试，否则
+					// 限流窗口每次同步都会多发一条重复顶层评论。
 					found = false
 				} else {
 					return errs.New(errs.ErrGitHubAPI.Code, "更新顶层评论失败: "+err.Error())
@@ -756,7 +773,7 @@ func (s *ReviewService) upsertPRComment(ctx context.Context, client githubapi.Gi
 		}
 	}
 	if !found {
-		newID, err := client.CreatePullRequestComment(ctx, ledger.InstallationID, ledger.RepoFullName, ledger.PRNumber, body)
+		newID, err := client.CreatePullRequestComment(ctx, ledger.RepoFullName, ledger.PRNumber, body)
 		if err != nil {
 			return errs.New(errs.ErrGitHubAPI.Code, "创建顶层评论失败: "+err.Error())
 		}
@@ -770,8 +787,8 @@ func (s *ReviewService) upsertPRComment(ctx context.Context, client githubapi.Gi
 // 列表读（按 bot+marker 找回），不影响正文正确性。
 func (s *ReviewService) recordCommentID(ledger *model.ReviewPullRequest, idColumn string, id int64) {
 	if err := s.db.Model(&model.ReviewPullRequest{}).
-		Where("project_id = ? AND repo_full_name = ? AND pr_number = ?",
-			ledger.ProjectID, ledger.RepoFullName, ledger.PRNumber).
+		Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ?",
+			ledger.ProjectID, ledger.RepoFullName, ledger.PRNumber, ledger.IntegrationID).
 		Update(idColumn, id).Error; err != nil {
 		s.logger.Warn("写回顶层评论 id 失败",
 			zap.String("column", idColumn), zap.Int64("comment", id), zap.Error(err))
@@ -779,7 +796,7 @@ func (s *ReviewService) recordCommentID(ledger *model.ReviewPullRequest, idColum
 }
 
 // upsertVisualComment 视觉顶层评论：本 head 的视觉运行结论或沿用提醒。
-func (s *ReviewService) upsertVisualComment(ctx context.Context, client githubapi.GitHubClient,
+func (s *ReviewService) upsertVisualComment(ctx context.Context, client forge.ReviewClient,
 	ledger *model.ReviewPullRequest, visualRuns []model.ReviewRun, priorRuns []model.ReviewRun, carried bool, now time.Time,
 	links forgeLinks) error {
 	meta := reviewCommentMeta{
@@ -1108,7 +1125,7 @@ func buildCodeComment(meta reviewCommentMeta, codeRuns []model.ReviewRun, inline
 // 扫描范围刻意不收窄到「尚未行内标注过」的发现（PostedAt == nil）：每次
 // resync 都要重算整份注记（已发过的行内 review 不会撤销，注记必须随之保持
 // 准确），轻微多一次 diff 读取可接受。
-func (s *ReviewService) fetchInlineLines(ctx context.Context, client githubapi.GitHubClient,
+func (s *ReviewService) fetchInlineLines(ctx context.Context, client forge.ReviewClient,
 	ledger *model.ReviewPullRequest, codeRuns []model.ReviewRun) (map[string]map[int]bool, error) {
 	need := false
 	for i := range codeRuns {
@@ -1132,14 +1149,14 @@ func (s *ReviewService) fetchInlineLines(ctx context.Context, client githubapi.G
 	if !need {
 		return nil, nil
 	}
-	diff, err := client.GetPullRequestDiff(ctx, ledger.InstallationID, ledger.RepoFullName, ledger.PRNumber)
+	diff, err := client.GetPullRequestDiff(ctx, ledger.RepoFullName, ledger.PRNumber)
 	if err != nil {
 		// 先分类：diff 超出 GitHub 上限（4xx + too_large，实测 406）是确定性
 		// 失败，退避重试永远撞同一堵墙——包装成哨兵错误让调用方按「本轮无行内
 		// 行」降级收尾，而不是把行内意见挂在永远清不掉的 sync_pending 上。
-		// 其余照旧按可重试的 GitHub 错误上报。原错误保留在链上（%w），日志与
+		// 其余照旧按可重试的平台错误上报。原错误保留在链上（%w），日志与
 		// 后续分类都能拿到状态码。
-		if githubapi.IsDiffTooLarge(err) {
+		if forge.IsDiffTooLarge(err) {
 			return nil, fmt.Errorf("%w: %w", errReviewDiffTooLarge, err)
 		}
 		return nil, errs.New(errs.ErrGitHubAPI.Code, "读取 diff 失败: "+err.Error())
@@ -1274,7 +1291,7 @@ func buildScreensUnavailableComment(meta reviewCommentMeta, priorRuns []model.Re
 // inlineLines 由调用方传入（fetchInlineLines 的结果），本函数不再自己读 diff
 // ——它与顶层评论的「未行内标注」注记同源，保证两处判定一致。diff 读不到时
 // 调用方根本不进本函数（推迟到下一轮）。
-func (s *ReviewService) postInlineReviews(ctx context.Context, client githubapi.GitHubClient,
+func (s *ReviewService) postInlineReviews(ctx context.Context, client forge.ReviewClient,
 	ledger *model.ReviewPullRequest, codeRuns []model.ReviewRun, inlineLines map[string]map[int]bool,
 	epoch int, now time.Time) error {
 	var pending []model.ReviewRun
@@ -1289,13 +1306,18 @@ func (s *ReviewService) postInlineReviews(ctx context.Context, client githubapi.
 	// 对账：上一轮可能已经成功提交 review、但响应丢失（posted_at 没写回）。
 	// 先拉一次已有 review，命中「同 commit + 同 summary」就认领为已发布，
 	// 避免同一批行内意见每轮重复提交。
-	existing, err := client.ListReviews(ctx, ledger.InstallationID, ledger.RepoFullName, ledger.PRNumber)
+	existing, err := client.ListReviews(ctx, ledger.RepoFullName, ledger.PRNumber)
 	if err != nil {
 		return errs.New(errs.ErrGitHubAPI.Code, "读取 review 列表失败: "+err.Error())
 	}
 	posted := map[string][]int64{} // summary -> review ids（旧评论没有运行标记时的兜底）
 	postedByRun := map[string]int64{}
 	for _, rev := range existing {
+		// 只认已提交态：未提交的 PENDING 草稿及其行内评论对其他用户不可见，
+		// 认领其内容会把 pending 运行的 findings 误判已投递而静默漏投。
+		if strings.EqualFold(rev.State, "PENDING") {
+			continue
+		}
 		if !strings.EqualFold(rev.CommitID, ledger.HeadSHA) {
 			continue
 		}
@@ -1321,13 +1343,13 @@ func (s *ReviewService) postInlineReviews(ctx context.Context, client githubapi.
 		}
 		var result api.ReviewCodeResult
 		_ = json.Unmarshal([]byte(r.ResultJSON), &result)
-		var comments []githubapi.ReviewInlineComment
+		var comments []forge.ReviewInlineComment
 		for _, f := range result.Findings {
 			if f.Level == api.Note || f.Line == nil || *f.Line < 1 {
 				continue
 			}
 			if lines, ok := valid[f.File]; ok && lines[*f.Line] {
-				comments = append(comments, githubapi.ReviewInlineComment{
+				comments = append(comments, forge.ReviewInlineComment{
 					Path: f.File, Line: *f.Line, Side: "RIGHT",
 					Body: fmt.Sprintf("%s：%s", f.Level, f.Body),
 				})
@@ -1362,8 +1384,8 @@ func (s *ReviewService) postInlineReviews(ctx context.Context, client githubapi.
 			} else if !ok {
 				return nil
 			}
-			id, err := client.SubmitReview(ctx, ledger.InstallationID, ledger.RepoFullName, ledger.PRNumber,
-				githubapi.ReviewInput{
+			id, err := client.SubmitReview(ctx, ledger.RepoFullName, ledger.PRNumber,
+				forge.ReviewInput{
 					Event: "COMMENT", CommitID: ledger.HeadSHA, Comments: comments,
 					Body: r.Summary + reviewRunMarker(r.ID),
 				})
@@ -1536,7 +1558,7 @@ type visualDecisionOutcome struct {
 
 // decideVisualForPR 组装真实输入并调 decideVisual。
 func (s *ReviewService) decideVisualForPR(ctx context.Context, ledger *model.ReviewPullRequest,
-	pr *githubapi.PullRequest, codeRuns []model.ReviewRun) (visualDecisionOutcome, error) {
+	pr *forge.PullRequest, codeRuns []model.ReviewRun) (visualDecisionOutcome, error) {
 	in := visualDecisionInput{CodeAllTerminal: true, CodeAllTerminalOK: true}
 	anyUI, anySinceLast := false, false
 	for _, r := range codeRuns {
@@ -1606,7 +1628,7 @@ func (s *ReviewService) decideVisualForPR(ctx context.Context, ledger *model.Rev
 	newContentFP := ""
 	if !judgedNone && in.CodeAllTerminalOK && in.HasVisualCombos && in.AnyUIChanged && in.HasScreenshots &&
 		(in.ScreensChanged || in.AnyUIChangedSinceLastVisual) {
-		probe := s.probeScreenshots(ctx, ledger.InstallationID, pr.Body)
+		probe := s.probeScreenshots(ctx, ledger.IntegrationID, ledger.InstallationID, pr.Body)
 		switch probe.result {
 		case probeReady:
 			newContentFP = probe.contentFP
@@ -1623,11 +1645,11 @@ func (s *ReviewService) decideVisualForPR(ctx context.Context, ledger *model.Rev
 		}
 	}
 
-	// 上一轮（更早 round）视觉运行的结论。历史只看本项目账本——其他项目
-	// 同仓库的残留运行不构成「上一轮」。
+	// 上一轮（更早 round）视觉运行的结论。历史只看本 (项目, 集成) 账本——
+	// 其他项目/其他集成的同仓库残留运行不构成「上一轮」。
 	var allPrior []model.ReviewRun
-	if err := s.db.Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND kind = ? AND round_number < ?",
-		ledger.ProjectID, ledger.RepoFullName, ledger.PRNumber, model.ReviewKindVisual, ledger.RoundNumber).
+	if err := s.db.Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ? AND kind = ? AND round_number < ?",
+		ledger.ProjectID, ledger.RepoFullName, ledger.PRNumber, ledger.IntegrationID, model.ReviewKindVisual, ledger.RoundNumber).
 		Order("round_number DESC, created_at ASC").Find(&allPrior).Error; err != nil {
 		return visualDecisionOutcome{}, errs.ErrInternal
 	}
@@ -1788,7 +1810,7 @@ func visualCarryDescription(priorRuns []model.ReviewRun) string {
 // aborted=true 让调用方放弃本轮同步（新 sync_pending 会重试），指纹也不写
 // （新快照会用它自己的材料重新决策）。
 func (s *ReviewService) createVisualRuns(ledger *model.ReviewPullRequest,
-	pr *githubapi.PullRequest, codeRuns []model.ReviewRun, now time.Time,
+	pr *forge.PullRequest, codeRuns []model.ReviewRun, now time.Time,
 	fingerprintToStore string) ([]model.ReviewRun, bool, error) {
 	var settings model.ProjectReviewSettings
 	if err := s.db.Where("project_id = ?", ledger.ProjectID).First(&settings).Error; err != nil {
@@ -1802,8 +1824,8 @@ func (s *ReviewService) createVisualRuns(ledger *model.ReviewPullRequest,
 	aborted := false
 	err = s.db.Transaction(func(tx *gorm.DB) error {
 		var cur model.ReviewPullRequest
-		if err := tx.Where("project_id = ? AND repo_full_name = ? AND pr_number = ?",
-			ledger.ProjectID, ledger.RepoFullName, ledger.PRNumber).
+		if err := tx.Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ?",
+			ledger.ProjectID, ledger.RepoFullName, ledger.PRNumber, ledger.IntegrationID).
 			First(&cur).Error; err != nil {
 			return err
 		}
@@ -1814,8 +1836,8 @@ func (s *ReviewService) createVisualRuns(ledger *model.ReviewPullRequest,
 		}
 		var cancelled int64
 		if err := tx.Model(&model.ReviewRun{}).
-			Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ? AND kind = ? AND status = ?",
-				ledger.ProjectID, ledger.RepoFullName, ledger.PRNumber, ledger.HeadSHA,
+			Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ? AND head_sha = ? AND kind = ? AND status = ?",
+				ledger.ProjectID, ledger.RepoFullName, ledger.PRNumber, ledger.IntegrationID, ledger.HeadSHA,
 				model.ReviewKindCode, model.ReviewRunCancelled).
 			Count(&cancelled).Error; err != nil {
 			return err
@@ -1840,6 +1862,7 @@ func (s *ReviewService) createVisualRuns(ledger *model.ReviewPullRequest,
 				HeadSHA:          ledger.HeadSHA,
 				RoundNumber:      ledger.RoundNumber,
 				InstallationID:   ledger.InstallationID,
+				IntegrationID:    ledger.IntegrationID,
 				TriggerAction:    "visual",
 				PRTitle:          pr.Title,
 				PRURL:            pr.HTMLURL,
@@ -1871,8 +1894,8 @@ func (s *ReviewService) createVisualRuns(ledger *model.ReviewPullRequest,
 		// 截图的新 head 会因指纹相同被判「未变化」，把更早一轮的通过沿用过去。
 		if len(runs) > 0 && fingerprintToStore != "" {
 			if err := tx.Model(&model.ReviewPullRequest{}).
-				Where("project_id = ? AND repo_full_name = ? AND pr_number = ?",
-					ledger.ProjectID, ledger.RepoFullName, ledger.PRNumber).
+				Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ?",
+					ledger.ProjectID, ledger.RepoFullName, ledger.PRNumber, ledger.IntegrationID).
 				Update("visual_screens_fingerprint", fingerprintToStore).Error; err != nil {
 				return err
 			}

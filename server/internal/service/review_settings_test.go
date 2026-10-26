@@ -39,7 +39,7 @@ func newReviewTestService(t *testing.T, svc *testServices, gh PRGitHubClients, a
 	t.Helper()
 	return NewReviewService(svc.db, svc.projectRepo,
 		repository.NewGitHubWebhookDeliveryRepository(svc.db),
-		NewNotificationSink(svc.db), gh, app, url, nil, nil, nil, svc.cfg, zap.NewNop())
+		NewNotificationSink(svc.db), gh, app, url, nil, nil, nil, repository.NewForgeIntegrationRepository(svc.db), svc.cfg, zap.NewNop())
 }
 
 // readyReviewService 所有前置条件就绪的 ReviewService：App 已配置、安装可达、
@@ -342,6 +342,81 @@ func TestUpdateSettings_SaveAndRead_Consistent(t *testing.T) {
 	}
 }
 
+// 启用基线打点（INT-167 轮询）：false→true 翻转写 enabled_at；启用中的
+// 无关保存沿用原值；停用清空、再启用重新打点。
+func TestUpdateSettings_EnabledAtBaseline(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "u1")
+	project := createTestProject(t, svc.db, user.ID)
+	env := createT3TestEnv(t, svc.db, user.ID, "env1")
+	createTestT3Binding(t, svc.db, project.ID, env.ID, "t3-1")
+	rs, _ := readyReviewService(t, svc)
+	ctx := context.Background()
+
+	readBaseline := func() *time.Time {
+		var row model.ProjectReviewSettings
+		if err := svc.db.Where("project_id = ?", project.ID).First(&row).Error; err != nil {
+			t.Fatalf("settings row: %v", err)
+		}
+		return row.EnabledAt
+	}
+	if _, err := rs.UpdateSettings(ctx, user.ID, project.ID, validSettingsInput(env.ID)); err != nil {
+		t.Fatalf("enable: %v", err)
+	}
+	first := readBaseline()
+	if first == nil {
+		t.Fatal("启用后 enabled_at 应有打点")
+	}
+	// 启用中改触发项等无关保存沿用基线——存量判定窗口不重启。
+	in := validSettingsInput(env.ID)
+	in.TriggerReadyForReview = true
+	if _, err := rs.UpdateSettings(ctx, user.ID, project.ID, in); err != nil {
+		t.Fatalf("resave: %v", err)
+	}
+	if got := readBaseline(); got == nil || !got.Equal(*first) {
+		t.Fatalf("无关保存应沿用基线: %v -> %v", first, got)
+	}
+	// 停用清空基线；再启用重新打点。
+	if _, err := rs.UpdateSettings(ctx, user.ID, project.ID, &api.ReviewSettingsInput{Enabled: false}); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+	if got := readBaseline(); got != nil {
+		t.Fatalf("停用应清空基线, got %v", got)
+	}
+	if _, err := rs.UpdateSettings(ctx, user.ID, project.ID, validSettingsInput(env.ID)); err != nil {
+		t.Fatalf("re-enable: %v", err)
+	}
+	if got := readBaseline(); got == nil || got.Before(*first) {
+		t.Fatalf("再启用应重新打点: first=%v got=%v", first, got)
+	}
+
+	// 存量升级行（enabled 且 enabled_at NULL）首次保存回填 created_at：
+	// 打 now 会把「保存前刚丢的 webhook 事件」误划成存量。
+	legacy := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.GithubRepo = "legacy-repo"
+	})
+	createTestT3Binding(t, svc.db, legacy.ID, env.ID, "t3-legacy")
+	legacyCreated := time.Now().UTC().Add(-48 * time.Hour)
+	if err := svc.db.Create(&model.ProjectReviewSettings{
+		ProjectID: legacy.ID, UserID: user.ID,
+		RepoFullName:  strings.ToLower(legacy.CodeRepoFullName()),
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		Enabled:       true, CreatedAt: legacyCreated, UpdatedAt: legacyCreated,
+	}).Error; err != nil {
+		t.Fatalf("seed legacy: %v", err)
+	}
+	if _, err := rs.UpdateSettings(ctx, user.ID, legacy.ID, validSettingsInput(env.ID)); err != nil {
+		t.Fatalf("legacy resave: %v", err)
+	}
+	var row model.ProjectReviewSettings
+	if err := svc.db.Where("project_id = ?", legacy.ID).First(&row).Error; err != nil {
+		t.Fatalf("legacy row: %v", err)
+	}
+	if row.EnabledAt == nil || !row.EnabledAt.Equal(legacyCreated) {
+		t.Fatalf("存量行应回填 created_at: got %v want %v", row.EnabledAt, legacyCreated)
+	}
+}
+
 // 部署未配置 App 时 GetSettings 的 prerequisites 标出缺项，且不发起仓库调用。
 func TestGetSettings_Prerequisites_MissingApp(t *testing.T) {
 	svc := setupTestServices(t)
@@ -388,7 +463,8 @@ func TestUpdateSettingsDisableCancelsRuns(t *testing.T) {
 	now := time.Now().UTC()
 
 	queued := &model.ReviewRun{
-		ID: uuid.NewString(), UserID: user.ID, ProjectID: project.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ID:            uuid.NewString(), UserID: user.ID, ProjectID: project.ID,
 		Kind: model.ReviewKindCode, RepoFullName: "o/r", PRNumber: 3, HeadSHA: "sha",
 		RoundNumber: 1, EnvironmentID: env.ID, InstanceID: "i", Model: "m",
 		ThreadID: uuid.NewString(), LaunchCommandID: uuid.NewString(), InitialMessageID: uuid.NewString(),
@@ -403,7 +479,8 @@ func TestUpdateSettingsDisableCancelsRuns(t *testing.T) {
 		t.Fatalf("seed token: %v", err)
 	}
 	if err := svc.db.Create(&model.ReviewDebounce{
-		ProjectID: project.ID, RepoFullName: "o/r", PRNumber: 3, HeadSHA: "sha2",
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     project.ID, RepoFullName: "o/r", PRNumber: 3, HeadSHA: "sha2",
 		Action: "synchronize", FireAt: now.Add(time.Hour), UpdatedAt: now,
 	}).Error; err != nil {
 		t.Fatalf("seed debounce: %v", err)
@@ -495,14 +572,57 @@ func TestGetSettings_ForgejoBinding_SkipsGitHubChecks(t *testing.T) {
 			t.Fatalf("%s = %+v，want 缺项且点明 Forgejo 不支持", code, p)
 		}
 	}
-	if byCode[api.PublicUrl].Missing || byCode[api.GithubToken].Missing {
-		t.Fatalf("其余前置条件不应缺项: %+v", byCode)
+	if byCode[api.PublicUrl].Missing {
+		t.Fatalf("public_url 前置条件不应缺项: %+v", byCode)
+	}
+	// Forgejo 项目的凭证前置看集成 PAT：绑定的 "forge-any" 行不存在 →
+	// GithubToken 项按「集成 PAT 未配置」缺项——项目上的 GitHub Token
+	// 绑定对 Forgejo 仓无效，不计入。
+	if !byCode[api.GithubToken].Missing {
+		t.Fatalf("Forgejo 项目凭证前置应看集成 PAT: %+v", byCode[api.GithubToken])
+	}
+}
+
+// TestGetSettings_ForgejoBinding_PATConfigured 凭证前置正向：绑定行存在且
+// PAT 已配置时 GithubToken 项就绪——项目侧 GitHub Token 为空也不缺项。
+func TestGetSettings_ForgejoBinding_PATConfigured(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "forgejo-u2")
+	integration := createTestForgeIntegration(t, svc.db, "https://forge.example.com")
+	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.CodeIntegrationID = integration.ID
+	})
+
+	fake := githubapp.NewFake()
+	rs := newReviewTestService(t, svc,
+		githubapp.StaticClients{Client: fake},
+		fakeReviewAppSource{ok: true},
+		fakeReviewPublicURL("https://fs.example.com"))
+	rs.forgeIntegrations = &stubForgeIntegrationLookup{rows: map[string]*model.ForgeIntegration{
+		integration.ID: integration,
+	}}
+
+	got, err := rs.GetSettings(context.Background(), user.ID, project.ID)
+	if err != nil {
+		t.Fatalf("GetSettings: %v", err)
+	}
+	byCode := map[api.ReviewPrerequisiteCode]api.ReviewPrerequisite{}
+	for _, p := range got.Prerequisites {
+		byCode[p.Code] = p
+	}
+	if p := byCode[api.GithubToken]; p.Missing {
+		t.Fatalf("集成 PAT 已配置时凭证前置不应缺项: %+v", p)
+	}
+	if p := byCode[api.GithubApp]; p.Missing {
+		t.Fatalf("集成行存在且 kind=forgejo 时集成前置不应缺项: %+v", p)
 	}
 }
 
 // TestUpdateSettings_ForgejoBoundInTx_Rejected D：入参侧快照（事务外）还没
 // 有 forgejo 绑定、前置校验与写事务之间项目被并发改绑 → 启用保存 40001 且
-// 点明 Forgejo 暂不支持，设置不落库——重启用竞态由事务内复核关掉。
+// 设置不落库。INT-167 任务 3 起 forgejo 可启用，事务内复核改为校验「绑定的
+// 集成行存在且 kind=forgejo」：并发改绑指向不存在的集成报「集成已失效」，
+// 快照与库内身份不一致由既有的「仓库已变更」复核兜住。
 func TestUpdateSettings_ForgejoBoundInTx_Rejected(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "u1")
@@ -523,8 +643,9 @@ func TestUpdateSettings_ForgejoBoundInTx_Rejected(t *testing.T) {
 	if code := appErrorCode(t, err); code != 40001 {
 		t.Fatalf("code = %d, want 40001 (err=%v)", code, err)
 	}
-	if !strings.Contains(err.Error(), "Forgejo") {
-		t.Fatalf("message = %q, want 点明 Forgejo 暂不支持", err)
+	msg := err.Error()
+	if !strings.Contains(msg, "集成已失效") && !strings.Contains(msg, "仓库已变更") {
+		t.Fatalf("message = %q, want 点明集成失效或仓库已变更", msg)
 	}
 	var n int64
 	svc.db.Model(&model.ProjectReviewSettings{}).

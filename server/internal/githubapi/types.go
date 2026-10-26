@@ -26,6 +26,9 @@ type PullRequest struct {
 	HeadRef      string
 	BaseRef      string
 	AuthorLogin  string
+	// UpdatedAt pulls/{n} 响应的 updated_at——webhook 复核路径用它落
+	// seen/总账的 pr_updated_at 基准（Forgejo 适配器同源字段）。
+	UpdatedAt *time.Time
 }
 
 // ReviewComment 是 PR 的 review 评论（行内评论，不含 issue 评论）。
@@ -76,6 +79,15 @@ type ReviewInput struct {
 
 // ErrForbidden GitHub 返回 403（App 未获该操作权限，例如缺 statuses:write）。
 var ErrForbidden = errors.New("githubapi: forbidden")
+
+// ErrBodyTooLarge 2xx 响应体超本端读取上限。截断的响应不能按完整件处理
+// （静默截断的 diff 会被误当成完整变更清单），超过上限确定性报错。
+var ErrBodyTooLarge = errors.New("githubapi: 响应体超过读取上限")
+
+// ErrTreeTruncated git/trees 响应被平台截断（truncated=true，如 >10 万条目
+// 的目录）：条目清单不完整，「查不到」不等于「不存在」——按存在性不可判定
+// 上报，调用方不可将其当缺席证明。
+var ErrTreeTruncated = errors.New("githubapi: tree 响应被截断")
 
 // StatusError 非 2xx 响应。
 type StatusError struct {

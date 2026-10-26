@@ -48,7 +48,7 @@ func newReviewEngineEnv(t *testing.T) *reviewEngineEnv {
 		githubapp.StaticClients{Client: fake},
 		fakeReviewAppSource{ok: true},
 		fakeReviewPublicURL("https://fs.example.com"),
-		nil, media, nil, svc.cfg, zap.NewNop())
+		nil, media, nil, repository.NewForgeIntegrationRepository(svc.db), svc.cfg, zap.NewNop())
 	user := createTestUser(t, svc.db, "reviewer")
 	project := createTestProject(t, svc.db, user.ID)
 	return &reviewEngineEnv{svc: svc, review: review, fake: fake, media: media, user: user, project: project}
@@ -66,6 +66,7 @@ func (e *reviewEngineEnv) enableReview(t *testing.T, opts ...func(*model.Project
 		ProjectID:             e.project.ID,
 		UserID:                e.user.ID,
 		RepoFullName:          strings.ToLower(e.project.CodeRepoFullName()),
+		IntegrationID:         model.ForgeIntegrationBuiltinGitHubID,
 		Enabled:               true,
 		TriggerOpened:         true,
 		TriggerSynchronize:    true,
@@ -235,6 +236,31 @@ func TestReviewWebhookDeliveryIdempotent(t *testing.T) {
 	}
 }
 
+// TestReviewWebhookDeliveryLegacyBareKey 升级前的裸 GUID 幂等账（集成前缀
+// 账键引入前的行没有前缀）对 GitHub 同 GUID 重投仍须命中去重——只查
+// 前缀键的话升级窗口内的重投会重走一遍受理路径。
+func TestReviewWebhookDeliveryLegacyBareKey(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	e.enableReview(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	ctx := context.Background()
+
+	// 模拟升级前登记的裸键行（无 integration_id 前缀）。
+	if err := e.svc.db.Create(&model.GitHubWebhookDelivery{
+		DeliveryID: "legacy-1", Event: "pull_request", ReceivedAt: time.Now().UTC(),
+	}).Error; err != nil {
+		t.Fatalf("seed legacy delivery: %v", err)
+	}
+	err := e.review.HandleGitHubWebhook(ctx, "pull_request", "legacy-1",
+		prPayload("opened", repo, 6, "sha-1", false, false))
+	if err != ErrDeliveryDuplicated {
+		t.Fatalf("legacy bare-key redelivery err = %v, want ErrDeliveryDuplicated", err)
+	}
+	if got := e.debounceCount(t); got != 0 {
+		t.Fatalf("debounce rows = %d, want 0（裸键命中不得受理）", got)
+	}
+}
+
 // TestReviewWebhookSupersedesStaleSHA 新 head 覆盖防抖行并取消旧 head 的在途运行。
 func TestReviewWebhookSupersedesStaleSHA(t *testing.T) {
 	e := newReviewEngineEnv(t)
@@ -245,7 +271,8 @@ func TestReviewWebhookSupersedesStaleSHA(t *testing.T) {
 
 	// 旧 head 有一条 running 运行。
 	old := &model.ReviewRun{
-		ID: uuid.NewString(), UserID: e.user.ID, ProjectID: e.project.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ID:            uuid.NewString(), UserID: e.user.ID, ProjectID: e.project.ID,
 		Kind: model.ReviewKindCode, RepoFullName: repo, PRNumber: 4,
 		HeadSHA: "sha-old", RoundNumber: 1, EnvironmentID: "env-1",
 		InstanceID: "claude", Model: "m",
@@ -281,7 +308,8 @@ func TestReviewDebounceConsumeOpensRound(t *testing.T) {
 
 	e.fake.SetPR(repo, 9, &githubapi.PullRequest{HeadSHA: "sha-9"})
 	e.svc.db.Create(&model.ReviewDebounce{
-		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 9,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: repo, PRNumber: 9,
 		HeadSHA: "sha-9", Action: "synchronize", InstallationID: 42,
 		PRTitle: "t", PRURL: "u", BaseRef: "main", HeadRef: "feature",
 		FireAt: now.Add(-time.Second), UpdatedAt: now.Add(-time.Minute),
@@ -358,7 +386,8 @@ func TestReviewMarkTimeouts(t *testing.T) {
 		RunID: run.ID, TokenHash: "h", CreatedAt: now.Add(-time.Hour), ExpiresAt: now.Add(time.Hour),
 	})
 	e.svc.db.Create(&model.ReviewPullRequest{
-		RepoFullName: repo, PRNumber: 11, ProjectID: e.project.ID, UserID: e.user.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		RepoFullName:  repo, PRNumber: 11, ProjectID: e.project.ID, UserID: e.user.ID,
 		UpdatedAt: now,
 	})
 
@@ -391,7 +420,8 @@ func TestReviewMarkTimeouts(t *testing.T) {
 func (e *reviewEngineEnv) seedRun(t *testing.T, repo string, pr int, head string, status model.ReviewRunStatus, now time.Time) *model.ReviewRun {
 	t.Helper()
 	run := &model.ReviewRun{
-		ID: uuid.NewString(), UserID: e.user.ID, ProjectID: e.project.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ID:            uuid.NewString(), UserID: e.user.ID, ProjectID: e.project.ID,
 		Kind: model.ReviewKindCode, RepoFullName: repo, PRNumber: pr,
 		HeadSHA: head, RoundNumber: 1, EnvironmentID: "env-1",
 		InstanceID: "claude", Model: "m",
@@ -417,7 +447,8 @@ func TestReviewResultValidation(t *testing.T) {
 		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
 	})
 	e.svc.db.Create(&model.ReviewPullRequest{
-		RepoFullName: repo, PRNumber: 12, ProjectID: e.project.ID, UserID: e.user.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		RepoFullName:  repo, PRNumber: 12, ProjectID: e.project.ID, UserID: e.user.ID,
 		InstallationID: 42, HeadSHA: "sha-r", RoundNumber: 1, UpdatedAt: now,
 	})
 
@@ -469,7 +500,8 @@ func TestReviewResultHeadChanged(t *testing.T) {
 		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
 	})
 	e.svc.db.Create(&model.ReviewPullRequest{
-		RepoFullName: repo, PRNumber: 13, ProjectID: e.project.ID, UserID: e.user.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		RepoFullName:  repo, PRNumber: 13, ProjectID: e.project.ID, UserID: e.user.ID,
 		HeadSHA: "sha-old", RoundNumber: 1, UpdatedAt: now,
 	})
 	run := e.seedRun(t, repo, 13, "sha-old", model.ReviewRunRunning, now)
@@ -499,7 +531,7 @@ func TestResolveRunToken(t *testing.T) {
 		RunID: run.ID, TokenHash: sha256Hex(raw), CreatedAt: now, ExpiresAt: now.Add(time.Hour),
 	})
 
-	id, err := e.review.ResolveRunToken(context.Background(), raw, true)
+	id, err := e.review.ResolveRunToken(context.Background(), raw, true, run.ID)
 	if err != nil || id.RunID != run.ID || id.UserID != e.user.ID {
 		t.Fatalf("resolve: %+v err=%v", id, err)
 	}
@@ -512,20 +544,20 @@ func TestResolveRunToken(t *testing.T) {
 	// 消费后 requireLive 拒绝、result 端点放行。
 	consume := now.Add(time.Minute)
 	e.svc.db.Model(&model.ReviewRunToken{}).Where("run_id = ?", run.ID).Update("consumed_at", consume)
-	if _, err := e.review.ResolveRunToken(context.Background(), raw, true); err == nil {
+	if _, err := e.review.ResolveRunToken(context.Background(), raw, true, run.ID); err == nil {
 		t.Fatal("consumed token must fail requireLive")
 	}
 	e.svc.db.Model(&model.ReviewRun{}).Where("id = ?", run.ID).Update("status", model.ReviewRunCompleted)
-	if _, err := e.review.ResolveRunToken(context.Background(), raw, false); err != nil {
+	if _, err := e.review.ResolveRunToken(context.Background(), raw, false, run.ID); err != nil {
 		t.Fatalf("terminal replay resolve: %v", err)
 	}
 
 	// 过期与伪造 → 40106。
 	e.svc.db.Model(&model.ReviewRunToken{}).Where("run_id = ?", run.ID).Update("expires_at", now.Add(-time.Minute))
-	if _, err := e.review.ResolveRunToken(context.Background(), raw, false); err == nil {
+	if _, err := e.review.ResolveRunToken(context.Background(), raw, false, run.ID); err == nil {
 		t.Fatal("expired token must fail")
 	}
-	if _, err := e.review.ResolveRunToken(context.Background(), "fsr_unknown", true); err == nil {
+	if _, err := e.review.ResolveRunToken(context.Background(), "fsr_unknown", true, run.ID); err == nil {
 		t.Fatal("unknown token must fail")
 	}
 }

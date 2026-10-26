@@ -41,3 +41,11 @@ export const forgeIntegrationsApi = {
         .json<ApiResponse<ForgeIntegrationTest>>(),
     ),
 };
+
+// GET /api/integrations（INT-167）：项目表单用的集成选项投影，全部登录用户
+// 可读——与上面仅管理员的部署级 CRUD（deployment/integrations）是不同端点，
+// 无凭证字段，路径与类型都不复用。
+export const integrationOptionsApi = {
+  list: () =>
+    decodeApiError(api.get("integrations").json<ApiResponse<IntegrationOption[]>>()),
+};

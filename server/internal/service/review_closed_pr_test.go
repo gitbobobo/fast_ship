@@ -7,10 +7,12 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/godbobo/fast_ship/server/internal/forge"
 	"github.com/godbobo/fast_ship/server/internal/githubapi"
 	"github.com/godbobo/fast_ship/server/internal/model"
 )
@@ -19,7 +21,8 @@ import (
 func seedClosedDebounce(t *testing.T, e *reviewEngineEnv, repo string, pr int, head string, now time.Time) {
 	t.Helper()
 	if err := e.svc.db.Create(&model.ReviewDebounce{
-		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: pr,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: repo, PRNumber: pr,
 		HeadSHA: head, Action: "synchronize", InstallationID: 42,
 		PRTitle: "t", PRURL: "u", BaseRef: "main", HeadRef: "feature",
 		FireAt: now.Add(-time.Second), UpdatedAt: now.Add(-time.Minute),
@@ -125,6 +128,79 @@ func TestReviewDebounceReadFailureRetries(t *testing.T) {
 	}
 }
 
+// TestReviewDebounceDeterministicErrorDropsRow 实况读确定性失败（集成已删/
+// 密文损坏/401/403/404）直接删行不推后：每轮重试结果相同，留着只会让行
+// 永远消费不掉并按周期刷错；后续新事件会重建防抖行。
+func TestReviewDebounceDeterministicErrorDropsRow(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	e.enableReview(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	t3 := &fakeReviewT3{}
+	review := e.withT3(t3, nil, nil)
+
+	// 绑定不存在的 Forgejo 集成：resolver → findForgejoRow 行不存在
+	// （ErrRecordNotFound）→ 确定性失败，直接删行不推后。
+	if err := e.svc.db.Create(&model.ReviewDebounce{
+		IntegrationID: "forge-gone", ProjectID: e.project.ID,
+		RepoFullName: repo, PRNumber: 71, HeadSHA: "sha-71", Action: "synchronize",
+		PRTitle: "t", PRURL: "u", BaseRef: "main", HeadRef: "f",
+		FireAt: now.Add(-time.Second), UpdatedAt: now.Add(-time.Minute),
+	}).Error; err != nil {
+		t.Fatalf("seed debounce: %v", err)
+	}
+	review.processDueDebounces(now)
+
+	if got := e.debounceCount(t); got != 0 {
+		t.Fatalf("确定性失败的防抖行应删除，剩 %d", got)
+	}
+	var runs int64
+	e.svc.db.Model(&model.ReviewRun{}).Count(&runs)
+	if runs != 0 || len(t3.created) != 0 {
+		t.Fatalf("确定性失败不得开轮/建线程：runs=%d created=%d", runs, len(t3.created))
+	}
+}
+
+// TestReviewDebounceRateLimitRetries 限流 403（GitHub 主/二次限流正是回
+// 403，响应体含 rate limit）是瞬时失败：不删行、fire_at 推后；同测试里
+// 真权限 403（无 rate limit 字样）对照删行。
+func TestReviewDebounceRateLimitRetries(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	e.enableReview(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	t3 := &fakeReviewT3{}
+	review := e.withT3(t3, nil, nil)
+
+	review.clients = pollStubResolver{byIntegration: map[string]forge.ReviewClient{
+		model.ForgeIntegrationBuiltinGitHubID: &pollStubClient{errByRepo: map[string]error{
+			repo: &forge.StatusError{StatusCode: 403, Body: "API rate limit exceeded for user"},
+		}},
+	}}
+	seedClosedDebounce(t, e, repo, 72, "sha-72", now)
+	review.processDueDebounces(now)
+
+	if got := e.debounceCount(t); got != 1 {
+		t.Fatalf("限流 403 不应删行，防抖行 = %d，want 1", got)
+	}
+	var row model.ReviewDebounce
+	e.svc.db.Where("repo_full_name = ? AND pr_number = 72", repo).First(&row)
+	if !row.FireAt.After(now) {
+		t.Fatalf("限流 403 应推后 fire_at: %v", row.FireAt)
+	}
+
+	// 对照：无 rate limit 字样的真权限 403 → 确定性，删行。
+	review.clients = pollStubResolver{byIntegration: map[string]forge.ReviewClient{
+		model.ForgeIntegrationBuiltinGitHubID: &pollStubClient{errByRepo: map[string]error{
+			repo: &forge.StatusError{StatusCode: 403, Body: "Forbidden"},
+		}},
+	}}
+	review.processDueDebounces(row.FireAt.Add(time.Second))
+	if got := e.debounceCount(t); got != 0 {
+		t.Fatalf("权限 403 应删行，剩 %d", got)
+	}
+}
+
 // TestReviewClosedDispatchCancelsRun 派发阶段 PR 已关闭：不建线程，运行
 // cancelled + error_code=pr_closed，令牌已消费、总账 sync_pending 置位；
 // 读 PR 失败（未登记）不落终态不签令牌，留给认领超窗重试。
@@ -142,7 +218,8 @@ func TestReviewClosedDispatchCancelsRun(t *testing.T) {
 		HeadSHA: "sha-c54", Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
 	})
 	e.svc.db.Create(&model.ReviewPullRequest{
-		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 54, UserID: e.user.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: repo, PRNumber: 54, UserID: e.user.ID,
 		InstallationID: 42, HeadSHA: "sha-c54", RoundNumber: 1, UpdatedAt: now,
 	})
 
@@ -200,7 +277,8 @@ func TestReviewClosedDispatchCancelsRun(t *testing.T) {
 		t.Fatal("已关闭 PR 不得建线程")
 	}
 
-	// 读 PR 失败（fake 未登记）：不落终态也不签令牌——认领超窗后重试。
+	// 读 PR 失败（fake 未登记、非确定性错误）：不落终态也不签令牌——
+	// 认领超窗后重试。
 	noPR := e.seedRun(t, repo, 55, "sha-c55", model.ReviewRunDispatched, now)
 	e.svc.db.Model(noPR).Update("environment_id", env.ID)
 	review.launchRun(context.Background(), noPR.ID, now)
@@ -219,6 +297,101 @@ func TestReviewClosedDispatchCancelsRun(t *testing.T) {
 	}
 }
 
+// TestReviewDispatchAccessErrTerminals 派发前实况读的确定性失败不再等认领
+// 超窗空转到 timeout：PR 404 且仓库可读按 PR 关闭终局 cancelled/pr_closed
+// （GitHub/Forgejo 对无权限资源也回 404，用仓库级复核消歧）；权限 403 与
+// PR+仓库双 404（凭证吊销/仓库转私有）落 failed/access_denied +
+// dispatch_failed 通知；仓库复核瞬时失败保持 dispatched 等重认领；均不建
+// 线程不签令牌，与防抖/轮询的确定性口径一致。
+func TestReviewDispatchAccessErrTerminals(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	env := createT3TestEnv(t, e.svc.db, e.user.ID, "env-det-acc")
+	createTestT3Binding(t, e.svc.db, e.project.ID, env.ID, "t3p")
+	t3 := &fakeReviewT3{}
+	review := e.withT3(t3, nil, nil)
+
+	e.svc.db.Create(&model.ReviewPullRequest{
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: repo, PRNumber: 60, UserID: e.user.ID,
+		InstallationID: 42, HeadSHA: "sha-c60", RoundNumber: 1, UpdatedAt: now,
+	})
+	gone := e.seedRun(t, repo, 60, "sha-c60", model.ReviewRunDispatched, now)
+	e.svc.db.Model(gone).Update("environment_id", env.ID)
+	e.fake.SetPRError(repo, &githubapi.StatusError{
+		StatusCode: 404, Method: "GET", URL: "pulls/60", Body: "not found",
+	})
+	review.launchRun(context.Background(), gone.ID, now)
+	var after404 model.ReviewRun
+	e.svc.db.First(&after404, "id = ?", gone.ID)
+	if after404.Status != model.ReviewRunCancelled || after404.ErrorCode != "pr_closed" || after404.FinishedAt == nil {
+		t.Fatalf("404 run = %q/%q, want cancelled/pr_closed", after404.Status, after404.ErrorCode)
+	}
+	var ledger model.ReviewPullRequest
+	e.svc.db.First(&ledger, "repo_full_name = ? AND pr_number = 60", repo)
+	if !ledger.SyncPending {
+		t.Fatal("404 收尾应置 sync_pending（交给同步阶段清账）")
+	}
+
+	denied := e.seedRun(t, repo, 61, "sha-c61", model.ReviewRunDispatched, now)
+	e.svc.db.Model(denied).Update("environment_id", env.ID)
+	e.fake.SetPRError(repo, &githubapi.StatusError{
+		StatusCode: 403, Method: "GET", URL: "pulls/61", Body: "forbidden",
+	})
+	review.launchRun(context.Background(), denied.ID, now)
+	var after403 model.ReviewRun
+	e.svc.db.First(&after403, "id = ?", denied.ID)
+	if after403.Status != model.ReviewRunFailed || after403.ErrorCode != "access_denied" || after403.FinishedAt == nil {
+		t.Fatalf("403 run = %q/%q, want failed/access_denied", after403.Status, after403.ErrorCode)
+	}
+	var notifCount int64
+	e.svc.db.Model(&model.Notification{}).
+		Where("kind = ?", model.NotificationReviewDispatchFailed).Count(&notifCount)
+	if notifCount == 0 {
+		t.Fatal("access_denied 应发 dispatch_failed 通知（凭证问题需用户处置）")
+	}
+
+	// PR 404 且仓库级同样确定性读不到（凭证吊销/仓库转私有也回 404）——
+	// 不当「PR 已删」静默取消，按 access_denied 报真实原因。
+	repo404 := e.seedRun(t, repo, 62, "sha-c62", model.ReviewRunDispatched, now)
+	e.svc.db.Model(repo404).Update("environment_id", env.ID)
+	e.fake.SetPRError(repo, &githubapi.StatusError{
+		StatusCode: 404, Method: "GET", URL: "pulls/62", Body: "not found",
+	})
+	e.fake.SetRepoError(repo, &githubapi.StatusError{
+		StatusCode: 404, Method: "GET", URL: "repos/x", Body: "not found",
+	})
+	review.launchRun(context.Background(), repo404.ID, now)
+	var afterRepo404 model.ReviewRun
+	e.svc.db.First(&afterRepo404, "id = ?", repo404.ID)
+	if afterRepo404.Status != model.ReviewRunFailed || afterRepo404.ErrorCode != "access_denied" {
+		t.Fatalf("双 404 run = %q/%q, want failed/access_denied",
+			afterRepo404.Status, afterRepo404.ErrorCode)
+	}
+
+	// PR 404 但仓库级复核本身瞬时失败：不证明任何一边，等重认领。
+	e.fake.SetRepoError(repo, fmt.Errorf("network down"))
+	retry := e.seedRun(t, repo, 63, "sha-c63", model.ReviewRunDispatched, now)
+	e.svc.db.Model(retry).Update("environment_id", env.ID)
+	review.launchRun(context.Background(), retry.ID, now)
+	var kept model.ReviewRun
+	e.svc.db.First(&kept, "id = ?", retry.ID)
+	if kept.Status != model.ReviewRunDispatched || kept.FinishedAt != nil {
+		t.Fatalf("仓库复核瞬时失败应保持 dispatched 等重试: %q", kept.Status)
+	}
+
+	if len(t3.created) != 0 {
+		t.Fatal("确定性失败不得建线程")
+	}
+	var tokCount int64
+	e.svc.db.Model(&model.ReviewRunToken{}).
+		Where("run_id IN ?", []string{gone.ID, denied.ID, repo404.ID, retry.ID}).Count(&tokCount)
+	if tokCount != 0 {
+		t.Fatal("确定性失败不得签发令牌")
+	}
+}
+
 // TestReviewClosedSyncWritesNothing sync_pending 的 PR 已关闭：零 GitHub 写
 // （status/顶层评论/行内 review 都不发、不建视觉运行），pending 清除、
 // epoch 推进、在途运行取消。
@@ -233,7 +406,8 @@ func TestReviewClosedSyncWritesNothing(t *testing.T) {
 		HeadSHA: "sha-c56", Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
 	})
 	e.svc.db.Create(&model.ReviewPullRequest{
-		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 56, UserID: e.user.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: repo, PRNumber: 56, UserID: e.user.ID,
 		InstallationID: 1, HeadSHA: "sha-c56", RoundNumber: 1,
 		SyncPending: true, SyncEpoch: 1, SyncError: "上一次同步失败：github 502", UpdatedAt: now,
 	})
@@ -311,7 +485,8 @@ func TestReviewClosedResultSuperseded(t *testing.T) {
 		HeadSHA: "sha-c58", Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
 	})
 	e.svc.db.Create(&model.ReviewPullRequest{
-		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 58, UserID: e.user.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: repo, PRNumber: 58, UserID: e.user.ID,
 		HeadSHA: "sha-c58", RoundNumber: 1, UpdatedAt: now,
 	})
 	run := e.seedRun(t, repo, 58, "sha-c58", model.ReviewRunRunning, now)

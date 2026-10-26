@@ -128,7 +128,8 @@ func TestReviewSyncEpochGuard(t *testing.T) {
 	e.svc.db.Model(run).Update("result_json",
 		`{"summary":"ok","findings":[],"prior":[],"ui_changed":false,"ui_changed_since_last_visual":false}`)
 	e.svc.db.Create(&model.ReviewPullRequest{
-		RepoFullName: repo, PRNumber: 77, ProjectID: e.project.ID, UserID: e.user.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		RepoFullName:  repo, PRNumber: 77, ProjectID: e.project.ID, UserID: e.user.ID,
 		InstallationID: 1, HeadSHA: "sha-g", RoundNumber: 1,
 		SyncPending: true, SyncEpoch: 1, UpdatedAt: now,
 	})
@@ -139,7 +140,7 @@ func TestReviewSyncEpochGuard(t *testing.T) {
 		githubapp.StaticClients{Client: &epochBumpClient{GitHubClient: e.fake, db: e.svc.db, repo: repo, pr: 77}},
 		fakeReviewAppSource{ok: true},
 		fakeReviewPublicURL("https://fs.example.com"),
-		nil, nil, nil, e.svc.cfg, zap.NewNop())
+		nil, nil, nil, repository.NewForgeIntegrationRepository(e.svc.db), e.svc.cfg, zap.NewNop())
 	review.syncPendingPRs(now)
 
 	var after model.ReviewPullRequest
@@ -190,7 +191,8 @@ func TestStatusDescUTF8(t *testing.T) {
 	}
 	// 截断只发生在选项串上（k= + 值×100 共 102 字符，超过 reviewOptionsMaxRunes）。
 	opts := runCombinationOptions(&model.ReviewRun{
-		Model: "m", InstanceID: "inst",
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		Model:         "m", InstanceID: "inst",
 		ModelOptionsJSON: `[{"id":"k","value":"` + strings.Repeat("值", 100) + `"}]`,
 	})
 	if n := utf8.RuneCountInString(opts); n > reviewOptionsMaxRunes+1 {
@@ -210,11 +212,13 @@ func TestReviewWebhookNoInstallationID(t *testing.T) {
 	now := time.Now().UTC()
 
 	e.svc.db.Create(&model.ReviewPullRequest{
-		RepoFullName: repo, PRNumber: 66, ProjectID: e.project.ID, UserID: e.user.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		RepoFullName:  repo, PRNumber: 66, ProjectID: e.project.ID, UserID: e.user.ID,
 		InstallationID: 42, HeadSHA: "sha-old-i", RoundNumber: 1, UpdatedAt: now,
 	})
 	e.svc.db.Create(&model.ReviewSeenSHA{
-		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 66, HeadSHA: "sha-old-i",
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: repo, PRNumber: 66, HeadSHA: "sha-old-i",
 		AcceptedAt: now,
 	})
 
@@ -226,6 +230,9 @@ func TestReviewWebhookNoInstallationID(t *testing.T) {
 	delete(payload, "installation")
 	body, _ := json.Marshal(payload)
 
+	// seen 行无 pr_updated_at（存量行形态）：异 head 投递按歧义实拉
+	// 复核——登记 live PR（head 即投递的 sha-new-i）让复核通过。
+	e.fake.SetPR(repo, 66, &githubapi.PullRequest{HeadSHA: "sha-new-i"})
 	if err := e.review.HandleGitHubWebhook(context.Background(), "pull_request", "d-ni", body); err != nil {
 		t.Fatalf("webhook: %v", err)
 	}
@@ -335,7 +342,8 @@ func TestDispatchReclaimsStaleClaim(t *testing.T) {
 	e := newReviewEngineEnv(t)
 	now := time.Now().UTC()
 	run := &model.ReviewRun{
-		ID: "run-stale-claim", UserID: e.user.ID, ProjectID: e.project.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ID:            "run-stale-claim", UserID: e.user.ID, ProjectID: e.project.ID,
 		Kind: model.ReviewKindCode, RepoFullName: "o/r", PRNumber: 7,
 		HeadSHA: "sha", RoundNumber: 1,
 		EnvironmentID: "env-1", InstanceID: "claude", Model: "m",

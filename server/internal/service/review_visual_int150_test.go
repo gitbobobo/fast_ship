@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/api"
+	"github.com/godbobo/fast_ship/server/internal/forge"
 	"github.com/godbobo/fast_ship/server/internal/githubapi"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/githubapp"
@@ -354,7 +355,8 @@ func TestVisualSyncSameContentDifferentURLsCarries(t *testing.T) {
 	// 账本记的是旧 URL 集合 + 内容指纹（上一轮探测/开轮时落账的新格式）。
 	storedA := encodeScreensFingerprint(screensFingerprint{urlFP: urlFPA, contentFP: contentFP})
 	if err := e.svc.db.Create(&model.ReviewPullRequest{
-		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 84, UserID: e.user.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: repo, PRNumber: 84, UserID: e.user.ID,
 		InstallationID: 1, HeadSHA: "sha-sc", RoundNumber: 2,
 		VisualScreensFingerprint: storedA, SyncPending: true, SyncEpoch: 1, UpdatedAt: now,
 	}).Error; err != nil {
@@ -410,7 +412,8 @@ func TestVisualSyncSameContentDifferentURLsCarries(t *testing.T) {
 		"result_json": `{"summary":"干净","findings":[],"prior":[],"ui_changed":true,"ui_changed_since_last_visual":false}`,
 	})
 	if err := e.svc.db.Create(&model.ReviewPullRequest{
-		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 85, UserID: e.user.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: repo, PRNumber: 85, UserID: e.user.ID,
 		InstallationID: 1, HeadSHA: "sha-sf", RoundNumber: 2,
 		VisualScreensFingerprint: storedA, SyncPending: true, SyncEpoch: 1, UpdatedAt: now,
 	}).Error; err != nil {
@@ -662,7 +665,8 @@ func TestVisualSyncWaitsForCodeTerminalBeforeCarrySuccess(t *testing.T) {
 	// 只差代码未终态这一条。
 	fp := screenshotFingerprint(collectScreenshotURLs(body))
 	if err := e.svc.db.Create(&model.ReviewPullRequest{
-		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 97, UserID: e.user.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: repo, PRNumber: 97, UserID: e.user.ID,
 		InstallationID: 1, HeadSHA: "sha-wp", RoundNumber: 2,
 		VisualScreensFingerprint: fp, SyncPending: true, SyncEpoch: 1, UpdatedAt: now,
 	}).Error; err != nil {
@@ -732,7 +736,8 @@ func TestVisualSyncPartialStartAdvancesURLFingerprint(t *testing.T) {
 			`"ui_changed_since_last_visual":true}`,
 	})
 	if err := e.svc.db.Create(&model.ReviewPullRequest{
-		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 98, UserID: e.user.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: repo, PRNumber: 98, UserID: e.user.ID,
 		InstallationID: 1, HeadSHA: "sha-p1", RoundNumber: 1,
 		SyncPending: true, SyncEpoch: 1, UpdatedAt: now,
 	}).Error; err != nil {
@@ -850,7 +855,8 @@ func TestVisualSyncFingerprintTracksLatestVisualMaterial(t *testing.T) {
 		"https://uiv.frp.musiver.cn/f/b2.png": errors.New("404 not found"),
 	}
 	if err := e.svc.db.Create(&model.ReviewPullRequest{
-		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 99, UserID: e.user.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: repo, PRNumber: 99, UserID: e.user.ID,
 		InstallationID: 1, HeadSHA: "sha-b", RoundNumber: 2,
 		VisualScreensFingerprint: encodeScreensFingerprint(screensFingerprint{urlFP: urlFPA, contentFP: contentA}),
 		SyncPending:              true, SyncEpoch: 1, UpdatedAt: now,
@@ -963,7 +969,8 @@ func TestVisualSyncOneScreenContentChangedReopens(t *testing.T) {
 		"result_json": `{"summary":"干净","findings":[],"prior":[],"ui_changed":true,"ui_changed_since_last_visual":false}`,
 	})
 	if err := e.svc.db.Create(&model.ReviewPullRequest{
-		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 100, UserID: e.user.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: repo, PRNumber: 100, UserID: e.user.ID,
 		InstallationID: 1, HeadSHA: "sha-oc", RoundNumber: 2,
 		VisualScreensFingerprint: encodeScreensFingerprint(screensFingerprint{
 			urlFP:     screenshotFingerprint(collectScreenshotURLs(body1)),
@@ -1038,7 +1045,8 @@ func TestVisualSyncReversedRefOrderSameContentCarries(t *testing.T) {
 		"result_json": `{"summary":"干净","findings":[],"prior":[],"ui_changed":true,"ui_changed_since_last_visual":false}`,
 	})
 	if err := e.svc.db.Create(&model.ReviewPullRequest{
-		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 101, UserID: e.user.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: repo, PRNumber: 101, UserID: e.user.ID,
 		InstallationID: 1, HeadSHA: "sha-ro", RoundNumber: 2,
 		VisualScreensFingerprint: encodeScreensFingerprint(screensFingerprint{
 			urlFP:     screenshotFingerprint(collectScreenshotURLs(body1)),
@@ -1139,7 +1147,8 @@ func TestVisualSyncFingerprintStoredWhenGitHubPendingWriteFails(t *testing.T) {
 		"https://uiv.frp.musiver.cn/f/b2.png": errors.New("404 not found"),
 	}
 	if err := e.svc.db.Create(&model.ReviewPullRequest{
-		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 102, UserID: e.user.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: repo, PRNumber: 102, UserID: e.user.ID,
 		InstallationID: 1, HeadSHA: "sha-gb", RoundNumber: 2,
 		VisualScreensFingerprint: encodeScreensFingerprint(screensFingerprint{urlFP: urlFPA, contentFP: contentA}),
 		SyncPending:              true, SyncEpoch: 1, UpdatedAt: now,
@@ -1154,7 +1163,7 @@ func TestVisualSyncFingerprintStoredWhenGitHubPendingWriteFails(t *testing.T) {
 		githubapp.StaticClients{Client: client},
 		fakeReviewAppSource{ok: true},
 		fakeReviewPublicURL("https://fs.example.com"),
-		nil, e.media, nil, e.svc.cfg, zap.NewNop())
+		nil, e.media, nil, repository.NewForgeIntegrationRepository(e.svc.db), e.svc.cfg, zap.NewNop())
 	review.syncPendingPRs(now)
 
 	// 前置确认同步确实失败：GitHub 写错误被记成 sync_error，pending 保留给重试。
@@ -1221,14 +1230,15 @@ func TestCreateVisualRunsSkipsFingerprintWhenNoCombos(t *testing.T) {
 	})
 	oldFP := encodeScreensFingerprint(screensFingerprint{urlFP: "aaaaaaaaaaaaaaaa", contentFP: "bbbbbbbbbbbbbbbb"})
 	ledger := &model.ReviewPullRequest{
-		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 103, UserID: e.user.ID,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: repo, PRNumber: 103, UserID: e.user.ID,
 		InstallationID: 1, HeadSHA: "sha-nc", RoundNumber: 2,
 		VisualScreensFingerprint: oldFP, SyncEpoch: 3, UpdatedAt: now,
 	}
 	if err := e.svc.db.Create(ledger).Error; err != nil {
 		t.Fatalf("seed ledger: %v", err)
 	}
-	pr := &githubapi.PullRequest{
+	pr := &forge.PullRequest{
 		RepoFullName: repo, Number: 103, HeadSHA: "sha-nc",
 		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
 	}

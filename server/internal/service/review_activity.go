@@ -111,7 +111,7 @@ func (s *ReviewService) ListPullRequestActivity(ctx context.Context, userID, pro
 			}
 		}
 
-		// 总账按 (project, repo, pr) 全量取，仓库与设置行不一致的残留行在
+		// 总账按 (project, 集成, repo, pr) 全量取，键与设置行不一致的残留行在
 		// 内存过滤。
 		if err := tx.
 			Where("project_id IN ? AND repo_full_name IN ?", projectIDs, repos).
@@ -124,22 +124,22 @@ func (s *ReviewService) ListPullRequestActivity(ctx context.Context, userID, pro
 		for i := range prs {
 			pr := &prs[i]
 			row, ok := settingsByProject[pr.ProjectID]
-			if !ok || pr.RepoFullName != row.RepoFullName {
+			if !ok || pr.RepoFullName != row.RepoFullName || pr.IntegrationID != row.IntegrationID {
 				continue
 			}
 			scoped = append(scoped, pr)
-			// 当前轮运行的匹配键：项目 + 轮次 + head 必须同时等于账本值，新
-			// head 已推进但未开轮时旧轮 runs 不得混入（只查当前轮，不查历史
-			// 轮）。项目 id 也进键：同仓库换项目接管后，两个项目的同号
-			// PR/同轮/同 head 运行不能合并。
-			runKeys = append(runKeys, pr.ProjectID+"#"+pr.RepoFullName+"#"+strconv.Itoa(pr.PRNumber)+"#"+
+			// 当前轮运行的匹配键：项目 + 集成 + 轮次 + head 必须同时等于账本
+			// 值，新 head 已推进但未开轮时旧轮 runs 不得混入（只查当前轮，不
+			// 查历史轮）。项目 id 与集成 id 也进键：同仓库换项目接管或改绑
+			// 集成后，不同键的同号 PR/同轮/同 head 运行不能合并。
+			runKeys = append(runKeys, pr.ProjectID+"#"+pr.IntegrationID+"#"+pr.RepoFullName+"#"+strconv.Itoa(pr.PRNumber)+"#"+
 				strconv.Itoa(pr.RoundNumber)+"#"+pr.HeadSHA)
 		}
 		if len(scoped) == 0 {
 			return nil
 		}
 
-		// 防抖行批量取（按 project#repo#pr 建索引）。
+		// 防抖行批量取（按 project#集成#repo#pr 建索引）。
 		if err := tx.
 			Where("project_id IN ? AND repo_full_name IN ?", projectIDs, repos).
 			Find(&debounces).Error; err != nil {
@@ -148,7 +148,7 @@ func (s *ReviewService) ListPullRequestActivity(ctx context.Context, userID, pro
 
 		// 当前轮运行批量取（键见 runKeys）。
 		return tx.
-			Where("(project_id || '#' || repo_full_name || '#' || pr_number || '#' || round_number || '#' || head_sha) IN ?", runKeys).
+			Where("(project_id || '#' || integration_id || '#' || repo_full_name || '#' || pr_number || '#' || round_number || '#' || head_sha) IN ?", runKeys).
 			Order("created_at ASC").
 			Find(&runs).Error
 	})
@@ -159,33 +159,32 @@ func (s *ReviewService) ListPullRequestActivity(ctx context.Context, userID, pro
 		return page, nil
 	}
 
-	// 防抖行按 project#repo#pr 建索引。
+	// 防抖行按 project#集成#repo#pr 建索引。
 	debounceByPR := map[string]*model.ReviewDebounce{}
 	for i := range debounces {
 		d := &debounces[i]
-		debounceByPR[d.ProjectID+"#"+d.RepoFullName+"#"+strconv.Itoa(d.PRNumber)] = d
+		debounceByPR[d.ProjectID+"#"+d.IntegrationID+"#"+d.RepoFullName+"#"+strconv.Itoa(d.PRNumber)] = d
 	}
 
 	runsByPR := map[string][]model.ReviewRun{}
 	for _, r := range runs {
-		key := r.ProjectID + "#" + r.RepoFullName + "#" + strconv.Itoa(r.PRNumber) + "#" + strconv.Itoa(r.RoundNumber) + "#" + r.HeadSHA
+		key := r.ProjectID + "#" + r.IntegrationID + "#" + r.RepoFullName + "#" + strconv.Itoa(r.PRNumber) + "#" + strconv.Itoa(r.RoundNumber) + "#" + r.HeadSHA
 		runsByPR[key] = append(runsByPR[key], r)
 	}
 
 	// 全量分组后再切片：counts/total 是过滤范围内全部 PR 的统计。
 	now := time.Now().UTC()
-	// PR 链接兜底按 GitHub 身份构造：审查执行本期只有 GitHub 一条链路，
-	// 历史运行的 forge 身份就是 github——项目改绑 forgejo 后历史链接不
-	// 该改写过去（INT-166 方向审计结论；P1 接入 Forgejo 执行时随运行记
-	// 录存 forge 身份）。
-	ghLinks := githubLinks(githubWebBase(s.cfg))
+	// PR 链接兜底按每行账本自身的 forge 身份构造（与记录列表同口径）：
+	// 项目改绑 forgejo 后历史链接不该改写过去，Forgejo 行也不能拼到
+	// github.com。
+	prLinks := s.recordForgeLinks(ctx, prs)
 	entries := make([]reviewActivityEntry, 0, len(scoped))
 	for _, pr := range scoped {
-		key := pr.ProjectID + "#" + pr.RepoFullName + "#" + strconv.Itoa(pr.PRNumber) + "#" + strconv.Itoa(pr.RoundNumber) + "#" + pr.HeadSHA
+		key := pr.ProjectID + "#" + pr.IntegrationID + "#" + pr.RepoFullName + "#" + strconv.Itoa(pr.PRNumber) + "#" + strconv.Itoa(pr.RoundNumber) + "#" + pr.HeadSHA
 		item, sortAt, ok := buildPullRequestActivity(pr, nameByProject[pr.ProjectID],
 			settingsByProject[pr.ProjectID], visualCombosByProject[pr.ProjectID],
-			debounceByPR[pr.ProjectID+"#"+pr.RepoFullName+"#"+strconv.Itoa(pr.PRNumber)],
-			runsByPR[key], now, ghLinks)
+			debounceByPR[pr.ProjectID+"#"+pr.IntegrationID+"#"+pr.RepoFullName+"#"+strconv.Itoa(pr.PRNumber)],
+			runsByPR[key], now, prLinks[reviewIntegrationID(pr.IntegrationID)])
 		if !ok {
 			continue
 		}
@@ -464,10 +463,12 @@ func buildPullRequestActivity(pr *model.ReviewPullRequest, projectName string,
 	return item, sortAt, true
 }
 
-// reviewActivityCanRerun 设置行 enabled 且账本属于当前审查仓库（契约第 6 步）。
+// reviewActivityCanRerun 设置行 enabled 且账本键（集成+仓库）与设置行一致
+// （契约第 6 步）。
 func reviewActivityCanRerun(settings model.ProjectReviewSettings, pr *model.ReviewPullRequest) bool {
 	return settings.Enabled && settings.RepoFullName != "" &&
-		strings.EqualFold(pr.RepoFullName, settings.RepoFullName)
+		strings.EqualFold(pr.RepoFullName, settings.RepoFullName) &&
+		pr.IntegrationID == settings.IntegrationID
 }
 
 // reviewCollectRunIssues 遍历当前轮同段运行：completed 的解析 result_json 计
@@ -684,8 +685,8 @@ func (s *ReviewService) GetPullRequestRecord(ctx context.Context, userID, projec
 	}
 	var pr model.ReviewPullRequest
 	err = s.db.WithContext(ctx).
-		Where("project_id = ? AND repo_full_name = ? AND pr_number = ?",
-			projectID, settings.RepoFullName, prNumber).
+		Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ?",
+			projectID, settings.RepoFullName, prNumber, settings.IntegrationID).
 		First(&pr).Error
 	switch {
 	case errors.Is(err, gorm.ErrRecordNotFound):
@@ -696,8 +697,8 @@ func (s *ReviewService) GetPullRequestRecord(ctx context.Context, userID, projec
 
 	var runs []model.ReviewRun
 	if err := s.db.WithContext(ctx).
-		Where("project_id = ? AND repo_full_name = ? AND pr_number = ?",
-			projectID, pr.RepoFullName, pr.PRNumber).
+		Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ?",
+			projectID, pr.RepoFullName, pr.PRNumber, pr.IntegrationID).
 		Order("created_at ASC").
 		Find(&runs).Error; err != nil {
 		return nil, errs.ErrInternal
@@ -708,8 +709,9 @@ func (s *ReviewService) GetPullRequestRecord(ctx context.Context, userID, projec
 		roundMap[r.RoundNumber] = append(roundMap[r.RoundNumber], *r)
 	}
 	envNames := s.reviewRunEnvNames(ctx, runs)
-	// 历史运行记录同按 GitHub 身份兜底（与列表路径同口径，见上方注释）。
+	// 链接按该记录自身的 forge 身份构造（与列表路径同口径）：项目改绑后
+	// 历史记录仍指回原平台实例。
 	rec := buildReviewPRRecord(&pr, roundMap, envNames, settings.RepoFullName,
-		githubLinks(githubWebBase(s.cfg)))
+		settings.IntegrationID, s.recordForgeLinks(ctx, []model.ReviewPullRequest{pr})[reviewIntegrationID(pr.IntegrationID)])
 	return &rec, nil
 }

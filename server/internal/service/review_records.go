@@ -57,35 +57,38 @@ func (s *ReviewService) ListReviewProjects(ctx context.Context, userID string) (
 	}
 
 	// 最新一条 PR 记录（updated_at 最大）给状态字段。按设置行的
-	// repo_full_name（审查仓库的判定键，与 webhook 反查/同步过滤同口径）挑账本：
-	// 项目换过仓库后，旧仓库的历史记录不能当成当前仓库的最近状态展示。
-	// 没有设置行的项目不可能有账本（开轮要求设置行存在），直接跳过。
-	repoByProject := map[string]string{}
-	repoSet := map[string]struct{}{}
+	// (integration_id, repo_full_name)（审查对象的判定键，与 webhook 反查/
+	// 同步过滤同口径）挑账本：项目换过仓库或改绑集成后，旧键的历史记录不能
+	// 当成当前对象的最近状态展示。没有设置行的项目不可能有账本（开轮要求
+	// 设置行存在），直接跳过。
+	ledgerKeyByProject := map[string]string{}
+	ledgerKeySet := map[string]struct{}{}
 	for i := range projects {
 		p := &projects[i]
 		row, ok := settingsByProject[p.ID]
 		if !ok || row.RepoFullName == "" {
 			continue
 		}
-		repoByProject[p.ID] = row.RepoFullName
-		repoSet[row.RepoFullName] = struct{}{}
+		key := row.IntegrationID + "#" + row.RepoFullName
+		ledgerKeyByProject[p.ID] = key
+		ledgerKeySet[key] = struct{}{}
 	}
 	latestByProject := map[string]model.ReviewPullRequest{}
-	if len(repoSet) > 0 {
-		repos := make([]string, 0, len(repoSet))
-		for repo := range repoSet {
-			repos = append(repos, repo)
+	if len(ledgerKeySet) > 0 {
+		keys := make([]string, 0, len(ledgerKeySet))
+		for key := range ledgerKeySet {
+			keys = append(keys, key)
 		}
 		var prs []model.ReviewPullRequest
 		if err := s.db.WithContext(ctx).
-			Where("project_id IN ? AND repo_full_name IN ?", projectIDs, repos).
+			Where("(integration_id || '#' || repo_full_name) IN ?", keys).
+			Where("project_id IN ?", projectIDs).
 			Order("updated_at DESC").
 			Find(&prs).Error; err != nil {
 			return nil, errs.ErrInternal
 		}
 		for _, pr := range prs {
-			if repoByProject[pr.ProjectID] != pr.RepoFullName {
+			if ledgerKeyByProject[pr.ProjectID] != pr.IntegrationID+"#"+pr.RepoFullName {
 				continue
 			}
 			if _, ok := latestByProject[pr.ProjectID]; !ok {
@@ -138,21 +141,22 @@ func (s *ReviewService) ListReviewProjects(ctx context.Context, userID string) (
 }
 
 // reviewOccupiers 返回 repoKey → (占用 projectID → 登录名) 的映射：
-// 对给定项目集合，查同仓库 enabled 的其他项目。占用判定只读设置行的
-// repo_full_name 快照（enabled 行的唯一真相），联 users 取登录名。
-// 键外层是 repo，内层项目 id 只用于排除「自己占自己」。
+// 对给定项目集合，查同 (集成, 仓库) enabled 的其他项目。占用判定只读设置
+// 行的 (integration_id, repo_full_name) 快照（enabled 行的唯一真相），联
+// users 取登录名。键外层是 repo，内层项目 id 只用于排除「自己占自己」。
 func (s *ReviewService) reviewOccupiers(ctx context.Context, projects []model.Project) (map[string]map[string]string, error) {
 	type row struct {
-		ProjectID    string
-		RepoFullName string
-		Login        string
+		ProjectID     string
+		IntegrationID string
+		RepoFullName  string
+		Login         string
 	}
 	var rows []row
 	if err := s.db.WithContext(ctx).
 		Table("project_review_settings AS s").
 		Joins("JOIN users u ON u.id = s.user_id").
 		Where("s.enabled").
-		Select("s.project_id, s.repo_full_name, u.username AS login").
+		Select("s.project_id, s.integration_id, s.repo_full_name, u.username AS login").
 		Scan(&rows).Error; err != nil {
 		return nil, errs.ErrInternal
 	}
@@ -161,11 +165,12 @@ func (s *ReviewService) reviewOccupiers(ctx context.Context, projects []model.Pr
 	for _, p := range projects {
 		owner, repo := p.CodeRepo()
 		key := reviewRepoKey(owner, repo)
+		binding := reviewIntegrationID(p.CodeIntegrationID)
 		for _, r := range rows {
 			if r.ProjectID == p.ID {
 				continue
 			}
-			if r.RepoFullName != key {
+			if r.RepoFullName != key || r.IntegrationID != binding {
 				continue
 			}
 			if out[key] == nil {
@@ -187,14 +192,16 @@ func (s *ReviewService) ListReviewRecords(ctx context.Context, userID, projectID
 	if _, err := s.ownedProject(userID, projectID); err != nil {
 		return nil, err
 	}
-	// can_rerun 的判定键是设置行的 repo_full_name（审查仓库，与 rerun 接口
-	// 同口径），不按 enabled 过滤——停用只影响开轮授权，不影响记录能否重跑
-	// （接口会返回 40923）。没有设置行的项目不可能有账本。
-	currentRepo := ""
+	// can_rerun 的判定键是设置行的 (integration_id, repo_full_name)（审查
+	// 仓库与集成，与 rerun 接口同口径），不按 enabled 过滤——停用只影响
+	// 开轮授权，不影响记录能否重跑（接口会返回 40923）。没有设置行的
+	// 项目不可能有账本。
+	currentRepo, currentIntegration := "", ""
 	var settings model.ProjectReviewSettings
 	switch err := s.db.WithContext(ctx).Where("project_id = ?", projectID).First(&settings).Error; {
 	case err == nil:
 		currentRepo = settings.RepoFullName
+		currentIntegration = settings.IntegrationID
 	case !errors.Is(err, gorm.ErrRecordNotFound):
 		return nil, errs.ErrInternal
 	}
@@ -218,15 +225,16 @@ func (s *ReviewService) ListReviewRecords(ctx context.Context, userID, projectID
 		return out, nil
 	}
 
-	// 运行按 (repo, pr) 精确匹配：项目换过仓库时，A 与 B 可能有同号 PR，
-	// 只按 pr_number 取运行会把两个仓库的轮次/线程混进同一条记录。
+	// 运行按 (集成, repo, pr) 精确匹配：项目换过仓库/改绑集成时，A 与 B 可
+	// 能有同号 PR，只按 pr_number 取运行会把不同仓库/集成的轮次/线程混进
+	// 同一条记录。
 	keys := make([]string, 0, len(prs))
 	for _, pr := range prs {
-		keys = append(keys, pr.RepoFullName+"#"+strconv.Itoa(pr.PRNumber))
+		keys = append(keys, pr.IntegrationID+"#"+pr.RepoFullName+"#"+strconv.Itoa(pr.PRNumber))
 	}
 	var runs []model.ReviewRun
 	if err := s.db.WithContext(ctx).
-		Where("project_id = ? AND (repo_full_name || '#' || pr_number) IN ?", projectID, keys).
+		Where("project_id = ? AND (integration_id || '#' || repo_full_name || '#' || pr_number) IN ?", projectID, keys).
 		Order("created_at ASC").
 		Find(&runs).Error; err != nil {
 		return nil, errs.ErrInternal
@@ -234,22 +242,20 @@ func (s *ReviewService) ListReviewRecords(ctx context.Context, userID, projectID
 
 	// 批量补 environment_name。
 	envNames := s.reviewRunEnvNames(ctx, runs)
-	// PR 链接兜底按 GitHub 身份构造：审查执行本期只有 GitHub 一条链路
-	// （forgejo 绑定的项目在审查设置侧进不来），存量运行的 forge 身份就是
-	// github——项目后来被改绑 forgejo，也不能把历史运行的链接改写到新
-	// 实例上。P1 接入 Forgejo 审查执行时须随运行记录存 forge 身份再按
-	// 记录解析（INT-166 方向审计结论）。
-	links := githubLinks(githubWebBase(s.cfg))
+	// PR 链接兜底按记录自身 forge 身份构造：运行已存 integration_id，
+	// 项目改绑后历史记录的链接仍指向原平台实例，不能渲染到新绑定上。
+	links := s.recordForgeLinks(ctx, prs)
 
-	// (repo, pr) → rounds。
+	// (集成, repo, pr) → rounds。
 	type prKey struct {
-		Repo string
-		PR   int
+		Integration string
+		Repo        string
+		PR          int
 	}
 	roundsByPR := map[prKey]map[int][]model.ReviewRun{}
 	for i := range runs {
 		r := &runs[i]
-		key := prKey{r.RepoFullName, r.PRNumber}
+		key := prKey{r.IntegrationID, r.RepoFullName, r.PRNumber}
 		if roundsByPR[key] == nil {
 			roundsByPR[key] = map[int][]model.ReviewRun{}
 		}
@@ -257,27 +263,57 @@ func (s *ReviewService) ListReviewRecords(ctx context.Context, userID, projectID
 	}
 
 	for _, pr := range prs {
-		key := prKey{pr.RepoFullName, pr.PRNumber}
-		out = append(out, buildReviewPRRecord(&pr, roundsByPR[key], envNames, currentRepo, links))
+		key := prKey{pr.IntegrationID, pr.RepoFullName, pr.PRNumber}
+		recLinks := links[reviewIntegrationID(pr.IntegrationID)]
+		out = append(out, buildReviewPRRecord(&pr, roundsByPR[key], envNames, currentRepo, currentIntegration, recLinks))
 	}
 	return out, nil
 }
 
+// recordForgeLinks 按记录出现的 integration_id 逐个解析链接构造面：
+// github-default 用部署 GitHub 基址，其余查 forge_integrations 行
+// (kind, base_url)；查不到的行标 unresolved（链接空串，不回落 github）。
+func (s *ReviewService) recordForgeLinks(ctx context.Context, prs []model.ReviewPullRequest) map[string]forgeLinks {
+	out := map[string]forgeLinks{
+		model.ForgeIntegrationBuiltinGitHubID: githubLinks(githubWebBase(s.cfg)),
+	}
+	ids := make([]string, 0, len(prs))
+	for i := range prs {
+		id := reviewIntegrationID(prs[i].IntegrationID)
+		if id != model.ForgeIntegrationBuiltinGitHubID {
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) == 0 {
+		return out
+	}
+	var rows []model.ForgeIntegration
+	if err := s.db.WithContext(ctx).Where("id IN ?", ids).Find(&rows).Error; err != nil {
+		return out
+	}
+	for _, row := range rows {
+		out[row.ID] = forgeLinks{kind: row.Kind, baseURL: row.BaseURL}
+	}
+	return out
+}
+
 // buildReviewPRRecord 单条 PR 记录投影：PR 元信息 + 轮次列表（round_number
-// DESC）。records 列表与跨项目详情共用；currentRepo 是设置行的审查仓库
-// 快照（can_rerun 判定键），为空表示项目没有设置行。links 按项目代码仓
-// 集成解析，PR 标题/URL 快照缺失时兜底构造 PR 链接。
+// DESC）。records 列表与跨项目详情共用；currentRepo/currentIntegration 是
+// 设置行的审查仓库与集成快照（can_rerun 判定键），为空表示项目没有设置行。
+// links 按记录自身 forge 身份解析，PR 标题/URL 快照缺失时兜底构造 PR 链接。
 func buildReviewPRRecord(pr *model.ReviewPullRequest, roundMap map[int][]model.ReviewRun,
-	envNames map[string]string, currentRepo string, links forgeLinks) api.ReviewPullRequestRecord {
+	envNames map[string]string, currentRepo, currentIntegration string, links forgeLinks) api.ReviewPullRequestRecord {
 	rec := api.ReviewPullRequestRecord{
 		PrNumber:     pr.PRNumber,
 		RepoFullName: pr.RepoFullName,
 		HeadSha:      pr.HeadSHA,
 		UpdatedAt:    pr.UpdatedAt.UTC().Format(time.RFC3339Nano),
-		// 项目改过仓库后，旧仓库的记录只能查看：rerun 会按当前审查仓库
-		// 取 PR，同号的无关 PR 会被误审。
-		CanRerun: currentRepo != "" && strings.EqualFold(pr.RepoFullName, currentRepo),
-		Rounds:   []api.ReviewRoundRecord{},
+		// 项目改过仓库或改绑集成后，旧记录的仓库名可能与当前相同但归属
+		// 另一平台：rerun 只按当前 (集成, 仓库) 取 PR，不同归属的同号
+		// 记录必须只能查看，不能被当成本平台的 PR 误审。
+		CanRerun: currentRepo != "" && strings.EqualFold(pr.RepoFullName, currentRepo) &&
+			reviewIntegrationID(pr.IntegrationID) == currentIntegration,
+		Rounds: []api.ReviewRoundRecord{},
 	}
 	if pr.CodeStatus != "" {
 		rec.CodeStatus = api.Ptr(pr.CodeStatus)

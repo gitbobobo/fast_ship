@@ -78,7 +78,8 @@ func setupWebhookEnv(t *testing.T, secrets WebhookSecretSource) *webhookHandlerE
 	sink := service.NewNotificationSink(db)
 	review := service.NewReviewService(db, repository.NewProjectRepository(db),
 		repository.NewGitHubWebhookDeliveryRepository(db), sink,
-		githubapp.StaticClients{Client: fake}, nil, nil, nil, nil, nil, cfg, logger)
+		githubapp.StaticClients{Client: fake}, nil, nil, nil, nil, nil,
+		repository.NewForgeIntegrationRepository(db), cfg, logger)
 
 	integrationSvc := service.NewIntegrationService(repository.NewDeploymentSettingsRepository(db), cfg, logger)
 	integrationSvc.SetVerify(func(ctx context.Context, appID string, keyPEM []byte, apiBaseURL string) githubapp.Detection {
@@ -144,7 +145,7 @@ func prWebhookPayload(action, repo string, number int, sha string) []byte {
 func (e *webhookHandlerEnv) deliveryCount(t *testing.T, delivery string) int64 {
 	t.Helper()
 	var n int64
-	if err := e.db.Model(&model.GitHubWebhookDelivery{}).Where("delivery_id = ?", delivery).Count(&n).Error; err != nil {
+	if err := e.db.Model(&model.GitHubWebhookDelivery{}).Where("delivery_id = ?", model.ForgeIntegrationBuiltinGitHubID+":"+delivery).Count(&n).Error; err != nil {
 		t.Fatalf("count deliveries: %v", err)
 	}
 	return n
