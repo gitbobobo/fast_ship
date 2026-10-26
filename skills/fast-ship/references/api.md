@@ -8828,6 +8828,8 @@ unpriced_requests。
 | `bots[].max_run_cost` | number（double，可空） | 是 |  |
 | `bots[].p90_run_cost` | number（double，可空） | 是 | 单次运行显示成本的 P90（nearest-rank，与 avg/max 同一已计价 run 集合）；无已计价 run 为 null |
 | `bots[].cache_hit_rate` | number（double，可空） | 是 | cached / prompt，只算 usage 完整的请求；无完整 usage 为 null |
+| `bots[].budget_set` | boolean | 否 | omitempty；true = 该机器人设有 bot 级预算（行内状态提示，INT-164） |
+| `bots[].budget_exceeded` | boolean | 否 | omitempty；true = 任一已设预算周期当前花费 ≥ 预算金额 |
 | `bots[].unpriced_requests` | integer（int64） | 是 |  |
 | `schedule_tasks` | object[] | 是 |  |
 | `schedule_tasks[].task_id` | string | 是 | 聚合键；已删除任务仍取其运行记录上的 schedule_task_id |
@@ -8847,6 +8849,8 @@ unpriced_requests。
 | `schedule_tasks[].p90_run_cost` | number（double，可空） | 是 | 单次运行显示成本的 P90（nearest-rank，与 avg/max 同一已计价 run 集合）；无已计价 run 为 null |
 | `schedule_tasks[].linked_main_cost` | number（double，可空） | 是 | schedule_event 主线 run 的连带成本（近似） |
 | `schedule_tasks[].estimated_monthly_cost` | number（double，可空） | 是 | （单次定时运行平均 + 每次触发摊到的连带主线成本）× 未来 30 天触发次数（parseScheduleCron）；单次统计取最近 30 个当地日的固定窗口，与所选 range 无关；停用、已删除、无已计价平均或 cron 解析失败为 null |
+| `schedule_tasks[].budget_set` | boolean | 否 | omitempty；true = 该任务设有任务级预算（行内状态提示，INT-164） |
+| `schedule_tasks[].budget_exceeded` | boolean | 否 | omitempty；true = 任一已设预算周期当前花费 ≥ 预算金额 |
 
 **错误**
 
@@ -9055,6 +9059,7 @@ cost_estimate）：display_cost = 自身 + 关联维护的显示成本合计；
 | `requests[].tool_calls[].action` | string | 是 |  |
 | `requests[].tool_calls[].status` | string | 是 |  |
 | `requests[].tool_calls[].error_code` | string（可空） | 否 |  |
+| `requests[].tool_calls[].error_message` | string（可空） | 否 |  |
 | `requests[].tool_calls[].created_at` | string（date-time） | 是 |  |
 | `requests[].tool_calls[].finished_at` | string（date-time，可空） | 否 |  |
 | `requests_truncated` | boolean | 是 | 请求数超过上限（500）被截断时为 true |
