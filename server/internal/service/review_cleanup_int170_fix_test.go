@@ -845,3 +845,71 @@ func TestCleanupDerivesBranchFromRegistry(t *testing.T) {
 			after.WorktreeState, after.WorktreeBranch)
 	}
 }
+
+// TestWorktreeReclaimDueSkipsUnarchived（复审4轮 P2）已派发未归档行等归档
+// 阶段，进 cleanupRunWorktree 也立即返回却空耗 processed 名额——到期预判判
+// 未到期，防积压饿死真正到期的行。
+func TestWorktreeReclaimDueSkipsUnarchived(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	review := e.withT3(&fakeReviewT3{}, nil, nil)
+	now := time.Now().UTC()
+
+	dispatchedUnarchived := &model.ReviewRun{
+		ID: "a", DispatchStartedAt: &now, DispatchedAt: &now,
+	}
+	if review.worktreeReclaimDue(dispatchedUnarchived, now) {
+		t.Fatal("已派发未归档行应判未到期")
+	}
+	archived := &model.ReviewRun{
+		ID: "b", DispatchStartedAt: &now, DispatchedAt: &now, ArchivedAt: &now,
+	}
+	if !review.worktreeReclaimDue(archived, now) {
+		t.Fatal("已归档行应到期")
+	}
+	neverDispatched := &model.ReviewRun{ID: "c"}
+	if !review.worktreeReclaimDue(neverDispatched, now) {
+		t.Fatal("未派发行无归档依赖，应到期（立即收 removed）")
+	}
+	neverLaunched := &model.ReviewRun{ID: "d", ErrorCode: "dispatch_failed"}
+	if !review.worktreeReclaimDue(neverLaunched, now) {
+		t.Fatal("未建线程行无归档依赖，应到期")
+	}
+}
+
+// TestCleanupRemoveBudgetExhaustedGoesPending（复审4轮 Note）删除前置在调用
+// 方预算内到点（errRegistryIncomplete 包装）：与登记读取同口径挂待确认退避，
+// 不占 remove-attempt 三次重试落 failed。
+func TestCleanupRemoveBudgetExhaustedGoesPending(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	env := createT3TestEnv(t, e.svc.db, e.user.ID, "env-budget")
+	createTestT3Binding(t, e.svc.db, e.project.ID, env.ID, "t3p")
+
+	run := e.seedCleanableRun(t, repo, 570, env, model.ReviewRunCompleted, "/wt/b", now)
+	run.WorktreeBranch = "br-b"
+	e.svc.db.Model(run).Updates(map[string]any{"worktree_branch": "br-b"})
+	t3 := &fakeReviewT3{
+		threadWorktrees: map[string]T3ThreadWorktree{
+			run.ThreadID: {Path: "/wt/b", Branch: "br-b"},
+		},
+		worktrees: []T3Worktree{{Path: "/wt/b", RefNames: []string{"br-b"}}},
+		removeErr: fmt.Errorf("%w: %s", errRegistryIncomplete, context.DeadlineExceeded),
+	}
+	review := e.withT3(t3, nil, nil)
+
+	review.cleanupRunWorktree(run, now)
+	var after model.ReviewRun
+	e.svc.db.First(&after, "id = ?", run.ID)
+	if after.WorktreeState != model.ReviewWorktreeNone ||
+		after.WorktreeReason != worktreeReasonRegistryIncomplete {
+		t.Fatalf("预算耗尽应保持 none + registry_incomplete, got %q/%q",
+			after.WorktreeState, after.WorktreeReason)
+	}
+	if got := review.worktreeTries[run.ID+"|"+worktreeTryRemoveAttempt]; got != 0 {
+		t.Fatalf("预算耗尽不得计 remove-attempt 重试, got %d", got)
+	}
+	if got := review.worktreeTries[run.ID+"|"+worktreeTryRegIncomplete]; got != 1 {
+		t.Fatalf("待确认计数应记 1, got %d", got)
+	}
+}

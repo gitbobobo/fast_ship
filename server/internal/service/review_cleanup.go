@@ -302,8 +302,13 @@ func (s *ReviewService) cleanupWorktrees(now time.Time) {
 
 // worktreeReclaimDue 回收行到期预判（INT-170）：branch_pending 按其复查退避，
 // none 行的 registry_incomplete / remove_uncertain 按各自的重试退避；其余行
-// 恒到期。
+// 恒到期。例外：已派发未归档行在等归档阶段——进 cleanupRunWorktree 也只立即
+// 返回，但照样消耗 processed 名额，归档积压超 reviewStageBatch 时会饿死真正
+// 到期的行（复审 P2）。未派发/未建线程行不在此列：无归档依赖，立即收 removed。
 func (s *ReviewService) worktreeReclaimDue(run *model.ReviewRun, now time.Time) bool {
+	if run.ArchivedAt == nil && run.DispatchStartedAt != nil && !reviewRunNeverLaunched(run) {
+		return false
+	}
 	if run.WorktreeState == model.ReviewWorktreeBranchPending {
 		return s.worktreeBackoffDue(run.ID, worktreeReasonBranchPending, now)
 	}
@@ -576,21 +581,27 @@ func (s *ReviewService) cleanupWithRegistry(ctx context.Context, run *model.Revi
 // 报错走有限重试，超限 failed + 聚合通知（现有行为口径）。
 func (s *ReviewService) handleRegistryReadError(run *model.ReviewRun, err error, now time.Time, finish worktreeFinish) {
 	if errors.Is(err, errRegistryIncomplete) {
-		tries := s.bumpWorktreeTries(run.ID, worktreeTryRegIncomplete)
-		s.scheduleWorktreeBackoff(run.ID, worktreeReasonRegistryIncomplete, now)
-		s.writePendingReason(run, worktreeReasonRegistryIncomplete,
-			"登记读取未在预算内完成，待下轮确认重试", now)
-		if tries >= reviewWorktreeMaxTries {
-			// 进入持续待确认态：按（环境, 仓库, 原因）聚合通知（同键重复
-			// 发布由 dedup+指纹收敛，正文随清单自动更新）。
-			s.publishCleanupAggregate(run, worktreeReasonRegistryIncomplete, now)
-		}
+		s.markBudgetPending(run, "登记读取未在预算内完成，待下轮确认重试", now)
 		return
 	}
 	if tries := s.bumpWorktreeTries(run.ID, worktreeTryRegistry); tries < reviewWorktreeMaxTries {
 		return
 	}
 	finish(model.ReviewWorktreeFailed, worktreeReasonRegistryError, "读取项目工作区登记失败: "+err.Error(), true)
+}
+
+// markBudgetPending 把「预算在行内耗尽」的暂态落行：保持 none 挂退避，连
+// 续到上限起发聚合通知（进入持续待确认态）。登记读取与删除前置（env/dial
+// 在调用方预算内到点）共用——同一根因同一口径（复审 Note）。
+func (s *ReviewService) markBudgetPending(run *model.ReviewRun, errMsg string, now time.Time) {
+	tries := s.bumpWorktreeTries(run.ID, worktreeTryRegIncomplete)
+	s.scheduleWorktreeBackoff(run.ID, worktreeReasonRegistryIncomplete, now)
+	s.writePendingReason(run, worktreeReasonRegistryIncomplete, errMsg, now)
+	if tries >= reviewWorktreeMaxTries {
+		// 进入持续待确认态：按（环境, 仓库, 原因）聚合通知（同键重复
+		// 发布由 dedup+指纹收敛，正文随清单自动更新）。
+		s.publishCleanupAggregate(run, worktreeReasonRegistryIncomplete, now)
+	}
 }
 
 // recoverFromPending 登记读成功后清除行内的待确认原因（INT-170）：计数按
@@ -668,6 +679,12 @@ func (s *ReviewService) worktreeStep(ctx context.Context, run *model.ReviewRun, 
 	}
 	if err := s.t3.RemoveWorktree(ctx, run.UserID, run.EnvironmentID, cwd, path, true); err == nil {
 		return true
+	} else if errors.Is(err, errRegistryIncomplete) {
+		// 删除前置（env/dial）在调用方预算内到点：与登记读取同口径「待确认」
+		// 挂退避——上游慢但活着不是「未送达」，不占三次重试就落 failed（复审
+		// Note）。
+		s.markBudgetPending(run, "执行删除的时间预算在行内耗尽，待下轮重试", now)
+		return false
 	} else if errors.Is(err, errT3RemoveUncertain) {
 		// 结果不可见（读超时/连接中断）：先重读一次登记复查远端实际状态——
 		// 已不在即完成（远端执行完了才报错）；仍在或复查不到就保持 none 挂

@@ -272,6 +272,11 @@ func (e *t3RemoveNotAttemptedError) Unwrap() error        { return e.err }
 func (s *T3ThreadsService) RemoveWorktree(ctx context.Context, userID, envID, cwd, path string, force bool) error {
 	env, err := s.loadEnvForWrite(ctx, userID, envID)
 	if err != nil {
+		// 调用方预算在行内被前面的登记读/复查耗到点：与 ListRegistry 同口径
+		// 归「待确认」，不算「未送达」的三次重试对象（复审 Note）。
+		if ctx.Err() != nil {
+			return fmt.Errorf("%w: %s", errRegistryIncomplete, ctx.Err())
+		}
 		return &t3RemoveNotAttemptedError{err: err}
 	}
 	ctx, cancel := s.t3WriteBudget(ctx)
@@ -279,6 +284,9 @@ func (s *T3ThreadsService) RemoveWorktree(ctx context.Context, userID, envID, cw
 
 	session, err := s.dialAfterProbe(ctx, env)
 	if err != nil {
+		if ctx.Err() != nil {
+			return fmt.Errorf("%w: %s", errRegistryIncomplete, ctx.Err())
+		}
 		return &t3RemoveNotAttemptedError{err: err}
 	}
 	defer session.Close()
