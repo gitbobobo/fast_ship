@@ -913,3 +913,38 @@ func TestCleanupRemoveBudgetExhaustedGoesPending(t *testing.T) {
 		t.Fatalf("待确认计数应记 1, got %d", got)
 	}
 }
+
+// TestCleanupUnmappedBranchFailsNotRemoved（复审5轮 codex）行有路径、分支名
+// 缺失且工作树已不在登记：无法把存活 ref 映射回本运行，收 removed 是撒谎——
+// 记 failed(branch_unknown) 交人工核查。
+func TestCleanupUnmappedBranchFailsNotRemoved(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	env := createT3TestEnv(t, e.svc.db, e.user.ID, "env-unmapped")
+	createTestT3Binding(t, e.svc.db, e.project.ID, env.ID, "t3p")
+
+	run := e.seedCleanableRun(t, repo, 580, env, model.ReviewRunCompleted, "", now)
+	e.svc.db.Model(run).Updates(map[string]any{"worktree_path": "/wt/gone"})
+	run.WorktreePath = "/wt/gone"
+	t3 := &fakeReviewT3{
+		threadWorktreeErrs: map[string]error{run.ThreadID: errT3ThreadNotFound},
+		// 登记里 worktree 已不在，但疑似存活的专属分支 ref 仍在。
+		refNames: []string{"t3-orphan"},
+	}
+	review := e.withT3(t3, nil, nil)
+
+	for i := 0; i < reviewWorktreeMaxTries; i++ {
+		review.cleanupRunWorktree(run, now)
+	}
+	var after model.ReviewRun
+	e.svc.db.First(&after, "id = ?", run.ID)
+	if after.WorktreeState != model.ReviewWorktreeFailed ||
+		after.WorktreeReason != worktreeReasonBranchUnknown {
+		t.Fatalf("无法映射分支应收 failed/branch_unknown, got %q/%q",
+			after.WorktreeState, after.WorktreeReason)
+	}
+	if e.cleanupFailedCount(t) != 1 {
+		t.Fatal("未解决的残留应发聚合通知")
+	}
+}

@@ -112,6 +112,8 @@ func cleanupReasonSummary(reason string) string {
 		return "工作树已删除，本轮专属分支仍在；当前远程 T3 无删除分支接口，待审查代理收尾或人工清理。"
 	case worktreeReasonEnvBinding:
 		return "环境绑定缺失，无法定位工作区根目录。"
+	case worktreeReasonBranchUnknown:
+		return "分支名缺失且工作树已不在登记，无法确认专属分支是否已清理，请按工作区路径人工核查。"
 	}
 	return "工作区回收未完成。"
 }

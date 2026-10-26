@@ -95,6 +95,9 @@ const (
 	worktreeReasonBranchPending = "branch_pending"
 	// worktreeReasonEnvBinding 环境绑定缺失，无法定位工作区根目录。
 	worktreeReasonEnvBinding = "env_binding"
+	// worktreeReasonBranchUnknown 分支名缺失且登记无法恢复（升级前 NULL 行 +
+	// 工作树先消失）：无法证明无专属分支残留，记失败交人工核查。
+	worktreeReasonBranchUnknown = "branch_unknown"
 )
 
 // archiveRuns 调度阶段：挑线程「可能已建成」的终态运行逐条归档——
@@ -418,7 +421,7 @@ func (s *ReviewService) cleanupRunWorktree(run *model.ReviewRun, now time.Time) 
 				return
 			}
 			if run.WorktreePath != "" {
-				s.cleanupWithRegistry(ctx, run, run.WorktreePath, run.WorktreeBranch, now, finish)
+				s.cleanupWithRegistry(ctx, run, run.WorktreePath, run.WorktreeBranch, true, now, finish)
 				return
 			}
 			finish(model.ReviewWorktreeRemoved, "", "", false)
@@ -472,14 +475,14 @@ func (s *ReviewService) cleanupRunWorktree(run *model.ReviewRun, now time.Time) 
 		// 过、分支仍在只回 branch_pending、下轮再转 none，永久打摆且工作树
 		// 永不删（codex 复审）。
 		if run.WorktreePath != "" {
-			s.cleanupWithRegistry(ctx, run, run.WorktreePath, branch, now, finish)
+			s.cleanupWithRegistry(ctx, run, run.WorktreePath, branch, false, now, finish)
 			return
 		}
 		if branch == "" {
 			finish(model.ReviewWorktreeRemoved, "", "", false)
 			return
 		}
-		s.cleanupWithRegistry(ctx, run, "", branch, now, finish)
+		s.cleanupWithRegistry(ctx, run, "", branch, false, now, finish)
 		return
 	}
 	// 行内旧快照与线程真值冲突：可能是行被并发改写或线程被复用，不删。
@@ -509,13 +512,15 @@ func (s *ReviewService) cleanupRunWorktree(run *model.ReviewRun, now time.Time) 
 		}
 		run.WorktreePath = path
 	}
-	s.cleanupWithRegistry(ctx, run, path, branch, now, finish)
+	s.cleanupWithRegistry(ctx, run, path, branch, false, now, finish)
 }
 
 // cleanupWithRegistry 工作区回收的主体：读登记 → 工作树步（归属核验 + 删除）
 // → 分支步（ref 名全集核验）。path 为空表示线程确认没有工作树（或线程 404
-// 且行内无路径快照），跳过工作树步只判分支。
-func (s *ReviewService) cleanupWithRegistry(ctx context.Context, run *model.ReviewRun, path, branch string, now time.Time, finish worktreeFinish) {
+// 且行内无路径快照），跳过工作树步只判分支。snapshotOnly 表示 path/branch
+// 来自行内快照而非活着的线程投影（线程 404）——此时分支名缺失无法证明，
+// 与「投影明说没分支」要分开处理。
+func (s *ReviewService) cleanupWithRegistry(ctx context.Context, run *model.ReviewRun, path, branch string, snapshotOnly bool, now time.Time, finish worktreeFinish) {
 	// 核验与删除用同一个 cwd：launch 时快照的 workspace_root 优先——绑定之后
 	// 被删/改时，当前绑定不能代表当时的工作区根目录。
 	cwd := s.worktreeCwdFor(run)
@@ -550,6 +555,17 @@ func (s *ReviewService) cleanupWithRegistry(ctx context.Context, run *model.Revi
 		}
 	}
 	if branch == "" {
+		if path != "" && snapshotOnly {
+			// 只剩行快照（线程 404）：分支名缺失且登记已无法从该路径恢复名字
+			// （工作树先一步消失：代理自行收尾、T3 生命周期回收或早前部分删除
+			// ——升级前 worktree_branch 为 NULL 的旧行正中此场景），可能有专属
+			// 分支残留但无法映射回本运行，收 removed 是撒谎；保持未解决记
+			// failed 交人工按路径核查（codex 复审）。活着的投影明说 branch=""
+			// 是权威「没分支」，不在这列。
+			finish(model.ReviewWorktreeFailed, worktreeReasonBranchUnknown,
+				"工作树已不在登记且分支名缺失，无法确认专属分支是否已清理，请按工作区路径人工核查", true)
+			return
+		}
 		finish(model.ReviewWorktreeRemoved, "", "", false)
 		return
 	}
