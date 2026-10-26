@@ -78,7 +78,8 @@ head 提交 {{head_sha}}（{{pr_url}}）。工作区已经按该 PR 的 head 分
     "ui_changed_since_last_visual": false
   }
   ` + "`body`" + ` 按「问题 / 影响 / 建议」组织，用短句或分号分隔，不要复述 summary；
-  ` + "`file`" + ` 必须是当前 HEAD 树中真实存在的仓库相对路径，不存在的路径会被服务端
+  ` + "`file`" + ` 必须是当前 HEAD 树中真实存在的仓库相对路径，或本 PR diff 中删除/
+  重命名走掉的旧路径（针对「不该删它」的意见）；其他不存在的路径会被服务端
   拒收（提交前用 git 核对）；` + "`line`" + ` 是当前 HEAD 右侧代码行号，无法定位到 HEAD
   行时省略（顶层评论会注明未行内标注）；` + "`prior.status`" + ` 取 fixed / rejected /
   open，rejected 必须写 ` + "`reason`" + `。提交成功即结束，不需要再调用其它接口。`

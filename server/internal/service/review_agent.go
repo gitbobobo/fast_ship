@@ -595,12 +595,17 @@ func (s *ReviewService) AgentSubmitResult(ctx context.Context, runID string, bod
 
 // checkFindingFilesInTree INT-169 文件归属：代码审查新发现的仓库相对路径
 // 逐个在运行 head_sha 的树中查存在性（同一路径去重，去重后上限 64 条——
-// 每个唯一路径一次 GitHub 调用，需要整体预算）。不存在 → 40004 要求核对
-// 审查对象；GitHub 调用失败 → 50200（调用方可重交）。
+// 每个唯一路径一次平台调用，需要整体预算）。不存在 → 40004 要求核对
+// 审查对象；平台调用失败 → 50200（调用方可重交）。树未命中的路径再用
+// 本轮 PR diff 文件列表兜底一次：PR 删除/重命名走的文件仍是合法审查
+// 对象（「不该删这个文件」指向的正是已删文件本身），只在 head 树与
+// diff 里都查不到才算路径错误。
 const findingFileCheckLimit = 64
 
 func (s *ReviewService) checkFindingFilesInTree(ctx context.Context, client forge.ReviewClient, run *model.ReviewRun, findings []api.ReviewCodeFinding) error {
 	seen := map[string]bool{}
+	var diffSet map[string]bool
+	diffTried := false
 	for i, f := range findings {
 		if seen[f.File] {
 			continue
@@ -613,11 +618,55 @@ func (s *ReviewService) checkFindingFilesInTree(ctx context.Context, client forg
 		if err != nil {
 			return errs.New(errs.ErrGitHubAPI.Code, "校验 findings 文件归属失败: "+err.Error())
 		}
-		if !exists {
+		if exists {
+			continue
+		}
+		if !diffTried {
+			diffTried = true
+			diffSet, err = s.diffFilePaths(ctx, client, run)
+			if err != nil {
+				return errs.New(errs.ErrGitHubAPI.Code, "校验 findings 文件归属失败: "+err.Error())
+			}
+		}
+		if !diffSet[f.File] {
 			return reviewResultErr("findings[%d].file %q 在 head %s 的仓库树中不存在，请核对审查对象后重交", i, f.File, reviewShortSHA(run.HeadSHA))
 		}
 	}
 	return nil
+}
+
+// diffFilePaths 本轮 PR diff 中涉及的文件路径集（旧名与新名都算）：
+// `--- a/`、`+++ b/`、`rename from/to` 行解析；/dev/null 与引号路径做
+// 最小清理。给树未命中的 finding 做存在性兜底。
+func (s *ReviewService) diffFilePaths(ctx context.Context, client forge.ReviewClient, run *model.ReviewRun) (map[string]bool, error) {
+	diff, err := client.GetPullRequestDiff(ctx, run.RepoFullName, run.PRNumber)
+	if err != nil {
+		return nil, err
+	}
+	paths := map[string]bool{}
+	for _, line := range strings.Split(diff, "\n") {
+		for _, p := range []string{"--- a/", "+++ b/"} {
+			if strings.HasPrefix(line, p) {
+				paths[unquoteDiffPath(strings.TrimSpace(line[len(p):]))] = true
+			}
+		}
+		for _, p := range []string{"rename from ", "rename to "} {
+			if strings.HasPrefix(line, p) {
+				paths[unquoteDiffPath(strings.TrimSpace(line[len(p):]))] = true
+			}
+		}
+	}
+	return paths, nil
+}
+
+// unquoteDiffPath git diff 对含特殊字符的路径整段加引号；剥离引号让
+// finding 里的真实路径能匹配。仅处理整段引号形态，不还原转义序列——
+// 含转义的路径匹配不上按不存在处理，不会误放。
+func unquoteDiffPath(p string) string {
+	if len(p) >= 2 && p[0] == '"' && p[len(p)-1] == '"' {
+		return p[1 : len(p)-1]
+	}
+	return p
 }
 
 // decodeStrict 严格反序列化：未知字段与类型错误一律 40004。

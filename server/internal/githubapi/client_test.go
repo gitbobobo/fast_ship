@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -263,33 +264,57 @@ func TestPathExistsAtRef(t *testing.T) {
 	}
 }
 
-// TestPathExistsAtRefNotFoundAndTruncated 404→false；tree 截断且未命中→
-// 报错（无法判定时不猜不存在）。
+// TestPathExistsAtRefNotFoundAndTruncated 404 消歧（r2 Note）：dir 级
+// 404 会回探根树——根在则路径不存在（false,nil），根也 404/出错则按
+// 调用失败上报（ref/仓库不可达不能误报成「文件不存在」）；根级请求
+// 自身 404 恒为错误。tree 截断且未命中→报错（无法判定时不猜不存在）。
 func TestPathExistsAtRefNotFoundAndTruncated(t *testing.T) {
-	var status int
-	var payload any
+	var rootStatus int
+	var rootPayload any
+	dirStatus := http.StatusNotFound
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(t, w, status, payload)
+		// dir 级请求（treeish 含 :）按 dirStatus 应答；根树按 rootStatus。
+		if strings.Contains(r.URL.Path, ":") {
+			writeJSON(t, w, dirStatus, map[string]any{"message": "dir response"})
+			return
+		}
+		writeJSON(t, w, rootStatus, rootPayload)
 	}))
 	defer ts.Close()
 	c := NewClient(&fakeAuth{token: "tok"}, ts.URL)
 	ctx := context.Background()
 
-	status, payload = http.StatusNotFound, map[string]any{"message": "Not Found"}
+	// dir 404 + 根树 200 → 目录确实缺，路径不存在。
+	rootStatus, rootPayload = http.StatusOK, map[string]any{
+		"tree": []map[string]any{{"path": "other.go", "type": "blob"}},
+	}
 	ok, err := c.PathExistsAtRef(ctx, 1, "octocat/hw", "x/y.go", "sha-1")
 	if err != nil || ok {
-		t.Fatalf("404 = %v %v, want false nil", ok, err)
+		t.Fatalf("dir 404 + root 200 = %v %v, want false nil", ok, err)
 	}
 
-	status, payload = http.StatusOK, map[string]any{
+	// dir 404 + 根树 404 → ref/仓库级故障，报错而非「不存在」。
+	rootStatus, rootPayload = http.StatusNotFound, map[string]any{"message": "Not Found"}
+	if _, err = c.PathExistsAtRef(ctx, 1, "octocat/hw", "x/y.go", "sha-1"); err == nil {
+		t.Fatal("root probe 404 must surface as error, not file-not-found")
+	}
+
+	// 根级路径请求 404（本身就是根树）→ 恒为 ref 级错误。
+	if _, err = c.PathExistsAtRef(ctx, 1, "octocat/hw", "y.go", "sha-1"); err == nil {
+		t.Fatal("root request 404 must error")
+	}
+
+	// 根树 200 但截断且未命中 → 报错（用根级路径直查根树）。
+	rootStatus, rootPayload = http.StatusOK, map[string]any{
 		"tree":      []map[string]any{{"path": "other.go", "type": "blob"}},
 		"truncated": true,
 	}
-	if _, err := c.PathExistsAtRef(ctx, 1, "octocat/hw", "x/y.go", "sha-1"); err == nil {
+	if _, err := c.PathExistsAtRef(ctx, 1, "octocat/hw", "y.go", "sha-1"); err == nil {
 		t.Fatal("truncated miss must error, not guess nonexistence")
 	}
 
-	status, payload = http.StatusInternalServerError, map[string]any{"message": "boom"}
+	// dir 请求本身 5xx → 透传（不进根探）。
+	dirStatus = http.StatusInternalServerError
 	if _, err := c.PathExistsAtRef(ctx, 1, "octocat/hw", "x/y.go", "sha-1"); err == nil {
 		t.Fatal("5xx must propagate")
 	}

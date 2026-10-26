@@ -88,6 +88,49 @@ func TestAgentSubmitResultFindingFileAttribution(t *testing.T) {
 	}
 }
 
+// TestAgentSubmitResultDeletedFileFindings head 树未命中的路径用本轮
+// diff 兜底：PR 删除/重命名走的文件仍是合法审查对象（r2 P2）；
+// 既不在树也不在 diff 的路径照旧 40004。
+func TestAgentSubmitResultDeletedFileFindings(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	e.fake.SetPR(repo, 27, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 27, HeadSHA: "sha-d",
+		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
+	})
+	e.svc.db.Create(&model.ReviewPullRequest{
+		RepoFullName: repo, PRNumber: 27, ProjectID: e.project.ID, UserID: e.user.ID,
+		InstallationID: 42, HeadSHA: "sha-d", RoundNumber: 1, UpdatedAt: now,
+	})
+	// 树里只有 a.go；diff 记录 gone.go 被删除、old.go→new.go 重命名。
+	e.fake.SetTreeFiles(repo, "sha-d", "a.go", "new.go")
+	e.fake.SetDiff("diff --git a/gone.go b/gone.go\ndeleted file mode 100644\n" +
+		"--- a/gone.go\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n" +
+		"diff --git a/old.go b/new.go\nsimilarity index 90%\nrename from old.go\nrename to new.go\n")
+
+	run := e.seedRun(t, repo, 27, "sha-d", model.ReviewRunRunning, now)
+	e.svc.db.Create(&model.ReviewRunToken{
+		RunID: run.ID, TokenHash: "h-del", CreatedAt: now, ExpiresAt: now.Add(time.Hour),
+	})
+
+	// 已删文件 + 重命名旧路径的 finding 受理；幽灵路径仍 40004。
+	bad := `{"findings":[{"level":"P1","file":"ghost.go","body":"x"}],"prior":[],"summary":"s","ui_changed":false,"ui_changed_since_last_visual":false}`
+	err := e.review.AgentSubmitResult(context.Background(), run.ID, []byte(bad))
+	if err == nil || !strings.Contains(err.Error(), "核对审查对象") {
+		t.Fatalf("ghost path = %v, want 40004 核对审查对象", err)
+	}
+	good := `{"findings":[{"level":"P1","file":"gone.go","body":"不该删除此文件"},{"level":"P2","file":"old.go","body":"重命名后调用方未跟进"}],"prior":[],"summary":"s","ui_changed":false,"ui_changed_since_last_visual":false}`
+	if err := e.review.AgentSubmitResult(context.Background(), run.ID, []byte(good)); err != nil {
+		t.Fatalf("deleted/renamed file findings must be accepted: %v", err)
+	}
+	var after model.ReviewRun
+	e.svc.db.First(&after, "id = ?", run.ID)
+	if after.Status != model.ReviewRunCompleted {
+		t.Fatalf("status = %q, want completed", after.Status)
+	}
+}
+
 // TestAgentSubmitResultFileCheckBudget 唯一路径数超预算（64）→ 40004，
 // 不做逐个 GitHub 查询的失控扇出。
 func TestAgentSubmitResultFileCheckBudget(t *testing.T) {

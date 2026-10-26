@@ -569,16 +569,24 @@ func (c *ForgejoReviewClient) PathExistsAtRef(ctx context.Context, repoFullName,
 		}
 		segs[i] = pathSegment(s)
 	}
+	qref := url.QueryEscape(ref)
 	err = c.do(ctx, http.MethodGet,
-		"/repos/"+repo+"/contents/"+strings.Join(segs, "/")+"?ref="+url.QueryEscape(ref),
+		"/repos/"+repo+"/contents/"+strings.Join(segs, "/")+"?ref="+qref,
 		nil, nil)
 	if err == nil {
 		return true, nil
 	}
-	if IsNotFound(err) {
-		return false, nil
+	if !IsNotFound(err) {
+		return false, err
 	}
-	return false, err
+	// contents 404 恒有歧义（路径不存在 vs ref/仓库不可达）：探根目录区分，
+	// ref 级失败按调用失败上报，不能误报成「文件不存在」诱导 Agent 重写
+	// 合法 findings。
+	rootErr := c.do(ctx, http.MethodGet, "/repos/"+repo+"/contents/?ref="+qref, nil, nil)
+	if rootErr != nil {
+		return false, rootErr
+	}
+	return false, nil
 }
 
 // ListOpenPullRequests open PR 枚举（轮询补漏专用，不在 ReviewClient 方法面）。

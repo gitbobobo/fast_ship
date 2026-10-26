@@ -706,9 +706,14 @@ func TestForgejoClient_GetPullRequestDiff_TooLarge(t *testing.T) {
 }
 
 // TestForgejoClient_PathExistsAtRef INT-169 文件归属的 Forgejo 实现：contents
-// 端点 2xx→存在、404→不存在、非规范路径本地判不存在且零请求、5xx 透传。
+// 端点 2xx→存在、404 经根目录探测消歧（根在→不存在，根也 404→调用失败）、
+// 非规范路径本地判不存在且零请求。
 func TestForgejoClient_PathExistsAtRef(t *testing.T) {
 	client, logs := newForgejoTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("ref") == "bad-ref" {
+			http.Error(w, `{"message":"not found"}`, http.StatusNotFound)
+			return
+		}
 		if strings.Contains(r.URL.Path, "gone.go") {
 			http.Error(w, `{"message":"not found"}`, http.StatusNotFound)
 			return
@@ -728,9 +733,19 @@ func TestForgejoClient_PathExistsAtRef(t *testing.T) {
 		t.Fatalf("请求形状: %s %s", got.method, got.path)
 	}
 
+	// 路径 404 + 根目录 200 → 路径确实不存在。
 	ok, err = client.PathExistsAtRef(ctx, "o/r", "gone.go", "sha-1")
 	if err != nil || ok {
 		t.Fatalf("404 = %v, %v, want false,nil", ok, err)
+	}
+	got = lastServeLog(t, logs)
+	if got.path != "/api/v1/repos/o/r/contents/?ref=sha-1" {
+		t.Fatalf("消歧应探测根目录, got %q", got.path)
+	}
+
+	// 根目录也 404 → ref/仓库级故障，报错而非「不存在」。
+	if _, err = client.PathExistsAtRef(ctx, "o/r", "any.go", "bad-ref"); err == nil {
+		t.Fatal("ref 级 404 须透传为错误")
 	}
 
 	for _, bad := range []string{"/a.go", "a//b.go", "./a.go", "../x", "a.go/"} {

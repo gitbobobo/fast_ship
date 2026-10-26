@@ -526,8 +526,10 @@ func (c *restClient) PathExistsAtRef(ctx context.Context, installationID int64, 
 		}
 	}
 	base := segs[len(segs)-1]
-	treeish := url.PathEscape(ref)
-	if dir := strings.Join(segs[:len(segs)-1], "/"); dir != "" {
+	dir := strings.Join(segs[:len(segs)-1], "/")
+	escapedRef := url.PathEscape(ref)
+	treeish := escapedRef
+	if dir != "" {
 		escaped := make([]string, 0, len(segs)-1)
 		for _, s := range segs[:len(segs)-1] {
 			escaped = append(escaped, url.PathEscape(s))
@@ -540,10 +542,25 @@ func (c *restClient) PathExistsAtRef(ctx context.Context, installationID int64, 
 			fmt.Sprintf("/repos/%s/%s/git/trees/%s", owner, name, treeish), bearer, nil, &out)
 	})
 	if err != nil {
-		if IsNotFound(err) {
-			return false, nil
+		if !IsNotFound(err) {
+			return false, err
 		}
-		return false, err
+		// 404 有歧义：dir 级可能是「目录真不存在」，也可能是 ref/仓库本身
+		// 不可达——后者报「文件不存在」会把基础设施故障误报成 Agent 的
+		// 审查对象错误。探一次根树区分：根 404/出错 → 按调用失败上报；
+		// 根在 → dir 确实缺，路径不存在。根级请求本身 404 即 ref 无效。
+		if dir == "" {
+			return false, err
+		}
+		var root gitTreeWire
+		rootErr := c.withToken(ctx, installationID, func(bearer string) error {
+			return c.h.doJSON(ctx, http.MethodGet,
+				fmt.Sprintf("/repos/%s/%s/git/trees/%s", owner, name, escapedRef), bearer, nil, &root)
+		})
+		if rootErr != nil {
+			return false, rootErr
+		}
+		return false, nil
 	}
 	for _, e := range out.Tree {
 		if e.Path == base {
