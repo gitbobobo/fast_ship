@@ -12,15 +12,20 @@ import (
 // 推进、预算约束、去重排序、cursor 透传，以及 AppThread 投影的 branch/
 // worktreePath 字段层级。
 
-// page 是测试里构造 t3WorktreesPage 的便捷写法。
+// t3Ref 是 t3WorktreesPage.Refs 元素的具名别名：匿名结构体带标签时手写
+// 字面量太吵，测试统一经它构造。
+type t3Ref = struct {
+	Name         string  `json:"name"`
+	IsRemote     *bool   `json:"isRemote"`
+	WorktreePath *string `json:"worktreePath"`
+}
+
+// page 是测试里构造 t3WorktreesPage 的便捷写法（全部按本地 ref 造）。
 func page(cursor *int, refs ...[2]string) t3WorktreesPage {
 	p := t3WorktreesPage{NextCursor: cursor}
 	for _, r := range refs {
 		path := r[1]
-		p.Refs = append(p.Refs, struct {
-			Name         string  `json:"name"`
-			WorktreePath *string `json:"worktreePath"`
-		}{Name: r[0], WorktreePath: &path})
+		p.Refs = append(p.Refs, t3Ref{Name: r[0], WorktreePath: &path})
 	}
 	return p
 }
@@ -122,6 +127,42 @@ func TestCollectRegistryAggregatesAndRefNames(t *testing.T) {
 	}
 	if reg.HasRef("never-existed") {
 		t.Fatal("未出现过的 ref 名不应在全集里")
+	}
+}
+
+// TestCollectRegistrySkipsRemoteRefs（复审16轮 P2）远端跟踪 ref 不进核验
+// 全集：HasRef 回答的是「本地分支仍在不在」——本地分支被删后残留的同名
+// 远端 ref（上游 refKind=all 的 refs/remotes 项）不算存活证据，也不会被
+// 当成带工作区的绑定项。
+func TestCollectRegistrySkipsRemoteRefs(t *testing.T) {
+	remote := true
+	path := "/wt/remote"
+	p := t3WorktreesPage{}
+	p.Refs = append(p.Refs,
+		// 本地分支 t3/gone 已删，只剩同名远端跟踪 ref：不得计为存活。
+		t3Ref{Name: "t3/gone", IsRemote: &remote},
+		// 远端 ref 带 worktreePath 的畸形项同样剔除，不进 worktree 清单。
+		t3Ref{Name: "origin/br-x", IsRemote: &remote, WorktreePath: &path},
+	)
+	p.Refs = append(p.Refs, page(nil, [2]string{"br-alive", "/wt/a"}).Refs...)
+
+	reg, err := collectT3Registry(context.Background(), func(*int) (t3WorktreesPage, error) {
+		return p, nil
+	})
+	if err != nil {
+		t.Fatalf("collectT3Registry: %v", err)
+	}
+	if reg.HasRef("t3/gone") || reg.HasRef("origin/br-x") {
+		t.Fatal("远端 ref 不应进 ref 名全集")
+	}
+	if !reg.HasRef("br-alive") {
+		t.Fatal("本地 ref 应在全集里")
+	}
+	if reg.ContainsWorktree("/wt/remote") {
+		t.Fatal("远端 ref 不应登记出 worktree 项")
+	}
+	if !reg.ContainsWorktree("/wt/a") {
+		t.Fatal("本地 ref 的 worktree 应登记")
 	}
 }
 

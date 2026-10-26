@@ -67,7 +67,7 @@ Issue 与 Release、无代码；代码在另一仓库）。`project.CodeRepo()` 
 | 表 | 关键列 | 说明 |
 | --- | --- | --- |
 | `project_review_settings` | PK `project_id`；`user_id`；`integration_id/repo_full_name`（审查对象快照，INT-167）；`enabled`；`trigger_opened/synchronize/ready_for_review/reopened`；`code_combinations_json`/`visual_combinations_json` | 项目级开关与组合。组合元素：`environment_id`、`instance_id`（harness/provider 实例）、`model`、`options`（canonical `[{id,value}]` 数组，思考强度等）、`t3_project_id`（保存时由 `project_t3_bindings` 快照，不信任客户端回传）。代码组合启用时 1–5 个必填；视觉组合 0–3 个，0 个即从不启动视觉审查。`integration_id` 是归一值（空绑定 = `github-default`），保存设置与改绑项目时同点写入。 |
-| `review_runs` | `kind(code\|visual)`、`repo_full_name/pr_number/head_sha/round_number/integration_id`、`installation_id`、`trigger_action`、`pr_title/pr_url/base_ref/head_ref`、组合列 `environment_id/t3_project_id/instance_id/model/model_options_json`、预分配 `thread_id/launch_command_id/initial_message_id`、`status(queued\|dispatched\|running\|completed\|failed\|timed_out\|cancelled)`、`dispatch_started_at/dispatched_at/started_at/finished_at/deadline_at`、`error_code/error_message`、`prep_retry_count`、`summary/result_json`、`review_id/posted_at`、`worktree_path/worktree_branch/worktree_state/worktree_reason/worktree_error`、`stop_attempted_at`、`archived_at` | 一次审查运行 = 一轮 × 一个组合。同一 (集成, repo, pr, head_sha) 的代码与视觉运行共享 `round_number`（视觉是同一轮内的第二段）。`integration_id` 是普通列不入键（INT-167）：按集成选 client、按集成隔离同名仓库的历史。`dispatched_at` 在启动 RPC 结果确认或 Agent 首次持令牌鉴权时写入，为空 = 线程是否建成未确认。`prep_retry_count` 是 T3 工作区准备失败后的自动重试次数（INT-147，须持久化：进程重启不能把已用掉的重试名额清零）。`worktree_branch` 是线程投影读到的本轮专属分支名（INT-170，「空才补」回写，与 `worktree_path` 同款——线程 404 后的两步回收靠行内快照；两列都是新增可空列，升级前已有的行是 NULL，「空才补」条件须兼容 `IS NULL`，否则旧库行静默写不进、快照丢失）。`worktree_state` 值域 `none/removed/failed/branch_pending`（INT-170：`branch_pending` = 工作树已删、本轮专属分支仍在，服务端无删分支 RPC，复查登记 ref 全集、分支消失才 `removed`）。`worktree_reason` 是回收问题分类码（INT-170：`archive_failed/thread_read/registry_error/registry_incomplete/remove_budget_pending/ownership_error/ownership_mismatch/worktree_remove/remove_uncertain/branch_pending/env_binding/branch_unknown`；`removed` 时清空；`ownership_error` = 归属核验所需的本地 DB 读连续失败，区别于 `registry_error` 的 T3 登记读失败；`remove_budget_pending` = 删除执行的行内预算耗尽待重试，区别于 `registry_incomplete` 的登记读取不完整），聚合通知按（环境, 仓库, 原因）分键查询受影响清单。`archived_at` 是终态后线程归档写回的时刻；归档有限重试超限后也写入（不再重试），失败原因见 `worktree_error` 与 `review_cleanup_failed` 聚合通知。 |
+| `review_runs` | `kind(code\|visual)`、`repo_full_name/pr_number/head_sha/round_number/integration_id`、`installation_id`、`trigger_action`、`pr_title/pr_url/base_ref/head_ref`、组合列 `environment_id/t3_project_id/instance_id/model/model_options_json`、预分配 `thread_id/launch_command_id/initial_message_id`、`status(queued\|dispatched\|running\|completed\|failed\|timed_out\|cancelled)`、`dispatch_started_at/dispatched_at/started_at/finished_at/deadline_at`、`error_code/error_message`、`prep_retry_count`、`summary/result_json`、`review_id/posted_at`、`worktree_path/worktree_branch/worktree_state/worktree_reason/worktree_error`、`stop_attempted_at`、`archived_at` | 一次审查运行 = 一轮 × 一个组合。同一 (集成, repo, pr, head_sha) 的代码与视觉运行共享 `round_number`（视觉是同一轮内的第二段）。`integration_id` 是普通列不入键（INT-167）：按集成选 client、按集成隔离同名仓库的历史。`dispatched_at` 在启动 RPC 结果确认或 Agent 首次持令牌鉴权时写入，为空 = 线程是否建成未确认。`prep_retry_count` 是 T3 工作区准备失败后的自动重试次数（INT-147，须持久化：进程重启不能把已用掉的重试名额清零）。`worktree_branch` 是线程投影读到的本轮专属分支名（INT-170，「空才补」回写，与 `worktree_path` 同款——线程 404 后的两步回收靠行内快照；两列都是新增可空列，升级前已有的行是 NULL，「空才补」条件须兼容 `IS NULL`，否则旧库行静默写不进、快照丢失）。`worktree_state` 值域 `none/removed/failed/branch_pending`（INT-170：`branch_pending` = 工作树已删、本轮专属分支仍在，服务端无删分支 RPC，复查登记 ref 全集、分支消失才 `removed`）。`worktree_reason` 是回收问题分类码（INT-170：`archive_failed/thread_read/registry_error/registry_incomplete/remove_budget_pending/remove_unavailable/ownership_error/ownership_mismatch/worktree_remove/remove_uncertain/branch_pending/env_binding/branch_unknown`；`removed` 时清空；`ownership_error` = 归属核验所需的本地 DB 读连续失败，区别于 `registry_error` 的 T3 登记读失败；`remove_budget_pending` = 删除执行的行内预算耗尽待重试，`remove_unavailable` = 删除请求未送达远端待重试，两者与 `registry_incomplete` 的登记读取不完整分键），聚合通知按（环境, 仓库, 原因）分键查询受影响清单。`archived_at` 是终态后线程归档写回的时刻；归档有限重试超限后也写入（不再重试），失败原因见 `worktree_error` 与 `review_cleanup_failed` 聚合通知。 |
 | `review_run_tokens` | PK `run_id`；`token_hash`（UNIQUE）；`expires_at`；`consumed_at` | 每次运行一个 `fsr_` 令牌，只存完整令牌的 SHA-256。 |
 | `review_pull_requests` | PK `(project_id, repo_full_name, pr_number, integration_id)`；`user_id/installation_id`；`round_number/head_sha`；`code_comment_id/visual_comment_id`；`code_status/visual_status`；`visual_screens_fingerprint`（`c:<urlFP>:<contentFP>` / `u:<urlFP>`，见「视觉审查衔接」）；`sync_pending/sync_epoch/sync_error` | 一个 PR 的审查总账：评论落点、最近一次推送的 commit status 结论、视觉截图指纹、事务外同步标记（置 pending 时 epoch+1，清标记按开始时 epoch 条件写）。主键含 `project_id` 与 `integration_id`：同仓库换项目接管或改绑集成后各一本账。 |
 | `review_assets` | 唯一键 `(integration_id, repo_full_name, pr_number, head_sha, source_url)`；`position`；`label`；`storage_path`；`mime_type`；`size_bytes` | 视觉审查截图：PR 描述里的图片链接经截图下载面（`NewReviewMediaService`）下载后本地落盘。内容按 (集成, 仓库) 归一共享（同一 head 同一批截图），不按项目分区；同名仓库在两个集成下是不同实例的图源，各留一行。 |
@@ -923,7 +923,8 @@ SHA-256 前 16 位。
   进入回收，查询条件含 `worktree_state IN ('none','branch_pending')`。
   **全量扫描 + 到期预判**（不再 `LIMIT 20` 截断查询）：循环顶部先做不占名额
   的到期预判——`branch_pending` 行查其复查退避、`none` 行的
-  `registry_incomplete`/`remove_uncertain` 查各自重试退避，未到点整行跳过
+  `registry_incomplete`/`remove_uncertain`/`remove_budget_pending`/
+  `remove_unavailable` 查各自重试退避，未到点整行跳过
   （不读登记、不发网络请求）；否则 20 条常驻 pending 行会把后面的行永久饿死
   在批量窗口外。实际处理仍受双上限（先到先停）：每轮最多
   `reviewStageBatch`（20）条进入单行处理，且整阶段共享
@@ -948,8 +949,10 @@ SHA-256 前 16 位。
     才 `cd <主检出> && git worktree remove --force … && git branch -D …`。
     `git branch --show-current` 为空（detached HEAD）时从 `git worktree list
     --porcelain` 本工作树条目取 `branch refs/heads/<名>`，仍取不到就跳过分
-    支步、只删工作树）。服务端只核验登记 ref 名
-    全集：分支仍在 → `branch_pending` 复查；消失（ref 整条不在）→ `removed`。
+    支步、只删工作树）。服务端只核验登记 **本地** ref 名
+    全集（`vcs.listRefs` 的 `refKind=all` 含远端跟踪 ref，收集时按 `isRemote`
+    剔除——`HasRef` 要回答的是「本地分支仍在不在」，同名远端 ref 不算存活
+    证据）：分支仍在 → `branch_pending` 复查；消失（ref 整条不在）→ `removed`。
   - 线程 404、读线程失败、线程 `worktreePath` 为空（T3 仍在准备）各自独立
     计数、有限重试（3 个 tick），成功一次即清零该原因的计数（按「连续失败」
     而非累计）：404 连续 3 次都读不到才采信，行内已有 path/branch 快照的改用
@@ -972,7 +975,11 @@ SHA-256 前 16 位。
     报错。**预算耗尽先待确认后收敛**：行保持 `none`、reason=`registry_incomplete`
     挂指数退避（见下），连续 ≥3 次起发聚合通知；连续 12 次（封顶 5min 退避约
     1h 周期）仍读不完整 → `failed`（reason=`registry_error`，长期读不完整视
-    同登记读失败交人工）——待确认不是无限期状态；登记读成功即清原因与计数。
+    同登记读失败交人工）——待确认不是无限期状态；登记读成功即清登记侧
+    原因并无条件复位 `registry-incomplete` 计数（复位先于原因判空——
+    原因写库失败而读成功反复出现时，不复位会把「连续失败」退化成跨成功
+    累计、叠满上限误收 failed；`remove_budget_pending`/`remove_unavailable`
+    两个删除侧待确认原因不清，消解只看 RemoveWorktree 重试结果）。
     `vcs.removeWorktree` 前的环境解析/拨号把预算耗到点也挂待确认退避但分键
     `remove_budget_pending`（同一收敛上限，届时终态 reason=`worktree_remove`；
     与「登记读取不完整」分键避免聚合通知指向错误根因；连续计数也用独立
@@ -994,9 +1001,11 @@ SHA-256 前 16 位。
     保持 `none`、reason=`remove_uncertain` 挂退避，每次重发删除前都重过归属
     核验，连续 3 次 → `failed` + 聚合通知。**未送达**——请求发出前的准备失
     败（环境解析/凭证不可用/会话探测/WS 拨号，`errT3RemoveNotAttempted`），
-    远端必然没执行、复查也读不出「没发生」的删除，按独立计数有限重试（不查
-    登记），到限 → `failed`（reason 仍=`worktree_remove`，不新增对外值）+
-    聚合通知，文案写明「未能送达」而非「被远端明确拒绝」。**明确拒绝**——
+    远端必然没执行、复查也读不出「没发生」的删除；与登记侧同根因（T3 停机/
+    维护）同口径挂待确认——reason=`remove_unavailable` + 退避 + 独立
+    `remove-attempt` 连续计数（登记读成功不复位，消解只看 RemoveWorktree
+    重试结果），连续 12 次 → `failed`（reason=`worktree_remove`，长期不可达
+    视同删除失败）+ 聚合通知。**明确拒绝**——
     Exit Failure 也先重读一次登记（报错与执行竞态），已不在即完成；仍在 →
     `failed`（reason=`worktree_remove`）+ 通知。
   - **分支步**：分支名缺失且行内有工作树路径时，先借登记恢复名字——登记
@@ -1011,7 +1020,9 @@ SHA-256 前 16 位。
     记 ref 名全集 → `worktree_state=branch_pending` + 聚合通知；不在 →
     `removed`。
     `branch_pending` 行按退避复查（只查登记，不读投影），分支消失 →
-    `removed` 并刷新聚合通知（受影响清单收缩）；登记预算耗尽与 none 态同
+    `removed` 并刷新聚合通知（受影响清单收缩）；环境绑定缺失解析不出
+    `workspace_root` 时同样连续计数（`branch-env` 键），到 24 次上限收敛
+    `failed`（reason=`env_binding`）——绑定永久缺失不留无信号滞留；登记预算耗尽与 none 态同
     口径收敛（复用 `registry-incomplete` 计数与 12 次上限 →
     `failed`/`registry_error`）；分支被绑到多个 worktree 时先收集全部绑
     定——行内有快照路径时同路径项优先采信恢复转 none，仅全部绑定都在异
@@ -1023,8 +1034,9 @@ SHA-256 前 16 位。
     `branch_pending`，提示人工清理）——待清理不是无限期状态；复查登记明
     确报错到上限同样降级 `failed`（`registry_error`，终态统一走
     `finishWorktreeCleanup`，旧 `branch_pending` 键随转移自动刷新）。
-  - **指数退避**（INT-170）：`branch_pending` 复查、`registry_incomplete` 与
-    `remove_uncertain` 重试按 runID+reason 存进程内退避表，30s 起指数增长；
+  - **指数退避**（INT-170）：`branch_pending` 复查、`registry_incomplete`、
+    `remove_uncertain`、`remove_budget_pending` 与 `remove_unavailable`
+    重试按 runID+reason 存进程内退避表，30s 起指数增长；
     封顶按原因给——重试类 5min，`branch_pending` 长期等外部动作（代理收尾或
     人工删分支）封顶 1h；未到点的行在阶段入口就被到期预判整个跳过（不重读大
     登记、不占处理名额）。进程重启丢失无所谓——下个 tick 即可重查。终态转移
@@ -1153,10 +1165,11 @@ GitHub 与 Forgejo 两个集成下可各自被一个项目启用，互不算占�
 `review_cleanup_failed` 自 INT-170 起按（环境, 仓库, 原因）**聚合**：
 ProblemKey = `environment_id|repo_full_name|worktree_reason`，标题按原因给
 可读名（`branch_pending`→「PR 审查分支待清理」、`registry_incomplete`/
-`remove_uncertain`→「PR 审查回收待确认」、其余→「PR 审查工作区回收失败」），
+`remove_uncertain`/`remove_budget_pending`/`remove_unavailable`→「PR 审查
+回收待确认」、其余→「PR 审查工作区回收失败」），
 正文先写一句原因说明、再逐行列当前受影响运行（查
 `worktree_reason=原因 且 worktree_state IN ('none','branch_pending','failed')`，
-状态标签按原因给：`registry_incomplete`/`remove_uncertain`→「待确认复查」、
+状态标签按原因给：四个待确认原因→「待确认复查」、
 恒 `none` 的视觉运行（`archive_failed`）→「已放弃」、其余 `none`→「未完成」、
 `branch_pending`→「分支待清理」、`failed`→「失败」；清单按 limit+1 探测——
 超过 20 条才写「…（清单截断）」，恰好 20 条不误报）。

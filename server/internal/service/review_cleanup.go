@@ -61,8 +61,9 @@ const (
 	worktreeTryRegIncomplete   = "registry-incomplete"
 	worktreeTryRemoveUncertain = "remove-uncertain"
 	// worktreeTryRemoveAttempt 删除请求「未送达」（INT-170：环境/凭证/拨号
-	// 失败，远端必然没执行）的有限重试计数——与「结果不可见」的复查退避
-	// 分开计数：前者直接重试即可，后者每轮都要先复查远端实际状态。
+	// 失败，远端必然没执行）的连续计数——与「结果不可见」的复查退避分开：
+	// 前者是删除步自己的连续失败，登记读成功不能复位（登记走通了不代表
+	// 删除步的拨号恢复），消解条件是 RemoveWorktree 重试本身（复审 P2）。
 	worktreeTryRemoveAttempt = "remove-attempt"
 	// worktreeTryOwnership 归属核验的 DB 读失败（行快照/认领统计）：与登记
 	// 读取分键——登记读成功每 tick 都复位 registry 键，共用会把核验错误的
@@ -77,6 +78,10 @@ const (
 	// reviewBranchPendingMaxTries 收敛 failed，待清理不是无限期状态（复审
 	// Note）。只统计确认存活的复查——登记读失败走自己的键，不掺进来。
 	worktreeTryBranchPending = "branch-pending"
+	// worktreeTryBranchEnv branch_pending 复查解析不出工作区根目录（环境
+	// 绑定缺失）的连续计数（复审 Note）：绑定永久缺失时没有信号能让行离
+	// 开 branch_pending，累计到上限同样收敛 failed，不留无信号的永久滞留。
+	worktreeTryBranchEnv = "branch-env"
 )
 
 // 回收问题分类码（INT-170，写入 review_runs.worktree_reason）：聚合通知按
@@ -112,13 +117,18 @@ const (
 	// 境解析/拨号到点）：与 registry_incomplete 同为待确认但分键——聚合通
 	// 知按原因分桶，混进「登记读取不完整」会指向错误根因（复审 P2）。
 	worktreeReasonRemoveBudgetPending = "remove_budget_pending"
+	// worktreeReasonRemoveUnavailable 删除请求未能送达远端（环境/凭证/拨
+	// 号失败，T3 停机或维护中，复审 P2）：请求帧未发出、远端必然未执行，
+	// 与登记读取同一「暂不可达」根因同口径保持 none 挂退避——秒级停机
+	// 走有限三次快速判败会放大成批量假 failed + 告警。
+	worktreeReasonRemoveUnavailable = "remove_unavailable"
 	// worktreeReasonOwnershipError 归属核验的 DB 读连续失败（行快照/认领统
 	// 计）——本地库故障，不并入「登记读取失败」聚合键误导排查（复审 Note）。
 	worktreeReasonOwnershipError = "ownership_error"
 )
 
 // reviewBudgetPendingMaxTries 待确认态连续预算耗尽的累计上限（复审 P2）：
-// markBudgetPending 每 tick 记一次连续失败，退避封顶 5min 后 ≈1h 仍翻不完
+// markPendingRetry 每 tick 记一次连续失败，退避封顶 5min 后 ≈1h 仍翻不完
 // 即收敛 failed——无限期待确认只会让行既不回收也不标败、还周期性重读大登记。
 const reviewBudgetPendingMaxTries = 12
 
@@ -333,7 +343,7 @@ func (s *ReviewService) cleanupWorktrees(now time.Time) {
 }
 
 // worktreeReclaimDue 回收行到期预判（INT-170）：branch_pending 按其复查退避，
-// none 行的 registry_incomplete / remove_uncertain 按各自的重试退避；其余行
+// none 行的各待确认原因按各自的重试退避（名单见 isWorktreePendingReason）；其余行
 // 恒到期。例外：已派发未归档行在等归档阶段——进 cleanupRunWorktree 也只立即
 // 返回，但照样消耗 processed 名额，归档积压超 reviewStageBatch 时会饿死真正
 // 到期的行（复审 P2）。未派发/未建线程行不在此列：无归档依赖，立即收 removed。
@@ -355,7 +365,8 @@ func (s *ReviewService) worktreeReclaimDue(run *model.ReviewRun, now time.Time) 
 // 何一处都会让行绕过节流每 tick 重读大登记（复审 P2 的漂移源）。
 func isWorktreePendingReason(reason string) bool {
 	switch reason {
-	case worktreeReasonRegistryIncomplete, worktreeReasonRemoveUncertain, worktreeReasonRemoveBudgetPending:
+	case worktreeReasonRegistryIncomplete, worktreeReasonRemoveUncertain,
+		worktreeReasonRemoveBudgetPending, worktreeReasonRemoveUnavailable:
 		return true
 	}
 	return false
@@ -680,7 +691,7 @@ func (s *ReviewService) cleanupWithRegistry(ctx context.Context, run *model.Revi
 // 报错走有限重试，超限 failed + 聚合通知（现有行为口径）。
 func (s *ReviewService) handleRegistryReadError(run *model.ReviewRun, err error, now time.Time, finish worktreeFinish) {
 	if errors.Is(err, errRegistryIncomplete) {
-		if tries := s.markBudgetPending(run, worktreeReasonRegistryIncomplete, "登记读取未在预算内完成，待下轮确认重试", now); tries >= reviewBudgetPendingMaxTries {
+		if tries := s.markPendingRetry(run, worktreeReasonRegistryIncomplete, "登记读取未在预算内完成，待下轮确认重试", now); tries >= reviewBudgetPendingMaxTries {
 			finish(model.ReviewWorktreeFailed, worktreeReasonRegistryError,
 				"登记读取长时间未在预算内完成，按失败处理", true)
 		}
@@ -692,17 +703,20 @@ func (s *ReviewService) handleRegistryReadError(run *model.ReviewRun, err error,
 	finish(model.ReviewWorktreeFailed, worktreeReasonRegistryError, "读取项目工作区登记失败: "+err.Error(), true)
 }
 
-// markBudgetPending 把「预算在行内耗尽」的暂态落行：保持 none 挂退避，连
-// 续到上限起发聚合通知（进入持续待确认态）。登记读取与删除前置（env/dial
-// 在调用方预算内到点）共用——同一根因同一口径（复审 Note）。返回连续失败
-// 计数，供调用方按 reviewBudgetPendingMaxTries 收敛 failed（待确认不是无
-// 限期状态）。
-func (s *ReviewService) markBudgetPending(run *model.ReviewRun, reason, errMsg string, now time.Time) int {
-	// 两类预算耗尽分键计数（复审 P2）：登记侧由登记读成功复位，删除侧只有
+// markPendingRetry 把「暂时无法推进」的待确认暂态落行（预算在行内耗尽、
+// 删除请求未送达）：保持 none 挂退避，连续到上限起发聚合通知（进入持续
+// 待确认态）。登记读取与删除侧共用同一口径（复审 Note）。返回连续失败
+// 计数，供调用方按 reviewBudgetPendingMaxTries 收敛 failed（待确认不是
+// 无限期状态）。
+func (s *ReviewService) markPendingRetry(run *model.ReviewRun, reason, errMsg string, now time.Time) int {
+	// 待确认三类分键计数（复审 P2）：登记侧由登记读成功复位，删除侧只有
 	// RemoveWorktree 的后续结果能消解——共键会让删除侧被登记读清零。
 	tryKey := worktreeTryRegIncomplete
-	if reason == worktreeReasonRemoveBudgetPending {
+	switch reason {
+	case worktreeReasonRemoveBudgetPending:
 		tryKey = worktreeTryRemoveBudget
+	case worktreeReasonRemoveUnavailable:
+		tryKey = worktreeTryRemoveAttempt
 	}
 	tries := s.bumpWorktreeTries(run.ID, tryKey)
 	s.scheduleWorktreeBackoff(run.ID, reason, now)
@@ -725,10 +739,17 @@ func (s *ReviewService) markBudgetPending(run *model.ReviewRun, reason, errMsg s
 // remove_uncertain 的计数不清——它的上限跨越多个「登记成功」的 tick，清了
 // 就永远到不了终态。
 func (s *ReviewService) recoverFromPending(run *model.ReviewRun, now time.Time) {
-	if run.WorktreeReason == "" || run.WorktreeReason == worktreeReasonRemoveBudgetPending {
-		// remove_budget_pending 不由登记读消解（复审 P2）：登记读成功不代表
-		// 删除预算恢复，它的清算点是本 tick RemoveWorktree 的重试结果。这里
-		// 清了会让原因每 tick 抖动一次落库+空发聚合，还会连带复位计数。
+	// 登记读成功本身即证明「登记侧不完整」已解除：无论行内原因是什么、
+	// 写没落库，regIncomplete 连续计数都先复位（复审 Note）——
+	// markPendingRetry 先计数后写原因，写失败时 reason 留空，复位放在
+	// 提前返回之后会把「连续失败」退化成跨成功累计，叠满上限误收 failed。
+	s.resetWorktreeTries(run.ID, worktreeTryRegIncomplete)
+	if run.WorktreeReason == "" ||
+		run.WorktreeReason == worktreeReasonRemoveBudgetPending ||
+		run.WorktreeReason == worktreeReasonRemoveUnavailable {
+		// 删除侧待确认（预算耗尽/未送达）不由登记读消解（复审 P2）：登记
+		// 读成功不代表删除步恢复，它们的清算点是本 tick RemoveWorktree
+		// 的重试结果。清了会让原因每 tick 抖动一次落库+空发聚合。
 		return
 	}
 	prior := run.WorktreeReason
@@ -740,7 +761,6 @@ func (s *ReviewService) recoverFromPending(run *model.ReviewRun, now time.Time) 
 		return
 	}
 	run.WorktreeReason = ""
-	s.resetWorktreeTries(run.ID, worktreeTryRegIncomplete)
 	// 退避排程按 prior reason 一并清（INT-170）：恢复后再入同一待确认态时从
 	// 起步间隔重新爬梯，不接着半截阶梯跳档。
 	s.clearWorktreeBackoff(run.ID, prior)
@@ -812,7 +832,7 @@ func (s *ReviewService) worktreeStep(ctx context.Context, run *model.ReviewRun, 
 		// Note）。连续累计超限同样收敛 failed，待确认不是无限期状态。原因
 		// 用 remove_budget_pending 与登记读取分键（复审 P2），聚合通知才不
 		// 会把删除侧根因错标成「登记读取不完整」。
-		if tries := s.markBudgetPending(run, worktreeReasonRemoveBudgetPending, "执行删除的时间预算在行内耗尽，待下轮重试", now); tries >= reviewBudgetPendingMaxTries {
+		if tries := s.markPendingRetry(run, worktreeReasonRemoveBudgetPending, "执行删除的时间预算在行内耗尽，待下轮重试", now); tries >= reviewBudgetPendingMaxTries {
 			finish(model.ReviewWorktreeFailed, worktreeReasonWorktreeRemove,
 				"执行删除的时间预算长时间耗尽，按失败处理", true)
 		}
@@ -835,14 +855,15 @@ func (s *ReviewService) worktreeStep(ctx context.Context, run *model.ReviewRun, 
 		return false
 	} else if errors.Is(err, errT3RemoveNotAttempted) {
 		// 请求未送达（环境/凭证/拨号失败，INT-170）：远端必然没执行——无需
-		// 复查登记（复查也读不出「没发生」的删除），按有限重试处理，到限才
-		// failed + 聚合。reason 仍用 worktree_remove（对外不新增值），文案写
-		// 明是未送达而非被远端拒绝。
-		if tries := s.bumpWorktreeTries(run.ID, worktreeTryRemoveAttempt); tries < reviewWorktreeMaxTries {
-			return false
+		// 复查登记（复查也读不出「没发生」的删除）。但与登记侧预算耗尽可能
+		// 是同一根因（T3 停机/维护）：有限三次快速判败会把秒级停机放大成
+		// 批量假 failed + 告警（复审 P2），同口径挂待确认退避——远端没执
+		// 行过，等待本身无副作用；连续未送达到上限才收敛 failed。
+		if tries := s.markPendingRetry(run, worktreeReasonRemoveUnavailable,
+			"删除工作区请求未能送达远端（环境或连接不可用），待下轮重试", now); tries >= reviewBudgetPendingMaxTries {
+			finish(model.ReviewWorktreeFailed, worktreeReasonWorktreeRemove,
+				"删除工作区请求长时间未能送达远端（环境或连接不可用），按失败处理", true)
 		}
-		finish(model.ReviewWorktreeFailed, worktreeReasonWorktreeRemove,
-			"删除工作区请求未能送达远端（环境或连接不可用），停止重试", true)
 		return false
 	} else {
 		// 确定失败：也先重读一次登记——路径已不在说明远端其实删掉了（报错
@@ -882,13 +903,22 @@ func (s *ReviewService) recheckBranchPending(ctx context.Context, run *model.Rev
 	}
 	cwd := s.worktreeCwdFor(run)
 	if cwd == "" {
-		// 绑定缺失证明不了分支已删：保持 branch_pending 续排退避——分支仍在
-		// 的事实没变，改判 failed 反而丢掉「分支待清理」的语义。
-		s.logger.Warn("branch_pending 复查缺少工作区根目录，保持待复查",
-			zap.String("run", run.ID), zap.String("branch", run.WorktreeBranch))
-		s.scheduleWorktreeBackoff(run.ID, worktreeReasonBranchPending, now)
+		// 绑定缺失证明不了分支已删：保持 branch_pending 续排退避——但永久
+		// 缺失（解绑/环境被删而行残留）没有任何收敛路径（复审 Note）。连续
+		// 缺到上限转 failed(env_binding)：「分支待清理」的事实由失败原因
+		// 与文案保留，交人工确认而非无信号滞留。
+		if tries := s.bumpWorktreeTries(run.ID, worktreeTryBranchEnv); tries < reviewBranchPendingMaxTries {
+			s.logger.Warn("branch_pending 复查缺少工作区根目录，保持待复查",
+				zap.String("run", run.ID), zap.String("branch", run.WorktreeBranch))
+			s.scheduleWorktreeBackoff(run.ID, worktreeReasonBranchPending, now)
+			return
+		}
+		s.finishWorktreeCleanup(run, model.ReviewWorktreeFailed, worktreeReasonEnvBinding,
+			"环境绑定长时间缺失，无法复查分支登记；分支 "+run.WorktreeBranch+" 的清理请人工确认", true, now)
 		return
 	}
+	// 根目录解析成功复位「连续缺失」计数：绑定中途恢复过就不算连续。
+	s.resetWorktreeTries(run.ID, worktreeTryBranchEnv)
 	reg, err := s.t3.ListRegistry(ctx, run.UserID, run.EnvironmentID, cwd)
 	if err != nil {
 		if errors.Is(err, errRegistryIncomplete) {

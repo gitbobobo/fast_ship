@@ -77,19 +77,23 @@ func threadWorktreeFromProjection(p *t3ThreadProjection) T3ThreadWorktree {
 	return out
 }
 
-// t3WorktreesPage 是 vcs.listRefs 单页响应里登记核验用到的字段。
+// t3WorktreesPage 是 vcs.listRefs 单页响应里登记核验用到的字段。isRemote
+// 必须解码（复审 P2）：响应全集含远端跟踪 ref，HasRef 要回答的是「本地
+// 分支仍在不在」，远端 ref 不算存活证据，收集时显式剔除。
 type t3WorktreesPage struct {
 	Refs []struct {
 		Name         string  `json:"name"`
+		IsRemote     *bool   `json:"isRemote"`
 		WorktreePath *string `json:"worktreePath"`
 	} `json:"refs"`
 	NextCursor *int `json:"nextCursor"`
 }
 
 // T3Registry 是 vcs.listRefs 翻页收集完的整份登记（INT-170）：Worktrees 是
-// worktreePath 非空项按路径聚合的 worktree 清单，RefNames 是全部 ref 名的
-// 存在集合——分支被删后 ref 整条消失，只看 worktree 项区分不了「分支还在
-// 但没有 worktree」与「分支已删」，分支步核验必须查全集。
+// worktreePath 非空项按路径聚合的 worktree 清单，RefNames 是全部本地 ref 名
+// 的存在集合（远端跟踪 ref 已剔除）——分支被删后 ref 整条消失，只看
+// worktree 项区分不了「分支还在但没有 worktree」与「分支已删」，分支步核验
+// 必须查全集。
 type T3Registry struct {
 	Worktrees []T3Worktree
 	RefNames  map[string]bool
@@ -149,6 +153,12 @@ func collectT3Registry(ctx context.Context, fetch func(cursor *int) (t3Worktrees
 			return nil, err
 		}
 		for _, ref := range p.Refs {
+			if api.Deref(ref.IsRemote) {
+				// 远端跟踪 ref 不进核验全集：本地分支被删后同名远端 ref
+				// 残留不代表分支存活（当前上游远端名带 origin/ 前缀本
+				// 就撞不上，过滤是把语义显式化而不是依赖命名约定）。
+				continue
+			}
 			refNames[ref.Name] = true
 			if ref.WorktreePath == nil || *ref.WorktreePath == "" {
 				continue

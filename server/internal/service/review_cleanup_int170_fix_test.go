@@ -296,10 +296,12 @@ func TestCleanupRecoverySkipsUnpublishedKey(t *testing.T) {
 	}
 }
 
-// TestCleanupRemoveNotAttemptedRetriesThenFails（F7）删除请求未送达（环境/
-// 连接不可用）：远端必然没执行——有限重试、不复查登记，到限 failed +
-// 聚合，文案写明未送达而非「被远端明确拒绝」。
-func TestCleanupRemoveNotAttemptedRetriesThenFails(t *testing.T) {
+// TestCleanupRemoveNotAttemptedGoesPendingThenConverges（F7 + 复审16轮 P2）
+// 删除请求未送达（环境/连接不可用，T3 停机）：远端必然没执行——不再有限
+// 三次快速判败（秒级停机会被放大成批量假告警），与登记侧同口径挂待确认
+// 退避（remove_unavailable + 独立 remove-attempt 计数键），未到点整行跳
+// 过、连续到上限才收敛 failed，终态文案写明未送达而非「被远端明确拒绝」。
+func TestCleanupRemoveNotAttemptedGoesPendingThenConverges(t *testing.T) {
 	e := newReviewEngineEnv(t)
 	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
 	now := time.Now().UTC()
@@ -316,34 +318,46 @@ func TestCleanupRemoveNotAttemptedRetriesThenFails(t *testing.T) {
 	}
 	review := e.withT3(t3, nil, nil)
 
-	for i := 0; i < reviewWorktreeMaxTries-1; i++ {
-		review.cleanupRunWorktree(run, now)
-		var mid model.ReviewRun
-		e.svc.db.First(&mid, "id = ?", run.ID)
-		if mid.WorktreeState != model.ReviewWorktreeNone {
-			t.Fatalf("第 %d tick = %q, want none（未送达有限重试）", i+1, mid.WorktreeState)
-		}
-	}
 	review.cleanupRunWorktree(run, now)
+	var mid model.ReviewRun
+	e.svc.db.First(&mid, "id = ?", run.ID)
+	if mid.WorktreeState != model.ReviewWorktreeNone ||
+		mid.WorktreeReason != worktreeReasonRemoveUnavailable {
+		t.Fatalf("未送达应保持 none + remove_unavailable, got %q/%q",
+			mid.WorktreeState, mid.WorktreeReason)
+	}
+	if got := review.worktreeTries[run.ID+"|"+worktreeTryRemoveAttempt]; got != 1 {
+		t.Fatalf("remove-attempt 计数应记 1, got %d", got)
+	}
+	// 退避闸门：未到点的 tick 整行跳过——不再每 10s 重发删除+重读大登记。
+	review.cleanupRunWorktree(run, now.Add(10*time.Second))
+	if len(t3.removed) != 1 || t3.listCalls != 1 {
+		t.Fatalf("退避窗口内不得重试, removed=%d listCalls=%d", len(t3.removed), t3.listCalls)
+	}
 
+	at := now.Add(6 * time.Minute) // 越过退避（重试类封顶 5min）
+	for i := 1; i < reviewBudgetPendingMaxTries; i++ {
+		review.cleanupRunWorktree(run, at)
+		at = at.Add(6 * time.Minute)
+	}
 	var after model.ReviewRun
 	e.svc.db.First(&after, "id = ?", run.ID)
 	if after.WorktreeState != model.ReviewWorktreeFailed ||
 		after.WorktreeReason != worktreeReasonWorktreeRemove {
-		t.Fatalf("worktree = %q/%q, want failed/worktree_remove（到限）",
+		t.Fatalf("连续未送达到上限应收 failed/worktree_remove, got %q/%q",
 			after.WorktreeState, after.WorktreeReason)
 	}
 	if !strings.Contains(after.WorktreeError, "未能送达") {
 		t.Fatalf("worktree_error = %q, 应写明未送达而非远端拒绝", after.WorktreeError)
 	}
-	if t3.listCalls != reviewWorktreeMaxTries {
-		t.Fatalf("listCalls = %d, want %d（未送达分支不复查登记）", t3.listCalls, reviewWorktreeMaxTries)
+	if len(t3.removed) != reviewBudgetPendingMaxTries || t3.listCalls != reviewBudgetPendingMaxTries {
+		t.Fatalf("每个到点 tick 应各读一次登记+试一次删除, removed=%d listCalls=%d",
+			len(t3.removed), t3.listCalls)
 	}
-	if len(t3.removed) != reviewWorktreeMaxTries {
-		t.Fatalf("removed = %v, want 每轮各试一次删除", t3.removed)
-	}
-	if e.cleanupFailedCount(t) != 1 {
-		t.Fatal("到限应发一条聚合通知")
+	// 通知两行：待确认键（tries≥3 起发）与终态 worktree_remove 键各占一
+	// 条；待确认键在终态转移时被收缩重发，不新增行。
+	if e.cleanupFailedCount(t) != 2 {
+		t.Fatalf("应各有一条待确认与终态聚合通知, got %d", e.cleanupFailedCount(t))
 	}
 }
 
@@ -1235,5 +1249,96 @@ func TestCleanupRemoveBudgetPendingConverges(t *testing.T) {
 		after.WorktreeReason != worktreeReasonWorktreeRemove {
 		t.Fatalf("删除侧连续预算耗尽应收敛 failed/worktree_remove, got %q/%q",
 			after.WorktreeState, after.WorktreeReason)
+	}
+}
+
+// TestCleanupBranchPendingMissingEnvConverges（复审16轮 Note）branch_pending
+// 复查解析不出工作区根目录（环境绑定永久缺失：解绑或环境被删而行残留）：
+// 不再无信号地无限续排——branch-env 键连续计数到上限收敛
+// failed(env_binding)，「分支待清理」事实由原因与文案保留交人工。
+func TestCleanupBranchPendingMissingEnvConverges(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	// 环境行在、但不建绑定：bindingFor 返回 nil，行内又无 workspace_root
+	// 快照 → worktreeCwdFor 恒为空。
+	env := createT3TestEnv(t, e.svc.db, e.user.ID, "env-unbound")
+
+	run := e.seedCleanableRun(t, repo, 695, env, model.ReviewRunCompleted, "/wt/unb", now)
+	e.svc.db.Model(run).Updates(map[string]any{
+		"worktree_state":  string(model.ReviewWorktreeBranchPending),
+		"worktree_reason": worktreeReasonBranchPending,
+		"worktree_branch": "br-unb",
+		"worktree_path":   "/wt/unb",
+		"environment_id":  env.ID,
+	})
+	run.WorktreeState = model.ReviewWorktreeBranchPending
+	run.WorktreeReason = worktreeReasonBranchPending
+	run.WorktreeBranch = "br-unb"
+	review := e.withT3(&fakeReviewT3{}, nil, nil)
+
+	at := now
+	for i := 0; i < reviewBranchPendingMaxTries; i++ {
+		review.cleanupRunWorktree(run, at)
+		at = at.Add(61 * time.Minute) // 越过 branch_pending 退避（封顶 1h）
+		if i < reviewBranchPendingMaxTries-1 {
+			var mid model.ReviewRun
+			e.svc.db.First(&mid, "id = ?", run.ID)
+			if mid.WorktreeState != model.ReviewWorktreeBranchPending {
+				t.Fatalf("第 %d 次复查 = %q, want 保持 branch_pending", i+1, mid.WorktreeState)
+			}
+		}
+	}
+	if got := review.worktreeTries[run.ID+"|"+worktreeTryBranchEnv]; got != 0 {
+		t.Fatalf("终态转移后 branch-env 计数应释放, got %d", got)
+	}
+	var after model.ReviewRun
+	e.svc.db.First(&after, "id = ?", run.ID)
+	if after.WorktreeState != model.ReviewWorktreeFailed ||
+		after.WorktreeReason != worktreeReasonEnvBinding {
+		t.Fatalf("环境绑定长期缺失应收敛 failed/env_binding, got %q/%q",
+			after.WorktreeState, after.WorktreeReason)
+	}
+	if !strings.Contains(after.WorktreeError, "br-unb") {
+		t.Fatalf("失败文案应保留分支名供人工清理, got %q", after.WorktreeError)
+	}
+	if e.cleanupFailedCount(t) != 1 {
+		t.Fatal("收敛应交一条聚合通知")
+	}
+}
+
+// TestRecoverFromPendingResetsCounterBeforeReasonCheck（复审16轮 Note）登记
+// 读成功时 regIncomplete 计数必须先于原因判空复位：markPendingRetry 先计数
+// 后写原因，写库失败会让 reason 留空——复位放在判空之后会把「连续失败」
+// 退化成跨成功累计，叠满上限误收 failed。
+func TestRecoverFromPendingResetsCounterBeforeReasonCheck(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	review := e.withT3(&fakeReviewT3{}, nil, nil)
+	now := time.Now().UTC()
+
+	// 写失败场景：计数已累积、行内原因留空。
+	run := &model.ReviewRun{ID: "r-writeflap"}
+	for i := 0; i < 5; i++ {
+		review.bumpWorktreeTries(run.ID, worktreeTryRegIncomplete)
+	}
+	review.recoverFromPending(run, now)
+	if got := review.worktreeTries[run.ID+"|"+worktreeTryRegIncomplete]; got != 0 {
+		t.Fatalf("登记读成功必须复位 regIncomplete 计数（即使 reason 为空）, got %d", got)
+	}
+
+	// 删除侧待确认不被登记读消解：reason 与 remove-attempt 计数都保留，
+	// 但 regIncomplete 计数照样复位（读成功确实证明登记侧通了）。
+	run2 := &model.ReviewRun{ID: "r-removepend", WorktreeReason: worktreeReasonRemoveUnavailable}
+	review.bumpWorktreeTries(run2.ID, worktreeTryRegIncomplete)
+	review.bumpWorktreeTries(run2.ID, worktreeTryRemoveAttempt)
+	review.recoverFromPending(run2, now)
+	if got := review.worktreeTries[run2.ID+"|"+worktreeTryRegIncomplete]; got != 0 {
+		t.Fatalf("regIncomplete 应复位, got %d", got)
+	}
+	if got := review.worktreeTries[run2.ID+"|"+worktreeTryRemoveAttempt]; got != 1 {
+		t.Fatalf("remove-attempt 不应被登记读成功复位, got %d", got)
+	}
+	if run2.WorktreeReason != worktreeReasonRemoveUnavailable {
+		t.Fatalf("remove_unavailable 不应被登记读清除, got %q", run2.WorktreeReason)
 	}
 }

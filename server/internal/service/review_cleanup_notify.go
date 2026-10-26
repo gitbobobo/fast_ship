@@ -85,7 +85,8 @@ func cleanupAggregateTitle(reason string) string {
 	switch reason {
 	case worktreeReasonBranchPending:
 		return "PR 审查分支待清理"
-	case worktreeReasonRegistryIncomplete, worktreeReasonRemoveUncertain, worktreeReasonRemoveBudgetPending:
+	case worktreeReasonRegistryIncomplete, worktreeReasonRemoveUncertain,
+		worktreeReasonRemoveBudgetPending, worktreeReasonRemoveUnavailable:
 		return "PR 审查回收待确认"
 	}
 	return "PR 审查工作区回收失败"
@@ -112,6 +113,8 @@ func cleanupReasonSummary(reason string) string {
 		return "工作区删除结果不可见（超时或连接中断），保持待确认并按退避复查远端状态。"
 	case worktreeReasonRemoveBudgetPending:
 		return "删除工作区的时间预算在行内耗尽（环境解析或连接超时），保持待确认并按退避重试。"
+	case worktreeReasonRemoveUnavailable:
+		return "删除工作区请求未能送达远端（环境或连接不可用，远端必然未执行），保持待确认并按退避重试。"
 	case worktreeReasonBranchPending:
 		return "工作树已删除，本轮专属分支仍在；当前远程 T3 无删除分支接口，待审查代理收尾或人工清理。"
 	case worktreeReasonEnvBinding:
@@ -133,7 +136,8 @@ func cleanupAffectedLine(run *model.ReviewRun) string {
 		state = "分支待清理"
 	case run.WorktreeState == model.ReviewWorktreeNone:
 		switch run.WorktreeReason {
-		case worktreeReasonRegistryIncomplete, worktreeReasonRemoveUncertain, worktreeReasonRemoveBudgetPending:
+		case worktreeReasonRegistryIncomplete, worktreeReasonRemoveUncertain,
+			worktreeReasonRemoveBudgetPending, worktreeReasonRemoveUnavailable:
 			state = "待确认复查"
 		case worktreeReasonArchiveFailed:
 			state = "已放弃"
