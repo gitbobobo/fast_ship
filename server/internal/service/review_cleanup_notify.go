@@ -104,6 +104,8 @@ func cleanupReasonSummary(reason string) string {
 		return "工作区登记未能在时间预算内读取完整，保持待确认并按退避复查。"
 	case worktreeReasonOwnershipMismatch:
 		return "工作区归属核验未通过，未执行删除。"
+	case worktreeReasonOwnershipError:
+		return "归属核验所需的本地数据连续读取失败，无法证明归属。"
 	case worktreeReasonWorktreeRemove:
 		return "工作区删除未完成：被远端明确拒绝，或删除请求未能送达远端（环境/连接不可用）。"
 	case worktreeReasonRemoveUncertain:

@@ -98,7 +98,15 @@ const (
 	// worktreeReasonBranchUnknown 分支名缺失且登记无法恢复（升级前 NULL 行 +
 	// 工作树先消失）：无法证明无专属分支残留，记失败交人工核查。
 	worktreeReasonBranchUnknown = "branch_unknown"
+	// worktreeReasonOwnershipError 归属核验的 DB 读连续失败（行快照/认领统
+	// 计）——本地库故障，不并入「登记读取失败」聚合键误导排查（复审 Note）。
+	worktreeReasonOwnershipError = "ownership_error"
 )
+
+// reviewBudgetPendingMaxTries 待确认态连续预算耗尽的累计上限（复审 P2）：
+// markBudgetPending 每 tick 记一次连续失败，退避封顶 5min 后 ≈1h 仍翻不完
+// 即收敛 failed——无限期待确认只会让行既不回收也不标败、还周期性重读大登记。
+const reviewBudgetPendingMaxTries = 12
 
 // archiveRuns 调度阶段：挑线程「可能已建成」的终态运行逐条归档——
 // dispatch_started_at 非空即可能已发出启动，包括 dispatched_at 为空
@@ -343,7 +351,13 @@ func (s *ReviewService) finishWorktreeCleanup(run *model.ReviewRun, state model.
 		updates["worktree_error"] = errMsg
 		updates["worktree_reason"] = reason
 	}
-	s.db.Model(&model.ReviewRun{}).Where("id = ?", run.ID).Updates(updates)
+	if res := s.db.Model(&model.ReviewRun{}).Where("id = ?", run.ID).Updates(updates); res.Error != nil {
+		// 终态没写进去就中断：计数/退避不释放、内存态不改、聚合不发——
+		// 下轮按库内旧态重走，通知不与库态背离（复审 Note）。
+		s.logger.Warn("回收终态写库失败，下轮重试",
+			zap.String("run", run.ID), zap.Error(res.Error))
+		return
+	}
 	s.releaseWorktreeTries(run.ID)
 	prior := run.WorktreeReason
 	if state == model.ReviewWorktreeRemoved {
@@ -597,7 +611,10 @@ func (s *ReviewService) cleanupWithRegistry(ctx context.Context, run *model.Revi
 // 报错走有限重试，超限 failed + 聚合通知（现有行为口径）。
 func (s *ReviewService) handleRegistryReadError(run *model.ReviewRun, err error, now time.Time, finish worktreeFinish) {
 	if errors.Is(err, errRegistryIncomplete) {
-		s.markBudgetPending(run, "登记读取未在预算内完成，待下轮确认重试", now)
+		if tries := s.markBudgetPending(run, "登记读取未在预算内完成，待下轮确认重试", now); tries >= reviewBudgetPendingMaxTries {
+			finish(model.ReviewWorktreeFailed, worktreeReasonRegistryError,
+				"登记读取长时间未在预算内完成，按失败处理", true)
+		}
 		return
 	}
 	if tries := s.bumpWorktreeTries(run.ID, worktreeTryRegistry); tries < reviewWorktreeMaxTries {
@@ -608,8 +625,10 @@ func (s *ReviewService) handleRegistryReadError(run *model.ReviewRun, err error,
 
 // markBudgetPending 把「预算在行内耗尽」的暂态落行：保持 none 挂退避，连
 // 续到上限起发聚合通知（进入持续待确认态）。登记读取与删除前置（env/dial
-// 在调用方预算内到点）共用——同一根因同一口径（复审 Note）。
-func (s *ReviewService) markBudgetPending(run *model.ReviewRun, errMsg string, now time.Time) {
+// 在调用方预算内到点）共用——同一根因同一口径（复审 Note）。返回连续失败
+// 计数，供调用方按 reviewBudgetPendingMaxTries 收敛 failed（待确认不是无
+// 限期状态）。
+func (s *ReviewService) markBudgetPending(run *model.ReviewRun, errMsg string, now time.Time) int {
 	tries := s.bumpWorktreeTries(run.ID, worktreeTryRegIncomplete)
 	s.scheduleWorktreeBackoff(run.ID, worktreeReasonRegistryIncomplete, now)
 	s.writePendingReason(run, worktreeReasonRegistryIncomplete, errMsg, now)
@@ -618,6 +637,7 @@ func (s *ReviewService) markBudgetPending(run *model.ReviewRun, errMsg string, n
 		// 发布由 dedup+指纹收敛，正文随清单自动更新）。
 		s.publishCleanupAggregate(run, worktreeReasonRegistryIncomplete, now)
 	}
+	return tries
 }
 
 // recoverFromPending 登记读成功后清除行内的待确认原因（INT-170）：计数按
@@ -632,8 +652,10 @@ func (s *ReviewService) recoverFromPending(run *model.ReviewRun, now time.Time) 
 		return
 	}
 	prior := run.WorktreeReason
-	s.db.Model(&model.ReviewRun{}).Where("id = ?", run.ID).
-		Updates(map[string]any{"worktree_reason": "", "worktree_error": "", "updated_at": now})
+	if err := s.db.Model(&model.ReviewRun{}).Where("id = ?", run.ID).
+		Updates(map[string]any{"worktree_reason": "", "worktree_error": "", "updated_at": now}).Error; err != nil {
+		s.logger.Warn("清除待确认原因写库失败", zap.String("run", run.ID), zap.Error(err))
+	}
 	run.WorktreeReason = ""
 	s.resetWorktreeTries(run.ID, worktreeTryRegIncomplete)
 	// 退避排程按 prior reason 一并清（INT-170）：恢复后再入同一待确认态时从
@@ -653,11 +675,13 @@ func (s *ReviewService) recoverFromPending(run *model.ReviewRun, now time.Time) 
 // 重发一次聚合——不补发，旧键的受影响清单会永久滞留本运行（复审 Note）。
 func (s *ReviewService) writePendingReason(run *model.ReviewRun, reason, errMsg string, now time.Time) {
 	prior := run.WorktreeReason
-	s.db.Model(&model.ReviewRun{}).Where("id = ?", run.ID).
+	if err := s.db.Model(&model.ReviewRun{}).Where("id = ?", run.ID).
 		Updates(map[string]any{
 			"worktree_state":  model.ReviewWorktreeNone,
 			"worktree_reason": reason, "worktree_error": errMsg, "updated_at": now,
-		})
+		}).Error; err != nil {
+		s.logger.Warn("待确认原因写库失败", zap.String("run", run.ID), zap.Error(err))
+	}
 	run.WorktreeReason, run.WorktreeError = reason, errMsg
 	if prior != "" && prior != reason {
 		s.publishCleanupAggregate(run, prior, now)
@@ -681,7 +705,7 @@ func (s *ReviewService) worktreeStep(ctx context.Context, run *model.ReviewRun, 
 		if tries := s.bumpWorktreeTries(run.ID, worktreeTryOwnership); tries < reviewWorktreeMaxTries {
 			return false
 		}
-		finish(model.ReviewWorktreeFailed, worktreeReasonRegistryError, err.Error(), true)
+		finish(model.ReviewWorktreeFailed, worktreeReasonOwnershipError, err.Error(), true)
 		return false
 	}
 	// 归属核验读成功复位其连续失败计数。
@@ -698,8 +722,11 @@ func (s *ReviewService) worktreeStep(ctx context.Context, run *model.ReviewRun, 
 	} else if errors.Is(err, errRegistryIncomplete) {
 		// 删除前置（env/dial）在调用方预算内到点：与登记读取同口径「待确认」
 		// 挂退避——上游慢但活着不是「未送达」，不占三次重试就落 failed（复审
-		// Note）。
-		s.markBudgetPending(run, "执行删除的时间预算在行内耗尽，待下轮重试", now)
+		// Note）。连续累计超限同样收敛 failed，待确认不是无限期状态。
+		if tries := s.markBudgetPending(run, "执行删除的时间预算在行内耗尽，待下轮重试", now); tries >= reviewBudgetPendingMaxTries {
+			finish(model.ReviewWorktreeFailed, worktreeReasonWorktreeRemove,
+				"执行删除的时间预算长时间耗尽，按失败处理", true)
+		}
 		return false
 	} else if errors.Is(err, errT3RemoveUncertain) {
 		// 结果不可见（读超时/连接中断）：先重读一次登记复查远端实际状态——
@@ -810,7 +837,12 @@ func (s *ReviewService) recheckBranchPending(ctx context.Context, run *model.Rev
 			}
 			run.WorktreePath = w.Path
 		} else if run.WorktreePath != w.Path {
-			continue
+			// 本轮分支被绑到与行内快照不同的工作区：归属不明——不删（歧义资
+			// 源），也不无限续排（无信号的永久滞留，复审 P2），记 failed 交
+			// 人工。
+			s.finishWorktreeCleanup(run, model.ReviewWorktreeFailed, worktreeReasonOwnershipMismatch,
+				"本轮分支 "+run.WorktreeBranch+" 被绑定到工作区 "+w.Path+"，与记录不一致，未执行删除", true, now)
+			return
 		}
 		s.finishWorktreeCleanup(run, model.ReviewWorktreeNone, "", "", false, now)
 		return

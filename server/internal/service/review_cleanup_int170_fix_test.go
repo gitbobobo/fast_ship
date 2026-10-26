@@ -615,8 +615,9 @@ func TestCleanupBranchPendingLateWorktreeReclaimed(t *testing.T) {
 		t.Fatalf("工作树删后分支仍在 = %q, want branch_pending", after.WorktreeState)
 	}
 
-	// 歧义场景：行内已有路径、登记绑定的是另一路径的 worktree → 保持
-	// pending，不动任何东西。
+	// 歧义场景：行内已有路径、登记绑定的是另一路径的 worktree → 归属不明
+	// 记 failed（ownership_mismatch）交人工——保持 pending 是无信号的永久
+	// 滞留（复审 P2）。
 	run2 := seedBranchPendingRow(t, e, repo, 521, env, "br-amb", now.Add(-time.Minute))
 	e.svc.db.Model(run2).Updates(map[string]any{"worktree_path": "/wt/ours-gone"})
 	run2.WorktreePath = "/wt/ours-gone"
@@ -625,8 +626,10 @@ func TestCleanupBranchPendingLateWorktreeReclaimed(t *testing.T) {
 	review.cleanupRunWorktree(run2, now.Add(2*time.Hour))
 	var after2 model.ReviewRun
 	e.svc.db.First(&after2, "id = ?", run2.ID)
-	if after2.WorktreeState != model.ReviewWorktreeBranchPending {
-		t.Fatalf("绑定路径与行内不同的歧义 worktree = %q, want branch_pending 不删", after2.WorktreeState)
+	if after2.WorktreeState != model.ReviewWorktreeFailed ||
+		after2.WorktreeReason != worktreeReasonOwnershipMismatch {
+		t.Fatalf("绑定路径与行内不同的歧义 worktree = %q/%q, want failed/ownership_mismatch",
+			after2.WorktreeState, after2.WorktreeReason)
 	}
 	if len(t3.removed) != 1 {
 		t.Fatalf("歧义 worktree 不得删除, removed = %v", t3.removed)
@@ -946,5 +949,40 @@ func TestCleanupUnmappedBranchFailsNotRemoved(t *testing.T) {
 	}
 	if e.cleanupFailedCount(t) != 1 {
 		t.Fatal("未解决的残留应发聚合通知")
+	}
+}
+
+// TestCleanupBudgetPendingConvergesFailed（复审6轮 P2）registry_incomplete 待
+// 确认不是无限期状态：连续预算耗尽到 reviewBudgetPendingMaxTries 收敛
+// failed(registry_error)。
+func TestCleanupBudgetPendingConvergesFailed(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	env := createT3TestEnv(t, e.svc.db, e.user.ID, "env-cap")
+	createTestT3Binding(t, e.svc.db, e.project.ID, env.ID, "t3p")
+
+	run := e.seedCleanableRun(t, repo, 590, env, model.ReviewRunCompleted, "/wt/c", now)
+	run.WorktreeBranch = "br-c"
+	e.svc.db.Model(run).Updates(map[string]any{"worktree_branch": "br-c"})
+	t3 := &fakeReviewT3{
+		threadWorktrees: map[string]T3ThreadWorktree{
+			run.ThreadID: {Path: "/wt/c", Branch: "br-c"},
+		},
+		listIncomplete: true,
+	}
+	review := e.withT3(t3, nil, nil)
+
+	at := now
+	for i := 0; i < reviewBudgetPendingMaxTries; i++ {
+		review.cleanupRunWorktree(run, at)
+		at = at.Add(6 * time.Minute) // 越过退避（封顶 5min）
+	}
+	var after model.ReviewRun
+	e.svc.db.First(&after, "id = ?", run.ID)
+	if after.WorktreeState != model.ReviewWorktreeFailed ||
+		after.WorktreeReason != worktreeReasonRegistryError {
+		t.Fatalf("连续预算耗尽到上限应收敛 failed/registry_error, got %q/%q",
+			after.WorktreeState, after.WorktreeReason)
 	}
 }
