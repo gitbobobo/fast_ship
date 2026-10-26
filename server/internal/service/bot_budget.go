@@ -409,16 +409,16 @@ func (s *BotService) alertBudgetThreshold(alert botBudgetAlert) error {
 	var title string
 	if actualPct >= 100 {
 		if b.ScheduleTaskID != nil {
-			title = fmt.Sprintf("定时任务「%s」已超出每%s预算（阈值 %s，当前 %s）", alert.taskName, label, pct, actualText)
+			title = fmt.Sprintf("定时任务「%s」已超出每%s预算（阈值 %s，当前%s）", alert.taskName, label, pct, actualText)
 		} else {
-			title = fmt.Sprintf("机器人「%s」已超出每%s预算（阈值 %s，当前 %s）", alert.botName, label, pct, actualText)
+			title = fmt.Sprintf("机器人「%s」已超出每%s预算（阈值 %s，当前%s）", alert.botName, label, pct, actualText)
 		}
 	} else if b.ScheduleTaskID != nil {
-		title = fmt.Sprintf("定时任务「%s」每%s预算已达 %s（当前 %s）", alert.taskName, label, pct, actualText)
+		title = fmt.Sprintf("定时任务「%s」每%s预算已达 %s（当前%s）", alert.taskName, label, pct, actualText)
 	} else {
-		title = fmt.Sprintf("机器人「%s」每%s预算已达 %s（当前 %s）", alert.botName, label, pct, actualText)
+		title = fmt.Sprintf("机器人「%s」每%s预算已达 %s（当前%s）", alert.botName, label, pct, actualText)
 	}
-	body := fmt.Sprintf("周期 %s 已花费 %s，预算 %s，当前占比 %s，告警阈值 %s。"+
+	body := fmt.Sprintf("周期 %s 已花费 %s，预算 %s，当前占比%s，告警阈值 %s。"+
 		"只统计已计价金额，未计价请求未计入；告警只作提示，不会停止运行。",
 		alert.periodKey, money, amount, actualText, pct)
 

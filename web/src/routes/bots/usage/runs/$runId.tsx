@@ -89,9 +89,9 @@ const TOOL_CALL_STATUS_LABELS: Record<string, string> = {
 const labelOf = (map: Record<string, string>, value: string) =>
   map[value] ?? value;
 
-/** 错误正文剥掉 [NNNNN] 码与行首重复的「工具 动作」前缀（技术名在同行
- * 已用等宽字显示），剩余的是可读原因；「不接受参数 xxx」这类夹着内部
- * 参数名的提示改写成纯中文，原始文案仍在 title 里备查。 */
+/** 错误正文剥掉 [NNNNN] 码与行首重复的「工具 动作」前缀（技术名收进
+ * title 备查），剩余的是可读原因；「不接受参数 xxx」这类夹着内部参数名
+ * 的提示改写成纯中文。 */
 function toolErrorText(msg: string, tool: string, action?: string | null) {
   let s = msg.replace(/^\[\d{5}\]\s*/, "");
   for (const head of [
@@ -484,12 +484,11 @@ function RequestRow({ request }: { request: BotUsageRequest }) {
               key={call.id}
               className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground"
             >
-              <span className="text-foreground">
+              <span
+                className="text-foreground"
+                title={`${call.tool_name}${call.action ? `:${call.action}` : ""}`}
+              >
                 {toolActionLabel(call.tool_name, call.action)}
-                <span className="ml-1.5 font-mono text-muted-foreground">
-                  {call.tool_name}
-                  {call.action ? `:${call.action}` : ""}
-                </span>
               </span>
               <Badge
                 variant={call.status === "failed" ? "destructive" : "secondary"}
