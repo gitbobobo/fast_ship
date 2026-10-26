@@ -1045,3 +1045,89 @@ func TestCleanupBranchPendingConvergesFailed(t *testing.T) {
 			after.WorktreeState, after.WorktreeReason)
 	}
 }
+
+// TestCleanup404RowBranchOnlyChecksRegistry（复审9轮 bot）线程 404 确认、行
+// 内无路径但有分支快照：分支可能仍存活，须走登记判定而非直接 removed。
+func TestCleanup404RowBranchOnlyChecksRegistry(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	env := createT3TestEnv(t, e.svc.db, e.user.ID, "env-404b")
+	createTestT3Binding(t, e.svc.db, e.project.ID, env.ID, "t3p")
+
+	run := e.seedCleanableRun(t, repo, 630, env, model.ReviewRunCompleted, "", now)
+	e.svc.db.Model(run).Updates(map[string]any{"worktree_branch": "br-orphan"})
+	run.WorktreeBranch = "br-orphan"
+	t3 := &fakeReviewT3{
+		threadWorktreeErrs: map[string]error{run.ThreadID: errT3ThreadNotFound},
+		refNames:           []string{"br-orphan"},
+	}
+	review := e.withT3(t3, nil, nil)
+
+	for i := 0; i < reviewWorktreeMaxTries; i++ {
+		review.cleanupRunWorktree(run, now)
+	}
+	var after model.ReviewRun
+	e.svc.db.First(&after, "id = ?", run.ID)
+	if after.WorktreeState != model.ReviewWorktreeBranchPending {
+		t.Fatalf("分支仍存活应 branch_pending 而非 removed, got %q", after.WorktreeState)
+	}
+}
+
+// TestCleanupBranchPendingIncompleteConverges（复审9轮 bot）branch_pending
+// 复查的登记预算耗尽同 none 态口径收敛：连续 reviewBudgetPendingMaxTries
+// 次后 failed(registry_error)。
+func TestCleanupBranchPendingIncompleteConverges(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	env := createT3TestEnv(t, e.svc.db, e.user.ID, "env-bpi")
+	createTestT3Binding(t, e.svc.db, e.project.ID, env.ID, "t3p")
+
+	run := seedBranchPendingRow(t, e, repo, 640, env, "br-slow", now.Add(-time.Hour))
+	t3 := &fakeReviewT3{listIncomplete: true}
+	review := e.withT3(t3, nil, nil)
+
+	for i := 0; i < reviewBudgetPendingMaxTries; i++ {
+		review.recheckBranchPending(context.Background(), run, now.Add(time.Duration(i)*time.Hour))
+	}
+	var after model.ReviewRun
+	e.svc.db.First(&after, "id = ?", run.ID)
+	if after.WorktreeState != model.ReviewWorktreeFailed ||
+		after.WorktreeReason != worktreeReasonRegistryError {
+		t.Fatalf("连续预算耗尽到上限应收 failed/registry_error, got %q/%q",
+			after.WorktreeState, after.WorktreeReason)
+	}
+}
+
+// TestCleanupBranchPendingPrefersSamePathBinding（复审9轮 Note）同一分支绑
+// 到多个 worktree 且其中一项与行内快照同路径：优先采信同路径恢复转 none，
+// 不按切片顺序错判 ownership_mismatch。
+func TestCleanupBranchPendingPrefersSamePathBinding(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	env := createT3TestEnv(t, e.svc.db, e.user.ID, "env-multi")
+	createTestT3Binding(t, e.svc.db, e.project.ID, env.ID, "t3p")
+
+	run := seedBranchPendingRow(t, e, repo, 650, env, "br-multi", now.Add(-time.Minute))
+	e.svc.db.Model(run).Updates(map[string]any{"worktree_path": "/wt/ours"})
+	run.WorktreePath = "/wt/ours"
+	t3 := &fakeReviewT3{
+		// 异路径项排在前——旧实现首个命中即 failed。
+		worktrees: []T3Worktree{
+			{Path: "/wt/foreign", RefNames: []string{"br-multi"}},
+			{Path: "/wt/ours", RefNames: []string{"br-multi"}},
+		},
+		refNames: []string{"br-multi"},
+	}
+	review := e.withT3(t3, nil, nil)
+
+	review.recheckBranchPending(context.Background(), run, now)
+	var after model.ReviewRun
+	e.svc.db.First(&after, "id = ?", run.ID)
+	if after.WorktreeState != model.ReviewWorktreeNone {
+		t.Fatalf("存在同路径绑定应恢复转 none 走完整回收, got %q/%q",
+			after.WorktreeState, after.WorktreeReason)
+	}
+}

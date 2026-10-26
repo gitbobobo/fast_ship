@@ -447,6 +447,13 @@ func (s *ReviewService) cleanupRunWorktree(run *model.ReviewRun, now time.Time) 
 				s.cleanupWithRegistry(ctx, run, run.WorktreePath, run.WorktreeBranch, true, now, finish)
 				return
 			}
+			// 行内无路径但有分支快照（投影曾给出 branch 而 path 为空——root
+			// 工作区线程或路径登记迟到）：分支可能仍存活，与活投影的同款场
+			// 景一样走登记判定，不能直接收 removed 静默残留（复审 P2）。
+			if run.WorktreeBranch != "" {
+				s.cleanupWithRegistry(ctx, run, "", run.WorktreeBranch, true, now, finish)
+				return
+			}
 			finish(model.ReviewWorktreeRemoved, "", "", false)
 			return
 		}
@@ -816,7 +823,15 @@ func (s *ReviewService) recheckBranchPending(ctx context.Context, run *model.Rev
 	reg, err := s.t3.ListRegistry(ctx, run.UserID, run.EnvironmentID, cwd)
 	if err != nil {
 		if errors.Is(err, errRegistryIncomplete) {
-			s.scheduleWorktreeBackoff(run.ID, worktreeReasonBranchPending, now)
+			// 预算耗尽与 none 态同口径收敛（复审 P2）：复用同一计数键与上限，
+			// 超限按长期读不完整记 failed——待确认不是无限期状态，branch_
+			// pending 行也不能例外地永久重读大登记。
+			if tries := s.bumpWorktreeTries(run.ID, worktreeTryRegIncomplete); tries < reviewBudgetPendingMaxTries {
+				s.scheduleWorktreeBackoff(run.ID, worktreeReasonBranchPending, now)
+				return
+			}
+			s.finishWorktreeCleanup(run, model.ReviewWorktreeFailed, worktreeReasonRegistryError,
+				"复查分支登记长时间未在预算内完成，按失败处理", true, now)
 			return
 		}
 		// 上游明确报错：有限重试，超限降级 failed（复查面坏掉，分支残留的
@@ -834,34 +849,49 @@ func (s *ReviewService) recheckBranchPending(ctx context.Context, run *model.Rev
 	// 登记读成功复位连续失败计数：branch_pending 行生命周期无上限，瞬时抖动
 	// 不reset会跨天累计成永久 failed。
 	s.resetWorktreeTries(run.ID, worktreeTryRegistry)
+	s.resetWorktreeTries(run.ID, worktreeTryRegIncomplete)
 	// T3 建 worktree 可能滞后于首次回收（首轮按 path 空直接判分支进 pending）：
 	// 登记出现绑定本分支的 worktree 项时回到完整回收链路处理——行内无路径先按
 	// 「空才补」写回（写失败保持待复查），随后转 none 让下个 tick 走归属核验+
 	// 删除+分支步（核验与删除仍同源，不在这里直接删）。行内已有快照路径时：
 	// 同一路径说明回收链曾走到过这步（或路径被删后重现），转 none 由完整核验
-	// 决定；不同路径则归属不明，保持 pending 不删。
+	// 决定；全部绑定都在异路径则归属不明，记 failed 交人工。
+	// 同一分支可能被绑到多个 worktree：先收集全部绑定再定夺——行内已有快
+	// 照路径时优先采信同路径项恢复，只有全部绑定都在异路径才算归属不明
+	// （复审 Note：首个命中即定夺会把「同路径+异路径并存」的合法情形按切
+	// 片顺序错判成永久 failed）。
+	var bound []T3Worktree
 	for _, w := range reg.Worktrees {
-		if !slices.Contains(w.RefNames, run.WorktreeBranch) {
-			continue
+		if slices.Contains(w.RefNames, run.WorktreeBranch) {
+			bound = append(bound, w)
+		}
+	}
+	if len(bound) > 0 {
+		match := -1
+		if run.WorktreePath == "" {
+			match = 0
+		} else if i := slices.IndexFunc(bound, func(w T3Worktree) bool { return w.Path == run.WorktreePath }); i >= 0 {
+			match = i
+		}
+		if match < 0 {
+			// 本轮分支被绑到与行内快照不同的工作区：归属不明——不删（歧义资
+			// 源），也不无限续排（无信号的永久滞留，复审 P2），记 failed 交
+			// 人工。
+			s.finishWorktreeCleanup(run, model.ReviewWorktreeFailed, worktreeReasonOwnershipMismatch,
+				"本轮分支 "+run.WorktreeBranch+" 被绑定到工作区 "+bound[0].Path+"，与记录不一致，未执行删除", true, now)
+			return
 		}
 		if run.WorktreePath == "" {
 			res := s.db.Model(&model.ReviewRun{}).
 				Where("id = ? AND (worktree_path = '' OR worktree_path IS NULL)", run.ID).
-				Updates(map[string]any{"worktree_path": w.Path, "updated_at": now})
+				Updates(map[string]any{"worktree_path": bound[match].Path, "updated_at": now})
 			if res.Error != nil || res.RowsAffected == 0 {
 				s.logger.Warn("补登记迟到的回收工作区路径失败，保持待复查",
 					zap.String("run", run.ID), zap.Error(res.Error))
 				s.scheduleWorktreeBackoff(run.ID, worktreeReasonBranchPending, now)
 				return
 			}
-			run.WorktreePath = w.Path
-		} else if run.WorktreePath != w.Path {
-			// 本轮分支被绑到与行内快照不同的工作区：归属不明——不删（歧义资
-			// 源），也不无限续排（无信号的永久滞留，复审 P2），记 failed 交
-			// 人工。
-			s.finishWorktreeCleanup(run, model.ReviewWorktreeFailed, worktreeReasonOwnershipMismatch,
-				"本轮分支 "+run.WorktreeBranch+" 被绑定到工作区 "+w.Path+"，与记录不一致，未执行删除", true, now)
-			return
+			run.WorktreePath = bound[match].Path
 		}
 		s.finishWorktreeCleanup(run, model.ReviewWorktreeNone, "", "", false, now)
 		return

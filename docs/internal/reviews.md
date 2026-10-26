@@ -954,7 +954,9 @@ SHA-256 前 16 位。
     计数、有限重试（3 个 tick），成功一次即清零该原因的计数（按「连续失败」
     而非累计）：404 连续 3 次都读不到才采信，行内已有 path/branch 快照的改用
     快照继续走登记核验（线程删了工作区可能还在），行内无快照 → `removed`
-    （磁盘工作区归 T3 生命周期管）；读线程失败到上限 →
+    （磁盘工作区归 T3 生命周期管）；行内仅无路径但有分支快照（投影曾给出
+    branch 而 path 空）同样走登记判定——分支可能仍存活，不能直接
+    `removed` 静默残留；读线程失败到上限 →
     `failed`（reason=`thread_read`）+ 聚合通知；空路径到上限 → 行内分支也空
     则 `removed`（无工作区），分支非空则跳过工作树步直接判分支。
   - 行内旧 `worktree_path`/`worktree_branch` 与线程真值不一致 →
@@ -1004,9 +1006,11 @@ SHA-256 前 16 位。
     记 ref 名全集 → `worktree_state=branch_pending` + 聚合通知；不在 →
     `removed`。
     `branch_pending` 行按退避复查（只查登记，不读投影），分支消失 →
-    `removed` 并刷新聚合通知（受影响清单收缩）；分支仍存活但它绑定的登记
-    worktree 路径与行内路径不一致 → 归属不明，直接 `failed`
-    （reason=`ownership_mismatch`）交人工，不静默续排；确认存活累计 24
+    `removed` 并刷新聚合通知（受影响清单收缩）；登记预算耗尽与 none 态同
+    口径收敛（复用 `registry-incomplete` 计数与 12 次上限 →
+    `failed`/`registry_error`）；分支被绑到多个 worktree 时先收集全部绑
+    定——存在与行内快照同路径项即采信恢复转 none，仅全部绑定都在异路径
+    才 `failed`（reason=`ownership_mismatch`）交人工；确认存活累计 24
     次（封顶 1h 退避 ≈1 天）仍未消失同样收敛 `failed`（reason=
     `branch_pending`，提示人工清理）——待清理不是无限期状态；复查登记明
     确报错到上限同样降级 `failed`（`registry_error`，终态统一走
