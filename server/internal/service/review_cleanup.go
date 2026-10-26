@@ -462,6 +462,14 @@ func (s *ReviewService) cleanupRunWorktree(run *model.ReviewRun, now time.Time) 
 		if branch == "" {
 			branch = run.WorktreeBranch
 		}
+		// 投影仍无路径但行内有快照（登记迟到回收写回 / 旧行）：以行快照进完整
+		// 回收链——登记会重新核验路径在册与否。用空路径跳步会让工作树步被跳
+		// 过、分支仍在只回 branch_pending、下轮再转 none，永久打摆且工作树
+		// 永不删（codex 复审）。
+		if run.WorktreePath != "" {
+			s.cleanupWithRegistry(ctx, run, run.WorktreePath, branch, now, finish)
+			return
+		}
 		if branch == "" {
 			finish(model.ReviewWorktreeRemoved, "", "", false)
 			return
@@ -527,6 +535,15 @@ func (s *ReviewService) cleanupWithRegistry(ctx context.Context, run *model.Revi
 	}
 	// 分支步：行内没有分支名 → 收 removed；分支仍在登记 ref 全集 →
 	// branch_pending（服务端删不了，等代理收尾或人工）；不在 → removed。
+	if branch == "" && path != "" {
+		// 分支名缺失但登记把该路径绑定到具体分支（升级前 worktree_branch 为
+		// NULL 的旧行、线程 404 后只剩行快照）：借登记恢复——不恢复就收
+		// removed，仍存活的分支从此无人追踪（codex 复审）。同路径登记多个
+		// ref 名视为歧义，不采用。
+		if idx := slices.IndexFunc(reg.Worktrees, func(w T3Worktree) bool { return w.Path == path }); idx >= 0 && len(reg.Worktrees[idx].RefNames) == 1 {
+			branch = reg.Worktrees[idx].RefNames[0]
+		}
+	}
 	if branch == "" {
 		finish(model.ReviewWorktreeRemoved, "", "", false)
 		return
@@ -534,9 +551,18 @@ func (s *ReviewService) cleanupWithRegistry(ctx context.Context, run *model.Revi
 	if reg.HasRef(branch) {
 		// 进入 branch_pending 前断言分支快照已在行内持久化（本来非空或刚写
 		// 成功）：复查只认行内的 worktree_branch，空快照进 pending 后下轮
-		// HasRef("")=false 会误收 removed。写失败已在上面返回，这是防御闸门。
+		// HasRef("")=false 会误收 removed。登记刚恢复的名字同样走这条「空才
+		// 补」写回，写失败就等下轮，不持久化不进 pending。
 		if run.WorktreeBranch == "" {
-			return
+			res := s.db.Model(&model.ReviewRun{}).
+				Where("id = ? AND (worktree_branch = '' OR worktree_branch IS NULL)", run.ID).
+				Updates(map[string]any{"worktree_branch": branch, "updated_at": now})
+			if res.Error != nil || res.RowsAffected == 0 {
+				s.logger.Warn("回写登记恢复的分支名失败，等下轮重试",
+					zap.String("run", run.ID), zap.Error(res.Error))
+				return
+			}
+			run.WorktreeBranch = branch
 		}
 		finish(model.ReviewWorktreeBranchPending, worktreeReasonBranchPending,
 			"工作树已删除，本轮专属分支 "+branch+" 仍存在；当前远程 T3 无删除分支接口，待审查代理收尾或人工清理", true)

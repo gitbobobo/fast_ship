@@ -395,12 +395,15 @@ func TestCleanupRowWithoutBranchRemoved(t *testing.T) {
 
 	var after model.ReviewRun
 	e.svc.db.First(&after, "id = ?", run.ID)
-	if after.WorktreeState != model.ReviewWorktreeRemoved || len(t3.removed) != 1 {
-		t.Fatalf("worktree = %q removed=%v, want removed 且删除（无分支即两步完成）",
-			after.WorktreeState, t3.removed)
+	// 工作树删除后登记恢复分支名「whatever」——分支仍存活，记名进
+	// branch_pending 等代理/人工，不能收 removed 把存活分支丢成无人追踪。
+	if after.WorktreeState != model.ReviewWorktreeBranchPending ||
+		after.WorktreeBranch != "whatever" || len(t3.removed) != 1 {
+		t.Fatalf("worktree = %q/%q removed=%v, want branch_pending 且删除并恢复分支名",
+			after.WorktreeState, after.WorktreeBranch, t3.removed)
 	}
-	if e.cleanupFailedCount(t) != 0 {
-		t.Fatal("无分支不应通知")
+	if e.cleanupFailedCount(t) != 1 {
+		t.Fatal("分支待清理应聚合通知")
 	}
 }
 

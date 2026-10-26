@@ -1036,12 +1036,15 @@ func TestCleanupEmptyBranchMatchesByPath(t *testing.T) {
 
 	var after model.ReviewRun
 	e.svc.db.First(&after, "id = ?", run.ID)
-	if after.WorktreeState != model.ReviewWorktreeRemoved || len(t3.removed) != 1 {
-		t.Fatalf("worktree = %q removed=%v, want removed 且删除（空分支按路径核验）",
-			after.WorktreeState, t3.removed)
+	// 空分支按路径核验归属并删除；删后借登记恢复分支名「whatever」——分支
+	// 仍存活进 branch_pending（不再误收 removed）。
+	if after.WorktreeState != model.ReviewWorktreeBranchPending ||
+		after.WorktreeBranch != "whatever" || len(t3.removed) != 1 {
+		t.Fatalf("worktree = %q/%q removed=%v, want branch_pending 且删除并恢复分支名",
+			after.WorktreeState, after.WorktreeBranch, t3.removed)
 	}
-	if e.cleanupFailedCount(t) != 0 {
-		t.Fatal("空分支不应发失败通知")
+	if e.cleanupFailedCount(t) != 1 {
+		t.Fatal("分支待清理应聚合通知")
 	}
 }
 
