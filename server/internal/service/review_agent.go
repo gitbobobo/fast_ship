@@ -14,7 +14,6 @@ import (
 
 	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/forge"
-	"github.com/godbobo/fast_ship/server/internal/githubapi"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	"go.uber.org/zap"
@@ -91,13 +90,6 @@ func (s *ReviewService) loadAgentRun(ctx context.Context, runID string) (*model.
 		return nil, errs.ErrRunTokenInvalid
 	}
 	return &run, nil
-}
-
-func (s *ReviewService) ghClient(ctx context.Context) (githubapi.GitHubClient, error) {
-	if s.gh == nil {
-		return nil, errs.New(errs.ErrGitHubAPI.Code, "GitHub 访问面未配置")
-	}
-	return s.gh.ClientFor(ctx)
 }
 
 // AgentPullRequest GET /api/review-agent/runs/:runId/pull-request：运行绑定身份 + 实时
