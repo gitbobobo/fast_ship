@@ -726,9 +726,11 @@ func (s *ReviewService) diffFilePaths(ctx context.Context, client forge.ReviewCl
 	return paths, true, nil
 }
 
-// diffGitHeaderPaths 解析 `diff --git` 行两侧路径：常规 `a/x b/y` 形态
-// 按 ` b/` 分界；含空格/特殊字符时 git 把 a//b/ 前缀一并包进整段引号
-// `"a/x y" "b/x y"`——先去引号再剥前缀。
+// diffGitHeaderPaths 解析 `diff --git` 行两侧路径：含特殊字符时 git 把
+// a//b/ 前缀一并包进整段引号 `"a/x y" "b/x y"`——先去引号再剥前缀。
+// 未引号形态 git 不对空格引号，路径本身可含 ` b/`（如 images b/x.png），
+// 首个 ` b/` 不一定是分界——非重命名两侧同路径，枚举 ` b/` 分割点取
+// 两侧等值解；重命名两侧不同路径本就由 rename from/to 行覆盖，不解析。
 func diffGitHeaderPaths(rest string) (string, string) {
 	if strings.HasPrefix(rest, `"`) {
 		qa, rem, ok := quotedToken(rest)
@@ -741,11 +743,21 @@ func diffGitHeaderPaths(rest string) (string, string) {
 		}
 		return stripDiffAB(unquoteDiffPath(qa)), stripDiffAB(unquoteDiffPath(qb))
 	}
-	i := strings.Index(rest, " b/")
-	if i <= 0 {
+	if !strings.HasPrefix(rest, "a/") {
 		return "", ""
 	}
-	return stripDiffAB(strings.TrimSpace(rest[:i])), stripDiffAB(strings.TrimSpace(rest[i+1:]))
+	body := rest[2:] // PATH b/PATH：非重命名两侧同路径
+	for i := strings.Index(body, " b/"); i > 0; {
+		if body[:i] == body[i+3:] {
+			return body[:i], body[:i]
+		}
+		n := strings.Index(body[i+1:], " b/")
+		if n < 0 {
+			break
+		}
+		i += 1 + n
+	}
+	return "", ""
 }
 
 // diffSidePath 解析 ---/+++ 行尾路径：token 是 a/x、b/x、/dev/null 或整段

@@ -248,6 +248,8 @@ func TestAgentSubmitResultDiffParseEdges(t *testing.T) {
 			"--- \"a/x\\ty.go\"\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n" +
 			"diff --git a/bin.dat b/bin.dat\n" +
 			"deleted file mode 100644\nBinary files a/bin.dat and /dev/null differ\n" +
+			"diff --git a/images b/logo.png b/images b/logo.png\n" +
+			"deleted file mode 100644\nBinary files a/images b/logo.png and /dev/null differ\n" +
 			"diff --git a/keep.go b/keep.go\nindex a..b\n" +
 			"--- a/keep.go\n+++ b/keep.go\n@@ -1,2 +1,1 @@\n--- a/fake.go\n keep\n",
 	)
@@ -263,8 +265,9 @@ func TestAgentSubmitResultDiffParseEdges(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "核对审查对象") {
 		t.Fatalf("hunk-body fake path = %v, want 40004 核对审查对象", err)
 	}
-	// 引号路径、具名转义路径与仅见 diff --git 头的二进制删除文件均受理。
-	good := `{"findings":[{"level":"P1","file":"dir/gone file.go","body":"不该删除"},{"level":"P2","file":"x\ty.go","body":"含 tab 的删除文件"},{"level":"P2","file":"bin.dat","body":"二进制文件删除影响下载"}],"prior":[],"summary":"s","ui_changed":false,"ui_changed_since_last_visual":false}`
+	// 引号路径、具名转义路径、含 ` b/` 的未引号路径与仅见 diff --git 头的
+	// 二进制删除文件均受理。
+	good := `{"findings":[{"level":"P1","file":"dir/gone file.go","body":"不该删除"},{"level":"P2","file":"x\ty.go","body":"含 tab 的删除文件"},{"level":"P2","file":"images b/logo.png","body":"路径含 b/ 的删除文件"},{"level":"P2","file":"bin.dat","body":"二进制文件删除影响下载"}],"prior":[],"summary":"s","ui_changed":false,"ui_changed_since_last_visual":false}`
 	if err := e.review.AgentSubmitResult(context.Background(), run.ID, []byte(good)); err != nil {
 		t.Fatalf("quoted/binary deleted paths must be accepted: %v", err)
 	}
