@@ -388,8 +388,9 @@ func botParseProviderCost(extra map[string]respjson.Field, openrouter bool) (*fl
 
 // botUSDTotalField 判定 *_usd 字段名是否声明「总额」：词根为裸金额词
 // （cost/amount/charge/price/spend/fee/total/response_cost）或以 total_
-// 开头的字段视作总额；带其他限定的 *_usd（input_/output_ 分项、
-// price_per_ 单价、upstream 上游成本）不是用户实收总额。
+// 开头的字段视作总额；但 total_ 词干内含 input/output/per/upstream 等
+// 分项、单价、上游词段的（total_input_cost_usd 之类）仍不是用户实收
+// 总额。漏判方向安全——置信失败只进 raw 留证，不错价。
 func botUSDTotalField(name string) bool {
 	stem := strings.TrimSuffix(strings.ToLower(name), "_usd")
 	switch stem {
@@ -397,7 +398,17 @@ func botUSDTotalField(name string) bool {
 		"total", "response_cost":
 		return true
 	}
-	return strings.HasPrefix(stem, "total_")
+	if !strings.HasPrefix(stem, "total_") {
+		return false
+	}
+	for _, seg := range strings.Split(stem[len("total_"):], "_") {
+		switch seg {
+		case "input", "output", "prompt", "completion",
+			"per", "unit", "upstream", "cache", "inference":
+			return false
+		}
+	}
+	return true
 }
 
 // botParseCostText 解析金额文本：裸数字（respjson 原始值）或 JSON 字符串

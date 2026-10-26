@@ -168,6 +168,12 @@ func TestBotParseProviderCostPrecedence(t *testing.T) {
 		{name: "非 _usd 后缀字段不作 USD 候选", extra: map[string]respjson.Field{
 			"cost_usd_v2": f("0.5"), "upstream_usd_cost": f("0.5"),
 		}},
+		{name: "total_ 前缀的分项 _usd 不当总额", extra: map[string]respjson.Field{
+			"total_input_cost_usd": f("0.03"), "total_output_cost_usd": f("0.04"),
+		}, wantRaw: true},
+		{name: "total_ 前缀的上游 _usd 不当总额", extra: map[string]respjson.Field{
+			"total_upstream_cost_usd": f("0.03"),
+		}, wantRaw: true},
 		{name: "OR 的 total_cost 置信 USD 并记来源字段", extra: map[string]respjson.Field{
 			"total_cost": f("0.9"),
 		}, openrouter: true, wantCost: ptrCost(0.9), wantRaw: true},
