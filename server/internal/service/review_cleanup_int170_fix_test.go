@@ -986,3 +986,62 @@ func TestCleanupBudgetPendingConvergesFailed(t *testing.T) {
 			after.WorktreeState, after.WorktreeReason)
 	}
 }
+
+// TestCleanupAmbiguousRegistryRefsFailNotRemoved（复审8轮 bot）活投影明说无
+// 分支，但登记把该路径绑定到多个 ref 名：无法唯一映射本运行专属分支，与
+// 404 快照路径同为「无法证明无残留」——收 removed 是撒谎，记
+// failed(branch_unknown)。
+func TestCleanupAmbiguousRegistryRefsFailNotRemoved(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	env := createT3TestEnv(t, e.svc.db, e.user.ID, "env-amb")
+	createTestT3Binding(t, e.svc.db, e.project.ID, env.ID, "t3p")
+
+	run := e.seedCleanableRun(t, repo, 610, env, model.ReviewRunCompleted, "", now)
+	t3 := &fakeReviewT3{
+		threadWorktrees: map[string]T3ThreadWorktree{
+			run.ThreadID: {Path: "/wt/live", Branch: ""},
+		},
+		// 登记仍把该路径绑到两个 ref：工作树步删除后这份快照照旧，其中一
+		// 个很可能就是本运行专属分支，但无法指认。
+		worktrees: []T3Worktree{{Path: "/wt/live", RefNames: []string{"br-x", "br-y"}}},
+		refNames:  []string{"br-x", "br-y"},
+	}
+	review := e.withT3(t3, nil, nil)
+
+	review.cleanupRunWorktree(run, now)
+	var after model.ReviewRun
+	e.svc.db.First(&after, "id = ?", run.ID)
+	if after.WorktreeState != model.ReviewWorktreeFailed ||
+		after.WorktreeReason != worktreeReasonBranchUnknown {
+		t.Fatalf("登记多 ref 歧义应收 failed/branch_unknown, got %q/%q",
+			after.WorktreeState, after.WorktreeReason)
+	}
+}
+
+// TestCleanupBranchPendingConvergesFailed（复审8轮 Note）branch_pending 复
+// 查确认分支仍存活也有上限：reviewBranchPendingMaxTries 次后收敛
+// failed(branch_pending) 交人工，不再永久滞留续排。
+func TestCleanupBranchPendingConvergesFailed(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	env := createT3TestEnv(t, e.svc.db, e.user.ID, "env-bpc")
+	createTestT3Binding(t, e.svc.db, e.project.ID, env.ID, "t3p")
+
+	run := seedBranchPendingRow(t, e, repo, 620, env, "br-stuck", now.Add(-time.Hour))
+	t3 := &fakeReviewT3{refNames: []string{"br-stuck"}}
+	review := e.withT3(t3, nil, nil)
+
+	for i := 0; i < reviewBranchPendingMaxTries; i++ {
+		review.recheckBranchPending(context.Background(), run, now.Add(time.Duration(i)*time.Hour))
+	}
+	var after model.ReviewRun
+	e.svc.db.First(&after, "id = ?", run.ID)
+	if after.WorktreeState != model.ReviewWorktreeFailed ||
+		after.WorktreeReason != worktreeReasonBranchPending {
+		t.Fatalf("确认存活到上限应收 failed/branch_pending, got %q/%q",
+			after.WorktreeState, after.WorktreeReason)
+	}
+}

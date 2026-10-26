@@ -67,6 +67,10 @@ const (
 	// 读取分键——登记读成功每 tick 都复位 registry 键，共用会把核验错误的
 	// 宽限刷成永远 1 次，持续性核验失败永远到不了上限（复审 P2）。
 	worktreeTryOwnership = "ownership"
+	// worktreeTryBranchPending 复查确认「分支仍存活」的累计计数：到
+	// reviewBranchPendingMaxTries 收敛 failed，待清理不是无限期状态（复审
+	// Note）。只统计确认存活的复查——登记读失败走自己的键，不掺进来。
+	worktreeTryBranchPending = "branch-pending"
 )
 
 // 回收问题分类码（INT-170，写入 review_runs.worktree_reason）：聚合通知按
@@ -107,6 +111,11 @@ const (
 // markBudgetPending 每 tick 记一次连续失败，退避封顶 5min 后 ≈1h 仍翻不完
 // 即收敛 failed——无限期待确认只会让行既不回收也不标败、还周期性重读大登记。
 const reviewBudgetPendingMaxTries = 12
+
+// reviewBranchPendingMaxTries 分支待清理态的确认存活上限（复审 Note）：
+// recheckBranchPending 每次确认分支仍存活记一次；退避封顶 1h 下 ≈1 天仍
+// 未消失说明代理收尾与人工都不会再动它，收敛 failed 交人工而非永久滞留。
+const reviewBranchPendingMaxTries = 24
 
 // archiveRuns 调度阶段：挑线程「可能已建成」的终态运行逐条归档——
 // dispatch_started_at 非空即可能已发出启动，包括 dispatched_at 为空
@@ -519,9 +528,14 @@ func (s *ReviewService) cleanupRunWorktree(run *model.ReviewRun, now time.Time) 
 	// 仍是空路径时核验的行快照必然不符，会把一次瞬时 DB 失败误报成「归属核验
 	// 未通过」。
 	if run.WorktreePath == "" {
-		if err := s.db.Model(&model.ReviewRun{}).
+		res := s.db.Model(&model.ReviewRun{}).
 			Where("id = ? AND (worktree_path = '' OR worktree_path IS NULL)", run.ID).
-			Updates(map[string]any{"worktree_path": path, "updated_at": now}).Error; err != nil {
+			Updates(map[string]any{"worktree_path": path, "updated_at": now})
+		if res.Error != nil || res.RowsAffected == 0 {
+			// 与分支写回同口径（复审 Note）：条件未命中=并发写入先行，不能
+			// 当写成功继续——行内内存态会与库背离。
+			s.logger.Warn("回写运行工作区路径失败，等下轮重试",
+				zap.String("run", run.ID), zap.Error(res.Error))
 			return
 		}
 		run.WorktreePath = path
@@ -559,25 +573,30 @@ func (s *ReviewService) cleanupWithRegistry(ctx context.Context, run *model.Revi
 	}
 	// 分支步：行内没有分支名 → 收 removed；分支仍在登记 ref 全集 →
 	// branch_pending（服务端删不了，等代理收尾或人工）；不在 → removed。
+	ambiguousRefs := false
 	if branch == "" && path != "" {
 		// 分支名缺失但登记把该路径绑定到具体分支（升级前 worktree_branch 为
 		// NULL 的旧行、线程 404 后只剩行快照）：借登记恢复——不恢复就收
 		// removed，仍存活的分支从此无人追踪（codex 复审）。同路径登记多个
 		// ref 名视为歧义，不采用。
-		if idx := slices.IndexFunc(reg.Worktrees, func(w T3Worktree) bool { return w.Path == path }); idx >= 0 && len(reg.Worktrees[idx].RefNames) == 1 {
-			branch = reg.Worktrees[idx].RefNames[0]
+		if idx := slices.IndexFunc(reg.Worktrees, func(w T3Worktree) bool { return w.Path == path }); idx >= 0 {
+			if len(reg.Worktrees[idx].RefNames) == 1 {
+				branch = reg.Worktrees[idx].RefNames[0]
+			} else if len(reg.Worktrees[idx].RefNames) > 1 {
+				ambiguousRefs = true
+			}
 		}
 	}
 	if branch == "" {
-		if path != "" && snapshotOnly {
-			// 只剩行快照（线程 404）：分支名缺失且登记已无法从该路径恢复名字
-			// （工作树先一步消失：代理自行收尾、T3 生命周期回收或早前部分删除
-			// ——升级前 worktree_branch 为 NULL 的旧行正中此场景），可能有专属
-			// 分支残留但无法映射回本运行，收 removed 是撒谎；保持未解决记
-			// failed 交人工按路径核查（codex 复审）。活着的投影明说 branch=""
-			// 是权威「没分支」，不在这列。
+		if path != "" && (snapshotOnly || ambiguousRefs) {
+			// 无法证明「没有专属分支残留」的两类场景都记 failed 交人工，不收
+			// removed 撒谎（codex/bot 复审）：a) 只剩行快照（线程 404、升级
+			// 前 NULL 行），工作树先一步消失，分支名缺失且登记无法恢复；
+			// b) 登记把该路径绑定到多个 ref 名，无法唯一映射本运行专属分支。
+			// 活着的投影明说 branch="" 且登记路径无绑定 ref 才是权威「没分
+			// 支」，不在这列。
 			finish(model.ReviewWorktreeFailed, worktreeReasonBranchUnknown,
-				"工作树已不在登记且分支名缺失，无法确认专属分支是否已清理，请按工作区路径人工核查", true)
+				"分支名缺失且登记无法唯一映射本运行专属分支，无法确认是否已清理，请按工作区路径人工核查", true)
 			return
 		}
 		finish(model.ReviewWorktreeRemoved, "", "", false)
@@ -848,7 +867,15 @@ func (s *ReviewService) recheckBranchPending(ctx context.Context, run *model.Rev
 		return
 	}
 	if reg.HasRef(run.WorktreeBranch) {
-		s.scheduleWorktreeBackoff(run.ID, worktreeReasonBranchPending, now)
+		// 分支仍存活：续排等代理收尾或人工，但确认存活有上限——封顶 1h 退避
+		// 下 reviewBranchPendingMaxTries 次（≈1 天）仍未消失说明不会再有人
+		// 清，收敛 failed 交人工而非永久滞留（复审 Note）。
+		if tries := s.bumpWorktreeTries(run.ID, worktreeTryBranchPending); tries < reviewBranchPendingMaxTries {
+			s.scheduleWorktreeBackoff(run.ID, worktreeReasonBranchPending, now)
+			return
+		}
+		s.finishWorktreeCleanup(run, model.ReviewWorktreeFailed, worktreeReasonBranchPending,
+			"本轮专属分支 "+run.WorktreeBranch+" 超过复查上限仍存活；当前远程 T3 无删除分支接口，请人工清理", true, now)
 		return
 	}
 	// 分支消失：removed 并刷新 branch_pending 键的聚合通知（受影响清单收缩）

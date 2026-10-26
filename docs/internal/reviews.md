@@ -995,17 +995,21 @@ SHA-256 前 16 位。
     Exit Failure 也先重读一次登记（报错与执行竞态），已不在即完成；仍在 →
     `failed`（reason=`worktree_remove`）+ 通知。
   - **分支步**：分支名缺失且行内有工作树路径时，先借登记恢复名字——登记
-    中该路径恰有唯一 ref 名即采用（多名歧义不采用）。仍恢复不出：线程 404
-    只剩行快照（分支缺失无法证明，升级前 NULL 行）→ `failed`
-    （reason=`branch_unknown`，可能有专属分支残留但无法映射回本运行，交
-    人工按路径核查）；活着的投影明说无分支、或路径与分支都拿不到 →
-    `removed`。分支仍在登记 ref 名全集 → `worktree_state=branch_pending`
-    + 聚合通知；不在 → `removed`。
+    中该路径恰有唯一 ref 名即采用。仍恢复不出且无法证明「没有专属分支残
+    留」的两类场景都 `failed`（reason=`branch_unknown`，交人工按路径核
+    查）：线程 404 只剩行快照（升级前 NULL 行）；或登记把该路径绑定到多
+    个 ref 名、无法唯一映射（活投影 `branch` 空也可能只是丢字段，证据力
+    与快照相同）。活着的投影明说无分支**且**登记路径无绑定 ref 才是权威
+    「没分支」→ `removed`；路径与分支都拿不到同样 `removed`。分支仍在登
+    记 ref 名全集 → `worktree_state=branch_pending` + 聚合通知；不在 →
+    `removed`。
     `branch_pending` 行按退避复查（只查登记，不读投影），分支消失 →
     `removed` 并刷新聚合通知（受影响清单收缩）；分支仍存活但它绑定的登记
     worktree 路径与行内路径不一致 → 归属不明，直接 `failed`
-    （reason=`ownership_mismatch`）交人工，不静默续排；复查登记明确报错到
-    上限同样降级 `failed`（`registry_error`，终态统一走
+    （reason=`ownership_mismatch`）交人工，不静默续排；确认存活累计 24
+    次（封顶 1h 退避 ≈1 天）仍未消失同样收敛 `failed`（reason=
+    `branch_pending`，提示人工清理）——待清理不是无限期状态；复查登记明
+    确报错到上限同样降级 `failed`（`registry_error`，终态统一走
     `finishWorktreeCleanup`，旧 `branch_pending` 键随转移自动刷新）。
   - **指数退避**（INT-170）：`branch_pending` 复查、`registry_incomplete` 与
     `remove_uncertain` 重试按 runID+reason 存进程内退避表，30s 起指数增长；
