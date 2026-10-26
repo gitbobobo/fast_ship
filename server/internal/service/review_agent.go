@@ -634,7 +634,7 @@ func (s *ReviewService) checkFindingFilesInTree(ctx context.Context, client forg
 		}
 		seen[f.File] = true
 		if len(seen) > findingFileCheckLimit {
-			return reviewResultErr("findings 涉及的不同文件路径超过 %d 个，超出归属校验预算", findingFileCheckLimit)
+			return reviewResultErr("findings 涉及的不同文件路径超过 %d 个，超出归属校验预算——请合并同文件发现或裁剪次要条目后重交", findingFileCheckLimit)
 		}
 		exists, err := client.PathExistsAtRef(ctx, run.RepoFullName, f.File, run.HeadSHA)
 		if err != nil {
