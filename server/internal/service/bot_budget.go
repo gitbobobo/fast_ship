@@ -175,13 +175,13 @@ func botBudgetPercentText(bp int) string {
 }
 
 // botBudgetActualText 渲染当前占比：低于十倍按百分数（"328%"），达到十倍
-// 改按倍数（4200% → "约 42 倍"）避免多位百分数难读。与前端
-// formatSpendPercent 同口径。
+// 改按倍数（4200% → "约 42 倍"）避免多位百分数难读。math.Round 与前端
+// formatSpendPercent 的 Math.round 同为四舍五入，x.5 边界口径一致。
 func botBudgetActualText(pct float64) string {
 	if pct < 1000 {
-		return fmt.Sprintf("%.0f%%", pct)
+		return fmt.Sprintf("%.0f%%", math.Round(pct))
 	}
-	return fmt.Sprintf("约 %.0f 倍", pct/100)
+	return fmt.Sprintf("约 %.0f 倍", math.Round(pct/100))
 }
 
 // ---------- 评估循环 ----------

@@ -164,7 +164,9 @@ describe("formatSpendPercent", () => {
     expect(formatSpendPercent(0)).toBe("0%");
     expect(formatSpendPercent(328)).toBe("328%");
     expect(formatSpendPercent(999)).toBe("999%");
+    expect(formatSpendPercent(998.5)).toBe("999%");
     expect(formatSpendPercent(1000)).toBe("约 10 倍");
+    expect(formatSpendPercent(1050)).toBe("约 11 倍");
     expect(formatSpendPercent(4200)).toBe("约 42 倍");
   });
 });

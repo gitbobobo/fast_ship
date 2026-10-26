@@ -553,11 +553,13 @@ func TestBotBudgetRejectsInvalidInput(t *testing.T) {
 
 func TestBotBudgetActualText(t *testing.T) {
 	for pct, want := range map[float64]string{
-		0:    "0%",
-		328:  "328%",
-		999:  "999%",
-		1000: "约 10 倍",
-		4200: "约 42 倍",
+		0:     "0%",
+		328:   "328%",
+		999:   "999%",
+		998.5: "999%",
+		1000:  "约 10 倍",
+		1050:  "约 11 倍",
+		4200:  "约 42 倍",
 	} {
 		if got := botBudgetActualText(pct); got != want {
 			t.Fatalf("pct=%v 期望 %q 实得 %q", pct, want, got)
