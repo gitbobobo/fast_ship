@@ -298,7 +298,8 @@ func TestPathExistsAtRef(t *testing.T) {
 // TestPathExistsAtRefNotFoundAndTruncated 404 消歧（r2 Note）：dir 级
 // 404 会回探根树——根在则路径不存在（false,nil），根也 404/出错则按
 // 调用失败上报（ref/仓库不可达不能误报成「文件不存在」）；根级请求
-// 自身 404 恒为错误。tree 截断且未命中→报错（无法判定时不猜不存在）。
+// 自身 404 恒为错误。tree 截断且未命中→ErrTreeTruncated（r4：不可判定，
+// 「不在截断清单内」不能当缺席证明，service 按放行+Warn 而非 50200）。
 func TestPathExistsAtRefNotFoundAndTruncated(t *testing.T) {
 	var rootStatus int
 	var rootPayload any
@@ -335,13 +336,13 @@ func TestPathExistsAtRefNotFoundAndTruncated(t *testing.T) {
 		t.Fatal("root request 404 must error")
 	}
 
-	// 根树 200 但截断且未命中 → 报错（用根级路径直查根树）。
+	// 根树 200 但截断且未命中 → ErrTreeTruncated（用根级路径直查根树）。
 	rootStatus, rootPayload = http.StatusOK, map[string]any{
 		"tree":      []map[string]any{{"path": "other.go", "type": "blob"}},
 		"truncated": true,
 	}
-	if _, err := c.PathExistsAtRef(ctx, 1, "octocat/hw", "y.go", "sha-1"); err == nil {
-		t.Fatal("truncated miss must error, not guess nonexistence")
+	if _, err := c.PathExistsAtRef(ctx, 1, "octocat/hw", "y.go", "sha-1"); !errors.Is(err, ErrTreeTruncated) {
+		t.Fatalf("truncated miss = %v, want ErrTreeTruncated", err)
 	}
 
 	// dir 请求本身 5xx → 透传（不进根探）。

@@ -277,6 +277,22 @@ func TestGitHubReviewClientConvertsListAndSubmitTypes(t *testing.T) {
 	}
 }
 
+// 树截断归一（r4 P2）：githubapi.ErrTreeTruncated 经适配器归一为
+// forge.ErrTreeTruncated，service 据此按「不可判定」放行而非 50200。
+func TestGitHubReviewClientTreeTruncated(t *testing.T) {
+	api := &recordingAPI{pathErr: githubapi.ErrTreeTruncated}
+	client := NewGitHubReviewClient(api, 1)
+	exists, err := client.PathExistsAtRef(context.Background(), "o/r", "x/y.go", "sha")
+	if exists || !errors.Is(err, ErrTreeTruncated) {
+		t.Fatalf("truncated = (%v, %v), want (false, ErrTreeTruncated)", exists, err)
+	}
+	// 非截断错误原样透传，不误归一。
+	api.pathErr = errors.New("boom")
+	if _, err := client.PathExistsAtRef(context.Background(), "o/r", "x/y.go", "sha"); errors.Is(err, ErrTreeTruncated) {
+		t.Fatalf("普通错误不应归一为 ErrTreeTruncated, got %v", err)
+	}
+}
+
 func TestGitHubReviewClientErrorPassthrough(t *testing.T) {
 	// 适配器不包装错误：githubapi.StatusError 原样透出，forge 判定函数按状态
 	// 码结构识别——GitHub 行为（错误文本、errors.As 链）不变。

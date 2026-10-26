@@ -587,7 +587,7 @@ func (c *restClient) PathExistsAtRef(ctx context.Context, installationID int64, 
 		}
 	}
 	if out.Truncated {
-		return false, fmt.Errorf("githubapi: tree 响应截断，无法判定 %q 是否存在", path)
+		return false, fmt.Errorf("%w: 无法判定 %q 是否存在", ErrTreeTruncated, path)
 	}
 	return false, nil
 }

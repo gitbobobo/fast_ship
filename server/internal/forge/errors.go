@@ -22,6 +22,11 @@ var ErrForbidden = errors.New("forge: forbidden")
 // 同一判定：service 只认 IsDiffTooLarge，不区分两种来源。
 var ErrDiffTooLarge = errors.New("forge: diff too large")
 
+// ErrTreeTruncated 树条目响应被平台截断（GitHub git/trees truncated=true），
+// 路径存在性不可判定：「不在截断清单内」不能当缺席证明。service 收到此哨兵
+// 时按不可判定放行并记录，不当作调用失败或路径不存在。
+var ErrTreeTruncated = errors.New("forge: tree truncated")
+
 // StatusError 非 2xx 响应。字段与 githubapi.StatusError 同构，便于判定函数
 // 在两种形态间按同一口径取值。
 type StatusError struct {

@@ -84,6 +84,11 @@ var ErrForbidden = errors.New("githubapi: forbidden")
 // （静默截断的 diff 会被误当成完整变更清单），超过上限确定性报错。
 var ErrBodyTooLarge = errors.New("githubapi: 响应体超过读取上限")
 
+// ErrTreeTruncated git/trees 响应被平台截断（truncated=true，如 >10 万条目
+// 的目录）：条目清单不完整，「查不到」不等于「不存在」——按存在性不可判定
+// 上报，调用方不可将其当缺席证明。
+var ErrTreeTruncated = errors.New("githubapi: tree 响应被截断")
+
 // StatusError 非 2xx 响应。
 type StatusError struct {
 	StatusCode int

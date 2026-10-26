@@ -152,7 +152,11 @@ func (c *GitHubReviewClient) GetRepository(ctx context.Context, repoFullName str
 }
 
 func (c *GitHubReviewClient) PathExistsAtRef(ctx context.Context, repoFullName, path, ref string) (bool, error) {
-	return c.api.PathExistsAtRef(ctx, c.installationID, repoFullName, path, ref)
+	exists, err := c.api.PathExistsAtRef(ctx, c.installationID, repoFullName, path, ref)
+	if errors.Is(err, githubapi.ErrTreeTruncated) {
+		return false, fmt.Errorf("%w: %s@%s", ErrTreeTruncated, path, ref)
+	}
+	return exists, err
 }
 
 // Bearer 媒体下载令牌：委派底层实现的 Bearer(ctx, installationID)（私有仓库

@@ -36,6 +36,8 @@ type Fake struct {
 	treePaths        map[string]map[string]map[string]bool     // repo -> ref -> 路径集合（SetTreeFiles 建立；无 repo 索引=不建模树）
 	treeErrs         map[string]error                          // repo -> PathExistsAtRef 注入错误
 	treeHook         func(repo, ref, path string)              // PathExistsAtRef 前置钩子（测试注入并发副作用）
+	prCalls          int                                       // GetPullRequest 已调用次数（prHook 判定用）
+	prHook           func(call int)                            // GetPullRequest 前置钩子，call 为本次序号（测试注入并发副作用）
 	hookDeliveries   []HookDelivery                            // 投递记录（SetHookDeliveries 覆盖，重投时追加行）
 	hookPayloads     map[int64]json.RawMessage                 // delivery id -> 投递 payload（SetHookDeliveryPayload 登记）
 	redeliveredIDs   []int64                                   // 已触发重投的 delivery id（调用序）
@@ -176,6 +178,14 @@ func (f *Fake) SetTreeError(repo string, err error) {
 	f.treeErrs[fakeRepoKey(repo)] = err
 }
 
+// SetPRHook 注册 GetPullRequest 前置钩子：按调用序号触发（测试中在 pr2
+// 复核等窗口注入并发副作用）。传 nil 清除。
+func (f *Fake) SetPRHook(fn func(call int)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.prHook = fn
+}
+
 // SetTreeHook 注册 PathExistsAtRef 前置钩子：在查询判定前执行（测试中模拟
 // 校验期间的外界状态变化，如并发提交完成运行）。nil 清除。
 func (f *Fake) SetTreeHook(fn func(repo, ref, path string)) {
@@ -311,6 +321,13 @@ func (f *Fake) SetPRError(repo string, err error) {
 
 func (f *Fake) GetPullRequest(ctx context.Context, installationID int64, repoFullName string, number int) (*githubapi.PullRequest, error) {
 	f.record("GetPullRequest", repoFullName, number, "")
+	f.mu.Lock()
+	f.prCalls++
+	hook, call := f.prHook, f.prCalls
+	f.mu.Unlock()
+	if hook != nil {
+		hook(call)
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if err := f.prErrs[fakeRepoKey(repoFullName)]; err != nil {

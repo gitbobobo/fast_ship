@@ -178,6 +178,165 @@ func TestAgentSubmitResultDiffTooLargeInconclusive(t *testing.T) {
 	}
 }
 
+// TestAgentSubmitResultTreeTruncatedInconclusive 树条目截断时「不在截断
+// 清单内」不能当缺席证明（r4 P2）——按不可判定放行完成而非 50200 卡死
+// （重试只拿到同一份截断树）；其它树错误仍 50200。
+func TestAgentSubmitResultTreeTruncatedInconclusive(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	e.fake.SetPR(repo, 31, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 31, HeadSHA: "sha-tr",
+		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
+	})
+	e.svc.db.Create(&model.ReviewPullRequest{
+		RepoFullName: repo, PRNumber: 31, ProjectID: e.project.ID, UserID: e.user.ID,
+		InstallationID: 42, HeadSHA: "sha-tr", RoundNumber: 1, UpdatedAt: now,
+	})
+	run := e.seedRun(t, repo, 31, "sha-tr", model.ReviewRunRunning, now)
+	e.svc.db.Create(&model.ReviewRunToken{
+		RunID: run.ID, TokenHash: "h-tr", CreatedAt: now, ExpiresAt: now.Add(time.Hour),
+	})
+	body := `{"findings":[{"level":"P1","file":"big/f.go","body":"x"}],"prior":[],"summary":"s","ui_changed":false,"ui_changed_since_last_visual":false}`
+
+	// 非截断类树错误 → 50200，运行与令牌零副作用。
+	e.fake.SetTreeError(repo, errors.New("github 5xx"))
+	err := e.review.AgentSubmitResult(context.Background(), run.ID, []byte(body))
+	assertErrCode(t, err, 50200)
+	var mid model.ReviewRun
+	e.svc.db.First(&mid, "id = ?", run.ID)
+	if mid.Status != model.ReviewRunRunning {
+		t.Fatalf("status = %q, tree error must not change run", mid.Status)
+	}
+
+	// 截断（ErrTreeTruncated→适配器归一为 forge 哨兵）→ 不可判定放行完成。
+	e.fake.SetTreeError(repo, githubapi.ErrTreeTruncated)
+	if err := e.review.AgentSubmitResult(context.Background(), run.ID, []byte(body)); err != nil {
+		t.Fatalf("truncated tree must not reject unverifiable path: %v", err)
+	}
+	var after model.ReviewRun
+	e.svc.db.First(&after, "id = ?", run.ID)
+	if after.Status != model.ReviewRunCompleted {
+		t.Fatalf("status = %q, want completed", after.Status)
+	}
+}
+
+// TestAgentSubmitResultDiffParseEdges diff 兜底解析边界（r4 P2+Note）：
+// 整段引号路径（"a/x y"）要去引号再剥前缀；diff --git 头覆盖无 hunk
+// 文件（二进制/纯删除）；hunk 体内形似 `--- a/` 的被删内容行不收。
+func TestAgentSubmitResultDiffParseEdges(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	e.fake.SetPR(repo, 32, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 32, HeadSHA: "sha-e",
+		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
+	})
+	e.svc.db.Create(&model.ReviewPullRequest{
+		RepoFullName: repo, PRNumber: 32, ProjectID: e.project.ID, UserID: e.user.ID,
+		InstallationID: 42, HeadSHA: "sha-e", RoundNumber: 1, UpdatedAt: now,
+	})
+	e.fake.SetTreeFiles(repo, "sha-e", "keep.go")
+	// 引号删除文件、无 hunk 的二进制删除（仅 diff --git 头可见）、hunk 体
+	// 内一行被删内容恰以 `-- a/` 开头（渲染成 --- a/fake.go，不能当路径收）。
+	e.fake.SetDiff(
+		"diff --git \"a/dir/gone file.go\" \"b/dir/gone file.go\"\n" +
+			"deleted file mode 100644\nindex 1..0\n" +
+			"--- \"a/dir/gone file.go\"\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n" +
+			"diff --git a/bin.dat b/bin.dat\n" +
+			"deleted file mode 100644\nBinary files a/bin.dat and /dev/null differ\n" +
+			"diff --git a/keep.go b/keep.go\nindex a..b\n" +
+			"--- a/keep.go\n+++ b/keep.go\n@@ -1,2 +1,1 @@\n--- a/fake.go\n keep\n",
+	)
+
+	run := e.seedRun(t, repo, 32, "sha-e", model.ReviewRunRunning, now)
+	e.svc.db.Create(&model.ReviewRunToken{
+		RunID: run.ID, TokenHash: "h-edge", CreatedAt: now, ExpiresAt: now.Add(time.Hour),
+	})
+
+	// hunk 体内的形似路径行不收 → fake.go 仍 40004。
+	bad := `{"findings":[{"level":"P1","file":"fake.go","body":"x"}],"prior":[],"summary":"s","ui_changed":false,"ui_changed_since_last_visual":false}`
+	err := e.review.AgentSubmitResult(context.Background(), run.ID, []byte(bad))
+	if err == nil || !strings.Contains(err.Error(), "核对审查对象") {
+		t.Fatalf("hunk-body fake path = %v, want 40004 核对审查对象", err)
+	}
+	// 引号路径与仅见 diff --git 头的二进制删除文件均受理。
+	good := `{"findings":[{"level":"P1","file":"dir/gone file.go","body":"不该删除"},{"level":"P2","file":"bin.dat","body":"二进制文件删除影响下载"}],"prior":[],"summary":"s","ui_changed":false,"ui_changed_since_last_visual":false}`
+	if err := e.review.AgentSubmitResult(context.Background(), run.ID, []byte(good)); err != nil {
+		t.Fatalf("quoted/binary deleted paths must be accepted: %v", err)
+	}
+	var after model.ReviewRun
+	e.svc.db.First(&after, "id = ?", run.ID)
+	if after.Status != model.ReviewRunCompleted {
+		t.Fatalf("status = %q, want completed", after.Status)
+	}
+}
+
+// TestAgentSubmitResultConcurrentReplayAtHeadRecheck pr2 复核窗口的并发
+// 完全相同重放（r4 Note）：文件校验通过后、事务前并发提交已完成——GetPullRequest
+// 复核失败或 head 前进两个出口都要先复核幂等成功，不报 50200/40920。
+func TestAgentSubmitResultConcurrentReplayAtHeadRecheck(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	e.fake.SetPR(repo, 33, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 33, HeadSHA: "sha-r",
+		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
+	})
+	e.svc.db.Create(&model.ReviewPullRequest{
+		RepoFullName: repo, PRNumber: 33, ProjectID: e.project.ID, UserID: e.user.ID,
+		InstallationID: 42, HeadSHA: "sha-r", RoundNumber: 1, UpdatedAt: now,
+	})
+	e.fake.SetTreeFiles(repo, "sha-r", "a.go")
+
+	body := `{"findings":[{"level":"P1","file":"a.go","body":"x"}],"prior":[],"summary":"s","ui_changed":false,"ui_changed_since_last_visual":false}`
+	expected, err := json.Marshal(&api.ReviewCodeResult{
+		Findings: []api.ReviewCodeFinding{{Level: api.P1, File: "a.go", Body: "x"}},
+		Prior:    []api.ReviewPriorDecision{},
+		Summary:  "s", UiChanged: false, UiChangedSinceLastVisual: false,
+	})
+	if err != nil {
+		t.Fatalf("marshal canonical: %v", err)
+	}
+	complete := func(runID string) {
+		e.svc.db.Model(&model.ReviewRun{}).Where("id = ?", runID).
+			Updates(map[string]any{"status": model.ReviewRunCompleted, "result_json": string(expected)})
+	}
+
+	// pr2 复核拉取失败分支：第 2 次 GetPullRequest 前并发完成 + 注入错误。
+	run1 := e.seedRun(t, repo, 33, "sha-r", model.ReviewRunRunning, now)
+	calls1 := 0
+	e.fake.SetPRHook(func(int) {
+		calls1++
+		if calls1 == 2 {
+			complete(run1.ID)
+			e.fake.SetPRError(repo, errors.New("github 5xx"))
+		}
+	})
+	if err := e.review.AgentSubmitResult(context.Background(), run1.ID, []byte(body)); err != nil {
+		t.Fatalf("pr2-error exit must honor concurrent replay: %v", err)
+	}
+	e.fake.SetPRHook(nil)
+	e.fake.SetPRError(repo, nil)
+
+	// pr2 head 前进分支：第 2 次 GetPullRequest 前并发完成 + head 变了。
+	run2 := e.seedRun(t, repo, 33, "sha-r", model.ReviewRunRunning, now)
+	calls2 := 0
+	e.fake.SetPRHook(func(int) {
+		calls2++
+		if calls2 == 2 {
+			complete(run2.ID)
+			e.fake.SetPR(repo, 33, &githubapi.PullRequest{
+				RepoFullName: repo, Number: 33, HeadSHA: "sha-new",
+				Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
+			})
+		}
+	})
+	if err := e.review.AgentSubmitResult(context.Background(), run2.ID, []byte(body)); err != nil {
+		t.Fatalf("pr2-supersede exit must honor concurrent replay: %v", err)
+	}
+}
+
 // TestAgentSubmitResultFileCheckBudget 唯一路径数超预算（64）→ 40004，
 // 不做逐个 GitHub 查询的失控扇出。
 func TestAgentSubmitResultFileCheckBudget(t *testing.T) {

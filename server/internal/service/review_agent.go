@@ -487,18 +487,22 @@ func (s *ReviewService) AgentSubmitResult(ctx context.Context, runID string, bod
 		return supersede()
 	}
 
+	// completedReplay 复核运行是否已被并发完全相同提交完成：本次加载时
+	// 运行在途，校验/复核期间另一提交落库——与函数头终态重放判定同口径，
+	// 命中按幂等成功返回，避免合法重放被 502/40004/40920 顶掉。
+	completedReplay := func() bool {
+		var cur model.ReviewRun
+		return s.db.WithContext(ctx).Where("id = ?", run.ID).First(&cur).Error == nil &&
+			cur.Status == model.ReviewRunCompleted && cur.ResultJSON != "" && cur.ResultJSON == string(canonical)
+	}
+
 	// 新发现文件归属校验（INT-169）：代码审查 findings 的文件必须存在于
 	// 本轮 head_sha 的仓库树中；不存在的路径 40004 拒收并要求核对审查
 	// 对象（不改运行状态，可修正后重交）。prior 不查——历史意见里已删除/
 	// 重命名的路径合法。位置在终态重放判定之后（合法重放不受新检查影响）
 	// 与事务之前（无任何状态副作用）。
 	if err := s.checkFindingFilesInTree(ctx, client, run, codeFindings); err != nil {
-		// 并发完全相同重放窗口：本次加载时运行还在途，校验期间另一提交已
-		// 完成——与函数头的终态重放判定同口径复核，避免合法重放被 502/40004
-		// 顶掉（INT-169）。校验失败本身也可能使对方无法完成，复核结果为准。
-		var cur model.ReviewRun
-		if rerr := s.db.WithContext(ctx).Where("id = ?", run.ID).First(&cur).Error; rerr == nil &&
-			cur.Status == model.ReviewRunCompleted && cur.ResultJSON != "" && cur.ResultJSON == string(canonical) {
+		if completedReplay() {
 			return nil
 		}
 		return err
@@ -508,9 +512,15 @@ func (s *ReviewService) AgentSubmitResult(ctx context.Context, runID string, bod
 	now = time.Now().UTC()
 	pr2, err := client.GetPullRequest(ctx, run.RepoFullName, run.PRNumber)
 	if err != nil {
+		if completedReplay() {
+			return nil
+		}
 		return errs.New(errs.ErrGitHubAPI.Code, "复核 PR head 失败: "+err.Error())
 	}
 	if !prReviewable(pr2) || (pr2.HeadSHA != "" && !strings.EqualFold(pr2.HeadSHA, run.HeadSHA)) {
+		if completedReplay() {
+			return nil
+		}
 		return supersede()
 	}
 
@@ -617,6 +627,17 @@ func (s *ReviewService) checkFindingFilesInTree(ctx context.Context, client forg
 		}
 		exists, err := client.PathExistsAtRef(ctx, run.RepoFullName, f.File, run.HeadSHA)
 		if err != nil {
+			if errors.Is(err, forge.ErrTreeTruncated) {
+				// 树条目截断：「不在截断清单内」不等于不存在——与 diff
+				// 兜底不可证同口径放行并 Warn，不按调用失败把合法提交
+				// 卡成永久 50200（重试只拿到同一份截断树）。
+				s.logger.Warn("审查文件归属树响应截断，路径存在性不可判定，放行",
+					zap.String("run_id", run.ID),
+					zap.String("repo", run.RepoFullName),
+					zap.String("file", f.File),
+				)
+				continue
+			}
 			return errs.New(errs.ErrGitHubAPI.Code, "校验 findings 文件归属失败: "+err.Error())
 		}
 		if exists {
@@ -655,30 +676,141 @@ func (s *ReviewService) diffFilePaths(ctx context.Context, client forge.ReviewCl
 		}
 		return nil, false, err
 	}
+	// 只在文件头区块解析 ---/+++/rename 行（diff --git 之后、首个 @@ hunk
+	// 之前）：被删除行原文若以 `-- a/` 开头会渲染成 `--- a/foo`，在 hunk
+	// 体内——不能当路径收（虚增存在性证据会削弱校验本意）。
 	paths := map[string]bool{}
+	inHeader := false
 	for _, line := range strings.Split(diff, "\n") {
-		for _, p := range []string{"--- a/", "+++ b/"} {
-			if strings.HasPrefix(line, p) {
-				paths[unquoteDiffPath(strings.TrimSpace(line[len(p):]))] = true
+		if strings.HasPrefix(line, "diff --git ") {
+			inHeader = true
+			// diff --git 头本身覆盖无 hunk 文件（二进制、纯 mode 变更、
+			// 无文本块的删除），两侧路径都收。
+			a, b := diffGitHeaderPaths(line[len("diff --git "):])
+			if a != "" {
+				paths[a] = true
 			}
+			if b != "" {
+				paths[b] = true
+			}
+			continue
 		}
-		for _, p := range []string{"rename from ", "rename to "} {
-			if strings.HasPrefix(line, p) {
-				paths[unquoteDiffPath(strings.TrimSpace(line[len(p):]))] = true
+		if strings.HasPrefix(line, "@@") {
+			inHeader = false
+			continue
+		}
+		if !inHeader {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(line, "--- "), strings.HasPrefix(line, "+++ "):
+			if p := diffSidePath(line[4:]); p != "" {
+				paths[p] = true
+			}
+		case strings.HasPrefix(line, "rename from "):
+			if p := unquoteDiffPath(strings.TrimSpace(line[len("rename from "):])); p != "" {
+				paths[p] = true
+			}
+		case strings.HasPrefix(line, "rename to "):
+			if p := unquoteDiffPath(strings.TrimSpace(line[len("rename to "):])); p != "" {
+				paths[p] = true
 			}
 		}
 	}
 	return paths, true, nil
 }
 
-// unquoteDiffPath git diff 对含特殊字符的路径整段加引号；剥离引号让
-// finding 里的真实路径能匹配。仅处理整段引号形态，不还原转义序列——
-// 含转义的路径匹配不上按不存在处理，不会误放。
-func unquoteDiffPath(p string) string {
-	if len(p) >= 2 && p[0] == '"' && p[len(p)-1] == '"' {
-		return p[1 : len(p)-1]
+// diffGitHeaderPaths 解析 `diff --git` 行两侧路径：常规 `a/x b/y` 形态
+// 按 ` b/` 分界；含空格/特殊字符时 git 把 a//b/ 前缀一并包进整段引号
+// `"a/x y" "b/x y"`——先去引号再剥前缀。
+func diffGitHeaderPaths(rest string) (string, string) {
+	if strings.HasPrefix(rest, `"`) {
+		qa, rem, ok := quotedToken(rest)
+		if !ok {
+			return "", ""
+		}
+		qb, _, ok := quotedToken(strings.TrimSpace(rem))
+		if !ok {
+			return "", ""
+		}
+		return stripDiffAB(unquoteDiffPath(qa)), stripDiffAB(unquoteDiffPath(qb))
+	}
+	i := strings.Index(rest, " b/")
+	if i <= 0 {
+		return "", ""
+	}
+	return stripDiffAB(strings.TrimSpace(rest[:i])), stripDiffAB(strings.TrimSpace(rest[i+1:]))
+}
+
+// diffSidePath 解析 ---/+++ 行尾路径：token 是 a/x、b/x、/dev/null 或整段
+// 引号 "a/x y"（引号内才含前缀）。返回仓库相对路径；/dev/null 与无法识别
+// 返回空串。
+func diffSidePath(tok string) string {
+	p := stripDiffAB(unquoteDiffPath(strings.TrimSpace(tok)))
+	if p == "" || p == "/dev/null" {
+		return ""
 	}
 	return p
+}
+
+// stripDiffAB 剥路径前的 a//b/ 段标记（diff --git 与 ---/+++ 行用）。
+func stripDiffAB(p string) string {
+	if strings.HasPrefix(p, "a/") || strings.HasPrefix(p, "b/") {
+		return p[2:]
+	}
+	return p
+}
+
+// quotedToken 取以 " 开头的引号串（内层 \" 跳过），返回含引号的 token、
+// 剩余串与是否闭合；s 不以 " 开头或不闭合返回 ok=false。
+func quotedToken(s string) (tok, rest string, ok bool) {
+	if !strings.HasPrefix(s, `"`) {
+		return "", s, false
+	}
+	for i := 1; i < len(s); i++ {
+		switch s[i] {
+		case '\\':
+			i++
+		case '"':
+			return s[:i+1], s[i+1:], true
+		}
+	}
+	return "", s, false
+}
+
+// unquoteDiffPath git core.quotePath 的 C 风格引号还原：整段 "..." 去引号，
+// 还原 \\、\" 与 \NNN 三位八进制字节（非 ASCII 路径的编码形态）。非引号
+// 形态原样返回；不闭合或不可识别的转义按字面保留——匹配不上按缺席处理，
+// 不会误放。
+func unquoteDiffPath(p string) string {
+	if len(p) < 2 || p[0] != '"' || p[len(p)-1] != '"' {
+		return p
+	}
+	body := p[1 : len(p)-1]
+	var sb strings.Builder
+	sb.Grow(len(body))
+	for i := 0; i < len(body); i++ {
+		c := body[i]
+		if c != '\\' || i+1 >= len(body) {
+			sb.WriteByte(c)
+			continue
+		}
+		i++
+		n := body[i]
+		if n == '\\' || n == '"' {
+			sb.WriteByte(n)
+			continue
+		}
+		if n >= '0' && n <= '7' && i+2 < len(body) &&
+			body[i+1] >= '0' && body[i+1] <= '7' && body[i+2] >= '0' && body[i+2] <= '7' {
+			sb.WriteByte((n-'0')<<6 | (body[i+1]-'0')<<3 | (body[i+2] - '0'))
+			i += 2
+			continue
+		}
+		sb.WriteByte('\\')
+		sb.WriteByte(n)
+	}
+	return sb.String()
 }
 
 // decodeStrict 严格反序列化：未知字段与类型错误一律 40004。
