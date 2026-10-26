@@ -217,8 +217,9 @@ type BotModelRequest struct {
 	// 不进计价公式。
 	ReasoningTokens *int64 `json:"reasoning_tokens"`
 	// ProviderCost 是供应商 usage 里返回的实际金额，只在币别置信 USD
-	// 时落库（OpenRouter 的 cost / total_cost，或名字声明 USD 的 *_usd
-	// 字段）；本列可安全求和。
+	// 时落库（OpenRouter 的 cost / total_cost，或总额形态的 *_usd 字段
+	// ——裸金额词根或 total_ 前缀，分项/单价类 *_usd 不作总额）；本列
+	// 可安全求和。
 	// 币别不明或非用户实收的金额不进本列，原始字段名与值记进
 	// ProviderCostRaw（只记录不展示，INT-164）。
 	ProviderCost    *float64 `json:"provider_cost"`

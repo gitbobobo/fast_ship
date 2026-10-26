@@ -141,11 +141,11 @@ func TestBotParseProviderCostPrecedence(t *testing.T) {
 			"cost": f("0.5"), "total_cost": f("0.9"),
 		}, wantRaw: true},
 		{name: "非 OR 的 cost 记 raw 且不挡 _usd 字段", extra: map[string]respjson.Field{
-			"cost": f("0.5"), "prompt_usd": f("0.07"),
+			"cost": f("0.5"), "cost_usd": f("0.07"),
 		}, wantCost: ptrCost(0.07), wantRaw: true},
 		{name: "upstream 记 raw 但不挡 _usd 字段", extra: map[string]respjson.Field{
 			"cost_details": f(`{"upstream_inference_cost":0.01}`),
-			"prompt_usd":   f("0.07"),
+			"cost_usd":     f("0.07"),
 		}, wantCost: ptrCost(0.07), wantRaw: true},
 		{name: "OR 的 cost 置信 USD", extra: map[string]respjson.Field{
 			"cost": f("0.5"), "total_cost": f("0.9"),
@@ -156,6 +156,18 @@ func TestBotParseProviderCostPrecedence(t *testing.T) {
 		{name: "字段名含 _usd 视为 USD", extra: map[string]respjson.Field{
 			"total_tokens_billed_usd": f("0.07"),
 		}, wantCost: ptrCost(0.07), wantRaw: true},
+		{name: "分项 _usd 字段不当总额只进 raw", extra: map[string]respjson.Field{
+			"input_cost_usd": f("0.03"), "output_cost_usd": f("0.04"),
+		}, wantRaw: true},
+		{name: "单价 _usd 字段不当总额只进 raw", extra: map[string]respjson.Field{
+			"price_per_token_usd": f("0.0001"),
+		}, wantRaw: true},
+		{name: "总额 _usd 优先于分项 _usd", extra: map[string]respjson.Field{
+			"input_cost_usd": f("0.03"), "cost_usd": f("0.07"),
+		}, wantCost: ptrCost(0.07), wantRaw: true},
+		{name: "非 _usd 后缀字段不作 USD 候选", extra: map[string]respjson.Field{
+			"cost_usd_v2": f("0.5"), "upstream_usd_cost": f("0.5"),
+		}},
 		{name: "OR 的 total_cost 置信 USD 并记来源字段", extra: map[string]respjson.Field{
 			"total_cost": f("0.9"),
 		}, openrouter: true, wantCost: ptrCost(0.9), wantRaw: true},

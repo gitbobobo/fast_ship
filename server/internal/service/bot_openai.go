@@ -282,7 +282,8 @@ func botIsOpenRouterBase(baseURL string) bool {
 // 处理；多字段并存按固定优先级取首个可解析值，同一响应解析结果稳定：
 //  1. cost / total_cost —— 裸名不带币别声明，仅 OpenRouter 语义按 USD
 //     展示，其余地址币别不明只进 raw；
-//  2. 名字含 _usd 的字段 —— 字段名自身声明币别，按约定视为 USD；
+//  2. 名字以 _usd 结尾且为总额形态的字段 —— 字段名自身声明币别，按
+//     约定视为 USD；
 //  3. cost_details.upstream_inference_cost —— OpenRouter 付给上游的金额
 //     而非用户实收，币别虽是 USD 也只进 raw。
 func botParseProviderCost(extra map[string]respjson.Field, openrouter bool) (*float64, *string) {
@@ -328,21 +329,39 @@ func botParseProviderCost(extra map[string]respjson.Field, openrouter bool) (*fl
 			rawNote = rawRecord("total_cost", extra["total_cost"])
 		}
 	}
-	// *_usd 字段按名字排序取首个可解析的：map 遍历无序，不稳定会让同一
+	// *_usd 字段只置信「总额」形态的名字：分项（input_/output_）与单价
+	// （price_per_）类 *_usd 不是用户实收总额，置信托付会系统性错价。
+	// 总额候选按名字排序取首个可解析的：map 遍历无序，不稳定会让同一
 	// 响应两次解析选出不同字段。
 	if usd == nil {
-		names := make([]string, 0, len(extra))
+		totals := make([]string, 0, len(extra))
+		others := make([]string, 0, len(extra))
 		for name := range extra {
-			if strings.Contains(strings.ToLower(name), "_usd") {
-				names = append(names, name)
+			if !strings.HasSuffix(strings.ToLower(name), "_usd") {
+				continue
+			}
+			if botUSDTotalField(name) {
+				totals = append(totals, name)
+			} else {
+				others = append(others, name)
 			}
 		}
-		sort.Strings(names)
-		for _, name := range names {
+		sort.Strings(totals)
+		for _, name := range totals {
 			if v, ok := field(extra[name]); ok {
 				usd = v
 				usdField = name
 				break
+			}
+		}
+		// 分项/单价类 *_usd 有实值但不敢当总额：留一条 raw 证据备查。
+		if usd == nil && rawNote == nil {
+			sort.Strings(others)
+			for _, name := range others {
+				if _, ok := field(extra[name]); ok {
+					rawNote = rawRecord(name, extra[name])
+					break
+				}
 			}
 		}
 	}
@@ -365,6 +384,20 @@ func botParseProviderCost(extra map[string]respjson.Field, openrouter bool) (*fl
 		}
 	}
 	return usd, rawNote
+}
+
+// botUSDTotalField 判定 *_usd 字段名是否声明「总额」：词根为裸金额词
+// （cost/amount/charge/price/spend/fee/total/response_cost）或以 total_
+// 开头的字段视作总额；带其他限定的 *_usd（input_/output_ 分项、
+// price_per_ 单价、upstream 上游成本）不是用户实收总额。
+func botUSDTotalField(name string) bool {
+	stem := strings.TrimSuffix(strings.ToLower(name), "_usd")
+	switch stem {
+	case "cost", "amount", "charge", "price", "spend", "fee",
+		"total", "response_cost":
+		return true
+	}
+	return strings.HasPrefix(stem, "total_")
 }
 
 // botParseCostText 解析金额文本：裸数字（respjson 原始值）或 JSON 字符串
