@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/model"
@@ -881,16 +882,29 @@ func (s *ReviewService) recheckBranchPending(ctx context.Context, run *model.Rev
 	if len(bound) > 0 {
 		match := -1
 		if run.WorktreePath == "" {
-			match = 0
+			// 行内无路径快照时只有唯一绑定才可采信：同分支可被绑到多个不
+			// 同路径的 worktree（同分支上另建、旧登记残留），bound[0] 按路
+			// 径排序不代表是本运行的——盲信会把别人的工作树写回并删掉
+			// （复审 P2）。多绑定无快照 = 归属不明，交人工。
+			if len(bound) == 1 {
+				match = 0
+			}
 		} else if i := slices.IndexFunc(bound, func(w T3Worktree) bool { return w.Path == run.WorktreePath }); i >= 0 {
 			match = i
 		}
 		if match < 0 {
-			// 本轮分支被绑到与行内快照不同的工作区：归属不明——不删（歧义资
-			// 源），也不无限续排（无信号的永久滞留，复审 P2），记 failed 交
-			// 人工。
-			s.finishWorktreeCleanup(run, model.ReviewWorktreeFailed, worktreeReasonOwnershipMismatch,
-				"本轮分支 "+run.WorktreeBranch+" 被绑定到工作区 "+bound[0].Path+"，与记录不一致，未执行删除", true, now)
+			// 归属不明：不删（歧义资源），也不无限续排（无信号的永久滞
+			// 留，复审 P2），记 failed 交人工。两种歧义文案分开——行内有快
+			// 照路径是「与记录冲突」，无快照多绑定是「无法指认」。
+			msg := "本轮分支 " + run.WorktreeBranch + " 被绑定到工作区 " + bound[0].Path + "，与记录不一致，未执行删除"
+			if run.WorktreePath == "" {
+				paths := make([]string, 0, len(bound))
+				for _, w := range bound {
+					paths = append(paths, w.Path)
+				}
+				msg = "本轮分支 " + run.WorktreeBranch + " 被绑定到多个工作区（" + strings.Join(paths, ", ") + "），行内无路径快照无法指认，未执行删除"
+			}
+			s.finishWorktreeCleanup(run, model.ReviewWorktreeFailed, worktreeReasonOwnershipMismatch, msg, true, now)
 			return
 		}
 		if run.WorktreePath == "" {

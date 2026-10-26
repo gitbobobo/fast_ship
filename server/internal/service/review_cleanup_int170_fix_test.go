@@ -1131,3 +1131,36 @@ func TestCleanupBranchPendingPrefersSamePathBinding(t *testing.T) {
 			after.WorktreeState, after.WorktreeReason)
 	}
 }
+
+// TestCleanupBranchPendingNoPathMultiBindingFails（复审10轮 bot）行内无路径
+// 快照且分支被绑到多个不同路径 worktree：bound[0] 按路径排序不代表是本运
+// 行的，盲信会删掉别人的工作树——归属不明记 failed 交人工。
+func TestCleanupBranchPendingNoPathMultiBindingFails(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	env := createT3TestEnv(t, e.svc.db, e.user.ID, "env-npmb")
+	createTestT3Binding(t, e.svc.db, e.project.ID, env.ID, "t3p")
+
+	run := seedBranchPendingRow(t, e, repo, 660, env, "br-many", now.Add(-time.Minute))
+	t3 := &fakeReviewT3{
+		worktrees: []T3Worktree{
+			{Path: "/wt/a", RefNames: []string{"br-many"}},
+			{Path: "/wt/b", RefNames: []string{"br-many"}},
+		},
+		refNames: []string{"br-many"},
+	}
+	review := e.withT3(t3, nil, nil)
+
+	review.recheckBranchPending(context.Background(), run, now)
+	var after model.ReviewRun
+	e.svc.db.First(&after, "id = ?", run.ID)
+	if after.WorktreeState != model.ReviewWorktreeFailed ||
+		after.WorktreeReason != worktreeReasonOwnershipMismatch {
+		t.Fatalf("无快照多绑定应收 failed/ownership_mismatch, got %q/%q",
+			after.WorktreeState, after.WorktreeReason)
+	}
+	if after.WorktreePath != "" {
+		t.Fatalf("歧义场景不得写回路径, got %q", after.WorktreePath)
+	}
+}
