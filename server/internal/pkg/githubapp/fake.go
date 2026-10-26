@@ -42,6 +42,7 @@ type Fake struct {
 	redeliverErr     error                                     // SetRedeliverError 注入的重投错误（非 nil 时不记账）
 	nextID           int64
 	diffText         string
+	diffErr          error
 
 	// InstallationID ResolveInstallation 返回的固定安装 id（默认 1）；
 	// 置 <=0 表示不支持解析（返回错误）。
@@ -134,6 +135,13 @@ func (f *Fake) SetPR(repo string, number int, pr *githubapi.PullRequest) {
 		pr.State = "open"
 	}
 	f.prs[key][number] = pr
+}
+
+// SetDiffError 让 GetPullRequestDiff 返回指定错误（截断/平台失败注入）。
+func (f *Fake) SetDiffError(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.diffErr = err
 }
 
 // SetDiff 覆盖固定 diff 文本。
@@ -320,6 +328,9 @@ func (f *Fake) GetPullRequestDiff(ctx context.Context, installationID int64, rep
 	f.record("GetPullRequestDiff", repoFullName, number, "")
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.diffErr != nil {
+		return "", f.diffErr
+	}
 	return f.diffText, nil
 }
 

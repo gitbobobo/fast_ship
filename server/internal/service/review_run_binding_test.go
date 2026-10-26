@@ -131,6 +131,53 @@ func TestAgentSubmitResultDeletedFileFindings(t *testing.T) {
 	}
 }
 
+// TestAgentSubmitResultDiffTooLargeInconclusive diff 超本端读入上限被截断
+// 时树未命中路径的「不在 diff 集」不再是有效缺席证据（r3 codex P2）——
+// 放行完成而非 40004/50200 卡死（重试只会拿到同一份截断 diff）；非截断
+// 类 diff 拉取失败仍按 50200 平台失败上报。
+func TestAgentSubmitResultDiffTooLargeInconclusive(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	e.fake.SetPR(repo, 29, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 29, HeadSHA: "sha-l",
+		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
+	})
+	e.svc.db.Create(&model.ReviewPullRequest{
+		RepoFullName: repo, PRNumber: 29, ProjectID: e.project.ID, UserID: e.user.ID,
+		InstallationID: 42, HeadSHA: "sha-l", RoundNumber: 1, UpdatedAt: now,
+	})
+	e.fake.SetTreeFiles(repo, "sha-l", "a.go")
+
+	run := e.seedRun(t, repo, 29, "sha-l", model.ReviewRunRunning, now)
+	e.svc.db.Create(&model.ReviewRunToken{
+		RunID: run.ID, TokenHash: "h-large", CreatedAt: now, ExpiresAt: now.Add(time.Hour),
+	})
+	body := `{"findings":[{"level":"P1","file":"gone.go","body":"不该删除此文件"}],"prior":[],"summary":"s","ui_changed":false,"ui_changed_since_last_visual":false}`
+
+	// 非截断类 diff 失败 → 50200，运行与令牌零副作用。
+	e.fake.SetDiffError(errors.New("boom"))
+	err := e.review.AgentSubmitResult(context.Background(), run.ID, []byte(body))
+	assertErrCode(t, err, 50200)
+	var mid model.ReviewRun
+	e.svc.db.First(&mid, "id = ?", run.ID)
+	if mid.Status != model.ReviewRunRunning {
+		t.Fatalf("status = %q, diff fetch failure must not change run", mid.Status)
+	}
+
+	// 截断（ErrBodyTooLarge→适配器归一为 ErrDiffTooLarge）→ 兜底不可证，
+	// 树未命中路径放行，运行正常完成。
+	e.fake.SetDiffError(githubapi.ErrBodyTooLarge)
+	if err := e.review.AgentSubmitResult(context.Background(), run.ID, []byte(body)); err != nil {
+		t.Fatalf("truncated diff must not reject unverifiable path: %v", err)
+	}
+	var after model.ReviewRun
+	e.svc.db.First(&after, "id = ?", run.ID)
+	if after.Status != model.ReviewRunCompleted {
+		t.Fatalf("status = %q, want completed", after.Status)
+	}
+}
+
 // TestAgentSubmitResultFileCheckBudget 唯一路径数超预算（64）→ 40004，
 // 不做逐个 GitHub 查询的失控扇出。
 func TestAgentSubmitResultFileCheckBudget(t *testing.T) {

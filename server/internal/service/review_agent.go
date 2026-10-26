@@ -599,13 +599,14 @@ func (s *ReviewService) AgentSubmitResult(ctx context.Context, runID string, bod
 // 审查对象；平台调用失败 → 50200（调用方可重交）。树未命中的路径再用
 // 本轮 PR diff 文件列表兜底一次：PR 删除/重命名走的文件仍是合法审查
 // 对象（「不该删这个文件」指向的正是已删文件本身），只在 head 树与
-// diff 里都查不到才算路径错误。
+// diff 里都查不到才算路径错误。diff 超本端读入上限被截断时路径集不
+// 完整——缺席不再是有效证据，树未命中路径放行并 Warn 记录。
 const findingFileCheckLimit = 64
 
 func (s *ReviewService) checkFindingFilesInTree(ctx context.Context, client forge.ReviewClient, run *model.ReviewRun, findings []api.ReviewCodeFinding) error {
 	seen := map[string]bool{}
 	var diffSet map[string]bool
-	diffTried := false
+	diffTried, diffComplete := false, true
 	for i, f := range findings {
 		if seen[f.File] {
 			continue
@@ -623,12 +624,19 @@ func (s *ReviewService) checkFindingFilesInTree(ctx context.Context, client forg
 		}
 		if !diffTried {
 			diffTried = true
-			diffSet, err = s.diffFilePaths(ctx, client, run)
+			diffSet, diffComplete, err = s.diffFilePaths(ctx, client, run)
 			if err != nil {
 				return errs.New(errs.ErrGitHubAPI.Code, "校验 findings 文件归属失败: "+err.Error())
 			}
+			if !diffComplete {
+				s.logger.Warn("审查文件归属兜底证据不完整，树未命中路径按可采信放行",
+					zap.String("run_id", run.ID),
+					zap.String("repo", run.RepoFullName),
+					zap.Int("pr", run.PRNumber),
+				)
+			}
 		}
-		if !diffSet[f.File] {
+		if diffComplete && !diffSet[f.File] {
 			return reviewResultErr("findings[%d].file %q 在 head %s 的仓库树中不存在，请核对审查对象后重交", i, f.File, reviewShortSHA(run.HeadSHA))
 		}
 	}
@@ -637,11 +645,15 @@ func (s *ReviewService) checkFindingFilesInTree(ctx context.Context, client forg
 
 // diffFilePaths 本轮 PR diff 中涉及的文件路径集（旧名与新名都算）：
 // `--- a/`、`+++ b/`、`rename from/to` 行解析；/dev/null 与引号路径做
-// 最小清理。给树未命中的 finding 做存在性兜底。
-func (s *ReviewService) diffFilePaths(ctx context.Context, client forge.ReviewClient, run *model.ReviewRun) (map[string]bool, error) {
+// 最小清理。给树未命中的 finding 做存在性兜底。complete=false 表示 diff
+// 超出本端读入上限被截断——路径集不完整，缺席不能当不存在的证据。
+func (s *ReviewService) diffFilePaths(ctx context.Context, client forge.ReviewClient, run *model.ReviewRun) (map[string]bool, bool, error) {
 	diff, err := client.GetPullRequestDiff(ctx, run.RepoFullName, run.PRNumber)
 	if err != nil {
-		return nil, err
+		if forge.IsDiffTooLarge(err) {
+			return nil, false, nil
+		}
+		return nil, false, err
 	}
 	paths := map[string]bool{}
 	for _, line := range strings.Split(diff, "\n") {
@@ -656,7 +668,7 @@ func (s *ReviewService) diffFilePaths(ctx context.Context, client forge.ReviewCl
 			}
 		}
 	}
-	return paths, nil
+	return paths, true, nil
 }
 
 // unquoteDiffPath git diff 对含特殊字符的路径整段加引号；剥离引号让

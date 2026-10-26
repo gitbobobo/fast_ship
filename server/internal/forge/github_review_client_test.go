@@ -17,6 +17,7 @@ type recordingAPI struct {
 
 	pr             *githubapi.PullRequest
 	diff           string
+	diffErr        error
 	reviewComments []githubapi.ReviewComment
 	issueComments  []githubapi.IssueComment
 	foundID        int64
@@ -53,7 +54,7 @@ func (r *recordingAPI) GetPullRequest(_ context.Context, installationID int64, _
 
 func (r *recordingAPI) GetPullRequestDiff(_ context.Context, installationID int64, _ string, _ int) (string, error) {
 	r.mark(installationID)
-	return r.diff, nil
+	return r.diff, r.diffErr
 }
 
 func (r *recordingAPI) ListReviewComments(_ context.Context, installationID int64, _ string, _ int) ([]githubapi.ReviewComment, error) {
@@ -122,6 +123,25 @@ type withBearer struct {
 func (w *withBearer) Bearer(_ context.Context, installationID int64) (string, error) {
 	w.mark(installationID)
 	return w.token, nil
+}
+
+// ErrBodyTooLarge（diff 端点本端截断探测）归一到 ErrDiffTooLarge，与
+// Forgejo 适配器同一哨兵口径。
+func TestGitHubReviewClientDiffTooLarge(t *testing.T) {
+	api := &recordingAPI{diffErr: githubapi.ErrBodyTooLarge}
+	client := NewGitHubReviewClient(api, 1)
+	_, err := client.GetPullRequestDiff(context.Background(), "o/r", 1)
+	if !errors.Is(err, ErrDiffTooLarge) {
+		t.Fatalf("应归一到 ErrDiffTooLarge, got %v", err)
+	}
+	if !IsDiffTooLarge(err) {
+		t.Fatalf("IsDiffTooLarge 应命中, got %v", err)
+	}
+	// 非截断错误原样透传。
+	api.diffErr = fmt.Errorf("boom")
+	if _, err := client.GetPullRequestDiff(context.Background(), "o/r", 1); errors.Is(err, ErrDiffTooLarge) {
+		t.Fatalf("普通错误不应归一为 ErrDiffTooLarge, got %v", err)
+	}
 }
 
 func TestGitHubReviewClientPassesInstallationID(t *testing.T) {

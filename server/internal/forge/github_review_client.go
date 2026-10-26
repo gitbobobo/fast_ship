@@ -2,6 +2,8 @@ package forge
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/godbobo/fast_ship/server/internal/githubapi"
@@ -62,7 +64,13 @@ func (c *GitHubReviewClient) GetPullRequest(ctx context.Context, repoFullName st
 }
 
 func (c *GitHubReviewClient) GetPullRequestDiff(ctx context.Context, repoFullName string, number int) (string, error) {
-	return c.api.GetPullRequestDiff(ctx, c.installationID, repoFullName, number)
+	diff, err := c.api.GetPullRequestDiff(ctx, c.installationID, repoFullName, number)
+	if errors.Is(err, githubapi.ErrBodyTooLarge) {
+		// 本端截断探测与 Forgejo 适配器同一哨兵口径：service 只认
+		// IsDiffTooLarge，不区分两种来源。
+		return "", fmt.Errorf("%w: github: %s #%d 的 diff 超过本端读入上限", ErrDiffTooLarge, repoFullName, number)
+	}
+	return diff, err
 }
 
 func (c *GitHubReviewClient) ListReviewComments(ctx context.Context, repoFullName string, number int) ([]ReviewComment, error) {

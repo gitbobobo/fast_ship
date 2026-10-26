@@ -99,8 +99,17 @@ type httpClient struct {
 	baseURL string
 }
 
-// do 发任意请求，返回状态码与（截到 8MB 的）响应体。ctx 取消时中止等待。
+// bodyReadMaxBytes 一般端点响应体读取上限；diff 端点走 doLimit 单独放宽。
+const bodyReadMaxBytes = 8 << 20
+
+// do 发任意请求，返回状态码与响应体。ctx 取消时中止等待。
 func (h *httpClient) do(ctx context.Context, method, url, accept, bearer string, in any) (int, []byte, error) {
+	return h.doLimit(ctx, method, url, accept, bearer, in, bodyReadMaxBytes)
+}
+
+// doLimit 同 do，按 max 读响应体：2xx 超限返回 ErrBodyTooLarge（截断件不能
+// 当完整件用）；非 2xx 仍按限长截断返回，供 StatusError 消息使用。
+func (h *httpClient) doLimit(ctx context.Context, method, url, accept, bearer string, in any, max int64) (int, []byte, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -129,9 +138,15 @@ func (h *httpClient) do(ctx context.Context, method, url, accept, bearer string,
 		return 0, nil, err
 	}
 	defer resp.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, max+1))
 	if err != nil {
 		return resp.StatusCode, nil, err
+	}
+	if int64(len(raw)) > max {
+		if resp.StatusCode < 300 {
+			return resp.StatusCode, nil, fmt.Errorf("%w: %s %s 超过 %d 字节", ErrBodyTooLarge, method, url, max)
+		}
+		raw = raw[:max]
 	}
 	return resp.StatusCode, raw, nil
 }
@@ -227,6 +242,10 @@ func (c *restClient) GetPullRequest(ctx context.Context, installationID int64, r
 	}, nil
 }
 
+// diffBodyMaxBytes diff 端点读取上限，与 Forgejo 适配器的 respBodyMaxBytes
+// 对齐；超限走 ErrBodyTooLarge 而非静默截断（半截 diff 不能当完整变更清单）。
+const diffBodyMaxBytes = 64 << 20
+
 // GetPullRequestDiff diff 端点返回 text/plain（Accept: vnd.github.v3.diff），
 // 不走 JSON 解析。
 func (c *restClient) GetPullRequestDiff(ctx context.Context, installationID int64, repoFullName string, number int) (string, error) {
@@ -237,7 +256,7 @@ func (c *restClient) GetPullRequestDiff(ctx context.Context, installationID int6
 	path := fmt.Sprintf("/repos/%s/%s/pulls/%d", owner, name, number)
 	var diff string
 	err = c.withToken(ctx, installationID, func(bearer string) error {
-		code, raw, err := c.h.do(ctx, http.MethodGet, c.h.baseURL+path, "application/vnd.github.v3.diff", bearer, nil)
+		code, raw, err := c.h.doLimit(ctx, http.MethodGet, c.h.baseURL+path, "application/vnd.github.v3.diff", bearer, nil, diffBodyMaxBytes)
 		if err != nil {
 			return err
 		}

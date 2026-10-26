@@ -80,6 +80,10 @@ type ReviewInput struct {
 // ErrForbidden GitHub 返回 403（App 未获该操作权限，例如缺 statuses:write）。
 var ErrForbidden = errors.New("githubapi: forbidden")
 
+// ErrBodyTooLarge 2xx 响应体超本端读取上限。截断的响应不能按完整件处理
+// （静默截断的 diff 会被误当成完整变更清单），超过上限确定性报错。
+var ErrBodyTooLarge = errors.New("githubapi: 响应体超过读取上限")
+
 // StatusError 非 2xx 响应。
 type StatusError struct {
 	StatusCode int
