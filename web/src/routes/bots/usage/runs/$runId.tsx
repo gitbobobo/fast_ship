@@ -90,11 +90,21 @@ const labelOf = (map: Record<string, string>, value: string) =>
   map[value] ?? value;
 
 /** 错误正文剥掉 [NNNNN] 码与行首重复的「工具 动作」前缀（技术名在同行
- * 已用等宽字显示），剩余的是可读原因。 */
+ * 已用等宽字显示），剩余的是可读原因；「不接受参数 xxx」这类夹着内部
+ * 参数名的提示改写成纯中文，原始文案仍在 title 里备查。 */
 function toolErrorText(msg: string, tool: string, action?: string | null) {
-  const s = msg.replace(/^\[\d{5}\]\s*/, "");
-  const head = action ? `${tool} ${action} ` : `${tool} `;
-  return s.startsWith(head) ? s.slice(head.length) : s;
+  let s = msg.replace(/^\[\d{5}\]\s*/, "");
+  for (const head of [
+    `工具 ${tool} `,
+    action ? `${tool} ${action} ` : "",
+    `${tool} `,
+  ]) {
+    if (head && s.startsWith(head)) {
+      s = s.slice(head.length);
+      break;
+    }
+  }
+  return s.replace(/不接受参数\s+\S+/g, "参数不被支持");
 }
 
 const formatTokens = (n: number | null | undefined) =>

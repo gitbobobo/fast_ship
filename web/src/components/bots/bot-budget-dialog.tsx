@@ -28,7 +28,6 @@ import {
   useTaskBudgets,
 } from "@/lib/hooks/use-bots";
 import { cn } from "@/lib/utils";
-import { formatCostEstimate } from "./bot-metrics";
 
 /**
  * 周期预算设置（INT-164）：机器人与定时任务各一段每日/每月预算。预算只在
@@ -56,6 +55,15 @@ function ratioToText(ratio: number): string {
  * botBudgetActualText 同口径。 */
 export function formatSpendPercent(pct: number): string {
   return pct < 1000 ? `${Math.round(pct)}%` : `约 ${Math.round(pct / 100)} 倍`;
+}
+
+/** 与服务端 botBudgetMoney 同口径：$1 以下保留 4 位小数剥尾零——预算
+ * 是用户输入的确定值，写「<$0.001」会和通知里的「$0.0001」对不上。 */
+export function formatBudgetMoney(usd: number): string {
+  if (Math.abs(usd) < 1) {
+    return `$${usd.toFixed(4).replace(/\.?0+$/, "")}`;
+  }
+  return `$${usd.toFixed(2)}`;
 }
 
 /**
@@ -117,7 +125,10 @@ function BudgetPeriodForm({
   const [thresholds, setThresholds] = useState(
     budget ? budget.thresholds.map(ratioToText).join("、") : "",
   );
-  const [problem, setProblem] = useState<string | null>(null);
+  const [problem, setProblem] = useState<{
+    msg: string;
+    field: "amount" | "thresholds";
+  } | null>(null);
 
   // refetch 返回新 budget 对象时按字段回填：未编辑的字段跟随新数据，
   // 已编辑（dirty）的字段保留用户输入——保存另一周期触发的整组 refetch
@@ -144,12 +155,12 @@ function BudgetPeriodForm({
   const handleSave = async () => {
     const parsedAmount = Number.parseFloat(amount);
     if (!Number.isFinite(parsedAmount) || parsedAmount <= 0) {
-      setProblem("金额需为大于 0 的数字（USD）");
+      setProblem({ msg: "金额需为大于 0 的数字（USD）", field: "amount" });
       return;
     }
     const parsed = parseThresholdInput(thresholds);
     if ("error" in parsed) {
-      setProblem(parsed.error);
+      setProblem({ msg: parsed.error, field: "thresholds" });
       return;
     }
     setProblem(null);
@@ -207,8 +218,8 @@ function BudgetPeriodForm({
                 : "text-muted-foreground",
             )}
           >
-            已花费 {formatCostEstimate(budget.spend_usd)} /{" "}
-            {formatCostEstimate(budget.amount_usd)}
+            已花费 {formatBudgetMoney(budget.spend_usd)} /{" "}
+            {formatBudgetMoney(budget.amount_usd)}
             （{formatSpendPercent(spendPct)}）
           </p>
           <div
@@ -239,9 +250,19 @@ function BudgetPeriodForm({
             data-testid={`budget-amount-${period}`}
             inputMode="decimal"
             value={amount}
-            onChange={(e) => setAmount(e.target.value)}
+            onChange={(e) => {
+              setAmount(e.target.value);
+              setProblem((p) => (p?.field === "amount" ? null : p));
+            }}
             placeholder="例如：10"
+            aria-invalid={problem?.field === "amount" || undefined}
+            className={cn(problem?.field === "amount" && "border-destructive")}
           />
+          {problem?.field === "amount" && (
+            <p role="alert" className="text-xs text-destructive">
+              {problem.msg}
+            </p>
+          )}
         </div>
         <div className="space-y-1.5">
           <Label htmlFor={`budget-thresholds-${period}`}>告警阈值</Label>
@@ -249,20 +270,24 @@ function BudgetPeriodForm({
             id={`budget-thresholds-${period}`}
             data-testid={`budget-thresholds-${period}`}
             value={thresholds}
-            onChange={(e) => setThresholds(e.target.value)}
+            onChange={(e) => {
+              setThresholds(e.target.value);
+              setProblem((p) => (p?.field === "thresholds" ? null : p));
+            }}
             placeholder="例如：80%、100%"
+            aria-invalid={problem?.field === "thresholds" || undefined}
+            className={cn(problem?.field === "thresholds" && "border-destructive")}
           />
+          {problem?.field === "thresholds" && (
+            <p role="alert" className="text-xs text-destructive">
+              {problem.msg}
+            </p>
+          )}
         </div>
       </div>
       {period === "daily" && (
         <p className="text-xs text-muted-foreground">
           阈值是相对金额的比例，可超过 100%（如 150%）；越过阈值只发提醒，不会停止运行。
-        </p>
-      )}
-
-      {problem && (
-        <p role="alert" className="text-xs text-destructive">
-          {problem}
         </p>
       )}
 
