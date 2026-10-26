@@ -237,12 +237,15 @@ func TestAgentSubmitResultDiffParseEdges(t *testing.T) {
 		InstallationID: 42, HeadSHA: "sha-e", RoundNumber: 1, UpdatedAt: now,
 	})
 	e.fake.SetTreeFiles(repo, "sha-e", "keep.go")
-	// 引号删除文件、无 hunk 的二进制删除（仅 diff --git 头可见）、hunk 体
-	// 内一行被删内容恰以 `-- a/` 开头（渲染成 --- a/fake.go，不能当路径收）。
+	// 引号删除文件、具名转义路径（\t）、无 hunk 的二进制删除（仅 diff --git
+	// 头可见）、hunk 体内一行被删内容恰以 `-- a/` 开头（不能当路径收）。
 	e.fake.SetDiff(
 		"diff --git \"a/dir/gone file.go\" \"b/dir/gone file.go\"\n" +
 			"deleted file mode 100644\nindex 1..0\n" +
 			"--- \"a/dir/gone file.go\"\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n" +
+			"diff --git \"a/x\\ty.go\" \"b/x\\ty.go\"\n" +
+			"deleted file mode 100644\nindex 1..0\n" +
+			"--- \"a/x\\ty.go\"\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n" +
 			"diff --git a/bin.dat b/bin.dat\n" +
 			"deleted file mode 100644\nBinary files a/bin.dat and /dev/null differ\n" +
 			"diff --git a/keep.go b/keep.go\nindex a..b\n" +
@@ -260,8 +263,8 @@ func TestAgentSubmitResultDiffParseEdges(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "核对审查对象") {
 		t.Fatalf("hunk-body fake path = %v, want 40004 核对审查对象", err)
 	}
-	// 引号路径与仅见 diff --git 头的二进制删除文件均受理。
-	good := `{"findings":[{"level":"P1","file":"dir/gone file.go","body":"不该删除"},{"level":"P2","file":"bin.dat","body":"二进制文件删除影响下载"}],"prior":[],"summary":"s","ui_changed":false,"ui_changed_since_last_visual":false}`
+	// 引号路径、具名转义路径与仅见 diff --git 头的二进制删除文件均受理。
+	good := `{"findings":[{"level":"P1","file":"dir/gone file.go","body":"不该删除"},{"level":"P2","file":"x\ty.go","body":"含 tab 的删除文件"},{"level":"P2","file":"bin.dat","body":"二进制文件删除影响下载"}],"prior":[],"summary":"s","ui_changed":false,"ui_changed_since_last_visual":false}`
 	if err := e.review.AgentSubmitResult(context.Background(), run.ID, []byte(good)); err != nil {
 		t.Fatalf("quoted/binary deleted paths must be accepted: %v", err)
 	}
@@ -334,6 +337,25 @@ func TestAgentSubmitResultConcurrentReplayAtHeadRecheck(t *testing.T) {
 	})
 	if err := e.review.AgentSubmitResult(context.Background(), run2.ID, []byte(body)); err != nil {
 		t.Fatalf("pr2-supersede exit must honor concurrent replay: %v", err)
+	}
+	e.fake.SetPRHook(nil)
+
+	// 首个 supersede 出口（r5 Note）：首次 GetPullRequest 前并发完成 +
+	// head 已变——不先复核就会把合法重放顶成 40920。
+	run3 := e.seedRun(t, repo, 33, "sha-r", model.ReviewRunRunning, now)
+	calls3 := 0
+	e.fake.SetPRHook(func(int) {
+		calls3++
+		if calls3 == 1 {
+			complete(run3.ID)
+			e.fake.SetPR(repo, 33, &githubapi.PullRequest{
+				RepoFullName: repo, Number: 33, HeadSHA: "sha-new",
+				Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
+			})
+		}
+	})
+	if err := e.review.AgentSubmitResult(context.Background(), run3.ID, []byte(body)); err != nil {
+		t.Fatalf("first supersede exit must honor concurrent replay: %v", err)
 	}
 }
 

@@ -454,6 +454,15 @@ func (s *ReviewService) AgentSubmitResult(ctx context.Context, runID string, bod
 		return errs.ErrRunTokenInvalid
 	}
 
+	// completedReplay 复核运行是否已被并发完全相同提交完成：本次加载时
+	// 运行在途，校验/复核期间另一提交落库——与函数头终态重放判定同口径，
+	// 命中按幂等成功返回，避免合法重放被 502/40004/40920 顶掉。
+	completedReplay := func() bool {
+		var cur model.ReviewRun
+		return s.db.WithContext(ctx).Where("id = ?", run.ID).First(&cur).Error == nil &&
+			cur.Status == model.ReviewRunCompleted && cur.ResultJSON != "" && cur.ResultJSON == string(canonical)
+	}
+
 	// 提交前核对 PR 实时状态：已关闭或 head 已前进 → 本轮作废（取消 + 消费令牌 + sync）。
 	client, err := s.reviewClient(ctx, run.IntegrationID, run.RepoFullName, run.InstallationID)
 	if err != nil {
@@ -461,6 +470,9 @@ func (s *ReviewService) AgentSubmitResult(ctx context.Context, runID string, bod
 	}
 	pr, err := client.GetPullRequest(ctx, run.RepoFullName, run.PRNumber)
 	if err != nil {
+		if completedReplay() {
+			return nil
+		}
 		return errs.New(errs.ErrGitHubAPI.Code, "读取 PR head 失败: "+err.Error())
 	}
 	now := time.Now().UTC()
@@ -484,16 +496,10 @@ func (s *ReviewService) AgentSubmitResult(ctx context.Context, runID string, bod
 		return errs.ErrReviewHeadChanged
 	}
 	if !prReviewable(pr) || (pr.HeadSHA != "" && !strings.EqualFold(pr.HeadSHA, run.HeadSHA)) {
+		if completedReplay() {
+			return nil
+		}
 		return supersede()
-	}
-
-	// completedReplay 复核运行是否已被并发完全相同提交完成：本次加载时
-	// 运行在途，校验/复核期间另一提交落库——与函数头终态重放判定同口径，
-	// 命中按幂等成功返回，避免合法重放被 502/40004/40920 顶掉。
-	completedReplay := func() bool {
-		var cur model.ReviewRun
-		return s.db.WithContext(ctx).Where("id = ?", run.ID).First(&cur).Error == nil &&
-			cur.Status == model.ReviewRunCompleted && cur.ResultJSON != "" && cur.ResultJSON == string(canonical)
 	}
 
 	// 新发现文件归属校验（INT-169）：代码审查 findings 的文件必须存在于
@@ -779,9 +785,9 @@ func quotedToken(s string) (tok, rest string, ok bool) {
 }
 
 // unquoteDiffPath git core.quotePath 的 C 风格引号还原：整段 "..." 去引号，
-// 还原 \\、\" 与 \NNN 三位八进制字节（非 ASCII 路径的编码形态）。非引号
-// 形态原样返回；不闭合或不可识别的转义按字面保留——匹配不上按缺席处理，
-// 不会误放。
+// 还原 \\、\"、\NNN 三位八进制字节（非 ASCII 路径形态）与 \a \b \f \n \r
+// \t \v 具名转义（git 对控制字符用具名而非八进制）。非引号形态原样返回；
+// 不闭合或不可识别的转义按字面保留——匹配不上按缺席处理，不会误放。
 func unquoteDiffPath(p string) string {
 	if len(p) < 2 || p[0] != '"' || p[len(p)-1] != '"' {
 		return p
@@ -801,6 +807,11 @@ func unquoteDiffPath(p string) string {
 			sb.WriteByte(n)
 			continue
 		}
+		// git 对控制字符用具名转义而非八进制（quote.c 的 sq_lookup 表）。
+		if c := diffNamedEscape(n); c != 0 {
+			sb.WriteByte(c)
+			continue
+		}
 		if n >= '0' && n <= '7' && i+2 < len(body) &&
 			body[i+1] >= '0' && body[i+1] <= '7' && body[i+2] >= '0' && body[i+2] <= '7' {
 			sb.WriteByte((n-'0')<<6 | (body[i+1]-'0')<<3 | (body[i+2] - '0'))
@@ -811,6 +822,28 @@ func unquoteDiffPath(p string) string {
 		sb.WriteByte(n)
 	}
 	return sb.String()
+}
+
+// diffNamedEscape git 具名转义表（quote.c 对控制字符用具名而非八进制）；
+// 非具名转义字符返回 0。
+func diffNamedEscape(n byte) byte {
+	switch n {
+	case 'a':
+		return '\a'
+	case 'b':
+		return '\b'
+	case 'f':
+		return '\f'
+	case 'n':
+		return '\n'
+	case 'r':
+		return '\r'
+	case 't':
+		return '\t'
+	case 'v':
+		return '\v'
+	}
+	return 0
 }
 
 // decodeStrict 严格反序列化：未知字段与类型错误一律 40004。
