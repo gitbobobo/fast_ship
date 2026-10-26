@@ -23,7 +23,7 @@ func NewReviewAgentHandler(reviewService *service.ReviewService) *ReviewAgentHan
 	return &ReviewAgentHandler{reviewService: reviewService}
 }
 
-// PullRequest GET /api/review-agent/pull-request
+// PullRequest GET /api/review-agent/runs/:runId/pull-request
 func (h *ReviewAgentHandler) PullRequest(c *gin.Context) {
 	out, err := h.reviewService.AgentPullRequest(c.Request.Context(), middleware.GetRunID(c))
 	if err != nil {
@@ -33,7 +33,7 @@ func (h *ReviewAgentHandler) PullRequest(c *gin.Context) {
 	response.Success(c, out)
 }
 
-// Diff GET /api/review-agent/pull-request/diff
+// Diff GET /api/review-agent/runs/:runId/pull-request/diff
 func (h *ReviewAgentHandler) Diff(c *gin.Context) {
 	out, err := h.reviewService.AgentDiff(c.Request.Context(), middleware.GetRunID(c))
 	if err != nil {
@@ -43,7 +43,7 @@ func (h *ReviewAgentHandler) Diff(c *gin.Context) {
 	response.Success(c, out)
 }
 
-// History GET /api/review-agent/history
+// History GET /api/review-agent/runs/:runId/history
 func (h *ReviewAgentHandler) History(c *gin.Context) {
 	content, err := h.reviewService.AgentHistory(c.Request.Context(), middleware.GetRunID(c))
 	if err != nil {
@@ -53,7 +53,7 @@ func (h *ReviewAgentHandler) History(c *gin.Context) {
 	response.Success(c, gin.H{"content": content})
 }
 
-// Screenshots GET /api/review-agent/screenshots
+// Screenshots GET /api/review-agent/runs/:runId/screenshots
 func (h *ReviewAgentHandler) Screenshots(c *gin.Context) {
 	items, changed, err := h.reviewService.AgentScreenshots(c.Request.Context(), middleware.GetRunID(c))
 	if err != nil {
@@ -63,7 +63,7 @@ func (h *ReviewAgentHandler) Screenshots(c *gin.Context) {
 	response.Success(c, gin.H{"items": items, "changed": changed})
 }
 
-// ScreenshotImage GET /api/review-agent/screenshots/:assetId
+// ScreenshotImage GET /api/review-agent/runs/:runId/screenshots/:assetId
 func (h *ReviewAgentHandler) ScreenshotImage(c *gin.Context) {
 	path, mime, err := h.reviewService.AgentScreenshotImage(c.Request.Context(), middleware.GetRunID(c), c.Param("assetId"))
 	if err != nil {
@@ -85,7 +85,7 @@ func (h *ReviewAgentHandler) ScreenshotImage(c *gin.Context) {
 // 的 ReadAll 会让超大 body 撑爆内存；超限按结果非法（40004）返回。
 const reviewResultMaxBodyBytes = 2 << 20
 
-// SubmitResult POST /api/review-agent/result
+// SubmitResult POST /api/review-agent/runs/:runId/result
 func (h *ReviewAgentHandler) SubmitResult(c *gin.Context) {
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, reviewResultMaxBodyBytes)
 	body, err := io.ReadAll(c.Request.Body)

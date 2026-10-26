@@ -531,7 +531,7 @@ func TestResolveRunToken(t *testing.T) {
 		RunID: run.ID, TokenHash: sha256Hex(raw), CreatedAt: now, ExpiresAt: now.Add(time.Hour),
 	})
 
-	id, err := e.review.ResolveRunToken(context.Background(), raw, true)
+	id, err := e.review.ResolveRunToken(context.Background(), raw, true, run.ID)
 	if err != nil || id.RunID != run.ID || id.UserID != e.user.ID {
 		t.Fatalf("resolve: %+v err=%v", id, err)
 	}
@@ -544,20 +544,20 @@ func TestResolveRunToken(t *testing.T) {
 	// 消费后 requireLive 拒绝、result 端点放行。
 	consume := now.Add(time.Minute)
 	e.svc.db.Model(&model.ReviewRunToken{}).Where("run_id = ?", run.ID).Update("consumed_at", consume)
-	if _, err := e.review.ResolveRunToken(context.Background(), raw, true); err == nil {
+	if _, err := e.review.ResolveRunToken(context.Background(), raw, true, run.ID); err == nil {
 		t.Fatal("consumed token must fail requireLive")
 	}
 	e.svc.db.Model(&model.ReviewRun{}).Where("id = ?", run.ID).Update("status", model.ReviewRunCompleted)
-	if _, err := e.review.ResolveRunToken(context.Background(), raw, false); err != nil {
+	if _, err := e.review.ResolveRunToken(context.Background(), raw, false, run.ID); err != nil {
 		t.Fatalf("terminal replay resolve: %v", err)
 	}
 
 	// 过期与伪造 → 40106。
 	e.svc.db.Model(&model.ReviewRunToken{}).Where("run_id = ?", run.ID).Update("expires_at", now.Add(-time.Minute))
-	if _, err := e.review.ResolveRunToken(context.Background(), raw, false); err == nil {
+	if _, err := e.review.ResolveRunToken(context.Background(), raw, false, run.ID); err == nil {
 		t.Fatal("expired token must fail")
 	}
-	if _, err := e.review.ResolveRunToken(context.Background(), "fsr_unknown", true); err == nil {
+	if _, err := e.review.ResolveRunToken(context.Background(), "fsr_unknown", true, run.ID); err == nil {
 		t.Fatal("unknown token must fail")
 	}
 }

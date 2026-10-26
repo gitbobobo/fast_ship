@@ -58,6 +58,9 @@ var (
 	// 管理员角色与邀请注册（INT-129）。
 	ErrAdminRequired      = New(40305, "需要管理员权限")
 	ErrRegistrationClosed = New(40306, "公开注册已关闭，请联系管理员获取邀请链接")
+	// ErrReviewRunMismatch 审查 Agent 端点（INT-169）：URL 中的 run_id 与运行
+	// 令牌所属运行不一致——拒绝且不写结果、不消费令牌、不推进运行状态。
+	ErrReviewRunMismatch = New(40307, "运行令牌与目标运行不匹配")
 )
 
 // 资源不存在 40400-40499

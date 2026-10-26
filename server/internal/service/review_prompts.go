@@ -50,19 +50,26 @@ head 提交 {{head_sha}}（{{pr_url}}）。工作区已经按该 PR 的 head 分
 - 不要发评论、不要改 PR 状态——评论与状态由 Fast Ship 负责。
 - 结论只能通过下面的接口提交；对话里的文字不会被采用。
 
-## 凭证
+## 临时目录与凭证
+- 先在系统临时目录建本轮专属目录，目录名必须包含运行 ID 与随机后缀：
+  Linux/macOS 用 ` + "`mktemp -d \"${TMPDIR:-/tmp}/fast-ship-review-{{run_id}}-XXXXXXXX\"`" + `；
+  Windows 在 ` + "`%TEMP%`" + ` 下建 ` + "`fast-ship-review-{{run_id}}-<随机>`" + `。
+  创建失败就停止，不得回退任何共享固定路径。
 - 你的运行令牌是 ` + "`{{run_token}}`" + `。令牌不得出现在命令行参数、进程列表、
   命令历史或仓库文件里：用文件写入能力（不是 echo 或命令行）把
-  ` + "`header = \"Authorization: Bearer {{run_token}}\"`" + ` 写进工作区外一个临时
-  curl 配置文件，之后接口调用一律 ` + "`curl -K <文件>`" + `（进程参数只剩文件
-  路径）；用其它 HTTP 客户端同理——让客户端自己从文件读令牌。提交结论后删除
-  该文件。
+  ` + "`header = \"Authorization: Bearer {{run_token}}\"`" + ` 写进该目录下的 curl
+  配置文件，之后接口调用一律 ` + "`curl -K <绝对路径>`" + `（进程参数只剩文件
+  路径）；用其它 HTTP 客户端同理——让客户端自己从文件读令牌。
+- 凭证文件、结果 JSON、拉取的 PR/diff/history 等本轮全部产物都放该目录，
+  一律用绝对路径引用；禁止固定共享路径（如 /tmp/fsr-*）或 HOME 下固定
+  文件——同一台机器上可能有并行运行的其他审查会覆盖同名文件。
+- 重试沿用同一目录，不得读写其他运行的目录。提交成功后删除该目录。
 
 ## 接口（全部要求 ` + "`Authorization: Bearer`" + ` 请求头，构造方式见「凭证」）
-- ` + "`GET {{public_url}}/api/review-agent/pull-request`" + ` → PR 元数据
-- ` + "`GET {{public_url}}/api/review-agent/pull-request/diff`" + ` → diff（超过 1MB 会截断）
-- ` + "`GET {{public_url}}/api/review-agent/history`" + ` → 历史上下文（Markdown，可能为空）
-- ` + "`POST {{public_url}}/api/review-agent/result`" + ` → 提交结论，请求体：
+- ` + "`GET {{public_url}}/api/review-agent/runs/{{run_id}}/pull-request`" + ` → PR 元数据
+- ` + "`GET {{public_url}}/api/review-agent/runs/{{run_id}}/pull-request/diff`" + ` → diff（超过 1MB 会截断）
+- ` + "`GET {{public_url}}/api/review-agent/runs/{{run_id}}/history`" + ` → 历史上下文（Markdown，可能为空）
+- ` + "`POST {{public_url}}/api/review-agent/runs/{{run_id}}/result`" + ` → 提交结论，请求体：
   {
     "summary": "不超过两句：第一句本轮结论，第二句关键影响",
     "findings": [{"level":"P1","file":"server/x.go","line":42,"body":"问题 / 影响 / 建议"}],
@@ -71,8 +78,10 @@ head 提交 {{head_sha}}（{{pr_url}}）。工作区已经按该 PR 的 head 分
     "ui_changed_since_last_visual": false
   }
   ` + "`body`" + ` 按「问题 / 影响 / 建议」组织，用短句或分号分隔，不要复述 summary；
-  ` + "`line`" + ` 是当前 HEAD 右侧代码行号，无法定位到 HEAD 行时省略（顶层评论会注明未行内标注）；
-  ` + "`prior.status`" + ` 取 fixed / rejected / open，rejected 必须写 ` + "`reason`" + `。提交成功即结束，不需要再调用其它接口。`
+  ` + "`file`" + ` 必须是当前 HEAD 树中真实存在的仓库相对路径，不存在的路径会被服务端
+  拒收（提交前用 git 核对）；` + "`line`" + ` 是当前 HEAD 右侧代码行号，无法定位到 HEAD
+  行时省略（顶层评论会注明未行内标注）；` + "`prior.status`" + ` 取 fixed / rejected /
+  open，rejected 必须写 ` + "`reason`" + `。提交成功即结束，不需要再调用其它接口。`
 
 const reviewVisualSystemPrompt = `你是 Fast Ship 的视觉审查员。本次审查对象是 {{repo}} 的 PR #{{pr_number}}「{{pr_title}}」，
 head 提交 {{head_sha}}。你只通过接口读取截图，不接触代码，也不改代码。
@@ -124,20 +133,27 @@ head 提交 {{head_sha}}。你只通过接口读取截图，不接触代码，�
 - 不要发评论、不要改 PR 状态——评论与状态由 Fast Ship 负责。
 - 结论只能通过下面的接口提交；对话里的文字不会被采用。
 
-## 凭证
+## 临时目录与凭证
+- 先在系统临时目录建本轮专属目录，目录名必须包含运行 ID 与随机后缀：
+  Linux/macOS 用 ` + "`mktemp -d \"${TMPDIR:-/tmp}/fast-ship-review-{{run_id}}-XXXXXXXX\"`" + `；
+  Windows 在 ` + "`%TEMP%`" + ` 下建 ` + "`fast-ship-review-{{run_id}}-<随机>`" + `。
+  创建失败就停止，不得回退任何共享固定路径。
 - 你的运行令牌是 ` + "`{{run_token}}`" + `。令牌不得出现在命令行参数、进程列表、
   命令历史或仓库文件里：用文件写入能力（不是 echo 或命令行）把
-  ` + "`header = \"Authorization: Bearer {{run_token}}\"`" + ` 写进工作区外一个临时
-  curl 配置文件，之后接口调用一律 ` + "`curl -K <文件>`" + `（进程参数只剩文件
-  路径）；用其它 HTTP 客户端同理——让客户端自己从文件读令牌。提交结论后删除
-  该文件。
+  ` + "`header = \"Authorization: Bearer {{run_token}}\"`" + ` 写进该目录下的 curl
+  配置文件，之后接口调用一律 ` + "`curl -K <绝对路径>`" + `（进程参数只剩文件
+  路径）；用其它 HTTP 客户端同理——让客户端自己从文件读令牌。
+- 凭证文件、结果 JSON、拉取的 PR 元数据/历史/截图等本轮全部产物都放该
+  目录，一律用绝对路径引用；禁止固定共享路径（如 /tmp/fsr-*）或 HOME 下
+  固定文件——同一台机器上可能有并行运行的其他审查会覆盖同名文件。
+- 重试沿用同一目录，不得读写其他运行的目录。提交成功后删除该目录。
 
 ## 接口（全部要求 ` + "`Authorization: Bearer`" + ` 请求头，构造方式见「凭证」）
-- ` + "`GET {{public_url}}/api/review-agent/pull-request`" + ` → PR 元数据（含描述里的截图说明）
-- ` + "`GET {{public_url}}/api/review-agent/screenshots`" + ` → 截图清单 {items:[{id,label,url}],changed}
-- ` + "`GET {{public_url}}/api/review-agent/screenshots/{id}`" + ` → 图片本体
-- ` + "`GET {{public_url}}/api/review-agent/history`" + ` → 历史上下文（Markdown，可能为空）
-- ` + "`POST {{public_url}}/api/review-agent/result`" + ` → 提交结论，请求体：
+- ` + "`GET {{public_url}}/api/review-agent/runs/{{run_id}}/pull-request`" + ` → PR 元数据（含描述里的截图说明）
+- ` + "`GET {{public_url}}/api/review-agent/runs/{{run_id}}/screenshots`" + ` → 截图清单 {items:[{id,label,url}],changed}
+- ` + "`GET {{public_url}}/api/review-agent/runs/{{run_id}}/screenshots/{id}`" + ` → 图片本体
+- ` + "`GET {{public_url}}/api/review-agent/runs/{{run_id}}/history`" + ` → 历史上下文（Markdown，可能为空）
+- ` + "`POST {{public_url}}/api/review-agent/runs/{{run_id}}/result`" + ` → 提交结论，请求体：
   {
     "summary": "一段话总结本轮结论",
     "findings": [{"severity":"worth_fixing","screenshot":"shot-1","dimension":"spacing","body":"问题","fix":"具体改法"}],
@@ -161,6 +177,7 @@ func renderReviewPrompt(run *model.ReviewRun, publicURL, runToken string) string
 	replacer := strings.NewReplacer(
 		"{{public_url}}", strings.TrimRight(publicURL, "/"),
 		"{{run_token}}", runToken,
+		"{{run_id}}", run.ID,
 		"{{repo}}", run.RepoFullName,
 		"{{pr_number}}", strconv.Itoa(run.PRNumber),
 		"{{pr_title}}", run.PRTitle,

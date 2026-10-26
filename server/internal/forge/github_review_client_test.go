@@ -28,6 +28,8 @@ type recordingAPI struct {
 	reviewInput    githubapi.ReviewInput
 	status         statusCall
 	repoErr        error
+	pathExists     bool
+	pathErr        error
 }
 
 // statusCall 一次 CreateCommitStatus 的入参快照。
@@ -100,6 +102,11 @@ func (r *recordingAPI) CreateCommitStatus(_ context.Context, installationID int6
 func (r *recordingAPI) GetRepository(_ context.Context, installationID int64, _ string) error {
 	r.mark(installationID)
 	return r.repoErr
+}
+
+func (r *recordingAPI) PathExistsAtRef(_ context.Context, installationID int64, _, _, _ string) (bool, error) {
+	r.mark(installationID)
+	return r.pathExists, r.pathErr
 }
 
 func (r *recordingAPI) ResolveInstallation(_ context.Context, _ string) (int64, error) {

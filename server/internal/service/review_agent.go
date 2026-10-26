@@ -13,8 +13,11 @@ import (
 	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/api"
+	"github.com/godbobo/fast_ship/server/internal/forge"
+	"github.com/godbobo/fast_ship/server/internal/githubapi"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
+	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
 
@@ -25,8 +28,10 @@ import (
 // requireLive=true：令牌未过期、未消费且运行在途（dispatched/running）才通过；
 // requireLive=false（result 端点）：终态运行与已消费令牌也放行——是否重放
 // 由 SubmitResult 比对 result_json 决定。
-// 首次成功鉴权把 dispatched → running（条件 UPDATE）。
-func (s *ReviewService) ResolveRunToken(ctx context.Context, raw string, requireLive bool) (*RunTokenIdentity, error) {
+// expectedRunID 非空时按 INT-169 做强校验：URL 目标运行与令牌所属运行不
+// 一致 → 40307，且在下面的状态推进之前返回——错配请求对双方运行零副作用。
+// 首次合法鉴权把 dispatched → running（条件 UPDATE）。
+func (s *ReviewService) ResolveRunToken(ctx context.Context, raw string, requireLive bool, expectedRunID string) (*RunTokenIdentity, error) {
 	if !strings.HasPrefix(raw, "fsr_") {
 		return nil, errs.ErrRunTokenInvalid
 	}
@@ -53,6 +58,17 @@ func (s *ReviewService) ResolveRunToken(ctx context.Context, raw string, require
 	} else if token.ConsumedAt != nil && !run.Status.Terminal() {
 		return nil, errs.ErrRunTokenInvalid
 	}
+	// 运行归属强校验（INT-169）：在 dispatched→running 推进之前拒绝错配。
+	// 日志只记运行/线程身份与原因，不记令牌内容。
+	if expectedRunID != "" && run.ID != expectedRunID {
+		s.logger.Warn("审查 Agent 运行归属错配，拒绝请求",
+			zap.String("target_run_id", expectedRunID),
+			zap.String("token_run_id", run.ID),
+			zap.String("thread_id", run.ThreadID),
+			zap.String("reason", "run_id_mismatch"),
+		)
+		return nil, errs.ErrReviewRunMismatch
+	}
 	// 首次成功鉴权：dispatched → running（条件更新，失败即并发状态已变）。
 	// 顺带补 dispatched_at：令牌只经启动提示词交给线程，Agent 能出示即证明
 	// 线程已建成——即使启动 RPC 结果没确认。归档阶段以 dispatched_at 非空
@@ -65,7 +81,7 @@ func (s *ReviewService) ResolveRunToken(ctx context.Context, raw string, require
 			"dispatched_at": gorm.Expr("COALESCE(dispatched_at, ?)", now),
 			"updated_at":    now,
 		})
-	return &RunTokenIdentity{UserID: run.UserID, RunID: run.ID}, nil
+	return &RunTokenIdentity{UserID: run.UserID, RunID: run.ID, ThreadID: run.ThreadID}, nil
 }
 
 // loadAgentRun 端点共用的运行加载（令牌身份 → 运行行）。
@@ -77,7 +93,14 @@ func (s *ReviewService) loadAgentRun(ctx context.Context, runID string) (*model.
 	return &run, nil
 }
 
-// AgentPullRequest GET /api/review-agent/pull-request：运行绑定身份 + 实时
+func (s *ReviewService) ghClient(ctx context.Context) (githubapi.GitHubClient, error) {
+	if s.gh == nil {
+		return nil, errs.New(errs.ErrGitHubAPI.Code, "GitHub 访问面未配置")
+	}
+	return s.gh.ClientFor(ctx)
+}
+
+// AgentPullRequest GET /api/review-agent/runs/:runId/pull-request：运行绑定身份 + 实时
 // PR 元数据（body 要拿最新——视觉审查的截图说明来自这里）。
 func (s *ReviewService) AgentPullRequest(ctx context.Context, runID string) (*api.ReviewAgentPullRequest, error) {
 	run, err := s.loadAgentRun(ctx, runID)
@@ -107,7 +130,7 @@ func (s *ReviewService) AgentPullRequest(ctx context.Context, runID string) (*ap
 // reviewDiffMaxBytes diff 端点截断阈值。
 const reviewDiffMaxBytes = 1 << 20
 
-// AgentDiff GET /api/review-agent/pull-request/diff：>1MB 按字节截断。
+// AgentDiff GET /api/review-agent/runs/:runId/pull-request/diff：>1MB 按字节截断。
 func (s *ReviewService) AgentDiff(ctx context.Context, runID string) (*api.ReviewAgentDiff, error) {
 	run, err := s.loadAgentRun(ctx, runID)
 	if err != nil {
@@ -129,7 +152,7 @@ func (s *ReviewService) AgentDiff(ctx context.Context, runID string) (*api.Revie
 	return &api.ReviewAgentDiff{Content: diff, Truncated: truncated}, nil
 }
 
-// AgentHistory GET /api/review-agent/history：按运行类型拼历史上下文 Markdown。
+// AgentHistory GET /api/review-agent/runs/:runId/history：按运行类型拼历史上下文 Markdown。
 func (s *ReviewService) AgentHistory(ctx context.Context, runID string) (string, error) {
 	run, err := s.loadAgentRun(ctx, runID)
 	if err != nil {
@@ -374,7 +397,7 @@ func runCombinationOptions(run *model.ReviewRun) string {
 	return truncateRunes(strings.Join(parts, " · "), reviewOptionsMaxRunes)
 }
 
-// AgentSubmitResult POST /api/review-agent/result：结构化结论的校验与落地。
+// AgentSubmitResult POST /api/review-agent/runs/:runId/result：结构化结论的校验与落地。
 // 终态运行只允许完全相同 body 的重放（result_json 比对）；HEAD 已前进 →
 // 40920 且运行作废。
 func (s *ReviewService) AgentSubmitResult(ctx context.Context, runID string, body []byte) error {
@@ -400,6 +423,8 @@ func (s *ReviewService) AgentSubmitResult(ctx context.Context, runID string, bod
 	// 严格校验：按 kind 反序列化 + 字段校验（不允许未知字段）。
 	var canonical []byte
 	summary := ""
+	// codeFindings 仅代码 kind 有值：供事务前的文件归属校验（INT-169）。
+	var codeFindings []api.ReviewCodeFinding
 	switch run.Kind {
 	case model.ReviewKindCode:
 		var result api.ReviewCodeResult
@@ -411,6 +436,7 @@ func (s *ReviewService) AgentSubmitResult(ctx context.Context, runID string, bod
 		}
 		canonical, _ = json.Marshal(&result)
 		summary = result.Summary
+		codeFindings = result.Findings
 	case model.ReviewKindVisual:
 		var result api.ReviewVisualResult
 		if err := decodeStrict(body, &result); err != nil {
@@ -447,8 +473,9 @@ func (s *ReviewService) AgentSubmitResult(ctx context.Context, runID string, bod
 	}
 	now := time.Now().UTC()
 	// 已关闭/合并或 head 已前进 → 本轮作废（取消 + 消费令牌 + sync）。
-	// 关闭后 head 不再前进，仅比对 SHA 会漏掉「PR 已关」。
-	if !prReviewable(pr) || (pr.HeadSHA != "" && !strings.EqualFold(pr.HeadSHA, run.HeadSHA)) {
+	// 关闭后 head 不再前进，仅比对 SHA 会漏掉「PR 已关」。supersede 封成
+	// 闭包：文件归属校验后还要以同一口径复核一次（校验期间 head 可能前进）。
+	supersede := func() error {
 		_ = s.db.Transaction(func(tx *gorm.DB) error {
 			tx.Model(&model.ReviewRun{}).
 				Where("id = ? AND status IN ?", run.ID,
@@ -463,6 +490,36 @@ func (s *ReviewService) AgentSubmitResult(ctx context.Context, runID string, bod
 			return s.markPRSyncPendingByRepoTx(tx, run.IntegrationID, run.ProjectID, run.RepoFullName, run.PRNumber, now)
 		})
 		return errs.ErrReviewHeadChanged
+	}
+	if !prReviewable(pr) || (pr.HeadSHA != "" && !strings.EqualFold(pr.HeadSHA, run.HeadSHA)) {
+		return supersede()
+	}
+
+	// 新发现文件归属校验（INT-169）：代码审查 findings 的文件必须存在于
+	// 本轮 head_sha 的仓库树中；不存在的路径 40004 拒收并要求核对审查
+	// 对象（不改运行状态，可修正后重交）。prior 不查——历史意见里已删除/
+	// 重命名的路径合法。位置在终态重放判定之后（合法重放不受新检查影响）
+	// 与事务之前（无任何状态副作用）。
+	if err := s.checkFindingFilesInTree(ctx, client, run, codeFindings); err != nil {
+		// 并发完全相同重放窗口：本次加载时运行还在途，校验期间另一提交已
+		// 完成——与函数头的终态重放判定同口径复核，避免合法重放被 502/40004
+		// 顶掉（INT-169）。校验失败本身也可能使对方无法完成，复核结果为准。
+		var cur model.ReviewRun
+		if rerr := s.db.WithContext(ctx).Where("id = ?", run.ID).First(&cur).Error; rerr == nil &&
+			cur.Status == model.ReviewRunCompleted && cur.ResultJSON != "" && cur.ResultJSON == string(canonical) {
+			return nil
+		}
+		return err
+	}
+	// 文件归属校验是多次 GitHub 调用，可能耗时数秒——进入写入事务前重取
+	// 时间并复核 PR head（校验期间 head 可能前进，缩小提交陈旧结果窗口）。
+	now = time.Now().UTC()
+	pr2, err := client.GetPullRequest(ctx, run.RepoFullName, run.PRNumber)
+	if err != nil {
+		return errs.New(errs.ErrGitHubAPI.Code, "复核 PR head 失败: "+err.Error())
+	}
+	if !prReviewable(pr2) || (pr2.HeadSHA != "" && !strings.EqualFold(pr2.HeadSHA, run.HeadSHA)) {
+		return supersede()
 	}
 
 	// submitErr 承载「超时作废」的返回错误：超时收尾（timed_out + 消费令牌 +
@@ -491,6 +548,11 @@ func (s *ReviewService) AgentSubmitResult(ctx context.Context, runID string, bod
 			var cur model.ReviewRun
 			if err := tx.Where("id = ?", run.ID).First(&cur).Error; err != nil {
 				return err
+			}
+			// 并发完全相同重放：另一提交已先完成且正文一致 → 按幂等成功返回，
+			// 与函数头的终态重放判定口径一致（那处只覆盖请求到达时已终态）。
+			if cur.Status == model.ReviewRunCompleted && cur.ResultJSON != "" && cur.ResultJSON == string(canonical) {
+				return nil
 			}
 			if cur.Status.Active() && !cur.DeadlineAt.After(now) {
 				cas := tx.Model(&model.ReviewRun{}).
@@ -536,6 +598,33 @@ func (s *ReviewService) AgentSubmitResult(ctx context.Context, runID string, bod
 		return submitErr
 	}
 	s.notifyReviewLoop()
+	return nil
+}
+
+// checkFindingFilesInTree INT-169 文件归属：代码审查新发现的仓库相对路径
+// 逐个在运行 head_sha 的树中查存在性（同一路径去重，去重后上限 64 条——
+// 每个唯一路径一次 GitHub 调用，需要整体预算）。不存在 → 40004 要求核对
+// 审查对象；GitHub 调用失败 → 50200（调用方可重交）。
+const findingFileCheckLimit = 64
+
+func (s *ReviewService) checkFindingFilesInTree(ctx context.Context, client forge.ReviewClient, run *model.ReviewRun, findings []api.ReviewCodeFinding) error {
+	seen := map[string]bool{}
+	for i, f := range findings {
+		if seen[f.File] {
+			continue
+		}
+		seen[f.File] = true
+		if len(seen) > findingFileCheckLimit {
+			return reviewResultErr("findings 涉及的不同文件路径超过 %d 个，超出归属校验预算", findingFileCheckLimit)
+		}
+		exists, err := client.PathExistsAtRef(ctx, run.RepoFullName, f.File, run.HeadSHA)
+		if err != nil {
+			return errs.New(errs.ErrGitHubAPI.Code, "校验 findings 文件归属失败: "+err.Error())
+		}
+		if !exists {
+			return reviewResultErr("findings[%d].file %q 在 head %s 的仓库树中不存在，请核对审查对象后重交", i, f.File, reviewShortSHA(run.HeadSHA))
+		}
+	}
 	return nil
 }
 

@@ -553,6 +553,34 @@ func (c *ForgejoReviewClient) GetRepository(ctx context.Context, repoFullName st
 	return c.do(ctx, http.MethodGet, "/repos/"+repo, nil, nil)
 }
 
+// PathExistsAtRef 用 contents 端点判存在（Forgejo 无 GitHub 的
+// git/trees/{ref}:{dir} 取子树语法）：2xx → 存在（文件/目录同算），404 →
+// 不存在。非规范路径（前导 /、空段、.、..）本地判不存在不发请求——与
+// githubapi 实现同口径，防路径别名绕过文件归属校验。
+func (c *ForgejoReviewClient) PathExistsAtRef(ctx context.Context, repoFullName, path, ref string) (bool, error) {
+	repo, err := repoPath(repoFullName)
+	if err != nil {
+		return false, err
+	}
+	segs := strings.Split(path, "/")
+	for i, s := range segs {
+		if s == "" || s == "." || s == ".." {
+			return false, nil
+		}
+		segs[i] = pathSegment(s)
+	}
+	err = c.do(ctx, http.MethodGet,
+		"/repos/"+repo+"/contents/"+strings.Join(segs, "/")+"?ref="+url.QueryEscape(ref),
+		nil, nil)
+	if err == nil {
+		return true, nil
+	}
+	if IsNotFound(err) {
+		return false, nil
+	}
+	return false, err
+}
+
 // ListOpenPullRequests open PR 枚举（轮询补漏专用，不在 ReviewClient 方法面）。
 // fork head 与已删 fork（head.repo=null）的 PR 在这里过滤——fork 的改动不属于
 // 本仓库镜像的审查对象，轮询只补同仓库分支的推送漏网。分页到短页/空页止。

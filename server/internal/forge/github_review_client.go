@@ -143,6 +143,10 @@ func (c *GitHubReviewClient) GetRepository(ctx context.Context, repoFullName str
 	return c.api.GetRepository(ctx, c.installationID, repoFullName)
 }
 
+func (c *GitHubReviewClient) PathExistsAtRef(ctx context.Context, repoFullName, path, ref string) (bool, error) {
+	return c.api.PathExistsAtRef(ctx, c.installationID, repoFullName, path, ref)
+}
+
 // Bearer 媒体下载令牌：委派底层实现的 Bearer(ctx, installationID)（私有仓库
 // 截图下载）。实现没有凭证面（静态 token / 匿名）时返回空串，调用方按匿名
 // 下载处理——与令牌路径改造前 main 的类型断言同口径。

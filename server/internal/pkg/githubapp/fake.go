@@ -33,6 +33,9 @@ type Fake struct {
 	submittedReviews []githubapi.ReviewSummary                 // 已提交 review（对账用）
 	repoErrs         map[string]error                          // repo -> GetRepository 注入的错误（nil=可访问）
 	prErrs           map[string]error                          // repo -> GetPullRequest 注入的错误（nil=按登记表返回）
+	treePaths        map[string]map[string]map[string]bool     // repo -> ref -> 路径集合（SetTreeFiles 建立；无 repo 索引=不建模树）
+	treeErrs         map[string]error                          // repo -> PathExistsAtRef 注入错误
+	treeHook         func(repo, ref, path string)              // PathExistsAtRef 前置钩子（测试注入并发副作用）
 	hookDeliveries   []HookDelivery                            // 投递记录（SetHookDeliveries 覆盖，重投时追加行）
 	hookPayloads     map[int64]json.RawMessage                 // delivery id -> 投递 payload（SetHookDeliveryPayload 登记）
 	redeliveredIDs   []int64                                   // 已触发重投的 delivery id（调用序）
@@ -82,6 +85,8 @@ func NewFake() *Fake {
 		reviews:        map[string][]fakeComment{},
 		repoErrs:       map[string]error{},
 		prErrs:         map[string]error{},
+		treePaths:      map[string]map[string]map[string]bool{},
+		treeErrs:       map[string]error{},
 		hookPayloads:   map[int64]json.RawMessage{},
 		diffText:       "diff --git a/main.go b/main.go\n+func main() {}\n",
 		nextID:         1000,
@@ -136,6 +141,57 @@ func (f *Fake) SetDiff(text string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.diffText = text
+}
+
+// SetTreeFiles 为仓库某 ref 建立树路径索引（INT-169 文件归属校验）：索引按
+// (repo, ref) 建——同仓不同 ref 各自一份，借此发现实现误用默认分支/最新
+// head 而非运行固定 head_sha；没建索引的仓库恒存在（存量用例不必登记），
+// 建过索引的仓库按 ref 严格判定。同 (repo, ref) 重复调用整组替换。
+func (f *Fake) SetTreeFiles(repo, ref string, paths ...string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key := fakeRepoKey(repo)
+	if f.treePaths[key] == nil {
+		f.treePaths[key] = map[string]map[string]bool{}
+	}
+	set := map[string]bool{}
+	for _, p := range paths {
+		set[p] = true
+	}
+	f.treePaths[key][ref] = set
+}
+
+// SetTreeError 让该仓库的 PathExistsAtRef 返回指定错误（网络/5xx 注入）。
+func (f *Fake) SetTreeError(repo string, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.treeErrs[fakeRepoKey(repo)] = err
+}
+
+// SetTreeHook 注册 PathExistsAtRef 前置钩子：在查询判定前执行（测试中模拟
+// 校验期间的外界状态变化，如并发提交完成运行）。nil 清除。
+func (f *Fake) SetTreeHook(fn func(repo, ref, path string)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.treeHook = fn
+}
+
+// PathExistsAtRef 按 SetTreeFiles 索引判定；未建索引的仓库返回 true。
+func (f *Fake) PathExistsAtRef(ctx context.Context, installationID int64, repoFullName, path, ref string) (bool, error) {
+	f.record("PathExistsAtRef", repoFullName, 0, path+"@"+ref)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.treeHook != nil {
+		f.treeHook(repoFullName, ref, path)
+	}
+	if err := f.treeErrs[fakeRepoKey(repoFullName)]; err != nil {
+		return false, err
+	}
+	set, indexed := f.treePaths[fakeRepoKey(repoFullName)]
+	if !indexed {
+		return true, nil
+	}
+	return set[ref][path], nil
 }
 
 // Comments 当前 issue 评论快照（repo+pr）。

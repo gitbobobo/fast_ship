@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -51,6 +52,11 @@ type GitHubClient interface {
 	// 的 id 字段）：rerun 等没有 webhook installation 快照的路径用。
 	// 静态 token / 匿名实现不支持解析，返回错误（调用方不得把 0 当安装 id 继续）。
 	ResolveInstallation(ctx context.Context, repoFullName string) (int64, error)
+	// PathExistsAtRef 仓库相对路径在指定 ref（commit SHA 等）的树中是否存在
+	// （GET /repos/{o}/{r}/git/trees/{ref}:{dir} 取父目录条目精确匹配末段；
+	// INT-169 审查结果文件归属校验）。true=存在（blob/tree/commit 条目均可），
+	// 不存在→false；tree 响应截断且未命中时报错（无法判定，不猜不存在）。
+	PathExistsAtRef(ctx context.Context, installationID int64, repoFullName, path, ref string) (bool, error)
 }
 
 // githubHTTP GitHub 调用的共享客户端。Timeout 是 ctx 缺失时的兜底；调用方
@@ -489,6 +495,65 @@ func (c *restClient) GetRepository(ctx context.Context, installationID int64, re
 // 需要解析的调用方应使用 githubapp.Client（它覆盖本方法）。
 func (c *restClient) ResolveInstallation(ctx context.Context, repoFullName string) (int64, error) {
 	return 0, fmt.Errorf("githubapi: 该客户端不支持 installation 解析")
+}
+
+// gitTreeWire git/trees 响应：非递归时给该 tree 的直接子条目。
+type gitTreeWire struct {
+	Tree      []gitTreeEntry `json:"tree"`
+	Truncated bool           `json:"truncated"`
+}
+
+type gitTreeEntry struct {
+	Path string `json:"path"`
+	Type string `json:"type"` // blob / tree / commit（子模块）
+}
+
+// PathExistsAtRef 用非递归 git/trees 判路径存在性：拉取父目录的直接条目、
+// 精确匹配末段名——contents API 会把目录/符号链接/子模块和大文件都混进
+// 2xx，无法严格回答「树中是否有此路径」。路径必须是规范的仓库相对形态：
+// 前导 /、空段、「.」「..」一律按不存在处理——不静默归一化（校验过的
+// 形态会被原样存进结果，别名会造成校验对象与存储值不一致，且转义拦不下
+// 它们，HTTP 层归一化可能把请求拼到别的端点上）。
+func (c *restClient) PathExistsAtRef(ctx context.Context, installationID int64, repoFullName, path, ref string) (bool, error) {
+	owner, name, err := splitRepo(repoFullName)
+	if err != nil {
+		return false, err
+	}
+	segs := strings.Split(path, "/")
+	for _, s := range segs {
+		if s == "" || s == "." || s == ".." {
+			return false, nil
+		}
+	}
+	base := segs[len(segs)-1]
+	treeish := url.PathEscape(ref)
+	if dir := strings.Join(segs[:len(segs)-1], "/"); dir != "" {
+		escaped := make([]string, 0, len(segs)-1)
+		for _, s := range segs[:len(segs)-1] {
+			escaped = append(escaped, url.PathEscape(s))
+		}
+		treeish += ":" + strings.Join(escaped, "/")
+	}
+	var out gitTreeWire
+	err = c.withToken(ctx, installationID, func(bearer string) error {
+		return c.h.doJSON(ctx, http.MethodGet,
+			fmt.Sprintf("/repos/%s/%s/git/trees/%s", owner, name, treeish), bearer, nil, &out)
+	})
+	if err != nil {
+		if IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	for _, e := range out.Tree {
+		if e.Path == base {
+			return true, nil
+		}
+	}
+	if out.Truncated {
+		return false, fmt.Errorf("githubapi: tree 响应截断，无法判定 %q 是否存在", path)
+	}
+	return false, nil
 }
 
 func (c *restClient) CreateCommitStatus(ctx context.Context, installationID int64, repoFullName, sha, state, statusContext, description, targetURL string) error {

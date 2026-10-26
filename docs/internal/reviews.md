@@ -409,7 +409,8 @@ GitHub App 投递失败（公网隧道超时/502）不会自动重试，一次�
   open，open 保持原级别并写清现状），`findings` 只写本轮新发现的问题——评论
   的「本轮新发现 / 仍未解决」两段正好对应这两份数据，不需要靠文本比对归
   类。两份都
-  明确「只读审查、不发评论、不改 PR 状态，结论只能经 `/result` 提交」。
+  明确「只读审查、不发评论、不改 PR 状态，结论只能经 run 作用域的
+  `/result` 提交」；凭证与临时文件要求见「运行令牌与 Agent 端点」。
   代码审查另约束产出形态：`summary` ≤2 句（结论 + 关键影响），finding
   按「问题 / 影响 / 建议」组织，`line` 无法定位到 HEAD 行时省略（顶层评论
   会注明未行内标注）。
@@ -454,7 +455,7 @@ Ship 不代点就干等 1h deadline 变 `timed_out`，整轮还得手动重审�
   且仍在 dispatched/running）保证 RPC 期间运行已被取消/完成/超时终态化时
   两者都不改写。
 
-## 运行令牌与 Agent 端点（`/api/review-agent/*`）
+## 运行令牌与 Agent 端点（`/api/review-agent/runs/:runId/*`）
 
 派发时签发 `fsr_` + 32 字节 base64url，存 SHA-256，
 `expires_at = deadline_at + 5min`。路由统一 `runTokenAuth`
@@ -463,9 +464,32 @@ Ship 不代点就干等 1h deadline 变 `timed_out`，整轮还得手动重审�
 端点且 `status ∈ {dispatched, running}`；首次成功鉴权把 `dispatched→running`
 落库（`started_at`），**并补 `dispatched_at`**——令牌只经启动提示词交给
 线程，Agent 能出示即证明线程已建成（即使启动 RPC 结果未确认），归档/回收
-据此区分「可能已建成」与「确定没建」。运行进终态后所有端点 40106。
+据此区分「可能已建成」与「确定没建」。运行进终态后，除 `POST /result` 的
+完全相同重放（幂等成功）外所有端点一律 40106。
 
-| 端点 | 说明 |
+**运行归属强校验（INT-169）**：全部端点带 `:runId` 路径参数，
+`RequireRunToken` 把它作为预期运行交给 `ResolveRunToken`——令牌/run 加载、
+存活检查全部通过后、**任何状态推进之前**比对 URL runId 与令牌所属运行，
+错配一律 **40307**：不写结果、不消费令牌、不推进运行状态（包括
+dispatched→running）、不发布评论——对双方运行零副作用。拒绝日志记目标
+run_id、令牌所属 run_id、`thread_id`、reason（不记令牌内容）。
+`runId` 为空（`/runs//...` 双斜杠——Gin 允许路径参数匹配空段）同样按
+40307 拒绝：空目标无法做归属校验，不能形成仅凭令牌的旁路入口。旧的仅凭令牌
+端点（`/api/review-agent/pull-request`、`/history`、`/result` 等）已整体移除：
+仅凭令牌无法确定「预期目标」，保留等于留一个绕过新校验的提交路径。
+**在途线程处理**：升级时仍在跑、持旧提示词的线程无法构造 run 作用域
+URL（其提示词不含 run_id），请求 404，运行按既有 deadline 机制
+`timed_out` 收尾。
+
+**远程临时文件约定**：提示词要求 Agent 在系统临时目录建
+`fast-ship-review-<run_id>-<随机后缀>/`（POSIX `mktemp -d`，Windows
+`%TEMP%`），凭证配置、结果 JSON、拉取的 PR/diff/history/截图全部放该
+目录并用绝对路径；创建失败即停止、不回退共享路径，禁止 `/tmp/fsr-*`
+固定路径与 HOME 固定文件（并行运行会互覆同名文件——INT-169 的串用
+事故即由此发生）；重试沿用同一目录，成功后只删本轮目录。目录隔离依赖
+Agent 执行，服务端的 run 强校验是兜底。
+
+| 端点（前缀 `/api/review-agent/runs/:runId`） | 说明 |
 | --- | --- |
 | `GET /pull-request` | PR 元数据（repo、PR 号、标题、正文、base/head ref、head SHA、URL）；身份全部取自运行行，不接受请求参数。 |
 | `GET /pull-request/diff` | PR diff，>1MB 按字节截断并标 `truncated:true`。 |
@@ -489,6 +513,18 @@ Ship 不代点就干等 1h deadline 变 `timed_out`，整轮还得手动重审�
 `line>=1`；非法 → 400（40004 口径）并提示修正重交，不改运行状态。提交前用 App 令牌 `GetPullRequest` 核对 PR
 当前状态与 HEAD：PR 已关闭/合并，或 HEAD 与运行 `head_sha` 不一致 → 本轮
 作废（`cancelled/superseded`、消费令牌、置 `sync_pending`），返回 **40920**。
+**文件归属（INT-169）**：代码审查 `findings` 的 `file` 逐个经
+`PathExistsAtRef` 核对在本轮 `head_sha` 树中存在——实现走非递归
+`git/trees/{ref}:{dir}` 取父目录条目精确匹配末段名（contents API 的 2xx
+会把目录/符号链接/子模块混进来，不严格）；同路径去重且去重后上限 64 条
+（每个唯一路径一次 GitHub 调用，需要整体预算）；前导 `/`、`..`/`.`/空段
+等别名不做归一化、一律按不存在处理（校验过的形态原样入库，别名会造成
+校验对象与存储值不一致）。不存在 → **40004**「核对审查对象」且不产生任何状态副作用，
+可修正重交；`prior` 不查（历史意见里已删除/重命名的路径合法）；只查
+新发现、不限定 diff 内文件。校验位置在终态重放判定之后——已完成运行的
+相同 canonical 重放不受新检查影响，仍按原幂等语义成功（并发落库的同文
+提交在事务内复核后同样按幂等成功返回；校验失败时也先复核运行是否已被
+并发提交完成，再决定报错口径）。
 成功后写 `result_json/summary`、
 `completed`、`finished_at`，消费令牌、`posted_at` 置空（待同步推 GitHub）、
 置 `sync_pending` 并 kick。

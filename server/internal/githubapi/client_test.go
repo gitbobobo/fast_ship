@@ -201,6 +201,100 @@ func TestFindPullRequestComment_PaginatesToPage2(t *testing.T) {
 	}
 }
 
+// TestPathExistsAtRef 非递归 git/trees 归属判定（INT-169）：URL 形状
+// /git/trees/{ref}:{dir}、父目录条目精确匹配末段名、404→不存在、
+// 截断未命中→报错、非规范路径本地拒绝且不发请求。
+func TestPathExistsAtRef(t *testing.T) {
+	var gotPath string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.EscapedPath()
+		writeJSON(t, w, http.StatusOK, map[string]any{
+			"tree": []map[string]any{
+				{"path": "a.go", "type": "blob"},
+				{"path": "sub", "type": "tree"},
+			},
+			"truncated": false,
+		})
+	}))
+	defer ts.Close()
+	c := NewClient(&fakeAuth{token: "tok"}, ts.URL)
+	ctx := context.Background()
+
+	// 命中末段条目 → true；URL 是 /git/trees/{ref}:{dir}（dir 段逐段转义、
+	// 以字面 / 拼接）。
+	ok, err := c.PathExistsAtRef(ctx, 1, "octocat/hw", "dir/sub/a.go", "sha-1")
+	if err != nil || !ok {
+		t.Fatalf("exists = %v %v, want true", ok, err)
+	}
+	if gotPath != "/repos/octocat/hw/git/trees/sha-1:dir/sub" {
+		t.Fatalf("request path = %q, want git/trees/sha-1:dir/sub", gotPath)
+	}
+	// 父目录存在但末段不在条目中 → false（b.go 不在 tree 列表）。
+	ok, err = c.PathExistsAtRef(ctx, 1, "octocat/hw", "dir/sub/b.go", "sha-1")
+	if err != nil || ok {
+		t.Fatalf("missing entry = %v %v, want false nil", ok, err)
+	}
+	// 根级文件：treeish 无 :dir 后缀。
+	ok, err = c.PathExistsAtRef(ctx, 1, "octocat/hw", "a.go", "sha-1")
+	if err != nil || !ok {
+		t.Fatalf("root file = %v %v, want true", ok, err)
+	}
+	if gotPath != "/repos/octocat/hw/git/trees/sha-1" {
+		t.Fatalf("root request path = %q, want git/trees/sha-1", gotPath)
+	}
+	// 含空格/中文的路径段必须转义发出。
+	ok, err = c.PathExistsAtRef(ctx, 1, "octocat/hw", "docs/设计 文档/a.go", "sha-1")
+	if err != nil || !ok {
+		t.Fatalf("unicode path = %v %v, want true", ok, err)
+	}
+	if gotPath != "/repos/octocat/hw/git/trees/sha-1:docs/%E8%AE%BE%E8%AE%A1%20%E6%96%87%E6%A1%A3" {
+		t.Fatalf("unicode request path = %q", gotPath)
+	}
+	// 非规范路径：本地判不存在，请求不得发出。
+	for _, bad := range []string{"/a.go", "a//b.go", "./a.go", "a.go/./b.go", "../x", "a.go/../b.go", "a.go/", ""} {
+		gotPath = ""
+		ok, err = c.PathExistsAtRef(ctx, 1, "octocat/hw", bad, "sha-1")
+		if err != nil || ok {
+			t.Fatalf("alias %q = %v %v, want false nil", bad, ok, err)
+		}
+		if gotPath != "" {
+			t.Fatalf("alias %q must not issue HTTP request, got %q", bad, gotPath)
+		}
+	}
+}
+
+// TestPathExistsAtRefNotFoundAndTruncated 404→false；tree 截断且未命中→
+// 报错（无法判定时不猜不存在）。
+func TestPathExistsAtRefNotFoundAndTruncated(t *testing.T) {
+	var status int
+	var payload any
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(t, w, status, payload)
+	}))
+	defer ts.Close()
+	c := NewClient(&fakeAuth{token: "tok"}, ts.URL)
+	ctx := context.Background()
+
+	status, payload = http.StatusNotFound, map[string]any{"message": "Not Found"}
+	ok, err := c.PathExistsAtRef(ctx, 1, "octocat/hw", "x/y.go", "sha-1")
+	if err != nil || ok {
+		t.Fatalf("404 = %v %v, want false nil", ok, err)
+	}
+
+	status, payload = http.StatusOK, map[string]any{
+		"tree":      []map[string]any{{"path": "other.go", "type": "blob"}},
+		"truncated": true,
+	}
+	if _, err := c.PathExistsAtRef(ctx, 1, "octocat/hw", "x/y.go", "sha-1"); err == nil {
+		t.Fatal("truncated miss must error, not guess nonexistence")
+	}
+
+	status, payload = http.StatusInternalServerError, map[string]any{"message": "boom"}
+	if _, err := c.PathExistsAtRef(ctx, 1, "octocat/hw", "x/y.go", "sha-1"); err == nil {
+		t.Fatal("5xx must propagate")
+	}
+}
+
 func writeJSON(t *testing.T, w http.ResponseWriter, status int, payload any) {
 	t.Helper()
 	w.Header().Set("Content-Type", "application/json")

@@ -704,3 +704,40 @@ func TestForgejoClient_GetPullRequestDiff_TooLarge(t *testing.T) {
 		t.Fatalf("应保留 ErrDiffTooLarge 哨兵, got %v", err)
 	}
 }
+
+// TestForgejoClient_PathExistsAtRef INT-169 文件归属的 Forgejo 实现：contents
+// 端点 2xx→存在、404→不存在、非规范路径本地判不存在且零请求、5xx 透传。
+func TestForgejoClient_PathExistsAtRef(t *testing.T) {
+	client, logs := newForgejoTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "gone.go") {
+			http.Error(w, `{"message":"not found"}`, http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"name":"a.go","path":"dir/a.go","type":"file"}`))
+	})
+	ctx := context.Background()
+
+	ok, err := client.PathExistsAtRef(ctx, "o/r", "dir/a.go", "sha-1")
+	if err != nil || !ok {
+		t.Fatalf("存在路径 = %v, %v", ok, err)
+	}
+	got := lastServeLog(t, logs)
+	if got.method != http.MethodGet ||
+		got.path != "/api/v1/repos/o/r/contents/dir/a.go?ref=sha-1" {
+		t.Fatalf("请求形状: %s %s", got.method, got.path)
+	}
+
+	ok, err = client.PathExistsAtRef(ctx, "o/r", "gone.go", "sha-1")
+	if err != nil || ok {
+		t.Fatalf("404 = %v, %v, want false,nil", ok, err)
+	}
+
+	for _, bad := range []string{"/a.go", "a//b.go", "./a.go", "../x", "a.go/"} {
+		before := len(*logs)
+		ok, err = client.PathExistsAtRef(ctx, "o/r", bad, "sha-1")
+		if err != nil || ok || len(*logs) != before {
+			t.Fatalf("别名 %q = %v, %v, 请求数 %d→%d", bad, ok, err, before, len(*logs))
+		}
+	}
+}
