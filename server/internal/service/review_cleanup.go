@@ -68,6 +68,11 @@ const (
 	// 读取分键——登记读成功每 tick 都复位 registry 键，共用会把核验错误的
 	// 宽限刷成永远 1 次，持续性核验失败永远到不了上限（复审 P2）。
 	worktreeTryOwnership = "ownership"
+	// worktreeTryRemoveBudget 删除侧预算耗尽的连续计数（复审 P2）：必须与
+	// registry-incomplete 分键——登记读成功每 tick 都会经 recoverFromPending
+	// 复位后者，删除侧复用它会被清零、计数永远停在 1，既不收敛也发不出聚
+	// 合。消解条件是 RemoveWorktree 重试的结果，不是登记读。
+	worktreeTryRemoveBudget = "remove-budget"
 	// worktreeTryBranchPending 复查确认「分支仍存活」的累计计数：到
 	// reviewBranchPendingMaxTries 收敛 failed，待清理不是无限期状态（复审
 	// Note）。只统计确认存活的复查——登记读失败走自己的键，不掺进来。
@@ -605,6 +610,7 @@ func (s *ReviewService) cleanupWithRegistry(ctx context.Context, run *model.Revi
 	// 分支步：行内没有分支名 → 收 removed；分支仍在登记 ref 全集 →
 	// branch_pending（服务端删不了，等代理收尾或人工）；不在 → removed。
 	ambiguousRefs := false
+	branchInferred := false
 	if branch == "" && path != "" {
 		// 分支名缺失但登记把该路径绑定到具体分支（升级前 worktree_branch 为
 		// NULL 的旧行、线程 404 后只剩行快照）：借登记恢复——不恢复就收
@@ -612,7 +618,17 @@ func (s *ReviewService) cleanupWithRegistry(ctx context.Context, run *model.Revi
 		// ref 名视为歧义，不采用。
 		if idx := slices.IndexFunc(reg.Worktrees, func(w T3Worktree) bool { return w.Path == path }); idx >= 0 {
 			if len(reg.Worktrees[idx].RefNames) == 1 {
-				branch = reg.Worktrees[idx].RefNames[0]
+				candidate := reg.Worktrees[idx].RefNames[0]
+				// 最低佐证（复审 Note）：唯一 ref 若同时绑在别的 worktree
+				// 路径，说明该分支被别处 checkout、并非本运行已删工作树的
+				// 专属分支——按歧义处理，不盲采信去跟踪无关分支。
+				if slices.ContainsFunc(reg.Worktrees, func(w T3Worktree) bool {
+					return w.Path != path && slices.Contains(w.RefNames, candidate)
+				}) {
+					ambiguousRefs = true
+				} else {
+					branch, branchInferred = candidate, true
+				}
 			} else if len(reg.Worktrees[idx].RefNames) > 1 {
 				ambiguousRefs = true
 			}
@@ -649,8 +665,11 @@ func (s *ReviewService) cleanupWithRegistry(ctx context.Context, run *model.Revi
 			}
 			run.WorktreeBranch = branch
 		}
-		finish(model.ReviewWorktreeBranchPending, worktreeReasonBranchPending,
-			"工作树已删除，本轮专属分支 "+branch+" 仍存在；当前远程 T3 无删除分支接口，待审查代理收尾或人工清理", true)
+		msg := "工作树已删除，本轮专属分支 " + branch + " 仍存在；当前远程 T3 无删除分支接口，待审查代理收尾或人工清理"
+		if branchInferred {
+			msg = "工作树已删除，登记推断的本轮专属分支 " + branch + "（名由登记恢复，未经线程确认）仍存在；当前远程 T3 无删除分支接口，待审查代理收尾或人工清理"
+		}
+		finish(model.ReviewWorktreeBranchPending, worktreeReasonBranchPending, msg, true)
 		return
 	}
 	finish(model.ReviewWorktreeRemoved, "", "", false)
@@ -679,7 +698,13 @@ func (s *ReviewService) handleRegistryReadError(run *model.ReviewRun, err error,
 // 计数，供调用方按 reviewBudgetPendingMaxTries 收敛 failed（待确认不是无
 // 限期状态）。
 func (s *ReviewService) markBudgetPending(run *model.ReviewRun, reason, errMsg string, now time.Time) int {
-	tries := s.bumpWorktreeTries(run.ID, worktreeTryRegIncomplete)
+	// 两类预算耗尽分键计数（复审 P2）：登记侧由登记读成功复位，删除侧只有
+	// RemoveWorktree 的后续结果能消解——共键会让删除侧被登记读清零。
+	tryKey := worktreeTryRegIncomplete
+	if reason == worktreeReasonRemoveBudgetPending {
+		tryKey = worktreeTryRemoveBudget
+	}
+	tries := s.bumpWorktreeTries(run.ID, tryKey)
 	s.scheduleWorktreeBackoff(run.ID, reason, now)
 	if !s.writePendingReason(run, reason, errMsg, now) {
 		return tries
@@ -700,7 +725,10 @@ func (s *ReviewService) markBudgetPending(run *model.ReviewRun, reason, errMsg s
 // remove_uncertain 的计数不清——它的上限跨越多个「登记成功」的 tick，清了
 // 就永远到不了终态。
 func (s *ReviewService) recoverFromPending(run *model.ReviewRun, now time.Time) {
-	if run.WorktreeReason == "" {
+	if run.WorktreeReason == "" || run.WorktreeReason == worktreeReasonRemoveBudgetPending {
+		// remove_budget_pending 不由登记读消解（复审 P2）：登记读成功不代表
+		// 删除预算恢复，它的清算点是本 tick RemoveWorktree 的重试结果。这里
+		// 清了会让原因每 tick 抖动一次落库+空发聚合，还会连带复位计数。
 		return
 	}
 	prior := run.WorktreeReason

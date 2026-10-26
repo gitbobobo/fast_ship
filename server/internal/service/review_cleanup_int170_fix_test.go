@@ -912,8 +912,8 @@ func TestCleanupRemoveBudgetExhaustedGoesPending(t *testing.T) {
 	if got := review.worktreeTries[run.ID+"|"+worktreeTryRemoveAttempt]; got != 0 {
 		t.Fatalf("预算耗尽不得计 remove-attempt 重试, got %d", got)
 	}
-	if got := review.worktreeTries[run.ID+"|"+worktreeTryRegIncomplete]; got != 1 {
-		t.Fatalf("待确认计数应记 1, got %d", got)
+	if got := review.worktreeTries[run.ID+"|"+worktreeTryRemoveBudget]; got != 1 {
+		t.Fatalf("删除侧待确认计数应记 1（与登记读取分键）, got %d", got)
 	}
 }
 
@@ -1199,5 +1199,41 @@ func TestCleanupPendingWriteFailureKeepsMemoryState(t *testing.T) {
 	}
 	if run.WorktreeReason != worktreeReasonRemoveUncertain {
 		t.Fatalf("写失败内存态不得改写, got %q", run.WorktreeReason)
+	}
+}
+
+// TestCleanupRemoveBudgetPendingConverges（复审14轮 bot）remove_budget_pending
+// 的连续计数不得被登记读成功复位：独立 remove-budget 键累积到
+// reviewBudgetPendingMaxTries 收敛 failed(worktree_remove)。
+func TestCleanupRemoveBudgetPendingConverges(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	env := createT3TestEnv(t, e.svc.db, e.user.ID, "env-rbc")
+	createTestT3Binding(t, e.svc.db, e.project.ID, env.ID, "t3p")
+
+	run := e.seedCleanableRun(t, repo, 680, env, model.ReviewRunCompleted, "/wt/rb", now)
+	e.svc.db.Model(run).Updates(map[string]any{"worktree_branch": "br-rb"})
+	run.WorktreeBranch = "br-rb"
+	t3 := &fakeReviewT3{
+		threadWorktrees: map[string]T3ThreadWorktree{
+			run.ThreadID: {Path: "/wt/rb", Branch: "br-rb"},
+		},
+		worktrees: []T3Worktree{{Path: "/wt/rb", RefNames: []string{"br-rb"}}},
+		// 登记读成功、删除侧预算持续耗尽——旧实现共享计数键，每 tick 被
+		// recoverFromPending 复位，永远停在 1。
+		removeErr: fmt.Errorf("%w: %s", errRegistryIncomplete, context.DeadlineExceeded),
+	}
+	review := e.withT3(t3, nil, nil)
+
+	for i := 0; i < reviewBudgetPendingMaxTries; i++ {
+		review.cleanupRunWorktree(run, now.Add(time.Duration(i)*6*time.Minute))
+	}
+	var after model.ReviewRun
+	e.svc.db.First(&after, "id = ?", run.ID)
+	if after.WorktreeState != model.ReviewWorktreeFailed ||
+		after.WorktreeReason != worktreeReasonWorktreeRemove {
+		t.Fatalf("删除侧连续预算耗尽应收敛 failed/worktree_remove, got %q/%q",
+			after.WorktreeState, after.WorktreeReason)
 	}
 }
