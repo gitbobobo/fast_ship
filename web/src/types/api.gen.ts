@@ -2860,7 +2860,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/review-agent/pull-request": {
+    "/api/review-agent/runs/{runId}/pull-request": {
         parameters: {
             query?: never;
             header?: never;
@@ -2869,7 +2869,7 @@ export interface paths {
         };
         /**
          * 本运行审查的 PR 元数据
-         * @description 只接受运行令牌；PR 身份全部取自运行行，不接受请求参数。
+         * @description 只接受运行令牌；PR 身份全部取自运行行，不接受请求参数。路径中的 runId 必须与令牌所属运行一致（错配 40307）。
          */
         get: operations["reviewAgentPullRequest"];
         put?: never;
@@ -2880,7 +2880,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/review-agent/pull-request/diff": {
+    "/api/review-agent/runs/{runId}/pull-request/diff": {
         parameters: {
             query?: never;
             header?: never;
@@ -2889,7 +2889,7 @@ export interface paths {
         };
         /**
          * 本运行的 PR diff
-         * @description 超过 1MB 截断并标记 truncated。
+         * @description 超过 1MB 截断并标记 truncated。路径中的 runId 必须与令牌所属运行一致（错配 40307）。
          */
         get: operations["reviewAgentPullRequestDiff"];
         put?: never;
@@ -2900,7 +2900,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/review-agent/history": {
+    "/api/review-agent/runs/{runId}/history": {
         parameters: {
             query?: never;
             header?: never;
@@ -2910,7 +2910,7 @@ export interface paths {
         /**
          * 历史处置上下文（系统生成 Markdown）
          * @description 代码审查：上一轮各组合的结构化发现 + 上一轮结论之后的新评论/行内回复；首次审查给全部讨论。
-         *     视觉审查：上一轮视觉发现与 unmeasurable。只识别本系统自己发的结论。
+         *     视觉审查：上一轮视觉发现与 unmeasurable。只识别本系统自己发的结论。路径中的 runId 必须与令牌所属运行一致（错配 40307）。
          */
         get: operations["reviewAgentHistory"];
         put?: never;
@@ -2921,7 +2921,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/review-agent/screenshots": {
+    "/api/review-agent/runs/{runId}/screenshots": {
         parameters: {
             query?: never;
             header?: never;
@@ -2930,7 +2930,7 @@ export interface paths {
         };
         /**
          * 视觉审查截图清单
-         * @description 只有视觉审查运行可调用；图片本体走下面的图片端点。
+         * @description 只有视觉审查运行可调用；图片本体走下面的图片端点。路径中的 runId 必须与令牌所属运行一致（错配 40307）。
          */
         get: operations["reviewAgentScreenshots"];
         put?: never;
@@ -2941,7 +2941,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/review-agent/screenshots/{assetId}": {
+    "/api/review-agent/runs/{runId}/screenshots/{assetId}": {
         parameters: {
             query?: never;
             header?: never;
@@ -2950,7 +2950,7 @@ export interface paths {
         };
         /**
          * 截图图片本体
-         * @description 按运行所属 PR/SHA 校验；返回原始字节与 Content-Type。
+         * @description 按运行所属 PR/SHA 校验；返回原始字节与 Content-Type。路径中的 runId 必须与令牌所属运行一致（错配 40307）。
          */
         get: operations["reviewAgentScreenshotImage"];
         put?: never;
@@ -2961,7 +2961,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/review-agent/result": {
+    "/api/review-agent/runs/{runId}/result": {
         parameters: {
             query?: never;
             header?: never;
@@ -2974,6 +2974,8 @@ export interface paths {
          * 提交结构化审查结论
          * @description 请求体按运行类型二选一：代码审查 `ReviewCodeResult`、视觉审查 `ReviewVisualResult`（字段校验失败返回 400，
          *     提示修正重交；PR HEAD 与运行绑定 SHA 不一致返回 40920 并作废本轮）。
+         *     路径中的 runId 必须与令牌所属运行一致（错配 40307，不写结果、不消费令牌、不推进状态）。
+         *     代码审查 findings 的文件必须存在于本运行 head_sha 的仓库树中，不存在的路径返回 40004。
          */
         post: operations["reviewAgentSubmitResult"];
         delete?: never;
@@ -14566,7 +14568,10 @@ export interface operations {
         parameters: {
             query?: never;
             header?: never;
-            path?: never;
+            path: {
+                /** @description 审查运行 ID */
+                runId: string;
+            };
             cookie?: never;
         };
         requestBody?: never;
@@ -14591,7 +14596,10 @@ export interface operations {
         parameters: {
             query?: never;
             header?: never;
-            path?: never;
+            path: {
+                /** @description 审查运行 ID */
+                runId: string;
+            };
             cookie?: never;
         };
         requestBody?: never;
@@ -14616,7 +14624,10 @@ export interface operations {
         parameters: {
             query?: never;
             header?: never;
-            path?: never;
+            path: {
+                /** @description 审查运行 ID */
+                runId: string;
+            };
             cookie?: never;
         };
         requestBody?: never;
@@ -14644,7 +14655,10 @@ export interface operations {
         parameters: {
             query?: never;
             header?: never;
-            path?: never;
+            path: {
+                /** @description 审查运行 ID */
+                runId: string;
+            };
             cookie?: never;
         };
         requestBody?: never;
@@ -14674,6 +14688,8 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
+                /** @description 审查运行 ID */
+                runId: string;
                 assetId: string;
             };
             cookie?: never;
@@ -14701,7 +14717,10 @@ export interface operations {
         parameters: {
             query?: never;
             header?: never;
-            path?: never;
+            path: {
+                /** @description 审查运行 ID */
+                runId: string;
+            };
             cookie?: never;
         };
         requestBody: {

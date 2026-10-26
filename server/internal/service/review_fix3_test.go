@@ -244,7 +244,7 @@ func TestResolveRunTokenBackfillsDispatchedAt(t *testing.T) {
 		RunID: run.ID, TokenHash: sha256Hex(raw), CreatedAt: now, ExpiresAt: now.Add(time.Hour),
 	})
 
-	if _, err := e.review.ResolveRunToken(context.Background(), raw, true); err != nil {
+	if _, err := e.review.ResolveRunToken(context.Background(), raw, true, run.ID); err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
 	var after model.ReviewRun
@@ -266,7 +266,7 @@ func TestResolveRunTokenBackfillsDispatchedAt(t *testing.T) {
 	e.svc.db.Create(&model.ReviewRunToken{
 		RunID: run2.ID, TokenHash: sha256Hex(raw2), CreatedAt: now, ExpiresAt: now.Add(time.Hour),
 	})
-	if _, err := e.review.ResolveRunToken(context.Background(), raw2, true); err != nil {
+	if _, err := e.review.ResolveRunToken(context.Background(), raw2, true, run2.ID); err != nil {
 		t.Fatalf("resolve2: %v", err)
 	}
 	var after2 model.ReviewRun

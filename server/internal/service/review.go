@@ -401,17 +401,20 @@ func (s *ReviewService) notifyReviewLoop() {
 	}
 }
 
-// RunTokenIdentity 从运行令牌推出的身份：运行与其归属用户。
-// /api/review-agent 端点（1c）经 RequireRunToken 消费。
+// RunTokenIdentity 从运行令牌推出的身份：运行、其归属用户与线程。
+// /api/review-agent 端点（1c）经 RequireRunToken 消费；ThreadID 供错配
+// 拒绝等日志定位线程（INT-169）。
 type RunTokenIdentity struct {
-	UserID string
-	RunID  string
+	UserID   string
+	RunID    string
+	ThreadID string
 }
 
 // RunTokenResolver 是 middleware.RequireRunToken 的令牌解析依赖；
-// 由 ReviewService 在 1c 实现。
+// 由 ReviewService 在 1c 实现。expectedRunID 是 run 作用域路由给出的预期
+// 运行（URL runId；INT-169），空串表示不做归属校验。
 type RunTokenResolver interface {
-	ResolveRunToken(ctx context.Context, rawToken string, requireLive bool) (*RunTokenIdentity, error)
+	ResolveRunToken(ctx context.Context, rawToken string, requireLive bool, expectedRunID string) (*RunTokenIdentity, error)
 }
 
 // PRGitHubClients 解析审查链路的 GitHub App 访问面（INT-129 部署级身份：

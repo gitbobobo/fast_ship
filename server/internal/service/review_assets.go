@@ -684,7 +684,7 @@ func (s *ReviewService) probeScreenshots(ctx context.Context, integrationID stri
 	return screenshotProbe{result: probeNone}
 }
 
-// AgentScreenshots GET /api/review-agent/screenshots：仅视觉运行可用。
+// AgentScreenshots GET /api/review-agent/runs/:runId/screenshots：仅视觉运行可用。
 // items 的 url 是本端点图片路径（相对 public_url）；changed 表示截图集合
 // 相对上一轮视觉审查是否有变化。
 func (s *ReviewService) AgentScreenshots(ctx context.Context, runID string) ([]api.ReviewAgentScreenshot, bool, error) {
@@ -756,7 +756,9 @@ func (s *ReviewService) AgentScreenshots(ctx context.Context, runID string) ([]a
 			items = append(items, item)
 			continue
 		}
-		item.Url = "/api/review-agent/screenshots/" + a.ID
+		// 图片地址带本轮 run 作用域（INT-169）：端点按 runId+令牌双重绑定，
+		// URL 只能取本运行 id，不能从其他运行借。
+		item.Url = "/api/review-agent/runs/" + runID + "/screenshots/" + a.ID
 		items = append(items, item)
 	}
 	return items, changed, nil

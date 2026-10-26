@@ -2,6 +2,8 @@ package forge
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/godbobo/fast_ship/server/internal/githubapi"
@@ -62,7 +64,17 @@ func (c *GitHubReviewClient) GetPullRequest(ctx context.Context, repoFullName st
 }
 
 func (c *GitHubReviewClient) GetPullRequestDiff(ctx context.Context, repoFullName string, number int) (string, error) {
-	return c.api.GetPullRequestDiff(ctx, c.installationID, repoFullName, number)
+	diff, err := c.api.GetPullRequestDiff(ctx, c.installationID, repoFullName, number)
+	if errors.Is(err, githubapi.ErrBodyTooLarge) {
+		// 本端截断探测与 Forgejo 适配器同一哨兵口径：service 只认
+		// IsDiffTooLarge，不区分两种来源；前缀原样透传。
+		return diff, fmt.Errorf("%w: github: %s #%d 的 diff 超过本端读入上限", ErrDiffTooLarge, repoFullName, number)
+	}
+	return diff, err
+}
+
+func (c *GitHubReviewClient) ListPullRequestFiles(ctx context.Context, repoFullName string, number int) ([]string, bool, error) {
+	return c.api.ListPullRequestFiles(ctx, c.installationID, repoFullName, number)
 }
 
 func (c *GitHubReviewClient) ListReviewComments(ctx context.Context, repoFullName string, number int) ([]ReviewComment, error) {
@@ -141,6 +153,14 @@ func (c *GitHubReviewClient) CreateCommitStatus(ctx context.Context, repoFullNam
 
 func (c *GitHubReviewClient) GetRepository(ctx context.Context, repoFullName string) error {
 	return c.api.GetRepository(ctx, c.installationID, repoFullName)
+}
+
+func (c *GitHubReviewClient) PathExistsAtRef(ctx context.Context, repoFullName, path, ref string) (bool, error) {
+	exists, err := c.api.PathExistsAtRef(ctx, c.installationID, repoFullName, path, ref)
+	if errors.Is(err, githubapi.ErrTreeTruncated) {
+		return false, fmt.Errorf("%w: %s@%s", ErrTreeTruncated, path, ref)
+	}
+	return exists, err
 }
 
 // Bearer 媒体下载令牌：委派底层实现的 Bearer(ctx, installationID)（私有仓库

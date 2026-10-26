@@ -423,9 +423,13 @@ func Setup(
 	// 审查 Agent 端点（/api/review-agent，INT-135）：仅 Bearer 运行令牌
 	// （fsr_）。读/上下文端点 requireLive（运行终态即拒）；result 允许
 	// 结束后完全相同正文的结束回报重放。
-	reviewAgent := api.Group("/review-agent")
+	// INT-169 起全部端点改为 run 作用域：URL 中 :runId 必须与令牌所属运行
+	// 一致（RequireRunToken 把路径参数作为预期运行交给 resolver 强校验，
+	// 错配 40307 且对双方运行零副作用）；旧的仅凭令牌端点整体移除
+	// （在途旧提示词线程的请求 404，运行按 deadline 超时收尾）。
+	reviewAgent := api.Group("/review-agent/runs/:runId")
 	{
-		live := reviewAgent.Group("", middleware.RequireRunToken(reviewResolver, true))
+		live := reviewAgent.Group("", middleware.RequireRunToken(reviewResolver, true, "runId"))
 		{
 			live.GET("/pull-request", reviewAgentHandler.PullRequest)
 			live.GET("/pull-request/diff", reviewAgentHandler.Diff)
@@ -433,7 +437,7 @@ func Setup(
 			live.GET("/screenshots", reviewAgentHandler.Screenshots)
 			live.GET("/screenshots/:assetId", reviewAgentHandler.ScreenshotImage)
 		}
-		reviewAgent.POST("/result", middleware.RequireRunToken(reviewResolver, false), reviewAgentHandler.SubmitResult)
+		reviewAgent.POST("/result", middleware.RequireRunToken(reviewResolver, false, "runId"), reviewAgentHandler.SubmitResult)
 	}
 
 	// Fast Ship 自身日志查询（INT-94，只读）：JWT（Web 管理员）与 fsk_ API Key

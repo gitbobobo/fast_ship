@@ -205,10 +205,64 @@ func (c *ForgejoReviewClient) GetPullRequestDiff(ctx context.Context, repoFullNa
 	}
 	if len(data) > respBodyMaxBytes {
 		// 确定性失败走 ErrDiffTooLarge 哨兵：service 的 IsDiffTooLarge 把它
-		// 与平台 too_large 归一，进降级收尾而不是无限退避重试。
-		return "", fmt.Errorf("%w: forge: PR #%d 的 diff 超过 %d 字节上限", ErrDiffTooLarge, number, respBodyMaxBytes)
+		// 与平台 too_large 归一，进降级收尾而不是无限退避重试。已读前缀
+		// 原样返回——前缀仍是真实内容，调用方按不完整件处置。
+		return string(data[:respBodyMaxBytes]),
+			fmt.Errorf("%w: forge: PR #%d 的 diff 超过 %d 字节上限", ErrDiffTooLarge, number, respBodyMaxBytes)
 	}
 	return string(data), nil
+}
+
+// forgejoPRFileWire pulls/N/files 元素：rename 的 previous_filename 是旧路径。
+type forgejoPRFileWire struct {
+	Filename         string `json:"filename"`
+	PreviousFilename string `json:"previous_filename"`
+}
+
+// forgejoPRFilesPage 单页大小与封顶口径：与 GitHub 3000 文件上限同形，
+// 打满按不完整清单处理（缺席不作否决证据）。
+const forgejoPRFilesPage = 100
+const forgejoPRFilesHardCap = 3000
+
+// ListPullRequestFiles 分页拉 PR 变更文件清单（GET pulls/N/files）：rename
+// 两侧都收并去重；否决类判定用这份分页清单而不是 diff 文本——平台对超大
+// PR 的 diff 可能无标记截断。末页只能以空页判：Forgejo 按部署
+// MaxResponseItems 收缩实际页大小（limit=100 可能只回 50/20），
+// 「不满一页即末页」会把后续页静默漏掉。
+func (c *ForgejoReviewClient) ListPullRequestFiles(ctx context.Context, repoFullName string, number int) ([]string, bool, error) {
+	repo, err := repoPath(repoFullName)
+	if err != nil {
+		return nil, false, err
+	}
+	seen := map[string]bool{}
+	var paths []string
+	add := func(p string) {
+		if p != "" && !seen[p] {
+			seen[p] = true
+			paths = append(paths, p)
+		}
+	}
+	// 页数兜底：服务端异常时（恒返非空页）不无限翻页。
+	const maxPages = forgejoPRFilesHardCap/forgejoPRFilesPage + 2
+	for page := 1; page <= maxPages; page++ {
+		var items []forgejoPRFileWire
+		err := c.do(ctx, http.MethodGet,
+			"/repos/"+repo+"/pulls/"+strconv.Itoa(number)+"/files?limit="+strconv.Itoa(forgejoPRFilesPage)+"&page="+strconv.Itoa(page), nil, &items)
+		if err != nil {
+			return nil, false, err
+		}
+		for _, f := range items {
+			add(f.Filename)
+			add(f.PreviousFilename)
+		}
+		if len(items) == 0 {
+			return paths, true, nil
+		}
+		if len(paths) >= forgejoPRFilesHardCap {
+			return paths, false, nil
+		}
+	}
+	return paths, false, nil
 }
 
 // forgejoReviewExpandMax 单次 ListReviewComments 展开评论的已提交 review
@@ -551,6 +605,42 @@ func (c *ForgejoReviewClient) GetRepository(ctx context.Context, repoFullName st
 		return err
 	}
 	return c.do(ctx, http.MethodGet, "/repos/"+repo, nil, nil)
+}
+
+// PathExistsAtRef 用 contents 端点判存在（Forgejo 无 GitHub 的
+// git/trees/{ref}:{dir} 取子树语法）：2xx → 存在（文件/目录同算），404 →
+// 不存在。非规范路径（前导 /、空段、.、..）本地判不存在不发请求——与
+// githubapi 实现同口径，防路径别名绕过文件归属校验。
+func (c *ForgejoReviewClient) PathExistsAtRef(ctx context.Context, repoFullName, path, ref string) (bool, error) {
+	repo, err := repoPath(repoFullName)
+	if err != nil {
+		return false, err
+	}
+	segs := strings.Split(path, "/")
+	for i, s := range segs {
+		if s == "" || s == "." || s == ".." {
+			return false, nil
+		}
+		segs[i] = pathSegment(s)
+	}
+	qref := url.QueryEscape(ref)
+	err = c.do(ctx, http.MethodGet,
+		"/repos/"+repo+"/contents/"+strings.Join(segs, "/")+"?ref="+qref,
+		nil, nil)
+	if err == nil {
+		return true, nil
+	}
+	if !IsNotFound(err) {
+		return false, err
+	}
+	// contents 404 恒有歧义（路径不存在 vs ref/仓库不可达）：探根目录区分，
+	// ref 级失败按调用失败上报，不能误报成「文件不存在」诱导 Agent 重写
+	// 合法 findings。
+	rootErr := c.do(ctx, http.MethodGet, "/repos/"+repo+"/contents/?ref="+qref, nil, nil)
+	if rootErr != nil {
+		return false, rootErr
+	}
+	return false, nil
 }
 
 // ListOpenPullRequests open PR 枚举（轮询补漏专用，不在 ReviewClient 方法面）。

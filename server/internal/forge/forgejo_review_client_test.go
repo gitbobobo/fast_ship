@@ -690,17 +690,101 @@ func TestForgejoClient_InvalidRepoName(t *testing.T) {
 
 // TestForgejoClient_GetPullRequestDiff_TooLarge 本端截断探测超上限返回
 // ErrDiffTooLarge 哨兵，IsDiffTooLarge 与平台 too_large 同口径命中——
-// service 侧进降级收尾，不再按可重试错误无限退避。
+// service 侧进降级收尾，不再按可重试错误无限退避；返回值携带已读前缀
+// （AgentDiff 端点按截断件给 Agent，不每次 50200 卡到 deadline）。
 func TestForgejoClient_GetPullRequestDiff_TooLarge(t *testing.T) {
 	client, _ := newForgejoTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = w.Write(make([]byte, respBodyMaxBytes+1))
 	})
-	_, err := client.GetPullRequestDiff(context.Background(), "o/r", 3)
+	diff, err := client.GetPullRequestDiff(context.Background(), "o/r", 3)
 	if !IsDiffTooLarge(err) {
 		t.Fatalf("超限 diff 应命中 IsDiffTooLarge, got %v", err)
 	}
 	if !errors.Is(err, ErrDiffTooLarge) {
 		t.Fatalf("应保留 ErrDiffTooLarge 哨兵, got %v", err)
+	}
+	if len(diff) != respBodyMaxBytes {
+		t.Fatalf("前缀 len = %d, want %d", len(diff), respBodyMaxBytes)
+	}
+}
+
+// TestForgejoClient_ListPullRequestFiles_MaxResponseItemsShrink 部署侧
+// MaxResponseItems 收缩实际页大小时（limit=100 只回 20）继续翻页到空页——
+// 「不满一页即末页」会把后续页的删除/重命名路径静默漏掉（r11 P1）。
+func TestForgejoClient_ListPullRequestFiles_MaxResponseItemsShrink(t *testing.T) {
+	const perPage = 20 // 模拟 MaxResponseItems=20 的收缩部署
+	client, _ := newForgejoTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		page := 1
+		fmt.Sscanf(r.URL.Query().Get("page"), "%d", &page)
+		start := (page - 1) * perPage
+		items := "["
+		for i := start; i < start+perPage && i < 45; i++ {
+			if i > start {
+				items += ","
+			}
+			items += fmt.Sprintf(`{"filename":"f%d.go","status":"modified"}`, i)
+		}
+		_, _ = w.Write([]byte(items + "]"))
+	})
+	paths, complete, err := client.ListPullRequestFiles(context.Background(), "o/r", 3)
+	if err != nil {
+		t.Fatalf("files: %v", err)
+	}
+	if !complete || len(paths) != 45 {
+		t.Fatalf("complete=%v paths=%d, want complete 45", complete, len(paths))
+	}
+}
+
+// TestForgejoClient_PathExistsAtRef INT-169 文件归属的 Forgejo 实现：contents
+// 端点 2xx→存在、404 经根目录探测消歧（根在→不存在，根也 404→调用失败）、
+// 非规范路径本地判不存在且零请求。
+func TestForgejoClient_PathExistsAtRef(t *testing.T) {
+	client, logs := newForgejoTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("ref") == "bad-ref" {
+			http.Error(w, `{"message":"not found"}`, http.StatusNotFound)
+			return
+		}
+		if strings.Contains(r.URL.Path, "gone.go") {
+			http.Error(w, `{"message":"not found"}`, http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"name":"a.go","path":"dir/a.go","type":"file"}`))
+	})
+	ctx := context.Background()
+
+	ok, err := client.PathExistsAtRef(ctx, "o/r", "dir/a.go", "sha-1")
+	if err != nil || !ok {
+		t.Fatalf("存在路径 = %v, %v", ok, err)
+	}
+	got := lastServeLog(t, logs)
+	if got.method != http.MethodGet ||
+		got.path != "/api/v1/repos/o/r/contents/dir/a.go?ref=sha-1" {
+		t.Fatalf("请求形状: %s %s", got.method, got.path)
+	}
+
+	// 路径 404 + 根目录 200 → 路径确实不存在。
+	ok, err = client.PathExistsAtRef(ctx, "o/r", "gone.go", "sha-1")
+	if err != nil || ok {
+		t.Fatalf("404 = %v, %v, want false,nil", ok, err)
+	}
+	got = lastServeLog(t, logs)
+	if got.path != "/api/v1/repos/o/r/contents/?ref=sha-1" {
+		t.Fatalf("消歧应探测根目录, got %q", got.path)
+	}
+
+	// 根目录也 404 → ref/仓库级故障，报错而非「不存在」。
+	if _, err = client.PathExistsAtRef(ctx, "o/r", "any.go", "bad-ref"); err == nil {
+		t.Fatal("ref 级 404 须透传为错误")
+	}
+
+	for _, bad := range []string{"/a.go", "a//b.go", "./a.go", "../x", "a.go/"} {
+		before := len(*logs)
+		ok, err = client.PathExistsAtRef(ctx, "o/r", bad, "sha-1")
+		if err != nil || ok || len(*logs) != before {
+			t.Fatalf("别名 %q = %v, %v, 请求数 %d→%d", bad, ok, err, before, len(*logs))
+		}
 	}
 }

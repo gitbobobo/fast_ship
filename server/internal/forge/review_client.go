@@ -17,7 +17,14 @@ const (
 type ReviewClient interface {
 	// 元数据
 	GetPullRequest(ctx context.Context, repoFullName string, number int) (*PullRequest, error)
+	// GetPullRequestDiff err 为 ErrDiffTooLarge 时返回值是尽量读到的前缀
+	// （可能为空）——前缀仍是真实内容，调用方按不完整件处置。
 	GetPullRequestDiff(ctx context.Context, repoFullName string, number int) (string, error)
+	// ListPullRequestFiles PR 变更文件清单（rename 旧名+新名都含，去重）：
+	// 分页端点的权威证据——平台对超大 PR 的 diff 文本可能无标记截断，
+	// 否决类判定不得用 diff 文本。complete=false 表示清单被平台封顶
+	// （如 GitHub 3000 文件上限），缺席不能当不存在证据。
+	ListPullRequestFiles(ctx context.Context, repoFullName string, number int) (paths []string, complete bool, err error)
 	ListReviewComments(ctx context.Context, repoFullName string, number int) ([]ReviewComment, error)
 	// ListIssueCommentsForPR PR 会话评论（review 行内之外的顶层讨论，INT-135
 	// 历史上下文用）。
@@ -36,6 +43,10 @@ type ReviewClient interface {
 	CreateCommitStatus(ctx context.Context, repoFullName, sha, state, statusContext, description, targetURL string) error
 	// 仓库级检查：nil 表示可访问；403/404 经 *StatusError 返回。
 	GetRepository(ctx context.Context, repoFullName string) error
+	// PathExistsAtRef 仓库相对路径在指定 ref（commit SHA 等）的树中是否存在
+	// （INT-169 文件归属校验：审查 findings 的 file 必须落在本轮 head 树里）。
+	// 非规范路径（绝对路径、空段、.、..）按不存在处理而非规范化。
+	PathExistsAtRef(ctx context.Context, repoFullName, path, ref string) (bool, error)
 	// Kind 报告适配器的集成 kind（github/forgejo）。
 	Kind() string
 }

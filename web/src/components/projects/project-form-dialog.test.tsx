@@ -446,7 +446,7 @@ describe("ProjectFormDialog", () => {
       makeProject({ code_integration_id: "dead-row", code_repo_url: null }),
     );
 
-    await screen.findByLabelText(/代码仓库（/);
+    await screen.findByLabelText("代码仓库");
     await user.click(
       screen.getByLabelText("清除失效的代码仓库绑定（回落到公开仓库）"),
     );
@@ -472,7 +472,7 @@ describe("ProjectFormDialog", () => {
     );
 
     // slug 从 code_github_owner/repo 预填非空——勾选语义须优先于输入内容。
-    const slug = await screen.findByLabelText(/代码仓库（/);
+    const slug = await screen.findByLabelText("代码仓库");
     expect(slug).toHaveValue("acme/api");
     await user.click(
       screen.getByLabelText("清除失效的代码仓库绑定（回落到公开仓库）"),
@@ -493,7 +493,7 @@ describe("ProjectFormDialog", () => {
       makeProject({ code_integration_id: "dead-row", code_repo_url: null }),
     );
 
-    await user.type(await screen.findByLabelText(/代码仓库（/), "acme/api");
+    await user.type(await screen.findByLabelText("代码仓库"), "acme/api");
     await user.click(screen.getByRole("button", { name: "保存" }));
 
     expect(
@@ -560,7 +560,7 @@ describe("ProjectFormDialog", () => {
       }),
     );
 
-    expect(await screen.findByLabelText(/代码仓库（/)).toHaveValue("acme/api");
+    expect(await screen.findByLabelText("代码仓库")).toHaveValue("acme/api");
     const nameInput = screen.getByLabelText("项目名称");
     await user.clear(nameInput);
     await user.type(nameInput, "renamed");
@@ -608,7 +608,7 @@ describe("ProjectFormDialog", () => {
       }),
     );
 
-    await screen.findByLabelText(/代码仓库（/);
+    await screen.findByLabelText("代码仓库");
     expect(screen.queryByText(repoChangeWarning)).not.toBeInTheDocument();
   });
 
@@ -625,7 +625,7 @@ describe("ProjectFormDialog", () => {
       }),
     );
 
-    const input = await screen.findByLabelText(/代码仓库（/);
+    const input = await screen.findByLabelText("代码仓库");
     await user.clear(input);
     await user.type(input, "acme/other");
     await user.click(screen.getByRole("button", { name: "保存" }));

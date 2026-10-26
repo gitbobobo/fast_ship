@@ -115,6 +115,14 @@ func (stubGitHubClient) ResolveInstallation(context.Context, string) (int64, err
 	return 0, stubErr("ResolveInstallation")
 }
 
+func (stubGitHubClient) PathExistsAtRef(context.Context, int64, string, string, string) (bool, error) {
+	return false, stubErr("PathExistsAtRef")
+}
+
+func (stubGitHubClient) ListPullRequestFiles(context.Context, int64, string, int) ([]string, bool, error) {
+	return nil, false, stubErr("ListPullRequestFiles")
+}
+
 func (stubGitHubClient) ListIssueCommentsForPR(context.Context, int64, string, int) ([]githubapi.IssueComment, error) {
 	return nil, stubErr("ListIssueCommentsForPR")
 }
