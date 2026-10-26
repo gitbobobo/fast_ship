@@ -1009,8 +1009,9 @@ SHA-256 前 16 位。
     `removed` 并刷新聚合通知（受影响清单收缩）；登记预算耗尽与 none 态同
     口径收敛（复用 `registry-incomplete` 计数与 12 次上限 →
     `failed`/`registry_error`）；分支被绑到多个 worktree 时先收集全部绑
-    定——存在与行内快照同路径项即采信恢复转 none，仅全部绑定都在异路径
-    才 `failed`（reason=`ownership_mismatch`）交人工；确认存活累计 24
+    定——行内有快照路径时同路径项优先采信恢复转 none，仅全部绑定都在异
+    路径才 `failed`（reason=`ownership_mismatch`）交人工；行内无快照路径
+    时只有唯一绑定可采信写回，多绑定即无法指认同样 `failed`；确认存活累计 24
     次（封顶 1h 退避 ≈1 天）仍未消失同样收敛 `failed`（reason=
     `branch_pending`，提示人工清理）——待清理不是无限期状态；复查登记明
     确报错到上限同样降级 `failed`（`registry_error`，终态统一走
