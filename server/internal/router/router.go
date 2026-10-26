@@ -418,6 +418,14 @@ func Setup(
 		bots.POST("/:id/schedule-tasks/:taskId/runs/:runId/stop", botHandler.StopScheduleRun)
 		bots.PUT("/:id/schedule-tasks/:taskId/enabled", botHandler.SetScheduleTaskEnabled)
 		bots.DELETE("/:id/schedule-tasks/:taskId/state", botHandler.ClearScheduleTaskState)
+		// 周期预算与告警阈值（INT-164）：机器人与定时任务各一组读写；只影响
+		// 告警，不改变运行行为。周期段只接受 daily / monthly。
+		bots.GET("/:id/budgets", botHandler.ListBotBudgets)
+		bots.PUT("/:id/budgets/:period", botHandler.UpsertBotBudget)
+		bots.DELETE("/:id/budgets/:period", botHandler.DeleteBotBudget)
+		bots.GET("/:id/schedule-tasks/:taskId/budgets", botHandler.ListScheduleTaskBudgets)
+		bots.PUT("/:id/schedule-tasks/:taskId/budgets/:period", botHandler.UpsertScheduleTaskBudget)
+		bots.DELETE("/:id/schedule-tasks/:taskId/budgets/:period", botHandler.DeleteScheduleTaskBudget)
 	}
 
 	// 审查 Agent 端点（/api/review-agent，INT-135）：仅 Bearer 运行令牌

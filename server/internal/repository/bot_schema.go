@@ -9,8 +9,9 @@ import (
 
 // BotModels 返回机器人的全部表模型（七张主线表 + INT-102 的压缩/记忆/维护
 // 表 + INT-103 的定时任务表 + INT-115 的模型窗口缓存表 + INT-133 的 AI 提供
-// 商表 + INT-160 的写操作分级规则表），供 AutoMigrate 与测试建库共用。FTS5
-// 虚表与触发器不在 GORM 模型体系内，由 botSchemaDDL 创建。
+// 商表 + INT-160 的写操作分级规则表 + INT-164 的花费按天汇总表），供
+// AutoMigrate 与测试建库共用。FTS5 虚表与触发器不在 GORM 模型体系内，由
+// botSchemaDDL 创建。
 func BotModels() []interface{} {
 	return []interface{}{
 		&model.AIProvider{},
@@ -28,8 +29,12 @@ func BotModels() []interface{} {
 		&model.BotMaintenanceRun{},
 		&model.BotMaintenanceRequest{},
 		&model.BotScheduleTask{},
+		&model.BotScheduleTaskName{},
 		&model.BotModelWindow{},
 		&model.BotWritePolicyRule{},
+		&model.BotUsageDaily{},
+		&model.BotUsageRollupDay{},
+		&model.BotBudget{},
 	}
 }
 
@@ -173,6 +178,20 @@ END`,
 	// bot_events：会话隔离读（聊天页只返回 main）。
 	`CREATE INDEX IF NOT EXISTS idx_bot_events_bot_session_seq ON bot_events(bot_id, session_kind, seq)`,
 
+	// ---------- INT-164：花费页按天汇总 ----------
+
+	// bot_usage_daily：一行 = (bot, date, kind, schedule_task_id)。SQLite 复合
+	// UNIQUE 把 NULL 互不相同，对 task_id 可空的键只能用部分唯一索引兜底：
+	// task 为空走 (bot_id,date,kind)，非空走四列全键。
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_bot_usage_daily_bucket ON bot_usage_daily(bot_id, date, kind) WHERE schedule_task_id IS NULL`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_bot_usage_daily_bucket_task ON bot_usage_daily(bot_id, date, kind, schedule_task_id) WHERE schedule_task_id IS NOT NULL`,
+	// 汇总任务按 (bot,date) 整日替换；混合查询按 (user,date) 窗口读。
+	`CREATE INDEX IF NOT EXISTS idx_bot_usage_daily_bot_date ON bot_usage_daily(bot_id, date)`,
+	`CREATE INDEX IF NOT EXISTS idx_bot_usage_daily_user_date ON bot_usage_daily(user_id, date)`,
+
+	// ---------- INT-164：预算（部分唯一索引见 repository/bot_budget.go 的
+	// BotBudgetDDL，EnsureBotSchema 统一执行） ----------
+
 	// bot_memory_fts 是派生全文索引（trigram），事实来源是文件/版本表；
 	// 只索引未删除文件的当前正文，不索引历史版本。同步由文件表触发器完成，
 	// 墓碑文件不进入索引。
@@ -231,9 +250,49 @@ WHERE tool_name = 'fs_thread' AND action = 'wait' AND status = 'running'
 	if err := db.Exec(dupWaitCleanup).Error; err != nil {
 		return fmt.Errorf("bot schema: dedupe running waits: %w", err)
 	}
-	for _, ddl := range botSchemaDDL {
-		if err := db.Exec(ddl).Error; err != nil {
-			return fmt.Errorf("bot schema: %w", err)
+	// INT-164 存量修正：调度派发路径曾把 BotRun 交给 autoCreateTime，
+	// created_at 落本地时区文本（如 +08:00），与 UTC 窗口边界做字符串
+	// 比较时被挡在窗口外——usage 窗口、写水位探针、按天记日、预算窗口
+	// 全链路漏计。把含 ±HH:MM 偏移后缀的存量行统一重写为 UTC 规范文本
+	// （瞬时不变、毫秒尾数原样保留）；受影响 bot 的汇总标记作废交给
+	// 启动回填按新时间轴重算——否则探针水位低于标记，错账会固住。
+	// 幂等：规范行不匹配模式，二次执行影响 0 行。四条语句包进一个事务，
+	// 固定到同一连接——TEMPORARY TABLE 是会话级的，连接池里逐条执行会
+	// 在第二条报 no such table。
+	tzErr := db.Transaction(func(tx *gorm.DB) error {
+		tzFix := []string{
+			`CREATE TEMPORARY TABLE IF NOT EXISTS int164_tz_bots AS
+SELECT DISTINCT bot_id FROM bot_runs
+WHERE (created_at GLOB '*+[0-9][0-9]:[0-9][0-9]' OR created_at GLOB '*-[0-9][0-9]:[0-9][0-9]')
+  AND created_at NOT LIKE '%+00:00'`,
+			`DELETE FROM bot_usage_rollup_days WHERE bot_id IN (SELECT bot_id FROM int164_tz_bots)`,
+			`UPDATE bot_runs SET created_at =
+    strftime('%Y-%m-%d %H:%M:%S', created_at) ||
+    CASE WHEN instr(created_at, '.') > 0
+         THEN substr(created_at, instr(created_at, '.'),
+                     length(created_at) - instr(created_at, '.') - 5)
+         ELSE '' END ||
+    '+00:00'
+WHERE (created_at GLOB '*+[0-9][0-9]:[0-9][0-9]' OR created_at GLOB '*-[0-9][0-9]:[0-9][0-9]')
+  AND created_at NOT LIKE '%+00:00'
+  AND strftime('%Y-%m-%d %H:%M:%S', created_at) IS NOT NULL`,
+			`DROP TABLE IF EXISTS int164_tz_bots`,
+		}
+		for _, stmt := range tzFix {
+			if err := tx.Exec(stmt).Error; err != nil {
+				return fmt.Errorf("normalize run created_at offsets: %w", err)
+			}
+		}
+		return nil
+	})
+	if tzErr != nil {
+		return fmt.Errorf("bot schema: %w", tzErr)
+	}
+	for _, ddls := range [][]string{botSchemaDDL, BotBudgetDDL} {
+		for _, ddl := range ddls {
+			if err := db.Exec(ddl).Error; err != nil {
+				return fmt.Errorf("bot schema: %w", err)
+			}
 		}
 	}
 	return nil

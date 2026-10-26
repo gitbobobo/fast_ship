@@ -102,7 +102,7 @@ func (s *BotService) auxModelRequest(ctx context.Context, bot *model.Bot, maintR
 	timeouts := s.botStreamTimeoutsOf()
 	callCtx, cancel := context.WithTimeout(ctx, timeouts.FirstChunk+timeouts.Idle+30*time.Second)
 	defer cancel()
-	reply, callErr := botStreamChat(callCtx, &client, botStreamRequest{
+	reply, callErr := botStreamChat(callCtx, &client, bot.BaseURL, botStreamRequest{
 		Messages:            params,
 		Model:               modelName,
 		MaxCompletionTokens: maxOut,
@@ -134,6 +134,18 @@ func (s *BotService) auxModelRequest(ctx context.Context, bot *model.Bot, maintR
 		cols["completion_tokens"] = reply.CompletionTokens
 		cols["total_tokens"] = reply.TotalTokens
 		cols["cached_tokens"] = reply.CachedTokens
+		// 推理 token 与供应商实际金额同 finishModelRequest 口径（INT-164）：
+		// 未返回不写列，保持 NULL，缺失 ≠ 0；provider_cost 只落置信 USD 的
+		// 值，其余记 provider_cost_raw。
+		if reply.ReasoningTokens != nil {
+			cols["reasoning_tokens"] = *reply.ReasoningTokens
+		}
+		if reply.ProviderCost != nil {
+			cols["provider_cost"] = *reply.ProviderCost
+		}
+		if reply.ProviderCostRaw != nil {
+			cols["provider_cost_raw"] = *reply.ProviderCostRaw
+		}
 		// 维护请求按维护运行快照里的目录归属计价（INT-139 云端复审）：
 		// maintRun.ConfigSnapshotJSON 由父 run 派发时冻结，与主线请求走
 		// runCatalogIDOf 同口径——运行中用户切了 provider/目录，发往冻结旧
@@ -150,6 +162,8 @@ func (s *BotService) auxModelRequest(ctx context.Context, bot *model.Bot, maintR
 		}
 	}
 	_, _ = repository.NewBotMaintenanceRepository(s.db).UpdateRequestColumns(req.ID, nil, cols)
+	// usage/成本落账后通知预算评估（INT-164）：信号合并，不背评估成本。
+	s.kickBudgetEval()
 	return reply, callErr
 }
 

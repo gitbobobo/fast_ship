@@ -34,17 +34,13 @@ func (s *BotService) ListRuns(userID, botID string, limit int) ([]BotRunResponse
 	if err != nil {
 		return nil, errs.ErrInternal
 	}
-	ids := make([]string, 0, len(rows))
-	for i := range rows {
-		ids = append(ids, rows[i].ID)
-	}
-	display, err := s.maintenanceCostsOf(ids)
+	own, maint, err := s.displayCostsOf(s.db, rows)
 	if err != nil {
 		return nil, errs.ErrInternal
 	}
 	out := make([]BotRunResponse, 0, len(rows))
 	for i := range rows {
-		out = append(out, botRunResponseOf(&rows[i], display[rows[i].ID]))
+		out = append(out, botRunResponseOf(&rows[i], own[rows[i].ID], maint[rows[i].ID]))
 	}
 	return out, nil
 }
@@ -383,17 +379,13 @@ func (s *BotService) GetChatSnapshot(userID, botID string, messageLimit int) (*B
 		if err != nil {
 			return err
 		}
-		runIDs := make([]string, 0, len(runRows))
-		for i := range runRows {
-			runIDs = append(runIDs, runRows[i].ID)
-		}
-		display, err := repository.NewBotUsageRepository(tx).MaintenanceCostsByParentRun(runIDs)
+		own, maint, err := s.displayCostsOf(tx, runRows)
 		if err != nil {
 			return err
 		}
 		snap.Runs = make([]BotRunResponse, 0, len(runRows))
 		for i := range runRows {
-			snap.Runs = append(snap.Runs, botRunResponseOf(&runRows[i], display[runRows[i].ID]))
+			snap.Runs = append(snap.Runs, botRunResponseOf(&runRows[i], own[runRows[i].ID], maint[runRows[i].ID]))
 		}
 
 		if req, err := repository.NewBotModelRequestRepository(tx).LatestMainByBot(botID); err == nil {

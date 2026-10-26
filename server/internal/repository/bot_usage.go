@@ -169,11 +169,16 @@ func (r *BotUsageRepository) ListMaintenanceRunsInWindow(botIDs []string, start,
 // 命中率推过 1）；priced_* 只统计已计价行的 token 合计，供换模型差价用同一
 // 分母（已计价必以 usage 完整为前提）。
 type RequestUsageAgg struct {
-	GroupID             string   `gorm:"column:group_id"`
-	Total               int64    `gorm:"column:total"`
-	Priced              int64    `gorm:"column:priced"`
-	Unpriced            int64    `gorm:"column:unpriced"`
-	CostSum             *float64 `gorm:"column:cost_sum"`
+	GroupID string   `gorm:"column:group_id"`
+	Total   int64    `gorm:"column:total"`
+	Priced  int64    `gorm:"column:priced"`
+	Counted int64    `gorm:"column:counted"`
+	CostSum *float64 `gorm:"column:cost_sum"`
+	// DisplaySum 是逐请求 COALESCE(provider_cost, cost_estimate) 的合计——
+	// 全部展示金额（总览/明细/按天汇总/任务合计）与预算花费共用的实收优先
+	// 口径；空集合为 nil（缺失 ≠ 0）。CostSum 保持纯估算口径，供优化参考的
+	// 换模型差价计算。
+	DisplaySum          *float64 `gorm:"column:display_sum"`
 	PromptSum           int64    `gorm:"column:prompt_sum"`
 	CachedSum           int64    `gorm:"column:cached_sum"`
 	CompletionSum       int64    `gorm:"column:completion_sum"`
@@ -181,6 +186,9 @@ type RequestUsageAgg struct {
 	PricedPromptSum     int64    `gorm:"column:priced_prompt_sum"`
 	PricedCachedSum     int64    `gorm:"column:priced_cached_sum"`
 	PricedCompletionSum int64    `gorm:"column:priced_completion_sum"`
+	// ReasoningSum 是 usage 完整行的 reasoning_tokens 合计；全 NULL 保持
+	// NULL（缺失 ≠ 0）；目前只有按天汇总（INT-164）消费。
+	ReasoningSum *int64 `gorm:"column:reasoning_sum"`
 }
 
 // requestAggSelect 是请求聚合的公共投影：%1 = 分组列、%2 = 表名、
@@ -191,16 +199,21 @@ type RequestUsageAgg struct {
 // 与已计价合计）都逐行 MIN(cached_tokens, prompt_tokens) 钳制。
 const requestAggSelect = "COALESCE(%[1]s, '') AS group_id, " +
 	"COUNT(*) AS total, " +
+	// priced 保持「目录价已计价」口径（优化参考的换模型差价分母用它）；
+	// counted 是展示口径的有金额计数（估算或实收任一非空）——实收覆盖的
+	// 请求已按实收进合计，不能再算未计价。
 	"SUM(CASE WHEN %[2]s.cost_estimate IS NOT NULL THEN 1 ELSE 0 END) AS priced, " +
-	"SUM(CASE WHEN %[2]s.cost_estimate IS NULL THEN 1 ELSE 0 END) AS unpriced, " +
+	"SUM(CASE WHEN COALESCE(%[2]s.provider_cost, %[2]s.cost_estimate) IS NOT NULL THEN 1 ELSE 0 END) AS counted, " +
 	"SUM(%[2]s.cost_estimate) AS cost_sum, " +
+	"SUM(COALESCE(%[2]s.provider_cost, %[2]s.cost_estimate)) AS display_sum, " +
 	"COALESCE(SUM(CASE WHEN %[3]s THEN COALESCE(%[2]s.prompt_tokens, 0) ELSE 0 END), 0) AS prompt_sum, " +
 	"COALESCE(SUM(CASE WHEN %[3]s THEN MIN(COALESCE(%[2]s.cached_tokens, 0), COALESCE(%[2]s.prompt_tokens, 0)) ELSE 0 END), 0) AS cached_sum, " +
 	"COALESCE(SUM(CASE WHEN %[3]s THEN COALESCE(%[2]s.completion_tokens, 0) ELSE 0 END), 0) AS completion_sum, " +
 	"%[4]s AS tools_sum, " +
 	"COALESCE(SUM(CASE WHEN %[2]s.cost_estimate IS NOT NULL THEN COALESCE(%[2]s.prompt_tokens, 0) ELSE 0 END), 0) AS priced_prompt_sum, " +
 	"COALESCE(SUM(CASE WHEN %[2]s.cost_estimate IS NOT NULL THEN MIN(COALESCE(%[2]s.cached_tokens, 0), COALESCE(%[2]s.prompt_tokens, 0)) ELSE 0 END), 0) AS priced_cached_sum, " +
-	"COALESCE(SUM(CASE WHEN %[2]s.cost_estimate IS NOT NULL THEN COALESCE(%[2]s.completion_tokens, 0) ELSE 0 END), 0) AS priced_completion_sum"
+	"COALESCE(SUM(CASE WHEN %[2]s.cost_estimate IS NOT NULL THEN COALESCE(%[2]s.completion_tokens, 0) ELSE 0 END), 0) AS priced_completion_sum, " +
+	"SUM(CASE WHEN %[3]s THEN %[2]s.reasoning_tokens END) AS reasoning_sum"
 
 // RequestAggregatesByRun 按主线/定时 run 聚合模型请求计数、成本与用量；
 // runIDs 为空返回空表。总览与优化参考（INT-163）共用这一份聚合。
@@ -247,10 +260,11 @@ func (r *BotUsageRepository) MaintenanceRequestAggregatesByRun(maintRunIDs []str
 	return out, nil
 }
 
-// MaintenanceCostsByParentRun 关联维护已计价成本合计（parent_run_id →
-// SUM(cost_estimate)）。值仅在有已计价请求行时非 nil——全部未计价与无维护
-// 同样表示「无已计价」，供显示成本的空值合并（缺失 ≠ 0）。列表投影批量取
-// 全也走这一条（当前页一次查询，不做逐 run N+1）。
+// MaintenanceCostsByParentRun 关联维护显示成本合计（parent_run_id →
+// SUM(COALESCE(provider_cost, cost_estimate))），实收优先与展示/预算同口径。
+// 值仅在有金额请求行时非 nil——全部未计价与无维护同样表示「无金额」，供
+// 显示成本的空值合并（缺失 ≠ 0）。列表投影批量取全也走这一条（当前页一次
+// 查询，不做逐 run N+1）。
 func (r *BotUsageRepository) MaintenanceCostsByParentRun(runIDs []string) (map[string]*float64, error) {
 	out := map[string]*float64{}
 	for _, batch := range ChunkIDs(runIDs, UsageQueryBatch) {
@@ -259,7 +273,8 @@ func (r *BotUsageRepository) MaintenanceCostsByParentRun(runIDs []string) (map[s
 			CostSum     *float64 `gorm:"column:cost_sum"`
 		}
 		err := r.db.Table("bot_maintenance_requests").
-			Select("bot_maintenance_runs.parent_run_id AS parent_run_id, SUM(bot_maintenance_requests.cost_estimate) AS cost_sum").
+			Select("bot_maintenance_runs.parent_run_id AS parent_run_id, "+
+				"SUM(COALESCE(bot_maintenance_requests.provider_cost, bot_maintenance_requests.cost_estimate)) AS cost_sum").
 			Joins("JOIN bot_maintenance_runs ON bot_maintenance_runs.id = bot_maintenance_requests.maintenance_run_id").
 			Where("bot_maintenance_runs.parent_run_id IN ?", batch).
 			Group("bot_maintenance_runs.parent_run_id").
@@ -399,7 +414,7 @@ func (r *BotUsageRepository) ListToolCallsByRequestIDs(requestIDs []string) ([]m
 		// 明细投影只需展示列；arguments_json/result_json 可为瘦身前大文本，
 		// 非终态明细每 5s 轮询，整行拉取会让响应体积无界。
 		err := r.db.Select("id", "request_id", "tool_name", "action", "status",
-			"error_code", "created_at", "finished_at").
+			"error_code", "error_message", "created_at", "finished_at").
 			Where("request_id IN ?", batch).
 			Order("created_at ASC, id ASC").Find(&part).Error
 		if err != nil {
@@ -542,8 +557,8 @@ func (r *BotUsageRepository) RetryCountsByRun(runIDs []string) (map[string]int64
 }
 
 // FailedRequestAggRow 是失败请求按 (run, error_code) 的聚合行（failures 用）：
-// error_code 为 NULL 的失败归到 null 一组（扫描为 nil 指针）；cost_sum 只含
-// 已计价行，全未计价为 nil（缺失 ≠ 0）。
+// error_code 为 NULL 的失败归到 null 一组（扫描为 nil 指针）；cost_sum 按
+// 实收优先（COALESCE(provider_cost, cost_estimate)），全无金额为 nil。
 type FailedRequestAggRow struct {
 	RunID     string   `gorm:"column:run_id"`
 	ErrorCode *string  `gorm:"column:error_code"`
@@ -557,7 +572,7 @@ func (r *BotUsageRepository) FailedRequestAggsByRun(runIDs []string) ([]FailedRe
 	for _, batch := range ChunkIDs(runIDs, UsageQueryBatch) {
 		var part []FailedRequestAggRow
 		err := r.db.Model(&model.BotModelRequest{}).
-			Select("run_id, error_code, COUNT(*) AS requests, SUM(cost_estimate) AS cost_sum").
+			Select("run_id, error_code, COUNT(*) AS requests, SUM(COALESCE(provider_cost, cost_estimate)) AS cost_sum").
 			Where("run_id IN ? AND status = ?", batch, model.BotModelRequestFailed).
 			Group("run_id, error_code").
 			Scan(&part).Error
@@ -580,6 +595,8 @@ type MaintenanceRequestDetailRow struct {
 	PromptTokens     *int64   `gorm:"column:prompt_tokens"`
 	CachedTokens     *int64   `gorm:"column:cached_tokens"`
 	CompletionTokens *int64   `gorm:"column:completion_tokens"`
+	ReasoningTokens  *int64   `gorm:"column:reasoning_tokens"`
+	ProviderCost     *float64 `gorm:"column:provider_cost"`
 	CostEstimate     *float64 `gorm:"column:cost_estimate"`
 	ErrorCode        *string  `gorm:"column:error_code"`
 }
@@ -591,7 +608,7 @@ func (r *BotUsageRepository) ListMaintenanceRequestRows(maintRunIDs []string) ([
 	for _, batch := range ChunkIDs(maintRunIDs, UsageQueryBatch) {
 		var part []MaintenanceRequestDetailRow
 		err := r.db.Model(&model.BotMaintenanceRequest{}).
-			Select("maintenance_run_id, purpose, status, usage_complete, prompt_tokens, cached_tokens, completion_tokens, cost_estimate, error_code").
+			Select("maintenance_run_id, purpose, status, usage_complete, prompt_tokens, cached_tokens, completion_tokens, reasoning_tokens, provider_cost, cost_estimate, error_code").
 			Where("maintenance_run_id IN ?", batch).
 			Scan(&part).Error
 		if err != nil {

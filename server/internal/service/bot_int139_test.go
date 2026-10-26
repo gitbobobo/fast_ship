@@ -116,7 +116,7 @@ func TestBotStreamChatSynthesizesMissingToolCallID(t *testing.T) {
 		},
 	})
 	client := botNewClient(f.URL(), "sk-test-abcdef123456")
-	reply, err := botStreamChat(context.Background(), &client, int137DirectRequest(),
+	reply, err := botStreamChat(context.Background(), &client, "https://relay.example.com/v1", int137DirectRequest(),
 		botStreamTimeouts{FirstChunk: 5 * time.Second, Idle: 5 * time.Second}, nil)
 	if err != nil {
 		t.Fatalf("stream: %v", err)
@@ -140,7 +140,7 @@ func TestBotStreamChatDropsNamelessToolCall(t *testing.T) {
 		},
 	})
 	client := botNewClient(f.URL(), "sk-test-abcdef123456")
-	reply, err := botStreamChat(context.Background(), &client, int137DirectRequest(),
+	reply, err := botStreamChat(context.Background(), &client, "https://relay.example.com/v1", int137DirectRequest(),
 		botStreamTimeouts{FirstChunk: 5 * time.Second, Idle: 5 * time.Second}, nil)
 	if err != nil {
 		t.Fatalf("stream: %v", err)

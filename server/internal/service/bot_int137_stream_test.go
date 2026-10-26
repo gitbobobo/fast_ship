@@ -54,7 +54,7 @@ func TestBotStreamChatWatchdogFirstChunk(t *testing.T) {
 	f := newFakeModelServer(t, fakeModelTurn{HoldFor: 2 * time.Second})
 	client := botNewClient(f.URL(), "sk-test-abcdef123456")
 
-	reply, err := botStreamChat(context.Background(), &client, int137DirectRequest(),
+	reply, err := botStreamChat(context.Background(), &client, "https://relay.example.com/v1", int137DirectRequest(),
 		botStreamTimeouts{FirstChunk: 100 * time.Millisecond, Idle: 100 * time.Millisecond}, nil)
 	var timeout *botStreamTimeoutError
 	if !errors.As(err, &timeout) {
@@ -72,7 +72,7 @@ func TestBotStreamChatWatchdogIdle(t *testing.T) {
 	f := newFakeModelServer(t, fakeModelTurn{Text: "开头", StallAfterText: 2 * time.Second})
 	client := botNewClient(f.URL(), "sk-test-abcdef123456")
 
-	reply, err := botStreamChat(context.Background(), &client, int137DirectRequest(),
+	reply, err := botStreamChat(context.Background(), &client, "https://relay.example.com/v1", int137DirectRequest(),
 		botStreamTimeouts{FirstChunk: 5 * time.Second, Idle: 100 * time.Millisecond}, nil)
 	var timeout *botStreamTimeoutError
 	if !errors.As(err, &timeout) {
@@ -99,7 +99,7 @@ func TestBotStreamChatStopCancelIsNotTimeout(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 		cancel()
 	}()
-	_, err := botStreamChat(ctx, &client, int137DirectRequest(),
+	_, err := botStreamChat(ctx, &client, "https://relay.example.com/v1", int137DirectRequest(),
 		botStreamTimeouts{FirstChunk: 500 * time.Millisecond, Idle: 500 * time.Millisecond}, nil)
 	if err == nil || !errors.Is(err, context.Canceled) {
 		t.Fatalf("用户停止应保留取消错误，实得 %v", err)

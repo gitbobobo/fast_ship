@@ -248,4 +248,69 @@ describe("BotUsageRunPage", () => {
       "仅最新 500 条",
     );
   });
+
+  it("供应商返回金额：provider_cost 有值时打徽记并替代估算", () => {
+    mockRun({
+      ...detail,
+      requests: [
+        {
+          ...detail.requests[1],
+          provider_cost: 0.0134,
+          cost_estimate: 0.4,
+        },
+      ],
+      maintenance_runs: [
+        {
+          ...detail.maintenance_runs[0],
+          requests: [
+            {
+              ...detail.maintenance_runs[0].requests[0],
+              provider_cost: 0.05,
+              cost_estimate: 0.06,
+            },
+          ],
+        },
+      ],
+    });
+    renderPage();
+
+    // 主线请求行：徽记 + 实际金额，估算 0.4 不再出现。
+    const rows = screen.getAllByTestId("usage-request-row");
+    const cost = within(rows[0]).getByTestId("usage-provider-cost");
+    expect(within(cost).getByText("供应商返回")).toBeInTheDocument();
+    expect(cost).toHaveTextContent("$0.0134");
+    expect(rows[0].textContent).not.toContain("$0.4");
+    // 维护请求行同口径。
+    const maintRun = screen.getByTestId("usage-maintenance-run");
+    expect(maintRun).toHaveTextContent("供应商返回");
+    expect(maintRun).toHaveTextContent("$0.05");
+  });
+
+  it("推理 token：有值显示在输出括注里，缺失显示「—」", () => {
+    mockRun({
+      ...detail,
+      requests: [
+        { ...detail.requests[0], usage_complete: true, prompt_tokens: 1000, cached_tokens: 0, completion_tokens: 200, total_tokens: 1200 },
+        { ...detail.requests[1], reasoning_tokens: 512 },
+      ],
+      maintenance_runs: [
+        {
+          ...detail.maintenance_runs[0],
+          requests: [
+            { ...detail.maintenance_runs[0].requests[0], reasoning_tokens: null },
+          ],
+        },
+      ],
+    });
+    renderPage();
+
+    const rows = screen.getAllByTestId("usage-request-row");
+    // 缺失（null）→「—」，不是 0。
+    expect(rows[0]).toHaveTextContent("输出 200（含推理 —）");
+    // 有值 → 数字。
+    expect(rows[1]).toHaveTextContent("输出 800（含推理 512）");
+    // 维护请求行缺失同样显示「—」。
+    const maintRun = screen.getByTestId("usage-maintenance-run");
+    expect(maintRun).toHaveTextContent("输出 300（含推理 —）");
+  });
 });

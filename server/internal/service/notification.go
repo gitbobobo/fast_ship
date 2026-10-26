@@ -128,7 +128,8 @@ func isValidNotificationKind(kind model.NotificationKind) bool {
 	case model.NotificationReviewDispatchFailed,
 		model.NotificationReviewRunTimeout,
 		model.NotificationReviewCleanupFailed,
-		model.NotificationReviewRedeliveryFailed:
+		model.NotificationReviewRedeliveryFailed,
+		model.NotificationBotBudgetThreshold:
 		return true
 	}
 	return false

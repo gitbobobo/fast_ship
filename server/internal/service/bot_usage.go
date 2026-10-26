@@ -1,6 +1,7 @@
 package service
 
 import (
+	"encoding/json"
 	"errors"
 	"math"
 	"sort"
@@ -77,6 +78,18 @@ func botUsageWindow(days int, loc *time.Location, now time.Time) (time.Time, []s
 
 // botSumOptional 空值合并加法：任一非空即非空，全空保持 nil（缺失 ≠ 0）。
 func botSumOptional(a, b *float64) *float64 {
+	switch {
+	case a == nil:
+		return b
+	case b == nil:
+		return a
+	}
+	sum := *a + *b
+	return &sum
+}
+
+// optInt64Sum 是 *int64 版本（reasoning_tokens 合计同样保持全 NULL）。
+func optInt64Sum(a, b *int64) *int64 {
 	switch {
 	case a == nil:
 		return b
@@ -192,6 +205,11 @@ func (s *BotService) botUsageEstimateStats(
 		if err != nil {
 			return nil, err
 		}
+		// run 自身金额与总览同口径（请求级实收优先；请求行缺失退回快照）。
+		runAgg, err := repo.RequestAggregatesByRun(parentIDs)
+		if err != nil {
+			return nil, err
+		}
 		for i := range schedRuns {
 			row := &schedRuns[i]
 			if row.ScheduleTaskID == nil || !inSet[*row.ScheduleTaskID] {
@@ -199,7 +217,7 @@ func (s *BotService) botUsageEstimateStats(
 			}
 			acc := out[*row.ScheduleTaskID]
 			acc.runs++
-			if disp := botSumOptional(row.CostEstimate, maintByParent[row.ID]); disp != nil {
+			if disp := botSumOptional(runDisplayOwn(row.CostEstimate, runAgg[row.ID]), maintByParent[row.ID]); disp != nil {
 				acc.priced++
 				acc.displaySum = botSumOptional(acc.displaySum, disp)
 			}
@@ -216,10 +234,212 @@ func (s *BotService) botUsageEstimateStats(
 			}
 			acc := out[taskID]
 			acc.linked = botSumOptional(acc.linked,
-				botSumOptional(row.CostEstimate, maintByParent[row.ID]))
+				botSumOptional(runDisplayOwn(row.CostEstimate, runAgg[row.ID]), maintByParent[row.ID]))
 		}
 	}
 	return out, nil
+}
+
+// botUsageDailyCosts 解析汇总行的 display_costs JSON 数组；损坏按无样本
+// 处理（汇总只是缓存，坏行不该让查询失败——该日判脏条件覆盖不了列内容，
+// 但下一次重算会整体替换）。
+func botUsageDailyCosts(raw string) []float64 {
+	if raw == "" {
+		return nil
+	}
+	var out []float64
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return nil
+	}
+	return out
+}
+
+// usageUncoveredRanges 把某 bot 窗口内未覆盖的当地日期（含今天，covered 由
+// usageRollupCovered 判定）合并成连续的 UTC 扫描区间；最后一个区间若含今天
+// 则终点截到 now（实时扫描不越过当前时刻）。
+func usageUncoveredRanges(dates []string, covered map[string]bool, loc *time.Location, now time.Time) []repository.UsageDaySpan {
+	var spans []repository.UsageDaySpan
+	for i, d := range dates {
+		if covered[d] {
+			continue
+		}
+		day := usageLocalDaySpan(d, loc)
+		end := day.End
+		if i == len(dates)-1 {
+			end = now
+		}
+		if n := len(spans); n > 0 && spans[n-1].End.Equal(day.Start) {
+			spans[n-1].End = end
+			continue
+		}
+		spans = append(spans, repository.UsageDaySpan{Start: day.Start, End: end})
+	}
+	return spans
+}
+
+// loadUsageHybridScan 总览路径的混合读取（INT-164）：返回要参与实时聚合的
+// 明细行与要折叠的汇总行。
+//
+// 覆盖判定：窗口内的历史日期（今天恒走实时）——标记存在、timezone 与当前
+// 有效时区一致、明细指纹与 DayFingerprints 现算值一致，三条齐备才算覆盖。
+// 未覆盖/脏日期与该 bot 的今天合并成连续 UTC 区间回退明细扫描；全部现存
+// bot 都整窗未覆盖时退化回单次全窗口扫描（新装/汇总未跑的情形，与纯实时
+// 查询形态相同）。
+//
+// 汇总行的筛选：现存且在作用域内的 bot 只折覆盖日；现存但不在作用域
+// （bot_id 收窄）与已删除但收窄到具体 bot 的情形不折——已删除 bot 的行
+// 只在无 bot_id 的全量视图并入（明细已级联清理，窗口内各日都读汇总）。
+func (s *BotService) loadUsageHybridScan(
+	userID string,
+	scoped []model.Bot,
+	botByID map[string]model.Bot,
+	botIDs []string,
+	botIDParam string,
+	dates []string,
+	loc *time.Location,
+	tzName string,
+	start, now time.Time,
+	repo *repository.BotUsageRepository,
+) ([]repository.UsageRunRow, []repository.MaintenanceUsageRow, []model.BotUsageDaily, error) {
+	rollup := repository.NewBotUsageRollupRepository(s.db)
+	pastDates := dates[:len(dates)-1]
+	today := dates[len(dates)-1]
+
+	covered, err := s.usageRollupCovered(botIDs, pastDates, loc, tzName)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	all, err := rollup.ListDailyRows(userID, dates)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	scopedSet := make(map[string]bool, len(scoped))
+	for _, b := range scoped {
+		scopedSet[b.ID] = true
+	}
+	var dailyRows []model.BotUsageDaily
+	for i := range all {
+		row := &all[i]
+		if scopedSet[row.BotID] {
+			if row.Date != today && covered[row.BotID][row.Date] {
+				dailyRows = append(dailyRows, *row)
+			}
+			continue
+		}
+		if _, live := botByID[row.BotID]; !live && botIDParam == "" {
+			dailyRows = append(dailyRows, *row)
+		}
+	}
+
+	var runRows []repository.UsageRunRow
+	var maintRows []repository.MaintenanceUsageRow
+	scan := func(ids []string, s, e time.Time) error {
+		rr, err := repo.ListRunsInWindow(ids, s, e)
+		if err != nil {
+			return err
+		}
+		runRows = append(runRows, rr...)
+		mm, err := repo.ListMaintenanceRunsInWindow(ids, s, e)
+		if err != nil {
+			return err
+		}
+		maintRows = append(maintRows, mm...)
+		return nil
+	}
+	rangesByBot := make(map[string][]repository.UsageDaySpan, len(scoped))
+	fullWindow := true
+	for _, b := range scoped {
+		ranges := usageUncoveredRanges(dates, covered[b.ID], loc, now)
+		rangesByBot[b.ID] = ranges
+		if len(ranges) != 1 || !ranges[0].Start.Equal(start) || !ranges[0].End.Equal(now) {
+			fullWindow = false
+		}
+	}
+	if len(scoped) == 0 {
+		fullWindow = false
+	}
+	if fullWindow {
+		if err := scan(botIDs, start, now); err != nil {
+			return nil, nil, nil, err
+		}
+		return runRows, maintRows, dailyRows, nil
+	}
+	for _, b := range scoped {
+		for _, sp := range rangesByBot[b.ID] {
+			if err := scan([]string{b.ID}, sp.Start, sp.End); err != nil {
+				return nil, nil, nil, err
+			}
+		}
+	}
+	return runRows, maintRows, dailyRows, nil
+}
+
+// usageRollupCovered 判定窗口历史日期的覆盖与新鲜度：covered[bot][date] 为
+// true 表示该日可以信任汇总表。时区不符或指纹不符（迟到写入/收尾更新）的
+// 日期一律不覆盖，回退实时扫描。
+func (s *BotService) usageRollupCovered(botIDs, pastDates []string, loc *time.Location, tzName string) (map[string]map[string]bool, error) {
+	covered := map[string]map[string]bool{}
+	if len(botIDs) == 0 || len(pastDates) == 0 {
+		return covered, nil
+	}
+	repo := repository.NewBotUsageRollupRepository(s.db)
+	spans := make([]repository.UsageDaySpan, 0, len(pastDates))
+	for _, d := range pastDates {
+		spans = append(spans, usageLocalDaySpan(d, loc))
+	}
+	marks, err := repo.MarksForBotsDates(botIDs, pastDates)
+	if err != nil {
+		return nil, err
+	}
+	markBy := map[string]map[string]model.BotUsageRollupDay{}
+	for _, m := range marks {
+		if m.Timezone != tzName {
+			continue
+		}
+		by := markBy[m.BotID]
+		if by == nil {
+			by = map[string]model.BotUsageRollupDay{}
+			markBy[m.BotID] = by
+		}
+		by[m.Date] = m
+	}
+	for _, botID := range botIDs {
+		// 水位闸（与写路径 usageRollupPlan 同探针）：窗口内账本最大写入
+		// 不超该 bot 标记所记时，已覆盖日零新写，标记全部可信——省掉
+		// 每次页面加载的全历史指纹聚合。
+		var markMax int64
+		for _, m := range markBy[botID] {
+			if m.LastWriteNs > markMax {
+				markMax = m.LastWriteNs
+			}
+		}
+		// 探针与标记 LastWriteNs 同为纳秒精度（账本原文解析）——同毫秒的
+		// 迟到写入仍能在纳秒上越过水位被判新写（写路径 usageRollupPlan
+		// 同规则），截断比较会误判相等而放行脏日。
+		probe, err := repo.SpanWriteMax(botID, spans[0].Start, spans[len(spans)-1].End)
+		if err != nil {
+			return nil, err
+		}
+		cov := map[string]bool{}
+		if probe == nil || !probe.After(time.Unix(0, markMax)) {
+			for date := range markBy[botID] {
+				cov[date] = true
+			}
+			covered[botID] = cov
+			continue
+		}
+		fps, err := repo.DayFingerprints(botID, spans)
+		if err != nil {
+			return nil, err
+		}
+		for date, mark := range markBy[botID] {
+			if fps[date].Equal(mark) {
+				cov[date] = true
+			}
+		}
+		covered[botID] = cov
+	}
+	return covered, nil
 }
 
 // botUsageCostLess 按已计价金额降序的比较谓词：nil（无已计价）永远排最后。
@@ -241,7 +461,10 @@ func botUsageCostLess(a, b *float64) bool {
 // （avg/max/p90 共用同一已计价集合）与请求计数、cached/prompt 合计（缓存
 // 命中率；cached 已逐行钳制，与按天/按任务同一分子）。
 type botUsageBotAcc struct {
-	name            string
+	name string
+	// deleted 标记该 acc 来自汇总表的已删除 bot 行（INT-164）：名字是删除时
+	// 快照；insights 路径不产生 deleted acc。
+	deleted         bool
 	costMain        *float64
 	costSchedule    *float64
 	costLinked      *float64
@@ -267,8 +490,11 @@ type botUsageDayAcc struct {
 }
 
 // botUsageTaskAcc 是窗口内任务行的累加（总览与 insights 的任务行存在性同源）。
+// name 只由按天汇总行回填——明细行不记任务名；任务被删后汇总行的名字快照
+// 是唯一能如实呈现「已删除任务叫什么」的来源。
 type botUsageTaskAcc struct {
 	botID        string
+	name         string
 	runs         int64
 	failed       int64
 	skipped      int64
@@ -312,11 +538,22 @@ type botUsageLedger struct {
 	taskAccs map[string]*botUsageTaskAcc
 }
 
+// runDisplayOwn 单个 run 自身（不含关联维护）的显示金额：请求行带金额时以
+// 请求级实收优先合计为准（生产上快照同源于请求估算合计，合并只会更准）；
+// 请求全无金额或请求行缺失时退回 run 冻结快照——存量「成本只在 run 列上」
+// 的钱不能丢（缺失 ≠ 0，比低估更接近事实）。
+func runDisplayOwn(snapshot *float64, agg repository.RequestUsageAgg) *float64 {
+	if agg.DisplaySum != nil {
+		return agg.DisplaySum
+	}
+	return snapshot
+}
+
 // botUsageMaintAggOf 从维护请求明细行推导按维护运行的聚合（与仓库层 SQL 聚合
 // 同口径）：insights 路径本就要拉明细行（用途拆分、失败统计、按天命中都在
 // insights 消费），聚合在内存里做，同一批行不再跑第二次聚合查询；总览只要
 // 聚合，直接走仓库层 SQL。cached 逐行钳制与主线一致；CostSum 对齐 SQL SUM
-// 语义——没有任何已计价行为 nil。
+// 语义——没有任何已计价行为 nil。DisplaySum/Counted 为实收优先口径。
 func botUsageMaintAggOf(rows []repository.MaintenanceRequestDetailRow) map[string]repository.RequestUsageAgg {
 	out := map[string]repository.RequestUsageAgg{}
 	for _, row := range rows {
@@ -336,6 +573,14 @@ func botUsageMaintAggOf(rows []repository.MaintenanceRequestDetailRow) map[strin
 		if clamped > prompt {
 			clamped = prompt
 		}
+		if row.CostEstimate != nil || row.ProviderCost != nil {
+			agg.Counted++
+		}
+		display := row.CostEstimate
+		if row.ProviderCost != nil {
+			display = row.ProviderCost
+		}
+		agg.DisplaySum = botSumOptional(agg.DisplaySum, display)
 		if row.CostEstimate != nil {
 			agg.Priced++
 			agg.CostSum = botSumOptional(agg.CostSum, row.CostEstimate)
@@ -343,8 +588,6 @@ func botUsageMaintAggOf(rows []repository.MaintenanceRequestDetailRow) map[strin
 			agg.PricedPromptSum += prompt
 			agg.PricedCachedSum += clamped
 			agg.PricedCompletionSum += completion
-		} else {
-			agg.Unpriced++
 		}
 		if row.UsageComplete {
 			agg.PromptSum += prompt
@@ -411,18 +654,33 @@ func (s *BotService) loadBotUsageLedger(userID, rangeParam, botID string, maintD
 		botNames[b.ID] = b.Name
 	}
 
-	now := time.Now().UTC()
+	now := s.now()
 	tzName, loc := s.botUserTimezoneOf(userID)
 	start, dates := botUsageWindow(days, loc, now)
 
 	repo := repository.NewBotUsageRepository(s.db)
-	runRows, err := repo.ListRunsInWindow(botIDs, start, now)
-	if err != nil {
-		return nil, errs.ErrInternal
-	}
-	maintRows, err := repo.ListMaintenanceRunsInWindow(botIDs, start, now)
-	if err != nil {
-		return nil, errs.ErrInternal
+	var runRows []repository.UsageRunRow
+	var maintRows []repository.MaintenanceUsageRow
+	var dailyRows []model.BotUsageDaily
+	if maintDetail {
+		// insights 路径维持全量实时明细（INT-163）：维护请求明细行从这里出，
+		// 已删除 bot 不进入作用域——汇总表只在总览路径参与。
+		var err error
+		if runRows, err = repo.ListRunsInWindow(botIDs, start, now); err != nil {
+			return nil, errs.ErrInternal
+		}
+		if maintRows, err = repo.ListMaintenanceRunsInWindow(botIDs, start, now); err != nil {
+			return nil, errs.ErrInternal
+		}
+	} else {
+		// 总览混合读取（INT-164）：覆盖且新鲜的历史日读 bot_usage_daily，
+		// 未覆盖/脏日与今天回退实时扫描。daily 里出现而现存 bots 里没有的
+		// bot_id 视为已删除——明细已随删除级联清理，整窗（含今天）都读汇总。
+		// 汇总行与实时明细在同一天不会双计：覆盖日只折表，未覆盖日只扫明细。
+		var err error
+		if runRows, maintRows, dailyRows, err = s.loadUsageHybridScan(userID, scoped, botByID, botIDs, botID, dates, loc, tzName, start, now, repo); err != nil {
+			return nil, errs.ErrInternal
+		}
 	}
 	runIDs := make([]string, 0, len(runRows))
 	runByID := make(map[string]*repository.UsageRunRow, len(runRows))
@@ -574,8 +832,8 @@ func (s *BotService) loadBotUsageLedger(userID, rangeParam, botID string, maintD
 		if m.ParentRunID == nil || runByID[*m.ParentRunID] == nil {
 			continue
 		}
-		if agg := maintAgg[m.ID]; agg.CostSum != nil {
-			maintInWindowByParent[*m.ParentRunID] += *agg.CostSum
+		if agg := maintAgg[m.ID]; agg.DisplaySum != nil {
+			maintInWindowByParent[*m.ParentRunID] += *agg.DisplaySum
 		}
 	}
 
@@ -586,15 +844,17 @@ func (s *BotService) loadBotUsageLedger(userID, rangeParam, botID string, maintD
 		agg := runAgg[row.ID]
 		acc.runs++
 		acc.totalReq += agg.Total
-		acc.pricedReq += agg.Priced
+		acc.pricedReq += agg.Counted
 		acc.cachedSum += agg.CachedSum
 		acc.promptSum += agg.PromptSum
 
 		// 显示成本 = run 自身 + 关联维护（都为空则 null），桶归属随显示成本。
+		// run 自身与维护金额都走实收优先口径（provider_cost 覆盖估算）。
 		// 日归属只记 run 自身成本——关联维护部分由维护循环按维护自己的
 		// created_at 记日，跨日不随父 run 漂移；有请求（含未计价）的机器人
 		// 进当日 bots 列表。
-		display := botSumOptional(row.CostEstimate, maintByParent[row.ID])
+		own := runDisplayOwn(row.CostEstimate, agg)
+		display := botSumOptional(own, maintByParent[row.ID])
 		if display != nil {
 			acc.displayCosts = append(acc.displayCosts, *display)
 		}
@@ -602,19 +862,19 @@ func (s *BotService) loadBotUsageLedger(userID, rangeParam, botID string, maintD
 		if v, ok := maintInWindowByParent[row.ID]; ok {
 			inWindowMaint = &v
 		}
-		if bucketAmount := botSumOptional(row.CostEstimate, inWindowMaint); bucketAmount != nil {
+		if bucketAmount := botSumOptional(own, inWindowMaint); bucketAmount != nil {
 			applyRunBucket(row, *bucketAmount)
 		}
 		day := dayOf(row.CreatedAt)
 		if day != nil {
 			// hasReq 门槛与 botCost 累加同口径：run 级有价但请求行缺失的存量
 			// 数据也要进当日 bots，否则堆叠柱总高含它而分层里没这一层。
-			if agg.Total > 0 || row.CostEstimate != nil {
+			if agg.Total > 0 || own != nil {
 				day.hasReq[row.BotID] = true
 			}
-			if row.CostEstimate != nil {
-				day.cost += *row.CostEstimate
-				day.botCost[row.BotID] += *row.CostEstimate
+			if own != nil {
+				day.cost += *own
+				day.botCost[row.BotID] += *own
 			}
 		}
 
@@ -648,7 +908,7 @@ func (s *BotService) loadBotUsageLedger(userID, rangeParam, botID string, maintD
 		acc := botAccs[m.BotID]
 		agg := maintAgg[m.ID]
 		acc.totalReq += agg.Total
-		acc.pricedReq += agg.Priced
+		acc.pricedReq += agg.Counted
 		acc.cachedSum += agg.CachedSum
 		acc.promptSum += agg.PromptSum
 
@@ -656,7 +916,7 @@ func (s *BotService) loadBotUsageLedger(userID, rangeParam, botID string, maintD
 		if day != nil && agg.Total > 0 {
 			day.hasReq[m.BotID] = true
 		}
-		if agg.CostSum == nil {
+		if agg.DisplaySum == nil {
 			continue // 全部未计价：不进任何金额（缺失 ≠ 0）
 		}
 		var parent *repository.UsageRunRow
@@ -669,16 +929,88 @@ func (s *BotService) loadBotUsageLedger(userID, rangeParam, botID string, maintD
 		case parent == nil || botAccs[parent.BotID] == nil:
 			// 无父 run、父 run 行不存在（或父的机器人不在查询集合）：
 			// 计入机器人维护项。
-			acc.costMaintenance = botSumOptional(acc.costMaintenance, agg.CostSum)
+			acc.costMaintenance = botSumOptional(acc.costMaintenance, agg.DisplaySum)
 		case runByID[parent.ID] != nil:
 			// 父 run 在窗口内：桶归属已随父显示成本完成，这里只记日。
 		default:
 			// 父 run 在窗口外：桶跟父走。
-			applyRunBucket(parent, *agg.CostSum)
+			applyRunBucket(parent, *agg.DisplaySum)
 		}
 		if day != nil {
-			day.cost += *agg.CostSum
-			day.botCost[m.BotID] += *agg.CostSum
+			day.cost += *agg.DisplaySum
+			day.botCost[m.BotID] += *agg.DisplaySum
+		}
+	}
+
+	// ---------- 汇总行折叠（INT-164 混合读取） ----------
+	// 覆盖且新鲜的历史日不再扫明细，直接折 daily 行进同一批累加器：
+	//   - day.hasReq 门槛与实时同口径（有请求行或有已计价成分才算当日活跃；
+	//     只有空 run 的日子不进当日 bots——runs>0 单独不算活跃）；
+	//   - day.cost/botCost 用行级 display_cost（当日实收优先显示合计）；
+	//   - 三桶/任务/连带按行 kind 归位；display_costs 数组与实时逐元素一致；
+	//   - botAccs 里没有的 bot_id = 已删除 bot：名字用删除时快照，deleted
+	//     标到投影。它们的行全部折入（今天也不例外——明细已经没了）。
+	for i := range dailyRows {
+		row := &dailyRows[i]
+		acc := botAccs[row.BotID]
+		if acc == nil {
+			acc = &botUsageBotAcc{name: row.BotName, deleted: true}
+			botAccs[row.BotID] = acc
+			botNames[row.BotID] = row.BotName
+		}
+		acc.totalReq += row.Requests
+		acc.pricedReq += row.Requests - row.UnpricedRequests
+		acc.cachedSum += row.CachedTokens
+		acc.promptSum += row.PromptTokens
+		acc.runs += row.Runs // maintenance 桶行恒 0
+		samples := botUsageDailyCosts(row.DisplayCosts)
+		acc.displayCosts = append(acc.displayCosts, samples...)
+
+		if idx, ok := dayIndex[row.Date]; ok {
+			day := dayAccs[idx]
+			if row.Requests > 0 || row.DisplayCost != nil {
+				day.hasReq[row.BotID] = true
+			}
+			if row.DisplayCost != nil {
+				day.cost += *row.DisplayCost
+				day.botCost[row.BotID] += *row.DisplayCost
+			}
+		}
+		taskOf := func() *botUsageTaskAcc {
+			if row.ScheduleTaskID == nil {
+				return nil
+			}
+			task := taskAccs[*row.ScheduleTaskID]
+			if task == nil {
+				task = &botUsageTaskAcc{botID: row.BotID, name: row.TaskName}
+				taskAccs[*row.ScheduleTaskID] = task
+			} else if task.name == "" {
+				task.name = row.TaskName
+			}
+			return task
+		}
+		switch row.Kind {
+		case model.BotUsageDayMain:
+			acc.costMain = botSumOptional(acc.costMain, row.DisplayCost)
+		case model.BotUsageDaySchedule:
+			acc.costSchedule = botSumOptional(acc.costSchedule, row.DisplayCost)
+			if task := taskOf(); task != nil {
+				task.cost = botSumOptional(task.cost, row.DisplayCost)
+				task.runs += row.Runs
+				task.failed += row.Failed
+				task.skipped += row.Skipped
+				task.displayCosts = append(task.displayCosts, samples...)
+			}
+		case model.BotUsageDayScheduleEvent:
+			// 连带主线：进定时桶 + 连带近似 + 任务连带；run 数不算进任务
+			// runs/failed/skipped（与实时投影同口径）。
+			acc.costSchedule = botSumOptional(acc.costSchedule, row.DisplayCost)
+			acc.costLinked = botSumOptional(acc.costLinked, row.DisplayCost)
+			if task := taskOf(); task != nil {
+				task.linked = botSumOptional(task.linked, row.DisplayCost)
+			}
+		case model.BotUsageDayMaintenance:
+			acc.costMaintenance = botSumOptional(acc.costMaintenance, row.DisplayCost)
 		}
 	}
 
@@ -696,6 +1028,25 @@ func (s *BotService) loadBotUsageLedger(userID, rangeParam, botID string, maintD
 		}
 		for _, row := range rows {
 			taskRows[row.ID] = row
+		}
+	}
+	// 已删除任务没有活名来源：实时累加的桶在覆盖日外拿不到汇总行快照，
+	// 回退名字墓碑（与 run 明细 TaskNameTombstonesTx 同口径），窗口内各日
+	// 显示同一个名字而不是「已删除的任务」。
+	var tombIDs []string
+	for id, acc := range taskAccs {
+		if _, ok := taskRows[id]; !ok && acc.name == "" {
+			tombIDs = append(tombIDs, id)
+		}
+	}
+	if len(tombIDs) > 0 {
+		if tomb, err := repository.NewBotUsageRollupRepository(s.db).
+			TaskNameTombstonesTx(s.db, tombIDs); err == nil {
+			for id, name := range tomb {
+				if acc := taskAccs[id]; acc != nil && acc.name == "" && name != "" {
+					acc.name = name
+				}
+			}
 		}
 	}
 
@@ -779,9 +1130,17 @@ func (s *BotService) GetBotUsageOverview(userID, rangeParam, botID string) (*api
 		if acc.promptSum > 0 {
 			cacheHit = ptrFloat64(float64(acc.cachedSum) / float64(acc.promptSum))
 		}
+		// deleted 是可选字段（INT-164）：汇总行带过来的已删除机器人给
+		// true 与原名快照，现存机器人省略（omitempty）。
+		var deleted *bool
+		if acc.deleted {
+			v := true
+			deleted = &v
+		}
 		botItems = append(botItems, api.BotUsageBot{
 			BotId:                    botID,
 			Name:                     acc.name,
+			Deleted:                  deleted,
 			Cost:                     cost,
 			CostMain:                 acc.costMain,
 			CostSchedule:             acc.costSchedule,
@@ -819,7 +1178,7 @@ func (s *BotService) GetBotUsageOverview(userID, rangeParam, botID string) (*api
 			TaskId:         taskID,
 			BotId:          acc.botID,
 			BotName:        led.botNames[acc.botID],
-			Name:           "",
+			Name:           acc.name,
 			Deleted:        true,
 			Enabled:        false,
 			Timezone:       "",
@@ -880,6 +1239,10 @@ func (s *BotService) GetBotUsageOverview(userID, rangeParam, botID string) (*api
 	})
 	overview.ScheduleTasks = taskItems
 
+	// 行内预算态：预算列只有入口按钮时看不出「已设 / 已超」（视觉审查）。
+	// 读失败不拖垮总览——预算态是附属提示，缺省即无徽标。
+	s.botUsageApplyBudgetMarks(overview, led.loc)
+
 	// totals.cost 与分桶同口径：任一已计价成分（含 run 级价目，不必依赖请求
 	// 行有价）存在即输出；全空才是「未计价」的 null，不能出现按机器人表有
 	// 金额而总卡片「—」的自相矛盾。
@@ -888,6 +1251,72 @@ func (s *BotService) GetBotUsageOverview(userID, rangeParam, botID string) (*api
 		overview.Totals.DailyAverage = ptrFloat64(*totalCost / float64(len(led.dayAccs)))
 	}
 	return overview, nil
+}
+
+// botUsageApplyBudgetMarks 给总览的机器人/任务行打预算态徽标：按周期分组
+// 后每周期一次 SpendInWindow 批量计算（O(周期数) 而非 O(目标数)）。花费
+// 口径与预算评估同源——同日窗口、任务花费挂所属 bot 窗口。
+func (s *BotService) botUsageApplyBudgetMarks(overview *api.BotUsageOverview, loc *time.Location) {
+	budgets, err := repository.NewBotBudgetRepository(s.db).ListAll()
+	if err != nil || len(budgets) == 0 {
+		return
+	}
+	botItems := make(map[string]*api.BotUsageBot, len(overview.Bots))
+	taskItems := make(map[string]*api.BotUsageScheduleTask, len(overview.ScheduleTasks))
+	ownerSet := map[string]bool{}
+	for i := range overview.Bots {
+		botItems[overview.Bots[i].BotId] = &overview.Bots[i]
+		ownerSet[overview.Bots[i].BotId] = true
+	}
+	for i := range overview.ScheduleTasks {
+		taskItems[overview.ScheduleTasks[i].TaskId] = &overview.ScheduleTasks[i]
+		ownerSet[overview.ScheduleTasks[i].BotId] = true
+	}
+	byPeriod := map[model.BotBudgetPeriod][]model.BotBudget{}
+	for i := range budgets {
+		b := budgets[i]
+		if b.BotID != nil && botItems[*b.BotID] != nil {
+			byPeriod[b.Period] = append(byPeriod[b.Period], b)
+		} else if b.ScheduleTaskID != nil && taskItems[*b.ScheduleTaskID] != nil {
+			byPeriod[b.Period] = append(byPeriod[b.Period], b)
+		}
+	}
+	if len(byPeriod) == 0 {
+		return
+	}
+	ownerIDs := make([]string, 0, len(ownerSet))
+	for id := range ownerSet {
+		ownerIDs = append(ownerIDs, id)
+	}
+	repo := repository.NewBotBudgetRepository(s.db)
+	now := s.now()
+	for period, list := range byPeriod {
+		start, end, _ := botBudgetWindow(period, now, loc, false)
+		sp, err := repo.SpendInWindow(ownerIDs, start, end)
+		if err != nil {
+			continue
+		}
+		for i := range list {
+			b := &list[i]
+			var itemSet, itemExceeded **bool
+			var spend float64
+			if b.ScheduleTaskID != nil {
+				item := taskItems[*b.ScheduleTaskID]
+				itemSet, itemExceeded = &item.BudgetSet, &item.BudgetExceeded
+				spend = sp.Task(*b.ScheduleTaskID)
+			} else {
+				item := botItems[*b.BotID]
+				itemSet, itemExceeded = &item.BudgetSet, &item.BudgetExceeded
+				spend = sp.Bot(*b.BotID)
+			}
+			tru := true
+			*itemSet = &tru
+			// 与告警侧同口径：阈值 100% 的基点比较，避免浮点边界与告警不一致。
+			if botBudgetThresholdReached(b.AmountUSD, 1, spend) {
+				*itemExceeded = &tru
+			}
+		}
+	}
 }
 
 func ptrFloat64(v float64) *float64 { return &v }
@@ -924,6 +1353,13 @@ func (s *BotService) GetBotUsageRunDetail(userID, runID string) (*api.BotUsageRu
 	if requestsTruncated {
 		requestRows = requestRows[len(requestRows)-usageRunDetailMaxRequests:]
 	}
+	// run 自身显示金额按请求级实收优先合计（截断的请求窗口不能用来求和，
+	// 走一次聚合查询；存量请求行缺失时退回 run 冻结快照）。
+	runAggs, err := repo.RequestAggregatesByRun([]string{run.ID})
+	if err != nil {
+		return nil, errs.ErrInternal
+	}
+	own := runDisplayOwn(run.CostEstimate, runAggs[run.ID])
 	requestIDs := make([]string, 0, len(requestRows))
 	for _, r := range requestRows {
 		requestIDs = append(requestIDs, r.ID)
@@ -935,13 +1371,14 @@ func (s *BotService) GetBotUsageRunDetail(userID, runID string) (*api.BotUsageRu
 	callsByRequest := make(map[string][]api.BotUsageToolCall, len(requestRows))
 	for _, c := range callRows {
 		callsByRequest[c.RequestID] = append(callsByRequest[c.RequestID], api.BotUsageToolCall{
-			Id:         c.ID,
-			ToolName:   c.ToolName,
-			Action:     c.Action,
-			Status:     string(c.Status),
-			ErrorCode:  c.ErrorCode,
-			CreatedAt:  c.CreatedAt.UTC().Format(time.RFC3339Nano),
-			FinishedAt: rfc3339(c.FinishedAt),
+			Id:           c.ID,
+			ToolName:     c.ToolName,
+			Action:       c.Action,
+			Status:       string(c.Status),
+			ErrorCode:    c.ErrorCode,
+			ErrorMessage: c.ErrorMessage,
+			CreatedAt:    c.CreatedAt.UTC().Format(time.RFC3339Nano),
+			FinishedAt:   rfc3339(c.FinishedAt),
 		})
 	}
 
@@ -989,6 +1426,8 @@ func (s *BotService) GetBotUsageRunDetail(userID, runID string) (*api.BotUsageRu
 			CachedTokens:        row.CachedTokens,
 			CompletionTokens:    row.CompletionTokens,
 			TotalTokens:         row.TotalTokens,
+			ReasoningTokens:     row.ReasoningTokens,
+			ProviderCost:        row.ProviderCost,
 			ToolsTokensEstimate: row.ToolsTokensEstimate,
 			// bot_model_requests 没有 usage_complete 列，沿用聊天页口径：
 			// 落过 usage 计数列（prompt_tokens 非空）才算完整。
@@ -1031,6 +1470,8 @@ func (s *BotService) GetBotUsageRunDetail(userID, runID string) (*api.BotUsageRu
 			CachedTokens:     row.CachedTokens,
 			CompletionTokens: row.CompletionTokens,
 			TotalTokens:      row.TotalTokens,
+			ReasoningTokens:  row.ReasoningTokens,
+			ProviderCost:     row.ProviderCost,
 			CostEstimate:     row.CostEstimate,
 			CostSource:       row.CostSource,
 			ErrorCode:        row.ErrorCode,
@@ -1038,7 +1479,7 @@ func (s *BotService) GetBotUsageRunDetail(userID, runID string) (*api.BotUsageRu
 			StartedAt:        row.StartedAt.UTC().Format(time.RFC3339Nano),
 			FinishedAt:       rfc3339(row.FinishedAt),
 		})
-		maintCost = botSumOptional(maintCost, row.CostEstimate)
+		maintCost = botSumOptional(maintCost, requestDisplayCost(row.ProviderCost, row.CostEstimate))
 	}
 	maintRuns := make([]api.BotUsageMaintenanceRun, 0, len(maintRunRows))
 	for i := range maintRunRows {
@@ -1059,12 +1500,18 @@ func (s *BotService) GetBotUsageRunDetail(userID, runID string) (*api.BotUsageRu
 		})
 	}
 
-	// 任务名：现存任务才有；任务已删除或无关联时为 null。
+	// 任务名：现存任务取活名；已删任务回退名字墓碑（删除时刻写下的名字，
+	// 与总览/汇总行同源口径）；都无关联时为 null。
 	var taskID, taskName *string
 	if run.ScheduleTaskID != nil {
 		taskID = run.ScheduleTaskID
 		if task, err := s.schedTasks.FindByID(*run.ScheduleTaskID); err == nil && task.BotID == run.BotID {
 			taskName = &task.Name
+		} else if tomb, err := repository.NewBotUsageRollupRepository(s.db).
+			TaskNameTombstonesTx(s.db, []string{*run.ScheduleTaskID}); err == nil {
+			if name := tomb[*run.ScheduleTaskID]; name != "" {
+				taskName = &name
+			}
 		}
 	}
 
@@ -1093,7 +1540,7 @@ func (s *BotService) GetBotUsageRunDetail(userID, runID string) (*api.BotUsageRu
 			CostEstimate:     run.CostEstimate,
 			CostSource:       run.CostSource,
 			MaintenanceCost:  maintCost,
-			DisplayCost:      botSumOptional(run.CostEstimate, maintCost),
+			DisplayCost:      botSumOptional(own, maintCost),
 			ErrorCode:        run.ErrorCode,
 			ErrorMessage:     run.ErrorMessage,
 			CreatedAt:        run.CreatedAt.UTC().Format(time.RFC3339Nano),
@@ -1104,26 +1551,57 @@ func (s *BotService) GetBotUsageRunDetail(userID, runID string) (*api.BotUsageRu
 	return detail, nil
 }
 
-// maintCostOf 单个维护运行的已计价成本合计（服务层在装配明细时顺带算好，
-// 不再回库）。
+// maintCostOf 单个维护运行的显示成本合计（请求级实收优先；服务层在装配明细
+// 时顺带算好，不再回库）。
 func maintCostOf(maintRunID string, byRun map[string][]api.BotUsageMaintenanceRequest) *float64 {
 	var cost *float64
 	for _, req := range byRun[maintRunID] {
-		cost = botSumOptional(cost, req.CostEstimate)
+		cost = botSumOptional(cost, requestDisplayCost(req.ProviderCost, req.CostEstimate))
 	}
 	return cost
 }
 
+// requestDisplayCost 单个请求的显示金额：provider_cost（置信 USD 实收）
+// 覆盖 cost_estimate 目录价估算，两者皆空为 nil（缺失 ≠ 0）。
+func requestDisplayCost(providerCost, costEstimate *float64) *float64 {
+	if providerCost != nil {
+		return providerCost
+	}
+	return costEstimate
+}
+
 // ---------- 投影辅助（display_cost_estimate / cost_last_7d） ----------
 
-// maintenanceCostsOf 批量取 run 的关联维护已计价成本合计（run ID → 合计，
-// 无已计价维护的 run 不在结果里）：列表投影一次取全当前页，显示口径成本
-// 在投影函数里与 run 自身成本合成，不做逐 run N+1。
-func (s *BotService) maintenanceCostsOf(runIDs []string) (map[string]*float64, error) {
-	if len(runIDs) == 0 {
-		return map[string]*float64{}, nil
+// displayCostsOf 批量取 run 的显示口径成本两半（run ID → 合计，无金额的
+// run 不在结果里）：own 是 run 自身（请求级实收优先，无请求行退回 run
+// 快照），maint 是关联维护（COALESCE 已合）。display_cost_estimate = 两者
+// 合并、皆空为 null。整页一次取全（两条聚合 SQL），不做逐 run N+1；db 走
+// 调用方句柄，事务内与 s.db 通用。
+func (s *BotService) displayCostsOf(db *gorm.DB, runs []model.BotRun) (own, maint map[string]*float64, err error) {
+	own = make(map[string]*float64, len(runs))
+	maint = make(map[string]*float64, len(runs))
+	if len(runs) == 0 {
+		return own, maint, nil
 	}
-	return repository.NewBotUsageRepository(s.db).MaintenanceCostsByParentRun(runIDs)
+	ids := make([]string, 0, len(runs))
+	for i := range runs {
+		ids = append(ids, runs[i].ID)
+	}
+	repo := repository.NewBotUsageRepository(db)
+	aggs, err := repo.RequestAggregatesByRun(ids)
+	if err != nil {
+		return nil, nil, err
+	}
+	maint, err = repo.MaintenanceCostsByParentRun(ids)
+	if err != nil {
+		return nil, nil, err
+	}
+	for i := range runs {
+		if v := runDisplayOwn(runs[i].CostEstimate, aggs[runs[i].ID]); v != nil {
+			own[runs[i].ID] = v
+		}
+	}
+	return own, maint, nil
 }
 
 // ScheduleTaskCostsLast7d 批量计算任务近 7 天已计价成本（schedule run 自身 +
@@ -1146,17 +1624,24 @@ func (s *BotService) ScheduleTaskCostsLast7d(userID, botID string, taskIDs []str
 	if err != nil {
 		return nil, err
 	}
+	runIDs := make([]string, 0, len(runs))
+	for _, r := range runs {
+		runIDs = append(runIDs, r.ID)
+	}
+	// 金额与总览同口径（请求级实收优先；请求行缺失退回 run 快照）。
+	runAgg, err := repo.RequestAggregatesByRun(runIDs)
+	if err != nil {
+		return nil, err
+	}
 	inSet := make(map[string]bool, len(taskIDs))
 	for _, id := range taskIDs {
 		inSet[id] = true
 	}
 	runTaskOf := make(map[string]string, len(runs))
-	runIDs := make([]string, 0, len(runs))
 	for _, r := range runs {
-		runIDs = append(runIDs, r.ID)
 		if r.ScheduleTaskID != nil && inSet[*r.ScheduleTaskID] {
 			runTaskOf[r.ID] = *r.ScheduleTaskID
-			out[*r.ScheduleTaskID] = botSumOptional(out[*r.ScheduleTaskID], r.CostEstimate)
+			out[*r.ScheduleTaskID] = botSumOptional(out[*r.ScheduleTaskID], runDisplayOwn(r.CostEstimate, runAgg[r.ID]))
 		}
 	}
 	// 连带主线 run：schedule_event 唤醒的主线经 trigger_key 反查任务。
@@ -1171,6 +1656,10 @@ func (s *BotService) ScheduleTaskCostsLast7d(userID, botID string, taskIDs []str
 		if ref := botScheduleEventRunIDOf(m.TriggerKey); ref != "" {
 			refIDs = append(refIDs, ref)
 		}
+	}
+	mainAgg, err := repo.RequestAggregatesByRun(mainIDs)
+	if err != nil {
+		return nil, err
 	}
 	taskByRefRun, err := repo.ScheduleTaskIDsByRunIDs(refIDs)
 	if err != nil {
@@ -1207,8 +1696,8 @@ func (s *BotService) ScheduleTaskCostsLast7d(userID, botID string, taskIDs []str
 		}
 		if coveredParent[*m.ParentRunID] {
 			agg := maintAgg[m.ID]
-			if agg.CostSum != nil {
-				maint[*m.ParentRunID] = botSumOptional(maint[*m.ParentRunID], agg.CostSum)
+			if agg.DisplaySum != nil {
+				maint[*m.ParentRunID] = botSumOptional(maint[*m.ParentRunID], agg.DisplaySum)
 			}
 		} else {
 			lateParentIDs = append(lateParentIDs, *m.ParentRunID)
@@ -1227,9 +1716,9 @@ func (s *BotService) ScheduleTaskCostsLast7d(userID, botID string, taskIDs []str
 		if !ok || !inSet[taskID] {
 			continue
 		}
-		display := botSumOptional(m.CostEstimate, maint[m.ID])
+		display := botSumOptional(runDisplayOwn(m.CostEstimate, mainAgg[m.ID]), maint[m.ID])
 		if display == nil {
-			continue // 主线自身与关联维护都未计价：整条不计
+			continue // 主线自身与关联维护都无金额：整条不计
 		}
 		out[taskID] = botSumOptional(out[taskID], display)
 	}
@@ -1264,7 +1753,7 @@ func (s *BotService) ScheduleTaskCostsLast7d(userID, botID string, taskIDs []str
 				continue
 			}
 			agg := maintAgg[m.ID]
-			if agg.CostSum == nil {
+			if agg.DisplaySum == nil {
 				continue
 			}
 			parent, ok := parentByID[*m.ParentRunID]
@@ -1274,11 +1763,11 @@ func (s *BotService) ScheduleTaskCostsLast7d(userID, botID string, taskIDs []str
 			switch {
 			case parent.SessionKind == model.BotSessionKindSchedule:
 				if parent.ScheduleTaskID != nil && inSet[*parent.ScheduleTaskID] {
-					out[*parent.ScheduleTaskID] = botSumOptional(out[*parent.ScheduleTaskID], agg.CostSum)
+					out[*parent.ScheduleTaskID] = botSumOptional(out[*parent.ScheduleTaskID], agg.DisplaySum)
 				}
 			default:
 				if taskID, ok := lateTaskByRef[refOf[parent.ID]]; ok && inSet[taskID] {
-					out[taskID] = botSumOptional(out[taskID], agg.CostSum)
+					out[taskID] = botSumOptional(out[taskID], agg.DisplaySum)
 				}
 			}
 		}
