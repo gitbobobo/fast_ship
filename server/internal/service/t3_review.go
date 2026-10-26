@@ -77,31 +77,89 @@ func threadWorktreeFromProjection(p *t3ThreadProjection) T3ThreadWorktree {
 	return out
 }
 
-// t3WorktreesPage 是 vcs.listRefs 单页响应里登记核验用到的字段。
+// t3WorktreesPage 是 vcs.listRefs 单页响应里登记核验用到的字段。isRemote
+// 必须解码（复审 P2）：响应全集含远端跟踪 ref，HasRef 要回答的是「本地
+// 分支仍在不在」，远端 ref 不算存活证据，收集时显式剔除。
 type t3WorktreesPage struct {
 	Refs []struct {
 		Name         string  `json:"name"`
+		IsRemote     *bool   `json:"isRemote"`
 		WorktreePath *string `json:"worktreePath"`
 	} `json:"refs"`
 	NextCursor *int `json:"nextCursor"`
 }
 
-// reviewWorktreeMaxRefPages 登记收集的分页上限。
-const reviewWorktreeMaxRefPages = 8
+// T3Registry 是 vcs.listRefs 翻页收集完的整份登记（INT-170）：Worktrees 是
+// worktreePath 非空项按路径聚合的 worktree 清单，RefNames 是全部本地 ref 名
+// 的存在集合（远端跟踪 ref 已剔除）——分支被删后 ref 整条消失，只看
+// worktree 项区分不了「分支还在但没有 worktree」与「分支已删」，分支步核验
+// 必须查全集。
+type T3Registry struct {
+	Worktrees []T3Worktree
+	RefNames  map[string]bool
+}
 
-// collectWorktrees 分页收集 vcs.listRefs 的 worktree 项（纯函数，fetch 取一页
-// 并透传 cursor）：同一路径聚合全部 ref 名去重，结果按路径排序。到达页数上限
-// 仍有 NextCursor 时返回上游错误、绝不返回不完整列表——核验把「不在列表」当
-// 「已无此登记」，截断列表会造成漏删或归属误判。
-func collectWorktrees(fetch func(cursor *int) (t3WorktreesPage, error)) ([]T3Worktree, error) {
+// ContainsWorktree 报告路径是否登记在册；nil 登记按未登记处理。
+func (r *T3Registry) ContainsWorktree(path string) bool {
+	if r == nil {
+		return false
+	}
+	return slices.ContainsFunc(r.Worktrees, func(w T3Worktree) bool { return w.Path == path })
+}
+
+// HasRef 报告 ref 名是否存在于登记全集；nil 登记按不存在处理。
+func (r *T3Registry) HasRef(name string) bool {
+	return r != nil && r.RefNames[name]
+}
+
+// vcs.listRefs 单页条数（T3 0.0.45 已核实接受该入参，缺省 100）。大仓库
+// （远端实测 ~800 本地分支）按默认页宽要翻 8+ 页，显式给大一点的页宽减少
+// 往返次数。
+const t3ListRefsPageSize = 200
+
+// reviewWorktreeMaxRefPages 登记翻页的兜底上限（异常探测，不是常规截断）：
+// 200/页 × 512 页 ≈ 10 万引用，正常仓库远达不到；翻到这个页数仍未耗尽即认定
+// 上游分页异常，明确报错而不是继续翻。
+const reviewWorktreeMaxRefPages = 512
+
+// errRegistryIncomplete 登记读取未能在预算内翻完（ctx 到点/取消，含页内调用
+// 被 ctx 掐断）：不是上游异常、也不是读到了完整列表——调用方按「待确认」
+// 处理（保持 none、退避重试、不置 failed），必须能与普通上游错误区分。
+var errRegistryIncomplete = errors.New("登记读取未在预算内完成")
+
+// collectT3Registry 分页收集 vcs.listRefs 整份登记（纯函数，fetch 取一页并
+// 透传 cursor，ctx 只用于页间预算检查）：worktree 项按路径聚合 ref 名去重、
+// 按路径排序，同时收集全部 ref 名集合。三重异常约束：
+//   - 预算：每页发出前查 ctx.Err()，页内调用失败且 ctx 已到点同样归入预算
+//     耗尽——返回 errRegistryIncomplete 包装，绝不返回不完整列表；
+//   - 游标推进：nextCursor 与刚发出的同值或复现已见过的值都是上游分页异常，
+//     明确报错（死循环翻页比报错更糟）；
+//   - 页数兜底：超过 reviewWorktreeMaxRefPages 页仍未耗尽，同样明确报错。
+func collectT3Registry(ctx context.Context, fetch func(cursor *int) (t3WorktreesPage, error)) (*T3Registry, error) {
 	byPath := map[string][]string{}
+	refNames := map[string]bool{}
 	var nextCursor *int
-	for page := 0; page < reviewWorktreeMaxRefPages; page++ {
+	seenCursors := map[int]bool{}
+	for page := 0; ; page++ {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("%w: %s", errRegistryIncomplete, err)
+		}
 		p, err := fetch(nextCursor)
 		if err != nil {
+			if ctx.Err() != nil {
+				// 页内调用被行预算掐断：与页间检查同一「待确认」语义。
+				return nil, fmt.Errorf("%w: %s", errRegistryIncomplete, ctx.Err())
+			}
 			return nil, err
 		}
 		for _, ref := range p.Refs {
+			if api.Deref(ref.IsRemote) {
+				// 远端跟踪 ref 不进核验全集：本地分支被删后同名远端 ref
+				// 残留不代表分支存活（当前上游远端名带 origin/ 前缀本
+				// 就撞不上，过滤是把语义显式化而不是依赖命名约定）。
+				continue
+			}
+			refNames[ref.Name] = true
 			if ref.WorktreePath == nil || *ref.WorktreePath == "" {
 				continue
 			}
@@ -110,33 +168,39 @@ func collectWorktrees(fetch func(cursor *int) (t3WorktreesPage, error)) ([]T3Wor
 			}
 		}
 		if p.NextCursor == nil {
-			nextCursor = nil
 			break
 		}
+		if seenCursors[*p.NextCursor] || (nextCursor != nil && *p.NextCursor == *nextCursor) {
+			return nil, errs.New(errs.ErrT3Upstream.Code,
+				fmt.Sprintf("引用列表分页游标未推进（回到 %d），拒绝在不完整列表上核验工作区归属", *p.NextCursor))
+		}
+		seenCursors[*p.NextCursor] = true
 		nextCursor = p.NextCursor
-	}
-	if nextCursor != nil {
-		return nil, errs.New(errs.ErrT3Upstream.Code,
-			fmt.Sprintf("引用列表分页超过上限（%d 页），拒绝在不完整列表上核验工作区归属", reviewWorktreeMaxRefPages))
+		if page+1 >= reviewWorktreeMaxRefPages {
+			return nil, errs.New(errs.ErrT3Upstream.Code,
+				fmt.Sprintf("引用列表分页超过上限（%d 页），拒绝在不完整列表上核验工作区归属", reviewWorktreeMaxRefPages))
+		}
 	}
 	paths := make([]string, 0, len(byPath))
 	for path := range byPath {
 		paths = append(paths, path)
 	}
 	sort.Strings(paths)
-	out := make([]T3Worktree, 0, len(paths))
+	worktrees := make([]T3Worktree, 0, len(paths))
 	for _, path := range paths {
-		out = append(out, T3Worktree{Path: path, RefNames: byPath[path]})
+		worktrees = append(worktrees, T3Worktree{Path: path, RefNames: byPath[path]})
 	}
-	return out, nil
+	return &T3Registry{Worktrees: worktrees, RefNames: refNames}, nil
 }
 
-// ListWorktrees 列出一个 T3 工作区根目录（cwd）当前登记的全部 worktree
-// （vcs.listRefs 的 worktreePath 非空项），每条带聚合后的 ref 名集合，供回收
-// 前的登记核验。cwd 由调用方给定且必须与随后的删除同源——从 T3 项目表现查
+// ListRegistry 列出一个 T3 工作区根目录（cwd）的完整登记（vcs.listRefs，
+// 按 nextCursor 翻到耗尽）：worktree 项供回收前的归属核验，ref 名全集供分支
+// 存在性核验。cwd 由调用方给定且必须与随后的删除同源——从 T3 项目表现查
 // workspace_root 会在绑定变更后对着另一个 repo 核验。不做服务端 query 过滤：
-// 核验需要完整集合判定「未登记」。
-func (s *T3ThreadsService) ListWorktrees(ctx context.Context, userID, envID, cwd string) ([]T3Worktree, error) {
+// 核验需要完整集合判定「未登记」与「分支已删」。总时间预算沿用 t3WriteBudget
+// （整段翻页共享 25s）；预算内没翻完返回 errRegistryIncomplete 包装（调用方
+// 按待确认处理），上游异常按普通错误上抛。
+func (s *T3ThreadsService) ListRegistry(ctx context.Context, userID, envID, cwd string) (*T3Registry, error) {
 	env, err := s.loadEnvForWrite(ctx, userID, envID)
 	if err != nil {
 		return nil, err
@@ -150,12 +214,19 @@ func (s *T3ThreadsService) ListWorktrees(ctx context.Context, userID, envID, cwd
 	}
 	session, err := dialT3RPC(ctx, wsBaseOf(env.Address), token)
 	if err != nil {
+		// 握手把预算耗到点（对端不回握手包、黑洞地址）：与翻页中途的预算
+		// 耗尽同一「待确认」语义——同一根因（预算不够/暂时不可达）不能在
+		// 开头记 failed、在翻页中途却是待确认。预算内就明确失败的（凭证被
+		// 拒、协议不符、连接被拒）仍按上游错误走有限重试。
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("%w: %s", errRegistryIncomplete, ctx.Err())
+		}
 		return nil, s.upstreamError(err)
 	}
 	defer session.Close()
 
-	listInput := map[string]any{"cwd": cwd, "refKind": "all"}
-	return collectWorktrees(func(cursor *int) (t3WorktreesPage, error) {
+	listInput := map[string]any{"cwd": cwd, "refKind": "all", "limit": t3ListRefsPageSize}
+	return collectT3Registry(ctx, func(cursor *int) (t3WorktreesPage, error) {
 		if cursor != nil {
 			listInput["cursor"] = *cursor
 		}
@@ -171,19 +242,62 @@ func (s *T3ThreadsService) ListWorktrees(ctx context.Context, userID, envID, cwd
 	})
 }
 
+// errT3RemoveUncertain 删除请求已发出但结果不可见（INT-170）：读超时、连接
+// 被掐断等传输层失败——远端 git worktree remove 可能已经执行完（实测 17 次
+// 超时里目录后来都不在了）。调用方不能把它当确定失败置 failed，应先重读登记
+// 复查远端实际状态。
+var errT3RemoveUncertain = errors.New("删除工作区结果待确认")
+
+// t3RemoveUncertainError 包装不确定的删除失败：errors.Is 命中
+// errT3RemoveUncertain，Unwrap 透传底层错误保留诊断链，消息保留原始细节。
+// 必须在 upstreamError 之前分类——upstreamError 会丢掉 unwrap 链。
+type t3RemoveUncertainError struct{ err error }
+
+func (e *t3RemoveUncertainError) Error() string {
+	return errT3RemoveUncertain.Error() + "（" + e.err.Error() + "）"
+}
+func (e *t3RemoveUncertainError) Is(target error) bool { return target == errT3RemoveUncertain }
+func (e *t3RemoveUncertainError) Unwrap() error        { return e.err }
+
+// errT3RemoveNotAttempted 删除请求从未送达远端（INT-170）：环境解析/凭证不可
+// 用、会话探测或 WS 拨号失败——请求帧没有发出，远端必然没有执行。这是最安
+// 全的重试对象，与 errT3RemoveUncertain（已发出、结果不可见，须先复查远端实
+// 际状态）区分开：调用方对未送达直接有限重试即可。
+var errT3RemoveNotAttempted = errors.New("删除工作区请求未能送达远端")
+
+// t3RemoveNotAttemptedError 包装删除前的准备失败：errors.Is 命中
+// errT3RemoveNotAttempted，Unwrap 透传底层错误保留诊断链。
+type t3RemoveNotAttemptedError struct{ err error }
+
+func (e *t3RemoveNotAttemptedError) Error() string {
+	return errT3RemoveNotAttempted.Error() + "（" + e.err.Error() + "）"
+}
+func (e *t3RemoveNotAttemptedError) Is(target error) bool { return target == errT3RemoveNotAttempted }
+func (e *t3RemoveNotAttemptedError) Unwrap() error        { return e.err }
+
 // RemoveWorktree 删除一个已登记的 worktree（vcs.removeWorktree，force 由调用方给）。
-// cwd 由调用方给定（launch 快照优先），核验与删除必须同源。
+// cwd 由调用方给定（launch 快照优先），核验与删除必须同源。请求发出前的准备
+// 失败（环境/凭证/探测/拨号）返回 errT3RemoveNotAttempted 包装，传输层不确定
+// 失败返回 errT3RemoveUncertain 包装（INT-170）；明确拒绝按普通上游错误返回。
 func (s *T3ThreadsService) RemoveWorktree(ctx context.Context, userID, envID, cwd, path string, force bool) error {
 	env, err := s.loadEnvForWrite(ctx, userID, envID)
 	if err != nil {
-		return err
+		// 调用方预算在行内被前面的登记读/复查耗到点：与 ListRegistry 同口径
+		// 归「待确认」，不算「未送达」的三次重试对象（复审 Note）。
+		if ctx.Err() != nil {
+			return fmt.Errorf("%w: %s", errRegistryIncomplete, ctx.Err())
+		}
+		return &t3RemoveNotAttemptedError{err: err}
 	}
 	ctx, cancel := s.t3WriteBudget(ctx)
 	defer cancel()
 
 	session, err := s.dialAfterProbe(ctx, env)
 	if err != nil {
-		return err
+		if ctx.Err() != nil {
+			return fmt.Errorf("%w: %s", errRegistryIncomplete, ctx.Err())
+		}
+		return &t3RemoveNotAttemptedError{err: err}
 	}
 	defer session.Close()
 
@@ -191,6 +305,11 @@ func (s *T3ThreadsService) RemoveWorktree(ctx context.Context, userID, envID, cw
 		"cwd": cwd, "path": path, "force": force,
 	})
 	if err != nil {
+		// 先分类再翻译：upstreamError 生成新错误会丢 unwrap 链。
+		var uncertain *rpcUncertainError
+		if errors.As(err, &uncertain) {
+			return &t3RemoveUncertainError{err: err}
+		}
 		return s.upstreamError(err)
 	}
 	return nil

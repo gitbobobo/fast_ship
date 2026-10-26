@@ -42,13 +42,17 @@ func (s ReviewRunStatus) Active() bool {
 	return s == ReviewRunDispatched || s == ReviewRunRunning
 }
 
-// ReviewWorktreeState 代码审查工作区的回收进度。视觉审查不开工作区，恒为 none。
+// ReviewWorktreeState 代码审查工作区的回收进度。视觉审查不开工作区，恒为
+// none。branch_pending（INT-170）表示工作树已删、本轮专属分支仍在：远程 T3
+// 没有删分支的 RPC，分支消失只能靠审查代理收尾或人工清理，复查到分支不在
+// 登记（ref 整条消失）才转 removed。
 type ReviewWorktreeState string
 
 const (
-	ReviewWorktreeNone    ReviewWorktreeState = "none"
-	ReviewWorktreeRemoved ReviewWorktreeState = "removed"
-	ReviewWorktreeFailed  ReviewWorktreeState = "failed"
+	ReviewWorktreeNone          ReviewWorktreeState = "none"
+	ReviewWorktreeRemoved       ReviewWorktreeState = "removed"
+	ReviewWorktreeFailed        ReviewWorktreeState = "failed"
+	ReviewWorktreeBranchPending ReviewWorktreeState = "branch_pending"
 )
 
 // ProjectReviewSettings 项目级审查开关与组合配置。仓库（github_owner/repo）
@@ -161,9 +165,21 @@ type ReviewRun struct {
 	WorktreePath string `gorm:"column:worktree_path;type:text" json:"worktree_path,omitempty"`
 	// WorkspaceRoot launch 时项目绑定的主检出根目录快照：回收工作区要用它当
 	// cwd，绑定之后被删/改也不能用当前绑定去猜。
-	WorkspaceRoot string              `gorm:"column:workspace_root;type:text" json:"workspace_root,omitempty"`
-	WorktreeState ReviewWorktreeState `gorm:"column:worktree_state;type:text;not null;default:none" json:"worktree_state"`
-	WorktreeError string              `gorm:"column:worktree_error;type:text" json:"worktree_error,omitempty"`
+	WorkspaceRoot string `gorm:"column:workspace_root;type:text" json:"workspace_root,omitempty"`
+	// WorktreeBranch 线程投影读到的本轮专属分支名（INT-170）：与 worktree_path
+	// 同款「空才补」回写。线程 404 后工作树与分支的两步回收只能靠行内快照，
+	// 服务端又没有删分支的 RPC，删除结果（worktree 还在/分支仍在）都以这份
+	// 快照对照远端登记判定。
+	WorktreeBranch string              `gorm:"column:worktree_branch;type:text" json:"worktree_branch,omitempty"`
+	WorktreeState  ReviewWorktreeState `gorm:"column:worktree_state;type:text;not null;default:none" json:"worktree_state"`
+	WorktreeError  string              `gorm:"column:worktree_error;type:text" json:"worktree_error,omitempty"`
+	// WorktreeReason 回收问题的分类码（INT-170，见 review_cleanup.go 的
+	// worktreeReason* 常量）：removed 时清空；failed/branch_pending 与持续
+	// 待确认（none + registry_incomplete / remove_uncertain /
+	// remove_budget_pending / remove_unavailable）时写入。聚合通知按
+	// (environment_id, repo_full_name, worktree_reason) 分键查询受影响
+	// 运行清单。
+	WorktreeReason string `gorm:"column:worktree_reason;type:text" json:"worktree_reason,omitempty"`
 
 	// StopAttemptedAt 取消后的线程中断尝试（只发一次的标记）。
 	StopAttemptedAt *time.Time `gorm:"column:stop_attempted_at" json:"stop_attempted_at,omitempty"`
