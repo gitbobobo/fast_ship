@@ -709,6 +709,34 @@ func TestForgejoClient_GetPullRequestDiff_TooLarge(t *testing.T) {
 	}
 }
 
+// TestForgejoClient_ListPullRequestFiles_MaxResponseItemsShrink 部署侧
+// MaxResponseItems 收缩实际页大小时（limit=100 只回 20）继续翻页到空页——
+// 「不满一页即末页」会把后续页的删除/重命名路径静默漏掉（r11 P1）。
+func TestForgejoClient_ListPullRequestFiles_MaxResponseItemsShrink(t *testing.T) {
+	const perPage = 20 // 模拟 MaxResponseItems=20 的收缩部署
+	client, _ := newForgejoTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		page := 1
+		fmt.Sscanf(r.URL.Query().Get("page"), "%d", &page)
+		start := (page - 1) * perPage
+		items := "["
+		for i := start; i < start+perPage && i < 45; i++ {
+			if i > start {
+				items += ","
+			}
+			items += fmt.Sprintf(`{"filename":"f%d.go","status":"modified"}`, i)
+		}
+		_, _ = w.Write([]byte(items + "]"))
+	})
+	paths, complete, err := client.ListPullRequestFiles(context.Background(), "o/r", 3)
+	if err != nil {
+		t.Fatalf("files: %v", err)
+	}
+	if !complete || len(paths) != 45 {
+		t.Fatalf("complete=%v paths=%d, want complete 45", complete, len(paths))
+	}
+}
+
 // TestForgejoClient_PathExistsAtRef INT-169 文件归属的 Forgejo 实现：contents
 // 端点 2xx→存在、404 经根目录探测消歧（根在→不存在，根也 404→调用失败）、
 // 非规范路径本地判不存在且零请求。

@@ -219,6 +219,25 @@ func TestListPullRequestFiles(t *testing.T) {
 	}
 }
 
+// 单页带 patch 负载可超 8MiB：按不完整清单返回已收前缀（缺席不作否决），
+// 不当 50200 平台错误透传。
+func TestListPullRequestFilesOversizedPage(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(make([]byte, bodyReadMaxBytes+1))
+	}))
+	defer ts.Close()
+
+	c := NewClient(&fakeAuth{token: "t"}, ts.URL)
+	paths, complete, err := c.ListPullRequestFiles(context.Background(), 1, "octocat/hw", 9)
+	if err != nil {
+		t.Fatalf("oversized page must not error: %v", err)
+	}
+	if complete || len(paths) != 0 {
+		t.Fatalf("complete=%v paths=%v, want incomplete empty", complete, paths)
+	}
+}
+
 func TestStatusErrorHelpers(t *testing.T) {
 	if !IsForbidden(&StatusError{StatusCode: http.StatusForbidden}) {
 		t.Fatal("403 must be forbidden")

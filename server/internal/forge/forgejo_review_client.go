@@ -226,7 +226,9 @@ const forgejoPRFilesHardCap = 3000
 
 // ListPullRequestFiles 分页拉 PR 变更文件清单（GET pulls/N/files）：rename
 // 两侧都收并去重；否决类判定用这份分页清单而不是 diff 文本——平台对超大
-// PR 的 diff 可能无标记截断。
+// PR 的 diff 可能无标记截断。末页只能以空页判：Forgejo 按部署
+// MaxResponseItems 收缩实际页大小（limit=100 可能只回 50/20），
+// 「不满一页即末页」会把后续页静默漏掉。
 func (c *ForgejoReviewClient) ListPullRequestFiles(ctx context.Context, repoFullName string, number int) ([]string, bool, error) {
 	repo, err := repoPath(repoFullName)
 	if err != nil {
@@ -240,7 +242,9 @@ func (c *ForgejoReviewClient) ListPullRequestFiles(ctx context.Context, repoFull
 			paths = append(paths, p)
 		}
 	}
-	for page := 1; ; page++ {
+	// 页数兜底：服务端异常时（恒返非空页）不无限翻页。
+	const maxPages = forgejoPRFilesHardCap/forgejoPRFilesPage + 2
+	for page := 1; page <= maxPages; page++ {
 		var items []forgejoPRFileWire
 		err := c.do(ctx, http.MethodGet,
 			"/repos/"+repo+"/pulls/"+strconv.Itoa(number)+"/files?limit="+strconv.Itoa(forgejoPRFilesPage)+"&page="+strconv.Itoa(page), nil, &items)
@@ -251,13 +255,14 @@ func (c *ForgejoReviewClient) ListPullRequestFiles(ctx context.Context, repoFull
 			add(f.Filename)
 			add(f.PreviousFilename)
 		}
-		if len(items) < forgejoPRFilesPage {
+		if len(items) == 0 {
 			return paths, true, nil
 		}
 		if len(paths) >= forgejoPRFilesHardCap {
 			return paths, false, nil
 		}
 	}
+	return paths, false, nil
 }
 
 // forgejoReviewExpandMax 单次 ListReviewComments 展开评论的已提交 review

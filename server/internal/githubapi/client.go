@@ -643,6 +643,11 @@ func (c *restClient) ListPullRequestFiles(ctx context.Context, installationID in
 				fmt.Sprintf("/repos/%s/%s/pulls/%d/files?per_page=100&page=%d", owner, name, number, page), bearer, nil, &items)
 		})
 		if err != nil {
+			// 单页带 patch 负载可超 8MiB 读上限：清单判不完整——缺席不作
+			// 否决证据，比每次 50200 卡死重试强。
+			if errors.Is(err, ErrBodyTooLarge) {
+				return paths, false, nil
+			}
 			return nil, false, err
 		}
 		for _, f := range items {
