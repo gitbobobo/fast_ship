@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   BotBudgetDialog,
+  formatSpendPercent,
   parseThresholdInput,
 } from "@/components/bots/bot-budget-dialog";
 import { BotUsageOverviewPanel } from "@/components/bots/bot-usage-overview";
@@ -155,6 +156,16 @@ describe("parseThresholdInput", () => {
     expect(parseThresholdInput("abc")).toHaveProperty("error");
     expect(parseThresholdInput("0")).toHaveProperty("error");
     expect(parseThresholdInput("30000%")).toHaveProperty("error");
+  });
+});
+
+describe("formatSpendPercent", () => {
+  it("十倍以下按百分数、达到十倍改按倍数", () => {
+    expect(formatSpendPercent(0)).toBe("0%");
+    expect(formatSpendPercent(328)).toBe("328%");
+    expect(formatSpendPercent(999)).toBe("999%");
+    expect(formatSpendPercent(1000)).toBe("约 10 倍");
+    expect(formatSpendPercent(4200)).toBe("约 42 倍");
   });
 });
 

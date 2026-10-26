@@ -51,10 +51,11 @@ function ratioToText(ratio: number): string {
   return `${Number((ratio * 100).toFixed(4))}%`;
 }
 
-/** 已花占比文案：低于一万倍按百分数（328%），超过改按倍数（408660% →
- * 「约 4087 倍」）避免六位百分数难读。与服务端 botBudgetActualText 同口径。 */
+/** 已花占比文案：低于十倍按百分数（328%），达到十倍改按倍数
+ * （4200% → 「约 42 倍」）避免多位百分数难读。与服务端
+ * botBudgetActualText 同口径。 */
 export function formatSpendPercent(pct: number): string {
-  return pct < 10000 ? `${Math.round(pct)}%` : `约 ${Math.round(pct / 100)} 倍`;
+  return pct < 1000 ? `${Math.round(pct)}%` : `约 ${Math.round(pct / 100)} 倍`;
 }
 
 /**
