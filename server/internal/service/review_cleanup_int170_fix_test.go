@@ -905,8 +905,8 @@ func TestCleanupRemoveBudgetExhaustedGoesPending(t *testing.T) {
 	var after model.ReviewRun
 	e.svc.db.First(&after, "id = ?", run.ID)
 	if after.WorktreeState != model.ReviewWorktreeNone ||
-		after.WorktreeReason != worktreeReasonRegistryIncomplete {
-		t.Fatalf("预算耗尽应保持 none + registry_incomplete, got %q/%q",
+		after.WorktreeReason != worktreeReasonRemoveBudgetPending {
+		t.Fatalf("删除侧预算耗尽应保持 none + remove_budget_pending（与登记读取分键）, got %q/%q",
 			after.WorktreeState, after.WorktreeReason)
 	}
 	if got := review.worktreeTries[run.ID+"|"+worktreeTryRemoveAttempt]; got != 0 {
@@ -1162,5 +1162,42 @@ func TestCleanupBranchPendingNoPathMultiBindingFails(t *testing.T) {
 	}
 	if after.WorktreePath != "" {
 		t.Fatalf("歧义场景不得写回路径, got %q", after.WorktreePath)
+	}
+}
+
+// TestCleanupPendingWriteFailureKeepsMemoryState（复审12轮 P2）待确认原因的
+// 写库失败不得改写内存态：内存先于库态清空会让 finish 读不到 prior、跳过旧
+// 键聚合收缩，旧键清单永久滞留本运行。用 sqlite 触发器让 UPDATE 真失败。
+func TestCleanupPendingWriteFailureKeepsMemoryState(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	env := createT3TestEnv(t, e.svc.db, e.user.ID, "env-wfail")
+	createTestT3Binding(t, e.svc.db, e.project.ID, env.ID, "t3p")
+
+	run := e.seedCleanableRun(t, repo, 670, env, model.ReviewRunCompleted, "/wt/f", now)
+	e.svc.db.Model(run).Updates(map[string]any{
+		"worktree_reason": worktreeReasonRemoveUncertain, "worktree_error": "x"})
+	run.WorktreeReason = worktreeReasonRemoveUncertain
+
+	if err := e.svc.db.Exec(`CREATE TRIGGER block_reason BEFORE UPDATE ON review_runs
+		WHEN NEW.worktree_reason <> OLD.worktree_reason
+		BEGIN SELECT RAISE(ABORT, 'blocked'); END`).Error; err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+	defer e.svc.db.Exec("DROP TRIGGER block_reason")
+
+	// 清除路径：写失败 → 内存原因保持，不得先行清空。
+	review := e.withT3(&fakeReviewT3{}, nil, nil)
+	review.recoverFromPending(run, now)
+	if run.WorktreeReason != worktreeReasonRemoveUncertain {
+		t.Fatalf("写失败内存态不得清空, got %q", run.WorktreeReason)
+	}
+	// 写入路径：写失败 → 内存原因保持旧值，不换成新原因。
+	if review.writePendingReason(run, worktreeReasonRegistryIncomplete, "y", now) {
+		t.Fatal("写失败应返回 false")
+	}
+	if run.WorktreeReason != worktreeReasonRemoveUncertain {
+		t.Fatalf("写失败内存态不得改写, got %q", run.WorktreeReason)
 	}
 }

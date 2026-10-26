@@ -103,6 +103,10 @@ const (
 	// worktreeReasonBranchUnknown 分支名缺失且登记无法恢复（升级前 NULL 行 +
 	// 工作树先消失）：无法证明无专属分支残留，记失败交人工核查。
 	worktreeReasonBranchUnknown = "branch_unknown"
+	// worktreeReasonRemoveBudgetPending 删除执行的时间预算在行内耗尽（环
+	// 境解析/拨号到点）：与 registry_incomplete 同为待确认但分键——聚合通
+	// 知按原因分桶，混进「登记读取不完整」会指向错误根因（复审 P2）。
+	worktreeReasonRemoveBudgetPending = "remove_budget_pending"
 	// worktreeReasonOwnershipError 归属核验的 DB 读连续失败（行快照/认领统
 	// 计）——本地库故障，不并入「登记读取失败」聚合键误导排查（复审 Note）。
 	worktreeReasonOwnershipError = "ownership_error"
@@ -336,7 +340,7 @@ func (s *ReviewService) worktreeReclaimDue(run *model.ReviewRun, now time.Time) 
 		return s.worktreeBackoffDue(run.ID, worktreeReasonBranchPending, now)
 	}
 	switch run.WorktreeReason {
-	case worktreeReasonRegistryIncomplete, worktreeReasonRemoveUncertain:
+	case worktreeReasonRegistryIncomplete, worktreeReasonRemoveUncertain, worktreeReasonRemoveBudgetPending:
 		return s.worktreeBackoffDue(run.ID, run.WorktreeReason, now)
 	}
 	return true
@@ -650,7 +654,7 @@ func (s *ReviewService) cleanupWithRegistry(ctx context.Context, run *model.Revi
 // 报错走有限重试，超限 failed + 聚合通知（现有行为口径）。
 func (s *ReviewService) handleRegistryReadError(run *model.ReviewRun, err error, now time.Time, finish worktreeFinish) {
 	if errors.Is(err, errRegistryIncomplete) {
-		if tries := s.markBudgetPending(run, "登记读取未在预算内完成，待下轮确认重试", now); tries >= reviewBudgetPendingMaxTries {
+		if tries := s.markBudgetPending(run, worktreeReasonRegistryIncomplete, "登记读取未在预算内完成，待下轮确认重试", now); tries >= reviewBudgetPendingMaxTries {
 			finish(model.ReviewWorktreeFailed, worktreeReasonRegistryError,
 				"登记读取长时间未在预算内完成，按失败处理", true)
 		}
@@ -667,14 +671,16 @@ func (s *ReviewService) handleRegistryReadError(run *model.ReviewRun, err error,
 // 在调用方预算内到点）共用——同一根因同一口径（复审 Note）。返回连续失败
 // 计数，供调用方按 reviewBudgetPendingMaxTries 收敛 failed（待确认不是无
 // 限期状态）。
-func (s *ReviewService) markBudgetPending(run *model.ReviewRun, errMsg string, now time.Time) int {
+func (s *ReviewService) markBudgetPending(run *model.ReviewRun, reason, errMsg string, now time.Time) int {
 	tries := s.bumpWorktreeTries(run.ID, worktreeTryRegIncomplete)
-	s.scheduleWorktreeBackoff(run.ID, worktreeReasonRegistryIncomplete, now)
-	s.writePendingReason(run, worktreeReasonRegistryIncomplete, errMsg, now)
+	s.scheduleWorktreeBackoff(run.ID, reason, now)
+	if !s.writePendingReason(run, reason, errMsg, now) {
+		return tries
+	}
 	if tries >= reviewWorktreeMaxTries {
 		// 进入持续待确认态：按（环境, 仓库, 原因）聚合通知（同键重复
 		// 发布由 dedup+指纹收敛，正文随清单自动更新）。
-		s.publishCleanupAggregate(run, worktreeReasonRegistryIncomplete, now)
+		s.publishCleanupAggregate(run, reason, now)
 	}
 	return tries
 }
@@ -693,7 +699,10 @@ func (s *ReviewService) recoverFromPending(run *model.ReviewRun, now time.Time) 
 	prior := run.WorktreeReason
 	if err := s.db.Model(&model.ReviewRun{}).Where("id = ?", run.ID).
 		Updates(map[string]any{"worktree_reason": "", "worktree_error": "", "updated_at": now}).Error; err != nil {
+		// 写失败直接中断、不动内存态（复审 P2）：内存先于库态清空会让
+		// finish 读不到 prior、跳过旧键聚合收缩，旧键清单永久滞留本运行。
 		s.logger.Warn("清除待确认原因写库失败", zap.String("run", run.ID), zap.Error(err))
+		return
 	}
 	run.WorktreeReason = ""
 	s.resetWorktreeTries(run.ID, worktreeTryRegIncomplete)
@@ -712,7 +721,9 @@ func (s *ReviewService) recoverFromPending(run *model.ReviewRun, now time.Time) 
 // writePendingReason 把「保持 none 的待确认/暂态原因」落行：状态不变，只更新
 // 原因与错误，供聚合通知查询受影响清单。行内已有不同的待确认原因时按旧键
 // 重发一次聚合——不补发，旧键的受影响清单会永久滞留本运行（复审 Note）。
-func (s *ReviewService) writePendingReason(run *model.ReviewRun, reason, errMsg string, now time.Time) {
+// 返回写库是否成功：失败时不动内存态、不重发旧键（复审 P2——内存先于库态
+// 改写会让 finish 读不到 prior，旧键清单永久滞留）。
+func (s *ReviewService) writePendingReason(run *model.ReviewRun, reason, errMsg string, now time.Time) bool {
 	prior := run.WorktreeReason
 	if err := s.db.Model(&model.ReviewRun{}).Where("id = ?", run.ID).
 		Updates(map[string]any{
@@ -720,11 +731,13 @@ func (s *ReviewService) writePendingReason(run *model.ReviewRun, reason, errMsg 
 			"worktree_reason": reason, "worktree_error": errMsg, "updated_at": now,
 		}).Error; err != nil {
 		s.logger.Warn("待确认原因写库失败", zap.String("run", run.ID), zap.Error(err))
+		return false
 	}
 	run.WorktreeReason, run.WorktreeError = reason, errMsg
 	if prior != "" && prior != reason {
 		s.publishCleanupAggregate(run, prior, now)
 	}
+	return true
 }
 
 // worktreeStep 工作树步：登记命中才核验归属并删除。返回 false 表示本 tick
@@ -761,8 +774,10 @@ func (s *ReviewService) worktreeStep(ctx context.Context, run *model.ReviewRun, 
 	} else if errors.Is(err, errRegistryIncomplete) {
 		// 删除前置（env/dial）在调用方预算内到点：与登记读取同口径「待确认」
 		// 挂退避——上游慢但活着不是「未送达」，不占三次重试就落 failed（复审
-		// Note）。连续累计超限同样收敛 failed，待确认不是无限期状态。
-		if tries := s.markBudgetPending(run, "执行删除的时间预算在行内耗尽，待下轮重试", now); tries >= reviewBudgetPendingMaxTries {
+		// Note）。连续累计超限同样收敛 failed，待确认不是无限期状态。原因
+		// 用 remove_budget_pending 与登记读取分键（复审 P2），聚合通知才不
+		// 会把删除侧根因错标成「登记读取不完整」。
+		if tries := s.markBudgetPending(run, worktreeReasonRemoveBudgetPending, "执行删除的时间预算在行内耗尽，待下轮重试", now); tries >= reviewBudgetPendingMaxTries {
 			finish(model.ReviewWorktreeFailed, worktreeReasonWorktreeRemove,
 				"执行删除的时间预算长时间耗尽，按失败处理", true)
 		}
@@ -809,6 +824,12 @@ func (s *ReviewService) worktreeStep(ctx context.Context, run *model.ReviewRun, 
 // 返回 true（目标态已达成）。复查本身失败按「仍在」处理——不能把读不到登记
 // 当成删除成功。
 func (s *ReviewService) confirmWorktreeGoneAfterRemove(ctx context.Context, run *model.ReviewRun, cwd, path string) bool {
+	if ctx.Err() != nil {
+		// 行预算已被刚失败的删除耗尽：这次复查注定翻不完页返回
+		// incomplete，查了也形同虚设——直接按「仍在」等下个退避周期（复审
+		// Note）。
+		return false
+	}
 	reg, err := s.t3.ListRegistry(ctx, run.UserID, run.EnvironmentID, cwd)
 	if err != nil || reg.ContainsWorktree(path) {
 		return false
@@ -919,7 +940,18 @@ func (s *ReviewService) recheckBranchPending(ctx context.Context, run *model.Rev
 			}
 			run.WorktreePath = bound[match].Path
 		}
+		// 转 none 会释放全部重试计数——branch-pending 的「确认存活」累计要
+		// 保留（复审 Note）：T3 侧对同一分支反复出现/消失 worktree 登记
+		// 时，24 次上限被反复重置会把收敛时长无限拉长。
+		s.worktreeMu.Lock()
+		bpTries := s.worktreeTries[run.ID+"|"+worktreeTryBranchPending]
+		s.worktreeMu.Unlock()
 		s.finishWorktreeCleanup(run, model.ReviewWorktreeNone, "", "", false, now)
+		if bpTries > 0 {
+			s.worktreeMu.Lock()
+			s.worktreeTries[run.ID+"|"+worktreeTryBranchPending] = bpTries
+			s.worktreeMu.Unlock()
+		}
 		return
 	}
 	if reg.HasRef(run.WorktreeBranch) {
