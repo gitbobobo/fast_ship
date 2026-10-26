@@ -32,7 +32,10 @@ func (s *ReviewService) publishCleanupAggregate(run *model.ReviewRun, reason str
 			[]model.ReviewWorktreeState{model.ReviewWorktreeNone,
 				model.ReviewWorktreeBranchPending, model.ReviewWorktreeFailed}).
 		Order("finished_at ASC").Limit(reviewStageBatch + 1).Find(&affected).Error; err != nil {
+		// 读不到清单就中断：带错走下去 affected 为空会走「均已回收完成」
+		// 分支，一次瞬时 DB 抖动就把仍有失败行的通知误刷成已恢复（复审 P2）。
 		s.logger.Warn("查询回收受影响运行失败", zap.String("run", run.ID), zap.Error(err))
+		return
 	}
 	// 清单截断按 limit+1 探测：恰好 reviewStageBatch 条不算截断，多探的那条
 	// 只用来判断「还有更多」。

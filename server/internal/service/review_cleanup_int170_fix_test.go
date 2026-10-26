@@ -701,3 +701,76 @@ func TestCleanupAggregateFiltersByUser(t *testing.T) {
 		t.Fatalf("其他用户的行不得进本用户清单: %q", note.Body)
 	}
 }
+
+// TestCleanupAggregateQueryErrorDoesNotPublish（复审3轮 P2）受影响清单查询
+// 失败必须中断——带错走下去会把仍有失败行的聚合通知误刷成「均已回收完成」。
+func TestCleanupAggregateQueryErrorDoesNotPublish(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	env := createT3TestEnv(t, e.svc.db, e.user.ID, "env-qerr")
+
+	run := e.seedCleanableRun(t, repo, 550, env, model.ReviewRunFailed, "", now)
+	e.svc.db.Model(run).Updates(map[string]any{
+		"worktree_state": model.ReviewWorktreeFailed, "worktree_reason": worktreeReasonRegistryError,
+	})
+	review := e.withT3(&fakeReviewT3{}, nil, nil)
+	review.publishCleanupAggregate(run, worktreeReasonRegistryError, now)
+	var before model.Notification
+	if err := e.svc.db.First(&before,
+		"kind = ? AND user_id = ?", model.NotificationReviewCleanupFailed, e.user.ID).Error; err != nil {
+		t.Fatalf("首条聚合通知未建成: %v", err)
+	}
+	if !strings.Contains(before.Body, run.ID[:8]) {
+		t.Fatalf("清单应含失败行: %q", before.Body)
+	}
+
+	// 让受影响清单查询报错（缺列）：瞬时 DB 故障的等价物。
+	if err := e.svc.db.Exec("ALTER TABLE review_runs DROP COLUMN worktree_reason").Error; err != nil {
+		t.Skipf("sqlite 不支持 DROP COLUMN，无法模拟查询失败: %v", err)
+	}
+	review.publishCleanupAggregate(run, worktreeReasonRegistryError, now)
+
+	var after model.Notification
+	e.svc.db.First(&after, "id = ?", before.ID)
+	if !strings.Contains(after.Body, run.ID[:8]) || strings.Contains(after.Body, "均已回收完成") {
+		t.Fatalf("查询失败不得把清单刷成已恢复, got %q", after.Body)
+	}
+}
+
+// TestCleanupPendingReasonSwitchRefreshesOldKey（复审3轮 Note）待确认态之间
+// 换原因时旧键清单必须收缩——不补发，旧键的受影响清单永久滞留本运行。
+func TestCleanupPendingReasonSwitchRefreshesOldKey(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	env := createT3TestEnv(t, e.svc.db, e.user.ID, "env-swap")
+
+	run := e.seedCleanableRun(t, repo, 551, env, model.ReviewRunFailed, "", now)
+	e.svc.db.Model(run).Updates(map[string]any{
+		"worktree_state":  model.ReviewWorktreeNone,
+		"worktree_reason": worktreeReasonRegistryIncomplete, "worktree_error": "登记读取未在预算内完成",
+	})
+	run.WorktreeReason, run.WorktreeError = worktreeReasonRegistryIncomplete, "登记读取未在预算内完成"
+	review := e.withT3(&fakeReviewT3{}, nil, nil)
+	review.publishCleanupAggregate(run, worktreeReasonRegistryIncomplete, now)
+	var note model.Notification
+	if err := e.svc.db.First(&note,
+		"kind = ? AND user_id = ?", model.NotificationReviewCleanupFailed, e.user.ID).Error; err != nil {
+		t.Fatalf("incomplete 键通知未建成: %v", err)
+	}
+	if !strings.Contains(note.Body, run.ID[:8]) {
+		t.Fatalf("清单应含待确认行: %q", note.Body)
+	}
+
+	// 换原因（incomplete → uncertain）：旧键应按收缩后的清单重发。
+	review.writePendingReason(run, worktreeReasonRemoveUncertain, "删除工作区结果待确认", now)
+
+	e.svc.db.First(&note, "id = ?", note.ID)
+	if !strings.Contains(note.Body, "受影响运行均已回收完成") {
+		t.Fatalf("旧键清单应收缩为已恢复, got %q", note.Body)
+	}
+	if run.WorktreeReason != worktreeReasonRemoveUncertain {
+		t.Fatalf("内存原因应切到新值, got %q", run.WorktreeReason)
+	}
+}

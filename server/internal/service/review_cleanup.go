@@ -552,7 +552,6 @@ func (s *ReviewService) handleRegistryReadError(run *model.ReviewRun, err error,
 	if errors.Is(err, errRegistryIncomplete) {
 		tries := s.bumpWorktreeTries(run.ID, worktreeTryRegIncomplete)
 		s.scheduleWorktreeBackoff(run.ID, worktreeReasonRegistryIncomplete, now)
-		run.WorktreeReason = worktreeReasonRegistryIncomplete
 		s.writePendingReason(run, worktreeReasonRegistryIncomplete,
 			"登记读取未在预算内完成，待下轮确认重试", now)
 		if tries >= reviewWorktreeMaxTries {
@@ -597,13 +596,19 @@ func (s *ReviewService) recoverFromPending(run *model.ReviewRun, now time.Time) 
 }
 
 // writePendingReason 把「保持 none 的待确认/暂态原因」落行：状态不变，只更新
-// 原因与错误，供聚合通知查询受影响清单。
+// 原因与错误，供聚合通知查询受影响清单。行内已有不同的待确认原因时按旧键
+// 重发一次聚合——不补发，旧键的受影响清单会永久滞留本运行（复审 Note）。
 func (s *ReviewService) writePendingReason(run *model.ReviewRun, reason, errMsg string, now time.Time) {
+	prior := run.WorktreeReason
 	s.db.Model(&model.ReviewRun{}).Where("id = ?", run.ID).
 		Updates(map[string]any{
 			"worktree_state":  model.ReviewWorktreeNone,
 			"worktree_reason": reason, "worktree_error": errMsg, "updated_at": now,
 		})
+	run.WorktreeReason, run.WorktreeError = reason, errMsg
+	if prior != "" && prior != reason {
+		s.publishCleanupAggregate(run, prior, now)
+	}
 }
 
 // worktreeStep 工作树步：登记命中才核验归属并删除。返回 false 表示本 tick
@@ -647,7 +652,6 @@ func (s *ReviewService) worktreeStep(ctx context.Context, run *model.ReviewRun, 
 		}
 		tries := s.bumpWorktreeTries(run.ID, worktreeTryRemoveUncertain)
 		s.scheduleWorktreeBackoff(run.ID, worktreeReasonRemoveUncertain, now)
-		run.WorktreeReason = worktreeReasonRemoveUncertain
 		s.writePendingReason(run, worktreeReasonRemoveUncertain, "删除工作区结果待确认（超时或连接中断），下轮复查远端状态", now)
 		if tries >= reviewWorktreeMaxTries {
 			finish(model.ReviewWorktreeFailed, worktreeReasonRemoveUncertain,
