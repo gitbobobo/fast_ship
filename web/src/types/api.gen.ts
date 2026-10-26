@@ -3141,11 +3141,13 @@ export interface paths {
         };
         /**
          * 花费总览（按天 / 按机器人 / 按定时任务，INT-162）
-         * @description 只用现有账本（bot_runs / bot_model_requests / bot_maintenance_*）实时
-         *     聚合，不新增表、不回填。窗口按 users.timezone 切日，空值回退部署配置
-         *     bots.memory.timezone，再回退 UTC。金额一律来自内置 models.dev 目录单价
-         *     估算：目录无价、自定义提供商、缺 usage 的请求为「未计价」——已计价
-         *     字段缺省为 null（缺失 ≠ 0），未计价请求计入 unpriced_requests。
+         * @description 历史日期读按天汇总表（bot_usage_daily），今天与缺失/脏日期实时扫描
+         *     现有账本（bot_runs / bot_model_requests / bot_maintenance_*）。窗口
+         *     按 users.timezone 切日，空值回退部署配置 bots.memory.timezone，再回退
+         *     UTC。金额为请求级实收优先（COALESCE(provider_cost, cost_estimate)，
+         *     INT-164）：提供商回报的置信 USD 实收覆盖目录价估算；两者皆空的请求
+         *     为「未计价」——金额字段缺省为 null（缺失 ≠ 0），未计价请求计入
+         *     unpriced_requests。
          *     归属：session_kind='schedule' 的 run 按 schedule_task_id 归定时任务；
          *     触发来源 schedule_event 的主线 run 经 trigger_key 反查任务，计入该
          *     任务 linked_main_cost（近似，一次主线 run 可能同时处理多条输入），
@@ -3171,16 +3173,17 @@ export interface paths {
         /**
          * 花费优化参考（上下文增长 / 缓存命中 / 工具定义占比 / 维护占比 / 失败重试浪费 / 空转 / 换模型差价，INT-163）
          * @description 与花费总览同一窗口、同一机器人集合的只读聚合，回答「钱花在哪、怎么省」。
-         *     全部指标复用现有账本实时计算：金额仍是目录单价估算（缺失 ≠ 0），token
-         *     估算列（input_tokens_estimate / tools_tokens_estimate）标 estimated。
+         *     全部指标复用现有账本实时计算：展示金额与总览同口径（请求级实收优先，
+         *     缺失 ≠ 0）；换模型差价是假设对比，按目录单价估算。token 估算列
+         *     （input_tokens_estimate / tools_tokens_estimate）标 estimated。
          *     口径要点：
          *     - 缓存命中率：cached / prompt，只统计 usage 完整的请求；按天维度把请求
          *       计入所属 run（或维护运行）自身 created_at 的当地日，与总览记日一致。
          *     - 工具定义占比：tools_tokens_estimate / prompt_tokens，同一 usage 完整
          *       请求集合；分子是按 schema 字节的估算值。
-         *     - 维护占比：窗口内全部维护请求已计价花费（含挂到 run 名下的，口径大于
+         *     - 维护占比：窗口内全部维护请求显示花费（含挂到 run 名下的，口径大于
          *       总览「维护」桶）占该机器人总花费（总览三桶之和）的比例，按用途拆分。
-         *     - 失败和重试浪费：status=failed 的请求行中已计价金额、status=failed 的
+         *     - 失败和重试浪费：status=failed 的请求行中显示金额、status=failed 的
          *       run 的显示成本合计、重复 request_hash 的重试次数；按 error_code 分组。
          *     - 空转：非 skipped 的终态 schedule run 中满足任一条件即算空转——
          *       silent=true、整次运行没有任何工具调用行、没有任何写操作调用（写操作
@@ -3208,8 +3211,9 @@ export interface paths {
         /**
          * 单次运行花费明细（INT-162）
          * @description 单次 run 的完整账单：每次模型请求（含失败重试）及其工具调用、关联的
-         *     压缩/维护运行与请求。display_cost = 自身已计价成本 + 关联维护已计价
-         *     成本；不改写 run 的 cost_estimate 列。
+         *     压缩/维护运行与请求。金额均为请求级实收优先（provider_cost 覆盖
+         *     cost_estimate）：display_cost = 自身 + 关联维护的显示成本合计；
+         *     不改写 run 的 cost_estimate 列（保持目录价快照语义）。
          */
         get: operations["getBotUsageRun"];
         put?: never;
@@ -3500,6 +3504,103 @@ export interface paths {
          *     操作；随任务删除一并清除。
          */
         delete: operations["clearBotScheduleTaskState"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/bots/{id}/budgets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 机器人周期预算列表（INT-164）
+         * @description 返回该机器人的预算（每日/每月各至多一条）与当前周期的已计价花费。
+         *     花费为实收优先（provider_cost 覆盖 cost_estimate，与花费页展示同
+         *     口径，未计价请求不计入），周期按用户有效时区切日/切月。未设置预算
+         *     时返回空列表，系统行为与没有预算完全一致。
+         */
+        get: operations["listBotBudgets"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/bots/{id}/budgets/{period}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * 设置机器人预算（按周期覆盖）
+         * @description 覆盖该机器人某周期的预算。阈值是相对预算金额的比例（0.8 = 80%，
+         *     1 = 100%，允许大于 1）；服务端规范化（去重、升序、整数基点）后保存。
+         *     越过阈值只发站内通知与主线事件，不停止运行；同一周期同一阈值只告警
+         *     一次。
+         */
+        put: operations["upsertBotBudget"];
+        post?: never;
+        /**
+         * 删除机器人预算
+         * @description 删除该机器人某周期的预算；不存在也算成功（幂等）。
+         */
+        delete: operations["deleteBotBudget"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/bots/{id}/schedule-tasks/{taskId}/budgets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 定时任务周期预算列表（INT-164）
+         * @description 返回该定时任务的预算与当前周期花费。任务花费只算任务口径：该任务的
+         *     schedule run、解析到该任务的 schedule_event 连带主线 run 及它们的关联
+         *     维护；未计价请求不计入。
+         */
+        get: operations["listBotScheduleTaskBudgets"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/bots/{id}/schedule-tasks/{taskId}/budgets/{period}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * 设置定时任务预算（按周期覆盖）
+         * @description 覆盖该定时任务某周期的预算；阈值语义同机器人预算。任务必须属于该
+         *     机器人（否则 404），机器人与任务都必须属于当前用户。
+         */
+        put: operations["upsertBotScheduleTaskBudget"];
+        post?: never;
+        /**
+         * 删除定时任务预算
+         * @description 删除该定时任务某周期的预算；不存在也算成功（幂等）。
+         */
+        delete: operations["deleteBotScheduleTaskBudget"];
         options?: never;
         head?: never;
         patch?: never;
@@ -5828,7 +5929,7 @@ export interface components {
         Notification: {
             id: string;
             /** @enum {string} */
-            kind: "review_dispatch_failed" | "review_run_timeout" | "review_cleanup_failed" | "review_redelivery_failed";
+            kind: "review_dispatch_failed" | "review_run_timeout" | "review_cleanup_failed" | "review_redelivery_failed" | "bot_budget_threshold";
             title: string;
             body: string;
             environment_id?: string | null;
@@ -6495,7 +6596,7 @@ export interface components {
             cost_source?: string | null;
             /**
              * Format: double
-             * @description 显示口径成本（INT-162）：本 run 已计价成本 + 关联维护运行已计价成本；两者都为 null 时为 null。cost_estimate 列本身口径不变
+             * @description 显示口径成本（INT-162）：本 run + 关联维护运行的显示成本合计（请求级实收优先，INT-164）；两者都为 null 时为 null。cost_estimate 列本身口径不变
              */
             display_cost_estimate: number | null;
             error_code?: string | null;
@@ -6536,7 +6637,7 @@ export interface components {
             state_updated_at: string | null;
             /**
              * Format: double
-             * @description 近 7 天该任务已计价成本合计（schedule run 自身+关联维护 + 连带主线成本，INT-162）；无已计价记录为 null
+             * @description 近 7 天该任务显示成本合计（schedule run 自身+关联维护 + 连带主线成本，请求级实收优先，INT-162/164）；无金额记录为 null
              */
             cost_last_7d: number | null;
             /** Format: date-time */
@@ -6584,14 +6685,59 @@ export interface components {
             cost_source?: string;
             /**
              * Format: double
-             * @description 显示口径成本（INT-162）：本 run 已计价成本 + 关联维护运行已计价成本；两者都为 null 时为 null
+             * @description 显示口径成本（INT-162）：本 run + 关联维护运行的显示成本合计（请求级实收优先，INT-164）；两者都为 null 时为 null
              */
             display_cost_estimate: number | null;
+        };
+        BotBudget: {
+            id: string;
+            /**
+             * @description 预算周期；每日按用户有效时区的当地日，每月按当地月
+             * @enum {string}
+             */
+            period: "daily" | "monthly";
+            /**
+             * Format: double
+             * @description 预算金额（美元，大于 0）
+             */
+            amount_usd: number;
+            /** @description 告警阈值（相对预算金额的比例，0.8 = 80%、1 = 100%；服务端规范化去重升序） */
+            thresholds: number[];
+            /**
+             * Format: double
+             * @description 当前周期花费（USD）；实收优先（provider_cost 覆盖 cost_estimate），无金额请求不计入，无花费为 0
+             */
+            spend_usd: number;
+            /** @description 当前周期的规范键（daily = 当地日期 2006-01-02，monthly = 2006-01） */
+            period_key: string;
+            /**
+             * Format: date-time
+             * @description 当前周期统计窗口起点（UTC）
+             */
+            spend_window_start: string;
+            /**
+             * Format: date-time
+             * @description 当前周期统计窗口终点（UTC，= 评估时刻）
+             */
+            spend_window_end: string;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        BotBudgetUpsertRequest: {
+            /**
+             * Format: double
+             * @description 预算金额（美元，必须大于 0）
+             */
+            amount_usd: number;
+            /** @description 告警阈值（(0, 100]，1 = 100%，允许超过 100% 的档位；至少一个，服务端去重升序） */
+            thresholds: number[];
         };
         BotUsageTotals: {
             /**
              * Format: double
-             * @description 窗口内已计价成本合计（USD）；无任何已计价请求为 null（缺失 ≠ 0）
+             * @description 窗口内显示成本合计（USD，请求级实收优先）；无任何金额请求为 null（缺失 ≠ 0）
              */
             cost: number | null;
             /**
@@ -6604,11 +6750,14 @@ export interface components {
              * @description 模型请求总数（主线/定时 + 维护）
              */
             total_requests: number;
-            /** Format: int64 */
+            /**
+             * Format: int64
+             * @description 有金额请求数（估算或实收任一非空）
+             */
             priced_requests: number;
             /**
              * Format: int64
-             * @description 未计价请求数（自定义提供商、目录无价、缺 usage、v0.1.63 前旧记录）
+             * @description 无金额请求数（估算与实收都为空：自定义提供商、目录无价、缺 usage、v0.1.63 前旧记录）
              */
             unpriced_requests: number;
         };
@@ -6617,7 +6766,7 @@ export interface components {
             date: string;
             /**
              * Format: double
-             * @description 当日已计价成本合计；全未计价或无记录为 0
+             * @description 当日显示成本合计（请求级实收优先）；全无金额或无记录为 0
              */
             cost: number;
             /** @description 当日有模型请求（含未计价）的机器人 */
@@ -6630,9 +6779,11 @@ export interface components {
         BotUsageBot: {
             bot_id: string;
             name: string;
+            /** @description omitempty；true = 机器人已删除——明细已级联清理，name 是删除时快照，历史维度读按天汇总表（INT-164） */
+            deleted?: boolean;
             /**
              * Format: double
-             * @description 已计价合计 = cost_main + cost_schedule + cost_maintenance
+             * @description 显示成本合计 = cost_main + cost_schedule + cost_maintenance（请求级实收优先）
              */
             cost: number | null;
             /**
@@ -6677,6 +6828,10 @@ export interface components {
              * @description cached / prompt，只算 usage 完整的请求；无完整 usage 为 null
              */
             cache_hit_rate: number | null;
+            /** @description omitempty；true = 该机器人设有 bot 级预算（行内状态提示，INT-164） */
+            budget_set?: boolean;
+            /** @description omitempty；true = 任一已设预算周期当前花费 ≥ 预算金额 */
+            budget_exceeded?: boolean;
             /** Format: int64 */
             unpriced_requests: number;
         };
@@ -6724,6 +6879,10 @@ export interface components {
              * @description （单次定时运行平均 + 每次触发摊到的连带主线成本）× 未来 30 天触发次数（parseScheduleCron）；单次统计取最近 30 个当地日的固定窗口，与所选 range 无关；停用、已删除、无已计价平均或 cron 解析失败为 null
              */
             estimated_monthly_cost: number | null;
+            /** @description omitempty；true = 该任务设有任务级预算（行内状态提示，INT-164） */
+            budget_set?: boolean;
+            /** @description omitempty；true = 任一已设预算周期当前花费 ≥ 预算金额 */
+            budget_exceeded?: boolean;
         };
         BotUsageOverview: {
             /** @enum {string} */
@@ -6775,7 +6934,7 @@ export interface components {
             cost_source: string | null;
             /**
              * Format: double
-             * @description 关联维护运行已计价成本合计
+             * @description 关联维护运行显示成本合计（实收优先）
              */
             maintenance_cost: number | null;
             /**
@@ -6798,6 +6957,7 @@ export interface components {
             action: string;
             status: string;
             error_code?: string | null;
+            error_message?: string | null;
             /** Format: date-time */
             created_at: string;
             /** Format: date-time */
@@ -6824,6 +6984,16 @@ export interface components {
             completion_tokens?: number | null;
             /** Format: int64 */
             total_tokens?: number | null;
+            /**
+             * Format: int64
+             * @description completion_tokens_details.reasoning_tokens；供应商未返回为 null
+             */
+            reasoning_tokens?: number | null;
+            /**
+             * Format: double
+             * @description 供应商 usage 返回的实际金额（USD）；仅币别置信 USD 时落库并返回，否则 null
+             */
+            provider_cost?: number | null;
             /** Format: int64 */
             tools_tokens_estimate: number;
             usage_complete: boolean;
@@ -6858,6 +7028,16 @@ export interface components {
             completion_tokens?: number | null;
             /** Format: int64 */
             total_tokens?: number | null;
+            /**
+             * Format: int64
+             * @description completion_tokens_details.reasoning_tokens；供应商未返回为 null
+             */
+            reasoning_tokens?: number | null;
+            /**
+             * Format: double
+             * @description 供应商 usage 返回的实际金额（USD）；仅币别置信 USD 时落库并返回，否则 null
+             */
+            provider_cost?: number | null;
             /** Format: double */
             cost_estimate: number | null;
             cost_source: string | null;
@@ -6882,7 +7062,7 @@ export interface components {
             finished_at?: string | null;
             /**
              * Format: double
-             * @description 本维护运行已计价请求合计
+             * @description 本维护运行显示成本合计（请求级实收优先）
              */
             cost_estimate: number | null;
             requests: components["schemas"]["BotUsageMaintenanceRequest"][];
@@ -6945,14 +7125,14 @@ export interface components {
             purpose: string;
             /**
              * Format: double
-             * @description 该用途下已计价请求合计；全部未计价为 null（缺失 ≠ 0）
+             * @description 该用途下显示成本合计（实收优先）；全无金额为 null（缺失 ≠ 0）
              */
             cost: number | null;
         };
         BotUsageMaintenanceShare: {
             /**
              * Format: double
-             * @description 窗口内该机器人全部维护请求已计价合计（含挂到 run 名下的压缩/归档，口径大于总览「维护」桶）
+             * @description 窗口内该机器人全部维护请求显示成本合计（实收优先，含挂到 run 名下的压缩/归档，口径大于总览「维护」桶）
              */
             cost: number | null;
             /**
@@ -6970,7 +7150,7 @@ export interface components {
             requests: number;
             /**
              * Format: double
-             * @description 该组失败请求中已计价金额合计
+             * @description 该组失败请求中显示金额合计（实收优先）
              */
             cost: number | null;
         };
@@ -6982,7 +7162,7 @@ export interface components {
             failed_requests: number;
             /**
              * Format: double
-             * @description 失败请求中已计价金额合计——重试浪费口径：失败尝试若送过 usage 就已计价，其花费即浪费
+             * @description 失败请求中显示金额合计（实收优先）——重试浪费口径：失败尝试若有金额，其花费即浪费
              */
             failed_requests_cost: number | null;
             /**
@@ -6992,7 +7172,7 @@ export interface components {
             failed_runs: number;
             /**
              * Format: double
-             * @description 失败 run 的显示成本合计（自身 + 关联维护已计价）
+             * @description 失败 run 的显示成本合计（自身 + 关联维护，实收优先）
              */
             failed_runs_cost: number | null;
             /**
@@ -7078,7 +7258,7 @@ export interface components {
             idle_rate: number | null;
             /**
              * Format: double
-             * @description 空转 run 的显示成本合计（自身 + 关联维护已计价）
+             * @description 空转 run 的显示成本合计（自身 + 关联维护，实收优先）
              */
             idle_cost: number | null;
             /**
@@ -15672,6 +15852,191 @@ export interface operations {
                     "application/json": components["schemas"]["Envelope"] & {
                         data?: components["schemas"]["BotScheduleTask"];
                     };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listBotBudgets: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description API Key ID */
+                id: components["parameters"]["ProjectOrKeyId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 预算列表 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"] & {
+                        data?: {
+                            items: components["schemas"]["BotBudget"][];
+                        };
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    upsertBotBudget: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description API Key ID */
+                id: components["parameters"]["ProjectOrKeyId"];
+                period: "daily" | "monthly";
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BotBudgetUpsertRequest"];
+            };
+        };
+        responses: {
+            /** @description 保存后的预算与当前周期花费 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"] & {
+                        data?: components["schemas"]["BotBudget"];
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    deleteBotBudget: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description API Key ID */
+                id: components["parameters"]["ProjectOrKeyId"];
+                period: "daily" | "monthly";
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 删除成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listBotScheduleTaskBudgets: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description API Key ID */
+                id: components["parameters"]["ProjectOrKeyId"];
+                taskId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 预算列表 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"] & {
+                        data?: {
+                            items: components["schemas"]["BotBudget"][];
+                        };
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    upsertBotScheduleTaskBudget: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description API Key ID */
+                id: components["parameters"]["ProjectOrKeyId"];
+                taskId: string;
+                period: "daily" | "monthly";
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BotBudgetUpsertRequest"];
+            };
+        };
+        responses: {
+            /** @description 保存后的预算与当前周期花费 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"] & {
+                        data?: components["schemas"]["BotBudget"];
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    deleteBotScheduleTaskBudget: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description API Key ID */
+                id: components["parameters"]["ProjectOrKeyId"];
+                taskId: string;
+                period: "daily" | "monthly";
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 删除成功 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"];
                 };
             };
             401: components["responses"]["Unauthorized"];

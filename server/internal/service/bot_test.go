@@ -42,6 +42,10 @@ type fakeModelTurn struct {
 	Text      string
 	ToolCalls []fakeModelToolCall
 	Usage     *fakeModelUsage
+	// RawUsage 非 nil 时整体替换 usage chunk 的 JSON：测试 completion_tokens_details
+	// 与供应商非标准金额字段（cost / cost_details / total_cost 等，INT-164）
+	// 等 SDK 未建模的形状；与 Usage 互斥，RawUsage 优先。
+	RawUsage map[string]interface{}
 	// Hold 非 nil 时请求阻塞到该 channel 可读或请求 context 结束——测试用它
 	// 把「模型请求进行中」精确控制在时点上。
 	Hold <-chan struct{}
@@ -239,18 +243,22 @@ func newFakeModelServer(t *testing.T, turns ...fakeModelTurn) *fakeModelServer {
 		if !turn.NoFinish {
 			writeChunk(chunk("", nil, finish))
 		}
-		if turn.Usage != nil {
+		if turn.Usage != nil || turn.RawUsage != nil {
 			// cached_tokens 在 prompt_tokens_details 下（与上游 wire 格式一致）。
-			usageRaw, _ := json.Marshal(map[string]interface{}{
-				"id": "chatcmpl-test", "object": "chat.completion.chunk",
-				"created": 1700000000, "model": "fake-model",
-				"choices": []map[string]interface{}{},
-				"usage": map[string]interface{}{
+			usage := turn.RawUsage
+			if usage == nil {
+				usage = map[string]interface{}{
 					"prompt_tokens":         turn.Usage.Prompt,
 					"completion_tokens":     turn.Usage.Completion,
 					"total_tokens":          turn.Usage.Total,
 					"prompt_tokens_details": map[string]int64{"cached_tokens": turn.Usage.Cached},
-				},
+				}
+			}
+			usageRaw, _ := json.Marshal(map[string]interface{}{
+				"id": "chatcmpl-test", "object": "chat.completion.chunk",
+				"created": 1700000000, "model": "fake-model",
+				"choices": []map[string]interface{}{},
+				"usage":   usage,
 			})
 			writeChunk(string(usageRaw))
 		}

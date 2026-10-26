@@ -18,6 +18,9 @@ const (
 	// NotificationReviewRedeliveryFailed webhook 投递重投在上限内仍未送达
 	// （审查系统故障：这次推送不会被审查）。
 	NotificationReviewRedeliveryFailed NotificationKind = "review_redelivery_failed"
+	// NotificationBotBudgetThreshold 机器人或定时任务的周期预算越过告警阈值
+	// （INT-164）：只提示不停止运行，同一预算同一周期同一阈值只发一次。
+	NotificationBotBudgetThreshold NotificationKind = "bot_budget_threshold"
 )
 
 type Notification struct {

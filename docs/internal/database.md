@@ -27,6 +27,8 @@ Fast Ship 自身日志（INT-94）不在本库：独立 SQLite 文件 `logging.s
 
 另一类无外键的是**探测缓存表**：`bot_model_windows`（INT-115）按「规范化 API 地址 + 模型名」缓存模型窗口元数据，不指向任何 bot——多个机器人可共享同一上游，地址或模型变化后旧行自然失效（键不同），不随机器人删除级联，过期数据只影响一次多余的探测，不值得为其建引用关系。`context_window=0` 的行是探测失败的负缓存标记（`source="detect_failed"`，TTL 10 分钟，区别于成功行的 24 小时），能力解析只认 >0 的值，标记行只用于期内免白探。
 
+同样**有意对 bots/schedule_tasks 不建外键**的是按天花费汇总表（INT-164）：`bot_usage_daily` 与 `bot_usage_rollup_days` 的历史价值恰好在明细被级联清理之后——机器人删除前由 `Delete` 把全部日期（含今天的部分快照）汇总落盘，汇总行的 `bot_name`/`task_name` 是写入时快照。两张表只随 `users` 删除级联。`bot_schedule_task_names` 是任务名墓碑表：任务删除时把名字落这里（快照行本身可被替换/清空重建，活名也随删除消失），重算时经它取回已删任务名；只对任务删除路径写入，bot 删除事务内按 bot_id 顺手清理（不建级联外键）。其 (bot_id,date,kind,schedule_task_id) 唯一性不能靠普通复合 UNIQUE（SQLite 把 NULL 视为互不相同），用两条部分唯一索引分别覆盖 task_id 为空/非空两种形态；`bot_budgets` 的「目标二选一」同模式（check 约束 `(bot_id IS NOT NULL) != (schedule_task_id IS NOT NULL)` + 两条部分唯一索引），预算本身随目标删除级联清理是对的（已删 bot 不再有花费，历史告警留在通知里）。
+
 GORM 的坑：同一关联在 has-many/has-one（父侧）与 belongs-to（子侧）双侧声明时，生成的外键只取**父侧**字段的 `constraint` tag，belongs-to 侧写了也不生效。因此：
 
 - 双侧声明：两侧都写 `constraint:OnDelete:CASCADE`（如 `Issue.Comments` + `IssueComment.Issue`）。

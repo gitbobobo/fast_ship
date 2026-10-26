@@ -92,3 +92,81 @@ func TestEnsureBotSchemaDedupesRunningWaits(t *testing.T) {
 		t.Fatalf("EnsureBotSchema 后同键 running wait 必须被唯一索引拒绝")
 	}
 }
+
+// INT-164 存量修正：调度派发曾让 BotRun.created_at 落本地时区文本
+// （如 +08:00），与 UTC 窗口文本比较时被挡在窗口外。EnsureBotSchema 须把
+// 存量偏移行重写为 UTC 规范文本（瞬时不变、毫秒尾数保留）并作废受影响
+// bot 的汇总标记，幂等且不动规范行。
+func TestEnsureBotSchemaNormalizesRunCreatedAtOffsets(t *testing.T) {
+	dsn := "file:" + uuid.NewString() + "?mode=memory&cache=shared"
+	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open test db: %v", err)
+	}
+	if err := db.AutoMigrate(BotModels()...); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	// 先经模型插入合法行，再直写 created_at 文本模拟存量形态：+08:00 是
+	// 旧派发路径的实际落库结果（瞬时与 run-ok 相同）。
+	for _, row := range [][3]string{
+		{"run-tz", "bot-tz", "2026-10-20 20:16:07.891256+08:00"},
+		{"run-ok", "bot-ok", "2026-10-20 04:16:07.891256+00:00"},
+	} {
+		r := &model.BotRun{
+			ID: row[0], BotID: row[1], Status: model.BotRunStatusCompleted,
+			SessionKind: model.BotSessionKindSchedule, TriggerSource: model.BotTriggerSchedule,
+			TriggerKey: "tk-" + row[0], Summary: "",
+			CreatedAt:          time.Date(2026, 10, 20, 12, 16, 7, 0, time.UTC),
+			ConfigSnapshotJSON: "{}", TriggerContextJSON: "{}",
+		}
+		if err := db.Create(r).Error; err != nil {
+			t.Fatalf("seed %s: %v", row[0], err)
+		}
+		if err := db.Exec("UPDATE bot_runs SET created_at = ? WHERE id = ?", row[2], row[0]).Error; err != nil {
+			t.Fatalf("stamp %s: %v", row[0], err)
+		}
+	}
+	// 受影响 bot 已有覆盖标记与汇总行：标记作废重滚，规范行不动。
+	db.Exec(`INSERT INTO bot_usage_rollup_days
+		(user_id, bot_id, date, timezone, rolled_at, run_count, maint_run_count,
+		 request_count, maint_request_count, last_write_ns)
+		VALUES ('u1', 'bot-tz', '2026-10-20', 'Asia/Shanghai', '2026-10-21 00:00:00+00:00',
+			1, 0, 1, 0, 1)`)
+	db.Exec(`INSERT INTO bot_usage_rollup_days
+		(user_id, bot_id, date, timezone, rolled_at, run_count, maint_run_count,
+		 request_count, maint_request_count, last_write_ns)
+		VALUES ('u1', 'bot-ok', '2026-10-20', 'Asia/Shanghai', '2026-10-21 00:00:00+00:00',
+			1, 0, 1, 0, 1)`)
+
+	if err := EnsureBotSchema(db); err != nil {
+		t.Fatalf("EnsureBotSchema: %v", err)
+	}
+
+	var got string
+	if err := db.Raw("SELECT quote(created_at) FROM bot_runs WHERE id = 'run-tz'").Scan(&got).Error; err != nil {
+		t.Fatalf("read run-tz: %v", err)
+	}
+	if got != "'2026-10-20 12:16:07.891256+00:00'" {
+		t.Fatalf("+08:00 行应重写为同瞬时 UTC 文本，实得 %q", got)
+	}
+	if err := db.Raw("SELECT quote(created_at) FROM bot_runs WHERE id = 'run-ok'").Scan(&got).Error; err != nil {
+		t.Fatalf("read run-ok: %v", err)
+	}
+	if got != "'2026-10-20 04:16:07.891256+00:00'" {
+		t.Fatalf("规范行不应被改写，实得 %q", got)
+	}
+	var marks int64
+	db.Raw("SELECT COUNT(*) FROM bot_usage_rollup_days WHERE bot_id = 'bot-tz'").Scan(&marks)
+	if marks != 0 {
+		t.Fatalf("受影响 bot 的汇总标记应作废，剩 %d", marks)
+	}
+	db.Raw("SELECT COUNT(*) FROM bot_usage_rollup_days WHERE bot_id = 'bot-ok'").Scan(&marks)
+	if marks != 1 {
+		t.Fatalf("未受影响 bot 的标记不应被动，剩 %d", marks)
+	}
+	// 幂等：二次执行无副作用。
+	if err := EnsureBotSchema(db); err != nil {
+		t.Fatalf("二次 EnsureBotSchema 应幂等: %v", err)
+	}
+}

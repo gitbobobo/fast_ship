@@ -84,14 +84,14 @@ export default function NotificationsPage() {
             </p>
           </div>
         ) : (
-          <div className="overflow-hidden rounded-lg border">
-            <Table>
+          <div className="overflow-x-auto rounded-lg border">
+            <Table className="table-fixed">
               <TableHeader>
                 <TableRow>
-                  <TableHead>类型</TableHead>
+                  <TableHead className="w-[96px]">类型</TableHead>
                   <TableHead>内容</TableHead>
-                  <TableHead>时间</TableHead>
-                  <TableHead className="text-right">操作</TableHead>
+                  <TableHead className="w-[150px] whitespace-nowrap">时间</TableHead>
+                  <TableHead className="w-[96px] text-right">操作</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -128,8 +128,8 @@ function NotificationRow({
       <TableCell>
         <Badge variant="secondary">{notificationKindLabel(notification.kind)}</Badge>
       </TableCell>
-      <TableCell>
-        <p className="text-sm font-medium">
+      <TableCell className="min-w-0 whitespace-normal">
+        <p className="break-words text-sm font-medium">
           {unread && (
             <span
               className="mr-1.5 inline-block h-1.5 w-1.5 rounded-full bg-destructive align-middle"
@@ -139,10 +139,10 @@ function NotificationRow({
           {notification.title}
         </p>
         {notification.body && (
-          <p className="mt-0.5 text-xs text-muted-foreground">{notification.body}</p>
+          <p className="mt-0.5 break-words text-xs text-muted-foreground">{notification.body}</p>
         )}
       </TableCell>
-      <TableCell className="whitespace-nowrap text-sm text-muted-foreground">
+      <TableCell className="w-[140px] whitespace-nowrap text-sm text-muted-foreground">
         {formatDate(notification.updated_at)}
       </TableCell>
       <TableCell className="text-right">

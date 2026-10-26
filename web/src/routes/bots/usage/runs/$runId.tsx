@@ -9,6 +9,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Header } from "@/components/layout/header";
 import { ContextGrowthChart } from "@/components/bots/bot-usage-insights";
 import { errorText } from "@/lib/api/client";
+import { toolActionLabel } from "@/lib/bots/tool-labels";
 import type {
   BotUsageMaintenanceRequest,
   BotUsageMaintenanceRun,
@@ -26,7 +27,9 @@ import {
 /**
  * 单次运行花费明细（INT-162）：run 摘要 + 每次模型请求（含失败重试）及其
  * 工具调用 + 关联维护运行与请求。金额口径：display_cost = 自身已计价 +
- * 关联维护已计价；可空字段为「未计价」显示「—」。
+ * 关联维护已计价；可空字段为「未计价」显示「—」。请求行另带推理 token
+ * 与供应商返回的实际金额（INT-164）：前者供应商未返回显示「—」，后者
+ * 仅币别置信 USD 时由 API 透出，有值优先于目录估算展示。
  */
 
 const SESSION_KIND_LABELS: Record<string, string> = {
@@ -86,8 +89,29 @@ const TOOL_CALL_STATUS_LABELS: Record<string, string> = {
 const labelOf = (map: Record<string, string>, value: string) =>
   map[value] ?? value;
 
+/** 错误正文剥掉 [NNNNN] 码与行首重复的「工具 动作」前缀（技术名收进
+ * title 备查），剩余的是可读原因；「不接受参数 xxx」这类夹着内部参数名
+ * 的提示改写成纯中文。 */
+function toolErrorText(msg: string, tool: string, action?: string | null) {
+  let s = msg.replace(/^\[\d{5}\]\s*/, "");
+  for (const head of [
+    `工具 ${tool} `,
+    action ? `${tool} ${action} ` : "",
+    `${tool} `,
+  ]) {
+    if (head && s.startsWith(head)) {
+      s = s.slice(head.length);
+      break;
+    }
+  }
+  return s.replace(/不接受参数\s+\S+/g, "参数不被支持");
+}
+
 const formatTokens = (n: number | null | undefined) =>
   n == null ? "—" : n.toLocaleString("en-US");
+
+/** 供应商返回金额的展示口径说明：API 只透出币别置信 USD 的记录。 */
+const PROVIDER_COST_NOTE = "供应商 usage 返回的实际金额（USD）；无则按目录单价估算";
 
 /** 起止时间差的可读时长；缺任一端（未开始/进行中）显示「—」。 */
 function formatSpan(start: string | null | undefined, end: string | null | undefined) {
@@ -208,8 +232,12 @@ function RunSummary({
     { label: "触发", value: labelOf(TRIGGER_LABELS, run.trigger_source) },
     {
       label: "成本拆分",
-      value: `自身 ${formatUsageCost(run.cost_estimate)} + 维护 ${formatUsageCost(run.maintenance_cost)}`,
-      title: `display_cost = 本 run 已计价成本 + 关联维护已计价成本；${USAGE_PRICE_NOTE}`,
+      value: `自身 ${formatUsageCost(
+        run.display_cost != null
+          ? run.display_cost - (run.maintenance_cost ?? 0)
+          : run.cost_estimate,
+      )} + 维护 ${formatUsageCost(run.maintenance_cost)}`,
+      title: `自身 = display_cost − 维护（与头部总价同一实收优先口径）；${USAGE_PRICE_NOTE}`,
     },
     { label: "Token", value: tokenText },
     {
@@ -368,11 +396,51 @@ function RequestList({
   );
 }
 
+/**
+ * 请求成本槽位：供应商返回金额（provider_cost，API 仅在币别置信 USD 时
+ * 才有值）优先展示并打徽记；否则回落到目录估算 cost_estimate。
+ */
+function RequestCost({
+  providerCost,
+  costEstimate,
+}: {
+  providerCost: number | null | undefined;
+  costEstimate: number | null | undefined;
+}) {
+  if (providerCost != null) {
+    return (
+      <span
+        className="ml-auto flex items-center gap-1.5"
+        title={PROVIDER_COST_NOTE}
+        data-testid="usage-provider-cost"
+      >
+        <Badge variant="secondary" className="h-4 px-1.5 text-[10px]">
+          供应商返回
+        </Badge>
+        <span className="text-sm font-medium tabular-nums">
+          {formatUsageCost(providerCost)}
+        </span>
+      </span>
+    );
+  }
+  return (
+    <span
+      className="ml-auto text-sm font-medium tabular-nums"
+      title={
+        costEstimate != null ? USAGE_PRICE_NOTE : `未计价；${UNPRICED_REASON_NOTE}`
+      }
+    >
+      {formatUsageCost(costEstimate)}
+    </span>
+  );
+}
+
 function RequestRow({ request }: { request: BotUsageRequest }) {
   // usage 未收齐时实际计数不可信，只展示服务端估算列。合计口径：
-  // 输入（含其中缓存命中部分）+ 输出，各字段可直接相加自验。
+  // 输入（含其中缓存命中部分）+ 输出（含其中推理部分），各字段可直接
+  // 相加自验；推理 token 供应商未返回显示「—」（缺失 ≠ 0）。
   const actual = request.usage_complete
-    ? `输入 ${formatTokens(request.prompt_tokens)}（含缓存 ${formatTokens(request.cached_tokens)}）· 输出 ${formatTokens(request.completion_tokens)} · 合计 ${formatTokens(request.total_tokens)}`
+    ? `输入 ${formatTokens(request.prompt_tokens)}（含缓存 ${formatTokens(request.cached_tokens)}）· 输出 ${formatTokens(request.completion_tokens)}（含推理 ${formatTokens(request.reasoning_tokens)}）· 合计 ${formatTokens(request.total_tokens)}`
     : "usage 未收齐";
 
   return (
@@ -394,16 +462,10 @@ function RequestRow({ request }: { request: BotUsageRequest }) {
         <span className="text-xs text-muted-foreground">
           耗时 {formatSpan(request.started_at, request.finished_at)}
         </span>
-        <span
-          className="ml-auto text-sm font-medium tabular-nums"
-          title={
-            request.cost_estimate != null
-              ? USAGE_PRICE_NOTE
-              : `未计价；${UNPRICED_REASON_NOTE}`
-          }
-        >
-          {formatUsageCost(request.cost_estimate)}
-        </span>
+        <RequestCost
+          providerCost={request.provider_cost}
+          costEstimate={request.cost_estimate}
+        />
       </div>
       <p className="text-xs text-muted-foreground">
         估算输入 {formatTokens(request.input_tokens_estimate)} · {actual} ·
@@ -422,16 +484,31 @@ function RequestRow({ request }: { request: BotUsageRequest }) {
               key={call.id}
               className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground"
             >
-              <span className="font-mono text-foreground">
-                {call.tool_name}
-                {call.action ? `:${call.action}` : ""}
+              <span
+                className="text-foreground"
+                title={`${call.tool_name}${call.action ? `:${call.action}` : ""}`}
+              >
+                {toolActionLabel(call.tool_name, call.action)}
               </span>
-              <Badge variant="secondary" className="h-4 px-1.5 text-[10px]">
+              <Badge
+                variant={call.status === "failed" ? "destructive" : "secondary"}
+                className="h-4 px-1.5 text-[10px]"
+              >
                 {labelOf(TOOL_CALL_STATUS_LABELS, call.status)}
               </Badge>
               <span>耗时 {formatSpan(call.created_at, call.finished_at)}</span>
-              {call.error_code && (
-                <span className="text-destructive">{call.error_code}</span>
+              {(call.error_message || call.error_code) && (
+                // 与工具卡同口径：错误码进 title 备查，正文剥掉 [NNNNN] 前缀
+                // 与重复的工具名；历史行可能只有 error_code，无 message 时仍
+                // 露出码值。
+                <span
+                  title={call.error_code ?? undefined}
+                  className="basis-full text-destructive"
+                >
+                  {call.error_message
+                    ? toolErrorText(call.error_message, call.tool_name, call.action)
+                    : call.error_code}
+                </span>
               )}
             </li>
           ))}
@@ -510,12 +587,13 @@ function MaintenanceRequestRow({
       </Badge>
       <span>
         {request.usage_complete
-          ? `输入 ${formatTokens(request.prompt_tokens)}（含缓存 ${formatTokens(request.cached_tokens)}）· 输出 ${formatTokens(request.completion_tokens)}`
+          ? `输入 ${formatTokens(request.prompt_tokens)}（含缓存 ${formatTokens(request.cached_tokens)}）· 输出 ${formatTokens(request.completion_tokens)}（含推理 ${formatTokens(request.reasoning_tokens)}）`
           : "usage 未收齐"}
       </span>
-      <span className="ml-auto tabular-nums">
-        {formatUsageCost(request.cost_estimate)}
-      </span>
+      <RequestCost
+        providerCost={request.provider_cost}
+        costEstimate={request.cost_estimate}
+      />
       {request.error_message && (
         <span className="basis-full text-destructive">
           {request.error_code ? `${request.error_code}：` : ""}

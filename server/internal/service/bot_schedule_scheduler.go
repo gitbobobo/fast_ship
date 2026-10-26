@@ -205,7 +205,10 @@ func (s *BotService) dispatchDueScheduleTask(task *model.BotScheduleTask, now ti
 			TriggerKey:    botScheduleTriggerKey(current.ID, planned),
 			Status:        model.BotRunStatusRunning,
 			SessionKind:   model.BotSessionKindSchedule,
-			Summary:       "",
+			// CreatedAt 必须显式 UTC——交给 autoCreateTime 会落本地时区串，
+			// 与 UTC 存量的文本窗口比较（usage/汇总按 created_at 归窗）错位。
+			CreatedAt: now,
+			Summary:   "",
 			// 密钥与 base_url 成对冻结：派发后用户换地址又换密钥时，
 			// 不能把新密钥发往旧地址（运行结尾直接用这份密文）。
 			APIKeyEncryptedSnapshot: append([]byte(nil), botRow.APIKeyEncrypted...),

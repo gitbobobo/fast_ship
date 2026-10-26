@@ -77,6 +77,10 @@ type BotService struct {
 	// maintJobs 是全局单一维护队列（夜间整理）；compaction 走主线不入队。
 	maintJobs chan botMaintJob
 	maintOnce sync.Once
+
+	// budgetKick 在 usage 落账后轻量触发一次预算评估（INT-164）：容量 1
+	// 起合并作用，写路径只发信号不背评估成本；60s tick 是兜底节拍。
+	budgetKick chan struct{}
 }
 
 type botMaintJob struct {
@@ -116,6 +120,7 @@ func NewBotService(
 		streamHub:  newBotStreamHub(),
 		waits:      map[string]*botWaitEntry{},
 		waitCfg:    defaultBotWaitEvalConfig(),
+		budgetKick: make(chan struct{}, 1),
 	}
 }
 
@@ -447,62 +452,44 @@ func (s *BotService) Update(userID, botID string, req *UpdateBotRequest) (*BotRe
 	return &resp, nil
 }
 
-// Delete 有活动 run 或未终结调用时返回冲突：先显式处理，避免静默丢任务。
-// pending_confirmation / queued 的调用也算未终结（rejected/cancelled 等终态
-// 不算）。冲突检查与删除在同一事务内：发送准入（NextMessageSeqTx 取号）与
-// 删除天然串行，先删则并发发送因 bot 缺失失败，先入账则删除撞活动 run。
+// Delete 有活动 run、未终结调用或未消费输入时返回冲突：先显式处理，避免
+// 静默丢任务。pending_confirmation / queued 的调用与 finished_at 为空的
+// 维护运行都算未终结（rejected/cancelled 等终态不算）。删除前先把该 bot
+// 的按天花费汇总补齐（INT-164）：事务外 rollupBotUsageRange 覆盖历史缺口
+// 与今天的部分快照（失败中止删除——历史宁可不删也不丢）；删除事务内再补
+// 事务期间新脏的日期与今天，然后把汇总行的名称快照统一刷成删除时的最终名。
+// 汇总行不对 bots 建外键，级联删除不伤历史。
 func (s *BotService) Delete(userID, botID string) error {
+	// 事务外预检（只读）：明知冲突就不白跑一遍汇总。
+	if err := s.botDeleteConflicts(s.db, userID, botID); err != nil {
+		return err
+	}
+	if err := s.rollupBotUsageRange(botID); err != nil {
+		s.logger.Warn("删除前补齐花费汇总失败", zap.String("bot_id", botID), zap.Error(err))
+		return errs.ErrInternal
+	}
+	nowFn := s.now // 闭包内要现取时间；绑成函数值后调用是局部调用，且不丢测试时钟注入。
 	txErr := s.db.Transaction(func(tx *gorm.DB) error {
-		if _, err := repository.NewBotRepository(tx).FindByIDAndUser(botID, userID); err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return errs.ErrBotNotFound
-			}
-			return errs.ErrInternal
+		if err := s.botDeleteConflicts(tx, userID, botID); err != nil {
+			return err
 		}
-		if _, err := repository.NewBotRunRepository(tx).FindActiveByBot(botID); err == nil {
-			return errs.ErrBotDeleteConflict
-		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
-			return errs.ErrInternal
-		}
-		// 定时任务 run 不占主线槽，删除时同样视为进行中：避免级联删除一个
-		// 正在执行的会话。
-		var activeSchedule int64
-		if err := tx.Model(&model.BotRun{}).
-			Where("bot_id = ? AND finished_at IS NULL AND session_kind = ?",
-				botID, model.BotSessionKindSchedule).
-			Count(&activeSchedule).Error; err != nil {
-			return errs.ErrInternal
-		}
-		if activeSchedule > 0 {
-			return errs.ErrBotDeleteConflict
-		}
-		active, err := repository.NewBotToolCallRepository(tx).ListByBot(botID, []string{
-			string(model.BotCallStatusPendingConfirmation),
-			string(model.BotCallStatusQueued),
-			string(model.BotCallStatusRunning),
-		}, 1)
+		bot, err := repository.NewBotRepository(tx).FindByIDAndUser(botID, userID)
 		if err != nil {
 			return errs.ErrInternal
 		}
-		if len(active) > 0 {
-			return errs.ErrBotDeleteConflict
-		}
-		// 未消费输入也算冲突：消息事务已提交但 run 尚未由调度异步创建，
-		// 此时删除会把刚受理的消息级联掉，而发送方已拿到成功响应。判定用
-		// 真实的输入消息（user/lifecycle）——后台结果等非输入消息也占
-		// seq，裸水位比较会永远冲突。
-		var bot struct {
-			OfferedInputSeq int64
-		}
-		if err := tx.Raw("SELECT offered_input_seq FROM bots WHERE id = ?", botID).Scan(&bot).Error; err != nil {
+		// 事务内再补今天与事务期间新脏的日期：全部查询走 tx（生产连接池
+		// 单连接，事务内用 s.db 会自锁）。now 在闭包内现取——事务排队等锁
+		// 期间可能跨过当地午夜，用排队前的时间会把新一天的明细漏在汇总外。
+		if err := s.rollupBotDaysTx(tx, bot, nowFn()); err != nil {
+			s.logger.Warn("删除事务内补齐花费汇总失败", zap.String("bot_id", botID), zap.Error(err))
 			return errs.ErrInternal
 		}
-		hasNew, err := repository.NewBotMessageRepository(tx).HasModelInputSinceTx(tx, botID, model.BotSessionKindMain, "", bot.OfferedInputSeq)
-		if err != nil {
+		if err := repository.NewBotUsageRollupRepository(tx).StampBotNameTx(tx, botID, bot.Name); err != nil {
 			return errs.ErrInternal
 		}
-		if hasNew {
-			return errs.ErrBotDeleteConflict
+		// 任务名墓碑随 bot 清理：汇总已归档且不会再有重算，墓碑成了死重。
+		if err := tx.Where("bot_id = ?", botID).Delete(&model.BotScheduleTaskName{}).Error; err != nil {
+			return errs.ErrInternal
 		}
 		if err := repository.NewBotRepository(tx).Delete(botID); err != nil {
 			return errs.ErrInternal
@@ -511,6 +498,75 @@ func (s *BotService) Delete(userID, botID string) error {
 	})
 	if txErr != nil {
 		return txErr
+	}
+	return nil
+}
+
+// botDeleteConflicts 检查删除冲突；db 是调用方所在的连接/事务句柄——事务
+// 内复检必须传 tx（生产连接池单连接，混用句柄会自锁）。
+func (s *BotService) botDeleteConflicts(db *gorm.DB, userID, botID string) error {
+	if _, err := repository.NewBotRepository(db).FindByIDAndUser(botID, userID); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return errs.ErrBotNotFound
+		}
+		return errs.ErrInternal
+	}
+	if _, err := repository.NewBotRunRepository(db).FindActiveByBot(botID); err == nil {
+		return errs.ErrBotDeleteConflict
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return errs.ErrInternal
+	}
+	// 定时任务 run 不占主线槽，删除时同样视为进行中：避免级联删除一个
+	// 正在执行的会话。
+	var activeSchedule int64
+	if err := db.Model(&model.BotRun{}).
+		Where("bot_id = ? AND finished_at IS NULL AND session_kind = ?",
+			botID, model.BotSessionKindSchedule).
+		Count(&activeSchedule).Error; err != nil {
+		return errs.ErrInternal
+	}
+	if activeSchedule > 0 {
+		return errs.ErrBotDeleteConflict
+	}
+	// 进行中的维护运行同样算冲突：维护 run 记账与父 run/快照配套，删掉
+	// bot 会把一条还在写的账本级联掉。
+	var activeMaint int64
+	if err := db.Model(&model.BotMaintenanceRun{}).
+		Where("bot_id = ? AND finished_at IS NULL", botID).
+		Count(&activeMaint).Error; err != nil {
+		return errs.ErrInternal
+	}
+	if activeMaint > 0 {
+		return errs.ErrBotDeleteConflict
+	}
+	active, err := repository.NewBotToolCallRepository(db).ListByBot(botID, []string{
+		string(model.BotCallStatusPendingConfirmation),
+		string(model.BotCallStatusQueued),
+		string(model.BotCallStatusRunning),
+	}, 1)
+	if err != nil {
+		return errs.ErrInternal
+	}
+	if len(active) > 0 {
+		return errs.ErrBotDeleteConflict
+	}
+	// 未消费输入也算冲突：消息事务已提交但 run 尚未由调度异步创建，
+	// 此时删除会把刚受理的消息级联掉，而发送方已拿到成功响应。判定用
+	// 真实的输入消息（botInputKinds：user/background_result/schedule_event，
+	// 预算告警这类 lifecycle 输出不挡删除）——非输入消息也占 seq，裸水位
+	// 比较会永远冲突。
+	var bot struct {
+		OfferedInputSeq int64
+	}
+	if err := db.Raw("SELECT offered_input_seq FROM bots WHERE id = ?", botID).Scan(&bot).Error; err != nil {
+		return errs.ErrInternal
+	}
+	hasNew, err := repository.NewBotMessageRepository(db).HasModelInputSinceTx(db, botID, model.BotSessionKindMain, "", bot.OfferedInputSeq)
+	if err != nil {
+		return errs.ErrInternal
+	}
+	if hasNew {
+		return errs.ErrBotDeleteConflict
 	}
 	return nil
 }

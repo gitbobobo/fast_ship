@@ -37,5 +37,7 @@ export function notificationKindLabel(kind: NotificationKind): string {
       return "工作区回收失败";
     case "review_redelivery_failed":
       return "投递重投失败";
+    case "bot_budget_threshold":
+      return "预算告警";
   }
 }

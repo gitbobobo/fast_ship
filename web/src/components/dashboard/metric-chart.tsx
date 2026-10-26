@@ -649,24 +649,28 @@ function StackedSeriesChart({
                 ))
               : coordinates.map((point, pointIndex) => (
                   <g key={`col-${pointIndex}`}>
-                    {point.stacks.map(
-                      (stack) =>
-                        stack.value > 0 && (
-                          <rect
-                            key={stack.id}
-                            x={point.x - columnWidth / 2}
-                            y={stack.yTop}
-                            width={columnWidth}
-                            height={Math.max(stack.yBottom - stack.yTop, 0)}
-                            fill={stack.color}
-                            opacity={
-                              hoveredIndex === null || hoveredIndex === pointIndex
-                                ? 1
-                                : 0.4
-                            }
-                          />
-                        ),
-                    )}
+                    {point.stacks.map((stack) => {
+                      if (stack.value <= 0) return null;
+                      // 非零分段至少 2px：小额系列被大额压到亚像素时仍可见；
+                      // 贴基线的分段改为自基线向上，避免压过轴线。
+                      const top = Math.min(stack.yTop, baselineY - 2);
+                      const height = Math.max(stack.yBottom - stack.yTop, 2);
+                      return (
+                        <rect
+                          key={stack.id}
+                          x={point.x - columnWidth / 2}
+                          y={top}
+                          width={columnWidth}
+                          height={height}
+                          fill={stack.color}
+                          opacity={
+                            hoveredIndex === null || hoveredIndex === pointIndex
+                              ? 1
+                              : 0.4
+                          }
+                        />
+                      );
+                    })}
                   </g>
                 ))}
 
