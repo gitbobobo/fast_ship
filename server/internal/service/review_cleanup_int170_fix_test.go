@@ -462,3 +462,169 @@ func TestCleanupAggregateTruncatesAtLimitPlusOne(t *testing.T) {
 		t.Fatalf("截断应保留最老的 %d 条: got %q", reviewStageBatch, note.Body)
 	}
 }
+
+// TestCleanupRegistryCounterResetsOnSuccess（复审 P1）登记错误计数按「连续
+// 失败」计：中途一次成功读必须复位，否则 branch_pending 这类生命周期无
+// 上限的行会被跨天瞬时抖动累计成永久 failed。
+func TestCleanupRegistryCounterResetsOnSuccess(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	env := createT3TestEnv(t, e.svc.db, e.user.ID, "env-rst")
+	createTestT3Binding(t, e.svc.db, e.project.ID, env.ID, "t3p")
+
+	run := seedBranchPendingRow(t, e, repo, 500, env, "br-rst", now)
+	t3 := &fakeReviewT3{
+		listErr:  errors.New("registry flaky"),
+		refNames: []string{"br-rst"},
+	}
+	review := e.withT3(t3, nil, nil)
+
+	// 两次瞬时登记错误：计数涨到 2。
+	review.cleanupRunWorktree(run, now)
+	review.cleanupRunWorktree(run, now.Add(2*time.Hour))
+	if got := review.worktreeTries[run.ID+"|"+worktreeTryRegistry]; got != 2 {
+		t.Fatalf("两次错误后 registry 计数 = %d, want 2", got)
+	}
+
+	// 登记读成功（分支仍在，保持 pending）：计数必须复位。
+	t3.listErr = nil
+	review.cleanupRunWorktree(run, now.Add(4*time.Hour))
+	if got := review.worktreeTries[run.ID+"|"+worktreeTryRegistry]; got != 0 {
+		t.Fatalf("登记读成功后 registry 计数 = %d, want 0（连续失败语义）", got)
+	}
+	var mid model.ReviewRun
+	e.svc.db.First(&mid, "id = ?", run.ID)
+	if mid.WorktreeState != model.ReviewWorktreeBranchPending {
+		t.Fatalf("成功后状态 = %q, want branch_pending", mid.WorktreeState)
+	}
+
+	// 再一次瞬时错误：只算 1 次连续失败，不得 failed。
+	t3.listErr = errors.New("registry flaky again")
+	review.cleanupRunWorktree(run, now.Add(6*time.Hour))
+	var after model.ReviewRun
+	e.svc.db.First(&after, "id = ?", run.ID)
+	if after.WorktreeState == model.ReviewWorktreeFailed {
+		t.Fatalf("累计语义把瞬时抖动误判成永久失败, reason = %q", after.WorktreeReason)
+	}
+	if got := review.worktreeTries[run.ID+"|"+worktreeTryRegistry]; got != 1 {
+		t.Fatalf("恢复后又一次错误计数 = %d, want 1", got)
+	}
+}
+
+// TestCleanupRecoverUncertainPublishesPriorKey（复审 P2）remove_uncertain 行
+// 恢复时旧原因键的聚合通知必须收缩：reason 在 recoverFromPending 已清，
+// 不在这里重发旧键，清单会永远滞留本运行。
+func TestCleanupRecoverUncertainPublishesPriorKey(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	env := createT3TestEnv(t, e.svc.db, e.user.ID, "env-unc")
+	createTestT3Binding(t, e.svc.db, e.project.ID, env.ID, "t3p")
+
+	// A：已 failed 的 remove_uncertain 行（通知来源）；B：恢复中的行。
+	runA := e.seedCleanableRun(t, repo, 510, env, model.ReviewRunFailed, "/wt/a", now)
+	e.svc.db.Model(runA).Updates(map[string]any{
+		"worktree_state":  model.ReviewWorktreeFailed,
+		"worktree_reason": worktreeReasonRemoveUncertain,
+		"worktree_error":  "删除结果不可见",
+	})
+	runB := e.seedCleanableRun(t, repo, 511, env, model.ReviewRunFailed, "/wt/b", now)
+	e.svc.db.Model(runB).Updates(map[string]any{
+		"worktree_reason": worktreeReasonRemoveUncertain,
+		"worktree_error":  "删除结果不可见",
+	})
+	runB.WorktreeReason = worktreeReasonRemoveUncertain
+
+	t3 := &fakeReviewT3{
+		threadWorktrees: map[string]T3ThreadWorktree{
+			runB.ThreadID: {Path: "/wt/b", Branch: ""},
+		},
+		worktrees: []T3Worktree{{Path: "/wt/b", RefNames: []string{"br-b"}}},
+	}
+	review := e.withT3(t3, nil, nil)
+
+	// 既有通知：清单含 A、B 两行（A 的 failed 触发了聚合发布）。
+	review.publishCleanupAggregate(runA, worktreeReasonRemoveUncertain, now)
+	var note model.Notification
+	e.svc.db.First(&note, "kind = ? AND user_id = ?", model.NotificationReviewCleanupFailed, e.user.ID)
+	if !strings.Contains(note.Body, runA.ID[:8]) || !strings.Contains(note.Body, runB.ID[:8]) {
+		t.Fatalf("恢复前清单应含 A、B: %q", note.Body)
+	}
+
+	// B 恢复：登记读成功 → recoverFromPending 清 reason 并重发旧键；随后
+	// 工作树步删除、分支空 → removed。
+	review.cleanupRunWorktree(runB, now)
+	var afterB model.ReviewRun
+	e.svc.db.First(&afterB, "id = ?", runB.ID)
+	if afterB.WorktreeState != model.ReviewWorktreeRemoved {
+		t.Fatalf("B 恢复后状态 = %q, want removed", afterB.WorktreeState)
+	}
+	e.svc.db.First(&note, "kind = ? AND user_id = ?", model.NotificationReviewCleanupFailed, e.user.ID)
+	if strings.Contains(note.Body, runB.ID[:8]) {
+		t.Fatalf("B 恢复后仍滞留在受影响清单: %q", note.Body)
+	}
+	if !strings.Contains(note.Body, runA.ID[:8]) {
+		t.Fatalf("A 的失败行应仍在清单: %q", note.Body)
+	}
+}
+
+// TestCleanupBranchPendingLateWorktreeReclaimed（复审 Note）T3 建 worktree
+// 滞后于首轮回收（首轮按 path 空只判分支进 pending）：复查发现登记出绑定
+// 本分支的 worktree 时回到完整回收链路——写回路径转 none，下 tick 走归属
+// 核验删除后分支仍在仍回 branch_pending。行内路径与绑定路径不同的歧义
+// 场景保持 pending 不删。
+func TestCleanupBranchPendingLateWorktreeReclaimed(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	env := createT3TestEnv(t, e.svc.db, e.user.ID, "env-late")
+	createTestT3Binding(t, e.svc.db, e.project.ID, env.ID, "t3p")
+
+	run := seedBranchPendingRow(t, e, repo, 520, env, "br-late", now)
+	t3 := &fakeReviewT3{
+		threadWorktrees: map[string]T3ThreadWorktree{
+			run.ThreadID: {Path: "/wt/late", Branch: "br-late"},
+		},
+		worktrees: []T3Worktree{{Path: "/wt/late", RefNames: []string{"br-late"}}},
+		refNames:  []string{"br-late"},
+	}
+	review := e.withT3(t3, nil, nil)
+
+	// 复查：登记出绑定本分支的 worktree → 路径写回 + 转 none。
+	review.cleanupRunWorktree(run, now)
+	var mid model.ReviewRun
+	e.svc.db.First(&mid, "id = ?", run.ID)
+	if mid.WorktreeState != model.ReviewWorktreeNone || mid.WorktreePath != "/wt/late" {
+		t.Fatalf("迟到 worktree 应回填路径并转 none, got %q/%q", mid.WorktreeState, mid.WorktreePath)
+	}
+
+	// 下 tick：完整链路（投影路径一致 → 归属核验 → 删除 → 分支仍在 →
+	// branch_pending）。
+	review.cleanupRunWorktree(&mid, now.Add(time.Second))
+	var after model.ReviewRun
+	e.svc.db.First(&after, "id = ?", run.ID)
+	if len(t3.removed) != 1 || t3.removed[0] != "/wt/late" {
+		t.Fatalf("removed = %v, want 删除迟到的 /wt/late", t3.removed)
+	}
+	if after.WorktreeState != model.ReviewWorktreeBranchPending {
+		t.Fatalf("工作树删后分支仍在 = %q, want branch_pending", after.WorktreeState)
+	}
+
+	// 歧义场景：行内已有路径、登记绑定的是另一路径的 worktree → 保持
+	// pending，不动任何东西。
+	run2 := seedBranchPendingRow(t, e, repo, 521, env, "br-amb", now.Add(-time.Minute))
+	e.svc.db.Model(run2).Updates(map[string]any{"worktree_path": "/wt/ours-gone"})
+	run2.WorktreePath = "/wt/ours-gone"
+	t3.worktrees = []T3Worktree{{Path: "/wt/foreign", RefNames: []string{"br-amb"}}}
+	t3.refNames = []string{"br-amb"}
+	review.cleanupRunWorktree(run2, now.Add(2*time.Hour))
+	var after2 model.ReviewRun
+	e.svc.db.First(&after2, "id = ?", run2.ID)
+	if after2.WorktreeState != model.ReviewWorktreeBranchPending {
+		t.Fatalf("绑定路径与行内不同的歧义 worktree = %q, want branch_pending 不删", after2.WorktreeState)
+	}
+	if len(t3.removed) != 1 {
+		t.Fatalf("歧义 worktree 不得删除, removed = %v", t3.removed)
+	}
+}

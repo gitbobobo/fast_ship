@@ -509,7 +509,10 @@ func (s *ReviewService) cleanupWithRegistry(ctx context.Context, run *model.Revi
 		return
 	}
 	// 登记读成功：待确认态（registry_incomplete / remove_uncertain）解除——
-	// 清行内原因与计数并刷新旧原因键的聚合通知（受影响清单收缩）。
+	// 清行内原因与计数并刷新旧原因键的聚合通知（受影响清单收缩）。登记错误
+	// 计数同步清零：重试宽限按「连续失败」计，中途成功必须复位，否则常驻
+	// pending 行会被跨天瞬时抖动累计成永久 failed。
+	s.resetWorktreeTries(run.ID, worktreeTryRegistry)
 	s.recoverFromPending(run, now)
 
 	if path != "" && !s.worktreeStep(ctx, run, path, branch, cwd, reg, now, finish) {
@@ -560,9 +563,9 @@ func (s *ReviewService) handleRegistryReadError(run *model.ReviewRun, err error,
 
 // recoverFromPending 登记读成功后清除行内的待确认原因（INT-170）：计数按
 // 「连续」语义清零（registry_incomplete 的重试宽限重新起算）。登记可读即
-// 该原因确实解除，重发一次聚合通知刷新受影响清单；remove_uncertain 只做
-// 清账不重发——它只是重发删除前的准备，真正的恢复通知由终态转移（finish）
-// 处理，每个退避轮都发一次会让通知在「待确认↔已恢复」间来回翻新正文。
+// 该原因确实解除，重发一次聚合通知刷新受影响清单——两条待确认原因都发：
+// reason 在这里已清掉，不补发旧键，它的受影响清单会永远滞留本运行（发布面
+// 已处理「键不存在且清单为空→跳过」，不为从未发布的键造恢复通知）。
 // remove_uncertain 的计数不清——它的上限跨越多个「登记成功」的 tick，清了
 // 就永远到不了终态。
 func (s *ReviewService) recoverFromPending(run *model.ReviewRun, now time.Time) {
@@ -577,7 +580,11 @@ func (s *ReviewService) recoverFromPending(run *model.ReviewRun, now time.Time) 
 	// 退避排程按 prior reason 一并清（INT-170）：恢复后再入同一待确认态时从
 	// 起步间隔重新爬梯，不接着半截阶梯跳档。
 	s.clearWorktreeBackoff(run.ID, prior)
-	if prior == worktreeReasonRegistryIncomplete {
+	// 旧原因键的聚合通知重发收缩清单（INT-170 复审修订：remove_uncertain 同
+	// 样需要——reason 在本函数已清掉，finish 读不到 prior，这里不重发该键
+	// 的受影响清单会永远滞留本运行）。发布面已处理「键不存在且清单为空
+	// →跳过」，不会为从未发布的键造恢复通知。
+	if prior != "" {
 		s.publishCleanupAggregate(run, prior, now)
 	}
 }
@@ -611,6 +618,8 @@ func (s *ReviewService) worktreeStep(ctx context.Context, run *model.ReviewRun, 
 		finish(model.ReviewWorktreeFailed, worktreeReasonRegistryError, err.Error(), true)
 		return false
 	}
+	// 归属核验读成功同样复位连续失败计数（与登记读共用 worktreeTryRegistry）。
+	s.resetWorktreeTries(run.ID, worktreeTryRegistry)
 	switch verdict {
 	case worktreeGone:
 		return true
@@ -703,6 +712,36 @@ func (s *ReviewService) recheckBranchPending(ctx context.Context, run *model.Rev
 		}
 		s.finishWorktreeCleanup(run, model.ReviewWorktreeFailed, worktreeReasonRegistryError,
 			"复查分支登记失败: "+err.Error(), true, now)
+		return
+	}
+	// 登记读成功复位连续失败计数：branch_pending 行生命周期无上限，瞬时抖动
+	// 不reset会跨天累计成永久 failed。
+	s.resetWorktreeTries(run.ID, worktreeTryRegistry)
+	// T3 建 worktree 可能滞后于首次回收（首轮按 path 空直接判分支进 pending）：
+	// 登记出现绑定本分支的 worktree 项时回到完整回收链路处理——行内无路径先按
+	// 「空才补」写回（写失败保持待复查），随后转 none 让下个 tick 走归属核验+
+	// 删除+分支步（核验与删除仍同源，不在这里直接删）。行内已有快照路径时：
+	// 同一路径说明回收链曾走到过这步（或路径被删后重现），转 none 由完整核验
+	// 决定；不同路径则归属不明，保持 pending 不删。
+	for _, w := range reg.Worktrees {
+		if !slices.Contains(w.RefNames, run.WorktreeBranch) {
+			continue
+		}
+		if run.WorktreePath == "" {
+			res := s.db.Model(&model.ReviewRun{}).
+				Where("id = ? AND (worktree_path = '' OR worktree_path IS NULL)", run.ID).
+				Updates(map[string]any{"worktree_path": w.Path, "updated_at": now})
+			if res.Error != nil || res.RowsAffected == 0 {
+				s.logger.Warn("补登记迟到的回收工作区路径失败，保持待复查",
+					zap.String("run", run.ID), zap.Error(res.Error))
+				s.scheduleWorktreeBackoff(run.ID, worktreeReasonBranchPending, now)
+				return
+			}
+			run.WorktreePath = w.Path
+		} else if run.WorktreePath != w.Path {
+			continue
+		}
+		s.finishWorktreeCleanup(run, model.ReviewWorktreeNone, "", "", false, now)
 		return
 	}
 	if reg.HasRef(run.WorktreeBranch) {
