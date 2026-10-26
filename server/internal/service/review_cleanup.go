@@ -241,21 +241,23 @@ func (s *ReviewService) archiveRunThread(run *model.ReviewRun, now time.Time) {
 		if tries := s.bumpWorktreeTries(run.ID, worktreeTryArchive); tries < reviewWorktreeMaxTries {
 			return
 		}
-		// 超限：先落 archived_at 防无限重试；回收终态（含旧原因键刷新与聚合
-		// 通知）统一走 finishWorktreeCleanup。已回收完（removed）的行不再回填
-		// 失败原因；视觉运行无工作区可清，工作区状态保持 none，只落原因供
-		// 聚合清单查询（不落行的运行不会出现在清单里）。
-		s.db.Model(&model.ReviewRun{}).Where("id = ? AND archived_at IS NULL", run.ID).
-			Updates(map[string]any{"archived_at": now, "updated_at": now})
-		if run.WorktreeState == model.ReviewWorktreeRemoved {
-			return
-		}
+		// 超限：archived_at 与回收终态必须同一笔写（codex 复审）——先落
+		// archived_at 再写失败态，第二步失败会留下「已归档标记 + state=none」
+		// 的半截行，下轮 cleanup 把标记当已归档删掉未归档线程的工作区。写失
+		// 败则整段下轮重走（archived_at 仍空、计数未释放，重试序列不断）。
+		// 已回收完（removed）的行不回填失败原因；视觉运行无工作区可清，工作
+		// 区状态保持 none，只落原因供聚合清单查询。
 		msg := "线程归档失败: " + err.Error() + "，工作区回收未执行"
-		state := model.ReviewWorktreeNone
-		if run.Kind == model.ReviewKindCode {
-			state = model.ReviewWorktreeFailed
+		state, reason, notify := run.WorktreeState, "", false
+		if state != model.ReviewWorktreeRemoved {
+			reason, notify = worktreeReasonArchiveFailed, true
+			state = model.ReviewWorktreeNone
+			if run.Kind == model.ReviewKindCode {
+				state = model.ReviewWorktreeFailed
+			}
 		}
-		s.finishWorktreeCleanup(run, state, worktreeReasonArchiveFailed, msg, true, now)
+		s.finishWorktreeCleanupExtra(run, state, reason, msg, notify, now,
+			map[string]any{"archived_at": now})
 	}
 }
 
@@ -351,7 +353,17 @@ type worktreeFinish func(state model.ReviewWorktreeState, reason, errMsg string,
 // archiveRunThread 的超限终态都走这里——手写 Updates+release+publish 的分叉
 // 会把「刷新旧原因键」漏掉，同一裂缝以后还会再漏。
 func (s *ReviewService) finishWorktreeCleanup(run *model.ReviewRun, state model.ReviewWorktreeState, reason, errMsg string, notify bool, now time.Time) {
+	s.finishWorktreeCleanupExtra(run, state, reason, errMsg, notify, now, nil)
+}
+
+// finishWorktreeCleanupExtra 与 finishWorktreeCleanup 相同，额外把 extra 列
+// 并入同一笔 Updates——archived_at 这类前置标记必须与终态原子落账，分开
+// 写会留下半截状态（codex 复审）。
+func (s *ReviewService) finishWorktreeCleanupExtra(run *model.ReviewRun, state model.ReviewWorktreeState, reason, errMsg string, notify bool, now time.Time, extra map[string]any) {
 	updates := map[string]any{"worktree_state": state, "updated_at": now}
+	for k, v := range extra {
+		updates[k] = v
+	}
 	if state == model.ReviewWorktreeRemoved {
 		// 恢复即清账：原因与错误不残留，聚合查询也不会再算上这行。
 		updates["worktree_error"] = ""
