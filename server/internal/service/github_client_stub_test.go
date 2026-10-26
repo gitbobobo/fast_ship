@@ -119,6 +119,10 @@ func (stubGitHubClient) PathExistsAtRef(context.Context, int64, string, string, 
 	return false, stubErr("PathExistsAtRef")
 }
 
+func (stubGitHubClient) ListPullRequestFiles(context.Context, int64, string, int) ([]string, bool, error) {
+	return nil, false, stubErr("ListPullRequestFiles")
+}
+
 func (stubGitHubClient) ListIssueCommentsForPR(context.Context, int64, string, int) ([]githubapi.IssueComment, error) {
 	return nil, stubErr("ListIssueCommentsForPR")
 }

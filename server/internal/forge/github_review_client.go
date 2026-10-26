@@ -73,6 +73,10 @@ func (c *GitHubReviewClient) GetPullRequestDiff(ctx context.Context, repoFullNam
 	return diff, err
 }
 
+func (c *GitHubReviewClient) ListPullRequestFiles(ctx context.Context, repoFullName string, number int) ([]string, bool, error) {
+	return c.api.ListPullRequestFiles(ctx, c.installationID, repoFullName, number)
+}
+
 func (c *GitHubReviewClient) ListReviewComments(ctx context.Context, repoFullName string, number int) ([]ReviewComment, error) {
 	list, err := c.api.ListReviewComments(ctx, c.installationID, repoFullName, number)
 	if err != nil {

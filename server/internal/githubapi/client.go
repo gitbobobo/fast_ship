@@ -58,6 +58,10 @@ type GitHubClient interface {
 	// INT-169 审查结果文件归属校验）。true=存在（blob/tree/commit 条目均可），
 	// 不存在→false；tree 响应截断且未命中时报错（无法判定，不猜不存在）。
 	PathExistsAtRef(ctx context.Context, installationID int64, repoFullName, path, ref string) (bool, error)
+	// ListPullRequestFiles PR 变更文件清单（GET pulls/N/files 分页）：rename
+	// 两侧（filename+previous_filename）都收，去重。complete=false 表示清单
+	// 被平台封顶截断（GitHub 3000 文件上限）——缺席不能当不存在证据。
+	ListPullRequestFiles(ctx context.Context, installationID int64, repoFullName string, number int) (paths []string, complete bool, err error)
 }
 
 // githubHTTP GitHub 调用的共享客户端。Timeout 是 ctx 缺失时的兜底；调用方
@@ -604,6 +608,54 @@ func (c *restClient) PathExistsAtRef(ctx context.Context, installationID int64, 
 		return false, fmt.Errorf("%w: 无法判定 %q 是否存在", ErrTreeTruncated, path)
 	}
 	return false, nil
+}
+
+// pullRequestFileWire pulls/N/files 元素：status=renamed 时 previous_filename
+// 是旧路径（「不该删它」类 finding 指向旧名，两侧都收）。
+type pullRequestFileWire struct {
+	Filename         string `json:"filename"`
+	PreviousFilename string `json:"previous_filename"`
+}
+
+// prFilesHardCap GitHub files 端点硬封顶：单 PR 最多返回 3000 个文件，
+// 打满即按不完整清单处理（缺席不作否决证据）。
+const prFilesHardCap = 3000
+
+// ListPullRequestFiles 分页拉 PR 变更文件清单（每页 100）。平台对超大 PR 的
+// diff 文本可能无标记截断——否决类证据必须用这份权威分页清单。
+func (c *restClient) ListPullRequestFiles(ctx context.Context, installationID int64, repoFullName string, number int) ([]string, bool, error) {
+	owner, name, err := splitRepo(repoFullName)
+	if err != nil {
+		return nil, false, err
+	}
+	seen := map[string]bool{}
+	var paths []string
+	add := func(p string) {
+		if p != "" && !seen[p] {
+			seen[p] = true
+			paths = append(paths, p)
+		}
+	}
+	for page := 1; ; page++ {
+		var items []pullRequestFileWire
+		err := c.withToken(ctx, installationID, func(bearer string) error {
+			return c.h.doJSON(ctx, http.MethodGet,
+				fmt.Sprintf("/repos/%s/%s/pulls/%d/files?per_page=100&page=%d", owner, name, number, page), bearer, nil, &items)
+		})
+		if err != nil {
+			return nil, false, err
+		}
+		for _, f := range items {
+			add(f.Filename)
+			add(f.PreviousFilename)
+		}
+		if len(items) < 100 {
+			return paths, true, nil
+		}
+		if len(paths) >= prFilesHardCap {
+			return paths, false, nil
+		}
+	}
 }
 
 func (c *restClient) CreateCommitStatus(ctx context.Context, installationID int64, repoFullName, sha, state, statusContext, description, targetURL string) error {

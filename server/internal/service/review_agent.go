@@ -498,6 +498,11 @@ func (s *ReviewService) AgentSubmitResult(ctx context.Context, runID string, bod
 				Update("consumed_at", now)
 			return s.markPRSyncPendingByRepoTx(tx, run.IntegrationID, run.ProjectID, run.RepoFullName, run.PRNumber, now)
 		})
+		// TOCTOU：事务提交后、返回作废错误前并发完全相同重放可能已落库
+		// （CAS 不匹配不会改坏状态）——再复核一次，命中按幂等成功返回。
+		if completedReplay() {
+			return nil
+		}
 		return errs.ErrReviewHeadChanged
 	}
 	if !prReviewable(pr) || (pr.HeadSHA != "" && !strings.EqualFold(pr.HeadSHA, run.HeadSHA)) {
@@ -618,16 +623,17 @@ func (s *ReviewService) AgentSubmitResult(ctx context.Context, runID string, bod
 // 逐个在运行 head_sha 的树中查存在性（同一路径去重，去重后上限 64 条——
 // 每个唯一路径一次平台调用，需要整体预算）。不存在 → 40004 要求核对
 // 审查对象；平台调用失败 → 50200（调用方可重交）。树未命中的路径再用
-// 本轮 PR diff 文件列表兜底一次：PR 删除/重命名走的文件仍是合法审查
+// 本轮 PR 变更文件清单兜底一次：PR 删除/重命名走的文件仍是合法审查
 // 对象（「不该删这个文件」指向的正是已删文件本身），只在 head 树与
-// diff 里都查不到才算路径错误。diff 超本端读入上限被截断时路径集不
-// 完整——缺席不再是有效证据，树未命中路径放行并 Warn 记录。
+// 变更清单里都查不到才算路径错误。清单来自分页 files 端点而非 diff 文本
+// ——平台对超大 PR 的 diff 可能无标记静默截断，不能当否决证据；清单
+// 本身不完整（如 GitHub 3000 文件封顶）时缺席同样不作否决，放行并 Warn。
 const findingFileCheckLimit = 64
 
 func (s *ReviewService) checkFindingFilesInTree(ctx context.Context, client forge.ReviewClient, run *model.ReviewRun, findings []api.ReviewCodeFinding) error {
 	seen := map[string]bool{}
-	var diffSet map[string]bool
-	diffTried, diffComplete := false, true
+	var prFiles map[string]bool
+	filesTried, filesComplete := false, true
 	for i, f := range findings {
 		if seen[f.File] {
 			continue
@@ -639,7 +645,7 @@ func (s *ReviewService) checkFindingFilesInTree(ctx context.Context, client forg
 		exists, err := client.PathExistsAtRef(ctx, run.RepoFullName, f.File, run.HeadSHA)
 		if err != nil {
 			if errors.Is(err, forge.ErrTreeTruncated) {
-				// 树条目截断：「不在截断清单内」不等于不存在——与 diff
+				// 树条目截断：「不在截断清单内」不等于不存在——与清单
 				// 兜底不可证同口径放行并 Warn，不按调用失败把合法提交
 				// 卡成永久 50200（重试只拿到同一份截断树）。
 				s.logger.Warn("审查文件归属树响应截断，路径存在性不可判定，放行",
@@ -654,225 +660,30 @@ func (s *ReviewService) checkFindingFilesInTree(ctx context.Context, client forg
 		if exists {
 			continue
 		}
-		if !diffTried {
-			diffTried = true
-			diffSet, diffComplete, err = s.diffFilePaths(ctx, client, run)
+		if !filesTried {
+			filesTried = true
+			var paths []string
+			paths, filesComplete, err = client.ListPullRequestFiles(ctx, run.RepoFullName, run.PRNumber)
 			if err != nil {
 				return errs.New(errs.ErrGitHubAPI.Code, "校验 findings 文件归属失败: "+err.Error())
 			}
-			if !diffComplete {
-				s.logger.Warn("审查文件归属兜底证据不完整，树未命中路径按可采信放行",
+			prFiles = map[string]bool{}
+			for _, p := range paths {
+				prFiles[p] = true
+			}
+			if !filesComplete {
+				s.logger.Warn("审查文件归属兜底清单不完整，树未命中路径按可采信放行",
 					zap.String("run_id", run.ID),
 					zap.String("repo", run.RepoFullName),
 					zap.Int("pr", run.PRNumber),
 				)
 			}
 		}
-		if diffComplete && !diffSet[f.File] {
+		if filesComplete && !prFiles[f.File] {
 			return reviewResultErr("findings[%d].file %q 在 head %s 的仓库树中不存在，请核对审查对象后重交", i, f.File, reviewShortSHA(run.HeadSHA))
 		}
 	}
 	return nil
-}
-
-// diffFilePaths 本轮 PR diff 中涉及的文件路径集（旧名与新名都算）：
-// `--- a/`、`+++ b/`、`rename from/to` 行解析；/dev/null 与引号路径做
-// 最小清理。给树未命中的 finding 做存在性兜底。complete=false 表示 diff
-// 超出本端读入上限被截断——路径集不完整，缺席不能当不存在的证据。
-func (s *ReviewService) diffFilePaths(ctx context.Context, client forge.ReviewClient, run *model.ReviewRun) (map[string]bool, bool, error) {
-	diff, err := client.GetPullRequestDiff(ctx, run.RepoFullName, run.PRNumber)
-	if err != nil {
-		if forge.IsDiffTooLarge(err) {
-			return nil, false, nil
-		}
-		return nil, false, err
-	}
-	// 只在文件头区块解析 ---/+++/rename 行（diff --git 之后、首个 @@ hunk
-	// 之前）：被删除行原文若以 `-- a/` 开头会渲染成 `--- a/foo`，在 hunk
-	// 体内——不能当路径收（虚增存在性证据会削弱校验本意）。
-	paths := map[string]bool{}
-	inHeader := false
-	// diff --git 头的解析结果先暂存：未引号头按两侧等值切分时，若本块
-	// 实为重命名（header 行如 `a/a b/z b/a b/z`），等值解是伪路径——
-	// 块内见到 rename from/to 行即弃，真实端点由 rename 行提供。
-	var pendingA, pendingB string
-	flushPending := func() {
-		if pendingA != "" {
-			paths[pendingA] = true
-		}
-		if pendingB != "" {
-			paths[pendingB] = true
-		}
-		pendingA, pendingB = "", ""
-	}
-	for _, line := range strings.Split(diff, "\n") {
-		if strings.HasPrefix(line, "diff --git ") {
-			flushPending()
-			inHeader = true
-			// diff --git 头本身覆盖无 hunk 文件（二进制、纯 mode 变更、
-			// 无文本块的删除），两侧路径都收。
-			pendingA, pendingB = diffGitHeaderPaths(line[len("diff --git "):])
-			continue
-		}
-		if strings.HasPrefix(line, "@@") {
-			flushPending()
-			inHeader = false
-			continue
-		}
-		if !inHeader {
-			continue
-		}
-		switch {
-		case strings.HasPrefix(line, "--- "), strings.HasPrefix(line, "+++ "):
-			if p := diffSidePath(line[4:]); p != "" {
-				paths[p] = true
-			}
-		case strings.HasPrefix(line, "rename from "):
-			pendingA, pendingB = "", ""
-			if p := unquoteDiffPath(strings.TrimSpace(line[len("rename from "):])); p != "" {
-				paths[p] = true
-			}
-		case strings.HasPrefix(line, "rename to "):
-			pendingA, pendingB = "", ""
-			if p := unquoteDiffPath(strings.TrimSpace(line[len("rename to "):])); p != "" {
-				paths[p] = true
-			}
-		}
-	}
-	flushPending()
-	return paths, true, nil
-}
-
-// diffGitHeaderPaths 解析 `diff --git` 行两侧路径：含特殊字符时 git 把
-// a//b/ 前缀一并包进整段引号 `"a/x y" "b/x y"`——先去引号再剥前缀。
-// 未引号形态 git 不对空格引号，路径本身可含 ` b/`（如 images b/x.png），
-// 首个 ` b/` 不一定是分界——非重命名两侧同路径，枚举 ` b/` 分割点取
-// 两侧等值解；重命名两侧不同路径本就由 rename from/to 行覆盖，不解析。
-func diffGitHeaderPaths(rest string) (string, string) {
-	if strings.HasPrefix(rest, `"`) {
-		qa, rem, ok := quotedToken(rest)
-		if !ok {
-			return "", ""
-		}
-		qb, _, ok := quotedToken(strings.TrimSpace(rem))
-		if !ok {
-			return "", ""
-		}
-		return stripDiffAB(unquoteDiffPath(qa)), stripDiffAB(unquoteDiffPath(qb))
-	}
-	if !strings.HasPrefix(rest, "a/") {
-		return "", ""
-	}
-	body := rest[2:] // PATH b/PATH：非重命名两侧同路径
-	for i := strings.Index(body, " b/"); i > 0; {
-		if body[:i] == body[i+3:] {
-			return body[:i], body[:i]
-		}
-		n := strings.Index(body[i+1:], " b/")
-		if n < 0 {
-			break
-		}
-		i += 1 + n
-	}
-	return "", ""
-}
-
-// diffSidePath 解析 ---/+++ 行尾路径：token 是 a/x、b/x、/dev/null 或整段
-// 引号 "a/x y"（引号内才含前缀）。返回仓库相对路径；/dev/null 与无法识别
-// 返回空串。
-func diffSidePath(tok string) string {
-	p := stripDiffAB(unquoteDiffPath(strings.TrimSpace(tok)))
-	if p == "" || p == "/dev/null" {
-		return ""
-	}
-	return p
-}
-
-// stripDiffAB 剥路径前的 a//b/ 段标记（diff --git 与 ---/+++ 行用）。
-func stripDiffAB(p string) string {
-	if strings.HasPrefix(p, "a/") || strings.HasPrefix(p, "b/") {
-		return p[2:]
-	}
-	return p
-}
-
-// quotedToken 取以 " 开头的引号串（内层 \" 跳过），返回含引号的 token、
-// 剩余串与是否闭合；s 不以 " 开头或不闭合返回 ok=false。
-func quotedToken(s string) (tok, rest string, ok bool) {
-	if !strings.HasPrefix(s, `"`) {
-		return "", s, false
-	}
-	for i := 1; i < len(s); i++ {
-		switch s[i] {
-		case '\\':
-			i++
-		case '"':
-			return s[:i+1], s[i+1:], true
-		}
-	}
-	return "", s, false
-}
-
-// unquoteDiffPath git core.quotePath 的 C 风格引号还原：整段 "..." 去引号，
-// 还原 \\、\"、\NNN 三位八进制字节（非 ASCII 路径形态）与 \a \b \f \n \r
-// \t \v 具名转义（git 对控制字符用具名而非八进制）。非引号形态原样返回；
-// 不闭合或不可识别的转义按字面保留——匹配不上按缺席处理，不会误放。
-func unquoteDiffPath(p string) string {
-	if len(p) < 2 || p[0] != '"' || p[len(p)-1] != '"' {
-		return p
-	}
-	body := p[1 : len(p)-1]
-	var sb strings.Builder
-	sb.Grow(len(body))
-	for i := 0; i < len(body); i++ {
-		c := body[i]
-		if c != '\\' || i+1 >= len(body) {
-			sb.WriteByte(c)
-			continue
-		}
-		i++
-		n := body[i]
-		if n == '\\' || n == '"' {
-			sb.WriteByte(n)
-			continue
-		}
-		// git 对控制字符用具名转义而非八进制（quote.c 的 sq_lookup 表）。
-		if c := diffNamedEscape(n); c != 0 {
-			sb.WriteByte(c)
-			continue
-		}
-		if n >= '0' && n <= '7' && i+2 < len(body) &&
-			body[i+1] >= '0' && body[i+1] <= '7' && body[i+2] >= '0' && body[i+2] <= '7' {
-			sb.WriteByte((n-'0')<<6 | (body[i+1]-'0')<<3 | (body[i+2] - '0'))
-			i += 2
-			continue
-		}
-		sb.WriteByte('\\')
-		sb.WriteByte(n)
-	}
-	return sb.String()
-}
-
-// diffNamedEscape git 具名转义表（quote.c 对控制字符用具名而非八进制）；
-// 非具名转义字符返回 0。
-func diffNamedEscape(n byte) byte {
-	switch n {
-	case 'a':
-		return '\a'
-	case 'b':
-		return '\b'
-	case 'f':
-		return '\f'
-	case 'n':
-		return '\n'
-	case 'r':
-		return '\r'
-	case 't':
-		return '\t'
-	case 'v':
-		return '\v'
-	}
-	return 0
 }
 
 // decodeStrict 严格反序列化：未知字段与类型错误一律 40004。

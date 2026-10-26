@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -180,6 +181,41 @@ func TestPathExistsAtRefOversizedTree(t *testing.T) {
 	_, err := c.PathExistsAtRef(context.Background(), 1, "octocat/hw", "bigdir/f.go", "sha-x")
 	if !errors.Is(err, ErrTreeTruncated) {
 		t.Fatalf("oversized tree = %v, want ErrTreeTruncated", err)
+	}
+}
+
+// ListPullRequestFiles 分页收口 + rename 两侧收录 + 3000 封顶判不完整。
+func TestListPullRequestFiles(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		page := r.URL.Query().Get("page")
+		w.Header().Set("Content-Type", "application/json")
+		switch page {
+		case "1":
+			// 满页：rename 的 previous_filename 也要收。
+			items := `[{"filename":"new.go","previous_filename":"old.go","status":"renamed"}`
+			for i := 0; i < 99; i++ {
+				items += fmt.Sprintf(`,{"filename":"f%d.go","status":"modified"}`, i)
+			}
+			_, _ = w.Write([]byte(items + "]"))
+		default:
+			_, _ = w.Write([]byte(`[{"filename":"tail.go","status":"removed"}]`))
+		}
+	}))
+	defer ts.Close()
+
+	c := NewClient(&fakeAuth{token: "t"}, ts.URL)
+	paths, complete, err := c.ListPullRequestFiles(context.Background(), 1, "octocat/hw", 9)
+	if err != nil || !complete {
+		t.Fatalf("paths=%v complete=%v err=%v", paths, complete, err)
+	}
+	set := map[string]bool{}
+	for _, p := range paths {
+		set[p] = true
+	}
+	for _, want := range []string{"new.go", "old.go", "f0.go", "tail.go"} {
+		if !set[want] {
+			t.Fatalf("missing %q in %v", want, paths)
+		}
 	}
 }
 

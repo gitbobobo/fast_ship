@@ -45,6 +45,9 @@ type Fake struct {
 	nextID           int64
 	diffText         string
 	diffErr          error
+	prFiles          []string
+	prFilesComplete  bool
+	prFilesErr       error
 
 	// InstallationID ResolveInstallation 返回的固定安装 id（默认 1）；
 	// 置 <=0 表示不支持解析（返回错误）。
@@ -83,17 +86,18 @@ type FakeCall struct {
 
 func NewFake() *Fake {
 	return &Fake{
-		prs:            map[string]map[int]*githubapi.PullRequest{},
-		comments:       map[string]map[int][]fakeComment{},
-		reviews:        map[string][]fakeComment{},
-		repoErrs:       map[string]error{},
-		prErrs:         map[string]error{},
-		treePaths:      map[string]map[string]map[string]bool{},
-		treeErrs:       map[string]error{},
-		hookPayloads:   map[int64]json.RawMessage{},
-		diffText:       "diff --git a/main.go b/main.go\n+func main() {}\n",
-		nextID:         1000,
-		InstallationID: 1,
+		prs:             map[string]map[int]*githubapi.PullRequest{},
+		comments:        map[string]map[int][]fakeComment{},
+		reviews:         map[string][]fakeComment{},
+		repoErrs:        map[string]error{},
+		prErrs:          map[string]error{},
+		treePaths:       map[string]map[string]map[string]bool{},
+		treeErrs:        map[string]error{},
+		hookPayloads:    map[int64]json.RawMessage{},
+		diffText:        "diff --git a/main.go b/main.go\n+func main() {}\n",
+		prFilesComplete: true,
+		nextID:          1000,
+		InstallationID:  1,
 	}
 }
 
@@ -144,6 +148,35 @@ func (f *Fake) SetDiffError(err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.diffErr = err
+}
+
+// SetPRFiles 覆盖 PR 变更文件清单（默认 complete=true）。
+func (f *Fake) SetPRFiles(paths ...string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.prFiles = paths
+	f.prFilesComplete = true
+	f.prFilesErr = nil
+}
+
+// SetPRFilesResult 覆盖清单内容与完整性/错误（不完整清单与失败注入）。
+func (f *Fake) SetPRFilesResult(paths []string, complete bool, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.prFiles = paths
+	f.prFilesComplete = complete
+	f.prFilesErr = err
+}
+
+// ListPullRequestFiles GitHubClient 实现：返回 SetPRFiles(SetPRFilesResult) 的注入面。
+func (f *Fake) ListPullRequestFiles(ctx context.Context, installationID int64, repoFullName string, number int) ([]string, bool, error) {
+	f.record("ListPullRequestFiles", repoFullName, number, "")
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.prFilesErr != nil {
+		return nil, false, f.prFilesErr
+	}
+	return append([]string(nil), f.prFiles...), f.prFilesComplete, nil
 }
 
 // SetDiff 覆盖固定 diff 文本。

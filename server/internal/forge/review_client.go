@@ -20,6 +20,11 @@ type ReviewClient interface {
 	// GetPullRequestDiff err 为 ErrDiffTooLarge 时返回值是尽量读到的前缀
 	// （可能为空）——前缀仍是真实内容，调用方按不完整件处置。
 	GetPullRequestDiff(ctx context.Context, repoFullName string, number int) (string, error)
+	// ListPullRequestFiles PR 变更文件清单（rename 旧名+新名都含，去重）：
+	// 分页端点的权威证据——平台对超大 PR 的 diff 文本可能无标记截断，
+	// 否决类判定不得用 diff 文本。complete=false 表示清单被平台封顶
+	// （如 GitHub 3000 文件上限），缺席不能当不存在证据。
+	ListPullRequestFiles(ctx context.Context, repoFullName string, number int) (paths []string, complete bool, err error)
 	ListReviewComments(ctx context.Context, repoFullName string, number int) ([]ReviewComment, error)
 	// ListIssueCommentsForPR PR 会话评论（review 行内之外的顶层讨论，INT-135
 	// 历史上下文用）。

@@ -89,9 +89,9 @@ func TestAgentSubmitResultFindingFileAttribution(t *testing.T) {
 	}
 }
 
-// TestAgentSubmitResultDeletedFileFindings head 树未命中的路径用本轮
-// diff 兜底：PR 删除/重命名走的文件仍是合法审查对象（r2 P2）；
-// 既不在树也不在 diff 的路径照旧 40004。
+// TestAgentSubmitResultDeletedFileFindings head 树未命中的路径用本轮 PR
+// 变更文件清单兜底：PR 删除/重命名走的文件仍是合法审查对象（r2 P2）；
+// 既不在树也不在清单里的路径照旧 40004。
 func TestAgentSubmitResultDeletedFileFindings(t *testing.T) {
 	e := newReviewEngineEnv(t)
 	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
@@ -104,11 +104,10 @@ func TestAgentSubmitResultDeletedFileFindings(t *testing.T) {
 		RepoFullName: repo, PRNumber: 27, ProjectID: e.project.ID, UserID: e.user.ID,
 		InstallationID: 42, HeadSHA: "sha-d", RoundNumber: 1, UpdatedAt: now,
 	})
-	// 树里只有 a.go；diff 记录 gone.go 被删除、old.go→new.go 重命名。
+	// 树里只有 a.go；变更清单记录 gone.go 被删除、old.go→new.go 重命名
+	// （files 端点两侧都收：filename=new.go、previous_filename=old.go）。
 	e.fake.SetTreeFiles(repo, "sha-d", "a.go", "new.go")
-	e.fake.SetDiff("diff --git a/gone.go b/gone.go\ndeleted file mode 100644\n" +
-		"--- a/gone.go\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n" +
-		"diff --git a/old.go b/new.go\nsimilarity index 90%\nrename from old.go\nrename to new.go\n")
+	e.fake.SetPRFiles("gone.go", "old.go", "new.go")
 
 	run := e.seedRun(t, repo, 27, "sha-d", model.ReviewRunRunning, now)
 	e.svc.db.Create(&model.ReviewRunToken{
@@ -132,11 +131,10 @@ func TestAgentSubmitResultDeletedFileFindings(t *testing.T) {
 	}
 }
 
-// TestAgentSubmitResultDiffTooLargeInconclusive diff 超本端读入上限被截断
-// 时树未命中路径的「不在 diff 集」不再是有效缺席证据（r3 codex P2）——
-// 放行完成而非 40004/50200 卡死（重试只会拿到同一份截断 diff）；非截断
-// 类 diff 拉取失败仍按 50200 平台失败上报。
-func TestAgentSubmitResultDiffTooLargeInconclusive(t *testing.T) {
+// TestAgentSubmitResultFilesListInconclusive PR 变更文件清单不完整（平台
+// 封顶截断）时树未命中路径的「不在清单内」不是有效缺席证据——放行完成
+// 而非 40004/50200 卡死；清单拉取失败仍按 50200 平台失败上报。
+func TestAgentSubmitResultFilesListInconclusive(t *testing.T) {
 	e := newReviewEngineEnv(t)
 	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
 	now := time.Now().UTC()
@@ -156,21 +154,20 @@ func TestAgentSubmitResultDiffTooLargeInconclusive(t *testing.T) {
 	})
 	body := `{"findings":[{"level":"P1","file":"gone.go","body":"不该删除此文件"}],"prior":[],"summary":"s","ui_changed":false,"ui_changed_since_last_visual":false}`
 
-	// 非截断类 diff 失败 → 50200，运行与令牌零副作用。
-	e.fake.SetDiffError(errors.New("boom"))
+	// 清单拉取失败 → 50200，运行与令牌零副作用。
+	e.fake.SetPRFilesResult(nil, false, errors.New("boom"))
 	err := e.review.AgentSubmitResult(context.Background(), run.ID, []byte(body))
 	assertErrCode(t, err, 50200)
 	var mid model.ReviewRun
 	e.svc.db.First(&mid, "id = ?", run.ID)
 	if mid.Status != model.ReviewRunRunning {
-		t.Fatalf("status = %q, diff fetch failure must not change run", mid.Status)
+		t.Fatalf("status = %q, files list failure must not change run", mid.Status)
 	}
 
-	// 截断（ErrBodyTooLarge→适配器归一为 ErrDiffTooLarge）→ 兜底不可证，
-	// 树未命中路径放行，运行正常完成。
-	e.fake.SetDiffError(githubapi.ErrBodyTooLarge)
+	// 清单不完整（封顶截断）→ 兜底不可证，树未命中路径放行，运行正常完成。
+	e.fake.SetPRFilesResult([]string{"a.go"}, false, nil)
 	if err := e.review.AgentSubmitResult(context.Background(), run.ID, []byte(body)); err != nil {
-		t.Fatalf("truncated diff must not reject unverifiable path: %v", err)
+		t.Fatalf("incomplete files list must not reject unverifiable path: %v", err)
 	}
 	var after model.ReviewRun
 	e.svc.db.First(&after, "id = ?", run.ID)
@@ -222,10 +219,11 @@ func TestAgentSubmitResultTreeTruncatedInconclusive(t *testing.T) {
 	}
 }
 
-// TestAgentSubmitResultDiffParseEdges diff 兜底解析边界（r4 P2+Note）：
-// 整段引号路径（"a/x y"）要去引号再剥前缀；diff --git 头覆盖无 hunk
-// 文件（二进制/纯删除）；hunk 体内形似 `--- a/` 的被删内容行不收。
-func TestAgentSubmitResultDiffParseEdges(t *testing.T) {
+// TestAgentSubmitResultFilesListFallback 树未命中路径的清单兜底边界
+// （r10 P2 改源）：含空格/控制字符/分隔符形态的路径不再经 diff 文本
+// 解析——files 端点清单原样收（含 rename 的 previous_filename 旧名），
+// 清单外的伪造路径照旧 40004。
+func TestAgentSubmitResultFilesListFallback(t *testing.T) {
 	e := newReviewEngineEnv(t)
 	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
 	now := time.Now().UTC()
@@ -238,34 +236,15 @@ func TestAgentSubmitResultDiffParseEdges(t *testing.T) {
 		InstallationID: 42, HeadSHA: "sha-e", RoundNumber: 1, UpdatedAt: now,
 	})
 	e.fake.SetTreeFiles(repo, "sha-e", "keep.go")
-	// 引号删除文件、具名转义路径（\t）、无 hunk 的二进制删除（仅 diff --git
-	// 头可见）、hunk 体内一行被删内容恰以 `-- a/` 开头（不能当路径收）。
-	e.fake.SetDiff(
-		"diff --git \"a/dir/gone file.go\" \"b/dir/gone file.go\"\n" +
-			"deleted file mode 100644\nindex 1..0\n" +
-			"--- \"a/dir/gone file.go\"\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n" +
-			"diff --git \"a/x\\ty.go\" \"b/x\\ty.go\"\n" +
-			"deleted file mode 100644\nindex 1..0\n" +
-			"--- \"a/x\\ty.go\"\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n" +
-			"diff --git a/bin.dat b/bin.dat\n" +
-			"deleted file mode 100644\nBinary files a/bin.dat and /dev/null differ\n" +
-			"diff --git a/images b/logo.png b/images b/logo.png\n" +
-			"deleted file mode 100644\nBinary files a/images b/logo.png and /dev/null differ\n" +
-			// 重命名 a → z b/a b/z：未引号头的等值切分在第 2 个 ` b/` 处会
-			// 命中伪路径 a b/z——块内 rename from/to 行才是真实端点。
-			"diff --git a/a b/z b/a b/z\n" +
-			"similarity index 90%\nrename from a\nrename to z b/a b/z\n" +
-			"diff --git a/keep.go b/keep.go\nindex a..b\n" +
-			"--- a/keep.go\n+++ b/keep.go\n@@ -1,2 +1,1 @@\n--- a/fake.go\n keep\n",
-	)
+	// 已删/重命名走的特殊字符路径：清单原样收录即可受理，无解析歧义面。
+	e.fake.SetPRFiles("dir/gone file.go", "x\ty.go", "images b/logo.png", "a", "z b/a b/z", "bin.dat")
 
 	run := e.seedRun(t, repo, 32, "sha-e", model.ReviewRunRunning, now)
 	e.svc.db.Create(&model.ReviewRunToken{
 		RunID: run.ID, TokenHash: "h-edge", CreatedAt: now, ExpiresAt: now.Add(time.Hour),
 	})
 
-	// hunk 体内的形似路径行不收 → fake.go 仍 40004；重命名头的等值切分
-	// 伪路径 a b/z 同样不收（真实端点是 rename 行的 a 与 z b/a b/z）。
+	// 清单外的伪造路径 → 40004。
 	for _, badFile := range []string{"fake.go", "a b/z"} {
 		bad := `{"findings":[{"level":"P1","file":"` + badFile + `","body":"x"}],"prior":[],"summary":"s","ui_changed":false,"ui_changed_since_last_visual":false}`
 		err := e.review.AgentSubmitResult(context.Background(), run.ID, []byte(bad))
@@ -273,11 +252,10 @@ func TestAgentSubmitResultDiffParseEdges(t *testing.T) {
 			t.Fatalf("fake path %q = %v, want 40004 核对审查对象", badFile, err)
 		}
 	}
-	// 引号路径、具名转义路径、含 ` b/` 的未引号路径、仅见 diff --git 头的
-	// 二进制删除文件与重命名新路径（含 ` b/`）均受理。
+	// 清单内路径（含特殊字符、rename 两侧、二进制）均受理。
 	good := `{"findings":[{"level":"P1","file":"dir/gone file.go","body":"不该删除"},{"level":"P2","file":"x\ty.go","body":"含 tab 的删除文件"},{"level":"P2","file":"images b/logo.png","body":"路径含 b/ 的删除文件"},{"level":"P2","file":"z b/a b/z","body":"重命名新路径"},{"level":"P2","file":"bin.dat","body":"二进制文件删除影响下载"}],"prior":[],"summary":"s","ui_changed":false,"ui_changed_since_last_visual":false}`
 	if err := e.review.AgentSubmitResult(context.Background(), run.ID, []byte(good)); err != nil {
-		t.Fatalf("quoted/binary deleted paths must be accepted: %v", err)
+		t.Fatalf("deleted/renamed list paths must be accepted: %v", err)
 	}
 	var after model.ReviewRun
 	e.svc.db.First(&after, "id = ?", run.ID)

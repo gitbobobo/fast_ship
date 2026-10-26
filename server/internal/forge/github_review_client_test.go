@@ -105,6 +105,11 @@ func (r *recordingAPI) GetRepository(_ context.Context, installationID int64, _ 
 	return r.repoErr
 }
 
+func (r *recordingAPI) ListPullRequestFiles(_ context.Context, installationID int64, _ string, _ int) ([]string, bool, error) {
+	r.inst = append(r.inst, installationID)
+	return nil, true, nil
+}
+
 func (r *recordingAPI) PathExistsAtRef(_ context.Context, installationID int64, _, _, _ string) (bool, error) {
 	r.mark(installationID)
 	return r.pathExists, r.pathErr

@@ -213,6 +213,53 @@ func (c *ForgejoReviewClient) GetPullRequestDiff(ctx context.Context, repoFullNa
 	return string(data), nil
 }
 
+// forgejoPRFileWire pulls/N/files 元素：rename 的 previous_filename 是旧路径。
+type forgejoPRFileWire struct {
+	Filename         string `json:"filename"`
+	PreviousFilename string `json:"previous_filename"`
+}
+
+// forgejoPRFilesPage 单页大小与封顶口径：与 GitHub 3000 文件上限同形，
+// 打满按不完整清单处理（缺席不作否决证据）。
+const forgejoPRFilesPage = 100
+const forgejoPRFilesHardCap = 3000
+
+// ListPullRequestFiles 分页拉 PR 变更文件清单（GET pulls/N/files）：rename
+// 两侧都收并去重；否决类判定用这份分页清单而不是 diff 文本——平台对超大
+// PR 的 diff 可能无标记截断。
+func (c *ForgejoReviewClient) ListPullRequestFiles(ctx context.Context, repoFullName string, number int) ([]string, bool, error) {
+	repo, err := repoPath(repoFullName)
+	if err != nil {
+		return nil, false, err
+	}
+	seen := map[string]bool{}
+	var paths []string
+	add := func(p string) {
+		if p != "" && !seen[p] {
+			seen[p] = true
+			paths = append(paths, p)
+		}
+	}
+	for page := 1; ; page++ {
+		var items []forgejoPRFileWire
+		err := c.do(ctx, http.MethodGet,
+			"/repos/"+repo+"/pulls/"+strconv.Itoa(number)+"/files?limit="+strconv.Itoa(forgejoPRFilesPage)+"&page="+strconv.Itoa(page), nil, &items)
+		if err != nil {
+			return nil, false, err
+		}
+		for _, f := range items {
+			add(f.Filename)
+			add(f.PreviousFilename)
+		}
+		if len(items) < forgejoPRFilesPage {
+			return paths, true, nil
+		}
+		if len(paths) >= forgejoPRFilesHardCap {
+			return paths, false, nil
+		}
+	}
+}
+
 // forgejoReviewExpandMax 单次 ListReviewComments 展开评论的已提交 review
 // 数上限：逐 review 再分页没有总约束时，review 数百上千的 PR 会把一次调用
 // 放大到上万请求，拖垮同步预算与实例配额。超上限保留最新段——最新 review

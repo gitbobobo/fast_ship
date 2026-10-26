@@ -517,20 +517,16 @@ Agent 执行，服务端的 run 强校验是兜底。
 `PathExistsAtRef` 核对在本轮 `head_sha` 树中存在——实现走非递归
 `git/trees/{ref}:{dir}` 取父目录条目精确匹配末段名（contents API 的 2xx
 会把目录/符号链接/子模块混进来，不严格；Forgejo 侧无 `ref:path` 语法，
-走 contents 端点）；树未命中再用本轮 PR diff 文件列表兜底一次——PR
+走 contents 端点）；树未命中再用本轮 PR 变更文件清单兜底一次——PR
 删除/重命名走的文件仍是合法审查对象（「不该删它」指向的正是已删文件），
-只在树与 diff 都查不到才拒。diff 路径集在文件头区块解析（`diff --git`
-之后、首个 `@@` 之前）：`diff --git` 头本身覆盖无 hunk 文件（二进制、
-纯 mode 变更、无文本块的删除），整段引号路径（`"a/x y"`）先去引号再剥
-`a/`/`b/` 前缀，hunk 体内形似 `--- a/` 的被删内容行不收。未引号头的
-两侧路径按等值切分（路径可含 ` b/`）；切分结果先暂存——块内出现
-`rename from/to` 行即弃（重命名头的等值解可能是伪路径，真实端点以
-rename 行为准），块结束才提交。不完整证据
-不作缺席证明——三种形态：PR diff 超本端读入上限（GitHub 64 MiB /
-Forgejo 64 MB 截断探测，归一为 `IsDiffTooLarge`）时路径集不完整；
+只在树与清单都查不到才拒。清单来自 `pulls/N/files` 分页端点（rename 的
+`filename`+`previous_filename` 两侧都收）——平台对超大 PR 的 diff 文本
+可能无标记静默截断，否决类证据不用 diff 文本解析。清单本身不完整
+（GitHub 3000 文件封顶）时缺席同样不作否决。不完整证据
+不作缺席证明——两种形态：变更清单被平台封顶（`complete=false`）；
 GitHub `git/trees` 截断（`truncated=true`，>10 万条目目录，归一为
 `ErrTreeTruncated`）或目录清单超读入上限（>8MiB，同样归一
-`ErrTreeTruncated`）时树清单不完整。这些都按「存在性不可判定」放行并
+`ErrTreeTruncated`）。这些都按「存在性不可判定」放行并
 Warn 记录，而非 40004/50200——重试只拿到同一份不完整证据，拒收会把
 合法运行卡到 deadline。404 消歧：dir/路径级 404 回探根树/根目录，
 根也 404 按调用失败（50200）而非「文件不存在」上报，避免把 ref/仓库级
