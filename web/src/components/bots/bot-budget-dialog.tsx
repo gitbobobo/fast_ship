@@ -51,6 +51,12 @@ function ratioToText(ratio: number): string {
   return `${Number((ratio * 100).toFixed(4))}%`;
 }
 
+/** 已花占比文案：低于一万倍按百分数（328%），超过改按倍数（408660% →
+ * 「约 4087 倍」）避免六位百分数难读。与服务端 botBudgetActualText 同口径。 */
+export function formatSpendPercent(pct: number): string {
+  return pct < 10000 ? `${Math.round(pct)}%` : `约 ${Math.round(pct / 100)} 倍`;
+}
+
 /**
  * 阈值文本解析："80%,100%"、"80,100"、"0.8,1" 同样解析成 [0.8, 1]——
  * 大于 1 的数字按百分数处理，不大于 1 的按比例处理。去重升序后提交，
@@ -108,7 +114,7 @@ function BudgetPeriodForm({
     budget ? String(budget.amount_usd) : "",
   );
   const [thresholds, setThresholds] = useState(
-    budget ? budget.thresholds.map(ratioToText).join("，") : "",
+    budget ? budget.thresholds.map(ratioToText).join("、") : "",
   );
   const [problem, setProblem] = useState<string | null>(null);
 
@@ -122,7 +128,7 @@ function BudgetPeriodForm({
     if (prev === budget) return;
     const amountOf = (b?: BotBudget) => (b ? String(b.amount_usd) : "");
     const thresholdsOf = (b?: BotBudget) =>
-      b ? b.thresholds.map(ratioToText).join("，") : "";
+      b ? b.thresholds.map(ratioToText).join("、") : "";
     setAmount((cur) => (cur === amountOf(prev) ? amountOf(budget) : cur));
     setThresholds((cur) =>
       cur === thresholdsOf(prev) ? thresholdsOf(budget) : cur,
@@ -153,7 +159,7 @@ function BudgetPeriodForm({
       });
       // 回显服务端规范化结果（阈值已去重升序），与下次打开看到的一致。
       setAmount(String(saved.amount_usd));
-      setThresholds(saved.thresholds.map(ratioToText).join("，"));
+      setThresholds(saved.thresholds.map(ratioToText).join("、"));
       toast.success(`${label}已保存`);
     } catch (err) {
       toast.error(errorText(err, "预算保存失败"));
@@ -202,7 +208,7 @@ function BudgetPeriodForm({
           >
             已花费 {formatCostEstimate(budget.spend_usd)} /{" "}
             {formatCostEstimate(budget.amount_usd)}
-            （{Math.round(spendPct)}%）
+            （{formatSpendPercent(spendPct)}）
           </p>
           <div
             className="h-1.5 w-full overflow-hidden rounded-full bg-muted"

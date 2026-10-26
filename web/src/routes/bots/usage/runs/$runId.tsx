@@ -89,6 +89,14 @@ const TOOL_CALL_STATUS_LABELS: Record<string, string> = {
 const labelOf = (map: Record<string, string>, value: string) =>
   map[value] ?? value;
 
+/** 错误正文剥掉 [NNNNN] 码与行首重复的「工具 动作」前缀（技术名在同行
+ * 已用等宽字显示），剩余的是可读原因。 */
+function toolErrorText(msg: string, tool: string, action?: string | null) {
+  const s = msg.replace(/^\[\d{5}\]\s*/, "");
+  const head = action ? `${tool} ${action} ` : `${tool} `;
+  return s.startsWith(head) ? s.slice(head.length) : s;
+}
+
 const formatTokens = (n: number | null | undefined) =>
   n == null ? "—" : n.toLocaleString("en-US");
 
@@ -473,19 +481,23 @@ function RequestRow({ request }: { request: BotUsageRequest }) {
                   {call.action ? `:${call.action}` : ""}
                 </span>
               </span>
-              <Badge variant="secondary" className="h-4 px-1.5 text-[10px]">
+              <Badge
+                variant={call.status === "failed" ? "destructive" : "secondary"}
+                className="h-4 px-1.5 text-[10px]"
+              >
                 {labelOf(TOOL_CALL_STATUS_LABELS, call.status)}
               </Badge>
               <span>耗时 {formatSpan(call.created_at, call.finished_at)}</span>
               {(call.error_message || call.error_code) && (
-                // 与工具卡同口径：错误码进 title 备查，正文剥掉 [NNNNN] 前缀；
-                // 历史行可能只有 error_code，无 message 时仍露出码值。
+                // 与工具卡同口径：错误码进 title 备查，正文剥掉 [NNNNN] 前缀
+                // 与重复的工具名；历史行可能只有 error_code，无 message 时仍
+                // 露出码值。
                 <span
                   title={call.error_code ?? undefined}
                   className="basis-full text-destructive"
                 >
                   {call.error_message
-                    ? call.error_message.replace(/^\[\d{5}\]\s*/, "")
+                    ? toolErrorText(call.error_message, call.tool_name, call.action)
                     : call.error_code}
                 </span>
               )}

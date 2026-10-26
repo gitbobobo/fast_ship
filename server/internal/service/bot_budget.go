@@ -174,6 +174,16 @@ func botBudgetPercentText(bp int) string {
 	return strconv.FormatFloat(float64(bp)/100, 'f', -1, 64) + "%"
 }
 
+// botBudgetActualText 渲染当前占比：低于一万倍按百分数（"328%"），超过改按
+// 倍数（408660% → "约 4087 倍"）避免六位百分数难读。与前端
+// formatSpendPercent 同口径。
+func botBudgetActualText(pct float64) string {
+	if pct < 10000 {
+		return fmt.Sprintf("%.0f%%", pct)
+	}
+	return fmt.Sprintf("约 %.0f 倍", pct/100)
+}
+
 // ---------- 评估循环 ----------
 
 // budgetEvalLoop 每分钟评估一次全部预算，usage 落账后的 kick 让它立即再评
@@ -395,21 +405,22 @@ func (s *BotService) alertBudgetThreshold(alert botBudgetAlert) error {
 	label := botBudgetPeriodLabel(b.Period)
 
 	actualPct := alert.spendUSD / b.AmountUSD * 100
+	actualText := botBudgetActualText(actualPct)
 	var title string
 	if actualPct >= 100 {
 		if b.ScheduleTaskID != nil {
-			title = fmt.Sprintf("定时任务「%s」已超出每%s预算（阈值 %s，当前 %.0f%%）", alert.taskName, label, pct, actualPct)
+			title = fmt.Sprintf("定时任务「%s」已超出每%s预算（阈值 %s，当前 %s）", alert.taskName, label, pct, actualText)
 		} else {
-			title = fmt.Sprintf("机器人「%s」已超出每%s预算（阈值 %s，当前 %.0f%%）", alert.botName, label, pct, actualPct)
+			title = fmt.Sprintf("机器人「%s」已超出每%s预算（阈值 %s，当前 %s）", alert.botName, label, pct, actualText)
 		}
 	} else if b.ScheduleTaskID != nil {
-		title = fmt.Sprintf("定时任务「%s」每%s预算已达 %s（当前 %.0f%%）", alert.taskName, label, pct, actualPct)
+		title = fmt.Sprintf("定时任务「%s」每%s预算已达 %s（当前 %s）", alert.taskName, label, pct, actualText)
 	} else {
-		title = fmt.Sprintf("机器人「%s」每%s预算已达 %s（当前 %.0f%%）", alert.botName, label, pct, actualPct)
+		title = fmt.Sprintf("机器人「%s」每%s预算已达 %s（当前 %s）", alert.botName, label, pct, actualText)
 	}
-	body := fmt.Sprintf("周期 %s 已花费 %s，预算 %s，当前占比 %.0f%%，告警阈值 %s。"+
+	body := fmt.Sprintf("周期 %s 已花费 %s，预算 %s，当前占比 %s，告警阈值 %s。"+
 		"只统计已计价金额，未计价请求未计入；告警只作提示，不会停止运行。",
-		alert.periodKey, money, amount, actualPct, pct)
+		alert.periodKey, money, amount, actualText, pct)
 
 	scope := "bot"
 	taskID := ""

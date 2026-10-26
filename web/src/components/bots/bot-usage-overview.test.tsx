@@ -311,7 +311,7 @@ describe("BotUsageOverviewPanel", () => {
     expect(taskRows).toHaveLength(2);
     expect(within(taskRows[0]).getByText("已停用")).toBeInTheDocument();
     expect(within(taskRows[1]).getByText("已删除的任务")).toBeInTheDocument();
-    expect(screen.getByText("连带主线≈")).toBeInTheDocument();
+    expect(screen.getByText("连带主线（估）")).toBeInTheDocument();
     expect(within(taskRows[0]).getByText("$3.00")).toBeInTheDocument();
     // 「总花费」含连带主线（与排序口径一致）：0.3 + 0.1 = $0.4；
     // 连带部分仍在单独列（连带主线≈ $0.1）。P90 列插在平均与最高之间。

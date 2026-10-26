@@ -584,8 +584,8 @@ function TasksUsageTable({
                 <TableHead>平均/次</TableHead>
                 <TableHead title={P90_NOTE}>P90/次</TableHead>
                 <TableHead>最高/次</TableHead>
-                <TableHead title="定时任务运行结果写回主线时的连带成本（近似）">
-                  连带主线≈
+                <TableHead title="定时任务运行结果写回主线时摊到的主线花费（近似估算，可能与主线口径有少量重叠）">
+                  连带主线（估）
                 </TableHead>
                 <TableHead title="按单次平均（含连带主线摊销）与计划频率推算的未来 30 天成本">
                   推算月花费
@@ -731,7 +731,7 @@ function CompactTaskUsage({
               <p className="text-xs text-muted-foreground">
                 平均 {formatUsageCost(task.avg_run_cost)} · P90{" "}
                 {formatUsageCost(task.p90_run_cost)} · 最高{" "}
-                {formatUsageCost(task.max_run_cost)} · 连带主线≈
+                {formatUsageCost(task.max_run_cost)} · 连带主线（估）
                 {formatUsageCost(task.linked_main_cost)} · 推算月{" "}
                 {formatUsageCost(task.estimated_monthly_cost)}
               </p>
