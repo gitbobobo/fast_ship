@@ -449,6 +449,19 @@ export function useTaskBudgets(botId: string, taskId: string) {
   });
 }
 
+/** 预算写入后行内「已设/已超出」徽标读 usage 聚合——一并按前缀失效
+ * （usageInsights 嵌在同前缀下自动连带）。 */
+const invalidateBudgetAndUsage = (
+  queryClient: ReturnType<typeof useQueryClient>,
+  userId: string | null,
+  budgetKey: unknown[],
+) => {
+  void queryClient.invalidateQueries({ queryKey: budgetKey });
+  void queryClient.invalidateQueries({
+    queryKey: [BOTS_ROOT, userId, "usage"],
+  });
+};
+
 export function useSetBotBudget(botId: string) {
   const queryClient = useQueryClient();
   const userId = useUserId();
@@ -456,9 +469,11 @@ export function useSetBotBudget(botId: string) {
     mutationFn: (input: { period: BotBudgetPeriod; input: BotBudgetUpsertInput }) =>
       botApi.setBudget(botId, input.period, input.input),
     onSettled: () =>
-      queryClient.invalidateQueries({
-        queryKey: botKeys.budgets(userId, botId),
-      }),
+      invalidateBudgetAndUsage(
+        queryClient,
+        userId,
+        botKeys.budgets(userId, botId),
+      ),
   });
 }
 
@@ -468,9 +483,11 @@ export function useDeleteBotBudget(botId: string) {
   return useMutation({
     mutationFn: (period: BotBudgetPeriod) => botApi.deleteBudget(botId, period),
     onSettled: () =>
-      queryClient.invalidateQueries({
-        queryKey: botKeys.budgets(userId, botId),
-      }),
+      invalidateBudgetAndUsage(
+        queryClient,
+        userId,
+        botKeys.budgets(userId, botId),
+      ),
   });
 }
 
@@ -481,9 +498,11 @@ export function useSetTaskBudget(botId: string, taskId: string) {
     mutationFn: (input: { period: BotBudgetPeriod; input: BotBudgetUpsertInput }) =>
       botApi.setTaskBudget(botId, taskId, input.period, input.input),
     onSettled: () =>
-      queryClient.invalidateQueries({
-        queryKey: botKeys.taskBudgets(userId, botId, taskId),
-      }),
+      invalidateBudgetAndUsage(
+        queryClient,
+        userId,
+        botKeys.taskBudgets(userId, botId, taskId),
+      ),
   });
 }
 
@@ -494,8 +513,10 @@ export function useDeleteTaskBudget(botId: string, taskId: string) {
     mutationFn: (period: BotBudgetPeriod) =>
       botApi.deleteTaskBudget(botId, taskId, period),
     onSettled: () =>
-      queryClient.invalidateQueries({
-        queryKey: botKeys.taskBudgets(userId, botId, taskId),
-      }),
+      invalidateBudgetAndUsage(
+        queryClient,
+        userId,
+        botKeys.taskBudgets(userId, botId, taskId),
+      ),
   });
 }

@@ -1289,7 +1289,7 @@ func (s *BotService) botUsageApplyBudgetMarks(overview *api.BotUsageOverview, lo
 		ownerIDs = append(ownerIDs, id)
 	}
 	repo := repository.NewBotBudgetRepository(s.db)
-	now := time.Now()
+	now := s.now()
 	for period, list := range byPeriod {
 		start, end, _ := botBudgetWindow(period, now, loc, false)
 		sp, err := repo.SpendInWindow(ownerIDs, start, end)
@@ -1311,7 +1311,8 @@ func (s *BotService) botUsageApplyBudgetMarks(overview *api.BotUsageOverview, lo
 			}
 			tru := true
 			*itemSet = &tru
-			if spend >= b.AmountUSD {
+			// 与告警侧同口径：阈值 100% 的基点比较，避免浮点边界与告警不一致。
+			if botBudgetThresholdReached(b.AmountUSD, 1, spend) {
 				*itemExceeded = &tru
 			}
 		}
