@@ -37,7 +37,9 @@ type reviewT3 interface {
 	CreateThreadForAgent(ctx context.Context, userID, envID string, req *T3CreateThreadRequest) (*T3ThreadLaunchResult, bool, error)
 	StopThread(ctx context.Context, userID, envID, threadID string) (*T3ThreadStopResult, error)
 	ThreadWorktree(ctx context.Context, userID, envID, threadID string) (*T3ThreadWorktree, error)
-	ListWorktrees(ctx context.Context, userID, envID, cwd string) ([]T3Worktree, error)
+	// ListRegistry 读 cwd 下的完整登记（worktree 项 + ref 名全集，INT-170）：
+	// 归属核验与分支存在性核验共用同一份快照，预算耗尽返回 errRegistryIncomplete。
+	ListRegistry(ctx context.Context, userID, envID, cwd string) (*T3Registry, error)
 	RemoveWorktree(ctx context.Context, userID, envID, cwd, path string, force bool) error
 	ArchiveThread(ctx context.Context, userID, envID, threadID string) error
 	// ThreadTurnSettled 判读该运行绑定的 T3 run 是否已收尾（INT-158）：归档
@@ -96,9 +98,16 @@ type ReviewService struct {
 	cancel chan struct{}
 
 	// worktreeTries：归档/工作区读取等回收阶段的有限重试计数（进程内即可：
-	// 进程重启后未完成的行下个 tick 重新计，上限内不会漏终态）。
-	worktreeMu    sync.Mutex
-	worktreeTries map[string]int
+	// 进程重启后未完成的运行下个 tick 重新计，上限内不会漏终态）。
+	// worktreeBackoff：持续待确认问题（INT-170：branch_pending 复查、
+	// registry_incomplete 与 remove_uncertain 重试）的指数退避表，按
+	// runID|reason 存下次允许尝试的时刻与已排次数。进程重启丢失无所谓——
+	// 下个 tick 即可重查，代价只是一次提前的登记读。终态转移时随
+	// worktreeTries 一并释放（worktreeMu 同时护着两张表：访问总在同一段
+	// 回收代码里，分锁没有收益）。
+	worktreeMu      sync.Mutex
+	worktreeTries   map[string]int
+	worktreeBackoff map[string]*worktreeBackoffEntry
 
 	// prepRetryChecked 准备失败检测的查询节流表（INT-147）：每运行最多每
 	// reviewPrepRetryQueryEvery 查一次 T3 投影。进程内即可（重启丢失顶多多
@@ -153,6 +162,7 @@ func NewReviewService(
 		t3:                t3, media: media, mediaBearer: mediaBearer,
 		cfg: cfg, logger: logger,
 		worktreeTries:    map[string]int{},
+		worktreeBackoff:  map[string]*worktreeBackoffEntry{},
 		prepRetryChecked: map[string]time.Time{},
 		prLocks:          map[string]*sync.Mutex{},
 		projectLocks:     map[string]*sync.Mutex{},

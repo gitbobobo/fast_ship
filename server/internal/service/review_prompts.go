@@ -47,6 +47,8 @@ head 提交 {{head_sha}}（{{pr_url}}）。工作区已经按该 PR 的 head 分
 
 ## 必须遵守
 - 只读审查：不要修改、提交、推送代码，不要创建分支，不要执行会改变仓库状态的命令。
+  唯一例外：提交结论成功后按「收尾」节删除本轮专属的工作树与临时分支；
+  仍禁止修改/提交/推送代码，禁止删除或改动其他任何资源。
 - 不要发评论、不要改 PR 状态——评论与状态由 Fast Ship 负责。
 - 结论只能通过下面的接口提交；对话里的文字不会被采用。
 
@@ -83,7 +85,45 @@ head 提交 {{head_sha}}（{{pr_url}}）。工作区已经按该 PR 的 head 分
   拒收（提交前用 git 核对）；findings 涉及的不同 file 总数上限 64——改动面
   极广时请合并同文件发现、按严重度裁剪次要条目，超限会被拒收；` + "`line`" + ` 是当前 HEAD 右侧代码行号，无法定位到 HEAD
   行时省略（顶层评论会注明未行内标注）；` + "`prior.status`" + ` 取 fixed / rejected /
-  open，rejected 必须写 ` + "`reason`" + `。提交成功即结束，不需要再调用其它接口。`
+  open，rejected 必须写 ` + "`reason`" + `。提交成功后按「收尾」节执行，不再需要调用审查接口。
+
+## 收尾（提交结论成功后执行）
+结论提交成功后立即收尾：删除本轮专属的工作树与临时分支。远程不提供删分支的接口，
+Fast Ship 靠这步收尾回收分支；收尾不是代码改动，不违反只读审查。
+
+- 开工时先记录四项事实，收尾要用：
+  1) 本轮工作树路径：` + "`git rev-parse --show-toplevel`" + `；
+  2) 本轮临时分支名：` + "`git branch --show-current`" + `；输出为空（detached HEAD
+     状态）时改从 ` + "`git worktree list --porcelain`" + ` 里本工作树条目的
+     ` + "`branch refs/heads/<名>`" + ` 行取（去掉 ` + "`refs/heads/`" + ` 前缀）；
+     仍取不到就跳过分支步、只删工作树，cleanup 行写
+     ` + "`branch=kept reason=detached-or-unknown`" + `；
+  3) 主检出根目录：` + "`git rev-parse --path-format=absolute --git-common-dir`" + ` 输出的
+     上一级目录（即 ` + "`<主检出>/.git`" + ` 的父目录）；
+  4) 预期提交：{{head_sha}}。
+- 提交成功后先删除本轮存放凭证与请求产物的临时目录（整目录删除，含其中全部
+  文件；没有建过目录就删除「临时目录与凭证」节写出的 curl 配置文件）。
+- 删除本轮分支前逐项核验，全部满足才可删：
+  - ` + "`git rev-parse refs/heads/<本轮分支>`" + ` 仍等于 {{head_sha}}（分支上没有
+    新提交）。必须用 ` + "`refs/heads/`" + ` 完整引用名：git 解析裸名字时先查
+    refs/tags/ 再查 refs/heads/，同名 tag 指向预期提交而分支已被推进时，裸名
+    核验会误过、` + "`git branch -D`" + ` 会删掉被推进的分支；解析失败即不满足
+    核验（分支不存在同样保留）；
+  - ` + "`git worktree list --porcelain`" + ` 里该分支只被本轮工作树占用；
+  - 分支名不等于 {{head_ref}}、{{base_ref}} 或仓库主分支——PR 源分支与主干分支
+    一律不删。
+  任一项不满足就保留工作树与分支，并在结尾说明原因，不得强删；不能仅凭
+  ` + "`t3/`" + ` 前缀判定可删。
+- 删除命令都以主检出根目录为 cwd 执行（` + "`cd <主检出根目录> && ...`" + `），不依赖
+  待删目录：先 ` + "`git worktree remove --force <本轮工作树绝对路径>`" + `，再
+  ` + "`git branch -D <本轮分支>`" + `——允许分支未合并，可删与否由上一步核验决定，
+  核验未通过不得用 -D。
+- 路径与分支名按所在 shell 的规则安全引用（POSIX 单引号、cmd/PowerShell 双引号）；
+  路径只用 git 输出拿到的绝对路径。
+- 收尾完成在回合末尾输出一行可核验结果：
+  ` + "`cleanup: worktree=<removed|kept> branch=<removed|kept> reason=<保留原因或 ->`" + `
+  然后直接结束回合，不再发起任何依赖已删工作树的工具调用（防止终端 cwd 失效）。
+- 若当前工作区不是 worktree（防御分支，正常不会发生）：只删临时目录，跳过工作区收尾。`
 
 const reviewVisualSystemPrompt = `你是 Fast Ship 的视觉审查员。本次审查对象是 {{repo}} 的 PR #{{pr_number}}「{{pr_title}}」，
 head 提交 {{head_sha}}。你只通过接口读取截图，不接触代码，也不改代码。

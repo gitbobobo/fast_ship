@@ -24,21 +24,32 @@ import (
 // threadWorktrees（未命中回 threadWTDefault）；全局 threadWTErrs 按调用次序
 // 出队，取完后回 threadWTErr。createFn 非空时代替默认桩。准备失败判定
 // （INT-147）按 threadID 查 prepFailed，缺 key 回 (nil, nil)。
+// ListRegistry 返回的登记由 worktrees + refNames（无 worktree 的额外 ref 名，
+// 分支存在性核验用）合成；listIncomplete 注入「预算内没读完」。RemoveWorktree
+// 成功（或 removeUncertainGone）时把路径从登记里摘掉——模拟远端实际已删除，
+// 供删除结果复查路径使用。
 type fakeReviewT3 struct {
-	threadWorktrees    map[string]T3ThreadWorktree
-	threadWorktreeErrs map[string]error
-	threadWTDefault    T3ThreadWorktree
-	threadWTErrs       []error
-	threadWTErr        error
-	threadWTCalls      []string
-	worktrees          []T3Worktree
-	listErr            error
-	listCalls          int
-	listCwds           []string
-	stopped            []string
-	removed            []string
-	removedCwd         []string
-	removeErr          error
+	threadWorktrees     map[string]T3ThreadWorktree
+	threadWorktreeErrs  map[string]error
+	threadWTDefault     T3ThreadWorktree
+	threadWTErrs        []error
+	threadWTErr         error
+	threadWTCalls       []string
+	worktrees           []T3Worktree
+	refNames            []string
+	listErr             error
+	listIncomplete      bool
+	listCalls           int
+	listCwds            []string
+	stopped             []string
+	removed             []string
+	removedCwd          []string
+	removeErr           error
+	removeUncertain     bool
+	removeUncertainGone bool
+	// removeNotAttempted 注入「请求未送达」（INT-170）：RemoveWorktree 返回
+	// errT3RemoveNotAttempted 包装，模拟环境/凭证/拨号在请求发出前失败。
+	removeNotAttempted bool
 	archived           []string
 	archiveErr         error
 	// settled/settledErr 是归档前收尾判定（INT-158）的注入点：按 threadID 查
@@ -98,16 +109,59 @@ func (f *fakeReviewT3) ThreadWorktree(_ context.Context, _, _, threadID string) 
 	return &out, nil
 }
 
-func (f *fakeReviewT3) ListWorktrees(_ context.Context, _, _, cwd string) ([]T3Worktree, error) {
+func (f *fakeReviewT3) ListRegistry(_ context.Context, _, _, cwd string) (*T3Registry, error) {
 	f.listCalls++
 	f.listCwds = append(f.listCwds, cwd)
-	return f.worktrees, f.listErr
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	if f.listIncomplete {
+		return nil, fmt.Errorf("%w: 测试注入的预算耗尽", errRegistryIncomplete)
+	}
+	refSet := map[string]bool{}
+	for _, name := range f.refNames {
+		refSet[name] = true
+	}
+	worktrees := make([]T3Worktree, len(f.worktrees))
+	for i, wt := range f.worktrees {
+		worktrees[i] = wt
+		for _, name := range wt.RefNames {
+			refSet[name] = true
+		}
+	}
+	return &T3Registry{Worktrees: worktrees, RefNames: refSet}, nil
+}
+
+// dropWorktree 把路径从登记里摘掉：模拟远端 worktree remove 已实际生效
+// （成功返回，或结果不确定但复查发现已不在）。分支引用不受影响——远端的
+// removeWorktree 不删分支。
+func (f *fakeReviewT3) dropWorktree(path string) {
+	kept := f.worktrees[:0]
+	for _, wt := range f.worktrees {
+		if wt.Path != path {
+			kept = append(kept, wt)
+		}
+	}
+	f.worktrees = kept
 }
 
 func (f *fakeReviewT3) RemoveWorktree(_ context.Context, _, _, cwd, path string, _ bool) error {
 	f.removed = append(f.removed, path)
 	f.removedCwd = append(f.removedCwd, cwd)
-	return f.removeErr
+	if f.removeNotAttempted {
+		return &t3RemoveNotAttemptedError{err: errors.New("测试注入：会话探测失败")}
+	}
+	if f.removeErr != nil {
+		return f.removeErr
+	}
+	if f.removeUncertain {
+		if f.removeUncertainGone {
+			f.dropWorktree(path)
+		}
+		return &t3RemoveUncertainError{err: errors.New("读取 RPC 帧失败: 测试注入读超时")}
+	}
+	f.dropWorktree(path)
+	return nil
 }
 
 func (f *fakeReviewT3) ArchiveThread(_ context.Context, _, _, threadID string) error {
@@ -243,7 +297,9 @@ func TestReviewCleanupOwnership(t *testing.T) {
 		t.Fatal("线程确认无工作区不应发失败通知")
 	}
 
-	// 线程真值正常：路径写回行 + listRefs 核验通过 → 删除 → removed。
+	// 线程真值正常：路径写回行 + listRefs 核验通过 → 删除。工作树步完成后
+	// 进入分支步（INT-170）：登记 ref 集里本轮分支仍在（服务端删不了分支）
+	// → branch_pending 而非 removed。
 	r2 := e.seedCleanableRun(t, repo, 1, env, model.ReviewRunCompleted, "", now)
 	t3.threadWorktrees = map[string]T3ThreadWorktree{
 		r2.ThreadID: {Path: "/wt/owned", Branch: "br-owned"},
@@ -252,11 +308,14 @@ func TestReviewCleanupOwnership(t *testing.T) {
 	review.cleanupRunWorktree(r2, now)
 	var after2 model.ReviewRun
 	e.svc.db.First(&after2, "id = ?", r2.ID)
-	if after2.WorktreeState != model.ReviewWorktreeRemoved || len(t3.removed) != 1 || t3.removed[0] != "/wt/owned" {
+	if after2.WorktreeState != model.ReviewWorktreeBranchPending || len(t3.removed) != 1 || t3.removed[0] != "/wt/owned" {
 		t.Fatalf("owned worktree = %q removed=%v", after2.WorktreeState, t3.removed)
 	}
 	if after2.WorktreePath != "/wt/owned" {
 		t.Fatalf("worktree_path = %q，应写回线程真值 /wt/owned", after2.WorktreePath)
+	}
+	if after2.WorktreeBranch != "br-owned" {
+		t.Fatalf("worktree_branch = %q，应写回线程真值 br-owned（INT-170）", after2.WorktreeBranch)
 	}
 
 	// 路径被其他运行认领：failed + 不删。
@@ -283,10 +342,11 @@ func TestReviewCleanupOwnership(t *testing.T) {
 	}
 }
 
-// TestCleanupConcurrentRunsAllRemoved INT-142 回归：多组合连发的代码运行
-// 回收——行里 worktree_path 全空，各线程投影给出不同的 {Path,Branch}，
-// listRefs 里三条都以同名 ref 登记；三条全部 removed 且路径/线程一一对应。
-func TestCleanupConcurrentRunsAllRemoved(t *testing.T) {
+// TestCleanupConcurrentRunsAllBranchPending INT-142 回归 + INT-170 两步模型：
+// 多组合连发的代码运行回收——行里 worktree_path 全空，各线程投影给出不同的
+// {Path,Branch}，listRefs 里三条都以同名 ref 登记；工作树全部删除且路径/线程
+// 一一对应，分支仍在登记 ref 全集 → 三条全部 branch_pending。
+func TestCleanupConcurrentRunsAllBranchPending(t *testing.T) {
 	e := newReviewEngineEnv(t)
 	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
 	now := time.Now().UTC()
@@ -324,15 +384,18 @@ func TestCleanupConcurrentRunsAllRemoved(t *testing.T) {
 	for i, run := range runs {
 		var after model.ReviewRun
 		e.svc.db.First(&after, "id = ?", run.ID)
-		if after.WorktreeState != model.ReviewWorktreeRemoved {
-			t.Fatalf("run %d worktree_state = %q, want removed", i, after.WorktreeState)
+		// 工作树都已删除（上面已按路径断言）；登记 ref 集里各轮分支仍在，
+		// INT-170 两步模型下落 branch_pending 而非 removed。
+		if after.WorktreeState != model.ReviewWorktreeBranchPending {
+			t.Fatalf("run %d worktree_state = %q, want branch_pending", i, after.WorktreeState)
 		}
 		if want := fmt.Sprintf("/wt/burst-%d", i); after.WorktreePath != want {
 			t.Fatalf("run %d worktree_path = %q, want %q（线程真值写回）", i, after.WorktreePath, want)
 		}
 	}
-	if e.cleanupFailedCount(t) != 0 {
-		t.Fatal("多组合连发不应产生回收失败通知")
+	// 分支残留按（环境, 仓库, 原因）聚合：三条运行共享一条 branch_pending 通知。
+	if e.cleanupFailedCount(t) != 1 {
+		t.Fatal("分支残留应聚合为一条通知（env+repo+branch_pending 一键）")
 	}
 }
 
@@ -505,9 +568,9 @@ func TestCleanupRowPathMismatchFails(t *testing.T) {
 	}
 }
 
-// TestCleanupListWorktreesErrorRetries 列举项目工作区登记失败：有限重试到
-// 上限后 failed + 通知 + 不删。
-func TestCleanupListWorktreesErrorRetries(t *testing.T) {
+// TestCleanupListRegistryErrorRetries 列举项目工作区登记（ListRegistry）失败：
+// 有限重试到上限后 failed + 通知 + 不删。
+func TestCleanupListRegistryErrorRetries(t *testing.T) {
 	e := newReviewEngineEnv(t)
 	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
 	now := time.Now().UTC()
@@ -565,8 +628,10 @@ func TestReviewArchiveStage(t *testing.T) {
 	if len(t3.archived) != reviewWorktreeMaxTries*2 {
 		t.Fatalf("archive calls = %d, want %d", len(t3.archived), reviewWorktreeMaxTries*2)
 	}
-	if e.cleanupFailedCount(t) != 2 {
-		t.Fatal("归档超限应对每条运行各发一次通知")
+	// INT-170 聚合通知：两条运行同（环境, 仓库, archive_failed）一键，收敛为
+	// 一条清单（正文含两行受影响运行），不再逐 run 各发一条。
+	if e.cleanupFailedCount(t) != 1 {
+		t.Fatal("归档超限应按 env+repo+archive_failed 聚合为一条通知")
 	}
 
 	// 成功后写 archived_at。
@@ -1010,8 +1075,10 @@ func TestCleanupTerminalRowsNotClaimers(t *testing.T) {
 
 	var after model.ReviewRun
 	e.svc.db.First(&after, "id = ?", run.ID)
-	if after.WorktreeState != model.ReviewWorktreeRemoved || len(t3.removed) != 1 {
-		t.Fatalf("worktree = %q removed=%v, want removed（终态行不算认领者）",
+	// 删除发生（终态行的残留快照不算认领者）；本轮分支仍在登记 ref 集，
+	// INT-170 两步模型下落 branch_pending。
+	if after.WorktreeState != model.ReviewWorktreeBranchPending || len(t3.removed) != 1 {
+		t.Fatalf("worktree = %q removed=%v, want branch_pending 且已删除（终态行不算认领者）",
 			after.WorktreeState, t3.removed)
 	}
 }

@@ -31,6 +31,17 @@ const (
 	t3WSMaxFrameSize = 64 << 20         // 单帧上限，与 HTTP 响应体上限一致
 )
 
+// rpcUncertainError 标记「结果不确定」的传输层失败（INT-170）：请求帧没写出
+// （发送失败）、响应没读回来（读超时、ctx 取消引发的连接关闭）——请求可能
+// 已被远端执行，只是结果不可见。Exit Failure 是远端明确拒绝，不算这类。
+// Error()/Unwrap() 透传原始错误，不改变既有错误文本与 errors.Is/As 链；
+// 有副作用的 RPC 调用方（如 vcs.removeWorktree）据此把「永久失败」降级成
+// 「待确认」，先复查远端实际状态再定终态。
+type rpcUncertainError struct{ err error }
+
+func (e *rpcUncertainError) Error() string { return e.err.Error() }
+func (e *rpcUncertainError) Unwrap() error { return e.err }
+
 // t3RPCSession 是一条已认证的 /ws 连接，按顺序串行发请求。
 type t3RPCSession struct {
 	conn   *websocket.Conn
@@ -96,13 +107,15 @@ func (s *t3RPCSession) callInspect(ctx context.Context, method string, payload a
 	id := s.nextID
 	s.nextID++
 	defer s.closeOnCancel(ctx)()
+	// 请求帧没写出 / 响应帧没读回都可能是「远端已执行但结果不可见」（INT-170）：
+	// 用 rpcUncertainError 标记，Exit Failure 的明确拒绝不受影响。
 	if err := s.sendRequest(ctx, id, method, payload); err != nil {
-		return nil, nil, err
+		return nil, nil, &rpcUncertainError{err: err}
 	}
 	for {
 		frame, err := s.readFrame(ctx)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, &rpcUncertainError{err: err}
 		}
 		switch {
 		case frame.isExitFor(id):
@@ -127,7 +140,8 @@ func (s *t3RPCSession) callInspect(ctx context.Context, method string, payload a
 // callFirstChunkValue 订阅一个流式方法，把第一个 Chunk 的每个 value 交给 handle，
 // handle 返回 stop 后发送 Interrupt 并结束。handle 遇到的第一个错误优先返回；
 // Ack/Interrupt 等 I/O 失败只在没有业务错误可报时向上传播——连接层失败不掩盖
-// handle 给出的真实原因。
+// handle 给出的真实原因。读路径不包 rpcUncertainError：流式订阅是查询面，
+// 没有「远端副作用已发生但结果不可见」的问题需要分类（INT-170）。
 func (s *t3RPCSession) callFirstChunkValue(ctx context.Context, method string, payload any, handle func(value json.RawMessage) (stop bool, err error)) error {
 	id := s.nextID
 	s.nextID++

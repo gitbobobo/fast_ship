@@ -320,14 +320,14 @@ func (s *ReviewService) publishReviewNotification(run *model.ReviewRun, kind mod
 	}
 }
 
+// reviewNotificationTitle 逐 run 通知的标题（INT-170 起逐 run 只剩派发失败
+// 与超时；回收问题走 publishCleanupAggregate 按（环境, 仓库, 原因）聚合）。
 func reviewNotificationTitle(kind model.NotificationKind, prURL string) string {
 	switch kind {
 	case model.NotificationReviewRunTimeout:
 		return "PR 审查超时：" + prURL
 	case model.NotificationReviewDispatchFailed:
 		return "PR 审查派发失败：" + prURL
-	case model.NotificationReviewCleanupFailed:
-		return "PR 审查工作区回收失败：" + prURL
 	}
 	return "PR 审查：" + prURL
 }
