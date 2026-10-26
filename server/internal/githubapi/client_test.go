@@ -167,6 +167,22 @@ func TestBodyTooLargeDetection(t *testing.T) {
 	}
 }
 
+// 目录清单超读入上限（>8MiB）按 ErrTreeTruncated 不可判定处理——不完整
+// 证据不能当缺席证明，也不能让归属校验每次 50200 卡到 deadline。
+func TestPathExistsAtRefOversizedTree(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(make([]byte, bodyReadMaxBytes+1))
+	}))
+	defer ts.Close()
+
+	c := NewClient(&fakeAuth{token: "t"}, ts.URL)
+	_, err := c.PathExistsAtRef(context.Background(), 1, "octocat/hw", "bigdir/f.go", "sha-x")
+	if !errors.Is(err, ErrTreeTruncated) {
+		t.Fatalf("oversized tree = %v, want ErrTreeTruncated", err)
+	}
+}
+
 func TestStatusErrorHelpers(t *testing.T) {
 	if !IsForbidden(&StatusError{StatusCode: http.StatusForbidden}) {
 		t.Fatal("403 must be forbidden")

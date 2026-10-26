@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -566,6 +567,11 @@ func (c *restClient) PathExistsAtRef(ctx context.Context, installationID int64, 
 			fmt.Sprintf("/repos/%s/%s/git/trees/%s", owner, name, treeish), bearer, nil, &out)
 	})
 	if err != nil {
+		// 目录清单超读入上限（>8MiB 的大目录）——与 truncated=true 同属
+		// 不完整证据：不可判定，不可当缺席证明，也不该 50200 卡死重试。
+		if errors.Is(err, ErrBodyTooLarge) {
+			return false, fmt.Errorf("%w: %q 的目录清单超读入上限，无法判定是否存在", ErrTreeTruncated, path)
+		}
 		if !IsNotFound(err) {
 			return false, err
 		}
@@ -582,6 +588,9 @@ func (c *restClient) PathExistsAtRef(ctx context.Context, installationID int64, 
 				fmt.Sprintf("/repos/%s/%s/git/trees/%s", owner, name, escapedRef), bearer, nil, &root)
 		})
 		if rootErr != nil {
+			if errors.Is(rootErr, ErrBodyTooLarge) {
+				return false, fmt.Errorf("%w: 根树清单超读入上限，无法判定 %q 是否存在", ErrTreeTruncated, path)
+			}
 			return false, rootErr
 		}
 		return false, nil

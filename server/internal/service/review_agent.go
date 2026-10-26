@@ -692,21 +692,30 @@ func (s *ReviewService) diffFilePaths(ctx context.Context, client forge.ReviewCl
 	// 体内——不能当路径收（虚增存在性证据会削弱校验本意）。
 	paths := map[string]bool{}
 	inHeader := false
+	// diff --git 头的解析结果先暂存：未引号头按两侧等值切分时，若本块
+	// 实为重命名（header 行如 `a/a b/z b/a b/z`），等值解是伪路径——
+	// 块内见到 rename from/to 行即弃，真实端点由 rename 行提供。
+	var pendingA, pendingB string
+	flushPending := func() {
+		if pendingA != "" {
+			paths[pendingA] = true
+		}
+		if pendingB != "" {
+			paths[pendingB] = true
+		}
+		pendingA, pendingB = "", ""
+	}
 	for _, line := range strings.Split(diff, "\n") {
 		if strings.HasPrefix(line, "diff --git ") {
+			flushPending()
 			inHeader = true
 			// diff --git 头本身覆盖无 hunk 文件（二进制、纯 mode 变更、
 			// 无文本块的删除），两侧路径都收。
-			a, b := diffGitHeaderPaths(line[len("diff --git "):])
-			if a != "" {
-				paths[a] = true
-			}
-			if b != "" {
-				paths[b] = true
-			}
+			pendingA, pendingB = diffGitHeaderPaths(line[len("diff --git "):])
 			continue
 		}
 		if strings.HasPrefix(line, "@@") {
+			flushPending()
 			inHeader = false
 			continue
 		}
@@ -719,15 +728,18 @@ func (s *ReviewService) diffFilePaths(ctx context.Context, client forge.ReviewCl
 				paths[p] = true
 			}
 		case strings.HasPrefix(line, "rename from "):
+			pendingA, pendingB = "", ""
 			if p := unquoteDiffPath(strings.TrimSpace(line[len("rename from "):])); p != "" {
 				paths[p] = true
 			}
 		case strings.HasPrefix(line, "rename to "):
+			pendingA, pendingB = "", ""
 			if p := unquoteDiffPath(strings.TrimSpace(line[len("rename to "):])); p != "" {
 				paths[p] = true
 			}
 		}
 	}
+	flushPending()
 	return paths, true, nil
 }
 
