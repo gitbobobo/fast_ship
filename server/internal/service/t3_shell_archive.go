@@ -74,10 +74,6 @@ type t3ArchiveFetchState struct {
 	// mode 不得在无 s.mu 的纯 arch.mu 临界区里改——会把「archiveReady
 	// 尚可信但 mode 已翻」的中间态放给视图读者。
 	mode t3ArchiveMode
-	// refetchPending 是订阅模式下「请尽快整体重置」的备忘（RefreshArchive
-	// 强拉与写后失效共用）：常驻流没有按需拉取可发，备忘让链接的下一次
-	// 落地后立刻整表重置，取齐可能被时序/坏帧挡住的增量。只对 legacy 模式有意义。
-	refetchPending bool
 	// legacyStarted 保底订阅 goroutine 只启动一次（sync.Once 不可复位，
 	// 用原子标记代替；启动即随 entry 存活，entry 停/hub 关时自停）。
 	legacyStarted atomic.Bool
@@ -404,16 +400,19 @@ func (h *t3ShellHub) RefreshArchive(ctx context.Context, env *model.T3Environmen
 		return err
 	}
 	e.arch.mu.Lock()
-	if e.arch.mode == t3ArchiveModeLegacy {
-		// 订阅模式没有按需拉取可发：记守旧备忘，链接的下一次落地后
-		// 整表重置即补回写后状态；不阻塞调用方（常驻流自己收尾）。
-		e.arch.refetchPending = true
-		e.arch.mu.Unlock()
-		e.state.noteArchiveRefreshRequested()
+	legacy := e.arch.mode == t3ArchiveModeLegacy
+	e.arch.mu.Unlock()
+	if legacy {
+		// 订阅模式没有按需拉取可发：强拉的等价物是让常驻订阅断开重连
+		// （新连接 subscribe 即收权威全量快照）。备忘记在 state（s.mu）、
+		// 信号走 legacyReconnect；不阻塞调用方（常驻流自己收尾）。
+		e.state.noteArchiveReconnectRequested()
+		e.signalArchiveReconnect()
 		h.publishThreadEvent(e, nil, true)
 		e.refresh()
 		return nil
 	}
+	e.arch.mu.Lock()
 	e.arch.validUntil = time.Time{}
 	e.arch.retryAfter = time.Time{}
 	e.arch.mu.Unlock()
@@ -471,23 +470,26 @@ func (h *t3ShellHub) InvalidateArchive(userID, envID string) {
 func (h *t3ShellHub) invalidateArchiveEntry(e *t3ShellEntry) {
 	e.state.noteArchiveInvalidated()
 	e.arch.mu.Lock()
-	if e.arch.mode == t3ArchiveModeLegacy {
-		// 订阅模式：写后失效的等价物是守旧备忘——增量链维持当前面，
-		// 备忘让下一次落地后整表重置；不推进按需簿记（该模式下无意义）。
-		e.arch.refetchPending = true
-		e.arch.mu.Unlock()
-		e.state.noteArchiveRefreshRequested()
-		h.publishThreadEvent(e, nil, true)
-		e.refresh()
-		return
+	legacy := e.arch.mode == t3ArchiveModeLegacy
+	if !legacy {
+		e.arch.validUntil = time.Time{}
+		e.arch.retryAfter = time.Time{}
+		e.arch.needsRefetch = false
+		// 在途拉取落地时会因世代不符改走「只换数据」路径并留下
+		// needsRefetch——此处不预置：在途拉取尚未结束，下一 kick 仍被
+		// inFlight 合并，由落地收尾决定是否需要补拉。
 	}
-	e.arch.validUntil = time.Time{}
-	e.arch.retryAfter = time.Time{}
-	e.arch.needsRefetch = false
-	// 在途拉取落地时会因世代不符改走「只换数据」路径并留下
-	// needsRefetch——此处不预置：在途拉取尚未结束，下一 kick 仍被
-	// inFlight 合并，由落地收尾决定是否需要补拉。
 	e.arch.mu.Unlock()
+	if legacy {
+		// 订阅模式：写后失效的正确动作是让常驻订阅断开重连——常驻流
+		// 只收增量、不自发重发全量，「增量落地后整表重置」会把归档面
+		// 清空到下一次断线才恢复（R3 P1-B）。重连 subscribe 即收权威
+		// 全量快照（写后状态）。备忘记 state（s.mu）、信号走
+		// legacyReconnect：arch.mu 只在判 mode/清簿记时短暂持有，绝不
+		// 在持锁状态下反向取 s.mu（全局锁序 s.mu → arch.mu，R3 P1-A）。
+		e.state.noteArchiveReconnectRequested()
+		e.signalArchiveReconnect()
+	}
 	// 归档面可信度翻转，等归档读的等待者/订阅者需要看到「已失效」；
 	// 顺手发一次 Full 事件，浏览器据此整环境重拉。
 	e.hub.publishThreadEvent(e, nil, true)
@@ -495,6 +497,22 @@ func (h *t3ShellHub) invalidateArchiveEntry(e *t3ShellEntry) {
 }
 
 // ------ 旧面订阅回退（INT-173 审修） ------
+
+// errArchiveReconnectRequested 是按「请重建连接」备忘主动断开归档订阅的
+// 结束原因（RefreshArchive/写后失效留下的，不是故障）：记入 ArchiveErr
+// 与日志供观测，监督循环按普通重连处理。
+var errArchiveReconnectRequested = errors.New("按刷新/失效备忘重建归档订阅")
+
+// signalArchiveReconnect 通知旧面读循环断开重连。缓冲 1：信号丢失或重复
+// 都无害——读循环只在 state 备忘仍置位时才真断开（consume 判定），连接
+// 已死时监督循环的退避重连本来就是兜底。
+func (e *t3ShellEntry) signalArchiveReconnect() {
+	select {
+	case e.legacyReconnect <- struct{}{}:
+	default:
+	}
+}
+
 //
 // 旧上游（#26238 之前）的归档面只有常驻订阅 subscribeArchivedShell：注册
 // 后上游先发全量快照（首个 Chunk 的 snapshot 流项），再推
@@ -601,7 +619,9 @@ func (h *t3ShellHub) connectArchiveLegacyOnce(e *t3ShellEntry) t3ShellConnResult
 
 // readArchiveLegacyLoop 是旧归档订阅的读循环：只认本 requestID 的 Chunk/
 // Exit；Chunk 全部 value 先应用再 Ack（任一出错整条流失败）；其余帧只
-// 刷新活性计时，Ping 保活同活跃面。返回连接结局。
+// 刷新活性计时，Ping 保活同活跃面。另有第三条出路：legacyReconnect 信号
+// 在守旧备忘仍置位时主动断开，交监督循环重连取权威全量（R3 P1-B）。
+// 返回连接结局。
 func (h *t3ShellHub) readArchiveLegacyLoop(e *t3ShellEntry, session *t3RPCSession, connCtx context.Context, requestID int) t3ShellConnResult {
 	frames := make(chan *rpcFrame, 16)
 	readErrCh := make(chan error, 1)
@@ -664,22 +684,6 @@ func (h *t3ShellHub) readArchiveLegacyLoop(e *t3ShellEntry, session *t3RPCSessio
 					h.endFaceConnection(e, true, fmt.Errorf("发送 Ack 失败: %w", err))
 					return t3ShellConnResult{syncedAt: e.syncConfirmedAt()}
 				}
-				// 守旧游标：备忘置位（RefreshArchive/失效留下的「请尽快重置」）
-				// 时，落地后的当前面即清——下一次权威快照/增量重新建立完整
-				// 面，比按增量逐条追赶更能掩盖时序/坏帧缺漏。备忘录分两处记
-				// （arch.refetchPending 簿记 + state.archiveLegacyPending 判定），
-				// 同帧消费：arch.mu 持锁内判+清，state 层负责真重置。
-				e.arch.mu.Lock()
-				consume := e.arch.refetchPending && e.state.archiveLegacyPendingNow()
-				if consume {
-					e.arch.refetchPending = false
-				}
-				e.arch.mu.Unlock()
-				if consume {
-					e.state.resetArchiveSnapshot()
-					h.publishThreadEvent(e, nil, true)
-					e.refresh()
-				}
 			case frame.Tag == "Exit" && frame.requestIDMatches(requestID):
 				if _, err := frame.exitValue(); err != nil {
 					credential = errors.Is(err, errT3CredentialRejected)
@@ -690,6 +694,18 @@ func (h *t3ShellHub) readArchiveLegacyLoop(e *t3ShellEntry, session *t3RPCSessio
 				return t3ShellConnResult{credential: credential, syncedAt: e.syncConfirmedAt()}
 			default:
 			}
+		case <-e.legacyReconnect:
+			// 守旧备忘消费（s.mu 单锁，不与 arch.mu 嵌套——锁序全局只有
+			// s.mu → arch.mu）：订阅面没有按需拉取可发，RefreshArchive/写后
+			// 失效的正确动作是断开后由监督循环重连——新 subscribe 即收权威
+			// 全量快照。常驻流只收增量，「增量落地后整表重置」会把归档面
+			// 清空到下一次断线（R3 P1-B）。信号可早到/重复：备忘已被权威
+			// 快照或连接终止清掉时 consume 为假，忽略即可。
+			if !e.state.consumeArchiveReconnect() {
+				continue
+			}
+			h.endFaceConnection(e, true, errArchiveReconnectRequested)
+			return t3ShellConnResult{syncedAt: e.syncConfirmedAt()}
 		case <-pingTicker.C:
 			if time.Since(lastFrame) > h.cfg.PingInterval {
 				if err := session.sendRaw(connCtx, map[string]any{"_tag": "Ping"}); err != nil {

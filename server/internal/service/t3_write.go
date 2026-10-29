@@ -188,22 +188,33 @@ func (s *T3ThreadsService) ComposerOptions(ctx context.Context, userID, envID st
 		}
 		projects = append(projects, item)
 	}
-	config, settings := map[string]any{}, map[string]any{}
+	config := map[string]any{}
 	_ = json.Unmarshal(configValue, &config)
-	// settings 内嵌在 getConfig 响应里。用 RawMessage 区分「字段缺失」与
-	// 「字段为 null/空」：只有缺失才回退旧上游独立的 server.getSettings
-	// （新版 settings 为 null/空对象都是真实空设置，不得去调已删除的
-	// 旧 RPC）；字段存在时按其值原样解。
+	settings := s.resolveT3Settings(ctx, session, configValue)
+	return &T3ComposerOptions{
+		Projects: projects,
+		Config:   config,
+		Settings: settings,
+	}, nil
+}
+
+// resolveT3Settings 解析 T3 用户设置（ComposerOptions 与 worktree 的
+// startFromOrigin 共用）：上游 #26238 起 settings 内嵌在 server.getConfig
+// 响应里，独立的 server.getSettings 已删除。
+//
+// 用 RawMessage 区分「字段缺失」与「字段为 null/空」：只有缺失（旧上
+// 游无内嵌 settings）才回退一次 server.getSettings；null/空对象是新版
+// 真实的空设置，回退会去调已删除的旧 RPC 得到 method-not-found。
+// getSettings 失败宽容为空设置——设置读取失败不牵连整个应答。
+func (s *T3ThreadsService) resolveT3Settings(ctx context.Context, session *t3RPCSession, configValue json.RawMessage) map[string]any {
+	settings := map[string]any{}
 	var withSettings struct {
 		Settings json.RawMessage `json:"settings"`
 	}
 	_ = json.Unmarshal(configValue, &withSettings)
 	switch {
 	case len(withSettings.Settings) == 0:
-		// 字段缺失 = 旧上游（#26238 之前）无内嵌 settings：回退一次独立的
-		// server.getSettings 取真实设置。getConfig 本身失败仍按上游错误
-		// 处理（不会走到这里）；getSettings 失败宽容为空设置——它与
-		// ComposerOptions 其余字段独立，不牵连整个应答。
+		// 字段缺失 = 旧上游：回退一次独立的 server.getSettings 取真实设置。
 		if settingsValue, err := session.call(ctx, "server.getSettings", map[string]any{}); err == nil {
 			var legacy map[string]any
 			if json.Unmarshal(settingsValue, &legacy) == nil && legacy != nil {
@@ -215,11 +226,7 @@ func (s *T3ThreadsService) ComposerOptions(ctx context.Context, userID, envID st
 	default:
 		_ = json.Unmarshal(withSettings.Settings, &settings)
 	}
-	return &T3ComposerOptions{
-		Projects: projects,
-		Config:   config,
-		Settings: settings,
-	}, nil
+	return settings
 }
 
 // newT3ModelSelectionAPI 归一化模型选择（options 原样透传）。
@@ -444,16 +451,12 @@ func (s *T3ThreadsService) t3ThreadWorkspaceWire(ctx context.Context, session *t
 			wire["startFromOrigin"] = *workspace.StartFromOrigin
 		} else {
 			// startFromOrigin 从 T3 设置解析（newWorktreesStartFromOrigin，缺省
-			// false）。设置内嵌在 getConfig 响应里（上游 #26238 已删 getSettings）；
-			// 读取失败或 settings 缺省时不带该字段，交回上游自身缺省。
+			// false）：与 ComposerOptions 共用 resolveT3Settings——旧环境
+			// getConfig 缺 settings 字段时回退 server.getSettings（R3 P2）。
+			// 读取失败或设置缺省时不带该字段，交回上游自身缺省。
 			if configValue, err := session.call(ctx, "server.getConfig", map[string]any{}); err == nil {
-				var settings struct {
-					Settings struct {
-						NewWorktreesStartFromOrigin *bool `json:"newWorktreesStartFromOrigin"`
-					} `json:"settings"`
-				}
-				if json.Unmarshal(configValue, &settings) == nil && settings.Settings.NewWorktreesStartFromOrigin != nil {
-					wire["startFromOrigin"] = *settings.Settings.NewWorktreesStartFromOrigin
+				if v, ok := s.resolveT3Settings(ctx, session, configValue)["newWorktreesStartFromOrigin"].(bool); ok {
+					wire["startFromOrigin"] = v
 				}
 			}
 		}

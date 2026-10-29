@@ -440,8 +440,11 @@ func (h *t3ShellHub) newEntryLocked(key string, env *model.T3Environment, token 
 		activeConn: t3ShellConnConnecting,
 		archTTL:    h.cfg.ArchiveTTL,
 		legacyCh:   make(chan struct{}),
-		stop:       make(chan struct{}),
-		done:       make(chan struct{}),
+		// 缓冲 1：信号丢失/重复都无害（读循环消费前再核对 state 备忘，
+		// 见 readArchiveLegacyLoop 的 legacyReconnect 分支）。
+		legacyReconnect: make(chan struct{}, 1),
+		stop:            make(chan struct{}),
+		done:            make(chan struct{}),
 	}
 	h.entries[key] = e
 
@@ -528,6 +531,11 @@ type t3ShellEntry struct {
 	// 用 channel 而不是「发现失败时直接 go」——entry 创建时 wg.Add 已完成，
 	// 中途 Add 会与 done 观察者的 Wait 竞态（sync 文档禁止）。
 	legacyCh chan struct{}
+
+	// legacyReconnect 是旧面归档订阅的「请重建连接」信号：RefreshArchive
+	// 与写后失效在订阅模式下要取回写后全量，只能让常驻订阅断开重连
+	// （新 subscribe 即收权威快照），不能靠增量落地后整表重置（R3 P1-B）。
+	legacyReconnect chan struct{}
 
 	// forceResync 是活跃面的强制全量重同步请求（F1）：请求了 synchronized 但
 	// 预算内未等到时置位；下次活跃重连读后清除，不带 afterSequence，由上游

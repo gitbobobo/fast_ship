@@ -2459,3 +2459,183 @@ func TestT3ShellHub_NonMethodFailureDoesNotFallback(t *testing.T) {
 	case <-time.After(300 * time.Millisecond):
 	}
 }
+
+// 旧面写后失效（R3 P1-B）：失效的正确动作是让归档订阅断开重连取回权威
+// 全量——常驻流只收增量、不自发重发全量，「增量落地后整表重置」会把
+// 归档面清空到下一次断线才恢复。本用例钉住：失效后面留行但不可信 →
+// 第一连接被主动断开 → 重连的新订阅拿到写后全量快照。
+func TestT3ShellHub_LegacyInvalidateTriggersReconnectRefetch(t *testing.T) {
+	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
+	srv.setArchiveLegacy(true)
+	srv.setArchiveFixture(archiveSnapshotBody(1, "th-a"), nil)
+	hub := newT3ShellHubWithConfig(hubTestConfig(), nil)
+	defer hub.Close()
+	env := hubTestEnv(url, 0)
+
+	// 活跃面先就位；归档按需探测被判方法不存在 → 旧面订阅激活。
+	go hub.View(context.Background(), env, "tok")
+	collector := newShellConnCollector(t, srv)
+	active := collector.await(false)
+	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1")); err != nil {
+		t.Fatalf("send active snapshot: %v", err)
+	}
+	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
+		t.Fatalf("active snapshot not acked")
+	}
+	srv.awaitArchiveSub(t)
+	firstArchive := <-srv.archiveConns
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil && len(v.Snaps.Archived.Threads) == 1
+	})
+
+	// 写后失效：归档面立刻撤为不可信（旧行保留），订阅面按备忘断开。
+	hub.InvalidateArchive("user-1", "env-1")
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr != nil
+	})
+	if !firstArchive.awaitClosed(3 * time.Second) {
+		t.Fatalf("invalidation must end the legacy archive connection for a fresh snapshot")
+	}
+
+	// 重连订阅 = 写后状态的全量（fake 应答按当时 fixture 组装）。
+	srv.setArchiveFixture(archiveSnapshotBody(2, "th-a", "th-b"), nil)
+	sub2 := srv.awaitArchiveSub(t)
+	secondArchive := <-srv.archiveConns
+	view := waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil && len(v.Snaps.Archived.Threads) == 2
+	})
+	ids := map[string]bool{}
+	for _, th := range view.Snaps.Archived.Threads {
+		ids[th.ID] = true
+	}
+	if !ids["th-a"] || !ids["th-b"] {
+		t.Fatalf("archive face must recover via reconnected snapshot, got %+v", view.Snaps.Archived.Threads)
+	}
+
+	// 恢复后增量照常吃：面不会再被误清（旧实现的缺陷路径已删，本断言
+	// 钉住「增量不触发重置」的语义）。
+	thC, _ := json.Marshal(map[string]any{"id": "th-c", "projectId": "p-1", "title": "归档-th-c", "status": "idle", "archivedAt": "2026-10-01T00:00:00.000Z"})
+	item, _ := json.Marshal(map[string]any{"kind": "thread.updated", "sequence": 3, "thread": json.RawMessage(thC)})
+	if err := secondArchive.sendValue(sub2.ID, item); err != nil {
+		t.Fatalf("send archive delta: %v", err)
+	}
+	view = waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil && len(v.Snaps.Archived.Threads) == 3
+	})
+	_ = view
+}
+
+// 旧面守旧备忘与增量落地并发（R3 P1-A）：失效置备忘时恰有在途增量落地，
+// 修复前落地收尾持 arch.mu 取 s.mu（arch.mu → s.mu 反向嵌套），与任何
+// s.mu → arch.mu 序列（如 admitArchiveRefresh 准入）并发即 ABBA 死锁、
+// s.mu 永久占住。本用例先在测试线程持住 s.mu，再推送增量：若落地路径仍
+// 取 arch.mu → s.mu，它会卡在等 s.mu（不崩溃、可多次重演）；持锁期间
+// 置失效并发 RefreshArchive 信号，随后放锁——增量落地 + 备忘消费 +
+// 订阅断开必须全部在有限时间内完成，不走完即死锁回归。
+func TestT3ShellHub_LegacyPendingDoesNotDeadlock(t *testing.T) {
+	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
+	srv.setArchiveLegacy(true)
+	srv.setArchiveFixture(archiveSnapshotBody(1, "th-a"), nil)
+	hub := newT3ShellHubWithConfig(hubTestConfig(), nil)
+	defer hub.Close()
+	env := hubTestEnv(url, 0)
+
+	go hub.View(context.Background(), env, "tok")
+	collector := newShellConnCollector(t, srv)
+	active := collector.await(false)
+	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1")); err != nil {
+		t.Fatalf("send active snapshot: %v", err)
+	}
+	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
+		t.Fatalf("active snapshot not acked")
+	}
+	sub := srv.awaitArchiveSub(t)
+	firstArchive := <-srv.archiveConns
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil && len(v.Snaps.Archived.Threads) == 1
+	})
+
+	key := t3ShellHubKey("user-1", "env-1")
+	hub.mu.Lock()
+	entry := hub.entries[key]
+	hub.mu.Unlock()
+	if entry == nil {
+		t.Fatalf("entry missing")
+	}
+
+	// 重演「失效置备忘 与 归档增量落地 并发」：持 s.mu 卡住任何
+	// arch.mu → s.mu 反向嵌套的落地收尾（旧实现死锁形态），同时在锁外
+	// 推增量 + 置失效。解锁后三件事都得走完：增量应用并 Ack、备忘被
+	// 读循环消费、连接按备忘断开。
+	sendDelta := func(conn *fakeShellConn, id, seq int) error {
+		th, _ := json.Marshal(map[string]any{"id": "th-d", "projectId": "p-1", "title": "归档-th-d", "status": "idle", "archivedAt": "2026-10-01T00:00:00.000Z"})
+		item, _ := json.Marshal(map[string]any{"kind": "thread.updated", "sequence": seq, "thread": json.RawMessage(th)})
+		return conn.sendValue(id, item)
+	}
+	for round := 0; round < 3; round++ {
+		entry.state.mu.Lock()
+		sendDone := make(chan error, 1)
+		go func(seq int) {
+			// 发送本身与断连竞速：写失败只说明备忘已先行拆连（它正是
+			// 目的），不等于死锁；死锁的证据是 sendValue/落地永远回不来。
+			sendDone <- sendDelta(firstArchive, sub.ID, seq)
+		}(round)
+		// 失效与增量落地并发（InvalidateArchive 自身也要 s.mu，异步发起
+		// 再解锁才构成真正交错）。
+		invDone := make(chan struct{})
+		go func() {
+			hub.InvalidateArchive("user-1", "env-1")
+			close(invDone)
+		}()
+		entry.state.mu.Unlock()
+		select {
+		case <-sendDone:
+		case <-time.After(3 * time.Second):
+			t.Fatalf("round %d: archive delta landing deadlocked", round)
+		}
+		select {
+		case <-invDone:
+		case <-time.After(3 * time.Second):
+			t.Fatalf("round %d: invalidate deadlocked against archive landing", round)
+		}
+		if !firstArchive.awaitClosed(3 * time.Second) {
+			t.Fatalf("round %d: legacy conn must be ended by the reconnect memo", round)
+		}
+		// 重连接回：旧面恢复可信后再重演下一轮。
+		sub = srv.awaitArchiveSub(t)
+		firstArchive = <-srv.archiveConns
+		waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+			return v.Snaps != nil && v.Snaps.ArchiveErr == nil
+		})
+	}
+
+	// 稳定连接上确定性重演：增量正常落地并 Ack（落地路径不再触备忘，
+	// 也不会在增量后清表），随后置备忘依旧只拆连不清通道——两侧都不
+	// 死锁、不失步。
+	if err := sendDelta(firstArchive, sub.ID, 90); err != nil {
+		t.Fatalf("deterministic archive delta: %v", err)
+	}
+	if !firstArchive.awaitAck(sub.ID, 2*time.Second) {
+		t.Fatalf("delta must land and be acked on the stable legacy conn")
+	}
+	hub.InvalidateArchive("user-1", "env-1")
+	if !firstArchive.awaitClosed(3 * time.Second) {
+		t.Fatalf("memo-driven disconnect after delta landing")
+	}
+	srv.awaitArchiveSub(t)
+
+	// 失效/落地并发不得阻塞 s.mu 上的读取（死锁形态下 View 会永久挂起）。
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		hub.InvalidateArchive("user-1", "env-1")
+	}()
+	if _, err := hub.View(context.Background(), env, "tok"); err != nil {
+		t.Fatalf("view during invalidation: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("invalidate must not deadlock against in-flight archive work")
+	}
+}

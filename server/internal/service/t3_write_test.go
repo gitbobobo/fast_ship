@@ -1321,6 +1321,23 @@ func TestT3ComposerSettingsFromConfig(t *testing.T) {
 		t.Fatalf("legacy env must fall back to server.getSettings")
 	}
 
+	// 旧上游 worktree 启动同样回退 getSettings 继承 startFromOrigin
+	// （R3 P2：worktree 与 ComposerOptions 共用 resolveT3Settings，缺
+	// settings 字段不能静默丢用户设置）。
+	before = len(e.fake.recordedRPC())
+	if ws := createWorktreeThread(t); ws["startFromOrigin"] != true {
+		t.Fatalf("legacy worktree must inherit startFromOrigin via server.getSettings, got %+v", ws)
+	}
+	sawGetSettings = false
+	for _, rpc := range e.fake.recordedRPC()[before:] {
+		if rpc.method == "server.getSettings" {
+			sawGetSettings = true
+		}
+	}
+	if !sawGetSettings {
+		t.Fatalf("legacy worktree path must fall back to server.getSettings")
+	}
+
 	// 「字段为 null」是新版空设置：不得回退旧 RPC（新上游已删 getSettings，
 	// 误调会被 fake 炸出来）。
 	e.fake.mu.Lock()
