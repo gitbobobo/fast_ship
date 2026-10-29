@@ -614,15 +614,19 @@ func (h *t3ShellHub) connectArchiveLegacyOnce(e *t3ShellEntry) t3ShellConnResult
 		return t3ShellConnResult{}
 	}
 	e.noteConnState(true, t3ShellConnSubscribed, nil)
-	return h.readArchiveLegacyLoop(e, session, connCtx, requestID)
+	// 出发邮戳：本连接建立前已发出的 reconnect 请求数。落地快照用它判
+	// 定「本快照是否晚于最新请求」——快照请求必在本连接之后发出，故它
+	// 必晚于所有世代 ≤ 邮戳的请求（R4 P2，见 applyArchiveSnapshotLocked）。
+	return h.readArchiveLegacyLoop(e, session, connCtx, requestID, e.state.archiveReconnectTarget())
 }
 
 // readArchiveLegacyLoop 是旧归档订阅的读循环：只认本 requestID 的 Chunk/
 // Exit；Chunk 全部 value 先应用再 Ack（任一出错整条流失败）；其余帧只
-// 刷新活性计时，Ping 保活同活跃面。另有第三条出路：legacyReconnect 信号
-// 在守旧备忘仍置位时主动断开，交监督循环重连取权威全量（R3 P1-B）。
-// 返回连接结局。
-func (h *t3ShellHub) readArchiveLegacyLoop(e *t3ShellEntry, session *t3RPCSession, connCtx context.Context, requestID int) t3ShellConnResult {
+// 刷新活性计时，Ping 保活同活跃面。connectionStart 是本连接的 reconnect
+// 出发邮戳，随流项交给落地路径做备忘世代判定（R4 P2）。另有第三条出
+// 路：legacyReconnect 信号在守旧备忘仍置位时主动断开，交监督循环重连
+// 取权威全量（R3 P1-B）。返回连接结局。
+func (h *t3ShellHub) readArchiveLegacyLoop(e *t3ShellEntry, session *t3RPCSession, connCtx context.Context, requestID int, connectionStart int64) t3ShellConnResult {
 	frames := make(chan *rpcFrame, 16)
 	readErrCh := make(chan error, 1)
 	readerDone := make(chan struct{})
@@ -675,7 +679,7 @@ func (h *t3ShellHub) readArchiveLegacyLoop(e *t3ShellEntry, session *t3RPCSessio
 			lastFrame = time.Now()
 			switch {
 			case frame.Tag == "Chunk" && frame.requestIDMatches(requestID):
-				if applyErr := h.applyArchiveValues(e, frame.Values); applyErr != nil {
+				if applyErr := h.applyArchiveValues(e, frame.Values, connectionStart); applyErr != nil {
 					h.endFaceConnection(e, true, applyErr)
 					return t3ShellConnResult{syncedAt: e.syncConfirmedAt()}
 				}
@@ -700,7 +704,9 @@ func (h *t3ShellHub) readArchiveLegacyLoop(e *t3ShellEntry, session *t3RPCSessio
 			// 失效的正确动作是断开后由监督循环重连——新 subscribe 即收权威
 			// 全量快照。常驻流只收增量，「增量落地后整表重置」会把归档面
 			// 清空到下一次断线（R3 P1-B）。信号可早到/重复：备忘已被权威
-			// 快照或连接终止清掉时 consume 为假，忽略即可。
+			// 快照（邮戳 ≥ 备忘世代的那张）或连接终止清掉时 consume 为假，
+			// 忽略即可。备忘世代比本连接邮戳新时不做门控——那正是「本连接
+			// 的订阅取的是变更前状态」的证据，断开它就是兑现（R4 P2）。
 			if !e.state.consumeArchiveReconnect() {
 				continue
 			}
@@ -718,15 +724,16 @@ func (h *t3ShellHub) readArchiveLegacyLoop(e *t3ShellEntry, session *t3RPCSessio
 }
 
 // applyArchiveValues 把旧归档流 Chunk 的全部 value 依次解码并应用到状
-// 态，发布语义同活跃面。
-func (h *t3ShellHub) applyArchiveValues(e *t3ShellEntry, values []json.RawMessage) error {
+// 态，发布语义同活跃面。connectionStart 是本连接的 reconnect 出发邮戳，
+// 交给快照项做守旧备忘的世代判定（R4 P2）。
+func (h *t3ShellHub) applyArchiveValues(e *t3ShellEntry, values []json.RawMessage, connectionStart int64) error {
 	batch := t3ShellEventBatch{}
 	for _, raw := range values {
 		var item t3ArchiveStreamItem
 		if err := json.Unmarshal(raw, &item); err != nil {
 			return fmt.Errorf("归档流帧解析失败: %w", err)
 		}
-		if err := e.state.applyArchiveItem(item); err != nil {
+		if err := e.state.applyArchiveItem(item, connectionStart); err != nil {
 			return err
 		}
 		batch.observeArchive(&item)

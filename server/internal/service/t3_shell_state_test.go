@@ -848,3 +848,116 @@ func TestShellState_AdmitArchiveRefreshIsAtomicWithRevoke(t *testing.T) {
 		t.Fatalf("archiveReady must be revoked in the same critical section as inFlight")
 	}
 }
+
+// 旧面 reconnect 世代护栏（R4 P2，Preserve newer legacy reconnect
+// requests）：新连接已发出权威快照、但快照尚未 apply 的窗口里又记了一次
+// reconnect 请求（RefreshArchive/失效）时，该快照是「变更前」的——落地不
+// 得清掉这份更新的备忘（旧实现无条件清，已排队的 reconnect 信号被无视，
+// wait 拿写前数据判 thread_gone 直到下一个事件）。世代规则：备忘只能被
+// 「出发邮戳（subscribe 发出时读到的请求世代）≥ 备忘世代」的连接的快照
+// 清掉；被变更前快照挡下的备忘由读循环的信号分支消费——断开本连接、监
+// 督循环重连后新连接的 subscribe 必在请求之后发出，其快照必为写后。
+func TestShellState_LegacyReconnectGenerationGuard(t *testing.T) {
+	state := newT3ShellState()
+
+	// 连接 A 建立（邮戳=当时已发出的请求数 0），第一次失效记请求 gen1。
+	connA := state.archiveReconnectTarget()
+	if connA != 0 {
+		t.Fatalf("fresh state must have no issued reconnect requests, got %d", connA)
+	}
+	if gen := state.noteArchiveReconnectRequested(); gen != 1 {
+		t.Fatalf("first reconnect request generation = %d, want 1", gen)
+	}
+	// gen1 的信号被读循环消费：连接 A 按备忘断开，监督循环重连出连接 B。
+	if !state.consumeArchiveReconnect() {
+		t.Fatalf("connA read loop must consume the pending request")
+	}
+	connB := state.archiveReconnectTarget()
+	if connB != 1 {
+		t.Fatalf("connB postmark = %d, want 1", connB)
+	}
+	// 连接 B 订阅后即收到权威快照——但快照尚未 apply 时第二次失效记入
+	// gen2（write-in-flight）：这份快照是在 gen2 请求之前发出的。
+	if gen := state.noteArchiveReconnectRequested(); gen != 2 {
+		t.Fatalf("second reconnect request generation = %d, want 2", gen)
+	}
+	// 变更前快照落地（连接 B 邮戳 1 < 备忘 gen2）：换数据、恢复可信，但
+	// 不得吞掉 gen2 的备忘——它是写前状态，还欠一次写后重连。
+	if err := state.applyArchiveItem(t3ArchiveStreamItem{
+		Kind:     "snapshot",
+		Snapshot: &t3ArchivedShellSnapshot{SchemaVersion: 1, SnapshotSequence: 9, Threads: shellTestThreads(shellTestThread("th-stale", "变更前"))},
+	}, connB); err != nil {
+		t.Fatalf("apply stale-window snapshot: %v", err)
+	}
+	if state.archiveReconnectPendingGen != 2 {
+		t.Fatalf("pre-change snapshot must NOT clear the newer pending request, pending = %d", state.archiveReconnectPendingGen)
+	}
+	// 兑现路径：gen2 的信号送达连接 B 的读循环——备忘在，消费并断开本
+	// 连接（不做邮戳门控：备忘比本连接邮戳新正是「须断开」的证据）。
+	if !state.consumeArchiveReconnect() {
+		t.Fatalf("connB read loop must consume the request recorded during its snapshot window")
+	}
+	// 监督循环重连出连接 C：subscribe 在 gen2 之后发出（邮戳=2），其快照
+	// 必为写后状态——落地清备忘并交付写后全量。
+	connC := state.archiveReconnectTarget()
+	if connC != 2 {
+		t.Fatalf("connC postmark = %d, want 2", connC)
+	}
+	if err := state.applyArchiveItem(t3ArchiveStreamItem{
+		Kind:     "snapshot",
+		Snapshot: &t3ArchivedShellSnapshot{SchemaVersion: 1, SnapshotSequence: 10, Threads: shellTestThreads(shellTestThread("th-fresh", "写后"))},
+	}, connC); err != nil {
+		t.Fatalf("apply post-change snapshot: %v", err)
+	}
+	if state.archiveReconnectPendingGen != 0 {
+		t.Fatalf("post-change snapshot must clear the fulfilled memo, pending = %d", state.archiveReconnectPendingGen)
+	}
+	snaps := state.snapshots()
+	if len(snaps.Archived.Threads) != 1 || snaps.Archived.Threads[0].ID != "th-fresh" {
+		t.Fatalf("post-change snapshot must carry the write-behind rows, got %+v", snaps.Archived.Threads)
+	}
+	if snaps.ArchiveErr != nil {
+		t.Fatalf("post-change snapshot must restore trust, ArchiveErr = %v", snaps.ArchiveErr)
+	}
+}
+
+// reconnect 世代规则的边角：备忘被清后晚到/重复的信号为假（沿用旧语
+// 义）；连接终止作废备忘但 issued 不回卷，新请求世代继续推进。
+func TestShellState_LegacyReconnectMemoLifecycle(t *testing.T) {
+	state := newT3ShellState()
+
+	connA := state.archiveReconnectTarget()
+	if gen := state.noteArchiveReconnectRequested(); gen != 1 {
+		t.Fatalf("request generation = %d, want 1", gen)
+	}
+	// 同世代快照清备忘：连接 B 邮戳=1，它拿到的快照「确在请求之后」。
+	connB := state.archiveReconnectTarget()
+	if connB != 1 {
+		t.Fatalf("connB postmark = %d, want 1", connB)
+	}
+	if err := state.applyArchiveItem(t3ArchiveStreamItem{
+		Kind:     "snapshot",
+		Snapshot: &t3ArchivedShellSnapshot{SchemaVersion: 1, SnapshotSequence: 3, Threads: shellTestThreads()},
+	}, connB); err != nil {
+		t.Fatalf("apply snapshot: %v", err)
+	}
+	if state.archiveReconnectPendingGen != 0 {
+		t.Fatalf("snapshot from a connection that postdates the request must clear the memo, pending = %d", state.archiveReconnectPendingGen)
+	}
+	// 备忘已清时晚到/重复的信号为假（忽略即可）。
+	if state.consumeArchiveReconnect() {
+		t.Fatalf("cleared memo must not consume")
+	}
+	// 连接终止作废备忘但 issued 不回卷：再记请求世代继续推进。
+	if gen := state.noteArchiveReconnectRequested(); gen != 2 {
+		t.Fatalf("re-request must issue a fresh generation, got %d", gen)
+	}
+	state.markArchiveFailed(errors.New("conn dead"))
+	if state.archiveReconnectPendingGen != 0 {
+		t.Fatalf("connection end must void the memo, pending = %d", state.archiveReconnectPendingGen)
+	}
+	if gen := state.noteArchiveReconnectRequested(); gen != 3 {
+		t.Fatalf("issued counter must never rewind, generation = %d, want 3", gen)
+	}
+	_ = connA
+}

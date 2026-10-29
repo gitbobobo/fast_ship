@@ -184,15 +184,30 @@ type t3ShellState struct {
 	// 清除。
 	archiveStale bool
 
-	// archiveReconnectPending 是旧面订阅路径独有的「请重建归档订阅」备忘
-	// （守旧游标）：常驻流没有按需拉取可发——除重连外上游只推增量、不
+	// archiveReconnectPendingGen 是旧面订阅路径独有的「请重建归档订阅」
+	// 备忘（守旧游标），以单调世代表达：0 表示无未决请求，>0 表示最新一
+	// 次请求的世代。常驻流没有按需拉取可发——除重连外上游只推增量、不
 	// 自发重发全量，RefreshArchive 强拉与写后失效要取回写后全量只能靠
 	// 断开重连（新 subscribe 即收权威快照）。备忘由读循环的
 	// legacyReconnect 分支消费后主动断开（R3 P1-B：增量落地后整表重置
 	// 会让归档面长期不可信）。只被 archiveLegacy 模式读写，统一记在
 	// s.mu 下——arch.mu 掺与 state 判定会造成 arch.mu → s.mu 的反向嵌套
 	// （R3 P1-A，全局锁序 entry.mu → s.mu → arch.mu）。
-	archiveReconnectPending bool
+	//
+	// 世代护栏（R4 P2，Preserve newer legacy reconnect requests）：一条
+	// reconnect 请求只能被「确在该请求之后发出的快照」清掉——每条连接
+	// 在 subscribe 发出后记一个出发邮戳（当时已发出的请求世代），快照落
+	// 地时以「邮戳 ≥ 备忘世代」为清备忘条件：备忘更新（请求记在本连接
+	// 建立之后）说明本连接的订阅取的是变更前状态，其快照不得吞掉备忘——
+	// 否则已排队的 reconnect 信号被无视，wait 拿写前数据判 thread_gone
+	// 直到下一个事件/重连。兑现路径不变：读循环的信号分支消费备忘即断
+	// 开本连接，监督循环重连后新连接的 subscribe 必在该请求之后发出，
+	// 其快照必为写后状态，落地自然清掉备忘（邮戳 ≥ 备忘世代）。
+	archiveReconnectPendingGen int64
+	// archiveReconnectIssued 是已发出的 reconnect 请求总数（最新请求的世
+	// 代编号）。与 pending 分离：consume/连接终止只清 pending，不回卷本
+	// 计数——它是新请求世代的来源，也是连接出发邮戳的取值来源。
+	archiveReconnectIssued int64
 }
 
 func newT3ShellState() *t3ShellState {
@@ -434,8 +449,10 @@ func (s *t3ShellState) archiveGenerationNow() int64 {
 // applyArchiveItem 应用一个旧归档订阅流项（无 location 字段）。旧面是全
 // 量快照 + 增量的常驻流：snapshot 整体重置归档表，updated/removed 按项
 // 维护。坏帧返回错误，由订阅路径整条流失败重连（不得静默跳过然后继续
-// 宣称可信）——快照落地后清守旧备忘。
-func (s *t3ShellState) applyArchiveItem(item t3ArchiveStreamItem) error {
+// 宣称可信）。connectionStart 是本连接发出 subscribe 时刻读到的 reconnect
+// 请求世代（出发邮戳）——快照项据此判定能否清守旧备忘（见
+// applyArchiveSnapshotLocked）。
+func (s *t3ShellState) applyArchiveItem(item t3ArchiveStreamItem, connectionStart int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	switch item.Kind {
@@ -443,13 +460,7 @@ func (s *t3ShellState) applyArchiveItem(item t3ArchiveStreamItem) error {
 		if item.Snapshot == nil {
 			return fmt.Errorf("归档快照帧缺少 snapshot 字段")
 		}
-		if err := s.applyArchiveSnapshotLocked(*item.Snapshot); err != nil {
-			return err
-		}
-		// 权威全量快照即是重连取写后状态的完成：撤销尚存的重建备忘，
-		// 避免晚到的信号再把刚恢复的面拆掉一次。
-		s.archiveReconnectPending = false
-		return nil
+		return s.applyArchiveSnapshotLocked(*item.Snapshot, connectionStart)
 	case "thread.updated":
 		if item.Sequence == nil || item.Thread == nil || item.Thread.ID == "" {
 			return fmt.Errorf("归档 thread.updated 帧缺少 sequence/thread/threadId")
@@ -468,10 +479,20 @@ func (s *t3ShellState) applyArchiveItem(item t3ArchiveStreamItem) error {
 }
 
 // applyArchiveSnapshotLocked 是订阅模式下的快照整体替换（调用方须已持有
-// 锁）：与按需路径的 applyArchiveSnapshot 同体但不带世代/commit——常驻流
-// 的数据来自权威推送，没有「拉取途中被失效」的交错，可信化无条件成立。
-// 快照里的 Projects 一律忽略（F7）：项目表只有活跃面一份权威来源。
-func (s *t3ShellState) applyArchiveSnapshotLocked(snapshot t3ArchivedShellSnapshot) error {
+// 锁）：与按需路径的 applyArchiveSnapshot 同体但不带失效世代/commit——常
+// 驻流的数据来自权威推送，没有「拉取途中被失效」的交错，可信化无条件
+// 成立。快照里的 Projects 一律忽略（F7）：项目表只有活跃面一份权威来
+// 源。
+//
+// reconnect 世代护栏（R4 P2）：connectionStart 是本连接的出发邮戳
+// （subscribe 发出时读到的请求世代）——本快照必在该连接之后发出，故它
+// 一定晚于所有世代 ≤ 邮戳的请求。仅当邮戳不小于当前备忘世代时本快照
+// 才算「该请求之后的权威状态」、才清备忘；备忘更新（请求记在快照发出
+// 之后）时本快照是变更前状态，保留备忘——兑现交给读循环的信号分支：
+// 信号必随该请求送达本连接的读循环（chan 缓冲 1 且每连接只有一个读循
+// 环消费者，不会被快照吞掉），消费即断开本连接，下一条连接的 subscribe
+// 必在请求之后发出，其快照必为写后状态。
+func (s *t3ShellState) applyArchiveSnapshotLocked(snapshot t3ArchivedShellSnapshot, connectionStart int64) error {
 	if err := s.archivedThreads.reset(snapshot.Threads, func(t *t3ThreadShell) string { return t.ID }); err != nil {
 		return fmt.Errorf("归档快照线程缺少 ID: %w", err)
 	}
@@ -480,6 +501,11 @@ func (s *t3ShellState) applyArchiveSnapshotLocked(snapshot t3ArchivedShellSnapsh
 	s.archiveReady = true
 	s.archiveErr = nil
 	s.archiveStale = false
+	if connectionStart >= s.archiveReconnectPendingGen {
+		// 权威全量快照即是重连取写后状态的完成：撤销尚存的重建备忘，
+		// 避免晚到的信号再把刚恢复的面拆掉一次。
+		s.archiveReconnectPendingGen = 0
+	}
 	return nil
 }
 
@@ -495,36 +521,56 @@ func (s *t3ShellState) markArchiveFailed(err error) {
 	s.archiveReady = false
 	s.archiveStale = false
 	s.archiveErr = err
-	// 连接终止即弃用归档面：重建备忘随本连接一起作废——若已有新连接
-	// 在跑，它自己的订阅会拿全量；没有则监督循环正退避重连。
-	s.archiveReconnectPending = false
+	// 连接终止即弃用归档面：重建备忘随本连接一起作废——连接已死，兑
+	// 现搭监督循环自然重连的车：下一条连接的 subscribe 必在该请求之后
+	// 发出，其快照必为写后状态。只清备忘不回卷 issued 计数：它是后序
+	// 请求世代与连接邮戳的取值来源。
+	s.archiveReconnectPendingGen = 0
 }
 
 // noteArchiveReconnectRequested 记订阅模式的「请重建连接」备忘（守旧
 // 游标）：RefreshArchive/失效在订阅路径上无独立拉取可发，归档面先标为
 // 「已失效重拉中」（不得把备忘期间的面报为完整）；读循环经
 // legacyReconnect 信号唤醒后经 consumeArchiveReconnect 消费并断开，
-// 监督循环重连取回权威全量。
-func (s *t3ShellState) noteArchiveReconnectRequested() {
+// 监督循环重连取回权威全量。每次请求推进世代（即使备忘本就置位——
+// 后到的请求必须能从更早连接发出的快照里区分出来，世代护栏依据），
+// 返回本次请求的世代。
+func (s *t3ShellState) noteArchiveReconnectRequested() int64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.archiveReconnectPending = true
+	s.archiveReconnectIssued++
+	s.archiveReconnectPendingGen = s.archiveReconnectIssued
 	s.archiveReady = false
 	s.archiveStale = true
 	if s.archiveErr == nil {
 		s.archiveErr = errT3ShellArchiveStale
 	}
+	return s.archiveReconnectPendingGen
 }
 
 // consumeArchiveReconnect 原子读取并清除重建备忘：返回 true 表示有未消费
-// 的请求，调用方（旧面读循环）应断开本连接交监督循环重连。信号先到、
-// 备忘已被权威快照/连接终止清掉时返回 false，信号忽略。
+// 的请求，调用方（旧面读循环）应断开本连接交监督循环重连。不做邮戳门
+// 控——备忘世代比本连接邮戳新正是「须断开本连接」的情形（本连接的订
+// 阅取的是变更前状态）；兑现不靠本连接等，靠断开后下一条连接的写后订
+// 阅。信号先到、备忘已被权威快照（邮戳 ≥ 备忘世代的那张）或连接终止
+// 清掉时返回 false，信号忽略。
 func (s *t3ShellState) consumeArchiveReconnect() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	pending := s.archiveReconnectPending
-	s.archiveReconnectPending = false
+	pending := s.archiveReconnectPendingGen != 0
+	s.archiveReconnectPendingGen = 0
 	return pending
+}
+
+// archiveReconnectTarget 返回已发出的 reconnect 请求总数（最新请求的世
+// 代；从未请求过为 0）。旧面连接在 subscribe 发出后取它作出发邮戳
+// （connectionStart）：本连接之后发出的快照必晚于所有世代 ≤ 该值的请
+// 求，快照落地时据此判定备忘可清与否（R4 P2）。只增不减——备忘被消
+// 费/作废不回卷它，否则新请求的世代会与旧请求撞号。
+func (s *t3ShellState) archiveReconnectTarget() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.archiveReconnectIssued
 }
 
 // noteArchiveFetchFailed 记一次归档快照读取失败（INT-173）：不清数据、不改

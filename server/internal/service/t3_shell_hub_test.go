@@ -2639,3 +2639,118 @@ func TestT3ShellHub_LegacyPendingDoesNotDeadlock(t *testing.T) {
 		t.Fatalf("invalidate must not deadlock against in-flight archive work")
 	}
 }
+
+// 旧面 reconnect 世代护栏（R4 P2）：重连的新连接已发出权威快照、但快照
+// 尚未 apply 的窗口里又一次失效，「变更前快照」落地不得吞掉该请求的
+// 备忘——读循环的信号分支须消费到它、断开该连接并再重连一次取写后全
+// 量。旧实现落地即清备忘：信号到的时候备忘已空、被忽略，写前数据被当
+// 成当前可信，wait 会拿陈旧归档集判 thread_gone 直到下一个事件/重连。
+// 交错用 s.mu 精确排出（禁用竞态）：持锁阻住落地 → 发送快照帧（frame
+// 已发出但 apply 阻塞在 s.mu 上）→ 失效记入新备忘 → 放锁 → 断言「快照
+// 落地但备忘仍在、连接随后被拆」。
+func TestT3ShellHub_LegacyReconnectPreservesNewerRequest(t *testing.T) {
+	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
+	srv.setArchiveLegacy(true)
+	srv.setArchiveFixture(archiveSnapshotBody(1, "th-a"), nil)
+	hub := newT3ShellHubWithConfig(hubTestConfig(), nil)
+	defer hub.Close()
+	env := hubTestEnv(url, 0)
+
+	// 活跃面先就位；归档按需探测被判方法不存在 → 旧面订阅激活。
+	go hub.View(context.Background(), env, "tok")
+	collector := newShellConnCollector(t, srv)
+	active := collector.await(false)
+	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1")); err != nil {
+		t.Fatalf("send active snapshot: %v", err)
+	}
+	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
+		t.Fatalf("active snapshot not acked")
+	}
+	srv.awaitArchiveSub(t)
+	conn1 := <-srv.archiveConns
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil && len(v.Snaps.Archived.Threads) == 1
+	})
+
+	// 第一次失效：连接1被拆、监督循环重连出连接2。连接2的订阅应答快照
+	// 由 fake 在受理时自动推送——但内容按应答时刻的 fixture（此时仍是
+	// 写前的 th-a 单线程体），它正是「变更前快照」。
+	hub.InvalidateArchive("user-1", "env-1")
+	if !conn1.awaitClosed(3 * time.Second) {
+		t.Fatalf("first invalidation must end conn1")
+	}
+	sub2 := srv.awaitArchiveSub(t)
+	conn2 := <-srv.archiveConns
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil
+	})
+
+	// 上游在连接2订阅之后、第二次失效之前把归档集改成写后状态——连接3
+	// 的订阅应答将携带它；连接2已发的快照则是变更前数据。
+	srv.setArchiveFixture(archiveSnapshotBody(2, "th-a", "th-b"), nil)
+
+	key := t3ShellHubKey("user-1", "env-1")
+	hub.mu.Lock()
+	entry := hub.entries[key]
+	hub.mu.Unlock()
+	if entry == nil {
+		t.Fatalf("entry missing")
+	}
+
+	// 排交错（仅在非 -race 构建下有区分度；race 下本用例退化为「失效与
+	// 落地乱序」的两种合法结局，其中备忘被信号消费也是正确路径，后面
+	// 的断言两种结局都接受——真正的门控回归只在「备忘被清且连接2未
+	// 被拆」时炸出）。
+	entry.state.mu.Lock()
+	thStale, _ := json.Marshal(map[string]any{"id": "th-a", "projectId": "p-1", "title": "归档-th-a", "status": "idle", "archivedAt": "2026-10-01T00:00:00.000Z"})
+	staleSnap, _ := json.Marshal(map[string]any{
+		"kind": "snapshot",
+		"snapshot": map[string]any{
+			"schemaVersion": 1, "snapshotSequence": 5,
+			"projects": []map[string]any{{"id": "p-1", "title": "Fast Ship", "workspaceRoot": "/repo"}},
+			"threads":  []json.RawMessage{thStale},
+		},
+	})
+	if err := conn2.sendValue(sub2.ID, staleSnap); err != nil {
+		entry.state.mu.Unlock()
+		t.Fatalf("send stale-window snapshot: %v", err)
+	}
+	// 快照帧已发出、落地被 s.mu 阻住——此刻在另一 goroutine 记第二次失
+	// 效（失效自身取 s.mu，同步调会把测试卡死在自持锁上）：它阻塞在
+	// s.mu 上正好排在「落地」之后，构成「帧已发出、apply 前失效」的窗
+	// 口交错。
+	invDone := make(chan struct{})
+	go func() {
+		hub.InvalidateArchive("user-1", "env-1")
+		close(invDone)
+	}()
+	entry.state.mu.Unlock()
+	select {
+	case <-invDone:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("invalidation must land after the snapshot apply releases s.mu")
+	}
+
+	// 断言：变更前快照不得吞掉更新的备忘——读循环的信号分支消费到它
+	// 后必须拆掉连接2（旧实现落地即清备忘，信号被忽略，连接2会一直活
+	// 着把写前数据当最终可信态）。
+	if !conn2.awaitClosed(3 * time.Second) {
+		t.Fatalf("newer reconnect request must survive the pre-change snapshot and end conn2")
+	}
+
+	// 断言2：第三次重连拿到写后全量——备忘兑现的证据是连接3的订阅应
+	// 答携带 th-b（订阅受理时的 fixture 已是写后状态）。
+	srv.awaitArchiveSub(t)
+	conn3 := <-srv.archiveConns
+	view := waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil && len(v.Snaps.Archived.Threads) == 2
+	})
+	ids := map[string]bool{}
+	for _, th := range view.Snaps.Archived.Threads {
+		ids[th.ID] = true
+	}
+	if !ids["th-a"] || !ids["th-b"] {
+		t.Fatalf("archive face must recover post-change rows via the extra reconnect, got %+v", view.Snaps.Archived.Threads)
+	}
+	_ = conn3
+}
