@@ -439,7 +439,7 @@ func (h *t3ShellHub) newEntryLocked(key string, env *model.T3Environment, token 
 		notify:     make(chan struct{}),
 		activeConn: t3ShellConnConnecting,
 		archTTL:    h.cfg.ArchiveTTL,
-		legacyCh:   make(chan struct{}),
+		legacyCh:   make(chan struct{}, 1),
 		// 缓冲 1：信号丢失/重复都无害（读循环消费前再核对 state 备忘，
 		// 见 readArchiveLegacyLoop 的 legacyReconnect 分支）。
 		legacyReconnect: make(chan struct{}, 1),
@@ -460,15 +460,10 @@ func (h *t3ShellHub) newEntryLocked(key string, env *model.T3Environment, token 
 	}()
 	go func() {
 		defer e.wg.Done()
-		// 停泊：旧面回退从未激活（新上游）时随 entry 停/hub 关退出；激活后
-		// 转为常驻订阅监督循环。
-		select {
-		case <-e.legacyCh:
-		case <-e.stop:
-			return
-		case <-h.ctx.Done():
-			return
-		}
+		// 停泊与激活由监督循环首部的 mode 闸门承担（waitArchiveLegacyActive）：
+		// mode=Unknown 期间停在 legacyCh 上（不占连接、不打上游），
+		// switchToArchiveLegacy 放行；自愈回 Unknown 后闸门重新停泊，可重复
+		// 激活。entry 停/hub 关时闸门退出，goroutine 随之结束。
 		h.runArchiveLegacySubscription(e)
 	}()
 	// done 在全部监督 goroutine 退出后关闭，供测试汇合；同时释放 hub 的
@@ -519,17 +514,24 @@ type t3ShellEntry struct {
 	// 的变化（如「网络不可达」→「凭证被拒」）对用户是不同的提示，也要触发。
 	publishedState string
 	publishedErr   string
+	// archAnnounced 是归档面已对外发布过的可见状态指纹
+	// （publishArchiveFaceEvent 的去重基准，审修 R9 P2-2）：TTL 例行重拉
+	// 同一份数据、同一 ArchiveErr 反复失败都靠它与当前指纹的比较静默。
+	// 守 e.mu，与 publishedState 同型同锁。
+	archAnnounced t3ArchiveAnnounced
 
 	stop     chan struct{}
 	stopOnce sync.Once
 	wg       sync.WaitGroup
 	done     chan struct{}
 
-	// legacyCh 是旧面归档订阅 goroutine 的激活信号：entry 创建时停泊在
-	// select 上（不占连接、不打上游）；按需快照被判「方法明确拒绝」后由
-	// switchToArchiveLegacy 关闭，goroutine 随即进入常驻订阅监督循环。
-	// 用 channel 而不是「发现失败时直接 go」——entry 创建时 wg.Add 已完成，
-	// 中途 Add 会与 done 观察者的 Wait 竞态（sync 文档禁止）。
+	// legacyCh 是旧面归档订阅 goroutine 的激活信号（缓冲 1，非阻塞发送）：
+	// entry 创建时监督循环停在 mode 闸门上（不占连接、不打上游）；按需快照
+	// 被判「方法明确拒绝」后 switchToArchiveLegacy 发信号放行；自愈回
+	// Unknown 后再次切换时重复发信号、重复放行。信号只是唤醒——闸门醒来
+	// 复核 mode 现值，多余的信号留在缓冲里无害。用 channel 而不是「发现失
+	// 败时直接 go」——entry 创建时 wg.Add 已完成，中途 Add 会与 done 观察者
+	// 的 Wait 竞态（sync 文档禁止）。
 	legacyCh chan struct{}
 
 	// legacyReconnect 是旧面归档订阅的「请重建连接」信号：写后失效在订阅
@@ -1059,13 +1061,18 @@ func (h *t3ShellHub) readStreamLoop(e *t3ShellEntry, session *t3RPCSession, conn
 // ——读错误/写失败/正常 Exit/取消/探测或拨号失败——统一撤销归档面可
 // 信度（清空归档表 + ArchiveErr，同旧 F2），直到下一次归档权威快照到
 // 达才恢复，并发布一次 Full 事件（列表需要把「归档暂不可读」呈现）。
-// 活跃面只更新连接状态与失败分类：单面终止不推翻活跃数据（G1），View
-// 的 Stale 判定用得上最近一次真实失败原因。err 为 nil（停机取消）时记
-// 「未就绪」而不抹掉既有失败原因。
+// 收尾以 mode==legacy 为前提（审修 R9 P2-1）：自愈回 Unknown 后尚未收尾
+// 的旧面残余连接，其终止只说明「订阅通道不存在」，不推翻已由按需面接管
+// 的归档数据——那时清表会让可信的归档行凭空消失，且 kick 被簿记封窗时
+// 无人补拉，归档面整整消失一个 TTL。发布经指纹去重：同一错误反复失败
+// （真旧环境的退避重连循环）只说一次，不再每轮重连都 Full。活跃面只更新
+// 连接状态与失败分类：单面终止不推翻活跃数据（G1），View 的 Stale 判定用
+// 得上最近一次真实失败原因。err 为 nil（停机取消）时记「未就绪」而不抹
+// 掉既有失败原因。
 func (h *t3ShellHub) endFaceConnection(e *t3ShellEntry, archived bool, connErr error) {
-	if archived {
+	if archived && e.archiveLegacyActive() {
 		e.state.markArchiveFailed(connErr)
-		h.publishThreadEvent(e, nil, true)
+		h.publishArchiveFaceEvent(e, false)
 	}
 	e.noteConnState(archived, t3ShellConnFailed, connErr)
 	if connErr != nil {

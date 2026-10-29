@@ -681,3 +681,27 @@ func (s *t3ShellState) snapshots() *t3ShellSnapshots {
 	}
 	return snaps
 }
+
+// archiveFaceFingerprint 返回归档面的对外可见状态指纹：过滤活跃面残留后
+// 的线程 ID 序列（与 snapshots() 交给浏览器的归档列表同集同序）+ ArchiveErr
+// 文案（含「未就绪」兜底，与 snapshots() 的 archiveErr 同一推导）。发布端
+// 以两次指纹的相等性判定「对外是否有新话可说」，见 publishArchiveFaceEvent
+// ——没有指纹比对，TTL 例行重拉同一份快照也会每次发 Full，前端被迫整环境
+// 重取（审修 R9 P2-2）。
+func (s *t3ShellState) archiveFaceFingerprint() ([]string, string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ids := make([]string, 0, s.archivedThreads.len())
+	for _, id := range s.archivedThreads.order {
+		if _, live := s.activeThreads.byID[id]; !live {
+			ids = append(ids, id)
+		}
+	}
+	errText := ""
+	if s.archiveErr != nil {
+		errText = s.archiveErr.Error()
+	} else if !s.archiveReady {
+		errText = errT3ShellArchiveNotReady.Error()
+	}
+	return ids, errText
+}

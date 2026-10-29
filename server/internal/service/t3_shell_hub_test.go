@@ -126,9 +126,13 @@ type fakeShellStreamServer struct {
 	// 失败已送达）——模拟「本该有订阅面的环境却没有该方法」（环境中途
 	// 升级/误判自愈用例，审修 R8 P2），或非方法级订阅失败（不误重置
 	// 用例）。
-	archSubFail  map[string]any
-	archiveSubs  chan fakeShellRequest // 收到的 subscribeArchivedShell 请求
-	archiveConns chan *fakeShellConn   // 旧面订阅连接
+	archSubFail map[string]any
+	// archiveSubTotal 是 subscribeArchivedShell 的累计受理次数（审修 R9
+	// P2-1「自愈后不再发订阅」的计数证据）：含所有分支——非 legacy 的拒
+	// 绝、定制失败、掐断、正常受理，只要客户端发出订阅就计数。
+	archiveSubTotal atomic.Int64
+	archiveSubs     chan fakeShellRequest // 收到的 subscribeArchivedShell 请求
+	archiveConns    chan *fakeShellConn   // 旧面订阅连接
 	// archPaused 暂停归档快照应答（Finding A 交错测试用）：暂停发生在应答
 	// 派发而非收帧循环上——handler 仍会把请求收进 requests 通道，测试据此
 	// 确认「在途拉取已发起」再精确放行，而不是靠 sleep 猜时序。
@@ -239,6 +243,7 @@ func (s *fakeShellStreamServer) handler(conn *websocket.Conn) {
 					_ = sendExitSuccessFrame(conn, req.ID, resp.value)
 				}
 			case "orchestration.subscribeArchivedShell":
+				s.archiveSubTotal.Add(1)
 				s.mu.Lock()
 				legacy := s.archLegacy
 				subFail := s.archSubFail
@@ -469,6 +474,11 @@ func (s *fakeShellStreamServer) awaitArchiveSub(t *testing.T) fakeShellRequest {
 		t.Fatalf("timed out waiting for subscribeArchivedShell")
 		return fakeShellRequest{}
 	}
+}
+
+// archiveSubscribeCount 返回 subscribeArchivedShell 的累计受理次数。
+func (s *fakeShellStreamServer) archiveSubscribeCount() int {
+	return int(s.archiveSubTotal.Load())
 }
 
 func sendExitSuccessFrame(conn *websocket.Conn, id int, value json.RawMessage) error {
@@ -3743,4 +3753,266 @@ func TestT3ShellHub_LegacyVoluntaryReconnectDoesNotBackoff(t *testing.T) {
 		t.Fatalf("real failures must keep deepening the backoff, gap1=%v gap2=%v", gap12, gap23)
 	}
 	srv.setArchiveDrop(false)
+}
+
+// 自愈后旧面监督循环收缰（审修 R9 P2-1，end-to-end）：订阅被判方法不存在
+// → mode 回 Unknown 后，监督循环必须重新停泊——不再发任何 subscribe；按
+// 需面接管供数，持续观察 2×TTL（含 TTL 到期重拉）：归档行不再被清空、
+// 可信度至多是「过期重拉在途」的短暂 stale。旧实现里残余订阅连接的反复
+// 失败经 endFaceConnection 每轮 markArchiveFailed 清表，而 kick 被簿记封
+// 窗短路不重拉，归档面整整消失一个 TTL（1.5s 内 147/150 次 Peek 得
+// ArchiveErr、归档行 0）。
+func TestT3ShellHub_LegacyHealQuietAfterUpgrade(t *testing.T) {
+	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
+	srv.setArchiveLegacy(true)
+	srv.setArchiveFixture(archiveSnapshotBody(1, "th-a"), nil)
+	cfg := hubTestConfig()
+	cfg.ArchiveTTL = 80 * time.Millisecond
+	hub := newT3ShellHubWithConfig(cfg, nil)
+	defer hub.Close()
+	env := hubTestEnv(url, 0)
+
+	// 旧面就绪：按需快照被判方法不存在 → 切订阅面供数。
+	go hub.View(context.Background(), env, "tok")
+	collector := newShellConnCollector(t, srv)
+	active := collector.await(false)
+	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1")); err != nil {
+		t.Fatalf("send active snapshot: %v", err)
+	}
+	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
+		t.Fatalf("active snapshot not acked")
+	}
+	srv.awaitArchiveSub(t)
+	conn1 := <-srv.archiveConns
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil && len(v.Snaps.Archived.Threads) == 1
+	})
+	probeCalls := srv.archiveCallCount()
+
+	// 环境升级：按需方法恢复可用、订阅方法消失（fake 的 archLegacy=false
+	// 即新上游）。旧连接断开后监督循环重连的那条连接收到「方法不存在」
+	// 的 Exit → mode 回 Unknown，这是自愈落地的证据；此后基线才可信。
+	srv.setArchiveLegacy(false)
+	conn1.closeConn()
+	key := t3ShellHubKey("user-1", "env-1")
+	hub.mu.Lock()
+	entry := hub.entries[key]
+	hub.mu.Unlock()
+	if entry == nil {
+		t.Fatalf("entry missing")
+	}
+	healed := false
+	for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); {
+		entry.arch.mu.Lock()
+		mode := entry.arch.mode
+		entry.arch.mu.Unlock()
+		if mode == t3ArchiveModeUnknown {
+			healed = true
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !healed {
+		t.Fatalf("method-not-found subscribe exit must reset mode to Unknown")
+	}
+
+	// 按需面接管：kick 重探测按需快照成功，归档恢复可信。
+	probed := false
+	for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); {
+		if _, err := hub.Peek(env, "tok"); err != nil {
+			t.Fatalf("peek: %v", err)
+		}
+		if srv.archiveCallCount() > probeCalls {
+			probed = true
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !probed {
+		t.Fatalf("healed mode must re-probe the on-demand snapshot")
+	}
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil && len(v.Snaps.Archived.Threads) == 1
+	})
+
+	// 持续观察 2×TTL（含至少一次 TTL 到期重拉）：归档行恒在（不再被
+	// 清空）、非 stale 的 ArchiveErr 恒不出现、订阅计数钉在基线。
+	baselineSubs := srv.archiveSubscribeCount()
+	baselineCalls := srv.archiveCallCount()
+	deadline := time.Now().Add(2*cfg.ArchiveTTL + 60*time.Millisecond)
+	for time.Now().Before(deadline) {
+		v, err := hub.Peek(env, "tok")
+		if err != nil {
+			t.Fatalf("peek: %v", err)
+		}
+		if v.Snaps == nil {
+			t.Fatalf("healed archive view missing snaps")
+		}
+		if len(v.Snaps.Archived.Threads) != 1 {
+			t.Fatalf("healed archive face must never be cleared, rows=%d", len(v.Snaps.Archived.Threads))
+		}
+		if v.Snaps.ArchiveErr != nil && !errors.Is(v.Snaps.ArchiveErr, errT3ShellArchiveStale) {
+			t.Fatalf("healed archive face must stay trusted, err=%v", v.Snaps.ArchiveErr)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := srv.archiveSubscribeCount(); got != baselineSubs {
+		t.Fatalf("healed entry must not subscribe again, subs %d → %d", baselineSubs, got)
+	}
+	if srv.archiveCallCount() <= baselineCalls {
+		t.Fatalf("observation window must include TTL re-pulls (window not vacuous)")
+	}
+}
+
+// endFaceConnection 的归档收尾按 mode 把关（审修 R9 P2-1，单元口径）：
+// 非 legacy（按需面接管）下旧面残余连接终止不清表、不写 ArchiveErr、
+// 不发事件；legacy 下终止照旧整体弃用归档面（G1：数据随连接生死）。
+func TestT3ShellHub_EndArchiveTeardownRespectsMode(t *testing.T) {
+	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
+	srv.setArchiveFixture(archiveSnapshotBody(1, "th-a"), nil)
+	hub := newT3ShellHubWithConfig(hubTestConfig(), nil)
+	defer hub.Close()
+	env := hubTestEnv(url, 0)
+
+	sub := hub.Subscribe("user-1")
+	defer sub.Close()
+	_, _, _, _, _ = establishBothFaces(t, hub, srv, env, "tok", 42, "th-1")
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil && len(v.Snaps.Archived.Threads) == 1
+	})
+	key := t3ShellHubKey("user-1", "env-1")
+	hub.mu.Lock()
+	entry := hub.entries[key]
+	hub.mu.Unlock()
+	if entry == nil {
+		t.Fatalf("entry missing")
+	}
+	sub.Drain()
+
+	// 非 legacy：残余旧面连接终止——归档面由按需簿记管可信，不动数据、
+	// 不发事件（订阅端视角没有任何变化）。
+	hub.endFaceConnection(entry, true, errors.New("残余订阅连接结束"))
+	v, err := hub.Peek(env, "tok")
+	if err != nil {
+		t.Fatalf("peek: %v", err)
+	}
+	if v.Snaps == nil || v.Snaps.ArchiveErr != nil || len(v.Snaps.Archived.Threads) != 1 {
+		t.Fatalf("non-legacy teardown must not touch the archive face, snaps=%+v", v.Snaps)
+	}
+	if evs := sub.Drain(); len(evs) != 0 {
+		t.Fatalf("non-legacy teardown must publish nothing, got %+v", evs)
+	}
+
+	// legacy：订阅面数据随连接生死（G1），终止照旧清表 + ArchiveErr。
+	// 直接置 mode（不经 switchToArchiveLegacy，避免放行真订阅拨号）；
+	// 写序沿全局锁序 s.mu → arch.mu。
+	entry.state.mu.Lock()
+	entry.arch.mu.Lock()
+	entry.arch.mode = t3ArchiveModeLegacy
+	entry.arch.mu.Unlock()
+	entry.state.mu.Unlock()
+	hub.endFaceConnection(entry, true, errors.New("legacy 订阅连接结束"))
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr != nil && len(v.Snaps.Archived.Threads) == 0
+	})
+}
+
+// 归档面发布去重（审修 R9 P2-2）：首次落地发 Full；TTL 例行重拉同一份
+// 数据不发任何事件（旧实现每次 Full → 前端每环境每 TTL 整环境重取）；
+// 归档集真变发 Full；失败首次出现发轻量 State 事件、同一错误反复失败
+// 去重；恢复可信（同集合）再发一次轻量 State。
+func TestT3ShellHub_ArchiveRepublishDedup(t *testing.T) {
+	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
+	srv.setArchiveFixture(archiveSnapshotBody(1, "th-a"), nil)
+	cfg := hubTestConfig()
+	cfg.ArchiveTTL = 80 * time.Millisecond
+	hub := newT3ShellHubWithConfig(cfg, nil)
+	defer hub.Close()
+	env := hubTestEnv(url, 0)
+
+	sub := hub.Subscribe("user-1")
+	defer sub.Close()
+	_, _, _, _, _ = establishBothFaces(t, hub, srv, env, "tok", 42, "th-1")
+	// 首次落地：Full。
+	ev := awaitShellEvent(t, sub, func(e T3ShellEvent) bool { return e.Full })
+	if ev.EnvironmentID != "env-1" {
+		t.Fatalf("first landing full event environment = %q, want env-1", ev.EnvironmentID)
+	}
+	sub.Drain()
+
+	// TTL 例行重拉同一份数据：无任何事件。
+	time.Sleep(cfg.ArchiveTTL + 40*time.Millisecond)
+	calls := srv.archiveCallCount()
+	if _, err := hub.Peek(env, "tok"); err != nil {
+		t.Fatalf("peek: %v", err)
+	}
+	deadline := time.After(2 * time.Second)
+	for srv.archiveCallCount() <= calls {
+		select {
+		case <-deadline:
+			t.Fatalf("expired TTL must refetch the archive snapshot")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	time.Sleep(60 * time.Millisecond) // 落地 + 发布窗口
+	if evs := sub.Drain(); len(evs) != 0 {
+		t.Fatalf("identical re-pull must publish nothing, got %+v", evs)
+	}
+
+	// 归档集真变：Full。
+	srv.setArchiveFixture(archiveSnapshotBody(2, "th-a", "th-b"), nil)
+	time.Sleep(cfg.ArchiveTTL + 40*time.Millisecond)
+	if _, err := hub.Peek(env, "tok"); err != nil {
+		t.Fatalf("peek: %v", err)
+	}
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil && len(v.Snaps.Archived.Threads) == 2
+	})
+	ev = awaitShellEvent(t, sub, func(e T3ShellEvent) bool { return e.Full })
+	if ev.EnvironmentID != "env-1" {
+		t.Fatalf("changed landing full event environment = %q, want env-1", ev.EnvironmentID)
+	}
+	sub.Drain()
+
+	// 失败首次出现：轻量 State 事件（非 Full）。
+	srv.setArchiveFixture(nil, map[string]any{"_tag": "RuntimeError", "message": "archive exploded"})
+	time.Sleep(cfg.ArchiveTTL + 40*time.Millisecond)
+	if _, err := hub.Peek(env, "tok"); err != nil {
+		t.Fatalf("peek: %v", err)
+	}
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr != nil
+	})
+	ev = awaitShellEvent(t, sub, func(e T3ShellEvent) bool { return !e.Full && e.State != "" })
+	if ev.EnvironmentID != "env-1" {
+		t.Fatalf("failure state event environment = %q, want env-1", ev.EnvironmentID)
+	}
+	sub.Drain()
+
+	// 同一错误反复失败：去重，不再发事件。
+	for i := 0; i < 2; i++ {
+		time.Sleep(cfg.ArchiveTTL + 40*time.Millisecond)
+		if _, err := hub.Peek(env, "tok"); err != nil {
+			t.Fatalf("peek: %v", err)
+		}
+		waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+			return v.Snaps != nil && v.Snaps.ArchiveErr != nil
+		})
+	}
+	time.Sleep(60 * time.Millisecond)
+	if evs := sub.Drain(); len(evs) != 0 {
+		t.Fatalf("repeated identical failure must be deduplicated, got %+v", evs)
+	}
+
+	// 恢复可信（同集合）：轻量 State 事件（不发 Full）。
+	srv.setArchiveFixture(archiveSnapshotBody(3, "th-a", "th-b"), nil)
+	time.Sleep(cfg.ArchiveTTL + 40*time.Millisecond)
+	if _, err := hub.Peek(env, "tok"); err != nil {
+		t.Fatalf("peek: %v", err)
+	}
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil
+	})
+	ev = awaitShellEvent(t, sub, func(e T3ShellEvent) bool { return !e.Full && e.State != "" })
+	_ = ev
 }

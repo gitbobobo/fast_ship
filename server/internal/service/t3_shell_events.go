@@ -1,6 +1,9 @@
 package service
 
-import "sync"
+import (
+	"slices"
+	"sync"
+)
 
 // T3 shell 变更通知（INT-132）：hub 在数据路径上发布轻量事件，SSE 端点
 // （/api/threads/stream）推给浏览器，浏览器据此重拉列表/详情。设计要点：
@@ -171,6 +174,53 @@ func (h *t3ShellHub) publishToUser(userID string, ev T3ShellEvent) {
 	}
 }
 
+// t3ArchiveAnnounced 是归档面已对外发布过的可见状态指纹
+// （publishArchiveFaceEvent 的去重基准）。守 entry 锁，与 publishedState
+// 同型——都是「对外承诺过什么」的发布侧缓存。
+type t3ArchiveAnnounced struct {
+	ids []string
+	err string
+}
+
+// publishArchiveFaceEvent 是归档面事件的统一发布口（审修 R9 P2-2）：按
+// 「对外可见状态是否真的变了」去重，替代旧实现「凡落地必 Full」的无条件
+// 广播——TTL 例行重拉同一份快照每次都发 Full，前端把 Full 当整环境失效，
+// 每环境每 TTL 一次全量重取，推送退化成定时轮询。
+//
+// 判定基准是状态指纹（archiveFaceFingerprint，与 snapshots() 给浏览器的
+// 视图同源）：
+//   - 线程集合/顺序变了（首次落地、真实增删、清表后恢复）→ Full；
+//   - 集合没变、只有可信度文案变了（失败首次出现/失败原因变化/恢复可信）
+//     → 轻量 State 事件（载荷取当前视图状态，前端只按「有 state 即失效
+//     该环境详情」处理）；
+//   - 两者都没变（TTL 重拉同数据、同一错误反复失败）→ 不发，至多静默。
+//
+// forceFull 用于写后失效（invalidateArchiveEntry）：归档集「可能」变了但
+// 去向不可辨，必须整环境失效一次，不做去重；指纹仍同步为发布后状态，让
+// 随后的重拉落地能与它比较。
+//
+// 指纹比较与缓存更新在 e.mu 内完成，发布在锁外（与 noteConnState 同一锁
+// 边界：发布路径不持 entry 锁）。锁序 e.mu → s.mu 与全局一致。
+func (h *t3ShellHub) publishArchiveFaceEvent(e *t3ShellEntry, forceFull bool) {
+	ids, errText := e.state.archiveFaceFingerprint()
+	e.mu.Lock()
+	full := forceFull || !slices.Equal(ids, e.archAnnounced.ids)
+	stateHint := !full && errText != e.archAnnounced.err
+	e.archAnnounced.ids = ids
+	e.archAnnounced.err = errText
+	statePayload := ""
+	if stateHint {
+		statePayload = e.stateLocked().String()
+	}
+	e.mu.Unlock()
+	switch {
+	case full:
+		h.publishThreadEvent(e, nil, true)
+	case stateHint:
+		h.publishState(e, statePayload)
+	}
+}
+
 // publishThreadEvent 发布一批线程级变化。线程列表非空或 full 才有意义；
 // 空事件直接丢弃，省掉订阅者的无谓唤醒。
 func (h *t3ShellHub) publishThreadEvent(e *t3ShellEntry, threadIDs []string, full bool) {
@@ -184,8 +234,10 @@ func (h *t3ShellHub) publishThreadEvent(e *t3ShellEntry, threadIDs []string, ful
 	})
 }
 
-// publishState 发布连接状态翻转事件（不带线程列表：状态变化本身就是要呈现
-// 的信息）。
+// publishState 发布连接状态事件（不带线程列表）。常规用途是连接状态翻转
+// （状态变化本身就是要呈现的信息）；归档面的可信度翻转也走这里做轻量提示
+// （载荷为当前视图状态）——前端只按「有 state 即失效该环境的全部详情」
+// 处理，不依赖具体取值。
 func (h *t3ShellHub) publishState(e *t3ShellEntry, state string) {
 	h.publishToUser(e.userID, T3ShellEvent{
 		EnvironmentID: e.envID,

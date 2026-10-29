@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
@@ -76,9 +75,6 @@ type t3ArchiveFetchState struct {
 	// mode 不得在无 s.mu 的纯 arch.mu 临界区里改——会把「archiveReady
 	// 尚可信但 mode 已翻」的中间态放给视图读者。
 	mode t3ArchiveMode
-	// legacyStarted 保底订阅 goroutine 只启动一次（sync.Once 不可复位，
-	// 用原子标记代替；启动即随 entry 存活，entry 停/hub 关时自停）。
-	legacyStarted atomic.Bool
 	// 以下字段只在按需快照模式下有意义（legacy 订阅面自己维持可信度）：
 	// validUntil 是「当前 state 里的归档快照可信到哪一刻」：来自
 	// applyArchiveSnapshot 可信化成功时刻 + TTL。零值表示从未成功/已失效。
@@ -328,7 +324,9 @@ func (e *t3ShellEntry) ensureArchive(ctx context.Context) error {
 	if _, applyErr := e.state.applyArchiveSnapshot(snapshot, generation, e.commitArchiveApply); applyErr != nil {
 		return e.noteArchiveFetchFailed(applyErr, generation)
 	}
-	e.hub.publishThreadEvent(e, nil, true)
+	// 落地发布经指纹去重（审修 R9 P2-2）：集合真变才 Full；TTL 例行重拉
+	// 同一份数据不发任何事件；失效/失败后的恢复发轻量 State 提示。
+	e.hub.publishArchiveFaceEvent(e, false)
 	e.refresh()
 	return nil
 }
@@ -353,14 +351,15 @@ func isArchiveSnapshotMethodMissing(err error) bool {
 		strings.Contains(msg, "methodnotfound")
 }
 
-// switchToArchiveLegacy 把该 entry 永久切到旧面订阅模式。临界区与
+// switchToArchiveLegacy 把该 entry 切到旧面订阅模式。临界区与
 // admitArchiveRefresh 同序（s.mu → arch.mu）：mode 翻转与「撤可信+清簿
 // 记」对读者不可分——准入判定在本临界区之外不可能看到「mode 已是
 // legacy 而 archiveReady 仍可信」的中间态；此后 kickArchiveRefresh 短
 // 路不再发按需拨号。调用方先经 noteArchiveFetchFailed 记失败、再进入本
 // 切换（顺序依据见 ensureArchive：先收尾失败、后放行订阅，权威快照落地
 // 才不会被失败收尾重新盖回失败态）；inFlight 由其 defer 清理；归档数据
-// 由随后启动的常驻订阅 goroutine 补齐（仅启动一次）。
+// 由随后放行的常驻订阅 goroutine 补齐（entry 创建时已停泊，激活可重复：
+// 自愈回 Unknown 后重探测再次判方法不存在时，本函数再次放行它）。
 func (e *t3ShellEntry) switchToArchiveLegacy() {
 	e.state.mu.Lock()
 	e.arch.mu.Lock()
@@ -371,10 +370,13 @@ func (e *t3ShellEntry) switchToArchiveLegacy() {
 	e.state.noteArchiveExpiredLocked() // archiveReady → false，留行但报已失效
 	e.arch.mu.Unlock()
 	e.state.mu.Unlock()
-	// 激活停泊中的旧面订阅 goroutine（仅一次）：entry 创建时已为它
-	// wg.Add，这里只负责放行，不再需要 go/Add。
-	if e.arch.legacyStarted.CompareAndSwap(false, true) {
-		close(e.legacyCh)
+	// 放行停在 mode 闸门上的旧面订阅 goroutine（runArchiveLegacySubscription
+	// 首部）：mode 已提交为 legacy，信号只是唤醒，闸门醒来会复核现值。
+	// 缓冲 1 + 非阻塞发送：重复激活时丢弃多余信号——闸门每次醒来都按 mode
+	// 现值行事，丢信号不丢激活。
+	select {
+	case e.legacyCh <- struct{}{}:
+	default:
 	}
 }
 
@@ -388,11 +390,13 @@ func (e *t3ShellEntry) switchToArchiveLegacy() {
 // 次探测拨号。只在确认方法不存在时才回退判定——订阅的其他失败（断
 // 线、业务拒绝）不重置，否则真旧环境的普通故障会让按需面每轮空拨。
 //
-// 订阅监督循环不受影响：它不判 mode，继续按退避重连——重置后的按需
-// 探测与订阅重连并行，任一路径恢复供数都成立。锁序与
-// switchToArchiveLegacy 同一临界区（s.mu → arch.mu）：mode 翻回与簿记
-// 清理对准入判定不可分——「mode 已是 Unknown 而 retryAfter 仍封住
-// kick」的中间态不会放给读者。
+// 订阅监督循环随 mode 一起收缰（审修 R9 P2-1）：循环每轮重连前经 mode
+// 闸门（waitArchiveLegacyActive）复核，mode 离开 legacy 即停泊回等
+// legacyCh 的待命态——否则重置后的订阅重连仍会照旧失败，每次失败经
+// endFaceConnection 把归档面再清一遍，而按需簿记刚被封窗时 kick 短路不
+// 重拉，归档面会整整消失一个 TTL。锁序与 switchToArchiveLegacy 同一临界
+// 区（s.mu → arch.mu）：mode 翻回与簿记清理对准入判定不可分——「mode
+// 已是 Unknown 而 retryAfter 仍封住 kick」的中间态不会放给读者。
 func (e *t3ShellEntry) resetArchiveModeToUnknown() {
 	e.state.mu.Lock()
 	e.arch.mu.Lock()
@@ -469,7 +473,9 @@ func (e *t3ShellEntry) noteArchiveFetchFailed(err error, generation int64) error
 	// 临界区内收尾，不存在「应用失败后、记冷却前发生失效」把已作废
 	// 的窗口用 retryAfter 封死的交错。
 	e.state.noteArchiveFetchFailed(err, generation, e.commitArchiveFailure)
-	e.hub.publishThreadEvent(e, nil, true)
+	// 失败发布经指纹去重（审修 R9 P2-2）：同一 ArchiveErr 反复失败不再
+	// 每次发 Full——订阅端只需在错误首次出现/变化时知道一次。
+	e.hub.publishArchiveFaceEvent(e, false)
 	e.refresh()
 	e.hub.logger.Warn("t3 归档快照读取失败",
 		zap.String("environment_id", e.envID),
@@ -525,8 +531,9 @@ func (h *t3ShellHub) invalidateArchiveEntry(e *t3ShellEntry) {
 		e.signalArchiveReconnect()
 	}
 	// 归档面可信度翻转，等归档读的等待者/订阅者需要看到「已失效」；
-	// 顺手发一次 Full 事件，浏览器据此整环境重拉。
-	e.hub.publishThreadEvent(e, nil, true)
+	// 写后失效强制发一次 Full（forceFull）：归档集「可能」变了但去向不可
+	// 辨，浏览器必须整环境重拉一次，不做指纹去重。
+	e.hub.publishArchiveFaceEvent(e, true)
 	e.refresh()
 }
 
@@ -547,6 +554,44 @@ func (e *t3ShellEntry) signalArchiveReconnect() {
 	}
 }
 
+// waitArchiveLegacyActive 是旧面订阅监督循环的 mode 闸门（审修 R9 P2-1）：
+// mode 仍处 legacy 时立即放行；已离开 legacy（自愈回 Unknown、按需面重新
+// 接管）则停泊在 legacyCh 上待命，直到 switchToArchiveLegacy 再次放行或
+// entry/hub 停机。返回 false 表示停机，监督循环应退出。停泊不打上游——
+// 非 legacy 环境里 subscribe 只会得到「方法不存在」，重连只是反复挨拒、
+// 每次失败还把归档面再清一遍。读 mode 只取 arch.mu（与
+// invalidateArchiveEntry 的判定同型：纯读不涉及「archiveReady 尚可信但
+// mode 已翻」的中间态问题）。
+func (e *t3ShellEntry) waitArchiveLegacyActive() bool {
+	for {
+		e.arch.mu.Lock()
+		legacy := e.arch.mode == t3ArchiveModeLegacy
+		e.arch.mu.Unlock()
+		if legacy {
+			return true
+		}
+		select {
+		case <-e.legacyCh:
+			// 唤醒后复核现值：信号可能在 mode 已再次离开 legacy 时到达，
+			// 那就继续停泊，不发起连接。
+		case <-e.stop:
+			return false
+		case <-e.hub.ctx.Done():
+			return false
+		}
+	}
+}
+
+// archiveLegacyActive 报告归档面当前是否由旧面订阅供数（mode==legacy）。
+// endFaceConnection 用它把关收窄：只有订阅模式的数据可信度才随连接生死
+// （G1：清表 + ArchiveErr），按需快照模式的归档面由 TTL 簿记管可信，旧面
+// 残余连接（自愈后尚未收尾的那条）的终止不得再动归档表。
+func (e *t3ShellEntry) archiveLegacyActive() bool {
+	e.arch.mu.Lock()
+	defer e.arch.mu.Unlock()
+	return e.arch.mode == t3ArchiveModeLegacy
+}
+
 //
 // 旧上游（#26238 之前）的归档面只有常驻订阅 subscribeArchivedShell：注册
 // 后上游先发全量快照（首个 Chunk 的 snapshot 流项），再推
@@ -563,9 +608,12 @@ func (e *t3ShellEntry) signalArchiveReconnect() {
 // 实）。
 
 // runArchiveLegacySubscription 是旧面归档常驻订阅的监督循环：探测 → 拨号
-// → 订阅 → 读循环，结束后按分类退避重连（复用活跃面的 backoffFor）。仅
-// 在 switchToArchiveLegacy 置 legacyStarted 后启动一次，随 entry/hub 生命
-// 周期退出。
+// → 订阅 → 读循环，结束后按分类退避重连（复用活跃面的 backoffFor）。随
+// entry/hub 生命周期退出；mode 闸门让它只在 legacy 模式下发起连接——
+// entry 创建时停在闸门上待命（不占连接、不打上游），
+// switchToArchiveLegacy 放行；自愈回 Unknown（resetArchiveModeToUnknown）
+// 后下一轮闸门把它重新停泊，订阅不再重连（审修 R9 P2-1：否则旧面连接
+// 的持续失败会反复清空已由按需面接管的归档表）。
 //
 // 稳定判定用归档面自己的数据落地时刻（审修 R6-C，syncedAt 取自本连接
 // 的读循环记录而非活跃面的 syncConfirmedAt）：活跃面长期健康时其追平时
@@ -579,6 +627,12 @@ func (e *t3ShellEntry) signalArchiveReconnect() {
 func (h *t3ShellHub) runArchiveLegacySubscription(e *t3ShellEntry) {
 	attempts := 0
 	for {
+		// mode 闸门：非 legacy（Unknown/Snapshot）不发起任何订阅连接，
+		// 停泊等 switchToArchiveLegacy 的放行信号或停机。闸门在每轮重连
+		// 前复核，mode 已在临界区提交后才可能放行。
+		if !e.waitArchiveLegacyActive() {
+			return
+		}
 		result := h.connectArchiveLegacyOnce(e)
 		if e.isStopped() {
 			return
@@ -754,15 +808,18 @@ func (h *t3ShellHub) readArchiveLegacyLoop(e *t3ShellEntry, session *t3RPCSessio
 			case frame.Tag == "Exit" && frame.requestIDMatches(requestID):
 				if _, err := frame.exitValue(); err != nil {
 					credential = errors.Is(err, errT3CredentialRejected)
-					h.endFaceConnection(e, true, err)
 					// 方法不存在的 Exit 是「环境中途升级/上次误判」的证据：本
 					// 该有订阅面的环境反而没有，说明按需快照路径可能已可用。
-					// mode 回 Unknown 交给下一次 kick 重探测（审修 R8 P2）——真
-					// 旧环境的其他订阅失败文案不命中窄条件，不会误复活按需
-					// 拨号。
+					// 先重置 mode、再收尾连接（审修 R9 P2-1）：reset 后
+					// endFaceConnection 看到的是非 legacy 面，不再 markArchiveFailed
+					// 清表/写 ArchiveErr——这次失败只证明「订阅通道不存在」，
+					// 不证明「归档数据作废」，清表会让按需面接管前的窗口里归
+					// 档行凭空消失。mode 回 Unknown 交给下一次 kick 重探测；真
+					// 旧环境的其他订阅失败文案不命中窄条件，不会误复活按需拨号。
 					if isArchiveSnapshotMethodMissing(err) {
 						e.resetArchiveModeToUnknown()
 					}
+					h.endFaceConnection(e, true, err)
 				} else {
 					h.endFaceConnection(e, true, fmt.Errorf("归档订阅流提前结束"))
 				}
