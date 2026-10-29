@@ -5,7 +5,8 @@ Fast Ship 以 T3 客户端身份接入 T3 Code 环境：配对一个 T3 服务�
 请求状态由 T3 持有——Fast Ship 不落库、不建队列库、不做任务调度器、不做第二套
 线程状态机。读取走按环境常驻的 shell 订阅（INT-116：活跃面一条长驻 WS +
 增量推送；归档面自 INT-173 起为按需快照——上游删除了常驻归档订阅，改为
-一次性 `getArchivedShellSnapshot` RPC + TTL 缓存 + 写后失效；内存组装回答。
+一次性 `getArchivedShellSnapshot` RPC + TTL 缓存 + 写后失效；旧上游没有该
+RPC 时自动回退到常驻 `subscribeArchivedShell` 订阅；内存组装回答。
 INT-132 起订阅跟环境走、不跟读请求走，变更经 SSE 推给浏览器，前端不再定时
 轮询）；写操作仍是 REST 表达用户操作、适配器转成 T3 一次性
 WS RPC。
@@ -235,7 +236,14 @@ workspace-options 选），由 T3 校验路径；Fast Ship 不另做项目目录
 决定）；归档面自 INT-173 起改为**按需快照**——上游 #26238 删除了
 `orchestration.subscribeArchivedShell`，归档读取只剩一次性
 `orchestration.getArchivedShellSnapshot` RPC（每次读取单拨一条 WS 会话，探
-测 → 拨号 → 一次 RPC → 断开）。常驻连接只有活跃面一条：会话客户端是串行的，
+测 → 拨号 → 一次 RPC → 断开）。**旧上游回退**：上游 #26238 之前的环境
+没有该 RPC（归档只有常驻 `subscribeArchivedShell`）；getConfig 无归档面能
+力字段可判，故以「方法不存在」的明确 RPC 信号（method not found / unknown
+method / MethodNotFound 类 _tag，排除 rpcUncertainError 与任意业务失败）
+为切换凭据——首次读取命中即把 entry 永久切到回退的常驻订阅
+（`runArchiveLegacySubscription`：探活 → 拨号 → 订阅 → 快照/增量喂入，
+断连即 markArchiveFailed + 退避重连），此后 kickArchiveRefresh 短路不再
+发按需拨号。常驻连接只有活跃面一条：会话客户端是串行的，
 按需快照另拨一次性会话不复用订阅连接，取消/重订阅互不牵扯。数据进纯内存
 reducer（`t3_shell_state.go`）：活跃/归档两面独立维护，权威快照整体替换并把
 游标重置为 `snapshotSequence`，增量（thread/project updated/removed）按

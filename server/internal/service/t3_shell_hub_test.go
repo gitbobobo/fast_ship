@@ -113,6 +113,12 @@ type fakeShellStreamServer struct {
 	archValue json.RawMessage // getArchivedShellSnapshot 应答体（nil 时按空快照答）
 	archErr   map[string]any  // 非空时归档快照 RPC 回该 Fail 错误（G1 降级路径）
 	archCalls int             // getArchivedShellSnapshot 被调次数（缓存断言用）
+	// archLegacy 切旧上游：getArchivedShellSnapshot 按「方法不存在」拒绝，
+	// subscribeArchivedShell 恢复为常驻订阅（注册后推快照+增量）。回退路径
+	// 的旧面断言用。
+	archLegacy   bool
+	archiveSubs  chan fakeShellRequest // 收到的 subscribeArchivedShell 请求
+	archiveConns chan *fakeShellConn   // 旧面订阅连接
 	// archPaused 暂停归档快照应答（Finding A 交错测试用）：暂停发生在应答
 	// 派发而非收帧循环上——handler 仍会把请求收进 requests 通道，测试据此
 	// 确认「在途拉取已发起」再精确放行，而不是靠 sleep 猜时序。
@@ -196,6 +202,19 @@ func (s *fakeShellStreamServer) handler(conn *websocket.Conn) {
 				})
 				_ = sendExitSuccessFrame(conn, req.ID, config)
 			case t3RPCGetArchivedShellSnapshot:
+				s.mu.Lock()
+				legacy := s.archLegacy
+				archErr := s.archErr
+				s.mu.Unlock()
+				if legacy && archErr == nil {
+					// 旧上游没有该 RPC：调用方得失败（回退路径由此激活）。
+					// archErr 定制失败场景（非方法不存在，测「不误切」）时照常应答。
+					_ = sendExitFailureFrame(conn, req.ID, map[string]any{
+						"_tag":    "UnknownException",
+						"message": "method not found: orchestration.getArchivedShellSnapshot",
+					})
+					continue
+				}
 				// 归档按需快照（INT-173）：应答内容由 archiveValue/archiveErr
 				// 在应答时刻决定——应答前对 fake 的修改对后续读取可见。
 				resp := s.archiveAnswer()
@@ -205,12 +224,29 @@ func (s *fakeShellStreamServer) handler(conn *websocket.Conn) {
 					_ = sendExitSuccessFrame(conn, req.ID, resp.value)
 				}
 			case "orchestration.subscribeArchivedShell":
-				// 新上游已删除该 RPC（#26238）：fake 默认报错，仍调用的客户端
-				// 代码在测试里炸出来。
-				_ = sendExitFailureFrame(conn, req.ID, map[string]any{
-					"_tag":    "UnknownException",
-					"message": "method not found: orchestration.subscribeArchivedShell",
-				})
+				s.mu.Lock()
+				legacy := s.archLegacy
+				s.mu.Unlock()
+				if !legacy {
+					// 新上游已删除该 RPC（#26238）：fake 默认报错，仍调用的客户
+					// 端代码在测试里炸出来。
+					_ = sendExitFailureFrame(conn, req.ID, map[string]any{
+						"_tag":    "UnknownException",
+						"message": "method not found: orchestration.subscribeArchivedShell",
+					})
+					continue
+				}
+				select {
+				case s.archiveSubs <- req:
+				default:
+				}
+				select {
+				case s.archiveConns <- fc:
+				default:
+				}
+				// 订阅受理：推全量快照体（包装成 snapshot 流项）。
+				item := s.archiveStreamItem()
+				_ = sendValueFrame(conn, req.ID, item)
 			}
 		case "Ack":
 			var id float64
@@ -300,6 +336,49 @@ func (s *fakeShellStreamServer) archiveCallCount() int {
 	return s.archCalls
 }
 
+// archiveStreamItem 把归档快照体包装成订阅流的 snapshot 流项（旧面：
+// 订阅首项即全量）。
+func (s *fakeShellStreamServer) archiveStreamItem() json.RawMessage {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	value := s.archValue
+	if value == nil {
+		value = archiveSnapshotBody(1)
+	}
+	data, _ := json.Marshal(map[string]any{
+		"kind":     "snapshot",
+		"snapshot": json.RawMessage(value),
+	})
+	return data
+}
+
+// sendValueFrame 推一个 Chunk（订阅流帧）。
+func sendValueFrame(conn *websocket.Conn, id int, values ...json.RawMessage) error {
+	conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	data, _ := json.Marshal(map[string]any{"_tag": "Chunk", "requestId": id, "values": values})
+	return websocket.Message.Send(conn, data)
+}
+
+// setArchiveLegacy 切旧上游归档面：getArchivedShellSnapshot 拒绝、
+// subscribeArchivedShell 生效。
+func (s *fakeShellStreamServer) setArchiveLegacy(legacy bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.archLegacy = legacy
+}
+
+// awaitArchiveSub 等一条旧面订阅请求（回退路径激活的证据）。
+func (s *fakeShellStreamServer) awaitArchiveSub(t *testing.T) fakeShellRequest {
+	t.Helper()
+	select {
+	case req := <-s.archiveSubs:
+		return req
+	case <-time.After(3 * time.Second):
+		t.Fatalf("timed out waiting for subscribeArchivedShell")
+		return fakeShellRequest{}
+	}
+}
+
 func sendExitSuccessFrame(conn *websocket.Conn, id int, value json.RawMessage) error {
 	conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	data, _ := json.Marshal(map[string]any{"_tag": "Exit", "requestId": id, "exit": map[string]any{"_tag": "Success", "value": value}})
@@ -325,11 +404,13 @@ type fakeShellServerOptions struct {
 func startFakeShellStreamServer(t *testing.T, opts fakeShellServerOptions) (*fakeShellStreamServer, string) {
 	t.Helper()
 	srv := &fakeShellStreamServer{
-		t:        t,
-		bearer:   opts.bearer,
-		marker:   opts.marker,
-		autoPong: opts.autoPong,
-		connsCh:  make(chan *fakeShellConn, 64),
+		t:            t,
+		bearer:       opts.bearer,
+		marker:       opts.marker,
+		autoPong:     opts.autoPong,
+		connsCh:      make(chan *fakeShellConn, 64),
+		archiveSubs:  make(chan fakeShellRequest, 64),
+		archiveConns: make(chan *fakeShellConn, 64),
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -2300,4 +2381,81 @@ func TestT3ShellHub_BadArchivePayloadRecordsCooldown(t *testing.T) {
 		t.Fatalf("recovery must take exactly one refetch after the cooldown, calls %d → %d", calls, got)
 	}
 	_ = view
+}
+
+// 旧面回退（INT-173 审修）：getArchivedShellSnapshot 被判「方法不存在」后，
+// entry 切到常驻 subscribeArchivedShell 订阅——归档数据由订阅流喂入，
+// 此后不再发按需拨号；非方法级失败（任意 Exit Failure / 传输错误）不切换。
+func TestT3ShellHub_LegacyArchiveSubscriptionFallback(t *testing.T) {
+	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
+	srv.setArchiveLegacy(true)
+	srv.setArchiveFixture(archiveSnapshotBody(1, "th-a"), nil)
+	hub := newT3ShellHubWithConfig(hubTestConfig(), nil)
+	defer hub.Close()
+	env := hubTestEnv(url, 0)
+
+	// 活跃面先就位；归档按需快照将被判方法不存在 → 触发旧面订阅。
+	go hub.View(context.Background(), env, "tok")
+	collector := newShellConnCollector(t, srv)
+	active := collector.await(false)
+	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1")); err != nil {
+		t.Fatalf("send active snapshot: %v", err)
+	}
+	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
+		t.Fatalf("active snapshot not acked")
+	}
+
+	// 旧面订阅请求到达（回退激活的证据）。
+	srv.awaitArchiveSub(t)
+	// 归档数据经订阅快照喂入。
+	view := waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil && len(v.Snaps.Archived.Threads) == 1
+	})
+	if view.Snaps.Archived.Threads[0].ID != "th-a" {
+		t.Fatalf("archived threads via legacy subscription = %+v", view.Snaps.Archived.Threads)
+	}
+
+	// 切换后按需快照不再重试：TTL 内多次读只产生最初那一次探测性调用。
+	calls := srv.archiveCallCount()
+	for i := 0; i < 3; i++ {
+		if _, err := hub.View(context.Background(), env, "tok"); err != nil {
+			t.Fatalf("view: %v", err)
+		}
+	}
+	if srv.archiveCallCount() != calls {
+		t.Fatalf("legacy env must not retry the on-demand snapshot RPC, calls %d → %d", calls, srv.archiveCallCount())
+	}
+}
+
+// 非方法级的归档失败不得误切订阅面：任意 Exit Failure（非 method-not-found）
+// 仍按「读取失败」记账并冷却，归档面不可信但旧订阅不被拉起。
+func TestT3ShellHub_NonMethodFailureDoesNotFallback(t *testing.T) {
+	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
+	srv.setArchiveLegacy(true) // 上游其实有订阅可用——但失败不是「方法不存在」
+	srv.setArchiveFixture(nil, map[string]any{"_tag": "RuntimeError", "message": "archive exploded"})
+	hub := newT3ShellHubWithConfig(hubTestConfig(), nil)
+	defer hub.Close()
+	env := hubTestEnv(url, 0)
+
+	go hub.View(context.Background(), env, "tok")
+	collector := newShellConnCollector(t, srv)
+	active := collector.await(false)
+	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1")); err != nil {
+		t.Fatalf("send active snapshot: %v", err)
+	}
+	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
+		t.Fatalf("active snapshot not acked")
+	}
+
+	// 失败只记 ArchiveErr：旧订阅不得被拉起（否则「任意失败→切订阅」
+	// 会掩盖真实故障，还把按需簿记语义搅乱）。
+	view := waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr != nil
+	})
+	_ = view
+	select {
+	case sub := <-srv.archiveSubs:
+		t.Fatalf("non-method failure must not trigger legacy subscription, got %+v", sub)
+	case <-time.After(300 * time.Millisecond):
+	}
 }

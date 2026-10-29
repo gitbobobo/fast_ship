@@ -5374,9 +5374,9 @@ type T3ThreadQueueItem struct {
 	Text string `json:"text"`
 }
 
-// T3ThreadStopResult 停止结果；无可停止运行时按 T3 口径视为无操作（stopped=false）
+// T3ThreadStopResult 停止结果；回退路径（旧上游）无可停止运行时按 T3 口径视为无操作（stopped=false）
 type T3ThreadStopResult struct {
-	// RunId 被中断的 run；无可停止运行时缺省
+	// RunId 被中断的 run；仅在 run.interrupt 回退路径回填（thread.stop 路径由服务端选目标，不返回 run_id）
 	RunId   *string `json:"run_id,omitempty"`
 	Stopped bool    `json:"stopped"`
 }
@@ -7182,7 +7182,7 @@ type StopT3Thread200JSONResponseBody struct {
 	// Code 业务错误码；0 表示成功
 	Code int `json:"code"`
 
-	// Data 停止结果；无可停止运行时按 T3 口径视为无操作（stopped=false）
+	// Data 停止结果；回退路径（旧上游）无可停止运行时按 T3 口径视为无操作（stopped=false）
 	Data *T3ThreadStopResult `json:"data,omitempty"`
 
 	// Message 人类可读信息；成功时为 "success"

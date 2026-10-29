@@ -2547,6 +2547,99 @@ func TestT3ThreadsArchiveNotReadyDegrades(t *testing.T) {
 	}
 }
 
+// TestT3ThreadsLegacyArchiveSubscription 覆盖旧面回退（INT-173 审修）：旧上游
+// 没有 getArchivedShellSnapshot（fake 的 legacyArchiveSubscription 建模式），
+// 按需快照首读被判方法拒绝后，entry 永久切到常驻 subscribeArchivedShell
+// 订阅——归档数据由订阅流喂入（快照 + 增量），此后不再发按需拨号。
+func TestT3ThreadsLegacyArchiveSubscription(t *testing.T) {
+	e := setupT3ServiceTest(t)
+	userID := e.createUser(t)
+	ctx := context.Background()
+
+	e.fake.mu.Lock()
+	e.fake.legacyArchiveSubscription = true
+	e.fake.snapshot = shellSnapshotFixture(
+		[]any{map[string]any{"id": "p-1", "title": "P"}},
+		[]any{shellThread("th-1", "活跃线程", "running", nil)},
+	)
+	e.fake.archive = mustJSON(map[string]any{
+		"schemaVersion": 1, "snapshotSequence": 2,
+		"projects": []any{map[string]any{"id": "p-1", "title": "P"}},
+		"threads":  []any{shellThread("th-2", "旧归档线程", "idle", map[string]any{"archivedAt": "2026-10-01T00:00:00.000Z"})},
+	})
+	e.fake.mu.Unlock()
+
+	if _, err := e.env.Create(ctx, userID, &CreateT3EnvironmentRequest{Name: "旧面机", PairingUrl: e.fake.pairingURL(e.fake.baseURL)}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	// 归档线程经旧订阅快照喂入：列表需等到包含它才满足。
+	result := listUntil(t, e, userID, func(res *T3ThreadListResponse) bool {
+		if len(res.Items) != 2 {
+			return false
+		}
+		for _, item := range res.Items {
+			if item.Id == "th-2" && item.Status == "archived" {
+				return true
+			}
+		}
+		return false
+	})
+	_ = result
+
+	// 按需快照被明确拒绝了一次（切订阅的证据）；此后不再有按需调用。
+	var sawSnapshotRPC, sawLegacySub bool
+	for _, rpc := range e.fake.recordedRPC() {
+		switch rpc.method {
+		case t3RPCGetArchivedShellSnapshot:
+			sawSnapshotRPC = true
+		case "orchestration.subscribeArchivedShell":
+			sawLegacySub = true
+		}
+	}
+	if !sawSnapshotRPC {
+		t.Fatalf("expected one probing getArchivedShellSnapshot before the legacy switch")
+	}
+	if !sawLegacySub {
+		t.Fatalf("legacy env must subscribe via subscribeArchivedShell")
+	}
+
+	// 旧订阅的增量通道继续喂数：推一条归档 thread.updated，列表应出现新线程。
+	e.fake.mu.Lock()
+	st := e.fake.archiveStream
+	e.fake.mu.Unlock()
+	if st == nil {
+		t.Fatalf("archive subscription stream must be registered")
+	}
+	seq := e.fake.nextPushSeq()
+	item := mustJSON(map[string]any{
+		"kind": "thread.updated", "sequence": seq,
+		"thread": shellThread("th-3", "增量归档", "idle", map[string]any{"archivedAt": "2026-10-02T00:00:00.000Z"}),
+	})
+	if err := st.push(item); err != nil {
+		t.Fatalf("push archive delta: %v", err)
+	}
+	listUntil(t, e, userID, func(res *T3ThreadListResponse) bool {
+		for _, it := range res.Items {
+			if it.Id == "th-3" {
+				return true
+			}
+		}
+		return false
+	})
+
+	// 切换后不再发按需快照：窗口内只统计切换前那一次。
+	before := len(e.fake.recordedRPC())
+	if _, err := e.th.List(ctx, userID); err != nil {
+		t.Fatalf("list again: %v", err)
+	}
+	for _, rpc := range e.fake.recordedRPC()[before:] {
+		if rpc.method == t3RPCGetArchivedShellSnapshot {
+			t.Fatalf("legacy env must not retry the on-demand snapshot RPC")
+		}
+	}
+}
+
 // TestT3ThreadsStaleAfterDisconnectNotTrusted 覆盖新鲜度契约：连接断开且
 // 重连被拒（吊销）后进入 Stale——列表如实降级标注「连接已断开」；详情/Stop
 // 不用陈旧快照回答运行态（陈旧 idle 会让 Stop 无事可做，也会把旧数据当可信）。

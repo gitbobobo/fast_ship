@@ -136,7 +136,9 @@ func (s *T3ThreadsService) fetchProjectionForWrite(ctx context.Context, env *mod
 // ComposerOptions 聚合线程启动器选项：项目表 + server.getConfig（config 与
 // 内嵌其中的 settings 原样透传，camelCase 留在适配器内）。上游 #26238 起删除
 // 了 server.getSettings，设置改由 getConfig.settings 携带；旧环境 getConfig
-// 无 settings，缺省语义即空设置。项目表走 HTTP `GET /api/projects`（INT-116）：不再为拿项目配置拉全量 shell
+// 无 settings 字段（字段缺失与「settings 存在但为 null/空」必须区分——前者
+// 才回退 server.getSettings，后者是新版真实的空设置，多调一次旧 RPC 只会
+// 得到 method-not-found）。项目表走 HTTP `GET /api/projects`（INT-116）：不再为拿项目配置拉全量 shell
 // 快照、不建 shell 订阅；fetchProjectSnapshot 已把 401/403 分类成凭证被拒，
 // 不再需要前置会话探测。
 func (s *T3ThreadsService) ComposerOptions(ctx context.Context, userID, envID string) (*T3ComposerOptions, error) {
@@ -188,14 +190,30 @@ func (s *T3ThreadsService) ComposerOptions(ctx context.Context, userID, envID st
 	}
 	config, settings := map[string]any{}, map[string]any{}
 	_ = json.Unmarshal(configValue, &config)
-	// settings 内嵌在 getConfig 响应里（宽容解码：缺失/非对象时保持空 map，
-	// 兼容无 settings 的旧上游——其缺省语义就是空设置）。
+	// settings 内嵌在 getConfig 响应里。用 RawMessage 区分「字段缺失」与
+	// 「字段为 null/空」：只有缺失才回退旧上游独立的 server.getSettings
+	// （新版 settings 为 null/空对象都是真实空设置，不得去调已删除的
+	// 旧 RPC）；字段存在时按其值原样解。
 	var withSettings struct {
-		Settings map[string]any `json:"settings"`
+		Settings json.RawMessage `json:"settings"`
 	}
 	_ = json.Unmarshal(configValue, &withSettings)
-	if withSettings.Settings != nil {
-		settings = withSettings.Settings
+	switch {
+	case len(withSettings.Settings) == 0:
+		// 字段缺失 = 旧上游（#26238 之前）无内嵌 settings：回退一次独立的
+		// server.getSettings 取真实设置。getConfig 本身失败仍按上游错误
+		// 处理（不会走到这里）；getSettings 失败宽容为空设置——它与
+		// ComposerOptions 其余字段独立，不牵连整个应答。
+		if settingsValue, err := session.call(ctx, "server.getSettings", map[string]any{}); err == nil {
+			var legacy map[string]any
+			if json.Unmarshal(settingsValue, &legacy) == nil && legacy != nil {
+				settings = legacy
+			}
+		}
+	case string(withSettings.Settings) == "null":
+		// 新版 settings 为 null：空设置。
+	default:
+		_ = json.Unmarshal(withSettings.Settings, &settings)
 	}
 	return &T3ComposerOptions{
 		Projects: projects,

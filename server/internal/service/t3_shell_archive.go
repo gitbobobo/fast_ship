@@ -3,8 +3,11 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/model"
@@ -45,10 +48,40 @@ import (
 //     这道护栏，写前快照会被 applyArchiveSnapshot + validUntil 重新
 //     封为可信整一个 TTL，「下次读拉到写后状态」的承诺落空。
 
+// t3ArchiveMode 是归档面的读取通道。
+type t3ArchiveMode int
+
+const (
+	// t3ArchiveModeUnknown 尚未判定：默认走按需快照，第一次拉取遇到
+	// 「方法不存在」的明确拒绝即切订阅面。
+	t3ArchiveModeUnknown t3ArchiveMode = iota
+	// t3ArchiveModeSnapshot 按需快照路径已确认（至少一次拉取已经发起）。
+	t3ArchiveModeSnapshot
+	// t3ArchiveModeLegacy 旧上游归档面（#26238 之前）：只有常驻
+	// subscribeArchivedShell，getArchivedShellSnapshot 被判方法不存在过。
+	// 归档读由常驻订阅 goroutine 喂（快照 + 增量），TTL/失效簿记不再起作用。
+	t3ArchiveModeLegacy
+)
+
 // t3ArchiveFetchState 是 entry 级归档快照簿记：锁内只做「是否需要发一次
 // 拉取」的判定，网络 I/O 全在锁外。
 type t3ArchiveFetchState struct {
 	mu sync.Mutex
+	// mode 归档面通道判定：未知（默认走按需快照）/ 按需快照已确认 / 旧面
+	// 订阅。读按全局锁序 s.mu → arch.mu；写只在两种已定义场景发生——
+	// admitArchiveRefresh 的准入临界区（s.mu→arch.mu 持有中翻 snapshot），
+	// 与 switchToArchiveLegacy 的同序临界区（翻 legacy + 撤可信不可分）。
+	// mode 不得在无 s.mu 的纯 arch.mu 临界区里改——会把「archiveReady
+	// 尚可信但 mode 已翻」的中间态放给视图读者。
+	mode t3ArchiveMode
+	// refetchPending 是订阅模式下「请尽快整体重置」的备忘（RefreshArchive
+	// 强拉与写后失效共用）：常驻流没有按需拉取可发，备忘让链接的下一次
+	// 落地后立刻整表重置，取齐可能被时序/坏帧挡住的增量。只对 legacy 模式有意义。
+	refetchPending bool
+	// legacyStarted 保底订阅 goroutine 只启动一次（sync.Once 不可复位，
+	// 用原子标记代替；启动即随 entry 存活，entry 停/hub 关时自停）。
+	legacyStarted atomic.Bool
+	// 以下字段只在按需快照模式下有意义（legacy 订阅面自己维持可信度）：
 	// validUntil 是「当前 state 里的归档快照可信到哪一刻」：来自
 	// applyArchiveSnapshot 可信化成功时刻 + TTL。零值表示从未成功/已失效。
 	validUntil time.Time
@@ -130,9 +163,16 @@ func (e *t3ShellEntry) admitArchiveRefresh() (admitted bool, revoked bool) {
 	e.arch.mu.Lock()
 	defer e.arch.mu.Unlock()
 	now := time.Now()
+	// 订阅模式由常驻流供数，按需拉取在 admission 内短路——避免周期空拨。
+	if e.arch.mode == t3ArchiveModeLegacy {
+		return false, false
+	}
 	if e.arch.inFlight || now.Before(e.arch.validUntil) || now.Before(e.arch.retryAfter) {
 		return false, false
 	}
+	// 按需路径已确认：第一次发起拉取把 mode 记为 snapshot（同一临界区
+	// 提交，与「inFlight 置位」不可分）。
+	e.arch.mode = t3ArchiveModeSnapshot
 	// 准入判定通过：validUntil 一定是零值或已过（上面已 return）。非零即
 	// 「曾信任但已过期」——发起重拉的同时把归档面撤为不可信（Finding
 	// R2）：过期不等于数据作废，旧行照旧展示，但在新快照落地前
@@ -151,6 +191,18 @@ func (e *t3ShellEntry) admitArchiveRefresh() (admitted bool, revoked bool) {
 // refresh（归档面就绪/失败翻转，唤醒等待者并发布事件）。发起时刻先取样
 // 失效计数（generation）：拉取途中归档面被失效作废时，本次结果按写前
 // 状态处理（见落地处的世代护栏）。
+//
+// 旧面上游回退（INT-173 审修）：getArchivedShellSnapshot 在上游 #26238 之
+// 前的环境里不存在（只有常驻 subscribeArchivedShell）。上游没有可查询的
+// 「归档面能力」字段（getConfig 的 capabilities 不覆盖归档读取），切换凭
+// 据只能是 RPC 层的「方法不存在」信号：Exit Failure 里 message 形如
+// "method not found: <方法>" / "unknown method"、或 _tag 为
+// MethodNotFound/RpcMethodNotFound。**只在拿到这个明确信号时切订阅面**
+// ——任意的 RPC 失败（归档数据损坏、上游 5xx、鉴权错误）不等于「方法不
+// 存在」，切了反而掩盖真实故障；传输层不确定性（rpcUncertainError：请
+// 求未写出/响应未读回）也不切——那次调用根本没到过方法分派。切换是单
+// 向的（该环境不可能中途「有了」该方法）；记为 entry 的 mode，此后
+// kickArchiveRefresh 不再发按需拨号，归档由常驻订阅流喂。
 //
 // 失败只记 ArchiveErr（noteArchiveFetchFailed），不动已有快照——归档面
 // 没有增量通道，失败时保留旧快照比「清空并谎报归档列表为空」更不坏；
@@ -208,6 +260,11 @@ func (e *t3ShellEntry) ensureArchive(ctx context.Context) error {
 
 	value, err := session.call(connCtx, t3RPCGetArchivedShellSnapshot, map[string]any{})
 	if err != nil {
+		// 旧面回退：仅「方法不存在」的明确信号才切订阅面——
+		// rpcUncertainError 与任意业务失败都不构成该证据（见函数头）。
+		if isArchiveSnapshotMethodMissing(err) {
+			e.switchToArchiveLegacy()
+		}
 		return e.noteArchiveFetchFailed(err, generation)
 	}
 	var snapshot t3ArchivedShellSnapshot
@@ -231,6 +288,47 @@ func (e *t3ShellEntry) ensureArchive(ctx context.Context) error {
 	e.hub.publishThreadEvent(e, nil, true)
 	e.refresh()
 	return nil
+}
+
+// isArchiveSnapshotMethodMissing 判定 getArchivedShellSnapshot 的失败是否
+// 为「该方法在上游不存在」的明确信号。错误文本由 t3RPCCauseError 组装为
+// "<_tag>: <message>"；上游对未注册方法的应答以 "method not found" /
+// "unknown method" 消息或 MethodNotFound 类 _tag 表达——凭据比任意 RPC
+// 失败窄得多，保证瞬时业务失败不会把面误切到订阅模式。
+func isArchiveSnapshotMethodMissing(err error) bool {
+	var uncertain *rpcUncertainError
+	if errors.As(err, &uncertain) {
+		// 传输层不确定：调用可能根本没到方法分派，不构成「方法不存在」。
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "method not found") ||
+		strings.Contains(msg, "unknown method") ||
+		strings.Contains(msg, "MethodNotFound")
+}
+
+// switchToArchiveLegacy 把该 entry 永久切到旧面订阅模式。临界区与
+// admitArchiveRefresh 同序（s.mu → arch.mu）：mode 翻转与「撤可信+清簿
+// 记」对读者不可分——准入判定在本临界区之外不可能看到「mode 已是
+// legacy 而 archiveReady 仍可信」的中间态；此后 kickArchiveRefresh 短
+// 路不再发按需拨号。本次失败的拉取照常走 noteArchiveFetchFailed 收尾
+// （ArchiveErr 记真实原因），inFlight 由其 defer 清理；归档数据由随后
+// 启动的常驻订阅 goroutine 补齐（仅启动一次）。
+func (e *t3ShellEntry) switchToArchiveLegacy() {
+	e.state.mu.Lock()
+	e.arch.mu.Lock()
+	e.arch.mode = t3ArchiveModeLegacy
+	e.arch.validUntil = time.Time{}
+	e.arch.retryAfter = time.Time{}
+	e.arch.needsRefetch = false
+	e.state.noteArchiveExpiredLocked() // archiveReady → false，留行但报已失效
+	e.arch.mu.Unlock()
+	e.state.mu.Unlock()
+	// 激活停泊中的旧面订阅 goroutine（仅一次）：entry 创建时已为它
+	// wg.Add，这里只负责放行，不再需要 go/Add。
+	if e.arch.legacyStarted.CompareAndSwap(false, true) {
+		close(e.legacyCh)
+	}
 }
 
 // commitArchiveApply 是 applyArchiveSnapshot 的临界区簿记收尾：世代相符
@@ -306,6 +404,16 @@ func (h *t3ShellHub) RefreshArchive(ctx context.Context, env *model.T3Environmen
 		return err
 	}
 	e.arch.mu.Lock()
+	if e.arch.mode == t3ArchiveModeLegacy {
+		// 订阅模式没有按需拉取可发：记守旧备忘，链接的下一次落地后
+		// 整表重置即补回写后状态；不阻塞调用方（常驻流自己收尾）。
+		e.arch.refetchPending = true
+		e.arch.mu.Unlock()
+		e.state.noteArchiveRefreshRequested()
+		h.publishThreadEvent(e, nil, true)
+		e.refresh()
+		return nil
+	}
 	e.arch.validUntil = time.Time{}
 	e.arch.retryAfter = time.Time{}
 	e.arch.mu.Unlock()
@@ -363,6 +471,16 @@ func (h *t3ShellHub) InvalidateArchive(userID, envID string) {
 func (h *t3ShellHub) invalidateArchiveEntry(e *t3ShellEntry) {
 	e.state.noteArchiveInvalidated()
 	e.arch.mu.Lock()
+	if e.arch.mode == t3ArchiveModeLegacy {
+		// 订阅模式：写后失效的等价物是守旧备忘——增量链维持当前面，
+		// 备忘让下一次落地后整表重置；不推进按需簿记（该模式下无意义）。
+		e.arch.refetchPending = true
+		e.arch.mu.Unlock()
+		e.state.noteArchiveRefreshRequested()
+		h.publishThreadEvent(e, nil, true)
+		e.refresh()
+		return
+	}
 	e.arch.validUntil = time.Time{}
 	e.arch.retryAfter = time.Time{}
 	e.arch.needsRefetch = false
@@ -374,4 +492,229 @@ func (h *t3ShellHub) invalidateArchiveEntry(e *t3ShellEntry) {
 	// 顺手发一次 Full 事件，浏览器据此整环境重拉。
 	e.hub.publishThreadEvent(e, nil, true)
 	e.refresh()
+}
+
+// ------ 旧面订阅回退（INT-173 审修） ------
+//
+// 旧上游（#26238 之前）的归档面只有常驻订阅 subscribeArchivedShell：注册
+// 后上游先发全量快照（首个 Chunk 的 snapshot 流项），再推
+// thread.updated/removed 增量。与按需快照的生命周期不同——它是常驻流：
+// 连接健康期间数据持续可信，连接断开即整体弃用（G1：伴随健康连接才可
+// 信），交由监督循环重连。按需路径的 TTL/冷却/世代簿记不适用于它：数据
+// 可信度由「连接是否活着」而不是「快照多新」承载。
+//
+// 恢复自 57c4f583^ 的归档订阅实现（runFaceSubscription/archived=true 分支），
+// 收窄为只服务旧面回退：探活与拨号复用活跃面的 connectFaceOnce 骨架，但
+// 去掉完成标记/游标（归档流没有 afterSequence 恢复语义，重连即重新拉全
+// 量）；流项改喂 t3ArchiveStreamItem；连接终止统一经 markArchiveFailed
+// 弃用归档面（订阅面没有「留旧行等 TTL」的按需语义，清空比留陈旧更如
+// 实）。
+
+// runArchiveLegacySubscription 是旧面归档常驻订阅的监督循环：探测 → 拨号
+// → 订阅 → 读循环，结束后按分类退避重连（复用活跃面的 backoffFor）。仅
+// 在 switchToArchiveLegacy 置 legacyStarted 后启动一次，随 entry/hub 生命
+// 周期退出。
+func (h *t3ShellHub) runArchiveLegacySubscription(e *t3ShellEntry) {
+	attempts := 0
+	for {
+		result := h.connectArchiveLegacyOnce(e)
+		if e.isStopped() {
+			return
+		}
+		select {
+		case <-h.ctx.Done():
+			return
+		default:
+		}
+		if !result.syncedAt.IsZero() && time.Since(result.syncedAt) > h.cfg.StableResetAfter {
+			attempts = 0
+		} else {
+			attempts++
+		}
+		backoff := h.backoffFor(attempts, result.credential)
+		timer := time.NewTimer(backoff)
+		select {
+		case <-e.stop:
+			timer.Stop()
+			return
+		case <-h.ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+	}
+}
+
+// connectArchiveLegacyOnce 跑一次完整的旧归档订阅连接，阻塞到连接结束。
+// 与 connectFaceOnce 同构，但方法固定为 subscribeArchivedShell、无能力查
+// 询与恢复游标（旧订阅没有该协议面）；终止统一按归档面记失败。
+func (h *t3ShellHub) connectArchiveLegacyOnce(e *t3ShellEntry) t3ShellConnResult {
+	connCtx, cancelConn := context.WithCancel(h.ctx)
+	defer cancelConn()
+	watchDone := make(chan struct{})
+	go func() {
+		defer close(watchDone)
+		select {
+		case <-e.stop:
+			cancelConn()
+		case <-connCtx.Done():
+		}
+	}()
+	defer func() {
+		cancelConn()
+		<-watchDone
+	}()
+
+	status, probeMsg := h.http.probeSession(connCtx, e.address, e.token)
+	if status != T3EnvironmentStatusOK {
+		probeErr := fmt.Errorf("归档订阅会话探测失败: %s", probeMsg)
+		credential := false
+		if status == T3EnvironmentStatusRepair {
+			probeErr = fmt.Errorf("%w: %s", errT3CredentialRejected, probeMsg)
+			credential = true
+		}
+		h.endFaceConnection(e, true, probeErr)
+		return t3ShellConnResult{credential: credential}
+	}
+
+	dialCtx, cancelDial := context.WithTimeout(connCtx, h.cfg.DialBudget)
+	session, err := dialT3RPC(dialCtx, wsBaseOf(e.address), e.token)
+	cancelDial()
+	if err != nil {
+		h.endFaceConnection(e, true, err)
+		return t3ShellConnResult{}
+	}
+	defer session.Close()
+	unregisterCancel := session.closeOnCancel(connCtx)
+	defer unregisterCancel()
+
+	e.noteConnState(true, t3ShellConnConnecting, nil)
+	requestID := session.nextID
+	session.nextID++
+	if err := session.sendRequest(connCtx, requestID, t3RPCSubscribeArchivedShell, map[string]any{}); err != nil {
+		h.endFaceConnection(e, true, err)
+		return t3ShellConnResult{}
+	}
+	e.noteConnState(true, t3ShellConnSubscribed, nil)
+	return h.readArchiveLegacyLoop(e, session, connCtx, requestID)
+}
+
+// readArchiveLegacyLoop 是旧归档订阅的读循环：只认本 requestID 的 Chunk/
+// Exit；Chunk 全部 value 先应用再 Ack（任一出错整条流失败）；其余帧只
+// 刷新活性计时，Ping 保活同活跃面。返回连接结局。
+func (h *t3ShellHub) readArchiveLegacyLoop(e *t3ShellEntry, session *t3RPCSession, connCtx context.Context, requestID int) t3ShellConnResult {
+	frames := make(chan *rpcFrame, 16)
+	readErrCh := make(chan error, 1)
+	readerDone := make(chan struct{})
+	stop := make(chan struct{})
+	go func() {
+		defer close(readerDone)
+		defer close(frames)
+		for {
+			frame, err := session.readFrameWithIdleTimeout(h.cfg.FrameIdleTimeout)
+			if err != nil {
+				readErrCh <- err
+				return
+			}
+			select {
+			case frames <- frame:
+			case <-connCtx.Done():
+				return
+			case <-stop:
+				return
+			}
+		}
+	}()
+	defer func() {
+		session.Close()
+		close(stop)
+		<-readerDone
+	}()
+
+	lastFrame := time.Now()
+	pingTicker := time.NewTicker(h.cfg.PingInterval / 2)
+	defer pingTicker.Stop()
+
+	var connErr error
+	credential := false
+	for {
+		select {
+		case <-connCtx.Done():
+			h.endFaceConnection(e, true, nil)
+			return t3ShellConnResult{syncedAt: e.syncConfirmedAt()}
+		case frame, ok := <-frames:
+			if !ok {
+				select {
+				case connErr = <-readErrCh:
+				default:
+					connErr = fmt.Errorf("归档订阅连接读取中断")
+				}
+				h.endFaceConnection(e, true, connErr)
+				return t3ShellConnResult{credential: credential, syncedAt: e.syncConfirmedAt()}
+			}
+			lastFrame = time.Now()
+			switch {
+			case frame.Tag == "Chunk" && frame.requestIDMatches(requestID):
+				if applyErr := h.applyArchiveValues(e, frame.Values); applyErr != nil {
+					h.endFaceConnection(e, true, applyErr)
+					return t3ShellConnResult{syncedAt: e.syncConfirmedAt()}
+				}
+				e.refresh()
+				if err := session.sendAck(connCtx, frame.RequestID); err != nil {
+					h.endFaceConnection(e, true, fmt.Errorf("发送 Ack 失败: %w", err))
+					return t3ShellConnResult{syncedAt: e.syncConfirmedAt()}
+				}
+				// 守旧游标：备忘置位（RefreshArchive/失效留下的「请尽快重置」）
+				// 时，落地后的当前面即清——下一次权威快照/增量重新建立完整
+				// 面，比按增量逐条追赶更能掩盖时序/坏帧缺漏。备忘录分两处记
+				// （arch.refetchPending 簿记 + state.archiveLegacyPending 判定），
+				// 同帧消费：arch.mu 持锁内判+清，state 层负责真重置。
+				e.arch.mu.Lock()
+				consume := e.arch.refetchPending && e.state.archiveLegacyPendingNow()
+				if consume {
+					e.arch.refetchPending = false
+				}
+				e.arch.mu.Unlock()
+				if consume {
+					e.state.resetArchiveSnapshot()
+					h.publishThreadEvent(e, nil, true)
+					e.refresh()
+				}
+			case frame.Tag == "Exit" && frame.requestIDMatches(requestID):
+				if _, err := frame.exitValue(); err != nil {
+					credential = errors.Is(err, errT3CredentialRejected)
+					h.endFaceConnection(e, true, err)
+				} else {
+					h.endFaceConnection(e, true, fmt.Errorf("归档订阅流提前结束"))
+				}
+				return t3ShellConnResult{credential: credential, syncedAt: e.syncConfirmedAt()}
+			default:
+			}
+		case <-pingTicker.C:
+			if time.Since(lastFrame) > h.cfg.PingInterval {
+				if err := session.sendRaw(connCtx, map[string]any{"_tag": "Ping"}); err != nil {
+					h.endFaceConnection(e, true, fmt.Errorf("发送 Ping 失败: %w", err))
+					return t3ShellConnResult{credential: credential, syncedAt: e.syncConfirmedAt()}
+				}
+			}
+		}
+	}
+}
+
+// applyArchiveValues 把旧归档流 Chunk 的全部 value 依次解码并应用到状
+// 态，发布语义同活跃面。
+func (h *t3ShellHub) applyArchiveValues(e *t3ShellEntry, values []json.RawMessage) error {
+	batch := t3ShellEventBatch{}
+	for _, raw := range values {
+		var item t3ArchiveStreamItem
+		if err := json.Unmarshal(raw, &item); err != nil {
+			return fmt.Errorf("归档流帧解析失败: %w", err)
+		}
+		if err := e.state.applyArchiveItem(item); err != nil {
+			return err
+		}
+		batch.observeArchive(&item)
+	}
+	h.publishThreadEvent(e, batch.ids, batch.full)
+	return nil
 }

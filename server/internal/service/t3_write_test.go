@@ -1227,9 +1227,10 @@ func TestT3ComposerAndWorkspaceOptions(t *testing.T) {
 
 // TestT3ComposerSettingsFromConfig 覆盖 INT-173：上游 #26238 删除独立的
 // server.getSettings 后，设置改从 getConfig 内嵌的 settings 字段读取。
-// 新上游（缺省 fake）：Settings 非空、worktree startFromOrigin 继承内嵌值；
-// 旧上游（legacy 开关）：getConfig 无 settings → 客户端拿到空 settings、
-// 不报错，startFromOrigin 缺省不上送。全程不得出现 server.getSettings 调用。
+// 新上游（缺省 fake）：Settings 非空、worktree startFromOrigin 继承内嵌值，
+// 且不得再调 server.getSettings；旧上游（legacy 开关）：getConfig 缺
+// settings 字段 → 回退一次 server.getSettings 拿到真实设置（字段缺失
+// 与「字段为 null/空」严格区分，后者不回退）。
 func TestT3ComposerSettingsFromConfig(t *testing.T) {
 	e := setupT3ServiceTest(t)
 	userID := e.createUser(t)
@@ -1299,24 +1300,47 @@ func TestT3ComposerSettingsFromConfig(t *testing.T) {
 		t.Fatalf("startFromOrigin must inherit false from config.settings, got %+v", ws)
 	}
 
-	// 旧上游：getConfig 无 settings → 空 settings、不报错；startFromOrigin
-	// 缺省不上送（fake 的 getSettings 此时虽可用，但客户端不再调用）。
+	// 旧上游：getConfig 缺 settings 字段 → 回退一次 server.getSettings 拿到
+	// 真实设置（fake 的 settingsValue=newWorktreesStartFromOrigin=true）。
+	before := len(e.fake.recordedRPC())
 	e.fake.useLegacySettings()
 	options, err = e.th.ComposerOptions(ctx, userID, envID)
 	if err != nil {
 		t.Fatalf("composer options (legacy): %v", err)
 	}
-	if len(options.Settings) != 0 {
-		t.Fatalf("legacy config without settings must yield empty settings, got %+v", options.Settings)
+	if options.Settings["newWorktreesStartFromOrigin"] != true {
+		t.Fatalf("legacy env must read settings via server.getSettings, got %+v", options.Settings)
 	}
-	if ws := createWorktreeThread(t); func() bool { _, ok := ws["startFromOrigin"]; return ok }() {
-		t.Fatalf("legacy env must not send startFromOrigin, got %+v", ws)
+	var sawGetSettings bool
+	for _, rpc := range e.fake.recordedRPC()[before:] {
+		if rpc.method == "server.getSettings" {
+			sawGetSettings = true
+		}
+	}
+	if !sawGetSettings {
+		t.Fatalf("legacy env must fall back to server.getSettings")
 	}
 
-	// 验收硬口径：任何路径都不得再调 server.getSettings。
-	for _, rpc := range e.fake.recordedRPC() {
+	// 「字段为 null」是新版空设置：不得回退旧 RPC（新上游已删 getSettings，
+	// 误调会被 fake 炸出来）。
+	e.fake.mu.Lock()
+	e.fake.legacySettings = false
+	e.fake.configValue = mustJSON(map[string]any{
+		"providers": map[string]any{}, "shellResumeCompletionMarker": true,
+		"settings": nil,
+	})
+	e.fake.mu.Unlock()
+	before = len(e.fake.recordedRPC())
+	options, err = e.th.ComposerOptions(ctx, userID, envID)
+	if err != nil {
+		t.Fatalf("composer options (null settings): %v", err)
+	}
+	if len(options.Settings) != 0 {
+		t.Fatalf("null settings must yield empty map, got %+v", options.Settings)
+	}
+	for _, rpc := range e.fake.recordedRPC()[before:] {
 		if rpc.method == "server.getSettings" {
-			t.Fatalf("client must not call server.getSettings anymore")
+			t.Fatalf("null settings (new env) must not fall back to server.getSettings")
 		}
 	}
 }

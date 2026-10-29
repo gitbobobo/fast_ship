@@ -21,6 +21,10 @@ import (
 // 增量推送；归档面自 INT-173 起改为按需一次性快照——上游 #26238 删除了
 // orchestration.subscribeArchivedShell，官方客户端已改用
 // getArchivedShellSnapshot（见 t3ShellEntry 的 arch* 字段与 t3ArchiveFetchState）。
+// 旧上游（#26238 之前）归档面只有常驻 subscribeArchivedShell：按需快照
+// 首次读取被判方法拒绝（确定性 Exit Failure）时，entry 永久切到回退的
+// 常驻订阅路径（见 t3_shell_archive.go 的 mode 判定与
+// runArchiveLegacySubscription）。
 // INT-132 起订阅跟环境走（启动预热、环境增删改时增删），不再按读请求的
 // 生灭做空闲回收；变更经 t3_shell_events.go 推给浏览器。
 // 设计见 INT-116 v2：
@@ -47,7 +51,10 @@ const (
 	// 起保留的唯一归档读取口）：返回 t3ArchivedShellSnapshot 形状的全量
 	// 数据，失败以 Exit Failure 明确表达。
 	t3RPCGetArchivedShellSnapshot = "orchestration.getArchivedShellSnapshot"
-	t3RPCServerGetConfig          = "server.getConfig"
+	// t3RPCSubscribeArchivedShell 是旧上游的归档常驻订阅（#26238 之前）：
+	// 仅在按需快照被判方法拒绝后由旧面回退路径使用（t3_shell_archive.go）。
+	t3RPCSubscribeArchivedShell = "orchestration.subscribeArchivedShell"
+	t3RPCServerGetConfig        = "server.getConfig"
 )
 
 // errT3ShellConfigStale 是 View 的版本守卫哨兵：请求携带的环境配置世代
@@ -410,9 +417,13 @@ func (h *t3ShellHub) Close() {
 	})
 }
 
-// newEntryLocked 创建 entry 并启动活跃面监督 goroutine。只做内存操作与
-// go 语句，网络 I/O 都在 goroutine 内、锁外。调用方持有 hub 锁。归档面
-// 不建常驻连接：INT-173 起按需快照，快照到达前的归档面表达为「未就绪」。
+// newEntryLocked 创建 entry 并启动两条 goroutine：活跃面监督循环，与停泊
+// 中的归档面 goroutine（默认等待旧面回退激活，见 t3_shell_archive.go 的
+// mode 判定——entry 创建时不知道上游新旧，旧面订阅只能在第一次按需拉取
+// 被判方法失败后启动；停泊避免「运行中途 wg.Add」与 done 观察者的
+// Wait 竞态）。只做内存操作与 go 语句，网络 I/O 都在 goroutine 内、锁外。
+// 调用方持有 hub 锁。归档面正常情况下不建常驻连接：INT-173 起按需快照，
+// 快照到达前的归档面表达为「未就绪」。
 func (h *t3ShellHub) newEntryLocked(key string, env *model.T3Environment, token string) *t3ShellEntry {
 	e := &t3ShellEntry{
 		hub:            h,
@@ -428,6 +439,7 @@ func (h *t3ShellHub) newEntryLocked(key string, env *model.T3Environment, token 
 		notify:     make(chan struct{}),
 		activeConn: t3ShellConnConnecting,
 		archTTL:    h.cfg.ArchiveTTL,
+		legacyCh:   make(chan struct{}),
 		stop:       make(chan struct{}),
 		done:       make(chan struct{}),
 	}
@@ -436,12 +448,25 @@ func (h *t3ShellHub) newEntryLocked(key string, env *model.T3Environment, token 
 	// 生命周期计数：entry 的全部 goroutine（监督循环经 readStreamLoop 退出前
 	// 会汇合各自的订阅 reader）退出后释放。归档按需拉取是后台一次性任务
 	// （arch.inFlight 合并并发，entry 停/hub 关即中断），不占常驻 goroutine，
-	// 不计入 e.wg。
+	// 不计入 e.wg；旧面订阅 goroutine 则常驻，占 e.wg 一份。
 	h.lifecycle.Add(1)
-	e.wg.Add(1)
+	e.wg.Add(2)
 	go func() {
 		defer e.wg.Done()
 		h.runFaceSubscription(e, false)
+	}()
+	go func() {
+		defer e.wg.Done()
+		// 停泊：旧面回退从未激活（新上游）时随 entry 停/hub 关退出；激活后
+		// 转为常驻订阅监督循环。
+		select {
+		case <-e.legacyCh:
+		case <-e.stop:
+			return
+		case <-h.ctx.Done():
+			return
+		}
+		h.runArchiveLegacySubscription(e)
 	}()
 	// done 在全部监督 goroutine 退出后关闭，供测试汇合；同时释放 hub 的
 	// 生命周期计数（Close 经它等待已被摘除的 entry）。
@@ -496,6 +521,13 @@ type t3ShellEntry struct {
 	stopOnce sync.Once
 	wg       sync.WaitGroup
 	done     chan struct{}
+
+	// legacyCh 是旧面归档订阅 goroutine 的激活信号：entry 创建时停泊在
+	// select 上（不占连接、不打上游）；按需快照被判「方法明确拒绝」后由
+	// switchToArchiveLegacy 关闭，goroutine 随即进入常驻订阅监督循环。
+	// 用 channel 而不是「发现失败时直接 go」——entry 创建时 wg.Add 已完成，
+	// 中途 Add 会与 done 观察者的 Wait 竞态（sync 文档禁止）。
+	legacyCh chan struct{}
 
 	// forceResync 是活跃面的强制全量重同步请求（F1）：请求了 synchronized 但
 	// 预算内未等到时置位；下次活跃重连读后清除，不带 afterSequence，由上游
@@ -1010,11 +1042,19 @@ func (h *t3ShellHub) readStreamLoop(e *t3ShellEntry, session *t3RPCSession, conn
 	}
 }
 
-// endFaceConnection 收尾活跃面连接状态：只更新连接状态与失败分类。归档面
-// 已改为按需快照（INT-173），不再随连接生灭——归档读取失败由 ensureArchive
-// 记进归档快照状态，不推翻既有归档快照（语义与活跃面 G1 对称）。err 为
-// nil（停机取消）时记「未就绪」而不抹掉既有失败原因。
+// endFaceConnection 收尾连接状态。归档面分两条路径：按需快照模式不在
+// 此终止（它没有常驻连接）；旧面订阅模式（archived=true）下任何终止
+// ——读错误/写失败/正常 Exit/取消/探测或拨号失败——统一撤销归档面可
+// 信度（清空归档表 + ArchiveErr，同旧 F2），直到下一次归档权威快照到
+// 达才恢复，并发布一次 Full 事件（列表需要把「归档暂不可读」呈现）。
+// 活跃面只更新连接状态与失败分类：单面终止不推翻活跃数据（G1），View
+// 的 Stale 判定用得上最近一次真实失败原因。err 为 nil（停机取消）时记
+// 「未就绪」而不抹掉既有失败原因。
 func (h *t3ShellHub) endFaceConnection(e *t3ShellEntry, archived bool, connErr error) {
+	if archived {
+		e.state.markArchiveFailed(connErr)
+		h.publishThreadEvent(e, nil, true)
+	}
 	e.noteConnState(archived, t3ShellConnFailed, connErr)
 	if connErr != nil {
 		h.logFaceFailure(e, archived, connErr)
@@ -1077,7 +1117,7 @@ func (h *t3ShellHub) applyActiveValues(e *t3ShellEntry, values []json.RawMessage
 	return nil
 }
 
-// logFaceFailure 记录连接失败，日志只作观测。
+// logFaceFailure 记录连接失败；归档面失败不推翻活跃面（G1），日志只作观测。
 func (h *t3ShellHub) logFaceFailure(e *t3ShellEntry, archived bool, err error) {
 	face := "active"
 	if archived {

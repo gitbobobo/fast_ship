@@ -290,12 +290,14 @@ export interface paths {
         put?: never;
         /**
          * 停止线程当前活动（并挂起队列）
-         * @description 经 WS RPC `orchestration.dispatchCommand` 下发 `run.interrupt`
-         *     （holdQueue=true，T3 Stop 按钮口径：同时挂起队列）。目标 run 由
-         *     服务端选择：活动 run（preparing/starting/running/waiting 的最近一个），
-         *     否则仍有后台工作的最近 run（对齐 T3 客户端 stopThread 的选择逻辑）。
-         *     没有可停止的 run 时按 T3 口径视为无操作，返回 stopped=false，
-         *     不杜撰内部 thread.stop 命令。
+         * @description 能力驱动的两条路径：环境在 `server.getConfig` 声明
+         *     `environment.capabilities.threadStop`（新上游）时下发公开命令
+         *     `thread.stop`，由服务端选择停止目标并挂起队列——受理即
+         *     stopped=true，run_id 此路径不返回。能力缺失（旧上游）走回退：
+         *     本地读可信 shell 自选 run 后下发 `run.interrupt`（holdQueue=true），
+         *     目标 run 取活动 run（preparing/starting/running/waiting 的最近
+         *     一个），否则仍有后台工作的最近 run；没有可停止的 run 时按 T3
+         *     口径视为无操作，返回 stopped=false。
          */
         post: operations["stopT3Thread"];
         delete?: never;
@@ -5839,10 +5841,10 @@ export interface components {
         T3DispatchResult: {
             sequence: number;
         };
-        /** @description 停止结果；无可停止运行时按 T3 口径视为无操作（stopped=false） */
+        /** @description 停止结果；回退路径（旧上游）无可停止运行时按 T3 口径视为无操作（stopped=false） */
         T3ThreadStopResult: {
             stopped: boolean;
-            /** @description 被中断的 run；无可停止运行时缺省 */
+            /** @description 被中断的 run；仅在 run.interrupt 回退路径回填（thread.stop 路径由服务端选目标，不返回 run_id） */
             run_id?: string;
         };
         /** @description target_run_id 由服务端解析为当前活动 run，请求体保留字段以显式表达意图 */
