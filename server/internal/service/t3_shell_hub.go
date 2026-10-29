@@ -532,8 +532,8 @@ type t3ShellEntry struct {
 	// 中途 Add 会与 done 观察者的 Wait 竞态（sync 文档禁止）。
 	legacyCh chan struct{}
 
-	// legacyReconnect 是旧面归档订阅的「请重建连接」信号：RefreshArchive
-	// 与写后失效在订阅模式下要取回写后全量，只能让常驻订阅断开重连
+	// legacyReconnect 是旧面归档订阅的「请重建连接」信号：写后失效在订阅
+	// 模式下要取回写后全量，只能让常驻订阅断开重连
 	// （新 subscribe 即收权威快照），不能靠增量落地后整表重置（R3 P1-B）。
 	legacyReconnect chan struct{}
 
@@ -1084,22 +1084,27 @@ func (e *t3ShellEntry) syncConfirmedAt() time.Time {
 // 成功后把本批变化发布给该用户的订阅者。应用失败（坏帧）整条流失败重连，
 // 不发布线程事件——紧随其后的连接终止会发布状态事件，浏览器据此整面刷新。
 //
-// 批内出现过 thread.removed 时同步失效归档缓存：removal 表示线程离开了
-// 活跃面，但帧本身不携带「去向」——可能是被归档（进归档面），也可能是被
-// 彻底删除（归档集不变），上游对移除不看 location，Fast Ship 无法区分。
-// 两者统一按「归档集可能变了」失效是保守正确的选择：多付一次快照重拉，
-// 不会出错；若只在「确认归档」时失效，就得先猜去向，猜错（把删除当无效
-// 不失效）不会导致错误，但把归档当删除跳过失效会让线程在 TTL 内从活跃、
-// 归档两边同时消失——useThreads 不轮询，TTL 过期也不主动调度拉取，要缺
-// 到下一次事件/聚焦/手动刷新。这个窗口主要威胁的是「别的客户端归档了
-// 线程」场景：我们自己的写命令已在写后失效，这里再失效一次是幂等的
-// 冗余标记，无额外拉取（在途合并/同一世代内的标记不重拨）。失效只是标
-// 不可信+留旧行，不在这里同步发起网络拉取（不拖慢 readStreamLoop），下一
-// 次读经 kickArchiveRefresh 重拉；removed 是低频帧，且每条 Chunk 至多失效
-// 一次，不构成对流式的过度拉取。
+// 批内出现过「线程离开活跃面」的帧时同步失效归档缓存——离开活跃面即归
+// 档集可能变了。两种帧都算离开：thread.removed，与 location != "active"
+// 的 thread.updated（applyActiveItem 对它执行 activeThreads.remove——上游
+// 若以该帧传递归档迁移，不失效的话线程会同时从活跃面与 TTL 缓存的归档
+// 集合消失，ArchiveErr 却仍 nil，列表谎报完整、详情落「未找到该线程」，
+// 最长一个 TTL 才自愈）。离开帧不携带「去向」——可能是被归档（进归档
+// 面），也可能是被彻底删除（归档集不变），上游对移除不看 location，Fast
+// Ship 无法区分。两者统一按「归档集可能变了」失效是保守正确的选择：多付
+// 一次快照重拉，不会出错；若只在「确认归档」时失效，就得先猜去向，猜错
+// （把删除当无效不失效）不会导致错误，但把归档当删除跳过失效会让线程在
+// TTL 内从活跃、归档两边同时消失——useThreads 不轮询，TTL 过期也不主动
+// 调度拉取，要缺到下一次事件/聚焦/手动刷新。这个窗口主要威胁的是「别的
+// 客户端归档了线程」场景：我们自己的写命令已在写后失效，这里再失效一次
+// 是幂等的冗余标记，无额外拉取（在途合并/同一世代内的标记不重拨）。失效
+// 只是标不可信+留旧行，不在这里同步发起网络拉取（不拖慢 readStreamLoop），
+// 下一次读经 kickArchiveRefresh 重拉；离开帧是低频帧，且每条 Chunk 至多
+// 失效一次，不构成对流式的过度拉取。location == "active" 的 updated 是
+// 正常字段更新，线程没离开活跃面，不触发失效。
 func (h *t3ShellHub) applyActiveValues(e *t3ShellEntry, values []json.RawMessage) error {
 	batch := t3ShellEventBatch{}
-	removedFromActive := false
+	leftActiveFace := false
 	for _, raw := range values {
 		var item t3ShellStreamItem
 		if err := json.Unmarshal(raw, &item); err != nil {
@@ -1108,8 +1113,11 @@ func (h *t3ShellHub) applyActiveValues(e *t3ShellEntry, values []json.RawMessage
 		if err := e.state.applyActiveItem(item); err != nil {
 			return err
 		}
-		if item.Kind == "thread.removed" {
-			removedFromActive = true
+		// 线程离开活跃面即归档集可能变了（见函数头）：removal 与
+		// location != "active" 的 updated 都把线程从活跃面摘除，去向不可辨，
+		// 统一失效归档缓存。
+		if item.Kind == "thread.removed" || (item.Kind == "thread.updated" && item.Location != "active") {
+			leftActiveFace = true
 		}
 		batch.observeActive(&item)
 		// 权威全量快照落地（无 enrichment 标记）→ 强制重同步要求到此结束。
@@ -1119,7 +1127,7 @@ func (h *t3ShellHub) applyActiveValues(e *t3ShellEntry, values []json.RawMessage
 		}
 	}
 	h.publishThreadEvent(e, batch.ids, batch.full)
-	if removedFromActive {
+	if leftActiveFace {
 		h.invalidateArchiveEntry(e)
 	}
 	return nil

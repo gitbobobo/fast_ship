@@ -599,6 +599,13 @@ func (c *shellConnCollector) classify(conn *fakeShellConn) {
 		// 按需归档快照：单次请求后客户端即关闭连接。
 		entry = classifiedShellConn{conn: conn, sub: req}
 		archived = true
+	case t3RPCSubscribeArchivedShell:
+		// 旧面归档订阅连接（回退路径）：无 getConfig 前置，首请求即订阅。
+		// 它与活跃连接并行拨号，到达顺序竞速——await(active) 先等到它时
+		// 停泊归档池继续等，不得判死（-race 下的既有 flake：活跃连接的
+		// 探测/拨号慢于「按需快照被拒→回退重拨」时，legacy 连接先到）。
+		entry = classifiedShellConn{conn: conn, sub: req}
+		archived = true
 	default:
 		c.t.Fatalf("unexpected first request %q", req.Method)
 	}
@@ -1247,6 +1254,99 @@ func TestT3ShellHub_ActiveRemovedInvalidatesArchive(t *testing.T) {
 	for _, th := range view.Snaps.Active.Threads {
 		if th.ID == "th-1" {
 			t.Fatalf("removed thread must leave the active face: %+v", view.Snaps.Active.Threads)
+		}
+	}
+}
+
+// location:"archive" 的 thread.updated 同样是「线程离开活跃面」（P2 修复）：
+// 上游若以该帧传递归档迁移，归档缓存必须同步失效——否则线程同时从活跃
+// 面与 TTL 缓存的归档集合消失，ArchiveErr 却仍 nil（列表谎报完整、详情
+// 落「未找到该线程」），最长一个 TTL 才自愈。失效后的重拉必须读到含该
+// 线程的新归档面；location:"active" 的正常字段更新则不得触发失效（幂等
+// 标记之外的拉取是浪费）。
+func TestT3ShellHub_ActiveUpdatedArchiveLocationInvalidatesArchive(t *testing.T) {
+	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
+	srv.setArchiveFixture(archiveSnapshotBody(1, "th-a"), nil)
+	hub := newT3ShellHubWithConfig(hubTestConfig(), nil)
+	defer hub.Close()
+	env := hubTestEnv(url, 0)
+
+	_, activeConn, activeSub, _, _ := establishBothFaces(t, hub, srv, env, "tok", 42, "th-1")
+
+	key := t3ShellHubKey(env.UserID, env.ID)
+	hub.mu.Lock()
+	e := hub.entries[key]
+	hub.mu.Unlock()
+	if e == nil {
+		t.Fatalf("entry missing")
+	}
+	e.state.mu.Lock()
+	genBefore := e.state.archiveGeneration
+	e.state.mu.Unlock()
+
+	// 先验反例：location:"active" 的正常更新是普通字段变更，线程没离开
+	// 活跃面，归档世代不得推进。
+	updated, _ := json.Marshal(map[string]any{
+		"kind": "thread.updated", "sequence": 43, "location": "active",
+		"thread": map[string]any{"id": "th-1", "projectId": "p-1", "title": "改名", "status": "idle"},
+	})
+	if err := activeConn.sendValue(activeSub.ID, updated); err != nil {
+		t.Fatalf("send active update: %v", err)
+	}
+	if !activeConn.awaitAck(activeSub.ID, 2*time.Second) {
+		t.Fatalf("active update frame not acked")
+	}
+	e.state.mu.Lock()
+	gen := e.state.archiveGeneration
+	e.state.mu.Unlock()
+	if gen != genBefore {
+		t.Fatalf("location=active update must not invalidate the archive face: gen %d → %d", genBefore, gen)
+	}
+
+	// 另一个客户端把 th-1 归档，活跃流以 location:"archive" 的 updated
+	// 传达（applyActiveItem 对它执行活跃面移除）。归档快照 fixture 同步换
+	// 上写后状态：失效后的重拉必须读到含 th-1 的新归档面，线程不得从活
+	// 跃、归档两边同时消失。
+	archived, _ := json.Marshal(map[string]any{
+		"kind": "thread.updated", "sequence": 44, "location": "archive",
+		"thread": map[string]any{"id": "th-1", "projectId": "p-1", "title": "th-1", "status": "idle", "archivedAt": "2026-10-01T00:00:00.000Z"},
+	})
+	srv.setArchiveFixture(archiveSnapshotBody(2, "th-a", "th-1"), nil)
+	if err := activeConn.sendValue(activeSub.ID, archived); err != nil {
+		t.Fatalf("send archive-located update: %v", err)
+	}
+	if !activeConn.awaitAck(activeSub.ID, 2*time.Second) {
+		t.Fatalf("archive-located update frame not acked")
+	}
+
+	// Ack 在全部 value 应用后才发 → 失效此刻已同步生效：标不可信（stale、
+	// ArchiveErr 非空）且世代推进，不依赖 TTL 到期。
+	e.state.mu.Lock()
+	stale, gen, archErr := e.state.archiveStale, e.state.archiveGeneration, e.state.archiveErr
+	e.state.mu.Unlock()
+	if !stale || archErr == nil || gen != genBefore+1 {
+		t.Fatalf("archive-located update must invalidate the archive face: stale=%v err=%v gen %d → %d", stale, archErr, genBefore, gen)
+	}
+
+	// 流处理路径不发起同步拉取：失效只标不可信，重拉由下一次读取 kick。
+	calls := srv.archiveCallCount()
+	view := waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		if v.Snaps == nil || v.Snaps.ArchiveErr != nil {
+			return false
+		}
+		for _, th := range v.Snaps.Archived.Threads {
+			if th.ID == "th-1" {
+				return true
+			}
+		}
+		return false
+	})
+	if got := srv.archiveCallCount(); got != calls+1 {
+		t.Fatalf("archive-located update must trigger exactly one archive refetch, calls %d → %d", calls, got)
+	}
+	for _, th := range view.Snaps.Active.Threads {
+		if th.ID == "th-1" {
+			t.Fatalf("updated-away thread must leave the active face: %+v", view.Snaps.Active.Threads)
 		}
 	}
 }
@@ -2522,6 +2622,84 @@ func TestT3ShellHub_NonMethodFailureDoesNotFallback(t *testing.T) {
 	}
 }
 
+// isArchiveSnapshotMethodMissing 的匹配大小写不敏感（审修 N3）：上游文案
+// 的大小写没有保证，首字母大写变体（"Method not found"/"Unknown method"）
+// 与 _tag 形式都要命中；普通业务失败与传输层不确定仍然不构成「方法不
+// 存在」。
+func TestIsArchiveSnapshotMethodMissingCaseInsensitive(t *testing.T) {
+	yes := []string{
+		"UnknownException: method not found: orchestration.getArchivedShellSnapshot",
+		"UnknownException: Method not found: orchestration.getArchivedShellSnapshot",
+		"UnknownException: METHOD NOT FOUND",
+		"UnknownException: unknown method",
+		"UnknownException: Unknown method",
+		"UnknownException: MethodNotFound",
+		"UnknownException: RpcMethodNotFound",
+	}
+	for _, msg := range yes {
+		if !isArchiveSnapshotMethodMissing(errors.New(msg)) {
+			t.Fatalf("must be classified as method missing: %q", msg)
+		}
+	}
+	no := []string{
+		"UnknownException: archive exploded",
+		"UnknownException: Method absent",
+		"RPC 调用失败（无错误详情）",
+	}
+	for _, msg := range no {
+		if isArchiveSnapshotMethodMissing(errors.New(msg)) {
+			t.Fatalf("must NOT be classified as method missing: %q", msg)
+		}
+	}
+	if isArchiveSnapshotMethodMissing(&rpcUncertainError{err: errors.New("method not found")}) {
+		t.Fatalf("uncertain transport error must never be classified as method missing")
+	}
+}
+
+// method-not-found 判定的大小写变体须触发旧面回退（审修 N3，端到端）：
+// 上游以 "Method not found"/"Unknown method" 首字母大写文案拒绝按需快照
+// 时，回退必须同样激活——否则归档面长期停 ArchiveErr、每 TTL 盲重试。
+// 变体命中后切订阅面、权威快照落地恢复可信，与全小写路径一致。
+func TestT3ShellHub_MethodNotFoundCaseVariantsFallBack(t *testing.T) {
+	variants := []struct {
+		name    string
+		message string
+	}{
+		{"capitalized method not found", "Method not found: orchestration.getArchivedShellSnapshot"},
+		{"capitalized unknown method", "Unknown method"},
+		{"uppercase method not found", "METHOD NOT FOUND: orchestration.getArchivedShellSnapshot"},
+		{"tag form", "MethodNotFound"},
+	}
+	for _, tc := range variants {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
+			srv.setArchiveLegacy(true)
+			// archErr 定制失败文案：fake 照常应答该错误（legacy 模式下定制
+			// 失败优先于内置的 method-not-found 应答，见 fake 的分派注释）。
+			srv.setArchiveFixture(archiveSnapshotBody(1, "th-a"), map[string]any{"_tag": "UnknownException", "message": tc.message})
+			hub := newT3ShellHubWithConfig(hubTestConfig(), nil)
+			defer hub.Close()
+			env := hubTestEnv(url, 0)
+
+			go hub.View(context.Background(), env, "tok")
+			collector := newShellConnCollector(t, srv)
+			active := collector.await(false)
+			if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1")); err != nil {
+				t.Fatalf("send active snapshot: %v", err)
+			}
+			if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
+				t.Fatalf("active snapshot not acked")
+			}
+
+			// 变体命中 → 切订阅面：旧面订阅被拉起、权威快照落地恢复可信。
+			srv.awaitArchiveSub(t)
+			waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+				return v.Snaps != nil && v.Snaps.ArchiveErr == nil && len(v.Snaps.Archived.Threads) == 1
+			})
+		})
+	}
+}
+
 // legacy 回退的失败收尾时序（R5 P2）：方法不存在切订阅面时必须先记失败、
 // 后切换——switchToArchiveLegacy 放行的常驻订阅可能紧跟着落地权威快照
 // （archiveErr=nil、archiveReady=true），先切换后收尾会把刚恢复可信的
@@ -2675,7 +2853,7 @@ func TestT3ShellHub_LegacyInvalidateTriggersReconnectRefetch(t *testing.T) {
 // s.mu → arch.mu 序列（如 admitArchiveRefresh 准入）并发即 ABBA 死锁、
 // s.mu 永久占住。本用例先在测试线程持住 s.mu，再推送增量：若落地路径仍
 // 取 arch.mu → s.mu，它会卡在等 s.mu（不崩溃、可多次重演）；持锁期间
-// 置失效并发 RefreshArchive 信号，随后放锁——增量落地 + 备忘消费 +
+// 置失效并发 reconnect 信号，随后放锁——增量落地 + 备忘消费 +
 // 订阅断开必须全部在有限时间内完成，不走完即死锁回归。
 func TestT3ShellHub_LegacyPendingDoesNotDeadlock(t *testing.T) {
 	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
@@ -2909,7 +3087,7 @@ func TestT3ShellHub_LegacyReconnectPreservesNewerRequest(t *testing.T) {
 // 期间记入的请求世代（gen2）必然大于邮戳——落地不得吞掉备忘，读循环
 // 须消费信号拆掉 conn2，再由 conn3 的订阅取回写后全量。
 //
-// 交错：conn1 尚在时经 RefreshArchive 记备忘 gen=1 → conn1 被拆、conn2
+// 交错：conn1 尚在时经写后失效记备忘 gen=1 → conn1 被拆、conn2
 // 重连（subscribe 在 gen=1 之后发出，其快照对 gen=1 合法）→ 持 s.mu 阻
 // 住 conn2 的 apply → 推送一张变更前形状的快照（写前数据）→ 在「
 // subscribe 已发出、快照未落地」的窗口里记第二次失效（gen2）→ 放锁：
@@ -2949,10 +3127,11 @@ func TestT3ShellHub_LegacyStampTakenBeforeSubscribe(t *testing.T) {
 		t.Fatalf("entry missing")
 	}
 
-	// 第一次重建请求（gen=1）：conn1 被拆、conn2 重连。conn2 的 subscribe
+	// 第一次重建请求（gen=1，经写后失效记入：legacy 面失效的正确动作就
+	// 是拆连重连）：conn1 被拆、conn2 重连。conn2 的 subscribe
 	// 受理证据（archiveSubs）一到，subscribe 必已发出——此刻记入的失效世
 	// 代必然在 conn2 邮戳右侧（邮戳取于发送之前）。
-	go func() { _ = hub.RefreshArchive(context.Background(), env, "tok") }()
+	hub.InvalidateArchive("user-1", "env-1")
 	if !conn1.awaitClosed(3 * time.Second) {
 		t.Fatalf("first reconnect request must end conn1")
 	}
@@ -3036,18 +3215,16 @@ func TestT3ShellHub_ArchiveSnapshotShapeValidated(t *testing.T) {
 	})
 	_ = view
 
-	// 失效作废可信面 → 下一次强拉；fake 改答「threads 字段缺失的包裹形
-	// 状」。RefreshArchive 同步等待结果：修复前它把零值快照应用成功返回
-	// nil 并封可信、清空归档行；修复后返回形状错误，行保留、ArchiveErr
-	// 如实记失败原因。
+	// 失效作废可信面 → 下一次读取 kick 重拉；fake 改答「threads 字段缺失的包裹形
+	// 状」。修复前零值快照被应用成功并封可信、清空归档行；修复后读取以形
+	// 状失败告终：ArchiveErr 记真实原因、行保留、不封窗。
 	hub.InvalidateArchive("user-1", "env-1")
 	wrapped, _ := json.Marshal(map[string]any{"snapshot": json.RawMessage(archiveSnapshotBody(2, "th-b"))})
 	srv.setArchiveFixture(wrapped, nil)
-	if err := hub.RefreshArchive(context.Background(), env, "tok"); err == nil {
-		t.Fatalf("wrapped snapshot response must be rejected as a read failure")
-	}
 	view = waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
-		return v.Snaps != nil && v.Snaps.ArchiveErr != nil && len(v.Snaps.Archived.Threads) == 1
+		return v.Snaps != nil && v.Snaps.ArchiveErr != nil &&
+			strings.Contains(v.Snaps.ArchiveErr.Error(), "缺少 threads 判别字段") &&
+			len(v.Snaps.Archived.Threads) == 1
 	})
 	if view.Snaps.Archived.Threads[0].ID != "th-a" {
 		t.Fatalf("rejected shape must not wipe archive rows, got %+v", view.Snaps.Archived.Threads)
@@ -3057,11 +3234,10 @@ func TestT3ShellHub_ArchiveSnapshotShapeValidated(t *testing.T) {
 	// 判别字段缺失）。
 	hub.InvalidateArchive("user-1", "env-1")
 	srv.setArchiveFixture(json.RawMessage("null"), nil)
-	if err := hub.RefreshArchive(context.Background(), env, "tok"); err == nil {
-		t.Fatalf("null snapshot response must be rejected as a read failure")
-	}
 	view = waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
-		return v.Snaps != nil && v.Snaps.ArchiveErr != nil && len(v.Snaps.Archived.Threads) == 1
+		return v.Snaps != nil && v.Snaps.ArchiveErr != nil &&
+			strings.Contains(v.Snaps.ArchiveErr.Error(), "缺少 threads 判别字段") &&
+			len(v.Snaps.Archived.Threads) == 1
 	})
 	_ = view
 
@@ -3069,9 +3245,6 @@ func TestT3ShellHub_ArchiveSnapshotShapeValidated(t *testing.T) {
 	// 归档表按权威快照置空——与「字段缺失的零值」区分开。
 	srv.setArchiveFixture(archiveSnapshotBody(3), nil)
 	hub.InvalidateArchive("user-1", "env-1")
-	if err := hub.RefreshArchive(context.Background(), env, "tok"); err != nil {
-		t.Fatalf("legit empty archive must apply, got %v", err)
-	}
 	view = waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
 		return v.Snaps != nil && v.Snaps.ArchiveErr == nil && len(v.Snaps.Archived.Threads) == 0
 	})

@@ -187,7 +187,7 @@ type t3ShellState struct {
 	// archiveReconnectPendingGen 是旧面订阅路径独有的「请重建归档订阅」
 	// 备忘（守旧游标），以单调世代表达：0 表示无未决请求，>0 表示最新一
 	// 次请求的世代。常驻流没有按需拉取可发——除重连外上游只推增量、不
-	// 自发重发全量，RefreshArchive 强拉与写后失效要取回写后全量只能靠
+	// 自发重发全量，写后失效要取回写后全量只能靠
 	// 断开重连（新 subscribe 即收权威快照）。备忘由读循环的
 	// legacyReconnect 分支消费后主动断开（R3 P1-B：增量落地后整表重置
 	// 会让归档面长期不可信）。只被 archiveLegacy 模式读写，统一记在
@@ -278,7 +278,9 @@ func (s *t3ShellState) applyActiveItem(item t3ShellStreamItem) error {
 		// 活跃流实际只产生 location:"active"（ShellStream.ts:292-320）。旧版服务端
 		// 也可能在这条流上发 location:"archive"，上游 reducer 对它的处理是「不进
 		// 活跃面」（shellReducer.ts:169-190），归档面归归档订阅维护；当坏帧处理
-		// 会把协议演进拖成重连循环，代价远大于收益。
+		// 会把协议演进拖成重连循环，代价远大于收益。走到 remove 分支即线程离开
+		// 活跃面：归档缓存的失效与 thread.removed 一样由 hub 层在应用后触发
+		// （applyActiveValues → invalidateArchiveEntry），state 只管活跃面。
 		if item.Location == "active" {
 			s.activeThreads.upsert(item.Thread, item.Thread.ID)
 		} else {
@@ -293,8 +295,9 @@ func (s *t3ShellState) applyActiveItem(item t3ShellStreamItem) error {
 		// 只从活跃面删除：归档动作在上游也发 active removal
 		// （ShellStream.ts:292-320），不代表线程从归档面消失（规则 3）；
 		// removal 的 location 不改变语义（上游对移除不看 location）。
-		// state 是纯内存、不持 hub 引用：归档缓存的失效由 hub 层在应用此帧后
-		// 触发（applyActiveValues → invalidateArchiveEntry），这里只管活跃面。
+		// state 是纯内存、不持 hub 引用：归档缓存的失效由 hub 层在应用离开
+		// 活跃面的帧（本帧与 location!="active" 的 updated）后触发
+		// （applyActiveValues → invalidateArchiveEntry），这里只管活跃面。
 		s.activeThreads.remove(item.ThreadID)
 		s.advanceActiveCursorLocked(*item.Sequence)
 		return nil
@@ -427,26 +430,6 @@ func (s *t3ShellState) archiveGenerationNow() int64 {
 	return s.archiveGeneration
 }
 
-// noteArchiveFetchFailed 记一次归档快照读取失败（INT-173）：不清数据、不改
-// ArchiveReady。失败不推翻既有快照——归档面没有增量通道，保留的旧快照与
-// 「清空后谎报归档列表为空」相比更不坏；ArchiveErr 单独承载失败，调用方
-// 据此决定能不能把「归档面没有」当结论用（G1）。archiveReady 为假时清空
-// 归档表——没有快照可留时半张表只会误导（同旧 markArchiveFailed 的清表
-// 语义）。entry 的 TTL/失效簿记在 t3ArchiveFetchState，这里只认快照本身。
-//
-// generation 与 applyArchiveSnapshot 同一护栏：拉取期间归档面被失效标记
-// 作废时，「这次读失败」只说明写前那次读取失败——用它把归档面盖成「读
-// 失败」会抹掉「已失效重拉中」的语义并把失败冷却封到窗口上，拦不住「在
-// 途写前失败盖掉失效」的交错。世代变则不覆盖 archiveErr/表：归档面已由
-// noteArchiveInvalidated 标为不可信且保留旧行；返回 false 让发起方不记
-// 冷却（世代变的失败不封窗，下次 kick 立刻重拉）。
-//
-// 清表条件收窄为「从未有过成功快照」（Finding R3）：!archiveReady 不够——
-// 失效后留行的面（archiveStale）在当前世代重拉失败时仍须保留旧行，本次
-// 失败只说明这次读没成，旧行并不因此更不可信；清表会把「不可信但留行」
-// 错变成「确定为空」。无论哪条路径 ArchiveErr 都记本次真实失败原因。
-// commit 与 applyArchiveSnapshot 同约束：在同一临界区内收尾冷却簿记
-// （retryAfter/needsRefetch），锁序 s.mu → arch.mu。
 // applyArchiveItem 应用一个旧归档订阅流项（无 location 字段）。旧面是全
 // 量快照 + 增量的常驻流：snapshot 整体重置归档表，updated/removed 按项
 // 维护。坏帧返回错误，由订阅路径整条流失败重连（不得静默跳过然后继续
@@ -530,7 +513,7 @@ func (s *t3ShellState) markArchiveFailed(err error) {
 }
 
 // noteArchiveReconnectRequested 记订阅模式的「请重建连接」备忘（守旧
-// 游标）：RefreshArchive/失效在订阅路径上无独立拉取可发，归档面先标为
+// 游标）：失效在订阅路径上无独立拉取可发，归档面先标为
 // 「已失效重拉中」（不得把备忘期间的面报为完整）；读循环经
 // legacyReconnect 信号唤醒后经 consumeArchiveReconnect 消费并断开，
 // 监督循环重连取回权威全量。每次请求推进世代（即使备忘本就置位——

@@ -10,7 +10,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/godbobo/fast_ship/server/internal/model"
 	"go.uber.org/zap"
 )
 
@@ -29,8 +28,9 @@ import (
 //   - 合并：同一环境并发的归档读取由 arch.inFlight 哨兵合并成一次上游
 //     调用——锁内判定才放行，先放行并发再看缓存会重复打上游。
 //   - 失效：归档相关写操作（archive/unarchive/settle/unsettle 等改变归档集
-//     的命令派发成功后）与别的客户端造成的活跃面移除（活跃流 thread.removed，
-//     归档与彻底删除都发这一帧、去向不可辨，见 applyActiveValues）都经
+//     的命令派发成功后）与别的客户端造成的活跃面移除（活跃流的
+//     thread.removed 与 location != "active" 的 thread.updated——离开活跃
+//     面即归档集可能变了，两种帧都不携带去向，见 applyActiveValues）都经
 //     InvalidateArchive 立即作废缓存，并让归档面在视图层变成「不完整但
 //     保留旧行」（ArchiveErr 非空、archivedThreads 照旧）——线程离开活跃面
 //     的这段窗口里归档面若仍报可信，wait 会把线程误判为不存在、详情会
@@ -126,7 +126,7 @@ func (e *t3ShellEntry) kickArchiveRefresh() {
 	// 到期重试；entry 停/hub 关即随 connCtx 终止。
 	// 并发合并由 inFlight 哨兵承担（锁内判定后才放行），不走
 	// singleflight.Do——它的「等共享结果返回」会把后台拉取的挂起传染给
-	// 调用方；RefreshArchive 需要等结果才用它。
+	// 调用方；按需面所有读者都是「发起即走」，没有等结果的强拉入口。
 	fetchCtx, cancelFetch := context.WithTimeout(e.hub.ctx, e.archTTL)
 	go func() {
 		defer cancelFetch()
@@ -147,8 +147,8 @@ func (e *t3ShellEntry) kickArchiveRefresh() {
 // 原子性不变量（复审遗留竞态）：「判定过期 + 撤可信 + 设 inFlight」必须对
 // 读者不可分。临界区按 s.mu → arch.mu 嵌套——与 applyArchiveSnapshot 的
 // commit（s.mu 持锁内取 arch.mu）同向，全局锁序 e.mu → s.mu → arch.mu 上
-// 不存在 arch.mu → s.mu 的反向嵌套（RefreshArchive/InvalidateArchive/落地
-// 收尾都只在锁外或同级顺序取 arch.mu），无成环可能。inFlight 在 arch.mu
+// 不存在 arch.mu → s.mu 的反向嵌套（InvalidateArchive/落地收尾都只在锁外
+// 或同级顺序取 arch.mu），无成环可能。inFlight 在 arch.mu
 // 下置位、archiveReady 在 s.mu 下撤回，但二者在同一持锁序列内提交：任何
 // 能读到 inFlight=true 的读者（需 arch.mu 已过准入或走 arch.mu 之外的
 // s.mu 视图）见到的 archiveReady 必已撤回——视图组装必经 s.mu，而 s.mu
@@ -322,17 +322,20 @@ func (e *t3ShellEntry) ensureArchive(ctx context.Context) error {
 // 为「该方法在上游不存在」的明确信号。错误文本由 t3RPCCauseError 组装为
 // "<_tag>: <message>"；上游对未注册方法的应答以 "method not found" /
 // "unknown method" 消息或 MethodNotFound 类 _tag 表达——凭据比任意 RPC
-// 失败窄得多，保证瞬时业务失败不会把面误切到订阅模式。
+// 失败窄得多，保证瞬时业务失败不会把面误切到订阅模式。匹配统一小写后
+// 比对（审修 N3）：上游文案的大小写没有保证（"Method not found"/
+// "Unknown method" 首字母大写变体同样存在），按原文匹配会让回退永不触
+// 发——归档面长期停 ArchiveErr、每 TTL 盲重试。
 func isArchiveSnapshotMethodMissing(err error) bool {
 	var uncertain *rpcUncertainError
 	if errors.As(err, &uncertain) {
 		// 传输层不确定：调用可能根本没到方法分派，不构成「方法不存在」。
 		return false
 	}
-	msg := err.Error()
+	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "method not found") ||
 		strings.Contains(msg, "unknown method") ||
-		strings.Contains(msg, "MethodNotFound")
+		strings.Contains(msg, "methodnotfound")
 }
 
 // switchToArchiveLegacy 把该 entry 永久切到旧面订阅模式。临界区与
@@ -369,7 +372,7 @@ func (e *t3ShellEntry) switchToArchiveLegacy() {
 // 隐式依赖两个零值时间）。坏负载（reset 拒收）不经本回调——其簿记由
 // 失败路径 commitArchiveFailure 收尾，两处不得双记。本回调在 s.mu 临界
 // 区内执行；锁序 s.mu →
-// arch.mu 全局一致（kick/失效/RefreshArchive 都在锁外或同级顺序取
+// arch.mu 全局一致（kick/失效/落地收尾都在锁外或同级顺序取
 // arch.mu），无反向嵌套、不与 waitView/refresh 成环。
 func (e *t3ShellEntry) commitArchiveApply(trusted bool) {
 	e.arch.mu.Lock()
@@ -420,60 +423,6 @@ func (e *t3ShellEntry) noteArchiveFetchFailed(err error, generation int64) error
 		zap.String("environment_id", e.envID),
 		zap.Error(err))
 	return err
-}
-
-// RefreshArchive 手动强拉归档快照（bypass TTL）：作废缓存后在调用方 ctx
-// 上同步拉取并返回结果，供「立即刷新」类入口使用——TTL 未过期的读取不会
-// 自己触发网络 I/O。并发强拉与后台 kick 共用 inFlight 哨兵，合并成一次
-// 上游调用；失败语义与后台路径一致（ArchiveErr，不推翻已有快照），错误
-// 原样返回给调用方。
-func (h *t3ShellHub) RefreshArchive(ctx context.Context, env *model.T3Environment, token string) error {
-	e, err := h.admitEntry(env, token)
-	if err != nil {
-		return err
-	}
-	e.arch.mu.Lock()
-	legacy := e.arch.mode == t3ArchiveModeLegacy
-	e.arch.mu.Unlock()
-	if legacy {
-		// 订阅模式没有按需拉取可发：强拉的等价物是让常驻订阅断开重连
-		// （新连接 subscribe 即收权威全量快照）。备忘记在 state（s.mu）、
-		// 信号走 legacyReconnect；不阻塞调用方（常驻流自己收尾）。
-		e.state.noteArchiveReconnectRequested()
-		e.signalArchiveReconnect()
-		h.publishThreadEvent(e, nil, true)
-		e.refresh()
-		return nil
-	}
-	e.arch.mu.Lock()
-	e.arch.validUntil = time.Time{}
-	e.arch.retryAfter = time.Time{}
-	e.arch.mu.Unlock()
-	// 已在途的拉取（后台 kick 或另一次强拉）即最新一次读，等它落地——
-	// 它的结果就是写后状态最早的可见答案，不需要另发一次；没有并发在
-	// 飞时这里自己发起。inFlight 哨兵与后台 kick 互斥，同一时刻至多一次
-	// 上游调用。
-	for {
-		e.arch.mu.Lock()
-		busy := e.arch.inFlight
-		if !busy {
-			e.arch.inFlight = true
-		}
-		e.arch.mu.Unlock()
-		if !busy {
-			break
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(10 * time.Millisecond):
-		}
-	}
-	fetchErr := e.ensureArchive(ctx)
-	e.arch.mu.Lock()
-	e.arch.inFlight = false
-	e.arch.mu.Unlock()
-	return fetchErr
 }
 
 // InvalidateArchive 作废环境的归档快照缓存：下一次读取重新拉取。归档相关
@@ -532,9 +481,9 @@ func (h *t3ShellHub) invalidateArchiveEntry(e *t3ShellEntry) {
 // ------ 旧面订阅回退（INT-173 审修） ------
 
 // errArchiveReconnectRequested 是按「请重建连接」备忘主动断开归档订阅的
-// 结束原因（RefreshArchive/写后失效留下的，不是故障）：记入 ArchiveErr
+// 结束原因（写后失效留下的，不是故障）：记入 ArchiveErr
 // 与日志供观测，监督循环按普通重连处理。
-var errArchiveReconnectRequested = errors.New("按刷新/失效备忘重建归档订阅")
+var errArchiveReconnectRequested = errors.New("按失效备忘重建归档订阅")
 
 // signalArchiveReconnect 通知旧面读循环断开重连。缓冲 1：信号丢失或重复
 // 都无害——读循环只在 state 备忘仍置位时才真断开（consume 判定），连接
@@ -755,8 +704,8 @@ func (h *t3ShellHub) readArchiveLegacyLoop(e *t3ShellEntry, session *t3RPCSessio
 			}
 		case <-e.legacyReconnect:
 			// 守旧备忘消费（s.mu 单锁，不与 arch.mu 嵌套——锁序全局只有
-			// s.mu → arch.mu）：订阅面没有按需拉取可发，RefreshArchive/写后
-			// 失效的正确动作是断开后由监督循环重连——新 subscribe 即收权威
+			// s.mu → arch.mu）：订阅面没有按需拉取可发，写后失效的正确动作
+			// 是断开后由监督循环重连——新 subscribe 即收权威
 			// 全量快照。常驻流只收增量，「增量落地后整表重置」会把归档面
 			// 清空到下一次断线（R3 P1-B）。信号可早到/重复：备忘已被权威
 			// 快照（邮戳 ≥ 备忘世代的那张）或连接终止清掉时 consume 为假，

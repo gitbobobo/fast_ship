@@ -851,7 +851,7 @@ func TestShellState_AdmitArchiveRefreshIsAtomicWithRevoke(t *testing.T) {
 
 // 旧面 reconnect 世代护栏（R4 P2，Preserve newer legacy reconnect
 // requests）：新连接已发出权威快照、但快照尚未 apply 的窗口里又记了一次
-// reconnect 请求（RefreshArchive/失效）时，该快照是「变更前」的——落地不
+// reconnect 请求（写后失效）时，该快照是「变更前」的——落地不
 // 得清掉这份更新的备忘（旧实现无条件清，已排队的 reconnect 信号被无视，
 // wait 拿写前数据判 thread_gone 直到下一个事件）。世代规则：备忘只能被
 // 「出发邮戳（subscribe 发出时读到的请求世代）≥ 备忘世代」的连接的快照
