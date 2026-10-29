@@ -124,10 +124,15 @@ type fakeShellStreamServer struct {
 	// 确认「在途拉取已发起」再精确放行，而不是靠 sleep 猜时序。
 	archPaused bool
 	archResume chan struct{}
-	connsCh    chan *fakeShellConn
-	connCount  atomic.Int64
-	gotPongs   atomic.Int64
-	lastProbes atomic.Int64
+	// archSubPaused 压住旧面订阅的首帧快照（legacy 回退收尾时序测试用）：
+	// 订阅激活证据照常入通道，快照帧压到 resumeArchiveSub 放行——精确控
+	// 制「权威落地」发生在哪一步之后，不靠 sleep 猜时序。
+	archSubPaused bool
+	archSubResume chan struct{}
+	connsCh       chan *fakeShellConn
+	connCount     atomic.Int64
+	gotPongs      atomic.Int64
+	lastProbes    atomic.Int64
 }
 
 func (s *fakeShellStreamServer) setBearer(bearer string) {
@@ -244,7 +249,11 @@ func (s *fakeShellStreamServer) handler(conn *websocket.Conn) {
 				case s.archiveConns <- fc:
 				default:
 				}
-				// 订阅受理：推全量快照体（包装成 snapshot 流项）。
+				// 订阅受理：推全量快照体（包装成 snapshot 流项）。压住态下
+				// 等放行再发首帧（激活证据已入通道，时序由测试控制）。
+				if !s.awaitArchiveSubResume() {
+					continue
+				}
 				item := s.archiveStreamItem()
 				_ = sendValueFrame(conn, req.ID, item)
 			}
@@ -318,6 +327,38 @@ func (s *fakeShellStreamServer) resumeArchive() {
 	if s.archResume != nil {
 		close(s.archResume)
 		s.archResume = nil
+	}
+}
+
+// awaitArchiveSubResume 等旧面订阅首帧放行；未压住时直接放行。
+func (s *fakeShellStreamServer) awaitArchiveSubResume() bool {
+	s.mu.Lock()
+	resume := s.archSubResume
+	s.mu.Unlock()
+	if resume == nil {
+		return true
+	}
+	<-resume
+	return true
+}
+
+// pauseArchiveSub 压住旧面订阅的首帧快照：订阅请求照常入通道（激活证据），
+// 快照帧等 resumeArchiveSub 放行。
+func (s *fakeShellStreamServer) pauseArchiveSub() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.archSubPaused = true
+	s.archSubResume = make(chan struct{})
+}
+
+// resumeArchiveSub 放行全部被压住的订阅快照帧并结束压住态。
+func (s *fakeShellStreamServer) resumeArchiveSub() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.archSubPaused = false
+	if s.archSubResume != nil {
+		close(s.archSubResume)
+		s.archSubResume = nil
 	}
 }
 
@@ -2457,6 +2498,89 @@ func TestT3ShellHub_NonMethodFailureDoesNotFallback(t *testing.T) {
 	case sub := <-srv.archiveSubs:
 		t.Fatalf("non-method failure must not trigger legacy subscription, got %+v", sub)
 	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+// legacy 回退的失败收尾时序（R5 P2）：方法不存在切订阅面时必须先记失败、
+// 后切换——switchToArchiveLegacy 放行的常驻订阅可能紧跟着落地权威快照
+// （archiveErr=nil、archiveReady=true），先切换后收尾会把刚恢复可信的
+// 订阅面重新写回失败态，legacy 流可能很久不发下一帧。闸门压住订阅首帧：
+// 订阅激活即证失败收尾已完成（修复后：先记账、后放行订阅），断言失败
+// 如实记账、权威落地后恢复可信且失败不再被写回。
+func TestT3ShellHub_LegacyFallbackFailureNotedBeforeLanding(t *testing.T) {
+	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
+	srv.setArchiveLegacy(true)
+	srv.setArchiveFixture(archiveSnapshotBody(1, "th-a"), nil)
+	srv.pauseArchiveSub() // 权威落地等失败收尾完成后才放行
+	hub := newT3ShellHubWithConfig(hubTestConfig(), nil)
+	defer hub.Close()
+	env := hubTestEnv(url, 0)
+	waitForPeek := func(until func(*t3ShellView) bool) *t3ShellView {
+		t.Helper()
+		deadline := time.After(3 * time.Second)
+		for {
+			view, err := hub.Peek(env, "tok")
+			if err != nil {
+				t.Fatalf("peek: %v", err)
+			}
+			if until(view) {
+				return view
+			}
+			select {
+			case <-deadline:
+				t.Fatalf("timed out waiting for archive state, snaps=%+v", view.Snaps)
+			case <-time.After(10 * time.Millisecond):
+			}
+		}
+	}
+
+	// 活跃面先就位（entry Ready 才带 Snaps）；waitView 的归档 kick 发一次
+	// 探测性快照 RPC → 方法不存在 → 触发旧面订阅。
+	go hub.View(context.Background(), env, "tok")
+	collector := newShellConnCollector(t, srv)
+	active := collector.await(false)
+	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1")); err != nil {
+		t.Fatalf("send active snapshot: %v", err)
+	}
+	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
+		t.Fatalf("active snapshot not acked")
+	}
+
+	// 回退已激活（切换的证据）。修复后顺序保证：awaitArchiveSub 可观测时
+	// 失败收尾必已完成（先记账、后 close(legacyCh) 放行订阅）。
+	srv.awaitArchiveSub(t)
+
+	// 失败已如实记账、订阅快照仍被闸门压住：归档面此刻必须报不可信。
+	view := waitForPeek(func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr != nil
+	})
+	_ = view
+
+	// 放行权威快照落地：健康的 legacy 流必须清 ArchiveErr、恢复可信——
+	// 先前的失败收尾不得把它重新写回失败态。
+	srv.resumeArchiveSub()
+	view = waitForPeek(func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil && len(v.Snaps.Archived.Threads) == 1
+	})
+	if view.Snaps.Archived.Threads[0].ID != "th-a" {
+		t.Fatalf("archived threads via legacy subscription = %+v", view.Snaps.Archived.Threads)
+	}
+
+	// 失败冷却/备忘簿记不得在订阅面复活按需拉取：切换后继续读不再产生新
+	// 的快照 RPC，ArchiveErr 稳定保持 nil（legacy 模式下 Peek 的 kick 短
+	// 路，不拨号）。
+	calls := srv.archiveCallCount()
+	for i := 0; i < 3; i++ {
+		v, err := hub.Peek(env, "tok")
+		if err != nil {
+			t.Fatalf("peek: %v", err)
+		}
+		if v.Snaps == nil || v.Snaps.ArchiveErr != nil {
+			t.Fatalf("trusted legacy face must stay trusted, snaps=%+v", v.Snaps)
+		}
+	}
+	if got := srv.archiveCallCount(); got != calls {
+		t.Fatalf("legacy env must not re-dial the on-demand snapshot RPC, calls %d → %d", calls, got)
 	}
 }
 

@@ -259,7 +259,20 @@ func (e *t3ShellEntry) ensureArchive(ctx context.Context) error {
 		// 旧面回退：仅「方法不存在」的明确信号才切订阅面——
 		// rpcUncertainError 与任意业务失败都不构成该证据（见函数头）。
 		if isArchiveSnapshotMethodMissing(err) {
+			// 先记失败、后切换（R5 P2）：switchToArchiveLegacy 放行的常驻
+			// 订阅可能紧跟着落地权威快照（archiveErr=nil、archiveReady=
+			// true），若先切换后收尾，这次失败记账会把刚恢复可信的订阅面
+			// 重新写回失败态——legacy 流可能很久不发下一帧，正确的归档
+			// 数据要背负到那时。先收尾则切换发生在记账之后，随后落地的
+			// 订阅快照必然覆盖它。世代判定不受顺序影响（切换不推进
+			// archiveGeneration）；记下的 retryAfter 冷却随切换清零，而
+			// legacy 准入本就短路、簿记不再参与判定，无害。切换内
+			// noteArchiveExpiredLocked 在 archiveReady 已撤时是 no-op，
+			// archiveErr 保留本次真实失败原因——「失败、订阅重拉中」，
+			// 语义如实。
+			failure := e.noteArchiveFetchFailed(err, generation)
 			e.switchToArchiveLegacy()
+			return failure
 		}
 		return e.noteArchiveFetchFailed(err, generation)
 	}
@@ -307,9 +320,10 @@ func isArchiveSnapshotMethodMissing(err error) bool {
 // admitArchiveRefresh 同序（s.mu → arch.mu）：mode 翻转与「撤可信+清簿
 // 记」对读者不可分——准入判定在本临界区之外不可能看到「mode 已是
 // legacy 而 archiveReady 仍可信」的中间态；此后 kickArchiveRefresh 短
-// 路不再发按需拨号。本次失败的拉取照常走 noteArchiveFetchFailed 收尾
-// （ArchiveErr 记真实原因），inFlight 由其 defer 清理；归档数据由随后
-// 启动的常驻订阅 goroutine 补齐（仅启动一次）。
+// 路不再发按需拨号。调用方先经 noteArchiveFetchFailed 记失败、再进入本
+// 切换（顺序依据见 ensureArchive：先收尾失败、后放行订阅，权威快照落地
+// 才不会被失败收尾重新盖回失败态）；inFlight 由其 defer 清理；归档数据
+// 由随后启动的常驻订阅 goroutine 补齐（仅启动一次）。
 func (e *t3ShellEntry) switchToArchiveLegacy() {
 	e.state.mu.Lock()
 	e.arch.mu.Lock()
