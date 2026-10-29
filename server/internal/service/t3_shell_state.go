@@ -254,6 +254,8 @@ func (s *t3ShellState) applyActiveItem(item t3ShellStreamItem) error {
 		// 只从活跃面删除：归档动作在上游也发 active removal
 		// （ShellStream.ts:292-320），不代表线程从归档面消失（规则 3）；
 		// removal 的 location 不改变语义（上游对移除不看 location）。
+		// state 是纯内存、不持 hub 引用：归档缓存的失效由 hub 层在应用此帧后
+		// 触发（applyActiveValues → invalidateArchiveEntry），这里只管活跃面。
 		s.activeThreads.remove(item.ThreadID)
 		s.advanceActiveCursorLocked(*item.Sequence)
 		return nil

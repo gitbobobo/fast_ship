@@ -1038,6 +1038,76 @@ func TestT3ShellHub_ArchiveTTLAndInvalidation(t *testing.T) {
 	_ = view
 }
 
+// 别的客户端归档/删除线程（P2 修复）：活跃流 thread.removed 到达后归档缓
+// 存立即失效——removal 不带「去向」（归档或彻底删除），统一按「归档集可能
+// 变了」处理；下一次读取重拉到含该线程的新快照，线程不会从活跃、归档两
+// 边同时消失到 TTL 过期（useThreads 不轮询）。
+func TestT3ShellHub_ActiveRemovedInvalidatesArchive(t *testing.T) {
+	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
+	srv.setArchiveFixture(archiveSnapshotBody(1, "th-a"), nil)
+	hub := newT3ShellHubWithConfig(hubTestConfig(), nil)
+	defer hub.Close()
+	env := hubTestEnv(url, 0)
+
+	_, activeConn, activeSub, _, _ := establishBothFaces(t, hub, srv, env, "tok", 42, "th-1")
+
+	key := t3ShellHubKey(env.UserID, env.ID)
+	hub.mu.Lock()
+	e := hub.entries[key]
+	hub.mu.Unlock()
+	if e == nil {
+		t.Fatalf("entry missing")
+	}
+	e.state.mu.Lock()
+	genBefore := e.state.archiveGeneration
+	e.state.mu.Unlock()
+
+	// 另一个客户端把 th-1 归档：活跃流到达 thread.removed（上游对归档也发
+	// active removal，ShellStream.ts:292-320）。归档快照 fixture 同步换上
+	// 「写后状态」：失效后的重拉必须读到含 th-1 的新归档面。
+	removed, _ := json.Marshal(map[string]any{
+		"kind": "thread.removed", "sequence": 43, "location": "active", "threadId": "th-1",
+	})
+	srv.setArchiveFixture(archiveSnapshotBody(2, "th-a", "th-1"), nil)
+	if err := activeConn.sendValue(activeSub.ID, removed); err != nil {
+		t.Fatalf("send thread.removed: %v", err)
+	}
+	if !activeConn.awaitAck(activeSub.ID, 2*time.Second) {
+		t.Fatalf("thread.removed frame not acked")
+	}
+
+	// Ack 在全部 value 应用后才发 → 失效此刻已同步生效：标不可信（stale、
+	// ArchiveErr 非空）且世代推进，不依赖 TTL 到期。
+	e.state.mu.Lock()
+	stale, gen, archErr := e.state.archiveStale, e.state.archiveGeneration, e.state.archiveErr
+	e.state.mu.Unlock()
+	if !stale || archErr == nil || gen != genBefore+1 {
+		t.Fatalf("active removal must invalidate the archive face: stale=%v err=%v gen %d → %d", stale, archErr, genBefore, gen)
+	}
+
+	// 流处理路径不发起同步拉取：失效只标不可信，重拉由下一次读取 kick。
+	calls := srv.archiveCallCount()
+	view := waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		if v.Snaps == nil || v.Snaps.ArchiveErr != nil {
+			return false
+		}
+		for _, th := range v.Snaps.Archived.Threads {
+			if th.ID == "th-1" {
+				return true
+			}
+		}
+		return false
+	})
+	if got := srv.archiveCallCount(); got != calls+1 {
+		t.Fatalf("active removal must trigger exactly one archive refetch, calls %d → %d", calls, got)
+	}
+	for _, th := range view.Snaps.Active.Threads {
+		if th.ID == "th-1" {
+			t.Fatalf("removed thread must leave the active face: %+v", view.Snaps.Active.Threads)
+		}
+	}
+}
+
 // 归档按需快照的过期重拉（INT-173）：TTL 过期后的读取重新打上游——一次
 // 成功快照不得被长期当作实时完整数据。
 func TestT3ShellHub_ArchiveTTLExpiryRefetches(t *testing.T) {

@@ -26,10 +26,12 @@ import (
 //   - 合并：同一环境并发的归档读取由 arch.inFlight 哨兵合并成一次上游
 //     调用——锁内判定才放行，先放行并发再看缓存会重复打上游。
 //   - 失效：归档相关写操作（archive/unarchive/settle/unsettle 等改变归档集
-//     的命令派发成功后）经 InvalidateArchive 立即作废缓存，并让归档面在
-//     视图层变成「不完整但保留旧行」（ArchiveErr 非空、archivedThreads
-//     照旧）——活跃订阅随即把写后的线程从活跃面摘除，这段窗口里归档面
-//     若仍报可信，wait 会把线程误判为不存在、详情会谎报列表完整。
+//     的命令派发成功后）与别的客户端造成的活跃面移除（活跃流 thread.removed，
+//     归档与彻底删除都发这一帧、去向不可辨，见 applyActiveValues）都经
+//     InvalidateArchive 立即作废缓存，并让归档面在视图层变成「不完整但
+//     保留旧行」（ArchiveErr 非空、archivedThreads 照旧）——线程离开活跃面
+//     的这段窗口里归档面若仍报可信，wait 会把线程误判为不存在、详情会
+//     谎报列表完整。
 //   - 世代护栏：拉取发起时记一个失效计数（generation），落地时计数已变
 //     （拉取途中发生失效）则该结果是写前状态——只换数据不封可信窗口、不
 //     记失败冷却，并置 arch.needsRefetch 让收尾后的下一次 kick 立刻重拉。
@@ -337,13 +339,6 @@ func (h *t3ShellHub) RefreshArchive(ctx context.Context, env *model.T3Environmen
 // InvalidateArchive 作废环境的归档快照缓存：下一次读取重新拉取。归档相关
 // 写命令派发成功后调用（见 t3_settle.go/t3_review.go），不依赖 TTL 兜底。
 // entry 不存在时无需处理（下一个 View 会建 entry 并走未就绪路径）。
-//
-// 失效即标不可信：簿记清零之外，还要让归档面在视图层立刻变成「不完整但
-// 保留旧行」——noteArchiveInvalidated 撤销 archiveReady 并把 ArchiveErr
-// 标为「已失效重拉中」；archivedThreads 旧行保留供展示（清表会把「不
-// 确定」变成「确定为空」，比保留旧行更糟）。世代计数推进同时给所有在途
-// 拉取下了护栏：写前那次落地时 generation 对不上，数据照换但不再把窗口
-// 封回可信（见 ensureArchive 的世代护栏）。
 func (h *t3ShellHub) InvalidateArchive(userID, envID string) {
 	key := t3ShellHubKey(userID, envID)
 	h.mu.Lock()
@@ -352,6 +347,20 @@ func (h *t3ShellHub) InvalidateArchive(userID, envID string) {
 	if e == nil {
 		return
 	}
+	h.invalidateArchiveEntry(e)
+}
+
+// invalidateArchiveEntry 是 InvalidateArchive 的 entry 级入口：hub 内部已持
+// entry 句柄的调用方（活跃流 thread.removed，见 applyActiveValues）不必再查
+// 一次注册表。
+//
+// 失效即标不可信：簿记清零之外，还要让归档面在视图层立刻变成「不完整但
+// 保留旧行」——noteArchiveInvalidated 撤销 archiveReady 并把 ArchiveErr
+// 标为「已失效重拉中」；archivedThreads 旧行保留供展示（清表会把「不
+// 确定」变成「确定为空」，比保留旧行更糟）。世代计数推进同时给所有在途
+// 拉取下了护栏：写前那次落地时 generation 对不上，数据照换但不再把窗口
+// 封回可信（见 ensureArchive 的世代护栏）。
+func (h *t3ShellHub) invalidateArchiveEntry(e *t3ShellEntry) {
 	e.state.noteArchiveInvalidated()
 	e.arch.mu.Lock()
 	e.arch.validUntil = time.Time{}

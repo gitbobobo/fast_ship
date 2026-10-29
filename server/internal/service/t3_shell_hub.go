@@ -1035,8 +1035,23 @@ func (e *t3ShellEntry) syncConfirmedAt() time.Time {
 // applyActiveValues 把活跃流 Chunk 的全部 value 依次解码并应用到状态，应用
 // 成功后把本批变化发布给该用户的订阅者。应用失败（坏帧）整条流失败重连，
 // 不发布线程事件——紧随其后的连接终止会发布状态事件，浏览器据此整面刷新。
+//
+// 批内出现过 thread.removed 时同步失效归档缓存：removal 表示线程离开了
+// 活跃面，但帧本身不携带「去向」——可能是被归档（进归档面），也可能是被
+// 彻底删除（归档集不变），上游对移除不看 location，Fast Ship 无法区分。
+// 两者统一按「归档集可能变了」失效是保守正确的选择：多付一次快照重拉，
+// 不会出错；若只在「确认归档」时失效，就得先猜去向，猜错（把删除当无效
+// 不失效）不会导致错误，但把归档当删除跳过失效会让线程在 TTL 内从活跃、
+// 归档两边同时消失——useThreads 不轮询，TTL 过期也不主动调度拉取，要缺
+// 到下一次事件/聚焦/手动刷新。这个窗口主要威胁的是「别的客户端归档了
+// 线程」场景：我们自己的写命令已在写后失效，这里再失效一次是幂等的
+// 冗余标记，无额外拉取（在途合并/同一世代内的标记不重拨）。失效只是标
+// 不可信+留旧行，不在这里同步发起网络拉取（不拖慢 readStreamLoop），下一
+// 次读经 kickArchiveRefresh 重拉；removed 是低频帧，且每条 Chunk 至多失效
+// 一次，不构成对流式的过度拉取。
 func (h *t3ShellHub) applyActiveValues(e *t3ShellEntry, values []json.RawMessage) error {
 	batch := t3ShellEventBatch{}
+	removedFromActive := false
 	for _, raw := range values {
 		var item t3ShellStreamItem
 		if err := json.Unmarshal(raw, &item); err != nil {
@@ -1044,6 +1059,9 @@ func (h *t3ShellHub) applyActiveValues(e *t3ShellEntry, values []json.RawMessage
 		}
 		if err := e.state.applyActiveItem(item); err != nil {
 			return err
+		}
+		if item.Kind == "thread.removed" {
+			removedFromActive = true
 		}
 		batch.observeActive(&item)
 		// 权威全量快照落地（无 enrichment 标记）→ 强制重同步要求到此结束。
@@ -1053,6 +1071,9 @@ func (h *t3ShellHub) applyActiveValues(e *t3ShellEntry, values []json.RawMessage
 		}
 	}
 	h.publishThreadEvent(e, batch.ids, batch.full)
+	if removedFromActive {
+		h.invalidateArchiveEntry(e)
+	}
 	return nil
 }
 
