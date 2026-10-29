@@ -339,7 +339,13 @@ func (s *T3ThreadsService) ArchiveThread(ctx context.Context, userID, envID, thr
 		"commandId": "fs-review-archive-" + threadID,
 		"threadId":  threadID,
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	// 归档集已变：作废本环境的归档快照缓存，下一次读取重拉（INT-173——
+	// 归档面是 TTL 缓存的按需快照，写后不靠 TTL 兜底）。
+	s.shellHub.InvalidateArchive(userID, envID)
+	return nil
 }
 
 // t3TurnVerdict 绑定回合的收尾判定（INT-158）：归档不只是「等不等」的问题，

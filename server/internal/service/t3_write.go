@@ -26,7 +26,9 @@ import (
 //   - message.dispatch 的 dispatchMode 联合里 queue_after_active 即
 //     「活动运行时排队」；deliveryIntent=auto 是服务端代投递语义，
 //     本集成禁止使用
-//   - run.interrupt holdQueue=true 是 T3 Stop 按钮口径（同时挂起队列）
+//   - Stop 口径（INT-173）：capabilities.threadStop 声明支持时派发公开命令
+//     thread.stop——服务端选目标、挂队列、停委派任务，客户端不自选 run；
+//     能力缺失（旧上游）才回退 run.interrupt holdQueue=true 的自选 run 路径
 //   - launchThread 输入见 contracts orchestrationV2.ts
 //     OrchestrationV2ThreadLaunchInput；threadId 可由客户端指定（稳定重试）
 
@@ -131,9 +133,10 @@ func (s *T3ThreadsService) fetchProjectionForWrite(ctx context.Context, env *mod
 
 // ------ 启动器与工作区选项 ------
 
-// ComposerOptions 聚合线程启动器选项：项目表 + server.getConfig +
-// server.getSettings（config/settings 原样透传，camelCase 留在适配器内）。
-// 项目表走 HTTP `GET /api/projects`（INT-116）：不再为拿项目配置拉全量 shell
+// ComposerOptions 聚合线程启动器选项：项目表 + server.getConfig（config 与
+// 内嵌其中的 settings 原样透传，camelCase 留在适配器内）。上游 #26238 起删除
+// 了 server.getSettings，设置改由 getConfig.settings 携带；旧环境 getConfig
+// 无 settings，缺省语义即空设置。项目表走 HTTP `GET /api/projects`（INT-116）：不再为拿项目配置拉全量 shell
 // 快照、不建 shell 订阅；fetchProjectSnapshot 已把 401/403 分类成凭证被拒，
 // 不再需要前置会话探测。
 func (s *T3ThreadsService) ComposerOptions(ctx context.Context, userID, envID string) (*T3ComposerOptions, error) {
@@ -168,10 +171,6 @@ func (s *T3ThreadsService) ComposerOptions(ctx context.Context, userID, envID st
 	if err != nil {
 		return nil, s.upstreamError(err)
 	}
-	settingsValue, err := session.call(ctx, "server.getSettings", map[string]any{})
-	if err != nil {
-		return nil, s.upstreamError(err)
-	}
 
 	projects := make([]api.T3ComposerOptions_Projects, 0, len(projectShells))
 	for _, project := range projectShells {
@@ -189,7 +188,15 @@ func (s *T3ThreadsService) ComposerOptions(ctx context.Context, userID, envID st
 	}
 	config, settings := map[string]any{}, map[string]any{}
 	_ = json.Unmarshal(configValue, &config)
-	_ = json.Unmarshal(settingsValue, &settings)
+	// settings 内嵌在 getConfig 响应里（宽容解码：缺失/非对象时保持空 map，
+	// 兼容无 settings 的旧上游——其缺省语义就是空设置）。
+	var withSettings struct {
+		Settings map[string]any `json:"settings"`
+	}
+	_ = json.Unmarshal(configValue, &withSettings)
+	if withSettings.Settings != nil {
+		settings = withSettings.Settings
+	}
 	return &T3ComposerOptions{
 		Projects: projects,
 		Config:   config,
@@ -418,13 +425,17 @@ func (s *T3ThreadsService) t3ThreadWorkspaceWire(ctx context.Context, session *t
 		if workspace.StartFromOrigin != nil {
 			wire["startFromOrigin"] = *workspace.StartFromOrigin
 		} else {
-			// startFromOrigin 从 T3 设置解析（newWorktreesStartFromOrigin，缺省 false）。
-			if settingsValue, err := session.call(ctx, "server.getSettings", map[string]any{}); err == nil {
+			// startFromOrigin 从 T3 设置解析（newWorktreesStartFromOrigin，缺省
+			// false）。设置内嵌在 getConfig 响应里（上游 #26238 已删 getSettings）；
+			// 读取失败或 settings 缺省时不带该字段，交回上游自身缺省。
+			if configValue, err := session.call(ctx, "server.getConfig", map[string]any{}); err == nil {
 				var settings struct {
-					NewWorktreesStartFromOrigin *bool `json:"newWorktreesStartFromOrigin"`
+					Settings struct {
+						NewWorktreesStartFromOrigin *bool `json:"newWorktreesStartFromOrigin"`
+					} `json:"settings"`
 				}
-				if json.Unmarshal(settingsValue, &settings) == nil && settings.NewWorktreesStartFromOrigin != nil {
-					wire["startFromOrigin"] = *settings.NewWorktreesStartFromOrigin
+				if json.Unmarshal(configValue, &settings) == nil && settings.Settings.NewWorktreesStartFromOrigin != nil {
+					wire["startFromOrigin"] = *settings.Settings.NewWorktreesStartFromOrigin
 				}
 			}
 		}
@@ -567,15 +578,39 @@ func t3RequestConflictError(err error) bool {
 
 // ------ Stop 与队列 ------
 
-// StopThread 按 T3 Stop 口径选择目标 run 下发 run.interrupt(holdQueue=true)：
-// 活动 run 优先；否则仍有后台工作的最近 run；都没有则视为无操作
-// （T3 此场景只做 PR unwatch，Fast Ship 不维护 PR watch，故不杜撰内部命令）。
+// t3ConfigSupportsThreadStop 判定 server.getConfig 响应是否声明
+// environment.capabilities.threadStop（INT-173：thread.stop 已是公开命令，
+// 旧版服务端既不声明也不认识它）。与结算能力「必须支持否则报错」语义不同，
+// 这里是能力选择：支持走 thread.stop 新路，缺失走 run.interrupt 回退——
+// 回退路径在新旧环境都成立，所以响应解析失败同样按缺失处理。
+func t3ConfigSupportsThreadStop(configValue json.RawMessage) bool {
+	var config struct {
+		Environment struct {
+			Capabilities struct {
+				ThreadStop *bool `json:"threadStop"`
+			} `json:"capabilities"`
+		} `json:"environment"`
+	}
+	if err := json.Unmarshal(configValue, &config); err != nil {
+		return false
+	}
+	return config.Environment.Capabilities.ThreadStop != nil &&
+		*config.Environment.Capabilities.ThreadStop
+}
+
+// StopThread 停止线程（INT-173，能力驱动的两条路径）：
+//   - 环境在 server.getConfig 声明 capabilities.threadStop（新上游）：派发
+//     公开命令 thread.stop，对齐官方客户端「未显式指定 run 时优先
+//     thread.stop」——由服务端选择目标、挂起队列并停止委派任务，本地不再
+//     自选 run。回执只表示受理：受理即 Stopped=true；run_id 在此路径没有
+//     自选 run 可填，留缺省。
+//   - 能力缺失（旧上游）：保留既有回退——可信 shell 本地选 run 后发
+//     run.interrupt(holdQueue=true)。
 //
-// 读取顺序（F6，恢复基线）：先读 HTTP 投影——线程真的不存在必须回到
-// 40418（投影 404 → errT3ThreadNotFound，基线语义；凭证被拒/不可达也在此
-// 按既有分类）；再取**可信活跃面**的 shell 作为运行态。运行态守卫不放松：
-// 非 Ready（Stale/Syncing）一律 50202（陈旧快照里的 idle 会把可停线程误判
-// 成无事可做）；Ready 但 shell 无此线程同样是 50202（上游快照面不一致）。
+// 两条路径共同的前置：先读 HTTP 投影——线程真的不存在必须回到 40418
+// （投影 404 → errT3ThreadNotFound，基线语义；凭证被拒/不可达也在此按既有
+// 分类）。「无目标 → Stopped=false」的判定只对回退路径有意义：thread.stop
+// 路径由服务端判定有无活可停，本地不做前置结论。
 func (s *T3ThreadsService) StopThread(ctx context.Context, userID, envID, threadID string) (*T3ThreadStopResult, error) {
 	env, err := s.loadEnvForWrite(ctx, userID, envID)
 	if err != nil {
@@ -590,15 +625,10 @@ func (s *T3ThreadsService) StopThread(ctx context.Context, userID, envID, thread
 		return nil, errs.New(errs.ErrT3Upstream.Code, "环境凭证不可用，请重新配对")
 	}
 
-	// 投影在先：404 → 40418，不被 shell 守卫拦成 50202。这里只做存在性/分类，
-	// run 选择一律基于等待之后的新鲜信息（见下方）。
+	// 投影在先（两条路径共用）：404 → 40418，不被 shell 守卫拦成 50202。
+	// 这里只做存在性/分类；回退路径的 run 选择基于等待之后的新鲜信息（见下）。
 	if _, err := s.fetchProjectionForWrite(ctx, env, token, threadID); err != nil {
 		return nil, s.upstreamError(err)
-	}
-
-	shell, _, err := s.trustedShell(ctx, env, token, threadID)
-	if err != nil {
-		return nil, err
 	}
 
 	session, err := dialT3RPC(ctx, wsBaseOf(env.Address), token)
@@ -606,6 +636,32 @@ func (s *T3ThreadsService) StopThread(ctx context.Context, userID, envID, thread
 		return nil, s.upstreamError(err)
 	}
 	defer session.Close()
+
+	// 能力分支依据：getConfig 调用失败按上游错误处理（旧上游也有 getConfig，
+	// 调用失败不是「旧环境」的证据）；响应里没有 threadStop 声明才算缺失。
+	configValue, err := session.call(ctx, t3RPCServerGetConfig, map[string]any{})
+	if err != nil {
+		return nil, s.upstreamError(err)
+	}
+	if t3ConfigSupportsThreadStop(configValue) {
+		// thread.stop 受理即成功：服务端负责选目标、挂队列、停委派任务
+		// （无可停目标时也正常回执，不本地前置判「无事可做」）。不必先
+		// 解析出 run 才发，带 commandId/threadId 即可。
+		if _, err := s.dispatchT3Command(ctx, session, threadID, map[string]any{
+			"type":      "thread.stop",
+			"commandId": newT3CommandId(),
+			"threadId":  threadID,
+		}); err != nil {
+			return nil, err
+		}
+		return &T3ThreadStopResult{Stopped: true}, nil
+	}
+
+	// 回退路径（旧上游无 threadStop 能力）：保留本地自选 run 的既有口径。
+	shell, _, err := s.trustedShell(ctx, env, token, threadID)
+	if err != nil {
+		return nil, err
+	}
 
 	// shell.activeRunId 是新鲜的可中断活动 run（preparing/starting/running）；
 	// 为空时典型是 waiting——它只有投影里看得到，所以回读一次投影再决策。
@@ -635,12 +691,14 @@ func (s *T3ThreadsService) StopThread(ctx context.Context, userID, envID, thread
 	return &T3ThreadStopResult{Stopped: true, RunId: api.Ptr(runID)}, nil
 }
 
-// selectStopRunID 选择 Stop 要中断的 run（对齐官方 stopThread 的口径）：
+// selectStopRunID 是 Stop 回退路径（旧上游无 threadStop 能力）的本地 run
+// 选择，对齐官方客户端显式指定 run 时的口径：
 //   - shell.activeRunId 优先：它是可信活跃面按 isInterruptibleRunForShell
 //     （preparing/starting/running）派生的，比任何投影都新鲜；
 //   - 其次看投影里的活动 run（含 waiting——上游 shell 的可中断集合不含
 //     waiting，只有投影里能看到）；
-//   - 都没有时看 shell 的后台工作占位：根 run 已结束但后台工作仍会唤醒代理，
+//   - 都没有时看 shell 的可中断后台工作（t3HasInterruptibleBackgroundWork，
+//     与「占完成位」是两个口径）：根 run 已结束但还有可停止的后台工作时，
 //     T3 的 Stop 接受对最近 run 的中断。PR watch 不算可中断后台（与
 //     interruptThreadTurn 不含 pullRequests 一致）。
 //

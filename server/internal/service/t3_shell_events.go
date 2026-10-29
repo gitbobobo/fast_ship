@@ -221,23 +221,6 @@ func (b *t3ShellEventBatch) observeActive(item *t3ShellStreamItem) {
 	}
 }
 
-// observeArchive 记录一个归档流项的变化。归档流没有 enrichment 帧，快照
-// 一律按权威全量处理。
-func (b *t3ShellEventBatch) observeArchive(item *t3ArchiveStreamItem) {
-	switch item.Kind {
-	case "thread.updated":
-		if item.Thread != nil && item.Thread.ID != "" {
-			b.ids = append(b.ids, item.Thread.ID)
-		}
-	case "thread.removed":
-		if item.ThreadID != "" {
-			b.ids = append(b.ids, item.ThreadID)
-		}
-	case "snapshot":
-		b.full = true
-	}
-}
-
 // PublishUserRefresh 让该用户的浏览器整棵线程子树失效一次（Full 且不带
 // environment_id，前端按「全局刷新」处理）。环境增删改本身不产生线程级
 // 增量：删除时 entry 若正处在重连退避里，Drop 不会经 endFaceConnection

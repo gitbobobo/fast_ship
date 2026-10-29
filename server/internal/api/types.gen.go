@@ -5066,7 +5066,7 @@ type T3ComposerOptions struct {
 	Config   map[string]interface{}       `json:"config"`
 	Projects []T3ComposerOptions_Projects `json:"projects"`
 
-	// Settings T3 `server.getSettings` 响应原样透传（camelCase，含 newWorktreesStartFromOrigin 等设置）
+	// Settings T3 `server.getConfig` 响应内嵌 `settings` 子对象原样透传（camelCase，含 newWorktreesStartFromOrigin 等设置；上游 `server.getSettings` 已删除，旧上游无该字段时为空对象）
 	Settings map[string]interface{} `json:"settings"`
 }
 

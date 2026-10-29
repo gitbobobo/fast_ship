@@ -6,9 +6,11 @@ import (
 	"sync"
 )
 
-// T3 shell 订阅的纯内存状态（INT-116）：活跃 / 归档两面各自维护 map+order，
-// 由 hub 的两条长驻订阅流分别喂入，读时组装成既有消费方使用的 t3ShellSnapshots。
-// 无任何 I/O，可独立单测。
+// T3 shell 订阅的纯内存状态（INT-116）：活跃 / 归档两面各自维护 map+order。
+// 活跃面由 hub 的常驻订阅流喂入；归档面自 INT-173 起由 hub 的按需快照读取
+// （orchestration.getArchivedShellSnapshot）喂入——上游 #26238 删除了
+// subscribeArchivedShell，归档不再有常驻流。读时组装成既有消费方使用的
+// t3ShellSnapshots。无任何 I/O，可独立单测。
 //
 // 协议依据（全部核对自 T3 源码，2026-10）：
 //   - 活跃流（orchestration.subscribeShell）流项 OrchestrationV2ShellStreamItem
@@ -19,9 +21,8 @@ import (
 //     位于初始快照/回放之后、live 之前，ws.ts:1100-1105）与四类增量。
 //   - 活跃流实际只产生 location:"active" 的 thread 增量（ShellStream.ts:292-320）：
 //     归档动作也表现为 thread.removed{location:"active"}，不是线程全局删除。
-//   - 归档流（orchestration.subscribeArchivedShell，输入 {} 无 afterSequence）：
-//     先全量 snapshot 再接 thread.updated/thread.removed（无 location 字段，
-//     contracts orchestrationV2.ts:3264-3281；ShellStream.ts:322-344）。
+//   - 归档快照（orchestration.getArchivedShellSnapshot）返回的全量归档面：
+//     归档线程在 threads 字段，形状与旧归档订阅首项的 snapshot 字段一致。
 //   - 恢复语义：afterSequence 超前、gap>1000（ws.ts:550）或回放 payload>8MiB
 //     （ws.ts:685）时上游直接改发权威全量快照——序号不需要连续，权威帧把游标
 //     重置为 snapshotSequence（可以变小）。
@@ -47,15 +48,6 @@ type t3ShellStreamItem struct {
 	Location                        string           `json:"location"`
 	Thread                          *t3ThreadShell   `json:"thread"`
 	ThreadID                        string           `json:"threadId"`
-}
-
-// t3ArchiveStreamItem 是归档流流项的宽松解码（无 location / enrichment 字段）。
-type t3ArchiveStreamItem struct {
-	Kind     string                   `json:"kind"`
-	Snapshot *t3ArchivedShellSnapshot `json:"snapshot"`
-	Sequence *int                     `json:"sequence"`
-	Thread   *t3ThreadShell           `json:"thread"`
-	ThreadID string                   `json:"threadId"`
 }
 
 // t3ShellFace 是单面的存储：ID → shell 的 map 加插入序。upsert 已有 ID 只换值
@@ -131,6 +123,13 @@ type t3ShellFaceStatus struct {
 	ActiveCursor int
 }
 
+// errT3ShellArchiveStale 表示归档快照在两次可信读取之间被作废（写后失效，
+// 或 TTL 过期后重拉尚未落地）：归档面此刻不可信（G1 同口径——不得据此
+// 断言线程不存在、不得声称列表完整），但缓存里最近一次成功快照的行继续
+// 如实展示。与读取失败的区别仅在文案：数据还在、只是一次写操作或一次
+// 过期重拉让它暂时落后于上游真相。
+var errT3ShellArchiveStale = fmt.Errorf("归档快照已失效，正在重新拉取")
+
 // t3ShellState 汇聚一个环境的活跃 + 归档两面 shell 数据。
 //
 // 可信标记分离（设计 B1 规则 5）：
@@ -139,7 +138,8 @@ type t3ShellFaceStatus struct {
 //     期间只有元数据帧与增量，须等 synchronized 标记——由 hub 调
 //     markActiveSynced 控制；能力不支持时 hub 在发出订阅后立即置位（对齐
 //     官方客户端 packages/client-runtime/src/state/shell.ts:386-398）；
-//   - ArchiveReady：收到过归档全量快照。
+//   - ArchiveReady：收到过归档全量快照（INT-173 起是一次性 RPC 的返回，
+//     语义不变）。
 //
 // 活跃恢复游标 activeCursor 只由活跃面推进（规则 2）：权威快照把它重置为
 // snapshotSequence（可以变小，不是 max），活跃增量推进为 item.sequence；
@@ -160,6 +160,16 @@ type t3ShellState struct {
 	activeSynced bool
 	archiveReady bool
 	archiveErr   error
+	// archiveGeneration 是失效计数：noteArchiveInvalidated 每次推进，拉取
+	// 发起方用它做世代护栏（见 applyArchiveSnapshot）。
+	archiveGeneration int64
+	// archiveStale 表示「归档面留有最近一次成功快照的行、但当前不可信」：
+	// 写后失效（noteArchiveInvalidated）与 TTL 过期重拉发起
+	// （noteArchiveExpired）都置位——两种情形保留旧行，只是不得把快照当
+	// 完整结论。noteArchiveFetchFailed 用它区分「失效/过期后留行」与
+	// 「冷启动无快照」（清表只发生在后者）；下一次可信快照应用成功时
+	// 清除。
+	archiveStale bool
 }
 
 func newT3ShellState() *t3ShellState {
@@ -260,68 +270,159 @@ func (s *t3ShellState) advanceActiveCursorLocked(sequence int) {
 	}
 }
 
-// applyArchiveSnapshot 应用归档全量快照：替换归档两表并清除归档错误——
-// 新的全量快照意味着归档面重新可信（G1 的解除路径）。
-func (s *t3ShellState) applyArchiveSnapshot(snapshot t3ArchivedShellSnapshot) error {
+// applyArchiveSnapshot 应用归档全量快照：替换归档线程表并清除归档错误——
+// 新的全量快照意味着归档面重新可信（G1 的解除路径）。返回 (applied, err)
+// 区分两种「未可信落地」的结局（复审遗留：不得把两种 false 合并）：
+//   - 坏负载（reset 拒收，如线程缺 ID）：applied=false 且 err 非空。这是
+//     「本次读取失败」，不在本函数内 commit，由调用方走失败路径
+//     （noteArchiveFetchFailed 写 ArchiveErr 真实原因 + retryAfter 冷却；
+//     它的世代逻辑顺带处理写前坏负载——不记冷却、只留 needsRefetch）。
+//   - 世代不符（写前快照）：applied=false 且 err=nil——陈旧不是错误。
+//
+// generation 是发起拉取时刻读到的失效计数：拉取期间归档面被写后失效
+// （noteArchiveInvalidated 推进计数）时，本次快照必定反映写前状态——放行它
+// 等于把「写前快照」封回可信窗口直到 TTL 到期，wait/详情会在这整段窗口里
+// 拿陈旧归档集下「线程不存在」结论。世代变则只应用数据、不提升可信度：
+// archivedThreads 换成较新读取（数据并不更旧），但 archiveReady 保持 false、
+// ArchiveErr 报告「已失效重拉中」，由发起方负责再发一次新拉取。世代未变
+// 才置 ready 并清除 archiveErr/archiveStale（applied=true）。
+//
+// commit 非空时在同一个临界区内收尾 entry 侧簿记（validUntil/needsRefetch
+// 等）：世代校验与簿记提交原子化（Finding R1），「apply 成功后、簿记提交
+// 前发生失效」没有可插入的缝隙——失效要么先于本次落地（世代不符，
+// commit 收到 false 不封窗），要么在 commit 之后发生（由
+// InvalidateArchive 清零簿记），不存在「已失效却被 validUntil 封窗」的
+// 交错。坏负载不经本回调（其簿记由失败路径的 commitArchiveFailure 收尾，
+// 两处簿记不得双记）。commit 在持锁状态下回调，不得在回调里反向获取
+// s.mu；它可以安全地获取 e.arch.mu（锁序 s.mu → arch.mu 全局一致，无
+// 反向嵌套）。
+//
+// 快照里的 Projects 一律忽略（F7）：项目表只有活跃面一份权威来源，归档
+// 线程的项目名改从活跃项目表取，项目已删除时显示无名，与「项目已删除」
+// 一致。
+func (s *t3ShellState) applyArchiveSnapshot(snapshot t3ArchivedShellSnapshot, generation int64, commit func(trusted bool)) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.applyArchiveSnapshotLocked(snapshot)
-}
-
-// applyArchiveSnapshotLocked 应用归档全量快照：替换归档线程表并清除归档错误
-// ——新的全量快照意味着归档面重新可信（G1 的解除路径）。
-//
-// 快照里的 Projects 一律忽略（F7）：项目表只有活跃面一份权威来源。归档订阅
-// 只在初始快照时携带项目，常驻订阅后旧名字会一直覆盖活跃流的项目更新/删除，
-// 永不自愈；归档线程的项目名改从活跃项目表取，项目已删除时显示无名，与
-// 「项目已删除」一致。
-func (s *t3ShellState) applyArchiveSnapshotLocked(snapshot t3ArchivedShellSnapshot) error {
+	// 坏负载先于世代判定：reset 失败时面保持原样，err 点名原因交调用方
+	// 按「本次读取失败」记账——不得吞成「不可信但没错误」，否则上游结构
+	// 性坏快照（毒快照）会引发无冷却重试风暴：每次读取立即重拨、永不记账。
 	if err := s.archivedThreads.reset(snapshot.Threads, func(t *t3ThreadShell) string { return t.ID }); err != nil {
-		return fmt.Errorf("归档快照线程缺少 ID: %w", err)
+		return false, fmt.Errorf("归档快照线程缺少 ID: %w", err)
 	}
 	s.archivedSchemaVersion = snapshot.SchemaVersion
 	s.archivedSeq = snapshot.SnapshotSequence
+	if generation != s.archiveGeneration {
+		// 写前快照：换掉数据但不封窗。archiveReady=false 让 snapshots() 继续
+		// 把归档面报为不可信；archiveErr 保持失效标记时的语义。
+		s.archiveReady = false
+		if s.archiveErr == nil {
+			s.archiveErr = errT3ShellArchiveStale
+		}
+		if commit != nil {
+			commit(false)
+		}
+		return false, nil
+	}
 	s.archiveReady = true
 	s.archiveErr = nil
-	return nil
+	s.archiveStale = false
+	if commit != nil {
+		commit(true)
+	}
+	return true, nil
 }
 
-// applyArchiveItem 应用一个归档流流项（无 location 字段）。
-func (s *t3ShellState) applyArchiveItem(item t3ArchiveStreamItem) error {
+// noteArchiveInvalidated 记录一次写后失效（InvalidateArchive）：可信窗口
+// 作废、世代计数推进（使所有在途拉取的结果失去可信化资格），归档表保留
+// 旧行供展示——清表会把「不确定」变成「确定为空」，比保留旧行更糟。
+// archiveReady 撤为 false：失效到新快照落地之间 snapshots() 必须把归档面
+// 报为不可信（ArchiveErr 非空），否则 wait 会在「写后快照尚未拉回来」的
+// 窗口里把线程误判为不存在。
+func (s *t3ShellState) noteArchiveInvalidated() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	switch item.Kind {
-	case "snapshot":
-		if item.Snapshot == nil {
-			return fmt.Errorf("归档快照帧缺少 snapshot 字段")
-		}
-		return s.applyArchiveSnapshotLocked(*item.Snapshot)
-	case "thread.updated":
-		if item.Sequence == nil || item.Thread == nil || item.Thread.ID == "" {
-			return fmt.Errorf("归档 thread.updated 帧缺少 sequence/thread/threadId")
-		}
-		s.archivedThreads.upsert(item.Thread, item.Thread.ID)
-		return nil
-	case "thread.removed":
-		if item.Sequence == nil || item.ThreadID == "" {
-			return fmt.Errorf("归档 thread.removed 帧缺少 sequence/threadId")
-		}
-		s.archivedThreads.remove(item.ThreadID)
-		return nil
-	default:
-		return fmt.Errorf("归档流未知帧 kind %q", item.Kind)
+	s.archiveGeneration++
+	s.archiveStale = true
+	s.archiveReady = false
+	if s.archiveErr == nil {
+		s.archiveErr = errT3ShellArchiveStale
 	}
 }
 
-// markArchiveFailed 归档面整体弃用（G1）：清空归档线程表并记录错误，活跃面
-// 照常可用。归档连接的任何终止路径都经 hub 的 endFaceConnection 调到这里
-// （F2）——归档数据只有伴随健康连接才可信。之后归档快照成功到达即恢复。
-func (s *t3ShellState) markArchiveFailed(err error) {
+// noteArchiveExpired 在发起 TTL 过期重拉时把归档面撤为不可信（Finding R2）：
+// 过期不等于数据作废，旧行照旧展示，但 validUntil 已过意味着「快照不再被
+// 信任为当前完整」——重拉在途期间若不撤 archiveReady，Peek/wait 会拿过期
+// 快照判 thread_gone、谎报归档列表完整（与写后失效同型缺口）。落地成功
+// （applyArchiveSnapshot 世代相符）恢复可信；落地失败由 noteArchiveFetchFailed
+// 记真实失败原因。不推进世代：本次重拉正是为恢复可信而发，落地要按当前
+// 世代正常封窗。已不可信的面（未就绪/已失效/已标记）不重复标记——既有
+// archiveErr 文案（真实失败/失效）比过期语义更准确。
+func (s *t3ShellState) noteArchiveExpired() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.archivedThreads = newT3ShellFace[t3ThreadShell]()
+	s.noteArchiveExpiredLocked()
+}
+
+// noteArchiveExpiredLocked 是 noteArchiveExpired 的无锁变体（调用方须已持有
+// s.mu）：kick 的准入临界区经 commit 回调在 arch.mu 持锁内调用它，把「设
+// inFlight」与「撤可信」收成同一原子序列（锁序 s.mu → arch.mu，与
+// applyArchiveSnapshot 的 commit 同型）。
+func (s *t3ShellState) noteArchiveExpiredLocked() {
+	if !s.archiveReady {
+		return
+	}
 	s.archiveReady = false
+	s.archiveStale = true
+	if s.archiveErr == nil {
+		s.archiveErr = errT3ShellArchiveStale
+	}
+}
+
+// archiveGenerationNow 返回当前失效计数（发起拉取时取样，落地时回传给
+// applyArchiveSnapshot 做世代护栏判定）。
+func (s *t3ShellState) archiveGenerationNow() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.archiveGeneration
+}
+
+// noteArchiveFetchFailed 记一次归档快照读取失败（INT-173）：不清数据、不改
+// ArchiveReady。失败不推翻既有快照——归档面没有增量通道，保留的旧快照与
+// 「清空后谎报归档列表为空」相比更不坏；ArchiveErr 单独承载失败，调用方
+// 据此决定能不能把「归档面没有」当结论用（G1）。archiveReady 为假时清空
+// 归档表——没有快照可留时半张表只会误导（同旧 markArchiveFailed 的清表
+// 语义）。entry 的 TTL/失效簿记在 t3ArchiveFetchState，这里只认快照本身。
+//
+// generation 与 applyArchiveSnapshot 同一护栏：拉取期间归档面被失效标记
+// 作废时，「这次读失败」只说明写前那次读取失败——用它把归档面盖成「读
+// 失败」会抹掉「已失效重拉中」的语义并把失败冷却封到窗口上，拦不住「在
+// 途写前失败盖掉失效」的交错。世代变则不覆盖 archiveErr/表：归档面已由
+// noteArchiveInvalidated 标为不可信且保留旧行；返回 false 让发起方不记
+// 冷却（世代变的失败不封窗，下次 kick 立刻重拉）。
+//
+// 清表条件收窄为「从未有过成功快照」（Finding R3）：!archiveReady 不够——
+// 失效后留行的面（archiveStale）在当前世代重拉失败时仍须保留旧行，本次
+// 失败只说明这次读没成，旧行并不因此更不可信；清表会把「不可信但留行」
+// 错变成「确定为空」。无论哪条路径 ArchiveErr 都记本次真实失败原因。
+// commit 与 applyArchiveSnapshot 同约束：在同一临界区内收尾冷却簿记
+// （retryAfter/needsRefetch），锁序 s.mu → arch.mu。
+func (s *t3ShellState) noteArchiveFetchFailed(err error, generation int64, commit func(applied bool)) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if generation != s.archiveGeneration {
+		if commit != nil {
+			commit(false)
+		}
+		return false
+	}
+	if !s.archiveReady && !(s.archiveStale && s.archivedThreads.len() != 0) {
+		s.archivedThreads = newT3ShellFace[t3ThreadShell]()
+	}
 	s.archiveErr = err
+	if commit != nil {
+		commit(true)
+	}
+	return true
 }
 
 // markActiveSynced 由 hub 控制追平标记：resume 时在重发订阅前清 false、
@@ -362,8 +463,11 @@ func (s *t3ShellState) snapshots() *t3ShellSnapshots {
 		archivedThreads = append(archivedThreads, *s.archivedThreads.byID[id])
 	}
 
-	// 归档面未就绪也要如实标不可信：ArchiveErr == nil 只说明「读到了且没出错」，
-	// 不代表归档已经加载完（两条连接进度独立，活跃面常先就绪）。
+	// 归档面未就绪/已失效/过期重拉在途也要如实标不可信：ArchiveErr == nil
+	// 只说明「读到了且没出错」，不代表归档当前可信（按需快照首次拉取是
+	// 异步补位的，活跃面常先就绪；写后失效与 TTL 过期重拉发起也会把
+	// archiveReady 撤回 false）。失效标记与真实读取失败都已在 archiveErr
+	// 里，未就绪兜底补 not-ready。
 	archiveErr := s.archiveErr
 	if !s.archiveReady && archiveErr == nil {
 		archiveErr = errT3ShellArchiveNotReady

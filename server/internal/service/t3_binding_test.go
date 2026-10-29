@@ -153,7 +153,7 @@ func TestT3BindingDiscoverProjects(t *testing.T) {
 	// 项目发现零 shell 调用（INT-116）：订阅类 RPC 不出现在发现窗口里。
 	for _, rpc := range e.fake.recordedRPC()[before:] {
 		switch rpc.method {
-		case t3RPCSubscribeShell, t3RPCSubscribeArchivedShell:
+		case t3RPCSubscribeShell, "orchestration.subscribeArchivedShell":
 			t.Fatalf("discovery must not subscribe shell, got %s", rpc.method)
 		}
 	}

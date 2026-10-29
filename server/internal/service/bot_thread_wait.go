@@ -515,7 +515,7 @@ func botWaitShellActivity(shell *t3ThreadShell) map[string]interface{} {
 	}
 	bg := 0
 	for _, task := range shell.PendingBackgroundTasks {
-		if task.Kind != "command" {
+		if t3TaskHoldsCompletion(task) {
 			bg++
 		}
 	}

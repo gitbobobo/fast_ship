@@ -6453,10 +6453,12 @@ user_input_request（提问）/ secret_request（密钥，绝不携带密钥值�
 读取线程启动器选项（项目表 + 服务器配置 + 设置）
 
 一次 WS 会话内取 T3 `orchestration.subscribeShell` 首快照（项目表）+
-`server.getConfig` + `server.getSettings`。`projects` 为归一化项目表
+`server.getConfig`。`projects` 为归一化项目表
 （snake_case，含 workspace_root 供 workspace-options 解析 cwd）；
-`config`/`settings` 为上游 `server.getConfig`/`server.getSettings`
-响应原样透传（camelCase，字段随 T3 版本演进，客户端按需读取）。
+`config` 为上游 `server.getConfig` 响应原样透传、`settings` 为其
+内嵌 `settings` 子对象（上游 #26238 起 `server.getSettings` 已删除，
+设置改由 getConfig.settings 携带；旧上游无该字段时为空对象），
+camelCase，字段随 T3 版本演进，客户端按需读取。
 
 **鉴权**：公开
 
@@ -6487,7 +6489,7 @@ user_input_request（提问）/ secret_request（密钥，绝不携带密钥值�
 | `projects[].default_model_selection.options[].id` | string | 是 |  |
 | `projects[].default_model_selection.options[].value` | string | 是 | 字符串或布尔（T3 ProviderOptionSelectionValue）。JSON 原样透传， 布尔选项发 JSON boolean 而非字符串。 |
 | `config` | object | 是 | T3 `server.getConfig` 响应原样透传（camelCase，含 providers 等启动器所需的全部配置） |
-| `settings` | object | 是 | T3 `server.getSettings` 响应原样透传（camelCase，含 newWorktreesStartFromOrigin 等设置） |
+| `settings` | object | 是 | T3 `server.getConfig` 响应内嵌 `settings` 子对象原样透传（camelCase，含 newWorktreesStartFromOrigin 等设置；上游 `server.getSettings` 已删除，旧上游无该字段时为空对象） |
 
 **错误**
 

@@ -200,9 +200,10 @@ func deriveT3ThreadActivity(projection *t3ThreadProjection, shell *t3ThreadShell
 		Stopping:           false,
 		HasPendingRequests: shell.PendingRuntimeRequest != nil,
 	}
-	// 占完成位的后台工作数（口径与状态映射一致：command 不占位）。
+	// 占完成位的后台工作数：与状态映射 t3ThreadStatus 同口径，统一走
+	// t3TaskHoldsCompletion（awaited=true 的 command 也计入）。
 	for _, task := range shell.PendingBackgroundTasks {
-		if task.Kind != "command" {
+		if t3TaskHoldsCompletion(task) {
 			activity.PendingBackgroundTaskCount++
 		}
 	}
@@ -248,9 +249,19 @@ func t3QueueRank(run t3Run) int {
 	return run.Ordinal
 }
 
-// t3HasInterruptibleBackgroundWork 对齐 T3 interruptThreadTurn：没有活动 run 时，
-// 用「不含 pullRequests」的后台工作决定要不要中断最近 run。PR watch 是 monitor
-// 且 taskId 前缀 pull-request-watch:，Stop 不应把它当成可中断目标。
+// t3HasInterruptibleBackgroundWork 是「可被停止」判定，与上面的
+// t3TaskHoldsCompletion「占完成位」是两个独立口径，不得互相套用：占位看
+// 「谁会唤醒代理」，可停止看「Stop 还能对什么下手」——一条 awaited 的
+// command 占完成位，但 Stop 回退路径不把它当可中断目标。
+//
+// 对齐上游 interruptThreadTurn（无 threadStop 能力的回退分支）：没有活动
+// run 时，用后台工作 roster（不含 PR 链接，即「不含 pullRequests」）决定
+// 要不要中断最近 run；command/monitor/subagent/background_task 都在可中断
+// 后台之列（run.interrupt 连带取消该 run 挂的后台工作），唯独 PR watch
+// 不算——taskId 前缀 pull-request-watch: 的 monitor 由专门的解监听分支
+// 处理（thread.pull-request.watch watching=false），不该成为 run.interrupt
+// 的理由。Fast Ship 在此之上额外排除 command（dev server 之类的常驻命令
+// 不作为回退路径的停止目标），是比上游更窄的本地口径。
 func t3HasInterruptibleBackgroundWork(tasks []t3PendingBackgroundTask) bool {
 	for _, task := range tasks {
 		if task.Kind == "command" {

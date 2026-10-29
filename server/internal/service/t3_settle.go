@@ -99,5 +99,8 @@ func (s *T3ThreadsService) threadSettlementCommand(ctx context.Context, userID, 
 	if err != nil {
 		return nil, err
 	}
+	// settle/unsettle 改变线程的可见归属（T3 历史区），归档集同样可能随之
+	// 变化：作废归档快照缓存，下一次读取重拉（INT-173，写后不靠 TTL 兜底）。
+	s.shellHub.InvalidateArchive(userID, envID)
 	return &T3DispatchResult{Sequence: sequence}, nil
 }

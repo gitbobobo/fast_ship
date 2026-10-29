@@ -367,7 +367,7 @@ func TestT3CreateThreadLaunch(t *testing.T) {
 	// （断言窗口从预热稳定后起算，Create 预热的流量不进窗口）。
 	for _, rpc := range e.fake.recordedRPC()[before:] {
 		switch rpc.method {
-		case t3RPCSubscribeShell, t3RPCSubscribeArchivedShell:
+		case t3RPCSubscribeShell, "orchestration.subscribeArchivedShell":
 			t.Fatalf("create path must not subscribe shell, got %s", rpc.method)
 		}
 	}
@@ -376,10 +376,13 @@ func TestT3CreateThreadLaunch(t *testing.T) {
 	}
 }
 
-// TestT3StopThreadSelection 覆盖 Stop 口径：活动 run 优先（holdQueue=true）；
+// TestT3StopThreadSelection 覆盖 Stop 回退路径（fake 切到旧上游：无
+// threadStop 能力声明）的 run 选择口径：活动 run 优先（holdQueue=true）；
 // 根 run 结束但后台工作仍在 → 最近 run；无可停 → stopped=false 无写命令。
 func TestT3StopThreadSelection(t *testing.T) {
 	e := setupT3ServiceTest(t)
+	// 能力缺失才走回退：本地读可信 shell 选 run 后发 run.interrupt。
+	e.fake.useLegacyThreadStop()
 	userID := e.createUser(t)
 	envID := pairWritable(t, e, userID, "停止机")
 	ctx := context.Background()
@@ -530,7 +533,130 @@ func TestT3StopThreadSelection(t *testing.T) {
 	}
 }
 
-// Stop 的 run 选择是纯函数，逐条锁定官方 stopThread 的口径：
+// TestT3StopThreadStopCommandPath 覆盖能力存在的主路径（INT-173）：
+// capabilities.threadStop=true 时派发公开命令 thread.stop（不带
+// runId/holdQueue，服务端选目标），受理即 stopped=true、run_id 留缺省；
+// 本地不再读可信 shell——无 shell 记录的线程也直接交服务端判定，不再有
+// 50202 守卫；线程不存在（投影 404）→ 40418 在新路径同样保留。
+func TestT3StopThreadStopCommandPath(t *testing.T) {
+	e := setupT3ServiceTest(t)
+	userID := e.createUser(t)
+	envID := pairWritable(t, e, userID, "新停机")
+	ctx := context.Background()
+
+	e.fake.mu.Lock()
+	e.fake.projections["th-run"] = mustJSONString(map[string]any{
+		"thread":           appThreadFixture("th-run", "运行中", nil),
+		"runs":             []any{map[string]any{"id": "run-1", "ordinal": 1, "status": "running", "userMessageId": "m1"}},
+		"messages":         []any{map[string]any{"id": "m1", "text": "你好", "attachments": []any{}}},
+		"providerSessions": []any{},
+		"providerThreads":  []any{},
+		"providerTurns":    []any{},
+		"runtimeRequests":  []any{},
+		"turnItems":        []any{},
+		"visibleTurnItems": []any{},
+	})
+	e.fake.snapshot = shellSnapshotFixture(
+		[]any{map[string]any{"id": "p-1", "title": "P"}},
+		[]any{shellThread("th-run", "运行中", "running", map[string]any{"latestRunId": "run-1", "activeRunId": "run-1"})},
+	)
+	e.fake.mu.Unlock()
+
+	result, err := e.th.StopThread(ctx, userID, envID, "th-run")
+	if err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	if !result.Stopped || result.RunId != nil {
+		t.Fatalf("threadStop path: acceptance means stopped=true with no self-picked run, got %+v", result)
+	}
+	var stop map[string]any
+	sawInterrupt := false
+	for _, rpc := range e.fake.recordedRPC() {
+		if rpc.method != "orchestration.dispatchCommand" {
+			continue
+		}
+		var cmd map[string]any
+		if json.Unmarshal(rpc.payload, &cmd) != nil {
+			continue
+		}
+		if cmd["type"] == "thread.stop" {
+			stop = cmd
+		}
+		if cmd["type"] == "run.interrupt" {
+			sawInterrupt = true
+		}
+	}
+	if stop == nil {
+		t.Fatalf("expected thread.stop dispatch")
+	}
+	if sawInterrupt {
+		t.Fatalf("capability path must not dispatch run.interrupt")
+	}
+	if stop["threadId"] != "th-run" {
+		t.Fatalf("thread.stop threadId = %+v", stop)
+	}
+	if id, _ := stop["commandId"].(string); id == "" {
+		t.Fatalf("thread.stop missing commandId: %+v", stop)
+	}
+	if _, ok := stop["runId"]; ok {
+		t.Fatalf("thread.stop must not carry runId (server picks target): %+v", stop)
+	}
+	if _, ok := stop["holdQueue"]; ok {
+		t.Fatalf("thread.stop must not carry holdQueue (server holds queue): %+v", stop)
+	}
+
+	// 无可停目标：不必本地先判「无事可做」，直接交服务端空转回执——
+	// 投影在、shell 无此线程也不再有 50202 守卫（本地不读运行态）。
+	e.fake.mu.Lock()
+	e.fake.projections["th-idle"] = mustJSONString(map[string]any{
+		"thread":           appThreadFixture("th-idle", "空闲", nil),
+		"runs":             []any{},
+		"messages":         []any{},
+		"providerSessions": []any{},
+		"providerThreads":  []any{},
+		"providerTurns":    []any{},
+		"runtimeRequests":  []any{},
+		"turnItems":        []any{},
+		"visibleTurnItems": []any{},
+	})
+	e.fake.mu.Unlock()
+	result, err = e.th.StopThread(ctx, userID, envID, "th-idle")
+	if err != nil {
+		t.Fatalf("stop idle on threadStop path: %v", err)
+	}
+	if !result.Stopped || result.RunId != nil {
+		t.Fatalf("idle thread on threadStop path = %+v", result)
+	}
+
+	// 线程真的不存在（投影 404）→ 40418，能力路径同样保留基线语义。
+	if _, err := e.th.StopThread(ctx, userID, envID, "th-absent"); err == nil || t3ErrCode(err) != errs.ErrT3ThreadNotFound.Code {
+		t.Fatalf("stop missing thread = %v, want 40418", err)
+	}
+}
+
+// t3ConfigSupportsThreadStop 纯函数口径：显式声明 true 才算支持；false、
+// 字段缺失、capabilities/environment 缺失、响应坏 JSON 都算不支持（回退）。
+func TestT3ConfigSupportsThreadStop(t *testing.T) {
+	caps := func(v map[string]any) json.RawMessage {
+		return mustJSON(map[string]any{"environment": map[string]any{"capabilities": v}})
+	}
+	if !t3ConfigSupportsThreadStop(caps(map[string]any{"threadStop": true})) {
+		t.Fatalf("declared true must count as supported")
+	}
+	for name, raw := range map[string]json.RawMessage{
+		"declared false":  caps(map[string]any{"threadStop": false}),
+		"field absent":    caps(map[string]any{}),
+		"no capabilities": mustJSON(map[string]any{"environment": map[string]any{}}),
+		"no environment":  mustJSON(map[string]any{}),
+		"broken json":     json.RawMessage(`{`),
+	} {
+		if t3ConfigSupportsThreadStop(raw) {
+			t.Fatalf("%s must not count as supported", name)
+		}
+	}
+}
+
+// Stop 回退路径的 run 选择是纯函数，逐条锁定官方客户端显式指定 run 时的口径：
 // shell 的可中断活动 run 优先；没有时看投影（含 waiting）；再否则看后台工作。
 func TestSelectStopRunID(t *testing.T) {
 	ptr := func(v string) *string { return &v }
@@ -1093,8 +1219,104 @@ func TestT3ComposerAndWorkspaceOptions(t *testing.T) {
 	// （断言窗口从预热稳定后起算，Create 预热的流量不进窗口）。
 	for _, rpc := range e.fake.recordedRPC()[before:] {
 		switch rpc.method {
-		case t3RPCSubscribeShell, t3RPCSubscribeArchivedShell:
+		case t3RPCSubscribeShell, "orchestration.subscribeArchivedShell":
 			t.Fatalf("composer/workspace path must not subscribe shell, got %s", rpc.method)
+		}
+	}
+}
+
+// TestT3ComposerSettingsFromConfig 覆盖 INT-173：上游 #26238 删除独立的
+// server.getSettings 后，设置改从 getConfig 内嵌的 settings 字段读取。
+// 新上游（缺省 fake）：Settings 非空、worktree startFromOrigin 继承内嵌值；
+// 旧上游（legacy 开关）：getConfig 无 settings → 客户端拿到空 settings、
+// 不报错，startFromOrigin 缺省不上送。全程不得出现 server.getSettings 调用。
+func TestT3ComposerSettingsFromConfig(t *testing.T) {
+	e := setupT3ServiceTest(t)
+	userID := e.createUser(t)
+	envID := pairWritable(t, e, userID, "设置机")
+	_ = awaitPrewarmSubscriptions(t, e.fake)
+	ctx := context.Background()
+
+	e.fake.mu.Lock()
+	e.fake.projects = mustJSON(map[string]any{"projects": []any{
+		map[string]any{"id": "p-1", "title": "P", "workspaceRoot": "/repo",
+			"defaultModelSelection": map[string]any{"instanceId": "prov", "model": "m1"}},
+	}})
+	e.fake.mu.Unlock()
+
+	createWorktreeThread := func(t *testing.T) map[string]any {
+		t.Helper()
+		if _, err := e.th.CreateThread(ctx, userID, envID, &T3CreateThreadRequest{
+			ProjectId: "p-1",
+			Message:   api.CreateT3ThreadRequest_Message{Text: "wt"},
+			Workspace: &api.T3ThreadWorkspace{Type: "worktree"},
+		}); err != nil {
+			t.Fatalf("create worktree thread: %v", err)
+		}
+		var launch map[string]any
+		for _, rpc := range e.fake.recordedRPC() {
+			if rpc.method == "orchestration.launchThread" {
+				launch = nil
+				if json.Unmarshal(rpc.payload, &launch) != nil {
+					t.Fatalf("launch payload: %s", rpc.payload)
+				}
+			}
+		}
+		ws, _ := launch["workspaceStrategy"].(map[string]any)
+		if ws == nil || ws["type"] != "worktree" {
+			t.Fatalf("worktree workspace = %+v", launch["workspaceStrategy"])
+		}
+		return ws
+	}
+
+	// 新上游：settings 内嵌在 getConfig 里（fake 缺省 newWorktreesStartFromOrigin=true）。
+	options, err := e.th.ComposerOptions(ctx, userID, envID)
+	if err != nil {
+		t.Fatalf("composer options: %v", err)
+	}
+	if len(options.Settings) == 0 || options.Settings["newWorktreesStartFromOrigin"] != true {
+		t.Fatalf("settings must come from config.settings, got %+v", options.Settings)
+	}
+	if ws := createWorktreeThread(t); ws["startFromOrigin"] != true {
+		t.Fatalf("startFromOrigin must inherit true from config.settings, got %+v", ws)
+	}
+
+	// 内嵌设置翻为 false：两条路径都必须如实继承。
+	e.fake.mu.Lock()
+	e.fake.configValue = mustJSON(map[string]any{
+		"providers": map[string]any{}, "shellResumeCompletionMarker": true,
+		"settings": map[string]any{"newWorktreesStartFromOrigin": false},
+	})
+	e.fake.mu.Unlock()
+	options, err = e.th.ComposerOptions(ctx, userID, envID)
+	if err != nil {
+		t.Fatalf("composer options (false): %v", err)
+	}
+	if options.Settings["newWorktreesStartFromOrigin"] != false {
+		t.Fatalf("settings must carry explicit false, got %+v", options.Settings)
+	}
+	if ws := createWorktreeThread(t); ws["startFromOrigin"] != false {
+		t.Fatalf("startFromOrigin must inherit false from config.settings, got %+v", ws)
+	}
+
+	// 旧上游：getConfig 无 settings → 空 settings、不报错；startFromOrigin
+	// 缺省不上送（fake 的 getSettings 此时虽可用，但客户端不再调用）。
+	e.fake.useLegacySettings()
+	options, err = e.th.ComposerOptions(ctx, userID, envID)
+	if err != nil {
+		t.Fatalf("composer options (legacy): %v", err)
+	}
+	if len(options.Settings) != 0 {
+		t.Fatalf("legacy config without settings must yield empty settings, got %+v", options.Settings)
+	}
+	if ws := createWorktreeThread(t); func() bool { _, ok := ws["startFromOrigin"]; return ok }() {
+		t.Fatalf("legacy env must not send startFromOrigin, got %+v", ws)
+	}
+
+	// 验收硬口径：任何路径都不得再调 server.getSettings。
+	for _, rpc := range e.fake.recordedRPC() {
+		if rpc.method == "server.getSettings" {
+			t.Fatalf("client must not call server.getSettings anymore")
 		}
 	}
 }
@@ -1216,6 +1438,45 @@ func TestT3HasInterruptibleBackgroundWork(t *testing.T) {
 		{TaskID: "bg-1", Kind: "subagent"},
 	}) {
 		t.Fatalf("subagent must count")
+	}
+	// monitor 不整体排除：普通 monitor（如 agent 挂的文件看护）在上游
+	// interruptThreadTurn 的回退门里也算后台工作，唯独 PR watch 前缀不算。
+	if !t3HasInterruptibleBackgroundWork([]t3PendingBackgroundTask{
+		{TaskID: "watch-src", Kind: "monitor"},
+	}) {
+		t.Fatalf("plain monitor must count as interruptible")
+	}
+}
+
+// TestT3HoldsCompletionVsInterruptible 钉住两个判定的分离：占完成位（谁会
+// 唤醒代理）与可被停止（Stop 回退还能对什么下手）口径不同，同一条后台工作
+// 在两侧可以得出不同结论——awaited 的 command 占位但不可停止；普通 monitor
+// 不占位但可停止；PR watch 两侧都不占。
+func TestT3HoldsCompletionVsInterruptible(t *testing.T) {
+	cases := []struct {
+		name          string
+		task          t3PendingBackgroundTask
+		holds         bool
+		interruptible bool
+	}{
+		{"awaited command：占位、不可停止", t3PendingBackgroundTask{TaskID: "c1", Kind: "command", Awaited: true}, true, false},
+		{"普通 command：都不占", t3PendingBackgroundTask{TaskID: "c2", Kind: "command"}, false, false},
+		{"普通 monitor：不占位、可停止", t3PendingBackgroundTask{TaskID: "w1", Kind: "monitor"}, false, true},
+		{"awaited monitor：占位、可停止", t3PendingBackgroundTask{TaskID: "w2", Kind: "monitor", Awaited: true}, true, true},
+		{"PR watch monitor：都不占", t3PendingBackgroundTask{TaskID: "pull-request-watch:o/r#1", Kind: "monitor"}, false, false},
+		{"subagent：占位、可停止", t3PendingBackgroundTask{TaskID: "s1", Kind: "subagent"}, true, true},
+		{"background_task：占位、可停止", t3PendingBackgroundTask{TaskID: "b1", Kind: "background_task"}, true, true},
+		{"未知 kind：占位、可停止", t3PendingBackgroundTask{TaskID: "u1", Kind: "hologram"}, true, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := t3TaskHoldsCompletion(c.task); got != c.holds {
+				t.Fatalf("holds = %v, want %v", got, c.holds)
+			}
+			if got := t3HasInterruptibleBackgroundWork([]t3PendingBackgroundTask{c.task}); got != c.interruptible {
+				t.Fatalf("interruptible = %v, want %v", got, c.interruptible)
+			}
+		})
 	}
 }
 
