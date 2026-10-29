@@ -5186,7 +5186,7 @@ type T3ThreadActivity struct {
 	// HasPendingRequests 有等待用户处理的运行时请求（审批/提问/代答 secret）
 	HasPendingRequests bool `json:"has_pending_requests"`
 
-	// PendingBackgroundTaskCount 根 run 结束后仍在跑的后台工作条数（command 类不占完成位；上游缺省时为 0）
+	// PendingBackgroundTaskCount 根 run 结束后仍在跑且占完成位的后台工作条数（awaited=true 的 command 也占；command/monitor 默认不占，subagent/background_task/未知/缺省 kind 占；上游缺省时为 0）
 	PendingBackgroundTaskCount int `json:"pending_background_task_count"`
 
 	// Stopping 停止请求已下发且尚未落定：活动 run 的最近一条 run_interrupt_request

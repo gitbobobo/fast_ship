@@ -276,6 +276,25 @@ func (e *t3ShellEntry) ensureArchive(ctx context.Context) error {
 		}
 		return e.noteArchiveFetchFailed(err, generation)
 	}
+	// 应答形状校验（审修 B）：归档 RPC 是宽松解码——Exit Success 的 value
+	// 为 null、应答多包一层（{snapshot:{...}}）、字段改名都零错误解成
+	// 零值快照，直接应用会把归档表整体重置为空并封可信：谎报「归档列
+	// 表确定为空且可信」，与「失败不清表、不谎报完整」相反；且 RPC 是
+	// 成功应答，不触发旧面回退。判别字段用 threads「存在（含空数组）」
+	// vs「缺失/null」区分——上游快照恒带该字段（threads:[] 也是合法完
+	// 整应答，len>0 会把合法空归档误拒）。形状不符按本次读取失败记账
+	// （ArchiveErr 真实原因 + 冷却），不清表、不封窗。
+	var shape struct {
+		Threads json.RawMessage `json:"threads"`
+	}
+	if err := json.Unmarshal(value, &shape); err != nil || shape.Threads == nil {
+		if err == nil {
+			err = fmt.Errorf("归档快照应答缺少 threads 判别字段")
+		} else {
+			err = fmt.Errorf("归档快照应答解析失败: %w", err)
+		}
+		return e.noteArchiveFetchFailed(err, generation)
+	}
 	var snapshot t3ArchivedShellSnapshot
 	if err := json.Unmarshal(value, &snapshot); err != nil {
 		return e.noteArchiveFetchFailed(fmt.Errorf("归档快照响应解析失败: %w", err), generation)
@@ -546,6 +565,16 @@ func (e *t3ShellEntry) signalArchiveReconnect() {
 // → 订阅 → 读循环，结束后按分类退避重连（复用活跃面的 backoffFor）。仅
 // 在 switchToArchiveLegacy 置 legacyStarted 后启动一次，随 entry/hub 生命
 // 周期退出。
+//
+// 稳定判定用归档面自己的数据落地时刻（审修 R6-C，syncedAt 取自本连接
+// 的读循环记录而非活跃面的 syncConfirmedAt）：活跃面长期健康时其追平时
+// 刻恒为旧值，归档订阅持续失败（上游拒收/立即 Exit/掐断）也会被每轮重
+// 置 attempts=0、按 BackoffBase 无限重连——每环境每秒一次探活+拨号的重
+// 连风暴；活跃面刚重连时又错误从 2s 起算。归档面没有 synchronized/追平
+// 态，「本连接收到过快照/增量」即它的健康信号：读循环把最近一次
+// applyArchiveValues 成功时刻记入 connResult.syncedAt，全程无数据的连接
+// 返回零值，attempts 持续加深；连接活着且数据流过 StableResetAfter 才重
+// 置退避——「连接健康期间数据持续可信」正是订阅面的可信度模型。
 func (h *t3ShellHub) runArchiveLegacySubscription(e *t3ShellEntry) {
 	attempts := 0
 	for {
@@ -620,6 +649,15 @@ func (h *t3ShellHub) connectArchiveLegacyOnce(e *t3ShellEntry) t3ShellConnResult
 	unregisterCancel := session.closeOnCancel(connCtx)
 	defer unregisterCancel()
 
+	// 出发邮戳必须在发 subscribe 之前取（审修 R6-A，邮戳时机）：保证
+	// 「发送后窗口内记录的新请求世代必然大于邮戳」。若在发送后、或任何
+	// 可阻塞调用（noteConnState 取 e.mu，可能等一次大快照拷贝）之后取，
+	// 窗口内发生的归档写后失效记入的请求世代会被算进邮戳——该连接送达
+	// 的变更前快照落地时 connectionStart >= pendingGen 成立，备忘被误清，
+	// 排队的 reconnect 信号被当无备忘忽略，写后全量不再重拉。拨号/探测
+	// 是订阅发出之前的事，在它们之前的请求本就该计入邮戳——唯一不能计
+	// 入的是「本连接 subscribe 已发出之后」的那批。
+	connectionStart := e.state.archiveReconnectTarget()
 	e.noteConnState(true, t3ShellConnConnecting, nil)
 	requestID := session.nextID
 	session.nextID++
@@ -628,10 +666,7 @@ func (h *t3ShellHub) connectArchiveLegacyOnce(e *t3ShellEntry) t3ShellConnResult
 		return t3ShellConnResult{}
 	}
 	e.noteConnState(true, t3ShellConnSubscribed, nil)
-	// 出发邮戳：本连接建立前已发出的 reconnect 请求数。落地快照用它判
-	// 定「本快照是否晚于最新请求」——快照请求必在本连接之后发出，故它
-	// 必晚于所有世代 ≤ 邮戳的请求（R4 P2，见 applyArchiveSnapshotLocked）。
-	return h.readArchiveLegacyLoop(e, session, connCtx, requestID, e.state.archiveReconnectTarget())
+	return h.readArchiveLegacyLoop(e, session, connCtx, requestID, connectionStart)
 }
 
 // readArchiveLegacyLoop 是旧归档订阅的读循环：只认本 requestID 的 Chunk/
@@ -675,11 +710,16 @@ func (h *t3ShellHub) readArchiveLegacyLoop(e *t3ShellEntry, session *t3RPCSessio
 
 	var connErr error
 	credential := false
+	// dataSeenAt 是本连接最近一次权威数据（快照/增量）落地时刻：归档面
+	// 没有追平态，退避的稳定判定以「本连接是否收到过数据且活了多久」为
+	// 凭（审修 R6-C）——全程无数据的连接返回零值 syncedAt，attempts 持续
+	// 加深，不会被活跃面的追平时刻误重置。
+	var dataSeenAt time.Time
 	for {
 		select {
 		case <-connCtx.Done():
 			h.endFaceConnection(e, true, nil)
-			return t3ShellConnResult{syncedAt: e.syncConfirmedAt()}
+			return t3ShellConnResult{syncedAt: dataSeenAt}
 		case frame, ok := <-frames:
 			if !ok {
 				select {
@@ -688,19 +728,20 @@ func (h *t3ShellHub) readArchiveLegacyLoop(e *t3ShellEntry, session *t3RPCSessio
 					connErr = fmt.Errorf("归档订阅连接读取中断")
 				}
 				h.endFaceConnection(e, true, connErr)
-				return t3ShellConnResult{credential: credential, syncedAt: e.syncConfirmedAt()}
+				return t3ShellConnResult{credential: credential, syncedAt: dataSeenAt}
 			}
 			lastFrame = time.Now()
 			switch {
 			case frame.Tag == "Chunk" && frame.requestIDMatches(requestID):
 				if applyErr := h.applyArchiveValues(e, frame.Values, connectionStart); applyErr != nil {
 					h.endFaceConnection(e, true, applyErr)
-					return t3ShellConnResult{syncedAt: e.syncConfirmedAt()}
+					return t3ShellConnResult{syncedAt: dataSeenAt}
 				}
+				dataSeenAt = time.Now()
 				e.refresh()
 				if err := session.sendAck(connCtx, frame.RequestID); err != nil {
 					h.endFaceConnection(e, true, fmt.Errorf("发送 Ack 失败: %w", err))
-					return t3ShellConnResult{syncedAt: e.syncConfirmedAt()}
+					return t3ShellConnResult{syncedAt: dataSeenAt}
 				}
 			case frame.Tag == "Exit" && frame.requestIDMatches(requestID):
 				if _, err := frame.exitValue(); err != nil {
@@ -709,7 +750,7 @@ func (h *t3ShellHub) readArchiveLegacyLoop(e *t3ShellEntry, session *t3RPCSessio
 				} else {
 					h.endFaceConnection(e, true, fmt.Errorf("归档订阅流提前结束"))
 				}
-				return t3ShellConnResult{credential: credential, syncedAt: e.syncConfirmedAt()}
+				return t3ShellConnResult{credential: credential, syncedAt: dataSeenAt}
 			default:
 			}
 		case <-e.legacyReconnect:
@@ -725,12 +766,12 @@ func (h *t3ShellHub) readArchiveLegacyLoop(e *t3ShellEntry, session *t3RPCSessio
 				continue
 			}
 			h.endFaceConnection(e, true, errArchiveReconnectRequested)
-			return t3ShellConnResult{syncedAt: e.syncConfirmedAt()}
+			return t3ShellConnResult{syncedAt: dataSeenAt}
 		case <-pingTicker.C:
 			if time.Since(lastFrame) > h.cfg.PingInterval {
 				if err := session.sendRaw(connCtx, map[string]any{"_tag": "Ping"}); err != nil {
 					h.endFaceConnection(e, true, fmt.Errorf("发送 Ping 失败: %w", err))
-					return t3ShellConnResult{credential: credential, syncedAt: e.syncConfirmedAt()}
+					return t3ShellConnResult{credential: credential, syncedAt: dataSeenAt}
 				}
 			}
 		}

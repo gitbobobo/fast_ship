@@ -196,8 +196,9 @@ type t3ShellState struct {
 	//
 	// 世代护栏（R4 P2，Preserve newer legacy reconnect requests）：一条
 	// reconnect 请求只能被「确在该请求之后发出的快照」清掉——每条连接
-	// 在 subscribe 发出后记一个出发邮戳（当时已发出的请求世代），快照落
-	// 地时以「邮戳 ≥ 备忘世代」为清备忘条件：备忘更新（请求记在本连接
+	// 在发 subscribe 之前记一个出发邮戳（当时已发出的请求世代，发送前
+	// 取值保证发送后的新请求世代必然大于邮戳，审修 R6-A），快照落地
+	// 时以「邮戳 ≥ 备忘世代」为清备忘条件：备忘更新（请求记在本连接
 	// 建立之后）说明本连接的订阅取的是变更前状态，其快照不得吞掉备忘——
 	// 否则已排队的 reconnect 信号被无视，wait 拿写前数据判 thread_gone
 	// 直到下一个事件/重连。兑现路径不变：读循环的信号分支消费备忘即断
@@ -449,9 +450,9 @@ func (s *t3ShellState) archiveGenerationNow() int64 {
 // applyArchiveItem 应用一个旧归档订阅流项（无 location 字段）。旧面是全
 // 量快照 + 增量的常驻流：snapshot 整体重置归档表，updated/removed 按项
 // 维护。坏帧返回错误，由订阅路径整条流失败重连（不得静默跳过然后继续
-// 宣称可信）。connectionStart 是本连接发出 subscribe 时刻读到的 reconnect
-// 请求世代（出发邮戳）——快照项据此判定能否清守旧备忘（见
-// applyArchiveSnapshotLocked）。
+// 宣称可信）。connectionStart 是本连接发 subscribe 之前读到的 reconnect
+// 请求世代（出发邮戳，发前取值见 connectArchiveLegacyOnce）——快照项据
+// 此判定能否清守旧备忘（见 applyArchiveSnapshotLocked）。
 func (s *t3ShellState) applyArchiveItem(item t3ArchiveStreamItem, connectionStart int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -485,7 +486,7 @@ func (s *t3ShellState) applyArchiveItem(item t3ArchiveStreamItem, connectionStar
 // 源。
 //
 // reconnect 世代护栏（R4 P2）：connectionStart 是本连接的出发邮戳
-// （subscribe 发出时读到的请求世代）——本快照必在该连接之后发出，故它
+// （发 subscribe 之前读到的请求世代）——本快照必在该连接之后发出，故它
 // 一定晚于所有世代 ≤ 邮戳的请求。仅当邮戳不小于当前备忘世代时本快照
 // 才算「该请求之后的权威状态」、才清备忘；备忘更新（请求记在快照发出
 // 之后）时本快照是变更前状态，保留备忘——兑现交给读循环的信号分支：
@@ -563,10 +564,11 @@ func (s *t3ShellState) consumeArchiveReconnect() bool {
 }
 
 // archiveReconnectTarget 返回已发出的 reconnect 请求总数（最新请求的世
-// 代；从未请求过为 0）。旧面连接在 subscribe 发出后取它作出发邮戳
-// （connectionStart）：本连接之后发出的快照必晚于所有世代 ≤ 该值的请
-// 求，快照落地时据此判定备忘可清与否（R4 P2）。只增不减——备忘被消
-// 费/作废不回卷它，否则新请求的世代会与旧请求撞号。
+// 代；从未请求过为 0）。旧面连接在发 subscribe 之前取它作出发邮戳
+// （connectionStart）：发送前取值保证「订阅发出之后记录的新请求世代必
+// 然大于邮戳」，本连接送达的快照才不能误清后到的备忘（R4 P2 + 审修
+// R6-A 邮戳时机）。只增不减——备忘被消费/作废不回卷它，否则新请求的
+// 世代会与旧请求撞号。
 func (s *t3ShellState) archiveReconnectTarget() int64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()

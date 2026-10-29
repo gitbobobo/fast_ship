@@ -5744,7 +5744,7 @@ export interface components {
             stopping: boolean;
             /** @description 有等待用户处理的运行时请求（审批/提问/代答 secret） */
             has_pending_requests: boolean;
-            /** @description 根 run 结束后仍在跑的后台工作条数（command 类不占完成位；上游缺省时为 0） */
+            /** @description 根 run 结束后仍在跑且占完成位的后台工作条数（awaited=true 的 command 也占；command/monitor 默认不占，subagent/background_task/未知/缺省 kind 占；上游缺省时为 0） */
             pending_background_task_count: number;
         };
         T3ThreadDetail: {
