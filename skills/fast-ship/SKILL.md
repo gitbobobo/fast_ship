@@ -8,7 +8,7 @@ description: 通过 Fast Ship REST API 完成 Issue 的创建、更新与查询�
 | 想做什么 | 实际调用 |
 |---|---|
 | 在 issue 上留言/发评论/写完成总结 | `PUT /api/issues/:iid/collab/summary`（API Key 发评论必 40301） |
-| 标记完成 | `PUT /api/issues/:iid/internal-meta` 置 `workflow_status=done`（不是 `state`） |
+| 收尾时标记完成 | `PUT /api/issues/:iid/internal-meta` 置 `workflow_status=done`（不是 `state`） |
 | 关闭 issue | 不可——仅 JWT，API Key 传 `state` 必 40301 |
 | 开始做了 | `PUT /api/issues/:iid/internal-meta` 置 `in_progress` |
 | 记录共识/决策 | `PUT /api/issues/:iid/collab/consensus` |
