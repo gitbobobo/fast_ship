@@ -961,3 +961,80 @@ func TestShellState_LegacyReconnectMemoLifecycle(t *testing.T) {
 	}
 	_ = connA
 }
+
+// 旧面写前快照不得封可信（审修 R8 P2，deterministic）：订阅连接「邮戳 <
+// 备忘世代」的快照是先于最近一次写后失效发出的变更前状态——落地只能
+// 换数据，archiveReady 保持 false、ArchiveErr 报「已失效重拉中」，备忘
+// 不清。修复前 applyArchiveSnapshotLocked 无条件置 Ready+清 Err 才判邮
+// 戳，从消费备忘到连接被拆开的窗口里 View/Peek 会拿写前归档集判
+// thread_gone、谎报列表完整。邮戳 ≥ 备忘世代的写后快照才恢复可信并清
+// 备忘。
+func TestShellState_LegacyPreChangeSnapshotStaysUntrusted(t *testing.T) {
+	state := newT3ShellState()
+
+	// conn1（邮戳=0）先落地一张权威快照就绪。
+	if err := state.applyArchiveItem(t3ArchiveStreamItem{
+		Kind:     "snapshot",
+		Snapshot: &t3ArchivedShellSnapshot{SchemaVersion: 1, SnapshotSequence: 1, Threads: shellTestThreads(shellTestThread("th-a", "归档"))},
+	}, state.archiveReconnectTarget()); err != nil {
+		t.Fatalf("apply initial snapshot: %v", err)
+	}
+
+	// 写后失效记备忘（gen1）→ conn1 被拆、conn2 重连（邮戳=1）。
+	state.noteArchiveReconnectRequested()
+	state.consumeArchiveReconnect()
+	conn2 := state.archiveReconnectTarget() // =1
+
+	// conn2 的权威快照落地前先记第二次失效（gen2）：conn2 之后送达的任
+	// 何快照都是「先于 gen2 发出」的写前状态。
+	if gen := state.noteArchiveReconnectRequested(); gen != 2 {
+		t.Fatalf("second reconnect request generation = %d, want 2", gen)
+	}
+
+	// 写前快照落地（邮戳1 < 备忘gen2）：换数据、保持不可信、备忘不清。
+	if err := state.applyArchiveItem(t3ArchiveStreamItem{
+		Kind:     "snapshot",
+		Snapshot: &t3ArchivedShellSnapshot{SchemaVersion: 1, SnapshotSequence: 9, Threads: shellTestThreads(shellTestThread("th-stale", "变更前"))},
+	}, conn2); err != nil {
+		t.Fatalf("apply pre-change snapshot: %v", err)
+	}
+	if state.archiveReady {
+		t.Fatalf("pre-change snapshot must NOT seal trust")
+	}
+	if state.archiveErr == nil {
+		t.Fatalf("pre-change snapshot must keep the stale error")
+	}
+	if !errors.Is(state.archiveErr, errT3ShellArchiveStale) {
+		t.Fatalf("pre-change snapshot must keep stale semantics, got %v", state.archiveErr)
+	}
+	if state.archiveReconnectPendingGen != 2 {
+		t.Fatalf("pre-change snapshot must NOT clear the newer memo, pending = %d", state.archiveReconnectPendingGen)
+	}
+	snaps := state.snapshots()
+	if len(snaps.Archived.Threads) != 1 || snaps.Archived.Threads[0].ID != "th-stale" {
+		t.Fatalf("pre-change snapshot must swap the rows, got %+v", snaps.Archived.Threads)
+	}
+	if snaps.ArchiveErr == nil {
+		t.Fatalf("view must report the archive face as untrusted")
+	}
+
+	// 兑现：conn3（邮戳=2）的写后快照落地——恢复可信、清备忘。
+	state.consumeArchiveReconnect()
+	conn3 := state.archiveReconnectTarget() // =2
+	if err := state.applyArchiveItem(t3ArchiveStreamItem{
+		Kind:     "snapshot",
+		Snapshot: &t3ArchivedShellSnapshot{SchemaVersion: 1, SnapshotSequence: 10, Threads: shellTestThreads(shellTestThread("th-a", "归档"), shellTestThread("th-b", "写后"))},
+	}, conn3); err != nil {
+		t.Fatalf("apply post-change snapshot: %v", err)
+	}
+	if !state.archiveReady {
+		t.Fatalf("post-change snapshot must restore trust")
+	}
+	if state.archiveReconnectPendingGen != 0 {
+		t.Fatalf("post-change snapshot must clear the memo, pending = %d", state.archiveReconnectPendingGen)
+	}
+	snaps = state.snapshots()
+	if snaps.ArchiveErr != nil {
+		t.Fatalf("post-change snapshot must clear the error, got %v", snaps.ArchiveErr)
+	}
+}

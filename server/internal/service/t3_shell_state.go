@@ -464,32 +464,50 @@ func (s *t3ShellState) applyArchiveItem(item t3ArchiveStreamItem, connectionStar
 
 // applyArchiveSnapshotLocked 是订阅模式下的快照整体替换（调用方须已持有
 // 锁）：与按需路径的 applyArchiveSnapshot 同体但不带失效世代/commit——常
-// 驻流的数据来自权威推送，没有「拉取途中被失效」的交错，可信化无条件
-// 成立。快照里的 Projects 一律忽略（F7）：项目表只有活跃面一份权威来
-// 源。
+// 驻流的数据来自权威推送，没有「拉取途中被失效」的交错，但其「可信化
+// 何时成立」由 reconnect 世代护栏裁决（见下），不是无条件成立。快照里
+// 的 Projects 一律忽略（F7）：项目表只有活跃面一份权威来源。
 //
-// reconnect 世代护栏（R4 P2）：connectionStart 是本连接的出发邮戳
-// （发 subscribe 之前读到的请求世代）——本快照必在该连接之后发出，故它
-// 一定晚于所有世代 ≤ 邮戳的请求。仅当邮戳不小于当前备忘世代时本快照
-// 才算「该请求之后的权威状态」、才清备忘；备忘更新（请求记在快照发出
-// 之后）时本快照是变更前状态，保留备忘——兑现交给读循环的信号分支：
-// 信号必随该请求送达本连接的读循环（chan 缓冲 1 且每连接只有一个读循
-// 环消费者，不会被快照吞掉），消费即断开本连接，下一条连接的 subscribe
-// 必在请求之后发出，其快照必为写后状态。
+// reconnect 世代护栏（R4 P2 + 审修 R8 P2）：connectionStart 是本连接的
+// 出发邮戳（发 subscribe 之前读到的请求世代）——本快照必在该连接之后
+// 发出，故它一定晚于所有世代 ≤ 邮戳的请求。
+//   - 邮戳 < 备忘世代：本快照先于最近一次写后失效发出，是变更前状态。
+//     只换数据、不恢复可信——若照常封 Ready+清 Err，从消费备忘到连接
+//     被拆开的窗口里，并发 View/Peek 会拿写前归档集判 thread_gone、谎报
+//     列表完整（审修 R8 P2）。面保持「已失效重拉中」，可信由兑现那条
+//     连接的写后快照恢复。数据照换：写前快照不比其他行更旧，留行优
+//     于清表。
+//   - 邮戳 ≥ 备忘世代（含备忘为零）：本快照确在最后一次失效请求之后发
+//     出，是写后权威状态——置可信、清备忘（撤销尚存的重建请求，避免
+//     晚到的信号再把刚恢复的面拆掉一次）。
+//
+// 被变更前快照挡下的备忘由读循环的信号分支兑现：信号必随该请求送达
+// 本连接的读循环（chan 缓冲 1 且每连接只有一个读循环消费者，不会被快
+// 照吞掉），消费即断开本连接，下一条连接的 subscribe 必在请求之后发
+// 出，其快照必为写后状态。
 func (s *t3ShellState) applyArchiveSnapshotLocked(snapshot t3ArchivedShellSnapshot, connectionStart int64) error {
 	if err := s.archivedThreads.reset(snapshot.Threads, func(t *t3ThreadShell) string { return t.ID }); err != nil {
 		return fmt.Errorf("归档快照线程缺少 ID: %w", err)
 	}
 	s.archivedSchemaVersion = snapshot.SchemaVersion
 	s.archivedSeq = snapshot.SnapshotSequence
+	if connectionStart < s.archiveReconnectPendingGen {
+		// 写前快照：数据照换但不封窗（审修 R8 P2）。与按需路径
+		// applyArchiveSnapshot 世代不符分支同型——面保持不可信，
+		// 「已失效重拉中」语义留到写后快照落地才解除。
+		s.archiveReady = false
+		s.archiveStale = true
+		if s.archiveErr == nil {
+			s.archiveErr = errT3ShellArchiveStale
+		}
+		return nil
+	}
+	// 邮戳 ≥ 备忘世代：权威全量快照即是重连取写后状态的完成——置可信
+	// 并撤销尚存的重建备忘，避免晚到的信号再把刚恢复的面拆掉一次。
 	s.archiveReady = true
 	s.archiveErr = nil
 	s.archiveStale = false
-	if connectionStart >= s.archiveReconnectPendingGen {
-		// 权威全量快照即是重连取写后状态的完成：撤销尚存的重建备忘，
-		// 避免晚到的信号再把刚恢复的面拆掉一次。
-		s.archiveReconnectPendingGen = 0
-	}
+	s.archiveReconnectPendingGen = 0
 	return nil
 }
 

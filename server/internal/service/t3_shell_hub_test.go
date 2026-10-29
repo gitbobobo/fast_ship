@@ -120,7 +120,13 @@ type fakeShellStreamServer struct {
 	// archiveDrop 持续掐断模式：受理 subscribeArchivedShell 后立即断开
 	// （激活证据照常入 archiveSubs），模拟上游拒收/立即掐流的持续失败——
 	// 退避递增测试用（审修 R6-C），不设快照帧，归档面再未收到数据。
-	archiveDrop  bool
+	archiveDrop bool
+	// archSubFail 非空时对 subscribeArchivedShell 回该 Exit Failure（受理证
+	// 据照常入 archiveSubs，连接句柄照常入 archiveConns——测试等它即知
+	// 失败已送达）——模拟「本该有订阅面的环境却没有该方法」（环境中途
+	// 升级/误判自愈用例，审修 R8 P2），或非方法级订阅失败（不误重置
+	// 用例）。
+	archSubFail  map[string]any
 	archiveSubs  chan fakeShellRequest // 收到的 subscribeArchivedShell 请求
 	archiveConns chan *fakeShellConn   // 旧面订阅连接
 	// archPaused 暂停归档快照应答（Finding A 交错测试用）：暂停发生在应答
@@ -235,6 +241,7 @@ func (s *fakeShellStreamServer) handler(conn *websocket.Conn) {
 			case "orchestration.subscribeArchivedShell":
 				s.mu.Lock()
 				legacy := s.archLegacy
+				subFail := s.archSubFail
 				s.mu.Unlock()
 				if !legacy {
 					// 新上游已删除该 RPC（#26238）：fake 默认报错，仍调用的客户
@@ -243,6 +250,21 @@ func (s *fakeShellStreamServer) handler(conn *websocket.Conn) {
 						"_tag":    "UnknownException",
 						"message": "method not found: orchestration.subscribeArchivedShell",
 					})
+					continue
+				}
+				if subFail != nil {
+					// 定制订阅失败：受理证据与连接句柄照常入通道（等连接即
+					// 知失败 Exit 已送达），应答按指定错误——模拟「环境却没
+					// 有该方法」或其他订阅级故障。
+					select {
+					case s.archiveSubs <- req:
+					default:
+					}
+					select {
+					case s.archiveConns <- fc:
+					default:
+					}
+					_ = sendExitFailureFrame(conn, req.ID, subFail)
 					continue
 				}
 				select {
@@ -420,6 +442,14 @@ func (s *fakeShellStreamServer) setArchiveLegacy(legacy bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.archLegacy = legacy
+}
+
+// setArchiveSubFail 定制旧面订阅的应答错误（nil 恢复正常受理）：方法
+// 不存在与非方法级失败都走同一 Exit Failure 通道，由错误文案区分。
+func (s *fakeShellStreamServer) setArchiveSubFail(err map[string]any) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.archSubFail = err
 }
 
 // setArchiveDrop 开关旧面订阅的掐断模式（退避递增测试用）。
@@ -3241,6 +3271,20 @@ func TestT3ShellHub_ArchiveSnapshotShapeValidated(t *testing.T) {
 	})
 	_ = view
 
+	// threads:null 同样被拒（审修 R8 P2）：json.RawMessage 对显式 null 得
+	// 到 4 字节 "null" 而非 nil——按「字段存在」放行会把归档表整体清成
+	// 空并封可信，谎报「归档列表确定为空且可信」。
+	hub.InvalidateArchive("user-1", "env-1")
+	srv.setArchiveFixture(json.RawMessage(`{"schemaVersion":1,"snapshotSequence":2,"projects":[],"threads":null}`), nil)
+	view = waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr != nil &&
+			strings.Contains(v.Snaps.ArchiveErr.Error(), "缺少 threads 判别字段") &&
+			len(v.Snaps.Archived.Threads) == 1
+	})
+	if view.Snaps.Archived.Threads[0].ID != "th-a" {
+		t.Fatalf("threads:null must not wipe archive rows, got %+v", view.Snaps.Archived.Threads)
+	}
+
 	// 合法空归档（threads:[] 字段存在）不是坏形状：照常落地并封可信、
 	// 归档表按权威快照置空——与「字段缺失的零值」区分开。
 	srv.setArchiveFixture(archiveSnapshotBody(3), nil)
@@ -3333,4 +3377,370 @@ func TestT3ShellHub_LegacyArchiveBackoffEscalates(t *testing.T) {
 		return v.Snaps != nil && v.Snaps.ArchiveErr == nil && len(v.Snaps.Archived.Threads) == 1
 	})
 	_ = view
+}
+
+// 旧面写前快照不得封可信（审修 R8 P2）：订阅连接「邮戳 < 备忘世代」的
+// 快照是先于最近一次写后失效发出的变更前状态——落地只能换数据，不得
+// 恢复可信。修复前 applyArchiveSnapshotLocked 无条件置 Ready+清 Err 才
+// 判邮戳，从消费备忘到连接被拆开的窗口里，并发 View/Peek 会拿写前归
+// 档集判 thread_gone、谎报列表完整。
+// 交错窗口（备忘已置位、写前快照尚未落地）在 wire 上只有纳秒级、无法
+// 从外部确定性注入；unit 版（t3_shell_state_test.go 的
+// TestShellState_LegacyPreChangeSnapshotStaysUntrusted）直接对 state 驱动
+// 同一 applyArchiveItem 路径钉死不变量。这里钉住端到端结局：连续失效
+// 后归档面始终经「拆旧连→新连写后快照」恢复可信，不谎报完整。
+func TestT3ShellHub_LegacyPreChangeSnapshotStaysUntrusted(t *testing.T) {
+	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
+	srv.setArchiveLegacy(true)
+	srv.setArchiveFixture(archiveSnapshotBody(1, "th-a"), nil)
+	hub := newT3ShellHubWithConfig(hubTestConfig(), nil)
+	defer hub.Close()
+	env := hubTestEnv(url, 0)
+
+	// 活跃面先就位；归档按需探测被判方法不存在 → 旧面订阅激活并就绪。
+	go hub.View(context.Background(), env, "tok")
+	collector := newShellConnCollector(t, srv)
+	active := collector.await(false)
+	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1")); err != nil {
+		t.Fatalf("send active snapshot: %v", err)
+	}
+	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
+		t.Fatalf("active snapshot not acked")
+	}
+	srv.awaitArchiveSub(t)
+	conn1 := <-srv.archiveConns
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil && len(v.Snaps.Archived.Threads) == 1
+	})
+
+	// 上游把归档集改成写后状态：之后受理的订阅应答都携带 th-b。
+	srv.setArchiveFixture(archiveSnapshotBody(2, "th-a", "th-b"), nil)
+
+	// 写后失效：conn1 被拆、conn2 重连。conn2 的订阅应答携带写后全量
+	// （fixture 已是 th-b），落地恢复可信——写前快照不会把这窗口谎报成
+	// 完整（恢复路径本身即「邮戳 ≥ 备忘世代才置可信」的证据）。
+	hub.InvalidateArchive("user-1", "env-1")
+	if !conn1.awaitClosed(3 * time.Second) {
+		t.Fatalf("first invalidation must end conn1")
+	}
+	srv.awaitArchiveSub(t)
+	<-srv.archiveConns
+	view := waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil && len(v.Snaps.Archived.Threads) == 2
+	})
+	ids := map[string]bool{}
+	for _, th := range view.Snaps.Archived.Threads {
+		ids[th.ID] = true
+	}
+	if !ids["th-a"] || !ids["th-b"] {
+		t.Fatalf("post-change snapshot must restore trust with write-behind rows, got %+v", view.Snaps.Archived.Threads)
+	}
+}
+
+// legacy mode 自愈（审修 R8 P2，end-to-end）：订阅连接因「方法不存在」
+// Exit 失败时 mode 回 Unknown——下一次读重探测按需快照（环境可能中途
+// 升级回新版/上次误判）。真旧环境重探测会再次判方法不存在、经
+// switchToArchiveLegacy 切回订阅面（多付一次探测拨号、不死锁）；环境
+// 确实升级了则按需路径恢复供数。订阅的其他失败（非方法级）不误重置。
+func TestT3ShellHub_LegacyMethodNotFoundResetsToUnknown(t *testing.T) {
+	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
+	srv.setArchiveLegacy(true)
+	srv.setArchiveFixture(archiveSnapshotBody(1, "th-a"), nil)
+	hub := newT3ShellHubWithConfig(hubTestConfig(), nil)
+	defer hub.Close()
+	env := hubTestEnv(url, 0)
+
+	// 旧面就绪。
+	go hub.View(context.Background(), env, "tok")
+	collector := newShellConnCollector(t, srv)
+	active := collector.await(false)
+	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1")); err != nil {
+		t.Fatalf("send active snapshot: %v", err)
+	}
+	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
+		t.Fatalf("active snapshot not acked")
+	}
+	srv.awaitArchiveSub(t)
+	conn1 := <-srv.archiveConns
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil && len(v.Snaps.Archived.Threads) == 1
+	})
+
+	// 订阅连接收到「方法不存在」的 Exit——本该有订阅面的环境反而没
+	// 有，是「环境中途升级/上次误判」的证据。archSubFail 定制该应答
+	// （archLegacy 保持 true，这里只钉住「方法不存在的订阅 Exit → mode
+	// 回 Unknown」这一步，不追踪升级后的完整路径——后者由
+	// LegacyHealsToSnapshotAfterUpgrade 用真升级 fake 覆盖）。
+	srv.setArchiveSubFail(map[string]any{
+		"_tag":    "UnknownException",
+		"message": "method not found: orchestration.subscribeArchivedShell",
+	})
+	conn1.closeConn()
+	if !conn1.awaitClosed(3 * time.Second) {
+		t.Fatalf("legacy conn must close for the reconnect")
+	}
+	// 等「发送了失败 Exit」的重连连接——它的落地触发 mode 重置。断言
+	// mode 真的回到 Unknown（自愈的证据）。
+	select {
+	case <-srv.archiveConns:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("no reconnecting conn carries the method-not-found exit")
+	}
+	key := t3ShellHubKey("user-1", "env-1")
+	hub.mu.Lock()
+	entry := hub.entries[key]
+	hub.mu.Unlock()
+	healed := false
+	for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); {
+		entry.arch.mu.Lock()
+		mode := entry.arch.mode
+		entry.arch.mu.Unlock()
+		if mode == t3ArchiveModeUnknown {
+			healed = true
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !healed {
+		t.Fatalf("method-not-found subscribe exit must reset mode to Unknown")
+	}
+}
+
+// legacy mode 自愈到按需面（审修 R8 P2，真升级）：环境「中途升级回新
+// 版」——getArchivedShellSnapshot 重新可用、subscribeArchivedShell 反而
+// 被判方法不存在。mode 回 Unknown 后重探测按需快照成功，归档面改由按
+// 需路径供数（不再发订阅），是本审修项要修的核心自愈场景。
+func TestT3ShellHub_LegacyHealsToSnapshotAfterUpgrade(t *testing.T) {
+	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
+	srv.setArchiveLegacy(true)
+	srv.setArchiveFixture(archiveSnapshotBody(1, "th-a"), nil)
+	hub := newT3ShellHubWithConfig(hubTestConfig(), nil)
+	defer hub.Close()
+	env := hubTestEnv(url, 0)
+
+	// 旧面就绪（按需方法不存在 → 切订阅面）。
+	go hub.View(context.Background(), env, "tok")
+	collector := newShellConnCollector(t, srv)
+	active := collector.await(false)
+	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1")); err != nil {
+		t.Fatalf("send active snapshot: %v", err)
+	}
+	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
+		t.Fatalf("active snapshot not acked")
+	}
+	srv.awaitArchiveSub(t)
+	conn1 := <-srv.archiveConns
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil && len(v.Snaps.Archived.Threads) == 1
+	})
+	probeCalls := srv.archiveCallCount()
+
+	// 环境升级：按需方法恢复可用、订阅方法消失。#26238 后的新上游删除
+	// 了 subscribeArchivedShell——fake 的 archLegacy=false 正好表达「新
+	// 上游」（按需应答正常、subscribe 按方法不存在拒绝），订阅 Exit
+	// method-not-found 触发 mode 回 Unknown 重探测。
+	srv.setArchiveLegacy(false)
+	conn1.closeConn()
+	if !conn1.awaitClosed(3 * time.Second) {
+		t.Fatalf("legacy conn must close for the reconnect")
+	}
+	// 新上游对 subscribe 回方法不存在（fake 内置应答）；等下一条重连
+	// 连接到达即知失败 Exit 已送达、mode 重置已发生。连接走默认
+	// method-not-found 分支，句柄不入 archiveConns——改用「按需快照被
+	// 重探测」作落地证据。
+	probed0 := false
+	for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); {
+		if _, err := hub.Peek(env, "tok"); err != nil {
+			t.Fatalf("peek: %v", err)
+		}
+		if srv.archiveCallCount() > probeCalls {
+			probed0 = true
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !probed0 {
+		t.Fatalf("upgraded env must reset mode and re-probe the on-demand snapshot")
+	}
+
+	// 自愈后按需路径接管：kick 重探测按需快照成功，归档面经按需供数恢
+	// 复可信；此后不再发订阅（按需面没有常驻订阅）。
+	probed := false
+	for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); {
+		if _, err := hub.Peek(env, "tok"); err != nil {
+			t.Fatalf("peek: %v", err)
+		}
+		if srv.archiveCallCount() > probeCalls {
+			probed = true
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !probed {
+		t.Fatalf("healed mode must re-probe the on-demand snapshot")
+	}
+	view := waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil && len(v.Snaps.Archived.Threads) == 1
+	})
+	if view.Snaps.Archived.Threads[0].ID != "th-a" {
+		t.Fatalf("upgraded env must serve the archive face via the on-demand snapshot, got %+v", view.Snaps.Archived.Threads)
+	}
+}
+
+// 订阅的非方法级失败不误重置 mode（审修 R8 P2 的窄条件）：旧面订阅以
+// 任意业务错误 Exit 时，「方法不存在」的窄条件不命中——mode 保持
+// legacy，监督循环按退避重连订阅，下一次读不得复活按需快照拨号。
+func TestT3ShellHub_LegacyNonMethodExitDoesNotReset(t *testing.T) {
+	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
+	srv.setArchiveLegacy(true)
+	srv.setArchiveFixture(archiveSnapshotBody(1, "th-a"), nil)
+	hub := newT3ShellHubWithConfig(hubTestConfig(), nil)
+	defer hub.Close()
+	env := hubTestEnv(url, 0)
+
+	go hub.View(context.Background(), env, "tok")
+	collector := newShellConnCollector(t, srv)
+	active := collector.await(false)
+	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1")); err != nil {
+		t.Fatalf("send active snapshot: %v", err)
+	}
+	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
+		t.Fatalf("active snapshot not acked")
+	}
+	srv.awaitArchiveSub(t)
+	conn1 := <-srv.archiveConns
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil && len(v.Snaps.Archived.Threads) == 1
+	})
+	probeCalls := srv.archiveCallCount()
+
+	// 订阅持续以非方法级错误失败：监督循环退避重连，归档面留不可读。
+	// mode 不得被重置——否则 kick 会复活按需拨号（按需方法在旧上游真
+	// 的不存在，每轮探测都再切回 legacy，纯空拨）。
+	srv.setArchiveSubFail(map[string]any{
+		"_tag":    "RuntimeError",
+		"message": "archive subscription exploded",
+	})
+	conn1.closeConn()
+	if !conn1.awaitClosed(3 * time.Second) {
+		t.Fatalf("legacy conn must close for the reconnect")
+	}
+	// 等「发送了失败 Exit」的重连连接：非方法级失败已落地，mode 应保
+	// 持 legacy（窄条件不命中）。
+	select {
+	case <-srv.archiveConns:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("no reconnecting conn carries the non-method exit")
+	}
+
+	// 连续读：归档面保持不可信，但按需快照零新调用（mode 未回 Unknown）。
+	for i := 0; i < 3; i++ {
+		if _, err := hub.Peek(env, "tok"); err != nil {
+			t.Fatalf("peek: %v", err)
+		}
+	}
+	time.Sleep(150 * time.Millisecond)
+	if got := srv.archiveCallCount(); got != probeCalls {
+		t.Fatalf("non-method subscribe failure must not re-probe the on-demand snapshot, calls %d → %d", probeCalls, got)
+	}
+	// 退避重连仍在走订阅路径（不是挂断空等）：窗口内应再受理订阅。
+	select {
+	case <-srv.archiveSubs:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("legacy subscribe must keep reconnecting after a non-method failure")
+	}
+}
+
+// 主动重连不计退避（审修 R8 P2，end-to-end）：写后失效触发的
+// consume-断开是「主动去拿写后状态」不是故障——连续批量归档时每轮重
+// 连立即收新快照，若按「syncedAt 刚刷新 → 视作不稳定」加深退避，退避
+// 会 1s→2s→4s→30s 涨上去，每轮 markArchiveFailed 清空归档行，归档线程
+// 消失数十秒。修复后 connResult.voluntary 区分两种断开：主动重连的
+// attempts 归 0、按 BackoffBase 立即重连；真正的故障断开（订阅被掐/读
+// 错误）照常加深。观察连续三次失效重连的间隔不超一次基准退避窗口，再
+// 用一次真故障确认退避仍会加深。
+func TestT3ShellHub_LegacyVoluntaryReconnectDoesNotBackoff(t *testing.T) {
+	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
+	srv.setArchiveLegacy(true)
+	srv.setArchiveFixture(archiveSnapshotBody(1, "th-a"), nil)
+	cfg := hubTestConfig()
+	// 真故障可区分性：退避加深必须能观测——上限放宽到 300ms，真故障的
+	// 第二轮间隔才会明显超过「立即重连」的阈值；主动重连恒 ~BackoffBase
+	// （20ms±jitter）。
+	cfg.BackoffMax = 300 * time.Millisecond
+	hub := newT3ShellHubWithConfig(cfg, nil)
+	defer hub.Close()
+	env := hubTestEnv(url, 0)
+
+	go hub.View(context.Background(), env, "tok")
+	collector := newShellConnCollector(t, srv)
+	active := collector.await(false)
+	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1")); err != nil {
+		t.Fatalf("send active snapshot: %v", err)
+	}
+	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
+		t.Fatalf("active snapshot not acked")
+	}
+	srv.awaitArchiveSub(t)
+	conn := <-srv.archiveConns
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil && len(v.Snaps.Archived.Threads) == 1
+	})
+
+	// 连续三次写后失效：每轮「备忘→断连→重连→新快照」应在一个小窗口
+	// 内完成。退避若按故障加深（20→40→80→160…），第三轮的间隔已明显超
+	// 出阈值——阈值 150ms > BackoffBase+jitter 上限（~25ms）+拨号/落
+	// 地开销，< 连续加深后的累计（第 N 轮已背 40/80ms 档）。
+	for round := 0; round < 3; round++ {
+		start := time.Now()
+		hub.InvalidateArchive("user-1", "env-1")
+		if !conn.awaitClosed(3 * time.Second) {
+			t.Fatalf("round %d: invalidation must end the legacy conn", round)
+		}
+		srv.awaitArchiveSub(t)
+		conn = <-srv.archiveConns
+		view := waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+			return v.Snaps != nil && v.Snaps.ArchiveErr == nil
+		})
+		_ = view
+		if elapsed := time.Since(start); elapsed > 150*time.Millisecond {
+			t.Fatalf("round %d: voluntary reconnect must not deepen the backoff (took %v)", round, elapsed)
+		}
+	}
+
+	// 真故障仍加深：掐断模式让订阅受理即断（无数据落地、非主动断开），
+	// 连续重连的间隔必须涨起来——「主动断开不计退避」不得把故障路径
+	// 的加深一并取消。
+	srv.setArchiveDrop(true)
+	conn.closeConn()
+	if !conn.awaitClosed(3 * time.Second) {
+		t.Fatalf("dropped legacy conn must close")
+	}
+	first := time.Now()
+	select {
+	case <-srv.archiveSubs:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("no archive reconnect after drop")
+	}
+	second := time.Now()
+	select {
+	case <-srv.archiveSubs:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("no second archive reconnect after drop")
+	}
+	third := time.Now()
+	select {
+	case <-srv.archiveSubs:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("no third archive reconnect after drop")
+	}
+	// 掐断的连接 voluntary=false 且 syncedAt 零值（无数据）→ attempts 递
+	// 增：受理间隔必须逐轮变长（20→40→80…±jitter）。只断言「后一间
+	// 隔 > 前一间隔」证明故障路径的加深没有被 voluntary 免退避带走。
+	gap12 := second.Sub(first)
+	gap23 := third.Sub(second)
+	if gap23 <= gap12 {
+		t.Fatalf("real failures must keep deepening the backoff, gap1=%v gap2=%v", gap12, gap23)
+	}
+	srv.setArchiveDrop(false)
 }

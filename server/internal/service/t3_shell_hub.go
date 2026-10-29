@@ -744,6 +744,10 @@ func (e *t3ShellEntry) waitView(ctx context.Context) (*t3ShellView, error) {
 type t3ShellConnResult struct {
 	credential bool      // 凭证被拒（探测 repair / Exit 鉴权失败）→ 长退避
 	syncedAt   time.Time // 本连接追平确认时刻；零值表示从未追平
+	// voluntary 表示本条连接是按备忘主动断开（兑现 reconnect 请求去拿写
+	// 后状态），不是故障——退避不加深、按 BackoffBase 立即重连（审修
+	// R8 P2）。
+	voluntary bool
 }
 
 // runFaceSubscription 单条订阅的监督循环（每条连接一个 goroutine）：

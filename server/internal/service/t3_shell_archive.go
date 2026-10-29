@@ -68,9 +68,11 @@ const (
 type t3ArchiveFetchState struct {
 	mu sync.Mutex
 	// mode 归档面通道判定：未知（默认走按需快照）/ 按需快照已确认 / 旧面
-	// 订阅。读按全局锁序 s.mu → arch.mu；写只在两种已定义场景发生——
+	// 订阅。读按全局锁序 s.mu → arch.mu；写只在三种已定义场景发生——
 	// admitArchiveRefresh 的准入临界区（s.mu→arch.mu 持有中翻 snapshot），
-	// 与 switchToArchiveLegacy 的同序临界区（翻 legacy + 撤可信不可分）。
+	// switchToArchiveLegacy 的同序临界区（翻 legacy + 撤可信不可分），与
+	// resetArchiveModeToUnknown 的同序临界区（订阅被判方法不存在 → 回
+	// Unknown 重探测，审修 R8 P2）。
 	// mode 不得在无 s.mu 的纯 arch.mu 临界区里改——会把「archiveReady
 	// 尚可信但 mode 已翻」的中间态放给视图读者。
 	mode t3ArchiveMode
@@ -196,14 +198,24 @@ func (e *t3ShellEntry) admitArchiveRefresh() (admitted bool, revoked bool) {
 // MethodNotFound/RpcMethodNotFound。**只在拿到这个明确信号时切订阅面**
 // ——任意的 RPC 失败（归档数据损坏、上游 5xx、鉴权错误）不等于「方法不
 // 存在」，切了反而掩盖真实故障；传输层不确定性（rpcUncertainError：请
-// 求未写出/响应未读回）也不切——那次调用根本没到过方法分派。切换是单
-// 向的（该环境不可能中途「有了」该方法）；记为 entry 的 mode，此后
-// kickArchiveRefresh 不再发按需拨号，归档由常驻订阅流喂。
+// 求未写出/响应未读回）也不切——那次调用根本没到过方法分派。切换按
+// 「环境不可能中途有该方法」记为 entry 的 mode，此后 kickArchiveRefresh
+// 不再发按需拨号，归档由常驻订阅流喂；环境原地升级/误判的对称自愈在
+// 订阅面（subscribe 被判方法不存在 → mode 回 Unknown 重探测，审修
+// R8 P2，见本文件末尾 resetArchiveModeToUnknown）。
 //
 // 失败只记 ArchiveErr（noteArchiveFetchFailed），不动已有快照——归档面
 // 没有增量通道，失败时保留旧快照比「清空并谎报归档列表为空」更不坏；
 // 归档读取失败与「未就绪」共用 ArchiveErr 通道，调用方据此决定能否把
 // 「归档面没有」当结论。
+//
+// legacy 判定不是钉死的（审修 R8 P2）：切换凭据是「按需方法不存在」的
+// 明确信号，但环境可能中途升级回新版（地址与凭证不变、entry 不重建），
+// 或一次误判（代理转发层返回的 unknown method 文案并非方法分派的结
+// 果）。对称的自愈路径在订阅面：subscribeArchivedShell 被判「方法不存
+// 在」（本该有订阅面的环境反而没有，正是升级/误判的证据）时 mode 重
+// 置回 Unknown，下一次 kick 重新探测按需快照——真旧环境的订阅故障
+// 文案不命中该窄条件，不会在按需面上反复空拨。
 //
 // 后台路径（kickArchiveRefresh）的拉取跑在 hub 生命周期 ctx 上、不感知
 // 单个请求 ctx：按需拉取服务的是「面」，发起它的请求取消不该中断在途
@@ -276,18 +288,21 @@ func (e *t3ShellEntry) ensureArchive(ctx context.Context) error {
 		}
 		return e.noteArchiveFetchFailed(err, generation)
 	}
-	// 应答形状校验（审修 B）：归档 RPC 是宽松解码——Exit Success 的 value
-	// 为 null、应答多包一层（{snapshot:{...}}）、字段改名都零错误解成
-	// 零值快照，直接应用会把归档表整体重置为空并封可信：谎报「归档列
-	// 表确定为空且可信」，与「失败不清表、不谎报完整」相反；且 RPC 是
-	// 成功应答，不触发旧面回退。判别字段用 threads「存在（含空数组）」
+	// 应答形状校验（审修 B + R8 P2）：归档 RPC 是宽松解码——Exit Success
+	// 的 value 为 null、应答多包一层（{snapshot:{...}}）、字段改名都零错误
+	// 解成零值快照，直接应用会把归档表整体重置为空并封可信：谎报「归
+	// 档列表确定为空且可信」，与「失败不清表、不谎报完整」相反；且 RPC
+	// 是成功应答，不触发旧面回退。判别字段用 threads「存在（含空数组）」
 	// vs「缺失/null」区分——上游快照恒带该字段（threads:[] 也是合法完
-	// 整应答，len>0 会把合法空归档误拒）。形状不符按本次读取失败记账
-	// （ArchiveErr 真实原因 + 冷却），不清表、不封窗。
+	// 整应答，len>0 会把合法空归档误拒）。注意 null 也不得放行：解进
+	// RawMessage 的 "threads":null 是 4 字节 "null" 而非 nil（审修 R8 P2），
+	// 往下游解是零值切片、reset 照成空表——与字段缺失同样是坏形状。
+	// 形状不符按本次读取失败记账（ArchiveErr 真实原因 + 冷却），不清表、
+	// 不封窗。
 	var shape struct {
 		Threads json.RawMessage `json:"threads"`
 	}
-	if err := json.Unmarshal(value, &shape); err != nil || shape.Threads == nil {
+	if err := json.Unmarshal(value, &shape); err != nil || shape.Threads == nil || string(shape.Threads) == "null" {
 		if err == nil {
 			err = fmt.Errorf("归档快照应答缺少 threads 判别字段")
 		} else {
@@ -360,6 +375,43 @@ func (e *t3ShellEntry) switchToArchiveLegacy() {
 	// wg.Add，这里只负责放行，不再需要 go/Add。
 	if e.arch.legacyStarted.CompareAndSwap(false, true) {
 		close(e.legacyCh)
+	}
+}
+
+// resetArchiveModeToUnknown 把 legacy mode 重置回 Unknown（审修 R8 P2）：
+// 常驻订阅以「方法不存在」的明确 Exit 失败时，本该有订阅面的环境反而
+// 没有——这是「环境中途升级回新版（getArchivedShellSnapshot 已可用，地
+// 址与凭证不变、entry 不重建）或上次误判（代理层返回的 unknown method
+// 文案不是方法分派结果）」的证据。回 Unknown 后下一次 kick 按准入流程
+// 重探测按需快照：环境确实已升级则按需路径恢复供数；是真旧环境则探
+// 测会再次判方法不存在、经 switchToArchiveLegacy 切回订阅面，只多付一
+// 次探测拨号。只在确认方法不存在时才回退判定——订阅的其他失败（断
+// 线、业务拒绝）不重置，否则真旧环境的普通故障会让按需面每轮空拨。
+//
+// 订阅监督循环不受影响：它不判 mode，继续按退避重连——重置后的按需
+// 探测与订阅重连并行，任一路径恢复供数都成立。锁序与
+// switchToArchiveLegacy 同一临界区（s.mu → arch.mu）：mode 翻回与簿记
+// 清理对准入判定不可分——「mode 已是 Unknown 而 retryAfter 仍封住
+// kick」的中间态不会放给读者。
+func (e *t3ShellEntry) resetArchiveModeToUnknown() {
+	e.state.mu.Lock()
+	e.arch.mu.Lock()
+	// 幂等：只有订阅模式才有得回退。mode 若已被其他路径改离 legacy（理论
+	// 上不存在第二条写法），不覆盖它。
+	reset := false
+	if e.arch.mode == t3ArchiveModeLegacy {
+		e.arch.mode = t3ArchiveModeUnknown
+		// 清按需簿记：让下一次 kick 立刻准入发探测，不等失败冷却。
+		e.arch.validUntil = time.Time{}
+		e.arch.retryAfter = time.Time{}
+		e.arch.needsRefetch = false
+		reset = true
+	}
+	e.arch.mu.Unlock()
+	e.state.mu.Unlock()
+	if reset {
+		e.hub.logger.Info("t3 归档订阅被判方法不存在，mode 回 Unknown 重探测按需快照",
+			zap.String("environment_id", e.envID))
 	}
 }
 
@@ -536,7 +588,14 @@ func (h *t3ShellHub) runArchiveLegacySubscription(e *t3ShellEntry) {
 			return
 		default:
 		}
-		if !result.syncedAt.IsZero() && time.Since(result.syncedAt) > h.cfg.StableResetAfter {
+		if result.voluntary {
+			// 主动断开（consume 重建备忘）：断开的目的是拿写后状态，不是
+			// 故障——attempts 不加深（审修 R8 P2：连续批量归档的写后失效
+			// 重连若按故障加深，退避会涨到上限，归档面消失数十秒）。按
+			// BackoffBase 立即重连；连上后未能兑现（新方法不存在/中途故
+			// 障）的下一轮结果不再带 voluntary，退避照常加深。
+			attempts = 0
+		} else if !result.syncedAt.IsZero() && time.Since(result.syncedAt) > h.cfg.StableResetAfter {
 			attempts = 0
 		} else {
 			attempts++
@@ -696,6 +755,14 @@ func (h *t3ShellHub) readArchiveLegacyLoop(e *t3ShellEntry, session *t3RPCSessio
 				if _, err := frame.exitValue(); err != nil {
 					credential = errors.Is(err, errT3CredentialRejected)
 					h.endFaceConnection(e, true, err)
+					// 方法不存在的 Exit 是「环境中途升级/上次误判」的证据：本
+					// 该有订阅面的环境反而没有，说明按需快照路径可能已可用。
+					// mode 回 Unknown 交给下一次 kick 重探测（审修 R8 P2）——真
+					// 旧环境的其他订阅失败文案不命中窄条件，不会误复活按需
+					// 拨号。
+					if isArchiveSnapshotMethodMissing(err) {
+						e.resetArchiveModeToUnknown()
+					}
 				} else {
 					h.endFaceConnection(e, true, fmt.Errorf("归档订阅流提前结束"))
 				}
@@ -715,7 +782,9 @@ func (h *t3ShellHub) readArchiveLegacyLoop(e *t3ShellEntry, session *t3RPCSessio
 				continue
 			}
 			h.endFaceConnection(e, true, errArchiveReconnectRequested)
-			return t3ShellConnResult{syncedAt: dataSeenAt}
+			// voluntary=true：主动断开是兑现写后拉取、不是故障——退避
+			// 不加深（审修 R8 P2）。
+			return t3ShellConnResult{syncedAt: dataSeenAt, voluntary: true}
 		case <-pingTicker.C:
 			if time.Since(lastFrame) > h.cfg.PingInterval {
 				if err := session.sendRaw(connCtx, map[string]any{"_tag": "Ping"}); err != nil {
