@@ -1766,7 +1766,8 @@ func TestReviewCommentWakeForkDenyCache(t *testing.T) {
 		RepoFullName: repo, Number: 52, State: "open", HeadSHA: "sha-fork2",
 		AuthorLogin: "fork-author",
 	})
-	e.review.forkDeny.Store(repo+"#52", time.Now().UTC().Add(-time.Minute))
+	e.review.forkDeny.Store(fmt.Sprintf("%s/%s#52", model.ForgeIntegrationBuiltinGitHubID, repo),
+		time.Now().UTC().Add(-time.Minute))
 	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-fc-3",
 		commentBodyWithUsers("@fast-ship-bot 请再审", repo, 52, 42, "NONE", "fork-author", "fork-author")); err != nil {
 		t.Fatalf("缓存过期后同仓点名应唤醒: %v", err)

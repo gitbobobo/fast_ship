@@ -215,8 +215,8 @@ const reviewForkDenyMax = 10000
 // 实拉才在事务内被 fork 守卫拒绝——公开仓库上可无限放大 App API 成本
 // （fast-ship-bot 第 26 轮 P2）。命中过 fork 判定的 (repo, PR) 短时缓存，
 // 重复点名边际成本降为零。
-func (s *ReviewService) commentWakeForkDeny(repo string, prNumber int, now time.Time) bool {
-	key := fmt.Sprintf("%s#%d", repo, prNumber)
+func (s *ReviewService) commentWakeForkDeny(integrationID, repo string, prNumber int, now time.Time) bool {
+	key := fmt.Sprintf("%s/%s#%d", integrationID, repo, prNumber)
 	v, ok := s.forkDeny.Load(key)
 	if !ok {
 		return false
@@ -224,8 +224,8 @@ func (s *ReviewService) commentWakeForkDeny(repo string, prNumber int, now time.
 	return now.Before(v.(time.Time))
 }
 
-func (s *ReviewService) rememberCommentWakeForkDeny(repo string, prNumber int, now time.Time) {
-	key := fmt.Sprintf("%s#%d", repo, prNumber)
+func (s *ReviewService) rememberCommentWakeForkDeny(integrationID, repo string, prNumber int, now time.Time) {
+	key := fmt.Sprintf("%s/%s#%d", integrationID, repo, prNumber)
 	// 上限保护：先清过期；仍超上限就整体清空（正确性不受影响，攻击者
 	// 用海量 fork PR 填缓存没有边际收益）。
 	if s.forkDenySize() >= reviewForkDenyMax {
@@ -350,7 +350,9 @@ func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, ev
 		return nil
 	}
 	// fork 否定缓存命中：零 API 成本忽略（该 PR 已知是跨仓 fork）。
-	if s.commentWakeForkDeny(repo, prNumber, time.Now().UTC()) {
+	// 缓存键含集成身份：不同集成可有同名仓库 + 同号 PR（完全不同的仓库），
+	// 一处的 fork 否定不得错杀另一集成（codex 第 27 轮 P2）。
+	if s.commentWakeForkDeny(integrationID, repo, prNumber, time.Now().UTC()) {
 		return nil
 	}
 	installationID := payload.Installation.ID
@@ -478,7 +480,7 @@ func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, ev
 			// 判丢弃已随事务落幂等账；否定缓存是事务外副作用（判定来自
 			// 实拉快照，与事务成败无关）——后续同 (repo, PR) 点名零 API
 			// 成本拒绝（fast-ship-bot 第 26 轮 P2）。
-			s.rememberCommentWakeForkDeny(repo, prNumber, time.Now().UTC())
+			s.rememberCommentWakeForkDeny(integrationID, repo, prNumber, time.Now().UTC())
 			return nil
 		}
 		if errors.Is(err, errCommentWakeObservedHeadMoved) {
