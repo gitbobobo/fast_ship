@@ -343,7 +343,9 @@ func (s *t3ShellState) applyActiveItemTracked(item t3ShellStreamItem) (removed [
 			}
 		}
 		s.advanceActiveCursorLocked(*item.Sequence)
-		return nil, armedRegistered, nil
+		// 必须把 removed 交回 hub（#156 R11）：否则 armed 登记了却没人调度到期
+		// 清理、也不发事件，归档面会停在一个既无定时器也无通知的 stale 上。
+		return removed, armedRegistered, nil
 	case "thread.removed":
 		if item.Sequence == nil || item.ThreadID == "" {
 			return nil, false, fmt.Errorf("thread.removed 帧缺少 sequence/threadId")

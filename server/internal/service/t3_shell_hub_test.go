@@ -5331,3 +5331,49 @@ func TestT3ShellHub_LegacyNoiseRemovalDoesNotDegrade(t *testing.T) {
 		}
 	}
 }
+
+// 活跃流以 location!="active" 的 thread.updated 传递归档迁移时，同样要按 ID
+// 记账并有到期清理（#156 R11）：armed 路径登记后若 hub 拿不到 ID，就不会调度
+// 定时器也不发事件，归档面会停在无定时器、无通知的 stale 上。
+func TestT3ShellHub_LegacyArchiveLocatedUpdateRecovers(t *testing.T) {
+	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
+	srv.setArchiveLegacy(true)
+	srv.setArchiveFixture(archiveSnapshotBody(1, "th-a"), nil)
+	cfg := hubTestConfig()
+	cfg.ArchiveStaleGrace = 120 * time.Millisecond
+	hub := newT3ShellHubWithConfig(cfg, nil)
+	defer hub.Close()
+	env := hubTestEnv(url, 0)
+
+	go hub.View(context.Background(), env, "tok")
+	collector := newShellConnCollector(t, srv)
+	active := collector.await(false)
+	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1")); err != nil {
+		t.Fatalf("send active snapshot: %v", err)
+	}
+	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
+		t.Fatalf("active snapshot not acked")
+	}
+	srv.awaitArchiveSub(t)
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil
+	})
+
+	archived, _ := json.Marshal(map[string]any{
+		"kind": "thread.updated", "sequence": 43, "location": "archive",
+		"thread": map[string]any{"id": "th-1", "projectId": "p-1", "title": "th-1", "status": "idle", "archivedAt": "2026-10-01T00:00:00.000Z"},
+	})
+	if err := active.conn.sendValue(active.sub.ID, archived); err != nil {
+		t.Fatalf("send archive-located update: %v", err)
+	}
+	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
+		t.Fatalf("archive-located update not acked")
+	}
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && errors.Is(v.Snaps.ArchiveErr, errT3ShellArchiveStale)
+	})
+	// 到期必须自愈（有定时器），不需要归档增量。
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil
+	})
+}
