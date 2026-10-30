@@ -76,12 +76,13 @@ type commentWakePayload struct {
 // 完全由 payload 决定，不登记幂等账：忽略类投递重投再忽略一遍，零副作用。
 // 启用项目反查在最终事务内做（见 handleCommentWake 阶段二），这里不预查。
 // restrictAuthor（GitHub 入口为 true）时再判评论者身份：只接受 PR 作者
-// （AUTHOR）与仓库内部人员（OWNER/MEMBER/COLLABORATOR/CONTRIBUTOR）——
-// 公开仓库上无 push 权限的陌生人只能开 fork PR（被触发面拒绝），原本
-// 无法触发审查；身份过滤外的「每轮结束后继续点名」会把无限烧额度通道
-// 开放给无缘者（codex 第 9 轮 P2）。实现者回帖纠正的主场景是 PR 作者
-// 本人（AUTHOR），不受影响；Forgejo payload 无该字段，跳过（自托管
-// 实例访问已由集成凭证限界）。
+// （AUTHOR）与仓库当前授权人员（OWNER/MEMBER/COLLABORATOR）。CONTRIBUTOR
+// 是「历史提交过」而非当前权限（GitHub 官方定义），历史贡献者可永久保留
+// 点名权，不收——公开仓库上无 push 权限的陌生人只能开 fork PR（被触发面
+// 拒绝），原本无法触发审查；身份过滤外的「每轮结束后继续点名」会把无限
+// 烧额度通道开放给无缘者或失去当前授权的历史贡献者（codex 第 9/10 轮
+// P2）。实现者回帖纠正的主场景是 PR 作者本人（AUTHOR），不受影响；
+// Forgejo payload 无该字段，跳过（自托管实例访问已由集成凭证限界）。
 func commentWakePayloadGuards(body []byte, restrictAuthor bool) *commentWakePayload {
 	var p commentWakePayload
 	if err := json.Unmarshal(body, &p); err != nil {
@@ -95,13 +96,16 @@ func commentWakePayloadGuards(body []byte, restrictAuthor bool) *commentWakePayl
 	if !strings.Contains(strings.ToLower(p.Comment.Body), reviewCommentWakeMention) {
 		return nil
 	}
-	// 评论者身份（GitHub 入口）：PR 作者与仓库内部人员可点名，无缘者
+	// 评论者身份（GitHub 入口）：PR 作者（AUTHOR，实现者回帖纠正的主场
+	// 景）与仓库当前授权人员（OWNER/MEMBER/COLLABORATOR——三者由 GitHub
+	// 按当前状态计算）可点名；CONTRIBUTOR 是「历史提交过」而非当前权限
+	// （GitHub 官方定义），历史贡献者可永久保留点名权，不收；无缘者
 	// （NONE/未知）忽略——公开仓库陌生人原本触发不了任何审查（fork PR
 	// 被拒、无 push 权限开不了同仓分支），放行等于把无限烧额度通道交给
-	// 匿名者。
+	// 匿名者或失去当前授权的历史贡献者。
 	if restrictAuthor {
 		switch p.Comment.Association {
-		case "OWNER", "MEMBER", "COLLABORATOR", "CONTRIBUTOR", "AUTHOR":
+		case "OWNER", "MEMBER", "COLLABORATOR", "AUTHOR":
 		default:
 			return nil
 		}

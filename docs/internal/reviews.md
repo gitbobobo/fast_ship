@@ -199,8 +199,9 @@ payload 两平台同形，只取最小字段面：`action`（只受理 `created`
 不唤醒）、`issue.pull_request`（存在即 PR，普通 Issue 的评论忽略）、
 `issue.number`、`comment.body`、`repository.full_name`、`installation.id`、
 `comment.author_association`。纯 payload 守卫（不碰库、不发网络）依次：
-action → mention → 评论者身份（仅 GitHub：PR 作者 AUTHOR 与仓库内部人员
-OWNER/MEMBER/COLLABORATOR/CONTRIBUTOR 可点名——公开仓库上无 push 权限的
+action → mention → 评论者身份（仅 GitHub：PR 作者 AUTHOR 与仓库当前授权
+人员 OWNER/MEMBER/COLLABORATOR 可点名；CONTRIBUTOR 是「历史提交过」而非
+当前权限，不收——公开仓库上无 push 权限的
 陌生人只能开 fork PR（被触发面拒绝），原本触发不了任何审查，身份过滤
 堵住「每轮结束后继续点名」的无限烧额度通道；实现者回帖纠正的主场景是
 PR 作者本人，不受影响；Forgejo payload 无该字段，跳过，自托管实例访问
