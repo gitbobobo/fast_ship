@@ -295,7 +295,7 @@ func redeliveryCommentPayload(repo string, number int) json.RawMessage {
 			"number":       number,
 			"pull_request": map[string]any{"url": "https://github.com/" + repo + "/pulls/" + fmt.Sprint(number)},
 		},
-		"comment":      map[string]any{"body": "@fast-ship-bot 请再审一轮"},
+		"comment":      map[string]any{"body": "@fast-ship-bot 请再审一轮", "author_association": "COLLABORATOR"},
 		"repository":   map[string]any{"full_name": repo},
 		"installation": map[string]any{"id": 1},
 	})
@@ -314,7 +314,7 @@ func redeliveryPlainCommentPayload(repo string, number int) json.RawMessage {
 			"number":       number,
 			"pull_request": map[string]any{"url": "https://github.com/" + repo + "/pulls/" + fmt.Sprint(number)},
 		},
-		"comment":      map[string]any{"body": "普通讨论，不需要审查"},
+		"comment":      map[string]any{"body": "普通讨论，不需要审查", "author_association": "NONE"},
 		"repository":   map[string]any{"full_name": repo},
 		"installation": map[string]any{"id": 1},
 	})

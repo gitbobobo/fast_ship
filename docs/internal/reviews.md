@@ -197,13 +197,16 @@ PR 顶层评论正文包含 `@fast-ship-bot`（大小写不敏感的包含判定
 
 payload 两平台同形，只取最小字段面：`action`（只受理 `created`，编辑/删除
 不唤醒）、`issue.pull_request`（存在即 PR，普通 Issue 的评论忽略）、
-`issue.number`、`comment.body`、`repository.full_name`、`installation.id`。
-纯 payload 守卫（不碰库、不发网络）依次：action → mention → PR 归属；任一
-不过静默忽略，**不登记幂等账**——忽略判定完全由 payload 决定，重投再忽略
-一遍零副作用。**不做评论作者权限检查**：能开 PR 的人（公开仓库任何人、
-私有仓库有读权限的协作者——GitHub 上开 PR 只需 read 访问）本来就能通过
-opened/ready_for_review 触发面开启审查，评论唤醒不引入新的暴露类别
-（INT-179 拍板的设计决策）。配合「同 head 已有在途审查不重开」守卫，
+`issue.number`、`comment.body`、`repository.full_name`、`installation.id`、
+`comment.author_association`。纯 payload 守卫（不碰库、不发网络）依次：
+action → mention → 评论者身份（仅 GitHub：PR 作者 AUTHOR 与仓库内部人员
+OWNER/MEMBER/COLLABORATOR/CONTRIBUTOR 可点名——公开仓库上无 push 权限的
+陌生人只能开 fork PR（被触发面拒绝），原本触发不了任何审查，身份过滤
+堵住「每轮结束后继续点名」的无限烧额度通道；实现者回帖纠正的主场景是
+PR 作者本人，不受影响；Forgejo payload 无该字段，跳过，自托管实例访问
+已由集成凭证限界）→ PR 归属；任一不过静默忽略，**不登记幂等账**——忽略
+判定完全由 payload 决定，重投再忽略一遍零副作用。配合「同 head 已有
+在途审查不重开」守卫，
 连续点名也无法作废在途轮饿死审查。
 
 编排沿用「事务内零网络调用」铁律，两阶段（模式同 `revalidateTiedWebhook`）：

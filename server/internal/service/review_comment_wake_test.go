@@ -35,7 +35,7 @@ func issueCommentBody(body, repo string, number int, installationID int64, opts 
 	payload := map[string]any{
 		"action":     "created",
 		"issue":      issue,
-		"comment":    map[string]any{"body": body},
+		"comment":    map[string]any{"body": body, "author_association": "COLLABORATOR"},
 		"repository": map[string]any{"full_name": repo},
 	}
 	if installationID >= 0 {
@@ -63,6 +63,15 @@ func setCommentAction(action string) func(map[string]any) {
 func setCommentUserType(userType string) func(map[string]any) {
 	return func(payload map[string]any) {
 		payload["comment"].(map[string]any)["user"] = map[string]any{"type": userType, "login": "fast-ship-bot"}
+	}
+}
+
+// setCommentAssociation 覆盖评论者与仓库/Issue 的关系（GitHub 入口的身份
+// 过滤：NONE/未知无缘者忽略，AUTHOR/OWNER/MEMBER/COLLABORATOR/CONTRIBUTOR
+// 可点名）。
+func setCommentAssociation(association string) func(map[string]any) {
+	return func(payload map[string]any) {
+		payload["comment"].(map[string]any)["author_association"] = association
 	}
 }
 
@@ -378,6 +387,9 @@ func TestReviewCommentWakeGuards(t *testing.T) {
 		// 同口径），marker 开头的整条评论不唤醒。
 		issueCommentBody("<!-- fast-ship-code-review -->\n结论 含 @fast-ship-bot", repo, 25, 42),
 		issueCommentBody("<!-- codex-pull-request-review-summary -->\n含 @fast-ship-bot", repo, 25, 42),
+		// 无缘者（author_association NONE）：公开仓库陌生人原本触发不了
+		// 任何审查（fork PR 被拒、无 push 权限），不能获得无限烧额度通道。
+		issueCommentBody("@fast-ship-bot 看看", repo, 25, 42, setCommentAssociation("NONE")),
 	} {
 		if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", fmt.Sprintf("d-g%d", i), body); err != nil {
 			t.Fatalf("guard %d: %v", i, err)
@@ -402,7 +414,7 @@ func TestReviewCommentWakeGuards(t *testing.T) {
 		t.Fatalf("complete: %v", err)
 	}
 	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-g-quote",
-		issueCommentBody("引用机器人结论片段 <!-- fast-ship-code-review --> 后 @fast-ship-bot 请再审", repo, 25, 42)); err != nil {
+		issueCommentBody("引用机器人结论片段 <!-- fast-ship-code-review --> 后 @fast-ship-bot 请再审", repo, 25, 42, setCommentAssociation("AUTHOR"))); err != nil {
 		t.Fatalf("quote marker: %v", err)
 	}
 	var run model.ReviewRun

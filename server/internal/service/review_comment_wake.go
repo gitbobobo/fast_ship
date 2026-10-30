@@ -57,6 +57,10 @@ type commentWakePayload struct {
 		User struct {
 			Type string `json:"type"`
 		} `json:"user"`
+		// AuthorAssociation GitHub 评论者与仓库/Issue 的关系（OWNER/MEMBER/
+		// COLLABORATOR/CONTRIBUTOR/AUTHOR/NONE）：GitHub 入口按它过滤无缘
+		// 陌生人（见 commentWakePayloadGuards）。
+		Association string `json:"author_association"`
 	} `json:"comment"`
 	Repository struct {
 		FullName string `json:"full_name"`
@@ -68,15 +72,17 @@ type commentWakePayload struct {
 
 // commentWakePayloadGuards 纯 payload 守卫（不碰库、不发网络）：依次判
 // action（只受理 created）、mention（大小写不敏感包含）、PR 归属
-// （issue.pull_request 存在 + 仓库/编号可用）。任一不过返回 nil——忽略判定
+// （issue.pull_request 存在 + 仓库/编号可用），任一不过返回 nil——忽略判定
 // 完全由 payload 决定，不登记幂等账：忽略类投递重投再忽略一遍，零副作用。
 // 启用项目反查在最终事务内做（见 handleCommentWake 阶段二），这里不预查。
-// 不做评论作者权限检查：能开 PR 的人（公开仓库任何人；私有仓库有读权
-// 限的协作者——GitHub 上开 PR 只需 read 访问）本来就能通过
-// opened/ready_for_review 触发面开启审查，评论唤醒不引入新的暴露类别
-// （INT-179 拍板的设计决策）；配合「同 head 已有在途审查不重开」守卫，
-// 连续点名也无法作废在途轮饿死审查。
-func commentWakePayloadGuards(body []byte) *commentWakePayload {
+// restrictAuthor（GitHub 入口为 true）时再判评论者身份：只接受 PR 作者
+// （AUTHOR）与仓库内部人员（OWNER/MEMBER/COLLABORATOR/CONTRIBUTOR）——
+// 公开仓库上无 push 权限的陌生人只能开 fork PR（被触发面拒绝），原本
+// 无法触发审查；身份过滤外的「每轮结束后继续点名」会把无限烧额度通道
+// 开放给无缘者（codex 第 9 轮 P2）。实现者回帖纠正的主场景是 PR 作者
+// 本人（AUTHOR），不受影响；Forgejo payload 无该字段，跳过（自托管
+// 实例访问已由集成凭证限界）。
+func commentWakePayloadGuards(body []byte, restrictAuthor bool) *commentWakePayload {
 	var p commentWakePayload
 	if err := json.Unmarshal(body, &p); err != nil {
 		return nil
@@ -88,6 +94,17 @@ func commentWakePayloadGuards(body []byte) *commentWakePayload {
 	// 正文未点名机器人：不是给审查者的指令。
 	if !strings.Contains(strings.ToLower(p.Comment.Body), reviewCommentWakeMention) {
 		return nil
+	}
+	// 评论者身份（GitHub 入口）：PR 作者与仓库内部人员可点名，无缘者
+	// （NONE/未知）忽略——公开仓库陌生人原本触发不了任何审查（fork PR
+	// 被拒、无 push 权限开不了同仓分支），放行等于把无限烧额度通道交给
+	// 匿名者。
+	if restrictAuthor {
+		switch p.Comment.Association {
+		case "OWNER", "MEMBER", "COLLABORATOR", "CONTRIBUTOR", "AUTHOR":
+		default:
+			return nil
+		}
 	}
 	// 机器自评论不唤醒：审查结论与复审总结的正文由模型生成，可能引用
 	// 用户评论里的 @fast-ship-bot——不排除会形成「发布结论 → 再唤醒」
@@ -183,8 +200,9 @@ func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, ev
 		return ErrDeliveryDuplicated
 	}
 
-	// 纯 payload 守卫：非 created/无 mention/非 PR/畸形投递静默忽略（不登记）。
-	payload := commentWakePayloadGuards(body)
+	// 纯 payload 守卫：非 created/无 mention/非 PR/畸形投递/无资格作者
+	// （GitHub 入口）静默忽略（不登记）。
+	payload := commentWakePayloadGuards(body, integrationID == model.ForgeIntegrationBuiltinGitHubID)
 	if payload == nil {
 		return nil
 	}
