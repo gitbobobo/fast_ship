@@ -646,9 +646,14 @@ func (s *t3ShellState) applyArchiveItemAt(item t3ArchiveStreamItem, connectionSt
 // 照吞掉），消费即断开本连接，下一条连接的 subscribe 必在请求之后发
 // 出，其快照必为写后状态。
 func (s *t3ShellState) applyArchiveSnapshotLocked(snapshot t3ArchivedShellSnapshot, connectionStart int64, observedAt time.Time) error {
-	// 变更前采集的快照整条丢弃（#156 R28/R39）：不覆盖行、不动可信度，也不
-	// 请求重连（#156 R38）。
+	// 变更前采集的快照整条丢弃（#156 R28/R39）：不覆盖行、不动可信度。
 	if !observedAt.IsZero() && observedAt.Before(s.archiveFreshnessFloor) {
+		// 但若这条快照是**仅有的一次机会**（面还没就绪、之后不会再推），就必须
+		// 请求重连取新全量（#156 R40）；面已就绪时保持安静，避免批量归档期间
+		// 的重连风暴（#156 R38）。
+		if !s.archiveReady {
+			s.noteArchiveReconnectRequestedLocked()
+		}
 		return nil
 	}
 	if err := s.archivedThreads.reset(snapshot.Threads, func(t *t3ThreadShell) string { return t.ID }); err != nil {

@@ -2030,3 +2030,23 @@ func TestShellState_StreamPrestaleSnapshotDoesNotReconnect(t *testing.T) {
 		t.Fatalf("prestale snapshot must not force a reconnect, got gen=%d", gen)
 	}
 }
+
+// 首条订阅快照就是变更前状态时必须请求重连（#156 R40）：否则面永远不就绪；
+// 但面已就绪时保持安静，避免批量归档期间的连接风暴。
+func TestShellState_FirstPrestaleStreamSnapshotRequestsReconnect(t *testing.T) {
+	state := newT3ShellState()
+	// 先制造一次归属变更（floor 前推），面尚未就绪。
+	state.armArchiveUncertain(true, time.Minute)
+	if pending := state.noteArchiveMembershipUncertain([]string{"th-1"}, time.Minute); pending != 1 {
+		t.Fatalf("seed uncertainty: pending=%d", pending)
+	}
+	if err := state.applyArchiveItemAt(t3ArchiveStreamItem{
+		Kind: "snapshot", Sequence: intPtrTestLocal(1),
+		Snapshot: &t3ArchivedShellSnapshot{SchemaVersion: 1, SnapshotSequence: 1, Threads: shellTestThreads(shellTestThread("th-1", "归档"))},
+	}, 0, time.Now().Add(-time.Second)); err != nil {
+		t.Fatalf("apply first prestale snapshot: %v", err)
+	}
+	if gen := state.archiveReconnectTarget(); gen == 0 {
+		t.Fatalf("an unready face must request a reconnect for a pre-transition snapshot")
+	}
+}
