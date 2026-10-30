@@ -566,7 +566,7 @@ func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, ev
 			pr = pr2
 		}
 		forkDenied, txErr := s.openCommentWakeRoundTx(ctx, integrationID, event, deliveryID, repo, prNumber,
-			installationID, observedHead, pr, time.Now().UTC())
+			installationID, observedProjectID, observedHead, pr, time.Now().UTC())
 		denyCache, err := commentWakeTxOutcome(forkDenied, txErr)
 		if errors.Is(err, errCommentWakeObservedHeadMoved) {
 			s.logger.Info("评论唤醒观察窗口内总账被并发推进，重读重拉",
@@ -602,7 +602,8 @@ func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, ev
 // 返回值 forkDenied：事务内 fork 守卫判丢弃（幂等账已随事务落定）——外层
 // 据此写否定缓存（INT-97：事务闭包内不得调非 tx 方法面，非事务副作用外置）。
 func (s *ReviewService) openCommentWakeRoundTx(ctx context.Context, integrationID, event, deliveryID, repo string,
-	prNumber int, installationID int64, observedHead string, pr *forge.PullRequest, now time.Time) (forkDenied bool, err error) {
+	prNumber int, installationID int64, observedProjectID, observedHead string,
+	pr *forge.PullRequest, now time.Time) (forkDenied bool, err error) {
 	forkDenied = false
 	txErr := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		// 幂等登记先行：预查后的并发重投在事务内判重兜底。
@@ -622,6 +623,13 @@ func (s *ReviewService) openCommentWakeRoundTx(ctx context.Context, integrationI
 		project, settings, err := s.findEnabledReviewProjectTx(tx, integrationID, repo)
 		if err != nil || project == nil {
 			return err
+		}
+		// 项目身份复核：观察值（含时序基准）属于观察时绑定的项目——预查/
+		// 观察与最终事务之间改绑时，即便两项目账本 head 字符串相同，基准
+		// 也不可跨项目沿用；哨兵重读重拉，新绑定下重新观察+实拉（codex
+		// 第 35 轮 P2）。
+		if project.ID != observedProjectID {
+			return errCommentWakeObservedHeadMoved
 		}
 		// 复核设置行（rerun 同款）：取 PR 与开轮之间可能发生停用/换仓库/
 		// 改绑集成——设置行已删或停用、快照 (集成, 仓库) 不再匹配时不开轮。

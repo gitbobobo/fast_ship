@@ -2223,3 +2223,81 @@ func TestReviewCommentWakeSameHeadLaggedTimestampAccepted(t *testing.T) {
 		t.Fatalf("应开出新轮: runs = %d", runs)
 	}
 }
+
+// 最终事务的项目身份复核（codex 第 35 轮 P2）：预查/观察与最终事务之间
+// 改绑（A→B）且两项目账本 head 字符串相同时——观察基准（A 的 seen 行）
+// 不可跨项目沿用，事务必须比对项目身份，不一致即哨兵重读重拉、在新绑定
+// 下重新观察实拉。
+func TestReviewCommentWakeTxBindsObservedProject(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	e.enableReview(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	ctx := context.Background()
+
+	projectB := model.Project{ID: "p-int179-tx", UserID: e.project.UserID, Name: "int179-tx"}
+	if err := e.svc.db.Create(&projectB).Error; err != nil {
+		t.Fatalf("create project B: %v", err)
+	}
+	t1 := time.Now().UTC().Add(-3 * time.Hour)
+	t2 := t1.Add(time.Hour)
+	// A：观察将来自它（head sha-x，基准 t1）。
+	if err := e.svc.db.Create(&model.ReviewPullRequest{
+		ProjectID: e.project.ID, UserID: e.project.UserID,
+		RepoFullName: repo, PRNumber: 58,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		HeadSHA:       "sha-x", RoundNumber: 1, UpdatedAt: t1,
+	}).Error; err != nil {
+		t.Fatalf("seed A ledger: %v", err)
+	}
+	if err := e.svc.db.Create(&model.ReviewSeenSHA{
+		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 58,
+		HeadSHA: "sha-x", IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		PRUpdatedAt: &t1, AcceptedAt: t1,
+	}).Error; err != nil {
+		t.Fatalf("seed A seen: %v", err)
+	}
+	// B：同名 head（字符串巧合），基准更新。
+	if err := e.svc.db.Create(&model.ReviewPullRequest{
+		ProjectID: projectB.ID, UserID: projectB.UserID,
+		RepoFullName: repo, PRNumber: 58,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		HeadSHA:       "sha-x", RoundNumber: 1, UpdatedAt: t2,
+	}).Error; err != nil {
+		t.Fatalf("seed B ledger: %v", err)
+	}
+	// 实拉快照：同 head、时间戳 t1（对 A 基准合法）。
+	e.fake.SetPR(repo, 58, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 58, State: "open", HeadSHA: "sha-x",
+		HeadRepoFullName: repo, UpdatedAt: &t1,
+	})
+
+	// 改绑发生在观察之后、最终事务之前（实拉钩子里执行——观察与事务之间
+	// 的无锁窗口；在事务内的查询回调里做会与 sqlite 写锁死锁）。
+	e.fake.SetPRHook(func(int) {
+		if err := e.svc.db.Model(&model.ProjectReviewSettings{}).
+			Where("project_id = ?", e.project.ID).
+			Update("project_id", projectB.ID).Error; err != nil {
+			t.Logf("rebind failed: %v", err)
+		}
+	})
+
+	// 哨兵重读重拉后在新绑定（B）下收敛开轮。
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-tx-bind",
+		issueCommentBody("@fast-ship-bot", repo, 58, 42)); err != nil {
+		t.Fatalf("哨兵重读后应在新绑定下收敛: %v", err)
+	}
+	var run model.ReviewRun
+	if err := e.svc.db.Where("pr_number = 58").First(&run).Error; err != nil {
+		t.Fatalf("应开出新轮: %v", err)
+	}
+	if run.ProjectID != projectB.ID {
+		t.Fatalf("新轮应落在改绑后的项目 B: %s", run.ProjectID)
+	}
+	var deliveries int64
+	e.svc.db.Model(&model.GitHubWebhookDelivery{}).
+		Where("delivery_id = ?", deliveryLedgerKey(model.ForgeIntegrationBuiltinGitHubID, "d-tx-bind")).
+		Count(&deliveries)
+	if deliveries != 1 {
+		t.Fatalf("幂等账只应落一次: %d", deliveries)
+	}
+}
