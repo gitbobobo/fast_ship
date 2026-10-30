@@ -491,7 +491,11 @@ func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, ev
 		// 读可能拿到旧 head 且 updated_at 与基准相等——严格 Before 拦不住）：
 		// 与触发面的同刻异 head 歧义同口径，按瞬时失败重投换新鲜快照
 		// （codex 第 28 轮 P2）。
-		stale := baseline != nil && pr.UpdatedAt != nil && pr.UpdatedAt.Before(*baseline)
+		// 滞后判定只防「回退到旧 head」：实拉 head == 已受理 head 时总账
+		// 无从回退，同 head 早时间戳（缓存/只读副本滞后）照常采信开轮
+		// （fast-ship-bot 第 33 轮 P2：误杀会推迟甚至丢掉合法唤醒）。
+		stale := baseline != nil && pr.UpdatedAt != nil && pr.UpdatedAt.Before(*baseline) &&
+			pr.HeadSHA != observedHead
 		tied := baseline != nil && pr.UpdatedAt != nil &&
 			pr.UpdatedAt.Equal(*baseline) && pr.HeadSHA != observedHead
 		if stale {

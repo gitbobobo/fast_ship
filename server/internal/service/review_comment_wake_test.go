@@ -1805,30 +1805,30 @@ func TestReviewCommentWakeHeadBaselineAdvances(t *testing.T) {
 		t.Fatalf("总账应落实拉快照时刻: %v", ledger.PRUpdatedAt)
 	}
 
-	// 第二次点名读到滞后快照（同一 head、更早的 updated_at）：无 seen 行，
-	// 但总账基准命中 → 按瞬时失败拒绝，总账不回退、不落账。
+	// 第二次点名读到滞后快照（同一 head、更早的 updated_at）：同 head 无
+	// 从回退总账，照常采信开新轮（fast-ship-bot 第 33 轮 P2）；总账 head
+	// 不变，基准随受理快照推进。
 	t0 := t1.Add(-time.Hour)
 	e.fake.SetPR(repo, 53, &githubapi.PullRequest{
 		RepoFullName: repo, Number: 53, State: "open", HeadSHA: "sha-base",
 		HeadRepoFullName: repo, AuthorLogin: "pr-author", UpdatedAt: &t0,
 	})
+	// 首轮仍在途：同 head 再点名被在途守卫跳过——关键是不得按滞后误拒（500）。
 	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-base-2",
-		commentBodyWithUsers("@fast-ship-bot 请再审", repo, 53, 42, "NONE", "pr-author", "pr-author")); err == nil {
-		t.Fatal("滞后快照应按瞬时失败拒绝（500）")
+		commentBodyWithUsers("@fast-ship-bot 请再审", repo, 53, 42, "NONE", "pr-author", "pr-author")); err != nil {
+		t.Fatalf("同 head 滞后时间戳应采信（在途守卫拦截而非 500）: %v", err)
+	}
+	var rounds int64
+	e.svc.db.Model(&model.ReviewRun{}).Where("pr_number = 53").Count(&rounds)
+	if rounds != 1 {
+		t.Fatalf("在途守卫应拦截重复开轮: runs = %d", rounds)
 	}
 	var after model.ReviewPullRequest
 	if err := e.svc.db.Where("pr_number = 53").First(&after).Error; err != nil {
 		t.Fatalf("总账行应仍在: %v", err)
 	}
-	if !after.PRUpdatedAt.Equal(t1) || after.HeadSHA != "sha-base" {
-		t.Fatalf("总账不得回退: head=%s pr_updated_at=%v", after.HeadSHA, after.PRUpdatedAt)
-	}
-	var deliveries int64
-	e.svc.db.Model(&model.GitHubWebhookDelivery{}).
-		Where("delivery_id = ?", deliveryLedgerKey(model.ForgeIntegrationBuiltinGitHubID, "d-base-2")).
-		Count(&deliveries)
-	if deliveries != 0 {
-		t.Fatalf("瞬时失败不落账: deliveries = %d", deliveries)
+	if after.HeadSHA != "sha-base" {
+		t.Fatalf("总账 head 不得变化: %s", after.HeadSHA)
 	}
 }
 
@@ -2180,5 +2180,46 @@ func TestCommentWakeTxOutcome(t *testing.T) {
 	deny, err = commentWakeTxOutcome(false, nil)
 	if err != nil || deny {
 		t.Fatalf("正常开轮: deny=%v err=%v", deny, err)
+	}
+}
+
+// 同 head 早时间戳不是滞后误杀（fast-ship-bot 第 33 轮 P2）：滞后判定的
+// 目的是防总账回退到旧 head——实拉 head == 已受理 head 时无从回退，缓存/
+// 只读副本滞后返回的同 head 快照照常采信开轮。
+func TestReviewCommentWakeSameHeadLaggedTimestampAccepted(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	e.enableReview(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	ctx := context.Background()
+	t1 := time.Now().UTC().Add(-2 * time.Hour)
+	t0 := t1.Add(-time.Hour)
+	if err := e.svc.db.Create(&model.ReviewPullRequest{
+		ProjectID: e.project.ID, UserID: e.project.UserID,
+		RepoFullName: repo, PRNumber: 57,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		HeadSHA:       "sha-a", RoundNumber: 1, UpdatedAt: t1,
+	}).Error; err != nil {
+		t.Fatalf("seed ledger: %v", err)
+	}
+	if err := e.svc.db.Create(&model.ReviewSeenSHA{
+		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 57,
+		HeadSHA: "sha-a", IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		PRUpdatedAt: &t1, AcceptedAt: t1,
+	}).Error; err != nil {
+		t.Fatalf("seed seen: %v", err)
+	}
+	// 同一 head、更早的 updated_at（缓存滞后快照）。
+	e.fake.SetPR(repo, 57, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 57, State: "open", HeadSHA: "sha-a",
+		HeadRepoFullName: repo, UpdatedAt: &t0,
+	})
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-same-head",
+		issueCommentBody("@fast-ship-bot", repo, 57, 42)); err != nil {
+		t.Fatalf("同 head 滞后时间戳应采信开轮: %v", err)
+	}
+	var runs int64
+	e.svc.db.Model(&model.ReviewRun{}).Where("pr_number = 57").Count(&runs)
+	if runs != 1 {
+		t.Fatalf("应开出新轮: runs = %d", runs)
 	}
 }
