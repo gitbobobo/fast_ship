@@ -1193,6 +1193,10 @@ func (h *t3ShellHub) applyActiveValues(e *t3ShellEntry, values []json.RawMessage
 	// state 在应用帧时就判定无需对账，帧后回调必须尊重这个结论——否则会给
 	// 它重新登记、把一条已有归档据的线程白降级一个宽限窗口。
 	provenIDs := make([]string, 0, 1)
+	// hadUncertain 记录本批之前是否有待对账（#156 R33）：解账可能只由
+	// thread.updated(location=active)/活跃快照触发，那时 removedIDs 是空的，
+	// 不能拿「本批有移除」当发布条件。
+	hadUncertain := e.state.pendingArchiveUncertain() > 0
 	// leftActiveFace 只表示「本批出现过离开活跃面的帧」，用于按需快照模式的
 	// 缓存失效（噪声帧多失效一次只是多付一次快照，不影响可信度语义）。
 	leftActiveFace := false
@@ -1246,7 +1250,7 @@ func (h *t3ShellHub) applyActiveValues(e *t3ShellEntry, values []json.RawMessage
 	// 否则 archAnnounced 停在 stale，下一次登记在归档行集合未变时会被指纹判
 	// 「无新话可说」而不发降级事件。只在「待对账被清空」时调用，避免无翻转的
 	// 批次产生多余事件；指纹去重再兜一层。
-	if len(removedIDs) > 0 && e.state.pendingArchiveUncertain() == 0 {
+	if hadUncertain && e.state.pendingArchiveUncertain() == 0 {
 		h.publishArchiveFaceEvent(e, false)
 	}
 	return nil
