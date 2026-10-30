@@ -1185,7 +1185,7 @@ func (h *t3ShellHub) applyActiveValues(e *t3ShellEntry, values []json.RawMessage
 		if err := json.Unmarshal(raw, &item); err != nil {
 			return fmt.Errorf("活跃流帧解析失败: %w", err)
 		}
-		removed, armedRegistered, err := e.state.applyActiveItemTracked(item)
+		removed, armedRegistered, proven, err := e.state.applyActiveItemDetailed(item)
 		if err != nil {
 			return err
 		}
@@ -1198,9 +1198,11 @@ func (h *t3ShellHub) applyActiveValues(e *t3ShellEntry, values []json.RawMessage
 			removedIDs = append(removedIDs, removed...)
 			if armedRegistered {
 				armedRegisteredIDs = append(armedRegisteredIDs, removed...)
-			} else if item.Kind == "thread.updated" && item.Location != "active" {
-				// 帧带归档行却没登记 = state 判定「归档面已有该行」。
-				provenIDs = append(provenIDs, removed...)
+			}
+			// proven 只认 state 的结论（#156 R14）：帧型 + armed 推断会误判
+			// 「帧在 arm 之前应用」的情形，把排队的归档增量跳过。
+			if len(proven) > 0 {
+				provenIDs = append(provenIDs, proven...)
 			}
 			leftActiveFace = true
 		}

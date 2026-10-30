@@ -1767,3 +1767,50 @@ func TestShellState_FrameWithArchiveRowSkipsRegistration(t *testing.T) {
 		t.Fatalf("frame carrying an existing archive row needs no reconciliation, got %v", snaps.ArchiveErr)
 	}
 }
+
+// proven 只能由 state 在「已 arm 且归档面确实已有该行」时给出（#156 R14）：
+// 帧在 arm **之前**应用时 armed=false 只是「没登记」，不构成「已证明」——
+// hub 若按帧型推断成 proven，排队的归档增量会被跳过，wait 可能判 thread_gone。
+func TestShellState_ProvenRequiresArmedJudgement(t *testing.T) {
+	state := newT3ShellState()
+	if applied, err := state.applyArchiveSnapshot(
+		t3ArchivedShellSnapshot{SchemaVersion: 1, SnapshotSequence: 1, Threads: shellTestThreads(shellTestThread("th-1", "归档"))},
+		state.archiveGenerationNow(), nil); !applied || err != nil {
+		t.Fatalf("seed archive: %v", err)
+	}
+	if _, _, _, err := state.applyActiveItemDetailed(t3ShellStreamItem{
+		Kind: "snapshot", Snapshot: &t3ShellSnapshot{SchemaVersion: 1, SnapshotSequence: 1, Threads: shellTestThreads(shellTestThread("th-1", "线程"))},
+	}); err != nil {
+		t.Fatalf("seed active: %v", err)
+	}
+
+	// arm 之前应用：不是 proven。
+	removed, armed, proven, err := state.applyActiveItemDetailed(t3ShellStreamItem{
+		Kind: "thread.updated", Sequence: intPtrTestLocal(2), Location: "archive",
+		Thread: shellTestThread("th-1", "归档"),
+	})
+	if err != nil {
+		t.Fatalf("apply before arm: %v", err)
+	}
+	if len(removed) != 1 || armed || len(proven) != 0 {
+		t.Fatalf("a frame applied before arming proves nothing, got removed=%v armed=%v proven=%v", removed, armed, proven)
+	}
+
+	// arm 之后同一帧才算 proven（归档面已有该行）。
+	state.armArchiveUncertain(true, time.Minute)
+	if _, _, err := state.applyActiveItemTracked(t3ShellStreamItem{
+		Kind: "snapshot", Snapshot: &t3ShellSnapshot{SchemaVersion: 1, SnapshotSequence: 3, Threads: shellTestThreads(shellTestThread("th-1", "线程"))},
+	}); err != nil {
+		t.Fatalf("restore active: %v", err)
+	}
+	removed, armed, proven, err = state.applyActiveItemDetailed(t3ShellStreamItem{
+		Kind: "thread.updated", Sequence: intPtrTestLocal(4), Location: "archive",
+		Thread: shellTestThread("th-1", "归档"),
+	})
+	if err != nil {
+		t.Fatalf("apply after arm: %v", err)
+	}
+	if len(removed) != 1 || armed || len(proven) != 1 || proven[0] != "th-1" {
+		t.Fatalf("armed frame with an existing archive row is proven, got removed=%v armed=%v proven=%v", removed, armed, proven)
+	}
+}

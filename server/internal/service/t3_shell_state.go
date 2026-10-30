@@ -275,14 +275,14 @@ func (s *t3ShellState) applyActiveSnapshotLocked(snapshot t3ShellSnapshot) ([]st
 	s.activeCursor = snapshot.SnapshotSequence
 	s.activeReady = true
 	s.activeSynced = true
-	s.armUncertainForRemovalsLocked(removed, false)
+	_, _ = s.armUncertainForRemovalsLocked(removed, false)
 	return removed, nil
 }
 
 // applyActiveItem 应用一个活跃流流项。坏帧 / 未知 kind 返回错误，由调用方
 // 整条流失败重连，不得静默跳过然后继续宣称 ready（规则 8）。
 func (s *t3ShellState) applyActiveItem(item t3ShellStreamItem) error {
-	_, _, err := s.applyActiveItemTracked(item)
+	_, _, _, err := s.applyActiveItemDetailed(item)
 	return err
 }
 
@@ -290,7 +290,22 @@ func (s *t3ShellState) applyActiveItem(item t3ShellStreamItem) error {
 // 跃面时返回被移除的旧线程 ID（见 applyActiveSnapshotLocked），其余帧型恒
 // 返回 nil——增量帧的「离开活跃面」由 hub 按帧型判定（thread.removed 与
 // location != "active" 的 updated），不在此重复。
+//
+// applyActiveItemTracked 是 applyActiveItemDetailed 的兼容包装：丢掉「帧自身证明
+// 无需对账」的 ID 集合，供不关心该分类的调用方与用例使用。
 func (s *t3ShellState) applyActiveItemTracked(item t3ShellStreamItem) (removed []string, armedRegistered bool, err error) {
+	removed, armedRegistered, _, err = s.applyActiveItemDetailed(item)
+	return removed, armedRegistered, err
+}
+
+// applyActiveItem 应用一条活跃面帧，返回 (确实移走的 ID, 是否已由 armed 路径
+// 登记, 由帧自身证明无需对账的 ID, error)。
+//
+// proven 必须是 state 显式给出的结论（#156 R14）：hub 不能靠帧型 + armed
+// 推断——帧可能在 arm 之前就被应用（那时 armedRegistered 恒为 false），把
+// 它当成「归档行已证明」会让一个排队的归档增量被误跳过，wait 可能把线程判
+// 成 thread_gone。只有「帧自带归档行且归档面确实已有该行」才算 proven。
+func (s *t3ShellState) applyActiveItemDetailed(item t3ShellStreamItem) (removed []string, armedRegistered bool, proven []string, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	switch item.Kind {
@@ -298,39 +313,39 @@ func (s *t3ShellState) applyActiveItemTracked(item t3ShellStreamItem) (removed [
 		if len(item.ResolvedRepositoryIdentityRoots) > 0 {
 			// 元数据/enrichment 帧：Fast Ship 不使用 repositoryIdentity，
 			// 整体忽略（只 Ack，不改数据、不动游标、不动可信标记）。
-			return nil, false, nil
+			return nil, false, nil, nil
 		}
 		if item.Snapshot == nil {
-			return nil, false, fmt.Errorf("活跃快照帧缺少 snapshot 字段")
+			return nil, false, nil, fmt.Errorf("活跃快照帧缺少 snapshot 字段")
 		}
 		removed, err = s.applyActiveSnapshotLocked(*item.Snapshot)
 		if err != nil {
-			return nil, false, err
+			return nil, false, nil, err
 		}
 		// applyActiveSnapshotLocked 内已按 armed 状态登记（见其中调用），
 		// 这里报告「本帧的移除已由 armed 路径登记」。
-		return removed, len(removed) > 0 && s.archiveUncertainArmed, nil
+		return removed, len(removed) > 0 && s.archiveUncertainArmed, nil, nil
 	case "synchronized":
 		// 追平标记：不携带数据，只推进可信标记（不碰游标，规则 2）。
 		s.activeSynced = true
-		return nil, false, nil
+		return nil, false, nil, nil
 	case "project.updated":
 		if item.Sequence == nil || item.Project == nil || item.Project.ID == "" {
-			return nil, false, fmt.Errorf("project.updated 帧缺少 sequence/project/projectId")
+			return nil, false, nil, fmt.Errorf("project.updated 帧缺少 sequence/project/projectId")
 		}
 		s.activeProjects.upsert(item.Project, item.Project.ID)
 		s.advanceActiveCursorLocked(*item.Sequence)
-		return nil, false, nil
+		return nil, false, nil, nil
 	case "project.removed":
 		if item.Sequence == nil || item.ProjectID == "" {
-			return nil, false, fmt.Errorf("project.removed 帧缺少 sequence/projectId")
+			return nil, false, nil, fmt.Errorf("project.removed 帧缺少 sequence/projectId")
 		}
 		s.activeProjects.remove(item.ProjectID)
 		s.advanceActiveCursorLocked(*item.Sequence)
-		return nil, false, nil
+		return nil, false, nil, nil
 	case "thread.updated":
 		if item.Sequence == nil || item.Thread == nil || item.Thread.ID == "" {
-			return nil, false, fmt.Errorf("thread.updated 帧缺少 sequence/thread/threadId")
+			return nil, false, nil, fmt.Errorf("thread.updated 帧缺少 sequence/thread/threadId")
 		}
 		// 活跃流实际只产生 location:"active"（ShellStream.ts:292-320）。旧版服务端
 		// 也可能在这条流上发 location:"archive"，上游 reducer 对它的处理是「不进
@@ -350,16 +365,16 @@ func (s *t3ShellState) applyActiveItemTracked(item t3ShellStreamItem) (removed [
 			s.activeThreads.remove(item.Thread.ID)
 			if present {
 				removed = []string{item.Thread.ID}
-				armedRegistered = s.armUncertainForRemovalsLocked(removed, true)
+				armedRegistered, proven = s.armUncertainForRemovalsLocked(removed, true)
 			}
 		}
 		s.advanceActiveCursorLocked(*item.Sequence)
 		// 必须把 removed 交回 hub（#156 R11）：否则 armed 登记了却没人调度到期
 		// 清理、也不发事件，归档面会停在一个既无定时器也无通知的 stale 上。
-		return removed, armedRegistered, nil
+		return removed, armedRegistered, proven, nil
 	case "thread.removed":
 		if item.Sequence == nil || item.ThreadID == "" {
-			return nil, false, fmt.Errorf("thread.removed 帧缺少 sequence/threadId")
+			return nil, false, nil, fmt.Errorf("thread.removed 帧缺少 sequence/threadId")
 		}
 		// 只从活跃面删除：归档动作在上游也发 active removal
 		// （ShellStream.ts:292-320），不代表线程从归档面消失（规则 3）；
@@ -371,12 +386,12 @@ func (s *t3ShellState) applyActiveItemTracked(item t3ShellStreamItem) (removed [
 		s.activeThreads.remove(item.ThreadID)
 		if present {
 			removed = []string{item.ThreadID}
-			armedRegistered = s.armUncertainForRemovalsLocked(removed, false)
+			armedRegistered, proven = s.armUncertainForRemovalsLocked(removed, false)
 		}
 		s.advanceActiveCursorLocked(*item.Sequence)
-		return removed, armedRegistered, nil
+		return removed, armedRegistered, proven, nil
 	default:
-		return nil, false, fmt.Errorf("活跃流未知帧 kind %q", item.Kind)
+		return nil, false, nil, fmt.Errorf("活跃流未知帧 kind %q", item.Kind)
 	}
 }
 
@@ -733,15 +748,16 @@ func (s *t3ShellState) noteArchiveMembershipUncertain(ids []string, settle time.
 func (s *t3ShellState) noteArchiveMembershipUncertainSkipping(ids []string, settle time.Duration, skipArchived bool) (pending int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.noteArchiveMembershipUncertainLocked(ids, settle, skipArchived)
+	pending, _ = s.noteArchiveMembershipUncertainLocked(ids, settle, skipArchived)
+	return pending
 }
 
 // noteArchiveMembershipUncertainLocked 是 noteArchiveMembershipUncertain 的
 // 无锁变体（调用方须持 s.mu）：活跃面移除与应用在同一临界区登记，
 // 保证读者看不到「已删除但可信」的中间态（#156 R5）。
-func (s *t3ShellState) noteArchiveMembershipUncertainLocked(ids []string, settle time.Duration, skipArchived bool) (pending int) {
+func (s *t3ShellState) noteArchiveMembershipUncertainLocked(ids []string, settle time.Duration, skipArchived bool) (pending int, proven []string) {
 	if len(ids) == 0 || settle <= 0 {
-		return 0
+		return 0, nil
 	}
 	// 登记不依赖 archiveReady（#156 R6）：切入订阅模式时归档面先是不可信的，
 	// 这期间发生移除若跳过登记，等订阅快照把它恢复可信时，对应的归档增量
@@ -757,6 +773,8 @@ func (s *t3ShellState) noteArchiveMembershipUncertainLocked(ids []string, settle
 		// 已由归档数据确定，登记只会让归档面白降级一个宽限窗口。
 		if skipArchived {
 			if _, archived := s.archivedThreads.byID[id]; archived {
+				// 帧自带归档行、且归档面已有该行：本次移除无需对账（#156 R13）。
+				proven = append(proven, id)
 				continue
 			}
 		}
@@ -771,7 +789,7 @@ func (s *t3ShellState) noteArchiveMembershipUncertainLocked(ids []string, settle
 		s.archiveUncertain[id] = deadline
 	}
 	if pending == 0 {
-		return 0
+		return 0, proven
 	}
 	// 只在面本来没有错误时写 stale（#156 R12 Note）：真实失败文案不得被通用
 	// stale 覆盖——否则到期路径会把它当作「归属不确定已解除」清成 nil，把一次
@@ -779,7 +797,7 @@ func (s *t3ShellState) noteArchiveMembershipUncertainLocked(ids []string, settle
 	if s.archiveReady && s.archiveErr == nil {
 		s.archiveErr = errT3ShellArchiveStale
 	}
-	return pending
+	return pending, proven
 }
 
 // clearArchiveMembershipUncertainLocked 清空待对账集合（#156 R8-2）：离开订阅
@@ -791,19 +809,19 @@ func (s *t3ShellState) clearArchiveMembershipUncertainLocked() {
 
 // armUncertainForRemovalsLocked 在 armed 状态下，把刚离开活跃面的线程就地
 // 登记为待对账（调用方须持 s.mu，见 armArchiveUncertain）。
-func (s *t3ShellState) armUncertainForRemovalsLocked(ids []string, skipArchived bool) bool {
+func (s *t3ShellState) armUncertainForRemovalsLocked(ids []string, skipArchived bool) (registered bool, proven []string) {
 	if !s.archiveUncertainArmed {
-		return false
+		return false, nil
 	}
 	settle := s.archiveUncertainSettle
 	if settle <= 0 {
 		// 没有宽限就没有定时器（scheduleArchiveMembershipSettle 同样早退）：
 		// 登记了也永远清不掉，归档面会一直 stale（#156 R9 Note）。宁可相信
 		// 归档面也不要制造不可恢复的不确定态。
-		return false
+		return false, nil
 	}
-	registered := s.noteArchiveMembershipUncertainLocked(ids, settle, skipArchived)
-	return registered > 0
+	pending, proven := s.noteArchiveMembershipUncertainLocked(ids, settle, skipArchived)
+	return pending > 0, proven
 }
 
 // armArchiveUncertain 控制「活跃面移除即在同一临界区登记待对账」（订阅模式
