@@ -1240,3 +1240,74 @@ func TestShellState_AdmitDoesNotRevokeAfterSuccessfulLanding(t *testing.T) {
 		t.Fatalf("revoked face must keep the last rows, got %+v", revokedSnaps.Archived.Threads)
 	}
 }
+
+// 归档归属不确定的自愈上界（跟进 PR②/#156 R1）：线程可能是被彻底删除，
+// 归档面不会有它的增量——不确定状态不能无限期，超过 settle 仍无对账就按
+// 「归档面无该线程」处理（此时若有极晚的增量，流本身也已异常，断连重连会
+// 走权威快照）。
+func TestShellState_ArchiveMembershipUncertainSettlesOnDeadline(t *testing.T) {
+	state := newT3ShellState()
+	gen := state.archiveGenerationNow()
+	if applied, err := state.applyArchiveSnapshot(
+		t3ArchivedShellSnapshot{SchemaVersion: 1, SnapshotSequence: 1, Threads: shellTestThreads(shellTestThread("th-a", "归档"))},
+		gen, nil); !applied || err != nil {
+		t.Fatalf("seed archive: applied=%v err=%v", applied, err)
+	}
+
+	if !state.noteArchiveMembershipUncertain([]string{"th-x"}, 40*time.Millisecond) {
+		t.Fatalf("marking a live face uncertain must report a change")
+	}
+	if snaps := state.snapshots(); !errors.Is(snaps.ArchiveErr, errT3ShellArchiveStale) {
+		t.Fatalf("uncertain membership must report stale, got %v", snaps.ArchiveErr)
+	}
+	// 行仍保留、面仍 ready（只是不宣称完整）。
+	if st := state.status(); !st.ArchiveReady {
+		t.Fatalf("uncertainty must not drop archiveReady")
+	}
+
+	time.Sleep(80 * time.Millisecond)
+	if snaps := state.snapshots(); snaps.ArchiveErr != nil {
+		t.Fatalf("uncertainty must self-heal after the settle deadline, got %v", snaps.ArchiveErr)
+	}
+	if len(state.snapshots().Archived.Threads) != 1 {
+		t.Fatalf("rows must be retained")
+	}
+}
+
+// 逐个线程对账（#156 R1）：无关线程的增量不得替仍缺增量的线程恢复可信。
+func TestShellState_ArchiveMembershipUncertainIsPerThread(t *testing.T) {
+	state := newT3ShellState()
+	gen := state.archiveGenerationNow()
+	if applied, err := state.applyArchiveSnapshot(
+		t3ArchivedShellSnapshot{SchemaVersion: 1, SnapshotSequence: 1, Threads: shellTestThreads(shellTestThread("th-a", "归档"))},
+		gen, nil); !applied || err != nil {
+		t.Fatalf("seed archive: applied=%v err=%v", applied, err)
+	}
+	if !state.noteArchiveMembershipUncertain([]string{"th-x", "th-y"}, time.Minute) {
+		t.Fatalf("marking must report a change")
+	}
+
+	// 只有 th-x 的增量到位：仍然不可信（th-y 未对账）。
+	seqX := 2
+	if err := state.applyArchiveItem(t3ArchiveStreamItem{
+		Kind: "thread.updated", Sequence: &seqX,
+		Thread: shellTestThread("th-x", "归档"),
+	}, 0); err != nil {
+		t.Fatalf("apply delta: %v", err)
+	}
+	if snaps := state.snapshots(); !errors.Is(snaps.ArchiveErr, errT3ShellArchiveStale) {
+		t.Fatalf("th-y is still unreconciled, must stay stale, got %v", snaps.ArchiveErr)
+	}
+
+	// th-y 的增量到位：全部对账完成，恢复可信。
+	seqY := 3
+	if err := state.applyArchiveItem(t3ArchiveStreamItem{
+		Kind: "thread.updated", Sequence: &seqY,
+		Thread: shellTestThread("th-y", "归档"),
+	}, 0); err != nil {
+		t.Fatalf("apply delta: %v", err)
+	}
+	if snaps := state.snapshots(); snaps.ArchiveErr != nil {
+		t.Fatalf("all reconciled, trust must be restored, got %v", snaps.ArchiveErr)
+	}
+}

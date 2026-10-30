@@ -1148,10 +1148,10 @@ func (e *t3ShellEntry) syncConfirmedAt() time.Time {
 // defer 兜住所有返回路径：帧级记下 leftActiveFace 即失效。
 func (h *t3ShellHub) applyActiveValues(e *t3ShellEntry, values []json.RawMessage) error {
 	batch := t3ShellEventBatch{}
-	leftActiveFace := false
+	leftActiveIDs := make([]string, 0, 1)
 	defer func() {
-		if leftActiveFace {
-			h.invalidateArchiveEntryAfterActiveRemoval(e)
+		if len(leftActiveIDs) > 0 {
+			h.invalidateArchiveEntryAfterActiveRemoval(e, leftActiveIDs)
 		}
 	}()
 	for _, raw := range values {
@@ -1166,8 +1166,18 @@ func (h *t3ShellHub) applyActiveValues(e *t3ShellEntry, values []json.RawMessage
 		// 线程离开活跃面即归档集可能变了（见函数头）：增量帧的 removal 由
 		// hub 按帧型判定；全量快照整体替换的移除由 state 在同一临界区内算
 		// 出并返回，两边一并失效归档缓存。
-		if len(removed) > 0 || item.Kind == "thread.removed" || (item.Kind == "thread.updated" && item.Location != "active") {
-			leftActiveFace = true
+		// 逐个记下离开活跃面的线程 ID：订阅模式下要按 ID 等归档增量对账
+		// （跟进 PR② / #156 R1），无关线程的增量不能替它们恢复可信。
+		if len(removed) > 0 {
+			leftActiveIDs = append(leftActiveIDs, removed...)
+		}
+		switch {
+		case item.Kind == "thread.removed":
+			if item.ThreadID != "" {
+				leftActiveIDs = append(leftActiveIDs, item.ThreadID)
+			}
+		case item.Kind == "thread.updated" && item.Location != "active" && item.Thread != nil:
+			leftActiveIDs = append(leftActiveIDs, item.Thread.ID)
 		}
 		batch.observeActive(&item)
 		// 权威全量快照落地（无 enrichment 标记）→ 强制重同步要求到此结束。

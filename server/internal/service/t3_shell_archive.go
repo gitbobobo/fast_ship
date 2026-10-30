@@ -613,12 +613,15 @@ func (h *t3ShellHub) InvalidateArchive(userID, envID string) {
 // ArchiveErr 仍为 nil，并发 bot wait 会把「活跃面与归档面都没有」当成可信
 // 结论而误判 thread_gone。标记只影响可信度（旧行保留），下一次订阅数据
 // 落地（增量或快照）即恢复，不必清表重连。
-func (h *t3ShellHub) invalidateArchiveEntryAfterActiveRemoval(e *t3ShellEntry) {
+func (h *t3ShellHub) invalidateArchiveEntryAfterActiveRemoval(e *t3ShellEntry, leftIDs []string) {
 	e.arch.mu.Lock()
 	legacy := e.arch.mode == t3ArchiveModeLegacy
 	e.arch.mu.Unlock()
 	if legacy {
-		if e.state.noteArchiveMembershipUncertain() {
+		// 按线程 ID 记账（Codex #156 R1）：只有这些线程自己的归档增量（或
+		// 权威快照）能解除不确定，无关线程的增量不算对账；settle 上界用
+		// 与撤可信一致的宽限（线程可能是被彻底删除，归档面不会有增量）。
+		if e.state.noteArchiveMembershipUncertain(leftIDs, e.archiveStaleGrace) {
 			e.hub.publishArchiveFaceEvent(e, false)
 		}
 		return

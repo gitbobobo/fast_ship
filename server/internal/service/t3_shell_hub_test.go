@@ -5086,7 +5086,24 @@ func TestT3ShellHub_LegacyActiveRemovalMarksMembershipUncertain(t *testing.T) {
 		t.Fatalf("active removal must not tear down the healthy legacy archive stream")
 	}
 
-	// 归档增量到达：归档集已跟上，可信度恢复。
+	// 无关线程的归档增量不算对账（Codex #156 R1）：th-2 的归属仍未知，
+	// 可信度不得被别人的增量提前恢复。
+	thA, _ := json.Marshal(map[string]any{
+		"id": "th-a", "projectId": "p-1", "title": "归档-th-a", "status": "idle",
+		"archivedAt": "2026-10-01T00:00:00.000Z",
+	})
+	unrelated, _ := json.Marshal(map[string]any{"kind": "thread.updated", "sequence": 43, "thread": json.RawMessage(thA)})
+	if err := archiveConn.sendValue(archiveSub.ID, unrelated); err != nil {
+		t.Fatalf("send unrelated archive delta: %v", err)
+	}
+	time.Sleep(150 * time.Millisecond)
+	if v, err := hub.Peek(env, "tok"); err != nil {
+		t.Fatalf("peek: %v", err)
+	} else if v.Snaps == nil || !errors.Is(v.Snaps.ArchiveErr, errT3ShellArchiveStale) {
+		t.Fatalf("unrelated archive delta must not restore trust for th-2, got %+v", v.Snaps)
+	}
+
+	// th-2 自己的归档增量到达：对账完成，可信度恢复。
 	thB, _ := json.Marshal(map[string]any{
 		"id": "th-2", "projectId": "p-1", "title": "归档-th-2", "status": "idle",
 		"archivedAt": "2026-10-01T00:00:00.000Z",

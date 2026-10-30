@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 )
 
 // T3 shell 订阅的纯内存状态（INT-116）：活跃 / 归档两面各自维护 map+order。
@@ -184,6 +185,13 @@ type t3ShellState struct {
 	// 「冷启动无快照」（清表只发生在后者）；下一次可信快照应用成功时
 	// 清除。
 	archiveStale bool
+	// archiveUncertain 是「归档归属待对账」的线程集合（ID → 自愈截止时刻，
+	// 跟进 PR② / #156 R1）：订阅模式下活跃面宣告线程离开、而归档增量还没
+	// 到时登记，非空期间归档面报 stale（不是完整结论）；该线程的增量落地、
+	// 或权威快照整体替换归档集时清除。逐个 ID 记账，无关线程的增量不会替
+	// 仍缺增量的线程恢复可信；超过截止时刻自动失效（线程可能是被彻底删除，
+	// 归档面不会有它的增量）。守 s.mu。
+	archiveUncertain map[string]time.Time
 
 	// archiveReconnectPendingGen 是旧面订阅路径独有的「请重建归档订阅」
 	// 备忘（守旧游标），以单调世代表达：0 表示无未决请求，>0 表示最新一
@@ -472,16 +480,15 @@ func (s *t3ShellState) applyArchiveItem(item t3ArchiveStreamItem, connectionStar
 			return fmt.Errorf("归档 thread.updated 帧缺少 sequence/thread/threadId")
 		}
 		s.archivedThreads.upsert(item.Thread, item.Thread.ID)
-		// 订阅增量到达 = 归档集已跟上（含 noteArchiveMembershipUncertain 的
-		// 窗口）：恢复可信度（跟进 PR②）。
-		s.markArchiveMembershipTrustedLocked()
+		// 该线程的归档增量到达 = 它的归属已对账（跟进 PR② / #156 R1）。
+		s.noteArchiveMembershipSettledLocked(item.Thread.ID)
 		return nil
 	case "thread.removed":
 		if item.Sequence == nil || item.ThreadID == "" {
 			return fmt.Errorf("归档 thread.removed 帧缺少 sequence/threadId")
 		}
 		s.archivedThreads.remove(item.ThreadID)
-		s.markArchiveMembershipTrustedLocked()
+		s.noteArchiveMembershipSettledLocked(item.ThreadID)
 		return nil
 	default:
 		return fmt.Errorf("归档流未知帧 kind %q", item.Kind)
@@ -517,6 +524,9 @@ func (s *t3ShellState) applyArchiveSnapshotLocked(snapshot t3ArchivedShellSnapsh
 	}
 	s.archivedSchemaVersion = snapshot.SchemaVersion
 	s.archivedSeq = snapshot.SnapshotSequence
+	// 权威快照整体替换归档集：待对账集合随之作废（无论新旧，成员关系都
+	// 以这张快照为准；写前快照的「不封窗」由下面的分支处理）。
+	s.archiveUncertain = nil
 	if connectionStart < s.archiveReconnectPendingGen {
 		// 写前快照：数据照换但不封窗（审修 R8 P2）。与按需路径
 		// applyArchiveSnapshot 世代不符分支同型——面保持不可信，
@@ -641,29 +651,65 @@ func (s *t3ShellState) noteArchiveFetchFailed(err error, generation int64, commi
 	return true
 }
 
-// noteArchiveMembershipUncertain 把订阅模式的归档面标为「归档集可能已变、
-// 暂不可信」（跟进 PR②，Codex :608）：活跃面已宣告某线程离开，而归档订阅的
-// 对应增量还没到——两条流之间没有顺序保证。此刻若 ArchiveErr 仍为 nil，
-// 并发 wait 会把「活跃面与归档面都没有」当可信结论，误判 thread_gone。
-// 只动可信度（archiveReady 不动、旧行保留），不断流也不清表：增量随后到达
-// 即由 markArchiveMembershipTrustedLocked 恢复。返回是否真的改变了状态，
-// 供发布层按指纹去重。
-func (s *t3ShellState) noteArchiveMembershipUncertain() bool {
+// noteArchiveMembershipUncertain 记下「这些线程的归档归属尚未对账」（跟进
+// PR②，Codex :608 / #156 R1）：活跃面已宣告它们离开，而归档订阅的对应增量
+// 还没到——两条流之间没有顺序保证。此刻若 ArchiveErr 仍为 nil，并发 wait
+// 会把「活跃面与归档面都没有」当可信结论，误判 thread_gone。
+//
+// 粒度是**逐个线程 ID**（Codex #156 R1）：无关线程的增量落地不能替某个仍
+// 缺增量的线程恢复可信，否则那个窗口依旧敞着。settle 是自愈上界：线程可能
+// 是被彻底删除（归档面不会有它的增量），所以不确定状态不能无限期——超过
+// settle 仍无对账就按「归档面无该线程」处理（此时若有极晚的增量，流本身也
+// 已经异常，断连重连会走权威快照）。
+//
+// 只动可信度（archiveReady 不动、旧行保留），不断流也不清表。返回是否真的
+// 改变了状态，供发布层按指纹去重。
+func (s *t3ShellState) noteArchiveMembershipUncertain(ids []string, settle time.Duration) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.archiveReady || errors.Is(s.archiveErr, errT3ShellArchiveStale) {
+	if !s.archiveReady || len(ids) == 0 {
 		return false
 	}
+	if s.archiveUncertain == nil {
+		s.archiveUncertain = make(map[string]time.Time, len(ids))
+	}
+	deadline := time.Now().Add(settle)
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		s.archiveUncertain[id] = deadline
+	}
+	changed := !errors.Is(s.archiveErr, errT3ShellArchiveStale)
 	s.archiveErr = errT3ShellArchiveStale
-	return true
+	return changed
 }
 
-// markArchiveMembershipTrustedLocked 撤销 noteArchiveMembershipUncertain 的
-// 标记（调用方须持 s.mu）：订阅数据已到达，说明归档集跟上了，可信度恢复。
-// 只清本函数自己打的 stale 标记——noteArchiveExpiredLocked 的过期标记会把
-// archiveReady 一并撤掉（这里要求 ready），真实失败原因也不会被抹掉。
-func (s *t3ShellState) markArchiveMembershipTrustedLocked() {
-	if s.archiveReady && errors.Is(s.archiveErr, errT3ShellArchiveStale) {
+// noteArchiveMembershipSettledLocked 撤掉某个线程的不确定标记（调用方须持
+// s.mu）：它的归档增量已落地，或权威快照已整体替换归档集。
+func (s *t3ShellState) noteArchiveMembershipSettledLocked(id string) {
+	if _, ok := s.archiveUncertain[id]; !ok {
+		return
+	}
+	delete(s.archiveUncertain, id)
+	s.refreshArchiveMembershipTrustLocked()
+}
+
+// refreshArchiveMembershipTrustLocked 清理过期的不确定项并在全部对账完成时
+// 恢复可信（调用方须持 s.mu）。只清本机制自己打的 stale 标记——
+// noteArchiveExpiredLocked 的过期标记会把 archiveReady 一并撤掉（这里要求
+// ready），真实失败原因也不会被抹掉。
+func (s *t3ShellState) refreshArchiveMembershipTrustLocked() {
+	if len(s.archiveUncertain) > 0 {
+		now := time.Now()
+		for id, deadline := range s.archiveUncertain {
+			if now.After(deadline) {
+				delete(s.archiveUncertain, id)
+			}
+		}
+	}
+	if len(s.archiveUncertain) == 0 && s.archiveReady && errors.Is(s.archiveErr, errT3ShellArchiveStale) &&
+		!s.archiveStale {
 		s.archiveErr = nil
 	}
 }
@@ -680,6 +726,7 @@ func (s *t3ShellState) markActiveSynced(synced bool) {
 func (s *t3ShellState) status() t3ShellFaceStatus {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.refreshArchiveMembershipTrustLocked()
 	return t3ShellFaceStatus{
 		ActiveReady:  s.activeReady,
 		ActiveSynced: s.activeSynced,
@@ -696,6 +743,7 @@ func (s *t3ShellState) status() t3ShellFaceStatus {
 func (s *t3ShellState) snapshots() *t3ShellSnapshots {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.refreshArchiveMembershipTrustLocked()
 
 	activeThreads := s.activeThreads.list()
 	archivedThreads := make([]t3ThreadShell, 0, s.archivedThreads.len())
