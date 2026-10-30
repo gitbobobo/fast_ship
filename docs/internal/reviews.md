@@ -195,6 +195,13 @@ PR 顶层评论正文包含 `@fast-ship-bot`（大小写不敏感的包含判定
 端没有可改存量 App 订阅的 API）；Forgejo 需勾 Pull Request Comment
 （见 forge-integrations.md 第 6 步）。
 
+**Forgejo 瞬态失败的恢复**：GitHub 侧投递失败有独立对账循环（见「投递
+失败对账」）；Forgejo 没有投递列表 API 集成、轮询也只覆盖推送事件，
+评论唤醒遇到瞬态失败（实拉/DB 故障回 5xx）不会自动重放。恢复路径：
+Forgejo 后台 webhook 的 Recent Deliveries 手动重放（投递内容不变，重放
+按幂等账正常受理）。为 Forgejo 建持久重试子系统属独立需求，本 PR 不做；
+GitHub 主路径的自动对账完整覆盖。
+
 payload 两平台同形，只取最小字段面：`action`（只受理 `created`，编辑/删除
 不唤醒）、`issue.pull_request`（存在即 PR，普通 Issue 的评论忽略）、
 `issue.number`、`comment.body`、`repository.full_name`、`installation.id`、
