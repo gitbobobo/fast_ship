@@ -113,6 +113,12 @@ type fakeShellStreamServer struct {
 	archValue json.RawMessage // getArchivedShellSnapshot 应答体（nil 时按空快照答）
 	archErr   map[string]any  // 非空时归档快照 RPC 回该 Fail 错误（G1 降级路径）
 	archCalls int             // getArchivedShellSnapshot 被调次数（缓存断言用）
+	// archQueue 按序应答队列（世代护栏补拉测试用）：非空时每次
+	// getArchivedShellSnapshot 请求到达即按序摘取一项，作为该请求的应答
+	// 内容（暂停释放后仍用摘到的项）——同一暂停窗口里的多次请求各拿各
+	// 的应答，测试得以编排「第 1 次答写前状态、第 2 次答写后状态」的确定
+	// 性交错，不靠 sleep 猜时序。队列为空时回退 archValue/archErr。
+	archQueue []fakeArchiveAnswer
 	// archLegacy 切旧上游：getArchivedShellSnapshot 按「方法不存在」拒绝，
 	// subscribeArchivedShell 恢复为常驻订阅（注册后推快照+增量）。回退路径
 	// 的旧面断言用。
@@ -323,10 +329,38 @@ func (s *fakeShellStreamServer) currentMarker() bool {
 	return s.marker
 }
 
+// fakeArchiveAnswer 是 archQueue 的一项：一次归档快照请求的定制应答。
+// hold 非空时该请求挂起直到 channel 关闭，再按当时的默认 fixture 应答。
+type fakeArchiveAnswer struct {
+	value json.RawMessage
+	err   map[string]any
+	hold  chan struct{}
+}
+
+// pushArchiveFixture 向按序应答队列追加一项（err 非 nil 时该请求回 Fail）。
+func (s *fakeShellStreamServer) pushArchiveFixture(value json.RawMessage, err map[string]any) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.archQueue = append(s.archQueue, fakeArchiveAnswer{value: value, err: err})
+}
+
+// pushArchiveHold 向按序应答队列追加一个「压住」项：对应的归档快照请求
+// 摘到它后挂起，直到返回的 release 被调用才按当时的默认 fixture 应答——
+// 把补拉/重拉停在「已发起未落地」，中间态断言不再靠 sleep 猜时序。
+func (s *fakeShellStreamServer) pushArchiveHold() (release func()) {
+	hold := make(chan struct{})
+	s.mu.Lock()
+	s.archQueue = append(s.archQueue, fakeArchiveAnswer{hold: hold})
+	s.mu.Unlock()
+	return func() { close(hold) }
+}
+
 // archiveAnswer 取归档快照应答：archErr 优先（读失败路径），否则按
 // archValue 答（缺省是空快照，保证未定制 fixture 时归档面也能就绪）。
 // archPaused 置位时先在锁外等 resume——请求已被收进 requests 通道（测试
 // 的「在途」证据），应答暂停让客户端的拉取停在「已发起未落地」。
+// archQueue 非空时按请求到达序逐项摘取应答（见字段注释）：同一暂停窗口
+// 里的多次请求各拿各的应答，放行先后不再决定内容。
 func (s *fakeShellStreamServer) archiveAnswer() struct {
 	value json.RawMessage
 	err   map[string]any
@@ -335,9 +369,17 @@ func (s *fakeShellStreamServer) archiveAnswer() struct {
 	s.archCalls++
 	paused := s.archPaused
 	resume := s.archResume
+	var queued *fakeArchiveAnswer
+	if len(s.archQueue) > 0 {
+		queued = &s.archQueue[0]
+		s.archQueue = s.archQueue[1:]
+	}
 	s.mu.Unlock()
 	if paused && resume != nil {
 		<-resume
+	}
+	if queued != nil && queued.hold != nil {
+		<-queued.hold
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -345,10 +387,15 @@ func (s *fakeShellStreamServer) archiveAnswer() struct {
 	if value == nil {
 		value = archiveSnapshotBody(1)
 	}
+	err := s.archErr
+	// hold 项（value/err 均零值）不覆盖：按当时的默认 fixture 应答。
+	if queued != nil && (queued.value != nil || queued.err != nil) {
+		value, err = queued.value, queued.err
+	}
 	return struct {
 		value json.RawMessage
 		err   map[string]any
-	}{value: value, err: s.archErr}
+	}{value: value, err: err}
 }
 
 // pauseArchive 开始暂停归档快照应答：之后的 getArchivedShellSnapshot 请求
@@ -2340,13 +2387,18 @@ func TestT3ShellHub_InvalidateMarksArchiveUntrusted(t *testing.T) {
 }
 
 // 世代护栏的确定性交错：暂停 getArchivedShellSnapshot 应答 → 触发归档写并
-// 失效 → 放行写前应答 → 该应答不得把窗口封回可信，随后读到的是写后快照。
+// 失效 → 放行写前应答 → 该应答不得把窗口封回可信；落地留下的 needsRefetch
+// 由收尾自动补拉兑现，把补拉压住后中间态可确定性观察（旧实现依赖「之后
+// 恰好还有一次读」，写命令后无人再读时归档面永远停在降级态，R11 P2-1）。
 func TestT3ShellHub_InFlightPreWriteSnapshotCannotSealWindow(t *testing.T) {
 	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
 	// 先暂停归档应答再建 entry：首读就停在「已发起未落地」。pause 挂在
 	// 应答派发上——请求照常收进 requests 通道（测试据此确认在途）。
+	// 按序应答：第 1 次答写前 [th-a]；第 2 次（收尾自动补拉）用 hold 压住，
+	// 放行时按当时默认 fixture 答写后 [th-a, th-b]。
 	srv.pauseArchive()
-	srv.setArchiveFixture(archiveSnapshotBody(1, "th-a"), nil)
+	srv.pushArchiveFixture(archiveSnapshotBody(1, "th-a"), nil)
+	releaseRefetch := srv.pushArchiveHold()
 	hub := newT3ShellHubWithConfig(hubTestConfig(), nil)
 	defer hub.Close()
 	env := hubTestEnv(url, 0)
@@ -2360,7 +2412,7 @@ func TestT3ShellHub_InFlightPreWriteSnapshotCannotSealWindow(t *testing.T) {
 	}()
 	collector := newShellConnCollector(t, srv)
 	active := collector.await(false)
-	parked := collector.await(true) // 归档拉取在途、应答被暂停
+	collector.await(true) // 归档拉取在途、应答被暂停
 	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1")); err != nil {
 		t.Fatalf("send active snapshot: %v", err)
 	}
@@ -2372,26 +2424,27 @@ func TestT3ShellHub_InFlightPreWriteSnapshotCannotSealWindow(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatalf("timed out waiting for first view")
 	}
-	_ = parked
 
 	// 拉取在途（写前应答未落地）时发生归档写：失效。
 	hub.InvalidateArchive("user-1", "env-1")
 
-	// 放行写前应答：落地不得把窗口封回可信（ArchiveErr 必须非空）。
+	// 放行写前应答，随后自动补拉被 hold 压住：中间态可确定性观察——落
+	// 地不得把窗口封回可信（ArchiveErr 非空）、写前数据可换行但不可信。
 	srv.resumeArchive()
+	collector.await(true) // 自动补拉已发起（无任何读参与）：它确实不依赖后续读
 	view := waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
-		return v.Snaps != nil && len(v.Snaps.Archived.Threads) == 1
+		return v.Snaps != nil && v.Snaps.ArchiveErr != nil && len(v.Snaps.Archived.Threads) == 1
 	})
-	if view.Snaps.ArchiveErr == nil {
+	if !errors.Is(view.Snaps.ArchiveErr, errT3ShellArchiveStale) {
 		t.Fatalf("pre-write snapshot must not reseal the window as trusted, snaps = %+v", view.Snaps)
 	}
 	if view.Snaps.Archived.Threads[0].ID != "th-a" {
 		t.Fatalf("pre-write data may replace rows but not trust, got %+v", view.Snaps.Archived.Threads)
 	}
 
-	// 下一次 kick 补发写后拉取（簿记已被失效清零，kick 立即放行）：
-	// 读到的是写后快照，归档面重新可信。
+	// 写后快照放行补拉落地：归档面重新可信，含写后新线程。
 	srv.setArchiveFixture(archiveSnapshotBody(2, "th-a", "th-b"), nil)
+	releaseRefetch()
 	view = waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
 		return v.Snaps != nil && v.Snaps.ArchiveErr == nil && len(v.Snaps.Archived.Threads) == 2
 	})
@@ -2402,11 +2455,13 @@ func TestT3ShellHub_InFlightPreWriteSnapshotCannotSealWindow(t *testing.T) {
 // 世代校验与簿记提交已在同一临界区原子化，失效只可能发生在 commit 之后
 // （簿记清零）或之前（世代不符走 needsRefetch），不存在「apply 成功了但
 // 簿记把已失效的窗口封回 60s」的缝隙。用 pauseArchive 挂住在途拉取，
-// Invalidate 后放行写前应答：落地不得封窗，下一次读取立即补拉写后状态。
+// Invalidate 后放行写前应答：落地不得封窗，收尾自动补拉写后状态（无读
+// 参与——若落地误封窗，needsRefetch 不会留下，补拉不会发生）。
 func TestT3ShellHub_BookkeepingCommitCannotSealAfterInvalidation(t *testing.T) {
 	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
 	srv.pauseArchive()
-	srv.setArchiveFixture(archiveSnapshotBody(1, "th-a"), nil)
+	srv.pushArchiveFixture(archiveSnapshotBody(1, "th-a"), nil)
+	srv.pushArchiveFixture(archiveSnapshotBody(2, "th-a", "th-b"), nil)
 	hub := newT3ShellHubWithConfig(hubTestConfig(), nil)
 	defer hub.Close()
 	env := hubTestEnv(url, 0)
@@ -2436,10 +2491,10 @@ func TestT3ShellHub_BookkeepingCommitCannotSealAfterInvalidation(t *testing.T) {
 	calls := srv.archiveCallCount()
 
 	// 放行写前应答：世代护栏让落地只换数据，commit 簿记（needsRefetch
-	// 备忘）不得封窗——下一次读取立即放行写后拉取，不受 inFlight 之外
-	// 的任何窗口阻挡。
+	// 备忘）不得封窗——收尾立即自动补拉写后快照，不受 inFlight 之外
+	// 的任何窗口阻挡，也不需要任何后续读参与（补拉连接先于一切读出现）。
 	srv.resumeArchive()
-	srv.setArchiveFixture(archiveSnapshotBody(2, "th-a", "th-b"), nil)
+	collector.await(true)
 	view := waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
 		return v.Snaps != nil && v.Snaps.ArchiveErr == nil && len(v.Snaps.Archived.Threads) == 2
 	})
@@ -2447,6 +2502,185 @@ func TestT3ShellHub_BookkeepingCommitCannotSealAfterInvalidation(t *testing.T) {
 		t.Fatalf("post-write refetch must happen immediately, archive calls %d → %d", calls, got)
 	}
 	_ = view
+}
+
+// 世代护栏的闭环（R11 P2-1）：写命令与在途拉取交错 → 在途结果落地为写前
+// 状态（needsRefetch 备忘）→ 落地收尾必须自己补发一次写后拉取，不再依赖
+// 「之后恰好还有一次读」——否则写命令后无人再读时，归档面永远停
+// 「已失效重拉中」、缺新归档线程，且落地指纹若无变化连事件都不发，浏览器
+// 收不到提示就永远不会再读。补拉拿到写后快照（含新线程）恢复可信并发事
+// 件；链条终止由世代判定承担：无新失效则补拉世代相符落地封窗，不再留
+// 标志，无空转（用例末尾的静默窗口验证）。
+func TestT3ShellHub_GenerationMismatchLandingAutoRefetches(t *testing.T) {
+	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
+	// 按序应答：第 1 次（写前，被压住）答 [th-a]；第 2 次（收尾自动补拉）
+	// 答写后状态 [th-a, th-b]。压住让「第 1 次应答何时放行」由测试控制。
+	srv.pauseArchive()
+	srv.pushArchiveFixture(archiveSnapshotBody(1, "th-a"), nil)
+	srv.pushArchiveFixture(archiveSnapshotBody(2, "th-a", "th-b"), nil)
+	hub := newT3ShellHubWithConfig(hubTestConfig(), nil)
+	defer hub.Close()
+	env := hubTestEnv(url, 0)
+
+	sub := hub.Subscribe("user-1")
+	defer sub.Close()
+
+	viewDone := make(chan struct{})
+	go func() {
+		defer close(viewDone)
+		_, _ = hub.View(context.Background(), env, "tok")
+	}()
+	collector := newShellConnCollector(t, srv)
+	active := collector.await(false)
+	collector.await(true) // 第 1 次归档拉取在途、应答被压住
+	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1")); err != nil {
+		t.Fatalf("send active snapshot: %v", err)
+	}
+	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
+		t.Fatalf("active snapshot not acked")
+	}
+	select {
+	case <-viewDone:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("timed out waiting for first view")
+	}
+	sub.Drain()
+
+	// 拉取在途时发生归档写：失效（推进世代、清零簿记）。
+	hub.InvalidateArchive("user-1", "env-1")
+
+	// 放行写前应答。此后不再发任何 View/Peek：写前落地只换数据不封窗，
+	// 留下 needsRefetch，落地收尾必须自己补拉。
+	srv.resumeArchive()
+
+	// 自动补拉的证据：无读者参与，归档 RPC 被再次调用（第 2 项队列应答）。
+	deadline := time.After(3 * time.Second)
+	for srv.archiveCallCount() != 2 {
+		select {
+		case <-deadline:
+			t.Fatalf("finisher must refetch without any reader, archive calls = %d", srv.archiveCallCount())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	// 补拉落地（写后快照，含新线程 th-b）：归档面恢复可信，并发事件——
+	// 无读参与下浏览器也能收到提示。
+	view := waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil &&
+			len(v.Snaps.Archived.Threads) == 2
+	})
+	ids := map[string]bool{}
+	for _, th := range view.Snaps.Archived.Threads {
+		ids[th.ID] = true
+	}
+	if !ids["th-a"] || !ids["th-b"] {
+		t.Fatalf("recovered archive must contain post-write threads, got %+v", view.Snaps.Archived.Threads)
+	}
+	awaitShellEvent(t, sub, func(e T3ShellEvent) bool { return e.Full })
+
+	// 无空转：补拉已世代相符落地封窗，标志不再置位。静默窗口内归档 RPC
+	// 不得再被调用（TTL 充裕，这里只可能来自补拉空转）。
+	time.Sleep(250 * time.Millisecond)
+	if got := srv.archiveCallCount(); got != 2 {
+		t.Fatalf("no refetch loop allowed, archive calls = %d", got)
+	}
+}
+
+// 同型交错落在失败路径（R11 P2-1 对称覆盖）：写前拉取以真实失败告终
+// （非「方法不存在」，不触发 legacy 回退）且世代已变——不记冷却、只留
+// needsRefetch，落地收尾同样必须自动补拉并拿到写后快照。
+func TestT3ShellHub_GenerationMismatchFailureAutoRefetches(t *testing.T) {
+	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
+	srv.pauseArchive()
+	srv.pushArchiveFixture(nil, map[string]any{"_tag": "RuntimeError", "message": "storage hiccup"})
+	srv.pushArchiveFixture(archiveSnapshotBody(2, "th-a", "th-b"), nil)
+	hub := newT3ShellHubWithConfig(hubTestConfig(), nil)
+	defer hub.Close()
+	env := hubTestEnv(url, 0)
+
+	viewDone := make(chan struct{})
+	go func() {
+		defer close(viewDone)
+		_, _ = hub.View(context.Background(), env, "tok")
+	}()
+	collector := newShellConnCollector(t, srv)
+	active := collector.await(false)
+	collector.await(true)
+	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1")); err != nil {
+		t.Fatalf("send active snapshot: %v", err)
+	}
+	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
+		t.Fatalf("active snapshot not acked")
+	}
+	select {
+	case <-viewDone:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("timed out waiting for first view")
+	}
+
+	hub.InvalidateArchive("user-1", "env-1")
+	srv.resumeArchive()
+
+	// 失败收尾（世代不符不记冷却）后同样自动补拉。
+	deadline := time.After(3 * time.Second)
+	for srv.archiveCallCount() != 2 {
+		select {
+		case <-deadline:
+			t.Fatalf("finisher must refetch after mismatched failure, archive calls = %d", srv.archiveCallCount())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	view := waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil && len(v.Snaps.Archived.Threads) == 2
+	})
+	_ = view
+	time.Sleep(250 * time.Millisecond)
+	if got := srv.archiveCallCount(); got != 2 {
+		t.Fatalf("no refetch loop allowed, archive calls = %d", got)
+	}
+}
+
+// 空归档首次就绪必须广播（R11 P2-3）：去重基准的零值 {ids:nil, err:""}
+// 恰好等于「归档为空且可信」的指纹——不加区分时，新环境的首份空归档
+// 快照被判「与已宣布相同」，Full 与 State 一个都不发；归档落地晚于活跃面
+// Ready 的页面收不到任何提示，永远停在「归档线程暂不可读」降级。修复后
+// 首次发布无条件放行；此后同一份数据的重拉（TTL 过期）仍被去重静默。
+func TestT3ShellHub_EmptyArchiveFirstSnapshotPublishes(t *testing.T) {
+	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
+	srv.setArchiveFixture(archiveSnapshotBody(1), nil) // 合法空归档（threads:[]）
+	cfg := hubTestConfig()
+	cfg.ArchiveTTL = 150 * time.Millisecond
+	hub := newT3ShellHubWithConfig(cfg, nil)
+	defer hub.Close()
+	env := hubTestEnv(url, 0)
+
+	sub := hub.Subscribe("user-1")
+	defer sub.Close()
+
+	// 建连时压住归档应答：活跃面先就绪（产生它自己的事件），清掉后观察
+	// 窗口里只剩归档落地一个事件源。
+	srv.pauseArchive()
+	_, _, _, _, _ = establishBothFaces(t, hub, srv, env, "tok", 42, "th-1")
+	sub.Drain()
+
+	// 放行空归档首份快照：必须发事件（Full）。
+	srv.resumeArchive()
+	ev := awaitShellEvent(t, sub, func(e T3ShellEvent) bool { return e.Full || e.State != "" })
+	if ev.EnvironmentID != "env-1" || !ev.Full {
+		t.Fatalf("first empty-archive landing must publish Full, got %+v", ev)
+	}
+	sub.Drain()
+
+	// TTL 过期重拉同一份空数据：指纹与已宣布的相同 → 不得再发任何事件
+	// （首次发布标志不得破坏去重契约）。
+	time.Sleep(cfg.ArchiveTTL + 80*time.Millisecond)
+	if _, err := hub.Peek(env, "tok"); err != nil {
+		t.Fatalf("peek: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	if events := sub.Drain(); len(events) != 0 {
+		t.Fatalf("identical refetch must stay silent, got %+v", events)
+	}
 }
 
 // TTL 过期的信任缺口（Finding R2）：缓存成功后 TTL 过期、重拉被闸门挡住

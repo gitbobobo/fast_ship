@@ -176,10 +176,15 @@ func (h *t3ShellHub) publishToUser(userID string, ev T3ShellEvent) {
 
 // t3ArchiveAnnounced 是归档面已对外发布过的可见状态指纹
 // （publishArchiveFaceEvent 的去重基准）。守 entry 锁，与 publishedState
-// 同型——都是「对外承诺过什么」的发布侧缓存。
+// 同型——都是「对外承诺过什么」的发布侧缓存。announced 区分「从未发布
+// 过」与「发布过空归档可信态」：两者指纹相同（ids 空、err 空），零值若
+// 不加区分，新环境的首份快照会被误判「与基准相同」而整场静默（R11
+// P2-3）——归档落地晚于活跃面 Ready 的页面收不到任何事件，停在
+// 「归档线程暂不可读」降级。首次发布无条件放行。
 type t3ArchiveAnnounced struct {
-	ids []string
-	err string
+	announced bool
+	ids       []string
+	err       string
 }
 
 // publishArchiveFaceEvent 是归档面事件的统一发布口（审修 R9 P2-2）：按
@@ -189,7 +194,9 @@ type t3ArchiveAnnounced struct {
 //
 // 判定基准是状态指纹（archiveFaceFingerprint，与 snapshots() 给浏览器的
 // 视图同源）：
-//   - 线程集合/顺序变了（首次落地、真实增删、清表后恢复）→ Full；
+//   - 线程集合/顺序变了，或本 entry 还从未发布过（announced=false，含
+//     空归档——空表也是要交给浏览器的结论，不能因零值基准撞车而静默）
+//     → Full；
 //   - 集合没变、只有可信度文案变了（失败首次出现/失败原因变化/恢复可信）
 //     → 轻量 State 事件（载荷取当前视图状态，前端只按「有 state 即失效
 //     该环境详情」处理）；
@@ -204,8 +211,9 @@ type t3ArchiveAnnounced struct {
 func (h *t3ShellHub) publishArchiveFaceEvent(e *t3ShellEntry, forceFull bool) {
 	ids, errText := e.state.archiveFaceFingerprint()
 	e.mu.Lock()
-	full := forceFull || !slices.Equal(ids, e.archAnnounced.ids)
+	full := forceFull || !e.archAnnounced.announced || !slices.Equal(ids, e.archAnnounced.ids)
 	stateHint := !full && errText != e.archAnnounced.err
+	e.archAnnounced.announced = true
 	e.archAnnounced.ids = ids
 	e.archAnnounced.err = errText
 	statePayload := ""

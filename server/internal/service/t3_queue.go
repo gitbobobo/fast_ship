@@ -251,8 +251,7 @@ func t3QueueRank(run t3Run) int {
 
 // t3HasInterruptibleBackgroundWork 是「可被停止」判定，与上面的
 // t3TaskHoldsCompletion「占完成位」是两个独立口径，不得互相套用：占位看
-// 「谁会唤醒代理」，可停止看「Stop 还能对什么下手」——一条 awaited 的
-// command 占完成位，但 Stop 回退路径不把它当可中断目标。
+// 「谁会唤醒代理」，可停止看「Stop 还能对什么下手」。
 //
 // 对齐上游 interruptThreadTurn（无 threadStop 能力的回退分支）：没有活动
 // run 时，用后台工作 roster（不含 PR 链接，即「不含 pullRequests」）决定
@@ -260,11 +259,15 @@ func t3QueueRank(run t3Run) int {
 // 后台之列（run.interrupt 连带取消该 run 挂的后台工作），唯独 PR watch
 // 不算——taskId 前缀 pull-request-watch: 的 monitor 由专门的解监听分支
 // 处理（thread.pull-request.watch watching=false），不该成为 run.interrupt
-// 的理由。Fast Ship 在此之上额外排除 command（dev server 之类的常驻命令
-// 不作为回退路径的停止目标），是比上游更窄的本地口径。
+// 的理由。Fast Ship 在此之上仍排除普通 command（dev server 之类的常驻
+// 命令不作为回退路径的停止目标），是比上游更窄的本地口径；但 awaited 的
+// command 例外——它占完成位、线程状态因它判 running（见 t3ThreadStatus），
+// 若回退路径停不了它，「根 run 已结束、只剩一条 awaited command」的线程
+// 会显示 running 却点不停。awaited 语义是「它结束时我要被唤醒」，与
+// 「dev server 不宜停」不是一类，停止判定按上游口径放行。
 func t3HasInterruptibleBackgroundWork(tasks []t3PendingBackgroundTask) bool {
 	for _, task := range tasks {
-		if task.Kind == "command" {
+		if task.Kind == "command" && !task.Awaited {
 			continue
 		}
 		if task.Kind == "monitor" && strings.HasPrefix(task.TaskID, "pull-request-watch:") {

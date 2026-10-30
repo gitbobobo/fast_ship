@@ -685,6 +685,23 @@ func TestSelectStopRunID(t *testing.T) {
 		t.Fatalf("background work must fall back to latestRunId, got %q", got)
 	}
 
+	// 只剩 awaited 的 command（占完成位、状态判 running）：回退路径必须
+	// 能停（R11 P2-2），否则「显示 running 却点不停」。
+	if got := selectStopRunID(
+		shell(nil, ptr("run-7"), t3PendingBackgroundTask{TaskID: "cmd-wait", Kind: "command", Awaited: true}),
+		nil,
+	); got != "run-7" {
+		t.Fatalf("awaited command must be stoppable, got %q", got)
+	}
+
+	// 只剩普通 command（dev server 之类）：仍无可停目标。
+	if got := selectStopRunID(
+		shell(nil, ptr("run-7"), t3PendingBackgroundTask{TaskID: "cmd-dev", Kind: "command"}),
+		nil,
+	); got != "" {
+		t.Fatalf("plain command must not be stoppable, got %q", got)
+	}
+
 	// 只有 PR watch 的 monitor 不算可中断后台。
 	if got := selectStopRunID(
 		shell(nil, ptr("run-9"), t3PendingBackgroundTask{TaskID: "pull-request-watch:pr-1", Kind: "monitor"}),
@@ -1473,7 +1490,14 @@ func TestT3HasInterruptibleBackgroundWork(t *testing.T) {
 		{TaskID: "pull-request-watch:1", Kind: "monitor"},
 		{TaskID: "cmd-1", Kind: "command"},
 	}) {
-		t.Fatalf("PR watch + command must not count as interruptible")
+		t.Fatalf("PR watch + plain command must not count as interruptible")
+	}
+	// awaited 的 command 可停（R11 P2-2）：它占完成位、线程状态因它判
+	// running，回退路径停不了它就「显示 running 却点不停」。
+	if !t3HasInterruptibleBackgroundWork([]t3PendingBackgroundTask{
+		{TaskID: "cmd-wait", Kind: "command", Awaited: true},
+	}) {
+		t.Fatalf("awaited command must count as interruptible")
 	}
 	if !t3HasInterruptibleBackgroundWork([]t3PendingBackgroundTask{
 		{TaskID: "bg-1", Kind: "subagent"},
@@ -1491,8 +1515,9 @@ func TestT3HasInterruptibleBackgroundWork(t *testing.T) {
 
 // TestT3HoldsCompletionVsInterruptible 钉住两个判定的分离：占完成位（谁会
 // 唤醒代理）与可被停止（Stop 回退还能对什么下手）口径不同，同一条后台工作
-// 在两侧可以得出不同结论——awaited 的 command 占位但不可停止；普通 monitor
-// 不占位但可停止；PR watch 两侧都不占。
+// 在两侧可以得出不同结论——awaited 的 command 占位且可停（不停它「显示
+// running 却点不停」）；普通 command 两侧都不占（不占位、不可停）；普通
+// monitor 不占位但可停止；PR watch 两侧都不占。
 func TestT3HoldsCompletionVsInterruptible(t *testing.T) {
 	cases := []struct {
 		name          string
@@ -1500,7 +1525,7 @@ func TestT3HoldsCompletionVsInterruptible(t *testing.T) {
 		holds         bool
 		interruptible bool
 	}{
-		{"awaited command：占位、不可停止", t3PendingBackgroundTask{TaskID: "c1", Kind: "command", Awaited: true}, true, false},
+		{"awaited command：占位、可停止", t3PendingBackgroundTask{TaskID: "c1", Kind: "command", Awaited: true}, true, true},
 		{"普通 command：都不占", t3PendingBackgroundTask{TaskID: "c2", Kind: "command"}, false, false},
 		{"普通 monitor：不占位、可停止", t3PendingBackgroundTask{TaskID: "w1", Kind: "monitor"}, false, true},
 		{"awaited monitor：占位、可停止", t3PendingBackgroundTask{TaskID: "w2", Kind: "monitor", Awaited: true}, true, true},

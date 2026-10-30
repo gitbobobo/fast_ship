@@ -36,7 +36,8 @@ import (
 //     谎报列表完整。
 //   - 世代护栏：拉取发起时记一个失效计数（generation），落地时计数已变
 //     （拉取途中发生失效）则该结果是写前状态——只换数据不封可信窗口、不
-//     记失败冷却，并置 arch.needsRefetch 让收尾后的下一次 kick 立刻重拉。
+//     记失败冷却，并置 arch.needsRefetch；落地收尾（kick 的后台 defer）
+//     消费该标志，立即补发一次写后拉取，不依赖外部再读一次。
 //   - 坏负载分派（复审遗留：不得与世代不符合并成同一种 false）：
 //     applyArchiveSnapshot 拒收的快照（如线程缺 ID 的结构性坏数据）是
 //     「本次读取失败」，走 noteArchiveFetchFailed 记 ArchiveErr 真实原因 +
@@ -90,7 +91,9 @@ type t3ArchiveFetchState struct {
 	// inFlight 落地后需要紧跟一次新拉取补回写后状态。kick 的放行条件
 	// 把它当作「簿记已无效」处理（validUntil/retryAfter 均被失效清零），
 	// 真正起决定作用的是世代护栏——它只是簿记语义上的备忘，防止误读成
-	// 「失败冷却还在生效」。
+	// 「失败冷却还在生效」。消费点在 kick 的后台收尾：inFlight 清零时若
+	// 该标志置位，清零并立即补发一次写后拉取（不再依赖「之后恰好还有
+	// 一次读」触发 kick）。
 	needsRefetch bool
 }
 
@@ -101,9 +104,14 @@ type t3ArchiveFetchState struct {
 //
 // inFlight 与 needsRefetch 协作：在途拉取已登记、但期间发生过失效
 // （needsRefetch）时，「等它落地」不承诺写后状态——kick 在这里把它当作
-// 「已经有人在拉」跳过即可，落地收尾会留下 needsRefetch，下一次 kick
-// （由落地后的 refresh 唤醒的读、或失效后的第一次读触发）立刻补发真正
-// 写后的拉取。世代护栏保证写前那次落地不会把窗口封回可信。
+// 「已经有人在拉」跳过即可，落地收尾（下方 goroutine 的 defer）会消费
+// 该标志并自动补发真正写后的拉取，不需要浏览器再发一次读：否则写命令
+// 与在途拉取交错的窗口里，归档面会停在「已失效重拉中」直到外部读取——
+// 停在降级态的页面收不到事件（落地指纹若与宣布过的相同，发布层也不发）
+// 就永远不会再来读，两面消失。世代护栏保证写前那次落地不会把窗口封回
+// 可信；补拉链条的终止条件同样由世代判定承担：补拉拿到的是写后快照，
+// 世代相符即落地封窗，标志不再置位——只有补拉期间又发生失效才会再留
+// 标志再补拉，写停止后链条自然收敛，无空转。
 func (e *t3ShellEntry) kickArchiveRefresh() {
 	// 准入、撤可信与 inFlight 哨兵在同一临界区收尾（锁序 s.mu → arch.mu）：
 	// 读者不可能观测到「inFlight 已置位而 archiveReady 未撤」的中间态——
@@ -131,7 +139,19 @@ func (e *t3ShellEntry) kickArchiveRefresh() {
 		defer func() {
 			e.arch.mu.Lock()
 			e.arch.inFlight = false
+			// 世代护栏的闭环：落地留下 needsRefetch（拉取途中发生过失效，
+			// 在途结果是写前状态——apply 的世代不符落地与失败路径的世代
+			// 不符都留它）时，收尾处清零并立即补发一次写后拉取。标志在
+			// 清 inFlight 的同一临界区消费：补拉落地若再遇失效会再次留
+			// 标志并再经这里补拉；没有新失效则世代相符落地、封窗可信，
+			// 链条自然终止。entry 已停时不补拉——面已无服务对象，标志
+			// 清零即可（否则停机路径上的空转会无限接龙）。
+			refetch := e.arch.needsRefetch
+			e.arch.needsRefetch = false
 			e.arch.mu.Unlock()
+			if refetch && !e.isStopped() {
+				e.kickArchiveRefresh()
+			}
 		}()
 		_ = e.ensureArchive(fetchCtx)
 	}()

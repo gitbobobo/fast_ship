@@ -198,11 +198,12 @@ workspace-options 选），由 T3 校验路径；Fast Ship 不另做项目目录
   的，冷启动等首次同步期间新起的 run 不在里面；`shell.activeRunId` 为空时
   （典型是 waiting）才回读一次投影，保留「waiting/后台工作也算可停」的既有
   口径；再否则 shell 的 `latestRunId` 带着可中断后台工作
-  （`t3HasInterruptibleBackgroundWork`：排除 command 与 PR watch 前缀的
-  monitor——「可被停止」与「占完成位」是两个独立口径，后者见
-  `t3TaskHoldsCompletion`）→ 中断最近 run；都没有 → `stopped=false`
-  （T3 此场景只做 PR unwatch，Fast Ship 不维护 PR watch）。选中后发
-  `run.interrupt`（`holdQueue=true`），run_id 回填。
+  （`t3HasInterruptibleBackgroundWork`：排除普通 command 与 PR watch 前缀的
+  monitor，awaited 的 command 例外——它占完成位、状态因它判 running，
+  回退停不了它就「显示 running 却点不停」——「可被停止」与「占完成位」
+  是两个独立口径，后者见 `t3TaskHoldsCompletion`）→ 中断最近 run；
+  都没有 → `stopped=false`（T3 此场景只做 PR unwatch，Fast Ship 不维护
+  PR watch）。选中后发 `run.interrupt`（`holdQueue=true`），run_id 回填。
 
 「无目标 → Stopped=false」的判定只对回退路径有意义。
 
@@ -269,7 +270,12 @@ Peek）后台触发重拉——拉取不阻塞本次视图，落地/失败经 re
   （`ArchiveErr` 非空、旧行保留——活跃订阅随即把线程从活跃面摘除，这段
   窗口里归档面若仍报可信会把线程误判为不存在）。拉取发起时记失效计
   数（generation），拉取途中发生失效则该次结果是写前状态：只换数据、不
-  封可信窗口也不记失败冷却，落地后补发一次写后拉取（世代护栏）。
+  封可信窗口也不记失败冷却；落地收尾（kick 的后台 defer）消费
+  `needsRefetch` 备忘，**自动补发一次写后拉取**——不依赖浏览器再发读
+  （停在降级态的页面收不到事件就永远不会再读）；补拉落地恢复可信并发
+  事件（集合变 Full、可信度翻转 State）。终止靠世代判定自然收敛：补拉
+  拿到写后快照即世代相符落地封窗，只有补拉期间又发生失效才会再留备忘
+  再补拉（世代护栏）。
 - **项目表只有活跃面一份权威来源**：归档快照的 `Projects` 一律忽略
   （F7）；归档线程的项目名从活跃项目表取，项目已删除时显示无名（与
   「项目已删除」一致）。
