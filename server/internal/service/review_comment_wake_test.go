@@ -674,6 +674,49 @@ func (s stubAppSource) Current(context.Context) (GitHubAppConfig, bool, error) {
 	return s.cfg, true, nil
 }
 
+// stubAppSourceErr GitHubAppSource 桩：读取恒报错（瞬时故障用例）。
+type stubAppSourceErr struct{}
+
+func (stubAppSourceErr) Current(context.Context) (GitHubAppConfig, bool, error) {
+	return GitHubAppConfig{}, false, errors.New("injected app lookup failure")
+}
+
+// App slug 读取的瞬时故障按瞬时失败处理：评论可能用了 @<slug>，静默回落
+// 字面量会让该唤醒被无声忽略（重投同样失败 → 永久丢失），透出 error 让
+// 平台重投、不落账（codex 第 22 轮 P2）。
+func TestReviewCommentWakeAppLookupError(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	e.enableReview(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	ctx := context.Background()
+	e.fake.SetPR(repo, 39, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 39, State: "open", HeadSHA: "sha-apperr",
+		HeadRepoFullName: repo,
+	})
+	e.review.appSource = stubAppSourceErr{}
+
+	body := issueCommentBody("@fast-ship-bot", repo, 39, 42)
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-apperr", body); err == nil {
+		t.Fatal("App 身份读取失败应透出 error（500，平台重投）")
+	}
+	var deliveries, runs int64
+	e.svc.db.Model(&model.GitHubWebhookDelivery{}).Count(&deliveries)
+	e.svc.db.Model(&model.ReviewRun{}).Where("pr_number = 39").Count(&runs)
+	if deliveries != 0 || runs != 0 {
+		t.Fatalf("瞬时故障不落账: deliveries=%d runs=%d", deliveries, runs)
+	}
+
+	// 恢复后（换成可用桩）同 delivery 重投：完整重走并开轮。
+	e.review.appSource = stubAppSource{cfg: GitHubAppConfig{AppSlug: "Fast-Ship-Demo"}}
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-apperr", body); err != nil {
+		t.Fatalf("恢复后重投应完整重走并开轮: %v", err)
+	}
+	var run model.ReviewRun
+	if err := e.svc.db.Where("pr_number = 39").First(&run).Error; err != nil {
+		t.Fatalf("重投后应开出新轮: %v", err)
+	}
+}
+
 // TestReviewCommentWakeUnboundRepoNoAPI 未绑定仓库零联网放大：点名评论
 // 落在没有任何项目启用审查的仓库上时，不写幂等账、不做任何平台 API 调用
 // （installation 解析与实拉都不会发生，fast-ship-bot 第 16 轮 P2）。
@@ -1083,6 +1126,60 @@ func TestReviewCommentWakeTxRollbackRetainsRedelivery(t *testing.T) {
 	}
 	if run.TriggerAction != "comment" || run.HeadSHA != "sha-tx" {
 		t.Fatalf("run = action=%s head=%s", run.TriggerAction, run.HeadSHA)
+	}
+}
+
+// 时序基准（seen 行）查询的瞬时 DB 故障不得当作「无 seen 行」放行——那
+// 正是需要拦滞后快照的时刻；非 NotFound 错误透出 500 重试，不落账
+// （codex 第 22 轮 P2）。
+func TestReviewCommentWakeStaleLookupError(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	e.enableReview(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	ctx := context.Background()
+	now := time.Now().UTC()
+	if err := e.svc.db.Create(&model.ReviewPullRequest{
+		ProjectID: e.project.ID, UserID: e.project.UserID,
+		RepoFullName: repo, PRNumber: 41,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		HeadSHA:       "sha-a", RoundNumber: 1, UpdatedAt: now,
+	}).Error; err != nil {
+		t.Fatalf("seed ledger: %v", err)
+	}
+	e.fake.SetPR(repo, 41, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 41, State: "open", HeadSHA: "sha-b",
+		HeadRepoFullName: repo, UpdatedAt: &now,
+	})
+
+	failSeen := false
+	if err := e.svc.db.Callback().Query().Before("gorm:query").Register("int179_fail_seen_select",
+		func(tx *gorm.DB) {
+			if failSeen && tx.Statement.Table == "review_seen_shas" {
+				tx.AddError(errors.New("injected seen query failure"))
+			}
+		}); err != nil {
+		t.Fatalf("注册回调失败: %v", err)
+	}
+	failSeen = true
+	body := issueCommentBody("@fast-ship-bot", repo, 41, 42)
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-seenerr", body); err == nil {
+		t.Fatal("时序基准查询失败应透出 error（500，平台重投）")
+	}
+	var deliveries, runs int64
+	e.svc.db.Model(&model.GitHubWebhookDelivery{}).Count(&deliveries)
+	e.svc.db.Model(&model.ReviewRun{}).Where("pr_number = 41").Count(&runs)
+	if deliveries != 0 || runs != 0 {
+		t.Fatalf("瞬时故障不落账: deliveries=%d runs=%d", deliveries, runs)
+	}
+
+	// 恢复后同 delivery 重投：完整重走并开轮。
+	failSeen = false
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-seenerr", body); err != nil {
+		t.Fatalf("恢复后重投应完整重走并开轮: %v", err)
+	}
+	var run model.ReviewRun
+	if err := e.svc.db.Where("pr_number = 41").First(&run).Error; err != nil {
+		t.Fatalf("重投后应开出新轮: %v", err)
 	}
 }
 

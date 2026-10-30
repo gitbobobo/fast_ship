@@ -34,17 +34,23 @@ const reviewCommentWakeMention = "@fast-ship-bot"
 
 // commentWakeMentions 唤醒串集合：规格字面量 + 部署真实机器人句柄（App
 // slug，manifest 流创建的 App slug 形如 fast-ship-<host>，与字面量不同——
-// fast-ship-bot 第 20 轮 P2）。读取失败/未配置时回落字面量。
-func (s *ReviewService) commentWakeMentions(ctx context.Context) []string {
+// fast-ship-bot 第 20 轮 P2）。App 身份未配置（ok=false）回落字面量；读
+// 取失败（瞬时 DB 故障）透出错误——评论可能用了 @<slug>，静默回落字面量
+// 会让该唤醒被无声忽略且重投同样失败（codex 第 22 轮 P2：调用方按瞬时
+// 失败返回 500 让平台重投）。
+func (s *ReviewService) commentWakeMentions(ctx context.Context) ([]string, error) {
 	mentions := []string{reviewCommentWakeMention}
 	if s.appSource == nil {
-		return mentions
+		return mentions, nil
 	}
 	cfg, ok, err := s.appSource.Current(ctx)
-	if err != nil || !ok || cfg.AppSlug == "" {
-		return mentions
+	if err != nil {
+		return nil, err
 	}
-	return append(mentions, "@"+strings.ToLower(cfg.AppSlug))
+	if !ok || cfg.AppSlug == "" {
+		return mentions, nil
+	}
+	return append(mentions, "@"+strings.ToLower(cfg.AppSlug)), nil
 }
 
 // reviewCommentWakeRevalidateMax 观察窗口复核的尝试上限：实拉前观察到的
@@ -243,7 +249,12 @@ func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, ev
 	}
 
 	// 纯 payload 守卫：非 created/无唤醒串/非 PR/畸形投递静默忽略（不登记）。
-	payload := commentWakePayloadGuards(body, s.commentWakeMentions(ctx))
+	mentions, err := s.commentWakeMentions(ctx)
+	if err != nil {
+		// 瞬时故障不落账：返回 500 让平台重投（重投时读取恢复即正常处理）。
+		return err
+	}
+	payload := commentWakePayloadGuards(body, mentions)
 	if payload == nil {
 		return nil
 	}
@@ -356,6 +367,11 @@ func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, ev
 		var accepted model.ReviewSeenSHA
 		snErr := s.db.WithContext(ctx).Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ? AND integration_id = ?",
 			preProject.ID, repo, prNumber, observedHead, integrationID).First(&accepted).Error
+		// 基准查询的瞬时 DB 故障不得当作「无 seen 行」放行——那正是需要拦
+		// 滞后快照的时刻；透出 500 让平台重投（codex 第 22 轮 P2）。
+		if snErr != nil && !errors.Is(snErr, gorm.ErrRecordNotFound) {
+			return snErr
+		}
 		if snErr == nil && accepted.PRUpdatedAt != nil && pr.UpdatedAt != nil &&
 			pr.UpdatedAt.Before(*accepted.PRUpdatedAt) {
 			s.logger.Warn("评论唤醒实拉快照滞后于已受理 head，按瞬时失败重投",

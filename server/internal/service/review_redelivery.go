@@ -165,11 +165,17 @@ func (s *ReviewService) reconcileWebhookDeliveries(now time.Time) {
 	}
 	probeCtx, probeCancel := context.WithTimeout(ctx, probeBudget)
 	defer probeCancel()
+	// 闸门降级语义：唤醒串读取瞬时失败回落字面量继续重投——闸门本就宽
+	// 松，宁可多投不漏投（唤醒侧则按瞬时失败 500 重试，两处口径不同）。
+	mentions, mentionsErr := s.commentWakeMentions(ctx)
+	if mentionsErr != nil {
+		mentions = []string{reviewCommentWakeMention}
+	}
 	probe := &redeliveryPRProbe{
 		hooks:    hooks,
 		client:   client,
 		budget:   reviewRedeliveryMaxPerSweep,
-		mentions: s.commentWakeMentions(ctx),
+		mentions: mentions,
 		prStates: map[string]*probePRState{},
 	}
 	tried := 0
