@@ -621,14 +621,23 @@ func (h *t3ShellHub) invalidateArchiveEntryAfterActiveRemoval(e *t3ShellEntry, l
 		// 按线程 ID 记账（Codex #156 R1）：只有这些线程自己的归档增量（或
 		// 权威快照）能解除不确定，无关线程的增量不算对账；settle 上界用
 		// 与撤可信一致的宽限（线程可能是被彻底删除，归档面不会有增量）。
-		if e.state.noteArchiveMembershipUncertain(leftIDs, e.archiveStaleGrace) {
-			e.hub.publishArchiveFaceEvent(e, false)
-			// 到期恢复必须发事件（#156 R2）：线程可能被彻底删除、永远等不到
-			// 归档增量，只在读路径懒清会让打开中的页面一直停在降级态
-			// （use-threads 不轮询，SSE 心跳不带数据）。定时器只负责这一次
-			// 转变，entry 停机后丢弃。
-			h.scheduleArchiveMembershipSettle(e, e.archiveStaleGrace)
+		registered, flipped := e.state.noteArchiveMembershipUncertain(leftIDs, e.archiveStaleGrace)
+		if registered == 0 {
+			return
 		}
+		// 可信度翻转才发布（已 stale 时重复登记不必再发）。
+		if flipped {
+			e.hub.publishArchiveFaceEvent(e, false)
+		}
+		// 到期恢复必须发事件（#156 R2）：线程可能被彻底删除、永远等不到
+		// 归档增量，只在读路径懒清会让打开中的页面一直停在降级态
+		// （use-threads 不轮询，SSE 心跳不带数据）。
+		//
+		// 定时器每次登记都调度（#156 R3-P1）：判据不能只看「可信度是否翻转」——
+		// 同一宽限窗口内的第二次移除不会翻转 archiveErr，若因此跳过调度，它
+		// 登记的那批 ID 就永远等不到到期清理，归档面会永久 stale。到期清理按
+		// 各自截止时刻裁剪，重复调度只是多一次空转。
+		h.scheduleArchiveMembershipSettle(e, e.archiveStaleGrace)
 		return
 	}
 	h.invalidateArchiveEntry(e)

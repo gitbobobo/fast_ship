@@ -1254,8 +1254,8 @@ func TestShellState_ArchiveMembershipUncertainSettlesOnDeadline(t *testing.T) {
 		t.Fatalf("seed archive: applied=%v err=%v", applied, err)
 	}
 
-	if !state.noteArchiveMembershipUncertain([]string{"th-x"}, 40*time.Millisecond) {
-		t.Fatalf("marking a live face uncertain must report a change")
+	if registered, flipped := state.noteArchiveMembershipUncertain([]string{"th-x"}, 40*time.Millisecond); registered != 1 || !flipped {
+		t.Fatalf("marking a live face uncertain must register and flip, got registered=%d flipped=%v", registered, flipped)
 	}
 	if snaps := state.snapshots(); !errors.Is(snaps.ArchiveErr, errT3ShellArchiveStale) {
 		t.Fatalf("uncertain membership must report stale, got %v", snaps.ArchiveErr)
@@ -1287,8 +1287,8 @@ func TestShellState_ArchiveMembershipUncertainIsPerThread(t *testing.T) {
 		gen, nil); !applied || err != nil {
 		t.Fatalf("seed archive: applied=%v err=%v", applied, err)
 	}
-	if !state.noteArchiveMembershipUncertain([]string{"th-x", "th-y"}, time.Minute) {
-		t.Fatalf("marking must report a change")
+	if registered, flipped := state.noteArchiveMembershipUncertain([]string{"th-x", "th-y"}, time.Minute); registered != 2 || !flipped {
+		t.Fatalf("marking must register both ids and flip, got registered=%d flipped=%v", registered, flipped)
 	}
 
 	// 只有 th-x 的增量到位：仍然不可信（th-y 未对账）。
@@ -1313,5 +1313,29 @@ func TestShellState_ArchiveMembershipUncertainIsPerThread(t *testing.T) {
 	}
 	if snaps := state.snapshots(); snaps.ArchiveErr != nil {
 		t.Fatalf("all reconciled, trust must be restored, got %v", snaps.ArchiveErr)
+	}
+}
+
+// 归档增量先到、活跃移除后到不得降级（#156 R2-1）：两条流顺序不定，归档面
+// 已有该线程时成员关系已确定，不该再登记成「待对账」白降级一个宽限窗口。
+func TestShellState_ArchiveMembershipAlreadyArchivedIsNotUncertain(t *testing.T) {
+	state := newT3ShellState()
+	gen := state.archiveGenerationNow()
+	if applied, err := state.applyArchiveSnapshot(
+		t3ArchivedShellSnapshot{SchemaVersion: 1, SnapshotSequence: 1, Threads: shellTestThreads(shellTestThread("th-a", "归档"))},
+		gen, nil); !applied || err != nil {
+		t.Fatalf("seed archive: applied=%v err=%v", applied, err)
+	}
+
+	if registered, flipped := state.noteArchiveMembershipUncertain([]string{"th-a"}, time.Minute); registered != 0 || flipped {
+		t.Fatalf("an already-archived thread needs no reconciliation, got registered=%d flipped=%v", registered, flipped)
+	}
+	if snaps := state.snapshots(); snaps.ArchiveErr != nil {
+		t.Fatalf("face must stay trusted, got %v", snaps.ArchiveErr)
+	}
+
+	// 反例：归档面没有的线程仍要登记。
+	if registered, flipped := state.noteArchiveMembershipUncertain([]string{"th-x"}, time.Minute); registered != 1 || !flipped {
+		t.Fatalf("unknown-to-archive thread must be registered, got registered=%d flipped=%v", registered, flipped)
 	}
 }

@@ -5179,3 +5179,54 @@ func TestT3ShellHub_LegacyMembershipUncertainExpiryAnnounces(t *testing.T) {
 		return v.Snaps != nil && v.Snaps.ArchiveErr == nil
 	})
 }
+
+// 同一宽限窗口内两次移除都必须到期自愈（#156 R3-P1）：第二次登记不会翻转
+// archiveErr，若因此跳过定时器调度，那批 ID 永远等不到清理，归档面永久 stale。
+func TestT3ShellHub_LegacyMembershipUncertainSecondBatchExpires(t *testing.T) {
+	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
+	srv.setArchiveLegacy(true)
+	srv.setArchiveFixture(archiveSnapshotBody(1, "th-a"), nil)
+	cfg := hubTestConfig()
+	cfg.ArchiveStaleGrace = 150 * time.Millisecond
+	hub := newT3ShellHubWithConfig(cfg, nil)
+	defer hub.Close()
+	env := hubTestEnv(url, 0)
+
+	go hub.View(context.Background(), env, "tok")
+	collector := newShellConnCollector(t, srv)
+	active := collector.await(false)
+	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1")); err != nil {
+		t.Fatalf("send active snapshot: %v", err)
+	}
+	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
+		t.Fatalf("active snapshot not acked")
+	}
+	srv.awaitArchiveSub(t)
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil
+	})
+
+	sendRemoval := func(seq int, id string) {
+		t.Helper()
+		removed, _ := json.Marshal(map[string]any{"kind": "thread.removed", "sequence": seq, "threadId": id})
+		if err := active.conn.sendValue(active.sub.ID, removed); err != nil {
+			t.Fatalf("send removal %s: %v", id, err)
+		}
+		if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
+			t.Fatalf("removal %s not acked", id)
+		}
+	}
+
+	sendRemoval(43, "th-x")
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && errors.Is(v.Snaps.ArchiveErr, errT3ShellArchiveStale)
+	})
+	// 同一宽限窗口内的第二批（不翻转可信度）：也必须有自己的到期清理。
+	time.Sleep(60 * time.Millisecond)
+	sendRemoval(44, "th-y")
+
+	// 两批都到期后必须恢复可信（不需要任何归档增量）。
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil
+	})
+}
