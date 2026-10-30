@@ -483,7 +483,8 @@ func (h *t3ShellHub) newEntryLocked(key string, env *model.T3Environment, token 
 	// （Peek/waitView）kick，重启或新环境接入后的首个列表/详情就会在快照
 	// 落地前返回——归档线程整段缺失且被标 degraded；main 上归档订阅随预热
 	// 建立，首读通常已就绪，这里保持同等体验。拉取本身是后台任务（失败冷却
-	// + inFlight 合并），不阻塞首读，也不占 e.wg。
+	// + inFlight 合并），不阻塞首读，但**计入 e.wg**（#156 R21/R26）——停机时
+	// 汇合 goroutine 会等它退出，Close 不会在拉取收尾前返回。
 	e.kickArchiveRefresh()
 
 	// done 在全部监督 goroutine 退出后关闭，供测试汇合；同时释放 hub 的
