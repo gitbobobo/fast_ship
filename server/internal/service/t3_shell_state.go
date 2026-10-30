@@ -557,6 +557,13 @@ func (s *t3ShellState) archiveGenerationNow() int64 {
 // 请求世代（出发邮戳，发前取值见 connectArchiveLegacyOnce）——快照项据
 // 此判定能否清守旧备忘（见 applyArchiveSnapshotLocked）。
 func (s *t3ShellState) applyArchiveItem(item t3ArchiveStreamItem, connectionStart int64) error {
+	return s.applyArchiveItemAt(item, connectionStart, time.Now())
+}
+
+// applyArchiveItemAt 是带「本连接的发起时刻」的版本（#156 R17）：订阅推送的
+// 快照也可能在本连接建立之前就被上游采好、之后才送达——用送达时刻当证据
+// 会把这类旧快照误当成新对账。调用方传连接建立时刻（保守下界）。
+func (s *t3ShellState) applyArchiveItemAt(item t3ArchiveStreamItem, connectionStart int64, observedAt time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	switch item.Kind {
@@ -564,7 +571,7 @@ func (s *t3ShellState) applyArchiveItem(item t3ArchiveStreamItem, connectionStar
 		if item.Snapshot == nil {
 			return fmt.Errorf("归档快照帧缺少 snapshot 字段")
 		}
-		return s.applyArchiveSnapshotLocked(*item.Snapshot, connectionStart, time.Now())
+		return s.applyArchiveSnapshotLocked(*item.Snapshot, connectionStart, observedAt)
 	case "thread.updated":
 		if item.Sequence == nil || item.Thread == nil || item.Thread.ID == "" {
 			return fmt.Errorf("归档 thread.updated 帧缺少 sequence/thread/threadId")

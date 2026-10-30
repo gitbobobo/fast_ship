@@ -993,6 +993,10 @@ func (h *t3ShellHub) readArchiveLegacyLoop(e *t3ShellEntry, session *t3RPCSessio
 	}()
 
 	lastFrame := time.Now()
+	// connStartAt 是本连接的建立时刻（#156 R17）：订阅推送的快照可能在本连接
+	// 之前就被采好，用送达时刻当对账证据会把旧快照当成新证据。取连接建立的
+	// 保守下界，宁可多等一个宽限窗口也不误判存在性。
+	connStartAt := time.Now()
 	pingTicker := time.NewTicker(h.cfg.PingInterval / 2)
 	defer pingTicker.Stop()
 
@@ -1021,7 +1025,7 @@ func (h *t3ShellHub) readArchiveLegacyLoop(e *t3ShellEntry, session *t3RPCSessio
 			lastFrame = time.Now()
 			switch {
 			case frame.Tag == "Chunk" && frame.requestIDMatches(requestID):
-				if applyErr := h.applyArchiveValues(e, frame.Values, connectionStart); applyErr != nil {
+				if applyErr := h.applyArchiveValues(e, frame.Values, connectionStart, connStartAt); applyErr != nil {
 					h.endFaceConnection(e, true, applyErr)
 					return t3ShellConnResult{syncedAt: dataSeenAt}
 				}
@@ -1082,14 +1086,14 @@ func (h *t3ShellHub) readArchiveLegacyLoop(e *t3ShellEntry, session *t3RPCSessio
 // applyArchiveValues 把旧归档流 Chunk 的全部 value 依次解码并应用到状
 // 态，发布语义同活跃面。connectionStart 是本连接的 reconnect 出发邮戳，
 // 交给快照项做守旧备忘的世代判定（R4 P2）。
-func (h *t3ShellHub) applyArchiveValues(e *t3ShellEntry, values []json.RawMessage, connectionStart int64) error {
+func (h *t3ShellHub) applyArchiveValues(e *t3ShellEntry, values []json.RawMessage, connectionStart int64, connStartAt time.Time) error {
 	batch := t3ShellEventBatch{}
 	for _, raw := range values {
 		var item t3ArchiveStreamItem
 		if err := json.Unmarshal(raw, &item); err != nil {
 			return fmt.Errorf("归档流帧解析失败: %w", err)
 		}
-		if err := e.state.applyArchiveItem(item, connectionStart); err != nil {
+		if err := e.state.applyArchiveItemAt(item, connectionStart, connStartAt); err != nil {
 			return err
 		}
 		batch.observeArchive(&item)
