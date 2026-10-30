@@ -199,7 +199,8 @@ const reviewTiedRevalidateMax = 4
 // issue_comment 走评论唤醒分支（INT-179）：幂等与守卫自成两阶段编排
 // （handleCommentWake，事务外只读预查+实拉、单事务内幂等登记+复核开轮），
 // 不进 pull_request 触发事务；两平台的事件名同为
-// issue_comment（Forgejo webhook 订阅名 "Issue Comment"）。错误归类与
+// issue_comment（Forgejo 的 PR 评论由独立订阅项 Pull Request Comment
+// 投递，事件头归一为 issue_comment）。错误归类与
 // 提交后踢循环两平台共用同一尾部。
 func (s *ReviewService) handlePlatformWebhook(ctx context.Context, integrationID, source, event, deliveryID string, body []byte) error {
 	var err error

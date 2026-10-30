@@ -266,10 +266,10 @@ func TestReviewCommentWakeGuards(t *testing.T) {
 		// 平台标记的 Bot 账号自评论：正文可能引用用户评论里的 mention，
 		// 不排除会形成「发布结论 → 再唤醒」的无限审查循环。
 		issueCommentBody("@fast-ship-bot 结论：发现问题", repo, 25, 42, setCommentUserType("Bot")),
-		// 机器评论的隐藏标记（fast-ship 审查结论）同样排除。
-		issueCommentBody("结论 <!-- fast-ship-code-review --> 含 @fast-ship-bot", repo, 25, 42),
-		// codex 复审总结的隐藏标记同样排除。
-		issueCommentBody("<!-- codex-pull-request-review-summary --> 含 @fast-ship-bot", repo, 25, 42),
+		// 机器评论的隐藏标记固定在正文开头（与 upsertPRComment 的 own 判定
+		// 同口径），marker 开头的整条评论不唤醒。
+		issueCommentBody("<!-- fast-ship-code-review -->\n结论 含 @fast-ship-bot", repo, 25, 42),
+		issueCommentBody("<!-- codex-pull-request-review-summary -->\n含 @fast-ship-bot", repo, 25, 42),
 	} {
 		if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", fmt.Sprintf("d-g%d", i), body); err != nil {
 			t.Fatalf("guard %d: %v", i, err)
@@ -286,9 +286,20 @@ func TestReviewCommentWakeGuards(t *testing.T) {
 		issueCommentBody("麻烦 @Fast-Ship-BOT 复审", repo, 25, 42)); err != nil {
 		t.Fatalf("upper mention: %v", err)
 	}
+	// 人类引用/摘录机器人评论片段（marker 落在正文中间）不误杀：前缀
+	// 匹配只拦 marker 开头的整条机器评论。
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-g-quote",
+		issueCommentBody("引用机器人结论片段 <!-- fast-ship-code-review --> 后 @fast-ship-bot 请再审", repo, 25, 42)); err != nil {
+		t.Fatalf("quote marker: %v", err)
+	}
 	var run model.ReviewRun
 	if err := e.svc.db.Where("pr_number = 25").First(&run).Error; err != nil {
 		t.Fatalf("大写 mention 应唤醒: %v", err)
+	}
+	var wakeCount int64
+	e.svc.db.Model(&model.ReviewRun{}).Where("pr_number = 25").Count(&wakeCount)
+	if wakeCount != 2 {
+		t.Fatalf("大写 mention 与引用 marker 的人类评论各开一轮，runs = %d", wakeCount)
 	}
 	if run.TriggerAction != "comment" {
 		t.Fatalf("trigger_action = %q, want comment", run.TriggerAction)

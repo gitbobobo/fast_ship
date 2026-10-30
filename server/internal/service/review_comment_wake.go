@@ -89,12 +89,15 @@ func commentWakePayloadGuards(body []byte) *commentWakePayload {
 	// 机器自评论不唤醒：审查结论与复审总结的正文由模型生成，可能引用
 	// 用户评论里的 @fast-ship-bot——不排除会形成「发布结论 → 再唤醒」
 	// 的无限审查循环（每轮 supersede 上一轮，持续烧额度）。两类识别：
-	// 平台标记的 Bot 账号；机器评论自带的隐藏 HTML 标记（fast-ship 审查
-	// 结论、codex 复审总结）。
+	// 平台标记的 Bot 账号；机器评论自带的隐藏 HTML 标记。标记判定与
+	// upsertPRComment 的 own 口径同源（TrimSpace 后前缀匹配）：机器结论
+	// 的 marker 固定在正文开头，人类引用/摘录机器人评论片段（marker
+	// 落在正文中间）不该被误杀（fast-ship-bot 第 4 轮 P2）。
+	trimmedBody := strings.TrimSpace(p.Comment.Body)
 	if p.Comment.User.Type == "Bot" ||
-		strings.Contains(p.Comment.Body, reviewCodeCommentMarker) ||
-		strings.Contains(p.Comment.Body, reviewVisualCommentMarker) ||
-		strings.Contains(p.Comment.Body, "<!-- codex-") {
+		strings.HasPrefix(trimmedBody, reviewCodeCommentMarker) ||
+		strings.HasPrefix(trimmedBody, reviewVisualCommentMarker) ||
+		strings.HasPrefix(trimmedBody, "<!-- codex-") {
 		return nil
 	}
 	// 普通 Issue 评论（issue.pull_request 缺失）与缺仓库/编号的畸形投递忽略。

@@ -185,10 +185,12 @@ PR 顶层评论（`issue_comment` 事件）正文包含 `@fast-ship-bot`（大�
 的包含判定）时也开一轮审查——审查结论有误时实现者回帖纠正即可唤醒审查
 者，不必推空提交。`handlePlatformWebhook` 按 event 名分流：`issue_comment`
 走独立的评论唤醒分支，不进 pull_request 触发事务；GitHub 与 Forgejo 的事件
-名同为 `issue_comment`（Forgejo webhook 订阅名 "Issue Comment"），共用中性
-路径。**平台 webhook 必须订阅 Issue comment 事件**，否则平台根本不投递：
-manifest 流创建的 App 已默认带上（`GitHubAppManifestService.Create` 的
-`default_events` 含 `issue_comment`），手动创建的 App 需自行勾选。
+名同为 `issue_comment`（Forgejo 的 PR 评论由独立订阅项 **Pull Request
+Comment** 投递，事件头归一为 `issue_comment`），共用中性路径。**平台
+webhook 必须订阅 Issue comment 事件**，否则平台根本不投递：manifest 流
+创建的 GitHub App 已默认带上（`GitHubAppManifestService.Create` 的
+`default_events` 含 `issue_comment`），手动创建的 App 需自行勾选；Forgejo
+需勾 Pull Request Comment（见 forge-integrations.md 第 6 步）。
 
 payload 两平台同形，只取最小字段面：`action`（只受理 `created`，编辑/删除
 不唤醒）、`issue.pull_request`（存在即 PR，普通 Issue 的评论忽略）、
