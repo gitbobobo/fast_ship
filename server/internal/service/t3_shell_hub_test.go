@@ -4854,3 +4854,93 @@ func TestT3ShellHub_LegacyActiveRemovalDoesNotReconnectArchive(t *testing.T) {
 		t.Fatalf("legacy archive rows must be retained, got %+v", view.Snaps.Archived.Threads)
 	}
 }
+
+// TestT3ShellHub_GraceRevokesWhileRefetchInFlight 钉住 R17 P2-1：重拉一旦
+// 发起，后续读全走 inFlight 早退；撤可信不能只挂在「准入成功」那一次，
+// 否则慢/挂起的重拉窗口里过期快照继续被报可信。
+func TestT3ShellHub_GraceRevokesWhileRefetchInFlight(t *testing.T) {
+	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
+	srv.setArchiveFixture(archiveSnapshotBody(1, "th-a"), nil)
+	cfg := hubTestConfig()
+	cfg.ArchiveTTL = 200 * time.Millisecond
+	cfg.ArchiveStaleGrace = 50 * time.Millisecond
+	hub := newT3ShellHubWithConfig(cfg, nil)
+	defer hub.Close()
+	env := hubTestEnv(url, 0)
+
+	_, _, _, _, _ = establishBothFaces(t, hub, srv, env, "tok", 42, "th-1")
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil
+	})
+
+	// 压住重拉：宽限内触发重拉（此时仍可信），随后让过期超过宽限。
+	srv.pauseArchive()
+	time.Sleep(cfg.ArchiveTTL + 10*time.Millisecond)
+	view, err := hub.Peek(env, "tok")
+	if err != nil {
+		t.Fatalf("peek: %v", err)
+	}
+	if view.Snaps == nil || view.Snaps.ArchiveErr != nil {
+		t.Fatalf("within grace must stay trusted, got %+v", view.Snaps)
+	}
+
+	time.Sleep(cfg.ArchiveStaleGrace + 40*time.Millisecond) // 超过宽限，拉取仍在途
+	view, err = hub.Peek(env, "tok")
+	if err != nil {
+		t.Fatalf("peek: %v", err)
+	}
+	if view.Snaps == nil || !errors.Is(view.Snaps.ArchiveErr, errT3ShellArchiveStale) {
+		t.Fatalf("beyond grace must revoke even while a refetch is in flight, got %+v", view.Snaps)
+	}
+	srv.resumeArchive()
+}
+
+// TestT3ShellHub_LegacyLandingSyncsAnnounceBaseline 钉住 R17 P2-2：旧面订阅
+// 落地后必须同步 archAnnounced，否则清表后的发布比对旧基准判「无变化」而
+// 完全不发事件，浏览器继续展示服务端已清掉的归档行。
+func TestT3ShellHub_LegacyLandingSyncsAnnounceBaseline(t *testing.T) {
+	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
+	srv.setArchiveLegacy(true)
+	srv.setArchiveFixture(archiveSnapshotBody(1, "th-a"), nil)
+	hub := newT3ShellHubWithConfig(hubTestConfig(), nil)
+	defer hub.Close()
+	env := hubTestEnv(url, 0)
+
+	sub := hub.Subscribe("user-1")
+	defer sub.Close()
+
+	_, _, _, _, _ = establishBothFaces(t, hub, srv, env, "tok", 42, "th-1")
+	archConn := <-srv.archiveConns
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil && len(v.Snaps.Archived.Threads) == 1
+	})
+	// 落地必须同步宣布基准（否则清表比对旧基准判「无变化」不发事件）。
+	key := t3ShellHubKey(env.UserID, env.ID)
+	hub.mu.Lock()
+	entry := hub.entries[key]
+	hub.mu.Unlock()
+	if entry == nil {
+		t.Fatalf("entry missing")
+	}
+	entry.mu.Lock()
+	announced := archiveDigestIDs(entry.archAnnounced.rows)
+	entry.mu.Unlock()
+	if len(announced) != 1 || announced[0] != "th-a" {
+		t.Fatalf("legacy landing must sync the announce baseline, announced=%v", announced)
+	}
+
+	// 清掉落地事件，只观察随后的清表。
+	deadline := time.Now().Add(200 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if len(sub.Drain()) == 0 {
+			break
+		}
+	}
+
+	// 归档订阅断开 → markArchiveFailed 清表：集合从 1 行变 0 行，必须发事件。
+	archConn.closeConn()
+	ev := awaitShellEvent(t, sub, func(e T3ShellEvent) bool { return e.Full })
+	if ev.EnvironmentID != "env-1" {
+		t.Fatalf("clearing the legacy archive face must be announced, got %+v", ev)
+	}
+}

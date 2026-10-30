@@ -120,9 +120,6 @@ func (e *t3ShellEntry) kickArchiveRefresh() {
 	// 旧实现在放 arch.mu 后才调 noteArchiveExpired，后到读者见 inFlight
 	// 直接返回，拿到的视图仍报可信（复审遗留竞态）。
 	admitted, revoked := e.admitArchiveRefresh()
-	if !admitted {
-		return
-	}
 	if revoked {
 		// 撤可信是归档面对外可见状态的一次翻转（ArchiveErr 从无到 stale），
 		// 与落地/失败同款发布一次（P1，R12）：只 refresh 不发布时宣布基准
@@ -136,6 +133,9 @@ func (e *t3ShellEntry) kickArchiveRefresh() {
 		// 与落地/失败发布同一锁边界，不引入持锁发布点。
 		e.hub.publishArchiveFaceEvent(e, false)
 		e.refresh()
+	}
+	if !admitted {
+		return
 	}
 
 	// 拉取跑在 hub 生命周期 ctx 上、不感知单个请求 ctx（拉取服务的是
@@ -196,7 +196,16 @@ func (e *t3ShellEntry) admitArchiveRefresh() (admitted bool, revoked bool) {
 		return false, false
 	}
 	if e.arch.inFlight || now.Before(e.arch.validUntil) || now.Before(e.arch.retryAfter) {
-		return false, false
+		// 在途分支同样要按宽限撤可信（R17 P2-1）：重拉一旦发起，后续读全部
+		// 走这条早退，撤可信若只挂在「准入成功」那一次，就会拖到拉取结束
+		// （最长 archTTL）——慢/挂起的重拉窗口里过期快照仍被报 archiveReady
+		// =true、ArchiveErr=nil，Peek/wait 据此判 thread_gone（R2 要堵的窗
+		// 口重现）。撤可信与在途状态在同一临界区内完成，对读者不可分。
+		revoked := e.arch.inFlight && !e.arch.validUntil.IsZero() && now.Sub(e.arch.validUntil) > e.archiveStaleGrace
+		if revoked {
+			e.state.noteArchiveExpiredLocked()
+		}
+		return false, revoked
 	}
 	// 按需路径已确认：第一次发起拉取把 mode 记为 snapshot（同一临界区
 	// 提交，与「inFlight 置位」不可分）。
@@ -967,5 +976,11 @@ func (h *t3ShellHub) applyArchiveValues(e *t3ShellEntry, values []json.RawMessag
 		batch.observeArchive(&item)
 	}
 	h.publishThreadEvent(e, batch.ids, batch.full)
+	// 宣布基准随本次落地同步（R17 P2-2）：旧面订阅落地只发线程事件时，
+	// archAnnounced 停在更早的失败/初始状态——「连上拿快照 → 同一错误再次
+	// 断开」的循环里，清表后的发布拿空表+同一文案去比对旧基准，判「无新
+	// 话可说」而完全不发事件，浏览器继续展示服务端已清掉的归档行。落地后
+	// 同步基准，清表就是真实的集合变化（发 Full）。
+	h.publishArchiveFaceEvent(e, false)
 	return nil
 }
