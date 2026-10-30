@@ -461,9 +461,10 @@ func (h *t3ShellHub) newEntryLocked(key string, env *model.T3Environment, token 
 	h.entries[key] = e
 
 	// 生命周期计数：entry 的全部 goroutine（监督循环经 readStreamLoop 退出前
-	// 会汇合各自的订阅 reader）退出后释放。归档按需拉取是后台一次性任务
-	// （arch.inFlight 合并并发，entry 停/hub 关即中断），不占常驻 goroutine，
-	// 不计入 e.wg；旧面订阅 goroutine 则常驻，占 e.wg 一份。
+	// 会汇合各自的订阅 reader）退出后释放。归档按需拉取虽是后台一次性任务
+	// （arch.inFlight 合并并发），但**计入 e.wg**（#156 R21）——否则 Close 等
+	// 不到它，可能在 ensureArchive 收尾/发布失败时就返回；旧面订阅 goroutine
+	// 常驻，同样占 e.wg 一份。
 	h.lifecycle.Add(1)
 	e.wg.Add(2)
 	go func() {
@@ -526,6 +527,9 @@ type t3ShellEntry struct {
 	// settleTimer 是「归档归属待对账」到期清理的定时器（#156 R12）：由 entry
 	// 持有并在停机时 Stop，避免 Close 之后回调仍触发、也算进生命周期。守 mu。
 	settleTimer *time.Timer
+	// settleAt 是当前定时器的目标时刻（#156 R23）：只在新 deadline 更早时重排，
+	// 避免后来的登记把早先条目的清理上界往后推。
+	settleAt time.Time
 	// settleMu 串行化「停机 Stop 定时器」与「回调正在执行」（#156 R12-codex）：
 	// 只 Stop 定时器不能 join 已经在跑的回到——Close 可能在回调中途返回。
 	// 回调全程持锁，停机在同一把锁里 Stop，保证 shutdown 返回后没有在途回调。

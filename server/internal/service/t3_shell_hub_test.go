@@ -2757,7 +2757,8 @@ func TestT3ShellHub_ExpiredArchiveUntrustedDuringRefetch(t *testing.T) {
 	// 放行重拉：写后快照落地恢复可信，归档集换成上游新状态。
 	srv.resumeArchive()
 	view = waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
-		return v.Snaps != nil && v.Snaps.ArchiveErr == nil && v.Snaps.Archived.Threads[0].ID == "th-b"
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil && len(v.Snaps.Archived.Threads) == 1 &&
+			v.Snaps.Archived.Threads[0].ID == "th-b"
 	})
 	_ = view
 }
@@ -5409,6 +5410,65 @@ func TestT3ShellHub_LegacyArchiveLocatedUpdateRecovers(t *testing.T) {
 		return v.Snaps != nil && errors.Is(v.Snaps.ArchiveErr, errT3ShellArchiveStale)
 	})
 	// 到期必须自愈（有定时器），不需要归档增量。
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil
+	})
+}
+
+// 连续移除不得把早期条目的清理顺延（#156 R23 P1）：定时器按最早截止时刻排程，
+// 否则间隔小于宽限的连续移除会让定时器永远不到期，归档面永久 stale 且集合
+// 无界增长。
+func TestT3ShellHub_MembershipSettleNotStarvedByNewRemovals(t *testing.T) {
+	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
+	srv.setArchiveLegacy(true)
+	srv.setArchiveFixture(archiveSnapshotBody(1, "th-a"), nil)
+	cfg := hubTestConfig()
+	cfg.ArchiveStaleGrace = 120 * time.Millisecond
+	hub := newT3ShellHubWithConfig(cfg, nil)
+	defer hub.Close()
+	env := hubTestEnv(url, 0)
+
+	go hub.View(context.Background(), env, "tok")
+	collector := newShellConnCollector(t, srv)
+	active := collector.await(false)
+	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1", "th-2", "th-3", "th-4")); err != nil {
+		t.Fatalf("send active snapshot: %v", err)
+	}
+	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
+		t.Fatalf("active snapshot not acked")
+	}
+	srv.awaitArchiveSub(t)
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil
+	})
+
+	// 每 40ms 移走一个（间隔远小于 120ms 宽限）：旧实现在这里永不恢复。
+	for i, id := range []string{"th-1", "th-2", "th-3", "th-4"} {
+		removed, _ := json.Marshal(map[string]any{"kind": "thread.removed", "sequence": 43 + i, "threadId": id})
+		if err := active.conn.sendValue(active.sub.ID, removed); err != nil {
+			t.Fatalf("send removal %s: %v", id, err)
+		}
+		if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
+			t.Fatalf("removal %s not acked", id)
+		}
+		time.Sleep(40 * time.Millisecond)
+	}
+
+	// 关键断言：连续移除期间，早期条目必须按**自己的**截止时刻被清掉，不能
+	// 被后来的登记一直顺延（旧实现在这里是 4 条全在，且流继续就永不清理）。
+	time.Sleep(60 * time.Millisecond)
+	var entry *t3ShellEntry
+	for _, e := range hub.entries {
+		entry = e
+	}
+	if entry == nil {
+		t.Fatalf("entry not found")
+	}
+	if pending := entry.state.pendingArchiveUncertain(); pending > 1 {
+		t.Fatalf("earlier removals must expire on their own deadlines, still pending=%d", pending)
+	}
+
+	// 全部到期后归档面恢复可信。
 	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
 		return v.Snaps != nil && v.Snaps.ArchiveErr == nil
 	})

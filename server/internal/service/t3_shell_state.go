@@ -924,6 +924,30 @@ func (s *t3ShellState) refreshArchiveMembershipTrustLocked() {
 	}
 }
 
+// pendingArchiveUncertain 返回当前待对账条数（观测/用例用）。
+func (s *t3ShellState) pendingArchiveUncertain() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.archiveUncertain)
+}
+
+// earliestArchiveUncertainDeadline 返回待对账集合里最早的截止时刻（#156 R23）。
+// 定时器按它排程，保证「每条目的截止时刻就是自己的清理上界」——早先登记的
+// 条目不会被后来者顺延。
+func (s *t3ShellState) earliestArchiveUncertainDeadline() (time.Time, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var earliest time.Time
+	found := false
+	for _, deadline := range s.archiveUncertain {
+		if !found || deadline.Before(earliest) {
+			earliest = deadline
+			found = true
+		}
+	}
+	return earliest, found
+}
+
 // expireArchiveMembershipUncertain 清理到期的不确定项，全部清空时恢复可信并
 // 报告「是否需要发布事件」（#156 R2）：到期恢复必须由定时器驱动并在 hub 层
 // 发布——只在读路径懒清会让打开中的页面一直停在降级态（use-threads 不轮询，

@@ -710,35 +710,59 @@ func (h *t3ShellHub) scheduleArchiveMembershipSettle(e *t3ShellEntry, settle tim
 	if settle <= 0 {
 		return
 	}
-	// 定时器由 entry 持有并在停机时 Stop（#156 R12）：既避免 Close 之后回调
-	// 仍触发，也让「到期清理」成为 entry 生命周期的一部分。同一 entry 同时
-	// 只保留最新一个定时器：settle 是常量，最新定时器的时刻必然覆盖此前各批
-	// 的截止时刻（到期清理按各自 deadline 裁剪，早批会被一并清掉）。
+	// 定时器按**最早截止时刻**排程（#156 R23）：只按「本次登记 + settle」排会
+	// 让早先登记条目的截止时刻被后来的登记不断顺延——连续移除间隔小于宽限时
+	// 定时器永远不到期，早期 ID 早已过截止却仍待对账，归档面永久 stale 且集合
+	// 无界增长。到期回调里再按剩余最早截止续排，每条目的上界就是自己。
+	deadline, ok := e.state.earliestArchiveUncertainDeadline()
+	if !ok {
+		return
+	}
 	e.mu.Lock()
 	if e.isStopped() {
-		// 停机之后再装定时器没人会 Stop 它（#156 R19）：回调虽会因 isStopped
-		// 早退，但仍是 Close 之后才触发的 goroutine，白占一个生命周期尾巴。
+		// 停机之后再装定时器没人会 Stop 它（#156 R19）。
 		e.mu.Unlock()
 		return
 	}
-	if e.settleTimer != nil {
-		e.settleTimer.Stop()
+	if e.settleTimer != nil && !e.settleAt.After(deadline) {
+		// 已有更早（或同刻）的排程，不后移。
+		e.mu.Unlock()
+		return
 	}
-	e.settleTimer = time.AfterFunc(settle, func() {
-		// 与停机串行（#156 R12-codex）：shutdown 在同一把锁里 Stop，回调一旦
-		// 开跑就持锁到结束，shutdown 返回后不再有在途回调（Close 才算真正
-		// 收干净）。
-		e.settleMu.Lock()
-		defer e.settleMu.Unlock()
-		if e.isStopped() {
-			return
-		}
-		if e.state.expireArchiveMembershipUncertain() {
-			h.publishArchiveFaceEvent(e, false)
-			e.refresh()
-		}
-	})
+	delay := time.Until(deadline)
+	if delay < 0 {
+		delay = 0
+	}
+	if e.settleTimer == nil {
+		e.settleTimer = time.AfterFunc(delay, func() { h.settleArchiveMembership(e) })
+	} else {
+		e.settleTimer.Reset(delay)
+	}
+	e.settleAt = deadline
 	e.mu.Unlock()
+}
+
+// settleArchiveMembership 是一次到期清理（#156 R23）：清掉已过截止的条目，
+// 若仍有剩余则按它们的最早截止续排。
+func (h *t3ShellHub) settleArchiveMembership(e *t3ShellEntry) {
+	// 与停机串行（#156 R12-codex）：shutdown 在同一把锁里 Stop，回调一旦
+	// 开跑就持锁到结束，shutdown 返回后不再有在途回调（Close 才算真正收干净）。
+	e.settleMu.Lock()
+	defer e.settleMu.Unlock()
+	if e.isStopped() {
+		return
+	}
+	if e.state.expireArchiveMembershipUncertain() {
+		h.publishArchiveFaceEvent(e, false)
+		e.refresh()
+	}
+	e.mu.Lock()
+	e.settleTimer = nil
+	e.settleAt = time.Time{}
+	e.mu.Unlock()
+	if deadline, ok := e.state.earliestArchiveUncertainDeadline(); ok {
+		h.scheduleArchiveMembershipSettle(e, time.Until(deadline))
+	}
 }
 
 // invalidateArchiveEntry 是 InvalidateArchive 的 entry 级入口：hub 内部已持
