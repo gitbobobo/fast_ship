@@ -638,8 +638,10 @@ func (h *t3ShellHub) InvalidateArchive(userID, envID string) {
 // 活跃面与归档订阅是两条流，顺序无保证——别的客户端归档线程时，active 的
 // thread.removed 可能先于 archived 的 thread.updated 到达。若这段窗口里
 // ArchiveErr 仍为 nil，并发 bot wait 会把「活跃面与归档面都没有」当成可信
-// 结论而误判 thread_gone。标记只影响可信度（旧行保留），下一次订阅数据
-// 落地（增量或快照）即恢复，不必清表重连。
+// 结论而误判 thread_gone。标记只影响可信度（旧行保留），恢复只有三条路径：
+// **含该线程的归档全量快照**、**线程在活跃面重新出现**、**宽限到期**——
+// 归档增量只换行、不解账（#156 R15：排队的增量可能来自更早一轮归档周期），
+// 所以不能写成「下一次订阅数据落地即恢复」。
 func (h *t3ShellHub) invalidateArchiveEntryAfterActiveRemoval(e *t3ShellEntry, leftIDs, armedRegisteredIDs, provenIDs []string) {
 	e.arch.mu.Lock()
 	legacy := e.arch.mode == t3ArchiveModeLegacy
