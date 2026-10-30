@@ -374,8 +374,15 @@ func (p *redeliveryPRProbe) lookup(ctx context.Context, deliveryID int64, event 
 	switch event {
 	case "issue_comment":
 		// 与评论唤醒共用同一份最小字段面：repository.full_name + issue.number。
-		// 复用同一份守卫：非唤醒投递（普通 Issue 评论、正文未点名机器人）
-		// webhook 本来就会静默忽略——记终态跳过，不进重试集白吃预算与通知。
+		// 解析失败 ≠ 守卫拒绝：空/损坏 payload（或形状变化）按未知降级重投，
+		// 与 pull_request 分支同口径——只有解析成功后的守卫拒绝才是非唤醒
+		// 终态（fast-ship-bot 第 29 轮 P2：真实唤醒不得被记终态不再重试）。
+		var probe commentWakePayload
+		if err := json.Unmarshal(detail.Payload, &probe); err != nil {
+			return redeliveryPRCheck{}, fmt.Errorf("解析投递 payload: %w", err)
+		}
+		// 守卫拒绝（非唤醒投递：普通 Issue 评论、正文未点名机器人）webhook
+		// 本来就会静默忽略——记终态跳过，不进重试集白吃预算与通知。
 		payload := commentWakePayloadGuards(detail.Payload, p.mentions)
 		if payload == nil {
 			if p.mentionsDegraded {

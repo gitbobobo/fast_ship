@@ -45,6 +45,13 @@ func (s *ReviewService) commentWakeMentions(ctx context.Context) ([]string, erro
 	}
 	cfg, ok, err := s.appSource.Current(ctx)
 	if err != nil {
+		// 永久配置错误（如部署设置解密失败）重投只会得到同一结果——回落
+		// 字面量集合，不让 App 身份读取失败卡死全部平台的评论唤醒（含
+		// Forgejo 与普通讨论评论，fast-ship-bot 第 29 轮 P2）；其余（瞬时
+		// DB 故障）维持透出 500 让平台重投。
+		if errors.Is(err, errGitHubAppDecrypt) {
+			return mentions, nil
+		}
 		return nil, err
 	}
 	if !ok || cfg.AppSlug == "" {
@@ -473,12 +480,44 @@ func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, ev
 		stale := baseline != nil && pr.UpdatedAt != nil && pr.UpdatedAt.Before(*baseline)
 		tied := baseline != nil && pr.UpdatedAt != nil &&
 			pr.UpdatedAt.Equal(*baseline) && pr.HeadSHA != observedHead
-		if stale || tied {
-			s.logger.Warn("评论唤醒实拉快照时序与已受理 head 不符（滞后/同刻歧义），按瞬时失败重投",
+		if stale {
+			s.logger.Warn("评论唤醒实拉快照滞后于已受理 head，按瞬时失败重投",
 				zap.String("integration", integrationID),
 				zap.String("repo", repo), zap.Int("pr", prNumber),
 				zap.String("live", pr.HeadSHA), zap.String("accepted", observedHead))
-			return fmt.Errorf("评论唤醒实拉快照时序与已受理 head 不符（滞后/同刻歧义）")
+			return fmt.Errorf("评论唤醒实拉快照滞后于已受理 head")
+		}
+		if tied {
+			// 同刻异 head 有两种可能：账本落后 + 同秒新 head（本功能要修的
+			// 场景，应采信）；滞后读旧快照（应重投）。复核：再实拉一次（一
+			// 致才算稳定），再查 head 是否曾受理过（seen 行）——曾受理 = 旧
+			// 快照拒绝；未受理 = 同秒新 head 采信（fast-ship-bot 第 29 轮
+			// P2：无条件重投会让同秒新 head 永久丢唤醒）。
+			pr2, ferr := client.GetPullRequest(pullCtx, repo, prNumber)
+			if ferr != nil {
+				return ferr
+			}
+			if pr2.HeadSHA != pr.HeadSHA {
+				s.logger.Warn("评论唤醒同刻异 head 复核未收敛，按瞬时失败重投",
+					zap.String("integration", integrationID),
+					zap.String("repo", repo), zap.Int("pr", prNumber),
+					zap.String("live", pr.HeadSHA), zap.String("rechecked", pr2.HeadSHA))
+				return fmt.Errorf("评论唤醒同刻异 head 复核未收敛")
+			}
+			var seenOld model.ReviewSeenSHA
+			sErr := s.db.WithContext(ctx).Where("repo_full_name = ? AND pr_number = ? AND head_sha = ? AND integration_id = ?",
+				repo, prNumber, pr.HeadSHA, integrationID).First(&seenOld).Error
+			if sErr == nil {
+				s.logger.Warn("评论唤醒同刻异 head 为曾受理旧快照（滞后读），按瞬时失败重投",
+					zap.String("integration", integrationID),
+					zap.String("repo", repo), zap.Int("pr", prNumber),
+					zap.String("live", pr.HeadSHA), zap.String("accepted", observedHead))
+				return fmt.Errorf("评论唤醒实拉快照滞后于已受理 head（同刻旧 head）")
+			}
+			if !errors.Is(sErr, gorm.ErrRecordNotFound) {
+				return sErr
+			}
+			pr = pr2
 		}
 		forkDenied, err := s.openCommentWakeRoundTx(ctx, integrationID, event, deliveryID, repo, prNumber,
 			installationID, observedHead, pr, time.Now().UTC())

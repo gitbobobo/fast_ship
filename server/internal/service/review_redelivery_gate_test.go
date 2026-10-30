@@ -456,3 +456,32 @@ func TestRedeliveryGateRenamedRepoNotFork(t *testing.T) {
 		t.Fatalf("同仓 PR 不得按 fork 记终态: %+v", row)
 	}
 }
+
+// 投递 payload 解析失败 ≠ 非唤醒（fast-ship-bot 第 29 轮 P2）：空/损坏的
+// request.payload 按未知降级重投（与 pull_request 分支同口径），不得把真
+// 实唤醒投递记终态永不重试；解析成功的守卫拒绝才是非唤醒终态。
+func TestRedeliveryGateCorruptPayloadDegrades(t *testing.T) {
+	env := newReviewEngineEnv(t)
+	env.enableReview(t)
+
+	base := redeliveryTestNow.Add(-time.Hour)
+	env.fake.SetHookDeliveries([]githubapp.HookDelivery{
+		hookRow(6101, "guid-cw-corrupt", "issue_comment", "created", 500, false, base),
+		hookRow(6102, "guid-cw-plain2", "issue_comment", "created", 500, false, base),
+	})
+	env.fake.SetHookDeliveryPayload(6101, json.RawMessage("{oops 不是合法 JSON"))
+	env.fake.SetHookDeliveryPayload(6102, redeliveryPlainCommentPayload("owner/repo", 7))
+	env.fake.SetPR("owner/repo", 7, &githubapi.PullRequest{})
+
+	env.review.reconcileWebhookDeliveries(redeliveryTestNow)
+	got := env.fake.RedeliveredIDs()
+	if len(got) != 1 || got[0] != 6101 {
+		t.Fatalf("损坏 payload 应降级重投: %v", got)
+	}
+	if row, ok := redeliveryClosedRow(t, env, "guid-cw-corrupt"); ok && row.ClosedAt != nil {
+		t.Fatalf("损坏 payload 不得记终态: %+v", row)
+	}
+	if row, ok := redeliveryClosedRow(t, env, "guid-cw-plain2"); !ok || row.ClosedAt == nil {
+		t.Fatalf("守卫拒绝（非唤醒）仍应记终态: %+v (ok=%v)", row, ok)
+	}
+}

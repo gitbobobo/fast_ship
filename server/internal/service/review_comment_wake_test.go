@@ -1856,14 +1856,22 @@ func TestReviewCommentWakeTiedTimestampAmbiguity(t *testing.T) {
 	}).Error; err != nil {
 		t.Fatalf("seed seen: %v", err)
 	}
-	// 同刻（t1）但 head 不同：滞后读到的旧 head 快照。
+	// 同刻（t1）但 head 不同：滞后读到的旧 head 快照——该 head 曾受理过
+	// （有 seen 行），复核判旧、拒绝。
+	if err := e.svc.db.Create(&model.ReviewSeenSHA{
+		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 46,
+		HeadSHA: "sha-older", IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		PRUpdatedAt: &t1, AcceptedAt: t1,
+	}).Error; err != nil {
+		t.Fatalf("seed seen old: %v", err)
+	}
 	e.fake.SetPR(repo, 46, &githubapi.PullRequest{
 		RepoFullName: repo, Number: 46, State: "open", HeadSHA: "sha-older",
 		HeadRepoFullName: repo, UpdatedAt: &t1,
 	})
 	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-tied",
 		issueCommentBody("@fast-ship-bot", repo, 46, 42)); err == nil {
-		t.Fatal("同刻异 head 快照应按瞬时失败拒绝（500）")
+		t.Fatal("同刻异 head 的曾受理旧快照应按瞬时失败拒绝（500）")
 	}
 	var runs int64
 	e.svc.db.Model(&model.ReviewRun{}).Where("pr_number = 46").Count(&runs)
@@ -1877,4 +1885,83 @@ func TestReviewCommentWakeTiedTimestampAmbiguity(t *testing.T) {
 	if deliveries != 0 {
 		t.Fatalf("瞬时失败不落账: deliveries = %d", deliveries)
 	}
+}
+
+// 同刻异 head 的另一种情况（fast-ship-bot 第 29 轮 P2）：账本因丢投递落
+// 后、实拉读到同秒内的新 head——复核后采信开轮（「采信实拉 head」语义），
+// 不再无条件重投把唤醒锁死。
+func TestReviewCommentWakeTiedNewHeadAccepted(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	e.enableReview(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	ctx := context.Background()
+	t1 := time.Now().UTC().Add(-2 * time.Hour)
+	if err := e.svc.db.Create(&model.ReviewPullRequest{
+		ProjectID: e.project.ID, UserID: e.project.UserID,
+		RepoFullName: repo, PRNumber: 47,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		HeadSHA:       "sha-a", RoundNumber: 1, UpdatedAt: t1,
+	}).Error; err != nil {
+		t.Fatalf("seed ledger: %v", err)
+	}
+	if err := e.svc.db.Create(&model.ReviewSeenSHA{
+		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 47,
+		HeadSHA: "sha-a", IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		PRUpdatedAt: &t1, AcceptedAt: t1,
+	}).Error; err != nil {
+		t.Fatalf("seed seen: %v", err)
+	}
+	// 同刻（t1）新 head sha-b（从未受理）：复核一致且无 seen 行 → 采信开轮。
+	e.fake.SetPR(repo, 47, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 47, State: "open", HeadSHA: "sha-b",
+		HeadRepoFullName: repo, UpdatedAt: &t1,
+	})
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-tied-new",
+		issueCommentBody("@fast-ship-bot", repo, 47, 42)); err != nil {
+		t.Fatalf("同秒新 head 应采信开轮: %v", err)
+	}
+	var run model.ReviewRun
+	if err := e.svc.db.Where("pr_number = 47").First(&run).Error; err != nil {
+		t.Fatalf("应开出新轮: %v", err)
+	}
+	if run.HeadSHA != "sha-b" {
+		t.Fatalf("新轮 head = %s, want sha-b", run.HeadSHA)
+	}
+}
+
+// 永久配置错误（部署设置解密失败）回落字面量集合（fast-ship-bot 第 29 轮
+// P2）：重投只会得到同一结果，500 会让全部平台的评论唤醒（含 Forgejo 与
+// 普通讨论评论）卡死；字面量唤醒串不受 App 身份读取失败影响。
+func TestReviewCommentWakeAppDecryptErrorFallback(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	e.enableReview(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	ctx := context.Background()
+	e.fake.SetPR(repo, 48, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 48, State: "open", HeadSHA: "sha-decrypt",
+		HeadRepoFullName: repo,
+	})
+	e.review.appSource = appSourceDecryptErr{}
+
+	// 字面量点名照常唤醒（不 500）。
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-dec-1",
+		issueCommentBody("@fast-ship-bot", repo, 48, 42)); err != nil {
+		t.Fatalf("解密失败应回落字面量而非卡死: %v", err)
+	}
+	var run model.ReviewRun
+	if err := e.svc.db.Where("pr_number = 48").First(&run).Error; err != nil {
+		t.Fatalf("字面量点名应开轮: %v", err)
+	}
+	// 非唤醒评论照常静默忽略。
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-dec-2",
+		issueCommentBody("普通讨论", repo, 48, 42)); err != nil {
+		t.Fatalf("非唤醒评论应忽略: %v", err)
+	}
+}
+
+// appSourceDecryptErr GitHubAppSource 桩：读取恒报解密失败（永久配置错误）。
+type appSourceDecryptErr struct{}
+
+func (appSourceDecryptErr) Current(context.Context) (GitHubAppConfig, bool, error) {
+	return GitHubAppConfig{}, false, errGitHubAppDecrypt
 }
