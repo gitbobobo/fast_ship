@@ -161,6 +161,12 @@ func (e *t3ShellEntry) kickArchiveRefresh() {
 	if e.wgClosed {
 		e.wgMu.Unlock()
 		cancelFetch()
+		// 准入已经置过 inFlight/refetchStartedAt，这里不落 goroutine 就不会有人
+		// 收尾（#156 R35 Note）：停机后仍持有该 entry 的读会永远看到「重拉在途」。
+		e.arch.mu.Lock()
+		e.arch.inFlight = false
+		e.arch.refetchStartedAt = time.Time{}
+		e.arch.mu.Unlock()
 		return
 	}
 	e.wg.Add(1)

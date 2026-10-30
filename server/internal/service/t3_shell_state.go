@@ -477,7 +477,10 @@ func (s *t3ShellState) applyArchiveSnapshotAt(snapshot t3ArchivedShellSnapshot, 
 		}
 		return false, nil
 	}
-	if !observedAt.IsZero() && observedAt.Before(s.archiveFreshnessFloor) {
+	// 快照本身可能晚于 floor（订阅往返期间发生的移除会把 floor 推到
+	// connStartAt 之后），此时它包含全部待对账 ID 就足以证明是变更后采样
+	// （#156 R35）：否则批量移除期间会无差别拒收、反复断连重拨。
+	if !observedAt.IsZero() && observedAt.Before(s.archiveFreshnessFloor) && !(len(s.archiveUncertain) > 0 && snapshotCoversUncertain(snapshot, s.archiveUncertain)) {
 		// 采集早于最近一次归属变更（#156 R28）：这是变更前状态，只换数据不封窗，
 		// 由之后采到的快照或下一次到期恢复可信。
 		s.archiveReady = false
@@ -941,6 +944,24 @@ func (s *t3ShellState) armArchiveUncertain(armed bool, settle time.Duration) {
 func (s *t3ShellState) armArchiveUncertainLocked(armed bool, settle time.Duration) {
 	s.archiveUncertainArmed = armed
 	s.archiveUncertainSettle = settle
+}
+
+// snapshotCoversUncertain 判断快照是否包含全部待对账 ID（#156 R35）：包含即
+// 说明它是在那些移除之后采样的，可以据此解账，不必因为采集时刻下界更早就拒收。
+func snapshotCoversUncertain(snapshot t3ArchivedShellSnapshot, uncertain map[string]time.Time) bool {
+	if len(uncertain) == 0 {
+		return true
+	}
+	incoming := make(map[string]struct{}, len(snapshot.Threads))
+	for i := range snapshot.Threads {
+		incoming[snapshot.Threads[i].ID] = struct{}{}
+	}
+	for id := range uncertain {
+		if _, ok := incoming[id]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // noteArchiveMembershipSettledLocked 撤掉某个线程的不确定标记（调用方须持
