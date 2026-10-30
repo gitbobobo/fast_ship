@@ -272,6 +272,7 @@ func (s *t3ShellState) applyActiveSnapshotLocked(snapshot t3ShellSnapshot) ([]st
 	if len(s.archiveUncertain) > 0 {
 		for i := range snapshot.Threads {
 			delete(s.archiveUncertain, snapshot.Threads[i].ID)
+			delete(s.archiveUncertainSince, snapshot.Threads[i].ID)
 		}
 		s.refreshArchiveMembershipTrustLocked()
 	}
@@ -864,6 +865,9 @@ func (s *t3ShellState) noteArchiveMembershipUncertainLocked(ids []string, settle
 // 清理（调度在 hub 帧后回调里），又会让后续订阅快照永远报 stale。
 func (s *t3ShellState) clearArchiveMembershipUncertainLocked() {
 	s.archiveUncertain = nil
+	// 登记时刻表必须同步清空（#156 R20）：它只为待对账集合服务，残留条目会
+	// 让同一 ID 之后重新登记时取到旧时刻，把本该有效的快照误判成「采集太早」。
+	s.archiveUncertainSince = nil
 }
 
 // armUncertainForRemovalsLocked 在 armed 状态下，把刚离开活跃面的线程就地
@@ -934,6 +938,9 @@ func (s *t3ShellState) expireArchiveMembershipUncertain() bool {
 	for id, deadline := range s.archiveUncertain {
 		if now.After(deadline) {
 			delete(s.archiveUncertain, id)
+			// 到期同样要清登记时刻（#156 R20）：否则同一 ID 再次登记时取到的
+			// 是旧时刻，会把之后的权威快照误判成「采集太早」而多降级一轮。
+			delete(s.archiveUncertainSince, id)
 		}
 	}
 	if len(s.archiveUncertain) > 0 {

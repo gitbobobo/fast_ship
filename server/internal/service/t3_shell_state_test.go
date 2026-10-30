@@ -1880,3 +1880,34 @@ func TestShellState_PrestaleSnapshotDoesNotSettleUncertainty(t *testing.T) {
 		t.Fatalf("a snapshot captured after the removal settles it, got %v", snaps.ArchiveErr)
 	}
 }
+
+// 待对账集合清空时必须同步清掉登记时刻表（#156 R20）：否则残留的旧时刻会
+// 跟着同一 ID 的下一次登记，把之后的权威快照误判成「采集太早」。
+func TestShellState_UncertaintySinceFollowsUncertainMap(t *testing.T) {
+	state := newT3ShellState()
+	if applied, err := state.applyArchiveSnapshot(
+		t3ArchivedShellSnapshot{SchemaVersion: 1, SnapshotSequence: 1, Threads: shellTestThreads(shellTestThread("th-a", "归档"))},
+		state.archiveGenerationNow(), nil); !applied || err != nil {
+		t.Fatalf("seed archive: %v", err)
+	}
+	if _, _, err := state.applyActiveItemTracked(t3ShellStreamItem{
+		Kind: "snapshot", Snapshot: &t3ShellSnapshot{SchemaVersion: 1, SnapshotSequence: 1, Threads: shellTestThreads(shellTestThread("th-1", "线程"))},
+	}); err != nil {
+		t.Fatalf("seed active: %v", err)
+	}
+	state.armArchiveUncertain(true, 20*time.Millisecond)
+	if _, _, err := state.applyActiveItemTracked(t3ShellStreamItem{
+		Kind: "thread.removed", Sequence: intPtrTestLocal(2), ThreadID: "th-1",
+	}); err != nil {
+		t.Fatalf("apply removal: %v", err)
+	}
+
+	time.Sleep(40 * time.Millisecond)
+	state.expireArchiveMembershipUncertain()
+	state.mu.Lock()
+	pending, since := len(state.archiveUncertain), len(state.archiveUncertainSince)
+	state.mu.Unlock()
+	if pending != 0 || since != 0 {
+		t.Fatalf("expiry must drop both maps, got pending=%d since=%d", pending, since)
+	}
+}
