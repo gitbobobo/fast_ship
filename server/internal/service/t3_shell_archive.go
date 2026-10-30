@@ -761,7 +761,15 @@ func (h *t3ShellHub) settleArchiveMembership(e *t3ShellEntry) {
 	e.settleAt = time.Time{}
 	e.mu.Unlock()
 	if deadline, ok := e.state.earliestArchiveUncertainDeadline(); ok {
-		h.scheduleArchiveMembershipSettle(e, time.Until(deadline))
+		delay := time.Until(deadline)
+		if delay <= 0 {
+			// 剩余条目的截止已过但还没被这轮清理到（expire 取 now 之后又过了
+			// 一会儿）：不能把负延迟交给 schedule（它在 settle<=0 时直接返回，
+			// 于是这些条目再也没有定时器 → 面永久 stale）。压到 1ms 立刻再看
+			// 一眼，expire 会按 now 裁掉它们。
+			delay = time.Millisecond
+		}
+		h.scheduleArchiveMembershipSettle(e, delay)
 	}
 }
 

@@ -589,7 +589,15 @@ func (s *t3ShellState) applyArchiveItemAt(item t3ArchiveStreamItem, connectionSt
 		if item.Sequence == nil || item.ThreadID == "" {
 			return fmt.Errorf("归档 thread.removed 帧缺少 sequence/threadId")
 		}
+		// 归档流删行本身可能来自更早一轮的 unarchive（两条流无顺序保证）：若该
+		// 线程此刻也不在活跃面，就会出现「两面都没有且面可信」的窗口（#156 R24）。
+		// 只删行不够——要把它记成归属待对账，等权威快照/宽限到期再下结论。
 		s.archivedThreads.remove(item.ThreadID)
+		if _, active := s.activeThreads.byID[item.ThreadID]; !active {
+			if settle := s.archiveUncertainSettle; settle > 0 && s.archiveUncertainArmed {
+				_, _ = s.noteArchiveMembershipUncertainLocked([]string{item.ThreadID}, settle, false)
+			}
+		}
 		// 归档流的 thread.removed **不能**当作「该线程归属已对账」（#156 R9）：
 		// 两条流顺序无保证，这条 removed 可能来自更早的一次 unarchive；把它当
 		// 对账完成会提前恢复可信，wait 随即把「两面都没有」判成 thread_gone。

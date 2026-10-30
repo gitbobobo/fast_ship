@@ -1911,3 +1911,24 @@ func TestShellState_UncertaintySinceFollowsUncertainMap(t *testing.T) {
 		t.Fatalf("expiry must drop both maps, got pending=%d since=%d", pending, since)
 	}
 }
+
+// 归档流删行同时线程不在活跃面时必须记成待对账（#156 R24）：这条 removed 可能
+// 来自更早一轮 unarchive，删完就是「两面都没有」，面还可信 → 会把存在的线程
+// 判成 thread_gone；等权威快照/宽限到期再下结论。
+func TestShellState_ArchiveRemovalOfActiveAbsentThreadMarksUncertain(t *testing.T) {
+	state := newT3ShellState()
+	if applied, err := state.applyArchiveSnapshot(
+		t3ArchivedShellSnapshot{SchemaVersion: 1, SnapshotSequence: 1, Threads: shellTestThreads(shellTestThread("th-1", "归档"))},
+		state.archiveGenerationNow(), nil); !applied || err != nil {
+		t.Fatalf("seed archive: %v", err)
+	}
+	state.armArchiveUncertain(true, time.Minute)
+	if err := state.applyArchiveItem(t3ArchiveStreamItem{
+		Kind: "thread.removed", Sequence: intPtrTestLocal(2), ThreadID: "th-1",
+	}, 0); err != nil {
+		t.Fatalf("apply archive removal: %v", err)
+	}
+	if snaps := state.snapshots(); !errors.Is(snaps.ArchiveErr, errT3ShellArchiveStale) {
+		t.Fatalf("removing the only trace of a thread must mark uncertainty, got %v", snaps.ArchiveErr)
+	}
+}
