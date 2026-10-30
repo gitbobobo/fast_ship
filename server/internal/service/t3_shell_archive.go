@@ -635,7 +635,7 @@ func (h *t3ShellHub) invalidateArchiveEntryAfterActiveRemoval(e *t3ShellEntry, l
 		// 把已被归档流对账的 ID 重新打回待对账（白 stale 一个宽限窗口），而
 		// 完全跳过又会漏掉「帧应用发生在 arm 之前」的移除。
 		todo := t3IDsNotIn(leftIDs, armedRegisteredIDs)
-		pending, _ := e.state.noteArchiveMembershipUncertain(todo, e.archiveStaleGrace)
+		pending := e.state.noteArchiveMembershipUncertain(todo, e.archiveStaleGrace)
 		if pending == 0 && len(armedRegisteredIDs) == 0 {
 			return
 		}

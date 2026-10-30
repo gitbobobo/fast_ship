@@ -333,8 +333,13 @@ func (s *t3ShellState) applyActiveItemTracked(item t3ShellStreamItem) (removed [
 		if item.Location == "active" {
 			s.activeThreads.upsert(item.Thread, item.Thread.ID)
 		} else {
+			// 只有「确实从活跃面移走」才需要等归档对账（#156 R9）：对不在活跃
+			// 面的 ID 的重复移除是噪声，登记只会把整个环境降级一个宽限窗口。
+			_, present := s.activeThreads.byID[item.Thread.ID]
 			s.activeThreads.remove(item.Thread.ID)
-			armedRegistered = s.armUncertainForRemovalsLocked([]string{item.Thread.ID})
+			if present {
+				armedRegistered = s.armUncertainForRemovalsLocked([]string{item.Thread.ID})
+			}
 		}
 		s.advanceActiveCursorLocked(*item.Sequence)
 		return nil, armedRegistered, nil
@@ -348,8 +353,11 @@ func (s *t3ShellState) applyActiveItemTracked(item t3ShellStreamItem) (removed [
 		// state 是纯内存、不持 hub 引用：归档缓存的失效由 hub 层在应用离开
 		// 活跃面的帧（本帧与 location!="active" 的 updated）后触发
 		// （applyActiveValues → invalidateArchiveEntry），这里只管活跃面。
+		_, present := s.activeThreads.byID[item.ThreadID]
 		s.activeThreads.remove(item.ThreadID)
-		armedRegistered = s.armUncertainForRemovalsLocked([]string{item.ThreadID})
+		if present {
+			armedRegistered = s.armUncertainForRemovalsLocked([]string{item.ThreadID})
+		}
 		s.advanceActiveCursorLocked(*item.Sequence)
 		return nil, armedRegistered, nil
 	default:
@@ -503,7 +511,10 @@ func (s *t3ShellState) applyArchiveItem(item t3ArchiveStreamItem, connectionStar
 			return fmt.Errorf("归档 thread.removed 帧缺少 sequence/threadId")
 		}
 		s.archivedThreads.remove(item.ThreadID)
-		s.noteArchiveMembershipSettledLocked(item.ThreadID)
+		// 归档流的 thread.removed **不能**当作「该线程归属已对账」（#156 R9）：
+		// 两条流顺序无保证，这条 removed 可能来自更早的一次 unarchive；把它当
+		// 对账完成会提前恢复可信，wait 随即把「两面都没有」判成 thread_gone。
+		// 只让 thread.updated（行确实存在）解账，removed 交给到期兜底。
 		return nil
 	default:
 		return fmt.Errorf("归档流未知帧 kind %q", item.Kind)
@@ -692,10 +703,9 @@ func (s *t3ShellState) noteArchiveFetchFailed(err error, generation int64, commi
 // settle 仍无对账就按「归档面无该线程」处理（此时若有极晚的增量，流本身也
 // 已经异常，断连重连会走权威快照）。
 //
-// 只动可信度（archiveReady 不动、旧行保留），不断流也不清表。返回 (pending,
-// flipped)：pending 是本次落到待对账集合里的 ID 数（含续期，调用方据此调度
-// 到期清理），flipped 表示可信度是否真的翻转（调用方据此决定是否发布事件）。
-func (s *t3ShellState) noteArchiveMembershipUncertain(ids []string, settle time.Duration) (pending int, flipped bool) {
+// 只动可信度（archiveReady 不动、旧行保留），不断流也不清表。返回 pending：
+// 本次落到待对账集合里的 ID 数（含续期，调用方据此调度到期清理与发布）。
+func (s *t3ShellState) noteArchiveMembershipUncertain(ids []string, settle time.Duration) (pending int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.noteArchiveMembershipUncertainLocked(ids, settle)
@@ -704,9 +714,9 @@ func (s *t3ShellState) noteArchiveMembershipUncertain(ids []string, settle time.
 // noteArchiveMembershipUncertainLocked 是 noteArchiveMembershipUncertain 的
 // 无锁变体（调用方须持 s.mu）：活跃面移除与应用在同一临界区登记，
 // 保证读者看不到「已删除但可信」的中间态（#156 R5）。
-func (s *t3ShellState) noteArchiveMembershipUncertainLocked(ids []string, settle time.Duration) (pending int, flipped bool) {
-	if len(ids) == 0 {
-		return 0, false
+func (s *t3ShellState) noteArchiveMembershipUncertainLocked(ids []string, settle time.Duration) (pending int) {
+	if len(ids) == 0 || settle <= 0 {
+		return 0
 	}
 	// 登记不依赖 archiveReady（#156 R6）：切入订阅模式时归档面先是不可信的，
 	// 这期间发生移除若跳过登记，等订阅快照把它恢复可信时，对应的归档增量
@@ -734,13 +744,12 @@ func (s *t3ShellState) noteArchiveMembershipUncertainLocked(ids []string, settle
 		s.archiveUncertain[id] = deadline
 	}
 	if pending == 0 {
-		return 0, false
+		return 0
 	}
 	if s.archiveReady && !errors.Is(s.archiveErr, errT3ShellArchiveStale) {
 		s.archiveErr = errT3ShellArchiveStale
-		flipped = true
 	}
-	return pending, flipped
+	return pending
 }
 
 // clearArchiveMembershipUncertainLocked 清空待对账集合（#156 R8-2）：离开订阅
@@ -748,14 +757,6 @@ func (s *t3ShellState) noteArchiveMembershipUncertainLocked(ids []string, settle
 // 清理（调度在 hub 帧后回调里），又会让后续订阅快照永远报 stale。
 func (s *t3ShellState) clearArchiveMembershipUncertainLocked() {
 	s.archiveUncertain = nil
-}
-
-// archiveUncertainArmedNow 报告当前是否处于「移除即登记」模式（#156 R7）：
-// 调用方据此判断登记是否已在应用移除的临界区内完成，避免重复登记。
-func (s *t3ShellState) archiveUncertainArmedNow() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.archiveUncertainArmed
 }
 
 // armUncertainForRemovalsLocked 在 armed 状态下，把刚离开活跃面的线程就地
@@ -766,9 +767,12 @@ func (s *t3ShellState) armUncertainForRemovalsLocked(ids []string) bool {
 	}
 	settle := s.archiveUncertainSettle
 	if settle <= 0 {
-		settle = time.Second
+		// 没有宽限就没有定时器（scheduleArchiveMembershipSettle 同样早退）：
+		// 登记了也永远清不掉，归档面会一直 stale（#156 R9 Note）。宁可相信
+		// 归档面也不要制造不可恢复的不确定态。
+		return false
 	}
-	registered, _ := s.noteArchiveMembershipUncertainLocked(ids, settle)
+	registered := s.noteArchiveMembershipUncertainLocked(ids, settle)
 	return registered > 0
 }
 

@@ -1254,8 +1254,8 @@ func TestShellState_ArchiveMembershipUncertainSettlesOnDeadline(t *testing.T) {
 		t.Fatalf("seed archive: applied=%v err=%v", applied, err)
 	}
 
-	if registered, flipped := state.noteArchiveMembershipUncertain([]string{"th-x"}, 40*time.Millisecond); registered != 1 || !flipped {
-		t.Fatalf("marking a live face uncertain must register and flip, got registered=%d flipped=%v", registered, flipped)
+	if registered := state.noteArchiveMembershipUncertain([]string{"th-x"}, 40*time.Millisecond); registered != 1 {
+		t.Fatalf("marking a live face uncertain must register, got registered=%d", registered)
 	}
 	if snaps := state.snapshots(); !errors.Is(snaps.ArchiveErr, errT3ShellArchiveStale) {
 		t.Fatalf("uncertain membership must report stale, got %v", snaps.ArchiveErr)
@@ -1287,8 +1287,8 @@ func TestShellState_ArchiveMembershipUncertainIsPerThread(t *testing.T) {
 		gen, nil); !applied || err != nil {
 		t.Fatalf("seed archive: applied=%v err=%v", applied, err)
 	}
-	if registered, flipped := state.noteArchiveMembershipUncertain([]string{"th-x", "th-y"}, time.Minute); registered != 2 || !flipped {
-		t.Fatalf("marking must register both ids and flip, got registered=%d flipped=%v", registered, flipped)
+	if registered := state.noteArchiveMembershipUncertain([]string{"th-x", "th-y"}, time.Minute); registered != 2 {
+		t.Fatalf("marking must register both ids, got registered=%d", registered)
 	}
 
 	// 只有 th-x 的增量到位：仍然不可信（th-y 未对账）。
@@ -1327,16 +1327,16 @@ func TestShellState_ArchiveMembershipAlreadyArchivedIsNotUncertain(t *testing.T)
 		t.Fatalf("seed archive: applied=%v err=%v", applied, err)
 	}
 
-	if registered, flipped := state.noteArchiveMembershipUncertain([]string{"th-a"}, time.Minute); registered != 0 || flipped {
-		t.Fatalf("an already-archived thread needs no reconciliation, got registered=%d flipped=%v", registered, flipped)
+	if registered := state.noteArchiveMembershipUncertain([]string{"th-a"}, time.Minute); registered != 0 {
+		t.Fatalf("an already-archived thread needs no reconciliation, got registered=%d", registered)
 	}
 	if snaps := state.snapshots(); snaps.ArchiveErr != nil {
 		t.Fatalf("face must stay trusted, got %v", snaps.ArchiveErr)
 	}
 
 	// 反例：归档面没有的线程仍要登记。
-	if registered, flipped := state.noteArchiveMembershipUncertain([]string{"th-x"}, time.Minute); registered != 1 || !flipped {
-		t.Fatalf("unknown-to-archive thread must be registered, got registered=%d flipped=%v", registered, flipped)
+	if registered := state.noteArchiveMembershipUncertain([]string{"th-x"}, time.Minute); registered != 1 {
+		t.Fatalf("unknown-to-archive thread must be registered, got registered=%d", registered)
 	}
 }
 
@@ -1480,8 +1480,8 @@ func TestShellState_RegistrationAfterArmCoversEarlierRemoval(t *testing.T) {
 
 	// arm 之后、帧后回调补登记：必须真的登记（不能因 armed 而跳过）。
 	state.armArchiveUncertain(true, time.Minute)
-	if pending, flipped := state.noteArchiveMembershipUncertain([]string{"th-1"}, time.Minute); pending != 1 || !flipped {
-		t.Fatalf("post-callback registration must cover pre-arm removals, got pending=%d flipped=%v", pending, flipped)
+	if pending := state.noteArchiveMembershipUncertain([]string{"th-1"}, time.Minute); pending != 1 {
+		t.Fatalf("post-callback registration must cover pre-arm removals, got pending=%d", pending)
 	}
 	if snaps := state.snapshots(); !errors.Is(snaps.ArchiveErr, errT3ShellArchiveStale) {
 		t.Fatalf("face must become stale, got %v", snaps.ArchiveErr)
@@ -1530,5 +1530,98 @@ func TestShellState_ResetClearsPendingUncertain(t *testing.T) {
 	}
 	if snaps := state.snapshots(); snaps.ArchiveErr != nil {
 		t.Fatalf("cleared pending set must not keep the face stale, got %v", snaps.ArchiveErr)
+	}
+}
+
+// 归档流的 thread.removed 不能算对账完成（#156 R9）：它可能来自更早的一次
+// unarchive（两条流顺序无保证），拿来解账会提前恢复可信、误判 thread_gone。
+func TestShellState_ArchiveRemovedDoesNotSettle(t *testing.T) {
+	state := newT3ShellState()
+	if applied, err := state.applyArchiveSnapshot(
+		t3ArchivedShellSnapshot{SchemaVersion: 1, SnapshotSequence: 1, Threads: shellTestThreads(shellTestThread("th-a", "归档"))},
+		state.archiveGenerationNow(), nil); !applied || err != nil {
+		t.Fatalf("seed archive: %v", err)
+	}
+	if _, _, err := state.applyActiveItemTracked(t3ShellStreamItem{
+		Kind: "snapshot", Snapshot: &t3ShellSnapshot{SchemaVersion: 1, SnapshotSequence: 1, Threads: shellTestThreads(shellTestThread("th-1", "线程"))},
+	}); err != nil {
+		t.Fatalf("seed active: %v", err)
+	}
+	state.armArchiveUncertain(true, time.Minute)
+	if _, _, err := state.applyActiveItemTracked(t3ShellStreamItem{
+		Kind: "thread.removed", Sequence: intPtrTestLocal(2), ThreadID: "th-1",
+	}); err != nil {
+		t.Fatalf("apply active removal: %v", err)
+	}
+	if snaps := state.snapshots(); !errors.Is(snaps.ArchiveErr, errT3ShellArchiveStale) {
+		t.Fatalf("armed removal must mark uncertainty, got %v", snaps.ArchiveErr)
+	}
+
+	// 归档流投递同名 removed（可能是更早的 unarchive）：不得解账。
+	if err := state.applyArchiveItem(t3ArchiveStreamItem{
+		Kind: "thread.removed", Sequence: intPtrTestLocal(3), ThreadID: "th-1",
+	}, 0); err != nil {
+		t.Fatalf("apply archive removal: %v", err)
+	}
+	if snaps := state.snapshots(); !errors.Is(snaps.ArchiveErr, errT3ShellArchiveStale) {
+		t.Fatalf("archive thread.removed must not settle the uncertainty, got %v", snaps.ArchiveErr)
+	}
+
+	// 只有 thread.updated（行确实存在）才解账。
+	if err := state.applyArchiveItem(t3ArchiveStreamItem{
+		Kind: "thread.updated", Sequence: intPtrTestLocal(4), Thread: shellTestThread("th-1", "归档"),
+	}, 0); err != nil {
+		t.Fatalf("apply archive update: %v", err)
+	}
+	if snaps := state.snapshots(); snaps.ArchiveErr != nil {
+		t.Fatalf("thread.updated settles the uncertainty, got %v", snaps.ArchiveErr)
+	}
+}
+
+// 噪声移除不登记（#156 R9）：对不在活跃面的 ID 的移除不该把整个环境降级一个
+// 宽限窗口。
+func TestShellState_NoiseRemovalDoesNotGoUncertain(t *testing.T) {
+	state := newT3ShellState()
+	if applied, err := state.applyArchiveSnapshot(
+		t3ArchivedShellSnapshot{SchemaVersion: 1, SnapshotSequence: 1, Threads: shellTestThreads(shellTestThread("th-a", "归档"))},
+		state.archiveGenerationNow(), nil); !applied || err != nil {
+		t.Fatalf("seed archive: %v", err)
+	}
+	state.armArchiveUncertain(true, time.Minute)
+	if _, _, err := state.applyActiveItemTracked(t3ShellStreamItem{
+		Kind: "thread.removed", Sequence: intPtrTestLocal(2), ThreadID: "th-ghost",
+	}); err != nil {
+		t.Fatalf("apply noise removal: %v", err)
+	}
+	if snaps := state.snapshots(); snaps.ArchiveErr != nil {
+		t.Fatalf("removing an absent thread must not degrade the face, got %v", snaps.ArchiveErr)
+	}
+}
+
+// 没有宽限就没有定时器：settle<=0 时宁可不登记（#156 R9 Note），否则待对账
+// 永远清不掉、归档面一直 stale。
+func TestShellState_ZeroSettleDoesNotRegister(t *testing.T) {
+	state := newT3ShellState()
+	if applied, err := state.applyArchiveSnapshot(
+		t3ArchivedShellSnapshot{SchemaVersion: 1, SnapshotSequence: 1, Threads: shellTestThreads(shellTestThread("th-a", "归档"))},
+		state.archiveGenerationNow(), nil); !applied || err != nil {
+		t.Fatalf("seed archive: %v", err)
+	}
+	if _, _, err := state.applyActiveItemTracked(t3ShellStreamItem{
+		Kind: "snapshot", Snapshot: &t3ShellSnapshot{SchemaVersion: 1, SnapshotSequence: 1, Threads: shellTestThreads(shellTestThread("th-1", "线程"))},
+	}); err != nil {
+		t.Fatalf("seed active: %v", err)
+	}
+	state.armArchiveUncertain(true, 0)
+	if _, _, err := state.applyActiveItemTracked(t3ShellStreamItem{
+		Kind: "thread.removed", Sequence: intPtrTestLocal(2), ThreadID: "th-1",
+	}); err != nil {
+		t.Fatalf("apply removal: %v", err)
+	}
+	if snaps := state.snapshots(); snaps.ArchiveErr != nil {
+		t.Fatalf("zero settle must not register an unrecoverable uncertainty, got %v", snaps.ArchiveErr)
+	}
+	if pending := state.noteArchiveMembershipUncertain([]string{"th-1"}, 0); pending != 0 {
+		t.Fatalf("zero settle must reject registration, got pending=%d", pending)
 	}
 }
