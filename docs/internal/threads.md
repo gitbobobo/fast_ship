@@ -247,7 +247,8 @@ workspace-options 选），由 T3 校验路径；Fast Ship 不另做项目目录
 没有该 RPC（归档只有常驻 `subscribeArchivedShell`）；getConfig 无归档面能
 力字段可判，故以「方法不存在」的明确 RPC 信号（method not found / unknown
 method / MethodNotFound 类 _tag，排除 rpcUncertainError 与任意业务失败）
-为切换凭据——首次读取命中即把 entry 永久切到回退的常驻订阅
+为切换凭据——**首次归档拉取**命中即把 entry 永久切到回退的常驻订阅（该拉取
+可能在 entry 建立时预热即发生，见下文生命周期条目，而不限于用户首次读取）
 （`runArchiveLegacySubscription`：探活 → 拨号 → 订阅 → 快照/增量喂入，
 断连即 markArchiveFailed + 退避重连），此后 kickArchiveRefresh 短路不再
 发按需拨号。常驻连接只有活跃面一条：会话客户端是串行的，
@@ -258,7 +259,12 @@ reducer（`t3_shell_state.go`）：活跃/归档两面独立维护，权威快�
 enrichment/元数据帧，整体忽略。归档面没有增量通道：一次成功快照只在
 `t3ShellHubConfig.ArchiveTTL`（60s）内当可信复用，过期由下一次读取（View/
 Peek）后台触发重拉——拉取不阻塞本次视图，落地/失败经 refresh 广播给等待
-者与订阅者；并发读取由 entry 的 `inFlight` 哨兵合并成一次上游调用。
+者与订阅者；并发读取由 entry 的 `inFlight` 哨兵合并成一次上游调用。过期
+本身不等于数据作废：**撤可信锚在本次重拉的发起时刻**（`ArchiveStaleGrace`，
+默认 5s），只有重拉在途超过宽限仍未落地（或重拉失败写真实原因）才把归档面
+撤为不可信；落地成功的那次快照即使收尾簿记尚未清完也不得再被撤（守卫看
+`validUntil` 是否已恢复为未来）。订阅模式下活跃面「离开」帧不断流，但会把
+归档集标记为暂不可信（两条流无顺序保证），由随后的订阅增量/快照恢复。
 
 - **可信度分别标注**：活跃面（`ActiveReady`/`ActiveSynced`）与归档面
   （`ArchiveReady`/`ArchiveErr`）独立判定。归档未就绪、读取失败与写后失效
@@ -305,7 +311,10 @@ Peek）后台触发重拉——拉取不阻塞本次视图，落地/失败经 re
   运行态；官方客户端的新 session 也是先加载权威快照、失败才退回全量，而不是
   沿用上一会话的缓存。权威帧到达前视图保持 Stale/Syncing。
 - **生命周期跟环境走（INT-132）**：服务启动预热时为每个已配对环境建立 entry
-  （`PrewarmShellSubscriptions` → `hub.Ensure`），环境创建/重新配对后重建，
+  （`PrewarmShellSubscriptions` → `hub.Ensure`），**entry 建立时并行预热一次
+  归档快照**（INT-173 R18：`newEntryLocked` 里 `kickArchiveRefresh`，后台拉取、
+  不阻塞首读、不计入 `e.wg`）——否则服务重启/新环境接入后的首个列表/详情会
+  在快照落地前返回，归档线程整段缺失并被标降级。环境创建/重新配对后重建，
   删除即关闭（`Drop` 传 `math.MaxInt64` tombstone：淘汰恒成立、迟到请求恒被拒）。
   不再有基于 View 的空闲断开或空闲回收；`View` 只取用已有 entry 并等待首次同步，
   读请求不决定连接生灭。连接结束时会汇合本次连接的取消监听与 reader；

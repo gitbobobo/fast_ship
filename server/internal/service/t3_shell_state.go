@@ -2,6 +2,7 @@ package service
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 )
@@ -471,12 +472,16 @@ func (s *t3ShellState) applyArchiveItem(item t3ArchiveStreamItem, connectionStar
 			return fmt.Errorf("归档 thread.updated 帧缺少 sequence/thread/threadId")
 		}
 		s.archivedThreads.upsert(item.Thread, item.Thread.ID)
+		// 订阅增量到达 = 归档集已跟上（含 noteArchiveMembershipUncertain 的
+		// 窗口）：恢复可信度（跟进 PR②）。
+		s.markArchiveMembershipTrustedLocked()
 		return nil
 	case "thread.removed":
 		if item.Sequence == nil || item.ThreadID == "" {
 			return fmt.Errorf("归档 thread.removed 帧缺少 sequence/threadId")
 		}
 		s.archivedThreads.remove(item.ThreadID)
+		s.markArchiveMembershipTrustedLocked()
 		return nil
 	default:
 		return fmt.Errorf("归档流未知帧 kind %q", item.Kind)
@@ -634,6 +639,33 @@ func (s *t3ShellState) noteArchiveFetchFailed(err error, generation int64, commi
 		commit(true)
 	}
 	return true
+}
+
+// noteArchiveMembershipUncertain 把订阅模式的归档面标为「归档集可能已变、
+// 暂不可信」（跟进 PR②，Codex :608）：活跃面已宣告某线程离开，而归档订阅的
+// 对应增量还没到——两条流之间没有顺序保证。此刻若 ArchiveErr 仍为 nil，
+// 并发 wait 会把「活跃面与归档面都没有」当可信结论，误判 thread_gone。
+// 只动可信度（archiveReady 不动、旧行保留），不断流也不清表：增量随后到达
+// 即由 markArchiveMembershipTrustedLocked 恢复。返回是否真的改变了状态，
+// 供发布层按指纹去重。
+func (s *t3ShellState) noteArchiveMembershipUncertain() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.archiveReady || errors.Is(s.archiveErr, errT3ShellArchiveStale) {
+		return false
+	}
+	s.archiveErr = errT3ShellArchiveStale
+	return true
+}
+
+// markArchiveMembershipTrustedLocked 撤销 noteArchiveMembershipUncertain 的
+// 标记（调用方须持 s.mu）：订阅数据已到达，说明归档集跟上了，可信度恢复。
+// 只清本函数自己打的 stale 标记——noteArchiveExpiredLocked 的过期标记会把
+// archiveReady 一并撤掉（这里要求 ready），真实失败原因也不会被抹掉。
+func (s *t3ShellState) markArchiveMembershipTrustedLocked() {
+	if s.archiveReady && errors.Is(s.archiveErr, errT3ShellArchiveStale) {
+		s.archiveErr = nil
+	}
 }
 
 // markActiveSynced 由 hub 控制追平标记：resume 时在重发订阅前清 false、

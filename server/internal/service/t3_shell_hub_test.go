@@ -4887,8 +4887,10 @@ func TestT3ShellHub_LegacyActiveRemovalDoesNotReconnectArchive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("peek: %v", err)
 	}
-	if view.Snaps == nil || view.Snaps.ArchiveErr != nil {
-		t.Fatalf("legacy archive face must stay trusted, got %+v", view.Snaps)
+	// 归档集被标记为暂不可信（跟进 PR②）：活跃面先宣告离开、归档增量未到，
+	// 这段窗口不得让并发 wait 把「两面都没有」当可信结论。旧行保留、不断流。
+	if view.Snaps == nil || !errors.Is(view.Snaps.ArchiveErr, errT3ShellArchiveStale) {
+		t.Fatalf("legacy archive membership must be marked uncertain, got %+v", view.Snaps)
 	}
 	if len(view.Snaps.Archived.Threads) != 1 || view.Snaps.Archived.Threads[0].ID != "th-a" {
 		t.Fatalf("legacy archive rows must be retained, got %+v", view.Snaps.Archived.Threads)
@@ -5023,5 +5025,88 @@ func TestT3ShellHub_EnsurePrewarmsArchiveSnapshot(t *testing.T) {
 			t.Fatalf("ensure must prewarm the archive snapshot without any read: ready=%v err=%v rows=%d", ready, err, rows)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// 订阅模式活跃面移除：不断流，但归档集暂不可信（跟进 PR②，Codex :608）。
+// 活跃面与归档订阅是两条流，顺序无保证——别的客户端归档线程时，active 的
+// thread.removed 可能先于 archived 的 thread.updated 到达；这段窗口里若
+// ArchiveErr 仍是 nil，并发 bot wait 会把「两面都没有」当可信结论误判
+// thread_gone。标记只影响可信度（旧行保留），增量到达即恢复。
+func TestT3ShellHub_LegacyActiveRemovalMarksMembershipUncertain(t *testing.T) {
+	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
+	srv.setArchiveLegacy(true)
+	srv.setArchiveFixture(archiveSnapshotBody(1, "th-a"), nil)
+	hub := newT3ShellHubWithConfig(hubTestConfig(), nil)
+	defer hub.Close()
+	env := hubTestEnv(url, 0)
+
+	// View 触发建连；活跃面与订阅面各自成为常驻连接。
+	go hub.View(context.Background(), env, "tok")
+	collector := newShellConnCollector(t, srv)
+	active := collector.await(false)
+	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1")); err != nil {
+		t.Fatalf("send active snapshot: %v", err)
+	}
+	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
+		t.Fatalf("active snapshot not acked")
+	}
+	archiveSub := srv.awaitArchiveSub(t)
+	archiveConn := <-srv.archiveConns
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil && len(v.Snaps.Archived.Threads) == 1
+	})
+	subsBefore := srv.archiveSubscribeCount()
+	if archiveConn.awaitClosed(50 * time.Millisecond) {
+		t.Fatalf("legacy archive subscription must stay open before any active removal")
+	}
+
+	// 活跃面宣告 th-2 离开（模拟别的客户端归档），归档增量尚未到达。
+	removed, _ := json.Marshal(map[string]any{
+		"kind": "thread.removed", "sequence": 43, "threadId": "th-2",
+	})
+	if err := active.conn.sendValue(active.sub.ID, removed); err != nil {
+		t.Fatalf("send active removal: %v", err)
+	}
+	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
+		t.Fatalf("active removal not acked")
+	}
+
+	// 不断流：不重连、连接仍活；但归档集暂不可信（旧行保留）。
+	view := waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && errors.Is(v.Snaps.ArchiveErr, errT3ShellArchiveStale)
+	})
+	if len(view.Snaps.Archived.Threads) != 1 || view.Snaps.Archived.Threads[0].ID != "th-a" {
+		t.Fatalf("uncertain membership must keep the last rows, got %+v", view.Snaps.Archived.Threads)
+	}
+	if got := srv.archiveSubscribeCount(); got != subsBefore {
+		t.Fatalf("active removal must not reconnect the legacy archive subscription, subs %d → %d", subsBefore, got)
+	}
+	if archiveConn.awaitClosed(200 * time.Millisecond) {
+		t.Fatalf("active removal must not tear down the healthy legacy archive stream")
+	}
+
+	// 归档增量到达：归档集已跟上，可信度恢复。
+	thB, _ := json.Marshal(map[string]any{
+		"id": "th-2", "projectId": "p-1", "title": "归档-th-2", "status": "idle",
+		"archivedAt": "2026-10-01T00:00:00.000Z",
+	})
+	delta, _ := json.Marshal(map[string]any{"kind": "thread.updated", "sequence": 44, "thread": json.RawMessage(thB)})
+	if err := archiveConn.sendValue(archiveSub.ID, delta); err != nil {
+		t.Fatalf("send archive delta: %v", err)
+	}
+	view = waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		if v.Snaps == nil || v.Snaps.ArchiveErr != nil {
+			return false
+		}
+		for _, th := range v.Snaps.Archived.Threads {
+			if th.ID == "th-2" {
+				return true
+			}
+		}
+		return false
+	})
+	if len(view.Snaps.Archived.Threads) != 2 {
+		t.Fatalf("archive delta must restore trust and add the thread, got %+v", view.Snaps.Archived.Threads)
 	}
 }

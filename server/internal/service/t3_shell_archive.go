@@ -211,7 +211,14 @@ func (e *t3ShellEntry) admitArchiveRefresh() (admitted bool, revoked bool) {
 		// 窗口里过期快照仍被报 archiveReady=true、ArchiveErr=nil，Peek/wait
 		// 据此判 thread_gone（R2 要堵的窗口）。撤可信与在途状态在同一临界区
 		// 内完成，对读者不可分。
-		revoked := !e.arch.refetchStartedAt.IsZero() && now.Sub(e.arch.refetchStartedAt) > e.archiveStaleGrace
+		// 仅在缓存仍过期时才撤（跟进 PR①，Codex :214）：重拉可能已经成功
+		// 落地（archiveReady=true、validUntil 在未来），只是 kick 的后台
+		// defer 还没来得及清 inFlight/refetchStartedAt——这个窗口里按「在途
+		// 过久」撤可信会把刚恢复的面重新打回不可信；而 inFlight 清空后，
+		// 后续准入看到未来的 validUntil 不再重拉，降级就会持续整个 TTL。
+		revoked := !e.arch.refetchStartedAt.IsZero() &&
+			now.Sub(e.arch.refetchStartedAt) > e.archiveStaleGrace &&
+			!now.Before(e.arch.validUntil)
 		if revoked {
 			e.state.noteArchiveExpiredLocked()
 		}
@@ -600,11 +607,20 @@ func (h *t3ShellHub) InvalidateArchive(userID, envID string) {
 // 因此订阅模式跳过；按需快照模式的 TTL 缓存必须靠这里失效（别处/别的
 // 客户端的归档迁移只能从这里得知）。写命令触发的失效仍走
 // InvalidateArchive，不受本函数影响。
+// 订阅模式下不断流，但要**标记归档集暂不可信**（跟进 PR②，Codex :608）：
+// 活跃面与归档订阅是两条流，顺序无保证——别的客户端归档线程时，active 的
+// thread.removed 可能先于 archived 的 thread.updated 到达。若这段窗口里
+// ArchiveErr 仍为 nil，并发 bot wait 会把「活跃面与归档面都没有」当成可信
+// 结论而误判 thread_gone。标记只影响可信度（旧行保留），下一次订阅数据
+// 落地（增量或快照）即恢复，不必清表重连。
 func (h *t3ShellHub) invalidateArchiveEntryAfterActiveRemoval(e *t3ShellEntry) {
 	e.arch.mu.Lock()
 	legacy := e.arch.mode == t3ArchiveModeLegacy
 	e.arch.mu.Unlock()
 	if legacy {
+		if e.state.noteArchiveMembershipUncertain() {
+			e.hub.publishArchiveFaceEvent(e, false)
+		}
 		return
 	}
 	h.invalidateArchiveEntry(e)

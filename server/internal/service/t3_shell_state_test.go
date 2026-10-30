@@ -1194,3 +1194,49 @@ func TestShellState_ArchiveFingerprintIncludesAssociationFields(t *testing.T) {
 		t.Fatalf("non-subagent row must not carry a parent, got %+v", rows4[0])
 	}
 }
+
+// 成功落地窗口不得再撤可信（跟进 PR①，Codex :214）：重拉可能已经成功落地
+// （archiveReady=true、validUntil 在未来），只是 kick 的后台 defer 还没清
+// inFlight/refetchStartedAt。此刻按「在途过久」撤可信会把刚恢复的面重新
+// 打回不可信；inFlight 清空后，后续准入看到未来的 validUntil 不再重拉，
+// 降级就会持续整个 TTL。
+func TestShellState_AdmitDoesNotRevokeAfterSuccessfulLanding(t *testing.T) {
+	entry := &t3ShellEntry{state: newT3ShellState(), archTTL: time.Minute, archiveStaleGrace: 50 * time.Millisecond}
+	gen := entry.state.archiveGenerationNow()
+	if applied, applyErr := entry.state.applyArchiveSnapshot(
+		t3ArchivedShellSnapshot{SchemaVersion: 1, SnapshotSequence: 1, Threads: shellTestThreads(shellTestThread("th-a", "归档"))},
+		gen, entry.commitArchiveApply); !applied || applyErr != nil {
+		t.Fatalf("seed trusted archive: applied=%v err=%v", applied, applyErr)
+	}
+
+	// 模拟「落地已提交、收尾 defer 未执行」的窗口：inFlight 仍置位、
+	// refetchStartedAt 是很久以前。
+	entry.arch.mu.Lock()
+	entry.arch.inFlight = true
+	entry.arch.refetchStartedAt = time.Now().Add(-time.Minute)
+	entry.arch.mu.Unlock()
+
+	admitted, revoked := entry.admitArchiveRefresh()
+	if admitted || revoked {
+		t.Fatalf("freshly landed snapshot must not be revoked, admitted=%v revoked=%v", admitted, revoked)
+	}
+	if snaps := entry.state.snapshots(); snaps.ArchiveErr != nil {
+		t.Fatalf("successful landing window must stay trusted, got %v", snaps.ArchiveErr)
+	}
+
+	// 反例（保持原语义）：缓存确实过期时，在途过久仍要撤可信。
+	entry.arch.mu.Lock()
+	entry.arch.validUntil = time.Now().Add(-time.Minute)
+	entry.arch.mu.Unlock()
+	admitted, revoked = entry.admitArchiveRefresh()
+	if admitted || !revoked {
+		t.Fatalf("expired cache with overlong refetch must revoke trust, admitted=%v revoked=%v", admitted, revoked)
+	}
+	revokedSnaps := entry.state.snapshots()
+	if !errors.Is(revokedSnaps.ArchiveErr, errT3ShellArchiveStale) {
+		t.Fatalf("revoked face must report stale, got %v", revokedSnaps.ArchiveErr)
+	}
+	if len(revokedSnaps.Archived.Threads) != 1 {
+		t.Fatalf("revoked face must keep the last rows, got %+v", revokedSnaps.Archived.Threads)
+	}
+}
