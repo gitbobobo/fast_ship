@@ -4743,3 +4743,114 @@ func TestT3ShellHub_BatchFailureStillInvalidatesArchive(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+// TestT3ShellHub_TTLExpiryWithinGraceStaysTrusted 钉住 R16 P2-2：TTL 过期只
+// 表示「该重拉了」，宽限期内（重拉多半正在途）触发重拉的这次读不得被标
+// degraded——否则每个环境每 TTL 就有一次读被误报降级，自动化侧据此把环境
+// 计入 incomplete_environments。
+func TestT3ShellHub_TTLExpiryWithinGraceStaysTrusted(t *testing.T) {
+	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
+	srv.setArchiveFixture(archiveSnapshotBody(1, "th-a"), nil)
+	cfg := hubTestConfig()
+	cfg.ArchiveTTL = 60 * time.Millisecond
+	cfg.ArchiveStaleGrace = 10 * time.Second // 本用例只观测宽限期内
+	hub := newT3ShellHubWithConfig(cfg, nil)
+	defer hub.Close()
+	env := hubTestEnv(url, 0)
+
+	_, _, _, _, _ = establishBothFaces(t, hub, srv, env, "tok", 42, "th-1")
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil && len(v.Snaps.Archived.Threads) == 1
+	})
+
+	time.Sleep(cfg.ArchiveTTL + 20*time.Millisecond) // 已过期，仍在宽限期内
+	view, err := hub.Peek(env, "tok")
+	if err != nil {
+		t.Fatalf("peek: %v", err)
+	}
+	if view.Snaps == nil || view.Snaps.ArchiveErr != nil {
+		t.Fatalf("expiry within grace must keep the face trusted (no false degrade), got %+v", view.Snaps)
+	}
+	if len(view.Snaps.Archived.Threads) != 1 {
+		t.Fatalf("grace window must still serve the previous snapshot rows, got %+v", view.Snaps.Archived.Threads)
+	}
+}
+
+// TestT3ShellHub_TTLExpiryBeyondGraceDegrades 钉住宽限的另一半：过期超过
+// 宽限仍未落地就撤可信（R2 的 thread_gone 保护不变），后续读不再信任过期
+// 快照。
+func TestT3ShellHub_TTLExpiryBeyondGraceDegrades(t *testing.T) {
+	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
+	srv.setArchiveFixture(archiveSnapshotBody(1, "th-a"), nil)
+	cfg := hubTestConfig()
+	cfg.ArchiveTTL = 40 * time.Millisecond
+	cfg.ArchiveStaleGrace = 20 * time.Millisecond
+	hub := newT3ShellHubWithConfig(cfg, nil)
+	defer hub.Close()
+	env := hubTestEnv(url, 0)
+
+	_, _, _, _, _ = establishBothFaces(t, hub, srv, env, "tok", 42, "th-1")
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil
+	})
+
+	// 压住重拉：过期超过宽限后仍未落地，撤可信。
+	srv.pauseArchive()
+	time.Sleep(cfg.ArchiveTTL + cfg.ArchiveStaleGrace + 30*time.Millisecond)
+	view, err := hub.Peek(env, "tok")
+	if err != nil {
+		t.Fatalf("peek: %v", err)
+	}
+	if view.Snaps == nil || !errors.Is(view.Snaps.ArchiveErr, errT3ShellArchiveStale) {
+		t.Fatalf("expiry beyond grace must revoke trust, got %+v", view.Snaps)
+	}
+	srv.resumeArchive()
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil
+	})
+}
+
+// TestT3ShellHub_LegacyActiveRemovalDoesNotReconnectArchive 钉住 R16 P2-1：
+// 订阅模式下归档集由常驻流增量维护，活跃面移除帧不得再把健康的归档订阅
+// 拆掉重连（否则批量归档时归档表反复清空）。
+func TestT3ShellHub_LegacyActiveRemovalDoesNotReconnectArchive(t *testing.T) {
+	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
+	srv.setArchiveLegacy(true)
+	srv.setArchiveFixture(archiveSnapshotBody(1, "th-a"), nil)
+	hub := newT3ShellHubWithConfig(hubTestConfig(), nil)
+	defer hub.Close()
+	env := hubTestEnv(url, 0)
+
+	_, activeConn, activeSub, _, _ := establishBothFaces(t, hub, srv, env, "tok", 42, "th-1")
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil && len(v.Snaps.Archived.Threads) == 1
+	})
+	subsBefore := srv.archiveSubscribeCount()
+
+	// 活跃面通知 th-1 离开（归档动作在上游同样发 active removal）。
+	removed, _ := json.Marshal(map[string]any{
+		"kind": "thread.removed", "sequence": 43, "threadId": "th-1",
+	})
+	if err := activeConn.sendValue(activeSub.ID, removed); err != nil {
+		t.Fatalf("send active removal: %v", err)
+	}
+	if !activeConn.awaitAck(activeSub.ID, 2*time.Second) {
+		t.Fatalf("active removal not acked")
+	}
+
+	// 订阅面不得被拆：不重连、归档行仍在、无失效错误。
+	time.Sleep(150 * time.Millisecond)
+	if got := srv.archiveSubscribeCount(); got != subsBefore {
+		t.Fatalf("legacy active removal must not reconnect the archive subscription, subs %d → %d", subsBefore, got)
+	}
+	view, err := hub.Peek(env, "tok")
+	if err != nil {
+		t.Fatalf("peek: %v", err)
+	}
+	if view.Snaps == nil || view.Snaps.ArchiveErr != nil {
+		t.Fatalf("legacy archive face must stay trusted, got %+v", view.Snaps)
+	}
+	if len(view.Snaps.Archived.Threads) != 1 || view.Snaps.Archived.Threads[0].ID != "th-a" {
+		t.Fatalf("legacy archive rows must be retained, got %+v", view.Snaps.Archived.Threads)
+	}
+}

@@ -420,7 +420,7 @@ func (s *t3ShellState) noteArchiveInvalidated() {
 	}
 }
 
-// noteArchiveExpired 在发起 TTL 过期重拉时把归档面撤为不可信（Finding R2）：
+// noteArchiveExpiredLocked 在 TTL 过期超过宽限期后把归档面撤为不可信（Finding R2 / R16 P2-2）：
 // 过期不等于数据作废，旧行照旧展示，但 validUntil 已过意味着「快照不再被
 // 信任为当前完整」——重拉在途期间若不撤 archiveReady，Peek/wait 会拿过期
 // 快照判 thread_gone、谎报归档列表完整（与写后失效同型缺口）。落地成功
@@ -428,14 +428,8 @@ func (s *t3ShellState) noteArchiveInvalidated() {
 // 记真实失败原因。不推进世代：本次重拉正是为恢复可信而发，落地要按当前
 // 世代正常封窗。已不可信的面（未就绪/已失效/已标记）不重复标记——既有
 // archiveErr 文案（真实失败/失效）比过期语义更准确。
-func (s *t3ShellState) noteArchiveExpired() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.noteArchiveExpiredLocked()
-}
-
-// noteArchiveExpiredLocked 是 noteArchiveExpired 的无锁变体（调用方须已持有
-// s.mu）：kick 的准入临界区经 commit 回调在 arch.mu 持锁内调用它，把「设
+// noteArchiveExpiredLocked 的调用方须已持有 s.mu：kick 的准入临界区经 commit
+// 回调在 arch.mu 持锁内调用它，把「设
 // inFlight」与「撤可信」收成同一原子序列（锁序 s.mu → arch.mu，与
 // applyArchiveSnapshot 的 commit 同型）。
 func (s *t3ShellState) noteArchiveExpiredLocked() {

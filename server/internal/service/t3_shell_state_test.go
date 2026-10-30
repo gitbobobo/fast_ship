@@ -667,7 +667,9 @@ func TestShellState_ArchiveFetchFailedAfterInvalidationKeepsRows(t *testing.T) {
 	if applied, applyErr := state.applyArchiveSnapshot(t3ArchivedShellSnapshot{SchemaVersion: 1, SnapshotSequence: 3, Threads: shellTestThreads(shellTestThread("th-a", "归档"))}, state.archiveGenerationNow(), nil); !applied || applyErr != nil {
 		t.Fatalf("re-apply archive must be trusted")
 	}
-	state.noteArchiveExpired()
+	state.mu.Lock()
+	state.noteArchiveExpiredLocked()
+	state.mu.Unlock()
 	if !state.noteArchiveFetchFailed(fetchErr, state.archiveGenerationNow(), nil) {
 		t.Fatalf("current-generation failure must be applied")
 	}

@@ -202,16 +202,21 @@ func (e *t3ShellEntry) admitArchiveRefresh() (admitted bool, revoked bool) {
 	// 提交，与「inFlight 置位」不可分）。
 	e.arch.mode = t3ArchiveModeSnapshot
 	// 准入判定通过：validUntil 一定是零值或已过（上面已 return）。非零即
-	// 「曾信任但已过期」——发起重拉的同时把归档面撤为不可信（Finding
-	// R2）：过期不等于数据作废，旧行照旧展示，但在新快照落地前
-	// Peek/wait 不得拿过期快照判 thread_gone、谎报归档列表完整。
+	// 「曾信任但已过期」。过期只表示「该重拉了」，不等于数据作废（R16
+	// P2-2）：宽限期（archiveStaleGrace）内重拉在途时读取仍返回上一份快照，
+	// 不因「触发重拉的这次读」就把面标 degraded——否则每个环境每 TTL 都有
+	// 一次读被误报降级（bot 侧据此把环境计入 incomplete_environments）。
+	// 超过宽限仍未落地才撤可信（Finding R2：撤了之后 Peek/wait 不得拿过期
+	// 快照判 thread_gone、谎报归档列表完整）；「撤可信 + 设 inFlight」仍在
+	// 同一临界区完成，对读者不可分。
 	expired := !e.arch.validUntil.IsZero()
+	staleGraceExpired := expired && now.Sub(e.arch.validUntil) > e.archiveStaleGrace
 	e.arch.inFlight = true
 	e.arch.needsRefetch = false
-	if expired {
+	if staleGraceExpired {
 		e.state.noteArchiveExpiredLocked()
 	}
-	return true, expired
+	return true, staleGraceExpired
 }
 
 // ensureArchive 执行一次归档快照拉取：探测 → 拨一次性会话 →
@@ -567,6 +572,24 @@ func (h *t3ShellHub) InvalidateArchive(userID, envID string) {
 	e := h.entries[key]
 	h.mu.Unlock()
 	if e == nil {
+		return
+	}
+	h.invalidateArchiveEntry(e)
+}
+
+// invalidateArchiveEntryAfterActiveRemoval 是活跃面「离开」帧触发的失效
+// （R16 P2-1）：订阅模式下归档集本就由常驻流的增量维护（归档与删除都会各自
+// 送达 thread.updated/removed），主动断连只会让 endFaceConnection 清空整张
+// 归档表再按退避重连——批量移除时重连窗口内新请求又把备忘置位、新连接读
+// 完即被再拆，归档表可持续为空，列表缺行、bot 侧把环境计入 incomplete。
+// 因此订阅模式跳过；按需快照模式的 TTL 缓存必须靠这里失效（别处/别的
+// 客户端的归档迁移只能从这里得知）。写命令触发的失效仍走
+// InvalidateArchive，不受本函数影响。
+func (h *t3ShellHub) invalidateArchiveEntryAfterActiveRemoval(e *t3ShellEntry) {
+	e.arch.mu.Lock()
+	legacy := e.arch.mode == t3ArchiveModeLegacy
+	e.arch.mu.Unlock()
+	if legacy {
 		return
 	}
 	h.invalidateArchiveEntry(e)
