@@ -316,6 +316,9 @@ type redeliveryPRProbe struct {
 type probePRState struct {
 	usable bool
 	author string
+	// fork 同 prUsable 一起缓存：命中分支回填 check.Fork，日志不把 fork
+	// 误判成关闭/草稿（fast-ship-bot 第 38 轮 Note）。
+	fork bool
 }
 
 type redeliveryPRCheck struct {
@@ -415,6 +418,7 @@ func (p *redeliveryPRProbe) lookup(ctx context.Context, deliveryID int64, event 
 		authorized := wakePayload == nil || commentWakeAuthorized(wakePayload,
 			&forge.PullRequest{AuthorLogin: st.author})
 		check.Known, check.Reviewable = true, st.usable && authorized
+		check.Fork = st.fork
 		return check, nil
 	}
 	if p.budget <= 0 {
@@ -446,7 +450,7 @@ func (p *redeliveryPRProbe) lookup(ctx context.Context, deliveryID int64, event 
 	// 唤醒事务的 pr.Draft 守卫都会丢弃）：草稿期间的投递重投只会白吃预算
 	// 甚至误发故障通知（codex 第 34 轮 P2）；转正式后新投递自然开审。
 	prUsable := open && !fork && !forgePR.Draft
-	p.prStates[key] = &probePRState{usable: prUsable, author: forgePR.AuthorLogin}
+	p.prStates[key] = &probePRState{usable: prUsable, author: forgePR.AuthorLogin, fork: fork}
 	reviewable := prUsable && authorized
 	check.Known, check.Reviewable = true, reviewable
 	check.Fork = !reviewable && fork

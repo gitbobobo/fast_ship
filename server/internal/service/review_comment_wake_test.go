@@ -98,15 +98,17 @@ func setCommentLogin(login string) func(map[string]any) {
 }
 
 // TestReviewCommentWakeOpensRound 正向路径：PR 顶层评论点名机器人 → 实拉
-// 实况 open → 恒开新轮（action=comment），不写 seen、不落防抖行。
+// 实况 open → 恒开新轮（action=comment），落 seen（受理史与 push 同源）、
+// 不落防抖行。
 func TestReviewCommentWakeOpensRound(t *testing.T) {
 	e := newReviewEngineEnv(t)
 	e.enableReview(t)
 	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
 	ctx := context.Background()
+	wakeAt := time.Now().UTC().Add(-30 * time.Minute)
 	e.fake.SetPR(repo, 21, &githubapi.PullRequest{
 		RepoFullName: repo, Number: 21, State: "open",
-		HeadSHA: "sha-w1", HeadRepoFullName: repo,
+		HeadSHA: "sha-w1", HeadRepoFullName: repo, UpdatedAt: &wakeAt,
 		Title: "wake me", HTMLURL: "https://github.com/" + repo + "/pull/21",
 		BaseRef: "main", HeadRef: "feature",
 	})
@@ -137,10 +139,14 @@ func TestReviewCommentWakeOpensRound(t *testing.T) {
 	if !ledger.SyncPending || ledger.RoundNumber != 1 {
 		t.Fatalf("ledger = pending=%v round=%d, want true/1", ledger.SyncPending, ledger.RoundNumber)
 	}
-	var seen int64
-	e.svc.db.Model(&model.ReviewSeenSHA{}).Count(&seen)
-	if seen != 0 {
-		t.Fatalf("评论唤醒不得写 review_seen_shas，实得 %d 行", seen)
+	// 受理登记 seen（fast-ship-bot 第 38 轮 P2：push 触发面的时序判定以
+	// 当前 head 的 seen 行为基准，comment 受理必须进受理史）。
+	var seen model.ReviewSeenSHA
+	if err := e.svc.db.First(&seen).Error; err != nil {
+		t.Fatalf("评论唤醒应写 review_seen_shas: %v", err)
+	}
+	if seen.HeadSHA != "sha-w1" || seen.PRUpdatedAt == nil {
+		t.Fatalf("seen = head=%s pr_updated_at=%v", seen.HeadSHA, seen.PRUpdatedAt)
 	}
 	if got := e.debounceCount(t); got != 0 {
 		t.Fatalf("评论唤醒不落防抖行，实得 %d 行", got)

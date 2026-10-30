@@ -645,11 +645,12 @@ func TestReviewDebounceInstallationFallback(t *testing.T) {
 		if runs == 0 {
 			t.Fatal("应照常开轮")
 		}
-		var ledger, run model.ReviewPullRequest
+		var ledger model.ReviewPullRequest
+		var run model.ReviewRun
 		if err := e.svc.db.Where("pr_number = 81").First(&ledger).Error; err != nil {
 			t.Fatalf("总账行应存在: %v", err)
 		}
-		if err := e.svc.db.Where("pr_number = 81").First(&run).Error; err != nil {
+		if err := e.svc.db.Where("pr_number = 81 AND head_sha = ?", "sha-81").First(&run).Error; err != nil {
 			t.Fatalf("运行行应存在: %v", err)
 		}
 		if ledger.InstallationID != 7 || run.InstallationID != 7 {
@@ -697,11 +698,12 @@ func TestReviewDebounceInstallationFallback(t *testing.T) {
 		if runs == 0 {
 			t.Fatal("解析后应照常开轮")
 		}
-		var ledger, run model.ReviewPullRequest
+		var ledger model.ReviewPullRequest
+		var run model.ReviewRun
 		if err := e.svc.db.Where("pr_number = 82").First(&ledger).Error; err != nil {
 			t.Fatalf("总账行应存在: %v", err)
 		}
-		if err := e.svc.db.Where("pr_number = 82").First(&run).Error; err != nil {
+		if err := e.svc.db.Where("pr_number = 82 AND head_sha = ?", "sha-82").First(&run).Error; err != nil {
 			t.Fatalf("运行行应存在: %v", err)
 		}
 		if ledger.InstallationID != 1 || run.InstallationID != 1 {

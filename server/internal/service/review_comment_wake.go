@@ -15,13 +15,16 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/pkg/githubapp"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // 评论唤醒（INT-179）：PR 顶层评论（issue_comment 事件）正文包含
 // @fast-ship-bot 时也开一轮审查——审查结论有误时实现者回帖纠正即可唤醒
 // 审查者，不必推空提交。GitHub 与 Forgejo 的 issue_comment payload 同形，
 // 与 pull_request 一样共用中性路径；触发语义等同 rerun 的 manual：同 head
-// 也恒开新轮（action=comment），不写 seen、不走 handleReviewTriggerTx。
+// 也恒开新轮（action=comment），受理同 push 一样登记 seen（fast-ship-bot
+// 第 38 轮 P2：push 触发面的时序判定以当前 head 的 seen 行为基准）、不走
+// handleReviewTriggerTx。
 // 编排沿用「事务内零网络调用」铁律，照 revalidateTiedWebhook 两阶段模式：
 // 事务外只读预查 + 纯 payload 守卫 + 实拉 PR 实况，最终单事务幂等登记 +
 // 复核后开轮。幂等账只随「已确定的受理/丢弃」落定——瞬时错误与事务失败
@@ -462,7 +465,7 @@ func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, ev
 		// 滞后按瞬时失败处理：不落任何账，返回 error 让 handler 回 500——
 		// GitHub 侧投递未送达会进对账循环重投，拿到新鲜快照后自然恢复
 		// （重投上限 3 次仍滞后则发故障通知）；与触发面的过期判定同口径：
-		// 任一侧缺时间戳或无 seen 行（comment 轮自身不写 seen）维持采信
+		// 任一侧缺时间戳或无 seen 行（comment 受理前从未受理过的 head）维持采信
 		// （fast-ship-bot 第 21 轮 P2：滞后不得烧幂等账静默丢唤醒）。
 		var accepted model.ReviewSeenSHA
 		snErr := s.db.WithContext(ctx).Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ? AND integration_id = ?",
@@ -536,9 +539,8 @@ func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, ev
 			}
 			// 受理史判定按观察项目过滤（与基准查询同口径：改绑后旧项目的
 			// seen 行不得错杀新项目的合法 head，codex 第 30 轮 P2）；除
-			// seen 行外还查运行行——评论唤醒不写 seen，但其受理的 head 有
-			// 运行记录，只查 seen 会把滞后读旧 head 误判成同秒新 head 而
-			// 采信回退总账（codex 第 30 轮 P2）。
+			// 运行行兜底（codex 第 30 轮 P2）：seen 与运行行任一存在即
+			// 曾受理，只查 seen 会漏掉历史受理。
 			headAccepted := false
 			var seenOld model.ReviewSeenSHA
 			sErr := s.db.WithContext(ctx).Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ? AND integration_id = ?",
@@ -714,7 +716,20 @@ func (s *ReviewService) openCommentWakeRoundTx(ctx context.Context, integrationI
 		}
 		_, err = s.openRoundTx(tx, project, settings, repo, prNumber,
 			pr.HeadSHA, "comment", pr.Title, pr.HTMLURL, pr.BaseRef, pr.HeadRef, installationID, pr.UpdatedAt, now)
-		return err
+		if err != nil {
+			return err
+		}
+		// 受理登记 seen（与 push 受理同款 OnConflict DoNothing）：push 触发
+		// 面的过期/同刻判定以当前 head 的 seen 行为时序基准——comment 受理
+		// 不写 seen 会让基准缺失，旧 head 投递的重投复核可回滚账本（
+		// fast-ship-bot 第 38 轮 P2；受理史语义与 push 对齐，force-push 回
+		// 评论审过的 head 同样按已受理处理）。
+		seen := &model.ReviewSeenSHA{
+			ProjectID: project.ID, RepoFullName: repo, PRNumber: prNumber,
+			HeadSHA: pr.HeadSHA, IntegrationID: integrationID,
+			PRUpdatedAt: pr.UpdatedAt, AcceptedAt: now,
+		}
+		return tx.Clauses(clause.OnConflict{DoNothing: true}).Create(seen).Error
 	})
 	return forkDenied, txErr
 }
