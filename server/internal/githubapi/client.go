@@ -232,21 +232,22 @@ func (c *restClient) GetPullRequest(ctx context.Context, installationID int64, r
 		return nil, err
 	}
 	return &PullRequest{
-		RepoFullName: pr.Base.Repo.FullName,
-		Number:       pr.Number,
-		Title:        pr.Title,
-		Body:         deref(pr.Body),
-		HTMLURL:      pr.HTMLURL,
-		State:        pr.State,
-		Draft:        pr.Draft,
-		Merged:       pr.Merged,
-		MergedAt:     pr.MergedAt,
-		ClosedAt:     pr.ClosedAt,
-		HeadSHA:      pr.Head.SHA,
-		HeadRef:      pr.Head.Ref,
-		BaseRef:      pr.Base.Ref,
-		AuthorLogin:  pr.User.Login,
-		UpdatedAt:    pr.UpdatedAt,
+		RepoFullName:     pr.Base.Repo.FullName,
+		Number:           pr.Number,
+		Title:            pr.Title,
+		Body:             deref(pr.Body),
+		HTMLURL:          pr.HTMLURL,
+		State:            pr.State,
+		Draft:            pr.Draft,
+		Merged:           pr.Merged,
+		MergedAt:         pr.MergedAt,
+		ClosedAt:         pr.ClosedAt,
+		HeadSHA:          pr.Head.SHA,
+		HeadRef:          pr.Head.Ref,
+		HeadRepoFullName: pr.Head.Repo.FullName,
+		BaseRef:          pr.Base.Ref,
+		AuthorLogin:      pr.User.Login,
+		UpdatedAt:        pr.UpdatedAt,
 	}, nil
 }
 

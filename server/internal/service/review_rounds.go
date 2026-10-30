@@ -140,11 +140,13 @@ func (s *ReviewService) openRoundTx(
 	return round, s.promoteQueuedRunsTx(tx, project.UserID, now)
 }
 
-// nextReviewRoundTx 轮次分配：manual 恒 1+max；其余同 (project,repo,pr,head,
+// nextReviewRoundTx 轮次分配：manual 与 comment（INT-179 评论唤醒）恒
+// 1+max——同 head 也要新轮，否则同 (project,repo,pr,head,round,组合) 唯一
+// 索引吃掉运行行，唤醒不会产生任何新运行；其余同 (project,repo,pr,head,
 // 集成) 已有运行沿其 round_number，否则 1+max。轮次只在 (项目, 集成) 内
 // 分配——接管或改绑后新键不受旧键已跑轮次的影响。
 func nextReviewRoundTx(tx *gorm.DB, integrationID, projectID, repo string, prNumber int, headSHA, action string) (int, error) {
-	if action != "manual" {
+	if action != "manual" && action != "comment" {
 		var rounds []int
 		if err := tx.Model(&model.ReviewRun{}).
 			Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ? AND integration_id = ?",

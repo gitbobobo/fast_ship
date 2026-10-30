@@ -673,6 +673,7 @@ func (e ReviewPullRequestActivityStage) Valid() bool {
 
 // Defines values for ReviewRoundRecordTriggerAction.
 const (
+	ReviewRoundRecordTriggerActionComment        ReviewRoundRecordTriggerAction = "comment"
 	ReviewRoundRecordTriggerActionManual         ReviewRoundRecordTriggerAction = "manual"
 	ReviewRoundRecordTriggerActionOpened         ReviewRoundRecordTriggerAction = "opened"
 	ReviewRoundRecordTriggerActionReadyForReview ReviewRoundRecordTriggerAction = "ready_for_review"
@@ -685,6 +686,8 @@ const (
 // Valid indicates whether the value is a known member of the ReviewRoundRecordTriggerAction enum.
 func (e ReviewRoundRecordTriggerAction) Valid() bool {
 	switch e {
+	case ReviewRoundRecordTriggerActionComment:
+		return true
 	case ReviewRoundRecordTriggerActionManual:
 		return true
 	case ReviewRoundRecordTriggerActionOpened:

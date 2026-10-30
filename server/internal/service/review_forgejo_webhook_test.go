@@ -503,7 +503,8 @@ func TestRerunReviewForgejoIntegration(t *testing.T) {
 	review.clients = pollStubResolver{byIntegration: map[string]forge.ReviewClient{
 		forgeID: &rerunForgejoStubClient{pr: &forge.PullRequest{
 			RepoFullName: "acme/app", Number: 71, HeadSHA: "sha-r2", State: "open",
-			Title: "t", HTMLURL: "https://forge.example.com/acme/app/pulls/71",
+			HeadRepoFullName: "acme/app",
+			Title:            "t", HTMLURL: "https://forge.example.com/acme/app/pulls/71",
 			BaseRef: "main", HeadRef: "feat",
 		}},
 	}}

@@ -1,0 +1,896 @@
+package service
+
+// 评论唤醒（INT-179）：issue_comment 顶层评论 @fast-ship-bot 也开新一轮
+// 审查。覆盖守卫顺序（action/mention/PR 归属/启用反查/fork）、两阶段事务
+// 编排（幂等重投、实拉确定性失败丢弃、瞬时错误后重投可重走、事务失败回滚
+// 幂等账、head 采信与观察窗口竞态、复核停用/改绑、安装解析确定性分类、
+// 预查后并发重投的判重兜底）、恒开新轮语义（同 head 也新轮、取消在途、
+// 删防抖）与 Forgejo 集成路径。
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/godbobo/fast_ship/server/internal/api"
+	"github.com/godbobo/fast_ship/server/internal/forge"
+	"github.com/godbobo/fast_ship/server/internal/githubapi"
+	"github.com/godbobo/fast_ship/server/internal/model"
+	"gorm.io/gorm"
+)
+
+// issueCommentBody 组一个 issue_comment webhook body。installationID<0 表
+// 示省略 installation 字段（GitHub 代理剥字段/Forgejo 无安装语义的形态）。
+func issueCommentBody(body, repo string, number int, installationID int64, opts ...func(map[string]any)) []byte {
+	issue := map[string]any{
+		"number":       number,
+		"pull_request": map[string]any{"html_url": "https://example.com/" + repo + "/pull/" + strconv.Itoa(number)},
+	}
+	payload := map[string]any{
+		"action":     "created",
+		"issue":      issue,
+		"comment":    map[string]any{"body": body},
+		"repository": map[string]any{"full_name": repo},
+	}
+	if installationID >= 0 {
+		payload["installation"] = map[string]any{"id": installationID}
+	}
+	for _, opt := range opts {
+		opt(payload)
+	}
+	raw, _ := json.Marshal(payload)
+	return raw
+}
+
+// dropIssuePullRequest 把 issue.pull_request 摘掉（普通 Issue 评论的形态）。
+func dropIssuePullRequest(payload map[string]any) {
+	issue := payload["issue"].(map[string]any)
+	delete(issue, "pull_request")
+}
+
+// setCommentAction 覆盖 action（edited/deleted 等不唤醒）。
+func setCommentAction(action string) func(map[string]any) {
+	return func(payload map[string]any) { payload["action"] = action }
+}
+
+// TestReviewCommentWakeOpensRound 正向路径：PR 顶层评论点名机器人 → 实拉
+// 实况 open → 恒开新轮（action=comment），不写 seen、不落防抖行。
+func TestReviewCommentWakeOpensRound(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	e.enableReview(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	ctx := context.Background()
+	e.fake.SetPR(repo, 21, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 21, State: "open",
+		HeadSHA: "sha-w1", HeadRepoFullName: repo,
+		Title: "wake me", HTMLURL: "https://github.com/" + repo + "/pull/21",
+		BaseRef: "main", HeadRef: "feature",
+	})
+
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-cw-1",
+		issueCommentBody("请再审一轮 @fast-ship-bot", repo, 21, 42)); err != nil {
+		t.Fatalf("comment wake: %v", err)
+	}
+
+	var runs []model.ReviewRun
+	e.svc.db.Where("repo_full_name = ? AND pr_number = 21", repo).Find(&runs)
+	if len(runs) != 1 {
+		t.Fatalf("runs = %d, want 1", len(runs))
+	}
+	run := runs[0]
+	if run.TriggerAction != "comment" || run.HeadSHA != "sha-w1" || run.RoundNumber != 1 {
+		t.Fatalf("run = action=%s head=%s round=%d", run.TriggerAction, run.HeadSHA, run.RoundNumber)
+	}
+	if run.InstallationID != 42 {
+		t.Fatalf("installation = %d, want 42", run.InstallationID)
+	}
+
+	// 开轮置 sync_pending，且不写 seen（评论唤醒不走 pull_request 受理面）。
+	var ledger model.ReviewPullRequest
+	if err := e.svc.db.Where("repo_full_name = ? AND pr_number = 21", repo).First(&ledger).Error; err != nil {
+		t.Fatalf("ledger: %v", err)
+	}
+	if !ledger.SyncPending || ledger.RoundNumber != 1 {
+		t.Fatalf("ledger = pending=%v round=%d, want true/1", ledger.SyncPending, ledger.RoundNumber)
+	}
+	var seen int64
+	e.svc.db.Model(&model.ReviewSeenSHA{}).Count(&seen)
+	if seen != 0 {
+		t.Fatalf("评论唤醒不得写 review_seen_shas，实得 %d 行", seen)
+	}
+	if got := e.debounceCount(t); got != 0 {
+		t.Fatalf("评论唤醒不落防抖行，实得 %d 行", got)
+	}
+	// 幂等账已登记（github-default 前缀键）。
+	var deliveries int64
+	e.svc.db.Model(&model.GitHubWebhookDelivery{}).
+		Where("delivery_id = ?", deliveryLedgerKey(model.ForgeIntegrationBuiltinGitHubID, "d-cw-1")).
+		Count(&deliveries)
+	if deliveries != 1 {
+		t.Fatalf("幂等账 = %d, want 1", deliveries)
+	}
+}
+
+// TestReviewCommentWakeAlwaysNewRound 恒开新轮：同 head 已有第 1 轮（已受理
+// 的推送触发）时评论唤醒开第 2 轮，并取消第 1 轮在途运行；评论前残留的未
+// 到期防抖行被删除——旧推送的防抖不再开火，只留下 comment 轮。
+func TestReviewCommentWakeAlwaysNewRound(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	e.enableReview(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	ctx := context.Background()
+	e.fake.SetPR(repo, 22, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 22, State: "open",
+		HeadSHA: "sha-same", HeadRepoFullName: repo,
+		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
+	})
+
+	// 第 1 轮：正常 push 触发（opened → 防抖 → 到期开轮）。
+	if err := e.review.HandleGitHubWebhook(ctx, "pull_request", "d-r1",
+		prPayload("opened", repo, 22, "sha-same", false, false)); err != nil {
+		t.Fatalf("webhook opened: %v", err)
+	}
+	t3 := &fakeReviewT3{}
+	review := e.withT3(t3, nil, nil)
+	// 防抖窗口 60s：推进时钟让第 1 轮的防抖行到期开轮。
+	review.processDueDebounces(now.Add(2 * time.Minute))
+	var round1 []model.ReviewRun
+	e.svc.db.Where("repo_full_name = ? AND pr_number = 22 AND round_number = 1", repo).Find(&round1)
+	if len(round1) != 1 || round1[0].TriggerAction != "opened" {
+		t.Fatalf("第 1 轮未开出: %+v", round1)
+	}
+
+	// 评论前再留一条未到期防抖行（模拟新 push 刚落行、尚未到期的形态）：
+	// 不经 processDueDebounces 消费，验证评论唤醒对它的清理。
+	if err := e.svc.db.Create(&model.ReviewDebounce{
+		ProjectID: e.project.ID, RepoFullName: strings.ToLower(repo), PRNumber: 22,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		HeadSHA:       "sha-same", Action: "synchronize", InstallationID: 42,
+		FireAt: now.Add(time.Minute), UpdatedAt: now,
+	}).Error; err != nil {
+		t.Fatalf("seed debounce: %v", err)
+	}
+
+	// 同 head 评论唤醒：开第 2 轮，第 1 轮在途运行被取消（superseded）。
+	if err := review.HandleGitHubWebhook(ctx, "issue_comment", "d-r2",
+		issueCommentBody("@fast-ship-bot 再看一眼", repo, 22, 42)); err != nil {
+		t.Fatalf("comment wake: %v", err)
+	}
+	var round2 []model.ReviewRun
+	e.svc.db.Where("repo_full_name = ? AND pr_number = 22 AND round_number = 2", repo).Find(&round2)
+	if len(round2) != 1 || round2[0].TriggerAction != "comment" || round2[0].HeadSHA != "sha-same" {
+		t.Fatalf("第 2 轮未按 comment 开出: %+v", round2)
+	}
+	var old model.ReviewRun
+	if err := e.svc.db.Where("id = ?", round1[0].ID).First(&old).Error; err != nil {
+		t.Fatalf("round1 run: %v", err)
+	}
+	if old.Status != model.ReviewRunCancelled || old.ErrorCode != "superseded" {
+		t.Fatalf("旧轮未取消: status=%s err=%s", old.Status, old.ErrorCode)
+	}
+	if got := e.debounceCount(t); got != 0 {
+		t.Fatalf("未到期防抖行应随唤醒删除，剩 %d", got)
+	}
+	// 防抖行已删：推进时钟后不再有任何轮次开火——只留下 comment 轮。
+	review.processDueDebounces(now.Add(4 * time.Minute))
+	var total int64
+	e.svc.db.Model(&model.ReviewRun{}).Where("repo_full_name = ? AND pr_number = 22", repo).Count(&total)
+	if total != 2 {
+		t.Fatalf("防抖行不应再开火，总运行 = %d, want 2（第 1、2 轮）", total)
+	}
+}
+
+// TestReviewCommentWakeRedeliveryDup 同一 delivery id 重投按幂等去重
+// （预查命中，不再实拉）；payload 守卫忽略的投递（无 mention）不登记幂等
+// 账——忽略判定完全由 payload 决定，重投再忽略一遍零副作用。
+func TestReviewCommentWakeRedeliveryDup(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	e.enableReview(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	ctx := context.Background()
+	e.fake.SetPR(repo, 23, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 23, State: "open", HeadSHA: "sha-dup", HeadRepoFullName: repo,
+	})
+
+	body := issueCommentBody("@fast-ship-bot 看看", repo, 23, 42)
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-dup", body); err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-dup", body); !errors.Is(err, ErrDeliveryDuplicated) {
+		t.Fatalf("重投应 ErrDeliveryDuplicated，实得 %v", err)
+	}
+	var runs int64
+	e.svc.db.Model(&model.ReviewRun{}).Where("pr_number = ?", 23).Count(&runs)
+	if runs != 1 {
+		t.Fatalf("重投不得重复开轮，runs = %d", runs)
+	}
+
+	// 无 mention 的投递（payload 守卫忽略）不登记幂等账。
+	ignored := issueCommentBody("普通评论", repo, 24, 42)
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-ignored", ignored); err != nil {
+		t.Fatalf("ignored: %v", err)
+	}
+	var ignoredLedger int64
+	e.svc.db.Model(&model.GitHubWebhookDelivery{}).
+		Where("delivery_id = ?", deliveryLedgerKey(model.ForgeIntegrationBuiltinGitHubID, "d-ignored")).
+		Count(&ignoredLedger)
+	if ignoredLedger != 0 {
+		t.Fatalf("payload 守卫忽略的投递不得登记幂等账，实得 %d 行", ignoredLedger)
+	}
+	// 重投：再忽略一遍（返回 nil），依旧零副作用。
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-ignored", ignored); err != nil {
+		t.Fatalf("忽略投递重投应静默忽略，实得 %v", err)
+	}
+}
+
+// TestReviewCommentWakeGuards 守卫顺序：非 created 动作、无 mention（大小写
+// 敏感于命中）、普通 Issue 评论、未启用仓库都不唤醒；mention 大小写不敏感。
+func TestReviewCommentWakeGuards(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	e.enableReview(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	ctx := context.Background()
+	e.fake.SetPR(repo, 25, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 25, State: "open", HeadSHA: "sha-g", HeadRepoFullName: repo,
+	})
+	// 未启用仓库也能实拉成功（如 App 装在别的仓库上）：启用判定由最终事务
+	// 内的反查按设置行快照拒绝，不开轮。
+	e.fake.SetPR("other/repo", 25, &githubapi.PullRequest{
+		RepoFullName: "other/repo", Number: 25, State: "open", HeadSHA: "sha-other",
+		HeadRepoFullName: "other/repo",
+	})
+
+	for i, body := range [][]byte{
+		// 非 created（编辑/删除不唤醒）。
+		issueCommentBody("@fast-ship-bot", repo, 25, 42, setCommentAction("edited")),
+		// 无 mention。
+		issueCommentBody("帮忙看看这个 PR", repo, 25, 42),
+		// 普通 Issue 评论（issue.pull_request 缺失）。
+		issueCommentBody("@fast-ship-bot", repo, 25, 42, dropIssuePullRequest),
+		// 未启用审查的仓库。
+		issueCommentBody("@fast-ship-bot", "other/repo", 25, 42),
+	} {
+		if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", fmt.Sprintf("d-g%d", i), body); err != nil {
+			t.Fatalf("guard %d: %v", i, err)
+		}
+	}
+	var runs int64
+	e.svc.db.Model(&model.ReviewRun{}).Count(&runs)
+	if runs != 0 {
+		t.Fatalf("守卫不过不得开轮，runs = %d", runs)
+	}
+
+	// mention 大小写不敏感：命中即唤醒。
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-g-upper",
+		issueCommentBody("麻烦 @Fast-Ship-BOT 复审", repo, 25, 42)); err != nil {
+		t.Fatalf("upper mention: %v", err)
+	}
+	var run model.ReviewRun
+	if err := e.svc.db.Where("pr_number = 25").First(&run).Error; err != nil {
+		t.Fatalf("大写 mention 应唤醒: %v", err)
+	}
+	if run.TriggerAction != "comment" {
+		t.Fatalf("trigger_action = %q, want comment", run.TriggerAction)
+	}
+}
+
+// TestReviewCommentWakeDraftAndClosed PR 实况关卡：draft 与已关闭/合并的 PR
+// 评论唤醒一律忽略（以 GetPullRequest 实时 State/Draft 为准，不信事件体）。
+func TestReviewCommentWakeDraftAndClosed(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	e.enableReview(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	ctx := context.Background()
+	e.fake.SetPR(repo, 26, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 26, State: "open", Draft: true, HeadSHA: "sha-draft",
+	})
+	e.fake.SetPR(repo, 27, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 27, State: "closed", Merged: true, HeadSHA: "sha-closed",
+	})
+
+	for i, tc := range []struct{ number int }{{26}, {27}} {
+		if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", fmt.Sprintf("d-dc%d", i),
+			issueCommentBody("@fast-ship-bot", repo, tc.number, 42)); err != nil {
+			t.Fatalf("case %d: %v", i, err)
+		}
+	}
+	var runs int64
+	e.svc.db.Model(&model.ReviewRun{}).Count(&runs)
+	if runs != 0 {
+		t.Fatalf("draft/关闭 PR 不得开轮，runs = %d", runs)
+	}
+}
+
+// TestReviewCommentWakeTrustsLiveHead head 采信语义：账本 head 因丢投递落
+// 后于平台（账本 A、实拉 B）不再锁死唤醒——观察窗口内总账未被推进时采信
+// 实拉 head 开轮，并把总账推进到 B。
+func TestReviewCommentWakeTrustsLiveHead(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	e.enableReview(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	ctx := context.Background()
+	e.fake.SetPR(repo, 28, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 28, State: "open", HeadSHA: "sha-live",
+		HeadRepoFullName: repo,
+	})
+	// 已受理 head 是更早的 SHA（总账残留：投递丢了，推送从未被受理）。
+	now := time.Now().UTC()
+	if err := e.svc.db.Create(&model.ReviewPullRequest{
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, UserID: e.user.ID,
+		RepoFullName: strings.ToLower(repo), PRNumber: 28, HeadSHA: "sha-accepted",
+		UpdatedAt: now,
+	}).Error; err != nil {
+		t.Fatalf("seed ledger: %v", err)
+	}
+
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-trust",
+		issueCommentBody("@fast-ship-bot", repo, 28, 42)); err != nil {
+		t.Fatalf("trust live head: %v", err)
+	}
+	var run model.ReviewRun
+	if err := e.svc.db.Where("repo_full_name = ? AND pr_number = 28", strings.ToLower(repo)).First(&run).Error; err != nil {
+		t.Fatalf("账本落后时评论应仍开轮: %v", err)
+	}
+	if run.TriggerAction != "comment" || run.HeadSHA != "sha-live" {
+		t.Fatalf("run = action=%s head=%s, want comment/sha-live", run.TriggerAction, run.HeadSHA)
+	}
+	// openRoundTx 把总账推进到实拉 head——落后的 A 不再挡后续判定。
+	var ledger model.ReviewPullRequest
+	if err := e.svc.db.Where("project_id = ? AND pr_number = 28", e.project.ID).First(&ledger).Error; err != nil {
+		t.Fatalf("ledger: %v", err)
+	}
+	if ledger.HeadSHA != "sha-live" {
+		t.Fatalf("总账 head = %s, want sha-live（采信实拉并推进）", ledger.HeadSHA)
+	}
+}
+
+// seedOrAdvanceCommentWakeLedger 测试内模拟并发写总账：行存在则推进 head，
+// 否则插入（评论唤醒的观察窗口竞态注入点）。
+func seedOrAdvanceCommentWakeLedger(t *testing.T, e *reviewEngineEnv, repo string, pr int, head string) {
+	t.Helper()
+	var row model.ReviewPullRequest
+	err := e.svc.db.Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ?",
+		e.project.ID, strings.ToLower(repo), pr, model.ForgeIntegrationBuiltinGitHubID).First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		if err := e.svc.db.Create(&model.ReviewPullRequest{
+			IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+			ProjectID:     e.project.ID, UserID: e.user.ID,
+			RepoFullName: strings.ToLower(repo), PRNumber: pr,
+			HeadSHA: head, UpdatedAt: time.Now().UTC(),
+		}).Error; err != nil {
+			t.Fatalf("seed ledger: %v", err)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("load ledger: %v", err)
+	}
+	if err := e.svc.db.Model(&row).Update("head_sha", head).Error; err != nil {
+		t.Fatalf("advance ledger: %v", err)
+	}
+}
+
+// TestReviewCommentWakeObservedWindowRace 观察窗口复核：实拉时总账被并发
+// 推进（观察值与事务内重取不一致）→ 哨兵回滚不烧幂等账，外层重读重拉后
+// 采信新观察值开轮——恰好两次实拉，幂等账随开轮落定。
+func TestReviewCommentWakeObservedWindowRace(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	e.enableReview(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	ctx := context.Background()
+	e.fake.SetPR(repo, 41, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 41, State: "open", HeadSHA: "sha-race-live",
+		HeadRepoFullName: repo,
+	})
+	// 第一次实拉时抢先推进总账（模拟并发 webhook 受理新 head）：第一次的
+	// 观察值（空）与事务内重取不一致 → 重试；第二次观察值已同步，放行。
+	e.fake.SetPRHook(func(call int) {
+		if call == 1 {
+			seedOrAdvanceCommentWakeLedger(t, e, repo, 41, "sha-race-accepted")
+		}
+	})
+
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-race",
+		issueCommentBody("@fast-ship-bot", repo, 41, 42)); err != nil {
+		t.Fatalf("race retry: %v", err)
+	}
+	e.fake.SetPRHook(nil)
+	if got := e.fake.CallCounts()["GetPullRequest"]; got != 2 {
+		t.Fatalf("GetPullRequest 调用 = %d, want 2（窗口竞态后恰好重试一次）", got)
+	}
+	var run model.ReviewRun
+	if err := e.svc.db.Where("pr_number = 41").First(&run).Error; err != nil {
+		t.Fatalf("重试后应开轮: %v", err)
+	}
+	if run.TriggerAction != "comment" || run.HeadSHA != "sha-race-live" {
+		t.Fatalf("run = action=%s head=%s", run.TriggerAction, run.HeadSHA)
+	}
+	var deliveries int64
+	e.svc.db.Model(&model.GitHubWebhookDelivery{}).
+		Where("delivery_id = ?", deliveryLedgerKey(model.ForgeIntegrationBuiltinGitHubID, "d-race")).
+		Count(&deliveries)
+	if deliveries != 1 {
+		t.Fatalf("开轮后幂等账应落定，实得 %d", deliveries)
+	}
+}
+
+// TestReviewCommentWakeObservedWindowGiveUp 观察窗口不收敛：每次实拉时总账
+// 都被并发推进（两次尝试观察值都不一致）→ 放弃并补登幂等账，不开轮；
+// 重投按 202 去重，不再空转。
+func TestReviewCommentWakeObservedWindowGiveUp(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	e.enableReview(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	ctx := context.Background()
+	e.fake.SetPR(repo, 42, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 42, State: "open", HeadSHA: "sha-giveup-live",
+		HeadRepoFullName: repo,
+	})
+	// 每次实拉都把总账推进到新值：两次尝试的观察值都不收敛。
+	e.fake.SetPRHook(func(call int) {
+		seedOrAdvanceCommentWakeLedger(t, e, repo, 42, fmt.Sprintf("sha-flutter-%d", call))
+	})
+
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-giveup",
+		issueCommentBody("@fast-ship-bot", repo, 42, 42)); err != nil {
+		t.Fatalf("不收敛应判丢弃返回 nil，实得 %v", err)
+	}
+	e.fake.SetPRHook(nil)
+	if got := e.fake.CallCounts()["GetPullRequest"]; got != reviewCommentWakeRevalidateMax {
+		t.Fatalf("GetPullRequest 调用 = %d, want %d（上限后放弃）", got, reviewCommentWakeRevalidateMax)
+	}
+	var runs int64
+	e.svc.db.Model(&model.ReviewRun{}).Count(&runs)
+	if runs != 0 {
+		t.Fatalf("未收敛不得开轮，runs = %d", runs)
+	}
+	// 幂等账已补登：重投按 202 去重。
+	var deliveries int64
+	e.svc.db.Model(&model.GitHubWebhookDelivery{}).
+		Where("delivery_id = ?", deliveryLedgerKey(model.ForgeIntegrationBuiltinGitHubID, "d-giveup")).
+		Count(&deliveries)
+	if deliveries != 1 {
+		t.Fatalf("放弃路径幂等账应已登记，实得 %d", deliveries)
+	}
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-giveup",
+		issueCommentBody("@fast-ship-bot", repo, 42, 42)); !errors.Is(err, ErrDeliveryDuplicated) {
+		t.Fatalf("重投应按幂等去重，实得 %v", err)
+	}
+}
+
+// TestReviewCommentWakeRevalidatePhaseC 阶段二复核：取 PR 与开轮之间设置行
+// 被停用/改绑仓库时不开轮（经 GetPullRequest 的钩子在两阶段之间改库）。每个
+// 场景独立环境——前一场景的停用不得掩盖后一场景的改绑守卫。
+func TestReviewCommentWakeRevalidatePhaseC(t *testing.T) {
+	for i, tc := range []struct {
+		name   string
+		mutate func(*testing.T, *reviewEngineEnv)
+	}{
+		{
+			// 停用审查。
+			name: "disable",
+			mutate: func(t *testing.T, e *reviewEngineEnv) {
+				if err := e.svc.db.Model(&model.ProjectReviewSettings{}).
+					Where("project_id = ?", e.project.ID).Update("enabled", false).Error; err != nil {
+					t.Fatalf("disable: %v", err)
+				}
+			},
+		},
+		{
+			// 改绑仓库（快照变更）。
+			name: "rebind",
+			mutate: func(t *testing.T, e *reviewEngineEnv) {
+				if err := e.svc.db.Model(&model.ProjectReviewSettings{}).
+					Where("project_id = ?", e.project.ID).Update("repo_full_name", "moved/repo").Error; err != nil {
+					t.Fatalf("rebind: %v", err)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newReviewEngineEnv(t)
+			e.enableReview(t)
+			repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+			e.fake.SetPR(repo, 29, &githubapi.PullRequest{
+				RepoFullName: repo, Number: 29, State: "open", HeadSHA: "sha-pc",
+				HeadRepoFullName: repo,
+			})
+			// 实拉返回时再改库：模拟实拉与最终事务开轮之间用户操作。
+			e.fake.SetPRHook(func(int) { tc.mutate(t, e) })
+			if err := e.review.HandleGitHubWebhook(context.Background(), "issue_comment",
+				fmt.Sprintf("d-pc%d", i), issueCommentBody("@fast-ship-bot", repo, 29, 42)); err != nil {
+				t.Fatalf("case %s: %v", tc.name, err)
+			}
+			e.fake.SetPRHook(nil)
+			var runs int64
+			e.svc.db.Model(&model.ReviewRun{}).Count(&runs)
+			if runs != 0 {
+				t.Fatalf("case %s: 复核不过不得开轮，runs = %d", tc.name, runs)
+			}
+		})
+	}
+}
+
+// TestReviewCommentWakeDeterministicDrop 实拉确定性失败（PR 已删 404）判
+// 丢弃：返回 nil 且幂等账落库（重投 202 去重）；瞬时错误返回 error（handler
+// 500，平台重投）且库中无幂等账——重投可完整重走。
+func TestReviewCommentWakeDeterministicDrop(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	e.enableReview(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	ctx := context.Background()
+
+	// 确定性失败：404。
+	stub := pollStubResolver{byIntegration: map[string]forge.ReviewClient{
+		model.ForgeIntegrationBuiltinGitHubID: &pollStubClient{
+			liveErr: &forge.StatusError{StatusCode: 404, Method: "GET", URL: "pr"},
+		},
+	}}
+	e.review.clients = stub
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-drop",
+		issueCommentBody("@fast-ship-bot", repo, 31, 42)); err != nil {
+		t.Fatalf("确定性失败应判丢弃返回 nil，实得 %v", err)
+	}
+	var runs int64
+	e.svc.db.Model(&model.ReviewRun{}).Count(&runs)
+	if runs != 0 {
+		t.Fatalf("丢弃路径不得开轮，runs = %d", runs)
+	}
+	var deliveries int64
+	e.svc.db.Model(&model.GitHubWebhookDelivery{}).
+		Where("delivery_id = ?", deliveryLedgerKey(model.ForgeIntegrationBuiltinGitHubID, "d-drop")).
+		Count(&deliveries)
+	if deliveries != 1 {
+		t.Fatalf("丢弃路径幂等账应已登记，实得 %d", deliveries)
+	}
+
+	// 瞬时错误：返回 error 让 handler 回 500。
+	e.review.clients = pollStubResolver{byIntegration: map[string]forge.ReviewClient{
+		model.ForgeIntegrationBuiltinGitHubID: &pollStubClient{
+			liveErr: errors.New("network timeout"),
+		},
+	}}
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-transient",
+		issueCommentBody("@fast-ship-bot", repo, 31, 42)); err == nil {
+		t.Fatal("瞬时错误应返回 error（500，平台重投）")
+	}
+	// 瞬时错误不得烧幂等账：库里无登记，同 delivery 重投可重走全流程。
+	var transientLedger int64
+	e.svc.db.Model(&model.GitHubWebhookDelivery{}).
+		Where("delivery_id = ?", deliveryLedgerKey(model.ForgeIntegrationBuiltinGitHubID, "d-transient")).
+		Count(&transientLedger)
+	if transientLedger != 0 {
+		t.Fatalf("瞬时错误不得登记幂等账，实得 %d 行", transientLedger)
+	}
+}
+
+// TestReviewCommentWakeTransientRedeliveryReopens 瞬时错误后同 delivery 重投
+// 可重走（本次修复的核心回归）：第一次实拉遇瞬时错误返回 error 且库中无任
+// 何登记，随后客户端恢复、同一 delivery id 重投 → 完整重走并正常开轮。
+// 旧实现阶段 A 单独提交幂等账，瞬时错误后重投被 202 去重，唤醒永久吞掉。
+func TestReviewCommentWakeTransientRedeliveryReopens(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	e.enableReview(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	ctx := context.Background()
+
+	stub := &pollStubClient{liveErr: errors.New("network timeout")}
+	e.review.clients = pollStubResolver{byIntegration: map[string]forge.ReviewClient{
+		model.ForgeIntegrationBuiltinGitHubID: stub,
+	}}
+	body := issueCommentBody("@fast-ship-bot 再审一轮", repo, 33, 42)
+
+	// 第一次投递：实拉瞬时错误 → 返回 error，库中无幂等账。
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-retry", body); err == nil {
+		t.Fatal("瞬时错误应返回 error（500，平台重投）")
+	}
+	var ledgerRows int64
+	e.svc.db.Model(&model.GitHubWebhookDelivery{}).
+		Where("delivery_id = ?", deliveryLedgerKey(model.ForgeIntegrationBuiltinGitHubID, "d-retry")).
+		Count(&ledgerRows)
+	if ledgerRows != 0 {
+		t.Fatalf("瞬时错误后库中不得有幂等账，实得 %d 行", ledgerRows)
+	}
+
+	// 同 delivery 重投：客户端恢复 → 完整重走并开轮（action=comment）。
+	stub.liveErr = nil
+	stub.live = &forge.PullRequest{RepoFullName: repo, Number: 33, State: "open",
+		HeadSHA: "sha-retry", HeadRepoFullName: repo,
+		Title: "retry wake", HTMLURL: "https://github.com/" + repo + "/pull/33",
+		BaseRef: "main", HeadRef: "feature"}
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-retry", body); err != nil {
+		t.Fatalf("重投应完整重走并开轮: %v", err)
+	}
+	var run model.ReviewRun
+	if err := e.svc.db.Where("pr_number = 33").First(&run).Error; err != nil {
+		t.Fatalf("重投后应开出新轮: %v", err)
+	}
+	if run.TriggerAction != "comment" || run.HeadSHA != "sha-retry" {
+		t.Fatalf("run = action=%s head=%s", run.TriggerAction, run.HeadSHA)
+	}
+	// 开轮成功后幂等账落定，再投同 delivery 按 202 去重。
+	ledgerRows = 0
+	e.svc.db.Model(&model.GitHubWebhookDelivery{}).
+		Where("delivery_id = ?", deliveryLedgerKey(model.ForgeIntegrationBuiltinGitHubID, "d-retry")).
+		Count(&ledgerRows)
+	if ledgerRows != 1 {
+		t.Fatalf("开轮后幂等账应落定，实得 %d 行", ledgerRows)
+	}
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-retry", body); !errors.Is(err, ErrDeliveryDuplicated) {
+		t.Fatalf("三投应按幂等去重，实得 %v", err)
+	}
+}
+
+// TestReviewCommentWakeTxRollbackRetainsRedelivery 最终事务失败不烧幂等账：
+// 开轮中途失败（组合 JSON 损坏 → openRoundTx 解析报错）→ 整体回滚，库中既
+// 无运行也无幂等账，同一 delivery 修复后重投可再走全流程。
+func TestReviewCommentWakeTxRollbackRetainsRedelivery(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	e.enableReview(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	ctx := context.Background()
+	e.fake.SetPR(repo, 34, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 34, State: "open", HeadSHA: "sha-tx",
+		HeadRepoFullName: repo,
+		Title:            "tx rollback", HTMLURL: "https://github.com/" + repo + "/pull/34",
+		BaseRef: "main", HeadRef: "feature",
+	})
+
+	// 实拉返回时损坏组合 JSON：幂等登记之后 openRoundTx 解析失败 → 回滚。
+	e.fake.SetPRHook(func(int) {
+		if err := e.svc.db.Model(&model.ProjectReviewSettings{}).
+			Where("project_id = ?", e.project.ID).
+			Update("code_combinations_json", "{broken").Error; err != nil {
+			t.Errorf("损坏组合 JSON: %v", err)
+		}
+	})
+	body := issueCommentBody("@fast-ship-bot", repo, 34, 42)
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-txrb", body); err == nil {
+		t.Fatal("开轮失败应返回 error（500，平台重投）")
+	}
+	e.fake.SetPRHook(nil)
+
+	// 回滚验证：无运行、无账本推进、无幂等账——三样都必须不存在。
+	var runs, ledger, deliveries int64
+	e.svc.db.Model(&model.ReviewRun{}).Where("pr_number = 34").Count(&runs)
+	e.svc.db.Model(&model.ReviewPullRequest{}).Where("pr_number = 34").Count(&ledger)
+	e.svc.db.Model(&model.GitHubWebhookDelivery{}).
+		Where("delivery_id = ?", deliveryLedgerKey(model.ForgeIntegrationBuiltinGitHubID, "d-txrb")).
+		Count(&deliveries)
+	if runs != 0 || ledger != 0 || deliveries != 0 {
+		t.Fatalf("事务失败应整体回滚: runs=%d ledger=%d deliveries=%d", runs, ledger, deliveries)
+	}
+
+	// 修复后同 delivery 重投：可再走全流程并开轮。
+	restored, err := marshalCombinations([]api.ReviewCombination{testCombo("env-1")})
+	if err != nil {
+		t.Fatalf("marshal combos: %v", err)
+	}
+	if err := e.svc.db.Model(&model.ProjectReviewSettings{}).
+		Where("project_id = ?", e.project.ID).
+		Update("code_combinations_json", restored).Error; err != nil {
+		t.Fatalf("恢复组合 JSON: %v", err)
+	}
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-txrb", body); err != nil {
+		t.Fatalf("重投应完整重走并开轮: %v", err)
+	}
+	var run model.ReviewRun
+	if err := e.svc.db.Where("pr_number = 34").First(&run).Error; err != nil {
+		t.Fatalf("重投后应开出新轮: %v", err)
+	}
+	if run.TriggerAction != "comment" || run.HeadSHA != "sha-tx" {
+		t.Fatalf("run = action=%s head=%s", run.TriggerAction, run.HeadSHA)
+	}
+}
+
+// TestReviewCommentWakeForgejoIntegration Forgejo 路径：按集成 id 反查启用
+// 项目、无安装语义（installation=0）、评论恒开新轮；GitHub 入口对绑定
+// Forgejo 的项目不误触（设置行快照分区）。
+func TestReviewCommentWakeForgejoIntegration(t *testing.T) {
+	svc := setupTestServices(t)
+	forgeID := createTestForgeIntegration(t, svc.db, "https://forge.example.com").ID
+	project, _ := seedForgejoReviewProject(t, svc, forgeID, "fj-wake", "acme/app", nil)
+	review := newReviewTestService(t, svc, nil, nil, nil)
+	// 单拉复核返回 open PR（list 不在评论唤醒路径，桩只喂 live）。
+	review.clients = pollStubResolver{byIntegration: map[string]forge.ReviewClient{
+		forgeID: &pollStubClient{
+			byRepo: map[string][]forge.PullRequest{},
+			live: &forge.PullRequest{RepoFullName: "acme/app", Number: 61, State: "open",
+				HeadSHA: "sha-fj", HeadRepoFullName: "acme/app",
+				Title: "t", HTMLURL: "https://forge.example.com/acme/app/pulls/61",
+				BaseRef: "main", HeadRef: "feat",
+				UpdatedAt: ptrTime(time.Now().UTC())},
+		},
+		// GitHub 入口也能构造客户端（部署级 App 恒在）：实拉后由最终事务的
+		// 反查按设置行快照分区拒绝，不误触 Forgejo 项目。
+		model.ForgeIntegrationBuiltinGitHubID: &pollStubClient{},
+	}}
+
+	body := issueCommentBody("@fast-ship-bot 再审一次", "acme/app", 61, -1)
+	if err := review.HandleForgejoWebhook(context.Background(), forgeID, "issue_comment", "d-fj", body); err != nil {
+		t.Fatalf("forgejo wake: %v", err)
+	}
+	// 空代码组合不产生 run 行；开轮以账本推进（新轮 + sync_pending）为准。
+	var ledger model.ReviewPullRequest
+	if err := svc.db.Where("project_id = ? AND integration_id = ? AND pr_number = ?",
+		project.ID, forgeID, 61).First(&ledger).Error; err != nil {
+		t.Fatalf("ledger: %v", err)
+	}
+	if !ledger.SyncPending || ledger.HeadSHA != "sha-fj" || ledger.RoundNumber != 1 {
+		t.Fatalf("账本未按 comment 开轮: pending=%v head=%s round=%d",
+			ledger.SyncPending, ledger.HeadSHA, ledger.RoundNumber)
+	}
+	if ledger.InstallationID != 0 {
+		t.Fatalf("Forgejo 无安装语义, installation = %d", ledger.InstallationID)
+	}
+
+	// GitHub 入口同名仓库不误触 Forgejo 绑定的项目。
+	if err := review.HandleGitHubWebhook(context.Background(), "issue_comment", "d-gh-cross",
+		issueCommentBody("@fast-ship-bot", "acme/app", 61, 42)); err != nil {
+		t.Fatalf("github cross: %v", err)
+	}
+	var count int64
+	svc.db.Model(&model.ReviewPullRequest{}).
+		Where("project_id = ? AND integration_id = ?", project.ID, forgeID).Count(&count)
+	if count != 1 {
+		t.Fatalf("GitHub 投递不得误触 Forgejo 项目，账本 = %d 行", count)
+	}
+}
+
+// TestReviewCommentWakeForkSkipped fork 守卫（F1）：跨仓 fork 的 PR 评论唤醒
+// 不开轮（与 pull_request 触发面同一不变量），判定在最终事务内做出——幂等账
+// 随事务落定，重投按 202 去重；已删 fork（实拉 head.repo 为空）同样不开轮。
+func TestReviewCommentWakeForkSkipped(t *testing.T) {
+	for i, headRepo := range []string{"someone-else/repo", ""} {
+		e := newReviewEngineEnv(t)
+		e.enableReview(t)
+		repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+		ctx := context.Background()
+		e.fake.SetPR(repo, 51, &githubapi.PullRequest{
+			RepoFullName: repo, Number: 51, State: "open", HeadSHA: "sha-fork",
+			HeadRepoFullName: headRepo,
+		})
+
+		if err := e.review.HandleGitHubWebhook(ctx, "issue_comment",
+			fmt.Sprintf("d-fork%d", i), issueCommentBody("@fast-ship-bot", repo, 51, 42)); err != nil {
+			t.Fatalf("case %d head=%q: fork 评论应静默忽略，实得 %v", i, headRepo, err)
+		}
+		var runs int64
+		e.svc.db.Model(&model.ReviewRun{}).Count(&runs)
+		if runs != 0 {
+			t.Fatalf("case %d: fork PR 不得开轮，runs = %d", i, runs)
+		}
+		// 判定在最终事务内做出：幂等账随事务提交落定。
+		var deliveries int64
+		e.svc.db.Model(&model.GitHubWebhookDelivery{}).
+			Where("delivery_id = ?", deliveryLedgerKey(model.ForgeIntegrationBuiltinGitHubID, fmt.Sprintf("d-fork%d", i))).
+			Count(&deliveries)
+		if deliveries != 1 {
+			t.Fatalf("case %d: fork 判丢弃的幂等账应落定，实得 %d", i, deliveries)
+		}
+		if err := e.review.HandleGitHubWebhook(ctx, "issue_comment",
+			fmt.Sprintf("d-fork%d", i), issueCommentBody("@fast-ship-bot", repo, 51, 42)); !errors.Is(err, ErrDeliveryDuplicated) {
+			t.Fatalf("case %d: 重投应按幂等去重，实得 %v", i, err)
+		}
+	}
+}
+
+// TestRerunReviewForkRejected fork 守卫（F1）：跨仓 fork 的 PR 不能手动重跑
+// 审查（与评论唤醒、webhook 触发面同一不变量），文案与「PR 已关闭」并列。
+func TestRerunReviewForkRejected(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	e.enableReview(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	e.fake.SetPR(repo, 52, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 52, State: "open", HeadSHA: "sha-rerun-fork",
+		HeadRepoFullName: "someone-else/" + strings.SplitN(repo, "/", 2)[1],
+		Title:            "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
+	})
+
+	_, err := e.review.RerunReview(context.Background(), e.user.ID, e.project.ID, 52, "")
+	if err == nil || !strings.Contains(err.Error(), "fork PR 不能重跑审查") {
+		t.Fatalf("rerun err = %v, want 含「fork PR 不能重跑审查」", err)
+	}
+	assertErrCode(t, err, 40001)
+	var runs int64
+	e.svc.db.Model(&model.ReviewRun{}).Count(&runs)
+	if runs != 0 {
+		t.Fatalf("fork PR 重跑不得开轮，runs = %d", runs)
+	}
+}
+
+// TestReviewCommentWakeInstallationResolveFails installation 兜底解析的错误
+// 分类（F5）：确定性失败（访问面未配置）判丢弃并补登幂等账；瞬时错误返回
+// error（500，平台重投）且不落任何账。
+func TestReviewCommentWakeInstallationResolveFails(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	e.enableReview(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	ctx := context.Background()
+	e.fake.SetPR(repo, 53, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 53, State: "open", HeadSHA: "sha-inst",
+		HeadRepoFullName: repo,
+	})
+	// 投递缺 installation 快照（payload 无 installation 字段）才走兜底解析。
+	body := issueCommentBody("@fast-ship-bot", repo, 53, -1)
+
+	// 确定性失败：访问面未配置（gh==nil）——重投只会得到同一结果。
+	e.review.gh = nil
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-inst-1", body); err != nil {
+		t.Fatalf("访问面未配置应判丢弃返回 nil，实得 %v", err)
+	}
+	var runs int64
+	e.svc.db.Model(&model.ReviewRun{}).Count(&runs)
+	if runs != 0 {
+		t.Fatalf("丢弃路径不得开轮，runs = %d", runs)
+	}
+	var deliveries int64
+	e.svc.db.Model(&model.GitHubWebhookDelivery{}).
+		Where("delivery_id = ?", deliveryLedgerKey(model.ForgeIntegrationBuiltinGitHubID, "d-inst-1")).
+		Count(&deliveries)
+	if deliveries != 1 {
+		t.Fatalf("确定性解析失败幂等账应落定，实得 %d", deliveries)
+	}
+
+	// 瞬时失败：fake 未配置安装 id，解析回非状态错误——透出 500 且不落账。
+	e2 := newReviewEngineEnv(t)
+	e2.enableReview(t)
+	e2.fake.SetPR(repo, 53, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 53, State: "open", HeadSHA: "sha-inst",
+		HeadRepoFullName: repo,
+	})
+	e2.fake.InstallationID = 0
+	if err := e2.review.HandleGitHubWebhook(ctx, "issue_comment", "d-inst-2", body); err == nil {
+		t.Fatal("瞬时解析失败应返回 error（500，平台重投）")
+	}
+	var deliveries2 int64
+	e2.svc.db.Model(&model.GitHubWebhookDelivery{}).
+		Where("delivery_id = ?", deliveryLedgerKey(model.ForgeIntegrationBuiltinGitHubID, "d-inst-2")).
+		Count(&deliveries2)
+	if deliveries2 != 0 {
+		t.Fatalf("瞬时失败不得登记幂等账，实得 %d 行", deliveries2)
+	}
+}
+
+// TestReviewCommentWakeConcurrentDuplicate 预查后的并发兜底（F7）：只读预查
+// 通过后、最终事务前，同 delivery 的幂等行被并发写入（重投抢先生效）——
+// 事务内 insert 判重兜底，返回 ErrDeliveryDuplicated，不开轮。
+func TestReviewCommentWakeConcurrentDuplicate(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	e.enableReview(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	ctx := context.Background()
+	e.fake.SetPR(repo, 54, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 54, State: "open", HeadSHA: "sha-dup-race",
+		HeadRepoFullName: repo,
+	})
+	// 实拉时并发投递抢先把同一 delivery 登记进幂等账（预查已过，事务兜底）。
+	e.fake.SetPRHook(func(int) {
+		if err := e.svc.db.Create(&model.GitHubWebhookDelivery{
+			DeliveryID: deliveryLedgerKey(model.ForgeIntegrationBuiltinGitHubID, "d-dup-race"),
+			Event:      "issue_comment",
+			ReceivedAt: time.Now().UTC(),
+		}).Error; err != nil {
+			t.Errorf("seed concurrent delivery: %v", err)
+		}
+	})
+
+	err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-dup-race",
+		issueCommentBody("@fast-ship-bot", repo, 54, 42))
+	e.fake.SetPRHook(nil)
+	if !errors.Is(err, ErrDeliveryDuplicated) {
+		t.Fatalf("并发重复应返回 ErrDeliveryDuplicated，实得 %v", err)
+	}
+	var runs int64
+	e.svc.db.Model(&model.ReviewRun{}).Count(&runs)
+	if runs != 0 {
+		t.Fatalf("并发重复不得开轮，runs = %d", runs)
+	}
+}

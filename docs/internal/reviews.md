@@ -179,6 +179,70 @@ seen SHA、取消旧轮全部失效）。
 
 事务内零 GitHub/T3 调用；提交后非阻塞 kick 调度循环。
 
+### 评论唤醒（INT-179，`review_comment_wake.go`）
+
+PR 顶层评论（`issue_comment` 事件）正文包含 `@fast-ship-bot`（大小写不敏感
+的包含判定）时也开一轮审查——审查结论有误时实现者回帖纠正即可唤醒审查
+者，不必推空提交。`handlePlatformWebhook` 按 event 名分流：`issue_comment`
+走独立的评论唤醒分支，不进 pull_request 触发事务；GitHub 与 Forgejo 的事件
+名同为 `issue_comment`（Forgejo webhook 订阅名 "Issue Comment"），共用中性
+路径。**平台 webhook 必须订阅 Issue comment 事件**，否则平台根本不投递。
+
+payload 两平台同形，只取最小字段面：`action`（只受理 `created`，编辑/删除
+不唤醒）、`issue.pull_request`（存在即 PR，普通 Issue 的评论忽略）、
+`issue.number`、`comment.body`、`repository.full_name`、`installation.id`。
+纯 payload 守卫（不碰库、不发网络）依次：action → mention → PR 归属；任一
+不过静默忽略，**不登记幂等账**——忽略判定完全由 payload 决定，重投再忽略
+一遍零副作用。**不做评论作者权限检查**：公开仓库上「任何人都能开 PR 触发
+审查」的暴露面已经存在，评论唤醒不引入新的暴露类别（INT-179 拍板的设计
+决策）。
+
+编排沿用「事务内零网络调用」铁律，两阶段（模式同 `revalidateTiedWebhook`）：
+
+1. **阶段一（事务外）**：
+   - 幂等预查（只读）：已登记的投递直接按重复去重（handler 仍 202），省
+     一次实拉；预查与最终事务之间的并发窗口由事务内 insert 判重兜底。
+   - installation 兜底：GitHub 投递缺 installation 快照（代理剥字段等）时
+     `resolveGitHubInstallation` 按仓库解析，Forgejo 恒 0。解析失败按错误
+     链分类（`deterministicCommentWakeSetupErr`）：确定性失败（访问面未
+     配置、平台 401/403/404 且非限流）重投结果相同，判丢弃并补登幂等账；
+     瞬时错误（限流/网络）返回 error（handler 500，平台重投）。
+   - 只读观察总账 head（`observeAcceptedHead`，与 `currentAcceptedHeadTx`
+     同源：未开火的防抖行优先，否则总账 `head_sha`）记 `observedHead`，
+     供阶段二复核观察窗口。
+   - 实拉 PR 实况：实拉独享超时 ctx（从 `context.Background()` 派生，照
+     `consumeDebounce`；后续库操作用请求 ctx）。构造客户端/实拉的确定性
+     失败（`deterministicReviewAccessErr`）判丢弃并补登幂等账；瞬时错误
+     返回 error 让平台重投——此时库里没有任何登记，重投可完整重走全流程
+     （这正是幂等账不能在此前单独提交的原因）。
+2. **阶段二（单事务，幂等登记与开轮同生共死）**：`deliveries.InsertTx` +
+   `deliveryLedgerKey` 登记（重复 → `ErrDeliveryDuplicated`）→ 反查启用
+   项目（与 pull_request 同款判定：按设置行 (integration_id, repo_full_name)
+   快照）→ 复核设置行仍 enabled 且快照未变 → 观察窗口复核：事务内重取总账
+   head ≠ `observedHead` 即窗口内被并发推进，哨兵
+   `errCommentWakeObservedHeadMoved` 让整体回滚（幂等登记一并撤销，不烧
+   账），外层重读重拉；上限 `reviewCommentWakeRevalidateMax`（2 次）仍不
+   收敛则放弃并 `recordDroppedDelivery` 补登幂等账（重投按 202 去重）→
+   fork 守卫：实拉 `HeadRepoFullName` 为空（已删 fork/异常 payload）或与
+   base 仓库不同名即跨仓 fork，不开轮（与 pull_request 触发面同一不变量，
+   rerun 同样有此守卫）→ 实况非 open 或 draft、空 head → 忽略
+   （`prReviewable` + `forge.PullRequest.Draft`）→ 通过后
+   `supersedePRRunsTx` 取消在途、删残留防抖行（旧推送不得再开火）、
+   `openRoundTx` 开新轮。事务任何一步失败整体回滚（幂等账随之撤销），平台
+   重投可重走；复核不过是已确定的丢弃，事务提交后幂等账落定，重投按 202
+   去重。
+
+**head 采信语义**：账本可能因丢投递落后于平台——观察窗口内总账未被并发
+推进时，即便实拉 head 与总账不同也采信实拉 head 开轮（`openRoundTx` 把
+总账推进到 live head），不再按「账本不同」把唤醒永久锁死；窗口内被并发
+推进则是重试信号，不是忽略信号。
+
+触发语义等同 rerun 的 `manual`：**评论唤醒恒开新轮**，同 head 也新轮
+（`nextReviewRoundTx` 对 `comment` 与 `manual` 同样跳过同 head 复用——否则
+组合唯一索引会吃掉运行行），`action` 落库为新值 `comment`；不写
+`review_seen_shas`、不走 `handleReviewTriggerTx`、不落防抖行。不在平台回
+帖确认（范围外）。成功后与主路径共用同一尾部：提交后非阻塞 kick 调度循环。
+
 投递本身也可能失败：GitHub 发出但没送达（公网隧道超时/502）时 GitHub App
 不会自动重试，这次推送就永远不会进入上面的任何一步。独立低频循环里的对账
 兜底这一层，见「投递失败对账」。
@@ -296,9 +360,11 @@ GitHub App 投递失败（公网隧道超时/502）不会自动重试，一次�
   轮**（进程刚起来时补上停机期间漏掉的投递），单次兜底超时 90 秒——独立
   循环不阻塞调度，但仍要有界，避免 GitHub 半挂时无限拖。
 - 拉近 **24 小时**（`reviewRedeliveryLookback`；GitHub 只保留约 3 天投递
-  记录）的投递记录，只处理 `pull_request` 事件里**会开轮的 action**
-  （opened/synchronize/ready_for_review/reopened，`reviewTriggerableAction`
-  同源判定），`status_code` 非 2xx 即失败。`closed` **有意不重投**：丢失的
+  记录）的投递记录，只处理会开轮的事件行：`pull_request` 里**会开轮的
+  action**（opened/synchronize/ready_for_review/reopened，
+  `reviewTriggerableAction` 同源判定）与 `issue_comment` 的 `created`
+  （INT-179 评论唤醒也靠 webhook 投递入场，丢了同样永久漏审），
+  `status_code` 非 2xx 即失败。`closed` **有意不重投**：丢失的
   closed 投递不会导致「推送没被审查」，而重投回去会无条件取消该 PR 当前
   有效的审查运行（webhook 的 closed 分支在任何时间戳判定之前执行）。
   重投重放的是**原始 payload**（PR 仍写着 open、`updated_at`/head 都是旧
@@ -1098,7 +1164,7 @@ SHA-256 前 16 位。
 | GET | `/api/projects/{id}/review-settings` | 设置 + `repo_full_name`（实际审查的代码仓库，原样大小写）+ `prerequisites[]`（缺项 `missing=true` + `detail`）+ `taken_by`。prerequisite 的 `github_app_installation` 每次实时调一次 GitHub。 |
 | PUT | `/api/projects/{id}/review-settings` | 全量保存。组合结构/归属/绑定/数量/重复问题 40001（只读会话的环境同样拒绝）；启用时前置条件缺项 41202（逐条写进 message）；同仓库占用 40922（带占用者）。`enabled=false` 跳过前置校验、允许零组合。 |
 | GET | `/api/projects/{id}/review-records` | 审查记录：`items[]` 每个 PR 一行，内嵌 `rounds[]`（轮次、head、触发方式、时间）与每轮 `code_runs[]`/`visual_runs[]`（含 `findings[]`/`unmeasurable[]`）。`?limit=` 默认 20、上限 100。首页改版后网页不再有入口，接口保留。 |
-| POST | `/api/projects/{id}/reviews/rerun` | 重新审查：body `{pr_number}`。项目必须 enabled（否则 40923）。rerun 没有 webhook installation 快照：先 `ResolveInstallation` 解析真实安装 id（解析不支持/失败直接报错，不拿 0 继续），再用安装令牌 `GetPullRequest` 实时取当前 head，走与 webhook 相同的「取消旧 SHA + 开轮」事务路径（`trigger_action=manual`，恒开新轮），安装 id 落进运行与总账。PR 已关闭/合并时直接报错（40001「PR 已关闭」），不开轮。返回 `{accepted, head_sha, round_number}`。 |
+| POST | `/api/projects/{id}/reviews/rerun` | 重新审查：body `{pr_number}`。项目必须 enabled（否则 40923）。rerun 没有 webhook installation 快照：先 `ResolveInstallation` 解析真实安装 id（解析不支持/失败直接报错，不拿 0 继续），再用安装令牌 `GetPullRequest` 实时取当前 head，走与 webhook 相同的「取消旧 SHA + 开轮」事务路径（`trigger_action=manual`，恒开新轮），安装 id 落进运行与总账。PR 已关闭/合并时直接报错（40001「PR 已关闭」），不开轮；跨仓 fork（实拉 head 仓库缺失或与 base 仓库不同名）同样报错（40001「fork PR 不能重跑审查」）。返回 `{accepted, head_sha, round_number}`。 |
 
 ## 开启前置与同仓库唯一
 

@@ -237,7 +237,7 @@ func TestRedeliveryProbeHonoursItsOwnContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	before := env.fake.CallCounts()
-	check := env.review.redeliveryPRReviewable(ctx, probe, 2501)
+	check := env.review.redeliveryPRReviewable(ctx, probe, 2501, "pull_request")
 	if check.Known {
 		t.Fatal("闸门 ctx 已结束时应按未知处理")
 	}
@@ -282,5 +282,56 @@ func TestRedeliveryGateBudgetExhaustedClosedPRDegrades(t *testing.T) {
 		Where("guid = ? AND closed_at IS NOT NULL", "guid-budget-10").Count(&wrongClosed)
 	if wrongClosed != 0 {
 		t.Fatal("第 11 个 guid 不应被记成关闭（没查到实况）")
+	}
+}
+
+// redeliveryCommentPayload 构造 issue_comment 投递详情的 request.payload：
+// PR 号在 issue.number（与 pull_request 的顶层 number 字段名不同），仓库与
+// installation 同形。
+func redeliveryCommentPayload(repo string, number int) json.RawMessage {
+	body, err := json.Marshal(map[string]any{
+		"action": "created",
+		"issue": map[string]any{
+			"number":       number,
+			"pull_request": map[string]any{"url": "https://github.com/" + repo + "/pulls/" + fmt.Sprint(number)},
+		},
+		"repository":   map[string]any{"full_name": repo},
+		"installation": map[string]any{"id": 1},
+	})
+	if err != nil {
+		panic(err)
+	}
+	return body
+}
+
+// TestRedeliveryGateLocatesCommentPayload 评论唤醒投递的闸门定位（INT-179）：
+// payload 按 issue.number 定位 repo/PR——PR 仍 open 照常重投；已关闭则记终
+// 态静默跳过（评论唤醒重投关 PR 只会白跑）。
+func TestRedeliveryGateLocatesCommentPayload(t *testing.T) {
+	env := newReviewEngineEnv(t)
+	env.enableReview(t)
+
+	base := redeliveryTestNow.Add(-time.Hour)
+	env.fake.SetHookDeliveries([]githubapp.HookDelivery{
+		hookRow(3101, "guid-cw-open", "issue_comment", "created", 500, false, base),
+		hookRow(3102, "guid-cw-closed", "issue_comment", "created", 502, false, base),
+	})
+	env.fake.SetHookDeliveryPayload(3101, redeliveryCommentPayload("owner/repo", 7))
+	env.fake.SetHookDeliveryPayload(3102, redeliveryCommentPayload("owner/repo", 8))
+	env.fake.SetPR("owner/repo", 7, &githubapi.PullRequest{})
+	env.fake.SetPR("owner/repo", 8, &githubapi.PullRequest{State: "closed"})
+
+	env.review.reconcileWebhookDeliveries(redeliveryTestNow)
+	if got := env.fake.RedeliveredIDs(); len(got) != 1 || got[0] != 3101 {
+		t.Fatalf("redelivered = %v, want [3101]（open PR 的评论投递照常重投）", got)
+	}
+	if row, ok := redeliveryClosedRow(t, env, "guid-cw-closed"); !ok || row.ClosedAt == nil {
+		t.Fatalf("已关闭 PR 的评论投递应记终态: %+v (ok=%v)", row, ok)
+	}
+	if row, ok := redeliveryClosedRow(t, env, "guid-cw-open"); ok && row.ClosedAt != nil {
+		t.Fatalf("open PR 的评论投递不应记终态: %+v", row)
+	}
+	if n := countNotifications(t, env, model.NotificationReviewRedeliveryFailed); n != 0 {
+		t.Fatalf("notifications = %d, want 0", n)
 	}
 }

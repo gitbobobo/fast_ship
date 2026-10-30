@@ -207,7 +207,8 @@ func TestGitHubReviewClientConvertsPullRequest(t *testing.T) {
 	api := &recordingAPI{pr: &githubapi.PullRequest{
 		RepoFullName: "base/repo", Number: 9, Title: "t", Body: "b", HTMLURL: "u",
 		State: "open", Draft: true, Merged: true, MergedAt: &mergedAt, ClosedAt: &closedAt,
-		HeadSHA: "sha", HeadRef: "feature", BaseRef: "main", AuthorLogin: "alice",
+		HeadSHA: "sha", HeadRef: "feature", HeadRepoFullName: "fork/other",
+		BaseRef: "main", AuthorLogin: "alice",
 		UpdatedAt: &updatedAt,
 	}}
 	pr, err := NewGitHubReviewClient(api, 1).GetPullRequest(context.Background(), "o/r", 9)
@@ -217,7 +218,8 @@ func TestGitHubReviewClientConvertsPullRequest(t *testing.T) {
 	want := PullRequest{
 		RepoFullName: "base/repo", Number: 9, Title: "t", Body: "b", HTMLURL: "u",
 		State: "open", Draft: true, Merged: true, MergedAt: &mergedAt, ClosedAt: &closedAt,
-		HeadSHA: "sha", HeadRef: "feature", BaseRef: "main", AuthorLogin: "alice",
+		HeadSHA: "sha", HeadRef: "feature", HeadRepoFullName: "fork/other",
+		BaseRef: "main", AuthorLogin: "alice",
 		UpdatedAt: &updatedAt,
 	}
 	if *pr != want {

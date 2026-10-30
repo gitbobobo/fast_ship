@@ -80,8 +80,9 @@ type hookDeliveryState struct {
 }
 
 // reconcileWebhookDeliveries 一轮投递失败对账：GitHub 发出但没送达本服务的
-// pull_request 投递（隧道超时/502）会被重投，避免一次投递失败就让这次推送
-// 永远不会被审查。节流由 redeliveryLoop 的 ticker 负责，本函数不做节流。
+// pull_request 与 issue_comment/created 投递（隧道超时/502）会被重投，避免
+// 一次投递失败就让这次推送/评论唤醒永远不生效。节流由 redeliveryLoop 的
+// ticker 负责，本函数不做节流。
 // 超上限后不再重试并发站内通知。循环内的判定顺序：跳过已送达 → 已判关闭
 // 静默跳过 → PR 实况闸门 → 超限通知 → 每轮重投预算 → 重投。
 func (s *ReviewService) reconcileWebhookDeliveries(now time.Time) {
@@ -182,7 +183,7 @@ func (s *ReviewService) reconcileWebhookDeliveries(now time.Time) {
 		if ledger[st.GUID].Closed {
 			continue // 已确认关闭的 PR：终态，不重投、不通知、不再查询
 		}
-		if check := s.redeliveryPRReviewable(probeCtx, probe, st.TargetID); check.Known && !check.Reviewable {
+		if check := s.redeliveryPRReviewable(probeCtx, probe, st.TargetID, st.Event); check.Known && !check.Reviewable {
 			// PR 已关闭/合并：记终态后静默跳过——重投只会白跑一轮（webhook
 			// 会照常受理并在连续失败时误报故障通知）。记账失败只留日志，
 			// 不影响其它组（下一轮重查同一条，顶多重复一次）。
@@ -286,8 +287,8 @@ type redeliveryPRCheck struct {
 // redeliveryPRReviewable 重投前的 PR 实况闸门：确认投递指向的 PR 仍开着。
 // 读不到时只记 Warn（含投递 id 与原因，不打 payload 全文——里面是仓库内容）
 // 并按未知处理。闸门预算/时间用完是设计内的降级，不当故障记。
-func (s *ReviewService) redeliveryPRReviewable(ctx context.Context, probe *redeliveryPRProbe, deliveryID int64) redeliveryPRCheck {
-	check, err := probe.lookup(ctx, deliveryID)
+func (s *ReviewService) redeliveryPRReviewable(ctx context.Context, probe *redeliveryPRProbe, deliveryID int64, event string) redeliveryPRCheck {
+	check, err := probe.lookup(ctx, deliveryID, event)
 	if err != nil && !errors.Is(err, errRedeliveryProbeBudget) &&
 		!errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
 		s.logger.Warn("重投闸门无法确认投递指向的 PR 实况，降级为照常重投",
@@ -299,8 +300,10 @@ func (s *ReviewService) redeliveryPRReviewable(ctx context.Context, probe *redel
 // lookup 取投递详情、定位其 PR 并实时读 State。每次 GetHookDelivery、每次
 // 缓存未命中的 GetPullRequest 各占一个预算名额（被拒的请求同样打到了
 // GitHub，与重投预算同口径）；只缓存读到的状态，失败不缓存——预算兜住
-// 总量，后续投递仍可重试。
-func (p *redeliveryPRProbe) lookup(ctx context.Context, deliveryID int64) (redeliveryPRCheck, error) {
+// 总量，后续投递仍可重试。payload 按 event 选解析面：pull_request 与
+// issue_comment（INT-179 评论唤醒）都带 repository/installation，但 PR 号
+// 字段名不同（前者顶层 number、后者 issue.number）。
+func (p *redeliveryPRProbe) lookup(ctx context.Context, deliveryID int64, event string) (redeliveryPRCheck, error) {
 	// 闸门自己的时间预算已经用完：不再发请求，直接按未知降级（调用方还有
 	// 正常的总超时 context 可用）。
 	if err := ctx.Err(); err != nil {
@@ -314,15 +317,29 @@ func (p *redeliveryPRProbe) lookup(ctx context.Context, deliveryID int64) (redel
 	if err != nil {
 		return redeliveryPRCheck{}, err
 	}
-	var payload prWebhookPayload
-	if err := json.Unmarshal(detail.Payload, &payload); err != nil {
-		return redeliveryPRCheck{}, fmt.Errorf("解析投递 payload: %w", err)
+	var repo string
+	var number int
+	var installation int64
+	switch event {
+	case "issue_comment":
+		// 与评论唤醒共用同一份最小字段面：repository.full_name + issue.number。
+		var payload commentWakePayload
+		if err := json.Unmarshal(detail.Payload, &payload); err != nil {
+			return redeliveryPRCheck{}, fmt.Errorf("解析投递 payload: %w", err)
+		}
+		repo, number, installation = payload.Repository.FullName, payload.Issue.Number, payload.Installation.ID
+	default:
+		var payload prWebhookPayload
+		if err := json.Unmarshal(detail.Payload, &payload); err != nil {
+			return redeliveryPRCheck{}, fmt.Errorf("解析投递 payload: %w", err)
+		}
+		repo, number, installation = payload.Repository.FullName, payload.Number, payload.Installation.ID
 	}
 	check := redeliveryPRCheck{
-		Repo:   strings.ToLower(payload.Repository.FullName),
-		Number: payload.Number,
+		Repo:   strings.ToLower(repo),
+		Number: number,
 	}
-	if payload.Number <= 0 || payload.Repository.FullName == "" || payload.Installation.ID == 0 {
+	if number <= 0 || repo == "" || installation == 0 {
 		return check, errors.New("投递 payload 缺少 repo/PR/installation 字段")
 	}
 	key := check.Repo + "#" + strconv.Itoa(check.Number)
@@ -334,7 +351,7 @@ func (p *redeliveryPRProbe) lookup(ctx context.Context, deliveryID int64) (redel
 		return check, errRedeliveryProbeBudget
 	}
 	p.budget--
-	pr, err := p.client.GetPullRequest(ctx, payload.Installation.ID, payload.Repository.FullName, payload.Number)
+	pr, err := p.client.GetPullRequest(ctx, installation, repo, number)
 	if err != nil {
 		return check, err
 	}
@@ -346,18 +363,24 @@ func (p *redeliveryPRProbe) lookup(ctx context.Context, deliveryID int64) (redel
 	return check, nil
 }
 
-// groupHookDeliveries 把投递行按 guid 汇总：只处理 pull_request 事件里会开轮
-// 的 action（opened/synchronize/ready_for_review/reopened）。丢失的 closed
+// groupHookDeliveries 把投递行按 guid 汇总：处理会开轮的事件行——
+// pull_request 里会开轮的 action（opened/synchronize/ready_for_review/
+// reopened）与 issue_comment 的 created（INT-179 评论唤醒也靠 webhook 投递
+// 入场，丢了同样永久漏审）。丢失的 closed
 // 投递不会导致「推送没被审查」（本功能唯一目标），但把旧的 closed 事件重投
 // 回去会无条件取消该 PR 当前有效的审查运行（webhook 的 closed 分支在任何
-// 时间戳判定之前执行），破坏面比收益大，有意不重投。重投目标取最早一条
+// 时间戳判定之前执行），破坏面比收益大，有意不重投。同一 guid 只对应一条
+// 投递，不存在跨事件混组的歧义。重投目标取最早一条
 // 失败行的 delivery id；输出按 TargetAt 升序（GUID 兜同刻排序），保证对账
 // 行为确定。Attempts 只数列表可见的重投行——原始行滑出回看窗口后它不再等
 // 于总次数，调用方须以重投次数账为准。
 func groupHookDeliveries(items []githubapp.HookDelivery) []hookDeliveryState {
 	byGUID := map[string]*hookDeliveryState{}
 	for _, it := range items {
-		if it.Event != "pull_request" || !reviewTriggerableAction(it.Action) {
+		switch {
+		case it.Event == "pull_request" && reviewTriggerableAction(it.Action):
+		case it.Event == "issue_comment" && it.Action == "created":
+		default:
 			continue
 		}
 		st, ok := byGUID[it.GUID]

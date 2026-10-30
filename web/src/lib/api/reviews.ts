@@ -220,6 +220,8 @@ export function reviewTriggerActionLabel(
       return "重新打开";
     case "manual":
       return "手动";
+    case "comment":
+      return "评论";
     case "visual":
       return "视觉审查";
     case "unknown":

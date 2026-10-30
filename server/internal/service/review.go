@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -195,14 +196,24 @@ const reviewTiedRevalidateMax = 4
 // 踢调度循环。source 只进日志文案。同刻异 head 的歧义投递先回滚、现拉实时
 // PR 复核——payload head 仍是平台现状才带 tiedBase（绑观察到的总账 head）
 // 重进；重进时总账已前进则哨兵再触发、按新快照重验，直到收敛或到上限。
+// issue_comment 走评论唤醒分支（INT-179）：幂等与守卫自成两阶段编排
+// （handleCommentWake，事务外只读预查+实拉、单事务内幂等登记+复核开轮），
+// 不进 pull_request 触发事务；两平台的事件名同为
+// issue_comment（Forgejo webhook 订阅名 "Issue Comment"）。错误归类与
+// 提交后踢循环两平台共用同一尾部。
 func (s *ReviewService) handlePlatformWebhook(ctx context.Context, integrationID, source, event, deliveryID string, body []byte) error {
-	err := s.runWebhookDeliveryTx(ctx, integrationID, event, deliveryID, body, "", nil)
-	for i := 0; i < reviewTiedRevalidateMax; i++ {
-		var tied *tiedHeadError
-		if !errors.As(err, &tied) {
-			break
+	var err error
+	if event == "issue_comment" {
+		err = s.handleCommentWake(ctx, integrationID, event, deliveryID, body)
+	} else {
+		err = s.runWebhookDeliveryTx(ctx, integrationID, event, deliveryID, body, "", nil)
+		for i := 0; i < reviewTiedRevalidateMax; i++ {
+			var tied *tiedHeadError
+			if !errors.As(err, &tied) {
+				break
+			}
+			err = s.revalidateTiedWebhook(ctx, integrationID, source, event, deliveryID, body, tied.observedHead)
 		}
-		err = s.revalidateTiedWebhook(ctx, integrationID, source, event, deliveryID, body, tied.observedHead)
 	}
 	if errors.Is(err, errTiedHeadAmbiguous) {
 		// 上限内没收敛：总账在同刻内持续前进，丢弃该投递不腐化账本。
@@ -296,9 +307,11 @@ func (s *ReviewService) revalidateTiedWebhook(ctx context.Context, integrationID
 	if repo == "" || p.Number <= 0 || p.PR.Head.SHA == "" {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(ctx, reviewForgejoPollTimeout)
+	// 实拉独享超时预算（照 consumeDebounce：从 Background 派生并显式取消），
+	// 后续补登幂等账/重进受理事务用请求 ctx——实拉的倒计时不再渗入库操作。
+	pullCtx, cancel := context.WithTimeout(context.Background(), reviewForgejoPollTimeout)
 	defer cancel()
-	client, err := s.reviewClient(ctx, integrationID, repo, p.Installation.ID)
+	client, err := s.reviewClient(pullCtx, integrationID, repo, p.Installation.ID)
 	if err != nil {
 		// 确定性失败（集成行已删/密文损坏）重投只会得到同一错误——判丢弃
 		// 并补登幂等账，不让平台无限重投；瞬时错误才透出 500。
@@ -314,7 +327,7 @@ func (s *ReviewService) revalidateTiedWebhook(ctx context.Context, integrationID
 			zap.String("delivery", deliveryID), zap.Error(err))
 		return err
 	}
-	live, err := client.GetPullRequest(ctx, repo, p.Number)
+	live, err := client.GetPullRequest(pullCtx, repo, p.Number)
 	if err != nil {
 		// PR 已删/凭证吊销/仓库删除——确定性失败重投结果相同：判丢弃并
 		// 补登幂等账（本投递不进触发事务，不登记同 GUID 重投会重走复核
@@ -455,7 +468,9 @@ func (s *ReviewService) resolveGitHubInstallation(ctx context.Context, repoFullN
 	}
 	installationID, err := api.ResolveInstallation(ctx, repoFullName)
 	if err != nil {
-		return 0, errs.New(errs.ErrGitHubAPI.Code, "解析仓库安装失败: "+err.Error())
+		// %w 保留原因：评论唤醒按错误链分类确定性失败（401/403/404 且非限流）；
+		// rerun 的对外形态由调用处包装回 AppError，不回归。
+		return 0, fmt.Errorf("解析仓库安装失败: %w", err)
 	}
 	return installationID, nil
 }

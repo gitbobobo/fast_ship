@@ -265,7 +265,7 @@ func TestRerunReviewUsesCodeRepo(t *testing.T) {
 
 	// 代码仓库的记录 → 受理开新轮。
 	e.fake.SetPR(e.codeRepo, 7, &githubapi.PullRequest{
-		RepoFullName: e.codeRepo, Number: 7, HeadSHA: "sha-rerun",
+		RepoFullName: e.codeRepo, Number: 7, HeadSHA: "sha-rerun", HeadRepoFullName: e.codeRepo,
 		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
 	})
 	got, err := e.review.RerunReview(ctx, e.user.ID, e.project.ID, 7, e.codeRepo)
@@ -514,7 +514,7 @@ func TestRerunReviewUsesSnapshotNotLiveCodeRepo(t *testing.T) {
 	}
 
 	e.fake.SetPR(e.codeRepo, 7, &githubapi.PullRequest{
-		RepoFullName: e.codeRepo, Number: 7, HeadSHA: "sha-snap-rerun",
+		RepoFullName: e.codeRepo, Number: 7, HeadSHA: "sha-snap-rerun", HeadRepoFullName: e.codeRepo,
 		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
 	})
 	got, err := e.review.RerunReview(ctx, e.user.ID, e.project.ID, 7, e.codeRepo)

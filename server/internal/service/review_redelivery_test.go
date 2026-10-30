@@ -399,3 +399,42 @@ func TestRedeliveryPerSweepCapCountsFailures(t *testing.T) {
 		t.Fatalf("全部被拒不应记成功，实际 %v", got)
 	}
 }
+
+// TestGroupHookDeliveriesIncludesCommentCreated 评论唤醒投递（issue_comment/
+// created，INT-179）纳入对账：同 guid 分组去重、目标取最早失败行、任一行
+// 2xx 视为已送达；非 created 的评论投递（edited 等）不入组。
+func TestGroupHookDeliveriesIncludesCommentCreated(t *testing.T) {
+	base := redeliveryTestNow.Add(-time.Hour)
+	out := groupHookDeliveries([]githubapp.HookDelivery{
+		// 同 guid 两条失败行：目标取最早一条（602）。
+		hookRow(602, "guid-comment", "issue_comment", "created", 502, false, base),
+		hookRow(603, "guid-comment", "issue_comment", "created", 500, false, base.Add(time.Minute)),
+		// edited/removed 不开轮，不入组。
+		hookRow(604, "guid-comment-edited", "issue_comment", "edited", 500, false, base),
+		hookRow(605, "guid-comment-removed", "issue_comment", "removed", 500, false, base),
+		// 任一行 2xx 即整组已送达，不再重投。
+		hookRow(606, "guid-comment-ok", "issue_comment", "created", 200, false, base),
+	})
+	guids := map[string]hookDeliveryState{}
+	for _, st := range out {
+		guids[st.GUID] = st
+	}
+	st, ok := guids["guid-comment"]
+	if !ok {
+		t.Fatal("issue_comment/created 失败投递应入组")
+	}
+	if st.Event != "issue_comment" || st.Action != "created" {
+		t.Fatalf("st = %s/%s, want issue_comment/created", st.Event, st.Action)
+	}
+	if st.TargetID != 602 || st.Delivered {
+		t.Fatalf("TargetID = %d delivered = %v, want 602/false", st.TargetID, st.Delivered)
+	}
+	for _, guid := range []string{"guid-comment-edited", "guid-comment-removed"} {
+		if _, ok := guids[guid]; ok {
+			t.Fatalf("%s 不应入组（非 created 不开轮）", guid)
+		}
+	}
+	if st, ok := guids["guid-comment-ok"]; !ok || !st.Delivered {
+		t.Fatalf("guid-comment-ok 应入组且已送达: %+v (ok=%v)", st, ok)
+	}
+}
