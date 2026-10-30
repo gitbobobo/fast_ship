@@ -700,18 +700,36 @@ func (s *t3ShellState) noteArchiveMembershipSettledLocked(id string) {
 // noteArchiveExpiredLocked 的过期标记会把 archiveReady 一并撤掉（这里要求
 // ready），真实失败原因也不会被抹掉。
 func (s *t3ShellState) refreshArchiveMembershipTrustLocked() {
-	if len(s.archiveUncertain) > 0 {
-		now := time.Now()
-		for id, deadline := range s.archiveUncertain {
-			if now.After(deadline) {
-				delete(s.archiveUncertain, id)
-			}
-		}
-	}
 	if len(s.archiveUncertain) == 0 && s.archiveReady && errors.Is(s.archiveErr, errT3ShellArchiveStale) &&
 		!s.archiveStale {
 		s.archiveErr = nil
 	}
+}
+
+// expireArchiveMembershipUncertain 清理到期的不确定项，全部清空时恢复可信并
+// 报告「是否需要发布事件」（#156 R2）：到期恢复必须由定时器驱动并在 hub 层
+// 发布——只在读路径懒清会让打开中的页面一直停在降级态（use-threads 不轮询，
+// SSE 心跳也不带数据）。
+func (s *t3ShellState) expireArchiveMembershipUncertain() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.archiveUncertain) == 0 {
+		return false
+	}
+	now := time.Now()
+	for id, deadline := range s.archiveUncertain {
+		if now.After(deadline) {
+			delete(s.archiveUncertain, id)
+		}
+	}
+	if len(s.archiveUncertain) > 0 {
+		return false
+	}
+	if s.archiveReady && errors.Is(s.archiveErr, errT3ShellArchiveStale) && !s.archiveStale {
+		s.archiveErr = nil
+		return true
+	}
+	return false
 }
 
 // markActiveSynced 由 hub 控制追平标记：resume 时在重发订阅前清 false、
@@ -726,7 +744,6 @@ func (s *t3ShellState) markActiveSynced(synced bool) {
 func (s *t3ShellState) status() t3ShellFaceStatus {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.refreshArchiveMembershipTrustLocked()
 	return t3ShellFaceStatus{
 		ActiveReady:  s.activeReady,
 		ActiveSynced: s.activeSynced,
@@ -743,8 +760,6 @@ func (s *t3ShellState) status() t3ShellFaceStatus {
 func (s *t3ShellState) snapshots() *t3ShellSnapshots {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.refreshArchiveMembershipTrustLocked()
-
 	activeThreads := s.activeThreads.list()
 	archivedThreads := make([]t3ThreadShell, 0, s.archivedThreads.len())
 	for _, id := range s.archivedThreads.order {

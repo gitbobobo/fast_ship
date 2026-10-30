@@ -623,10 +623,33 @@ func (h *t3ShellHub) invalidateArchiveEntryAfterActiveRemoval(e *t3ShellEntry, l
 		// 与撤可信一致的宽限（线程可能是被彻底删除，归档面不会有增量）。
 		if e.state.noteArchiveMembershipUncertain(leftIDs, e.archiveStaleGrace) {
 			e.hub.publishArchiveFaceEvent(e, false)
+			// 到期恢复必须发事件（#156 R2）：线程可能被彻底删除、永远等不到
+			// 归档增量，只在读路径懒清会让打开中的页面一直停在降级态
+			// （use-threads 不轮询，SSE 心跳不带数据）。定时器只负责这一次
+			// 转变，entry 停机后丢弃。
+			h.scheduleArchiveMembershipSettle(e, e.archiveStaleGrace)
 		}
 		return
 	}
 	h.invalidateArchiveEntry(e)
+}
+
+// scheduleArchiveMembershipSettle 在宽限到期时清理「归属待对账」并发布可信度
+// 恢复事件（#156 R2）。线程可能是被彻底删除、永远等不到归档增量，所以不确定
+// 状态必须有时间上界，且这条转变要让浏览器知道。entry 停机后丢弃回调。
+func (h *t3ShellHub) scheduleArchiveMembershipSettle(e *t3ShellEntry, settle time.Duration) {
+	if settle <= 0 {
+		return
+	}
+	time.AfterFunc(settle, func() {
+		if e.isStopped() {
+			return
+		}
+		if e.state.expireArchiveMembershipUncertain() {
+			h.publishArchiveFaceEvent(e, false)
+			e.refresh()
+		}
+	})
 }
 
 // invalidateArchiveEntry 是 InvalidateArchive 的 entry 级入口：hub 内部已持

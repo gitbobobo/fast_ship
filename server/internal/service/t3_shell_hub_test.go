@@ -5127,3 +5127,55 @@ func TestT3ShellHub_LegacyActiveRemovalMarksMembershipUncertain(t *testing.T) {
 		t.Fatalf("archive delta must restore trust and add the thread, got %+v", view.Snaps.Archived.Threads)
 	}
 }
+
+// 归属不确定到期必须发事件（#156 R2）：线程可能被彻底删除、永远等不到归档
+// 增量；若只在读路径懒清，打开中的页面会一直停在降级态（use-threads 不轮询）。
+func TestT3ShellHub_LegacyMembershipUncertainExpiryAnnounces(t *testing.T) {
+	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
+	srv.setArchiveLegacy(true)
+	srv.setArchiveFixture(archiveSnapshotBody(1, "th-a"), nil)
+	cfg := hubTestConfig()
+	cfg.ArchiveStaleGrace = 120 * time.Millisecond
+	hub := newT3ShellHubWithConfig(cfg, nil)
+	defer hub.Close()
+	env := hubTestEnv(url, 0)
+
+	sub := hub.Subscribe("user-1")
+	defer sub.Close()
+
+	go hub.View(context.Background(), env, "tok")
+	collector := newShellConnCollector(t, srv)
+	active := collector.await(false)
+	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1")); err != nil {
+		t.Fatalf("send active snapshot: %v", err)
+	}
+	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
+		t.Fatalf("active snapshot not acked")
+	}
+	srv.awaitArchiveSub(t)
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil && len(v.Snaps.Archived.Threads) == 1
+	})
+	sub.Drain()
+
+	// 活跃面宣告离开，归档面没有任何增量（模拟被彻底删除）。
+	removed, _ := json.Marshal(map[string]any{"kind": "thread.removed", "sequence": 43, "threadId": "th-2"})
+	if err := active.conn.sendValue(active.sub.ID, removed); err != nil {
+		t.Fatalf("send active removal: %v", err)
+	}
+	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
+		t.Fatalf("active removal not acked")
+	}
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && errors.Is(v.Snaps.ArchiveErr, errT3ShellArchiveStale)
+	})
+
+	// 到期：必须发一条恢复事件（不需要任何读取或归档增量）。
+	ev := awaitShellEvent(t, sub, func(e T3ShellEvent) bool { return !e.Full && e.State != "" })
+	if ev.EnvironmentID != env.ID {
+		t.Fatalf("expiry recovery event environment = %q, want %q", ev.EnvironmentID, env.ID)
+	}
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil
+	})
+}

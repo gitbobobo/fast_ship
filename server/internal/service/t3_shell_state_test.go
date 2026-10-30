@@ -1265,7 +1265,11 @@ func TestShellState_ArchiveMembershipUncertainSettlesOnDeadline(t *testing.T) {
 		t.Fatalf("uncertainty must not drop archiveReady")
 	}
 
+	// 到期由定时器驱动（不是读路径懒清，见 #156 R2）：清理要报告「需要发布事件」。
 	time.Sleep(80 * time.Millisecond)
+	if !state.expireArchiveMembershipUncertain() {
+		t.Fatalf("expiry must report a trust transition to publish")
+	}
 	if snaps := state.snapshots(); snaps.ArchiveErr != nil {
 		t.Fatalf("uncertainty must self-heal after the settle deadline, got %v", snaps.ArchiveErr)
 	}
