@@ -213,6 +213,66 @@ func TestReviewCommentWakeAlwaysNewRound(t *testing.T) {
 	}
 }
 
+// TestReviewCommentWakeVisualInflightDoesNotBlock 视觉运行在途不阻塞点名：
+// 代码轮已出结论、视觉段在途（同 head）时评论唤醒照常开新代码轮，并把
+// 在途视觉运行 superseded——视觉在途说明代码结论已发布，正是「结论有误
+// 请重审」的主场景（fast-ship-bot 第 7 轮 P2：在途守卫只计 kind=code）。
+func TestReviewCommentWakeVisualInflightDoesNotBlock(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	e.enableReview(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	ctx := context.Background()
+	e.fake.SetPR(repo, 23, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 23, State: "open",
+		HeadSHA: "sha-vis", HeadRepoFullName: repo,
+		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
+	})
+
+	// 第 1 轮代码运行已出结论（终态），同 head 视觉运行在途。
+	if err := e.review.HandleGitHubWebhook(ctx, "pull_request", "d-v1",
+		prPayload("opened", repo, 23, "sha-vis", false, false)); err != nil {
+		t.Fatalf("webhook opened: %v", err)
+	}
+	t3 := &fakeReviewT3{}
+	review := e.withT3(t3, nil, nil)
+	review.processDueDebounces(now.Add(2 * time.Minute))
+	if err := e.svc.db.Model(&model.ReviewRun{}).
+		Where("repo_full_name = ? AND pr_number = 23 AND kind = ?", repo, model.ReviewKindCode).
+		Updates(map[string]any{"status": model.ReviewRunCompleted, "finished_at": now.Add(5 * time.Minute)}).Error; err != nil {
+		t.Fatalf("complete code: %v", err)
+	}
+	visual := &model.ReviewRun{
+		ID: "visual-inflight", UserID: e.project.UserID, ProjectID: e.project.ID,
+		Kind: model.ReviewKindVisual, RepoFullName: strings.ToLower(repo), PRNumber: 23,
+		HeadSHA: "sha-vis", RoundNumber: 1, IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		TriggerAction: "visual", ThreadID: "t-vis", LaunchCommandID: "lc-vis", InitialMessageID: "im-vis",
+		Status: model.ReviewRunRunning, DeadlineAt: now.Add(30 * time.Minute),
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := e.svc.db.Create(visual).Error; err != nil {
+		t.Fatalf("seed visual: %v", err)
+	}
+
+	// 点名：视觉在途不算「同 head 在途审查」，照常开新代码轮并取消视觉段。
+	if err := review.HandleGitHubWebhook(ctx, "issue_comment", "d-vis-wake",
+		issueCommentBody("@fast-ship-bot 代码结论有误，请重审", repo, 23, 42)); err != nil {
+		t.Fatalf("comment wake: %v", err)
+	}
+	var round2 []model.ReviewRun
+	e.svc.db.Where("repo_full_name = ? AND pr_number = 23 AND round_number = 2 AND kind = ?", repo, model.ReviewKindCode).Find(&round2)
+	if len(round2) != 1 || round2[0].TriggerAction != "comment" {
+		t.Fatalf("视觉在途时应照常开新代码轮: %+v", round2)
+	}
+	var vis model.ReviewRun
+	if err := e.svc.db.Where("id = ?", "visual-inflight").First(&vis).Error; err != nil {
+		t.Fatalf("visual run: %v", err)
+	}
+	if vis.Status != model.ReviewRunCancelled || vis.ErrorCode != "superseded" {
+		t.Fatalf("在途视觉运行应被 superseded: status=%s err=%s", vis.Status, vis.ErrorCode)
+	}
+}
+
 // TestReviewCommentWakeRedeliveryDup 同一 delivery id 重投按幂等去重
 // （预查命中，不再实拉）；payload 守卫忽略的投递（无 mention）不登记幂等
 // 账——忽略判定完全由 payload 决定，重投再忽略一遍零副作用。

@@ -343,11 +343,13 @@ func (s *ReviewService) openCommentWakeRoundTx(ctx context.Context, integrationI
 		// 审，再点名是重复请求——不重开（否则两次点名互相作废在途轮，
 		// 公开仓库可被连续点名饿死审查）。结论已出的轮不受影响：终态运行
 		// 不计入在途，照常开新轮重审；在途运行停留在旧 head 上时也照常
-		// supersede 重开。
+		// supersede 重开。只计代码运行（kind=code）：视觉运行在途说明代码
+		// 结论已发布——这正是「结论有误请重审」的主场景，点名必须开新轮
+		// 并 supersede 在途视觉段（fast-ship-bot 第 7 轮 P2）。
 		var active int64
 		if err := tx.Model(&model.ReviewRun{}).
-			Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ? AND head_sha = ? AND status IN ?",
-				project.ID, repo, prNumber, integrationID, pr.HeadSHA,
+			Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ? AND head_sha = ? AND kind = ? AND status IN ?",
+				project.ID, repo, prNumber, integrationID, pr.HeadSHA, model.ReviewKindCode,
 				[]model.ReviewRunStatus{model.ReviewRunQueued, model.ReviewRunDispatched, model.ReviewRunRunning}).
 			Count(&active).Error; err != nil {
 			return err
