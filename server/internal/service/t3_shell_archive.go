@@ -949,12 +949,16 @@ func (h *t3ShellHub) connectArchiveLegacyOnce(e *t3ShellEntry) t3ShellConnResult
 	e.noteConnState(true, t3ShellConnConnecting, nil)
 	requestID := session.nextID
 	session.nextID++
+	// connStartAt 必须在**发出 subscribe 之前**取（#156 R18）：服务端可能在收到
+	// 订阅时立刻采样快照，取在发送之后就等于把「本连接之前采好的快照」也算成
+	// 晚于连接建立，旧快照会被当成新对账证据。
+	connStartAt := time.Now()
 	if err := session.sendRequest(connCtx, requestID, t3RPCSubscribeArchivedShell, map[string]any{}); err != nil {
 		h.endFaceConnection(e, true, err)
 		return t3ShellConnResult{}
 	}
 	e.noteConnState(true, t3ShellConnSubscribed, nil)
-	return h.readArchiveLegacyLoop(e, session, connCtx, requestID, connectionStart)
+	return h.readArchiveLegacyLoop(e, session, connCtx, requestID, connectionStart, connStartAt)
 }
 
 // readArchiveLegacyLoop 是旧归档订阅的读循环：只认本 requestID 的 Chunk/
@@ -963,7 +967,7 @@ func (h *t3ShellHub) connectArchiveLegacyOnce(e *t3ShellEntry) t3ShellConnResult
 // 出发邮戳，随流项交给落地路径做备忘世代判定（R4 P2）。另有第三条出
 // 路：legacyReconnect 信号在守旧备忘仍置位时主动断开，交监督循环重连
 // 取权威全量（R3 P1-B）。返回连接结局。
-func (h *t3ShellHub) readArchiveLegacyLoop(e *t3ShellEntry, session *t3RPCSession, connCtx context.Context, requestID int, connectionStart int64) t3ShellConnResult {
+func (h *t3ShellHub) readArchiveLegacyLoop(e *t3ShellEntry, session *t3RPCSession, connCtx context.Context, requestID int, connectionStart int64, connStartAt time.Time) t3ShellConnResult {
 	frames := make(chan *rpcFrame, 16)
 	readErrCh := make(chan error, 1)
 	readerDone := make(chan struct{})
@@ -993,10 +997,6 @@ func (h *t3ShellHub) readArchiveLegacyLoop(e *t3ShellEntry, session *t3RPCSessio
 	}()
 
 	lastFrame := time.Now()
-	// connStartAt 是本连接的建立时刻（#156 R17）：订阅推送的快照可能在本连接
-	// 之前就被采好，用送达时刻当对账证据会把旧快照当成新证据。取连接建立的
-	// 保守下界，宁可多等一个宽限窗口也不误判存在性。
-	connStartAt := time.Now()
 	pingTicker := time.NewTicker(h.cfg.PingInterval / 2)
 	defer pingTicker.Stop()
 
