@@ -1153,6 +1153,11 @@ func (h *t3ShellHub) applyArchiveValues(e *t3ShellEntry, values []json.RawMessag
 		// 归档流自己也可能登记待对账（#156 R24：删掉某线程在归档面的唯一一行，
 		// 而它也不在活跃面）。这条路径不会经过活跃面的帧后回调，所以定时器要在
 		// 这里补排——否则条目只能等下次活跃移除或快照，面会一直 stale。
+		// 变更前快照被拒时 state 会记重建备忘（#156 R29）：这里要真的把信号
+		// 发给读循环，否则备忘只等下一次自然断连才兑现，期间面一直是 stale。
+		if e.state.archiveReconnectTarget() > connectionStart {
+			e.signalArchiveReconnect()
+		}
 		if e.state.pendingArchiveUncertain() > 0 {
 			h.scheduleArchiveMembershipSettle(e, e.archiveStaleGrace)
 		}
