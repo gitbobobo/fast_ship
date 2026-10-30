@@ -689,10 +689,9 @@ func (s *t3ShellState) applyArchiveSnapshotLocked(snapshot t3ArchivedShellSnapsh
 	// 采集早于最近一次归属变更的快照同样是变更前状态（#156 R28）：只换数据
 	// 不封窗，否则它会把面恢复可信而线程两面都没有。
 	if !observedAt.IsZero() && observedAt.Before(s.archiveFreshnessFloor) {
-		s.archiveReady = false
-		if s.archiveErr == nil {
-			s.archiveErr = errT3ShellArchiveStale
-		}
+		// 变更前快照被拒之后要主动重连取新全量（#156 R29）：否则这条连接
+		// 不会再有写后快照，面只能等到期，catch-up 期间读一直 degraded。
+		s.noteArchiveReconnectRequestedLocked()
 		return nil
 	}
 	// 邮戳 ≥ 备忘世代：权威全量快照即是重连取写后状态的完成——置可信
@@ -737,6 +736,12 @@ func (s *t3ShellState) markArchiveFailed(err error) {
 func (s *t3ShellState) noteArchiveReconnectRequested() int64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.noteArchiveReconnectRequestedLocked()
+}
+
+// noteArchiveReconnectRequestedLocked 同 noteArchiveReconnectRequested（调用方
+// 须持 s.mu）。
+func (s *t3ShellState) noteArchiveReconnectRequestedLocked() int64 {
 	s.archiveReconnectIssued++
 	s.archiveReconnectPendingGen = s.archiveReconnectIssued
 	s.archiveReady = false
