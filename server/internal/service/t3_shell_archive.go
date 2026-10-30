@@ -623,7 +623,7 @@ func (h *t3ShellHub) InvalidateArchive(userID, envID string) {
 // ArchiveErr 仍为 nil，并发 bot wait 会把「活跃面与归档面都没有」当成可信
 // 结论而误判 thread_gone。标记只影响可信度（旧行保留），下一次订阅数据
 // 落地（增量或快照）即恢复，不必清表重连。
-func (h *t3ShellHub) invalidateArchiveEntryAfterActiveRemoval(e *t3ShellEntry, leftIDs, armedRegisteredIDs []string) {
+func (h *t3ShellHub) invalidateArchiveEntryAfterActiveRemoval(e *t3ShellEntry, leftIDs, armedRegisteredIDs, provenIDs []string) {
 	e.arch.mu.Lock()
 	legacy := e.arch.mode == t3ArchiveModeLegacy
 	e.arch.mu.Unlock()
@@ -634,7 +634,10 @@ func (h *t3ShellHub) invalidateArchiveEntryAfterActiveRemoval(e *t3ShellEntry, l
 		// 只登记「未由 armed 路径登记」的 ID（#156 R7/R8）：已登记过的再登记会
 		// 把已被归档流对账的 ID 重新打回待对账（白 stale 一个宽限窗口），而
 		// 完全跳过又会漏掉「帧应用发生在 arm 之前」的移除。
-		todo := t3IDsNotIn(leftIDs, armedRegisteredIDs)
+		// provenIDs 同理要排除（#156 R13-codex）：那些移除的帧自身带着归档行、
+		// 且归档面已有该行，state 已判定无需对账，帧后回调不能把它重新登记。
+		handled := append(append([]string{}, armedRegisteredIDs...), provenIDs...)
+		todo := t3IDsNotIn(leftIDs, handled)
 		pending := e.state.noteArchiveMembershipUncertain(todo, e.archiveStaleGrace)
 		if pending == 0 && len(armedRegisteredIDs) == 0 {
 			return

@@ -1168,12 +1168,16 @@ func (h *t3ShellHub) applyActiveValues(e *t3ShellEntry, values []json.RawMessage
 	// 「已在应用移除的同一临界区登记过」的部分（R7/R8），帧后回调不再重复登记。
 	removedIDs := make([]string, 0, 1)
 	armedRegisteredIDs := make([]string, 0, 1)
+	// provenIDs 是「帧自身带着归档行、且归档面已有该行」的 ID（#156 R13-codex）：
+	// state 在应用帧时就判定无需对账，帧后回调必须尊重这个结论——否则会给
+	// 它重新登记、把一条已有归档据的线程白降级一个宽限窗口。
+	provenIDs := make([]string, 0, 1)
 	// leftActiveFace 只表示「本批出现过离开活跃面的帧」，用于按需快照模式的
 	// 缓存失效（噪声帧多失效一次只是多付一次快照，不影响可信度语义）。
 	leftActiveFace := false
 	defer func() {
 		if leftActiveFace {
-			h.invalidateArchiveEntryAfterActiveRemoval(e, removedIDs, armedRegisteredIDs)
+			h.invalidateArchiveEntryAfterActiveRemoval(e, removedIDs, armedRegisteredIDs, provenIDs)
 		}
 	}()
 	for _, raw := range values {
@@ -1194,6 +1198,9 @@ func (h *t3ShellHub) applyActiveValues(e *t3ShellEntry, values []json.RawMessage
 			removedIDs = append(removedIDs, removed...)
 			if armedRegistered {
 				armedRegisteredIDs = append(armedRegisteredIDs, removed...)
+			} else if item.Kind == "thread.updated" && item.Location != "active" {
+				// 帧带归档行却没登记 = state 判定「归档面已有该行」。
+				provenIDs = append(provenIDs, removed...)
 			}
 			leftActiveFace = true
 		}

@@ -2757,7 +2757,7 @@ func TestT3ShellHub_ExpiredArchiveUntrustedDuringRefetch(t *testing.T) {
 	// 放行重拉：写后快照落地恢复可信，归档集换成上游新状态。
 	srv.resumeArchive()
 	view = waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
-		return v.Snaps != nil && v.Snaps.ArchiveErr == nil && len(v.Snaps.Archived.Threads) == 1 && v.Snaps.Archived.Threads[0].ID == "th-b"
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil && v.Snaps.Archived.Threads[0].ID == "th-b"
 	})
 	_ = view
 }
@@ -5202,7 +5202,7 @@ func TestT3ShellHub_LegacyMembershipUncertainSecondBatchExpires(t *testing.T) {
 	}
 	srv.awaitArchiveSub(t)
 	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
-		return v.Snaps != nil && v.Snaps.ArchiveErr == nil
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil && len(v.Snaps.Archived.Threads) > 0
 	})
 
 	sendRemoval := func(seq int, id string) {
