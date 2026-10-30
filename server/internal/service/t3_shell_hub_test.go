@@ -4686,3 +4686,60 @@ func TestT3ShellHub_ArchivePRCountChangeAnnouncesState(t *testing.T) {
 		t.Fatalf("same-collection PR count change must announce exactly one lightweight State (no Full), got %+v", evs)
 	}
 }
+
+// TestT3ShellHub_BatchFailureStillInvalidatesArchive 钉住「失效不依赖整批
+// 成功」（R15 P2）：坏帧与离开活跃面的帧同批时，提前返回不得吞掉归档缓存
+// 失效——已应用的移除不回滚，重连后的权威全量快照也不会再把它算进
+// removed，漏掉就永远补不上。
+func TestT3ShellHub_BatchFailureStillInvalidatesArchive(t *testing.T) {
+	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
+	srv.setArchiveFixture(archiveSnapshotBody(1, "th-a"), nil)
+	hub := newT3ShellHubWithConfig(hubTestConfig(), nil)
+	defer hub.Close()
+	env := hubTestEnv(url, 0)
+
+	_, activeConn, activeSub, _, _ := establishBothFaces(t, hub, srv, env, "tok", 42, "th-1")
+
+	key := t3ShellHubKey(env.UserID, env.ID)
+	hub.mu.Lock()
+	e := hub.entries[key]
+	hub.mu.Unlock()
+	if e == nil {
+		t.Fatalf("entry missing")
+	}
+	e.state.mu.Lock()
+	genBefore := e.state.archiveGeneration
+	e.state.mu.Unlock()
+
+	// 同一批里：先移除 th-1（离开活跃面），随后一条坏帧让整批失败。
+	removed, _ := json.Marshal(map[string]any{
+		"kind": "thread.removed", "sequence": 43, "threadId": "th-1",
+	})
+	bad := json.RawMessage(`[]`) // 解进 t3ShellStreamItem 必失败
+	data, err := json.Marshal(map[string]any{
+		"_tag": "Chunk", "requestId": activeSub.ID,
+		"values": []json.RawMessage{removed, bad},
+	})
+	if err != nil {
+		t.Fatalf("marshal batch: %v", err)
+	}
+	activeConn.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	if err := websocket.Message.Send(activeConn.conn, data); err != nil {
+		t.Fatalf("send failing batch: %v", err)
+	}
+
+	// 整批失败 → 流结束重连；已应用的移除仍须完成归档失效。
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		e.state.mu.Lock()
+		stale, gen, archErr := e.state.archiveStale, e.state.archiveGeneration, e.state.archiveErr
+		e.state.mu.Unlock()
+		if stale && archErr != nil && gen > genBefore {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("batch failure must not swallow archive invalidation: stale=%v err=%v gen %d → %d", stale, archErr, genBefore, gen)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}

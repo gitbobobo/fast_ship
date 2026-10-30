@@ -1119,9 +1119,20 @@ func (e *t3ShellEntry) syncConfirmedAt() time.Time {
 // 帧是低频帧，且每条 Chunk 至多失效一次，不构成对流式的过度拉取。
 // location == "active" 的 updated 是正常字段更新，线程没离开活跃面，不
 // 触发失效。
+//
+// 失效不依赖整批成功（R15 P2）：批内已应用的移除不会因后续帧失败而回滚，
+// 若把失效留在成功收尾处，坏帧与迁移帧同批时那次移除就永远补不上失效
+// （重连后的权威全量快照已看不到它，不会再算进 removed）——线程两面消失
+// 且 ArchiveErr 仍 nil，最长一个 TTL 内 wait 误判 thread_gone。因此用
+// defer 兜住所有返回路径：帧级记下 leftActiveFace 即失效。
 func (h *t3ShellHub) applyActiveValues(e *t3ShellEntry, values []json.RawMessage) error {
 	batch := t3ShellEventBatch{}
 	leftActiveFace := false
+	defer func() {
+		if leftActiveFace {
+			h.invalidateArchiveEntry(e)
+		}
+	}()
 	for _, raw := range values {
 		var item t3ShellStreamItem
 		if err := json.Unmarshal(raw, &item); err != nil {
@@ -1145,9 +1156,6 @@ func (h *t3ShellHub) applyActiveValues(e *t3ShellEntry, values []json.RawMessage
 		}
 	}
 	h.publishThreadEvent(e, batch.ids, batch.full)
-	if leftActiveFace {
-		h.invalidateArchiveEntry(e)
-	}
 	return nil
 }
 
