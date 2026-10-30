@@ -645,6 +645,16 @@ func TestReviewDebounceInstallationFallback(t *testing.T) {
 		if runs == 0 {
 			t.Fatal("应照常开轮")
 		}
+		var ledger, run model.ReviewPullRequest
+		if err := e.svc.db.Where("pr_number = 81").First(&ledger).Error; err != nil {
+			t.Fatalf("总账行应存在: %v", err)
+		}
+		if err := e.svc.db.Where("pr_number = 81").First(&run).Error; err != nil {
+			t.Fatalf("运行行应存在: %v", err)
+		}
+		if ledger.InstallationID != 7 || run.InstallationID != 7 {
+			t.Fatalf("installation 快照应沿总账值 7: ledger=%d run=%d", ledger.InstallationID, run.InstallationID)
+		}
 		if got := e.debounceCount(t); got != 0 {
 			t.Fatalf("防抖行应被消费，剩 %d", got)
 		}
@@ -686,6 +696,16 @@ func TestReviewDebounceInstallationFallback(t *testing.T) {
 		e.svc.db.Model(&model.ReviewRun{}).Where("pr_number = 82").Count(&runs)
 		if runs == 0 {
 			t.Fatal("解析后应照常开轮")
+		}
+		var ledger, run model.ReviewPullRequest
+		if err := e.svc.db.Where("pr_number = 82").First(&ledger).Error; err != nil {
+			t.Fatalf("总账行应存在: %v", err)
+		}
+		if err := e.svc.db.Where("pr_number = 82").First(&run).Error; err != nil {
+			t.Fatalf("运行行应存在: %v", err)
+		}
+		if ledger.InstallationID != 1 || run.InstallationID != 1 {
+			t.Fatalf("解析出的安装 id 应落账本与运行行: ledger=%d run=%d", ledger.InstallationID, run.InstallationID)
 		}
 	})
 }

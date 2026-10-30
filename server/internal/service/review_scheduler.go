@@ -307,9 +307,12 @@ func (s *ReviewService) consumeDebounce(row *model.ReviewDebounce, now time.Time
 		if settings.RepoFullName != row.RepoFullName || settings.IntegrationID != row.IntegrationID {
 			return nil
 		}
+		// 传兜底解析后的 installationID：首次审查（无总账）时 row 内为 0，
+		// openRoundTx 的「0 保留旧值」兜底无从生效，账本与运行行会以 0 派发
+		// 失败（fast-ship-bot 第 37 轮 P2）。
 		_, err := s.openRoundTx(tx, &project, &settings,
 			row.RepoFullName, row.PRNumber, row.HeadSHA, row.Action,
-			row.PRTitle, row.PRURL, row.BaseRef, row.HeadRef, row.InstallationID, nil, now)
+			row.PRTitle, row.PRURL, row.BaseRef, row.HeadRef, installationID, nil, now)
 		return err
 	})
 	if err != nil {
