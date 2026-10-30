@@ -196,6 +196,11 @@ type t3ShellState struct {
 	// 该时刻采集的归档快照才能算作它的对账证据——重连快照可能在移除之前就已
 	// 采好、之后才送达，把它的包含关系当作「本轮已对账」会误清标记。
 	archiveUncertainSince map[string]time.Time
+	// archiveFreshnessFloor 是「最近一次归属变更」的时刻下界（#156 R28）：待对账
+	// 到期会被清掉，但**早于它采集的归档快照仍然不能算证据**——否则一条在移除
+	// 之前采好、迟到超过宽限的快照会把面恢复可信、而线程两面都没有，wait 会
+	// 把存在的线程判成 thread_gone。快照采集时刻早于它一律按「变更前状态」处理。
+	archiveFreshnessFloor time.Time
 	// archiveUncertainArmed / archiveUncertainSettle：（订阅模式下）活跃面移除
 	// 在同一临界区里直接登记待对账，不必等 hub 的帧后回调（#156 R5：否则
 	// 「线程已从活跃面删除、ArchiveErr 仍为 nil」的中间态可被并发 Peek/wait
@@ -473,6 +478,15 @@ func (s *t3ShellState) applyArchiveSnapshotAt(snapshot t3ArchivedShellSnapshot, 
 		}
 		return false, nil
 	}
+	if !observedAt.IsZero() && observedAt.Before(s.archiveFreshnessFloor) {
+		// 采集早于最近一次归属变更（#156 R28）：这是变更前状态，只换数据不封窗，
+		// 由之后采到的快照或下一次到期恢复可信。
+		s.archiveReady = false
+		if s.archiveErr == nil {
+			s.archiveErr = errT3ShellArchiveStale
+		}
+		return false, nil
+	}
 	s.archiveReady = true
 	s.archiveErr = nil
 	s.archiveStale = false
@@ -672,6 +686,15 @@ func (s *t3ShellState) applyArchiveSnapshotLocked(snapshot t3ArchivedShellSnapsh
 		}
 		return nil
 	}
+	// 采集早于最近一次归属变更的快照同样是变更前状态（#156 R28）：只换数据
+	// 不封窗，否则它会把面恢复可信而线程两面都没有。
+	if !observedAt.IsZero() && observedAt.Before(s.archiveFreshnessFloor) {
+		s.archiveReady = false
+		if s.archiveErr == nil {
+			s.archiveErr = errT3ShellArchiveStale
+		}
+		return nil
+	}
 	// 邮戳 ≥ 备忘世代：权威全量快照即是重连取写后状态的完成——置可信
 	// 并撤销尚存的重建备忘，避免晚到的信号再把刚恢复的面拆掉一次。
 	s.archiveReady = true
@@ -858,6 +881,9 @@ func (s *t3ShellState) noteArchiveMembershipUncertainLocked(ids []string, settle
 			s.archiveUncertainSince = make(map[string]time.Time, len(ids))
 		}
 		s.archiveUncertainSince[id] = time.Now()
+		if s.archiveUncertainSince[id].After(s.archiveFreshnessFloor) {
+			s.archiveFreshnessFloor = s.archiveUncertainSince[id]
+		}
 	}
 	if pending == 0 {
 		return 0, proven
@@ -988,6 +1014,9 @@ func (s *t3ShellState) expireArchiveMembershipUncertain() bool {
 	now := time.Now()
 	for id, deadline := range s.archiveUncertain {
 		if now.After(deadline) {
+			if since, ok := s.archiveUncertainSince[id]; ok && since.After(s.archiveFreshnessFloor) {
+				s.archiveFreshnessFloor = since
+			}
 			delete(s.archiveUncertain, id)
 			// 到期同样要清登记时刻（#156 R20）：否则同一 ID 再次登记时取到的
 			// 是旧时刻，会把之后的权威快照误判成「采集太早」而多降级一轮。

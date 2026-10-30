@@ -1865,7 +1865,8 @@ func TestShellState_PrestaleSnapshotDoesNotSettleUncertainty(t *testing.T) {
 	covered := t3ArchivedShellSnapshot{SchemaVersion: 1, SnapshotSequence: 3, Threads: shellTestThreads(shellTestThread("th-1", "归档"))}
 
 	// 采集时刻早于登记：不算证据。
-	if applied, err := state.applyArchiveSnapshotAt(covered, state.archiveGenerationNow(), nil, time.Now().Add(-time.Second)); !applied || err != nil {
+	// 采集早于登记：按变更前状态处理（applied=false，不封窗），且不得解账。
+	if _, err := state.applyArchiveSnapshotAt(covered, state.archiveGenerationNow(), nil, time.Now().Add(-time.Second)); err != nil {
 		t.Fatalf("apply stale snapshot: %v", err)
 	}
 	if snaps := state.snapshots(); !errors.Is(snaps.ArchiveErr, errT3ShellArchiveStale) {
@@ -1930,5 +1931,49 @@ func TestShellState_ArchiveRemovalOfActiveAbsentThreadMarksUncertain(t *testing.
 	}
 	if snaps := state.snapshots(); !errors.Is(snaps.ArchiveErr, errT3ShellArchiveStale) {
 		t.Fatalf("removing the only trace of a thread must mark uncertainty, got %v", snaps.ArchiveErr)
+	}
+}
+
+// 待对账到期后，早于那次变更采集的归档快照仍然不算证据（#156 R28）：否则一条
+// 移除前采好、迟到超过宽限的快照会把面恢复可信，而线程两面都没有 → thread_gone。
+func TestShellState_ExpiryKeepsFreshnessFloor(t *testing.T) {
+	state := newT3ShellState()
+	if applied, err := state.applyArchiveSnapshot(
+		t3ArchivedShellSnapshot{SchemaVersion: 1, SnapshotSequence: 1, Threads: shellTestThreads(shellTestThread("th-a", "归档"))},
+		state.archiveGenerationNow(), nil); !applied || err != nil {
+		t.Fatalf("seed archive: %v", err)
+	}
+	if _, _, err := state.applyActiveItemTracked(t3ShellStreamItem{
+		Kind: "snapshot", Snapshot: &t3ShellSnapshot{SchemaVersion: 1, SnapshotSequence: 1, Threads: shellTestThreads(shellTestThread("th-1", "线程"))},
+	}); err != nil {
+		t.Fatalf("seed active: %v", err)
+	}
+	state.armArchiveUncertain(true, 20*time.Millisecond)
+	if _, _, err := state.applyActiveItemTracked(t3ShellStreamItem{
+		Kind: "thread.removed", Sequence: intPtrTestLocal(2), ThreadID: "th-1",
+	}); err != nil {
+		t.Fatalf("apply removal: %v", err)
+	}
+	time.Sleep(40 * time.Millisecond)
+	state.expireArchiveMembershipUncertain()
+
+	// 采集时刻早于那次移除的快照：不得恢复可信。
+	if _, err := state.applyArchiveSnapshotAt(
+		t3ArchivedShellSnapshot{SchemaVersion: 1, SnapshotSequence: 3, Threads: shellTestThreads(shellTestThread("th-a", "归档"))},
+		state.archiveGenerationNow(), nil, time.Now().Add(-time.Second)); err != nil {
+		t.Fatalf("apply stale snapshot: %v", err)
+	}
+	if snaps := state.snapshots(); !errors.Is(snaps.ArchiveErr, errT3ShellArchiveStale) {
+		t.Fatalf("a snapshot captured before the transition must not restore trust, got %v", snaps.ArchiveErr)
+	}
+
+	// 之后采集的快照可以恢复可信。
+	if _, err := state.applyArchiveSnapshotAt(
+		t3ArchivedShellSnapshot{SchemaVersion: 1, SnapshotSequence: 4, Threads: shellTestThreads(shellTestThread("th-a", "归档"))},
+		state.archiveGenerationNow(), nil, time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("apply fresh snapshot: %v", err)
+	}
+	if snaps := state.snapshots(); snaps.ArchiveErr != nil {
+		t.Fatalf("a snapshot captured after the transition restores trust, got %v", snaps.ArchiveErr)
 	}
 }
