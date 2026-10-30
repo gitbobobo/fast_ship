@@ -264,8 +264,17 @@ func (s *ReviewService) notifyRedeliveryExhausted(userIDs []string, st hookDeliv
 		return
 	}
 	title := fmt.Sprintf("PR 审查投递重投失败：%s/%s", st.Event, st.Action)
-	body := fmt.Sprintf("GitHub 的 %s/%s 投递在 %d 次重投后仍未送达本服务（guid %s），这次推送可能没有被审查；请检查公网入口与隧道。",
-		st.Event, st.Action, attempts, st.GUID)
+	// 恢复指引按事件面区分：推送投递丢了重推即可；评论唤醒丢了重投也不
+	// 行——幂等账只随确定结果落定，失败投递没进账，用户重新评论一次就能
+	// 触发新一轮（codex 第 25 轮 P3：误导性文案把用户往重推空提交上引）。
+	var hint string
+	if st.Event == "issue_comment" {
+		hint = "这次评论唤醒可能没有开始；请在 PR 上重新评论一次即可重新触发"
+	} else {
+		hint = "这次推送可能没有被审查；重新推送或合并后重试即可触发"
+	}
+	body := fmt.Sprintf("GitHub 的 %s/%s 投递在 %d 次重投后仍未送达本服务（guid %s），%s；请检查公网入口与隧道。",
+		st.Event, st.Action, attempts, st.GUID, hint)
 	for _, userID := range userIDs {
 		err := s.sink.Publish(NotificationInput{
 			UserID:     userID,
