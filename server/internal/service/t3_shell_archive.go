@@ -703,6 +703,12 @@ func (h *t3ShellHub) scheduleArchiveMembershipSettle(e *t3ShellEntry, settle tim
 	// 只保留最新一个定时器：settle 是常量，最新定时器的时刻必然覆盖此前各批
 	// 的截止时刻（到期清理按各自 deadline 裁剪，早批会被一并清掉）。
 	e.mu.Lock()
+	if e.isStopped() {
+		// 停机之后再装定时器没人会 Stop 它（#156 R19）：回调虽会因 isStopped
+		// 早退，但仍是 Close 之后才触发的 goroutine，白占一个生命周期尾巴。
+		e.mu.Unlock()
+		return
+	}
 	if e.settleTimer != nil {
 		e.settleTimer.Stop()
 	}
