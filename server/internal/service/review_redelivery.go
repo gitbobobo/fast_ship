@@ -184,16 +184,21 @@ func (s *ReviewService) reconcileWebhookDeliveries(now time.Time) {
 			continue // 已确认关闭的 PR：终态，不重投、不通知、不再查询
 		}
 		if check := s.redeliveryPRReviewable(probeCtx, probe, st.TargetID, st.Event); check.Known && !check.Reviewable {
-			// PR 已关闭/合并：记终态后静默跳过——重投只会白跑一轮（webhook
-			// 会照常受理并在连续失败时误报故障通知）。记账失败只留日志，
-			// 不影响其它组（下一轮重查同一条，顶多重复一次）。
+			// 记终态后静默跳过——重投只会白跑一轮（webhook 会照常受理并在
+			// 连续失败时误报故障通知）。记账失败只留日志，不影响其它组（下
+			// 一轮重查同一条，顶多重复一次）。
 			if err := s.redeliveries.RecordClosed(s.db, st.GUID, time.Now().UTC()); err != nil {
 				s.logger.Error("记录投递终态失败",
 					zap.String("guid", st.GUID), zap.Error(err))
 			}
-			s.logger.Info("投递指向的 PR 已关闭，跳过重投",
-				zap.String("guid", st.GUID), zap.Int64("delivery", st.TargetID),
-				zap.String("repo", check.Repo), zap.Int("pr", check.Number))
+			if check.NotWake {
+				s.logger.Info("非唤醒评论投递，跳过重投",
+					zap.String("guid", st.GUID), zap.Int64("delivery", st.TargetID))
+			} else {
+				s.logger.Info("投递指向的 PR 已关闭，跳过重投",
+					zap.String("guid", st.GUID), zap.Int64("delivery", st.TargetID),
+					zap.String("repo", check.Repo), zap.Int("pr", check.Number))
+			}
 			continue
 		}
 		attempts := ledger[st.GUID].Attempts
@@ -282,6 +287,10 @@ type redeliveryPRCheck struct {
 	Reviewable bool
 	Repo       string
 	Number     int
+	// NotWake 评论唤醒专用：投递是 issue_comment 但 payload 不满足唤醒守卫
+	// （编辑/删除、普通 Issue 评论、正文未点名机器人）——webhook 本来就
+	// 会静默忽略，对账记终态跳过，不进重试集不吃预算。
+	NotWake bool
 }
 
 // redeliveryPRReviewable 重投前的 PR 实况闸门：确认投递指向的 PR 仍开着。
@@ -323,9 +332,11 @@ func (p *redeliveryPRProbe) lookup(ctx context.Context, deliveryID int64, event 
 	switch event {
 	case "issue_comment":
 		// 与评论唤醒共用同一份最小字段面：repository.full_name + issue.number。
-		var payload commentWakePayload
-		if err := json.Unmarshal(detail.Payload, &payload); err != nil {
-			return redeliveryPRCheck{}, fmt.Errorf("解析投递 payload: %w", err)
+		// 复用同一份守卫：非唤醒投递（普通 Issue 评论、正文未点名机器人）
+		// webhook 本来就会静默忽略——记终态跳过，不进重试集白吃预算与通知。
+		payload := commentWakePayloadGuards(detail.Payload)
+		if payload == nil {
+			return redeliveryPRCheck{Known: true, Reviewable: false, NotWake: true}, nil
 		}
 		repo, number, installation = payload.Repository.FullName, payload.Issue.Number, payload.Installation.ID
 	default:

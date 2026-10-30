@@ -690,6 +690,61 @@ func TestReviewCommentWakeTxRollbackRetainsRedelivery(t *testing.T) {
 	}
 }
 
+// TestReviewCommentWakeSettingsQueryError 设置行复核的库错误必须透出：
+// 只有 ErrRecordNotFound（审查被移除）才是已确定的丢弃；其余查询失败要让
+// 事务整体回滚、不烧幂等账，平台重投可完整重走（codex review P2 修复面）。
+func TestReviewCommentWakeSettingsQueryError(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	e.enableReview(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	ctx := context.Background()
+
+	e.fake.SetPR(repo, 35, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 35, State: "open", HeadSHA: "sha-dberr",
+		HeadRepoFullName: repo,
+		Title:            "db err", HTMLURL: "https://github.com/" + repo + "/pull/35",
+		BaseRef: "main", HeadRef: "feature",
+	})
+
+	// 只拦设置行复核那条带 Select 列的查询（反查启用项目的联查无 Select
+	// 列，不受影响）；在实拉 hook 里置位，保证失败发生在最终事务内。
+	failSettings := false
+	if err := e.svc.db.Callback().Query().Before("gorm:query").Register("int179_fail_settings_select",
+		func(tx *gorm.DB) {
+			if failSettings && tx.Statement.Table == "project_review_settings" && len(tx.Statement.Selects) > 0 {
+				tx.AddError(errors.New("injected settings query failure"))
+			}
+		}); err != nil {
+		t.Fatalf("注册回调失败: %v", err)
+	}
+	e.fake.SetPRHook(func(int) { failSettings = true })
+
+	body := issueCommentBody("@fast-ship-bot", repo, 35, 42)
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-dberr", body); err == nil {
+		t.Fatal("设置行查询失败应透出 error（500，平台重投）")
+	}
+	var deliveries, runs int64
+	e.svc.db.Model(&model.GitHubWebhookDelivery{}).Count(&deliveries)
+	e.svc.db.Model(&model.ReviewRun{}).Where("pr_number = 35").Count(&runs)
+	if deliveries != 0 || runs != 0 {
+		t.Fatalf("库错误应整体回滚（不烧幂等账）: deliveries=%d runs=%d", deliveries, runs)
+	}
+
+	// 恢复后同 delivery 重投：完整重走并开轮。
+	failSettings = false
+	e.fake.SetPRHook(nil)
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-dberr", body); err != nil {
+		t.Fatalf("恢复后重投应完整重走并开轮: %v", err)
+	}
+	var run model.ReviewRun
+	if err := e.svc.db.Where("pr_number = 35").First(&run).Error; err != nil {
+		t.Fatalf("重投后应开出新轮: %v", err)
+	}
+	if run.TriggerAction != "comment" {
+		t.Fatalf("trigger_action = %s", run.TriggerAction)
+	}
+}
+
 // TestReviewCommentWakeForgejoIntegration Forgejo 路径：按集成 id 反查启用
 // 项目、无安装语义（installation=0）、评论恒开新轮；GitHub 入口对绑定
 // Forgejo 的项目不误触（设置行快照分区）。

@@ -284,7 +284,12 @@ func (s *ReviewService) openCommentWakeRoundTx(ctx context.Context, integrationI
 		var fresh model.ProjectReviewSettings
 		if err := tx.Select("repo_full_name", "integration_id", "enabled").
 			Where("project_id = ?", project.ID).First(&fresh).Error; err != nil {
-			// 设置行已删（审查被移除）→ 静默忽略。
+			// 只有「设置行已删（审查被移除）」才是已确定的丢弃——静默忽略并
+			// 随事务落幂等账；其余库错误必须透出让事务整体回滚（不烧幂等
+			// 账），否则一次 DB 抖动就把投递记成已处理，平台重投被 202 永吞。
+			if !errors.Is(err, gorm.ErrRecordNotFound) {
+				return err
+			}
 			return nil
 		}
 		if !fresh.Enabled || !strings.EqualFold(fresh.RepoFullName, repo) ||
