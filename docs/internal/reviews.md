@@ -181,9 +181,12 @@ seen SHA、取消旧轮全部失效）。
 
 ### 评论唤醒（INT-179，`review_comment_wake.go`）
 
-PR 顶层评论正文包含 `@fast-ship-bot`（大小写不敏感的包含判定）时也开一轮
-审查——审查结论有误时实现者回帖纠正即可唤醒审查者，不必推空提交。
-`handlePlatformWebhook` 按 event 名分流：`issue_comment` 与
+PR 顶层评论正文包含唤醒串（大小写不敏感的包含判定）时也开一轮审查——审
+查结论有误时实现者回帖纠正即可唤醒审查者，不必推空提交。唤醒串有两个：
+规格字面量 `@fast-ship-bot`（INT-179）与部署真实机器人句柄
+`@<app_slug>`（manifest 流创建的 App slug 形如 fast-ship-<host>，与字面
+量不同——按机器人账号自然 @ 也能唤醒；读取自部署设置行的 app_slug，
+未配置时仅字面量生效）。`handlePlatformWebhook` 按 event 名分流：`issue_comment` 与
 `pull_request_comment` 都进独立的评论唤醒分支，不进 pull_request 触发事务
 （Forgejo 的 PR 评论由独立订阅项 **Pull Request Comment** 投递，事件名随
 部署版本/形态可能是任一者；GitHub 恒 `issue_comment`，行内评论是另一个

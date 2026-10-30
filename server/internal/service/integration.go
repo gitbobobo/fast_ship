@@ -40,6 +40,8 @@ type GitHubAppConfig struct {
 	AppID         string
 	PrivateKeyPEM []byte
 	WebhookSecret string
+	// AppSlug 部署机器人句柄（不含 [bot] 后缀）：评论唤醒把它也当唤醒串。
+	AppSlug string
 }
 
 var (
@@ -127,14 +129,21 @@ func (s *IntegrationService) resolveConfig() (source string, row *model.Deployme
 // Current 返回当前部署生效的 GitHub App 明文身份（githubapp.Clients 的唯一
 // 入口）；ok=false 表示未配置。解密失败返回 50000，不回落 config。
 func (s *IntegrationService) Current(ctx context.Context) (GitHubAppConfig, bool, error) {
-	_, _, payload, usable, err := s.resolveConfig()
+	_, row, payload, usable, err := s.resolveConfig()
 	if err != nil {
 		return GitHubAppConfig{}, false, err
+	}
+	slug := ""
+	if row != nil {
+		slug = row.AppSlug
 	}
 	return GitHubAppConfig{
 		AppID:         payload.AppID,
 		PrivateKeyPEM: []byte(payload.PrivateKeyPEM),
 		WebhookSecret: payload.WebhookSecret,
+		// AppSlug 部署机器人句柄（<slug>[bot]）：评论唤醒把它也当唤醒串
+		// （INT-179——字面量 @fast-ship-bot 与真实句柄不同）。
+		AppSlug: slug,
 	}, usable, nil
 }
 

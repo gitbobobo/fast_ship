@@ -169,6 +169,7 @@ func (s *ReviewService) reconcileWebhookDeliveries(now time.Time) {
 		hooks:    hooks,
 		client:   client,
 		budget:   reviewRedeliveryMaxPerSweep,
+		mentions: s.commentWakeMentions(ctx),
 		prStates: map[string]*probePRState{},
 	}
 	tried := 0
@@ -281,6 +282,7 @@ type redeliveryPRProbe struct {
 	hooks    githubapp.HookDeliveries
 	client   githubapi.GitHubClient
 	budget   int
+	mentions []string
 	prStates map[string]*probePRState // repo#number -> PR 实况快照（可用性 + 作者）
 }
 
@@ -351,7 +353,7 @@ func (p *redeliveryPRProbe) lookup(ctx context.Context, deliveryID int64, event 
 		// 与评论唤醒共用同一份最小字段面：repository.full_name + issue.number。
 		// 复用同一份守卫：非唤醒投递（普通 Issue 评论、正文未点名机器人）
 		// webhook 本来就会静默忽略——记终态跳过，不进重试集白吃预算与通知。
-		payload := commentWakePayloadGuards(detail.Payload)
+		payload := commentWakePayloadGuards(detail.Payload, p.mentions)
 		if payload == nil {
 			return redeliveryPRCheck{Known: true, Reviewable: false, NotWake: true}, nil
 		}

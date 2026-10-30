@@ -26,9 +26,25 @@ import (
 // 复核后开轮。幂等账只随「已确定的受理/丢弃」落定——瞬时错误与事务失败
 // 时库中无任何登记，平台重投可完整重走全流程。
 
-// reviewCommentWakeMention 唤醒评论的识别标记：正文包含（大小写不敏感）
-// 即视为点名审查者。
+// reviewCommentWakeMention 唤醒串的规格字面量（INT-179）：正文包含（大小
+// 写不敏感）即视为点名。部署真实机器人句柄（App slug）经
+// commentWakeMentions 追加。
 const reviewCommentWakeMention = "@fast-ship-bot"
+
+// commentWakeMentions 唤醒串集合：规格字面量 + 部署真实机器人句柄（App
+// slug，manifest 流创建的 App slug 形如 fast-ship-<host>，与字面量不同——
+// fast-ship-bot 第 20 轮 P2）。读取失败/未配置时回落字面量。
+func (s *ReviewService) commentWakeMentions(ctx context.Context) []string {
+	mentions := []string{reviewCommentWakeMention}
+	if s.appSource == nil {
+		return mentions
+	}
+	cfg, ok, err := s.appSource.Current(ctx)
+	if err != nil || !ok || cfg.AppSlug == "" {
+		return mentions
+	}
+	return append(mentions, "@"+strings.ToLower(cfg.AppSlug))
+}
 
 // reviewCommentWakeRevalidateMax 观察窗口复核的尝试上限：实拉前观察到的
 // 总账 head 与事务内重取不一致时重读重拉；上限内不收敛（总账在同一窗口
@@ -79,7 +95,7 @@ type commentWakePayload struct {
 // 启用项目反查在最终事务内做（见 handleCommentWake 阶段二），这里不预查。
 // 评论者身份过滤在实拉 PR 后做（commentWakeAuthorized）：需要与实拉 PR
 // 作者登录名比对，且 Forgejo payload 没有关系字段，无法纯 payload 判定。
-func commentWakePayloadGuards(body []byte) *commentWakePayload {
+func commentWakePayloadGuards(body []byte, mentions []string) *commentWakePayload {
 	var p commentWakePayload
 	if err := json.Unmarshal(body, &p); err != nil {
 		return nil
@@ -88,8 +104,16 @@ func commentWakePayloadGuards(body []byte) *commentWakePayload {
 	if p.Action != "created" {
 		return nil
 	}
-	// 正文未点名机器人：不是给审查者的指令。
-	if !strings.Contains(strings.ToLower(p.Comment.Body), reviewCommentWakeMention) {
+	// 正文未点名机器人（规格字面量或部署机器人句柄）：不是给审查者的指令。
+	lower := strings.ToLower(p.Comment.Body)
+	mentioned := false
+	for _, m := range mentions {
+		if strings.Contains(lower, m) {
+			mentioned = true
+			break
+		}
+	}
+	if !mentioned {
 		return nil
 	}
 	// 机器自评论不唤醒：审查结论与复审总结的正文由模型生成，可能引用
@@ -217,8 +241,8 @@ func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, ev
 		return ErrDeliveryDuplicated
 	}
 
-	// 纯 payload 守卫：非 created/无 mention/非 PR/畸形投递静默忽略（不登记）。
-	payload := commentWakePayloadGuards(body)
+	// 纯 payload 守卫：非 created/无唤醒串/非 PR/畸形投递静默忽略（不登记）。
+	payload := commentWakePayloadGuards(body, s.commentWakeMentions(ctx))
 	if payload == nil {
 		return nil
 	}

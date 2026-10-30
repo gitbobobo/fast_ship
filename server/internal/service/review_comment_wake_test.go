@@ -630,6 +630,46 @@ func TestReviewCommentWakeUnqualifiedNoAPI(t *testing.T) {
 	}
 }
 
+func TestReviewCommentWakeSlugMention(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	e.enableReview(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	ctx := context.Background()
+	e.fake.SetPR(repo, 38, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 38, State: "open", HeadSHA: "sha-slug",
+		HeadRepoFullName: repo,
+	})
+	// 部署机器人句柄（App slug）也可唤醒：manifest 流创建的 App slug 形如
+	// fast-ship-<host>，与规格字面量 @fast-ship-bot 不同（fast-ship-bot
+	// 第 20 轮 P2）。
+	e.review.appSource = stubAppSource{cfg: GitHubAppConfig{AppSlug: "Fast-Ship-Demo"}}
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-slug",
+		issueCommentBody("@fast-ship-demo 请再审", repo, 38, 42)); err != nil {
+		t.Fatalf("slug mention: %v", err)
+	}
+	var run model.ReviewRun
+	if err := e.svc.db.Where("pr_number = 38").First(&run).Error; err != nil {
+		t.Fatalf("slug 点名应唤醒: %v", err)
+	}
+	// 不含唤醒串的评论不唤醒。
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-slug-x",
+		issueCommentBody("@fast-ship-not-this", repo, 38, 42)); err != nil {
+		t.Fatalf("无关字面量: %v", err)
+	}
+	var c int64
+	e.svc.db.Model(&model.ReviewRun{}).Where("pr_number = 38").Count(&c)
+	if c != 1 {
+		t.Fatalf("不含唤醒串的评论不得开轮，runs = %d", c)
+	}
+}
+
+// stubAppSource GitHubAppSource 桩：返回固定配置（slug 用例）。
+type stubAppSource struct{ cfg GitHubAppConfig }
+
+func (s stubAppSource) Current(context.Context) (GitHubAppConfig, bool, error) {
+	return s.cfg, true, nil
+}
+
 // TestReviewCommentWakeUnboundRepoNoAPI 未绑定仓库零联网放大：点名评论
 // 落在没有任何项目启用审查的仓库上时，不写幂等账、不做任何平台 API 调用
 // （installation 解析与实拉都不会发生，fast-ship-bot 第 16 轮 P2）。
