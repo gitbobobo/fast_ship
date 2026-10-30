@@ -1147,6 +1147,12 @@ func (h *t3ShellHub) applyArchiveValues(e *t3ShellEntry, values []json.RawMessag
 			return err
 		}
 		batch.observeArchive(&item)
+		// 归档流自己也可能登记待对账（#156 R24：删掉某线程在归档面的唯一一行，
+		// 而它也不在活跃面）。这条路径不会经过活跃面的帧后回调，所以定时器要在
+		// 这里补排——否则条目只能等下次活跃移除或快照，面会一直 stale。
+		if e.state.pendingArchiveUncertain() > 0 {
+			h.scheduleArchiveMembershipSettle(e, e.archiveStaleGrace)
+		}
 	}
 	h.publishThreadEvent(e, batch.ids, batch.full)
 	// 宣布基准随本次落地同步（R17 P2-2）：旧面订阅落地只发线程事件时，

@@ -5473,3 +5473,44 @@ func TestT3ShellHub_MembershipSettleNotStarvedByNewRemovals(t *testing.T) {
 		return v.Snaps != nil && v.Snaps.ArchiveErr == nil
 	})
 }
+
+// 归档流自己登记的待对账也要排到期清理（#156 R25）：这条路径不经过活跃面的
+// 帧后回调，若不补排定时器，条目只能等下一次活跃移除，面会一直 stale。
+func TestT3ShellHub_ArchiveSideRemovalSettles(t *testing.T) {
+	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
+	srv.setArchiveLegacy(true)
+	srv.setArchiveFixture(archiveSnapshotBody(1, "th-2"), nil)
+	cfg := hubTestConfig()
+	cfg.ArchiveStaleGrace = 300 * time.Millisecond
+	hub := newT3ShellHubWithConfig(cfg, nil)
+	defer hub.Close()
+	env := hubTestEnv(url, 0)
+
+	go hub.View(context.Background(), env, "tok")
+	collector := newShellConnCollector(t, srv)
+	active := collector.await(false)
+	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1")); err != nil {
+		t.Fatalf("send active snapshot: %v", err)
+	}
+	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
+		t.Fatalf("active snapshot not acked")
+	}
+	archiveSub := srv.awaitArchiveSub(t)
+	archiveConn := <-srv.archiveConns
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil
+	})
+
+	// 归档流删掉 th-2（它不在活跃面）→ 归属未知。
+	removed, _ := json.Marshal(map[string]any{"kind": "thread.removed", "sequence": 43, "threadId": "th-2"})
+	if err := archiveConn.sendValue(archiveSub.ID, removed); err != nil {
+		t.Fatalf("send archive removal: %v", err)
+	}
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && errors.Is(v.Snaps.ArchiveErr, errT3ShellArchiveStale)
+	})
+	// 必须在自己的宽限到期后自愈（不依赖活跃面的下一次移除）。
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil
+	})
+}
