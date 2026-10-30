@@ -114,21 +114,19 @@ func commentWakePayloadGuards(body []byte) *commentWakePayload {
 }
 
 // commentWakeAuthorized 评论者身份（实拉 PR 后判定，两平台同口径）：
-// 仓库属主（OWNER）、当前直接协作者（COLLABORATOR）或 PR 作者本人（评
-// 论者登录名与实拉 PR 作者一致）。MEMBER/CONTRIBUTOR 等组织类关联标记
-// 不收——GitHub 官方定义 MEMBER 只是组织成员身份（组织仓库基础权限可
-// 设为 Read，不代表对该仓库有写权限）、CONTRIBUTOR 是「历史提交过」而
-// 非当前权限；association 枚举也没有 AUTHOR 值（首评作者标记为 NONE，
-// 标记判不出作者身份），故作者身份用登录名与实拉 PR 作者比对。这些边
-// 界是逐轮补丁式打过来的开放反例（codex 第 9/10/12/14 轮 P2），根治
-// 口径：只有可证明当前有权限或与 PR 强绑定（作者）的身份可点名，其余
-// （无 push 权限的陌生人、组织成员、历史贡献者）一律忽略——公开仓库
-// 上他们原本触发不了任何审查（fork PR 被拒、开不了同仓分支），放行等
-// 于开放无限烧额度通道。Forgejo payload 没有关系字段，只能走登录名
-// 比对：仅 PR 作者可点名（维护者能力待产品决策另议）。
+// 仓库属主（OWNER，恒有管理员权限）或 PR 作者本人（评论者登录名与实拉
+// PR 作者一致）。其余一律不收：association 枚举除 OWNER 外没有任何值能
+// 编码当前写权限——COLLABORATOR 邀请可授 Read/Triage、MEMBER 只是组织
+// 成员身份（组织仓库基础权限可设 Read）、CONTRIBUTOR 是「历史提交过」、
+// 没有 AUTHOR 值（首评作者标记为 NONE）——逐个信任它们的补丁已被逐轮
+// 反例击穿（codex 第 9/10/12/14/15 轮 P2），根治口径：与 PR 强绑定的
+// 作者和属主可点名，其余（无 push 权限的陌生人、组织成员、历史贡献者、
+// 只读外部协作者）一律忽略——公开仓库上他们原本触发不了任何审查（fork
+// PR 被拒、开不了同仓分支），放行等于开放无限烧额度通道。需要更宽的
+// 维护者点名能力须做实时权限校验 API，属产品决策另议。Forgejo payload
+// 没有关系字段，只能走登录名比对：仅 PR 作者可点名。
 func commentWakeAuthorized(p *commentWakePayload, pr *forge.PullRequest) bool {
-	switch p.Comment.Association {
-	case "OWNER", "COLLABORATOR":
+	if p.Comment.Association == "OWNER" {
 		return true
 	}
 	return p.Comment.User.Login != "" && pr.AuthorLogin != "" &&

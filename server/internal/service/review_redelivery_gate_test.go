@@ -289,9 +289,9 @@ func TestRedeliveryGateBudgetExhaustedClosedPRDegrades(t *testing.T) {
 // PR 号在 issue.number（与 pull_request 的顶层 number 字段名不同），仓库与
 // installation 同形。
 // redeliveryCommentPayload 组唤醒形态的评论投递 payload（association 可
-// 覆盖，默认 COLLABORATOR：有资格的仓库协作者点名）。
+// 覆盖，默认 OWNER：仓库属主点名）。
 func redeliveryCommentPayload(repo string, number int, association ...string) json.RawMessage {
-	a := "COLLABORATOR"
+	a := "OWNER"
 	if len(association) > 0 {
 		a = association[0]
 	}
@@ -352,10 +352,10 @@ func TestRedeliveryGateLocatesCommentPayload(t *testing.T) {
 	env.fake.SetHookDeliveryPayload(3103, redeliveryPlainCommentPayload("owner/repo", 7))
 	// fork PR 的唤醒投递：守卫必拒，重投只会白跑，记终态跳过。
 	env.fake.SetHookDeliveryPayload(3104, redeliveryCommentPayload("owner/repo", 9))
-	// 同 PR 两条投递：无资格（NONE）在前、有资格（COLLABORATOR）在后——
+	// 同 PR 两条投递：无资格（NONE）在前、属主（OWNER）在后——
 	// 身份判定按投递现算，不得污染 prStates 缓存连累后者（codex 第 13 轮）。
 	env.fake.SetHookDeliveryPayload(3105, redeliveryCommentPayload("owner/repo", 10, "NONE"))
-	env.fake.SetHookDeliveryPayload(3106, redeliveryCommentPayload("owner/repo", 10, "COLLABORATOR"))
+	env.fake.SetHookDeliveryPayload(3106, redeliveryCommentPayload("owner/repo", 10, "OWNER"))
 	env.fake.SetPR("owner/repo", 7, &githubapi.PullRequest{})
 	env.fake.SetPR("owner/repo", 8, &githubapi.PullRequest{State: "closed"})
 	env.fake.SetPR("owner/repo", 9, &githubapi.PullRequest{HeadRepoFullName: "someone-else/repo"})

@@ -36,7 +36,7 @@ func issueCommentBody(body, repo string, number int, installationID int64, opts 
 	payload := map[string]any{
 		"action":     "created",
 		"issue":      issue,
-		"comment":    map[string]any{"body": body, "author_association": "COLLABORATOR"},
+		"comment":    map[string]any{"body": body, "author_association": "OWNER"},
 		"repository": map[string]any{"full_name": repo},
 	}
 	if installationID >= 0 {
@@ -68,9 +68,9 @@ func setCommentUserType(userType string) func(map[string]any) {
 }
 
 // setCommentAssociation 覆盖评论者与仓库/Issue 的关系（GitHub 入口的身份
-// 过滤：仅 OWNER/COLLABORATOR 可点名；MEMBER 只是组织成员身份、
-// CONTRIBUTOR 是历史提交而非当前权限、NONE/未知无缘者——均忽略；
-// PR 作者走登录名比对例外）。
+// 过滤：仅 OWNER 可点名；COLLABORATOR 邀请可授 Read/Triage、MEMBER
+// 只是组织成员身份、CONTRIBUTOR 是历史提交而非当前权限、NONE/未知无缘
+// 者——均忽略；PR 作者走登录名比对例外）。
 func setCommentAssociation(association string) func(map[string]any) {
 	return func(payload map[string]any) {
 		payload["comment"].(map[string]any)["author_association"] = association
@@ -442,6 +442,8 @@ func TestReviewCommentWakeGuards(t *testing.T) {
 		// MEMBER 只是组织成员身份（组织仓库基础权限可设为 Read，不代表写
 		// 权限），同样不收（codex 第 14 轮 P2）。
 		issueCommentBody("@fast-ship-bot 三看", repo, 25, 42, setCommentAssociation("MEMBER")),
+		// COLLABORATOR 邀请可授 Read/Triage（codex 第 15 轮 P2），同样不收。
+		issueCommentBody("@fast-ship-bot 四看", repo, 25, 42, setCommentAssociation("COLLABORATOR")),
 	} {
 		if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", fmt.Sprintf("d-g%d", i), body); err != nil {
 			t.Fatalf("guard %d: %v", i, err)

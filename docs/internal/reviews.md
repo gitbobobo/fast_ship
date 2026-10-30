@@ -200,12 +200,12 @@ payload 两平台同形，只取最小字段面：`action`（只受理 `created`
 `issue.number`、`comment.body`、`repository.full_name`、`installation.id`、
 `comment.author_association`、`comment.user.login`。纯 payload 守卫（不碰
 库、不发网络）依次：action → mention → PR 归属；评论者身份在实拉 PR 后
-判（`commentWakeAuthorized`，两平台同口径）：仓库属主 OWNER、当前直接
-协作者 COLLABORATOR，或 PR 作者本人（评论者登录名与实拉 PR 作者一致——
-GitHub 的 association 枚举没有 AUTHOR 值，标记判不出作者身份；Forgejo
-没有关系字段，只能靠登录名）。MEMBER 只是组织成员身份（组织仓库基础
-权限可设为 Read，不代表写权限）、CONTRIBUTOR 是「历史提交过」而非当前
-权限，均不收——公开仓库上无 push 权限的陌生人只能开 fork PR（被触发
+判（`commentWakeAuthorized`，两平台同口径）：仓库属主 OWNER，或 PR 作者
+本人（评论者登录名与实拉 PR 作者一致——GitHub 的 association 枚举没有
+AUTHOR 值，标记判不出作者身份；Forgejo 没有关系字段，只能靠登录名）。
+其余关联标记均不信任：COLLABORATOR 邀请可授 Read/Triage、MEMBER 只是
+组织成员身份（组织仓库基础权限可设为 Read）、CONTRIBUTOR 是「历史提交
+过」而非当前权限——公开仓库上无 push 权限的陌生人只能开 fork PR（被触发
 面拒绝），原本触发不了任何审查，身份过滤堵住「每轮结束后继续点名」的
 无限烧额度通道；实现者回帖纠正的主场景是 PR 作者本人，不受影响。身份
 不过静默忽略，**不登记幂等账**——重投再忽略一遍零副作用。配合「同
