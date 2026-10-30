@@ -2439,3 +2439,78 @@ func TestReviewCommentWakeChangedFlag(t *testing.T) {
 		t.Fatalf("重复投递应 ErrDeliveryDuplicated: %v", err)
 	}
 }
+
+// 重新受理刷新 seen 时戳（codex 第 42 轮 P2）：force-push 回已见 head 的
+// 评论唤醒受理后，seen 行的 pr_updated_at 刷新为最新快照——滞后基准若停
+// 留旧值，中间时间戳的滞后读会绕过 stale 判定回退总账。
+func TestReviewCommentWakeReacceptRefreshesSeen(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	e.enableReview(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	ctx := context.Background()
+	t1 := time.Now().UTC().Add(-3 * time.Hour)
+	t3 := t1.Add(2 * time.Hour)
+	t2 := t1.Add(time.Hour)
+	// sha-c 曾受理（seen/账本基准 t1）；现 force-push 回同一 SHA、快照更新到 t3。
+	if err := e.svc.db.Create(&model.ReviewPullRequest{
+		ProjectID: e.project.ID, UserID: e.project.UserID,
+		RepoFullName: repo, PRNumber: 62,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		HeadSHA:       "sha-c", RoundNumber: 1, UpdatedAt: t1,
+	}).Error; err != nil {
+		t.Fatalf("seed ledger: %v", err)
+	}
+	if err := e.svc.db.Create(&model.ReviewSeenSHA{
+		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 62,
+		HeadSHA: "sha-c", IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		PRUpdatedAt: &t1, AcceptedAt: t1,
+	}).Error; err != nil {
+		t.Fatalf("seed seen: %v", err)
+	}
+	e.fake.SetPR(repo, 62, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 62, State: "open", HeadSHA: "sha-c",
+		HeadRepoFullName: repo, UpdatedAt: &t3,
+	})
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-reaccept",
+		issueCommentBody("@fast-ship-bot", repo, 62, 42)); err != nil {
+		t.Fatalf("重受理应开轮: %v", err)
+	}
+	var seen model.ReviewSeenSHA
+	if err := e.svc.db.Where("head_sha = ?", "sha-c").First(&seen).Error; err != nil {
+		t.Fatalf("seen 行应存在: %v", err)
+	}
+	if seen.PRUpdatedAt == nil || !seen.PRUpdatedAt.Equal(t3) {
+		t.Fatalf("seen 时戳应刷新为 t3: %v", seen.PRUpdatedAt)
+	}
+
+	// 之后的唤醒读到滞后快照：旧 head sha-old、时间戳 t2 ∈ (t1, t3)——
+	// 刷新后的基准（t3）能拦下；停留在旧值（t1）时会被采信回退。
+	var runCount int64
+	e.svc.db.Model(&model.ReviewRun{}).Where("pr_number = 62 AND head_sha = ?", "sha-old").Count(&runCount)
+	if runCount == 0 {
+		if err := e.svc.db.Create(&model.ReviewRun{
+			ID: "run-t62-old", UserID: e.project.UserID, ProjectID: e.project.ID,
+			Kind: model.ReviewKindCode, RepoFullName: repo, PRNumber: 62,
+			IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+			HeadSHA:       "sha-old", RoundNumber: 1, Status: model.ReviewRunCompleted,
+			TriggerAction: "comment",
+		}).Error; err != nil {
+			t.Fatalf("seed old run: %v", err)
+		}
+	}
+	e.fake.SetPR(repo, 62, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 62, State: "open", HeadSHA: "sha-old",
+		HeadRepoFullName: repo, UpdatedAt: &t2,
+	})
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-reaccept-lag",
+		issueCommentBody("@fast-ship-bot", repo, 62, 42)); err == nil {
+		t.Fatal("中间时间戳滞后读应按瞬时失败拒绝（500）")
+	}
+	var after model.ReviewPullRequest
+	if err := e.svc.db.Where("pr_number = 62").First(&after).Error; err != nil {
+		t.Fatalf("总账行应仍在: %v", err)
+	}
+	if after.HeadSHA != "sha-c" {
+		t.Fatalf("总账不得回退: head = %s", after.HeadSHA)
+	}
+}

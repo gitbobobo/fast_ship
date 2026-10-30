@@ -761,7 +761,13 @@ func (s *ReviewService) openCommentWakeRoundTx(ctx context.Context, integrationI
 			HeadSHA: pr.HeadSHA, IntegrationID: integrationID,
 			PRUpdatedAt: pr.UpdatedAt, AcceptedAt: now,
 		}
-		return tx.Clauses(clause.OnConflict{DoNothing: true}).Create(seen).Error
+		// 重新受理（force-push 回已见 head 的评论唤醒）要刷新 seen 时戳：
+		// DoNothing 会留下旧值，滞后基准取旧值会放行中间时间戳的滞后读、
+		// 回退总账（codex 第 42 轮 P2）。
+		return tx.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "project_id"}, {Name: "repo_full_name"}, {Name: "pr_number"}, {Name: "head_sha"}, {Name: "integration_id"}},
+			DoUpdates: clause.AssignmentColumns([]string{"pr_updated_at", "accepted_at"}),
+		}).Create(seen).Error
 	})
 	return forkDenied, txErr
 }
