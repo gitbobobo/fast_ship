@@ -699,6 +699,11 @@ func (h *t3ShellHub) scheduleArchiveMembershipSettle(e *t3ShellEntry, settle tim
 		e.settleTimer.Stop()
 	}
 	e.settleTimer = time.AfterFunc(settle, func() {
+		// 与停机串行（#156 R12-codex）：shutdown 在同一把锁里 Stop，回调一旦
+		// 开跑就持锁到结束，shutdown 返回后不再有在途回调（Close 才算真正
+		// 收干净）。
+		e.settleMu.Lock()
+		defer e.settleMu.Unlock()
 		if e.isStopped() {
 			return
 		}
