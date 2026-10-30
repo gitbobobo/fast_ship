@@ -69,10 +69,23 @@ func setCommentUserType(userType string) func(map[string]any) {
 
 // setCommentAssociation 覆盖评论者与仓库/Issue 的关系（GitHub 入口的身份
 // 过滤：NONE/未知无缘者与 CONTRIBUTOR（历史提交而非当前权限）忽略，
-// AUTHOR/OWNER/MEMBER/COLLABORATOR 可点名）。
+// OWNER/MEMBER/COLLABORATOR 可点名）。
 func setCommentAssociation(association string) func(map[string]any) {
 	return func(payload map[string]any) {
 		payload["comment"].(map[string]any)["author_association"] = association
+	}
+}
+
+// setCommentLogin 覆盖评论者登录名（PR 作者例外：与实拉 PR 作者比对）。
+func setCommentLogin(login string) func(map[string]any) {
+	return func(payload map[string]any) {
+		comment := payload["comment"].(map[string]any)
+		user, _ := comment["user"].(map[string]any)
+		if user == nil {
+			user = map[string]any{}
+			comment["user"] = user
+		}
+		user["login"] = login
 	}
 }
 
@@ -393,7 +406,8 @@ func TestReviewCommentWakeGuards(t *testing.T) {
 	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
 	ctx := context.Background()
 	e.fake.SetPR(repo, 25, &githubapi.PullRequest{
-		RepoFullName: repo, Number: 25, State: "open", HeadSHA: "sha-g", HeadRepoFullName: repo,
+		RepoFullName: repo, Number: 25, State: "open", HeadSHA: "sha-g",
+		HeadRepoFullName: repo, AuthorLogin: "pr-author",
 	})
 	// 未启用仓库也能实拉成功（如 App 装在别的仓库上）：启用判定由最终事务
 	// 内的反查按设置行快照拒绝，不开轮。
@@ -448,7 +462,8 @@ func TestReviewCommentWakeGuards(t *testing.T) {
 		t.Fatalf("complete: %v", err)
 	}
 	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-g-quote",
-		issueCommentBody("引用机器人结论片段 <!-- fast-ship-code-review --> 后 @fast-ship-bot 请再审", repo, 25, 42, setCommentAssociation("AUTHOR"))); err != nil {
+		issueCommentBody("引用机器人结论片段 <!-- fast-ship-code-review --> 后 @fast-ship-bot 请再审", repo, 25, 42,
+			setCommentAssociation("NONE"), setCommentLogin("pr-author"))); err != nil {
 		t.Fatalf("quote marker: %v", err)
 	}
 	var run model.ReviewRun

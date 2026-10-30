@@ -56,7 +56,8 @@ type commentWakePayload struct {
 		// User.Type GitHub 把 App/机器人账号标为 "Bot"：机器自评论不唤醒
 		// （见 commentWakePayloadGuards 的机器评论排除）。
 		User struct {
-			Type string `json:"type"`
+			Type  string `json:"type"`
+			Login string `json:"login"`
 		} `json:"user"`
 		// AuthorAssociation GitHub 评论者与仓库/Issue 的关系（OWNER/MEMBER/
 		// COLLABORATOR/CONTRIBUTOR/AUTHOR/NONE）：GitHub 入口按它过滤无缘
@@ -73,18 +74,12 @@ type commentWakePayload struct {
 
 // commentWakePayloadGuards 纯 payload 守卫（不碰库、不发网络）：依次判
 // action（只受理 created）、mention（大小写不敏感包含）、PR 归属
-// （issue.pull_request 存在 + 仓库/编号可用），任一不过返回 nil——忽略判定
+// （issue.pull_request 存在 + 仓库/编号可用）。任一不过返回 nil——忽略判定
 // 完全由 payload 决定，不登记幂等账：忽略类投递重投再忽略一遍，零副作用。
 // 启用项目反查在最终事务内做（见 handleCommentWake 阶段二），这里不预查。
-// restrictAuthor（GitHub 入口为 true）时再判评论者身份：只接受 PR 作者
-// （AUTHOR）与仓库当前授权人员（OWNER/MEMBER/COLLABORATOR）。CONTRIBUTOR
-// 是「历史提交过」而非当前权限（GitHub 官方定义），历史贡献者可永久保留
-// 点名权，不收——公开仓库上无 push 权限的陌生人只能开 fork PR（被触发面
-// 拒绝），原本无法触发审查；身份过滤外的「每轮结束后继续点名」会把无限
-// 烧额度通道开放给无缘者或失去当前授权的历史贡献者（codex 第 9/10 轮
-// P2）。实现者回帖纠正的主场景是 PR 作者本人（AUTHOR），不受影响；
-// Forgejo payload 无该字段，跳过（自托管实例访问已由集成凭证限界）。
-func commentWakePayloadGuards(body []byte, restrictAuthor bool) *commentWakePayload {
+// 评论者身份过滤在实拉 PR 后做（commentWakeAuthorized）：需要与实拉 PR
+// 作者登录名比对，且 Forgejo payload 没有关系字段，无法纯 payload 判定。
+func commentWakePayloadGuards(body []byte) *commentWakePayload {
 	var p commentWakePayload
 	if err := json.Unmarshal(body, &p); err != nil {
 		return nil
@@ -96,20 +91,6 @@ func commentWakePayloadGuards(body []byte, restrictAuthor bool) *commentWakePayl
 	// 正文未点名机器人：不是给审查者的指令。
 	if !strings.Contains(strings.ToLower(p.Comment.Body), reviewCommentWakeMention) {
 		return nil
-	}
-	// 评论者身份（GitHub 入口）：PR 作者（AUTHOR，实现者回帖纠正的主场
-	// 景）与仓库当前授权人员（OWNER/MEMBER/COLLABORATOR——三者由 GitHub
-	// 按当前状态计算）可点名；CONTRIBUTOR 是「历史提交过」而非当前权限
-	// （GitHub 官方定义），历史贡献者可永久保留点名权，不收；无缘者
-	// （NONE/未知）忽略——公开仓库陌生人原本触发不了任何审查（fork PR
-	// 被拒、无 push 权限开不了同仓分支），放行等于把无限烧额度通道交给
-	// 匿名者或失去当前授权的历史贡献者。
-	if restrictAuthor {
-		switch p.Comment.Association {
-		case "OWNER", "MEMBER", "COLLABORATOR", "AUTHOR":
-		default:
-			return nil
-		}
 	}
 	// 机器自评论不唤醒：审查结论与复审总结的正文由模型生成，可能引用
 	// 用户评论里的 @fast-ship-bot——不排除会形成「发布结论 → 再唤醒」
@@ -130,6 +111,25 @@ func commentWakePayloadGuards(body []byte, restrictAuthor bool) *commentWakePayl
 		return nil
 	}
 	return &p
+}
+
+// commentWakeAuthorized 评论者身份（实拉 PR 后判定，两平台同口径）：
+// 仓库当前授权人员（GitHub association OWNER/MEMBER/COLLABORATOR，由
+// 平台按当前状态计算）或 PR 作者本人（评论者登录名与实拉 PR 作者一致）。
+// AUTHOR/CONTRIBUTOR 等关联标记不可信——GitHub 的 association 枚举没有
+// AUTHOR（首评作者 association=NONE，标记判不出作者身份），CONTRIBUTOR
+// 是「历史提交过」而非当前权限；公开仓库上无 push 权限的陌生人原本触发
+// 不了任何审查（fork PR 被拒、开不了同仓分支），无此过滤等于把「每轮
+// 结束后继续点名」的无限烧额度通道交给无缘者或失去授权的历史贡献者
+// （codex 第 9/10/12 轮 P2）。Forgejo payload 没有关系字段，只能走登录
+// 名比对：仅 PR 作者可点名（codex 第 12 轮 P1 面）。
+func commentWakeAuthorized(p *commentWakePayload, pr *forge.PullRequest) bool {
+	switch p.Comment.Association {
+	case "OWNER", "MEMBER", "COLLABORATOR":
+		return true
+	}
+	return p.Comment.User.Login != "" && pr.AuthorLogin != "" &&
+		strings.EqualFold(p.Comment.User.Login, pr.AuthorLogin)
 }
 
 // deterministicCommentWakeSetupErr 评论唤醒前置解析的确定性失败：访问面未
@@ -208,9 +208,8 @@ func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, ev
 		return ErrDeliveryDuplicated
 	}
 
-	// 纯 payload 守卫：非 created/无 mention/非 PR/畸形投递/无资格作者
-	// （GitHub 入口）静默忽略（不登记）。
-	payload := commentWakePayloadGuards(body, integrationID == model.ForgeIntegrationBuiltinGitHubID)
+	// 纯 payload 守卫：非 created/无 mention/非 PR/畸形投递静默忽略（不登记）。
+	payload := commentWakePayloadGuards(body)
 	if payload == nil {
 		return nil
 	}
@@ -288,6 +287,11 @@ func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, ev
 				zap.String("integration", integrationID),
 				zap.String("delivery", deliveryID), zap.Error(err))
 			return err
+		}
+		// 评论者身份：仓库当前授权人员或 PR 作者本人（与实拉 PR 作者登录
+		// 名比对）方可点名；其余静默忽略（不登记，重投再忽略零副作用）。
+		if !commentWakeAuthorized(payload, pr) {
+			return nil
 		}
 		err = s.openCommentWakeRoundTx(ctx, integrationID, event, deliveryID, repo, prNumber,
 			installationID, observedHead, pr, time.Now().UTC())

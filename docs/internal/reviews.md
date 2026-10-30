@@ -198,16 +198,17 @@ PR 顶层评论正文包含 `@fast-ship-bot`（大小写不敏感的包含判定
 payload 两平台同形，只取最小字段面：`action`（只受理 `created`，编辑/删除
 不唤醒）、`issue.pull_request`（存在即 PR，普通 Issue 的评论忽略）、
 `issue.number`、`comment.body`、`repository.full_name`、`installation.id`、
-`comment.author_association`。纯 payload 守卫（不碰库、不发网络）依次：
-action → mention → 评论者身份（仅 GitHub：PR 作者 AUTHOR 与仓库当前授权
-人员 OWNER/MEMBER/COLLABORATOR 可点名；CONTRIBUTOR 是「历史提交过」而非
-当前权限，不收——公开仓库上无 push 权限的
-陌生人只能开 fork PR（被触发面拒绝），原本触发不了任何审查，身份过滤
+`comment.author_association`、`comment.user.login`。纯 payload 守卫（不碰
+库、不发网络）依次：action → mention → PR 归属；评论者身份在实拉 PR 后
+判（`commentWakeAuthorized`，两平台同口径）：仓库当前授权人员（GitHub
+association OWNER/MEMBER/COLLABORATOR，由平台按当前状态计算）或 PR 作者
+本人（评论者登录名与实拉 PR 作者一致——GitHub 的 association 枚举没有
+AUTHOR 值，标记判不出作者身份；Forgejo 没有关系字段，只能靠登录名）。
+CONTRIBUTOR 是「历史提交过」而非当前权限，不收——公开仓库上无 push 权限
+的陌生人只能开 fork PR（被触发面拒绝），原本触发不了任何审查，身份过滤
 堵住「每轮结束后继续点名」的无限烧额度通道；实现者回帖纠正的主场景是
-PR 作者本人，不受影响；Forgejo payload 无该字段，跳过，自托管实例访问
-已由集成凭证限界）→ PR 归属；任一不过静默忽略，**不登记幂等账**——忽略
-判定完全由 payload 决定，重投再忽略一遍零副作用。配合「同 head 已有
-在途审查不重开」守卫，
+PR 作者本人，不受影响。身份不过静默忽略，**不登记幂等账**——重投再忽略
+一遍零副作用。配合「同 head 已有在途审查不重开」守卫，
 连续点名也无法作废在途轮饿死审查。
 
 编排沿用「事务内零网络调用」铁律，两阶段（模式同 `revalidateTiedWebhook`）：

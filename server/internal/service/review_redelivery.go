@@ -336,16 +336,19 @@ func (p *redeliveryPRProbe) lookup(ctx context.Context, deliveryID int64, event 
 	var repo string
 	var number int
 	var installation int64
+	// issue_comment 投递的守卫结果（nil = 非 issue_comment）：用于实拉后的
+	// 评论者身份判定（pull_request 投递不需要——推送作者天然有 push 权限）。
+	var wakePayload *commentWakePayload
 	switch event {
 	case "issue_comment":
 		// 与评论唤醒共用同一份最小字段面：repository.full_name + issue.number。
-		// 复用同一份守卫（GitHub 对账路径，作者身份过滤开启）：非唤醒投递
-		// （普通 Issue 评论、正文未点名机器人或无缘者）webhook 本来就会
-		// 静默忽略——记终态跳过，不进重试集白吃预算与通知。
-		payload := commentWakePayloadGuards(detail.Payload, true)
+		// 复用同一份守卫：非唤醒投递（普通 Issue 评论、正文未点名机器人）
+		// webhook 本来就会静默忽略——记终态跳过，不进重试集白吃预算与通知。
+		payload := commentWakePayloadGuards(detail.Payload)
 		if payload == nil {
 			return redeliveryPRCheck{Known: true, Reviewable: false, NotWake: true}, nil
 		}
+		wakePayload = payload
 		repo, number, installation = payload.Repository.FullName, payload.Issue.Number, payload.Installation.ID
 	default:
 		var payload prWebhookPayload
@@ -377,11 +380,18 @@ func (p *redeliveryPRProbe) lookup(ctx context.Context, deliveryID int64, event 
 	// 重投是 GitHub 专属路径（deliveries API 不在 forge.ReviewClient 方法面），
 	// 实况判定与审查链路同一口径：经共享转换后复用 prReviewable。fork PR
 	// （head 仓库缺失或与 base 不同名）的投递无论重投多少次都会被 fork
-	// 守卫丢弃，同样记终态跳过，不白吃重投预算（codex 第 5 轮 P2）。
-	reviewable := prReviewable(forge.PullRequestFromGitHub(pr)) &&
-		pr.HeadRepoFullName != "" && strings.EqualFold(pr.HeadRepoFullName, repo)
+	// 守卫丢弃；无资格评论者的投递同样必拒——都记终态跳过，不白吃重投
+	// 预算（codex 第 5/12 轮 P2）。
+	forgePR := forge.PullRequestFromGitHub(pr)
+	open := prReviewable(forgePR)
+	fork := open && (pr.HeadRepoFullName == "" || !strings.EqualFold(pr.HeadRepoFullName, repo))
+	// 评论者身份仅约束 issue_comment 投递（pull_request 投递的推送作者天然
+	// 有 push 权限，不需要也不能用评论身份判定）。
+	authorized := wakePayload == nil || commentWakeAuthorized(wakePayload, forgePR)
+	reviewable := open && !fork && authorized
 	p.prStates[key] = reviewable
-	check.Known, check.Reviewable, check.Fork = true, reviewable, !reviewable && prReviewable(forge.PullRequestFromGitHub(pr))
+	check.Known, check.Reviewable = true, reviewable
+	check.Fork = !reviewable && fork
 	return check, nil
 }
 
