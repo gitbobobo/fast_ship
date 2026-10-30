@@ -1241,6 +1241,14 @@ func (h *t3ShellHub) applyActiveValues(e *t3ShellEntry, values []json.RawMessage
 		}
 	}
 	h.publishThreadEvent(e, batch.ids, batch.full)
+	// 活跃面回现（location=active / 活跃快照带回）会直接解账并把 archiveErr 从
+	// stale 清成 nil（#156 R32）：这条翻转也必须经过统一发布口同步宣布基准，
+	// 否则 archAnnounced 停在 stale，下一次登记在归档行集合未变时会被指纹判
+	// 「无新话可说」而不发降级事件。只在「待对账被清空」时调用，避免无翻转的
+	// 批次产生多余事件；指纹去重再兜一层。
+	if len(removedIDs) > 0 && e.state.pendingArchiveUncertain() == 0 {
+		h.publishArchiveFaceEvent(e, false)
+	}
 	return nil
 }
 

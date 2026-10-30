@@ -189,8 +189,8 @@ type t3ShellState struct {
 	// 跟进 PR② / #156 R1）：订阅模式下活跃面宣告线程离开、而归档增量还没
 	// 到时登记，非空期间归档面报 stale（不是完整结论）；该线程的增量落地、
 	// 或权威快照整体替换归档集时清除。逐个 ID 记账，无关线程的增量不会替
-	// 仍缺增量的线程恢复可信；超过截止时刻自动失效（线程可能是被彻底删除，
-	// 归档面不会有它的增量）。守 s.mu。
+	// 只能由「含该线程的权威全量快照 / 活跃面回现 / 宽限到期」解除——归档增量
+	// 不解账（#156 R15：排队的增量可能来自更早一轮归档周期）。守 s.mu。
 	archiveUncertain map[string]time.Time
 	// archiveUncertainSince 记每个待对账 ID 的登记时刻（#156 R16）：只有**晚于**
 	// 该时刻采集的归档快照才能算作它的对账证据——重连快照可能在移除之前就已
@@ -946,7 +946,8 @@ func (s *t3ShellState) armArchiveUncertainLocked(armed bool, settle time.Duratio
 
 // noteArchiveMembershipSettledLocked 撤掉某个线程的不确定标记（调用方须持
 // s.mu）。当前唯一调用方是活跃面回现（unarchive / 活跃快照带回）：线程在活跃
-// 面即确定存在，归档归属不再影响判定。归档增量**不**走这里（#156 R15）。
+// 面即确定存在，归档归属不再影响判定。归档增量**不**走这里（#156 R15），归档
+// 流 data 落地也不解账。
 // s.mu）：它的归档增量已落地，或权威快照已整体替换归档集。
 func (s *t3ShellState) noteArchiveMembershipSettledLocked(id string) {
 	if _, ok := s.archiveUncertain[id]; !ok {
