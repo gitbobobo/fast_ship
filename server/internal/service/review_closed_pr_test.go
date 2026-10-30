@@ -584,3 +584,108 @@ func TestReviewArchiveSkipsNeverLaunched(t *testing.T) {
 		t.Fatal("pr_closed 收尾不应产生回收失败通知")
 	}
 }
+
+// 密文损坏按确定性失败（fast-ship-bot 第 36 轮 P2）：GitHub App 部署配置
+// 解密失败与 Forgejo 集成密文损坏同口径——防抖行删行不再推后、评论唤醒
+// 判丢弃补登幂等账，而不是无限重试/500 刷错。
+func TestReviewDecryptErrorsAreDeterministic(t *testing.T) {
+	if !deterministicReviewAccessErr(errGitHubAppDecrypt) {
+		t.Fatal("防抖分类应把 App 配置解密失败当确定性失败")
+	}
+	if !deterministicCommentWakeSetupErr(errGitHubAppDecrypt) {
+		t.Fatal("评论唤醒分类应把 App 配置解密失败当确定性失败")
+	}
+}
+
+// 防抖实况读的安装 id 兜底（fast-ship-bot 第 36 轮 P2）：GitHub 投递缺
+// installation 快照（行内为 0）时先沿用总账快照，无总账才按仓库解析——
+// 直接拿 0 换 token 会 404 并被确定性分支删行静默丢推送。
+func TestReviewDebounceInstallationFallback(t *testing.T) {
+	now := time.Now().UTC()
+
+	// 案例一：总账有 installation 快照（7）——沿用，不发解析调用。
+	t.Run("ledger-snapshot", func(t *testing.T) {
+		e := newReviewEngineEnv(t)
+		e.enableReview(t)
+		repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+		t3 := &fakeReviewT3{}
+		review := e.withT3(t3, nil, nil)
+		e.fake.SetPR(repo, 81, &githubapi.PullRequest{
+			RepoFullName: repo, Number: 81, State: "open", HeadSHA: "sha-81",
+			HeadRepoFullName: repo, Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
+		})
+		if err := e.svc.db.Create(&model.ReviewPullRequest{
+			ProjectID: e.project.ID, UserID: e.project.UserID,
+			RepoFullName: repo, PRNumber: 81,
+			IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+			HeadSHA:       "sha-81", RoundNumber: 1, UpdatedAt: now,
+			InstallationID: 7,
+		}).Error; err != nil {
+			t.Fatalf("seed ledger: %v", err)
+		}
+		if err := e.svc.db.Create(&model.ReviewDebounce{
+			IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+			ProjectID:     e.project.ID, RepoFullName: repo, PRNumber: 81,
+			HeadSHA: "sha-81", Action: "synchronize", InstallationID: 0,
+			PRTitle: "t", PRURL: "u", BaseRef: "main", HeadRef: "feature",
+			FireAt: now.Add(-time.Second), UpdatedAt: now.Add(-time.Minute),
+		}).Error; err != nil {
+			t.Fatalf("seed debounce: %v", err)
+		}
+
+		review.processDueDebounces(now)
+
+		for _, c := range e.fake.Calls {
+			if c.Method == "ResolveInstallation" {
+				t.Fatal("总账快照可用时不得发安装解析调用")
+			}
+		}
+		var runs int64
+		e.svc.db.Model(&model.ReviewRun{}).Where("pr_number = 81").Count(&runs)
+		if runs == 0 {
+			t.Fatal("应照常开轮")
+		}
+		if got := e.debounceCount(t); got != 0 {
+			t.Fatalf("防抖行应被消费，剩 %d", got)
+		}
+	})
+
+	// 案例二：无总账——按仓库解析安装（fake 固定返回 1），照常开轮。
+	t.Run("resolve", func(t *testing.T) {
+		e := newReviewEngineEnv(t)
+		e.enableReview(t)
+		repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+		t3 := &fakeReviewT3{}
+		review := e.withT3(t3, nil, nil)
+		e.fake.SetPR(repo, 82, &githubapi.PullRequest{
+			RepoFullName: repo, Number: 82, State: "open", HeadSHA: "sha-82",
+			HeadRepoFullName: repo, Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
+		})
+		if err := e.svc.db.Create(&model.ReviewDebounce{
+			IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+			ProjectID:     e.project.ID, RepoFullName: repo, PRNumber: 82,
+			HeadSHA: "sha-82", Action: "synchronize", InstallationID: 0,
+			PRTitle: "t", PRURL: "u", BaseRef: "main", HeadRef: "feature",
+			FireAt: now.Add(-time.Second), UpdatedAt: now.Add(-time.Minute),
+		}).Error; err != nil {
+			t.Fatalf("seed debounce: %v", err)
+		}
+
+		review.processDueDebounces(now)
+
+		resolved := false
+		for _, c := range e.fake.Calls {
+			if c.Method == "ResolveInstallation" {
+				resolved = true
+			}
+		}
+		if !resolved {
+			t.Fatal("无总账快照时应按仓库解析安装")
+		}
+		var runs int64
+		e.svc.db.Model(&model.ReviewRun{}).Where("pr_number = 82").Count(&runs)
+		if runs == 0 {
+			t.Fatal("解析后应照常开轮")
+		}
+	})
+}

@@ -201,14 +201,16 @@ func commentWakeAuthorized(p *commentWakePayload, pr *forge.PullRequest) bool {
 // deterministicCommentWakeSetupErr 评论唤醒前置解析的确定性失败：访问面未
 // 配置（两个哨兵：resolveGitHubInstallation 的 gh==nil 与 reviewClient 链
 // 路的 githubapp.ErrAppNotConfigured——webhook-secret-only 部署的永久配置
-// 态，重投只会得到同一结果）与平台 401/403/404 且非限流（仓库无安装、
+// 态，重投只会得到同一结果）、App 部署配置解密失败（密文损坏/加密密钥
+// 轮换出错，重投同样不自愈）与平台 401/403/404 且非限流（仓库无安装、
 // 凭证吊销/权限不足）。限流 403 与网络/5xx/设置读取失败属瞬时，透出 500
 // 让平台重投。其余 AppError（部署设置读取失败等 ErrInternal）也是瞬时
 // DB 故障——只有两个哨兵按确定性处理，不能一提子以 errs.AppError 判定
 // （fast-ship-bot 第 1 轮 P2、codex 第 11 轮 P2）。
 func deterministicCommentWakeSetupErr(err error) bool {
 	if errors.Is(err, errReviewGitHubAccessUnconfigured) ||
-		errors.Is(err, githubapp.ErrAppNotConfigured) {
+		errors.Is(err, githubapp.ErrAppNotConfigured) ||
+		errors.Is(err, errGitHubAppDecrypt) {
 		return true
 	}
 	var statusErr *githubapi.StatusError

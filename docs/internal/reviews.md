@@ -243,7 +243,9 @@ head 已有在途审查不重开」守卫，
 2. **阶段二（单事务，幂等登记与开轮同生共死）**：`deliveries.InsertTx` +
    `deliveryLedgerKey` 登记（重复 → `ErrDeliveryDuplicated`）→ 反查启用
    项目（与 pull_request 同款判定：按设置行 (integration_id, repo_full_name)
-   快照）→ 复核设置行仍 enabled 且快照未变 → 观察窗口复核：事务内重取总账
+   快照）→ 项目身份复核：反查到的项目 ID ≠ `observedProjectID`（预查/
+   观察与事务之间改绑）即同上哨兵——观察基准（seen/总账时序基准）不可
+   跨项目沿用 → 复核设置行仍 enabled 且快照未变 → 观察窗口复核：事务内重取总账
    head ≠ `observedHead` 即窗口内被并发推进，哨兵
    `errCommentWakeObservedHeadMoved` 让整体回滚（幂等登记一并撤销，不烧
    账），外层重读重拉；上限 `reviewCommentWakeRevalidateMax`（2 次）仍不

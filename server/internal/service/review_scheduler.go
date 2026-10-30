@@ -189,7 +189,32 @@ func deterministicReviewAccessErr(err error) bool {
 		return false
 	}
 	return forge.IsNotFound(err) || forge.IsForbidden(err) || forge.IsUnauthorized(err) ||
-		errors.Is(err, gorm.ErrRecordNotFound) || errors.Is(err, errForgeIntegrationDecrypt)
+		errors.Is(err, gorm.ErrRecordNotFound) ||
+		// 密文损坏两处同口径：Forgejo 集成密文与 GitHub App 部署配置密文
+		// （解密失败重投/重试只会得到同一结果，fast-ship-bot 第 36 轮 P2）。
+		errors.Is(err, errForgeIntegrationDecrypt) || errors.Is(err, errGitHubAppDecrypt)
+}
+
+// debounceInstallationID 防抖实况读的安装 id 兜底：GitHub 投递缺
+// installation 快照（代理剥字段）时防抖行内为 0——直接拿 0 换 token 会
+// 404 并被确定性分支删行静默丢推送（fast-ship-bot 第 36 轮 P2）。先沿用
+// 总账快照（openRoundTx 对 0 有「保留旧值」兜底，但新加的实读让那条路走
+// 不到），仍缺才按仓库解析安装（评论唤醒同款）。
+func (s *ReviewService) debounceInstallationID(ctx context.Context, row *model.ReviewDebounce) (int64, error) {
+	if row.InstallationID != 0 || row.IntegrationID != model.ForgeIntegrationBuiltinGitHubID {
+		return row.InstallationID, nil
+	}
+	var ledger model.ReviewPullRequest
+	lErr := s.db.Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ?",
+		row.ProjectID, row.RepoFullName, row.PRNumber, row.IntegrationID).
+		First(&ledger).Error
+	if lErr == nil && ledger.InstallationID != 0 {
+		return ledger.InstallationID, nil
+	}
+	if lErr != nil && !errors.Is(lErr, gorm.ErrRecordNotFound) {
+		return 0, lErr
+	}
+	return s.resolveGitHubInstallation(ctx, row.RepoFullName)
 }
 
 // consumeDebounce 一行防抖的消费：先在事务外读 PR 实况——防抖行可能是已
@@ -203,10 +228,17 @@ func (s *ReviewService) consumeDebounce(row *model.ReviewDebounce, now time.Time
 	// 单次 PR 实况读 10s：这是「读一次 PR 状态」的检查而非数据传输，超时只
 	// 意味着本轮不开轮（fire_at 推后），10s 足够，别占满整个阶段预算。
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	client, err := s.reviewClient(ctx, row.IntegrationID, row.RepoFullName, row.InstallationID)
+	installationID, instErr := s.debounceInstallationID(ctx, row)
+	var client forge.ReviewClient
 	var pr *forge.PullRequest
-	if err == nil {
-		pr, err = client.GetPullRequest(ctx, row.RepoFullName, row.PRNumber)
+	var err error
+	if instErr == nil {
+		client, err = s.reviewClient(ctx, row.IntegrationID, row.RepoFullName, installationID)
+		if err == nil {
+			pr, err = client.GetPullRequest(ctx, row.RepoFullName, row.PRNumber)
+		}
+	} else {
+		err = instErr
 	}
 	cancel()
 	if err != nil {
