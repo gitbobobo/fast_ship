@@ -192,6 +192,10 @@ type t3ShellState struct {
 	// 仍缺增量的线程恢复可信；超过截止时刻自动失效（线程可能是被彻底删除，
 	// 归档面不会有它的增量）。守 s.mu。
 	archiveUncertain map[string]time.Time
+	// archiveUncertainSince 记每个待对账 ID 的登记时刻（#156 R16）：只有**晚于**
+	// 该时刻采集的归档快照才能算作它的对账证据——重连快照可能在移除之前就已
+	// 采好、之后才送达，把它的包含关系当作「本轮已对账」会误清标记。
+	archiveUncertainSince map[string]time.Time
 	// archiveUncertainArmed / archiveUncertainSettle：（订阅模式下）活跃面移除
 	// 在同一临界区里直接登记待对账，不必等 hub 的帧后回调（#156 R5：否则
 	// 「线程已从活跃面删除、ArchiveErr 仍为 nil」的中间态可被并发 Peek/wait
@@ -434,6 +438,16 @@ func (s *t3ShellState) advanceActiveCursorLocked(sequence int) {
 // 线程的项目名改从活跃项目表取，项目已删除时显示无名，与「项目已删除」
 // 一致。
 func (s *t3ShellState) applyArchiveSnapshot(snapshot t3ArchivedShellSnapshot, generation int64, commit func(trusted bool)) (bool, error) {
+	return s.applyArchiveSnapshotAt(snapshot, generation, commit, time.Now())
+}
+
+// applyArchiveSnapshotAt 是带「快照采集时刻」的版本（#156 R16）：调用方应传
+// 本次拉取的**开始**时刻（refetchStartedAt），而不是送达时刻——否则一条在
+// 移除之前就采好的重连快照会被当成新证据，清掉本轮待对账。
+func (s *t3ShellState) applyArchiveSnapshotAt(snapshot t3ArchivedShellSnapshot, generation int64, commit func(trusted bool), observedAt time.Time) (bool, error) {
+	if observedAt.IsZero() {
+		observedAt = time.Now()
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	// 坏负载先于世代判定：reset 失败时面保持原样，err 点名原因交调用方
@@ -459,6 +473,29 @@ func (s *t3ShellState) applyArchiveSnapshot(snapshot t3ArchivedShellSnapshot, ge
 	s.archiveReady = true
 	s.archiveErr = nil
 	s.archiveStale = false
+	// 对账裁决带时序（#156 R16）：只有**晚于登记时刻**采集的快照才是证据。
+	// 重连快照可能在移除之前就采好、之后才送达——那时它的包含关系不能清掉
+	// 本轮待对账，否则排队的 removed 删行后两面皆空而面可信，wait 会判
+	// thread_gone。
+	if len(s.archiveUncertain) > 0 {
+		incoming := make(map[string]struct{}, len(snapshot.Threads))
+		for i := range snapshot.Threads {
+			incoming[snapshot.Threads[i].ID] = struct{}{}
+		}
+		for id := range s.archiveUncertain {
+			if _, ok := incoming[id]; !ok {
+				continue
+			}
+			if since, ok := s.archiveUncertainSince[id]; ok && observedAt.Before(since) {
+				continue
+			}
+			delete(s.archiveUncertain, id)
+			delete(s.archiveUncertainSince, id)
+		}
+		if len(s.archiveUncertain) > 0 {
+			s.archiveErr = errT3ShellArchiveStale
+		}
+	}
 	if commit != nil {
 		commit(true)
 	}
@@ -527,7 +564,7 @@ func (s *t3ShellState) applyArchiveItem(item t3ArchiveStreamItem, connectionStar
 		if item.Snapshot == nil {
 			return fmt.Errorf("归档快照帧缺少 snapshot 字段")
 		}
-		return s.applyArchiveSnapshotLocked(*item.Snapshot, connectionStart)
+		return s.applyArchiveSnapshotLocked(*item.Snapshot, connectionStart, time.Now())
 	case "thread.updated":
 		if item.Sequence == nil || item.Thread == nil || item.Thread.ID == "" {
 			return fmt.Errorf("归档 thread.updated 帧缺少 sequence/thread/threadId")
@@ -578,7 +615,7 @@ func (s *t3ShellState) applyArchiveItem(item t3ArchiveStreamItem, connectionStar
 // 本连接的读循环（chan 缓冲 1 且每连接只有一个读循环消费者，不会被快
 // 照吞掉），消费即断开本连接，下一条连接的 subscribe 必在请求之后发
 // 出，其快照必为写后状态。
-func (s *t3ShellState) applyArchiveSnapshotLocked(snapshot t3ArchivedShellSnapshot, connectionStart int64) error {
+func (s *t3ShellState) applyArchiveSnapshotLocked(snapshot t3ArchivedShellSnapshot, connectionStart int64, observedAt time.Time) error {
 	if err := s.archivedThreads.reset(snapshot.Threads, func(t *t3ThreadShell) string { return t.ID }); err != nil {
 		return fmt.Errorf("归档快照线程缺少 ID: %w", err)
 	}
@@ -593,9 +630,16 @@ func (s *t3ShellState) applyArchiveSnapshotLocked(snapshot t3ArchivedShellSnapsh
 			incoming[snapshot.Threads[i].ID] = struct{}{}
 		}
 		for id := range s.archiveUncertain {
-			if _, ok := incoming[id]; ok {
-				delete(s.archiveUncertain, id)
+			if _, ok := incoming[id]; !ok {
+				continue
 			}
+			// 只有**晚于登记时刻**采集的快照才算对账证据（#156 R16）：重连快照
+			// 可能在移除之前就采好、之后才送达。
+			if since, ok := s.archiveUncertainSince[id]; ok && observedAt.Before(since) {
+				continue
+			}
+			delete(s.archiveUncertain, id)
+			delete(s.archiveUncertainSince, id)
 		}
 	}
 	if connectionStart < s.archiveReconnectPendingGen {
@@ -791,6 +835,10 @@ func (s *t3ShellState) noteArchiveMembershipUncertainLocked(ids []string, settle
 		// 这里计的是「本次落到了多少个待对账 ID」，而不是「新增了几个」。
 		pending++
 		s.archiveUncertain[id] = deadline
+		if s.archiveUncertainSince == nil {
+			s.archiveUncertainSince = make(map[string]time.Time, len(ids))
+		}
+		s.archiveUncertainSince[id] = time.Now()
 	}
 	if pending == 0 {
 		return 0, proven
@@ -850,6 +898,7 @@ func (s *t3ShellState) noteArchiveMembershipSettledLocked(id string) {
 		return
 	}
 	delete(s.archiveUncertain, id)
+	delete(s.archiveUncertainSince, id)
 	s.refreshArchiveMembershipTrustLocked()
 }
 

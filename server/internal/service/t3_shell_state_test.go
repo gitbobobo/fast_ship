@@ -1841,3 +1841,42 @@ func TestShellState_ProvenRequiresArmedJudgement(t *testing.T) {
 		t.Fatalf("armed frame with an existing archive row is proven, got removed=%v armed=%v proven=%v", removed, armed, proven)
 	}
 }
+
+// 只有「晚于登记时刻」采集的归档快照才算对账证据（#156 R16）：重连快照可能
+// 在活跃移除之前就采好、之后才送达，它的包含关系不能清掉本轮待对账。
+func TestShellState_PrestaleSnapshotDoesNotSettleUncertainty(t *testing.T) {
+	state := newT3ShellState()
+	if applied, err := state.applyArchiveSnapshot(
+		t3ArchivedShellSnapshot{SchemaVersion: 1, SnapshotSequence: 1, Threads: shellTestThreads(shellTestThread("th-a", "归档"))},
+		state.archiveGenerationNow(), nil); !applied || err != nil {
+		t.Fatalf("seed archive: %v", err)
+	}
+	if _, _, err := state.applyActiveItemTracked(t3ShellStreamItem{
+		Kind: "snapshot", Snapshot: &t3ShellSnapshot{SchemaVersion: 1, SnapshotSequence: 1, Threads: shellTestThreads(shellTestThread("th-1", "线程"))},
+	}); err != nil {
+		t.Fatalf("seed active: %v", err)
+	}
+	state.armArchiveUncertain(true, time.Minute)
+	if _, _, err := state.applyActiveItemTracked(t3ShellStreamItem{
+		Kind: "thread.removed", Sequence: intPtrTestLocal(2), ThreadID: "th-1",
+	}); err != nil {
+		t.Fatalf("apply removal: %v", err)
+	}
+	covered := t3ArchivedShellSnapshot{SchemaVersion: 1, SnapshotSequence: 3, Threads: shellTestThreads(shellTestThread("th-1", "归档"))}
+
+	// 采集时刻早于登记：不算证据。
+	if applied, err := state.applyArchiveSnapshotAt(covered, state.archiveGenerationNow(), nil, time.Now().Add(-time.Second)); !applied || err != nil {
+		t.Fatalf("apply stale snapshot: %v", err)
+	}
+	if snaps := state.snapshots(); !errors.Is(snaps.ArchiveErr, errT3ShellArchiveStale) {
+		t.Fatalf("a snapshot captured before the removal must not settle it, got %v", snaps.ArchiveErr)
+	}
+
+	// 采集时刻晚于登记：算证据，恢复可信。
+	if applied, err := state.applyArchiveSnapshotAt(covered, state.archiveGenerationNow(), nil, time.Now().Add(time.Second)); !applied || err != nil {
+		t.Fatalf("apply fresh snapshot: %v", err)
+	}
+	if snaps := state.snapshots(); snaps.ArchiveErr != nil {
+		t.Fatalf("a snapshot captured after the removal settles it, got %v", snaps.ArchiveErr)
+	}
+}

@@ -385,7 +385,12 @@ func (e *t3ShellEntry) ensureArchive(ctx context.Context) error {
 	// 世代语义由 noteArchiveFetchFailed 自行判定（写前坏负载不记冷却、
 	// 只留 needsRefetch），该路径自带 publishThreadEvent/refresh。err=nil
 	// （世代不符或相符）时簿记已由 apply 临界区内的 commit 收尾。
-	if _, applyErr := e.state.applyArchiveSnapshot(snapshot, generation, e.commitArchiveApply); applyErr != nil {
+	// 快照的采集时刻取本次拉取的发起时刻（#156 R16）：送达时刻会晚于它，
+	// 拿送达时刻当证据会把「移除之前采好的重连快照」误当成新一轮对账。
+	e.arch.mu.Lock()
+	observedAt := e.arch.refetchStartedAt
+	e.arch.mu.Unlock()
+	if _, applyErr := e.state.applyArchiveSnapshotAt(snapshot, generation, e.commitArchiveApply, observedAt); applyErr != nil {
 		return e.noteArchiveFetchFailed(applyErr, generation)
 	}
 	// 落地发布经指纹去重（审修 R9 P2-2）：集合真变才 Full；TTL 例行重拉
