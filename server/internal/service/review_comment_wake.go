@@ -201,6 +201,59 @@ func deterministicCommentWakeSetupErr(err error) bool {
 	return false
 }
 
+// reviewForkDenyTTL 跨仓 fork 否定判定的缓存时长：判定来自实拉快照，
+// PR 不会从 fork 变同仓（fork 关系不可逆），TTL 只是内存占用与改名窗口
+// 的平衡——改名后 base 仓库名变化会走出判定范围（key 含 repo 名）。
+const reviewForkDenyTTL = 10 * time.Minute
+
+// reviewForkDenyMax 缓存条目上限：超出先清过期，仍超即整体清空（攻击者
+// 用海量 fork PR 填缓存的边际收益为零，正确性不受影响）。
+const reviewForkDenyMax = 10000
+
+// commentWakeForkDeny 否定判定缓存：fork PR 作者本人点名会通过 payload
+// 预过滤（评论者=PR 作者），每条评论都要花一次 installation 解析 + 一次
+// 实拉才在事务内被 fork 守卫拒绝——公开仓库上可无限放大 App API 成本
+// （fast-ship-bot 第 26 轮 P2）。命中过 fork 判定的 (repo, PR) 短时缓存，
+// 重复点名边际成本降为零。
+func (s *ReviewService) commentWakeForkDeny(repo string, prNumber int, now time.Time) bool {
+	key := fmt.Sprintf("%s#%d", repo, prNumber)
+	v, ok := s.forkDeny.Load(key)
+	if !ok {
+		return false
+	}
+	return now.Before(v.(time.Time))
+}
+
+func (s *ReviewService) rememberCommentWakeForkDeny(repo string, prNumber int, now time.Time) {
+	key := fmt.Sprintf("%s#%d", repo, prNumber)
+	// 上限保护：先清过期；仍超上限就整体清空（正确性不受影响，攻击者
+	// 用海量 fork PR 填缓存没有边际收益）。
+	if s.forkDenySize() >= reviewForkDenyMax {
+		s.forkDeny.Range(func(k, v any) bool {
+			if !now.Before(v.(time.Time)) {
+				s.forkDeny.Delete(k)
+			}
+			return true
+		})
+		if s.forkDenySize() >= reviewForkDenyMax {
+			s.forkDeny.Range(func(k, v any) bool {
+				s.forkDeny.Delete(k)
+				return true
+			})
+		}
+	}
+	s.forkDeny.Store(key, now.Add(reviewForkDenyTTL))
+}
+
+func (s *ReviewService) forkDenySize() int {
+	n := 0
+	s.forkDeny.Range(func(k, v any) bool {
+		n++
+		return true
+	})
+	return n
+}
+
 // observeAcceptedHead 评论唤醒实拉前的只读观察值：与 currentAcceptedHeadTx
 // 同源（未开火的防抖行优先，否则总账 head_sha），项目反查同样按设置行
 // (集成, 仓库) 快照。返回观察所用项目的 ID——实拉后的滞后时序判定必须用
@@ -294,6 +347,10 @@ func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, ev
 	if integrationID == model.ForgeIntegrationBuiltinGitHubID &&
 		!commentAssociationAllowed(payload.Comment.Association) &&
 		payload.Comment.User.Login == "" {
+		return nil
+	}
+	// fork 否定缓存命中：零 API 成本忽略（该 PR 已知是跨仓 fork）。
+	if s.commentWakeForkDeny(repo, prNumber, time.Now().UTC()) {
 		return nil
 	}
 	installationID := payload.Installation.ID
@@ -390,16 +447,40 @@ func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, ev
 		if snErr != nil && !errors.Is(snErr, gorm.ErrRecordNotFound) {
 			return snErr
 		}
-		if snErr == nil && accepted.PRUpdatedAt != nil && pr.UpdatedAt != nil &&
-			pr.UpdatedAt.Before(*accepted.PRUpdatedAt) {
+		baseline := (*time.Time)(nil)
+		if snErr == nil {
+			baseline = accepted.PRUpdatedAt
+		} else {
+			// seen 行未命中（评论唤醒与 advancePRHeadTx 只推 head 的路径不写
+			// seen）时读总账行：受理该 head 时落库的实拉快照时刻就是基准——
+			// 否则这些 head 永久无基准，滞后快照恒被采信、总账可回退
+			// （fast-ship-bot 第 26 轮 P2）。
+			var ledger model.ReviewPullRequest
+			if lErr := s.db.WithContext(ctx).Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ?",
+				observedProjectID, repo, prNumber, integrationID).First(&ledger).Error; lErr == nil &&
+				ledger.HeadSHA == observedHead {
+				baseline = ledger.PRUpdatedAt
+			} else if lErr != nil && !errors.Is(lErr, gorm.ErrRecordNotFound) {
+				return lErr
+			}
+		}
+		if baseline != nil && pr.UpdatedAt != nil &&
+			pr.UpdatedAt.Before(*baseline) {
 			s.logger.Warn("评论唤醒实拉快照滞后于已受理 head，按瞬时失败重投",
 				zap.String("integration", integrationID),
 				zap.String("repo", repo), zap.Int("pr", prNumber),
 				zap.String("live", pr.HeadSHA), zap.String("accepted", observedHead))
 			return fmt.Errorf("评论唤醒实拉快照滞后于已受理 head")
 		}
-		err = s.openCommentWakeRoundTx(ctx, integrationID, event, deliveryID, repo, prNumber,
+		forkDenied, err := s.openCommentWakeRoundTx(ctx, integrationID, event, deliveryID, repo, prNumber,
 			installationID, observedHead, pr, time.Now().UTC())
+		if forkDenied {
+			// 判丢弃已随事务落幂等账；否定缓存是事务外副作用（判定来自
+			// 实拉快照，与事务成败无关）——后续同 (repo, PR) 点名零 API
+			// 成本拒绝（fast-ship-bot 第 26 轮 P2）。
+			s.rememberCommentWakeForkDeny(repo, prNumber, time.Now().UTC())
+			return nil
+		}
 		if errors.Is(err, errCommentWakeObservedHeadMoved) {
 			s.logger.Info("评论唤醒观察窗口内总账被并发推进，重读重拉",
 				zap.String("integration", integrationID),
@@ -422,9 +503,12 @@ func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, ev
 // 出错整体回滚（幂等账随之撤销），瞬时失败由平台重投完整重走。观察窗口
 // 复核不过时回 errCommentWakeObservedHeadMoved（事务回滚不烧账，由外层
 // 重读重拉）。
+// 返回值 forkDenied：事务内 fork 守卫判丢弃（幂等账已随事务落定）——外层
+// 据此写否定缓存（INT-97：事务闭包内不得调非 tx 方法面，非事务副作用外置）。
 func (s *ReviewService) openCommentWakeRoundTx(ctx context.Context, integrationID, event, deliveryID, repo string,
-	prNumber int, installationID int64, observedHead string, pr *forge.PullRequest, now time.Time) error {
-	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	prNumber int, installationID int64, observedHead string, pr *forge.PullRequest, now time.Time) (forkDenied bool, err error) {
+	forkDenied = false
+	txErr := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		// 幂等登记先行：预查后的并发重投在事务内判重兜底。
 		inserted, err := s.deliveries.InsertTx(tx, &model.GitHubWebhookDelivery{
 			DeliveryID: deliveryLedgerKey(integrationID, deliveryID),
@@ -476,7 +560,16 @@ func (s *ReviewService) openCommentWakeRoundTx(ctx context.Context, integrationI
 		// 一致）——实拉 head 仓库缺失（已删 fork/异常 payload）或与 base
 		// 仓库不同名即 fork，不开轮；closed/merged/draft 没有可审的实现，
 		// 空 head 不开轮。
-		if pr.HeadRepoFullName == "" || !strings.EqualFold(pr.HeadRepoFullName, pr.RepoFullName) {
+		if pr.HeadRepoFullName == "" || !strings.EqualFold(pr.HeadRepoFullName, pr.RepoFullName) ||
+			// 实拉 base 与投递快照仓库不同名 = 已改名/转移：投递属于旧仓，
+			// 新仓审查由迁移后的配置决定，按未绑定忽略（fast-ship-bot 第
+			// 24 轮 P2：不得把旧仓投递开进新仓账本）。
+			!strings.EqualFold(pr.RepoFullName, repo) {
+			// 判丢弃随事务落幂等账；否定缓存由外层写（INT-97：闭包内不得
+			// 调非 tx 方法面）。判定来自实拉快照（与事务成败无关的事实），
+			// 后续同 (repo, PR) 点名零 API 成本拒绝——fork PR 作者本人点
+			// 名的放大通道（fast-ship-bot 第 26 轮 P2）。
+			forkDenied = true
 			return nil
 		}
 		if !prReviewable(pr) || pr.Draft || pr.HeadSHA == "" {
@@ -514,7 +607,8 @@ func (s *ReviewService) openCommentWakeRoundTx(ctx context.Context, integrationI
 			return err
 		}
 		_, err = s.openRoundTx(tx, project, settings, repo, prNumber,
-			pr.HeadSHA, "comment", pr.Title, pr.HTMLURL, pr.BaseRef, pr.HeadRef, installationID, now)
+			pr.HeadSHA, "comment", pr.Title, pr.HTMLURL, pr.BaseRef, pr.HeadRef, installationID, pr.UpdatedAt, now)
 		return err
 	})
+	return forkDenied, txErr
 }

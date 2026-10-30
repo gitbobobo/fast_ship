@@ -85,6 +85,9 @@ type ReviewService struct {
 	// 集成校验与轮询补漏的项目↔集成一致性复核。
 	clients           forge.ReviewClientResolver
 	forgeIntegrations forgeIntegrationLookup
+	// forkDeny 跨仓 fork 的否定判定短时缓存（评论唤醒放大面缓解，见
+	// commentWakeForkDeny）。零值即可用（sync.Map），无需初始化。
+	forkDeny sync.Map
 	// t3 线程/工作区执行面、media 截图缓存下载面；均可为 nil（对应阶段按失败处理）。
 	// mediaBearer 为截图下载取安装令牌（私有仓库附件）：入参集成身份与安装 id；
 	// 可为 nil（不支持凭证下载时保持匿名）。

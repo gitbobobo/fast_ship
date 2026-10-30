@@ -927,7 +927,7 @@ func (s *ReviewService) RerunReview(ctx context.Context, userID, projectID strin
 		}
 		var openErr error
 		round, openErr = s.openRoundTx(tx, project, &settings, repo, prNumber,
-			pr.HeadSHA, "manual", pr.Title, pr.HTMLURL, pr.BaseRef, pr.HeadRef, installationID, now)
+			pr.HeadSHA, "manual", pr.Title, pr.HTMLURL, pr.BaseRef, pr.HeadRef, installationID, pr.UpdatedAt, now)
 		return openErr
 	})
 	if err != nil {

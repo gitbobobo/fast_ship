@@ -1725,3 +1725,108 @@ func TestReviewCommentWakeObserveReturnsSupplyingProject(t *testing.T) {
 		t.Fatalf("rebind 后 observe = (%q, %q, %v), want (sha-obs, %q, nil)", head, projectID, err, projectB.ID)
 	}
 }
+
+// fork 否定判定缓存（fast-ship-bot 第 26 轮 P2）：fork PR 作者本人点名
+// 会通过 payload 预过滤（评论者=作者），每条评论都要花一次 installation
+// 解析 + 一次实拉才被 fork 守卫拒绝——公开仓库上可无限放大 App API 成本。
+// 命中过 fork 判定的 (repo, PR) 短时缓存后，重复点名零 API 成本拒绝。
+func TestReviewCommentWakeForkDenyCache(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	e.enableReview(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	ctx := context.Background()
+	e.fake.SetPR(repo, 52, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 52, State: "open", HeadSHA: "sha-fork2",
+		HeadRepoFullName: "someone-else/repo", AuthorLogin: "fork-author",
+	})
+
+	// 第一条：走完整流程（安装解析 + 实拉），事务内 fork 守卫拒绝并落幂等账。
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-fc-1",
+		commentBodyWithUsers("@fast-ship-bot 请再审", repo, 52, 42, "NONE", "fork-author", "fork-author")); err != nil {
+		t.Fatalf("fork 点名应静默忽略: %v", err)
+	}
+	afterFirst := e.fake.TotalCalls()
+
+	// 第二条（不同投递）：缓存命中，零新增平台调用。
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-fc-2",
+		commentBodyWithUsers("@fast-ship-bot 请再审", repo, 52, 42, "NONE", "fork-author", "fork-author")); err != nil {
+		t.Fatalf("缓存命中应静默忽略: %v", err)
+	}
+	if got := e.fake.TotalCalls(); got != afterFirst {
+		t.Fatalf("缓存命中后不得产生平台调用: %d -> %d", afterFirst, got)
+	}
+	var runs int64
+	e.svc.db.Model(&model.ReviewRun{}).Where("pr_number = 52").Count(&runs)
+	if runs != 0 {
+		t.Fatalf("fork PR 不得开轮: runs = %d", runs)
+	}
+
+	// 缓存过期后恢复实拉判定：把该 PR 改回同仓后，下一条点名照常开轮。
+	e.fake.SetPR(repo, 52, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 52, State: "open", HeadSHA: "sha-fork2",
+		AuthorLogin: "fork-author",
+	})
+	e.review.forkDeny.Store(repo+"#52", time.Now().UTC().Add(-time.Minute))
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-fc-3",
+		commentBodyWithUsers("@fast-ship-bot 请再审", repo, 52, 42, "NONE", "fork-author", "fork-author")); err != nil {
+		t.Fatalf("缓存过期后同仓点名应唤醒: %v", err)
+	}
+	e.svc.db.Model(&model.ReviewRun{}).Where("pr_number = 52").Count(&runs)
+	if runs != 1 {
+		t.Fatalf("缓存过期后应照常开轮: runs = %d", runs)
+	}
+}
+
+// 评论唤醒受理的 head 也要有滞后时序基准（fast-ship-bot 第 26 轮 P2）：
+// 评论唤醒不写 seen，受理时把实拉快照时刻落进总账 PRUpdatedAt——同一
+// head 的第二次点名若读到滞后快照，按瞬时失败拒绝而不是回退总账。
+func TestReviewCommentWakeHeadBaselineAdvances(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	e.enableReview(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	ctx := context.Background()
+	t1 := time.Now().UTC().Add(-2 * time.Hour)
+	e.fake.SetPR(repo, 53, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 53, State: "open", HeadSHA: "sha-base",
+		HeadRepoFullName: repo, AuthorLogin: "pr-author", UpdatedAt: &t1,
+	})
+
+	// 第一次点名：受理 head sha-base，总账 PRUpdatedAt = t1。
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-base-1",
+		commentBodyWithUsers("@fast-ship-bot 请再审", repo, 53, 42, "NONE", "pr-author", "pr-author")); err != nil {
+		t.Fatalf("第一次点名应开轮: %v", err)
+	}
+	var ledger model.ReviewPullRequest
+	if err := e.svc.db.Where("pr_number = 53").First(&ledger).Error; err != nil {
+		t.Fatalf("总账行应存在: %v", err)
+	}
+	if ledger.PRUpdatedAt == nil || !ledger.PRUpdatedAt.Equal(t1) {
+		t.Fatalf("总账应落实拉快照时刻: %v", ledger.PRUpdatedAt)
+	}
+
+	// 第二次点名读到滞后快照（同一 head、更早的 updated_at）：无 seen 行，
+	// 但总账基准命中 → 按瞬时失败拒绝，总账不回退、不落账。
+	t0 := t1.Add(-time.Hour)
+	e.fake.SetPR(repo, 53, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 53, State: "open", HeadSHA: "sha-base",
+		HeadRepoFullName: repo, AuthorLogin: "pr-author", UpdatedAt: &t0,
+	})
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-base-2",
+		commentBodyWithUsers("@fast-ship-bot 请再审", repo, 53, 42, "NONE", "pr-author", "pr-author")); err == nil {
+		t.Fatal("滞后快照应按瞬时失败拒绝（500）")
+	}
+	var after model.ReviewPullRequest
+	if err := e.svc.db.Where("pr_number = 53").First(&after).Error; err != nil {
+		t.Fatalf("总账行应仍在: %v", err)
+	}
+	if !after.PRUpdatedAt.Equal(t1) || after.HeadSHA != "sha-base" {
+		t.Fatalf("总账不得回退: head=%s pr_updated_at=%v", after.HeadSHA, after.PRUpdatedAt)
+	}
+	var deliveries int64
+	e.svc.db.Model(&model.GitHubWebhookDelivery{}).
+		Where("delivery_id = ?", deliveryLedgerKey(model.ForgeIntegrationBuiltinGitHubID, "d-base-2")).
+		Count(&deliveries)
+	if deliveries != 0 {
+		t.Fatalf("瞬时失败不落账: deliveries = %d", deliveries)
+	}
+}

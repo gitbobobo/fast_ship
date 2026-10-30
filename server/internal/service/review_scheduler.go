@@ -277,7 +277,7 @@ func (s *ReviewService) consumeDebounce(row *model.ReviewDebounce, now time.Time
 		}
 		_, err := s.openRoundTx(tx, &project, &settings,
 			row.RepoFullName, row.PRNumber, row.HeadSHA, row.Action,
-			row.PRTitle, row.PRURL, row.BaseRef, row.HeadRef, row.InstallationID, now)
+			row.PRTitle, row.PRURL, row.BaseRef, row.HeadRef, row.InstallationID, nil, now)
 		return err
 	})
 	if err != nil {

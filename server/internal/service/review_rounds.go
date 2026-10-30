@@ -43,6 +43,7 @@ func (s *ReviewService) openRoundTx(
 	repo string, prNumber int,
 	headSHA, action, prTitle, prURL, baseRef, headRef string,
 	installationID int64,
+	prUpdatedAt *time.Time,
 	now time.Time,
 ) (int, error) {
 	integrationID := reviewIntegrationID(settings.IntegrationID)
@@ -80,6 +81,8 @@ func (s *ReviewService) openRoundTx(
 	ledger.CodeStatus = ""
 	ledger.VisualStatus = ""
 	ledger.HeadSHA = headSHA
+	// 受理时刻的实拉快照随 head 一起推进（滞后时序判定基准，见模型注释）。
+	ledger.PRUpdatedAt = prUpdatedAt
 	ledger.RoundNumber = round
 	ledger.SyncPending = true
 	ledger.SyncEpoch = ledger.SyncEpoch + 1
