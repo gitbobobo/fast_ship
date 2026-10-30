@@ -65,6 +65,20 @@ func (s *ReviewService) commentWakeMentions(ctx context.Context) ([]string, erro
 // 内被持续并发推进）就放弃并补登幂等账。
 const reviewCommentWakeRevalidateMax = 2
 
+// commentWakeTxOutcome 评论唤醒事务结果的统一处置（纯函数，单元可测）：
+// 观察窗口哨兵原样透传（外层重读重拉）；提交失败原样透出——此时幂等账
+// 已随回滚撤销，平台重投整段重走，不得因 forkDenied 置位而被吞成 202
+// （fast-ship-bot 第 32 轮 P2）；fork 否定仅在事务成功落账后写缓存。
+func commentWakeTxOutcome(forkDenied bool, err error) (denyCache bool, retErr error) {
+	if errors.Is(err, errCommentWakeObservedHeadMoved) {
+		return false, err
+	}
+	if err != nil {
+		return false, err
+	}
+	return forkDenied, nil
+}
+
 // errCommentWakeObservedHeadMoved 观察窗口哨兵：实拉前观察的总账 head 与
 // 最终事务内重取的不一致——窗口内有并发写入推进了账本。哨兵让事务整体
 // 回滚（幂等登记一并撤销，不烧账），由外层重读重拉后再试。
@@ -547,15 +561,9 @@ func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, ev
 			}
 			pr = pr2
 		}
-		forkDenied, err := s.openCommentWakeRoundTx(ctx, integrationID, event, deliveryID, repo, prNumber,
+		forkDenied, txErr := s.openCommentWakeRoundTx(ctx, integrationID, event, deliveryID, repo, prNumber,
 			installationID, observedHead, pr, time.Now().UTC())
-		if forkDenied {
-			// 判丢弃已随事务落幂等账；否定缓存是事务外副作用（判定来自
-			// 实拉快照，与事务成败无关）——后续同 (repo, PR) 点名零 API
-			// 成本拒绝（fast-ship-bot 第 26 轮 P2）。
-			s.rememberCommentWakeForkDeny(integrationID, repo, prNumber, time.Now().UTC())
-			return nil
-		}
+		denyCache, err := commentWakeTxOutcome(forkDenied, txErr)
 		if errors.Is(err, errCommentWakeObservedHeadMoved) {
 			s.logger.Info("评论唤醒观察窗口内总账被并发推进，重读重拉",
 				zap.String("integration", integrationID),
@@ -563,7 +571,16 @@ func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, ev
 				zap.Int("attempt", attempt+1))
 			continue
 		}
-		return err
+		if err != nil {
+			return err
+		}
+		if denyCache {
+			// 判丢弃已随事务落幂等账；否定缓存是事务外副作用（判定来自
+			// 实拉快照，与事务成败无关）——后续同 (repo, PR) 点名零 API
+			// 成本拒绝（fast-ship-bot 第 26 轮 P2）。
+			s.rememberCommentWakeForkDeny(integrationID, repo, prNumber, time.Now().UTC())
+		}
+		return nil
 	}
 	s.logger.Warn("评论唤醒观察窗口未收敛，放弃并丢弃投递",
 		zap.String("integration", integrationID),

@@ -2155,3 +2155,30 @@ func TestReviewCommentWakeTiedRecheckStaleRejected(t *testing.T) {
 		t.Fatalf("瞬时失败不落账: deliveries = %d", deliveries)
 	}
 }
+
+// 事务结果处置（fast-ship-bot 第 32 轮 P2）：forkDenied 与提交失败并存时
+// 不得把提交错误吞成 202——幂等账已随回滚撤销，必须透出让平台重投。
+func TestCommentWakeTxOutcome(t *testing.T) {
+	txErr := errors.New("commit failure")
+
+	// forkDenied + 提交失败：错误透出，不写否定缓存。
+	deny, err := commentWakeTxOutcome(true, txErr)
+	if err == nil || deny {
+		t.Fatalf("提交失败必须透出: deny=%v err=%v", deny, err)
+	}
+	// 观察窗口哨兵原样透传（外层重读重拉，不写缓存）。
+	deny, err = commentWakeTxOutcome(true, errCommentWakeObservedHeadMoved)
+	if !errors.Is(err, errCommentWakeObservedHeadMoved) || deny {
+		t.Fatalf("哨兵应透传: deny=%v err=%v", deny, err)
+	}
+	// fork 否定 + 事务成功：写缓存。
+	deny, err = commentWakeTxOutcome(true, nil)
+	if err != nil || !deny {
+		t.Fatalf("fork 否定应写缓存: deny=%v err=%v", deny, err)
+	}
+	// 正常开轮。
+	deny, err = commentWakeTxOutcome(false, nil)
+	if err != nil || deny {
+		t.Fatalf("正常开轮: deny=%v err=%v", deny, err)
+	}
+}
