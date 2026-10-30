@@ -533,9 +533,20 @@ func (s *t3ShellState) applyArchiveSnapshotLocked(snapshot t3ArchivedShellSnapsh
 	}
 	s.archivedSchemaVersion = snapshot.SchemaVersion
 	s.archivedSeq = snapshot.SnapshotSequence
-	// 权威快照整体替换归档集：待对账集合随之作废（无论新旧，成员关系都
-	// 以这张快照为准；写前快照的「不封窗」由下面的分支处理）。
-	s.archiveUncertain = nil
+	// 权威快照只对账它**确实包含**的线程（#156 R6）：命中的 ID 成员关系已定；
+	// 未命中的仍可能「被归档但增量还在队列里」，或「被彻底删除」——交给
+	// 各自的到期时刻兜底，不能因为快照没包含它们就断言不存在。
+	if len(s.archiveUncertain) > 0 {
+		incoming := make(map[string]struct{}, len(snapshot.Threads))
+		for i := range snapshot.Threads {
+			incoming[snapshot.Threads[i].ID] = struct{}{}
+		}
+		for id := range s.archiveUncertain {
+			if _, ok := incoming[id]; ok {
+				delete(s.archiveUncertain, id)
+			}
+		}
+	}
 	if connectionStart < s.archiveReconnectPendingGen {
 		// 写前快照：数据照换但不封窗（审修 R8 P2）。与按需路径
 		// applyArchiveSnapshot 世代不符分支同型——面保持不可信，
@@ -553,6 +564,10 @@ func (s *t3ShellState) applyArchiveSnapshotLocked(snapshot t3ArchivedShellSnapsh
 	s.archiveErr = nil
 	s.archiveStale = false
 	s.archiveReconnectPendingGen = 0
+	// 仍有未对账的移除：面就绪但不能宣称归档集完整（#156 R6）。
+	if len(s.archiveUncertain) > 0 {
+		s.archiveErr = errT3ShellArchiveStale
+	}
 	return nil
 }
 
@@ -684,9 +699,13 @@ func (s *t3ShellState) noteArchiveMembershipUncertain(ids []string, settle time.
 // 无锁变体（调用方须持 s.mu）：活跃面移除与应用在同一临界区登记，
 // 保证读者看不到「已删除但可信」的中间态（#156 R5）。
 func (s *t3ShellState) noteArchiveMembershipUncertainLocked(ids []string, settle time.Duration) (pending int, flipped bool) {
-	if !s.archiveReady || len(ids) == 0 {
+	if len(ids) == 0 {
 		return 0, false
 	}
+	// 登记不依赖 archiveReady（#156 R6）：切入订阅模式时归档面先是不可信的，
+	// 这期间发生移除若跳过登记，等订阅快照把它恢复可信时，对应的归档增量
+	// 可能还在队列里，wait 会把缺失线程当定论。面不可信时这里只记账、不改
+	// 可信度（本来就不信）。
 	deadline := time.Now().Add(settle)
 	for _, id := range ids {
 		if id == "" {
@@ -711,9 +730,9 @@ func (s *t3ShellState) noteArchiveMembershipUncertainLocked(ids []string, settle
 	if pending == 0 {
 		return 0, false
 	}
-	flipped = !errors.Is(s.archiveErr, errT3ShellArchiveStale)
-	if flipped {
+	if s.archiveReady && !errors.Is(s.archiveErr, errT3ShellArchiveStale) {
 		s.archiveErr = errT3ShellArchiveStale
+		flipped = true
 	}
 	return pending, flipped
 }

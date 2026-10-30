@@ -1394,3 +1394,57 @@ func TestShellState_ArmedRemovalMarksUncertainAtomically(t *testing.T) {
 		t.Fatalf("unarmed state must not self-mark uncertainty, got %v", snaps.ArchiveErr)
 	}
 }
+
+// 切入订阅模式的窗口内发生移除也必须记账（#156 R6）：此时归档面先是不可信的，
+// 若跳过登记，等订阅快照把它恢复可信时，对应归档增量可能仍在队列里——wait
+// 会把缺失线程当定论。快照只对账它确实包含的 ID，其余留到到期。
+func TestShellState_RemovalDuringLegacySwitchIsRecorded(t *testing.T) {
+	state := newT3ShellState()
+	gen := state.archiveGenerationNow()
+	if applied, err := state.applyArchiveSnapshot(
+		t3ArchivedShellSnapshot{SchemaVersion: 1, SnapshotSequence: 1, Threads: shellTestThreads(shellTestThread("th-a", "归档"))},
+		gen, nil); !applied || err != nil {
+		t.Fatalf("seed archive: %v", err)
+	}
+	if _, err := state.applyActiveItemTracked(t3ShellStreamItem{
+		Kind: "snapshot", Snapshot: &t3ShellSnapshot{SchemaVersion: 1, SnapshotSequence: 1, Threads: shellTestThreads(shellTestThread("th-1", "线程"))},
+	}); err != nil {
+		t.Fatalf("seed active: %v", err)
+	}
+
+	// 模拟切入订阅模式：arm + 撤可信（与 switchToArchiveLegacy 同序）。
+	state.mu.Lock()
+	state.armArchiveUncertainLocked(true, 10*time.Second)
+	state.noteArchiveExpiredLocked()
+	state.mu.Unlock()
+
+	// 面不可信期间发生移除：必须记账（否则快照恢复可信后无人再提它）。
+	if _, err := state.applyActiveItemTracked(t3ShellStreamItem{
+		Kind: "thread.removed", Sequence: intPtrTestLocal(2), ThreadID: "th-1",
+	}); err != nil {
+		t.Fatalf("apply removal: %v", err)
+	}
+
+	// 订阅快照落地（权威全量，不含 th-1）：th-1 仍未对账，面不得宣称完整。
+	if err := state.applyArchiveItem(t3ArchiveStreamItem{
+		Kind: "snapshot", Snapshot: &t3ArchivedShellSnapshot{SchemaVersion: 1, SnapshotSequence: 2, Threads: shellTestThreads(shellTestThread("th-a", "归档"))},
+	}, 0); err != nil {
+		t.Fatalf("apply legacy snapshot: %v", err)
+	}
+	if snaps := state.snapshots(); !errors.Is(snaps.ArchiveErr, errT3ShellArchiveStale) {
+		t.Fatalf("snapshot without the removed thread must not claim completeness, got %v", snaps.ArchiveErr)
+	}
+
+	// th-1 的归档增量到达：对账完成，恢复可信。
+	if err := state.applyArchiveItem(t3ArchiveStreamItem{
+		Kind: "thread.updated", Sequence: intPtrTestLocal(3), Thread: shellTestThread("th-1", "归档"),
+	}, 0); err != nil {
+		t.Fatalf("apply delta: %v", err)
+	}
+	if snaps := state.snapshots(); snaps.ArchiveErr != nil {
+		t.Fatalf("after reconciliation the face must be trusted, got %v", snaps.ArchiveErr)
+	}
+}
+
+// intPtrTestLocal 是测试内的小工具：取整型地址。
+func intPtrTestLocal(v int) *int { return &v }

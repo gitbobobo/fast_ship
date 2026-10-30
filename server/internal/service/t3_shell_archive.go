@@ -429,16 +429,20 @@ func isArchiveSnapshotMethodMissing(err error) bool {
 // 是现成的探测冷却，双方法缺失的环境至多每冷却窗口重探测一次，而不是
 // 每次读都重拨；冷却过期后照常重探测（误判/升级自愈不受影响）。
 func (e *t3ShellEntry) switchToArchiveLegacy() {
-	defer e.state.armArchiveUncertain(true, e.archiveStaleGrace)
 	e.state.mu.Lock()
 	e.arch.mu.Lock()
 	e.arch.mode = t3ArchiveModeLegacy
+	// 与 mode 翻转同一临界区开启「移除即登记待对账」（#156 R6）：若延到锁外
+	// 再 arm，窗口内到达的活跃面移除会看到 legacy 模式却仍未 armed，既不进
+	// 按需失效路径、也不登记待对账——随后订阅快照恢复可信时，对应归档增量
+	// 可能仍在队列里，wait 会把缺失线程当定论。
 	e.arch.validUntil = time.Time{}
 	// retryAfter 保留（R14 P2-2）：见函数头。legacy 准入按 mode 短路，
 	// 簿记在订阅模式下不参与判定；它只在 resetArchiveModeToUnknown 回
 	// Unknown 后重新生效，作双方法缺失环境的探测冷却。
 	e.arch.needsRefetch = false
 	e.state.noteArchiveExpiredLocked() // archiveReady → false，留行但报已失效
+	e.state.armArchiveUncertainLocked(true, e.archiveStaleGrace)
 	e.arch.mu.Unlock()
 	e.state.mu.Unlock()
 	// 放行停在 mode 闸门上的旧面订阅 goroutine（runArchiveLegacySubscription
