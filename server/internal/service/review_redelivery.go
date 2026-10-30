@@ -194,6 +194,10 @@ func (s *ReviewService) reconcileWebhookDeliveries(now time.Time) {
 			if check.NotWake {
 				s.logger.Info("非唤醒评论投递，跳过重投",
 					zap.String("guid", st.GUID), zap.Int64("delivery", st.TargetID))
+			} else if check.Fork {
+				s.logger.Info("投递指向的 PR 是跨仓 fork，跳过重投",
+					zap.String("guid", st.GUID), zap.Int64("delivery", st.TargetID),
+					zap.String("repo", check.Repo), zap.Int("pr", check.Number))
 			} else {
 				s.logger.Info("投递指向的 PR 已关闭，跳过重投",
 					zap.String("guid", st.GUID), zap.Int64("delivery", st.TargetID),
@@ -291,6 +295,9 @@ type redeliveryPRCheck struct {
 	// （编辑/删除、普通 Issue 评论、正文未点名机器人）——webhook 本来就
 	// 会静默忽略，对账记终态跳过，不进重试集不吃预算。
 	NotWake bool
+	// Fork 投递指向跨仓 fork PR（或已删 fork）：唤醒/审查守卫必拒，重投
+	// 只会白跑，同样记终态跳过。
+	Fork bool
 }
 
 // redeliveryPRReviewable 重投前的 PR 实况闸门：确认投递指向的 PR 仍开着。
@@ -367,10 +374,13 @@ func (p *redeliveryPRProbe) lookup(ctx context.Context, deliveryID int64, event 
 		return check, err
 	}
 	// 重投是 GitHub 专属路径（deliveries API 不在 forge.ReviewClient 方法面），
-	// 实况判定与审查链路同一口径：经共享转换后复用 prReviewable。
-	reviewable := prReviewable(forge.PullRequestFromGitHub(pr))
+	// 实况判定与审查链路同一口径：经共享转换后复用 prReviewable。fork PR
+	// （head 仓库缺失或与 base 不同名）的投递无论重投多少次都会被 fork
+	// 守卫丢弃，同样记终态跳过，不白吃重投预算（codex 第 5 轮 P2）。
+	reviewable := prReviewable(forge.PullRequestFromGitHub(pr)) &&
+		pr.HeadRepoFullName != "" && strings.EqualFold(pr.HeadRepoFullName, repo)
 	p.prStates[key] = reviewable
-	check.Known, check.Reviewable = true, reviewable
+	check.Known, check.Reviewable, check.Fork = true, reviewable, !reviewable && prReviewable(forge.PullRequestFromGitHub(pr))
 	return check, nil
 }
 

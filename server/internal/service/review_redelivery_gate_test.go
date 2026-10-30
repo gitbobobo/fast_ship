@@ -336,23 +336,30 @@ func TestRedeliveryGateLocatesCommentPayload(t *testing.T) {
 		hookRow(3101, "guid-cw-open", "issue_comment", "created", 500, false, base),
 		hookRow(3102, "guid-cw-closed", "issue_comment", "created", 502, false, base),
 		hookRow(3103, "guid-cw-plain", "issue_comment", "created", 500, false, base),
+		hookRow(3104, "guid-cw-fork", "issue_comment", "created", 500, false, base),
 	})
 	env.fake.SetHookDeliveryPayload(3101, redeliveryCommentPayload("owner/repo", 7))
 	env.fake.SetHookDeliveryPayload(3102, redeliveryCommentPayload("owner/repo", 8))
 	// 未点名机器人的普通讨论评论：webhook 会静默忽略，对账不重投、记终态。
 	env.fake.SetHookDeliveryPayload(3103, redeliveryPlainCommentPayload("owner/repo", 7))
+	// fork PR 的唤醒投递：守卫必拒，重投只会白跑，记终态跳过。
+	env.fake.SetHookDeliveryPayload(3104, redeliveryCommentPayload("owner/repo", 9))
 	env.fake.SetPR("owner/repo", 7, &githubapi.PullRequest{})
 	env.fake.SetPR("owner/repo", 8, &githubapi.PullRequest{State: "closed"})
+	env.fake.SetPR("owner/repo", 9, &githubapi.PullRequest{HeadRepoFullName: "someone-else/repo"})
 
 	env.review.reconcileWebhookDeliveries(redeliveryTestNow)
 	if got := env.fake.RedeliveredIDs(); len(got) != 1 || got[0] != 3101 {
-		t.Fatalf("redelivered = %v, want [3101]（open PR 的评论投递照常重投，非唤醒不投）", got)
+		t.Fatalf("redelivered = %v, want [3101]（open PR 的评论投递照常重投，非唤醒/ fork 不投）", got)
 	}
 	if row, ok := redeliveryClosedRow(t, env, "guid-cw-closed"); !ok || row.ClosedAt == nil {
 		t.Fatalf("已关闭 PR 的评论投递应记终态: %+v (ok=%v)", row, ok)
 	}
 	if row, ok := redeliveryClosedRow(t, env, "guid-cw-plain"); !ok || row.ClosedAt == nil {
 		t.Fatalf("非唤醒评论投递应记终态跳过: %+v (ok=%v)", row, ok)
+	}
+	if row, ok := redeliveryClosedRow(t, env, "guid-cw-fork"); !ok || row.ClosedAt == nil {
+		t.Fatalf("fork PR 的唤醒投递应记终态跳过: %+v (ok=%v)", row, ok)
 	}
 	if row, ok := redeliveryClosedRow(t, env, "guid-cw-open"); ok && row.ClosedAt != nil {
 		t.Fatalf("open PR 的评论投递不应记终态: %+v", row)
