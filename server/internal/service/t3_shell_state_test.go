@@ -1996,3 +1996,39 @@ func TestShellState_ExcludeActiveThreads(t *testing.T) {
 		t.Fatalf("only non-active threads may stay, got %v", got)
 	}
 }
+
+// 订阅路径同样要豁免「覆盖全部待对账」的快照（#156 R37）：observedAt 只是连接
+// 发起时刻的下界，往返期间的移除会把 floor 推到它之后；不豁免就会批量归档时
+// 反复拒收并触发重连风暴。
+func TestShellState_StreamSnapshotCoveringUncertainSkipsFloor(t *testing.T) {
+	state := newT3ShellState()
+	if applied, err := state.applyArchiveSnapshot(
+		t3ArchivedShellSnapshot{SchemaVersion: 1, SnapshotSequence: 1, Threads: shellTestThreads(shellTestThread("th-a", "归档"))},
+		state.archiveGenerationNow(), nil); !applied || err != nil {
+		t.Fatalf("seed archive: %v", err)
+	}
+	if _, _, err := state.applyActiveItemTracked(t3ShellStreamItem{
+		Kind: "snapshot", Snapshot: &t3ShellSnapshot{SchemaVersion: 1, SnapshotSequence: 1, Threads: shellTestThreads(shellTestThread("th-1", "线程"))},
+	}); err != nil {
+		t.Fatalf("seed active: %v", err)
+	}
+	state.armArchiveUncertain(true, time.Minute)
+	if _, _, err := state.applyActiveItemTracked(t3ShellStreamItem{
+		Kind: "thread.removed", Sequence: intPtrTestLocal(2), ThreadID: "th-1",
+	}); err != nil {
+		t.Fatalf("apply removal: %v", err)
+	}
+	// 采集时刻早于 floor，但快照覆盖了待对账的 th-1。
+	if err := state.applyArchiveItemAt(t3ArchiveStreamItem{
+		Kind: "snapshot", Sequence: intPtrTestLocal(3),
+		Snapshot: &t3ArchivedShellSnapshot{SchemaVersion: 1, SnapshotSequence: 3, Threads: shellTestThreads(shellTestThread("th-1", "归档"))},
+	}, 0, time.Now().Add(-time.Second)); err != nil {
+		t.Fatalf("apply stream snapshot: %v", err)
+	}
+	if snaps := state.snapshots(); snaps.ArchiveErr != nil {
+		t.Fatalf("a covering snapshot must settle, got %v", snaps.ArchiveErr)
+	}
+	if gen := state.archiveReconnectTarget(); gen != 0 {
+		t.Fatalf("covering snapshot must not request reconnect, got gen=%d", gen)
+	}
+}

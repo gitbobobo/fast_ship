@@ -659,6 +659,10 @@ func (s *t3ShellState) applyArchiveSnapshotLocked(snapshot t3ArchivedShellSnapsh
 	// 权威快照只对账它**确实包含**的线程（#156 R6）：命中的 ID 成员关系已定；
 	// 未命中的仍可能「被归档但增量还在队列里」，或「被彻底删除」——交给
 	// 各自的到期时刻兜底，不能因为快照没包含它们就断言不存在。
+	// 覆盖全部待对账 = 采集必在那些移除之后（#156 R37）：结算与下面的 floor
+	// 裁决都用同一判定——注意必须在删除待对账**之前**算，否则一次结算就把
+	// 「覆盖」算成「空集合」。
+	covering := snapshotCoversUncertain(snapshot, s.archiveUncertain)
 	if len(s.archiveUncertain) > 0 {
 		incoming := make(map[string]struct{}, len(snapshot.Threads))
 		for i := range snapshot.Threads {
@@ -670,7 +674,7 @@ func (s *t3ShellState) applyArchiveSnapshotLocked(snapshot t3ArchivedShellSnapsh
 			}
 			// 只有**晚于登记时刻**采集的快照才算对账证据（#156 R16）：重连快照
 			// 可能在移除之前就采好、之后才送达。
-			if since, ok := s.archiveUncertainSince[id]; ok && observedAt.Before(since) {
+			if since, ok := s.archiveUncertainSince[id]; ok && observedAt.Before(since) && !covering {
 				continue
 			}
 			delete(s.archiveUncertain, id)
@@ -690,7 +694,10 @@ func (s *t3ShellState) applyArchiveSnapshotLocked(snapshot t3ArchivedShellSnapsh
 	}
 	// 采集早于最近一次归属变更的快照同样是变更前状态（#156 R28）：只换数据
 	// 不封窗，否则它会把面恢复可信而线程两面都没有。
-	if !observedAt.IsZero() && observedAt.Before(s.archiveFreshnessFloor) {
+	// 快照包含全部待对账 ID 即证明它是变更后采样（#156 R37）：订阅路径的
+	// observedAt 只是连接发起时刻（下界），往返期间的移除会把 floor 推到它
+	// 之后——不豁免的话，批量归档期间每次快照都会被拒并触发重连风暴。
+	if !observedAt.IsZero() && observedAt.Before(s.archiveFreshnessFloor) && !covering {
 		// 变更前快照被拒之后要主动重连取新全量（#156 R29）：否则这条连接
 		// 不会再有写后快照，面只能等到期，catch-up 期间读一直 degraded。
 		s.noteArchiveReconnectRequestedLocked()
