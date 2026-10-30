@@ -169,7 +169,7 @@ func (s *ReviewService) reconcileWebhookDeliveries(now time.Time) {
 		hooks:    hooks,
 		client:   client,
 		budget:   reviewRedeliveryMaxPerSweep,
-		prStates: map[string]bool{},
+		prStates: map[string]*probePRState{},
 	}
 	tried := 0
 	for _, st := range pending {
@@ -281,11 +281,18 @@ type redeliveryPRProbe struct {
 	hooks    githubapp.HookDeliveries
 	client   githubapi.GitHubClient
 	budget   int
-	prStates map[string]bool // repo#number -> PR 实时可审
+	prStates map[string]*probePRState // repo#number -> PR 实况快照（可用性 + 作者）
 }
 
 // redeliveryPRCheck 一次闸门判定的结果。Known=false 表示读不到（payload 拉取
 // 失败/解析不出 PR/实时读失败/预算耗尽），调用方降级为原行为照常重投。
+// probePRState 闸门缓存的 PR 实况快照：可用性与作者登录名分开存——评论者
+// 身份按投递现算，不能掺进缓存。
+type probePRState struct {
+	usable bool
+	author string
+}
+
 type redeliveryPRCheck struct {
 	Known      bool
 	Reviewable bool
@@ -365,8 +372,12 @@ func (p *redeliveryPRProbe) lookup(ctx context.Context, deliveryID int64, event 
 		return check, errors.New("投递 payload 缺少 repo/PR/installation 字段")
 	}
 	key := check.Repo + "#" + strconv.Itoa(check.Number)
-	if reviewable, ok := p.prStates[key]; ok {
-		check.Known, check.Reviewable = true, reviewable
+	if st, ok := p.prStates[key]; ok {
+		// 缓存只放 PR 实况快照；评论者身份按投递现算（同 sweep 内同 PR 的
+		// 无资格评论不得连累有资格投递，codex 第 13 轮 P2）。
+		authorized := wakePayload == nil || commentWakeAuthorized(wakePayload,
+			&forge.PullRequest{AuthorLogin: st.author})
+		check.Known, check.Reviewable = true, st.usable && authorized
 		return check, nil
 	}
 	if p.budget <= 0 {
@@ -386,10 +397,13 @@ func (p *redeliveryPRProbe) lookup(ctx context.Context, deliveryID int64, event 
 	open := prReviewable(forgePR)
 	fork := open && (pr.HeadRepoFullName == "" || !strings.EqualFold(pr.HeadRepoFullName, repo))
 	// 评论者身份仅约束 issue_comment 投递（pull_request 投递的推送作者天然
-	// 有 push 权限，不需要也不能用评论身份判定）。
+	// 有 push 权限，不需要也不能用评论身份判定），且**按投递现算、不入
+	// prStates 缓存**——缓存被同一 sweep 内同 PR 的后续投递复用，掺入某条
+	// 无资格评论的判定会把有资格投递也错误跳过（codex 第 13 轮 P2）。
 	authorized := wakePayload == nil || commentWakeAuthorized(wakePayload, forgePR)
-	reviewable := open && !fork && authorized
-	p.prStates[key] = reviewable
+	prUsable := open && !fork
+	p.prStates[key] = &probePRState{usable: prUsable, author: forgePR.AuthorLogin}
+	reviewable := prUsable && authorized
 	check.Known, check.Reviewable = true, reviewable
 	check.Fork = !reviewable && fork
 	return check, nil

@@ -232,7 +232,7 @@ func TestRedeliveryProbeHonoursItsOwnContext(t *testing.T) {
 		hooks:    env.fake,
 		client:   env.fake,
 		budget:   reviewRedeliveryMaxPerSweep,
-		prStates: map[string]bool{},
+		prStates: map[string]*probePRState{},
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -288,14 +288,20 @@ func TestRedeliveryGateBudgetExhaustedClosedPRDegrades(t *testing.T) {
 // redeliveryCommentPayload 构造 issue_comment 投递详情的 request.payload：
 // PR 号在 issue.number（与 pull_request 的顶层 number 字段名不同），仓库与
 // installation 同形。
-func redeliveryCommentPayload(repo string, number int) json.RawMessage {
+// redeliveryCommentPayload 组唤醒形态的评论投递 payload（association 可
+// 覆盖，默认 COLLABORATOR：有资格的仓库协作者点名）。
+func redeliveryCommentPayload(repo string, number int, association ...string) json.RawMessage {
+	a := "COLLABORATOR"
+	if len(association) > 0 {
+		a = association[0]
+	}
 	body, err := json.Marshal(map[string]any{
 		"action": "created",
 		"issue": map[string]any{
 			"number":       number,
 			"pull_request": map[string]any{"url": "https://github.com/" + repo + "/pulls/" + fmt.Sprint(number)},
 		},
-		"comment":      map[string]any{"body": "@fast-ship-bot 请再审一轮", "author_association": "COLLABORATOR"},
+		"comment":      map[string]any{"body": "@fast-ship-bot 请再审一轮", "author_association": a},
 		"repository":   map[string]any{"full_name": repo},
 		"installation": map[string]any{"id": 1},
 	})
@@ -337,6 +343,8 @@ func TestRedeliveryGateLocatesCommentPayload(t *testing.T) {
 		hookRow(3102, "guid-cw-closed", "issue_comment", "created", 502, false, base),
 		hookRow(3103, "guid-cw-plain", "issue_comment", "created", 500, false, base),
 		hookRow(3104, "guid-cw-fork", "issue_comment", "created", 500, false, base),
+		hookRow(3105, "guid-cw-unauth", "issue_comment", "created", 500, false, base),
+		hookRow(3106, "guid-cw-auth", "issue_comment", "created", 500, false, base),
 	})
 	env.fake.SetHookDeliveryPayload(3101, redeliveryCommentPayload("owner/repo", 7))
 	env.fake.SetHookDeliveryPayload(3102, redeliveryCommentPayload("owner/repo", 8))
@@ -344,13 +352,19 @@ func TestRedeliveryGateLocatesCommentPayload(t *testing.T) {
 	env.fake.SetHookDeliveryPayload(3103, redeliveryPlainCommentPayload("owner/repo", 7))
 	// fork PR 的唤醒投递：守卫必拒，重投只会白跑，记终态跳过。
 	env.fake.SetHookDeliveryPayload(3104, redeliveryCommentPayload("owner/repo", 9))
+	// 同 PR 两条投递：无资格（NONE）在前、有资格（COLLABORATOR）在后——
+	// 身份判定按投递现算，不得污染 prStates 缓存连累后者（codex 第 13 轮）。
+	env.fake.SetHookDeliveryPayload(3105, redeliveryCommentPayload("owner/repo", 10, "NONE"))
+	env.fake.SetHookDeliveryPayload(3106, redeliveryCommentPayload("owner/repo", 10, "COLLABORATOR"))
 	env.fake.SetPR("owner/repo", 7, &githubapi.PullRequest{})
 	env.fake.SetPR("owner/repo", 8, &githubapi.PullRequest{State: "closed"})
 	env.fake.SetPR("owner/repo", 9, &githubapi.PullRequest{HeadRepoFullName: "someone-else/repo"})
+	env.fake.SetPR("owner/repo", 10, &githubapi.PullRequest{})
 
 	env.review.reconcileWebhookDeliveries(redeliveryTestNow)
-	if got := env.fake.RedeliveredIDs(); len(got) != 1 || got[0] != 3101 {
-		t.Fatalf("redelivered = %v, want [3101]（open PR 的评论投递照常重投，非唤醒/ fork 不投）", got)
+	got := env.fake.RedeliveredIDs()
+	if len(got) != 2 || (got[0] != 3101 && got[0] != 3106) || (got[1] != 3101 && got[1] != 3106) {
+		t.Fatalf("redelivered = %v, want {3101 3106}（open PR 的评论投递照常重投；无资格/ fork/非唤醒不投）", got)
 	}
 	if row, ok := redeliveryClosedRow(t, env, "guid-cw-closed"); !ok || row.ClosedAt == nil {
 		t.Fatalf("已关闭 PR 的评论投递应记终态: %+v (ok=%v)", row, ok)
@@ -360,6 +374,12 @@ func TestRedeliveryGateLocatesCommentPayload(t *testing.T) {
 	}
 	if row, ok := redeliveryClosedRow(t, env, "guid-cw-fork"); !ok || row.ClosedAt == nil {
 		t.Fatalf("fork PR 的唤醒投递应记终态跳过: %+v (ok=%v)", row, ok)
+	}
+	if row, ok := redeliveryClosedRow(t, env, "guid-cw-unauth"); !ok || row.ClosedAt == nil {
+		t.Fatalf("无资格评论投递应记终态跳过: %+v (ok=%v)", row, ok)
+	}
+	if row, ok := redeliveryClosedRow(t, env, "guid-cw-auth"); ok && row.ClosedAt != nil {
+		t.Fatalf("有资格评论投递不应记终态: %+v", row)
 	}
 	if row, ok := redeliveryClosedRow(t, env, "guid-cw-open"); ok && row.ClosedAt != nil {
 		t.Fatalf("open PR 的评论投递不应记终态: %+v", row)
