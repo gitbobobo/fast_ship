@@ -120,6 +120,9 @@ func (s *GitHubAppManifestService) Create(ctx context.Context, adminUserID strin
 			Public:      false,
 			DefaultEvents: []api.GitHubAppManifestDefaultEvents{
 				api.GitHubAppManifestDefaultEvents("pull_request"),
+				// 评论唤醒（INT-179）依赖 issue_comment 投递：manifest 流创建的
+				// App 默认带上，安装者不必再手动加订阅。
+				api.GitHubAppManifestDefaultEvents("issue_comment"),
 			},
 			DefaultPermissions: api.GitHubAppManifest_DefaultPermissions{
 				PullRequests: api.GitHubAppManifestDefaultPermissionsPullRequests("write"),

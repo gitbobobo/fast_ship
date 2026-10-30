@@ -205,13 +205,16 @@ func (e GitHubAppDeploymentSource) Valid() bool {
 
 // Defines values for GitHubAppManifestDefaultEvents.
 const (
-	PullRequest GitHubAppManifestDefaultEvents = "pull_request"
+	GitHubAppManifestDefaultEventsIssueComment GitHubAppManifestDefaultEvents = "issue_comment"
+	GitHubAppManifestDefaultEventsPullRequest  GitHubAppManifestDefaultEvents = "pull_request"
 )
 
 // Valid indicates whether the value is a known member of the GitHubAppManifestDefaultEvents enum.
 func (e GitHubAppManifestDefaultEvents) Valid() bool {
 	switch e {
-	case PullRequest:
+	case GitHubAppManifestDefaultEventsIssueComment:
+		return true
+	case GitHubAppManifestDefaultEventsPullRequest:
 		return true
 	default:
 		return false
@@ -3203,6 +3206,7 @@ type GitHubAppDeploymentSource string
 
 // GitHubAppManifest 原样 POST 给 GitHub 的 App Manifest（形状由 GitHub Manifest 流程约定）
 type GitHubAppManifest struct {
+	// DefaultEvents 默认订阅 pull_request 与 issue_comment（INT-179 评论唤醒需要后者）
 	DefaultEvents []GitHubAppManifestDefaultEvents `json:"default_events"`
 
 	// DefaultPermissions PR 审查所需的最小权限集（结论用 commit status，不用 Checks API）

@@ -4164,7 +4164,8 @@ export interface components {
             setup_url: string;
             /** @description 恒为 false（非公开 App；同上不用 enum[false] 避免生成撞名常量） */
             public: boolean;
-            default_events: "pull_request"[];
+            /** @description 默认订阅 pull_request 与 issue_comment（INT-179 评论唤醒需要后者） */
+            default_events: ("pull_request" | "issue_comment")[];
             /** @description PR 审查所需的最小权限集（结论用 commit status，不用 Checks API） */
             default_permissions: {
                 /** @enum {string} */

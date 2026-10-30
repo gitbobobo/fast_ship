@@ -12225,7 +12225,7 @@ public_url 组装 manifest（原样 POST 给 GitHub 的形状），返回 GitHub
 | `manifest.redirect_url` | string | 是 | 创建完成回跳地址 = {public_url}/settings/integrations/github/callback |
 | `manifest.setup_url` | string | 是 | 安装后跳转地址 = {public_url}/settings/integrations |
 | `manifest.public` | boolean | 是 | 恒为 false（非公开 App；同上不用 enum[false] 避免生成撞名常量） |
-| `manifest.default_events` | string[]（enum: pull_request） | 是 |  |
+| `manifest.default_events` | string[]（enum: pull_request \| issue_comment） | 是 | 默认订阅 pull_request 与 issue_comment（INT-179 评论唤醒需要后者） |
 | `manifest.default_permissions` | object | 是 | PR 审查所需的最小权限集（结论用 commit status，不用 Checks API） |
 | `manifest.default_permissions.pull_requests` | string（enum: write） | 是 |  |
 | `manifest.default_permissions.issues` | string（enum: write） | 是 |  |
