@@ -217,6 +217,15 @@ func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, ev
 
 	repo := strings.ToLower(payload.Repository.FullName)
 	prNumber := payload.Issue.Number
+	// 启用项目预查（只读，模式同 observeAcceptedHead）：未绑定/未启用的
+	// 仓库零副作用返回——不写幂等账、不做任何平台 API 调用。否则任何人的
+	// 点名评论（哪怕仓库根本没开启审查）都会放大成 installation 解析与
+	// 实拉两次 App 级 API 调用（fast-ship-bot 第 16 轮 P2）。最终事务内
+	// 会用同一判定复核，防预查与开轮之间停用/改绑。
+	preProject, _, err := s.findEnabledReviewProjectTx(s.db.WithContext(ctx), integrationID, repo)
+	if err != nil || preProject == nil {
+		return err
+	}
 	installationID := payload.Installation.ID
 	// GitHub 投递缺 installation 快照（代理剥字段等）时按仓库解析兜底；
 	// Forgejo 恒 0（无安装语义，resolver 按集成凭证取 PR）。解析失败按

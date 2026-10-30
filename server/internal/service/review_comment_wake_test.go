@@ -499,8 +499,14 @@ func TestReviewCommentWakeDraftAndClosed(t *testing.T) {
 	e.fake.SetPR(repo, 27, &githubapi.PullRequest{
 		RepoFullName: repo, Number: 27, State: "closed", Merged: true, HeadSHA: "sha-closed",
 	})
+	// 脏数据形态：state=open + merged=true（部分 Forgejo/Gitea 实例合并后
+	// 的返回），同样不可审（fast-ship-bot 第 16 轮 P2：prReviewable 排
+	// Merged 后与轮询口径一致）。
+	e.fake.SetPR(repo, 28, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 28, State: "open", Merged: true, HeadSHA: "sha-merged",
+	})
 
-	for i, tc := range []struct{ number int }{{26}, {27}} {
+	for i, tc := range []struct{ number int }{{26}, {27}, {28}} {
 		if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", fmt.Sprintf("d-dc%d", i),
 			issueCommentBody("@fast-ship-bot", repo, tc.number, 42)); err != nil {
 			t.Fatalf("case %d: %v", i, err)
@@ -509,7 +515,36 @@ func TestReviewCommentWakeDraftAndClosed(t *testing.T) {
 	var runs int64
 	e.svc.db.Model(&model.ReviewRun{}).Count(&runs)
 	if runs != 0 {
-		t.Fatalf("draft/关闭 PR 不得开轮，runs = %d", runs)
+		t.Fatalf("draft/关闭/合并 PR 不得开轮，runs = %d", runs)
+	}
+}
+
+// TestReviewCommentWakeUnboundRepoNoAPI 未绑定仓库零联网放大：点名评论
+// 落在没有任何项目启用审查的仓库上时，不写幂等账、不做任何平台 API 调用
+// （installation 解析与实拉都不会发生，fast-ship-bot 第 16 轮 P2）。
+func TestReviewCommentWakeUnboundRepoNoAPI(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	e.enableReview(t)
+	ctx := context.Background()
+	// 其他仓库有启用项目（证明反查按仓库分区），但 stranger/other 无绑定。
+	e.fake.SetPR("stranger/other", 99, &githubapi.PullRequest{
+		RepoFullName: "stranger/other", Number: 99, State: "open",
+		HeadSHA: "sha-x", HeadRepoFullName: "stranger/other",
+	})
+
+	before := e.fake.CallCounts()
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-unbound",
+		issueCommentBody("@fast-ship-bot", "stranger/other", 99, 42)); err != nil {
+		t.Fatalf("未绑定仓库应静默忽略: %v", err)
+	}
+	after := e.fake.CallCounts()
+	if after["GetPullRequest"] != before["GetPullRequest"] {
+		t.Fatalf("未绑定仓库不得触发实拉 API，GetPullRequest %d -> %d", before["GetPullRequest"], after["GetPullRequest"])
+	}
+	var deliveries int64
+	e.svc.db.Model(&model.GitHubWebhookDelivery{}).Count(&deliveries)
+	if deliveries != 0 {
+		t.Fatalf("未绑定仓库不得写幂等账，实得 %d 行", deliveries)
 	}
 }
 
