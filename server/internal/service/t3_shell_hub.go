@@ -488,6 +488,14 @@ func (h *t3ShellHub) newEntryLocked(key string, env *model.T3Environment, token 
 	// done 在全部监督 goroutine 退出后关闭，供测试汇合；同时释放 hub 的
 	// 生命周期计数（Close 经它等待已被摘除的 entry）。
 	go func() {
+		// 先在停机信号上等，再关闸门、最后 Wait（#156 R22）：Wait 若在 entry
+		// 建立时就跑起来，之后任何 wg.Add（预热拉取、耗时回调）都是「Wait 已
+		// 开始后 Add」——既可能漏计数也可能 panic。停机后再关闸，Add 一侧在
+		// wgMu 下检查 wgClosed，两侧顺序确定。
+		<-e.stop
+		e.wgMu.Lock()
+		e.wgClosed = true
+		e.wgMu.Unlock()
 		e.wg.Wait()
 		close(e.done)
 		h.lifecycle.Done()
