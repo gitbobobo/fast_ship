@@ -2092,3 +2092,66 @@ func TestReviewCommentWakeTiedHistoryScopedToObservedProject(t *testing.T) {
 		t.Fatalf("新轮应落在观察项目 B: project=%s head=%s", run.ProjectID, run.HeadSHA)
 	}
 }
+
+// 复核快照本身也要过时序判定（codex 第 31 轮 P2）：tied 分支的确认读
+// head 一致但 updated_at 早于基准 = 两次都是滞后快照，采信同样回退总账。
+func TestReviewCommentWakeTiedRecheckStaleRejected(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	e.enableReview(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	ctx := context.Background()
+	t1 := time.Now().UTC().Add(-2 * time.Hour)
+	t0 := t1.Add(-time.Hour)
+	if err := e.svc.db.Create(&model.ReviewPullRequest{
+		ProjectID: e.project.ID, UserID: e.project.UserID,
+		RepoFullName: repo, PRNumber: 56,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		HeadSHA:       "sha-b", RoundNumber: 1, UpdatedAt: t1,
+	}).Error; err != nil {
+		t.Fatalf("seed ledger: %v", err)
+	}
+	if err := e.svc.db.Create(&model.ReviewSeenSHA{
+		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 56,
+		HeadSHA: "sha-b", IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		PRUpdatedAt: &t1, AcceptedAt: t1,
+	}).Error; err != nil {
+		t.Fatalf("seed seen: %v", err)
+	}
+	// 第一次读：同刻异 head sha-new（未受理，tied）；复核读：同 head 但
+	// updated_at 更早（仍是滞后快照）→ 拒绝。
+	e.fake.SetPR(repo, 56, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 56, State: "open", HeadSHA: "sha-new",
+		HeadRepoFullName: repo, UpdatedAt: &t1,
+	})
+	calls := 0
+	e.fake.SetPRHook(func(call int) {
+		calls = call
+		if call >= 2 {
+			e.fake.SetPR(repo, 56, &githubapi.PullRequest{
+				RepoFullName: repo, Number: 56, State: "open", HeadSHA: "sha-new",
+				HeadRepoFullName: repo, UpdatedAt: &t0,
+			})
+		}
+	})
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-tied-stale2",
+		issueCommentBody("@fast-ship-bot", repo, 56, 42)); err == nil {
+		t.Fatal("复核快照仍滞后应按瞬时失败拒绝（500）")
+	}
+	if calls < 2 {
+		t.Fatalf("应发生复核实拉: calls = %d", calls)
+	}
+	var after model.ReviewPullRequest
+	if err := e.svc.db.Where("pr_number = 56").First(&after).Error; err != nil {
+		t.Fatalf("总账行应仍在: %v", err)
+	}
+	if after.HeadSHA != "sha-b" {
+		t.Fatalf("总账不得回退: head = %s", after.HeadSHA)
+	}
+	var deliveries int64
+	e.svc.db.Model(&model.GitHubWebhookDelivery{}).
+		Where("delivery_id = ?", deliveryLedgerKey(model.ForgeIntegrationBuiltinGitHubID, "d-tied-stale2")).
+		Count(&deliveries)
+	if deliveries != 0 {
+		t.Fatalf("瞬时失败不落账: deliveries = %d", deliveries)
+	}
+}

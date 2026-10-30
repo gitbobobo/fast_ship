@@ -504,6 +504,16 @@ func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, ev
 					zap.String("live", pr.HeadSHA), zap.String("rechecked", pr2.HeadSHA))
 				return fmt.Errorf("评论唤醒同刻异 head 复核未收敛")
 			}
+			// 复核快照本身也要过时序判定：head 一致但 updated_at 早于基准
+			// 说明两次读到的都是滞后快照，采信同样会回退总账（codex 第 31
+			// 轮 P2）。缺时间戳维持采信口径（与首次实拉一致）。
+			if pr2.UpdatedAt != nil && baseline != nil && pr2.UpdatedAt.Before(*baseline) {
+				s.logger.Warn("评论唤醒同刻异 head 复核快照仍滞后，按瞬时失败重投",
+					zap.String("integration", integrationID),
+					zap.String("repo", repo), zap.Int("pr", prNumber),
+					zap.String("live", pr.HeadSHA), zap.String("accepted", observedHead))
+				return fmt.Errorf("评论唤醒实拉快照滞后于已受理 head（复核仍滞后）")
+			}
 			// 受理史判定按观察项目过滤（与基准查询同口径：改绑后旧项目的
 			// seen 行不得错杀新项目的合法 head，codex 第 30 轮 P2）；除
 			// seen 行外还查运行行——评论唤醒不写 seen，但其受理的 head 有
