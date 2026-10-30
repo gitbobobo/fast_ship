@@ -1977,3 +1977,22 @@ func TestShellState_ExpiryKeepsFreshnessFloor(t *testing.T) {
 		t.Fatalf("a snapshot captured after the transition restores trust, got %v", snaps.ArchiveErr)
 	}
 }
+
+// 同一批「先移除再回现」的线程不该被帧后回调重新登记（#156 R36）。
+func TestShellState_ExcludeActiveThreads(t *testing.T) {
+	state := newT3ShellState()
+	if _, _, err := state.applyActiveItemTracked(t3ShellStreamItem{
+		Kind: "snapshot", Snapshot: &t3ShellSnapshot{SchemaVersion: 1, SnapshotSequence: 1, Threads: shellTestThreads(shellTestThread("th-1", "线程"))},
+	}); err != nil {
+		t.Fatalf("seed active: %v", err)
+	}
+	if _, _, err := state.applyActiveItemTracked(t3ShellStreamItem{
+		Kind: "thread.updated", Sequence: intPtrTestLocal(2), Location: "active",
+		Thread: shellTestThread("th-1", "线程"),
+	}); err != nil {
+		t.Fatalf("apply active update: %v", err)
+	}
+	if got := state.excludeActiveThreads([]string{"th-1", "th-2"}); len(got) != 1 || got[0] != "th-2" {
+		t.Fatalf("only non-active threads may stay, got %v", got)
+	}
+}

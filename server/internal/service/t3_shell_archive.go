@@ -662,7 +662,7 @@ func (h *t3ShellHub) invalidateArchiveEntryAfterActiveRemoval(e *t3ShellEntry, l
 		// provenIDs 同理要排除（#156 R13-codex）：那些移除的帧自身带着归档行、
 		// 且归档面已有该行，state 已判定无需对账，帧后回调不能把它重新登记。
 		handled := append(append([]string{}, armedRegisteredIDs...), provenIDs...)
-		todo := t3IDsNotIn(leftIDs, handled)
+		todo := e.state.excludeActiveThreads(t3IDsNotIn(leftIDs, handled))
 		// 登记与「是否 arm」在同一临界区内完成（#156 R27）：先读 arch.mode 再
 		// 登记的两步之间，resetArchiveModeToUnknown 可能已清空集合、撤 arm，
 		// 登记就落进一个已经离开订阅模式的 state。

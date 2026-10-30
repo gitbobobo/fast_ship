@@ -988,6 +988,22 @@ func (s *t3ShellState) refreshArchiveMembershipTrustLocked() {
 	}
 }
 
+// excludeActiveThreads 返回 ids 里**当前仍不在活跃面**的部分（#156 R36）：
+// 同一批里 A 先被移除、随后又以 location=active 回来时，帧后回调不能把 A
+// 重新记成待对账——那会把一条已确定在活跃面的线程白降级一个宽限窗口。
+func (s *t3ShellState) excludeActiveThreads(ids []string) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if _, active := s.activeThreads.byID[id]; active {
+			continue
+		}
+		out = append(out, id)
+	}
+	return out
+}
+
 // pendingArchiveUncertain 返回当前待对账条数（观测/用例用）。
 func (s *t3ShellState) pendingArchiveUncertain() int {
 	s.mu.Lock()
