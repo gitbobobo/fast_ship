@@ -100,7 +100,9 @@ type t3ArchiveFetchState struct {
 // kickArchiveRefresh 是归档面按需拉取的入口：缓存仍可信（validUntil
 // 未到）或失败冷却中（retryAfter 未到）则不发；需要拉取时经 inFlight
 // 哨兵合并并发发起。调用方（waitView/Peek）在每次读之前走它，拉取完成
-// 与否不阻塞本次视图。
+// 与否不阻塞本次视图。TTL 过期撤可信（revoked）时除 refresh 广播外还
+// 发布一次归档面事件——撤可信是面状态翻转，浏览器必须被告知（见下方
+// revoked 分支）。
 //
 // inFlight 与 needsRefetch 协作：在途拉取已登记、但期间发生过失效
 // （needsRefetch）时，「等它落地」不承诺写后状态——kick 在这里把它当作
@@ -122,6 +124,17 @@ func (e *t3ShellEntry) kickArchiveRefresh() {
 		return
 	}
 	if revoked {
+		// 撤可信是归档面对外可见状态的一次翻转（ArchiveErr 从无到 stale），
+		// 与落地/失败同款发布一次（P1，R12）：只 refresh 不发布时宣布基准
+		// （archAnnounced）停在撤可信前的可信指纹，随后同数据补拉落地与
+		// 基准一致被判「无新话可说」——降级那次响应之后没有任何事件，
+		// 前端降级横幅挂到用户下次手动读才消失。指纹去重保证只有真实翻转
+		// 才发声：已不可信面的重复撤可信（noteArchiveExpiredLocked 的
+		// no-op 路径）与文案未变的失败照旧静默。发布在锁外：
+		// admitArchiveRefresh 已返回，s.mu/arch.mu 均已释放；
+		// publishArchiveFaceEvent 自取 state 指纹（s.mu）与 e.mu、锁外发布，
+		// 与落地/失败发布同一锁边界，不引入持锁发布点。
+		e.hub.publishArchiveFaceEvent(e, false)
 		e.refresh()
 	}
 
@@ -160,7 +173,8 @@ func (e *t3ShellEntry) kickArchiveRefresh() {
 // admitArchiveRefresh 登记一次按需拉取：返回 (admitted, revoked)。admitted
 // 为假表示缓存仍可信、失败冷却中、或已有在途拉取（并发读合并到那一次）；
 // revoked 为真表示本次准入同时把已过期的可信面撤为不可信（Finding R2），
-// 调用方应在临界区外 refresh 广播翻转。
+// 调用方应在临界区外发布归档面事件（撤可信是面状态翻转，见
+// kickArchiveRefresh）并 refresh 广播。
 //
 // 原子性不变量（复审遗留竞态）：「判定过期 + 撤可信 + 设 inFlight」必须对
 // 读者不可分。临界区按 s.mu → arch.mu 嵌套——与 applyArchiveSnapshot 的

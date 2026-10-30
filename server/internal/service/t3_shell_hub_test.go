@@ -2644,7 +2644,8 @@ func TestT3ShellHub_GenerationMismatchFailureAutoRefetches(t *testing.T) {
 // 恰好等于「归档为空且可信」的指纹——不加区分时，新环境的首份空归档
 // 快照被判「与已宣布相同」，Full 与 State 一个都不发；归档落地晚于活跃面
 // Ready 的页面收不到任何提示，永远停在「归档线程暂不可读」降级。修复后
-// 首次发布无条件放行；此后同一份数据的重拉（TTL 过期）仍被去重静默。
+// 首次发布无条件放行；此后同一份数据的重拉（TTL 过期）按 R12 P1 发撤可
+// 信 + 恢复的轻量 State（合并为一条），仍不重发 Full。
 func TestT3ShellHub_EmptyArchiveFirstSnapshotPublishes(t *testing.T) {
 	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
 	srv.setArchiveFixture(archiveSnapshotBody(1), nil) // 合法空归档（threads:[]）
@@ -2671,15 +2672,17 @@ func TestT3ShellHub_EmptyArchiveFirstSnapshotPublishes(t *testing.T) {
 	}
 	sub.Drain()
 
-	// TTL 过期重拉同一份空数据：指纹与已宣布的相同 → 不得再发任何事件
-	// （首次发布标志不得破坏去重契约）。
+	// TTL 过期重拉同一份空数据（R12 P1）：撤可信 + 同数据落地各发一次
+	// 轻量 State（订阅端合并为一条）；集合没变仍不得发 Full——首次发布
+	// 标志不得退化成重复整环境广播。
 	time.Sleep(cfg.ArchiveTTL + 80*time.Millisecond)
 	if _, err := hub.Peek(env, "tok"); err != nil {
 		t.Fatalf("peek: %v", err)
 	}
 	time.Sleep(200 * time.Millisecond)
-	if events := sub.Drain(); len(events) != 0 {
-		t.Fatalf("identical refetch must stay silent, got %+v", events)
+	events := sub.Drain()
+	if len(events) != 1 || events[0].Full || events[0].State == "" {
+		t.Fatalf("identical refetch must announce degraded + recovery as one merged State (no Full), got %+v", events)
 	}
 }
 
@@ -4151,10 +4154,11 @@ func TestT3ShellHub_EndArchiveTeardownRespectsMode(t *testing.T) {
 	})
 }
 
-// 归档面发布去重（审修 R9 P2-2）：首次落地发 Full；TTL 例行重拉同一份
-// 数据不发任何事件（旧实现每次 Full → 前端每环境每 TTL 整环境重取）；
-// 归档集真变发 Full；失败首次出现发轻量 State 事件、同一错误反复失败
-// 去重；恢复可信（同集合）再发一次轻量 State。
+// 归档面发布去重（审修 R9 P2-2 + R12 P1）：首次落地发 Full；TTL 例行重拉
+// 同一份数据发撤可信 + 恢复各一次轻量 State（订阅端合并为一条，不再全程
+// 静默——降级横幅需要自愈信号，且集合没变不整环境重取）；归档集真变发
+// Full；失败首次出现发轻量 State 事件、同一错误反复失败去重；恢复可信
+// （同集合）再发一次轻量 State。
 func TestT3ShellHub_ArchiveRepublishDedup(t *testing.T) {
 	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
 	srv.setArchiveFixture(archiveSnapshotBody(1, "th-a"), nil)
@@ -4174,7 +4178,9 @@ func TestT3ShellHub_ArchiveRepublishDedup(t *testing.T) {
 	}
 	sub.Drain()
 
-	// TTL 例行重拉同一份数据：无任何事件。
+	// TTL 例行重拉同一份数据（R12 P1）：撤可信发一次降级 State，同数据
+	// 落地恢复（stale → 可信）再发一次；订阅端合并为一条轻量 State，
+	// 不得发 Full（集合没变不整环境重取）。
 	time.Sleep(cfg.ArchiveTTL + 40*time.Millisecond)
 	calls := srv.archiveCallCount()
 	if _, err := hub.Peek(env, "tok"); err != nil {
@@ -4189,8 +4195,9 @@ func TestT3ShellHub_ArchiveRepublishDedup(t *testing.T) {
 		}
 	}
 	time.Sleep(60 * time.Millisecond) // 落地 + 发布窗口
-	if evs := sub.Drain(); len(evs) != 0 {
-		t.Fatalf("identical re-pull must publish nothing, got %+v", evs)
+	evs := sub.Drain()
+	if len(evs) != 1 || evs[0].Full || evs[0].State == "" {
+		t.Fatalf("identical re-pull must announce degraded + recovery as one merged State (no Full), got %+v", evs)
 	}
 
 	// 归档集真变：Full。
@@ -4208,14 +4215,17 @@ func TestT3ShellHub_ArchiveRepublishDedup(t *testing.T) {
 	}
 	sub.Drain()
 
-	// 失败首次出现：轻量 State 事件（非 Full）。
+	// 失败首次出现：轻量 State 事件（非 Full）。等真实失败文案落地（不是
+	// 撤可信的 stale）再断言事件：撤可信本身也发一次 State（R12 P1），若只
+	// 等 ArchiveErr 非空，可能在失败落地前就把撤可信那条消费掉，落地的
+	// 那条滞留 pending 污染后续窗口。
 	srv.setArchiveFixture(nil, map[string]any{"_tag": "RuntimeError", "message": "archive exploded"})
 	time.Sleep(cfg.ArchiveTTL + 40*time.Millisecond)
 	if _, err := hub.Peek(env, "tok"); err != nil {
 		t.Fatalf("peek: %v", err)
 	}
 	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
-		return v.Snaps != nil && v.Snaps.ArchiveErr != nil
+		return v.Snaps != nil && v.Snaps.ArchiveErr != nil && !errors.Is(v.Snaps.ArchiveErr, errT3ShellArchiveStale)
 	})
 	ev = awaitShellEvent(t, sub, func(e T3ShellEvent) bool { return !e.Full && e.State != "" })
 	if ev.EnvironmentID != "env-1" {
@@ -4249,4 +4259,64 @@ func TestT3ShellHub_ArchiveRepublishDedup(t *testing.T) {
 	})
 	ev = awaitShellEvent(t, sub, func(e T3ShellEvent) bool { return !e.Full && e.State != "" })
 	_ = ev
+}
+
+// TTL 撤可信必须发布（R12 P1 端到端）：闲置超 TTL 后回页面的首次读取必带
+// ArchiveErr=stale（降级横幅），同数据补拉落地（归档集没变）若不发事件，
+// 那次降级响应不被失效，横幅挂到用户下次手动读——归档行其实完整，误报
+// 每次闲置回页面重演。修复后：撤可信发一次降级 State（宣布基准同步为
+// stale），补拉落地 errText 从 stale 变 nil 再发一次恢复 State，前端重取
+// 自愈；全程无 Full（集合没变）。
+func TestT3ShellHub_TTLRevokedFaceAnnouncesDegradedAndSelfHeals(t *testing.T) {
+	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
+	srv.setArchiveFixture(archiveSnapshotBody(1, "th-a"), nil)
+	cfg := hubTestConfig()
+	cfg.ArchiveTTL = 80 * time.Millisecond
+	hub := newT3ShellHubWithConfig(cfg, nil)
+	defer hub.Close()
+	env := hubTestEnv(url, 0)
+
+	sub := hub.Subscribe("user-1")
+	defer sub.Close()
+	_, _, _, _, _ = establishBothFaces(t, hub, srv, env, "tok", 42, "th-1")
+	ev := awaitShellEvent(t, sub, func(e T3ShellEvent) bool { return e.Full })
+	if ev.EnvironmentID != "env-1" || !ev.Full {
+		t.Fatalf("first landing must publish Full, got %+v", ev)
+	}
+	sub.Drain()
+
+	// 闲置超 TTL 后的首次读取：撤可信 + 发起重拉。上游归档集未变——
+	// 「归档行其实完整」的误报场景。读取响应本身必须如实报 stale。
+	srv.pauseArchive()
+	srv.setArchiveFixture(archiveSnapshotBody(2, "th-a"), nil) // 同集合、仅序号推进
+	time.Sleep(cfg.ArchiveTTL + 40*time.Millisecond)
+	view, err := hub.Peek(env, "tok")
+	if err != nil {
+		t.Fatalf("peek: %v", err)
+	}
+	if view.Snaps == nil || !errors.Is(view.Snaps.ArchiveErr, errT3ShellArchiveStale) {
+		t.Fatalf("expired read must report stale, got %+v", view.Snaps)
+	}
+	// 修复前：撤可信不发事件、宣布基准停在可信指纹，这里的降级 State
+	// 不会出现。
+	ev = awaitShellEvent(t, sub, func(e T3ShellEvent) bool { return !e.Full && e.State != "" })
+	if ev.EnvironmentID != "env-1" {
+		t.Fatalf("revocation state event environment = %q, want env-1", ev.EnvironmentID)
+	}
+	sub.Drain()
+
+	// 同数据补拉落地：恢复可信必须发轻量 State（errText stale → nil），
+	// 前端据此重取自愈降级横幅；集合没变不得发 Full。恢复之后无多余事件
+	// （指纹与宣布基准一致的重读照旧静默）。
+	srv.resumeArchive()
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil && len(v.Snaps.Archived.Threads) == 1
+	})
+	ev = awaitShellEvent(t, sub, func(e T3ShellEvent) bool { return !e.Full && e.State != "" })
+	if ev.EnvironmentID != "env-1" || ev.Full {
+		t.Fatalf("recovery must be a lightweight State for env-1, got %+v", ev)
+	}
+	if evs := sub.Drain(); len(evs) != 0 {
+		t.Fatalf("recovery must not over-publish, got %+v", evs)
+	}
 }
