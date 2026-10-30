@@ -582,8 +582,9 @@ func (s *t3ShellState) applyArchiveItemAt(item t3ArchiveStreamItem, connectionSt
 		// 可能来自更早的一轮归档周期（unarchive 前就被排队的更新），拿它当
 		// 「本次移除已对账」会让随后的 thread.removed 把缓存行删掉、而新增量
 		// 还没到——两面都没有 + 面可信 = wait 把线程判成 thread_gone。
-		// 解除只有两条权威路径：归档全量快照包含该 ID（见
-		// applyActiveSnapshotLocked）、或宽限到期（expireArchiveMembershipUncertain）。
+		// 解除只有三条路径：归档全量快照包含该 ID（见
+		// applyActiveSnapshotLocked）、活跃面重新出现（location=active 或活跃快照
+		// 带回）、或宽限到期（expireArchiveMembershipUncertain）。
 		return nil
 	case "thread.removed":
 		if item.Sequence == nil || item.ThreadID == "" {
@@ -911,6 +912,8 @@ func (s *t3ShellState) armArchiveUncertainLocked(armed bool, settle time.Duratio
 }
 
 // noteArchiveMembershipSettledLocked 撤掉某个线程的不确定标记（调用方须持
+// s.mu）。当前唯一调用方是活跃面回现（unarchive / 活跃快照带回）：线程在活跃
+// 面即确定存在，归档归属不再影响判定。归档增量**不**走这里（#156 R15）。
 // s.mu）：它的归档增量已落地，或权威快照已整体替换归档集。
 func (s *t3ShellState) noteArchiveMembershipSettledLocked(id string) {
 	if _, ok := s.archiveUncertain[id]; !ok {
