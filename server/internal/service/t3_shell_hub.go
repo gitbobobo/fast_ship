@@ -513,8 +513,11 @@ type t3ShellEntry struct {
 
 	mu sync.Mutex
 	// state 的锁在 t3ShellState 内部；锁序恒为 mu → state.mu。
-	state        *t3ShellState
-	notify       chan struct{} // 关闭并替换以广播状态变化，View select 等待
+	state  *t3ShellState
+	notify chan struct{} // 关闭并替换以广播状态变化，View select 等待
+	// settleTimer 是「归档归属待对账」到期清理的定时器（#156 R12）：由 entry
+	// 持有并在停机时 Stop，避免 Close 之后回调仍触发、也算进生命周期。守 mu。
+	settleTimer  *time.Timer
 	activeConn   t3ShellConnState
 	activeErr    error
 	obsReady     bool
@@ -593,6 +596,12 @@ func (e *t3ShellEntry) clearForceResync() {
 
 func (e *t3ShellEntry) shutdown() {
 	e.stopOnce.Do(func() { close(e.stop) })
+	e.mu.Lock()
+	if e.settleTimer != nil {
+		e.settleTimer.Stop()
+		e.settleTimer = nil
+	}
+	e.mu.Unlock()
 }
 
 func (e *t3ShellEntry) isStopped() bool {

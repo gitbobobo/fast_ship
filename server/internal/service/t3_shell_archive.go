@@ -690,7 +690,15 @@ func (h *t3ShellHub) scheduleArchiveMembershipSettle(e *t3ShellEntry, settle tim
 	if settle <= 0 {
 		return
 	}
-	time.AfterFunc(settle, func() {
+	// 定时器由 entry 持有并在停机时 Stop（#156 R12）：既避免 Close 之后回调
+	// 仍触发，也让「到期清理」成为 entry 生命周期的一部分。同一 entry 同时
+	// 只保留最新一个定时器：settle 是常量，最新定时器的时刻必然覆盖此前各批
+	// 的截止时刻（到期清理按各自 deadline 裁剪，早批会被一并清掉）。
+	e.mu.Lock()
+	if e.settleTimer != nil {
+		e.settleTimer.Stop()
+	}
+	e.settleTimer = time.AfterFunc(settle, func() {
 		if e.isStopped() {
 			return
 		}
@@ -699,6 +707,7 @@ func (h *t3ShellHub) scheduleArchiveMembershipSettle(e *t3ShellEntry, settle tim
 			e.refresh()
 		}
 	})
+	e.mu.Unlock()
 }
 
 // invalidateArchiveEntry 是 InvalidateArchive 的 entry 级入口：hub 内部已持
