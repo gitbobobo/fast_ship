@@ -192,6 +192,12 @@ type t3ShellState struct {
 	// 仍缺增量的线程恢复可信；超过截止时刻自动失效（线程可能是被彻底删除，
 	// 归档面不会有它的增量）。守 s.mu。
 	archiveUncertain map[string]time.Time
+	// archiveUncertainArmed / archiveUncertainSettle：（订阅模式下）活跃面移除
+	// 在同一临界区里直接登记待对账，不必等 hub 的帧后回调（#156 R5：否则
+	// 「线程已从活跃面删除、ArchiveErr 仍为 nil」的中间态可被并发 Peek/wait
+	// 观测到，把线程误判 thread_gone）。由 hub 在切入/离开 legacy 模式时设置。
+	archiveUncertainArmed  bool
+	archiveUncertainSettle time.Duration
 
 	// archiveReconnectPendingGen 是旧面订阅路径独有的「请重建归档订阅」
 	// 备忘（守旧游标），以单调世代表达：0 表示无未决请求，>0 表示最新一
@@ -261,6 +267,7 @@ func (s *t3ShellState) applyActiveSnapshotLocked(snapshot t3ShellSnapshot) ([]st
 	s.activeCursor = snapshot.SnapshotSequence
 	s.activeReady = true
 	s.activeSynced = true
+	s.armUncertainForRemovalsLocked(removed)
 	return removed, nil
 }
 
@@ -321,6 +328,7 @@ func (s *t3ShellState) applyActiveItemTracked(item t3ShellStreamItem) ([]string,
 			s.activeThreads.upsert(item.Thread, item.Thread.ID)
 		} else {
 			s.activeThreads.remove(item.Thread.ID)
+			s.armUncertainForRemovalsLocked([]string{item.Thread.ID})
 		}
 		s.advanceActiveCursorLocked(*item.Sequence)
 		return nil, nil
@@ -335,6 +343,7 @@ func (s *t3ShellState) applyActiveItemTracked(item t3ShellStreamItem) ([]string,
 		// 活跃面的帧（本帧与 location!="active" 的 updated）后触发
 		// （applyActiveValues → invalidateArchiveEntry），这里只管活跃面。
 		s.activeThreads.remove(item.ThreadID)
+		s.armUncertainForRemovalsLocked([]string{item.ThreadID})
 		s.advanceActiveCursorLocked(*item.Sequence)
 		return nil, nil
 	default:
@@ -668,6 +677,13 @@ func (s *t3ShellState) noteArchiveFetchFailed(err error, generation int64, commi
 func (s *t3ShellState) noteArchiveMembershipUncertain(ids []string, settle time.Duration) (pending int, flipped bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.noteArchiveMembershipUncertainLocked(ids, settle)
+}
+
+// noteArchiveMembershipUncertainLocked 是 noteArchiveMembershipUncertain 的
+// 无锁变体（调用方须持 s.mu）：活跃面移除与应用在同一临界区登记，
+// 保证读者看不到「已删除但可信」的中间态（#156 R5）。
+func (s *t3ShellState) noteArchiveMembershipUncertainLocked(ids []string, settle time.Duration) (pending int, flipped bool) {
 	if !s.archiveReady || len(ids) == 0 {
 		return 0, false
 	}
@@ -700,6 +716,34 @@ func (s *t3ShellState) noteArchiveMembershipUncertain(ids []string, settle time.
 		s.archiveErr = errT3ShellArchiveStale
 	}
 	return pending, flipped
+}
+
+// armUncertainForRemovalsLocked 在 armed 状态下，把刚离开活跃面的线程就地
+// 登记为待对账（调用方须持 s.mu，见 armArchiveUncertain）。
+func (s *t3ShellState) armUncertainForRemovalsLocked(ids []string) {
+	if !s.archiveUncertainArmed {
+		return
+	}
+	settle := s.archiveUncertainSettle
+	if settle <= 0 {
+		settle = time.Second
+	}
+	s.noteArchiveMembershipUncertainLocked(ids, settle)
+}
+
+// armArchiveUncertain 控制「活跃面移除即在同一临界区登记待对账」（订阅模式
+// 专用，由 hub 在切入/离开 legacy 模式时调用）：armed 时移除动作与登记不可
+// 分，读者不会观测到「线程已离开活跃面但归档面仍宣称完整」的窗口（#156 R5）。
+func (s *t3ShellState) armArchiveUncertain(armed bool, settle time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.armArchiveUncertainLocked(armed, settle)
+}
+
+// armArchiveUncertainLocked 是无锁变体（调用方须持 s.mu）。
+func (s *t3ShellState) armArchiveUncertainLocked(armed bool, settle time.Duration) {
+	s.archiveUncertainArmed = armed
+	s.archiveUncertainSettle = settle
 }
 
 // noteArchiveMembershipSettledLocked 撤掉某个线程的不确定标记（调用方须持

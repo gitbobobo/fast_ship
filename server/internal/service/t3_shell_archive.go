@@ -429,6 +429,7 @@ func isArchiveSnapshotMethodMissing(err error) bool {
 // 是现成的探测冷却，双方法缺失的环境至多每冷却窗口重探测一次，而不是
 // 每次读都重拨；冷却过期后照常重探测（误判/升级自愈不受影响）。
 func (e *t3ShellEntry) switchToArchiveLegacy() {
+	defer e.state.armArchiveUncertain(true, e.archiveStaleGrace)
 	e.state.mu.Lock()
 	e.arch.mu.Lock()
 	e.arch.mode = t3ArchiveModeLegacy
@@ -510,6 +511,8 @@ func (e *t3ShellEntry) resetArchiveModeToUnknown() {
 		// 同数据落地后指纹与宣布基准一致照旧静默——浏览器无需为这个
 		// 过渡窗口整环境重取；落地失败则失败路径经指纹比对发 State。
 		// 已不可信的面（失败/已失效）重撤是 no-op，保留更准确的既有文案。
+		// 离开订阅模式：关闭「移除即登记待对账」（#156 R5）。
+		e.state.armArchiveUncertainLocked(false, 0)
 		e.state.noteArchiveExpiredLocked()
 		reset = true
 	}
@@ -621,14 +624,15 @@ func (h *t3ShellHub) invalidateArchiveEntryAfterActiveRemoval(e *t3ShellEntry, l
 		// 按线程 ID 记账（Codex #156 R1）：只有这些线程自己的归档增量（或
 		// 权威快照）能解除不确定，无关线程的增量不算对账；settle 上界用
 		// 与撤可信一致的宽限（线程可能是被彻底删除，归档面不会有增量）。
-		pending, flipped := e.state.noteArchiveMembershipUncertain(leftIDs, e.archiveStaleGrace)
+		pending, _ := e.state.noteArchiveMembershipUncertain(leftIDs, e.archiveStaleGrace)
 		if pending == 0 {
 			return
 		}
-		// 可信度翻转才发布（已 stale 时重复登记不必再发）。
-		if flipped {
-			e.hub.publishArchiveFaceEvent(e, false)
-		}
+		// 发布交给指纹去重（#156 R5）：armed 状态下标记已在应用移除的同一
+		// 临界区里置好，这里的 flipped 会是 false，但宣布基准（archAnnounced）
+		// 还没更新——若不发布，浏览器收不到降级事件，到期恢复也会因指纹相同
+		// 而静默。函数内部按「集合+内容+文案」比对，重复调用不产生多余事件。
+		e.hub.publishArchiveFaceEvent(e, false)
 		// 到期恢复必须发事件（#156 R2）：线程可能被彻底删除、永远等不到
 		// 归档增量，只在读路径懒清会让打开中的页面一直停在降级态
 		// （use-threads 不轮询，SSE 心跳不带数据）。

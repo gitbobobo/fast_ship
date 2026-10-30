@@ -1339,3 +1339,58 @@ func TestShellState_ArchiveMembershipAlreadyArchivedIsNotUncertain(t *testing.T)
 		t.Fatalf("unknown-to-archive thread must be registered, got registered=%d flipped=%v", registered, flipped)
 	}
 }
+
+// 移除与「标不可信」必须原子（#156 R5）：订阅模式下 armed 后，活跃面移除在
+// 应用的同一临界区里登记待对账——读者不会观测到「线程已离开活跃面、归档面却
+// 仍宣称完整」的中间态（否则并发 wait 会据此把线程判 thread_gone）。
+func TestShellState_ArmedRemovalMarksUncertainAtomically(t *testing.T) {
+	state := newT3ShellState()
+	gen := state.archiveGenerationNow()
+	if applied, err := state.applyArchiveSnapshot(
+		t3ArchivedShellSnapshot{SchemaVersion: 1, SnapshotSequence: 1, Threads: shellTestThreads(shellTestThread("th-a", "归档"))},
+		gen, nil); !applied || err != nil {
+		t.Fatalf("seed archive: applied=%v err=%v", applied, err)
+	}
+	// 活跃面先有一行；随后权威快照替换掉它（removed 集）。
+	seq1 := 1
+	if _, err := state.applyActiveItemTracked(t3ShellStreamItem{
+		Kind: "snapshot", Snapshot: &t3ShellSnapshot{SchemaVersion: 1, SnapshotSequence: 1, Threads: shellTestThreads(shellTestThread("th-1", "线程"))},
+	}); err != nil {
+		t.Fatalf("seed active: %v", err)
+	}
+	_ = seq1
+	state.armArchiveUncertain(true, time.Minute)
+
+	seq2 := 2
+	if _, err := state.applyActiveItemTracked(t3ShellStreamItem{
+		Kind: "snapshot", Snapshot: &t3ShellSnapshot{SchemaVersion: 1, SnapshotSequence: seq2, Threads: shellTestThreads()},
+	}); err != nil {
+		t.Fatalf("apply snapshot removal: %v", err)
+	}
+
+	// 应用返回后立刻读：归档面必须已不可信（同一临界区登记，不依赖 hub 回调）。
+	if snaps := state.snapshots(); !errors.Is(snaps.ArchiveErr, errT3ShellArchiveStale) {
+		t.Fatalf("armed removal must mark uncertainty inside the same critical section, got %v", snaps.ArchiveErr)
+	}
+
+	// 未 armed（按需快照模式）时不登记：可信度由失效路径负责。
+	state2 := newT3ShellState()
+	if applied, err := state2.applyArchiveSnapshot(
+		t3ArchivedShellSnapshot{SchemaVersion: 1, SnapshotSequence: 1, Threads: shellTestThreads(shellTestThread("th-a", "归档"))},
+		state2.archiveGenerationNow(), nil); !applied || err != nil {
+		t.Fatalf("seed archive2: %v", err)
+	}
+	if _, err := state2.applyActiveItemTracked(t3ShellStreamItem{
+		Kind: "snapshot", Snapshot: &t3ShellSnapshot{SchemaVersion: 1, SnapshotSequence: 1, Threads: shellTestThreads(shellTestThread("th-1", "线程"))},
+	}); err != nil {
+		t.Fatalf("seed active2: %v", err)
+	}
+	if _, err := state2.applyActiveItemTracked(t3ShellStreamItem{
+		Kind: "snapshot", Snapshot: &t3ShellSnapshot{SchemaVersion: 1, SnapshotSequence: 2, Threads: shellTestThreads()},
+	}); err != nil {
+		t.Fatalf("apply snapshot removal2: %v", err)
+	}
+	if snaps := state2.snapshots(); snaps.ArchiveErr != nil {
+		t.Fatalf("unarmed state must not self-mark uncertainty, got %v", snaps.ArchiveErr)
+	}
+}
