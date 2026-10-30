@@ -263,6 +263,14 @@ func (s *t3ShellState) applyActiveSnapshotLocked(snapshot t3ShellSnapshot) ([]st
 	if err := s.activeThreads.reset(snapshot.Threads, func(t *t3ThreadShell) string { return t.ID }); err != nil {
 		return nil, fmt.Errorf("活跃快照线程缺少 ID: %w", err)
 	}
+	// 活跃全量快照带回来的线程同样解账（#156 R12）：线程已在活跃面，其归档
+	// 归属不再影响「两面都没有」的判定。
+	if len(s.archiveUncertain) > 0 {
+		for i := range snapshot.Threads {
+			delete(s.archiveUncertain, snapshot.Threads[i].ID)
+		}
+		s.refreshArchiveMembershipTrustLocked()
+	}
 	s.activeSchemaVersion = snapshot.SchemaVersion
 	s.activeCursor = snapshot.SnapshotSequence
 	s.activeReady = true
@@ -332,6 +340,9 @@ func (s *t3ShellState) applyActiveItemTracked(item t3ShellStreamItem) (removed [
 		// （applyActiveValues → invalidateArchiveEntry），state 只管活跃面。
 		if item.Location == "active" {
 			s.activeThreads.upsert(item.Thread, item.Thread.ID)
+			// 回到活跃面（unarchive）：线程在活跃面即确定存在，「归档面里有没有」
+			// 对「两面都没有」的判定已无意义，直接解账（#156 R12）。
+			s.noteArchiveMembershipSettledLocked(item.Thread.ID)
 		} else {
 			// 只有「确实从活跃面移走」才需要等归档对账（#156 R9）：对不在活跃
 			// 面的 ID 的重复移除是噪声，登记只会把整个环境降级一个宽限窗口。
@@ -750,7 +761,10 @@ func (s *t3ShellState) noteArchiveMembershipUncertainLocked(ids []string, settle
 	if pending == 0 {
 		return 0
 	}
-	if s.archiveReady && !errors.Is(s.archiveErr, errT3ShellArchiveStale) {
+	// 只在面本来没有错误时写 stale（#156 R12 Note）：真实失败文案不得被通用
+	// stale 覆盖——否则到期路径会把它当作「归属不确定已解除」清成 nil，把一次
+	// 真实拉取失败静默改写成可信。
+	if s.archiveReady && s.archiveErr == nil {
 		s.archiveErr = errT3ShellArchiveStale
 	}
 	return pending

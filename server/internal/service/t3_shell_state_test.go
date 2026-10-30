@@ -1627,3 +1627,84 @@ func TestShellState_ZeroSettleDoesNotRegister(t *testing.T) {
 		t.Fatalf("zero settle must reject registration, got pending=%d", pending)
 	}
 }
+
+// 线程回到活跃面即解账（#156 R12）：活跃优先——它已确定存在，归档归属不再影响
+// 「两面都没有」的判定，不该白降级一个宽限窗口。
+func TestShellState_ActiveReappearanceClearsUncertainty(t *testing.T) {
+	state := newT3ShellState()
+	if applied, err := state.applyArchiveSnapshot(
+		t3ArchivedShellSnapshot{SchemaVersion: 1, SnapshotSequence: 1, Threads: shellTestThreads(shellTestThread("th-a", "归档"))},
+		state.archiveGenerationNow(), nil); !applied || err != nil {
+		t.Fatalf("seed archive: %v", err)
+	}
+	if _, _, err := state.applyActiveItemTracked(t3ShellStreamItem{
+		Kind: "snapshot", Snapshot: &t3ShellSnapshot{SchemaVersion: 1, SnapshotSequence: 1, Threads: shellTestThreads(shellTestThread("th-1", "线程"))},
+	}); err != nil {
+		t.Fatalf("seed active: %v", err)
+	}
+	state.armArchiveUncertain(true, time.Minute)
+	if _, _, err := state.applyActiveItemTracked(t3ShellStreamItem{
+		Kind: "thread.removed", Sequence: intPtrTestLocal(2), ThreadID: "th-1",
+	}); err != nil {
+		t.Fatalf("apply removal: %v", err)
+	}
+	if snaps := state.snapshots(); !errors.Is(snaps.ArchiveErr, errT3ShellArchiveStale) {
+		t.Fatalf("removal must mark uncertainty, got %v", snaps.ArchiveErr)
+	}
+
+	// unarchive 回到活跃面（location=active 的 updated）。
+	if _, _, err := state.applyActiveItemTracked(t3ShellStreamItem{
+		Kind: "thread.updated", Sequence: intPtrTestLocal(3), Location: "active",
+		Thread: shellTestThread("th-1", "线程"),
+	}); err != nil {
+		t.Fatalf("apply unarchive: %v", err)
+	}
+	if snaps := state.snapshots(); snaps.ArchiveErr != nil {
+		t.Fatalf("reappearance in the active face must clear uncertainty, got %v", snaps.ArchiveErr)
+	}
+
+	// 活跃全量快照带回该线程同样解账。
+	if _, _, err := state.applyActiveItemTracked(t3ShellStreamItem{
+		Kind: "thread.removed", Sequence: intPtrTestLocal(4), ThreadID: "th-1",
+	}); err != nil {
+		t.Fatalf("apply removal again: %v", err)
+	}
+	if snaps := state.snapshots(); !errors.Is(snaps.ArchiveErr, errT3ShellArchiveStale) {
+		t.Fatalf("second removal must mark uncertainty again, got %v", snaps.ArchiveErr)
+	}
+	if _, _, err := state.applyActiveItemTracked(t3ShellStreamItem{
+		Kind: "snapshot", Snapshot: &t3ShellSnapshot{SchemaVersion: 1, SnapshotSequence: 5, Threads: shellTestThreads(shellTestThread("th-1", "线程"))},
+	}); err != nil {
+		t.Fatalf("apply active snapshot: %v", err)
+	}
+	if snaps := state.snapshots(); snaps.ArchiveErr != nil {
+		t.Fatalf("active snapshot re-including the thread must clear uncertainty, got %v", snaps.ArchiveErr)
+	}
+}
+
+// 真实失败文案不得被归属不确定覆盖（#156 R12 Note）：否则到期路径会把它清成
+// nil，把一次真实拉取失败静默改写成可信。
+func TestShellState_RealFailureNotOverwrittenByUncertainty(t *testing.T) {
+	state := newT3ShellState()
+	if applied, err := state.applyArchiveSnapshot(
+		t3ArchivedShellSnapshot{SchemaVersion: 1, SnapshotSequence: 1, Threads: shellTestThreads(shellTestThread("th-a", "归档"))},
+		state.archiveGenerationNow(), nil); !applied || err != nil {
+		t.Fatalf("seed archive: %v", err)
+	}
+	realErr := errors.New("归档读取失败: 上游 500")
+	state.noteArchiveFetchFailed(realErr, state.archiveGenerationNow(), nil)
+
+	if registered := state.noteArchiveMembershipUncertain([]string{"th-x"}, time.Minute); registered != 1 {
+		t.Fatalf("uncertainty must still be registered, got %d", registered)
+	}
+	if snaps := state.snapshots(); !errors.Is(snaps.ArchiveErr, realErr) {
+		t.Fatalf("the real failure must survive uncertainty, got %v", snaps.ArchiveErr)
+	}
+	// 到期清理不得把真实失败改写成可信。
+	if state.expireArchiveMembershipUncertain() {
+		t.Fatalf("expiry must not report a trust transition over a real failure")
+	}
+	if snaps := state.snapshots(); !errors.Is(snaps.ArchiveErr, realErr) {
+		t.Fatalf("expiry must keep the real failure, got %v", snaps.ArchiveErr)
+	}
+}

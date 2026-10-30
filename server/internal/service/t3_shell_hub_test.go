@@ -5230,15 +5230,15 @@ func TestT3ShellHub_LegacyMembershipUncertainSecondBatchExpires(t *testing.T) {
 	})
 }
 
-// 同一 ID 在待对账期间重复移除要续期并重新调度（#156 R4）：已有定时器可能
-// 在续期后的截止时刻之前触发，裁剪不到它也不会再安排回调——必须为新截止时刻
-// 再调度一次，否则该 ID 永久留在待对账集合里，归档面一直 stale。
+// 同一 ID 在待对账期间「回到活跃面再离开」要重新登记并重新调度（#156 R4/R12）：
+// 旧实现只续期、且不看活跃面成员关系，这条路径没被真正验证；现在回到活跃面
+// 会先解账（活跃优先），再次离开才重新登记——新截止时刻必须由新的定时器兑现。
 func TestT3ShellHub_LegacyMembershipUncertainRefreshReschedules(t *testing.T) {
 	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
 	srv.setArchiveLegacy(true)
 	srv.setArchiveFixture(archiveSnapshotBody(1, "th-a"), nil)
 	cfg := hubTestConfig()
-	cfg.ArchiveStaleGrace = 150 * time.Millisecond
+	cfg.ArchiveStaleGrace = 200 * time.Millisecond
 	hub := newT3ShellHubWithConfig(cfg, nil)
 	defer hub.Close()
 	env := hubTestEnv(url, 0)
@@ -5246,7 +5246,7 @@ func TestT3ShellHub_LegacyMembershipUncertainRefreshReschedules(t *testing.T) {
 	go hub.View(context.Background(), env, "tok")
 	collector := newShellConnCollector(t, srv)
 	active := collector.await(false)
-	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1", "th-2", "th-x", "th-y")); err != nil {
+	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1", "th-x")); err != nil {
 		t.Fatalf("send active snapshot: %v", err)
 	}
 	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
@@ -5267,16 +5267,42 @@ func TestT3ShellHub_LegacyMembershipUncertainRefreshReschedules(t *testing.T) {
 			t.Fatalf("removal %s not acked", id)
 		}
 	}
+	sendSnapshot := func(seq int, ids ...string) {
+		t.Helper()
+		if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(seq, ids...)); err != nil {
+			t.Fatalf("send active snapshot: %v", err)
+		}
+		if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
+			t.Fatalf("active snapshot not acked")
+		}
+	}
 
+	// t≈0：离开活跃面 → 登记（截止 ≈ +200ms）。
 	sendRemoval(43, "th-x")
 	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
 		return v.Snaps != nil && errors.Is(v.Snaps.ArchiveErr, errT3ShellArchiveStale)
 	})
-	// 同一 ID 在待对账期间再次移除：截止时刻后移，必须重新调度。
-	time.Sleep(100 * time.Millisecond)
-	sendRemoval(44, "th-x")
 
-	// 原定时器（150ms）先到，续期后的截止时刻（250ms）到点后必须恢复可信。
+	// t≈100ms：活跃快照把它带回来 → 立即解账、恢复可信（活跃优先）。
+	time.Sleep(100 * time.Millisecond)
+	sendSnapshot(44, "th-1", "th-x")
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil
+	})
+
+	// t≈110ms：再次离开 → 重新登记（截止 ≈ +310ms）。
+	sendRemoval(45, "th-x")
+
+	// t≈250ms：第一次的截止（200ms）早已过；若没有为第二次重新调度，这里会
+	// 已恢复可信。仍须 stale 才证明新定时器生效。
+	time.Sleep(140 * time.Millisecond)
+	if v, err := hub.Peek(env, "tok"); err != nil {
+		t.Fatalf("peek: %v", err)
+	} else if v.Snaps == nil || !errors.Is(v.Snaps.ArchiveErr, errT3ShellArchiveStale) {
+		t.Fatalf("the second removal must schedule its own settle, got %+v", v.Snaps)
+	}
+
+	// 等第二次截止到期后恢复可信。
 	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
 		return v.Snaps != nil && v.Snaps.ArchiveErr == nil
 	})

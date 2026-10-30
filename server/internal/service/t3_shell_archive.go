@@ -648,11 +648,12 @@ func (h *t3ShellHub) invalidateArchiveEntryAfterActiveRemoval(e *t3ShellEntry, l
 		// 归档增量，只在读路径懒清会让打开中的页面一直停在降级态
 		// （use-threads 不轮询，SSE 心跳不带数据）。
 		//
-		// 定时器每次登记都调度（#156 R3-P1 / R4）：判据不能只看「可信度是否
-		// 翻转」或「是否新增 ID」——同一窗口内的第二次移除不会翻转 archiveErr，
-		// 同一 ID 的重复移除只是续期而不算新增；两者若跳过调度，那批 ID 就
-		// 永远等不到到期清理，归档面会永久 stale。到期清理按各自截止时刻裁剪，
-		// 重复调度只是多一次空转。
+		// 定时器每次登记都调度（#156 R3-P1 / R4 / R12）：判据不能只看「可信度是否
+		// 翻转」或「是否新增 ID」——同一窗口内的第二次移除不会翻转 archiveErr；
+		// 而同一 ID 只有在「先回到活跃面（解账）再离开」时才会重新登记、拿到新的
+		// 截止时刻（重复投递的噪声移除被 R9/R10 过滤）。两种情形若跳过调度，那批
+		// ID 就永远等不到到期清理，归档面会永久 stale。到期清理按各自截止时刻
+		// 裁剪，重复调度只是多一次空转。
 		h.scheduleArchiveMembershipSettle(e, e.archiveStaleGrace)
 		return
 	}
