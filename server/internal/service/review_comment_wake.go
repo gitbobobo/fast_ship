@@ -504,18 +504,36 @@ func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, ev
 					zap.String("live", pr.HeadSHA), zap.String("rechecked", pr2.HeadSHA))
 				return fmt.Errorf("评论唤醒同刻异 head 复核未收敛")
 			}
+			// 受理史判定按观察项目过滤（与基准查询同口径：改绑后旧项目的
+			// seen 行不得错杀新项目的合法 head，codex 第 30 轮 P2）；除
+			// seen 行外还查运行行——评论唤醒不写 seen，但其受理的 head 有
+			// 运行记录，只查 seen 会把滞后读旧 head 误判成同秒新 head 而
+			// 采信回退总账（codex 第 30 轮 P2）。
+			headAccepted := false
 			var seenOld model.ReviewSeenSHA
-			sErr := s.db.WithContext(ctx).Where("repo_full_name = ? AND pr_number = ? AND head_sha = ? AND integration_id = ?",
-				repo, prNumber, pr.HeadSHA, integrationID).First(&seenOld).Error
-			if sErr == nil {
+			sErr := s.db.WithContext(ctx).Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ? AND integration_id = ?",
+				observedProjectID, repo, prNumber, pr.HeadSHA, integrationID).First(&seenOld).Error
+			switch {
+			case sErr == nil:
+				headAccepted = true
+			case errors.Is(sErr, gorm.ErrRecordNotFound):
+				var runCount int64
+				if rErr := s.db.WithContext(ctx).Model(&model.ReviewRun{}).
+					Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ? AND integration_id = ?",
+						observedProjectID, repo, prNumber, pr.HeadSHA, integrationID).
+					Count(&runCount).Error; rErr != nil {
+					return rErr
+				}
+				headAccepted = runCount > 0
+			default:
+				return sErr
+			}
+			if headAccepted {
 				s.logger.Warn("评论唤醒同刻异 head 为曾受理旧快照（滞后读），按瞬时失败重投",
 					zap.String("integration", integrationID),
 					zap.String("repo", repo), zap.Int("pr", prNumber),
 					zap.String("live", pr.HeadSHA), zap.String("accepted", observedHead))
 				return fmt.Errorf("评论唤醒实拉快照滞后于已受理 head（同刻旧 head）")
-			}
-			if !errors.Is(sErr, gorm.ErrRecordNotFound) {
-				return sErr
 			}
 			pr = pr2
 		}

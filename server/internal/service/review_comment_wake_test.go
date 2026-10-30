@@ -1965,3 +1965,130 @@ type appSourceDecryptErr struct{}
 func (appSourceDecryptErr) Current(context.Context) (GitHubAppConfig, bool, error) {
 	return GitHubAppConfig{}, false, errGitHubAppDecrypt
 }
+
+// 同刻异 head 的受理史要看运行行（codex 第 30 轮 P2）：评论唤醒不写
+// seen——其受理过的 head 只有运行记录；滞后读同刻旧 head 时只查 seen
+// 会误判成「同秒新 head」采信、把总账回退到旧 head。
+func TestReviewCommentWakeTiedCommentAcceptedHeadRejected(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	e.enableReview(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	ctx := context.Background()
+	t1 := time.Now().UTC().Add(-2 * time.Hour)
+	if err := e.svc.db.Create(&model.ReviewPullRequest{
+		ProjectID: e.project.ID, UserID: e.project.UserID,
+		RepoFullName: repo, PRNumber: 54,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		HeadSHA:       "sha-b", RoundNumber: 2, UpdatedAt: t1,
+	}).Error; err != nil {
+		t.Fatalf("seed ledger: %v", err)
+	}
+	if err := e.svc.db.Create(&model.ReviewSeenSHA{
+		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 54,
+		HeadSHA: "sha-b", IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		PRUpdatedAt: &t1, AcceptedAt: t1,
+	}).Error; err != nil {
+		t.Fatalf("seed seen: %v", err)
+	}
+	// 更早的 head sha-a 由评论唤醒受理过：有运行行、无 seen 行。
+	if err := e.svc.db.Create(&model.ReviewRun{
+		ID: "run-tied-54", UserID: e.project.UserID, ProjectID: e.project.ID,
+		Kind: model.ReviewKindCode, RepoFullName: repo, PRNumber: 54,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		HeadSHA:       "sha-a", RoundNumber: 1, Status: model.ReviewRunCompleted,
+		TriggerAction: "comment",
+	}).Error; err != nil {
+		t.Fatalf("seed comment run: %v", err)
+	}
+	// 滞后读：同刻（t1）旧 head sha-a → 复核发现运行行 → 拒绝，不回退。
+	e.fake.SetPR(repo, 54, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 54, State: "open", HeadSHA: "sha-a",
+		HeadRepoFullName: repo, UpdatedAt: &t1,
+	})
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-tied-run",
+		issueCommentBody("@fast-ship-bot", repo, 54, 42)); err == nil {
+		t.Fatal("同刻旧 head（评论唤醒受理过）应按瞬时失败拒绝")
+	}
+	var after model.ReviewPullRequest
+	if err := e.svc.db.Where("pr_number = 54").First(&after).Error; err != nil {
+		t.Fatalf("总账行应仍在: %v", err)
+	}
+	if after.HeadSHA != "sha-b" {
+		t.Fatalf("总账不得回退: head = %s", after.HeadSHA)
+	}
+}
+
+// 受理史判定按观察项目过滤（codex 第 30 轮 P2）：改绑后旧项目的 seen 行
+// 不得错杀新项目的合法同刻异 head——观察与受理史判定用同一项目快照。
+func TestReviewCommentWakeTiedHistoryScopedToObservedProject(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	e.enableReview(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	ctx := context.Background()
+
+	projectB := model.Project{ID: "p-int179-tie", UserID: e.project.UserID, Name: "int179-tie"}
+	if err := e.svc.db.Create(&projectB).Error; err != nil {
+		t.Fatalf("create project B: %v", err)
+	}
+	t1 := time.Now().UTC().Add(-2 * time.Hour)
+	// B 的账本与基准（观察将来自 B）。
+	if err := e.svc.db.Create(&model.ReviewPullRequest{
+		ProjectID: projectB.ID, UserID: projectB.UserID,
+		RepoFullName: repo, PRNumber: 55,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		HeadSHA:       "sha-b", RoundNumber: 1, UpdatedAt: t1,
+	}).Error; err != nil {
+		t.Fatalf("seed B ledger: %v", err)
+	}
+	if err := e.svc.db.Create(&model.ReviewSeenSHA{
+		ProjectID: projectB.ID, RepoFullName: repo, PRNumber: 55,
+		HeadSHA: "sha-b", IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		PRUpdatedAt: &t1, AcceptedAt: t1,
+	}).Error; err != nil {
+		t.Fatalf("seed B seen: %v", err)
+	}
+	// 旧项目 A 的 seen 行：sha-old 曾在 A 受理过——改绑到 B 后它不在 B 的
+	// 受理史里，不得错杀。
+	if err := e.svc.db.Create(&model.ReviewSeenSHA{
+		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 55,
+		HeadSHA: "sha-old", IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		PRUpdatedAt: &t1, AcceptedAt: t1,
+	}).Error; err != nil {
+		t.Fatalf("seed A seen: %v", err)
+	}
+	e.fake.SetPR(repo, 55, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 55, State: "open", HeadSHA: "sha-old",
+		HeadRepoFullName: repo, UpdatedAt: &t1,
+	})
+
+	// 预查返回 A；观察阶段（第 2 次设置行反查）把绑定搬到 B——改绑窗口。
+	settingsQueries := 0
+	if err := e.svc.db.Callback().Query().Before("gorm:query").Register("int179_tie_rebind",
+		func(tx *gorm.DB) {
+			if tx.Statement.Table != "project_review_settings" || len(tx.Statement.Selects) > 0 {
+				return
+			}
+			settingsQueries++
+			if settingsQueries == 2 {
+				if err := e.svc.db.Model(&model.ProjectReviewSettings{}).
+					Where("project_id = ?", e.project.ID).
+					Update("project_id", projectB.ID).Error; err != nil {
+					t.Logf("rebind failed: %v", err)
+				}
+			}
+		}); err != nil {
+		t.Fatalf("注册回调失败: %v", err)
+	}
+
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-tie-scope",
+		issueCommentBody("@fast-ship-bot", repo, 55, 42)); err != nil {
+		t.Fatalf("B 的受理史不含 sha-old，应采信开轮而非拒绝: %v", err)
+	}
+	var run model.ReviewRun
+	if err := e.svc.db.Where("pr_number = 55").First(&run).Error; err != nil {
+		t.Fatalf("应开出新轮: %v", err)
+	}
+	if run.ProjectID != projectB.ID || run.HeadSHA != "sha-old" {
+		t.Fatalf("新轮应落在观察项目 B: project=%s head=%s", run.ProjectID, run.HeadSHA)
+	}
+}
