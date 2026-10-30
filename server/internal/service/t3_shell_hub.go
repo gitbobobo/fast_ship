@@ -521,7 +521,12 @@ type t3ShellEntry struct {
 	// settleMu 串行化「停机 Stop 定时器」与「回调正在执行」（#156 R12-codex）：
 	// 只 Stop 定时器不能 join 已经在跑的回到——Close 可能在回调中途返回。
 	// 回调全程持锁，停机在同一把锁里 Stop，保证 shutdown 返回后没有在途回调。
-	settleMu     sync.Mutex
+	settleMu sync.Mutex
+	// wgMu / wgClosed 保护「停机后再往 e.wg 里加计数」（#156 R21）：Close 之后
+	// 才发起的后台拉取不该被 Wait 漏掉，也不该在 Wait 已开始后 Add（会 panic）。
+	// Add 与 shutdown 互斥，任何一侧先拿到锁都会得到确定结果。
+	wgMu         sync.Mutex
+	wgClosed     bool
 	activeConn   t3ShellConnState
 	activeErr    error
 	obsReady     bool
@@ -600,6 +605,9 @@ func (e *t3ShellEntry) clearForceResync() {
 
 func (e *t3ShellEntry) shutdown() {
 	e.stopOnce.Do(func() { close(e.stop) })
+	e.wgMu.Lock()
+	e.wgClosed = true
+	e.wgMu.Unlock()
 	e.settleMu.Lock()
 	e.mu.Lock()
 	if e.settleTimer != nil {

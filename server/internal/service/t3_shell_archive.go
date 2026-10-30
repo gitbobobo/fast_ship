@@ -154,7 +154,19 @@ func (e *t3ShellEntry) kickArchiveRefresh() {
 	// singleflight.Do——它的「等共享结果返回」会把后台拉取的挂起传染给
 	// 调用方；按需面所有读者都是「发起即走」，没有等结果的强拉入口。
 	fetchCtx, cancelFetch := context.WithTimeout(e.hub.ctx, e.archTTL)
+	// 计入 entry 生命周期（#156 R21）：否则 Close 等不到这次拉取，可能在
+	// ensureArchive 仍在收尾/发布失败时就返回。停机后不再接收新计数——
+	// Wait 已开始，Add 会 panic。
+	e.wgMu.Lock()
+	if e.wgClosed {
+		e.wgMu.Unlock()
+		cancelFetch()
+		return
+	}
+	e.wg.Add(1)
+	e.wgMu.Unlock()
 	go func() {
+		defer e.wg.Done()
 		defer cancelFetch()
 		defer func() {
 			e.arch.mu.Lock()
