@@ -692,6 +692,13 @@ func (s *t3ShellState) noteArchiveFetchFailed(err error, generation int64, commi
 func (s *t3ShellState) noteArchiveMembershipUncertain(ids []string, settle time.Duration) (pending int, flipped bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// armed 模式下这些 ID 已在「应用移除」的同一临界区登记过；此处再登记会
+	// 把「已被归档流对账（甚至已收到 thread.removed）」的 ID 重新打回待对账，
+	// 让归档面白 stale 一个宽限窗口（#156 R7）。armed 路径自己调的是
+	// noteArchiveMembershipUncertainLocked，不受此短路影响。
+	if s.archiveUncertainArmed {
+		return 0, false
+	}
 	return s.noteArchiveMembershipUncertainLocked(ids, settle)
 }
 
@@ -735,6 +742,14 @@ func (s *t3ShellState) noteArchiveMembershipUncertainLocked(ids []string, settle
 		flipped = true
 	}
 	return pending, flipped
+}
+
+// archiveUncertainArmedNow 报告当前是否处于「移除即登记」模式（#156 R7）：
+// 调用方据此判断登记是否已在应用移除的临界区内完成，避免重复登记。
+func (s *t3ShellState) archiveUncertainArmedNow() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.archiveUncertainArmed
 }
 
 // armUncertainForRemovalsLocked 在 armed 状态下，把刚离开活跃面的线程就地

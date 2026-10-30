@@ -628,10 +628,14 @@ func (h *t3ShellHub) invalidateArchiveEntryAfterActiveRemoval(e *t3ShellEntry, l
 		// 按线程 ID 记账（Codex #156 R1）：只有这些线程自己的归档增量（或
 		// 权威快照）能解除不确定，无关线程的增量不算对账；settle 上界用
 		// 与撤可信一致的宽限（线程可能是被彻底删除，归档面不会有增量）。
+		armed := e.state.archiveUncertainArmedNow()
 		pending, _ := e.state.noteArchiveMembershipUncertain(leftIDs, e.archiveStaleGrace)
-		if pending == 0 {
+		if pending == 0 && !armed {
 			return
 		}
+		// armed 时登记已在应用移除的同一临界区完成（上面对登记是 no-op）：
+		// 这里只负责发布降级事件与调度到期清理（#156 R7——若再登记，会把
+		// 已被归档流对账的 ID 重新打回待对账，白 stale 一个宽限窗口）。
 		// 发布交给指纹去重（#156 R5）：armed 状态下标记已在应用移除的同一
 		// 临界区里置好，这里的 flipped 会是 false，但宣布基准（archAnnounced）
 		// 还没更新——若不发布，浏览器收不到降级事件，到期恢复也会因指纹相同

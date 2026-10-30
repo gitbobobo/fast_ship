@@ -1448,3 +1448,50 @@ func TestShellState_RemovalDuringLegacySwitchIsRecorded(t *testing.T) {
 
 // intPtrTestLocal 是测试内的小工具：取整型地址。
 func intPtrTestLocal(v int) *int { return &v }
+
+// 已被归档流对账的移除不得被重复登记（#156 R7）：armed 模式下登记发生在应用
+// 移除的临界区；归档流的 thread.removed 若先到并清掉标记，hub 的帧后回调不得
+// 再把它打回待对账，否则归档面白 stale 一个宽限窗口，wait 会误报 watch_degraded。
+func TestShellState_ArmedModeDoesNotReregisterReconciledRemoval(t *testing.T) {
+	state := newT3ShellState()
+	gen := state.archiveGenerationNow()
+	if applied, err := state.applyArchiveSnapshot(
+		t3ArchivedShellSnapshot{SchemaVersion: 1, SnapshotSequence: 1, Threads: shellTestThreads(shellTestThread("th-a", "归档"))},
+		gen, nil); !applied || err != nil {
+		t.Fatalf("seed archive: %v", err)
+	}
+	if _, err := state.applyActiveItemTracked(t3ShellStreamItem{
+		Kind: "snapshot", Snapshot: &t3ShellSnapshot{SchemaVersion: 1, SnapshotSequence: 1, Threads: shellTestThreads(shellTestThread("th-1", "线程"))},
+	}); err != nil {
+		t.Fatalf("seed active: %v", err)
+	}
+	state.armArchiveUncertain(true, time.Minute)
+
+	// armed 路径登记（应用移除时）。
+	if _, err := state.applyActiveItemTracked(t3ShellStreamItem{
+		Kind: "thread.removed", Sequence: intPtrTestLocal(2), ThreadID: "th-1",
+	}); err != nil {
+		t.Fatalf("apply removal: %v", err)
+	}
+	if snaps := state.snapshots(); !errors.Is(snaps.ArchiveErr, errT3ShellArchiveStale) {
+		t.Fatalf("armed removal must mark uncertainty, got %v", snaps.ArchiveErr)
+	}
+
+	// 归档流的同名移除先到：对账完成，恢复可信。
+	if err := state.applyArchiveItem(t3ArchiveStreamItem{
+		Kind: "thread.removed", Sequence: intPtrTestLocal(3), ThreadID: "th-1",
+	}, 0); err != nil {
+		t.Fatalf("apply archive removal: %v", err)
+	}
+	if snaps := state.snapshots(); snaps.ArchiveErr != nil {
+		t.Fatalf("archive delta reconciles the removal, got %v", snaps.ArchiveErr)
+	}
+
+	// hub 的帧后回调（armed 模式下对登记是 no-op）：不得再打回待对账。
+	if pending, _ := state.noteArchiveMembershipUncertain([]string{"th-1"}, time.Minute); pending != 0 {
+		t.Fatalf("reconciled removal must not be re-registered, got pending=%d", pending)
+	}
+	if snaps := state.snapshots(); snaps.ArchiveErr != nil {
+		t.Fatalf("face must stay trusted after a no-op registration, got %v", snaps.ArchiveErr)
+	}
+}
