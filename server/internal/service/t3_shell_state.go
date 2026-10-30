@@ -533,8 +533,12 @@ func (s *t3ShellState) applyArchiveItem(item t3ArchiveStreamItem, connectionStar
 			return fmt.Errorf("归档 thread.updated 帧缺少 sequence/thread/threadId")
 		}
 		s.archivedThreads.upsert(item.Thread, item.Thread.ID)
-		// 该线程的归档增量到达 = 它的归属已对账（跟进 PR② / #156 R1）。
-		s.noteArchiveMembershipSettledLocked(item.Thread.ID)
+		// 归档增量**不**解除待对账（#156 R15）：两条流顺序无保证，这条 updated
+		// 可能来自更早的一轮归档周期（unarchive 前就被排队的更新），拿它当
+		// 「本次移除已对账」会让随后的 thread.removed 把缓存行删掉、而新增量
+		// 还没到——两面都没有 + 面可信 = wait 把线程判成 thread_gone。
+		// 解除只有两条权威路径：归档全量快照包含该 ID（见
+		// applyActiveSnapshotLocked）、或宽限到期（expireArchiveMembershipUncertain）。
 		return nil
 	case "thread.removed":
 		if item.Sequence == nil || item.ThreadID == "" {

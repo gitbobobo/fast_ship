@@ -5037,7 +5037,9 @@ func TestT3ShellHub_LegacyActiveRemovalMarksMembershipUncertain(t *testing.T) {
 	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
 	srv.setArchiveLegacy(true)
 	srv.setArchiveFixture(archiveSnapshotBody(1, "th-a"), nil)
-	hub := newT3ShellHubWithConfig(hubTestConfig(), nil)
+	cfg := hubTestConfig()
+	cfg.ArchiveStaleGrace = 1200 * time.Millisecond
+	hub := newT3ShellHubWithConfig(cfg, nil)
 	defer hub.Close()
 	env := hubTestEnv(url, 0)
 
@@ -5103,7 +5105,8 @@ func TestT3ShellHub_LegacyActiveRemovalMarksMembershipUncertain(t *testing.T) {
 		t.Fatalf("unrelated archive delta must not restore trust for th-2, got %+v", v.Snaps)
 	}
 
-	// th-2 自己的归档增量到达：对账完成，可信度恢复。
+	// th-2 自己的归档增量到达：行会进列表，但**不解账**（#156 R15，可能来自
+	// 更早一轮归档周期），可信度仍在宽限期内保持 stale。
 	thB, _ := json.Marshal(map[string]any{
 		"id": "th-2", "projectId": "p-1", "title": "归档-th-2", "status": "idle",
 		"archivedAt": "2026-10-01T00:00:00.000Z",
@@ -5112,10 +5115,7 @@ func TestT3ShellHub_LegacyActiveRemovalMarksMembershipUncertain(t *testing.T) {
 	if err := archiveConn.sendValue(archiveSub.ID, delta); err != nil {
 		t.Fatalf("send archive delta: %v", err)
 	}
-	view = waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
-		if v.Snaps == nil || v.Snaps.ArchiveErr != nil {
-			return false
-		}
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
 		for _, th := range v.Snaps.Archived.Threads {
 			if th.ID == "th-2" {
 				return true
@@ -5123,8 +5123,18 @@ func TestT3ShellHub_LegacyActiveRemovalMarksMembershipUncertain(t *testing.T) {
 		}
 		return false
 	})
+	if v, err := hub.Peek(env, "tok"); err != nil {
+		t.Fatalf("peek: %v", err)
+	} else if !errors.Is(v.Snaps.ArchiveErr, errT3ShellArchiveStale) {
+		t.Fatalf("an archive delta must not settle the uncertainty, got %v", v.Snaps.ArchiveErr)
+	}
+
+	// 宽限到期后自愈。
+	view = waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil
+	})
 	if len(view.Snaps.Archived.Threads) != 2 {
-		t.Fatalf("archive delta must restore trust and add the thread, got %+v", view.Snaps.Archived.Threads)
+		t.Fatalf("both archived threads must survive, got %+v", view.Snaps.Archived.Threads)
 	}
 }
 

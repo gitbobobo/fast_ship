@@ -1303,13 +1303,23 @@ func TestShellState_ArchiveMembershipUncertainIsPerThread(t *testing.T) {
 		t.Fatalf("th-y is still unreconciled, must stay stale, got %v", snaps.ArchiveErr)
 	}
 
-	// th-y 的增量到位：全部对账完成，恢复可信。
+	// th-y 的增量也不解账（#156 R15）：可能来自更早一轮归档周期，只有
+	// 权威快照包含这些 ID 才算对账完成。
 	seqY := 3
 	if err := state.applyArchiveItem(t3ArchiveStreamItem{
 		Kind: "thread.updated", Sequence: &seqY,
 		Thread: shellTestThread("th-y", "归档"),
 	}, 0); err != nil {
 		t.Fatalf("apply delta: %v", err)
+	}
+	if snaps := state.snapshots(); !errors.Is(snaps.ArchiveErr, errT3ShellArchiveStale) {
+		t.Fatalf("an archive delta must not settle the uncertainty, got %v", snaps.ArchiveErr)
+	}
+	if applied, err := state.applyArchiveSnapshot(t3ArchivedShellSnapshot{
+		SchemaVersion: 1, SnapshotSequence: 4,
+		Threads: shellTestThreads(shellTestThread("th-x", "归档"), shellTestThread("th-y", "归档")),
+	}, state.archiveGenerationNow(), nil); !applied || err != nil {
+		t.Fatalf("apply archive snapshot: %v", err)
 	}
 	if snaps := state.snapshots(); snaps.ArchiveErr != nil {
 		t.Fatalf("all reconciled, trust must be restored, got %v", snaps.ArchiveErr)
@@ -1437,11 +1447,20 @@ func TestShellState_RemovalDuringLegacySwitchIsRecorded(t *testing.T) {
 		t.Fatalf("snapshot without the removed thread must not claim completeness, got %v", snaps.ArchiveErr)
 	}
 
-	// th-1 的归档增量到达：对账完成，恢复可信。
+	// th-1 的归档增量不解账（#156 R15，可能来自更早一轮归档周期）；只有权威
+	// 快照包含它才算对账完成。
 	if err := state.applyArchiveItem(t3ArchiveStreamItem{
 		Kind: "thread.updated", Sequence: intPtrTestLocal(3), Thread: shellTestThread("th-1", "归档"),
 	}, 0); err != nil {
 		t.Fatalf("apply delta: %v", err)
+	}
+	if snaps := state.snapshots(); !errors.Is(snaps.ArchiveErr, errT3ShellArchiveStale) {
+		t.Fatalf("an archive delta must not settle the uncertainty, got %v", snaps.ArchiveErr)
+	}
+	if applied, err := state.applyArchiveSnapshot(t3ArchivedShellSnapshot{
+		SchemaVersion: 1, SnapshotSequence: 4, Threads: shellTestThreads(shellTestThread("th-1", "归档")),
+	}, state.archiveGenerationNow(), nil); !applied || err != nil {
+		t.Fatalf("apply archive snapshot: %v", err)
 	}
 	if snaps := state.snapshots(); snaps.ArchiveErr != nil {
 		t.Fatalf("after reconciliation the face must be trusted, got %v", snaps.ArchiveErr)
@@ -1571,14 +1590,22 @@ func TestShellState_ArchiveRemovedDoesNotSettle(t *testing.T) {
 		t.Fatalf("archive thread.removed must not settle the uncertainty, got %v", snaps.ArchiveErr)
 	}
 
-	// 只有 thread.updated（行确实存在）才解账。
+	// 增量同样不解账（#156 R15）：只有权威快照包含该 ID 才算对账完成。
 	if err := state.applyArchiveItem(t3ArchiveStreamItem{
 		Kind: "thread.updated", Sequence: intPtrTestLocal(4), Thread: shellTestThread("th-1", "归档"),
 	}, 0); err != nil {
 		t.Fatalf("apply archive update: %v", err)
 	}
+	if snaps := state.snapshots(); !errors.Is(snaps.ArchiveErr, errT3ShellArchiveStale) {
+		t.Fatalf("an archive delta must not settle the uncertainty, got %v", snaps.ArchiveErr)
+	}
+	if applied, err := state.applyArchiveSnapshot(t3ArchivedShellSnapshot{
+		SchemaVersion: 1, SnapshotSequence: 5, Threads: shellTestThreads(shellTestThread("th-1", "归档")),
+	}, state.archiveGenerationNow(), nil); !applied || err != nil {
+		t.Fatalf("apply archive snapshot: %v", err)
+	}
 	if snaps := state.snapshots(); snaps.ArchiveErr != nil {
-		t.Fatalf("thread.updated settles the uncertainty, got %v", snaps.ArchiveErr)
+		t.Fatalf("an archive snapshot settles the uncertainty, got %v", snaps.ArchiveErr)
 	}
 }
 
