@@ -331,8 +331,9 @@ func (s *ReviewService) observeAcceptedHead(ctx context.Context, integrationID, 
 //	推进到 live head），不再按「账本不同」把唤醒永久锁死。
 //
 // 返回值 changed：本次投递实际改变了审查状态（开出新轮）——忽略类投递
-// （未点名/非 PR/无资格/判丢弃）返回 false，调用方据此跳过调度循环 kick，
-// 讨论密集仓库的普通评论不再放大成额外 tick（codex 第 41 轮 P2）。
+// （未点名/非 PR/无资格/判丢弃/同 head 在途跳过等事务内静默路径）返回
+// false，调用方据此跳过调度循环 kick，讨论密集仓库的普通评论不再放大成
+// 额外 tick（codex 第 41 轮 P2、第 42 轮 P3）。
 func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, event, deliveryID string, body []byte) (bool, error) {
 	// 幂等预查（只读）：已登记的投递直接按重复去重，省一次实拉；预查与
 	// 最终事务之间的并发窗口由事务内 insert 判重兜底。存量裸键兼容与
@@ -600,7 +601,7 @@ func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, ev
 			}
 			pr = pr2
 		}
-		forkDenied, txErr := s.openCommentWakeRoundTx(ctx, integrationID, event, deliveryID, repo, prNumber,
+		opened, forkDenied, txErr := s.openCommentWakeRoundTx(ctx, integrationID, event, deliveryID, repo, prNumber,
 			installationID, observedProjectID, observedHead, pr, time.Now().UTC())
 		denyCache, err := commentWakeTxOutcome(forkDenied, txErr)
 		if errors.Is(err, errCommentWakeObservedHeadMoved) {
@@ -620,7 +621,7 @@ func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, ev
 			s.rememberCommentWakeForkDeny(integrationID, repo, prNumber, time.Now().UTC())
 			return false, nil
 		}
-		return true, nil
+		return opened, nil
 	}
 	s.logger.Warn("评论唤醒观察窗口未收敛，放弃并丢弃投递",
 		zap.String("integration", integrationID),
@@ -637,10 +638,13 @@ func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, ev
 // 重读重拉）。
 // 返回值 forkDenied：事务内 fork 守卫判丢弃（幂等账已随事务落定）——外层
 // 据此写否定缓存（INT-97：事务闭包内不得调非 tx 方法面，非事务副作用外置）。
+// 返回值 opened：事务内实际开出新轮——静默跳过路径（设置行移除/无资格/
+// 同 head 在途/草稿等）保持 false，调度 kick 不为空跳误报（codex 第 42 轮 P3）。
 func (s *ReviewService) openCommentWakeRoundTx(ctx context.Context, integrationID, event, deliveryID, repo string,
 	prNumber int, installationID int64, observedProjectID, observedHead string,
-	pr *forge.PullRequest, now time.Time) (forkDenied bool, err error) {
+	pr *forge.PullRequest, now time.Time) (opened, forkDenied bool, err error) {
 	forkDenied = false
+	opened = false
 	txErr := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		// 幂等登记先行：预查后的并发重投在事务内判重兜底。
 		inserted, err := s.deliveries.InsertTx(tx, &model.GitHubWebhookDelivery{
@@ -746,9 +750,8 @@ func (s *ReviewService) openCommentWakeRoundTx(ctx context.Context, integrationI
 			project.ID, repo, prNumber, integrationID).Delete(&model.ReviewDebounce{}).Error; err != nil {
 			return err
 		}
-		_, err = s.openRoundTx(tx, project, settings, repo, prNumber,
-			pr.HeadSHA, "comment", pr.Title, pr.HTMLURL, pr.BaseRef, pr.HeadRef, installationID, pr.UpdatedAt, now)
-		if err != nil {
+		if _, err = s.openRoundTx(tx, project, settings, repo, prNumber,
+			pr.HeadSHA, "comment", pr.Title, pr.HTMLURL, pr.BaseRef, pr.HeadRef, installationID, pr.UpdatedAt, now); err != nil {
 			return err
 		}
 		// 受理登记 seen（与 push 受理同款 OnConflict DoNothing）：push 触发
@@ -763,11 +766,20 @@ func (s *ReviewService) openCommentWakeRoundTx(ctx context.Context, integrationI
 		}
 		// 重新受理（force-push 回已见 head 的评论唤醒）要刷新 seen 时戳：
 		// DoNothing 会留下旧值，滞后基准取旧值会放行中间时间戳的滞后读、
-		// 回退总账（codex 第 42 轮 P2）。
+		// 回退总账（codex 第 42 轮 P2）。刷新仅在快照时刻非空且**更新**时
+		// 生效——同 head 分支有意放行的早时间戳（缓存/只读副本滞后）不得
+		// 把基准往回拨，nil 不得清成 NULL（fast-ship-bot 第 43 轮 P2）。
+		opened = true
 		return tx.Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "project_id"}, {Name: "repo_full_name"}, {Name: "pr_number"}, {Name: "head_sha"}, {Name: "integration_id"}},
-			DoUpdates: clause.AssignmentColumns([]string{"pr_updated_at", "accepted_at"}),
+			Columns: []clause.Column{{Name: "project_id"}, {Name: "repo_full_name"}, {Name: "pr_number"}, {Name: "head_sha"}, {Name: "integration_id"}},
+			DoUpdates: clause.Assignments(map[string]any{
+				"accepted_at": now,
+				"pr_updated_at": gorm.Expr(
+					"CASE WHEN excluded.pr_updated_at IS NOT NULL AND " +
+						"(review_seen_shas.pr_updated_at IS NULL OR excluded.pr_updated_at > review_seen_shas.pr_updated_at) " +
+						"THEN excluded.pr_updated_at ELSE review_seen_shas.pr_updated_at END"),
+			}),
 		}).Create(seen).Error
 	})
-	return forkDenied, txErr
+	return opened, forkDenied, txErr
 }

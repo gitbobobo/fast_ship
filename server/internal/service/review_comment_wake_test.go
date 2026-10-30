@@ -2432,6 +2432,12 @@ func TestReviewCommentWakeChangedFlag(t *testing.T) {
 	if err != nil || !changed {
 		t.Fatalf("开轮投递应 (true, nil): changed=%v err=%v", changed, err)
 	}
+	// 同 head 再点名（在途守卫跳过、不开轮）：changed=false，不得误 kick。
+	changed, err = e.review.handleCommentWake(ctx, model.ForgeIntegrationBuiltinGitHubID,
+		"issue_comment", "d-kick-2", issueCommentBody("@fast-ship-bot 请再审", repo, 61, 42))
+	if err != nil || changed {
+		t.Fatalf("在途跳过应 (false, nil): changed=%v err=%v", changed, err)
+	}
 	// 重复投递：去重路径返回 ErrDeliveryDuplicated（调用方按错误处理，不 kick）。
 	_, err = e.review.handleCommentWake(ctx, model.ForgeIntegrationBuiltinGitHubID,
 		"issue_comment", "d-kick-1", issueCommentBody("@fast-ship-bot 请再审", repo, 61, 42))
@@ -2512,5 +2518,39 @@ func TestReviewCommentWakeReacceptRefreshesSeen(t *testing.T) {
 	}
 	if after.HeadSHA != "sha-c" {
 		t.Fatalf("总账不得回退: head = %s", after.HeadSHA)
+	}
+
+	// 同 head 分支有意放行的早时间戳（缓存/只读副本滞后）：不得把 seen 基
+	// 准往回拨（fast-ship-bot 第 43 轮 P2）。
+	t0 := t1.Add(-time.Hour)
+	e.fake.SetPR(repo, 62, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 62, State: "open", HeadSHA: "sha-c",
+		HeadRepoFullName: repo, UpdatedAt: &t0,
+	})
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-reaccept-lag0",
+		issueCommentBody("@fast-ship-bot", repo, 62, 42)); err != nil {
+		t.Fatalf("同 head 早时间戳应采信: %v", err)
+	}
+	if err := e.svc.db.Where("head_sha = ?", "sha-c").First(&seen).Error; err != nil {
+		t.Fatalf("seen 行应存在: %v", err)
+	}
+	if seen.PRUpdatedAt == nil || !seen.PRUpdatedAt.Equal(t3) {
+		t.Fatalf("seen 基准不得往回拨: %v", seen.PRUpdatedAt)
+	}
+
+	// 缺时间戳的快照（适配器/平台漏字段）：不得把基准清成 NULL。
+	e.fake.SetPR(repo, 62, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 62, State: "open", HeadSHA: "sha-c",
+		HeadRepoFullName: repo,
+	})
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-reaccept-nil",
+		issueCommentBody("@fast-ship-bot", repo, 62, 42)); err != nil {
+		t.Fatalf("缺时间戳快照应采信: %v", err)
+	}
+	if err := e.svc.db.Where("head_sha = ?", "sha-c").First(&seen).Error; err != nil {
+		t.Fatalf("seen 行应存在: %v", err)
+	}
+	if seen.PRUpdatedAt == nil || !seen.PRUpdatedAt.Equal(t3) {
+		t.Fatalf("seen 基准不得清空: %v", seen.PRUpdatedAt)
 	}
 }
