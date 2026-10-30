@@ -92,12 +92,14 @@ type t3ShellHubConfig struct {
 	// 60s 既能摊销连续列表/详情的读取，也不会让陈旧归档数据停留太久。
 	// 改变归档集的写操作经 InvalidateArchive 立即失效，不靠 TTL 兜底。
 	ArchiveTTL time.Duration
-	// ArchiveStaleGrace 是 TTL 过期后的宽限期（R16 P2-2）：过期只意味着
-	// 「该重拉了」，不等于数据作废。宽限期内重拉在途时，读取仍返回上一份
-	// 快照（不报降级）——否则每个环境每 TTL 都会有一次读被标 degraded，
-	// bot 侧据此把环境计入 incomplete_environments，形成周期性假警报。
-	// 超过宽限仍未落地（重拉失败另有真实失败原因，见 noteArchiveFetchFailed）
-	// 才把面撤为不可信：此后读绝不再信任过期快照（R2 的 thread_gone 保护）。
+	// ArchiveStaleGrace 是「重拉在途超过多久仍未落地就把归档面撤为不可信」
+	// 的宽限（R16 P2-2 / R20 P2）：TTL 过期只意味着「该重拉了」，不等于
+	// 数据作废，所以过期后的读仍返回上一份快照（不报降级）——否则每个环境
+	// 每 TTL、以及空闲回来后的首次读都会有一次读被标 degraded，bot 侧据此
+	// 把环境计入 incomplete_environments，形成周期性假警报。判据锚在**本次
+	// 拉取的发起时刻**：超过宽限仍在途（挂起）才撤可信，此后读绝不再信任
+	// 过期快照（R2 的 thread_gone 保护）；重拉失败另有真实失败原因
+	// （noteArchiveFetchFailed），立即降级。
 	ArchiveStaleGrace time.Duration
 }
 

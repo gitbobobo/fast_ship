@@ -601,6 +601,9 @@ func hubTestConfig() t3ShellHubConfig {
 		MarkerWaitTimeout: 600 * time.Millisecond,
 		DialBudget:        2 * time.Second,
 		ArchiveTTL:        60 * time.Second,
+		// 默认让宽限不起作用（重拉在途不会被视为挂起）：需要观测宽限语义的
+		// 用例自己设小值。
+		ArchiveStaleGrace: 60 * time.Second,
 	}
 }
 
@@ -2682,17 +2685,16 @@ func TestT3ShellHub_EmptyArchiveFirstSnapshotPublishes(t *testing.T) {
 	}
 	sub.Drain()
 
-	// TTL 过期重拉同一份空数据（R12 P1）：撤可信 + 同数据落地各发一次
-	// 轻量 State（订阅端合并为一条）；集合没变仍不得发 Full——首次发布
-	// 标志不得退化成重复整环境广播。
+	// TTL 过期后重拉同一份空数据（R20 P2）：过期不等于数据作废，宽限内
+	// 读取仍返回上一份快照、不报降级，同数据落地也不改变指纹——整段静默。
+	// 首次发布标志不得退化成重复整环境广播（Full）。
 	time.Sleep(cfg.ArchiveTTL + 80*time.Millisecond)
 	if _, err := hub.Peek(env, "tok"); err != nil {
 		t.Fatalf("peek: %v", err)
 	}
 	time.Sleep(200 * time.Millisecond)
-	events := sub.Drain()
-	if len(events) != 1 || events[0].Full || events[0].State == "" {
-		t.Fatalf("identical refetch must announce degraded + recovery as one merged State (no Full), got %+v", events)
+	if events := sub.Drain(); len(events) != 0 {
+		t.Fatalf("identical refetch within grace must stay silent (no Full, no State), got %+v", events)
 	}
 }
 
@@ -2703,7 +2705,10 @@ func TestT3ShellHub_ExpiredArchiveUntrustedDuringRefetch(t *testing.T) {
 	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
 	srv.setArchiveFixture(archiveSnapshotBody(1, "th-a"), nil)
 	cfg := hubTestConfig()
-	cfg.ArchiveTTL = 80 * time.Millisecond
+	// 重拉预算（= ArchiveTTL）必须明显长于宽限，才能观测到「在途过久」而
+	// 不是被拉取超时提前收尾（那种情况留下的是真实失败原因）。
+	cfg.ArchiveTTL = 150 * time.Millisecond
+	cfg.ArchiveStaleGrace = 40 * time.Millisecond
 	hub := newT3ShellHubWithConfig(cfg, nil)
 	defer hub.Close()
 	env := hubTestEnv(url, 0)
@@ -2718,12 +2723,19 @@ func TestT3ShellHub_ExpiredArchiveUntrustedDuringRefetch(t *testing.T) {
 		t.Fatalf("cached archive must stay trusted within TTL, snaps = %+v", view.Snaps)
 	}
 
-	// TTL 过期 + 闸门挡住重拉：下一次读取发起重拉并把归档面撤为不可信。
-	// 上游归档集已变（th-a 被 th-b 取代）：过期快照若仍被当完整，断言
-	// 就会把它错当成当前状态。
+	// TTL 过期 + 闸门挡住重拉：过期只触发重拉，读取仍返回旧快照；重拉在途
+	// 超过宽限仍未落地才撤为不可信（R2 的「不得拿过期快照判 thread_gone」
+	// 由在途时长兜底）。上游归档集已变（th-a 被 th-b 取代）：过期快照若
+	// 仍被当完整，断言就会把它错当成当前状态。
 	srv.pauseArchive()
 	srv.setArchiveFixture(archiveSnapshotBody(2, "th-b"), nil)
-	time.Sleep(cfg.ArchiveTTL + 30*time.Millisecond)
+	time.Sleep(cfg.ArchiveTTL + 20*time.Millisecond)
+	if v, err := hub.Peek(env, "tok"); err != nil {
+		t.Fatalf("peek: %v", err)
+	} else if v.Snaps == nil || v.Snaps.ArchiveErr != nil {
+		t.Fatalf("expiry alone must keep the face trusted (refetch just started), got %+v", v.Snaps)
+	}
+	time.Sleep(cfg.ArchiveStaleGrace + 30*time.Millisecond)
 	view = waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
 		return v.Snaps != nil && v.Snaps.ArchiveErr != nil
 	})
@@ -4242,11 +4254,10 @@ func TestT3ShellHub_EndArchiveTeardownRespectsMode(t *testing.T) {
 	})
 }
 
-// 归档面发布去重（审修 R9 P2-2 + R12 P1）：首次落地发 Full；TTL 例行重拉
-// 同一份数据发撤可信 + 恢复各一次轻量 State（订阅端合并为一条，不再全程
-// 静默——降级横幅需要自愈信号，且集合没变不整环境重取）；归档集真变发
-// Full；失败首次出现发轻量 State 事件、同一错误反复失败去重；恢复可信
-// （同集合）再发一次轻量 State。
+// 归档面发布去重（审修 R9 P2-2 + R12 P1 + R20 P2）：首次落地发 Full；
+// TTL 例行重拉同一份数据全程静默（过期不等于数据作废，宽限内不降级）；
+// 归档集真变发 Full；失败首次出现发轻量 State 事件、同一错误反复失败去重；
+// 恢复可信（同集合）再发一次轻量 State。
 func TestT3ShellHub_ArchiveRepublishDedup(t *testing.T) {
 	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
 	srv.setArchiveFixture(archiveSnapshotBody(1, "th-a"), nil)
@@ -4266,9 +4277,8 @@ func TestT3ShellHub_ArchiveRepublishDedup(t *testing.T) {
 	}
 	sub.Drain()
 
-	// TTL 例行重拉同一份数据（R12 P1）：撤可信发一次降级 State，同数据
-	// 落地恢复（stale → 可信）再发一次；订阅端合并为一条轻量 State，
-	// 不得发 Full（集合没变不整环境重取）。
+	// TTL 例行重拉同一份数据（R20 P2）：过期不等于数据作废——宽限内读取
+	// 仍返回上一份快照、同数据落地指纹不变，整段静默（不降级、不重发 Full）。
 	time.Sleep(cfg.ArchiveTTL + 40*time.Millisecond)
 	calls := srv.archiveCallCount()
 	if _, err := hub.Peek(env, "tok"); err != nil {
@@ -4284,8 +4294,8 @@ func TestT3ShellHub_ArchiveRepublishDedup(t *testing.T) {
 	}
 	time.Sleep(60 * time.Millisecond) // 落地 + 发布窗口
 	evs := sub.Drain()
-	if len(evs) != 1 || evs[0].Full || evs[0].State == "" {
-		t.Fatalf("identical re-pull must announce degraded + recovery as one merged State (no Full), got %+v", evs)
+	if len(evs) != 0 {
+		t.Fatalf("identical re-pull within grace must stay silent (no Full, no State), got %+v", evs)
 	}
 
 	// 归档集真变：Full。
@@ -4359,7 +4369,10 @@ func TestT3ShellHub_TTLRevokedFaceAnnouncesDegradedAndSelfHeals(t *testing.T) {
 	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
 	srv.setArchiveFixture(archiveSnapshotBody(1, "th-a"), nil)
 	cfg := hubTestConfig()
-	cfg.ArchiveTTL = 80 * time.Millisecond
+	// 重拉预算（= ArchiveTTL）明显长于宽限，才观测得到「在途过久」而不是
+	// 拉取超时（那会留下真实失败原因，语义不同）。
+	cfg.ArchiveTTL = 150 * time.Millisecond
+	cfg.ArchiveStaleGrace = 40 * time.Millisecond
 	hub := newT3ShellHubWithConfig(cfg, nil)
 	defer hub.Close()
 	env := hubTestEnv(url, 0)
@@ -4373,17 +4386,26 @@ func TestT3ShellHub_TTLRevokedFaceAnnouncesDegradedAndSelfHeals(t *testing.T) {
 	}
 	sub.Drain()
 
-	// 闲置超 TTL 后的首次读取：撤可信 + 发起重拉。上游归档集未变——
-	// 「归档行其实完整」的误报场景。读取响应本身必须如实报 stale。
+	// 闲置超 TTL 后的首次读取（R20 P2）：过期只触发重拉，本次响应仍返回
+	// 上一份快照（不报降级）；重拉被闸门挡住、在途超过宽限仍未落地，才撤
+	// 可信并发布降级 State（R12 P1：撤可信必须让前端知道，否则横幅挂死）。
 	srv.pauseArchive()
 	srv.setArchiveFixture(archiveSnapshotBody(2, "th-a"), nil) // 同集合、仅序号推进
-	time.Sleep(cfg.ArchiveTTL + 40*time.Millisecond)
+	time.Sleep(cfg.ArchiveTTL + 10*time.Millisecond)
 	view, err := hub.Peek(env, "tok")
 	if err != nil {
 		t.Fatalf("peek: %v", err)
 	}
+	if view.Snaps == nil || view.Snaps.ArchiveErr != nil {
+		t.Fatalf("expiry alone must keep the face trusted (no false degrade), got %+v", view.Snaps)
+	}
+	time.Sleep(cfg.ArchiveStaleGrace + 20*time.Millisecond)
+	view, err = hub.Peek(env, "tok")
+	if err != nil {
+		t.Fatalf("peek: %v", err)
+	}
 	if view.Snaps == nil || !errors.Is(view.Snaps.ArchiveErr, errT3ShellArchiveStale) {
-		t.Fatalf("expired read must report stale, got %+v", view.Snaps)
+		t.Fatalf("refetch in flight beyond grace must report stale, got %+v", view.Snaps)
 	}
 	// 修复前：撤可信不发事件、宣布基准停在可信指纹，这里的降级 State
 	// 不会出现。
@@ -4780,15 +4802,16 @@ func TestT3ShellHub_TTLExpiryWithinGraceStaysTrusted(t *testing.T) {
 	}
 }
 
-// TestT3ShellHub_TTLExpiryBeyondGraceDegrades 钉住宽限的另一半：过期超过
-// 宽限仍未落地就撤可信（R2 的 thread_gone 保护不变），后续读不再信任过期
-// 快照。
+// TestT3ShellHub_TTLExpiryBeyondGraceDegrades 钉住宽限的另一半（R20 P2）：
+// 撤可信锚在**重拉在途时长**上——空闲超过 TTL+宽限后的首次读只是刚发起
+// 重拉，仍返回上一份快照（不假降级）；只有在途超过宽限仍未落地才撤可信
+// （R2 的 thread_gone 保护不变）。
 func TestT3ShellHub_TTLExpiryBeyondGraceDegrades(t *testing.T) {
 	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
 	srv.setArchiveFixture(archiveSnapshotBody(1, "th-a"), nil)
 	cfg := hubTestConfig()
-	cfg.ArchiveTTL = 40 * time.Millisecond
-	cfg.ArchiveStaleGrace = 20 * time.Millisecond
+	cfg.ArchiveTTL = 150 * time.Millisecond
+	cfg.ArchiveStaleGrace = 40 * time.Millisecond
 	hub := newT3ShellHubWithConfig(cfg, nil)
 	defer hub.Close()
 	env := hubTestEnv(url, 0)
@@ -4798,15 +4821,28 @@ func TestT3ShellHub_TTLExpiryBeyondGraceDegrades(t *testing.T) {
 		return v.Snaps != nil && v.Snaps.ArchiveErr == nil
 	})
 
-	// 压住重拉：过期超过宽限后仍未落地，撤可信。
+	// 空闲到过期且早已超过宽限：首次读仍然可信（只是刚发起重拉）。
 	srv.pauseArchive()
-	time.Sleep(cfg.ArchiveTTL + cfg.ArchiveStaleGrace + 30*time.Millisecond)
+	time.Sleep(cfg.ArchiveTTL + cfg.ArchiveStaleGrace + 40*time.Millisecond)
 	view, err := hub.Peek(env, "tok")
 	if err != nil {
 		t.Fatalf("peek: %v", err)
 	}
+	if view.Snaps == nil || view.Snaps.ArchiveErr != nil {
+		t.Fatalf("idle-return first read must not be degraded, got %+v", view.Snaps)
+	}
+	if len(view.Snaps.Archived.Threads) != 1 {
+		t.Fatalf("idle-return read must still serve the previous rows, got %+v", view.Snaps.Archived.Threads)
+	}
+
+	// 重拉被压住在途超过宽限：撤可信。
+	time.Sleep(cfg.ArchiveStaleGrace + 20*time.Millisecond)
+	view, err = hub.Peek(env, "tok")
+	if err != nil {
+		t.Fatalf("peek: %v", err)
+	}
 	if view.Snaps == nil || !errors.Is(view.Snaps.ArchiveErr, errT3ShellArchiveStale) {
-		t.Fatalf("expiry beyond grace must revoke trust, got %+v", view.Snaps)
+		t.Fatalf("refetch in flight beyond grace must revoke trust, got %+v", view.Snaps)
 	}
 	srv.resumeArchive()
 	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {

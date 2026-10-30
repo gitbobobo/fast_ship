@@ -766,20 +766,19 @@ func TestShellState_ApplyCommitIsAtomicWithGeneration(t *testing.T) {
 	entry2.arch.mu.Unlock()
 }
 
-// 准入竞态（复审遗留）：「判定过期 + 撤可信 + 设 inFlight」必须在同一
-// 临界区对读者不可分。旧实现在放 arch.mu 后才调 noteArchiveExpired——
-// 后到读者 B 见 inFlight 直接返回，拿到的视图仍是 archiveReady=true/
-// ArchiveErr=nil（A 还没来得及撤），wait 据此拿过期快照判 thread_gone。
+// 撤可信与在途早退的原子性（R2 / R17 P2-1 / R20 P2 合并后的不变量）：
+// 「重拉在途超过宽限 → 撤可信」必须与「本次准入被合并（return false）」
+// 在同一临界区提交——读者不可能拿到「kick 被拒但视图仍报可信」的组合，
+// 否则 wait 会拿过期快照判 thread_gone。判据锚在本次拉取的发起时刻
+// （refetchStartedAt），不是 validUntil 的年龄。
 //
 // 确定性复现分两步：
 //  1. 锁序证明：先由本 goroutine 持住 s.mu，再启动 admission——它必须阻塞
-//     在 s.mu 上（准入序列第一步取 s.mu）。旧实现第一步取 arch.mu，此刻
-//     会直接把 inFlight 置位（在「B 可见 inFlight 但 A 未撤可信」的窗口
-//     内）；阻塞在 s.mu 则证明 inFlight 不可能先于撤可信被观测。
-//  2. 读者 B 交错重演：放开 admission 后立刻走 B 的路径——见 inFlight
-//     早退、读视图。同一临界区提交保证此时 ArchiveErr 已非空。
+//     在 s.mu 上（准入序列第一步取 s.mu），提交前读者看不到任何变化。
+//  2. 放开 s.mu 后 admission 完成撤可信；此后读者 B 走早退路径，读到的
+//     视图必须已不可信（留行、报 stale）。
 func TestShellState_AdmitArchiveRefreshIsAtomicWithRevoke(t *testing.T) {
-	entry := &t3ShellEntry{state: newT3ShellState(), archTTL: time.Minute}
+	entry := &t3ShellEntry{state: newT3ShellState(), archTTL: time.Minute, archiveStaleGrace: 50 * time.Millisecond}
 	gen := entry.state.archiveGenerationNow()
 	if applied, applyErr := entry.state.applyArchiveSnapshot(
 		t3ArchivedShellSnapshot{SchemaVersion: 1, SnapshotSequence: 1, Threads: shellTestThreads(shellTestThread("th-a", "归档"))},
@@ -790,14 +789,14 @@ func TestShellState_AdmitArchiveRefreshIsAtomicWithRevoke(t *testing.T) {
 		t.Fatalf("seeded archive must be trusted, got %v", snaps.ArchiveErr)
 	}
 
-	// TTL 已过期：簿记手工回拨，下一次准入必须撤可信。
+	// 过期且重拉在途超过宽限：下一次准入必须在早退的同时撤可信。
 	entry.arch.mu.Lock()
-	entry.arch.validUntil = time.Now().Add(-time.Second)
+	entry.arch.validUntil = time.Now().Add(-time.Minute)
+	entry.arch.inFlight = true
+	entry.arch.refetchStartedAt = time.Now().Add(-time.Minute)
 	entry.arch.mu.Unlock()
 
-	// 1) 持住 s.mu：admission 若先取 arch.mu（旧实现）会立刻置 inFlight，
-	//    读者 B 此刻读到的视图 archiveReady 仍为 true——缝隙复现。本实现
-	//    必须阻塞在 s.mu 上，inFlight 不可观测。
+	// 1) 持住 s.mu：admission 必须阻塞在这里，提交前视图仍可信。
 	entry.state.mu.Lock()
 	admitDone := make(chan struct{})
 	var admitted, revoked bool
@@ -807,48 +806,31 @@ func TestShellState_AdmitArchiveRefreshIsAtomicWithRevoke(t *testing.T) {
 	}()
 	select {
 	case <-admitDone:
-		t.Fatalf("admission must block on s.mu first; arch.mu-first would set inFlight before revoking trust")
-	case <-time.After(100 * time.Millisecond):
+		t.Fatalf("admission must block on s.mu (lock order s.mu → arch.mu)")
+	case <-time.After(20 * time.Millisecond):
 	}
-	entry.arch.mu.Lock()
-	if entry.arch.inFlight {
-		t.Fatalf("inFlight must not be observable while s.mu is held before the critical section")
-	}
-	entry.arch.mu.Unlock()
-	// 读者 B 在「准入尚未完成」的窗口读视图：归档面仍可信（A 尚未提交）——
-	// 这是合法的：B 的 kick 判定同样阻塞在 s.mu 上，见到 inFlight 时视图
-	// 必已撤可信。这里只验证 A 提交前视图仍一致（持 s.mu 读字段）。
 	if !entry.state.archiveReady || entry.state.archiveErr != nil {
-		t.Fatalf("pre-admission view must still be trusted, ready=%v err=%v", entry.state.archiveReady, entry.state.archiveErr)
+		t.Fatalf("pre-commit view must still be trusted, ready=%v err=%v", entry.state.archiveReady, entry.state.archiveErr)
 	}
 	entry.state.mu.Unlock()
 
-	// 2) 重演 B 的交错：admission 完成后 inFlight 已可观测，B 的 kick 判定
-	//    早退（admitted=false）；B 读到的视图必须已撤可信。
+	// 2) admission 完成：早退 + 撤可信在同一临界区提交。
 	<-admitDone
-	if !admitted || !revoked {
-		t.Fatalf("expired cache must admit a refetch and revoke trust, admitted=%v revoked=%v", admitted, revoked)
+	if admitted || !revoked {
+		t.Fatalf("in-flight beyond grace must be merged onto the running fetch and revoke trust, admitted=%v revoked=%v", admitted, revoked)
+	}
+	snaps := entry.state.snapshots()
+	if snaps.ArchiveErr == nil || !errors.Is(snaps.ArchiveErr, errT3ShellArchiveStale) {
+		t.Fatalf("revocation must be applied in the same critical section, got %v", snaps.ArchiveErr)
+	}
+	if len(snaps.Archived.Threads) != 1 || snaps.Archived.Threads[0].ID != "th-a" {
+		t.Fatalf("revoked face must keep the last rows, got %+v", snaps.Archived.Threads)
+	}
+	if st := entry.state.status(); st.ArchiveReady {
+		t.Fatalf("archiveReady must be revoked together with the in-flight early return")
 	}
 	if admittedAgain, _ := entry.admitArchiveRefresh(); admittedAgain {
 		t.Fatalf("reader B must merge onto the in-flight fetch, not admit a second one")
-	}
-	entry.arch.mu.Lock()
-	if !entry.arch.inFlight {
-		t.Fatalf("admission must leave inFlight set")
-	}
-	entry.arch.mu.Unlock()
-	snaps := entry.state.snapshots()
-	if snaps.ArchiveErr == nil {
-		t.Fatalf("reader B observed inFlight but the view still reports trusted: the admission-to-revoke gap is still open")
-	}
-	if !errors.Is(snaps.ArchiveErr, errT3ShellArchiveStale) {
-		t.Fatalf("expired refetch must report stale semantics, got %v", snaps.ArchiveErr)
-	}
-	if len(snaps.Archived.Threads) != 1 || snaps.Archived.Threads[0].ID != "th-a" {
-		t.Fatalf("expired face must keep the last rows, got %+v", snaps.Archived.Threads)
-	}
-	if st := entry.state.status(); st.ArchiveReady {
-		t.Fatalf("archiveReady must be revoked in the same critical section as inFlight")
 	}
 }
 

@@ -20,10 +20,12 @@ import (
 //
 // 三面保证：
 //   - TTL：一次成功快照只在 t3ShellHubConfig.ArchiveTTL 内当可信复用，过期
-//     重拉——归档面没有增量通道，快照不得被长期当作实时完整数据。过期
-//     重拉发起的同时视图层把归档面撤为不可信（noteArchiveExpired，留行
-//     但不封窗），新快照落地才恢复——否则在途期间 Peek/wait 会拿过期
-//     快照当完整结论（与写后失效同型缺口，Finding R2）。
+//     重拉——归档面没有增量通道，快照不得被长期当作实时完整数据。撤可信
+//     锚在**重拉在途时长**上（R20 P2）：过期只触发一次重拉，读取仍返回上
+//     一份快照（TTL 到期不等于数据作废，空闲后首次读不该被标降级）；只有
+//     在途超过 ArchiveStaleGrace 仍未落地（或重拉失败写真实错误）才撤为
+//     不可信（noteArchiveExpired，留行但不封窗），新快照落地才恢复——否则
+//     慢/挂起的重拉窗口里 Peek/wait 会拿过期快照当完整结论（Finding R2）。
 //   - 合并：同一环境并发的归档读取由 arch.inFlight 哨兵合并成一次上游
 //     调用——锁内判定才放行，先放行并发再看缓存会重复打上游。
 //   - 失效：归档相关写操作（archive/unarchive/settle/unsettle 等改变归档集
@@ -87,6 +89,11 @@ type t3ArchiveFetchState struct {
 	// inFlight 已在途拉取的哨兵：登记「已发起」，TTL/冷却外的并发读出
 	// 合并到这一次而不重复拨号——由发起方在拉取结束后清。
 	inFlight bool
+	// refetchStartedAt 是本次在途拉取的发起时刻（R20 P2）：撤可信锚在这里
+	// 而不是 validUntil 的年龄——「过期多久」不代表「重拉挂了多久」，空闲
+	// 回来后首次读刚发起的拉取不该被判过期太久。拉取结束（落地/失败）
+	// 时清零。
+	refetchStartedAt time.Time
 	// needsRefetch 表示「在途拉取期间发生过失效」：在途结果已是写前状态，
 	// inFlight 落地后需要紧跟一次新拉取补回写后状态。kick 的放行条件
 	// 把它当作「簿记已无效」处理（validUntil/retryAfter 均被失效清零），
@@ -152,6 +159,7 @@ func (e *t3ShellEntry) kickArchiveRefresh() {
 		defer func() {
 			e.arch.mu.Lock()
 			e.arch.inFlight = false
+			e.arch.refetchStartedAt = time.Time{}
 			// 世代护栏的闭环：落地留下 needsRefetch（拉取途中发生过失效，
 			// 在途结果是写前状态——apply 的世代不符落地与失败路径的世代
 			// 不符都留它）时，收尾处清零并立即补发一次写后拉取。标志在
@@ -195,37 +203,35 @@ func (e *t3ShellEntry) admitArchiveRefresh() (admitted bool, revoked bool) {
 	if e.arch.mode == t3ArchiveModeLegacy {
 		return false, false
 	}
-	if e.arch.inFlight || now.Before(e.arch.validUntil) || now.Before(e.arch.retryAfter) {
-		// 在途分支同样要按宽限撤可信（R17 P2-1）：重拉一旦发起，后续读全部
-		// 走这条早退，撤可信若只挂在「准入成功」那一次，就会拖到拉取结束
-		// （最长 archTTL）——慢/挂起的重拉窗口里过期快照仍被报 archiveReady
-		// =true、ArchiveErr=nil，Peek/wait 据此判 thread_gone（R2 要堵的窗
-		// 口重现）。撤可信与在途状态在同一临界区内完成，对读者不可分。
-		revoked := e.arch.inFlight && !e.arch.validUntil.IsZero() && now.Sub(e.arch.validUntil) > e.archiveStaleGrace
+	if e.arch.inFlight {
+		// 在途过久才撤可信（R17 P2-1 / R20 P2）：判据锚在**本次拉取发起
+		// 时刻**上，而不是 validUntil 的年龄——过期只说明该重拉了，空闲
+		// 回来后首次读自己刚发起的那次拉取不该被判「过期太久」。重拉一旦
+		// 发起，后续读全走这条早退，撤可信只能落在这里，否则慢/挂起的在途
+		// 窗口里过期快照仍被报 archiveReady=true、ArchiveErr=nil，Peek/wait
+		// 据此判 thread_gone（R2 要堵的窗口）。撤可信与在途状态在同一临界区
+		// 内完成，对读者不可分。
+		revoked := !e.arch.refetchStartedAt.IsZero() && now.Sub(e.arch.refetchStartedAt) > e.archiveStaleGrace
 		if revoked {
 			e.state.noteArchiveExpiredLocked()
 		}
 		return false, revoked
 	}
+	if now.Before(e.arch.validUntil) || now.Before(e.arch.retryAfter) {
+		return false, false
+	}
 	// 按需路径已确认：第一次发起拉取把 mode 记为 snapshot（同一临界区
 	// 提交，与「inFlight 置位」不可分）。
 	e.arch.mode = t3ArchiveModeSnapshot
-	// 准入判定通过：validUntil 一定是零值或已过（上面已 return）。非零即
-	// 「曾信任但已过期」。过期只表示「该重拉了」，不等于数据作废（R16
-	// P2-2）：宽限期（archiveStaleGrace）内重拉在途时读取仍返回上一份快照，
-	// 不因「触发重拉的这次读」就把面标 degraded——否则每个环境每 TTL 都有
-	// 一次读被误报降级（bot 侧据此把环境计入 incomplete_environments）。
-	// 超过宽限仍未落地才撤可信（Finding R2：撤了之后 Peek/wait 不得拿过期
-	// 快照判 thread_gone、谎报归档列表完整）；「撤可信 + 设 inFlight」仍在
-	// 同一临界区完成，对读者不可分。
-	expired := !e.arch.validUntil.IsZero()
-	staleGraceExpired := expired && now.Sub(e.arch.validUntil) > e.archiveStaleGrace
+	// 准入判定通过：validUntil 一定是零值或已过。过期只表示「该重拉了」，
+	// 不等于数据作废（R16 P2-2）：本次读取仍返回上一份快照，不因「触发重拉
+	// 的这次读」就把面标 degraded——否则每个环境每 TTL（以及空闲回来的
+	// 首次读）都会有一次读被误报降级。撤可信改由在途时长兜底（上面的
+	// inFlight 分支）：重拉真的挂了超过 ArchiveStaleGrace 才降级。
 	e.arch.inFlight = true
+	e.arch.refetchStartedAt = now
 	e.arch.needsRefetch = false
-	if staleGraceExpired {
-		e.state.noteArchiveExpiredLocked()
-	}
-	return true, staleGraceExpired
+	return true, false
 }
 
 // ensureArchive 执行一次归档快照拉取：探测 → 拨一次性会话 →
