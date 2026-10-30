@@ -307,8 +307,11 @@ func (e *t3ShellEntry) ensureArchive(ctx context.Context) error {
 			// 重新写回失败态——legacy 流可能很久不发下一帧，正确的归档
 			// 数据要背负到那时。先收尾则切换发生在记账之后，随后落地的
 			// 订阅快照必然覆盖它。世代判定不受顺序影响（切换不推进
-			// archiveGeneration）；记下的 retryAfter 冷却随切换清零，而
-			// legacy 准入本就短路、簿记不再参与判定，无害。切换内
+			// archiveGeneration）；记下的 retryAfter 冷却随切换保留（R14
+			// P2-2），legacy 准入本就按 mode 短路、簿记不参与判定——保留
+			// 是为了在订阅面同样被判方法不存在时（resetArchiveModeToUnknown
+			// 回 Unknown）留一个现成的探测冷却：清零会让「两个方法都不存
+			// 在」的环境每次读都立即重探测，ping-pong 永不收敛。切换内
 			// noteArchiveExpiredLocked 在 archiveReady 已撤时是 no-op，
 			// archiveErr 保留本次真实失败原因——「失败、订阅重拉中」，
 			// 语义如实。
@@ -386,20 +389,26 @@ func isArchiveSnapshotMethodMissing(err error) bool {
 }
 
 // switchToArchiveLegacy 把该 entry 切到旧面订阅模式。临界区与
-// admitArchiveRefresh 同序（s.mu → arch.mu）：mode 翻转与「撤可信+清簿
-// 记」对读者不可分——准入判定在本临界区之外不可能看到「mode 已是
-// legacy 而 archiveReady 仍可信」的中间态；此后 kickArchiveRefresh 短
-// 路不再发按需拨号。调用方先经 noteArchiveFetchFailed 记失败、再进入本
+// admitArchiveRefresh 同序（s.mu → arch.mu）：mode 翻转与「撤可信+簿记
+// 收尾」对读者不可分——准入判定在本临界区之外不可能看到「mode 已是
+// legacy 而 archiveReady 仍可信」的中间态；此后 kickArchiveRefresh 短路
+// 不再发按需拨号。调用方先经 noteArchiveFetchFailed 记失败、再进入本
 // 切换（顺序依据见 ensureArchive：先收尾失败、后放行订阅，权威快照落地
 // 才不会被失败收尾重新盖回失败态）；inFlight 由其 defer 清理；归档数据
 // 由随后放行的常驻订阅 goroutine 补齐（entry 创建时已停泊，激活可重复：
 // 自愈回 Unknown 后重探测再次判方法不存在时，本函数再次放行它）。
+// retryAfter 不在这里清零（R14 P2-2）：刚记的失败冷却保留下来，若订阅
+// 面随后也被判方法不存在，resetArchiveModeToUnknown 回 Unknown 后它就
+// 是现成的探测冷却，双方法缺失的环境至多每冷却窗口重探测一次，而不是
+// 每次读都重拨；冷却过期后照常重探测（误判/升级自愈不受影响）。
 func (e *t3ShellEntry) switchToArchiveLegacy() {
 	e.state.mu.Lock()
 	e.arch.mu.Lock()
 	e.arch.mode = t3ArchiveModeLegacy
 	e.arch.validUntil = time.Time{}
-	e.arch.retryAfter = time.Time{}
+	// retryAfter 保留（R14 P2-2）：见函数头。legacy 准入按 mode 短路，
+	// 簿记在订阅模式下不参与判定；它只在 resetArchiveModeToUnknown 回
+	// Unknown 后重新生效，作双方法缺失环境的探测冷却。
 	e.arch.needsRefetch = false
 	e.state.noteArchiveExpiredLocked() // archiveReady → false，留行但报已失效
 	e.arch.mu.Unlock()
@@ -418,11 +427,16 @@ func (e *t3ShellEntry) switchToArchiveLegacy() {
 // 常驻订阅以「方法不存在」的明确 Exit 失败时，本该有订阅面的环境反而
 // 没有——这是「环境中途升级回新版（getArchivedShellSnapshot 已可用，地
 // 址与凭证不变、entry 不重建）或上次误判（代理层返回的 unknown method
-// 文案不是方法分派结果）」的证据。回 Unknown 后下一次 kick 按准入流程
-// 重探测按需快照：环境确实已升级则按需路径恢复供数；是真旧环境则探
-// 测会再次判方法不存在、经 switchToArchiveLegacy 切回订阅面，只多付一
-// 次探测拨号。只在确认方法不存在时才回退判定——订阅的其他失败（断
-// 线、业务拒绝）不重置，否则真旧环境的普通故障会让按需面每轮空拨。
+// 文案不是方法分派结果）」的证据。回 Unknown 后按需簿记里仍留上次探
+// 测失败记下的 retryAfter 冷却（R14 P2-2，不再无条件清零）：冷却期内读
+// 取照旧封住探测，过期后的下一次 kick 按准入流程重探测按需快照——环境
+// 确实已升级则按需路径恢复供数；是真旧环境则探测会再次判方法不存在、
+// 经 switchToArchiveLegacy 切回订阅面，每轮 ping-pong 至多隔一个冷却窗
+// 口（探测失败记账→切订阅→订阅判方法不存在→回 Unknown，冷却保留）——
+// 若在回退时无条件清零冷却，「两个方法都不存在」的环境（未来上游移除
+// 归档读、或代理统一回 unknown method）会每读各付一次探测+拨号+唤醒订
+// 阅，永不收敛，与本函数旧注释的「只多付一次探测拨号」相违。只在确认方法不存在时才回退判定——订阅的其他失败（断线、业务拒
+// 绝）不重置，否则真旧环境的普通故障会让按需面每轮空拨。
 //
 // 回退同时撤归档面可信（R13 P2-2，同一临界区）：订阅供数通道已被判不
 // 存在，面上的订阅快照——可能来自早已死去的供数连接——不得继续被当
@@ -438,8 +452,10 @@ func (e *t3ShellEntry) switchToArchiveLegacy() {
 // legacyCh 的待命态——否则重置后的订阅重连仍会照旧失败，每次失败经
 // endFaceConnection 把归档面再清一遍，而按需簿记刚被封窗时 kick 短路不
 // 重拉，归档面会整整消失一个 TTL。锁序与 switchToArchiveLegacy 同一临界
-// 区（s.mu → arch.mu）：mode 翻回与簿记清理对准入判定不可分——「mode
-// 已是 Unknown 而 retryAfter 仍封住 kick」的中间态不会放给读者。
+// 区（s.mu → arch.mu）：mode 翻回与簿记清理对准入判定不可分——读者不
+// 会看到「mode 已是 Unknown 而探测冷却尚未就位」的能立即准入的中间态
+// （R14 P2-2 起 retryAfter 随切换保留，该原子性同时是 ping-pong 阻尼成
+// 立的前提）。
 func (e *t3ShellEntry) resetArchiveModeToUnknown() {
 	e.state.mu.Lock()
 	e.arch.mu.Lock()
@@ -448,9 +464,14 @@ func (e *t3ShellEntry) resetArchiveModeToUnknown() {
 	reset := false
 	if e.arch.mode == t3ArchiveModeLegacy {
 		e.arch.mode = t3ArchiveModeUnknown
-		// 清按需簿记：让下一次 kick 立刻准入发探测，不等失败冷却。
+		// 簿记收尾（R14 P2-2）：validUntil 清零（撤可信由下方
+		// noteArchiveExpiredLocked 承担，旧快照不得继续报完整）；
+		// retryAfter 保留——上次探测失败记下的冷却就是回 Unknown 后的
+		// 探测冷却，让「双方法都不存在」的 ping-pong 每轮至少隔一个
+		// TTL，而不是每读都重探测。冷却已过期（升级发生在最后一次探
+		// 测失败很久之后）时它自然不再封窗，下一次读照常准入重探测：
+		// 误判/升级自愈只延迟到冷却到期，不会被钉死。
 		e.arch.validUntil = time.Time{}
-		e.arch.retryAfter = time.Time{}
 		e.arch.needsRefetch = false
 		// 同一临界区撤归档面可信（R13 P2-2）：订阅供数通道已被判不存在，
 		// 面上最近一次订阅快照（可能来自早已死去的连接）不得继续当完整

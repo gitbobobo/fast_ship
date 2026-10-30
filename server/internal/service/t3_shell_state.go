@@ -709,12 +709,17 @@ func (s *t3ShellState) snapshots() *t3ShellSnapshots {
 	return snaps
 }
 
-// t3ArchiveRowDigest 是归档行参与发布去重的对外可见摘要（R13 Note-2）：
-// ID + 列表摘要实际渲染的字段（标题/运行态/活动状态/分支/模型/更新与归
-// 档时刻/收进历史标记/最近 run 起始时刻，与 normalizeT3ThreadShell 从
-// shell 读的字段同源）。指纹若只含线程 ID 序列，TTL 重拉同集合但行内容
-// 变了（改名/状态翻转）会被判「无新话可说」——服务端内存已换新而浏览
-// 器停在旧行，直到无关事件或手动刷新。全字段字符串，可直接 slices.Equal。
+// t3ArchiveRowDigest 是归档行参与发布去重的对外可见摘要（R13 Note-2，
+// R14 Note-1 补关联/运行字段）：ID + 列表摘要实际渲染的字段（标题/运行态
+// status=run_status 原文/activityRunStatus/分支/provider=modelSelection.
+// instanceID/模型/更新与归档时刻/收进历史标记/最近 run 起始时刻/关联
+// PR 数（thread-row 的 PR 徽标，与 normalizeT3ThreadShell 的
+// pull_request_count 同一推导）/子代理父线程（rows-compose 按它嵌套行），
+// 与 normalizeT3ThreadShell 从 shell 读的字段同源）。指纹若只含线程 ID
+// 序列，TTL 重拉同集合但行内容变了（改名/状态翻转/关联或解关联 PR——
+// 外部关联操作通常不推进 updatedAt）会被判「无新话可说」不发事件——服
+// 务端内存已换新而浏览器停在旧行（旧 PR 徽标），直到无关事件或手动刷
+// 新。全字段可直接 slices.Equal。
 type t3ArchiveRowDigest struct {
 	ID              string
 	Title           string
@@ -727,9 +732,14 @@ type t3ArchiveRowDigest struct {
 	ArchivedAt      string
 	SettledOverride string
 	RunStartedAt    string
+	PullRequests    int
+	ParentThreadID  string
 }
 
 // archiveRowDigestOf 从一行归档线程提取可见摘要（指针字段空值归空串）。
+// PR 计数与父线程字段与 normalizeT3ThreadShell 同一推导（t3PullRequestCount
+// 的字段存在性判定、t3IsSubagentThread 的 lineage 关系判定），保证指纹
+// 的「对外可见」口径与 snapshots() 交给浏览器的列表一致。
 func archiveRowDigestOf(t *t3ThreadShell) t3ArchiveRowDigest {
 	d := t3ArchiveRowDigest{
 		ID:        t.ID,
@@ -753,6 +763,10 @@ func archiveRowDigestOf(t *t3ThreadShell) t3ArchiveRowDigest {
 	}
 	if t.LatestRunStartedAt != nil {
 		d.RunStartedAt = *t.LatestRunStartedAt
+	}
+	d.PullRequests = t3PullRequestCount(t, len(normalizeT3PullRequests(t.PullRequests)))
+	if t3IsSubagentThread(t) && t.Lineage.ParentThreadID != "" {
+		d.ParentThreadID = t.Lineage.ParentThreadID
 	}
 	return d
 }

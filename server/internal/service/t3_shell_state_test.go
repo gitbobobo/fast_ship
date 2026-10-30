@@ -1146,3 +1146,67 @@ func TestShellState_ArchiveFingerprintIncludesRowContent(t *testing.T) {
 		t.Fatalf("collection growth must change the ID sequence")
 	}
 }
+
+// 归档行指纹必须包含列表行渲染的关联/运行字段（R14 Note-1）：关联 PR 数
+// （thread-row 的 PR 徽标，t3PullRequestCount 同一推导）与子代理父线程
+// （rows-compose 按它嵌套行）。外部关联/解关联 PR 通常不推进 updatedAt，
+// 指纹不含它的话同集合 PR 数变会被判「无新话可说」不发事件，浏览器停
+// 在旧徽标。同集合（ID 序列不变）PR 数变 → 指纹变；父线程关系变同理。
+func TestShellState_ArchiveFingerprintIncludesAssociationFields(t *testing.T) {
+	state := newT3ShellState()
+	if err := state.applyActiveItem(shellTestAuthoritative(1, nil, shellTestThreads(shellTestThread("th-live", "活跃")))); err != nil {
+		t.Fatalf("apply active: %v", err)
+	}
+	archivedAt := "2026-10-01T00:00:00.000Z"
+	subagent := "subagent"
+	row := func(pullRequests []json.RawMessage, parent *string) *t3ThreadShell {
+		t := &t3ThreadShell{ID: "th-a", ProjectID: "p-1", Title: "归档", Status: "idle", ArchivedAt: &archivedAt, UpdatedAt: "2026-10-01T08:00:00.000Z", PullRequests: pullRequests}
+		if parent != nil {
+			t.Lineage = &t3ThreadLineage{ParentThreadID: *parent, RelationshipToParent: &subagent}
+		}
+		return t
+	}
+	onePR := []json.RawMessage{json.RawMessage(`{"host":"github.com","repository":"o/r","number":3}`)}
+	twoPRs := append(onePR, json.RawMessage(`{"host":"github.com","repository":"o/r","number":4}`))
+	apply := func(thread *t3ThreadShell) {
+		t.Helper()
+		if applied, applyErr := state.applyArchiveSnapshot(t3ArchivedShellSnapshot{SchemaVersion: 1, SnapshotSequence: 5, Threads: shellTestThreads(thread)}, state.archiveGenerationNow(), nil); !applied || applyErr != nil {
+			t.Fatalf("apply archive snapshot must be trusted")
+		}
+	}
+
+	apply(row(onePR, nil))
+	rows, _ := state.archiveFaceFingerprint()
+	if len(rows) != 1 || rows[0].PullRequests != 1 {
+		t.Fatalf("digest must carry the visible PR count, got %+v", rows)
+	}
+
+	// 同集合 PR 数变（外部关联了第二个 PR，updatedAt 不变）：ID 序列不变、
+	// 摘要变——发布端据此发轻量 State 而不是静默。
+	apply(row(twoPRs, nil))
+	rows2, _ := state.archiveFaceFingerprint()
+	if slices.Equal(rows, rows2) {
+		t.Fatalf("PR count change with same collection must change the fingerprint")
+	}
+	if !slices.Equal(archiveFingerprintIDs(rows2), archiveFingerprintIDs(rows)) {
+		t.Fatalf("PR count change must keep the ID sequence")
+	}
+	if rows2[0].PullRequests != 2 {
+		t.Fatalf("digest must track the new PR count, got %+v", rows2[0])
+	}
+
+	// 同集合父线程关系变（子代理挂到新父线程）：摘要变，ID 序列仍不变。
+	parent := "th-parent-2"
+	apply(row(twoPRs, &parent))
+	rows3, _ := state.archiveFaceFingerprint()
+	if slices.Equal(rows2, rows3) || rows3[0].ParentThreadID != "th-parent-2" {
+		t.Fatalf("parent thread change must change the fingerprint, got %+v", rows3[0])
+	}
+
+	// 非子代理行不携带父线程字段（与 normalizeT3ThreadShell 同一判定）。
+	apply(row(twoPRs, nil))
+	rows4, _ := state.archiveFaceFingerprint()
+	if rows4[0].ParentThreadID != "" {
+		t.Fatalf("non-subagent row must not carry a parent, got %+v", rows4[0])
+	}
+}

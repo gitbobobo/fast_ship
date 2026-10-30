@@ -3767,7 +3767,12 @@ func TestT3ShellHub_LegacyHealsToSnapshotAfterUpgrade(t *testing.T) {
 	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
 	srv.setArchiveLegacy(true)
 	srv.setArchiveFixture(archiveSnapshotBody(1, "th-a"), nil)
-	hub := newT3ShellHubWithConfig(hubTestConfig(), nil)
+	// 小 TTL（R14 P2-2）：mode 回 Unknown 不再清探测冷却（保留上次探测
+	// 失败记下的 retryAfter），自愈重探测发生在冷却到期后的下一次读——
+	// 用小 TTL 让它在测试时间内到期，同 LegacyHealQuietAfterUpgrade。
+	cfg := hubTestConfig()
+	cfg.ArchiveTTL = 300 * time.Millisecond
+	hub := newT3ShellHubWithConfig(cfg, nil)
 	defer hub.Close()
 	env := hubTestEnv(url, 0)
 
@@ -3837,6 +3842,79 @@ func TestT3ShellHub_LegacyHealsToSnapshotAfterUpgrade(t *testing.T) {
 	})
 	if view.Snaps.Archived.Threads[0].ID != "th-a" {
 		t.Fatalf("upgraded env must serve the archive face via the on-demand snapshot, got %+v", view.Snaps.Archived.Threads)
+	}
+}
+
+// 双方法都不存在的 ping-pong 阻尼（R14 P2-2，end-to-end）：按需快照与旧面
+// 订阅同时被判「方法不存在」时，探测失败记账→切订阅→订阅判方法不存在→
+// 回 Unknown 的循环不得随读取收敛失败——回 Unknown 保留（不清零）上次探
+// 测失败记下的 retryAfter 冷却，每轮 ping-pong 至多隔一个 TTL，而不是每
+// 读各付一次探测+拨号+唤醒订阅（修复前 reset 无条件清零冷却，永不停息）。
+func TestT3ShellHub_BothArchiveMethodsMissingDamPerReadReprobe(t *testing.T) {
+	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
+	srv.setArchiveLegacy(true) // 按需快照 → method not found
+	// 旧面订阅同样被判方法不存在：未来上游移除归档读/代理统一回 unknown
+	// method 的环境，两个方法都缺失。
+	srv.setArchiveSubFail(map[string]any{
+		"_tag":    "UnknownException",
+		"message": "method not found: orchestration.subscribeArchivedShell",
+	})
+	hub := newT3ShellHubWithConfig(hubTestConfig(), nil) // 60s TTL：冷却罩住整个观察窗
+	defer hub.Close()
+	env := hubTestEnv(url, 0)
+
+	// 活跃面先就位；归档首读触发第一轮 ping-pong：探测失败 → 切订阅 →
+	// 订阅 Exit method-not-found → mode 回 Unknown（冷却保留）。
+	go hub.View(context.Background(), env, "tok")
+	collector := newShellConnCollector(t, srv)
+	active := collector.await(false)
+	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1")); err != nil {
+		t.Fatalf("send active snapshot: %v", err)
+	}
+	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
+		t.Fatalf("active snapshot not acked")
+	}
+	srv.awaitArchiveSub(t)
+	key := t3ShellHubKey("user-1", "env-1")
+	hub.mu.Lock()
+	entry := hub.entries[key]
+	hub.mu.Unlock()
+	if entry == nil {
+		t.Fatalf("entry missing")
+	}
+	// 第一轮结束的证据：mode 回 Unknown 且探测冷却已就位（回退与冷却在
+	// 同一临界区提交，两者同时可见）。
+	firstRound := false
+	for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); {
+		entry.arch.mu.Lock()
+		mode, retryAfter := entry.arch.mode, entry.arch.retryAfter
+		entry.arch.mu.Unlock()
+		if mode == t3ArchiveModeUnknown && !retryAfter.IsZero() {
+			firstRound = true
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !firstRound {
+		t.Fatalf("double method-missing must round-trip back to Unknown with the probe cooldown retained")
+	}
+
+	// 冷却窗口内的连续读不得各付一次探测/订阅：probe 与 subscribe 调用
+	// 不随读取线性增长（修复前每次读都会重拨快照会话并重拉订阅）。
+	probes := srv.archiveCallCount()
+	subs := srv.archiveSubscribeCount()
+	for i := 0; i < 8; i++ {
+		if _, err := hub.Peek(env, "tok"); err != nil {
+			t.Fatalf("peek: %v", err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	time.Sleep(150 * time.Millisecond)
+	if got := srv.archiveCallCount(); got != probes {
+		t.Fatalf("probe cooldown must gate re-dialing while both methods are missing, snapshot calls %d → %d", probes, got)
+	}
+	if got := srv.archiveSubscribeCount(); got != subs {
+		t.Fatalf("probe cooldown must gate re-arming the legacy subscription, subscribes %d → %d", subs, got)
 	}
 }
 
@@ -4422,7 +4500,11 @@ func TestT3ShellHub_LegacyResetRetractsArchiveTrust(t *testing.T) {
 	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
 	srv.setArchiveLegacy(true)
 	srv.setArchiveFixture(archiveSnapshotBody(1, "th-a"), nil)
-	hub := newT3ShellHubWithConfig(hubTestConfig(), nil)
+	// 小 TTL（R14 P2-2）：reset 保留探测冷却，按需重拉发生在冷却到期后
+	// 的下一次读；小 TTL 让 waitForView 在测试时间内等到重探测。
+	cfg := hubTestConfig()
+	cfg.ArchiveTTL = 300 * time.Millisecond
+	hub := newT3ShellHubWithConfig(cfg, nil)
 	defer hub.Close()
 	env := hubTestEnv(url, 0)
 
@@ -4552,5 +4634,55 @@ func TestT3ShellHub_ArchiveContentChangeAnnouncesState(t *testing.T) {
 	time.Sleep(60 * time.Millisecond)
 	if evs := sub.Drain(); len(evs) != 0 {
 		t.Fatalf("cache-valid reread must stay silent, got %+v", evs)
+	}
+}
+
+// 同集合 PR 数变必须发声（R14 Note-1，end-to-end）：外部关联/解关联 PR
+// 通常不推进 updatedAt，指纹若不含关联 PR 数，TTL 重拉同集合会被判「无
+// 新话可说」不发事件，浏览器停在旧 PR 徽标。修复后：ID 序列不变、PR 数
+// 变 → 恰好一条轻量 State（集合没变不整环境重取），重取后拿到新徽标。
+func TestT3ShellHub_ArchivePRCountChangeAnnouncesState(t *testing.T) {
+	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
+	srv.setArchiveFixture(archiveSnapshotBodyWith(1, []map[string]any{
+		{"id": "th-a", "projectId": "p-1", "title": "归档-th-a", "status": "idle",
+			"archivedAt":   "2026-10-01T00:00:00.000Z",
+			"updatedAt":    "2026-10-01T08:00:00.000Z",
+			"pullRequests": []map[string]any{{"host": "github.com", "repository": "o/r", "number": 3}}},
+	}), nil)
+	cfg := hubTestConfig()
+	cfg.ArchiveTTL = 80 * time.Millisecond
+	hub := newT3ShellHubWithConfig(cfg, nil)
+	defer hub.Close()
+	env := hubTestEnv(url, 0)
+
+	sub := hub.Subscribe("user-1")
+	defer sub.Close()
+	_, _, _, _, _ = establishBothFaces(t, hub, srv, env, "tok", 42, "th-1")
+	ev := awaitShellEvent(t, sub, func(e T3ShellEvent) bool { return e.Full })
+	if ev.EnvironmentID != "env-1" || !ev.Full {
+		t.Fatalf("first landing must publish Full, got %+v", ev)
+	}
+	sub.Drain()
+
+	// 同集合、PR 数变（外部又关联了一个 PR，updatedAt 原样）：ID 序列不变
+	// → 不得发 Full；行可见内容变 → 恰好一条轻量 State。
+	srv.setArchiveFixture(archiveSnapshotBodyWith(2, []map[string]any{
+		{"id": "th-a", "projectId": "p-1", "title": "归档-th-a", "status": "idle",
+			"archivedAt":   "2026-10-01T00:00:00.000Z",
+			"updatedAt":    "2026-10-01T08:00:00.000Z",
+			"pullRequests": []map[string]any{{"host": "github.com", "repository": "o/r", "number": 3}, {"host": "github.com", "repository": "o/r", "number": 4}}},
+	}), nil)
+	time.Sleep(cfg.ArchiveTTL + 40*time.Millisecond)
+	if _, err := hub.Peek(env, "tok"); err != nil {
+		t.Fatalf("peek: %v", err)
+	}
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil &&
+			len(v.Snaps.Archived.Threads) == 1 && len(v.Snaps.Archived.Threads[0].PullRequests) == 2
+	})
+	time.Sleep(60 * time.Millisecond) // 发布窗口
+	evs := sub.Drain()
+	if len(evs) != 1 || evs[0].Full || evs[0].State == "" {
+		t.Fatalf("same-collection PR count change must announce exactly one lightweight State (no Full), got %+v", evs)
 	}
 }

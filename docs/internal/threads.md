@@ -198,12 +198,18 @@ workspace-options 选），由 T3 校验路径；Fast Ship 不另做项目目录
   的，冷启动等首次同步期间新起的 run 不在里面；`shell.activeRunId` 为空时
   （典型是 waiting）才回读一次投影，保留「waiting/后台工作也算可停」的既有
   口径；再否则 shell 的 `latestRunId` 带着可中断后台工作
-  （`t3HasInterruptibleBackgroundWork`：排除普通 command 与 PR watch 前缀的
-  monitor，awaited 的 command 例外——它占完成位、状态因它判 running，
-  回退停不了它就「显示 running 却点不停」——「可被停止」与「占完成位」
-  是两个独立口径，后者见 `t3TaskHoldsCompletion`）→ 中断最近 run；
-  都没有 → `stopped=false`（T3 此场景只做 PR unwatch，Fast Ship 不维护
-  PR watch）。选中后发 `run.interrupt`（`holdQueue=true`），run_id 回填。
+  （`t3HasInterruptibleBackgroundWork`：PR watch 前缀的 monitor 无论是否
+  awaited 都排除，未声明 awaited 的普通 command 也排除——PR watch 不是
+  run 上的工作，停它需 `thread.pull-request.watch` `watching=false` 的解
+  监听专门分支，`run.interrupt` 停不了它，放行只会让回退把中断引向一条
+  已结束的最近 run：上游按「run 不活跃」拒收（用户见 502），或受理返回
+  stopped=true 而 PR watch 照跑、线程仍判 running（「假停」）；awaited
+  的 run 挂载类（command/subagent/background_task）放行——awaited 占完
+  成位、状态因它判 running，回退停不了它就「显示 running 却点不停」——
+  「可被停止」与「占完成位」是两个独立口径，后者见 `t3TaskHoldsCompletion`）
+  → 中断最近 run；都没有 → `stopped=false`（T3 此场景只做 PR unwatch，
+  Fast Ship 不维护 PR watch）。选中后发 `run.interrupt`（`holdQueue=true`），
+  run_id 回填。
 
 「无目标 → Stopped=false」的判定只对回退路径有意义。
 

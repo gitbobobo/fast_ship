@@ -1511,13 +1511,21 @@ func TestT3HasInterruptibleBackgroundWork(t *testing.T) {
 	}) {
 		t.Fatalf("plain monitor must count as interruptible")
 	}
-	// awaited 的 PR watch monitor 同样可停（R13 Note-1）：awaited 是最高
-	// 优先的放行，前缀排除只约束未声明 awaited 的 monitor——否则它占完
-	// 成位、状态判 running，回退却选不出它。
-	if !t3HasInterruptibleBackgroundWork([]t3PendingBackgroundTask{
+	// awaited 的 PR watch monitor 仍排除（R14 P2-1）：PR watch 不是 run
+	// 上的工作，Stop 回退只发 run.interrupt，停它需 watching=false 专门分
+	// 支——前缀排除先于 awaited 判定；放行它只会让 Stop 对已结束的最近
+	// run 发中断（上游拒收 502，或「假停」），不如如实 stopped=false。
+	if t3HasInterruptibleBackgroundWork([]t3PendingBackgroundTask{
 		{TaskID: "pull-request-watch:o/r#3", Kind: "monitor", Awaited: true},
 	}) {
-		t.Fatalf("awaited PR watch monitor must count as interruptible")
+		t.Fatalf("awaited PR watch monitor must still be excluded")
+	}
+	// awaited 的 run 挂载类可停：subagent/background_task 本就放行（kind
+	// 排除只约束 command），这里钉住 awaited 豁免只对 run 挂载类生效。
+	if !t3HasInterruptibleBackgroundWork([]t3PendingBackgroundTask{
+		{TaskID: "bg-wait", Kind: "background_task", Awaited: true},
+	}) {
+		t.Fatalf("awaited background_task must count as interruptible")
 	}
 }
 
@@ -1525,8 +1533,9 @@ func TestT3HasInterruptibleBackgroundWork(t *testing.T) {
 // 唤醒代理）与可被停止（Stop 回退还能对什么下手）口径不同，同一条后台工作
 // 在两侧可以得出不同结论——awaited 的 command 占位且可停（不停它「显示
 // running 却点不停」）；普通 command 两侧都不占（不占位、不可停）；普通
-// monitor 不占位但可停止；PR watch 两侧都不占，但 awaited 的 PR watch
-// monitor 占位且可停（R13 Note-1）。
+// monitor 不占位但可停止；PR watch 在 awaited 时占位但不可停（R14 P2-1：
+// 停它需 watching=false 专门分支，run.interrupt 不停它——占位与可停的分
+// 离正在于此），未 awaited 时两侧都不占。
 func TestT3HoldsCompletionVsInterruptible(t *testing.T) {
 	cases := []struct {
 		name          string
@@ -1539,7 +1548,7 @@ func TestT3HoldsCompletionVsInterruptible(t *testing.T) {
 		{"普通 monitor：不占位、可停止", t3PendingBackgroundTask{TaskID: "w1", Kind: "monitor"}, false, true},
 		{"awaited monitor：占位、可停止", t3PendingBackgroundTask{TaskID: "w2", Kind: "monitor", Awaited: true}, true, true},
 		{"PR watch monitor：都不占", t3PendingBackgroundTask{TaskID: "pull-request-watch:o/r#1", Kind: "monitor"}, false, false},
-		{"awaited PR watch monitor：占位、可停止", t3PendingBackgroundTask{TaskID: "pull-request-watch:o/r#2", Kind: "monitor", Awaited: true}, true, true},
+		{"awaited PR watch monitor：占位、不可停止", t3PendingBackgroundTask{TaskID: "pull-request-watch:o/r#2", Kind: "monitor", Awaited: true}, true, false},
 		{"subagent：占位、可停止", t3PendingBackgroundTask{TaskID: "s1", Kind: "subagent"}, true, true},
 		{"background_task：占位、可停止", t3PendingBackgroundTask{TaskID: "b1", Kind: "background_task"}, true, true},
 		{"未知 kind：占位、可停止", t3PendingBackgroundTask{TaskID: "u1", Kind: "hologram"}, true, true},
