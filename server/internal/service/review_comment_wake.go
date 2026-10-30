@@ -124,32 +124,21 @@ type commentWakePayload struct {
 	} `json:"installation"`
 }
 
-// commentWakePayloadGuards 纯 payload 守卫（不碰库、不发网络）：依次判
-// action（只受理 created）、mention（大小写不敏感包含）、PR 归属
-// （issue.pull_request 存在 + 仓库/编号可用）。任一不过返回 nil——忽略判定
-// 完全由 payload 决定，不登记幂等账：忽略类投递重投再忽略一遍，零副作用。
-// 启用项目反查在最终事务内做（见 handleCommentWake 阶段二），这里不预查。
+// commentWakePayloadBaseGuards 不依赖唤醒串的纯 payload 守卫（不碰库、不
+// 发网络）：判 action（只受理 created）、PR 归属（issue.pull_request 存在 +
+// 仓库/编号可用）、机器评论标记。任一不过返回 nil——忽略判定完全由 payload
+// 决定，不登记幂等账。与唤醒串读取（App 身份读取 = DB 读 + AES 解密）拆开：
+// 前者先跑，App 身份读取只发生在可能是唤醒的投递上——否则活跃公开仓库里
+// 任何人的任意评论都会放大成一次设置读取（fast-ship-bot 第 40 轮 Note）。
 // 评论者身份过滤在实拉 PR 后做（commentWakeAuthorized）：需要与实拉 PR
 // 作者登录名比对，且 Forgejo payload 没有关系字段，无法纯 payload 判定。
-func commentWakePayloadGuards(body []byte, mentions []string) *commentWakePayload {
+func commentWakePayloadBaseGuards(body []byte) *commentWakePayload {
 	var p commentWakePayload
 	if err := json.Unmarshal(body, &p); err != nil {
 		return nil
 	}
 	// 只受理新建评论；编辑/删除不唤醒。
 	if p.Action != "created" {
-		return nil
-	}
-	// 正文未点名机器人（规格字面量或部署机器人句柄）：不是给审查者的指令。
-	lower := strings.ToLower(p.Comment.Body)
-	mentioned := false
-	for _, m := range mentions {
-		if strings.Contains(lower, m) {
-			mentioned = true
-			break
-		}
-	}
-	if !mentioned {
 		return nil
 	}
 	// 机器自评论不唤醒：审查结论与复审总结的正文由模型生成，可能引用
@@ -171,6 +160,30 @@ func commentWakePayloadGuards(body []byte, mentions []string) *commentWakePayloa
 		return nil
 	}
 	return &p
+}
+
+// commentWakeMentioned 正文点名判定（大小写不敏感包含，唤醒串 = 规格字面
+// 量或部署机器人句柄）。
+func commentWakeMentioned(p *commentWakePayload, mentions []string) bool {
+	lower := strings.ToLower(p.Comment.Body)
+	for _, m := range mentions {
+		if strings.Contains(lower, m) {
+			return true
+		}
+	}
+	return false
+}
+
+// commentWakePayloadGuards 组合守卫（base + 唤醒串）：重投闸门与测试用。
+func commentWakePayloadGuards(body []byte, mentions []string) *commentWakePayload {
+	p := commentWakePayloadBaseGuards(body)
+	if p == nil {
+		return nil
+	}
+	if !commentWakeMentioned(p, mentions) {
+		return nil
+	}
+	return p
 }
 
 // commentAssociationAllowed GitHub association 白名单（可用纯 payload
@@ -336,14 +349,18 @@ func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, ev
 		return ErrDeliveryDuplicated
 	}
 
-	// 纯 payload 守卫：非 created/无唤醒串/非 PR/畸形投递静默忽略（不登记）。
+	// 纯 payload 守卫（base 先行）：非 created/非 PR/机器评论/畸形投递
+	// 零成本忽略——App 身份读取只发生在可能是唤醒的投递上。
+	payload := commentWakePayloadBaseGuards(body)
+	if payload == nil {
+		return nil
+	}
 	mentions, err := s.commentWakeMentions(ctx)
 	if err != nil {
 		// 瞬时故障不落账：返回 500 让平台重投（重投时读取恢复即正常处理）。
 		return err
 	}
-	payload := commentWakePayloadGuards(body, mentions)
-	if payload == nil {
+	if !commentWakeMentioned(payload, mentions) {
 		return nil
 	}
 
@@ -518,6 +535,16 @@ func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, ev
 			// P2：无条件重投会让同秒新 head 永久丢唤醒）。
 			pr2, ferr := client.GetPullRequest(pullCtx, repo, prNumber)
 			if ferr != nil {
+				// 与首次实拉同口径：确定性失败（PR 已删/凭证吊销/仓库转走）
+				// 重投只会得到同一结果——判丢弃并补登幂等账，不再按瞬时失
+				// 败刷满重投上限后发误导通知（fast-ship-bot 第 40 轮 P2）。
+				if deterministicReviewAccessErr(ferr) {
+					s.logger.Warn("评论唤醒同刻复核实拉确定性失败，丢弃投递",
+						zap.String("integration", integrationID),
+						zap.String("delivery", deliveryID), zap.Error(ferr))
+					s.recordDroppedDelivery(ctx, integrationID, deliveryID, event)
+					return nil
+				}
 				return ferr
 			}
 			if pr2.HeadSHA != pr.HeadSHA {

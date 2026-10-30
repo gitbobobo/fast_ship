@@ -8,6 +8,7 @@ import (
 
 	"github.com/godbobo/fast_ship/server/internal/forge"
 	"github.com/godbobo/fast_ship/server/internal/model"
+	"github.com/godbobo/fast_ship/server/internal/pkg/githubapp"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
@@ -192,7 +193,10 @@ func deterministicReviewAccessErr(err error) bool {
 		errors.Is(err, gorm.ErrRecordNotFound) ||
 		// 密文损坏两处同口径：Forgejo 集成密文与 GitHub App 部署配置密文
 		// （解密失败重投/重试只会得到同一结果，fast-ship-bot 第 36 轮 P2）。
-		errors.Is(err, errForgeIntegrationDecrypt) || errors.Is(err, errGitHubAppDecrypt)
+		errors.Is(err, errForgeIntegrationDecrypt) || errors.Is(err, errGitHubAppDecrypt) ||
+		// App 身份未配置同属永久配置态（webhook-secret-only 部署等），与
+		// 评论唤醒分类同口径（fast-ship-bot 第 40 轮 Note）。
+		errors.Is(err, githubapp.ErrAppNotConfigured)
 }
 
 // debounceInstallationID 防抖实况读的安装 id 兜底：GitHub 投递缺

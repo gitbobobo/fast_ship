@@ -82,7 +82,12 @@ func (s *ReviewService) openRoundTx(
 	ledger.VisualStatus = ""
 	ledger.HeadSHA = headSHA
 	// 受理时刻的实拉快照随 head 一起推进（滞后时序判定基准，见模型注释）。
-	ledger.PRUpdatedAt = prUpdatedAt
+	// nil = 本路径没有实拉快照时刻（防抖消费）：保留旧值（与 installationID
+	// 的 0 保留同口径），不得把 advancePRHeadTx/rerun 写下的基准清成 NULL
+	// （fast-ship-bot 第 40 轮 Note）。
+	if prUpdatedAt != nil {
+		ledger.PRUpdatedAt = prUpdatedAt
+	}
 	ledger.RoundNumber = round
 	ledger.SyncPending = true
 	ledger.SyncEpoch = ledger.SyncEpoch + 1
