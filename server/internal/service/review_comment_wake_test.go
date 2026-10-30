@@ -273,6 +273,35 @@ func TestReviewCommentWakeVisualInflightDoesNotBlock(t *testing.T) {
 	}
 }
 
+// TestReviewCommentWakeLegacyBareKeyDedup 存量裸键兼容（codex 第 8 轮 P2）：
+// 集成前缀账键引入前登记过的裸 GUID 行，重投同 delivery 按幂等去重，
+// 不重复受理、不开轮。
+func TestReviewCommentWakeLegacyBareKeyDedup(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	e.enableReview(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	ctx := context.Background()
+	e.fake.SetPR(repo, 36, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 36, State: "open", HeadSHA: "sha-legacy",
+		HeadRepoFullName: repo,
+	})
+	// 存量裸键行（集成前缀引入前的形态，只可能属于 github-default）。
+	if err := e.svc.db.Create(&model.GitHubWebhookDelivery{
+		DeliveryID: "legacy-bare-guid", Event: "issue_comment", ReceivedAt: time.Now().UTC(),
+	}).Error; err != nil {
+		t.Fatalf("seed legacy row: %v", err)
+	}
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "legacy-bare-guid",
+		issueCommentBody("@fast-ship-bot", repo, 36, 42)); !errors.Is(err, ErrDeliveryDuplicated) {
+		t.Fatalf("存量裸键应按幂等去重，实得 %v", err)
+	}
+	var runs int64
+	e.svc.db.Model(&model.ReviewRun{}).Count(&runs)
+	if runs != 0 {
+		t.Fatalf("去重路径不得开轮，runs = %d", runs)
+	}
+}
+
 // TestReviewCommentWakeRedeliveryDup 同一 delivery id 重投按幂等去重
 // （预查命中，不再实拉）；payload 守卫忽略的投递（无 mention）不登记幂等
 // 账——忽略判定完全由 payload 决定，重投再忽略一遍零副作用。

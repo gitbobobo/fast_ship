@@ -165,11 +165,18 @@ func (s *ReviewService) observeAcceptedHead(ctx context.Context, integrationID, 
 //	推进到 live head），不再按「账本不同」把唤醒永久锁死。
 func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, event, deliveryID string, body []byte) error {
 	// 幂等预查（只读）：已登记的投递直接按重复去重，省一次实拉；预查与
-	// 最终事务之间的并发窗口由事务内 insert 判重兜底。
+	// 最终事务之间的并发窗口由事务内 insert 判重兜底。存量裸键兼容与
+	// runWebhookDeliveryTx 同口径：集成前缀账键引入前的行是裸 GUID，只可
+	// 能属于 github-default——升级前就订阅过 issue_comment 的安装，重投
+	// 旧投递时仅查前缀键会漏掉裸键行而重复受理（codex 第 8 轮 P2）。
+	key := deliveryLedgerKey(integrationID, deliveryID)
+	countQuery := s.db.WithContext(ctx).Model(&model.GitHubWebhookDelivery{}).
+		Where("delivery_id = ?", key)
+	if integrationID == model.ForgeIntegrationBuiltinGitHubID {
+		countQuery = countQuery.Or("delivery_id = ?", deliveryID)
+	}
 	var registered int64
-	if err := s.db.WithContext(ctx).Model(&model.GitHubWebhookDelivery{}).
-		Where("delivery_id = ?", deliveryLedgerKey(integrationID, deliveryID)).
-		Count(&registered).Error; err != nil {
+	if err := countQuery.Count(&registered).Error; err != nil {
 		return err
 	}
 	if registered > 0 {
