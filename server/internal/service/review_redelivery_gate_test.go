@@ -388,3 +388,43 @@ func TestRedeliveryGateLocatesCommentPayload(t *testing.T) {
 		t.Fatalf("notifications = %d, want 0", n)
 	}
 }
+
+// 唤醒串读取降级时评论投递按未知重试（codex 第 23 轮 P2）：slug-only 的
+// 失败投递恰是因读取故障失败、最需要重试的——字面量集合会把它们误判成
+// 非唤醒记终态，永不重试（与降级「宁多投不漏投」自相矛盾）。
+func TestRedeliveryGateSlugOnlyRetryableWhenMentionsDegraded(t *testing.T) {
+	env := newReviewEngineEnv(t)
+	env.enableReview(t)
+	env.review.appSource = stubAppSourceErr{}
+
+	base := redeliveryTestNow.Add(-time.Hour)
+	env.fake.SetHookDeliveries([]githubapp.HookDelivery{
+		hookRow(4101, "guid-cw-slug", "issue_comment", "created", 500, false, base),
+	})
+	env.fake.SetHookDeliveryPayload(4101, func() json.RawMessage {
+		body, err := json.Marshal(map[string]any{
+			"action": "created",
+			"issue": map[string]any{
+				"number":       7,
+				"pull_request": map[string]any{"url": "https://github.com/owner/repo/pulls/7"},
+			},
+			"comment":      map[string]any{"body": "@fast-ship-demo 请再审一轮", "author_association": "OWNER"},
+			"repository":   map[string]any{"full_name": "owner/repo"},
+			"installation": map[string]any{"id": 1},
+		})
+		if err != nil {
+			panic(err)
+		}
+		return body
+	}())
+	env.fake.SetPR("owner/repo", 7, &githubapi.PullRequest{})
+
+	env.review.reconcileWebhookDeliveries(redeliveryTestNow)
+	got := env.fake.RedeliveredIDs()
+	if len(got) != 1 || got[0] != 4101 {
+		t.Fatalf("降级时 slug-only 评论投递应按未知照常重投: %v", got)
+	}
+	if row, ok := redeliveryClosedRow(t, env, "guid-cw-slug"); ok && row.ClosedAt != nil {
+		t.Fatalf("降级时不得记终态: %+v", row)
+	}
+}

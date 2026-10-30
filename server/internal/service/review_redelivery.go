@@ -176,7 +176,11 @@ func (s *ReviewService) reconcileWebhookDeliveries(now time.Time) {
 		client:   client,
 		budget:   reviewRedeliveryMaxPerSweep,
 		mentions: mentions,
-		prStates: map[string]*probePRState{},
+		// 唤醒串读取降级时，slug-only 评论会被字面量集合误判成非唤醒而记
+		// 终态——那恰是因读取故障失败、最需要重试的投递（codex 第 23 轮
+		// P2）。标记降级，评论投递一律按未知重试（降级语义：宁多投不漏投）。
+		mentionsDegraded: mentionsErr != nil,
+		prStates:         map[string]*probePRState{},
 	}
 	tried := 0
 	for _, st := range pending {
@@ -290,6 +294,10 @@ type redeliveryPRProbe struct {
 	budget   int
 	mentions []string
 	prStates map[string]*probePRState // repo#number -> PR 实况快照（可用性 + 作者）
+	// mentionsDegraded 唤醒串集合读取降级（瞬时 DB 故障回落字面量）：此刻
+	// 字面量判定「非唤醒」不可信——slug-only 的合法唤醒会被记终态永不重试，
+	// 评论投递一律按未知重试（codex 第 23 轮 P2）。
+	mentionsDegraded bool
 }
 
 // redeliveryPRCheck 一次闸门判定的结果。Known=false 表示读不到（payload 拉取
@@ -361,6 +369,11 @@ func (p *redeliveryPRProbe) lookup(ctx context.Context, deliveryID int64, event 
 		// webhook 本来就会静默忽略——记终态跳过，不进重试集白吃预算与通知。
 		payload := commentWakePayloadGuards(detail.Payload, p.mentions)
 		if payload == nil {
+			if p.mentionsDegraded {
+				// 字面量集合不完整：判「非唤醒」不可信，按未知处理——调用方
+				// 对未知投递降级照常重投（宁多投不漏投，codex 第 23 轮 P2）。
+				return redeliveryPRCheck{}, errors.New("唤醒串集合读取降级，评论投递按未知重试")
+			}
 			return redeliveryPRCheck{Known: true, Reviewable: false, NotWake: true}, nil
 		}
 		wakePayload = payload

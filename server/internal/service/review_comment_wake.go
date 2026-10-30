@@ -73,6 +73,11 @@ type commentWakePayload struct {
 		// PullRequest 存在即 PR：GitHub/Forgejo 都在 PR 的 issue payload 里
 		// 带该对象，普通 Issue 评论缺省——指针判存在性即可，内容不消费。
 		PullRequest *struct{} `json:"pull_request"`
+		// User.Login PR 即 issue，issue.user 就是 PR 作者——payload 层即可
+		// 与评论者登录名预比对，无资格者零实拉拒绝（codex 第 23 轮 P2）。
+		User struct {
+			Login string `json:"login"`
+		} `json:"user"`
 	} `json:"issue"`
 	Comment struct {
 		Body string `json:"body"`
@@ -198,16 +203,20 @@ func deterministicCommentWakeSetupErr(err error) bool {
 
 // observeAcceptedHead 评论唤醒实拉前的只读观察值：与 currentAcceptedHeadTx
 // 同源（未开火的防抖行优先，否则总账 head_sha），项目反查同样按设置行
-// (集成, 仓库) 快照。找不到启用项目时返回空串——观察值不参与判定，最终
-// 事务的反查会照常拒开轮。实拉窗口内账本可能被并发推进：事务内以「重取值
-// == 观察值」复核，不一致即哨兵重试（见 openCommentWakeRoundTx）。
-func (s *ReviewService) observeAcceptedHead(ctx context.Context, integrationID, repo string, prNumber int) (string, error) {
+// (集成, 仓库) 快照。返回观察所用项目的 ID——实拉后的滞后时序判定必须用
+// 同一项目的 seen 行作基准：观察与判定之间若发生改绑，两次独立反查可能
+// 得到不同项目，基准错位会让滞后快照绕过判定、把新项目账本回退（codex
+// 第 23 轮 P2）。找不到启用项目时返回空串——观察值不参与判定，最终事务
+// 的反查会照常拒开轮。实拉窗口内账本可能被并发推进：事务内以「重取值 ==
+// 观察值」复核，不一致即哨兵重试（见 openCommentWakeRoundTx）。
+func (s *ReviewService) observeAcceptedHead(ctx context.Context, integrationID, repo string, prNumber int) (string, string, error) {
 	db := s.db.WithContext(ctx)
 	project, _, err := s.findEnabledReviewProjectTx(db, integrationID, repo)
 	if err != nil || project == nil {
-		return "", err
+		return "", "", err
 	}
-	return s.currentAcceptedHeadTx(db, integrationID, project.ID, repo, prNumber)
+	head, err := s.currentAcceptedHeadTx(db, integrationID, project.ID, repo, prNumber)
+	return head, project.ID, err
 }
 
 // handleCommentWake 评论唤醒的两阶段编排（照 revalidateTiedWebhook 模式）：
@@ -270,9 +279,18 @@ func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, ev
 	if err != nil || preProject == nil {
 		return err
 	}
-	// 显然无资格的点名（association 不在允许集且 payload 无登录名可比对
-	// 作者）不必实拉——零 API 成本拒绝（codex 第 17 轮 P2：省安装 API
-	// 预算）；带登录名的留待实拉后与 PR 作者比对（PR 作者例外）。
+	// 显然无资格的点名不必实拉——零 API 成本拒绝（codex 第 17/23 轮 P2）：
+	// PR 即 issue，payload 的 issue.user.login 就是 PR 作者（commentWakeAuthorized
+	// 比对的正是它，实拉只为拿实时 head/state）。作者例外与属主例外之外的
+	// 登录名评论者直接拒绝；两个字段都缺失（代理剥字段等）才留待实拉后
+	// 按实拉作者比对。Forgejo 没有关联字段，同一比对同样适用。
+	if !commentAssociationAllowed(payload.Comment.Association) &&
+		payload.Comment.User.Login != "" && payload.Issue.User.Login != "" &&
+		!strings.EqualFold(payload.Comment.User.Login, payload.Issue.User.Login) {
+		return nil
+	}
+	// 退路：payload 缺登录名或登录名与 payload 作者一致（可能是伪造，也可能
+	// 是真作者）——维持实拉后按实拉 PR 作者比对的最终判定。
 	if integrationID == model.ForgeIntegrationBuiltinGitHubID &&
 		!commentAssociationAllowed(payload.Comment.Association) &&
 		payload.Comment.User.Login == "" {
@@ -330,7 +348,7 @@ func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, ev
 	// 内总有第三方在持续受理，此刻的实拉快照一进事务就过期，再试只是
 	// 空转；登记后同 delivery 重投按 202 去重）。
 	for attempt := 0; attempt < reviewCommentWakeRevalidateMax; attempt++ {
-		observedHead, err := s.observeAcceptedHead(ctx, integrationID, repo, prNumber)
+		observedHead, observedProjectID, err := s.observeAcceptedHead(ctx, integrationID, repo, prNumber)
 		if err != nil {
 			return err
 		}
@@ -366,7 +384,7 @@ func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, ev
 		// （fast-ship-bot 第 21 轮 P2：滞后不得烧幂等账静默丢唤醒）。
 		var accepted model.ReviewSeenSHA
 		snErr := s.db.WithContext(ctx).Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ? AND integration_id = ?",
-			preProject.ID, repo, prNumber, observedHead, integrationID).First(&accepted).Error
+			observedProjectID, repo, prNumber, observedHead, integrationID).First(&accepted).Error
 		// 基准查询的瞬时 DB 故障不得当作「无 seen 行」放行——那正是需要拦
 		// 滞后快照的时刻；透出 500 让平台重投（codex 第 22 轮 P2）。
 		if snErr != nil && !errors.Is(snErr, gorm.ErrRecordNotFound) {

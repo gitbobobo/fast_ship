@@ -1534,3 +1534,194 @@ func TestReviewCommentWakeConcurrentDuplicate(t *testing.T) {
 		t.Fatalf("并发重复不得开轮，runs = %d", runs)
 	}
 }
+
+// payload 级作者预比对（codex 第 23 轮 P2）：PR 即 issue，issue.user.login
+// 就是 PR 作者——有登录名的陌生人（非作者且非 OWNER）零实拉拒绝，不再花
+// installation 级 API 预算；作者与属主例外照常唤醒。
+func commentBodyWithUsers(body, repo string, number int, installationID int64,
+	assoc, commentLogin, issueAuthor string) []byte {
+	raw, err := json.Marshal(map[string]any{
+		"action": "created",
+		"issue": map[string]any{
+			"number":       number,
+			"pull_request": map[string]any{"html_url": "https://github.com/" + repo + "/pull/" + strconv.Itoa(number)},
+			"user":         map[string]any{"login": issueAuthor},
+		},
+		"comment": map[string]any{
+			"body": body, "author_association": assoc,
+			"user": map[string]any{"login": commentLogin},
+		},
+		"repository":   map[string]any{"full_name": repo},
+		"installation": map[string]any{"id": installationID},
+	})
+	if err != nil {
+		panic(err)
+	}
+	return raw
+}
+
+func TestReviewCommentWakeStrangerPrefilterNoAPI(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	e.enableReview(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	ctx := context.Background()
+	e.fake.SetPR(repo, 43, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 43, State: "open", HeadSHA: "sha-pf",
+		HeadRepoFullName: repo, AuthorLogin: "pr-author",
+	})
+	callsBefore := e.fake.TotalCalls()
+
+	// 陌生人（有登录名、非作者、非 OWNER）：零 API 拒绝——installation
+	// 解析与实拉都不发生。
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-pf-stranger",
+		commentBodyWithUsers("@fast-ship-bot 请再审", repo, 43, 42, "NONE", "stranger", "pr-author")); err != nil {
+		t.Fatalf("陌生人点名应零成本忽略: %v", err)
+	}
+	if got := e.fake.TotalCalls(); got != callsBefore {
+		t.Fatalf("陌生人点名不得产生任何平台调用: %d -> %d", callsBefore, got)
+	}
+
+	// PR 作者本人：预比对通过，照常实拉开轮。
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-pf-author",
+		commentBodyWithUsers("@fast-ship-bot 请再审", repo, 43, 42, "NONE", "pr-author", "pr-author")); err != nil {
+		t.Fatalf("作者点名应唤醒: %v", err)
+	}
+	var run model.ReviewRun
+	if err := e.svc.db.Where("pr_number = 43").First(&run).Error; err != nil {
+		t.Fatalf("作者点名应开轮: %v", err)
+	}
+
+	// OWNER 例外（属主登录名与作者不同）：预比对不拦，实拉后 commentWakeAuthorized 放行。
+	// 先把作者那轮置终态，绕开「同 head 在途守卫」（该守卫只拦在途轮）。
+	if err := e.svc.db.Model(&model.ReviewRun{}).Where("pr_number = 43").
+		Updates(map[string]any{"status": model.ReviewRunCompleted, "finished_at": time.Now().UTC()}).Error; err != nil {
+		t.Fatalf("置终态: %v", err)
+	}
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-pf-owner",
+		commentBodyWithUsers("@fast-ship-bot 请再审", repo, 43, 42, "OWNER", "repo-owner", "pr-author")); err != nil {
+		t.Fatalf("属主点名应唤醒: %v", err)
+	}
+	var runs int64
+	e.svc.db.Model(&model.ReviewRun{}).Where("pr_number = 43").Count(&runs)
+	if runs != 2 {
+		t.Fatalf("属主点名应再开一轮: runs = %d", runs)
+	}
+}
+
+// 改绑窗口内的观察一致性（codex 第 23 轮 P2）：预查与观察是两次独立的
+// 项目反查——改绑发生在两者之间时，滞后时序判定必须用「供给观察值的
+// 那个项目」的 seen 行作基准，否则基准错位会让滞后快照绕过判定、把新
+// 项目账本回退。回调在第二次设置行反查（观察阶段）时把绑定搬到项目 B。
+func TestReviewCommentWakeStalenessUsesObservedProject(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	e.enableReview(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	ctx := context.Background()
+
+	// 项目 B：绑定将搬到它名下，账本与 seen 都在 B。
+	projectB := model.Project{ID: "p-int179-b", UserID: e.project.UserID, Name: "int179-b"}
+	if err := e.svc.db.Create(&projectB).Error; err != nil {
+		t.Fatalf("create project B: %v", err)
+	}
+	t1 := time.Now().UTC().Add(-2 * time.Hour)
+	t0 := t1.Add(-time.Hour)
+	if err := e.svc.db.Create(&model.ReviewPullRequest{
+		ProjectID: projectB.ID, UserID: projectB.UserID,
+		RepoFullName: repo, PRNumber: 44,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		HeadSHA:       "sha-a", RoundNumber: 1, UpdatedAt: t1,
+	}).Error; err != nil {
+		t.Fatalf("seed B ledger: %v", err)
+	}
+	if err := e.svc.db.Create(&model.ReviewSeenSHA{
+		ProjectID: projectB.ID, RepoFullName: repo, PRNumber: 44,
+		HeadSHA: "sha-a", IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		PRUpdatedAt: &t1, AcceptedAt: t1,
+	}).Error; err != nil {
+		t.Fatalf("seed B seen: %v", err)
+	}
+	e.fake.SetPR(repo, 44, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 44, State: "open", HeadSHA: "sha-b",
+		HeadRepoFullName: repo, UpdatedAt: &t0,
+	})
+
+	// 预查（第 1 次无 Select 设置行查询）返回 A；在观察阶段（第 2 次）把
+	// 绑定搬到 B——窗口内改绑。
+	settingsQueries := 0
+	if err := e.svc.db.Callback().Query().Before("gorm:query").Register("int179_rebind_midwindow",
+		func(tx *gorm.DB) {
+			if tx.Statement.Table != "project_review_settings" || len(tx.Statement.Selects) > 0 {
+				return
+			}
+			settingsQueries++
+			if settingsQueries == 2 {
+				if err := e.svc.db.Model(&model.ProjectReviewSettings{}).
+					Where("project_id = ?", e.project.ID).
+					Update("project_id", projectB.ID).Error; err != nil {
+					t.Logf("rebind failed: %v", err)
+				}
+			}
+		}); err != nil {
+		t.Fatalf("注册回调失败: %v", err)
+	}
+
+	// 滞后快照（live t0 < B 的 seen 基准 t1）：必须用 B 的 seen 拦下（返回
+	// error 500），而不是因基准错位（查 A 的 seen → 无行）放行开轮。
+	body := issueCommentBody("@fast-ship-bot", repo, 44, 42)
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-rebind", body); err == nil {
+		t.Fatal("改绑窗口内滞后快照应按瞬时失败拒绝（500）")
+	}
+	var runs int64
+	e.svc.db.Model(&model.ReviewRun{}).Where("pr_number = 44").Count(&runs)
+	if runs != 0 {
+		t.Fatalf("滞后快照不得开轮: runs = %d", runs)
+	}
+	var deliveries int64
+	e.svc.db.Model(&model.GitHubWebhookDelivery{}).Count(&deliveries)
+	if deliveries != 0 {
+		t.Fatalf("瞬时失败不落账: deliveries = %d", deliveries)
+	}
+}
+
+// observeAcceptedHead 返回供给观察值的项目：改绑后观察跟随新项目，调用
+// 方（滞后时序判定）用同一项目 ID 查基准——契约测试钉住返回值配对。
+func TestReviewCommentWakeObserveReturnsSupplyingProject(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	e.enableReview(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	ctx := context.Background()
+	t1 := time.Now().UTC().Add(-2 * time.Hour)
+	if err := e.svc.db.Create(&model.ReviewPullRequest{
+		ProjectID: e.project.ID, UserID: e.project.UserID,
+		RepoFullName: repo, PRNumber: 45,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		HeadSHA:       "sha-obs", RoundNumber: 1, UpdatedAt: t1,
+	}).Error; err != nil {
+		t.Fatalf("seed ledger: %v", err)
+	}
+
+	head, projectID, err := e.review.observeAcceptedHead(ctx, model.ForgeIntegrationBuiltinGitHubID, repo, 45)
+	if err != nil || head != "sha-obs" || projectID != e.project.ID {
+		t.Fatalf("observe = (%q, %q, %v), want (sha-obs, %q, nil)", head, projectID, err, e.project.ID)
+	}
+
+	// 改绑到项目 B：观察跟随新绑定，返回值同步换项目。
+	projectB := model.Project{ID: "p-int179-obs", UserID: e.project.UserID, Name: "int179-obs"}
+	if err := e.svc.db.Create(&projectB).Error; err != nil {
+		t.Fatalf("create project B: %v", err)
+	}
+	if err := e.svc.db.Model(&model.ReviewPullRequest{}).
+		Where("project_id = ?", e.project.ID).
+		Update("project_id", projectB.ID).Error; err != nil {
+		t.Fatalf("move ledger: %v", err)
+	}
+	if err := e.svc.db.Model(&model.ProjectReviewSettings{}).
+		Where("project_id = ?", e.project.ID).
+		Update("project_id", projectB.ID).Error; err != nil {
+		t.Fatalf("rebind settings: %v", err)
+	}
+	head, projectID, err = e.review.observeAcceptedHead(ctx, model.ForgeIntegrationBuiltinGitHubID, repo, 45)
+	if err != nil || head != "sha-obs" || projectID != projectB.ID {
+		t.Fatalf("rebind 后 observe = (%q, %q, %v), want (sha-obs, %q, nil)", head, projectID, err, projectB.ID)
+	}
+}
