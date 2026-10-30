@@ -6266,7 +6266,7 @@ ThreadItem 列表；条目 ID 由 `sourceThreadId + "::" + T3 原始条目 id` �
 | `activity.active_run_status` | string | 否 | 活动 run 状态；静止时缺省 |
 | `activity.stopping` | boolean | 是 | 停止请求已下发且尚未落定：活动 run 的最近一条 run_interrupt_request 条目晚于同 run 的最近一条 run_interrupt_result |
 | `activity.has_pending_requests` | boolean | 是 | 有等待用户处理的运行时请求（审批/提问/代答 secret） |
-| `activity.pending_background_task_count` | integer | 是 | 根 run 结束后仍在跑的后台工作条数（command 类不占完成位；上游缺省时为 0） |
+| `activity.pending_background_task_count` | integer | 是 | 根 run 结束后仍在跑且占完成位的后台工作条数（awaited=true 的 command 也占；command/monitor 默认不占，subagent/background_task/未知/缺省 kind 占；上游缺省时为 0） |
 | `access` | string（enum: read-only \| operate） | 是 | 会话能力：仅当精确持有 `orchestration:operate` scope 时为 `operate`， 否则 `read-only`。唯一判定依据是精确 token 的 scope 列； `read-only` 环境调用任何写入口返回 40300（重新配对后可操作） |
 
 **错误**
@@ -6453,10 +6453,12 @@ user_input_request（提问）/ secret_request（密钥，绝不携带密钥值�
 读取线程启动器选项（项目表 + 服务器配置 + 设置）
 
 一次 WS 会话内取 T3 `orchestration.subscribeShell` 首快照（项目表）+
-`server.getConfig` + `server.getSettings`。`projects` 为归一化项目表
+`server.getConfig`。`projects` 为归一化项目表
 （snake_case，含 workspace_root 供 workspace-options 解析 cwd）；
-`config`/`settings` 为上游 `server.getConfig`/`server.getSettings`
-响应原样透传（camelCase，字段随 T3 版本演进，客户端按需读取）。
+`config` 为上游 `server.getConfig` 响应原样透传、`settings` 为其
+内嵌 `settings` 子对象（上游 #26238 起 `server.getSettings` 已删除，
+设置改由 getConfig.settings 携带；旧上游无该字段时为空对象），
+camelCase，字段随 T3 版本演进，客户端按需读取。
 
 **鉴权**：公开
 
@@ -6487,7 +6489,7 @@ user_input_request（提问）/ secret_request（密钥，绝不携带密钥值�
 | `projects[].default_model_selection.options[].id` | string | 是 |  |
 | `projects[].default_model_selection.options[].value` | string | 是 | 字符串或布尔（T3 ProviderOptionSelectionValue）。JSON 原样透传， 布尔选项发 JSON boolean 而非字符串。 |
 | `config` | object | 是 | T3 `server.getConfig` 响应原样透传（camelCase，含 providers 等启动器所需的全部配置） |
-| `settings` | object | 是 | T3 `server.getSettings` 响应原样透传（camelCase，含 newWorktreesStartFromOrigin 等设置） |
+| `settings` | object | 是 | T3 `server.getConfig` 响应内嵌 `settings` 子对象原样透传（camelCase，含 newWorktreesStartFromOrigin 等设置；上游 `server.getSettings` 已删除，旧上游无该字段时为空对象） |
 
 **错误**
 
@@ -6704,12 +6706,14 @@ dispatchCommand 受理结果（sequence 为 T3 投影事件序号）
 
 停止线程当前活动（并挂起队列）
 
-经 WS RPC `orchestration.dispatchCommand` 下发 `run.interrupt`
-（holdQueue=true，T3 Stop 按钮口径：同时挂起队列）。目标 run 由
-服务端选择：活动 run（preparing/starting/running/waiting 的最近一个），
-否则仍有后台工作的最近 run（对齐 T3 客户端 stopThread 的选择逻辑）。
-没有可停止的 run 时按 T3 口径视为无操作，返回 stopped=false，
-不杜撰内部 thread.stop 命令。
+能力驱动的两条路径：环境在 `server.getConfig` 声明
+`environment.capabilities.threadStop`（新上游）时下发公开命令
+`thread.stop`，由服务端选择停止目标并挂起队列——受理即
+stopped=true，run_id 此路径不返回。能力缺失（旧上游）走回退：
+本地读可信 shell 自选 run 后下发 `run.interrupt`（holdQueue=true），
+目标 run 取活动 run（preparing/starting/running/waiting 的最近
+一个），否则仍有后台工作的最近 run；没有可停止的 run 时按 T3
+口径视为无操作，返回 stopped=false。
 
 **鉴权**：公开
 
@@ -6726,12 +6730,12 @@ dispatchCommand 受理结果（sequence 为 T3 投影事件序号）
 
 `data`：
 
-停止结果；无可停止运行时按 T3 口径视为无操作（stopped=false）
+停止结果；回退路径（旧上游）无可停止运行时按 T3 口径视为无操作（stopped=false）
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `stopped` | boolean | 是 |  |
-| `run_id` | string | 否 | 被中断的 run；无可停止运行时缺省 |
+| `run_id` | string | 否 | 被中断的 run；仅在 run.interrupt 回退路径回填（thread.stop 路径由服务端选目标，不返回 run_id） |
 
 **错误**
 

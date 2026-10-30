@@ -16,14 +16,21 @@ import (
 	"go.uber.org/zap"
 )
 
-// T3 shell 订阅复用 hub（INT-116）：每个「用户 × 环境」持两条长驻 WS 连接
-// （活跃 / 归档各一条），把原来每个请求一次的全量 shell 快照拉取摊销成
-// 常驻订阅 + 增量推送。INT-132 起订阅跟环境走（启动预热、环境增删改时增删），
-// 不再按读请求的生灭做空闲回收；变更经 t3_shell_events.go 推给浏览器。
+// T3 shell 订阅复用 hub（INT-116）：每个「用户 × 环境」持一条活跃面长驻
+// WS 订阅连接，把原来每个请求一次的全量 shell 快照拉取摊销成常驻订阅 +
+// 增量推送；归档面自 INT-173 起改为按需一次性快照——上游 #26238 删除了
+// orchestration.subscribeArchivedShell，官方客户端已改用
+// getArchivedShellSnapshot（见 t3ShellEntry 的 arch* 字段与 t3ArchiveFetchState）。
+// 旧上游（#26238 之前）归档面只有常驻 subscribeArchivedShell：按需快照
+// 首次读取被判方法拒绝（确定性 Exit Failure）时，entry 永久切到回退的
+// 常驻订阅路径（见 t3_shell_archive.go 的 mode 判定与
+// runArchiveLegacySubscription）。
+// INT-132 起订阅跟环境走（启动预热、环境增删改时增删），不再按读请求的
+// 生灭做空闲回收；变更经 t3_shell_events.go 推给浏览器。
 // 设计见 INT-116 v2：
-//   - 两条连接而非一条多路复用：t3RPCSession 是串行客户端（call 会吞掉其他
-//     requestId 的帧），复用一条需自建 requestId 派发；两条单流连接读循环
-//     无需派发，取消/重订阅互不影响。代价是每环境两条 WS，可接受。
+//   - 常驻连接只有活跃面一条：t3RPCSession 是串行客户端（call 会吞掉其他
+//     requestId 的帧），归档按需快照另拨一次性会话，不复用订阅连接；
+//     取消/重订阅互不牵扯。
 //   - 完成标记能力来自 server.getConfig 的 shellResumeCompletionMarker
 //     （ws.ts:1731）；官方客户端据此决定是否请求 synchronized 标记
 //     （client-runtime/src/state/shell.ts:338,386-398）：不支持时不请求并
@@ -39,7 +46,13 @@ import (
 // entry.mu → state.mu（state 方法内部自带锁），不存在反向。
 
 const (
-	t3RPCSubscribeShell         = "orchestration.subscribeShell"
+	t3RPCSubscribeShell = "orchestration.subscribeShell"
+	// t3RPCGetArchivedShellSnapshot 是归档面的一次性快照 RPC（上游 #26238
+	// 起保留的唯一归档读取口）：返回 t3ArchivedShellSnapshot 形状的全量
+	// 数据，失败以 Exit Failure 明确表达。
+	t3RPCGetArchivedShellSnapshot = "orchestration.getArchivedShellSnapshot"
+	// t3RPCSubscribeArchivedShell 是旧上游的归档常驻订阅（#26238 之前）：
+	// 仅在按需快照被判方法拒绝后由旧面回退路径使用（t3_shell_archive.go）。
 	t3RPCSubscribeArchivedShell = "orchestration.subscribeArchivedShell"
 	t3RPCServerGetConfig        = "server.getConfig"
 )
@@ -72,6 +85,22 @@ type t3ShellHubConfig struct {
 	MarkerWaitTimeout time.Duration
 	// DialBudget 建连独立预算（不由任何请求 ctx 决定）。
 	DialBudget time.Duration
+	// ArchiveTTL 归档快照的缓存有效期（INT-173）：归档面不再是常驻推送的
+	// 实时面，一次 getArchivedShellSnapshot 结果只在 TTL 内当可信复用，
+	// 过期重拉。取值依据：归档集变化只发生在归档/恢复归档等写命令之后
+	// （派发成功即主动失效），TTL 只需兜住「别处的归档操作」与快照竞态，
+	// 60s 既能摊销连续列表/详情的读取，也不会让陈旧归档数据停留太久。
+	// 改变归档集的写操作经 InvalidateArchive 立即失效，不靠 TTL 兜底。
+	ArchiveTTL time.Duration
+	// ArchiveStaleGrace 是「重拉在途超过多久仍未落地就把归档面撤为不可信」
+	// 的宽限（R16 P2-2 / R20 P2）：TTL 过期只意味着「该重拉了」，不等于
+	// 数据作废，所以过期后的读仍返回上一份快照（不报降级）——否则每个环境
+	// 每 TTL、以及空闲回来后的首次读都会有一次读被标 degraded，bot 侧据此
+	// 把环境计入 incomplete_environments，形成周期性假警报。判据锚在**本次
+	// 拉取的发起时刻**：超过宽限仍在途（挂起）才撤可信，此后读绝不再信任
+	// 过期快照（R2 的 thread_gone 保护）；重拉失败另有真实失败原因
+	// （noteArchiveFetchFailed），立即降级。
+	ArchiveStaleGrace time.Duration
 }
 
 func defaultT3ShellHubConfig() t3ShellHubConfig {
@@ -85,6 +114,8 @@ func defaultT3ShellHubConfig() t3ShellHubConfig {
 		CredentialBackoff: 5 * time.Minute,
 		MarkerWaitTimeout: 10 * time.Second,
 		DialBudget:        15 * time.Second,
+		ArchiveTTL:        60 * time.Second,
+		ArchiveStaleGrace: 5 * time.Second,
 	}
 }
 
@@ -276,11 +307,15 @@ func (h *t3ShellHub) View(ctx context.Context, env *model.T3Environment, token s
 // Peek 读取环境的 shell 状态当前值，不等待首次同步：entry 不存在时只注册
 // （订阅照常在后台建立），随即按内存现状回答（Syncing/Failed 时无快照）。
 // wait 评估器（INT-160）每轮扫描只读内存，绝不阻塞等待。
+// 归档面是按需快照：Peek 同样触发一次后台补齐（TTL 内命中只标「已在途」，
+// 不会真正拨号；拉取跑在服务 ctx 上，不受请求生灭影响）。wait 评估器的
+// 线程消迩判定要的就是「下一轮看到的归档面尽量新」这个保证。
 func (h *t3ShellHub) Peek(env *model.T3Environment, token string) (*t3ShellView, error) {
 	e, err := h.admitEntry(env, token)
 	if err != nil {
 		return nil, err
 	}
+	e.kickArchiveRefresh()
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.viewLocked(), nil
@@ -392,8 +427,14 @@ func (h *t3ShellHub) Close() {
 	})
 }
 
-// newEntryLocked 创建 entry 并启动两条监督 goroutine（活跃/归档各一条）。
-// 只做内存操作与 go 语句，网络 I/O 都在 goroutine 内、锁外。调用方持有 hub 锁。
+// newEntryLocked 创建 entry 并启动两条 goroutine：活跃面监督循环，与停泊
+// 中的归档面 goroutine（默认等待旧面回退激活，见 t3_shell_archive.go 的
+// mode 判定——entry 创建时不知道上游新旧，旧面订阅只能在第一次按需拉取
+// 被判方法失败后启动；停泊避免「运行中途 wg.Add」与 done 观察者的
+// Wait 竞态）。只做内存操作与 go 语句，网络 I/O 都在 goroutine 内、锁外；
+// 归档面首个快照也在这里经 kickArchiveRefresh 并行预热（R18 P2，同样只在
+// 后台 goroutine 里拨号）。调用方持有 hub 锁。归档面正常情况下不建常驻
+// 连接：INT-173 起按需快照，快照到达前的归档面表达为「未就绪」。
 func (h *t3ShellHub) newEntryLocked(key string, env *model.T3Environment, token string) *t3ShellEntry {
 	e := &t3ShellEntry{
 		hub:            h,
@@ -403,18 +444,26 @@ func (h *t3ShellHub) newEntryLocked(key string, env *model.T3Environment, token 
 		configRevision: env.ConfigRevision,
 		fingerprint:    t3ShellFingerprint(env.Address, token),
 		// 连接目标与指纹用同一规范化地址，避免结尾斜杠让 WS 路径拼出 //ws。
-		address:    t3ShellNormalizedAddress(env.Address),
-		token:      token,
-		state:      newT3ShellState(),
-		notify:     make(chan struct{}),
-		activeConn: t3ShellConnConnecting,
-		stop:       make(chan struct{}),
-		done:       make(chan struct{}),
+		address:           t3ShellNormalizedAddress(env.Address),
+		token:             token,
+		state:             newT3ShellState(),
+		notify:            make(chan struct{}),
+		activeConn:        t3ShellConnConnecting,
+		archTTL:           h.cfg.ArchiveTTL,
+		archiveStaleGrace: h.cfg.ArchiveStaleGrace,
+		legacyCh:          make(chan struct{}, 1),
+		// 缓冲 1：信号丢失/重复都无害（读循环消费前再核对 state 备忘，
+		// 见 readArchiveLegacyLoop 的 legacyReconnect 分支）。
+		legacyReconnect: make(chan struct{}, 1),
+		stop:            make(chan struct{}),
+		done:            make(chan struct{}),
 	}
 	h.entries[key] = e
 
 	// 生命周期计数：entry 的全部 goroutine（监督循环经 readStreamLoop 退出前
-	// 会汇合各自的订阅 reader）退出后释放。
+	// 会汇合各自的订阅 reader）退出后释放。归档按需拉取是后台一次性任务
+	// （arch.inFlight 合并并发，entry 停/hub 关即中断），不占常驻 goroutine，
+	// 不计入 e.wg；旧面订阅 goroutine 则常驻，占 e.wg 一份。
 	h.lifecycle.Add(1)
 	e.wg.Add(2)
 	go func() {
@@ -423,8 +472,19 @@ func (h *t3ShellHub) newEntryLocked(key string, env *model.T3Environment, token 
 	}()
 	go func() {
 		defer e.wg.Done()
-		h.runFaceSubscription(e, true)
+		// 停泊与激活由监督循环首部的 mode 闸门承担（waitArchiveLegacyActive）：
+		// mode=Unknown 期间停在 legacyCh 上（不占连接、不打上游），
+		// switchToArchiveLegacy 放行；自愈回 Unknown 后闸门重新停泊，可重复
+		// 激活。entry 停/hub 关时闸门退出，goroutine 随之结束。
+		h.runArchiveLegacySubscription(e)
 	}()
+	// 归档面首次拉取随 entry 建立并行预热（R18 P2）：按需快照只在读路径
+	// （Peek/waitView）kick，重启或新环境接入后的首个列表/详情就会在快照
+	// 落地前返回——归档线程整段缺失且被标 degraded；main 上归档订阅随预热
+	// 建立，首读通常已就绪，这里保持同等体验。拉取本身是后台任务（失败冷却
+	// + inFlight 合并），不阻塞首读，也不占 e.wg。
+	e.kickArchiveRefresh()
+
 	// done 在全部监督 goroutine 退出后关闭，供测试汇合；同时释放 hub 的
 	// 生命周期计数（Close 经它等待已被摘除的 entry）。
 	go func() {
@@ -462,16 +522,43 @@ type t3ShellEntry struct {
 	obsConn      t3ShellConnState
 	lastSyncedAt time.Time
 
+	// archTTL 归档快照缓存有效期（取自 hub 配置，entry 建立后不变）。
+	archTTL time.Duration
+	// archiveStaleGrace TTL 过期后的宽限期（R16 P2-2）：见配置字段注释。
+	archiveStaleGrace time.Duration
+	// arch 是归档按需快照的簿记（TTL/失败冷却/在途合并），见
+	// t3_shell_archive.go——并发读由 arch.inFlight 哨兵合并成一次上游调用。
+	arch t3ArchiveFetchState
+
 	// 已发布的事件状态缓存（INT-132）：publishStateIfChanged 在 entry 锁内
 	// 比较，只有翻转才对外发布；errText 一并缓存，stale/failed 下失败原因
 	// 的变化（如「网络不可达」→「凭证被拒」）对用户是不同的提示，也要触发。
 	publishedState string
 	publishedErr   string
+	// archAnnounced 是归档面已对外发布过的可见状态指纹
+	// （publishArchiveFaceEvent 的去重基准，审修 R9 P2-2）：TTL 例行重拉
+	// 同一份数据、同一 ArchiveErr 反复失败都靠它与当前指纹的比较静默。
+	// 守 e.mu，与 publishedState 同型同锁。
+	archAnnounced t3ArchiveAnnounced
 
 	stop     chan struct{}
 	stopOnce sync.Once
 	wg       sync.WaitGroup
 	done     chan struct{}
+
+	// legacyCh 是旧面归档订阅 goroutine 的激活信号（缓冲 1，非阻塞发送）：
+	// entry 创建时监督循环停在 mode 闸门上（不占连接、不打上游）；按需快照
+	// 被判「方法明确拒绝」后 switchToArchiveLegacy 发信号放行；自愈回
+	// Unknown 后再次切换时重复发信号、重复放行。信号只是唤醒——闸门醒来
+	// 复核 mode 现值，多余的信号留在缓冲里无害。用 channel 而不是「发现失
+	// 败时直接 go」——entry 创建时 wg.Add 已完成，中途 Add 会与 done 观察者
+	// 的 Wait 竞态（sync 文档禁止）。
+	legacyCh chan struct{}
+
+	// legacyReconnect 是旧面归档订阅的「请重建连接」信号：写后失效在订阅
+	// 模式下要取回写后全量，只能让常驻订阅断开重连
+	// （新 subscribe 即收权威快照），不能靠增量落地后整表重置（R3 P1-B）。
+	legacyReconnect chan struct{}
 
 	// forceResync 是活跃面的强制全量重同步请求（F1）：请求了 synchronized 但
 	// 预算内未等到时置位；下次活跃重连读后清除，不带 afterSequence，由上游
@@ -638,6 +725,10 @@ func (e *t3ShellEntry) viewLocked() *t3ShellView {
 // 每轮循环重新读取，保证抓到最新的广播 channel。
 func (e *t3ShellEntry) waitView(ctx context.Context) (*t3ShellView, error) {
 	for {
+		// 归档面按需快照（INT-173）：TTL 过期才发一次共享拉取，TTL 内命中
+		// 只标「已在途」不重复拨号。归档是非阻塞面——拉取在后台补位，
+		// 快照落地/失败时经 refresh 广播，本循环下一轮拿到新视图。
+		e.kickArchiveRefresh()
 		e.mu.Lock()
 		view := e.viewLocked()
 		hasAuthority := e.state.status().ActiveReady
@@ -676,6 +767,10 @@ func (e *t3ShellEntry) waitView(ctx context.Context) (*t3ShellView, error) {
 type t3ShellConnResult struct {
 	credential bool      // 凭证被拒（探测 repair / Exit 鉴权失败）→ 长退避
 	syncedAt   time.Time // 本连接追平确认时刻；零值表示从未追平
+	// voluntary 表示本条连接是按备忘主动断开（兑现 reconnect 请求去拿写
+	// 后状态），不是故障——退避不加深、按 BackoffBase 立即重连（审修
+	// R8 P2）。
+	voluntary bool
 }
 
 // runFaceSubscription 单条订阅的监督循环（每条连接一个 goroutine）：
@@ -787,76 +882,66 @@ func (h *t3ShellHub) connectFaceOnce(e *t3ShellEntry, archived bool) t3ShellConn
 
 	e.noteConnState(archived, t3ShellConnConnecting, nil)
 
-	method := t3RPCSubscribeShell
-	if archived {
-		method = t3RPCSubscribeArchivedShell
-	}
-
+	// 完成标记能力查询（订阅前发：此刻这条连接上只有本请求的帧，
+	// one-shot call 不会误吞订阅流）。缺能力时不请求标记并立即视为
+	// 追平，与官方客户端一致。
 	wantMarker := false
-	if !archived {
-		// 完成标记能力查询（订阅前发：此刻这条连接上只有本请求的帧，
-		// one-shot call 不会误吞订阅流）。缺能力时不请求标记并立即视为
-		// 追平，与官方客户端一致。
-		value, err := session.call(connCtx, t3RPCServerGetConfig, map[string]any{})
-		if err != nil {
-			result := t3ShellConnResult{}
-			if errors.Is(err, errT3CredentialRejected) {
-				result.credential = true
-			}
-			h.endFaceConnection(e, archived, err)
-			return result
+	value, err := session.call(connCtx, t3RPCServerGetConfig, map[string]any{})
+	if err != nil {
+		result := t3ShellConnResult{}
+		if errors.Is(err, errT3CredentialRejected) {
+			result.credential = true
 		}
-		var config struct {
-			ShellResumeCompletionMarker bool `json:"shellResumeCompletionMarker"`
-		}
-		if err := json.Unmarshal(value, &config); err != nil {
-			err := fmt.Errorf("getConfig 响应解析失败: %w", err)
-			h.endFaceConnection(e, archived, err)
-			return t3ShellConnResult{}
-		}
-		wantMarker = config.ShellResumeCompletionMarker
+		h.endFaceConnection(e, archived, err)
+		return result
 	}
+	var config struct {
+		ShellResumeCompletionMarker bool `json:"shellResumeCompletionMarker"`
+	}
+	if err := json.Unmarshal(value, &config); err != nil {
+		err := fmt.Errorf("getConfig 响应解析失败: %w", err)
+		h.endFaceConnection(e, archived, err)
+		return t3ShellConnResult{}
+	}
+	wantMarker = config.ShellResumeCompletionMarker
 
-	// 订阅。活跃面带恢复游标（有过权威快照才有意义）；归档订阅没有
-	// afterSequence，重连即重新拉全量归档快照。
+	// 订阅。活跃面带恢复游标（有过权威快照才有意义）。
 	payload := map[string]any{}
 	// resumed 表示本次带了恢复游标：只有 resume 才需要等 synchronized 追平
 	// 信号。冷启动（无游标）与强制全量重同步的完成标志是权威全量快照本身，
 	// 不对它们计时——强慢快照（>MarkerWaitTimeout）能被反复截断就永远
 	// Ready 不了（例如首帧需要 14s、ticker 每 12.5s 就判超时）。
 	resumed := false
-	if !archived {
-		// 强制全量重同步（F1）：上一条活跃连接请求了 marker 但预算内未等到
-		// ——不认为追平，本次重连不带 afterSequence。上游收到无游标的订阅
-		// 会直接发权威全量快照（与序号失效回退同一语义，ws.ts:550,685,1141），
-		// 权威帧到达才重新视为追平；期间视图保持 Stale/Syncing。
-		if e.forceResyncPending() {
-			// 置位时已未追平，这里再显式清一次：任何交错都不得把旧缓存
-			// 在权威快照到达前当成可信。
-			e.state.markActiveSynced(false)
-			e.refresh()
-		} else if st := e.state.status(); st.ActiveReady {
-			if wantMarker {
-				// 有完成标记能力才带游标恢复：上游会在回放之后发
-				// synchronized，我们据此确认追平。
-				payload["afterSequence"] = st.ActiveCursor
-				resumed = true
-			}
-			// 进入追平阶段：清标记，等权威帧/标记重新置位——追平前的窗口
-			// View 应当是 Stale 而不是 Ready。没有 marker 能力时不带游标
-			// （退回权威全量）：没有任何新数据就宣称追平会把旧缓存当成可信
-			// 运行态，违反「陈旧快照不得当作可信」——官方客户端的新 session
-			// 也是先加载权威快照、失败才退回全量，而不是直接沿用上一会话缓存。
-			e.state.markActiveSynced(false)
-			e.refresh()
-		}
+	// 强制全量重同步（F1）：上一条活跃连接请求了 marker 但预算内未等到
+	// ——不认为追平，本次重连不带 afterSequence。上游收到无游标的订阅
+	// 会直接发权威全量快照（与序号失效回退同一语义，ws.ts:550,685,1141），
+	// 权威帧到达才重新视为追平；期间视图保持 Stale/Syncing。
+	if e.forceResyncPending() {
+		// 置位时已未追平，这里再显式清一次：任何交错都不得把旧缓存
+		// 在权威快照到达前当成可信。
+		e.state.markActiveSynced(false)
+		e.refresh()
+	} else if st := e.state.status(); st.ActiveReady {
 		if wantMarker {
-			payload["requestCompletionMarker"] = true
+			// 有完成标记能力才带游标恢复：上游会在回放之后发
+			// synchronized，我们据此确认追平。
+			payload["afterSequence"] = st.ActiveCursor
+			resumed = true
 		}
+		// 进入追平阶段：清标记，等权威帧/标记重新置位——追平前的窗口
+		// View 应当是 Stale 而不是 Ready。没有 marker 能力时不带游标
+		// （退回权威全量）：没有任何新数据就宣称追平会把旧缓存当成可信
+		// 运行态，违反「陈旧快照不得当作可信」——官方客户端的新 session
+		// 也是先加载权威快照、失败才退回全量，而不是直接沿用上一会话缓存。
+		e.state.markActiveSynced(false)
+		e.refresh()
+	}
+	if wantMarker {
+		payload["requestCompletionMarker"] = true
 	}
 	requestID := session.nextID
 	session.nextID++
-	if err := session.sendRequest(connCtx, requestID, method, payload); err != nil {
+	if err := session.sendRequest(connCtx, requestID, t3RPCSubscribeShell, payload); err != nil {
 		h.endFaceConnection(e, archived, err)
 		return t3ShellConnResult{}
 	}
@@ -865,9 +950,9 @@ func (h *t3ShellHub) connectFaceOnce(e *t3ShellEntry, archived bool) t3ShellConn
 	// marker 等待截止时刻：只对带游标的 resume 生效。预算内没等到
 	// synchronized 就不再假装追平，由 readStreamLoop 的 ticker 分支置强制
 	// 全量重同步并结束本连接。零值表示无需等待（未请求 marker / 冷启动 /
-	// 强制全量重同步 / 归档面）。
+	// 强制全量重同步）。
 	var markerDeadline time.Time
-	if !archived && wantMarker && resumed {
+	if wantMarker && resumed {
 		markerDeadline = time.Now().Add(h.cfg.MarkerWaitTimeout)
 	}
 
@@ -924,8 +1009,7 @@ func (h *t3ShellHub) readStreamLoop(e *t3ShellEntry, session *t3RPCSession, conn
 	for {
 		select {
 		case <-connCtx.Done():
-			// 停机取消：归档面同样终止（F2 统一撤销归档可信度），err 为 nil
-			// 时记「未就绪」而不抹掉既有失败原因。
+			// 停机取消：err 为 nil 时记「未就绪」而不抹掉既有失败原因。
 			h.endFaceConnection(e, archived, nil)
 			return t3ShellConnResult{syncedAt: e.syncConfirmedAt()}
 
@@ -944,15 +1028,7 @@ func (h *t3ShellHub) readStreamLoop(e *t3ShellEntry, session *t3RPCSession, conn
 			switch {
 			case frame.Tag == "Chunk" && frame.requestIDMatches(requestID):
 				// 先应用全部 value（任一出错即整条流失败），成功才 Ack。
-				var applyErr error
-				if archived {
-					applyErr = h.applyArchiveValues(e, frame.Values)
-				} else {
-					applyErr = h.applyActiveValues(e, frame.Values)
-				}
-				if applyErr != nil {
-					// 归档流数据路径失败经 endFaceConnection 整体弃用归档面
-					// （G1），活跃面照常可用。
+				if applyErr := h.applyActiveValues(e, frame.Values); applyErr != nil {
 					h.endFaceConnection(e, archived, applyErr)
 					return t3ShellConnResult{syncedAt: e.syncConfirmedAt()}
 				}
@@ -1001,17 +1077,23 @@ func (h *t3ShellHub) readStreamLoop(e *t3ShellEntry, session *t3RPCSession, conn
 	}
 }
 
-// endFaceConnection 收尾连接状态。归档面（F2）：任何终止路径——读错误/写
-// 失败/正常 Exit/取消/探测或拨号失败——统一撤销归档面可信度（清空归档两表 +
-// ArchiveErr），直到下一次归档权威快照到达才恢复；归档数据只有伴随健康连接
-// 才可信，凭缓存继续宣称归档命中可信会违反 G1。归档失效同时发布一次 Full
-// 事件：列表需要把「归档线程暂不可读」呈现出来。err 为 nil（停机取消）时记
-// 「未就绪」。活跃面只更新连接状态与失败分类：单面终止不推翻活跃数据
-// （G1），View 的 Stale 判定用得上最近一次真实失败原因。
+// endFaceConnection 收尾连接状态。归档面分两条路径：按需快照模式不在
+// 此终止（它没有常驻连接）；旧面订阅模式（archived=true）下任何终止
+// ——读错误/写失败/正常 Exit/取消/探测或拨号失败——统一撤销归档面可
+// 信度（清空归档表 + ArchiveErr，同旧 F2），直到下一次归档权威快照到
+// 达才恢复，并发布一次 Full 事件（列表需要把「归档暂不可读」呈现）。
+// 收尾以 mode==legacy 为前提（审修 R9 P2-1）：自愈回 Unknown 后尚未收尾
+// 的旧面残余连接，其终止只说明「订阅通道不存在」，不推翻已由按需面接管
+// 的归档数据——那时清表会让可信的归档行凭空消失，且 kick 被簿记封窗时
+// 无人补拉，归档面整整消失一个 TTL。发布经指纹去重：同一错误反复失败
+// （真旧环境的退避重连循环）只说一次，不再每轮重连都 Full。活跃面只更新
+// 连接状态与失败分类：单面终止不推翻活跃数据（G1），View 的 Stale 判定用
+// 得上最近一次真实失败原因。err 为 nil（停机取消）时记「未就绪」而不抹
+// 掉既有失败原因。
 func (h *t3ShellHub) endFaceConnection(e *t3ShellEntry, archived bool, connErr error) {
-	if archived {
+	if archived && e.archiveLegacyActive() {
 		e.state.markArchiveFailed(connErr)
-		h.publishThreadEvent(e, nil, true)
+		h.publishArchiveFaceEvent(e, false)
 	}
 	e.noteConnState(archived, t3ShellConnFailed, connErr)
 	if connErr != nil {
@@ -1033,15 +1115,59 @@ func (e *t3ShellEntry) syncConfirmedAt() time.Time {
 // applyActiveValues 把活跃流 Chunk 的全部 value 依次解码并应用到状态，应用
 // 成功后把本批变化发布给该用户的订阅者。应用失败（坏帧）整条流失败重连，
 // 不发布线程事件——紧随其后的连接终止会发布状态事件，浏览器据此整面刷新。
+//
+// 批内出现过「线程离开活跃面」的帧时同步失效归档缓存——离开活跃面即归
+// 档集可能变了。三种帧都算离开：thread.removed，与 location != "active"
+// 的 thread.updated（applyActiveItem 对它执行 activeThreads.remove——上游
+// 若以该帧传递归档迁移，不失效的话线程会同时从活跃面与 TTL 缓存的归档
+// 集合消失，ArchiveErr 却仍 nil，列表谎报完整、详情落「未找到该线程」，
+// 最长一个 TTL 才自愈），以及权威全量快照整体替换时被 reset 掉的旧线程
+// （R13 P2-1，由 state 的 applyActiveItemTracked 返回移除集）——无完成
+// 标记环境每次重连走全量快照、marker 超时强制重同步/序号失效回退同样走
+// 全量，断连窗口里被别的客户端归档的线程会从新快照里消失，不算离开的话
+// 它既不在新活跃面、也不在旧归档缓存，ArchiveErr 却仍 nil，bot wait 误
+// 下 thread_gone 结论，最长 60s 才自愈。离开帧不携带「去向」——可能是被
+// 归档（进归档面），也可能是被彻底删除（归档集不变），上游对移除不看
+// location，Fast Ship 无法区分。三者统一按「归档集可能变了」失效是保守
+// 正确的选择：多付一次快照重拉，不会出错；若只在「确认归档」时失效，就
+// 得先猜去向，猜错（把删除当无效不失效）不会导致错误，但把归档当删除
+// 跳过失效会让线程在 TTL 内从活跃、归档两边同时消失——useThreads 不轮
+// 询，TTL 过期也不主动调度拉取，要缺到下一次事件/聚焦/手动刷新。这个
+// 窗口主要威胁的是「别的客户端归档了线程」场景：我们自己的写命令已在写
+// 后失效，这里再失效一次是幂等的冗余标记，无额外拉取（在途合并/同一世
+// 代内的标记不重拨）。失效只是标不可信+留旧行，不在这里同步发起网络拉
+// 取（不拖慢 readStreamLoop），下一次读经 kickArchiveRefresh 重拉；离开
+// 帧是低频帧，且每条 Chunk 至多失效一次，不构成对流式的过度拉取。
+// location == "active" 的 updated 是正常字段更新，线程没离开活跃面，不
+// 触发失效。
+//
+// 失效不依赖整批成功（R15 P2）：批内已应用的移除不会因后续帧失败而回滚，
+// 若把失效留在成功收尾处，坏帧与迁移帧同批时那次移除就永远补不上失效
+// （重连后的权威全量快照已看不到它，不会再算进 removed）——线程两面消失
+// 且 ArchiveErr 仍 nil，最长一个 TTL 内 wait 误判 thread_gone。因此用
+// defer 兜住所有返回路径：帧级记下 leftActiveFace 即失效。
 func (h *t3ShellHub) applyActiveValues(e *t3ShellEntry, values []json.RawMessage) error {
 	batch := t3ShellEventBatch{}
+	leftActiveFace := false
+	defer func() {
+		if leftActiveFace {
+			h.invalidateArchiveEntryAfterActiveRemoval(e)
+		}
+	}()
 	for _, raw := range values {
 		var item t3ShellStreamItem
 		if err := json.Unmarshal(raw, &item); err != nil {
 			return fmt.Errorf("活跃流帧解析失败: %w", err)
 		}
-		if err := e.state.applyActiveItem(item); err != nil {
+		removed, err := e.state.applyActiveItemTracked(item)
+		if err != nil {
 			return err
+		}
+		// 线程离开活跃面即归档集可能变了（见函数头）：增量帧的 removal 由
+		// hub 按帧型判定；全量快照整体替换的移除由 state 在同一临界区内算
+		// 出并返回，两边一并失效归档缓存。
+		if len(removed) > 0 || item.Kind == "thread.removed" || (item.Kind == "thread.updated" && item.Location != "active") {
+			leftActiveFace = true
 		}
 		batch.observeActive(&item)
 		// 权威全量快照落地（无 enrichment 标记）→ 强制重同步要求到此结束。
@@ -1049,24 +1175,6 @@ func (h *t3ShellHub) applyActiveValues(e *t3ShellEntry, values []json.RawMessage
 		if item.Kind == "snapshot" && item.Snapshot != nil && len(item.ResolvedRepositoryIdentityRoots) == 0 {
 			e.clearForceResync()
 		}
-	}
-	h.publishThreadEvent(e, batch.ids, batch.full)
-	return nil
-}
-
-// applyArchiveValues 把归档流 Chunk 的全部 value 依次解码并应用到状态，发布
-// 语义同活跃面（归档线程同样出现在列表里）。
-func (h *t3ShellHub) applyArchiveValues(e *t3ShellEntry, values []json.RawMessage) error {
-	batch := t3ShellEventBatch{}
-	for _, raw := range values {
-		var item t3ArchiveStreamItem
-		if err := json.Unmarshal(raw, &item); err != nil {
-			return fmt.Errorf("归档流帧解析失败: %w", err)
-		}
-		if err := e.state.applyArchiveItem(item); err != nil {
-			return err
-		}
-		batch.observeArchive(&item)
 	}
 	h.publishThreadEvent(e, batch.ids, batch.full)
 	return nil

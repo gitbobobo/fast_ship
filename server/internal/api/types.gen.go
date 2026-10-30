@@ -5066,7 +5066,7 @@ type T3ComposerOptions struct {
 	Config   map[string]interface{}       `json:"config"`
 	Projects []T3ComposerOptions_Projects `json:"projects"`
 
-	// Settings T3 `server.getSettings` 响应原样透传（camelCase，含 newWorktreesStartFromOrigin 等设置）
+	// Settings T3 `server.getConfig` 响应内嵌 `settings` 子对象原样透传（camelCase，含 newWorktreesStartFromOrigin 等设置；上游 `server.getSettings` 已删除，旧上游无该字段时为空对象）
 	Settings map[string]interface{} `json:"settings"`
 }
 
@@ -5186,7 +5186,7 @@ type T3ThreadActivity struct {
 	// HasPendingRequests 有等待用户处理的运行时请求（审批/提问/代答 secret）
 	HasPendingRequests bool `json:"has_pending_requests"`
 
-	// PendingBackgroundTaskCount 根 run 结束后仍在跑的后台工作条数（command 类不占完成位；上游缺省时为 0）
+	// PendingBackgroundTaskCount 根 run 结束后仍在跑且占完成位的后台工作条数（awaited=true 的 command 也占；command/monitor 默认不占，subagent/background_task/未知/缺省 kind 占；上游缺省时为 0）
 	PendingBackgroundTaskCount int `json:"pending_background_task_count"`
 
 	// Stopping 停止请求已下发且尚未落定：活动 run 的最近一条 run_interrupt_request
@@ -5374,9 +5374,9 @@ type T3ThreadQueueItem struct {
 	Text string `json:"text"`
 }
 
-// T3ThreadStopResult 停止结果；无可停止运行时按 T3 口径视为无操作（stopped=false）
+// T3ThreadStopResult 停止结果；回退路径（旧上游）无可停止运行时按 T3 口径视为无操作（stopped=false）
 type T3ThreadStopResult struct {
-	// RunId 被中断的 run；无可停止运行时缺省
+	// RunId 被中断的 run；仅在 run.interrupt 回退路径回填（thread.stop 路径由服务端选目标，不返回 run_id）
 	RunId   *string `json:"run_id,omitempty"`
 	Stopped bool    `json:"stopped"`
 }
@@ -7182,7 +7182,7 @@ type StopT3Thread200JSONResponseBody struct {
 	// Code 业务错误码；0 表示成功
 	Code int `json:"code"`
 
-	// Data 停止结果；无可停止运行时按 T3 口径视为无操作（stopped=false）
+	// Data 停止结果；回退路径（旧上游）无可停止运行时按 T3 口径视为无操作（stopped=false）
 	Data *T3ThreadStopResult `json:"data,omitempty"`
 
 	// Message 人类可读信息；成功时为 "success"

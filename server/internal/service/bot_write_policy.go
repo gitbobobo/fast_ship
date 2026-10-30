@@ -264,8 +264,12 @@ func (st botPolicyThreadState) facts() map[string]interface{} {
 	return out
 }
 
-// policyThreadState 读取 hub 内存快照（PeekShell，无网络 I/O）：与 wait 评估器
-// 同一可信口径（State==t3ShellReady 才算数）。
+// policyThreadState 读取 hub 视图（PeekShell）：与 wait 评估器同一可信口径
+// （State==t3ShellReady 才算数）。注意 PeekShell 并非纯内存——归档面是按需
+// 快照（INT-173），TTL 过期或首次加载时会触发一次**共享的后台**拉取（HTTP
+// 探测 + WS 拨号 + getArchivedShellSnapshot；inFlight 合并、失败冷却），本次
+// 调用不等待结果（见 PeekShell 注释）。因此不要把它放进更紧的锁内或高频
+// 批量循环：会附带上游拨号。
 func (s *BotService) policyThreadState(userID, envID, threadID string) botPolicyThreadState {
 	st := botPolicyThreadState{}
 	if s.threads == nil {
@@ -285,6 +289,18 @@ func (s *BotService) policyThreadState(userID, envID, threadID string) botPolicy
 	st.hasPendingRequest = shell.PendingRuntimeRequest != nil
 	st.hasActiveRun = shell.ActiveRunID != nil && *shell.ActiveRunID != ""
 	for _, task := range shell.PendingBackgroundTasks {
+		// 独立的第三口径（有意为之，勿与另两个合并）：
+		//   · t3TaskHoldsCompletion —— 「是否占完成位」（awaited 恒占；
+		//     command/monitor 默认不占；其余占）；
+		//   · t3HasInterruptibleBackgroundWork —— 「是否可被停止」；
+		//   · 这里 —— 「线程是否还有会继续推进的运行痕迹」。
+		// dev server 类常驻 command 不构成「线程还在推进」，而 monitor（含
+		// 长跑看门狗）是活的监控，自动结算前应保守视为仍有工作在跑，所以
+		// 本口径比 pending_background_task_count 更严：monitor 计入、awaited
+		// 的 command 不计。facts.background_tasks 与 API 字段因此可能给出不同
+		// 数字，属预期差异而非口径漂移。改用 t3TaskHoldsCompletion 会让
+		// 「只有 dev server 在跑」的线程被当成有后台工作，也会让监控中的
+		// 线程被放行结算——两者都不对。
 		if task.Kind != "command" {
 			st.backgroundTasks++
 		}

@@ -1,6 +1,9 @@
 package service
 
-import "sync"
+import (
+	"slices"
+	"sync"
+)
 
 // T3 shell 变更通知（INT-132）：hub 在数据路径上发布轻量事件，SSE 端点
 // （/api/threads/stream）推给浏览器，浏览器据此重拉列表/详情。设计要点：
@@ -171,6 +174,79 @@ func (h *t3ShellHub) publishToUser(userID string, ev T3ShellEvent) {
 	}
 }
 
+// t3ArchiveAnnounced 是归档面已对外发布过的可见状态指纹
+// （publishArchiveFaceEvent 的去重基准）。守 entry 锁，与 publishedState
+// 同型——都是「对外承诺过什么」的发布侧缓存。announced 区分「从未发布
+// 过」与「发布过空归档可信态」：两者指纹相同（rows 空、err 空），零值若
+// 不加区分，新环境的首份快照会被误判「与基准相同」而整场静默（R11
+// P2-3）——归档落地晚于活跃面 Ready 的页面收不到任何事件，停在
+// 「归档线程暂不可读」降级。首次发布无条件放行。
+type t3ArchiveAnnounced struct {
+	announced bool
+	rows      []t3ArchiveRowDigest
+	err       string
+}
+
+// archiveDigestIDs 摘取行摘要序列的 ID 子序列（保序）：Full/State 的分派
+// 与「集合/顺序是否变了」同一口径——ID 序列变 → Full，ID 不变而行内容
+// 或可信度变 → 轻量 State（R13 Note-2）。
+func archiveDigestIDs(rows []t3ArchiveRowDigest) []string {
+	ids := make([]string, len(rows))
+	for i := range rows {
+		ids[i] = rows[i].ID
+	}
+	return ids
+}
+
+// publishArchiveFaceEvent 是归档面事件的统一发布口（审修 R9 P2-2）：按
+// 「对外可见状态是否真的变了」去重，替代旧实现「凡落地必 Full」的无条件
+// 广播——TTL 例行重拉同一份快照每次都发 Full，前端把 Full 当整环境失效，
+// 每环境每 TTL 一次全量重取，推送退化成定时轮询。
+//
+// 判定基准是状态指纹（archiveFaceFingerprint，与 snapshots() 给浏览器的
+// 视图同源）：
+//   - 线程 ID 集合/顺序变了，或本 entry 还从未发布过（announced=false，含
+//     空归档——空表也是要交给浏览器的结论，不能因零值基准撞车而静默）
+//     → Full；
+//   - ID 集合没变，但行可见内容（标题/状态/更新时刻等，R13 Note-2）或
+//     可信度文案变了（失败首次出现/失败原因变化/恢复可信/TTL 过期撤可
+//     信与随后的同数据落地恢复）→ 轻量 State 事件（载荷取当前视图状态，
+//     前端只按「有 state 即失效该环境详情」处理）；
+//   - 两者都没变（同一错误反复失败、已不可信面的重复撤可信、TTL 例行重
+//     拉同一份行）→ 不发，至多静默。TTL 过期重拉同数据因此不再是全程静
+//     默（P1，R12）：若撤可信不发事件，宣布基准停在可信指纹，落地恢复
+//     与基准一致会被判「无新话可说」——降级的那次响应之后没有任何事件，
+//     前端降级横幅挂到用户下次手动读。行内容变化同理：不发 State 的话
+//     服务端内存已换新而浏览器停在旧行，直到无关事件或手动刷新。
+//
+// forceFull 用于写后失效（invalidateArchiveEntry）：归档集「可能」变了但
+// 去向不可辨，必须整环境失效一次，不做去重；指纹仍同步为发布后状态，让
+// 随后的重拉落地能与它比较。
+//
+// 指纹比较与缓存更新在 e.mu 内完成，发布在锁外（与 noteConnState 同一锁
+// 边界：发布路径不持 entry 锁）。锁序 e.mu → s.mu 与全局一致。
+func (h *t3ShellHub) publishArchiveFaceEvent(e *t3ShellEntry, forceFull bool) {
+	rows, errText := e.state.archiveFaceFingerprint()
+	e.mu.Lock()
+	full := forceFull || !e.archAnnounced.announced ||
+		!slices.Equal(archiveDigestIDs(rows), archiveDigestIDs(e.archAnnounced.rows))
+	stateHint := !full && (!slices.Equal(rows, e.archAnnounced.rows) || errText != e.archAnnounced.err)
+	e.archAnnounced.announced = true
+	e.archAnnounced.rows = rows
+	e.archAnnounced.err = errText
+	statePayload := ""
+	if stateHint {
+		statePayload = e.stateLocked().String()
+	}
+	e.mu.Unlock()
+	switch {
+	case full:
+		h.publishThreadEvent(e, nil, true)
+	case stateHint:
+		h.publishState(e, statePayload)
+	}
+}
+
 // publishThreadEvent 发布一批线程级变化。线程列表非空或 full 才有意义；
 // 空事件直接丢弃，省掉订阅者的无谓唤醒。
 func (h *t3ShellHub) publishThreadEvent(e *t3ShellEntry, threadIDs []string, full bool) {
@@ -184,8 +260,10 @@ func (h *t3ShellHub) publishThreadEvent(e *t3ShellEntry, threadIDs []string, ful
 	})
 }
 
-// publishState 发布连接状态翻转事件（不带线程列表：状态变化本身就是要呈现
-// 的信息）。
+// publishState 发布连接状态事件（不带线程列表）。常规用途是连接状态翻转
+// （状态变化本身就是要呈现的信息）；归档面的可信度翻转也走这里做轻量提示
+// （载荷为当前视图状态）——前端只按「有 state 即失效该环境的全部详情」
+// 处理，不依赖具体取值。
 func (h *t3ShellHub) publishState(e *t3ShellEntry, state string) {
 	h.publishToUser(e.userID, T3ShellEvent{
 		EnvironmentID: e.envID,
@@ -221,8 +299,8 @@ func (b *t3ShellEventBatch) observeActive(item *t3ShellStreamItem) {
 	}
 }
 
-// observeArchive 记录一个归档流项的变化。归档流没有 enrichment 帧，快照
-// 一律按权威全量处理。
+// observeArchive 记录一个旧归档订阅流项的变化（旧面回退路径）。归档流
+// 没有 enrichment 帧，快照一律按权威全量处理。
 func (b *t3ShellEventBatch) observeArchive(item *t3ArchiveStreamItem) {
 	switch item.Kind {
 	case "thread.updated":

@@ -21,7 +21,7 @@ type t3ShellSnapshot struct {
 }
 
 // t3ArchivedShellSnapshot 是归档面全量快照的形状（orchestration
-// .subscribeArchivedShell 首个流项的 snapshot 字段，INT-116 起由归档订阅维护）：
+// .getArchivedShellSnapshot 的返回值，INT-173 起由 hub 的按需读取维护）：
 // 归档线程在 threads 字段（不是活跃快照的 archivedThreads）。
 type t3ArchivedShellSnapshot struct {
 	SchemaVersion    int              `json:"schemaVersion"`
@@ -64,12 +64,39 @@ type t3PendingRuntimeRequest struct {
 
 // t3PendingBackgroundTask 是 shell 上根 run 结束后仍在跑的后台工作摘要
 // （contracts orchestrationV2.ts OrchestrationV2PendingBackgroundTask）：
-// {taskId, kind, description?, childThreadId?}，kind ∈ {subagent, command,
-// monitor, background_task}；未知 kind 上游回退 background_task，kind 缺省
-// （kinds 出现前的旧 roster）同样按 background_task 加载。这里只解码 kind。
+// {taskId, kind, awaited?, description?, childThreadId?}，kind ∈ {subagent,
+// command, monitor, background_task}；未知 kind 上游回退 background_task，
+// kind 缺省（kinds 出现前的旧 roster）同样按 background_task 加载。awaited
+// 是可选的 Literal(true)（#24610）：agent 声明「它结束时我要被唤醒」——线
+// 上只有缺省与 true 两种形态，故解码成值 bool，false 与缺省同义（未显式
+// 声明）。这里只解码 taskId/kind/awaited；占位判定见 t3TaskHoldsCompletion。
 type t3PendingBackgroundTask struct {
-	TaskID string `json:"taskId"`
-	Kind   string `json:"kind"`
+	TaskID  string `json:"taskId"`
+	Kind    string `json:"kind"`
+	Awaited bool   `json:"awaited"`
+}
+
+// t3TaskHoldsCompletion 判定一条后台工作是否占完成位（上游
+// orchestrationV2PendingBackgroundWork.ts backgroundWorkHoldsCompletion，
+// #24610）：awaited=true 恒占位——只有 agent 知道一条 command 是等待还是
+// 留下长跑的 dev server，agent 声明要被唤醒时按 subagent 同等对待；否则按
+// kind 默认：command/monitor 常是 dev server 或其看门狗，不占位；
+// subagent/background_task 占位；未知 kind 上游回退 background_task、kind
+// 缺省（旧 roster）也按 background_task 加载，故都占位。
+//
+// 注意这是「占完成位」判定，与 Stop 的「可被停止」判定
+// （t3HasInterruptibleBackgroundWork）是两个独立口径，不得互相套用。
+func t3TaskHoldsCompletion(task t3PendingBackgroundTask) bool {
+	if task.Awaited {
+		return true
+	}
+	switch task.Kind {
+	case "command", "monitor":
+		return false
+	default:
+		// subagent/background_task、未知 kind 与缺省 kind 都占位。
+		return true
+	}
 }
 
 // t3PullRequestSnapshot 是 PR 链接上的宿主状态快照（contracts
@@ -271,22 +298,23 @@ type t3RuntimeRequest struct {
 	Answers            map[string]any  `json:"answers"`
 }
 
-// t3ShellSnapshots 是同一 WS 会话取回的活跃 + 归档两份 shell 快照。
-// 列表与详情共用；两侧都含子代理线程，由调用方决定是否按 lineage 过滤。
-// ArchiveErr 记录归档面的读取失败（活跃快照已到手后归档 RPC 超时/出错/
-// 响应损坏）：失败不推翻活跃面，Archived 保持零值。两份快照是否齐全由
-// ArchiveErr==nil 表达，调用方按各自语义降级——列表保留活跃线程并标环境
-// 降级；详情在活跃面也找不到该线程时不得借归档缺失断言它不存在（G1）。
+// t3ShellSnapshots 是一个环境的活跃 + 归档两份 shell 视图（活跃面来自常驻
+// 订阅流，归档面来自按需快照缓存）。列表与详情共用；两侧都含子代理线程，
+// 由调用方决定是否按 lineage 过滤。ArchiveErr 记录归档面当前不可信的原因
+// （尚未拉到快照 / 快照 RPC 失败 / 写后失效重拉中）：不可信不推翻活跃面，
+// 已缓存的归档行照旧展示但不得当结论。归档面是否可信由 ArchiveErr==nil
+// 表达，调用方按各自语义降级——列表保留活跃线程并标环境降级；详情在
+// 活跃面也找不到该线程时不得借归档缺失断言它不存在（G1）。
 type t3ShellSnapshots struct {
 	Active     t3ShellSnapshot
 	Archived   t3ArchivedShellSnapshot
 	ArchiveErr error
 }
 
-// projectNames 只用活跃面的项目表（F7）：项目表的权威来源只有活跃面——归档
-// 订阅只在初始快照时携带项目，常驻订阅后旧名字会一直压过活跃流的项目更新/
-// 删除且永不自愈。归档线程同样从这里取项目名；项目已删除时取不到名字
-// （显示无名），与「项目已删除」一致。
+// projectNames 只用活跃面的项目表（F7）：项目表的权威来源只有活跃面——
+// 归档快照携带的项目表会压过活跃流的项目更新/删除且永不自愈，一律忽略。
+// 归档线程同样从这里取项目名；项目已删除时取不到名字（显示无名），与
+// 「项目已删除」一致。
 func (snaps *t3ShellSnapshots) projectNames() map[string]string {
 	names := make(map[string]string, len(snaps.Active.Projects))
 	for _, project := range snaps.Active.Projects {
@@ -349,15 +377,15 @@ func t3ThreadStatus(shell *t3ThreadShell) T3ThreadSummaryStatus {
 			return api.T3ThreadSummaryStatusWaiting
 		}
 	}
-	// 后台工作占位（G2）：根 run 结束后仍在跑的后台 subagent/monitor 会唤醒
-	// 代理继续（上游 backgroundWorkHoldsCompletion，orchestrationV2PendingBackgroundWork.ts：
-	// kind=command 不占完成位——dev server 之类可长跑数小时；其余一切 kind
-	// 含未知都占；kind 缺省按 background_task 加载，故空串同样占位）。
-	// 存在占位工作 → running：线程还有会唤醒代理的工作，状态徽标不能提前
-	// 落成 idle——不是「等待输入或审批」。判定置于 pendingRuntimeRequest 与
-	// activityRunStatus 之后、shell.status 兜底之前。
+	// 后台工作占位（G2）：根 run 结束后仍在跑的后台工作会唤醒代理继续
+	// （上游 backgroundWorkHoldsCompletion，orchestrationV2PendingBackgroundWork.ts
+	// #24610）。占位判定统一走 t3TaskHoldsCompletion（awaited 优先，否则按
+	// kind 默认），与详情计数 deriveT3ThreadActivity 同口径。存在占位工作 →
+	// running：线程还有会唤醒代理的工作，状态徽标不能提前落成 idle——不是
+	// 「等待输入或审批」。判定置于 pendingRuntimeRequest 与 activityRunStatus
+	// 之后、shell.status 兜底之前。
 	for _, task := range shell.PendingBackgroundTasks {
-		if task.Kind != "command" {
+		if t3TaskHoldsCompletion(task) {
 			return api.T3ThreadSummaryStatusRunning
 		}
 	}

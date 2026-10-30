@@ -37,29 +37,36 @@ func t3ErrCode(err error) int {
 
 // fakeT3Environment 在一个 httptest.Server 上同时模拟 T3 的 HTTP 面与 WS RPC 面，
 // 信封/方法名/路径都按真实协议（packages/contracts、apps/server/src/ws.ts）。
-// INT-116 语义：shell 状态来自 hub 的两条长驻订阅（活跃/归档各一条连接），
-// 所以 WS 面是「按 requestId 分派 + 逐 requestId Ack 门控」的统一读循环——
-// 同一条连接上要能先 server.getConfig 再挂订阅流，订阅注册后保持 live 等推送；
-// 归档数据由 orchestration.subscribeArchivedShell 的流式全量快照提供（真实
-// 活跃快照的 archivedThreads 恒为空）；项目表在 HTTP 面提供（GET /api/projects）。
-// 线程投影按 wire 形状携带 visibleTurnItems 且裁掉命令输出。
+// INT-116 语义：活跃面 shell 状态来自 hub 的一条长驻订阅；归档面自
+// INT-173 起走 orchestration.getArchivedShellSnapshot 一次性 RPC（fake
+// 缺省模拟新上游：subscribeArchivedShell 已删除，对该方法的请求直接报错；
+// legacyArchiveSubscription 开关可切回旧模式让回退路径可测）。WS 面是
+// 「按 requestId 分派 + 逐 requestId Ack 门控」的统一读循环——同一条
+// 连接上要能先 server.getConfig 再挂订阅流，订阅注册后保持 live 等推送
+// （真实活跃快照的 archivedThreads 恒为空）；项目表在 HTTP 面提供
+// （GET /api/projects）。线程投影按 wire 形状携带 visibleTurnItems 且裁掉
+// 命令输出。
 type fakeT3Environment struct {
 	t  *testing.T
 	mu sync.Mutex
 
-	baseURL         string
-	pairingCodes    map[string]bool          // 有效配对码
-	validBearers    map[string]bool          // 有效 Bearer
-	grantScope      string                   // /oauth/token 回的 scope；默认宽 scope（标准客户端授权）
-	snapshot        json.RawMessage          // subscribeShell 的权威活跃快照流项（{"kind":"snapshot",...}）
-	archive         json.RawMessage          // 归档订阅的全量快照体（无 kind 包装）
-	archiveFail     bool                     // true 时归档订阅回 Exit Failure（G1 降级路径）
-	archiveGate     chan struct{}            // 非空时归档订阅先等放行再发快照（制造「归档未就绪」窗口）
-	dropAfterActive bool                     // true 时活跃快照发出后立即断连
-	projects        json.RawMessage          // GET /api/projects 响应体
-	projections     map[string]string        // threadId -> wire 投影 JSON
-	blockProjection map[string]chan struct{} // threadId -> 非空时投影请求挂起直到关闭或客户端断开（测预算中途杀掉）
-	turnItems       map[string]string        // itemId -> getTurnItem 返回的完整条目 JSON
+	baseURL      string
+	pairingCodes map[string]bool // 有效配对码
+	validBearers map[string]bool // 有效 Bearer
+	grantScope   string          // /oauth/token 回的 scope；默认宽 scope（标准客户端授权）
+	snapshot     json.RawMessage // subscribeShell 的权威活跃快照流项（{"kind":"snapshot",...}）
+	archive      json.RawMessage // 归档快照体（getArchivedShellSnapshot 返回值）
+	archiveFail  bool            // true 时归档快照 RPC 回 Exit Failure（G1 降级路径）
+	archiveGate  chan struct{}   // 非空时归档快照 RPC 先等放行再答（制造「归档未就绪」窗口）
+	// legacyArchiveSubscription 切回旧上游：subscribeArchivedShell 恢复为
+	// 常驻订阅（注册流、发全量快照、收增量），getArchivedShellSnapshot 改为
+	// 报错。INT-173 起生产路径只调快照 RPC；该开关只用于回退路径可测。
+	legacyArchiveSubscription bool
+	dropAfterActive           bool                     // true 时活跃快照发出后立即断连
+	projects                  json.RawMessage          // GET /api/projects 响应体
+	projections               map[string]string        // threadId -> wire 投影 JSON
+	blockProjection           map[string]chan struct{} // threadId -> 非空时投影请求挂起直到关闭或客户端断开（测预算中途杀掉）
+	turnItems                 map[string]string        // itemId -> getTurnItem 返回的完整条目 JSON
 
 	// 订阅流句柄：hub 每条连接至多一条流，测试经这两个引用推送增量驱动状态。
 	// 多环境共用一个 fake 时以最后注册者为准（测试没有这种用法）。
@@ -68,18 +75,29 @@ type fakeT3Environment struct {
 	conns         []*websocket.Conn // 已建立的 WS 连接（dropConnections 用）
 	nextSeq       int               // 推送增量的序号基线（高于所有 fixture 的 snapshotSequence）
 
-	// 写路径（INT-85）可配置响应
-	configValue    json.RawMessage   // server.getConfig 返回值
-	settingsValue  json.RawMessage   // server.getSettings 返回值
-	vcsStatus      json.RawMessage   // vcs.refreshStatus 返回值
-	vcsRefs        json.RawMessage   // vcs.listRefs 返回值（单页）
-	vcsRefsPages   []json.RawMessage // 非空时按调用顺序弹出，用于跟页测试
-	uploaded       map[string][]byte // attachmentId -> 上传的字节（POST /api/attachments/upload/*）
-	assetContent   map[string][]byte // attachmentId -> 下载字节（GET /api/assets/<id>）
-	assetMissing   bool              // true 时 assets.createUrl 回 AssetAttachmentNotFoundError
-	secretFail     string            // 非空时 secrets.answerRequest 回该 reason 的 SecretRequestError
-	secretAnswers  []map[string]any  // secrets.answerRequest 收到的完整 payload（验证转发）
-	deletedUploads []string          // attachments.delete 收到的 attachmentId
+	// 写路径（INT-85）可配置响应。设置自上游 #26238 起内嵌在 getConfig 的
+	// settings 字段；独立的 server.getSettings 已不存在（fake 缺省模拟新上游，
+	// 该 RPC 直接报错，让仍在调它的客户端代码在测试里炸出来）。legacy 开关
+	// 模拟旧环境：getConfig 无 settings（客户端得到空 settings）、getSettings
+	// 恢复可用（返回 settingsValue）。
+	configValue    json.RawMessage // server.getConfig 返回值（新上游内嵌 settings 子对象）
+	settingsValue  json.RawMessage // 旧上游 server.getSettings 返回值（仅 legacy 模式返回）
+	legacySettings bool            // true 时模拟旧上游的设置面（见上）
+	// legacyThreadStop 切回旧上游的停止面（INT-173）：getConfig 不声明
+	// environment.capabilities.threadStop（真实旧版无该键，客户端应走
+	// run.interrupt 自选 run 回退），且对 thread.stop 命令按未知命令失败——
+	// 能力判定没做就派发的客户端会在测试里炸出来。缺省模拟新上游
+	// （threadStop=true，服务端选目标的新停止语义）。
+	legacyThreadStop bool
+	vcsStatus        json.RawMessage   // vcs.refreshStatus 返回值
+	vcsRefs          json.RawMessage   // vcs.listRefs 返回值（单页）
+	vcsRefsPages     []json.RawMessage // 非空时按调用顺序弹出，用于跟页测试
+	uploaded         map[string][]byte // attachmentId -> 上传的字节（POST /api/attachments/upload/*）
+	assetContent     map[string][]byte // attachmentId -> 下载字节（GET /api/assets/<id>）
+	assetMissing     bool              // true 时 assets.createUrl 回 AssetAttachmentNotFoundError
+	secretFail       string            // 非空时 secrets.answerRequest 回该 reason 的 SecretRequestError
+	secretAnswers    []map[string]any  // secrets.answerRequest 收到的完整 payload（验证转发）
+	deletedUploads   []string          // attachments.delete 收到的 attachmentId
 
 	gotTokenForms []map[string]string
 	gotRPC        []t3RecordedRPC // WS 请求（方法+payload，含订阅）
@@ -152,12 +170,21 @@ func newFakeT3Environment(t *testing.T) *fakeT3Environment {
 				"projects": []any{}, "threads": []any{}, "archivedThreads": []any{},
 			},
 		}),
-		archive:       mustJSON(map[string]any{"schemaVersion": 1, "snapshotSequence": 0, "projects": []any{}, "threads": []any{}}),
-		projects:      mustJSON(map[string]any{"projects": []any{}}),
-		nextSeq:       1000, // 高于所有 fixture 的 snapshotSequence（增量只前进不回卷）
-		projections:   map[string]string{},
-		turnItems:     map[string]string{},
-		configValue:   mustJSON(map[string]any{"providers": map[string]any{}, "shellResumeCompletionMarker": true}),
+		archive:     mustJSON(map[string]any{"schemaVersion": 1, "snapshotSequence": 0, "projects": []any{}, "threads": []any{}}),
+		projects:    mustJSON(map[string]any{"projects": []any{}}),
+		nextSeq:     1000, // 高于所有 fixture 的 snapshotSequence（增量只前进不回卷）
+		projections: map[string]string{},
+		turnItems:   map[string]string{},
+		// 新上游：设置内嵌在 getConfig 的 settings 字段（getSettings 已删除）；
+		// thread.stop 是公开命令，由 environment.capabilities.threadStop 声明
+		// （legacy 开关 useLegacyThreadStop 会剥掉它模拟旧环境）。
+		configValue: mustJSON(map[string]any{
+			"providers": map[string]any{}, "shellResumeCompletionMarker": true,
+			"settings": map[string]any{"newWorktreesStartFromOrigin": true},
+			"environment": map[string]any{
+				"capabilities": map[string]any{"threadStop": true},
+			},
+		}),
 		settingsValue: mustJSON(map[string]any{"newWorktreesStartFromOrigin": true}),
 		vcsStatus:     mustJSON(map[string]any{"isRepo": true, "refName": "main", "hasWorkingTreeChanges": false, "hasPrimaryRemote": true}),
 		vcsRefs: mustJSON(map[string]any{
@@ -168,6 +195,38 @@ func newFakeT3Environment(t *testing.T) *fakeT3Environment {
 		assetContent:   map[string][]byte{},
 		secretAnswers:  []map[string]any{},
 		deletedUploads: []string{},
+	}
+}
+
+// useLegacySettings 把 fake 切到「旧上游」设置面：从 getConfig 响应里剥掉
+// settings（真实旧版无该键，客户端将得到空 settings），并恢复独立的
+// server.getSettings（返回 settingsValue）。用于覆盖回退/兼容路径。
+func (f *fakeT3Environment) useLegacySettings() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.legacySettings = true
+	var config map[string]any
+	if json.Unmarshal(f.configValue, &config) == nil {
+		delete(config, "settings")
+		f.configValue = mustJSON(config)
+	}
+}
+
+// useLegacyThreadStop 把 fake 切到「旧上游」的停止面：getConfig 不再声明
+// environment.capabilities.threadStop，且 thread.stop 命令按未知命令失败
+// （真实旧版不认识该命令）。用于覆盖 Stop 的 run.interrupt 回退路径。
+func (f *fakeT3Environment) useLegacyThreadStop() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.legacyThreadStop = true
+	var config map[string]any
+	if json.Unmarshal(f.configValue, &config) == nil {
+		if environment, ok := config["environment"].(map[string]any); ok {
+			if capabilities, ok := environment["capabilities"].(map[string]any); ok {
+				delete(capabilities, "threadStop")
+			}
+		}
+		f.configValue = mustJSON(config)
 	}
 }
 
@@ -297,27 +356,25 @@ func (f *fakeT3Environment) subscribeShellCount() int {
 }
 
 // awaitPrewarmSubscriptions 等环境的常驻订阅（INT-132：Create 落库即预热）
-// 完成两条订阅，返回当前 RPC 记录条数。调用方以它圈出「被测调用」的观察
-// 窗口，让「该路径不订阅」的断言不被预热流量污染。
+// 完成活跃面订阅，返回当前 RPC 记录条数。调用方以它圈出「被测调用」的观察
+// 窗口，让「该路径不订阅」的断言不被预热流量污染。归档面自 INT-173 起是
+// 按需快照，预热只建活跃面一条订阅。
 func awaitPrewarmSubscriptions(t *testing.T, f *fakeT3Environment) int {
 	t.Helper()
 	deadline := time.After(3 * time.Second)
 	for {
-		shell, archived := false, false
+		shell := false
 		for _, rpc := range f.recordedRPC() {
-			switch rpc.method {
-			case t3RPCSubscribeShell:
+			if rpc.method == t3RPCSubscribeShell {
 				shell = true
-			case t3RPCSubscribeArchivedShell:
-				archived = true
 			}
 		}
-		if shell && archived {
+		if shell {
 			return len(f.recordedRPC())
 		}
 		select {
 		case <-deadline:
-			t.Fatalf("prewarm subscriptions never settled")
+			t.Fatalf("prewarm subscription never settled")
 		case <-time.After(5 * time.Millisecond):
 		}
 	}
@@ -612,7 +669,19 @@ func (f *fakeT3Environment) serveWS(conn *websocket.Conn) {
 						return
 					}
 				}
-			case t3RPCSubscribeArchivedShell:
+			case "orchestration.subscribeArchivedShell":
+				f.mu.Lock()
+				legacy := f.legacyArchiveSubscription
+				f.mu.Unlock()
+				if !legacy {
+					// 新上游已删除该 RPC（上游 #26238）：仍调用的客户端必须失败，
+					// 让误用常驻订阅的代码在测试里炸出来。
+					_ = write(exitFailureFrame(frame.ID, map[string]any{
+						"_tag":    "UnknownException",
+						"message": "method not found: orchestration.subscribeArchivedShell",
+					}))
+					continue
+				}
 				f.mu.Lock()
 				gate := f.archiveGate
 				f.mu.Unlock()
@@ -647,6 +716,43 @@ func (f *fakeT3Environment) serveWS(conn *websocket.Conn) {
 				if err := write(t3ChunkFrame(frame.ID, []json.RawMessage{item})); err != nil {
 					return
 				}
+			case t3RPCGetArchivedShellSnapshot:
+				f.mu.Lock()
+				legacy := f.legacyArchiveSubscription
+				gate := f.archiveGate
+				f.mu.Unlock()
+				if legacy {
+					// 旧上游没有该 RPC（归档只有订阅）：调用方得失败。
+					_ = write(exitFailureFrame(frame.ID, map[string]any{
+						"_tag":    "UnknownException",
+						"message": "method not found: orchestration.getArchivedShellSnapshot",
+					}))
+					continue
+				}
+				if gate != nil {
+					// 归档未就绪窗口：请求已受理但不答，等测试放行；超时断开
+					// 让客户端把这次读取记为失败（冷却后可重试，不是永久结论）。
+					select {
+					case <-gate:
+					case <-time.After(5 * time.Second):
+						return
+					}
+				}
+				f.mu.Lock()
+				archiveFail := f.archiveFail
+				archive := f.archive
+				f.mu.Unlock()
+				if archiveFail {
+					// Exit Failure：归档面读取失败（G1 降级路径）。
+					_ = write(exitFailureFrame(frame.ID, map[string]any{
+						"_tag":    "UnknownException",
+						"message": "archived shell snapshot unavailable",
+					}))
+					continue
+				}
+				// 一次性 RPC：快照体原样作为 Exit Success 的 value（客户端解成
+				// t3ArchivedShellSnapshot，与旧订阅首项的 snapshot 字段同形状）。
+				_ = write(exitSuccessFrame(frame.ID, archive))
 			case "orchestration.getTurnItem":
 				var payload struct {
 					ItemID string `json:"itemId"`
@@ -659,9 +765,22 @@ func (f *fakeT3Environment) serveWS(conn *websocket.Conn) {
 				}
 				_ = write(exitSuccessFrame(frame.ID, json.RawMessage(`{"item":`+item+`}`)))
 			case "orchestration.dispatchCommand":
+				var command struct {
+					Type string `json:"type"`
+				}
+				_ = json.Unmarshal(frame.Payload, &command)
 				f.mu.Lock()
+				legacyStop := f.legacyThreadStop
 				hook := f.onDispatch
 				f.mu.Unlock()
+				if legacyStop && command.Type == "thread.stop" {
+					// 旧上游不认识 thread.stop：按未知命令失败（对齐真实环境）。
+					_ = write(exitFailureFrame(frame.ID, map[string]any{
+						"_tag":    "UnknownException",
+						"message": "unknown command: thread.stop",
+					}))
+					continue
+				}
 				if hook != nil {
 					hook(frame.Payload)
 				}
@@ -676,8 +795,17 @@ func (f *fakeT3Environment) serveWS(conn *websocket.Conn) {
 				_ = write(exitSuccessFrame(frame.ID, value))
 			case "server.getSettings":
 				f.mu.Lock()
+				legacy := f.legacySettings
 				value := f.settingsValue
 				f.mu.Unlock()
+				if !legacy {
+					// 新上游已删除该 RPC：仍调用的客户端必须失败（对齐真实环境）。
+					_ = write(exitFailureFrame(frame.ID, map[string]any{
+						"_tag":    "UnknownException",
+						"message": "method not found: server.getSettings",
+					}))
+					continue
+				}
 				_ = write(exitSuccessFrame(frame.ID, value))
 			case "vcs.refreshStatus":
 				f.mu.Lock()
@@ -1325,15 +1453,19 @@ func TestT3ThreadsAggregationAndErrorIsolation(t *testing.T) {
 		t.Fatalf("subagent thread th-5 must be excluded from list")
 	}
 
-	// 归档读取走的是归档订阅（先全量快照后增量），不再是归档一次性 RPC
-	var sawArchiveSubscribe bool
+	// 归档读取走的是 getArchivedShellSnapshot 一次性 RPC（INT-173）：
+	// 新上游已删除 subscribeArchivedShell，生产路径不得再调用它。
+	var sawArchiveSnapshotRPC bool
 	for _, rpc := range e.fake.recordedRPC() {
-		if rpc.method == t3RPCSubscribeArchivedShell {
-			sawArchiveSubscribe = true
+		switch rpc.method {
+		case t3RPCGetArchivedShellSnapshot:
+			sawArchiveSnapshotRPC = true
+		case "orchestration.subscribeArchivedShell":
+			t.Fatalf("archive must be read via getArchivedShellSnapshot, not the removed subscribe RPC")
 		}
 	}
-	if !sawArchiveSubscribe {
-		t.Fatalf("expected orchestration.subscribeArchivedShell stream")
+	if !sawArchiveSnapshotRPC {
+		t.Fatalf("expected orchestration.getArchivedShellSnapshot call")
 	}
 	// 热路径复用：第一次列表只发生一次冷启动全量订阅（活跃一条连接）。
 	if got := e.fake.subscribeShellCount(); got != 1 {
@@ -1921,6 +2053,19 @@ func TestT3ThreadsArchiveFailureKeepsActiveThreads(t *testing.T) {
 					map[string]any{"taskId": "bg-2", "kind": "command"},
 				},
 			}),
+			// WS 快照解码后的 awaited 参与 G2 判定：awaited=true 的 command
+			// 占完成位（agent 声明它结束时自己要被唤醒），无它则落 idle。
+			shellThread("th-3", "awaited 命令占位", "completed", map[string]any{
+				"pendingBackgroundTasks": []any{
+					map[string]any{"taskId": "bg-3", "kind": "command", "awaited": true},
+				},
+			}),
+			// 对照：同 shape 但未声明 awaited 的 monitor 不占位。
+			shellThread("th-4", "普通 monitor 不占位", "completed", map[string]any{
+				"pendingBackgroundTasks": []any{
+					map[string]any{"taskId": "bg-4", "kind": "monitor"},
+				},
+			}),
 		},
 	)
 	e.fake.archiveFail = true
@@ -1934,7 +2079,7 @@ func TestT3ThreadsArchiveFailureKeepsActiveThreads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
-	if len(result.Items) != 2 {
+	if len(result.Items) != 4 {
 		t.Fatalf("active threads must survive archive RPC failure, got %+v", result.Items)
 	}
 	byID := map[string]T3ThreadSummary{}
@@ -1946,6 +2091,12 @@ func TestT3ThreadsArchiveFailureKeepsActiveThreads(t *testing.T) {
 	}
 	if byID["th-2"].Status != "running" {
 		t.Fatalf("pending background subagent must hold completion (running), got %+v", byID["th-2"])
+	}
+	if byID["th-3"].Status != "running" {
+		t.Fatalf("awaited command must hold completion (running), got %+v", byID["th-3"])
+	}
+	if byID["th-4"].Status != "idle" {
+		t.Fatalf("plain monitor must not hold completion (idle), got %+v", byID["th-4"])
 	}
 	if len(result.Environments) != 1 {
 		t.Fatalf("environments = %+v", result.Environments)
@@ -2014,9 +2165,11 @@ func TestT3ThreadDetailArchiveFailure(t *testing.T) {
 }
 
 // TestT3ThreadStatusPendingBackgroundTasks 覆盖 G2 状态映射：根 run 结束后
-// 仍在跑的后台工作按 kind 占完成位——command 不占，其余一切 kind（含未知与
-// 缺省）都占 → running；判定次序上 archivedAt/pendingRuntimeRequest/
-// activityRunStatus 保持优先。用例从 JSON 解码起步，连带覆盖 wire 字段标签。
+// 仍在跑的后台工作按「占完成位」判定决定是否撑为 running——awaited=true 恒
+// 占位，否则按 kind 默认（command/monitor 不占，其余一切 kind 含未知与缺省
+// 都占；上游 backgroundWorkHoldsCompletion，#24610）；判定次序上
+// archivedAt/pendingRuntimeRequest/activityRunStatus 保持优先。用例从 JSON
+// 解码起步，连带覆盖 wire 字段标签（含 awaited）。
 func TestT3ThreadStatusPendingBackgroundTasks(t *testing.T) {
 	decode := func(t *testing.T, shellJSON string) *t3ThreadShell {
 		t.Helper()
@@ -2034,12 +2187,13 @@ func TestT3ThreadStatusPendingBackgroundTasks(t *testing.T) {
 		want  api.T3ThreadSummaryStatus
 	}{
 		{"subagent 占位", `[{"taskId":"bg-1","kind":"subagent"}]`, api.T3ThreadSummaryStatusRunning},
-		{"monitor 占位", `[{"taskId":"bg-1","kind":"monitor"}]`, api.T3ThreadSummaryStatusRunning},
+		{"monitor 不占位（dev server/看门狗类）", `[{"taskId":"bg-1","kind":"monitor"}]`, api.T3ThreadSummaryStatusIdle},
 		{"background_task 占位", `[{"taskId":"bg-1","kind":"background_task"}]`, api.T3ThreadSummaryStatusRunning},
 		{"未知 kind 占位（上游回退 background_task）", `[{"taskId":"bg-1","kind":"hologram"}]`, api.T3ThreadSummaryStatusRunning},
 		{"kind 缺省占位（旧 roster 按 background_task 加载）", `[{"taskId":"bg-1"}]`, api.T3ThreadSummaryStatusRunning},
 		{"command 不占位", `[{"taskId":"bg-1","kind":"command"}]`, api.T3ThreadSummaryStatusIdle},
-		{"command 与占位混合", `[{"taskId":"b1","kind":"command"},{"taskId":"b2","kind":"monitor"}]`, api.T3ThreadSummaryStatusRunning},
+		{"command 与占位混合", `[{"taskId":"b1","kind":"command"},{"taskId":"b2","kind":"subagent"}]`, api.T3ThreadSummaryStatusRunning},
+		{"command 与 monitor 混合仍不占位", `[{"taskId":"b1","kind":"command"},{"taskId":"b2","kind":"monitor"}]`, api.T3ThreadSummaryStatusIdle},
 		{"空数组不占位", `[]`, api.T3ThreadSummaryStatusIdle},
 	}
 	for _, c := range kindCases {
@@ -2047,6 +2201,38 @@ func TestT3ThreadStatusPendingBackgroundTasks(t *testing.T) {
 			shell := decode(t, `{"id":"th-1","status":"completed","pendingBackgroundTasks":`+c.tasks+`}`)
 			if got := t3ThreadStatus(shell); got != c.want {
 				t.Fatalf("tasks %s: status = %v, want %v", c.tasks, got, c.want)
+			}
+		})
+	}
+
+	// awaited 矩阵（#24610）：awaited=true 恒占位——agent 声明它结束时自己
+	// 要被唤醒，command/monitor 也一样；否则按 kind 默认。上游契约里 awaited
+	// 是可选的 Literal(true)，false 与缺省同为「未显式声明」，都走 kind 默认。
+	awaitedCases := []struct {
+		name    string
+		kind    string
+		awaited string
+		want    api.T3ThreadSummaryStatus
+	}{
+		{"command awaited 缺省不占位", "command", ``, api.T3ThreadSummaryStatusIdle},
+		{"command awaited=true 恒占位", "command", `,"awaited":true`, api.T3ThreadSummaryStatusRunning},
+		{"command awaited=false 不占位（同缺省）", "command", `,"awaited":false`, api.T3ThreadSummaryStatusIdle},
+		{"monitor awaited 缺省不占位", "monitor", ``, api.T3ThreadSummaryStatusIdle},
+		{"monitor awaited=true 恒占位（如 PR watch）", "monitor", `,"awaited":true`, api.T3ThreadSummaryStatusRunning},
+		{"monitor awaited=false 不占位", "monitor", `,"awaited":false`, api.T3ThreadSummaryStatusIdle},
+		{"subagent awaited 缺省占位", "subagent", ``, api.T3ThreadSummaryStatusRunning},
+		{"subagent awaited=true 占位", "subagent", `,"awaited":true`, api.T3ThreadSummaryStatusRunning},
+		{"subagent awaited=false 仍按 kind 占位", "subagent", `,"awaited":false`, api.T3ThreadSummaryStatusRunning},
+		{"background_task awaited 缺省占位", "background_task", ``, api.T3ThreadSummaryStatusRunning},
+		{"background_task awaited=true 占位", "background_task", `,"awaited":true`, api.T3ThreadSummaryStatusRunning},
+		{"background_task awaited=false 仍按 kind 占位", "background_task", `,"awaited":false`, api.T3ThreadSummaryStatusRunning},
+	}
+	for _, c := range awaitedCases {
+		t.Run(c.name, func(t *testing.T) {
+			tasks := `[{"taskId":"bg-1","kind":"` + c.kind + `"` + c.awaited + `}]`
+			shell := decode(t, `{"id":"th-1","status":"completed","pendingBackgroundTasks":`+tasks+`}`)
+			if got := t3ThreadStatus(shell); got != c.want {
+				t.Fatalf("tasks %s: status = %v, want %v", tasks, got, c.want)
 			}
 		})
 	}
@@ -2304,11 +2490,14 @@ func TestT3ThreadsStaleCredentialRejectionSurfacesRepair(t *testing.T) {
 	}
 }
 
-// TestT3ThreadsArchiveNotReadyDegrades 覆盖 G1 的「未就绪」半边：归档订阅已
-// 受理但全量快照未到（两条连接进度独立）时，活跃线程照常返回、环境标
-// degraded「归档线程暂不可读」；放行后归档快照到达，状态收敛为 ok。
+// TestT3ThreadsArchiveNotReadyDegrades 覆盖 G1 的「未就绪」半边（INT-173：
+// 按需快照版本）：归档快照 RPC 已受理但迟迟不答时，活跃线程照常返回、
+// 环境标 degraded「归档线程暂不可读」；放行后快照到达，下一次读取（冷却
+// 过期重拉）收敛为 ok。失败冷却窗口给得很短——第一次 gate 内读取被 fake
+// 的应答超时断开会记一次读取失败，等冷却过了重试即可。
 func TestT3ThreadsArchiveNotReadyDegrades(t *testing.T) {
 	e := setupT3ServiceTest(t)
+	e.hub.cfg.ArchiveTTL = 300 * time.Millisecond
 	userID := e.createUser(t)
 	ctx := context.Background()
 
@@ -2355,6 +2544,99 @@ func TestT3ThreadsArchiveNotReadyDegrades(t *testing.T) {
 	}, T3EnvironmentStatusOK, 3*time.Second)
 	if len(items) != 2 {
 		t.Fatalf("archived thread must appear after the snapshot arrives, got %+v", items)
+	}
+}
+
+// TestT3ThreadsLegacyArchiveSubscription 覆盖旧面回退（INT-173 审修）：旧上游
+// 没有 getArchivedShellSnapshot（fake 的 legacyArchiveSubscription 建模式），
+// 按需快照首读被判方法拒绝后，entry 永久切到常驻 subscribeArchivedShell
+// 订阅——归档数据由订阅流喂入（快照 + 增量），此后不再发按需拨号。
+func TestT3ThreadsLegacyArchiveSubscription(t *testing.T) {
+	e := setupT3ServiceTest(t)
+	userID := e.createUser(t)
+	ctx := context.Background()
+
+	e.fake.mu.Lock()
+	e.fake.legacyArchiveSubscription = true
+	e.fake.snapshot = shellSnapshotFixture(
+		[]any{map[string]any{"id": "p-1", "title": "P"}},
+		[]any{shellThread("th-1", "活跃线程", "running", nil)},
+	)
+	e.fake.archive = mustJSON(map[string]any{
+		"schemaVersion": 1, "snapshotSequence": 2,
+		"projects": []any{map[string]any{"id": "p-1", "title": "P"}},
+		"threads":  []any{shellThread("th-2", "旧归档线程", "idle", map[string]any{"archivedAt": "2026-10-01T00:00:00.000Z"})},
+	})
+	e.fake.mu.Unlock()
+
+	if _, err := e.env.Create(ctx, userID, &CreateT3EnvironmentRequest{Name: "旧面机", PairingUrl: e.fake.pairingURL(e.fake.baseURL)}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	// 归档线程经旧订阅快照喂入：列表需等到包含它才满足。
+	result := listUntil(t, e, userID, func(res *T3ThreadListResponse) bool {
+		if len(res.Items) != 2 {
+			return false
+		}
+		for _, item := range res.Items {
+			if item.Id == "th-2" && item.Status == "archived" {
+				return true
+			}
+		}
+		return false
+	})
+	_ = result
+
+	// 按需快照被明确拒绝了一次（切订阅的证据）；此后不再有按需调用。
+	var sawSnapshotRPC, sawLegacySub bool
+	for _, rpc := range e.fake.recordedRPC() {
+		switch rpc.method {
+		case t3RPCGetArchivedShellSnapshot:
+			sawSnapshotRPC = true
+		case "orchestration.subscribeArchivedShell":
+			sawLegacySub = true
+		}
+	}
+	if !sawSnapshotRPC {
+		t.Fatalf("expected one probing getArchivedShellSnapshot before the legacy switch")
+	}
+	if !sawLegacySub {
+		t.Fatalf("legacy env must subscribe via subscribeArchivedShell")
+	}
+
+	// 旧订阅的增量通道继续喂数：推一条归档 thread.updated，列表应出现新线程。
+	e.fake.mu.Lock()
+	st := e.fake.archiveStream
+	e.fake.mu.Unlock()
+	if st == nil {
+		t.Fatalf("archive subscription stream must be registered")
+	}
+	seq := e.fake.nextPushSeq()
+	item := mustJSON(map[string]any{
+		"kind": "thread.updated", "sequence": seq,
+		"thread": shellThread("th-3", "增量归档", "idle", map[string]any{"archivedAt": "2026-10-02T00:00:00.000Z"}),
+	})
+	if err := st.push(item); err != nil {
+		t.Fatalf("push archive delta: %v", err)
+	}
+	listUntil(t, e, userID, func(res *T3ThreadListResponse) bool {
+		for _, it := range res.Items {
+			if it.Id == "th-3" {
+				return true
+			}
+		}
+		return false
+	})
+
+	// 切换后不再发按需快照：窗口内只统计切换前那一次。
+	before := len(e.fake.recordedRPC())
+	if _, err := e.th.List(ctx, userID); err != nil {
+		t.Fatalf("list again: %v", err)
+	}
+	for _, rpc := range e.fake.recordedRPC()[before:] {
+		if rpc.method == t3RPCGetArchivedShellSnapshot {
+			t.Fatalf("legacy env must not retry the on-demand snapshot RPC")
+		}
 	}
 }
 

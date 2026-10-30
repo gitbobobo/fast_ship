@@ -200,9 +200,10 @@ func deriveT3ThreadActivity(projection *t3ThreadProjection, shell *t3ThreadShell
 		Stopping:           false,
 		HasPendingRequests: shell.PendingRuntimeRequest != nil,
 	}
-	// 占完成位的后台工作数（口径与状态映射一致：command 不占位）。
+	// 占完成位的后台工作数：与状态映射 t3ThreadStatus 同口径，统一走
+	// t3TaskHoldsCompletion（awaited=true 的 command 也计入）。
 	for _, task := range shell.PendingBackgroundTasks {
-		if task.Kind != "command" {
+		if t3TaskHoldsCompletion(task) {
 			activity.PendingBackgroundTaskCount++
 		}
 	}
@@ -248,15 +249,34 @@ func t3QueueRank(run t3Run) int {
 	return run.Ordinal
 }
 
-// t3HasInterruptibleBackgroundWork 对齐 T3 interruptThreadTurn：没有活动 run 时，
-// 用「不含 pullRequests」的后台工作决定要不要中断最近 run。PR watch 是 monitor
-// 且 taskId 前缀 pull-request-watch:，Stop 不应把它当成可中断目标。
+// t3HasInterruptibleBackgroundWork 是「可被停止」判定，与上面的
+// t3TaskHoldsCompletion「占完成位」是两个独立口径，不得互相套用：占位看
+// 「谁会唤醒代理」，可停止看「Stop 还能对什么下手」。
+//
+// 对齐上游 interruptThreadTurn（无 threadStop 能力的回退分支）：没有活动
+// run 时，用后台工作 roster（不含 PR 链接，即「不含 pullRequests」）决定
+// 要不要中断最近 run；command/monitor/subagent/background_task 都在可中断
+// 后台之列（run.interrupt 连带取消该 run 挂的后台工作），唯独 PR watch
+// 不算——taskId 前缀 pull-request-watch: 的 monitor 由专门的解监听分支
+// 处理（thread.pull-request.watch watching=false），不该成为 run.interrupt
+// 的理由（R14 P2-1：前缀排除先于 awaited 判定、无论 awaited 与否都不放
+// 行——放行 awaited PR watch 只会把 Stop 引向一条已结束的最近 run：上游
+// 按「run 不活跃」拒绝（用户看到 502），或受理返回 stopped=true 而 PR
+// watch 照跑、线程仍判 running（「假停」），两头都丢 stopped=false 的如
+// 实结论；停它需 watching=false 专门分支，不在本 PR）。Fast Ship 在此之上
+// 仍排除普通 command（dev server 之类的常驻命令不作为回退路径的停止目
+// 标），是比上游更窄的本地口径；但 awaited 是 run 挂载类（command/
+// subagent/background_task）的最高优先放行——awaited 语义是「它结束时我
+// 要被唤醒」，与「dev server 不宜停」不是一类：awaited 恒占完成位、线程
+// 状态因它判 running（见 t3ThreadStatus），awaited 的 command 得能停，否
+// 则「根 run 已结束、只剩一条 awaited 后台工作」的线程显示 running 却点
+// 不停（R11 awaited command 同型）。kind 排除只在未声明 awaited 时生效。
 func t3HasInterruptibleBackgroundWork(tasks []t3PendingBackgroundTask) bool {
 	for _, task := range tasks {
-		if task.Kind == "command" {
+		if strings.HasPrefix(task.TaskID, "pull-request-watch:") {
 			continue
 		}
-		if task.Kind == "monitor" && strings.HasPrefix(task.TaskID, "pull-request-watch:") {
+		if !task.Awaited && task.Kind == "command" {
 			continue
 		}
 		return true
