@@ -11,7 +11,6 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/forge"
 	"github.com/godbobo/fast_ship/server/internal/githubapi"
 	"github.com/godbobo/fast_ship/server/internal/model"
-	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
@@ -53,6 +52,11 @@ type commentWakePayload struct {
 	} `json:"issue"`
 	Comment struct {
 		Body string `json:"body"`
+		// User.Type GitHub 把 App/机器人账号标为 "Bot"：机器自评论不唤醒
+		// （见 commentWakePayloadGuards 的机器评论排除）。
+		User struct {
+			Type string `json:"type"`
+		} `json:"user"`
 	} `json:"comment"`
 	Repository struct {
 		FullName string `json:"full_name"`
@@ -82,6 +86,17 @@ func commentWakePayloadGuards(body []byte) *commentWakePayload {
 	if !strings.Contains(strings.ToLower(p.Comment.Body), reviewCommentWakeMention) {
 		return nil
 	}
+	// 机器自评论不唤醒：审查结论与复审总结的正文由模型生成，可能引用
+	// 用户评论里的 @fast-ship-bot——不排除会形成「发布结论 → 再唤醒」
+	// 的无限审查循环（每轮 supersede 上一轮，持续烧额度）。两类识别：
+	// 平台标记的 Bot 账号；机器评论自带的隐藏 HTML 标记（fast-ship 审查
+	// 结论、codex 复审总结）。
+	if p.Comment.User.Type == "Bot" ||
+		strings.Contains(p.Comment.Body, reviewCodeCommentMarker) ||
+		strings.Contains(p.Comment.Body, reviewVisualCommentMarker) ||
+		strings.Contains(p.Comment.Body, "<!-- codex-") {
+		return nil
+	}
 	// 普通 Issue 评论（issue.pull_request 缺失）与缺仓库/编号的畸形投递忽略。
 	if p.Issue.PullRequest == nil || p.Issue.Number <= 0 || p.Repository.FullName == "" {
 		return nil
@@ -92,11 +107,11 @@ func commentWakePayloadGuards(body []byte) *commentWakePayload {
 // deterministicCommentWakeSetupErr 评论唤醒前置解析的确定性失败：访问面未
 // 配置（App 未部署/静态令牌，重投只会得到同一结果）与平台 401/403/404 且
 // 非限流（仓库无安装、凭证吊销/权限不足）。限流 403 与网络/5xx 属瞬时，
-// 透出 500 让平台重投。
+// 透出 500 让平台重投。其余 AppError（部署设置读取失败等 ErrInternal）
+// 也是瞬时 DB 故障——只有哨兵 errReviewGitHubAccessUnconfigured 按确定性
+// 处理，不能一提子以 errs.AppError 判定（fast-ship-bot 第 1 轮 P2）。
 func deterministicCommentWakeSetupErr(err error) bool {
-	var appErr *errs.AppError
-	if errors.As(err, &appErr) {
-		// resolveGitHubInstallation 只在访问面未配置时直接回 AppError。
+	if errors.Is(err, errReviewGitHubAccessUnconfigured) {
 		return true
 	}
 	var statusErr *githubapi.StatusError

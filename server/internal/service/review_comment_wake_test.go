@@ -21,6 +21,7 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/forge"
 	"github.com/godbobo/fast_ship/server/internal/githubapi"
 	"github.com/godbobo/fast_ship/server/internal/model"
+	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	"gorm.io/gorm"
 )
 
@@ -56,6 +57,13 @@ func dropIssuePullRequest(payload map[string]any) {
 // setCommentAction 覆盖 action（edited/deleted 等不唤醒）。
 func setCommentAction(action string) func(map[string]any) {
 	return func(payload map[string]any) { payload["action"] = action }
+}
+
+// setCommentUserType 覆盖评论作者类型（GitHub 把 App/机器人账号标为 Bot）。
+func setCommentUserType(userType string) func(map[string]any) {
+	return func(payload map[string]any) {
+		payload["comment"].(map[string]any)["user"] = map[string]any{"type": userType, "login": "fast-ship-bot"}
+	}
 }
 
 // TestReviewCommentWakeOpensRound 正向路径：PR 顶层评论点名机器人 → 实拉
@@ -255,6 +263,13 @@ func TestReviewCommentWakeGuards(t *testing.T) {
 		issueCommentBody("@fast-ship-bot", repo, 25, 42, dropIssuePullRequest),
 		// 未启用审查的仓库。
 		issueCommentBody("@fast-ship-bot", "other/repo", 25, 42),
+		// 平台标记的 Bot 账号自评论：正文可能引用用户评论里的 mention，
+		// 不排除会形成「发布结论 → 再唤醒」的无限审查循环。
+		issueCommentBody("@fast-ship-bot 结论：发现问题", repo, 25, 42, setCommentUserType("Bot")),
+		// 机器评论的隐藏标记（fast-ship 审查结论）同样排除。
+		issueCommentBody("结论 <!-- fast-ship-code-review --> 含 @fast-ship-bot", repo, 25, 42),
+		// codex 复审总结的隐藏标记同样排除。
+		issueCommentBody("<!-- codex-pull-request-review-summary --> 含 @fast-ship-bot", repo, 25, 42),
 	} {
 		if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", fmt.Sprintf("d-g%d", i), body); err != nil {
 			t.Fatalf("guard %d: %v", i, err)
@@ -810,8 +825,10 @@ func TestReviewCommentWakeForkSkipped(t *testing.T) {
 		ctx := context.Background()
 		e.fake.SetPR(repo, 51, &githubapi.PullRequest{
 			RepoFullName: repo, Number: 51, State: "open", HeadSHA: "sha-fork",
-			HeadRepoFullName: headRepo,
 		})
+		// SetPR 把空 head 仓库默认成 base 仓库（本地自测语义）；fork/已删
+		// fork 用覆盖口显式指明。
+		e.fake.SetPRHeadRepo(repo, 51, headRepo)
 
 		if err := e.review.HandleGitHubWebhook(ctx, "issue_comment",
 			fmt.Sprintf("d-fork%d", i), issueCommentBody("@fast-ship-bot", repo, 51, 42)); err != nil {
@@ -911,6 +928,73 @@ func TestReviewCommentWakeInstallationResolveFails(t *testing.T) {
 		Count(&deliveries2)
 	if deliveries2 != 0 {
 		t.Fatalf("瞬时失败不得登记幂等账，实得 %d 行", deliveries2)
+	}
+}
+
+// stubGHClientFor 构造 ClientFor 可注入错误的 gh 访问面（-fast-ship-bot
+// 第 1 轮 P2：ClientFor 链路的 ErrInternal 是瞬时 DB 故障，不得判丢弃）。
+type stubGHClientFor struct{ err error }
+
+func (s stubGHClientFor) ClientFor(context.Context) (githubapi.GitHubClient, error) {
+	return nil, s.err
+}
+
+// TestReviewCommentWakeClientForTransientErr ClientFor 返回瞬时 AppError
+// （如部署设置读取失败的 ErrInternal）时透出 500 不落账；只有访问面未
+// 配置的哨兵才按确定性丢弃补登幂等账。
+func TestReviewCommentWakeClientForTransientErr(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	e.enableReview(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	ctx := context.Background()
+	e.fake.SetPR(repo, 54, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 54, State: "open", HeadSHA: "sha-cf",
+		HeadRepoFullName: repo,
+	})
+	body := issueCommentBody("@fast-ship-bot", repo, 54, -1)
+
+	origGH := e.review.gh
+	e.review.gh = stubGHClientFor{err: errs.New(errs.ErrInternal.Code, "读取部署设置失败")}
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-cf-1", body); err == nil {
+		t.Fatal("ClientFor 瞬时 AppError 应透出 error（500，平台重投）")
+	}
+	var deliveries int64
+	e.svc.db.Model(&model.GitHubWebhookDelivery{}).
+		Where("delivery_id = ?", deliveryLedgerKey(model.ForgeIntegrationBuiltinGitHubID, "d-cf-1")).
+		Count(&deliveries)
+	if deliveries != 0 {
+		t.Fatalf("瞬时 AppError 不得烧幂等账，实得 %d 行", deliveries)
+	}
+
+	// 恢复后同 delivery 重投：完整重走并开轮。
+	e.review.gh = origGH
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-cf-1", body); err != nil {
+		t.Fatalf("恢复后重投应完整重走并开轮: %v", err)
+	}
+	var run model.ReviewRun
+	if err := e.svc.db.Where("pr_number = 54").First(&run).Error; err != nil {
+		t.Fatalf("重投后应开出新轮: %v", err)
+	}
+}
+
+// TestReviewCommentWakeFakeHeadRepoDefault fake 自测路径的 head 仓库默认：
+// SetPR 未指明 HeadRepoFullName 时按同仓库处理，fork 守卫不在 fake 上恒
+// 触发（fast-ship-bot 第 1 轮 P2：本地 simulate 永远无法自测唤醒）。
+func TestReviewCommentWakeFakeHeadRepoDefault(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	e.enableReview(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	ctx := context.Background()
+	e.fake.SetPR(repo, 56, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 56, State: "open", HeadSHA: "sha-fake",
+		// 故意不设 HeadRepoFullName：验证 fake 默认按同仓库处理。
+	})
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-fake", issueCommentBody("@fast-ship-bot", repo, 56, 42)); err != nil {
+		t.Fatalf("fake 默认同仓库应开轮: %v", err)
+	}
+	var run model.ReviewRun
+	if err := e.svc.db.Where("pr_number = 56").First(&run).Error; err != nil {
+		t.Fatalf("应开出新轮: %v", err)
 	}
 }
 

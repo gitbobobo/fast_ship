@@ -454,13 +454,19 @@ func (s *ReviewService) reviewClient(ctx context.Context, integrationID, repoFul
 	return s.clients.ClientFor(ctx, integrationID, repoFullName, installationID)
 }
 
+// errReviewGitHubAccessUnconfigured GitHub 访问面未配置的哨兵：
+// resolveGitHubInstallation 唯一按「确定性失败」返回的 AppError——ClientFor
+// 链路上的其他 AppError（部署设置读取失败等 ErrInternal）是瞬时 DB 故障，
+// 评论唤醒不得判丢弃烧幂等账（fast-ship-bot 第 1 轮 P2）。
+var errReviewGitHubAccessUnconfigured = errs.New(errs.ErrGitHubAPI.Code, "GitHub 访问面未配置")
+
 // resolveGitHubInstallation GitHub 专属 seam：rerun 这类没有 webhook 安装
 // 快照的路径按仓库名解析 App 安装 id。ResolveInstallation 不在
 // forge.ReviewClient 方法面内（App 安装解析对其他集成不存在），留在
 // githubapi/githubapp 侧。
 func (s *ReviewService) resolveGitHubInstallation(ctx context.Context, repoFullName string) (int64, error) {
 	if s.gh == nil {
-		return 0, errs.New(errs.ErrGitHubAPI.Code, "GitHub 访问面未配置")
+		return 0, errReviewGitHubAccessUnconfigured
 	}
 	api, err := s.gh.ClientFor(ctx)
 	if err != nil {
