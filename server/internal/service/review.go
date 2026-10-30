@@ -207,12 +207,18 @@ const reviewTiedRevalidateMax = 4
 // 提交后踢循环两平台共用同一尾部。
 func (s *ReviewService) handlePlatformWebhook(ctx context.Context, integrationID, source, event, deliveryID string, body []byte) error {
 	var err error
+	kick := true
 	if event == "issue_comment" || event == "pull_request_comment" {
 		// Forgejo 的 PR 评论由独立订阅项 Pull Request Comment 投递，事件名
 		// 随部署版本/形态可能是 pull_request_comment（字面名）或 issue_comment
 		// （Gitea 系 issue 评论同型），两个名字都进评论唤醒分支；GitHub 恒
 		// issue_comment（行内评论是另一个事件名，不会误入）。
-		err = s.handleCommentWake(ctx, integrationID, event, deliveryID, body)
+		var changed bool
+		changed, err = s.handleCommentWake(ctx, integrationID, event, deliveryID, body)
+		// 忽略类评论（未点名/非 PR/无资格/判丢弃）没有可调度的状态变化，
+		// 不 kick——订阅 issue_comment 后所有评论都进这里，讨论密集仓库
+		// 的普通评论不该放大成额外 tick（codex 第 41 轮 P2）。
+		kick = changed
 	} else {
 		err = s.runWebhookDeliveryTx(ctx, integrationID, event, deliveryID, body, "", nil)
 		for i := 0; i < reviewTiedRevalidateMax; i++ {
@@ -244,7 +250,9 @@ func (s *ReviewService) handlePlatformWebhook(ctx context.Context, integrationID
 		return err
 	}
 	// 事务提交后踢调度循环（循环未启动时为 no-op）。
-	s.notifyReviewLoop()
+	if kick {
+		s.notifyReviewLoop()
+	}
 	return nil
 }
 

@@ -329,7 +329,11 @@ func (s *ReviewService) observeAcceptedHead(ctx context.Context, integrationID, 
 //	head 采信语义：账本可能因丢投递落后于平台——观察窗口内总账未被并发推进
 //	时，即便实拉 head 与总账不同也采信实拉 head 开轮（openRoundTx 把总账
 //	推进到 live head），不再按「账本不同」把唤醒永久锁死。
-func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, event, deliveryID string, body []byte) error {
+//
+// 返回值 changed：本次投递实际改变了审查状态（开出新轮）——忽略类投递
+// （未点名/非 PR/无资格/判丢弃）返回 false，调用方据此跳过调度循环 kick，
+// 讨论密集仓库的普通评论不再放大成额外 tick（codex 第 41 轮 P2）。
+func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, event, deliveryID string, body []byte) (bool, error) {
 	// 幂等预查（只读）：已登记的投递直接按重复去重，省一次实拉；预查与
 	// 最终事务之间的并发窗口由事务内 insert 判重兜底。存量裸键兼容与
 	// runWebhookDeliveryTx 同口径：集成前缀账键引入前的行是裸 GUID，只可
@@ -343,25 +347,25 @@ func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, ev
 	}
 	var registered int64
 	if err := countQuery.Count(&registered).Error; err != nil {
-		return err
+		return false, err
 	}
 	if registered > 0 {
-		return ErrDeliveryDuplicated
+		return false, ErrDeliveryDuplicated
 	}
 
 	// 纯 payload 守卫（base 先行）：非 created/非 PR/机器评论/畸形投递
 	// 零成本忽略——App 身份读取只发生在可能是唤醒的投递上。
 	payload := commentWakePayloadBaseGuards(body)
 	if payload == nil {
-		return nil
+		return false, nil
 	}
 	mentions, err := s.commentWakeMentions(ctx)
 	if err != nil {
 		// 瞬时故障不落账：返回 500 让平台重投（重投时读取恢复即正常处理）。
-		return err
+		return false, err
 	}
 	if !commentWakeMentioned(payload, mentions) {
-		return nil
+		return false, nil
 	}
 
 	repo := strings.ToLower(payload.Repository.FullName)
@@ -373,7 +377,7 @@ func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, ev
 	// 会用同一判定复核，防预查与开轮之间停用/改绑。
 	preProject, _, err := s.findEnabledReviewProjectTx(s.db.WithContext(ctx), integrationID, repo)
 	if err != nil || preProject == nil {
-		return err
+		return false, err
 	}
 	// 显然无资格的点名不必实拉——零 API 成本拒绝（codex 第 17/23 轮 P2）：
 	// PR 即 issue，payload 的 issue.user.login 就是 PR 作者（commentWakeAuthorized
@@ -383,20 +387,20 @@ func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, ev
 	if !commentAssociationAllowed(payload.Comment.Association) &&
 		payload.Comment.User.Login != "" && payload.Issue.User.Login != "" &&
 		!strings.EqualFold(payload.Comment.User.Login, payload.Issue.User.Login) {
-		return nil
+		return false, nil
 	}
 	// 退路：payload 缺登录名或登录名与 payload 作者一致（可能是伪造，也可能
 	// 是真作者）——维持实拉后按实拉 PR 作者比对的最终判定。
 	if integrationID == model.ForgeIntegrationBuiltinGitHubID &&
 		!commentAssociationAllowed(payload.Comment.Association) &&
 		payload.Comment.User.Login == "" {
-		return nil
+		return false, nil
 	}
 	// fork 否定缓存命中：零 API 成本忽略（该 PR 已知是跨仓 fork）。
 	// 缓存键含集成身份：不同集成可有同名仓库 + 同号 PR（完全不同的仓库），
 	// 一处的 fork 否定不得错杀另一集成（codex 第 27 轮 P2）。
 	if s.commentWakeForkDeny(integrationID, repo, prNumber, time.Now().UTC()) {
-		return nil
+		return false, nil
 	}
 	installationID := payload.Installation.ID
 	// GitHub 投递缺 installation 快照（代理剥字段等）时按仓库解析兜底；
@@ -412,12 +416,12 @@ func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, ev
 					zap.String("integration", integrationID),
 					zap.String("delivery", deliveryID), zap.Error(err))
 				s.recordDroppedDelivery(ctx, integrationID, deliveryID, event)
-				return nil
+				return false, nil
 			}
 			s.logger.Warn("评论唤醒安装解析失败",
 				zap.String("integration", integrationID),
 				zap.String("delivery", deliveryID), zap.Error(err))
-			return err
+			return false, err
 		}
 		installationID = resolved
 	}
@@ -437,12 +441,12 @@ func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, ev
 				zap.String("integration", integrationID),
 				zap.String("delivery", deliveryID), zap.Error(err))
 			s.recordDroppedDelivery(ctx, integrationID, deliveryID, event)
-			return nil
+			return false, nil
 		}
 		s.logger.Warn("评论唤醒构造客户端失败",
 			zap.String("integration", integrationID),
 			zap.String("delivery", deliveryID), zap.Error(err))
-		return err
+		return false, err
 	}
 
 	// 观察 → 实拉 → 事务复核：窗口内总账被并发推进就重读重拉，上限
@@ -452,7 +456,7 @@ func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, ev
 	for attempt := 0; attempt < reviewCommentWakeRevalidateMax; attempt++ {
 		observedHead, observedProjectID, err := s.observeAcceptedHead(ctx, integrationID, repo, prNumber)
 		if err != nil {
-			return err
+			return false, err
 		}
 		pr, err := client.GetPullRequest(pullCtx, repo, prNumber)
 		if err != nil {
@@ -463,17 +467,17 @@ func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, ev
 					zap.String("integration", integrationID),
 					zap.String("delivery", deliveryID), zap.Error(err))
 				s.recordDroppedDelivery(ctx, integrationID, deliveryID, event)
-				return nil
+				return false, nil
 			}
 			s.logger.Warn("评论唤醒实拉失败",
 				zap.String("integration", integrationID),
 				zap.String("delivery", deliveryID), zap.Error(err))
-			return err
+			return false, err
 		}
 		// 评论者身份：仓库当前授权人员或 PR 作者本人（与实拉 PR 作者登录
 		// 名比对）方可点名；其余静默忽略（不登记，重投再忽略零副作用）。
 		if !commentWakeAuthorized(payload, pr) {
-			return nil
+			return false, nil
 		}
 		// 实拉快照时序判定（观察基准 observedHead 的 seen 行存有
 		// pr_updated_at 时可比序）：live.UpdatedAt 更早说明实拉读到的是滞后
@@ -490,7 +494,7 @@ func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, ev
 		// 基准查询的瞬时 DB 故障不得当作「无 seen 行」放行——那正是需要拦
 		// 滞后快照的时刻；透出 500 让平台重投（codex 第 22 轮 P2）。
 		if snErr != nil && !errors.Is(snErr, gorm.ErrRecordNotFound) {
-			return snErr
+			return false, snErr
 		}
 		baseline := (*time.Time)(nil)
 		if snErr == nil {
@@ -506,7 +510,7 @@ func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, ev
 				ledger.HeadSHA == observedHead {
 				baseline = ledger.PRUpdatedAt
 			} else if lErr != nil && !errors.Is(lErr, gorm.ErrRecordNotFound) {
-				return lErr
+				return false, lErr
 			}
 		}
 		// 同刻异 head = 时序歧义（Forgejo 秒级精度下两次推进同一秒，滞后
@@ -525,7 +529,7 @@ func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, ev
 				zap.String("integration", integrationID),
 				zap.String("repo", repo), zap.Int("pr", prNumber),
 				zap.String("live", pr.HeadSHA), zap.String("accepted", observedHead))
-			return fmt.Errorf("评论唤醒实拉快照滞后于已受理 head")
+			return false, fmt.Errorf("评论唤醒实拉快照滞后于已受理 head")
 		}
 		if tied {
 			// 同刻异 head 有两种可能：账本落后 + 同秒新 head（本功能要修的
@@ -543,16 +547,16 @@ func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, ev
 						zap.String("integration", integrationID),
 						zap.String("delivery", deliveryID), zap.Error(ferr))
 					s.recordDroppedDelivery(ctx, integrationID, deliveryID, event)
-					return nil
+					return false, nil
 				}
-				return ferr
+				return false, ferr
 			}
 			if pr2.HeadSHA != pr.HeadSHA {
 				s.logger.Warn("评论唤醒同刻异 head 复核未收敛，按瞬时失败重投",
 					zap.String("integration", integrationID),
 					zap.String("repo", repo), zap.Int("pr", prNumber),
 					zap.String("live", pr.HeadSHA), zap.String("rechecked", pr2.HeadSHA))
-				return fmt.Errorf("评论唤醒同刻异 head 复核未收敛")
+				return false, fmt.Errorf("评论唤醒同刻异 head 复核未收敛")
 			}
 			// 复核快照本身也要过时序判定：head 一致但 updated_at 早于基准
 			// 说明两次读到的都是滞后快照，采信同样会回退总账（codex 第 31
@@ -562,7 +566,7 @@ func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, ev
 					zap.String("integration", integrationID),
 					zap.String("repo", repo), zap.Int("pr", prNumber),
 					zap.String("live", pr.HeadSHA), zap.String("accepted", observedHead))
-				return fmt.Errorf("评论唤醒实拉快照滞后于已受理 head（复核仍滞后）")
+				return false, fmt.Errorf("评论唤醒实拉快照滞后于已受理 head（复核仍滞后）")
 			}
 			// 受理史判定按观察项目过滤（与基准查询同口径：改绑后旧项目的
 			// seen 行不得错杀新项目的合法 head，codex 第 30 轮 P2）；除
@@ -581,18 +585,18 @@ func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, ev
 					Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ? AND integration_id = ?",
 						observedProjectID, repo, prNumber, pr.HeadSHA, integrationID).
 					Count(&runCount).Error; rErr != nil {
-					return rErr
+					return false, rErr
 				}
 				headAccepted = runCount > 0
 			default:
-				return sErr
+				return false, sErr
 			}
 			if headAccepted {
 				s.logger.Warn("评论唤醒同刻异 head 为曾受理旧快照（滞后读），按瞬时失败重投",
 					zap.String("integration", integrationID),
 					zap.String("repo", repo), zap.Int("pr", prNumber),
 					zap.String("live", pr.HeadSHA), zap.String("accepted", observedHead))
-				return fmt.Errorf("评论唤醒实拉快照滞后于已受理 head（同刻旧 head）")
+				return false, fmt.Errorf("评论唤醒实拉快照滞后于已受理 head（同刻旧 head）")
 			}
 			pr = pr2
 		}
@@ -607,22 +611,23 @@ func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, ev
 			continue
 		}
 		if err != nil {
-			return err
+			return false, err
 		}
 		if denyCache {
 			// 判丢弃已随事务落幂等账；否定缓存是事务外副作用（判定来自
 			// 实拉快照，与事务成败无关）——后续同 (repo, PR) 点名零 API
 			// 成本拒绝（fast-ship-bot 第 26 轮 P2）。
 			s.rememberCommentWakeForkDeny(integrationID, repo, prNumber, time.Now().UTC())
+			return false, nil
 		}
-		return nil
+		return true, nil
 	}
 	s.logger.Warn("评论唤醒观察窗口未收敛，放弃并丢弃投递",
 		zap.String("integration", integrationID),
 		zap.String("repo", repo), zap.Int("pr", prNumber),
 		zap.String("delivery", deliveryID))
 	s.recordDroppedDelivery(ctx, integrationID, deliveryID, event)
-	return nil
+	return false, nil
 }
 
 // openCommentWakeRoundTx 阶段二：最终单事务，幂等登记与复核开轮同生共死。

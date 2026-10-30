@@ -2407,3 +2407,35 @@ func TestReviewCommentWakeBaseGuardsBeforeAppLookup(t *testing.T) {
 		t.Fatalf("无关/编辑投递不得开轮: runs = %d", runs)
 	}
 }
+
+// 调度 kick 只随状态变化（codex 第 41 轮 P2）：忽略类投递（未点名）返回
+// changed=false，成功开轮返回 true——调用方据此跳过无谓的调度 tick。
+func TestReviewCommentWakeChangedFlag(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	e.enableReview(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	ctx := context.Background()
+	e.fake.SetPR(repo, 61, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 61, State: "open", HeadSHA: "sha-kick",
+		HeadRepoFullName: repo,
+	})
+
+	// 未点名的普通 PR 评论：忽略，changed=false。
+	changed, err := e.review.handleCommentWake(ctx, model.ForgeIntegrationBuiltinGitHubID,
+		"issue_comment", "d-kick-0", issueCommentBody("普通讨论", repo, 61, 42))
+	if err != nil || changed {
+		t.Fatalf("忽略投递应 (false, nil): changed=%v err=%v", changed, err)
+	}
+	// 点名唤醒：开出新轮，changed=true。
+	changed, err = e.review.handleCommentWake(ctx, model.ForgeIntegrationBuiltinGitHubID,
+		"issue_comment", "d-kick-1", issueCommentBody("@fast-ship-bot 请再审", repo, 61, 42))
+	if err != nil || !changed {
+		t.Fatalf("开轮投递应 (true, nil): changed=%v err=%v", changed, err)
+	}
+	// 重复投递：去重路径返回 ErrDeliveryDuplicated（调用方按错误处理，不 kick）。
+	_, err = e.review.handleCommentWake(ctx, model.ForgeIntegrationBuiltinGitHubID,
+		"issue_comment", "d-kick-1", issueCommentBody("@fast-ship-bot 请再审", repo, 61, 42))
+	if !errors.Is(err, ErrDeliveryDuplicated) {
+		t.Fatalf("重复投递应 ErrDeliveryDuplicated: %v", err)
+	}
+}
