@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -343,6 +344,26 @@ func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, ev
 		if !commentWakeAuthorized(payload, pr) {
 			return nil
 		}
+		// 实拉快照时序判定（观察基准 observedHead 的 seen 行存有
+		// pr_updated_at 时可比序）：live.UpdatedAt 更早说明实拉读到的是滞后
+		// 快照（单 PR 读偶发滞后、自托管实例前置缓存/主从）——采信会把总
+		// 账回退到旧 head，新 head 的投递反因「非当前 head」被永久吞掉。
+		// 滞后按瞬时失败处理：不落任何账，返回 error 让 handler 回 500——
+		// GitHub 侧投递未送达会进对账循环重投，拿到新鲜快照后自然恢复
+		// （重投上限 3 次仍滞后则发故障通知）；与触发面的过期判定同口径：
+		// 任一侧缺时间戳或无 seen 行（comment 轮自身不写 seen）维持采信
+		// （fast-ship-bot 第 21 轮 P2：滞后不得烧幂等账静默丢唤醒）。
+		var accepted model.ReviewSeenSHA
+		snErr := s.db.WithContext(ctx).Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ? AND integration_id = ?",
+			preProject.ID, repo, prNumber, observedHead, integrationID).First(&accepted).Error
+		if snErr == nil && accepted.PRUpdatedAt != nil && pr.UpdatedAt != nil &&
+			pr.UpdatedAt.Before(*accepted.PRUpdatedAt) {
+			s.logger.Warn("评论唤醒实拉快照滞后于已受理 head，按瞬时失败重投",
+				zap.String("integration", integrationID),
+				zap.String("repo", repo), zap.Int("pr", prNumber),
+				zap.String("live", pr.HeadSHA), zap.String("accepted", observedHead))
+			return fmt.Errorf("评论唤醒实拉快照滞后于已受理 head")
+		}
 		err = s.openCommentWakeRoundTx(ctx, integrationID, event, deliveryID, repo, prNumber,
 			installationID, observedHead, pr, time.Now().UTC())
 		if errors.Is(err, errCommentWakeObservedHeadMoved) {
@@ -416,24 +437,6 @@ func (s *ReviewService) openCommentWakeRoundTx(ctx context.Context, integrationI
 		}
 		if current != observedHead {
 			return errCommentWakeObservedHeadMoved
-		}
-		// 实拉快照时序判定：已受理 head 的 seen 行存有 pr_updated_at 时，
-		// live.UpdatedAt 更早说明实拉读到的是滞后快照（单 PR 读偶发滞后、
-		// 自托管实例前置缓存/主从）——无条件采信会把总账回退到旧 head，
-		// 新 head 的投递反因「非当前 head」被永久吞掉。与触发面的过期判
-		// 定同口径：任一侧缺时间戳无从比序时维持采信（comment 轮自身不写
-		// seen，无 seen 行同样放行）。时序不过是对本快照的确定丢弃：幂等
-		// 账随事务落定，用户再次评论或平台重投拿到新鲜快照后自然恢复。
-		var accepted model.ReviewSeenSHA
-		snErr := tx.Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ? AND integration_id = ?",
-			project.ID, repo, prNumber, current, integrationID).First(&accepted).Error
-		if snErr == nil && accepted.PRUpdatedAt != nil && pr.UpdatedAt != nil &&
-			pr.UpdatedAt.Before(*accepted.PRUpdatedAt) {
-			s.logger.Info("评论唤醒实拉快照滞后于已受理 head，忽略",
-				zap.String("integration", integrationID),
-				zap.String("repo", repo), zap.Int("pr", prNumber),
-				zap.String("live", pr.HeadSHA), zap.String("accepted", current))
-			return nil
 		}
 		// PR 实况关卡：跨仓 fork 不审（既有不变量，与 pull_request 触发面
 		// 一致）——实拉 head 仓库缺失（已删 fork/异常 payload）或与 base

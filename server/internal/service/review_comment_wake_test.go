@@ -394,14 +394,15 @@ func TestReviewCommentWakeStaleLiveSnapshot(t *testing.T) {
 		t.Fatalf("seed seen: %v", err)
 	}
 
-	// 滞后快照：live head=sha-b 但 UpdatedAt=t0 早于已受理基准 t1 → 丢弃。
+	// 滞后快照：live head=sha-b 但 UpdatedAt=t0 早于已受理基准 t1 → 按瞬
+	// 时失败处理（500，平台/对账重投拿到新鲜快照后自然恢复），不落任何账。
 	e.fake.SetPR(repo, 40, &githubapi.PullRequest{
 		RepoFullName: repo, Number: 40, State: "open", HeadSHA: "sha-b",
 		HeadRepoFullName: repo, UpdatedAt: &t0,
 	})
 	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-stale",
-		issueCommentBody("@fast-ship-bot", repo, 40, 42)); err != nil {
-		t.Fatalf("滞后快照应静默忽略: %v", err)
+		issueCommentBody("@fast-ship-bot", repo, 40, 42)); err == nil {
+		t.Fatal("滞后快照应返回 error（500，平台重投）")
 	}
 	var led model.ReviewPullRequest
 	if err := e.svc.db.Where("pr_number = 40").First(&led).Error; err != nil {
@@ -410,10 +411,13 @@ func TestReviewCommentWakeStaleLiveSnapshot(t *testing.T) {
 	if led.HeadSHA != "sha-a" {
 		t.Fatalf("总账不得回退到滞后 head，实得 %s", led.HeadSHA)
 	}
-	var staleRuns int64
+	var staleRuns, staleDeliveries int64
 	e.svc.db.Model(&model.ReviewRun{}).Count(&staleRuns)
-	if staleRuns != 0 {
-		t.Fatalf("滞后快照不得开轮，runs = %d", staleRuns)
+	e.svc.db.Model(&model.GitHubWebhookDelivery{}).
+		Where("delivery_id = ?", deliveryLedgerKey(model.ForgeIntegrationBuiltinGitHubID, "d-stale")).
+		Count(&staleDeliveries)
+	if staleRuns != 0 || staleDeliveries != 0 {
+		t.Fatalf("滞后快照不得开轮/烧幂等账: runs=%d deliveries=%d", staleRuns, staleDeliveries)
 	}
 
 	// 新鲜快照：UpdatedAt=t2 晚于基准 → 采信开轮，总账推进到 sha-b。
