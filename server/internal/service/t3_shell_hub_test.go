@@ -2063,26 +2063,30 @@ func TestT3ShellHub_EnsureStartsSubscriptionsWithoutView(t *testing.T) {
 	}
 
 	// 全程不调用 View：等订阅者收到 ready 状态事件。归档面是按需快照
-	// （INT-173），Ensure 只建活跃订阅，不会有归档流量。
+	// （INT-173）：entry 建立时并行预热一次（R18 P2），所以这里会有一次
+	// 探测 + 快照拨号，但不等结果、也不阻塞就绪事件。
 	ev := awaitShellEvent(t, sub, func(e T3ShellEvent) bool { return e.State == "ready" })
 	if ev.EnvironmentID != env.ID {
 		t.Fatalf("state event environment = %q, want %q", ev.EnvironmentID, env.ID)
 	}
 
-	// 幂等：再 Ensure 两次也不得拨新连接（Ensure 只建活跃订阅一条连接）。
+	// 幂等：再 Ensure 两次不得拨新连接。预热拨号已完成（连接是一次性会话，
+	// 快照落地即关闭），所以以当下的拨号总数为基线比较增长。
+	time.Sleep(100 * time.Millisecond)
+	baseline := srv.connCount.Load()
 	if err := hub.Ensure(env, "tok"); err != nil {
 		t.Fatalf("second ensure: %v", err)
 	}
 	time.Sleep(50 * time.Millisecond)
-	if got := srv.connCount.Load(); got != 1 {
-		t.Fatalf("second ensure must reuse the entry, connCount = %d", got)
+	if got := srv.connCount.Load(); got != baseline {
+		t.Fatalf("second ensure must reuse the entry, connCount %d → %d", baseline, got)
 	}
 	if err := hub.Ensure(env, "tok"); err != nil {
 		t.Fatalf("third ensure: %v", err)
 	}
 	time.Sleep(50 * time.Millisecond)
-	if got := srv.connCount.Load(); got != 1 {
-		t.Fatalf("third ensure must not dial, connCount = %d", got)
+	if got := srv.connCount.Load(); got != baseline {
+		t.Fatalf("third ensure must not dial, connCount %d → %d", baseline, got)
 	}
 }
 
@@ -4942,5 +4946,46 @@ func TestT3ShellHub_LegacyLandingSyncsAnnounceBaseline(t *testing.T) {
 	ev := awaitShellEvent(t, sub, func(e T3ShellEvent) bool { return e.Full })
 	if ev.EnvironmentID != "env-1" {
 		t.Fatalf("clearing the legacy archive face must be announced, got %+v", ev)
+	}
+}
+
+// TestT3ShellHub_EnsurePrewarmsArchiveSnapshot 钉住 R18 P2：归档面首个快照
+// 随 entry 建立并行预热，重启/新环境接入后的首个列表/详情不必等一次往返
+// 才看到归档线程（main 上归档订阅随预热建立，首读通常已就绪）。
+func TestT3ShellHub_EnsurePrewarmsArchiveSnapshot(t *testing.T) {
+	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
+	srv.setArchiveFixture(archiveSnapshotBody(1, "th-a"), nil)
+	hub := newT3ShellHubWithConfig(hubTestConfig(), nil)
+	defer hub.Close()
+	env := hubTestEnv(url, 0)
+
+	if err := hub.Ensure(env, "tok"); err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+
+	key := t3ShellHubKey(env.UserID, env.ID)
+	hub.mu.Lock()
+	e := hub.entries[key]
+	hub.mu.Unlock()
+	if e == nil {
+		t.Fatalf("entry missing")
+	}
+
+	// 全程不做任何读取：归档面必须经预热自行就绪。
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		st := e.state.status()
+		ready, err := st.ArchiveReady, st.ArchiveErr
+		var rows int
+		if snaps := e.state.snapshots(); snaps != nil {
+			rows = len(snaps.Archived.Threads)
+		}
+		if ready && err == nil && rows == 1 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("ensure must prewarm the archive snapshot without any read: ready=%v err=%v rows=%d", ready, err, rows)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

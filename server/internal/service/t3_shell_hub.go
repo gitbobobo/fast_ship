@@ -429,9 +429,10 @@ func (h *t3ShellHub) Close() {
 // 中的归档面 goroutine（默认等待旧面回退激活，见 t3_shell_archive.go 的
 // mode 判定——entry 创建时不知道上游新旧，旧面订阅只能在第一次按需拉取
 // 被判方法失败后启动；停泊避免「运行中途 wg.Add」与 done 观察者的
-// Wait 竞态）。只做内存操作与 go 语句，网络 I/O 都在 goroutine 内、锁外。
-// 调用方持有 hub 锁。归档面正常情况下不建常驻连接：INT-173 起按需快照，
-// 快照到达前的归档面表达为「未就绪」。
+// Wait 竞态）。只做内存操作与 go 语句，网络 I/O 都在 goroutine 内、锁外；
+// 归档面首个快照也在这里经 kickArchiveRefresh 并行预热（R18 P2，同样只在
+// 后台 goroutine 里拨号）。调用方持有 hub 锁。归档面正常情况下不建常驻
+// 连接：INT-173 起按需快照，快照到达前的归档面表达为「未就绪」。
 func (h *t3ShellHub) newEntryLocked(key string, env *model.T3Environment, token string) *t3ShellEntry {
 	e := &t3ShellEntry{
 		hub:            h,
@@ -475,6 +476,13 @@ func (h *t3ShellHub) newEntryLocked(key string, env *model.T3Environment, token 
 		// 激活。entry 停/hub 关时闸门退出，goroutine 随之结束。
 		h.runArchiveLegacySubscription(e)
 	}()
+	// 归档面首次拉取随 entry 建立并行预热（R18 P2）：按需快照只在读路径
+	// （Peek/waitView）kick，重启或新环境接入后的首个列表/详情就会在快照
+	// 落地前返回——归档线程整段缺失且被标 degraded；main 上归档订阅随预热
+	// 建立，首读通常已就绪，这里保持同等体验。拉取本身是后台任务（失败冷却
+	// + inFlight 合并），不阻塞首读，也不占 e.wg。
+	e.kickArchiveRefresh()
+
 	// done 在全部监督 goroutine 退出后关闭，供测试汇合；同时释放 hub 的
 	// 生命周期计数（Close 经它等待已被摘除的 entry）。
 	go func() {

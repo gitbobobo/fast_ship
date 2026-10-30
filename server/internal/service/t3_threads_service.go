@@ -209,9 +209,12 @@ func (s *T3ThreadsService) Detail(ctx context.Context, userID, envID, threadID s
 	return detail, nil
 }
 
-// PeekShell 读取一个环境的 shell 视图当前值（不等待首次同步，无网络 I/O）：
-// wait 评估器（INT-160）每轮扫描用。环境不存在或凭证不可用返回错误；hub
-// 视图状态（Syncing/Stale/Failed）原样带回，由调用方按可信度处理。
+// PeekShell 读取一个环境的 shell 视图当前值（不等待首次同步、不阻塞）：
+// wait 评估器（INT-160）每轮扫描用。注意它并非纯内存——归档面是按需快照
+// （INT-173），TTL 过期或首次加载时这里会触发一次**共享的后台**拉取（HTTP
+// 探测 + WS 拨号 + getArchivedShellSnapshot；inFlight 合并并发、失败有冷却），
+// 但本次调用不等待结果。环境不存在或凭证不可用返回错误；hub 视图状态
+// （Syncing/Stale/Failed）原样带回，由调用方按可信度处理。
 func (s *T3ThreadsService) PeekShell(userID, envID string) (*t3ShellView, error) {
 	env, err := s.envRepo.FindByIDAndUserID(context.Background(), envID, userID)
 	if err != nil {
