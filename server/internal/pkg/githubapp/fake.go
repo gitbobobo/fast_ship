@@ -135,7 +135,12 @@ func (f *Fake) SetPR(repo string, number int, pr *githubapi.PullRequest) {
 	if f.prs[key] == nil {
 		f.prs[key] = map[int]*githubapi.PullRequest{}
 	}
-	pr.RepoFullName = repo
+	// RepoFullName 默认按登记仓库名填（与真实返回一致）；显式提供时不覆盖
+	// ——仓库改名/转移后按旧名查询会重定向并返回新名 base（fast-ship-bot
+	// 第 24 轮 P2 的闸门重名场景需要能表达它）。
+	if pr.RepoFullName == "" {
+		pr.RepoFullName = repo
+	}
 	pr.Number = number
 	if pr.State == "" {
 		pr.State = "open"

@@ -428,3 +428,31 @@ func TestRedeliveryGateSlugOnlyRetryableWhenMentionsDegraded(t *testing.T) {
 		t.Fatalf("降级时不得记终态: %+v", row)
 	}
 }
+
+// fork 判定用实拉 base 仓库名而非 payload 仓库名（fast-ship-bot 第 24 轮
+// P2）：payload 是投递时刻的旧快照，仓库改名/转移后拿它当同仓基准会把
+// 改名窗口内的同仓 PR 误判成跨仓 fork 记终态、永不重投。
+func TestRedeliveryGateRenamedRepoNotFork(t *testing.T) {
+	env := newReviewEngineEnv(t)
+	env.enableReview(t)
+
+	base := redeliveryTestNow.Add(-time.Hour)
+	env.fake.SetHookDeliveries([]githubapp.HookDelivery{
+		hookRow(5101, "guid-cw-renamed", "issue_comment", "created", 500, false, base),
+	})
+	// payload 记着旧仓库名（改名前的投递快照）；实拉 PR 的 base 与 head
+	// 都已是新名——同仓，不是 fork。
+	env.fake.SetHookDeliveryPayload(5101, redeliveryCommentPayload("owner/repo", 12))
+	env.fake.SetPR("owner/repo", 12, &githubapi.PullRequest{
+		RepoFullName: "owner/repo-renamed", HeadRepoFullName: "owner/repo-renamed",
+	})
+
+	env.review.reconcileWebhookDeliveries(redeliveryTestNow)
+	got := env.fake.RedeliveredIDs()
+	if len(got) != 1 || got[0] != 5101 {
+		t.Fatalf("改名后的同仓 PR 投递应照常重投: %v", got)
+	}
+	if row, ok := redeliveryClosedRow(t, env, "guid-cw-renamed"); ok && row.ClosedAt != nil {
+		t.Fatalf("同仓 PR 不得按 fork 记终态: %+v", row)
+	}
+}

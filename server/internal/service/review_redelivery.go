@@ -416,7 +416,11 @@ func (p *redeliveryPRProbe) lookup(ctx context.Context, deliveryID int64, event 
 	// 预算（codex 第 5/12 轮 P2）。
 	forgePR := forge.PullRequestFromGitHub(pr)
 	open := prReviewable(forgePR)
-	fork := open && (pr.HeadRepoFullName == "" || !strings.EqualFold(pr.HeadRepoFullName, repo))
+	// fork 判定与评论唤醒守卫同口径：head 与**实拉 base** 仓库名比对——
+	// payload 里的仓库名是投递时刻的旧快照，仓库改名/转移后会过期，拿它
+	// 当同仓基准会把改名窗口内的同仓 PR 误判成跨仓 fork 记终态、永不重投
+	// （fast-ship-bot 第 24 轮 P2）。
+	fork := open && (forgePR.HeadRepoFullName == "" || !strings.EqualFold(forgePR.HeadRepoFullName, forgePR.RepoFullName))
 	// 评论者身份仅约束 issue_comment 投递（pull_request 投递的推送作者天然
 	// 有 push 权限，不需要也不能用评论身份判定），且**按投递现算、不入
 	// prStates 缓存**——缓存被同一 sweep 内同 PR 的后续投递复用，掺入某条
