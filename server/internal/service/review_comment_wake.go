@@ -393,6 +393,24 @@ func (s *ReviewService) openCommentWakeRoundTx(ctx context.Context, integrationI
 		if current != observedHead {
 			return errCommentWakeObservedHeadMoved
 		}
+		// 实拉快照时序判定：已受理 head 的 seen 行存有 pr_updated_at 时，
+		// live.UpdatedAt 更早说明实拉读到的是滞后快照（单 PR 读偶发滞后、
+		// 自托管实例前置缓存/主从）——无条件采信会把总账回退到旧 head，
+		// 新 head 的投递反因「非当前 head」被永久吞掉。与触发面的过期判
+		// 定同口径：任一侧缺时间戳无从比序时维持采信（comment 轮自身不写
+		// seen，无 seen 行同样放行）。时序不过是对本快照的确定丢弃：幂等
+		// 账随事务落定，用户再次评论或平台重投拿到新鲜快照后自然恢复。
+		var accepted model.ReviewSeenSHA
+		snErr := tx.Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ? AND integration_id = ?",
+			project.ID, repo, prNumber, current, integrationID).First(&accepted).Error
+		if snErr == nil && accepted.PRUpdatedAt != nil && pr.UpdatedAt != nil &&
+			pr.UpdatedAt.Before(*accepted.PRUpdatedAt) {
+			s.logger.Info("评论唤醒实拉快照滞后于已受理 head，忽略",
+				zap.String("integration", integrationID),
+				zap.String("repo", repo), zap.Int("pr", prNumber),
+				zap.String("live", pr.HeadSHA), zap.String("accepted", current))
+			return nil
+		}
 		// PR 实况关卡：跨仓 fork 不审（既有不变量，与 pull_request 触发面
 		// 一致）——实拉 head 仓库缺失（已删 fork/异常 payload）或与 base
 		// 仓库不同名即 fork，不开轮；closed/merged/draft 没有可审的实现，

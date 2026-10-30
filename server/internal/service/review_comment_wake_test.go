@@ -363,6 +363,81 @@ func TestReviewCommentWakeAppNotConfigured(t *testing.T) {
 	}
 }
 
+// TestReviewCommentWakeStaleLiveSnapshot 实拉快照时序判定：seen 行存有已
+// 受理 head 的 pr_updated_at 时，实拉 UpdatedAt 更早 = 滞后快照（单 PR 读
+// 偶发滞后/前置缓存）——采信会把总账回退到旧 head、新 head 永久漏审。
+// 滞后快照判丢弃并落幂等账；新鲜快照（UpdatedAt 更晚）照常开轮并推进
+// 总账（fast-ship-bot 第 17 轮 P2）。
+func TestReviewCommentWakeStaleLiveSnapshot(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	e.enableReview(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	ctx := context.Background()
+
+	t1 := time.Now().UTC().Add(-2 * time.Hour)
+	t0 := t1.Add(-time.Hour)
+	t2 := t1.Add(time.Hour)
+	// 账本 head=sha-a（accepted at t1，seen 行带 pr_updated_at 基准）。
+	if err := e.svc.db.Create(&model.ReviewPullRequest{
+		ProjectID: e.project.ID, UserID: e.project.UserID,
+		RepoFullName: strings.ToLower(repo), PRNumber: 40,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		HeadSHA:       "sha-a", RoundNumber: 1, UpdatedAt: t1,
+	}).Error; err != nil {
+		t.Fatalf("seed ledger: %v", err)
+	}
+	if err := e.svc.db.Create(&model.ReviewSeenSHA{
+		ProjectID: e.project.ID, RepoFullName: strings.ToLower(repo), PRNumber: 40,
+		HeadSHA: "sha-a", IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		PRUpdatedAt: &t1, AcceptedAt: t1,
+	}).Error; err != nil {
+		t.Fatalf("seed seen: %v", err)
+	}
+
+	// 滞后快照：live head=sha-b 但 UpdatedAt=t0 早于已受理基准 t1 → 丢弃。
+	e.fake.SetPR(repo, 40, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 40, State: "open", HeadSHA: "sha-b",
+		HeadRepoFullName: repo, UpdatedAt: &t0,
+	})
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-stale",
+		issueCommentBody("@fast-ship-bot", repo, 40, 42)); err != nil {
+		t.Fatalf("滞后快照应静默忽略: %v", err)
+	}
+	var led model.ReviewPullRequest
+	if err := e.svc.db.Where("pr_number = 40").First(&led).Error; err != nil {
+		t.Fatalf("ledger: %v", err)
+	}
+	if led.HeadSHA != "sha-a" {
+		t.Fatalf("总账不得回退到滞后 head，实得 %s", led.HeadSHA)
+	}
+	var staleRuns int64
+	e.svc.db.Model(&model.ReviewRun{}).Count(&staleRuns)
+	if staleRuns != 0 {
+		t.Fatalf("滞后快照不得开轮，runs = %d", staleRuns)
+	}
+
+	// 新鲜快照：UpdatedAt=t2 晚于基准 → 采信开轮，总账推进到 sha-b。
+	e.fake.SetPR(repo, 40, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 40, State: "open", HeadSHA: "sha-b",
+		HeadRepoFullName: repo, UpdatedAt: &t2,
+	})
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-fresh",
+		issueCommentBody("@fast-ship-bot", repo, 40, 42)); err != nil {
+		t.Fatalf("新鲜快照应开轮: %v", err)
+	}
+	if err := e.svc.db.Where("pr_number = 40").First(&led).Error; err != nil {
+		t.Fatalf("ledger: %v", err)
+	}
+	if led.HeadSHA != "sha-b" {
+		t.Fatalf("总账应推进到新鲜 head，实得 %s", led.HeadSHA)
+	}
+	var runs int64
+	e.svc.db.Model(&model.ReviewRun{}).Where("head_sha = ? AND trigger_action = ?", "sha-b", "comment").Count(&runs)
+	if runs == 0 {
+		t.Fatal("新鲜快照应按 comment 开轮")
+	}
+}
+
 // TestReviewCommentWakeRedeliveryDup 同一 delivery id 重投按幂等去重
 // （预查命中，不再实拉）；payload 守卫忽略的投递（无 mention）不登记幂等
 // 账——忽略判定完全由 payload 决定，重投再忽略一遍零副作用。
