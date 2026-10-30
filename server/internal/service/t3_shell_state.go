@@ -248,9 +248,9 @@ func newT3ShellState() *t3ShellState {
 // 的线程会从新快照里消失，hub 层据此失效归档缓存，否则它既不在新活跃面、
 // 也不在旧归档缓存，ArchiveErr 却仍 nil（列表谎报完整、详情落「未找到该
 // 线程」），最长一个 TTL 才自愈。
-func (s *t3ShellState) applyActiveSnapshotLocked(snapshot t3ShellSnapshot) ([]string, error) {
+func (s *t3ShellState) applyActiveSnapshotLocked(snapshot t3ShellSnapshot) ([]string, bool, []string, error) {
 	if err := s.activeProjects.reset(snapshot.Projects, func(p *t3ProjectShell) string { return p.ID }); err != nil {
-		return nil, fmt.Errorf("活跃快照项目缺少 ID: %w", err)
+		return nil, false, nil, fmt.Errorf("活跃快照项目缺少 ID: %w", err)
 	}
 	// reset 前 diff：新快照的 ID 集是权威的活跃面全量，旧 order 里不在
 	// 集中的即被替换掉（与 reset 同锁内计算，不留交错缝隙）。
@@ -265,7 +265,7 @@ func (s *t3ShellState) applyActiveSnapshotLocked(snapshot t3ShellSnapshot) ([]st
 		}
 	}
 	if err := s.activeThreads.reset(snapshot.Threads, func(t *t3ThreadShell) string { return t.ID }); err != nil {
-		return nil, fmt.Errorf("活跃快照线程缺少 ID: %w", err)
+		return nil, false, nil, fmt.Errorf("活跃快照线程缺少 ID: %w", err)
 	}
 	// 活跃全量快照带回来的线程同样解账（#156 R12）：线程已在活跃面，其归档
 	// 归属不再影响「两面都没有」的判定。
@@ -280,8 +280,8 @@ func (s *t3ShellState) applyActiveSnapshotLocked(snapshot t3ShellSnapshot) ([]st
 	s.activeCursor = snapshot.SnapshotSequence
 	s.activeReady = true
 	s.activeSynced = true
-	_, _ = s.armUncertainForRemovalsLocked(removed, false)
-	return removed, nil
+	armedRegistered, proven := s.armUncertainForRemovalsLocked(removed, false)
+	return removed, armedRegistered, proven, nil
 }
 
 // applyActiveItem 应用一个活跃流流项。坏帧 / 未知 kind 返回错误，由调用方
@@ -323,13 +323,15 @@ func (s *t3ShellState) applyActiveItemDetailed(item t3ShellStreamItem) (removed 
 		if item.Snapshot == nil {
 			return nil, false, nil, fmt.Errorf("活跃快照帧缺少 snapshot 字段")
 		}
-		removed, err = s.applyActiveSnapshotLocked(*item.Snapshot)
+		removed, armedRegistered, proven, err = s.applyActiveSnapshotLocked(*item.Snapshot)
 		if err != nil {
 			return nil, false, nil, err
 		}
-		// applyActiveSnapshotLocked 内已按 armed 状态登记（见其中调用），
-		// 这里报告「本帧的移除已由 armed 路径登记」。
-		return removed, len(removed) > 0 && s.archiveUncertainArmed, nil, nil
+		// 返回 applyActiveSnapshotLocked 里 armUncertainForRemovalsLocked 的
+		// **真实结果**（#156 R27）：早先按「有移除 && armed」推断，在
+		// settle<=0（不登记）或部分已对账时说成「已登记」，帧后回调于是
+		// 漏掉补登记。
+		return removed, armedRegistered, proven, nil
 	case "synchronized":
 		// 追平标记：不携带数据，只推进可信标记（不碰游标，规则 2）。
 		s.activeSynced = true
@@ -940,6 +942,20 @@ func (s *t3ShellState) pendingArchiveUncertain() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.archiveUncertain)
+}
+
+// registerArchiveMembershipUncertainIfArmed 只在「订阅模式已 arm」时登记待
+// 对账，判定与登记在同一个 s.mu 临界区内完成（#156 R27）：否则调用方先读
+// mode、再登记，两步之间 resetArchiveModeToUnknown 可能已清空集合/撤 arm，
+// 登记就落进一个已经离开订阅模式的 state。
+func (s *t3ShellState) registerArchiveMembershipUncertainIfArmed(ids []string, settle time.Duration) (pending int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.archiveUncertainArmed || settle <= 0 {
+		return 0
+	}
+	pending, _ = s.noteArchiveMembershipUncertainLocked(ids, settle, false)
+	return pending
 }
 
 // earliestArchiveUncertainDeadline 返回待对账集合里最早的截止时刻（#156 R23）。
