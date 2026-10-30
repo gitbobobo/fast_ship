@@ -260,17 +260,18 @@ func t3QueueRank(run t3Run) int {
 // 不算——taskId 前缀 pull-request-watch: 的 monitor 由专门的解监听分支
 // 处理（thread.pull-request.watch watching=false），不该成为 run.interrupt
 // 的理由。Fast Ship 在此之上仍排除普通 command（dev server 之类的常驻
-// 命令不作为回退路径的停止目标），是比上游更窄的本地口径；但 awaited 的
-// command 例外——它占完成位、线程状态因它判 running（见 t3ThreadStatus），
-// 若回退路径停不了它，「根 run 已结束、只剩一条 awaited command」的线程
-// 会显示 running 却点不停。awaited 语义是「它结束时我要被唤醒」，与
-// 「dev server 不宜停」不是一类，停止判定按上游口径放行。
+// 命令不作为回退路径的停止目标），是比上游更窄的本地口径；但 awaited 是
+// 最高优先的放行——awaited 语义是「它结束时我要被唤醒」，与「dev server
+// 不宜停」不是一类：awaited 恒占完成位、线程状态因它判 running（见
+// t3ThreadStatus），awaited 的 command 与 awaited 的 PR watch monitor
+// 都得能停，否则「根 run 已结束、只剩一条 awaited 后台工作」的线程显示
+// running 却点不停（R11 awaited command 同型，R13 Note-1 补 monitor）。
+// 排除只在未声明 awaited 时生效：kind/前缀排除先于 awaited 判定的旧顺序
+// 会把 awaited PR watch 挡在 Stop 之外——状态判 running+详情计数，回退
+// 却选不出它。
 func t3HasInterruptibleBackgroundWork(tasks []t3PendingBackgroundTask) bool {
 	for _, task := range tasks {
-		if task.Kind == "command" && !task.Awaited {
-			continue
-		}
-		if task.Kind == "monitor" && strings.HasPrefix(task.TaskID, "pull-request-watch:") {
+		if !task.Awaited && (task.Kind == "command" || strings.HasPrefix(task.TaskID, "pull-request-watch:")) {
 			continue
 		}
 		return true

@@ -3,6 +3,7 @@ package service
 import (
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1036,5 +1037,112 @@ func TestShellState_LegacyPreChangeSnapshotStaysUntrusted(t *testing.T) {
 	snaps = state.snapshots()
 	if snaps.ArchiveErr != nil {
 		t.Fatalf("post-change snapshot must clear the error, got %v", snaps.ArchiveErr)
+	}
+}
+
+// 权威全量快照整体替换时被移除的旧线程要被追踪为「离开活跃面」（R13
+// P2-1）：state 在同一临界区内计算移除集，hub 据此失效归档缓存——否则
+// 断连重连/强制重同步走全量快照时，被别的客户端归档的线程既不在新活跃
+// 快照、也不在旧归档缓存，ArchiveErr 却仍 nil。集合未变与元数据帧恒无
+// 移除；被移除的 ID 与 reset 后的活跃面一致。
+func TestShellState_AuthoritativeSnapshotRemovalsTracked(t *testing.T) {
+	state := newT3ShellState()
+	projects := []t3ProjectShell{{ID: "p-1", Title: "Fast Ship"}}
+	if err := state.applyActiveItem(shellTestAuthoritative(7, projects, shellTestThreads(shellTestThread("th-1", "一"), shellTestThread("th-2", "二")))); err != nil {
+		t.Fatalf("apply authoritative: %v", err)
+	}
+
+	// 集合未变的快照：无移除。
+	removed, err := state.applyActiveItemTracked(shellTestAuthoritative(8, projects, shellTestThreads(shellTestThread("th-1", "一"), shellTestThread("th-2", "二"))))
+	if err != nil || len(removed) != 0 {
+		t.Fatalf("identical snapshot must track no removals, got %v (err %v)", removed, err)
+	}
+
+	// 元数据帧：无移除（不是权威数据）。
+	removed, err = state.applyActiveItemTracked(shellTestEnrichment(9, projects))
+	if err != nil || len(removed) != 0 {
+		t.Fatalf("enrichment frame must track no removals, got %v (err %v)", removed, err)
+	}
+
+	// 全量快照丢掉 th-2（断连窗口里被别的客户端归档）：移除集须含 th-2。
+	removed, err = state.applyActiveItemTracked(shellTestAuthoritative(10, projects, shellTestThreads(shellTestThread("th-1", "一"))))
+	if err != nil {
+		t.Fatalf("apply shrinking snapshot: %v", err)
+	}
+	if len(removed) != 1 || removed[0] != "th-2" {
+		t.Fatalf("shrinking snapshot must track th-2 as removed, got %v", removed)
+	}
+	snaps := state.snapshots()
+	if len(snaps.Active.Threads) != 1 || snaps.Active.Threads[0].ID != "th-1" {
+		t.Fatalf("active face must be replaced by the snapshot, got %+v", snaps.Active.Threads)
+	}
+}
+
+// archiveFingerprintIDs 摘取指纹行序列的 ID 子序列（测试内区分「集合变」
+// 与「内容变」用，与发布端 archiveDigestIDs 同一口径）。
+func archiveFingerprintIDs(rows []t3ArchiveRowDigest) []string {
+	ids := make([]string, len(rows))
+	for i := range rows {
+		ids[i] = rows[i].ID
+	}
+	return ids
+}
+
+// 归档面发布指纹必须包含行内容（R13 Note-2）：同集合（ID 序列不变）行
+// 内容变化（标题/状态/归档时刻/更新时刻）要让指纹变化——发布端以指纹
+// 相等性判「无新话可说」，内容不进指纹的话同集合内容变会被静默，浏览
+// 器停在旧行。集合或顺序变化当然也变化；可信度文案独立于行摘要参与指
+// 纹（发布端分派 Full/State 用）。
+func TestShellState_ArchiveFingerprintIncludesRowContent(t *testing.T) {
+	state := newT3ShellState()
+	if err := state.applyActiveItem(shellTestAuthoritative(1, nil, shellTestThreads(shellTestThread("th-1", "活跃")))); err != nil {
+		t.Fatalf("apply active: %v", err)
+	}
+	archivedAt := "2026-10-01T00:00:00.000Z"
+	row := func(id, title, status string) *t3ThreadShell {
+		return &t3ThreadShell{ID: id, ProjectID: "p-1", Title: title, Status: status, ArchivedAt: &archivedAt, UpdatedAt: "2026-10-01T08:00:00.000Z"}
+	}
+	if applied, applyErr := state.applyArchiveSnapshot(t3ArchivedShellSnapshot{SchemaVersion: 1, SnapshotSequence: 5, Threads: shellTestThreads(row("th-a", "归档", "idle"), row("th-b", "归档二", "idle"))}, state.archiveGenerationNow(), nil); !applied || applyErr != nil {
+		t.Fatalf("apply archive snapshot must be trusted")
+	}
+
+	rows, errText := state.archiveFaceFingerprint()
+	if len(rows) != 2 || rows[0].ID != "th-a" || rows[1].ID != "th-b" {
+		t.Fatalf("fingerprint rows = %+v", rows)
+	}
+	if errText != "" {
+		t.Fatalf("trusted face must have empty err text, got %q", errText)
+	}
+
+	// 同集合、同内容重拉：指纹不变（例行重拉静默的依据）。
+	if applied, applyErr := state.applyArchiveSnapshot(t3ArchivedShellSnapshot{SchemaVersion: 1, SnapshotSequence: 6, Threads: shellTestThreads(row("th-a", "归档", "idle"), row("th-b", "归档二", "idle"))}, state.archiveGenerationNow(), nil); !applied || applyErr != nil {
+		t.Fatalf("re-apply must be trusted")
+	}
+	rows2, errText2 := state.archiveFaceFingerprint()
+	if !slices.Equal(rows, rows2) || errText2 != errText {
+		t.Fatalf("identical re-pull must keep the fingerprint: %+v vs %+v", rows, rows2)
+	}
+
+	// 同集合、行内容变（改名 + 状态翻转）：ID 序列不变、摘要变——发布端
+	// 据此发轻量 State 而不是静默。
+	if applied, applyErr := state.applyArchiveSnapshot(t3ArchivedShellSnapshot{SchemaVersion: 1, SnapshotSequence: 7, Threads: shellTestThreads(row("th-a", "归档（改名）", "completed"), row("th-b", "归档二", "idle"))}, state.archiveGenerationNow(), nil); !applied || applyErr != nil {
+		t.Fatalf("apply renamed snapshot must be trusted")
+	}
+	rows3, _ := state.archiveFaceFingerprint()
+	if slices.Equal(rows, rows3) {
+		t.Fatalf("content change with same collection must change the fingerprint")
+	}
+	ids3 := archiveFingerprintIDs(rows3)
+	if !slices.Equal(ids3, archiveFingerprintIDs(rows)) {
+		t.Fatalf("content change must keep the ID sequence, got %v vs %v", ids3, archiveFingerprintIDs(rows))
+	}
+
+	// 集合变（新增 th-c）：ID 序列变——发布端据此发 Full。
+	if applied, applyErr := state.applyArchiveSnapshot(t3ArchivedShellSnapshot{SchemaVersion: 1, SnapshotSequence: 8, Threads: shellTestThreads(row("th-a", "归档（改名）", "completed"), row("th-b", "归档二", "idle"), row("th-c", "归档三", "idle"))}, state.archiveGenerationNow(), nil); !applied || applyErr != nil {
+		t.Fatalf("apply grown snapshot must be trusted")
+	}
+	rows4, _ := state.archiveFaceFingerprint()
+	if slices.Equal(archiveFingerprintIDs(rows4), ids3) {
+		t.Fatalf("collection growth must change the ID sequence")
 	}
 }

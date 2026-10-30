@@ -424,6 +424,15 @@ func (e *t3ShellEntry) switchToArchiveLegacy() {
 // 次探测拨号。只在确认方法不存在时才回退判定——订阅的其他失败（断
 // 线、业务拒绝）不重置，否则真旧环境的普通故障会让按需面每轮空拨。
 //
+// 回退同时撤归档面可信（R13 P2-2，同一临界区）：订阅供数通道已被判不
+// 存在，面上的订阅快照——可能来自早已死去的供数连接——不得继续被当
+// 完整结论；旧的实现只清簿记不撤 archiveReady/archiveErr，而
+// admitArchiveRefresh 的 expired 判定只看 validUntil（已清零），重探测
+// 的按需拉取会被当「首次读取」，旧快照在按需落地（≤ TTL）前一直报
+// archiveReady=true+ArchiveErr=nil，列表/详情/wait 拿它当完整结论。撤
+// 可信用 noteArchiveExpiredLocked 语义（留旧行、报「已失效重拉中」），
+// 可信只在按需快照世代相符落地时恢复。
+//
 // 订阅监督循环随 mode 一起收缰（审修 R9 P2-1）：循环每轮重连前经 mode
 // 闸门（waitArchiveLegacyActive）复核，mode 离开 legacy 即停泊回等
 // legacyCh 的待命态——否则重置后的订阅重连仍会照旧失败，每次失败经
@@ -443,6 +452,17 @@ func (e *t3ShellEntry) resetArchiveModeToUnknown() {
 		e.arch.validUntil = time.Time{}
 		e.arch.retryAfter = time.Time{}
 		e.arch.needsRefetch = false
+		// 同一临界区撤归档面可信（R13 P2-2）：订阅供数通道已被判不存在，
+		// 面上最近一次订阅快照（可能来自早已死去的连接）不得继续当完整
+		// 结论——否则在下一次按需快照落地（≤ TTL）前，列表/详情/wait
+		// 拿旧快照谎报完整。noteArchiveExpiredLocked 语义：archiveReady
+		// 撤回 false、archiveStale 置位、ArchiveErr 标「已失效重拉中」、
+		// 旧行保留供展示；可信只在按需快照世代相符落地时恢复。不在这里
+		// 发布事件：撤回后到落地前的窗口里读取的响应自身携带 stale 文案，
+		// 同数据落地后指纹与宣布基准一致照旧静默——浏览器无需为这个
+		// 过渡窗口整环境重取；落地失败则失败路径经指纹比对发 State。
+		// 已不可信的面（失败/已失效）重撤是 no-op，保留更准确的既有文案。
+		e.state.noteArchiveExpiredLocked()
 		reset = true
 	}
 	e.arch.mu.Unlock()

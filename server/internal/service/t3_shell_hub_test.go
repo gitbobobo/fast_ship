@@ -735,6 +735,12 @@ func archiveSnapshotBody(sequence int, threadIDs ...string) json.RawMessage {
 			"archivedAt": "2026-10-01T00:00:00.000Z",
 		})
 	}
+	return archiveSnapshotBodyWith(sequence, threads)
+}
+
+// archiveSnapshotBodyWith 是行内容可定制的归档快照应答体：同集合行内容
+// 变化的发布去重测试用（R13 Note-2）。
+func archiveSnapshotBodyWith(sequence int, threads []map[string]any) json.RawMessage {
 	data, _ := json.Marshal(map[string]any{
 		"schemaVersion":    1,
 		"snapshotSequence": sequence,
@@ -4318,5 +4324,233 @@ func TestT3ShellHub_TTLRevokedFaceAnnouncesDegradedAndSelfHeals(t *testing.T) {
 	}
 	if evs := sub.Drain(); len(evs) != 0 {
 		t.Fatalf("recovery must not over-publish, got %+v", evs)
+	}
+}
+
+// 权威全量快照整体替换时被移除的旧线程同样是「线程离开活跃面」（R13
+// P2-1）：无完成标记环境每次重连走全量快照、marker 超时强制重同步/序号
+// 失效回退也走全量——断连窗口里被别的客户端归档的线程会从新快照里消失，
+// 不失效的话它既不在新活跃快照、也不在旧归档缓存，ArchiveErr 却仍 nil
+// （列表谎报完整、详情落「未找到该线程」、bot wait 误下 thread_gone），
+// 最长一个 TTL 才自愈。失效后的重拉必须读到含该线程的写后归档面；集合
+// 未变的快照帧不得触发失效（幂等冗余之外的拉取是浪费）。
+func TestT3ShellHub_AuthoritativeSnapshotRemovalInvalidatesArchive(t *testing.T) {
+	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
+	srv.setArchiveFixture(archiveSnapshotBody(1, "th-a"), nil)
+	hub := newT3ShellHubWithConfig(hubTestConfig(), nil)
+	defer hub.Close()
+	env := hubTestEnv(url, 0)
+
+	_, activeConn, activeSub, _, _ := establishBothFaces(t, hub, srv, env, "tok", 42, "th-1")
+
+	key := t3ShellHubKey(env.UserID, env.ID)
+	hub.mu.Lock()
+	e := hub.entries[key]
+	hub.mu.Unlock()
+	if e == nil {
+		t.Fatalf("entry missing")
+	}
+	e.state.mu.Lock()
+	genBefore := e.state.archiveGeneration
+	e.state.mu.Unlock()
+
+	// 先验反例：集合未变的全量快照（重连后上游重发的同集合快照）不触发
+	// 失效——归档世代不得推进。
+	if err := activeConn.sendValue(activeSub.ID, shellSnapshotValue(43, "th-1")); err != nil {
+		t.Fatalf("send identical snapshot: %v", err)
+	}
+	if !activeConn.awaitAck(activeSub.ID, 2*time.Second) {
+		t.Fatalf("identical snapshot frame not acked")
+	}
+	e.state.mu.Lock()
+	gen := e.state.archiveGeneration
+	e.state.mu.Unlock()
+	if gen != genBefore {
+		t.Fatalf("identical snapshot must not invalidate the archive face: gen %d → %d", genBefore, gen)
+	}
+
+	// 另一个客户端把 th-1 归档；本端随后因断连重连走全量快照（marker 预
+	// 算内追平），新快照已不含 th-1——「快照帧移除线程」。归档快照 fixture
+	// 同步换上写后状态：失效后的重拉必须读到含 th-1 的归档面。
+	srv.setArchiveFixture(archiveSnapshotBody(2, "th-a", "th-1"), nil)
+	if err := activeConn.sendValue(activeSub.ID, shellSnapshotValue(44, "th-2")); err != nil {
+		t.Fatalf("send shrinking snapshot: %v", err)
+	}
+	if !activeConn.awaitAck(activeSub.ID, 2*time.Second) {
+		t.Fatalf("shrinking snapshot frame not acked")
+	}
+
+	// Ack 在全部 value 应用后才发 → 失效此刻已同步生效：标不可信（stale、
+	// ArchiveErr 非空）且世代推进，不依赖 TTL 到期。
+	e.state.mu.Lock()
+	stale, gen, archErr := e.state.archiveStale, e.state.archiveGeneration, e.state.archiveErr
+	e.state.mu.Unlock()
+	if !stale || archErr == nil || gen != genBefore+1 {
+		t.Fatalf("snapshot removal must invalidate the archive face: stale=%v err=%v gen %d → %d", stale, archErr, genBefore, gen)
+	}
+
+	// 流处理路径不发起同步拉取：失效只标不可信，重拉由下一次读取 kick。
+	calls := srv.archiveCallCount()
+	view := waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		if v.Snaps == nil || v.Snaps.ArchiveErr != nil {
+			return false
+		}
+		for _, th := range v.Snaps.Archived.Threads {
+			if th.ID == "th-1" {
+				return true
+			}
+		}
+		return false
+	})
+	if got := srv.archiveCallCount(); got != calls+1 {
+		t.Fatalf("snapshot removal must trigger exactly one archive refetch, calls %d → %d", calls, got)
+	}
+	for _, th := range view.Snaps.Active.Threads {
+		if th.ID == "th-1" {
+			t.Fatalf("snapshot-removed thread must leave the active face: %+v", view.Snaps.Active.Threads)
+		}
+	}
+}
+
+// mode 重置必须撤归档面可信（R13 P2-2）：订阅被判方法不存在 → 订阅供数
+// 通道已死，最近一次订阅快照（可能来自早已死去的连接）不得在按需落地
+// （≤ TTL）前继续报 archiveReady=true+ArchiveErr=nil——旧实现只清簿记，
+// admitArchiveRefresh 的 expired 判定（validUntil 非零）不命中，重探测被
+// 当「首次读取」，列表/详情/wait 在整个窗口里拿旧快照当完整结论。修复后
+// reset 在同一临界区撤可信（留行、报 stale），按需快照落地才恢复。
+func TestT3ShellHub_LegacyResetRetractsArchiveTrust(t *testing.T) {
+	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
+	srv.setArchiveLegacy(true)
+	srv.setArchiveFixture(archiveSnapshotBody(1, "th-a"), nil)
+	hub := newT3ShellHubWithConfig(hubTestConfig(), nil)
+	defer hub.Close()
+	env := hubTestEnv(url, 0)
+
+	// 旧面就绪（按需方法不存在 → 切订阅面，订阅快照落地 → 可信）。
+	go hub.View(context.Background(), env, "tok")
+	collector := newShellConnCollector(t, srv)
+	active := collector.await(false)
+	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1")); err != nil {
+		t.Fatalf("send active snapshot: %v", err)
+	}
+	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
+		t.Fatalf("active snapshot not acked")
+	}
+	sub1 := srv.awaitArchiveSub(t)
+	conn1 := <-srv.archiveConns
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil && len(v.Snaps.Archived.Threads) == 1
+	})
+	key := t3ShellHubKey("user-1", "env-1")
+	hub.mu.Lock()
+	entry := hub.entries[key]
+	hub.mu.Unlock()
+
+	// 环境升级：按需方法恢复可用、订阅方法消失。「方法不存在」的 Exit 在
+	// 仍健康的订阅连接上送达（连接活着、数据刚流过——正是修复针对的场
+	// 景）：reset 在连接收尾之前发生，撤可信落在仍可信的面上；随后的
+	// endFaceConnection 见非 legacy 面不再清表。压住按需应答，让「reset
+	// 撤可信 → 按需落地恢复」的中间态可观测，不靠 sleep 猜时序。
+	srv.setArchiveLegacy(false)
+	srv.pauseArchive()
+	if err := conn1.sendExitFailure(sub1.ID, map[string]any{
+		"_tag":    "UnknownException",
+		"message": "method not found: orchestration.subscribeArchivedShell",
+	}); err != nil {
+		t.Fatalf("send method-not-found exit: %v", err)
+	}
+	healed := false
+	for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); {
+		entry.arch.mu.Lock()
+		mode := entry.arch.mode
+		entry.arch.mu.Unlock()
+		if mode == t3ArchiveModeUnknown {
+			healed = true
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !healed {
+		t.Fatalf("method-not-found subscribe exit must reset mode to Unknown")
+	}
+
+	// reset 撤可信：归档面不可信（stale、ArchiveErr 非空）、旧行保留。此
+	// 时无任何按需拉取落地（应答被压住、也没有读触发 kick）——旧订阅快
+	// 照不得继续被当完整结论。
+	entry.state.mu.Lock()
+	ready, stale, archErr := entry.state.archiveReady, entry.state.archiveStale, entry.state.archiveErr
+	entry.state.mu.Unlock()
+	if ready || !stale || archErr == nil {
+		t.Fatalf("mode reset must retract archive trust: ready=%v stale=%v err=%v", ready, stale, archErr)
+	}
+	snaps := entry.state.snapshots()
+	if len(snaps.Archived.Threads) != 1 || snaps.Archived.Threads[0].ID != "th-a" {
+		t.Fatalf("reset must keep the old rows for display, got %+v", snaps.Archived.Threads)
+	}
+
+	// 按需快照落地：可信恢复（ArchiveErr 清空、archiveReady 置回）。
+	srv.resumeArchive()
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil && len(v.Snaps.Archived.Threads) == 1
+	})
+	entry.state.mu.Lock()
+	ready = entry.state.archiveReady
+	entry.state.mu.Unlock()
+	if !ready {
+		t.Fatalf("on-demand landing must restore archive trust")
+	}
+}
+
+// 同集合行内容变化必须发声（R13 Note-2）：TTL 重拉拿到的归档行内容变了
+// （改名/归档时刻推进）而 ID 集合与顺序不变时，发布端必须让浏览器知道
+// 服务端内存已换新——指纹只含 ID 序列的实现里内容变被埋进可信度文案的
+// 变化里，机制上「无新话可说」的窗口随任何去重强化出现。修复后：ID 序
+// 列变 → Full；ID 不变而行内容或可信度变 → 轻量 State；全不变 → 静默。
+func TestT3ShellHub_ArchiveContentChangeAnnouncesState(t *testing.T) {
+	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
+	srv.setArchiveFixture(archiveSnapshotBody(1, "th-a"), nil)
+	cfg := hubTestConfig()
+	cfg.ArchiveTTL = 80 * time.Millisecond
+	hub := newT3ShellHubWithConfig(cfg, nil)
+	defer hub.Close()
+	env := hubTestEnv(url, 0)
+
+	sub := hub.Subscribe("user-1")
+	defer sub.Close()
+	_, _, _, _, _ = establishBothFaces(t, hub, srv, env, "tok", 42, "th-1")
+	ev := awaitShellEvent(t, sub, func(e T3ShellEvent) bool { return e.Full })
+	if ev.EnvironmentID != "env-1" || !ev.Full {
+		t.Fatalf("first landing must publish Full, got %+v", ev)
+	}
+	sub.Drain()
+
+	// TTL 重拉：同集合、行内容变（标题改名 + 归档时刻推进）。ID 序列不变
+	// → 不得发 Full；行内容变（撤可信与恢复的 State 同窗合并）→ 恰好一
+	// 条轻量 State，浏览器据此重取拿到新内容。
+	srv.setArchiveFixture(archiveSnapshotBodyWith(2, []map[string]any{
+		{"id": "th-a", "projectId": "p-1", "title": "归档-th-a（改名）", "status": "idle",
+			"archivedAt": "2026-10-02T00:00:00.000Z"},
+	}), nil)
+	time.Sleep(cfg.ArchiveTTL + 40*time.Millisecond)
+	if _, err := hub.Peek(env, "tok"); err != nil {
+		t.Fatalf("peek: %v", err)
+	}
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil &&
+			len(v.Snaps.Archived.Threads) == 1 && v.Snaps.Archived.Threads[0].Title == "归档-th-a（改名）"
+	})
+	time.Sleep(60 * time.Millisecond) // 发布窗口
+	evs := sub.Drain()
+	if len(evs) != 1 || evs[0].Full || evs[0].State == "" {
+		t.Fatalf("same-collection content change must announce exactly one lightweight State (no Full), got %+v", evs)
+	}
+
+	// TTL 窗口内的重读命中可信缓存，不重拉也不发声（全不变静默）。
+	if _, err := hub.Peek(env, "tok"); err != nil {
+		t.Fatalf("peek: %v", err)
+	}
+	time.Sleep(60 * time.Millisecond)
+	if evs := sub.Drain(); len(evs) != 0 {
+		t.Fatalf("cache-valid reread must stay silent, got %+v", evs)
 	}
 }

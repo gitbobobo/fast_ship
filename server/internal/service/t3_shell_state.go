@@ -222,24 +222,51 @@ func newT3ShellState() *t3ShellState {
 // applyActiveSnapshotLocked 应用权威活跃快照（调用方须已持有锁）：整体替换
 // projects + active threads，游标重置为 snapshotSequence；archivedThreads
 // 字段（真实服务恒为空）一律丢弃——归档数据只由归档流维护，不能被活跃帧
-// 清空（规则 1/3）。
-func (s *t3ShellState) applyActiveSnapshotLocked(snapshot t3ShellSnapshot) error {
+// 清空（规则 1/3）。返回被本快照从活跃面移除的线程 ID（应用前在活跃面、
+// 新快照里已不存在的 ID，R13 P2-1）：权威全量是「整体替换」，被替换掉的
+// 旧线程与增量帧的 removal 一样是「线程离开活跃面」——断连重连、marker
+// 超时强制重同步、序号失效回退都走全量快照，断连窗口里被别的客户端归档
+// 的线程会从新快照里消失，hub 层据此失效归档缓存，否则它既不在新活跃面、
+// 也不在旧归档缓存，ArchiveErr 却仍 nil（列表谎报完整、详情落「未找到该
+// 线程」），最长一个 TTL 才自愈。
+func (s *t3ShellState) applyActiveSnapshotLocked(snapshot t3ShellSnapshot) ([]string, error) {
 	if err := s.activeProjects.reset(snapshot.Projects, func(p *t3ProjectShell) string { return p.ID }); err != nil {
-		return fmt.Errorf("活跃快照项目缺少 ID: %w", err)
+		return nil, fmt.Errorf("活跃快照项目缺少 ID: %w", err)
+	}
+	// reset 前 diff：新快照的 ID 集是权威的活跃面全量，旧 order 里不在
+	// 集中的即被替换掉（与 reset 同锁内计算，不留交错缝隙）。
+	incoming := make(map[string]bool, len(snapshot.Threads))
+	for i := range snapshot.Threads {
+		incoming[snapshot.Threads[i].ID] = true
+	}
+	var removed []string
+	for _, id := range s.activeThreads.order {
+		if !incoming[id] {
+			removed = append(removed, id)
+		}
 	}
 	if err := s.activeThreads.reset(snapshot.Threads, func(t *t3ThreadShell) string { return t.ID }); err != nil {
-		return fmt.Errorf("活跃快照线程缺少 ID: %w", err)
+		return nil, fmt.Errorf("活跃快照线程缺少 ID: %w", err)
 	}
 	s.activeSchemaVersion = snapshot.SchemaVersion
 	s.activeCursor = snapshot.SnapshotSequence
 	s.activeReady = true
 	s.activeSynced = true
-	return nil
+	return removed, nil
 }
 
 // applyActiveItem 应用一个活跃流流项。坏帧 / 未知 kind 返回错误，由调用方
 // 整条流失败重连，不得静默跳过然后继续宣称 ready（规则 8）。
 func (s *t3ShellState) applyActiveItem(item t3ShellStreamItem) error {
+	_, err := s.applyActiveItemTracked(item)
+	return err
+}
+
+// applyActiveItemTracked 是 applyActiveItem 的扩展：权威全量快照整体替换活
+// 跃面时返回被移除的旧线程 ID（见 applyActiveSnapshotLocked），其余帧型恒
+// 返回 nil——增量帧的「离开活跃面」由 hub 按帧型判定（thread.removed 与
+// location != "active" 的 updated），不在此重复。
+func (s *t3ShellState) applyActiveItemTracked(item t3ShellStreamItem) ([]string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	switch item.Kind {
@@ -247,33 +274,33 @@ func (s *t3ShellState) applyActiveItem(item t3ShellStreamItem) error {
 		if len(item.ResolvedRepositoryIdentityRoots) > 0 {
 			// 元数据/enrichment 帧：Fast Ship 不使用 repositoryIdentity，
 			// 整体忽略（只 Ack，不改数据、不动游标、不动可信标记）。
-			return nil
+			return nil, nil
 		}
 		if item.Snapshot == nil {
-			return fmt.Errorf("活跃快照帧缺少 snapshot 字段")
+			return nil, fmt.Errorf("活跃快照帧缺少 snapshot 字段")
 		}
 		return s.applyActiveSnapshotLocked(*item.Snapshot)
 	case "synchronized":
 		// 追平标记：不携带数据，只推进可信标记（不碰游标，规则 2）。
 		s.activeSynced = true
-		return nil
+		return nil, nil
 	case "project.updated":
 		if item.Sequence == nil || item.Project == nil || item.Project.ID == "" {
-			return fmt.Errorf("project.updated 帧缺少 sequence/project/projectId")
+			return nil, fmt.Errorf("project.updated 帧缺少 sequence/project/projectId")
 		}
 		s.activeProjects.upsert(item.Project, item.Project.ID)
 		s.advanceActiveCursorLocked(*item.Sequence)
-		return nil
+		return nil, nil
 	case "project.removed":
 		if item.Sequence == nil || item.ProjectID == "" {
-			return fmt.Errorf("project.removed 帧缺少 sequence/projectId")
+			return nil, fmt.Errorf("project.removed 帧缺少 sequence/projectId")
 		}
 		s.activeProjects.remove(item.ProjectID)
 		s.advanceActiveCursorLocked(*item.Sequence)
-		return nil
+		return nil, nil
 	case "thread.updated":
 		if item.Sequence == nil || item.Thread == nil || item.Thread.ID == "" {
-			return fmt.Errorf("thread.updated 帧缺少 sequence/thread/threadId")
+			return nil, fmt.Errorf("thread.updated 帧缺少 sequence/thread/threadId")
 		}
 		// 活跃流实际只产生 location:"active"（ShellStream.ts:292-320）。旧版服务端
 		// 也可能在这条流上发 location:"archive"，上游 reducer 对它的处理是「不进
@@ -287,10 +314,10 @@ func (s *t3ShellState) applyActiveItem(item t3ShellStreamItem) error {
 			s.activeThreads.remove(item.Thread.ID)
 		}
 		s.advanceActiveCursorLocked(*item.Sequence)
-		return nil
+		return nil, nil
 	case "thread.removed":
 		if item.Sequence == nil || item.ThreadID == "" {
-			return fmt.Errorf("thread.removed 帧缺少 sequence/threadId")
+			return nil, fmt.Errorf("thread.removed 帧缺少 sequence/threadId")
 		}
 		// 只从活跃面删除：归档动作在上游也发 active removal
 		// （ShellStream.ts:292-320），不代表线程从归档面消失（规则 3）；
@@ -300,9 +327,9 @@ func (s *t3ShellState) applyActiveItem(item t3ShellStreamItem) error {
 		// （applyActiveValues → invalidateArchiveEntry），这里只管活跃面。
 		s.activeThreads.remove(item.ThreadID)
 		s.advanceActiveCursorLocked(*item.Sequence)
-		return nil
+		return nil, nil
 	default:
-		return fmt.Errorf("活跃流未知帧 kind %q", item.Kind)
+		return nil, fmt.Errorf("活跃流未知帧 kind %q", item.Kind)
 	}
 }
 
@@ -682,19 +709,69 @@ func (s *t3ShellState) snapshots() *t3ShellSnapshots {
 	return snaps
 }
 
+// t3ArchiveRowDigest 是归档行参与发布去重的对外可见摘要（R13 Note-2）：
+// ID + 列表摘要实际渲染的字段（标题/运行态/活动状态/分支/模型/更新与归
+// 档时刻/收进历史标记/最近 run 起始时刻，与 normalizeT3ThreadShell 从
+// shell 读的字段同源）。指纹若只含线程 ID 序列，TTL 重拉同集合但行内容
+// 变了（改名/状态翻转）会被判「无新话可说」——服务端内存已换新而浏览
+// 器停在旧行，直到无关事件或手动刷新。全字段字符串，可直接 slices.Equal。
+type t3ArchiveRowDigest struct {
+	ID              string
+	Title           string
+	Status          string
+	ActivityStatus  string
+	Branch          string
+	ModelInstance   string
+	Model           string
+	UpdatedAt       string
+	ArchivedAt      string
+	SettledOverride string
+	RunStartedAt    string
+}
+
+// archiveRowDigestOf 从一行归档线程提取可见摘要（指针字段空值归空串）。
+func archiveRowDigestOf(t *t3ThreadShell) t3ArchiveRowDigest {
+	d := t3ArchiveRowDigest{
+		ID:        t.ID,
+		Title:     t.Title,
+		Status:    t.Status,
+		UpdatedAt: t.UpdatedAt,
+	}
+	if t.ArchivedAt != nil {
+		d.ArchivedAt = *t.ArchivedAt
+	}
+	if t.ActivityRunStatus != nil {
+		d.ActivityStatus = *t.ActivityRunStatus
+	}
+	if t.Branch != nil {
+		d.Branch = *t.Branch
+	}
+	d.ModelInstance = t.ModelSelection.InstanceID
+	d.Model = t.ModelSelection.Model
+	if t.SettledOverride != nil {
+		d.SettledOverride = *t.SettledOverride
+	}
+	if t.LatestRunStartedAt != nil {
+		d.RunStartedAt = *t.LatestRunStartedAt
+	}
+	return d
+}
+
 // archiveFaceFingerprint 返回归档面的对外可见状态指纹：过滤活跃面残留后
-// 的线程 ID 序列（与 snapshots() 交给浏览器的归档列表同集同序）+ ArchiveErr
-// 文案（含「未就绪」兜底，与 snapshots() 的 archiveErr 同一推导）。发布端
-// 以两次指纹的相等性判定「对外是否有新话可说」，见 publishArchiveFaceEvent
-// ——没有指纹比对，TTL 例行重拉同一份快照也会每次发 Full，前端被迫整环境
-// 重取（审修 R9 P2-2）。
-func (s *t3ShellState) archiveFaceFingerprint() ([]string, string) {
+// 的行摘要序列（ID + 可见字段，与 snapshots() 交给浏览器的归档列表同集
+// 同序）+ ArchiveErr 文案（含「未就绪」兜底，与 snapshots() 的 archiveErr
+// 同一推导）。发布端以整行摘要的相等性判定「对外是否有新话可说」、以 ID
+// 子序列判定 Full 还是轻量 State，见 publishArchiveFaceEvent——没有指纹
+// 比对，TTL 例行重拉同一份快照也会每次发 Full，前端被迫整环境重取（审修
+// R9 P2-2）；指纹不含行内容，同集合内容变会被静默（R13 Note-2）。每次
+// 发布算一次指纹，行数以归档集大小为界，纯内存拷贝可接受。
+func (s *t3ShellState) archiveFaceFingerprint() ([]t3ArchiveRowDigest, string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	ids := make([]string, 0, s.archivedThreads.len())
+	rows := make([]t3ArchiveRowDigest, 0, s.archivedThreads.len())
 	for _, id := range s.archivedThreads.order {
 		if _, live := s.activeThreads.byID[id]; !live {
-			ids = append(ids, id)
+			rows = append(rows, archiveRowDigestOf(s.archivedThreads.byID[id]))
 		}
 	}
 	errText := ""
@@ -703,5 +780,5 @@ func (s *t3ShellState) archiveFaceFingerprint() ([]string, string) {
 	} else if !s.archiveReady {
 		errText = errT3ShellArchiveNotReady.Error()
 	}
-	return ids, errText
+	return rows, errText
 }

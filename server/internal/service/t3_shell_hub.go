@@ -1096,23 +1096,29 @@ func (e *t3ShellEntry) syncConfirmedAt() time.Time {
 // 不发布线程事件——紧随其后的连接终止会发布状态事件，浏览器据此整面刷新。
 //
 // 批内出现过「线程离开活跃面」的帧时同步失效归档缓存——离开活跃面即归
-// 档集可能变了。两种帧都算离开：thread.removed，与 location != "active"
+// 档集可能变了。三种帧都算离开：thread.removed，与 location != "active"
 // 的 thread.updated（applyActiveItem 对它执行 activeThreads.remove——上游
 // 若以该帧传递归档迁移，不失效的话线程会同时从活跃面与 TTL 缓存的归档
 // 集合消失，ArchiveErr 却仍 nil，列表谎报完整、详情落「未找到该线程」，
-// 最长一个 TTL 才自愈）。离开帧不携带「去向」——可能是被归档（进归档
-// 面），也可能是被彻底删除（归档集不变），上游对移除不看 location，Fast
-// Ship 无法区分。两者统一按「归档集可能变了」失效是保守正确的选择：多付
-// 一次快照重拉，不会出错；若只在「确认归档」时失效，就得先猜去向，猜错
-// （把删除当无效不失效）不会导致错误，但把归档当删除跳过失效会让线程在
-// TTL 内从活跃、归档两边同时消失——useThreads 不轮询，TTL 过期也不主动
-// 调度拉取，要缺到下一次事件/聚焦/手动刷新。这个窗口主要威胁的是「别的
-// 客户端归档了线程」场景：我们自己的写命令已在写后失效，这里再失效一次
-// 是幂等的冗余标记，无额外拉取（在途合并/同一世代内的标记不重拨）。失效
-// 只是标不可信+留旧行，不在这里同步发起网络拉取（不拖慢 readStreamLoop），
-// 下一次读经 kickArchiveRefresh 重拉；离开帧是低频帧，且每条 Chunk 至多
-// 失效一次，不构成对流式的过度拉取。location == "active" 的 updated 是
-// 正常字段更新，线程没离开活跃面，不触发失效。
+// 最长一个 TTL 才自愈），以及权威全量快照整体替换时被 reset 掉的旧线程
+// （R13 P2-1，由 state 的 applyActiveItemTracked 返回移除集）——无完成
+// 标记环境每次重连走全量快照、marker 超时强制重同步/序号失效回退同样走
+// 全量，断连窗口里被别的客户端归档的线程会从新快照里消失，不算离开的话
+// 它既不在新活跃面、也不在旧归档缓存，ArchiveErr 却仍 nil，bot wait 误
+// 下 thread_gone 结论，最长 60s 才自愈。离开帧不携带「去向」——可能是被
+// 归档（进归档面），也可能是被彻底删除（归档集不变），上游对移除不看
+// location，Fast Ship 无法区分。三者统一按「归档集可能变了」失效是保守
+// 正确的选择：多付一次快照重拉，不会出错；若只在「确认归档」时失效，就
+// 得先猜去向，猜错（把删除当无效不失效）不会导致错误，但把归档当删除
+// 跳过失效会让线程在 TTL 内从活跃、归档两边同时消失——useThreads 不轮
+// 询，TTL 过期也不主动调度拉取，要缺到下一次事件/聚焦/手动刷新。这个
+// 窗口主要威胁的是「别的客户端归档了线程」场景：我们自己的写命令已在写
+// 后失效，这里再失效一次是幂等的冗余标记，无额外拉取（在途合并/同一世
+// 代内的标记不重拨）。失效只是标不可信+留旧行，不在这里同步发起网络拉
+// 取（不拖慢 readStreamLoop），下一次读经 kickArchiveRefresh 重拉；离开
+// 帧是低频帧，且每条 Chunk 至多失效一次，不构成对流式的过度拉取。
+// location == "active" 的 updated 是正常字段更新，线程没离开活跃面，不
+// 触发失效。
 func (h *t3ShellHub) applyActiveValues(e *t3ShellEntry, values []json.RawMessage) error {
 	batch := t3ShellEventBatch{}
 	leftActiveFace := false
@@ -1121,13 +1127,14 @@ func (h *t3ShellHub) applyActiveValues(e *t3ShellEntry, values []json.RawMessage
 		if err := json.Unmarshal(raw, &item); err != nil {
 			return fmt.Errorf("活跃流帧解析失败: %w", err)
 		}
-		if err := e.state.applyActiveItem(item); err != nil {
+		removed, err := e.state.applyActiveItemTracked(item)
+		if err != nil {
 			return err
 		}
-		// 线程离开活跃面即归档集可能变了（见函数头）：removal 与
-		// location != "active" 的 updated 都把线程从活跃面摘除，去向不可辨，
-		// 统一失效归档缓存。
-		if item.Kind == "thread.removed" || (item.Kind == "thread.updated" && item.Location != "active") {
+		// 线程离开活跃面即归档集可能变了（见函数头）：增量帧的 removal 由
+		// hub 按帧型判定；全量快照整体替换的移除由 state 在同一临界区内算
+		// 出并返回，两边一并失效归档缓存。
+		if len(removed) > 0 || item.Kind == "thread.removed" || (item.Kind == "thread.updated" && item.Location != "active") {
 			leftActiveFace = true
 		}
 		batch.observeActive(&item)
