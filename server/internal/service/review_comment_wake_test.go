@@ -22,6 +22,7 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/githubapi"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
+	"github.com/godbobo/fast_ship/server/internal/pkg/githubapp"
 	"gorm.io/gorm"
 )
 
@@ -308,6 +309,36 @@ func TestReviewCommentWakeLegacyBareKeyDedup(t *testing.T) {
 	e.svc.db.Model(&model.ReviewRun{}).Count(&runs)
 	if runs != 0 {
 		t.Fatalf("去重路径不得开轮，runs = %d", runs)
+	}
+}
+
+// TestReviewCommentWakeAppNotConfigured webhook-secret-only 部署（无 App
+// 身份）的永久配置态：reviewClient 链路返回 githubapp.ErrAppNotConfigured
+// 哨兵 → 判确定性丢弃并补登幂等账，不让平台无限重投（codex 第 11 轮 P2）；
+// 同 delivery 重投按幂等去重。
+func TestReviewCommentWakeAppNotConfigured(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	e.enableReview(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	ctx := context.Background()
+	e.fake.SetPR(repo, 57, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 57, State: "open", HeadSHA: "sha-noapp",
+		HeadRepoFullName: repo,
+	})
+	e.review.clients = errClientResolver{err: githubapp.ErrAppNotConfigured}
+
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-noapp",
+		issueCommentBody("@fast-ship-bot", repo, 57, 42)); err != nil {
+		t.Fatalf("App 未配置应判确定性丢弃返回 nil，实得 %v", err)
+	}
+	var runs int64
+	e.svc.db.Model(&model.ReviewRun{}).Count(&runs)
+	if runs != 0 {
+		t.Fatalf("丢弃路径不得开轮，runs = %d", runs)
+	}
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-noapp",
+		issueCommentBody("@fast-ship-bot", repo, 57, 42)); !errors.Is(err, ErrDeliveryDuplicated) {
+		t.Fatalf("幂等账应落定，重投按去重，实得 %v", err)
 	}
 }
 
@@ -1092,6 +1123,13 @@ type stubGHClientFor struct{ err error }
 
 func (s stubGHClientFor) ClientFor(context.Context) (githubapi.GitHubClient, error) {
 	return nil, s.err
+}
+
+// errClientResolver 审查客户端解析桩：ClientFor 直接返回指定错误。
+type errClientResolver struct{ err error }
+
+func (r errClientResolver) ClientFor(context.Context, string, string, int64) (forge.ReviewClient, error) {
+	return nil, r.err
 }
 
 // TestReviewCommentWakeClientForTransientErr ClientFor 返回瞬时 AppError

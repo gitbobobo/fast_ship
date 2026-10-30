@@ -11,6 +11,7 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/forge"
 	"github.com/godbobo/fast_ship/server/internal/githubapi"
 	"github.com/godbobo/fast_ship/server/internal/model"
+	"github.com/godbobo/fast_ship/server/internal/pkg/githubapp"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
@@ -132,13 +133,16 @@ func commentWakePayloadGuards(body []byte, restrictAuthor bool) *commentWakePayl
 }
 
 // deterministicCommentWakeSetupErr 评论唤醒前置解析的确定性失败：访问面未
-// 配置（App 未部署/静态令牌，重投只会得到同一结果）与平台 401/403/404 且
-// 非限流（仓库无安装、凭证吊销/权限不足）。限流 403 与网络/5xx 属瞬时，
-// 透出 500 让平台重投。其余 AppError（部署设置读取失败等 ErrInternal）
-// 也是瞬时 DB 故障——只有哨兵 errReviewGitHubAccessUnconfigured 按确定性
-// 处理，不能一提子以 errs.AppError 判定（fast-ship-bot 第 1 轮 P2）。
+// 配置（两个哨兵：resolveGitHubInstallation 的 gh==nil 与 reviewClient 链
+// 路的 githubapp.ErrAppNotConfigured——webhook-secret-only 部署的永久配置
+// 态，重投只会得到同一结果）与平台 401/403/404 且非限流（仓库无安装、
+// 凭证吊销/权限不足）。限流 403 与网络/5xx/设置读取失败属瞬时，透出 500
+// 让平台重投。其余 AppError（部署设置读取失败等 ErrInternal）也是瞬时
+// DB 故障——只有两个哨兵按确定性处理，不能一提子以 errs.AppError 判定
+// （fast-ship-bot 第 1 轮 P2、codex 第 11 轮 P2）。
 func deterministicCommentWakeSetupErr(err error) bool {
-	if errors.Is(err, errReviewGitHubAccessUnconfigured) {
+	if errors.Is(err, errReviewGitHubAccessUnconfigured) ||
+		errors.Is(err, githubapp.ErrAppNotConfigured) {
 		return true
 	}
 	var statusErr *githubapi.StatusError
@@ -244,9 +248,10 @@ func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, ev
 	defer pullCancel()
 	client, err := s.reviewClient(pullCtx, integrationID, repo, installationID)
 	if err != nil {
-		// 集成行已删/密文损坏等确定性失败重投只会得到同一错误——判丢弃并
-		// 补登幂等账，不让平台无限重投；瞬时错误才透出 500。
-		if deterministicReviewAccessErr(err) {
+		// 集成行已删/密文损坏/部署未配置 App 身份（ErrAppNotConfigured）等
+		// 确定性失败重投只会得到同一错误——判丢弃并补登幂等账，不让平台
+		// 无限重投；瞬时错误才透出 500。
+		if deterministicReviewAccessErr(err) || errors.Is(err, githubapp.ErrAppNotConfigured) {
 			s.logger.Warn("评论唤醒构造客户端确定性失败，丢弃投递",
 				zap.String("integration", integrationID),
 				zap.String("delivery", deliveryID), zap.Error(err))
