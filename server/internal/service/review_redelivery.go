@@ -210,7 +210,7 @@ func (s *ReviewService) reconcileWebhookDeliveries(now time.Time) {
 					zap.String("guid", st.GUID), zap.Int64("delivery", st.TargetID),
 					zap.String("repo", check.Repo), zap.Int("pr", check.Number))
 			} else {
-				s.logger.Info("投递指向的 PR 已关闭，跳过重投",
+				s.logger.Info("投递指向的 PR 当前不可审（已关闭/草稿），跳过重投",
 					zap.String("guid", st.GUID), zap.Int64("delivery", st.TargetID),
 					zap.String("repo", check.Repo), zap.Int("pr", check.Number))
 			}
@@ -442,7 +442,10 @@ func (p *redeliveryPRProbe) lookup(ctx context.Context, deliveryID int64, event 
 	// prStates 缓存**——缓存被同一 sweep 内同 PR 的后续投递复用，掺入某条
 	// 无资格评论的判定会把有资格投递也错误跳过（codex 第 13 轮 P2）。
 	authorized := wakePayload == nil || commentWakeAuthorized(wakePayload, forgePR)
-	prUsable := open && !fork
+	// 草稿 PR 与触发面同口径排除（handleReviewTriggerTx 的 t.draft、评论
+	// 唤醒事务的 pr.Draft 守卫都会丢弃）：草稿期间的投递重投只会白吃预算
+	// 甚至误发故障通知（codex 第 34 轮 P2）；转正式后新投递自然开审。
+	prUsable := open && !fork && !forgePR.Draft
 	p.prStates[key] = &probePRState{usable: prUsable, author: forgePR.AuthorLogin}
 	reviewable := prUsable && authorized
 	check.Known, check.Reviewable = true, reviewable

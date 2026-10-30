@@ -485,3 +485,29 @@ func TestRedeliveryGateCorruptPayloadDegrades(t *testing.T) {
 		t.Fatalf("守卫拒绝（非唤醒）仍应记终态: %+v (ok=%v)", row, ok)
 	}
 }
+
+// 草稿 PR 的投递不重投（codex 第 34 轮 P2）：触发面与评论唤醒事务都会
+// 丢弃草稿——草稿期间重投只会白吃预算、误发故障通知；记终态跳过。
+func TestRedeliveryGateDraftPRSkipped(t *testing.T) {
+	env := newReviewEngineEnv(t)
+	env.enableReview(t)
+
+	base := redeliveryTestNow.Add(-time.Hour)
+	env.fake.SetHookDeliveries([]githubapp.HookDelivery{
+		hookRow(7101, "guid-cw-draft", "issue_comment", "created", 500, false, base),
+		hookRow(7102, "guid-pr-draft", "pull_request", "synchronize", 500, false, base),
+	})
+	env.fake.SetHookDeliveryPayload(7101, redeliveryCommentPayload("owner/repo", 13))
+	env.fake.SetHookDeliveryPayload(7102, redeliveryGatePayload("owner/repo", 13))
+	env.fake.SetPR("owner/repo", 13, &githubapi.PullRequest{Draft: true})
+
+	env.review.reconcileWebhookDeliveries(redeliveryTestNow)
+	if got := env.fake.RedeliveredIDs(); len(got) != 0 {
+		t.Fatalf("草稿 PR 的投递不得重投: %v", got)
+	}
+	for _, guid := range []string{"guid-cw-draft", "guid-pr-draft"} {
+		if row, ok := redeliveryClosedRow(t, env, guid); !ok || row.ClosedAt == nil {
+			t.Fatalf("%s 应记终态: %+v (ok=%v)", guid, row, ok)
+		}
+	}
+}
