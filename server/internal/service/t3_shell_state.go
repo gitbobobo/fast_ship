@@ -662,9 +662,10 @@ func (s *t3ShellState) noteArchiveFetchFailed(err error, generation int64, commi
 // settle 仍无对账就按「归档面无该线程」处理（此时若有极晚的增量，流本身也
 // 已经异常，断连重连会走权威快照）。
 //
-// 只动可信度（archiveReady 不动、旧行保留），不断流也不清表。返回是否真的
-// 改变了状态，供发布层按指纹去重。
-func (s *t3ShellState) noteArchiveMembershipUncertain(ids []string, settle time.Duration) (registered int, flipped bool) {
+// 只动可信度（archiveReady 不动、旧行保留），不断流也不清表。返回 (pending,
+// flipped)：pending 是本次落到待对账集合里的 ID 数（含续期，调用方据此调度
+// 到期清理），flipped 表示可信度是否真的翻转（调用方据此决定是否发布事件）。
+func (s *t3ShellState) noteArchiveMembershipUncertain(ids []string, settle time.Duration) (pending int, flipped bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.archiveReady || len(ids) == 0 {
@@ -684,19 +685,21 @@ func (s *t3ShellState) noteArchiveMembershipUncertain(ids []string, settle time.
 		if s.archiveUncertain == nil {
 			s.archiveUncertain = make(map[string]time.Time, len(ids))
 		}
-		if _, existed := s.archiveUncertain[id]; !existed {
-			registered++
-		}
+		// 同一 ID 在待对账期间再次离开活跃面时要**续期**（截止时刻后移）；
+		// 续期同样必须能调度到期清理（#156 R4）：已有定时器可能在续期后的
+		// 截止时刻之前就触发，那时裁剪不到它、也不会再安排下一次回调。所以
+		// 这里计的是「本次落到了多少个待对账 ID」，而不是「新增了几个」。
+		pending++
 		s.archiveUncertain[id] = deadline
 	}
-	if registered == 0 {
+	if pending == 0 {
 		return 0, false
 	}
 	flipped = !errors.Is(s.archiveErr, errT3ShellArchiveStale)
 	if flipped {
 		s.archiveErr = errT3ShellArchiveStale
 	}
-	return registered, flipped
+	return pending, flipped
 }
 
 // noteArchiveMembershipSettledLocked 撤掉某个线程的不确定标记（调用方须持

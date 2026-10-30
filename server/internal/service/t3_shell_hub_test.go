@@ -5230,3 +5230,55 @@ func TestT3ShellHub_LegacyMembershipUncertainSecondBatchExpires(t *testing.T) {
 		return v.Snaps != nil && v.Snaps.ArchiveErr == nil
 	})
 }
+
+// 同一 ID 在待对账期间重复移除要续期并重新调度（#156 R4）：已有定时器可能
+// 在续期后的截止时刻之前触发，裁剪不到它也不会再安排回调——必须为新截止时刻
+// 再调度一次，否则该 ID 永久留在待对账集合里，归档面一直 stale。
+func TestT3ShellHub_LegacyMembershipUncertainRefreshReschedules(t *testing.T) {
+	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
+	srv.setArchiveLegacy(true)
+	srv.setArchiveFixture(archiveSnapshotBody(1, "th-a"), nil)
+	cfg := hubTestConfig()
+	cfg.ArchiveStaleGrace = 150 * time.Millisecond
+	hub := newT3ShellHubWithConfig(cfg, nil)
+	defer hub.Close()
+	env := hubTestEnv(url, 0)
+
+	go hub.View(context.Background(), env, "tok")
+	collector := newShellConnCollector(t, srv)
+	active := collector.await(false)
+	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1")); err != nil {
+		t.Fatalf("send active snapshot: %v", err)
+	}
+	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
+		t.Fatalf("active snapshot not acked")
+	}
+	srv.awaitArchiveSub(t)
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil
+	})
+
+	sendRemoval := func(seq int, id string) {
+		t.Helper()
+		removed, _ := json.Marshal(map[string]any{"kind": "thread.removed", "sequence": seq, "threadId": id})
+		if err := active.conn.sendValue(active.sub.ID, removed); err != nil {
+			t.Fatalf("send removal %s: %v", id, err)
+		}
+		if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
+			t.Fatalf("removal %s not acked", id)
+		}
+	}
+
+	sendRemoval(43, "th-x")
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && errors.Is(v.Snaps.ArchiveErr, errT3ShellArchiveStale)
+	})
+	// 同一 ID 在待对账期间再次移除：截止时刻后移，必须重新调度。
+	time.Sleep(100 * time.Millisecond)
+	sendRemoval(44, "th-x")
+
+	// 原定时器（150ms）先到，续期后的截止时刻（250ms）到点后必须恢复可信。
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil
+	})
+}
