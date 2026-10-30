@@ -266,8 +266,10 @@ head 已有在途审查不重开」守卫，
 
 触发语义等同 rerun 的 `manual`：**评论唤醒开新轮**，同 head 也新轮
 （`nextReviewRoundTx` 对 `comment` 与 `manual` 同样跳过同 head 复用——否则
-组合唯一索引会吃掉运行行），`action` 落库为新值 `comment`；不写
-`review_seen_shas`、不走 `handleReviewTriggerTx`、不落防抖行。例外：同
+组合唯一索引会吃掉运行行），`action` 落库为新值 `comment`；不走
+`handleReviewTriggerTx`、不落防抖行；受理与 push 一样登记
+`review_seen_shas`（第 38 轮 P2：push 触发面的时序判定以当前 head 的
+seen 行为基准，comment 受理必须进受理史）。例外：同
 head 已有在途审查（queued/dispatched/running）时不重开、不 supersede、
 不动防抖行——该 head 正在审，再点名是重复请求，防连续点名作废在途轮
 饿死审查；结论已出（终态运行）时照常开新轮重审。不在平台回帖确认（范
