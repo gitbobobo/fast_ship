@@ -68,8 +68,9 @@ func setCommentUserType(userType string) func(map[string]any) {
 }
 
 // setCommentAssociation 覆盖评论者与仓库/Issue 的关系（GitHub 入口的身份
-// 过滤：NONE/未知无缘者与 CONTRIBUTOR（历史提交而非当前权限）忽略，
-// OWNER/MEMBER/COLLABORATOR 可点名）。
+// 过滤：仅 OWNER/COLLABORATOR 可点名；MEMBER 只是组织成员身份、
+// CONTRIBUTOR 是历史提交而非当前权限、NONE/未知无缘者——均忽略；
+// PR 作者走登录名比对例外）。
 func setCommentAssociation(association string) func(map[string]any) {
 	return func(payload map[string]any) {
 		payload["comment"].(map[string]any)["author_association"] = association
@@ -438,6 +439,9 @@ func TestReviewCommentWakeGuards(t *testing.T) {
 		// CONTRIBUTOR 是「历史提交过」而非当前权限（GitHub 官方定义），
 		// 失去当前授权的历史贡献者同样不收（codex 第 10 轮 P2）。
 		issueCommentBody("@fast-ship-bot 再看看", repo, 25, 42, setCommentAssociation("CONTRIBUTOR")),
+		// MEMBER 只是组织成员身份（组织仓库基础权限可设为 Read，不代表写
+		// 权限），同样不收（codex 第 14 轮 P2）。
+		issueCommentBody("@fast-ship-bot 三看", repo, 25, 42, setCommentAssociation("MEMBER")),
 	} {
 		if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", fmt.Sprintf("d-g%d", i), body); err != nil {
 			t.Fatalf("guard %d: %v", i, err)
