@@ -1471,8 +1471,10 @@ func TestShellState_RegistrationAfterArmCoversEarlierRemoval(t *testing.T) {
 	if err != nil {
 		t.Fatalf("apply removal: %v", err)
 	}
-	if armedRegistered || len(removed) != 0 {
-		t.Fatalf("unarmed apply must not self-register, removed=%v armed=%v", removed, armedRegistered)
+	// 未 armed：不自行登记，但仍要把「确实移走」的 ID 返回给 hub 补登记（R9：
+	// 登记只认活跃面真实移除的 ID）。
+	if armedRegistered || len(removed) != 1 || removed[0] != "th-1" {
+		t.Fatalf("unarmed apply must report the removed id without self-registering, removed=%v armed=%v", removed, armedRegistered)
 	}
 	if snaps := state.snapshots(); snaps.ArchiveErr != nil {
 		t.Fatalf("unarmed state must not be stale yet, got %v", snaps.ArchiveErr)

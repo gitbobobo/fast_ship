@@ -3098,7 +3098,7 @@ func TestT3ShellHub_LegacyInvalidateTriggersReconnectRefetch(t *testing.T) {
 	go hub.View(context.Background(), env, "tok")
 	collector := newShellConnCollector(t, srv)
 	active := collector.await(false)
-	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1")); err != nil {
+	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1", "th-2", "th-x", "th-y")); err != nil {
 		t.Fatalf("send active snapshot: %v", err)
 	}
 	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
@@ -3282,7 +3282,7 @@ func TestT3ShellHub_LegacyReconnectPreservesNewerRequest(t *testing.T) {
 	go hub.View(context.Background(), env, "tok")
 	collector := newShellConnCollector(t, srv)
 	active := collector.await(false)
-	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1")); err != nil {
+	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1", "th-2", "th-x", "th-y")); err != nil {
 		t.Fatalf("send active snapshot: %v", err)
 	}
 	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
@@ -3403,7 +3403,7 @@ func TestT3ShellHub_LegacyStampTakenBeforeSubscribe(t *testing.T) {
 	go hub.View(context.Background(), env, "tok")
 	collector := newShellConnCollector(t, srv)
 	active := collector.await(false)
-	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1")); err != nil {
+	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1", "th-2", "th-x", "th-y")); err != nil {
 		t.Fatalf("send active snapshot: %v", err)
 	}
 	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
@@ -3670,7 +3670,7 @@ func TestT3ShellHub_LegacyPreChangeSnapshotStaysUntrusted(t *testing.T) {
 	go hub.View(context.Background(), env, "tok")
 	collector := newShellConnCollector(t, srv)
 	active := collector.await(false)
-	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1")); err != nil {
+	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1", "th-2", "th-x", "th-y")); err != nil {
 		t.Fatalf("send active snapshot: %v", err)
 	}
 	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
@@ -3723,7 +3723,7 @@ func TestT3ShellHub_LegacyMethodNotFoundResetsToUnknown(t *testing.T) {
 	go hub.View(context.Background(), env, "tok")
 	collector := newShellConnCollector(t, srv)
 	active := collector.await(false)
-	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1")); err != nil {
+	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1", "th-2", "th-x", "th-y")); err != nil {
 		t.Fatalf("send active snapshot: %v", err)
 	}
 	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
@@ -3796,7 +3796,7 @@ func TestT3ShellHub_LegacyHealsToSnapshotAfterUpgrade(t *testing.T) {
 	go hub.View(context.Background(), env, "tok")
 	collector := newShellConnCollector(t, srv)
 	active := collector.await(false)
-	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1")); err != nil {
+	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1", "th-2", "th-x", "th-y")); err != nil {
 		t.Fatalf("send active snapshot: %v", err)
 	}
 	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
@@ -3884,7 +3884,7 @@ func TestT3ShellHub_BothArchiveMethodsMissingDamPerReadReprobe(t *testing.T) {
 	go hub.View(context.Background(), env, "tok")
 	collector := newShellConnCollector(t, srv)
 	active := collector.await(false)
-	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1")); err != nil {
+	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1", "th-2", "th-x", "th-y")); err != nil {
 		t.Fatalf("send active snapshot: %v", err)
 	}
 	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
@@ -3948,7 +3948,7 @@ func TestT3ShellHub_LegacyNonMethodExitDoesNotReset(t *testing.T) {
 	go hub.View(context.Background(), env, "tok")
 	collector := newShellConnCollector(t, srv)
 	active := collector.await(false)
-	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1")); err != nil {
+	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1", "th-2", "th-x", "th-y")); err != nil {
 		t.Fatalf("send active snapshot: %v", err)
 	}
 	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
@@ -4022,7 +4022,7 @@ func TestT3ShellHub_LegacyVoluntaryReconnectDoesNotBackoff(t *testing.T) {
 	go hub.View(context.Background(), env, "tok")
 	collector := newShellConnCollector(t, srv)
 	active := collector.await(false)
-	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1")); err != nil {
+	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1", "th-2", "th-x", "th-y")); err != nil {
 		t.Fatalf("send active snapshot: %v", err)
 	}
 	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
@@ -4113,7 +4113,7 @@ func TestT3ShellHub_LegacyHealQuietAfterUpgrade(t *testing.T) {
 	go hub.View(context.Background(), env, "tok")
 	collector := newShellConnCollector(t, srv)
 	active := collector.await(false)
-	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1")); err != nil {
+	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1", "th-2", "th-x", "th-y")); err != nil {
 		t.Fatalf("send active snapshot: %v", err)
 	}
 	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
@@ -5045,7 +5045,7 @@ func TestT3ShellHub_LegacyActiveRemovalMarksMembershipUncertain(t *testing.T) {
 	go hub.View(context.Background(), env, "tok")
 	collector := newShellConnCollector(t, srv)
 	active := collector.await(false)
-	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1")); err != nil {
+	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1", "th-2")); err != nil {
 		t.Fatalf("send active snapshot: %v", err)
 	}
 	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
@@ -5146,7 +5146,7 @@ func TestT3ShellHub_LegacyMembershipUncertainExpiryAnnounces(t *testing.T) {
 	go hub.View(context.Background(), env, "tok")
 	collector := newShellConnCollector(t, srv)
 	active := collector.await(false)
-	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1")); err != nil {
+	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1", "th-2", "th-x", "th-y")); err != nil {
 		t.Fatalf("send active snapshot: %v", err)
 	}
 	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
@@ -5169,7 +5169,6 @@ func TestT3ShellHub_LegacyMembershipUncertainExpiryAnnounces(t *testing.T) {
 	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
 		return v.Snaps != nil && errors.Is(v.Snaps.ArchiveErr, errT3ShellArchiveStale)
 	})
-
 	// 到期：必须发一条恢复事件（不需要任何读取或归档增量）。
 	ev := awaitShellEvent(t, sub, func(e T3ShellEvent) bool { return !e.Full && e.State != "" })
 	if ev.EnvironmentID != env.ID {
@@ -5195,7 +5194,7 @@ func TestT3ShellHub_LegacyMembershipUncertainSecondBatchExpires(t *testing.T) {
 	go hub.View(context.Background(), env, "tok")
 	collector := newShellConnCollector(t, srv)
 	active := collector.await(false)
-	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1")); err != nil {
+	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1", "th-2", "th-x", "th-y")); err != nil {
 		t.Fatalf("send active snapshot: %v", err)
 	}
 	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
@@ -5247,7 +5246,7 @@ func TestT3ShellHub_LegacyMembershipUncertainRefreshReschedules(t *testing.T) {
 	go hub.View(context.Background(), env, "tok")
 	collector := newShellConnCollector(t, srv)
 	active := collector.await(false)
-	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1")); err != nil {
+	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1", "th-2", "th-x", "th-y")); err != nil {
 		t.Fatalf("send active snapshot: %v", err)
 	}
 	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
@@ -5281,4 +5280,54 @@ func TestT3ShellHub_LegacyMembershipUncertainRefreshReschedules(t *testing.T) {
 	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
 		return v.Snaps != nil && v.Snaps.ArchiveErr == nil
 	})
+}
+
+// 不在活跃面的移除是噪声，不得登记待对账（#156 R9/R10）：真实链路（hub 帧后
+// 回调）也要过滤，否则订阅模式环境会被重复移除持续降级并无限续期。
+func TestT3ShellHub_LegacyNoiseRemovalDoesNotDegrade(t *testing.T) {
+	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
+	srv.setArchiveLegacy(true)
+	srv.setArchiveFixture(archiveSnapshotBody(1, "th-a"), nil)
+	hub := newT3ShellHubWithConfig(hubTestConfig(), nil)
+	defer hub.Close()
+	env := hubTestEnv(url, 0)
+
+	sub := hub.Subscribe("user-1")
+	defer sub.Close()
+
+	go hub.View(context.Background(), env, "tok")
+	collector := newShellConnCollector(t, srv)
+	active := collector.await(false)
+	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1")); err != nil {
+		t.Fatalf("send active snapshot: %v", err)
+	}
+	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
+		t.Fatalf("active snapshot not acked")
+	}
+	srv.awaitArchiveSub(t)
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil
+	})
+	sub.Drain()
+
+	// th-ghost 不在活跃面：重复移除是噪声。
+	ghost, _ := json.Marshal(map[string]any{"kind": "thread.removed", "sequence": 43, "threadId": "th-ghost"})
+	if err := active.conn.sendValue(active.sub.ID, ghost); err != nil {
+		t.Fatalf("send noise removal: %v", err)
+	}
+	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
+		t.Fatalf("noise removal not acked")
+	}
+
+	time.Sleep(150 * time.Millisecond)
+	if v, err := hub.Peek(env, "tok"); err != nil {
+		t.Fatalf("peek: %v", err)
+	} else if v.Snaps == nil || v.Snaps.ArchiveErr != nil {
+		t.Fatalf("noise removal must not degrade the archive face, got %+v", v.Snaps)
+	}
+	for _, ev := range sub.Drain() {
+		if ev.Full || ev.State != "" {
+			t.Fatalf("noise removal must not publish archive-face events, got %+v", ev)
+		}
+	}
 }

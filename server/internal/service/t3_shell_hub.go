@@ -1148,15 +1148,17 @@ func (e *t3ShellEntry) syncConfirmedAt() time.Time {
 // defer 兜住所有返回路径：帧级记下 leftActiveFace 即失效。
 func (h *t3ShellHub) applyActiveValues(e *t3ShellEntry, values []json.RawMessage) error {
 	batch := t3ShellEventBatch{}
-	leftActiveIDs := make([]string, 0, 1)
-	// armedRegisteredIDs 是本批里「已在应用移除的同一临界区登记过」的 ID
-	// （#156 R7/R8）：帧后回调不再重复登记它们，否则会把已被归档流对账的 ID
-	// 重新打回待对账；但**未**由 armed 路径登记的 ID（例如帧应用发生在 arm
-	// 之前）必须在这里补登记，不能按全局 armed 标志一刀切。
+	// removedIDs 是**确实从活跃面移走**的线程（由 state 判定并返回，R9 噪声
+	// 过滤的真实链路）：只有它们需要等归档对账。armedRegisteredIDs 是其中
+	// 「已在应用移除的同一临界区登记过」的部分（R7/R8），帧后回调不再重复登记。
+	removedIDs := make([]string, 0, 1)
 	armedRegisteredIDs := make([]string, 0, 1)
+	// leftActiveFace 只表示「本批出现过离开活跃面的帧」，用于按需快照模式的
+	// 缓存失效（噪声帧多失效一次只是多付一次快照，不影响可信度语义）。
+	leftActiveFace := false
 	defer func() {
-		if len(leftActiveIDs) > 0 {
-			h.invalidateArchiveEntryAfterActiveRemoval(e, leftActiveIDs, armedRegisteredIDs)
+		if leftActiveFace {
+			h.invalidateArchiveEntryAfterActiveRemoval(e, removedIDs, armedRegisteredIDs)
 		}
 	}()
 	for _, raw := range values {
@@ -1174,24 +1176,17 @@ func (h *t3ShellHub) applyActiveValues(e *t3ShellEntry, values []json.RawMessage
 		// 逐个记下离开活跃面的线程 ID：订阅模式下要按 ID 等归档增量对账
 		// （跟进 PR② / #156 R1），无关线程的增量不能替它们恢复可信。
 		if len(removed) > 0 {
-			leftActiveIDs = append(leftActiveIDs, removed...)
+			removedIDs = append(removedIDs, removed...)
 			if armedRegistered {
 				armedRegisteredIDs = append(armedRegisteredIDs, removed...)
 			}
+			leftActiveFace = true
 		}
 		switch {
-		case item.Kind == "thread.removed":
-			if item.ThreadID != "" {
-				leftActiveIDs = append(leftActiveIDs, item.ThreadID)
-				if armedRegistered {
-					armedRegisteredIDs = append(armedRegisteredIDs, item.ThreadID)
-				}
-			}
-		case item.Kind == "thread.updated" && item.Location != "active" && item.Thread != nil:
-			leftActiveIDs = append(leftActiveIDs, item.Thread.ID)
-			if armedRegistered {
-				armedRegisteredIDs = append(armedRegisteredIDs, item.Thread.ID)
-			}
+		case item.Kind == "thread.removed", item.Kind == "thread.updated" && item.Location != "active":
+			// 离开活跃面的帧一律触发缓存失效判定；登记只认 state 返回的
+			// 「确实移走」的 ID（removedIDs，见上）。
+			leftActiveFace = true
 		}
 		batch.observeActive(&item)
 		// 权威全量快照落地（无 enrichment 标记）→ 强制重同步要求到此结束。

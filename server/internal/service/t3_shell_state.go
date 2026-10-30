@@ -338,7 +338,8 @@ func (s *t3ShellState) applyActiveItemTracked(item t3ShellStreamItem) (removed [
 			_, present := s.activeThreads.byID[item.Thread.ID]
 			s.activeThreads.remove(item.Thread.ID)
 			if present {
-				armedRegistered = s.armUncertainForRemovalsLocked([]string{item.Thread.ID})
+				removed = []string{item.Thread.ID}
+				armedRegistered = s.armUncertainForRemovalsLocked(removed)
 			}
 		}
 		s.advanceActiveCursorLocked(*item.Sequence)
@@ -356,10 +357,11 @@ func (s *t3ShellState) applyActiveItemTracked(item t3ShellStreamItem) (removed [
 		_, present := s.activeThreads.byID[item.ThreadID]
 		s.activeThreads.remove(item.ThreadID)
 		if present {
-			armedRegistered = s.armUncertainForRemovalsLocked([]string{item.ThreadID})
+			removed = []string{item.ThreadID}
+			armedRegistered = s.armUncertainForRemovalsLocked(removed)
 		}
 		s.advanceActiveCursorLocked(*item.Sequence)
-		return nil, armedRegistered, nil
+		return removed, armedRegistered, nil
 	default:
 		return nil, false, fmt.Errorf("活跃流未知帧 kind %q", item.Kind)
 	}
