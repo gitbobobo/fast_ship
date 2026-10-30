@@ -457,6 +457,12 @@ func (s *t3ShellState) applyArchiveSnapshotAt(snapshot t3ArchivedShellSnapshot, 
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// 采集早于最近一次归属变更的快照整条丢弃（#156 R28/R39）：它既不能封窗、
+	// 也不能拿变更前的行覆盖现有行；不动可信度，避免「撤 ready 后宽限到期也
+	// 恢复不了」的死角。
+	if !observedAt.IsZero() && observedAt.Before(s.archiveFreshnessFloor) {
+		return false, nil
+	}
 	// 坏负载先于世代判定：reset 失败时面保持原样，err 点名原因交调用方
 	// 按「本次读取失败」记账——不得吞成「不可信但没错误」，否则上游结构
 	// 性坏快照（毒快照）会引发无冷却重试风暴：每次读取立即重拨、永不记账。
@@ -477,18 +483,7 @@ func (s *t3ShellState) applyArchiveSnapshotAt(snapshot t3ArchivedShellSnapshot, 
 		}
 		return false, nil
 	}
-	// 快照本身可能晚于 floor（订阅往返期间发生的移除会把 floor 推到
-	// connStartAt 之后），此时它包含全部待对账 ID 就足以证明是变更后采样
-	// （#156 R35）：否则批量移除期间会无差别拒收、反复断连重拨。
-	if !observedAt.IsZero() && observedAt.Before(s.archiveFreshnessFloor) {
-		// 采集早于最近一次归属变更（#156 R28）：这是变更前状态，只换数据不封窗，
-		// 由之后采到的快照或下一次到期恢复可信。
-		s.archiveReady = false
-		if s.archiveErr == nil {
-			s.archiveErr = errT3ShellArchiveStale
-		}
-		return false, nil
-	}
+
 	s.archiveReady = true
 	s.archiveErr = nil
 	s.archiveStale = false
@@ -651,6 +646,11 @@ func (s *t3ShellState) applyArchiveItemAt(item t3ArchiveStreamItem, connectionSt
 // 照吞掉），消费即断开本连接，下一条连接的 subscribe 必在请求之后发
 // 出，其快照必为写后状态。
 func (s *t3ShellState) applyArchiveSnapshotLocked(snapshot t3ArchivedShellSnapshot, connectionStart int64, observedAt time.Time) error {
+	// 变更前采集的快照整条丢弃（#156 R28/R39）：不覆盖行、不动可信度，也不
+	// 请求重连（#156 R38）。
+	if !observedAt.IsZero() && observedAt.Before(s.archiveFreshnessFloor) {
+		return nil
+	}
 	if err := s.archivedThreads.reset(snapshot.Threads, func(t *t3ThreadShell) string { return t.ID }); err != nil {
 		return fmt.Errorf("归档快照线程缺少 ID: %w", err)
 	}
@@ -689,17 +689,7 @@ func (s *t3ShellState) applyArchiveSnapshotLocked(snapshot t3ArchivedShellSnapsh
 		}
 		return nil
 	}
-	// 采集早于最近一次归属变更的快照同样是变更前状态（#156 R28）：只换数据
-	// 不封窗，否则它会把面恢复可信而线程两面都没有。
-	// 快照包含全部待对账 ID 即证明它是变更后采样（#156 R37）：订阅路径的
-	// observedAt 只是连接发起时刻（下界），往返期间的移除会把 floor 推到它
-	// 之后——不豁免的话，批量归档期间每次快照都会被拒并触发重连风暴。
-	if !observedAt.IsZero() && observedAt.Before(s.archiveFreshnessFloor) {
-		// 变更前快照：只换数据不封窗（#156 R28）。**不**在这里请求重连（#156 R38）：
-		// 批量归档期间 floor 会被频繁推后，重连风暴比多等一个宽限更糟；恢复靠
-		// 之后的自然快照、归档增量落地或宽限到期。
-		return nil
-	}
+
 	// 邮戳 ≥ 备忘世代：权威全量快照即是重连取写后状态的完成——置可信
 	// 并撤销尚存的重建备忘，避免晚到的信号再把刚恢复的面拆掉一次。
 	s.archiveReady = true

@@ -1957,14 +1957,14 @@ func TestShellState_ExpiryKeepsFreshnessFloor(t *testing.T) {
 	time.Sleep(40 * time.Millisecond)
 	state.expireArchiveMembershipUncertain()
 
-	// 采集时刻早于那次移除的快照：不得恢复可信。
+	// 采集时刻早于那次变更的快照整条丢弃（#156 R39）：既不覆盖行、也不改可信度。
 	if _, err := state.applyArchiveSnapshotAt(
-		t3ArchivedShellSnapshot{SchemaVersion: 1, SnapshotSequence: 3, Threads: shellTestThreads(shellTestThread("th-a", "归档"))},
+		t3ArchivedShellSnapshot{SchemaVersion: 1, SnapshotSequence: 3, Threads: nil},
 		state.archiveGenerationNow(), nil, time.Now().Add(-time.Second)); err != nil {
 		t.Fatalf("apply stale snapshot: %v", err)
 	}
-	if snaps := state.snapshots(); !errors.Is(snaps.ArchiveErr, errT3ShellArchiveStale) {
-		t.Fatalf("a snapshot captured before the transition must not restore trust, got %v", snaps.ArchiveErr)
+	if snaps := state.snapshots(); len(snaps.Archived.Threads) != 1 || snaps.Archived.Threads[0].ID != "th-a" {
+		t.Fatalf("a pre-transition snapshot must not replace rows, got %+v", snaps.Archived.Threads)
 	}
 
 	// 之后采集的快照可以恢复可信。
