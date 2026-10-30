@@ -1327,14 +1327,16 @@ func TestShellState_ArchiveMembershipAlreadyArchivedIsNotUncertain(t *testing.T)
 		t.Fatalf("seed archive: applied=%v err=%v", applied, err)
 	}
 
-	if registered := state.noteArchiveMembershipUncertain([]string{"th-a"}, time.Minute); registered != 0 {
-		t.Fatalf("an already-archived thread needs no reconciliation, got registered=%d", registered)
+	// 只有帧自身带着归档行（location!="active" 的 thread.updated）时，才允许
+	// 以「归档面已有该行」跳过登记（#156 R13）；无行证明的移除仍须登记——
+	// 归档面里的旧行可能早于本次活跃迁移。
+	if registered := state.noteArchiveMembershipUncertainSkipping([]string{"th-a"}, time.Minute, true); registered != 0 {
+		t.Fatalf("an archive row carried by the frame itself needs no reconciliation, got registered=%d", registered)
 	}
-	if snaps := state.snapshots(); snaps.ArchiveErr != nil {
-		t.Fatalf("face must stay trusted, got %v", snaps.ArchiveErr)
+	if registered := state.noteArchiveMembershipUncertain([]string{"th-a"}, time.Minute); registered != 1 {
+		t.Fatalf("a removal without row proof must still be registered, got registered=%d", registered)
 	}
-
-	// 反例：归档面没有的线程仍要登记。
+	// 反例：归档面没有的线程同样要登记。
 	if registered := state.noteArchiveMembershipUncertain([]string{"th-x"}, time.Minute); registered != 1 {
 		t.Fatalf("unknown-to-archive thread must be registered, got registered=%d", registered)
 	}
@@ -1706,5 +1708,62 @@ func TestShellState_RealFailureNotOverwrittenByUncertainty(t *testing.T) {
 	}
 	if snaps := state.snapshots(); !errors.Is(snaps.ArchiveErr, realErr) {
 		t.Fatalf("expiry must keep the real failure, got %v", snaps.ArchiveErr)
+	}
+}
+
+// 归档面里的旧行不能当作「本次活跃迁移已对账」（#156 R13）：A 被 unarchive
+// 后又 archive，旧行仍在归档面时收到活跃 thread.removed——该帧不带行证明，
+// 必须照常登记，否则旧行随后被归档流的排队 removed 删掉、而新增量未到时
+// wait 会把 A 判成 thread_gone。
+func TestShellState_StaleArchiveRowDoesNotSkipRegistration(t *testing.T) {
+	state := newT3ShellState()
+	if applied, err := state.applyArchiveSnapshot(
+		t3ArchivedShellSnapshot{SchemaVersion: 1, SnapshotSequence: 1, Threads: shellTestThreads(shellTestThread("th-a", "归档"), shellTestThread("th-1", "归档"))},
+		state.archiveGenerationNow(), nil); !applied || err != nil {
+		t.Fatalf("seed archive: %v", err)
+	}
+	if _, _, err := state.applyActiveItemTracked(t3ShellStreamItem{
+		Kind: "snapshot", Snapshot: &t3ShellSnapshot{SchemaVersion: 1, SnapshotSequence: 1, Threads: shellTestThreads(shellTestThread("th-1", "线程"))},
+	}); err != nil {
+		t.Fatalf("seed active: %v", err)
+	}
+	state.armArchiveUncertain(true, time.Minute)
+
+	// thread.removed 不带归档行：即使归档面已有旧行也必须登记。
+	if _, _, err := state.applyActiveItemTracked(t3ShellStreamItem{
+		Kind: "thread.removed", Sequence: intPtrTestLocal(2), ThreadID: "th-1",
+	}); err != nil {
+		t.Fatalf("apply removal: %v", err)
+	}
+	if snaps := state.snapshots(); !errors.Is(snaps.ArchiveErr, errT3ShellArchiveStale) {
+		t.Fatalf("stale archive row must not skip registration, got %v", snaps.ArchiveErr)
+	}
+}
+
+// 帧自身带归档行（location!="active" 的 thread.updated）时，归档面已有该行
+// 就是「已对账」的证据：不登记、不降级（#156 R2-1 / R13）。
+func TestShellState_FrameWithArchiveRowSkipsRegistration(t *testing.T) {
+	state := newT3ShellState()
+	if applied, err := state.applyArchiveSnapshot(
+		t3ArchivedShellSnapshot{SchemaVersion: 1, SnapshotSequence: 1, Threads: shellTestThreads(shellTestThread("th-a", "归档"), shellTestThread("th-1", "归档"))},
+		state.archiveGenerationNow(), nil); !applied || err != nil {
+		t.Fatalf("seed archive: %v", err)
+	}
+	if _, _, err := state.applyActiveItemTracked(t3ShellStreamItem{
+		Kind: "snapshot", Snapshot: &t3ShellSnapshot{SchemaVersion: 1, SnapshotSequence: 1, Threads: shellTestThreads(shellTestThread("th-1", "线程"))},
+	}); err != nil {
+		t.Fatalf("seed active: %v", err)
+	}
+	state.armArchiveUncertain(true, time.Minute)
+
+	// 归档面已有 th-1：这条 updated 说明归档流已经确认过它，无需降级。
+	if _, _, err := state.applyActiveItemTracked(t3ShellStreamItem{
+		Kind: "thread.updated", Sequence: intPtrTestLocal(2), Location: "archive",
+		Thread: shellTestThread("th-1", "归档"),
+	}); err != nil {
+		t.Fatalf("apply archive-located update: %v", err)
+	}
+	if snaps := state.snapshots(); snaps.ArchiveErr != nil {
+		t.Fatalf("frame carrying an existing archive row needs no reconciliation, got %v", snaps.ArchiveErr)
 	}
 }

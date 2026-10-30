@@ -275,7 +275,7 @@ func (s *t3ShellState) applyActiveSnapshotLocked(snapshot t3ShellSnapshot) ([]st
 	s.activeCursor = snapshot.SnapshotSequence
 	s.activeReady = true
 	s.activeSynced = true
-	s.armUncertainForRemovalsLocked(removed)
+	s.armUncertainForRemovalsLocked(removed, false)
 	return removed, nil
 }
 
@@ -350,7 +350,7 @@ func (s *t3ShellState) applyActiveItemTracked(item t3ShellStreamItem) (removed [
 			s.activeThreads.remove(item.Thread.ID)
 			if present {
 				removed = []string{item.Thread.ID}
-				armedRegistered = s.armUncertainForRemovalsLocked(removed)
+				armedRegistered = s.armUncertainForRemovalsLocked(removed, true)
 			}
 		}
 		s.advanceActiveCursorLocked(*item.Sequence)
@@ -371,7 +371,7 @@ func (s *t3ShellState) applyActiveItemTracked(item t3ShellStreamItem) (removed [
 		s.activeThreads.remove(item.ThreadID)
 		if present {
 			removed = []string{item.ThreadID}
-			armedRegistered = s.armUncertainForRemovalsLocked(removed)
+			armedRegistered = s.armUncertainForRemovalsLocked(removed, false)
 		}
 		s.advanceActiveCursorLocked(*item.Sequence)
 		return removed, armedRegistered, nil
@@ -721,15 +721,25 @@ func (s *t3ShellState) noteArchiveFetchFailed(err error, generation int64, commi
 // 只动可信度（archiveReady 不动、旧行保留），不断流也不清表。返回 pending：
 // 本次落到待对账集合里的 ID 数（含续期，调用方据此调度到期清理与发布）。
 func (s *t3ShellState) noteArchiveMembershipUncertain(ids []string, settle time.Duration) (pending int) {
+	return s.noteArchiveMembershipUncertainSkipping(ids, settle, false)
+}
+
+// noteArchiveMembershipUncertainSkipping 是带「是否允许以『归档面已有该行』
+// 跳过登记」开关的版本（#156 R12/R13）：ok 只该由**帧自身携带归档行**的路径
+// （location != "active" 的 thread.updated）传入——那是「归档流已经确认过这
+// 条线程」的证据；而 thread.removed 与快照移除不携带行，归档面里的旧行可能
+// 早于本次活跃迁移（unarchive 后又 archive），拿它当对账完成会让 wait 在
+// 新增量到达前把线程判成 thread_gone。
+func (s *t3ShellState) noteArchiveMembershipUncertainSkipping(ids []string, settle time.Duration, skipArchived bool) (pending int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.noteArchiveMembershipUncertainLocked(ids, settle)
+	return s.noteArchiveMembershipUncertainLocked(ids, settle, skipArchived)
 }
 
 // noteArchiveMembershipUncertainLocked 是 noteArchiveMembershipUncertain 的
 // 无锁变体（调用方须持 s.mu）：活跃面移除与应用在同一临界区登记，
 // 保证读者看不到「已删除但可信」的中间态（#156 R5）。
-func (s *t3ShellState) noteArchiveMembershipUncertainLocked(ids []string, settle time.Duration) (pending int) {
+func (s *t3ShellState) noteArchiveMembershipUncertainLocked(ids []string, settle time.Duration, skipArchived bool) (pending int) {
 	if len(ids) == 0 || settle <= 0 {
 		return 0
 	}
@@ -745,8 +755,10 @@ func (s *t3ShellState) noteArchiveMembershipUncertainLocked(ids []string, settle
 		// 已在归档面里的线程不需要对账（#156 R2-1）：两条流顺序不定，归档
 		// 增量先到是常见顺序（活跃面重连的权威快照移除同理），此时成员关系
 		// 已由归档数据确定，登记只会让归档面白降级一个宽限窗口。
-		if _, archived := s.archivedThreads.byID[id]; archived {
-			continue
+		if skipArchived {
+			if _, archived := s.archivedThreads.byID[id]; archived {
+				continue
+			}
 		}
 		if s.archiveUncertain == nil {
 			s.archiveUncertain = make(map[string]time.Time, len(ids))
@@ -779,7 +791,7 @@ func (s *t3ShellState) clearArchiveMembershipUncertainLocked() {
 
 // armUncertainForRemovalsLocked 在 armed 状态下，把刚离开活跃面的线程就地
 // 登记为待对账（调用方须持 s.mu，见 armArchiveUncertain）。
-func (s *t3ShellState) armUncertainForRemovalsLocked(ids []string) bool {
+func (s *t3ShellState) armUncertainForRemovalsLocked(ids []string, skipArchived bool) bool {
 	if !s.archiveUncertainArmed {
 		return false
 	}
@@ -790,7 +802,7 @@ func (s *t3ShellState) armUncertainForRemovalsLocked(ids []string) bool {
 		// 归档面也不要制造不可恢复的不确定态。
 		return false
 	}
-	registered := s.noteArchiveMembershipUncertainLocked(ids, settle)
+	registered := s.noteArchiveMembershipUncertainLocked(ids, settle, skipArchived)
 	return registered > 0
 }
 
