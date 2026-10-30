@@ -55,6 +55,13 @@ func dropIssuePullRequest(payload map[string]any) {
 	delete(issue, "pull_request")
 }
 
+// dropCommentUser 把 comment.user 摘掉（代理剥字段的形态：无法与 PR 作者
+// 比对登录名）。
+func dropCommentUser(payload map[string]any) {
+	comment := payload["comment"].(map[string]any)
+	delete(comment, "user")
+}
+
 // setCommentAction 覆盖 action（edited/deleted 等不唤醒）。
 func setCommentAction(action string) func(map[string]any) {
 	return func(payload map[string]any) { payload["action"] = action }
@@ -516,6 +523,35 @@ func TestReviewCommentWakeDraftAndClosed(t *testing.T) {
 	e.svc.db.Model(&model.ReviewRun{}).Count(&runs)
 	if runs != 0 {
 		t.Fatalf("draft/关闭/合并 PR 不得开轮，runs = %d", runs)
+	}
+}
+
+// TestReviewCommentWakeUnqualifiedNoAPI 显然无资格的点名（association
+// 不在允许集且 payload 无登录名可比对作者）不必实拉：零 API 成本拒绝
+// （codex 第 17 轮 P2）。带登录名的留待实拉后与 PR 作者比对（例外通道）。
+func TestReviewCommentWakeUnqualifiedNoAPI(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	e.enableReview(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	ctx := context.Background()
+	e.fake.SetPR(repo, 37, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 37, State: "open", HeadSHA: "sha-uq",
+		HeadRepoFullName: repo,
+	})
+
+	before := e.fake.CallCounts()
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-uq",
+		issueCommentBody("@fast-ship-bot", repo, 37, 42, setCommentAssociation("NONE"), dropCommentUser)); err != nil {
+		t.Fatalf("无资格点名应静默忽略: %v", err)
+	}
+	after := e.fake.CallCounts()
+	if after["GetPullRequest"] != before["GetPullRequest"] {
+		t.Fatalf("无资格点名不得实拉，GetPullRequest %d -> %d", before["GetPullRequest"], after["GetPullRequest"])
+	}
+	var runs int64
+	e.svc.db.Model(&model.ReviewRun{}).Count(&runs)
+	if runs != 0 {
+		t.Fatalf("无资格点名不得开轮，runs = %d", runs)
 	}
 }
 

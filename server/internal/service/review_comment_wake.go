@@ -113,6 +113,14 @@ func commentWakePayloadGuards(body []byte) *commentWakePayload {
 	return &p
 }
 
+// commentAssociationAllowed GitHub association 白名单（可用纯 payload
+// 判定的部分）：仓库属主。COLLABORATOR 邀请可授 Read/Triage，与
+// MEMBER/CONTRIBUTOR/NONE 一样不留 payload 层判定空间——是否 PR 作者
+// 须实拉后按登录名比对（见 commentWakeAuthorized）。
+func commentAssociationAllowed(association string) bool {
+	return association == "OWNER"
+}
+
 // commentWakeAuthorized 评论者身份（实拉 PR 后判定，两平台同口径）：
 // 仓库属主（OWNER，恒有管理员权限）或 PR 作者本人（评论者登录名与实拉
 // PR 作者一致）。其余一律不收：association 枚举除 OWNER 外没有任何值能
@@ -126,7 +134,7 @@ func commentWakePayloadGuards(body []byte) *commentWakePayload {
 // 维护者点名能力须做实时权限校验 API，属产品决策另议。Forgejo payload
 // 没有关系字段，只能走登录名比对：仅 PR 作者可点名。
 func commentWakeAuthorized(p *commentWakePayload, pr *forge.PullRequest) bool {
-	if p.Comment.Association == "OWNER" {
+	if commentAssociationAllowed(p.Comment.Association) {
 		return true
 	}
 	return p.Comment.User.Login != "" && pr.AuthorLogin != "" &&
@@ -225,6 +233,14 @@ func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, ev
 	preProject, _, err := s.findEnabledReviewProjectTx(s.db.WithContext(ctx), integrationID, repo)
 	if err != nil || preProject == nil {
 		return err
+	}
+	// 显然无资格的点名（association 不在允许集且 payload 无登录名可比对
+	// 作者）不必实拉——零 API 成本拒绝（codex 第 17 轮 P2：省安装 API
+	// 预算）；带登录名的留待实拉后与 PR 作者比对（PR 作者例外）。
+	if integrationID == model.ForgeIntegrationBuiltinGitHubID &&
+		!commentAssociationAllowed(payload.Comment.Association) &&
+		payload.Comment.User.Login == "" {
+		return nil
 	}
 	installationID := payload.Installation.ID
 	// GitHub 投递缺 installation 快照（代理剥字段等）时按仓库解析兜底；
