@@ -466,13 +466,19 @@ func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, ev
 				return lErr
 			}
 		}
-		if baseline != nil && pr.UpdatedAt != nil &&
-			pr.UpdatedAt.Before(*baseline) {
-			s.logger.Warn("评论唤醒实拉快照滞后于已受理 head，按瞬时失败重投",
+		// 同刻异 head = 时序歧义（Forgejo 秒级精度下两次推进同一秒，滞后
+		// 读可能拿到旧 head 且 updated_at 与基准相等——严格 Before 拦不住）：
+		// 与触发面的同刻异 head 歧义同口径，按瞬时失败重投换新鲜快照
+		// （codex 第 28 轮 P2）。
+		stale := baseline != nil && pr.UpdatedAt != nil && pr.UpdatedAt.Before(*baseline)
+		tied := baseline != nil && pr.UpdatedAt != nil &&
+			pr.UpdatedAt.Equal(*baseline) && pr.HeadSHA != observedHead
+		if stale || tied {
+			s.logger.Warn("评论唤醒实拉快照时序与已受理 head 不符（滞后/同刻歧义），按瞬时失败重投",
 				zap.String("integration", integrationID),
 				zap.String("repo", repo), zap.Int("pr", prNumber),
 				zap.String("live", pr.HeadSHA), zap.String("accepted", observedHead))
-			return fmt.Errorf("评论唤醒实拉快照滞后于已受理 head")
+			return fmt.Errorf("评论唤醒实拉快照时序与已受理 head 不符（滞后/同刻歧义）")
 		}
 		forkDenied, err := s.openCommentWakeRoundTx(ctx, integrationID, event, deliveryID, repo, prNumber,
 			installationID, observedHead, pr, time.Now().UTC())

@@ -1831,3 +1831,50 @@ func TestReviewCommentWakeHeadBaselineAdvances(t *testing.T) {
 		t.Fatalf("瞬时失败不落账: deliveries = %d", deliveries)
 	}
 }
+
+// 同刻异 head = 时序歧义（codex 第 28 轮 P2）：Forgejo 秒级精度下同一秒
+// 两次推进，滞后读可能拿到旧 head 且 updated_at 与基准相等——严格 Before
+// 拦不住，须与触发面同刻异 head 歧义同口径按瞬时失败重投。
+func TestReviewCommentWakeTiedTimestampAmbiguity(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	e.enableReview(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	ctx := context.Background()
+	t1 := time.Now().UTC().Add(-2 * time.Hour)
+	if err := e.svc.db.Create(&model.ReviewPullRequest{
+		ProjectID: e.project.ID, UserID: e.project.UserID,
+		RepoFullName: repo, PRNumber: 46,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		HeadSHA:       "sha-a", RoundNumber: 1, UpdatedAt: t1,
+	}).Error; err != nil {
+		t.Fatalf("seed ledger: %v", err)
+	}
+	if err := e.svc.db.Create(&model.ReviewSeenSHA{
+		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 46,
+		HeadSHA: "sha-a", IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		PRUpdatedAt: &t1, AcceptedAt: t1,
+	}).Error; err != nil {
+		t.Fatalf("seed seen: %v", err)
+	}
+	// 同刻（t1）但 head 不同：滞后读到的旧 head 快照。
+	e.fake.SetPR(repo, 46, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 46, State: "open", HeadSHA: "sha-older",
+		HeadRepoFullName: repo, UpdatedAt: &t1,
+	})
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-tied",
+		issueCommentBody("@fast-ship-bot", repo, 46, 42)); err == nil {
+		t.Fatal("同刻异 head 快照应按瞬时失败拒绝（500）")
+	}
+	var runs int64
+	e.svc.db.Model(&model.ReviewRun{}).Where("pr_number = 46").Count(&runs)
+	if runs != 0 {
+		t.Fatalf("歧义快照不得开轮: runs = %d", runs)
+	}
+	var deliveries int64
+	e.svc.db.Model(&model.GitHubWebhookDelivery{}).
+		Where("delivery_id = ?", deliveryLedgerKey(model.ForgeIntegrationBuiltinGitHubID, "d-tied")).
+		Count(&deliveries)
+	if deliveries != 0 {
+		t.Fatalf("瞬时失败不落账: deliveries = %d", deliveries)
+	}
+}
