@@ -8109,7 +8109,7 @@ webhook 密钥验签。验签密钥取部署级 GitHub App 身份（INT-129：�
 或不匹配 → 401（40107）。处理 pull_request 的 opened/synchronize/ready_for_review/reopened；
 draft 与 fork 一律 202 忽略。同时受理 issue_comment 的 created（INT-179 评论唤醒）：
 PR 顶层评论正文包含 `@fast-ship-bot`（大小写不敏感）时按评论唤醒开新一轮审查
-（trigger_action=comment，同 head 也恒开新轮）；编辑/删除动作与普通 Issue 评论
+（trigger_action=comment，同 head 也恒开新轮；同 head 已有在途审查时不重开）；编辑/删除动作与普通 Issue 评论
 202 忽略。仓库必须已与本部署的 Fast Ship 项目关联
 才会进入防抖/开轮。同一 `X-GitHub-Delivery` 幂等（重复投递返回 202 且
 不再开轮）。

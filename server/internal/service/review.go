@@ -204,7 +204,11 @@ const reviewTiedRevalidateMax = 4
 // 提交后踢循环两平台共用同一尾部。
 func (s *ReviewService) handlePlatformWebhook(ctx context.Context, integrationID, source, event, deliveryID string, body []byte) error {
 	var err error
-	if event == "issue_comment" {
+	if event == "issue_comment" || event == "pull_request_comment" {
+		// Forgejo 的 PR 评论由独立订阅项 Pull Request Comment 投递，事件名
+		// 随部署版本/形态可能是 pull_request_comment（字面名）或 issue_comment
+		// （Gitea 系 issue 评论同型），两个名字都进评论唤醒分支；GitHub 恒
+		// issue_comment（行内评论是另一个事件名，不会误入）。
 		err = s.handleCommentWake(ctx, integrationID, event, deliveryID, body)
 	} else {
 		err = s.runWebhookDeliveryTx(ctx, integrationID, event, deliveryID, body, "", nil)

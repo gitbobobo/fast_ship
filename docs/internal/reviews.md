@@ -181,25 +181,30 @@ seen SHA、取消旧轮全部失效）。
 
 ### 评论唤醒（INT-179，`review_comment_wake.go`）
 
-PR 顶层评论（`issue_comment` 事件）正文包含 `@fast-ship-bot`（大小写不敏感
-的包含判定）时也开一轮审查——审查结论有误时实现者回帖纠正即可唤醒审查
-者，不必推空提交。`handlePlatformWebhook` 按 event 名分流：`issue_comment`
-走独立的评论唤醒分支，不进 pull_request 触发事务；GitHub 与 Forgejo 的事件
-名同为 `issue_comment`（Forgejo 的 PR 评论由独立订阅项 **Pull Request
-Comment** 投递，事件头归一为 `issue_comment`），共用中性路径。**平台
-webhook 必须订阅 Issue comment 事件**，否则平台根本不投递：manifest 流
-创建的 GitHub App 已默认带上（`GitHubAppManifestService.Create` 的
-`default_events` 含 `issue_comment`），手动创建的 App 需自行勾选；Forgejo
-需勾 Pull Request Comment（见 forge-integrations.md 第 6 步）。
+PR 顶层评论正文包含 `@fast-ship-bot`（大小写不敏感的包含判定）时也开一轮
+审查——审查结论有误时实现者回帖纠正即可唤醒审查者，不必推空提交。
+`handlePlatformWebhook` 按 event 名分流：`issue_comment` 与
+`pull_request_comment` 都进独立的评论唤醒分支，不进 pull_request 触发事务
+（Forgejo 的 PR 评论由独立订阅项 **Pull Request Comment** 投递，事件名随
+部署版本/形态可能是任一者；GitHub 恒 `issue_comment`，行内评论是另一个
+事件名不会误入），共用中性路径。**平台 webhook 必须订阅 Issue comment
+事件**，否则平台根本不投递：manifest 流创建的 GitHub App 已默认带上
+（`GitHubAppManifestService.Create` 的 `default_events` 含
+`issue_comment`），手动创建的 App 需自行勾选；**升级到本版本的存量 App
+不受 manifest 影响**，需在 GitHub App 设置里手动补勾 Issue comment（服务
+端没有可改存量 App 订阅的 API）；Forgejo 需勾 Pull Request Comment
+（见 forge-integrations.md 第 6 步）。
 
 payload 两平台同形，只取最小字段面：`action`（只受理 `created`，编辑/删除
 不唤醒）、`issue.pull_request`（存在即 PR，普通 Issue 的评论忽略）、
 `issue.number`、`comment.body`、`repository.full_name`、`installation.id`。
 纯 payload 守卫（不碰库、不发网络）依次：action → mention → PR 归属；任一
 不过静默忽略，**不登记幂等账**——忽略判定完全由 payload 决定，重投再忽略
-一遍零副作用。**不做评论作者权限检查**：公开仓库上「任何人都能开 PR 触发
-审查」的暴露面已经存在，评论唤醒不引入新的暴露类别（INT-179 拍板的设计
-决策）。
+一遍零副作用。**不做评论作者权限检查**：能开 PR 的人（公开仓库任何人、
+私有仓库有读权限的协作者——GitHub 上开 PR 只需 read 访问）本来就能通过
+opened/ready_for_review 触发面开启审查，评论唤醒不引入新的暴露类别
+（INT-179 拍板的设计决策）。配合「同 head 已有在途审查不重开」守卫，
+连续点名也无法作废在途轮饿死审查。
 
 编排沿用「事务内零网络调用」铁律，两阶段（模式同 `revalidateTiedWebhook`）：
 
@@ -241,11 +246,14 @@ payload 两平台同形，只取最小字段面：`action`（只受理 `created`
 总账推进到 live head），不再按「账本不同」把唤醒永久锁死；窗口内被并发
 推进则是重试信号，不是忽略信号。
 
-触发语义等同 rerun 的 `manual`：**评论唤醒恒开新轮**，同 head 也新轮
+触发语义等同 rerun 的 `manual`：**评论唤醒开新轮**，同 head 也新轮
 （`nextReviewRoundTx` 对 `comment` 与 `manual` 同样跳过同 head 复用——否则
 组合唯一索引会吃掉运行行），`action` 落库为新值 `comment`；不写
-`review_seen_shas`、不走 `handleReviewTriggerTx`、不落防抖行。不在平台回
-帖确认（范围外）。成功后与主路径共用同一尾部：提交后非阻塞 kick 调度循环。
+`review_seen_shas`、不走 `handleReviewTriggerTx`、不落防抖行。例外：同
+head 已有在途审查（queued/dispatched/running）时不重开、不 supersede、
+不动防抖行——该 head 正在审，再点名是重复请求，防连续点名作废在途轮
+饿死审查；结论已出（终态运行）时照常开新轮重审。不在平台回帖确认（范
+围外）。成功后与主路径共用同一尾部：提交后非阻塞 kick 调度循环。
 
 投递本身也可能失败：GitHub 发出但没送达（公网隧道超时/502）时 GitHub App
 不会自动重试，这次推送就永远不会进入上面的任何一步。独立低频循环里的对账

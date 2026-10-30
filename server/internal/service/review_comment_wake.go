@@ -71,8 +71,11 @@ type commentWakePayload struct {
 // （issue.pull_request 存在 + 仓库/编号可用）。任一不过返回 nil——忽略判定
 // 完全由 payload 决定，不登记幂等账：忽略类投递重投再忽略一遍，零副作用。
 // 启用项目反查在最终事务内做（见 handleCommentWake 阶段二），这里不预查。
-// 不做评论作者权限检查：公开仓库上「任何人都能开 PR 触发审查」的暴露面已经
-// 存在，评论唤醒不引入新的暴露类别（INT-179 拍板的设计决策）。
+// 不做评论作者权限检查：能开 PR 的人（公开仓库任何人；私有仓库有读权
+// 限的协作者——GitHub 上开 PR 只需 read 访问）本来就能通过
+// opened/ready_for_review 触发面开启审查，评论唤醒不引入新的暴露类别
+// （INT-179 拍板的设计决策）；配合「同 head 已有在途审查不重开」守卫，
+// 连续点名也无法作废在途轮饿死审查。
 func commentWakePayloadGuards(body []byte) *commentWakePayload {
 	var p commentWakePayload
 	if err := json.Unmarshal(body, &p); err != nil {
@@ -334,6 +337,26 @@ func (s *ReviewService) openCommentWakeRoundTx(ctx context.Context, integrationI
 			return nil
 		}
 		if !prReviewable(pr) || pr.Draft || pr.HeadSHA == "" {
+			return nil
+		}
+		// 同 head 已有在途审查（queued/dispatched/running）：该 head 正在
+		// 审，再点名是重复请求——不重开（否则两次点名互相作废在途轮，
+		// 公开仓库可被连续点名饿死审查）。结论已出的轮不受影响：终态运行
+		// 不计入在途，照常开新轮重审；在途运行停留在旧 head 上时也照常
+		// supersede 重开。
+		var active int64
+		if err := tx.Model(&model.ReviewRun{}).
+			Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ? AND head_sha = ? AND status IN ?",
+				project.ID, repo, prNumber, integrationID, pr.HeadSHA,
+				[]model.ReviewRunStatus{model.ReviewRunQueued, model.ReviewRunDispatched, model.ReviewRunRunning}).
+			Count(&active).Error; err != nil {
+			return err
+		}
+		if active > 0 {
+			s.logger.Info("同 head 已有在途审查，评论唤醒不重开",
+				zap.String("integration", integrationID),
+				zap.String("repo", repo), zap.Int("pr", prNumber),
+				zap.String("head", pr.HeadSHA))
 			return nil
 		}
 		// 恒开新轮：取消在途（含排队）、删防抖行（旧轮不得再开火），按

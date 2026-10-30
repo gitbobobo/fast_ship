@@ -124,9 +124,11 @@ func TestReviewCommentWakeOpensRound(t *testing.T) {
 	}
 }
 
-// TestReviewCommentWakeAlwaysNewRound 恒开新轮：同 head 已有第 1 轮（已受理
-// 的推送触发）时评论唤醒开第 2 轮，并取消第 1 轮在途运行；评论前残留的未
-// 到期防抖行被删除——旧推送的防抖不再开火，只留下 comment 轮。
+// TestReviewCommentWakeAlwaysNewRound 同 head 唤醒的两种形态：同 head 有
+// 在途轮时不重开（防连续点名作废在途审查），也不动未到期防抖行；第 1 轮
+// 出结论后评论唤醒开第 2 轮（trigger_action=comment，同 head 也新轮），
+// 评论前残留的未到期防抖行被删除——旧推送的防抖不再开火，只留下
+// comment 轮。
 func TestReviewCommentWakeAlwaysNewRound(t *testing.T) {
 	e := newReviewEngineEnv(t)
 	e.enableReview(t)
@@ -165,22 +167,39 @@ func TestReviewCommentWakeAlwaysNewRound(t *testing.T) {
 		t.Fatalf("seed debounce: %v", err)
 	}
 
-	// 同 head 评论唤醒：开第 2 轮，第 1 轮在途运行被取消（superseded）。
+	// 同 head 已有在途第 1 轮：评论唤醒不重开（两次点名互相作废在途轮、
+	// 公开仓库可被连续点名饿死审查），也不动未到期防抖行；投递记幂等账
+	// （确定跳过，重投按 202 去重）。
 	if err := review.HandleGitHubWebhook(ctx, "issue_comment", "d-r2",
 		issueCommentBody("@fast-ship-bot 再看一眼", repo, 22, 42)); err != nil {
-		t.Fatalf("comment wake: %v", err)
+		t.Fatalf("comment wake 1: %v", err)
+	}
+	var stillActive int64
+	e.svc.db.Model(&model.ReviewRun{}).
+		Where("repo_full_name = ? AND pr_number = 22 AND status IN ?", repo,
+			[]model.ReviewRunStatus{model.ReviewRunQueued, model.ReviewRunDispatched, model.ReviewRunRunning}).
+		Count(&stillActive)
+	if stillActive != 1 {
+		t.Fatalf("在途同 head 轮不应被作废，active = %d", stillActive)
+	}
+	if got := e.debounceCount(t); got != 1 {
+		t.Fatalf("跳过路径不得动防抖行，剩 %d", got)
+	}
+
+	// 第 1 轮出结论（置终态）后评论唤醒：同 head 无在途 → 开第 2 轮。
+	if err := e.svc.db.Model(&model.ReviewRun{}).
+		Where("repo_full_name = ? AND pr_number = 22", repo).
+		Updates(map[string]any{"status": model.ReviewRunCompleted, "finished_at": now.Add(3 * time.Minute)}).Error; err != nil {
+		t.Fatalf("complete round1: %v", err)
+	}
+	if err := review.HandleGitHubWebhook(ctx, "issue_comment", "d-r3",
+		issueCommentBody("@fast-ship-bot 结论有误，请重审", repo, 22, 42)); err != nil {
+		t.Fatalf("comment wake 2: %v", err)
 	}
 	var round2 []model.ReviewRun
 	e.svc.db.Where("repo_full_name = ? AND pr_number = 22 AND round_number = 2", repo).Find(&round2)
 	if len(round2) != 1 || round2[0].TriggerAction != "comment" || round2[0].HeadSHA != "sha-same" {
 		t.Fatalf("第 2 轮未按 comment 开出: %+v", round2)
-	}
-	var old model.ReviewRun
-	if err := e.svc.db.Where("id = ?", round1[0].ID).First(&old).Error; err != nil {
-		t.Fatalf("round1 run: %v", err)
-	}
-	if old.Status != model.ReviewRunCancelled || old.ErrorCode != "superseded" {
-		t.Fatalf("旧轮未取消: status=%s err=%s", old.Status, old.ErrorCode)
 	}
 	if got := e.debounceCount(t); got != 0 {
 		t.Fatalf("未到期防抖行应随唤醒删除，剩 %d", got)
@@ -286,8 +305,13 @@ func TestReviewCommentWakeGuards(t *testing.T) {
 		issueCommentBody("麻烦 @Fast-Ship-BOT 复审", repo, 25, 42)); err != nil {
 		t.Fatalf("upper mention: %v", err)
 	}
-	// 人类引用/摘录机器人评论片段（marker 落在正文中间）不误杀：前缀
-	// 匹配只拦 marker 开头的整条机器评论。
+	// 人类引用/摘录机器人评论片段（marker 落在正文中间）不误杀：先把
+	// 上一轮置终态（否则同 head 在途守卫会跳过），再断言开新轮。
+	if err := e.svc.db.Model(&model.ReviewRun{}).
+		Where("pr_number = 25").
+		Updates(map[string]any{"status": model.ReviewRunCompleted, "finished_at": time.Now().UTC()}).Error; err != nil {
+		t.Fatalf("complete: %v", err)
+	}
 	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-g-quote",
 		issueCommentBody("引用机器人结论片段 <!-- fast-ship-code-review --> 后 @fast-ship-bot 请再审", repo, 25, 42)); err != nil {
 		t.Fatalf("quote marker: %v", err)
@@ -798,15 +822,31 @@ func TestReviewCommentWakeForgejoIntegration(t *testing.T) {
 	if err := review.HandleForgejoWebhook(context.Background(), forgeID, "issue_comment", "d-fj", body); err != nil {
 		t.Fatalf("forgejo wake: %v", err)
 	}
-	// 空代码组合不产生 run 行；开轮以账本推进（新轮 + sync_pending）为准。
+	// Forgejo 的评论投递事件名随部署形态也可能是字面名 pull_request_comment，
+	// 两个名字都进评论唤醒分支：换事件名再点名（无代码组合 → 无运行，
+	// 不触发同 head 在途守卫），账本推进到第 2 轮。
+	body2 := issueCommentBody("@fast-ship-bot 再看一眼", "acme/app", 61, -1)
+	if err := review.HandleForgejoWebhook(context.Background(), forgeID, "pull_request_comment", "d-fj2", body2); err != nil {
+		t.Fatalf("forgejo wake (pull_request_comment): %v", err)
+	}
+	// 空代码组合不产生 run 行；开轮以账本推进（sync_pending）为准。两次
+	// 事件名都各自开轮：无运行行时轮次号都从 1 重算（1+max(empty)），
+	// 断言两次投递都落了幂等账 + 账本最终 pending 在 sha-fj 上。
 	var ledger model.ReviewPullRequest
 	if err := svc.db.Where("project_id = ? AND integration_id = ? AND pr_number = ?",
 		project.ID, forgeID, 61).First(&ledger).Error; err != nil {
 		t.Fatalf("ledger: %v", err)
 	}
-	if !ledger.SyncPending || ledger.HeadSHA != "sha-fj" || ledger.RoundNumber != 1 {
+	if !ledger.SyncPending || ledger.HeadSHA != "sha-fj" {
 		t.Fatalf("账本未按 comment 开轮: pending=%v head=%s round=%d",
 			ledger.SyncPending, ledger.HeadSHA, ledger.RoundNumber)
+	}
+	var fjDeliveries int64
+	svc.db.Model(&model.GitHubWebhookDelivery{}).
+		Where("delivery_id IN ?", []string{deliveryLedgerKey(forgeID, "d-fj"), deliveryLedgerKey(forgeID, "d-fj2")}).
+		Count(&fjDeliveries)
+	if fjDeliveries != 2 {
+		t.Fatalf("两个事件名的投递都应受理，幂等账 = %d 行", fjDeliveries)
 	}
 	if ledger.InstallationID != 0 {
 		t.Fatalf("Forgejo 无安装语义, installation = %d", ledger.InstallationID)
