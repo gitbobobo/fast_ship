@@ -515,8 +515,11 @@ func (e *t3ShellEntry) resetArchiveModeToUnknown() {
 		// 同数据落地后指纹与宣布基准一致照旧静默——浏览器无需为这个
 		// 过渡窗口整环境重取；落地失败则失败路径经指纹比对发 State。
 		// 已不可信的面（失败/已失效）重撤是 no-op，保留更准确的既有文案。
-		// 离开订阅模式：关闭「移除即登记待对账」（#156 R5）。
+		// 离开订阅模式：关闭「移除即登记待对账」并清空遗留条目（#156 R5/R8-2）。
+		// 遗留条目既没有定时器清理（调度在 hub 帧后回调里），又会让后续订阅
+		// 快照永远报 stale；按需快照路径的可信由 TTL 簿记负责。
 		e.state.armArchiveUncertainLocked(false, 0)
+		e.state.clearArchiveMembershipUncertainLocked()
 		e.state.noteArchiveExpiredLocked()
 		reset = true
 	}
@@ -620,7 +623,7 @@ func (h *t3ShellHub) InvalidateArchive(userID, envID string) {
 // ArchiveErr 仍为 nil，并发 bot wait 会把「活跃面与归档面都没有」当成可信
 // 结论而误判 thread_gone。标记只影响可信度（旧行保留），下一次订阅数据
 // 落地（增量或快照）即恢复，不必清表重连。
-func (h *t3ShellHub) invalidateArchiveEntryAfterActiveRemoval(e *t3ShellEntry, leftIDs []string) {
+func (h *t3ShellHub) invalidateArchiveEntryAfterActiveRemoval(e *t3ShellEntry, leftIDs, armedRegisteredIDs []string) {
 	e.arch.mu.Lock()
 	legacy := e.arch.mode == t3ArchiveModeLegacy
 	e.arch.mu.Unlock()
@@ -628,14 +631,14 @@ func (h *t3ShellHub) invalidateArchiveEntryAfterActiveRemoval(e *t3ShellEntry, l
 		// 按线程 ID 记账（Codex #156 R1）：只有这些线程自己的归档增量（或
 		// 权威快照）能解除不确定，无关线程的增量不算对账；settle 上界用
 		// 与撤可信一致的宽限（线程可能是被彻底删除，归档面不会有增量）。
-		armed := e.state.archiveUncertainArmedNow()
-		pending, _ := e.state.noteArchiveMembershipUncertain(leftIDs, e.archiveStaleGrace)
-		if pending == 0 && !armed {
+		// 只登记「未由 armed 路径登记」的 ID（#156 R7/R8）：已登记过的再登记会
+		// 把已被归档流对账的 ID 重新打回待对账（白 stale 一个宽限窗口），而
+		// 完全跳过又会漏掉「帧应用发生在 arm 之前」的移除。
+		todo := t3IDsNotIn(leftIDs, armedRegisteredIDs)
+		pending, _ := e.state.noteArchiveMembershipUncertain(todo, e.archiveStaleGrace)
+		if pending == 0 && len(armedRegisteredIDs) == 0 {
 			return
 		}
-		// armed 时登记已在应用移除的同一临界区完成（上面对登记是 no-op）：
-		// 这里只负责发布降级事件与调度到期清理（#156 R7——若再登记，会把
-		// 已被归档流对账的 ID 重新打回待对账，白 stale 一个宽限窗口）。
 		// 发布交给指纹去重（#156 R5）：armed 状态下标记已在应用移除的同一
 		// 临界区里置好，这里的 flipped 会是 false，但宣布基准（archAnnounced）
 		// 还没更新——若不发布，浏览器收不到降级事件，到期恢复也会因指纹相同
@@ -654,6 +657,29 @@ func (h *t3ShellHub) invalidateArchiveEntryAfterActiveRemoval(e *t3ShellEntry, l
 		return
 	}
 	h.invalidateArchiveEntry(e)
+}
+
+// t3IDsNotIn 返回 ids 里不在 done 中的 ID（保序、去空）：用于「只登记未由
+// armed 路径处理过的移除」（#156 R7/R8）。
+func t3IDsNotIn(ids, done []string) []string {
+	if len(done) == 0 {
+		return ids
+	}
+	skip := make(map[string]struct{}, len(done))
+	for _, id := range done {
+		skip[id] = struct{}{}
+	}
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		if _, ok := skip[id]; ok {
+			continue
+		}
+		out = append(out, id)
+	}
+	return out
 }
 
 // scheduleArchiveMembershipSettle 在宽限到期时清理「归属待对账」并发布可信度

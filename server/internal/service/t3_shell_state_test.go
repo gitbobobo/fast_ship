@@ -1037,19 +1037,19 @@ func TestShellState_AuthoritativeSnapshotRemovalsTracked(t *testing.T) {
 	}
 
 	// 集合未变的快照：无移除。
-	removed, err := state.applyActiveItemTracked(shellTestAuthoritative(8, projects, shellTestThreads(shellTestThread("th-1", "一"), shellTestThread("th-2", "二"))))
+	removed, _, err := state.applyActiveItemTracked(shellTestAuthoritative(8, projects, shellTestThreads(shellTestThread("th-1", "一"), shellTestThread("th-2", "二"))))
 	if err != nil || len(removed) != 0 {
 		t.Fatalf("identical snapshot must track no removals, got %v (err %v)", removed, err)
 	}
 
 	// 元数据帧：无移除（不是权威数据）。
-	removed, err = state.applyActiveItemTracked(shellTestEnrichment(9, projects))
+	removed, _, err = state.applyActiveItemTracked(shellTestEnrichment(9, projects))
 	if err != nil || len(removed) != 0 {
 		t.Fatalf("enrichment frame must track no removals, got %v (err %v)", removed, err)
 	}
 
 	// 全量快照丢掉 th-2（断连窗口里被别的客户端归档）：移除集须含 th-2。
-	removed, err = state.applyActiveItemTracked(shellTestAuthoritative(10, projects, shellTestThreads(shellTestThread("th-1", "一"))))
+	removed, _, err = state.applyActiveItemTracked(shellTestAuthoritative(10, projects, shellTestThreads(shellTestThread("th-1", "一"))))
 	if err != nil {
 		t.Fatalf("apply shrinking snapshot: %v", err)
 	}
@@ -1353,7 +1353,7 @@ func TestShellState_ArmedRemovalMarksUncertainAtomically(t *testing.T) {
 	}
 	// 活跃面先有一行；随后权威快照替换掉它（removed 集）。
 	seq1 := 1
-	if _, err := state.applyActiveItemTracked(t3ShellStreamItem{
+	if _, _, err := state.applyActiveItemTracked(t3ShellStreamItem{
 		Kind: "snapshot", Snapshot: &t3ShellSnapshot{SchemaVersion: 1, SnapshotSequence: 1, Threads: shellTestThreads(shellTestThread("th-1", "线程"))},
 	}); err != nil {
 		t.Fatalf("seed active: %v", err)
@@ -1362,7 +1362,7 @@ func TestShellState_ArmedRemovalMarksUncertainAtomically(t *testing.T) {
 	state.armArchiveUncertain(true, time.Minute)
 
 	seq2 := 2
-	if _, err := state.applyActiveItemTracked(t3ShellStreamItem{
+	if _, _, err := state.applyActiveItemTracked(t3ShellStreamItem{
 		Kind: "snapshot", Snapshot: &t3ShellSnapshot{SchemaVersion: 1, SnapshotSequence: seq2, Threads: shellTestThreads()},
 	}); err != nil {
 		t.Fatalf("apply snapshot removal: %v", err)
@@ -1380,12 +1380,12 @@ func TestShellState_ArmedRemovalMarksUncertainAtomically(t *testing.T) {
 		state2.archiveGenerationNow(), nil); !applied || err != nil {
 		t.Fatalf("seed archive2: %v", err)
 	}
-	if _, err := state2.applyActiveItemTracked(t3ShellStreamItem{
+	if _, _, err := state2.applyActiveItemTracked(t3ShellStreamItem{
 		Kind: "snapshot", Snapshot: &t3ShellSnapshot{SchemaVersion: 1, SnapshotSequence: 1, Threads: shellTestThreads(shellTestThread("th-1", "线程"))},
 	}); err != nil {
 		t.Fatalf("seed active2: %v", err)
 	}
-	if _, err := state2.applyActiveItemTracked(t3ShellStreamItem{
+	if _, _, err := state2.applyActiveItemTracked(t3ShellStreamItem{
 		Kind: "snapshot", Snapshot: &t3ShellSnapshot{SchemaVersion: 1, SnapshotSequence: 2, Threads: shellTestThreads()},
 	}); err != nil {
 		t.Fatalf("apply snapshot removal2: %v", err)
@@ -1406,7 +1406,7 @@ func TestShellState_RemovalDuringLegacySwitchIsRecorded(t *testing.T) {
 		gen, nil); !applied || err != nil {
 		t.Fatalf("seed archive: %v", err)
 	}
-	if _, err := state.applyActiveItemTracked(t3ShellStreamItem{
+	if _, _, err := state.applyActiveItemTracked(t3ShellStreamItem{
 		Kind: "snapshot", Snapshot: &t3ShellSnapshot{SchemaVersion: 1, SnapshotSequence: 1, Threads: shellTestThreads(shellTestThread("th-1", "线程"))},
 	}); err != nil {
 		t.Fatalf("seed active: %v", err)
@@ -1419,7 +1419,7 @@ func TestShellState_RemovalDuringLegacySwitchIsRecorded(t *testing.T) {
 	state.mu.Unlock()
 
 	// 面不可信期间发生移除：必须记账（否则快照恢复可信后无人再提它）。
-	if _, err := state.applyActiveItemTracked(t3ShellStreamItem{
+	if _, _, err := state.applyActiveItemTracked(t3ShellStreamItem{
 		Kind: "thread.removed", Sequence: intPtrTestLocal(2), ThreadID: "th-1",
 	}); err != nil {
 		t.Fatalf("apply removal: %v", err)
@@ -1449,26 +1449,61 @@ func TestShellState_RemovalDuringLegacySwitchIsRecorded(t *testing.T) {
 // intPtrTestLocal 是测试内的小工具：取整型地址。
 func intPtrTestLocal(v int) *int { return &v }
 
-// 已被归档流对账的移除不得被重复登记（#156 R7）：armed 模式下登记发生在应用
-// 移除的临界区；归档流的 thread.removed 若先到并清掉标记，hub 的帧后回调不得
-// 再把它打回待对账，否则归档面白 stale 一个宽限窗口，wait 会误报 watch_degraded。
-func TestShellState_ArmedModeDoesNotReregisterReconciledRemoval(t *testing.T) {
+// arm 之后补登记：帧应用发生在 arm 之前时，armed 路径没登记过，帧后回调必须
+// 补上（#156 R8-1）。按全局 armed 标志一刀切会漏掉这些 ID。
+func TestShellState_RegistrationAfterArmCoversEarlierRemoval(t *testing.T) {
 	state := newT3ShellState()
-	gen := state.archiveGenerationNow()
 	if applied, err := state.applyArchiveSnapshot(
 		t3ArchivedShellSnapshot{SchemaVersion: 1, SnapshotSequence: 1, Threads: shellTestThreads(shellTestThread("th-a", "归档"))},
-		gen, nil); !applied || err != nil {
+		state.archiveGenerationNow(), nil); !applied || err != nil {
 		t.Fatalf("seed archive: %v", err)
 	}
-	if _, err := state.applyActiveItemTracked(t3ShellStreamItem{
+	if _, _, err := state.applyActiveItemTracked(t3ShellStreamItem{
+		Kind: "snapshot", Snapshot: &t3ShellSnapshot{SchemaVersion: 1, SnapshotSequence: 1, Threads: shellTestThreads(shellTestThread("th-1", "线程"))},
+	}); err != nil {
+		t.Fatalf("seed active: %v", err)
+	}
+
+	// 帧应用发生在 arm 之前：armed 路径没记账（未 armed）。
+	removed, armedRegistered, err := state.applyActiveItemTracked(t3ShellStreamItem{
+		Kind: "thread.removed", Sequence: intPtrTestLocal(2), ThreadID: "th-1",
+	})
+	if err != nil {
+		t.Fatalf("apply removal: %v", err)
+	}
+	if armedRegistered || len(removed) != 0 {
+		t.Fatalf("unarmed apply must not self-register, removed=%v armed=%v", removed, armedRegistered)
+	}
+	if snaps := state.snapshots(); snaps.ArchiveErr != nil {
+		t.Fatalf("unarmed state must not be stale yet, got %v", snaps.ArchiveErr)
+	}
+
+	// arm 之后、帧后回调补登记：必须真的登记（不能因 armed 而跳过）。
+	state.armArchiveUncertain(true, time.Minute)
+	if pending, flipped := state.noteArchiveMembershipUncertain([]string{"th-1"}, time.Minute); pending != 1 || !flipped {
+		t.Fatalf("post-callback registration must cover pre-arm removals, got pending=%d flipped=%v", pending, flipped)
+	}
+	if snaps := state.snapshots(); !errors.Is(snaps.ArchiveErr, errT3ShellArchiveStale) {
+		t.Fatalf("face must become stale, got %v", snaps.ArchiveErr)
+	}
+}
+
+// 离开订阅模式必须清空待对账集合（#156 R8-2）：这些条目没有定时器（调度在 hub
+// 帧后回调里，可能被模式翻转绕过），留着会让后续订阅快照永远报 stale。
+func TestShellState_ResetClearsPendingUncertain(t *testing.T) {
+	state := newT3ShellState()
+	if applied, err := state.applyArchiveSnapshot(
+		t3ArchivedShellSnapshot{SchemaVersion: 1, SnapshotSequence: 1, Threads: shellTestThreads(shellTestThread("th-a", "归档"))},
+		state.archiveGenerationNow(), nil); !applied || err != nil {
+		t.Fatalf("seed archive: %v", err)
+	}
+	if _, _, err := state.applyActiveItemTracked(t3ShellStreamItem{
 		Kind: "snapshot", Snapshot: &t3ShellSnapshot{SchemaVersion: 1, SnapshotSequence: 1, Threads: shellTestThreads(shellTestThread("th-1", "线程"))},
 	}); err != nil {
 		t.Fatalf("seed active: %v", err)
 	}
 	state.armArchiveUncertain(true, time.Minute)
-
-	// armed 路径登记（应用移除时）。
-	if _, err := state.applyActiveItemTracked(t3ShellStreamItem{
+	if _, _, err := state.applyActiveItemTracked(t3ShellStreamItem{
 		Kind: "thread.removed", Sequence: intPtrTestLocal(2), ThreadID: "th-1",
 	}); err != nil {
 		t.Fatalf("apply removal: %v", err)
@@ -1477,21 +1512,23 @@ func TestShellState_ArmedModeDoesNotReregisterReconciledRemoval(t *testing.T) {
 		t.Fatalf("armed removal must mark uncertainty, got %v", snaps.ArchiveErr)
 	}
 
-	// 归档流的同名移除先到：对账完成，恢复可信。
-	if err := state.applyArchiveItem(t3ArchiveStreamItem{
-		Kind: "thread.removed", Sequence: intPtrTestLocal(3), ThreadID: "th-1",
-	}, 0); err != nil {
-		t.Fatalf("apply archive removal: %v", err)
-	}
-	if snaps := state.snapshots(); snaps.ArchiveErr != nil {
-		t.Fatalf("archive delta reconciles the removal, got %v", snaps.ArchiveErr)
-	}
+	// 走生产路径 resetArchiveModeToUnknown（切回按需快照）：必须关掉登记并清空
+	// 遗留条目——它们没有定时器，留着会让后续订阅快照永远报 stale。
+	hub := newT3ShellHubWithConfig(hubTestConfig(), nil)
+	defer hub.Close()
+	entry := &t3ShellEntry{hub: hub, state: state, envID: "env-1", archiveStaleGrace: time.Minute, archTTL: time.Minute}
+	entry.arch.mu.Lock()
+	entry.arch.mode = t3ArchiveModeLegacy
+	entry.arch.mu.Unlock()
+	entry.resetArchiveModeToUnknown()
 
-	// hub 的帧后回调（armed 模式下对登记是 no-op）：不得再打回待对账。
-	if pending, _ := state.noteArchiveMembershipUncertain([]string{"th-1"}, time.Minute); pending != 0 {
-		t.Fatalf("reconciled removal must not be re-registered, got pending=%d", pending)
+	// 下一次订阅快照（不含 th-1）落地后必须恢复可信，而不是永远 stale。
+	if err := state.applyArchiveItem(t3ArchiveStreamItem{
+		Kind: "snapshot", Snapshot: &t3ArchivedShellSnapshot{SchemaVersion: 1, SnapshotSequence: 2, Threads: shellTestThreads(shellTestThread("th-a", "归档"))},
+	}, 0); err != nil {
+		t.Fatalf("apply snapshot: %v", err)
 	}
 	if snaps := state.snapshots(); snaps.ArchiveErr != nil {
-		t.Fatalf("face must stay trusted after a no-op registration, got %v", snaps.ArchiveErr)
+		t.Fatalf("cleared pending set must not keep the face stale, got %v", snaps.ArchiveErr)
 	}
 }
