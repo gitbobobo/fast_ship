@@ -480,7 +480,7 @@ func (s *t3ShellState) applyArchiveSnapshotAt(snapshot t3ArchivedShellSnapshot, 
 	// 快照本身可能晚于 floor（订阅往返期间发生的移除会把 floor 推到
 	// connStartAt 之后），此时它包含全部待对账 ID 就足以证明是变更后采样
 	// （#156 R35）：否则批量移除期间会无差别拒收、反复断连重拨。
-	if !observedAt.IsZero() && observedAt.Before(s.archiveFreshnessFloor) && !(len(s.archiveUncertain) > 0 && snapshotCoversUncertain(snapshot, s.archiveUncertain)) {
+	if !observedAt.IsZero() && observedAt.Before(s.archiveFreshnessFloor) {
 		// 采集早于最近一次归属变更（#156 R28）：这是变更前状态，只换数据不封窗，
 		// 由之后采到的快照或下一次到期恢复可信。
 		s.archiveReady = false
@@ -659,10 +659,7 @@ func (s *t3ShellState) applyArchiveSnapshotLocked(snapshot t3ArchivedShellSnapsh
 	// 权威快照只对账它**确实包含**的线程（#156 R6）：命中的 ID 成员关系已定；
 	// 未命中的仍可能「被归档但增量还在队列里」，或「被彻底删除」——交给
 	// 各自的到期时刻兜底，不能因为快照没包含它们就断言不存在。
-	// 覆盖全部待对账 = 采集必在那些移除之后（#156 R37）：结算与下面的 floor
-	// 裁决都用同一判定——注意必须在删除待对账**之前**算，否则一次结算就把
-	// 「覆盖」算成「空集合」。
-	covering := snapshotCoversUncertain(snapshot, s.archiveUncertain)
+
 	if len(s.archiveUncertain) > 0 {
 		incoming := make(map[string]struct{}, len(snapshot.Threads))
 		for i := range snapshot.Threads {
@@ -674,7 +671,7 @@ func (s *t3ShellState) applyArchiveSnapshotLocked(snapshot t3ArchivedShellSnapsh
 			}
 			// 只有**晚于登记时刻**采集的快照才算对账证据（#156 R16）：重连快照
 			// 可能在移除之前就采好、之后才送达。
-			if since, ok := s.archiveUncertainSince[id]; ok && observedAt.Before(since) && !covering {
+			if since, ok := s.archiveUncertainSince[id]; ok && observedAt.Before(since) {
 				continue
 			}
 			delete(s.archiveUncertain, id)
@@ -697,10 +694,10 @@ func (s *t3ShellState) applyArchiveSnapshotLocked(snapshot t3ArchivedShellSnapsh
 	// 快照包含全部待对账 ID 即证明它是变更后采样（#156 R37）：订阅路径的
 	// observedAt 只是连接发起时刻（下界），往返期间的移除会把 floor 推到它
 	// 之后——不豁免的话，批量归档期间每次快照都会被拒并触发重连风暴。
-	if !observedAt.IsZero() && observedAt.Before(s.archiveFreshnessFloor) && !covering {
-		// 变更前快照被拒之后要主动重连取新全量（#156 R29）：否则这条连接
-		// 不会再有写后快照，面只能等到期，catch-up 期间读一直 degraded。
-		s.noteArchiveReconnectRequestedLocked()
+	if !observedAt.IsZero() && observedAt.Before(s.archiveFreshnessFloor) {
+		// 变更前快照：只换数据不封窗（#156 R28）。**不**在这里请求重连（#156 R38）：
+		// 批量归档期间 floor 会被频繁推后，重连风暴比多等一个宽限更糟；恢复靠
+		// 之后的自然快照、归档增量落地或宽限到期。
 		return nil
 	}
 	// 邮戳 ≥ 备忘世代：权威全量快照即是重连取写后状态的完成——置可信
@@ -951,24 +948,6 @@ func (s *t3ShellState) armArchiveUncertain(armed bool, settle time.Duration) {
 func (s *t3ShellState) armArchiveUncertainLocked(armed bool, settle time.Duration) {
 	s.archiveUncertainArmed = armed
 	s.archiveUncertainSettle = settle
-}
-
-// snapshotCoversUncertain 判断快照是否包含全部待对账 ID（#156 R35）：包含即
-// 说明它是在那些移除之后采样的，可以据此解账，不必因为采集时刻下界更早就拒收。
-func snapshotCoversUncertain(snapshot t3ArchivedShellSnapshot, uncertain map[string]time.Time) bool {
-	if len(uncertain) == 0 {
-		return true
-	}
-	incoming := make(map[string]struct{}, len(snapshot.Threads))
-	for i := range snapshot.Threads {
-		incoming[snapshot.Threads[i].ID] = struct{}{}
-	}
-	for id := range uncertain {
-		if _, ok := incoming[id]; !ok {
-			return false
-		}
-	}
-	return true
 }
 
 // noteArchiveMembershipSettledLocked 撤掉某个线程的不确定标记（调用方须持

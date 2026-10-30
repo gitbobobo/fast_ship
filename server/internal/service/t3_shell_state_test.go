@@ -1997,10 +1997,9 @@ func TestShellState_ExcludeActiveThreads(t *testing.T) {
 	}
 }
 
-// 订阅路径同样要豁免「覆盖全部待对账」的快照（#156 R37）：observedAt 只是连接
-// 发起时刻的下界，往返期间的移除会把 floor 推到它之后；不豁免就会批量归档时
-// 反复拒收并触发重连风暴。
-func TestShellState_StreamSnapshotCoveringUncertainSkipsFloor(t *testing.T) {
+// 订阅路径：变更前采集的快照（observedAt 早于 floor）只换数据、不能封窗，
+// 也不再请求重连（#156 R38：批量归档期间重连风暴比多等一个宽限更糟）。
+func TestShellState_StreamPrestaleSnapshotDoesNotReconnect(t *testing.T) {
 	state := newT3ShellState()
 	if applied, err := state.applyArchiveSnapshot(
 		t3ArchivedShellSnapshot{SchemaVersion: 1, SnapshotSequence: 1, Threads: shellTestThreads(shellTestThread("th-a", "归档"))},
@@ -2018,17 +2017,16 @@ func TestShellState_StreamSnapshotCoveringUncertainSkipsFloor(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("apply removal: %v", err)
 	}
-	// 采集时刻早于 floor，但快照覆盖了待对账的 th-1。
 	if err := state.applyArchiveItemAt(t3ArchiveStreamItem{
 		Kind: "snapshot", Sequence: intPtrTestLocal(3),
 		Snapshot: &t3ArchivedShellSnapshot{SchemaVersion: 1, SnapshotSequence: 3, Threads: shellTestThreads(shellTestThread("th-1", "归档"))},
 	}, 0, time.Now().Add(-time.Second)); err != nil {
 		t.Fatalf("apply stream snapshot: %v", err)
 	}
-	if snaps := state.snapshots(); snaps.ArchiveErr != nil {
-		t.Fatalf("a covering snapshot must settle, got %v", snaps.ArchiveErr)
+	if snaps := state.snapshots(); !errors.Is(snaps.ArchiveErr, errT3ShellArchiveStale) {
+		t.Fatalf("prestale snapshot must not be trusted, got %v", snaps.ArchiveErr)
 	}
 	if gen := state.archiveReconnectTarget(); gen != 0 {
-		t.Fatalf("covering snapshot must not request reconnect, got gen=%d", gen)
+		t.Fatalf("prestale snapshot must not force a reconnect, got gen=%d", gen)
 	}
 }
