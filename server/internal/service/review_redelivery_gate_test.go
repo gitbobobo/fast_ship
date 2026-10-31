@@ -518,9 +518,11 @@ func TestRedeliveryGateDraftPRSkipped(t *testing.T) {
 func TestRedeliveryGateCachedMentionsRetrySlugOnly(t *testing.T) {
 	env := newReviewEngineEnv(t)
 	env.enableReview(t)
-	env.review.appSource = stubAppSource{cfg: GitHubAppConfig{AppSlug: "Fast-Ship-Demo"}}
+	// 部署已切换到新句柄：缓存窗口内还是旧句柄，payload 用新句柄——只有
+	// 走到 fresh 复核（刷新后命中新句柄）才会被捡回重投。
+	env.review.appSource = stubAppSource{cfg: GitHubAppConfig{AppSlug: "Fresh-Slug"}}
 
-	// 先走一次唤醒判定把 slug 写进缓存（5 分钟窗口）。
+	// 先走一次唤醒判定把旧 slug 写进缓存（5 分钟窗口）。
 	if _, _, err := env.review.commentWakeMentions(context.Background()); err != nil {
 		t.Fatalf("预热缓存: %v", err)
 	}
@@ -528,6 +530,7 @@ func TestRedeliveryGateCachedMentionsRetrySlugOnly(t *testing.T) {
 	base := redeliveryTestNow.Add(-time.Hour)
 	env.fake.SetHookDeliveries([]githubapp.HookDelivery{
 		hookRow(8101, "guid-cw-slug-cached", "issue_comment", "created", 500, false, base),
+		hookRow(8102, "guid-cw-slug-miss", "issue_comment", "created", 500, false, base),
 	})
 	env.fake.SetHookDeliveryPayload(8101, func() json.RawMessage {
 		body, err := json.Marshal(map[string]any{
@@ -536,7 +539,25 @@ func TestRedeliveryGateCachedMentionsRetrySlugOnly(t *testing.T) {
 				"number":       7,
 				"pull_request": map[string]any{"url": "https://github.com/owner/repo/pulls/7"},
 			},
-			"comment":      map[string]any{"body": "@fast-ship-demo 请再审一轮", "author_association": "OWNER"},
+			"comment":      map[string]any{"body": "@fresh-slug 请再审一轮", "author_association": "OWNER"},
+			"repository":   map[string]any{"full_name": "owner/repo"},
+			"installation": map[string]any{"id": 1},
+		})
+		if err != nil {
+			panic(err)
+		}
+		return body
+	}())
+	// fresh 复核仍不命中（@unknown-x 不在刷新后的集合里）：确定的非唤醒，
+	// 记终态。
+	env.fake.SetHookDeliveryPayload(8102, func() json.RawMessage {
+		body, err := json.Marshal(map[string]any{
+			"action": "created",
+			"issue": map[string]any{
+				"number":       7,
+				"pull_request": map[string]any{"url": "https://github.com/owner/repo/pulls/7"},
+			},
+			"comment":      map[string]any{"body": "@unknown-x 帮忙看下", "author_association": "OWNER"},
 			"repository":   map[string]any{"full_name": "owner/repo"},
 			"installation": map[string]any{"id": 1},
 		})
@@ -550,10 +571,13 @@ func TestRedeliveryGateCachedMentionsRetrySlugOnly(t *testing.T) {
 	env.review.reconcileWebhookDeliveries(redeliveryTestNow)
 	got := env.fake.RedeliveredIDs()
 	if len(got) != 1 || got[0] != 8101 {
-		t.Fatalf("缓存窗口内 slug-only 投递应按未知重试: %v", got)
+		t.Fatalf("缓存窗口内 slug-only 投递应经 fresh 复核捡回重投: %v", got)
 	}
 	if row, ok := redeliveryClosedRow(t, env, "guid-cw-slug-cached"); ok && row.ClosedAt != nil {
 		t.Fatalf("缓存窗口内不得记终态: %+v", row)
+	}
+	if row, ok := redeliveryClosedRow(t, env, "guid-cw-slug-miss"); !ok || row.ClosedAt == nil {
+		t.Fatalf("fresh 复核仍不命中应记终态: %+v (ok=%v)", row, ok)
 	}
 }
 

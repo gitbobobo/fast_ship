@@ -2823,6 +2823,11 @@ func TestReviewCommentWakeWordBoundary(t *testing.T) {
 		issueCommentBody("@fast-ship-bot2 请再审", repo, 67, 42)); err != nil {
 		t.Fatalf("相似名评论应忽略: %v", err)
 	}
+	// 邮箱式文本（前缀词字符）：同样不是点名（第 57 轮 Note）。
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-wb-mail",
+		issueCommentBody("someone@fast-ship-bot 是邮箱片段", repo, 67, 42)); err != nil {
+		t.Fatalf("邮箱式文本应忽略: %v", err)
+	}
 	// 精确句柄 + [bot] 后缀形态：都是点名，各开一轮（轮次间置终态绕开
 	// 同 head 在途守卫）。
 	for i, body := range []string{"@fast-ship-bot 请再审", "@fast-ship-bot[bot] 请再审"} {

@@ -79,12 +79,17 @@ func (s *ReviewService) commentWakeMentions(ctx context.Context) ([]string, bool
 			return mentions, true, nil
 		}
 	}
-	return s.commentWakeMentionsFresh(ctx)
+	// 未命中走强制刷新：degraded（解密降级）并入 cached 通道——闸门/调用
+	// 方把「可能不完整」的集合同视作降级。
+	mentions, degraded, err := s.commentWakeMentionsFresh(ctx)
+	return mentions, degraded, err
 }
 
 // commentWakeMentionsFresh 绕过缓存强制读取 App 身份并刷新缓存：缓存窗口
 // 内 slug 可能已变更（部署切换/重建 App），唤醒判定未命中时用它复核，新
-// 句柄的唤醒才不会被 202 静默吞掉（codex 第 47 轮 P2）。
+// 句柄的唤醒才不会被 202 静默吞掉（codex 第 47 轮 P2）。返回值 degraded：
+// 解密失败降级（仅字面量集合，第 56 轮已入短缓存）——调用方不得把该集合
+// 的未命中当确定的非唤醒（fast-ship-bot 第 57 轮 P2）。
 func (s *ReviewService) commentWakeMentionsFresh(ctx context.Context) ([]string, bool, error) {
 	mentions := []string{reviewCommentWakeMention}
 	if s.appSource == nil {
@@ -99,11 +104,12 @@ func (s *ReviewService) commentWakeMentionsFresh(ctx context.Context) ([]string,
 		if errors.Is(err, errGitHubAppDecrypt) {
 			// 解密失败属永久配置态也入缓存（缩到 30s，fast-ship-bot 第 56
 			// 轮 P2）：降级期成本回到每 TTL 一次，不再按评论线性放大；短
-			// TTL 保证修复后 30s 内自愈。
+			// TTL 保证修复后 30s 内自愈。degraded 标记透出：该集合的未命
+			// 中不是确定的非唤醒。
 			s.mentionsSlugCache.Store("slug", mentionsSlugEntry{
 				expires: time.Now().UTC().Add(reviewMentionsDegradedTTL),
 			})
-			return mentions, false, nil
+			return mentions, true, nil
 		}
 		return nil, false, err
 	}
@@ -232,6 +238,9 @@ func commentWakePayloadBaseGuards(body []byte) *commentWakePayload {
 // 量或部署机器人句柄）。
 func commentWakeMentioned(p *commentWakePayload, mentions []string) bool {
 	lower := strings.ToLower(p.Comment.Body)
+	isNameChar := func(c byte) bool {
+		return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_'
+	}
 	for _, m := range mentions {
 		start := 0
 		for {
@@ -240,16 +249,19 @@ func commentWakeMentioned(p *commentWakePayload, mentions []string) bool {
 				break
 			}
 			pos := start + i
-			// 词边界：紧随其后的字符不属于 GitHub 用户名合法字符集
-			// [a-z0-9-_] 才算点名——@fast-ship-bot2/@fast-ship-bots 这类
-			// 真实存在的其他账号不得误判（fast-ship-bot 第 56 轮 P2）；
-			// 句柄的 [bot] 后缀形态（'['）不受影响。
+			// 词边界双向：命中串前后的字符都不属于 GitHub 用户名合法字符
+			// 集 [a-z0-9-_] 才算点名——后缀挡 @fast-ship-bot2 这类相似账
+			// 号（第 56 轮 P2），前缀挡 someone@fast-ship-bot 这类邮箱式
+			// 文本（第 57 轮 Note）；句柄的 [bot] 后缀形态（'['）不受影响。
+			prev := byte(' ')
+			if pos > 0 {
+				prev = lower[pos-1]
+			}
 			next := byte(' ')
 			if pos+len(m) < len(lower) {
 				next = lower[pos+len(m)]
 			}
-			isWordChar := (next >= 'a' && next <= 'z') || (next >= '0' && next <= '9') || next == '-' || next == '_'
-			if !isWordChar {
+			if !isNameChar(prev) && !isNameChar(next) {
 				return true
 			}
 			start = pos + 1

@@ -315,6 +315,7 @@ type redeliveryPRProbe struct {
 	// 未命中先用刷新后的集合复核再判终态（fast-ship-bot 第 56 轮 P2）。
 	fresh         func() ([]string, bool, error)
 	freshMentions []string
+	freshDegraded bool
 	freshTried    bool
 	freshErr      error
 }
@@ -411,13 +412,18 @@ func (p *redeliveryPRProbe) lookup(ctx context.Context, deliveryID int64, event 
 			if p.mentionsDegraded && strings.Contains(strings.ToLower(probe.Comment.Body), "@") {
 				if !p.freshTried {
 					p.freshTried = true
-					p.freshMentions, _, p.freshErr = p.fresh()
+					p.freshMentions, p.freshDegraded, p.freshErr = p.fresh()
 				}
 				if p.freshErr != nil {
 					return redeliveryPRCheck{}, p.freshErr
 				}
 				payload = commentWakePayloadGuards(detail.Payload, p.freshMentions)
 				if payload == nil {
+					if p.freshDegraded {
+						// 刷新集合本身是降级态（解密失败仅字面量，fast-ship-bot
+						// 第 57 轮 P2）：slug-only 唤醒不得据此记终态，按未知重试。
+						return redeliveryPRCheck{}, errors.New("刷新集合降级，评论投递按未知重试")
+					}
 					return redeliveryPRCheck{Known: true, Reviewable: false, NotWake: true}, nil
 				}
 			} else {
