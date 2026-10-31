@@ -459,6 +459,10 @@ func (h *IssueHandler) AssetContent(c *gin.Context) {
 	// ?token=，不能以同源文档交付（上传只按前 512 字节嗅探求 image/*，
 	// 「图片魔数 + HTML/SVG 体」的多态文件会被存成 image/*）。附件没有落库
 	// 文件名，下载名用固定前缀 + 媒体类型扩展名。
-	setSameOriginAttachmentHeaders(c.Writer.Header(), "issue-asset"+githubmedia.MediaFileExtension(mimeType))
+	assetExt := githubmedia.MediaFileExtension(mimeType)
+	if assetExt == "" {
+		assetExt = ".bin"
+	}
+	setSameOriginAttachmentHeaders(c.Writer.Header(), "issue-asset"+assetExt)
 	c.DataFromReader(200, fileSize, mimeType, reader, nil)
 }

@@ -592,8 +592,11 @@ func TestMediaFileExtension(t *testing.T) {
 		{"image/jpeg", ".jpeg"},
 		{"video/mp4", ".mp4"},
 		{"IMAGE/WEBP", ".webp"},
-		{"text/html", ".bin"},
-		{"", ".bin"},
+		// 表外类型返回空串：调用方据此保留上游自己的后缀，而不是改成 .bin。
+		{"image/avif", ""},
+		{"video/x-matroska", ""},
+		{"text/html", ""},
+		{"", ""},
 	} {
 		if got := MediaFileExtension(tc.contentType); got != tc.want {
 			t.Fatalf("MediaFileExtension(%q) = %q, want %q", tc.contentType, got, tc.want)

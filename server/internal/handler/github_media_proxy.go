@@ -149,9 +149,12 @@ func setMediaProxyHardeningHeaders(header http.Header, upstreamURL, contentType 
 }
 
 // mediaProxyFileName 下载文件名：优先上游 URL 末段（GitHub 附件直链多半是没
-// 扩展名的 uuid）。末段没有媒体扩展名时换成按响应类型反查的那个——非媒体后
-// 缀（`screenshot.v2`、结尾一个点）留着双击也打不开，正是这条逻辑要解决的
-// 问题，所以是替换而不是追加。
+// 扩展名的 uuid）。后缀分三种情况：
+//   - 已是媒体扩展名（.png/.mp4/…）原样保留；
+//   - 表内类型能反查出确定扩展名，就用它替换不可信的后缀（`screenshot.v2` →
+//     `screenshot.png`、`trailing.` → `trailing.png`）；
+//   - 表外类型（`image/avif`、`video/x-matroska`）反查不到，保留上游自己的
+//     `.avif`/`.mkv`——不能拿 `.bin` 覆盖掉本来能打开的文件。
 func mediaProxyFileName(upstreamURL, contentType string) string {
 	name := "media"
 	if parsed, err := url.Parse(upstreamURL); err == nil {
@@ -159,10 +162,21 @@ func mediaProxyFileName(upstreamURL, contentType string) string {
 			name = base
 		}
 	}
-	if ext := path.Ext(name); !githubmedia.IsMediaFileExtension(ext) {
-		name = strings.TrimSuffix(name, ext) + githubmedia.MediaFileExtension(contentType)
+	// 先去掉末段结尾的点：`a.png.` 的 path.Ext 是 "."，不去掉会拼成 a.png.png。
+	if trimmed := strings.TrimRight(name, "."); trimmed != "" {
+		name = trimmed
 	}
-	return name
+	ext := path.Ext(name)
+	if githubmedia.IsMediaFileExtension(ext) {
+		return name
+	}
+	if want := githubmedia.MediaFileExtension(contentType); want != "" {
+		return strings.TrimSuffix(name, ext) + want
+	}
+	if ext != "" {
+		return name
+	}
+	return name + ".bin"
 }
 
 func copyMediaHeaders(dst, src http.Header) {

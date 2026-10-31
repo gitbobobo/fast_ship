@@ -44,10 +44,14 @@ func TestGitHubMediaProxyHandlerSVGGateAndHardeningHeaders(t *testing.T) {
 			// 无扩展名的附件直链（GitHub uuid 形态）。
 			w.Header().Set("Content-Type", "image/png")
 			_, _ = w.Write([]byte("png-bytes"))
-		case "/user-attachments/assets/screenshot.v2", "/user-attachments/assets/trailing.":
-			// 非媒体后缀与结尾一个点：末段不能当成「已有扩展名」。
+		case "/user-attachments/assets/screenshot.v2", "/user-attachments/assets/trailing.", "/user-attachments/assets/a.png.":
+			// 非媒体后缀、结尾一个点：末段不能当成「已有扩展名」。
 			w.Header().Set("Content-Type", "image/png")
 			_, _ = w.Write([]byte("png-bytes"))
+		case "/user-attachments/assets/photo.avif":
+			// 表外类型（按 image/ 前缀放行）——扩展名反查不到，保留上游后缀。
+			w.Header().Set("Content-Type", "image/avif")
+			_, _ = w.Write([]byte("avif-bytes"))
 		case "/user-attachments/assets/clip.mp4":
 			w.Header().Set("Content-Type", "video/mp4")
 			if r.Header.Get("Range") != "" {
@@ -218,6 +222,10 @@ func TestGitHubMediaProxyHandlerSVGGateAndHardeningHeaders(t *testing.T) {
 	for _, tc := range []struct{ path, want string }{
 		{"/user-attachments/assets/screenshot.v2", `attachment; filename="screenshot.png"`},
 		{"/user-attachments/assets/trailing.", `attachment; filename="trailing.png"`},
+		// 媒体扩展名 + 结尾点：去掉点即可，不能拼成 a.png.png。
+		{"/user-attachments/assets/a.png.", `attachment; filename="a.png"`},
+		// 表外媒体类型：保留上游自己的 .avif，不能改成 .bin。
+		{"/user-attachments/assets/photo.avif", `attachment; filename="photo.avif"`},
 	} {
 		req = httptest.NewRequest(http.MethodGet, githubmedia.ProxyPath+"?url="+url.QueryEscape("http://github.com"+tc.path), nil)
 		rec = httptest.NewRecorder()

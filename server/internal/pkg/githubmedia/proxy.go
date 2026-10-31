@@ -1411,15 +1411,15 @@ func IsMediaFileExtension(ext string) bool {
 	return ok
 }
 
-// MediaFileExtension 由具体媒体类型反查扩展名（带点），表外类型给 ".bin"。
-// 供 Content-Disposition 的 filename 兜底：GitHub 附件直链多半是没有扩展名
-// 的 uuid，不带 filename 时浏览器只能按 URL 末段取名，下载下来是个双击打不
-// 开的无扩展名文件。
+// MediaFileExtension 由具体媒体类型反查扩展名（带点）。只认准入用的那张扩展名
+// 表；表外类型（`image/avif`、`video/x-matroska` 这些按前缀放行但表里没有的）
+// 返回空串，由调用方决定兜底——不能拿一个 `.bin` 无条件覆盖上游自己的
+// `.avif`/`.mkv`，那会把本来能打开的文件改成打不开的。
 func MediaFileExtension(contentType string) string {
 	if ext, ok := mediaExtensionByType[strings.ToLower(strings.TrimSpace(contentType))]; ok {
 		return ext
 	}
-	return ".bin"
+	return ""
 }
 
 // HasBitmapExtension URL 路径是否以位图扩展名（.png .jpg .jpeg .gif .webp
