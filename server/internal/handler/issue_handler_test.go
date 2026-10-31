@@ -802,4 +802,11 @@ func TestIssueAssetContentOutOfTypeTableFallsBackToSubtype(t *testing.T) {
 	if disposition != `attachment; filename="issue-asset.x-icon"` {
 		t.Fatalf("disposition = %q, want issue-asset.x-icon（子类型兜底，不是 .bin）", disposition)
 	}
+	// 同源出口不变量：附件认 ?token=，硬化头与头像同口径。
+	if got := contentRec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Fatalf("nosniff = %q, want nosniff", got)
+	}
+	if got := contentRec.Header().Get("Content-Security-Policy"); got != "default-src 'none'; sandbox" {
+		t.Fatalf("csp = %q, want default-src 'none'; sandbox", got)
+	}
 }
