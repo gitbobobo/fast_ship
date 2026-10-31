@@ -30,42 +30,20 @@ describe("github media proxy utils", () => {
     );
   });
 
-  it("keeps a newer server-provided cache-busting version on existing proxy urls", () => {
-    // 大于前端常量的 v 保留：兼容「只递增 Go 常量、前端还没发」的滚动发版。
-    const html = rewriteGitHubMediaHtml(
-      '<p><img alt="Image" src="/api/github/media-proxy?url=https%3A%2F%2Fgithub.com%2Fuser-attachments%2Fassets%2Fdemo&v=9" /></p>',
-      "jwt-token",
-    );
-    const doc = new DOMParser().parseFromString(html ?? "", "text/html");
-
-    expect(doc.querySelector("img")?.getAttribute("src")).toBe(
-      "/api/github/media-proxy?url=https%3A%2F%2Fgithub.com%2Fuser-attachments%2Fassets%2Fdemo&v=9&token=jwt-token",
-    );
-  });
-
-  it("upgrades stale cache-busting versions from user content to the current one", () => {
-    // 内容里带的旧版本号会把浏览器钉在未硬化的旧缓存上，必须升到当前值。
-    const html = rewriteGitHubMediaHtml(
-      '<p><img alt="Image" src="/api/github/media-proxy?url=https%3A%2F%2Fgithub.com%2Fuser-attachments%2Fassets%2Fdemo&v=1" /></p>',
-      "jwt-token",
-    );
-    const doc = new DOMParser().parseFromString(html ?? "", "text/html");
-
-    expect(doc.querySelector("img")?.getAttribute("src")).toBe(
-      "/api/github/media-proxy?url=https%3A%2F%2Fgithub.com%2Fuser-attachments%2Fassets%2Fdemo&v=2&token=jwt-token",
-    );
-  });
-
-  it("replaces a non-numeric cache-busting version with the current one", () => {
-    const html = rewriteGitHubMediaHtml(
-      '<p><img alt="Image" src="/api/github/media-proxy?url=https%3A%2F%2Fgithub.com%2Fuser-attachments%2Fassets%2Fdemo&v=abc" /></p>',
-      "jwt-token",
-    );
-    const doc = new DOMParser().parseFromString(html ?? "", "text/html");
-
-    expect(doc.querySelector("img")?.getAttribute("src")).toBe(
-      "/api/github/media-proxy?url=https%3A%2F%2Fgithub.com%2Fuser-attachments%2Fassets%2Fdemo&v=2&token=jwt-token",
-    );
+  it("rewrites any content-provided cache-busting version to the current one", () => {
+    // v 是缓存失效的权威键，而代理地址嵌在用户可控的正文里：预置的旧/超前的
+    // 版本号都会把浏览器钉在错误的缓存键上，一律重写为当前常量（与前端未发
+    // 版的 Go 并存不存在——web dist 与二进制同一镜像下发）。
+    for (const provided of ["1", "9", "abc", "2.0", "2 "]) {
+      const html = rewriteGitHubMediaHtml(
+        `<p><img alt="Image" src="/api/github/media-proxy?url=https%3A%2F%2Fgithub.com%2Fuser-attachments%2Fassets%2Fdemo&v=${encodeURIComponent(provided)}" /></p>`,
+        "jwt-token",
+      );
+      const doc = new DOMParser().parseFromString(html ?? "", "text/html");
+      expect(doc.querySelector("img")?.getAttribute("src")).toBe(
+        "/api/github/media-proxy?url=https%3A%2F%2Fgithub.com%2Fuser-attachments%2Fassets%2Fdemo&v=2&token=jwt-token",
+      );
+    }
   });
 
   it("adds the auth token to internal issue asset urls", () => {

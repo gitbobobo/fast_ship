@@ -298,3 +298,36 @@ func TestMediaProxyErrorStatusMapping(t *testing.T) {
 		})
 	}
 }
+
+// 直通路径的文件名对账用规范化后的类型：上游带参数（video/mp4; codecs=…）
+// 在 ProxyPass 已被剥参，无扩展名附件的下载名不因此退化成 .bin。
+func TestMediaProxyFileNameUsesNormalizedContentTypeOnProxyPass(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", `video/mp4; codecs="avc1.42E01E, mp4a.40.2"`)
+		_, _ = w.Write([]byte("mp4-bytes"))
+	}))
+	defer upstream.Close()
+
+	target, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("parse upstream url: %v", err)
+	}
+	svc := githubmedia.NewProxyService(t.TempDir(),
+		githubmedia.WithHTTPTransport(&rewriteToUpstreamTransport{target: target}))
+
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	proxy := NewGitHubMediaProxyHandler(svc).Proxy
+	router.GET(githubmedia.ProxyPath, proxy)
+
+	// 无扩展名的 uuid 附件 + 带参数的 video/mp4：下载名应按基础类型补 .mp4。
+	req := httptest.NewRequest(http.MethodGet, githubmedia.ProxyPath+"?url="+url.QueryEscape("http://github.com/user-attachments/assets/clip-uuid"), nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d body = %s, want 200", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Content-Disposition"); got != `attachment; filename="clip-uuid.mp4"` {
+		t.Fatalf("disposition = %q, want clip-uuid.mp4（按规范化后的基础类型补后缀）", got)
+	}
+}

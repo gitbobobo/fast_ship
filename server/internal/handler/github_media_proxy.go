@@ -54,6 +54,8 @@ func (h *GitHubMediaProxyHandler) Proxy(c *gin.Context) {
 		defer resp.Body.Close()
 
 		copyMediaHeaders(c.Writer.Header(), resp.Header)
+		// 传规范化后的类型：直通路径回包的 Content-Type 已是去参小写的基础
+		// 类型，文件名对账用它，别用上游原始值（带参数会对不上表）。
 		setMediaProxyHardeningHeaders(c.Writer.Header(), rawURL, resp.Header.Get("Content-Type"))
 		c.Status(resp.StatusCode)
 		if headOnly {

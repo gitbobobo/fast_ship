@@ -45,16 +45,13 @@ function attachMediaProxyToken(url: URL, token?: string | null) {
   url.searchParams.delete(MEDIA_PROXY_TOKEN_PARAM);
 }
 
-// v 是缓存失效机制的权威键，但代理地址会原样嵌进用户可控的 Issue 正文：
-// 内容里带的旧版本号（部署前缓存下来的）不能原样保留，否则攻击者能把浏览器
-// 钉在未硬化的旧缓存上，换版本号就退役不了。按数值比较：缺失或小于当前
-// 常量时升到当前值；大于当前值保留——兼容「只递增 Go 常量、前端还没发」的
-// 滚动发版窗口。
+// v 是缓存失效机制的权威键，而代理地址会原样嵌进用户可控的 Issue 正文：
+// 内容里带的任何版本号都不能信——预置一个大于当前值的 v 同样能把浏览器钉在
+// 未硬化的旧缓存上。本项目 web dist 与 Go 二进制由同一镜像下发，不存在「Go
+// 常量先涨、前端还没发」的滚动窗口，所以内容来源的 URL 一律写成当前常量
+// （服务端 BuildProxyURL 写的正确值本来就是它，重写是幂等的）。
 function attachMediaProxyVersion(url: URL) {
-  const current = Number.parseInt(url.searchParams.get(MEDIA_PROXY_VERSION_PARAM) ?? "", 10);
-  if (!url.searchParams.has(MEDIA_PROXY_VERSION_PARAM) || Number.isNaN(current) || current < MEDIA_PROXY_VERSION) {
-    url.searchParams.set(MEDIA_PROXY_VERSION_PARAM, String(MEDIA_PROXY_VERSION));
-  }
+  url.searchParams.set(MEDIA_PROXY_VERSION_PARAM, String(MEDIA_PROXY_VERSION));
 }
 
 function isSameOriginMediaProxyUrl(value: string) {
