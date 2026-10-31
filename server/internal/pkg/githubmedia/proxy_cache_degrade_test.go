@@ -220,7 +220,9 @@ func TestGetCachedRevalidatesContentTypeGate(t *testing.T) {
 	if err != nil || ok || cached != nil {
 		t.Fatalf("cached = %+v ok = %v err = %v, want miss（octet-stream 旧条目无法还原最终 URL，保守重下）", cached, ok, err)
 	}
-	// 读路径不删文件，meta 原样保留。
+	// 带参数形态同样要拦：旧写入路径原样存上游值，剥参后才是 octet-stream。
+	// 同 key seed 会覆盖第一个条目，分开断言各自的 miss；读路径不删文件，
+	// meta 原样保留（用第二次 seed 的值核）。
 	metaBytes, err := os.ReadFile(legacyMeta)
 	if err != nil {
 		t.Fatalf("read legacy meta: %v", err)
@@ -231,5 +233,20 @@ func TestGetCachedRevalidatesContentTypeGate(t *testing.T) {
 	}
 	if entry.ContentType != "application/octet-stream" {
 		t.Fatalf("meta content type = %q, want application/octet-stream（meta 文件不重写）", entry.ContentType)
+	}
+	seedCacheMeta(t, svc, legacyURL, "application/octet-stream; charset=binary")
+	cached, ok, err = svc.GetCached(legacyURL)
+	if err != nil || ok || cached != nil {
+		t.Fatalf("param form: cached = %+v ok = %v err = %v, want miss", cached, ok, err)
+	}
+	metaBytes, err = os.ReadFile(legacyMeta)
+	if err != nil {
+		t.Fatalf("read param meta: %v", err)
+	}
+	if err := json.Unmarshal(metaBytes, &entry); err != nil {
+		t.Fatalf("unmarshal param meta: %v", err)
+	}
+	if entry.ContentType != "application/octet-stream; charset=binary" {
+		t.Fatalf("param meta content type = %q, want 原样保留（meta 文件不重写）", entry.ContentType)
 	}
 }

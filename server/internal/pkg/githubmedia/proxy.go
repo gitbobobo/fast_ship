@@ -979,11 +979,14 @@ func (s *ProxyService) getCachedNormalized(normalized, scope string) (*CachedMed
 	// meta/data 会与正在写盘的同 key 下载竞态，最坏删掉别人刚发布的新条目。
 	// 下一次成功下载按同一 key 覆盖 meta/data，TTL 到期由上面的检查清理。
 	// meta 是单值小文件，多值歧义只在响应 header 判定里出现，这里直接走
-	// 单值判定。旧条目 ContentType 为空或 octet-stream 时保守判 miss：它们的
-	// 放行依赖扩展名，而扩展名要用重定向后的最终 URL 才算得对，meta 里没存
-	// 最终 URL——宁可贵一次重下，不做「按原始 URL 的扩展名放行」这种与写入
-	// 侧不一致的复核（svg 字节会以回填的 image/png 命中，一个 TTL 内都错）。
-	if entry.ContentType == "" || strings.EqualFold(strings.TrimSpace(entry.ContentType), "application/octet-stream") {
+	// 单值判定。旧条目 ContentType 剥参小写后为空或 octet-stream 时保守判
+	// miss：它们的放行依赖扩展名，而扩展名要用重定向后的最终 URL 才算得对，
+	// meta 里没存最终 URL——宁可贵一次重下，不做「按原始 URL 的扩展名放行」
+	// 这种与写入侧不一致的复核（svg 字节会以回填的 image/png 命中，一个 TTL
+	// 内都错）。剥参后比较：旧写入路径原样存上游值，`octet-stream;
+	// charset=binary` 这类带参数形态也要拦住。
+	baseType := strings.ToLower(strings.TrimSpace(strings.Split(entry.ContentType, ";")[0]))
+	if baseType == "" || baseType == "application/octet-stream" {
 		return nil, false, nil
 	}
 	normalizedType, allowed := s.normalizeMediaContentType(entry.ContentType, normalized)
