@@ -315,8 +315,20 @@ func newService(cacheRoot string, cfg serviceConfig) *ProxyService {
 		download:          make(map[string]chan struct{}),
 	}
 	s.purgeLegacyCacheEntries()
-	s.startExpiredSweeper()
 	return s
+}
+
+// StartExpiredSweeper 启动后台目录过期扫描（启动即扫一遍 + 每
+// expiredSweepInterval 一次）。由生产装配显式调用——构造函数里无条件起后台
+// 协程会让测试的 seed 与扫描互相踩（扫描可能落在写 seed 的中间）。测试直接
+// 调 sweepExpiredEntries（导出为 SweepExpiredEntries）。
+func (s *ProxyService) StartExpiredSweeper() {
+	s.startExpiredSweeper()
+}
+
+// SweepExpiredEntries 手动触发一次目录过期扫描（测试与运维用）。
+func (s *ProxyService) SweepExpiredEntries() {
+	s.sweepExpiredEntries()
 }
 
 // expiredSweepInterval 目录过期扫描的间隔。读路径不再删文件（见
@@ -326,9 +338,7 @@ func newService(cacheRoot string, cfg serviceConfig) *ProxyService {
 const expiredSweepInterval = 6 * time.Hour
 
 // startExpiredSweeper 启动即扫一遍，之后按固定间隔后台扫。失败静默：扫描是
-// 保洁，不构成任何请求路径的前置条件；删除用 os.Remove，只删已过期条目，
-// 正在与写盘竞争的 key 由下载闸保证写侧原子发布（rename+WriteFile 完成后才
-// 可见），扫到一半被覆盖最坏是多删一次已失效文件。
+// 保洁，不构成任何请求路径的前置条件。
 func (s *ProxyService) startExpiredSweeper() {
 	go func() {
 		s.sweepExpiredEntries()
@@ -341,7 +351,12 @@ func (s *ProxyService) startExpiredSweeper() {
 
 // sweepExpiredEntries 扫一遍缓存目录，删掉已过期的条目。meta 是唯一事实源
 // （data 由 meta 的存在性背书），只读 meta 判断；meta 读不了/解析不了的孤儿
-// 文件留待人工或下次覆盖，不猜。
+// 文件留待下次覆盖，不猜。
+//
+// 与写盘的竞争处理：删除前重读 meta 并比对 CachedAt——与本次扫描读到的一
+// 致才动手，期间被写侧覆盖（新条目 CachedAt 更新）就放弃这一条；先删 data
+// 再删 meta，第二步失败或进程被杀只会留下孤儿 .bin（没有 meta 它不可达），
+// 孤儿按 mtime 超过 2×TTL 纳入清理，不会永久堆积。
 func (s *ProxyService) sweepExpiredEntries() {
 	entries, err := os.ReadDir(s.cacheDir)
 	if err != nil {
@@ -362,8 +377,35 @@ func (s *ProxyService) sweepExpiredEntries() {
 		if json.Unmarshal(data, &entry) != nil || !entry.expired(now) {
 			continue
 		}
+		// 复核仍是刚才读到的那条（CachedAt 是写侧发布时间，覆盖后会变），
+		// 期间被同 key 写盘覆盖就跳过。
+		recheck, err := os.ReadFile(metaPath)
+		if err != nil || json.Unmarshal(recheck, &entry) != nil || !entry.expired(now) {
+			continue
+		}
+		binPath := strings.TrimSuffix(metaPath, ".json") + ".bin"
+		// 先删 data 再删 meta：meta 是条目可达性的事实源，先删 meta 后被杀
+		// 会留下不可达的孤儿 .bin。
+		_ = os.Remove(binPath)
 		_ = os.Remove(metaPath)
-		_ = os.Remove(filepath.Join(s.cacheDir, strings.TrimSuffix(name, ".json")+".bin"))
+	}
+	// 无 meta 的孤儿 .bin（历史删除中断、或旧版本先删 meta 后删 data 被杀）：
+	// mtime 超过 2×TTL 才清，正在写盘的临时文件（tmp 后缀，不匹配 .bin）与
+	// 刚发布的条目不受影响。
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasSuffix(name, ".bin") {
+			continue
+		}
+		metaPath := filepath.Join(s.cacheDir, strings.TrimSuffix(name, ".bin")+".json")
+		if _, err := os.Stat(metaPath); !errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil || now.Sub(info.ModTime()) < 2*s.cacheTTL {
+			continue
+		}
+		_ = os.Remove(filepath.Join(s.cacheDir, name))
 	}
 }
 

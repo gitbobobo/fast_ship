@@ -161,7 +161,7 @@ func TestSweepExpiredEntriesRemovesOnlyExpired(t *testing.T) {
 		}
 	}
 
-	svc.sweepExpiredEntries()
+	svc.SweepExpiredEntries()
 
 	if _, err := os.Stat(filepath.Join(svc.cacheDir, "expired.json")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("expired.json stat = %v, want 已删除", err)
@@ -177,6 +177,71 @@ func TestSweepExpiredEntriesRemovesOnlyExpired(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(svc.cacheDir, "broken.json")); err != nil {
 		t.Fatalf("broken.json stat = %v, want 保留（解析不了不猜）", err)
+	}
+}
+
+// 扫描与写盘竞争：扫描读到旧 meta 后条目被写侧覆盖（CachedAt 更新、不再过
+// 期），扫描放弃这一条——不能把刚发布的新条目删掉。
+func TestSweepExpiredEntriesSkipsEntryOverwrittenDuringSweep(t *testing.T) {
+	svc := newService(t.TempDir(), serviceConfig{
+		allowURL: func(u *url.URL) bool { return true },
+	})
+	now := time.Now().UTC()
+	metaPath := filepath.Join(svc.cacheDir, "raced.json")
+	writeMeta := func(expires time.Time) {
+		t.Helper()
+		data, err := json.Marshal(map[string]any{"url": "https://x.test/r.png", "content_type": "image/png", "cached_at": now, "expires_at": expires})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		if err := os.WriteFile(metaPath, data, 0o640); err != nil {
+			t.Fatalf("write meta: %v", err)
+		}
+	}
+	// 旧 meta（已过期）落盘；再模拟写侧发布：data 换新 + meta 覆盖成未过期。
+	writeMeta(now.Add(-time.Hour))
+	binPath := filepath.Join(svc.cacheDir, "raced.bin")
+	if err := os.WriteFile(binPath, []byte("old"), 0o640); err != nil {
+		t.Fatalf("write bin: %v", err)
+	}
+	// 写侧新条目：CachedAt 更新到当前、未过期。sweep 内部重读会看到这份。
+	writeMeta(now.Add(time.Hour))
+
+	svc.SweepExpiredEntries()
+
+	if _, err := os.Stat(metaPath); err != nil {
+		t.Fatalf("meta stat = %v, want 保留（扫描复核 CachedAt 后放弃）", err)
+	}
+	if _, err := os.Stat(binPath); err != nil {
+		t.Fatalf("bin stat = %v, want 保留（扫描复核 CachedAt 后放弃）", err)
+	}
+}
+
+// 无 meta 的孤儿 .bin 按 mtime 超过 2×TTL 清理：历史删除中断的残留不永久堆积。
+func TestSweepExpiredEntriesRemovesStaleOrphanBins(t *testing.T) {
+	svc := newService(t.TempDir(), serviceConfig{
+		allowURL: func(u *url.URL) bool { return true },
+	})
+	orphan := filepath.Join(svc.cacheDir, "orphan.bin")
+	if err := os.WriteFile(orphan, []byte("data"), 0o640); err != nil {
+		t.Fatalf("write orphan: %v", err)
+	}
+	stale := time.Now().Add(-3 * defaultCacheTTL)
+	if err := os.Chtimes(orphan, stale, stale); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+	fresh := filepath.Join(svc.cacheDir, "fresh-orphan.bin")
+	if err := os.WriteFile(fresh, []byte("data"), 0o640); err != nil {
+		t.Fatalf("write fresh orphan: %v", err)
+	}
+
+	svc.SweepExpiredEntries()
+
+	if _, err := os.Stat(orphan); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("orphan stat = %v, want 已清理", err)
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Fatalf("fresh orphan stat = %v, want 保留（mtime 未超 2×TTL）", err)
 	}
 }
 
