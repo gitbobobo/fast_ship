@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/gin-gonic/gin"
 	"github.com/godbobo/fast_ship/server/internal/api"
@@ -461,7 +462,27 @@ func (h *IssueHandler) AssetContent(c *gin.Context) {
 	// 文件名，下载名用固定前缀 + 媒体类型扩展名。
 	assetExt := githubmedia.MediaFileExtension(mimeType)
 	if assetExt == "" {
-		assetExt = ".bin"
+		// 表外类型（Go 嗅探会给 image/x-icon 这类表里没有的 image/*）退而用
+		// 子类型当后缀（image/x-icon → .x-icon），至少让下载名能看出是什么；
+		// 再不行才落 .bin。附件没有落库文件名，这里只求「下载下来可辨识」，
+		// 不为个别类型特判简称。
+		subtype := mimeType
+		if idx := strings.Index(mimeType, "/"); idx >= 0 {
+			subtype = mimeType[idx+1:]
+		}
+		if idx := strings.IndexAny(subtype, "; "); idx >= 0 {
+			subtype = subtype[:idx]
+		}
+		subtype = strings.Map(func(r rune) rune {
+			if r > unicode.MaxASCII || unicode.IsControl(r) || r == '"' || r == '\\' {
+				return -1
+			}
+			return r
+		}, strings.ToLower(subtype))
+		if subtype == "" {
+			subtype = "bin"
+		}
+		assetExt = "." + subtype
 	}
 	setSameOriginAttachmentHeaders(c.Writer.Header(), "issue-asset"+assetExt)
 	c.DataFromReader(200, fileSize, mimeType, reader, nil)

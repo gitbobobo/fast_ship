@@ -752,3 +752,54 @@ func TestIssueHandlerCount_ReturnsFilteredCount(t *testing.T) {
 		t.Fatalf("expected count 1, got %d", result.Count)
 	}
 }
+
+// 表外图片类型（Go 嗅探给 image/x-icon，不在媒体扩展名表里）的下载名退而用
+// 子类型当后缀（.ico），而不是一律 .bin——与媒体代理「下载下来可辨识」的口径
+// 一致。ICO 魔数：00 00 01 00。
+func TestIssueAssetContentOutOfTypeTableFallsBackToSubtype(t *testing.T) {
+	env := setupHandlerTestEnv(t)
+	user := createHandlerTestUser(t, env.db, "user-1")
+	project := createHandlerTestProject(t, env.db, user.ID)
+	issue := createHandlerTestIssue(t, env.db, project.ID, func(i *model.Issue) {
+		i.Source = model.IssueSourceInternal
+	})
+
+	icoBytes := append([]byte{0x00, 0x00, 0x01, 0x00, 0x01, 0x00}, []byte("icon-payload")...)
+	req, _ := newMultipartUploadRequest(t, "/api/issues/"+issue.ID+"/assets", "file", "favicon.ico", icoBytes, nil)
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = req
+	ctx.Params = ginParams("iid", issue.ID)
+	ctx.Set(middleware.ContextKeyUserID, user.ID)
+	ctx.Set(middleware.ContextKeyAuthType, middleware.AuthTypeJWT)
+	env.issueHandler.UploadAsset(ctx)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected upload 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var uploaded struct {
+		ID         string `json:"id"`
+		MimeType   string `json:"mime_type"`
+		ContentURL string `json:"content_url"`
+	}
+	decodeEnvelope(t, rec, &uploaded)
+	if uploaded.MimeType != "image/x-icon" && uploaded.MimeType != "image/vnd.microsoft.icon" {
+		t.Fatalf("expected sniffed x-icon mime type, got %q", uploaded.MimeType)
+	}
+
+	contentRec := httptest.NewRecorder()
+	contentCtx, _ := gin.CreateTestContext(contentRec)
+	contentCtx.Request = httptest.NewRequest(http.MethodGet, uploaded.ContentURL, nil)
+	contentCtx.Params = ginParams("aid", uploaded.ID)
+	contentCtx.Set(middleware.ContextKeyUserID, user.ID)
+	contentCtx.Set(middleware.ContextKeyAuthType, middleware.AuthTypeJWT)
+	env.issueHandler.AssetContent(contentCtx)
+	if contentRec.Code != http.StatusOK {
+		t.Fatalf("expected content 200, got %d", contentRec.Code)
+	}
+	disposition := contentRec.Header().Get("Content-Disposition")
+	// 嗅探类型是 image/x-icon，子类型兜底给出 .x-icon（可辨识即可，不特判 .ico）。
+	if disposition != `attachment; filename="issue-asset.x-icon"` {
+		t.Fatalf("disposition = %q, want issue-asset.x-icon（子类型兜底，不是 .bin）", disposition)
+	}
+}
