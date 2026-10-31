@@ -380,6 +380,7 @@ func (s *ProxyService) StartExpiredSweeper() {
 // 的 tmp 残留同样要清）。
 func (s *ProxyService) StartStaleTmpSweeper() {
 	go func() {
+		s.sweepStaleTmpFiles(time.Now().UTC())
 		for {
 			time.Sleep(expiredSweepInterval)
 			s.sweepStaleTmpFiles(time.Now().UTC())
@@ -447,11 +448,39 @@ func (s *ProxyService) sweepExpiredEntries() {
 			// 盘满截断）：与孤儿 .bin 同口径按 mtime 超 2×TTL 回收（meta 与同
 			// 名 .bin 一起删），否则该条目连同最大 256MB 的 .bin 永久留盘且每
 			// 次命中都重源。mtime 新的是写侧中间态，不碰。
+			//
+			// 同一 URL 可能正在因「损坏 meta 读路径判 miss」而重下，删除与过
+			// 期分支一样持该 key 的下载闸（锁内重读复核 mtime 仍超龄，被写侧
+			// 覆盖成好 meta 就放弃），不无锁动手。
 			if now.Sub(info.ModTime()) < 2*s.cacheTTL {
+				continue
+			}
+			gate := s.acquireDownloadLock(entry.URL)
+			select {
+			case gate.sem <- struct{}{}:
+			case <-time.After(5 * time.Second):
+				s.abandonDownloadLock(entry.URL, gate)
+				continue
+			}
+			recheck, err := os.ReadFile(metaPath)
+			if err != nil {
+				s.releaseDownloadLock(entry.URL, gate)
+				continue
+			}
+			var recheckEntry cacheEntry
+			if json.Unmarshal(recheck, &recheckEntry) == nil {
+				// 被写侧覆盖成了好 meta（或换了个内容），放弃。
+				s.releaseDownloadLock(entry.URL, gate)
+				continue
+			}
+			recheckInfo, err := os.Stat(metaPath)
+			if err != nil || now.Sub(recheckInfo.ModTime()) < 2*s.cacheTTL {
+				s.releaseDownloadLock(entry.URL, gate)
 				continue
 			}
 			_ = os.Remove(filepath.Join(s.cacheDir, strings.TrimSuffix(name, ".json")+".bin"))
 			_ = os.Remove(metaPath)
+			s.releaseDownloadLock(entry.URL, gate)
 			continue
 		}
 		if !entry.expired(now) {
