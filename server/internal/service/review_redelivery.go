@@ -391,9 +391,13 @@ func (p *redeliveryPRProbe) lookup(ctx context.Context, deliveryID int64, event 
 		// 本来就会静默忽略——记终态跳过，不进重试集白吃预算与通知。
 		payload := commentWakePayloadGuards(detail.Payload, p.mentions)
 		if payload == nil {
-			if p.mentionsDegraded {
-				// 字面量集合不完整：判「非唤醒」不可信，按未知处理——调用方
-				// 对未知投递降级照常重投（宁多投不漏投，codex 第 23 轮 P2）。
+			// 降级/缓存窗口下 slug 可能过期，含 @ 的未命中判「非唤醒」不可
+			// 信——按未知处理让调用方照常重投（宁多投不漏投，codex 第 23
+			// 轮 P2）。正文不含 @ 则不可能含任何唤醒串（字面量与句柄都以
+			// @ 开头），无论集合是否可信都是确定的非唤醒，记终态跳过——
+			// webhook 故障积压的普通讨论不白吃重投预算、不制造误导通知
+			// （codex 第 48 轮 P2）。
+			if p.mentionsDegraded && strings.Contains(strings.ToLower(probe.Comment.Body), "@") {
 				return redeliveryPRCheck{}, errors.New("唤醒串集合读取降级，评论投递按未知重试")
 			}
 			return redeliveryPRCheck{Known: true, Reviewable: false, NotWake: true}, nil

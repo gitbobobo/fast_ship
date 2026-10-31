@@ -556,3 +556,48 @@ func TestRedeliveryGateCachedMentionsRetrySlugOnly(t *testing.T) {
 		t.Fatalf("缓存窗口内不得记终态: %+v", row)
 	}
 }
+
+// 降级/缓存窗口下正文不含 @ 的评论仍是非唤醒（codex 第 48 轮 P2）：无
+// @ 不可能含任何唤醒串，记终态跳过——不白吃重投预算、不制造误导通知；
+// 含 @ 的未命中才按未知重试（前一条缓存用例）。
+func TestRedeliveryGateDegradedNoAtSignTerminal(t *testing.T) {
+	env := newReviewEngineEnv(t)
+	env.enableReview(t)
+	env.review.appSource = stubAppSourceErr{}
+
+	base := redeliveryTestNow.Add(-time.Hour)
+	env.fake.SetHookDeliveries([]githubapp.HookDelivery{
+		hookRow(9101, "guid-cw-noat", "issue_comment", "created", 500, false, base),
+		hookRow(9102, "guid-cw-at", "issue_comment", "created", 500, false, base),
+	})
+	env.fake.SetHookDeliveryPayload(9101, redeliveryPlainCommentPayload("owner/repo", 7))
+	env.fake.SetHookDeliveryPayload(9102, func() json.RawMessage {
+		body, err := json.Marshal(map[string]any{
+			"action": "created",
+			"issue": map[string]any{
+				"number":       7,
+				"pull_request": map[string]any{"url": "https://github.com/owner/repo/pulls/7"},
+			},
+			"comment":      map[string]any{"body": "@someone-else 帮忙看下", "author_association": "NONE"},
+			"repository":   map[string]any{"full_name": "owner/repo"},
+			"installation": map[string]any{"id": 1},
+		})
+		if err != nil {
+			panic(err)
+		}
+		return body
+	}())
+	env.fake.SetPR("owner/repo", 7, &githubapi.PullRequest{})
+
+	env.review.reconcileWebhookDeliveries(redeliveryTestNow)
+	got := env.fake.RedeliveredIDs()
+	if len(got) != 1 || got[0] != 9102 {
+		t.Fatalf("降级下含 @ 的未命中应按未知重投: %v", got)
+	}
+	if row, ok := redeliveryClosedRow(t, env, "guid-cw-noat"); !ok || row.ClosedAt == nil {
+		t.Fatalf("不含 @ 的普通评论应记终态: %+v (ok=%v)", row, ok)
+	}
+	if row, ok := redeliveryClosedRow(t, env, "guid-cw-at"); ok && row.ClosedAt != nil {
+		t.Fatalf("含 @ 的未命中不得记终态: %+v", row)
+	}
+}
