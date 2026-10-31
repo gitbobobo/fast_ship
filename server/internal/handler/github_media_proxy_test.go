@@ -52,6 +52,10 @@ func TestGitHubMediaProxyHandlerSVGGateAndHardeningHeaders(t *testing.T) {
 			// 表外类型（按 image/ 前缀放行）——扩展名反查不到，保留上游后缀。
 			w.Header().Set("Content-Type", "image/avif")
 			_, _ = w.Write([]byte("avif-bytes"))
+		case "/user-attachments/assets/disguised.png":
+			// 后缀与响应类型冲突：.png 结尾却回 video/mp4，文件名以响应类型为准。
+			w.Header().Set("Content-Type", "video/mp4")
+			_, _ = w.Write([]byte("mp4-bytes"))
 		case "/user-attachments/assets/clip.mp4":
 			w.Header().Set("Content-Type", "video/mp4")
 			if r.Header.Get("Range") != "" {
@@ -226,6 +230,8 @@ func TestGitHubMediaProxyHandlerSVGGateAndHardeningHeaders(t *testing.T) {
 		{"/user-attachments/assets/a.png.", `attachment; filename="a.png"`},
 		// 表外媒体类型：保留上游自己的 .avif，不能改成 .bin。
 		{"/user-attachments/assets/photo.avif", `attachment; filename="photo.avif"`},
+		// 后缀与响应类型冲突：以后缀可信度为准，响应类型反查的扩展名替换。
+		{"/user-attachments/assets/disguised.png", `attachment; filename="disguised.mp4"`},
 	} {
 		req = httptest.NewRequest(http.MethodGet, githubmedia.ProxyPath+"?url="+url.QueryEscape("http://github.com"+tc.path), nil)
 		rec = httptest.NewRecorder()

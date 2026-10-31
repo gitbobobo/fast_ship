@@ -13,7 +13,7 @@ svg（`image/svg+xml`、非标准写法 `image/svg`、扩展名 `.svg`）与 HTM
 
 `?token=` 会出现在浏览器地址栏，所以同源出口绝不能返回同源可执行文档：svg 以 Fast Ship 同源在「新标签页打开图片」时执行脚本，能读到地址栏里的 token 与 localStorage 里的 refresh token。
 
-媒体代理的成功响应统一带：`X-Content-Type-Options: nosniff`（禁止嗅探改判）、`Content-Disposition: attachment; filename=…`（顶层导航退化为下载而非同源文档，只影响导航、不影响 `<img>`/`<video>` 子资源渲染；文件名优先取上游 URL 末段：末段已是媒体扩展名就保留；准入表内的类型按响应类型反查扩展名、替换不可信的后缀（`.v2`、结尾一个点、无扩展名）；表外类型（`image/avif`、`video/x-matroska` 这些按前缀放行但表里没有的）反查不到，保留上游自己的 `.avif`/`.mkv`，只在完全没后缀时退 `.bin`）与 `Content-Security-Policy: default-src 'none'; sandbox`（兜底禁脚本禁同源）。
+媒体代理的成功响应统一带：`X-Content-Type-Options: nosniff`（禁止嗅探改判）、`Content-Disposition: attachment; filename=…`（顶层导航退化为下载而非同源文档，只影响导航、不影响 `<img>`/`<video>` 子资源渲染；文件名优先取上游 URL 末段，且后缀要与响应类型对账（后缀是上游可控的）：后缀在媒体表里、且反查出的类型与响应类型一致才保留；否则表内类型按响应类型反查替换（`.v2`、结尾一个点、无扩展名、伪装后缀 `x.png` 回 `video/mp4` → `x.mp4`）；表外类型（`image/avif`、`video/x-matroska` 这些按前缀放行但表里没有的）反查不到，保留上游自己的 `.avif`/`.mkv`，只在完全没后缀时退 `.bin`）与 `Content-Security-Policy: default-src 'none'; sandbox`（兜底禁脚本禁同源）。
 
 **同源出口不变量**：同一套硬化头也用在同一组「`?token=` + 用户可控内容」的出口上，全部走 `server/internal/handler/github_media_proxy.go` 的 `setSameOriginContentHardeningHeaders`（`nosniff` + `CSP: default-src 'none'; sandbox`），需要下载语义的再加 `setSameOriginAttachmentHeaders`（带文件名的 `attachment`）：
 

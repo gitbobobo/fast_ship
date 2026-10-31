@@ -1411,6 +1411,13 @@ func IsMediaFileExtension(ext string) bool {
 	return ok
 }
 
+// MediaTypeForExtension 扩展名反查具体媒体类型（未命中返回空串）。出口用它
+// 对账「URL 后缀与响应类型是否一致」：后缀是上游可控的，`.png` 结尾却回
+// video/mp4 的资源不能只凭后缀保留文件名。
+func MediaTypeForExtension(ext string) string {
+	return mediaExtensions[strings.ToLower(ext)]
+}
+
 // MediaFileExtension 由具体媒体类型反查扩展名（带点）。只认准入用的那张扩展名
 // 表；表外类型（`image/avif`、`video/x-matroska` 这些按前缀放行但表里没有的）
 // 返回空串，由调用方决定兜底——不能拿一个 `.bin` 无条件覆盖上游自己的

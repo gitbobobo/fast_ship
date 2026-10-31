@@ -619,3 +619,15 @@ func TestIsMediaFileExtension(t *testing.T) {
 		}
 	}
 }
+
+// 扩展名反查具体媒体类型：出口对账「URL 后缀 vs 响应类型」用。
+func TestMediaTypeForExtension(t *testing.T) {
+	for _, tc := range []struct{ ext, want string }{
+		{".png", "image/png"}, {".mp4", "video/mp4"}, {".PNG", "image/png"},
+		{".v2", ""}, {".svg", ""},
+	} {
+		if got := MediaTypeForExtension(tc.ext); got != tc.want {
+			t.Fatalf("MediaTypeForExtension(%q) = %q, want %q", tc.ext, got, tc.want)
+		}
+	}
+}

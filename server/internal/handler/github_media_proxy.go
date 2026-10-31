@@ -160,10 +160,13 @@ func setMediaProxyHardeningHeaders(header http.Header, upstreamURL, contentType 
 }
 
 // mediaProxyFileName 下载文件名：优先上游 URL 末段（GitHub 附件直链多半是没
-// 扩展名的 uuid）。后缀分三种情况：
-//   - 已是媒体扩展名（.png/.mp4/…）原样保留；
-//   - 表内类型能反查出确定扩展名，就用它替换不可信的后缀（`screenshot.v2` →
-//     `screenshot.png`、`trailing.` → `trailing.png`）；
+// 扩展名的 uuid），且后缀要与响应类型对账——URL 后缀是上游可控的，不能只凭
+// 「像个媒体扩展名」就信：`.png` 结尾却回 `video/mp4` 的资源，下载下来照旧
+// 打不开。规则：
+//   - 末段后缀与响应类型一致（后缀反查出的类型 == 响应类型）原样保留；
+//   - 表内类型反查出确定扩展名，就用它替换不可信后缀（`screenshot.v2` →
+//     `screenshot.png`、`trailing.` → `trailing.png`、伪装后缀 `x.png` 回
+//     `video/mp4` → `x.mp4`）；
 //   - 表外类型（`image/avif`、`video/x-matroska`）反查不到，保留上游自己的
 //     `.avif`/`.mkv`——不能拿 `.bin` 覆盖掉本来能打开的文件。
 func mediaProxyFileName(upstreamURL, contentType string) string {
@@ -178,7 +181,10 @@ func mediaProxyFileName(upstreamURL, contentType string) string {
 		name = trimmed
 	}
 	ext := path.Ext(name)
-	if githubmedia.IsMediaFileExtension(ext) {
+	// 后缀可信：在媒体表里、且它对应的类型就是响应类型（大小写不敏感，与
+	// 准入侧同口径）。
+	if ext != "" && githubmedia.IsMediaFileExtension(ext) &&
+		strings.EqualFold(githubmedia.MediaTypeForExtension(ext), contentType) {
 		return name
 	}
 	if want := githubmedia.MediaFileExtension(contentType); want != "" {
