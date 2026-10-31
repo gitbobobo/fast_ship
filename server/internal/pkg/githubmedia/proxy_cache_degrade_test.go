@@ -180,17 +180,21 @@ func TestSweepExpiredEntriesRemovesOnlyExpired(t *testing.T) {
 	}
 }
 
-// 扫描与写盘竞争：扫描读到旧 meta 后条目被写侧覆盖（CachedAt 更新、不再过
-// 期），扫描放弃这一条——不能把刚发布的新条目删掉。
-func TestSweepExpiredEntriesSkipsEntryOverwrittenDuringSweep(t *testing.T) {
+// 扫描与写盘竞争：写侧持下载闸发布期间，扫描必须等待并复核——发布完成后
+// 条目不再过期，扫描跳过；旧过期条目（写侧没来覆盖）才被删。
+func TestSweepExpiredEntriesWaitsForWriterAndSkipsFreshEntry(t *testing.T) {
 	svc := newService(t.TempDir(), serviceConfig{
 		allowURL: func(u *url.URL) bool { return true },
 	})
 	now := time.Now().UTC()
+	normalized, err := svc.normalize("https://x.test/r.png")
+	if err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
 	metaPath := filepath.Join(svc.cacheDir, "raced.json")
 	writeMeta := func(expires time.Time) {
 		t.Helper()
-		data, err := json.Marshal(map[string]any{"url": "https://x.test/r.png", "content_type": "image/png", "cached_at": now, "expires_at": expires})
+		data, err := json.Marshal(map[string]any{"url": normalized, "content_type": "image/png", "cached_at": now, "expires_at": expires})
 		if err != nil {
 			t.Fatalf("marshal: %v", err)
 		}
@@ -198,22 +202,50 @@ func TestSweepExpiredEntriesSkipsEntryOverwrittenDuringSweep(t *testing.T) {
 			t.Fatalf("write meta: %v", err)
 		}
 	}
-	// 旧 meta（已过期）落盘；再模拟写侧发布：data 换新 + meta 覆盖成未过期。
+	// 旧过期 meta 落盘，模拟「扫描已读到它」。
 	writeMeta(now.Add(-time.Hour))
 	binPath := filepath.Join(svc.cacheDir, "raced.bin")
 	if err := os.WriteFile(binPath, []byte("old"), 0o640); err != nil {
 		t.Fatalf("write bin: %v", err)
 	}
-	// 写侧新条目：CachedAt 更新到当前、未过期。sweep 内部重读会看到这份。
+
+	// 写侧持下载闸（发布中）：扫描必须等闸，不能越过它删文件。
+	lock := svc.acquireDownloadLock(normalized)
+	lock <- struct{}{}
+
+	sweepDone := make(chan struct{})
+	go func() {
+		svc.SweepExpiredEntries()
+		close(sweepDone)
+	}()
+
+	// 给扫描时间跑到等闸的位置，然后写侧发布新条目并释放闸。
+	time.Sleep(100 * time.Millisecond)
 	writeMeta(now.Add(time.Hour))
+	if err := os.WriteFile(binPath, []byte("new"), 0o640); err != nil {
+		t.Fatalf("write new bin: %v", err)
+	}
+	<-lock
 
-	svc.SweepExpiredEntries()
+	select {
+	case <-sweepDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("sweep did not finish — 检查是否死锁在等闸")
+	}
 
+	// 发布后的新条目必须原样保留（扫描在锁内复核发现不再过期，跳过）。
 	if _, err := os.Stat(metaPath); err != nil {
-		t.Fatalf("meta stat = %v, want 保留（扫描复核 CachedAt 后放弃）", err)
+		t.Fatalf("meta stat = %v, want 保留（锁内复核发现不再过期）", err)
 	}
 	if _, err := os.Stat(binPath); err != nil {
-		t.Fatalf("bin stat = %v, want 保留（扫描复核 CachedAt 后放弃）", err)
+		t.Fatalf("bin stat = %v, want 保留（锁内复核发现不再过期）", err)
+	}
+
+	// 闸已释放：再次扫描，此时若把 meta 改回过期态，扫描应能正常删除。
+	writeMeta(now.Add(-time.Hour))
+	svc.SweepExpiredEntries()
+	if _, err := os.Stat(metaPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("meta stat = %v, want 已删除（闸释放后正常过期回收）", err)
 	}
 }
 

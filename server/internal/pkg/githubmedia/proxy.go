@@ -353,10 +353,13 @@ func (s *ProxyService) startExpiredSweeper() {
 // （data 由 meta 的存在性背书），只读 meta 判断；meta 读不了/解析不了的孤儿
 // 文件留待下次覆盖，不猜。
 //
-// 与写盘的竞争处理：删除前重读 meta 并比对 CachedAt——与本次扫描读到的一
-// 致才动手，期间被写侧覆盖（新条目 CachedAt 更新）就放弃这一条；先删 data
-// 再删 meta，第二步失败或进程被杀只会留下孤儿 .bin（没有 meta 它不可达），
-// 孤儿按 mtime 超过 2×TTL 纳入清理，不会永久堆积。
+// 与写盘的竞争处理：meta 落后于 data（写侧先 rename data 再 WriteFile meta），
+// 只靠「重读 meta 比对 CachedAt」堵不住「读到旧 meta、写侧已 rename 新 data、
+// 尚未写新 meta」的窗口。扫描删除前持该 key 的下载闸（与 fetchAndCache 同
+// 一把锁），互斥后旧过期条目在窗口内也只可能被覆盖成新条目——锁内重读发现
+// 不再过期就跳过；先删 data 再删 meta，第二步失败或进程被杀只会留下孤儿
+// .bin（没有 meta 它不可达），孤儿按 mtime 超过 2×TTL 纳入清理，不会永久堆
+// 积。meta 里存了原始 URL（缓存键底材），足以还原下载闸的 key。
 func (s *ProxyService) sweepExpiredEntries() {
 	entries, err := os.ReadDir(s.cacheDir)
 	if err != nil {
@@ -377,10 +380,24 @@ func (s *ProxyService) sweepExpiredEntries() {
 		if json.Unmarshal(data, &entry) != nil || !entry.expired(now) {
 			continue
 		}
-		// 复核仍是刚才读到的那条（CachedAt 是写侧发布时间，覆盖后会变），
-		// 期间被同 key 写盘覆盖就跳过。
+		// 持该 key 的下载闸再复核与删除：与同 key 写盘互斥，窗口关闭。闸等待
+		// 吃 ctx（背景扫描用 Background），锁被长下载持有时本轮跳过即可，下
+		// 轮再扫。
+		lock := s.acquireDownloadLock(entry.URL)
+		select {
+		case lock <- struct{}{}:
+		case <-time.After(5 * time.Second):
+			continue
+		}
+		// 锁内重读：条目可能刚被覆盖成新条目（不再过期）或已被清走。
 		recheck, err := os.ReadFile(metaPath)
-		if err != nil || json.Unmarshal(recheck, &entry) != nil || !entry.expired(now) {
+		if err != nil {
+			<-lock
+			continue
+		}
+		var recheckEntry cacheEntry
+		if json.Unmarshal(recheck, &recheckEntry) != nil || !recheckEntry.expired(now) || recheckEntry.URL != entry.URL {
+			<-lock
 			continue
 		}
 		binPath := strings.TrimSuffix(metaPath, ".json") + ".bin"
@@ -388,6 +405,7 @@ func (s *ProxyService) sweepExpiredEntries() {
 		// 会留下不可达的孤儿 .bin。
 		_ = os.Remove(binPath)
 		_ = os.Remove(metaPath)
+		<-lock
 	}
 	// 无 meta 的孤儿 .bin（历史删除中断、或旧版本先删 meta 后删 data 被杀）：
 	// mtime 超过 2×TTL 才清，正在写盘的临时文件（tmp 后缀，不匹配 .bin）与
