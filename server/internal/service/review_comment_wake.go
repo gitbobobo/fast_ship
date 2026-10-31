@@ -117,7 +117,8 @@ func (s *ReviewService) commentWakeMentionsFresh(ctx context.Context) ([]string,
 
 // reviewCommentWakeRevalidateMax 观察窗口复核的尝试上限：实拉前观察到的
 // 总账 head 与事务内重取不一致时重读重拉；上限内不收敛（总账在同一窗口
-// 内被持续并发推进）就放弃并补登幂等账。
+// 内被持续并发推进）就放弃且不登记幂等账（后续投递/手动 Redeliver 可完
+// 整重走，fast-ship-bot 第 52 轮 P2）。
 const reviewCommentWakeRevalidateMax = 2
 
 // commentWakeTxOutcome 评论唤醒事务结果的统一处置（纯函数，单元可测）：
