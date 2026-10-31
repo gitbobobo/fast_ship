@@ -11,10 +11,7 @@ import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Check, Copy } from "lucide-react";
 import { cn, copyToClipboard } from "@/lib/utils";
-import {
-  splitIncompleteFence,
-  splitStableBlocks,
-} from "@/lib/bots/markdown-stream";
+import { splitStreamingMarkdown } from "@/lib/bots/markdown-stream";
 
 /** 从 code 元素的 children 里抽出纯文本（保留缩进与换行）。 */
 function codeText(children: ReactNode): string {
@@ -140,26 +137,31 @@ function hasVisibleContent(text: string): boolean {
 }
 
 /**
- * 流式正文的块拆分（INT-176）：splitStableBlocks 把全文切成「已完整的块
- * 前缀 stable + 待定尾部 tail」，stable 再按切分点切成块，每块交给 memo 化
- * 的 MarkdownBlock——稳定块每帧重新声明但 text 不变，React 直接跳过，于是
- * 只重解析正在生成的 tail 与最后一块，整段回复的解析总量从二次降为线性。
- * 单帧的 Markdown 解析量只与当前块长度有关，但仍有一次对累计全文的逐行
- * 扫描（splitStableBlocks 内部只扫行与几个正则，不解析 Markdown）：那就是
+ * 流式正文的块拆分（INT-176）：splitStreamingMarkdown 一次扫描给出已完整的
+ * 块前缀（按块切开）与待重解析的尾部，每块交给 memo 化的 MarkdownBlock——
+ * 稳定块每帧重新声明但 text 不变，React 直接跳过，于是只重解析正在生成的
+ * 尾部与最后一块，整段回复的解析总量从二次降为线性。未闭合围栏的降级纯文本
+ * 段来自同一份扫描结果，不再有第二套围栏状态。
+ * 单帧的 Markdown 解析量只与当前块长度有关，但仍有一次对累计全文的逐行扫描
+ *（splitStreamingMarkdown 内部只扫行与几个正则，不解析 Markdown）：那就是
  * 流式渲染剩下的全部全量成本，实测 27KB 回复按 40 字符一帧（671 帧）累计
  * 扫描约 28ms、均值 0.04ms/帧，不构成瓶颈。切分点只落在语义独立的块边界（见
- * splitStableBlocks 注释），因此分块渲染的 DOM 与整段解析一致，由
+ * splitStreamingMarkdown 注释），因此分块渲染的 DOM 与整段解析一致，由
  * 等价性测试锁定。
  *
  * 只在流式时有意义：非流式正文一次解析就够，不必再扫描切分点（同一条消息
  * 每次重渲染都会调用到这里，跳过扫描省掉一次不必要的全文遍历）。
  */
-function useStreamingBlocks(text: string, streaming: boolean) {
+function useStreamingSplit(text: string, streaming: boolean) {
   return useMemo(
     () =>
       streaming
-        ? splitStableBlocks(text)
-        : { segments: [] as string[], tail: text },
+        ? splitStreamingMarkdown(text)
+        : {
+            segments: [] as string[],
+            tailMarkdown: text,
+            tailPlain: null as string | null,
+          },
     [text, streaming],
   );
 }
@@ -168,8 +170,9 @@ function useStreamingBlocks(text: string, streaming: boolean) {
  * 机器人正文的 Markdown 渲染：GFM 子集（标题/列表/表格/代码/引用/链接/
  * 分隔线），不解析原始 HTML、不渲染图片、链接一律新窗口且不带 referrer。
  * streaming 时只重解析尾部（INT-176）：稳定块前缀按块 memo 跳过重解析，
- * 未闭合围栏仍按既有行为降级为纯文本展示，闭合后自动升级；分块渲染与
- * 整段解析的 DOM 由等价性测试锁定一致。非流式保持单次全量渲染。user 消息仍走纯文本。
+ * 未闭合围栏降级为纯文本展示，闭合后自动升级；含原始 HTML（行首 `<`）或
+ * 引用/脚注定义（行首 `[`）的回复不分块，整段解析（与非流式一致）。分块渲染
+ * 与整段解析的 DOM 由等价性测试锁定一致。非流式保持单次全量渲染。user 消息仍走纯文本。
  */
 export const BotMarkdown = memo(function BotMarkdown({
   text,
@@ -180,10 +183,10 @@ export const BotMarkdown = memo(function BotMarkdown({
   streaming?: boolean;
   className?: string;
 }) {
-  const { segments, tail } = useStreamingBlocks(text, streaming);
-  const { complete, openTail } = streaming
-    ? splitIncompleteFence(tail)
-    : { complete: text, openTail: null };
+  const { segments, tailMarkdown, tailPlain } = useStreamingSplit(
+    text,
+    streaming,
+  );
 
   // 拼接输出：整段解析时相邻顶层块之间夹一个 "\n" 文本节点（mdast→hast
   // 的 wrap），分块后在这里补回，DOM 才与整段解析逐字节一致。不含可见内容
@@ -193,24 +196,20 @@ export const BotMarkdown = memo(function BotMarkdown({
   // 每个元素都带 key：同一层数组里混用有 key/无 key 的元素会触发 React 的
   // key 警告。
   const rendered: ReactNode[] = [];
-  if (streaming) {
-    segments.forEach((segment, index) => {
-      if (!hasVisibleContent(segment)) return;
-      if (rendered.length > 0) rendered.push("\n");
-      // key 用 segment 下标：同一块的位置在增长过程中不变，memo 才能命中。
-      rendered.push(<MarkdownBlock key={index} text={segment} />);
-    });
-    if (hasVisibleContent(complete)) {
-      if (rendered.length > 0) rendered.push("\n");
-      rendered.push(<MarkdownBlock key="tail" text={complete} />);
-    }
-  } else {
-    rendered.push(<MarkdownBlock key="whole" text={complete} />);
+  segments.forEach((segment, index) => {
+    if (!hasVisibleContent(segment)) return;
+    if (rendered.length > 0) rendered.push("\n");
+    // key 用 segment 下标：同一块的位置在增长过程中不变，memo 才能命中。
+    rendered.push(<MarkdownBlock key={index} text={segment} />);
+  });
+  if (hasVisibleContent(tailMarkdown)) {
+    if (rendered.length > 0) rendered.push("\n");
+    rendered.push(<MarkdownBlock key="tail" text={tailMarkdown} />);
   }
-  if (openTail !== null) {
+  if (tailPlain !== null) {
     rendered.push(
       <div key="open-tail" className="whitespace-pre-wrap">
-        {openTail}
+        {tailPlain}
       </div>,
     );
   }

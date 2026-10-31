@@ -6,7 +6,7 @@ import { BotMarkdown } from "./bot-markdown";
 // 统计 ReactMarkdown 的调用次数与入参：分块缓存的目的是让已稳定的块不再
 // 重新解析，这条断言直接锁住「整段回复的 Markdown 解析总量随长度线性增长，
 // 而不是每帧重解析全文」。注意它只锁解析量：每帧仍有一次对累计全文的逐行
-// 扫描（splitStableBlocks 内的 scanBlocks，不解析 Markdown）。
+// 扫描（splitStreamingMarkdown 内的 scanSource，不解析 Markdown）。
 // mock 工厂里不用 JSX（工厂被提升到 import 之前），改用 createElement。
 const parses = vi.hoisted(() => ({ texts: [] as string[] }));
 
