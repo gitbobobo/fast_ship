@@ -315,7 +315,56 @@ func newService(cacheRoot string, cfg serviceConfig) *ProxyService {
 		download:          make(map[string]chan struct{}),
 	}
 	s.purgeLegacyCacheEntries()
+	s.startExpiredSweeper()
 	return s
+}
+
+// expiredSweepInterval 目录过期扫描的间隔。读路径不再删文件（见
+// getCachedNormalized），过期条目由这里低频回收：每次扫描删掉已过期的
+// meta/data；「不再被成功重下」的条目（上游已删、永久 415）也由此退役，
+// 缓存目录不会只增不减。
+const expiredSweepInterval = 6 * time.Hour
+
+// startExpiredSweeper 启动即扫一遍，之后按固定间隔后台扫。失败静默：扫描是
+// 保洁，不构成任何请求路径的前置条件；删除用 os.Remove，只删已过期条目，
+// 正在与写盘竞争的 key 由下载闸保证写侧原子发布（rename+WriteFile 完成后才
+// 可见），扫到一半被覆盖最坏是多删一次已失效文件。
+func (s *ProxyService) startExpiredSweeper() {
+	go func() {
+		s.sweepExpiredEntries()
+		for {
+			time.Sleep(expiredSweepInterval)
+			s.sweepExpiredEntries()
+		}
+	}()
+}
+
+// sweepExpiredEntries 扫一遍缓存目录，删掉已过期的条目。meta 是唯一事实源
+// （data 由 meta 的存在性背书），只读 meta 判断；meta 读不了/解析不了的孤儿
+// 文件留待人工或下次覆盖，不猜。
+func (s *ProxyService) sweepExpiredEntries() {
+	entries, err := os.ReadDir(s.cacheDir)
+	if err != nil {
+		return
+	}
+	now := time.Now().UTC()
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		metaPath := filepath.Join(s.cacheDir, name)
+		data, err := os.ReadFile(metaPath)
+		if err != nil {
+			continue
+		}
+		var entry cacheEntry
+		if json.Unmarshal(data, &entry) != nil || !entry.expired(now) {
+			continue
+		}
+		_ = os.Remove(metaPath)
+		_ = os.Remove(filepath.Join(s.cacheDir, strings.TrimSuffix(name, ".json")+".bin"))
+	}
 }
 
 // legacyScopeMarker scope 进缓存键之前的存量条目不可信标记：老条目的 meta
@@ -947,18 +996,16 @@ func (s *ProxyService) getCachedNormalized(normalized, scope string) (*CachedMed
 
 	metaBytes, err := os.ReadFile(metaPath)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, false, nil
-		}
-		// 其余读失败（权限、目录损坏）降级：best-effort 清掉这一条，清得掉按
-		// miss 走重下，清不掉才上报（见 discardCacheEntry）。
-		return s.discardCacheEntry(metaPath, cachePath)
+		// ErrNotExist 是正常 miss；其余读失败（权限、目录损坏）同样按 miss——
+		// 读路径不删文件（见下），下次读取还是 miss，重下后按同一 key 覆盖。
+		return nil, false, nil
 	}
 
 	var entry cacheEntry
 	if err := json.Unmarshal(metaBytes, &entry); err != nil {
-		_ = os.Remove(metaPath)
-		_ = os.Remove(cachePath)
+		// meta 损坏（可能撞上写侧 rename 与 WriteFile 之间的中间态）按 miss
+		// 处理，不在读路径删文件：删除会与同 key 写盘竞态，最坏抹掉刚发布的
+		// 新条目。写侧发布完成后 meta 是完整 JSON，本次 miss 重下即自愈。
 		return nil, false, nil
 	}
 
@@ -980,7 +1027,7 @@ func (s *ProxyService) getCachedNormalized(normalized, scope string) (*CachedMed
 	// 命中时按 miss 走重下，不靠 bump 缓存标记全量清目录（INT-171）。
 	// 不过关只返回 miss，不在读路径删文件：GetCached 不持下载锁，这里删
 	// meta/data 会与正在写盘的同 key 下载竞态，最坏删掉别人刚发布的新条目。
-	// 下一次成功下载按同一 key 覆盖 meta/data，TTL 到期由上面的检查清理。
+	// 下一次成功下载按同一 key 覆盖 meta/data，不再被重下的由目录扫描回收。
 	// meta 是单值小文件，多值歧义只在响应 header 判定里出现，这里直接走
 	// 单值判定。旧条目 ContentType 剥参小写后为空或 octet-stream 时保守判
 	// miss：它们的放行依赖扩展名，而扩展名要用重定向后的最终 URL 才算得对，
@@ -1003,13 +1050,9 @@ func (s *ProxyService) getCachedNormalized(normalized, scope string) (*CachedMed
 
 	info, err := os.Stat(cachePath)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			_ = os.Remove(metaPath)
-			return nil, false, nil
-		}
-		// meta 在而 data 读不到（权限、损坏）：同样降级重下，不把一次可自愈
-		// 的单条损坏上报成目录级故障。
-		return s.discardCacheEntry(metaPath, cachePath)
+		// meta 在而 data 缺失/读不到（可能撞上写侧两步发布的中间态）：只按
+		// miss，不在读路径删文件，重下自愈。
+		return nil, false, nil
 	}
 
 	entry.Size = info.Size()
@@ -1017,19 +1060,6 @@ func (s *ProxyService) getCachedNormalized(normalized, scope string) (*CachedMed
 		Metadata: entry,
 		Path:     cachePath,
 	}, true, nil
-}
-
-// discardCacheEntry 单条缓存不可读时的降级清理：best-effort 删除 meta 与 data，
-// 都清得掉（或本就不在）按 miss 返回，让本次请求走重下；清理失败说明是目录级
-// 故障（权限/磁盘），才以 ErrLocalCache 上报——降级不了的现场必须留错误，否
-// 则每次请求都静默重复同一失败且无法自愈。
-func (s *ProxyService) discardCacheEntry(metaPath, cachePath string) (*CachedMedia, bool, error) {
-	for _, err := range []error{os.Remove(metaPath), os.Remove(cachePath)} {
-		if err != nil && !errors.Is(err, os.ErrNotExist) {
-			return nil, false, markLocalCacheErr(err)
-		}
-	}
-	return nil, false, nil
 }
 
 // acquireDownloadLock 返回该 URL 的下载闸（容量 1 信号量）：发送成功即持有，

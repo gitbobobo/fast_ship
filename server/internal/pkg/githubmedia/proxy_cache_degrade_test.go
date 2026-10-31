@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -38,8 +39,7 @@ func seedCacheMeta(t *testing.T, svc *ProxyService, normalized, contentType stri
 	return metaPath
 }
 
-// meta 读失败（权限，非 ErrNotExist）：降级 best-effort 删除 meta+data，删除
-// 成功按 miss 返回（走重下），文件确实被清掉。
+// meta 读失败（权限，非 ErrNotExist）：按 miss 返回，读路径不删文件。
 func TestGetCachedDegradesUnreadableMetaToMiss(t *testing.T) {
 	svc := newService(t.TempDir(), serviceConfig{
 		cacheSubdir:  "review-screenshot-cache",
@@ -63,16 +63,16 @@ func TestGetCachedDegradesUnreadableMetaToMiss(t *testing.T) {
 	if ok || err != nil || cached != nil {
 		t.Fatalf("cached = %+v ok = %v err = %v, want miss 不报错（降级重下）", cached, ok, err)
 	}
-	if _, statErr := os.Stat(metaPath); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("meta stat = %v, want 已被降级清理", statErr)
+	if _, statErr := os.Stat(metaPath); statErr != nil {
+		t.Fatalf("meta stat = %v, want 文件仍在（读路径不删）", statErr)
 	}
-	if _, statErr := os.Stat(svc.dataPath(normalized, "")); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("data stat = %v, want 已被降级清理", statErr)
+	if _, statErr := os.Stat(svc.dataPath(normalized, "")); statErr != nil {
+		t.Fatalf("data stat = %v, want 文件仍在（读路径不删）", statErr)
 	}
 }
 
-// meta 正常但 data 不可 Stat（符号链接环，非 ErrNotExist 的失败）：同样降级
-// 为 miss 并清掉残留 meta。
+// meta 正常但 data 不可 Stat（符号链接环，非 ErrNotExist 的失败）：按 miss
+// 返回，读路径不删文件。
 func TestGetCachedDegradesUnstatableDataToMiss(t *testing.T) {
 	svc := newService(t.TempDir(), serviceConfig{
 		cacheSubdir:  "review-screenshot-cache",
@@ -94,24 +94,22 @@ func TestGetCachedDegradesUnstatableDataToMiss(t *testing.T) {
 	if ok || err != nil || cached != nil {
 		t.Fatalf("cached = %+v ok = %v err = %v, want miss 不报错（降级重下）", cached, ok, err)
 	}
-	if _, statErr := os.Stat(svc.metaPath(normalized, "")); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("meta stat = %v, want 已被降级清理", statErr)
+	if _, statErr := os.Stat(svc.metaPath(normalized, "")); statErr != nil {
+		t.Fatalf("meta stat = %v, want 文件仍在（读路径不删）", statErr)
 	}
 }
 
 // 清理都做不了（缓存目录不可写=目录级故障）：以 ErrLocalCache 上报，不再静
 // 默——静默的降级失败会在每次请求重复出现且无法自愈。
-func TestGetCachedReportsLocalCacheErrWhenDiscardFails(t *testing.T) {
-	root := t.TempDir()
-	svc := newService(root, serviceConfig{
+// meta 读失败（权限，非 ErrNotExist）降级为 miss：读路径不删文件（删除会与
+// 同 key 写盘竞态），下次读取仍 miss、重下后按同一 key 覆盖自愈。
+func TestGetCachedDegradesUnreadableMetaToMissWithoutRemoval(t *testing.T) {
+	svc := newService(t.TempDir(), serviceConfig{
 		cacheSubdir:  "review-screenshot-cache",
 		allowURL:     allowPublicImageHost,
 		requireHTTPS: true,
 	})
-	if err := os.MkdirAll(svc.cacheDir, 0o750); err != nil {
-		t.Fatalf("mkdir cache dir: %v", err)
-	}
-	normalized, err := svc.normalize("https://uiv.example.com/f/z.png")
+	normalized, err := svc.normalize("https://uiv.example.com/f/x.png")
 	if err != nil {
 		t.Fatalf("normalize: %v", err)
 	}
@@ -119,19 +117,69 @@ func TestGetCachedReportsLocalCacheErrWhenDiscardFails(t *testing.T) {
 	if err := os.Chmod(metaPath, 0o000); err != nil {
 		t.Fatalf("chmod meta: %v", err)
 	}
-	// 目录去掉写权限：Remove 必然失败。
-	if err := os.Chmod(svc.cacheDir, 0o550); err != nil {
-		t.Fatalf("chmod cache dir: %v", err)
+	t.Cleanup(func() { _ = os.Chmod(metaPath, 0o640) })
+	if err := os.WriteFile(svc.dataPath(normalized, ""), []byte("png"), 0o640); err != nil {
+		t.Fatalf("write data: %v", err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(svc.cacheDir, 0o750) })
 
-	if _, _, err := svc.getCachedNormalized(normalized, ""); !errors.Is(err, ErrLocalCache) {
-		t.Fatalf("err = %v, want ErrLocalCache（降级也失败=目录级故障）", err)
+	cached, ok, err := svc.GetCached(normalized)
+	if ok || err != nil || cached != nil {
+		t.Fatalf("cached = %+v ok = %v err = %v, want miss（读失败降级为 miss）", cached, ok, err)
+	}
+	if _, statErr := os.Stat(metaPath); statErr != nil {
+		t.Fatalf("meta stat = %v, want 文件仍在（读路径不删）", statErr)
 	}
 }
 
-// image/svg（不带 +xml 的非标准写法）与 image/svg+xml 一样拒：视觉审查只吃
-// 位图，svg 变体不能因为写法不标准就漏拒。
+// 目录过期扫描：删已过期条目（meta+data），未过期与损坏 meta 不动。
+func TestSweepExpiredEntriesRemovesOnlyExpired(t *testing.T) {
+	svc := newService(t.TempDir(), serviceConfig{
+		allowURL: func(u *url.URL) bool { return true },
+	})
+	now := time.Now().UTC()
+
+	write := func(name string, entry map[string]any) {
+		t.Helper()
+		data, err := json.Marshal(entry)
+		if err != nil {
+			t.Fatalf("marshal %s: %v", name, err)
+		}
+		if err := os.WriteFile(filepath.Join(svc.cacheDir, name), data, 0o640); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	past := now.Add(-time.Hour)
+	future := now.Add(time.Hour)
+	write("expired.json", map[string]any{"url": "https://x.test/a.png", "content_type": "image/png", "cached_at": past, "expires_at": past})
+	write("fresh.json", map[string]any{"url": "https://x.test/b.png", "content_type": "image/png", "cached_at": now, "expires_at": future})
+	if err := os.WriteFile(filepath.Join(svc.cacheDir, "broken.json"), []byte("{not json"), 0o640); err != nil {
+		t.Fatalf("write broken.json: %v", err)
+	}
+	for _, name := range []string{"expired", "fresh"} {
+		if err := os.WriteFile(filepath.Join(svc.cacheDir, name+".bin"), []byte("data"), 0o640); err != nil {
+			t.Fatalf("write %s bin: %v", name, err)
+		}
+	}
+
+	svc.sweepExpiredEntries()
+
+	if _, err := os.Stat(filepath.Join(svc.cacheDir, "expired.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expired.json stat = %v, want 已删除", err)
+	}
+	if _, err := os.Stat(filepath.Join(svc.cacheDir, "expired.bin")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expired.bin stat = %v, want 已删除", err)
+	}
+	if _, err := os.Stat(filepath.Join(svc.cacheDir, "fresh.json")); err != nil {
+		t.Fatalf("fresh.json stat = %v, want 保留", err)
+	}
+	if _, err := os.Stat(filepath.Join(svc.cacheDir, "fresh.bin")); err != nil {
+		t.Fatalf("fresh.bin stat = %v, want 保留", err)
+	}
+	if _, err := os.Stat(filepath.Join(svc.cacheDir, "broken.json")); err != nil {
+		t.Fatalf("broken.json stat = %v, want 保留（解析不了不猜）", err)
+	}
+}
+
 func TestScreenshotFaceRejectsSVGContentTypeVariants(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/svg")
