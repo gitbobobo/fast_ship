@@ -41,6 +41,12 @@ const reviewCommentWakeMention = "@fast-ship-bot"
 // 取失败（瞬时 DB 故障）透出错误——评论可能用了 @<slug>，静默回落字面量
 // 会让该唤醒被无声忽略且重投同样失败（codex 第 22 轮 P2：调用方按瞬时
 // 失败返回 500 让平台重投）。
+// mentionsSlugEntry mentionsSlugCache 的缓存项（App 句柄 + 过期时刻）。
+type mentionsSlugEntry struct {
+	slug    string
+	expires time.Time
+}
+
 // reviewMentionsCacheTTL App 句柄的缓存时长：订阅 issue_comment 后所有
 // 评论都进唤醒分支，逐条读取部署设置（DB 读 + AES 解密）是可被外部用户
 // 按评论线性放大的固定成本（fast-ship-bot 第 44 轮 P2）——短缓存把成本
@@ -61,18 +67,25 @@ func (s *ReviewService) commentWakeMentions(ctx context.Context) ([]string, bool
 	if s.appSource == nil {
 		return mentions, false, nil
 	}
-	type slugEntry struct {
-		slug    string
-		expires time.Time
-	}
 	if v, ok := s.mentionsSlugCache.Load("slug"); ok {
-		e := v.(slugEntry)
+		e := v.(mentionsSlugEntry)
 		if time.Now().UTC().Before(e.expires) {
 			if e.slug != "" {
 				mentions = append(mentions, "@"+strings.ToLower(e.slug))
 			}
 			return mentions, true, nil
 		}
+	}
+	return s.commentWakeMentionsFresh(ctx)
+}
+
+// commentWakeMentionsFresh 绕过缓存强制读取 App 身份并刷新缓存：缓存窗口
+// 内 slug 可能已变更（部署切换/重建 App），唤醒判定未命中时用它复核，新
+// 句柄的唤醒才不会被 202 静默吞掉（codex 第 47 轮 P2）。
+func (s *ReviewService) commentWakeMentionsFresh(ctx context.Context) ([]string, bool, error) {
+	mentions := []string{reviewCommentWakeMention}
+	if s.appSource == nil {
+		return mentions, false, nil
 	}
 	cfg, ok, err := s.appSource.Current(ctx)
 	if err != nil {
@@ -87,7 +100,7 @@ func (s *ReviewService) commentWakeMentions(ctx context.Context) ([]string, bool
 	}
 	// 读取成功（含「未配置」这一稳定态）都进缓存：未配置部署不必每条评
 	// 论重读；瞬时故障不缓存，下一轮读取恢复即可。
-	s.mentionsSlugCache.Store("slug", slugEntry{
+	s.mentionsSlugCache.Store("slug", mentionsSlugEntry{
 		slug:    cfg.AppSlug,
 		expires: time.Now().UTC().Add(reviewMentionsCacheTTL),
 	})
@@ -395,12 +408,23 @@ func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, ev
 	if payload == nil {
 		return false, nil
 	}
-	mentions, _, err := s.commentWakeMentions(ctx)
+	mentions, cached, err := s.commentWakeMentions(ctx)
 	if err != nil {
 		// 瞬时故障不落账：返回 500 让平台重投（重投时读取恢复即正常处理）。
 		return false, err
 	}
-	if !commentWakeMentioned(payload, mentions) {
+	mentioned := commentWakeMentioned(payload, mentions)
+	if !mentioned && cached && strings.Contains(strings.ToLower(payload.Comment.Body), "@") {
+		// 缓存窗口内 slug 可能已变更（部署切换/重建 App）：未命中且正文含
+		// @ 时强制刷新一次再判——新句柄的唤醒不得被 202 静默吞掉（codex
+		// 第 47 轮 P2）。仅对含 @ 的未命中投递触发，普通讨论评论不受影响。
+		mentions, _, err = s.commentWakeMentionsFresh(ctx)
+		if err != nil {
+			return false, err
+		}
+		mentioned = commentWakeMentioned(payload, mentions)
+	}
+	if !mentioned {
 		return false, nil
 	}
 

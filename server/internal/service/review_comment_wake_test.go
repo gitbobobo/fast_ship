@@ -2613,3 +2613,56 @@ func (c *countingAppSource) Current(context.Context) (GitHubAppConfig, bool, err
 	c.mu.Unlock()
 	return cfg, true, nil
 }
+
+// 缓存窗口内 slug 变更的复核（codex 第 47 轮 P2）：唤醒串未命中且正文含
+// @ 时强制刷新 App 身份再判——新句柄的唤醒不被 202 静默吞掉；不含 @ 的
+// 普通评论不受影响。
+func TestReviewCommentWakeCachedMissRefreshesSlug(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	e.enableReview(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	ctx := context.Background()
+	e.fake.SetPR(repo, 64, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 64, State: "open", HeadSHA: "sha-reslug",
+		HeadRepoFullName: repo,
+	})
+	counter := &countingAppSource{cfg: GitHubAppConfig{AppSlug: "Old-Slug"}}
+	e.review.appSource = counter
+
+	// 预热缓存（旧 slug Old-Slug）。
+	if _, _, err := e.review.commentWakeMentions(ctx); err != nil {
+		t.Fatalf("预热缓存: %v", err)
+	}
+	// 部署切换：slug 变为 New-Slug。
+	counter.mu.Lock()
+	counter.cfg = GitHubAppConfig{AppSlug: "New-Slug"}
+	counter.mu.Unlock()
+
+	// 用新句柄点名：缓存未命中 + 含 @ → 强制刷新 → 唤醒照常受理。
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-reslug",
+		issueCommentBody("@new-slug 请再审", repo, 64, 42)); err != nil {
+		t.Fatalf("新句柄点名应唤醒: %v", err)
+	}
+	counter.mu.Lock()
+	reads := counter.reads
+	counter.mu.Unlock()
+	if reads != 2 {
+		t.Fatalf("未命中应强制刷新一次: reads = %d", reads)
+	}
+	var run model.ReviewRun
+	if err := e.svc.db.Where("pr_number = 64").First(&run).Error; err != nil {
+		t.Fatalf("新句柄点名应开轮: %v", err)
+	}
+
+	// 不含 @ 的普通评论：不触发强制刷新（缓存照用）。
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-reslug-plain",
+		issueCommentBody("普通讨论，不需要审查", repo, 64, 42)); err != nil {
+		t.Fatalf("普通评论应忽略: %v", err)
+	}
+	counter.mu.Lock()
+	readsAfter := counter.reads
+	counter.mu.Unlock()
+	if readsAfter != reads {
+		t.Fatalf("不含 @ 的未命中不得强制刷新: %d -> %d", reads, readsAfter)
+	}
+}
