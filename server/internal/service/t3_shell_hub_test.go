@@ -2757,7 +2757,8 @@ func TestT3ShellHub_ExpiredArchiveUntrustedDuringRefetch(t *testing.T) {
 	// 放行重拉：写后快照落地恢复可信，归档集换成上游新状态。
 	srv.resumeArchive()
 	view = waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
-		return v.Snaps != nil && v.Snaps.ArchiveErr == nil && len(v.Snaps.Archived.Threads) == 1 && v.Snaps.Archived.Threads[0].ID == "th-b"
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil && len(v.Snaps.Archived.Threads) == 1 &&
+			v.Snaps.Archived.Threads[0].ID == "th-b"
 	})
 	_ = view
 }
@@ -3098,7 +3099,7 @@ func TestT3ShellHub_LegacyInvalidateTriggersReconnectRefetch(t *testing.T) {
 	go hub.View(context.Background(), env, "tok")
 	collector := newShellConnCollector(t, srv)
 	active := collector.await(false)
-	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1")); err != nil {
+	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1", "th-2", "th-x", "th-y")); err != nil {
 		t.Fatalf("send active snapshot: %v", err)
 	}
 	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
@@ -3282,7 +3283,7 @@ func TestT3ShellHub_LegacyReconnectPreservesNewerRequest(t *testing.T) {
 	go hub.View(context.Background(), env, "tok")
 	collector := newShellConnCollector(t, srv)
 	active := collector.await(false)
-	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1")); err != nil {
+	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1", "th-2", "th-x", "th-y")); err != nil {
 		t.Fatalf("send active snapshot: %v", err)
 	}
 	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
@@ -3403,7 +3404,7 @@ func TestT3ShellHub_LegacyStampTakenBeforeSubscribe(t *testing.T) {
 	go hub.View(context.Background(), env, "tok")
 	collector := newShellConnCollector(t, srv)
 	active := collector.await(false)
-	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1")); err != nil {
+	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1", "th-2", "th-x", "th-y")); err != nil {
 		t.Fatalf("send active snapshot: %v", err)
 	}
 	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
@@ -3670,7 +3671,7 @@ func TestT3ShellHub_LegacyPreChangeSnapshotStaysUntrusted(t *testing.T) {
 	go hub.View(context.Background(), env, "tok")
 	collector := newShellConnCollector(t, srv)
 	active := collector.await(false)
-	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1")); err != nil {
+	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1", "th-2", "th-x", "th-y")); err != nil {
 		t.Fatalf("send active snapshot: %v", err)
 	}
 	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
@@ -3723,7 +3724,7 @@ func TestT3ShellHub_LegacyMethodNotFoundResetsToUnknown(t *testing.T) {
 	go hub.View(context.Background(), env, "tok")
 	collector := newShellConnCollector(t, srv)
 	active := collector.await(false)
-	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1")); err != nil {
+	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1", "th-2", "th-x", "th-y")); err != nil {
 		t.Fatalf("send active snapshot: %v", err)
 	}
 	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
@@ -3796,7 +3797,7 @@ func TestT3ShellHub_LegacyHealsToSnapshotAfterUpgrade(t *testing.T) {
 	go hub.View(context.Background(), env, "tok")
 	collector := newShellConnCollector(t, srv)
 	active := collector.await(false)
-	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1")); err != nil {
+	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1", "th-2", "th-x", "th-y")); err != nil {
 		t.Fatalf("send active snapshot: %v", err)
 	}
 	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
@@ -3884,7 +3885,7 @@ func TestT3ShellHub_BothArchiveMethodsMissingDamPerReadReprobe(t *testing.T) {
 	go hub.View(context.Background(), env, "tok")
 	collector := newShellConnCollector(t, srv)
 	active := collector.await(false)
-	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1")); err != nil {
+	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1", "th-2", "th-x", "th-y")); err != nil {
 		t.Fatalf("send active snapshot: %v", err)
 	}
 	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
@@ -3948,7 +3949,7 @@ func TestT3ShellHub_LegacyNonMethodExitDoesNotReset(t *testing.T) {
 	go hub.View(context.Background(), env, "tok")
 	collector := newShellConnCollector(t, srv)
 	active := collector.await(false)
-	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1")); err != nil {
+	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1", "th-2", "th-x", "th-y")); err != nil {
 		t.Fatalf("send active snapshot: %v", err)
 	}
 	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
@@ -4022,7 +4023,7 @@ func TestT3ShellHub_LegacyVoluntaryReconnectDoesNotBackoff(t *testing.T) {
 	go hub.View(context.Background(), env, "tok")
 	collector := newShellConnCollector(t, srv)
 	active := collector.await(false)
-	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1")); err != nil {
+	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1", "th-2", "th-x", "th-y")); err != nil {
 		t.Fatalf("send active snapshot: %v", err)
 	}
 	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
@@ -4113,7 +4114,7 @@ func TestT3ShellHub_LegacyHealQuietAfterUpgrade(t *testing.T) {
 	go hub.View(context.Background(), env, "tok")
 	collector := newShellConnCollector(t, srv)
 	active := collector.await(false)
-	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1")); err != nil {
+	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1", "th-2", "th-x", "th-y")); err != nil {
 		t.Fatalf("send active snapshot: %v", err)
 	}
 	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
@@ -4887,8 +4888,10 @@ func TestT3ShellHub_LegacyActiveRemovalDoesNotReconnectArchive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("peek: %v", err)
 	}
-	if view.Snaps == nil || view.Snaps.ArchiveErr != nil {
-		t.Fatalf("legacy archive face must stay trusted, got %+v", view.Snaps)
+	// 归档集被标记为暂不可信（跟进 PR②）：活跃面先宣告离开、归档增量未到，
+	// 这段窗口不得让并发 wait 把「两面都没有」当可信结论。旧行保留、不断流。
+	if view.Snaps == nil || !errors.Is(view.Snaps.ArchiveErr, errT3ShellArchiveStale) {
+		t.Fatalf("legacy archive membership must be marked uncertain, got %+v", view.Snaps)
 	}
 	if len(view.Snaps.Archived.Threads) != 1 || view.Snaps.Archived.Threads[0].ID != "th-a" {
 		t.Fatalf("legacy archive rows must be retained, got %+v", view.Snaps.Archived.Threads)
@@ -5024,4 +5027,490 @@ func TestT3ShellHub_EnsurePrewarmsArchiveSnapshot(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+// 订阅模式活跃面移除：不断流，但归档集暂不可信（跟进 PR②，Codex :608）。
+// 活跃面与归档订阅是两条流，顺序无保证——别的客户端归档线程时，active 的
+// thread.removed 可能先于 archived 的 thread.updated 到达；这段窗口里若
+// ArchiveErr 仍是 nil，并发 bot wait 会把「两面都没有」当可信结论误判
+// thread_gone。标记只影响可信度（旧行保留），增量到达即恢复。
+func TestT3ShellHub_LegacyActiveRemovalMarksMembershipUncertain(t *testing.T) {
+	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
+	srv.setArchiveLegacy(true)
+	srv.setArchiveFixture(archiveSnapshotBody(1, "th-a"), nil)
+	cfg := hubTestConfig()
+	cfg.ArchiveStaleGrace = 1200 * time.Millisecond
+	hub := newT3ShellHubWithConfig(cfg, nil)
+	defer hub.Close()
+	env := hubTestEnv(url, 0)
+
+	// View 触发建连；活跃面与订阅面各自成为常驻连接。
+	go hub.View(context.Background(), env, "tok")
+	collector := newShellConnCollector(t, srv)
+	active := collector.await(false)
+	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1", "th-2")); err != nil {
+		t.Fatalf("send active snapshot: %v", err)
+	}
+	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
+		t.Fatalf("active snapshot not acked")
+	}
+	archiveSub := srv.awaitArchiveSub(t)
+	archiveConn := <-srv.archiveConns
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil && len(v.Snaps.Archived.Threads) == 1
+	})
+	subsBefore := srv.archiveSubscribeCount()
+	if archiveConn.awaitClosed(50 * time.Millisecond) {
+		t.Fatalf("legacy archive subscription must stay open before any active removal")
+	}
+
+	// 活跃面宣告 th-2 离开（模拟别的客户端归档），归档增量尚未到达。
+	removed, _ := json.Marshal(map[string]any{
+		"kind": "thread.removed", "sequence": 43, "threadId": "th-2",
+	})
+	if err := active.conn.sendValue(active.sub.ID, removed); err != nil {
+		t.Fatalf("send active removal: %v", err)
+	}
+	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
+		t.Fatalf("active removal not acked")
+	}
+
+	// 不断流：不重连、连接仍活；但归档集暂不可信（旧行保留）。
+	view := waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && errors.Is(v.Snaps.ArchiveErr, errT3ShellArchiveStale)
+	})
+	if len(view.Snaps.Archived.Threads) != 1 || view.Snaps.Archived.Threads[0].ID != "th-a" {
+		t.Fatalf("uncertain membership must keep the last rows, got %+v", view.Snaps.Archived.Threads)
+	}
+	if got := srv.archiveSubscribeCount(); got != subsBefore {
+		t.Fatalf("active removal must not reconnect the legacy archive subscription, subs %d → %d", subsBefore, got)
+	}
+	if archiveConn.awaitClosed(200 * time.Millisecond) {
+		t.Fatalf("active removal must not tear down the healthy legacy archive stream")
+	}
+
+	// 无关线程的归档增量不算对账（Codex #156 R1）：th-2 的归属仍未知，
+	// 可信度不得被别人的增量提前恢复。
+	thA, _ := json.Marshal(map[string]any{
+		"id": "th-a", "projectId": "p-1", "title": "归档-th-a", "status": "idle",
+		"archivedAt": "2026-10-01T00:00:00.000Z",
+	})
+	unrelated, _ := json.Marshal(map[string]any{"kind": "thread.updated", "sequence": 43, "thread": json.RawMessage(thA)})
+	if err := archiveConn.sendValue(archiveSub.ID, unrelated); err != nil {
+		t.Fatalf("send unrelated archive delta: %v", err)
+	}
+	time.Sleep(150 * time.Millisecond)
+	if v, err := hub.Peek(env, "tok"); err != nil {
+		t.Fatalf("peek: %v", err)
+	} else if v.Snaps == nil || !errors.Is(v.Snaps.ArchiveErr, errT3ShellArchiveStale) {
+		t.Fatalf("unrelated archive delta must not restore trust for th-2, got %+v", v.Snaps)
+	}
+
+	// th-2 自己的归档增量到达：行会进列表，但**不解账**（#156 R15，可能来自
+	// 更早一轮归档周期），可信度仍在宽限期内保持 stale。
+	thB, _ := json.Marshal(map[string]any{
+		"id": "th-2", "projectId": "p-1", "title": "归档-th-2", "status": "idle",
+		"archivedAt": "2026-10-01T00:00:00.000Z",
+	})
+	delta, _ := json.Marshal(map[string]any{"kind": "thread.updated", "sequence": 44, "thread": json.RawMessage(thB)})
+	if err := archiveConn.sendValue(archiveSub.ID, delta); err != nil {
+		t.Fatalf("send archive delta: %v", err)
+	}
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		for _, th := range v.Snaps.Archived.Threads {
+			if th.ID == "th-2" {
+				return true
+			}
+		}
+		return false
+	})
+	if v, err := hub.Peek(env, "tok"); err != nil {
+		t.Fatalf("peek: %v", err)
+	} else if !errors.Is(v.Snaps.ArchiveErr, errT3ShellArchiveStale) {
+		t.Fatalf("an archive delta must not settle the uncertainty, got %v", v.Snaps.ArchiveErr)
+	}
+
+	// 宽限到期后自愈。
+	view = waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil
+	})
+	if len(view.Snaps.Archived.Threads) != 2 {
+		t.Fatalf("both archived threads must survive, got %+v", view.Snaps.Archived.Threads)
+	}
+}
+
+// 归属不确定到期必须发事件（#156 R2）：线程可能被彻底删除、永远等不到归档
+// 增量；若只在读路径懒清，打开中的页面会一直停在降级态（use-threads 不轮询）。
+func TestT3ShellHub_LegacyMembershipUncertainExpiryAnnounces(t *testing.T) {
+	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
+	srv.setArchiveLegacy(true)
+	srv.setArchiveFixture(archiveSnapshotBody(1, "th-a"), nil)
+	cfg := hubTestConfig()
+	cfg.ArchiveStaleGrace = 120 * time.Millisecond
+	hub := newT3ShellHubWithConfig(cfg, nil)
+	defer hub.Close()
+	env := hubTestEnv(url, 0)
+
+	sub := hub.Subscribe("user-1")
+	defer sub.Close()
+
+	go hub.View(context.Background(), env, "tok")
+	collector := newShellConnCollector(t, srv)
+	active := collector.await(false)
+	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1", "th-2", "th-x", "th-y")); err != nil {
+		t.Fatalf("send active snapshot: %v", err)
+	}
+	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
+		t.Fatalf("active snapshot not acked")
+	}
+	srv.awaitArchiveSub(t)
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil && len(v.Snaps.Archived.Threads) == 1
+	})
+	sub.Drain()
+
+	// 活跃面宣告离开，归档面没有任何增量（模拟被彻底删除）。
+	removed, _ := json.Marshal(map[string]any{"kind": "thread.removed", "sequence": 43, "threadId": "th-2"})
+	if err := active.conn.sendValue(active.sub.ID, removed); err != nil {
+		t.Fatalf("send active removal: %v", err)
+	}
+	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
+		t.Fatalf("active removal not acked")
+	}
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && errors.Is(v.Snaps.ArchiveErr, errT3ShellArchiveStale)
+	})
+	// 到期：必须发一条恢复事件（不需要任何读取或归档增量）。
+	ev := awaitShellEvent(t, sub, func(e T3ShellEvent) bool { return !e.Full && e.State != "" })
+	if ev.EnvironmentID != env.ID {
+		t.Fatalf("expiry recovery event environment = %q, want %q", ev.EnvironmentID, env.ID)
+	}
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil
+	})
+}
+
+// 同一宽限窗口内两次移除都必须到期自愈（#156 R3-P1）：第二次登记不会翻转
+// archiveErr，若因此跳过定时器调度，那批 ID 永远等不到清理，归档面永久 stale。
+func TestT3ShellHub_LegacyMembershipUncertainSecondBatchExpires(t *testing.T) {
+	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
+	srv.setArchiveLegacy(true)
+	srv.setArchiveFixture(archiveSnapshotBody(1, "th-a"), nil)
+	cfg := hubTestConfig()
+	cfg.ArchiveStaleGrace = 150 * time.Millisecond
+	hub := newT3ShellHubWithConfig(cfg, nil)
+	defer hub.Close()
+	env := hubTestEnv(url, 0)
+
+	go hub.View(context.Background(), env, "tok")
+	collector := newShellConnCollector(t, srv)
+	active := collector.await(false)
+	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1", "th-2", "th-x", "th-y")); err != nil {
+		t.Fatalf("send active snapshot: %v", err)
+	}
+	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
+		t.Fatalf("active snapshot not acked")
+	}
+	srv.awaitArchiveSub(t)
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil && len(v.Snaps.Archived.Threads) > 0
+	})
+
+	sendRemoval := func(seq int, id string) {
+		t.Helper()
+		removed, _ := json.Marshal(map[string]any{"kind": "thread.removed", "sequence": seq, "threadId": id})
+		if err := active.conn.sendValue(active.sub.ID, removed); err != nil {
+			t.Fatalf("send removal %s: %v", id, err)
+		}
+		if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
+			t.Fatalf("removal %s not acked", id)
+		}
+	}
+
+	sendRemoval(43, "th-x")
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && errors.Is(v.Snaps.ArchiveErr, errT3ShellArchiveStale)
+	})
+	// 同一宽限窗口内的第二批（不翻转可信度）：也必须有自己的到期清理。
+	time.Sleep(60 * time.Millisecond)
+	sendRemoval(44, "th-y")
+
+	// 两批都到期后必须恢复可信（不需要任何归档增量）。
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil
+	})
+}
+
+// 同一 ID 在待对账期间「回到活跃面再离开」要重新登记并重新调度（#156 R4/R12）：
+// 旧实现只续期、且不看活跃面成员关系，这条路径没被真正验证；现在回到活跃面
+// 会先解账（活跃优先），再次离开才重新登记——新截止时刻必须由新的定时器兑现。
+func TestT3ShellHub_LegacyMembershipUncertainRefreshReschedules(t *testing.T) {
+	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
+	srv.setArchiveLegacy(true)
+	srv.setArchiveFixture(archiveSnapshotBody(1, "th-a"), nil)
+	cfg := hubTestConfig()
+	cfg.ArchiveStaleGrace = 200 * time.Millisecond
+	hub := newT3ShellHubWithConfig(cfg, nil)
+	defer hub.Close()
+	env := hubTestEnv(url, 0)
+
+	go hub.View(context.Background(), env, "tok")
+	collector := newShellConnCollector(t, srv)
+	active := collector.await(false)
+	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1", "th-x")); err != nil {
+		t.Fatalf("send active snapshot: %v", err)
+	}
+	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
+		t.Fatalf("active snapshot not acked")
+	}
+	srv.awaitArchiveSub(t)
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil
+	})
+
+	sendRemoval := func(seq int, id string) {
+		t.Helper()
+		removed, _ := json.Marshal(map[string]any{"kind": "thread.removed", "sequence": seq, "threadId": id})
+		if err := active.conn.sendValue(active.sub.ID, removed); err != nil {
+			t.Fatalf("send removal %s: %v", id, err)
+		}
+		if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
+			t.Fatalf("removal %s not acked", id)
+		}
+	}
+	sendSnapshot := func(seq int, ids ...string) {
+		t.Helper()
+		if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(seq, ids...)); err != nil {
+			t.Fatalf("send active snapshot: %v", err)
+		}
+		if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
+			t.Fatalf("active snapshot not acked")
+		}
+	}
+
+	// t≈0：离开活跃面 → 登记（截止 ≈ +200ms）。
+	sendRemoval(43, "th-x")
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && errors.Is(v.Snaps.ArchiveErr, errT3ShellArchiveStale)
+	})
+
+	// t≈100ms：活跃快照把它带回来 → 立即解账、恢复可信（活跃优先）。
+	time.Sleep(100 * time.Millisecond)
+	sendSnapshot(44, "th-1", "th-x")
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil
+	})
+
+	// t≈110ms：再次离开 → 重新登记（截止 ≈ +310ms）。
+	sendRemoval(45, "th-x")
+
+	// t≈250ms：第一次的截止（200ms）早已过；若没有为第二次重新调度，这里会
+	// 已恢复可信。仍须 stale 才证明新定时器生效。
+	time.Sleep(140 * time.Millisecond)
+	if v, err := hub.Peek(env, "tok"); err != nil {
+		t.Fatalf("peek: %v", err)
+	} else if v.Snaps == nil || !errors.Is(v.Snaps.ArchiveErr, errT3ShellArchiveStale) {
+		t.Fatalf("the second removal must schedule its own settle, got %+v", v.Snaps)
+	}
+
+	// 等第二次截止到期后恢复可信。
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil
+	})
+}
+
+// 不在活跃面的移除是噪声，不得登记待对账（#156 R9/R10）：真实链路（hub 帧后
+// 回调）也要过滤，否则订阅模式环境会被重复移除持续降级并无限续期。
+func TestT3ShellHub_LegacyNoiseRemovalDoesNotDegrade(t *testing.T) {
+	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
+	srv.setArchiveLegacy(true)
+	srv.setArchiveFixture(archiveSnapshotBody(1, "th-a"), nil)
+	hub := newT3ShellHubWithConfig(hubTestConfig(), nil)
+	defer hub.Close()
+	env := hubTestEnv(url, 0)
+
+	sub := hub.Subscribe("user-1")
+	defer sub.Close()
+
+	go hub.View(context.Background(), env, "tok")
+	collector := newShellConnCollector(t, srv)
+	active := collector.await(false)
+	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1")); err != nil {
+		t.Fatalf("send active snapshot: %v", err)
+	}
+	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
+		t.Fatalf("active snapshot not acked")
+	}
+	srv.awaitArchiveSub(t)
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil
+	})
+	sub.Drain()
+
+	// th-ghost 不在活跃面：重复移除是噪声。
+	ghost, _ := json.Marshal(map[string]any{"kind": "thread.removed", "sequence": 43, "threadId": "th-ghost"})
+	if err := active.conn.sendValue(active.sub.ID, ghost); err != nil {
+		t.Fatalf("send noise removal: %v", err)
+	}
+	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
+		t.Fatalf("noise removal not acked")
+	}
+
+	time.Sleep(150 * time.Millisecond)
+	if v, err := hub.Peek(env, "tok"); err != nil {
+		t.Fatalf("peek: %v", err)
+	} else if v.Snaps == nil || v.Snaps.ArchiveErr != nil {
+		t.Fatalf("noise removal must not degrade the archive face, got %+v", v.Snaps)
+	}
+	for _, ev := range sub.Drain() {
+		if ev.Full || ev.State != "" {
+			t.Fatalf("noise removal must not publish archive-face events, got %+v", ev)
+		}
+	}
+}
+
+// 活跃流以 location!="active" 的 thread.updated 传递归档迁移时，同样要按 ID
+// 记账并有到期清理（#156 R11）：armed 路径登记后若 hub 拿不到 ID，就不会调度
+// 定时器也不发事件，归档面会停在无定时器、无通知的 stale 上。
+func TestT3ShellHub_LegacyArchiveLocatedUpdateRecovers(t *testing.T) {
+	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
+	srv.setArchiveLegacy(true)
+	srv.setArchiveFixture(archiveSnapshotBody(1, "th-a"), nil)
+	cfg := hubTestConfig()
+	cfg.ArchiveStaleGrace = 120 * time.Millisecond
+	hub := newT3ShellHubWithConfig(cfg, nil)
+	defer hub.Close()
+	env := hubTestEnv(url, 0)
+
+	go hub.View(context.Background(), env, "tok")
+	collector := newShellConnCollector(t, srv)
+	active := collector.await(false)
+	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1")); err != nil {
+		t.Fatalf("send active snapshot: %v", err)
+	}
+	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
+		t.Fatalf("active snapshot not acked")
+	}
+	srv.awaitArchiveSub(t)
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil
+	})
+
+	archived, _ := json.Marshal(map[string]any{
+		"kind": "thread.updated", "sequence": 43, "location": "archive",
+		"thread": map[string]any{"id": "th-1", "projectId": "p-1", "title": "th-1", "status": "idle", "archivedAt": "2026-10-01T00:00:00.000Z"},
+	})
+	if err := active.conn.sendValue(active.sub.ID, archived); err != nil {
+		t.Fatalf("send archive-located update: %v", err)
+	}
+	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
+		t.Fatalf("archive-located update not acked")
+	}
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && errors.Is(v.Snaps.ArchiveErr, errT3ShellArchiveStale)
+	})
+	// 到期必须自愈（有定时器），不需要归档增量。
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil
+	})
+}
+
+// 连续移除不得把早期条目的清理顺延（#156 R23 P1）：定时器按最早截止时刻排程，
+// 否则间隔小于宽限的连续移除会让定时器永远不到期，归档面永久 stale 且集合
+// 无界增长。
+func TestT3ShellHub_MembershipSettleNotStarvedByNewRemovals(t *testing.T) {
+	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
+	srv.setArchiveLegacy(true)
+	srv.setArchiveFixture(archiveSnapshotBody(1, "th-a"), nil)
+	cfg := hubTestConfig()
+	cfg.ArchiveStaleGrace = 120 * time.Millisecond
+	hub := newT3ShellHubWithConfig(cfg, nil)
+	defer hub.Close()
+	env := hubTestEnv(url, 0)
+
+	go hub.View(context.Background(), env, "tok")
+	collector := newShellConnCollector(t, srv)
+	active := collector.await(false)
+	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1", "th-2", "th-3", "th-4")); err != nil {
+		t.Fatalf("send active snapshot: %v", err)
+	}
+	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
+		t.Fatalf("active snapshot not acked")
+	}
+	srv.awaitArchiveSub(t)
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil
+	})
+
+	// 每 40ms 移走一个（间隔远小于 120ms 宽限）：旧实现在这里永不恢复。
+	for i, id := range []string{"th-1", "th-2", "th-3", "th-4"} {
+		removed, _ := json.Marshal(map[string]any{"kind": "thread.removed", "sequence": 43 + i, "threadId": id})
+		if err := active.conn.sendValue(active.sub.ID, removed); err != nil {
+			t.Fatalf("send removal %s: %v", id, err)
+		}
+		if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
+			t.Fatalf("removal %s not acked", id)
+		}
+		time.Sleep(40 * time.Millisecond)
+	}
+
+	// 关键断言：连续移除期间，早期条目必须按**自己的**截止时刻被清掉，不能
+	// 被后来的登记一直顺延（旧实现在这里是 4 条全在，且流继续就永不清理）。
+	time.Sleep(60 * time.Millisecond)
+	var entry *t3ShellEntry
+	for _, e := range hub.entries {
+		entry = e
+	}
+	if entry == nil {
+		t.Fatalf("entry not found")
+	}
+	if pending := entry.state.pendingArchiveUncertain(); pending > 1 {
+		t.Fatalf("earlier removals must expire on their own deadlines, still pending=%d", pending)
+	}
+
+	// 全部到期后归档面恢复可信。
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil
+	})
+}
+
+// 归档流自己登记的待对账也要排到期清理（#156 R25）：这条路径不经过活跃面的
+// 帧后回调，若不补排定时器，条目只能等下一次活跃移除，面会一直 stale。
+func TestT3ShellHub_ArchiveSideRemovalSettles(t *testing.T) {
+	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
+	srv.setArchiveLegacy(true)
+	srv.setArchiveFixture(archiveSnapshotBody(1, "th-2"), nil)
+	cfg := hubTestConfig()
+	cfg.ArchiveStaleGrace = 300 * time.Millisecond
+	hub := newT3ShellHubWithConfig(cfg, nil)
+	defer hub.Close()
+	env := hubTestEnv(url, 0)
+
+	go hub.View(context.Background(), env, "tok")
+	collector := newShellConnCollector(t, srv)
+	active := collector.await(false)
+	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(42, "th-1")); err != nil {
+		t.Fatalf("send active snapshot: %v", err)
+	}
+	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
+		t.Fatalf("active snapshot not acked")
+	}
+	archiveSub := srv.awaitArchiveSub(t)
+	archiveConn := <-srv.archiveConns
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil
+	})
+
+	// 归档流删掉 th-2（它不在活跃面）→ 归属未知。
+	removed, _ := json.Marshal(map[string]any{"kind": "thread.removed", "sequence": 43, "threadId": "th-2"})
+	if err := archiveConn.sendValue(archiveSub.ID, removed); err != nil {
+		t.Fatalf("send archive removal: %v", err)
+	}
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && errors.Is(v.Snaps.ArchiveErr, errT3ShellArchiveStale)
+	})
+	// 必须在自己的宽限到期后自愈（不依赖活跃面的下一次移除）。
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil
+	})
 }

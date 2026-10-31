@@ -2,8 +2,10 @@ package service
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
+	"time"
 )
 
 // T3 shell 订阅的纯内存状态（INT-116）：活跃 / 归档两面各自维护 map+order。
@@ -183,6 +185,27 @@ type t3ShellState struct {
 	// 「冷启动无快照」（清表只发生在后者）；下一次可信快照应用成功时
 	// 清除。
 	archiveStale bool
+	// archiveUncertain 是「归档归属待对账」的线程集合（ID → 自愈截止时刻，
+	// 跟进 PR② / #156 R1）：订阅模式下活跃面宣告线程离开、而归档增量还没
+	// 到时登记，非空期间归档面报 stale（不是完整结论）。按 ID 记账，无关线程的
+	// 增量不会替它解账；解除只有三条路径——含该线程的权威全量快照、线程在活跃面
+	// 回现、宽限到期（归档增量不解账，见 #156 R15）。守 s.mu。
+	archiveUncertain map[string]time.Time
+	// archiveUncertainSince 记每个待对账 ID 的登记时刻（#156 R16）：只有**晚于**
+	// 该时刻采集的归档快照才能算作它的对账证据——重连快照可能在移除之前就已
+	// 采好、之后才送达，把它的包含关系当作「本轮已对账」会误清标记。
+	archiveUncertainSince map[string]time.Time
+	// archiveFreshnessFloor 是「最近一次归属变更」的时刻下界（#156 R28）：待对账
+	// 到期会被清掉，但**早于它采集的归档快照仍然不能算证据**——否则一条在移除
+	// 之前采好、迟到超过宽限的快照会把面恢复可信、而线程两面都没有，wait 会
+	// 把存在的线程判成 thread_gone。快照采集时刻早于它一律按「变更前状态」处理。
+	archiveFreshnessFloor time.Time
+	// archiveUncertainArmed / archiveUncertainSettle：（订阅模式下）活跃面移除
+	// 在同一临界区里直接登记待对账，不必等 hub 的帧后回调（#156 R5：否则
+	// 「线程已从活跃面删除、ArchiveErr 仍为 nil」的中间态可被并发 Peek/wait
+	// 观测到，把线程误判 thread_gone）。由 hub 在切入/离开 legacy 模式时设置。
+	archiveUncertainArmed  bool
+	archiveUncertainSettle time.Duration
 
 	// archiveReconnectPendingGen 是旧面订阅路径独有的「请重建归档订阅」
 	// 备忘（守旧游标），以单调世代表达：0 表示无未决请求，>0 表示最新一
@@ -205,6 +228,11 @@ type t3ShellState struct {
 	// 开本连接，监督循环重连后新连接的 subscribe 必在该请求之后发出，
 	// 其快照必为写后状态，落地自然清掉备忘（邮戳 ≥ 备忘世代）。
 	archiveReconnectPendingGen int64
+	// archiveReconnectDedupGen 记「已为哪条连接请求过重建」（#156 R41）：同一
+	// 连接重复丢弃只 bump 一次世代，避免反复重建订阅。
+	archiveReconnectDedupGen int64
+	// archiveReconnectDedupSet 区分「尚未请求过」与「connectionStart=0」。
+	archiveReconnectDedupSet bool
 	// archiveReconnectIssued 是已发出的 reconnect 请求总数（最新请求的世
 	// 代编号）。与 pending 分离：consume/连接终止只清 pending，不回卷本
 	// 计数——它是新请求世代的来源，也是连接出发邮戳的取值来源。
@@ -229,9 +257,9 @@ func newT3ShellState() *t3ShellState {
 // 的线程会从新快照里消失，hub 层据此失效归档缓存，否则它既不在新活跃面、
 // 也不在旧归档缓存，ArchiveErr 却仍 nil（列表谎报完整、详情落「未找到该
 // 线程」），最长一个 TTL 才自愈。
-func (s *t3ShellState) applyActiveSnapshotLocked(snapshot t3ShellSnapshot) ([]string, error) {
+func (s *t3ShellState) applyActiveSnapshotLocked(snapshot t3ShellSnapshot) ([]string, bool, []string, error) {
 	if err := s.activeProjects.reset(snapshot.Projects, func(p *t3ProjectShell) string { return p.ID }); err != nil {
-		return nil, fmt.Errorf("活跃快照项目缺少 ID: %w", err)
+		return nil, false, nil, fmt.Errorf("活跃快照项目缺少 ID: %w", err)
 	}
 	// reset 前 diff：新快照的 ID 集是权威的活跃面全量，旧 order 里不在
 	// 集中的即被替换掉（与 reset 同锁内计算，不留交错缝隙）。
@@ -246,19 +274,29 @@ func (s *t3ShellState) applyActiveSnapshotLocked(snapshot t3ShellSnapshot) ([]st
 		}
 	}
 	if err := s.activeThreads.reset(snapshot.Threads, func(t *t3ThreadShell) string { return t.ID }); err != nil {
-		return nil, fmt.Errorf("活跃快照线程缺少 ID: %w", err)
+		return nil, false, nil, fmt.Errorf("活跃快照线程缺少 ID: %w", err)
+	}
+	// 活跃全量快照带回来的线程同样解账（#156 R12）：线程已在活跃面，其归档
+	// 归属不再影响「两面都没有」的判定。
+	if len(s.archiveUncertain) > 0 {
+		for i := range snapshot.Threads {
+			delete(s.archiveUncertain, snapshot.Threads[i].ID)
+			delete(s.archiveUncertainSince, snapshot.Threads[i].ID)
+		}
+		s.refreshArchiveMembershipTrustLocked()
 	}
 	s.activeSchemaVersion = snapshot.SchemaVersion
 	s.activeCursor = snapshot.SnapshotSequence
 	s.activeReady = true
 	s.activeSynced = true
-	return removed, nil
+	armedRegistered, proven := s.armUncertainForRemovalsLocked(removed, false)
+	return removed, armedRegistered, proven, nil
 }
 
 // applyActiveItem 应用一个活跃流流项。坏帧 / 未知 kind 返回错误，由调用方
 // 整条流失败重连，不得静默跳过然后继续宣称 ready（规则 8）。
 func (s *t3ShellState) applyActiveItem(item t3ShellStreamItem) error {
-	_, err := s.applyActiveItemTracked(item)
+	_, _, _, err := s.applyActiveItemDetailed(item)
 	return err
 }
 
@@ -266,7 +304,22 @@ func (s *t3ShellState) applyActiveItem(item t3ShellStreamItem) error {
 // 跃面时返回被移除的旧线程 ID（见 applyActiveSnapshotLocked），其余帧型恒
 // 返回 nil——增量帧的「离开活跃面」由 hub 按帧型判定（thread.removed 与
 // location != "active" 的 updated），不在此重复。
-func (s *t3ShellState) applyActiveItemTracked(item t3ShellStreamItem) ([]string, error) {
+//
+// applyActiveItemTracked 是 applyActiveItemDetailed 的兼容包装：丢掉「帧自身证明
+// 无需对账」的 ID 集合，供不关心该分类的调用方与用例使用。
+func (s *t3ShellState) applyActiveItemTracked(item t3ShellStreamItem) (removed []string, armedRegistered bool, err error) {
+	removed, armedRegistered, _, err = s.applyActiveItemDetailed(item)
+	return removed, armedRegistered, err
+}
+
+// applyActiveItem 应用一条活跃面帧，返回 (确实移走的 ID, 是否已由 armed 路径
+// 登记, 由帧自身证明无需对账的 ID, error)。
+//
+// proven 必须是 state 显式给出的结论（#156 R14）：hub 不能靠帧型 + armed
+// 推断——帧可能在 arm 之前就被应用（那时 armedRegistered 恒为 false），把
+// 它当成「归档行已证明」会让一个排队的归档增量被误跳过，wait 可能把线程判
+// 成 thread_gone。只有「帧自带归档行且归档面确实已有该行」才算 proven。
+func (s *t3ShellState) applyActiveItemDetailed(item t3ShellStreamItem) (removed []string, armedRegistered bool, proven []string, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	switch item.Kind {
@@ -274,33 +327,41 @@ func (s *t3ShellState) applyActiveItemTracked(item t3ShellStreamItem) ([]string,
 		if len(item.ResolvedRepositoryIdentityRoots) > 0 {
 			// 元数据/enrichment 帧：Fast Ship 不使用 repositoryIdentity，
 			// 整体忽略（只 Ack，不改数据、不动游标、不动可信标记）。
-			return nil, nil
+			return nil, false, nil, nil
 		}
 		if item.Snapshot == nil {
-			return nil, fmt.Errorf("活跃快照帧缺少 snapshot 字段")
+			return nil, false, nil, fmt.Errorf("活跃快照帧缺少 snapshot 字段")
 		}
-		return s.applyActiveSnapshotLocked(*item.Snapshot)
+		removed, armedRegistered, proven, err = s.applyActiveSnapshotLocked(*item.Snapshot)
+		if err != nil {
+			return nil, false, nil, err
+		}
+		// 返回 applyActiveSnapshotLocked 里 armUncertainForRemovalsLocked 的
+		// **真实结果**（#156 R27）：早先按「有移除 && armed」推断，在
+		// settle<=0（不登记）或部分已对账时说成「已登记」，帧后回调于是
+		// 漏掉补登记。
+		return removed, armedRegistered, proven, nil
 	case "synchronized":
 		// 追平标记：不携带数据，只推进可信标记（不碰游标，规则 2）。
 		s.activeSynced = true
-		return nil, nil
+		return nil, false, nil, nil
 	case "project.updated":
 		if item.Sequence == nil || item.Project == nil || item.Project.ID == "" {
-			return nil, fmt.Errorf("project.updated 帧缺少 sequence/project/projectId")
+			return nil, false, nil, fmt.Errorf("project.updated 帧缺少 sequence/project/projectId")
 		}
 		s.activeProjects.upsert(item.Project, item.Project.ID)
 		s.advanceActiveCursorLocked(*item.Sequence)
-		return nil, nil
+		return nil, false, nil, nil
 	case "project.removed":
 		if item.Sequence == nil || item.ProjectID == "" {
-			return nil, fmt.Errorf("project.removed 帧缺少 sequence/projectId")
+			return nil, false, nil, fmt.Errorf("project.removed 帧缺少 sequence/projectId")
 		}
 		s.activeProjects.remove(item.ProjectID)
 		s.advanceActiveCursorLocked(*item.Sequence)
-		return nil, nil
+		return nil, false, nil, nil
 	case "thread.updated":
 		if item.Sequence == nil || item.Thread == nil || item.Thread.ID == "" {
-			return nil, fmt.Errorf("thread.updated 帧缺少 sequence/thread/threadId")
+			return nil, false, nil, fmt.Errorf("thread.updated 帧缺少 sequence/thread/threadId")
 		}
 		// 活跃流实际只产生 location:"active"（ShellStream.ts:292-320）。旧版服务端
 		// 也可能在这条流上发 location:"archive"，上游 reducer 对它的处理是「不进
@@ -310,14 +371,26 @@ func (s *t3ShellState) applyActiveItemTracked(item t3ShellStreamItem) ([]string,
 		// （applyActiveValues → invalidateArchiveEntry），state 只管活跃面。
 		if item.Location == "active" {
 			s.activeThreads.upsert(item.Thread, item.Thread.ID)
+			// 回到活跃面（unarchive）：线程在活跃面即确定存在，「归档面里有没有」
+			// 对「两面都没有」的判定已无意义，直接解账（#156 R12）。
+			s.noteArchiveMembershipSettledLocked(item.Thread.ID)
 		} else {
+			// 只有「确实从活跃面移走」才需要等归档对账（#156 R9）：对不在活跃
+			// 面的 ID 的重复移除是噪声，登记只会把整个环境降级一个宽限窗口。
+			_, present := s.activeThreads.byID[item.Thread.ID]
 			s.activeThreads.remove(item.Thread.ID)
+			if present {
+				removed = []string{item.Thread.ID}
+				armedRegistered, proven = s.armUncertainForRemovalsLocked(removed, true)
+			}
 		}
 		s.advanceActiveCursorLocked(*item.Sequence)
-		return nil, nil
+		// 必须把 removed 交回 hub（#156 R11）：否则 armed 登记了却没人调度到期
+		// 清理、也不发事件，归档面会停在一个既无定时器也无通知的 stale 上。
+		return removed, armedRegistered, proven, nil
 	case "thread.removed":
 		if item.Sequence == nil || item.ThreadID == "" {
-			return nil, fmt.Errorf("thread.removed 帧缺少 sequence/threadId")
+			return nil, false, nil, fmt.Errorf("thread.removed 帧缺少 sequence/threadId")
 		}
 		// 只从活跃面删除：归档动作在上游也发 active removal
 		// （ShellStream.ts:292-320），不代表线程从归档面消失（规则 3）；
@@ -325,11 +398,16 @@ func (s *t3ShellState) applyActiveItemTracked(item t3ShellStreamItem) ([]string,
 		// state 是纯内存、不持 hub 引用：归档缓存的失效由 hub 层在应用离开
 		// 活跃面的帧（本帧与 location!="active" 的 updated）后触发
 		// （applyActiveValues → invalidateArchiveEntry），这里只管活跃面。
+		_, present := s.activeThreads.byID[item.ThreadID]
 		s.activeThreads.remove(item.ThreadID)
+		if present {
+			removed = []string{item.ThreadID}
+			armedRegistered, proven = s.armUncertainForRemovalsLocked(removed, false)
+		}
 		s.advanceActiveCursorLocked(*item.Sequence)
-		return nil, nil
+		return removed, armedRegistered, proven, nil
 	default:
-		return nil, fmt.Errorf("活跃流未知帧 kind %q", item.Kind)
+		return nil, false, nil, fmt.Errorf("活跃流未知帧 kind %q", item.Kind)
 	}
 }
 
@@ -372,8 +450,29 @@ func (s *t3ShellState) advanceActiveCursorLocked(sequence int) {
 // 线程的项目名改从活跃项目表取，项目已删除时显示无名，与「项目已删除」
 // 一致。
 func (s *t3ShellState) applyArchiveSnapshot(snapshot t3ArchivedShellSnapshot, generation int64, commit func(trusted bool)) (bool, error) {
+	return s.applyArchiveSnapshotAt(snapshot, generation, commit, time.Now())
+}
+
+// applyArchiveSnapshotAt 是带「快照采集时刻」的版本（#156 R16）：调用方应传
+// 本次拉取的**开始**时刻（refetchStartedAt），而不是送达时刻——否则一条在
+// 移除之前就采好的重连快照会被当成新证据，清掉本轮待对账。
+func (s *t3ShellState) applyArchiveSnapshotAt(snapshot t3ArchivedShellSnapshot, generation int64, commit func(trusted bool), observedAt time.Time) (bool, error) {
+	if observedAt.IsZero() {
+		observedAt = time.Now()
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// 采集早于最近一次归属变更的快照整条丢弃（#156 R28/R39）：它既不能封窗、
+	// 也不能拿变更前的行覆盖现有行；不动可信度，避免「撤 ready 后宽限到期也
+	// 恢复不了」的死角。
+	if !observedAt.IsZero() && observedAt.Before(s.archiveFreshnessFloor) {
+		// 未落地也要走 commit(false)（#156 R41 Note）：否则 validUntil/needsRefetch
+		// 都不更新，调用方会把「丢弃」当成功落地、不记冷却也不重试。
+		if commit != nil {
+			commit(false)
+		}
+		return false, nil
+	}
 	// 坏负载先于世代判定：reset 失败时面保持原样，err 点名原因交调用方
 	// 按「本次读取失败」记账——不得吞成「不可信但没错误」，否则上游结构
 	// 性坏快照（毒快照）会引发无冷却重试风暴：每次读取立即重拨、永不记账。
@@ -394,9 +493,33 @@ func (s *t3ShellState) applyArchiveSnapshot(snapshot t3ArchivedShellSnapshot, ge
 		}
 		return false, nil
 	}
+
 	s.archiveReady = true
 	s.archiveErr = nil
 	s.archiveStale = false
+	// 对账裁决带时序（#156 R16）：只有**晚于登记时刻**采集的快照才是证据。
+	// 重连快照可能在移除之前就采好、之后才送达——那时它的包含关系不能清掉
+	// 本轮待对账，否则排队的 removed 删行后两面皆空而面可信，wait 会判
+	// thread_gone。
+	if len(s.archiveUncertain) > 0 {
+		incoming := make(map[string]struct{}, len(snapshot.Threads))
+		for i := range snapshot.Threads {
+			incoming[snapshot.Threads[i].ID] = struct{}{}
+		}
+		for id := range s.archiveUncertain {
+			if _, ok := incoming[id]; !ok {
+				continue
+			}
+			if since, ok := s.archiveUncertainSince[id]; ok && observedAt.Before(since) {
+				continue
+			}
+			delete(s.archiveUncertain, id)
+			delete(s.archiveUncertainSince, id)
+		}
+		if len(s.archiveUncertain) > 0 {
+			s.archiveErr = errT3ShellArchiveStale
+		}
+	}
 	if commit != nil {
 		commit(true)
 	}
@@ -458,6 +581,13 @@ func (s *t3ShellState) archiveGenerationNow() int64 {
 // 请求世代（出发邮戳，发前取值见 connectArchiveLegacyOnce）——快照项据
 // 此判定能否清守旧备忘（见 applyArchiveSnapshotLocked）。
 func (s *t3ShellState) applyArchiveItem(item t3ArchiveStreamItem, connectionStart int64) error {
+	return s.applyArchiveItemAt(item, connectionStart, time.Now())
+}
+
+// applyArchiveItemAt 是带「本连接的发起时刻」的版本（#156 R17）：订阅推送的
+// 快照也可能在本连接建立之前就被上游采好、之后才送达——用送达时刻当证据
+// 会把这类旧快照误当成新对账。调用方传连接建立时刻（保守下界）。
+func (s *t3ShellState) applyArchiveItemAt(item t3ArchiveStreamItem, connectionStart int64, observedAt time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	switch item.Kind {
@@ -465,18 +595,37 @@ func (s *t3ShellState) applyArchiveItem(item t3ArchiveStreamItem, connectionStar
 		if item.Snapshot == nil {
 			return fmt.Errorf("归档快照帧缺少 snapshot 字段")
 		}
-		return s.applyArchiveSnapshotLocked(*item.Snapshot, connectionStart)
+		return s.applyArchiveSnapshotLocked(*item.Snapshot, connectionStart, observedAt)
 	case "thread.updated":
 		if item.Sequence == nil || item.Thread == nil || item.Thread.ID == "" {
 			return fmt.Errorf("归档 thread.updated 帧缺少 sequence/thread/threadId")
 		}
 		s.archivedThreads.upsert(item.Thread, item.Thread.ID)
+		// 归档增量**不**解除待对账（#156 R15）：两条流顺序无保证，这条 updated
+		// 可能来自更早的一轮归档周期（unarchive 前就被排队的更新），拿它当
+		// 「本次移除已对账」会让随后的 thread.removed 把缓存行删掉、而新增量
+		// 还没到——两面都没有 + 面可信 = wait 把线程判成 thread_gone。
+		// 解除只有三条路径：归档全量快照包含该 ID（见
+		// applyActiveSnapshotLocked）、活跃面重新出现（location=active 或活跃快照
+		// 带回）、或宽限到期（expireArchiveMembershipUncertain）。
 		return nil
 	case "thread.removed":
 		if item.Sequence == nil || item.ThreadID == "" {
 			return fmt.Errorf("归档 thread.removed 帧缺少 sequence/threadId")
 		}
+		// 归档流删行本身可能来自更早一轮的 unarchive（两条流无顺序保证）：若该
+		// 线程此刻也不在活跃面，就会出现「两面都没有且面可信」的窗口（#156 R24）。
+		// 只删行不够——要把它记成归属待对账，等权威快照/宽限到期再下结论。
 		s.archivedThreads.remove(item.ThreadID)
+		if _, active := s.activeThreads.byID[item.ThreadID]; !active {
+			if settle := s.archiveUncertainSettle; settle > 0 && s.archiveUncertainArmed {
+				_, _ = s.noteArchiveMembershipUncertainLocked([]string{item.ThreadID}, settle, false)
+			}
+		}
+		// 归档流的 thread.removed **不能**当作「该线程归属已对账」（#156 R9）：
+		// 两条流顺序无保证，这条 removed 可能来自更早的一次 unarchive；把它当
+		// 对账完成会提前恢复可信，wait 随即把「两面都没有」判成 thread_gone。
+		// 只让 thread.updated（行确实存在）解账，removed 交给到期兜底。
 		return nil
 	default:
 		return fmt.Errorf("归档流未知帧 kind %q", item.Kind)
@@ -506,12 +655,48 @@ func (s *t3ShellState) applyArchiveItem(item t3ArchiveStreamItem, connectionStar
 // 本连接的读循环（chan 缓冲 1 且每连接只有一个读循环消费者，不会被快
 // 照吞掉），消费即断开本连接，下一条连接的 subscribe 必在请求之后发
 // 出，其快照必为写后状态。
-func (s *t3ShellState) applyArchiveSnapshotLocked(snapshot t3ArchivedShellSnapshot, connectionStart int64) error {
+func (s *t3ShellState) applyArchiveSnapshotLocked(snapshot t3ArchivedShellSnapshot, connectionStart int64, observedAt time.Time) error {
+	// 变更前采集的快照整条丢弃（#156 R28/R39）：不覆盖行、不动可信度。
+	if !observedAt.IsZero() && observedAt.Before(s.archiveFreshnessFloor) {
+		// 但若这条快照是**仅有的一次机会**（面还没就绪、之后不会再推），就必须
+		// 请求重连取新全量（#156 R40）；面已就绪时保持安静，避免批量归档期间
+		// 的重连风暴（#156 R38）。
+		// 同一条连接只请求一次（#156 R41 Note）：否则每次快照被丢弃都会 bump
+		// 世代，形成「反复重建订阅」的循环。
+		if !s.archiveReady && !(s.archiveReconnectDedupSet && s.archiveReconnectDedupGen == connectionStart) {
+			s.archiveReconnectDedupSet = true
+			s.archiveReconnectDedupGen = connectionStart
+			s.noteArchiveReconnectRequestedLocked()
+		}
+		return nil
+	}
 	if err := s.archivedThreads.reset(snapshot.Threads, func(t *t3ThreadShell) string { return t.ID }); err != nil {
 		return fmt.Errorf("归档快照线程缺少 ID: %w", err)
 	}
 	s.archivedSchemaVersion = snapshot.SchemaVersion
 	s.archivedSeq = snapshot.SnapshotSequence
+	// 权威快照只对账它**确实包含**的线程（#156 R6）：命中的 ID 成员关系已定；
+	// 未命中的仍可能「被归档但增量还在队列里」，或「被彻底删除」——交给
+	// 各自的到期时刻兜底，不能因为快照没包含它们就断言不存在。
+
+	if len(s.archiveUncertain) > 0 {
+		incoming := make(map[string]struct{}, len(snapshot.Threads))
+		for i := range snapshot.Threads {
+			incoming[snapshot.Threads[i].ID] = struct{}{}
+		}
+		for id := range s.archiveUncertain {
+			if _, ok := incoming[id]; !ok {
+				continue
+			}
+			// 只有**晚于登记时刻**采集的快照才算对账证据（#156 R16）：重连快照
+			// 可能在移除之前就采好、之后才送达。
+			if since, ok := s.archiveUncertainSince[id]; ok && observedAt.Before(since) {
+				continue
+			}
+			delete(s.archiveUncertain, id)
+			delete(s.archiveUncertainSince, id)
+		}
+	}
 	if connectionStart < s.archiveReconnectPendingGen {
 		// 写前快照：数据照换但不封窗（审修 R8 P2）。与按需路径
 		// applyArchiveSnapshot 世代不符分支同型——面保持不可信，
@@ -523,12 +708,17 @@ func (s *t3ShellState) applyArchiveSnapshotLocked(snapshot t3ArchivedShellSnapsh
 		}
 		return nil
 	}
+
 	// 邮戳 ≥ 备忘世代：权威全量快照即是重连取写后状态的完成——置可信
 	// 并撤销尚存的重建备忘，避免晚到的信号再把刚恢复的面拆掉一次。
 	s.archiveReady = true
 	s.archiveErr = nil
 	s.archiveStale = false
 	s.archiveReconnectPendingGen = 0
+	// 仍有未对账的移除：面就绪但不能宣称归档集完整（#156 R6）。
+	if len(s.archiveUncertain) > 0 {
+		s.archiveErr = errT3ShellArchiveStale
+	}
 	return nil
 }
 
@@ -561,6 +751,12 @@ func (s *t3ShellState) markArchiveFailed(err error) {
 func (s *t3ShellState) noteArchiveReconnectRequested() int64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.noteArchiveReconnectRequestedLocked()
+}
+
+// noteArchiveReconnectRequestedLocked 同 noteArchiveReconnectRequested（调用方
+// 须持 s.mu）。
+func (s *t3ShellState) noteArchiveReconnectRequestedLocked() int64 {
 	s.archiveReconnectIssued++
 	s.archiveReconnectPendingGen = s.archiveReconnectIssued
 	s.archiveReady = false
@@ -636,6 +832,243 @@ func (s *t3ShellState) noteArchiveFetchFailed(err error, generation int64, commi
 	return true
 }
 
+// noteArchiveMembershipUncertain 记下「这些线程的归档归属尚未对账」（跟进
+// PR②，Codex :608 / #156 R1）：活跃面已宣告它们离开，而归档订阅的对应增量
+// 还没到——两条流之间没有顺序保证。此刻若 ArchiveErr 仍为 nil，并发 wait
+// 会把「活跃面与归档面都没有」当可信结论，误判 thread_gone。
+//
+// 粒度是**逐个线程 ID**（Codex #156 R1）：无关线程的增量落地不能替某个仍
+// 缺增量的线程恢复可信，否则那个窗口依旧敞着。settle 是自愈上界：线程可能
+// 是被彻底删除（归档面不会有它的增量），所以不确定状态不能无限期——超过
+// settle 仍无对账就按「归档面无该线程」处理（此时若有极晚的增量，流本身也
+// 已经异常，断连重连会走权威快照）。
+//
+// 只动可信度（archiveReady 不动、旧行保留），不断流也不清表。返回 pending：
+// 本次落到待对账集合里的 ID 数（含续期，调用方据此调度到期清理与发布）。
+func (s *t3ShellState) noteArchiveMembershipUncertain(ids []string, settle time.Duration) (pending int) {
+	return s.noteArchiveMembershipUncertainSkipping(ids, settle, false)
+}
+
+// noteArchiveMembershipUncertainSkipping 是带「是否允许以『归档面已有该行』
+// 跳过登记」开关的版本（#156 R12/R13）：ok 只该由**帧自身携带归档行**的路径
+// （location != "active" 的 thread.updated）传入——那是「归档流已经确认过这
+// 条线程」的证据；而 thread.removed 与快照移除不携带行，归档面里的旧行可能
+// 早于本次活跃迁移（unarchive 后又 archive），拿它当对账完成会让 wait 在
+// 新增量到达前把线程判成 thread_gone。
+func (s *t3ShellState) noteArchiveMembershipUncertainSkipping(ids []string, settle time.Duration, skipArchived bool) (pending int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	pending, _ = s.noteArchiveMembershipUncertainLocked(ids, settle, skipArchived)
+	return pending
+}
+
+// noteArchiveMembershipUncertainLocked 是 noteArchiveMembershipUncertain 的
+// 无锁变体（调用方须持 s.mu）：活跃面移除与应用在同一临界区登记，
+// 保证读者看不到「已删除但可信」的中间态（#156 R5）。
+func (s *t3ShellState) noteArchiveMembershipUncertainLocked(ids []string, settle time.Duration, skipArchived bool) (pending int, proven []string) {
+	if len(ids) == 0 || settle <= 0 {
+		return 0, nil
+	}
+	// 登记不依赖 archiveReady（#156 R6）：切入订阅模式时归档面先是不可信的，
+	// 这期间发生移除若跳过登记，等订阅快照把它恢复可信时，对应的归档增量
+	// 可能还在队列里，wait 会把缺失线程当定论。面不可信时这里只记账、不改
+	// 可信度（本来就不信）。
+	deadline := time.Now().Add(settle)
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		// 已在归档面里的线程不需要对账（#156 R2-1）：两条流顺序不定，归档
+		// 增量先到是常见顺序（活跃面重连的权威快照移除同理），此时成员关系
+		// 已由归档数据确定，登记只会让归档面白降级一个宽限窗口。
+		if skipArchived {
+			if _, archived := s.archivedThreads.byID[id]; archived {
+				// 帧自带归档行、且归档面已有该行：本次移除无需对账（#156 R13）。
+				proven = append(proven, id)
+				continue
+			}
+		}
+		if s.archiveUncertain == nil {
+			s.archiveUncertain = make(map[string]time.Time, len(ids))
+		}
+		// 同一 ID 在待对账期间再次离开活跃面时要**续期**（截止时刻后移）；
+		// 续期同样必须能调度到期清理（#156 R4）：已有定时器可能在续期后的
+		// 截止时刻之前就触发，那时裁剪不到它、也不会再安排下一次回调。所以
+		// 这里计的是「本次落到了多少个待对账 ID」，而不是「新增了几个」。
+		pending++
+		s.archiveUncertain[id] = deadline
+		if s.archiveUncertainSince == nil {
+			s.archiveUncertainSince = make(map[string]time.Time, len(ids))
+		}
+		s.archiveUncertainSince[id] = time.Now()
+		if s.archiveUncertainSince[id].After(s.archiveFreshnessFloor) {
+			s.archiveFreshnessFloor = s.archiveUncertainSince[id]
+		}
+	}
+	if pending == 0 {
+		return 0, proven
+	}
+	// 只在面本来没有错误时写 stale（#156 R12 Note）：真实失败文案不得被通用
+	// stale 覆盖——否则到期路径会把它当作「归属不确定已解除」清成 nil，把一次
+	// 真实拉取失败静默改写成可信。
+	if s.archiveReady && s.archiveErr == nil {
+		s.archiveErr = errT3ShellArchiveStale
+	}
+	return pending, proven
+}
+
+// clearArchiveMembershipUncertainLocked 清空待对账集合（#156 R8-2）：离开订阅
+// 模式时调用——按需快照路径的失效/可信由 TTL 簿记管，遗留条目既没有定时器
+// 清理（调度在 hub 帧后回调里），又会让后续订阅快照永远报 stale。
+func (s *t3ShellState) clearArchiveMembershipUncertainLocked() {
+	s.archiveUncertain = nil
+	// 登记时刻表必须同步清空（#156 R20）：它只为待对账集合服务，残留条目会
+	// 让同一 ID 之后重新登记时取到旧时刻，把本该有效的快照误判成「采集太早」。
+	s.archiveUncertainSince = nil
+}
+
+// armUncertainForRemovalsLocked 在 armed 状态下，把刚离开活跃面的线程就地
+// 登记为待对账（调用方须持 s.mu，见 armArchiveUncertain）。
+func (s *t3ShellState) armUncertainForRemovalsLocked(ids []string, skipArchived bool) (registered bool, proven []string) {
+	if !s.archiveUncertainArmed {
+		return false, nil
+	}
+	settle := s.archiveUncertainSettle
+	if settle <= 0 {
+		// 没有宽限就没有定时器（scheduleArchiveMembershipSettle 同样早退）：
+		// 登记了也永远清不掉，归档面会一直 stale（#156 R9 Note）。宁可相信
+		// 归档面也不要制造不可恢复的不确定态。
+		return false, nil
+	}
+	pending, proven := s.noteArchiveMembershipUncertainLocked(ids, settle, skipArchived)
+	return pending > 0, proven
+}
+
+// armArchiveUncertain 控制「活跃面移除即在同一临界区登记待对账」（订阅模式
+// 专用，由 hub 在切入/离开 legacy 模式时调用）：armed 时移除动作与登记不可
+// 分，读者不会观测到「线程已离开活跃面但归档面仍宣称完整」的窗口（#156 R5）。
+func (s *t3ShellState) armArchiveUncertain(armed bool, settle time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.armArchiveUncertainLocked(armed, settle)
+}
+
+// armArchiveUncertainLocked 是无锁变体（调用方须持 s.mu）。
+func (s *t3ShellState) armArchiveUncertainLocked(armed bool, settle time.Duration) {
+	s.archiveUncertainArmed = armed
+	s.archiveUncertainSettle = settle
+}
+
+// noteArchiveMembershipSettledLocked 撤掉某个线程的不确定标记（调用方须持
+// s.mu）。当前唯一调用方是活跃面回现（unarchive / 活跃快照带回）：线程在活跃
+// 面即确定存在，归档归属不再影响判定。归档增量**不**走这里（#156 R15），归档
+// 流 data 落地也不解账。
+func (s *t3ShellState) noteArchiveMembershipSettledLocked(id string) {
+	if _, ok := s.archiveUncertain[id]; !ok {
+		return
+	}
+	delete(s.archiveUncertain, id)
+	delete(s.archiveUncertainSince, id)
+	s.refreshArchiveMembershipTrustLocked()
+}
+
+// refreshArchiveMembershipTrustLocked 清理过期的不确定项并在全部对账完成时
+// 恢复可信（调用方须持 s.mu）。只清本机制自己打的 stale 标记——
+// noteArchiveExpiredLocked 的过期标记会把 archiveReady 一并撤掉（这里要求
+// ready），真实失败原因也不会被抹掉。
+func (s *t3ShellState) refreshArchiveMembershipTrustLocked() {
+	if len(s.archiveUncertain) == 0 && s.archiveReady && errors.Is(s.archiveErr, errT3ShellArchiveStale) &&
+		!s.archiveStale {
+		s.archiveErr = nil
+	}
+}
+
+// excludeActiveThreads 返回 ids 里**当前仍不在活跃面**的部分（#156 R36）：
+// 同一批里 A 先被移除、随后又以 location=active 回来时，帧后回调不能把 A
+// 重新记成待对账——那会把一条已确定在活跃面的线程白降级一个宽限窗口。
+func (s *t3ShellState) excludeActiveThreads(ids []string) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if _, active := s.activeThreads.byID[id]; active {
+			continue
+		}
+		out = append(out, id)
+	}
+	return out
+}
+
+// pendingArchiveUncertain 返回当前待对账条数（观测/用例用）。
+func (s *t3ShellState) pendingArchiveUncertain() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.archiveUncertain)
+}
+
+// registerArchiveMembershipUncertainIfArmed 只在「订阅模式已 arm」时登记待
+// 对账，判定与登记在同一个 s.mu 临界区内完成（#156 R27）：否则调用方先读
+// mode、再登记，两步之间 resetArchiveModeToUnknown 可能已清空集合/撤 arm，
+// 登记就落进一个已经离开订阅模式的 state。
+func (s *t3ShellState) registerArchiveMembershipUncertainIfArmed(ids []string, settle time.Duration) (pending int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.archiveUncertainArmed || settle <= 0 {
+		return 0
+	}
+	pending, _ = s.noteArchiveMembershipUncertainLocked(ids, settle, false)
+	return pending
+}
+
+// earliestArchiveUncertainDeadline 返回待对账集合里最早的截止时刻（#156 R23）。
+// 定时器按它排程，保证「每条目的截止时刻就是自己的清理上界」——早先登记的
+// 条目不会被后来者顺延。
+func (s *t3ShellState) earliestArchiveUncertainDeadline() (time.Time, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var earliest time.Time
+	found := false
+	for _, deadline := range s.archiveUncertain {
+		if !found || deadline.Before(earliest) {
+			earliest = deadline
+			found = true
+		}
+	}
+	return earliest, found
+}
+
+// expireArchiveMembershipUncertain 清理到期的不确定项，全部清空时恢复可信并
+// 报告「是否需要发布事件」（#156 R2）：到期恢复必须由定时器驱动并在 hub 层
+// 发布——只在读路径懒清会让打开中的页面一直停在降级态（use-threads 不轮询，
+// SSE 心跳也不带数据）。
+func (s *t3ShellState) expireArchiveMembershipUncertain() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.archiveUncertain) == 0 {
+		return false
+	}
+	now := time.Now()
+	for id, deadline := range s.archiveUncertain {
+		if now.After(deadline) {
+			if since, ok := s.archiveUncertainSince[id]; ok && since.After(s.archiveFreshnessFloor) {
+				s.archiveFreshnessFloor = since
+			}
+			delete(s.archiveUncertain, id)
+			// 到期同样要清登记时刻（#156 R20）：否则同一 ID 再次登记时取到的
+			// 是旧时刻，会把之后的权威快照误判成「采集太早」而多降级一轮。
+			delete(s.archiveUncertainSince, id)
+		}
+	}
+	if len(s.archiveUncertain) > 0 {
+		return false
+	}
+	if s.archiveReady && errors.Is(s.archiveErr, errT3ShellArchiveStale) && !s.archiveStale {
+		s.archiveErr = nil
+		return true
+	}
+	return false
+}
+
 // markActiveSynced 由 hub 控制追平标记：resume 时在重发订阅前清 false、
 // 等 synchronized（或能力不支持/超时兜底）后置 true。不碰数据与游标。
 func (s *t3ShellState) markActiveSynced(synced bool) {
@@ -664,7 +1097,6 @@ func (s *t3ShellState) status() t3ShellFaceStatus {
 func (s *t3ShellState) snapshots() *t3ShellSnapshots {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
 	activeThreads := s.activeThreads.list()
 	archivedThreads := make([]t3ThreadShell, 0, s.archivedThreads.len())
 	for _, id := range s.archivedThreads.order {

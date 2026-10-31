@@ -168,9 +168,9 @@ describe("BotUsageRunPage", () => {
     // 第二次是同输入的重试。
     expect(within(rows[1]).getByText("重试")).toBeInTheDocument();
     expect(within(rows[1]).getByText("$0.4")).toBeInTheDocument();
-    expect(
-      within(rows[1]).getByText("fs_issue:update"),
-    ).toBeInTheDocument();
+    // 工具调用显示的是本地化动作标签（title 保留原始 tool:action 便于排查）。
+    const toolLabel = within(rows[1]).getByText("更新问题");
+    expect(toolLabel).toHaveAttribute("title", "fs_issue:update");
   });
 
   it("关联维护：上下文压缩运行与其请求（purpose/model/成本）", () => {

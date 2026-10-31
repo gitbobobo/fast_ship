@@ -461,9 +461,10 @@ func (h *t3ShellHub) newEntryLocked(key string, env *model.T3Environment, token 
 	h.entries[key] = e
 
 	// 生命周期计数：entry 的全部 goroutine（监督循环经 readStreamLoop 退出前
-	// 会汇合各自的订阅 reader）退出后释放。归档按需拉取是后台一次性任务
-	// （arch.inFlight 合并并发，entry 停/hub 关即中断），不占常驻 goroutine，
-	// 不计入 e.wg；旧面订阅 goroutine 则常驻，占 e.wg 一份。
+	// 会汇合各自的订阅 reader）退出后释放。归档按需拉取虽是后台一次性任务
+	// （arch.inFlight 合并并发），但**计入 e.wg**（#156 R21）——否则 Close 等
+	// 不到它，可能在 ensureArchive 收尾/发布失败时就返回；旧面订阅 goroutine
+	// 常驻，同样占 e.wg 一份。
 	h.lifecycle.Add(1)
 	e.wg.Add(2)
 	go func() {
@@ -482,12 +483,21 @@ func (h *t3ShellHub) newEntryLocked(key string, env *model.T3Environment, token 
 	// （Peek/waitView）kick，重启或新环境接入后的首个列表/详情就会在快照
 	// 落地前返回——归档线程整段缺失且被标 degraded；main 上归档订阅随预热
 	// 建立，首读通常已就绪，这里保持同等体验。拉取本身是后台任务（失败冷却
-	// + inFlight 合并），不阻塞首读，也不占 e.wg。
+	// + inFlight 合并），不阻塞首读，但**计入 e.wg**（#156 R21/R26）——停机时
+	// 汇合 goroutine 会等它退出，Close 不会在拉取收尾前返回。
 	e.kickArchiveRefresh()
 
 	// done 在全部监督 goroutine 退出后关闭，供测试汇合；同时释放 hub 的
 	// 生命周期计数（Close 经它等待已被摘除的 entry）。
 	go func() {
+		// 先在停机信号上等，再关闸门、最后 Wait（#156 R22）：Wait 若在 entry
+		// 建立时就跑起来，之后任何 wg.Add（预热拉取、耗时回调）都是「Wait 已
+		// 开始后 Add」——既可能漏计数也可能 panic。停机后再关闸，Add 一侧在
+		// wgMu 下检查 wgClosed，两侧顺序确定。
+		<-e.stop
+		e.wgMu.Lock()
+		e.wgClosed = true
+		e.wgMu.Unlock()
 		e.wg.Wait()
 		close(e.done)
 		h.lifecycle.Done()
@@ -513,8 +523,23 @@ type t3ShellEntry struct {
 
 	mu sync.Mutex
 	// state 的锁在 t3ShellState 内部；锁序恒为 mu → state.mu。
-	state        *t3ShellState
-	notify       chan struct{} // 关闭并替换以广播状态变化，View select 等待
+	state  *t3ShellState
+	notify chan struct{} // 关闭并替换以广播状态变化，View select 等待
+	// settleTimer 是「归档归属待对账」到期清理的定时器（#156 R12）：由 entry
+	// 持有并在停机时 Stop，避免 Close 之后回调仍触发、也算进生命周期。守 mu。
+	settleTimer *time.Timer
+	// settleAt 是当前定时器的目标时刻（#156 R23）：只在新 deadline 更早时重排，
+	// 避免后来的登记把早先条目的清理上界往后推。
+	settleAt time.Time
+	// settleMu 串行化「停机 Stop 定时器」与「回调正在执行」（#156 R12-codex）：
+	// 只 Stop 定时器不能 join 已经在跑的回到——Close 可能在回调中途返回。
+	// 回调全程持锁，停机在同一把锁里 Stop，保证 shutdown 返回后没有在途回调。
+	settleMu sync.Mutex
+	// wgMu / wgClosed 保护「停机后再往 e.wg 里加计数」（#156 R21）：Close 之后
+	// 才发起的后台拉取不该被 Wait 漏掉，也不该在 Wait 已开始后 Add（会 panic）。
+	// Add 与 shutdown 互斥，任何一侧先拿到锁都会得到确定结果。
+	wgMu         sync.Mutex
+	wgClosed     bool
 	activeConn   t3ShellConnState
 	activeErr    error
 	obsReady     bool
@@ -593,6 +618,17 @@ func (e *t3ShellEntry) clearForceResync() {
 
 func (e *t3ShellEntry) shutdown() {
 	e.stopOnce.Do(func() { close(e.stop) })
+	e.wgMu.Lock()
+	e.wgClosed = true
+	e.wgMu.Unlock()
+	e.settleMu.Lock()
+	e.mu.Lock()
+	if e.settleTimer != nil {
+		e.settleTimer.Stop()
+		e.settleTimer = nil
+	}
+	e.mu.Unlock()
+	e.settleMu.Unlock()
 }
 
 func (e *t3ShellEntry) isStopped() bool {
@@ -1148,10 +1184,25 @@ func (e *t3ShellEntry) syncConfirmedAt() time.Time {
 // defer 兜住所有返回路径：帧级记下 leftActiveFace 即失效。
 func (h *t3ShellHub) applyActiveValues(e *t3ShellEntry, values []json.RawMessage) error {
 	batch := t3ShellEventBatch{}
+	// removedIDs 是**确实从活跃面移走**的线程（由 state 判定并返回，R9 噪声
+	// 过滤的真实链路）：只有它们需要等归档对账。armedRegisteredIDs 是其中
+	// 「已在应用移除的同一临界区登记过」的部分（R7/R8），帧后回调不再重复登记。
+	removedIDs := make([]string, 0, 1)
+	armedRegisteredIDs := make([]string, 0, 1)
+	// provenIDs 是「帧自身带着归档行、且归档面已有该行」的 ID（#156 R13-codex）：
+	// state 在应用帧时就判定无需对账，帧后回调必须尊重这个结论——否则会给
+	// 它重新登记、把一条已有归档据的线程白降级一个宽限窗口。
+	provenIDs := make([]string, 0, 1)
+	// hadUncertain 记录本批之前是否有待对账（#156 R33）：解账可能只由
+	// thread.updated(location=active)/活跃快照触发，那时 removedIDs 是空的，
+	// 不能拿「本批有移除」当发布条件。
+	hadUncertain := e.state.pendingArchiveUncertain() > 0
+	// leftActiveFace 只表示「本批出现过离开活跃面的帧」，用于按需快照模式的
+	// 缓存失效（噪声帧多失效一次只是多付一次快照，不影响可信度语义）。
 	leftActiveFace := false
 	defer func() {
 		if leftActiveFace {
-			h.invalidateArchiveEntryAfterActiveRemoval(e)
+			h.invalidateArchiveEntryAfterActiveRemoval(e, removedIDs, armedRegisteredIDs, provenIDs)
 		}
 	}()
 	for _, raw := range values {
@@ -1159,14 +1210,31 @@ func (h *t3ShellHub) applyActiveValues(e *t3ShellEntry, values []json.RawMessage
 		if err := json.Unmarshal(raw, &item); err != nil {
 			return fmt.Errorf("活跃流帧解析失败: %w", err)
 		}
-		removed, err := e.state.applyActiveItemTracked(item)
+		removed, armedRegistered, proven, err := e.state.applyActiveItemDetailed(item)
 		if err != nil {
 			return err
 		}
 		// 线程离开活跃面即归档集可能变了（见函数头）：增量帧的 removal 由
 		// hub 按帧型判定；全量快照整体替换的移除由 state 在同一临界区内算
 		// 出并返回，两边一并失效归档缓存。
-		if len(removed) > 0 || item.Kind == "thread.removed" || (item.Kind == "thread.updated" && item.Location != "active") {
+		// 逐个记下离开活跃面的线程 ID：订阅模式下要按 ID 等归档增量对账
+		// （跟进 PR② / #156 R1），无关线程的增量不能替它们恢复可信。
+		if len(removed) > 0 {
+			removedIDs = append(removedIDs, removed...)
+			if armedRegistered {
+				armedRegisteredIDs = append(armedRegisteredIDs, removed...)
+			}
+			// proven 只认 state 的结论（#156 R14）：帧型 + armed 推断会误判
+			// 「帧在 arm 之前应用」的情形，把排队的归档增量跳过。
+			if len(proven) > 0 {
+				provenIDs = append(provenIDs, proven...)
+			}
+			leftActiveFace = true
+		}
+		switch {
+		case item.Kind == "thread.removed", item.Kind == "thread.updated" && item.Location != "active":
+			// 离开活跃面的帧一律触发缓存失效判定；登记只认 state 返回的
+			// 「确实移走」的 ID（removedIDs，见上）。
 			leftActiveFace = true
 		}
 		batch.observeActive(&item)
@@ -1177,6 +1245,14 @@ func (h *t3ShellHub) applyActiveValues(e *t3ShellEntry, values []json.RawMessage
 		}
 	}
 	h.publishThreadEvent(e, batch.ids, batch.full)
+	// 活跃面回现（location=active / 活跃快照带回）会直接解账并把 archiveErr 从
+	// stale 清成 nil（#156 R32）：这条翻转也必须经过统一发布口同步宣布基准，
+	// 否则 archAnnounced 停在 stale，下一次登记在归档行集合未变时会被指纹判
+	// 「无新话可说」而不发降级事件。只在「待对账被清空」时调用，避免无翻转的
+	// 批次产生多余事件；指纹去重再兜一层。
+	if hadUncertain && e.state.pendingArchiveUncertain() == 0 {
+		h.publishArchiveFaceEvent(e, false)
+	}
 	return nil
 }
 

@@ -154,7 +154,25 @@ func (e *t3ShellEntry) kickArchiveRefresh() {
 	// singleflight.Do——它的「等共享结果返回」会把后台拉取的挂起传染给
 	// 调用方；按需面所有读者都是「发起即走」，没有等结果的强拉入口。
 	fetchCtx, cancelFetch := context.WithTimeout(e.hub.ctx, e.archTTL)
+	// 计入 entry 生命周期（#156 R21）：否则 Close 等不到这次拉取，可能在
+	// ensureArchive 仍在收尾/发布失败时就返回。停机后不再接收新计数——
+	// Wait 已开始，Add 会 panic。
+	e.wgMu.Lock()
+	if e.wgClosed {
+		e.wgMu.Unlock()
+		cancelFetch()
+		// 准入已经置过 inFlight/refetchStartedAt，这里不落 goroutine 就不会有人
+		// 收尾（#156 R35 Note）：停机后仍持有该 entry 的读会永远看到「重拉在途」。
+		e.arch.mu.Lock()
+		e.arch.inFlight = false
+		e.arch.refetchStartedAt = time.Time{}
+		e.arch.mu.Unlock()
+		return
+	}
+	e.wg.Add(1)
+	e.wgMu.Unlock()
 	go func() {
+		defer e.wg.Done()
 		defer cancelFetch()
 		defer func() {
 			e.arch.mu.Lock()
@@ -211,7 +229,14 @@ func (e *t3ShellEntry) admitArchiveRefresh() (admitted bool, revoked bool) {
 		// 窗口里过期快照仍被报 archiveReady=true、ArchiveErr=nil，Peek/wait
 		// 据此判 thread_gone（R2 要堵的窗口）。撤可信与在途状态在同一临界区
 		// 内完成，对读者不可分。
-		revoked := !e.arch.refetchStartedAt.IsZero() && now.Sub(e.arch.refetchStartedAt) > e.archiveStaleGrace
+		// 仅在缓存仍过期时才撤（跟进 PR①，Codex :214）：重拉可能已经成功
+		// 落地（archiveReady=true、validUntil 在未来），只是 kick 的后台
+		// defer 还没来得及清 inFlight/refetchStartedAt——这个窗口里按「在途
+		// 过久」撤可信会把刚恢复的面重新打回不可信；而 inFlight 清空后，
+		// 后续准入看到未来的 validUntil 不再重拉，降级就会持续整个 TTL。
+		revoked := !e.arch.refetchStartedAt.IsZero() &&
+			now.Sub(e.arch.refetchStartedAt) > e.archiveStaleGrace &&
+			!now.Before(e.arch.validUntil)
 		if revoked {
 			e.state.noteArchiveExpiredLocked()
 		}
@@ -378,7 +403,12 @@ func (e *t3ShellEntry) ensureArchive(ctx context.Context) error {
 	// 世代语义由 noteArchiveFetchFailed 自行判定（写前坏负载不记冷却、
 	// 只留 needsRefetch），该路径自带 publishThreadEvent/refresh。err=nil
 	// （世代不符或相符）时簿记已由 apply 临界区内的 commit 收尾。
-	if _, applyErr := e.state.applyArchiveSnapshot(snapshot, generation, e.commitArchiveApply); applyErr != nil {
+	// 快照的采集时刻取本次拉取的发起时刻（#156 R16）：送达时刻会晚于它，
+	// 拿送达时刻当证据会把「移除之前采好的重连快照」误当成新一轮对账。
+	e.arch.mu.Lock()
+	observedAt := e.arch.refetchStartedAt
+	e.arch.mu.Unlock()
+	if _, applyErr := e.state.applyArchiveSnapshotAt(snapshot, generation, e.commitArchiveApply, observedAt); applyErr != nil {
 		return e.noteArchiveFetchFailed(applyErr, generation)
 	}
 	// 落地发布经指纹去重（审修 R9 P2-2）：集合真变才 Full；TTL 例行重拉
@@ -425,12 +455,17 @@ func (e *t3ShellEntry) switchToArchiveLegacy() {
 	e.state.mu.Lock()
 	e.arch.mu.Lock()
 	e.arch.mode = t3ArchiveModeLegacy
+	// 与 mode 翻转同一临界区开启「移除即登记待对账」（#156 R6）：若延到锁外
+	// 再 arm，窗口内到达的活跃面移除会看到 legacy 模式却仍未 armed，既不进
+	// 按需失效路径、也不登记待对账——随后订阅快照恢复可信时，对应归档增量
+	// 可能仍在队列里，wait 会把缺失线程当定论。
 	e.arch.validUntil = time.Time{}
 	// retryAfter 保留（R14 P2-2）：见函数头。legacy 准入按 mode 短路，
 	// 簿记在订阅模式下不参与判定；它只在 resetArchiveModeToUnknown 回
 	// Unknown 后重新生效，作双方法缺失环境的探测冷却。
 	e.arch.needsRefetch = false
 	e.state.noteArchiveExpiredLocked() // archiveReady → false，留行但报已失效
+	e.state.armArchiveUncertainLocked(true, e.archiveStaleGrace)
 	e.arch.mu.Unlock()
 	e.state.mu.Unlock()
 	// 放行停在 mode 闸门上的旧面订阅 goroutine（runArchiveLegacySubscription
@@ -503,6 +538,11 @@ func (e *t3ShellEntry) resetArchiveModeToUnknown() {
 		// 同数据落地后指纹与宣布基准一致照旧静默——浏览器无需为这个
 		// 过渡窗口整环境重取；落地失败则失败路径经指纹比对发 State。
 		// 已不可信的面（失败/已失效）重撤是 no-op，保留更准确的既有文案。
+		// 离开订阅模式：关闭「移除即登记待对账」并清空遗留条目（#156 R5/R8-2）。
+		// 遗留条目既没有定时器清理（调度在 hub 帧后回调里），又会让后续订阅
+		// 快照永远报 stale；按需快照路径的可信由 TTL 簿记负责。
+		e.state.armArchiveUncertainLocked(false, 0)
+		e.state.clearArchiveMembershipUncertainLocked()
 		e.state.noteArchiveExpiredLocked()
 		reset = true
 	}
@@ -600,14 +640,148 @@ func (h *t3ShellHub) InvalidateArchive(userID, envID string) {
 // 因此订阅模式跳过；按需快照模式的 TTL 缓存必须靠这里失效（别处/别的
 // 客户端的归档迁移只能从这里得知）。写命令触发的失效仍走
 // InvalidateArchive，不受本函数影响。
-func (h *t3ShellHub) invalidateArchiveEntryAfterActiveRemoval(e *t3ShellEntry) {
+// 订阅模式下不断流，但要**标记归档集暂不可信**（跟进 PR②，Codex :608）：
+// 活跃面与归档订阅是两条流，顺序无保证——别的客户端归档线程时，active 的
+// thread.removed 可能先于 archived 的 thread.updated 到达。若这段窗口里
+// ArchiveErr 仍为 nil，并发 bot wait 会把「活跃面与归档面都没有」当成可信
+// 结论而误判 thread_gone。标记只影响可信度（旧行保留），恢复只有三条路径：
+// **含该线程的归档全量快照**、**线程在活跃面重新出现**、**宽限到期**——
+// 归档增量只换行、不解账（#156 R15：排队的增量可能来自更早一轮归档周期），
+// 所以不能写成「下一次订阅数据落地即恢复」。
+func (h *t3ShellHub) invalidateArchiveEntryAfterActiveRemoval(e *t3ShellEntry, leftIDs, armedRegisteredIDs, provenIDs []string) {
 	e.arch.mu.Lock()
 	legacy := e.arch.mode == t3ArchiveModeLegacy
 	e.arch.mu.Unlock()
 	if legacy {
+		// 按线程 ID 记账（Codex #156 R1）：只有这些线程自己的归档增量（或
+		// 权威快照）能解除不确定，无关线程的增量不算对账；settle 上界用
+		// 与撤可信一致的宽限（线程可能是被彻底删除，归档面不会有增量）。
+		// 只登记「未由 armed 路径登记」的 ID（#156 R7/R8）：已登记过的再登记会
+		// 把已被归档流对账的 ID 重新打回待对账（白 stale 一个宽限窗口），而
+		// 完全跳过又会漏掉「帧应用发生在 arm 之前」的移除。
+		// provenIDs 同理要排除（#156 R13-codex）：那些移除的帧自身带着归档行、
+		// 且归档面已有该行，state 已判定无需对账，帧后回调不能把它重新登记。
+		handled := append(append([]string{}, armedRegisteredIDs...), provenIDs...)
+		todo := e.state.excludeActiveThreads(t3IDsNotIn(leftIDs, handled))
+		// 登记与「是否 arm」在同一临界区内完成（#156 R27）：先读 arch.mode 再
+		// 登记的两步之间，resetArchiveModeToUnknown 可能已清空集合、撤 arm，
+		// 登记就落进一个已经离开订阅模式的 state。
+		pending := e.state.registerArchiveMembershipUncertainIfArmed(todo, e.archiveStaleGrace)
+		if pending == 0 && len(armedRegisteredIDs) == 0 {
+			return
+		}
+		// 发布交给指纹去重（#156 R5）：armed 状态下标记已在应用移除的同一
+		// 临界区里置好，这里的 flipped 会是 false，但宣布基准（archAnnounced）
+		// 还没更新——若不发布，浏览器收不到降级事件，到期恢复也会因指纹相同
+		// 而静默。函数内部按「集合+内容+文案」比对，重复调用不产生多余事件。
+		e.hub.publishArchiveFaceEvent(e, false)
+		// 到期恢复必须发事件（#156 R2）：线程可能被彻底删除、永远等不到
+		// 归档增量，只在读路径懒清会让打开中的页面一直停在降级态
+		// （use-threads 不轮询，SSE 心跳不带数据）。
+		//
+		// 定时器每次登记都调度（#156 R3-P1 / R4 / R12）：判据不能只看「可信度是否
+		// 翻转」或「是否新增 ID」——同一窗口内的第二次移除不会翻转 archiveErr；
+		// 而同一 ID 只有在「先回到活跃面（解账）再离开」时才会重新登记、拿到新的
+		// 截止时刻（重复投递的噪声移除被 R9/R10 过滤）。两种情形若跳过调度，那批
+		// ID 就永远等不到到期清理，归档面会永久 stale。到期清理按各自截止时刻
+		// 裁剪，重复调度只是多一次空转。
+		h.scheduleArchiveMembershipSettle(e, e.archiveStaleGrace)
 		return
 	}
 	h.invalidateArchiveEntry(e)
+}
+
+// t3IDsNotIn 返回 ids 里不在 done 中的 ID（保序、去空）：用于「只登记未由
+// armed 路径处理过的移除」（#156 R7/R8）。
+func t3IDsNotIn(ids, done []string) []string {
+	if len(done) == 0 {
+		return ids
+	}
+	skip := make(map[string]struct{}, len(done))
+	for _, id := range done {
+		skip[id] = struct{}{}
+	}
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		if _, ok := skip[id]; ok {
+			continue
+		}
+		out = append(out, id)
+	}
+	return out
+}
+
+// scheduleArchiveMembershipSettle 在宽限到期时清理「归属待对账」并发布可信度
+// 恢复事件（#156 R2）。线程可能是被彻底删除、永远等不到归档增量，所以不确定
+// 状态必须有时间上界，且这条转变要让浏览器知道。entry 停机后丢弃回调。
+func (h *t3ShellHub) scheduleArchiveMembershipSettle(e *t3ShellEntry, settle time.Duration) {
+	if settle <= 0 {
+		return
+	}
+	// 定时器按**最早截止时刻**排程（#156 R23）：只按「本次登记 + settle」排会
+	// 让早先登记条目的截止时刻被后来的登记不断顺延——连续移除间隔小于宽限时
+	// 定时器永远不到期，早期 ID 早已过截止却仍待对账，归档面永久 stale 且集合
+	// 无界增长。到期回调里再按剩余最早截止续排，每条目的上界就是自己。
+	deadline, ok := e.state.earliestArchiveUncertainDeadline()
+	if !ok {
+		return
+	}
+	e.mu.Lock()
+	if e.isStopped() {
+		// 停机之后再装定时器没人会 Stop 它（#156 R19）。
+		e.mu.Unlock()
+		return
+	}
+	if e.settleTimer != nil && !e.settleAt.After(deadline) {
+		// 已有更早（或同刻）的排程，不后移。
+		e.mu.Unlock()
+		return
+	}
+	delay := time.Until(deadline)
+	if delay < 0 {
+		delay = 0
+	}
+	if e.settleTimer == nil {
+		e.settleTimer = time.AfterFunc(delay, func() { h.settleArchiveMembership(e) })
+	} else {
+		e.settleTimer.Reset(delay)
+	}
+	e.settleAt = deadline
+	e.mu.Unlock()
+}
+
+// settleArchiveMembership 是一次到期清理（#156 R23）：清掉已过截止的条目，
+// 若仍有剩余则按它们的最早截止续排。
+func (h *t3ShellHub) settleArchiveMembership(e *t3ShellEntry) {
+	// 与停机串行（#156 R12-codex）：shutdown 在同一把锁里 Stop，回调一旦
+	// 开跑就持锁到结束，shutdown 返回后不再有在途回调（Close 才算真正收干净）。
+	e.settleMu.Lock()
+	defer e.settleMu.Unlock()
+	if e.isStopped() {
+		return
+	}
+	if e.state.expireArchiveMembershipUncertain() {
+		h.publishArchiveFaceEvent(e, false)
+		e.refresh()
+	}
+	e.mu.Lock()
+	e.settleTimer = nil
+	e.settleAt = time.Time{}
+	e.mu.Unlock()
+	if deadline, ok := e.state.earliestArchiveUncertainDeadline(); ok {
+		delay := time.Until(deadline)
+		if delay <= 0 {
+			// 剩余条目的截止已过但还没被这轮清理到（expire 取 now 之后又过了
+			// 一会儿）：不能把负延迟交给 schedule（它在 settle<=0 时直接返回，
+			// 于是这些条目再也没有定时器 → 面永久 stale）。压到 1ms 立刻再看
+			// 一眼，expire 会按 now 裁掉它们。
+			delay = time.Millisecond
+		}
+		h.scheduleArchiveMembershipSettle(e, delay)
+	}
 }
 
 // invalidateArchiveEntry 是 InvalidateArchive 的 entry 级入口：hub 内部已持
@@ -836,12 +1010,16 @@ func (h *t3ShellHub) connectArchiveLegacyOnce(e *t3ShellEntry) t3ShellConnResult
 	e.noteConnState(true, t3ShellConnConnecting, nil)
 	requestID := session.nextID
 	session.nextID++
+	// connStartAt 必须在**发出 subscribe 之前**取（#156 R18）：服务端可能在收到
+	// 订阅时立刻采样快照，取在发送之后就等于把「本连接之前采好的快照」也算成
+	// 晚于连接建立，旧快照会被当成新对账证据。
+	connStartAt := time.Now()
 	if err := session.sendRequest(connCtx, requestID, t3RPCSubscribeArchivedShell, map[string]any{}); err != nil {
 		h.endFaceConnection(e, true, err)
 		return t3ShellConnResult{}
 	}
 	e.noteConnState(true, t3ShellConnSubscribed, nil)
-	return h.readArchiveLegacyLoop(e, session, connCtx, requestID, connectionStart)
+	return h.readArchiveLegacyLoop(e, session, connCtx, requestID, connectionStart, connStartAt)
 }
 
 // readArchiveLegacyLoop 是旧归档订阅的读循环：只认本 requestID 的 Chunk/
@@ -850,7 +1028,7 @@ func (h *t3ShellHub) connectArchiveLegacyOnce(e *t3ShellEntry) t3ShellConnResult
 // 出发邮戳，随流项交给落地路径做备忘世代判定（R4 P2）。另有第三条出
 // 路：legacyReconnect 信号在守旧备忘仍置位时主动断开，交监督循环重连
 // 取权威全量（R3 P1-B）。返回连接结局。
-func (h *t3ShellHub) readArchiveLegacyLoop(e *t3ShellEntry, session *t3RPCSession, connCtx context.Context, requestID int, connectionStart int64) t3ShellConnResult {
+func (h *t3ShellHub) readArchiveLegacyLoop(e *t3ShellEntry, session *t3RPCSession, connCtx context.Context, requestID int, connectionStart int64, connStartAt time.Time) t3ShellConnResult {
 	frames := make(chan *rpcFrame, 16)
 	readErrCh := make(chan error, 1)
 	readerDone := make(chan struct{})
@@ -908,7 +1086,7 @@ func (h *t3ShellHub) readArchiveLegacyLoop(e *t3ShellEntry, session *t3RPCSessio
 			lastFrame = time.Now()
 			switch {
 			case frame.Tag == "Chunk" && frame.requestIDMatches(requestID):
-				if applyErr := h.applyArchiveValues(e, frame.Values, connectionStart); applyErr != nil {
+				if applyErr := h.applyArchiveValues(e, frame.Values, connectionStart, connStartAt); applyErr != nil {
 					h.endFaceConnection(e, true, applyErr)
 					return t3ShellConnResult{syncedAt: dataSeenAt}
 				}
@@ -969,17 +1147,28 @@ func (h *t3ShellHub) readArchiveLegacyLoop(e *t3ShellEntry, session *t3RPCSessio
 // applyArchiveValues 把旧归档流 Chunk 的全部 value 依次解码并应用到状
 // 态，发布语义同活跃面。connectionStart 是本连接的 reconnect 出发邮戳，
 // 交给快照项做守旧备忘的世代判定（R4 P2）。
-func (h *t3ShellHub) applyArchiveValues(e *t3ShellEntry, values []json.RawMessage, connectionStart int64) error {
+func (h *t3ShellHub) applyArchiveValues(e *t3ShellEntry, values []json.RawMessage, connectionStart int64, connStartAt time.Time) error {
 	batch := t3ShellEventBatch{}
 	for _, raw := range values {
 		var item t3ArchiveStreamItem
 		if err := json.Unmarshal(raw, &item); err != nil {
 			return fmt.Errorf("归档流帧解析失败: %w", err)
 		}
-		if err := e.state.applyArchiveItem(item, connectionStart); err != nil {
+		if err := e.state.applyArchiveItemAt(item, connectionStart, connStartAt); err != nil {
 			return err
 		}
 		batch.observeArchive(&item)
+		// 归档流自己也可能登记待对账（#156 R24：删掉某线程在归档面的唯一一行，
+		// 而它也不在活跃面）。这条路径不会经过活跃面的帧后回调，所以定时器要在
+		// 这里补排——否则条目只能等下次活跃移除或快照，面会一直 stale。
+		// 变更前快照被拒时 state 会记重建备忘（#156 R29）：这里要真的把信号
+		// 发给读循环，否则备忘只等下一次自然断连才兑现，期间面一直是 stale。
+		if e.state.archiveReconnectTarget() > connectionStart {
+			e.signalArchiveReconnect()
+		}
+		if e.state.pendingArchiveUncertain() > 0 {
+			h.scheduleArchiveMembershipSettle(e, e.archiveStaleGrace)
+		}
 	}
 	h.publishThreadEvent(e, batch.ids, batch.full)
 	// 宣布基准随本次落地同步（R17 P2-2）：旧面订阅落地只发线程事件时，
