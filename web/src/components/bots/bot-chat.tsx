@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useLayoutEffect, useRef, useState } from "react";
 import { Link } from "react-router";
 import { Loader2, RefreshCw, Square } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -6,6 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useScrollFollow } from "@/lib/hooks/use-scroll-follow";
 import { useBotChat } from "@/lib/hooks/use-bot-chat";
+import type { BotCallDecision } from "@/lib/api/bots";
 import { ApiRequestError } from "@/lib/api/client";
 import { cn } from "@/lib/utils";
 import { BotBackgroundCalls } from "./bot-background-calls";
@@ -64,6 +65,20 @@ export function BotChat({ botId }: { botId: string }) {
     observer.observe(el);
     return () => observer.disconnect();
   }, [chat.loading, chat.loadError]);
+
+  // 回调稳定（INT-176）：BotMessageView 已 memo，流式期间本组件随草稿
+  // 每帧重渲染，包一层 useCallback 让历史消息的 props 引用保持不变，
+  // memo 才能真正跳过整卡重渲染（message 本体来自 react-query 缓存，
+  // 引用本来就稳定）。先解构出 chat 的成员，依赖才能写成稳定函数本身。
+  const { decide, cancelCall } = chat;
+  const onDecide = useCallback(
+    (callId: string, decision: BotCallDecision) => void decide(callId, decision),
+    [decide],
+  );
+  const onCancelCall = useCallback(
+    (callId: string) => void cancelCall(callId),
+    [cancelCall],
+  );
 
   const submit = async () => {
     const value = text.trim();
@@ -293,10 +308,8 @@ export function BotChat({ botId }: { botId: string }) {
                 calls={chat.calls}
                 busyCallId={chat.busyCallId}
                 callActionError={chat.callActionError}
-                onDecide={(callId, decision) =>
-                  void chat.decide(callId, decision)
-                }
-                onCancelCall={(callId) => void chat.cancelCall(callId)}
+                onDecide={onDecide}
+                onCancelCall={onCancelCall}
               />
             ))}
           </div>

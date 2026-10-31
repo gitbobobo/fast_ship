@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { memo, useState } from "react";
 import {
   CalendarClock,
   CheckCircle2,
@@ -135,8 +135,11 @@ function ScheduleEventView({ message }: { message: BotMessage }) {
  * 过程旁白与已终态工具卡（INT-157）——待确认调用给确认卡（批准入口）、
  * 在途前台调用保留工具卡（逐项取消入口）。后台结果、批准决定与生命
  * 周期事件是平台投影出的结构性消息，用安静的样式与对话正文区分。
+ * memo 化（INT-176）：流式期间父级随草稿每帧重渲染，历史消息的 message
+ * 对象来自 react-query 缓存、引用不变，配合父级传下来的稳定回调，memo
+ * 能跳过历史消息的整卡重渲染，只有正在生成的草稿那一张在动。
  */
-export function BotMessageView({
+export const BotMessageView = memo(function BotMessageView({
   botId,
   message,
   draft = false,
@@ -443,4 +446,4 @@ export function BotMessageView({
       ))}
     </div>
   );
-}
+});
