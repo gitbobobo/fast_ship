@@ -316,7 +316,7 @@ func main() {
 	// 两个下载面各管各的：mediaProxyService 是 /api/github/media-proxy 用的
 	// GitHub 域名白名单面；reviewMediaService 是 PR 审查截图下载面，放行
 	// 任意公网 https 图片、靠拨号时校验解析 IP 防 SSRF，不与代理共用白名单。
-	mediaProxyService := githubmedia.NewProxyService(cfg.Upload.StoragePath)
+	mediaProxyService := githubmedia.NewProxyServiceWithLogger(cfg.Upload.StoragePath, appLogger)
 	// 读路径不删文件（见 githubmedia 包），过期条目由后台目录扫描回收。
 	mediaProxyService.StartExpiredSweeper()
 	// 截图下载面的凭证闸门要知道本部署的 GitHub 实例（GHE 拉私有附件）：只对

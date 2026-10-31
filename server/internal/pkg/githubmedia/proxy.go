@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -181,8 +182,56 @@ type ProxyService struct {
 	mu sync.Mutex
 	// download 每 URL 一把容量 1 的信号量（发送即持有、接收即释放）：同 URL
 	// 下载串行，但等待必须吃 ctx——sync.Mutex 锁不来取消，30s 探测时限会被
-	// 同 URL 前一请求的 45s 客户端超时拖穿。
-	download map[string]chan struct{}
+	// 同 URL 前一请求的 45s 客户端超时拖穿。refs 是该闸的引用计数（持有者 +
+	// 等待者，acquire 加、release/abandon 减）：空闲回收的判据是计数归零而
+	// 不是 len(chan)——等待者拿到 channel 后在 s.mu 之外做发送，那个窗口里
+	// channel 长度看不到等待者，凭长度删除会把等待者的闸变成孤儿，同一 URL
+	// 出现两个并发下载。
+	download map[string]*downloadGate
+
+	// metaReadFailMu/At/metaReadFailLogger 缓存 meta 读失败的限频告警：目录
+	// 级故障（权限被改、EIO、只读挂载）会退化成每个请求静默重下，不打日志
+	// 只能靠「图片变慢」感知；同类告警间隔内只记一次。
+	metaReadFailMu     sync.Mutex
+	metaReadFailAt     map[string]time.Time
+	metaReadFailLogger *slog.Logger
+}
+
+// metaReadFailLogInterval 同一 cacheDir 的 meta 读失败告警最小间隔。
+const metaReadFailLogInterval = 10 * time.Minute
+
+// NewProxyServiceWithLogger 带日志的生产装配：meta 读失败的目录级故障按限
+// 频 warn 记录（读路径不删文件的约束不变，日志是可观测性，不是行为变化）。
+func NewProxyServiceWithLogger(cacheRoot string, logger *slog.Logger) *ProxyService {
+	s := NewProxyService(cacheRoot)
+	s.metaReadFailLogger = logger
+	s.metaReadFailAt = make(map[string]time.Time)
+	return s
+}
+
+// logMetaReadFail 限频记录 meta 读失败：同一 cacheDir 在间隔内只记一次。
+func (s *ProxyService) logMetaReadFail(metaPath string, err error) {
+	if s.metaReadFailLogger == nil {
+		return
+	}
+	s.metaReadFailMu.Lock()
+	defer s.metaReadFailMu.Unlock()
+	if s.metaReadFailAt == nil {
+		s.metaReadFailAt = make(map[string]time.Time)
+	}
+	if last, ok := s.metaReadFailAt[s.cacheDir]; ok && time.Since(last) < metaReadFailLogInterval {
+		return
+	}
+	s.metaReadFailAt[s.cacheDir] = time.Now()
+	s.metaReadFailLogger.Warn("缓存 meta 读取失败，按 miss 重下（目录级故障时每条请求都会重下）",
+		"path", metaPath, "error", err)
+}
+
+// downloadGate 同 URL 下载闸：容量 1 的信号量加引用计数，计数由持有者在
+// s.mu 下增减（见 acquire/release/abandonDownloadLock）。
+type downloadGate struct {
+	sem  chan struct{}
+	refs int
 }
 
 // serviceConfig newService 的装配参数；零值字段按 GitHub 媒体代理语义兜底。
@@ -312,7 +361,7 @@ func newService(cacheRoot string, cfg serviceConfig) *ProxyService {
 		requireHTTPS:      cfg.requireHTTPS,
 		imagesOnly:        cfg.imagesOnly,
 		githubWebHost:     cfg.githubWebHost,
-		download:          make(map[string]chan struct{}),
+		download:          make(map[string]*downloadGate),
 	}
 	s.purgeLegacyCacheEntries()
 	return s
@@ -383,22 +432,22 @@ func (s *ProxyService) sweepExpiredEntries() {
 		// 持该 key 的下载闸再复核与删除：与同 key 写盘互斥，窗口关闭。闸等待
 		// 吃 ctx（背景扫描用 Background），锁被长下载持有时本轮跳过即可，下
 		// 轮再扫。
-		lock := s.acquireDownloadLock(entry.URL)
+		gate := s.acquireDownloadLock(entry.URL)
 		select {
-		case lock <- struct{}{}:
+		case gate.sem <- struct{}{}:
 		case <-time.After(5 * time.Second):
-			s.abandonDownloadLock(entry.URL, lock)
+			s.abandonDownloadLock(entry.URL, gate)
 			continue
 		}
 		// 锁内重读：条目可能刚被覆盖成新条目（不再过期）或已被清走。
 		recheck, err := os.ReadFile(metaPath)
 		if err != nil {
-			s.releaseDownloadLock(entry.URL, lock)
+			s.releaseDownloadLock(entry.URL, gate)
 			continue
 		}
 		var recheckEntry cacheEntry
 		if json.Unmarshal(recheck, &recheckEntry) != nil || !recheckEntry.expired(now) || recheckEntry.URL != entry.URL {
-			s.releaseDownloadLock(entry.URL, lock)
+			s.releaseDownloadLock(entry.URL, gate)
 			continue
 		}
 		binPath := strings.TrimSuffix(metaPath, ".json") + ".bin"
@@ -406,19 +455,25 @@ func (s *ProxyService) sweepExpiredEntries() {
 		// 会留下不可达的孤儿 .bin。
 		_ = os.Remove(binPath)
 		_ = os.Remove(metaPath)
-		s.releaseDownloadLock(entry.URL, lock)
+		s.releaseDownloadLock(entry.URL, gate)
 	}
 	// 无 meta 的孤儿 .bin（历史删除中断、或旧版本先删 meta 后删 data 被杀）：
-	// mtime 超过 2×TTL 才清，正在写盘的临时文件（tmp 后缀，不匹配 .bin）与
-	// 刚发布的条目不受影响。
+	// mtime 超过 2×TTL 才清，刚发布的条目不受影响。
+	// media-*.tmp（CreateTemp 的写盘中转）同样按 mtime 超 2×TTL 回收：进程
+	// 被杀/机器重启打断的下载会留下最多 maxCacheEntrySize 的临时文件，正在
+	// 写盘的文件因为 mtime 新不会被误删。
 	for _, e := range entries {
 		name := e.Name()
-		if !strings.HasSuffix(name, ".bin") {
+		isOrphanBin := strings.HasSuffix(name, ".bin")
+		isTmp := strings.HasPrefix(name, "media-") && strings.HasSuffix(name, ".tmp")
+		if !isOrphanBin && !isTmp {
 			continue
 		}
-		metaPath := filepath.Join(s.cacheDir, strings.TrimSuffix(name, ".bin")+".json")
-		if _, err := os.Stat(metaPath); !errors.Is(err, os.ErrNotExist) {
-			continue
+		if isOrphanBin {
+			metaPath := filepath.Join(s.cacheDir, strings.TrimSuffix(name, ".bin")+".json")
+			if _, err := os.Stat(metaPath); !errors.Is(err, os.ErrNotExist) {
+				continue
+			}
 		}
 		info, err := e.Info()
 		if err != nil || now.Sub(info.ModTime()) < 2*s.cacheTTL {
@@ -854,17 +909,17 @@ func (s *ProxyService) fetchAndCache(ctx context.Context, rawURL, bearer, scope 
 		return nil, err
 	}
 
-	lock := s.acquireDownloadLock(normalized)
+	gate := s.acquireDownloadLock(normalized)
 	select {
-	case lock <- struct{}{}:
+	case gate.sem <- struct{}{}:
 	case <-ctx.Done():
 		// 同 URL 已有下载在跑：等待必须吃 ctx。探测的 30s 时限是总时限，
 		// 不能被同 URL 前一请求的 45s 客户端超时拖穿。等待失败未持有闸，
 		// 用 abandon（不 <-lock）只尝试回收空闲条目。
-		s.abandonDownloadLock(normalized, lock)
+		s.abandonDownloadLock(normalized, gate)
 		return nil, ctx.Err()
 	}
-	defer s.releaseDownloadLock(normalized, lock)
+	defer s.releaseDownloadLock(normalized, gate)
 
 	if cached, ok, err := s.getCachedNormalized(normalized, scope); err != nil {
 		return nil, err
@@ -1061,6 +1116,10 @@ func (s *ProxyService) getCachedNormalized(normalized, scope string) (*CachedMed
 	if err != nil {
 		// ErrNotExist 是正常 miss；其余读失败（权限、目录损坏）同样按 miss——
 		// 读路径不删文件（见下），下次读取还是 miss，重下后按同一 key 覆盖。
+		// 目录级故障会退化成每条请求都重下，按限频 warn 留痕。
+		if !errors.Is(err, os.ErrNotExist) {
+			s.logMetaReadFail(metaPath, err)
+		}
 		return nil, false, nil
 	}
 
@@ -1129,37 +1188,39 @@ func (s *ProxyService) getCachedNormalized(normalized, scope string) (*CachedMed
 // 下载完成后 <-lock 收回。条目创建在 s.mu 下做，是否等待、等多久由调用方
 // 结合 ctx 决定。调用方用完应调 releaseDownloadLock：空闲（无人持有、无人
 // 等待）时把条目从 map 摘除，避免 map 随「历史上出现过的 URL 数」无界增长。
-func (s *ProxyService) acquireDownloadLock(key string) chan struct{} {
+func (s *ProxyService) acquireDownloadLock(key string) *downloadGate {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	lock, ok := s.download[key]
+	gate, ok := s.download[key]
 	if !ok {
-		lock = make(chan struct{}, 1)
-		s.download[key] = lock
+		gate = &downloadGate{sem: make(chan struct{}, 1)}
+		s.download[key] = gate
 	}
-	return lock
+	gate.refs++
+	return gate
 }
 
-// releaseDownloadLock 归还闸（调用方持有成功后用）并尝试回收空闲条目：归还
-// 后通道为空（容量 1，空即无持有者也无等待者）才从 map 摘除——恰有新请求
-// 在摘除判断与 map delete 之间 acquire 到同一 channel，delete 只是让它的
-// release 找不到条目、重新建一个，信号量语义不破坏。
-func (s *ProxyService) releaseDownloadLock(key string, lock chan struct{}) {
-	<-lock
-	s.releaseIdleDownloadLock(key, lock)
+// releaseDownloadLock 归还闸（调用方持有成功后用）并尝试回收空闲条目：引用
+// 计数归零才从 map 摘除——计数在 s.mu 下增减，等待者（acquire 时已登记）不
+// 会让持有者的释放把闸变成孤儿。
+func (s *ProxyService) releaseDownloadLock(key string, gate *downloadGate) {
+	<-gate.sem
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	gate.refs--
+	if gate.refs <= 0 && s.download[key] == gate {
+		delete(s.download, key)
+	}
 }
 
 // abandonDownloadLock 等待闸失败（ctx 超时/到期）时用：调用方从未持有闸，
-// 不能 <-lock（会阻塞到持有者释放），只尝试回收此刻空闲的条目。
-func (s *ProxyService) abandonDownloadLock(key string, lock chan struct{}) {
-	s.releaseIdleDownloadLock(key, lock)
-}
-
-func (s *ProxyService) releaseIdleDownloadLock(key string, lock chan struct{}) {
+// 不能 <-gate.sem（会阻塞到持有者释放），只递减计数、归零时回收。
+func (s *ProxyService) abandonDownloadLock(key string, gate *downloadGate) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(lock) == 0 && s.download[key] == lock {
+	gate.refs--
+	if gate.refs <= 0 && s.download[key] == gate {
 		delete(s.download, key)
 	}
 }

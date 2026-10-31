@@ -1,13 +1,16 @@
 package githubmedia
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -210,8 +213,8 @@ func TestSweepExpiredEntriesWaitsForWriterAndSkipsFreshEntry(t *testing.T) {
 	}
 
 	// 写侧持下载闸（发布中）：扫描必须等闸，不能越过它删文件。
-	lock := svc.acquireDownloadLock(normalized)
-	lock <- struct{}{}
+	gate := svc.acquireDownloadLock(normalized)
+	gate.sem <- struct{}{}
 
 	sweepDone := make(chan struct{})
 	go func() {
@@ -235,7 +238,7 @@ func TestSweepExpiredEntriesWaitsForWriterAndSkipsFreshEntry(t *testing.T) {
 	if err := os.WriteFile(binPath, []byte("new"), 0o640); err != nil {
 		t.Fatalf("write new bin: %v", err)
 	}
-	<-lock
+	svc.releaseDownloadLock(normalized, gate)
 
 	select {
 	case <-sweepDone:
@@ -284,6 +287,59 @@ func TestSweepExpiredEntriesRemovesStaleOrphanBins(t *testing.T) {
 	}
 	if _, err := os.Stat(fresh); err != nil {
 		t.Fatalf("fresh orphan stat = %v, want 保留（mtime 未超 2×TTL）", err)
+	}
+}
+
+// 中断下载留下的 media-*.tmp 同样按 mtime 超 2×TTL 回收（正在写盘的 mtime 新，
+// 不会被误删）。
+func TestSweepExpiredEntriesRemovesStaleTmpFiles(t *testing.T) {
+	svc := newService(t.TempDir(), serviceConfig{
+		allowURL: func(u *url.URL) bool { return true },
+	})
+	stale := filepath.Join(svc.cacheDir, "media-123.tmp")
+	if err := os.WriteFile(stale, []byte("partial"), 0o640); err != nil {
+		t.Fatalf("write stale tmp: %v", err)
+	}
+	old := time.Now().Add(-3 * defaultCacheTTL)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+	active := filepath.Join(svc.cacheDir, "media-456.tmp")
+	if err := os.WriteFile(active, []byte("writing"), 0o640); err != nil {
+		t.Fatalf("write active tmp: %v", err)
+	}
+
+	svc.SweepExpiredEntries()
+
+	if _, err := os.Stat(stale); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stale tmp stat = %v, want 已清理", err)
+	}
+	if _, err := os.Stat(active); err != nil {
+		t.Fatalf("active tmp stat = %v, want 保留（正在写盘）", err)
+	}
+}
+
+// meta 读失败（目录级故障）按限频 warn 记录：同 cacheDir 间隔内只记一次。
+func TestLogMetaReadFailRateLimited(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	svc := newService(t.TempDir(), serviceConfig{
+		allowURL:     allowPublicImageHost,
+		requireHTTPS: true,
+	})
+	svc.metaReadFailLogger = logger
+	svc.metaReadFailAt = make(map[string]time.Time)
+
+	metaPath := svc.metaPath(svc.metaPath("k", ""), "")
+	svc.logMetaReadFail(metaPath, os.ErrPermission)
+	svc.logMetaReadFail(metaPath, os.ErrPermission)
+	if n := strings.Count(buf.String(), "缓存 meta 读取失败"); n != 1 {
+		t.Fatalf("warn count = %d, want 1（限频）", n)
+	}
+	svc.metaReadFailAt[svc.cacheDir] = time.Now().Add(-2 * metaReadFailLogInterval)
+	svc.logMetaReadFail(metaPath, os.ErrPermission)
+	if n := strings.Count(buf.String(), "缓存 meta 读取失败"); n != 2 {
+		t.Fatalf("warn count = %d, want 2（间隔过后再记）", n)
 	}
 }
 
