@@ -868,8 +868,9 @@ func TestReviewCommentWakeObservedWindowRace(t *testing.T) {
 }
 
 // TestReviewCommentWakeObservedWindowGiveUp 观察窗口不收敛：每次实拉时总账
-// 都被并发推进（两次尝试观察值都不一致）→ 放弃并补登幂等账，不开轮；
-// 重投按 202 去重，不再空转。
+// 都被并发推进（两次尝试观察值都不一致）→ 放弃且**不登记**（fast-ship-bot
+// 第 52 轮 P2：烧账+静默丢弃会永久吞掉合法唤醒），不开轮；后续投递/手动
+// 重投可完整重走。
 func TestReviewCommentWakeObservedWindowGiveUp(t *testing.T) {
 	e := newReviewEngineEnv(t)
 	e.enableReview(t)
@@ -897,17 +898,21 @@ func TestReviewCommentWakeObservedWindowGiveUp(t *testing.T) {
 	if runs != 0 {
 		t.Fatalf("未收敛不得开轮，runs = %d", runs)
 	}
-	// 幂等账已补登：重投按 202 去重。
+	// 放弃路径不登记幂等账：同投递重走可完整重走（新鲜观察+实拉）。
 	var deliveries int64
 	e.svc.db.Model(&model.GitHubWebhookDelivery{}).
 		Where("delivery_id = ?", deliveryLedgerKey(model.ForgeIntegrationBuiltinGitHubID, "d-giveup")).
 		Count(&deliveries)
-	if deliveries != 1 {
-		t.Fatalf("放弃路径幂等账应已登记，实得 %d", deliveries)
+	if deliveries != 0 {
+		t.Fatalf("放弃路径不得登记幂等账，实得 %d", deliveries)
 	}
+	callsBefore := e.fake.CallCounts()["GetPullRequest"]
 	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-giveup",
-		issueCommentBody("@fast-ship-bot", repo, 42, 42)); !errors.Is(err, ErrDeliveryDuplicated) {
-		t.Fatalf("重投应按幂等去重，实得 %v", err)
+		issueCommentBody("@fast-ship-bot", repo, 42, 42)); err != nil {
+		t.Fatalf("同投递重走应完整重走不报错: %v", err)
+	}
+	if got := e.fake.CallCounts()["GetPullRequest"]; got <= callsBefore {
+		t.Fatalf("重走应重新实拉: %d -> %d", callsBefore, got)
 	}
 }
 
@@ -2745,5 +2750,58 @@ func TestReviewCommentWakeStrangerBeforeFreshRead(t *testing.T) {
 	e.svc.db.Model(&model.ReviewRun{}).Where("pr_number = 65").Count(&runs)
 	if runs != 0 {
 		t.Fatalf("陌生人不得开轮: runs = %d", runs)
+	}
+}
+
+// 启用基线（INT-167，fast-ship-bot 第 52 轮 P2）：评论时刻早于 enabled_at
+// 基线的存量投递（对账重投/手动重放）不得按当前 live head 开轮——静默忽
+// 略并随事务落幂等账；基线之后的评论照常受理。
+func TestReviewCommentWakeEnabledAtBaseline(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	e.enableReview(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	ctx := context.Background()
+	e.fake.SetPR(repo, 66, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 66, State: "open", HeadSHA: "sha-enable",
+		HeadRepoFullName: repo,
+	})
+	// 启用基线：1 小时前。
+	enabledAt := time.Now().UTC().Add(-time.Hour)
+	if err := e.svc.db.Model(&model.ProjectReviewSettings{}).
+		Where("project_id = ?", e.project.ID).
+		Update("enabled_at", enabledAt).Error; err != nil {
+		t.Fatalf("set enabled_at: %v", err)
+	}
+
+	// 启用前的存量评论（对账重投模拟）：忽略并落幂等账。
+	stale := issueCommentBody("@fast-ship-bot", repo, 66, 42, func(m map[string]any) {
+		m["comment"].(map[string]any)["created_at"] = enabledAt.Add(-30 * time.Minute).Format(time.RFC3339)
+	})
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-enable-stale", stale); err != nil {
+		t.Fatalf("启用前投递应静默忽略: %v", err)
+	}
+	var deliveries int64
+	e.svc.db.Model(&model.GitHubWebhookDelivery{}).
+		Where("delivery_id = ?", deliveryLedgerKey(model.ForgeIntegrationBuiltinGitHubID, "d-enable-stale")).
+		Count(&deliveries)
+	if deliveries != 1 {
+		t.Fatalf("忽略判定应随事务落幂等账: %d", deliveries)
+	}
+	var runs int64
+	e.svc.db.Model(&model.ReviewRun{}).Where("pr_number = 66").Count(&runs)
+	if runs != 0 {
+		t.Fatalf("启用前投递不得开轮: runs = %d", runs)
+	}
+
+	// 基线之后的评论照常受理开轮。
+	fresh := issueCommentBody("@fast-ship-bot", repo, 66, 42, func(m map[string]any) {
+		m["comment"].(map[string]any)["created_at"] = enabledAt.Add(30 * time.Minute).Format(time.RFC3339)
+	})
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-enable-fresh", fresh); err != nil {
+		t.Fatalf("基线后评论应受理: %v", err)
+	}
+	e.svc.db.Model(&model.ReviewRun{}).Where("pr_number = 66").Count(&runs)
+	if runs != 1 {
+		t.Fatalf("基线后评论应开轮: runs = %d", runs)
 	}
 }

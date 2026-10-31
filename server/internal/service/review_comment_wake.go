@@ -98,13 +98,18 @@ func (s *ReviewService) commentWakeMentionsFresh(ctx context.Context) ([]string,
 		}
 		return nil, false, err
 	}
-	// 读取成功（含「未配置」这一稳定态）都进缓存：未配置部署不必每条评
-	// 论重读；瞬时故障不缓存，下一轮读取恢复即可。
+	// 缓存只存「实际生效」的句柄：ok=false（未配置）时 row.AppSlug 残值
+	// 不得入缓存——否则缓存冷热两条路径的唤醒串集合漂移，强制刷新复核
+	// 反而漏掉 slug 唤醒（fast-ship-bot 第 52 轮 Note）。读取成功都进缓存
+	// （未配置部署不必每条评论重读）；瞬时故障不缓存。
+	if !ok {
+		cfg.AppSlug = ""
+	}
 	s.mentionsSlugCache.Store("slug", mentionsSlugEntry{
 		slug:    cfg.AppSlug,
 		expires: time.Now().UTC().Add(reviewMentionsCacheTTL),
 	})
-	if !ok || cfg.AppSlug == "" {
+	if cfg.AppSlug == "" {
 		return mentions, false, nil
 	}
 	return append(mentions, "@"+strings.ToLower(cfg.AppSlug)), false, nil
@@ -152,6 +157,9 @@ type commentWakePayload struct {
 	} `json:"issue"`
 	Comment struct {
 		Body string `json:"body"`
+		// CreatedAt 评论时刻：启用基线（INT-167）判定用——启用前的存量
+		// 投递（对账重投/手动重放）不受理。
+		CreatedAt *time.Time `json:"created_at"`
 		// User.Type GitHub 把 App/机器人账号标为 "Bot"：机器自评论不唤醒
 		// （见 commentWakePayloadGuards 的机器评论排除）。
 		User struct {
@@ -369,7 +377,8 @@ func (s *ReviewService) observeAcceptedHead(ctx context.Context, integrationID, 
 //	任何登记，重投会完整重走全流程（这正是幂等账不能在此前单独提交的原因）。
 //	阶段二（单事务）：幂等登记 → 反查启用项目 → 复核设置行 → 观察窗口复核
 //	（重取总账 head，与观察值不一致即哨兵回滚、外层重读重拉，上限
-//	reviewCommentWakeRevalidateMax 次不收敛判丢弃）→ fork/实况关卡 → 取消
+//	reviewCommentWakeRevalidateMax 次不收敛放弃且**不登记**——后续投递/
+//	手动重投可完整重走）→ fork/实况关卡 → 取消
 //	在途、删防抖行、按 action=comment 恒开新轮。登记与开轮同一事务：任何
 //	一步失败整体回滚（幂等账随之撤销），平台重投可重走；复核不过是已确定
 //	的丢弃，事务提交后幂等账落定，重投按 202 去重。
@@ -661,7 +670,7 @@ func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, ev
 			pr = pr2
 		}
 		opened, forkDenied, txErr := s.openCommentWakeRoundTx(ctx, integrationID, event, deliveryID, repo, prNumber,
-			installationID, observedProjectID, observedHead, pr, time.Now().UTC())
+			installationID, observedProjectID, observedHead, pr, payload.Comment.CreatedAt, time.Now().UTC())
 		denyCache, err := commentWakeTxOutcome(forkDenied, txErr)
 		if errors.Is(err, errCommentWakeObservedHeadMoved) {
 			s.logger.Info("评论唤醒观察窗口内总账被并发推进，重读重拉",
@@ -682,11 +691,15 @@ func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, ev
 		}
 		return opened, nil
 	}
-	s.logger.Warn("评论唤醒观察窗口未收敛，放弃并丢弃投递",
+	// 放弃路径不登记幂等账：窗口内 PR 被连续推送（agent amend/force-push
+	// 正是本功能的目标场景）时，静默丢弃 + 烧账会把合法唤醒永久吞掉且用
+	// 户无感知；不登记则用户再次评论或平台侧手动 Redeliver 都能完整重走
+	// 全流程（新鲜观察+实拉，大概率收敛），202 语义不受影响（fast-ship-bot
+	// 第 52 轮 P2）。
+	s.logger.Warn("评论唤醒观察窗口未收敛，放弃且不登记（后续投递可完整重走）",
 		zap.String("integration", integrationID),
 		zap.String("repo", repo), zap.Int("pr", prNumber),
 		zap.String("delivery", deliveryID))
-	s.recordDroppedDelivery(ctx, integrationID, deliveryID, event)
 	return false, nil
 }
 
@@ -701,7 +714,7 @@ func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, ev
 // 同 head 在途/草稿等）保持 false，调度 kick 不为空跳误报（codex 第 42 轮 P3）。
 func (s *ReviewService) openCommentWakeRoundTx(ctx context.Context, integrationID, event, deliveryID, repo string,
 	prNumber int, installationID int64, observedProjectID, observedHead string,
-	pr *forge.PullRequest, now time.Time) (opened, forkDenied bool, err error) {
+	pr *forge.PullRequest, commentAt *time.Time, now time.Time) (opened, forkDenied bool, err error) {
 	forkDenied = false
 	opened = false
 	txErr := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -733,7 +746,7 @@ func (s *ReviewService) openCommentWakeRoundTx(ctx context.Context, integrationI
 		// 复核设置行（rerun 同款）：取 PR 与开轮之间可能发生停用/换仓库/
 		// 改绑集成——设置行已删或停用、快照 (集成, 仓库) 不再匹配时不开轮。
 		var fresh model.ProjectReviewSettings
-		if err := tx.Select("repo_full_name", "integration_id", "enabled").
+		if err := tx.Select("repo_full_name", "integration_id", "enabled", "enabled_at").
 			Where("project_id = ?", project.ID).First(&fresh).Error; err != nil {
 			// 只有「设置行已删（审查被移除）」才是已确定的丢弃——静默忽略并
 			// 随事务落幂等账；其余库错误必须透出让事务整体回滚（不烧幂等
@@ -745,6 +758,14 @@ func (s *ReviewService) openCommentWakeRoundTx(ctx context.Context, integrationI
 		}
 		if !fresh.Enabled || !strings.EqualFold(fresh.RepoFullName, repo) ||
 			fresh.IntegrationID != settings.IntegrationID {
+			return nil
+		}
+		// 启用基线（INT-167）：评论时刻早于 enabled_at 基线 = 启用前的存量
+		// 投递（24h 内对账重投/后台手动 Redeliver），按当前 live head 开轮
+		// 会违背「启用前的存量状态不受理」——静默忽略并随事务落幂等账
+		// （与 pull_request 触发面同口径，fast-ship-bot 第 52 轮 P2）。
+		if fresh.EnabledAt != nil && commentAt != nil &&
+			commentAt.Before(fresh.EnabledAt.Add(-forgejoPollBaselineGrace)) {
 			return nil
 		}
 		// 观察窗口复核：实拉前观察到的总账 head 与事务内重取不一致——窗口
