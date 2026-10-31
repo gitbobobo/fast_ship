@@ -408,6 +408,21 @@ func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, ev
 	if payload == nil {
 		return false, nil
 	}
+	// payload 级作者预比对（零成本）：有登录名的陌生人（非作者且非 OWNER）
+	// 在任何 App 身份读取（含缓存未命中的强制刷新）之前拒绝——公开仓库的
+	// 任意 @ 评论不得放大成一次设置读取（codex 第 51 轮 P2）。
+	if !commentAssociationAllowed(payload.Comment.Association) &&
+		payload.Comment.User.Login != "" && payload.Issue.User.Login != "" &&
+		!strings.EqualFold(payload.Comment.User.Login, payload.Issue.User.Login) {
+		return false, nil
+	}
+	// 退路：payload 缺登录名或登录名与 payload 作者一致（可能是伪造，也可能
+	// 是真作者）——维持实拉后按实拉 PR 作者比对的最终判定。
+	if integrationID == model.ForgeIntegrationBuiltinGitHubID &&
+		!commentAssociationAllowed(payload.Comment.Association) &&
+		payload.Comment.User.Login == "" {
+		return false, nil
+	}
 	mentions, cached, err := s.commentWakeMentions(ctx)
 	if err != nil {
 		// 瞬时故障不落账：返回 500 让平台重投（重投时读取恢复即正常处理）。
@@ -440,22 +455,6 @@ func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, ev
 		return false, err
 	}
 	// 显然无资格的点名不必实拉——零 API 成本拒绝（codex 第 17/23 轮 P2）：
-	// PR 即 issue，payload 的 issue.user.login 就是 PR 作者（commentWakeAuthorized
-	// 比对的正是它，实拉只为拿实时 head/state）。作者例外与属主例外之外的
-	// 登录名评论者直接拒绝；两个字段都缺失（代理剥字段等）才留待实拉后
-	// 按实拉作者比对。Forgejo 没有关联字段，同一比对同样适用。
-	if !commentAssociationAllowed(payload.Comment.Association) &&
-		payload.Comment.User.Login != "" && payload.Issue.User.Login != "" &&
-		!strings.EqualFold(payload.Comment.User.Login, payload.Issue.User.Login) {
-		return false, nil
-	}
-	// 退路：payload 缺登录名或登录名与 payload 作者一致（可能是伪造，也可能
-	// 是真作者）——维持实拉后按实拉 PR 作者比对的最终判定。
-	if integrationID == model.ForgeIntegrationBuiltinGitHubID &&
-		!commentAssociationAllowed(payload.Comment.Association) &&
-		payload.Comment.User.Login == "" {
-		return false, nil
-	}
 	// fork 否定缓存命中：零 API 成本忽略（该 PR 已知是跨仓 fork）。
 	// 缓存键含集成身份：不同集成可有同名仓库 + 同号 PR（完全不同的仓库），
 	// 一处的 fork 否定不得错杀另一集成（codex 第 27 轮 P2）。

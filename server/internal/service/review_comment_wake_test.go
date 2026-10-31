@@ -2709,3 +2709,41 @@ func TestReviewCommentWakeNilSeenFallsBackToLedger(t *testing.T) {
 		t.Fatalf("总账不得回退: head = %s", after.HeadSHA)
 	}
 }
+
+// 作者预比对先于 App 身份读取（codex 第 51 轮 P2）：有登录名的陌生人
+// （非作者且非 OWNER）的任意 @ 评论在缓存未命中强制刷新之前就被拒绝，
+// 公开仓库的评论流量不得放大成部署设置读取。
+func TestReviewCommentWakeStrangerBeforeFreshRead(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	e.enableReview(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	ctx := context.Background()
+	e.fake.SetPR(repo, 65, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 65, State: "open", HeadSHA: "sha-str2",
+		HeadRepoFullName: repo,
+	})
+	counter := &countingAppSource{cfg: GitHubAppConfig{AppSlug: "Fast-Ship-Demo"}}
+	e.review.appSource = counter
+	// 预热缓存（未命中刷新只在缓存命中时触发，先填充）。
+	if _, _, err := e.review.commentWakeMentions(ctx); err != nil {
+		t.Fatalf("预热缓存: %v", err)
+	}
+
+	// 陌生人（登录名与 payload 作者不同、非 OWNER）@ 任意句柄：预比对拒绝，
+	// 不得触发强制刷新。
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-str2",
+		commentBodyWithUsers("@whatever-slug 看看", repo, 65, 42, "NONE", "stranger", "pr-author")); err != nil {
+		t.Fatalf("陌生人 @ 评论应零成本拒绝: %v", err)
+	}
+	counter.mu.Lock()
+	reads := counter.reads
+	counter.mu.Unlock()
+	if reads != 1 {
+		t.Fatalf("预比对应在强制刷新之前: reads = %d", reads)
+	}
+	var runs int64
+	e.svc.db.Model(&model.ReviewRun{}).Where("pr_number = 65").Count(&runs)
+	if runs != 0 {
+		t.Fatalf("陌生人不得开轮: runs = %d", runs)
+	}
+}
