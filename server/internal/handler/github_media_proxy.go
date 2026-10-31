@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -145,11 +146,20 @@ func copyMediaHeaders(dst, src http.Header) {
 	}
 }
 
+// mediaProxyRejectionMaxAge 415 的浏览器缓存秒数。被准入拒收的资源（如 Issue
+// 正文里的 svg 图片）是确定性的：同一 URL 同一准入规则下永远拒。不给缓存头
+// 的话每次页面渲染都会重新请求代理，代理再回源一趟（302 + 实体各一跳）才在
+// 闸门上拒——升级前这类资源是命中磁盘的，不回源就是不给浏览器留缓存头造成
+// 的放大。短 TTL 就够了：规则变了也不会被旧结果卡太久；不做服务端负缓存
+// （规则变更时要清理墓碑，语义成本高于收益）。
+const mediaProxyRejectionMaxAge = 600
+
 func writeMediaProxyError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, githubmedia.ErrInvalidMediaURL):
 		c.String(http.StatusBadRequest, "invalid github media url")
 	case errors.Is(err, githubmedia.ErrUnsupportedUpstreamMedia):
+		c.Header("Cache-Control", "private, max-age="+strconv.Itoa(mediaProxyRejectionMaxAge))
 		c.String(http.StatusUnsupportedMediaType, "unsupported media type")
 	default:
 		var upstreamErr *githubmedia.UpstreamStatusError

@@ -512,3 +512,21 @@ func TestExtensionFallbackUsesFinalRedirectURL(t *testing.T) {
 		t.Fatalf("content type = %q, want image/png（按最终 URL 扩展名规范化）", cached.Metadata.ContentType)
 	}
 }
+
+// WithHTTPTransport 撞上 guardAddress（截图面）直接 panic：那个面的 SSRF
+// 防线是 Transport 里的拨号期 IP 校验，整颗换 Transport 会把它静默拆掉。
+// 选项是导出的，宁可炸也不要让接线错误变成静默失守。
+func TestWithHTTPTransportRejectsGuardedFace(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected panic when injecting transport on guardAddress face")
+		}
+	}()
+	newService(t.TempDir(), serviceConfig{
+		allowURL:     allowPublicImageHost,
+		requireHTTPS: true,
+		imagesOnly:   true,
+		guardAddress: true,
+		transport:    http.DefaultTransport,
+	})
+}

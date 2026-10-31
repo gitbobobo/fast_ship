@@ -739,7 +739,9 @@ export interface paths {
          *     `Content-Security-Policy: default-src 'none'; sandbox`（只影响顶层导航，
          *     不影响 `<img>`/`<video>` 子资源渲染）。
          *     上游 Content-Type 缺省或为 `application/octet-stream` 时按扩展名回填具体媒体类型；
-         *     多段 `Range`（含逗号）按无 `Range` 处理返回完整 200。
+         *     多段 `Range`（含逗号）按无 `Range` 处理返回完整 200。415 带
+         *     `Cache-Control: private, max-age=600`：被准入拒收的资源在同一规则下永远拒，
+         *     给短缓存头避免每次页面渲染都回源。
          *     错误响应为 `text/plain`（非 JSON 信封）：400 invalid url、415 unsupported media type、
          *     其他上游错误按状态码透传或 502。同一路径另注册 HEAD 变体，语义同 GET 但不返回 body。
          */

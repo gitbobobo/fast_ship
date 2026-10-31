@@ -197,10 +197,13 @@ type serviceConfig struct {
 // 不打真实网络。
 type ProxyOption func(*serviceConfig)
 
-// WithHTTPTransport 只替换默认客户端的 Transport：客户端其余部分
-// （CheckRedirect 的白名单复检与 Authorization 剥离、超时）保持生产实现
-// ——它们本身是安全逻辑，测试整颗换掉客户端会顺带丢掉这层防线。
-// 测试注入指向 httptest 假上游的 RoundTripper，不打真实网络。
+// WithHTTPTransport 只替换默认客户端的 Transport（测试注入指向 httptest 假
+// 上游的 RoundTripper，不打真实网络），客户端的 CheckRedirect（白名单复检、
+// Authorization 剥离）与超时保持生产实现。
+//
+// 边界：截图面（guardAddress）的 SSRF 防线就长在 Transport 里（拨号期 IP 校
+// 验），整颗换 Transport 会把那层静默拆掉——所以该选项撞上 guardAddress 面
+// 直接 panic（见 newService），不要拿它去接截图面。
 func WithHTTPTransport(rt http.RoundTripper) ProxyOption {
 	return func(cfg *serviceConfig) { cfg.transport = rt }
 }
@@ -269,6 +272,11 @@ func newService(cacheRoot string, cfg serviceConfig) *ProxyService {
 			func(u *url.URL) bool { return IsGitHubMediaURLFor(u.String(), webHost) })
 	}
 	if cfg.transport != nil {
+		if cfg.guardAddress {
+			// 截图面的 SSRF 防线是 Transport 里的 Dialer.Control 拨号校验，整颗
+			// 换 Transport 就会静默失去它。宁可炸：测试注入只该用在媒体面。
+			panic("githubmedia: WithHTTPTransport 不能用于 guardAddress 面（会移除拨号期 IP 校验）")
+		}
 		// 克隆后只换 Transport：CheckRedirect/Timeout 是重定向白名单与凭证
 		// 剥离的执行点，不能被测试注入旁路。
 		clone := *cfg.client
@@ -1254,11 +1262,13 @@ func (s *ProxyService) isAllowedContentType(contentType string, rawURL string) b
 // normalizeMediaContentType 「准入 + 规范化」判定：上游类型原样是
 // image/* / video/*（GitHub 媒体面；截图面只收 image/*）时放行，返回
 // 小写去参后的类型本身；类型为空或 application/octet-stream 时按扩展名
-// 回退，放行则返回扩展名表里的具体媒体类型——不是把 octet-stream 原样
-// 回给客户端：成功响应统一带 nosniff，octet-stream/空类型在浏览器里
-// 不会被嗅探成图片，<img>/<video> 会拒收。rawURL 必须传重定向之后的
-// 最终 URL（调用方责任），借原始扩展名放行重定向出去的不可执行文档
-// 才无从发生。
+// 回退，放行则返回扩展名表里的具体媒体类型，不把 octet-stream/空类型原样
+// 回给客户端：具体类型是确定信息（缓存与响应同源），不依赖浏览器嗅探——
+// 同源 <img> 实测仍会嗅探 octet-stream 并解码，但那是实现细节，不能当设计
+// 前提，<video> 与其他客户端也不保证。注意这里只做类型准入，不校验媒体字节
+// （伪装成 image/png 的 svg 字节仍会被回），可执行性靠准入 + attachment +
+// CSP 的组合堵。rawURL 必须传重定向之后的最终 URL（调用方责任），借原始
+// 扩展名放行重定向出去的不可执行文档才无从发生。
 func (s *ProxyService) normalizeMediaContentType(contentType, rawURL string) (string, bool) {
 	if contentType == "" {
 		return mediaTypeForExtension(rawURL, s.imagesOnly)

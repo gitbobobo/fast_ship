@@ -42,8 +42,12 @@ func TestGitHubMediaProxyHandlerSVGGateAndHardeningHeaders(t *testing.T) {
 		case "/user-attachments/assets/clip.mp4":
 			w.Header().Set("Content-Type", "video/mp4")
 			if r.Header.Get("Range") != "" {
-				w.Header().Set("Content-Range", "bytes 0-3/8")
+				// 只回请求的前 4 字节（与 Content-Range 声明的 `bytes 0-3/9` 对齐），
+				// 断言才能盖到部分响应的字节边界，而不只是状态码。
+				w.Header().Set("Content-Range", "bytes 0-3/9")
 				w.WriteHeader(http.StatusPartialContent)
+				_, _ = w.Write([]byte("mp4-"))
+				return
 			}
 			_, _ = w.Write([]byte("mp4-bytes"))
 		case "/user-attachments/assets/evil.html":
@@ -104,6 +108,10 @@ func TestGitHubMediaProxyHandlerSVGGateAndHardeningHeaders(t *testing.T) {
 			if rec.Code != http.StatusUnsupportedMediaType {
 				t.Fatalf("code = %d body = %s, want 415", rec.Code, rec.Body.String())
 			}
+			// 415 是确定性拒绝：带短 TTL 缓存头，浏览器不必每次渲染都回源。
+			if got := rec.Header().Get("Cache-Control"); got != "private, max-age=600" {
+				t.Fatalf("cache-control = %q, want private, max-age=600", got)
+			}
 		})
 	}
 
@@ -139,8 +147,11 @@ func TestGitHubMediaProxyHandlerSVGGateAndHardeningHeaders(t *testing.T) {
 	if rec.Code != http.StatusPartialContent {
 		t.Fatalf("mp4 range code = %d, want 206", rec.Code)
 	}
-	if got := rec.Header().Get("Content-Range"); got != "bytes 0-3/8" {
-		t.Fatalf("mp4 content range = %q, want bytes 0-3/8", got)
+	if got := rec.Header().Get("Content-Range"); got != "bytes 0-3/9" {
+		t.Fatalf("mp4 content range = %q, want bytes 0-3/9", got)
+	}
+	if rec.Body.String() != "mp4-" {
+		t.Fatalf("mp4 range body = %q, want mp4-（只回前 4 字节）", rec.Body.String())
 	}
 	assertHardening(t, rec)
 
