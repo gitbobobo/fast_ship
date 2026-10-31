@@ -135,8 +135,15 @@ func setSameOriginContentHardeningHeaders(header http.Header) {
 }
 
 // setSameOriginAttachmentHeaders 同上，再加 Content-Disposition: attachment
-// 与文件名。attachment 把顶层导航（「在新标签页打开图片」）降级成下载而不是
-// 同源文档，只影响导航，不影响 <img>/<video> 子资源渲染。
+// 与文件名。attachment 挡的是顶层导航（「在新标签页打开图片」退化成下载，
+// 而不是打开一份同源文档）。子资源不受影响的依据：HTML 的下载处理只写在
+// 导航算法里，图片/媒体的加载算法没有 attachment 分支，Fetch 也只把
+// document/embed/frame/iframe/object 列为导航请求；WebKit 的 SubresourceLoader
+// 与 AVFoundation 媒体桥接源码里同样没有按 attachment 下载/拒显的分支。
+// Chromium 已实测；Safari 尚无本机实测，属于源码级判断而不是浏览器验证。
+// 不按 Sec-Fetch-Dest 区分：导航请求不止 document（还有 iframe/frame/object/
+// embed），缺失元数据的老客户端还得另定回落，为一个没有证据的 Safari 兼容
+// 问题引入两条缓存键与分支，不值得。
 func setSameOriginAttachmentHeaders(header http.Header, fileName string) {
 	setSameOriginContentHardeningHeaders(header)
 	header.Set("Content-Disposition", contentDisposition(fileName))
