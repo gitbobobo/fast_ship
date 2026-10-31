@@ -376,7 +376,9 @@ func main() {
 	// review 截图面**不接** TTL 扫描：它的缓存目录（review-screenshot-cache）
 	// 同时是 review_assets 的持久存储（storage_path 直接指向 cached 文件，无
 	// 副本），按 TTL 删除会让超过 24h 的历史截图取不到且 ensure 不会重下。
-	// 该面目录的治理另行处理（复制进上传存储或按引用回收），不是本 PR 范围。
+	// 但中断下载的 media-*.tmp 残留两边都一样要清，tmp 清理是独立方法，这里
+	// 只启动它（不触碰 .bin/.json）。
+	reviewMediaService.StartStaleTmpSweeper()
 	// shell 订阅 hub（INT-116）：每环境常驻活跃/归档两条 WS，列表与运行态读取
 	// 从内存回答；环境重配/删除时由环境服务清 entry。这里注册停机钩子：当前
 	// main 进程没有优雅停机路径、defer 通常不会执行（进程被信号终止时由 OS

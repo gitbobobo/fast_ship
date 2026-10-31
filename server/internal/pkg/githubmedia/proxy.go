@@ -375,6 +375,18 @@ func (s *ProxyService) StartExpiredSweeper() {
 	s.startExpiredSweeper()
 }
 
+// StartStaleTmpSweeper 启动后台 media-*.tmp 清理（随过期扫描一起跑）。给不
+// 接过期回收的面用（review 截图面：.bin/.json 是持久资产不回收，但中断下载
+// 的 tmp 残留同样要清）。
+func (s *ProxyService) StartStaleTmpSweeper() {
+	go func() {
+		for {
+			time.Sleep(expiredSweepInterval)
+			s.sweepStaleTmpFiles(time.Now().UTC())
+		}
+	}()
+}
+
 // SweepExpiredEntries 手动触发一次目录过期扫描（测试与运维用）。
 func (s *ProxyService) SweepExpiredEntries() {
 	s.sweepExpiredEntries()
@@ -459,21 +471,38 @@ func (s *ProxyService) sweepExpiredEntries() {
 	}
 	// 无 meta 的孤儿 .bin（历史删除中断、或旧版本先删 meta 后删 data 被杀）：
 	// mtime 超过 2×TTL 才清，刚发布的条目不受影响。
-	// media-*.tmp（CreateTemp 的写盘中转）同样按 mtime 超 2×TTL 回收：进程
-	// 被杀/机器重启打断的下载会留下最多 maxCacheEntrySize 的临时文件，正在
-	// 写盘的文件因为 mtime 新不会被误删。
 	for _, e := range entries {
 		name := e.Name()
-		isOrphanBin := strings.HasSuffix(name, ".bin")
-		isTmp := strings.HasPrefix(name, "media-") && strings.HasSuffix(name, ".tmp")
-		if !isOrphanBin && !isTmp {
+		if !strings.HasSuffix(name, ".bin") {
 			continue
 		}
-		if isOrphanBin {
-			metaPath := filepath.Join(s.cacheDir, strings.TrimSuffix(name, ".bin")+".json")
-			if _, err := os.Stat(metaPath); !errors.Is(err, os.ErrNotExist) {
-				continue
-			}
+		metaPath := filepath.Join(s.cacheDir, strings.TrimSuffix(name, ".bin")+".json")
+		if _, err := os.Stat(metaPath); !errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil || now.Sub(info.ModTime()) < 2*s.cacheTTL {
+			continue
+		}
+		_ = os.Remove(filepath.Join(s.cacheDir, name))
+	}
+	s.sweepStaleTmpFiles(now)
+}
+
+// sweepStaleTmpFiles 回收 CreateTemp 的 media-*.tmp 写盘中转：进程被杀/机器
+// 重启打断的下载会留下最多 maxCacheEntrySize 的临时文件。只碰 .tmp，不触碰
+// .bin/.json——review 截图面的目录同时是持久存储（见 main.go），它的过期
+// 条目不回收，但中断下载的 tmp 残留同样要清，所以这是独立方法。mtime 超过
+// 2×TTL 才清，正在写盘的文件因为 mtime 新不会被误删。
+func (s *ProxyService) sweepStaleTmpFiles(now time.Time) {
+	entries, err := os.ReadDir(s.cacheDir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasPrefix(name, "media-") || !strings.HasSuffix(name, ".tmp") {
+			continue
 		}
 		info, err := e.Info()
 		if err != nil || now.Sub(info.ModTime()) < 2*s.cacheTTL {
