@@ -228,6 +228,11 @@ type t3ShellState struct {
 	// 开本连接，监督循环重连后新连接的 subscribe 必在该请求之后发出，
 	// 其快照必为写后状态，落地自然清掉备忘（邮戳 ≥ 备忘世代）。
 	archiveReconnectPendingGen int64
+	// archiveReconnectDedupGen 记「已为哪条连接请求过重建」（#156 R41）：同一
+	// 连接重复丢弃只 bump 一次世代，避免反复重建订阅。
+	archiveReconnectDedupGen int64
+	// archiveReconnectDedupSet 区分「尚未请求过」与「connectionStart=0」。
+	archiveReconnectDedupSet bool
 	// archiveReconnectIssued 是已发出的 reconnect 请求总数（最新请求的世
 	// 代编号）。与 pending 分离：consume/连接终止只清 pending，不回卷本
 	// 计数——它是新请求世代的来源，也是连接出发邮戳的取值来源。
@@ -461,6 +466,11 @@ func (s *t3ShellState) applyArchiveSnapshotAt(snapshot t3ArchivedShellSnapshot, 
 	// 也不能拿变更前的行覆盖现有行；不动可信度，避免「撤 ready 后宽限到期也
 	// 恢复不了」的死角。
 	if !observedAt.IsZero() && observedAt.Before(s.archiveFreshnessFloor) {
+		// 未落地也要走 commit(false)（#156 R41 Note）：否则 validUntil/needsRefetch
+		// 都不更新，调用方会把「丢弃」当成功落地、不记冷却也不重试。
+		if commit != nil {
+			commit(false)
+		}
 		return false, nil
 	}
 	// 坏负载先于世代判定：reset 失败时面保持原样，err 点名原因交调用方
@@ -651,7 +661,11 @@ func (s *t3ShellState) applyArchiveSnapshotLocked(snapshot t3ArchivedShellSnapsh
 		// 但若这条快照是**仅有的一次机会**（面还没就绪、之后不会再推），就必须
 		// 请求重连取新全量（#156 R40）；面已就绪时保持安静，避免批量归档期间
 		// 的重连风暴（#156 R38）。
-		if !s.archiveReady {
+		// 同一条连接只请求一次（#156 R41 Note）：否则每次快照被丢弃都会 bump
+		// 世代，形成「反复重建订阅」的循环。
+		if !s.archiveReady && !(s.archiveReconnectDedupSet && s.archiveReconnectDedupGen == connectionStart) {
+			s.archiveReconnectDedupSet = true
+			s.archiveReconnectDedupGen = connectionStart
 			s.noteArchiveReconnectRequestedLocked()
 		}
 		return nil
