@@ -44,6 +44,14 @@ const LIST_MARKER_RE = /^(?:[-*+]|\d{1,9}[.)])(?:[ \t]+|$)/;
 // `- [x]: url` 的复选框后紧跟 `:`，那是引用定义而不是任务项，仍要退回。
 const TASK_ITEM_RE = /^ {0,3}(?:[-*+]|\d{1,9}[.)])[ \t]+\[[ xX]\](?:[ \t]|$)/;
 
+// 还没收完的复选框前缀（`- [`、`- [x`、`- [ `）。退回判定对正在增长的最后一行
+// 也生效：只认完整复选框的话，逐 token 流式时每一帧都会撞上一个中间态，整份
+// 回复反复退回再恢复，`segments` 归零、稳定块被重建。因此只对**还没换行完结**
+// 的行放行这个宽口：一行收完后仍不是完整任务项（`- [abc] task`、`- [ ]x`）就
+// 照旧退回；`- [x` 后接 `y]: url` 这种跨行定义标签也在那里拦下。
+const TASK_ITEM_PREFIX_RE =
+  /^ {0,3}(?:[-*+]|\d{1,9}[.)])[ \t]+\[[ xX]?\]?(?:[ \t]|$)/;
+
 // 开在列表项里的围栏：`- ``` `、`1. ~~~`、`> 1. ``` `（判定跑在剥过
 // blockquote 的视图上）。内容列取决于列表标记宽度，不建模，命中即整段退回。
 const LIST_ITEM_FENCE_RE =
@@ -88,7 +96,9 @@ function closingRun(line: string, char: "`" | "~", minLen: number): boolean {
     i += 1;
   }
   if (run < minLen) return false;
-  return line.slice(i).trim() === "";
+  // 标记后只认空格与制表符（CommonMark 的闭围栏口径）：`trim()` 会连 NBSP、
+  // U+3000、U+2028、VT/FF、U+FEFF 一起剥掉，把 ```` ```\u00a0 ```` 误判成闭围栏。
+  return /^[ \t]*$/.test(line.slice(i));
 }
 
 /**
@@ -109,6 +119,16 @@ function stripContainerPrefixes(line: string): string {
     if (next === rest) return rest;
     rest = next;
   }
+}
+
+/**
+ * 行首 `[` 是不是任务列表项（而非引用/脚注定义）。`complete` 为假表示这行还在
+ * 增长、后面还会长字符：只有这种时候才用宽口接受没收完的复选框前缀，否则
+ * `- [` 这类半成品会把定义放过去。
+ */
+function isTaskItem(view: string, complete: boolean): boolean {
+  if (TASK_ITEM_RE.test(view)) return true;
+  return !complete && TASK_ITEM_PREFIX_RE.test(view);
 }
 
 /** 一次逐行扫描的结果；切分点与围栏降级都只从这一份结果读。 */
@@ -208,7 +228,7 @@ function scanSource(text: string): SourceScan {
         // 剥掉容器前缀后以 `[` 开头：引用/脚注定义，或任务列表项。任务列表项
         // 剥离后同样以 `[` 开头，但它是正文（`]` 后是空白/行尾），是本产品很
         // 常见的回复形态，不该整段失去增量优化。
-        else if (head.startsWith("[") && !TASK_ITEM_RE.test(view)) bail = true;
+        else if (head.startsWith("[") && !isTaskItem(view, complete)) bail = true;
       }
       const m = OPEN_RE.exec(view);
       if (m) {

@@ -43,6 +43,20 @@ describe("围栏降级：tailPlain 直接断言", () => {
     ).toBeNull();
   });
 
+  it("闭围栏标记后只认空格与制表符：Unicode 空白不闭合围栏", () => {
+    // CommonMark 的闭围栏后面只允许空格与制表符。用 `trim()` 判残留会把 NBSP、
+    // U+3000、U+2028、VT/FF、U+FEFF 一起剥掉，于是这类行被误判成闭围栏、
+    // 后面的空白行成了切分点，本应留在代码块里的内容被切出去当正文渲染。
+    for (const space of ["\u00a0", "\u3000", "\u2028", "\v", "\f", "\ufeff"]) {
+      const text = `\`\`\`\ncode\n\`\`\`${space}\n\nmore\n`;
+      const r = splitStreamingMarkdown(text);
+      // 围栏仍开着：整段留在同一个未闭合围栏里，那个空白行不是切分点。
+      expect(r.segments, JSON.stringify(space)).toEqual([]);
+      expect(r.tailMarkdown, JSON.stringify(space)).toBe("");
+      expect(r.tailPlain, JSON.stringify(space)).toBe(text);
+    }
+  });
+
   it("闭合后再开新围栏：降级从最后一个未闭合围栏起", () => {
     expect(splitStreamingMarkdown("```\na\n```\n中间\n```\nb")).toEqual({
       segments: [],
@@ -339,12 +353,51 @@ describe("splitStreamingMarkdown 退回（不分块）", () => {
     );
   });
 
+  it("任务项的未收完前缀不触发退回：逐 token 喂入时稳定块不归零", () => {
+    // 退回判定对正在增长的最后一行也生效：豁免只认完整复选框（`- [ ]`）时，
+    // 流式到 `- [` 与 `- [x` 的每一帧都会整段退回、下一帧再恢复，于是 segments
+    // 归零、稳定块被反复重建。
+    const text =
+      "第一段。\n\n第二段。\n\n## 待办\n\n- [ ] 修正标题\n- [x] 更新描述\n\n收尾段落。\n";
+    // 中间态逐个断言：稳定块个数只增不减，且切出来的块文本始终是全文前缀。
+    let previousCount = 0;
+    for (let end = 1; end <= text.length; end += 1) {
+      const prefix = text.slice(0, end);
+      const { segments } = splitStreamingMarkdown(prefix);
+      expect(segments.length, prefix).toBeGreaterThanOrEqual(previousCount);
+      expect(prefix.startsWith(segments.join("")), prefix).toBe(true);
+      previousCount = segments.length;
+    }
+    // 单看两个未收完的中间态：与前一帧的稳定前缀一模一样，更早的块没被掏回尾部。
+    for (const marker of ["- [", "- [x"]) {
+      const at = text.indexOf(marker) + marker.length;
+      const frame = text.slice(0, at);
+      const { segments, tailMarkdown } = splitStreamingMarkdown(frame);
+      expect(segments, frame).toEqual(
+        splitStreamingMarkdown(text.slice(0, at - 1)).segments,
+      );
+      expect(segments.length, frame).toBeGreaterThan(0);
+      // 更早的块没被掏回尾部：tail 从稳定前缀之后才开始。
+      expect(tailMarkdown, frame).not.toContain("第一段。");
+      expect(frame.startsWith(segments.join("") + tailMarkdown), frame).toBe(
+        true,
+      );
+    }
+    // 末态：任务列表整块进稳定前缀。
+    expect(splitStreamingMarkdown(text).segments.join("")).toBe(
+      "第一段。\n\n第二段。\n\n## 待办\n\n- [ ] 修正标题\n- [x] 更新描述\n",
+    );
+  });
+
   it("`- [x]: url` 是真定义，仍整段退回", () => {
     // 任务项要求 `]` 后是空白或行尾；定义后面紧跟 `:`。两者只差一个字符，
     // 豁免不能宽到把定义放过去（定义是文档级作用域，切错会让引用退化成裸文本）。
     expectBail("- [x]: url\n\nSee [x].\n");
     expectBail("> - [x]: url\n\nSee [x].\n");
     expectBail("1. [x]: url\n\nSee [x].\n");
+    // 未收完的豁免同样是窄口：`[abc]`、`[ ]x` 追不完，照旧保守退回。
+    expectBail("- [abc] 任务\n\nSee [abc].\n");
+    expectBail("- [ ]x\n\nSee [ ].\n");
   });
 
   it("围栏开在列表项里时整段退回", () => {
