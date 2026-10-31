@@ -518,9 +518,10 @@ func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, ev
 	}
 
 	// 观察 → 实拉 → 事务复核：窗口内总账被并发推进就重读重拉，上限
-	// reviewCommentWakeRevalidateMax 次仍不收敛判丢弃并补登幂等账（窗口
-	// 内总有第三方在持续受理，此刻的实拉快照一进事务就过期，再试只是
-	// 空转；登记后同 delivery 重投按 202 去重）。
+	// reviewCommentWakeRevalidateMax 次仍不收敛则放弃且**不登记**幂等账
+	// （窗口内总有第三方在持续受理，此刻的实拉快照一进事务就过期，再试
+	// 只是空转；不登记则再次评论或手动 Redeliver 可完整重走，
+	// fast-ship-bot 第 52 轮 P2）。
 	for attempt := 0; attempt < reviewCommentWakeRevalidateMax; attempt++ {
 		observedHead, observedProjectID, err := s.observeAcceptedHead(ctx, integrationID, repo, prNumber)
 		if err != nil {
@@ -771,7 +772,8 @@ func (s *ReviewService) openCommentWakeRoundTx(ctx context.Context, integrationI
 		// 观察窗口复核：实拉前观察到的总账 head 与事务内重取不一致——窗口
 		// 内有并发写入推进了账本，此刻的实拉快照已经过期。哨兵让整体回滚
 		// （幂等登记一并撤销），外层重读重拉后再试；上限内不收敛由调用方
-		// 判丢弃并补登幂等账。一致时采信实拉 head：即便它与总账不同（丢
+		// 放弃且不登记幂等账（后续投递可完整重走）。一致时采信实拉 head：
+		// 即便它与总账不同（丢
 		// 投递造成的落后账本），也照常开轮并把总账推进到 live head。
 		current, err := s.currentAcceptedHeadTx(tx, integrationID, project.ID, repo, prNumber)
 		if err != nil {

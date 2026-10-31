@@ -228,9 +228,10 @@ type ReviewPullRequest struct {
 	HeadSHA     string `gorm:"column:head_sha;type:text" json:"head_sha,omitempty"`
 
 	// PRUpdatedAt 受理该 head 时实拉快照的时刻（滞后时序判定基准，随 head
-	// 一起推进）：push 触发面由 seen 行供基准，但评论唤醒不写 seen、只推
-	// head 的 advancePRHeadTx 路径也不写——没有它，这些 head 永久无基准，
-	// 滞后快照会被「维持采信」放行、把总账回退（fast-ship-bot 第 26 轮 P2）。
+	// 一起推进）：push 与评论唤醒受理都写 seen 行供基准；advancePRHeadTx
+	// 只推 head 的路径不写 seen，由本列兜底——没有它，这些 head 永久无基
+	// 准，滞后快照会被「维持采信」放行、把总账回退（fast-ship-bot 第 26
+	// 轮 P2）。
 	PRUpdatedAt *time.Time `gorm:"column:pr_updated_at" json:"-"`
 
 	// CodeCommentID/VisualCommentID 机器人顶层评论 id；0=尚未创建（按隐藏标记找回）。
