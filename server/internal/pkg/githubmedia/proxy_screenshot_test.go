@@ -522,9 +522,9 @@ func TestFetchAndCacheDownloadWaitRespectsContext(t *testing.T) {
 		t.Fatalf("normalize: %v", err)
 	}
 	// 占住闸门：模拟同 URL 已有下载在跑。
-	lock := svc.acquireDownloadLock(normalized)
-	lock <- struct{}{}
-	defer func() { <-lock }()
+	gate := svc.acquireDownloadLock(normalized)
+	gate.sem <- struct{}{}
+	defer func() { <-gate.sem }()
 
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
