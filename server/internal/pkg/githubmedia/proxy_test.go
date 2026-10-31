@@ -420,6 +420,47 @@ func TestAmbiguousContentTypeRejected(t *testing.T) {
 	}
 }
 
+// Content-Type 参数里的逗号不是歧义：`video/mp4; codecs="avc1.42E01E,
+// mp4a.40.2"` 这类合法写法照常放行，回包是去掉参数的基础类型；只有基础
+// 类型本身含逗号（多值拼接）才算歧义（见 TestAmbiguousContentTypeRejected）。
+func TestContentTypeParametersAccepted(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", r.URL.Query().Get("ct"))
+		_, _ = w.Write([]byte("data"))
+	}))
+	defer upstream.Close()
+
+	parsed, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("parse upstream url: %v", err)
+	}
+	service := newProxyService(
+		t.TempDir(),
+		time.Hour,
+		1<<20,
+		upstream.Client(),
+		func(u *url.URL) bool { return u.Host == parsed.Host },
+	)
+
+	for _, tc := range []struct{ name, ct, want string }{
+		{"codecs 参数带逗号", `video/mp4; codecs="avc1.42E01E, mp4a.40.2"`, "video/mp4"},
+		{"普通参数带逗号", "image/png; foo=bar,baz", "image/png"},
+		{"大写与参数", "IMAGE/PNG; charset=binary", "image/png"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp, err := service.ProxyPass(context.Background(),
+				upstream.URL+"/asset.png?ct="+url.QueryEscape(tc.ct), "", false)
+			if err != nil {
+				t.Fatalf("proxy pass: %v", err)
+			}
+			defer resp.Body.Close()
+			if got := resp.Header.Get("Content-Type"); got != tc.want {
+				t.Fatalf("content type = %q, want %q（参数被去掉）", got, tc.want)
+			}
+		})
+	}
+}
+
 // 扩展名回退用重定向之后的最终 URL：a.png 302 到 b.svg 且最终类型是
 // octet-stream 时必须拒（借原始扩展名放行会把 svg 字节按 png 回客户端）；
 // 重定向到 c.png 的 octet-stream 则按最终扩展名放行并规范化成 image/png。

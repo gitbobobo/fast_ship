@@ -940,13 +940,21 @@ func (s *ProxyService) getCachedNormalized(normalized, scope string) (*CachedMed
 		return nil, false, nil
 	}
 
+	// 过期条目先清掉再谈准入：过期与否与内容类型无关，清掉才能让被准入规则
+	// 拒绝的历史条目（如旧准入口径写进去的 svg）随 TTL 自然淘汰。
+	if entry.expired(time.Now().UTC()) {
+		_ = os.Remove(metaPath)
+		_ = os.Remove(cachePath)
+		return nil, false, nil
+	}
+
 	// 内容类型按当前准入规则复核：旧准入口径（收 svg）写进缓存的历史条目
 	// 命中时按 miss 走重下，不靠 bump 缓存标记全量清目录（INT-171）。
 	// 不过关只返回 miss，不在读路径删文件：GetCached 不持下载锁，这里删
 	// meta/data 会与正在写盘的同 key 下载竞态，最坏删掉别人刚发布的新条目。
-	// 下一次成功下载按同一 key 覆盖 meta/data，TTL 到期另有清理。
-	// meta 是单值小文件，逗号/多值歧义只在响应 header 判定里出现，这里
-	// 直接走单值判定。
+	// 下一次成功下载按同一 key 覆盖 meta/data，TTL 到期由上面的检查清理。
+	// meta 是单值小文件，多值歧义只在响应 header 判定里出现，这里直接走
+	// 单值判定。
 	normalizedType, allowed := s.normalizeMediaContentType(entry.ContentType, normalized)
 	if !allowed {
 		return nil, false, nil
@@ -955,12 +963,6 @@ func (s *ProxyService) getCachedNormalized(normalized, scope string) (*CachedMed
 	// 类型，响应不再拿 octet-stream 配 nosniff 回客户端；只改返回值，不重
 	// 写 meta 文件。
 	entry.ContentType = normalizedType
-
-	if entry.expired(time.Now().UTC()) {
-		_ = os.Remove(metaPath)
-		_ = os.Remove(cachePath)
-		return nil, false, nil
-	}
 
 	info, err := os.Stat(cachePath)
 	if err != nil {
@@ -1290,9 +1292,11 @@ func (s *ProxyService) normalizeMediaContentType(contentType, rawURL string) (st
 }
 
 // normalizeResponseContentType header 级准入：resp.Header 有多个
-// Content-Type 值、或单值里含逗号（Go http.Client 会原样拼接多值）时
-// 视为不可识别类型直接拒——歧义类型无从规范化，宁拒不放。放行时返回
-// 规范化后的单一类型（见 normalizeMediaContentType）。
+// Content-Type 值视为不可识别类型直接拒（规范上只允许单值，多值拼不出确定
+// 类型）；单个值里基础类型含逗号（如 `image/png, image/svg+xml`）同样拒。
+// 参数部分的逗号不算歧义——`video/mp4; codecs="avc1.42E01E, mp4a.40.2"`
+// 是合法写法，且回给客户端的本来就是去掉参数的基础类型。放行时返回规范化
+// 后的单一类型（见 normalizeMediaContentType）。
 func (s *ProxyService) normalizeResponseContentType(header http.Header, rawURL string) (string, bool) {
 	values := header.Values("Content-Type")
 	if len(values) > 1 {
@@ -1301,9 +1305,6 @@ func (s *ProxyService) normalizeResponseContentType(header http.Header, rawURL s
 	value := ""
 	if len(values) == 1 {
 		value = strings.TrimSpace(values[0])
-	}
-	if strings.Contains(value, ",") {
-		return "", false
 	}
 	return s.normalizeMediaContentType(value, rawURL)
 }

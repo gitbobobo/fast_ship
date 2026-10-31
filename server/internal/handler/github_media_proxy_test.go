@@ -172,8 +172,18 @@ func TestGitHubMediaProxyHandlerSVGGateAndHardeningHeaders(t *testing.T) {
 
 	// 多段 Range（逗号分隔）被忽略，按无 Range 走整文件路径：返回 200 完整
 	// body 而不是 415——上游对多段 Range 回 multipart/byteranges，闸门必然
-	// 拒，RFC 7233 允许忽略 Range。
-	req = httptest.NewRequest(http.MethodGet, githubmedia.ProxyPath+"?url="+url.QueryEscape("http://github.com/user-attachments/assets/clip.mp4"), nil)
+	// 拒，RFC 7233 允许忽略 Range。先整文件 GET 预热进缓存，多段请求才落在
+	// 缓存命中路径：那条路的 http.ServeContent 会自己再解析 Range，不删
+	// 请求头就会变回 206 multipart。
+	mp4URL := githubmedia.ProxyPath + "?url=" + url.QueryEscape("http://github.com/user-attachments/assets/clip.mp4")
+	req = httptest.NewRequest(http.MethodGet, mp4URL, nil)
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || rec.Body.String() != "mp4-bytes" {
+		t.Fatalf("mp4 preheat code = %d body = %q, want 200 完整内容", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, mp4URL, nil)
 	req.Header.Set("Range", "bytes=0-1,4-5")
 	rec = httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -182,6 +192,9 @@ func TestGitHubMediaProxyHandlerSVGGateAndHardeningHeaders(t *testing.T) {
 	}
 	if rec.Body.String() != "mp4-bytes" {
 		t.Fatalf("multi-range body = %q, want mp4-bytes（完整内容）", rec.Body.String())
+	}
+	if got := rec.Header().Get("Content-Range"); got != "" {
+		t.Fatalf("multi-range content-range = %q, want 空（未按 Range 切片）", got)
 	}
 	assertHardening(t, rec)
 }
