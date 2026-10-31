@@ -219,7 +219,7 @@ func TestSweepExpiredEntriesURLUnavailableBrokenMeta(t *testing.T) {
 	svc := newService(t.TempDir(), serviceConfig{
 		allowURL: func(u *url.URL) bool { return true },
 	})
-		old := time.Now().Add(-3 * defaultCacheTTL)
+	old := time.Now().Add(-3 * defaultCacheTTL)
 
 	// 0 字节 meta + 新鲜 .bin（写侧刚 rename 新 data、meta 尚未写的窗口态）：
 	// 不删——删了会把刚发布的条目抹掉。
