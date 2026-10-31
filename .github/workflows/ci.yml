@@ -1,10 +1,12 @@
 name: CI
 
+# 代码托管在 Forgejo（见 AGENTS.md「代码托管与 PR」）：PR 检查由本地代替
+# （web/ 下 pnpm api-types --check + pnpm check），不接远端 CI；GitHub 仅是
+# 只读推送镜像，这里的 push main 检查对镜像同步的提交做事后复核。
 on:
   push:
     branches:
       - main
-  pull_request:
 
 jobs:
   web-check:

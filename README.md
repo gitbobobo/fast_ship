@@ -122,6 +122,10 @@ fast_ship/
 └── Makefile              # 统一命令入口
 ```
 
+## 代码托管
+
+代码托管在 Forgejo（[fj.frp.musiver.cn/fjbobo/fast_ship](https://fj.frp.musiver.cn/fjbobo/fast_ship)），提交与 Pull Request 请前往 Forgejo；GitHub 仓库是只读推送镜像，公开 Issue 仍在本仓库提。`v*` tag 经镜像同步触发 GitHub Actions，发布多架构镜像到 `ghcr.io/gitbobobo/fast_ship`。
+
 ## License
 
 [MIT](LICENSE)

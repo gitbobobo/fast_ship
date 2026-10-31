@@ -4,7 +4,7 @@
 	help \
 	dev dev-server dev-web \
 	build build-server build-web \
-	test test-server test-web \
+	test test-server test-web test-release \
 	lint lint-server lint-web \
 	tidy tidy-server \
 	api-types api-docs \
@@ -22,6 +22,7 @@ help:
 	@printf "  make test         Run server and web tests\n"
 	@printf "  make test-server  Run Go tests\n"
 	@printf "  make test-web     Run web tests\n"
+	@printf "  make test-release Run isolated release script checks\n"
 	@printf "  make lint         Run server and web lint checks\n"
 	@printf "  make lint-server  Check Go formatting and run go vet\n"
 	@printf "  make lint-web     Run web ESLint and type checks\n"
@@ -55,6 +56,9 @@ test-server:
 
 test-web:
 	@pnpm --dir web test
+
+test-release:
+	@bash scripts/release-fixture.sh
 
 lint: lint-server lint-web
 
