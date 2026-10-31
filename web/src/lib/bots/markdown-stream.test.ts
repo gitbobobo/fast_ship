@@ -256,9 +256,37 @@ describe("splitStableBlocks", () => {
     }
   });
 
-  it("4 空格缩进的定义行是代码块，不触发整段退回", () => {
-    const r = splitStableBlocks("段落。\n\n    [x]: https://example.com\n\n收尾。\n");
-    expect(r.stable).toBe("段落。\n\n    [x]: https://example.com\n");
+  it("块容器内的引用定义同样是文档级作用域：剥掉容器前缀再判", () => {
+    // CommonMark 规定列表项、引用块里的链接/脚注定义同样对整个文档生效：
+    // 以行首 ≤3 空格判定义会漏掉它们，切分后引用退化成裸文本、脚注整节
+    // 消失或脚注区被插到中间（实测均与整段解析的 DOM 不一致）。
+    const definitions = [
+      "See [x].\n\nMiddle.\n\n> [x]: https://e.com\n",
+      "A[^1].\n\nMiddle.\n\n- [^1]: note\n",
+      "A[^1].\n\n> [^1]: note\n\nB\n",
+      "见 [x]。\n\n> > [x]: https://e.com\n",
+      "见 [x]。\n\n1. [x]: https://e.com\n",
+      "见 [x]。\n\n- > [x]: https://e.com\n",
+      // 顶层 4 空格缩进（代码块）里的同名行也命中：刻意保守，只损失增量。
+      "见 [x]。\n\n    [x]: https://e.com\n",
+    ];
+    for (const text of definitions) {
+      expect(splitStableBlocks(text)).toEqual({
+        stable: "",
+        segments: [],
+        tail: text,
+      });
+    }
+  });
+
+  it("正文里的 `[x]: y` 片段不触发整段退回", () => {
+    // 前缀不是空白/容器标记的行剥不动，`see [x]: y` 仍只是普通段落。
+    expect(splitStableBlocks("see [x]: y\n\n正文\n").stable).toBe(
+      "see [x]: y\n",
+    );
+    expect(splitStableBlocks("- see [x]: y\n\n正文\n").stable).toBe(
+      "- see [x]: y\n",
+    );
   });
 
   it("HTML 块（类型 1–5）内部的空白行不是切分点", () => {
@@ -303,6 +331,26 @@ describe("splitStableBlocks", () => {
     expect(r.segments).toEqual(["> <pre>\n>\n> code\n>\n> </pre>\n"]);
     expect(r.stable).toBe("> <pre>\n>\n> code\n>\n> </pre>\n");
     expect(r.tail).toBe("\n正文\n");
+  });
+
+  it("blockquote 内的 HTML 块按容器深度判结束，块内围栏不开块", () => {
+    // 起始行的自闭合判定若看原始行，容器标记 `>` 会被当成类型 4 的结束序列，
+    // 块在起始行就闭合；紧接着的 `> ``` ` 被当成新围栏打开，吞掉其后所有
+    // 切分点，stable 为空。容器的空行（深度 0）才是块的结束。
+    const text = "> <!DOCTYPE html\n> ```\n> x\n\npara\n";
+    const r = splitStableBlocks(text);
+    expect(r.stable).toBe("> <!DOCTYPE html\n> ```\n> x\n");
+    expect(r.tail).toBe("\npara\n");
+    expect(r.segments).toEqual(["> <!DOCTYPE html\n> ```\n> x\n"]);
+    // 切分点只落在容器结束后的空白行：块的三行全在同一个块里。
+  });
+
+  it("blockquote 内的 `>` 行不是类型 4 块的结束序列", () => {
+    // 块内容是原样文本，剥掉块的容器深度后 `>` 行剩空串：不闭合块，块内的
+    // 空白行照旧不是候选切分点；容器结束（行深度小于块的容器深度）才结束。
+    const r = splitStableBlocks("> <!DOCTYPE html\n>\n> x\n\npara\n");
+    expect(r.stable).toBe("> <!DOCTYPE html\n>\n> x\n");
+    expect(r.tail).toBe("\npara\n");
   });
 
   it("NBSP 行不是空白行：不切分", () => {

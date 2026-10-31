@@ -44,6 +44,24 @@ const EQUIV_SAMPLES: Array<[string, string]> = [
   // tail 只剩一行 NBSP：若把这篇 tail 当空白而不渲染，内容直接丢。
   ["NBSP 尾段", "A\n\n\u00a0\n"],
   ["开头空行", "\n\nHello\n"],
+  // 块容器（引用块、列表项）内的链接/脚注定义同样是文档级作用域；只认行首
+  // 的定义会让引用变裸文本、脚注整节消失或脚注区被插到中间。
+  [
+    "blockquote 内引用定义",
+    "See [x].\n\nMiddle.\n\n> [x]: https://e.com\n",
+  ],
+  ["列表项内脚注定义", "A[^1].\n\nMiddle.\n\n- [^1]: note\n"],
+  ["脚注定义在中间", "A[^1].\n\n> [^1]: note\n\nB\n"],
+  [
+    "缩进定义行（保守退回）",
+    "见 [x]。\n\n    [x]: https://e.com\n\n收尾。\n",
+  ],
+  // blockquote 里的 DOCTYPE（类型 4）：起始行的自闭合判定若看原始行，容器
+  // 标记 `>` 会把块当场闭合，紧接的 `> ``` ` 被当成新围栏打开。
+  [
+    "blockquote 内 DOCTYPE 与围栏",
+    "> <!DOCTYPE html\n> ```\n> x\n\npara\n",
+  ],
 ];
 
 describe("BotMarkdown", () => {

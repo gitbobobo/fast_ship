@@ -35,6 +35,26 @@ function stripBlockquoteMarkers(line: string): { view: string; depth: number } {
   }
 }
 
+/**
+ * 只剥掉前 n 个 blockquote 标记，其余内容原样保留，返回剩下内容的视图与
+ * 实际剥掉的深度。用于 HTML 块内按「块所在容器的深度」取块内容的判定视图：
+ * 容器标记不属于块内容，但不能多剥（块内容里的裸 `>` 就是字节本身）。
+ */
+function stripNBlockquoteMarkers(
+  line: string,
+  n: number,
+): { view: string; depth: number } {
+  let view = line;
+  let depth = 0;
+  while (depth < n) {
+    const m = BLOCKQUOTE_MARKER_RE.exec(view);
+    if (!m) break;
+    view = view.slice(m[0].length);
+    depth += 1;
+  }
+  return { view, depth };
+}
+
 /** 闭围栏判定：同一字符、长度 ≥ 开围栏、标记后只允许空白。 */
 function closingRun(line: string, char: "`" | "~", minLen: number): boolean {
   let i = 0;
@@ -52,37 +72,75 @@ function closingRun(line: string, char: "`" | "~", minLen: number): boolean {
 // 引用定义行（链接引用 `[x]: url`、GFM 脚注 `[^1]: note`）：CommonMark 允许
 // 定义出现在文档任意位置，且对全文档生效——它是文档级作用域，把定义切到后面
 // 的块里，前面的块单独解析时引用就成了裸文本（`See [x].` 不再成链接，脚注也
-// 没有上标与脚注区）。≤3 空格缩进按 CommonMark 仍算定义行。
-const REFERENCE_DEFINITION_RE = /^ {0,3}\[[^\]\n]+\]:/;
+// 没有上标与脚注区）。
+
+// 列表标记：`-` `*` `+`，或有序列表 `1.`/`1)`；标记后必须跟空白或行尾
+// （CommonMark 的口径，`-x` 不是列表标记而是正文）。
+const LIST_MARKER_RE = /^(?:[-*+]|\d{1,9}[.)])(?:[ \t]+|$)/;
 
 /**
- * HTML 块类型 1–5 的结束判定：在原始行上出现结束序列即结束。
- * HTML 块的内容是原样文本，块内的 `>`、`-->` 都是字节本身，不是容器标记，
- * 所以判定必须看未剥 blockquote 标记的原始行：按「检测视图」判会把裸 `>`
- * 剥成空串，`<!DOCTYPE html` 这类以 `>` 收尾的类型 4 块就永远判不到闭合。
+ * 剥掉行首的块容器前缀（行首空白、blockquote 标记、列表标记），返回容器内
+ * 的行内容。块容器（引用块、列表项）里的链接/脚注定义按 CommonMark 同样对
+ * 全文生效，所以要剥掉容器才认得出 `> [x]: url`、`- [x]: url`、`1. [x]: url`
+ * 这类定义行；反复剥离以覆盖嵌套组合（`> > [x]: url`、`- > [x]: url`）。
+ * 连行首空白也一并剥掉，于是顶层 4 空格缩进代码块里的同名行（`    [x]: url`）
+ * 也会被当成定义：这是保守方向——多退回一次只损失增量优化，不算白名单。
  */
-type HtmlBlockEnd = (line: string) => boolean;
+function stripContainerPrefixes(line: string): string {
+  let rest = line;
+  for (;;) {
+    const next = rest
+      .replace(/^[ \t]+/, "")
+      .replace(BLOCKQUOTE_MARKER_RE, "")
+      .replace(LIST_MARKER_RE, "");
+    if (next === rest) return rest;
+    rest = next;
+  }
+}
+
+// 剥掉容器前缀之后，以 `[...]:` 开头就是定义行。正文里的 `see [x]: y` 这类
+// 前缀不是空白/容器标记，剥不掉、也就不命中。
+const REFERENCE_DEFINITION_RE = /^\[[^\]\n]+\]:/;
 
 /**
- * HTML 块类型 1–5 的起始行判定，返回「行内出现该序列即结束」的判定函数。
- * 这些块的内容是原始文本、不被空白行打断，所以块内的空白行不能当切分点
- * （切开会把块内文本重新解释成普通段落）。起始行自身已含结束序列时块在
- * 该行就结束，返回 null。类型 6/7（普通标签）以空白行结束，无需处理。
+ * 进行中的 HTML 块类型 1–5。块内容是原样文本（块内的 `>`、`-->` 是字节
+ * 本身，不是容器标记），但块所在容器的 blockquote 标记不属于块内容：结束
+ * 判定要按块的容器深度剥掉标记，再在剩下的内容里找结束序列。这样既不会被
+ * 容器标记误判成结束序列（`> <!DOCTYPE html` 里的 `>`），也不会漏掉容器内
+ * 真实的结束序列（`> </pre>`）。
+ */
+interface HtmlBlock {
+  /** 结束序列。 */
+  closer: string;
+  /** 结束序列是否大小写不敏感（原始文本标签按 CommonMark 不敏感）。 */
+  ignoreCase: boolean;
+  /** 开块行的 blockquote 深度；块内各行剥掉同样多的标记后判定。 */
+  depth: number;
+}
+
+/** 在「已按块的容器深度剥过标记」的内容视图里找结束序列。 */
+function htmlBlockCloses(view: string, block: HtmlBlock): boolean {
+  return block.ignoreCase
+    ? view.toLowerCase().includes(block.closer)
+    : view.includes(block.closer);
+}
+
+/**
+ * HTML 块类型 1–5 的起始行判定，返回块状态。这些块的内容是原始文本、不被
+ * 空白行打断，所以块内的空白行不能当切分点（切开会把块内文本重新解释成
+ * 普通段落）。起始行自身已含结束序列时块在该行就结束，返回 null。类型 6/7
+ *（普通标签）以空白行结束，无需处理。
  *
- * 起始判定用检测视图 `view`（`> <pre>` 这种在 blockquote 里开块的行也要认得出），
- * 结束序列的查找一律用原始行 `line`（见 HtmlBlockEnd）。
+ * 判定用剥过 blockquote 标记的检测视图 `view`（`> <pre>` 这种在容器里开块
+ * 的行也要认得出），起始行的自闭合判定同样看在视图上：原始行里的容器标记
+ * 不属于块内容，拿原始行判会把 `> <!DOCTYPE html` 当场判成已闭合。
  */
-function htmlBlockStart(view: string, line: string): HtmlBlockEnd | null {
+function htmlBlockStart(view: string, depth: number): HtmlBlock | null {
   // 与围栏判定同口径：行首缩进 ≤3 空格才算块起始。
   let indent = 0;
   while (indent < 4 && view[indent] === " ") indent += 1;
   if (indent > 3) return null;
   const rest = view.slice(indent);
-
-  const contains =
-    (closer: string): HtmlBlockEnd =>
-    (rawLine) =>
-      rawLine.includes(closer);
 
   for (const [start, closer] of [
     [/^<!--/, "-->"],
@@ -91,17 +149,20 @@ function htmlBlockStart(view: string, line: string): HtmlBlockEnd | null {
     [/^<![A-Za-z]/, ">"],
   ] as const) {
     if (!start.test(rest)) continue;
-    const ended = contains(closer);
-    return ended(line) ? null : ended;
+    const block: HtmlBlock = { closer, ignoreCase: false, depth };
+    return htmlBlockCloses(view, block) ? null : block;
   }
 
   // 原始文本标签：标签名后须是空白、`>` 或行尾，避免把 `<prelude` 当块。
   // 结束标签的匹配按 CommonMark 大小写不敏感。
   const raw = /^<(script|pre|style|textarea)(?:[\s>]|$)/i.exec(rest);
   if (raw) {
-    const closer = `</${raw[1].toLowerCase()}>`;
-    if (line.toLowerCase().includes(closer)) return null;
-    return (rawLine) => rawLine.toLowerCase().includes(closer);
+    const block: HtmlBlock = {
+      closer: `</${raw[1].toLowerCase()}>`,
+      ignoreCase: true,
+      depth,
+    };
+    return htmlBlockCloses(view, block) ? null : block;
   }
   return null;
 }
@@ -148,8 +209,8 @@ interface BlockScan {
  */
 function scanBlocks(text: string): BlockScan {
   let inFence: { char: "`" | "~"; len: number; depth: number } | null = null;
-  // 进行中的 HTML 块结束判定；非 null 时块内空白行不是候选切分点。
-  let htmlEnd: HtmlBlockEnd | null = null;
+  // 进行中的 HTML 块；非 null 时块内空白行不是候选切分点。
+  let htmlBlock: HtmlBlock | null = null;
   // 最近一个位于块外（非围栏、非 HTML 块）的已完结空白行起点；连续空白行取最后一个。
   let lastBlank: number | null = null;
   const cuts: number[] = [];
@@ -162,10 +223,11 @@ function scanBlocks(text: string): BlockScan {
     // 数组末元素是末尾换行留下的空串时它已「完结」；否则最后一行仍在增长。
     const complete = index < last || text.endsWith("\n");
     const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
-    // 定义行对全文生效，含正在增长的最后一行都要判；一旦命中，调用方必定
-    // 整段退回，切分点已无意义，直接结束扫描。保守判断：代码围栏里的同名
-    // 行也算定义（不看围栏状态）。
-    if (REFERENCE_DEFINITION_RE.test(line)) {
+    // 定义行对全文生效（块容器里的定义也是文档级作用域，先剥容器前缀再
+    // 判定），含正在增长的最后一行都要判；一旦命中，调用方必定整段退回，
+    // 切分点已无意义，直接结束扫描。保守判断：代码围栏里的同名行也算定义
+    //（不看围栏状态）。
+    if (REFERENCE_DEFINITION_RE.test(stripContainerPrefixes(line))) {
       return { cuts: [], hasReferenceDefinition: true };
     }
     if (!complete) break;
@@ -176,25 +238,42 @@ function scanBlocks(text: string): BlockScan {
       if (depth === inFence.depth && closingRun(view, inFence.char, inFence.len)) {
         inFence = null;
       }
-    } else if (htmlEnd) {
-      // HTML 块内只等结束序列；块内容原样，判定看原始行而非容器视图。
-      if (htmlEnd(line)) htmlEnd = null;
     } else {
-      const m = OPEN_RE.exec(view);
-      if (m) {
-        const marker = m[1];
-        const info = m[2] ?? "";
-        if (marker[0] === "~" || !info.includes("`")) {
-          inFence = { char: marker[0] as "`" | "~", len: marker.length, depth };
+      // HTML 块内只等结束序列。块内容是原样文本，但要先按块的容器深度剥掉
+      // blockquote 标记（容器标记不属于内容）；容器先结束则块也随之结束，
+      // 这一行不属于该块，落回普通行判定。
+      let closedHere = false;
+      if (htmlBlock) {
+        const inner = stripNBlockquoteMarkers(line, htmlBlock.depth);
+        if (inner.depth < htmlBlock.depth) {
+          htmlBlock = null;
+        } else {
+          closedHere = htmlBlockCloses(inner.view, htmlBlock);
+          if (closedHere) htmlBlock = null;
         }
-      } else {
-        htmlEnd = htmlBlockStart(view, line);
+      }
+      // 块在本行闭合时，本行不再充当围栏/HTML 块的起始（与既有行为一致）。
+      if (!htmlBlock && !closedHere) {
+        const m = OPEN_RE.exec(view);
+        if (m) {
+          const marker = m[1];
+          const info = m[2] ?? "";
+          if (marker[0] === "~" || !info.includes("`")) {
+            inFence = {
+              char: marker[0] as "`" | "~",
+              len: marker.length,
+              depth,
+            };
+          }
+        } else {
+          htmlBlock = htmlBlockStart(view, depth);
+        }
       }
     }
 
     if (/^[ \t]*$/.test(line)) {
       // 围栏与 HTML 块内的空白行不是候选：块内内容是原样字节，不存在块边界。
-      if (!inFence && !htmlEnd) lastBlank = offset;
+      if (!inFence && !htmlBlock) lastBlank = offset;
     } else if (lastBlank !== null) {
       const ordered = /^(\d+)[.)]/.exec(line);
       if (
@@ -204,8 +283,9 @@ function scanBlocks(text: string): BlockScan {
         line[0] !== "-" &&
         line[0] !== "*" &&
         line[0] !== "+" &&
-        // 引用定义行已由 splitStableBlocks 的全文退回兜住，这里保留同一排除，
-        // 切分规则不依赖退回路径的实现细节。
+        // 引用定义行已由 splitStableBlocks 的全文退回兜住（含容器内的定义，
+        // 见 stripContainerPrefixes），这里保留同一排除，切分规则不依赖退回
+        // 路径的实现细节。
         line[0] !== "[" &&
         !ordered
       ) {
