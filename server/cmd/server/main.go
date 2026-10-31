@@ -373,6 +373,9 @@ func main() {
 			dynamicTrustedHostsAt = time.Now()
 			return hosts
 		})
+	// 两个面共用同一回收机制：读路径零删除（见 githubmedia 包），过期条目
+	// 由各自的目录扫描回收，review 截图缓存不会只增不减。
+	reviewMediaService.StartExpiredSweeper()
 	// shell 订阅 hub（INT-116）：每环境常驻活跃/归档两条 WS，列表与运行态读取
 	// 从内存回答；环境重配/删除时由环境服务清 entry。这里注册停机钩子：当前
 	// main 进程没有优雅停机路径、defer 通常不会执行（进程被信号终止时由 OS

@@ -219,8 +219,18 @@ func TestSweepExpiredEntriesWaitsForWriterAndSkipsFreshEntry(t *testing.T) {
 		close(sweepDone)
 	}()
 
-	// 给扫描时间跑到等闸的位置，然后写侧发布新条目并释放闸。
-	time.Sleep(100 * time.Millisecond)
+	// 证明扫描真的在等闸：闸被持有时它不能结束（也没有删任何文件）。
+	time.Sleep(300 * time.Millisecond)
+	select {
+	case <-sweepDone:
+		t.Fatal("sweep finished while writer held the lock — 没有在等闸")
+	default:
+	}
+	if _, err := os.Stat(metaPath); err != nil {
+		t.Fatalf("meta stat = %v, want 持闸期间未被删", err)
+	}
+
+	// 写侧发布新条目并释放闸：扫描随后拿到闸，锁内复核发现不再过期，跳过。
 	writeMeta(now.Add(time.Hour))
 	if err := os.WriteFile(binPath, []byte("new"), 0o640); err != nil {
 		t.Fatalf("write new bin: %v", err)

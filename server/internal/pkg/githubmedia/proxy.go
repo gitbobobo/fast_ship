@@ -387,6 +387,7 @@ func (s *ProxyService) sweepExpiredEntries() {
 		select {
 		case lock <- struct{}{}:
 		case <-time.After(5 * time.Second):
+			s.abandonDownloadLock(entry.URL, lock)
 			continue
 		}
 		// 锁内重读：条目可能刚被覆盖成新条目（不再过期）或已被清走。
@@ -397,7 +398,7 @@ func (s *ProxyService) sweepExpiredEntries() {
 		}
 		var recheckEntry cacheEntry
 		if json.Unmarshal(recheck, &recheckEntry) != nil || !recheckEntry.expired(now) || recheckEntry.URL != entry.URL {
-			<-lock
+			s.releaseDownloadLock(entry.URL, lock)
 			continue
 		}
 		binPath := strings.TrimSuffix(metaPath, ".json") + ".bin"
@@ -405,7 +406,7 @@ func (s *ProxyService) sweepExpiredEntries() {
 		// 会留下不可达的孤儿 .bin。
 		_ = os.Remove(binPath)
 		_ = os.Remove(metaPath)
-		<-lock
+		s.releaseDownloadLock(entry.URL, lock)
 	}
 	// 无 meta 的孤儿 .bin（历史删除中断、或旧版本先删 meta 后删 data 被杀）：
 	// mtime 超过 2×TTL 才清，正在写盘的临时文件（tmp 后缀，不匹配 .bin）与
@@ -858,10 +859,12 @@ func (s *ProxyService) fetchAndCache(ctx context.Context, rawURL, bearer, scope 
 	case lock <- struct{}{}:
 	case <-ctx.Done():
 		// 同 URL 已有下载在跑：等待必须吃 ctx。探测的 30s 时限是总时限，
-		// 不能被同 URL 前一请求的 45s 客户端超时拖穿。
+		// 不能被同 URL 前一请求的 45s 客户端超时拖穿。等待失败未持有闸，
+		// 用 abandon（不 <-lock）只尝试回收空闲条目。
+		s.abandonDownloadLock(normalized, lock)
 		return nil, ctx.Err()
 	}
-	defer func() { <-lock }()
+	defer s.releaseDownloadLock(normalized, lock)
 
 	if cached, ok, err := s.getCachedNormalized(normalized, scope); err != nil {
 		return nil, err
@@ -1124,7 +1127,8 @@ func (s *ProxyService) getCachedNormalized(normalized, scope string) (*CachedMed
 
 // acquireDownloadLock 返回该 URL 的下载闸（容量 1 信号量）：发送成功即持有，
 // 下载完成后 <-lock 收回。条目创建在 s.mu 下做，是否等待、等多久由调用方
-// 结合 ctx 决定。
+// 结合 ctx 决定。调用方用完应调 releaseDownloadLock：空闲（无人持有、无人
+// 等待）时把条目从 map 摘除，避免 map 随「历史上出现过的 URL 数」无界增长。
 func (s *ProxyService) acquireDownloadLock(key string) chan struct{} {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1135,6 +1139,29 @@ func (s *ProxyService) acquireDownloadLock(key string) chan struct{} {
 		s.download[key] = lock
 	}
 	return lock
+}
+
+// releaseDownloadLock 归还闸（调用方持有成功后用）并尝试回收空闲条目：归还
+// 后通道为空（容量 1，空即无持有者也无等待者）才从 map 摘除——恰有新请求
+// 在摘除判断与 map delete 之间 acquire 到同一 channel，delete 只是让它的
+// release 找不到条目、重新建一个，信号量语义不破坏。
+func (s *ProxyService) releaseDownloadLock(key string, lock chan struct{}) {
+	<-lock
+	s.releaseIdleDownloadLock(key, lock)
+}
+
+// abandonDownloadLock 等待闸失败（ctx 超时/到期）时用：调用方从未持有闸，
+// 不能 <-lock（会阻塞到持有者释放），只尝试回收此刻空闲的条目。
+func (s *ProxyService) abandonDownloadLock(key string, lock chan struct{}) {
+	s.releaseIdleDownloadLock(key, lock)
+}
+
+func (s *ProxyService) releaseIdleDownloadLock(key string, lock chan struct{}) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(lock) == 0 && s.download[key] == lock {
+		delete(s.download, key)
+	}
 }
 
 func (s *ProxyService) dataPath(normalized, scope string) string {
