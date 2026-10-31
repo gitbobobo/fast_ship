@@ -10,9 +10,9 @@
 // 围栏在容器深度下降时结束（引用块结束，里面的围栏也随之结束）。
 //
 // 覆盖范围刻意只到围栏、空白行、列表与引用这些必要构造：逐行剥掉容器标记后
-// 以 `[` 或 `<` 开头的行（引用/脚注定义、原始 HTML 块）一出现就整段退回、不
-// 分块。手写扫描器一旦去精确识别这两类语法，就是在写第二套 CommonMark 解释
-// 器：定义标签可以跨行（`[foo\nbar]: url`）、可以含转义右括号
+// 以 `[` 或 `<` 开头的行（引用/脚注定义、原始 HTML 块）、以及围栏开在列表项里
+// 的行，一出现就整段退回、不分块（任务列表项 `- [ ] x` 是正文，例外）。手写
+// 扫描器一旦去精确识别这两类语法，就是在写第二套 CommonMark 解释器：定义标签可以跨行（`[foo\nbar]: url`）、可以含转义右括号
 //（`[a\]b]: url`），HTML 块有 7 种起始与各自的反结束规则，反例是开放的。
 // 退回的代价只是这类回复失去增量优化，换来的是渲染结果与非流式完全一致。
 
@@ -44,6 +44,15 @@ const BLOCKQUOTE_MARKER_RE = /^ {0,3}> ?/;
 // （CommonMark 的口径，`-x` 不是列表标记而是正文）。
 const LIST_MARKER_RE = /^(?:[-*+]|\d{1,9}[.)])(?:[ \t]+|$)/;
 
+// 任务列表项：列表标记后跟 `[ ]`/`[x]`/`[X]`，且复选框后必须是空白或行尾。
+// `- [x]: url` 的复选框后紧跟 `:`，那是引用定义而不是任务项，仍要退回。
+const TASK_ITEM_RE = /^ {0,3}(?:[-*+]|\d{1,9}[.)])[ \t]+\[[ xX]\](?:[ \t]|$)/;
+
+// 开在列表项里的围栏：`- ``` `、`1. ~~~`、`> 1. ``` `（判定跑在剥过
+// blockquote 的视图上）。内容列取决于列表标记宽度，不建模，命中即整段退回。
+const LIST_ITEM_FENCE_RE =
+  /^ {0,3}(?:[-*+]|\d{1,9}[.)])[ \t]+(?:`{3,}|~{3,})/;
+
 /** 剥掉行首全部 blockquote 标记，返回用于围栏判定的「检测视图」与容器深度。 */
 function stripBlockquoteMarkers(line: string): { view: string; depth: number } {
   let view = line;
@@ -54,6 +63,21 @@ function stripBlockquoteMarkers(line: string): { view: string; depth: number } {
     view = view.slice(m[0].length);
     depth += 1;
   }
+}
+
+/**
+ * 行首空白占多少列，用来判定缩进代码块（≥4 列）。空格记 1 列，制表符补到
+ * 下一个 4 的倍数——CommonMark 的 tab stop 就是 4 列，`\t` 与 4 空格同义。
+ * 只看 `view`（已剥掉 blockquote 标记）的前导空白，与围栏判定同一口径。
+ */
+function indentColumns(view: string): number {
+  let columns = 0;
+  for (const ch of view) {
+    if (ch === " ") columns += 1;
+    else if (ch === "\t") columns += 4 - (columns % 4);
+    else break;
+  }
+  return columns;
 }
 
 /** 闭围栏判定：同一字符、长度 ≥ 开围栏、标记后只允许空白。 */
@@ -94,7 +118,7 @@ function stripContainerPrefixes(line: string): string {
 interface SourceScan {
   /** 安全切分点（原文偏移，升序）；退回时无意义。 */
   cuts: number[];
-  /** 围栏外出现行首 `[`/`<`：调用方整段退回，不再分块。 */
+  /** 围栏外出现行首 `[`/`<` 或列表项内围栏：调用方整段退回，不再分块。 */
   bail: boolean;
   /** 最后一个未闭合围栏的起始偏移；null 表示没有。 */
   fenceOpenStart: number | null;
@@ -110,7 +134,8 @@ interface SourceScan {
  * 一个容器——`- a`/`1. a` 是同一个列表（拆开会出现两个 `<ul>`、有序编号
  * 重排），`> a` 是同一个引用块（拆开间距不同）。顶格的普通文本/标题/新围栏
  * 在空白行后一定是语义独立的新块，切分后的 DOM 与整段解析一致。行首 `[`
- * 的行不再需要在这里排除：它已经在更早处触发整段退回。
+ * 的行不再需要在这里排除：它已经在更早处触发整段退回（任务列表项除外，它
+ * 以列表标记开头，本来就在排除之列）。
  *
  * 只有已换行完结的行能产生切分点：最后一行还在增长时，它是列表标记还是普通
  * 文本（`1` 会不会长成 `1.`）尚未可知，等它收完再判定，切分点才单调只增。
@@ -123,18 +148,20 @@ interface SourceScan {
  * 就随末尾换行在「代码块」与「纯文本」之间来回跳。
  *
  * 空白行判定只认空格与制表符（CommonMark 的空白行口径），NBSP 等 Unicode
- * 空白算正文。缩进代码块不建模：空白行自己缩进 ≥4 且上一行缩进也 ≥4 时，它
- * 不作为候选——缩进代码块里「只有空格的行」（去掉 4 空格缩进后仍有空格）是
- * 代码内容，切开会把这些空格剥出代码块；缩进 <4 的空白行是尾随空行，照旧可
- * 切。代价是缩进块之后那些同样 ≥4 空格的空行也少切一刀（直到出现缩进 <4 的
- * 非空行），只损失一点增量优化。
+ * 空白算正文。缩进代码块不建模起止语义，只用「当前行是否在缩进代码块里」这
+ * 一个布尔量保守地少切一刀：缩进按列数算（tab = 4 列，见 indentColumns），
+ * 非空行按自身缩进列数重算，空白行**不重置**它——CommonMark 里空白行不结束
+ * 缩进代码块，代码块「只有空格的行」（去掉缩进后仍有空格）是代码内容，切开
+ * 会把这些空格剥出代码块。因此缩进代码块之后的空白行一律不作候选，直到出现
+ * 缩进 <4 的非空行；代价是缩进块之后紧邻的那个空行也少切一刀，只损失一点
+ * 增量优化。
  */
 function scanSource(text: string): SourceScan {
   let inFence: { char: "`" | "~"; len: number; depth: number } | null = null;
   let fenceOpenStart: number | null = null;
   // 最近一个位于围栏外的已完结空白行起点；连续空白行取最后一个。
   let lastBlank: number | null = null;
-  // 当前行是否处于缩进代码块（≥4 空格缩进）内，用于让代码块里的空白行不进
+  // 当前行是否处于缩进代码块（≥4 列缩进）内，用于让代码块里的空白行不进
   // 候选。不建模缩进代码块的起止语义，只保守地少切一刀（见函数注释）。
   let indentedCode = false;
   const cuts: number[] = [];
@@ -169,7 +196,14 @@ function scanSource(text: string): SourceScan {
       // 深度规则的用处。
       if (!bail) {
         const head = stripContainerPrefixes(line);
-        if (head.startsWith("[") || head.startsWith("<")) bail = true;
+        // 列表项里的围栏不在扫描范围内（内容列取决于列表标记宽度），交给整段
+        // 解析：`1. ```\n\t\n正文` 被切开会渲染成空代码块。
+        if (LIST_ITEM_FENCE_RE.test(view)) bail = true;
+        else if (head.startsWith("<")) bail = true;
+        // 剥掉容器前缀后以 `[` 开头：引用/脚注定义，或任务列表项。任务列表项
+        // 剥离后同样以 `[` 开头，但它是正文（`]` 后是空白/行尾），是本产品很
+        // 常见的回复形态，不该整段失去增量优化。
+        else if (head.startsWith("[") && !TASK_ITEM_RE.test(view)) bail = true;
       }
       const m = OPEN_RE.exec(view);
       if (m) {
@@ -185,11 +219,9 @@ function scanSource(text: string): SourceScan {
 
     if (complete) {
       const blank = /^[ \t]*$/.test(line);
-      const indented = /^ {4}/.test(view);
-      // 缩进代码块按缩进延续：非空行按自身缩进重新判定，空白行只在缩进 ≥4 时
-      // 延续它（<4 空格的空白行是代码块结束后的普通空白行）。
-      if (!blank) indentedCode = indented;
-      else if (!indented) indentedCode = false;
+      // 缩进代码块只由非空行的自身缩进（列数）重算：空白行不结束缩进代码块，
+      // 所以它保留上一行的结论，代码块内的空白行因此不会成为候选。
+      if (!blank) indentedCode = indentColumns(view) >= 4;
       if (blank) {
         // 围栏内与缩进代码块内的空白行不是候选：块内内容是原样字节，不存在
         // 块边界（缩进块里那几行空格切出去就丢了）。

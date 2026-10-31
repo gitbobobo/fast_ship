@@ -296,15 +296,36 @@ describe("缩进代码块里的空白行不切分", () => {
     expect(r.tailPlain).toBeNull();
   });
 
-  it("缩进 <4 的空白行维持原有切分结论", () => {
-    // 缩进代码块里的 0/3 空格空白行是尾随空行，CommonMark 解析时会被剥掉，
-    // 切开与整段解析一致；本次修复只抑制缩进 ≥4 的空白行，不扩散到这两类。
-    expect(splitStreamingMarkdown("     code\n\npara\n").segments).toEqual([
-      "     code\n",
-    ]);
-    expect(splitStreamingMarkdown("     code\n   \npara\n").segments).toEqual([
-      "     code\n",
-    ]);
+  it("空白行不结束缩进代码块：0 空格的空行也在代码块里", () => {
+    // `"    code\n\n    \npara\n"` 整段解析是一个代码块（`code` 后跟两个空行）
+    // 加 `<p>para</p>`：缩进代码块里的无缩进空白行同样是代码内容（只是空行），
+    // 从这里切开会把中间那行 4 空格剥出代码块。
+    const spaced = splitStreamingMarkdown("    code\n\n    \npara\n");
+    expect(spaced.segments).toEqual([]);
+    expect(spaced.tailMarkdown).toBe("    code\n\n    \npara\n");
+    expect(spaced.tailPlain).toBeNull();
+  });
+
+  it("tab 缩进算 4 列：tab 代码行也能识别缩进代码块", () => {
+    // CommonMark 的 tab stop 是 4 列，`\t` 与 4 空格同义。按 `/^ {4}/` 判定时
+    // tab 缩进的代码行认不出来，后面那个空行就会被切出去。
+    const tabbed = splitStreamingMarkdown("\tcode\n     \npara\n");
+    expect(tabbed.segments).toEqual([]);
+    expect(tabbed.tailMarkdown).toBe("\tcode\n     \npara\n");
+    expect(tabbed.tailPlain).toBeNull();
+  });
+
+  it("缩进代码块之后紧邻的空行也少切一刀（刻意保守）", () => {
+    // 空白行不结束缩进代码块，所以缩进块后面的空行一律不作候选，直到出现
+    // 缩进 <4 的非空行。这两组以前会切一刀，现在整段留在尾部：代价只是少了
+    // 一点增量优化，换来的是缩进代码块里的空行不会被切出去。
+    for (const text of ["     code\n\npara\n", "     code\n   \npara\n"]) {
+      expect(splitStreamingMarkdown(text), text).toEqual({
+        segments: [],
+        tailMarkdown: text,
+        tailPlain: null,
+      });
+    }
   });
 
   it("普通段落之间的空白行仍可切分", () => {
@@ -371,6 +392,41 @@ describe("splitStreamingMarkdown 退回（不分块）", () => {
     expect(stableOf("- see [x]: y\n\n正文\n")).toBe("- see [x]: y\n");
   });
 
+  it("任务列表项不触发退回：`[ ]`/`[x]` 是正文不是定义", () => {
+    // 任务列表剥掉列表标记后以 `[` 开头，但 `]` 后是空白/行尾——这是本产品很
+    // 常见的回复形态，整段退回会白白丢掉增量优化。
+    const tasks = "## 待办\n\n- [ ] 修正标题\n- [x] 更新描述\n\n收尾段落。\n";
+    const r = splitStreamingMarkdown(tasks);
+    expect(r.segments.length).toBeGreaterThan(0);
+    expect(r.segments).toEqual(["## 待办\n\n- [ ] 修正标题\n- [x] 更新描述\n"]);
+    expect(r.tailPlain).toBeNull();
+    // 有序列表的任务项、引用块里的任务项、大写 `[X]` 同样豁免。
+    expect(stableOf("待办\n\n1. [x] 改标题\n\n收尾。\n")).toBe(
+      "待办\n\n1. [x] 改标题\n",
+    );
+    expect(stableOf("待办\n\n> - [X] 改标题\n\n收尾。\n")).toBe(
+      "待办\n\n> - [X] 改标题\n",
+    );
+  });
+
+  it("`- [x]: url` 是真定义，仍整段退回", () => {
+    // 任务项要求 `]` 后是空白或行尾；定义后面紧跟 `:`。两者只差一个字符，
+    // 豁免不能宽到把定义放过去（定义是文档级作用域，切错会让引用退化成裸文本）。
+    expectBail("- [x]: url\n\nSee [x].\n");
+    expectBail("> - [x]: url\n\nSee [x].\n");
+    expectBail("1. [x]: url\n\nSee [x].\n");
+  });
+
+  it("围栏开在列表项里时整段退回", () => {
+    // 列表项里围栏的内容列取决于列表标记宽度，扫描器不建模它：`1. ``` ` 会被
+    // 当成一个已完成的空代码块切出去，与整段解析（代码块里有一个 tab 缩进行）
+    // 的 DOM 不一致。
+    expectBail("1. ```\n\t\n正文\n");
+    expectBail("- ```\n  code\n\nZQMARKER\n");
+    expectBail("前提\n\n1. ~~~\ncode\n");
+    expectBail("> 1. ```\n> code\n");
+  });
+
   it("围栏内的 `<`/`[` 行不触发退回：代码类回复不该失去增量优化", () => {
     const text = "```tsx\n<div>\n[x]: url\n```\n\n后文\n";
     const r = splitStreamingMarkdown(text);
@@ -433,7 +489,6 @@ describe("tailPlain 与 splitIncompleteFence 一致", () => {
     "前文\n\n```",
     "前文\r\n```\r\ncode",
     "> > ```ts\n> > const a = 1;",
-    "- ```\n  code\n\nZQMARKER",
     "> ```\n> code\n\nZQMARKER",
     "> ```\n> code\n",
     "> ```\n> code\n> more",
@@ -525,14 +580,6 @@ describe("围栏在容器深度下降时结束", () => {
       segments: ["> ```\n> code\n"],
       tailMarkdown: "\n",
       tailPlain: "```\nZQMARKER\n",
-    });
-  });
-
-  it("列表项缩进内的围栏不在扫描范围（既有边界）：不降级", () => {
-    expect(splitStreamingMarkdown("- ```\n  code\n\nZQMARKER\n")).toEqual({
-      segments: ["- ```\n  code\n"],
-      tailMarkdown: "\nZQMARKER\n",
-      tailPlain: null,
     });
   });
 });

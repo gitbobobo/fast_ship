@@ -4,8 +4,8 @@ import { BotMarkdown } from "./bot-markdown";
 import { splitIncompleteFence, splitStreamingMarkdown } from "@/lib/bots/markdown-stream";
 
 // 等价性样本：闭合/完整文本，流式分块渲染与整段解析必须产出相同 DOM。
-// 不含原始 HTML 行（行首 `<`）与引用/脚注定义（行首 `[`）：那两类文本走
-// 「整段退回」路径，单独在 BAIL_SAMPLES 里断言。
+// 也包括退回路径的样本（列表项内围栏）：退回后不分块，仍未建模的构造只能靠
+// 「流式渲染与整段解析逐字节相同」来保证，不能靠「保守少切」。
 const EQUIV_SAMPLES: Array<[string, string]> = [
   ["多段段落", "第一段。\n\n第二段。\n\n第三段。"],
   ["标题", "# 大标题\n\n## 小标题\n\n正文。"],
@@ -25,6 +25,13 @@ const EQUIV_SAMPLES: Array<[string, string]> = [
   // 缩进代码块里的空格行是代码内容（去掉 4 空格缩进后仍是空格）：把它当空白行
   // 切分会让代码块丢掉这一行。
   ["缩进代码块内空格行", "     code\n     \npara\n"],
+  // 空白行不结束缩进代码块：无缩进行的空行、tab 缩进的代码行都算代码内容。
+  ["缩进代码块夹空白行", "    code\n\n    \npara\n"],
+  ["tab 缩进代码块", "\tcode\n     \npara\n"],
+  // 任务列表项剥掉列表标记后以 `[` 开头，但不是引用定义：不能因此整段退回。
+  ["任务列表", "## 待办\n\n- [ ] 修正标题\n- [x] 更新描述\n\n收尾段落。\n"],
+  // 列表项里的围栏不在扫描范围内，整段退回：切分会渲染成空代码块。
+  ["列表项内围栏", "1. ```\n\t\n正文\n"],
   ["缩进代码块后接段落", "前文。\n\n    const a = 1;\n\n     \n\n后文。\n"],
   ["两个相邻表格", "| a |\n| --- |\n| 1 |\n\n| b |\n| --- |\n| 2 |"],
   ["列表后续段落", "段落。\n\n- a\n- b\n\n后续段落。"],
@@ -41,11 +48,10 @@ const EQUIV_SAMPLES: Array<[string, string]> = [
   ["引用里惰性续行结束围栏", "> ```\n> code\nZQMARKER\n"],
   ["围栏行后立刻掉出容器", "> ```\ncode\n\nZQMARKER\n"],
   ["下一个引用不算进代码块", "> ```\n> code\n\n> stillfence\n"],
-  ["列表项内围栏（既有边界）", "- ```\n  code\n\nZQMARKER\n"],
 ];
 
-// 退回样本：行首 `<`（原始 HTML 块）或行首 `[`（链接/脚注引用定义）。这些文本
-// 不分块，流式渲染必须与非流式逐字节一致，且不得保留围栏降级。
+// 退回样本：行首 `<`（原始 HTML 块）、行首 `[`（链接/脚注引用定义）或围栏开在
+// 列表项里。这些文本不分块，流式渲染必须与非流式逐字节一致，且不得保留围栏降级。
 const BAIL_SAMPLES: Array<[string, string]> = [
   ["引用式链接", "见 [标注] 与 [另一处][标]。\n\n[标注]: https://example.com/a\n[标]: https://example.com/b\n"],
   ["引用定义在后", "See [x].\n\nMiddle paragraph.\n\n[x]: https://example.com"],
@@ -65,6 +71,10 @@ const BAIL_SAMPLES: Array<[string, string]> = [
   ["HTML 块前的正文", "说明。\n\n<pre>\n```\ncode"],
   ["未闭合 HTML 块", "<style>\n```\nstill"],
   ["注释块内的围栏", "前文\n\n<!--\n```\nhello"],
+  // 列表项里的围栏不在扫描范围内，整段退回（见 EQUIV_SAMPLES 里的有序列表项）。
+  ["列表项内围栏（无序）", "- ```\n  code\n\nZQMARKER\n"],
+  // 任务项要求 `]` 后是空白或行尾；`]` 后紧跟 `:` 的是引用定义，仍要退回。
+  ["列表项内的任务样式定义", "- [x]: url\n\nSee [x].\n"],
 ];
 
 describe("BotMarkdown", () => {
