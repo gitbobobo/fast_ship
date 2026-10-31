@@ -433,12 +433,28 @@ func (s *ProxyService) sweepExpiredEntries() {
 			continue
 		}
 		metaPath := filepath.Join(s.cacheDir, name)
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
 		data, err := os.ReadFile(metaPath)
 		if err != nil {
 			continue
 		}
 		var entry cacheEntry
-		if json.Unmarshal(data, &entry) != nil || !entry.expired(now) {
+		if json.Unmarshal(data, &entry) != nil {
+			// 损坏 meta（写盘中断在 rename data 与 WriteFile meta 之间、或磁
+			// 盘满截断）：与孤儿 .bin 同口径按 mtime 超 2×TTL 回收（meta 与同
+			// 名 .bin 一起删），否则该条目连同最大 256MB 的 .bin 永久留盘且每
+			// 次命中都重源。mtime 新的是写侧中间态，不碰。
+			if now.Sub(info.ModTime()) < 2*s.cacheTTL {
+				continue
+			}
+			_ = os.Remove(filepath.Join(s.cacheDir, strings.TrimSuffix(name, ".json")+".bin"))
+			_ = os.Remove(metaPath)
+			continue
+		}
+		if !entry.expired(now) {
 			continue
 		}
 		// 持该 key 的下载闸再复核与删除：与同 key 写盘互斥，窗口关闭。闸等待

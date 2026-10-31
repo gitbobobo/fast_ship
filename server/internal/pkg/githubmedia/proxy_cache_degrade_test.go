@@ -179,7 +179,30 @@ func TestSweepExpiredEntriesRemovesOnlyExpired(t *testing.T) {
 		t.Fatalf("fresh.bin stat = %v, want 保留", err)
 	}
 	if _, err := os.Stat(filepath.Join(svc.cacheDir, "broken.json")); err != nil {
-		t.Fatalf("broken.json stat = %v, want 保留（解析不了不猜）", err)
+		t.Fatalf("broken.json stat = %v, want 保留（mtime 新，写侧中间态不猜）", err)
+	}
+
+	// 损坏 meta 超 2×TTL：按孤儿口径回收（meta 与同名 .bin 一起删）——写盘
+	// 中断/磁盘满留下的截断 meta 不再连带 256MB 的 .bin 永久占盘。
+	staleBroken := filepath.Join(svc.cacheDir, "stale-broken.json")
+	if err := os.WriteFile(staleBroken, []byte("{truncated"), 0o640); err != nil {
+		t.Fatalf("write stale broken: %v", err)
+	}
+	old := time.Now().Add(-3 * defaultCacheTTL)
+	if err := os.Chtimes(staleBroken, old, old); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(svc.cacheDir, "stale-broken.bin"), []byte("big"), 0o640); err != nil {
+		t.Fatalf("write stale broken bin: %v", err)
+	}
+
+	svc.sweepExpiredEntries()
+
+	if _, err := os.Stat(staleBroken); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stale broken stat = %v, want 已回收", err)
+	}
+	if _, err := os.Stat(filepath.Join(svc.cacheDir, "stale-broken.bin")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stale broken bin stat = %v, want 已回收", err)
 	}
 }
 
