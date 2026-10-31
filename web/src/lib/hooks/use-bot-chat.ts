@@ -598,6 +598,12 @@ export function useBotChat(botId: string) {
   // 当前活动主线 run 的 id：进度快照只能回填到同一个 run，避免「旧 run 的快照
   // 晚到」把旧压缩阶段挂到新 run 的运行栏。
   const activeRunIdRef = useRef<string | null>(null);
+  // 按帧合并草稿增量（INT-176）：服务端约 100ms 一批 text_delta，突发/重连
+  // 补读时多批会挤进同一帧，逐批 setState 意味着一帧内多次整表重渲染。
+  // 增量先累积进 pending，排帧后一帧至多 flush 一次；flushFrameRef 存已
+  // 排帧的取消句柄（rAF 与 setTimeout 二选一），null 表示当前没有待 flush 帧。
+  const pendingDraftsRef = useRef<Map<string, string>>(new Map());
+  const flushFrameRef = useRef<(() => void) | null>(null);
 
   // 单一水合来源：bot 详情、消息、调用与 run 全部来自同一读取点的快照，
   // 消除分离请求的竞态窗口（快照与水位同点，SSE 从水位续读不漏不重）。
@@ -674,6 +680,26 @@ export function useBotChat(botId: string) {
     ? Math.max(0, (snapshotQuery.data.next_event_seq ?? 1) - 1)
     : null;
 
+  // 把 pending 里的草稿增量合并进 drafts 并清空 pending（一次 setState）。
+  // 幂等：先取消已排帧（自然触发时句柄已被置空，这里是兑底），pending
+  // 为空时直接返回，不产生无谓的 setState。
+  const flushDrafts = useCallback(() => {
+    if (flushFrameRef.current) {
+      flushFrameRef.current();
+      flushFrameRef.current = null;
+    }
+    const pending = pendingDraftsRef.current;
+    if (pending.size === 0) return;
+    pendingDraftsRef.current = new Map();
+    setDrafts((previous) => {
+      const next = new Map(previous);
+      for (const [id, text] of pending) {
+        next.set(id, (next.get(id) ?? "") + text);
+      }
+      return next;
+    });
+  }, []);
+
   useEffect(() => {
     if (!userId || !botId || cursor === null) return;
     const snapshotKey = botKeys.snapshot(userId, botId);
@@ -681,14 +707,38 @@ export function useBotChat(botId: string) {
     const callsKey = botKeys.calls(userId, botId);
     const runsKey = botKeys.runs(userId, botId);
 
+    // 排帧：一帧内多批增量只 flush 一次。环境没有 rAF（非浏览器）时退回
+    // setTimeout，两者都缺失则同步 flush。
+    const scheduleDraftFlush = () => {
+      if (flushFrameRef.current) return;
+      if (typeof requestAnimationFrame === "function") {
+        const frame = requestAnimationFrame(() => {
+          flushFrameRef.current = null;
+          flushDrafts();
+        });
+        flushFrameRef.current = () => cancelAnimationFrame(frame);
+      } else if (typeof setTimeout === "function") {
+        const timer = setTimeout(() => {
+          flushFrameRef.current = null;
+          flushDrafts();
+        }, 0);
+        flushFrameRef.current = () => clearTimeout(timer);
+      } else {
+        flushDrafts();
+      }
+    };
+
     const appendDraft = (messageId: string, text: string) => {
-      setDrafts((previous) => {
-        const next = new Map(previous);
-        next.set(messageId, (next.get(messageId) ?? "") + text);
-        return next;
-      });
+      const pending = pendingDraftsRef.current;
+      pending.set(messageId, (pending.get(messageId) ?? "") + text);
+      scheduleDraftFlush();
     };
     const clearDraft = (messageId: string) => {
+      // commit 携带的正文已完整入账本、discard 宣告草稿作废：pending 里
+      // 该 id 的增量必须先丢弃，否则排帧 flush 晚于事件到达时会把旧草稿
+      // 写回「复活」；其余 pending 同步 flush 后再删掉草稿本体。
+      pendingDraftsRef.current.delete(messageId);
+      flushDrafts();
       setDrafts((previous) => {
         if (!previous.has(messageId)) return previous;
         const next = new Map(previous);
@@ -784,8 +834,14 @@ export function useBotChat(botId: string) {
     return () => {
       subscription.close();
       if (subscriptionRef.current === subscription) subscriptionRef.current = null;
+      // 订阅因快照推进 cursor 而重建时，pending 里可能还压着已消费、还没到
+      // flush 帧的增量：新订阅从已推进的 seq 续读，这段事件不会重放，必须先
+      // 把 pending 写回 drafts（flushDrafts 内部同时取消已排的帧），否则草稿
+      // 永久少一段。卸载时这次 setState 是空操作（React 18+ 不再对已卸载组件
+      // 告警，也不产生更新），不会造成「卸载后更新」。
+      flushDrafts();
     };
-  }, [botId, cursor, queryClient, userId]);
+  }, [botId, cursor, flushDrafts, queryClient, userId]);
 
   const applyCallUpdate = useCallback(
     (updated?: BotCall) => {

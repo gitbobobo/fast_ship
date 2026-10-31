@@ -142,6 +142,20 @@ function hook() {
   return { client, result: render.result, rerender: render.rerender, unmount: render.unmount };
 }
 
+// 草稿增量按帧合并（INT-176）：等一帧让 pending flush 进 drafts。环境无
+// rAF 时退回 setTimeout，这里两者都兼容（测试环境为 happy-dom，有 rAF）。
+async function flushDraftFrame() {
+  await act(async () => {
+    await new Promise((resolve) => {
+      if (typeof requestAnimationFrame === "function") {
+        requestAnimationFrame(() => resolve(null));
+      } else {
+        setTimeout(resolve, 0);
+      }
+    });
+  });
+}
+
 beforeEach(() => {
   signInAs("A");
   api.getChatSnapshot.mockResolvedValue(snapshotWith());
@@ -347,15 +361,95 @@ describe("useBotChat", () => {
     const { result } = hook();
     await waitFor(() => expect(stream.subscribe).toHaveBeenCalled());
     emit("delta", { message_id: "m-d", payload: { text: "写到一半" } }, 10);
+    await flushDraftFrame();
     await waitFor(() => expect(result.current.entries).toHaveLength(1));
     emit("delta", { kind: "message_discard", message_id: "m-d" }, 11);
     await waitFor(() => expect(result.current.entries).toHaveLength(0));
   });
-  it("accumulates delta drafts and replaces them on message_commit", async () => {    const { result } = hook();
+
+  it("同一帧内多个 delta 合并后只更新一次草稿", async () => {
+    const { result } = hook();
+    await waitFor(() => expect(stream.subscribe).toHaveBeenCalled());
+    const before = result.current.entries;
+    emit("delta", { message_id: "m-f", payload: { text: "第一" } }, 10);
+    emit("delta", { message_id: "m-f", payload: { text: "第二" } }, 11);
+    emit("delta", { message_id: "m-f", payload: { text: "第三" } }, 12);
+    // 帧未到：没有任何 setState，entries 引用不变（一帧至多一次更新）。
+    expect(result.current.entries).toBe(before);
+    await flushDraftFrame();
+    expect(result.current.entries).not.toBe(before);
+    expect(result.current.entries[0].draft).toBe(true);
+    expect(result.current.entries[0].message.content.text).toBe("第一第二第三");
+  });
+
+  it("订阅因快照推进游标而重建时，已消费未 flush 的增量不丢", async () => {
+    // 把 rAF 换成一帧也不自动触发的队列：否则帧可能抢在订阅重建前把 pending
+    // flush 掉，就测不到清理函数是否把「已消费、未 flush」的增量写回。
+    const frames = new Map<number, FrameRequestCallback>();
+    let nextFrameId = 1;
+    const raf = vi
+      .spyOn(globalThis, "requestAnimationFrame")
+      .mockImplementation((callback) => {
+        const id = nextFrameId;
+        nextFrameId += 1;
+        frames.set(id, callback);
+        return id;
+      });
+    const cancel = vi
+      .spyOn(globalThis, "cancelAnimationFrame")
+      .mockImplementation((id) => {
+        frames.delete(id);
+      });
+    const runPendingFrames = () => {
+      const callbacks = [...frames.values()];
+      frames.clear();
+      act(() => {
+        for (const callback of callbacks) callback(0);
+      });
+    };
+
+    try {
+      // 首载水位 10；首个 text_delta 自带的快照重读把水位推到 12，订阅于是按
+      // 新游标重建。重建那一刻 pending 里还压着 FIRST，新订阅从已推进的 seq
+      // 续读，这段事件不会重放：清理函数必须把 pending 写回 drafts。
+      api.getChatSnapshot.mockResolvedValueOnce(snapshotWith());
+      api.getChatSnapshot.mockResolvedValue(
+        snapshotWith({ next_event_seq: 12 }),
+      );
+      const { result } = hook();
+      await waitFor(() => expect(stream.subscribe).toHaveBeenCalledTimes(1));
+      expect(stream.captured?.afterSeq).toBe(9);
+
+      // 首个 text_delta 自带快照重读（H2）：这一步同时把增量放进 pending、
+      // 把快照水位推到 12。
+      emit(
+        "delta",
+        { kind: "text_delta", message_id: "m-i", payload: { text: "FIRST" } },
+        10,
+      );
+      await waitFor(() => expect(stream.subscribe).toHaveBeenCalledTimes(2));
+      expect(stream.captured?.afterSeq).toBe(11);
+
+      // 续读后到达的第二批增量必须接在保住的第一批后面。
+      emit("delta", { message_id: "m-i", payload: { text: "SECOND" } }, 12);
+      runPendingFrames();
+      await waitFor(() => expect(result.current.entries).toHaveLength(1));
+      expect(result.current.entries[0].message.content.text).toBe(
+        "FIRSTSECOND",
+      );
+    } finally {
+      raf.mockRestore();
+      cancel.mockRestore();
+    }
+  });
+
+  it("accumulates delta drafts and replaces them on message_commit", async () => {
+    const { result } = hook();
     await waitFor(() => expect(stream.subscribe).toHaveBeenCalled());
 
     emit("delta", { message_id: "m-a", payload: { text: "你好" } }, 10);
     emit("delta", { message_id: "m-a", payload: { text: "，正在处理" } }, 11);
+    await flushDraftFrame();
     await waitFor(() => expect(result.current.entries).toHaveLength(1));
     expect(result.current.entries[0].draft).toBe(true);
     expect(result.current.entries[0].message.content.text).toBe("你好，正在处理");
@@ -371,6 +465,34 @@ describe("useBotChat", () => {
     expect(result.current.entries).toHaveLength(1);
     expect(result.current.entries[0].draft).toBeUndefined();
     expect(result.current.entries[0].message.content.text).toBe("已收到，我来处理。");
+  });
+
+  it("message_commit 在帧 flush 之前到达时丢弃 pending 草稿，不写回旧增量", async () => {
+    const { result } = hook();
+    await waitFor(() => expect(stream.subscribe).toHaveBeenCalled());
+
+    emit("delta", { message_id: "m-g", payload: { text: "写到一半" } }, 10);
+    // commit 在排帧 flush 之前到达：pending 的「写到一半」必须被丢弃，
+    // 稍后的帧 flush 不得让它复活成草稿。
+    const committed: BotMessage = {
+      id: "m-g",
+      bot_id: "b1",
+      seq: 12,
+      kind: "assistant",
+      content: { text: "完整正文" },
+      created_at: "2026-10-15T00:01:00Z",
+    };
+    emit(
+      "delta",
+      { kind: "message_commit", message_id: "m-g", payload: committed },
+      11,
+    );
+    await flushDraftFrame();
+    // 缓存已经写入 commit 正文，等 react-query 通知落到渲染。
+    await waitFor(() => expect(result.current.entries).toHaveLength(1));
+    expect(result.current.entries.filter((e) => e.draft)).toHaveLength(0);
+    expect(result.current.entries[0].draft).toBeUndefined();
+    expect(result.current.entries[0].message.content.text).toBe("完整正文");
   });
 
   it("folds tool events into the call ledger and keeps receipts out of the timeline", async () => {

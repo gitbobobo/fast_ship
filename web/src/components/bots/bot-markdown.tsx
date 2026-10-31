@@ -2,15 +2,16 @@ import {
   isValidElement,
   memo,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type ReactNode,
 } from "react";
-import ReactMarkdown from "react-markdown";
+import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Check, Copy } from "lucide-react";
 import { cn, copyToClipboard } from "@/lib/utils";
-import { splitIncompleteFence } from "@/lib/bots/markdown-stream";
+import { splitStreamingMarkdown } from "@/lib/bots/markdown-stream";
 
 /** 从 code 元素的 children 里抽出纯文本（保留缩进与换行）。 */
 function codeText(children: ReactNode): string {
@@ -91,11 +92,87 @@ function BotCodeBlock({ children }: { children?: ReactNode }) {
   );
 }
 
+// remark 配置提到模块级：所有 MarkdownBlock 共用同一组插件与组件映射，
+// 插件与映射引用稳定，模块级组件才能被 memo 可靠跳过。
+const REMARK_PLUGINS = [remarkGfm];
+const DISALLOWED_ELEMENTS = ["img"];
+const MARKDOWN_COMPONENTS: Components = {
+  a: ({ node: _node, href, children, ...props }) => (
+    <a
+      {...props}
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer nofollow"
+    >
+      {children}
+    </a>
+  ),
+  pre: ({ node: _node, children }) => <BotCodeBlock>{children}</BotCodeBlock>,
+};
+
+/**
+ * 单块 Markdown 渲染（既有那套 ReactMarkdown 配置）。
+ * memo 是关键（INT-176）：稳定块渲染后，后续帧即使重建它、只要 text
+ * 字符串不变就被跳过，整棵子树不重渲染也不重解析。
+ */
+const MarkdownBlock = memo(function MarkdownBlock({ text }: { text: string }) {
+  return (
+    <ReactMarkdown
+      remarkPlugins={REMARK_PLUGINS}
+      disallowedElements={DISALLOWED_ELEMENTS}
+      components={MARKDOWN_COMPONENTS}
+    >
+      {text}
+    </ReactMarkdown>
+  );
+});
+
+/**
+ * 空白判定：只有空格、制表符与换行算空白（CommonMark 的空白行口径）。
+ * 不能用 String.trim：它把 NBSP 等 Unicode 空白也当空白，会让「只有 NBSP 的
+ * 一行」被判空而整块不渲染，内容直接丢掉。
+ */
+function hasVisibleContent(text: string): boolean {
+  return /[^ \t\r\n]/.test(text);
+}
+
+/**
+ * 流式正文的块拆分（INT-176）：splitStreamingMarkdown 一次扫描给出已完整的
+ * 块前缀（按块切开）与待重解析的尾部，每块交给 memo 化的 MarkdownBlock——
+ * 稳定块每帧重新声明但 text 不变，React 直接跳过，于是只重解析正在生成的
+ * 尾部与最后一块，整段回复的解析总量从二次降为线性。未闭合围栏的降级纯文本
+ * 段来自同一份扫描结果，不再有第二套围栏状态。
+ * 单帧的 Markdown 解析量只与当前块长度有关，但仍有一次对累计全文的逐行扫描
+ *（splitStreamingMarkdown 内部只扫行与几个正则，不解析 Markdown）：那就是
+ * 流式渲染剩下的全部全量成本，实测 27KB 回复按 40 字符一帧（671 帧）累计
+ * 扫描约 28ms、均值 0.04ms/帧，不构成瓶颈。切分点只落在语义独立的块边界（见
+ * splitStreamingMarkdown 注释），因此分块渲染的 DOM 与整段解析一致，由
+ * 等价性测试锁定。
+ *
+ * 只在流式时有意义：非流式正文一次解析就够，不必再扫描切分点（同一条消息
+ * 每次重渲染都会调用到这里，跳过扫描省掉一次不必要的全文遍历）。
+ */
+function useStreamingSplit(text: string, streaming: boolean) {
+  return useMemo(
+    () =>
+      streaming
+        ? splitStreamingMarkdown(text)
+        : {
+            segments: [] as string[],
+            tailMarkdown: text,
+            tailPlain: null as string | null,
+          },
+    [text, streaming],
+  );
+}
+
 /**
  * 机器人正文的 Markdown 渲染：GFM 子集（标题/列表/表格/代码/引用/链接/
  * 分隔线），不解析原始 HTML、不渲染图片、链接一律新窗口且不带 referrer。
- * streaming 时若存在未闭合围栏，把围栏起始行之后的内容降级为纯文本展示，
- * 避免代码块在流式过程中先出现再跳变；闭合后自动升级。user 消息仍走纯文本。
+ * streaming 时只重解析尾部（INT-176）：稳定块前缀按块 memo 跳过重解析，
+ * 未闭合围栏降级为纯文本展示，闭合后自动升级；含原始 HTML（行首 `<`）或
+ * 引用/脚注定义（行首 `[`）的回复不分块，整段解析（与非流式一致）。分块渲染
+ * 与整段解析的 DOM 由等价性测试锁定一致。非流式保持单次全量渲染。user 消息仍走纯文本。
  */
 export const BotMarkdown = memo(function BotMarkdown({
   text,
@@ -106,9 +183,41 @@ export const BotMarkdown = memo(function BotMarkdown({
   streaming?: boolean;
   className?: string;
 }) {
-  const { complete, openTail } = streaming
-    ? splitIncompleteFence(text)
-    : { complete: text, openTail: null };
+  const { segments, tailMarkdown, tailPlain } = useStreamingSplit(
+    text,
+    streaming,
+  );
+
+  // 拼接输出：整段解析时相邻顶层块之间夹一个 "\n" 文本节点（mdast→hast
+  // 的 wrap），分块后在这里补回，DOM 才与整段解析逐字节一致。不含可见内容
+  // 的块（切分点正好落在开头时的白空块）在 mdast 里不产出任何子节点，因此
+  // 既不渲染它、也不补它前面的 "\n"——否则会多出悬空换行。稳定块由 memo
+  // 跳过，这里新建的只是外层数组与换行文本。非流式不走分块，单次全量渲染。
+  // 每个元素都带 key：同一层数组里混用有 key/无 key 的元素会触发 React 的
+  // key 警告。
+  const rendered: ReactNode[] = [];
+  segments.forEach((segment, index) => {
+    if (!hasVisibleContent(segment)) return;
+    if (rendered.length > 0) rendered.push("\n");
+    // key 用 segment 下标：同一块的位置在增长过程中不变，memo 才能命中。
+    rendered.push(<MarkdownBlock key={index} text={segment} />);
+  });
+  if (hasVisibleContent(tailMarkdown)) {
+    if (rendered.length > 0) rendered.push("\n");
+    // key 取 segments.length：稳定块的 key 是 0..segments.length-1，尾部这块
+    // 转为稳定块时正好拿到这个下标，跨越那一帧 key 不变，React 复用同一实例、
+    // 不卸载重建子树，<pre> 的横向滚动位置、文本选区和复制按钮的「已复制」态
+    // 因而都留在原节点上（否则每次跨界都会丢掉它们，memo 也必然 miss）。
+    // 空白块不渲染、key 仍是各自的 segment 下标，因此不会与这个下标撞车。
+    rendered.push(<MarkdownBlock key={segments.length} text={tailMarkdown} />);
+  }
+  if (tailPlain !== null) {
+    rendered.push(
+      <div key="open-tail" className="whitespace-pre-wrap">
+        {tailPlain}
+      </div>,
+    );
+  }
 
   return (
     <div
@@ -117,30 +226,7 @@ export const BotMarkdown = memo(function BotMarkdown({
         className,
       )}
     >
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        disallowedElements={["img"]}
-        components={{
-          a: ({ node: _node, href, children, ...props }) => (
-            <a
-              {...props}
-              href={href}
-              target="_blank"
-              rel="noopener noreferrer nofollow"
-            >
-              {children}
-            </a>
-          ),
-          pre: ({ node: _node, children }) => (
-            <BotCodeBlock>{children}</BotCodeBlock>
-          ),
-        }}
-      >
-        {complete}
-      </ReactMarkdown>
-      {openTail !== null && (
-        <div className="whitespace-pre-wrap">{openTail}</div>
-      )}
+      {rendered}
     </div>
   );
 });
