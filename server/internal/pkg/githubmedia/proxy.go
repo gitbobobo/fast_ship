@@ -457,8 +457,30 @@ func (s *ProxyService) sweepExpiredEntries() {
 			// 删（写侧 rename 的新 data mtime 必是新，不会误删刚发布的条目）。
 			binPath := strings.TrimSuffix(metaPath, ".json") + ".bin"
 			if entry.URL == "" {
+				// 闸键不可得，与写侧没有互斥，靠「只删旧东西」压窗口：.bin 存
+				// 在时看它的 mtime（写侧刚 rename 的新 data mtime 必是新）；
+				// .bin 不存在时看 meta 自身的 mtime——没有 data 可误删，meta
+				// 超龄就该回收（旧版本这条路径会永久留盘）。stat 与 remove 之
+				// 间的窗口用「先 rename 成隔离名再删」压掉：写侧若正要发布，
+				// 它的 rename(data) 与 WriteFile(meta) 都不会命中已被改名的路
+				// 径，本次删的确定是隔离出来的旧文件。
 				binInfo, statErr := os.Stat(binPath)
-				if statErr != nil || now.Sub(binInfo.ModTime()) < 2*s.cacheTTL {
+				switch {
+				case statErr == nil:
+					if now.Sub(binInfo.ModTime()) < 2*s.cacheTTL {
+						continue
+					}
+				case !errors.Is(statErr, os.ErrNotExist):
+					continue
+				default:
+					if now.Sub(info.ModTime()) < 2*s.cacheTTL {
+						continue
+					}
+					gonePath := metaPath + ".gone"
+					if err := os.Rename(metaPath, gonePath); err != nil {
+						continue
+					}
+					_ = os.Remove(gonePath)
 					continue
 				}
 				_ = os.Remove(binPath)

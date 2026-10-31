@@ -262,6 +262,21 @@ func TestSweepExpiredEntriesURLUnavailableBrokenMeta(t *testing.T) {
 	if _, err := os.Stat(staleMeta); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("stale meta stat = %v, want 已回收", err)
 	}
+
+	// 无 .bin 的超龄空 meta：没有 data 可误删，按 meta 自身 mtime 回收。
+	loneMeta := filepath.Join(svc.cacheDir, "lone-empty.json")
+	if err := os.WriteFile(loneMeta, nil, 0o640); err != nil {
+		t.Fatalf("write lone meta: %v", err)
+	}
+	if err := os.Chtimes(loneMeta, old, old); err != nil {
+		t.Fatalf("chtimes lone meta: %v", err)
+	}
+
+	svc.sweepExpiredEntries()
+
+	if _, err := os.Stat(loneMeta); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("lone meta stat = %v, want 已回收（无 .bin，按 meta mtime）", err)
+	}
 }
 
 // 扫描与写盘竞争：写侧持下载闸发布期间，扫描必须等待并复核——发布完成后
