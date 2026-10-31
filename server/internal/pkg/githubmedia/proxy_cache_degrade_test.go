@@ -204,8 +204,9 @@ func TestGetCachedRevalidatesContentTypeGate(t *testing.T) {
 		t.Fatalf("content type = %q, want image/png", cached.Metadata.ContentType)
 	}
 
-	// 老缓存存的 octet-stream + .png URL：复核按扩展名放行，返回的
-	// ContentType 是规范化后的 image/png（meta 文件不重写，仍是原值）。
+	// 老缓存存的 octet-stream + .png URL：放行依赖扩展名，而扩展名要用重定向
+	// 后的最终 URL 才算得对、meta 里没存——保守判 miss 走重下（下一次成功
+	// 下载按当前口径写入规范化类型），不在读路径上猜。
 	legacyURL, err := svc.normalize("https://user-images.githubusercontent.com/legacy.png")
 	if err != nil {
 		t.Fatalf("normalize legacy png: %v", err)
@@ -216,12 +217,10 @@ func TestGetCachedRevalidatesContentTypeGate(t *testing.T) {
 	}
 
 	cached, ok, err = svc.GetCached(legacyURL)
-	if err != nil || !ok || cached == nil {
-		t.Fatalf("cached = %+v ok = %v err = %v, want 命中", cached, ok, err)
+	if err != nil || ok || cached != nil {
+		t.Fatalf("cached = %+v ok = %v err = %v, want miss（octet-stream 旧条目无法还原最终 URL，保守重下）", cached, ok, err)
 	}
-	if cached.Metadata.ContentType != "image/png" {
-		t.Fatalf("content type = %q, want image/png（octet-stream 被规范化）", cached.Metadata.ContentType)
-	}
+	// 读路径不删文件，meta 原样保留。
 	metaBytes, err := os.ReadFile(legacyMeta)
 	if err != nil {
 		t.Fatalf("read legacy meta: %v", err)

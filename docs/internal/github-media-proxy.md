@@ -38,7 +38,7 @@ svg（`image/svg+xml`、非标准写法 `image/svg`、扩展名 `.svg`）与 HTM
 
 - 整文件下载（FetchAndCache）在写缓存前按内容类型/扩展名准入。
 - Range 与 HEAD 走 `ProxyPass` 流式直通，回给客户端前过同一道内容类型闸门，不构成旁路；HEAD 响应常无 Content-Type，走扩展名回退。多段 Range（`Range` 头含逗号）被忽略、按完整 200 回——上游对多段 Range 回 `multipart/byteranges`，闸门必然拒，RFC 7233 允许服务器忽略 Range。
-- 缓存命中时先判过期（与内容类型无关，过期条目清掉才能让被准入规则拒掉的历史条目随 TTL 淘汰），再按当前规则复核 `entry.ContentType`。复核不过关只按 miss 走重下，不在读路径删文件（`GetCached` 不持下载锁，删 meta/data 会与正在写盘的同 key 下载竞态；下一次成功下载按同一 key 覆盖，过期由前述检查清理）——旧准入口径写进缓存的历史 svg 条目因此自动淘汰，不做全量清目录。复核放行但 meta 里存的是 octet-stream/空类型时，返回的 ContentType 换成规范化类型（只改返回值，不重写 meta）。存量条目（`77af5b8` 之前写入）的复核用的是原始 URL 而非最终 URL，重定向型条目在 TTL 内仍按旧类型交付，可执行性由硬化头堵住。
+- 缓存命中时先判过期（与内容类型无关，过期条目清掉才能让被准入规则拒掉的历史条目随 TTL 淘汰），再按当前规则复核 `entry.ContentType`。复核不过关只按 miss 走重下，不在读路径删文件（`GetCached` 不持下载锁，删 meta/data 会与正在写盘的同 key 下载竞态；下一次成功下载按同一 key 覆盖，过期由前述检查清理）——旧准入口径写进缓存的历史 svg 条目因此自动淘汰，不做全量清目录。meta 里存的是 octet-stream/空类型的旧条目（放行依赖扩展名，而扩展名要用重定向后的最终 URL、meta 没存）保守判 miss 走重下，不按原始 URL 猜。存量条目（`77af5b8` 之前写入）因此在一个 TTL 内会被重下一次，换来与写入侧完全同一套判定。
 
 变更影响（第二轮加固后）：无扩展名且上游只给 `application/octet-stream` 的资源，`Range`/`HEAD` 不再绕过闸门（整文件 GET 本来就是 415），三条路径统一口径——这是有意的，不是回归。
 
