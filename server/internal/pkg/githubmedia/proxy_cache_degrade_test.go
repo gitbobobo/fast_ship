@@ -156,9 +156,11 @@ func TestScreenshotFaceRejectsSVGContentTypeVariants(t *testing.T) {
 
 // INT-171 缓存命中复核：旧准入口径（收 svg）写进缓存的历史条目，命中时按
 // 当前规则重新校验 ContentType，不过关只按 miss 走重下，不在读路径删文件
-// ——GetCached 不持下载锁，删 meta/data 会与正在写盘的同 key 下载竞态。位图
-// 条目不受复核影响，仍然命中；老缓存里存的 octet-stream/空类型按扩展名复
-// 核，命中时返回的 ContentType 换成规范化类型（只改返回值，不重写 meta）。
+// ——GetCached 不持下载锁，删 meta/data 会与正在写盘的同 key 下载竞态。
+// 空类型、基础类型（剥参小写）为 octet-stream 的旧条目直接按 miss 重下：
+// 它们的放行依赖扩展名，meta 里没有重定向后的最终 URL，读路径上无法与写
+// 入侧对齐。带具体类型的条目仍然命中，返回的 ContentType 换成规范化类型
+// （只改返回值，不重写 meta）。
 func TestGetCachedRevalidatesContentTypeGate(t *testing.T) {
 	svc := newService(t.TempDir(), serviceConfig{
 		allowURL: func(u *url.URL) bool { return true },

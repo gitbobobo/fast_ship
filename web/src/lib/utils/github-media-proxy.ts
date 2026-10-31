@@ -5,7 +5,7 @@ const MEDIA_PROXY_TOKEN_PARAM = "token";
 // served locally (never reaching the proxy). A new version value changes the cache
 // key and retires those entries.
 const MEDIA_PROXY_VERSION_PARAM = "v";
-const MEDIA_PROXY_VERSION = "2";
+const MEDIA_PROXY_VERSION = 2;
 const ISSUE_ASSET_CONTENT_PATH = /^\/api\/issues\/assets\/[^/]+\/content$/;
 const ISSUE_ASSET_CONTENT_REFERENCE =
   /(?:https?:\/\/[^/\s"')]+)?\/api\/issues\/assets\/[^/\s"')]+\/content(?:\?[^)\s"']*)?/;
@@ -45,12 +45,15 @@ function attachMediaProxyToken(url: URL, token?: string | null) {
   url.searchParams.delete(MEDIA_PROXY_TOKEN_PARAM);
 }
 
-// 服务端 BuildProxyURL 已把 v 写进 body_html 里的代理地址（它是缓存失效机制
-// 的权威来源），这里只在缺失时补——用 set 无条件覆盖的话，只递增 Go 常量的
-// 发版会被前端静默改回旧值，旧缓存照常命中。
+// v 是缓存失效机制的权威键，但代理地址会原样嵌进用户可控的 Issue 正文：
+// 内容里带的旧版本号（部署前缓存下来的）不能原样保留，否则攻击者能把浏览器
+// 钉在未硬化的旧缓存上，换版本号就退役不了。按数值比较：缺失或小于当前
+// 常量时升到当前值；大于当前值保留——兼容「只递增 Go 常量、前端还没发」的
+// 滚动发版窗口。
 function attachMediaProxyVersion(url: URL) {
-  if (!url.searchParams.has(MEDIA_PROXY_VERSION_PARAM)) {
-    url.searchParams.set(MEDIA_PROXY_VERSION_PARAM, MEDIA_PROXY_VERSION);
+  const current = Number.parseInt(url.searchParams.get(MEDIA_PROXY_VERSION_PARAM) ?? "", 10);
+  if (!url.searchParams.has(MEDIA_PROXY_VERSION_PARAM) || Number.isNaN(current) || current < MEDIA_PROXY_VERSION) {
+    url.searchParams.set(MEDIA_PROXY_VERSION_PARAM, String(MEDIA_PROXY_VERSION));
   }
 }
 

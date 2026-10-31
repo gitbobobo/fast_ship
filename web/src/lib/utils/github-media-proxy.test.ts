@@ -30,9 +30,8 @@ describe("github media proxy utils", () => {
     );
   });
 
-  it("keeps the server-provided cache-busting version on existing proxy urls", () => {
-    // 服务端 BuildProxyURL 已写进 body_html 的 v 是权威值；前端只补缺失，
-    // 不能覆盖——只递增 Go 常量的发版不能被前端静默改回旧值。
+  it("keeps a newer server-provided cache-busting version on existing proxy urls", () => {
+    // 大于前端常量的 v 保留：兼容「只递增 Go 常量、前端还没发」的滚动发版。
     const html = rewriteGitHubMediaHtml(
       '<p><img alt="Image" src="/api/github/media-proxy?url=https%3A%2F%2Fgithub.com%2Fuser-attachments%2Fassets%2Fdemo&v=9" /></p>',
       "jwt-token",
@@ -41,6 +40,31 @@ describe("github media proxy utils", () => {
 
     expect(doc.querySelector("img")?.getAttribute("src")).toBe(
       "/api/github/media-proxy?url=https%3A%2F%2Fgithub.com%2Fuser-attachments%2Fassets%2Fdemo&v=9&token=jwt-token",
+    );
+  });
+
+  it("upgrades stale cache-busting versions from user content to the current one", () => {
+    // 内容里带的旧版本号会把浏览器钉在未硬化的旧缓存上，必须升到当前值。
+    const html = rewriteGitHubMediaHtml(
+      '<p><img alt="Image" src="/api/github/media-proxy?url=https%3A%2F%2Fgithub.com%2Fuser-attachments%2Fassets%2Fdemo&v=1" /></p>',
+      "jwt-token",
+    );
+    const doc = new DOMParser().parseFromString(html ?? "", "text/html");
+
+    expect(doc.querySelector("img")?.getAttribute("src")).toBe(
+      "/api/github/media-proxy?url=https%3A%2F%2Fgithub.com%2Fuser-attachments%2Fassets%2Fdemo&v=2&token=jwt-token",
+    );
+  });
+
+  it("replaces a non-numeric cache-busting version with the current one", () => {
+    const html = rewriteGitHubMediaHtml(
+      '<p><img alt="Image" src="/api/github/media-proxy?url=https%3A%2F%2Fgithub.com%2Fuser-attachments%2Fassets%2Fdemo&v=abc" /></p>',
+      "jwt-token",
+    );
+    const doc = new DOMParser().parseFromString(html ?? "", "text/html");
+
+    expect(doc.querySelector("img")?.getAttribute("src")).toBe(
+      "/api/github/media-proxy?url=https%3A%2F%2Fgithub.com%2Fuser-attachments%2Fassets%2Fdemo&v=2&token=jwt-token",
     );
   });
 

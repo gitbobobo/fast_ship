@@ -993,9 +993,9 @@ func (s *ProxyService) getCachedNormalized(normalized, scope string) (*CachedMed
 	if !allowed {
 		return nil, false, nil
 	}
-	// 老缓存可能存着放行前的原始类型（octet-stream/空）：返回值改成规范化
-	// 类型，响应不再拿 octet-stream 配 nosniff 回客户端；只改返回值，不重
-	// 写 meta 文件。
+	// 走到这里的是带具体基础类型的条目：老缓存可能存着大写或带参数的原始
+	// 值，返回值改成规范化类型（小写去参）；空/基础类型为 octet-stream 的
+	// 旧条目已在上面判 miss。只改返回值，不重写 meta 文件。
 	entry.ContentType = normalizedType
 
 	info, err := os.Stat(cachePath)
