@@ -1,5 +1,11 @@
 const MEDIA_PROXY_PATH = "/api/github/media-proxy";
 const MEDIA_PROXY_TOKEN_PARAM = "token";
+// Bump together with githubmedia.ProxyURLVersion (Go). Browser caches the whole
+// response, so a URL built before a media-response hardening change keeps getting
+// served locally (never reaching the proxy). A new version value changes the cache
+// key and retires those entries.
+const MEDIA_PROXY_VERSION_PARAM = "v";
+const MEDIA_PROXY_VERSION = "2";
 const ISSUE_ASSET_CONTENT_PATH = /^\/api\/issues\/assets\/[^/]+\/content$/;
 const ISSUE_ASSET_CONTENT_REFERENCE =
   /(?:https?:\/\/[^/\s"')]+)?\/api\/issues\/assets\/[^/\s"')]+\/content(?:\?[^)\s"']*)?/;
@@ -37,6 +43,10 @@ function attachMediaProxyToken(url: URL, token?: string | null) {
     return;
   }
   url.searchParams.delete(MEDIA_PROXY_TOKEN_PARAM);
+}
+
+function attachMediaProxyVersion(url: URL) {
+  url.searchParams.set(MEDIA_PROXY_VERSION_PARAM, MEDIA_PROXY_VERSION);
 }
 
 function isSameOriginMediaProxyUrl(value: string) {
@@ -124,6 +134,7 @@ export function toGitHubMediaProxyUrl(value?: string | null, token?: string | nu
   if (isSameOriginMediaProxyUrl(value)) {
     const proxyURL = new URL(value, window.location.origin);
     attachMediaProxyToken(proxyURL, token);
+    attachMediaProxyVersion(proxyURL);
     return buildRelativeUrl(proxyURL);
   }
 
@@ -134,6 +145,7 @@ export function toGitHubMediaProxyUrl(value?: string | null, token?: string | nu
   const proxyURL = new URL(MEDIA_PROXY_PATH, window.location.origin);
   proxyURL.searchParams.set("url", value);
   attachMediaProxyToken(proxyURL, token);
+  attachMediaProxyVersion(proxyURL);
   return buildRelativeUrl(proxyURL);
 }
 

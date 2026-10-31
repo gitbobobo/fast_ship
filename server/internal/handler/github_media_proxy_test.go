@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -37,6 +38,10 @@ func TestGitHubMediaProxyHandlerSVGGateAndHardeningHeaders(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/user-attachments/assets/ok.png":
+			w.Header().Set("Content-Type", "image/png")
+			_, _ = w.Write([]byte("png-bytes"))
+		case "/user-attachments/assets/0f3a93f0-dd2c-416b-8638-77d85b0a2c07":
+			// 无扩展名的附件直链（GitHub uuid 形态）。
 			w.Header().Set("Content-Type", "image/png")
 			_, _ = w.Write([]byte("png-bytes"))
 		case "/user-attachments/assets/clip.mp4":
@@ -79,12 +84,16 @@ func TestGitHubMediaProxyHandlerSVGGateAndHardeningHeaders(t *testing.T) {
 		t.Helper()
 		for key, want := range map[string]string{
 			"X-Content-Type-Options":  "nosniff",
-			"Content-Disposition":     "attachment",
 			"Content-Security-Policy": "default-src 'none'; sandbox",
 		} {
 			if got := rec.Header().Get(key); got != want {
 				t.Fatalf("%s = %q, want %q", key, got, want)
 			}
+		}
+		// Content-Disposition 带下载文件名：附件直链多半没有扩展名，只给
+		// attachment 的话下载下来是双击打不开的文件。
+		if got := rec.Header().Get("Content-Disposition"); !strings.HasPrefix(got, "attachment; filename=") {
+			t.Fatalf("Content-Disposition = %q, want attachment; filename=…", got)
 		}
 	}
 
@@ -122,6 +131,10 @@ func TestGitHubMediaProxyHandlerSVGGateAndHardeningHeaders(t *testing.T) {
 	if rec.Code != http.StatusUnsupportedMediaType {
 		t.Fatalf("html code = %d, want 415", rec.Code)
 	}
+	// text/html 可能是上游抽风时的拦截页/登录页，不是确定性拒绝，不能钉缓存。
+	if got := rec.Header().Get("Cache-Control"); got != "" {
+		t.Fatalf("html cache-control = %q, want 空（临时性拒绝不缓存）", got)
+	}
 
 	// png 整文件走缓存命中：200 + 三个硬化头；显式设置的 Content-Type
 	// 不被 http.ServeContent 覆盖。
@@ -136,6 +149,9 @@ func TestGitHubMediaProxyHandlerSVGGateAndHardeningHeaders(t *testing.T) {
 	}
 	if rec.Body.String() != "png-bytes" {
 		t.Fatalf("png body = %q, want png-bytes", rec.Body.String())
+	}
+	if got := rec.Header().Get("Content-Disposition"); got != `attachment; filename="ok.png"` {
+		t.Fatalf("png disposition = %q, want filename=ok.png（沿用 URL 末段）", got)
 	}
 	assertHardening(t, rec)
 
@@ -178,6 +194,18 @@ func TestGitHubMediaProxyHandlerSVGGateAndHardeningHeaders(t *testing.T) {
 	}
 	if got := upstreamTransport.hits.Load(); got != hitsBefore {
 		t.Fatalf("upstream hits = %d, want %d（缓存命中不再打上游）", got, hitsBefore)
+	}
+	assertHardening(t, rec)
+
+	// 无扩展名的附件直链（GitHub 的 uuid 形态）：文件名按响应类型补扩展名。
+	req = httptest.NewRequest(http.MethodGet, githubmedia.ProxyPath+"?url="+url.QueryEscape("http://github.com/user-attachments/assets/0f3a93f0-dd2c-416b-8638-77d85b0a2c07"), nil)
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("uuid attachment code = %d, want 200", rec.Code)
+	}
+	if got := rec.Header().Get("Content-Disposition"); got != `attachment; filename="0f3a93f0-dd2c-416b-8638-77d85b0a2c07.png"` {
+		t.Fatalf("uuid disposition = %q, want 末段 uuid + .png（按类型补扩展名）", got)
 	}
 	assertHardening(t, rec)
 

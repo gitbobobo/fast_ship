@@ -28,7 +28,7 @@ describe("GitHubContent", () => {
 
     expect(screen.getByRole("img", { name: "Image" })).toHaveAttribute(
       "src",
-      "/api/github/media-proxy?url=https%3A%2F%2Fgithub.com%2Fuser-attachments%2Fassets%2Fdemo",
+      "/api/github/media-proxy?url=https%3A%2F%2Fgithub.com%2Fuser-attachments%2Fassets%2Fdemo&v=2",
     );
 
     authState.token = "jwt-token";
@@ -36,7 +36,7 @@ describe("GitHubContent", () => {
 
     expect(screen.getByRole("img", { name: "Image" })).toHaveAttribute(
       "src",
-      "/api/github/media-proxy?url=https%3A%2F%2Fgithub.com%2Fuser-attachments%2Fassets%2Fdemo&token=jwt-token",
+      "/api/github/media-proxy?url=https%3A%2F%2Fgithub.com%2Fuser-attachments%2Fassets%2Fdemo&token=jwt-token&v=2",
     );
   });
 
@@ -52,7 +52,7 @@ describe("GitHubContent", () => {
 
     expect(screen.getByRole("img", { name: "Image" })).toHaveAttribute(
       "src",
-      "/api/github/media-proxy?url=https%3A%2F%2Fgithub.com%2Fuser-attachments%2Fassets%2Fdemo&token=jwt-token",
+      "/api/github/media-proxy?url=https%3A%2F%2Fgithub.com%2Fuser-attachments%2Fassets%2Fdemo&token=jwt-token&v=2",
     );
   });
 

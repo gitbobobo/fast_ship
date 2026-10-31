@@ -14,7 +14,7 @@ describe("github media proxy utils", () => {
 
   it("adds the auth token to raw github media urls", () => {
     expect(toGitHubMediaProxyUrl("https://github.com/user-attachments/assets/demo", "jwt-token")).toBe(
-      "/api/github/media-proxy?url=https%3A%2F%2Fgithub.com%2Fuser-attachments%2Fassets%2Fdemo&token=jwt-token",
+      "/api/github/media-proxy?url=https%3A%2F%2Fgithub.com%2Fuser-attachments%2Fassets%2Fdemo&token=jwt-token&v=2",
     );
   });
 
@@ -26,7 +26,7 @@ describe("github media proxy utils", () => {
     const doc = new DOMParser().parseFromString(html ?? "", "text/html");
 
     expect(doc.querySelector("img")?.getAttribute("src")).toBe(
-      "/api/github/media-proxy?url=https%3A%2F%2Fgithub.com%2Fuser-attachments%2Fassets%2Fdemo&token=jwt-token",
+      "/api/github/media-proxy?url=https%3A%2F%2Fgithub.com%2Fuser-attachments%2Fassets%2Fdemo&token=jwt-token&v=2",
     );
   });
 

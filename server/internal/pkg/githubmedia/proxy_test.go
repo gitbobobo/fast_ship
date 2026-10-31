@@ -530,3 +530,73 @@ func TestWithHTTPTransportRejectsGuardedFace(t *testing.T) {
 		transport:    http.DefaultTransport,
 	})
 }
+
+// svg 拒收带独立哨兵（包装通用哨兵）：出口据此只给 svg 加可缓存的 415，
+// 其它非媒体类型（text/html 之类可能是上游拦截页）不钉缓存。
+func TestSVGRejectionCarriesDedicatedSentinel(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/a.svg":
+			w.Header().Set("Content-Type", "image/svg+xml")
+		case "/b.svg":
+			// 上游没标类型：靠 .svg 扩展名判 svg。
+			w.Header()["Content-Type"] = nil
+		case "/c.png":
+			w.Header().Set("Content-Type", "text/html")
+		}
+		_, _ = w.Write([]byte("payload"))
+	}))
+	defer upstream.Close()
+
+	parsed, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("parse upstream url: %v", err)
+	}
+	service := newProxyService(t.TempDir(), time.Hour, 1<<20, upstream.Client(),
+		func(u *url.URL) bool { return u.Host == parsed.Host })
+
+	for _, path := range []string{"/a.svg", "/b.svg"} {
+		_, err := service.FetchAndCache(context.Background(), upstream.URL+path)
+		if !errors.Is(err, ErrUnsupportedSVG) {
+			t.Fatalf("%s err = %v, want ErrUnsupportedSVG", path, err)
+		}
+		if !errors.Is(err, ErrUnsupportedUpstreamMedia) {
+			t.Fatalf("%s err = %v, want 同时命中 ErrUnsupportedUpstreamMedia", path, err)
+		}
+	}
+
+	// text/html 不是 svg：只命中通用哨兵，出口不会给它加缓存头。
+	_, err = service.FetchAndCache(context.Background(), upstream.URL+"/c.png")
+	if errors.Is(err, ErrUnsupportedSVG) {
+		t.Fatalf("text/html err = %v, must not be ErrUnsupportedSVG", err)
+	}
+	if !errors.Is(err, ErrUnsupportedUpstreamMedia) {
+		t.Fatalf("text/html err = %v, want ErrUnsupportedUpstreamMedia", err)
+	}
+}
+
+// 代理地址带版本参数：媒体响应的安全语义变了就递增，浏览器缓存键随之变化，
+// 旧版本 URL 上缓存过的响应（例如放行时期的 svg）不会再被命中。
+func TestBuildProxyURLCarriesVersion(t *testing.T) {
+	got := BuildProxyURL("https://github.com/user-attachments/assets/demo.png")
+	want := ProxyPath + "?url=" + url.QueryEscape("https://github.com/user-attachments/assets/demo.png") + "&v=" + ProxyURLVersion
+	if got != want {
+		t.Fatalf("BuildProxyURL = %q, want %q", got, want)
+	}
+}
+
+// 下载文件名兜底用：具体媒体类型反查扩展名，表外类型 .bin。
+func TestMediaFileExtension(t *testing.T) {
+	for _, tc := range []struct{ contentType, want string }{
+		{"image/png", ".png"},
+		{"image/jpeg", ".jpeg"},
+		{"video/mp4", ".mp4"},
+		{"IMAGE/WEBP", ".webp"},
+		{"text/html", ".bin"},
+		{"", ".bin"},
+	} {
+		if got := MediaFileExtension(tc.contentType); got != tc.want {
+			t.Fatalf("MediaFileExtension(%q) = %q, want %q", tc.contentType, got, tc.want)
+		}
+	}
+}

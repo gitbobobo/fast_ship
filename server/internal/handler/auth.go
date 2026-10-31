@@ -259,5 +259,8 @@ func (h *AuthHandler) GetAvatar(c *gin.Context) {
 	}
 
 	c.Header("Cache-Control", "private, max-age=3600")
+	// 与媒体代理同一道同源内容不变量：头像同样认 ?token=，不能以同源文档
+	// 交付（上传只验扩展名与内容嗅探，多态文件仍可能被当成图片存下）。
+	setSameOriginAttachmentHeaders(c.Writer.Header(), sanitizeAttachmentFileName(filename))
 	c.DataFromReader(200, -1, contentType, reader, nil)
 }

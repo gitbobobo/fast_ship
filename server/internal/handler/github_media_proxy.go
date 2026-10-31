@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"strconv"
 	"strings"
 
@@ -53,7 +54,7 @@ func (h *GitHubMediaProxyHandler) Proxy(c *gin.Context) {
 		defer resp.Body.Close()
 
 		copyMediaHeaders(c.Writer.Header(), resp.Header)
-		setMediaProxyHardeningHeaders(c.Writer.Header())
+		setMediaProxyHardeningHeaders(c.Writer.Header(), rawURL, resp.Header.Get("Content-Type"))
 		c.Status(resp.StatusCode)
 		if headOnly {
 			return
@@ -79,7 +80,7 @@ func (h *GitHubMediaProxyHandler) Proxy(c *gin.Context) {
 		defer resp.Body.Close()
 
 		copyMediaHeaders(c.Writer.Header(), resp.Header)
-		setMediaProxyHardeningHeaders(c.Writer.Header())
+		setMediaProxyHardeningHeaders(c.Writer.Header(), rawURL, resp.Header.Get("Content-Type"))
 		c.Status(resp.StatusCode)
 		_, _ = io.Copy(c.Writer, resp.Body)
 		return
@@ -120,21 +121,46 @@ func serveCachedMedia(c *gin.Context, media *githubmedia.CachedMedia) {
 	}
 	// 在 http.ServeContent 之前设置：它只补 Content-Type/Length/Range 等头，
 	// 已显式设置的头不会被覆盖（见下），硬化头也原样保留。
-	setMediaProxyHardeningHeaders(header)
+	setMediaProxyHardeningHeaders(header, media.Metadata.URL, media.Metadata.ContentType)
 
 	http.ServeContent(c.Writer, c.Request, "", media.Metadata.CachedAt, file)
 }
 
-// setMediaProxyHardeningHeaders 媒体代理成功响应的统一硬化头（INT-171）。
-// ?token= 会出现在地址栏，代理绝不能交付同源可执行文档：nosniff 阻止
-// 浏览器嗅探改判；attachment 把「新标签页打开」降级成下载而不是同源导航
-// ——只影响顶层导航，<img>/<video> 子资源渲染不受影响，可无条件加；
-// CSP sandbox 兜底禁脚本禁同源。必须在 copyMediaHeaders 之后、
-// http.ServeContent 之前设置，避免被上游头覆盖。
-func setMediaProxyHardeningHeaders(header http.Header) {
+// setSameOriginContentHardeningHeaders `?token=` 引入的同源内容出口（GitHub
+// 媒体代理、Issue 附件、头像）统一硬化：用户可控内容不能以 Fast Ship 同源
+// 文档交付。nosniff 禁止浏览器嗅探改判，CSP sandbox 兜底禁脚本禁同源。
+func setSameOriginContentHardeningHeaders(header http.Header) {
 	header.Set("X-Content-Type-Options", "nosniff")
-	header.Set("Content-Disposition", "attachment")
 	header.Set("Content-Security-Policy", "default-src 'none'; sandbox")
+}
+
+// setSameOriginAttachmentHeaders 同上，再加 Content-Disposition: attachment
+// 与文件名。attachment 把顶层导航（「在新标签页打开图片」）降级成下载而不是
+// 同源文档，只影响导航，不影响 <img>/<video> 子资源渲染。
+func setSameOriginAttachmentHeaders(header http.Header, fileName string) {
+	setSameOriginContentHardeningHeaders(header)
+	header.Set("Content-Disposition", contentDisposition(fileName))
+}
+
+// setMediaProxyHardeningHeaders 媒体代理成功响应的统一硬化头（INT-171）。必须
+// 在 copyMediaHeaders 之后、http.ServeContent 之前设置，避免被上游头覆盖。
+func setMediaProxyHardeningHeaders(header http.Header, upstreamURL, contentType string) {
+	setSameOriginAttachmentHeaders(header, mediaProxyFileName(upstreamURL, contentType))
+}
+
+// mediaProxyFileName 下载文件名：优先上游 URL 末段（GitHub 附件直链多半是没
+// 扩展名的 uuid），没扩展名时按响应类型补一个，保证下载下来能直接打开。
+func mediaProxyFileName(upstreamURL, contentType string) string {
+	name := "media"
+	if parsed, err := url.Parse(upstreamURL); err == nil {
+		if base := sanitizeAttachmentFileName(path.Base(parsed.Path)); base != "" && base != "." && base != "/" {
+			name = base
+		}
+	}
+	if path.Ext(name) == "" {
+		name += githubmedia.MediaFileExtension(contentType)
+	}
+	return name
 }
 
 func copyMediaHeaders(dst, src http.Header) {
@@ -146,20 +172,22 @@ func copyMediaHeaders(dst, src http.Header) {
 	}
 }
 
-// mediaProxyRejectionMaxAge 415 的浏览器缓存秒数。被准入拒收的资源（如 Issue
-// 正文里的 svg 图片）是确定性的：同一 URL 同一准入规则下永远拒。不给缓存头
-// 的话每次页面渲染都会重新请求代理，代理再回源一趟（302 + 实体各一跳）才在
-// 闸门上拒——升级前这类资源是命中磁盘的，不回源就是不给浏览器留缓存头造成
-// 的放大。短 TTL 就够了：规则变了也不会被旧结果卡太久；不做服务端负缓存
-// （规则变更时要清理墓碑，语义成本高于收益）。
+// mediaProxyRejectionMaxAge svg 拒绝的浏览器缓存秒数。svg 是确定性拒绝（同一
+// URL 同一准入规则下永远拒），不给缓存头的话每次页面渲染都会重新请求代理，
+// 代理再回源一趟（302 + 实体各一跳）才在闸门上拒——升级前这类资源是命中磁
+// 盘的，不回源就是不给浏览器留缓存头造成的放大。只给 svg 这类定拒绝：
+// text/html 之类可能是上游抽风时的拦截页，钉住会让图片持续裂图。
 const mediaProxyRejectionMaxAge = 600
 
 func writeMediaProxyError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, githubmedia.ErrInvalidMediaURL):
 		c.String(http.StatusBadRequest, "invalid github media url")
-	case errors.Is(err, githubmedia.ErrUnsupportedUpstreamMedia):
+	case errors.Is(err, githubmedia.ErrUnsupportedSVG):
+		// 顺序在通用非媒体类型之前：ErrUnsupportedSVG 包装了它。
 		c.Header("Cache-Control", "private, max-age="+strconv.Itoa(mediaProxyRejectionMaxAge))
+		c.String(http.StatusUnsupportedMediaType, "unsupported media type")
+	case errors.Is(err, githubmedia.ErrUnsupportedUpstreamMedia):
 		c.String(http.StatusUnsupportedMediaType, "unsupported media type")
 	default:
 		var upstreamErr *githubmedia.UpstreamStatusError

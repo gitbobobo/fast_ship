@@ -11,7 +11,15 @@ svg（`image/svg+xml`、非标准写法 `image/svg`、扩展名 `.svg`）与 HTM
 
 ## 威胁模型与硬化头
 
-`?token=` 会出现在浏览器地址栏，所以代理绝不能返回同源可执行文档：svg 以 Fast Ship 同源在「新标签页打开图片」时执行脚本，能读到地址栏里的 token 与 localStorage 里的 refresh token。所有成功响应统一带硬化头：`X-Content-Type-Options: nosniff`（禁止浏览器嗅探改判）、`Content-Disposition: attachment`（顶层导航退化为下载而非同源文档；只影响导航，不影响 `<img>`/`<video>` 子资源渲染，可无条件加）与 `Content-Security-Policy: default-src 'none'; sandbox`（兜底禁脚本禁同源）。
+`?token=` 会出现在浏览器地址栏，所以同源出口绝不能返回同源可执行文档：svg 以 Fast Ship 同源在「新标签页打开图片」时执行脚本，能读到地址栏里的 token 与 localStorage 里的 refresh token。
+
+媒体代理的成功响应统一带：`X-Content-Type-Options: nosniff`（禁止嗅探改判）、`Content-Disposition: attachment; filename=…`（顶层导航退化为下载而非同源文档，只影响导航、不影响 `<img>`/`<video>` 子资源渲染；文件名优先取上游 URL 末段，没扩展名时按响应类型补，GitHub 的 uuid 附件下载下来才能直接打开）与 `Content-Security-Policy: default-src 'none'; sandbox`（兜底禁脚本禁同源）。
+
+**同源出口不变量**：同一套硬化头也用在同一组「`?token=` + 用户可控内容」的出口上——`/api/issues/assets/:aid/content`（Issue 附件，上传只按前 512 字节嗅探求 `image/*`，「图片魔数 + HTML/SVG 体」的多态文件会被存成 `image/*`）与 `/api/avatars/:uid/:filename`（头像），两者都走 `setSameOriginAttachmentHeaders`。新增同类出口时照这个口径接上，别只给媒体代理加。
+
+## 地址版本参数
+
+代理地址带 `v=<ProxyURLVersion>`（Go 的 `githubmedia.BuildProxyURL` 与前端 `github-media-proxy.ts` 各一份常量，必须同步递增）。浏览器缓存的是整条响应：旧版本 URL 上缓存过的 svg 在部署后仍会命中本地缓存、根本不回源，闸门与硬化头对它们无效——窗口能长到旧条目的 24h TTL 或 token 轮换。换版本号就换了缓存键，一次跳跃让所有前置缓存失效。服务端不校验该参数，它只是缓存键的一部分。
 
 ## 闸门位置
 
@@ -23,4 +31,6 @@ svg（`image/svg+xml`、非标准写法 `image/svg`、扩展名 `.svg`）与 HTM
 
 ## 被拒资源的重复回源
 
-415（`unsupported media type`）带 `Cache-Control: private, max-age=600`：被准入拒收的资源在同一规则下永远拒，是确定性结果；不给缓存头的话每次页面渲染都会重新请求代理、代理再回源一趟才在闸门上拒，热门 Issue 里带 svg 图片时放大明显。选浏览器缓存而不是服务端负缓存（meta 墓碑），是因为后者在准入规则变化时要额外清理，语义成本高于收益；代价是不同客户端各自回源一次、以及规则变更后旧结果最多拦 10 分钟。
+**只有 svg 的 415 带** `Cache-Control: private, max-age=600`。svg 是确定性拒绝（同一 URL 同一准入规则下永远拒），不给缓存头的话每次页面渲染都会重新请求代理、代理再回源一趟才在闸门上拒，热门 Issue 里带 svg 图片时放大明显。其它非媒体类型（`text/html` 之类）可能是上游抽风时的拦截页/登录页/限流页，同一 URL 下一次就可能正常，钉住会让图片持续裂图——所以它们照旧不带缓存头。服务侧不区分，按 `ErrUnsupportedSVG` 这个哨兵（包装 `ErrUnsupportedUpstreamMedia`）判：内容类型是 `image/svg*`，或上游没给类型而扩展名是 `.svg`。
+
+选浏览器缓存而不是服务端负缓存（meta 墓碑），是因为后者在准入规则变化时要额外清理，语义成本高于收益；代价是不同客户端各自回源一次。

@@ -1332,7 +1332,7 @@ describe("Issue pages", () => {
 
     expect(screen.getByRole("img", { name: "Image" })).toHaveAttribute(
       "src",
-      "/api/github/media-proxy?url=https%3A%2F%2Fgithub.com%2Fuser-attachments%2Fassets%2Fdemo&token=jwt-token",
+      "/api/github/media-proxy?url=https%3A%2F%2Fgithub.com%2Fuser-attachments%2Fassets%2Fdemo&token=jwt-token&v=2",
     );
     expect(document.querySelector("script")).toBeNull();
   });
@@ -1355,7 +1355,7 @@ describe("Issue pages", () => {
 
     expect(screen.getByRole("img", { name: "Rendered image" })).toHaveAttribute(
       "src",
-      "/api/github/media-proxy?url=https%3A%2F%2Fgithub.com%2Fuser-attachments%2Fassets%2Fdemo&token=jwt-token",
+      "/api/github/media-proxy?url=https%3A%2F%2Fgithub.com%2Fuser-attachments%2Fassets%2Fdemo&token=jwt-token&v=2",
     );
   });
 

@@ -15,6 +15,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,6 +29,16 @@ import (
 )
 
 const ProxyPath = "/api/github/media-proxy"
+
+// ProxyURLVersion 代理地址的缓存失效版本，随媒体响应的安全语义（准入、硬化
+// 头）递增。浏览器缓存的是整条响应：旧版本 URL 上缓存过的 svg 在部署后仍会
+// 命中本地缓存、根本不回源，闸门与硬化头对它们无效。带版本参数的 URL 与旧
+// 缓存键不同，一次版本跳跃就能让所有前置缓存失效。前端
+// `web/src/lib/utils/github-media-proxy.ts` 里的同名常量必须跟着改。
+const ProxyURLVersion = "2"
+
+// ProxyURLVersionParam 版本参数名。
+const ProxyURLVersionParam = "v"
 
 const (
 	defaultCacheSubdir     = "github-media-cache"
@@ -43,9 +54,15 @@ var (
 	// 不经过这里。
 	ErrInvalidMediaURL          = errors.New("不支持的图片地址")
 	ErrUnsupportedUpstreamMedia = errors.New("上游返回的不是图片")
-	ErrBlockedUpstreamAddress   = errors.New("图片地址指向内网或保留地址")
-	ErrEmptyUpstreamMedia       = errors.New("上游返回空内容")
-	ErrMediaTooLarge            = errors.New("图片超过大小上限")
+	// ErrUnsupportedSVG 命中 svg 的固定拒绝（内容类型是 image/svg*，或上游没
+	// 给类型而扩展名是 .svg）。包装 ErrUnsupportedUpstreamMedia，下游分类不
+	// 变；单独一个哨兵是为了让出口区分“按 URL/类型确定的拒绝”（可以按短 TTL
+	// 缓存到浏览器）与“上游这一回回的不是媒体”（可能是拦截页/登录页，钉住
+	// 会让图片持续裂图，不能缓存）。
+	ErrUnsupportedSVG         = fmt.Errorf("%w: svg", ErrUnsupportedUpstreamMedia)
+	ErrBlockedUpstreamAddress = errors.New("图片地址指向内网或保留地址")
+	ErrEmptyUpstreamMedia     = errors.New("上游返回空内容")
+	ErrMediaTooLarge          = errors.New("图片超过大小上限")
 	// ErrLocalCache 本地截图缓存操作失败（建缓存目录/建临时文件/写盘/改名/
 	// 读缓存元数据）。在产生点打标：service 层只认这个 sentinel 归「截图缓
 	// 存写入失败」类，不再嗅探 *fs.PathError / *os.SyscallError 外壳——网络
@@ -634,7 +651,7 @@ func BuildProxyURL(rawURL string) string {
 	if err != nil {
 		return rawURL
 	}
-	return ProxyPath + "?url=" + url.QueryEscape(normalized)
+	return ProxyPath + "?url=" + url.QueryEscape(normalized) + "&" + ProxyURLVersionParam + "=" + ProxyURLVersion
 }
 
 func RewriteHTMLMediaSources(fragment string) string {
@@ -776,7 +793,7 @@ func (s *ProxyService) fetchAndCache(ctx context.Context, rawURL, bearer, scope 
 	}
 	contentType, ok := s.normalizeResponseContentType(resp.Header, finalURL)
 	if !ok {
-		return nil, ErrUnsupportedUpstreamMedia
+		return nil, s.mediaRejectionError(resp.Header, finalURL)
 	}
 
 	// 已知长度超限直接拒；未知长度（分块响应的 Content-Length 为 -1）不算
@@ -892,7 +909,7 @@ func (s *ProxyService) ProxyPass(ctx context.Context, rawURL, rangeHeader string
 	normalizedType, ok := s.normalizeResponseContentType(resp.Header, finalURL)
 	if !ok {
 		resp.Body.Close()
-		return nil, ErrUnsupportedUpstreamMedia
+		return nil, s.mediaRejectionError(resp.Header, finalURL)
 	}
 
 	header := cloneRelevantHeaders(resp.Header)
@@ -1319,6 +1336,29 @@ func (s *ProxyService) normalizeResponseContentType(header http.Header, rawURL s
 	return s.normalizeMediaContentType(value, rawURL)
 }
 
+// mediaRejectionError 拒收原因：svg 是「按 URL/类型确定」的拒绝（svg 永远是
+// svg），出口可以按短 TTL 缓存到浏览器、省掉重复回源；其它非媒体类型
+// （text/html 之类）可能是上游抽风时的拦截页/登录页/限流页，同一 URL 下一
+// 次就可能正常，不能钉住。
+func (s *ProxyService) mediaRejectionError(header http.Header, rawURL string) error {
+	values := header.Values("Content-Type")
+	if len(values) > 1 {
+		return ErrUnsupportedUpstreamMedia
+	}
+	value := ""
+	if len(values) == 1 {
+		value = values[0]
+	}
+	baseType := strings.ToLower(strings.TrimSpace(strings.Split(value, ";")[0]))
+	if strings.HasPrefix(baseType, "image/svg") {
+		return ErrUnsupportedSVG
+	}
+	if (baseType == "" || baseType == "application/octet-stream") && urlPathExtension(rawURL) == ".svg" {
+		return ErrUnsupportedSVG
+	}
+	return ErrUnsupportedUpstreamMedia
+}
+
 // mediaExtensions 扩展名 → 具体媒体类型：扩展名回退集合与回写缓存/响应的
 // 类型同源一张表，两边各写一份迟早漂移。svg 是可在浏览器执行脚本的矢量
 // 图，不在此列——两个面都不按扩展名收它（曾在 GitHub 媒体面的集合里，
@@ -1343,6 +1383,35 @@ func mediaTypeForExtension(rawURL string, imagesOnly bool) (string, bool) {
 func hasBitmapExtension(rawURL string) bool {
 	_, ok := mediaTypeForExtension(rawURL, true)
 	return ok
+}
+
+// mediaExtensionByType 具体媒体类型 → 扩展名（反向表，供下载文件名兜底）。
+// 同一类型可能有多个扩展名（image/jpeg 对应 .jpeg 与 .jpg），按扩展名字典
+// 序遍历取第一个，保证输出确定。
+var mediaExtensionByType = func() map[string]string {
+	exts := make([]string, 0, len(mediaExtensions))
+	for ext := range mediaExtensions {
+		exts = append(exts, ext)
+	}
+	sort.Strings(exts)
+	byType := make(map[string]string, len(mediaExtensions))
+	for _, ext := range exts {
+		if _, ok := byType[mediaExtensions[ext]]; !ok {
+			byType[mediaExtensions[ext]] = ext
+		}
+	}
+	return byType
+}()
+
+// MediaFileExtension 由具体媒体类型反查扩展名（带点），表外类型给 ".bin"。
+// 供 Content-Disposition 的 filename 兜底：GitHub 附件直链多半是没有扩展名
+// 的 uuid，不带 filename 时浏览器只能按 URL 末段取名，下载下来是个双击打不
+// 开的无扩展名文件。
+func MediaFileExtension(contentType string) string {
+	if ext, ok := mediaExtensionByType[strings.ToLower(strings.TrimSpace(contentType))]; ok {
+		return ext
+	}
+	return ".bin"
 }
 
 // HasBitmapExtension URL 路径是否以位图扩展名（.png .jpg .jpeg .gif .webp

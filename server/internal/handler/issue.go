@@ -11,6 +11,7 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/middleware"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
+	"github.com/godbobo/fast_ship/server/internal/pkg/githubmedia"
 	"github.com/godbobo/fast_ship/server/internal/pkg/response"
 	"github.com/godbobo/fast_ship/server/internal/service"
 )
@@ -454,5 +455,10 @@ func (h *IssueHandler) AssetContent(c *gin.Context) {
 		mimeType = "application/octet-stream"
 	}
 	c.Header("Cache-Control", "private, max-age=300")
+	// 与媒体代理同一道同源内容不变量：附件是用户可控内容，且这里同样认
+	// ?token=，不能以同源文档交付（上传只按前 512 字节嗅探求 image/*，
+	// 「图片魔数 + HTML/SVG 体」的多态文件会被存成 image/*）。附件没有落库
+	// 文件名，下载名用固定前缀 + 媒体类型扩展名。
+	setSameOriginAttachmentHeaders(c.Writer.Header(), "issue-asset"+githubmedia.MediaFileExtension(mimeType))
 	c.DataFromReader(200, fileSize, mimeType, reader, nil)
 }
