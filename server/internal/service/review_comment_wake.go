@@ -35,16 +35,15 @@ import (
 // commentWakeMentions 追加。
 const reviewCommentWakeMention = "@fast-ship-bot"
 
-// commentWakeMentions 唤醒串集合：规格字面量 + 部署真实机器人句柄（App
-// slug，manifest 流创建的 App slug 形如 fast-ship-<host>，与字面量不同——
-// fast-ship-bot 第 20 轮 P2）。App 身份未配置（ok=false）回落字面量；读
-// 取失败（瞬时 DB 故障）透出错误——评论可能用了 @<slug>，静默回落字面量
-// 会让该唤醒被无声忽略且重投同样失败（codex 第 22 轮 P2：调用方按瞬时
-// 失败返回 500 让平台重投）。
-// mentionsSlugEntry mentionsSlugCache 的缓存项（App 句柄 + 过期时刻）。
+// mentionsSlugEntry mentionsSlugCache 的缓存项（App 句柄 + 过期时刻 +
+// 上次强制刷新标记，见 commentWakeMentions/commentWakeMentionsFresh）。
 type mentionsSlugEntry struct {
 	slug    string
 	expires time.Time
+	// forcedRefreshed 本缓存代内已做过一次「未命中强制刷新」——同代内不再
+	// 重复刷新，授权用户的含 @ 评论不放大成逐条设置读取（fast-ship-bot 第
+	// 56 轮 P2）。TTL 过期自然重置。
+	forcedRefreshed bool
 }
 
 // reviewMentionsCacheTTL App 句柄的缓存时长：订阅 issue_comment 后所有
@@ -52,6 +51,10 @@ type mentionsSlugEntry struct {
 // 按评论线性放大的固定成本（fast-ship-bot 第 44 轮 P2）——短缓存把成本
 // 压到每 TTL 一次；slug 变更罕见，TTL 刷新足够。
 const reviewMentionsCacheTTL = 5 * time.Minute
+
+// reviewMentionsDegradedTTL 降级态（解密失败等仅字面量集合）的缓存时长：
+// 短于正常 TTL，配置修复后尽快自愈（fast-ship-bot 第 56 轮 P2）。
+const reviewMentionsDegradedTTL = 30 * time.Second
 
 // commentWakeMentions 唤醒串集合：规格字面量 + 部署真实机器人句柄（App
 // slug，manifest 流创建的 App slug 形如 fast-ship-<host>，与字面量不同——
@@ -94,6 +97,12 @@ func (s *ReviewService) commentWakeMentionsFresh(ctx context.Context) ([]string,
 		// Forgejo 与普通讨论评论，fast-ship-bot 第 29 轮 P2）；其余（瞬时
 		// DB 故障）维持透出 500 让平台重投。
 		if errors.Is(err, errGitHubAppDecrypt) {
+			// 解密失败属永久配置态也入缓存（缩到 30s，fast-ship-bot 第 56
+			// 轮 P2）：降级期成本回到每 TTL 一次，不再按评论线性放大；短
+			// TTL 保证修复后 30s 内自愈。
+			s.mentionsSlugCache.Store("slug", mentionsSlugEntry{
+				expires: time.Now().UTC().Add(reviewMentionsDegradedTTL),
+			})
 			return mentions, false, nil
 		}
 		return nil, false, err
@@ -224,8 +233,26 @@ func commentWakePayloadBaseGuards(body []byte) *commentWakePayload {
 func commentWakeMentioned(p *commentWakePayload, mentions []string) bool {
 	lower := strings.ToLower(p.Comment.Body)
 	for _, m := range mentions {
-		if strings.Contains(lower, m) {
-			return true
+		start := 0
+		for {
+			i := strings.Index(lower[start:], m)
+			if i < 0 {
+				break
+			}
+			pos := start + i
+			// 词边界：紧随其后的字符不属于 GitHub 用户名合法字符集
+			// [a-z0-9-_] 才算点名——@fast-ship-bot2/@fast-ship-bots 这类
+			// 真实存在的其他账号不得误判（fast-ship-bot 第 56 轮 P2）；
+			// 句柄的 [bot] 后缀形态（'['）不受影响。
+			next := byte(' ')
+			if pos+len(m) < len(lower) {
+				next = lower[pos+len(m)]
+			}
+			isWordChar := (next >= 'a' && next <= 'z') || (next >= '0' && next <= '9') || next == '-' || next == '_'
+			if !isWordChar {
+				return true
+			}
+			start = pos + 1
 		}
 	}
 	return false
@@ -442,12 +469,31 @@ func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, ev
 	if !mentioned && cached && strings.Contains(strings.ToLower(payload.Comment.Body), "@") {
 		// 缓存窗口内 slug 可能已变更（部署切换/重建 App）：未命中且正文含
 		// @ 时强制刷新一次再判——新句柄的唤醒不得被 202 静默吞掉（codex
-		// 第 47 轮 P2）。仅对含 @ 的未命中投递触发，普通讨论评论不受影响。
-		mentions, _, err = s.commentWakeMentionsFresh(ctx)
-		if err != nil {
-			return false, err
+		// 第 47 轮 P2）。仅对含 @ 的未命中投递触发；同缓存代内只刷新一次
+		// （forcedRefreshed 标记），授权用户的连续含 @ 评论不放大成逐条
+		// 设置读取（fast-ship-bot 第 56 轮 P2）。
+		refreshed := false
+		if v, ok := s.mentionsSlugCache.Load("slug"); ok {
+			e := v.(mentionsSlugEntry)
+			if !e.forcedRefreshed && time.Now().UTC().Before(e.expires) {
+				if mentions, _, err = s.commentWakeMentionsFresh(ctx); err != nil {
+					return false, err
+				}
+				refreshed = true
+			}
 		}
-		mentioned = commentWakeMentioned(payload, mentions)
+		if refreshed {
+			// 刷新后（无论 slug 是否变化）本次读取标记为已强制刷新：同代
+			// 内后续未命中直接按非唤醒忽略。
+			if v, ok := s.mentionsSlugCache.Load("slug"); ok {
+				e := v.(mentionsSlugEntry)
+				if time.Now().UTC().Before(e.expires) && !e.forcedRefreshed {
+					e.forcedRefreshed = true
+					s.mentionsSlugCache.Store("slug", e)
+				}
+			}
+			mentioned = commentWakeMentioned(payload, mentions)
+		}
 	}
 	if !mentioned {
 		return false, nil

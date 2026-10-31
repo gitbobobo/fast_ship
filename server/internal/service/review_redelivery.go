@@ -181,6 +181,7 @@ func (s *ReviewService) reconcileWebhookDeliveries(now time.Time) {
 		// App），那正是最需要重试的投递（codex 第 23 轮 P2、fast-ship-bot
 		// 第 46 轮 P2）。标记降级，评论投递一律按未知重试（宁多投不漏投）。
 		mentionsDegraded: mentionsErr != nil || mentionsCached,
+		fresh:            func() ([]string, bool, error) { return s.commentWakeMentionsFresh(ctx) },
 		prStates:         map[string]*probePRState{},
 	}
 	tried := 0
@@ -310,6 +311,12 @@ type redeliveryPRProbe struct {
 	// 字面量判定「非唤醒」不可信——slug-only 的合法唤醒会被记终态永不重试，
 	// 评论投递一律按未知重试（codex 第 23 轮 P2）。
 	mentionsDegraded bool
+	// fresh 每轮对账内的强制刷新面（懒执行一次）：降级/缓存窗口下含 @ 的
+	// 未命中先用刷新后的集合复核再判终态（fast-ship-bot 第 56 轮 P2）。
+	fresh         func() ([]string, bool, error)
+	freshMentions []string
+	freshTried    bool
+	freshErr      error
 }
 
 // redeliveryPRCheck 一次闸门判定的结果。Known=false 表示读不到（payload 拉取
@@ -391,16 +398,31 @@ func (p *redeliveryPRProbe) lookup(ctx context.Context, deliveryID int64, event 
 		// 本来就会静默忽略——记终态跳过，不进重试集白吃预算与通知。
 		payload := commentWakePayloadGuards(detail.Payload, p.mentions)
 		if payload == nil {
-			// 降级/缓存窗口下 slug 可能过期，含 @ 的未命中判「非唤醒」不可
-			// 信——按未知处理让调用方照常重投（宁多投不漏投，codex 第 23
-			// 轮 P2）。正文不含 @ 则不可能含任何唤醒串（字面量与句柄都以
-			// @ 开头），无论集合是否可信都是确定的非唤醒，记终态跳过——
-			// webhook 故障积压的普通讨论不白吃重投预算、不制造误导通知
-			// （codex 第 48 轮 P2）。
+			// 正文不含 @ 则不可能含任何唤醒串（字面量与句柄都以 @ 开头），
+			// 无论集合是否可信都是确定的非唤醒，记终态跳过——webhook 故障
+			// 积压的普通讨论不白吃重投预算、不制造误导通知（codex 第 48 轮
+			// P2）。
+			//
+			// 含 @ 的未命中：降级/缓存窗口下 slug 可能过期判「非唤醒」不可
+			// 信（codex 第 23 轮 P2）——每轮对账先强制刷新一次，用刷新后的
+			// 集合复核：仍不命中才是确定的非唤醒（记终态）；刷新失败按未
+			// 知重试（宁多投不漏投）。复核到的唤醒投递照常走 PR 实况判定
+			// （fast-ship-bot 第 56 轮 P2）。
 			if p.mentionsDegraded && strings.Contains(strings.ToLower(probe.Comment.Body), "@") {
-				return redeliveryPRCheck{}, errors.New("唤醒串集合读取降级，评论投递按未知重试")
+				if !p.freshTried {
+					p.freshTried = true
+					p.freshMentions, _, p.freshErr = p.fresh()
+				}
+				if p.freshErr != nil {
+					return redeliveryPRCheck{}, p.freshErr
+				}
+				payload = commentWakePayloadGuards(detail.Payload, p.freshMentions)
+				if payload == nil {
+					return redeliveryPRCheck{Known: true, Reviewable: false, NotWake: true}, nil
+				}
+			} else {
+				return redeliveryPRCheck{Known: true, Reviewable: false, NotWake: true}, nil
 			}
-			return redeliveryPRCheck{Known: true, Reviewable: false, NotWake: true}, nil
 		}
 		wakePayload = payload
 		repo, number, installation = payload.Repository.FullName, payload.Issue.Number, payload.Installation.ID

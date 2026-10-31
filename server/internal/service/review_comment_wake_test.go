@@ -2805,3 +2805,122 @@ func TestReviewCommentWakeEnabledAtBaseline(t *testing.T) {
 		t.Fatalf("基线后评论应开轮: runs = %d", runs)
 	}
 }
+
+// 词边界（fast-ship-bot 第 56 轮 P2）：@fast-ship-bot2/@fast-ship-bots
+// 这类真实存在的其他账号不得误判成点名机器人；[bot] 后缀形态不受影响。
+func TestReviewCommentWakeWordBoundary(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	e.enableReview(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	ctx := context.Background()
+	e.fake.SetPR(repo, 67, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 67, State: "open", HeadSHA: "sha-wb",
+		HeadRepoFullName: repo,
+	})
+
+	// 相似名账号：不是点名，忽略。
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-wb-2",
+		issueCommentBody("@fast-ship-bot2 请再审", repo, 67, 42)); err != nil {
+		t.Fatalf("相似名评论应忽略: %v", err)
+	}
+	// 精确句柄 + [bot] 后缀形态：都是点名，各开一轮（轮次间置终态绕开
+	// 同 head 在途守卫）。
+	for i, body := range []string{"@fast-ship-bot 请再审", "@fast-ship-bot[bot] 请再审"} {
+		if i > 0 {
+			if err := e.svc.db.Model(&model.ReviewRun{}).Where("pr_number = 67").
+				Updates(map[string]any{"status": model.ReviewRunCompleted, "finished_at": time.Now().UTC()}).Error; err != nil {
+				t.Fatalf("置终态: %v", err)
+			}
+		}
+		if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", fmt.Sprintf("d-wb-hit-%d", i),
+			issueCommentBody(body, repo, 67, 42)); err != nil {
+			t.Fatalf("精确句柄应唤醒: %v", err)
+		}
+	}
+	var runs int64
+	e.svc.db.Model(&model.ReviewRun{}).Where("pr_number = 67").Count(&runs)
+	if runs != 2 {
+		t.Fatalf("两次精确点名应各开一轮: runs = %d", runs)
+	}
+}
+
+// 强制刷新同代只做一次（fast-ship-bot 第 56 轮 P2）：授权用户连续含 @ 的
+// 未命中评论不放大成逐条设置读取。
+func TestReviewCommentWakeForceRefreshOncePerGeneration(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	e.enableReview(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	ctx := context.Background()
+	e.fake.SetPR(repo, 68, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 68, State: "open", HeadSHA: "sha-fr",
+		HeadRepoFullName: repo,
+	})
+	counter := &countingAppSource{cfg: GitHubAppConfig{AppSlug: "Fast-Ship-Demo"}}
+	e.review.appSource = counter
+
+	// 三条含 @ 但未命中缓存的授权评论：预热 1 次 + 首条强制刷新 1 次，
+	// 第二、三条走 forcedRefreshed 标记不再刷新。
+	for i := 0; i < 3; i++ {
+		if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", fmt.Sprintf("d-fr-%d", i),
+			commentBodyWithUsers("@someone-else 帮忙看下", repo, 68, 42, "OWNER", "pr-author", "pr-author")); err != nil {
+			t.Fatalf("含 @ 未命中评论应忽略: %v", err)
+		}
+	}
+	counter.mu.Lock()
+	reads := counter.reads
+	counter.mu.Unlock()
+	if reads != 2 {
+		t.Fatalf("同缓存代内强制刷新只应一次（预热+刷新）: reads = %d", reads)
+	}
+	var runs int64
+	e.svc.db.Model(&model.ReviewRun{}).Where("pr_number = 68").Count(&runs)
+	if runs != 0 {
+		t.Fatalf("未命中不得开轮: runs = %d", runs)
+	}
+}
+
+// 解密失败降级态入短缓存（fast-ship-bot 第 56 轮 P2）：密文损坏期间的评
+// 论不逐条重读部署设置，成本回到每 TTL 一次。
+func TestReviewCommentWakeDecryptFallbackCached(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	e.enableReview(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	ctx := context.Background()
+	e.fake.SetPR(repo, 69, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 69, State: "open", HeadSHA: "sha-dec2",
+		HeadRepoFullName: repo,
+	})
+	counter := &countingDecryptSource{}
+	e.review.appSource = counter
+
+	for i := 0; i < 3; i++ {
+		if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", fmt.Sprintf("d-dec-%d", i),
+			issueCommentBody("@fast-ship-bot 请再审", repo, 69, 42)); err != nil {
+			t.Fatalf("解密失败应回落字面量: %v", err)
+		}
+	}
+	counter.mu.Lock()
+	reads := counter.reads
+	counter.mu.Unlock()
+	if reads != 1 {
+		t.Fatalf("降级态应入短缓存（3 条评论 1 次读取）: reads = %d", reads)
+	}
+	var runs int64
+	e.svc.db.Model(&model.ReviewRun{}).Where("pr_number = 69").Count(&runs)
+	if runs != 1 {
+		t.Fatalf("字面量点名应开轮: runs = %d", runs)
+	}
+}
+
+// countingDecryptSource GitHubAppSource 桩：读取恒报解密失败并计数。
+type countingDecryptSource struct {
+	mu    sync.Mutex
+	reads int
+}
+
+func (c *countingDecryptSource) Current(context.Context) (GitHubAppConfig, bool, error) {
+	c.mu.Lock()
+	c.reads++
+	c.mu.Unlock()
+	return GitHubAppConfig{}, false, errGitHubAppDecrypt
+}
