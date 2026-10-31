@@ -706,19 +706,38 @@ func TestBotAppendOnly(t *testing.T) {
 	}
 
 	dup := "dup:" + uuid.NewString()
-	seq, err := repository.NewBotRepository(env.db).NextMessageSeqTx(env.db, bot.ID)
+	// 取号与插入必须同事务（NextMessageSeqTx 的契约）：SendMessage 之后 runtime
+	// goroutine 也在同一窗口取号，分两条自动提交语句会和它读到同一个流水号，
+	// 夹具插入就撞 bot_seq 唯一索引而偶发变红。
+	var msg *model.BotMessage
+	var seq int64
+	err = env.db.Transaction(func(tx *gorm.DB) error {
+		next, seqErr := repository.NewBotRepository(tx).NextMessageSeqTx(tx, bot.ID)
+		if seqErr != nil {
+			return seqErr
+		}
+		seq = next
+		msg = &model.BotMessage{ID: uuid.NewString(), BotID: bot.ID, Seq: seq, Kind: model.BotMessageKindLifecycle,
+			ContentJSON: "{}", DedupKey: &dup, CreatedAt: time.Now().UTC()}
+		return repository.NewBotMessageRepository(tx).AppendTx(tx, msg)
+	})
 	if err != nil {
-		t.Fatalf("seq: %v", err)
-	}
-	msg := &model.BotMessage{ID: uuid.NewString(), BotID: bot.ID, Seq: seq, Kind: model.BotMessageKindLifecycle,
-		ContentJSON: "{}", DedupKey: &dup, CreatedAt: time.Now().UTC()}
-	if err := repository.NewBotMessageRepository(env.db).AppendTx(env.db, msg); err != nil {
 		t.Fatalf("append: %v", err)
 	}
+	// 另一条同 dedup_key 的消息用新流水号，这样失败只能来自 dedup 唯一索引，
+	// 不会被 seq 索引先拦下而掩盖了本来要验证的约束。
 	msg2 := *msg
 	msg2.ID = uuid.NewString()
-	if err := repository.NewBotMessageRepository(env.db).AppendTx(env.db, &msg2); err == nil {
-		t.Fatalf("同 dedup_key 应唯一约束失败")
+	err = env.db.Transaction(func(tx *gorm.DB) error {
+		next, seqErr := repository.NewBotRepository(tx).NextMessageSeqTx(tx, bot.ID)
+		if seqErr != nil {
+			return seqErr
+		}
+		msg2.Seq = next
+		return repository.NewBotMessageRepository(tx).AppendTx(tx, &msg2)
+	})
+	if err == nil || !strings.Contains(err.Error(), "dedup_key") {
+		t.Fatalf("同 dedup_key 应唯一约束失败: %v", err)
 	}
 
 	// 只钉住本次夹具写入的两条消息：SendMessage 之后 runtime 会异步跑一轮并追加
