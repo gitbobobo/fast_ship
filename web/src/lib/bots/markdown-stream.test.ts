@@ -400,6 +400,39 @@ describe("splitStreamingMarkdown 退回（不分块）", () => {
     expectBail("- [ ]x\n\nSee [ ].\n");
   });
 
+  it("行首链接行不触发退回：`]` 后是 `(`/`[`，不可能是定义", () => {
+    // 链接行剥掉容器前缀后同样以 `[` 开头，但定义的 `]` 后面必然是 `:`，而
+    // 行内链接的 `]` 后是 `(`、完整/折叠引用链接的 `]` 后是 `[`。链接列表是
+    // 很常见的回复形态，不该整段失去增量优化。
+    const samples = [
+      "[文档](https://e.com)\n\n第二段\n",
+      "- [标题](https://e.com)\n- [另一个](https://e.com/b)\n\n收尾。\n",
+      "1. [步骤](https://e.com)\n\n收尾。\n",
+      "> [引用](https://e.com)\n\n收尾。\n",
+    ];
+    for (const text of samples) {
+      const r = splitStreamingMarkdown(text);
+      expect(r.segments.length, text).toBeGreaterThan(0);
+      expect(r.tailPlain, text).toBeNull();
+    }
+    // 顶格行内链接整段进稳定前缀；列表项里的链接行也按列表整块切出。
+    expect(stableOf(samples[0])).toBe("[文档](https://e.com)\n");
+    expect(stableOf(samples[1])).toBe(
+      "- [标题](https://e.com)\n- [另一个](https://e.com/b)\n",
+    );
+    // 完整/折叠引用链接（`]` 后跟 `[`，中间允许空白）同样豁免。
+    expect(stableOf("[文本][标]\n\n收尾。\n")).toBe("[文本][标]\n");
+    expect(stableOf("[文本] []\n\n收尾。\n")).toBe("[文本] []\n");
+  });
+
+  it("行首 `[` 的其余形状仍退回：定义与快捷引用", () => {
+    // 定义行的 `]` 后是 `:`，跨行定义标签的 `]` 还没出现，快捷引用（单独一行
+    // 的 `[文本]`）的 `]` 后是空白或行尾——这三类都仍走退回。
+    expectBail("[x]: https://e.com\n\nSee [x].\n");
+    expectBail("[foo\nbar]: https://e.com\n\nSee [foo bar].\n");
+    expectBail("[快捷] 单独一行\n\n再来一段。\n");
+  });
+
   it("围栏开在列表项里时整段退回", () => {
     // 列表项里围栏的内容列取决于列表标记宽度，扫描器不建模它：`1. ``` ` 会被
     // 当成一个已完成的空代码块切出去，与整段解析（代码块里有一个 tab 缩进行）
