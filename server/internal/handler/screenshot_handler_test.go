@@ -279,8 +279,10 @@ func TestScreenshotHandlerContent_ServesStoredImage(t *testing.T) {
 	if got := contentRec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
 		t.Fatalf("expected nosniff, got %q", got)
 	}
-	if got := contentRec.Header().Get("Content-Security-Policy"); got != "default-src 'none'; sandbox" {
-		t.Fatalf("expected sandbox CSP, got %q", got)
+	// 保留 inline 的出口用图片文档那一档 CSP：只给 sandbox，不设 default-src
+	// ——设了会牵连 Chromium 图片文档包装页里的 <img>，能不能显示随版本而异。
+	if got := contentRec.Header().Get("Content-Security-Policy"); got != "sandbox" {
+		t.Fatalf("expected sandbox-only CSP, got %q", got)
 	}
 	if contentRec.Body.String() != string(handlerTestPNGBytes) {
 		t.Fatalf("unexpected content body (%d bytes)", contentRec.Body.Len())

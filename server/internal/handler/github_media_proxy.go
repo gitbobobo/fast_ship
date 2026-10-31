@@ -142,6 +142,17 @@ func setSameOriginAttachmentHeaders(header http.Header, fileName string) {
 	header.Set("Content-Disposition", contentDisposition(fileName))
 }
 
+// setSameOriginInlineImageHardeningHeaders 给「响应本身就是要在浏览器里当图片
+// 看的同源内容」（截图）用：nosniff 禁止把 image/* 改判成 HTML；CSP 只给
+// `sandbox`——禁脚本、隔离来源，但不设 default-src。
+// 不套 default-src 'none'：Chromium 打开图片地址会生成 `<body><img>` 包装文档，
+// 那个 img 是否受 img-src（回落到 default-src）约束随版本而异（实测 155 不拦，
+// 别的版本可能拦），图片能不能显示不该赌这个实现细节。
+func setSameOriginInlineImageHardeningHeaders(header http.Header) {
+	header.Set("X-Content-Type-Options", "nosniff")
+	header.Set("Content-Security-Policy", "sandbox")
+}
+
 // setMediaProxyHardeningHeaders 媒体代理成功响应的统一硬化头（INT-171）。必须
 // 在 copyMediaHeaders 之后、http.ServeContent 之前设置，避免被上游头覆盖。
 func setMediaProxyHardeningHeaders(header http.Header, upstreamURL, contentType string) {

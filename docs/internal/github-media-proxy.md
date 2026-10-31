@@ -22,7 +22,7 @@ svg（`image/svg+xml`、非标准写法 `image/svg`、扩展名 `.svg`）与 HTM
 | `/api/github/media-proxy` | nosniff + CSP + attachment | 任意公网图片/视频（仅收媒体类型） |
 | `/api/issues/assets/:aid/content` | nosniff + CSP + attachment | Issue 附件，上传只按前 512 字节嗅探求 `image/*`，「图片魔数 + HTML/SVG 体」的多态文件能过 |
 | `/api/avatars/:uid/:filename` | nosniff + CSP + attachment | 头像 |
-| `/api/screenshot-screens/:sid/content` | nosniff + CSP，保留 `inline` | 截图同样是用户上传 + `?token=`；「在标签页里看截图」是产品行为，`inline` 保留，脚本执行面由 nosniff + CSP 堵住 |
+| `/api/screenshot-screens/:sid/content` | nosniff + CSP `sandbox`，保留 `inline` | 截图同样是用户上传 + `?token=`；「在标签页里看截图」是产品行为，`inline` 保留。这一档**不设** `default-src`：Chromium 打开图片地址会生成 `<body><img>` 包装文档，那个 img 是否受 `img-src`（回落到 `default-src`）约束随版本而异，能不能显示不该赌这个实现细节；`sandbox` 单独就够禁脚本 |
 
 `/api/artifacts/:aid/download`、`/api/attachments/:aid/download` 以 `application/octet-stream` + `attachment` 下发，本身不构成同源文档，不在这个不变量里。`/api/screenshot-annotations/:aid/crop` 是服务端生成的裁剪 PNG，也不在。
 
