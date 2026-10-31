@@ -249,7 +249,9 @@ head 已有在途审查不重开」守卫，
    head ≠ `observedHead` 即窗口内被并发推进，哨兵
    `errCommentWakeObservedHeadMoved` 让整体回滚（幂等登记一并撤销，不烧
    账），外层重读重拉；上限 `reviewCommentWakeRevalidateMax`（2 次）仍不
-   收敛则放弃并 `recordDroppedDelivery` 补登幂等账（重投按 202 去重）→
+   收敛则放弃且**不登记**幂等账（fast-ship-bot 第 52 轮 P2：连续推送窗
+   口内静默丢弃+烧账会永久吞掉合法唤醒——再次评论或手动 Redeliver 可完
+   整重走）→
    fork 守卫：实拉 `HeadRepoFullName` 为空（已删 fork/异常 payload）或与
    base 仓库不同名即跨仓 fork，不开轮（与 pull_request 触发面同一不变量，
    rerun 同样有此守卫）→ 实况非 open 或 draft、空 head → 忽略
