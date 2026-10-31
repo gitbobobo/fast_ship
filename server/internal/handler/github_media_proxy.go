@@ -24,6 +24,15 @@ func NewGitHubMediaProxyHandler(service *githubmedia.ProxyService) *GitHubMediaP
 func (h *GitHubMediaProxyHandler) Proxy(c *gin.Context) {
 	rawURL := decodeMediaURLParam(c.Query("url"))
 	rangeHeader := c.GetHeader("Range")
+	if strings.Contains(rangeHeader, ",") {
+		// 多段 Range 忽略：上游对它会回 multipart/byteranges，那既不是图片
+		// 也不是视频，内容类型闸门必然拒；RFC 7233 允许服务器忽略 Range，
+		// 按无 Range 走整文件路径返回 200 完整内容，比 415 更符合预期。
+		// 同时要删掉请求上的头：缓存命中走 http.ServeContent，它会自己再
+		// 解析 Range，不删会在这里又变回 206 multipart。
+		rangeHeader = ""
+		c.Request.Header.Del("Range")
+	}
 	headOnly := c.Request.Method == http.MethodHead
 
 	if cached, ok, err := h.service.GetCached(rawURL); err != nil {

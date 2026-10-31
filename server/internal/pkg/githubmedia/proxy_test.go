@@ -2,11 +2,13 @@ package githubmedia
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -274,5 +276,198 @@ func TestProxyPassEnforcesContentTypeGate(t *testing.T) {
 				t.Fatalf("status = %d, want 206", resp.StatusCode)
 			}
 		})
+	}
+}
+
+// 扩展名回退放行时类型改写：上游 Content-Type 为空（写 nil 抑制 Go 自动
+// 嗅探补头）或 application/octet-stream 时，按扩展名准入的资源回给客户端/
+// 写进缓存的是表内具体媒体类型——回包统一带 nosniff，octet-stream/空类型
+// 不会被浏览器嗅探成图片，<img>/<video> 会拒收。
+func TestContentTypeFallbackNormalizesToConcreteMediaType(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("ct") {
+		case "none":
+			// 置 nil 才不被 Go 在写 body 时自动嗅探补上 Content-Type。
+			w.Header()["Content-Type"] = nil
+		default:
+			w.Header().Set("Content-Type", r.URL.Query().Get("ct"))
+		}
+		_, _ = w.Write([]byte("payload"))
+	}))
+	defer upstream.Close()
+
+	parsed, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("parse upstream url: %v", err)
+	}
+	service := newProxyService(
+		t.TempDir(),
+		time.Hour,
+		1<<20,
+		upstream.Client(),
+		func(u *url.URL) bool { return u.Host == parsed.Host },
+	)
+
+	// 空 Content-Type + .png：放行且回包类型是 image/png（不是空、不是
+	// octet-stream）。
+	resp, err := service.ProxyPass(context.Background(), upstream.URL+"/asset.png?ct=none", "", false)
+	if err != nil {
+		t.Fatalf("empty content type proxy pass: %v", err)
+	}
+	if got := resp.Header.Get("Content-Type"); got != "image/png" {
+		resp.Body.Close()
+		t.Fatalf("content type = %q, want image/png", got)
+	}
+	resp.Body.Close()
+
+	// 空 Content-Type + .svg：扩展名回退集合没有 .svg，拒。
+	resp, err = service.ProxyPass(context.Background(), upstream.URL+"/asset.svg?ct=none", "", false)
+	if !errors.Is(err, ErrUnsupportedUpstreamMedia) {
+		t.Fatalf("err = %v, want ErrUnsupportedUpstreamMedia", err)
+	}
+	if resp != nil {
+		t.Fatalf("resp = %+v, want nil", resp)
+	}
+
+	// octet-stream + .mp4：ProxyPass 放行且回包 video/mp4。
+	resp, err = service.ProxyPass(context.Background(), upstream.URL+"/clip.mp4?ct=application/octet-stream", "", false)
+	if err != nil {
+		t.Fatalf("octet-stream proxy pass: %v", err)
+	}
+	if got := resp.Header.Get("Content-Type"); got != "video/mp4" {
+		resp.Body.Close()
+		t.Fatalf("content type = %q, want video/mp4", got)
+	}
+	resp.Body.Close()
+
+	// octet-stream + .mp4：FetchAndCache 写进缓存 meta 的也是 video/mp4。
+	svc2 := newProxyService(t.TempDir(), time.Hour, 1<<20, upstream.Client(),
+		func(u *url.URL) bool { return u.Host == parsed.Host })
+	cached, err := svc2.FetchAndCache(context.Background(), upstream.URL+"/clip.mp4?ct=application/octet-stream")
+	if err != nil {
+		t.Fatalf("octet-stream fetch: %v", err)
+	}
+	if cached.Metadata.ContentType != "video/mp4" {
+		t.Fatalf("cached content type = %q, want video/mp4", cached.Metadata.ContentType)
+	}
+	metaBytes, err := os.ReadFile(svc2.metaPath(cached.Metadata.URL, ""))
+	if err != nil {
+		t.Fatalf("read meta: %v", err)
+	}
+	var entry cacheEntry
+	if err := json.Unmarshal(metaBytes, &entry); err != nil {
+		t.Fatalf("unmarshal meta: %v", err)
+	}
+	if entry.ContentType != "video/mp4" {
+		t.Fatalf("meta content type = %q, want video/mp4", entry.ContentType)
+	}
+}
+
+// Content-Type 歧义即拒：header 里多个 Content-Type 值、或单值逗号拼接，
+// 整文件与 Range 两条路径都按 ErrUnsupportedUpstreamMedia 拒，不放行也
+// 不取任一值规范化。
+func TestAmbiguousContentTypeRejected(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/multi.png":
+			w.Header().Add("Content-Type", "image/png")
+			w.Header().Add("Content-Type", "image/svg+xml")
+		case "/joined.png":
+			w.Header().Set("Content-Type", "image/png, image/svg+xml")
+		}
+		if r.Header.Get("Range") != "" {
+			w.Header().Set("Content-Range", "bytes 0-3/8")
+			w.WriteHeader(http.StatusPartialContent)
+		}
+		_, _ = w.Write([]byte("data"))
+	}))
+	defer upstream.Close()
+
+	parsed, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("parse upstream url: %v", err)
+	}
+	service := newProxyService(
+		t.TempDir(),
+		time.Hour,
+		1<<20,
+		upstream.Client(),
+		func(u *url.URL) bool { return u.Host == parsed.Host },
+	)
+
+	for _, tc := range []struct {
+		name        string
+		path        string
+		rangeHeader string
+	}{
+		{"multi value full", "/multi.png", ""},
+		{"multi value range", "/multi.png", "bytes=0-3"},
+		{"comma joined full", "/joined.png", ""},
+		{"comma joined range", "/joined.png", "bytes=0-3"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp, err := service.ProxyPass(context.Background(), upstream.URL+tc.path, tc.rangeHeader, false)
+			if !errors.Is(err, ErrUnsupportedUpstreamMedia) {
+				t.Fatalf("err = %v, want ErrUnsupportedUpstreamMedia", err)
+			}
+			if resp != nil {
+				t.Fatalf("resp = %+v, want nil", resp)
+			}
+			if _, err := service.FetchAndCache(context.Background(), upstream.URL+tc.path); !errors.Is(err, ErrUnsupportedUpstreamMedia) {
+				t.Fatalf("fetch err = %v, want ErrUnsupportedUpstreamMedia", err)
+			}
+		})
+	}
+}
+
+// 扩展名回退用重定向之后的最终 URL：a.png 302 到 b.svg 且最终类型是
+// octet-stream 时必须拒（借原始扩展名放行会把 svg 字节按 png 回客户端）；
+// 重定向到 c.png 的 octet-stream 则按最终扩展名放行并规范化成 image/png。
+// 用 upstream.Client() 让注入客户端真实跟随跳转。
+func TestExtensionFallbackUsesFinalRedirectURL(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/a.png":
+			http.Redirect(w, r, "/b.svg?final=1", http.StatusFound)
+		case "/to-png.png":
+			http.Redirect(w, r, "/c.png?final=1", http.StatusFound)
+		case "/b.svg", "/c.png":
+			w.Header().Set("Content-Type", "application/octet-stream")
+			_, _ = w.Write([]byte("data"))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer upstream.Close()
+
+	parsed, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("parse upstream url: %v", err)
+	}
+	service := newProxyService(
+		t.TempDir(),
+		time.Hour,
+		1<<20,
+		upstream.Client(),
+		func(u *url.URL) bool { return u.Host == parsed.Host },
+	)
+
+	if _, err := service.FetchAndCache(context.Background(), upstream.URL+"/a.png"); !errors.Is(err, ErrUnsupportedUpstreamMedia) {
+		t.Fatalf("fetch err = %v, want ErrUnsupportedUpstreamMedia（最终 .svg 不得借 .png 放行）", err)
+	}
+	resp, err := service.ProxyPass(context.Background(), upstream.URL+"/a.png", "bytes=0-3", false)
+	if !errors.Is(err, ErrUnsupportedUpstreamMedia) {
+		t.Fatalf("range err = %v, want ErrUnsupportedUpstreamMedia", err)
+	}
+	if resp != nil {
+		t.Fatalf("resp = %+v, want nil", resp)
+	}
+
+	cached, err := service.FetchAndCache(context.Background(), upstream.URL+"/to-png.png")
+	if err != nil {
+		t.Fatalf("fetch to-png: %v", err)
+	}
+	if cached.Metadata.ContentType != "image/png" {
+		t.Fatalf("content type = %q, want image/png（按最终 URL 扩展名规范化）", cached.Metadata.ContentType)
 	}
 }

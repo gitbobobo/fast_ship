@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sync/atomic"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -13,12 +14,15 @@ import (
 
 // rewriteToUpstreamTransport 把白名单域名的请求在传输层改写到 httptest 假
 // 上游：媒体代理的 URL 准入认 GitHub 域名（normalize 层），注入的客户端
-// 只负责让这些请求落到本地假上游，两层各管各的。
+// 只负责让这些请求落到本地假上游，两层各管各的。hits 统计真正打到上游的
+// 请求数，验证缓存命中不再重复拉取。
 type rewriteToUpstreamTransport struct {
 	target *url.URL
+	hits   atomic.Int32
 }
 
 func (t *rewriteToUpstreamTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	t.hits.Add(1)
 	rewritten := req.Clone(req.Context())
 	rewritten.URL.Scheme = t.target.Scheme
 	rewritten.URL.Host = t.target.Host
@@ -57,8 +61,9 @@ func TestGitHubMediaProxyHandlerSVGGateAndHardeningHeaders(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse upstream url: %v", err)
 	}
+	upstreamTransport := &rewriteToUpstreamTransport{target: target}
 	svc := githubmedia.NewProxyService(t.TempDir(),
-		githubmedia.WithHTTPClient(&http.Client{Transport: &rewriteToUpstreamTransport{target: target}}))
+		githubmedia.WithHTTPTransport(upstreamTransport))
 
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
@@ -136,6 +141,47 @@ func TestGitHubMediaProxyHandlerSVGGateAndHardeningHeaders(t *testing.T) {
 	}
 	if got := rec.Header().Get("Content-Range"); got != "bytes 0-3/8" {
 		t.Fatalf("mp4 content range = %q, want bytes 0-3/8", got)
+	}
+	assertHardening(t, rec)
+
+	// 成功的 HEAD（ProxyPass 直通路径）同样带三个硬化头。
+	req = httptest.NewRequest(http.MethodHead, githubmedia.ProxyPath+"?url="+url.QueryEscape("http://github.com/user-attachments/assets/clip.mp4"), nil)
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("mp4 head code = %d, want 200", rec.Code)
+	}
+	assertHardening(t, rec)
+
+	// 同一 .png 连续两次 GET：第二次走缓存命中不再打上游，硬化头照带。
+	// 此前已经 GET 过一次 ok.png（首次下载入缓存）。
+	hitsBefore := upstreamTransport.hits.Load()
+	req = httptest.NewRequest(http.MethodGet, githubmedia.ProxyPath+"?url="+url.QueryEscape("http://github.com/user-attachments/assets/ok.png"), nil)
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("cached png code = %d body = %s, want 200", rec.Code, rec.Body.String())
+	}
+	if rec.Body.String() != "png-bytes" {
+		t.Fatalf("cached png body = %q, want png-bytes", rec.Body.String())
+	}
+	if got := upstreamTransport.hits.Load(); got != hitsBefore {
+		t.Fatalf("upstream hits = %d, want %d（缓存命中不再打上游）", got, hitsBefore)
+	}
+	assertHardening(t, rec)
+
+	// 多段 Range（逗号分隔）被忽略，按无 Range 走整文件路径：返回 200 完整
+	// body 而不是 415——上游对多段 Range 回 multipart/byteranges，闸门必然
+	// 拒，RFC 7233 允许忽略 Range。
+	req = httptest.NewRequest(http.MethodGet, githubmedia.ProxyPath+"?url="+url.QueryEscape("http://github.com/user-attachments/assets/clip.mp4"), nil)
+	req.Header.Set("Range", "bytes=0-1,4-5")
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("multi-range code = %d, want 200", rec.Code)
+	}
+	if rec.Body.String() != "mp4-bytes" {
+		t.Fatalf("multi-range body = %q, want mp4-bytes（完整内容）", rec.Body.String())
 	}
 	assertHardening(t, rec)
 }

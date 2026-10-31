@@ -5130,6 +5130,14 @@ GitHub 媒体代理
 GitHub 媒体代理（图片/视频）
 
 代理拉取并缓存 GitHub 附件/图片等媒体 URL，支持 `Range` 头与缓存命中直出。
+内容只收位图与视频：svg（`image/svg+xml`、非标准写法 `image/svg`、无
+Content-Type 时按扩展名回退的 `.svg`）与 HTML 等非图片/视频类型一律 415，
+整文件下载、`Range`、`HEAD` 与缓存命中走同一道准入。成功响应统一带
+`X-Content-Type-Options: nosniff`、`Content-Disposition: attachment` 与
+`Content-Security-Policy: default-src 'none'; sandbox`（只影响顶层导航，
+不影响 `<img>`/`<video>` 子资源渲染）。
+上游 Content-Type 缺省或为 `application/octet-stream` 时按扩展名回填具体媒体类型；
+多段 `Range`（含逗号）按无 `Range` 处理返回完整 200。
 错误响应为 `text/plain`（非 JSON 信封）：400 invalid url、415 unsupported media type、
 其他上游错误按状态码透传或 502。同一路径另注册 HEAD 变体，语义同 GET 但不返回 body。
 

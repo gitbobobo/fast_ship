@@ -171,10 +171,12 @@ type serviceConfig struct {
 	cacheTTL          time.Duration
 	maxCacheEntrySize int64
 	client            *http.Client
-	allowURL          func(*url.URL) bool
-	requireHTTPS      bool
-	imagesOnly        bool
-	guardAddress      bool
+	// transport 覆盖默认客户端的 Transport（测试注入）；nil 用原构造。
+	transport    http.RoundTripper
+	allowURL     func(*url.URL) bool
+	requireHTTPS bool
+	imagesOnly   bool
+	guardAddress bool
 	// trustedPrivateHosts 可信内网主机名单（仅 guardAddress 时有意义）：
 	// 拨号时的主机名与名单完全一致（不区分大小写、不含端口、不支持
 	// 通配符）即跳过解析 IP 的内网检查；名单外主机与名单内主机重定向
@@ -195,10 +197,12 @@ type serviceConfig struct {
 // 不打真实网络。
 type ProxyOption func(*serviceConfig)
 
-// WithHTTPClient 覆盖默认 HTTP 客户端（默认克隆 http.DefaultTransport，
-// GitHub 媒体面不 guardAddress、走环境代理）。
-func WithHTTPClient(client *http.Client) ProxyOption {
-	return func(cfg *serviceConfig) { cfg.client = client }
+// WithHTTPTransport 只替换默认客户端的 Transport：客户端其余部分
+// （CheckRedirect 的白名单复检与 Authorization 剥离、超时）保持生产实现
+// ——它们本身是安全逻辑，测试整颗换掉客户端会顺带丢掉这层防线。
+// 测试注入指向 httptest 假上游的 RoundTripper，不打真实网络。
+func WithHTTPTransport(rt http.RoundTripper) ProxyOption {
+	return func(cfg *serviceConfig) { cfg.transport = rt }
 }
 
 // NewProxyService GitHub 媒体代理面：GitHub 域名白名单、图片视频都收，
@@ -263,6 +267,13 @@ func newService(cacheRoot string, cfg serviceConfig) *ProxyService {
 		cfg.client = newGuardedClient(cfg.requireHTTPS, cfg.allowURL, cfg.guardAddress,
 			cfg.trustedPrivateHosts, cfg.trustedPrivateHostsFunc,
 			func(u *url.URL) bool { return IsGitHubMediaURLFor(u.String(), webHost) })
+	}
+	if cfg.transport != nil {
+		// 克隆后只换 Transport：CheckRedirect/Timeout 是重定向白名单与凭证
+		// 剥离的执行点，不能被测试注入旁路。
+		clone := *cfg.client
+		clone.Transport = cfg.transport
+		cfg.client = &clone
 	}
 	s := &ProxyService{
 		client:            cfg.client,
@@ -748,8 +759,15 @@ func (s *ProxyService) fetchAndCache(ctx context.Context, rawURL, bearer, scope 
 		return nil, &UpstreamStatusError{StatusCode: resp.StatusCode}
 	}
 
-	contentType := strings.TrimSpace(resp.Header.Get("Content-Type"))
-	if !s.isAllowedContentType(contentType, normalized) {
+	// 扩展名回退取重定向之后的最终 URL（resp.Request.URL）：client.Do
+	// 可能跟随了白名单内的 302，a.png 跳到 b.svg 且最终类型是
+	// octet-stream 时，借原始扩展名放行就会把 svg 字节按 png 回给客户端。
+	finalURL := normalized
+	if resp.Request != nil && resp.Request.URL != nil {
+		finalURL = resp.Request.URL.String()
+	}
+	contentType, ok := s.normalizeResponseContentType(resp.Header, finalURL)
+	if !ok {
 		return nil, ErrUnsupportedUpstreamMedia
 	}
 
@@ -857,15 +875,25 @@ func (s *ProxyService) ProxyPass(ctx context.Context, rawURL, rangeHeader string
 
 	// 内容类型闸门与整文件下载同口径：Range/HEAD 直通不能成为 svg/HTML
 	// 准入的旁路（INT-171）。HEAD 响应常无 Content-Type，走扩展名回退
-	// （集合里没有 .svg）。拒收时关掉 body 归还连接。
-	if !s.isAllowedContentType(resp.Header.Get("Content-Type"), normalized) {
+	// （集合里没有 .svg）——回退用重定向之后的最终 URL，与整文件路径
+	// 同一口径。拒收时关掉 body 归还连接。
+	finalURL := normalized
+	if resp.Request != nil && resp.Request.URL != nil {
+		finalURL = resp.Request.URL.String()
+	}
+	normalizedType, ok := s.normalizeResponseContentType(resp.Header, finalURL)
+	if !ok {
 		resp.Body.Close()
 		return nil, ErrUnsupportedUpstreamMedia
 	}
 
+	header := cloneRelevantHeaders(resp.Header)
+	// Content-Type 只保留规范化后的那一个值：多值/逗号拼接已在闸门上
+	// 被拒，octet-stream/空类型由扩展名回退改写成具体媒体类型。
+	header.Set("Content-Type", normalizedType)
 	return &PassThroughResponse{
 		StatusCode: resp.StatusCode,
-		Header:     cloneRelevantHeaders(resp.Header),
+		Header:     header,
 		Body:       resp.Body,
 	}, nil
 }
@@ -913,11 +941,20 @@ func (s *ProxyService) getCachedNormalized(normalized, scope string) (*CachedMed
 	}
 
 	// 内容类型按当前准入规则复核：旧准入口径（收 svg）写进缓存的历史条目
-	// 命中时淘汰重下，不靠 bump 缓存标记全量清目录（INT-171）。清不掉
-	// （目录级故障）按 discardCacheEntry 的既有语义上报 ErrLocalCache。
-	if !s.isAllowedContentType(entry.ContentType, normalized) {
-		return s.discardCacheEntry(metaPath, cachePath)
+	// 命中时按 miss 走重下，不靠 bump 缓存标记全量清目录（INT-171）。
+	// 不过关只返回 miss，不在读路径删文件：GetCached 不持下载锁，这里删
+	// meta/data 会与正在写盘的同 key 下载竞态，最坏删掉别人刚发布的新条目。
+	// 下一次成功下载按同一 key 覆盖 meta/data，TTL 到期另有清理。
+	// meta 是单值小文件，逗号/多值歧义只在响应 header 判定里出现，这里
+	// 直接走单值判定。
+	normalizedType, allowed := s.normalizeMediaContentType(entry.ContentType, normalized)
+	if !allowed {
+		return nil, false, nil
 	}
+	// 老缓存可能存着放行前的原始类型（octet-stream/空）：返回值改成规范化
+	// 类型，响应不再拿 octet-stream 配 nosniff 回客户端；只改返回值，不重
+	// 写 meta 文件。
+	entry.ContentType = normalizedType
 
 	if entry.expired(time.Now().UTC()) {
 		_ = os.Remove(metaPath)
@@ -1205,56 +1242,96 @@ func isAllowedGitHubMediaURL(parsed *url.URL) bool {
 // svg 在新标签页打开就是同源文档、能执行脚本，视觉审查也只吃位图。拒收
 // 两路并行——内容类型按 image/svg 前缀拒（标准写法 image/svg+xml 与非标准
 // 变体 image/svg 一并覆盖），扩展名回退集合不含 .svg。
+// 只答放不放行的薄封装；写缓存/回客户端前用 normalizeResponseContentType
+// 拿规范化类型。
 func (s *ProxyService) isAllowedContentType(contentType string, rawURL string) bool {
+	_, ok := s.normalizeMediaContentType(contentType, rawURL)
+	return ok
+}
+
+// normalizeMediaContentType 「准入 + 规范化」判定：上游类型原样是
+// image/* / video/*（GitHub 媒体面；截图面只收 image/*）时放行，返回
+// 小写去参后的类型本身；类型为空或 application/octet-stream 时按扩展名
+// 回退，放行则返回扩展名表里的具体媒体类型——不是把 octet-stream 原样
+// 回给客户端：成功响应统一带 nosniff，octet-stream/空类型在浏览器里
+// 不会被嗅探成图片，<img>/<video> 会拒收。rawURL 必须传重定向之后的
+// 最终 URL（调用方责任），借原始扩展名放行重定向出去的不可执行文档
+// 才无从发生。
+func (s *ProxyService) normalizeMediaContentType(contentType, rawURL string) (string, bool) {
 	if contentType == "" {
-		if s.imagesOnly {
-			return hasBitmapExtension(rawURL)
-		}
-		return hasMediaExtension(rawURL)
+		return mediaTypeForExtension(rawURL, s.imagesOnly)
 	}
 
 	baseType := strings.ToLower(strings.TrimSpace(strings.Split(contentType, ";")[0]))
-	// svg 在位图/视频分支之前统一拒，两个面共用同一道判定。
-	if strings.HasPrefix(baseType, "image/svg") {
-		return false
+	// svg 在位图/视频分支之前统一拒，两个面共用同一道判定。单值里含逗号
+	// 是多值拼接后的歧义类型（规范上 Content-Type 只允许单值），无从规范化
+	// 也拒。
+	if strings.HasPrefix(baseType, "image/svg") || strings.Contains(baseType, ",") {
+		return "", false
 	}
 	if s.imagesOnly {
-		return strings.HasPrefix(baseType, "image/") ||
-			(baseType == "application/octet-stream" && hasBitmapExtension(rawURL))
+		if strings.HasPrefix(baseType, "image/") {
+			return baseType, true
+		}
+		if baseType == "application/octet-stream" {
+			return mediaTypeForExtension(rawURL, true)
+		}
+		return "", false
 	}
 	if strings.HasPrefix(baseType, "image/") || strings.HasPrefix(baseType, "video/") {
-		return true
+		return baseType, true
 	}
 	if baseType == "application/octet-stream" {
-		return hasMediaExtension(rawURL)
+		return mediaTypeForExtension(rawURL, false)
 	}
 	// text/html、application/xhtml+xml、text/plain 等落不到任何前缀分支，
 	// 一律拒。
-	return false
+	return "", false
 }
 
-var (
-	// bitmapExtensions 两个面共用的位图扩展名。svg 是可在浏览器执行脚本的
-	// 矢量图，不在此列——两个面都不按扩展名收它。
-	bitmapExtensions = map[string]bool{
-		".png": true, ".jpg": true, ".jpeg": true, ".gif": true,
-		".webp": true, ".bmp": true,
+// normalizeResponseContentType header 级准入：resp.Header 有多个
+// Content-Type 值、或单值里含逗号（Go http.Client 会原样拼接多值）时
+// 视为不可识别类型直接拒——歧义类型无从规范化，宁拒不放。放行时返回
+// 规范化后的单一类型（见 normalizeMediaContentType）。
+func (s *ProxyService) normalizeResponseContentType(header http.Header, rawURL string) (string, bool) {
+	values := header.Values("Content-Type")
+	if len(values) > 1 {
+		return "", false
 	}
-	videoExtensions = map[string]bool{
-		".mp4": true, ".mov": true, ".webm": true, ".m4v": true,
+	value := ""
+	if len(values) == 1 {
+		value = strings.TrimSpace(values[0])
 	}
-)
+	if strings.Contains(value, ",") {
+		return "", false
+	}
+	return s.normalizeMediaContentType(value, rawURL)
+}
 
-// hasMediaExtension 扩展名回退集合 = 位图 + 视频。svg 曾在 GitHub 媒体面的
-// 集合里，INT-171 起移除：上游没标 Content-Type 时按扩展名回退的请求同样
-// 不能带进可执行文档。
-func hasMediaExtension(rawURL string) bool {
-	ext := urlPathExtension(rawURL)
-	return bitmapExtensions[ext] || videoExtensions[ext]
+// mediaExtensions 扩展名 → 具体媒体类型：扩展名回退集合与回写缓存/响应的
+// 类型同源一张表，两边各写一份迟早漂移。svg 是可在浏览器执行脚本的矢量
+// 图，不在此列——两个面都不按扩展名收它（曾在 GitHub 媒体面的集合里，
+// INT-171 起移除）。
+var mediaExtensions = map[string]string{
+	".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+	".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp",
+	".mp4": "video/mp4", ".mov": "video/quicktime",
+	".webm": "video/webm", ".m4v": "video/x-m4v",
+}
+
+// mediaTypeForExtension 扩展名回退：命中返回表内具体媒体类型，未命中
+// （含 .svg、无扩展名）拒。imagesOnly 时只认位图扩展名，视频按未命中处理。
+func mediaTypeForExtension(rawURL string, imagesOnly bool) (string, bool) {
+	mediaType, ok := mediaExtensions[urlPathExtension(rawURL)]
+	if !ok || (imagesOnly && !strings.HasPrefix(mediaType, "image/")) {
+		return "", false
+	}
+	return mediaType, true
 }
 
 func hasBitmapExtension(rawURL string) bool {
-	return bitmapExtensions[urlPathExtension(rawURL)]
+	_, ok := mediaTypeForExtension(rawURL, true)
+	return ok
 }
 
 // HasBitmapExtension URL 路径是否以位图扩展名（.png .jpg .jpeg .gif .webp

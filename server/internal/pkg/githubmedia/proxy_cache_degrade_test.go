@@ -155,32 +155,35 @@ func TestScreenshotFaceRejectsSVGContentTypeVariants(t *testing.T) {
 }
 
 // INT-171 缓存命中复核：旧准入口径（收 svg）写进缓存的历史条目，命中时按
-// 当前规则重新校验 ContentType，不过关就删 meta+data 按 miss 走重下；位图
-// 条目不受复核影响，仍然命中。
+// 当前规则重新校验 ContentType，不过关只按 miss 走重下，不在读路径删文件
+// ——GetCached 不持下载锁，删 meta/data 会与正在写盘的同 key 下载竞态。位图
+// 条目不受复核影响，仍然命中；老缓存里存的 octet-stream/空类型按扩展名复
+// 核，命中时返回的 ContentType 换成规范化类型（只改返回值，不重写 meta）。
 func TestGetCachedRevalidatesContentTypeGate(t *testing.T) {
 	svc := newService(t.TempDir(), serviceConfig{
 		allowURL: func(u *url.URL) bool { return true },
 	})
 
-	// 历史 svg 条目：命中时被淘汰，meta 与 data 都被清掉。
+	// 历史 svg 条目：命中时按 miss 淘汰重下，meta 与 data 留在原地（下一次
+	// 成功下载按同一 key 覆盖，TTL 到期另有清理）。
 	svgURL, err := svc.normalize("https://user-images.githubusercontent.com/legacy.svg")
 	if err != nil {
 		t.Fatalf("normalize: %v", err)
 	}
-	seedCacheMeta(t, svc, svgURL, "image/svg+xml")
+	svgMeta := seedCacheMeta(t, svc, svgURL, "image/svg+xml")
 	if err := os.WriteFile(svc.dataPath(svgURL, ""), []byte("<svg/>"), 0o640); err != nil {
 		t.Fatalf("write data: %v", err)
 	}
 
 	cached, ok, err := svc.GetCached(svgURL)
 	if ok || err != nil || cached != nil {
-		t.Fatalf("cached = %+v ok = %v err = %v, want miss 不报错（复核不过关淘汰）", cached, ok, err)
+		t.Fatalf("cached = %+v ok = %v err = %v, want miss 不报错（复核不过关按 miss 淘汰）", cached, ok, err)
 	}
-	if _, statErr := os.Stat(svc.metaPath(svgURL, "")); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("svg meta stat = %v, want 已被淘汰清理", statErr)
+	if _, statErr := os.Stat(svgMeta); statErr != nil {
+		t.Fatalf("svg meta stat = %v, want 文件仍在（读路径不删）", statErr)
 	}
-	if _, statErr := os.Stat(svc.dataPath(svgURL, "")); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("svg data stat = %v, want 已被淘汰清理", statErr)
+	if _, statErr := os.Stat(svc.dataPath(svgURL, "")); statErr != nil {
+		t.Fatalf("svg data stat = %v, want 文件仍在（读路径不删）", statErr)
 	}
 
 	// 位图条目：复核过关，照常命中。
@@ -199,5 +202,35 @@ func TestGetCachedRevalidatesContentTypeGate(t *testing.T) {
 	}
 	if cached.Metadata.ContentType != "image/png" {
 		t.Fatalf("content type = %q, want image/png", cached.Metadata.ContentType)
+	}
+
+	// 老缓存存的 octet-stream + .png URL：复核按扩展名放行，返回的
+	// ContentType 是规范化后的 image/png（meta 文件不重写，仍是原值）。
+	legacyURL, err := svc.normalize("https://user-images.githubusercontent.com/legacy.png")
+	if err != nil {
+		t.Fatalf("normalize legacy png: %v", err)
+	}
+	legacyMeta := seedCacheMeta(t, svc, legacyURL, "application/octet-stream")
+	if err := os.WriteFile(svc.dataPath(legacyURL, ""), []byte("png"), 0o640); err != nil {
+		t.Fatalf("write legacy data: %v", err)
+	}
+
+	cached, ok, err = svc.GetCached(legacyURL)
+	if err != nil || !ok || cached == nil {
+		t.Fatalf("cached = %+v ok = %v err = %v, want 命中", cached, ok, err)
+	}
+	if cached.Metadata.ContentType != "image/png" {
+		t.Fatalf("content type = %q, want image/png（octet-stream 被规范化）", cached.Metadata.ContentType)
+	}
+	metaBytes, err := os.ReadFile(legacyMeta)
+	if err != nil {
+		t.Fatalf("read legacy meta: %v", err)
+	}
+	var entry cacheEntry
+	if err := json.Unmarshal(metaBytes, &entry); err != nil {
+		t.Fatalf("unmarshal legacy meta: %v", err)
+	}
+	if entry.ContentType != "application/octet-stream" {
+		t.Fatalf("meta content type = %q, want application/octet-stream（meta 文件不重写）", entry.ContentType)
 	}
 }
