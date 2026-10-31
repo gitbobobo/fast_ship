@@ -24,7 +24,7 @@ VERSION 文件当前内容与目标版本都必须是 `X.Y.Z` 形式，否则报
 
 ## 产物与推送
 
-脚本依次执行：写 VERSION → `git commit`（信息 `chore: bump version to X`，只含 VERSION）→ `git tag vX`（轻量 tag，与现有 tag 一致）→ 一条 `git push --atomic` 同推 main 与 tag。写 VERSION 到推送之间任一步失败会自动回滚本地提交与 tag（远端由 --atomic 保证无半成品），修复原因后可直接重跑。
+脚本依次执行：写 VERSION → `git commit`（信息 `chore: bump version to X`，只含 VERSION）→ `git -c tag.gpgsign=false tag vX`（显式创建轻量 tag，不继承全局标签签名配置）→ 一条 `git push --atomic` 同推 main 与 tag。写 VERSION 到推送之间任一步失败会自动回滚本地提交与 tag（远端由 --atomic 保证无半成品），修复原因后可直接重跑。
 
 `--atomic` 只覆盖 Forgejo 端。GitHub 镜像按 sync on commit 异步同步，不在原子区间内：推送成功即退出回滚区间，此后镜像同步或构建查询的任何失败都只报告，不回滚、不删 tag、不重推。
 

@@ -94,7 +94,7 @@ trap 'release_rollback; exit 143' TERM
 printf '%s\n' "${VERSION}" > "${VERSION_FILE}"
 git add VERSION
 git commit -m "chore: bump version to ${VERSION}"
-git tag "${TAG_NAME}"
+git -c tag.gpgsign=false tag "${TAG_NAME}"
 git push --atomic origin main "refs/tags/${TAG_NAME}"
 # 推送成功即退出回滚区间：此后任何失败只报告，不回滚、不删 tag、不重推
 trap - ERR INT TERM
@@ -130,7 +130,7 @@ if [[ -z "${REPO_PATH}" ]]; then
 fi
 
 if [[ -z "${REPO_PATH}" ]]; then
-  printf '未能解析 GitHub 镜像仓库，跳过构建查询；请检查远程配置\n'
+  printf '未能解析 GitHub 镜像仓库，跳过构建查询（未配置 github 远程的新克隆属正常）\n'
   exit 0
 fi
 

@@ -69,7 +69,7 @@ EOF
 }
 run_release() {
   RC=0
-  (cd "${REPO}" && PATH="${SC}/bin:${PATH}" bash scripts/release.sh) > "${SC}/out.log" 2> "${SC}/err.log" || RC=$?
+  (cd "${REPO}" && PATH="${SC}/bin:${PATH}" GIT_EDITOR=false bash scripts/release.sh) > "${SC}/out.log" 2> "${SC}/err.log" || RC=$?
   OUT="$(cat "${SC}/out.log")"
   ERR_OUT="$(cat "${SC}/err.log")"
 }
@@ -132,15 +132,17 @@ equal "$([[ "${OUT}${ERR_OUT}" == *"${MARKER}"* ]] && echo leaked || true)" "" "
 
 printf '== 全局标签签名开启也不调用签名器 ==\n'
 setup signing "${FJ_URL}"
+git -C "${REPO}" config --unset tag.gpgsign
 cat > "${SC}/bin/signing-must-not-run" <<EOF
 #!/usr/bin/env bash
 echo unexpected-signing >> "${SC}/unexpected"
 exit 78
 EOF
 chmod +x "${SC}/bin/signing-must-not-run"
-# 用隔离的全局配置开启签名并指定阻断签名器；仓库设置必须覆盖全局。
+# 用隔离的全局配置开启签名并指定阻断签名器；由 release.sh 自己覆盖签名设置。
 git config --file "${SC}/global.gitconfig" tag.gpgsign true
 git config --file "${SC}/global.gitconfig" gpg.program "${SC}/bin/signing-must-not-run"
+equal "$(GIT_CONFIG_GLOBAL="${SC}/global.gitconfig" git -C "${REPO}" config --get tag.gpgsign)" true "被测环境确实继承全局标签签名"
 GIT_CONFIG_GLOBAL="${SC}/global.gitconfig" run_release
 verify_pushed
 equal "$(git -C "${REPO}" cat-file -t refs/tags/v0.1.68)" commit "测试仍生成轻量tag"

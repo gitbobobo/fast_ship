@@ -20,6 +20,7 @@
 
 | 检查命令 | 结果 |
 | --- | --- |
+| `cd web && pnpm api-types --check` | |
 | `make lint` | |
 | `make test` | |
 
