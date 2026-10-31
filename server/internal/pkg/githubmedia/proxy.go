@@ -451,7 +451,20 @@ func (s *ProxyService) sweepExpiredEntries() {
 			//
 			// 同一 URL 可能正在因「损坏 meta 读路径判 miss」而重下，删除与过
 			// 期分支一样持该 key 的下载闸（锁内重读复核 mtime 仍超龄，被写侧
-			// 覆盖成好 meta 就放弃），不无锁动手。
+			// 覆盖成好 meta 就放弃），不无锁动手。URL 不可得（0 字节/开头即截
+			// 断的 meta 解析不出 url 字段，闸键会是空串、与写侧不同键无互斥）
+			// 时不持闸硬删——退回孤儿判据：同名 .bin 的 mtime 也超 2×TTL 才
+			// 删（写侧 rename 的新 data mtime 必是新，不会误删刚发布的条目）。
+			binPath := strings.TrimSuffix(metaPath, ".json") + ".bin"
+			if entry.URL == "" {
+				binInfo, statErr := os.Stat(binPath)
+				if statErr != nil || now.Sub(binInfo.ModTime()) < 2*s.cacheTTL {
+					continue
+				}
+				_ = os.Remove(binPath)
+				_ = os.Remove(metaPath)
+				continue
+			}
 			if now.Sub(info.ModTime()) < 2*s.cacheTTL {
 				continue
 			}

@@ -192,8 +192,14 @@ func TestSweepExpiredEntriesRemovesOnlyExpired(t *testing.T) {
 	if err := os.Chtimes(staleBroken, old, old); err != nil {
 		t.Fatalf("chtimes: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(svc.cacheDir, "stale-broken.bin"), []byte("big"), 0o640); err != nil {
+	staleBin := filepath.Join(svc.cacheDir, "stale-broken.bin")
+	if err := os.WriteFile(staleBin, []byte("big"), 0o640); err != nil {
 		t.Fatalf("write stale broken bin: %v", err)
+	}
+	// URL 不可得的损坏 meta 依赖孤儿判据：.bin 的 mtime 也要超 2×TTL 才回收
+	//（.bin 新鲜意味着可能是写侧刚 rename 的新 data，不能删）。
+	if err := os.Chtimes(staleBin, old, old); err != nil {
+		t.Fatalf("chtimes bin: %v", err)
 	}
 
 	svc.sweepExpiredEntries()
@@ -201,8 +207,60 @@ func TestSweepExpiredEntriesRemovesOnlyExpired(t *testing.T) {
 	if _, err := os.Stat(staleBroken); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("stale broken stat = %v, want 已回收", err)
 	}
-	if _, err := os.Stat(filepath.Join(svc.cacheDir, "stale-broken.bin")); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(staleBin); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("stale broken bin stat = %v, want 已回收", err)
+	}
+}
+
+// URL 不可得的损坏 meta（0 字节/开头即截断，解析不出 url 字段）：闸键会是
+// 空串、与写侧不同键无互斥——只有同名 .bin 的 mtime 也超 2×TTL（不可能是
+// 写侧刚 rename 的新 data）才删；.bin 新鲜时保留。
+func TestSweepExpiredEntriesURLUnavailableBrokenMeta(t *testing.T) {
+	svc := newService(t.TempDir(), serviceConfig{
+		allowURL: func(u *url.URL) bool { return true },
+	})
+		old := time.Now().Add(-3 * defaultCacheTTL)
+
+	// 0 字节 meta + 新鲜 .bin（写侧刚 rename 新 data、meta 尚未写的窗口态）：
+	// 不删——删了会把刚发布的条目抹掉。
+	emptyMeta := filepath.Join(svc.cacheDir, "fresh-empty.json")
+	if err := os.WriteFile(emptyMeta, nil, 0o640); err != nil {
+		t.Fatalf("write empty meta: %v", err)
+	}
+	freshBin := filepath.Join(svc.cacheDir, "fresh-empty.bin")
+	if err := os.WriteFile(freshBin, []byte("new"), 0o640); err != nil {
+		t.Fatalf("write fresh bin: %v", err)
+	}
+
+	// 0 字节 meta + 超龄 .bin（历史残留）：一起回收。
+	staleMeta := filepath.Join(svc.cacheDir, "stale-empty.json")
+	if err := os.WriteFile(staleMeta, nil, 0o640); err != nil {
+		t.Fatalf("write stale meta: %v", err)
+	}
+	if err := os.Chtimes(staleMeta, old, old); err != nil {
+		t.Fatalf("chtimes meta: %v", err)
+	}
+	staleBin := filepath.Join(svc.cacheDir, "stale-empty.bin")
+	if err := os.WriteFile(staleBin, []byte("old"), 0o640); err != nil {
+		t.Fatalf("write stale bin: %v", err)
+	}
+	if err := os.Chtimes(staleBin, old, old); err != nil {
+		t.Fatalf("chtimes bin: %v", err)
+	}
+
+	svc.sweepExpiredEntries()
+
+	if _, err := os.Stat(freshBin); err != nil {
+		t.Fatalf("fresh bin stat = %v, want 保留（写侧刚发布，URL 不可得不硬删）", err)
+	}
+	if _, err := os.Stat(emptyMeta); err != nil {
+		t.Fatalf("empty meta stat = %v, want 保留（同上）", err)
+	}
+	if _, err := os.Stat(staleBin); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stale bin stat = %v, want 已回收", err)
+	}
+	if _, err := os.Stat(staleMeta); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stale meta stat = %v, want 已回收", err)
 	}
 }
 
