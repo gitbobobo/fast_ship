@@ -428,6 +428,16 @@ func (s *ProxyService) sweepExpiredEntries() {
 		return
 	}
 	now := time.Now().UTC()
+	// 扫描顺带回收上次进程被杀残留在隔离名的 .gone（rename 后 remove 前被
+	// 杀的残留，无人可达）。
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".json.gone") {
+			info, err := e.Info()
+			if err == nil && now.Sub(info.ModTime()) > s.cacheTTL {
+				_ = os.Remove(filepath.Join(s.cacheDir, e.Name()))
+			}
+		}
+	}
 	for _, e := range entries {
 		name := e.Name()
 		if !strings.HasSuffix(name, ".json") {
@@ -479,6 +489,15 @@ func (s *ProxyService) sweepExpiredEntries() {
 					gonePath := metaPath + ".gone"
 					if err := os.Rename(metaPath, gonePath); err != nil {
 						continue
+					}
+					// rename 前的复核没在锁内，期间写侧可能已把同一 meta 覆盖成
+					// 好条目：再读一次 .gone，能解析成好 meta 就还回去。
+					if data, err := os.ReadFile(gonePath); err == nil {
+						var entry cacheEntry
+						if json.Unmarshal(data, &entry) == nil && !entry.expired(now) {
+							_ = os.Rename(gonePath, metaPath)
+							continue
+						}
 					}
 					_ = os.Remove(gonePath)
 					continue
@@ -1744,12 +1763,15 @@ func urlPathExtension(rawURL string) string {
 	return strings.ToLower(path.Ext(parsed.Path))
 }
 
+// buildCacheControl 媒体成功响应的缓存头。private 而非 public：代理地址里带
+// 用户 JWT（?token=），public 允许前置共享缓存/CDN 把带 token 的 URL 存进共
+// 享层；private 下浏览器私有缓存行为不变，token 不再多活一份。
 func buildCacheControl(ttl time.Duration) string {
 	seconds := int(ttl / time.Second)
 	if seconds <= 0 {
 		seconds = int(defaultCacheTTL / time.Second)
 	}
-	return "public, max-age=" + strconv.Itoa(seconds)
+	return "private, max-age=" + strconv.Itoa(seconds)
 }
 
 func cacheKey(normalized string) string {

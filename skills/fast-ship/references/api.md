@@ -5138,7 +5138,9 @@ Content-Type 时按扩展名回退的 `.svg`）与 HTML 等非图片/视频类�
 不影响 `<img>`/`<video>` 子资源渲染；文件名取上游 URL 末段，没有扩展名时按
 响应类型补，GitHub 的无扩展名附件下载下来才能直接打开）。
 上游 Content-Type 缺省或为 `application/octet-stream` 时按扩展名回填具体媒体类型；
-多段 `Range`（含逗号）按无 `Range` 处理返回完整 200。
+多段 `Range`（含逗号）按无 `Range` 处理返回完整 200。`HEAD` 的准入判定基于上游对 HEAD
+的响应（常无 Content-Type，按扩展名回退），因此冷缓存时对无扩展名附件的 HEAD 可能
+415 而同地址整文件 GET 为 200——以 GET 结果为准。
 415 里只有 svg 拒绝带缓存头：内容类型 `image/svg*` 是确定性拒绝，带
 `Cache-Control: private, max-age=600`；上游没给类型而扩展名是 `.svg` 的判据来自
 上游本次响应，只带 `max-age=60`；其它非媒体类型可能是上游临时的拦截页，不带缓存头。
