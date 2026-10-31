@@ -10,18 +10,13 @@
 // 围栏在容器深度下降时结束（引用块结束，里面的围栏也随之结束）。
 //
 // 覆盖范围刻意只到围栏、空白行、列表与引用这些必要构造：逐行剥掉容器标记后
-// 以 `[` 或 `<` 开头的行（引用/脚注定义、原始 HTML 块）、以及围栏开在列表项里
-// 的行，一出现就整段退回、不分块（任务列表项 `- [ ] x` 是正文，例外）。手写
-// 扫描器一旦去精确识别这两类语法，就是在写第二套 CommonMark 解释器：定义标签可以跨行（`[foo\nbar]: url`）、可以含转义右括号
+// 以 `[` 或 `<` 开头的行（引用/脚注定义、原始 HTML 块）、围栏开在列表项里的行、
+// 缩进 1–3 的围栏行（可能开在列表项内容里，列表容器不建模）、以及含裸 `\r`
+//（不跟 `\n` 的回车）的文本，一出现就整段退回、不分块（任务列表项 `- [ ] x`
+// 是正文，例外）。手写扫描器一旦去精确识别这两类语法，就是在写第二套
+// CommonMark 解释器：定义标签可以跨行（`[foo\nbar]: url`）、可以含转义右括号
 //（`[a\]b]: url`），HTML 块有 7 种起始与各自的反结束规则，反例是开放的。
 // 退回的代价只是这类回复失去增量优化，换来的是渲染结果与非流式完全一致。
-
-export interface IncompleteFenceSplit {
-  /** 已闭合（或不含围栏）的前缀，可安全交给 Markdown 渲染。 */
-  complete: string;
-  /** 最后一个未闭合围栏起始行起的原文；null 表示没有未闭合围栏。 */
-  openTail: string | null;
-}
 
 export interface StreamingMarkdownSplit {
   /** 已完成的块前缀，按安全切分点切开；拼接即稳定前缀，可从尾部之前缓存。 */
@@ -34,6 +29,7 @@ export interface StreamingMarkdownSplit {
 
 // 围栏起始行：行首缩进 ≤3 空格，≥3 个反引号或波浪线；开围栏可带信息串，
 // 但反引号围栏的信息串不得再含反引号（否则按 CommonMark 它不是围栏）。
+// 缩进 1–3 的命中不当作围栏，而是整段退回（见 scanSource）。
 const OPEN_RE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
 
 // blockquote 容器标记：≤3 空格缩进 + `>` + 可选一个空格；反复剥离即支持
@@ -66,9 +62,10 @@ function stripBlockquoteMarkers(line: string): { view: string; depth: number } {
 }
 
 /**
- * 行首空白占多少列，用来判定缩进代码块（≥4 列）。空格记 1 列，制表符补到
- * 下一个 4 的倍数——CommonMark 的 tab stop 就是 4 列，`\t` 与 4 空格同义。
- * 只看 `view`（已剥掉 blockquote 标记）的前导空白，与围栏判定同一口径。
+ * 行首空白占多少列。空格记 1 列，制表符补到下一个 4 的倍数——CommonMark 的
+ * tab stop 就是 4 列，`\t` 与 4 空格同义。只看 `view`（已剥掉 blockquote
+ * 标记）的前导空白，与围栏判定同一口径。用来判定缩进代码块（≥4 列），也用
+ * 来把缩进 1–3 的围栏行排除在围栏之外（>0 即整段退回，见 scanSource）。
  */
 function indentColumns(view: string): number {
   let columns = 0;
@@ -118,7 +115,10 @@ function stripContainerPrefixes(line: string): string {
 interface SourceScan {
   /** 安全切分点（原文偏移，升序）；退回时无意义。 */
   cuts: number[];
-  /** 围栏外出现行首 `[`/`<` 或列表项内围栏：调用方整段退回，不再分块。 */
+  /**
+   * 命中扫描器不建模的构造（行首 `[`/`<`、列表项内围栏、缩进 1–3 的围栏、
+   * 裸 `\r`）：调用方整段退回，不再分块。
+   */
   bail: boolean;
   /** 最后一个未闭合围栏的起始偏移；null 表示没有。 */
   fenceOpenStart: number | null;
@@ -177,6 +177,11 @@ function scanSource(text: string): SourceScan {
     // 除最后一行外都已换行完结；最后一行在文本以换行结尾时也已完结。
     const complete = endsWithNewline || index < lines.length - 1;
     const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+    // 裸 `\r`（不跟 `\n`）在 CommonMark 里也算换行，但这里按 `\n` 切行，于是
+    // `prefix\r<!--`、`Middle\r\r[x]: url`、`` ```\rcode `` 能把 HTML 块起点、
+    // 引用定义与围栏藏在一行中间，绕过上面那些行首退回判定。等价于对全文做
+    // `/\r(?!\n)/`：命中就整段退回，代价只是这类文本失去增量优化。
+    if (line.includes("\r")) bail = true;
     const { view, depth } = stripBlockquoteMarkers(line);
 
     // 容器深度下降即容器结束：引用块里的围栏随容器一起结束，后续行不属于该
@@ -209,8 +214,13 @@ function scanSource(text: string): SourceScan {
       if (m) {
         const marker = m[1];
         const info = m[2] ?? "";
+        // 围栏只认剥掉 blockquote 标记后的顶格：缩进 1–3 的围栏行可能开在
+        // 列表项内容里（`- 运行：\n  ```bash`），内容列取决于列表标记宽度，
+        // 列表容器不建模，因此整段退回。代价是「顶层但缩进 2/3」的围栏也失去
+        // 增量优化。
+        if (indentColumns(view) > 0) bail = true;
         // 反引号开围栏的信息串含反引号时整行不是围栏（只是普通段落文本）。
-        if (marker[0] === "~" || !info.includes("`")) {
+        else if (marker[0] === "~" || !info.includes("`")) {
           inFence = { char: marker[0] as "`" | "~", len: marker.length, depth };
           fenceOpenStart = offset;
         }
@@ -277,20 +287,5 @@ export function splitStreamingMarkdown(text: string): StreamingMarkdownSplit {
     segments,
     tailMarkdown: text.slice(stableEnd, plainStart),
     tailPlain: plainStart < text.length ? text.slice(plainStart) : null,
-  };
-}
-
-/**
- * 按 CommonMark 围栏规则扫描文本，返回未闭合围栏的切分点。实现是对
- * splitStreamingMarkdown 同一份扫描结果的薄包装，围栏状态没有第二套。
- * 完整闭合时 openTail 为 null；非流式场景不要用——未闭合围栏在 CommonMark
- * 里本来就是合法的「延续到文末的代码块」。
- */
-export function splitIncompleteFence(text: string): IncompleteFenceSplit {
-  const { fenceOpenStart } = scanSource(text);
-  if (fenceOpenStart === null) return { complete: text, openTail: null };
-  return {
-    complete: text.slice(0, fenceOpenStart),
-    openTail: text.slice(fenceOpenStart),
   };
 }

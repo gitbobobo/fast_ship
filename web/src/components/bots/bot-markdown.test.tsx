@@ -1,7 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { BotMarkdown } from "./bot-markdown";
-import { splitIncompleteFence, splitStreamingMarkdown } from "@/lib/bots/markdown-stream";
+import { splitStreamingMarkdown } from "@/lib/bots/markdown-stream";
 
 // 等价性样本：闭合/完整文本，流式分块渲染与整段解析必须产出相同 DOM。
 // 也包括退回路径的样本（列表项内围栏）：退回后不分块，仍未建模的构造只能靠
@@ -50,8 +50,9 @@ const EQUIV_SAMPLES: Array<[string, string]> = [
   ["下一个引用不算进代码块", "> ```\n> code\n\n> stillfence\n"],
 ];
 
-// 退回样本：行首 `<`（原始 HTML 块）、行首 `[`（链接/脚注引用定义）或围栏开在
-// 列表项里。这些文本不分块，流式渲染必须与非流式逐字节一致，且不得保留围栏降级。
+// 退回样本：行首 `<`（原始 HTML 块）、行首 `[`（链接/脚注引用定义）、围栏开在
+// 列表项里或缩进 1–3、含裸 `\r`。这些文本不分块，流式渲染必须与非流式逐字节
+// 一致，且不得保留围栏降级。
 const BAIL_SAMPLES: Array<[string, string]> = [
   ["引用式链接", "见 [标注] 与 [另一处][标]。\n\n[标注]: https://example.com/a\n[标]: https://example.com/b\n"],
   ["引用定义在后", "See [x].\n\nMiddle paragraph.\n\n[x]: https://example.com"],
@@ -75,6 +76,21 @@ const BAIL_SAMPLES: Array<[string, string]> = [
   ["列表项内围栏（无序）", "- ```\n  code\n\nZQMARKER\n"],
   // 任务项要求 `]` 后是空白或行尾；`]` 后紧跟 `:` 的是引用定义，仍要退回。
   ["列表项内的任务样式定义", "- [x]: url\n\nSee [x].\n"],
+  // 缩进 1–3 的围栏可能开在列表项内容里（列表容器不建模），一律整段退回。
+  // 这几条是审计实测的反例：把缩进围栏当成顶层围栏切分，DOM 就与整段解析不
+  // 一致（围栏行在列表项里，内容列取决于列表标记宽度）。
+  ["列表项续行围栏", "- 运行：\n  ```bash\n  pnpm test\n```\n\n后文一段。\n"],
+  ["列表项续行围栏二", "- a\n  ```\n```\n\n\nb1\n"],
+  ["列表项内缩进围栏误降级", "- item\n  ```\n  code\n\n后文仍在代码里？\n\n段落\n"],
+  ["列表项缩进 4 开、缩进 3 闭", "- item\n    ```\n    code\n   ```\n   more\n\n后文\n"],
+  ["列表项缩进 3 孤行围栏", "- item\n    code\n   ```\n\n后文\n"],
+  ["顶层缩进 2 围栏（退回）", "  ```\n  code\n```\n\n后文\n"],
+  ["有序列表缩进 2 围栏（退回）", "1. 步骤\n  ```\n  code\n```\n\n后文\n"],
+  // 裸 `\r`（不跟 `\n`）也是 CommonMark 换行，但扫描器按 `\n` 切行：HTML 块
+  // 起点、引用定义、围栏能藏在一行中间，绕过行首退回判定。
+  ["裸 CR 隐藏 HTML 块", "prefix\r<!--\n\ninside\n\n-->\n\nEnd\n"],
+  ["裸 CR 隐藏引用定义", "See [x].\n\nMiddle\r\r[x]: https://e.com\n\nEnd\n"],
+  ["裸 CR 围栏", "```\rcode\n\npara\n```\n\nend\n"],
 ];
 
 describe("BotMarkdown", () => {
@@ -249,7 +265,7 @@ describe("BotMarkdown", () => {
     }
   });
 
-  it("引用块里未闭合的围栏：流式降级为纯文本，降级段就是 openTail", () => {
+  it("引用块里未闭合的围栏：流式降级为纯文本，降级段就是 tailPlain", () => {
     // 设计行为：引用块里的围栏还没收到同容器的闭围栏时，流式从围栏起始行起
     // 降级为纯文本（增量优化优先），与非流式（CommonMark 里延续到文末的代码
     // 块）不同，因此这几条不进上面的严格等价样本。末尾换行不应改写这个判定
@@ -265,7 +281,9 @@ describe("BotMarkdown", () => {
       );
       const plain = container.querySelector(".whitespace-pre-wrap");
       expect(plain, text).not.toBeNull();
-      expect(plain?.textContent, text).toBe(splitIncompleteFence(text).openTail);
+      expect(plain?.textContent, text).toBe(
+        splitStreamingMarkdown(text).tailPlain,
+      );
       // 降级段未被吞进代码块：围栏标记原样可见。
       expect(container.querySelector("pre"), text).toBeNull();
       expect(container.textContent, text).toContain("```");

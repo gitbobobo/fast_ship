@@ -1,163 +1,93 @@
 import { describe, expect, it } from "vitest";
-import {
-  splitIncompleteFence,
-  splitStreamingMarkdown,
-} from "./markdown-stream";
+import { splitStreamingMarkdown } from "./markdown-stream";
 
 /** 切分扫描得到的「已完成的块前缀」：segments 拼接即稳定前缀。 */
 function stableOf(text: string): string {
   return splitStreamingMarkdown(text).segments.join("");
 }
 
-describe("splitIncompleteFence", () => {
-  it("无围栏时整体返回，openTail 为 null", () => {
-    const text = "普通文本\n\n- 列表\n- 项\n";
-    expect(splitIncompleteFence(text)).toEqual({
-      complete: text,
-      openTail: null,
+describe("围栏降级：tailPlain 直接断言", () => {
+  // 围栏降级只由 splitStreamingMarkdown 的 tailPlain 承担：最后一个未闭合围栏
+  // 起始行起的原文按纯文本展示，闭合后自动升级为代码块。这里逐条钉住围栏状态
+  // 与降级边界（这些样本原先断言的是已删除的围栏扫描器导出）。
+  it("顶格未闭合围栏：围栏起始行起降级为纯文本", () => {
+    expect(splitStreamingMarkdown("前文\n```ts\nconst a = 1;")).toEqual({
+      segments: [],
+      tailMarkdown: "前文\n",
+      tailPlain: "```ts\nconst a = 1;",
+    });
+    expect(splitStreamingMarkdown("前文\n~~~\ncode")).toEqual({
+      segments: [],
+      tailMarkdown: "前文\n",
+      tailPlain: "~~~\ncode",
     });
   });
 
-  it("已闭合的 ``` 围栏不算未闭合", () => {
-    const text = "前文\n```ts\nconst a = 1;\n```\n后文";
-    expect(splitIncompleteFence(text).openTail).toBeNull();
+  it("闭围栏规则：同字符、长度 ≥ 开围栏、标记后只允许空白", () => {
+    // ``` 不能闭合 ~~~ 开的围栏，反之亦然。
+    expect(
+      splitStreamingMarkdown("~~~\ncode\n```\nstill").tailPlain,
+    ).toBe("~~~\ncode\n```\nstill");
+    // 闭围栏长度必须 ≥ 开围栏：```` 内 ``` 不闭合。
+    expect(
+      splitStreamingMarkdown("````\ncode\n```\nmore").tailPlain,
+    ).toBe("````\ncode\n```\nmore");
+    // 更长的闭围栏可以闭合短围栏。
+    expect(splitStreamingMarkdown("```\ncode\n````\n后文").tailPlain).toBeNull();
+    // 闭围栏标记后只允许空白：带信息串不闭合，带空白闭合。
+    expect(
+      splitStreamingMarkdown("```js\ncode\n``` js\nmore").tailPlain,
+    ).toBe("```js\ncode\n``` js\nmore");
+    expect(
+      splitStreamingMarkdown("```js\ncode\n```   \n后文").tailPlain,
+    ).toBeNull();
   });
 
-  it("未闭合的 ``` 从围栏起始行切出 openTail", () => {
-    const text = "前文\n```ts\nconst a = 1;";
-    expect(splitIncompleteFence(text)).toEqual({
-      complete: "前文\n",
-      openTail: "```ts\nconst a = 1;",
+  it("闭合后再开新围栏：降级从最后一个未闭合围栏起", () => {
+    expect(splitStreamingMarkdown("```\na\n```\n中间\n```\nb")).toEqual({
+      segments: [],
+      tailMarkdown: "```\na\n```\n中间\n",
+      tailPlain: "```\nb",
     });
   });
 
-  it("未闭合的 ~~~ 同样切出", () => {
-    const text = "前文\n~~~\ncode";
-    expect(splitIncompleteFence(text)).toEqual({
-      complete: "前文\n",
-      openTail: "~~~\ncode",
-    });
-  });
-
-  it("``` 不能闭合 ~~~ 开的围栏（反之亦然）", () => {
-    const text = "~~~\ncode\n```\nstill open";
-    const r = splitIncompleteFence(text);
-    expect(r.openTail).toBe("~~~\ncode\n```\nstill open");
-  });
-
-  it("闭围栏长度必须 ≥ 开围栏：```` 内 ``` 不闭合", () => {
-    const text = "````\ncode\n```\nmore";
-    const r = splitIncompleteFence(text);
-    expect(r.openTail).toBe("````\ncode\n```\nmore");
-  });
-
-  it("更长的闭围栏可以闭合短围栏", () => {
-    const text = "```\ncode\n````\n后文";
-    expect(splitIncompleteFence(text).openTail).toBeNull();
-  });
-
-  it("行首缩进 ≤3 空格算围栏，4 空格不算", () => {
-    const open = splitIncompleteFence("前文\n   ```js\ncode");
-    expect(open.openTail).toBe("   ```js\ncode");
-    const indented = splitIncompleteFence("前文\n    ```js\ncode");
-    expect(indented.openTail).toBeNull();
-  });
-
-  it("闭围栏标记后只允许空白，带信息串不闭合", () => {
-    const text = "```js\ncode\n``` js\nmore";
-    expect(splitIncompleteFence(text).openTail).toBe("```js\ncode\n``` js\nmore");
-    const closed = "```js\ncode\n```   \n后文";
-    expect(splitIncompleteFence(closed).openTail).toBeNull();
-  });
-
-  it("反引号开围栏的信息串含反引号时整行不是围栏", () => {
+  it("围栏信息串含反引号不算围栏：不降级，整段留在尾部", () => {
     const text = "前文\n``` `a` ```\n后文";
-    expect(splitIncompleteFence(text).openTail).toBeNull();
-  });
-
-  it("闭合后再开新围栏，切最后一个未闭合的", () => {
-    const text = "```\na\n```\n中间\n```\nb";
-    expect(splitIncompleteFence(text)).toEqual({
-      complete: "```\na\n```\n中间\n",
-      openTail: "```\nb",
+    expect(splitStreamingMarkdown(text)).toEqual({
+      segments: [],
+      tailMarkdown: text,
+      tailPlain: null,
     });
   });
 
-  it("行内出现的围栏标记不当作围栏行", () => {
-    const text = "正文里有 ``` 但不是行首围栏";
-    expect(splitIncompleteFence(text).openTail).toBeNull();
-  });
-
-  it("blockquote 内未闭合围栏从容器行切出 openTail", () => {
-    const text = "前文\n> ```ts\n> const a = 1;";
-    expect(splitIncompleteFence(text)).toEqual({
-      complete: "前文\n",
-      openTail: "> ```ts\n> const a = 1;",
+  it("缩进 4 空格不是围栏（是缩进代码块）：不降级", () => {
+    const text = "前文\n    ```js\ncode";
+    expect(splitStreamingMarkdown(text)).toEqual({
+      segments: [],
+      tailMarkdown: text,
+      tailPlain: null,
     });
   });
 
-  it("blockquote 内已闭合围栏不算未闭合", () => {
-    const text = "> ```ts\n> const a = 1;\n> ```";
-    expect(splitIncompleteFence(text).openTail).toBeNull();
-  });
-
-  it("嵌套 blockquote（> >）内未闭合围栏可识别", () => {
-    const text = "前文\n> > ```ts\n> > const a = 1;";
-    expect(splitIncompleteFence(text)).toEqual({
-      complete: "前文\n",
-      openTail: "> > ```ts\n> > const a = 1;",
-    });
-  });
-
-  it("紧凑嵌套 blockquote（>>）内的围栏同样可识别", () => {
-    const text = ">> ```ts\n>> code";
-    expect(splitIncompleteFence(text)).toEqual({
-      complete: "",
-      openTail: text,
-    });
-    // 下一行掉出两层容器：围栏随容器一起结束（末行 `code` 是顶层段落）。
-    expect(splitIncompleteFence(">> ```ts\ncode").openTail).toBeNull();
-  });
-
-  it("普通引用文本不误判为围栏", () => {
-    const text = "> 普通引用文本\n> 第二行引用";
-    expect(splitIncompleteFence(text)).toEqual({
-      complete: text,
-      openTail: null,
-    });
-  });
-
-  it("顶层围栏不会被内容里的容器前缀行误闭合", () => {
-    const text = "```\n> ```ts\n> x\n> ```\n后文";
-    expect(splitIncompleteFence(text)).toEqual({
-      complete: "",
-      openTail: text,
-    });
-  });
-
-  it("blockquote 内围栏只被同容器深度的行闭合", () => {
+  it("blockquote 内围栏按容器深度配对：深度不同不闭合", () => {
     const text = "> ```ts\n> > ```\n> x";
-    expect(splitIncompleteFence(text)).toEqual({
-      complete: "",
-      openTail: text,
-    });
+    expect(splitStreamingMarkdown(text).tailPlain).toBe(text);
+    expect(splitStreamingMarkdown("> ```ts\n> a\n> ```").tailPlain).toBeNull();
+    // 顶层围栏不会被内容里的 `> ``` ` 行误闭合。
+    const nested = "```\n> ```ts\n> x\n> ```\n后文";
+    expect(splitStreamingMarkdown(nested).tailPlain).toBe(nested);
   });
 
-  it("容器深度下降时围栏随之结束（裸空行结束引用块里的围栏）", () => {
-    const text = "> ```\n> code\n\nZQMARKER";
-    expect(splitIncompleteFence(text).openTail).toBeNull();
-    // 行首 `>` 的空引用行深度不变，引用还在继续，围栏不结束。
-    expect(splitIncompleteFence("> ```\n> code\n>\n> still").openTail).toBe(
-      "> ```\n> code\n>\n> still",
-    );
+  it("裸空行结束引用块里的围栏：后面的正文不再降级", () => {
+    expect(
+      splitStreamingMarkdown("> ```\n> code\n\nZQMARKER").tailPlain,
+    ).toBeNull();
   });
 
-  it("末尾换行不产生额外的空行：引用块里的围栏不因它关闭", () => {
-    // `"> ```\n> code\n"` 在 CommonMark 里只有两行，末尾那个空串不是一行；
-    // 把它当真实空行（深度 0）会关闭引用块里仍在增大的围栏。
-    expect(splitIncompleteFence("> ```\n> code\n").openTail).toBe(
-      "> ```\n> code\n",
-    );
+  it("末尾换行不产生额外空行：引用块里的围栏保持降级", () => {
+    for (const text of ["> ```\n> code\n", "> ```\n> code\n> more\n"]) {
+      expect(splitStreamingMarkdown(text).tailPlain, text).toBe(text);
+    }
   });
 });
 
@@ -427,6 +357,39 @@ describe("splitStreamingMarkdown 退回（不分块）", () => {
     expectBail("> 1. ```\n> code\n");
   });
 
+  it("缩进 1–3 的围栏行整段退回：可能属于列表项内容", () => {
+    // 围栏只认剥掉 blockquote 标记后的顶格：缩进 1–3 的围栏行可能开在列表项
+    // 内容里（`- 运行：\n  ```bash`），内容列取决于列表标记宽度，列表容器不
+    // 建模。代价是「顶层但缩进 2/3」的围栏也失去增量优化。
+    expectBail("  ```\n  code\n  ```\n\n后文\n");
+    expectBail("- 运行：\n  ```bash\n  pnpm test\n```\n\n后文一段。\n");
+    expectBail(">    ```\n>    code\n>    ```\n\n后文\n");
+  });
+
+  it("裸 CR（不跟 `\\n`）整段退回", () => {
+    // CommonMark 把裸 `\r` 也当换行，而扫描器按 `\n` 切行：HTML 块起点、引用
+    // 定义、围栏都能藏在一行中间，绕过行首退回判定。
+    expectBail("prefix\r<!--\n\ninside\n\n-->\n\nEnd\n");
+    expectBail("See [x].\n\nMiddle\r\r[x]: https://e.com\n\nEnd\n");
+    expectBail("```\rcode\n\npara\n```\n\nend\n");
+  });
+
+  it("顶格围栏照常切分（缩进退回的对照）", () => {
+    const fence = splitStreamingMarkdown("```ts\ncode\n```\n\n后文\n");
+    expect(fence.segments).toEqual(["```ts\ncode\n```\n"]);
+    expect(fence.tailMarkdown).toBe("\n后文\n");
+    expect(fence.tailPlain).toBeNull();
+    // 列表之后的顶格围栏同样是语义独立的新块。
+    const afterList = splitStreamingMarkdown(
+      "- 运行：\n\n```bash\ncode\n```\n\n后文\n",
+    );
+    expect(afterList.segments).toEqual([
+      "- 运行：\n",
+      "\n```bash\ncode\n```\n",
+    ]);
+    expect(afterList.tailPlain).toBeNull();
+  });
+
   it("围栏内的 `<`/`[` 行不触发退回：代码类回复不该失去增量优化", () => {
     const text = "```tsx\n<div>\n[x]: url\n```\n\n后文\n";
     const r = splitStreamingMarkdown(text);
@@ -456,7 +419,6 @@ describe("末尾换行与引围栏降级", () => {
       expect(r.segments, text).toEqual([]);
       expect(r.tailMarkdown, text).toBe("");
       expect(r.tailPlain, text).toBe(text);
-      expect(splitIncompleteFence(text).openTail, text).toBe(text);
     }
   });
 
@@ -476,9 +438,9 @@ describe("末尾换行与引围栏降级", () => {
   });
 });
 
-describe("tailPlain 与 splitIncompleteFence 一致", () => {
-  // 未闭合围栏起点是同一份扫描结果的两个出口：分块用的降级段与既有
-  // splitIncompleteFence 的 openTail 必须逐字节相同，否则两处围栏状态又会分叉。
+describe("tailPlain 与切分点覆盖全文", () => {
+  // 三段拼回必须逐字节等于全文：漏掉一段就是渲染丢内容。围栏状态只有
+  // scanSource 一份，切分点与降级段不会得出相反结论。
   const samples = [
     "普通文本\n\n- 列表\n- 项\n",
     "前文\n```ts\nconst a = 1;",
@@ -494,16 +456,11 @@ describe("tailPlain 与 splitIncompleteFence 一致", () => {
     "> ```\n> code\n> more",
   ];
 
-  it("非退回样本上两处出口逐字节一致", () => {
+  it("非退回样本上三段拼回逐字节等于全文", () => {
     for (const text of samples) {
-      const scan = splitStreamingMarkdown(text);
-      const fence = splitIncompleteFence(text);
-      expect(scan.tailPlain, text).toBe(fence.openTail);
-      expect(scan.segments.join("") + scan.tailMarkdown, text).toBe(
-        fence.complete,
-      );
+      const { segments, tailMarkdown, tailPlain } = splitStreamingMarkdown(text);
       expect(
-        scan.segments.join("") + scan.tailMarkdown + (scan.tailPlain ?? ""),
+        segments.join("") + tailMarkdown + (tailPlain ?? ""),
         text,
       ).toBe(text);
     }
