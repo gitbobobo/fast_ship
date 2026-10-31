@@ -96,47 +96,44 @@ git add VERSION
 git commit -m "chore: bump version to ${VERSION}"
 git tag "${TAG_NAME}"
 git push --atomic origin main "refs/tags/${TAG_NAME}"
+# 推送成功即退出回滚区间：此后任何失败只报告，不回滚、不删 tag、不重推
 trap - ERR INT TERM
 
 printf '已推送 main 与 tag %s\n' "${TAG_NAME}"
 
-# 推送后打印 Docker Publish 的 run 链接，不等待构建完成
-REPO_PATH=""
+# 推送后打印 Docker Publish 的 run 链接，不等待构建完成。
+# origin 是 GitHub 时按推送地址查询；origin 是 Forgejo 等其它主机时，改从
+# github 远程的 fetch URL 解析镜像仓库（github 远程的 push 已置 disabled，
+# 不能用于解析与查询）。
+GH_URL=""
 case "${PUSH_URL}" in
-  https://github.com/*)   REPO_PATH="${PUSH_URL#https://github.com/}" ;;
-  http://github.com/*)    REPO_PATH="${PUSH_URL#http://github.com/}" ;;
-  git@github.com:*)       REPO_PATH="${PUSH_URL#git@github.com:}" ;;
-  ssh://git@github.com/*) REPO_PATH="${PUSH_URL#ssh://git@github.com/}" ;;
+  https://github.com/*|http://github.com/*|git@github.com:*|ssh://git@github.com/*)
+    GH_URL="${PUSH_URL}" ;;
+  *)
+    GH_URL="$(git remote get-url github 2>/dev/null || true)" ;;
+esac
+REPO_PATH=""
+case "${GH_URL}" in
+  https://github.com/*)   REPO_PATH="${GH_URL#https://github.com/}" ;;
+  http://github.com/*)    REPO_PATH="${GH_URL#http://github.com/}" ;;
+  git@github.com:*)       REPO_PATH="${GH_URL#git@github.com:}" ;;
+  ssh://git@github.com/*) REPO_PATH="${GH_URL#ssh://git@github.com/}" ;;
 esac
 REPO_PATH="${REPO_PATH%.git}"
 REPO_PATH="${REPO_PATH%/}"
 
 if [[ -z "${REPO_PATH}" ]]; then
-  printf '远程地址不是 github.com，跳过构建查询\n'
+  printf '未能解析 GitHub 仓库（origin：%s，github 远程：%s），跳过构建查询\n' "${PUSH_URL}" "${GH_URL:-未配置}"
   exit 0
 fi
 
 WORKFLOW_URL="https://github.com/${REPO_PATH}/actions/workflows/docker-publish.yml"
 
-if ! command -v gh >/dev/null 2>&1; then
-  printf '未安装 gh，构建页面：%s\n' "${WORKFLOW_URL}"
-  printf '安装 gh 后可用 gh run watch 跟进构建\n'
-  exit 0
-fi
-
+# 推送成功后不再发起网络查询：镜像尚未到达、认证失败或网络挂起都不应
+# 阻塞发版命令，也不能把同名旧 tag 的构建当成本次发布。
 TAG_SHA="$(git rev-parse HEAD)"
-RUN_URL=""
-for _ in {1..12}; do
-  RUN_URL="$(gh run list --repo "${REPO_PATH}" --workflow=docker-publish.yml \
-    --json url,headSha,headBranch -L 20 \
-    --jq ".[] | select(.headSha == \"${TAG_SHA}\" or .headBranch == \"${TAG_NAME}\") | .url" 2>/dev/null | head -n 1 || true)"
-  [[ -n "${RUN_URL}" ]] && break
-  sleep 5
-done
-
-if [[ -n "${RUN_URL}" ]]; then
-  printf 'Docker Publish run：%s\n' "${RUN_URL}"
-else
-  printf '暂未查到 Docker Publish run，构建页面：%s\n' "${WORKFLOW_URL}"
-fi
-printf '如需等待构建完成，运行 gh run watch\n'
+printf 'Docker Publish 构建页面：%s\n' "${WORKFLOW_URL}"
+printf '本次发布：tag=%s，commit=%s；尚未确认镜像同步或构建启动\n' "${TAG_NAME}" "${TAG_SHA}"
+printf '镜像长时间未同步时检查 Forgejo 推送镜像的 last_error；不要重新发版\n'
+printf '安装并登录 gh 后，按本次提交与 tag 查询构建：\n'
+printf "gh run list --repo %q --workflow docker-publish.yml --commit %q --branch %q --json url,headSha,headBranch,status,conclusion\n" "${REPO_PATH}" "${TAG_SHA}" "${TAG_NAME}"
