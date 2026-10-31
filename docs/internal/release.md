@@ -38,4 +38,6 @@ VERSION 文件当前内容与目标版本都必须是 `X.Y.Z` 形式，否则报
 
 脚本不依赖 gh；安装并登录 gh 后可运行输出的查询命令，也可直接打开构建页面。`v*` tag 触发 `.github/workflows/docker-publish.yml`：先跑 `pnpm check`，再构建 linux/amd64 与 linux/arm64 镜像推到 `ghcr.io/gitbobobo/fast_ship`，镜像 tag 为版本号和 `latest`，全程约 10 分钟以上。
 
-`scripts/release-fixture.sh` 是发版脚本的隔离测试：临时裸仓库当远端，覆盖 GitHub origin、Forgejo origin + 禁用 GitHub 推送、新克隆没有镜像配置及推送被拒回滚。测试让推送后的网络调用和 gh 失败，断言脚本完全不调用它们，同时核对真实远端 main/tag 和本地 VERSION/tag；改 release.sh 后跑一遍。
+迁移时只核对了已有 67 个标签的双端一致性，未发布新版本；通过部署密钥镜像推送新版本标签并触发 Docker Publish 尚待首次正式发版实测。首次发版后核对 `git ls-remote github refs/tags/vX` 的 SHA 与 Forgejo 一致，并用输出的 SHA/tag 查询命令确认 Docker Publish run 与 GHCR 产物，不能把页面链接当作发布成功证据。
+
+`scripts/release-fixture.sh` 是发版脚本的隔离测试：临时裸仓库当远端，覆盖 GitHub origin、Forgejo origin + 禁用 GitHub 推送、新克隆没有镜像配置、URL 内嵌凭据不回显、全局标签签名开启时仍不调用签名器，以及推送被拒回滚。测试让推送后的网络调用和 gh 失败，断言脚本完全不调用它们，同时核对真实远端 main/tag 和本地 VERSION/tag；改 release.sh 后跑一遍。

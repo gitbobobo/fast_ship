@@ -36,6 +36,7 @@ setup() {
   git -C "${REPO}" config user.name fixture
   # 禁用开发机签名/钩子，避免测试向外访问或请求系统权限。
   git -C "${REPO}" config commit.gpgsign false
+  git -C "${REPO}" config tag.gpgsign false
   git -C "${REPO}" config core.hooksPath "${SC}/no-hooks"
   cp "${ROOT_DIR}/scripts/release.sh" "${REPO}/scripts/release.sh"
   printf '0.1.67\n' > "${REPO}/VERSION"
@@ -70,6 +71,7 @@ run_release() {
   RC=0
   (cd "${REPO}" && PATH="${SC}/bin:${PATH}" bash scripts/release.sh) > "${SC}/out.log" 2> "${SC}/err.log" || RC=$?
   OUT="$(cat "${SC}/out.log")"
+  ERR_OUT="$(cat "${SC}/err.log")"
 }
 verify_pushed() {
   local sha
@@ -105,6 +107,43 @@ setup no-mirror "${FJ_URL}"
 run_release
 verify_pushed
 contains "${OUT}" "跳过构建查询" "无镜像配置安全退出"
+
+printf '== URL userinfo 不进入构建页面或输出 ==\n'
+MARKER='fixture-userinfo-marker'
+setup userinfo-origin "https://oauth2:${MARKER}@github.com/test-owner/test-repo.git"
+run_release
+verify_pushed
+contains "${OUT}" "https://github.com/test-owner/test-repo/actions/workflows/docker-publish.yml" "GitHub origin剥除userinfo"
+equal "$([[ "${OUT}${ERR_OUT}" == *"${MARKER}"* ]] && echo leaked || true)" "" "GitHub凭据不回显"
+
+setup userinfo-mirror "https://x:${MARKER}@forgejo.example/fjbobo/test-repo.git"
+git -C "${REPO}" remote add github "https://oauth2:${MARKER}@github.com/test-owner/test-repo.git"
+git -C "${REPO}" remote set-url --push github disabled://github-read-only
+run_release
+verify_pushed
+contains "${OUT}" "https://github.com/test-owner/test-repo/actions/workflows/docker-publish.yml" "GitHub mirror剥除userinfo"
+equal "$([[ "${OUT}${ERR_OUT}" == *"${MARKER}"* ]] && echo leaked || true)" "" "镜像凭据不回显"
+
+setup userinfo-fallback "https://x:${MARKER}@forgejo.example/fjbobo/test-repo.git"
+run_release
+verify_pushed
+contains "${OUT}" "跳过构建查询" "解析失败仍安全退出"
+equal "$([[ "${OUT}${ERR_OUT}" == *"${MARKER}"* ]] && echo leaked || true)" "" "兜底不回显原始URL"
+
+printf '== 全局标签签名开启也不调用签名器 ==\n'
+setup signing "${FJ_URL}"
+cat > "${SC}/bin/signing-must-not-run" <<EOF
+#!/usr/bin/env bash
+echo unexpected-signing >> "${SC}/unexpected"
+exit 78
+EOF
+chmod +x "${SC}/bin/signing-must-not-run"
+# 用隔离的全局配置开启签名并指定阻断签名器；仓库设置必须覆盖全局。
+git config --file "${SC}/global.gitconfig" tag.gpgsign true
+git config --file "${SC}/global.gitconfig" gpg.program "${SC}/bin/signing-must-not-run"
+GIT_CONFIG_GLOBAL="${SC}/global.gitconfig" run_release
+verify_pushed
+equal "$(git -C "${REPO}" cat-file -t refs/tags/v0.1.68)" commit "测试仍生成轻量tag"
 
 printf '== 原子推送被拒，回滚本地 ==\n'
 setup rejected "${FJ_URL}"

@@ -29,10 +29,11 @@ make release                # VERSION 补丁号 +1
 make release VERSION=x.y.z  # 指定版本
 ```
 
-脚本完成前置检查、VERSION 修改、`chore: bump version to x.y.z` 提交、`vx.y.z` tag，并以一条 `git push --atomic` 同推 main 与 tag，最后打印 Docker Publish 的 run 链接。前置检查、产物与构建链路的完整约定见 [docs/internal/release.md](/docs/internal/release.md)。
+脚本完成前置检查、VERSION 修改、`chore: bump version to x.y.z` 提交、`vx.y.z` tag，并以一条 `git push --atomic` 同推 Forgejo main 与 tag。随后立即打印 GitHub 构建页面与限定本次提交 SHA、tag 的查询命令，不等待镜像同步或构建。推送成功不代表镜像已同步或构建已启动；按输出的命令核对具体 run。前置检查、产物与构建链路的完整约定见 [docs/internal/release.md](/docs/internal/release.md)。
 
 ## 失败处理
 
 - **前置检查报错或发版中途失败**：守卫失败零副作用；写 VERSION 到推送之间失败会自动回滚本地提交与 tag。按报错修复原因后重跑 `make release`。
 - **Docker 构建失败**：`gh run view --log-failed` 排查。需要代码修复就合入后用新版本号重跑 `make release`；仅需重试构建时在 Actions 页面 rerun。
+- **推送成功后尚无构建**：核对 GitHub 上目标 tag 的 SHA 和对应 Actions run；镜像异常时修复同步并检查 `last_error`，保留已推送的版本、提交与 tag，不重复发版。
 - **禁止**使用 `git push --force` 覆盖已发布的 tag，除非用户明确要求。

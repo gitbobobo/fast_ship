@@ -101,29 +101,36 @@ trap - ERR INT TERM
 
 printf '已推送 main 与 tag %s\n' "${TAG_NAME}"
 
-# 推送后打印 Docker Publish 的 run 链接，不等待构建完成。
-# origin 是 GitHub 时按推送地址查询；origin 是 Forgejo 等其它主机时，改从
-# github 远程的 fetch URL 解析镜像仓库（github 远程的 push 已置 disabled，
-# 不能用于解析与查询）。
-GH_URL=""
-case "${PUSH_URL}" in
-  https://github.com/*|http://github.com/*|git@github.com:*|ssh://git@github.com/*)
-    GH_URL="${PUSH_URL}" ;;
-  *)
-    GH_URL="$(git remote get-url github 2>/dev/null || true)" ;;
-esac
-REPO_PATH=""
-case "${GH_URL}" in
-  https://github.com/*)   REPO_PATH="${GH_URL#https://github.com/}" ;;
-  http://github.com/*)    REPO_PATH="${GH_URL#http://github.com/}" ;;
-  git@github.com:*)       REPO_PATH="${GH_URL#git@github.com:}" ;;
-  ssh://git@github.com/*) REPO_PATH="${GH_URL#ssh://git@github.com/}" ;;
-esac
-REPO_PATH="${REPO_PATH%.git}"
-REPO_PATH="${REPO_PATH%/}"
+# 只返回 GitHub owner/repo；剥除 authority 中的 userinfo，原始 URL 从不回显。
+github_repo() {
+  local url="$1" authority path
+  case "${url}" in
+    https://*|http://*|ssh://*)
+      authority="${url#*://}"
+      [[ "${authority}" == */* ]] || return 1
+      path="${authority#*/}"
+      authority="${authority%%/*}"
+      authority="${authority##*@}"
+      [[ "${authority}" == github.com ]] || return 1 ;;
+    git@github.com:*) path="${url#git@github.com:}" ;;
+    *) return 1 ;;
+  esac
+  path="${path%/}"
+  path="${path%.git}"
+  # 不把 query、fragment、额外路径或其它凭据片段带入页面/命令。
+  [[ "${path}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || return 1
+  printf '%s\n' "${path}"
+}
+
+# github 远程只取 fetch URL；push URL 已禁用。新克隆没有该远程也能发版。
+REPO_PATH="$(github_repo "${PUSH_URL}" || true)"
+if [[ -z "${REPO_PATH}" ]]; then
+  GH_URL="$(git remote get-url github 2>/dev/null || true)"
+  REPO_PATH="$(github_repo "${GH_URL}" || true)"
+fi
 
 if [[ -z "${REPO_PATH}" ]]; then
-  printf '未能解析 GitHub 仓库（origin：%s，github 远程：%s），跳过构建查询\n' "${PUSH_URL}" "${GH_URL:-未配置}"
+  printf '未能解析 GitHub 镜像仓库，跳过构建查询；请检查远程配置\n'
   exit 0
 fi
 
