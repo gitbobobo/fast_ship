@@ -275,6 +275,13 @@ func TestScreenshotHandlerContent_ServesStoredImage(t *testing.T) {
 	if cd := contentRec.Header().Get("Content-Disposition"); cd != "inline" {
 		t.Fatalf("expected inline disposition, got %q", cd)
 	}
+	// 同源内容出口不变量：截图是用户上传内容且认 ?token=，必须带硬化头。
+	if got := contentRec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Fatalf("expected nosniff, got %q", got)
+	}
+	if got := contentRec.Header().Get("Content-Security-Policy"); got != "default-src 'none'; sandbox" {
+		t.Fatalf("expected sandbox CSP, got %q", got)
+	}
 	if contentRec.Body.String() != string(handlerTestPNGBytes) {
 		t.Fatalf("unexpected content body (%d bytes)", contentRec.Body.Len())
 	}

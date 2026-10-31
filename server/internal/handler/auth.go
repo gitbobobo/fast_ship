@@ -258,7 +258,9 @@ func (h *AuthHandler) GetAvatar(c *gin.Context) {
 		contentType = "image/webp"
 	}
 
-	c.Header("Cache-Control", "private, max-age=3600")
+	// 头像地址存在用户表里、改不了缓存键，没法像媒体代理那样加版本参数：
+	// 部署前缓存的旧响应（没有硬化头）只能靠短 TTL 自然退役，所以用分钟级。
+	c.Header("Cache-Control", "private, max-age=300")
 	// 与媒体代理同一道同源内容不变量：头像同样认 ?token=，不能以同源文档
 	// 交付（上传只验扩展名与内容嗅探，多态文件仍可能被当成图片存下）。
 	setSameOriginAttachmentHeaders(c.Writer.Header(), sanitizeAttachmentFileName(filename))

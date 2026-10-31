@@ -177,6 +177,12 @@ func (h *ScreenshotHandler) Content(c *gin.Context) {
 	if mimeType == "" {
 		mimeType = "application/octet-stream"
 	}
+	// 同一道同源内容不变量：这条出口认 ?token=，内容由用户上传（上传只按前 512
+	// 字节嗅探求 image/*，「位图魔数 + HTML 体」的多态文件能过），不能以同源可
+	// 执行文档交付。nosniff 禁止把 image/* 改判成 HTML，CSP sandbox 兜底禁脚本。
+	// 这里保留 inline：截图库与 Issue 页的「在标签页里看截图」是产品行为，而
+	// 硬化头已经把脚本执行面堵住（cd 只影响顶层导航，子资源不受影响）。
+	setSameOriginContentHardeningHeaders(c.Writer.Header())
 	c.Header("Content-Disposition", "inline")
 	c.Header("Cache-Control", "private, max-age=300")
 	c.DataFromReader(200, fileSize, mimeType, reader, nil)

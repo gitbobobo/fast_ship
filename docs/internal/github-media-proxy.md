@@ -15,7 +15,18 @@ svg（`image/svg+xml`、非标准写法 `image/svg`、扩展名 `.svg`）与 HTM
 
 媒体代理的成功响应统一带：`X-Content-Type-Options: nosniff`（禁止嗅探改判）、`Content-Disposition: attachment; filename=…`（顶层导航退化为下载而非同源文档，只影响导航、不影响 `<img>`/`<video>` 子资源渲染；文件名优先取上游 URL 末段：末段已是媒体扩展名就保留；准入表内的类型按响应类型反查扩展名、替换不可信的后缀（`.v2`、结尾一个点、无扩展名）；表外类型（`image/avif`、`video/x-matroska` 这些按前缀放行但表里没有的）反查不到，保留上游自己的 `.avif`/`.mkv`，只在完全没后缀时退 `.bin`）与 `Content-Security-Policy: default-src 'none'; sandbox`（兜底禁脚本禁同源）。
 
-**同源出口不变量**：同一套硬化头也用在同一组「`?token=` + 用户可控内容」的出口上——`/api/issues/assets/:aid/content`（Issue 附件，上传只按前 512 字节嗅探求 `image/*`，「图片魔数 + HTML/SVG 体」的多态文件会被存成 `image/*`）与 `/api/avatars/:uid/:filename`（头像），两者都走 `setSameOriginAttachmentHeaders`。新增同类出口时照这个口径接上，别只给媒体代理加。
+**同源出口不变量**：同一套硬化头也用在同一组「`?token=` + 用户可控内容」的出口上，全部走 `server/internal/handler/github_media_proxy.go` 的 `setSameOriginContentHardeningHeaders`（`nosniff` + `CSP: default-src 'none'; sandbox`），需要下载语义的再加 `setSameOriginAttachmentHeaders`（带文件名的 `attachment`）：
+
+| 出口 | 硬化 | 说明 |
+| --- | --- | --- |
+| `/api/github/media-proxy` | nosniff + CSP + attachment | 任意公网图片/视频（仅收媒体类型） |
+| `/api/issues/assets/:aid/content` | nosniff + CSP + attachment | Issue 附件，上传只按前 512 字节嗅探求 `image/*`，「图片魔数 + HTML/SVG 体」的多态文件能过 |
+| `/api/avatars/:uid/:filename` | nosniff + CSP + attachment | 头像 |
+| `/api/screenshot-screens/:sid/content` | nosniff + CSP，保留 `inline` | 截图同样是用户上传 + `?token=`；「在标签页里看截图」是产品行为，`inline` 保留，脚本执行面由 nosniff + CSP 堵住 |
+
+`/api/artifacts/:aid/download`、`/api/attachments/:aid/download` 以 `application/octet-stream` + `attachment` 下发，本身不构成同源文档，不在这个不变量里。`/api/screenshot-annotations/:aid/crop` 是服务端生成的裁剪 PNG，也不在。
+
+**残余窗口**：头像地址存在用户表里、改不了缓存键，没法像媒体代理那样加版本参数；Issue 附件同理。两条出口的 `Cache-Control` 都压到 `private, max-age=300`，部署前缓存的旧响应（没有硬化头）最长 5 分钟内自然退役——不当作长期防线，但也不假装它不存在。新增同类出口时照上表接上，别只给媒体代理加。
 
 ## 地址版本参数
 
