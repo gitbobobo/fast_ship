@@ -41,10 +41,35 @@ const reviewCommentWakeMention = "@fast-ship-bot"
 // 取失败（瞬时 DB 故障）透出错误——评论可能用了 @<slug>，静默回落字面量
 // 会让该唤醒被无声忽略且重投同样失败（codex 第 22 轮 P2：调用方按瞬时
 // 失败返回 500 让平台重投）。
+// reviewMentionsCacheTTL App 句柄的缓存时长：订阅 issue_comment 后所有
+// 评论都进唤醒分支，逐条读取部署设置（DB 读 + AES 解密）是可被外部用户
+// 按评论线性放大的固定成本（fast-ship-bot 第 44 轮 P2）——短缓存把成本
+// 压到每 TTL 一次；slug 变更罕见，TTL 刷新足够。
+const reviewMentionsCacheTTL = 5 * time.Minute
+
+// commentWakeMentions 唤醒串集合：规格字面量 + 部署真实机器人句柄（App
+// slug，manifest 流创建的 App slug 形如 fast-ship-<host>，与字面量不同——
+// fast-ship-bot 第 20 轮 P2）。App 身份未配置（ok=false）回落字面量；读
+// 取失败（瞬时 DB 故障）透出错误——评论可能用了 @<slug>，静默回落字面量
+// 会让该唤醒被无声忽略且重投同样失败（codex 第 22 轮 P2：调用方按瞬时
+// 失败返回 500 让平台重投）。读取结果短时缓存（见 reviewMentionsCacheTTL）。
 func (s *ReviewService) commentWakeMentions(ctx context.Context) ([]string, error) {
 	mentions := []string{reviewCommentWakeMention}
 	if s.appSource == nil {
 		return mentions, nil
+	}
+	type slugEntry struct {
+		slug    string
+		expires time.Time
+	}
+	if v, ok := s.mentionsSlugCache.Load("slug"); ok {
+		e := v.(slugEntry)
+		if time.Now().UTC().Before(e.expires) {
+			if e.slug != "" {
+				mentions = append(mentions, "@"+strings.ToLower(e.slug))
+			}
+			return mentions, nil
+		}
 	}
 	cfg, ok, err := s.appSource.Current(ctx)
 	if err != nil {
@@ -57,6 +82,12 @@ func (s *ReviewService) commentWakeMentions(ctx context.Context) ([]string, erro
 		}
 		return nil, err
 	}
+	// 读取成功（含「未配置」这一稳定态）都进缓存：未配置部署不必每条评
+	// 论重读；瞬时故障不缓存，下一轮读取恢复即可。
+	s.mentionsSlugCache.Store("slug", slugEntry{
+		slug:    cfg.AppSlug,
+		expires: time.Now().UTC().Add(reviewMentionsCacheTTL),
+	})
 	if !ok || cfg.AppSlug == "" {
 		return mentions, nil
 	}
@@ -128,8 +159,9 @@ type commentWakePayload struct {
 // 发网络）：判 action（只受理 created）、PR 归属（issue.pull_request 存在 +
 // 仓库/编号可用）、机器评论标记。任一不过返回 nil——忽略判定完全由 payload
 // 决定，不登记幂等账。与唤醒串读取（App 身份读取 = DB 读 + AES 解密）拆开：
-// 前者先跑，App 身份读取只发生在可能是唤醒的投递上——否则活跃公开仓库里
-// 任何人的任意评论都会放大成一次设置读取（fast-ship-bot 第 40 轮 Note）。
+// 前者先跑；App 身份读取（可能仍是每条 base 通过的投递一次）由短缓存压
+// 到每 TTL 一次（见 commentWakeMentions），避免按评论线性放大（
+// fast-ship-bot 第 40 轮 Note、第 44 轮 P2）。
 // 评论者身份过滤在实拉 PR 后做（commentWakeAuthorized）：需要与实拉 PR
 // 作者登录名比对，且 Forgejo payload 没有关系字段，无法纯 payload 判定。
 func commentWakePayloadBaseGuards(body []byte) *commentWakePayload {
@@ -355,7 +387,7 @@ func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, ev
 	}
 
 	// 纯 payload 守卫（base 先行）：非 created/非 PR/机器评论/畸形投递
-	// 零成本忽略——App 身份读取只发生在可能是唤醒的投递上。
+	// 零成本忽略；唤醒串集合带短缓存（见 commentWakeMentions）。
 	payload := commentWakePayloadBaseGuards(body)
 	if payload == nil {
 		return false, nil

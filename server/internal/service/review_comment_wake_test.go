@@ -24,6 +24,7 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	"github.com/godbobo/fast_ship/server/internal/pkg/githubapp"
 	"gorm.io/gorm"
+	"sync"
 )
 
 // issueCommentBody 组一个 issue_comment webhook body。installationID<0 表
@@ -2553,4 +2554,57 @@ func TestReviewCommentWakeReacceptRefreshesSeen(t *testing.T) {
 	if seen.PRUpdatedAt == nil || !seen.PRUpdatedAt.Equal(t3) {
 		t.Fatalf("seen 基准不得清空: %v", seen.PRUpdatedAt)
 	}
+}
+
+// App 句柄短缓存（fast-ship-bot 第 44 轮 P2）：订阅 issue_comment 后所有
+// 评论都进唤醒分支，逐条读部署设置（DB 读 + AES 解密）是按评论线性放大
+// 的固定成本——短缓存把成本压到每 TTL 一次。
+func TestReviewCommentWakeSlugCached(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	e.enableReview(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	ctx := context.Background()
+	e.fake.SetPR(repo, 63, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 63, State: "open", HeadSHA: "sha-slug2",
+		HeadRepoFullName: repo,
+	})
+	counter := &countingAppSource{cfg: GitHubAppConfig{AppSlug: "Fast-Ship-Demo"}}
+	e.review.appSource = counter
+
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-sc-1",
+		issueCommentBody("@fast-ship-demo 请再审", repo, 63, 42)); err != nil {
+		t.Fatalf("第一次点名: %v", err)
+	}
+	if counter.reads != 1 {
+		t.Fatalf("第一次点名应发生一次读取: %d", counter.reads)
+	}
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-sc-2",
+		issueCommentBody("@fast-ship-demo 请再审", repo, 63, 42)); err != nil {
+		t.Fatalf("第二次点名: %v", err)
+	}
+	if counter.reads != 1 {
+		t.Fatalf("缓存生效后不得再读部署设置: reads = %d", counter.reads)
+	}
+	// 第二次点名走到唤醒判定（slug 由缓存供给）后被同 head 在途守卫跳过
+	// （comment 恒开新轮只对不在途的 head）——缓存判别器是读取计数。
+	var runs int64
+	e.svc.db.Model(&model.ReviewRun{}).Where("pr_number = 63").Count(&runs)
+	if runs != 1 {
+		t.Fatalf("第二轮应被同 head 在途守卫跳过: runs = %d", runs)
+	}
+}
+
+// countingAppSource GitHubAppSource 桩：带读取计数（缓存用例）。
+type countingAppSource struct {
+	cfg   GitHubAppConfig
+	mu    sync.Mutex
+	reads int
+}
+
+func (c *countingAppSource) Current(context.Context) (GitHubAppConfig, bool, error) {
+	c.mu.Lock()
+	c.reads++
+	cfg := c.cfg
+	c.mu.Unlock()
+	return cfg, true, nil
 }

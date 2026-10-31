@@ -269,7 +269,9 @@ func (s *ReviewService) notifyRedeliveryExhausted(userIDs []string, st hookDeliv
 	// 触发新一轮（codex 第 25 轮 P3：误导性文案把用户往重推空提交上引）。
 	var hint string
 	if st.Event == "issue_comment" {
-		hint = "这次评论唤醒可能没有开始；请在 PR 上重新评论一次即可重新触发"
+		// 新评论必须带唤醒串（@fast-ship-bot 或部署句柄）：不带会被
+		// commentWakeMentioned 静默忽略且无反馈（fast-ship-bot 第 44 轮 P2）。
+		hint = "这次评论唤醒可能没有开始；请在 PR 上重新评论并 @ 机器人（@fast-ship-bot）即可重新触发"
 	} else {
 		hint = "这次推送可能没有被审查；重新推送或合并后重试即可触发"
 	}
