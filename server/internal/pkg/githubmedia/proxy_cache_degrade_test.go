@@ -188,6 +188,38 @@ func TestGetCachedRevalidatesContentTypeGate(t *testing.T) {
 		t.Fatalf("svg data stat = %v, want 文件仍在（读路径不删）", statErr)
 	}
 
+	// 过期条目同样只按 miss：读路径的过期清理也退出，交给持下载锁的写路径
+	// 按同一 key 覆盖退役。
+	expiredURL, err := svc.normalize("https://user-images.githubusercontent.com/expired.png")
+	if err != nil {
+		t.Fatalf("normalize expired: %v", err)
+	}
+	expiredMeta := seedCacheMeta(t, svc, expiredURL, "image/png")
+	expiredEntry := map[string]any{
+		"url": expiredURL, "content_type": "image/png", "size": 3,
+		"cached_at": time.Now().Add(-2 * time.Hour).UTC(), "expires_at": time.Now().Add(-time.Hour).UTC(),
+	}
+	expiredData, err := json.Marshal(expiredEntry)
+	if err != nil {
+		t.Fatalf("marshal expired entry: %v", err)
+	}
+	if err := os.WriteFile(expiredMeta, expiredData, 0o640); err != nil {
+		t.Fatalf("write expired meta: %v", err)
+	}
+	if err := os.WriteFile(svc.dataPath(expiredURL, ""), []byte("png"), 0o640); err != nil {
+		t.Fatalf("write expired data: %v", err)
+	}
+	cached, ok, err = svc.GetCached(expiredURL)
+	if ok || err != nil || cached != nil {
+		t.Fatalf("expired: cached = %+v ok = %v err = %v, want miss", cached, ok, err)
+	}
+	if _, statErr := os.Stat(expiredMeta); statErr != nil {
+		t.Fatalf("expired meta stat = %v, want 文件仍在（读路径不删）", statErr)
+	}
+	if _, statErr := os.Stat(svc.dataPath(expiredURL, "")); statErr != nil {
+		t.Fatalf("expired data stat = %v, want 文件仍在（读路径不删）", statErr)
+	}
+
 	// 位图条目：复核过关，照常命中。
 	pngURL, err := svc.normalize("https://user-images.githubusercontent.com/ok.png")
 	if err != nil {

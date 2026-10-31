@@ -968,11 +968,11 @@ func (s *ProxyService) getCachedNormalized(normalized, scope string) (*CachedMed
 		return nil, false, nil
 	}
 
-	// 过期条目先清掉再谈准入：过期与否与内容类型无关，清掉才能让被准入规则
-	// 拒绝的历史条目（如旧准入口径写进去的 svg）随 TTL 自然淘汰。
+	// 过期条目只按 miss 处理，不在读路径删文件——与下面的内容复核同一约束：
+	// GetCached 不持下载锁，这里的 os.Remove 会与正在写盘的同 key 下载竞态，
+	// 最坏删掉别人刚发布的新条目。过期条目的退役路径：下次读取按 miss 触发
+	// 重下，fetchAndCache 持下载锁写盘时按同一 key 覆盖 meta/data。
 	if entry.expired(time.Now().UTC()) {
-		_ = os.Remove(metaPath)
-		_ = os.Remove(cachePath)
 		return nil, false, nil
 	}
 
