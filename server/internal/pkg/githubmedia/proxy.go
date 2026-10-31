@@ -457,7 +457,8 @@ func (s *ProxyService) sweepExpiredEntries() {
 			// 损坏 meta（写盘中断在 rename data 与 WriteFile meta 之间、或磁
 			// 盘满截断）：与孤儿 .bin 同口径按 mtime 超 2×TTL 回收（meta 与同
 			// 名 .bin 一起删），否则该条目连同最大 256MB 的 .bin 永久留盘且每
-			// 次命中都重源。mtime 新的是写侧中间态，不碰。
+			// 次命中都重源。mtime 新的是写侧中间态，不碰。两处删除（.bin 存
+			// 在/缺失）都先 rename 成隔离名再删，压掉 stat→remove 窗口。
 			//
 			// 同一 URL 可能正在因「损坏 meta 读路径判 miss」而重下，删除与过
 			// 期分支一样持该 key 的下载闸（锁内重读复核 mtime 仍超龄，被写侧
@@ -502,8 +503,19 @@ func (s *ProxyService) sweepExpiredEntries() {
 					_ = os.Remove(gonePath)
 					continue
 				}
-				_ = os.Remove(binPath)
-				_ = os.Remove(metaPath)
+				// 与缺失分支同口径：rename 成隔离名再删，stat→remove 窗口内
+				// 写侧刚发布的文件不会被误命中。
+				goneBin := binPath + ".gone"
+				goneMeta := metaPath + ".gone"
+				if err := os.Rename(binPath, goneBin); err != nil {
+					continue
+				}
+				if err := os.Rename(metaPath, goneMeta); err != nil {
+					_ = os.Rename(goneBin, binPath)
+					continue
+				}
+				_ = os.Remove(goneBin)
+				_ = os.Remove(goneMeta)
 				continue
 			}
 			if now.Sub(info.ModTime()) < 2*s.cacheTTL {
@@ -1373,14 +1385,16 @@ func scopedCacheID(normalized, scope string) string {
 
 func cloneRelevantHeaders(header http.Header) http.Header {
 	out := make(http.Header)
-	for _, key := range []string{"Content-Type", "Content-Length", "Content-Range", "Accept-Ranges", "Cache-Control", "ETag", "Last-Modified"} {
+	for _, key := range []string{"Content-Type", "Content-Length", "Content-Range", "Accept-Ranges", "ETag", "Last-Modified"} {
 		for _, value := range header.Values(key) {
 			out.Add(key, value)
 		}
 	}
-	if out.Get("Cache-Control") == "" {
-		out.Set("Cache-Control", buildCacheControl(defaultCacheTTL))
-	}
+	// Cache-Control 不透传上游值：直通路径与缓存命中同一口径，一律 private
+	// （代理地址带用户 JWT，上游的 public/max-age 会让共享缓存/CDN 把带
+	// token 的 URL 存进共享层）。TTL 取上游可见的保守值做不到也不必要——
+	// private 下共享层本就不缓存，浏览器侧用自己的 max-age 即可。
+	out.Set("Cache-Control", buildCacheControl(defaultCacheTTL))
 	return out
 }
 

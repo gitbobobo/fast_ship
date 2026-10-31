@@ -178,6 +178,10 @@ func TestGitHubMediaProxyHandlerSVGGateAndHardeningHeaders(t *testing.T) {
 	if got := rec.Header().Get("Content-Range"); got != "bytes 0-3/9" {
 		t.Fatalf("mp4 content range = %q, want bytes 0-3/9", got)
 	}
+	// 直通路径的缓存头与命中路径同口径：一律 private，不透传上游 public。
+	if got := rec.Header().Get("Cache-Control"); got != "private, max-age=86400" {
+		t.Fatalf("mp4 range cache-control = %q, want private, max-age=86400", got)
+	}
 	if rec.Body.String() != "mp4-" {
 		t.Fatalf("mp4 range body = %q, want mp4-（只回前 4 字节）", rec.Body.String())
 	}

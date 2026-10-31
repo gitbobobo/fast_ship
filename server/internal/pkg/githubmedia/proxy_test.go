@@ -627,6 +627,20 @@ func TestIsMediaFileExtension(t *testing.T) {
 	}
 }
 
+// 直通路径不透传上游 Cache-Control：代理地址带 JWT，一律覆写 private。
+func TestCloneRelevantHeadersForcesPrivateCacheControl(t *testing.T) {
+	upstream := http.Header{}
+	upstream.Set("Cache-Control", "public, max-age=300")
+	upstream.Set("ETag", `"abc"`)
+	out := cloneRelevantHeaders(upstream)
+	if got := out.Get("Cache-Control"); got != "private, max-age=86400" {
+		t.Fatalf("cache control = %q, want private, max-age=86400（不透传 public）", got)
+	}
+	if out.Get("ETag") != `"abc"` {
+		t.Fatalf("etag = %q, want 保留", out.Get("ETag"))
+	}
+}
+
 // 扩展名反查具体媒体类型：出口对账「URL 后缀 vs 响应类型」用。
 func TestMediaTypeForExtension(t *testing.T) {
 	for _, tc := range []struct{ ext, want string }{
