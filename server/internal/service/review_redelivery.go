@@ -167,7 +167,7 @@ func (s *ReviewService) reconcileWebhookDeliveries(now time.Time) {
 	defer probeCancel()
 	// 闸门降级语义：唤醒串读取瞬时失败回落字面量继续重投——闸门本就宽
 	// 松，宁可多投不漏投（唤醒侧则按瞬时失败 500 重试，两处口径不同）。
-	mentions, mentionsErr := s.commentWakeMentions(ctx)
+	mentions, mentionsCached, mentionsErr := s.commentWakeMentions(ctx)
 	if mentionsErr != nil {
 		mentions = []string{reviewCommentWakeMention}
 	}
@@ -176,10 +176,11 @@ func (s *ReviewService) reconcileWebhookDeliveries(now time.Time) {
 		client:   client,
 		budget:   reviewRedeliveryMaxPerSweep,
 		mentions: mentions,
-		// 唤醒串读取降级时，slug-only 评论会被字面量集合误判成非唤醒而记
-		// 终态——那恰是因读取故障失败、最需要重试的投递（codex 第 23 轮
-		// P2）。标记降级，评论投递一律按未知重试（降级语义：宁多投不漏投）。
-		mentionsDegraded: mentionsErr != nil,
+		// 唤醒串读取降级**或来自缓存**时，slug-only 评论会被字面量集合误
+		// 判成非唤醒而记终态——缓存窗口内 slug 可能过期（部署切换/重建
+		// App），那正是最需要重试的投递（codex 第 23 轮 P2、fast-ship-bot
+		// 第 46 轮 P2）。标记降级，评论投递一律按未知重试（宁多投不漏投）。
+		mentionsDegraded: mentionsErr != nil || mentionsCached,
 		prStates:         map[string]*probePRState{},
 	}
 	tried := 0

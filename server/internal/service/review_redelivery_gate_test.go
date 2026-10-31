@@ -511,3 +511,48 @@ func TestRedeliveryGateDraftPRSkipped(t *testing.T) {
 		}
 	}
 }
+
+// 唤醒串来自缓存时 slug-only 评论投递按未知重试（fast-ship-bot 第 46 轮
+// P2）：缓存窗口内 slug 可能过期（部署切换/重建 App），判终态会永久丢掉
+// 合法唤醒——宁多投不漏投。
+func TestRedeliveryGateCachedMentionsRetrySlugOnly(t *testing.T) {
+	env := newReviewEngineEnv(t)
+	env.enableReview(t)
+	env.review.appSource = stubAppSource{cfg: GitHubAppConfig{AppSlug: "Fast-Ship-Demo"}}
+
+	// 先走一次唤醒判定把 slug 写进缓存（5 分钟窗口）。
+	if _, _, err := env.review.commentWakeMentions(context.Background()); err != nil {
+		t.Fatalf("预热缓存: %v", err)
+	}
+
+	base := redeliveryTestNow.Add(-time.Hour)
+	env.fake.SetHookDeliveries([]githubapp.HookDelivery{
+		hookRow(8101, "guid-cw-slug-cached", "issue_comment", "created", 500, false, base),
+	})
+	env.fake.SetHookDeliveryPayload(8101, func() json.RawMessage {
+		body, err := json.Marshal(map[string]any{
+			"action": "created",
+			"issue": map[string]any{
+				"number":       7,
+				"pull_request": map[string]any{"url": "https://github.com/owner/repo/pulls/7"},
+			},
+			"comment":      map[string]any{"body": "@fast-ship-demo 请再审一轮", "author_association": "OWNER"},
+			"repository":   map[string]any{"full_name": "owner/repo"},
+			"installation": map[string]any{"id": 1},
+		})
+		if err != nil {
+			panic(err)
+		}
+		return body
+	}())
+	env.fake.SetPR("owner/repo", 7, &githubapi.PullRequest{})
+
+	env.review.reconcileWebhookDeliveries(redeliveryTestNow)
+	got := env.fake.RedeliveredIDs()
+	if len(got) != 1 || got[0] != 8101 {
+		t.Fatalf("缓存窗口内 slug-only 投递应按未知重试: %v", got)
+	}
+	if row, ok := redeliveryClosedRow(t, env, "guid-cw-slug-cached"); ok && row.ClosedAt != nil {
+		t.Fatalf("缓存窗口内不得记终态: %+v", row)
+	}
+}

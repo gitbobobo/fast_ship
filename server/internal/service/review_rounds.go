@@ -84,8 +84,11 @@ func (s *ReviewService) openRoundTx(
 	// 受理时刻的实拉快照随 head 一起推进（滞后时序判定基准，见模型注释）。
 	// nil = 本路径没有实拉快照时刻（防抖消费）：保留旧值（与 installationID
 	// 的 0 保留同口径），不得把 advancePRHeadTx/rerun 写下的基准清成 NULL
-	// （fast-ship-bot 第 40 轮 Note）。
-	if prUpdatedAt != nil {
+	// （fast-ship-bot 第 40 轮 Note）。非 nil 也只在**更新**时写——同 head
+	// 滞后快照是有意放行的（唤醒侧 stale 判定要求 head 不同），其时间戳可
+	// 能早于已受理基准，直接赋值会把基准往回拨、削弱后续滞后判定（
+	// fast-ship-bot 第 46 轮 P2，与 seen upsert 的 CASE 取最大同口径）。
+	if prUpdatedAt != nil && (ledger.PRUpdatedAt == nil || prUpdatedAt.After(*ledger.PRUpdatedAt)) {
 		ledger.PRUpdatedAt = prUpdatedAt
 	}
 	ledger.RoundNumber = round

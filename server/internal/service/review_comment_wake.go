@@ -53,10 +53,13 @@ const reviewMentionsCacheTTL = 5 * time.Minute
 // 取失败（瞬时 DB 故障）透出错误——评论可能用了 @<slug>，静默回落字面量
 // 会让该唤醒被无声忽略且重投同样失败（codex 第 22 轮 P2：调用方按瞬时
 // 失败返回 500 让平台重投）。读取结果短时缓存（见 reviewMentionsCacheTTL）。
-func (s *ReviewService) commentWakeMentions(ctx context.Context) ([]string, error) {
+// 返回值 cached：本次结果是否来自短缓存——缓存窗口内 slug 可能过期
+// （部署切换/重建 App），调用方据此降级（重投闸门把 slug-only 评论按未
+// 知重试而非终态，fast-ship-bot 第 46 轮 P2）。
+func (s *ReviewService) commentWakeMentions(ctx context.Context) ([]string, bool, error) {
 	mentions := []string{reviewCommentWakeMention}
 	if s.appSource == nil {
-		return mentions, nil
+		return mentions, false, nil
 	}
 	type slugEntry struct {
 		slug    string
@@ -68,7 +71,7 @@ func (s *ReviewService) commentWakeMentions(ctx context.Context) ([]string, erro
 			if e.slug != "" {
 				mentions = append(mentions, "@"+strings.ToLower(e.slug))
 			}
-			return mentions, nil
+			return mentions, true, nil
 		}
 	}
 	cfg, ok, err := s.appSource.Current(ctx)
@@ -78,9 +81,9 @@ func (s *ReviewService) commentWakeMentions(ctx context.Context) ([]string, erro
 		// Forgejo 与普通讨论评论，fast-ship-bot 第 29 轮 P2）；其余（瞬时
 		// DB 故障）维持透出 500 让平台重投。
 		if errors.Is(err, errGitHubAppDecrypt) {
-			return mentions, nil
+			return mentions, false, nil
 		}
-		return nil, err
+		return nil, false, err
 	}
 	// 读取成功（含「未配置」这一稳定态）都进缓存：未配置部署不必每条评
 	// 论重读；瞬时故障不缓存，下一轮读取恢复即可。
@@ -89,9 +92,9 @@ func (s *ReviewService) commentWakeMentions(ctx context.Context) ([]string, erro
 		expires: time.Now().UTC().Add(reviewMentionsCacheTTL),
 	})
 	if !ok || cfg.AppSlug == "" {
-		return mentions, nil
+		return mentions, false, nil
 	}
-	return append(mentions, "@"+strings.ToLower(cfg.AppSlug)), nil
+	return append(mentions, "@"+strings.ToLower(cfg.AppSlug)), false, nil
 }
 
 // reviewCommentWakeRevalidateMax 观察窗口复核的尝试上限：实拉前观察到的
@@ -392,7 +395,7 @@ func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, ev
 	if payload == nil {
 		return false, nil
 	}
-	mentions, err := s.commentWakeMentions(ctx)
+	mentions, _, err := s.commentWakeMentions(ctx)
 	if err != nil {
 		// 瞬时故障不落账：返回 500 让平台重投（重投时读取恢复即正常处理）。
 		return false, err

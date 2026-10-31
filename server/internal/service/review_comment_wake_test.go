@@ -1837,6 +1837,11 @@ func TestReviewCommentWakeHeadBaselineAdvances(t *testing.T) {
 	if after.HeadSHA != "sha-base" {
 		t.Fatalf("总账 head 不得变化: %s", after.HeadSHA)
 	}
+	// 同 head 滞后快照是有意放行的，但账本基准不得被其更早时间戳往回拨
+	// （fast-ship-bot 第 46 轮 P2，与 seen upsert 的 CASE 取最大同口径）。
+	if after.PRUpdatedAt == nil || !after.PRUpdatedAt.Equal(t1) {
+		t.Fatalf("账本基准不得回拨: %v", after.PRUpdatedAt)
+	}
 }
 
 // 同刻异 head = 时序歧义（codex 第 28 轮 P2）：Forgejo 秒级精度下同一秒
