@@ -123,13 +123,20 @@ interface SourceScan {
  * 就随末尾换行在「代码块」与「纯文本」之间来回跳。
  *
  * 空白行判定只认空格与制表符（CommonMark 的空白行口径），NBSP 等 Unicode
- * 空白算正文。
+ * 空白算正文。缩进代码块不建模：空白行自己缩进 ≥4 且上一行缩进也 ≥4 时，它
+ * 不作为候选——缩进代码块里「只有空格的行」（去掉 4 空格缩进后仍有空格）是
+ * 代码内容，切开会把这些空格剥出代码块；缩进 <4 的空白行是尾随空行，照旧可
+ * 切。代价是缩进块之后那些同样 ≥4 空格的空行也少切一刀（直到出现缩进 <4 的
+ * 非空行），只损失一点增量优化。
  */
 function scanSource(text: string): SourceScan {
   let inFence: { char: "`" | "~"; len: number; depth: number } | null = null;
   let fenceOpenStart: number | null = null;
   // 最近一个位于围栏外的已完结空白行起点；连续空白行取最后一个。
   let lastBlank: number | null = null;
+  // 当前行是否处于缩进代码块（≥4 空格缩进）内，用于让代码块里的空白行不进
+  // 候选。不建模缩进代码块的起止语义，只保守地少切一刀（见函数注释）。
+  let indentedCode = false;
   const cuts: number[] = [];
   let bail = false;
   let offset = 0;
@@ -177,9 +184,16 @@ function scanSource(text: string): SourceScan {
     }
 
     if (complete) {
-      if (/^[ \t]*$/.test(line)) {
-        // 围栏内的空白行不是候选：块内内容是原样字节，不存在块边界。
-        if (!inFence) lastBlank = offset;
+      const blank = /^[ \t]*$/.test(line);
+      const indented = /^ {4}/.test(view);
+      // 缩进代码块按缩进延续：非空行按自身缩进重新判定，空白行只在缩进 ≥4 时
+      // 延续它（<4 空格的空白行是代码块结束后的普通空白行）。
+      if (!blank) indentedCode = indented;
+      else if (!indented) indentedCode = false;
+      if (blank) {
+        // 围栏内与缩进代码块内的空白行不是候选：块内内容是原样字节，不存在
+        // 块边界（缩进块里那几行空格切出去就丢了）。
+        if (!inFence && !indentedCode) lastBlank = offset;
       } else if (lastBlank !== null) {
         const ordered = /^(\d+)[.)]/.exec(line);
         if (

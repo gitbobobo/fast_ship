@@ -22,6 +22,10 @@ const EQUIV_SAMPLES: Array<[string, string]> = [
   ["末尾空行", "第一段。\n\n第二段。\n\n"],
   ["连续空行", "第一段。\n\n\n\n第二段。"],
   ["缩进代码块", "前文。\n\n    const a = 1;\n\n    const b = 2;"],
+  // 缩进代码块里的空格行是代码内容（去掉 4 空格缩进后仍是空格）：把它当空白行
+  // 切分会让代码块丢掉这一行。
+  ["缩进代码块内空格行", "     code\n     \npara\n"],
+  ["缩进代码块后接段落", "前文。\n\n    const a = 1;\n\n     \n\n后文。\n"],
   ["两个相邻表格", "| a |\n| --- |\n| 1 |\n\n| b |\n| --- |\n| 2 |"],
   ["列表后续段落", "段落。\n\n- a\n- b\n\n后续段落。"],
   ["引用后续段落", "> 引用\n\n正文。"],
@@ -143,6 +147,47 @@ describe("BotMarkdown", () => {
     expect(container.querySelector("pre code")?.textContent).toContain(
       "const a = 1;",
     );
+  });
+
+  it("流式：尾部转为稳定块时复用同一 <pre> 节点，不重建子树", () => {
+    const { container, rerender } = render(
+      <BotMarkdown streaming text={"```ts\nconst a = 1;\n```"} />,
+    );
+    // 此时围栏整段在尾部。
+    const pre = container.querySelector("pre");
+    expect(pre).not.toBeNull();
+    // 末尾带换行：切分点要求空白行的下一行已收到完整一行，上一行不结尾换行时
+    // 围栏还跨不了界，这一步也会变成空跑。
+    rerender(
+      <BotMarkdown
+        streaming
+        text={"```ts\nconst a = 1;\n```" + "\n\n第二段。\n"}
+      />,
+    );
+    // 围栏块从尾部变成稳定块：尾块的 key 就是它将得到的 segment 下标，跨界
+    // 不换 key，于是 React 复用同一实例，<pre> 的滚动位置、选区和复制按钮
+    // 的「已复制」态都还留在原节点上。key 退回固定字符串时这里会变红。
+    expect(container.querySelector("pre")).toBe(pre);
+    expect(pre?.textContent).toContain("const a = 1;");
+    expect(container.textContent).toContain("第二段。");
+  });
+
+  it("流式：尾部持续增长但未跨界时 <pre> 节点保持不变", () => {
+    // 缩进代码块不走围栏降级，后面的增长一直留在尾部：尾部每帧重解析，
+    // 但同一个 <pre> 节点被复用。
+    const { container, rerender } = render(
+      <BotMarkdown streaming text={"前文。\n\n    const a = 1;"} />,
+    );
+    const pre = container.querySelector("pre");
+    expect(pre).not.toBeNull();
+    rerender(
+      <BotMarkdown
+        streaming
+        text={"前文。\n\n    const a = 1;\n    const b = 2;"}
+      />,
+    );
+    expect(container.querySelector("pre")).toBe(pre);
+    expect(pre?.textContent).toContain("const b = 2;");
   });
 
   it("流式分块渲染与整段解析的 DOM 完全一致", () => {

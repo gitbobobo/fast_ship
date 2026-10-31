@@ -285,6 +285,38 @@ describe("splitStreamingMarkdown 切分点", () => {
   });
 });
 
+describe("缩进代码块里的空白行不切分", () => {
+  it("空白行自己缩进 ≥4 时不断开缩进代码块", () => {
+    // `"     code\n     \npara\n"` 整段解析是 `<pre><code>code\n \n</code></pre>`
+    // 加 `<p>para</p>`：那个空格行去掉 4 空格缩进后仍是空格，是代码内容。
+    // 在这里切分会让代码块丢掉这一行。
+    const r = splitStreamingMarkdown("     code\n     \npara\n");
+    expect(r.segments).toEqual([]);
+    expect(r.tailMarkdown).toBe("     code\n     \npara\n");
+    expect(r.tailPlain).toBeNull();
+  });
+
+  it("缩进 <4 的空白行维持原有切分结论", () => {
+    // 缩进代码块里的 0/3 空格空白行是尾随空行，CommonMark 解析时会被剥掉，
+    // 切开与整段解析一致；本次修复只抑制缩进 ≥4 的空白行，不扩散到这两类。
+    expect(splitStreamingMarkdown("     code\n\npara\n").segments).toEqual([
+      "     code\n",
+    ]);
+    expect(splitStreamingMarkdown("     code\n   \npara\n").segments).toEqual([
+      "     code\n",
+    ]);
+  });
+
+  it("普通段落之间的空白行仍可切分", () => {
+    // 防过度保守：缩进代码块规则不向外扩散，顶格段落与 3 空格缩进的空白行
+    // 照旧切分。
+    expect(stableOf("甲段落\n\n乙段落\n")).toBe("甲段落\n");
+    expect(stableOf("A\n   \nB\n")).toBe("A\n");
+    // 空白行缩进 ≥4 但前面没有缩进代码块：不是代码内容，仍然切分。
+    expect(stableOf("A\n     \nB\n")).toBe("A\n");
+  });
+});
+
 describe("splitStreamingMarkdown 退回（不分块）", () => {
   /** 退回的完整口径：不分块、整段交给 Markdown、也不做围栏降级。 */
   function expectBail(text: string) {

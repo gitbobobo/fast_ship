@@ -204,7 +204,12 @@ export const BotMarkdown = memo(function BotMarkdown({
   });
   if (hasVisibleContent(tailMarkdown)) {
     if (rendered.length > 0) rendered.push("\n");
-    rendered.push(<MarkdownBlock key="tail" text={tailMarkdown} />);
+    // key 取 segments.length：稳定块的 key 是 0..segments.length-1，尾部这块
+    // 转为稳定块时正好拿到这个下标，跨越那一帧 key 不变，React 复用同一实例、
+    // 不卸载重建子树，<pre> 的横向滚动位置、文本选区和复制按钮的「已复制」态
+    // 因而都留在原节点上（否则每次跨界都会丢掉它们，memo 也必然 miss）。
+    // 空白块不渲染、key 仍是各自的 segment 下标，因此不会与这个下标撞车。
+    rendered.push(<MarkdownBlock key={segments.length} text={tailMarkdown} />);
   }
   if (tailPlain !== null) {
     rendered.push(
