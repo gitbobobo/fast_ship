@@ -855,7 +855,7 @@ func TestRerunRejectsWhenDisabledMidFlight(t *testing.T) {
 	e := newReviewEngineEnv(t)
 	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
 	e.fake.SetPR(repo, 92, &githubapi.PullRequest{
-		RepoFullName: repo, Number: 92, HeadSHA: "sha-rr",
+		RepoFullName: repo, Number: 92, HeadSHA: "sha-rr", HeadRepoFullName: repo,
 		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
 	})
 	e.enableReview(t)
@@ -905,7 +905,7 @@ func TestRerunRejectsWhenHeadMoved(t *testing.T) {
 	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
 	now := time.Now().UTC()
 	e.fake.SetPR(repo, 93, &githubapi.PullRequest{
-		RepoFullName: repo, Number: 93, HeadSHA: "sha-old",
+		RepoFullName: repo, Number: 93, HeadSHA: "sha-old", HeadRepoFullName: repo,
 		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
 	})
 	e.enableReview(t)

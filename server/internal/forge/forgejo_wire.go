@@ -45,8 +45,8 @@ type forgejoPR struct {
 }
 
 // toPullRequest 转中性类型：RepoFullName 取 base 仓库 canonical 名（与 GitHub
-// 适配器同口径）；head 仓库面不进中性类型——fork 判定只发生在 Forgejo 侧
-// （ListOpenPullRequests 已过滤 fork head）。
+// 适配器同口径）；head 仓库全名一并带出——评论唤醒与 rerun 的跨仓 fork 守卫
+// 按它与 base 仓库名比对，已删 fork（head.repo=null）落空串。
 func (w *forgejoPR) toPullRequest() *PullRequest {
 	out := &PullRequest{
 		Number:      w.Number,
@@ -63,6 +63,9 @@ func (w *forgejoPR) toPullRequest() *PullRequest {
 		BaseRef:     w.Base.Ref,
 		AuthorLogin: w.User.Login,
 		UpdatedAt:   w.UpdatedAt,
+	}
+	if w.Head.Repo != nil {
+		out.HeadRepoFullName = w.Head.Repo.FullName
 	}
 	if w.Base.Repo != nil {
 		out.RepoFullName = w.Base.Repo.FullName

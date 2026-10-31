@@ -77,7 +77,7 @@ func TestForgejoClient_GetPullRequest(t *testing.T) {
 		t.Fatalf("GetPullRequest: %v", err)
 	}
 	if pr.Number != 7 || pr.Title != "T" || pr.HeadSHA != "abc" || pr.HeadRef != "feat" ||
-		pr.BaseRef != "main" || pr.RepoFullName != "o/r" || pr.AuthorLogin != "bot" {
+		pr.BaseRef != "main" || pr.RepoFullName != "o/r" || pr.HeadRepoFullName != "o/r" || pr.AuthorLogin != "bot" {
 		t.Fatalf("映射不符: %+v", pr)
 	}
 	if pr.ClosedAt == nil || pr.MergedAt != nil {

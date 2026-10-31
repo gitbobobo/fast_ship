@@ -680,7 +680,7 @@ func TestReviewRerun(t *testing.T) {
 
 	e.enableReview(t)
 	e.fake.SetPR(repo, 2, &githubapi.PullRequest{
-		RepoFullName: repo, Number: 2, HeadSHA: "sha-rr",
+		RepoFullName: repo, Number: 2, HeadSHA: "sha-rr", HeadRepoFullName: repo,
 		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
 	})
 	old := e.seedRun(t, repo, 2, "sha-rr", model.ReviewRunRunning, now)

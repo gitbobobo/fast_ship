@@ -308,7 +308,7 @@ func (s *ReviewService) handleReviewTriggerTx(tx *gorm.DB, integrationID string,
 			Delete(&model.ReviewDebounce{}).Error; err != nil {
 			return err
 		}
-		if err := s.advancePRHeadTx(tx, project, repo, prNumber, headSHA, integrationID, t.installationID, now); err != nil {
+		if err := s.advancePRHeadTx(tx, project, repo, prNumber, headSHA, integrationID, t.installationID, t.updatedAt, now); err != nil {
 			return err
 		}
 	}
@@ -458,7 +458,7 @@ func (s *ReviewService) supersedePRRunsTx(tx *gorm.DB, integrationID, projectID,
 
 // advancePRHeadTx 只推进总账 head（不置 sync_pending）：动作未勾选时不该
 // 发布旧轮结论，但 head 必须前进，供后续已勾选动作按同一 SHA 正常开轮。
-func (s *ReviewService) advancePRHeadTx(tx *gorm.DB, project *model.Project, repo string, prNumber int, headSHA, integrationID string, installationID int64, now time.Time) error {
+func (s *ReviewService) advancePRHeadTx(tx *gorm.DB, project *model.Project, repo string, prNumber int, headSHA, integrationID string, installationID int64, prUpdatedAt *time.Time, now time.Time) error {
 	var ledger model.ReviewPullRequest
 	err := tx.Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ?",
 		project.ID, repo, prNumber, integrationID).First(&ledger).Error
@@ -468,7 +468,7 @@ func (s *ReviewService) advancePRHeadTx(tx *gorm.DB, project *model.Project, rep
 			ProjectID: project.ID, RepoFullName: repo, PRNumber: prNumber,
 			IntegrationID: integrationID,
 			UserID:        project.UserID, InstallationID: installationID,
-			HeadSHA: headSHA, UpdatedAt: now,
+			HeadSHA: headSHA, PRUpdatedAt: prUpdatedAt, UpdatedAt: now,
 		}).Error
 	case err != nil:
 		return err
@@ -480,6 +480,12 @@ func (s *ReviewService) advancePRHeadTx(tx *gorm.DB, project *model.Project, rep
 		"sync_pending": false,
 		"sync_epoch":   gorm.Expr("sync_epoch + 1"),
 		"updated_at":   now,
+	}
+	// nil 快照时刻（tied 重验路径等不带 updatedAt 的入口）保留旧基准，不
+	// 得清成 NULL——账本 pr_updated_at 是评论唤醒滞后判定的兜底（
+	// fast-ship-bot 第 40 轮 Note 同口径、codex 第 49 轮 P2）。
+	if prUpdatedAt != nil {
+		updates["pr_updated_at"] = prUpdatedAt
 	}
 	if installationID != 0 {
 		updates["installation_id"] = installationID

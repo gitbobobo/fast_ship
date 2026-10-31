@@ -862,7 +862,14 @@ func (s *ReviewService) RerunReview(ctx context.Context, userID, projectID strin
 	if reviewIntegrationID(settings.IntegrationID) == model.ForgeIntegrationBuiltinGitHubID {
 		resolved, err := s.resolveGitHubInstallation(ctx, repo)
 		if err != nil {
-			return nil, err
+			// 访问面未配置（resolveGitHubInstallation 直接回 AppError）原样透出；
+			// 其余（%w 包裹的平台错误）包装回 50200 AppError，对外形态与
+			// %w 化之前一致。
+			var appErr *errs.AppError
+			if errors.As(err, &appErr) {
+				return nil, err
+			}
+			return nil, errs.New(errs.ErrGitHubAPI.Code, err.Error())
 		}
 		installationID = resolved
 	}
@@ -876,6 +883,11 @@ func (s *ReviewService) RerunReview(ctx context.Context, userID, projectID strin
 	}
 	if !prReviewable(pr) {
 		return nil, errs.New(errs.ErrInvalidParams.Code, "PR 已关闭，不能重跑审查")
+	}
+	// 跨仓 fork 不审（既有不变量，与 webhook 触发面一致）：实拉 head 仓库
+	// 缺失（已删 fork/异常 payload）或与 base 仓库不同名即 fork。
+	if pr.HeadRepoFullName == "" || !strings.EqualFold(pr.HeadRepoFullName, pr.RepoFullName) {
+		return nil, errs.New(errs.ErrInvalidParams.Code, "fork PR 不能重跑审查")
 	}
 	if pr.HeadSHA == "" {
 		return nil, errs.New(errs.ErrGitHubAPI.Code, "PR head 为空")
@@ -915,7 +927,7 @@ func (s *ReviewService) RerunReview(ctx context.Context, userID, projectID strin
 		}
 		var openErr error
 		round, openErr = s.openRoundTx(tx, project, &settings, repo, prNumber,
-			pr.HeadSHA, "manual", pr.Title, pr.HTMLURL, pr.BaseRef, pr.HeadRef, installationID, now)
+			pr.HeadSHA, "manual", pr.Title, pr.HTMLURL, pr.BaseRef, pr.HeadRef, installationID, pr.UpdatedAt, now)
 		return openErr
 	})
 	if err != nil {

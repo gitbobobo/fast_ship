@@ -16,21 +16,22 @@ func PullRequestFromGitHub(pr *githubapi.PullRequest) *PullRequest {
 		return nil
 	}
 	return &PullRequest{
-		RepoFullName: pr.RepoFullName,
-		Number:       pr.Number,
-		Title:        pr.Title,
-		Body:         pr.Body,
-		HTMLURL:      pr.HTMLURL,
-		State:        pr.State,
-		Draft:        pr.Draft,
-		Merged:       pr.Merged,
-		MergedAt:     pr.MergedAt,
-		ClosedAt:     pr.ClosedAt,
-		HeadSHA:      pr.HeadSHA,
-		HeadRef:      pr.HeadRef,
-		BaseRef:      pr.BaseRef,
-		AuthorLogin:  pr.AuthorLogin,
-		UpdatedAt:    pr.UpdatedAt,
+		RepoFullName:     pr.RepoFullName,
+		Number:           pr.Number,
+		Title:            pr.Title,
+		Body:             pr.Body,
+		HTMLURL:          pr.HTMLURL,
+		State:            pr.State,
+		Draft:            pr.Draft,
+		Merged:           pr.Merged,
+		MergedAt:         pr.MergedAt,
+		ClosedAt:         pr.ClosedAt,
+		HeadSHA:          pr.HeadSHA,
+		HeadRef:          pr.HeadRef,
+		HeadRepoFullName: pr.HeadRepoFullName,
+		BaseRef:          pr.BaseRef,
+		AuthorLogin:      pr.AuthorLogin,
+		UpdatedAt:        pr.UpdatedAt,
 	}
 }
 

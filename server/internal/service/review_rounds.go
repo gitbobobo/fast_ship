@@ -43,6 +43,7 @@ func (s *ReviewService) openRoundTx(
 	repo string, prNumber int,
 	headSHA, action, prTitle, prURL, baseRef, headRef string,
 	installationID int64,
+	prUpdatedAt *time.Time,
 	now time.Time,
 ) (int, error) {
 	integrationID := reviewIntegrationID(settings.IntegrationID)
@@ -80,6 +81,16 @@ func (s *ReviewService) openRoundTx(
 	ledger.CodeStatus = ""
 	ledger.VisualStatus = ""
 	ledger.HeadSHA = headSHA
+	// 受理时刻的实拉快照随 head 一起推进（滞后时序判定基准，见模型注释）。
+	// nil = 本路径没有实拉快照时刻（防抖消费）：保留旧值（与 installationID
+	// 的 0 保留同口径），不得把 advancePRHeadTx/rerun 写下的基准清成 NULL
+	// （fast-ship-bot 第 40 轮 Note）。非 nil 也只在**更新**时写——同 head
+	// 滞后快照是有意放行的（唤醒侧 stale 判定要求 head 不同），其时间戳可
+	// 能早于已受理基准，直接赋值会把基准往回拨、削弱后续滞后判定（
+	// fast-ship-bot 第 46 轮 P2，与 seen upsert 的 CASE 取最大同口径）。
+	if prUpdatedAt != nil && (ledger.PRUpdatedAt == nil || prUpdatedAt.After(*ledger.PRUpdatedAt)) {
+		ledger.PRUpdatedAt = prUpdatedAt
+	}
 	ledger.RoundNumber = round
 	ledger.SyncPending = true
 	ledger.SyncEpoch = ledger.SyncEpoch + 1
@@ -140,11 +151,13 @@ func (s *ReviewService) openRoundTx(
 	return round, s.promoteQueuedRunsTx(tx, project.UserID, now)
 }
 
-// nextReviewRoundTx 轮次分配：manual 恒 1+max；其余同 (project,repo,pr,head,
+// nextReviewRoundTx 轮次分配：manual 与 comment（INT-179 评论唤醒）恒
+// 1+max——同 head 也要新轮，否则同 (project,repo,pr,head,round,组合) 唯一
+// 索引吃掉运行行，唤醒不会产生任何新运行；其余同 (project,repo,pr,head,
 // 集成) 已有运行沿其 round_number，否则 1+max。轮次只在 (项目, 集成) 内
 // 分配——接管或改绑后新键不受旧键已跑轮次的影响。
 func nextReviewRoundTx(tx *gorm.DB, integrationID, projectID, repo string, prNumber int, headSHA, action string) (int, error) {
-	if action != "manual" {
+	if action != "manual" && action != "comment" {
 		var rounds []int
 		if err := tx.Model(&model.ReviewRun{}).
 			Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ? AND integration_id = ?",

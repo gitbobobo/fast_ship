@@ -2846,14 +2846,17 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * 接收 GitHub App webhook（pull_request opened/synchronize/ready_for_review/reopened）
+         * 接收 GitHub App webhook（pull_request 触发审查 + issue_comment 评论唤醒）
          * @description 公开端点（无 JWT），以 `X-Hub-Signature-256`（HMAC-SHA256）按部署唯一的
          *     webhook 密钥验签。验签密钥取部署级 GitHub App 身份（INT-129：每套部署
          *     一个 App，没有用户级候选集）——以 `deployment_settings` 行内的密钥为准，
          *     行为空即视为未配置、不回落 config；仅当部署没有数据库 App 身份时用
          *     `github_app.webhook_secret` 兜底。密钥为空 → 503（50300）拒收；签名缺失
-         *     或不匹配 → 401（40107）。只处理 pull_request 的 opened/synchronize/ready_for_review/reopened；
-         *     draft 与 fork 一律 202 忽略。仓库必须已与本部署的 Fast Ship 项目关联
+         *     或不匹配 → 401（40107）。处理 pull_request 的 opened/synchronize/ready_for_review/reopened；
+         *     draft 与 fork 一律 202 忽略。同时受理 issue_comment 的 created（INT-179 评论唤醒）：
+         *     PR 顶层评论正文包含 `@fast-ship-bot`（大小写不敏感）时按评论唤醒开新一轮审查
+         *     （trigger_action=comment，同 head 也恒开新轮；同 head 已有在途审查时不重开）；编辑/删除动作与普通 Issue 评论
+         *     202 忽略。仓库必须已与本部署的 Fast Ship 项目关联
          *     才会进入防抖/开轮。同一 `X-GitHub-Delivery` 幂等（重复投递返回 202 且
          *     不再开轮）。
          */
@@ -4161,7 +4164,8 @@ export interface components {
             setup_url: string;
             /** @description 恒为 false（非公开 App；同上不用 enum[false] 避免生成撞名常量） */
             public: boolean;
-            default_events: "pull_request"[];
+            /** @description 默认订阅 pull_request 与 issue_comment（INT-179 评论唤醒需要后者） */
+            default_events: ("pull_request" | "issue_comment")[];
             /** @description PR 审查所需的最小权限集（结论用 commit status，不用 Checks API） */
             default_permissions: {
                 /** @enum {string} */
@@ -6100,7 +6104,7 @@ export interface components {
              * @description 触发方式（该轮第一条代码 run 的 trigger_action；没有代码 run 时为 unknown）
              * @enum {string}
              */
-            trigger_action: "opened" | "synchronize" | "ready_for_review" | "reopened" | "manual" | "visual" | "unknown";
+            trigger_action: "opened" | "synchronize" | "ready_for_review" | "reopened" | "manual" | "comment" | "visual" | "unknown";
             created_at: string;
             code_runs: components["schemas"]["ReviewRunSummary"][];
             visual_runs: components["schemas"]["ReviewRunSummary"][];

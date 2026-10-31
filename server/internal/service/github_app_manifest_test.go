@@ -117,7 +117,7 @@ func TestManifest_Create(t *testing.T) {
 		t.Fatal("public must be false")
 	}
 	events := out.Manifest.DefaultEvents
-	if len(events) != 1 || string(events[0]) != "pull_request" {
+	if len(events) != 2 || string(events[0]) != "pull_request" || string(events[1]) != "issue_comment" {
 		t.Fatalf("events = %v", events)
 	}
 	perms := out.Manifest.DefaultPermissions

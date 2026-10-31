@@ -68,20 +68,21 @@ func TestGetPullRequest_MapsAllFields(t *testing.T) {
 	mergedAt := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	closedAt := time.Date(2026, 1, 2, 3, 4, 6, 0, time.UTC)
 	want := PullRequest{
-		RepoFullName: "octocat/hw",
-		Number:       7,
-		Title:        "Fix crash",
-		Body:         "long story",
-		HTMLURL:      "https://github.com/octocat/hw/pull/7",
-		State:        "closed",
-		Draft:        true,
-		Merged:       true,
-		MergedAt:     &mergedAt,
-		ClosedAt:     &closedAt,
-		HeadSHA:      "abc123",
-		HeadRef:      "fix-crash",
-		BaseRef:      "main",
-		AuthorLogin:  "bob",
+		RepoFullName:     "octocat/hw",
+		Number:           7,
+		Title:            "Fix crash",
+		Body:             "long story",
+		HTMLURL:          "https://github.com/octocat/hw/pull/7",
+		State:            "closed",
+		Draft:            true,
+		Merged:           true,
+		MergedAt:         &mergedAt,
+		ClosedAt:         &closedAt,
+		HeadSHA:          "abc123",
+		HeadRef:          "fix-crash",
+		HeadRepoFullName: "fork/other",
+		BaseRef:          "main",
+		AuthorLogin:      "bob",
 	}
 	if !reflect.DeepEqual(*pr, want) {
 		t.Fatalf("pull request mismatch:\n got %+v\nwant %+v", *pr, want)

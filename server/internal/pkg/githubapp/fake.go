@@ -135,10 +135,21 @@ func (f *Fake) SetPR(repo string, number int, pr *githubapi.PullRequest) {
 	if f.prs[key] == nil {
 		f.prs[key] = map[int]*githubapi.PullRequest{}
 	}
-	pr.RepoFullName = repo
+	// RepoFullName 默认按登记仓库名填（与真实返回一致）；显式提供时不覆盖
+	// ——仓库改名/转移后按旧名查询会重定向并返回新名 base（fast-ship-bot
+	// 第 24 轮 P2 的闸门重名场景需要能表达它）。
+	if pr.RepoFullName == "" {
+		pr.RepoFullName = repo
+	}
 	pr.Number = number
 	if pr.State == "" {
 		pr.State = "open"
+	}
+	// fork 守卫按 head/base 仓库全名比对（评论唤醒/rerun 都用）：fake 是
+	// 本地自测路径，入站 PR 未指明 head 仓库时按同仓库处理，免得守卫在
+	// fake 上恒触发、本地永远无法自测（fast-ship-bot 第 1 轮 P2）。
+	if pr.HeadRepoFullName == "" {
+		pr.HeadRepoFullName = pr.RepoFullName
 	}
 	f.prs[key][number] = pr
 }
@@ -341,6 +352,17 @@ func (f *Fake) AddReviewComment(repo string, user, path, body string, createdAt 
 	key := fakeRepoKey(repo)
 	f.reviews[key] = append(f.reviews[key],
 		fakeComment{ID: f.nextID, User: user, Path: path, Body: body, CreatedAt: createdAt})
+}
+
+// SetPRHeadRepo 覆盖已登记 PR 的 head 仓库名：SetPR 会把空的
+// HeadRepoFullName 默认成 base 仓库（本地自测语义），需要表达「已删 fork
+// （head.repo 为空）」时用它显式置空或改指其他仓库。
+func (f *Fake) SetPRHeadRepo(repo string, number int, headRepo string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if pr := f.prs[fakeRepoKey(repo)][number]; pr != nil {
+		pr.HeadRepoFullName = headRepo
+	}
 }
 
 // SetPRError 注入 PR 级读取错误：err 非 nil 时该 repo 的 GetPullRequest 一律

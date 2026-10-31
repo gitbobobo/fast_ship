@@ -23,6 +23,9 @@ type PullRequest struct {
 	HeadRef      string
 	BaseRef      string
 	AuthorLogin  string
+	// HeadRepoFullName head 仓库全名：跨仓 fork 守卫用（已删 fork 为空串——
+	// head.repo 缺失与不同名同样不得开轮审查）。
+	HeadRepoFullName string
 	// UpdatedAt 平台侧的 PR 最后更新时间（Forgejo/GitHub updated_at）：轮询
 	// 快照与 webhook 同刻复核把它落成 seen/总账的 pr_updated_at 判定基准。
 	UpdatedAt *time.Time

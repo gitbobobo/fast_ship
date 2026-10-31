@@ -69,7 +69,7 @@ Issue 与 Release、无代码；代码在另一仓库）。`project.CodeRepo()` 
 | `project_review_settings` | PK `project_id`；`user_id`；`integration_id/repo_full_name`（审查对象快照，INT-167）；`enabled`；`trigger_opened/synchronize/ready_for_review/reopened`；`code_combinations_json`/`visual_combinations_json` | 项目级开关与组合。组合元素：`environment_id`、`instance_id`（harness/provider 实例）、`model`、`options`（canonical `[{id,value}]` 数组，思考强度等）、`t3_project_id`（保存时由 `project_t3_bindings` 快照，不信任客户端回传）。代码组合启用时 1–5 个必填；视觉组合 0–3 个，0 个即从不启动视觉审查。`integration_id` 是归一值（空绑定 = `github-default`），保存设置与改绑项目时同点写入。 |
 | `review_runs` | `kind(code\|visual)`、`repo_full_name/pr_number/head_sha/round_number/integration_id`、`installation_id`、`trigger_action`、`pr_title/pr_url/base_ref/head_ref`、组合列 `environment_id/t3_project_id/instance_id/model/model_options_json`、预分配 `thread_id/launch_command_id/initial_message_id`、`status(queued\|dispatched\|running\|completed\|failed\|timed_out\|cancelled)`、`dispatch_started_at/dispatched_at/started_at/finished_at/deadline_at`、`error_code/error_message`、`prep_retry_count`、`summary/result_json`、`review_id/posted_at`、`worktree_path/worktree_branch/worktree_state/worktree_reason/worktree_error`、`stop_attempted_at`、`archived_at` | 一次审查运行 = 一轮 × 一个组合。同一 (集成, repo, pr, head_sha) 的代码与视觉运行共享 `round_number`（视觉是同一轮内的第二段）。`integration_id` 是普通列不入键（INT-167）：按集成选 client、按集成隔离同名仓库的历史。`dispatched_at` 在启动 RPC 结果确认或 Agent 首次持令牌鉴权时写入，为空 = 线程是否建成未确认。`prep_retry_count` 是 T3 工作区准备失败后的自动重试次数（INT-147，须持久化：进程重启不能把已用掉的重试名额清零）。`worktree_branch` 是线程投影读到的本轮专属分支名（INT-170，「空才补」回写，与 `worktree_path` 同款——线程 404 后的两步回收靠行内快照；两列都是新增可空列，升级前已有的行是 NULL，「空才补」条件须兼容 `IS NULL`，否则旧库行静默写不进、快照丢失）。`worktree_state` 值域 `none/removed/failed/branch_pending`（INT-170：`branch_pending` = 工作树已删、本轮专属分支仍在，服务端无删分支 RPC，复查登记 ref 全集、分支消失才 `removed`）。`worktree_reason` 是回收问题分类码（INT-170：`archive_failed/thread_read/registry_error/registry_incomplete/remove_budget_pending/remove_unavailable/ownership_error/ownership_mismatch/worktree_remove/remove_uncertain/branch_pending/env_binding/branch_unknown`；`removed` 时清空；`ownership_error` = 归属核验所需的本地 DB 读连续失败，区别于 `registry_error` 的 T3 登记读失败；`remove_budget_pending` = 删除执行的行内预算耗尽待重试，`remove_unavailable` = 删除请求未送达远端待重试，两者与 `registry_incomplete` 的登记读取不完整分键），聚合通知按（环境, 仓库, 原因）分键查询受影响清单。`archived_at` 是终态后线程归档写回的时刻；归档有限重试超限后也写入（不再重试），失败原因见 `worktree_error` 与 `review_cleanup_failed` 聚合通知。 |
 | `review_run_tokens` | PK `run_id`；`token_hash`（UNIQUE）；`expires_at`；`consumed_at` | 每次运行一个 `fsr_` 令牌，只存完整令牌的 SHA-256。 |
-| `review_pull_requests` | PK `(project_id, repo_full_name, pr_number, integration_id)`；`user_id/installation_id`；`round_number/head_sha`；`code_comment_id/visual_comment_id`；`code_status/visual_status`；`visual_screens_fingerprint`（`c:<urlFP>:<contentFP>` / `u:<urlFP>`，见「视觉审查衔接」）；`sync_pending/sync_epoch/sync_error` | 一个 PR 的审查总账：评论落点、最近一次推送的 commit status 结论、视觉截图指纹、事务外同步标记（置 pending 时 epoch+1，清标记按开始时 epoch 条件写）。主键含 `project_id` 与 `integration_id`：同仓库换项目接管或改绑集成后各一本账。 |
+| `review_pull_requests` | PK `(project_id, repo_full_name, pr_number, integration_id)`；`user_id/installation_id`；`round_number/head_sha`；`pr_updated_at`（受理该 head 时实拉快照的时刻——只推 head 的 advancePRHeadTx 路径不写 seen，时序判定的账本兜底基准，随 head 推进）；`code_comment_id/visual_comment_id`；`code_status/visual_status`；`visual_screens_fingerprint`（`c:<urlFP>:<contentFP>` / `u:<urlFP>`，见「视觉审查衔接」）；`sync_pending/sync_epoch/sync_error` | 一个 PR 的审查总账：评论落点、最近一次推送的 commit status 结论、视觉截图指纹、事务外同步标记（置 pending 时 epoch+1，清标记按开始时 epoch 条件写）。主键含 `project_id` 与 `integration_id`：同仓库换项目接管或改绑集成后各一本账。 |
 | `review_assets` | 唯一键 `(integration_id, repo_full_name, pr_number, head_sha, source_url)`；`position`；`label`；`storage_path`；`mime_type`；`size_bytes` | 视觉审查截图：PR 描述里的图片链接经截图下载面（`NewReviewMediaService`）下载后本地落盘。内容按 (集成, 仓库) 归一共享（同一 head 同一批截图），不按项目分区；同名仓库在两个集成下是不同实例的图源，各留一行。 |
 | `review_debounces` | PK `(project_id, repo_full_name, pr_number, integration_id)`；`head_sha/action/installation_id/pr_title/pr_url/base_ref/head_ref`；`fire_at` | 防抖窗口。窗口内新推送只更新 head 并推后 `fire_at`；固定 60s，不提供配置。 |
 | `review_seen_shas` | PK `(project_id, repo_full_name, pr_number, head_sha, integration_id)`；`pr_updated_at`；`accepted_at` | 某项目已受理过的 head SHA：force-push 回旧 SHA 不再开轮。按 (项目, 集成) 分区——接管或改绑后新键对同仓库同一 SHA 重新受理。 |
@@ -178,6 +178,104 @@ seen SHA、取消旧轮全部失效）。
 8. 写/更新防抖行（同一 (project, repo, pr) 只一行），`fire_at=now+60s`。
 
 事务内零 GitHub/T3 调用；提交后非阻塞 kick 调度循环。
+
+### 评论唤醒（INT-179，`review_comment_wake.go`）
+
+PR 顶层评论正文包含唤醒串（大小写不敏感的包含判定）时也开一轮审查——审
+查结论有误时实现者回帖纠正即可唤醒审查者，不必推空提交。唤醒串有两个：
+规格字面量 `@fast-ship-bot`（INT-179）与部署真实机器人句柄
+`@<app_slug>`（manifest 流创建的 App slug 形如 fast-ship-<host>，与字面
+量不同——按机器人账号自然 @ 也能唤醒；读取自部署设置行的 app_slug，
+未配置时仅字面量生效）。`handlePlatformWebhook` 按 event 名分流：`issue_comment` 与
+`pull_request_comment` 都进独立的评论唤醒分支，不进 pull_request 触发事务
+（Forgejo 的 PR 评论由独立订阅项 **Pull Request Comment** 投递，事件名随
+部署版本/形态可能是任一者；GitHub 恒 `issue_comment`，行内评论是另一个
+事件名不会误入），共用中性路径。**平台 webhook 必须订阅 Issue comment
+事件**，否则平台根本不投递：manifest 流创建的 GitHub App 已默认带上
+（`GitHubAppManifestService.Create` 的 `default_events` 含
+`issue_comment`），手动创建的 App 需自行勾选；**升级到本版本的存量 App
+不受 manifest 影响**，需在 GitHub App 设置里手动补勾 Issue comment（服务
+端没有可改存量 App 订阅的 API）；Forgejo 需勾 Pull Request Comment
+（见 forge-integrations.md 第 6 步）。
+
+**Forgejo 瞬态失败的恢复**：GitHub 侧投递失败有独立对账循环（见「投递
+失败对账」）；Forgejo 没有投递列表 API 集成、轮询也只覆盖推送事件，
+评论唤醒遇到瞬态失败（实拉/DB 故障回 5xx）不会自动重放。恢复路径：
+Forgejo 后台 webhook 的 Recent Deliveries 手动重放（投递内容不变，重放
+按幂等账正常受理）。为 Forgejo 建持久重试子系统属独立需求，本 PR 不做；
+GitHub 主路径的自动对账完整覆盖。
+
+payload 两平台同形，只取最小字段面：`action`（只受理 `created`，编辑/删除
+不唤醒）、`issue.pull_request`（存在即 PR，普通 Issue 的评论忽略）、
+`issue.number`、`comment.body`、`repository.full_name`、`installation.id`、
+`comment.author_association`、`comment.user.login`。纯 payload 守卫（不碰
+库、不发网络）依次：action → mention → PR 归属；评论者身份在实拉 PR 后
+判（`commentWakeAuthorized`，两平台同口径）：仓库属主 OWNER，或 PR 作者
+本人（评论者登录名与实拉 PR 作者一致——GitHub 的 association 枚举没有
+AUTHOR 值，标记判不出作者身份；Forgejo 没有关系字段，只能靠登录名）。
+其余关联标记均不信任：COLLABORATOR 邀请可授 Read/Triage、MEMBER 只是
+组织成员身份（组织仓库基础权限可设为 Read）、CONTRIBUTOR 是「历史提交
+过」而非当前权限——公开仓库上无 push 权限的陌生人只能开 fork PR（被触发
+面拒绝），原本触发不了任何审查，身份过滤堵住「每轮结束后继续点名」的
+无限烧额度通道；实现者回帖纠正的主场景是 PR 作者本人，不受影响。身份
+不过静默忽略，**不登记幂等账**——重投再忽略一遍零副作用。配合「同
+head 已有在途审查不重开」守卫，
+连续点名也无法作废在途轮饿死审查。
+
+编排沿用「事务内零网络调用」铁律，两阶段（模式同 `revalidateTiedWebhook`）：
+
+1. **阶段一（事务外）**：
+   - 幂等预查（只读）：已登记的投递直接按重复去重（handler 仍 202），省
+     一次实拉；预查与最终事务之间的并发窗口由事务内 insert 判重兜底。
+   - installation 兜底：GitHub 投递缺 installation 快照（代理剥字段等）时
+     `resolveGitHubInstallation` 按仓库解析，Forgejo 恒 0。解析失败按错误
+     链分类（`deterministicCommentWakeSetupErr`）：确定性失败（访问面未
+     配置、平台 401/403/404 且非限流）重投结果相同，判丢弃并补登幂等账；
+     瞬时错误（限流/网络）返回 error（handler 500，平台重投）。
+   - 只读观察总账 head（`observeAcceptedHead`，与 `currentAcceptedHeadTx`
+     同源：未开火的防抖行优先，否则总账 `head_sha`）记 `observedHead`，
+     供阶段二复核观察窗口。
+   - 实拉 PR 实况：实拉独享超时 ctx（从 `context.Background()` 派生，照
+     `consumeDebounce`；后续库操作用请求 ctx）。构造客户端/实拉的确定性
+     失败（`deterministicReviewAccessErr`）判丢弃并补登幂等账；瞬时错误
+     返回 error 让平台重投——此时库里没有任何登记，重投可完整重走全流程
+     （这正是幂等账不能在此前单独提交的原因）。
+2. **阶段二（单事务，幂等登记与开轮同生共死）**：`deliveries.InsertTx` +
+   `deliveryLedgerKey` 登记（重复 → `ErrDeliveryDuplicated`）→ 反查启用
+   项目（与 pull_request 同款判定：按设置行 (integration_id, repo_full_name)
+   快照）→ 项目身份复核：反查到的项目 ID ≠ `observedProjectID`（预查/
+   观察与事务之间改绑）即同上哨兵——观察基准（seen/总账时序基准）不可
+   跨项目沿用 → 复核设置行仍 enabled 且快照未变 → 观察窗口复核：事务内重取总账
+   head ≠ `observedHead` 即窗口内被并发推进，哨兵
+   `errCommentWakeObservedHeadMoved` 让整体回滚（幂等登记一并撤销，不烧
+   账），外层重读重拉；上限 `reviewCommentWakeRevalidateMax`（2 次）仍不
+   收敛则放弃且**不登记**幂等账（fast-ship-bot 第 52 轮 P2：连续推送窗
+   口内静默丢弃+烧账会永久吞掉合法唤醒——再次评论或手动 Redeliver 可完
+   整重走）→
+   fork 守卫：实拉 `HeadRepoFullName` 为空（已删 fork/异常 payload）或与
+   base 仓库不同名即跨仓 fork，不开轮（与 pull_request 触发面同一不变量，
+   rerun 同样有此守卫）→ 实况非 open 或 draft、空 head → 忽略
+   （`prReviewable` + `forge.PullRequest.Draft`）→ 通过后
+   `supersedePRRunsTx` 取消在途、删残留防抖行（旧推送不得再开火）、
+   `openRoundTx` 开新轮。事务任何一步失败整体回滚（幂等账随之撤销），平台
+   重投可重走；复核不过是已确定的丢弃，事务提交后幂等账落定，重投按 202
+   去重。
+
+**head 采信语义**：账本可能因丢投递落后于平台——观察窗口内总账未被并发
+推进时，即便实拉 head 与总账不同也采信实拉 head 开轮（`openRoundTx` 把
+总账推进到 live head），不再按「账本不同」把唤醒永久锁死；窗口内被并发
+推进则是重试信号，不是忽略信号。
+
+触发语义等同 rerun 的 `manual`：**评论唤醒开新轮**，同 head 也新轮
+（`nextReviewRoundTx` 对 `comment` 与 `manual` 同样跳过同 head 复用——否则
+组合唯一索引会吃掉运行行），`action` 落库为新值 `comment`；不走
+`handleReviewTriggerTx`、不落防抖行；受理与 push 一样登记
+`review_seen_shas`（第 38 轮 P2：push 触发面的时序判定以当前 head 的
+seen 行为基准，comment 受理必须进受理史）。例外：同
+head 已有在途审查（queued/dispatched/running）时不重开、不 supersede、
+不动防抖行——该 head 正在审，再点名是重复请求，防连续点名作废在途轮
+饿死审查；结论已出（终态运行）时照常开新轮重审。不在平台回帖确认（范
+围外）。成功后与主路径共用同一尾部：提交后非阻塞 kick 调度循环。
 
 投递本身也可能失败：GitHub 发出但没送达（公网隧道超时/502）时 GitHub App
 不会自动重试，这次推送就永远不会进入上面的任何一步。独立低频循环里的对账
@@ -296,9 +394,11 @@ GitHub App 投递失败（公网隧道超时/502）不会自动重试，一次�
   轮**（进程刚起来时补上停机期间漏掉的投递），单次兜底超时 90 秒——独立
   循环不阻塞调度，但仍要有界，避免 GitHub 半挂时无限拖。
 - 拉近 **24 小时**（`reviewRedeliveryLookback`；GitHub 只保留约 3 天投递
-  记录）的投递记录，只处理 `pull_request` 事件里**会开轮的 action**
-  （opened/synchronize/ready_for_review/reopened，`reviewTriggerableAction`
-  同源判定），`status_code` 非 2xx 即失败。`closed` **有意不重投**：丢失的
+  记录）的投递记录，只处理会开轮的事件行：`pull_request` 里**会开轮的
+  action**（opened/synchronize/ready_for_review/reopened，
+  `reviewTriggerableAction` 同源判定）与 `issue_comment` 的 `created`
+  （INT-179 评论唤醒也靠 webhook 投递入场，丢了同样永久漏审），
+  `status_code` 非 2xx 即失败。`closed` **有意不重投**：丢失的
   closed 投递不会导致「推送没被审查」，而重投回去会无条件取消该 PR 当前
   有效的审查运行（webhook 的 closed 分支在任何时间戳判定之前执行）。
   重投重放的是**原始 payload**（PR 仍写着 open、`updated_at`/head 都是旧
@@ -363,7 +463,10 @@ GitHub App 投递失败（公网隧道超时/502）不会自动重试，一次�
   （代码与视觉同轮号）；否则 `1 + max(round_number)`——轮次只在项目内分配，
   接管后新项目从 1 起算，不受旧项目已跑轮次影响。手动重新审查（
   `trigger_action=manual`）恒开新轮——同 head 也要 `max+1`，否则会被
-  组合唯一索引吃掉。
+  组合唯一索引吃掉。评论唤醒（INT-179，`trigger_action=comment`）与
+  manual 同语义：同 head 也恒开新轮、不走同 head 复用；受理与 push 一样
+  登记 seen（第 38 轮 P2：push 触发面的时序判定以当前 head 的 seen 行为
+  基准，comment 受理必须进受理史）。
 - 同事务 upsert `review_pull_requests`（project/user/installation/round/head、
   `sync_pending=true`），为每个代码组合插一行 `review_runs`（`status=queued`）。
 - 视觉运行不在开轮时创建：等代码审查全部终态后由「视觉审查衔接」决定。
@@ -1098,7 +1201,7 @@ SHA-256 前 16 位。
 | GET | `/api/projects/{id}/review-settings` | 设置 + `repo_full_name`（实际审查的代码仓库，原样大小写）+ `prerequisites[]`（缺项 `missing=true` + `detail`）+ `taken_by`。prerequisite 的 `github_app_installation` 每次实时调一次 GitHub。 |
 | PUT | `/api/projects/{id}/review-settings` | 全量保存。组合结构/归属/绑定/数量/重复问题 40001（只读会话的环境同样拒绝）；启用时前置条件缺项 41202（逐条写进 message）；同仓库占用 40922（带占用者）。`enabled=false` 跳过前置校验、允许零组合。 |
 | GET | `/api/projects/{id}/review-records` | 审查记录：`items[]` 每个 PR 一行，内嵌 `rounds[]`（轮次、head、触发方式、时间）与每轮 `code_runs[]`/`visual_runs[]`（含 `findings[]`/`unmeasurable[]`）。`?limit=` 默认 20、上限 100。首页改版后网页不再有入口，接口保留。 |
-| POST | `/api/projects/{id}/reviews/rerun` | 重新审查：body `{pr_number}`。项目必须 enabled（否则 40923）。rerun 没有 webhook installation 快照：先 `ResolveInstallation` 解析真实安装 id（解析不支持/失败直接报错，不拿 0 继续），再用安装令牌 `GetPullRequest` 实时取当前 head，走与 webhook 相同的「取消旧 SHA + 开轮」事务路径（`trigger_action=manual`，恒开新轮），安装 id 落进运行与总账。PR 已关闭/合并时直接报错（40001「PR 已关闭」），不开轮。返回 `{accepted, head_sha, round_number}`。 |
+| POST | `/api/projects/{id}/reviews/rerun` | 重新审查：body `{pr_number}`。项目必须 enabled（否则 40923）。rerun 没有 webhook installation 快照：先 `ResolveInstallation` 解析真实安装 id（解析不支持/失败直接报错，不拿 0 继续），再用安装令牌 `GetPullRequest` 实时取当前 head，走与 webhook 相同的「取消旧 SHA + 开轮」事务路径（`trigger_action=manual`，恒开新轮），安装 id 落进运行与总账。PR 已关闭/合并时直接报错（40001「PR 已关闭」），不开轮；跨仓 fork（实拉 head 仓库缺失或与 base 仓库不同名）同样报错（40001「fork PR 不能重跑审查」）。返回 `{accepted, head_sha, round_number}`。 |
 
 ## 开启前置与同仓库唯一
 

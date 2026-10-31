@@ -80,8 +80,9 @@ type hookDeliveryState struct {
 }
 
 // reconcileWebhookDeliveries 一轮投递失败对账：GitHub 发出但没送达本服务的
-// pull_request 投递（隧道超时/502）会被重投，避免一次投递失败就让这次推送
-// 永远不会被审查。节流由 redeliveryLoop 的 ticker 负责，本函数不做节流。
+// pull_request 与 issue_comment/created 投递（隧道超时/502）会被重投，避免
+// 一次投递失败就让这次推送/评论唤醒永远不生效。节流由 redeliveryLoop 的
+// ticker 负责，本函数不做节流。
 // 超上限后不再重试并发站内通知。循环内的判定顺序：跳过已送达 → 已判关闭
 // 静默跳过 → PR 实况闸门 → 超限通知 → 每轮重投预算 → 重投。
 func (s *ReviewService) reconcileWebhookDeliveries(now time.Time) {
@@ -164,11 +165,24 @@ func (s *ReviewService) reconcileWebhookDeliveries(now time.Time) {
 	}
 	probeCtx, probeCancel := context.WithTimeout(ctx, probeBudget)
 	defer probeCancel()
+	// 闸门降级语义：唤醒串读取瞬时失败回落字面量继续重投——闸门本就宽
+	// 松，宁可多投不漏投（唤醒侧则按瞬时失败 500 重试，两处口径不同）。
+	mentions, mentionsCached, mentionsErr := s.commentWakeMentions(ctx)
+	if mentionsErr != nil {
+		mentions = []string{reviewCommentWakeMention}
+	}
 	probe := &redeliveryPRProbe{
 		hooks:    hooks,
 		client:   client,
 		budget:   reviewRedeliveryMaxPerSweep,
-		prStates: map[string]bool{},
+		mentions: mentions,
+		// 唤醒串读取降级**或来自缓存**时，slug-only 评论会被字面量集合误
+		// 判成非唤醒而记终态——缓存窗口内 slug 可能过期（部署切换/重建
+		// App），那正是最需要重试的投递（codex 第 23 轮 P2、fast-ship-bot
+		// 第 46 轮 P2）。标记降级，评论投递一律按未知重试（宁多投不漏投）。
+		mentionsDegraded: mentionsErr != nil || mentionsCached,
+		fresh:            func() ([]string, bool, error) { return s.commentWakeMentionsFresh(ctx) },
+		prStates:         map[string]*probePRState{},
 	}
 	tried := 0
 	for _, st := range pending {
@@ -182,17 +196,26 @@ func (s *ReviewService) reconcileWebhookDeliveries(now time.Time) {
 		if ledger[st.GUID].Closed {
 			continue // 已确认关闭的 PR：终态，不重投、不通知、不再查询
 		}
-		if check := s.redeliveryPRReviewable(probeCtx, probe, st.TargetID); check.Known && !check.Reviewable {
-			// PR 已关闭/合并：记终态后静默跳过——重投只会白跑一轮（webhook
-			// 会照常受理并在连续失败时误报故障通知）。记账失败只留日志，
-			// 不影响其它组（下一轮重查同一条，顶多重复一次）。
+		if check := s.redeliveryPRReviewable(probeCtx, probe, st.TargetID, st.Event); check.Known && !check.Reviewable {
+			// 记终态后静默跳过——重投只会白跑一轮（webhook 会照常受理并在
+			// 连续失败时误报故障通知）。记账失败只留日志，不影响其它组（下
+			// 一轮重查同一条，顶多重复一次）。
 			if err := s.redeliveries.RecordClosed(s.db, st.GUID, time.Now().UTC()); err != nil {
 				s.logger.Error("记录投递终态失败",
 					zap.String("guid", st.GUID), zap.Error(err))
 			}
-			s.logger.Info("投递指向的 PR 已关闭，跳过重投",
-				zap.String("guid", st.GUID), zap.Int64("delivery", st.TargetID),
-				zap.String("repo", check.Repo), zap.Int("pr", check.Number))
+			if check.NotWake {
+				s.logger.Info("非唤醒评论投递，跳过重投",
+					zap.String("guid", st.GUID), zap.Int64("delivery", st.TargetID))
+			} else if check.Fork {
+				s.logger.Info("投递指向的 PR 是跨仓 fork，跳过重投",
+					zap.String("guid", st.GUID), zap.Int64("delivery", st.TargetID),
+					zap.String("repo", check.Repo), zap.Int("pr", check.Number))
+			} else {
+				s.logger.Info("投递指向的 PR 当前不可审（已关闭/草稿），跳过重投",
+					zap.String("guid", st.GUID), zap.Int64("delivery", st.TargetID),
+					zap.String("repo", check.Repo), zap.Int("pr", check.Number))
+			}
 			continue
 		}
 		attempts := ledger[st.GUID].Attempts
@@ -243,8 +266,19 @@ func (s *ReviewService) notifyRedeliveryExhausted(userIDs []string, st hookDeliv
 		return
 	}
 	title := fmt.Sprintf("PR 审查投递重投失败：%s/%s", st.Event, st.Action)
-	body := fmt.Sprintf("GitHub 的 %s/%s 投递在 %d 次重投后仍未送达本服务（guid %s），这次推送可能没有被审查；请检查公网入口与隧道。",
-		st.Event, st.Action, attempts, st.GUID)
+	// 恢复指引按事件面区分：推送投递丢了重推即可；评论唤醒丢了重投也不
+	// 行——幂等账只随确定结果落定，失败投递没进账，用户重新评论一次就能
+	// 触发新一轮（codex 第 25 轮 P3：误导性文案把用户往重推空提交上引）。
+	var hint string
+	if st.Event == "issue_comment" {
+		// 新评论必须带唤醒串（@fast-ship-bot 或部署句柄）：不带会被
+		// commentWakeMentioned 静默忽略且无反馈（fast-ship-bot 第 44 轮 P2）。
+		hint = "这次评论唤醒可能没有开始；请在 PR 上重新评论并 @ 机器人（@fast-ship-bot）即可重新触发"
+	} else {
+		hint = "这次推送可能没有被审查；重新推送或合并后重试即可触发"
+	}
+	body := fmt.Sprintf("GitHub 的 %s/%s 投递在 %d 次重投后仍未送达本服务（guid %s），%s；请检查公网入口与隧道。",
+		st.Event, st.Action, attempts, st.GUID, hint)
 	for _, userID := range userIDs {
 		err := s.sink.Publish(NotificationInput{
 			UserID:     userID,
@@ -271,23 +305,52 @@ type redeliveryPRProbe struct {
 	hooks    githubapp.HookDeliveries
 	client   githubapi.GitHubClient
 	budget   int
-	prStates map[string]bool // repo#number -> PR 实时可审
+	mentions []string
+	prStates map[string]*probePRState // repo#number -> PR 实况快照（可用性 + 作者）
+	// mentionsDegraded 唤醒串集合读取降级（瞬时 DB 故障回落字面量）：此刻
+	// 字面量判定「非唤醒」不可信——slug-only 的合法唤醒会被记终态永不重试，
+	// 评论投递一律按未知重试（codex 第 23 轮 P2）。
+	mentionsDegraded bool
+	// fresh 每轮对账内的强制刷新面（懒执行一次）：降级/缓存窗口下含 @ 的
+	// 未命中先用刷新后的集合复核再判终态（fast-ship-bot 第 56 轮 P2）。
+	fresh         func() ([]string, bool, error)
+	freshMentions []string
+	freshDegraded bool
+	freshTried    bool
+	freshErr      error
 }
 
 // redeliveryPRCheck 一次闸门判定的结果。Known=false 表示读不到（payload 拉取
 // 失败/解析不出 PR/实时读失败/预算耗尽），调用方降级为原行为照常重投。
+// probePRState 闸门缓存的 PR 实况快照：可用性与作者登录名分开存——评论者
+// 身份按投递现算，不能掺进缓存。
+type probePRState struct {
+	usable bool
+	author string
+	// fork 同 prUsable 一起缓存：命中分支回填 check.Fork，日志不把 fork
+	// 误判成关闭/草稿（fast-ship-bot 第 38 轮 Note）。
+	fork bool
+}
+
 type redeliveryPRCheck struct {
 	Known      bool
 	Reviewable bool
 	Repo       string
 	Number     int
+	// NotWake 评论唤醒专用：投递是 issue_comment 但 payload 不满足唤醒守卫
+	// （编辑/删除、普通 Issue 评论、正文未点名机器人）——webhook 本来就
+	// 会静默忽略，对账记终态跳过，不进重试集不吃预算。
+	NotWake bool
+	// Fork 投递指向跨仓 fork PR（或已删 fork）：唤醒/审查守卫必拒，重投
+	// 只会白跑，同样记终态跳过。
+	Fork bool
 }
 
 // redeliveryPRReviewable 重投前的 PR 实况闸门：确认投递指向的 PR 仍开着。
 // 读不到时只记 Warn（含投递 id 与原因，不打 payload 全文——里面是仓库内容）
 // 并按未知处理。闸门预算/时间用完是设计内的降级，不当故障记。
-func (s *ReviewService) redeliveryPRReviewable(ctx context.Context, probe *redeliveryPRProbe, deliveryID int64) redeliveryPRCheck {
-	check, err := probe.lookup(ctx, deliveryID)
+func (s *ReviewService) redeliveryPRReviewable(ctx context.Context, probe *redeliveryPRProbe, deliveryID int64, event string) redeliveryPRCheck {
+	check, err := probe.lookup(ctx, deliveryID, event)
 	if err != nil && !errors.Is(err, errRedeliveryProbeBudget) &&
 		!errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
 		s.logger.Warn("重投闸门无法确认投递指向的 PR 实况，降级为照常重投",
@@ -299,8 +362,10 @@ func (s *ReviewService) redeliveryPRReviewable(ctx context.Context, probe *redel
 // lookup 取投递详情、定位其 PR 并实时读 State。每次 GetHookDelivery、每次
 // 缓存未命中的 GetPullRequest 各占一个预算名额（被拒的请求同样打到了
 // GitHub，与重投预算同口径）；只缓存读到的状态，失败不缓存——预算兜住
-// 总量，后续投递仍可重试。
-func (p *redeliveryPRProbe) lookup(ctx context.Context, deliveryID int64) (redeliveryPRCheck, error) {
+// 总量，后续投递仍可重试。payload 按 event 选解析面：pull_request 与
+// issue_comment（INT-179 评论唤醒）都带 repository/installation，但 PR 号
+// 字段名不同（前者顶层 number、后者 issue.number）。
+func (p *redeliveryPRProbe) lookup(ctx context.Context, deliveryID int64, event string) (redeliveryPRCheck, error) {
 	// 闸门自己的时间预算已经用完：不再发请求，直接按未知降级（调用方还有
 	// 正常的总超时 context 可用）。
 	if err := ctx.Err(); err != nil {
@@ -314,50 +379,143 @@ func (p *redeliveryPRProbe) lookup(ctx context.Context, deliveryID int64) (redel
 	if err != nil {
 		return redeliveryPRCheck{}, err
 	}
-	var payload prWebhookPayload
-	if err := json.Unmarshal(detail.Payload, &payload); err != nil {
-		return redeliveryPRCheck{}, fmt.Errorf("解析投递 payload: %w", err)
+	var repo string
+	var number int
+	var installation int64
+	// issue_comment 投递的守卫结果（nil = 非 issue_comment）：用于实拉后的
+	// 评论者身份判定（pull_request 投递不需要——推送作者天然有 push 权限）。
+	var wakePayload *commentWakePayload
+	switch event {
+	case "issue_comment":
+		// 与评论唤醒共用同一份最小字段面：repository.full_name + issue.number。
+		// 解析失败 ≠ 守卫拒绝：空/损坏 payload（或形状变化）按未知降级重投，
+		// 与 pull_request 分支同口径——只有解析成功后的守卫拒绝才是非唤醒
+		// 终态（fast-ship-bot 第 29 轮 P2：真实唤醒不得被记终态不再重试）。
+		var probe commentWakePayload
+		if err := json.Unmarshal(detail.Payload, &probe); err != nil {
+			return redeliveryPRCheck{}, fmt.Errorf("解析投递 payload: %w", err)
+		}
+		// 守卫拒绝（非唤醒投递：普通 Issue 评论、正文未点名机器人）webhook
+		// 本来就会静默忽略——记终态跳过，不进重试集白吃预算与通知。
+		payload := commentWakePayloadGuards(detail.Payload, p.mentions)
+		if payload == nil {
+			// 正文不含 @ 则不可能含任何唤醒串（字面量与句柄都以 @ 开头），
+			// 无论集合是否可信都是确定的非唤醒，记终态跳过——webhook 故障
+			// 积压的普通讨论不白吃重投预算、不制造误导通知（codex 第 48 轮
+			// P2）。
+			//
+			// 含 @ 的未命中：降级/缓存窗口下 slug 可能过期判「非唤醒」不可
+			// 信（codex 第 23 轮 P2）——每轮对账先强制刷新一次，用刷新后的
+			// 集合复核：仍不命中才是确定的非唤醒（记终态）；刷新失败按未
+			// 知重试（宁多投不漏投）。复核到的唤醒投递照常走 PR 实况判定
+			// （fast-ship-bot 第 56 轮 P2）。
+			if p.mentionsDegraded && strings.Contains(strings.ToLower(probe.Comment.Body), "@") {
+				if !p.freshTried {
+					p.freshTried = true
+					p.freshMentions, p.freshDegraded, p.freshErr = p.fresh()
+				}
+				if p.freshErr != nil {
+					return redeliveryPRCheck{}, p.freshErr
+				}
+				payload = commentWakePayloadGuards(detail.Payload, p.freshMentions)
+				if payload == nil {
+					if p.freshDegraded {
+						// 刷新集合本身是降级态（解密失败仅字面量，fast-ship-bot
+						// 第 57 轮 P2）：slug-only 唤醒不得据此记终态，按未知重试。
+						return redeliveryPRCheck{}, errors.New("刷新集合降级，评论投递按未知重试")
+					}
+					return redeliveryPRCheck{Known: true, Reviewable: false, NotWake: true}, nil
+				}
+			} else {
+				return redeliveryPRCheck{Known: true, Reviewable: false, NotWake: true}, nil
+			}
+		}
+		wakePayload = payload
+		repo, number, installation = payload.Repository.FullName, payload.Issue.Number, payload.Installation.ID
+	default:
+		var payload prWebhookPayload
+		if err := json.Unmarshal(detail.Payload, &payload); err != nil {
+			return redeliveryPRCheck{}, fmt.Errorf("解析投递 payload: %w", err)
+		}
+		repo, number, installation = payload.Repository.FullName, payload.Number, payload.Installation.ID
 	}
 	check := redeliveryPRCheck{
-		Repo:   strings.ToLower(payload.Repository.FullName),
-		Number: payload.Number,
+		Repo:   strings.ToLower(repo),
+		Number: number,
 	}
-	if payload.Number <= 0 || payload.Repository.FullName == "" || payload.Installation.ID == 0 {
+	if number <= 0 || repo == "" || installation == 0 {
 		return check, errors.New("投递 payload 缺少 repo/PR/installation 字段")
 	}
 	key := check.Repo + "#" + strconv.Itoa(check.Number)
-	if reviewable, ok := p.prStates[key]; ok {
-		check.Known, check.Reviewable = true, reviewable
+	if st, ok := p.prStates[key]; ok {
+		// 缓存只放 PR 实况快照；评论者身份按投递现算（同 sweep 内同 PR 的
+		// 无资格评论不得连累有资格投递，codex 第 13 轮 P2）。
+		authorized := wakePayload == nil || commentWakeAuthorized(wakePayload,
+			&forge.PullRequest{AuthorLogin: st.author})
+		check.Known, check.Reviewable = true, st.usable && authorized
+		check.Fork = st.fork
 		return check, nil
 	}
 	if p.budget <= 0 {
 		return check, errRedeliveryProbeBudget
 	}
 	p.budget--
-	pr, err := p.client.GetPullRequest(ctx, payload.Installation.ID, payload.Repository.FullName, payload.Number)
+	pr, err := p.client.GetPullRequest(ctx, installation, repo, number)
 	if err != nil {
 		return check, err
 	}
 	// 重投是 GitHub 专属路径（deliveries API 不在 forge.ReviewClient 方法面），
-	// 实况判定与审查链路同一口径：经共享转换后复用 prReviewable。
-	reviewable := prReviewable(forge.PullRequestFromGitHub(pr))
-	p.prStates[key] = reviewable
+	// 实况判定与审查链路同一口径：经共享转换后复用 prReviewable。fork PR
+	// （head 仓库缺失或与 base 不同名）的投递无论重投多少次都会被 fork
+	// 守卫丢弃；无资格评论者的投递同样必拒——都记终态跳过，不白吃重投
+	// 预算（codex 第 5/12 轮 P2）。
+	forgePR := forge.PullRequestFromGitHub(pr)
+	open := prReviewable(forgePR)
+	// fork 判定与评论唤醒守卫同口径：head 与**实拉 base** 仓库名比对——
+	// payload 里的仓库名是投递时刻的旧快照，仓库改名/转移后会过期，拿它
+	// 当同仓基准会把改名窗口内的同仓 PR 误判成跨仓 fork 记终态、永不重投
+	// （fast-ship-bot 第 24 轮 P2）。
+	fork := open && (forgePR.HeadRepoFullName == "" || !strings.EqualFold(forgePR.HeadRepoFullName, forgePR.RepoFullName))
+	// 评论者身份仅约束 issue_comment 投递（pull_request 投递的推送作者天然
+	// 有 push 权限，不需要也不能用评论身份判定），且**按投递现算、不入
+	// prStates 缓存**——缓存被同一 sweep 内同 PR 的后续投递复用，掺入某条
+	// 无资格评论的判定会把有资格投递也错误跳过（codex 第 13 轮 P2）。
+	authorized := wakePayload == nil || commentWakeAuthorized(wakePayload, forgePR)
+	// 草稿 PR 与触发面同口径排除（handleReviewTriggerTx 的 t.draft、评论
+	// 唤醒事务的 pr.Draft 守卫都会丢弃）：草稿期间的投递重投只会白吃预算
+	// 甚至误发故障通知（codex 第 34 轮 P2）；转正式后新投递自然开审。
+	prUsable := open && !fork && !forgePR.Draft
+	// 负向结果（closed/草稿/fork）不进缓存：同一 sweep 内 PR 可能转为可审
+	// （ready_for_review/reopened 投递紧随其后），缓存的 usable=false 会把
+	// 后到投递误记终态、永不重试（codex 第 50 轮 P2）——负向按投递现查
+	// （预算天然兜住总量），正向快照复用安全。
+	if prUsable {
+		p.prStates[key] = &probePRState{usable: prUsable, author: forgePR.AuthorLogin, fork: fork}
+	}
+	reviewable := prUsable && authorized
 	check.Known, check.Reviewable = true, reviewable
+	check.Fork = !reviewable && fork
 	return check, nil
 }
 
-// groupHookDeliveries 把投递行按 guid 汇总：只处理 pull_request 事件里会开轮
-// 的 action（opened/synchronize/ready_for_review/reopened）。丢失的 closed
+// groupHookDeliveries 把投递行按 guid 汇总：处理会开轮的事件行——
+// pull_request 里会开轮的 action（opened/synchronize/ready_for_review/
+// reopened）与 issue_comment 的 created（INT-179 评论唤醒也靠 webhook 投递
+// 入场，丢了同样永久漏审）。丢失的 closed
 // 投递不会导致「推送没被审查」（本功能唯一目标），但把旧的 closed 事件重投
 // 回去会无条件取消该 PR 当前有效的审查运行（webhook 的 closed 分支在任何
-// 时间戳判定之前执行），破坏面比收益大，有意不重投。重投目标取最早一条
+// 时间戳判定之前执行），破坏面比收益大，有意不重投。同一 guid 只对应一条
+// 投递，不存在跨事件混组的歧义。重投目标取最早一条
 // 失败行的 delivery id；输出按 TargetAt 升序（GUID 兜同刻排序），保证对账
 // 行为确定。Attempts 只数列表可见的重投行——原始行滑出回看窗口后它不再等
 // 于总次数，调用方须以重投次数账为准。
 func groupHookDeliveries(items []githubapp.HookDelivery) []hookDeliveryState {
 	byGUID := map[string]*hookDeliveryState{}
 	for _, it := range items {
-		if it.Event != "pull_request" || !reviewTriggerableAction(it.Action) {
+		switch {
+		case it.Event == "pull_request" && reviewTriggerableAction(it.Action):
+		case it.Event == "issue_comment" && it.Action == "created":
+		default:
 			continue
 		}
 		st, ok := byGUID[it.GUID]

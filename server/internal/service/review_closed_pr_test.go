@@ -15,6 +15,7 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/forge"
 	"github.com/godbobo/fast_ship/server/internal/githubapi"
 	"github.com/godbobo/fast_ship/server/internal/model"
+	"gorm.io/gorm"
 )
 
 // seedClosedDebounce 落一行到期防抖的公共助手。
@@ -582,5 +583,167 @@ func TestReviewArchiveSkipsNeverLaunched(t *testing.T) {
 	}
 	if e.cleanupFailedCount(t) != 0 {
 		t.Fatal("pr_closed 收尾不应产生回收失败通知")
+	}
+}
+
+// 密文损坏按确定性失败（fast-ship-bot 第 36 轮 P2）：GitHub App 部署配置
+// 解密失败与 Forgejo 集成密文损坏同口径——防抖行删行不再推后、评论唤醒
+// 判丢弃补登幂等账，而不是无限重试/500 刷错。
+func TestReviewDecryptErrorsAreDeterministic(t *testing.T) {
+	if !deterministicReviewAccessErr(errGitHubAppDecrypt) {
+		t.Fatal("防抖分类应把 App 配置解密失败当确定性失败")
+	}
+	if !deterministicCommentWakeSetupErr(errGitHubAppDecrypt) {
+		t.Fatal("评论唤醒分类应把 App 配置解密失败当确定性失败")
+	}
+}
+
+// 防抖实况读的安装 id 兜底（fast-ship-bot 第 36 轮 P2）：GitHub 投递缺
+// installation 快照（行内为 0）时先沿用总账快照，无总账才按仓库解析——
+// 直接拿 0 换 token 会 404 并被确定性分支删行静默丢推送。
+func TestReviewDebounceInstallationFallback(t *testing.T) {
+	now := time.Now().UTC()
+
+	// 案例一：总账有 installation 快照（7）——沿用，不发解析调用。
+	t.Run("ledger-snapshot", func(t *testing.T) {
+		e := newReviewEngineEnv(t)
+		e.enableReview(t)
+		repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+		t3 := &fakeReviewT3{}
+		review := e.withT3(t3, nil, nil)
+		e.fake.SetPR(repo, 81, &githubapi.PullRequest{
+			RepoFullName: repo, Number: 81, State: "open", HeadSHA: "sha-81",
+			HeadRepoFullName: repo, Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
+		})
+		if err := e.svc.db.Create(&model.ReviewPullRequest{
+			ProjectID: e.project.ID, UserID: e.project.UserID,
+			RepoFullName: repo, PRNumber: 81,
+			IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+			HeadSHA:       "sha-81", RoundNumber: 1, UpdatedAt: now,
+			InstallationID: 7,
+		}).Error; err != nil {
+			t.Fatalf("seed ledger: %v", err)
+		}
+		if err := e.svc.db.Create(&model.ReviewDebounce{
+			IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+			ProjectID:     e.project.ID, RepoFullName: repo, PRNumber: 81,
+			HeadSHA: "sha-81", Action: "synchronize", InstallationID: 0,
+			PRTitle: "t", PRURL: "u", BaseRef: "main", HeadRef: "feature",
+			FireAt: now.Add(-time.Second), UpdatedAt: now.Add(-time.Minute),
+		}).Error; err != nil {
+			t.Fatalf("seed debounce: %v", err)
+		}
+
+		review.processDueDebounces(now)
+
+		for _, c := range e.fake.Calls {
+			if c.Method == "ResolveInstallation" {
+				t.Fatal("总账快照可用时不得发安装解析调用")
+			}
+		}
+		var runs int64
+		e.svc.db.Model(&model.ReviewRun{}).Where("pr_number = 81").Count(&runs)
+		if runs == 0 {
+			t.Fatal("应照常开轮")
+		}
+		var ledger model.ReviewPullRequest
+		var run model.ReviewRun
+		if err := e.svc.db.Where("pr_number = 81").First(&ledger).Error; err != nil {
+			t.Fatalf("总账行应存在: %v", err)
+		}
+		if err := e.svc.db.Where("pr_number = 81 AND head_sha = ?", "sha-81").First(&run).Error; err != nil {
+			t.Fatalf("运行行应存在: %v", err)
+		}
+		if ledger.InstallationID != 7 || run.InstallationID != 7 {
+			t.Fatalf("installation 快照应沿总账值 7: ledger=%d run=%d", ledger.InstallationID, run.InstallationID)
+		}
+		if got := e.debounceCount(t); got != 0 {
+			t.Fatalf("防抖行应被消费，剩 %d", got)
+		}
+	})
+
+	// 案例二：无总账——按仓库解析安装（fake 固定返回 1），照常开轮。
+	t.Run("resolve", func(t *testing.T) {
+		e := newReviewEngineEnv(t)
+		e.enableReview(t)
+		repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+		t3 := &fakeReviewT3{}
+		review := e.withT3(t3, nil, nil)
+		e.fake.SetPR(repo, 82, &githubapi.PullRequest{
+			RepoFullName: repo, Number: 82, State: "open", HeadSHA: "sha-82",
+			HeadRepoFullName: repo, Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
+		})
+		if err := e.svc.db.Create(&model.ReviewDebounce{
+			IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+			ProjectID:     e.project.ID, RepoFullName: repo, PRNumber: 82,
+			HeadSHA: "sha-82", Action: "synchronize", InstallationID: 0,
+			PRTitle: "t", PRURL: "u", BaseRef: "main", HeadRef: "feature",
+			FireAt: now.Add(-time.Second), UpdatedAt: now.Add(-time.Minute),
+		}).Error; err != nil {
+			t.Fatalf("seed debounce: %v", err)
+		}
+
+		review.processDueDebounces(now)
+
+		resolved := false
+		for _, c := range e.fake.Calls {
+			if c.Method == "ResolveInstallation" {
+				resolved = true
+			}
+		}
+		if !resolved {
+			t.Fatal("无总账快照时应按仓库解析安装")
+		}
+		var runs int64
+		e.svc.db.Model(&model.ReviewRun{}).Where("pr_number = 82").Count(&runs)
+		if runs == 0 {
+			t.Fatal("解析后应照常开轮")
+		}
+		var ledger model.ReviewPullRequest
+		var run model.ReviewRun
+		if err := e.svc.db.Where("pr_number = 82").First(&ledger).Error; err != nil {
+			t.Fatalf("总账行应存在: %v", err)
+		}
+		if err := e.svc.db.Where("pr_number = 82 AND head_sha = ?", "sha-82").First(&run).Error; err != nil {
+			t.Fatalf("运行行应存在: %v", err)
+		}
+		if ledger.InstallationID != 1 || run.InstallationID != 1 {
+			t.Fatalf("解析出的安装 id 应落账本与运行行: ledger=%d run=%d", ledger.InstallationID, run.InstallationID)
+		}
+	})
+}
+
+// advancePRHeadTx nil 快照时刻保留旧基准（codex 第 49 轮 P2）：tied 重验
+// 等不带 updatedAt 的入口推进 head 时不得把账本 pr_updated_at 清成 NULL。
+func TestAdvancePRHeadPreservesBaselineOnNil(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	e.enableReview(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	t1 := now.Add(-2 * time.Hour)
+	if err := e.svc.db.Create(&model.ReviewPullRequest{
+		ProjectID: e.project.ID, UserID: e.project.UserID,
+		RepoFullName: repo, PRNumber: 91,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		HeadSHA:       "sha-old", RoundNumber: 1, UpdatedAt: t1, PRUpdatedAt: &t1,
+	}).Error; err != nil {
+		t.Fatalf("seed ledger: %v", err)
+	}
+
+	if err := e.svc.db.Transaction(func(tx *gorm.DB) error {
+		return e.review.advancePRHeadTx(tx, e.project, repo, 91, "sha-new",
+			model.ForgeIntegrationBuiltinGitHubID, 42, nil, now)
+	}); err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+	var after model.ReviewPullRequest
+	if err := e.svc.db.Where("pr_number = 91").First(&after).Error; err != nil {
+		t.Fatalf("总账行应存在: %v", err)
+	}
+	if after.HeadSHA != "sha-new" {
+		t.Fatalf("head 应推进: %s", after.HeadSHA)
+	}
+	if after.PRUpdatedAt == nil || !after.PRUpdatedAt.Equal(t1) {
+		t.Fatalf("nil 快照时刻不得清空基准: %v", after.PRUpdatedAt)
 	}
 }

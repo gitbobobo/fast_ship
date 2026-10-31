@@ -337,8 +337,10 @@ Forgejo 仓库的 PR 审查与 GitHub 走同一条协调管线（webhook 事务�
 5. Fast Ship「设置 → 部署 → 集成」配 Forgejo 集成（base_url、PAT、可选
    `allow_private_network` / 自定义 CA），跑一次连接检测确认 ok。
 6. 配 Forgejo webhook：URL `https://<fast-ship>/api/forge/<集成id>/webhooks`，
-   事件选 **Pull Request 与 Pull Request Sync 两项**（推送新提交走独立的
-   `pull_request_sync`，不勾它推送更新只能靠 5 分钟轮询补漏），secret 与
+   事件选 **Pull Request、Pull Request Sync、Pull Request Comment 三项**（推送
+   新提交走独立的 `pull_request_sync`，不勾它推送更新只能靠 5 分钟轮询补漏；
+   PR 顶层评论唤醒 INT-179 走 Pull Request Comment，事件头归一为
+   `issue_comment`），secret 与
    集成 `webhook_secret` 一致。受理面同时认 `pull_request` /
    `pull_request_sync` 两个事件名——新版本把细型放进 `X-Forgejo-Event-Type`
    而 `X-Forgejo-Event` 送归一名 `pull_request`，旧 Gitea/自定义投递可能

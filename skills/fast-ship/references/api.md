@@ -7567,7 +7567,7 @@ PR 审查（INT-135，仅 JWT）：项目级审查设置、审查总览与审查
 | `rounds` | object[] | 是 |  |
 | `rounds[].round_number` | integer | 是 |  |
 | `rounds[].head_sha` | string | 是 |  |
-| `rounds[].trigger_action` | string（enum: opened \| synchronize \| ready_for_review \| reopened \| manual \| visual \| unknown） | 是 | 触发方式（该轮第一条代码 run 的 trigger_action；没有代码 run 时为 unknown） |
+| `rounds[].trigger_action` | string（enum: opened \| synchronize \| ready_for_review \| reopened \| manual \| comment \| visual \| unknown） | 是 | 触发方式（该轮第一条代码 run 的 trigger_action；没有代码 run 时为 unknown） |
 | `rounds[].created_at` | string | 是 |  |
 | `rounds[].code_runs` | object[] | 是 |  |
 | `rounds[].code_runs[].id` | string | 是 |  |
@@ -7849,7 +7849,7 @@ PR 审查（INT-135，仅 JWT）：项目级审查设置、审查总览与审查
 | `items[].rounds` | object[] | 是 |  |
 | `items[].rounds[].round_number` | integer | 是 |  |
 | `items[].rounds[].head_sha` | string | 是 |  |
-| `items[].rounds[].trigger_action` | string（enum: opened \| synchronize \| ready_for_review \| reopened \| manual \| visual \| unknown） | 是 | 触发方式（该轮第一条代码 run 的 trigger_action；没有代码 run 时为 unknown） |
+| `items[].rounds[].trigger_action` | string（enum: opened \| synchronize \| ready_for_review \| reopened \| manual \| comment \| visual \| unknown） | 是 | 触发方式（该轮第一条代码 run 的 trigger_action；没有代码 run 时为 unknown） |
 | `items[].rounds[].created_at` | string | 是 |  |
 | `items[].rounds[].code_runs` | object[] | 是 |  |
 | `items[].rounds[].code_runs[].id` | string | 是 |  |
@@ -8099,15 +8099,18 @@ PR 审查（INT-135，仅 JWT）：项目级审查设置、审查总览与审查
 
 <!-- operationId: receiveGitHubWebhook -->
 
-接收 GitHub App webhook（pull_request opened/synchronize/ready_for_review/reopened）
+接收 GitHub App webhook（pull_request 触发审查 + issue_comment 评论唤醒）
 
 公开端点（无 JWT），以 `X-Hub-Signature-256`（HMAC-SHA256）按部署唯一的
 webhook 密钥验签。验签密钥取部署级 GitHub App 身份（INT-129：每套部署
 一个 App，没有用户级候选集）——以 `deployment_settings` 行内的密钥为准，
 行为空即视为未配置、不回落 config；仅当部署没有数据库 App 身份时用
 `github_app.webhook_secret` 兜底。密钥为空 → 503（50300）拒收；签名缺失
-或不匹配 → 401（40107）。只处理 pull_request 的 opened/synchronize/ready_for_review/reopened；
-draft 与 fork 一律 202 忽略。仓库必须已与本部署的 Fast Ship 项目关联
+或不匹配 → 401（40107）。处理 pull_request 的 opened/synchronize/ready_for_review/reopened；
+draft 与 fork 一律 202 忽略。同时受理 issue_comment 的 created（INT-179 评论唤醒）：
+PR 顶层评论正文包含 `@fast-ship-bot`（大小写不敏感）时按评论唤醒开新一轮审查
+（trigger_action=comment，同 head 也恒开新轮；同 head 已有在途审查时不重开）；编辑/删除动作与普通 Issue 评论
+202 忽略。仓库必须已与本部署的 Fast Ship 项目关联
 才会进入防抖/开轮。同一 `X-GitHub-Delivery` 幂等（重复投递返回 202 且
 不再开轮）。
 
@@ -8125,7 +8128,7 @@ draft 与 fork 一律 202 忽略。仓库必须已与本部署的 Fast Ship 项�
 
 `application/json`，必填。
 
-GitHub 官方 pull_request 事件 payload（原样验签，服务端只取 owner/repo、PR 号、head SHA、draft/fork 标记与 installation id）
+GitHub 官方 pull_request / issue_comment 事件 payload（原样验签，服务端只取 owner/repo、PR 号、head SHA、draft/fork 标记、评论正文与 installation id）
 
 **成功响应**
 
@@ -12222,7 +12225,7 @@ public_url 组装 manifest（原样 POST 给 GitHub 的形状），返回 GitHub
 | `manifest.redirect_url` | string | 是 | 创建完成回跳地址 = {public_url}/settings/integrations/github/callback |
 | `manifest.setup_url` | string | 是 | 安装后跳转地址 = {public_url}/settings/integrations |
 | `manifest.public` | boolean | 是 | 恒为 false（非公开 App；同上不用 enum[false] 避免生成撞名常量） |
-| `manifest.default_events` | string[]（enum: pull_request） | 是 |  |
+| `manifest.default_events` | string[]（enum: pull_request \| issue_comment） | 是 | 默认订阅 pull_request 与 issue_comment（INT-179 评论唤醒需要后者） |
 | `manifest.default_permissions` | object | 是 | PR 审查所需的最小权限集（结论用 commit status，不用 Checks API） |
 | `manifest.default_permissions.pull_requests` | string（enum: write） | 是 |  |
 | `manifest.default_permissions.issues` | string（enum: write） | 是 |  |

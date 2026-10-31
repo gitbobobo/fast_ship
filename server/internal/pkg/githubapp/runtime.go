@@ -44,6 +44,10 @@ type clientsEntry struct {
 	client      githubapi.GitHubClient
 }
 
+// ErrAppNotConfigured 部署未配置 GitHub App 身份（webhook-secret-only）的
+// 哨兵：永久配置态，重投不会自愈；与设置读取失败的瞬时 ErrInternal 区分。
+var ErrAppNotConfigured = errs.New(errs.ErrInternal.Code, "GitHub App 未配置")
+
 func NewClients(source ConfigSource) *Clients {
 	return &Clients{source: source}
 }
@@ -62,7 +66,9 @@ func (c *Clients) ClientFor(ctx context.Context) (githubapi.GitHubClient, error)
 		return nil, err
 	}
 	if !ok || cfgApp.AppID == "" || len(cfgApp.PrivateKeyPEM) == 0 {
-		return nil, errs.New(errs.ErrInternal.Code, "GitHub App 未配置")
+		// 哨兵化：调用方（如评论唤醒）需要把「App 未配置」这一永久配置态
+		// 与「设置读取失败」的瞬时 DB 故障区分开（errors.Is 判定）。
+		return nil, ErrAppNotConfigured
 	}
 	sum := sha256.Sum256(append([]byte(cfgApp.AppID+"\n"), cfgApp.PrivateKeyPEM...))
 	fp := hex.EncodeToString(sum[:])
