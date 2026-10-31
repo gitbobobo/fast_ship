@@ -14,6 +14,7 @@ Fast Ship 是一个项目管理工具，用于记录、同步多个项目的需�
 - `https://github.com/gitbobobo/fast_ship` 是 Forgejo 的推送镜像（SSH 部署密钥，sync on commit），禁止直接向它推送；公开 Issue 服务与 GitHub Actions 的 Docker Publish（`ghcr.io/gitbobobo/fast_ship`）继续走 GitHub。推送镜像没有分支过滤，GitHub 侧任何非同步来源的改动都会被下次同步覆盖。
 - PR 在 Forgejo 创建，云端审查由 Fast Ship 自己的 `NAS Forgejo` 集成触发。项目代码仓已改绑并读回确认审查开启，公开 Issue 仓仍保留 GitHub。Forgejo 不接远端 CI，**PR 检查由本地代替**：合并前在 `web/` 跑 `pnpm api-types --check` 与 `pnpm check`（lint + typecheck）；后端未改动时无需全仓 Go 测试，有改动时另跑对应包的 `go test`。
 - 发版仍用 `make release`：原子推送 Forgejo 后，脚本从 `github` 远程的 fetch URL 解析镜像仓库，立即输出构建页面和限定本次提交 SHA、tag 的查询命令，不等待镜像或查询 GitHub。推送成功不代表镜像同步或构建成功，详见[发版](docs/internal/release.md)与[代码托管运维](docs/internal/code-hosting.md)。
+- 修改发版脚本或其测试时，合并前另跑 `make test-release`；它只使用临时裸仓库，不发布真实版本。
 
 ## 开发与验证
 

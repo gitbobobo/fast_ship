@@ -57,9 +57,13 @@ else
 fi
 TAG_NAME="v${VERSION}"
 
-# 远程检查针对实际推送目标（pushurl 优先），用 ls-remote 查询，不改本地引用
-PUSH_URL="$(git config --get remote.origin.pushurl || git config --get remote.origin.url || true)"
-[[ -n "${PUSH_URL}" ]] || err "未配置 origin 远程"
+# Git 展开 URL 重写后必须只有一个推送目标；--atomic 不覆盖多个接收端。
+PUSH_URL="$(git remote get-url --push --all origin)" || err "无法读取 origin 推送目标"
+[[ -n "${PUSH_URL}" && "${PUSH_URL}" != *$'\n'* ]] || \
+  err "发版只接受一个 origin 推送目标；多个 url/pushurl 无法原子推送，请只保留一个源（可用 git config --unset-all remote.origin.pushurl 清除独立推送地址）"
+# ls-remote 会再次解析传入的 URL；拒绝会改变目标的层叠重写配置。
+CHECK_URL="$(git ls-remote --get-url "${PUSH_URL}")" || err "无法解析预检目标"
+[[ "${CHECK_URL}" == "${PUSH_URL}" ]] || err "推送目标存在层叠 URL 重写，请简化 origin 配置后重试"
 
 REMOTE_MAIN="$(git ls-remote "${PUSH_URL}" refs/heads/main | cut -f1)" || err "无法查询远程 main"
 [[ -n "${REMOTE_MAIN}" ]] || err "远程不存在 main 分支"
@@ -87,7 +91,7 @@ fi
 PREV_HEAD="$(git rev-parse HEAD)"
 printf '发版：%s -> %s\n' "${CURRENT}" "${VERSION}"
 
-# 写 VERSION 到推送之间任一失败或中断自动回滚本地改动（远程由 --atomic 保证无半成品）
+# 写 VERSION 到推送之间失败回滚本地；--atomic 保证唯一源端的 refs 同成同败。
 trap release_rollback ERR
 trap 'release_rollback; exit 130' INT
 trap 'release_rollback; exit 143' TERM
@@ -123,7 +127,9 @@ github_repo() {
 }
 
 # github 远程只取 fetch URL；push URL 已禁用。新克隆没有该远程也能发版。
-REPO_PATH="$(github_repo "${PUSH_URL}" || true)"
+# 原始配置只用于构建链接展示，不能代替上面的有效传输目标预检。
+DISPLAY_URL="$(git config --get remote.origin.pushurl || git config --get remote.origin.url || true)"
+REPO_PATH="$(github_repo "${DISPLAY_URL}" || true)"
 if [[ -z "${REPO_PATH}" ]]; then
   GH_URL="$(git remote get-url github 2>/dev/null || true)"
   REPO_PATH="$(github_repo "${GH_URL}" || true)"

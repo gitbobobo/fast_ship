@@ -85,6 +85,68 @@ verify_pushed() {
   equal "$([[ -f "${SC}/unexpected" ]] && cat "${SC}/unexpected" || true)" "" "推送后无网络或gh调用"
 }
 
+verify_unchanged() {
+  [[ "${RC}" -ne 0 ]] || { echo 'FAIL 非法目标必须提前拒绝'; exit 1; }
+  PASS=$((PASS + 1))
+  equal "$(git -C "${REPO}" rev-parse HEAD)" "${BEFORE}" "预检拒绝后HEAD未变"
+  equal "$(cat "${REPO}/VERSION")" 0.1.67 "预检拒绝后VERSION未变"
+  equal "$(git -C "${REPO}" tag -l v0.1.68)" "" "预检拒绝后无本地tag"
+  equal "$(git --git-dir="${BARE}" rev-parse main)" "${BEFORE}" "预检拒绝后源端未变"
+  equal "$(git --git-dir="${BARE}" tag -l v0.1.68)" "" "预检拒绝后源端无tag"
+  equal "$(git --git-dir="${SECOND}" rev-parse main)" "${BEFORE}" "预检拒绝后第二接收端未变"
+  equal "$(git --git-dir="${SECOND}" tag -l v0.1.68)" "" "预检拒绝后第二接收端无tag"
+}
+
+printf '== 多pushurl在任一远端接收前拒绝 ==\n'
+setup multi-pushurl "${FJ_URL}"
+SECOND="${SC}/second.git"
+git clone -q --bare "${BARE}" "${SECOND}"
+cat > "${SECOND}/hooks/pre-receive" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+chmod +x "${SECOND}/hooks/pre-receive"
+git -C "${REPO}" config --add remote.origin.pushurl "${BARE}"
+git -C "${REPO}" config --add remote.origin.pushurl "${SECOND}"
+run_release
+verify_unchanged
+contains "${ERR_OUT}" "只接受一个 origin 推送目标" "多pushurl明确报错"
+
+printf '== 无pushurl的多个url同样拒绝 ==\n'
+setup multi-url "${FJ_URL}"
+SECOND="${SC}/second.git"
+git clone -q --bare "${BARE}" "${SECOND}"
+git -C "${REPO}" config --add remote.origin.url "${SECOND}"
+run_release
+verify_unchanged
+
+printf '== 单pushurl与pushInsteadOf按Git实际目标预检 ==\n'
+setup single-pushurl "${FJ_URL}"
+git -C "${REPO}" config remote.origin.pushurl "${BARE}"
+run_release
+verify_pushed
+
+setup push-rewrite "${FJ_URL}"
+git -C "${REPO}" config --unset-all url."${BARE}".insteadOf
+git -C "${REPO}" config url."${BARE}".pushInsteadOf "${FJ_URL}"
+run_release
+verify_pushed
+
+setup explicit-pushurl-wins "${FJ_URL}"
+git -C "${REPO}" config url."${SC}/must-not-receive.git".pushInsteadOf "${FJ_URL}"
+git -C "${REPO}" config remote.origin.pushurl "${BARE}"
+run_release
+verify_pushed
+
+printf '== 层叠重写在写入前拒绝 ==\n'
+setup nested-rewrite "${FJ_URL}"
+SECOND="${SC}/second.git"
+git clone -q --bare "${BARE}" "${SECOND}"
+git -C "${REPO}" config url."${SECOND}".insteadOf "${BARE}"
+run_release
+verify_unchanged
+contains "${ERR_OUT}" "层叠 URL 重写" "拒绝预检会再次改变目标的重写"
+
 printf '== GitHub origin ==\n'
 setup github "${GH_URL}"
 run_release
