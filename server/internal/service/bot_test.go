@@ -721,9 +721,23 @@ func TestBotAppendOnly(t *testing.T) {
 		t.Fatalf("同 dedup_key 应唯一约束失败")
 	}
 
+	// 只钉住本次夹具写入的两条消息：SendMessage 之后 runtime 会异步跑一轮并追加
+	// assistant 回复，用总条数断言会跟那个 goroutine 抢时序（机器负载高时偶发变红）。
 	items, _, _, err := env.bots.ListMessages(userID, bot.ID, 0, 0, 50)
-	if err != nil || len(items) != 2 {
-		t.Fatalf("list 应含用户消息与去重用 lifecycle 夹具: %v %d", err, len(items))
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	userSeen, fixtureSeen := 0, 0
+	for _, item := range items {
+		switch {
+		case item.Kind == string(model.BotMessageKindUser) && item.Seq == 1:
+			userSeen++
+		case item.Kind == string(model.BotMessageKindLifecycle) && item.Seq == seq:
+			fixtureSeen++
+		}
+	}
+	if userSeen != 1 || fixtureSeen != 1 {
+		t.Fatalf("list 应含用户消息与去重用 lifecycle 夹具: user=%d fixture=%d", userSeen, fixtureSeen)
 	}
 }
 
