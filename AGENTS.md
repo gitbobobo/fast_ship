@@ -12,7 +12,7 @@ Fast Ship 是一个项目管理工具，用于记录、同步多个项目的需�
 
 - 唯一代码源是 `https://fj.frp.musiver.cn/fjbobo/fast_ship`，提交推送与 PR 均在 Forgejo。自检：`git remote get-url origin` 与 `git remote get-url --push --all origin`（全部推送地址）去掉尾部 `.git` 后均应为该地址。迁移旧克隆时先 `git remote set-url origin https://fj.frp.musiver.cn/fjbobo/fast_ship.git`，再清除全部独立推送地址：`git config --unset-all remote.origin.pushurl`（退出码 5 表示原本没有该项），复查实际推送地址，避免 fetch 已改而 push 仍指 GitHub。已有 `github` 远程时，其全部 push URL 应仅有 `disabled://github-read-only`；新克隆没有 `github` 远程属正常，无需补建。
 - `https://github.com/gitbobobo/fast_ship` 是 Forgejo 的推送镜像（SSH 部署密钥，sync on commit），禁止直接向它推送；公开 Issue 服务与 GitHub Actions 的 Docker Publish（`ghcr.io/gitbobobo/fast_ship`）继续走 GitHub。推送镜像没有分支过滤，GitHub 侧任何非同步来源的改动都会被下次同步覆盖。
-- PR 在 Forgejo 创建。`NAS Forgejo` 集成已配置，但本项目代码仓改绑与审查重开尚未完成，当前项目仍绑定 GitHub；在改绑并读回确认之前，Forgejo 自动审查尚未生效，不能空等审查状态。Forgejo 不接远端 CI，**PR 检查由本地代替**：合并前在 `web/` 跑 `pnpm api-types --check` 与 `pnpm check`（lint + typecheck）；后端未改动时无需全仓 Go 测试，有改动时另跑对应包的 `go test`。
+- PR 在 Forgejo 创建，云端审查由 Fast Ship 自己的 `NAS Forgejo` 集成触发。项目代码仓已改绑并读回确认审查开启，公开 Issue 仓仍保留 GitHub。Forgejo 不接远端 CI，**PR 检查由本地代替**：合并前在 `web/` 跑 `pnpm api-types --check` 与 `pnpm check`（lint + typecheck）；后端未改动时无需全仓 Go 测试，有改动时另跑对应包的 `go test`。
 - 发版仍用 `make release`：原子推送 Forgejo 后，脚本从 `github` 远程的 fetch URL 解析镜像仓库，立即输出构建页面和限定本次提交 SHA、tag 的查询命令，不等待镜像或查询 GitHub。推送成功不代表镜像同步或构建成功，详见[发版](docs/internal/release.md)与[代码托管运维](docs/internal/code-hosting.md)。
 
 ## 开发与验证

@@ -14,9 +14,9 @@ Forgejo 是唯一代码源，PR/issue/review 历史只在实例上。备份对�
 
 ## Fast Ship（自托管即自用）
 
-- 部署级集成 `NAS Forgejo`（id `321b5b36-01d6-4260-832d-c2596396fbfc`）及机器人 `fastship-bot`（协作者 write）已配置。项目改绑与审查重开尚未完成：管理员 JWT 凭据通道暂未完成认证，当前 `code_repository_url` 仍指 GitHub。恢复入口：以管理员登录后，将代码仓改为 `https://fj.frp.musiver.cn/fjbobo/fast_ship`，按原组合/环境/触发器重新开启审查，再用首个 Forgejo PR 验证。issue 管理与同步保留 GitHub 公开仓：`repository_url` 不变；公开仓只允许 GitHub 绑定，代码仓绑定按主机派生（见 `forge-integrations.md`）。
+- 部署级集成 `NAS Forgejo`（id `321b5b36-01d6-4260-832d-c2596396fbfc`）及机器人 `fastship-bot`（协作者 write）已配置。本项目代码仓已改为 `https://fj.frp.musiver.cn/fjbobo/fast_ship`，原审查组合、环境与触发器保持不变，审查已重新开启并读回确认。首个 Forgejo PR #157 的审查重跑已受理，返回的 head SHA 与 Forgejo 实时提交一致。issue 管理与同步保留 GitHub 公开仓：`repository_url` 不变；公开仓只允许 GitHub 绑定，代码仓绑定按主机派生（见 `forge-integrations.md`）。
 - 仓库 webhook 指向 `https://ship.frp.musiver.cn/api/forge/<集成id>/webhooks`，订阅 **Pull Request、Pull Request Sync、Pull Request Comment**（`issue_comment`，评论唤醒）三项；服务端先验签（HMAC-SHA256，hex 无前缀）再入队。secret 与集成一致，轮换时集成页改完同步改各仓库 webhook。
-- GitHub 仓库没有单独配置仓库 webhook（迁移前就没有）；GitHub App 的 webhook 与后台轮询是独立链路，不能据此断言 GitHub 审查已停。项目改绑后须读回代码集成与审查设置，确认后续审查走 Forgejo。不要卸载公开 issue 同步依赖的 GitHub App。issue↔PR 关联的状态刷新（`pull-requests/sync`）只认 GitHub PR，对 Forgejo PR 不可用（表上 `provider` 列已留位）。
+- GitHub 仓库没有单独配置仓库 webhook（迁移前就没有）；GitHub App 的 webhook 与后台轮询是独立链路，不能据此断言 GitHub 审查已停。本次已通过项目代码集成及审查设置读回确认后续审查走 Forgejo。不要卸载公开 issue 同步依赖的 GitHub App。issue↔PR 关联的状态刷新（`pull-requests/sync`）只认 GitHub PR，对 Forgejo PR 不可用（表上 `provider` 列已留位）。
 - 入站失败先读 Forgejo webhook 的投递记录（实例 `gitea.db` 的 `hook_task` 表），再查 Fast Ship 审查记录；5 分钟轮询补漏，不能把轮询成功当成 webhook 已正常投递。
 - NAS 将服务域名解析到内网地址；Fast Ship 集成开启该实例的内网访问，Forgejo `app.ini` 的 `[webhook] ALLOWED_HOST_LIST` 放行 `ship.frp.musiver.cn`。
 
@@ -31,7 +31,7 @@ Forgejo 是唯一代码源，PR/issue/review 历史只在实例上。备份对�
 - 审查状态：`GET /repos/fjbobo/fast_ship/commits/<sha>/statuses`，context 为「代码审查」/「视觉审查」，核对最新 HEAD
 - 轮次汇总：`GET /repos/fjbobo/fast_ship/issues/<PR号>/comments`（PR 评论走 issue 接口），Fast Ship 每轮发一条汇总评论；对意见的回应也用这个接口 `POST` 顶层评论并引用原意见
 - 行内意见：`GET /repos/fjbobo/fast_ship/pulls/<PR号>/reviews` 拿 review 列表，逐条 `GET /repos/fjbobo/fast_ship/pulls/<PR号>/reviews/<id>/comments` 取文件与行号；行内评论没有回复线程，不要对它 `POST`
-- 以下触发方式需先完成项目改绑并读回确认审查已开启，目前尚未生效：推送新提交经 webhook（`pull_request_sync`）自动重审；顶层评论 @fast-ship-bot 唤醒新一轮
+- 项目改绑且审查开启后，推送新提交经 webhook（`pull_request_sync`）自动重审；顶层评论 @fast-ship-bot 唤醒新一轮。跟进时核对最新 HEAD 的实际产出，不能只凭 webhook 受理就认定审查已完成
 
 `$pr-review-loop` 的通用流程（轮次判定、意见收敛）仍适用，但其 GitHub 命令在 Forgejo PR 上不可用，一律换成本节接口。
 
