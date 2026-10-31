@@ -55,25 +55,24 @@ function closingRun(line: string, char: "`" | "~", minLen: number): boolean {
 // 没有上标与脚注区）。≤3 空格缩进按 CommonMark 仍算定义行。
 const REFERENCE_DEFINITION_RE = /^ {0,3}\[[^\]\n]+\]:/;
 
-/** 全文是否含引用定义行；含则不能按块缓存（保守判断，代码围栏里的同名行也算）。 */
-function hasReferenceDefinition(text: string): boolean {
-  for (const rawLine of text.split("\n")) {
-    const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
-    if (REFERENCE_DEFINITION_RE.test(line)) return true;
-  }
-  return false;
-}
-
-/** HTML 块的结束判定：行内出现结束序列即结束（CommonMark 类型 1–5）。 */
-type HtmlBlockEnd = (view: string) => boolean;
+/**
+ * HTML 块类型 1–5 的结束判定：在原始行上出现结束序列即结束。
+ * HTML 块的内容是原样文本，块内的 `>`、`-->` 都是字节本身，不是容器标记，
+ * 所以判定必须看未剥 blockquote 标记的原始行：按「检测视图」判会把裸 `>`
+ * 剥成空串，`<!DOCTYPE html` 这类以 `>` 收尾的类型 4 块就永远判不到闭合。
+ */
+type HtmlBlockEnd = (line: string) => boolean;
 
 /**
  * HTML 块类型 1–5 的起始行判定，返回「行内出现该序列即结束」的判定函数。
  * 这些块的内容是原始文本、不被空白行打断，所以块内的空白行不能当切分点
  * （切开会把块内文本重新解释成普通段落）。起始行自身已含结束序列时块在
  * 该行就结束，返回 null。类型 6/7（普通标签）以空白行结束，无需处理。
+ *
+ * 起始判定用检测视图 `view`（`> <pre>` 这种在 blockquote 里开块的行也要认得出），
+ * 结束序列的查找一律用原始行 `line`（见 HtmlBlockEnd）。
  */
-function htmlBlockStart(view: string): HtmlBlockEnd | null {
+function htmlBlockStart(view: string, line: string): HtmlBlockEnd | null {
   // 与围栏判定同口径：行首缩进 ≤3 空格才算块起始。
   let indent = 0;
   while (indent < 4 && view[indent] === " ") indent += 1;
@@ -82,8 +81,8 @@ function htmlBlockStart(view: string): HtmlBlockEnd | null {
 
   const contains =
     (closer: string): HtmlBlockEnd =>
-    (line) =>
-      line.includes(closer);
+    (rawLine) =>
+      rawLine.includes(closer);
 
   for (const [start, closer] of [
     [/^<!--/, "-->"],
@@ -93,7 +92,7 @@ function htmlBlockStart(view: string): HtmlBlockEnd | null {
   ] as const) {
     if (!start.test(rest)) continue;
     const ended = contains(closer);
-    return ended(rest) ? null : ended;
+    return ended(line) ? null : ended;
   }
 
   // 原始文本标签：标签名后须是空白、`>` 或行尾，避免把 `<prelude` 当块。
@@ -101,8 +100,8 @@ function htmlBlockStart(view: string): HtmlBlockEnd | null {
   const raw = /^<(script|pre|style|textarea)(?:[\s>]|$)/i.exec(rest);
   if (raw) {
     const closer = `</${raw[1].toLowerCase()}>`;
-    if (rest.toLowerCase().includes(closer)) return null;
-    return (line) => line.toLowerCase().includes(closer);
+    if (line.toLowerCase().includes(closer)) return null;
+    return (rawLine) => rawLine.toLowerCase().includes(closer);
   }
   return null;
 }
@@ -116,8 +115,18 @@ export interface StableBlockSplit {
   segments: string[];
 }
 
+/** 一次逐行扫描的结果；splitStableBlocks 只用这一份结果。 */
+interface BlockScan {
+  /** 安全切分点（原文偏移，升序）。 */
+  cuts: number[];
+  /** 全文是否出现引用定义行；为 true 时调用方整段退回，cuts 不再有意义。 */
+  hasReferenceDefinition: boolean;
+}
+
 /**
- * 扫描出全部安全切分点（原文偏移，升序），splitStableBlocks 与块渲染共用。
+ * 全文唯一一次逐行扫描：同时得出安全切分点与「是否出现引用定义行」。
+ * 两者都在行维度上判定，合并成一次扫描即可，省掉一遍全文字符串数组分配
+ * （每帧都要跑，这是流式渲染剩下的唯一全量成本）。
  *
  * 切分点只取围栏外的空白行，且要求该空白行的下一行已收完、顶格、首字符
  * 不属于 `>` `-` `*` `+` `[`、也不是有序列表标记：这几类下一行意味着前后两段
@@ -130,12 +139,14 @@ export interface StableBlockSplit {
  *
  * 只消费已换行完结的行：最后一行还在增长时，它是列表标记还是普通文本
  * （`1` 会不会长成 `1.`）尚未可知，等它收完再判定，切分点才单调只增。
+ * 引用定义行例外——它连正在增长的最后一行也要判（`[x]: http` 一出现就是
+ * 定义，不必等行收完）。
  *
  * 两类「空白行也不切」的例外：围栏代码块与 HTML 块类型 1–5 内部的空白行
  * 不结束块，切开会改变块内文本的解释；空白行判定只认空格与制表符
  *（CommonMark 的空白行口径），NBSP 等 Unicode 空白算正文。
  */
-function stableCutOffsets(text: string): number[] {
+function scanBlocks(text: string): BlockScan {
   let inFence: { char: "`" | "~"; len: number; depth: number } | null = null;
   // 进行中的 HTML 块结束判定；非 null 时块内空白行不是候选切分点。
   let htmlEnd: HtmlBlockEnd | null = null;
@@ -150,8 +161,14 @@ function stableCutOffsets(text: string): number[] {
     const rawLine = lines[index];
     // 数组末元素是末尾换行留下的空串时它已「完结」；否则最后一行仍在增长。
     const complete = index < last || text.endsWith("\n");
-    if (!complete) break;
     const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+    // 定义行对全文生效，含正在增长的最后一行都要判；一旦命中，调用方必定
+    // 整段退回，切分点已无意义，直接结束扫描。保守判断：代码围栏里的同名
+    // 行也算定义（不看围栏状态）。
+    if (REFERENCE_DEFINITION_RE.test(line)) {
+      return { cuts: [], hasReferenceDefinition: true };
+    }
+    if (!complete) break;
     // 与 splitIncompleteFence 同一套围栏状态机：容器视图上判定开/闭，
     // blockquote 深度配对、反引号围栏信息串含反引号不算围栏。
     const { view, depth } = stripBlockquoteMarkers(line);
@@ -160,8 +177,8 @@ function stableCutOffsets(text: string): number[] {
         inFence = null;
       }
     } else if (htmlEnd) {
-      // HTML 块内：只等结束序列，围栏标记在这里是原始文本。
-      if (htmlEnd(view)) htmlEnd = null;
+      // HTML 块内只等结束序列；块内容原样，判定看原始行而非容器视图。
+      if (htmlEnd(line)) htmlEnd = null;
     } else {
       const m = OPEN_RE.exec(view);
       if (m) {
@@ -171,7 +188,7 @@ function stableCutOffsets(text: string): number[] {
           inFence = { char: marker[0] as "`" | "~", len: marker.length, depth };
         }
       } else {
-        htmlEnd = htmlBlockStart(view);
+        htmlEnd = htmlBlockStart(view, line);
       }
     }
 
@@ -199,22 +216,25 @@ function stableCutOffsets(text: string): number[] {
     }
     offset += rawLine.length + 1;
   }
-  return cuts;
+  return { cuts, hasReferenceDefinition: false };
 }
 
 /**
  * 把流式全文切成「已完整的块前缀 stable」与「每次都要重解析的尾部 tail」，
  * 让流式渲染只需重解析正在生成的块（解析总量从二次降为线性）。`segments`
  * 是 stable 按切分点切出的块，供逐块渲染并按块跳过未变化的前缀。
+ *
+ * 每帧仍对累计全文做一次逐行扫描（见 scanBlocks）：只有一次，且不解析
+ * Markdown，只扫行与几个正则——这是剩下的唯一全量成本。
  */
 export function splitStableBlocks(text: string): StableBlockSplit {
   // 引用定义是文档级作用域（见 REFERENCE_DEFINITION_RE）：全文出现定义行就
   // 不分块，整段交给老路径。代价是这类回复失去增量优化，换来的是引用/脚注
   // 渲染正确——保守退回，不是白名单。
-  if (hasReferenceDefinition(text)) {
+  const { cuts, hasReferenceDefinition } = scanBlocks(text);
+  if (hasReferenceDefinition) {
     return { stable: "", segments: [], tail: text };
   }
-  const cuts = stableCutOffsets(text);
   const stableEnd = cuts.length > 0 ? cuts[cuts.length - 1] : 0;
   const segments: string[] = [];
   let start = 0;

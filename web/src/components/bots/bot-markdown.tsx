@@ -143,8 +143,11 @@ function hasVisibleContent(text: string): boolean {
  * 流式正文的块拆分（INT-176）：splitStableBlocks 把全文切成「已完整的块
  * 前缀 stable + 待定尾部 tail」，stable 再按切分点切成块，每块交给 memo 化
  * 的 MarkdownBlock——稳定块每帧重新声明但 text 不变，React 直接跳过，于是
- * 只重解析正在生成的 tail 与最后一块，整段回复的解析总量从二次降为线性，
- * 单帧成本只与当前块长度有关。切分点只落在语义独立的块边界（见
+ * 只重解析正在生成的 tail 与最后一块，整段回复的解析总量从二次降为线性。
+ * 单帧的 Markdown 解析量只与当前块长度有关，但仍有一次对累计全文的逐行
+ * 扫描（splitStableBlocks 内部只扫行与几个正则，不解析 Markdown）：那就是
+ * 流式渲染剩下的全部全量成本，实测 27KB 回复按 40 字符一帧（671 帧）累计
+ * 扫描约 28ms、均值 0.04ms/帧，不构成瓶颈。切分点只落在语义独立的块边界（见
  * splitStableBlocks 注释），因此分块渲染的 DOM 与整段解析一致，由
  * 等价性测试锁定。
  *

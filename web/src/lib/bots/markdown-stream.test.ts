@@ -284,6 +284,27 @@ describe("splitStableBlocks", () => {
     expect(splitStableBlocks("<div>\n\n正文\n").stable).toBe("<div>\n");
   });
 
+  it("DOCTYPE 块在 > 处闭合：结束判定看原始行，不被剥空成空串", () => {
+    // 块内是原样文本，裸 `>` 行就是类型 4 块的结束序列；按容器视图判会被剥成
+    // 空串，块永远不闭合（此后全文再无切分点，而后续 `<pre>` 行自身带 `>`
+    // 又会把它误闭合、把切分点落进新 HTML 块内部）。
+    const text = "<!DOCTYPE html\n\nx\n\n>\n\n<pre>\n\ncode\n\n</pre>\n";
+    const r = splitStableBlocks(text);
+    expect(r.stable).toBe("<!DOCTYPE html\n\nx\n\n>\n");
+    expect(r.tail).toBe("\n<pre>\n\ncode\n\n</pre>\n");
+    // 关键：`<pre>` 的块内文本不被切进 stable。
+    expect(r.stable).not.toContain("code");
+  });
+
+  it("blockquote 内的 HTML 块能正确开块并闭合，块内空白行不切分", () => {
+    // 起始判定仍看容器视图（`> <pre>` 认得出是 HTML 块），结束判定看原始行
+    //（`> </pre>` 里的 `</pre>`），块内 `>` 行不被当成空白行。
+    const r = splitStableBlocks("> <pre>\n>\n> code\n>\n> </pre>\n\n正文\n");
+    expect(r.segments).toEqual(["> <pre>\n>\n> code\n>\n> </pre>\n"]);
+    expect(r.stable).toBe("> <pre>\n>\n> code\n>\n> </pre>\n");
+    expect(r.tail).toBe("\n正文\n");
+  });
+
   it("NBSP 行不是空白行：不切分", () => {
     // CommonMark 的空白行只含空格与制表符；U+00A0 是正文。
     const r = splitStableBlocks("A\n\u00a0\nB\n");

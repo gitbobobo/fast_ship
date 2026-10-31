@@ -34,6 +34,12 @@ const EQUIV_SAMPLES: Array<[string, string]> = [
   ["脚注", "A[^1].\n\nMiddle paragraph.\n\n[^1]: Note"],
   ["HTML 注释块", "<!--\n\nhello\n\n-->\n"],
   ["脚本块", "<script>\n\nhello\n\n</script>\n"],
+  // DOCTYPE（类型 4）以裸 `>` 收尾，后面紧跟 `<pre>` 块：结束判定若看剥过
+  // 容器的视图，切分点会落进 `<pre>` 块内部。
+  [
+    "DOCTYPE 以 > 收尾",
+    "<!DOCTYPE html\n\nx\n\n>\n\n<pre>\n\ncode\n\n</pre>\n",
+  ],
   ["NBSP 行", "A\n\u00a0\nB\n"],
   // tail 只剩一行 NBSP：若把这篇 tail 当空白而不渲染，内容直接丢。
   ["NBSP 尾段", "A\n\n\u00a0\n"],
