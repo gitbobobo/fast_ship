@@ -149,7 +149,9 @@ func setMediaProxyHardeningHeaders(header http.Header, upstreamURL, contentType 
 }
 
 // mediaProxyFileName 下载文件名：优先上游 URL 末段（GitHub 附件直链多半是没
-// 扩展名的 uuid），没扩展名时按响应类型补一个，保证下载下来能直接打开。
+// 扩展名的 uuid）。末段没有媒体扩展名时换成按响应类型反查的那个——非媒体后
+// 缀（`screenshot.v2`、结尾一个点）留着双击也打不开，正是这条逻辑要解决的
+// 问题，所以是替换而不是追加。
 func mediaProxyFileName(upstreamURL, contentType string) string {
 	name := "media"
 	if parsed, err := url.Parse(upstreamURL); err == nil {
@@ -157,8 +159,8 @@ func mediaProxyFileName(upstreamURL, contentType string) string {
 			name = base
 		}
 	}
-	if path.Ext(name) == "" {
-		name += githubmedia.MediaFileExtension(contentType)
+	if ext := path.Ext(name); !githubmedia.IsMediaFileExtension(ext) {
+		name = strings.TrimSuffix(name, ext) + githubmedia.MediaFileExtension(contentType)
 	}
 	return name
 }

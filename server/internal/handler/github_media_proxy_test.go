@@ -44,6 +44,10 @@ func TestGitHubMediaProxyHandlerSVGGateAndHardeningHeaders(t *testing.T) {
 			// 无扩展名的附件直链（GitHub uuid 形态）。
 			w.Header().Set("Content-Type", "image/png")
 			_, _ = w.Write([]byte("png-bytes"))
+		case "/user-attachments/assets/screenshot.v2", "/user-attachments/assets/trailing.":
+			// 非媒体后缀与结尾一个点：末段不能当成「已有扩展名」。
+			w.Header().Set("Content-Type", "image/png")
+			_, _ = w.Write([]byte("png-bytes"))
 		case "/user-attachments/assets/clip.mp4":
 			w.Header().Set("Content-Type", "video/mp4")
 			if r.Header.Get("Range") != "" {
@@ -208,6 +212,23 @@ func TestGitHubMediaProxyHandlerSVGGateAndHardeningHeaders(t *testing.T) {
 		t.Fatalf("uuid disposition = %q, want 末段 uuid + .png（按类型补扩展名）", got)
 	}
 	assertHardening(t, rec)
+
+	// 非媒体后缀与结尾一个点：换成按响应类型反查的扩展名，而不是当成已有
+	// 扩展名跳过（`screenshot.v2`、`trailing.` 留着双击都打不开）。
+	for _, tc := range []struct{ path, want string }{
+		{"/user-attachments/assets/screenshot.v2", `attachment; filename="screenshot.png"`},
+		{"/user-attachments/assets/trailing.", `attachment; filename="trailing.png"`},
+	} {
+		req = httptest.NewRequest(http.MethodGet, githubmedia.ProxyPath+"?url="+url.QueryEscape("http://github.com"+tc.path), nil)
+		rec = httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s code = %d, want 200", tc.path, rec.Code)
+		}
+		if got := rec.Header().Get("Content-Disposition"); got != tc.want {
+			t.Fatalf("%s disposition = %q, want %q", tc.path, got, tc.want)
+		}
+	}
 
 	// 多段 Range（逗号分隔）被忽略，按无 Range 走整文件路径：返回 200 完整
 	// body 而不是 415——上游对多段 Range 回 multipart/byteranges，闸门必然

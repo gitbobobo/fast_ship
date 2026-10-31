@@ -600,3 +600,19 @@ func TestMediaFileExtension(t *testing.T) {
 		}
 	}
 }
+
+// 下载文件名用：只有媒体扩展名才算「已有可用扩展名」，非媒体后缀（.v2、
+// 结尾一个点）都要按响应类型换掉。
+func TestIsMediaFileExtension(t *testing.T) {
+	for _, tc := range []struct {
+		ext  string
+		want bool
+	}{
+		{".png", true}, {".PNG", true}, {".mp4", true},
+		{".svg", false}, {".v2", false}, {".", false}, {"", false},
+	} {
+		if got := IsMediaFileExtension(tc.ext); got != tc.want {
+			t.Fatalf("IsMediaFileExtension(%q) = %v, want %v", tc.ext, got, tc.want)
+		}
+	}
+}

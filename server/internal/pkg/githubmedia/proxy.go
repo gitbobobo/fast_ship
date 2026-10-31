@@ -1403,6 +1403,14 @@ var mediaExtensionByType = func() map[string]string {
 	return byType
 }()
 
+// IsMediaFileExtension 扩展名（带点，如 ".png"）是否在媒体扩展名表里。出口判
+// 断下载文件名的末段是否已经是能直接打开的媒体扩展名时用它：只看「有没有
+// 点」不够——`screenshot.v2`、结尾一个点的名字都会被当成已有扩展名。
+func IsMediaFileExtension(ext string) bool {
+	_, ok := mediaExtensions[strings.ToLower(ext)]
+	return ok
+}
+
 // MediaFileExtension 由具体媒体类型反查扩展名（带点），表外类型给 ".bin"。
 // 供 Content-Disposition 的 filename 兜底：GitHub 附件直链多半是没有扩展名
 // 的 uuid，不带 filename 时浏览器只能按 URL 末段取名，下载下来是个双击打不
