@@ -601,3 +601,43 @@ func TestRedeliveryGateDegradedNoAtSignTerminal(t *testing.T) {
 		t.Fatalf("含 @ 的未命中不得记终态: %+v", row)
 	}
 }
+
+// 负向 PR 状态不进缓存（codex 第 50 轮 P2）：同一 sweep 内 PR 可能转为可
+// 审（ready_for_review/reopened 投递紧随草稿期的投递），缓存的 usable=
+// false 会把后到投递误记终态永不重试——负向按投递现查。
+func TestRedeliveryGateNegativeStateNotCached(t *testing.T) {
+	env := newReviewEngineEnv(t)
+	env.enableReview(t)
+
+	base := redeliveryTestNow.Add(-time.Hour)
+	env.fake.SetHookDeliveries([]githubapp.HookDelivery{
+		hookRow(10101, "guid-pr-draftfirst", "pull_request", "synchronize", 500, false, base),
+		hookRow(10102, "guid-pr-ready", "pull_request", "synchronize", 500, false, base),
+	})
+	env.fake.SetHookDeliveryPayload(10101, redeliveryGatePayload("owner/repo", 14))
+	env.fake.SetHookDeliveryPayload(10102, redeliveryGatePayload("owner/repo", 14))
+	// 第一次探测读到草稿；第二次（同 sweep 内后到投递）读到已转正式。
+	env.fake.SetPR("owner/repo", 14, &githubapi.PullRequest{Draft: true})
+	calls := 0
+	env.fake.SetPRHook(func(call int) {
+		calls = call
+		if call >= 2 {
+			env.fake.SetPR("owner/repo", 14, &githubapi.PullRequest{})
+		}
+	})
+
+	env.review.reconcileWebhookDeliveries(redeliveryTestNow)
+	got := env.fake.RedeliveredIDs()
+	if len(got) != 1 || got[0] != 10102 {
+		t.Fatalf("后到的已转正式投递应照常重投: %v", got)
+	}
+	if row, ok := redeliveryClosedRow(t, env, "guid-pr-draftfirst"); !ok || row.ClosedAt == nil {
+		t.Fatalf("草稿期投递应记终态: %+v (ok=%v)", row, ok)
+	}
+	if row, ok := redeliveryClosedRow(t, env, "guid-pr-ready"); ok && row.ClosedAt != nil {
+		t.Fatalf("已转正式投递不得因缓存误记终态: %+v", row)
+	}
+	if calls < 2 {
+		t.Fatalf("负向结果不得走缓存，应现查: calls = %d", calls)
+	}
+}

@@ -559,11 +559,12 @@ func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, ev
 		baseline := (*time.Time)(nil)
 		if snErr == nil {
 			baseline = accepted.PRUpdatedAt
-		} else {
-			// seen 行未命中（评论唤醒与 advancePRHeadTx 只推 head 的路径不写
-			// seen）时读总账行：受理该 head 时落库的实拉快照时刻就是基准——
+		}
+		if baseline == nil {
+			// seen 行未命中**或其快照时刻为空**（tied 重验等缺 updatedAt 的
+			// 受理）时读总账行：受理该 head 时落库的实拉快照时刻就是基准——
 			// 否则这些 head 永久无基准，滞后快照恒被采信、总账可回退
-			// （fast-ship-bot 第 26 轮 P2）。
+			// （fast-ship-bot 第 26 轮 P2、codex 第 50 轮 P2）。
 			var ledger model.ReviewPullRequest
 			if lErr := s.db.WithContext(ctx).Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ?",
 				observedProjectID, repo, prNumber, integrationID).First(&ledger).Error; lErr == nil &&

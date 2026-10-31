@@ -457,7 +457,13 @@ func (p *redeliveryPRProbe) lookup(ctx context.Context, deliveryID int64, event 
 	// 唤醒事务的 pr.Draft 守卫都会丢弃）：草稿期间的投递重投只会白吃预算
 	// 甚至误发故障通知（codex 第 34 轮 P2）；转正式后新投递自然开审。
 	prUsable := open && !fork && !forgePR.Draft
-	p.prStates[key] = &probePRState{usable: prUsable, author: forgePR.AuthorLogin, fork: fork}
+	// 负向结果（closed/草稿/fork）不进缓存：同一 sweep 内 PR 可能转为可审
+	// （ready_for_review/reopened 投递紧随其后），缓存的 usable=false 会把
+	// 后到投递误记终态、永不重试（codex 第 50 轮 P2）——负向按投递现查
+	// （预算天然兜住总量），正向快照复用安全。
+	if prUsable {
+		p.prStates[key] = &probePRState{usable: prUsable, author: forgePR.AuthorLogin, fork: fork}
+	}
 	reviewable := prUsable && authorized
 	check.Known, check.Reviewable = true, reviewable
 	check.Fork = !reviewable && fork

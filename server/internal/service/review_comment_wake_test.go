@@ -2666,3 +2666,46 @@ func TestReviewCommentWakeCachedMissRefreshesSlug(t *testing.T) {
 		t.Fatalf("不含 @ 的未命中不得强制刷新: %d -> %d", reads, readsAfter)
 	}
 }
+
+// seen 行存在但快照时刻为空也回落总账基准（codex 第 50 轮 P2）：tied 重
+// 验等缺 updatedAt 的受理写的 seen 行 PRUpdatedAt 为 NULL——只查 seen 会
+// 得到无基准、放行滞后读回退总账。
+func TestReviewCommentWakeNilSeenFallsBackToLedger(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	e.enableReview(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	ctx := context.Background()
+	t2 := time.Now().UTC().Add(-2 * time.Hour)
+	t1 := t2.Add(-time.Hour)
+	if err := e.svc.db.Create(&model.ReviewPullRequest{
+		ProjectID: e.project.ID, UserID: e.project.UserID,
+		RepoFullName: repo, PRNumber: 92,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		HeadSHA:       "sha-b", RoundNumber: 1, UpdatedAt: t2, PRUpdatedAt: &t2,
+	}).Error; err != nil {
+		t.Fatalf("seed ledger: %v", err)
+	}
+	if err := e.svc.db.Create(&model.ReviewSeenSHA{
+		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 92,
+		HeadSHA: "sha-b", IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		PRUpdatedAt: nil, AcceptedAt: t2,
+	}).Error; err != nil {
+		t.Fatalf("seed seen: %v", err)
+	}
+	// 滞后读：旧 head sha-a（时间戳 t1 < 账本基准 t2）。
+	e.fake.SetPR(repo, 92, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 92, State: "open", HeadSHA: "sha-a",
+		HeadRepoFullName: repo, UpdatedAt: &t1,
+	})
+	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-nilseen",
+		issueCommentBody("@fast-ship-bot", repo, 92, 42)); err == nil {
+		t.Fatal("seen 行空时戳应回落账本基准拦滞后读（500）")
+	}
+	var after model.ReviewPullRequest
+	if err := e.svc.db.Where("pr_number = 92").First(&after).Error; err != nil {
+		t.Fatalf("总账行应仍在: %v", err)
+	}
+	if after.HeadSHA != "sha-b" {
+		t.Fatalf("总账不得回退: head = %s", after.HeadSHA)
+	}
+}
