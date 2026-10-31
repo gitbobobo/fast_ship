@@ -476,11 +476,16 @@ func (s *ReviewService) advancePRHeadTx(tx *gorm.DB, project *model.Project, rep
 	// 前进 head 时清掉可能残留的 pending 并推进 epoch：旧轮的重试不能拿新
 	// head 去发布（此时还没有新轮的运行），在途同步也会因 epoch 不符中止。
 	updates := map[string]any{
-		"head_sha":      headSHA,
-		"pr_updated_at": prUpdatedAt,
-		"sync_pending":  false,
-		"sync_epoch":    gorm.Expr("sync_epoch + 1"),
-		"updated_at":    now,
+		"head_sha":     headSHA,
+		"sync_pending": false,
+		"sync_epoch":   gorm.Expr("sync_epoch + 1"),
+		"updated_at":   now,
+	}
+	// nil 快照时刻（tied 重验路径等不带 updatedAt 的入口）保留旧基准，不
+	// 得清成 NULL——账本 pr_updated_at 是评论唤醒滞后判定的兜底（
+	// fast-ship-bot 第 40 轮 Note 同口径、codex 第 49 轮 P2）。
+	if prUpdatedAt != nil {
+		updates["pr_updated_at"] = prUpdatedAt
 	}
 	if installationID != 0 {
 		updates["installation_id"] = installationID

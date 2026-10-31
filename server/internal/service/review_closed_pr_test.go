@@ -15,6 +15,7 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/forge"
 	"github.com/godbobo/fast_ship/server/internal/githubapi"
 	"github.com/godbobo/fast_ship/server/internal/model"
+	"gorm.io/gorm"
 )
 
 // seedClosedDebounce 落一行到期防抖的公共助手。
@@ -710,4 +711,39 @@ func TestReviewDebounceInstallationFallback(t *testing.T) {
 			t.Fatalf("解析出的安装 id 应落账本与运行行: ledger=%d run=%d", ledger.InstallationID, run.InstallationID)
 		}
 	})
+}
+
+// advancePRHeadTx nil 快照时刻保留旧基准（codex 第 49 轮 P2）：tied 重验
+// 等不带 updatedAt 的入口推进 head 时不得把账本 pr_updated_at 清成 NULL。
+func TestAdvancePRHeadPreservesBaselineOnNil(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	e.enableReview(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	t1 := now.Add(-2 * time.Hour)
+	if err := e.svc.db.Create(&model.ReviewPullRequest{
+		ProjectID: e.project.ID, UserID: e.project.UserID,
+		RepoFullName: repo, PRNumber: 91,
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		HeadSHA:       "sha-old", RoundNumber: 1, UpdatedAt: t1, PRUpdatedAt: &t1,
+	}).Error; err != nil {
+		t.Fatalf("seed ledger: %v", err)
+	}
+
+	if err := e.svc.db.Transaction(func(tx *gorm.DB) error {
+		return e.review.advancePRHeadTx(tx, e.project, repo, 91, "sha-new",
+			model.ForgeIntegrationBuiltinGitHubID, 42, nil, now)
+	}); err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+	var after model.ReviewPullRequest
+	if err := e.svc.db.Where("pr_number = 91").First(&after).Error; err != nil {
+		t.Fatalf("总账行应存在: %v", err)
+	}
+	if after.HeadSHA != "sha-new" {
+		t.Fatalf("head 应推进: %s", after.HeadSHA)
+	}
+	if after.PRUpdatedAt == nil || !after.PRUpdatedAt.Equal(t1) {
+		t.Fatalf("nil 快照时刻不得清空基准: %v", after.PRUpdatedAt)
+	}
 }
