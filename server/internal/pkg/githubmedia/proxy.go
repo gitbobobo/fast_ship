@@ -393,7 +393,7 @@ func (s *ProxyService) sweepExpiredEntries() {
 		// 锁内重读：条目可能刚被覆盖成新条目（不再过期）或已被清走。
 		recheck, err := os.ReadFile(metaPath)
 		if err != nil {
-			<-lock
+			s.releaseDownloadLock(entry.URL, lock)
 			continue
 		}
 		var recheckEntry cacheEntry
