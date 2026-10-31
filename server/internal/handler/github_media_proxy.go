@@ -43,6 +43,7 @@ func (h *GitHubMediaProxyHandler) Proxy(c *gin.Context) {
 		defer resp.Body.Close()
 
 		copyMediaHeaders(c.Writer.Header(), resp.Header)
+		setMediaProxyHardeningHeaders(c.Writer.Header())
 		c.Status(resp.StatusCode)
 		if headOnly {
 			return
@@ -68,6 +69,7 @@ func (h *GitHubMediaProxyHandler) Proxy(c *gin.Context) {
 		defer resp.Body.Close()
 
 		copyMediaHeaders(c.Writer.Header(), resp.Header)
+		setMediaProxyHardeningHeaders(c.Writer.Header())
 		c.Status(resp.StatusCode)
 		_, _ = io.Copy(c.Writer, resp.Body)
 		return
@@ -106,8 +108,23 @@ func serveCachedMedia(c *gin.Context, media *githubmedia.CachedMedia) {
 	if media.Metadata.LastModified != "" {
 		header.Set("Last-Modified", media.Metadata.LastModified)
 	}
+	// 在 http.ServeContent 之前设置：它只补 Content-Type/Length/Range 等头，
+	// 已显式设置的头不会被覆盖（见下），硬化头也原样保留。
+	setMediaProxyHardeningHeaders(header)
 
 	http.ServeContent(c.Writer, c.Request, "", media.Metadata.CachedAt, file)
+}
+
+// setMediaProxyHardeningHeaders 媒体代理成功响应的统一硬化头（INT-171）。
+// ?token= 会出现在地址栏，代理绝不能交付同源可执行文档：nosniff 阻止
+// 浏览器嗅探改判；attachment 把「新标签页打开」降级成下载而不是同源导航
+// ——只影响顶层导航，<img>/<video> 子资源渲染不受影响，可无条件加；
+// CSP sandbox 兜底禁脚本禁同源。必须在 copyMediaHeaders 之后、
+// http.ServeContent 之前设置，避免被上游头覆盖。
+func setMediaProxyHardeningHeaders(header http.Header) {
+	header.Set("X-Content-Type-Options", "nosniff")
+	header.Set("Content-Disposition", "attachment")
+	header.Set("Content-Security-Policy", "default-src 'none'; sandbox")
 }
 
 func copyMediaHeaders(dst, src http.Header) {

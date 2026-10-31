@@ -13,15 +13,16 @@ import (
 
 // 缓存条目不可读时的降级：清得掉按 miss 走重下，清不掉才上报 ErrLocalCache。
 
-// seedCacheMeta 落一条未过期的缓存 meta，返回 meta 路径。
-func seedCacheMeta(t *testing.T, svc *ProxyService, normalized string) string {
+// seedCacheMeta 落一条未过期的缓存 meta，返回 meta 路径。contentType 给
+// 条目声明的 Content-Type（历史缓存复核测试用它塞老准入口径写进去的值）。
+func seedCacheMeta(t *testing.T, svc *ProxyService, normalized, contentType string) string {
 	t.Helper()
 	if err := os.MkdirAll(svc.cacheDir, 0o750); err != nil {
 		t.Fatalf("mkdir cache dir: %v", err)
 	}
 	entry := cacheEntry{
 		URL:         normalized,
-		ContentType: "image/png",
+		ContentType: contentType,
 		Size:        5,
 		CachedAt:    time.Now().UTC(),
 		ExpiresAt:   time.Now().Add(time.Hour).UTC(),
@@ -49,7 +50,7 @@ func TestGetCachedDegradesUnreadableMetaToMiss(t *testing.T) {
 	if err != nil {
 		t.Fatalf("normalize: %v", err)
 	}
-	metaPath := seedCacheMeta(t, svc, normalized)
+	metaPath := seedCacheMeta(t, svc, normalized, "image/png")
 	if err := os.Chmod(metaPath, 0o000); err != nil {
 		t.Fatalf("chmod meta: %v", err)
 	}
@@ -82,7 +83,7 @@ func TestGetCachedDegradesUnstatableDataToMiss(t *testing.T) {
 	if err != nil {
 		t.Fatalf("normalize: %v", err)
 	}
-	seedCacheMeta(t, svc, normalized)
+	seedCacheMeta(t, svc, normalized, "image/png")
 	// 指向自身的符号链接：os.Stat 跟随链接即 ELOOP（非 ErrNotExist）。
 	dataPath := svc.dataPath(normalized, "")
 	if err := os.Symlink(dataPath, dataPath); err != nil {
@@ -114,7 +115,7 @@ func TestGetCachedReportsLocalCacheErrWhenDiscardFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("normalize: %v", err)
 	}
-	metaPath := seedCacheMeta(t, svc, normalized)
+	metaPath := seedCacheMeta(t, svc, normalized, "image/png")
 	if err := os.Chmod(metaPath, 0o000); err != nil {
 		t.Fatalf("chmod meta: %v", err)
 	}
@@ -150,5 +151,53 @@ func TestScreenshotFaceRejectsSVGContentTypeVariants(t *testing.T) {
 	})
 	if _, err := svc.FetchAndCache(t.Context(), upstream.URL+"/icon.svg"); !errors.Is(err, ErrUnsupportedUpstreamMedia) {
 		t.Fatalf("err = %v, want ErrUnsupportedUpstreamMedia（image/svg 变体同拒）", err)
+	}
+}
+
+// INT-171 缓存命中复核：旧准入口径（收 svg）写进缓存的历史条目，命中时按
+// 当前规则重新校验 ContentType，不过关就删 meta+data 按 miss 走重下；位图
+// 条目不受复核影响，仍然命中。
+func TestGetCachedRevalidatesContentTypeGate(t *testing.T) {
+	svc := newService(t.TempDir(), serviceConfig{
+		allowURL: func(u *url.URL) bool { return true },
+	})
+
+	// 历史 svg 条目：命中时被淘汰，meta 与 data 都被清掉。
+	svgURL, err := svc.normalize("https://user-images.githubusercontent.com/legacy.svg")
+	if err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	seedCacheMeta(t, svc, svgURL, "image/svg+xml")
+	if err := os.WriteFile(svc.dataPath(svgURL, ""), []byte("<svg/>"), 0o640); err != nil {
+		t.Fatalf("write data: %v", err)
+	}
+
+	cached, ok, err := svc.GetCached(svgURL)
+	if ok || err != nil || cached != nil {
+		t.Fatalf("cached = %+v ok = %v err = %v, want miss 不报错（复核不过关淘汰）", cached, ok, err)
+	}
+	if _, statErr := os.Stat(svc.metaPath(svgURL, "")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("svg meta stat = %v, want 已被淘汰清理", statErr)
+	}
+	if _, statErr := os.Stat(svc.dataPath(svgURL, "")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("svg data stat = %v, want 已被淘汰清理", statErr)
+	}
+
+	// 位图条目：复核过关，照常命中。
+	pngURL, err := svc.normalize("https://user-images.githubusercontent.com/ok.png")
+	if err != nil {
+		t.Fatalf("normalize png: %v", err)
+	}
+	seedCacheMeta(t, svc, pngURL, "image/png")
+	if err := os.WriteFile(svc.dataPath(pngURL, ""), []byte("png"), 0o640); err != nil {
+		t.Fatalf("write png data: %v", err)
+	}
+
+	cached, ok, err = svc.GetCached(pngURL)
+	if err != nil || !ok || cached == nil {
+		t.Fatalf("cached = %+v ok = %v err = %v, want 命中", cached, ok, err)
+	}
+	if cached.Metadata.ContentType != "image/png" {
+		t.Fatalf("content type = %q, want image/png", cached.Metadata.ContentType)
 	}
 }

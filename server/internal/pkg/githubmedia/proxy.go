@@ -190,13 +190,28 @@ type serviceConfig struct {
 	githubWebHost string
 }
 
+// ProxyOption NewProxyService 的可选装配项；生产装配不传即为默认 GitHub
+// 白名单语义。handler 层直测用它注入指向 httptest 假上游的客户端，测试
+// 不打真实网络。
+type ProxyOption func(*serviceConfig)
+
+// WithHTTPClient 覆盖默认 HTTP 客户端（默认克隆 http.DefaultTransport，
+// GitHub 媒体面不 guardAddress、走环境代理）。
+func WithHTTPClient(client *http.Client) ProxyOption {
+	return func(cfg *serviceConfig) { cfg.client = client }
+}
+
 // NewProxyService GitHub 媒体代理面：GitHub 域名白名单、图片视频都收，
 // 服务 /api/github/media-proxy。
-func NewProxyService(cacheRoot string) *ProxyService {
-	return newService(cacheRoot, serviceConfig{
+func NewProxyService(cacheRoot string, opts ...ProxyOption) *ProxyService {
+	cfg := serviceConfig{
 		cacheSubdir: defaultCacheSubdir,
 		allowURL:    isAllowedGitHubMediaURL,
-	})
+	}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	return newService(cacheRoot, cfg)
 }
 
 // NewReviewMediaService PR 审查截图下载面：放行任意公网 https 图片，SSRF
@@ -840,6 +855,14 @@ func (s *ProxyService) ProxyPass(ctx context.Context, rawURL, rangeHeader string
 		return nil, &UpstreamStatusError{StatusCode: resp.StatusCode}
 	}
 
+	// 内容类型闸门与整文件下载同口径：Range/HEAD 直通不能成为 svg/HTML
+	// 准入的旁路（INT-171）。HEAD 响应常无 Content-Type，走扩展名回退
+	// （集合里没有 .svg）。拒收时关掉 body 归还连接。
+	if !s.isAllowedContentType(resp.Header.Get("Content-Type"), normalized) {
+		resp.Body.Close()
+		return nil, ErrUnsupportedUpstreamMedia
+	}
+
 	return &PassThroughResponse{
 		StatusCode: resp.StatusCode,
 		Header:     cloneRelevantHeaders(resp.Header),
@@ -887,6 +910,13 @@ func (s *ProxyService) getCachedNormalized(normalized, scope string) (*CachedMed
 	// 的 Scope 字段是双保险（如旧格式条目或键派生变化时仍不误命中）。
 	if entry.Scope != scope {
 		return nil, false, nil
+	}
+
+	// 内容类型按当前准入规则复核：旧准入口径（收 svg）写进缓存的历史条目
+	// 命中时淘汰重下，不靠 bump 缓存标记全量清目录（INT-171）。清不掉
+	// （目录级故障）按 discardCacheEntry 的既有语义上报 ErrLocalCache。
+	if !s.isAllowedContentType(entry.ContentType, normalized) {
+		return s.discardCacheEntry(metaPath, cachePath)
 	}
 
 	if entry.expired(time.Now().UTC()) {
@@ -1169,24 +1199,26 @@ func isAllowedGitHubMediaURL(parsed *url.URL) bool {
 	}
 }
 
-// isAllowedContentType 内容类型准入：GitHub 媒体面收图片与视频；截图面
-// （imagesOnly）只收位图——octet-stream 时按扩展名回退，svg 即使标着
-// image/* 也拒（视觉审查只吃位图）。
+// isAllowedContentType 内容类型准入：GitHub 媒体面收位图与视频；截图面
+// （imagesOnly）只收位图——octet-stream 与空 Content-Type 时按扩展名回退。
+// svg 两个面都拒（INT-171）：用户态媒体代理的响应字节以 Fast Ship 同源交付，
+// svg 在新标签页打开就是同源文档、能执行脚本，视觉审查也只吃位图。拒收
+// 两路并行——内容类型按 image/svg 前缀拒（标准写法 image/svg+xml 与非标准
+// 变体 image/svg 一并覆盖），扩展名回退集合不含 .svg。
 func (s *ProxyService) isAllowedContentType(contentType string, rawURL string) bool {
 	if contentType == "" {
 		if s.imagesOnly {
 			return hasBitmapExtension(rawURL)
 		}
-		return hasGitHubMediaExtension(rawURL)
+		return hasMediaExtension(rawURL)
 	}
 
 	baseType := strings.ToLower(strings.TrimSpace(strings.Split(contentType, ";")[0]))
+	// svg 在位图/视频分支之前统一拒，两个面共用同一道判定。
+	if strings.HasPrefix(baseType, "image/svg") {
+		return false
+	}
 	if s.imagesOnly {
-		// svg 即使标着 image/* 也不收：image/svg+xml 是标准写法，image/svg
-		// （不带 +xml）是上游会用到的非标准变体，一并按前缀拒。
-		if strings.HasPrefix(baseType, "image/svg") {
-			return false
-		}
 		return strings.HasPrefix(baseType, "image/") ||
 			(baseType == "application/octet-stream" && hasBitmapExtension(rawURL))
 	}
@@ -1194,29 +1226,31 @@ func (s *ProxyService) isAllowedContentType(contentType string, rawURL string) b
 		return true
 	}
 	if baseType == "application/octet-stream" {
-		return hasGitHubMediaExtension(rawURL)
+		return hasMediaExtension(rawURL)
 	}
+	// text/html、application/xhtml+xml、text/plain 等落不到任何前缀分支，
+	// 一律拒。
 	return false
 }
 
 var (
-	// bitmapExtensions 视觉审查能吃的位图。svg 是矢量图，不在此列——截图
-	// 面既不按扩展名收它，也不收 image/svg+xml。
+	// bitmapExtensions 两个面共用的位图扩展名。svg 是可在浏览器执行脚本的
+	// 矢量图，不在此列——两个面都不按扩展名收它。
 	bitmapExtensions = map[string]bool{
 		".png": true, ".jpg": true, ".jpeg": true, ".gif": true,
 		".webp": true, ".bmp": true,
 	}
-	// vectorExtensions GitHub 媒体面额外收 svg。
-	vectorExtensions = map[string]bool{".svg": true}
-	videoExtensions  = map[string]bool{
+	videoExtensions = map[string]bool{
 		".mp4": true, ".mov": true, ".webm": true, ".m4v": true,
 	}
 )
 
-// hasGitHubMediaExtension GitHub 媒体面的扩展名集合 = 位图 + svg + 视频。
-func hasGitHubMediaExtension(rawURL string) bool {
+// hasMediaExtension 扩展名回退集合 = 位图 + 视频。svg 曾在 GitHub 媒体面的
+// 集合里，INT-171 起移除：上游没标 Content-Type 时按扩展名回退的请求同样
+// 不能带进可执行文档。
+func hasMediaExtension(rawURL string) bool {
 	ext := urlPathExtension(rawURL)
-	return bitmapExtensions[ext] || vectorExtensions[ext] || videoExtensions[ext]
+	return bitmapExtensions[ext] || videoExtensions[ext]
 }
 
 func hasBitmapExtension(rawURL string) bool {
