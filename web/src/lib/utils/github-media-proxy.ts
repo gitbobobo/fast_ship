@@ -45,8 +45,13 @@ function attachMediaProxyToken(url: URL, token?: string | null) {
   url.searchParams.delete(MEDIA_PROXY_TOKEN_PARAM);
 }
 
+// 服务端 BuildProxyURL 已把 v 写进 body_html 里的代理地址（它是缓存失效机制
+// 的权威来源），这里只在缺失时补——用 set 无条件覆盖的话，只递增 Go 常量的
+// 发版会被前端静默改回旧值，旧缓存照常命中。
 function attachMediaProxyVersion(url: URL) {
-  url.searchParams.set(MEDIA_PROXY_VERSION_PARAM, MEDIA_PROXY_VERSION);
+  if (!url.searchParams.has(MEDIA_PROXY_VERSION_PARAM)) {
+    url.searchParams.set(MEDIA_PROXY_VERSION_PARAM, MEDIA_PROXY_VERSION);
+  }
 }
 
 function isSameOriginMediaProxyUrl(value: string) {

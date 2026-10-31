@@ -26,7 +26,9 @@ svg（`image/svg+xml`、非标准写法 `image/svg`、扩展名 `.svg`）与 HTM
 
 `/api/artifacts/:aid/download`、`/api/attachments/:aid/download` 以 `application/octet-stream` + `attachment` 下发，本身不构成同源文档，不在这个不变量里。`/api/screenshot-annotations/:aid/crop` 是服务端生成的裁剪 PNG，也不在。
 
-**残余窗口**：头像地址存在用户表里、改不了缓存键，没法像媒体代理那样加版本参数；Issue 附件同理。两条出口的 `Cache-Control` 都压到 `private, max-age=300`，部署前缓存的旧响应（没有硬化头）最长 5 分钟内自然退役——不当作长期防线，但也不假装它不存在。新增同类出口时照上表接上，别只给媒体代理加。
+**残余窗口**：头像地址存在用户表里、改不了缓存键，没法像媒体代理那样加版本参数；Issue 附件同理。两条出口的 `Cache-Control` 都压到 `private, max-age=300`——但这只影响部署之后的新响应，**部署前已进浏览器的旧响应带着自己的 `max-age=3600`，会按它继续被复用**，未硬化响应的真实残余窗口最长 60 分钟（媒体代理旧版是 24h，靠 `v` 版本参数提前退役，附件/头像没有这个手段）。风险评估按 60 分钟算，别按 5 分钟。新增同类出口时照上表接上，别只给媒体代理加。
+
+**版本参数的单一来源**：`v` 的权威来源是 Go 的 `ProxyURLVersion`（服务端 `BuildProxyURL` 写进 body_html）。前端 `attachMediaProxyVersion` 只在 URL 缺失时补自己的常量、不覆盖已有值——否则只递增 Go 常量的发版会被前端静默改回旧值，缓存失效静默失效。递增时两边常量一起改，以 Go 侧为准。
 
 ## 地址版本参数
 
