@@ -555,11 +555,18 @@ func TestSVGRejectionCarriesDedicatedSentinel(t *testing.T) {
 	service := newProxyService(t.TempDir(), time.Hour, 1<<20, upstream.Client(),
 		func(u *url.URL) bool { return u.Host == parsed.Host })
 
+	// /a.svg 按内容类型判 svg（确定性档）；/b.svg 按扩展名判（依赖上游本次
+	// 响应，短 TTL 档）。
+	_, svgErr := service.FetchAndCache(context.Background(), upstream.URL+"/a.svg")
+	if !errors.Is(svgErr, ErrUnsupportedSVG) || errors.Is(svgErr, ErrUnsupportedSVGByExtension) {
+		t.Fatalf("a.svg err = %v, want ErrUnsupportedSVG 且不是扩展名档", svgErr)
+	}
+	_, svgErr = service.FetchAndCache(context.Background(), upstream.URL+"/b.svg")
+	if !errors.Is(svgErr, ErrUnsupportedSVGByExtension) {
+		t.Fatalf("b.svg err = %v, want ErrUnsupportedSVGByExtension", svgErr)
+	}
 	for _, path := range []string{"/a.svg", "/b.svg"} {
 		_, err := service.FetchAndCache(context.Background(), upstream.URL+path)
-		if !errors.Is(err, ErrUnsupportedSVG) {
-			t.Fatalf("%s err = %v, want ErrUnsupportedSVG", path, err)
-		}
 		if !errors.Is(err, ErrUnsupportedUpstreamMedia) {
 			t.Fatalf("%s err = %v, want 同时命中 ErrUnsupportedUpstreamMedia", path, err)
 		}

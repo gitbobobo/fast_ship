@@ -44,6 +44,6 @@ svg（`image/svg+xml`、非标准写法 `image/svg`、扩展名 `.svg`）与 HTM
 
 ## 被拒资源的重复回源
 
-**只有 svg 的 415 带** `Cache-Control: private, max-age=600`。svg 是确定性拒绝（同一 URL 同一准入规则下永远拒），不给缓存头的话每次页面渲染都会重新请求代理、代理再回源一趟才在闸门上拒，热门 Issue 里带 svg 图片时放大明显。其它非媒体类型（`text/html` 之类）可能是上游抽风时的拦截页/登录页/限流页，同一 URL 下一次就可能正常，钉住会让图片持续裂图——所以它们照旧不带缓存头。服务侧不区分，按 `ErrUnsupportedSVG` 这个哨兵（包装 `ErrUnsupportedUpstreamMedia`）判：内容类型是 `image/svg*`，或上游没给类型而扩展名是 `.svg`。
+svg 的 415 带缓存头，但分两档：内容类型判定（`image/svg*`，同一资源下次还是 svg）带 `private, max-age=600`；扩展名判定（上游没给 Content-Type + `.svg`，判据来自上游本次响应——下次它可能给正常类型）只带 `private, max-age=60`，钉 10 分钟会把裂图窗口也钉住。其它非媒体类型（`text/html` 之类可能是上游抽风时的拦截页/登录页/限流页，同一 URL 下一次就可能正常）不带缓存头。不给缓存头的话每次页面渲染都会重新请求代理、代理再回源一趟才在闸门上拒，热门 Issue 里带 svg 图片时放大明显。服务侧按两个哨兵区分：`ErrUnsupportedSVG`（内容类型档）与 `ErrUnsupportedSVGByExtension`（扩展名档，包装前者）。
 
 选浏览器缓存而不是服务端负缓存（meta 墓碑），是因为后者在准入规则变化时要额外清理，语义成本高于收益；代价是不同客户端各自回源一次。

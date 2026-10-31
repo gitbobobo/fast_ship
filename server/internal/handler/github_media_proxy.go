@@ -214,19 +214,27 @@ func copyMediaHeaders(dst, src http.Header) {
 	}
 }
 
-// mediaProxyRejectionMaxAge svg 拒绝的浏览器缓存秒数。svg 是确定性拒绝（同一
-// URL 同一准入规则下永远拒），不给缓存头的话每次页面渲染都会重新请求代理，
-// 代理再回源一趟（302 + 实体各一跳）才在闸门上拒——升级前这类资源是命中磁
-// 盘的，不回源就是不给浏览器留缓存头造成的放大。只给 svg 这类定拒绝：
-// text/html 之类可能是上游抽风时的拦截页，钉住会让图片持续裂图。
-const mediaProxyRejectionMaxAge = 600
+// svg 拒绝的浏览器缓存秒数，分两档：内容类型判定（image/svg*，同一资源下次
+// 还是 svg）可以钉住——不给缓存头的话每次页面渲染都会重新请求代理、代理再
+// 回源一趟才在闸门上拒；扩展名判定（上游没给类型 + .svg）的判据来自上游本
+// 次响应——下次它可能给正常类型，只能按短 TTL，钉 10 分钟会把裂图窗口也钉
+// 住。其它非媒体类型（text/html 之类可能是拦截页）不带缓存头。
+const (
+	mediaProxyRejectionMaxAge            = 600
+	mediaProxyRejectionByExtensionMaxAge = 60
+)
 
 func writeMediaProxyError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, githubmedia.ErrInvalidMediaURL):
 		c.String(http.StatusBadRequest, "invalid github media url")
+	case errors.Is(err, githubmedia.ErrUnsupportedSVGByExtension):
+		// 顺序在 ErrUnsupportedSVG 之前：它包装了后者。判据来自上游本次响应，
+		// 只按短 TTL。
+		c.Header("Cache-Control", "private, max-age="+strconv.Itoa(mediaProxyRejectionByExtensionMaxAge))
+		c.String(http.StatusUnsupportedMediaType, "unsupported media type")
 	case errors.Is(err, githubmedia.ErrUnsupportedSVG):
-		// 顺序在通用非媒体类型之前：ErrUnsupportedSVG 包装了它。
+		// 内容类型判定的 svg 是确定性拒绝，可按较长 TTL 缓存。
 		c.Header("Cache-Control", "private, max-age="+strconv.Itoa(mediaProxyRejectionMaxAge))
 		c.String(http.StatusUnsupportedMediaType, "unsupported media type")
 	case errors.Is(err, githubmedia.ErrUnsupportedUpstreamMedia):

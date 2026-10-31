@@ -129,7 +129,7 @@ func TestGitHubMediaProxyHandlerSVGGateAndHardeningHeaders(t *testing.T) {
 			if rec.Code != http.StatusUnsupportedMediaType {
 				t.Fatalf("code = %d body = %s, want 415", rec.Code, rec.Body.String())
 			}
-			// 415 是确定性拒绝：带短 TTL 缓存头，浏览器不必每次渲染都回源。
+			// 内容类型判定的 svg 是确定性拒绝：较长 TTL；浏览器不必每次渲染都回源。
 			if got := rec.Header().Get("Cache-Control"); got != "private, max-age=600" {
 				t.Fatalf("cache-control = %q, want private, max-age=600", got)
 			}
@@ -329,5 +329,36 @@ func TestMediaProxyFileNameUsesNormalizedContentTypeOnProxyPass(t *testing.T) {
 	}
 	if got := rec.Header().Get("Content-Disposition"); got != `attachment; filename="clip-uuid.mp4"` {
 		t.Fatalf("disposition = %q, want clip-uuid.mp4（按规范化后的基础类型补后缀）", got)
+	}
+}
+
+// 扩展名档的 svg 拒绝（上游没给 Content-Type + .svg）判据来自上游本次响应，
+// 只按短 TTL 缓存——钉 10 分钟会把裂图窗口也钉住。
+func TestMediaProxySVGByExtensionRejectionShortCache(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 不写 Content-Type 也不写 body：Go 只在写 body 时嗅探补头。
+		w.Header()["Content-Type"] = nil
+	}))
+	defer upstream.Close()
+
+	target, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("parse upstream url: %v", err)
+	}
+	svc := githubmedia.NewProxyService(t.TempDir(),
+		githubmedia.WithHTTPTransport(&rewriteToUpstreamTransport{target: target}))
+
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.GET(githubmedia.ProxyPath, NewGitHubMediaProxyHandler(svc).Proxy)
+
+	req := httptest.NewRequest(http.MethodGet, githubmedia.ProxyPath+"?url="+url.QueryEscape("http://github.com/user-attachments/assets/evil.svg"), nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("code = %d, want 415", rec.Code)
+	}
+	if got := rec.Header().Get("Cache-Control"); got != "private, max-age=60" {
+		t.Fatalf("cache-control = %q, want private, max-age=60（扩展名档短缓存）", got)
 	}
 }

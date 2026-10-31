@@ -54,15 +54,18 @@ var (
 	// 不经过这里。
 	ErrInvalidMediaURL          = errors.New("不支持的图片地址")
 	ErrUnsupportedUpstreamMedia = errors.New("上游返回的不是图片")
-	// ErrUnsupportedSVG 命中 svg 的固定拒绝（内容类型是 image/svg*，或上游没
-	// 给类型而扩展名是 .svg）。包装 ErrUnsupportedUpstreamMedia，下游分类不
-	// 变；单独一个哨兵是为了让出口区分“按 URL/类型确定的拒绝”（可以按短 TTL
-	// 缓存到浏览器）与“上游这一回回的不是媒体”（可能是拦截页/登录页，钉住
-	// 会让图片持续裂图，不能缓存）。
-	ErrUnsupportedSVG         = fmt.Errorf("%w: svg", ErrUnsupportedUpstreamMedia)
-	ErrBlockedUpstreamAddress = errors.New("图片地址指向内网或保留地址")
-	ErrEmptyUpstreamMedia     = errors.New("上游返回空内容")
-	ErrMediaTooLarge          = errors.New("图片超过大小上限")
+	// ErrUnsupportedSVG 命中 svg 的固定拒绝，分两档：内容类型是 image/svg*
+	//（按响应类型判定，同一资源下次还是 svg，出口可按较长 TTL 缓存）；上游
+	// 没给类型而扩展名是 .svg（ErrUnsupportedSVGByExtension，判据依赖上游本
+	// 次响应——下次它可能给正常类型，只能按很短 TTL）。都包装
+	// ErrUnsupportedUpstreamMedia，下游分类不变；单独的哨兵是为了让出口区分
+	// 「接近确定的拒绝」（可缓存）与「上游这一回回的不是媒体」（可能是拦截
+	// 页/登录页，钉住会让图片持续裂图，不能缓存）。
+	ErrUnsupportedSVG            = fmt.Errorf("%w: svg", ErrUnsupportedUpstreamMedia)
+	ErrUnsupportedSVGByExtension = fmt.Errorf("%w (by extension)", ErrUnsupportedSVG)
+	ErrBlockedUpstreamAddress    = errors.New("图片地址指向内网或保留地址")
+	ErrEmptyUpstreamMedia        = errors.New("上游返回空内容")
+	ErrMediaTooLarge             = errors.New("图片超过大小上限")
 	// ErrLocalCache 本地截图缓存操作失败（建缓存目录/建临时文件/写盘/改名/
 	// 读缓存元数据）。在产生点打标：service 层只认这个 sentinel 归「截图缓
 	// 存写入失败」类，不再嗅探 *fs.PathError / *os.SyscallError 外壳——网络
@@ -1345,10 +1348,11 @@ func (s *ProxyService) normalizeResponseContentType(header http.Header, rawURL s
 	return s.normalizeMediaContentType(value, rawURL)
 }
 
-// mediaRejectionError 拒收原因：svg 是「按 URL/类型确定」的拒绝（svg 永远是
-// svg），出口可以按短 TTL 缓存到浏览器、省掉重复回源；其它非媒体类型
+// mediaRejectionError 拒收原因分三档：内容类型是 image/svg* 是「按类型确定」
+// 的拒绝（同一资源下次还是 svg），出口按较长 TTL 缓存；上游没给类型而扩展
+// 名是 .svg 的判据依赖上游本次响应，只能按很短 TTL；其它非媒体类型
 // （text/html 之类）可能是上游抽风时的拦截页/登录页/限流页，同一 URL 下一
-// 次就可能正常，不能钉住。
+// 次就可能正常，不能缓存。
 func (s *ProxyService) mediaRejectionError(header http.Header, rawURL string) error {
 	values := header.Values("Content-Type")
 	if len(values) > 1 {
@@ -1363,7 +1367,7 @@ func (s *ProxyService) mediaRejectionError(header http.Header, rawURL string) er
 		return ErrUnsupportedSVG
 	}
 	if (baseType == "" || baseType == "application/octet-stream") && urlPathExtension(rawURL) == ".svg" {
-		return ErrUnsupportedSVG
+		return ErrUnsupportedSVGByExtension
 	}
 	return ErrUnsupportedUpstreamMedia
 }
