@@ -18,7 +18,7 @@ body 只传 `{"url": "<PR链接>"}`。服务端解析 owner/repo/number（支持
 ### 两种 URL 形状与凭证
 
 - `https://github.com/<owner>/<repo>/pull/<number>`：GitHub 既有路径。凭证按 `ProjectCredentials.pullRequestCredential`：已配代码仓库 Token（`projects.code_github_token_id`）则只用它；未配则匿名读公共 PR，不借公开仓库 Token。两种用途互不兜底，细节见 [github-credentials.md](github-credentials.md)。PR 关联是唯一允许匿名访问的调用方。
-- `http(s)://<host>/<owner>/<repo>/pulls/<number>`（非 github.com 主机）：Forgejo 路径（INT-181）。两道闸门都过才取数，任一不过都是 40007：① 按 URL 主机的归一键（`forges.HostKey`，与集成行落库同口径）点查 `forge_integrations`（kind=forgejo）；② **项目作用面**——项目绑定的代码集成（`projects.code_integration_id` 指向的行）必须在同一主机上。②是凭证作用面：部署级机器人 PAT 只服务代码仓真的在这个 Forgejo 上的项目，防止任意项目成员借集成 PAT 读项目外仓库的 PR 元数据；同主机内跨仓库是有意支持的能力（跨仓 PR 关联），这是有意的信任边界——作用上限 = 项目所在 Forgejo 上机器人可见的仓库，而非全实例。查到后经 `ForgeClientSource.ForgejoClient` 现取 SSRF 安全 client + 解密机器人 PAT 拉取——只用 forge_integrations 的部署级凭据，绝不碰项目/用户级 token。集成凭证面故障（集成被删、kind 不符、解密失败）统一脱敏为「Forgejo 集成不可用或已被删除」，内部集成 id 只进日志。
+- `http(s)://<host>/<owner>/<repo>/pulls/<number>`（非 github.com 主机）：Forgejo 路径（INT-181）。两道闸门都过才取数，任一不过都是 40007：① 按 URL 主机的归一键（`forges.HostKey`，与集成行落库同口径）点查 `forge_integrations`（kind=forgejo）；② **项目作用面**——项目绑定的代码集成（`projects.code_integration_id` 指向的行）必须在同一主机上。②是凭证作用面：部署级机器人 PAT 只服务代码仓真的在这个 Forgejo 上的项目，防止任意项目成员借集成 PAT 读项目外仓库的 PR 元数据；同主机内跨仓库是有意支持的能力（跨仓 PR 关联），这是有意的信任边界——作用上限 = 项目所在 Forgejo 上机器人可见的仓库，而非全实例。查到后经 `ForgeClientSource.ForgejoClient` 现取 SSRF 安全 client + 解密机器人 PAT 拉取——只用 forge_integrations 的部署级凭据，绝不碰项目/用户级 token。集成凭证面故障（集成被删、kind 不符、解密失败）统一脱敏为「Forgejo 集成不可用或已被删除」，内部集成 id 只进日志。绑定缺失的 40007 按事实分三种文案：代码仓在内置 GitHub（`code_github_owner` 有值、集成 id 空）时点明「仅支持关联 GitHub PR」；完全未配代码仓时提示先配置；绑定集成在另一主机时提示不一致——都不指向「改绑代码仓」的死路。
 
 github.com/www.github.com 域内形状不符（如 `/pulls/{n}`）按无效（40001）处理，不误判成 Forgejo。允许跨仓库：`repo_full_name` 以 PR 链接/平台返回为准，可以是项目配置仓库之外的仓库。
 
@@ -28,7 +28,7 @@ forgejo 行落 `forge_integration_id`（可空列，AutoMigrate 追加；github 
 
 attach 与 sync 的失败文案不回显适配器错误原文（集成 API 绝对地址、响应体只进服务端日志）：Forgejo 状态码错误给「Forgejo API 状态码 N」+提示，传输/解析失败归一为「连接或响应异常」。GitHub 与 Forgejo 对「PR 不存在」与「无权访问」都返回 404，提示同时保留两种可能（GitHub 附「核查仓库访问范围与 Pull requests 读权限」）；限流另给提示，不断言单一原因。
 
-**主机冲突（40917）**：同名 PR（同 owner/repo/number）已关联在另一台 Forgejo 实例上时，attach 拒绝并要求先显式 detach——覆盖会静默改写用户已关联的对象。旧集成行已删的行无法比对主机（sync 本就报集成缺失），允许新实例的 attach 覆盖修复。
+**主机冲突（40917）**：同名 PR（同 owner/repo/number）已关联在另一台 Forgejo 实例上时，attach 拒绝并要求先显式 detach——覆盖会静默改写用户已关联的对象。守卫是双层的：service 层先读后写检查给友好文案（按 provider+number+大小写不敏感匹配既有行），写路径是权威形态——Upsert 的 `DO UPDATE … WHERE` 谓词在写入时原子复评「既有行无快照 / 同快照 / 旧集成已删（死链修复）/ 新旧集成同主机」，跨主机活链即使绕过读检查也无法写入。旧集成行已删的行属于死链（sync 本就报集成缺失），允许新实例的 attach 覆盖修复。
 
 ## sync 契约
 

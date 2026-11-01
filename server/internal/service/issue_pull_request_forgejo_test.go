@@ -269,6 +269,8 @@ func TestIssueServiceAttachPullRequest_ForgejoIntegrationMissing(t *testing.T) {
 
 // 主机上有集成但项目未绑定代码集成：40007，部署级机器人 PAT 不服务未接入
 // 该 Forgejo 的项目——防止任意项目成员借集成 PAT 读项目外仓库的 PR 元数据。
+// 文案按事实分态：代码仓在内置 GitHub 的项目得到「仅支持 GitHub PR」的指
+// 引，不是让用户去改绑的死路。
 func TestIssueServiceAttachPullRequest_ForgejoProjectNotBound(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")
@@ -288,11 +290,28 @@ func TestIssueServiceAttachPullRequest_ForgejoProjectNotBound(t *testing.T) {
 	if !ok || appErr.Code != errs.ErrForgeIntegrationNotConfigured.Code {
 		t.Fatalf("expected %d for unbound project, got %v", errs.ErrForgeIntegrationNotConfigured.Code, err)
 	}
-	if !strings.Contains(appErr.Message, "未配置代码仓库集成") {
+	if !strings.Contains(appErr.Message, "未配置代码仓库") {
 		t.Fatalf("expected binding-oriented message, got %q", appErr.Message)
 	}
 	if count := countPullRequestRows(t, svc, issue.ID); count != 0 {
 		t.Fatalf("expected no link rows, got %d", count)
+	}
+
+	// 代码仓在 GitHub（CodeGithubOwner 有值、code_integration_id 空）的项目：
+	// 文案点明「仅支持 GitHub PR」，不指引改绑。
+	if err := svc.db.Model(&model.Project{}).Where("id = ?", project.ID).
+		Update("code_github_owner", "owner").Error; err != nil {
+		t.Fatalf("set code github owner: %v", err)
+	}
+	_, err = svc.issueService.AttachIssuePullRequest(issue.ID, user.ID, AttachIssuePullRequestRequest{
+		Url: "https://forge.example.com/o/r/pulls/9",
+	})
+	appErr, ok = err.(*errs.AppError)
+	if !ok || appErr.Code != errs.ErrForgeIntegrationNotConfigured.Code {
+		t.Fatalf("expected %d for github-bound project, got %v", errs.ErrForgeIntegrationNotConfigured.Code, err)
+	}
+	if !strings.Contains(appErr.Message, "仅支持关联 GitHub PR") {
+		t.Fatalf("expected github-bound message, got %q", appErr.Message)
 	}
 }
 
@@ -751,7 +770,8 @@ func TestIssuePullRequestRepoUpsert_EmptySnapshotPreserved(t *testing.T) {
 		t.Fatalf("attach forgejo pr: %v", err)
 	}
 
-	// 空快照撞唯一键：快照必须保留原值。
+	// 空快照撞唯一键：写谓词拦下（既有行绑定活集成且与空新值不同主机不可
+	// 判定——空新值不同主机不成立，保守拒绝），快照必须保留原值。
 	now := time.Now().UTC()
 	blank := &model.IssuePullRequest{
 		ID: uuid.NewString(), IssueID: issue.ID, ProjectID: project.ID,
@@ -759,8 +779,12 @@ func TestIssuePullRequestRepoUpsert_EmptySnapshotPreserved(t *testing.T) {
 		State: model.IssuePullRequestStateOpen, LinkOrigin: model.IssuePullRequestLinkOriginSynced,
 		ForgeIntegrationID: "", SyncedAt: now, CreatedAt: now, UpdatedAt: now,
 	}
-	if err := svc.issueService.pullRequestRepo.Upsert(blank); err != nil {
+	applied, err := svc.issueService.pullRequestRepo.Upsert(blank)
+	if err != nil {
 		t.Fatalf("upsert blank snapshot: %v", err)
+	}
+	if applied {
+		t.Fatalf("blank snapshot upsert must be blocked by host predicate")
 	}
 	var row model.IssuePullRequest
 	if err := svc.db.Where("issue_id = ?", issue.ID).First(&row).Error; err != nil {
@@ -826,4 +850,75 @@ func TestIssueServiceAttachPullRequest_ForgejoHostConflict(t *testing.T) {
 		t.Fatalf("expected single row, got %d", count)
 	}
 	_ = again
+}
+
+// Upsert 主机写谓词覆盖矩阵（TOCTOU 权威形态）：同快照、同主机、旧集成已删
+// 允许覆盖；跨主机活链在写入时原子拦截，不依赖 service 层的先读后写检查。
+func TestIssuePullRequestRepoUpsert_HostPredicate(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID)
+	issue := createTestIssue(t, svc.db, project.ID)
+	createForgejoIntegrationRow(t, svc.db, "fj-a", "https://forge-a.example.com", "pat-a")
+	createForgejoIntegrationRow(t, svc.db, "fj-b", "https://forge-b.example.com", "pat-b")
+	createForgejoIntegrationRow(t, svc.db, "fj-a2", "https://forge-a.example.com", "pat-a2")
+
+	newLink := func(integrationID string) *model.IssuePullRequest {
+		now := time.Now().UTC()
+		return &model.IssuePullRequest{
+			ID: uuid.NewString(), IssueID: issue.ID, ProjectID: project.ID,
+			Provider: model.IssuePullRequestProviderForgejo, RepoFullName: "o/r", Number: 5,
+			State: model.IssuePullRequestStateOpen, LinkOrigin: model.IssuePullRequestLinkOriginManual,
+			ForgeIntegrationID: integrationID, SyncedAt: now, CreatedAt: now, UpdatedAt: now,
+		}
+	}
+
+	// 初次落行（A 实例）。
+	applied, err := svc.issueService.pullRequestRepo.Upsert(newLink("fj-a"))
+	if err != nil || !applied {
+		t.Fatalf("seed upsert: applied=%v err=%v", applied, err)
+	}
+
+	// 跨主机活链（B）：写谓词原子拦截。
+	applied, err = svc.issueService.pullRequestRepo.Upsert(newLink("fj-b"))
+	if err != nil {
+		t.Fatalf("cross-host upsert: %v", err)
+	}
+	if applied {
+		t.Fatalf("cross-host alive overwrite must be blocked")
+	}
+	var row model.IssuePullRequest
+	if err := svc.db.Where("issue_id = ?", issue.ID).First(&row).Error; err != nil {
+		t.Fatalf("load row: %v", err)
+	}
+	if row.ForgeIntegrationID != "fj-a" {
+		t.Fatalf("row must stay on fj-a, got %q", row.ForgeIntegrationID)
+	}
+
+	// 同主机换绑（A→A2）：允许，快照跟随。
+	applied, err = svc.issueService.pullRequestRepo.Upsert(newLink("fj-a2"))
+	if err != nil || !applied {
+		t.Fatalf("same-host rebind: applied=%v err=%v", applied, err)
+	}
+	if err := svc.db.Where("issue_id = ?", issue.ID).First(&row).Error; err != nil {
+		t.Fatalf("load row: %v", err)
+	}
+	if row.ForgeIntegrationID != "fj-a2" {
+		t.Fatalf("row must follow same-host rebind, got %q", row.ForgeIntegrationID)
+	}
+
+	// 旧集成行已删（死链）：允许覆盖修复。
+	if err := svc.db.Delete(&model.ForgeIntegration{}, "id = ?", "fj-a2").Error; err != nil {
+		t.Fatalf("delete integration: %v", err)
+	}
+	applied, err = svc.issueService.pullRequestRepo.Upsert(newLink("fj-b"))
+	if err != nil || !applied {
+		t.Fatalf("dead-old repair: applied=%v err=%v", applied, err)
+	}
+	if err := svc.db.Where("issue_id = ?", issue.ID).First(&row).Error; err != nil {
+		t.Fatalf("load row: %v", err)
+	}
+	if row.ForgeIntegrationID != "fj-b" {
+		t.Fatalf("dead-old row must be repaired to fj-b, got %q", row.ForgeIntegrationID)
+	}
 }

@@ -24,7 +24,13 @@ func (r *IssuePullRequestRepository) Create(link *model.IssuePullRequest) error 
 // ——不能把 manual 行的快照抹掉，那会让 sync 永久报缺快照）。link_origin 只
 // 升不降——手动 attach 可把 synced 行升级为 manual，反向不允许（避免同步投
 // 影把手动关联降级、继而被 DeleteMissingSynced 清掉）。
-func (r *IssuePullRequestRepository) Upsert(link *model.IssuePullRequest) error {
+//
+// applied 返回 false 表示冲突行存在但被主机写谓词拦下：既有行绑定的集成仍
+// 存在且与本次不在同一台 Forgejo 主机上——跨主机同名 PR 不在此静默改写，调
+// 用方应按 40917 处置。这是 40917 守卫的权威形态（service 层的先读后写检查
+// 只做提前给友好文案；TOCTOU 由本谓词在写入时原子复评，新旧集成行快照、
+// 存活性与主机一致性都在同一条语句内判定）。
+func (r *IssuePullRequestRepository) Upsert(link *model.IssuePullRequest) (bool, error) {
 	set := clause.AssignmentColumns([]string{
 		"html_url", "title", "state", "is_draft", "author_login",
 		"head_ref", "base_ref", "merged_at", "closed_at", "synced_at", "updated_at",
@@ -38,7 +44,7 @@ func (r *IssuePullRequestRepository) Upsert(link *model.IssuePullRequest) error 
 			Column: clause.Column{Name: "link_origin"},
 			Value:  gorm.Expr("CASE WHEN excluded.link_origin = 'manual' THEN 'manual' ELSE issue_pull_requests.link_origin END"),
 		})
-	return r.db.Clauses(clause.OnConflict{
+	res := r.db.Clauses(clause.OnConflict{
 		Columns: []clause.Column{
 			{Name: "issue_id"},
 			{Name: "provider"},
@@ -46,7 +52,20 @@ func (r *IssuePullRequestRepository) Upsert(link *model.IssuePullRequest) error 
 			{Name: "number"},
 		},
 		DoUpdates: set,
-	}).Create(link).Error
+		// DO UPDATE WHERE：既有行无快照（github 行/历史数据）、新旧快照同一
+		// 集成、旧集成行已删（死链修复）、或新旧集成同主机才允许覆盖。
+		Where: clause.Where{Exprs: []clause.Expression{gorm.Expr(
+			"issue_pull_requests.forge_integration_id = '' " +
+				"OR issue_pull_requests.forge_integration_id = excluded.forge_integration_id " +
+				"OR NOT EXISTS (SELECT 1 FROM forge_integrations old_dead WHERE old_dead.id = issue_pull_requests.forge_integration_id) " +
+				"OR EXISTS (SELECT 1 FROM forge_integrations old_i, forge_integrations new_i " +
+				"WHERE old_i.id = issue_pull_requests.forge_integration_id AND new_i.id = excluded.forge_integration_id " +
+				"AND old_i.host_key = new_i.host_key)")}},
+	}).Create(link)
+	if res.Error != nil {
+		return false, res.Error
+	}
+	return res.RowsAffected > 0, nil
 }
 
 // SaveSyncedFields 按 (id, issue_id) 更新既有行的同步字段。不用 gorm Save：

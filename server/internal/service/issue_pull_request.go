@@ -159,8 +159,15 @@ func (s *IssueService) AttachIssuePullRequest(issueID, userID string, req Attach
 	}
 
 	// 原子 upsert：并发/重复 attach 撞唯一键时由冲突路径刷新既有行，不返回 500。
-	if err := s.pullRequestRepo.Upsert(link); err != nil {
+	// applied=false 是写路径的主机守卫（TOCTOU 权威形态）：先读后写窗口内另
+	// 一台实例的同名 PR 先落了行，或读守卫后被绕过，写入时谓词都会拦下。
+	applied, err := s.pullRequestRepo.Upsert(link)
+	if err != nil {
 		return nil, errs.ErrInternal
+	}
+	if !applied {
+		return nil, errs.New(errs.ErrPullRequestHostConflict.Code,
+			fmt.Sprintf("该 Issue 已关联主机不同的同名 PR（%s#%d），请先解除原关联", link.RepoFullName, link.Number))
 	}
 
 	// 冲突路径下 link.ID 是新建值而非既有行主键，重新按唯一键读回规范行。
@@ -470,7 +477,14 @@ func (s *IssueService) forgejoIntegrationIDForProject(project *model.Project, ho
 		return "", errs.ErrForgeIntegrationNotConfigured
 	}
 	if project.CodeIntegrationID == "" {
-		return "", errs.New(errs.ErrForgeIntegrationNotConfigured.Code, "该项目未配置代码仓库集成，请先在项目设置里配置代码仓库后再关联 PR")
+		// parseRepoBinding 对 GitHub 仓恒返回空集成 id：空绑定不代表没配代码仓，
+		// 很可能是代码仓在内置 GitHub 上——文案按事实给路径，别指向死路。
+		if project.CodeGithubOwner != "" {
+			return "", errs.New(errs.ErrForgeIntegrationNotConfigured.Code,
+				"该项目的代码仓在 GitHub 上，仅支持关联 GitHub PR；要关联 Forgejo PR 请先把项目代码仓改配到对应 Forgejo 实例")
+		}
+		return "", errs.New(errs.ErrForgeIntegrationNotConfigured.Code,
+			"该项目未配置代码仓库，请先在项目设置里配置代码仓库后再关联 PR")
 	}
 	bound, err := s.forgeIntegrationRepo.FindByID(project.CodeIntegrationID)
 	if err != nil {
