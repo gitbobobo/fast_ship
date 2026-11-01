@@ -457,6 +457,44 @@ func TestClientDialGuard(t *testing.T) {
 	})
 }
 
+// TestHostKey 主机归一键：大小写与尾点归一，显式默认端口可省；数字端口统一
+// 拼写（:0443 → :443，与保存侧 parseBaseURL 同口径），同一端点的不同拼写归
+// 出同一键。
+func TestHostKey(t *testing.T) {
+	for _, tc := range []struct{ raw, want string }{
+		{"https://Forge.Example.COM", "forge.example.com:443"},
+		{"https://forge.example.com./o/r", "forge.example.com:443"},
+		{"https://forge.example.com:0443", "forge.example.com:443"},
+		{"http://nas.local:3000", "nas.local:3000"},
+		{"https://bot@forge.example.com:8443", "forge.example.com:8443"},
+		{"https://./o/r", ""},
+	} {
+		if got := HostKey(tc.raw); got != tc.want {
+			t.Fatalf("HostKey(%q) = %q, want %q", tc.raw, got, tc.want)
+		}
+	}
+}
+
+// TestHostKeyNoScheme 不含 scheme 缺省端口的主机归一键：显式默认端口与省略
+// 写法归一（:443→省、:80→省），显式非默认端口保留；大小写与尾点归一同
+// HostKey。
+func TestHostKeyNoScheme(t *testing.T) {
+	for _, tc := range []struct{ raw, want string }{
+		{"https://Forge.Example.COM", "forge.example.com"},
+		{"https://forge.example.com./o/r", "forge.example.com"},
+		{"https://forge.example.com:443", "forge.example.com"},
+		{"https://forge.example.com:0443", "forge.example.com"},
+		{"http://nas.local:3000", "nas.local:3000"},
+		{"https://bot@forge.example.com:8443", "forge.example.com:8443"},
+		{"http://forge.example.com:80", "forge.example.com"},
+		{"https://./o/r", ""},
+	} {
+		if got := HostKeyNoScheme(tc.raw); got != tc.want {
+			t.Fatalf("HostKeyNoScheme(%q) = %q, want %q", tc.raw, got, tc.want)
+		}
+	}
+}
+
 // effectivePort 把「https://host」与「https://host:443」归一成同端点——
 // 反代把 Location 写成显式默认端口是合法形态，字面比较会误报跨主机。
 func TestEffectivePort(t *testing.T) {

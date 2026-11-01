@@ -18,23 +18,34 @@ func (r *IssuePullRequestRepository) Create(link *model.IssuePullRequest) error 
 	return r.db.Create(link).Error
 }
 
-// Upsert 以业务唯一键 (issue_id, provider, repo_full_name, number) 原子插入或刷新：
-// 冲突时更新同步字段并保留既有主键；link_origin 只升不降——手动 attach 可把
-// synced 行升级为 manual，反向不允许（避免同步投影把手动关联降级、继而被
-// DeleteMissingSynced 清掉）。
+// Upsert 以业务唯一键 (issue_id, provider, host_key, repo_full_name, number) 原子
+// 插入或刷新：不同 Forgejo 实例的同名 PR 天然是两行并存（host_key 在键内），
+// 不需要任何覆盖守卫；同主机重复 attach 就是普通 upsert。冲突时更新同步字段
+// 并保留既有主键；forge_integration_id 只在新值非空时刷新（重复 attach 换绑
+// 时快照跟随本次解析；空快照的调用方——如未来的同步投影——不能把 manual 行
+// 的快照抹掉，那会让 sync 永久报缺快照）。host_key 不在冲突更新列内——它参
+// 与身份判定，不随写入漂移（集成改 base_url 由 sync 的主机比对拦下）。link_
+// origin 只升不降——手动 attach 可把 synced 行升级为 manual，反向不允许（避
+// 免同步投影把手动关联降级、继而被 DeleteMissingSynced 清掉）。
 func (r *IssuePullRequestRepository) Upsert(link *model.IssuePullRequest) error {
 	set := clause.AssignmentColumns([]string{
 		"html_url", "title", "state", "is_draft", "author_login",
 		"head_ref", "base_ref", "merged_at", "closed_at", "synced_at", "updated_at",
 	})
-	set = append(set, clause.Assignment{
-		Column: clause.Column{Name: "link_origin"},
-		Value:  gorm.Expr("CASE WHEN excluded.link_origin = 'manual' THEN 'manual' ELSE issue_pull_requests.link_origin END"),
-	})
+	set = append(set,
+		clause.Assignment{
+			Column: clause.Column{Name: "forge_integration_id"},
+			Value:  gorm.Expr("CASE WHEN excluded.forge_integration_id <> '' THEN excluded.forge_integration_id ELSE issue_pull_requests.forge_integration_id END"),
+		},
+		clause.Assignment{
+			Column: clause.Column{Name: "link_origin"},
+			Value:  gorm.Expr("CASE WHEN excluded.link_origin = 'manual' THEN 'manual' ELSE issue_pull_requests.link_origin END"),
+		})
 	return r.db.Clauses(clause.OnConflict{
 		Columns: []clause.Column{
 			{Name: "issue_id"},
 			{Name: "provider"},
+			{Name: "host_key"},
 			{Name: "repo_full_name"},
 			{Name: "number"},
 		},
@@ -80,11 +91,11 @@ func (r *IssuePullRequestRepository) FindByID(issueID, id string) (*model.IssueP
 	return &link, nil
 }
 
-// FindByUnique 按业务唯一键 (issue_id, provider, repo_full_name, number) 取关联。
-func (r *IssuePullRequestRepository) FindByUnique(issueID, provider, repoFullName string, number int) (*model.IssuePullRequest, error) {
+// FindByUnique 按业务唯一键 (issue_id, provider, host_key, repo_full_name, number) 取关联。
+func (r *IssuePullRequestRepository) FindByUnique(issueID, provider, hostKey, repoFullName string, number int) (*model.IssuePullRequest, error) {
 	var link model.IssuePullRequest
-	err := r.db.Where("issue_id = ? AND provider = ? AND repo_full_name = ? AND number = ?",
-		issueID, provider, repoFullName, number).First(&link).Error
+	err := r.db.Where("issue_id = ? AND provider = ? AND host_key = ? AND repo_full_name = ? AND number = ?",
+		issueID, provider, hostKey, repoFullName, number).First(&link).Error
 	if err != nil {
 		return nil, err
 	}
@@ -141,12 +152,13 @@ func (r *IssuePullRequestRepository) SummariesByIssueIDs(issueIDs []string) (map
 }
 
 // DeleteMissingSynced 删除该 Issue 下 link_origin=synced 且同步键不在 keepKeys 中的行；
-// keepKeys 元素为 model.IssuePullRequest.SyncKey() 形式，空集表示删该 Issue 全部 synced 行。
-// manual 行永不受此函数影响——手动 attach 的关联只能由用户显式解除。
+// keepKeys 元素为 model.IssuePullRequest.SyncKey() 形式（含 host_key），空集表示删
+// 该 Issue 全部 synced 行。manual 行永不受此函数影响——手动 attach 的关联只能由
+// 用户显式解除。
 func (r *IssuePullRequestRepository) DeleteMissingSynced(issueID string, keepKeys []string) error {
 	query := r.db.Where("issue_id = ? AND link_origin = ?", issueID, model.IssuePullRequestLinkOriginSynced)
 	if len(keepKeys) > 0 {
-		query = query.Where("(provider || '|' || repo_full_name || '|' || number) NOT IN ?", keepKeys)
+		query = query.Where("(provider || '|' || host_key || '|' || repo_full_name || '|' || number) NOT IN ?", keepKeys)
 	}
 	return query.Delete(&model.IssuePullRequest{}).Error
 }

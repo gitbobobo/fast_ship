@@ -2092,20 +2092,20 @@ Issue CRUD、过滤、同步、清单、发货钩子与图片附件
 | `items[].pull_requests` | object[] | 否 | omitempty；仅 Issue 详情响应携带（读取失败或无关联时缺省）；列表项不出现 |
 | `items[].pull_requests[].id` | string（uuid） | 是 |  |
 | `items[].pull_requests[].issue_id` | string | 是 |  |
-| `items[].pull_requests[].provider` | string | 是 | 当前恒为 github；字段预留 gitlab |
+| `items[].pull_requests[].provider` | string | 是 | github=GitHub PR；forgejo=自托管 Forgejo/Gitea PR（走部署级 Forgejo 集成） |
 | `items[].pull_requests[].repo_full_name` | string | 是 | owner/repo；允许与项目配置的仓库不同（跨仓库 attach） |
 | `items[].pull_requests[].number` | integer | 是 |  |
 | `items[].pull_requests[].html_url` | string | 是 |  |
 | `items[].pull_requests[].title` | string | 是 |  |
-| `items[].pull_requests[].state` | string（enum: open \| closed \| merged） | 是 | merged = GitHub 上 closed 且 merged_at 非空 |
+| `items[].pull_requests[].state` | string（enum: open \| closed \| merged） | 是 | merged = GitHub 上 closed 且 merged_at 非空，或 Forgejo 上 closed 且平台标记合并（merged=true 或 merged_at 非空，异常快照可能只有其一） |
 | `items[].pull_requests[].is_draft` | boolean | 是 |  |
 | `items[].pull_requests[].author_login` | string | 是 |  |
 | `items[].pull_requests[].head_ref` | string | 是 |  |
 | `items[].pull_requests[].base_ref` | string | 是 |  |
-| `items[].pull_requests[].merged_at` | string（date-time，可空） | 是 | state=merged 时有值 |
+| `items[].pull_requests[].merged_at` | string（date-time，可空） | 是 | state=merged 时通常有值；Forgejo 上 merged=true 但 merged_at 缺失的异常快照下为空 |
 | `items[].pull_requests[].closed_at` | string（date-time，可空） | 是 |  |
 | `items[].pull_requests[].link_origin` | string（enum: manual \| synced） | 是 | manual=用户显式 attach；synced=远端同步投影产生（清理逻辑只作用于 synced） |
-| `items[].pull_requests[].synced_at` | string（date-time） | 是 | 最近一次从 GitHub 刷新成功的时间 |
+| `items[].pull_requests[].synced_at` | string（date-time） | 是 | 最近一次从远端 forge 刷新成功的时间 |
 | `items[].pull_requests[].created_at` | string（date-time） | 是 |  |
 | `items[].pull_requests[].updated_at` | string（date-time） | 是 |  |
 | `items[].attachments` | object[] | 否 | omitempty；仅 Issue 详情响应携带（无附件时缺省）；列表项不出现 |
@@ -2310,20 +2310,20 @@ Issue CRUD、过滤、同步、清单、发货钩子与图片附件
 | `pull_requests` | object[] | 否 | omitempty；仅 Issue 详情响应携带（读取失败或无关联时缺省）；列表项不出现 |
 | `pull_requests[].id` | string（uuid） | 是 |  |
 | `pull_requests[].issue_id` | string | 是 |  |
-| `pull_requests[].provider` | string | 是 | 当前恒为 github；字段预留 gitlab |
+| `pull_requests[].provider` | string | 是 | github=GitHub PR；forgejo=自托管 Forgejo/Gitea PR（走部署级 Forgejo 集成） |
 | `pull_requests[].repo_full_name` | string | 是 | owner/repo；允许与项目配置的仓库不同（跨仓库 attach） |
 | `pull_requests[].number` | integer | 是 |  |
 | `pull_requests[].html_url` | string | 是 |  |
 | `pull_requests[].title` | string | 是 |  |
-| `pull_requests[].state` | string（enum: open \| closed \| merged） | 是 | merged = GitHub 上 closed 且 merged_at 非空 |
+| `pull_requests[].state` | string（enum: open \| closed \| merged） | 是 | merged = GitHub 上 closed 且 merged_at 非空，或 Forgejo 上 closed 且平台标记合并（merged=true 或 merged_at 非空，异常快照可能只有其一） |
 | `pull_requests[].is_draft` | boolean | 是 |  |
 | `pull_requests[].author_login` | string | 是 |  |
 | `pull_requests[].head_ref` | string | 是 |  |
 | `pull_requests[].base_ref` | string | 是 |  |
-| `pull_requests[].merged_at` | string（date-time，可空） | 是 | state=merged 时有值 |
+| `pull_requests[].merged_at` | string（date-time，可空） | 是 | state=merged 时通常有值；Forgejo 上 merged=true 但 merged_at 缺失的异常快照下为空 |
 | `pull_requests[].closed_at` | string（date-time，可空） | 是 |  |
 | `pull_requests[].link_origin` | string（enum: manual \| synced） | 是 | manual=用户显式 attach；synced=远端同步投影产生（清理逻辑只作用于 synced） |
-| `pull_requests[].synced_at` | string（date-time） | 是 | 最近一次从 GitHub 刷新成功的时间 |
+| `pull_requests[].synced_at` | string（date-time） | 是 | 最近一次从远端 forge 刷新成功的时间 |
 | `pull_requests[].created_at` | string（date-time） | 是 |  |
 | `pull_requests[].updated_at` | string（date-time） | 是 |  |
 | `attachments` | object[] | 否 | omitempty；仅 Issue 详情响应携带（无附件时缺省）；列表项不出现 |
@@ -2779,20 +2779,20 @@ Issue CRUD、过滤、同步、清单、发货钩子与图片附件
 | `pull_requests` | object[] | 否 | omitempty；仅 Issue 详情响应携带（读取失败或无关联时缺省）；列表项不出现 |
 | `pull_requests[].id` | string（uuid） | 是 |  |
 | `pull_requests[].issue_id` | string | 是 |  |
-| `pull_requests[].provider` | string | 是 | 当前恒为 github；字段预留 gitlab |
+| `pull_requests[].provider` | string | 是 | github=GitHub PR；forgejo=自托管 Forgejo/Gitea PR（走部署级 Forgejo 集成） |
 | `pull_requests[].repo_full_name` | string | 是 | owner/repo；允许与项目配置的仓库不同（跨仓库 attach） |
 | `pull_requests[].number` | integer | 是 |  |
 | `pull_requests[].html_url` | string | 是 |  |
 | `pull_requests[].title` | string | 是 |  |
-| `pull_requests[].state` | string（enum: open \| closed \| merged） | 是 | merged = GitHub 上 closed 且 merged_at 非空 |
+| `pull_requests[].state` | string（enum: open \| closed \| merged） | 是 | merged = GitHub 上 closed 且 merged_at 非空，或 Forgejo 上 closed 且平台标记合并（merged=true 或 merged_at 非空，异常快照可能只有其一） |
 | `pull_requests[].is_draft` | boolean | 是 |  |
 | `pull_requests[].author_login` | string | 是 |  |
 | `pull_requests[].head_ref` | string | 是 |  |
 | `pull_requests[].base_ref` | string | 是 |  |
-| `pull_requests[].merged_at` | string（date-time，可空） | 是 | state=merged 时有值 |
+| `pull_requests[].merged_at` | string（date-time，可空） | 是 | state=merged 时通常有值；Forgejo 上 merged=true 但 merged_at 缺失的异常快照下为空 |
 | `pull_requests[].closed_at` | string（date-time，可空） | 是 |  |
 | `pull_requests[].link_origin` | string（enum: manual \| synced） | 是 | manual=用户显式 attach；synced=远端同步投影产生（清理逻辑只作用于 synced） |
-| `pull_requests[].synced_at` | string（date-time） | 是 | 最近一次从 GitHub 刷新成功的时间 |
+| `pull_requests[].synced_at` | string（date-time） | 是 | 最近一次从远端 forge 刷新成功的时间 |
 | `pull_requests[].created_at` | string（date-time） | 是 |  |
 | `pull_requests[].updated_at` | string（date-time） | 是 |  |
 | `attachments` | object[] | 否 | omitempty；仅 Issue 详情响应携带（无附件时缺省）；列表项不出现 |
@@ -3003,20 +3003,20 @@ github 来源 Issue 的更改写回 GitHub 远端，internal 仅写本地；`sta
 | `pull_requests` | object[] | 否 | omitempty；仅 Issue 详情响应携带（读取失败或无关联时缺省）；列表项不出现 |
 | `pull_requests[].id` | string（uuid） | 是 |  |
 | `pull_requests[].issue_id` | string | 是 |  |
-| `pull_requests[].provider` | string | 是 | 当前恒为 github；字段预留 gitlab |
+| `pull_requests[].provider` | string | 是 | github=GitHub PR；forgejo=自托管 Forgejo/Gitea PR（走部署级 Forgejo 集成） |
 | `pull_requests[].repo_full_name` | string | 是 | owner/repo；允许与项目配置的仓库不同（跨仓库 attach） |
 | `pull_requests[].number` | integer | 是 |  |
 | `pull_requests[].html_url` | string | 是 |  |
 | `pull_requests[].title` | string | 是 |  |
-| `pull_requests[].state` | string（enum: open \| closed \| merged） | 是 | merged = GitHub 上 closed 且 merged_at 非空 |
+| `pull_requests[].state` | string（enum: open \| closed \| merged） | 是 | merged = GitHub 上 closed 且 merged_at 非空，或 Forgejo 上 closed 且平台标记合并（merged=true 或 merged_at 非空，异常快照可能只有其一） |
 | `pull_requests[].is_draft` | boolean | 是 |  |
 | `pull_requests[].author_login` | string | 是 |  |
 | `pull_requests[].head_ref` | string | 是 |  |
 | `pull_requests[].base_ref` | string | 是 |  |
-| `pull_requests[].merged_at` | string（date-time，可空） | 是 | state=merged 时有值 |
+| `pull_requests[].merged_at` | string（date-time，可空） | 是 | state=merged 时通常有值；Forgejo 上 merged=true 但 merged_at 缺失的异常快照下为空 |
 | `pull_requests[].closed_at` | string（date-time，可空） | 是 |  |
 | `pull_requests[].link_origin` | string（enum: manual \| synced） | 是 | manual=用户显式 attach；synced=远端同步投影产生（清理逻辑只作用于 synced） |
-| `pull_requests[].synced_at` | string（date-time） | 是 | 最近一次从 GitHub 刷新成功的时间 |
+| `pull_requests[].synced_at` | string（date-time） | 是 | 最近一次从远端 forge 刷新成功的时间 |
 | `pull_requests[].created_at` | string（date-time） | 是 |  |
 | `pull_requests[].updated_at` | string（date-time） | 是 |  |
 | `attachments` | object[] | 否 | omitempty；仅 Issue 详情响应携带（无附件时缺省）；列表项不出现 |
@@ -3663,11 +3663,12 @@ AI 生成 checklist 建议（需已配置 AI 设置；JWT 与 API Key 均可）
 
 <!-- operationId: attachIssuePullRequest -->
 
-关联一个 GitHub PR 到 Issue（幂等）
+关联一个 GitHub 或 Forgejo PR 到 Issue（幂等）
 
-请求体只传 PR URL（`https://github.com/<owner>/<repo>/pull/<number>`），服务端解析 owner/repo/number 后立即从 GitHub 拉取 title/state/is_draft/author/head/base/merged_at 等字段入库；拉取失败返回错误，不落记录。
-允许跨仓库：URL 可以是任意 GitHub 仓库的 PR，不要求等于项目配置的仓库，不做跨仓库鉴权。项目未配 GitHub token 时以未认证方式拉取，仅支持公共仓库。
-重复 attach 同一 PR（唯一键 issue_id+provider+repo_full_name+number）幂等返回既有记录并顺带刷新状态。attach 产生的行 `link_origin=manual`；PR 状态与 Issue workflow_status 不联动。
+请求体只传 PR URL，服务端解析后立即从远端 forge 拉取 title/state/is_draft/author/head/base/merged_at 等字段入库；拉取失败返回错误，不落记录。
+两种 URL 形状：`https://github.com/<owner>/<repo>/pull/<number>` 走 GitHub（项目凭证，未配则以未认证方式拉公共仓库）；`http(s)://<host>/<owner>/<repo>/pulls/<number>` 走 Forgejo——读项目绑定的代码集成行并比对 host_key（行缺失/主机不一致/类型不符 → 40007），通过后该行交 ForgejoClientFor 构建客户端并用机器人 PAT 拉取；本地凭证面故障（行已删/kind 不符/解密失败/读库瞬时故障）→ 50000，上游 Forgejo 故障 → 50206。不同 Forgejo 实例的同名 PR 作为独立关联并存。
+允许跨仓库：URL 可以是任意仓库的 PR，不要求等于项目配置的仓库。
+重复 attach 同一 PR（唯一键 issue_id+provider+host_key+repo_full_name+number）幂等返回既有记录并顺带刷新状态与集成快照；不同 Forgejo 实例的同名 PR 是不同键，并存为独立关联。Forgejo 路径读项目绑定的代码集成行并比对 host_key，绑定缺失/主机不一致/类型不符 → 40007；本地凭证面故障（行已删/kind 不符/解密失败/读库瞬时故障）→ 50000，上游 Forgejo 故障 → 50206。attach 产生的行 `link_origin=manual`；PR 状态与 Issue workflow_status 不联动。
 
 **鉴权**：JWT+API Key
 
@@ -3695,20 +3696,20 @@ AI 生成 checklist 建议（需已配置 AI 设置；JWT 与 API Key 均可）
 | --- | --- | --- | --- |
 | `id` | string（uuid） | 是 |  |
 | `issue_id` | string | 是 |  |
-| `provider` | string | 是 | 当前恒为 github；字段预留 gitlab |
+| `provider` | string | 是 | github=GitHub PR；forgejo=自托管 Forgejo/Gitea PR（走部署级 Forgejo 集成） |
 | `repo_full_name` | string | 是 | owner/repo；允许与项目配置的仓库不同（跨仓库 attach） |
 | `number` | integer | 是 |  |
 | `html_url` | string | 是 |  |
 | `title` | string | 是 |  |
-| `state` | string（enum: open \| closed \| merged） | 是 | merged = GitHub 上 closed 且 merged_at 非空 |
+| `state` | string（enum: open \| closed \| merged） | 是 | merged = GitHub 上 closed 且 merged_at 非空，或 Forgejo 上 closed 且平台标记合并（merged=true 或 merged_at 非空，异常快照可能只有其一） |
 | `is_draft` | boolean | 是 |  |
 | `author_login` | string | 是 |  |
 | `head_ref` | string | 是 |  |
 | `base_ref` | string | 是 |  |
-| `merged_at` | string（date-time，可空） | 是 | state=merged 时有值 |
+| `merged_at` | string（date-time，可空） | 是 | state=merged 时通常有值；Forgejo 上 merged=true 但 merged_at 缺失的异常快照下为空 |
 | `closed_at` | string（date-time，可空） | 是 |  |
 | `link_origin` | string（enum: manual \| synced） | 是 | manual=用户显式 attach；synced=远端同步投影产生（清理逻辑只作用于 synced） |
-| `synced_at` | string（date-time） | 是 | 最近一次从 GitHub 刷新成功的时间 |
+| `synced_at` | string（date-time） | 是 | 最近一次从远端 forge 刷新成功的时间 |
 | `created_at` | string（date-time） | 是 |  |
 | `updated_at` | string（date-time） | 是 |  |
 
@@ -3716,11 +3717,11 @@ AI 生成 checklist 建议（需已配置 AI 设置；JWT 与 API Key 均可）
 
 | HTTP | 说明 |
 | --- | --- |
-| 400 | 非 GitHub 或无法解析的 PR URL（40001） |
+| 400 | 无法解析的 PR URL（40001）；项目未绑定 Forgejo 集成、绑定集成与 PR 主机不一致、或绑定集成类型不符（40007）；本地凭证面故障（50000）；上游 Forgejo 故障（50206） |
 | 401 | 未提供或提供无效凭证（40100-40199） |
 | 404 | 资源不存在（40400-40499） |
 | 500 | 服务器内部错误（50000） |
-| 502 | GitHub API 调用失败（50200；含 PR 不存在或无权访问） |
+| 502 | GitHub API 调用失败（50200）或 Forgejo API 调用失败（50206）；均含 PR 不存在或无权访问 |
 
 ### POST `/api/issues/{iid}/pull-requests/sync`
 
@@ -3728,7 +3729,7 @@ AI 生成 checklist 建议（需已配置 AI 设置；JWT 与 API Key 均可）
 
 刷新该 Issue 下全部已关联 PR 的状态
 
-逐条重新拉取 GitHub PR 信息并更新 state/merged_at/closed_at 等字段。只更新既有行，不新增、不删除；每条关联是独立失败域——单行拉取或保存失败记入 failures 不中断其余行（失败行保留旧数据），整体恒返回 200。仅 Issue/项目不存在返回 404，读取关联列表失败返回 500。
+逐条重新拉取已关联 PR 的最新信息并更新 state/merged_at/closed_at 等字段：github 行走项目凭证，forgejo 行按关联时落的集成快照重建 Forgejo 客户端（集成被删/解密失败/未知 provider 只记单行失败）。只更新既有行，不新增、不删除；每条关联是独立失败域——单行拉取或保存失败记入 failures 不中断其余行（失败行保留旧数据），整体恒返回 200。仅 Issue/项目不存在返回 404，读取关联列表失败返回 500。
 
 **鉴权**：JWT+API Key
 
@@ -3751,20 +3752,20 @@ syncIssuePullRequests 的响应形状，与批量 internal-meta 的 {items, fail
 | `items` | object[] | 是 | 本轮刷新成功的关联行（无关联或无成功时为空数组） |
 | `items[].id` | string（uuid） | 是 |  |
 | `items[].issue_id` | string | 是 |  |
-| `items[].provider` | string | 是 | 当前恒为 github；字段预留 gitlab |
+| `items[].provider` | string | 是 | github=GitHub PR；forgejo=自托管 Forgejo/Gitea PR（走部署级 Forgejo 集成） |
 | `items[].repo_full_name` | string | 是 | owner/repo；允许与项目配置的仓库不同（跨仓库 attach） |
 | `items[].number` | integer | 是 |  |
 | `items[].html_url` | string | 是 |  |
 | `items[].title` | string | 是 |  |
-| `items[].state` | string（enum: open \| closed \| merged） | 是 | merged = GitHub 上 closed 且 merged_at 非空 |
+| `items[].state` | string（enum: open \| closed \| merged） | 是 | merged = GitHub 上 closed 且 merged_at 非空，或 Forgejo 上 closed 且平台标记合并（merged=true 或 merged_at 非空，异常快照可能只有其一） |
 | `items[].is_draft` | boolean | 是 |  |
 | `items[].author_login` | string | 是 |  |
 | `items[].head_ref` | string | 是 |  |
 | `items[].base_ref` | string | 是 |  |
-| `items[].merged_at` | string（date-time，可空） | 是 | state=merged 时有值 |
+| `items[].merged_at` | string（date-time，可空） | 是 | state=merged 时通常有值；Forgejo 上 merged=true 但 merged_at 缺失的异常快照下为空 |
 | `items[].closed_at` | string（date-time，可空） | 是 |  |
 | `items[].link_origin` | string（enum: manual \| synced） | 是 | manual=用户显式 attach；synced=远端同步投影产生（清理逻辑只作用于 synced） |
-| `items[].synced_at` | string（date-time） | 是 | 最近一次从 GitHub 刷新成功的时间 |
+| `items[].synced_at` | string（date-time） | 是 | 最近一次从远端 forge 刷新成功的时间 |
 | `items[].created_at` | string（date-time） | 是 |  |
 | `items[].updated_at` | string（date-time） | 是 |  |
 | `failures` | object[] | 是 | 逐行失败明细 |

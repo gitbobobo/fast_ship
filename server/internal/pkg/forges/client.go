@@ -347,12 +347,44 @@ func HostKey(baseURL string) string {
 		return ""
 	}
 	if port := u.Port(); port != "" {
+		// 数字端口统一拼写（:0443 → :443）：保存侧 parseBaseURL 同口径，
+		// 同一端点的不同端口拼写归出同一键。
+		if n, err := strconv.Atoi(port); err == nil {
+			port = strconv.Itoa(n)
+		}
 		return host + ":" + port
 	}
 	if strings.EqualFold(u.Scheme, "http") {
 		return host + ":80"
 	}
 	return host + ":443"
+}
+
+// HostKeyNoScheme 与 HostKey 同口径但不含 scheme 缺省端口——同一端点的
+// http/https 拼写归一出同键（显式默认端口与省略写法归一，显式非默认端口
+// 保留）。PR 链接匹配、绑定集成比对等「主机身份」比较用它；需要 scheme
+// 参与判等（如回显判定）仍用 HostKey/URLKey。
+func HostKeyNoScheme(baseURL string) string {
+	u, err := url.Parse(strings.TrimSpace(baseURL))
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	host := normHost(u.Hostname())
+	if host == "" {
+		return ""
+	}
+	if port := u.Port(); port != "" {
+		if n, err := strconv.Atoi(port); err == nil {
+			port = strconv.Itoa(n)
+		}
+		// 显式默认端口与省略写法归一（:443→省、:80→省），非默认端口保留。
+		if (strings.EqualFold(u.Scheme, "https") && port == "443") ||
+			(strings.EqualFold(u.Scheme, "http") && port == "80") {
+			return host
+		}
+		return host + ":" + port
+	}
+	return host
 }
 
 // URLKey 完整 URL 的等价键：scheme 小写 + HostKey + 去尾斜杠的

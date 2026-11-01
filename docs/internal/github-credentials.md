@@ -45,7 +45,7 @@ PR 审查链路的仓库判定细节见 docs/internal/reviews.md。
 ## 读侧语义
 
 - `requiredGitHubToken(project)`：无 owner/repo → 40003「尚未关联仓库」；有仓库但 `PublicGitHubTokenID == ""` → 40006「该项目未配置公开仓库 Token」；有引用则加载行并解密，行缺失或解密失败 → 50000，文案点名「公开仓库 Token」。
-- `pullRequestCredential(project)`：有 `CodeGitHubTokenID` 只用它（解密失败 50000 点名「代码仓库 Token」，不回退公开/匿名）；否则匿名（`kind=anonymous`），即使公开仓库 Token 已配。`pullRequestCredentialKind` 只剩 `code`/`anonymous` 两个值，`usage()` 文案「使用代码仓库 Token」/「匿名访问」供 attach/sync 错误消息标注来源。
+- `pullRequestCredential(project)`：有 `CodeGitHubTokenID` 只用它（解密失败 50000 点名「代码仓库 Token」，不回退公开/匿名）；否则匿名（`kind=anonymous`），即使公开仓库 Token 已配。`pullRequestCredentialKind` 只剩 `code`/`anonymous` 两个值，`usage()` 文案「使用代码仓库 Token」/「匿名访问」供 attach/sync 错误消息标注来源。INT-181 起 attach/sync 双源：仅 GitHub PR 走这里，Forgejo PR（`provider=forgejo`）走部署级集成凭据（见 [forge-integrations.md](forge-integrations.md) 与 [issue-pull-request-links.md](issue-pull-request-links.md)）。
 - `IsGitHubConfigured()` 现在只判 owner+repo（仓库已关联）；公开仓库 Token 是否存在用 `PublicGitHubTokenID != ""` 单独判断。同步/写/分支/发货在有仓库但无公开 Token 时返回 40006 而非「尚未关联仓库」。
 - 同步：`SyncAll` 跳过无仓库或无公开 Token 的项目（后台不刷错误）；手动 `SyncProjectIssues` 有仓库无 Token 时经 `requiredGitHubToken` 返回 40006 并记录进 sync state。
 
@@ -67,4 +67,4 @@ PR 审查链路的仓库判定细节见 docs/internal/reviews.md。
 
 ## client 收拢（INT-107）
 
-凭证模块只管引用解析与解密，不合并 GitHub client 构造。GitHub 访问面收拢在 seam 包 `server/internal/githubapi`（PR 能力契约 + 共享 REST 实现），两个 adapter 是它的实现：`pkg/github`（用户 Token：`TokenClient` 实现 repo 能力接口 `github.Client`，`PRClient` 实现 `githubapi.GitHubClient` 做关联 PR 读取，token 空即匿名）与 `pkg/githubapp`（App 安装令牌：`githubapp.Client`）。业务 service 不再各留私有接口：`IssueService`/`ShipService` 用 `github.ClientFactory`（issue 同步/写、tag/release/asset），`ProjectService` 与 `VersionService` 同样经 `github.ClientFactory` 拿分支列表；`IssueService` 另有 `newPRClient` 缝构造 `githubapi.GitHubClient`（attach/sync 关联 PR，走代码仓库 Token 或匿名）。测试替身经同一组 factory 字段注入。
+凭证模块只管引用解析与解密，不合并 GitHub client 构造。GitHub 访问面收拢在 seam 包 `server/internal/githubapi`（PR 能力契约 + 共享 REST 实现），两个 adapter 是它的实现：`pkg/github`（用户 Token：`TokenClient` 实现 repo 能力接口 `github.Client`，`PRClient` 实现 `githubapi.GitHubClient` 做关联 PR 读取，token 空即匿名）与 `pkg/githubapp`（App 安装令牌：`githubapp.Client`）。业务 service 不再各留私有接口：`IssueService`/`ShipService` 用 `github.ClientFactory`（issue 同步/写、tag/release/asset），`ProjectService` 与 `VersionService` 同样经 `github.ClientFactory` 拿分支列表；`IssueService` 另有 `newPRClient` 缝构造 `githubapi.GitHubClient`（attach/sync 关联 PR 的 **GitHub 行**，走代码仓库 Token 或匿名；Forgejo 行走部署级集成凭据，见 [forge-integrations.md](forge-integrations.md)）。测试替身经同一组 factory 字段注入。

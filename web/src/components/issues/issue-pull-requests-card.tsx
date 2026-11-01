@@ -265,7 +265,7 @@ export function IssuePullRequestsCard({
             variant="ghost"
             size="icon-sm"
             aria-label="刷新 PR 状态"
-            title="从 GitHub 刷新状态"
+            title="从代码托管平台刷新状态"
             disabled={sync.isPending || items.length === 0}
             onClick={() => void handleSync()}
           >
