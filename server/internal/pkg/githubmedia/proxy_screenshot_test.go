@@ -395,9 +395,9 @@ func TestLegacyCacheEntriesPurgedOnStart(t *testing.T) {
 }
 
 // review 截图面的目录是 review_assets 的持久存储（storage_path 直接指向缓
-// 存文件），构造时不得因 scope 标记缺失清空它——否则升级会删光历史审查截
-// 图且不可恢复。
-func TestReviewFaceNotPurgedOnStart(t *testing.T) {
+// 存文件），构造时不得整目录清空——否则升级会删光历史审查截图且不可恢复。
+// 跨授权域不可信的无 Scope 存量条目走定点清理（删除），有 Scope 的保留。
+func TestReviewFaceSkipsPurgeButSweepsUnscoped(t *testing.T) {
 	cfg := serviceConfig{
 		cacheSubdir: "review-screenshot-cache",
 		allowURL:    func(u *url.URL) bool { return true },
@@ -405,24 +405,51 @@ func TestReviewFaceNotPurgedOnStart(t *testing.T) {
 	}
 	root := t.TempDir()
 	svcOld := newService(root, cfg)
-	normalized, err := svcOld.normalize("https://uiv.example.com/shot.png")
+
+	// 无 Scope 的存量条目（bearer 引入前写入）：被定点清理。
+	unscoped, err := svcOld.normalize("https://uiv.example.com/unscoped.png")
 	if err != nil {
-		t.Fatalf("normalize: %v", err)
+		t.Fatalf("normalize unscoped: %v", err)
 	}
-	metaPath := seedCacheMeta(t, svcOld, normalized, "image/png")
-	if err := os.WriteFile(svcOld.dataPath(normalized, ""), []byte("png"), 0o640); err != nil {
-		t.Fatalf("write data: %v", err)
+	unscopedMeta := seedCacheMeta(t, svcOld, unscoped, "image/png")
+	if err := os.WriteFile(svcOld.dataPath(unscoped, ""), []byte("png"), 0o640); err != nil {
+		t.Fatalf("write unscoped data: %v", err)
 	}
+
+	// 有 Scope 的条目（持久资产）：保留。
+	scoped := "install-123\x1fhttps://uiv.example.com/scoped.png"
+	scopedMeta := svcOld.metaPath(scoped, "install-123")
+	entry := map[string]any{"url": "https://uiv.example.com/scoped.png", "content_type": "image/png", "scope": "install-123"}
+	data, err := json.Marshal(entry)
+	if err != nil {
+		t.Fatalf("marshal scoped: %v", err)
+	}
+	if err := os.MkdirAll(svcOld.cacheDir, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(scopedMeta, data, 0o640); err != nil {
+		t.Fatalf("write scoped meta: %v", err)
+	}
+	if err := os.WriteFile(svcOld.dataPath(scoped, "install-123"), []byte("png"), 0o640); err != nil {
+		t.Fatalf("write scoped data: %v", err)
+	}
+
 	// review 面 purge 跳过时也不写标记（写标记在 purge 执行路径里），正好
 	// 覆盖「标记缺失」场景。
 
 	svc := newService(root, cfg)
-	cached, ok, err := svc.GetCached(normalized)
-	if err != nil || !ok || cached == nil {
-		t.Fatalf("cached = %+v ok = %v err = %v, want 命中（review 面 purge 不执行）", cached, ok, err)
+
+	// 无 Scope 条目被定点清理（按 miss 处理，重下自愈）。
+	if cached, ok, err := svc.GetCached(unscoped); err != nil || ok || cached != nil {
+		t.Fatalf("unscoped: cached = %+v ok = %v err = %v, want miss（定点清理）", cached, ok, err)
 	}
-	if _, statErr := os.Stat(metaPath); statErr != nil {
-		t.Fatalf("meta stat = %v, want 文件仍在", statErr)
+	if _, statErr := os.Stat(unscopedMeta); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("unscoped meta stat = %v, want 已清理", statErr)
+	}
+
+	// 有 Scope 条目保留（持久资产）。
+	if _, statErr := os.Stat(scopedMeta); statErr != nil {
+		t.Fatalf("scoped meta stat = %v, want 保留", statErr)
 	}
 }
 

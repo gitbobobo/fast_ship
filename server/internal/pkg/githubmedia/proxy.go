@@ -526,17 +526,32 @@ func (s *ProxyService) sweepExpiredEntries() {
 					continue
 				}
 				// goneMeta 是两步发布的第二步：写侧可能恰在这个窗口写完新
-				// meta——能解析成未过期条目就把两个文件都还回去。
+				// meta——能解析成未过期条目说明新条目已发布。此时只还 meta，
+				// goneBin 的去留看 binPath：已被写侧的新 data 占据就丢掉旧字
+				// 节（无条件 rename 回去会把新 data 覆盖成旧字节，条目在一个
+				// TTL 内内容与元数据错位）；binPath 还空着才把旧字节放回去。
 				if data, err := os.ReadFile(goneMeta); err == nil {
 					var recheckEntry cacheEntry
 					if json.Unmarshal(data, &recheckEntry) == nil && !recheckEntry.expired(now) {
 						_ = os.Rename(goneMeta, metaPath)
-						_ = os.Rename(goneBin, binPath)
+						if _, occupied := os.Stat(binPath); occupied == nil {
+							_ = os.Remove(goneBin)
+						} else {
+							_ = os.Rename(goneBin, binPath)
+						}
 						continue
 					}
 				}
-				_ = os.Remove(goneBin)
+				// 旧字节分支的回滚同理：binPath 被占据就丢弃旧字节，不留覆盖。
+				dropGoneBin := func() {
+					if _, occupied := os.Stat(binPath); occupied == nil {
+						_ = os.Remove(goneBin)
+					} else {
+						_ = os.Rename(goneBin, binPath)
+					}
+				}
 				_ = os.Remove(goneMeta)
+				dropGoneBin()
 				continue
 			}
 			if now.Sub(info.ModTime()) < 2*s.cacheTTL {
@@ -652,19 +667,22 @@ func (s *ProxyService) sweepStaleTmpFiles(now time.Time) {
 const legacyScopeMarker = ".cache-scope-v2"
 
 // purgeLegacyCacheEntries 旧 scope 标记缺失时清空缓存目录。只有媒体代理面
-// 允许执行（guardedPurge）：review 截图面的目录是 review_assets 的持久存储
-// （无副本、ensure 不会重下），标记缺失时清空等于删光历史审查截图。标记
-// stat 出错（非 ENOENT 的 EIO/权限）同样跳过——读不出标记不等于标记不存在，
-// 宁可不清理也不能误删持久资产。
+// 允许整目录清空（guardedPurge）：review 截图面的目录是 review_assets 的持
+// 久存储（无副本、ensure 不会重下），清空等于删光历史审查截图——它走定点
+// 清理（sweepUnscopedEntries）：只删 meta 缺 Scope 字段的条目（跨授权域不可
+// 信），其余原样保留。标记 stat 出错（非 ENOENT 的 EIO/权限）两个面都跳过
+// ——读不出标记不等于标记不存在，宁可不清理也不能误删持久资产。
 func (s *ProxyService) purgeLegacyCacheEntries(guardedPurge bool) {
-	if !guardedPurge {
-		return
-	}
 	_, statErr := os.Stat(filepath.Join(s.cacheDir, legacyScopeMarker))
 	if statErr == nil {
 		return
 	}
 	if !errors.Is(statErr, os.ErrNotExist) {
+		return
+	}
+	if !guardedPurge {
+		s.sweepUnscopedEntries()
+		_ = os.WriteFile(filepath.Join(s.cacheDir, legacyScopeMarker), []byte("scope-v2\n"), 0o640)
 		return
 	}
 	if err := os.MkdirAll(s.cacheDir, 0o750); err != nil {
@@ -680,6 +698,36 @@ func (s *ProxyService) purgeLegacyCacheEntries(guardedPurge bool) {
 	}
 	// 标记写失败也接受：下次启动重清一遍空目录而已，不会因此泄漏。
 	_ = os.WriteFile(filepath.Join(s.cacheDir, legacyScopeMarker), []byte("scope-v2\n"), 0o640)
+}
+
+// sweepUnscopedEntries review 面的定点清场：只删 meta 缺 Scope 字段的条目
+// （bearer 引入前写入的，跨授权域不可信）及其 .bin；有 Scope 的（含匿名=""）
+// 与持久资产一律保留。
+func (s *ProxyService) sweepUnscopedEntries() {
+	entries, err := os.ReadDir(s.cacheDir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		metaPath := filepath.Join(s.cacheDir, name)
+		data, err := os.ReadFile(metaPath)
+		if err != nil {
+			continue
+		}
+		var entry cacheEntry
+		if json.Unmarshal(data, &entry) != nil || entry.Scope != "" {
+			continue
+		}
+		// 匿名条目 Scope 就是 ""，与「字段缺失」区分不了——字段缺失时
+		// Unmarshal 后 Scope 也是零值 ""。这类旧条目按不可信处理删掉；
+		// 匿名内容是公开图床，重拉即可，私有内容宁可重拉不可误给。
+		_ = os.Remove(filepath.Join(s.cacheDir, strings.TrimSuffix(name, ".json")+".bin"))
+		_ = os.Remove(metaPath)
+	}
 }
 
 // newProxyService 旧内部构造（GitHub 媒体面语义：允许 http/https、图片视频
