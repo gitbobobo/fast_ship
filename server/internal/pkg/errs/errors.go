@@ -122,12 +122,9 @@ var (
 	ErrT3EnvironmentNameExists  = New(40912, "环境名称在当前用户下已存在")
 	ErrGitHubTokenInUse         = New(40913, "该 Token 仍被项目引用，请先解除或更换引用")
 	// 消息不含目标记录信息；替换撞指纹时由 service 用 New 追加已有记录的 title/id。
-	ErrGitHubTokenDuplicate = New(40914, "相同的 Token 已存在")
-	ErrGitHubTokenConflict  = New(40915, "GitHub Token 已被其他请求更新")
-	ErrT3StateConflict      = New(40916, "T3 状态冲突")
-	// ErrPullRequestHostConflict 同名 PR 已关联在另一台 Forgejo 实例上：覆盖会
-	// 静默改写用户已关联的对象，要求先显式 detach（INT-181 R2）。
-	ErrPullRequestHostConflict = New(40917, "该 Issue 已关联主机不同的同名 PR，请先解除原关联")
+	ErrGitHubTokenDuplicate    = New(40914, "相同的 Token 已存在")
+	ErrGitHubTokenConflict     = New(40915, "GitHub Token 已被其他请求更新")
+	ErrT3StateConflict         = New(40916, "T3 状态冲突")
 	ErrPageBoundaryInvalid     = New(40918, "分页边界条目已不存在，请从头重新拉取")
 	ErrScreenshotVariantExists = New(40921, "相同界面标识与平台/语言/亮度组合的截图已存在")
 	// PR 审查（INT-135）：整个部署内同一仓库只允许一个项目开启审查；

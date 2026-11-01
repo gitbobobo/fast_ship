@@ -2,11 +2,20 @@
 
 `issue_pull_requests` 表镜像 Issue 关联的远端 PR：一个 Issue 挂任意多条，每条缓存最近一次从 forge 拉到的状态（state/draft/author/head/base/merged_at/closed_at/synced_at）。
 
-provider 双源（INT-181）：`github`（github.com PR，走项目凭证）与 `forgejo`（自托管 Forgejo/Gitea PR，走部署级 Forgejo 集成）。唯一键 `(issue_id, provider, repo_full_name, number)` 天然区分两源，无需迁移。
+provider 双源（INT-181）：`github`（github.com PR，走项目凭证）与 `forgejo`（自托管 Forgejo/Gitea PR，走部署级 Forgejo 集成）。唯一键 `(issue_id, provider, host_key, repo_full_name, number)` 天然区分两源与多实例。
+
+## 交付范围（方向审计后定稿）
+
+> Forgejo 关联行以 `(issue, provider, host_key, owner/repo, number)` 为业务身份：不同 Forgejo 实例的同名 PR 作为独立关联并存，同主机重复关联幂等，并刷新到当前集成快照；集成在同主机重建后，重新关联即修复死链。`forge_integration_id` 只是凭据指针，不参与身份判定。集成改 base_url 时，已关联的行仍保留原 host_key 快照，sync 时主机不一致会报错要求重新关联，不会被静默改指。
+
+两条有意设计的信任边界（写在此处供后续审查与运维判断）：
+
+- **sync 沿用 attach 时授权的集成凭据**，不重查项目当前绑定——attach 时校验项目与主机一致，之后凭据随快照走；项目改绑后旧行继续用原集成拉数，直到集成改指（sync 拦下）或用户显式解除。
+- **同主机内跨仓库**是支持的能力（跨仓 PR 关联），作用上限 = 项目所在 Forgejo 上机器人可见的仓库。
 
 ## 不变量
 
-- **唯一键** `(issue_id, provider, repo_full_name, number)`。attach 是 upsert：重复 attach 幂等，不产生第二行，刷新同步字段；集成快照仅在新值非空时刷新（保护既有行不被空快照调用方抹掉）。
+- **唯一键** `(issue_id, provider, host_key, repo_full_name, number)`。attach 是 upsert：同主机重复 attach 幂等，不产生第二行，刷新同步字段；集成快照仅在新值非空时刷新（保护既有行不被空快照调用方抹掉）。不同实例的同名 PR 是不同键，并存。
 - **`link_origin` 只升不降**。`manual`（用户/agent 显式 attach）是终态；`synced`（远端同步投影产生，如 timeline cross-referenced）可被手动 attach 升级为 manual，反向不允许。Upsert 的冲突更新用 CASE 表达式实现：`excluded.link_origin='manual'` 才写 manual，否则保留原值。违反这条会让同步清理把用户挂的 PR 当成投影残留删掉。
 - **清理只碰 synced**。`DeleteMissingSynced`（按 origin 过滤）是同步投影的回收口；manual 行永不进入候选集。
 - **PR 状态与 `workflow_status` 无耦合**。PR 全合并不等于需求完成，二者互不驱动。
@@ -28,7 +37,7 @@ forgejo 行落 `forge_integration_id`（可空列，AutoMigrate 追加；github 
 
 attach 与 sync 的失败文案不回显适配器错误原文（集成 API 绝对地址、响应体只进服务端日志）：Forgejo 状态码错误给「Forgejo API 状态码 N」+提示，传输/解析失败归一为「连接或响应异常」。GitHub 与 Forgejo 对「PR 不存在」与「无权访问」都返回 404，提示同时保留两种可能（GitHub 附「核查仓库访问范围与 Pull requests 读权限」）；限流另给提示，不断言单一原因。
 
-**主机冲突（40917）**：同名 PR（同 owner/repo/number）已关联在另一台 Forgejo 实例上时，attach 拒绝并要求先显式 detach——覆盖会静默改写用户已关联的对象。守卫是双层的：service 层先读后写检查给友好文案（按 provider+number+大小写不敏感匹配既有行），写路径是权威形态——Upsert 的 `DO UPDATE … WHERE` 谓词在写入时原子复评「既有行无快照 / 同快照 / 旧集成已删（死链修复）/ 新旧集成同主机」，跨主机活链即使绕过读检查也无法写入。旧集成行已删的行属于死链（sync 本就报集成缺失），允许新实例的 attach 覆盖修复。
+**主机身份与改指防护**：行的 host_key 是 attach 时刻的主机快照，不随写入漂移。集成管理员改 base_url（改指别的主机）后，sync 按 host_key 比对发现不一致，按单行失败拦下（「该 Forgejo 集成已改指其他主机，请解除后重新关联」），旧行不被静默改指。
 
 ## sync 契约
 

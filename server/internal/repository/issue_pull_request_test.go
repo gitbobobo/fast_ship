@@ -22,7 +22,8 @@ func setupIssuePullRequestTestDB(t *testing.T) (*gorm.DB, *IssuePullRequestRepos
 	if err := db.AutoMigrate(&model.User{}, &model.Project{}, &model.Issue{}, &model.IssuePullRequest{}, &model.ForgeIntegration{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_pull_requests_issue_pr ON issue_pull_requests(issue_id, provider, repo_full_name, number)")
+	db.Exec("DROP INDEX IF EXISTS idx_issue_pull_requests_issue_pr")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_pull_requests_issue_pr_v2 ON issue_pull_requests(issue_id, provider, host_key, repo_full_name, number)")
 	return db, NewIssuePullRequestRepository(db)
 }
 
@@ -213,12 +214,8 @@ func TestIssuePullRequestUpsert_ConflictKeepsSingleRow(t *testing.T) {
 		CreatedAt:    now,
 		UpdatedAt:    now,
 	}
-	applied, err := repo.Upsert(second)
-	if err != nil {
+	if err := repo.Upsert(second); err != nil {
 		t.Fatalf("upsert duplicate: %v", err)
-	}
-	if !applied {
-		t.Fatalf("github row upsert must apply (both snapshots empty)")
 	}
 
 	links, err := repo.ListByIssueID(issue.ID)
@@ -255,10 +252,10 @@ func TestIssuePullRequestUpsert_ConflictKeepsSingleRow(t *testing.T) {
 		CreatedAt:    now,
 		UpdatedAt:    now,
 	}
-	if _, err := repo.Upsert(third); err != nil {
+	if err := repo.Upsert(third); err != nil {
 		t.Fatalf("upsert synced over manual: %v", err)
 	}
-	stored2, err := repo.FindByUnique(issue.ID, model.IssuePullRequestProviderGitHub, "owner/repo", 7)
+	stored2, err := repo.FindByUnique(issue.ID, model.IssuePullRequestProviderGitHub, "", "owner/repo", 7)
 	if err != nil {
 		t.Fatalf("find by unique: %v", err)
 	}

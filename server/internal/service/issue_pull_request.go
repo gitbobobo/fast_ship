@@ -95,6 +95,7 @@ func (s *IssueService) AttachIssuePullRequest(issueID, userID string, req Attach
 		LinkOrigin: model.IssuePullRequestLinkOriginManual,
 		CreatedAt:  now,
 	}
+	link.HostKey = parsed.HostKey // github 行恒空串：主机在唯一键内，跨实例同名 PR 天然并存
 
 	switch parsed.Provider {
 	case model.IssuePullRequestProviderForgejo:
@@ -103,35 +104,6 @@ func (s *IssueService) AttachIssuePullRequest(issueID, userID string, req Attach
 		integrationID, err := s.forgejoIntegrationIDForProject(project, parsed.HostKey)
 		if err != nil {
 			return nil, err
-		}
-		// 主机冲突守卫：同名 PR 已关联在另一台 Forgejo 实例上时，覆盖会静默
-		// 改写用户已关联的对象——要求先显式 detach（40917）。既有行落库的是
-		// 平台 canonical 名，URL 原文大小写/别名可能不同，比对按 provider+
-		// number+大小写不敏感匹配。旧集成行已删的行无法比对主机（sync 本就
-		// 报集成缺失），允许新实例的 attach 覆盖修复；其余查询失败（锁忙、
-		// I/O）按内部错误拦截——当「集成已删」放行正是本守卫要堵的静默覆
-		// 盖路径。
-		existingLinks, err := s.pullRequestRepo.ListByIssueID(issue.ID)
-		if err != nil {
-			return nil, errs.ErrInternal
-		}
-		for i := range existingLinks {
-			existing := &existingLinks[i]
-			if existing.Provider != model.IssuePullRequestProviderForgejo || existing.Number != parsed.Number ||
-				!strings.EqualFold(existing.RepoFullName, link.RepoFullName) || existing.ForgeIntegrationID == "" {
-				continue
-			}
-			oldIntegration, err := s.forgeIntegrationRepo.FindByID(existing.ForgeIntegrationID)
-			if err != nil {
-				if !errors.Is(err, gorm.ErrRecordNotFound) {
-					return nil, errs.ErrInternal
-				}
-				continue
-			}
-			if oldIntegration.HostKey != parsed.HostKey {
-				return nil, errs.New(errs.ErrPullRequestHostConflict.Code,
-					fmt.Sprintf("该 Issue 已关联主机不同的同名 PR（%s#%d），请先解除原关联", existing.RepoFullName, existing.Number))
-			}
 		}
 		link.ForgeIntegrationID = integrationID
 		reader, err := s.forgejoPRReader(ctx, integrationID)
@@ -158,20 +130,14 @@ func (s *IssueService) AttachIssuePullRequest(issueID, userID string, req Attach
 		applyPullRequestData(link, pr, now)
 	}
 
-	// 原子 upsert：并发/重复 attach 撞唯一键时由冲突路径刷新既有行，不返回 500。
-	// applied=false 是写路径的主机守卫（TOCTOU 权威形态）：先读后写窗口内另
-	// 一台实例的同名 PR 先落了行，或读守卫后被绕过，写入时谓词都会拦下。
-	applied, err := s.pullRequestRepo.Upsert(link)
-	if err != nil {
+	// 原子 upsert：并发/重复 attach 撞唯一键（含 host_key）时由冲突路径刷新既
+	// 有行，不返回 500；不同主机的同名 PR 是不同键，天然并存。
+	if err := s.pullRequestRepo.Upsert(link); err != nil {
 		return nil, errs.ErrInternal
-	}
-	if !applied {
-		return nil, errs.New(errs.ErrPullRequestHostConflict.Code,
-			fmt.Sprintf("该 Issue 已关联主机不同的同名 PR（%s#%d），请先解除原关联", link.RepoFullName, link.Number))
 	}
 
 	// 冲突路径下 link.ID 是新建值而非既有行主键，重新按唯一键读回规范行。
-	stored, err := s.pullRequestRepo.FindByUnique(issue.ID, link.Provider, link.RepoFullName, parsed.Number)
+	stored, err := s.pullRequestRepo.FindByUnique(issue.ID, link.Provider, link.HostKey, link.RepoFullName, parsed.Number)
 	if err != nil {
 		return nil, errs.ErrInternal
 	}
@@ -229,6 +195,10 @@ func (s *IssueService) SyncIssuePullRequests(issueID, userID string) (*IssuePull
 	// forgejo 行按「集成快照 id」缓存客户端；provider 分流见循环体。
 	forgeReaders := make(map[string]forgePRReader)
 	forgeReaderErrs := make(map[string]error)
+	// 集成现行 host_key 缓存（含查询错误）：集成改 base_url 后行仍指向原
+	// 主机，主机不一致只算单行失败，不允许静默改指。
+	forgeHostKeys := make(map[string]string)
+	forgeHostKeyErrs := make(map[string]error)
 	now := time.Now().UTC()
 	for i := range links {
 		link := &links[i]
@@ -239,6 +209,16 @@ func (s *IssueService) SyncIssuePullRequests(issueID, userID string) (*IssuePull
 				// 快照缺失是关联行自身的数据问题（非集成凭证面故障），
 				// 文案要指引用户解除重联，不走统一脱敏文案。
 				result.Failures = append(result.Failures, pullRequestSyncFailure(link, "关联行缺少 Forgejo 集成快照，请解除后重新关联"))
+				continue
+			}
+			// 主机一致性校验：集成改 base_url（改指别的主机）后，快照仍指
+			// 向原主机；原主机拉取会拿到错误实例的数据。不一致按单行失败
+			// 拦下，要求重新关联。
+			if currentHost, err := forgejoSyncHostKey(s, forgeHostKeys, forgeHostKeyErrs, link); err != nil {
+				result.Failures = append(result.Failures, pullRequestSyncFailure(link, s.forgejoSourceFailureText(err)))
+				continue
+			} else if currentHost != link.HostKey {
+				result.Failures = append(result.Failures, pullRequestSyncFailure(link, "该 Forgejo 集成已改指其他主机，请解除后重新关联"))
 				continue
 			}
 			reader, err := forgejoSyncReader(s, forgeReaders, forgeReaderErrs, ctx, link)
@@ -515,8 +495,8 @@ func (s *IssueService) forgejoPRReader(ctx context.Context, integrationID string
 
 // forgejoSyncReader 按「集成快照 id」（attach 时落的 ForgeIntegrationID）复用/
 // 缓存 Forgejo 读取客户端；构造错误同样按 id 缓存，同集成的后续行各自记一条
-// 失败而不是重复构造。调用方先拦快照为空的行；集成行被删/解密失败只算单行
-// 失败，不影响其余行。
+// 失败而不是重复构造。调用方先拦快照为空与主机不一致的行；集成凭证面故障
+// 只算单行失败，不影响其余行。
 func forgejoSyncReader(s *IssueService, readers map[string]forgePRReader, readerErrs map[string]error, ctx context.Context, link *model.IssuePullRequest) (forgePRReader, error) {
 	if reader, ok := readers[link.ForgeIntegrationID]; ok {
 		return reader, nil
@@ -531,6 +511,24 @@ func forgejoSyncReader(s *IssueService, readers map[string]forgePRReader, reader
 	}
 	readers[link.ForgeIntegrationID] = reader
 	return reader, nil
+}
+
+// forgejoSyncHostKey 按「集成快照 id」取集成现行 host_key（带缓存，查询错误
+// 同缓存）。集成行已删的行由上游凭证面文案统一处置。
+func forgejoSyncHostKey(s *IssueService, hosts map[string]string, hostErrs map[string]error, link *model.IssuePullRequest) (string, error) {
+	if host, ok := hosts[link.ForgeIntegrationID]; ok {
+		return host, nil
+	}
+	if err, failed := hostErrs[link.ForgeIntegrationID]; failed {
+		return "", err
+	}
+	row, err := s.forgeIntegrationRepo.FindByID(link.ForgeIntegrationID)
+	if err != nil {
+		hostErrs[link.ForgeIntegrationID] = err
+		return "", err
+	}
+	hosts[link.ForgeIntegrationID] = row.HostKey
+	return row.HostKey, nil
 }
 
 // parsePullRequestLink 分流解析 PR 链接（INT-181）：github.com 域 + /pull/{n}

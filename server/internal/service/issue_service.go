@@ -99,6 +99,9 @@ func NewIssueService(
 	logger *zap.Logger,
 	annotationRepo *repository.ScreenshotAnnotationRepository,
 	forgeIntegrationRepo *repository.ForgeIntegrationRepository,
+	// forgeSource Forgejo 集成凭证面：与审查 resolver 共用同一实例（同一份
+	// 传输层缓存），由装配点注入；测试可传 nil（forgejo 链路会报未配置）。
+	forgeSource issueForgeSource,
 ) *IssueService {
 	s := &IssueService{
 		issueRepo:           issueRepo,
@@ -130,7 +133,7 @@ func NewIssueService(
 			return ghclient.NewPRClient(token)
 		},
 		forgeIntegrationRepo: forgeIntegrationRepo,
-		forgeSource:          NewForgeClientSource(forgeIntegrationRepo, cfg, logger),
+		forgeSource:          forgeSource,
 		newForgejoPRReader: func(httpClient *http.Client, apiBase, token string) forgePRReader {
 			return forge.NewForgejoReviewClient(httpClient, apiBase, token)
 		},

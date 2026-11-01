@@ -753,7 +753,8 @@ func TestPullRequestStateFromForge(t *testing.T) {
 
 // Upsert 冲突路径的快照保护：空快照的调用方（如未来的同步投影）不能把
 // manual 行的 forge_integration_id 抹掉——否则 sync 永久报缺快照。非空新值
-// （重复 attach 换绑）仍正常覆盖。
+// （重复 attach 换绑）仍正常覆盖。host_key 在唯一键内：同主机空快照 upsert
+// 命中冲突路径，跨主机的空快照是另一行，与保护无关。
 func TestIssuePullRequestRepoUpsert_EmptySnapshotPreserved(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")
@@ -770,21 +771,17 @@ func TestIssuePullRequestRepoUpsert_EmptySnapshotPreserved(t *testing.T) {
 		t.Fatalf("attach forgejo pr: %v", err)
 	}
 
-	// 空快照撞唯一键：写谓词拦下（既有行绑定活集成且与空新值不同主机不可
-	// 判定——空新值不同主机不成立，保守拒绝），快照必须保留原值。
+	// 同主机空集成指针撞唯一键（同步投影知道主机但无凭据指针）：快照必须
+	// 保留原值。host_key 在键内，所以空指针调用方仍需带对主机才会命中。
 	now := time.Now().UTC()
 	blank := &model.IssuePullRequest{
 		ID: uuid.NewString(), IssueID: issue.ID, ProjectID: project.ID,
 		Provider: model.IssuePullRequestProviderForgejo, RepoFullName: "o/r", Number: 5,
 		State: model.IssuePullRequestStateOpen, LinkOrigin: model.IssuePullRequestLinkOriginSynced,
-		ForgeIntegrationID: "", SyncedAt: now, CreatedAt: now, UpdatedAt: now,
+		HostKey: "forge.example.com:443", ForgeIntegrationID: "", SyncedAt: now, CreatedAt: now, UpdatedAt: now,
 	}
-	applied, err := svc.issueService.pullRequestRepo.Upsert(blank)
-	if err != nil {
+	if err := svc.issueService.pullRequestRepo.Upsert(blank); err != nil {
 		t.Fatalf("upsert blank snapshot: %v", err)
-	}
-	if applied {
-		t.Fatalf("blank snapshot upsert must be blocked by host predicate")
 	}
 	var row model.IssuePullRequest
 	if err := svc.db.Where("issue_id = ?", issue.ID).First(&row).Error; err != nil {
@@ -796,129 +793,126 @@ func TestIssuePullRequestRepoUpsert_EmptySnapshotPreserved(t *testing.T) {
 	if row.LinkOrigin != model.IssuePullRequestLinkOriginManual {
 		t.Fatalf("link_origin must stay manual, got %q", row.LinkOrigin)
 	}
+	if row.HostKey != "forge.example.com:443" {
+		t.Fatalf("host_key must stay identity, got %q", row.HostKey)
+	}
 }
 
-// 主机冲突守卫：同名 PR 已关联在另一台 Forgejo 实例上时，attach 返回 40917
-// 要求先解除原关联，不静默覆盖既有行；同主机重复 attach 不受影响。
-func TestIssueServiceAttachPullRequest_ForgejoHostConflict(t *testing.T) {
+// 业务身份含 host_key：不同 Forgejo 实例的同名 PR 作为独立关联并存，各自落
+// 自己的快照；同主机重复 attach 仍幂等单行。这是方向审计（R5 后）选定的收
+// 敛路径——唯一键带主机，覆盖守卫整体删除。
+func TestIssueServiceAttachPullRequest_ForgejoCoexistsAcrossHosts(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")
 	project := createTestProject(t, svc.db, user.ID)
 	issue := createTestIssue(t, svc.db, project.ID)
 	createForgejoIntegrationRow(t, svc.db, "fj-a", "https://forge-a.example.com", "pat-a")
 	createForgejoIntegrationRow(t, svc.db, "fj-b", "https://forge-b.example.com", "pat-b")
-	bindProjectForgejo(t, svc, project.ID, "fj-a")
 
 	reader := stubForgejoPRReader(t, svc, "", "")
-	reader.prs = forgePRSet(testForgePullRequest("o/r", 5, "open", false, nil))
+	aPR := testForgePullRequest("o/r", 5, "open", false, nil)
+	aPR.HTMLURL = "https://forge-a.example.com/o/r/pulls/5"
+	bPR := testForgePullRequest("o/r", 5, "closed", true, nil)
+	bPR.HTMLURL = "https://forge-b.example.com/o/r/pulls/5"
+	reader.prs = forgePRSet(aPR)
+	bindProjectForgejo(t, svc, project.ID, "fj-a")
 	if _, err := svc.issueService.AttachIssuePullRequest(issue.ID, user.ID, AttachIssuePullRequestRequest{
 		Url: "https://forge-a.example.com/o/r/pulls/5",
 	}); err != nil {
 		t.Fatalf("attach on instance A: %v", err)
 	}
 
-	// 项目改绑到实例 B，再 attach 同名 PR：40917，A 的关联行原样保留。
-	// URL 大小写/别名写法不同也必须命中——既有行落库的是平台 canonical 名。
+	// 同 owner/repo/number、另一台实例：并存为第二行，互不覆盖。
+	reader.prs = forgePRSet(bPR)
 	bindProjectForgejo(t, svc, project.ID, "fj-b")
-	for _, u := range []string{
-		"https://forge-b.example.com/o/r/pulls/5",
-		"https://forge-b.example.com/O/R/pulls/5",
-	} {
-		_, err := svc.issueService.AttachIssuePullRequest(issue.ID, user.ID, AttachIssuePullRequestRequest{Url: u})
-		appErr, ok := err.(*errs.AppError)
-		if !ok || appErr.Code != errs.ErrPullRequestHostConflict.Code {
-			t.Fatalf("expected %d for cross-host same-name PR %s, got %v", errs.ErrPullRequestHostConflict.Code, u, err)
-		}
-	}
-	var row model.IssuePullRequest
-	if err := svc.db.Where("issue_id = ?", issue.ID).First(&row).Error; err != nil {
-		t.Fatalf("load row: %v", err)
-	}
-	if row.ForgeIntegrationID != "fj-a" || row.RepoFullName != "o/r" {
-		t.Fatalf("instance A row must stay untouched, got %+v", row)
-	}
-
-	// 同主机重复 attach 仍幂等（不走冲突路径）。
-	bindProjectForgejo(t, svc, project.ID, "fj-a")
-	again, err := svc.issueService.AttachIssuePullRequest(issue.ID, user.ID, AttachIssuePullRequestRequest{
-		Url: "https://forge-a.example.com/o/r/pulls/5",
+	second, err := svc.issueService.AttachIssuePullRequest(issue.ID, user.ID, AttachIssuePullRequestRequest{
+		Url: "https://forge-b.example.com/o/r/pulls/5",
 	})
 	if err != nil {
-		t.Fatalf("idempotent attach after conflict: %v", err)
+		t.Fatalf("attach on instance B: %v", err)
 	}
-	if count := countPullRequestRows(t, svc, issue.ID); count != 1 {
-		t.Fatalf("expected single row, got %d", count)
+	links, err := svc.issueService.ListIssuePullRequests(issue.ID)
+	if err != nil {
+		t.Fatalf("list links: %v", err)
 	}
-	_ = again
+	if len(links) != 2 {
+		t.Fatalf("expected 2 coexisting links, got %d: %+v", len(links), links)
+	}
+	byURL := map[string]IssuePullRequestResponse{}
+	for _, l := range links {
+		byURL[l.HtmlUrl] = l
+	}
+	if byURL[aPR.HTMLURL].State != model.IssuePullRequestStateOpen || byURL[bPR.HTMLURL].State != model.IssuePullRequestStateMerged {
+		t.Fatalf("rows must keep independent states: %+v", links)
+	}
+	if second.Id == byURL[aPR.HTMLURL].Id {
+		t.Fatalf("instance B row must be a distinct row, got %q twice", second.Id)
+	}
+	// 各行快照指向自己的集成（快照不出响应，回库读）。
+	var rows []model.IssuePullRequest
+	if err := svc.db.Where("issue_id = ?", issue.ID).Order("html_url").Find(&rows).Error; err != nil {
+		t.Fatalf("load rows: %v", err)
+	}
+	snapshots := map[string]string{}
+	for _, r := range rows {
+		snapshots[r.HTMLURL] = r.ForgeIntegrationID
+	}
+	if snapshots[aPR.HTMLURL] != "fj-a" || snapshots[bPR.HTMLURL] != "fj-b" {
+		t.Fatalf("rows must carry their own snapshots: %+v", snapshots)
+	}
+
+	// 同主机重复 attach 仍幂等：仍是两行。
+	reader.prs = forgePRSet(aPR)
+	bindProjectForgejo(t, svc, project.ID, "fj-a")
+	if _, err := svc.issueService.AttachIssuePullRequest(issue.ID, user.ID, AttachIssuePullRequestRequest{
+		Url: "https://forge-a.example.com/o/r/pulls/5",
+	}); err != nil {
+		t.Fatalf("idempotent attach on A: %v", err)
+	}
+	if links, _ = svc.issueService.ListIssuePullRequests(issue.ID); len(links) != 2 {
+		t.Fatalf("expected still 2 links, got %d", len(links))
+	}
 }
 
-// Upsert 主机写谓词覆盖矩阵（TOCTOU 权威形态）：同快照、同主机、旧集成已删
-// 允许覆盖；跨主机活链在写入时原子拦截，不依赖 service 层的先读后写检查。
-func TestIssuePullRequestRepoUpsert_HostPredicate(t *testing.T) {
+// sync 主机一致性校验：集成改 base_url（改指别的主机）后，快照仍指向原主机
+// 的行按单行失败拦下，不被静默改指到新主机拉数据。
+func TestIssueServiceSyncPullRequests_ForgejoIntegrationRepurposed(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")
 	project := createTestProject(t, svc.db, user.ID)
 	issue := createTestIssue(t, svc.db, project.ID)
-	createForgejoIntegrationRow(t, svc.db, "fj-a", "https://forge-a.example.com", "pat-a")
-	createForgejoIntegrationRow(t, svc.db, "fj-b", "https://forge-b.example.com", "pat-b")
-	createForgejoIntegrationRow(t, svc.db, "fj-a2", "https://forge-a.example.com", "pat-a2")
+	createForgejoIntegrationRow(t, svc.db, "fj-1", "https://forge.example.com", "fj-pat")
+	bindProjectForgejo(t, svc, project.ID, "fj-1")
 
-	newLink := func(integrationID string) *model.IssuePullRequest {
-		now := time.Now().UTC()
-		return &model.IssuePullRequest{
-			ID: uuid.NewString(), IssueID: issue.ID, ProjectID: project.ID,
-			Provider: model.IssuePullRequestProviderForgejo, RepoFullName: "o/r", Number: 5,
-			State: model.IssuePullRequestStateOpen, LinkOrigin: model.IssuePullRequestLinkOriginManual,
-			ForgeIntegrationID: integrationID, SyncedAt: now, CreatedAt: now, UpdatedAt: now,
-		}
+	reader := stubForgejoPRReader(t, svc, "", "")
+	reader.prs = forgePRSet(testForgePullRequest("o/r", 5, "open", false, nil))
+	if _, err := svc.issueService.AttachIssuePullRequest(issue.ID, user.ID, AttachIssuePullRequestRequest{
+		Url: "https://forge.example.com/o/r/pulls/5",
+	}); err != nil {
+		t.Fatalf("attach forgejo pr: %v", err)
 	}
 
-	// 初次落行（A 实例）。
-	applied, err := svc.issueService.pullRequestRepo.Upsert(newLink("fj-a"))
-	if err != nil || !applied {
-		t.Fatalf("seed upsert: applied=%v err=%v", applied, err)
+	// 集成 base_url 改指另一台实例（forge-b）：行的 host_key 仍是 forge.example.com。
+	if err := svc.db.Model(&model.ForgeIntegration{}).Where("id = ?", "fj-1").
+		Updates(map[string]any{"base_url": "https://forge-b.example.com", "host_key": "forge-b.example.com:443"}).Error; err != nil {
+		t.Fatalf("repoint integration: %v", err)
 	}
-
-	// 跨主机活链（B）：写谓词原子拦截。
-	applied, err = svc.issueService.pullRequestRepo.Upsert(newLink("fj-b"))
+	result, err := svc.issueService.SyncIssuePullRequests(issue.ID, user.ID)
 	if err != nil {
-		t.Fatalf("cross-host upsert: %v", err)
+		t.Fatalf("sync: %v", err)
 	}
-	if applied {
-		t.Fatalf("cross-host alive overwrite must be blocked")
+	if len(result.Items) != 0 || len(result.Failures) != 1 {
+		t.Fatalf("expected 0 items 1 failure, got %+v", result)
 	}
+	if !strings.Contains(result.Failures[0].Error, "改指其他主机") {
+		t.Fatalf("expected repointed-host failure, got %q", result.Failures[0].Error)
+	}
+	// 行未被改写：快照与 host_key 保持原值。
 	var row model.IssuePullRequest
 	if err := svc.db.Where("issue_id = ?", issue.ID).First(&row).Error; err != nil {
 		t.Fatalf("load row: %v", err)
 	}
-	if row.ForgeIntegrationID != "fj-a" {
-		t.Fatalf("row must stay on fj-a, got %q", row.ForgeIntegrationID)
-	}
-
-	// 同主机换绑（A→A2）：允许，快照跟随。
-	applied, err = svc.issueService.pullRequestRepo.Upsert(newLink("fj-a2"))
-	if err != nil || !applied {
-		t.Fatalf("same-host rebind: applied=%v err=%v", applied, err)
-	}
-	if err := svc.db.Where("issue_id = ?", issue.ID).First(&row).Error; err != nil {
-		t.Fatalf("load row: %v", err)
-	}
-	if row.ForgeIntegrationID != "fj-a2" {
-		t.Fatalf("row must follow same-host rebind, got %q", row.ForgeIntegrationID)
-	}
-
-	// 旧集成行已删（死链）：允许覆盖修复。
-	if err := svc.db.Delete(&model.ForgeIntegration{}, "id = ?", "fj-a2").Error; err != nil {
-		t.Fatalf("delete integration: %v", err)
-	}
-	applied, err = svc.issueService.pullRequestRepo.Upsert(newLink("fj-b"))
-	if err != nil || !applied {
-		t.Fatalf("dead-old repair: applied=%v err=%v", applied, err)
-	}
-	if err := svc.db.Where("issue_id = ?", issue.ID).First(&row).Error; err != nil {
-		t.Fatalf("load row: %v", err)
-	}
-	if row.ForgeIntegrationID != "fj-b" {
-		t.Fatalf("dead-old row must be repaired to fj-b, got %q", row.ForgeIntegrationID)
+	if row.HostKey != "forge.example.com:443" || row.ForgeIntegrationID != "fj-1" {
+		t.Fatalf("row must keep original host snapshot, got %+v", row)
 	}
 }

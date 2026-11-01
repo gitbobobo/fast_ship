@@ -1996,7 +1996,7 @@ export interface paths {
         /**
          * 关联一个 GitHub 或 Forgejo PR 到 Issue（幂等）
          * @description 请求体只传 PR URL，服务端解析后立即从远端 forge 拉取 title/state/is_draft/author/head/base/merged_at 等字段入库；拉取失败返回错误，不落记录。
-         *     两种 URL 形状：`https://github.com/<owner>/<repo>/pull/<number>` 走 GitHub（项目凭证，未配则以未认证方式拉公共仓库）；`http(s)://<host>/<owner>/<repo>/pulls/<number>` 走 Forgejo——按 URL 主机匹配部署级 Forgejo 集成（forge_integrations），用集成机器人 PAT 拉取；主机未配集成、或项目绑定的代码集成与 PR 主机不一致均返回 40007。同名 PR 已关联在另一台 Forgejo 实例上时返回 409（40917），需先解除原关联。
+         *     两种 URL 形状：`https://github.com/<owner>/<repo>/pull/<number>` 走 GitHub（项目凭证，未配则以未认证方式拉公共仓库）；`http(s)://<host>/<owner>/<repo>/pulls/<number>` 走 Forgejo——按 URL 主机匹配部署级 Forgejo 集成（forge_integrations），用集成机器人 PAT 拉取；主机未配集成、或项目绑定的代码集成与 PR 主机不一致均返回 40007。不同 Forgejo 实例的同名 PR 作为独立关联并存。
          *     允许跨仓库：URL 可以是任意仓库的 PR，不要求等于项目配置的仓库。
          *     重复 attach 同一 PR（唯一键 issue_id+provider+repo_full_name+number）幂等返回既有记录并顺带刷新状态与集成快照。attach 产生的行 `link_origin=manual`；PR 状态与 Issue workflow_status 不联动。
          */
@@ -12750,15 +12750,6 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             404: components["responses"]["NotFound"];
-            /** @description 同名 PR 已关联在另一台 Forgejo 实例上（40917），需先解除原关联 */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
             500: components["responses"]["InternalError"];
             /** @description GitHub API 调用失败（50200）或 Forgejo API 调用失败（50206）；均含 PR 不存在或无权访问 */
             502: {

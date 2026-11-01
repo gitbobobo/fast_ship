@@ -303,11 +303,10 @@ func main() {
 	// forgejo 集成并派生 code_integration_id 绑定。
 	projectService := service.NewProjectService(projectRepo, versionRepo, issueSyncStateRepo, githubTokenRepo, fileStorage, cfg, githubLogger, forgeIntegrationRepo)
 	versionService := service.NewVersionService(versionRepo, projectRepo, githubTokenRepo, fileStorage, cfg, githubLogger)
-	// Forgejo 集成凭证来源（INT-167/INT-181）：审查 resolver 用这份实例；
-	// IssueService 内部自建等价实例（各自一份传输层缓存，凭证同源），必须在
-	// issueService 之前建好。
+	// Forgejo 集成凭证来源（INT-167/INT-181）：审查 resolver 与 Issue 关联 PR
+	// 共用同一实例（同一份传输层缓存）；必须在 issueService 之前建好。
 	forgeSource := service.NewForgeClientSource(forgeIntegrationRepo, cfg, reviewLogger)
-	issueService := service.NewIssueService(issueRepo, issueGitHubMetaRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueShipHookService, issueChecklistRepo, issueSyncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, githubTokenRepo, userRepo, githubRepoLabelRepo, issueReadStateRepo, recommendationRepo, issuePullRequestRepo, issueAttachmentRepo, fileStorage, cfg, githubLogger, screenshotAnnotationRepo, forgeIntegrationRepo)
+	issueService := service.NewIssueService(issueRepo, issueGitHubMetaRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueShipHookService, issueChecklistRepo, issueSyncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, githubTokenRepo, userRepo, githubRepoLabelRepo, issueReadStateRepo, recommendationRepo, issuePullRequestRepo, issueAttachmentRepo, fileStorage, cfg, githubLogger, screenshotAnnotationRepo, forgeIntegrationRepo, forgeSource)
 	issueCollabService := service.NewIssueCollabService(issueCollabRepo, issueRepo, projectRepo, userRepo)
 	recommendationService := service.NewIssueRecommendationService(recommendationRepo, issueRepo, issueInternalMetaRepo, projectRepo)
 	logService := service.NewLogService(logRepo, projectRepo)
@@ -753,7 +752,8 @@ func createBootIndexes(db *gorm.DB) error {
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_comments_issue_github_comment ON issue_comments(issue_id, github_comment_id)")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_comments_issue_idempotency_key ON issue_comments(issue_id, idempotency_key) WHERE idempotency_key <> ''")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_timeline_issue_event_key ON issue_timeline_events(issue_id, event_key)")
-	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_pull_requests_issue_pr ON issue_pull_requests(issue_id, provider, repo_full_name, number)")
+	db.Exec("DROP INDEX IF EXISTS idx_issue_pull_requests_issue_pr")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_pull_requests_issue_pr_v2 ON issue_pull_requests(issue_id, provider, host_key, repo_full_name, number)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_log_runs_project_last_entry ON log_runs(project_id, last_entry_at DESC)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_log_entries_run_timestamp ON log_entries(log_run_id, timestamp ASC)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_documents_project_parent ON documents(project_id, parent_id)")

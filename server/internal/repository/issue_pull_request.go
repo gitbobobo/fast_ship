@@ -18,19 +18,16 @@ func (r *IssuePullRequestRepository) Create(link *model.IssuePullRequest) error 
 	return r.db.Create(link).Error
 }
 
-// Upsert 以业务唯一键 (issue_id, provider, repo_full_name, number) 原子插入或刷新：
-// 冲突时更新同步字段并保留既有主键；forge_integration_id 只在新值非空时刷新
-// （重复 attach 换绑时快照跟随本次解析；空快照的调用方——如未来的同步投影
-// ——不能把 manual 行的快照抹掉，那会让 sync 永久报缺快照）。link_origin 只
-// 升不降——手动 attach 可把 synced 行升级为 manual，反向不允许（避免同步投
-// 影把手动关联降级、继而被 DeleteMissingSynced 清掉）。
-//
-// applied 返回 false 表示冲突行存在但被主机写谓词拦下：既有行绑定的集成仍
-// 存在且与本次不在同一台 Forgejo 主机上——跨主机同名 PR 不在此静默改写，调
-// 用方应按 40917 处置。这是 40917 守卫的权威形态（service 层的先读后写检查
-// 只做提前给友好文案；TOCTOU 由本谓词在写入时原子复评，新旧集成行快照、
-// 存活性与主机一致性都在同一条语句内判定）。
-func (r *IssuePullRequestRepository) Upsert(link *model.IssuePullRequest) (bool, error) {
+// Upsert 以业务唯一键 (issue_id, provider, host_key, repo_full_name, number) 原子
+// 插入或刷新：不同 Forgejo 实例的同名 PR 天然是两行并存（host_key 在键内），
+// 不需要任何覆盖守卫；同主机重复 attach 就是普通 upsert。冲突时更新同步字段
+// 并保留既有主键；forge_integration_id 只在新值非空时刷新（重复 attach 换绑
+// 时快照跟随本次解析；空快照的调用方——如未来的同步投影——不能把 manual 行
+// 的快照抹掉，那会让 sync 永久报缺快照）。host_key 不在冲突更新列内——它参
+// 与身份判定，不随写入漂移（集成改 base_url 由 sync 的主机比对拦下）。link_
+// origin 只升不降——手动 attach 可把 synced 行升级为 manual，反向不允许（避
+// 免同步投影把手动关联降级、继而被 DeleteMissingSynced 清掉）。
+func (r *IssuePullRequestRepository) Upsert(link *model.IssuePullRequest) error {
 	set := clause.AssignmentColumns([]string{
 		"html_url", "title", "state", "is_draft", "author_login",
 		"head_ref", "base_ref", "merged_at", "closed_at", "synced_at", "updated_at",
@@ -44,28 +41,16 @@ func (r *IssuePullRequestRepository) Upsert(link *model.IssuePullRequest) (bool,
 			Column: clause.Column{Name: "link_origin"},
 			Value:  gorm.Expr("CASE WHEN excluded.link_origin = 'manual' THEN 'manual' ELSE issue_pull_requests.link_origin END"),
 		})
-	res := r.db.Clauses(clause.OnConflict{
+	return r.db.Clauses(clause.OnConflict{
 		Columns: []clause.Column{
 			{Name: "issue_id"},
 			{Name: "provider"},
+			{Name: "host_key"},
 			{Name: "repo_full_name"},
 			{Name: "number"},
 		},
 		DoUpdates: set,
-		// DO UPDATE WHERE：既有行无快照（github 行/历史数据）、新旧快照同一
-		// 集成、旧集成行已删（死链修复）、或新旧集成同主机才允许覆盖。
-		Where: clause.Where{Exprs: []clause.Expression{gorm.Expr(
-			"issue_pull_requests.forge_integration_id = '' " +
-				"OR issue_pull_requests.forge_integration_id = excluded.forge_integration_id " +
-				"OR NOT EXISTS (SELECT 1 FROM forge_integrations old_dead WHERE old_dead.id = issue_pull_requests.forge_integration_id) " +
-				"OR EXISTS (SELECT 1 FROM forge_integrations old_i, forge_integrations new_i " +
-				"WHERE old_i.id = issue_pull_requests.forge_integration_id AND new_i.id = excluded.forge_integration_id " +
-				"AND old_i.host_key = new_i.host_key)")}},
-	}).Create(link)
-	if res.Error != nil {
-		return false, res.Error
-	}
-	return res.RowsAffected > 0, nil
+	}).Create(link).Error
 }
 
 // SaveSyncedFields 按 (id, issue_id) 更新既有行的同步字段。不用 gorm Save：
@@ -106,11 +91,11 @@ func (r *IssuePullRequestRepository) FindByID(issueID, id string) (*model.IssueP
 	return &link, nil
 }
 
-// FindByUnique 按业务唯一键 (issue_id, provider, repo_full_name, number) 取关联。
-func (r *IssuePullRequestRepository) FindByUnique(issueID, provider, repoFullName string, number int) (*model.IssuePullRequest, error) {
+// FindByUnique 按业务唯一键 (issue_id, provider, host_key, repo_full_name, number) 取关联。
+func (r *IssuePullRequestRepository) FindByUnique(issueID, provider, hostKey, repoFullName string, number int) (*model.IssuePullRequest, error) {
 	var link model.IssuePullRequest
-	err := r.db.Where("issue_id = ? AND provider = ? AND repo_full_name = ? AND number = ?",
-		issueID, provider, repoFullName, number).First(&link).Error
+	err := r.db.Where("issue_id = ? AND provider = ? AND host_key = ? AND repo_full_name = ? AND number = ?",
+		issueID, provider, hostKey, repoFullName, number).First(&link).Error
 	if err != nil {
 		return nil, err
 	}
@@ -167,12 +152,13 @@ func (r *IssuePullRequestRepository) SummariesByIssueIDs(issueIDs []string) (map
 }
 
 // DeleteMissingSynced 删除该 Issue 下 link_origin=synced 且同步键不在 keepKeys 中的行；
-// keepKeys 元素为 model.IssuePullRequest.SyncKey() 形式，空集表示删该 Issue 全部 synced 行。
-// manual 行永不受此函数影响——手动 attach 的关联只能由用户显式解除。
+// keepKeys 元素为 model.IssuePullRequest.SyncKey() 形式（含 host_key），空集表示删
+// 该 Issue 全部 synced 行。manual 行永不受此函数影响——手动 attach 的关联只能由
+// 用户显式解除。
 func (r *IssuePullRequestRepository) DeleteMissingSynced(issueID string, keepKeys []string) error {
 	query := r.db.Where("issue_id = ? AND link_origin = ?", issueID, model.IssuePullRequestLinkOriginSynced)
 	if len(keepKeys) > 0 {
-		query = query.Where("(provider || '|' || repo_full_name || '|' || number) NOT IN ?", keepKeys)
+		query = query.Where("(provider || '|' || host_key || '|' || repo_full_name || '|' || number) NOT IN ?", keepKeys)
 	}
 	return query.Delete(&model.IssuePullRequest{}).Error
 }
