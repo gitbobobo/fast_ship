@@ -76,6 +76,10 @@ func (h *ReviewAgentHandler) ScreenshotImage(c *gin.Context) {
 		return
 	}
 	defer f.Close()
+	// 同源出口不变量：nosniff + CSP sandbox（inline 保留，运营端要在标签页
+	// 里看截图）。历史缓存里可能有 octet-stream 等非位图类型原样下发，没有
+	// nosniff 时浏览器会嗅探解码——别赌「眼下只有 Bearer 客户端消费」。
+	setSameOriginInlineImageHardeningHeaders(c.Writer.Header())
 	c.Header("Content-Type", mime)
 	c.Status(http.StatusOK)
 	_, _ = io.Copy(c.Writer, f)

@@ -10,7 +10,8 @@
 //     sweepStaleTmpFiles 不触碰 .bin/.json）；读路径命中即返回（不过期、
 //     不因类型复核 miss）。
 //     - 无缓存出口（issue assets、avatars、screenshot content、crop）：不落
-//     缓存目录，只施加同源硬化头与 attachment 判据。
+//     缓存目录，只施加同源硬化头与「attachment 或 inline 图片档」判据（按
+//     出口语义：下载类 attachment，截图/裁剪类刻意保留 inline）。
 //  2. MIME/扩展门：媒体代理面全量（image/svg*、.svg、HTML 拒 + fallback 归
 //     一化）；审查面只收位图；下载出口 octet-stream+attachment 不进文档上下
 //     文。
@@ -454,6 +455,13 @@ func (s *ProxyService) startExpiredSweeper() {
 // .bin（没有 meta 它不可达），孤儿按 mtime 超过 2×TTL 纳入清理，不会永久堆
 // 积。meta 里存了原始 URL（缓存键底材），足以还原下载闸的 key。
 func (s *ProxyService) sweepExpiredEntries() {
+	// 面边界（不变量第 1 条）：条目回收只存在于媒体代理面。护栏做在函数入
+	// 口而不是 main.go 装配——StartExpiredSweeper/SweepExpiredEntries 对所
+	// 有实例可见，误接或手动触发 review 实例就会把持久审查截图删成永久
+	// 404（storage_path 直指文件、ensureAssets 不重下）。
+	if s.cacheSubdir != defaultCacheSubdir {
+		return
+	}
 	entries, err := os.ReadDir(s.cacheDir)
 	if err != nil {
 		return
@@ -1335,8 +1343,19 @@ func (s *ProxyService) getCachedNormalized(normalized, scope string) (*CachedMed
 	metaPath := s.metaPath(normalized, scope)
 	cachePath := s.dataPath(normalized, scope)
 
+	// 面边界（不变量第 1 条）：review 截图面的「不可丢弃」不只在 meta 可读
+	// 时成立。meta 读失败/损坏而 .bin 还在时，若按 miss 返回，后续重下会
+	// rename 覆盖持久资产（上游已删/转私则探测失败，视觉证据被静默换掉，DB
+	// 的 size/mime 仍留旧值）。该面按命中兜底：大小取 stat，类型用
+	// http.DetectContentType 判（媒体面不做这条路——它的 miss 重下是自愈语
+	// 义，覆盖无妨）。
+	reviewFace := s.cacheSubdir != defaultCacheSubdir
+
 	metaBytes, err := os.ReadFile(metaPath)
 	if err != nil {
+		if reviewFace {
+			return s.servePersistedData(normalized, cachePath)
+		}
 		// ErrNotExist 是正常 miss；其余读失败（权限、目录损坏）同样按 miss——
 		// 读路径不删文件（见下），下次读取还是 miss，重下后按同一 key 覆盖。
 		// 目录级故障会退化成每条请求都重下，按限频 warn 留痕。
@@ -1351,6 +1370,10 @@ func (s *ProxyService) getCachedNormalized(normalized, scope string) (*CachedMed
 		// meta 损坏（可能撞上写侧 rename 与 WriteFile 之间的中间态）按 miss
 		// 处理，不在读路径删文件：删除会与同 key 写盘竞态，最坏抹掉刚发布的
 		// 新条目。写侧发布完成后 meta 是完整 JSON，本次 miss 重下即自愈。
+		// review 截图面例外：.bin 在就按命中兜底（同上，重下会覆盖持久资产）。
+		if reviewFace {
+			return s.servePersistedData(normalized, cachePath)
+		}
 		return nil, false, nil
 	}
 
@@ -1480,6 +1503,43 @@ func scopedCacheID(normalized, scope string) string {
 		return normalized
 	}
 	return scope + "\x1f" + normalized
+}
+
+// servePersistedData review 截图面的持久兜底：meta 不可读时，.bin 存在就按
+// 命中返回——大小取 stat，类型用 http.DetectContentType（读文件头 512 字
+// 节）兜底；.bin 也不在才是真 miss。Cache-Control 统一 private（地址带用户
+// 凭证，不进共享缓存层）。
+func (s *ProxyService) servePersistedData(normalized, cachePath string) (*CachedMedia, bool, error) {
+	info, err := os.Stat(cachePath)
+	if err != nil {
+		return nil, false, nil
+	}
+	f, err := os.Open(cachePath)
+	if err != nil {
+		return nil, false, nil
+	}
+	defer f.Close()
+	head := make([]byte, 512)
+	n, _ := io.ReadFull(f, head)
+	if n == 0 {
+		return nil, false, nil
+	}
+	contentType := http.DetectContentType(head[:n])
+	if !strings.HasPrefix(contentType, "image/") {
+		// 兜底类型不是位图：这一条按 miss（不让未知字节以持久资产名义流出），
+		// 但同样不在读路径删文件。
+		return nil, false, nil
+	}
+	return &CachedMedia{
+		Metadata: cacheEntry{
+			URL:          normalized,
+			ContentType:  contentType,
+			Size:         info.Size(),
+			CachedAt:     info.ModTime().UTC(),
+			CacheControl: buildCacheControl(s.cacheTTL),
+		},
+		Path: cachePath,
+	}, true, nil
 }
 
 func (s *ProxyService) cloneRelevantHeaders(header http.Header) http.Header {

@@ -515,6 +515,63 @@ func TestReviewFaceExpiredEntryStillServed(t *testing.T) {
 	}
 }
 
+// review 面 meta 损坏而 .bin 在：按命中兜底（DetectContentType 判位图），
+// 不被重下覆盖——重下会换掉持久资产，DB 的 size/mime 不同步。非位图字节
+// 仍按 miss（未知内容不借「持久资产」名义流出），但同样不删文件。
+func TestReviewFaceCorruptedMetaFallsBackToData(t *testing.T) {
+	cfg := serviceConfig{
+		cacheSubdir: "review-screenshot-cache",
+		allowURL:    func(u *url.URL) bool { return true },
+		imagesOnly:  true,
+	}
+	svc := newService(t.TempDir(), cfg)
+	normalized, err := svc.normalize("https://uiv.example.com/broken-meta.png")
+	if err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	if err := os.MkdirAll(svc.cacheDir, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(svc.metaPath(normalized, ""), []byte("{truncated"), 0o640); err != nil {
+		t.Fatalf("write meta: %v", err)
+	}
+	// 真 PNG 魔数：DetectContentType 靠它判 image/png。
+	pngMagic := []byte{0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 13}
+	if err := os.WriteFile(svc.dataPath(normalized, ""), pngMagic, 0o640); err != nil {
+		t.Fatalf("write data: %v", err)
+	}
+
+	cached, ok, err := svc.GetCached(normalized)
+	if err != nil || !ok || cached == nil {
+		t.Fatalf("cached = %+v ok = %v err = %v, want meta 损坏时按 .bin 兜底命中", cached, ok, err)
+	}
+	if cached.Metadata.ContentType != "image/png" {
+		t.Fatalf("ContentType = %q, want image/png（DetectContentType）", cached.Metadata.ContentType)
+	}
+	if cached.Metadata.Size != int64(len(pngMagic)) {
+		t.Fatalf("Size = %d, want %d（stat 兜底）", cached.Metadata.Size, len(pngMagic))
+	}
+
+	// 非位图字节：按 miss，但文件不删（读路径零删除）。
+	other, err := svc.normalize("https://uiv.example.com/broken-meta.txt")
+	if err != nil {
+		t.Fatalf("normalize other: %v", err)
+	}
+	otherPath := svc.dataPath(other, "")
+	if err := os.WriteFile(svc.metaPath(other, ""), []byte("{truncated"), 0o640); err != nil {
+		t.Fatalf("write other meta: %v", err)
+	}
+	if err := os.WriteFile(otherPath, []byte("plain text, not an image"), 0o640); err != nil {
+		t.Fatalf("write other data: %v", err)
+	}
+	if cached2, ok2, err2 := svc.GetCached(other); err2 != nil || ok2 || cached2 != nil {
+		t.Fatalf("txt data: cached = %+v ok = %v err = %v, want miss", cached2, ok2, err2)
+	}
+	if _, statErr := os.Stat(otherPath); statErr != nil {
+		t.Fatalf("other data stat = %v, want 文件仍在（读路径零删除）", statErr)
+	}
+}
+
 // F27 回归：上游没有 Content-Type 时按位图扩展名回退——位图扩展名收，
 // 非位图扩展名拒（ErrUnsupportedUpstreamMedia）。响应头里真没有 Content-Type
 // 的写法是把头置 nil：Go 服务器只在头不存在时做内容嗅探补头，置 nil 既压掉

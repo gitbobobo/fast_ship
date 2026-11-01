@@ -9,7 +9,7 @@
 1. **面只有三个，规则按面定，不按调用点定。**
    - 媒体代理面（`defaultCacheSubdir`）：缓存**可丢弃**。TTL 回收、scope 标记缺失时整目录清空、损坏条目回收，只发生在这里。
    - 审查截图面（`review-screenshot-cache`）：缓存**不可丢弃**——`.bin` 是 `review_assets` 持久资产（`storage_path` 直指文件、`ensureAssets` 不重下）。任何代码路径不得删除它的条目；启动只建目录+补标记；无 TTL 删除、无 purge、无条目回收 sweeper（`media-*.tmp` 清理是唯一例外，`sweepStaleTmpFiles` 不触碰 `.bin/.json`）；**读路径命中即返回**——不过期、不因类型复核 miss，否则探测时上游已删/转私的截图会被迫重下失败，或上游内容变化时新字节覆盖旧资产而 DB 的 size/mime 不同步。
-   - 无缓存出口（issue assets、avatars、screenshot content、crop）：不落缓存目录，只施加同源硬化头与 attachment 判据。
+   - 无缓存出口（issue assets、avatars、screenshot content、crop）：不落缓存目录，只施加同源硬化头与「attachment 或 inline 图片档」判据（按出口语义：下载类 attachment，截图/裁剪类刻意保留 inline，别「补齐」成下载）。
 2. **MIME/扩展门**：媒体代理面全量（`image/svg*`、`.svg`、HTML 拒 + fallback 归一化）；审查面只收位图；下载出口 `octet-stream`+`attachment` 不进文档上下文。
 3. **Cache-Control** 一律 `private`（URL 带 JWT），TTL 由 `s.cacheTTL` 派生，`cloneRelevantHeaders` 与缓存命中同源，不透传上游。
 4. **写侧两步发布**（data→binPath 再 meta→metaPath）。回收者对已 rename 走的文件，恢复前必须重读校验新鲜度，且恢复前校验目标路径未被写侧占据；不能安全恢复就丢弃旧字节，绝不覆盖新条目。
