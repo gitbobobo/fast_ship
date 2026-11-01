@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -344,10 +345,11 @@ func TestLegacyCacheEntriesPurgedOnStart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse upstream url: %v", err)
 	}
+	// 用媒体代理面验证 purge 仍生效：review 截图面的目录是 review_assets 的
+	// 持久存储（见 main.go），不接 purge（INT-171 复审），另见下一个用例。
 	cfg := serviceConfig{
-		cacheSubdir: "review-screenshot-cache",
+		cacheSubdir: defaultCacheSubdir,
 		allowURL:    func(u *url.URL) bool { return u.Host == parsed.Host },
-		imagesOnly:  true,
 		client:      upstream.Client(),
 	}
 	root := t.TempDir()
@@ -390,6 +392,276 @@ func TestLegacyCacheEntriesPurgedOnStart(t *testing.T) {
 	svcAgain := newService(root, cfg)
 	if _, ok, err := svcAgain.getCachedNormalized(u, ""); err != nil || !ok {
 		t.Fatalf("second construction must not wipe v2 entries: ok=%v err=%v", ok, err)
+	}
+}
+
+// review 截图面的目录是 review_assets 的持久存储（storage_path 直接指向缓
+// 存文件），构造时不得整目录清空——否则升级会删光历史审查截图且不可恢复；
+// 无 Scope 与有 Scope 的条目都保留（不删、不拒读）。
+func TestReviewFaceSkipsPurgeKeepsEntries(t *testing.T) {
+	cfg := serviceConfig{
+		cacheSubdir: "review-screenshot-cache",
+		allowURL:    func(u *url.URL) bool { return true },
+		imagesOnly:  true,
+	}
+	root := t.TempDir()
+	svcOld := newService(root, cfg)
+
+	// 无 Scope 的存量条目（bearer 引入前写入）：不删文件——这条目录里的
+	// .bin 是持久资产（ensureAssets 不重下），删了就是永久 404；标记补写后
+	// 照常命中（跨授权域风险由缓存键隔离与接口鉴权兜住）。
+	unscoped, err := svcOld.normalize("https://uiv.example.com/unscoped.png")
+	if err != nil {
+		t.Fatalf("normalize unscoped: %v", err)
+	}
+	unscopedMeta := seedCacheMeta(t, svcOld, unscoped, "image/png")
+	if err := os.WriteFile(svcOld.dataPath(unscoped, ""), []byte("png"), 0o640); err != nil {
+		t.Fatalf("write unscoped data: %v", err)
+	}
+
+	// 有 Scope 的条目（持久资产）：保留。落盘路径与生产写入一致——
+	// metaPath(normalizedURL, scope)，不要手工拼 scopedCacheID（会双重加前
+	// 缀，断言的是一个代码永远不读写的路径）。
+	scopedURL := "https://uiv.example.com/scoped.png"
+	scopedMeta := svcOld.metaPath(scopedURL, "install-123")
+	entry := map[string]any{"url": scopedURL, "content_type": "image/png", "scope": "install-123"}
+	data, err := json.Marshal(entry)
+	if err != nil {
+		t.Fatalf("marshal scoped: %v", err)
+	}
+	if err := os.MkdirAll(svcOld.cacheDir, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(scopedMeta, data, 0o640); err != nil {
+		t.Fatalf("write scoped meta: %v", err)
+	}
+	if err := os.WriteFile(svcOld.dataPath(scopedURL, "install-123"), []byte("png"), 0o640); err != nil {
+		t.Fatalf("write scoped data: %v", err)
+	}
+
+	// svcOld 的构造已在 !guardedPurge 分支里补写过标记；本用例要守的是
+	// 「标记缺失时 review 面不清场」，所以显式删掉标记，让第二个服务的
+	// purgeLegacyCacheEntries 真正走进标记缺失路径。
+	if err := os.Remove(filepath.Join(svcOld.cacheDir, legacyScopeMarker)); err != nil {
+		t.Fatalf("drop marker: %v", err)
+	}
+
+	svc := newService(root, cfg)
+
+	// 无 Scope 条目保留且仍可命中（不删持久资产）。
+	if cached, ok, err := svc.GetCached(unscoped); err != nil || !ok || cached == nil {
+		t.Fatalf("unscoped: cached = %+v ok = %v err = %v, want 命中（不删持久资产）", cached, ok, err)
+	}
+	if _, statErr := os.Stat(unscopedMeta); statErr != nil {
+		t.Fatalf("unscoped meta stat = %v, want 文件仍在", statErr)
+	}
+	// 标记已补写（下次启动按 v2 语义处理）。
+	if _, statErr := os.Stat(filepath.Join(svcOld.cacheDir, legacyScopeMarker)); statErr != nil {
+		t.Fatalf("marker stat = %v, want 已补写", statErr)
+	}
+
+	// 有 Scope 条目保留且可按生产写入路径命中（持久资产）。读也要带同一
+	// scope——GetCached 固定匿名键，这里走 getCachedNormalized。
+	if _, statErr := os.Stat(scopedMeta); statErr != nil {
+		t.Fatalf("scoped meta stat = %v, want 保留", statErr)
+	}
+	scopedNormalized, err := svc.normalize(scopedURL)
+	if err != nil {
+		t.Fatalf("normalize scoped: %v", err)
+	}
+	if cached, ok, err := svc.getCachedNormalized(scopedNormalized, "install-123"); err != nil || !ok || cached == nil {
+		t.Fatalf("scoped: cached = %+v ok = %v err = %v, want 命中（生产写入路径）", cached, ok, err)
+	}
+}
+
+// review 面：过期 + 旧类型（octet-stream）条目仍命中——持久资产不过期、
+// 不因类型复核 miss（不变量第 1 条：TTL 与退役只作用于媒体代理面）。否则
+// 探测时上游已删/转私的截图会被迫重下失败，视觉审查被跳过，而持久文件其
+// 实还在。
+func TestReviewFaceExpiredEntryStillServed(t *testing.T) {
+	cfg := serviceConfig{
+		cacheSubdir: "review-screenshot-cache",
+		allowURL:    func(u *url.URL) bool { return true },
+		imagesOnly:  true,
+	}
+	svc := newService(t.TempDir(), cfg)
+	normalized, err := svc.normalize("https://uiv.example.com/old.png")
+	if err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	entry := map[string]any{
+		"url":          normalized,
+		"content_type": "application/octet-stream",
+		"size":         5,
+		"cached_at":    time.Now().UTC().Add(-48 * time.Hour).Format(time.RFC3339Nano),
+		"expires_at":   time.Now().UTC().Add(-24 * time.Hour).Format(time.RFC3339Nano),
+	}
+	data, err := json.Marshal(entry)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := os.MkdirAll(svc.cacheDir, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(svc.metaPath(normalized, ""), data, 0o640); err != nil {
+		t.Fatalf("write meta: %v", err)
+	}
+	if err := os.WriteFile(svc.dataPath(normalized, ""), []byte("png"), 0o640); err != nil {
+		t.Fatalf("write data: %v", err)
+	}
+
+	cached, ok, err := svc.GetCached(normalized)
+	if err != nil || !ok || cached == nil {
+		t.Fatalf("cached = %+v ok = %v err = %v, want 持久条目照常命中（过期不复核）", cached, ok, err)
+	}
+}
+
+// review 面 meta 损坏而 .bin 在：按命中兜底（DetectContentType 判位图），
+// 不被重下覆盖——重下会换掉持久资产，DB 的 size/mime 不同步。非位图字节
+// 仍按 miss（未知内容不借「持久资产」名义流出），但同样不删文件。
+func TestReviewFaceCorruptedMetaFallsBackToData(t *testing.T) {
+	cfg := serviceConfig{
+		cacheSubdir: "review-screenshot-cache",
+		allowURL:    func(u *url.URL) bool { return true },
+		imagesOnly:  true,
+	}
+	svc := newService(t.TempDir(), cfg)
+	normalized, err := svc.normalize("https://uiv.example.com/broken-meta.png")
+	if err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	if err := os.MkdirAll(svc.cacheDir, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(svc.metaPath(normalized, ""), []byte("{truncated"), 0o640); err != nil {
+		t.Fatalf("write meta: %v", err)
+	}
+	// 真 PNG 魔数：DetectContentType 靠它判 image/png。
+	pngMagic := []byte{0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 13}
+	if err := os.WriteFile(svc.dataPath(normalized, ""), pngMagic, 0o640); err != nil {
+		t.Fatalf("write data: %v", err)
+	}
+
+	cached, ok, err := svc.GetCached(normalized)
+	if err != nil || !ok || cached == nil {
+		t.Fatalf("cached = %+v ok = %v err = %v, want meta 损坏时按 .bin 兜底命中", cached, ok, err)
+	}
+	if cached.Metadata.ContentType != "image/png" {
+		t.Fatalf("ContentType = %q, want image/png（DetectContentType）", cached.Metadata.ContentType)
+	}
+	if cached.Metadata.Size != int64(len(pngMagic)) {
+		t.Fatalf("Size = %d, want %d（stat 兜底）", cached.Metadata.Size, len(pngMagic))
+	}
+
+	// 非位图字节：按 miss，但文件不删（读路径零删除）。
+	other, err := svc.normalize("https://uiv.example.com/broken-meta.txt")
+	if err != nil {
+		t.Fatalf("normalize other: %v", err)
+	}
+	otherPath := svc.dataPath(other, "")
+	if err := os.WriteFile(svc.metaPath(other, ""), []byte("{truncated"), 0o640); err != nil {
+		t.Fatalf("write other meta: %v", err)
+	}
+	if err := os.WriteFile(otherPath, []byte("plain text, not an image"), 0o640); err != nil {
+		t.Fatalf("write other data: %v", err)
+	}
+	if cached2, ok2, err2 := svc.GetCached(other); err2 != nil || ok2 || cached2 != nil {
+		t.Fatalf("txt data: cached = %+v ok = %v err = %v, want miss", cached2, ok2, err2)
+	}
+	if _, statErr := os.Stat(otherPath); statErr != nil {
+		t.Fatalf("other data stat = %v, want 文件仍在（读路径零删除）", statErr)
+	}
+}
+
+// 兜底嗅探的魔数覆盖面：DetectContentType 不认的审查面合法类型（tiff、
+// avif、heic、jxl 容器/裸流）都要判得出，否则「不可丢弃」对它们失效。
+func TestSniffReviewImageTypeCoversAdmissionSet(t *testing.T) {
+	cases := []struct {
+		name string
+		head []byte
+		want string
+	}{
+		{"png", []byte("\x89PNG\r\n\x1a\n"), "image/png"},
+		{"tiff-le", []byte("II*\x00\x08"), "image/tiff"},
+		{"tiff-be", []byte("MM\x00*"), "image/tiff"},
+		{"avif", []byte("\x00\x00\x00\x20ftypavif\x00"), "image/avif"},
+		{"av01-video", []byte("\x00\x00\x00\x20ftypav01\x00"), ""},
+		{"hevc-video", []byte("\x00\x00\x00\x20ftyphevc\x00"), ""},
+		{"heic", []byte("\x00\x00\x00\x20ftypheic\x00"), "image/heic"},
+		{"jxl-raw", []byte("\xff\x0a\x00\x00"), "image/jxl"},
+		{"jxl-container", []byte("\x00\x00\x00\x0cJXL \x0d\x0a\x87\x0a"), "image/jxl"},
+		{"octet-stream", []byte("plain text"), ""},
+	}
+	for _, tc := range cases {
+		got, ok := sniffReviewImageType(tc.head)
+		if tc.want == "" {
+			if ok {
+				t.Fatalf("%s: got %q, want miss", tc.name, got)
+			}
+			continue
+		}
+		if !ok || got != tc.want {
+			t.Fatalf("%s: got %q ok=%v, want %q", tc.name, got, ok, tc.want)
+		}
+	}
+}
+
+// review 面 .bin 已存在时重下绝不覆盖持久字节：即使兜底嗅探判不出类型、
+// meta 损坏，FetchAndCache 也返回现有 .bin（mime 留空、由截图端点按魔数
+// 兜底，不落永久错值），上游
+// 新字节只丢弃。「不可丢弃」不依赖嗅探覆盖面——魔数表永远追不完 image/*。
+func TestReviewFaceFetchNeverOverwritesPersistentData(t *testing.T) {
+	var hits int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write([]byte("fresh-bytes-from-upstream"))
+	}))
+	defer upstream.Close()
+	parsed, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("parse upstream url: %v", err)
+	}
+	cfg := serviceConfig{
+		cacheSubdir: "review-screenshot-cache",
+		allowURL:    func(u *url.URL) bool { return u.Host == parsed.Host },
+		imagesOnly:  true,
+		client:      upstream.Client(),
+	}
+	svc := newService(t.TempDir(), cfg)
+	target := upstream.URL + "/x.png"
+	normalized, err := svc.normalize(target)
+	if err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	if err := os.MkdirAll(svc.cacheDir, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// 持久证据字节（嗅探判不出类型）+ 损坏 meta。护栏应在下载前返回，上游
+	// 不被请求。
+	if err := os.WriteFile(svc.dataPath(normalized, ""), []byte("old-evidence-bytes"), 0o640); err != nil {
+		t.Fatalf("write data: %v", err)
+	}
+	if err := os.WriteFile(svc.metaPath(normalized, ""), []byte("{truncated"), 0o640); err != nil {
+		t.Fatalf("write meta: %v", err)
+	}
+
+	media, err := svc.FetchAndCache(context.Background(), target)
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	data, err := os.ReadFile(svc.dataPath(normalized, ""))
+	if err != nil || string(data) != "old-evidence-bytes" {
+		t.Fatalf("data = %q err = %v, want 持久字节原样保留", data, err)
+	}
+	if media.Path != svc.dataPath(normalized, "") {
+		t.Fatalf("media.Path = %q, want 现有 .bin", media.Path)
+	}
+	if media.Metadata.ContentType != "" {
+		t.Fatalf("ContentType = %q, want 空（mime 不落库成永久错值，端点按魔数兜底）", media.Metadata.ContentType)
+	}
+	if atomic.LoadInt32(&hits) != 0 {
+		t.Fatalf("hits = %d, want 0（护栏在下载前返回现有字节，根本不请求上游）", hits)
 	}
 }
 
@@ -522,9 +794,9 @@ func TestFetchAndCacheDownloadWaitRespectsContext(t *testing.T) {
 		t.Fatalf("normalize: %v", err)
 	}
 	// 占住闸门：模拟同 URL 已有下载在跑。
-	lock := svc.acquireDownloadLock(normalized)
-	lock <- struct{}{}
-	defer func() { <-lock }()
+	gate := svc.acquireDownloadLock(normalized)
+	gate.sem <- struct{}{}
+	defer func() { <-gate.sem }()
 
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)

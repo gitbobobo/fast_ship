@@ -136,7 +136,8 @@ func (h *ScreenshotAnnotationHandler) Delete(c *gin.Context) {
 	response.SuccessEmpty(c)
 }
 
-// Crop 输出标注框选区域的 PNG 裁剪图，响应头与截图 content 端点一致。
+// Crop 输出标注框选区域的 PNG 裁剪图，硬化头与截图 content 端点同档
+// （nosniff + CSP sandbox；裁剪图是服务端重新编码的 PNG，保留 inline）。
 // HEAD 变体只跑存在性/权限/像素预算校验，不解码、不生成 PNG
 func (h *ScreenshotAnnotationHandler) Crop(c *gin.Context) {
 	annotationID := c.Param("aid")
@@ -147,6 +148,7 @@ func (h *ScreenshotAnnotationHandler) Crop(c *gin.Context) {
 			middleware.HandleAppError(c, err)
 			return
 		}
+		setSameOriginInlineImageHardeningHeaders(c.Writer.Header())
 		c.Header("Content-Disposition", "inline")
 		c.Header("Cache-Control", "private, max-age=300")
 		c.Data(http.StatusOK, "image/png", nil)
@@ -160,6 +162,7 @@ func (h *ScreenshotAnnotationHandler) Crop(c *gin.Context) {
 	}
 	defer release()
 
+	setSameOriginInlineImageHardeningHeaders(c.Writer.Header())
 	c.Header("Content-Disposition", "inline")
 	c.Header("Cache-Control", "private, max-age=300")
 	c.DataFromReader(http.StatusOK, int64(reader.Len()), "image/png", reader, nil)

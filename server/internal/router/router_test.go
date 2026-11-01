@@ -2514,3 +2514,43 @@ func TestRouterIssueRecommendationDefer(t *testing.T) {
 		t.Fatalf("jwt delete deferred expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
+
+// INT-171 同源内容出口不变量：头像这条出口同样认 ?token=、内容也由用户提供，
+// 必须与媒体代理一样带 nosniff / CSP / attachment，不能以同源文档交付。
+func TestAvatarContentCarriesHardeningHeaders(t *testing.T) {
+	env := setupRouterTestEnv(t)
+	auth := registerAndLoginRouterUser(t, env.router, "avatarhard", "avatarhard@example.com", "Password123")
+
+	pngBytes := append([]byte("\x89PNG\r\n\x1a\n"), []byte("0")...)
+	uploadReq := newRouterMultipartRequest(t, "/api/auth/avatar", "file", "me.png", pngBytes, nil)
+	uploadReq.Header.Set("Authorization", "Bearer "+auth.Token)
+	uploadRec := httptest.NewRecorder()
+	env.router.ServeHTTP(uploadRec, uploadReq)
+	if uploadRec.Code != http.StatusOK {
+		t.Fatalf("avatar upload = %d: %s", uploadRec.Code, uploadRec.Body.String())
+	}
+
+	var user struct {
+		AvatarURL string `json:"avatar_url"`
+	}
+	decodeRouterEnvelope(t, uploadRec, &user)
+	if user.AvatarURL == "" {
+		t.Fatalf("expected avatar_url in %s", uploadRec.Body.String())
+	}
+
+	contentReq := httptest.NewRequest(http.MethodGet, user.AvatarURL+"?token="+auth.Token, nil)
+	contentRec := httptest.NewRecorder()
+	env.router.ServeHTTP(contentRec, contentReq)
+	if contentRec.Code != http.StatusOK {
+		t.Fatalf("avatar content = %d: %s", contentRec.Code, contentRec.Body.String())
+	}
+	if got := contentRec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Fatalf("avatar nosniff = %q", got)
+	}
+	if got := contentRec.Header().Get("Content-Security-Policy"); got != "default-src 'none'; sandbox" {
+		t.Fatalf("avatar csp = %q", got)
+	}
+	if got := contentRec.Header().Get("Content-Disposition"); !strings.HasPrefix(got, "attachment; filename=") || !strings.Contains(got, ".png") {
+		t.Fatalf("avatar disposition = %q, want attachment + .png filename", got)
+	}
+}

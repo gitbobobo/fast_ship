@@ -1,5 +1,11 @@
 const MEDIA_PROXY_PATH = "/api/github/media-proxy";
 const MEDIA_PROXY_TOKEN_PARAM = "token";
+// Bump together with githubmedia.ProxyURLVersion (Go). Browser caches the whole
+// response, so a URL built before a media-response hardening change keeps getting
+// served locally (never reaching the proxy). A new version value changes the cache
+// key and retires those entries.
+const MEDIA_PROXY_VERSION_PARAM = "v";
+const MEDIA_PROXY_VERSION = 2;
 const ISSUE_ASSET_CONTENT_PATH = /^\/api\/issues\/assets\/[^/]+\/content$/;
 const ISSUE_ASSET_CONTENT_REFERENCE =
   /(?:https?:\/\/[^/\s"')]+)?\/api\/issues\/assets\/[^/\s"')]+\/content(?:\?[^)\s"']*)?/;
@@ -37,6 +43,15 @@ function attachMediaProxyToken(url: URL, token?: string | null) {
     return;
   }
   url.searchParams.delete(MEDIA_PROXY_TOKEN_PARAM);
+}
+
+// v 是缓存失效机制的权威键，而代理地址会原样嵌进用户可控的 Issue 正文：
+// 内容里带的任何版本号都不能信——预置一个大于当前值的 v 同样能把浏览器钉在
+// 未硬化的旧缓存上。本项目 web dist 与 Go 二进制由同一镜像下发，不存在「Go
+// 常量先涨、前端还没发」的滚动窗口，所以内容来源的 URL 一律写成当前常量
+// （服务端 BuildProxyURL 写的正确值本来就是它，重写是幂等的）。
+function attachMediaProxyVersion(url: URL) {
+  url.searchParams.set(MEDIA_PROXY_VERSION_PARAM, String(MEDIA_PROXY_VERSION));
 }
 
 function isSameOriginMediaProxyUrl(value: string) {
@@ -124,6 +139,7 @@ export function toGitHubMediaProxyUrl(value?: string | null, token?: string | nu
   if (isSameOriginMediaProxyUrl(value)) {
     const proxyURL = new URL(value, window.location.origin);
     attachMediaProxyToken(proxyURL, token);
+    attachMediaProxyVersion(proxyURL);
     return buildRelativeUrl(proxyURL);
   }
 
@@ -134,6 +150,7 @@ export function toGitHubMediaProxyUrl(value?: string | null, token?: string | nu
   const proxyURL = new URL(MEDIA_PROXY_PATH, window.location.origin);
   proxyURL.searchParams.set("url", value);
   attachMediaProxyToken(proxyURL, token);
+  attachMediaProxyVersion(proxyURL);
   return buildRelativeUrl(proxyURL);
 }
 

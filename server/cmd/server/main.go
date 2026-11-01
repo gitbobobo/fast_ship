@@ -319,7 +319,9 @@ func main() {
 	// 两个下载面各管各的：mediaProxyService 是 /api/github/media-proxy 用的
 	// GitHub 域名白名单面；reviewMediaService 是 PR 审查截图下载面，放行
 	// 任意公网 https 图片、靠拨号时校验解析 IP 防 SSRF，不与代理共用白名单。
-	mediaProxyService := githubmedia.NewProxyService(cfg.Upload.StoragePath)
+	mediaProxyService := githubmedia.NewProxyServiceWithLogger(cfg.Upload.StoragePath, appLogger)
+	// 读路径不删文件（见 githubmedia 包），过期条目由后台目录扫描回收。
+	mediaProxyService.StartExpiredSweeper()
 	// 截图下载面的凭证闸门要知道本部署的 GitHub 实例（GHE 拉私有附件）：只对
 	// 同一实例（host[:port]）的附件路径带 App 安装令牌重试，公共 GitHub 部署
 	// 下即 github.com。
@@ -374,6 +376,12 @@ func main() {
 			dynamicTrustedHostsAt = time.Now()
 			return hosts
 		})
+	// review 截图面**不接** TTL 扫描：它的缓存目录（review-screenshot-cache）
+	// 同时是 review_assets 的持久存储（storage_path 直接指向 cached 文件，无
+	// 副本），按 TTL 删除会让超过 24h 的历史截图取不到且 ensure 不会重下。
+	// 但中断下载的 media-*.tmp 残留两边都一样要清，tmp 清理是独立方法，这里
+	// 只启动它（不触碰 .bin/.json）。
+	reviewMediaService.StartStaleTmpSweeper()
 	// shell 订阅 hub（INT-116）：每环境常驻活跃/归档两条 WS，列表与运行态读取
 	// 从内存回答；环境重配/删除时由环境服务清 entry。这里注册停机钩子：当前
 	// main 进程没有优雅停机路径、defer 通常不会执行（进程被信号终止时由 OS
