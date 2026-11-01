@@ -8,7 +8,8 @@
 //     任何代码路径不得删除它的条目；启动只建目录+补标记；无 TTL 删除、
 //     无 purge、无条目回收 sweeper（media-*.tmp 清理是唯一例外，
 //     sweepStaleTmpFiles 不触碰 .bin/.json）；读路径命中即返回（不过期、
-//     不因类型复核 miss）。
+//     不因类型复核 miss）；重下绝不覆盖已落盘的 .bin（fetch 入口护栏：
+//     存在即返回现有字节，类型判不出时保守 octet-stream）。
 //     - 无缓存出口（issue assets、avatars、screenshot content、crop）：不落
 //     缓存目录，只施加同源硬化头与「attachment 或 inline 图片档」判据（按
 //     出口语义：下载类 attachment，截图/裁剪类刻意保留 inline）。
@@ -1156,6 +1157,33 @@ func (s *ProxyService) fetchAndCache(ctx context.Context, rawURL, bearer, scope 
 		return nil, err
 	} else if ok {
 		return cached, nil
+	}
+
+	// 面边界（不变量第 1 条）：review 截图面已落盘的 .bin 是持久资产，重下
+	// 会用上游当前字节覆盖证据（DB 的 size/mime 不同步），上游已删/转私时
+	// 更是直接失败。.bin 存在就返回现有字节，绝不 rename 覆盖——「不可丢
+	// 弃」不依赖兜底嗅探的覆盖面。类型判不出时保守以 octet-stream 下发（响
+	// 应带 nosniff + CSP sandbox，不构成脚本执行面），宁可显示不出来也不换
+	// 掉证据字节。
+	if s.cacheSubdir != defaultCacheSubdir {
+		cachePath := s.dataPath(normalized, scope)
+		if media, ok, err := s.servePersistedData(normalized, cachePath); err != nil {
+			return nil, err
+		} else if ok {
+			return media, nil
+		}
+		if info, statErr := os.Stat(cachePath); statErr == nil {
+			return &CachedMedia{
+				Metadata: cacheEntry{
+					URL:          normalized,
+					ContentType:  "application/octet-stream",
+					Size:         info.Size(),
+					CachedAt:     info.ModTime().UTC(),
+					CacheControl: buildCacheControl(s.cacheTTL),
+				},
+				Path: cachePath,
+			}, nil
+		}
 	}
 
 	if err := os.MkdirAll(s.cacheDir, 0o750); err != nil {

@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -600,6 +601,64 @@ func TestSniffReviewImageTypeCoversAdmissionSet(t *testing.T) {
 		if !ok || got != tc.want {
 			t.Fatalf("%s: got %q ok=%v, want %q", tc.name, got, ok, tc.want)
 		}
+	}
+}
+
+// review 面 .bin 已存在时重下绝不覆盖持久字节：即使兜底嗅探判不出类型、
+// meta 损坏，FetchAndCache 也返回现有 .bin（octet-stream 保守下发），上游
+// 新字节只丢弃。「不可丢弃」不依赖嗅探覆盖面——魔数表永远追不完 image/*。
+func TestReviewFaceFetchNeverOverwritesPersistentData(t *testing.T) {
+	var hits int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write([]byte("fresh-bytes-from-upstream"))
+	}))
+	defer upstream.Close()
+	parsed, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("parse upstream url: %v", err)
+	}
+	cfg := serviceConfig{
+		cacheSubdir: "review-screenshot-cache",
+		allowURL:    func(u *url.URL) bool { return u.Host == parsed.Host },
+		imagesOnly:  true,
+		client:      upstream.Client(),
+	}
+	svc := newService(t.TempDir(), cfg)
+	target := upstream.URL + "/x.png"
+	normalized, err := svc.normalize(target)
+	if err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	if err := os.MkdirAll(svc.cacheDir, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// 持久证据字节（嗅探判不出类型）+ 损坏 meta。护栏应在下载前返回，上游
+	// 不被请求。
+	if err := os.WriteFile(svc.dataPath(normalized, ""), []byte("old-evidence-bytes"), 0o640); err != nil {
+		t.Fatalf("write data: %v", err)
+	}
+	if err := os.WriteFile(svc.metaPath(normalized, ""), []byte("{truncated"), 0o640); err != nil {
+		t.Fatalf("write meta: %v", err)
+	}
+
+	media, err := svc.FetchAndCache(context.Background(), target)
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	data, err := os.ReadFile(svc.dataPath(normalized, ""))
+	if err != nil || string(data) != "old-evidence-bytes" {
+		t.Fatalf("data = %q err = %v, want 持久字节原样保留", data, err)
+	}
+	if media.Path != svc.dataPath(normalized, "") {
+		t.Fatalf("media.Path = %q, want 现有 .bin", media.Path)
+	}
+	if media.Metadata.ContentType != "application/octet-stream" {
+		t.Fatalf("ContentType = %q, want octet-stream（保守下发）", media.Metadata.ContentType)
+	}
+	if atomic.LoadInt32(&hits) != 0 {
+		t.Fatalf("hits = %d, want 0（护栏在下载前返回现有字节，根本不请求上游）", hits)
 	}
 }
 
