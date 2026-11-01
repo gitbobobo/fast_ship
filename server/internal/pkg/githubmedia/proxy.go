@@ -1,3 +1,26 @@
+// Package githubmedia 的缓存面边界（不变量，改动前先对照）：
+//
+//  1. 面只有三个，规则按面定，不按调用点定：
+//     - 媒体代理面（defaultCacheSubdir）：缓存可丢弃。TTL 回收、scope 标记
+//     缺失时整目录清空、损坏条目回收，只发生在这里。
+//     - 审查截图面（review-screenshot-cache）：缓存不可丢弃——.bin 是
+//     review_assets 持久资产（storage_path 直指文件、ensureAssets 不重下）。
+//     任何代码路径不得删除它的条目；启动只建目录+补标记；无 TTL 删除、
+//     无 purge、无条目回收 sweeper（media-*.tmp 清理是唯一例外，
+//     sweepStaleTmpFiles 不触碰 .bin/.json）。
+//     - 无缓存出口（issue assets、avatars、screenshot content、crop）：不落
+//     缓存目录，只施加同源硬化头与 attachment 判据。
+//  2. MIME/扩展门：媒体代理面全量（image/svg*、.svg、HTML 拒 + fallback 归
+//     一化）；审查面只收位图；下载出口 octet-stream+attachment 不进文档上下
+//     文。
+//  3. Cache-Control 一律 private（URL 带 JWT），TTL 由 s.cacheTTL 派生，
+//     cloneRelevantHeaders 与缓存命中同源，不透传上游。
+//  4. 写侧两步发布（data→binPath 再 meta→metaPath）。回收者对已 rename 走
+//     的文件，恢复前必须重读校验新鲜度，且恢复前校验目标路径未被写侧占据；
+//     不能安全恢复就丢弃旧字节，绝不覆盖新条目。
+//  5. 版本参数 v：前端无条件重写为当前值；Go ProxyURLVersion 与前端
+//     MEDIA_PROXY_VERSION 由 TestProxyURLVersionMatchesFrontend 断言一致，
+//     只涨一边会直接红。
 package githubmedia
 
 import (
@@ -659,29 +682,6 @@ func (s *ProxyService) sweepStaleTmpFiles(now time.Time) {
 	}
 }
 
-// Package githubmedia 的缓存面边界（不变量，改动前先对照）：
-//
-//  1. 面只有三个，规则按面定，不按调用点定：
-//     - 媒体代理面（defaultCacheSubdir）：缓存可丢弃。TTL 回收、scope 标记
-//     缺失时整目录清空、损坏条目回收，只发生在这里。
-//     - 审查截图面（review-screenshot-cache）：缓存不可丢弃——.bin 是
-//     review_assets 持久资产（storage_path 直指文件、ensureAssets 不重下）。
-//     任何代码路径不得删除它的条目；启动只建目录+补标记；无 TTL 删除、
-//     无 purge、无 sweeper。
-//     - 无缓存出口（issue assets、avatars、screenshot content、crop）：不落
-//     缓存目录，只施加同源硬化头与 attachment 判据。
-//  2. MIME/扩展门：媒体代理面全量（image/svg*、.svg、HTML 拒 + fallback 归
-//     一化）；审查面只收位图；下载出口 octet-stream+attachment 不进文档上下
-//     文。
-//  3. Cache-Control 一律 private（URL 带 JWT），TTL 由 s.cacheTTL 派生，
-//     cloneRelevantHeaders 与缓存命中同源，不透传上游。
-//  4. 写侧两步发布（data→binPath 再 meta→metaPath）。回收者对已 rename 走
-//     的文件，恢复前必须重读校验新鲜度，且恢复前校验目标路径未被写侧占据；
-//     不能安全恢复就丢弃旧字节，绝不覆盖新条目。
-//  5. 版本参数 v：前端无条件重写为当前值；Go ProxyURLVersion 与前端
-//     MEDIA_PROXY_VERSION 由 TestProxyURLVersionMatchesFrontend 断言一致，
-//     只涨一边会直接红。
-//
 // legacyScopeMarker scope 进缓存键之前的存量条目不可信标记：老条目的 meta
 // 没有 Scope 字段，无法区分是匿名拉取的公开内容还是安装令牌拉取的私有附
 // 件——后者若继续按匿名键命中，知道 URL 就能经 /api/github/media-proxy 跨
