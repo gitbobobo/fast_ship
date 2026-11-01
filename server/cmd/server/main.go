@@ -752,8 +752,18 @@ func createBootIndexes(db *gorm.DB) error {
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_comments_issue_github_comment ON issue_comments(issue_id, github_comment_id)")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_comments_issue_idempotency_key ON issue_comments(issue_id, idempotency_key) WHERE idempotency_key <> ''")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_timeline_issue_event_key ON issue_timeline_events(issue_id, event_key)")
-	db.Exec("DROP INDEX IF EXISTS idx_issue_pull_requests_issue_pr")
-	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_pull_requests_issue_pr_v2 ON issue_pull_requests(issue_id, provider, host_key, repo_full_name, number)")
+	// v2 唯一索引（INT-181 方向审计：host_key 入键）是 attach Upsert 的
+	// ON CONFLICT 目标——建失败不能静默，否则所有 attach 直接 500。生产启动
+	// 时 AutoMigrate 已建全部表，这里仅在表存在时建（部分迁移的单表测试库
+	// 跳过）。
+	if db.Migrator().HasTable("issue_pull_requests") {
+		if err := db.Exec("DROP INDEX IF EXISTS idx_issue_pull_requests_issue_pr").Error; err != nil {
+			return fmt.Errorf("删除旧 idx_issue_pull_requests_issue_pr 失败: %w", err)
+		}
+		if err := db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_pull_requests_issue_pr_v2 ON issue_pull_requests(issue_id, provider, host_key, repo_full_name, number)").Error; err != nil {
+			return fmt.Errorf("创建 idx_issue_pull_requests_issue_pr_v2 失败: %w", err)
+		}
+	}
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_log_runs_project_last_entry ON log_runs(project_id, last_entry_at DESC)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_log_entries_run_timestamp ON log_entries(log_run_id, timestamp ASC)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_documents_project_parent ON documents(project_id, parent_id)")

@@ -56,6 +56,10 @@ type pullRequestLink struct {
 // 不接项目/用户级凭证。
 type issueForgeSource interface {
 	ForgejoClient(ctx context.Context, integrationID string) (httpClient *http.Client, apiBaseURL, token string, err error)
+	// ForgejoClientFor 接受调用方已读出的集成行：sync 的主机校验与客户端构
+	// 建用同一份行数据，消除「校验读一次、构建再读一次」之间集成被改指的竞
+	// 态窗口（INT-181 R8）。
+	ForgejoClientFor(ctx context.Context, row *model.ForgeIntegration) (httpClient *http.Client, apiBaseURL, token string, err error)
 }
 
 // 编译期钉住 ForgeClientSource 满足关联 PR 链路的凭证面。
@@ -192,13 +196,10 @@ func (s *IssueService) SyncIssuePullRequests(issueID, userID string) (*IssuePull
 	clients := make(map[string]githubapi.GitHubClient)
 	clientKinds := make(map[string]pullRequestCredentialKind)
 	clientErrs := make(map[string]error)
-	// forgejo 行按「集成快照 id」缓存客户端；provider 分流见循环体。
-	forgeReaders := make(map[string]forgePRReader)
-	forgeReaderErrs := make(map[string]error)
-	// 集成现行 host_key 缓存（含查询错误）：集成改 base_url 后行仍指向原
-	// 主机，主机不一致只算单行失败，不允许静默改指。
-	forgeHostKeys := make(map[string]string)
-	forgeHostKeyErrs := make(map[string]error)
+	// forgejo 行按「集成快照 id」缓存单次读取的访问面（客户端+主机快照，
+	// 同一份集成行数据）；provider 分流见循环体。
+	forgeAccess := make(map[string]*forgejoSyncAccess)
+	forgeAccessErrs := make(map[string]error)
 	now := time.Now().UTC()
 	for i := range links {
 		link := &links[i]
@@ -211,22 +212,18 @@ func (s *IssueService) SyncIssuePullRequests(issueID, userID string) (*IssuePull
 				result.Failures = append(result.Failures, pullRequestSyncFailure(link, "关联行缺少 Forgejo 集成快照，请解除后重新关联"))
 				continue
 			}
-			// 主机一致性校验：集成改 base_url（改指别的主机）后，快照仍指
-			// 向原主机；原主机拉取会拿到错误实例的数据。不一致按单行失败
-			// 拦下，要求重新关联。
-			if currentHost, err := forgejoSyncHostKey(s, forgeHostKeys, forgeHostKeyErrs, link); err != nil {
-				result.Failures = append(result.Failures, pullRequestSyncFailure(link, s.forgejoSourceFailureText(err)))
+			// 一次读取集成行同时得到访问面与主机快照：主机不一致（集成改
+			// 指别的主机）按单行失败拦下，取数不会用改指后的新基址。
+			access, err := forgejoSyncAccessFor(s, forgeAccess, forgeAccessErrs, ctx, link)
+			if err != nil {
+				result.Failures = append(result.Failures, pullRequestSyncFailure(link, s.forgejoSyncFailureText(err)))
 				continue
-			} else if currentHost != link.HostKey {
+			}
+			if access.hostKey != link.HostKey {
 				result.Failures = append(result.Failures, pullRequestSyncFailure(link, "该 Forgejo 集成已改指其他主机，请解除后重新关联"))
 				continue
 			}
-			reader, err := forgejoSyncReader(s, forgeReaders, forgeReaderErrs, ctx, link)
-			if err != nil {
-				result.Failures = append(result.Failures, pullRequestSyncFailure(link, s.forgejoSourceFailureText(err)))
-				continue
-			}
-			pr, err := reader.GetPullRequest(ctx, link.RepoFullName, link.Number)
+			pr, err := access.reader.GetPullRequest(ctx, link.RepoFullName, link.Number)
 			if err != nil {
 				result.Failures = append(result.Failures, pullRequestSyncFailure(link, s.forgejoPullRequestFailureText("拉取 Forgejo PR", err)))
 				continue
@@ -494,42 +491,60 @@ func (s *IssueService) forgejoPRReader(ctx context.Context, integrationID string
 	return s.newForgejoPRReader(httpClient, apiBase, token), nil
 }
 
-// forgejoSyncReader 按「集成快照 id」（attach 时落的 ForgeIntegrationID）复用/
-// 缓存 Forgejo 读取客户端；构造错误同样按 id 缓存，同集成的后续行各自记一条
-// 失败而不是重复构造。调用方先拦快照为空与主机不一致的行；集成凭证面故障
-// 只算单行失败，不影响其余行。
-func forgejoSyncReader(s *IssueService, readers map[string]forgePRReader, readerErrs map[string]error, ctx context.Context, link *model.IssuePullRequest) (forgePRReader, error) {
-	if reader, ok := readers[link.ForgeIntegrationID]; ok {
-		return reader, nil
-	}
-	if err, failed := readerErrs[link.ForgeIntegrationID]; failed {
-		return nil, err
-	}
-	reader, err := s.forgejoPRReader(ctx, link.ForgeIntegrationID)
-	if err != nil {
-		readerErrs[link.ForgeIntegrationID] = err
-		return nil, err
-	}
-	readers[link.ForgeIntegrationID] = reader
-	return reader, nil
+// forgejoSyncAccess 一次读取集成行得到的同步访问面：host 校验与 PR 取数用
+// 同一份集成行数据——不存在「校验用旧行、取数用新行」的竞态窗口（R8）。
+type forgejoSyncAccess struct {
+	reader  forgePRReader
+	hostKey string
 }
 
-// forgejoSyncHostKey 按「集成快照 id」取集成现行 host_key（带缓存，查询错误
-// 同缓存）。集成行已删的行由上游凭证面文案统一处置。
-func forgejoSyncHostKey(s *IssueService, hosts map[string]string, hostErrs map[string]error, link *model.IssuePullRequest) (string, error) {
-	if host, ok := hosts[link.ForgeIntegrationID]; ok {
-		return host, nil
+// forgejoSyncAccessFor 按「集成快照 id」复用/缓存访问面；构造错误同样按 id
+// 缓存，同集成的后续行各自记一条失败而不是重复构造。集成行已删的行由上游
+// 凭证面文案统一处置。
+func forgejoSyncAccessFor(s *IssueService, entries map[string]*forgejoSyncAccess, entryErrs map[string]error, ctx context.Context, link *model.IssuePullRequest) (*forgejoSyncAccess, error) {
+	if entry, ok := entries[link.ForgeIntegrationID]; ok {
+		return entry, nil
 	}
-	if err, failed := hostErrs[link.ForgeIntegrationID]; failed {
-		return "", err
+	if err, failed := entryErrs[link.ForgeIntegrationID]; failed {
+		return nil, err
 	}
 	row, err := s.forgeIntegrationRepo.FindByID(link.ForgeIntegrationID)
 	if err != nil {
-		hostErrs[link.ForgeIntegrationID] = err
-		return "", err
+		err = classifyForgeIntegrationReadErr(err)
+		entryErrs[link.ForgeIntegrationID] = err
+		return nil, err
 	}
-	hosts[link.ForgeIntegrationID] = row.HostKey
-	return row.HostKey, nil
+	httpClient, apiBase, token, err := s.forgeSource.ForgejoClientFor(ctx, row)
+	if err != nil {
+		err = classifyForgeIntegrationReadErr(err)
+		entryErrs[link.ForgeIntegrationID] = err
+		return nil, err
+	}
+	entry := &forgejoSyncAccess{reader: s.newForgejoPRReader(httpClient, apiBase, token), hostKey: row.HostKey}
+	entries[link.ForgeIntegrationID] = entry
+	return entry, nil
+}
+
+// classifyForgeIntegrationReadErr 集成读取错误三类：行已删（NotFound 或 kind
+// 不符的哨兵）给「不可用或已被删除」；已有业务文案的错误（如 PAT 解密失败）
+// 原样透出；其余（锁忙/IO 等瞬时故障）给中性提示——瞬时故障不能引导用户去
+// 删集成重配。
+func classifyForgeIntegrationReadErr(err error) error {
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return errors.New("Forgejo 集成不可用或已被删除，请检查集成管理配置")
+	}
+	var appErr *errs.AppError
+	if errors.As(err, &appErr) {
+		return errors.New(appErr.Message)
+	}
+	return errors.New("读取 Forgejo 集成失败，请稍后重试")
+}
+
+// forgejoSyncFailureText 记日志并回传已分类的错误文案（forgejoSyncAccessFor
+// 返回的 err 已按受众分好类）。
+func (s *IssueService) forgejoSyncFailureText(err error) string {
+	s.logger.Error("Forgejo 关联行同步失败", zap.Error(err))
+	return err.Error()
 }
 
 // parsePullRequestLink 分流解析 PR 链接（INT-181）：github.com 域 + /pull/{n}

@@ -22,8 +22,9 @@ func TestMigrateForgeHostKeys(t *testing.T) {
 		t.Fatalf("open db: %v", err)
 	}
 	// createBootIndexes 会在 project_review_settings 上建唯一索引（同仓库占用
-	// 键 INT-167 起带 integration_id），一并迁出来。
-	if err := db.AutoMigrate(&model.ForgeIntegration{}, &model.ProjectReviewSettings{}); err != nil {
+	// 键 INT-167 起带 integration_id），一并迁出来；issue_pull_requests 的 v2
+	// 唯一索引创建失败会中止 createBootIndexes（R8），同样需要表在。
+	if err := db.AutoMigrate(&model.ForgeIntegration{}, &model.ProjectReviewSettings{}, &model.IssuePullRequest{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 

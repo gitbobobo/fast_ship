@@ -71,8 +71,20 @@ const forgeReviewClientTimeout = 60 * time.Second
 func (s *ForgeClientSource) ForgejoClient(_ context.Context, integrationID string) (*http.Client, string, string, error) {
 	row, err := s.findForgejoRow(integrationID)
 	if err != nil {
+		// 行被删或 kind 不符：同步逐出传输层缓存槽（重建同 id 集成时按新
+		// 配置重造，旧 Transport 不滞留）。
 		s.clients.Delete(integrationID)
 		return nil, "", "", err
+	}
+	return s.ForgejoClientFor(context.Background(), row)
+}
+
+// ForgejoClientFor 与 ForgejoClient 同口径，但接受调用方已读出的集成行：
+// host 校验与取数用同一份行数据（INT-181 R8），消除「校验读一次、构建再读
+// 一次」之间集成被改指的竞态窗口。
+func (s *ForgeClientSource) ForgejoClientFor(_ context.Context, row *model.ForgeIntegration) (*http.Client, string, string, error) {
+	if row.Kind != model.ForgeIntegrationKindForgejo {
+		return nil, "", "", fmt.Errorf("代码仓库集成 %s 不是 Forgejo 类型: %w", row.ID, gorm.ErrRecordNotFound)
 	}
 	token, err := crypto.Decrypt(row.TokenEncrypted, s.key)
 	if err != nil {
@@ -80,7 +92,7 @@ func (s *ForgeClientSource) ForgejoClient(_ context.Context, integrationID strin
 	}
 	apiBase := forgeAPIBaseURL(row)
 	fingerprint := forgeTransportFingerprint(row, apiBase)
-	if cached, ok := s.clients.Load(integrationID); ok {
+	if cached, ok := s.clients.Load(row.ID); ok {
 		if entry := cached.(cachedForgeClient); entry.fingerprint == fingerprint {
 			return entry.client, apiBase, string(token), nil
 		}
@@ -93,10 +105,10 @@ func (s *ForgeClientSource) ForgejoClient(_ context.Context, integrationID strin
 		Timeout:             forgeReviewClientTimeout,
 	})
 	if err != nil {
-		s.logger.Error("构建 Forgejo 集成 client 失败", zap.String("integration", integrationID), zap.Error(err))
+		s.logger.Error("构建 Forgejo 集成 client 失败", zap.String("integration", row.ID), zap.Error(err))
 		return nil, "", "", errors.New("构建 Forgejo 集成访问 client 失败")
 	}
-	s.clients.Store(integrationID, cachedForgeClient{fingerprint: fingerprint, client: httpClient})
+	s.clients.Store(row.ID, cachedForgeClient{fingerprint: fingerprint, client: httpClient})
 	return httpClient, apiBase, string(token), nil
 }
 
