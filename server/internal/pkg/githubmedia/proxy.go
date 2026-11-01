@@ -684,9 +684,8 @@ func (s *ProxyService) purgeLegacyCacheEntries(guardedPurge bool) {
 		if err := os.MkdirAll(s.cacheDir, 0o750); err != nil {
 			return
 		}
-		s.sweepUnscopedEntries()
-		// 标记写失败不静默落定：下次启动重扫一遍（定点清理幂等），标记缺
-		// 失期间读路径仍按不可信 miss，不会误用无 Scope 条目。
+		// 标记写失败不静默落定：下次启动重扫一遍，标记缺失期间无 Scope 的
+		// 旧条目照常按匿名键命中（跨授权域风险由键隔离与接口鉴权兜住）。
 		_ = os.WriteFile(filepath.Join(s.cacheDir, legacyScopeMarker), []byte("scope-v2\n"), 0o640)
 		return
 	}
@@ -703,17 +702,6 @@ func (s *ProxyService) purgeLegacyCacheEntries(guardedPurge bool) {
 	}
 	// 标记写失败也接受：下次启动重清一遍空目录而已，不会因此泄漏。
 	_ = os.WriteFile(filepath.Join(s.cacheDir, legacyScopeMarker), []byte("scope-v2\n"), 0o640)
-}
-
-// sweepUnscopedEntries review 面的标记补写前清理：**只建目录，不删任何文
-// 件**。无 Scope 字段的旧条目（bearer 引入前写入）与匿名条目（Scope 本就是
-// 空串，omitempty 连字段都不写）在 meta 层面无法区分，而这条目录里的 .bin
-// 是 review_assets 的持久资产——删文件等于把已落账的审查截图变成永久 404。
-// 跨授权域风险由既有机制兜住：缓存键按 Scope 隔离（scopedCacheID），新写入
-// 的条目必带 Scope 字段；无 Scope 的旧条目只能被「知道完整 URL 的请求」命
-// 中，审查截图 URL 不可枚举且接口要求项目成员身份。
-func (s *ProxyService) sweepUnscopedEntries() {
-	_ = os.MkdirAll(s.cacheDir, 0o750)
 }
 
 // newProxyService 旧内部构造（GitHub 媒体面语义：允许 http/https、图片视频

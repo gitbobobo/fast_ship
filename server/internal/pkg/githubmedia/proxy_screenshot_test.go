@@ -395,9 +395,9 @@ func TestLegacyCacheEntriesPurgedOnStart(t *testing.T) {
 }
 
 // review 截图面的目录是 review_assets 的持久存储（storage_path 直接指向缓
-// 存文件），构造时不得整目录清空——否则升级会删光历史审查截图且不可恢复。
-// 跨授权域不可信的无 Scope 存量条目走定点清理（删除），有 Scope 的保留。
-func TestReviewFaceSkipsPurgeButSweepsUnscoped(t *testing.T) {
+// 存文件），构造时不得整目录清空——否则升级会删光历史审查截图且不可恢复；
+// 无 Scope 与有 Scope 的条目都保留（不删、不拒读）。
+func TestReviewFaceSkipsPurgeKeepsEntries(t *testing.T) {
 	cfg := serviceConfig{
 		cacheSubdir: "review-screenshot-cache",
 		allowURL:    func(u *url.URL) bool { return true },
@@ -418,10 +418,12 @@ func TestReviewFaceSkipsPurgeButSweepsUnscoped(t *testing.T) {
 		t.Fatalf("write unscoped data: %v", err)
 	}
 
-	// 有 Scope 的条目（持久资产）：保留。
-	scoped := "install-123\x1fhttps://uiv.example.com/scoped.png"
-	scopedMeta := svcOld.metaPath(scoped, "install-123")
-	entry := map[string]any{"url": "https://uiv.example.com/scoped.png", "content_type": "image/png", "scope": "install-123"}
+	// 有 Scope 的条目（持久资产）：保留。落盘路径与生产写入一致——
+	// metaPath(normalizedURL, scope)，不要手工拼 scopedCacheID（会双重加前
+	// 缀，断言的是一个代码永远不读写的路径）。
+	scopedURL := "https://uiv.example.com/scoped.png"
+	scopedMeta := svcOld.metaPath(scopedURL, "install-123")
+	entry := map[string]any{"url": scopedURL, "content_type": "image/png", "scope": "install-123"}
 	data, err := json.Marshal(entry)
 	if err != nil {
 		t.Fatalf("marshal scoped: %v", err)
@@ -432,7 +434,7 @@ func TestReviewFaceSkipsPurgeButSweepsUnscoped(t *testing.T) {
 	if err := os.WriteFile(scopedMeta, data, 0o640); err != nil {
 		t.Fatalf("write scoped meta: %v", err)
 	}
-	if err := os.WriteFile(svcOld.dataPath(scoped, "install-123"), []byte("png"), 0o640); err != nil {
+	if err := os.WriteFile(svcOld.dataPath(scopedURL, "install-123"), []byte("png"), 0o640); err != nil {
 		t.Fatalf("write scoped data: %v", err)
 	}
 
@@ -453,9 +455,17 @@ func TestReviewFaceSkipsPurgeButSweepsUnscoped(t *testing.T) {
 		t.Fatalf("marker stat = %v, want 已补写", statErr)
 	}
 
-	// 有 Scope 条目保留（持久资产）。
+	// 有 Scope 条目保留且可按生产写入路径命中（持久资产）。读也要带同一
+	// scope——GetCached 固定匿名键，这里走 getCachedNormalized。
 	if _, statErr := os.Stat(scopedMeta); statErr != nil {
 		t.Fatalf("scoped meta stat = %v, want 保留", statErr)
+	}
+	scopedNormalized, err := svc.normalize(scopedURL)
+	if err != nil {
+		t.Fatalf("normalize scoped: %v", err)
+	}
+	if cached, ok, err := svc.getCachedNormalized(scopedNormalized, "install-123"); err != nil || !ok || cached == nil {
+		t.Fatalf("scoped: cached = %+v ok = %v err = %v, want 命中（生产写入路径）", cached, ok, err)
 	}
 }
 
