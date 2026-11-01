@@ -105,16 +105,19 @@ func (s *IssueService) AttachIssuePullRequest(issueID, userID string, req Attach
 	case model.IssuePullRequestProviderForgejo:
 		link.Provider = model.IssuePullRequestProviderForgejo
 		link.RepoFullName = parsed.Owner + "/" + parsed.Repo
-		integrationID, err := s.forgejoIntegrationIDForProject(project, parsed.HostKey)
+		// 一次读取项目绑定的集成行，主机校验与客户端构建用同一份数据（与
+		// sync 的 R8 口径对齐）：读取与构建之间集成被改指不再可能。
+		integration, err := s.forgejoIntegrationForProject(project, parsed.HostKey)
 		if err != nil {
 			return nil, err
 		}
-		link.ForgeIntegrationID = integrationID
-		reader, err := s.forgejoPRReader(ctx, integrationID)
+		link.ForgeIntegrationID = integration.ID
+		httpClient, apiBase, token, err := s.forgeSource.ForgejoClientFor(ctx, integration)
 		if err != nil {
-			return nil, errs.New(errs.ErrForgeAPI.Code, s.forgejoSourceFailureText(err))
+			s.logger.Error("Forgejo attach 读取集成失败", zap.Error(err))
+			return nil, errs.New(errs.ErrForgeAPI.Code, classifyForgeIntegrationReadErr(err).Error())
 		}
-		pr, err := reader.GetPullRequest(ctx, link.RepoFullName, parsed.Number)
+		pr, err := s.newForgejoPRReader(httpClient, apiBase, token).GetPullRequest(ctx, link.RepoFullName, parsed.Number)
 		if err != nil {
 			return nil, errs.New(errs.ErrForgeAPI.Code, s.forgejoPullRequestFailureText("获取 Forgejo PR", err))
 		}
@@ -405,14 +408,6 @@ func (s *IssueService) forgejoPullRequestFailureText(op string, err error) strin
 	return op + " 失败：Forgejo 服务连接或响应异常，请检查集成配置与网络"
 }
 
-// forgejoSourceFailureText 集成凭证面故障（集成行被删、kind 不符、PAT 解密
-// 失败）：ForgeClientSource 的错误原文带内部集成 id，只进日志；对外给统一
-// 脱敏文案，attach 报 50206、sync 单行失败共用。
-func (s *IssueService) forgejoSourceFailureText(err error) string {
-	s.logger.Error("Forgejo 集成凭证面故障", zap.Error(err))
-	return "Forgejo 集成不可用或已被删除，请检查集成管理配置"
-}
-
 // forgejoPullRequestAccessHint 对 Forgejo 的权限类错误、404 与限流追加排查
 // 提示（口径对齐 pullRequestAccessHint）：Forgejo 对「PR 不存在」和「机器人
 // PAT 无权访问该仓库」都返回 404，文案必须同时保留两种可能；限流响应无法与
@@ -436,59 +431,40 @@ func forgejoPullRequestAccessHint(err error) string {
 	}
 }
 
-// forgejoIntegrationIDForProject 解析 attach 可用的 Forgejo 集成：PR URL 主机
-// 上必须存在部署级 Forgejo 集成（无则 40007），且项目绑定的代码集成就在同一
-// 主机上——部署级机器人 PAT 只服务代码仓真的在这个 Forgejo 上的项目，其它
-// 项目不得借它读项目外仓库的 PR 元数据（owner/repo 仅是 URL 文本，不参与授
-// 权判定）。同主机内跨仓库是有意支持的能力（跨仓 PR 关联）。集成被项目引用
-// 时不可删除（DeleteIfUnreferenced），项目绑定指向的行恒存在。
-func (s *IssueService) forgejoIntegrationIDForProject(project *model.Project, hostKey string) (string, error) {
+// forgejoIntegrationForProject 解析 attach 可用的 Forgejo 集成，返回集成行
+// 本身（供 ForgejoClientFor 单次读取，不二次按 id 重读）：项目绑定的代码集
+// 成必须在 PR URL 主机上——host_key 在同 kind 存活行内有部分唯一索引，绑定
+// 行主机一致即它就是该主机的集成。部署级机器人 PAT 只服务代码仓真的在这个
+// Forgejo 上的项目，其它项目不得借它读项目外仓库的 PR 元数据（owner/repo
+// 仅是 URL 文本，不参与授权判定）。同主机内跨仓库是有意支持的能力（跨仓
+// PR 关联）。集成被项目引用时不可删除（DeleteIfUnreferenced），项目绑定指
+// 向的行恒存在。
+func (s *IssueService) forgejoIntegrationForProject(project *model.Project, hostKey string) (*model.ForgeIntegration, error) {
 	if hostKey == "" {
-		return "", errs.ErrForgeIntegrationNotConfigured
-	}
-	id, _, found, err := s.forgeIntegrationRepo.FindByHostKey(hostKey, "")
-	if err != nil {
-		return "", errs.ErrInternal
-	}
-	if !found {
-		return "", errs.ErrForgeIntegrationNotConfigured
+		return nil, errs.ErrForgeIntegrationNotConfigured
 	}
 	if project.CodeIntegrationID == "" {
 		// parseRepoBinding 对 GitHub 仓恒返回空集成 id：空绑定不代表没配代码仓，
 		// 很可能是代码仓在内置 GitHub 上（含只配公开仓、未单独配代码仓的回落
 		// 情形，CodeRepo() 同口径判定）——文案按事实给路径，别指向死路。
 		if owner, _ := project.CodeRepo(); owner != "" {
-			return "", errs.New(errs.ErrForgeIntegrationNotConfigured.Code,
+			return nil, errs.New(errs.ErrForgeIntegrationNotConfigured.Code,
 				"该项目的代码仓在 GitHub 上，仅支持关联 GitHub PR；要关联 Forgejo PR 请先把项目代码仓改配到对应 Forgejo 实例")
 		}
-		return "", errs.New(errs.ErrForgeIntegrationNotConfigured.Code,
+		return nil, errs.New(errs.ErrForgeIntegrationNotConfigured.Code,
 			"该项目未配置代码仓库，请先在项目设置里配置代码仓库后再关联 PR")
 	}
 	bound, err := s.forgeIntegrationRepo.FindByID(project.CodeIntegrationID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return "", errs.New(errs.ErrForgeIntegrationNotConfigured.Code, "该项目绑定的代码集成已不存在，请先在项目设置里重新配置代码仓库")
+			return nil, errs.New(errs.ErrForgeIntegrationNotConfigured.Code, "该项目绑定的代码集成已不存在，请先在项目设置里重新配置代码仓库")
 		}
-		return "", errs.ErrInternal
+		return nil, errs.ErrInternal
 	}
 	if bound.HostKey != hostKey {
-		return "", errs.New(errs.ErrForgeIntegrationNotConfigured.Code, "该项目绑定的代码集成与 PR 所在主机不一致，请先在项目设置里调整代码仓库后再关联 PR")
+		return nil, errs.New(errs.ErrForgeIntegrationNotConfigured.Code, "该项目绑定的代码集成与 PR 所在主机不一致，请先在项目设置里调整代码仓库后再关联 PR")
 	}
-	return id, nil
-}
-
-// forgejoPRReader 按 Forgejo 集成行现取访问三件套（SSRF 安全 client + API 基
-// 址 + 解密 PAT）并组装 PR 读取客户端。集成不存在/kind 不符/解密失败报明确
-// 错误，不回落匿名或任何用户级凭证；凭证明文只进适配器，不落 service 字段。
-func (s *IssueService) forgejoPRReader(ctx context.Context, integrationID string) (forgePRReader, error) {
-	if s.forgeSource == nil {
-		return nil, errors.New("Forgejo 集成凭证来源未配置")
-	}
-	httpClient, apiBase, token, err := s.forgeSource.ForgejoClient(ctx, integrationID)
-	if err != nil {
-		return nil, err
-	}
-	return s.newForgejoPRReader(httpClient, apiBase, token), nil
+	return bound, nil
 }
 
 // forgejoSyncAccess 一次读取集成行得到的同步访问面：host 校验与 PR 取数用

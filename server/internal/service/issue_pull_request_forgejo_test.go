@@ -742,7 +742,7 @@ func TestIssueServiceSyncPullRequests_ForgejoFailureSanitized(t *testing.T) {
 // 不参与匹配语义。
 func TestIssueServiceForgejoIntegrationIDForHost_EmptyKeyRejected(t *testing.T) {
 	svc := setupTestServices(t)
-	_, err := svc.issueService.forgejoIntegrationIDForProject(&model.Project{}, "")
+	_, err := svc.issueService.forgejoIntegrationForProject(&model.Project{}, "")
 	appErr, ok := err.(*errs.AppError)
 	if !ok || appErr.Code != errs.ErrForgeIntegrationNotConfigured.Code {
 		t.Fatalf("expected %d for empty host key, got %v", errs.ErrForgeIntegrationNotConfigured.Code, err)

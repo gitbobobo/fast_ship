@@ -13,6 +13,8 @@ provider 双源（INT-181）：`github`（github.com PR，走项目凭证）与 
 - **sync 沿用 attach 时授权的集成凭据**，不重查项目当前绑定——attach 时校验项目与主机一致，之后凭据随快照走；项目改绑后旧行继续用原集成拉数，直到集成改指（sync 拦下）或用户显式解除。
 - **同主机内跨仓库**是支持的能力（跨仓 PR 关联），作用上限 = 项目所在 Forgejo 上机器人可见的仓库。
 
+**回滚注意**：本 PR 启动时会 DROP 旧四元唯一索引 `idx_issue_pull_requests_issue_pr` 并建五元 v2（含 host_key）。回滚到本 PR 之前的版本前，需先手工重建旧索引（`CREATE UNIQUE INDEX idx_issue_pull_requests_issue_pr ON issue_pull_requests(issue_id, provider, repo_full_name, number)`，若已有跨实例同名并存行需先清理），否则旧代码 Upsert 的 ON CONFLICT 找不到匹配唯一索引，attach 全部失败。
+
 ## 不变量
 
 - **唯一键** `(issue_id, provider, host_key, repo_full_name, number)`。attach 是 upsert：同主机重复 attach 幂等，不产生第二行，刷新同步字段；集成快照仅在新值非空时刷新（保护既有行不被空快照调用方抹掉）。不同实例的同名 PR 是不同键，并存。
