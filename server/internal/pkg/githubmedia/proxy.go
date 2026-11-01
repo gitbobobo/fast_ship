@@ -525,6 +525,16 @@ func (s *ProxyService) sweepExpiredEntries() {
 					_ = os.Rename(goneBin, binPath)
 					continue
 				}
+				// goneMeta 是两步发布的第二步：写侧可能恰在这个窗口写完新
+				// meta——能解析成未过期条目就把两个文件都还回去。
+				if data, err := os.ReadFile(goneMeta); err == nil {
+					var recheckEntry cacheEntry
+					if json.Unmarshal(data, &recheckEntry) == nil && !recheckEntry.expired(now) {
+						_ = os.Rename(goneMeta, metaPath)
+						_ = os.Rename(goneBin, binPath)
+						continue
+					}
+				}
 				_ = os.Remove(goneBin)
 				_ = os.Remove(goneMeta)
 				continue
