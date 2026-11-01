@@ -572,6 +572,37 @@ func TestReviewFaceCorruptedMetaFallsBackToData(t *testing.T) {
 	}
 }
 
+// 兜底嗅探的魔数覆盖面：DetectContentType 不认的审查面合法类型（tiff、
+// avif、heic、jxl 容器/裸流）都要判得出，否则「不可丢弃」对它们失效。
+func TestSniffReviewImageTypeCoversAdmissionSet(t *testing.T) {
+	cases := []struct {
+		name string
+		head []byte
+		want string
+	}{
+		{"png", []byte("\x89PNG\r\n\x1a\n"), "image/png"},
+		{"tiff-le", []byte("II*\x00\x08"), "image/tiff"},
+		{"tiff-be", []byte("MM\x00*"), "image/tiff"},
+		{"avif", []byte("\x00\x00\x00\x20ftypavif\x00"), "image/avif"},
+		{"heic", []byte("\x00\x00\x00\x20ftypheic\x00"), "image/heic"},
+		{"jxl-raw", []byte("\xff\x0a\x00\x00"), "image/jxl"},
+		{"jxl-container", []byte("\x00\x00\x00\x0cJXL \x0d\x0a\x87\x0a"), "image/jxl"},
+		{"octet-stream", []byte("plain text"), ""},
+	}
+	for _, tc := range cases {
+		got, ok := sniffReviewImageType(tc.head)
+		if tc.want == "" {
+			if ok {
+				t.Fatalf("%s: got %q, want miss", tc.name, got)
+			}
+			continue
+		}
+		if !ok || got != tc.want {
+			t.Fatalf("%s: got %q ok=%v, want %q", tc.name, got, ok, tc.want)
+		}
+	}
+}
+
 // F27 回归：上游没有 Content-Type 时按位图扩展名回退——位图扩展名收，
 // 非位图扩展名拒（ErrUnsupportedUpstreamMedia）。响应头里真没有 Content-Type
 // 的写法是把头置 nil：Go 服务器只在头不存在时做内容嗅探补头，置 nil 既压掉

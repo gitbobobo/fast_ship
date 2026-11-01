@@ -1506,9 +1506,8 @@ func scopedCacheID(normalized, scope string) string {
 }
 
 // servePersistedData review 截图面的持久兜底：meta 不可读时，.bin 存在就按
-// 命中返回——大小取 stat，类型用 http.DetectContentType（读文件头 512 字
-// 节）兜底；.bin 也不在才是真 miss。Cache-Control 统一 private（地址带用户
-// 凭证，不进共享缓存层）。
+// 命中返回——大小取 stat，类型走 sniffReviewImageType；.bin 也不在才是真
+// miss。Cache-Control 统一 private（地址带用户凭证，不进共享缓存层）。
 func (s *ProxyService) servePersistedData(normalized, cachePath string) (*CachedMedia, bool, error) {
 	info, err := os.Stat(cachePath)
 	if err != nil {
@@ -1524,8 +1523,8 @@ func (s *ProxyService) servePersistedData(normalized, cachePath string) (*Cached
 	if n == 0 {
 		return nil, false, nil
 	}
-	contentType := http.DetectContentType(head[:n])
-	if !strings.HasPrefix(contentType, "image/") {
+	contentType, ok := sniffReviewImageType(head[:n])
+	if !ok {
 		// 兜底类型不是位图：这一条按 miss（不让未知字节以持久资产名义流出），
 		// 但同样不在读路径删文件。
 		return nil, false, nil
@@ -1540,6 +1539,33 @@ func (s *ProxyService) servePersistedData(normalized, cachePath string) (*Cached
 		},
 		Path: cachePath,
 	}, true, nil
+}
+
+// sniffReviewImageType 判定 review 面兜底字节的图片类型。http.DetectContent
+// Type 只认 png/jpeg/gif/webp/bmp/ico，而审查面准入按 image/* 前缀放行
+// （avif/heic/tiff/jxl 都是合法持久资产）——「不可丢弃」不能依赖嗅探覆盖
+// 面，缺的魔数在这里补齐。
+func sniffReviewImageType(head []byte) (string, bool) {
+	if t := http.DetectContentType(head); strings.HasPrefix(t, "image/") {
+		return t, true
+	}
+	switch {
+	case len(head) >= 4 && (string(head[:4]) == "II*\x00" || string(head[:4]) == "MM\x00*"):
+		return "image/tiff", true
+	case len(head) >= 12 && string(head[4:8]) == "ftyp":
+		brand := string(head[8:12])
+		switch {
+		case strings.HasPrefix(brand, "av") || brand == "avis":
+			return "image/avif", true
+		case strings.HasPrefix(brand, "he") || brand == "mif1" || brand == "msf1":
+			return "image/heic", true
+		}
+	case len(head) >= 2 && head[0] == 0xFF && head[1] == 0x0A:
+		return "image/jxl", true
+	case len(head) >= 12 && string(head[:12]) == "\x00\x00\x00\x0cJXL \x0d\x0a\x87\x0a":
+		return "image/jxl", true
+	}
+	return "", false
 }
 
 func (s *ProxyService) cloneRelevantHeaders(header http.Header) http.Header {
