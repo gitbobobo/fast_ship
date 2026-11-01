@@ -1581,11 +1581,12 @@ func sniffReviewImageType(head []byte) (string, bool) {
 	case len(head) >= 4 && (string(head[:4]) == "II*\x00" || string(head[:4]) == "MM\x00*"):
 		return "image/tiff", true
 	case len(head) >= 12 && string(head[4:8]) == "ftyp":
-		brand := string(head[8:12])
-		switch {
-		case strings.HasPrefix(brand, "av") || brand == "avis":
+		// 品牌显式集合：前缀匹配会把 AV1 视频（av01）、HEVC 视频（hevc）当
+		// 图片写进 review_assets.mime_type。判不出就 miss，不猜。
+		switch string(head[8:12]) {
+		case "avif", "avis":
 			return "image/avif", true
-		case strings.HasPrefix(brand, "he") || brand == "mif1" || brand == "msf1":
+		case "heic", "heix", "heim", "heis", "mif1", "msf1":
 			return "image/heic", true
 		}
 	case len(head) >= 2 && head[0] == 0xFF && head[1] == 0x0A:

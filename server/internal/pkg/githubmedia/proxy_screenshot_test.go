@@ -585,6 +585,8 @@ func TestSniffReviewImageTypeCoversAdmissionSet(t *testing.T) {
 		{"tiff-le", []byte("II*\x00\x08"), "image/tiff"},
 		{"tiff-be", []byte("MM\x00*"), "image/tiff"},
 		{"avif", []byte("\x00\x00\x00\x20ftypavif\x00"), "image/avif"},
+		{"av01-video", []byte("\x00\x00\x00\x20ftypav01\x00"), ""},
+		{"hevc-video", []byte("\x00\x00\x00\x20ftyphevc\x00"), ""},
 		{"heic", []byte("\x00\x00\x00\x20ftypheic\x00"), "image/heic"},
 		{"jxl-raw", []byte("\xff\x0a\x00\x00"), "image/jxl"},
 		{"jxl-container", []byte("\x00\x00\x00\x0cJXL \x0d\x0a\x87\x0a"), "image/jxl"},
