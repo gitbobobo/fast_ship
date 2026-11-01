@@ -428,10 +428,10 @@ func (s *ProxyService) sweepExpiredEntries() {
 		return
 	}
 	now := time.Now().UTC()
-	// 扫描顺带回收上次进程被杀残留在隔离名的 .gone（rename 后 remove 前被
-	// 杀的残留，无人可达）。
+	// 扫描顺带回收上次进程被杀残留在隔离名的 .gone（.json.gone 与 .bin.gone
+	// 都是 rename 后 remove 前被杀的残留，无人可达）。
 	for _, e := range entries {
-		if strings.HasSuffix(e.Name(), ".json.gone") {
+		if strings.HasSuffix(e.Name(), ".gone") {
 			info, err := e.Info()
 			if err == nil && now.Sub(info.ModTime()) > s.cacheTTL {
 				_ = os.Remove(filepath.Join(s.cacheDir, e.Name()))
@@ -508,6 +508,12 @@ func (s *ProxyService) sweepExpiredEntries() {
 				goneBin := binPath + ".gone"
 				goneMeta := metaPath + ".gone"
 				if err := os.Rename(binPath, goneBin); err != nil {
+					continue
+				}
+				// rename 后看一眼 mtime：写侧恰好在这个窗口 rename 了新 data
+				// 的话，goneBin 的时间是新鲜的——还回去，本轮跳过。
+				if goneInfo, err := os.Stat(goneBin); err == nil && now.Sub(goneInfo.ModTime()) < 2*s.cacheTTL {
+					_ = os.Rename(goneBin, binPath)
 					continue
 				}
 				if err := os.Rename(metaPath, goneMeta); err != nil {
@@ -1307,8 +1313,11 @@ func (s *ProxyService) getCachedNormalized(normalized, scope string) (*CachedMed
 	}
 	// 走到这里的是带具体基础类型的条目：老缓存可能存着大写或带参数的原始
 	// 值，返回值改成规范化类型（小写去参）；空/基础类型为 octet-stream 的
-	// 旧条目已在上面判 miss。只改返回值，不重写 meta 文件。
+	// 旧条目已在上面判 miss。CacheControl 同理：旧条目存的是 public（代理
+	// 地址带 token，不该进共享缓存层），下发时一律覆写 private。只改返回
+	// 值，不重写 meta 文件。
 	entry.ContentType = normalizedType
+	entry.CacheControl = buildCacheControl(s.cacheTTL)
 
 	info, err := os.Stat(cachePath)
 	if err != nil {
