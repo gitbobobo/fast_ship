@@ -438,8 +438,12 @@ func TestReviewFaceSkipsPurgeKeepsEntries(t *testing.T) {
 		t.Fatalf("write scoped data: %v", err)
 	}
 
-	// review 面 purge 跳过时也不写标记（写标记在 purge 执行路径里），正好
-	// 覆盖「标记缺失」场景。
+	// svcOld 的构造已在 !guardedPurge 分支里补写过标记；本用例要守的是
+	// 「标记缺失时 review 面不清场」，所以显式删掉标记，让第二个服务的
+	// purgeLegacyCacheEntries 真正走进标记缺失路径。
+	if err := os.Remove(filepath.Join(svcOld.cacheDir, legacyScopeMarker)); err != nil {
+		t.Fatalf("drop marker: %v", err)
+	}
 
 	svc := newService(root, cfg)
 

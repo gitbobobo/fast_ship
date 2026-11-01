@@ -2,6 +2,21 @@
 
 `/api/github/media-proxy`（`githubmedia.NewProxyService`）是用户态代理：把 Issue 正文里的 GitHub 图片/视频改写成代理地址，前端凭地址栏里的 `?token=<JWT>` 拉取。同仓还有一条截图下载面（`githubmedia.NewReviewMediaService`），供 PR 视觉审查在服务端拉图落盘为 `review_assets`；两者共用 `ProxyService` 实现，但准入与防 SSRF 策略不同。
 
+## 缓存面边界（不变量）
+
+39 轮复审反复在同族问题上打转，根因是「面边界」没一次定清。规则可穷举，改动前先对照；与这条冲突的意见按冲突处理，不再逐条补丁：
+
+1. **面只有三个，规则按面定，不按调用点定。**
+   - 媒体代理面（`defaultCacheSubdir`）：缓存**可丢弃**。TTL 回收、scope 标记缺失时整目录清空、损坏条目回收，只发生在这里。
+   - 审查截图面（`review-screenshot-cache`）：缓存**不可丢弃**——`.bin` 是 `review_assets` 持久资产（`storage_path` 直指文件、`ensureAssets` 不重下）。任何代码路径不得删除它的条目；启动只建目录+补标记；无 TTL 删除、无 purge、无 sweeper。
+   - 无缓存出口（issue assets、avatars、screenshot content、crop）：不落缓存目录，只施加同源硬化头与 attachment 判据。
+2. **MIME/扩展门**：媒体代理面全量（`image/svg*`、`.svg`、HTML 拒 + fallback 归一化）；审查面只收位图；下载出口 `octet-stream`+`attachment` 不进文档上下文。
+3. **Cache-Control** 一律 `private`（URL 带 JWT），TTL 由 `s.cacheTTL` 派生，`cloneRelevantHeaders` 与缓存命中同源，不透传上游。
+4. **写侧两步发布**（data→binPath 再 meta→metaPath）。回收者对已 rename 走的文件，恢复前必须重读校验新鲜度，且恢复前校验目标路径未被写侧占据；不能安全恢复就丢弃旧字节，绝不覆盖新条目。
+5. **版本参数 v**：前端无条件重写为当前值；Go `ProxyURLVersion` 与前端 `MEDIA_PROXY_VERSION` 由 `TestProxyURLVersionMatchesFrontend` 断言一致，只涨一边直接红。
+
+这条不变量同时写在 `server/internal/pkg/githubmedia/proxy.go` 的包注释里，两处保持同步。
+
 ## 两条面
 
 - 用户态媒体代理面：URL 准入是 GitHub 域名白名单；内容收位图 + 视频（`image/*`、`video/*`，`application/octet-stream` 或缺 Content-Type 时按扩展名回退，集合为位图 + 视频）。回退放行时把类型改写成扩展名表里的具体媒体类型再回给客户端/写进缓存：具体类型是确定信息，不依赖浏览器嗅探（实测 Chromium 下同源 `<img>` 仍会嗅探 octet-stream 并解码，但那是实现细节，`<video>` 与其他客户端不保证）。这里只做类型准入，**不校验媒体字节**——伪装成 `image/png` 的 svg 字节仍会被回，可执行性靠准入 + `Content-Disposition` + CSP 的组合堵。Content-Type 歧义即拒：同一响应多个 `Content-Type` 值、或基础类型里含逗号（多值拼接），按不可识别类型拒；参数部分的逗号不算（`video/mp4; codecs="avc1.42E01E, mp4a.40.2"` 是合法写法），回包只给去掉参数的基础类型。扩展名按重定向之后的最终 URL 取（`resp.Request.URL`），否则 `a.png` 302 到 `b.svg` 且最终类型是 octet-stream 时能借原始扩展名放行。
