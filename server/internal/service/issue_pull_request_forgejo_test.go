@@ -274,7 +274,11 @@ func TestIssueServiceAttachPullRequest_ForgejoIntegrationMissing(t *testing.T) {
 func TestIssueServiceAttachPullRequest_ForgejoProjectNotBound(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")
-	project := createTestProject(t, svc.db, user.ID)
+	// 无任何代码仓（公开仓字段也清空）：文案才是「未配置代码仓库」。
+	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.GithubOwner = ""
+		p.GithubRepo = ""
+	})
 	issue := createTestIssue(t, svc.db, project.ID)
 	createForgejoIntegrationRow(t, svc.db, "fj-1", "https://forge.example.com", "fj-pat")
 
@@ -300,7 +304,7 @@ func TestIssueServiceAttachPullRequest_ForgejoProjectNotBound(t *testing.T) {
 	// 代码仓在 GitHub（CodeGithubOwner 有值、code_integration_id 空）的项目：
 	// 文案点明「仅支持 GitHub PR」，不指引改绑。
 	if err := svc.db.Model(&model.Project{}).Where("id = ?", project.ID).
-		Update("code_github_owner", "owner").Error; err != nil {
+		Updates(map[string]any{"code_github_owner": "owner", "code_github_repo": "repo"}).Error; err != nil {
 		t.Fatalf("set code github owner: %v", err)
 	}
 	_, err = svc.issueService.AttachIssuePullRequest(issue.ID, user.ID, AttachIssuePullRequestRequest{
@@ -312,6 +316,23 @@ func TestIssueServiceAttachPullRequest_ForgejoProjectNotBound(t *testing.T) {
 	}
 	if !strings.Contains(appErr.Message, "仅支持关联 GitHub PR") {
 		t.Fatalf("expected github-bound message, got %q", appErr.Message)
+	}
+
+	// 公开仓回落：code 字段清空、只配公开 GitHub 仓（CodeRepo() 回落口径）
+	// 也算「代码仓在 GitHub」，不能落「未配置代码仓库」。
+	if err := svc.db.Model(&model.Project{}).Where("id = ?", project.ID).
+		Updates(map[string]any{"code_github_owner": "", "github_owner": "pub-owner", "github_repo": "pub-repo"}).Error; err != nil {
+		t.Fatalf("set public repo only: %v", err)
+	}
+	_, err = svc.issueService.AttachIssuePullRequest(issue.ID, user.ID, AttachIssuePullRequestRequest{
+		Url: "https://forge.example.com/o/r/pulls/9",
+	})
+	appErr, ok = err.(*errs.AppError)
+	if !ok || appErr.Code != errs.ErrForgeIntegrationNotConfigured.Code {
+		t.Fatalf("expected %d for public-repo-fallback project, got %v", errs.ErrForgeIntegrationNotConfigured.Code, err)
+	}
+	if !strings.Contains(appErr.Message, "仅支持关联 GitHub PR") {
+		t.Fatalf("expected fallback message, got %q", appErr.Message)
 	}
 }
 

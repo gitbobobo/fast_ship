@@ -458,8 +458,9 @@ func (s *IssueService) forgejoIntegrationIDForProject(project *model.Project, ho
 	}
 	if project.CodeIntegrationID == "" {
 		// parseRepoBinding 对 GitHub 仓恒返回空集成 id：空绑定不代表没配代码仓，
-		// 很可能是代码仓在内置 GitHub 上——文案按事实给路径，别指向死路。
-		if project.CodeGithubOwner != "" {
+		// 很可能是代码仓在内置 GitHub 上（含只配公开仓、未单独配代码仓的回落
+		// 情形，CodeRepo() 同口径判定）——文案按事实给路径，别指向死路。
+		if owner, _ := project.CodeRepo(); owner != "" {
 			return "", errs.New(errs.ErrForgeIntegrationNotConfigured.Code,
 				"该项目的代码仓在 GitHub 上，仅支持关联 GitHub PR；要关联 Forgejo PR 请先把项目代码仓改配到对应 Forgejo 实例")
 		}
