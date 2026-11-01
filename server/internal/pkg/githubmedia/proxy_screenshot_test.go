@@ -473,6 +473,48 @@ func TestReviewFaceSkipsPurgeKeepsEntries(t *testing.T) {
 	}
 }
 
+// review 面：过期 + 旧类型（octet-stream）条目仍命中——持久资产不过期、
+// 不因类型复核 miss（不变量第 1 条：TTL 与退役只作用于媒体代理面）。否则
+// 探测时上游已删/转私的截图会被迫重下失败，视觉审查被跳过，而持久文件其
+// 实还在。
+func TestReviewFaceExpiredEntryStillServed(t *testing.T) {
+	cfg := serviceConfig{
+		cacheSubdir: "review-screenshot-cache",
+		allowURL:    func(u *url.URL) bool { return true },
+		imagesOnly:  true,
+	}
+	svc := newService(t.TempDir(), cfg)
+	normalized, err := svc.normalize("https://uiv.example.com/old.png")
+	if err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	entry := map[string]any{
+		"url":          normalized,
+		"content_type": "application/octet-stream",
+		"size":         5,
+		"cached_at":    time.Now().UTC().Add(-48 * time.Hour).Format(time.RFC3339Nano),
+		"expires_at":   time.Now().UTC().Add(-24 * time.Hour).Format(time.RFC3339Nano),
+	}
+	data, err := json.Marshal(entry)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := os.MkdirAll(svc.cacheDir, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(svc.metaPath(normalized, ""), data, 0o640); err != nil {
+		t.Fatalf("write meta: %v", err)
+	}
+	if err := os.WriteFile(svc.dataPath(normalized, ""), []byte("png"), 0o640); err != nil {
+		t.Fatalf("write data: %v", err)
+	}
+
+	cached, ok, err := svc.GetCached(normalized)
+	if err != nil || !ok || cached == nil {
+		t.Fatalf("cached = %+v ok = %v err = %v, want 持久条目照常命中（过期不复核）", cached, ok, err)
+	}
+}
+
 // F27 回归：上游没有 Content-Type 时按位图扩展名回退——位图扩展名收，
 // 非位图扩展名拒（ErrUnsupportedUpstreamMedia）。响应头里真没有 Content-Type
 // 的写法是把头置 nil：Go 服务器只在头不存在时做内容嗅探补头，置 nil 既压掉

@@ -7,7 +7,8 @@
 //     review_assets 持久资产（storage_path 直指文件、ensureAssets 不重下）。
 //     任何代码路径不得删除它的条目；启动只建目录+补标记；无 TTL 删除、
 //     无 purge、无条目回收 sweeper（media-*.tmp 清理是唯一例外，
-//     sweepStaleTmpFiles 不触碰 .bin/.json）。
+//     sweepStaleTmpFiles 不触碰 .bin/.json）；读路径命中即返回（不过期、
+//     不因类型复核 miss）。
 //     - 无缓存出口（issue assets、avatars、screenshot content、crop）：不落
 //     缓存目录，只施加同源硬化头与 attachment 判据。
 //  2. MIME/扩展门：媒体代理面全量（image/svg*、.svg、HTML 拒 + fallback 归
@@ -189,8 +190,11 @@ type PassThroughResponse struct {
 }
 
 type ProxyService struct {
-	client            *http.Client
-	cacheDir          string
+	client   *http.Client
+	cacheDir string
+	// cacheSubdir 该服务实例的缓存面子目录；读路径按它区分媒体代理面（TTL
+	// 与退役生效）和 review 截图面（持久资产，命中即返回，不过期不复核）。
+	cacheSubdir       string
 	cacheTTL          time.Duration
 	maxCacheEntrySize int64
 	allowURL          func(*url.URL) bool
@@ -378,6 +382,7 @@ func newService(cacheRoot string, cfg serviceConfig) *ProxyService {
 	s := &ProxyService{
 		client:            cfg.client,
 		cacheDir:          filepath.Join(cacheRoot, cfg.cacheSubdir),
+		cacheSubdir:       cfg.cacheSubdir,
 		cacheTTL:          cfg.cacheTTL,
 		maxCacheEntrySize: cfg.maxCacheEntrySize,
 		allowURL:          cfg.allowURL,
@@ -539,42 +544,29 @@ func (s *ProxyService) sweepExpiredEntries() {
 					continue
 				}
 				// rename 后看一眼 mtime：写侧恰好在这个窗口 rename 了新 data
-				// 的话，goneBin 的时间是新鲜的——还回去，本轮跳过。
+				// 的话，goneBin 的时间是新鲜的——原子放回，本轮跳过。
 				if goneInfo, err := os.Stat(goneBin); err == nil && now.Sub(goneInfo.ModTime()) < 2*s.cacheTTL {
-					_ = os.Rename(goneBin, binPath)
+					restoreGoneBin(goneBin, binPath)
 					continue
 				}
 				if err := os.Rename(metaPath, goneMeta); err != nil {
-					_ = os.Rename(goneBin, binPath)
+					restoreGoneBin(goneBin, binPath)
 					continue
 				}
 				// goneMeta 是两步发布的第二步：写侧可能恰在这个窗口写完新
 				// meta——能解析成未过期条目说明新条目已发布。此时只还 meta，
-				// goneBin 的去留看 binPath：已被写侧的新 data 占据就丢掉旧字
-				// 节（无条件 rename 回去会把新 data 覆盖成旧字节，条目在一个
-				// TTL 内内容与元数据错位）；binPath 还空着才把旧字节放回去。
+				// 旧字节交给 restoreGoneBin 原子放回（写侧已占 binPath 就自动
+				// 丢弃，绝不覆盖新条目）。
 				if data, err := os.ReadFile(goneMeta); err == nil {
 					var recheckEntry cacheEntry
 					if json.Unmarshal(data, &recheckEntry) == nil && !recheckEntry.expired(now) {
 						_ = os.Rename(goneMeta, metaPath)
-						if _, occupied := os.Stat(binPath); occupied == nil {
-							_ = os.Remove(goneBin)
-						} else {
-							_ = os.Rename(goneBin, binPath)
-						}
+						restoreGoneBin(goneBin, binPath)
 						continue
 					}
 				}
-				// 旧字节分支的回滚同理：binPath 被占据就丢弃旧字节，不留覆盖。
-				dropGoneBin := func() {
-					if _, occupied := os.Stat(binPath); occupied == nil {
-						_ = os.Remove(goneBin)
-					} else {
-						_ = os.Rename(goneBin, binPath)
-					}
-				}
 				_ = os.Remove(goneMeta)
-				dropGoneBin()
+				restoreGoneBin(goneBin, binPath)
 				continue
 			}
 			if now.Sub(info.ModTime()) < 2*s.cacheTTL {
@@ -680,6 +672,18 @@ func (s *ProxyService) sweepStaleTmpFiles(now time.Time) {
 		}
 		_ = os.Remove(filepath.Join(s.cacheDir, name))
 	}
+}
+
+// restoreGoneBin 把隔离的旧字节原子放回 binPath。os.Link 不会覆盖已存在的
+// 目标：写侧恰好在该窗口发布了新 data 时 link 失败（EEXIST），旧字节直接
+// 丢弃——先 Stat 后 Rename 的两步恢复有 TOCTOU 窗口，会拿旧字节盖掉新 data
+// （不变量第 4 条：不能安全恢复就丢弃，绝不覆盖新条目）。
+func restoreGoneBin(goneBin, binPath string) {
+	if err := os.Link(goneBin, binPath); err != nil {
+		_ = os.Remove(goneBin)
+		return
+	}
+	_ = os.Remove(goneBin)
 }
 
 // legacyScopeMarker scope 进缓存键之前的存量条目不可信标记：老条目的 meta
@@ -1356,41 +1360,54 @@ func (s *ProxyService) getCachedNormalized(normalized, scope string) (*CachedMed
 		return nil, false, nil
 	}
 
-	// 过期条目只按 miss 处理，不在读路径删文件——与下面的内容复核同一约束：
-	// GetCached 不持下载锁，这里的 os.Remove 会与正在写盘的同 key 下载竞态，
-	// 最坏删掉别人刚发布的新条目。过期条目的退役路径：下次读取按 miss 触发
-	// 重下，fetchAndCache 持下载锁写盘时按同一 key 覆盖 meta/data。
-	if entry.expired(time.Now().UTC()) {
-		return nil, false, nil
-	}
+	// 面边界（不变量第 1 条）：TTL 与退役只作用于媒体代理面。review 截图面
+	// 的 .bin 是持久资产，过期不触发重下——重下会在上游内容变化时覆盖旧资
+	// 产（DB 的 size/mime 不随之更新），上游删除/转私时历史截图会永久不可
+	// 用。该面命中即返回持久条目；类型复核同样跳过：旧条目类型过不了当前
+	// 准入时按重下处理会把持久资产换成新字节，与「不可丢弃」矛盾（这类条
+	// 目响应带 nosniff + CSP sandbox，不构成脚本执行面）。
+	if s.cacheSubdir == defaultCacheSubdir {
+		// 过期条目只按 miss 处理，不在读路径删文件——与下面的内容复核同一
+		// 约束：GetCached 不持下载锁，这里的 os.Remove 会与正在写盘的同 key
+		// 下载竞态，最坏删掉别人刚发布的新条目。过期条目的退役路径：下次
+		// 读取按 miss 触发重下，fetchAndCache 持下载锁写盘时按同一 key 覆盖
+		// meta/data。
+		if entry.expired(time.Now().UTC()) {
+			return nil, false, nil
+		}
 
-	// 内容类型按当前准入规则复核：旧准入口径（收 svg）写进缓存的历史条目
-	// 命中时按 miss 走重下，不靠 bump 缓存标记全量清目录（INT-171）。
-	// 不过关只返回 miss，不在读路径删文件：GetCached 不持下载锁，这里删
-	// meta/data 会与正在写盘的同 key 下载竞态，最坏删掉别人刚发布的新条目。
-	// 下一次成功下载按同一 key 覆盖 meta/data，不再被重下的由目录扫描回收。
-	// meta 是单值小文件，多值歧义只在响应 header 判定里出现，这里直接走
-	// 单值判定。旧条目 ContentType 剥参小写后为空或 octet-stream 时保守判
-	// miss：它们的放行依赖扩展名，而扩展名要用重定向后的最终 URL 才算得对，
-	// meta 里没存最终 URL——宁可贵一次重下，不做「按原始 URL 的扩展名放行」
-	// 这种与写入侧不一致的复核（svg 字节会以回填的 image/png 命中，一个 TTL
-	// 内都错）。剥参后比较：旧写入路径原样存上游值，`octet-stream;
-	// charset=binary` 这类带参数形态也要拦住。
-	baseType := strings.ToLower(strings.TrimSpace(strings.Split(entry.ContentType, ";")[0]))
-	if baseType == "" || baseType == "application/octet-stream" {
-		return nil, false, nil
+		// 内容类型按当前准入规则复核：旧准入口径（收 svg）写进缓存的历史条
+		// 目命中时按 miss 走重下，不靠 bump 缓存标记全量清目录（INT-171）。
+		// 不过关只返回 miss，不在读路径删文件：GetCached 不持下载锁，这里删
+		// meta/data 会与正在写盘的同 key 下载竞态，最坏删掉别人刚发布的新条
+		// 目。下一次成功下载按同一 key 覆盖 meta/data，不再被重下的由目录扫
+		// 描回收。meta 是单值小文件，多值歧义只在响应 header 判定里出现，这
+		// 里直接走单值判定。旧条目 ContentType 剥参小写后为空或 octet-stream
+		// 时保守判 miss：它们的放行依赖扩展名，而扩展名要用重定向后的最终
+		// URL 才算得对，meta 里没存最终 URL——宁可贵一次重下，不做「按原始
+		// URL 的扩展名放行」这种与写入侧不一致的复核（svg 字节会以回填的
+		// image/png 命中，一个 TTL 内都错）。剥参后比较：旧写入路径原样存上
+		// 游值，`octet-stream; charset=binary` 这类带参数形态也要拦住。
+		baseType := strings.ToLower(strings.TrimSpace(strings.Split(entry.ContentType, ";")[0]))
+		if baseType == "" || baseType == "application/octet-stream" {
+			return nil, false, nil
+		}
+		normalizedType, allowed := s.normalizeMediaContentType(entry.ContentType, normalized)
+		if !allowed {
+			return nil, false, nil
+		}
+		// 走到这里的是带具体基础类型的条目：老缓存可能存着大写或带参数的原
+		// 始值，返回值改成规范化类型（小写去参）；空/基础类型为 octet-stream
+		// 的旧条目已在上面判 miss。CacheControl 同理：旧条目存的是 public（代
+		// 理地址带 token，不该进共享缓存层），下发时一律覆写 private。只改返
+		// 回值，不重写 meta 文件。
+		entry.ContentType = normalizedType
+		entry.CacheControl = buildCacheControl(s.cacheTTL)
+	} else {
+		// 持久面：类型原样下发（老条目可能是 octet-stream/带参数原始值），
+		// Cache-Control 仍统一 private。
+		entry.CacheControl = buildCacheControl(s.cacheTTL)
 	}
-	normalizedType, allowed := s.normalizeMediaContentType(entry.ContentType, normalized)
-	if !allowed {
-		return nil, false, nil
-	}
-	// 走到这里的是带具体基础类型的条目：老缓存可能存着大写或带参数的原始
-	// 值，返回值改成规范化类型（小写去参）；空/基础类型为 octet-stream 的
-	// 旧条目已在上面判 miss。CacheControl 同理：旧条目存的是 public（代理
-	// 地址带 token，不该进共享缓存层），下发时一律覆写 private。只改返回
-	// 值，不重写 meta 文件。
-	entry.ContentType = normalizedType
-	entry.CacheControl = buildCacheControl(s.cacheTTL)
 
 	info, err := os.Stat(cachePath)
 	if err != nil {
