@@ -100,14 +100,14 @@ func (s *IssueService) AttachIssuePullRequest(issueID, userID string, req Attach
 	case model.IssuePullRequestProviderForgejo:
 		link.Provider = model.IssuePullRequestProviderForgejo
 		link.RepoFullName = parsed.Owner + "/" + parsed.Repo
-		integrationID, err := s.forgejoIntegrationIDForHost(parsed.HostKey)
+		integrationID, err := s.forgejoIntegrationIDForProject(project, parsed.HostKey)
 		if err != nil {
 			return nil, err
 		}
 		link.ForgeIntegrationID = integrationID
 		reader, err := s.forgejoPRReader(ctx, integrationID)
 		if err != nil {
-			return nil, err
+			return nil, errs.New(errs.ErrForgeAPI.Code, s.forgejoSourceFailureText(err))
 		}
 		pr, err := reader.GetPullRequest(ctx, link.RepoFullName, parsed.Number)
 		if err != nil {
@@ -199,9 +199,15 @@ func (s *IssueService) SyncIssuePullRequests(issueID, userID string) (*IssuePull
 
 		switch link.Provider {
 		case model.IssuePullRequestProviderForgejo:
+			if link.ForgeIntegrationID == "" {
+				// 快照缺失是关联行自身的数据问题（非集成凭证面故障），
+				// 文案要指引用户解除重联，不走统一脱敏文案。
+				result.Failures = append(result.Failures, pullRequestSyncFailure(link, "关联行缺少 Forgejo 集成快照，请解除后重新关联"))
+				continue
+			}
 			reader, err := forgejoSyncReader(s, forgeReaders, forgeReaderErrs, ctx, link)
 			if err != nil {
-				result.Failures = append(result.Failures, pullRequestSyncFailure(link, err.Error()))
+				result.Failures = append(result.Failures, pullRequestSyncFailure(link, s.forgejoSourceFailureText(err)))
 				continue
 			}
 			pr, err := reader.GetPullRequest(ctx, link.RepoFullName, link.Number)
@@ -375,11 +381,23 @@ func pullRequestAccessHint(err error, kind pullRequestCredentialKind) string {
 func (s *IssueService) forgejoPullRequestFailureText(op string, err error) string {
 	var statusErr *forge.StatusError
 	if errors.As(err, &statusErr) {
+		// 状态码分支同样落日志：URL 与响应体是排查 404/403/限流的关键痕迹，
+		// 只进日志不外显。
+		s.logger.Error(op+"失败", zap.Int("status", statusErr.StatusCode), zap.String("url", statusErr.URL), zap.String("body", statusErr.Body))
 		return fmt.Sprintf("%s 失败（Forgejo API 状态码 %d）%s", op, statusErr.StatusCode, forgejoPullRequestAccessHint(err))
 	}
-	// 传输层错误还可能带内部主机名；全文进日志，对外只留固定提示。
+	// 传输层错误可能带内部主机名，响应解析失败可能意味着端点异常——原文
+	// 进日志，对外归一为连接/响应异常，不把排查引向单一方面。
 	s.logger.Error(op+"失败", zap.Error(err))
-	return op + " 失败：无法连接 Forgejo 服务，请检查集成配置"
+	return op + " 失败：Forgejo 服务连接或响应异常，请检查集成配置与网络"
+}
+
+// forgejoSourceFailureText 集成凭证面故障（集成行被删、kind 不符、PAT 解密
+// 失败）：ForgeClientSource 的错误原文带内部集成 id，只进日志；对外给统一
+// 脱敏文案，attach 报 50206、sync 单行失败共用。
+func (s *IssueService) forgejoSourceFailureText(err error) string {
+	s.logger.Error("Forgejo 集成凭证面故障", zap.Error(err))
+	return "Forgejo 集成不可用或已被删除，请检查集成管理配置"
 }
 
 // forgejoPullRequestAccessHint 对 Forgejo 的权限类错误、404 与限流追加排查
@@ -405,12 +423,13 @@ func forgejoPullRequestAccessHint(err error) string {
 	}
 }
 
-// forgejoIntegrationIDForHost 按 PR URL 主机的归一键（forges.HostKey，与集成
-// 行落库同口径）查部署级 Forgejo 集成。未配置返回 40007 明确指向集成管理；
-// 只用 forge_integrations 的机器人 PAT，不借项目或用户级凭证。空键直接按未
-// 配置处理：脏集成行的 host_key 就是空串，且部分唯一索引排除空串，不参与
-// 匹配语义。
-func (s *IssueService) forgejoIntegrationIDForHost(hostKey string) (string, error) {
+// forgejoIntegrationIDForProject 解析 attach 可用的 Forgejo 集成：PR URL 主机
+// 上必须存在部署级 Forgejo 集成（无则 40007），且项目绑定的代码集成就在同一
+// 主机上——部署级机器人 PAT 只服务代码仓真的在这个 Forgejo 上的项目，其它
+// 项目不得借它读项目外仓库的 PR 元数据（owner/repo 仅是 URL 文本，不参与授
+// 权判定）。同主机内跨仓库是有意支持的能力（跨仓 PR 关联）。集成被项目引用
+// 时不可删除（DeleteIfUnreferenced），项目绑定指向的行恒存在。
+func (s *IssueService) forgejoIntegrationIDForProject(project *model.Project, hostKey string) (string, error) {
 	if hostKey == "" {
 		return "", errs.ErrForgeIntegrationNotConfigured
 	}
@@ -420,6 +439,19 @@ func (s *IssueService) forgejoIntegrationIDForHost(hostKey string) (string, erro
 	}
 	if !found {
 		return "", errs.ErrForgeIntegrationNotConfigured
+	}
+	if project.CodeIntegrationID == "" {
+		return "", errs.New(errs.ErrForgeIntegrationNotConfigured.Code, "该项目未配置代码仓库集成，请先在项目设置里配置代码仓库后再关联 PR")
+	}
+	bound, err := s.forgeIntegrationRepo.FindByID(project.CodeIntegrationID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return "", errs.New(errs.ErrForgeIntegrationNotConfigured.Code, "该项目绑定的代码集成已不存在，请先在项目设置里重新配置代码仓库")
+		}
+		return "", errs.ErrInternal
+	}
+	if bound.HostKey != hostKey {
+		return "", errs.New(errs.ErrForgeIntegrationNotConfigured.Code, "该项目绑定的代码集成与 PR 所在主机不一致，请先在项目设置里调整代码仓库后再关联 PR")
 	}
 	return id, nil
 }
@@ -440,18 +472,13 @@ func (s *IssueService) forgejoPRReader(ctx context.Context, integrationID string
 
 // forgejoSyncReader 按「集成快照 id」（attach 时落的 ForgeIntegrationID）复用/
 // 缓存 Forgejo 读取客户端；构造错误同样按 id 缓存，同集成的后续行各自记一条
-// 失败而不是重复构造。快照为空（无法重建客户端）或集成行被删/解密失败都只算
-// 单行失败，不影响其余行。
+// 失败而不是重复构造。调用方先拦快照为空的行；集成行被删/解密失败只算单行
+// 失败，不影响其余行。
 func forgejoSyncReader(s *IssueService, readers map[string]forgePRReader, readerErrs map[string]error, ctx context.Context, link *model.IssuePullRequest) (forgePRReader, error) {
 	if reader, ok := readers[link.ForgeIntegrationID]; ok {
 		return reader, nil
 	}
 	if err, failed := readerErrs[link.ForgeIntegrationID]; failed {
-		return nil, err
-	}
-	if link.ForgeIntegrationID == "" {
-		err := errors.New("关联行缺少 Forgejo 集成快照，请解除后重新关联")
-		readerErrs[link.ForgeIntegrationID] = err
 		return nil, err
 	}
 	reader, err := s.forgejoPRReader(ctx, link.ForgeIntegrationID)
@@ -608,14 +635,15 @@ func applyForgePullRequestData(link *model.IssuePullRequest, pr *forge.PullReque
 	link.UpdatedAt = now
 }
 
-// pullRequestStateFromForge 映射 PR 状态：Forgejo 的 closed 且 merged_at 非空
-// 视为 merged——与 pullRequestStateFromGitHub 的 closed+merged_at 口径一致，
-// merged 行的 merged_at 恒有值（OpenAPI 对 merged 状态的承诺）。
+// pullRequestStateFromForge 映射 PR 状态：Forgejo 的 closed 且平台标记合并
+// （merged=true 或 merged_at 非空，历史/异常快照两者可能缺一）视为 merged——
+// 与 pullRequestStateFromGitHub 的 closed+merged_at 口径对齐，避免「平台已标
+// merged 但 merged_at 缺失」的老数据永久显示 closed。
 func pullRequestStateFromForge(pr *forge.PullRequest) model.IssuePullRequestState {
 	if pr.State != "closed" {
 		return model.IssuePullRequestStateOpen
 	}
-	if pr.MergedAt != nil {
+	if pr.Merged || pr.MergedAt != nil {
 		return model.IssuePullRequestStateMerged
 	}
 	return model.IssuePullRequestStateClosed

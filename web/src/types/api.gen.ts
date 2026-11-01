@@ -3838,7 +3838,7 @@ export interface components {
         /** @enum {string} */
         IssueSyncStatus: "idle" | "running" | "failed" | "completed";
         /**
-         * @description merged = GitHub 上 closed 且 merged_at 非空，或 Forgejo 上 closed 且 merged=true
+         * @description merged = GitHub 上 closed 且 merged_at 非空，或 Forgejo 上 closed 且平台标记合并（merged=true 或 merged_at 非空，异常快照可能只有其一）
          * @enum {string}
          */
         IssuePullRequestState: "open" | "closed" | "merged";

@@ -19,20 +19,25 @@ func (r *IssuePullRequestRepository) Create(link *model.IssuePullRequest) error 
 }
 
 // Upsert 以业务唯一键 (issue_id, provider, repo_full_name, number) 原子插入或刷新：
-// 冲突时更新同步字段并保留既有主键；forge_integration_id 一并刷新——重复
-// attach 时集成可能已换绑，快照必须跟随本次解析结果。link_origin 只升不降——
-// 手动 attach 可把 synced 行升级为 manual，反向不允许（避免同步投影把手动关
-// 联降级、继而被 DeleteMissingSynced 清掉）。
+// 冲突时更新同步字段并保留既有主键；forge_integration_id 只在新值非空时刷新
+// （重复 attach 换绑时快照跟随本次解析；空快照的调用方——如未来的同步投影
+// ——不能把 manual 行的快照抹掉，那会让 sync 永久报缺快照）。link_origin 只
+// 升不降——手动 attach 可把 synced 行升级为 manual，反向不允许（避免同步投
+// 影把手动关联降级、继而被 DeleteMissingSynced 清掉）。
 func (r *IssuePullRequestRepository) Upsert(link *model.IssuePullRequest) error {
 	set := clause.AssignmentColumns([]string{
 		"html_url", "title", "state", "is_draft", "author_login",
 		"head_ref", "base_ref", "merged_at", "closed_at", "synced_at", "updated_at",
-		"forge_integration_id",
 	})
-	set = append(set, clause.Assignment{
-		Column: clause.Column{Name: "link_origin"},
-		Value:  gorm.Expr("CASE WHEN excluded.link_origin = 'manual' THEN 'manual' ELSE issue_pull_requests.link_origin END"),
-	})
+	set = append(set,
+		clause.Assignment{
+			Column: clause.Column{Name: "forge_integration_id"},
+			Value:  gorm.Expr("CASE WHEN excluded.forge_integration_id <> '' THEN excluded.forge_integration_id ELSE issue_pull_requests.forge_integration_id END"),
+		},
+		clause.Assignment{
+			Column: clause.Column{Name: "link_origin"},
+			Value:  gorm.Expr("CASE WHEN excluded.link_origin = 'manual' THEN 'manual' ELSE issue_pull_requests.link_origin END"),
+		})
 	return r.db.Clauses(clause.OnConflict{
 		Columns: []clause.Column{
 			{Name: "issue_id"},

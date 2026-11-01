@@ -8,36 +8,56 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/pkg/forges"
 )
 
-// migrateForgeHostKeys 给存量 forge_integrations 行回填 host_key（INT-166）。
+// migrateForgeHostKeys 给存量 forge_integrations 行回填/重算 host_key（INT-166，
+// INT-181 扩为重算）。
 //
-// host_key 是 base_url 的归一键（forges.HostKey：小写 host + scheme 缺省端口），
-// 同归一主机的部分唯一索引 idx_forge_integrations_host_key 靠它兜应用层查重
-// （ensureHostAvailable）的并发窗口。AutoMigrate 给存量库加出的列是 NULL，这里
-// 按 base_url 现算写回；解析不出主机键的脏行写空串（部分唯一索引排除空串，
-// 不会因两条脏行撞索引而挡启动）。
+// host_key 是 base_url 的归一键（forges.HostKey：小写 host + scheme 缺省端口 +
+// 数字端口统一拼写），同归一主机的部分唯一索引 idx_forge_integrations_host_key
+// 靠它兜应用层查重（ensureHostAvailable）的并发窗口。AutoMigrate 给存量库加出
+// 的列是 NULL，这里按 base_url 现算写回；解析不出主机键的脏行写空串（部分唯
+// 一索引排除空串，不会因两条脏行撞索引而挡启动）。HostKey 口径升级（如端口
+// 归一）后，存量行与现算键不一致的也一并重算，避免「项目能绑定、PR 挂不上」
+// 的查空。
 //
-// 幂等：只更新 host_key 为 NULL 或空串的行，重复启动无副作用。必须在
+// 幂等：只更新 host_key 为 NULL/空串或与现算键不一致的行；目标键已被别的行
+// 占用时跳过并记日志（唯一索引兜底），重复启动无副作用。必须在
 // createBootIndexes 之前执行（索引建在回填完的数据上）。
 func migrateForgeHostKeys(db *gorm.DB, logger *zap.Logger) error {
 	var rows []model.ForgeIntegration
 	if err := db.Model(&model.ForgeIntegration{}).
-		Select("id, base_url").
-		Where("host_key IS NULL OR host_key = ''").
+		Select("id, base_url, host_key").
 		Find(&rows).Error; err != nil {
 		return err
 	}
-	if len(rows) == 0 {
-		return nil
-	}
+	backfilled := 0
 	for _, row := range rows {
+		want := forges.HostKey(row.BaseURL)
+		if want == row.HostKey {
+			continue
+		}
+		// 目标键被其他行占用：跳过让唯一索引与人工介入兜底，不硬写。
+		var taken int64
 		if err := db.Model(&model.ForgeIntegration{}).
-			Where("id = ?", row.ID).
-			Update("host_key", forges.HostKey(row.BaseURL)).Error; err != nil {
+			Where("host_key = ? AND id <> ?", want, row.ID).
+			Count(&taken).Error; err != nil {
 			return err
 		}
+		if taken > 0 {
+			if logger != nil {
+				logger.Warn("代码集成 host_key 重算冲突，跳过该行",
+					zap.String("id", row.ID), zap.String("host_key", row.HostKey), zap.String("want", want))
+			}
+			continue
+		}
+		if err := db.Model(&model.ForgeIntegration{}).
+			Where("id = ?", row.ID).
+			Update("host_key", want).Error; err != nil {
+			return err
+		}
+		backfilled++
 	}
-	if logger != nil {
-		logger.Info("代码集成 host_key 已回填", zap.Int("rows", len(rows)))
+	if logger != nil && backfilled > 0 {
+		logger.Info("代码集成 host_key 已回填/重算", zap.Int("rows", backfilled))
 	}
 	return nil
 }

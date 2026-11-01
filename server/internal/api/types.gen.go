@@ -3692,7 +3692,7 @@ type IssuePullRequest struct {
 	// RepoFullName owner/repo；允许与项目配置的仓库不同（跨仓库 attach）
 	RepoFullName string `json:"repo_full_name"`
 
-	// State merged = GitHub 上 closed 且 merged_at 非空，或 Forgejo 上 closed 且 merged=true
+	// State merged = GitHub 上 closed 且 merged_at 非空，或 Forgejo 上 closed 且平台标记合并（merged=true 或 merged_at 非空，异常快照可能只有其一）
 	State IssuePullRequestState `json:"state"`
 
 	// SyncedAt 最近一次从远端 forge 刷新成功的时间
@@ -3704,7 +3704,7 @@ type IssuePullRequest struct {
 // IssuePullRequestLinkOrigin manual=用户显式 attach；synced=远端同步投影产生（清理逻辑只作用于 synced）
 type IssuePullRequestLinkOrigin = model.IssuePullRequestLinkOrigin
 
-// IssuePullRequestState merged = GitHub 上 closed 且 merged_at 非空，或 Forgejo 上 closed 且 merged=true
+// IssuePullRequestState merged = GitHub 上 closed 且 merged_at 非空，或 Forgejo 上 closed 且平台标记合并（merged=true 或 merged_at 非空，异常快照可能只有其一）
 type IssuePullRequestState = model.IssuePullRequestState
 
 // IssuePullRequestSummary Issue 关联 PR 的聚合计数；closed 计数 = total - open - merged

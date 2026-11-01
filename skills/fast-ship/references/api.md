@@ -2097,7 +2097,7 @@ Issue CRUD、过滤、同步、清单、发货钩子与图片附件
 | `items[].pull_requests[].number` | integer | 是 |  |
 | `items[].pull_requests[].html_url` | string | 是 |  |
 | `items[].pull_requests[].title` | string | 是 |  |
-| `items[].pull_requests[].state` | string（enum: open \| closed \| merged） | 是 | merged = GitHub 上 closed 且 merged_at 非空，或 Forgejo 上 closed 且 merged=true |
+| `items[].pull_requests[].state` | string（enum: open \| closed \| merged） | 是 | merged = GitHub 上 closed 且 merged_at 非空，或 Forgejo 上 closed 且平台标记合并（merged=true 或 merged_at 非空，异常快照可能只有其一） |
 | `items[].pull_requests[].is_draft` | boolean | 是 |  |
 | `items[].pull_requests[].author_login` | string | 是 |  |
 | `items[].pull_requests[].head_ref` | string | 是 |  |
@@ -2315,7 +2315,7 @@ Issue CRUD、过滤、同步、清单、发货钩子与图片附件
 | `pull_requests[].number` | integer | 是 |  |
 | `pull_requests[].html_url` | string | 是 |  |
 | `pull_requests[].title` | string | 是 |  |
-| `pull_requests[].state` | string（enum: open \| closed \| merged） | 是 | merged = GitHub 上 closed 且 merged_at 非空，或 Forgejo 上 closed 且 merged=true |
+| `pull_requests[].state` | string（enum: open \| closed \| merged） | 是 | merged = GitHub 上 closed 且 merged_at 非空，或 Forgejo 上 closed 且平台标记合并（merged=true 或 merged_at 非空，异常快照可能只有其一） |
 | `pull_requests[].is_draft` | boolean | 是 |  |
 | `pull_requests[].author_login` | string | 是 |  |
 | `pull_requests[].head_ref` | string | 是 |  |
@@ -2784,7 +2784,7 @@ Issue CRUD、过滤、同步、清单、发货钩子与图片附件
 | `pull_requests[].number` | integer | 是 |  |
 | `pull_requests[].html_url` | string | 是 |  |
 | `pull_requests[].title` | string | 是 |  |
-| `pull_requests[].state` | string（enum: open \| closed \| merged） | 是 | merged = GitHub 上 closed 且 merged_at 非空，或 Forgejo 上 closed 且 merged=true |
+| `pull_requests[].state` | string（enum: open \| closed \| merged） | 是 | merged = GitHub 上 closed 且 merged_at 非空，或 Forgejo 上 closed 且平台标记合并（merged=true 或 merged_at 非空，异常快照可能只有其一） |
 | `pull_requests[].is_draft` | boolean | 是 |  |
 | `pull_requests[].author_login` | string | 是 |  |
 | `pull_requests[].head_ref` | string | 是 |  |
@@ -3008,7 +3008,7 @@ github 来源 Issue 的更改写回 GitHub 远端，internal 仅写本地；`sta
 | `pull_requests[].number` | integer | 是 |  |
 | `pull_requests[].html_url` | string | 是 |  |
 | `pull_requests[].title` | string | 是 |  |
-| `pull_requests[].state` | string（enum: open \| closed \| merged） | 是 | merged = GitHub 上 closed 且 merged_at 非空，或 Forgejo 上 closed 且 merged=true |
+| `pull_requests[].state` | string（enum: open \| closed \| merged） | 是 | merged = GitHub 上 closed 且 merged_at 非空，或 Forgejo 上 closed 且平台标记合并（merged=true 或 merged_at 非空，异常快照可能只有其一） |
 | `pull_requests[].is_draft` | boolean | 是 |  |
 | `pull_requests[].author_login` | string | 是 |  |
 | `pull_requests[].head_ref` | string | 是 |  |
@@ -3701,7 +3701,7 @@ AI 生成 checklist 建议（需已配置 AI 设置；JWT 与 API Key 均可）
 | `number` | integer | 是 |  |
 | `html_url` | string | 是 |  |
 | `title` | string | 是 |  |
-| `state` | string（enum: open \| closed \| merged） | 是 | merged = GitHub 上 closed 且 merged_at 非空，或 Forgejo 上 closed 且 merged=true |
+| `state` | string（enum: open \| closed \| merged） | 是 | merged = GitHub 上 closed 且 merged_at 非空，或 Forgejo 上 closed 且平台标记合并（merged=true 或 merged_at 非空，异常快照可能只有其一） |
 | `is_draft` | boolean | 是 |  |
 | `author_login` | string | 是 |  |
 | `head_ref` | string | 是 |  |
@@ -3757,7 +3757,7 @@ syncIssuePullRequests 的响应形状，与批量 internal-meta 的 {items, fail
 | `items[].number` | integer | 是 |  |
 | `items[].html_url` | string | 是 |  |
 | `items[].title` | string | 是 |  |
-| `items[].state` | string（enum: open \| closed \| merged） | 是 | merged = GitHub 上 closed 且 merged_at 非空，或 Forgejo 上 closed 且 merged=true |
+| `items[].state` | string（enum: open \| closed \| merged） | 是 | merged = GitHub 上 closed 且 merged_at 非空，或 Forgejo 上 closed 且平台标记合并（merged=true 或 merged_at 非空，异常快照可能只有其一） |
 | `items[].is_draft` | boolean | 是 |  |
 | `items[].author_login` | string | 是 |  |
 | `items[].head_ref` | string | 是 |  |

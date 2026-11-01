@@ -112,6 +112,17 @@ func testForgePullRequest(repoFullName string, number int, state string, merged 
 	return pr
 }
 
+// bindProjectForgejo 把项目绑到指定代码集成（模拟项目保存时 parseRepoBinding
+// 派生的 code_integration_id）：部署级 PAT 的作用面校验要求项目绑定与 PR 主
+// 机一致。
+func bindProjectForgejo(t *testing.T, svc *testServices, projectID, integrationID string) {
+	t.Helper()
+	if err := svc.db.Model(&model.Project{}).Where("id = ?", projectID).
+		Update("code_integration_id", integrationID).Error; err != nil {
+		t.Fatalf("bind project integration: %v", err)
+	}
+}
+
 func forgePRSet(prs ...*forge.PullRequest) map[string]map[int]*forge.PullRequest {
 	out := map[string]map[int]*forge.PullRequest{}
 	for _, pr := range prs {
@@ -187,6 +198,7 @@ func TestIssueServiceAttachPullRequest_ForgejoSucceeds(t *testing.T) {
 	// 另一个主机的集成不该被命中。
 	createForgejoIntegrationRow(t, svc.db, "fj-other", "https://other.example.com", "pat-other")
 	createForgejoIntegrationRow(t, svc.db, "fj-1", "https://forge.example.com", "fj-pat")
+	bindProjectForgejo(t, svc, project.ID, "fj-1")
 
 	mergedAt := time.Now().Add(-time.Hour).UTC()
 	reader := stubForgejoPRReader(t, svc, "https://forge.example.com/api/v1", "fj-pat")
@@ -255,6 +267,35 @@ func TestIssueServiceAttachPullRequest_ForgejoIntegrationMissing(t *testing.T) {
 	}
 }
 
+// 主机上有集成但项目未绑定代码集成：40007，部署级机器人 PAT 不服务未接入
+// 该 Forgejo 的项目——防止任意项目成员借集成 PAT 读项目外仓库的 PR 元数据。
+func TestIssueServiceAttachPullRequest_ForgejoProjectNotBound(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID)
+	issue := createTestIssue(t, svc.db, project.ID)
+	createForgejoIntegrationRow(t, svc.db, "fj-1", "https://forge.example.com", "fj-pat")
+
+	svc.issueService.newForgejoPRReader = func(*http.Client, string, string) forgePRReader {
+		t.Fatalf("forgejo reader must not be built for unbound project")
+		return nil
+	}
+
+	_, err := svc.issueService.AttachIssuePullRequest(issue.ID, user.ID, AttachIssuePullRequestRequest{
+		Url: "https://forge.example.com/o/r/pulls/9",
+	})
+	appErr, ok := err.(*errs.AppError)
+	if !ok || appErr.Code != errs.ErrForgeIntegrationNotConfigured.Code {
+		t.Fatalf("expected %d for unbound project, got %v", errs.ErrForgeIntegrationNotConfigured.Code, err)
+	}
+	if !strings.Contains(appErr.Message, "未配置代码仓库集成") {
+		t.Fatalf("expected binding-oriented message, got %q", appErr.Message)
+	}
+	if count := countPullRequestRows(t, svc, issue.ID); count != 0 {
+		t.Fatalf("expected no link rows, got %d", count)
+	}
+}
+
 // Forgejo 对「PR 不存在」与「PAT 无权」都返回 404：50206 文案两种可能都保留，
 // 不落记录。
 func TestIssueServiceAttachPullRequest_ForgejoPRNotFound(t *testing.T) {
@@ -263,6 +304,7 @@ func TestIssueServiceAttachPullRequest_ForgejoPRNotFound(t *testing.T) {
 	project := createTestProject(t, svc.db, user.ID)
 	issue := createTestIssue(t, svc.db, project.ID)
 	createForgejoIntegrationRow(t, svc.db, "fj-1", "https://forge.example.com", "fj-pat")
+	bindProjectForgejo(t, svc, project.ID, "fj-1")
 
 	reader := stubForgejoPRReader(t, svc, "", "")
 	// 错误原文带集成的内网 API 地址与响应体：都不允许外显。
@@ -304,6 +346,7 @@ func TestIssueServiceAttachPullRequest_ForgejoIdempotentAndSnapshotRefresh(t *te
 	project := createTestProject(t, svc.db, user.ID)
 	issue := createTestIssue(t, svc.db, project.ID)
 	createForgejoIntegrationRow(t, svc.db, "fj-1", "https://forge.example.com", "fj-pat")
+	bindProjectForgejo(t, svc, project.ID, "fj-1")
 
 	reader := stubForgejoPRReader(t, svc, "", "")
 	reader.prs = forgePRSet(testForgePullRequest("o/r", 5, "open", false, nil))
@@ -332,11 +375,20 @@ func TestIssueServiceAttachPullRequest_ForgejoIdempotentAndSnapshotRefresh(t *te
 		t.Fatalf("expected idempotent re-attach, got %q vs %q", second.Id, first.Id)
 	}
 
-	// 换绑：原集成删除，同主机新建集成。重复 attach 后快照指向新集成。
+	// 换绑：原集成删除，同主机新建集成。项目绑定仍指向已删的 fj-1 时
+	// attach 被作用面校验拒绝；重新绑定到 fj-2 后重复 attach，快照指向新集成。
 	if err := svc.db.Delete(&model.ForgeIntegration{}, "id = ?", "fj-1").Error; err != nil {
 		t.Fatalf("delete old integration: %v", err)
 	}
 	createForgejoIntegrationRow(t, svc.db, "fj-2", "https://forge.example.com", "fj-pat-2")
+	if _, err := svc.issueService.AttachIssuePullRequest(issue.ID, user.ID, AttachIssuePullRequestRequest{
+		Url: "https://forge.example.com/o/r/pulls/5",
+	}); err == nil {
+		t.Fatalf("attach with dangling binding must fail")
+	} else if appErr, ok := err.(*errs.AppError); !ok || appErr.Code != errs.ErrForgeIntegrationNotConfigured.Code {
+		t.Fatalf("expected %d for dangling binding, got %v", errs.ErrForgeIntegrationNotConfigured.Code, err)
+	}
+	bindProjectForgejo(t, svc, project.ID, "fj-2")
 	reader.lastToken = ""
 	third, err := svc.issueService.AttachIssuePullRequest(issue.ID, user.ID, AttachIssuePullRequestRequest{
 		Url: "https://forge.example.com/o/r/pulls/5",
@@ -367,6 +419,7 @@ func TestIssueServiceSyncPullRequests_ForgejoRefreshesStates(t *testing.T) {
 	project := createTestProject(t, svc.db, user.ID)
 	issue := createTestIssue(t, svc.db, project.ID)
 	createForgejoIntegrationRow(t, svc.db, "fj-1", "https://forge.example.com", "fj-pat")
+	bindProjectForgejo(t, svc, project.ID, "fj-1")
 
 	reader := stubForgejoPRReader(t, svc, "https://forge.example.com/api/v1", "fj-pat")
 	reader.prs = forgePRSet(
@@ -437,6 +490,7 @@ func TestIssueServiceSyncPullRequests_ForgejoIntegrationMissingSingleFailure(t *
 	// 同一主机两个集成行同属一个 Forgejo：删 fj-1 前先建 fj-2 备用行，
 	// 断言失败只落在快照指向 fj-1 的行上。
 	_ = createForgejoIntegrationRow(t, svc.db, "fj-1", "https://forge.example.com", "fj-pat")
+	bindProjectForgejo(t, svc, project.ID, "fj-1")
 
 	reader := stubForgejoPRReader(t, svc, "", "")
 	reader.prs = forgePRSet(testForgePullRequest("o/r", 5, "open", false, nil))
@@ -470,7 +524,7 @@ func TestIssueServiceSyncPullRequests_ForgejoIntegrationMissingSingleFailure(t *
 	if len(result.Failures) != 1 {
 		t.Fatalf("expected exactly one failure, got %+v", result.Failures)
 	}
-	if !strings.Contains(result.Failures[0].Error, "o/r#5") || !strings.Contains(result.Failures[0].Error, "不存在或已删除") {
+	if !strings.Contains(result.Failures[0].Error, "o/r#5") || !strings.Contains(result.Failures[0].Error, "不可用或已被删除") {
 		t.Fatalf("expected failure naming the forgejo row and missing integration, got %q", result.Failures[0].Error)
 	}
 	// 失败行旧数据保留。
@@ -491,6 +545,7 @@ func TestIssueServiceSyncPullRequests_ForgejoDegenerateRowsRecorded(t *testing.T
 	project := createTestProject(t, svc.db, user.ID)
 	issue := createTestIssue(t, svc.db, project.ID)
 	createForgejoIntegrationRow(t, svc.db, "fj-1", "https://forge.example.com", "fj-pat")
+	bindProjectForgejo(t, svc, project.ID, "fj-1")
 
 	reader := stubForgejoPRReader(t, svc, "", "")
 	reader.prs = forgePRSet(testForgePullRequest("o/r", 5, "open", false, nil))
@@ -577,6 +632,7 @@ func TestIssueServiceAttachPullRequest_ForgejoTransportErrorSanitized(t *testing
 	project := createTestProject(t, svc.db, user.ID)
 	issue := createTestIssue(t, svc.db, project.ID)
 	createForgejoIntegrationRow(t, svc.db, "fj-1", "https://forge.example.com", "fj-pat")
+	bindProjectForgejo(t, svc, project.ID, "fj-1")
 
 	reader := stubForgejoPRReader(t, svc, "", "")
 	reader.errs = map[int]error{5: fmt.Errorf("dial tcp 10.1.2.3:8443: connect refused")}
@@ -588,7 +644,7 @@ func TestIssueServiceAttachPullRequest_ForgejoTransportErrorSanitized(t *testing
 	if !ok || appErr.Code != errs.ErrForgeAPI.Code {
 		t.Fatalf("expected %d for forgejo transport failure, got %v", errs.ErrForgeAPI.Code, err)
 	}
-	if !strings.Contains(appErr.Message, "无法连接 Forgejo 服务") {
+	if !strings.Contains(appErr.Message, "连接或响应异常") {
 		t.Fatalf("expected generic connectivity message, got %q", appErr.Message)
 	}
 	for _, leak := range []string{"10.1.2.3", "8443", "dial tcp"} {
@@ -609,6 +665,7 @@ func TestIssueServiceSyncPullRequests_ForgejoFailureSanitized(t *testing.T) {
 	project := createTestProject(t, svc.db, user.ID)
 	issue := createTestIssue(t, svc.db, project.ID)
 	createForgejoIntegrationRow(t, svc.db, "fj-1", "https://forge.example.com", "fj-pat")
+	bindProjectForgejo(t, svc, project.ID, "fj-1")
 
 	reader := stubForgejoPRReader(t, svc, "", "")
 	reader.prs = forgePRSet(testForgePullRequest("o/r", 5, "open", false, nil))
@@ -645,7 +702,7 @@ func TestIssueServiceSyncPullRequests_ForgejoFailureSanitized(t *testing.T) {
 // 不参与匹配语义。
 func TestIssueServiceForgejoIntegrationIDForHost_EmptyKeyRejected(t *testing.T) {
 	svc := setupTestServices(t)
-	_, err := svc.issueService.forgejoIntegrationIDForHost("")
+	_, err := svc.issueService.forgejoIntegrationIDForProject(&model.Project{}, "")
 	appErr, ok := err.(*errs.AppError)
 	if !ok || appErr.Code != errs.ErrForgeIntegrationNotConfigured.Code {
 		t.Fatalf("expected %d for empty host key, got %v", errs.ErrForgeIntegrationNotConfigured.Code, err)
@@ -664,12 +721,55 @@ func TestPullRequestStateFromForge(t *testing.T) {
 	}{
 		{name: "open", pr: forge.PullRequest{State: "open"}, want: model.IssuePullRequestStateOpen},
 		{name: "closed merged", pr: forge.PullRequest{State: "closed", Merged: true, MergedAt: &mergedAt}, want: model.IssuePullRequestStateMerged},
-		{name: "closed 无 merged_at 视为 closed", pr: forge.PullRequest{State: "closed", Merged: true}, want: model.IssuePullRequestStateClosed},
+		{name: "closed 仅 merged 标记无 merged_at 仍为 merged", pr: forge.PullRequest{State: "closed", Merged: true}, want: model.IssuePullRequestStateMerged},
+		{name: "closed 仅 merged_at 无标记仍为 merged", pr: forge.PullRequest{State: "closed", MergedAt: &mergedAt}, want: model.IssuePullRequestStateMerged},
 		{name: "closed 未合并", pr: forge.PullRequest{State: "closed", Merged: false, ClosedAt: &mergedAt}, want: model.IssuePullRequestStateClosed},
 	}
 	for _, tc := range cases {
 		if got := pullRequestStateFromForge(&tc.pr); got != tc.want {
 			t.Fatalf("%s: state = %v, want %v", tc.name, got, tc.want)
 		}
+	}
+}
+
+// Upsert 冲突路径的快照保护：空快照的调用方（如未来的同步投影）不能把
+// manual 行的 forge_integration_id 抹掉——否则 sync 永久报缺快照。非空新值
+// （重复 attach 换绑）仍正常覆盖。
+func TestIssuePullRequestRepoUpsert_EmptySnapshotPreserved(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID)
+	issue := createTestIssue(t, svc.db, project.ID)
+	createForgejoIntegrationRow(t, svc.db, "fj-1", "https://forge.example.com", "fj-pat")
+	bindProjectForgejo(t, svc, project.ID, "fj-1")
+
+	reader := stubForgejoPRReader(t, svc, "", "")
+	reader.prs = forgePRSet(testForgePullRequest("o/r", 5, "open", false, nil))
+	if _, err := svc.issueService.AttachIssuePullRequest(issue.ID, user.ID, AttachIssuePullRequestRequest{
+		Url: "https://forge.example.com/o/r/pulls/5",
+	}); err != nil {
+		t.Fatalf("attach forgejo pr: %v", err)
+	}
+
+	// 空快照撞唯一键：快照必须保留原值。
+	now := time.Now().UTC()
+	blank := &model.IssuePullRequest{
+		ID: uuid.NewString(), IssueID: issue.ID, ProjectID: project.ID,
+		Provider: model.IssuePullRequestProviderForgejo, RepoFullName: "o/r", Number: 5,
+		State: model.IssuePullRequestStateOpen, LinkOrigin: model.IssuePullRequestLinkOriginSynced,
+		ForgeIntegrationID: "", SyncedAt: now, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := svc.issueService.pullRequestRepo.Upsert(blank); err != nil {
+		t.Fatalf("upsert blank snapshot: %v", err)
+	}
+	var row model.IssuePullRequest
+	if err := svc.db.Where("issue_id = ?", issue.ID).First(&row).Error; err != nil {
+		t.Fatalf("load row: %v", err)
+	}
+	if row.ForgeIntegrationID != "fj-1" {
+		t.Fatalf("empty snapshot must not wipe existing snapshot, got %q", row.ForgeIntegrationID)
+	}
+	if row.LinkOrigin != model.IssuePullRequestLinkOriginManual {
+		t.Fatalf("link_origin must stay manual, got %q", row.LinkOrigin)
 	}
 }
