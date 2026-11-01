@@ -1,3 +1,29 @@
+// Package githubmedia 的缓存面边界（不变量，改动前先对照）：
+//
+//  1. 面只有三个，规则按面定，不按调用点定：
+//     - 媒体代理面（defaultCacheSubdir）：缓存可丢弃。TTL 回收、scope 标记
+//     缺失时整目录清空、损坏条目回收，只发生在这里。
+//     - 审查截图面（review-screenshot-cache）：缓存不可丢弃——.bin 是
+//     review_assets 持久资产（storage_path 直指文件、ensureAssets 不重下）。
+//     任何代码路径不得删除它的条目；启动只建目录+补标记；无 TTL 删除、
+//     无 purge、无条目回收 sweeper（media-*.tmp 清理是唯一例外，
+//     sweepStaleTmpFiles 不触碰 .bin/.json）；读路径命中即返回（不过期、
+//     不因类型复核 miss）；重下绝不覆盖已落盘的 .bin（fetch 入口护栏：
+//     存在即返回现有字节，类型判不出时 mime 留空，截图端点按魔数兜底）。
+//     - 无缓存出口（issue assets、avatars、screenshot content、crop）：不落
+//     缓存目录，只施加同源硬化头与「attachment 或 inline 图片档」判据（按
+//     出口语义：下载类 attachment，截图/裁剪类刻意保留 inline）。
+//  2. MIME/扩展门：媒体代理面全量（image/svg*、.svg、HTML 拒 + fallback 归
+//     一化）；审查面只收位图；下载出口 octet-stream+attachment 不进文档上下
+//     文。
+//  3. Cache-Control 一律 private（URL 带 JWT），TTL 由 s.cacheTTL 派生，
+//     cloneRelevantHeaders 与缓存命中同源，不透传上游。
+//  4. 写侧两步发布（data→binPath 再 meta→metaPath）。回收者对已 rename 走
+//     的文件，恢复前必须重读校验新鲜度，且恢复前校验目标路径未被写侧占据；
+//     不能安全恢复就丢弃旧字节，绝不覆盖新条目。
+//  5. 版本参数 v：前端无条件重写为当前值；Go ProxyURLVersion 与前端
+//     MEDIA_PROXY_VERSION 由 TestProxyURLVersionMatchesFrontend 断言一致，
+//     只涨一边会直接红。
 package githubmedia
 
 import (
@@ -9,12 +35,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,6 +56,16 @@ import (
 )
 
 const ProxyPath = "/api/github/media-proxy"
+
+// ProxyURLVersion 代理地址的缓存失效版本，随媒体响应的安全语义（准入、硬化
+// 头）递增。浏览器缓存的是整条响应：旧版本 URL 上缓存过的 svg 在部署后仍会
+// 命中本地缓存、根本不回源，闸门与硬化头对它们无效。带版本参数的 URL 与旧
+// 缓存键不同，一次版本跳跃就能让所有前置缓存失效。前端
+// `web/src/lib/utils/github-media-proxy.ts` 里的同名常量必须跟着改。
+const ProxyURLVersion = "2"
+
+// ProxyURLVersionParam 版本参数名。
+const ProxyURLVersionParam = "v"
 
 const (
 	defaultCacheSubdir     = "github-media-cache"
@@ -43,9 +81,18 @@ var (
 	// 不经过这里。
 	ErrInvalidMediaURL          = errors.New("不支持的图片地址")
 	ErrUnsupportedUpstreamMedia = errors.New("上游返回的不是图片")
-	ErrBlockedUpstreamAddress   = errors.New("图片地址指向内网或保留地址")
-	ErrEmptyUpstreamMedia       = errors.New("上游返回空内容")
-	ErrMediaTooLarge            = errors.New("图片超过大小上限")
+	// ErrUnsupportedSVG 命中 svg 的固定拒绝，分两档：内容类型是 image/svg*
+	//（按响应类型判定，同一资源下次还是 svg，出口可按较长 TTL 缓存）；上游
+	// 没给类型而扩展名是 .svg（ErrUnsupportedSVGByExtension，判据依赖上游本
+	// 次响应——下次它可能给正常类型，只能按很短 TTL）。都包装
+	// ErrUnsupportedUpstreamMedia，下游分类不变；单独的哨兵是为了让出口区分
+	// 「接近确定的拒绝」（可缓存）与「上游这一回回的不是媒体」（可能是拦截
+	// 页/登录页，钉住会让图片持续裂图，不能缓存）。
+	ErrUnsupportedSVG            = fmt.Errorf("%w: svg", ErrUnsupportedUpstreamMedia)
+	ErrUnsupportedSVGByExtension = fmt.Errorf("%w (by extension)", ErrUnsupportedSVG)
+	ErrBlockedUpstreamAddress    = errors.New("图片地址指向内网或保留地址")
+	ErrEmptyUpstreamMedia        = errors.New("上游返回空内容")
+	ErrMediaTooLarge             = errors.New("图片超过大小上限")
 	// ErrLocalCache 本地截图缓存操作失败（建缓存目录/建临时文件/写盘/改名/
 	// 读缓存元数据）。在产生点打标：service 层只认这个 sentinel 归「截图缓
 	// 存写入失败」类，不再嗅探 *fs.PathError / *os.SyscallError 外壳——网络
@@ -121,7 +168,14 @@ type cacheEntry struct {
 }
 
 func (e cacheEntry) expired(now time.Time) bool {
-	return !e.ExpiresAt.IsZero() && now.After(e.ExpiresAt)
+	// 旧版本可能写入零值 ExpiresAt（字段缺失/升级窗口）——恒不过期会让这类
+	// 条目既不被扫描回收、读路径又永远复核 miss，同一 URL 每次都回源被闸门
+	// 拒一次，永不退役。零值回退 CachedAt+默认 TTL。
+	expiresAt := e.ExpiresAt
+	if expiresAt.IsZero() {
+		expiresAt = e.CachedAt.Add(defaultCacheTTL)
+	}
+	return now.After(expiresAt)
 }
 
 type CachedMedia struct {
@@ -145,8 +199,11 @@ type PassThroughResponse struct {
 }
 
 type ProxyService struct {
-	client            *http.Client
-	cacheDir          string
+	client   *http.Client
+	cacheDir string
+	// cacheSubdir 该服务实例的缓存面子目录；读路径按它区分媒体代理面（TTL
+	// 与退役生效）和 review 截图面（持久资产，命中即返回，不过期不复核）。
+	cacheSubdir       string
 	cacheTTL          time.Duration
 	maxCacheEntrySize int64
 	allowURL          func(*url.URL) bool
@@ -161,8 +218,56 @@ type ProxyService struct {
 	mu sync.Mutex
 	// download 每 URL 一把容量 1 的信号量（发送即持有、接收即释放）：同 URL
 	// 下载串行，但等待必须吃 ctx——sync.Mutex 锁不来取消，30s 探测时限会被
-	// 同 URL 前一请求的 45s 客户端超时拖穿。
-	download map[string]chan struct{}
+	// 同 URL 前一请求的 45s 客户端超时拖穿。refs 是该闸的引用计数（持有者 +
+	// 等待者，acquire 加、release/abandon 减）：空闲回收的判据是计数归零而
+	// 不是 len(chan)——等待者拿到 channel 后在 s.mu 之外做发送，那个窗口里
+	// channel 长度看不到等待者，凭长度删除会把等待者的闸变成孤儿，同一 URL
+	// 出现两个并发下载。
+	download map[string]*downloadGate
+
+	// metaReadFailMu/At/metaReadFailLogger 缓存 meta 读失败的限频告警：目录
+	// 级故障（权限被改、EIO、只读挂载）会退化成每个请求静默重下，不打日志
+	// 只能靠「图片变慢」感知；同类告警间隔内只记一次。
+	metaReadFailMu     sync.Mutex
+	metaReadFailAt     map[string]time.Time
+	metaReadFailLogger *slog.Logger
+}
+
+// metaReadFailLogInterval 同一 cacheDir 的 meta 读失败告警最小间隔。
+const metaReadFailLogInterval = 10 * time.Minute
+
+// NewProxyServiceWithLogger 带日志的生产装配：meta 读失败的目录级故障按限
+// 频 warn 记录（读路径不删文件的约束不变，日志是可观测性，不是行为变化）。
+func NewProxyServiceWithLogger(cacheRoot string, logger *slog.Logger) *ProxyService {
+	s := NewProxyService(cacheRoot)
+	s.metaReadFailLogger = logger
+	s.metaReadFailAt = make(map[string]time.Time)
+	return s
+}
+
+// logMetaReadFail 限频记录 meta 读失败：同一 cacheDir 在间隔内只记一次。
+func (s *ProxyService) logMetaReadFail(metaPath string, err error) {
+	if s.metaReadFailLogger == nil {
+		return
+	}
+	s.metaReadFailMu.Lock()
+	defer s.metaReadFailMu.Unlock()
+	if s.metaReadFailAt == nil {
+		s.metaReadFailAt = make(map[string]time.Time)
+	}
+	if last, ok := s.metaReadFailAt[s.cacheDir]; ok && time.Since(last) < metaReadFailLogInterval {
+		return
+	}
+	s.metaReadFailAt[s.cacheDir] = time.Now()
+	s.metaReadFailLogger.Warn("缓存 meta 读取失败，按 miss 重下（目录级故障时每条请求都会重下）",
+		"path", metaPath, "error", err)
+}
+
+// downloadGate 同 URL 下载闸：容量 1 的信号量加引用计数，计数由持有者在
+// s.mu 下增减（见 acquire/release/abandonDownloadLock）。
+type downloadGate struct {
+	sem  chan struct{}
+	refs int
 }
 
 // serviceConfig newService 的装配参数；零值字段按 GitHub 媒体代理语义兜底。
@@ -171,10 +276,12 @@ type serviceConfig struct {
 	cacheTTL          time.Duration
 	maxCacheEntrySize int64
 	client            *http.Client
-	allowURL          func(*url.URL) bool
-	requireHTTPS      bool
-	imagesOnly        bool
-	guardAddress      bool
+	// transport 覆盖默认客户端的 Transport（测试注入）；nil 用原构造。
+	transport    http.RoundTripper
+	allowURL     func(*url.URL) bool
+	requireHTTPS bool
+	imagesOnly   bool
+	guardAddress bool
 	// trustedPrivateHosts 可信内网主机名单（仅 guardAddress 时有意义）：
 	// 拨号时的主机名与名单完全一致（不区分大小写、不含端口、不支持
 	// 通配符）即跳过解析 IP 的内网检查；名单外主机与名单内主机重定向
@@ -190,13 +297,33 @@ type serviceConfig struct {
 	githubWebHost string
 }
 
+// ProxyOption NewProxyService 的可选装配项；生产装配不传即为默认 GitHub
+// 白名单语义。handler 层直测用它注入指向 httptest 假上游的客户端，测试
+// 不打真实网络。
+type ProxyOption func(*serviceConfig)
+
+// WithHTTPTransport 只替换默认客户端的 Transport（测试注入指向 httptest 假
+// 上游的 RoundTripper，不打真实网络），客户端的 CheckRedirect（白名单复检、
+// Authorization 剥离）与超时保持生产实现。
+//
+// 边界：截图面（guardAddress）的 SSRF 防线就长在 Transport 里（拨号期 IP 校
+// 验），整颗换 Transport 会把那层静默拆掉——所以该选项撞上 guardAddress 面
+// 直接 panic（见 newService），不要拿它去接截图面。
+func WithHTTPTransport(rt http.RoundTripper) ProxyOption {
+	return func(cfg *serviceConfig) { cfg.transport = rt }
+}
+
 // NewProxyService GitHub 媒体代理面：GitHub 域名白名单、图片视频都收，
 // 服务 /api/github/media-proxy。
-func NewProxyService(cacheRoot string) *ProxyService {
-	return newService(cacheRoot, serviceConfig{
+func NewProxyService(cacheRoot string, opts ...ProxyOption) *ProxyService {
+	cfg := serviceConfig{
 		cacheSubdir: defaultCacheSubdir,
 		allowURL:    isAllowedGitHubMediaURL,
-	})
+	}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	return newService(cacheRoot, cfg)
 }
 
 // NewReviewMediaService PR 审查截图下载面：放行任意公网 https 图片，SSRF
@@ -249,30 +376,361 @@ func newService(cacheRoot string, cfg serviceConfig) *ProxyService {
 			cfg.trustedPrivateHosts, cfg.trustedPrivateHostsFunc,
 			func(u *url.URL) bool { return IsGitHubMediaURLFor(u.String(), webHost) })
 	}
+	if cfg.transport != nil {
+		if cfg.guardAddress {
+			// 截图面的 SSRF 防线是 Transport 里的 Dialer.Control 拨号校验，整颗
+			// 换 Transport 就会静默失去它。宁可炸：测试注入只该用在媒体面。
+			panic("githubmedia: WithHTTPTransport 不能用于 guardAddress 面（会移除拨号期 IP 校验）")
+		}
+		// 克隆后只换 Transport：CheckRedirect/Timeout 是重定向白名单与凭证
+		// 剥离的执行点，不能被测试注入旁路。
+		clone := *cfg.client
+		clone.Transport = cfg.transport
+		cfg.client = &clone
+	}
 	s := &ProxyService{
 		client:            cfg.client,
 		cacheDir:          filepath.Join(cacheRoot, cfg.cacheSubdir),
+		cacheSubdir:       cfg.cacheSubdir,
 		cacheTTL:          cfg.cacheTTL,
 		maxCacheEntrySize: cfg.maxCacheEntrySize,
 		allowURL:          cfg.allowURL,
 		requireHTTPS:      cfg.requireHTTPS,
 		imagesOnly:        cfg.imagesOnly,
 		githubWebHost:     cfg.githubWebHost,
-		download:          make(map[string]chan struct{}),
+		download:          make(map[string]*downloadGate),
 	}
-	s.purgeLegacyCacheEntries()
+	// purge 只允许媒体代理面跑（按 cacheSubdir 判定）：review 截图面的目录
+	// 是 review_assets 的持久存储（无副本、ensure 不会重下），标记缺失时清
+	// 空等于删光历史审查截图。
+	s.purgeLegacyCacheEntries(cfg.cacheSubdir == defaultCacheSubdir)
 	return s
+}
+
+// StartExpiredSweeper 启动后台目录过期扫描（启动即扫一遍 + 每
+// expiredSweepInterval 一次）。由生产装配显式调用——构造函数里无条件起后台
+// 协程会让测试的 seed 与扫描互相踩（扫描可能落在写 seed 的中间）。测试直接
+// 调 sweepExpiredEntries（导出为 SweepExpiredEntries）。
+func (s *ProxyService) StartExpiredSweeper() {
+	s.startExpiredSweeper()
+}
+
+// StartStaleTmpSweeper 启动后台 media-*.tmp 清理（随过期扫描一起跑）。给不
+// 接过期回收的面用（review 截图面：.bin/.json 是持久资产不回收，但中断下载
+// 的 tmp 残留同样要清）。
+func (s *ProxyService) StartStaleTmpSweeper() {
+	go func() {
+		s.sweepStaleTmpFiles(time.Now().UTC())
+		for {
+			time.Sleep(expiredSweepInterval)
+			s.sweepStaleTmpFiles(time.Now().UTC())
+		}
+	}()
+}
+
+// SweepExpiredEntries 手动触发一次目录过期扫描（测试与运维用）。
+func (s *ProxyService) SweepExpiredEntries() {
+	s.sweepExpiredEntries()
+}
+
+// expiredSweepInterval 目录过期扫描的间隔。读路径不再删文件（见
+// getCachedNormalized），过期条目由这里低频回收：每次扫描删掉已过期的
+// meta/data；「不再被成功重下」的条目（上游已删、永久 415）也由此退役，
+// 缓存目录不会只增不减。
+const expiredSweepInterval = 6 * time.Hour
+
+// startExpiredSweeper 启动即扫一遍，之后按固定间隔后台扫。失败静默：扫描是
+// 保洁，不构成任何请求路径的前置条件。
+func (s *ProxyService) startExpiredSweeper() {
+	go func() {
+		s.sweepExpiredEntries()
+		for {
+			time.Sleep(expiredSweepInterval)
+			s.sweepExpiredEntries()
+		}
+	}()
+}
+
+// sweepExpiredEntries 扫一遍缓存目录，删掉已过期的条目。meta 是唯一事实源
+// （data 由 meta 的存在性背书），只读 meta 判断；meta 读不了/解析不了的孤儿
+// 文件留待下次覆盖，不猜。
+//
+// 与写盘的竞争处理：meta 落后于 data（写侧先 rename data 再 WriteFile meta），
+// 只靠「重读 meta 比对 CachedAt」堵不住「读到旧 meta、写侧已 rename 新 data、
+// 尚未写新 meta」的窗口。扫描删除前持该 key 的下载闸（与 fetchAndCache 同
+// 一把锁），互斥后旧过期条目在窗口内也只可能被覆盖成新条目——锁内重读发现
+// 不再过期就跳过；先删 data 再删 meta，第二步失败或进程被杀只会留下孤儿
+// .bin（没有 meta 它不可达），孤儿按 mtime 超过 2×TTL 纳入清理，不会永久堆
+// 积。meta 里存了原始 URL（缓存键底材），足以还原下载闸的 key。
+func (s *ProxyService) sweepExpiredEntries() {
+	// 面边界（不变量第 1 条）：条目回收只存在于媒体代理面。护栏做在函数入
+	// 口而不是 main.go 装配——StartExpiredSweeper/SweepExpiredEntries 对所
+	// 有实例可见，误接或手动触发 review 实例就会把持久审查截图删成永久
+	// 404（storage_path 直指文件、ensureAssets 不重下）。
+	if s.cacheSubdir != defaultCacheSubdir {
+		return
+	}
+	entries, err := os.ReadDir(s.cacheDir)
+	if err != nil {
+		return
+	}
+	now := time.Now().UTC()
+	// 扫描顺带回收上次进程被杀残留在隔离名的 .gone（.json.gone 与 .bin.gone
+	// 都是 rename 后 remove 前被杀的残留，无人可达）。阈值与隔离判据一致用
+	// 2×TTL：goneBin 的 mtime 继承原 data，落在 1×~2×TTL 区间的隔离文件若是
+	// 写侧刚发布的，按 1×TTL 会被另一轮扫描误回收。
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".gone") {
+			info, err := e.Info()
+			if err == nil && now.Sub(info.ModTime()) > 2*s.cacheTTL {
+				_ = os.Remove(filepath.Join(s.cacheDir, e.Name()))
+			}
+		}
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		metaPath := filepath.Join(s.cacheDir, name)
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		data, err := os.ReadFile(metaPath)
+		if err != nil {
+			continue
+		}
+		var entry cacheEntry
+		if json.Unmarshal(data, &entry) != nil {
+			// 损坏 meta（写盘中断在 rename data 与 WriteFile meta 之间、或磁
+			// 盘满截断）：与孤儿 .bin 同口径按 mtime 超 2×TTL 回收（meta 与同
+			// 名 .bin 一起删），否则该条目连同最大 256MB 的 .bin 永久留盘且每
+			// 次命中都重源。mtime 新的是写侧中间态，不碰。两处删除（.bin 存
+			// 在/缺失）都先 rename 成隔离名再删，压掉 stat→remove 窗口。
+			//
+			// 同一 URL 可能正在因「损坏 meta 读路径判 miss」而重下，删除与过
+			// 期分支一样持该 key 的下载闸（锁内重读复核 mtime 仍超龄，被写侧
+			// 覆盖成好 meta 就放弃），不无锁动手。URL 不可得（0 字节/开头即截
+			// 断的 meta 解析不出 url 字段，闸键会是空串、与写侧不同键无互斥）
+			// 时不持闸硬删——退回孤儿判据：同名 .bin 的 mtime 也超 2×TTL 才
+			// 删（写侧 rename 的新 data mtime 必是新，不会误删刚发布的条目）。
+			binPath := strings.TrimSuffix(metaPath, ".json") + ".bin"
+			if entry.URL == "" {
+				// 闸键不可得，与写侧没有互斥，靠「只删旧东西」压窗口：.bin 存
+				// 在时看它的 mtime（写侧刚 rename 的新 data mtime 必是新）；
+				// .bin 不存在时看 meta 自身的 mtime——没有 data 可误删，meta
+				// 超龄就该回收（旧版本这条路径会永久留盘）。stat 与 remove 之
+				// 间的窗口用「先 rename 成隔离名再删」压掉：写侧若正要发布，
+				// 它的 rename(data) 与 WriteFile(meta) 都不会命中已被改名的路
+				// 径，本次删的确定是隔离出来的旧文件。
+				binInfo, statErr := os.Stat(binPath)
+				switch {
+				case statErr == nil:
+					if now.Sub(binInfo.ModTime()) < 2*s.cacheTTL {
+						continue
+					}
+				case !errors.Is(statErr, os.ErrNotExist):
+					continue
+				default:
+					if now.Sub(info.ModTime()) < 2*s.cacheTTL {
+						continue
+					}
+					gonePath := metaPath + ".gone"
+					if err := os.Rename(metaPath, gonePath); err != nil {
+						continue
+					}
+					// rename 前的复核没在锁内，期间写侧可能已把同一 meta 覆盖成
+					// 好条目：再读一次 .gone，能解析成好 meta 就还回去。
+					if data, err := os.ReadFile(gonePath); err == nil {
+						var entry cacheEntry
+						if json.Unmarshal(data, &entry) == nil && !entry.expired(now) {
+							_ = os.Rename(gonePath, metaPath)
+							continue
+						}
+					}
+					_ = os.Remove(gonePath)
+					continue
+				}
+				// 与缺失分支同口径：rename 成隔离名再删，stat→remove 窗口内
+				// 写侧刚发布的文件不会被误命中。
+				goneBin := binPath + ".gone"
+				goneMeta := metaPath + ".gone"
+				if err := os.Rename(binPath, goneBin); err != nil {
+					continue
+				}
+				// rename 后看一眼 mtime：写侧恰好在这个窗口 rename 了新 data
+				// 的话，goneBin 的时间是新鲜的——原子放回，本轮跳过。
+				if goneInfo, err := os.Stat(goneBin); err == nil && now.Sub(goneInfo.ModTime()) < 2*s.cacheTTL {
+					restoreGoneBin(goneBin, binPath)
+					continue
+				}
+				if err := os.Rename(metaPath, goneMeta); err != nil {
+					restoreGoneBin(goneBin, binPath)
+					continue
+				}
+				// goneMeta 是两步发布的第二步：写侧可能恰在这个窗口写完新
+				// meta——能解析成未过期条目说明新条目已发布。此时只还 meta，
+				// 旧字节交给 restoreGoneBin 原子放回（写侧已占 binPath 就自动
+				// 丢弃，绝不覆盖新条目）。
+				if data, err := os.ReadFile(goneMeta); err == nil {
+					var recheckEntry cacheEntry
+					if json.Unmarshal(data, &recheckEntry) == nil && !recheckEntry.expired(now) {
+						_ = os.Rename(goneMeta, metaPath)
+						restoreGoneBin(goneBin, binPath)
+						continue
+					}
+				}
+				_ = os.Remove(goneMeta)
+				restoreGoneBin(goneBin, binPath)
+				continue
+			}
+			if now.Sub(info.ModTime()) < 2*s.cacheTTL {
+				continue
+			}
+			gate := s.acquireDownloadLock(entry.URL)
+			select {
+			case gate.sem <- struct{}{}:
+			case <-time.After(5 * time.Second):
+				s.abandonDownloadLock(entry.URL, gate)
+				continue
+			}
+			recheck, err := os.ReadFile(metaPath)
+			if err != nil {
+				s.releaseDownloadLock(entry.URL, gate)
+				continue
+			}
+			var recheckEntry cacheEntry
+			if json.Unmarshal(recheck, &recheckEntry) == nil {
+				// 被写侧覆盖成了好 meta（或换了个内容），放弃。
+				s.releaseDownloadLock(entry.URL, gate)
+				continue
+			}
+			recheckInfo, err := os.Stat(metaPath)
+			if err != nil || now.Sub(recheckInfo.ModTime()) < 2*s.cacheTTL {
+				s.releaseDownloadLock(entry.URL, gate)
+				continue
+			}
+			_ = os.Remove(filepath.Join(s.cacheDir, strings.TrimSuffix(name, ".json")+".bin"))
+			_ = os.Remove(metaPath)
+			s.releaseDownloadLock(entry.URL, gate)
+			continue
+		}
+		if !entry.expired(now) {
+			continue
+		}
+		// 持该 key 的下载闸再复核与删除：与同 key 写盘互斥，窗口关闭。闸等待
+		// 吃 ctx（背景扫描用 Background），锁被长下载持有时本轮跳过即可，下
+		// 轮再扫。
+		gate := s.acquireDownloadLock(entry.URL)
+		select {
+		case gate.sem <- struct{}{}:
+		case <-time.After(5 * time.Second):
+			s.abandonDownloadLock(entry.URL, gate)
+			continue
+		}
+		// 锁内重读：条目可能刚被覆盖成新条目（不再过期）或已被清走。
+		recheck, err := os.ReadFile(metaPath)
+		if err != nil {
+			s.releaseDownloadLock(entry.URL, gate)
+			continue
+		}
+		var recheckEntry cacheEntry
+		if json.Unmarshal(recheck, &recheckEntry) != nil || !recheckEntry.expired(now) || recheckEntry.URL != entry.URL {
+			s.releaseDownloadLock(entry.URL, gate)
+			continue
+		}
+		binPath := strings.TrimSuffix(metaPath, ".json") + ".bin"
+		// 先删 data 再删 meta：meta 是条目可达性的事实源，先删 meta 后被杀
+		// 会留下不可达的孤儿 .bin。
+		_ = os.Remove(binPath)
+		_ = os.Remove(metaPath)
+		s.releaseDownloadLock(entry.URL, gate)
+	}
+	// 无 meta 的孤儿 .bin（历史删除中断、或旧版本先删 meta 后删 data 被杀）：
+	// mtime 超过 2×TTL 才清，刚发布的条目不受影响。
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasSuffix(name, ".bin") {
+			continue
+		}
+		metaPath := filepath.Join(s.cacheDir, strings.TrimSuffix(name, ".bin")+".json")
+		if _, err := os.Stat(metaPath); !errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil || now.Sub(info.ModTime()) < 2*s.cacheTTL {
+			continue
+		}
+		_ = os.Remove(filepath.Join(s.cacheDir, name))
+	}
+	s.sweepStaleTmpFiles(now)
+}
+
+// sweepStaleTmpFiles 回收 CreateTemp 的 media-*.tmp 写盘中转：进程被杀/机器
+// 重启打断的下载会留下最多 maxCacheEntrySize 的临时文件。只碰 .tmp，不触碰
+// .bin/.json——review 截图面的目录同时是持久存储（见 main.go），它的过期
+// 条目不回收，但中断下载的 tmp 残留同样要清，所以这是独立方法。mtime 超过
+// 2×TTL 才清，正在写盘的文件因为 mtime 新不会被误删。
+func (s *ProxyService) sweepStaleTmpFiles(now time.Time) {
+	entries, err := os.ReadDir(s.cacheDir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasPrefix(name, "media-") || !strings.HasSuffix(name, ".tmp") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil || now.Sub(info.ModTime()) < 2*s.cacheTTL {
+			continue
+		}
+		_ = os.Remove(filepath.Join(s.cacheDir, name))
+	}
+}
+
+// restoreGoneBin 把隔离的旧字节原子放回 binPath。os.Link 不会覆盖已存在的
+// 目标：写侧恰好在该窗口发布了新 data 时 link 失败（EEXIST），旧字节直接
+// 丢弃——先 Stat 后 Rename 的两步恢复有 TOCTOU 窗口，会拿旧字节盖掉新 data
+// （不变量第 4 条：不能安全恢复就丢弃，绝不覆盖新条目）。
+func restoreGoneBin(goneBin, binPath string) {
+	if err := os.Link(goneBin, binPath); err != nil {
+		_ = os.Remove(goneBin)
+		return
+	}
+	_ = os.Remove(goneBin)
 }
 
 // legacyScopeMarker scope 进缓存键之前的存量条目不可信标记：老条目的 meta
 // 没有 Scope 字段，无法区分是匿名拉取的公开内容还是安装令牌拉取的私有附
 // 件——后者若继续按匿名键命中，知道 URL 就能经 /api/github/media-proxy 跨
-// 安装取到私有内容。构造服务时清一次：标记缺失则删光目录下的缓存文件，
-// 公开内容重拉即可，私有内容宁可重拉不可误给。
+// 安装取到私有内容。构造服务时清一次：媒体代理面标记缺失则清光目录下的
+// 缓存文件（公开内容重拉即可，私有内容宁可重拉不可误给）；review 截图面
+// 是持久存储，只建目录并补写标记，不删、不拒读任何条目。
 const legacyScopeMarker = ".cache-scope-v2"
 
-func (s *ProxyService) purgeLegacyCacheEntries() {
-	if _, err := os.Stat(filepath.Join(s.cacheDir, legacyScopeMarker)); err == nil {
+// purgeLegacyCacheEntries 旧 scope 标记缺失时的启动清场。只有媒体代理面
+// 允许整目录清空（guardedPurge）：review 截图面的目录是 review_assets 的持
+// 久存储（无副本、ensure 不会重下），删任何条目等于把历史审查截图变成永
+// 久 404——它只建目录并补写标记，不删、不拒读。标记 stat 出错（非 ENOENT
+// 的 EIO/权限）两个面都跳过——读不出标记不等于标记不存在，宁可不清理也
+// 不能误删持久资产。
+func (s *ProxyService) purgeLegacyCacheEntries(guardedPurge bool) {
+	_, statErr := os.Stat(filepath.Join(s.cacheDir, legacyScopeMarker))
+	if statErr == nil {
+		return
+	}
+	if !errors.Is(statErr, os.ErrNotExist) {
+		return
+	}
+	if !guardedPurge {
+		if err := os.MkdirAll(s.cacheDir, 0o750); err != nil {
+			return
+		}
+		// 标记写失败不静默落定：下次启动重扫一遍，标记缺失期间无 Scope 的
+		// 旧条目照常按匿名键命中（跨授权域风险由键隔离与接口鉴权兜住）。
+		_ = os.WriteFile(filepath.Join(s.cacheDir, legacyScopeMarker), []byte("scope-v2\n"), 0o640)
 		return
 	}
 	if err := os.MkdirAll(s.cacheDir, 0o750); err != nil {
@@ -600,7 +1058,7 @@ func BuildProxyURL(rawURL string) string {
 	if err != nil {
 		return rawURL
 	}
-	return ProxyPath + "?url=" + url.QueryEscape(normalized)
+	return ProxyPath + "?url=" + url.QueryEscape(normalized) + "&" + ProxyURLVersionParam + "=" + ProxyURLVersion
 }
 
 func RewriteHTMLMediaSources(fragment string) string {
@@ -690,20 +1148,49 @@ func (s *ProxyService) fetchAndCache(ctx context.Context, rawURL, bearer, scope 
 		return nil, err
 	}
 
-	lock := s.acquireDownloadLock(normalized)
+	gate := s.acquireDownloadLock(normalized)
 	select {
-	case lock <- struct{}{}:
+	case gate.sem <- struct{}{}:
 	case <-ctx.Done():
 		// 同 URL 已有下载在跑：等待必须吃 ctx。探测的 30s 时限是总时限，
-		// 不能被同 URL 前一请求的 45s 客户端超时拖穿。
+		// 不能被同 URL 前一请求的 45s 客户端超时拖穿。等待失败未持有闸，
+		// 用 abandon（不 <-lock）只尝试回收空闲条目。
+		s.abandonDownloadLock(normalized, gate)
 		return nil, ctx.Err()
 	}
-	defer func() { <-lock }()
+	defer s.releaseDownloadLock(normalized, gate)
 
 	if cached, ok, err := s.getCachedNormalized(normalized, scope); err != nil {
 		return nil, err
 	} else if ok {
 		return cached, nil
+	}
+
+	// 面边界（不变量第 1 条）：review 截图面已落盘的 .bin 是持久资产，重下
+	// 会用上游当前字节覆盖证据（DB 的 size/mime 不同步），上游已删/转私时
+	// 更是直接失败。.bin 存在就返回现有字节，绝不 rename 覆盖——「不可丢
+	// 弃」不依赖兜底嗅探的覆盖面。类型判不出时 ContentType 留空（不写进
+	// review_assets.mime_type 成永久错值）；截图端点对空/octet-stream 的
+	// mime 按魔数兜底判定下发类型，响应带 nosniff + CSP sandbox。
+	if s.cacheSubdir != defaultCacheSubdir {
+		cachePath := s.dataPath(normalized, scope)
+		if media, ok, err := s.servePersistedData(normalized, cachePath); err != nil {
+			return nil, err
+		} else if ok {
+			return media, nil
+		}
+		if info, statErr := os.Stat(cachePath); statErr == nil {
+			return &CachedMedia{
+				Metadata: cacheEntry{
+					URL:          normalized,
+					ContentType:  "",
+					Size:         info.Size(),
+					CachedAt:     info.ModTime().UTC(),
+					CacheControl: buildCacheControl(s.cacheTTL),
+				},
+				Path: cachePath,
+			}, nil
+		}
 	}
 
 	if err := os.MkdirAll(s.cacheDir, 0o750); err != nil {
@@ -733,9 +1220,16 @@ func (s *ProxyService) fetchAndCache(ctx context.Context, rawURL, bearer, scope 
 		return nil, &UpstreamStatusError{StatusCode: resp.StatusCode}
 	}
 
-	contentType := strings.TrimSpace(resp.Header.Get("Content-Type"))
-	if !s.isAllowedContentType(contentType, normalized) {
-		return nil, ErrUnsupportedUpstreamMedia
+	// 扩展名回退取重定向之后的最终 URL（resp.Request.URL）：client.Do
+	// 可能跟随了白名单内的 302，a.png 跳到 b.svg 且最终类型是
+	// octet-stream 时，借原始扩展名放行就会把 svg 字节按 png 回给客户端。
+	finalURL := normalized
+	if resp.Request != nil && resp.Request.URL != nil {
+		finalURL = resp.Request.URL.String()
+	}
+	contentType, ok := s.normalizeResponseContentType(resp.Header, finalURL)
+	if !ok {
+		return nil, s.mediaRejectionError(resp.Header, finalURL)
 	}
 
 	// 已知长度超限直接拒；未知长度（分块响应的 Content-Length 为 -1）不算
@@ -840,9 +1334,27 @@ func (s *ProxyService) ProxyPass(ctx context.Context, rawURL, rangeHeader string
 		return nil, &UpstreamStatusError{StatusCode: resp.StatusCode}
 	}
 
+	// 内容类型闸门与整文件下载同口径：Range/HEAD 直通不能成为 svg/HTML
+	// 准入的旁路（INT-171）。HEAD 响应常无 Content-Type，走扩展名回退
+	// （集合里没有 .svg）——回退用重定向之后的最终 URL，与整文件路径
+	// 同一口径。拒收时关掉 body 归还连接。
+	finalURL := normalized
+	if resp.Request != nil && resp.Request.URL != nil {
+		finalURL = resp.Request.URL.String()
+	}
+	normalizedType, ok := s.normalizeResponseContentType(resp.Header, finalURL)
+	if !ok {
+		resp.Body.Close()
+		return nil, s.mediaRejectionError(resp.Header, finalURL)
+	}
+
+	header := s.cloneRelevantHeaders(resp.Header)
+	// Content-Type 只保留规范化后的那一个值：多值/逗号拼接已在闸门上
+	// 被拒，octet-stream/空类型由扩展名回退改写成具体媒体类型。
+	header.Set("Content-Type", normalizedType)
 	return &PassThroughResponse{
 		StatusCode: resp.StatusCode,
-		Header:     cloneRelevantHeaders(resp.Header),
+		Header:     header,
 		Body:       resp.Body,
 	}, nil
 }
@@ -866,20 +1378,37 @@ func (s *ProxyService) getCachedNormalized(normalized, scope string) (*CachedMed
 	metaPath := s.metaPath(normalized, scope)
 	cachePath := s.dataPath(normalized, scope)
 
+	// 面边界（不变量第 1 条）：review 截图面的「不可丢弃」不只在 meta 可读
+	// 时成立。meta 读失败/损坏而 .bin 还在时，若按 miss 返回，后续重下会
+	// rename 覆盖持久资产（上游已删/转私则探测失败，视觉证据被静默换掉，DB
+	// 的 size/mime 仍留旧值）。该面按命中兜底：大小取 stat，类型用
+	// http.DetectContentType 判（媒体面不做这条路——它的 miss 重下是自愈语
+	// 义，覆盖无妨）。
+	reviewFace := s.cacheSubdir != defaultCacheSubdir
+
 	metaBytes, err := os.ReadFile(metaPath)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, false, nil
+		if reviewFace {
+			return s.servePersistedData(normalized, cachePath)
 		}
-		// 其余读失败（权限、目录损坏）降级：best-effort 清掉这一条，清得掉按
-		// miss 走重下，清不掉才上报（见 discardCacheEntry）。
-		return s.discardCacheEntry(metaPath, cachePath)
+		// ErrNotExist 是正常 miss；其余读失败（权限、目录损坏）同样按 miss——
+		// 读路径不删文件（见下），下次读取还是 miss，重下后按同一 key 覆盖。
+		// 目录级故障会退化成每条请求都重下，按限频 warn 留痕。
+		if !errors.Is(err, os.ErrNotExist) {
+			s.logMetaReadFail(metaPath, err)
+		}
+		return nil, false, nil
 	}
 
 	var entry cacheEntry
 	if err := json.Unmarshal(metaBytes, &entry); err != nil {
-		_ = os.Remove(metaPath)
-		_ = os.Remove(cachePath)
+		// meta 损坏（可能撞上写侧 rename 与 WriteFile 之间的中间态）按 miss
+		// 处理，不在读路径删文件：删除会与同 key 写盘竞态，最坏抹掉刚发布的
+		// 新条目。写侧发布完成后 meta 是完整 JSON，本次 miss 重下即自愈。
+		// review 截图面例外：.bin 在就按命中兜底（同上，重下会覆盖持久资产）。
+		if reviewFace {
+			return s.servePersistedData(normalized, cachePath)
+		}
 		return nil, false, nil
 	}
 
@@ -889,21 +1418,60 @@ func (s *ProxyService) getCachedNormalized(normalized, scope string) (*CachedMed
 		return nil, false, nil
 	}
 
-	if entry.expired(time.Now().UTC()) {
-		_ = os.Remove(metaPath)
-		_ = os.Remove(cachePath)
-		return nil, false, nil
+	// 面边界（不变量第 1 条）：TTL 与退役只作用于媒体代理面。review 截图面
+	// 的 .bin 是持久资产，过期不触发重下——重下会在上游内容变化时覆盖旧资
+	// 产（DB 的 size/mime 不随之更新），上游删除/转私时历史截图会永久不可
+	// 用。该面命中即返回持久条目；类型复核同样跳过：旧条目类型过不了当前
+	// 准入时按重下处理会把持久资产换成新字节，与「不可丢弃」矛盾（这类条
+	// 目响应带 nosniff + CSP sandbox，不构成脚本执行面）。
+	if s.cacheSubdir == defaultCacheSubdir {
+		// 过期条目只按 miss 处理，不在读路径删文件——与下面的内容复核同一
+		// 约束：GetCached 不持下载锁，这里的 os.Remove 会与正在写盘的同 key
+		// 下载竞态，最坏删掉别人刚发布的新条目。过期条目的退役路径：下次
+		// 读取按 miss 触发重下，fetchAndCache 持下载锁写盘时按同一 key 覆盖
+		// meta/data。
+		if entry.expired(time.Now().UTC()) {
+			return nil, false, nil
+		}
+
+		// 内容类型按当前准入规则复核：旧准入口径（收 svg）写进缓存的历史条
+		// 目命中时按 miss 走重下，不靠 bump 缓存标记全量清目录（INT-171）。
+		// 不过关只返回 miss，不在读路径删文件：GetCached 不持下载锁，这里删
+		// meta/data 会与正在写盘的同 key 下载竞态，最坏删掉别人刚发布的新条
+		// 目。下一次成功下载按同一 key 覆盖 meta/data，不再被重下的由目录扫
+		// 描回收。meta 是单值小文件，多值歧义只在响应 header 判定里出现，这
+		// 里直接走单值判定。旧条目 ContentType 剥参小写后为空或 octet-stream
+		// 时保守判 miss：它们的放行依赖扩展名，而扩展名要用重定向后的最终
+		// URL 才算得对，meta 里没存最终 URL——宁可贵一次重下，不做「按原始
+		// URL 的扩展名放行」这种与写入侧不一致的复核（svg 字节会以回填的
+		// image/png 命中，一个 TTL 内都错）。剥参后比较：旧写入路径原样存上
+		// 游值，`octet-stream; charset=binary` 这类带参数形态也要拦住。
+		baseType := strings.ToLower(strings.TrimSpace(strings.Split(entry.ContentType, ";")[0]))
+		if baseType == "" || baseType == "application/octet-stream" {
+			return nil, false, nil
+		}
+		normalizedType, allowed := s.normalizeMediaContentType(entry.ContentType, normalized)
+		if !allowed {
+			return nil, false, nil
+		}
+		// 走到这里的是带具体基础类型的条目：老缓存可能存着大写或带参数的原
+		// 始值，返回值改成规范化类型（小写去参）；空/基础类型为 octet-stream
+		// 的旧条目已在上面判 miss。CacheControl 同理：旧条目存的是 public（代
+		// 理地址带 token，不该进共享缓存层），下发时一律覆写 private。只改返
+		// 回值，不重写 meta 文件。
+		entry.ContentType = normalizedType
+		entry.CacheControl = buildCacheControl(s.cacheTTL)
+	} else {
+		// 持久面：类型原样下发（老条目可能是 octet-stream/带参数原始值），
+		// Cache-Control 仍统一 private。
+		entry.CacheControl = buildCacheControl(s.cacheTTL)
 	}
 
 	info, err := os.Stat(cachePath)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			_ = os.Remove(metaPath)
-			return nil, false, nil
-		}
-		// meta 在而 data 读不到（权限、损坏）：同样降级重下，不把一次可自愈
-		// 的单条损坏上报成目录级故障。
-		return s.discardCacheEntry(metaPath, cachePath)
+		// meta 在而 data 缺失/读不到（可能撞上写侧两步发布的中间态）：只按
+		// miss，不在读路径删文件，重下自愈。
+		return nil, false, nil
 	}
 
 	entry.Size = info.Size()
@@ -913,32 +1481,45 @@ func (s *ProxyService) getCachedNormalized(normalized, scope string) (*CachedMed
 	}, true, nil
 }
 
-// discardCacheEntry 单条缓存不可读时的降级清理：best-effort 删除 meta 与 data，
-// 都清得掉（或本就不在）按 miss 返回，让本次请求走重下；清理失败说明是目录级
-// 故障（权限/磁盘），才以 ErrLocalCache 上报——降级不了的现场必须留错误，否
-// 则每次请求都静默重复同一失败且无法自愈。
-func (s *ProxyService) discardCacheEntry(metaPath, cachePath string) (*CachedMedia, bool, error) {
-	for _, err := range []error{os.Remove(metaPath), os.Remove(cachePath)} {
-		if err != nil && !errors.Is(err, os.ErrNotExist) {
-			return nil, false, markLocalCacheErr(err)
-		}
-	}
-	return nil, false, nil
-}
-
 // acquireDownloadLock 返回该 URL 的下载闸（容量 1 信号量）：发送成功即持有，
 // 下载完成后 <-lock 收回。条目创建在 s.mu 下做，是否等待、等多久由调用方
-// 结合 ctx 决定。
-func (s *ProxyService) acquireDownloadLock(key string) chan struct{} {
+// 结合 ctx 决定。调用方用完应调 releaseDownloadLock：空闲（无人持有、无人
+// 等待）时把条目从 map 摘除，避免 map 随「历史上出现过的 URL 数」无界增长。
+func (s *ProxyService) acquireDownloadLock(key string) *downloadGate {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	lock, ok := s.download[key]
+	gate, ok := s.download[key]
 	if !ok {
-		lock = make(chan struct{}, 1)
-		s.download[key] = lock
+		gate = &downloadGate{sem: make(chan struct{}, 1)}
+		s.download[key] = gate
 	}
-	return lock
+	gate.refs++
+	return gate
+}
+
+// releaseDownloadLock 归还闸（调用方持有成功后用）并尝试回收空闲条目：引用
+// 计数归零才从 map 摘除——计数在 s.mu 下增减，等待者（acquire 时已登记）不
+// 会让持有者的释放把闸变成孤儿。
+func (s *ProxyService) releaseDownloadLock(key string, gate *downloadGate) {
+	<-gate.sem
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	gate.refs--
+	if gate.refs <= 0 && s.download[key] == gate {
+		delete(s.download, key)
+	}
+}
+
+// abandonDownloadLock 等待闸失败（ctx 超时/到期）时用：调用方从未持有闸，
+// 不能 <-gate.sem（会阻塞到持有者释放），只递减计数、归零时回收。
+func (s *ProxyService) abandonDownloadLock(key string, gate *downloadGate) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	gate.refs--
+	if gate.refs <= 0 && s.download[key] == gate {
+		delete(s.download, key)
+	}
 }
 
 func (s *ProxyService) dataPath(normalized, scope string) string {
@@ -959,16 +1540,90 @@ func scopedCacheID(normalized, scope string) string {
 	return scope + "\x1f" + normalized
 }
 
-func cloneRelevantHeaders(header http.Header) http.Header {
+// servePersistedData review 截图面的持久兜底：meta 不可读时，.bin 存在就按
+// 命中返回——大小取 stat，类型走 sniffReviewImageType；.bin 也不在才是真
+// miss。Cache-Control 统一 private（地址带用户凭证，不进共享缓存层）。
+func (s *ProxyService) servePersistedData(normalized, cachePath string) (*CachedMedia, bool, error) {
+	info, err := os.Stat(cachePath)
+	if err != nil {
+		return nil, false, nil
+	}
+	f, err := os.Open(cachePath)
+	if err != nil {
+		return nil, false, nil
+	}
+	defer f.Close()
+	head := make([]byte, 512)
+	n, _ := io.ReadFull(f, head)
+	if n == 0 {
+		return nil, false, nil
+	}
+	contentType, ok := sniffReviewImageType(head[:n])
+	if !ok {
+		// 兜底类型不是位图：这一条按 miss（不让未知字节以持久资产名义流出），
+		// 但同样不在读路径删文件。
+		return nil, false, nil
+	}
+	return &CachedMedia{
+		Metadata: cacheEntry{
+			URL:          normalized,
+			ContentType:  contentType,
+			Size:         info.Size(),
+			CachedAt:     info.ModTime().UTC(),
+			CacheControl: buildCacheControl(s.cacheTTL),
+		},
+		Path: cachePath,
+	}, true, nil
+}
+
+// SniffImageType 供截图端点对 mime 为空/octet-stream 的持久资产按魔数兜底
+// 判定下发类型（判不出返回 false，调用方保守 octet-stream）。
+func SniffImageType(head []byte) (string, bool) {
+	return sniffReviewImageType(head)
+}
+
+// sniffReviewImageType 判定 review 面兜底字节的图片类型。http.DetectContent
+// Type 只认 png/jpeg/gif/webp/bmp/ico，而审查面准入按 image/* 前缀放行
+// （avif/heic/tiff/jxl 都是合法持久资产）——「不可丢弃」不能依赖嗅探覆盖
+// 面，缺的魔数在这里补齐。
+func sniffReviewImageType(head []byte) (string, bool) {
+	if t := http.DetectContentType(head); strings.HasPrefix(t, "image/") {
+		return t, true
+	}
+	switch {
+	case len(head) >= 4 && (string(head[:4]) == "II*\x00" || string(head[:4]) == "MM\x00*"):
+		return "image/tiff", true
+	case len(head) >= 12 && string(head[4:8]) == "ftyp":
+		// 品牌显式集合：前缀匹配会把 AV1 视频（av01）、HEVC 视频（hevc）当
+		// 图片写进 review_assets.mime_type。mif1/msf1 是通用 HEIF 品牌、不带
+		// 编解码信息（部分 AVIF 编码器 major brand 写 mif1），归 heic 是猜——
+		// 同样按未识别处理，判不出就 miss。
+		switch string(head[8:12]) {
+		case "avif", "avis":
+			return "image/avif", true
+		case "heic", "heix", "heim", "heis":
+			return "image/heic", true
+		}
+	case len(head) >= 2 && head[0] == 0xFF && head[1] == 0x0A:
+		return "image/jxl", true
+	case len(head) >= 12 && string(head[:12]) == "\x00\x00\x00\x0cJXL \x0d\x0a\x87\x0a":
+		return "image/jxl", true
+	}
+	return "", false
+}
+
+func (s *ProxyService) cloneRelevantHeaders(header http.Header) http.Header {
 	out := make(http.Header)
-	for _, key := range []string{"Content-Type", "Content-Length", "Content-Range", "Accept-Ranges", "Cache-Control", "ETag", "Last-Modified"} {
+	for _, key := range []string{"Content-Type", "Content-Length", "Content-Range", "Accept-Ranges", "ETag", "Last-Modified"} {
 		for _, value := range header.Values(key) {
 			out.Add(key, value)
 		}
 	}
-	if out.Get("Cache-Control") == "" {
-		out.Set("Cache-Control", buildCacheControl(defaultCacheTTL))
-	}
+	// Cache-Control 不透传上游值：直通路径与缓存命中同一口径，一律 private
+	// （代理地址带用户 JWT，上游的 public/max-age 会让共享缓存/CDN 把带
+	// token 的 URL 存进共享层）。TTL 用服务实例的 cacheTTL，与命中路径同源
+	// ——写死默认值会让非默认 TTL 时浏览器的 max-age 比服务端条目晚过期。
+	out.Set("Cache-Control", buildCacheControl(s.cacheTTL))
 	return out
 }
 
@@ -1169,58 +1824,171 @@ func isAllowedGitHubMediaURL(parsed *url.URL) bool {
 	}
 }
 
-// isAllowedContentType 内容类型准入：GitHub 媒体面收图片与视频；截图面
-// （imagesOnly）只收位图——octet-stream 时按扩展名回退，svg 即使标着
-// image/* 也拒（视觉审查只吃位图）。
+// isAllowedContentType 内容类型准入：GitHub 媒体面收位图与视频；截图面
+// （imagesOnly）只收位图——octet-stream 与空 Content-Type 时按扩展名回退。
+// svg 两个面都拒（INT-171）：用户态媒体代理的响应字节以 Fast Ship 同源交付，
+// svg 在新标签页打开就是同源文档、能执行脚本，视觉审查也只吃位图。拒收
+// 两路并行——内容类型按 image/svg 前缀拒（标准写法 image/svg+xml 与非标准
+// 变体 image/svg 一并覆盖），扩展名回退集合不含 .svg。
+// 只答放不放行的薄封装；写缓存/回客户端前用 normalizeResponseContentType
+// 拿规范化类型。
 func (s *ProxyService) isAllowedContentType(contentType string, rawURL string) bool {
+	_, ok := s.normalizeMediaContentType(contentType, rawURL)
+	return ok
+}
+
+// normalizeMediaContentType 「准入 + 规范化」判定：上游类型原样是
+// image/* / video/*（GitHub 媒体面；截图面只收 image/*）时放行，返回
+// 小写去参后的类型本身；类型为空或 application/octet-stream 时按扩展名
+// 回退，放行则返回扩展名表里的具体媒体类型，不把 octet-stream/空类型原样
+// 回给客户端：具体类型是确定信息（缓存与响应同源），不依赖浏览器嗅探——
+// 同源 <img> 实测仍会嗅探 octet-stream 并解码，但那是实现细节，不能当设计
+// 前提，<video> 与其他客户端也不保证。注意这里只做类型准入，不校验媒体字节
+// （伪装成 image/png 的 svg 字节仍会被回），可执行性靠准入 + attachment +
+// CSP 的组合堵。rawURL 必须传重定向之后的最终 URL（调用方责任），借原始
+// 扩展名放行重定向出去的不可执行文档才无从发生。
+func (s *ProxyService) normalizeMediaContentType(contentType, rawURL string) (string, bool) {
 	if contentType == "" {
-		if s.imagesOnly {
-			return hasBitmapExtension(rawURL)
-		}
-		return hasGitHubMediaExtension(rawURL)
+		return mediaTypeForExtension(rawURL, s.imagesOnly)
 	}
 
 	baseType := strings.ToLower(strings.TrimSpace(strings.Split(contentType, ";")[0]))
+	// svg 在位图/视频分支之前统一拒，两个面共用同一道判定。单值里含逗号
+	// 是多值拼接后的歧义类型（规范上 Content-Type 只允许单值），无从规范化
+	// 也拒。
+	if strings.HasPrefix(baseType, "image/svg") || strings.Contains(baseType, ",") {
+		return "", false
+	}
 	if s.imagesOnly {
-		// svg 即使标着 image/* 也不收：image/svg+xml 是标准写法，image/svg
-		// （不带 +xml）是上游会用到的非标准变体，一并按前缀拒。
-		if strings.HasPrefix(baseType, "image/svg") {
-			return false
+		if strings.HasPrefix(baseType, "image/") {
+			return baseType, true
 		}
-		return strings.HasPrefix(baseType, "image/") ||
-			(baseType == "application/octet-stream" && hasBitmapExtension(rawURL))
+		if baseType == "application/octet-stream" {
+			return mediaTypeForExtension(rawURL, true)
+		}
+		return "", false
 	}
 	if strings.HasPrefix(baseType, "image/") || strings.HasPrefix(baseType, "video/") {
-		return true
+		return baseType, true
 	}
 	if baseType == "application/octet-stream" {
-		return hasGitHubMediaExtension(rawURL)
+		return mediaTypeForExtension(rawURL, false)
 	}
-	return false
+	// text/html、application/xhtml+xml、text/plain 等落不到任何前缀分支，
+	// 一律拒。
+	return "", false
 }
 
-var (
-	// bitmapExtensions 视觉审查能吃的位图。svg 是矢量图，不在此列——截图
-	// 面既不按扩展名收它，也不收 image/svg+xml。
-	bitmapExtensions = map[string]bool{
-		".png": true, ".jpg": true, ".jpeg": true, ".gif": true,
-		".webp": true, ".bmp": true,
+// normalizeResponseContentType header 级准入：resp.Header 有多个
+// Content-Type 值视为不可识别类型直接拒（规范上只允许单值，多值拼不出确定
+// 类型）；单个值里基础类型含逗号（如 `image/png, image/svg+xml`）同样拒。
+// 参数部分的逗号不算歧义——`video/mp4; codecs="avc1.42E01E, mp4a.40.2"`
+// 是合法写法，且回给客户端的本来就是去掉参数的基础类型。放行时返回规范化
+// 后的单一类型（见 normalizeMediaContentType）。
+func (s *ProxyService) normalizeResponseContentType(header http.Header, rawURL string) (string, bool) {
+	values := header.Values("Content-Type")
+	if len(values) > 1 {
+		return "", false
 	}
-	// vectorExtensions GitHub 媒体面额外收 svg。
-	vectorExtensions = map[string]bool{".svg": true}
-	videoExtensions  = map[string]bool{
-		".mp4": true, ".mov": true, ".webm": true, ".m4v": true,
+	value := ""
+	if len(values) == 1 {
+		value = strings.TrimSpace(values[0])
 	}
-)
+	return s.normalizeMediaContentType(value, rawURL)
+}
 
-// hasGitHubMediaExtension GitHub 媒体面的扩展名集合 = 位图 + svg + 视频。
-func hasGitHubMediaExtension(rawURL string) bool {
-	ext := urlPathExtension(rawURL)
-	return bitmapExtensions[ext] || vectorExtensions[ext] || videoExtensions[ext]
+// mediaRejectionError 拒收原因分三档：内容类型是 image/svg* 是「按类型确定」
+// 的拒绝（同一资源下次还是 svg），出口按较长 TTL 缓存；上游没给类型而扩展
+// 名是 .svg 的判据依赖上游本次响应，只能按很短 TTL；其它非媒体类型
+// （text/html 之类）可能是上游抽风时的拦截页/登录页/限流页，同一 URL 下一
+// 次就可能正常，不能缓存。
+func (s *ProxyService) mediaRejectionError(header http.Header, rawURL string) error {
+	values := header.Values("Content-Type")
+	if len(values) > 1 {
+		return ErrUnsupportedUpstreamMedia
+	}
+	value := ""
+	if len(values) == 1 {
+		value = values[0]
+	}
+	baseType := strings.ToLower(strings.TrimSpace(strings.Split(value, ";")[0]))
+	if strings.HasPrefix(baseType, "image/svg") {
+		return ErrUnsupportedSVG
+	}
+	if (baseType == "" || baseType == "application/octet-stream") && urlPathExtension(rawURL) == ".svg" {
+		return ErrUnsupportedSVGByExtension
+	}
+	return ErrUnsupportedUpstreamMedia
+}
+
+// mediaExtensions 扩展名 → 具体媒体类型：扩展名回退集合与回写缓存/响应的
+// 类型同源一张表，两边各写一份迟早漂移。svg 是可在浏览器执行脚本的矢量
+// 图，不在此列——两个面都不按扩展名收它（曾在 GitHub 媒体面的集合里，
+// INT-171 起移除）。
+var mediaExtensions = map[string]string{
+	".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+	".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp",
+	".mp4": "video/mp4", ".mov": "video/quicktime",
+	".webm": "video/webm", ".m4v": "video/x-m4v",
+}
+
+// mediaTypeForExtension 扩展名回退：命中返回表内具体媒体类型，未命中
+// （含 .svg、无扩展名）拒。imagesOnly 时只认位图扩展名，视频按未命中处理。
+func mediaTypeForExtension(rawURL string, imagesOnly bool) (string, bool) {
+	mediaType, ok := mediaExtensions[urlPathExtension(rawURL)]
+	if !ok || (imagesOnly && !strings.HasPrefix(mediaType, "image/")) {
+		return "", false
+	}
+	return mediaType, true
 }
 
 func hasBitmapExtension(rawURL string) bool {
-	return bitmapExtensions[urlPathExtension(rawURL)]
+	_, ok := mediaTypeForExtension(rawURL, true)
+	return ok
+}
+
+// mediaExtensionByType 具体媒体类型 → 扩展名（反向表，供下载文件名兜底）。
+// 同一类型可能有多个扩展名（image/jpeg 对应 .jpeg 与 .jpg），按扩展名字典
+// 序遍历取第一个，保证输出确定。
+var mediaExtensionByType = func() map[string]string {
+	exts := make([]string, 0, len(mediaExtensions))
+	for ext := range mediaExtensions {
+		exts = append(exts, ext)
+	}
+	sort.Strings(exts)
+	byType := make(map[string]string, len(mediaExtensions))
+	for _, ext := range exts {
+		if _, ok := byType[mediaExtensions[ext]]; !ok {
+			byType[mediaExtensions[ext]] = ext
+		}
+	}
+	return byType
+}()
+
+// IsMediaFileExtension 扩展名（带点，如 ".png"）是否在媒体扩展名表里。出口判
+// 断下载文件名的末段是否已经是能直接打开的媒体扩展名时用它：只看「有没有
+// 点」不够——`screenshot.v2`、结尾一个点的名字都会被当成已有扩展名。
+func IsMediaFileExtension(ext string) bool {
+	_, ok := mediaExtensions[strings.ToLower(ext)]
+	return ok
+}
+
+// MediaTypeForExtension 扩展名反查具体媒体类型（未命中返回空串）。出口用它
+// 对账「URL 后缀与响应类型是否一致」：后缀是上游可控的，`.png` 结尾却回
+// video/mp4 的资源不能只凭后缀保留文件名。
+func MediaTypeForExtension(ext string) string {
+	return mediaExtensions[strings.ToLower(ext)]
+}
+
+// MediaFileExtension 由具体媒体类型反查扩展名（带点）。只认准入用的那张扩展名
+// 表；表外类型（`image/avif`、`video/x-matroska` 这些按前缀放行但表里没有的）
+// 返回空串，由调用方决定兜底——不能拿一个 `.bin` 无条件覆盖上游自己的
+// `.avif`/`.mkv`，那会把本来能打开的文件改成打不开的。
+func MediaFileExtension(contentType string) string {
+	if ext, ok := mediaExtensionByType[strings.ToLower(strings.TrimSpace(contentType))]; ok {
+		return ext
+	}
+	return ""
 }
 
 // HasBitmapExtension URL 路径是否以位图扩展名（.png .jpg .jpeg .gif .webp
@@ -1238,12 +2006,15 @@ func urlPathExtension(rawURL string) string {
 	return strings.ToLower(path.Ext(parsed.Path))
 }
 
+// buildCacheControl 媒体成功响应的缓存头。private 而非 public：代理地址里带
+// 用户 JWT（?token=），public 允许前置共享缓存/CDN 把带 token 的 URL 存进共
+// 享层；private 下浏览器私有缓存行为不变，token 不再多活一份。
 func buildCacheControl(ttl time.Duration) string {
 	seconds := int(ttl / time.Second)
 	if seconds <= 0 {
 		seconds = int(defaultCacheTTL / time.Second)
 	}
-	return "public, max-age=" + strconv.Itoa(seconds)
+	return "private, max-age=" + strconv.Itoa(seconds)
 }
 
 func cacheKey(normalized string) string {

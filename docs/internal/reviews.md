@@ -943,7 +943,10 @@ Linkify；去重保序，label 取 alt 或「截图 N」）。收集走 AST 而�
 https** 主机，内容只收位图：`image/*`（svg 即使标着 `image/svg+xml` 也不
 收，非标准写法 `image/svg` 一并按前缀拒），
 或 `application/octet-stream` 且 URL 是位图扩展名；上游没有 Content-Type 时
-同样按位图扩展名回退——URL 是位图扩展名才收，否则拒；视频不收。防 SSRF 不靠
+同样按位图扩展名回退——URL 是位图扩展名才收，否则拒；视频不收。用户态
+媒体代理面 `/api/github/media-proxy` 自 INT-171 起同样拒 svg，并加 nosniff /
+Content-Disposition / CSP 硬化头，两面 svg 判定共用一处实现，口径详见
+`docs/internal/github-media-proxy.md`。防 SSRF 不靠
 域名白名单，
 而在拨号时校验解析出的 IP（`net.Dialer.Control`，因此这条下载面不走
 `HTTPS_PROXY` 等环境代理——走代理时校验到的会是代理 IP 而非目标 IP）——

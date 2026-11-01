@@ -14,7 +14,7 @@ describe("github media proxy utils", () => {
 
   it("adds the auth token to raw github media urls", () => {
     expect(toGitHubMediaProxyUrl("https://github.com/user-attachments/assets/demo", "jwt-token")).toBe(
-      "/api/github/media-proxy?url=https%3A%2F%2Fgithub.com%2Fuser-attachments%2Fassets%2Fdemo&token=jwt-token",
+      "/api/github/media-proxy?url=https%3A%2F%2Fgithub.com%2Fuser-attachments%2Fassets%2Fdemo&token=jwt-token&v=2",
     );
   });
 
@@ -26,8 +26,24 @@ describe("github media proxy utils", () => {
     const doc = new DOMParser().parseFromString(html ?? "", "text/html");
 
     expect(doc.querySelector("img")?.getAttribute("src")).toBe(
-      "/api/github/media-proxy?url=https%3A%2F%2Fgithub.com%2Fuser-attachments%2Fassets%2Fdemo&token=jwt-token",
+      "/api/github/media-proxy?url=https%3A%2F%2Fgithub.com%2Fuser-attachments%2Fassets%2Fdemo&token=jwt-token&v=2",
     );
+  });
+
+  it("rewrites any content-provided cache-busting version to the current one", () => {
+    // v 是缓存失效的权威键，而代理地址嵌在用户可控的正文里：预置的旧/超前的
+    // 版本号都会把浏览器钉在错误的缓存键上，一律重写为当前常量（与前端未发
+    // 版的 Go 并存不存在——web dist 与二进制同一镜像下发）。
+    for (const provided of ["1", "9", "abc", "2.0", "2 "]) {
+      const html = rewriteGitHubMediaHtml(
+        `<p><img alt="Image" src="/api/github/media-proxy?url=https%3A%2F%2Fgithub.com%2Fuser-attachments%2Fassets%2Fdemo&v=${encodeURIComponent(provided)}" /></p>`,
+        "jwt-token",
+      );
+      const doc = new DOMParser().parseFromString(html ?? "", "text/html");
+      expect(doc.querySelector("img")?.getAttribute("src")).toBe(
+        "/api/github/media-proxy?url=https%3A%2F%2Fgithub.com%2Fuser-attachments%2Fassets%2Fdemo&v=2&token=jwt-token",
+      );
+    }
   });
 
   it("adds the auth token to internal issue asset urls", () => {

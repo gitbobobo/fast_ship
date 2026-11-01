@@ -11,6 +11,8 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	"github.com/godbobo/fast_ship/server/internal/pkg/response"
 	"github.com/godbobo/fast_ship/server/internal/service"
+
+	"github.com/godbobo/fast_ship/server/internal/pkg/githubmedia"
 )
 
 // ReviewAgentHandler /api/review-agent 运行令牌端点（INT-135 1c）：
@@ -76,6 +78,21 @@ func (h *ReviewAgentHandler) ScreenshotImage(c *gin.Context) {
 		return
 	}
 	defer f.Close()
+	// 同源出口不变量：nosniff + CSP sandbox（inline 保留，运营端要在标签页
+	// 里看截图）。历史缓存里可能有 octet-stream 等非位图类型原样下发，没有
+	// nosniff 时浏览器会嗅探解码——别赌「眼下只有 Bearer 客户端消费」。
+	setSameOriginInlineImageHardeningHeaders(c.Writer.Header())
+	// 兜底 mime 为空/octet-stream（fetch 护栏对判不出类型的持久资产留空）时
+	// 按魔数重判：判得出就给具体类型（有 nosniff 也不会被嗅探利用），判不出
+	// 才保守 octet-stream。
+	if mime == "" || mime == "application/octet-stream" {
+		head := make([]byte, 512)
+		if n, _ := f.ReadAt(head, 0); n > 0 {
+			if sniffed, ok := githubmedia.SniffImageType(head[:n]); ok {
+				mime = sniffed
+			}
+		}
+	}
 	c.Header("Content-Type", mime)
 	c.Status(http.StatusOK)
 	_, _ = io.Copy(c.Writer, f)

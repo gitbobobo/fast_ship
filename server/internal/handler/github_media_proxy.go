@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -24,6 +26,15 @@ func NewGitHubMediaProxyHandler(service *githubmedia.ProxyService) *GitHubMediaP
 func (h *GitHubMediaProxyHandler) Proxy(c *gin.Context) {
 	rawURL := decodeMediaURLParam(c.Query("url"))
 	rangeHeader := c.GetHeader("Range")
+	if strings.Contains(rangeHeader, ",") {
+		// 多段 Range 忽略：上游对它会回 multipart/byteranges，那既不是图片
+		// 也不是视频，内容类型闸门必然拒；RFC 7233 允许服务器忽略 Range，
+		// 按无 Range 走整文件路径返回 200 完整内容，比 415 更符合预期。
+		// 同时要删掉请求上的头：缓存命中走 http.ServeContent，它会自己再
+		// 解析 Range，不删会在这里又变回 206 multipart。
+		rangeHeader = ""
+		c.Request.Header.Del("Range")
+	}
 	headOnly := c.Request.Method == http.MethodHead
 
 	if cached, ok, err := h.service.GetCached(rawURL); err != nil {
@@ -43,6 +54,9 @@ func (h *GitHubMediaProxyHandler) Proxy(c *gin.Context) {
 		defer resp.Body.Close()
 
 		copyMediaHeaders(c.Writer.Header(), resp.Header)
+		// 传规范化后的类型：直通路径回包的 Content-Type 已是去参小写的基础
+		// 类型，文件名对账用它，别用上游原始值（带参数会对不上表）。
+		setMediaProxyHardeningHeaders(c.Writer.Header(), rawURL, resp.Header.Get("Content-Type"))
 		c.Status(resp.StatusCode)
 		if headOnly {
 			return
@@ -68,6 +82,7 @@ func (h *GitHubMediaProxyHandler) Proxy(c *gin.Context) {
 		defer resp.Body.Close()
 
 		copyMediaHeaders(c.Writer.Header(), resp.Header)
+		setMediaProxyHardeningHeaders(c.Writer.Header(), rawURL, resp.Header.Get("Content-Type"))
 		c.Status(resp.StatusCode)
 		_, _ = io.Copy(c.Writer, resp.Body)
 		return
@@ -98,6 +113,10 @@ func serveCachedMedia(c *gin.Context, media *githubmedia.CachedMedia) {
 
 	header := c.Writer.Header()
 	header.Set("Content-Type", media.Metadata.ContentType)
+	// 不透传 meta 里存的原始缓存头：旧条目存的是 public（代理地址带 token，
+	// 不该进共享缓存层）。getCachedNormalized 已把它规范化成 private 且与
+	// 服务端条目 TTL 同源，直接用——写死 max-age 会在 cacheTTL 非默认时让
+	// 浏览器比服务端晚过期。
 	header.Set("Cache-Control", media.Metadata.CacheControl)
 	header.Set("Accept-Ranges", "bytes")
 	if media.Metadata.ETag != "" {
@@ -106,8 +125,88 @@ func serveCachedMedia(c *gin.Context, media *githubmedia.CachedMedia) {
 	if media.Metadata.LastModified != "" {
 		header.Set("Last-Modified", media.Metadata.LastModified)
 	}
+	// 在 http.ServeContent 之前设置：它只补 Content-Type/Length/Range 等头，
+	// 已显式设置的头不会被覆盖（见下），硬化头也原样保留。
+	setMediaProxyHardeningHeaders(header, media.Metadata.URL, media.Metadata.ContentType)
 
 	http.ServeContent(c.Writer, c.Request, "", media.Metadata.CachedAt, file)
+}
+
+// setSameOriginContentHardeningHeaders `?token=` 引入的同源内容出口（GitHub
+// 媒体代理、Issue 附件、头像）统一硬化：用户可控内容不能以 Fast Ship 同源
+// 文档交付。nosniff 禁止浏览器嗅探改判，CSP sandbox 兜底禁脚本禁同源。
+func setSameOriginContentHardeningHeaders(header http.Header) {
+	header.Set("X-Content-Type-Options", "nosniff")
+	header.Set("Content-Security-Policy", "default-src 'none'; sandbox")
+}
+
+// setSameOriginAttachmentHeaders 同上，再加 Content-Disposition: attachment
+// 与文件名。attachment 挡的是顶层导航（「在新标签页打开图片」退化成下载，
+// 而不是打开一份同源文档）。子资源不受影响的依据：HTML 的下载处理只写在
+// 导航算法里，图片/媒体的加载算法没有 attachment 分支，Fetch 也只把
+// document/embed/frame/iframe/object 列为导航请求；WebKit 的 SubresourceLoader
+// 与 AVFoundation 媒体桥接源码里同样没有按 attachment 下载/拒显的分支。
+// Chromium 已实测；Safari 尚无本机实测，属于源码级判断而不是浏览器验证。
+// 不按 Sec-Fetch-Dest 区分：导航请求不止 document（还有 iframe/frame/object/
+// embed），缺失元数据的老客户端还得另定回落，为一个没有证据的 Safari 兼容
+// 问题引入两条缓存键与分支，不值得。
+func setSameOriginAttachmentHeaders(header http.Header, fileName string) {
+	setSameOriginContentHardeningHeaders(header)
+	header.Set("Content-Disposition", contentDisposition(fileName))
+}
+
+// setSameOriginInlineImageHardeningHeaders 给「响应本身就是要在浏览器里当图片
+// 看的同源内容」（截图）用：nosniff 禁止把 image/* 改判成 HTML；CSP 只给
+// `sandbox`——禁脚本、隔离来源，但不设 default-src。
+// 不套 default-src 'none'：Chromium 打开图片地址会生成 `<body><img>` 包装文档，
+// 那个 img 是否受 img-src（回落到 default-src）约束随版本而异（实测 155 不拦，
+// 别的版本可能拦），图片能不能显示不该赌这个实现细节。
+func setSameOriginInlineImageHardeningHeaders(header http.Header) {
+	header.Set("X-Content-Type-Options", "nosniff")
+	header.Set("Content-Security-Policy", "sandbox")
+}
+
+// setMediaProxyHardeningHeaders 媒体代理成功响应的统一硬化头（INT-171）。必须
+// 在 copyMediaHeaders 之后、http.ServeContent 之前设置，避免被上游头覆盖。
+func setMediaProxyHardeningHeaders(header http.Header, upstreamURL, contentType string) {
+	setSameOriginAttachmentHeaders(header, mediaProxyFileName(upstreamURL, contentType))
+}
+
+// mediaProxyFileName 下载文件名：优先上游 URL 末段（GitHub 附件直链多半是没
+// 扩展名的 uuid），且后缀要与响应类型对账——URL 后缀是上游可控的，不能只凭
+// 「像个媒体扩展名」就信：`.png` 结尾却回 `video/mp4` 的资源，下载下来照旧
+// 打不开。规则：
+//   - 末段后缀与响应类型一致（后缀反查出的类型 == 响应类型）原样保留；
+//   - 表内类型反查出确定扩展名，就用它替换不可信后缀（`screenshot.v2` →
+//     `screenshot.png`、`trailing.` → `trailing.png`、伪装后缀 `x.png` 回
+//     `video/mp4` → `x.mp4`）；
+//   - 表外类型（`image/avif`、`video/x-matroska`）反查不到，保留上游自己的
+//     `.avif`/`.mkv`——不能拿 `.bin` 覆盖掉本来能打开的文件。
+func mediaProxyFileName(upstreamURL, contentType string) string {
+	name := "media"
+	if parsed, err := url.Parse(upstreamURL); err == nil {
+		if base := sanitizeAttachmentFileName(path.Base(parsed.Path)); base != "" && base != "." && base != "/" {
+			name = base
+		}
+	}
+	// 先去掉末段结尾的点：`a.png.` 的 path.Ext 是 "."，不去掉会拼成 a.png.png。
+	if trimmed := strings.TrimRight(name, "."); trimmed != "" {
+		name = trimmed
+	}
+	ext := path.Ext(name)
+	// 后缀可信：在媒体表里、且它对应的类型就是响应类型（大小写不敏感，与
+	// 准入侧同口径）。
+	if ext != "" && githubmedia.IsMediaFileExtension(ext) &&
+		strings.EqualFold(githubmedia.MediaTypeForExtension(ext), contentType) {
+		return name
+	}
+	if want := githubmedia.MediaFileExtension(contentType); want != "" {
+		return strings.TrimSuffix(name, ext) + want
+	}
+	if ext != "" {
+		return name
+	}
+	return name + ".bin"
 }
 
 func copyMediaHeaders(dst, src http.Header) {
@@ -119,10 +218,29 @@ func copyMediaHeaders(dst, src http.Header) {
 	}
 }
 
+// svg 拒绝的浏览器缓存秒数，分两档：内容类型判定（image/svg*，同一资源下次
+// 还是 svg）可以钉住——不给缓存头的话每次页面渲染都会重新请求代理、代理再
+// 回源一趟才在闸门上拒；扩展名判定（上游没给类型 + .svg）的判据来自上游本
+// 次响应——下次它可能给正常类型，只能按短 TTL，钉 10 分钟会把裂图窗口也钉
+// 住。其它非媒体类型（text/html 之类可能是拦截页）不带缓存头。
+const (
+	mediaProxyRejectionMaxAge            = 600
+	mediaProxyRejectionByExtensionMaxAge = 60
+)
+
 func writeMediaProxyError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, githubmedia.ErrInvalidMediaURL):
 		c.String(http.StatusBadRequest, "invalid github media url")
+	case errors.Is(err, githubmedia.ErrUnsupportedSVGByExtension):
+		// 顺序在 ErrUnsupportedSVG 之前：它包装了后者。判据来自上游本次响应，
+		// 只按短 TTL。
+		c.Header("Cache-Control", "private, max-age="+strconv.Itoa(mediaProxyRejectionByExtensionMaxAge))
+		c.String(http.StatusUnsupportedMediaType, "unsupported media type")
+	case errors.Is(err, githubmedia.ErrUnsupportedSVG):
+		// 内容类型判定的 svg 是确定性拒绝，可按较长 TTL 缓存。
+		c.Header("Cache-Control", "private, max-age="+strconv.Itoa(mediaProxyRejectionMaxAge))
+		c.String(http.StatusUnsupportedMediaType, "unsupported media type")
 	case errors.Is(err, githubmedia.ErrUnsupportedUpstreamMedia):
 		c.String(http.StatusUnsupportedMediaType, "unsupported media type")
 	default:
