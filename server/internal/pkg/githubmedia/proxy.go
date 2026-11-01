@@ -168,7 +168,14 @@ type cacheEntry struct {
 }
 
 func (e cacheEntry) expired(now time.Time) bool {
-	return !e.ExpiresAt.IsZero() && now.After(e.ExpiresAt)
+	// 旧版本可能写入零值 ExpiresAt（字段缺失/升级窗口）——恒不过期会让这类
+	// 条目既不被扫描回收、读路径又永远复核 miss，同一 URL 每次都回源被闸门
+	// 拒一次，永不退役。零值回退 CachedAt+默认 TTL。
+	expiresAt := e.ExpiresAt
+	if expiresAt.IsZero() {
+		expiresAt = e.CachedAt.Add(defaultCacheTTL)
+	}
+	return now.After(expiresAt)
 }
 
 type CachedMedia struct {

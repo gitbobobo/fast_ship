@@ -607,7 +607,8 @@ func TestSniffReviewImageTypeCoversAdmissionSet(t *testing.T) {
 }
 
 // review 面 .bin 已存在时重下绝不覆盖持久字节：即使兜底嗅探判不出类型、
-// meta 损坏，FetchAndCache 也返回现有 .bin（octet-stream 保守下发），上游
+// meta 损坏，FetchAndCache 也返回现有 .bin（mime 留空、由截图端点按魔数
+// 兜底，不落永久错值），上游
 // 新字节只丢弃。「不可丢弃」不依赖嗅探覆盖面——魔数表永远追不完 image/*。
 func TestReviewFaceFetchNeverOverwritesPersistentData(t *testing.T) {
 	var hits int32
