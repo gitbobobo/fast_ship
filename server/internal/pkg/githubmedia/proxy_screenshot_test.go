@@ -656,8 +656,8 @@ func TestReviewFaceFetchNeverOverwritesPersistentData(t *testing.T) {
 	if media.Path != svc.dataPath(normalized, "") {
 		t.Fatalf("media.Path = %q, want 现有 .bin", media.Path)
 	}
-	if media.Metadata.ContentType != "application/octet-stream" {
-		t.Fatalf("ContentType = %q, want octet-stream（保守下发）", media.Metadata.ContentType)
+	if media.Metadata.ContentType != "" {
+		t.Fatalf("ContentType = %q, want 空（mime 不落库成永久错值，端点按魔数兜底）", media.Metadata.ContentType)
 	}
 	if atomic.LoadInt32(&hits) != 0 {
 		t.Fatalf("hits = %d, want 0（护栏在下载前返回现有字节，根本不请求上游）", hits)

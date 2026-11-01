@@ -9,7 +9,7 @@
 //     无 purge、无条目回收 sweeper（media-*.tmp 清理是唯一例外，
 //     sweepStaleTmpFiles 不触碰 .bin/.json）；读路径命中即返回（不过期、
 //     不因类型复核 miss）；重下绝不覆盖已落盘的 .bin（fetch 入口护栏：
-//     存在即返回现有字节，类型判不出时保守 octet-stream）。
+//     存在即返回现有字节，类型判不出时 mime 留空，截图端点按魔数兜底）。
 //     - 无缓存出口（issue assets、avatars、screenshot content、crop）：不落
 //     缓存目录，只施加同源硬化头与「attachment 或 inline 图片档」判据（按
 //     出口语义：下载类 attachment，截图/裁剪类刻意保留 inline）。
@@ -1162,9 +1162,9 @@ func (s *ProxyService) fetchAndCache(ctx context.Context, rawURL, bearer, scope 
 	// 面边界（不变量第 1 条）：review 截图面已落盘的 .bin 是持久资产，重下
 	// 会用上游当前字节覆盖证据（DB 的 size/mime 不同步），上游已删/转私时
 	// 更是直接失败。.bin 存在就返回现有字节，绝不 rename 覆盖——「不可丢
-	// 弃」不依赖兜底嗅探的覆盖面。类型判不出时保守以 octet-stream 下发（响
-	// 应带 nosniff + CSP sandbox，不构成脚本执行面），宁可显示不出来也不换
-	// 掉证据字节。
+	// 弃」不依赖兜底嗅探的覆盖面。类型判不出时 ContentType 留空（不写进
+	// review_assets.mime_type 成永久错值）；截图端点对空/octet-stream 的
+	// mime 按魔数兜底判定下发类型，响应带 nosniff + CSP sandbox。
 	if s.cacheSubdir != defaultCacheSubdir {
 		cachePath := s.dataPath(normalized, scope)
 		if media, ok, err := s.servePersistedData(normalized, cachePath); err != nil {
@@ -1176,7 +1176,7 @@ func (s *ProxyService) fetchAndCache(ctx context.Context, rawURL, bearer, scope 
 			return &CachedMedia{
 				Metadata: cacheEntry{
 					URL:          normalized,
-					ContentType:  "application/octet-stream",
+					ContentType:  "",
 					Size:         info.Size(),
 					CachedAt:     info.ModTime().UTC(),
 					CacheControl: buildCacheControl(s.cacheTTL),
@@ -1569,6 +1569,12 @@ func (s *ProxyService) servePersistedData(normalized, cachePath string) (*Cached
 	}, true, nil
 }
 
+// SniffImageType 供截图端点对 mime 为空/octet-stream 的持久资产按魔数兜底
+// 判定下发类型（判不出返回 false，调用方保守 octet-stream）。
+func SniffImageType(head []byte) (string, bool) {
+	return sniffReviewImageType(head)
+}
+
 // sniffReviewImageType 判定 review 面兜底字节的图片类型。http.DetectContent
 // Type 只认 png/jpeg/gif/webp/bmp/ico，而审查面准入按 image/* 前缀放行
 // （avif/heic/tiff/jxl 都是合法持久资产）——「不可丢弃」不能依赖嗅探覆盖
@@ -1582,11 +1588,13 @@ func sniffReviewImageType(head []byte) (string, bool) {
 		return "image/tiff", true
 	case len(head) >= 12 && string(head[4:8]) == "ftyp":
 		// 品牌显式集合：前缀匹配会把 AV1 视频（av01）、HEVC 视频（hevc）当
-		// 图片写进 review_assets.mime_type。判不出就 miss，不猜。
+		// 图片写进 review_assets.mime_type。mif1/msf1 是通用 HEIF 品牌、不带
+		// 编解码信息（部分 AVIF 编码器 major brand 写 mif1），归 heic 是猜——
+		// 同样按未识别处理，判不出就 miss。
 		switch string(head[8:12]) {
 		case "avif", "avis":
 			return "image/avif", true
-		case "heic", "heix", "heim", "heis", "mif1", "msf1":
+		case "heic", "heix", "heim", "heis":
 			return "image/heic", true
 		}
 	case len(head) >= 2 && head[0] == 0xFF && head[1] == 0x0A:
