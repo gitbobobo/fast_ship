@@ -3686,16 +3686,16 @@ type IssuePullRequest struct {
 	MergedAt *string `json:"merged_at"`
 	Number   int     `json:"number"`
 
-	// Provider 当前恒为 github；字段预留 gitlab
+	// Provider github=GitHub PR；forgejo=自托管 Forgejo/Gitea PR（走部署级 Forgejo 集成）
 	Provider string `json:"provider"`
 
 	// RepoFullName owner/repo；允许与项目配置的仓库不同（跨仓库 attach）
 	RepoFullName string `json:"repo_full_name"`
 
-	// State merged = GitHub 上 closed 且 merged_at 非空
+	// State merged = GitHub 上 closed 且 merged_at 非空，或 Forgejo 上 closed 且 merged=true
 	State IssuePullRequestState `json:"state"`
 
-	// SyncedAt 最近一次从 GitHub 刷新成功的时间
+	// SyncedAt 最近一次从远端 forge 刷新成功的时间
 	SyncedAt  string `json:"synced_at"`
 	Title     string `json:"title"`
 	UpdatedAt string `json:"updated_at"`
@@ -3704,7 +3704,7 @@ type IssuePullRequest struct {
 // IssuePullRequestLinkOrigin manual=用户显式 attach；synced=远端同步投影产生（清理逻辑只作用于 synced）
 type IssuePullRequestLinkOrigin = model.IssuePullRequestLinkOrigin
 
-// IssuePullRequestState merged = GitHub 上 closed 且 merged_at 非空
+// IssuePullRequestState merged = GitHub 上 closed 且 merged_at 非空，或 Forgejo 上 closed 且 merged=true
 type IssuePullRequestState = model.IssuePullRequestState
 
 // IssuePullRequestSummary Issue 关联 PR 的聚合计数；closed 计数 = total - open - merged

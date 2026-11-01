@@ -1994,10 +1994,11 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * 关联一个 GitHub PR 到 Issue（幂等）
-         * @description 请求体只传 PR URL（`https://github.com/<owner>/<repo>/pull/<number>`），服务端解析 owner/repo/number 后立即从 GitHub 拉取 title/state/is_draft/author/head/base/merged_at 等字段入库；拉取失败返回错误，不落记录。
-         *     允许跨仓库：URL 可以是任意 GitHub 仓库的 PR，不要求等于项目配置的仓库，不做跨仓库鉴权。项目未配 GitHub token 时以未认证方式拉取，仅支持公共仓库。
-         *     重复 attach 同一 PR（唯一键 issue_id+provider+repo_full_name+number）幂等返回既有记录并顺带刷新状态。attach 产生的行 `link_origin=manual`；PR 状态与 Issue workflow_status 不联动。
+         * 关联一个 GitHub 或 Forgejo PR 到 Issue（幂等）
+         * @description 请求体只传 PR URL，服务端解析后立即从远端 forge 拉取 title/state/is_draft/author/head/base/merged_at 等字段入库；拉取失败返回错误，不落记录。
+         *     两种 URL 形状：`https://github.com/<owner>/<repo>/pull/<number>` 走 GitHub（项目凭证，未配则以未认证方式拉公共仓库）；`http(s)://<host>/<owner>/<repo>/pulls/<number>` 走 Forgejo——按 URL 主机匹配部署级 Forgejo 集成（forge_integrations），用集成机器人 PAT 拉取，主机未配集成返回 40007。
+         *     允许跨仓库：URL 可以是任意仓库的 PR，不要求等于项目配置的仓库。
+         *     重复 attach 同一 PR（唯一键 issue_id+provider+repo_full_name+number）幂等返回既有记录并顺带刷新状态与集成快照。attach 产生的行 `link_origin=manual`；PR 状态与 Issue workflow_status 不联动。
          */
         post: operations["attachIssuePullRequest"];
         delete?: never;
@@ -2017,7 +2018,7 @@ export interface paths {
         put?: never;
         /**
          * 刷新该 Issue 下全部已关联 PR 的状态
-         * @description 逐条重新拉取 GitHub PR 信息并更新 state/merged_at/closed_at 等字段。只更新既有行，不新增、不删除；每条关联是独立失败域——单行拉取或保存失败记入 failures 不中断其余行（失败行保留旧数据），整体恒返回 200。仅 Issue/项目不存在返回 404，读取关联列表失败返回 500。
+         * @description 逐条重新拉取已关联 PR 的最新信息并更新 state/merged_at/closed_at 等字段：github 行走项目凭证，forgejo 行按关联时落的集成快照重建 Forgejo 客户端（集成被删/解密失败/未知 provider 只记单行失败）。只更新既有行，不新增、不删除；每条关联是独立失败域——单行拉取或保存失败记入 failures 不中断其余行（失败行保留旧数据），整体恒返回 200。仅 Issue/项目不存在返回 404，读取关联列表失败返回 500。
          */
         post: operations["syncIssuePullRequests"];
         delete?: never;
@@ -3837,7 +3838,7 @@ export interface components {
         /** @enum {string} */
         IssueSyncStatus: "idle" | "running" | "failed" | "completed";
         /**
-         * @description merged = GitHub 上 closed 且 merged_at 非空
+         * @description merged = GitHub 上 closed 且 merged_at 非空，或 Forgejo 上 closed 且 merged=true
          * @enum {string}
          */
         IssuePullRequestState: "open" | "closed" | "merged";
@@ -4918,7 +4919,7 @@ export interface components {
             /** Format: uuid */
             id: string;
             issue_id: string;
-            /** @description 当前恒为 github；字段预留 gitlab */
+            /** @description github=GitHub PR；forgejo=自托管 Forgejo/Gitea PR（走部署级 Forgejo 集成） */
             provider: string;
             /** @description owner/repo；允许与项目配置的仓库不同（跨仓库 attach） */
             repo_full_name: string;
@@ -4940,7 +4941,7 @@ export interface components {
             link_origin: components["schemas"]["IssuePullRequestLinkOrigin"];
             /**
              * Format: date-time
-             * @description 最近一次从 GitHub 刷新成功的时间
+             * @description 最近一次从远端 forge 刷新成功的时间
              */
             synced_at: string;
             /** Format: date-time */
@@ -12738,7 +12739,7 @@ export interface operations {
                     };
                 };
             };
-            /** @description 非 GitHub 或无法解析的 PR URL（40001） */
+            /** @description 无法解析的 PR URL（40001），或该主机未配置 Forgejo 集成（40007） */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -12750,7 +12751,7 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             404: components["responses"]["NotFound"];
             500: components["responses"]["InternalError"];
-            /** @description GitHub API 调用失败（50200；含 PR 不存在或无权访问） */
+            /** @description GitHub API 调用失败（50200）或 Forgejo API 调用失败（50206）；均含 PR 不存在或无权访问 */
             502: {
                 headers: {
                     [name: string]: unknown;

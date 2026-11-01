@@ -27,9 +27,11 @@ var (
 	ErrReviewResultInvalid             = New(40004, "审查结论字段非法")
 	ErrPairingURLInvalid               = New(40005, "配对链接无效或缺少配对码")
 	ErrProjectPublicGitHubTokenMissing = New(40006, "该项目未配置公开仓库 Token")
-	ErrQuotaProviderUnknown            = New(40030, "未知的额度供应商")
-	ErrQuotaCredentialsInvalid         = New(40031, "凭据字段缺失或非法")
-	ErrQuotaDeviceAuthUnsupported      = New(40032, "该供应商不支持设备授权")
+	// Issue 关联 Forgejo PR（INT-181）：PR URL 的主机没有可用的 Forgejo 集成。
+	ErrForgeIntegrationNotConfigured = New(40007, "未配置可处理该 Forgejo PR 的集成，请先在集成管理里配置 Forgejo 集成")
+	ErrQuotaProviderUnknown          = New(40030, "未知的额度供应商")
+	ErrQuotaCredentialsInvalid       = New(40031, "凭据字段缺失或非法")
+	ErrQuotaDeviceAuthUnsupported    = New(40032, "该供应商不支持设备授权")
 	// 部署级 GitHub App Manifest（INT-129 B 轮）：state 一次性且进程内，过期/
 	// 重放/换管理员一律要求重新发起；GitHub 侧 code 404/422 同理。
 	ErrGitHubManifestStateInvalid = New(40009, "创建流程已过期或已失效，请重新创建 App")
@@ -185,4 +187,6 @@ var (
 	ErrQuotaDeviceAuthUpstream = New(50204, "额度供应商授权服务不可用")
 	// 部署级 GitHub App Manifest 转换（INT-129 B 轮）。
 	ErrGitHubManifestFailed = New(50205, "GitHub App Manifest 转换失败")
+	// Issue 关联 Forgejo PR（INT-181）：Forgejo 平台取数失败。
+	ErrForgeAPI = New(50206, "Forgejo API 调用失败")
 )

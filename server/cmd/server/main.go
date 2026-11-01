@@ -303,7 +303,11 @@ func main() {
 	// forgejo 集成并派生 code_integration_id 绑定。
 	projectService := service.NewProjectService(projectRepo, versionRepo, issueSyncStateRepo, githubTokenRepo, fileStorage, cfg, githubLogger, forgeIntegrationRepo)
 	versionService := service.NewVersionService(versionRepo, projectRepo, githubTokenRepo, fileStorage, cfg, githubLogger)
-	issueService := service.NewIssueService(issueRepo, issueGitHubMetaRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueShipHookService, issueChecklistRepo, issueSyncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, githubTokenRepo, userRepo, githubRepoLabelRepo, issueReadStateRepo, recommendationRepo, issuePullRequestRepo, issueAttachmentRepo, fileStorage, cfg, githubLogger, screenshotAnnotationRepo)
+	// Forgejo 集成凭证来源（INT-167/INT-181）：审查 resolver 用这份实例；
+	// IssueService 内部自建等价实例（各自一份传输层缓存，凭证同源），必须在
+	// issueService 之前建好。
+	forgeSource := service.NewForgeClientSource(forgeIntegrationRepo, cfg, reviewLogger)
+	issueService := service.NewIssueService(issueRepo, issueGitHubMetaRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueShipHookService, issueChecklistRepo, issueSyncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, githubTokenRepo, userRepo, githubRepoLabelRepo, issueReadStateRepo, recommendationRepo, issuePullRequestRepo, issueAttachmentRepo, fileStorage, cfg, githubLogger, screenshotAnnotationRepo, forgeIntegrationRepo)
 	issueCollabService := service.NewIssueCollabService(issueCollabRepo, issueRepo, projectRepo, userRepo)
 	recommendationService := service.NewIssueRecommendationService(recommendationRepo, issueRepo, issueInternalMetaRepo, projectRepo)
 	logService := service.NewLogService(logRepo, projectRepo)
@@ -431,7 +435,6 @@ func main() {
 	// 再向支持凭证的实现取 bearer——GitHub 是安装令牌，Forgejo 是机器人 PAT
 	// （经 forgeSource 现取，review_assets 只对 GitHub 实例的附件路径使用）；
 	// fake/不支持凭证的实现保持匿名（返回空串）。
-	forgeSource := service.NewForgeClientSource(forgeIntegrationRepo, cfg, reviewLogger)
 	reviewClients := forge.NewReviewClients(ghPR, forgeSource)
 	mediaBearer := func(ctx context.Context, integrationID string, installationID int64) (string, error) {
 		client, err := reviewClients.ClientFor(ctx, integrationID, "", installationID)

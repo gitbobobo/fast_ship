@@ -4,34 +4,79 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/godbobo/fast_ship/server/internal/forge"
 	"github.com/godbobo/fast_ship/server/internal/githubapi"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
+	"github.com/godbobo/fast_ship/server/internal/pkg/forges"
 	"github.com/godbobo/fast_ship/server/internal/repository"
 	"github.com/google/uuid"
+	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
 
-var pullRequestURLPattern = regexp.MustCompile(`(?i)^https?://(?:www\.)?github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/pull/(\d+)(?:[/?#].*)?$`)
+var (
+	pullRequestURLPattern = regexp.MustCompile(`(?i)^https?://(?:www\.)?github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/pull/(\d+)(?:[/?#].*)?$`)
+
+	// forgejoPullRequestURLPattern 自托管 Forgejo/Gitea 实例的 PR 链接（INT-181）：
+	// 非 github.com 主机 + /{owner}/{repo}/pulls/{n}，容忍 http/https、显式端口
+	// 与 /files、query、fragment 等尾部（风格对齐 pullRequestURLPattern）。
+	// scheme 与 authority 单独捕获：authority 段交给 url.Parse 归一（IPv6 字面量、
+	// 端口、误写的 userinfo 都能正确拆出 host），host 只用于集成查找，不用于发起
+	// 请求；scheme 参与主机的缺省端口归一（http→80、https→443）。
+	forgejoPullRequestURLPattern = regexp.MustCompile(`(?i)^(https?)://([^/?#]+)/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/pulls/(\d+)(?:[/?#].*)?$`)
+)
 
 const (
 	pullRequestAttachTimeout = 15 * time.Second
 	pullRequestSyncTimeout   = 30 * time.Second
 )
 
-// AttachIssuePullRequest 把一个 GitHub PR 关联到 Issue。
-// 输入只是 PR URL：解析出 owner/repo/number 后立刻向 GitHub 拉取详情填充，
-// 拉取失败直接报错不落记录。同一 PR 重复 attach 幂等——返回既有行并顺带刷新。
-// 允许跨仓库，repo_full_name 可以是任意 GitHub 仓库，不要求等于项目配置的仓库。
+// pullRequestLink 解析后的 PR 链接：Provider 决定后续取数路径；forgejo 行的
+// HostKey 是 PR URL 主机的归一键（forges.HostKey，与 forge_integrations.host_key
+// 同口径），github 行恒空串。
+type pullRequestLink struct {
+	Provider string
+	Owner    string
+	Repo     string
+	Number   int
+	HostKey  string
+}
+
+// issueForgeSource 关联 PR 链路的 Forgejo 集成凭证面最小接口（INT-181）：签名
+// 与 forge.ForgejoSource 同形，生产接 ForgeClientSource（同一实现同时满足
+// resolver 与本接口），测试可注入桩。只授权 forge_integrations 的机器人 PAT，
+// 不接项目/用户级凭证。
+type issueForgeSource interface {
+	ForgejoClient(ctx context.Context, integrationID string) (httpClient *http.Client, apiBaseURL, token string, err error)
+}
+
+// 编译期钉住 ForgeClientSource 满足关联 PR 链路的凭证面。
+var _ issueForgeSource = (*ForgeClientSource)(nil)
+
+// forgePRReader 关联 PR 链路对 Forgejo 平台的最小读取面（INT-181）：forge.ReviewClient
+// 的 GetPullRequest 子集，测试桩不必实现整个审查方法面。
+type forgePRReader interface {
+	GetPullRequest(ctx context.Context, repoFullName string, number int) (*forge.PullRequest, error)
+}
+
+// AttachIssuePullRequest 把一个 GitHub 或 Forgejo PR 关联到 Issue（INT-181 起
+// 支持双 provider）。输入只是 PR URL：github.com 链接沿用 GitHub 路径（凭证与
+// 报错口径不变）；其他主机的 /pulls/{n} 链接按主机键找部署级 Forgejo 集成，
+// 用集成机器人 PAT 拉取详情并落集成快照。解析/查集成/拉取失败直接报错不落
+// 记录。同一 PR 重复 attach 幂等——返回既有行并顺带刷新。允许跨仓库，
+// repo_full_name 可以是任意仓库，不要求等于项目配置的仓库。
 func (s *IssueService) AttachIssuePullRequest(issueID, userID string, req AttachIssuePullRequestRequest) (*IssuePullRequestResponse, error) {
-	owner, repo, number, ok := parsePullRequestURL(req.Url)
+	parsed, ok := parsePullRequestLink(req.Url)
 	if !ok {
-		return nil, errs.New(errs.ErrInvalidParams.Code, "无法识别的 PR 链接，仅支持 https://github.com/<owner>/<repo>/pull/<number>")
+		return nil, errs.New(errs.ErrInvalidParams.Code, "无法识别的 PR 链接，支持 https://github.com/<owner>/<repo>/pull/<number> 或 http(s)://<host>/<owner>/<repo>/pulls/<number>")
 	}
 
 	issue, project, err := s.loadIssueAndProject(issueID, userID)
@@ -39,30 +84,50 @@ func (s *IssueService) AttachIssuePullRequest(issueID, userID string, req Attach
 		return nil, err
 	}
 
-	client, credKind, err := s.pullRequestClient(project)
-	if err != nil {
-		return nil, err
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), pullRequestAttachTimeout)
 	defer cancel()
-	pr, err := client.GetPullRequest(ctx, 0, owner+"/"+repo, number)
-	if err != nil {
-		return nil, errs.New(errs.ErrGitHubAPI.Code, fmt.Sprintf("获取 GitHub PR 失败（%s）: %v%s", credKind.usage(), err, pullRequestAccessHint(err, credKind)))
-	}
-
 	now := time.Now().UTC()
 	link := &model.IssuePullRequest{
-		ID:           uuid.NewString(),
-		IssueID:      issue.ID,
-		ProjectID:    issue.ProjectID,
-		Provider:     model.IssuePullRequestProviderGitHub,
-		RepoFullName: owner + "/" + repo,
-		Number:       number,
-		LinkOrigin:   model.IssuePullRequestLinkOriginManual,
-		CreatedAt:    now,
+		ID:         uuid.NewString(),
+		IssueID:    issue.ID,
+		ProjectID:  issue.ProjectID,
+		Number:     parsed.Number,
+		LinkOrigin: model.IssuePullRequestLinkOriginManual,
+		CreatedAt:  now,
 	}
-	applyPullRequestData(link, pr, now)
+
+	switch parsed.Provider {
+	case model.IssuePullRequestProviderForgejo:
+		link.Provider = model.IssuePullRequestProviderForgejo
+		link.RepoFullName = parsed.Owner + "/" + parsed.Repo
+		integrationID, err := s.forgejoIntegrationIDForHost(parsed.HostKey)
+		if err != nil {
+			return nil, err
+		}
+		link.ForgeIntegrationID = integrationID
+		reader, err := s.forgejoPRReader(ctx, integrationID)
+		if err != nil {
+			return nil, err
+		}
+		pr, err := reader.GetPullRequest(ctx, link.RepoFullName, parsed.Number)
+		if err != nil {
+			return nil, errs.New(errs.ErrForgeAPI.Code, s.forgejoPullRequestFailureText("获取 Forgejo PR", err))
+		}
+		applyForgePullRequestData(link, pr, now)
+	default:
+		// GitHub 既有路径原样保留：凭证选择集中在 credentials.pullRequestCredential。
+		link.Provider = model.IssuePullRequestProviderGitHub
+		link.RepoFullName = parsed.Owner + "/" + parsed.Repo
+		client, credKind, err := s.pullRequestClient(project)
+		if err != nil {
+			return nil, err
+		}
+		pr, err := client.GetPullRequest(ctx, 0, link.RepoFullName, parsed.Number)
+		if err != nil {
+			return nil, errs.New(errs.ErrGitHubAPI.Code, fmt.Sprintf("获取 GitHub PR 失败（%s）: %v%s", credKind.usage(), err, pullRequestAccessHint(err, credKind)))
+		}
+		applyPullRequestData(link, pr, now)
+	}
 
 	// 原子 upsert：并发/重复 attach 撞唯一键时由冲突路径刷新既有行，不返回 500。
 	if err := s.pullRequestRepo.Upsert(link); err != nil {
@@ -70,7 +135,7 @@ func (s *IssueService) AttachIssuePullRequest(issueID, userID string, req Attach
 	}
 
 	// 冲突路径下 link.ID 是新建值而非既有行主键，重新按唯一键读回规范行。
-	stored, err := s.pullRequestRepo.FindByUnique(issue.ID, model.IssuePullRequestProviderGitHub, link.RepoFullName, number)
+	stored, err := s.pullRequestRepo.FindByUnique(issue.ID, link.Provider, link.RepoFullName, parsed.Number)
 	if err != nil {
 		return nil, errs.ErrInternal
 	}
@@ -125,23 +190,44 @@ func (s *IssueService) SyncIssuePullRequests(issueID, userID string) (*IssuePull
 	clients := make(map[string]githubapi.GitHubClient)
 	clientKinds := make(map[string]pullRequestCredentialKind)
 	clientErrs := make(map[string]error)
+	// forgejo 行按「集成快照 id」缓存客户端；provider 分流见循环体。
+	forgeReaders := make(map[string]forgePRReader)
+	forgeReaderErrs := make(map[string]error)
 	now := time.Now().UTC()
 	for i := range links {
 		link := &links[i]
 
-		client, credKind, err := pullRequestSyncClient(s, clients, clientKinds, clientErrs, project, link)
-		if err != nil {
-			result.Failures = append(result.Failures, pullRequestSyncFailure(link, err.Error()))
+		switch link.Provider {
+		case model.IssuePullRequestProviderForgejo:
+			reader, err := forgejoSyncReader(s, forgeReaders, forgeReaderErrs, ctx, link)
+			if err != nil {
+				result.Failures = append(result.Failures, pullRequestSyncFailure(link, err.Error()))
+				continue
+			}
+			pr, err := reader.GetPullRequest(ctx, link.RepoFullName, link.Number)
+			if err != nil {
+				result.Failures = append(result.Failures, pullRequestSyncFailure(link, s.forgejoPullRequestFailureText("拉取 Forgejo PR", err)))
+				continue
+			}
+			applyForgePullRequestData(link, pr, now)
+		case model.IssuePullRequestProviderGitHub:
+			client, credKind, err := pullRequestSyncClient(s, clients, clientKinds, clientErrs, project, link)
+			if err != nil {
+				result.Failures = append(result.Failures, pullRequestSyncFailure(link, err.Error()))
+				continue
+			}
+			pr, err := client.GetPullRequest(ctx, 0, link.RepoFullName, link.Number)
+			if err != nil {
+				result.Failures = append(result.Failures, pullRequestSyncFailure(link, fmt.Sprintf("拉取失败（%s）: %v%s", credKind.usage(), err, pullRequestAccessHint(err, credKind))))
+				continue
+			}
+			applyPullRequestData(link, pr, now)
+		default:
+			// 未知 provider（历史脏行等）只算单行失败，不中断其余行。
+			result.Failures = append(result.Failures, pullRequestSyncFailure(link, fmt.Sprintf("不支持的 PR 来源 %q，请解除该关联后重新添加", link.Provider)))
 			continue
 		}
 
-		pr, err := client.GetPullRequest(ctx, 0, link.RepoFullName, link.Number)
-		if err != nil {
-			result.Failures = append(result.Failures, pullRequestSyncFailure(link, fmt.Sprintf("拉取失败（%s）: %v%s", credKind.usage(), err, pullRequestAccessHint(err, credKind))))
-			continue
-		}
-
-		applyPullRequestData(link, pr, now)
 		if err := s.pullRequestRepo.SaveSyncedFields(link); err != nil {
 			msg := "保存失败"
 			switch {
@@ -282,12 +368,157 @@ func pullRequestAccessHint(err error, kind pullRequestCredentialKind) string {
 	}
 }
 
-// parsePullRequestURL 解析 GitHub PR 链接，容忍 http、www 前缀与 /files、query、fragment 等尾部。
-func parsePullRequestURL(raw string) (owner, repo string, number int, ok bool) {
-	m := pullRequestURLPattern.FindStringSubmatch(strings.TrimSpace(raw))
-	if m == nil {
-		return "", "", 0, false
+// forgejoPullRequestFailureText 把 Forgejo 取数失败转成可回显的文案（attach
+// 的错误信息与 sync 的 failures[].error 都走这里）：状态码与排查提示保留，
+// 适配器错误原文可能带集成配置的 API 绝对地址（含 allow_private_network 的
+// 内网基址）与响应体，只进服务端日志不外显给项目成员。
+func (s *IssueService) forgejoPullRequestFailureText(op string, err error) string {
+	var statusErr *forge.StatusError
+	if errors.As(err, &statusErr) {
+		return fmt.Sprintf("%s 失败（Forgejo API 状态码 %d）%s", op, statusErr.StatusCode, forgejoPullRequestAccessHint(err))
 	}
+	// 传输层错误还可能带内部主机名；全文进日志，对外只留固定提示。
+	s.logger.Error(op+"失败", zap.Error(err))
+	return op + " 失败：无法连接 Forgejo 服务，请检查集成配置"
+}
+
+// forgejoPullRequestAccessHint 对 Forgejo 的权限类错误、404 与限流追加排查
+// 提示（口径对齐 pullRequestAccessHint）：Forgejo 对「PR 不存在」和「机器人
+// PAT 无权访问该仓库」都返回 404，文案必须同时保留两种可能；限流响应无法与
+// 权限 403 区分且处置不同，按 RateLimited 预判定给不同提示。
+const forgejoPullRequestAccessHintText = "；PR 不存在或集成机器人 PAT 无权访问该仓库，请确认 Forgejo 集成的仓库授权范围"
+const forgejoPullRequestRateLimitHintText = "；Forgejo API 限流，请稍后重试"
+
+func forgejoPullRequestAccessHint(err error) string {
+	var statusErr *forge.StatusError
+	if !errors.As(err, &statusErr) {
+		return ""
+	}
+	if statusErr.RateLimited {
+		return forgejoPullRequestRateLimitHintText
+	}
+	switch statusErr.StatusCode {
+	case 401, 403, 404:
+		return forgejoPullRequestAccessHintText
+	default:
+		return ""
+	}
+}
+
+// forgejoIntegrationIDForHost 按 PR URL 主机的归一键（forges.HostKey，与集成
+// 行落库同口径）查部署级 Forgejo 集成。未配置返回 40007 明确指向集成管理；
+// 只用 forge_integrations 的机器人 PAT，不借项目或用户级凭证。空键直接按未
+// 配置处理：脏集成行的 host_key 就是空串，且部分唯一索引排除空串，不参与
+// 匹配语义。
+func (s *IssueService) forgejoIntegrationIDForHost(hostKey string) (string, error) {
+	if hostKey == "" {
+		return "", errs.ErrForgeIntegrationNotConfigured
+	}
+	id, _, found, err := s.forgeIntegrationRepo.FindByHostKey(hostKey, "")
+	if err != nil {
+		return "", errs.ErrInternal
+	}
+	if !found {
+		return "", errs.ErrForgeIntegrationNotConfigured
+	}
+	return id, nil
+}
+
+// forgejoPRReader 按 Forgejo 集成行现取访问三件套（SSRF 安全 client + API 基
+// 址 + 解密 PAT）并组装 PR 读取客户端。集成不存在/kind 不符/解密失败报明确
+// 错误，不回落匿名或任何用户级凭证；凭证明文只进适配器，不落 service 字段。
+func (s *IssueService) forgejoPRReader(ctx context.Context, integrationID string) (forgePRReader, error) {
+	if s.forgeSource == nil {
+		return nil, errors.New("Forgejo 集成凭证来源未配置")
+	}
+	httpClient, apiBase, token, err := s.forgeSource.ForgejoClient(ctx, integrationID)
+	if err != nil {
+		return nil, err
+	}
+	return s.newForgejoPRReader(httpClient, apiBase, token), nil
+}
+
+// forgejoSyncReader 按「集成快照 id」（attach 时落的 ForgeIntegrationID）复用/
+// 缓存 Forgejo 读取客户端；构造错误同样按 id 缓存，同集成的后续行各自记一条
+// 失败而不是重复构造。快照为空（无法重建客户端）或集成行被删/解密失败都只算
+// 单行失败，不影响其余行。
+func forgejoSyncReader(s *IssueService, readers map[string]forgePRReader, readerErrs map[string]error, ctx context.Context, link *model.IssuePullRequest) (forgePRReader, error) {
+	if reader, ok := readers[link.ForgeIntegrationID]; ok {
+		return reader, nil
+	}
+	if err, failed := readerErrs[link.ForgeIntegrationID]; failed {
+		return nil, err
+	}
+	if link.ForgeIntegrationID == "" {
+		err := errors.New("关联行缺少 Forgejo 集成快照，请解除后重新关联")
+		readerErrs[link.ForgeIntegrationID] = err
+		return nil, err
+	}
+	reader, err := s.forgejoPRReader(ctx, link.ForgeIntegrationID)
+	if err != nil {
+		readerErrs[link.ForgeIntegrationID] = err
+		return nil, err
+	}
+	readers[link.ForgeIntegrationID] = reader
+	return reader, nil
+}
+
+// parsePullRequestLink 分流解析 PR 链接（INT-181）：github.com 域 + /pull/{n}
+// 走 GitHub 既有路径；其他主机 + /{owner}/{repo}/pulls/{n} 走 Forgejo 路径并
+// 带出主机的归一键（forges.HostKey，与 forge_integrations.host_key 同口径）。
+// github.com 域内形状不符（如 /pulls/{n}）按无效处理，不误判成 Forgejo；其余
+// 形状一律无效，由调用方报 40001 并说明两种支持的格式。两种路径都容忍 http、
+// www 前缀（仅 GitHub）与 /files、query、fragment 等尾部。
+func parsePullRequestLink(raw string) (pullRequestLink, bool) {
+	trimmed := strings.TrimSpace(raw)
+	if m := pullRequestURLPattern.FindStringSubmatch(trimmed); m != nil {
+		owner, repo, number, ok := githubPullRequestMatch(m)
+		if !ok {
+			return pullRequestLink{}, false
+		}
+		return pullRequestLink{Provider: model.IssuePullRequestProviderGitHub, Owner: owner, Repo: repo, Number: number}, true
+	}
+	if m := forgejoPullRequestURLPattern.FindStringSubmatch(trimmed); m != nil {
+		scheme := strings.ToLower(m[1])
+		u, err := url.Parse(scheme + "://" + m[2])
+		if err != nil || u.Hostname() == "" {
+			return pullRequestLink{}, false
+		}
+		// github.com/www.github.com 域（与 forges.HostKey 同口径的归一比较：
+		// 尾点、大小写归一后同域即拒绝；Hostname 已剥端口，显式端口的主机名
+		// 仍命中）留给 GitHub 路径：形状不符就是无效，不落进 Forgejo 分支
+		// （也避免把 GitHub PR 误挂到 Forgejo 集成上）。
+		host := strings.ToLower(strings.TrimRight(u.Hostname(), "."))
+		if host == "github.com" || host == "www.github.com" {
+			return pullRequestLink{}, false
+		}
+		if !isGitHubPathName(m[3]) || !isGitHubPathName(m[4]) {
+			return pullRequestLink{}, false
+		}
+		number, err := strconv.Atoi(m[5])
+		if err != nil || number <= 0 {
+			return pullRequestLink{}, false
+		}
+		// HostKey 解析不出主机键（如 host 全是点段）返回空串：空键不参与
+		// 集成匹配（脏行 host_key 也是空串），按无效链接处理。
+		hostKey := forges.HostKey(scheme + "://" + m[2])
+		if hostKey == "" {
+			return pullRequestLink{}, false
+		}
+		return pullRequestLink{
+			Provider: model.IssuePullRequestProviderForgejo,
+			Owner:    m[3],
+			Repo:     m[4],
+			Number:   number,
+			HostKey:  hostKey,
+		}, true
+	}
+	return pullRequestLink{}, false
+}
+
+// githubPullRequestMatch 校验 GitHub 正则捕获组：排除纯点段与点开头结尾的
+// owner/repo（见 isGitHubPathName），编号须为正整数。
+func githubPullRequestMatch(m []string) (owner, repo string, number int, ok bool) {
 	if !isGitHubPathName(m[1]) || !isGitHubPathName(m[2]) {
 		return "", "", 0, false
 	}
@@ -336,6 +567,51 @@ func applyPullRequestData(link *model.IssuePullRequest, pr *githubapi.PullReques
 
 // pullRequestStateFromGitHub 映射 PR 状态：GitHub closed 且 merged_at 非空视为 merged。
 func pullRequestStateFromGitHub(pr *githubapi.PullRequest) model.IssuePullRequestState {
+	if pr.State != "closed" {
+		return model.IssuePullRequestStateOpen
+	}
+	if pr.MergedAt != nil {
+		return model.IssuePullRequestStateMerged
+	}
+	return model.IssuePullRequestStateClosed
+}
+
+// applyForgePullRequestData 把 Forgejo PR 详情刷进关联行，字段口径与
+// applyPullRequestData 一致（状态与合并时间一并重置，closed→open 复活也能纠
+// 正回来）：repo_full_name 归一到平台返回的 canonical 名（base 仓库 full_name），
+// 状态按 State/Merged 映射。集成快照不在此重写——sync 按关联行已有的
+// ForgeIntegrationID 重建客户端。
+func applyForgePullRequestData(link *model.IssuePullRequest, pr *forge.PullRequest, now time.Time) {
+	if pr.RepoFullName != "" {
+		link.RepoFullName = pr.RepoFullName
+	}
+	link.Title = pr.Title
+	if pr.HTMLURL != "" {
+		link.HTMLURL = pr.HTMLURL
+	}
+	link.State = pullRequestStateFromForge(pr)
+	link.IsDraft = pr.Draft
+	link.AuthorLogin = pr.AuthorLogin
+	link.HeadRef = pr.HeadRef
+	link.BaseRef = pr.BaseRef
+	link.MergedAt = nil
+	if pr.MergedAt != nil {
+		mergedAt := pr.MergedAt.UTC()
+		link.MergedAt = &mergedAt
+	}
+	link.ClosedAt = nil
+	if pr.ClosedAt != nil {
+		closedAt := pr.ClosedAt.UTC()
+		link.ClosedAt = &closedAt
+	}
+	link.SyncedAt = now
+	link.UpdatedAt = now
+}
+
+// pullRequestStateFromForge 映射 PR 状态：Forgejo 的 closed 且 merged_at 非空
+// 视为 merged——与 pullRequestStateFromGitHub 的 closed+merged_at 口径一致，
+// merged 行的 merged_at 恒有值（OpenAPI 对 merged 状态的承诺）。
+func pullRequestStateFromForge(pr *forge.PullRequest) model.IssuePullRequestState {
 	if pr.State != "closed" {
 		return model.IssuePullRequestStateOpen
 	}

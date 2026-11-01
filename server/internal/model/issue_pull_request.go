@@ -20,7 +20,10 @@ const (
 	IssuePullRequestLinkOriginManual IssuePullRequestLinkOrigin = "manual"
 )
 
-const IssuePullRequestProviderGitHub = "github"
+const (
+	IssuePullRequestProviderGitHub  = "github"
+	IssuePullRequestProviderForgejo = "forgejo"
+)
 
 // IssuePullRequest 记录 Issue 与某个远端 PR 的关联及其最近一次同步到的状态。
 // link_origin 区分关联来源：manual 由用户显式 attach，synced 由远端同步投影产生；
@@ -43,9 +46,13 @@ type IssuePullRequest struct {
 	MergedAt     *time.Time                 `json:"merged_at"`
 	ClosedAt     *time.Time                 `json:"closed_at"`
 	LinkOrigin   IssuePullRequestLinkOrigin `gorm:"type:text;not null;default:manual" json:"link_origin"`
-	SyncedAt     time.Time                  `gorm:"not null" json:"synced_at"`
-	CreatedAt    time.Time                  `gorm:"not null" json:"created_at"`
-	UpdatedAt    time.Time                  `gorm:"not null" json:"updated_at"`
+	// ForgeIntegrationID provider=forgejo 行的集成快照：repo_full_name 只有
+	// owner/repo 没有 host，sync 按它重建该行的 Forgejo 客户端；github 行恒
+	// 空串。列可空（AutoMigrate 追加）。
+	ForgeIntegrationID string    `gorm:"type:text" json:"-"`
+	SyncedAt           time.Time `gorm:"not null" json:"synced_at"`
+	CreatedAt          time.Time `gorm:"not null" json:"created_at"`
+	UpdatedAt          time.Time `gorm:"not null" json:"updated_at"`
 
 	Issue Issue `gorm:"foreignKey:IssueID;constraint:OnDelete:CASCADE" json:"-"`
 }

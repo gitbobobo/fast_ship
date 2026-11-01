@@ -1,14 +1,17 @@
 package service
 
 import (
+	"net/http"
+	"regexp"
+	"time"
+
 	"github.com/godbobo/fast_ship/server/internal/config"
+	"github.com/godbobo/fast_ship/server/internal/forge"
 	"github.com/godbobo/fast_ship/server/internal/githubapi"
 	ghclient "github.com/godbobo/fast_ship/server/internal/pkg/github"
 	"github.com/godbobo/fast_ship/server/internal/pkg/storage"
 	"github.com/godbobo/fast_ship/server/internal/repository"
 	"go.uber.org/zap"
-	"regexp"
-	"time"
 )
 
 var issueAssetContentPattern = regexp.MustCompile(`(?:https?://[^/\s"')]+)?/api/issues/assets/([0-9a-fA-F-]+)/content(?:\?[^)\s"']*)?`)
@@ -46,7 +49,13 @@ type IssueService struct {
 	newClient           ghclient.ClientFactory
 	// newPRClient 构造关联 PR 读取客户端（attach/sync）；测试注入替身的缝。
 	newPRClient func(token string) githubapi.GitHubClient
-	mirror      *issueMirror
+	// 关联 PR 的 Forgejo 侧（INT-181）：forgeIntegrationRepo 按主机键查集成，
+	// forgeSource 按集成行现取访问三件套（生产接 ForgeClientSource），
+	// newForgejoPRReader 由三件套组装读取客户端（测试注入替身的缝）。
+	forgeIntegrationRepo *repository.ForgeIntegrationRepository
+	forgeSource          issueForgeSource
+	newForgejoPRReader   func(httpClient *http.Client, apiBase, token string) forgePRReader
+	mirror               *issueMirror
 }
 
 type IssueListFilters struct {
@@ -89,6 +98,7 @@ func NewIssueService(
 	cfg *config.Config,
 	logger *zap.Logger,
 	annotationRepo *repository.ScreenshotAnnotationRepository,
+	forgeIntegrationRepo *repository.ForgeIntegrationRepository,
 ) *IssueService {
 	s := &IssueService{
 		issueRepo:           issueRepo,
@@ -118,6 +128,11 @@ func NewIssueService(
 		},
 		newPRClient: func(token string) githubapi.GitHubClient {
 			return ghclient.NewPRClient(token)
+		},
+		forgeIntegrationRepo: forgeIntegrationRepo,
+		forgeSource:          NewForgeClientSource(forgeIntegrationRepo, cfg, logger),
+		newForgejoPRReader: func(httpClient *http.Client, apiBase, token string) forgePRReader {
+			return forge.NewForgejoReviewClient(httpClient, apiBase, token)
 		},
 	}
 	// 镜像的 client 工厂在调用时才读 s.newClient，测试替换对两条路径同时生效；

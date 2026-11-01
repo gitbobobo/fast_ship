@@ -347,6 +347,11 @@ func HostKey(baseURL string) string {
 		return ""
 	}
 	if port := u.Port(); port != "" {
+		// 数字端口统一拼写（:0443 → :443）：保存侧 parseBaseURL 同口径，
+		// 同一端点的不同端口拼写归出同一键。
+		if n, err := strconv.Atoi(port); err == nil {
+			port = strconv.Itoa(n)
+		}
 		return host + ":" + port
 	}
 	if strings.EqualFold(u.Scheme, "http") {

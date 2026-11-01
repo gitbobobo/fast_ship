@@ -35,6 +35,11 @@ user_github_tokens 同一模式）。
 
 ## 项目 ↔ 集成绑定
 
+除项目绑定外，Issue 关联 Forgejo PR（INT-181）也按同一 host_key 口径按主机
+查集成：attach `http(s)://<host>/<owner>/<repo>/pulls/<number>` 时点查
+forgejo 集成并落集成快照，sync 按快照重建客户端。见
+[issue-pull-request-links.md](issue-pull-request-links.md)。
+
 项目写侧按仓库 URL 的主机派生绑定（`service/project.go` 的
 `parseRepositoryURL` + `parseRepoBinding`）：
 
