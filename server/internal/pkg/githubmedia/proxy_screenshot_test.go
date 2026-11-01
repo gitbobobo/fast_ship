@@ -406,7 +406,9 @@ func TestReviewFaceSkipsPurgeButSweepsUnscoped(t *testing.T) {
 	root := t.TempDir()
 	svcOld := newService(root, cfg)
 
-	// 无 Scope 的存量条目（bearer 引入前写入）：被定点清理。
+	// 无 Scope 的存量条目（bearer 引入前写入）：不删文件——这条目录里的
+	// .bin 是持久资产（ensureAssets 不重下），删了就是永久 404；标记补写后
+	// 照常命中（跨授权域风险由缓存键隔离与接口鉴权兜住）。
 	unscoped, err := svcOld.normalize("https://uiv.example.com/unscoped.png")
 	if err != nil {
 		t.Fatalf("normalize unscoped: %v", err)
@@ -439,12 +441,16 @@ func TestReviewFaceSkipsPurgeButSweepsUnscoped(t *testing.T) {
 
 	svc := newService(root, cfg)
 
-	// 无 Scope 条目被定点清理（按 miss 处理，重下自愈）。
-	if cached, ok, err := svc.GetCached(unscoped); err != nil || ok || cached != nil {
-		t.Fatalf("unscoped: cached = %+v ok = %v err = %v, want miss（定点清理）", cached, ok, err)
+	// 无 Scope 条目保留且仍可命中（不删持久资产）。
+	if cached, ok, err := svc.GetCached(unscoped); err != nil || !ok || cached == nil {
+		t.Fatalf("unscoped: cached = %+v ok = %v err = %v, want 命中（不删持久资产）", cached, ok, err)
 	}
-	if _, statErr := os.Stat(unscopedMeta); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("unscoped meta stat = %v, want 已清理", statErr)
+	if _, statErr := os.Stat(unscopedMeta); statErr != nil {
+		t.Fatalf("unscoped meta stat = %v, want 文件仍在", statErr)
+	}
+	// 标记已补写（下次启动按 v2 语义处理）。
+	if _, statErr := os.Stat(filepath.Join(svcOld.cacheDir, legacyScopeMarker)); statErr != nil {
+		t.Fatalf("marker stat = %v, want 已补写", statErr)
 	}
 
 	// 有 Scope 条目保留（持久资产）。
