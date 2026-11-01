@@ -107,9 +107,10 @@ func (s *IssueService) AttachIssuePullRequest(issueID, userID string, req Attach
 		// 主机冲突守卫：同名 PR 已关联在另一台 Forgejo 实例上时，覆盖会静默
 		// 改写用户已关联的对象——要求先显式 detach（40917）。既有行落库的是
 		// 平台 canonical 名，URL 原文大小写/别名可能不同，比对按 provider+
-		// number+大小写不敏感匹配；列表查询失败按内部错误处理，不放行。
-		// 旧集成行已删的行无法比对主机（sync 本就报集成缺失），允许新实例
-		// 的 attach 覆盖修复。
+		// number+大小写不敏感匹配。旧集成行已删的行无法比对主机（sync 本就
+		// 报集成缺失），允许新实例的 attach 覆盖修复；其余查询失败（锁忙、
+		// I/O）按内部错误拦截——当「集成已删」放行正是本守卫要堵的静默覆
+		// 盖路径。
 		existingLinks, err := s.pullRequestRepo.ListByIssueID(issue.ID)
 		if err != nil {
 			return nil, errs.ErrInternal
@@ -120,7 +121,14 @@ func (s *IssueService) AttachIssuePullRequest(issueID, userID string, req Attach
 				!strings.EqualFold(existing.RepoFullName, link.RepoFullName) || existing.ForgeIntegrationID == "" {
 				continue
 			}
-			if oldIntegration, err := s.forgeIntegrationRepo.FindByID(existing.ForgeIntegrationID); err == nil && oldIntegration.HostKey != parsed.HostKey {
+			oldIntegration, err := s.forgeIntegrationRepo.FindByID(existing.ForgeIntegrationID)
+			if err != nil {
+				if !errors.Is(err, gorm.ErrRecordNotFound) {
+					return nil, errs.ErrInternal
+				}
+				continue
+			}
+			if oldIntegration.HostKey != parsed.HostKey {
 				return nil, errs.New(errs.ErrPullRequestHostConflict.Code,
 					fmt.Sprintf("该 Issue 已关联主机不同的同名 PR（%s#%d），请先解除原关联", existing.RepoFullName, existing.Number))
 			}
