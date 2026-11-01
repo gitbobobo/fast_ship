@@ -163,7 +163,7 @@ func TestParsePullRequestLink_DualFormats(t *testing.T) {
 		{name: "forgejo 尾点主机归一同键", url: "https://forge.example.com./o/r/pulls/3",
 			want: pullRequestLink{Provider: model.IssuePullRequestProviderForgejo, Owner: "o", Repo: "r", Number: 3, HostKey: "forge.example.com"}, wantOK: true},
 		{name: "forgejo 端口前导零归一", url: "https://forge.example.com:0443/o/r/pulls/3",
-			want: pullRequestLink{Provider: model.IssuePullRequestProviderForgejo, Owner: "o", Repo: "r", Number: 3, HostKey: "forge.example.com:443"}, wantOK: true},
+			want: pullRequestLink{Provider: model.IssuePullRequestProviderForgejo, Owner: "o", Repo: "r", Number: 3, HostKey: "forge.example.com"}, wantOK: true},
 		{name: "forgejo userinfo 不影响主机键", url: "https://bot@forge.example.com/o/r/pulls/3",
 			want: pullRequestLink{Provider: model.IssuePullRequestProviderForgejo, Owner: "o", Repo: "r", Number: 3, HostKey: "forge.example.com"}, wantOK: true},
 		{name: "空主机无效", url: "https://./o/r/pulls/7", wantOK: false},

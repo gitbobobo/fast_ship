@@ -361,8 +361,9 @@ func HostKey(baseURL string) string {
 }
 
 // HostKeyNoScheme 与 HostKey 同口径但不含 scheme 缺省端口——同一端点的
-// http/https 拼写归一出同键。PR 链接匹配、绑定集成比对等「主机身份」比
-// 较用它；需要 scheme 参与判等（如回显判定）仍用 HostKey/URLKey。
+// http/https 拼写归一出同键（显式默认端口与省略写法归一，显式非默认端口
+// 保留）。PR 链接匹配、绑定集成比对等「主机身份」比较用它；需要 scheme
+// 参与判等（如回显判定）仍用 HostKey/URLKey。
 func HostKeyNoScheme(baseURL string) string {
 	u, err := url.Parse(strings.TrimSpace(baseURL))
 	if err != nil || u.Host == "" {
@@ -375,6 +376,11 @@ func HostKeyNoScheme(baseURL string) string {
 	if port := u.Port(); port != "" {
 		if n, err := strconv.Atoi(port); err == nil {
 			port = strconv.Itoa(n)
+		}
+		// 显式默认端口与省略写法归一（:443→省、:80→省），非默认端口保留。
+		if (strings.EqualFold(u.Scheme, "https") && port == "443") ||
+			(strings.EqualFold(u.Scheme, "http") && port == "80") {
+			return host
 		}
 		return host + ":" + port
 	}
