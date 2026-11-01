@@ -344,10 +344,11 @@ func TestLegacyCacheEntriesPurgedOnStart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse upstream url: %v", err)
 	}
+	// 用媒体代理面验证 purge 仍生效：review 截图面的目录是 review_assets 的
+	// 持久存储（见 main.go），不接 purge（INT-171 复审），另见下一个用例。
 	cfg := serviceConfig{
-		cacheSubdir: "review-screenshot-cache",
+		cacheSubdir: defaultCacheSubdir,
 		allowURL:    func(u *url.URL) bool { return u.Host == parsed.Host },
-		imagesOnly:  true,
 		client:      upstream.Client(),
 	}
 	root := t.TempDir()
@@ -390,6 +391,38 @@ func TestLegacyCacheEntriesPurgedOnStart(t *testing.T) {
 	svcAgain := newService(root, cfg)
 	if _, ok, err := svcAgain.getCachedNormalized(u, ""); err != nil || !ok {
 		t.Fatalf("second construction must not wipe v2 entries: ok=%v err=%v", ok, err)
+	}
+}
+
+// review 截图面的目录是 review_assets 的持久存储（storage_path 直接指向缓
+// 存文件），构造时不得因 scope 标记缺失清空它——否则升级会删光历史审查截
+// 图且不可恢复。
+func TestReviewFaceNotPurgedOnStart(t *testing.T) {
+	cfg := serviceConfig{
+		cacheSubdir: "review-screenshot-cache",
+		allowURL:    func(u *url.URL) bool { return true },
+		imagesOnly:  true,
+	}
+	root := t.TempDir()
+	svcOld := newService(root, cfg)
+	normalized, err := svcOld.normalize("https://uiv.example.com/shot.png")
+	if err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	metaPath := seedCacheMeta(t, svcOld, normalized, "image/png")
+	if err := os.WriteFile(svcOld.dataPath(normalized, ""), []byte("png"), 0o640); err != nil {
+		t.Fatalf("write data: %v", err)
+	}
+	// review 面 purge 跳过时也不写标记（写标记在 purge 执行路径里），正好
+	// 覆盖「标记缺失」场景。
+
+	svc := newService(root, cfg)
+	cached, ok, err := svc.GetCached(normalized)
+	if err != nil || !ok || cached == nil {
+		t.Fatalf("cached = %+v ok = %v err = %v, want 命中（review 面 purge 不执行）", cached, ok, err)
+	}
+	if _, statErr := os.Stat(metaPath); statErr != nil {
+		t.Fatalf("meta stat = %v, want 文件仍在", statErr)
 	}
 }
 

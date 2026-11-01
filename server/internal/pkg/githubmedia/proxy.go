@@ -363,7 +363,10 @@ func newService(cacheRoot string, cfg serviceConfig) *ProxyService {
 		githubWebHost:     cfg.githubWebHost,
 		download:          make(map[string]*downloadGate),
 	}
-	s.purgeLegacyCacheEntries()
+	// purge 只允许媒体代理面跑（按 cacheSubdir 判定）：review 截图面的目录
+	// 是 review_assets 的持久存储（无副本、ensure 不会重下），标记缺失时清
+	// 空等于删光历史审查截图。
+	s.purgeLegacyCacheEntries(cfg.cacheSubdir == defaultCacheSubdir)
 	return s
 }
 
@@ -638,8 +641,20 @@ func (s *ProxyService) sweepStaleTmpFiles(now time.Time) {
 // 公开内容重拉即可，私有内容宁可重拉不可误给。
 const legacyScopeMarker = ".cache-scope-v2"
 
-func (s *ProxyService) purgeLegacyCacheEntries() {
-	if _, err := os.Stat(filepath.Join(s.cacheDir, legacyScopeMarker)); err == nil {
+// purgeLegacyCacheEntries 旧 scope 标记缺失时清空缓存目录。只有媒体代理面
+// 允许执行（guardedPurge）：review 截图面的目录是 review_assets 的持久存储
+// （无副本、ensure 不会重下），标记缺失时清空等于删光历史审查截图。标记
+// stat 出错（非 ENOENT 的 EIO/权限）同样跳过——读不出标记不等于标记不存在，
+// 宁可不清理也不能误删持久资产。
+func (s *ProxyService) purgeLegacyCacheEntries(guardedPurge bool) {
+	if !guardedPurge {
+		return
+	}
+	_, statErr := os.Stat(filepath.Join(s.cacheDir, legacyScopeMarker))
+	if statErr == nil {
+		return
+	}
+	if !errors.Is(statErr, os.ErrNotExist) {
 		return
 	}
 	if err := os.MkdirAll(s.cacheDir, 0o750); err != nil {
