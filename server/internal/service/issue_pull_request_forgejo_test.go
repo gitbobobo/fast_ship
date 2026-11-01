@@ -794,13 +794,17 @@ func TestIssueServiceAttachPullRequest_ForgejoHostConflict(t *testing.T) {
 	}
 
 	// 项目改绑到实例 B，再 attach 同名 PR：40917，A 的关联行原样保留。
+	// URL 大小写/别名写法不同也必须命中——既有行落库的是平台 canonical 名。
 	bindProjectForgejo(t, svc, project.ID, "fj-b")
-	_, err := svc.issueService.AttachIssuePullRequest(issue.ID, user.ID, AttachIssuePullRequestRequest{
-		Url: "https://forge-b.example.com/o/r/pulls/5",
-	})
-	appErr, ok := err.(*errs.AppError)
-	if !ok || appErr.Code != errs.ErrPullRequestHostConflict.Code {
-		t.Fatalf("expected %d for cross-host same-name PR, got %v", errs.ErrPullRequestHostConflict.Code, err)
+	for _, u := range []string{
+		"https://forge-b.example.com/o/r/pulls/5",
+		"https://forge-b.example.com/O/R/pulls/5",
+	} {
+		_, err := svc.issueService.AttachIssuePullRequest(issue.ID, user.ID, AttachIssuePullRequestRequest{Url: u})
+		appErr, ok := err.(*errs.AppError)
+		if !ok || appErr.Code != errs.ErrPullRequestHostConflict.Code {
+			t.Fatalf("expected %d for cross-host same-name PR %s, got %v", errs.ErrPullRequestHostConflict.Code, u, err)
+		}
 	}
 	var row model.IssuePullRequest
 	if err := svc.db.Where("issue_id = ?", issue.ID).First(&row).Error; err != nil {

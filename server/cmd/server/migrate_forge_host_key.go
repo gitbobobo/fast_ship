@@ -44,8 +44,12 @@ func migrateForgeHostKeys(db *gorm.DB, logger *zap.Logger) error {
 		}
 		if taken > 0 {
 			if logger != nil {
-				logger.Warn("代码集成 host_key 重算冲突，跳过该行",
-					zap.String("id", row.ID), zap.String("host_key", row.HostKey), zap.String("want", want))
+				// 跳过时给出可操作路径：被跳过行的 base_url 与目标键都在日志
+				// 里，运维删除或改绑重复集成为同一端点后重启即收敛。
+				logger.Warn("代码集成 host_key 重算冲突，跳过该行（请删除或改绑重复集成为同一端点后重启）",
+					zap.String("id", row.ID),
+					zap.String("base_url", row.BaseURL),
+					zap.String("host_key", row.HostKey), zap.String("want", want))
 			}
 			continue
 		}
