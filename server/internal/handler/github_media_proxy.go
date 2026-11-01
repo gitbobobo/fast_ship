@@ -113,10 +113,11 @@ func serveCachedMedia(c *gin.Context, media *githubmedia.CachedMedia) {
 
 	header := c.Writer.Header()
 	header.Set("Content-Type", media.Metadata.ContentType)
-	// 不透传 meta 里存的缓存头：旧条目存的是 public（代理地址带 token，不
-	// 该进共享缓存层），下发时一律 private——与 getCachedNormalized 对
-	// ContentType 的规范化同口径，只改响应，不重写 meta。
-	header.Set("Cache-Control", "private, max-age=86400")
+	// 不透传 meta 里存的原始缓存头：旧条目存的是 public（代理地址带 token，
+	// 不该进共享缓存层）。getCachedNormalized 已把它规范化成 private 且与
+	// 服务端条目 TTL 同源，直接用——写死 max-age 会在 cacheTTL 非默认时让
+	// 浏览器比服务端晚过期。
+	header.Set("Cache-Control", media.Metadata.CacheControl)
 	header.Set("Accept-Ranges", "bytes")
 	if media.Metadata.ETag != "" {
 		header.Set("ETag", media.Metadata.ETag)

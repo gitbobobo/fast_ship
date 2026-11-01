@@ -182,6 +182,30 @@ func TestSweepExpiredEntriesRemovesOnlyExpired(t *testing.T) {
 		t.Fatalf("broken.json stat = %v, want 保留（mtime 新，写侧中间态不猜）", err)
 	}
 
+	// 隔离名 .gone 的回收：超龄（>2×TTL）清、新鲜留，两种后缀各一——与隔离
+	// 判据同一阈值，1×~2×TTL 区间的写侧新文件不会被另一轮扫描误回收。
+	staleGone := filepath.Join(svc.cacheDir, "stale.bin.gone")
+	if err := os.WriteFile(staleGone, []byte("old"), 0o640); err != nil {
+		t.Fatalf("write stale gone: %v", err)
+	}
+	staleTime := time.Now().Add(-3 * defaultCacheTTL)
+	if err := os.Chtimes(staleGone, staleTime, staleTime); err != nil {
+		t.Fatalf("chtimes stale gone: %v", err)
+	}
+	freshGone := filepath.Join(svc.cacheDir, "fresh.json.gone")
+	if err := os.WriteFile(freshGone, []byte("{}"), 0o640); err != nil {
+		t.Fatalf("write fresh gone: %v", err)
+	}
+
+	svc.sweepExpiredEntries()
+
+	if _, err := os.Stat(staleGone); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stale gone stat = %v, want 已回收", err)
+	}
+	if _, err := os.Stat(freshGone); err != nil {
+		t.Fatalf("fresh gone stat = %v, want 保留（mtime 未超 2×TTL）", err)
+	}
+
 	// 损坏 meta 超 2×TTL：按孤儿口径回收（meta 与同名 .bin 一起删）——写盘
 	// 中断/磁盘满留下的截断 meta 不再连带 256MB 的 .bin 永久占盘。
 	staleBroken := filepath.Join(svc.cacheDir, "stale-broken.json")

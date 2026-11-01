@@ -212,6 +212,11 @@ func TestGitHubMediaProxyHandlerSVGGateAndHardeningHeaders(t *testing.T) {
 		t.Fatalf("upstream hits = %d, want %d（缓存命中不再打上游）", got, hitsBefore)
 	}
 	assertHardening(t, rec)
+	// 命中路径的缓存头是 private（代理地址带 token，不进共享缓存层），且与
+	// 服务端条目 TTL 同源——不透传 meta 里可能存在的 public 旧值。
+	if got := rec.Header().Get("Cache-Control"); got != "private, max-age=86400" {
+		t.Fatalf("cached cache-control = %q, want private, max-age=86400", got)
+	}
 
 	// 无扩展名的附件直链（GitHub 的 uuid 形态）：文件名按响应类型补扩展名。
 	req = httptest.NewRequest(http.MethodGet, githubmedia.ProxyPath+"?url="+url.QueryEscape("http://github.com/user-attachments/assets/0f3a93f0-dd2c-416b-8638-77d85b0a2c07"), nil)

@@ -429,11 +429,13 @@ func (s *ProxyService) sweepExpiredEntries() {
 	}
 	now := time.Now().UTC()
 	// 扫描顺带回收上次进程被杀残留在隔离名的 .gone（.json.gone 与 .bin.gone
-	// 都是 rename 后 remove 前被杀的残留，无人可达）。
+	// 都是 rename 后 remove 前被杀的残留，无人可达）。阈值与隔离判据一致用
+	// 2×TTL：goneBin 的 mtime 继承原 data，落在 1×~2×TTL 区间的隔离文件若是
+	// 写侧刚发布的，按 1×TTL 会被另一轮扫描误回收。
 	for _, e := range entries {
 		if strings.HasSuffix(e.Name(), ".gone") {
 			info, err := e.Info()
-			if err == nil && now.Sub(info.ModTime()) > s.cacheTTL {
+			if err == nil && now.Sub(info.ModTime()) > 2*s.cacheTTL {
 				_ = os.Remove(filepath.Join(s.cacheDir, e.Name()))
 			}
 		}
