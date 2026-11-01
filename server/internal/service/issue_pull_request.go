@@ -112,6 +112,9 @@ func (s *IssueService) AttachIssuePullRequest(issueID, userID string, req Attach
 			return nil, err
 		}
 		link.ForgeIntegrationID = integration.ID
+		if s.forgeSource == nil {
+			return nil, errors.New("Forgejo 集成凭证来源未配置")
+		}
 		httpClient, apiBase, token, err := s.forgeSource.ForgejoClientFor(ctx, integration)
 		if err != nil {
 			s.logger.Error("Forgejo attach 读取集成失败", zap.Error(err))
@@ -489,6 +492,9 @@ func forgejoSyncAccessFor(s *IssueService, entries map[string]*forgejoSyncAccess
 		err = classifyForgeIntegrationReadErr(err)
 		entryErrs[link.ForgeIntegrationID] = err
 		return nil, err
+	}
+	if s.forgeSource == nil {
+		return nil, errors.New("Forgejo 集成凭证来源未配置")
 	}
 	httpClient, apiBase, token, err := s.forgeSource.ForgejoClientFor(ctx, row)
 	if err != nil {
