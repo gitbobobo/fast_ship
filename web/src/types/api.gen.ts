@@ -1998,7 +1998,7 @@ export interface paths {
          * @description 请求体只传 PR URL，服务端解析后立即从远端 forge 拉取 title/state/is_draft/author/head/base/merged_at 等字段入库；拉取失败返回错误，不落记录。
          *     两种 URL 形状：`https://github.com/<owner>/<repo>/pull/<number>` 走 GitHub（项目凭证，未配则以未认证方式拉公共仓库）；`http(s)://<host>/<owner>/<repo>/pulls/<number>` 走 Forgejo——按 URL 主机匹配部署级 Forgejo 集成（forge_integrations），用集成机器人 PAT 拉取；主机未配集成、或项目绑定的代码集成与 PR 主机不一致均返回 40007。不同 Forgejo 实例的同名 PR 作为独立关联并存。
          *     允许跨仓库：URL 可以是任意仓库的 PR，不要求等于项目配置的仓库。
-         *     重复 attach 同一 PR（唯一键 issue_id+provider+host_key+repo_full_name+number）幂等返回既有记录并顺带刷新状态与集成快照；不同 Forgejo 实例的同名 PR 是不同键，并存为独立关联。attach 产生的行 `link_origin=manual`；PR 状态与 Issue workflow_status 不联动。
+         *     重复 attach 同一 PR（唯一键 issue_id+provider+host_key+repo_full_name+number）幂等返回既有记录并顺带刷新状态与集成快照；不同 Forgejo 实例的同名 PR 是不同键，并存为独立关联。Forgejo 路径读项目绑定的代码集成行并比对 host_key，绑定缺失/主机不一致/类型不符 → 40007；本地凭证面故障（行已删/kind 不符/解密失败/读库瞬时故障）→ 50000，上游 Forgejo 故障 → 50206。attach 产生的行 `link_origin=manual`；PR 状态与 Issue workflow_status 不联动。
          */
         post: operations["attachIssuePullRequest"];
         delete?: never;

@@ -360,6 +360,27 @@ func HostKey(baseURL string) string {
 	return host + ":443"
 }
 
+// HostKeyNoScheme 与 HostKey 同口径但不含 scheme 缺省端口——同一端点的
+// http/https 拼写归一出同键。PR 链接匹配、绑定集成比对等「主机身份」比
+// 较用它；需要 scheme 参与判等（如回显判定）仍用 HostKey/URLKey。
+func HostKeyNoScheme(baseURL string) string {
+	u, err := url.Parse(strings.TrimSpace(baseURL))
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	host := normHost(u.Hostname())
+	if host == "" {
+		return ""
+	}
+	if port := u.Port(); port != "" {
+		if n, err := strconv.Atoi(port); err == nil {
+			port = strconv.Itoa(n)
+		}
+		return host + ":" + port
+	}
+	return host
+}
+
 // URLKey 完整 URL 的等价键：scheme 小写 + HostKey + 去尾斜杠的
 // EscapedPath——同端点的不同拼写（显式默认端口、DNS 尾点、host 大小写、
 // 尾部斜杠）归一成同键。回显判定这类「同 URL 不同拼写」的比较用它而不是

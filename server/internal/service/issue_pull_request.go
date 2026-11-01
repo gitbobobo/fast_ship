@@ -118,7 +118,10 @@ func (s *IssueService) AttachIssuePullRequest(issueID, userID string, req Attach
 		httpClient, apiBase, token, err := s.forgeSource.ForgejoClientFor(ctx, integration)
 		if err != nil {
 			s.logger.Error("Forgejo attach 读取集成失败", zap.Error(err))
-			return nil, errs.New(errs.ErrForgeAPI.Code, classifyForgeIntegrationReadErr(err).Error())
+			// 本地凭证面故障（行已删/kind 不符/解密失败/读库瞬时故障）是配置或存
+			// 储问题，不是 Forgejo 上游失败——按 50000 报而非 50206，客户端不会
+			// 误按网关故障重试，与 sync 对同一根因返回 200+failures 的口径一致。
+			return nil, errs.New(errs.ErrInternal.Code, classifyForgeIntegrationReadErr(err).Error())
 		}
 		pr, err := s.newForgejoPRReader(httpClient, apiBase, token).GetPullRequest(ctx, link.RepoFullName, parsed.Number)
 		if err != nil {
@@ -423,7 +426,7 @@ func forgejoPullRequestAccessHint(err error) string {
 	if !errors.As(err, &statusErr) {
 		return ""
 	}
-	if statusErr.RateLimited {
+	if statusErr.RateLimited || statusErr.StatusCode == 429 {
 		return forgejoPullRequestRateLimitHintText
 	}
 	switch statusErr.StatusCode {
@@ -467,8 +470,8 @@ func (s *IssueService) forgejoIntegrationForProject(project *model.Project, host
 	if bound.Kind != model.ForgeIntegrationKindForgejo {
 		return nil, errs.New(errs.ErrForgeIntegrationNotConfigured.Code, "该项目绑定的代码集成类型不是 Forgejo，仅支持关联 Forgejo PR；请在项目设置里改配 Forgejo 集成")
 	}
-	if bound.HostKey != hostKey {
-		return nil, errs.New(errs.ErrForgeIntegrationNotConfigured.Code, "该项目绑定的代码集成与 PR 所在主机不一致，请先在项目设置里调整代码仓库后再关联 PR")
+	if forges.HostKeyNoScheme(bound.BaseURL) != hostKey {
+		return nil, errs.New(errs.ErrForgeIntegrationNotConfigured.Code, "该项目绑定的代码集成与 PR 链接协议/端口不一致，请在项目设置里调整代码仓库后再关联 PR")
 	}
 	return bound, nil
 }
@@ -505,7 +508,7 @@ func forgejoSyncAccessFor(s *IssueService, entries map[string]*forgejoSyncAccess
 		entryErrs[link.ForgeIntegrationID] = err
 		return nil, err
 	}
-	entry := &forgejoSyncAccess{reader: s.newForgejoPRReader(httpClient, apiBase, token), hostKey: row.HostKey}
+	entry := &forgejoSyncAccess{reader: s.newForgejoPRReader(httpClient, apiBase, token), hostKey: forges.HostKeyNoScheme(row.BaseURL)}
 	entries[link.ForgeIntegrationID] = entry
 	return entry, nil
 }
@@ -568,9 +571,10 @@ func parsePullRequestLink(raw string) (pullRequestLink, bool) {
 		if err != nil || number <= 0 {
 			return pullRequestLink{}, false
 		}
-		// HostKey 解析不出主机键（如 host 全是点段）返回空串：空键不参与
-		// 集成匹配（脏行 host_key 也是空串），按无效链接处理。
-		hostKey := forges.HostKey(scheme + "://" + m[2])
+		// HostKeyNoScheme 解析不出主机键（如 host 全是点段）返回空串：空键
+		// 不参与集成匹配（脏行 host_key 也是空串），按无效链接处理。PR 链
+		// 接匹配用不含 scheme 的口径——同一端点的 http/https 拼写归一同键。
+		hostKey := forges.HostKeyNoScheme(scheme + "://" + m[2])
 		if hostKey == "" {
 			return pullRequestLink{}, false
 		}

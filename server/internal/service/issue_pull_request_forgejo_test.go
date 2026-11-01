@@ -70,8 +70,7 @@ func stubForgejoPRReader(t *testing.T, svc *testServices, wantBase, wantToken st
 
 // createForgejoIntegrationRow 落一条 forgejo 集成行：id 由调用方指定（快照
 // 断言用），PAT 以测试密钥加密（ForgeClientSource 要真解密），host_key 按
-// forges.HostKey 现算（与生产保存侧同口径），API 基址留空走展开推导。
-// host_key 按 forges.HostKey 现算（与生产保存侧同口径）。
+// forges.HostKeyNoScheme 现算（与生产保存侧同口径），API 基址留空走展开推导。
 func createForgejoIntegrationRow(t *testing.T, db *gorm.DB, id, baseURL, pat string) *model.ForgeIntegration {
 	t.Helper()
 	enc, err := crypto.Encrypt([]byte(pat), []byte(testEncryptionKey))
@@ -83,7 +82,7 @@ func createForgejoIntegrationRow(t *testing.T, db *gorm.DB, id, baseURL, pat str
 		Kind:           model.ForgeIntegrationKindForgejo,
 		Name:           "forge-" + id,
 		BaseURL:        baseURL,
-		HostKey:        forges.HostKey(baseURL),
+		HostKey:        forges.HostKeyNoScheme(baseURL),
 		TokenEncrypted: enc,
 	}
 	if err := db.Create(row).Error; err != nil {
@@ -149,24 +148,24 @@ func TestParsePullRequestLink_DualFormats(t *testing.T) {
 		{name: "github 尾部与 www", url: "http://www.github.com/owner/repo/pull/7/files#x",
 			want: pullRequestLink{Provider: model.IssuePullRequestProviderGitHub, Owner: "owner", Repo: "repo", Number: 7}, wantOK: true},
 		{name: "forgejo https", url: "https://fj.frp.musiver.cn/fjbobo/fast_ship/pulls/158",
-			want: pullRequestLink{Provider: model.IssuePullRequestProviderForgejo, Owner: "fjbobo", Repo: "fast_ship", Number: 158, HostKey: "fj.frp.musiver.cn:443"}, wantOK: true},
+			want: pullRequestLink{Provider: model.IssuePullRequestProviderForgejo, Owner: "fjbobo", Repo: "fast_ship", Number: 158, HostKey: "fj.frp.musiver.cn"}, wantOK: true},
 		{name: "forgejo http 显式端口", url: "http://nas.local:3000/o/r/pulls/5",
 			want: pullRequestLink{Provider: model.IssuePullRequestProviderForgejo, Owner: "o", Repo: "r", Number: 5, HostKey: "nas.local:3000"}, wantOK: true},
 		{name: "forgejo /files 尾部", url: "https://forge.example.com/o/r/pulls/12/files?q=1#f",
-			want: pullRequestLink{Provider: model.IssuePullRequestProviderForgejo, Owner: "o", Repo: "r", Number: 12, HostKey: "forge.example.com:443"}, wantOK: true},
+			want: pullRequestLink{Provider: model.IssuePullRequestProviderForgejo, Owner: "o", Repo: "r", Number: 12, HostKey: "forge.example.com"}, wantOK: true},
 		{name: "forgejo 大小写混合", url: "HTTPS://Forge.Example.COM/O/R/PULLS/3",
-			want: pullRequestLink{Provider: model.IssuePullRequestProviderForgejo, Owner: "O", Repo: "R", Number: 3, HostKey: "forge.example.com:443"}, wantOK: true},
+			want: pullRequestLink{Provider: model.IssuePullRequestProviderForgejo, Owner: "O", Repo: "R", Number: 3, HostKey: "forge.example.com"}, wantOK: true},
 		{name: "github 域 pulls 形状无效", url: "https://github.com/owner/repo/pulls/7", wantOK: false},
 		{name: "github www 域 pulls 形状无效", url: "https://www.github.com/owner/repo/pulls/7", wantOK: false},
 		{name: "github 尾点域 pulls 仍无效", url: "https://github.com./owner/repo/pulls/7", wantOK: false},
 		{name: "github www 尾点域 pulls 仍无效", url: "https://www.github.com./owner/repo/pulls/7", wantOK: false},
 		{name: "github 显式非标端口同域拒绝", url: "https://github.com:8443/owner/repo/pulls/7", wantOK: false},
 		{name: "forgejo 尾点主机归一同键", url: "https://forge.example.com./o/r/pulls/3",
-			want: pullRequestLink{Provider: model.IssuePullRequestProviderForgejo, Owner: "o", Repo: "r", Number: 3, HostKey: "forge.example.com:443"}, wantOK: true},
+			want: pullRequestLink{Provider: model.IssuePullRequestProviderForgejo, Owner: "o", Repo: "r", Number: 3, HostKey: "forge.example.com"}, wantOK: true},
 		{name: "forgejo 端口前导零归一", url: "https://forge.example.com:0443/o/r/pulls/3",
 			want: pullRequestLink{Provider: model.IssuePullRequestProviderForgejo, Owner: "o", Repo: "r", Number: 3, HostKey: "forge.example.com:443"}, wantOK: true},
 		{name: "forgejo userinfo 不影响主机键", url: "https://bot@forge.example.com/o/r/pulls/3",
-			want: pullRequestLink{Provider: model.IssuePullRequestProviderForgejo, Owner: "o", Repo: "r", Number: 3, HostKey: "forge.example.com:443"}, wantOK: true},
+			want: pullRequestLink{Provider: model.IssuePullRequestProviderForgejo, Owner: "o", Repo: "r", Number: 3, HostKey: "forge.example.com"}, wantOK: true},
 		{name: "空主机无效", url: "https://./o/r/pulls/7", wantOK: false},
 		{name: "forgejo 编号为零无效", url: "https://forge.example.com/o/r/pulls/0", wantOK: false},
 		{name: "gitlab merge request 无效", url: "https://gitlab.com/owner/repo/merge_requests/7", wantOK: false},
@@ -799,7 +798,7 @@ func TestIssuePullRequestRepoUpsert_EmptySnapshotPreserved(t *testing.T) {
 		ID: uuid.NewString(), IssueID: issue.ID, ProjectID: project.ID,
 		Provider: model.IssuePullRequestProviderForgejo, RepoFullName: "o/r", Number: 5,
 		State: model.IssuePullRequestStateOpen, LinkOrigin: model.IssuePullRequestLinkOriginSynced,
-		HostKey: "forge.example.com:443", ForgeIntegrationID: "", SyncedAt: now, CreatedAt: now, UpdatedAt: now,
+		HostKey: "forge.example.com", ForgeIntegrationID: "", SyncedAt: now, CreatedAt: now, UpdatedAt: now,
 	}
 	if err := svc.issueService.pullRequestRepo.Upsert(blank); err != nil {
 		t.Fatalf("upsert blank snapshot: %v", err)
@@ -814,7 +813,7 @@ func TestIssuePullRequestRepoUpsert_EmptySnapshotPreserved(t *testing.T) {
 	if row.LinkOrigin != model.IssuePullRequestLinkOriginManual {
 		t.Fatalf("link_origin must stay manual, got %q", row.LinkOrigin)
 	}
-	if row.HostKey != "forge.example.com:443" {
+	if row.HostKey != "forge.example.com" {
 		t.Fatalf("host_key must stay identity, got %q", row.HostKey)
 	}
 }
@@ -933,7 +932,7 @@ func TestIssueServiceSyncPullRequests_ForgejoIntegrationRepurposed(t *testing.T)
 	if err := svc.db.Where("issue_id = ?", issue.ID).First(&row).Error; err != nil {
 		t.Fatalf("load row: %v", err)
 	}
-	if row.HostKey != "forge.example.com:443" || row.ForgeIntegrationID != "fj-1" {
+	if row.HostKey != "forge.example.com" || row.ForgeIntegrationID != "fj-1" {
 		t.Fatalf("row must keep original host snapshot, got %+v", row)
 	}
 }
