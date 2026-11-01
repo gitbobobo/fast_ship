@@ -35,9 +35,10 @@ user_github_tokens 同一模式）。
 
 ## 项目 ↔ 集成绑定
 
-除项目绑定外，Issue 关联 Forgejo PR（INT-181）也按同一 host_key 口径按主机
-查集成：attach `http(s)://<host>/<owner>/<repo>/pulls/<number>` 时点查
-forgejo 集成并落集成快照，sync 按快照重建客户端。见
+除项目绑定外，Issue 关联 Forgejo PR（INT-181）以项目绑定的集成行为凭据面：
+attach `http(s)://<host>/<owner>/<repo>/pulls/<number>` 时读项目绑定行并比对
+host_key（行缺失/主机不一致 → 40007），通过后该行交 `ForgejoClientFor` 构建
+客户端；sync 按快照集成 id 读行并比对 host_key，主机不一致拦下。见
 [issue-pull-request-links.md](issue-pull-request-links.md)。
 
 项目写侧按仓库 URL 的主机派生绑定（`service/project.go` 的

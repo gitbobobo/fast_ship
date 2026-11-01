@@ -464,6 +464,9 @@ func (s *IssueService) forgejoIntegrationForProject(project *model.Project, host
 		}
 		return nil, errs.ErrInternal
 	}
+	if bound.Kind != model.ForgeIntegrationKindForgejo {
+		return nil, errs.New(errs.ErrForgeIntegrationNotConfigured.Code, "该项目绑定的代码集成类型不是 Forgejo，仅支持关联 Forgejo PR；请在项目设置里改配 Forgejo 集成")
+	}
 	if bound.HostKey != hostKey {
 		return nil, errs.New(errs.ErrForgeIntegrationNotConfigured.Code, "该项目绑定的代码集成与 PR 所在主机不一致，请先在项目设置里调整代码仓库后再关联 PR")
 	}
