@@ -3682,7 +3682,7 @@ type IssuePullRequest struct {
 	// LinkOrigin manual=用户显式 attach；synced=远端同步投影产生（清理逻辑只作用于 synced）
 	LinkOrigin IssuePullRequestLinkOrigin `json:"link_origin"`
 
-	// MergedAt state=merged 时有值
+	// MergedAt state=merged 时通常有值；Forgejo 上 merged=true 但 merged_at 缺失的异常快照下为空
 	MergedAt *string `json:"merged_at"`
 	Number   int     `json:"number"`
 

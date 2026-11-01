@@ -28,6 +28,8 @@ forgejo 行落 `forge_integration_id`（可空列，AutoMigrate 追加；github 
 
 attach 与 sync 的失败文案不回显适配器错误原文（集成 API 绝对地址、响应体只进服务端日志）：Forgejo 状态码错误给「Forgejo API 状态码 N」+提示，传输/解析失败归一为「连接或响应异常」。GitHub 与 Forgejo 对「PR 不存在」与「无权访问」都返回 404，提示同时保留两种可能（GitHub 附「核查仓库访问范围与 Pull requests 读权限」）；限流另给提示，不断言单一原因。
 
+**主机冲突（40917）**：同名 PR（同 owner/repo/number）已关联在另一台 Forgejo 实例上时，attach 拒绝并要求先显式 detach——覆盖会静默改写用户已关联的对象。旧集成行已删的行无法比对主机（sync 本就报集成缺失），允许新实例的 attach 覆盖修复。
+
 ## sync 契约
 
 `POST .../pull-requests/sync` 逐条刷新，返回 `{items, failures}`。**每条关联是独立失败域**：单行拉取或保存失败记入 `failures[]`（含关联行 id 与 `repo#number` 前缀的 error），旧数据保留，不中断其余行，整体恒 200。sync 按 provider 分流：github 行按 repo 缓存客户端；forgejo 行按 `forge_integration_id` 缓存客户端（同集成一轮 sync 只构建一次，构造失败同样按 id 缓存逐行记失败）；快照缺失（空 id，提示解除重联）与未知 provider 也只算单行失败。

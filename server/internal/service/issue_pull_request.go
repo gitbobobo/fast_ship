@@ -104,6 +104,16 @@ func (s *IssueService) AttachIssuePullRequest(issueID, userID string, req Attach
 		if err != nil {
 			return nil, err
 		}
+		// 主机冲突守卫：同名 PR 已关联在另一台 Forgejo 实例上时，覆盖会静默
+		// 改写用户已关联的对象——要求先显式 detach（40917）。旧集成行已删的
+		// 行无法比对主机（sync 本就报集成缺失），允许新实例的 attach 覆盖修复。
+		if existing, err := s.pullRequestRepo.FindByUnique(issue.ID, link.Provider, link.RepoFullName, parsed.Number); err == nil &&
+			existing.ForgeIntegrationID != "" {
+			if oldIntegration, err := s.forgeIntegrationRepo.FindByID(existing.ForgeIntegrationID); err == nil && oldIntegration.HostKey != parsed.HostKey {
+				return nil, errs.New(errs.ErrPullRequestHostConflict.Code,
+					fmt.Sprintf("该 Issue 已关联主机不同的同名 PR（%s#%d），请先解除原关联", link.RepoFullName, parsed.Number))
+			}
+		}
 		link.ForgeIntegrationID = integrationID
 		reader, err := s.forgejoPRReader(ctx, integrationID)
 		if err != nil {

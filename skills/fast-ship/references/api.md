@@ -2102,7 +2102,7 @@ Issue CRUD、过滤、同步、清单、发货钩子与图片附件
 | `items[].pull_requests[].author_login` | string | 是 |  |
 | `items[].pull_requests[].head_ref` | string | 是 |  |
 | `items[].pull_requests[].base_ref` | string | 是 |  |
-| `items[].pull_requests[].merged_at` | string（date-time，可空） | 是 | state=merged 时有值 |
+| `items[].pull_requests[].merged_at` | string（date-time，可空） | 是 | state=merged 时通常有值；Forgejo 上 merged=true 但 merged_at 缺失的异常快照下为空 |
 | `items[].pull_requests[].closed_at` | string（date-time，可空） | 是 |  |
 | `items[].pull_requests[].link_origin` | string（enum: manual \| synced） | 是 | manual=用户显式 attach；synced=远端同步投影产生（清理逻辑只作用于 synced） |
 | `items[].pull_requests[].synced_at` | string（date-time） | 是 | 最近一次从远端 forge 刷新成功的时间 |
@@ -2320,7 +2320,7 @@ Issue CRUD、过滤、同步、清单、发货钩子与图片附件
 | `pull_requests[].author_login` | string | 是 |  |
 | `pull_requests[].head_ref` | string | 是 |  |
 | `pull_requests[].base_ref` | string | 是 |  |
-| `pull_requests[].merged_at` | string（date-time，可空） | 是 | state=merged 时有值 |
+| `pull_requests[].merged_at` | string（date-time，可空） | 是 | state=merged 时通常有值；Forgejo 上 merged=true 但 merged_at 缺失的异常快照下为空 |
 | `pull_requests[].closed_at` | string（date-time，可空） | 是 |  |
 | `pull_requests[].link_origin` | string（enum: manual \| synced） | 是 | manual=用户显式 attach；synced=远端同步投影产生（清理逻辑只作用于 synced） |
 | `pull_requests[].synced_at` | string（date-time） | 是 | 最近一次从远端 forge 刷新成功的时间 |
@@ -2789,7 +2789,7 @@ Issue CRUD、过滤、同步、清单、发货钩子与图片附件
 | `pull_requests[].author_login` | string | 是 |  |
 | `pull_requests[].head_ref` | string | 是 |  |
 | `pull_requests[].base_ref` | string | 是 |  |
-| `pull_requests[].merged_at` | string（date-time，可空） | 是 | state=merged 时有值 |
+| `pull_requests[].merged_at` | string（date-time，可空） | 是 | state=merged 时通常有值；Forgejo 上 merged=true 但 merged_at 缺失的异常快照下为空 |
 | `pull_requests[].closed_at` | string（date-time，可空） | 是 |  |
 | `pull_requests[].link_origin` | string（enum: manual \| synced） | 是 | manual=用户显式 attach；synced=远端同步投影产生（清理逻辑只作用于 synced） |
 | `pull_requests[].synced_at` | string（date-time） | 是 | 最近一次从远端 forge 刷新成功的时间 |
@@ -3013,7 +3013,7 @@ github 来源 Issue 的更改写回 GitHub 远端，internal 仅写本地；`sta
 | `pull_requests[].author_login` | string | 是 |  |
 | `pull_requests[].head_ref` | string | 是 |  |
 | `pull_requests[].base_ref` | string | 是 |  |
-| `pull_requests[].merged_at` | string（date-time，可空） | 是 | state=merged 时有值 |
+| `pull_requests[].merged_at` | string（date-time，可空） | 是 | state=merged 时通常有值；Forgejo 上 merged=true 但 merged_at 缺失的异常快照下为空 |
 | `pull_requests[].closed_at` | string（date-time，可空） | 是 |  |
 | `pull_requests[].link_origin` | string（enum: manual \| synced） | 是 | manual=用户显式 attach；synced=远端同步投影产生（清理逻辑只作用于 synced） |
 | `pull_requests[].synced_at` | string（date-time） | 是 | 最近一次从远端 forge 刷新成功的时间 |
@@ -3666,7 +3666,7 @@ AI 生成 checklist 建议（需已配置 AI 设置；JWT 与 API Key 均可）
 关联一个 GitHub 或 Forgejo PR 到 Issue（幂等）
 
 请求体只传 PR URL，服务端解析后立即从远端 forge 拉取 title/state/is_draft/author/head/base/merged_at 等字段入库；拉取失败返回错误，不落记录。
-两种 URL 形状：`https://github.com/<owner>/<repo>/pull/<number>` 走 GitHub（项目凭证，未配则以未认证方式拉公共仓库）；`http(s)://<host>/<owner>/<repo>/pulls/<number>` 走 Forgejo——按 URL 主机匹配部署级 Forgejo 集成（forge_integrations），用集成机器人 PAT 拉取，主机未配集成返回 40007。
+两种 URL 形状：`https://github.com/<owner>/<repo>/pull/<number>` 走 GitHub（项目凭证，未配则以未认证方式拉公共仓库）；`http(s)://<host>/<owner>/<repo>/pulls/<number>` 走 Forgejo——按 URL 主机匹配部署级 Forgejo 集成（forge_integrations），用集成机器人 PAT 拉取；主机未配集成、或项目绑定的代码集成与 PR 主机不一致均返回 40007。同名 PR 已关联在另一台 Forgejo 实例上时返回 409（40917），需先解除原关联。
 允许跨仓库：URL 可以是任意仓库的 PR，不要求等于项目配置的仓库。
 重复 attach 同一 PR（唯一键 issue_id+provider+repo_full_name+number）幂等返回既有记录并顺带刷新状态与集成快照。attach 产生的行 `link_origin=manual`；PR 状态与 Issue workflow_status 不联动。
 
@@ -3706,7 +3706,7 @@ AI 生成 checklist 建议（需已配置 AI 设置；JWT 与 API Key 均可）
 | `author_login` | string | 是 |  |
 | `head_ref` | string | 是 |  |
 | `base_ref` | string | 是 |  |
-| `merged_at` | string（date-time，可空） | 是 | state=merged 时有值 |
+| `merged_at` | string（date-time，可空） | 是 | state=merged 时通常有值；Forgejo 上 merged=true 但 merged_at 缺失的异常快照下为空 |
 | `closed_at` | string（date-time，可空） | 是 |  |
 | `link_origin` | string（enum: manual \| synced） | 是 | manual=用户显式 attach；synced=远端同步投影产生（清理逻辑只作用于 synced） |
 | `synced_at` | string（date-time） | 是 | 最近一次从远端 forge 刷新成功的时间 |
@@ -3717,9 +3717,10 @@ AI 生成 checklist 建议（需已配置 AI 设置；JWT 与 API Key 均可）
 
 | HTTP | 说明 |
 | --- | --- |
-| 400 | 无法解析的 PR URL（40001），或该主机未配置 Forgejo 集成（40007） |
+| 400 | 无法解析的 PR URL（40001）；主机未配 Forgejo 集成、或项目绑定的代码集成与 PR 主机不一致（40007） |
 | 401 | 未提供或提供无效凭证（40100-40199） |
 | 404 | 资源不存在（40400-40499） |
+| 409 | 同名 PR 已关联在另一台 Forgejo 实例上（40917），需先解除原关联 |
 | 500 | 服务器内部错误（50000） |
 | 502 | GitHub API 调用失败（50200）或 Forgejo API 调用失败（50206）；均含 PR 不存在或无权访问 |
 
@@ -3762,7 +3763,7 @@ syncIssuePullRequests 的响应形状，与批量 internal-meta 的 {items, fail
 | `items[].author_login` | string | 是 |  |
 | `items[].head_ref` | string | 是 |  |
 | `items[].base_ref` | string | 是 |  |
-| `items[].merged_at` | string（date-time，可空） | 是 | state=merged 时有值 |
+| `items[].merged_at` | string（date-time，可空） | 是 | state=merged 时通常有值；Forgejo 上 merged=true 但 merged_at 缺失的异常快照下为空 |
 | `items[].closed_at` | string（date-time，可空） | 是 |  |
 | `items[].link_origin` | string（enum: manual \| synced） | 是 | manual=用户显式 attach；synced=远端同步投影产生（清理逻辑只作用于 synced） |
 | `items[].synced_at` | string（date-time） | 是 | 最近一次从远端 forge 刷新成功的时间 |

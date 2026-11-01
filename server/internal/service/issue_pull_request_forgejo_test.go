@@ -773,3 +773,53 @@ func TestIssuePullRequestRepoUpsert_EmptySnapshotPreserved(t *testing.T) {
 		t.Fatalf("link_origin must stay manual, got %q", row.LinkOrigin)
 	}
 }
+
+// 主机冲突守卫：同名 PR 已关联在另一台 Forgejo 实例上时，attach 返回 40917
+// 要求先解除原关联，不静默覆盖既有行；同主机重复 attach 不受影响。
+func TestIssueServiceAttachPullRequest_ForgejoHostConflict(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID)
+	issue := createTestIssue(t, svc.db, project.ID)
+	createForgejoIntegrationRow(t, svc.db, "fj-a", "https://forge-a.example.com", "pat-a")
+	createForgejoIntegrationRow(t, svc.db, "fj-b", "https://forge-b.example.com", "pat-b")
+	bindProjectForgejo(t, svc, project.ID, "fj-a")
+
+	reader := stubForgejoPRReader(t, svc, "", "")
+	reader.prs = forgePRSet(testForgePullRequest("o/r", 5, "open", false, nil))
+	if _, err := svc.issueService.AttachIssuePullRequest(issue.ID, user.ID, AttachIssuePullRequestRequest{
+		Url: "https://forge-a.example.com/o/r/pulls/5",
+	}); err != nil {
+		t.Fatalf("attach on instance A: %v", err)
+	}
+
+	// 项目改绑到实例 B，再 attach 同名 PR：40917，A 的关联行原样保留。
+	bindProjectForgejo(t, svc, project.ID, "fj-b")
+	_, err := svc.issueService.AttachIssuePullRequest(issue.ID, user.ID, AttachIssuePullRequestRequest{
+		Url: "https://forge-b.example.com/o/r/pulls/5",
+	})
+	appErr, ok := err.(*errs.AppError)
+	if !ok || appErr.Code != errs.ErrPullRequestHostConflict.Code {
+		t.Fatalf("expected %d for cross-host same-name PR, got %v", errs.ErrPullRequestHostConflict.Code, err)
+	}
+	var row model.IssuePullRequest
+	if err := svc.db.Where("issue_id = ?", issue.ID).First(&row).Error; err != nil {
+		t.Fatalf("load row: %v", err)
+	}
+	if row.ForgeIntegrationID != "fj-a" || row.RepoFullName != "o/r" {
+		t.Fatalf("instance A row must stay untouched, got %+v", row)
+	}
+
+	// 同主机重复 attach 仍幂等（不走冲突路径）。
+	bindProjectForgejo(t, svc, project.ID, "fj-a")
+	again, err := svc.issueService.AttachIssuePullRequest(issue.ID, user.ID, AttachIssuePullRequestRequest{
+		Url: "https://forge-a.example.com/o/r/pulls/5",
+	})
+	if err != nil {
+		t.Fatalf("idempotent attach after conflict: %v", err)
+	}
+	if count := countPullRequestRows(t, svc, issue.ID); count != 1 {
+		t.Fatalf("expected single row, got %d", count)
+	}
+	_ = again
+}
