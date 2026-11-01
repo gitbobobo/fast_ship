@@ -23,8 +23,9 @@ svg（`image/svg+xml`、非标准写法 `image/svg`、扩展名 `.svg`）与 HTM
 | `/api/issues/assets/:aid/content` | nosniff + CSP + attachment | Issue 附件，上传只按前 512 字节嗅探求 `image/*`，「图片魔数 + HTML/SVG 体」的多态文件能过 |
 | `/api/avatars/:uid/:filename` | nosniff + CSP + attachment | 头像 |
 | `/api/screenshot-screens/:sid/content` | nosniff + CSP `sandbox`，保留 `inline` | 截图同样是用户上传 + `?token=`；「在标签页里看截图」是产品行为，`inline` 保留。这一档**不设** `default-src`：Chromium 打开图片地址会生成 `<body><img>` 包装文档，那个 img 是否受 `img-src`（回落到 `default-src`）约束随版本而异，能不能显示不该赌这个实现细节；`sandbox` 单独就够禁脚本 |
+| `/api/screenshot-annotations/:aid/crop` | 同上（nosniff + CSP `sandbox` + `inline`） | 服务端重新编码的裁剪 PNG，无脚本执行风险，但按同一不变量接上，别靠「眼下没风险」豁免 |
 
-`/api/artifacts/:aid/download`、`/api/attachments/:aid/download` 以 `application/octet-stream` + `attachment` 下发，本身不构成同源文档，不在这个不变量里。`/api/screenshot-annotations/:aid/crop` 是服务端生成的裁剪 PNG，也不在。
+`/api/artifacts/:aid/download`、`/api/attachments/:aid/download` 以 `application/octet-stream` + `attachment` 下发，本身不构成同源文档，不在这个不变量里。
 
 **残余窗口**：头像地址存在用户表里、改不了缓存键，没法像媒体代理那样加版本参数；只有头像需要按 60 分钟评估——基线里头像的 `Cache-Control` 是 `private, max-age=3600`，部署前已进浏览器的旧响应（没有硬化头）会按它继续被复用，真实残余窗口最长 60 分钟。Issue 附件基线本来就是 `max-age=300`，残余窗口仍是最长 5 分钟（媒体代理旧版是 24h，靠 `v` 版本参数提前退役）。两条出口的 `Cache-Control` 都压到 `private, max-age=300`，只是把窗口之后的新请求压回分钟级，不是旧缓存的退役时间。新增同类出口时照上表接上，别只给媒体代理加。
 

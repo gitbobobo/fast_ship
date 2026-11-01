@@ -632,7 +632,8 @@ func TestCloneRelevantHeadersForcesPrivateCacheControl(t *testing.T) {
 	upstream := http.Header{}
 	upstream.Set("Cache-Control", "public, max-age=300")
 	upstream.Set("ETag", `"abc"`)
-	out := cloneRelevantHeaders(upstream)
+	svc := newService(t.TempDir(), serviceConfig{})
+	out := svc.cloneRelevantHeaders(upstream)
 	if got := out.Get("Cache-Control"); got != "private, max-age=86400" {
 		t.Fatalf("cache control = %q, want private, max-age=86400（不透传 public）", got)
 	}

@@ -1230,7 +1230,7 @@ func (s *ProxyService) ProxyPass(ctx context.Context, rawURL, rangeHeader string
 		return nil, s.mediaRejectionError(resp.Header, finalURL)
 	}
 
-	header := cloneRelevantHeaders(resp.Header)
+	header := s.cloneRelevantHeaders(resp.Header)
 	// Content-Type 只保留规范化后的那一个值：多值/逗号拼接已在闸门上
 	// 被拒，octet-stream/空类型由扩展名回退改写成具体媒体类型。
 	header.Set("Content-Type", normalizedType)
@@ -1394,7 +1394,7 @@ func scopedCacheID(normalized, scope string) string {
 	return scope + "\x1f" + normalized
 }
 
-func cloneRelevantHeaders(header http.Header) http.Header {
+func (s *ProxyService) cloneRelevantHeaders(header http.Header) http.Header {
 	out := make(http.Header)
 	for _, key := range []string{"Content-Type", "Content-Length", "Content-Range", "Accept-Ranges", "ETag", "Last-Modified"} {
 		for _, value := range header.Values(key) {
@@ -1403,9 +1403,9 @@ func cloneRelevantHeaders(header http.Header) http.Header {
 	}
 	// Cache-Control 不透传上游值：直通路径与缓存命中同一口径，一律 private
 	// （代理地址带用户 JWT，上游的 public/max-age 会让共享缓存/CDN 把带
-	// token 的 URL 存进共享层）。TTL 取上游可见的保守值做不到也不必要——
-	// private 下共享层本就不缓存，浏览器侧用自己的 max-age 即可。
-	out.Set("Cache-Control", buildCacheControl(defaultCacheTTL))
+	// token 的 URL 存进共享层）。TTL 用服务实例的 cacheTTL，与命中路径同源
+	// ——写死默认值会让非默认 TTL 时浏览器的 max-age 比服务端条目晚过期。
+	out.Set("Cache-Control", buildCacheControl(s.cacheTTL))
 	return out
 }
 
