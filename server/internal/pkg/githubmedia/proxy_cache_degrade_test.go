@@ -660,25 +660,58 @@ func TestSweepExpiredEntriesEvictsOldestOverCapacity(t *testing.T) {
 		t.Fatalf("chtimes corrupt bin: %v", err)
 	}
 
-	// 合计 40 > 上限 25：corrupt 跳过，按最旧淘汰 old、mid，到 20 ≤ 25 停。
+	// 合计（只算可安全淘汰的）30 > 上限 25：corrupt 跳过且不进容量总量，
+	// 淘汰 old 后 20 ≤ 25 即停——mid 与 fresh 保留。
 	svc.sweepExpiredEntries()
 
-	for _, p := range []string{oldBin, midBin} {
-		if _, err := os.Stat(p); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("%s stat = %v, want 已淘汰", p, err)
-		}
-		meta := strings.TrimSuffix(p, ".bin") + ".json"
-		if _, err := os.Stat(meta); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("%s stat = %v, want 已淘汰", meta, err)
-		}
+	if _, err := os.Stat(oldBin); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("old bin stat = %v, want 已淘汰", err)
 	}
-	if _, err := os.Stat(freshBin); err != nil {
-		t.Fatalf("fresh bin stat = %v, want 保留（最旧淘汰到上限内即停）", err)
+	oldMeta := strings.TrimSuffix(oldBin, ".bin") + ".json"
+	if _, err := os.Stat(oldMeta); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("%s stat = %v, want 已淘汰", oldMeta, err)
+	}
+	for _, p := range []string{midBin, freshBin} {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("%s 读不到, want 保留（最旧淘汰到上限内即停）", p)
+		}
 	}
 	if _, err := os.Stat(corruptBin); err != nil {
 		t.Fatal("corrupt bin 读不到, want 保留（URL 不可得不参与容量淘汰）")
 	}
 	if _, err := os.Stat(corruptJSON); err != nil {
 		t.Fatal("corrupt meta 读不到, want 保留")
+	}
+}
+
+// 容量口径只算可安全淘汰的字节：meta 缺失的孤儿 .bin（写侧 rename 后被杀、
+// mtime 新，归孤儿判据管）不进容量总量——把它算进去，上限就成了不可满足的
+// 约束，每轮扫描都会把可淘汰的存活条目删到底且永远填不平。
+func TestSweepExpiredEntriesCapacityIgnoresUnreachableBytes(t *testing.T) {
+	svc := newService(t.TempDir(), serviceConfig{
+		allowURL:      func(u *url.URL) bool { return true },
+		capacityLimit: 100,
+	})
+	if err := os.MkdirAll(svc.cacheDir, 0o750); err != nil {
+		t.Fatalf("mkdir cache dir: %v", err)
+	}
+	metaPath := seedCacheMeta(t, svc, "https://x.test/live.png", "image/png")
+	liveBin := strings.TrimSuffix(metaPath, ".json") + ".bin"
+	if err := os.WriteFile(liveBin, bytes.Repeat([]byte("x"), 10), 0o640); err != nil {
+		t.Fatalf("write live bin: %v", err)
+	}
+	// 孤儿 .bin：无 meta，字节远超上限。
+	orphanBin := filepath.Join(svc.cacheDir, "orphan.bin")
+	if err := os.WriteFile(orphanBin, bytes.Repeat([]byte("x"), 200), 0o640); err != nil {
+		t.Fatalf("write orphan bin: %v", err)
+	}
+
+	svc.sweepExpiredEntries()
+
+	if _, err := os.Stat(liveBin); err != nil {
+		t.Fatal("live bin 读不到, want 保留（可淘汰字节低于上限，孤儿字节不进容量口径）")
+	}
+	if _, err := os.Stat(metaPath); err != nil {
+		t.Fatal("live meta 读不到, want 保留")
 	}
 }

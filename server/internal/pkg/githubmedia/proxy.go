@@ -188,6 +188,10 @@ func (e cacheEntry) expired(now time.Time) bool {
 type CachedMedia struct {
 	Metadata cacheEntry
 	Path     string
+	// FromCache 本次调用是缓存命中（读路径命中 / review 面 .bin 兑底）而非
+	// 新下载。探测的字节预算只结算新拉进缓存的字节：命中的大小是确定值，
+	// 计入预算会让超预算集合每一轮都在同一位置中断，尾部引用永远探不到。
+	FromCache bool
 }
 
 // CachedImage 用给定元数据构造 CachedMedia。cacheEntry 未导出，service 层的
@@ -691,28 +695,33 @@ func (s *ProxyService) sweepExpiredEntries() {
 	s.evictOverCapacity(entries)
 }
 
-// evictOverCapacity 容量回收：.bin 合计超出 capacityLimit 时按 mtime 最旧
-// 先淘汰，删到上限以内为止。mtime 是发布时间（写盘 rename 的落定时刻），
-// 读路径不 touch 文件——这是「最旧优先」的发布序近似，不是命中序的真
-// LRU；命中热度换 mtime 要在每次读上写盘，与「读路径零删除零写入」的口
-// 径冲突，不值得。淘汰只发生在媒体代理面（调用点在 sweepExpiredEntries
-// 的面护栏之内）：条目 miss 重下自愈，删了不丢数据；review 截图面是持久
-// 资产，永不参与（容量上限字段对它不生效）。
+// evictOverCapacity 容量回收：可安全淘汰的 .bin 合计超出 capacityLimit 时
+// 按 mtime 最旧先淘汰，删到上限以内为止。mtime 是发布时间（写盘 rename 的
+// 落定时刻），读路径不 touch 文件——这是「最旧优先」的发布序近似，不是命
+// 中序的真 LRU；命中热度换 mtime 要在每次读上写盘，与「读路径零删除零写
+// 入」的口径冲突，不值得。淘汰只发生在媒体代理面（调用点在
+// sweepExpiredEntries 的面护栏之内）：条目 miss 重下自愈，删了不丢数据；
+// review 截图面是持久资产，永不参与（容量上限字段对它不生效）。
 //
-// 与写侧的竞争纪律与过期删除一致：meta 解析得出 URL 的条目持该 key 下载
-// 闸，锁内复核 .bin mtime 未变才删——写侧持同一把闸发布，锁内动手不会抹
-// 掉刚 rename 的新 data。meta 缺失/解析不了 URL 的 .bin 不在这里动手：它
-// 们是孤儿/损坏清理的辖区（mtime 超 2×TTL 回收），为容量绕过写侧互斥硬
-// 删，最坏抹掉并行发布中的新条目——容量压力晚一轮解除可以接受。闸等待
-// 超时同样跳过（下轮扫描再试），扫描是保洁，不构成请求路径的前置条件。
+// 容量口径是「可安全淘汰的字节」：meta 缺失/损坏、URL 不可得的 .bin 不计
+// 入总量也不动手——它们归孤儿/损坏判据管（mtime 超 2×TTL 回收），且字节
+// 永远扣不掉：把它们算进总量，上限就成了不可满足的约束，每轮扫描都会把
+// 可淘汰的存活条目删到底。不可淘汰的残留是暂态的（单文件上限封顶、超龄
+// 后由前述判据回收），不计入不改变「磁盘占用有界」的长期结论。
+//
+// 与写侧的竞争纪律与过期删除一致：持该 key 下载闸，锁内复核 .bin mtime
+// 未变才删——写侧持同一把闸发布，锁内动手不会抹掉刚 rename 的新 data。
+// 闸等待超时同样跳过（下轮扫描再试），扫描是保洁，不构成请求路径的前置
+// 条件。
 func (s *ProxyService) evictOverCapacity(entries []os.DirEntry) {
 	type sizedBin struct {
 		name  string
 		size  int64
 		mtime time.Time
+		url   string // 空串 = meta 缺失/损坏/URL 不可得，不可安全淘汰
 	}
 	var bins []sizedBin
-	var total int64
+	evictable := int64(0)
 	for _, e := range entries {
 		name := e.Name()
 		if !strings.HasSuffix(name, ".bin") {
@@ -722,43 +731,49 @@ func (s *ProxyService) evictOverCapacity(entries []os.DirEntry) {
 		if err != nil {
 			continue
 		}
-		total += info.Size()
-		bins = append(bins, sizedBin{name: name, size: info.Size(), mtime: info.ModTime()})
+		b := sizedBin{name: name, size: info.Size(), mtime: info.ModTime()}
+		metaPath := filepath.Join(s.cacheDir, strings.TrimSuffix(name, ".bin")+".json")
+		if data, err := os.ReadFile(metaPath); err == nil {
+			var entry cacheEntry
+			if json.Unmarshal(data, &entry) == nil {
+				b.url = entry.URL
+			}
+		}
+		if b.url != "" {
+			evictable += b.size
+		}
+		bins = append(bins, b)
 	}
-	if total <= s.capacityLimit {
+	if evictable <= s.capacityLimit {
 		return
 	}
 	sort.Slice(bins, func(i, j int) bool { return bins[i].mtime.Before(bins[j].mtime) })
 	for _, b := range bins {
-		if total <= s.capacityLimit {
+		if evictable <= s.capacityLimit {
 			return
 		}
-		metaPath := filepath.Join(s.cacheDir, strings.TrimSuffix(b.name, ".bin")+".json")
-		data, err := os.ReadFile(metaPath)
-		if err != nil {
+		if b.url == "" {
 			continue
 		}
-		var entry cacheEntry
-		if json.Unmarshal(data, &entry) != nil || entry.URL == "" {
-			continue
-		}
-		gate := s.acquireDownloadLock(entry.URL)
+		gate := s.acquireDownloadLock(b.url)
 		select {
 		case gate.sem <- struct{}{}:
 		case <-time.After(5 * time.Second):
-			s.abandonDownloadLock(entry.URL, gate)
+			s.abandonDownloadLock(b.url, gate)
 			continue
 		}
 		// 锁内复核 mtime：写侧已覆盖（时间变新）就放弃本条，下一轮再看。
+		// 放弃时不从 evictable 里扣减——它的字节仍在盘上，下一轮按新 mtime
+		// 重新排队；保守少删不会把存活条目误删。
 		info, err := os.Stat(filepath.Join(s.cacheDir, b.name))
 		if err != nil || !info.ModTime().Equal(b.mtime) {
-			s.releaseDownloadLock(entry.URL, gate)
+			s.releaseDownloadLock(b.url, gate)
 			continue
 		}
 		_ = os.Remove(filepath.Join(s.cacheDir, b.name))
-		_ = os.Remove(metaPath)
-		s.releaseDownloadLock(entry.URL, gate)
-		total -= b.size
+		_ = os.Remove(filepath.Join(s.cacheDir, strings.TrimSuffix(b.name, ".bin")+".json"))
+		s.releaseDownloadLock(b.url, gate)
+		evictable -= b.size
 	}
 }
 
@@ -1258,6 +1273,7 @@ func (s *ProxyService) fetchAndCache(ctx context.Context, rawURL, bearer, scope 
 	if cached, ok, err := s.getCachedNormalized(normalized, scope); err != nil {
 		return nil, err
 	} else if ok {
+		cached.FromCache = true
 		return cached, nil
 	}
 
@@ -1272,6 +1288,7 @@ func (s *ProxyService) fetchAndCache(ctx context.Context, rawURL, bearer, scope 
 		if media, ok, err := s.servePersistedData(normalized, cachePath); err != nil {
 			return nil, err
 		} else if ok {
+			media.FromCache = true
 			return media, nil
 		}
 		if info, statErr := os.Stat(cachePath); statErr == nil {
@@ -1283,7 +1300,8 @@ func (s *ProxyService) fetchAndCache(ctx context.Context, rawURL, bearer, scope 
 					CachedAt:     info.ModTime().UTC(),
 					CacheControl: buildCacheControl(s.cacheTTL),
 				},
-				Path: cachePath,
+				Path:      cachePath,
+				FromCache: true,
 			}, nil
 		}
 	}

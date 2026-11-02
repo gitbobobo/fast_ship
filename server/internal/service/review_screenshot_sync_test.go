@@ -1166,3 +1166,34 @@ func TestProbeScreenshotsByteBudgetStopsAfterLimit(t *testing.T) {
 		t.Fatalf("contentFP = %q, want 空（4 张只探了 2 张，指纹不全按未知处理）", probe.contentFP)
 	}
 }
+
+// 字节预算不结算缓存命中：命中的大小是确定值，计入预算会让超预算集合每一
+// 轮都在同一位置中断，尾部引用永远探不到、内容指纹永远收敛不了。命中不占
+// 预算后，全部命中（或上一轮已下载）的集合一次探齐、拿到全量指纹。
+func TestProbeScreenshotsByteBudgetSkipsCacheHits(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	review := e.withT3(nil, e.media, nil)
+	path := filepath.Join(t.TempDir(), "shot.png")
+	if err := os.WriteFile(path, []byte("\x89PNG\r\n\x1a\nfake"), 0o600); err != nil {
+		t.Fatalf("write fake png: %v", err)
+	}
+	cached := githubmedia.CachedImage(path, "image/png", 200<<20)
+	cached.FromCache = true
+	e.media.cached = cached
+
+	var lines []string
+	for i := 0; i < 4; i++ {
+		lines = append(lines, fmt.Sprintf("![s%d](https://uiv.example.com/f/%d.png)", i, i))
+	}
+	probe := review.probeScreenshots(context.Background(), model.ForgeIntegrationBuiltinGitHubID, 1, strings.Join(lines, "\n\n"))
+
+	if probe.result != probeReady {
+		t.Fatalf("probe = %+v, want probeReady", probe)
+	}
+	if e.media.anonCalls != 4 {
+		t.Fatalf("anonCalls = %d, want 4（命中不占预算，尾部引用不再被饿死）", e.media.anonCalls)
+	}
+	if probe.contentFP == "" {
+		t.Fatal("contentFP 为空, want 全量指纹（4 张全部探齐）")
+	}
+}

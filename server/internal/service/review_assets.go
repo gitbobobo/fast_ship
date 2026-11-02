@@ -620,9 +620,9 @@ type screenshotProbe struct {
 // 「拉不到」（见 isNotAnImageError）。任一成功 → probeReady（部分失败时内容
 // 指纹为空）；全部探完且全部「不是图」→ probeNone；零成功且存在「拉不到」
 // 或总预算耗尽未探完 → probeUnavailable，reason 取第一条「拉不到」类原因，
-// 没有再取第一条失败原因。字节预算（screenshotProbeBudget）耗尽时停在
-// 触发的那张：已有成功图则 probeReady + 部分指纹；单文件上限等于预算，
-// 零成功时不可能触发字节预算。探测不写 review_assets——资产行仍由视觉运行时的
+// 没有再取第一条失败原因。字节预算（screenshotProbeBudget）只结算新下载
+// 的字节，缓存命中不占预算——超预算集合逐轮拉齐，不会在同一位置反复中断；
+// 单文件上限等于预算，单张新下载永远不会超限。探测不写 review_assets——资产行仍由视觉运行时的
 // ensureAssets 落账，这里不按资产行计数，避免「已不在描述里的陈旧资产」被
 // 当成可用截图。
 func (s *ReviewService) probeScreenshots(ctx context.Context, integrationID string, installationID int64, prBody string) screenshotProbe {
@@ -663,14 +663,18 @@ func (s *ReviewService) probeScreenshots(ctx context.Context, integrationID stri
 				err = fmt.Errorf("%w: %v", githubmedia.ErrLocalCache, hashErr)
 			} else {
 				contentHashes = append(contentHashes, sum)
-				// 字节预算在下载后结算（下载前不知道大小）。单文件上限
-				// 256 MiB 等于预算，单张永远不会超限——能触发的都是第二张
-				// 及以后，此时已有成功图，结果是 probeReady + 部分指纹；
-				// 本轮不再继续拉，剩下的引用下轮探测继续（已进缓存的命中
-				// 不重下，每轮新下载量有界）。
-				probedBytes += cached.Metadata.Size
-				if probedBytes > screenshotProbeBudget {
-					break
+				// 字节预算只结算新下载的字节，缓存命中不占预算：命中的大小是
+				// 确定值，计入预算会让超预算集合每一轮都在同一位置中断——尾
+				// 部引用永远探不到、指纹永远收敛不了。命中不占预算后，超预
+				// 算集合逐轮拉齐：上一轮已下载的下一轮命中，预算让给还没拉
+				// 过的引用。单文件上限等于预算，单张新下载永远不会超限——能
+				// 触发的都是第二张及以后，此时已有成功图，结果是 probeReady
+				// + 部分指纹；本轮停在触发的那张。
+				if !cached.FromCache {
+					probedBytes += cached.Metadata.Size
+					if probedBytes > screenshotProbeBudget {
+						break
+					}
 				}
 				continue
 			}
