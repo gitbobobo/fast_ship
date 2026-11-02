@@ -615,3 +615,70 @@ func TestGetCachedRevalidatesContentTypeGate(t *testing.T) {
 		t.Fatalf("param meta content type = %q, want 原样保留（meta 文件不重写）", entry.ContentType)
 	}
 }
+
+// 容量回收：.bin 合计超出 capacityLimit 时按 mtime 最旧淘汰到上限以内，
+// 未过期的条目也会被淘汰（媒体面条目 miss 重下自愈，删了不丢数据）；
+// meta 解析不出 URL 的 .bin 不参与容量淘汰（孤儿/损坏清理的辖区，绕过
+// 写侧互斥硬删最坏抹掉并行发布中的新条目）。
+func TestSweepExpiredEntriesEvictsOldestOverCapacity(t *testing.T) {
+	svc := newService(t.TempDir(), serviceConfig{
+		allowURL:      func(u *url.URL) bool { return true },
+		capacityLimit: 25,
+	})
+	if err := os.MkdirAll(svc.cacheDir, 0o750); err != nil {
+		t.Fatalf("mkdir cache dir: %v", err)
+	}
+	now := time.Now().UTC()
+	writeEntry := func(url string, size int, age time.Duration) string {
+		t.Helper()
+		metaPath := seedCacheMeta(t, svc, url, "image/png")
+		binPath := strings.TrimSuffix(metaPath, ".json") + ".bin"
+		if err := os.WriteFile(binPath, bytes.Repeat([]byte("x"), size), 0o640); err != nil {
+			t.Fatalf("write bin: %v", err)
+		}
+		mtime := now.Add(-age)
+		if err := os.Chtimes(binPath, mtime, mtime); err != nil {
+			t.Fatalf("chtimes: %v", err)
+		}
+		return binPath
+	}
+	oldBin := writeEntry("https://x.test/old.png", 10, 3*time.Hour)
+	midBin := writeEntry("https://x.test/mid.png", 10, 2*time.Hour)
+	freshBin := writeEntry("https://x.test/fresh.png", 10, 0)
+	// meta 损坏的 .bin：发布最早，但 URL 不可得——容量淘汰不动手，它归
+	// mtime 判据（孤儿/损坏清理，>2×TTL）管。
+	corruptJSON := filepath.Join(svc.cacheDir, "corrupt.json")
+	if err := os.WriteFile(corruptJSON, []byte("{broken"), 0o640); err != nil {
+		t.Fatalf("write corrupt meta: %v", err)
+	}
+	corruptBin := filepath.Join(svc.cacheDir, "corrupt.bin")
+	if err := os.WriteFile(corruptBin, bytes.Repeat([]byte("x"), 10), 0o640); err != nil {
+		t.Fatalf("write corrupt bin: %v", err)
+	}
+	stale := now.Add(-4 * time.Hour)
+	if err := os.Chtimes(corruptBin, stale, stale); err != nil {
+		t.Fatalf("chtimes corrupt bin: %v", err)
+	}
+
+	// 合计 40 > 上限 25：corrupt 跳过，按最旧淘汰 old、mid，到 20 ≤ 25 停。
+	svc.sweepExpiredEntries()
+
+	for _, p := range []string{oldBin, midBin} {
+		if _, err := os.Stat(p); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s stat = %v, want 已淘汰", p, err)
+		}
+		meta := strings.TrimSuffix(p, ".bin") + ".json"
+		if _, err := os.Stat(meta); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s stat = %v, want 已淘汰", meta, err)
+		}
+	}
+	if _, err := os.Stat(freshBin); err != nil {
+		t.Fatalf("fresh bin stat = %v, want 保留（最旧淘汰到上限内即停）", err)
+	}
+	if _, err := os.Stat(corruptBin); err != nil {
+		t.Fatal("corrupt bin 读不到, want 保留（URL 不可得不参与容量淘汰）")
+	}
+	if _, err := os.Stat(corruptJSON); err != nil {
+		t.Fatal("corrupt meta 读不到, want 保留")
+	}
+}

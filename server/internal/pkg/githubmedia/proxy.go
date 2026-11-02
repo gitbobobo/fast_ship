@@ -75,6 +75,13 @@ const (
 	defaultTempFilePattern = "media-*.tmp"
 )
 
+// defaultCacheCapacity 媒体代理面缓存目录的总容量上限（.bin 字节合计，
+// 含孤儿）。过期扫描只回收「上游不再可用」的条目，描述反复带新图的部署
+// 即使条目都活着也会只增不减——超出上限时由容量回收按最旧淘汰（见
+// evictOverCapacity）。单文件上限是 defaultMaxCacheBytes，上限至少要容得
+// 下几张并行使用中的大文件，1 GiB 对 NAS 部署是占用与宽容的平衡点。
+const defaultCacheCapacity = 1 << 30
+
 var (
 	// 错误文案会原样落到 review_assets.error 与 status 描述里，写成用户能
 	// 看懂的中文原因；/api/github/media-proxy 的对外文案由 handler 固定生成，
@@ -206,7 +213,10 @@ type ProxyService struct {
 	cacheSubdir       string
 	cacheTTL          time.Duration
 	maxCacheEntrySize int64
-	allowURL          func(*url.URL) bool
+	// capacityLimit 媒体代理面的总容量上限（.bin 字节合计）；只在媒体面
+	// 由过期扫描末尾消费（evictOverCapacity），review 截图面永不参与。
+	capacityLimit int64
+	allowURL      func(*url.URL) bool
 	// requireHTTPS 只接受 https 上游（截图面）；imagesOnly 只收图片内容。
 	// GitHub 媒体面两者全关：白名单语义 + 图片视频都收，与截图面是两套准入。
 	requireHTTPS bool
@@ -275,7 +285,10 @@ type serviceConfig struct {
 	cacheSubdir       string
 	cacheTTL          time.Duration
 	maxCacheEntrySize int64
-	client            *http.Client
+	// capacityLimit 缓存目录总容量上限（.bin 字节合计）；零值用
+	// defaultCacheCapacity，测试注入小值观察淘汰。只作用于媒体代理面。
+	capacityLimit int64
+	client        *http.Client
 	// transport 覆盖默认客户端的 Transport（测试注入）；nil 用原构造。
 	transport    http.RoundTripper
 	allowURL     func(*url.URL) bool
@@ -311,6 +324,12 @@ type ProxyOption func(*serviceConfig)
 // 直接 panic（见 newService），不要拿它去接截图面。
 func WithHTTPTransport(rt http.RoundTripper) ProxyOption {
 	return func(cfg *serviceConfig) { cfg.transport = rt }
+}
+
+// WithCacheCapacity 覆盖缓存目录总容量上限（.bin 字节合计，媒体代理面）。
+// 测试注入小值观察最旧淘汰；生产装配不传即用默认上限。
+func WithCacheCapacity(limit int64) ProxyOption {
+	return func(cfg *serviceConfig) { cfg.capacityLimit = limit }
 }
 
 // NewProxyService GitHub 媒体代理面：GitHub 域名白名单、图片视频都收，
@@ -367,6 +386,9 @@ func newService(cacheRoot string, cfg serviceConfig) *ProxyService {
 	if cfg.maxCacheEntrySize <= 0 {
 		cfg.maxCacheEntrySize = defaultMaxCacheBytes
 	}
+	if cfg.capacityLimit <= 0 {
+		cfg.capacityLimit = defaultCacheCapacity
+	}
 	if cfg.allowURL == nil {
 		cfg.allowURL = isAllowedGitHubMediaURL
 	}
@@ -394,6 +416,7 @@ func newService(cacheRoot string, cfg serviceConfig) *ProxyService {
 		cacheSubdir:       cfg.cacheSubdir,
 		cacheTTL:          cfg.cacheTTL,
 		maxCacheEntrySize: cfg.maxCacheEntrySize,
+		capacityLimit:     cfg.capacityLimit,
 		allowURL:          cfg.allowURL,
 		requireHTTPS:      cfg.requireHTTPS,
 		imagesOnly:        cfg.imagesOnly,
@@ -665,6 +688,78 @@ func (s *ProxyService) sweepExpiredEntries() {
 		_ = os.Remove(filepath.Join(s.cacheDir, name))
 	}
 	s.sweepStaleTmpFiles(now)
+	s.evictOverCapacity(entries)
+}
+
+// evictOverCapacity 容量回收：.bin 合计超出 capacityLimit 时按 mtime 最旧
+// 先淘汰，删到上限以内为止。mtime 是发布时间（写盘 rename 的落定时刻），
+// 读路径不 touch 文件——这是「最旧优先」的发布序近似，不是命中序的真
+// LRU；命中热度换 mtime 要在每次读上写盘，与「读路径零删除零写入」的口
+// 径冲突，不值得。淘汰只发生在媒体代理面（调用点在 sweepExpiredEntries
+// 的面护栏之内）：条目 miss 重下自愈，删了不丢数据；review 截图面是持久
+// 资产，永不参与（容量上限字段对它不生效）。
+//
+// 与写侧的竞争纪律与过期删除一致：meta 解析得出 URL 的条目持该 key 下载
+// 闸，锁内复核 .bin mtime 未变才删——写侧持同一把闸发布，锁内动手不会抹
+// 掉刚 rename 的新 data。meta 缺失/解析不了 URL 的 .bin 不在这里动手：它
+// 们是孤儿/损坏清理的辖区（mtime 超 2×TTL 回收），为容量绕过写侧互斥硬
+// 删，最坏抹掉并行发布中的新条目——容量压力晚一轮解除可以接受。闸等待
+// 超时同样跳过（下轮扫描再试），扫描是保洁，不构成请求路径的前置条件。
+func (s *ProxyService) evictOverCapacity(entries []os.DirEntry) {
+	type sizedBin struct {
+		name  string
+		size  int64
+		mtime time.Time
+	}
+	var bins []sizedBin
+	var total int64
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasSuffix(name, ".bin") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		total += info.Size()
+		bins = append(bins, sizedBin{name: name, size: info.Size(), mtime: info.ModTime()})
+	}
+	if total <= s.capacityLimit {
+		return
+	}
+	sort.Slice(bins, func(i, j int) bool { return bins[i].mtime.Before(bins[j].mtime) })
+	for _, b := range bins {
+		if total <= s.capacityLimit {
+			return
+		}
+		metaPath := filepath.Join(s.cacheDir, strings.TrimSuffix(b.name, ".bin")+".json")
+		data, err := os.ReadFile(metaPath)
+		if err != nil {
+			continue
+		}
+		var entry cacheEntry
+		if json.Unmarshal(data, &entry) != nil || entry.URL == "" {
+			continue
+		}
+		gate := s.acquireDownloadLock(entry.URL)
+		select {
+		case gate.sem <- struct{}{}:
+		case <-time.After(5 * time.Second):
+			s.abandonDownloadLock(entry.URL, gate)
+			continue
+		}
+		// 锁内复核 mtime：写侧已覆盖（时间变新）就放弃本条，下一轮再看。
+		info, err := os.Stat(filepath.Join(s.cacheDir, b.name))
+		if err != nil || !info.ModTime().Equal(b.mtime) {
+			s.releaseDownloadLock(entry.URL, gate)
+			continue
+		}
+		_ = os.Remove(filepath.Join(s.cacheDir, b.name))
+		_ = os.Remove(metaPath)
+		s.releaseDownloadLock(entry.URL, gate)
+		total -= b.size
+	}
 }
 
 // sweepStaleTmpFiles 回收 CreateTemp 的 media-*.tmp 写盘中转：进程被杀/机器
