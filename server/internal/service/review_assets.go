@@ -777,17 +777,24 @@ func (s *ReviewService) AgentScreenshots(ctx context.Context, runID string) ([]a
 			Order("position ASC").Find(&prevAssets).Error; err != nil {
 			return nil, false, errs.ErrInternal
 		}
-		// 两侧口径必须一致：本轮指纹来自**截断后**的收集结果，上一轮的行却
-		// 可能是升级前留下的全量（同一 head 上可能超过张数上限）。不按同一
-		// 规则截断，多出来的旧 URL 会持续改变指纹，`changed` 恒为 true，审查
-		// 员每轮都被告知「截图集合已变化」。行按 position 升序，取前 N 条即
-		// 与收集面的「按出现顺序保留前 N 个」同口径。
-		if len(prevAssets) > maxScreenshotsPerPR {
-			prevAssets = prevAssets[:maxScreenshotsPerPR]
-		}
-		prevRefs := make([]screenshotRef, 0, len(prevAssets))
+		// 两侧口径必须一致，按收集面的两道规则依次过一遍（行按 position 升序，
+		// 即收集面的「按出现顺序」）：
+		//   - 结构准入：上一轮的行可能混有今天的口径不会再收的残留（旧版本写入
+		//     的 http/data 地址、带 userinfo 的链接）。它们从未展示给审查员，
+		//     却会改变指纹，让 `changed` 恒为 true。
+		//   - 张数上限：本轮指纹来自**截断后**的收集结果，上一轮的行可能是升级
+		//     前的全量（同一 head 上超过上限），多出来的旧 URL 同样会顶住指纹。
+		// 注意不按「当前描述」过滤：描述里真的删掉某张截图时集合确实变了，
+		// 那必须判 changed=true，抹掉它等于把「截图被删」报成未变化。
+		prevRefs := make([]screenshotRef, 0, maxScreenshotsPerPR)
 		for _, a := range prevAssets {
+			if !admitScreenshotURL(a.SourceURL) {
+				continue
+			}
 			prevRefs = append(prevRefs, screenshotRef{URL: a.SourceURL})
+			if len(prevRefs) == maxScreenshotsPerPR {
+				break
+			}
 		}
 		changed = screenshotFingerprint(prevRefs) != fingerprint
 	}

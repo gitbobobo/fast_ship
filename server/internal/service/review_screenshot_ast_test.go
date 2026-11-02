@@ -592,3 +592,65 @@ func TestAgentScreenshotsChangedTruncatesPrevAssets(t *testing.T) {
 		t.Fatal("changed = true, want false（上一轮超限残留不应改变指纹）")
 	}
 }
+
+// 上一轮的行里可能混有今天的口径不会再收的残留（旧版本写入的 http 地址、
+// 带 userinfo 的链接）。它们从未展示给审查员，却会改变指纹让 changed 恒为
+// true——比较前按收集面同一道结构准入过滤。
+func TestAgentScreenshotsChangedDropsUnadmittedPrevRows(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+
+	base := "https://uiv.frp.musiver.cn/f/"
+	var lines []string
+	for i := 0; i < maxScreenshotsPerPR; i++ {
+		lines = append(lines, fmt.Sprintf("![s%d](%s%d.png)", i, base, i))
+	}
+	body := strings.Join(lines, "\n\n")
+	e.fake.SetPR(repo, 97, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 97, HeadSHA: "sha-cur",
+		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature", Body: body,
+	})
+	combos, err := marshalCombinations([]api.ReviewCombination{testCombo("env-u")})
+	if err != nil {
+		t.Fatalf("marshal combos: %v", err)
+	}
+	e.enableReview(t, func(s *model.ProjectReviewSettings) {
+		s.VisualCombinationsJSON = combos
+	})
+
+	prevRun := e.seedRun(t, repo, 97, "sha-prev", model.ReviewRunCompleted, now)
+	e.svc.db.Model(prevRun).Updates(map[string]any{"kind": model.ReviewKindVisual, "round_number": 1})
+	curRun := e.seedRun(t, repo, 97, "sha-cur", model.ReviewRunQueued, now)
+	e.svc.db.Model(curRun).Updates(map[string]any{"kind": model.ReviewKindVisual, "round_number": 2})
+
+	create := func(id, head, url string, pos int) {
+		t.Helper()
+		if err := e.svc.db.Create(&model.ReviewAsset{
+			IntegrationID: model.ForgeIntegrationBuiltinGitHubID, ID: id,
+			RepoFullName: repo, PRNumber: 97, HeadSHA: head,
+			Position: pos, Label: id, SourceURL: url,
+			StoragePath: "/cache/" + id + ".png", MimeType: "image/png", SizeBytes: 10,
+			CreatedAt: now,
+		}).Error; err != nil {
+			t.Fatalf("seed asset: %v", err)
+		}
+	}
+
+	// 上一轮：position 0/1 是旧口径残留（今天的准入不会收），后面才是真正
+	// 展示过的 12 张。只按 position 截断会把这 12 张挤掉两张，指纹必然不同。
+	create("prev-bad-0", "sha-prev", "http://uiv.frp.musiver.cn/f/plain.png", 0)
+	create("prev-bad-1", "sha-prev", "https://user:pw@uiv.frp.musiver.cn/f/userinfo.png", 1)
+	for i := 0; i < maxScreenshotsPerPR; i++ {
+		create(fmt.Sprintf("prev-%d", i), "sha-prev", fmt.Sprintf("%s%d.png", base, i), i+2)
+		create(fmt.Sprintf("cur-%d", i), "sha-cur", fmt.Sprintf("%s%d.png", base, i), i)
+	}
+
+	_, changed, err := e.review.AgentScreenshots(context.Background(), curRun.ID)
+	if err != nil {
+		t.Fatalf("AgentScreenshots: %v", err)
+	}
+	if changed {
+		t.Fatal("changed = true, want false（旧口径残留不该改变指纹）")
+	}
+}
