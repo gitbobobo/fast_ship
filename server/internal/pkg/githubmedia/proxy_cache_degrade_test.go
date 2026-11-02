@@ -2,6 +2,7 @@ package githubmedia
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -616,102 +617,136 @@ func TestGetCachedRevalidatesContentTypeGate(t *testing.T) {
 	}
 }
 
-// 容量回收：.bin 合计超出 capacityLimit 时按 mtime 最旧淘汰到上限以内，
-// 未过期的条目也会被淘汰（媒体面条目 miss 重下自愈，删了不丢数据）；
-// meta 解析不出 URL 的 .bin 不参与容量淘汰（孤儿/损坏清理的辖区，绕过
-// 写侧互斥硬删最坏抹掉并行发布中的新条目）。
-func TestSweepExpiredEntriesEvictsOldestOverCapacity(t *testing.T) {
+// newCapacityTestService 起一个容量上限极小的媒体面服务，上游固定回 size
+// 字节的 png。返回服务与上游 URL 前缀。
+func newCapacityTestService(t *testing.T, capacity int64, size int) (*ProxyService, string) {
+	t.Helper()
+	payload := bytes.Repeat([]byte("x"), size)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(payload)
+	}))
+	t.Cleanup(upstream.Close)
+	parsed, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("parse upstream url: %v", err)
+	}
 	svc := newService(t.TempDir(), serviceConfig{
-		allowURL:      func(u *url.URL) bool { return true },
-		capacityLimit: 25,
+		cacheSubdir:   defaultCacheSubdir,
+		cacheTTL:      time.Hour,
+		capacityLimit: capacity,
+		client:        upstream.Client(),
+		allowURL:      func(u *url.URL) bool { return u.Host == parsed.Host },
 	})
-	if err := os.MkdirAll(svc.cacheDir, 0o750); err != nil {
-		t.Fatalf("mkdir cache dir: %v", err)
-	}
-	now := time.Now().UTC()
-	writeEntry := func(url string, size int, age time.Duration) string {
-		t.Helper()
-		metaPath := seedCacheMeta(t, svc, url, "image/png")
-		binPath := strings.TrimSuffix(metaPath, ".json") + ".bin"
-		if err := os.WriteFile(binPath, bytes.Repeat([]byte("x"), size), 0o640); err != nil {
-			t.Fatalf("write bin: %v", err)
-		}
-		mtime := now.Add(-age)
-		if err := os.Chtimes(binPath, mtime, mtime); err != nil {
-			t.Fatalf("chtimes: %v", err)
-		}
-		return binPath
-	}
-	oldBin := writeEntry("https://x.test/old.png", 10, 3*time.Hour)
-	midBin := writeEntry("https://x.test/mid.png", 10, 2*time.Hour)
-	freshBin := writeEntry("https://x.test/fresh.png", 10, 0)
-	// meta 损坏的 .bin：发布最早，但 URL 不可得——容量淘汰不动手，它归
-	// mtime 判据（孤儿/损坏清理，>2×TTL）管。
-	corruptJSON := filepath.Join(svc.cacheDir, "corrupt.json")
-	if err := os.WriteFile(corruptJSON, []byte("{broken"), 0o640); err != nil {
-		t.Fatalf("write corrupt meta: %v", err)
-	}
-	corruptBin := filepath.Join(svc.cacheDir, "corrupt.bin")
-	if err := os.WriteFile(corruptBin, bytes.Repeat([]byte("x"), 10), 0o640); err != nil {
-		t.Fatalf("write corrupt bin: %v", err)
-	}
-	stale := now.Add(-4 * time.Hour)
-	if err := os.Chtimes(corruptBin, stale, stale); err != nil {
-		t.Fatalf("chtimes corrupt bin: %v", err)
+	return svc, upstream.URL
+}
+
+// 容量闸长在写入点：水位会越过上限时不缓存、返回 ErrCacheFull，且**不删
+// 任何已落盘条目**——容量机制不再删文件，TTL 内命中的图片不会因容量变破
+// 图（INT-172 R4 方向审计把「扫描期按最旧淘汰」换成了这条准入闸）。
+func TestFetchAndCacheRejectsWhenCapacityExhausted(t *testing.T) {
+	svc, upstream := newCapacityTestService(t, 40, 32)
+	ctx := context.Background()
+
+	first, err := svc.FetchAndCache(ctx, upstream+"/a.png")
+	if err != nil {
+		t.Fatalf("first fetch: %v", err)
 	}
 
-	// 合计（只算可安全淘汰的）30 > 上限 25：corrupt 跳过且不进容量总量，
-	// 淘汰 old 后 20 ≤ 25 即停——mid 与 fresh 保留。
-	svc.sweepExpiredEntries()
+	// 32 已落盘，再要 32 会越过 40。
+	if _, err := svc.FetchAndCache(ctx, upstream+"/b.png"); !errors.Is(err, ErrCacheFull) {
+		t.Fatalf("second fetch err = %v, want ErrCacheFull", err)
+	}
 
-	if _, err := os.Stat(oldBin); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("old bin stat = %v, want 已淘汰", err)
+	// 已落盘条目必须原样在盘上，且仍可命中。
+	if _, err := os.Stat(first.Path); err != nil {
+		t.Fatalf("first entry stat = %v, want 保留（准入闸不删已落盘条目）", err)
 	}
-	oldMeta := strings.TrimSuffix(oldBin, ".bin") + ".json"
-	if _, err := os.Stat(oldMeta); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("%s stat = %v, want 已淘汰", oldMeta, err)
-	}
-	for _, p := range []string{midBin, freshBin} {
-		if _, err := os.Stat(p); err != nil {
-			t.Fatalf("%s 读不到, want 保留（最旧淘汰到上限内即停）", p)
-		}
-	}
-	if _, err := os.Stat(corruptBin); err != nil {
-		t.Fatal("corrupt bin 读不到, want 保留（URL 不可得不参与容量淘汰）")
-	}
-	if _, err := os.Stat(corruptJSON); err != nil {
-		t.Fatal("corrupt meta 读不到, want 保留")
+	if _, ok, err := svc.GetCached(upstream + "/a.png"); err != nil || !ok {
+		t.Fatalf("GetCached = ok:%v err:%v, want 命中", ok, err)
 	}
 }
 
-// 容量口径只算可安全淘汰的字节：meta 缺失的孤儿 .bin（写侧 rename 后被杀、
-// mtime 新，归孤儿判据管）不进容量总量——把它算进去，上限就成了不可满足的
-// 约束，每轮扫描都会把可淘汰的存活条目删到底且永远填不平。
-func TestSweepExpiredEntriesCapacityIgnoresUnreachableBytes(t *testing.T) {
+// 预留计数覆盖并发下载：两次预留各自通过后合并水位仍受上限约束，释放后可
+// 再用——否则一个高并发页面就能把目录推过上限（P2-b 的「并发下载不设限」）。
+func TestReserveCacheBytesCountsConcurrentReservations(t *testing.T) {
+	svc, _ := newCapacityTestService(t, 100, 1)
+
+	first, err := svc.reserveCacheBytes(60)
+	if err != nil {
+		t.Fatalf("first reserve: %v", err)
+	}
+	if _, err := svc.reserveCacheBytes(60); !errors.Is(err, ErrCacheFull) {
+		t.Fatalf("concurrent reserve err = %v, want ErrCacheFull（60+60 > 100）", err)
+	}
+	first.release()
+	if _, err := svc.reserveCacheBytes(60); err != nil {
+		t.Fatalf("reserve after release: %v, want 成功（退还后额度回到 100）", err)
+	}
+}
+
+// 过期扫描删掉条目后要立刻校准水位：不校准，被删字节会一直占着额度，缓存
+// 明明空着却一直拒绝新字节。
+func TestSweepExpiredEntriesRecalibratesCapacity(t *testing.T) {
+	svc, upstream := newCapacityTestService(t, 40, 32)
+	ctx := context.Background()
+
+	if _, err := svc.FetchAndCache(ctx, upstream+"/a.png"); err != nil {
+		t.Fatalf("first fetch: %v", err)
+	}
+	if _, err := svc.FetchAndCache(ctx, upstream+"/b.png"); !errors.Is(err, ErrCacheFull) {
+		t.Fatalf("second fetch err = %v, want ErrCacheFull", err)
+	}
+
+	// 把 a 改成已过期，扫描回收后水位应回到 0。
+	metaPath := svc.metaPath(upstream+"/a.png", "")
+	data, err := os.ReadFile(metaPath)
+	if err != nil {
+		t.Fatalf("read meta: %v", err)
+	}
+	var entry cacheEntry
+	if err := json.Unmarshal(data, &entry); err != nil {
+		t.Fatalf("unmarshal meta: %v", err)
+	}
+	entry.CachedAt = time.Now().UTC().Add(-2 * time.Hour)
+	entry.ExpiresAt = time.Now().UTC().Add(-time.Hour)
+	expired, err := json.Marshal(entry)
+	if err != nil {
+		t.Fatalf("marshal meta: %v", err)
+	}
+	if err := os.WriteFile(metaPath, expired, 0o640); err != nil {
+		t.Fatalf("write meta: %v", err)
+	}
+	svc.SweepExpiredEntries()
+
+	if _, err := svc.FetchAndCache(ctx, upstream+"/b.png"); err != nil {
+		t.Fatalf("fetch after sweep err = %v, want 成功（回收后额度已释放）", err)
+	}
+}
+
+// 截图面不经过容量准入：它是持久资产面，永不删除，上界由张数与探测预算给
+// 出。给它一个形同虚设的上限也必须照常落盘。
+func TestReviewFaceSkipsCapacityAdmission(t *testing.T) {
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(bytes.Repeat([]byte("x"), 64))
+	}))
+	defer upstream.Close()
 	svc := newService(t.TempDir(), serviceConfig{
-		allowURL:      func(u *url.URL) bool { return true },
-		capacityLimit: 100,
+		cacheSubdir:   "review-screenshot-cache",
+		cacheTTL:      time.Hour,
+		capacityLimit: 1, // 形同虚设：截图面不吃这道闸
+		client:        upstream.Client(),
+		allowURL:      allowPublicImageHost,
+		requireHTTPS:  true,
+		imagesOnly:    true,
 	})
-	if err := os.MkdirAll(svc.cacheDir, 0o750); err != nil {
-		t.Fatalf("mkdir cache dir: %v", err)
-	}
-	metaPath := seedCacheMeta(t, svc, "https://x.test/live.png", "image/png")
-	liveBin := strings.TrimSuffix(metaPath, ".json") + ".bin"
-	if err := os.WriteFile(liveBin, bytes.Repeat([]byte("x"), 10), 0o640); err != nil {
-		t.Fatalf("write live bin: %v", err)
-	}
-	// 孤儿 .bin：无 meta，字节远超上限。
-	orphanBin := filepath.Join(svc.cacheDir, "orphan.bin")
-	if err := os.WriteFile(orphanBin, bytes.Repeat([]byte("x"), 200), 0o640); err != nil {
-		t.Fatalf("write orphan bin: %v", err)
-	}
 
-	svc.sweepExpiredEntries()
-
-	if _, err := os.Stat(liveBin); err != nil {
-		t.Fatal("live bin 读不到, want 保留（可淘汰字节低于上限，孤儿字节不进容量口径）")
+	cached, err := svc.FetchAndCache(context.Background(), upstream.URL+"/s.png")
+	if err != nil {
+		t.Fatalf("review face fetch: %v, want 成功（不吃容量准入）", err)
 	}
-	if _, err := os.Stat(metaPath); err != nil {
-		t.Fatal("live meta 读不到, want 保留")
+	if _, err := os.Stat(cached.Path); err != nil {
+		t.Fatalf("cached path stat = %v, want 落盘", err)
 	}
 }

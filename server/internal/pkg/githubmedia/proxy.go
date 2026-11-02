@@ -75,13 +75,11 @@ const (
 	defaultTempFilePattern = "media-*.tmp"
 )
 
-// defaultCacheCapacity 媒体代理面缓存目录的总容量上限（只计可安全淘汰的
-// .bin：meta 可解析出 URL 的条目；meta 缺失/损坏的不进总量也不参与淘汰，
-// 归孤儿/损坏判据回收——这些字节永远扣不掉，算进总量会让上限成为不可满
-// 足的约束，每轮扫描都会把可淘汰的存活条目删到底）。过期扫描只回收「上
-// 游不再可用」的条目，描述反复带新图的部署即使条目都活着也会只增不减——
-// 超出上限时由容量回收按最旧淘汰（见 evictOverCapacity）。单文件上限是
-// defaultMaxCacheBytes，上限至少要容得下几张并行使用中的大文件，1 GiB
+// defaultCacheCapacity 媒体代理面缓存目录的总容量上限（口径：`data` 与
+// 写盘中转字节合计，见 cacheReservation）。它由**写入点准入闸**执行：水位
+// 会越过上限时不缓存、流式直通，而不是删已落盘条目——容量机制不删任何文
+// 件，TTL 内命中的图片不会因容量变破图（INT-172 R4 方向审计）。单文件上限
+// 是 defaultMaxCacheBytes，上限至少要容得下几张并行使用中的大文件，1 GiB
 // 对 NAS 部署是占用与宽容的平衡点。
 const defaultCacheCapacity = 1 << 30
 
@@ -103,6 +101,10 @@ var (
 	ErrBlockedUpstreamAddress    = errors.New("图片地址指向内网或保留地址")
 	ErrEmptyUpstreamMedia        = errors.New("上游返回空内容")
 	ErrMediaTooLarge             = errors.New("图片超过大小上限")
+	// ErrCacheFull 媒体面缓存水位会越过容量上限：该请求不缓存，调用方应流式
+	// 直通（内容类型闸门照旧生效）。与 ErrMediaTooLarge 同一条退路但成因不
+	// 同——后者是单文件超限，前者是目录总额满。
+	ErrCacheFull = errors.New("媒体缓存已达容量上限")
 	// ErrLocalCache 本地截图缓存操作失败（建缓存目录/建临时文件/写盘/改名/
 	// 读缓存元数据）。在产生点打标：service 层只认这个 sentinel 归「截图缓
 	// 存写入失败」类，不再嗅探 *fs.PathError / *os.SyscallError 外壳——网络
@@ -220,9 +222,18 @@ type ProxyService struct {
 	cacheSubdir       string
 	cacheTTL          time.Duration
 	maxCacheEntrySize int64
-	// capacityLimit 媒体代理面的总容量上限（.bin 字节合计）；只在媒体面
-	// 由过期扫描末尾消费（evictOverCapacity），review 截图面永不参与。
+	// capacityLimit 媒体代理面的总容量上限；由写入点准入闸消费（见
+	// cacheReservation），review 截图面永不参与。
 	capacityLimit int64
+
+	// capMu 保护下面三个容量水位字段。capCommitted 是已落盘字节的保守估
+	// 计（只在成功落盘时增加、由目录校准回收），capReserved 是进行中的预
+	// 留；两者相加即水位，偏差方向恒为「多算」——多算只会让准入更早拒绝
+	// （直通），绝不删任何已落盘条目。
+	capMu         sync.Mutex
+	capCommitted  int64
+	capReserved   int64
+	capCalibrated bool
 	allowURL      func(*url.URL) bool
 	// requireHTTPS 只接受 https 上游（截图面）；imagesOnly 只收图片内容。
 	// GitHub 媒体面两者全关：白名单语义 + 图片视频都收，与截图面是两套准入。
@@ -695,96 +706,129 @@ func (s *ProxyService) sweepExpiredEntries() {
 		_ = os.Remove(filepath.Join(s.cacheDir, name))
 	}
 	s.sweepStaleTmpFiles(now)
-	s.evictOverCapacity(entries)
+	// 被删掉的字节要立刻从容量水位里退出来，否则它们会一直占着额度直到
+	// 下一次校准（媒体面准入闸只增不减，见 cacheReservation）。
+	s.recalibrateCacheUsage()
 }
 
-// evictOverCapacity 容量回收：可安全淘汰的 .bin 合计超出 capacityLimit 时
-// 按 mtime 最旧先淘汰，删到上限以内为止。mtime 是发布时间（写盘 rename 的
-// 落定时刻），读路径不 touch 文件——这是「最旧优先」的发布序近似，不是命
-// 中序的真 LRU；命中热度换 mtime 要在每次读上写盘，与「读路径零删除零写
-// 入」的口径冲突，不值得。淘汰只发生在媒体代理面（调用点在
-// sweepExpiredEntries 的面护栏之内）：条目 miss 重下自愈，删了不丢数据；
-// review 截图面是持久资产，永不参与（容量上限字段对它不生效）。
+// 媒体面的容量闸长在写入点，不在扫描里（INT-172 R4 方向审计的结论）。
 //
-// 容量口径是「可安全淘汰的字节」：meta 缺失/损坏、URL 不可得的 .bin 不计
-// 入总量也不动手——它们归孤儿/损坏判据管（mtime 超 2×TTL 回收），且字节
-// 永远扣不掉：把它们算进总量，上限就成了不可满足的约束，每轮扫描都会把
-// 可淘汰的存活条目删到底。不可淘汰的残留是暂态的（单文件上限封顶、超龄
-// 后由前述判据回收），不计入不改变「磁盘占用有界」的长期结论。
+// 曾经的做法是「每 6h 扫一遍目录，按 mtime 最旧淘汰到字节上限以内」。它
+// 有两个改不掉的缺点，而且是同一个机制上不断冒出的反例来源：
+//   - 上限只在低频扫描末尾执行，写入点没有任何判断——两次扫描之间的新增量
+//     无上界（单文件上限 256 MiB、并发下载不设限），缓存目录与 sqlite/
+//     uploads 同卷时瞬时越界就能把数据盘写满。
+//   - 为了凑上限必须删 TTL 内的活条目，而「删了不丢数据」只在回源成功时
+//     成立：上层图片被删/转私有、匿名限流或网络抖动时，原本能命中显示的图
+//     片直接变破图。
 //
-// 与写侧的竞争纪律与过期删除一致：持该 key 下载闸，锁内复核 .bin mtime
-// 未变才删——写侧持同一把闸发布，锁内动手不会抹掉刚 rename 的新 data。
-// 闸等待超时同样跳过（下轮扫描再试），扫描是保洁，不构成请求路径的前置
-// 条件。
-func (s *ProxyService) evictOverCapacity(entries []os.DirEntry) {
-	type sizedBin struct {
-		name  string
-		size  int64
-		mtime time.Time
-		url   string // 空串 = meta 缺失/损坏/URL 不可得，不可安全淘汰
-	}
-	var bins []sizedBin
-	evictable := int64(0)
-	for _, e := range entries {
-		name := e.Name()
-		if !strings.HasSuffix(name, ".bin") {
-			continue
-		}
-		info, err := e.Info()
-		if err != nil {
-			continue
-		}
-		b := sizedBin{name: name, size: info.Size(), mtime: info.ModTime()}
-		metaPath := filepath.Join(s.cacheDir, strings.TrimSuffix(name, ".bin")+".json")
-		if data, err := os.ReadFile(metaPath); err == nil {
-			var entry cacheEntry
-			if json.Unmarshal(data, &entry) == nil {
-				b.url = entry.URL
-			}
-		}
-		if b.url != "" {
-			evictable += b.size
-		}
-		bins = append(bins, b)
-	}
-	if evictable <= s.capacityLimit {
+// 「读路径零删除 + 写侧两步发布」把删除只能放在低频后台扫描里，而「磁盘
+// 任意时刻有界」只能在字节写进磁盘的那一个点执行——删除端怎么调都碰不到
+// 写入端。所以容量机制不再删任何文件，改成写前预留：
+//   - 落盘前按 Content-Length（未知则按单文件上限）预留字节，并发下载也算
+//     在内；预留会超上限就不缓存，返回 ErrCacheFull 由调用方流式直通。
+//   - 水位 = 已落盘（capCommitted）+ 进行中预留（capReserved），只在成功落
+//     盘时增加、由目录校准回收。偏差方向恒为「多算」（同 key 覆盖不扣旧值、
+//     过期扫描刚删的文件要等下次校准才减掉），多算只会让准入更早拒绝（直
+//     通），绝不删任何已落盘条目。
+//   - 校准点：首次准入前与每轮过期扫描末尾，按目录实际字节重算已落盘部分；
+//     进行中的预留不参与校准，不会被覆盖。
+//
+// 口径：只统计 data 与写盘中转（`.bin` + `media-*.tmp`），meta 每条几百字
+// 节、可忽略。
+//
+// 截图面（review-screenshot-cache）不经过这道闸：它是持久资产面，永不删
+// 除，上界由 maxScreenshotsPerPR × 单文件上限给出，见 service 层。
+type cacheReservation struct {
+	s       *ProxyService
+	bytes   int64
+	settled bool
+}
+
+// settle 落盘成功：把预留转成已落盘字节（actual 是实际写入量）。
+func (r *cacheReservation) settle(actual int64) {
+	if r.settled {
 		return
 	}
-	sort.Slice(bins, func(i, j int) bool { return bins[i].mtime.Before(bins[j].mtime) })
-	for _, b := range bins {
-		if evictable <= s.capacityLimit {
-			return
-		}
-		if b.url == "" {
-			continue
-		}
-		gate := s.acquireDownloadLock(b.url)
-		select {
-		case gate.sem <- struct{}{}:
-		case <-time.After(5 * time.Second):
-			s.abandonDownloadLock(b.url, gate)
-			continue
-		}
-		// 锁内复核 mtime：写侧已覆盖（时间变新）就放弃本条，下一轮再看。
-		// 放弃时不从 evictable 里扣减——它的字节仍在盘上，下一轮按新 mtime
-		// 重新排队；保守少删不会把存活条目误删。
-		info, err := os.Stat(filepath.Join(s.cacheDir, b.name))
-		if err != nil || !info.ModTime().Equal(b.mtime) {
-			s.releaseDownloadLock(b.url, gate)
-			continue
-		}
-		// .bin 是容量口径的字节本体：删成功才扣减、才删 meta——meta 是条
-		// 目可达性的事实源，bin 删失败时留着它，下一轮按同一 mtime 重试；
-		// 先删 meta 会把这条变成既不计入容量也不再被尝试的孤儿 .bin，上限
-		// 可能显示「已满足」而磁盘仍超，要等 2×TTL 孤儿判据才回收。删除失
-		// 败（权限、只读挂载、文件被占用）保留计数继续淘汰下一条，本轮仍
-		// 可能把可淘汰字节压回上限内。
-		if err := os.Remove(filepath.Join(s.cacheDir, b.name)); err == nil {
-			evictable -= b.size
-			_ = os.Remove(filepath.Join(s.cacheDir, strings.TrimSuffix(b.name, ".bin")+".json"))
-		}
-		s.releaseDownloadLock(b.url, gate)
+	r.settled = true
+	if actual < 0 {
+		actual = 0
 	}
+	r.s.capMu.Lock()
+	r.s.capReserved -= r.bytes
+	r.s.capCommitted += actual
+	r.s.capMu.Unlock()
+}
+
+// release 未落盘（下载失败、被拒、改名失败）：原样退还预留。
+func (r *cacheReservation) release() {
+	if r.settled {
+		return
+	}
+	r.settled = true
+	r.s.capMu.Lock()
+	r.s.capReserved -= r.bytes
+	r.s.capMu.Unlock()
+}
+
+// reserveCacheBytes 为一次写盘预留 want 字节；水位会越过上限时返回
+// ErrCacheFull。只由媒体面调用。
+func (s *ProxyService) reserveCacheBytes(want int64) (*cacheReservation, error) {
+	if want <= 0 {
+		want = 1
+	}
+	// 首次准入前校准：构造期不扫目录（测试 seed 与扫描会互踩），放这里同样
+	// 只在真正要写盘时付一次 IO。并发首次准入会重复扫一遍，结果收敛。
+	s.capMu.Lock()
+	needCalibrate := !s.capCalibrated
+	s.capMu.Unlock()
+	if needCalibrate {
+		bytes := s.cacheDirBytes()
+		s.capMu.Lock()
+		if !s.capCalibrated {
+			s.capCommitted = bytes
+			s.capCalibrated = true
+		}
+		s.capMu.Unlock()
+	}
+
+	s.capMu.Lock()
+	defer s.capMu.Unlock()
+	if s.capCommitted+s.capReserved+want > s.capacityLimit {
+		return nil, ErrCacheFull
+	}
+	s.capReserved += want
+	return &cacheReservation{s: s, bytes: want}, nil
+}
+
+// recalibrateCacheUsage 按目录实际字节重算已落盘水位（不改进行中的预留）。
+// 过期扫描删完文件后调用：不清零会让被删字节永久占着额度。
+func (s *ProxyService) recalibrateCacheUsage() {
+	bytes := s.cacheDirBytes()
+	s.capMu.Lock()
+	s.capCommitted = bytes
+	s.capCalibrated = true
+	s.capMu.Unlock()
+}
+
+// cacheDirBytes 目录里占据容量的字节合计（data 与写盘中转）。
+func (s *ProxyService) cacheDirBytes() int64 {
+	entries, err := os.ReadDir(s.cacheDir)
+	if err != nil {
+		return 0
+	}
+	var total int64
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasSuffix(name, ".bin") &&
+			!(strings.HasPrefix(name, "media-") && strings.HasSuffix(name, ".tmp")) {
+			continue
+		}
+		if info, err := e.Info(); err == nil {
+			total += info.Size()
+		}
+	}
+	return total
 }
 
 // sweepStaleTmpFiles 回收 CreateTemp 的 media-*.tmp 写盘中转：进程被杀/机器
@@ -1361,6 +1405,25 @@ func (s *ProxyService) fetchAndCache(ctx context.Context, rawURL, bearer, scope 
 		return nil, ErrMediaTooLarge
 	}
 
+	// 容量准入（只在媒体面）：写 tmp 之前预留字节，并发下载也算在内。满了
+	// 不缓存，返回 ErrCacheFull 由调用方流式直通——容量机制不删已落盘条目，
+	// 所以这里拒绝的一定是新字节，不会造成命中变破图。分块响应不知道长度，
+	// 按单文件上限预留，落盘后按实际大小结算。
+	var reservation *cacheReservation
+	if s.cacheSubdir == defaultCacheSubdir {
+		want := resp.ContentLength
+		if want <= 0 {
+			want = s.maxCacheEntrySize
+		}
+		var reserveErr error
+		if reservation, reserveErr = s.reserveCacheBytes(want); reserveErr != nil {
+			return nil, reserveErr
+		}
+		// 未落盘的路径（下载失败、改名失败）原样退还预留；settle 过的调用
+		// 是空操作。
+		defer reservation.release()
+	}
+
 	tempFile, err := os.CreateTemp(s.cacheDir, defaultTempFilePattern)
 	if err != nil {
 		return nil, markLocalCacheErr(err)
@@ -1410,6 +1473,11 @@ func (s *ProxyService) fetchAndCache(ctx context.Context, rawURL, bearer, scope 
 
 	if err := os.Rename(tempFile.Name(), cachePath); err != nil {
 		return nil, markLocalCacheErr(err) // *os.LinkError 也统一打标
+	}
+	// data 已落定：预留转成已落盘字节（同 key 覆盖不扣旧值，偏差方向是多
+	// 算，下次目录校准收敛）。
+	if reservation != nil {
+		reservation.settle(written)
 	}
 	metaBytes, err := json.Marshal(entry)
 	if err != nil {

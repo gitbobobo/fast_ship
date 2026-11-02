@@ -438,3 +438,39 @@ func TestGitHubMediaProxyServesAfterCacheFileEvictedBetweenHitAndOpen(t *testing
 		t.Fatalf("upstream hits = %d, want %d（回退必须真的回源）", upstreamTransport.hits.Load(), firstHits+1)
 	}
 }
+
+// 媒体面缓存水位越过容量上限（ErrCacheFull）时与单文件超限走同一条退路：
+// ProxyPass 流式直通，客户端照常拿到字节，只是不缓存。容量机制不删已落盘
+// 条目，所以被拒的一定是新字节，不会把命中变成破图。
+func TestGitHubMediaProxyFallsBackToPassthroughWhenCacheFull(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write([]byte("png-bytes"))
+	}))
+	defer upstream.Close()
+	target, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("parse upstream url: %v", err)
+	}
+	upstreamTransport := &rewriteToUpstreamTransport{target: target}
+	// 容量上限 1 字节：任何下载都过不了准入闸。
+	svc := githubmedia.NewProxyService(t.TempDir(),
+		githubmedia.WithHTTPTransport(upstreamTransport),
+		githubmedia.WithCacheCapacity(1))
+
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.GET(githubmedia.ProxyPath, NewGitHubMediaProxyHandler(svc).Proxy)
+
+	req := httptest.NewRequest(http.MethodGet, githubmedia.ProxyPath+"?url="+
+		url.QueryEscape("http://github.com/user-attachments/assets/full.png"), nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d body = %s, want 200（直通兜底）", rec.Code, rec.Body.String())
+	}
+	if got := rec.Body.String(); got != "png-bytes" {
+		t.Fatalf("body = %q, want 直通的字节", got)
+	}
+}

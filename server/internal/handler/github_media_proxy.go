@@ -77,9 +77,11 @@ func (h *GitHubMediaProxyHandler) Proxy(c *gin.Context) {
 		return
 	}
 
-	// 本地超限（拉到的图超过缓存上限）转 ProxyPass 兜底，把流式响应直接回给
-	// 客户端；上游自己回的 413 不是本地超限，走下面的常规错误分支。
-	if errors.Is(err, githubmedia.ErrMediaTooLarge) {
+	// 本地拒绝缓存两种成因走同一条退路——ProxyPass 兜底，把流式响应直接回
+	// 给客户端：单文件超限（ErrMediaTooLarge）、媒体面缓存水位会越过容量上
+	// 限（ErrCacheFull，容量机制不删已落盘条目，所以只拒新字节）。上游自己
+	// 回的 413 不是本地拒绝，走下面的常规错误分支。
+	if errors.Is(err, githubmedia.ErrMediaTooLarge) || errors.Is(err, githubmedia.ErrCacheFull) {
 		resp, passErr := h.service.ProxyPass(c.Request.Context(), rawURL, "", false)
 		if passErr != nil {
 			writeMediaProxyError(c, passErr)
