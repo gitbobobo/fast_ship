@@ -75,11 +75,14 @@ const (
 	defaultTempFilePattern = "media-*.tmp"
 )
 
-// defaultCacheCapacity 媒体代理面缓存目录的总容量上限（.bin 字节合计，
-// 含孤儿）。过期扫描只回收「上游不再可用」的条目，描述反复带新图的部署
-// 即使条目都活着也会只增不减——超出上限时由容量回收按最旧淘汰（见
-// evictOverCapacity）。单文件上限是 defaultMaxCacheBytes，上限至少要容得
-// 下几张并行使用中的大文件，1 GiB 对 NAS 部署是占用与宽容的平衡点。
+// defaultCacheCapacity 媒体代理面缓存目录的总容量上限（只计可安全淘汰的
+// .bin：meta 可解析出 URL 的条目；meta 缺失/损坏的不进总量也不参与淘汰，
+// 归孤儿/损坏判据回收——这些字节永远扣不掉，算进总量会让上限成为不可满
+// 足的约束，每轮扫描都会把可淘汰的存活条目删到底）。过期扫描只回收「上
+// 游不再可用」的条目，描述反复带新图的部署即使条目都活着也会只增不减——
+// 超出上限时由容量回收按最旧淘汰（见 evictOverCapacity）。单文件上限是
+// defaultMaxCacheBytes，上限至少要容得下几张并行使用中的大文件，1 GiB
+// 对 NAS 部署是占用与宽容的平衡点。
 const defaultCacheCapacity = 1 << 30
 
 var (
@@ -770,10 +773,15 @@ func (s *ProxyService) evictOverCapacity(entries []os.DirEntry) {
 			s.releaseDownloadLock(b.url, gate)
 			continue
 		}
-		_ = os.Remove(filepath.Join(s.cacheDir, b.name))
+		// .bin 是容量口径的字节本体：删成功才扣减；删除失败（权限、只读
+		// 挂载、文件被占用）保留计数继续淘汰下一条，本轮仍可能把可淘汰字
+		// 节压回上限内。.bin 删成而 .json 删失败留下无 bin 的孤儿 meta，
+		// 体积极小且重下时被同键覆盖，可接受。
+		if err := os.Remove(filepath.Join(s.cacheDir, b.name)); err == nil {
+			evictable -= b.size
+		}
 		_ = os.Remove(filepath.Join(s.cacheDir, strings.TrimSuffix(b.name, ".bin")+".json"))
 		s.releaseDownloadLock(b.url, gate)
-		evictable -= b.size
 	}
 }
 

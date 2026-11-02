@@ -562,8 +562,10 @@ var screenshotProbeAttemptTimeout = 10 * time.Second
 
 // screenshotProbeBudget 单次探测允许拉进缓存的总字节预算：时间预算管不住
 // 「快速回源的大图」——图床很快时 30s 内能下进几十张大文件，而 review 截
-// 图面是持久资产（永不回收），字节必须有自己的闸。超过预算按「拉不到」收
-// 敛（下轮同步再试，已进缓存的条目命中不重下，每轮新下载量有界）。
+// 图面是持久资产（永不回收），字节必须有自己的闸。只结算新下载（命中不占
+// 预算，见 probeScreenshots），下载后结算：触发那张已完整落盘，单轮新下
+// 载实际上界是预算 + 单文件上限（那张下一轮命中不重下，不白拉）。超过预
+// 算时本轮停在触发的那张，已成功的照常计入指纹；剩下的引用下轮继续。
 const screenshotProbeBudget = 256 << 20
 
 // screenshotProbeResult 探测三态：ready 至少一张可下载；none 全部「不是图」
