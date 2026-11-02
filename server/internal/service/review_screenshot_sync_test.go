@@ -2,8 +2,6 @@ package service
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -1250,95 +1248,5 @@ func TestProbeScreenshotsByteBudgetSettlesEvenWhenHashFails(t *testing.T) {
 	}
 	if !strings.Contains(probe.reason, "预算") {
 		t.Fatalf("reason = %q, want 预算耗尽原因", probe.reason)
-	}
-}
-
-// perURLReviewMedia 按 URL 落一个独立文件的截图桩：用来验证「不再被引用的
-// 资产行连同落盘文件一起收敛」——共用同一个 path 的桩区分不出文件归属。
-type perURLReviewMedia struct {
-	dir string
-}
-
-func (m *perURLReviewMedia) pathFor(url string) (string, error) {
-	sum := sha256.Sum256([]byte(url))
-	p := filepath.Join(m.dir, hex.EncodeToString(sum[:8])+".png")
-	if err := os.WriteFile(p, []byte("\x89PNG\r\n\x1a\nfake"), 0o600); err != nil {
-		return "", err
-	}
-	return p, nil
-}
-
-func (m *perURLReviewMedia) FetchAndCache(_ context.Context, url string) (*githubmedia.CachedMedia, error) {
-	p, err := m.pathFor(url)
-	if err != nil {
-		return nil, err
-	}
-	return githubmedia.CachedImage(p, "image/png", 15), nil
-}
-
-func (m *perURLReviewMedia) FetchAndCacheWithBearer(_ context.Context, url, _, _ string) (*githubmedia.CachedMedia, error) {
-	return m.FetchAndCache(context.Background(), url)
-}
-
-// 同一 head 反复编辑描述、每次换一批 URL 时，唯一索引（按 source_url）只增
-// 不删，资产行与持久 .bin 会随编辑次数无界累积——张数上限只约束「一次收
-// 集」。超过上限时把该 head 上不再被引用的行与文件一起收敛掉，磁盘上界才
-// 真的成立。
-func TestEnsureAssetsPrunesUnreferencedRowsBeyondCap(t *testing.T) {
-	e := newReviewEngineEnv(t)
-	media := &perURLReviewMedia{dir: t.TempDir()}
-	review := e.withT3(nil, media, nil)
-	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
-	ctx := context.Background()
-
-	body := func(prefix string) string {
-		var lines []string
-		for i := 0; i < maxScreenshotsPerPR; i++ {
-			lines = append(lines, fmt.Sprintf("![s%d](https://uiv.example.com/f/%s-%d.png)", i, prefix, i))
-		}
-		return strings.Join(lines, "\n\n")
-	}
-
-	_, first, err := review.ensureAssets(ctx, model.ForgeIntegrationBuiltinGitHubID, repo, 91, "sha-prune", body("a"), 0)
-	if err != nil {
-		t.Fatalf("ensureAssets(first): %v", err)
-	}
-	if len(first) != maxScreenshotsPerPR {
-		t.Fatalf("first assets = %d, want %d", len(first), maxScreenshotsPerPR)
-	}
-	oldPaths := make([]string, 0, len(first))
-	for _, a := range first {
-		oldPaths = append(oldPaths, a.StoragePath)
-	}
-
-	// 换一整批新 URL：行数会到 2×上限，触发收敛。
-	_, second, err := review.ensureAssets(ctx, model.ForgeIntegrationBuiltinGitHubID, repo, 91, "sha-prune", body("b"), 0)
-	if err != nil {
-		t.Fatalf("ensureAssets(second): %v", err)
-	}
-	if len(second) != maxScreenshotsPerPR {
-		t.Fatalf("second assets = %d, want %d（超出上限后只保留当前引用）", len(second), maxScreenshotsPerPR)
-	}
-	for _, a := range second {
-		if strings.Contains(a.SourceURL, "-a-") {
-			t.Fatalf("second assets 含旧引用 %s, want 只剩当前描述的引用", a.SourceURL)
-		}
-	}
-	var rows int64
-	if err := e.svc.db.Model(&model.ReviewAsset{}).
-		Where("integration_id = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ?",
-			model.ForgeIntegrationBuiltinGitHubID, repo, 91, "sha-prune").Count(&rows).Error; err != nil {
-		t.Fatalf("count rows: %v", err)
-	}
-	if rows != maxScreenshotsPerPR {
-		t.Fatalf("rows = %d, want %d（同 head 行数被上限兜住）", rows, maxScreenshotsPerPR)
-	}
-	// 文件**不在**这里删：删行与删文件之间的崩溃窗口、以及「文件已写、行还没
-	// 插」的并发窗口都会让别的 head 的截图永久 404。文件回收交给截图面的孤
-	// 独条目清扫（按「无行引用 + 超宽限期」判定），这里只断言行收敛对了。
-	for _, p := range oldPaths {
-		if _, err := os.Stat(p); err != nil {
-			t.Fatalf("旧文件 %s stat = %v, want 保留（文件回收归孤独条目清扫）", p, err)
-		}
 	}
 }

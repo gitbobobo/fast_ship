@@ -278,12 +278,7 @@ type ProxyService struct {
 	// capCalMu 校准单飞：并发首次准入只做一次目录扫描，其余等待复用结果。
 	capCalMu sync.Mutex
 
-	// livePathSource 仍被上层数据行引用的落盘路径集合（截图面用）。非媒体面
-	// 的条目是持久资产，正常路径永不删除，但资产行被收敛或进程在「删行」与
-	// 「删文件」之间崩溃会留下没人引用的文件——那面没有 TTL 清扫，不回收就
-	// 永久占盘。由 main.go 装配注入（DB 在 service 层）。
-	livePathSource func() (map[string]struct{}, error)
-	allowURL       func(*url.URL) bool
+	allowURL func(*url.URL) bool
 	// requireHTTPS 只接受 https 上游（截图面）；imagesOnly 只收图片内容。
 	// GitHub 媒体面两者全关：白名单语义 + 图片视频都收，与截图面是两套准入。
 	requireHTTPS bool
@@ -975,55 +970,6 @@ func (s *ProxyService) cacheDirBytes() (int64, bool) {
 	return total, complete
 }
 
-// SetLivePathSource 注入「仍被数据行引用的落盘路径」来源（截图面用）。
-// 传 nil 关闭该面的孤独文件回收。
-func (s *ProxyService) SetLivePathSource(fn func() (map[string]struct{}, error)) {
-	s.livePathSource = fn
-}
-
-// orphanEntryGrace 孤独条目的回收宽限：条目先落盘、后插行（ensureAssets 的
-// 下载与落账是两步），宽限期兜住这段窗口，不然并发写同一 URL 的另一个 head
-// 刚写完文件、还没插行时就被判成孤儿删掉，行留下来却指向不存在的文件。
-const orphanEntryGrace = 30 * time.Minute
-
-// sweepOrphanEntries 回收该面里**没有任何数据行引用**且超过宽限期的条目。
-// 只给非媒体面用（媒体面由 TTL 扫描 + 准入闸管，.bin 的回收判据完全不同），
-// 且需要 SetLivePathSource 注入存活集合；没注入就什么都不做。
-//
-// 与 fetchAndCache 的两步发布（rename data → WriteFile meta）配合：宽限期远
-// 大于一次写盘，正在写的条目 mtime 是新的，不会命中。
-func (s *ProxyService) sweepOrphanEntries(now time.Time) {
-	if s.cacheSubdir == defaultCacheSubdir || s.livePathSource == nil {
-		return
-	}
-	live, err := s.livePathSource()
-	if err != nil {
-		return // 存活集合读不到就不删：宁可留着也不误删证据
-	}
-	entries, err := os.ReadDir(s.cacheDir)
-	if err != nil {
-		return
-	}
-	for _, e := range entries {
-		name := e.Name()
-		if !strings.HasSuffix(name, ".bin") && !strings.HasSuffix(name, ".json") {
-			continue
-		}
-		binPath := filepath.Join(s.cacheDir, strings.TrimSuffix(name, ".json")+".bin")
-		if _, ok := live[binPath]; ok {
-			continue
-		}
-		info, err := e.Info()
-		if err != nil || now.Sub(info.ModTime()) < orphanEntryGrace {
-			continue
-		}
-		// data 与 meta 一起删：只删 data 会留下一个 meta 永远指向不存在的
-		// 文件（读取按 miss/兜底处理，但字节永远不回）。
-		_ = os.Remove(binPath)
-		_ = os.Remove(strings.TrimSuffix(binPath, ".bin") + ".json")
-	}
-}
-
 // sweepStaleTmpFiles 回收 CreateTemp 的 media-*.tmp 写盘中转：进程被杀/机器
 // 重启打断的下载会留下最多 maxCacheEntrySize 的临时文件。只碰 .tmp，不触碰
 // .bin/.json——review 截图面的目录同时是持久存储（见 main.go），它的过期
@@ -1045,7 +991,6 @@ func (s *ProxyService) sweepStaleTmpFiles(now time.Time) {
 		}
 		_ = os.Remove(filepath.Join(s.cacheDir, name))
 	}
-	s.sweepOrphanEntries(now)
 }
 
 // restoreGoneBin 把隔离的旧字节原子放回 binPath。os.Link 不会覆盖已存在的
