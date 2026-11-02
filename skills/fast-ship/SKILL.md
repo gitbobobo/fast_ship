@@ -103,7 +103,7 @@ Content-Type: application/json; charset=utf-8
 
 1. `GET /api/projects`，确定 `project_id`。
 2. 打标前先 `GET /api/projects/{id}/issues/repo-labels`。项目没配 GitHub 仓库或标签为空时，改 `GET /api/projects/{id}/issues/filter-options`。
-3. `POST /api/projects/{id}/issues` 创建。后续路径只用响应里的 `id`（UUID）。给用户的页面是 `{base_url}/projects/{project_id}/issues/{id}`。
+3. `POST /api/projects/{id}/issues` 创建。后续路径只用响应里的 `id`（UUID）。给用户的页面是 `{base_url}/projects/{project_id}/issues/{id}`。**建完立刻 `GET /api/issues/{id}` 回读**，按「请求编码」核对标题与正文没有 `\uFFFD`——写入方自己看不出乱码时，回读是唯一防线。
 4. 要打标就 `PUT /api/issues/{iid}`，标签名必须已经存在。不要靠创建请求里的 `workflow_status` 推进进度。
 5. 推进用 `PUT /api/issues/{iid}/internal-meta`，值为 `todo`、`in_progress` 或 `done`。
 6. 查一条用 `GET /api/issues/{iid}`。列表用 `GET /api/projects/{id}/issues`。
@@ -187,9 +187,12 @@ spec 的 security 经常同时写 JWT 和 API Key，真正的拒绝在 handler �
 
 完成总结写给普通人看，两段就够：之前怎样，现在怎样。不列文件，不贴 commit SHA，不写测试清单。改动还没落到能感知的结果上，就先别写「现在」。
 
-### 请求编码
+### 请求编码（写操作硬性规则）
 
-请求体写成 UTF-8 JSON 文件，用脚本的 `body.json` 传入。不要在 shell 里拼接中文。
+- 请求体一律写成 UTF-8 JSON 文件，用脚本的 `body.json` 位置参数传入；标题、正文、路径里的中文等任何非 ASCII 都不进命令行参数。
+- **Windows / CP936 环境尤其危险**：cmd、PowerShell 会把内联中文按本地代码页转换，UTF-8 字节被二次解码后写进库里的就是 `U+FFFD`（`\uFFFD`）加残留 GBK 字节，原文不可逆。PC 环境上这条没有例外。
+- **每次写操作都要回读校验**：加 `--verify`（或紧接一次 GET），确认回读的标题与正文是正常中文、不含 `\uFFFD`、不含 `??` 之类替换痕迹。只看 `code:0 success` 不够——服务端照收替换字符，照样返回成功。
+- 回读发现乱码就当场按原文（PR 审查正文、GitHub issue 等原始 UTF-8 来源）重建，不要断言「只是终端显示问题」：写进库的替换字符不会因为换个终端就恢复。
 
 ### Breaking Changes
 
