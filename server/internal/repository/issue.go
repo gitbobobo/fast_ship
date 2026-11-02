@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"context"
 	"errors"
 	"strconv"
 	"strings"
@@ -31,6 +32,14 @@ func (r *IssueRepository) Transaction(fc func(tx *gorm.DB) error) error {
 	return r.db.Transaction(fc)
 }
 
+// WithContext 返回绑定 ctx 的仓库视图：Transaction / 查询的借连接等待会随 ctx 取消。
+func (r *IssueRepository) WithContext(ctx context.Context) *IssueRepository {
+	if r == nil || ctx == nil {
+		return r
+	}
+	return &IssueRepository{db: r.db.WithContext(ctx)}
+}
+
 func (r *IssueRepository) Save(issue *model.Issue) error {
 	return r.db.Save(issue).Error
 }
@@ -42,6 +51,22 @@ func (r *IssueRepository) SaveTx(tx *gorm.DB, issue *model.Issue) error {
 // TouchUpdatedAt 仅刷新某个 issue 的 updated_at，用于在不改动主表业务字段时反映状态变更。
 func (r *IssueRepository) TouchUpdatedAt(tx *gorm.DB, id string, at time.Time) error {
 	return tx.Model(&model.Issue{}).Where("id = ?", id).Update("updated_at", at).Error
+}
+
+// BatchCloseInternalTx 把指定内部 Issue 一次更新为 closed/completed。
+// ids 为空时不发 SQL（避免 IN ()）。
+func (r *IssueRepository) BatchCloseInternalTx(tx *gorm.DB, ids []string, closedAt time.Time) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	return tx.Model(&model.Issue{}).
+		Where("id IN ? AND source = ?", ids, model.IssueSourceInternal).
+		Updates(map[string]any{
+			"state":        model.IssueStateClosed,
+			"state_reason": "completed",
+			"closed_at":    closedAt,
+			"updated_at":   closedAt,
+		}).Error
 }
 
 func (r *IssueRepository) FindByID(id string) (*model.Issue, error) {

@@ -59,10 +59,18 @@ func (r *IssueRecommendationRepository) ReplaceDependenciesTx(tx *gorm.DB, issue
 
 // DeleteTx 删除推荐行及其依赖行（依赖行外键指向 issues，不随推荐行级联，需显式删）。
 func (r *IssueRecommendationRepository) DeleteTx(tx *gorm.DB, issueID string) error {
-	if err := tx.Where("issue_id = ?", issueID).Delete(&model.RecommendationDependency{}).Error; err != nil {
+	return r.DeleteByIssueIDsTx(tx, []string{issueID})
+}
+
+// DeleteByIssueIDsTx 按 issue_id 批量删除推荐行及其依赖行。ids 为空时不发 SQL。
+func (r *IssueRecommendationRepository) DeleteByIssueIDsTx(tx *gorm.DB, issueIDs []string) error {
+	if len(issueIDs) == 0 {
+		return nil
+	}
+	if err := tx.Where("issue_id IN ?", issueIDs).Delete(&model.RecommendationDependency{}).Error; err != nil {
 		return err
 	}
-	return tx.Where("issue_id = ?", issueID).Delete(&model.IssueRecommendation{}).Error
+	return tx.Where("issue_id IN ?", issueIDs).Delete(&model.IssueRecommendation{}).Error
 }
 
 // DeferTx 把推荐行置为延后态：写 deferred_at/defer_note 并刷新 updated_at；重复调用覆盖备注。

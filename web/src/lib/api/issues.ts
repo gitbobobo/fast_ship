@@ -34,6 +34,9 @@ interface BatchCloseDoneRequest {
   source?: "internal" | "github";
 }
 
+/** 服务端 30s 停发新的 GitHub PATCH，之后还要串行落库；60s 给落库留余量。 */
+const BATCH_CLOSE_TIMEOUT_MS = 60_000;
+
 /** 契约名为 IssueBatchResult。 */
 type BatchCloseDoneResponse = Schemas["IssueBatchResult"];
 
@@ -81,7 +84,10 @@ export const issueApi = {
 
   batchCloseDone: (projectId: string, data: BatchCloseDoneRequest = {}) =>
     api
-      .post(`projects/${projectId}/issues/batch-close`, { json: data })
+      .post(`projects/${projectId}/issues/batch-close`, {
+        json: data,
+        timeout: BATCH_CLOSE_TIMEOUT_MS,
+      })
       .json<ApiResponse<BatchCloseDoneResponse>>(),
 
   filterOptions: (projectId: string) =>

@@ -142,7 +142,7 @@ func (h *IssueHandler) BatchCloseDone(c *gin.Context) {
 		return
 	}
 
-	result, err := h.issueService.BatchCloseDoneIssues(projectID, userID, string(source))
+	result, err := h.issueService.BatchCloseDoneIssues(c.Request.Context(), projectID, userID, string(source))
 	if err != nil {
 		middleware.HandleAppError(c, err)
 		return

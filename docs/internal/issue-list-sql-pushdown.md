@@ -42,7 +42,7 @@ service 层（`issue_list.go`）只做映射与编排：`List` 先 `CountFiltere
   索引），顺序可能与迁移前 Go 不稳定排序（`sort.Slice`）给出的顺序不同——两者都满足
   排序键，不构成行为回归；补唯一键是为了 LIMIT/OFFSET 分页在跨请求时稳定不重不漏。
 - **page 超过末页**：返回空切片、total 不变。
-- **BatchCloseDoneIssues**：仍按 open+done 筛选，超 200 条返回 `ErrBatchCloseTooMany`。
+- **BatchCloseDoneIssues**：仍按 open+done 筛选，超 200 条返回 `ErrBatchCloseTooMany`。关闭本身（INT-174）走请求 context + 30s 整批截止：内部来源单事务批量改状态，GitHub 来源 `UpdateIssue` 并发度 4、本地 upsert 串行。
 
 ## JSON 列与 json_valid 防护
 

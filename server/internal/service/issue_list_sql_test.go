@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"testing"
@@ -588,7 +589,7 @@ func TestIssueServiceBatchCloseDoneIssues_ClosesInternalDoneIssues(t *testing.T)
 			workflow: listFixtureStatus(model.IssueWorkflowStatusDone)},
 	})
 
-	resp, err := svc.issueService.BatchCloseDoneIssues(project.ID, user.ID, "")
+	resp, err := svc.issueService.BatchCloseDoneIssues(context.Background(), project.ID, user.ID, "")
 	if err != nil {
 		t.Fatalf("batch close: %v", err)
 	}
@@ -633,7 +634,7 @@ func TestIssueServiceBatchCloseDoneIssues_TooManyIssues(t *testing.T) {
 	}
 	seedListFixtureIssues(t, svc, project.ID, seeds)
 
-	_, err := svc.issueService.BatchCloseDoneIssues(project.ID, user.ID, "")
+	_, err := svc.issueService.BatchCloseDoneIssues(context.Background(), project.ID, user.ID, "")
 	if err == nil {
 		t.Fatalf("expected ErrBatchCloseTooMany, got nil")
 	}
