@@ -221,6 +221,10 @@ type PassThroughResponse struct {
 //
 // 只有「响应体还没被读」的拒绝点能这样交接：写入过程中才发现超限的那条路
 // 走不到这里（body 已被消费），仍返回裸 ErrMediaTooLarge 由调用方重新直通。
+//
+// **契约只对媒体面生效**：拿到 PassthroughError 的调用方必须关闭 Response.Body
+// 并将其写回客户端（媒体面是 handler）。截图面的调用方是 service 层，它只把
+// 错误往上抛，所以截图面这两条拒绝仍返回裸错误、由 fetchAndCache 自己关。
 type PassthroughError struct {
 	Err      error
 	Response *PassThroughResponse
@@ -1525,9 +1529,15 @@ func (s *ProxyService) fetchAndCache(ctx context.Context, rawURL, bearer, scope 
 	// 超限，交给下面的 io.LimitReader + written 复核兜底。
 	if contentLength := resp.ContentLength; contentLength > s.maxCacheEntrySize {
 		// 响应体还没读，可以整份交回调用方直通：重新 ProxyPass 会把同一个
-		// 超限附件再下一次上游。
-		bodyHandedOff = true
-		return nil, &PassthroughError{Err: ErrMediaTooLarge, Response: s.passThroughOf(resp, contentType)}
+		// 超限附件再下一次上游。**只对媒体面**这样做——PassthroughError 的
+		// 契约是「调用方负责关闭并回包」，媒体面调用方是 handler；截图面的
+		// 调用方是 service 层，它只把错误往上抛，交出去的 body 永远没人关
+		// （连接与缓冲泄漏）。
+		if s.cacheSubdir == defaultCacheSubdir {
+			bodyHandedOff = true
+			return nil, &PassthroughError{Err: ErrMediaTooLarge, Response: s.passThroughOf(resp, contentType)}
+		}
+		return nil, ErrMediaTooLarge
 	}
 
 	// 容量准入（只在媒体面）：写 tmp 之前预留字节，并发下载也算在内。满了

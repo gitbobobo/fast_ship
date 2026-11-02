@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"bytes"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -449,9 +450,12 @@ func TestGitHubMediaProxyRefetchesAfterCacheFileDeleted(t *testing.T) {
 // 必须先真的把水位顶满（两张 32 字节 + 上限 64），否则走的是「中途被拒 →
 // 复用已打开响应」那条分支——两条分支都写 200，只有上游命中次数能区分。
 func TestGitHubMediaProxyFallsBackToPassthroughWhenCacheFull(t *testing.T) {
+	// 载荷必须是注释里说的 32 字节：水位按实际落盘字节计，写短了上限 64 就
+	// 永远顶不满，第三张会走正常缓存路径，「预检拒绝」根本没被覆盖。
+	payload := bytes.Repeat([]byte("p"), 32)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/png")
-		_, _ = w.Write([]byte("png-bytes"))
+		_, _ = w.Write(payload)
 	}))
 	defer upstream.Close()
 	target, err := url.Parse(upstream.URL)
@@ -490,11 +494,21 @@ func TestGitHubMediaProxyFallsBackToPassthroughWhenCacheFull(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("code = %d body = %s, want 200（直通兜底）", rec.Code, rec.Body.String())
 	}
-	if got := rec.Body.String(); got != "png-bytes" {
-		t.Fatalf("body = %q, want 直通的字节", got)
+	if got := len(rec.Body.String()); got != 32 {
+		t.Fatalf("body len = %d, want 32（直通的字节）", got)
 	}
 	if got := upstreamTransport.hits.Load(); got != 3 {
 		t.Fatalf("upstream hits = %d, want 3（满容量预检不回源，只直通一次）", got)
+	}
+
+	// 再请求同一 URL：被预检拒绝的字节没有落盘，所以不能命中缓存，仍要直通
+	// （hits 再 +1）。这条才真正区分「预检拒绝」与「其实缓存住了」——两者都
+	// 回 200、命中次数也都只是第三次，只有第四次请求能把它们分开。
+	if rec := get("c.png"); rec.Code != http.StatusOK {
+		t.Fatalf("repeat code = %d, want 200", rec.Code)
+	}
+	if got := upstreamTransport.hits.Load(); got != 4 {
+		t.Fatalf("upstream hits = %d, want 4（预检拒绝的字节未落盘，重复请求仍直通）", got)
 	}
 }
 

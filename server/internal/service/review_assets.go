@@ -546,7 +546,64 @@ func (s *ReviewService) ensureAssets(ctx context.Context, integrationID, repo st
 		integrationID, repo, prNumber, headSHA).Order("position ASC").Find(&assets).Error; err != nil {
 		return "", nil, errs.ErrInternal
 	}
-	return fingerprint, assets, nil
+	return fingerprint, s.pruneUnreferencedAssets(integrationID, repo, prNumber, headSHA, refs, assets), nil
+}
+
+// pruneUnreferencedAssets 单 head 资产行的容量收敛：唯一索引按
+// source_url 去重，**只增不删**——同一 head 上反复编辑 PR 描述、每次换一批
+// 图片 URL，就会为同一个 head 累积任意多行资产与持久 `.bin`，而张数上限只
+// 约束「一次收集」，兜不住这种累积。
+//
+// 只在行数超过 maxScreenshotsPerPR 时动手（正常情况下不动，避免无谓的删行
+// 与可能误伤在途视觉运行的资产）：删掉该 head 上**当前描述不再引用**的行，
+// 删完保留数 = 当前引用数 ≤ 上限。文件只在没有任何资产行再引用它时才删——
+// 同一 URL 在不同 head 间共享同一份缓存字节，删早了会让别的 head 的历史截
+// 图永久 404。
+func (s *ReviewService) pruneUnreferencedAssets(integrationID, repo string, prNumber int, headSHA string, refs []screenshotRef, assets []model.ReviewAsset) []model.ReviewAsset {
+	if len(assets) <= maxScreenshotsPerPR {
+		return assets
+	}
+	keep := make(map[string]struct{}, len(refs))
+	for _, ref := range refs {
+		keep[ref.URL] = struct{}{}
+	}
+	var stale []model.ReviewAsset
+	kept := make([]model.ReviewAsset, 0, len(assets))
+	for _, a := range assets {
+		if _, ok := keep[a.SourceURL]; ok {
+			kept = append(kept, a)
+			continue
+		}
+		stale = append(stale, a)
+	}
+	if len(stale) == 0 {
+		return assets
+	}
+	ids := make([]string, 0, len(stale))
+	for _, a := range stale {
+		ids = append(ids, a.ID)
+	}
+	if err := s.db.Where("id IN ?", ids).Delete(&model.ReviewAsset{}).Error; err != nil {
+		// 清不掉就原样返回：行留着只占几行 DB，不影响本轮落账，下次再试。
+		return assets
+	}
+	for _, a := range stale {
+		if a.StoragePath == "" {
+			continue
+		}
+		var refsLeft int64
+		if err := s.db.Model(&model.ReviewAsset{}).Where("storage_path = ?", a.StoragePath).Count(&refsLeft).Error; err != nil {
+			continue
+		}
+		if refsLeft > 0 {
+			continue
+		}
+		if err := os.Remove(a.StoragePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			s.logger.Warn("审查截图资产文件清理失败",
+				zap.String("path", a.StoragePath), zap.Error(err))
+		}
+	}
+	return kept
 }
 
 // screenshotProbeTimeout 截图探测的总时限。探测跑在共享同步循环里，图床挂死

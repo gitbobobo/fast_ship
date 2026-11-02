@@ -975,3 +975,33 @@ func TestFetchAndCacheMediaTooLargeReusesUpstreamResponse(t *testing.T) {
 		t.Fatalf("upstream hits = %d, want 1（不得二次请求）", got)
 	}
 }
+
+// PassthroughError 的契约是「调用方负责关闭并回包」，只对媒体面生效。截图面
+// 的调用方是 service 层，它只把错误往上抛——把打开的响应体交给它，连接与缓
+// 冲永远没人关（泄漏）。截图面必须拿到裸错误，body 由 fetchAndCache 自己关。
+func TestReviewFaceMediaTooLargeReturnsPlainError(t *testing.T) {
+	payload := bytes.Repeat([]byte("x"), 64)
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(payload)
+	}))
+	defer upstream.Close()
+	svc := newService(t.TempDir(), serviceConfig{
+		cacheSubdir:       "review-screenshot-cache",
+		cacheTTL:          time.Hour,
+		maxCacheEntrySize: 8,
+		client:            upstream.Client(),
+		allowURL:          allowPublicImageHost,
+		requireHTTPS:      true,
+		imagesOnly:        true,
+	})
+
+	_, err := svc.FetchAndCache(context.Background(), upstream.URL+"/big.png")
+	if !errors.Is(err, ErrMediaTooLarge) {
+		t.Fatalf("err = %v, want ErrMediaTooLarge", err)
+	}
+	if resp, ok := PassthroughResponse(err); ok {
+		_ = resp.Body.Close()
+		t.Fatal("PassthroughResponse 非空, want 空（截图面不交接响应体，调用方不会关）")
+	}
+}
