@@ -53,6 +53,14 @@ const (
 	refSourceLink // 普通链接目的地（ast.Link 与 <a href>）
 )
 
+// maxScreenshotsPerPR 单个 PR 描述收集的截图引用上限：按出现顺序保留前 N
+// 个（去重后），超出部分忽略。上限同时约束探测下载与 ensureAssets 落账——
+// review 截图面是持久资产（永不回收），描述塞几十张图会让磁盘占用随 PR 数
+// 无界增长；正常审查用不了几张图，超出部分本来就开不出有意义的视觉轮。
+// 单张大小另受下载面的单文件上限（256 MiB）与探测字节预算
+// （screenshotProbeBudget）约束。
+const maxScreenshotsPerPR = 12
+
 // prBodyMarkdown PR 描述的 Markdown 解析器（GFM 含 Linkify）。收集走 AST：
 // 「URL 到哪结束」是 GFM 规范已定义的问题——行内代码/围栏代码块不产链接
 // 节点、括号配对与 ASCII 尾标点剥离有规范行为、引用式与尖括号目的地都解析
@@ -308,6 +316,11 @@ func collectScreenshotURLsAt(body, githubWebHost string) []screenshotRef {
 		}
 		refs = append(refs, c.ref)
 	}
+	// 张数截断在去重之后按出现顺序做：保留的是描述里靠前的引用，与「探测
+	// 逐张试、失败行按 position 落账」的顺序语义一致。
+	if len(refs) > maxScreenshotsPerPR {
+		refs = refs[:maxScreenshotsPerPR]
+	}
 	return refs
 }
 
@@ -547,6 +560,12 @@ var screenshotProbeTimeout = 30 * time.Second
 // 顺序重复同一张挂死图。var 是为了让测试缩短等待。
 var screenshotProbeAttemptTimeout = 10 * time.Second
 
+// screenshotProbeBudget 单次探测允许拉进缓存的总字节预算：时间预算管不住
+// 「快速回源的大图」——图床很快时 30s 内能下进几十张大文件，而 review 截
+// 图面是持久资产（永不回收），字节必须有自己的闸。超过预算按「拉不到」收
+// 敛（下轮同步再试，已进缓存的条目命中不重下，每轮新下载量有界）。
+const screenshotProbeBudget = 256 << 20
+
 // screenshotProbeResult 探测三态：ready 至少一张可下载；none 全部「不是图」
 // （内容/地址形态被下载面拒）；unavailable 拉不到（网络故障、超时、预算耗
 // 尽）。成败两态表达不了「全部不是图」——那该收敛到 visualNone，而不是每次
@@ -601,7 +620,9 @@ type screenshotProbe struct {
 // 「拉不到」（见 isNotAnImageError）。任一成功 → probeReady（部分失败时内容
 // 指纹为空）；全部探完且全部「不是图」→ probeNone；零成功且存在「拉不到」
 // 或总预算耗尽未探完 → probeUnavailable，reason 取第一条「拉不到」类原因，
-// 没有再取第一条失败原因。探测不写 review_assets——资产行仍由视觉运行时的
+// 没有再取第一条失败原因。字节预算（screenshotProbeBudget）耗尽时停在
+// 触发的那张：已有成功图则 probeReady + 部分指纹；单文件上限等于预算，
+// 零成功时不可能触发字节预算。探测不写 review_assets——资产行仍由视觉运行时的
 // ensureAssets 落账，这里不按资产行计数，避免「已不在描述里的陈旧资产」被
 // 当成可用截图。
 func (s *ReviewService) probeScreenshots(ctx context.Context, integrationID string, installationID int64, prBody string) screenshotProbe {
@@ -615,6 +636,7 @@ func (s *ReviewService) probeScreenshots(ctx context.Context, integrationID stri
 	firstFetchFailReason := ""
 	fetchFailed := false
 	completed := true
+	probedBytes := int64(0)
 	var contentHashes []string
 	for _, ref := range refs {
 		// 单张限时：挂死图只吃掉自己的时限，还有剩余预算就继续试下一张；
@@ -641,6 +663,15 @@ func (s *ReviewService) probeScreenshots(ctx context.Context, integrationID stri
 				err = fmt.Errorf("%w: %v", githubmedia.ErrLocalCache, hashErr)
 			} else {
 				contentHashes = append(contentHashes, sum)
+				// 字节预算在下载后结算（下载前不知道大小）。单文件上限
+				// 256 MiB 等于预算，单张永远不会超限——能触发的都是第二张
+				// 及以后，此时已有成功图，结果是 probeReady + 部分指纹；
+				// 本轮不再继续拉，剩下的引用下轮探测继续（已进缓存的命中
+				// 不重下，每轮新下载量有界）。
+				probedBytes += cached.Metadata.Size
+				if probedBytes > screenshotProbeBudget {
+					break
+				}
 				continue
 			}
 		}

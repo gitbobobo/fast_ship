@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
@@ -1132,5 +1133,36 @@ func TestScreenshotErrorText(t *testing.T) {
 		if strings.Contains(got, banned) {
 			t.Fatalf("screenshotErrorText = %q, 不应含 %q", got, banned)
 		}
+	}
+}
+
+// 字节预算：单次探测拉进缓存的总字节超限时停在触发的那张——已有成功图
+// 则 probeReady + 部分指纹，未探的引用本轮不再拉。时间预算管不住快速回源
+// 的大图，而 review 截图面是持久资产，字节必须有自己的一道闸。
+func TestProbeScreenshotsByteBudgetStopsAfterLimit(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	review := e.withT3(nil, e.media, nil)
+	// 桩元数据每张 200 MiB（真实文件极小，只测预算结算不测字节）：第 2 张
+	// 后累计 400 MiB > 预算 256 MiB。
+	path := filepath.Join(t.TempDir(), "shot.png")
+	if err := os.WriteFile(path, []byte("\x89PNG\r\n\x1a\nfake"), 0o600); err != nil {
+		t.Fatalf("write fake png: %v", err)
+	}
+	e.media.cached = githubmedia.CachedImage(path, "image/png", 200<<20)
+
+	var lines []string
+	for i := 0; i < 4; i++ {
+		lines = append(lines, fmt.Sprintf("![s%d](https://uiv.example.com/f/%d.png)", i, i))
+	}
+	probe := review.probeScreenshots(context.Background(), model.ForgeIntegrationBuiltinGitHubID, 1, strings.Join(lines, "\n\n"))
+
+	if probe.result != probeReady {
+		t.Fatalf("probe = %+v, want probeReady（预算触发前已有成功图）", probe)
+	}
+	if e.media.anonCalls != 2 {
+		t.Fatalf("anonCalls = %d, want 2（第 2 张触发预算后停止）", e.media.anonCalls)
+	}
+	if probe.contentFP != "" {
+		t.Fatalf("contentFP = %q, want 空（4 张只探了 2 张，指纹不全按未知处理）", probe.contentFP)
 	}
 }

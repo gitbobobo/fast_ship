@@ -3,6 +3,8 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -500,5 +502,25 @@ func TestAgentScreenshotsFiltersStaleRows(t *testing.T) {
 	}
 	if len(items) != 1 || items[0].Id != "asset-current" {
 		t.Fatalf("items = %+v, want 只剩当前描述里的资产行", items)
+	}
+}
+
+// 张数截断：超过 maxScreenshotsPerPR 的引用按出现顺序保留前 N 个。review
+// 截图面是持久资产（永不回收），收集面是磁盘占用的第一道闸——探测字节
+// 预算与下载面单文件上限都在它之后。
+func TestCollectScreenshotURLsTruncatesAtLimit(t *testing.T) {
+	var lines []string
+	for i := 0; i < maxScreenshotsPerPR+8; i++ {
+		lines = append(lines, fmt.Sprintf("![s%d](https://uiv.example.com/f/%d.png)", i, i))
+	}
+	refs := collectScreenshotURLsAt(strings.Join(lines, "\n\n"), "")
+	if len(refs) != maxScreenshotsPerPR {
+		t.Fatalf("len(refs) = %d, want %d（超出部分忽略）", len(refs), maxScreenshotsPerPR)
+	}
+	for i, ref := range refs {
+		want := fmt.Sprintf("https://uiv.example.com/f/%d.png", i)
+		if ref.URL != want {
+			t.Fatalf("refs[%d] = %s, want %s（按出现顺序保留靠前的引用）", i, ref.URL, want)
+		}
 	}
 }
