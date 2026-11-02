@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -369,5 +371,70 @@ func TestMediaProxySVGByExtensionRejectionShortCache(t *testing.T) {
 	}
 	if got := rec.Header().Get("Cache-Control"); got != "private, max-age=60" {
 		t.Fatalf("cache-control = %q, want private, max-age=60（扩展名档短缓存）", got)
+	}
+}
+
+// 容量回收/过期扫描把 .bin 删在 GetCached 命中与 os.Open 之间（读路径无互
+// 锁，容量回收把这种窗口从「仅过期条目」扩大到任意旧条目）：按 miss 回退
+// 重下，淘汰窗口不暴露成破图 404。
+func TestGitHubMediaProxyServesAfterCacheFileEvictedBetweenHitAndOpen(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write([]byte("png-bytes"))
+	}))
+	defer upstream.Close()
+	target, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("parse upstream url: %v", err)
+	}
+	upstreamTransport := &rewriteToUpstreamTransport{target: target}
+	cacheRoot := t.TempDir()
+	svc := githubmedia.NewProxyService(cacheRoot,
+		githubmedia.WithHTTPTransport(upstreamTransport))
+
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.GET(githubmedia.ProxyPath, NewGitHubMediaProxyHandler(svc).Proxy)
+
+	mediaURL := "http://github.com/user-attachments/assets/evicted.png"
+	get := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, githubmedia.ProxyPath+"?url="+url.QueryEscape(mediaURL), nil)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		return rec
+	}
+
+	if rec := get(); rec.Code != http.StatusOK {
+		t.Fatalf("first fetch code = %d, want 200", rec.Code)
+	}
+	firstHits := upstreamTransport.hits.Load()
+
+	// 模拟淘汰窗口：只删 .bin（meta 还在，GetCached 仍命中）。
+	cacheDir := filepath.Join(cacheRoot, "github-media-cache")
+	entries, err := os.ReadDir(cacheDir)
+	if err != nil {
+		t.Fatalf("read cache dir: %v", err)
+	}
+	removed := 0
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".bin") {
+			if err := os.Remove(filepath.Join(cacheDir, e.Name())); err == nil {
+				removed++
+			}
+		}
+	}
+	if removed == 0 {
+		t.Fatal("no .bin removed, want 缓存文件存在")
+	}
+
+	rec := get()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d body = %s, want 200（淘汰窗口回退重下，不 404）", rec.Code, rec.Body.String())
+	}
+	if got := rec.Body.String(); got != "png-bytes" {
+		t.Fatalf("body = %q, want 重下后的字节", got)
+	}
+	if upstreamTransport.hits.Load() != firstHits+1 {
+		t.Fatalf("upstream hits = %d, want %d（回退必须真的回源）", upstreamTransport.hits.Load(), firstHits+1)
 	}
 }

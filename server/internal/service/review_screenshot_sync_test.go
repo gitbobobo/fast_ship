@@ -1197,3 +1197,29 @@ func TestProbeScreenshotsByteBudgetSkipsCacheHits(t *testing.T) {
 		t.Fatal("contentFP 为空, want 全量指纹（4 张全部探齐）")
 	}
 }
+
+// 预算触发不可能把探测结果压成 probeNone：触发点在哈希入账之后，触发时
+// contentHashes 至少有一张，probeReady 分支必然先行返回（触发时置的
+// completed=false 只影响零成功路径，是未来重构的防护而非现行分支）。用超
+// 过预算的单张元数据模拟「单文件上限被调高」的常量分叉形态：这张图是可
+// 服务的，结果必须是 ready + 全量指纹——落 probeNone 会把它误判「全部不
+// 是图」并结清，同一 URL 集合的视觉轮被永久跳过。
+func TestProbeScreenshotsByteBudgetNeverNone(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	review := e.withT3(nil, e.media, nil)
+	path := filepath.Join(t.TempDir(), "shot.png")
+	if err := os.WriteFile(path, []byte("\x89PNG\r\n\x1a\nfake"), 0o600); err != nil {
+		t.Fatalf("write fake png: %v", err)
+	}
+	e.media.cached = githubmedia.CachedImage(path, "image/png", 300<<20)
+
+	probe := review.probeScreenshots(context.Background(), model.ForgeIntegrationBuiltinGitHubID, 1,
+		"![s](https://uiv.example.com/f/x.png)")
+
+	if probe.result != probeReady {
+		t.Fatalf("probe = %+v, want probeReady（预算触发不改变已有成功图的结果）", probe)
+	}
+	if probe.contentFP == "" {
+		t.Fatal("contentFP 为空, want 全量指纹（单张触发时已入账）")
+	}
+}

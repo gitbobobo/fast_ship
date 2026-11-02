@@ -40,10 +40,12 @@ func (h *GitHubMediaProxyHandler) Proxy(c *gin.Context) {
 	if cached, ok, err := h.service.GetCached(rawURL); err != nil {
 		writeMediaProxyError(c, err)
 		return
-	} else if ok {
-		serveCachedMedia(c, cached)
+	} else if ok && serveCachedMedia(c, cached) {
 		return
 	}
+	// 命中但文件打不开（条目刚被容量回收/过期清扫删掉，GetCached 读到
+	// meta 与 os.Open 之间没有互斥）：按 miss 走重下，淘汰窗口不暴露成破
+	// 图 404——容量回收把这种窗口从「仅过期条目」扩大到了任意旧条目。
 
 	if rangeHeader != "" || headOnly {
 		resp, err := h.service.ProxyPass(c.Request.Context(), rawURL, rangeHeader, headOnly)
@@ -67,7 +69,11 @@ func (h *GitHubMediaProxyHandler) Proxy(c *gin.Context) {
 
 	cached, err := h.service.FetchAndCache(c.Request.Context(), rawURL)
 	if err == nil {
-		serveCachedMedia(c, cached)
+		if serveCachedMedia(c, cached) {
+			return
+		}
+		// 刚下完就打不开是文件系统级故障，与淘汰窗口无关：保持原有 404。
+		c.String(http.StatusNotFound, "cached media not found")
 		return
 	}
 
@@ -103,11 +109,12 @@ func decodeMediaURLParam(value string) string {
 	return decoded
 }
 
-func serveCachedMedia(c *gin.Context, media *githubmedia.CachedMedia) {
+func serveCachedMedia(c *gin.Context, media *githubmedia.CachedMedia) bool {
 	file, err := os.Open(media.Path)
 	if err != nil {
-		c.String(http.StatusNotFound, "cached media not found")
-		return
+		// 打不开（文件刚被回收/磁盘故障）：不写任何响应，让调用方按 miss
+		// 回退（重下）或按缓存丢失回 404。
+		return false
 	}
 	defer file.Close()
 
@@ -130,6 +137,7 @@ func serveCachedMedia(c *gin.Context, media *githubmedia.CachedMedia) {
 	setMediaProxyHardeningHeaders(header, media.Metadata.URL, media.Metadata.ContentType)
 
 	http.ServeContent(c.Writer, c.Request, "", media.Metadata.CachedAt, file)
+	return true
 }
 
 // setSameOriginContentHardeningHeaders `?token=` 引入的同源内容出口（GitHub

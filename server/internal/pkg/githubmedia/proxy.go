@@ -773,14 +773,16 @@ func (s *ProxyService) evictOverCapacity(entries []os.DirEntry) {
 			s.releaseDownloadLock(b.url, gate)
 			continue
 		}
-		// .bin 是容量口径的字节本体：删成功才扣减；删除失败（权限、只读
-		// 挂载、文件被占用）保留计数继续淘汰下一条，本轮仍可能把可淘汰字
-		// 节压回上限内。.bin 删成而 .json 删失败留下无 bin 的孤儿 meta，
-		// 体积极小且重下时被同键覆盖，可接受。
+		// .bin 是容量口径的字节本体：删成功才扣减、才删 meta——meta 是条
+		// 目可达性的事实源，bin 删失败时留着它，下一轮按同一 mtime 重试；
+		// 先删 meta 会把这条变成既不计入容量也不再被尝试的孤儿 .bin，上限
+		// 可能显示「已满足」而磁盘仍超，要等 2×TTL 孤儿判据才回收。删除失
+		// 败（权限、只读挂载、文件被占用）保留计数继续淘汰下一条，本轮仍
+		// 可能把可淘汰字节压回上限内。
 		if err := os.Remove(filepath.Join(s.cacheDir, b.name)); err == nil {
 			evictable -= b.size
+			_ = os.Remove(filepath.Join(s.cacheDir, strings.TrimSuffix(b.name, ".bin")+".json"))
 		}
-		_ = os.Remove(filepath.Join(s.cacheDir, strings.TrimSuffix(b.name, ".bin")+".json"))
 		s.releaseDownloadLock(b.url, gate)
 	}
 }

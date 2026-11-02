@@ -566,6 +566,12 @@ var screenshotProbeAttemptTimeout = 10 * time.Second
 // 预算，见 probeScreenshots），下载后结算：触发那张已完整落盘，单轮新下
 // 载实际上界是预算 + 单文件上限（那张下一轮命中不重下，不白拉）。超过预
 // 算时本轮停在触发的那张，已成功的照常计入指纹；剩下的引用下轮继续。
+//
+// 口径边界：这是探测的**节奏**闸（每轮新下载量有界），不是持久面的总量
+// 闸——review 截图面按设计持久全部可用截图（视觉证据不可丢弃），单
+// (PR, head) 的磁盘上界 = maxScreenshotsPerPR × 下载面单文件上限；跨 head
+// 的历史资产累积归审查保留策略，不在这里解决。字节闸挡不住落盘总量（探
+// 测逐轮把集合拉齐），挡住的是「一轮同步被大图吃掉整个磁盘预算」。
 const screenshotProbeBudget = 256 << 20
 
 // screenshotProbeResult 探测三态：ready 至少一张可下载；none 全部「不是图」
@@ -675,6 +681,16 @@ func (s *ReviewService) probeScreenshots(ctx context.Context, integrationID stri
 				if !cached.FromCache {
 					probedBytes += cached.Metadata.Size
 					if probedBytes > screenshotProbeBudget {
+						// 预算触发显式标记未探完：零成功时收敛到
+						// probeUnavailable 而不是 probeNone。「单张新下载不
+						// 会超限」依赖单文件上限 = 预算的常量巧合，任一侧单
+						// 独调整后第一张即可触发，落 probeNone 会把可达截图
+						// 误判「全部不是图」并结清，同一集合视觉轮被永久跳
+						// 过。已有成功图时 probeReady 优先，此标记无副作用。
+						completed = false
+						if firstReason == "" {
+							firstReason = fmt.Sprintf("截图总大小超过探测预算（%d MiB）", screenshotProbeBudget>>20)
+						}
 						break
 					}
 				}
