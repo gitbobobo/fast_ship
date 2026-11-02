@@ -1005,3 +1005,133 @@ func TestReviewFaceMediaTooLargeReturnsPlainError(t *testing.T) {
 		t.Fatal("PassthroughResponse 非空, want 空（截图面不交接响应体，调用方不会关）")
 	}
 }
+
+// 截图面的孤独条目清扫：没有任何资产行引用、且超过宽限期的 .bin/.json 一起
+// 删；仍被引用或还在宽限期内的保留。这条是「行收敛只删行」的配套——不回收
+// 那些字节，它们会在这面（没有 TTL 清扫）永久占盘。
+func TestSweepOrphanEntriesRemovesUnreferencedOldEntries(t *testing.T) {
+	svc := newService(t.TempDir(), serviceConfig{
+		cacheSubdir: "review-screenshot-cache",
+		cacheTTL:    time.Hour,
+		allowURL:    allowPublicImageHost,
+	})
+	if err := os.MkdirAll(svc.cacheDir, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	now := time.Now().UTC()
+	write := func(key string, age time.Duration) (string, string) {
+		t.Helper()
+		bin := filepath.Join(svc.cacheDir, key+".bin")
+		meta := filepath.Join(svc.cacheDir, key+".json")
+		for _, p := range []string{bin, meta} {
+			if err := os.WriteFile(p, []byte("x"), 0o640); err != nil {
+				t.Fatalf("write %s: %v", p, err)
+			}
+			ts := now.Add(-age)
+			if err := os.Chtimes(p, ts, ts); err != nil {
+				t.Fatalf("chtimes %s: %v", p, err)
+			}
+		}
+		return bin, meta
+	}
+	liveBin, liveMeta := write("live", 3*time.Hour)
+	oldBin, oldMeta := write("orphan-old", 3*time.Hour)
+	freshBin, freshMeta := write("orphan-fresh", time.Minute)
+
+	svc.SetLivePathSource(func() (map[string]struct{}, error) {
+		return map[string]struct{}{liveBin: {}}, nil
+	})
+	svc.sweepOrphanEntries(now)
+
+	for _, p := range []string{liveBin, liveMeta} {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("%s 读不到, want 保留（仍被资产行引用）", p)
+		}
+	}
+	for _, p := range []string{freshBin, freshMeta} {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("%s 读不到, want 保留（未过宽限期，可能是写盘中间态）", p)
+		}
+	}
+	for _, p := range []string{oldBin, oldMeta} {
+		if _, err := os.Stat(p); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s stat = %v, want 已回收（无行引用 + 超宽限期）", p, err)
+		}
+	}
+}
+
+// 存活集合读不到时一个字节都不删：宁可留着也不误删证据。
+func TestSweepOrphanEntriesSkipsWhenLiveSetUnavailable(t *testing.T) {
+	svc := newService(t.TempDir(), serviceConfig{
+		cacheSubdir: "review-screenshot-cache",
+		cacheTTL:    time.Hour,
+		allowURL:    allowPublicImageHost,
+	})
+	if err := os.MkdirAll(svc.cacheDir, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	bin := filepath.Join(svc.cacheDir, "keep.bin")
+	meta := filepath.Join(svc.cacheDir, "keep.json")
+	for _, p := range []string{bin, meta} {
+		if err := os.WriteFile(p, []byte("x"), 0o640); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		ts := time.Now().UTC().Add(-3 * time.Hour)
+		if err := os.Chtimes(p, ts, ts); err != nil {
+			t.Fatalf("chtimes: %v", err)
+		}
+	}
+	svc.SetLivePathSource(func() (map[string]struct{}, error) {
+		return nil, errors.New("db down")
+	})
+	svc.sweepOrphanEntries(time.Now().UTC())
+
+	for _, p := range []string{bin, meta} {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("%s 读不到, want 保留（存活集合不可用）", p)
+		}
+	}
+}
+
+// 清扫之后校准失败要留待重试：清扫已经把文件删了，水位却还按删之前算——
+// 不重试的话媒体面会因为「反正水位满了」长期退化成直通。
+func TestCapacityRecalibrateRetriesAfterFailure(t *testing.T) {
+	svc, _ := newCapacityTestService(t, 100, 1)
+	if err := os.MkdirAll(svc.cacheDir, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	held, err := svc.reserveCacheBytes(60)
+	if err != nil {
+		t.Fatalf("reserve: %v", err)
+	}
+	held.settle(60)
+
+	if err := os.Chmod(svc.cacheDir, 0o000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	restored := false
+	restore := func() {
+		if !restored {
+			restored = true
+			_ = os.Chmod(svc.cacheDir, 0o750)
+		}
+	}
+	t.Cleanup(restore)
+	if _, readErr := os.ReadDir(svc.cacheDir); readErr == nil {
+		t.Skip("目录仍可读（以 root 运行？），无法模拟扫描失败")
+	}
+
+	svc.recalibrateCacheUsage() // 失败：置 pending
+	restore()
+	// 模拟退避窗口过去（真实实现里由 capacityCalibrateRetryInterval 控制）。
+	svc.capMu.Lock()
+	svc.capNextCalibrateAt = time.Time{}
+	svc.capMu.Unlock()
+
+	// 校准重试成功：目录实际为空，水位回到 0，再预留 60 不该被拒。
+	next, err := svc.reserveCacheBytes(60)
+	if err != nil {
+		t.Fatalf("reserve after retry: %v, want 成功（清扫后重新校准，水位已释放）", err)
+	}
+	next.release()
+}

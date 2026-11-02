@@ -271,9 +271,19 @@ type ProxyService struct {
 	// capNextCalibrateAt 校准失败（目录读不完整）后的重试下限：避免每条写
 	// 请求都重扫一遍整个缓存目录。
 	capNextCalibrateAt time.Time
+	// capRecalibratePending 有一次校准没成功、需要重试。清扫释放了字节却
+	// 校准失败时置位——不置位的话「已校准」会让后续写请求永远不再重试，水位
+	// 一直偏多，媒体面长期退化成直通。
+	capRecalibratePending bool
 	// capCalMu 校准单飞：并发首次准入只做一次目录扫描，其余等待复用结果。
 	capCalMu sync.Mutex
-	allowURL func(*url.URL) bool
+
+	// livePathSource 仍被上层数据行引用的落盘路径集合（截图面用）。非媒体面
+	// 的条目是持久资产，正常路径永不删除，但资产行被收敛或进程在「删行」与
+	// 「删文件」之间崩溃会留下没人引用的文件——那面没有 TTL 清扫，不回收就
+	// 永久占盘。由 main.go 装配注入（DB 在 service 层）。
+	livePathSource func() (map[string]struct{}, error)
+	allowURL       func(*url.URL) bool
 	// requireHTTPS 只接受 https 上游（截图面）；imagesOnly 只收图片内容。
 	// GitHub 媒体面两者全关：白名单语义 + 图片视频都收，与截图面是两套准入。
 	requireHTTPS bool
@@ -857,14 +867,26 @@ func (s *ProxyService) cacheAdmissionFull() bool {
 // recalibrateCacheUsage 按目录实际字节重算已落盘水位（不改进行中的预留）。
 // 过期扫描删完文件后调用：不清零会让被删字节永久占着额度。
 func (s *ProxyService) recalibrateCacheUsage() {
-	s.applyCalibration(s.cacheDirBytes)
+	if s.applyCalibration(s.cacheDirBytes) {
+		s.capMu.Lock()
+		s.capNextCalibrateAt = time.Time{}
+		s.capRecalibratePending = false
+		s.capMu.Unlock()
+		return
+	}
+	// 失败要留待重试：清扫已经把文件删了，水位却还按删之前算——不重试的话
+	// 媒体面会因为「反正水位满了」长期退化成直通。
+	s.capMu.Lock()
+	s.capNextCalibrateAt = time.Now().Add(capacityCalibrateRetryInterval)
+	s.capRecalibratePending = true
+	s.capMu.Unlock()
 }
 
 // ensureCapacityCalibrated 保证首次校准已做过。单飞：并发首次准入只扫一遍
 // 目录；校准失败按 capacityCalibrateRetryInterval 退避，不随每条写请求重扫。
 func (s *ProxyService) ensureCapacityCalibrated() {
 	s.capMu.Lock()
-	done := s.capCalibrated
+	done := s.capCalibrated && !s.capRecalibratePending
 	s.capMu.Unlock()
 	if done {
 		return
@@ -872,21 +894,24 @@ func (s *ProxyService) ensureCapacityCalibrated() {
 
 	s.capCalMu.Lock()
 	defer s.capCalMu.Unlock()
+	// 单飞后复查：等锁期间别人可能已经做过。
 	s.capMu.Lock()
-	if s.capCalibrated || time.Now().Before(s.capNextCalibrateAt) {
-		s.capMu.Unlock()
+	done = (s.capCalibrated && !s.capRecalibratePending) || time.Now().Before(s.capNextCalibrateAt)
+	s.capMu.Unlock()
+	if done {
 		return
 	}
-	s.capMu.Unlock()
 
 	if s.applyCalibration(s.cacheDirBytes) {
 		s.capMu.Lock()
 		s.capNextCalibrateAt = time.Time{}
+		s.capRecalibratePending = false
 		s.capMu.Unlock()
 		return
 	}
 	s.capMu.Lock()
 	s.capNextCalibrateAt = time.Now().Add(capacityCalibrateRetryInterval)
+	s.capRecalibratePending = true
 	s.capMu.Unlock()
 }
 
@@ -935,12 +960,68 @@ func (s *ProxyService) cacheDirBytes() (int64, bool) {
 		}
 		info, err := e.Info()
 		if err != nil {
+			// ErrNotExist = ReadDir 与 Info 之间被并发删掉/改名：文件已经不
+			// 在盘上，它对总量的贡献就是 0，扫描仍然完整。把它算成不完整会
+			// 让刚被清扫释放的字节永远退不出水位（清扫后紧接着的校准几乎
+			// 必然撞上这类文件）。
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
 			complete = false
 			continue
 		}
 		total += info.Size()
 	}
 	return total, complete
+}
+
+// SetLivePathSource 注入「仍被数据行引用的落盘路径」来源（截图面用）。
+// 传 nil 关闭该面的孤独文件回收。
+func (s *ProxyService) SetLivePathSource(fn func() (map[string]struct{}, error)) {
+	s.livePathSource = fn
+}
+
+// orphanEntryGrace 孤独条目的回收宽限：条目先落盘、后插行（ensureAssets 的
+// 下载与落账是两步），宽限期兜住这段窗口，不然并发写同一 URL 的另一个 head
+// 刚写完文件、还没插行时就被判成孤儿删掉，行留下来却指向不存在的文件。
+const orphanEntryGrace = 30 * time.Minute
+
+// sweepOrphanEntries 回收该面里**没有任何数据行引用**且超过宽限期的条目。
+// 只给非媒体面用（媒体面由 TTL 扫描 + 准入闸管，.bin 的回收判据完全不同），
+// 且需要 SetLivePathSource 注入存活集合；没注入就什么都不做。
+//
+// 与 fetchAndCache 的两步发布（rename data → WriteFile meta）配合：宽限期远
+// 大于一次写盘，正在写的条目 mtime 是新的，不会命中。
+func (s *ProxyService) sweepOrphanEntries(now time.Time) {
+	if s.cacheSubdir == defaultCacheSubdir || s.livePathSource == nil {
+		return
+	}
+	live, err := s.livePathSource()
+	if err != nil {
+		return // 存活集合读不到就不删：宁可留着也不误删证据
+	}
+	entries, err := os.ReadDir(s.cacheDir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasSuffix(name, ".bin") && !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		binPath := filepath.Join(s.cacheDir, strings.TrimSuffix(name, ".json")+".bin")
+		if _, ok := live[binPath]; ok {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil || now.Sub(info.ModTime()) < orphanEntryGrace {
+			continue
+		}
+		// data 与 meta 一起删：只删 data 会留下一个 meta 永远指向不存在的
+		// 文件（读取按 miss/兜底处理，但字节永远不回）。
+		_ = os.Remove(binPath)
+		_ = os.Remove(strings.TrimSuffix(binPath, ".bin") + ".json")
+	}
 }
 
 // sweepStaleTmpFiles 回收 CreateTemp 的 media-*.tmp 写盘中转：进程被杀/机器
@@ -964,6 +1045,7 @@ func (s *ProxyService) sweepStaleTmpFiles(now time.Time) {
 		}
 		_ = os.Remove(filepath.Join(s.cacheDir, name))
 	}
+	s.sweepOrphanEntries(now)
 }
 
 // restoreGoneBin 把隔离的旧字节原子放回 binPath。os.Link 不会覆盖已存在的

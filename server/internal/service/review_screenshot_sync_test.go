@@ -1333,9 +1333,12 @@ func TestEnsureAssetsPrunesUnreferencedRowsBeyondCap(t *testing.T) {
 	if rows != maxScreenshotsPerPR {
 		t.Fatalf("rows = %d, want %d（同 head 行数被上限兜住）", rows, maxScreenshotsPerPR)
 	}
+	// 文件**不在**这里删：删行与删文件之间的崩溃窗口、以及「文件已写、行还没
+	// 插」的并发窗口都会让别的 head 的截图永久 404。文件回收交给截图面的孤
+	// 独条目清扫（按「无行引用 + 超宽限期」判定），这里只断言行收敛对了。
 	for _, p := range oldPaths {
-		if _, err := os.Stat(p); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("旧文件 %s stat = %v, want 已随行收敛删除", p, err)
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("旧文件 %s stat = %v, want 保留（文件回收归孤独条目清扫）", p, err)
 		}
 	}
 }

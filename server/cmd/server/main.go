@@ -457,6 +457,10 @@ func main() {
 	reviewService := service.NewReviewService(db, projectRepo, webhookDeliveryRepo, notificationSink,
 		ghPR, integrationService, deploymentSettingsService, t3ThreadsService, reviewMediaService, mediaBearer,
 		forgeIntegrationRepo, cfg, reviewLogger)
+	// 截图面的条目是持久资产（永不按 TTL 回收），但资产行被收敛或进程在
+	// 「删行」与「删文件」之间崩溃会留下没人引用的文件；那面没有 TTL 清扫，
+	// 由这里注入存活集合让它的孤独条目清扫能把这类字节收回来。
+	reviewMediaService.SetLivePathSource(reviewService.LiveAssetPaths)
 	// 删除项目会 CASCADE 掉审查运行行，先让审查服务尽力停线程/归档/回收工作区。
 	projectService.SetReviewCleaner(reviewService)
 	reviewService.Start()
