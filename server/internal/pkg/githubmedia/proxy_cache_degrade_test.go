@@ -893,9 +893,9 @@ func TestFetchAndCacheCacheFullReusesUpstreamResponse(t *testing.T) {
 	if !errors.Is(err, ErrCacheFull) {
 		t.Fatalf("err = %v, want ErrCacheFull", err)
 	}
-	resp, ok := CacheFullPassthrough(err)
+	resp, ok := PassthroughResponse(err)
 	if !ok || resp == nil {
-		t.Fatalf("CacheFullPassthrough = %v, want 可复用的上游响应", ok)
+		t.Fatalf("PassthroughResponse = %v, want 可复用的上游响应", ok)
 	}
 	body, readErr := io.ReadAll(resp.Body)
 	resp.Body.Close()
@@ -924,10 +924,54 @@ func TestFetchAndCacheCacheFullPrecheckSkipsUpstream(t *testing.T) {
 	if !errors.Is(err, ErrCacheFull) {
 		t.Fatalf("err = %v, want ErrCacheFull", err)
 	}
-	if _, ok := CacheFullPassthrough(err); ok {
-		t.Fatal("CacheFullPassthrough 非空, want 空（预检拒绝没有上游响应可复用）")
+	if _, ok := PassthroughResponse(err); ok {
+		t.Fatal("PassthroughResponse 非空, want 空（预检拒绝没有上游响应可复用）")
 	}
 	if got := hits.Load(); got != 0 {
 		t.Fatalf("upstream hits = %d, want 0（满容量时预检直接拒绝，不回源）", got)
+	}
+}
+
+// 按 Content-Length 判定超限时响应体还没读，可以整份交回调用方直通：重新
+// ProxyPass 会把同一个超限附件再下一次上游。
+func TestFetchAndCacheMediaTooLargeReusesUpstreamResponse(t *testing.T) {
+	payload := bytes.Repeat([]byte("x"), 64)
+	var hits atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(payload)
+	}))
+	defer upstream.Close()
+	parsed, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("parse upstream url: %v", err)
+	}
+	svc := newService(t.TempDir(), serviceConfig{
+		cacheSubdir:       defaultCacheSubdir,
+		cacheTTL:          time.Hour,
+		maxCacheEntrySize: 8, // 上游 64 字节必超
+		client:            upstream.Client(),
+		allowURL:          func(u *url.URL) bool { return u.Host == parsed.Host },
+	})
+
+	_, err = svc.FetchAndCache(context.Background(), upstream.URL+"/big.mp4")
+	if !errors.Is(err, ErrMediaTooLarge) {
+		t.Fatalf("err = %v, want ErrMediaTooLarge", err)
+	}
+	resp, ok := PassthroughResponse(err)
+	if !ok || resp == nil {
+		t.Fatalf("PassthroughResponse = %v, want 可复用的上游响应", ok)
+	}
+	body, readErr := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if readErr != nil {
+		t.Fatalf("read body: %v", readErr)
+	}
+	if len(body) != 64 {
+		t.Fatalf("body len = %d, want 64", len(body))
+	}
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("upstream hits = %d, want 1（不得二次请求）", got)
 	}
 }

@@ -443,9 +443,11 @@ func TestGitHubMediaProxyRefetchesAfterCacheFileDeleted(t *testing.T) {
 	}
 }
 
-// 媒体面缓存水位越过容量上限（ErrCacheFull）时与单文件超限走同一条退路：
-// ProxyPass 流式直通，客户端照常拿到字节，只是不缓存。容量机制不删已落盘
-// 条目，所以被拒的一定是新字节，不会把命中变成破图。
+// 水位**已满**时 handler 走「预检拒绝 → ProxyPass」这条退路：客户端照常拿
+// 到字节，只是不缓存，且上游只被请求一次。
+//
+// 必须先真的把水位顶满（两张 32 字节 + 上限 64），否则走的是「中途被拒 →
+// 复用已打开响应」那条分支——两条分支都写 200，只有上游命中次数能区分。
 func TestGitHubMediaProxyFallsBackToPassthroughWhenCacheFull(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/png")
@@ -457,29 +459,42 @@ func TestGitHubMediaProxyFallsBackToPassthroughWhenCacheFull(t *testing.T) {
 		t.Fatalf("parse upstream url: %v", err)
 	}
 	upstreamTransport := &rewriteToUpstreamTransport{target: target}
-	// 容量上限 1 字节：任何下载都过不了准入闸。
+	// 上限 64 = 两张 32 字节：前两张正常缓存把水位顶满。
 	svc := githubmedia.NewProxyService(t.TempDir(),
 		githubmedia.WithHTTPTransport(upstreamTransport),
-		githubmedia.WithCacheCapacity(1))
+		githubmedia.WithCacheCapacity(64))
 
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	router.GET(githubmedia.ProxyPath, NewGitHubMediaProxyHandler(svc).Proxy)
+	get := func(name string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, githubmedia.ProxyPath+"?url="+
+			url.QueryEscape("http://github.com/user-attachments/assets/"+name), nil)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		return rec
+	}
 
-	req := httptest.NewRequest(http.MethodGet, githubmedia.ProxyPath+"?url="+
-		url.QueryEscape("http://github.com/user-attachments/assets/full.png"), nil)
-	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
+	for _, name := range []string{"a.png", "b.png"} {
+		if rec := get(name); rec.Code != http.StatusOK {
+			t.Fatalf("%s code = %d, want 200（32+32 ≤ 64，正常缓存）", name, rec.Code)
+		}
+	}
+	if got := upstreamTransport.hits.Load(); got != 2 {
+		t.Fatalf("warm-up hits = %d, want 2", got)
+	}
 
+	// 水位已满：预检拒绝 → ProxyPass 再打一次上游（总计 3），不再是二次回源
+	// 那种「先打一次被拒、再打一次直通」（那会是 4）。
+	rec := get("c.png")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("code = %d body = %s, want 200（直通兜底）", rec.Code, rec.Body.String())
 	}
 	if got := rec.Body.String(); got != "png-bytes" {
 		t.Fatalf("body = %q, want 直通的字节", got)
 	}
-	// 水位已满时预检直接拒绝，直通只打一次上游。
-	if got := upstreamTransport.hits.Load(); got != 1 {
-		t.Fatalf("upstream hits = %d, want 1（满容量不多打上游）", got)
+	if got := upstreamTransport.hits.Load(); got != 3 {
+		t.Fatalf("upstream hits = %d, want 3（满容量预检不回源，只直通一次）", got)
 	}
 }
 

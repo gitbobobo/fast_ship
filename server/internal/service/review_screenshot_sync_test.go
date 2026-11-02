@@ -1223,3 +1223,30 @@ func TestProbeScreenshotsByteBudgetNeverNone(t *testing.T) {
 		t.Fatal("contentFP 为空, want 全量指纹（单张触发时已入账）")
 	}
 }
+
+// 字节预算的结算不能挂在哈希成功分支上：下载成功但读盘哈希失败（EIO/坏块）
+// 时若不结算，每张新下载都能绕过预算，单轮新下载上界从「预算 + 单张」放大
+// 到「张数上限 × 单张」。零成功 + 预算触发必须收敛 probeUnavailable（下轮
+// 再试），不能落 probeNone 结清。
+func TestProbeScreenshotsByteBudgetSettlesEvenWhenHashFails(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	review := e.withT3(nil, e.media, nil)
+	// 下载「成功」，但路径不存在 → hashFileSHA256 失败。
+	e.media.cached = githubmedia.CachedImage(filepath.Join(t.TempDir(), "missing.png"), "image/png", 300<<20)
+
+	var lines []string
+	for i := 0; i < 4; i++ {
+		lines = append(lines, fmt.Sprintf("![s%d](https://uiv.example.com/f/%d.png)", i, i))
+	}
+	probe := review.probeScreenshots(context.Background(), model.ForgeIntegrationBuiltinGitHubID, 1, strings.Join(lines, "\n\n"))
+
+	if e.media.anonCalls != 1 {
+		t.Fatalf("anonCalls = %d, want 1（第一张 300 MiB 超预算即停，不得因哈希失败继续）", e.media.anonCalls)
+	}
+	if probe.result != probeUnavailable {
+		t.Fatalf("probe = %+v, want probeUnavailable（零成功 + 预算触发）", probe)
+	}
+	if !strings.Contains(probe.reason, "预算") {
+		t.Fatalf("reason = %q, want 预算耗尽原因", probe.reason)
+	}
+}

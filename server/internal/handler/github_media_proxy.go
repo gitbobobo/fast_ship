@@ -72,10 +72,10 @@ func (h *GitHubMediaProxyHandler) Proxy(c *gin.Context) {
 	// 容量机制不删已落盘条目，所以只拒新字节）。上游自己回的 413 不是本地
 	// 拒绝，走下面的常规错误分支。
 	if errors.Is(err, githubmedia.ErrMediaTooLarge) || errors.Is(err, githubmedia.ErrCacheFull) {
-		// 请求中途被准入闸拒时上游响应已经打开（过了内容类型闸门）：直接复
-		// 用它，不再发第二次上游请求——容量满不是偶发而是稳态，二次 GET 会
-		// 让上游请求数与连接数翻倍。
-		if resp, ok := githubmedia.CacheFullPassthrough(err); ok {
+		// 拒绝点在上游响应打开之后（内容类型闸门已过）：直接复用它，不再发
+		// 第二次上游请求——容量满不是偶发而是稳态，超限附件也会每次下两遍，
+		// 二次 GET 都会让上游请求数与连接数翻倍。
+		if resp, ok := githubmedia.PassthroughResponse(err); ok {
 			servePassThrough(c, rawURL, resp, false)
 			return
 		}

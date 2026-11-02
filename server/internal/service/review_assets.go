@@ -663,6 +663,15 @@ func (s *ReviewService) probeScreenshots(ctx context.Context, integrationID stri
 				}
 				break
 			}
+			// 字节预算在下载成功当场结算，**与哈希成败无关**：新下载的字节
+			// 已经写进持久缓存面，不结算的话哈希读盘失败（EIO/坏块）这条
+			// 路径每张都能绕过预算，单轮新下载上界从「预算 + 单张」放大到
+			// 「张数上限 × 单张」。缓存命中不占预算：命中的大小是确定值，
+			// 计入会让超预算集合每一轮都在同一位置中断，尾部引用永远探不
+			// 到；命中不占预算后超预算集合逐轮拉齐。
+			if !cached.FromCache {
+				probedBytes += cached.Metadata.Size
+			}
 			// 下载成功只读一次盘：哈希在下载当场算，不再在末尾按路径二次
 			// 读取。读失败（磁盘异常）按该张「拉不到」处理，不当成可用图——
 			// 视觉运行时同样会栽在读文件上。
@@ -671,29 +680,19 @@ func (s *ReviewService) probeScreenshots(ctx context.Context, integrationID stri
 				err = fmt.Errorf("%w: %v", githubmedia.ErrLocalCache, hashErr)
 			} else {
 				contentHashes = append(contentHashes, sum)
-				// 字节预算只结算新下载的字节，缓存命中不占预算：命中的大小是
-				// 确定值，计入预算会让超预算集合每一轮都在同一位置中断——尾
-				// 部引用永远探不到、指纹永远收敛不了。命中不占预算后，超预
-				// 算集合逐轮拉齐：上一轮已下载的下一轮命中，预算让给还没拉
-				// 过的引用。单文件上限等于预算，单张新下载永远不会超限——能
-				// 触发的都是第二张及以后，此时已有成功图，结果是 probeReady
-				// + 部分指纹；本轮停在触发的那张。
-				if !cached.FromCache {
-					probedBytes += cached.Metadata.Size
-					if probedBytes > screenshotProbeBudget {
-						// 预算触发显式标记未探完：零成功时收敛到
-						// probeUnavailable 而不是 probeNone。「单张新下载不
-						// 会超限」依赖单文件上限 = 预算的常量巧合，任一侧单
-						// 独调整后第一张即可触发，落 probeNone 会把可达截图
-						// 误判「全部不是图」并结清，同一集合视觉轮被永久跳
-						// 过。已有成功图时 probeReady 优先，此标记无副作用。
-						completed = false
-						if firstReason == "" {
-							firstReason = fmt.Sprintf("截图总大小超过探测预算（%d MiB）", screenshotProbeBudget>>20)
-						}
-						break
-					}
+			}
+			if probedBytes > screenshotProbeBudget {
+				// 预算触发显式标记未探完：零成功时收敛到 probeUnavailable 而
+				// 不是 probeNone。哈希失败路径也能走到这里（此时
+				// contentHashes 为空），落 probeNone 会把可达截图误判「全部
+				// 不是图」并结清，同一 URL 集合的视觉轮被永久跳过。
+				completed = false
+				if firstReason == "" {
+					firstReason = fmt.Sprintf("截图总大小超过探测预算（%d MiB）", screenshotProbeBudget>>20)
 				}
+				break
+			}
+			if hashErr == nil {
 				continue
 			}
 		}

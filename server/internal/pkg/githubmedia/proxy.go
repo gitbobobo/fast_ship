@@ -214,24 +214,28 @@ type PassThroughResponse struct {
 	Body       io.ReadCloser
 }
 
-// CacheFullError 媒体面容量准入拒绝。Response 非空表示上游响应已经拿到并
-// 过了内容类型闸门——调用方应直接把它流式回给客户端，**不要再发一次上游请
-// 求**：容量满不是偶发而是稳态（水位停在 1 GiB），二次请求会让媒体代理对上
-// 游的请求数与连接数翻倍，抬高上游限流与延迟。
-type CacheFullError struct {
+// PassthroughError 本地拒绝缓存，但上游响应已经打开、已过内容类型闸门，可
+// 以直接交给调用方流式回包，**不要再发一次上游请求**：ErrCacheFull 在容量满
+// 时是稳态（水位停在 1 GiB），ErrMediaTooLarge 也会让超限附件每次请求都下两
+// 遍——二次回源都会让上游请求数与连接数翻倍，抬高上游限流与延迟。
+//
+// 只有「响应体还没被读」的拒绝点能这样交接：写入过程中才发现超限的那条路
+// 走不到这里（body 已被消费），仍返回裸 ErrMediaTooLarge 由调用方重新直通。
+type PassthroughError struct {
+	Err      error
 	Response *PassThroughResponse
 }
 
-func (e *CacheFullError) Error() string { return ErrCacheFull.Error() }
+func (e *PassthroughError) Error() string { return e.Err.Error() }
 
-func (e *CacheFullError) Unwrap() error { return ErrCacheFull }
+func (e *PassthroughError) Unwrap() error { return e.Err }
 
-// CacheFullPassthrough 取出 CacheFullError 里可复用的上游响应；没有（预检
-// 直接拒绝）时返回 nil, false，调用方按普通拒绝走直通。
-func CacheFullPassthrough(err error) (*PassThroughResponse, bool) {
-	var full *CacheFullError
-	if errors.As(err, &full) && full.Response != nil {
-		return full.Response, true
+// PassthroughResponse 取出 PassthroughError 里可复用的上游响应；没有（预检
+// 阶段直接拒绝）时返回 nil, false，调用方按普通拒绝走直通。
+func PassthroughResponse(err error) (*PassThroughResponse, bool) {
+	var pe *PassthroughError
+	if errors.As(err, &pe) && pe.Response != nil {
+		return pe.Response, true
 	}
 	return nil, false
 }
@@ -375,8 +379,10 @@ func WithHTTPTransport(rt http.RoundTripper) ProxyOption {
 	return func(cfg *serviceConfig) { cfg.transport = rt }
 }
 
-// WithCacheCapacity 覆盖缓存目录总容量上限（.bin 字节合计，媒体代理面）。
-// 测试注入小值观察最旧淘汰；生产装配不传即用默认上限。
+// WithCacheCapacity 覆盖缓存目录总容量上限（媒体代理面，口径见
+// cacheReservation）。这是一道**写入点准入闸**：满了拒绝缓存、流式直通，
+// 不淘汰任何已落盘条目（扫描期按最旧淘汰的旧模型已在 INT-172 R4 方向审计
+// 后删除）。测试注入小值观察准入闸拒绝；生产装配不传即用默认上限。
 func WithCacheCapacity(limit int64) ProxyOption {
 	return func(cfg *serviceConfig) { cfg.capacityLimit = limit }
 }
@@ -1518,7 +1524,10 @@ func (s *ProxyService) fetchAndCache(ctx context.Context, rawURL, bearer, scope 
 	// 已知长度超限直接拒；未知长度（分块响应的 Content-Length 为 -1）不算
 	// 超限，交给下面的 io.LimitReader + written 复核兜底。
 	if contentLength := resp.ContentLength; contentLength > s.maxCacheEntrySize {
-		return nil, ErrMediaTooLarge
+		// 响应体还没读，可以整份交回调用方直通：重新 ProxyPass 会把同一个
+		// 超限附件再下一次上游。
+		bodyHandedOff = true
+		return nil, &PassthroughError{Err: ErrMediaTooLarge, Response: s.passThroughOf(resp, contentType)}
 	}
 
 	// 容量准入（只在媒体面）：写 tmp 之前预留字节，并发下载也算在内。满了
@@ -1537,13 +1546,7 @@ func (s *ProxyService) fetchAndCache(ctx context.Context, rawURL, bearer, scope 
 			// 别再发一次上游请求（二次 GET 会让满容量稳态下的上游请求数翻
 			// 倍）。硬化头与文件名由 handler 按直通路径同一套规则补。
 			bodyHandedOff = true
-			header := s.cloneRelevantHeaders(resp.Header)
-			header.Set("Content-Type", contentType)
-			return nil, &CacheFullError{Response: &PassThroughResponse{
-				StatusCode: resp.StatusCode,
-				Header:     header,
-				Body:       resp.Body,
-			}}
+			return nil, &PassthroughError{Err: ErrCacheFull, Response: s.passThroughOf(resp, contentType)}
 		}
 		// 未落盘的路径（下载失败、改名失败）原样退还预留；settle 过的调用
 		// 是空操作。
@@ -1618,6 +1621,19 @@ func (s *ProxyService) fetchAndCache(ctx context.Context, rawURL, bearer, scope 
 		Metadata: entry,
 		Path:     cachePath,
 	}, nil
+}
+
+// passThroughOf 把已打开的上游响应包成直通响应：相关头照抄，Content-Type 用
+// 规范化后的那一个值（多值/拼接形态已在闸门上被拒，octet-stream/空类型已由
+// 扩展名回退改写成具体媒体类型）。
+func (s *ProxyService) passThroughOf(resp *http.Response, contentType string) *PassThroughResponse {
+	header := s.cloneRelevantHeaders(resp.Header)
+	header.Set("Content-Type", contentType)
+	return &PassThroughResponse{
+		StatusCode: resp.StatusCode,
+		Header:     header,
+		Body:       resp.Body,
+	}
 }
 
 func (s *ProxyService) ProxyPass(ctx context.Context, rawURL, rangeHeader string, headOnly bool) (*PassThroughResponse, error) {
