@@ -654,3 +654,119 @@ func TestAgentScreenshotsChangedDropsUnadmittedPrevRows(t *testing.T) {
 		t.Fatal("changed = true, want false（旧口径残留不该改变指纹）")
 	}
 }
+
+// 旧版本写入的行可能带 #fragment（规整规则后来才落地），而结构准入不拒
+// fragment——比较前不规整，指纹与当前集合恒不相等，changed 永远为 true。
+func TestAgentScreenshotsChangedNormalizesPrevFragments(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+
+	base := "https://uiv.frp.musiver.cn/f/"
+	var lines []string
+	for i := 0; i < 3; i++ {
+		lines = append(lines, fmt.Sprintf("![s%d](%s%d.png)", i, base, i))
+	}
+	body := strings.Join(lines, "\n\n")
+	e.fake.SetPR(repo, 98, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 98, HeadSHA: "sha-cur",
+		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature", Body: body,
+	})
+	combos, err := marshalCombinations([]api.ReviewCombination{testCombo("env-f")})
+	if err != nil {
+		t.Fatalf("marshal combos: %v", err)
+	}
+	e.enableReview(t, func(s *model.ProjectReviewSettings) {
+		s.VisualCombinationsJSON = combos
+	})
+
+	prevRun := e.seedRun(t, repo, 98, "sha-prev", model.ReviewRunCompleted, now)
+	e.svc.db.Model(prevRun).Updates(map[string]any{"kind": model.ReviewKindVisual, "round_number": 1})
+	curRun := e.seedRun(t, repo, 98, "sha-cur", model.ReviewRunQueued, now)
+	e.svc.db.Model(curRun).Updates(map[string]any{"kind": model.ReviewKindVisual, "round_number": 2})
+
+	create := func(id, head, url string, pos int) {
+		t.Helper()
+		if err := e.svc.db.Create(&model.ReviewAsset{
+			IntegrationID: model.ForgeIntegrationBuiltinGitHubID, ID: id,
+			RepoFullName: repo, PRNumber: 98, HeadSHA: head,
+			Position: pos, Label: id, SourceURL: url,
+			StoragePath: "/cache/" + id + ".png", MimeType: "image/png", SizeBytes: 10,
+			CreatedAt: now,
+		}).Error; err != nil {
+			t.Fatalf("seed asset: %v", err)
+		}
+	}
+	for i := 0; i < 3; i++ {
+		// 上一轮的行带 fragment，当前描述里的没有。
+		create(fmt.Sprintf("prev-%d", i), "sha-prev", fmt.Sprintf("%s%d.png#frag", base, i), i)
+		create(fmt.Sprintf("cur-%d", i), "sha-cur", fmt.Sprintf("%s%d.png", base, i), i)
+	}
+
+	_, changed, err := e.review.AgentScreenshots(context.Background(), curRun.ID)
+	if err != nil {
+		t.Fatalf("AgentScreenshots: %v", err)
+	}
+	if changed {
+		t.Fatal("changed = true, want false（fragment 规整后两侧应一致）")
+	}
+}
+
+// 同一 head 的 manual rerun：ensureAssets 在比较之前已把本轮新收集的 URL 写
+// 进同一张共享资产表。不过滤「本轮开始之后才建的行」，新增截图会被算进上一
+// 轮——两侧指纹相等，changed 误判为 false，新增的那张不会被提示。
+func TestAgentScreenshotsChangedExcludesRowsFromThisRound(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+
+	base := "https://uiv.frp.musiver.cn/f/"
+	var lines []string
+	for i := 0; i < maxScreenshotsPerPR-1; i++ {
+		lines = append(lines, fmt.Sprintf("![s%d](%s%d.png)", i, base, i))
+	}
+	lines = append(lines, fmt.Sprintf("![new](%snew.png)", base))
+	body := strings.Join(lines, "\n\n")
+	e.fake.SetPR(repo, 99, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 99, HeadSHA: "sha-same",
+		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature", Body: body,
+	})
+	combos, err := marshalCombinations([]api.ReviewCombination{testCombo("env-r")})
+	if err != nil {
+		t.Fatalf("marshal combos: %v", err)
+	}
+	e.enableReview(t, func(s *model.ProjectReviewSettings) {
+		s.VisualCombinationsJSON = combos
+	})
+
+	// 两轮同 head：上一轮只见过前 11 张，本轮描述新增了第 12 张。
+	prevRun := e.seedRun(t, repo, 99, "sha-same", model.ReviewRunCompleted, now)
+	e.svc.db.Model(prevRun).Updates(map[string]any{"kind": model.ReviewKindVisual, "round_number": 1})
+	curRun := e.seedRun(t, repo, 99, "sha-same", model.ReviewRunQueued, now)
+	e.svc.db.Model(curRun).Updates(map[string]any{"kind": model.ReviewKindVisual, "round_number": 2})
+
+	for i := 0; i < maxScreenshotsPerPR-1; i++ {
+		if err := e.svc.db.Create(&model.ReviewAsset{
+			IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+			ID:            fmt.Sprintf("prev-%d", i),
+			RepoFullName:  repo, PRNumber: 99, HeadSHA: "sha-same",
+			Position: i, Label: fmt.Sprintf("s%d", i),
+			SourceURL:   fmt.Sprintf("%s%d.png", base, i),
+			StoragePath: fmt.Sprintf("/cache/prev-%d.png", i), MimeType: "image/png", SizeBytes: 10,
+			CreatedAt: now, // 本轮开始之前就有
+		}).Error; err != nil {
+			t.Fatalf("seed prev asset: %v", err)
+		}
+	}
+
+	items, changed, err := e.review.AgentScreenshots(context.Background(), curRun.ID)
+	if err != nil {
+		t.Fatalf("AgentScreenshots: %v", err)
+	}
+	if len(items) != maxScreenshotsPerPR {
+		t.Fatalf("items = %d, want %d（新增的那张应当落账并展示）", len(items), maxScreenshotsPerPR)
+	}
+	if !changed {
+		t.Fatal("changed = false, want true（本轮新增的截图不能算进上一轮集合）")
+	}
+}

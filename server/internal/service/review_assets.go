@@ -788,10 +788,22 @@ func (s *ReviewService) AgentScreenshots(ctx context.Context, runID string) ([]a
 		// 那必须判 changed=true，抹掉它等于把「截图被删」报成未变化。
 		prevRefs := make([]screenshotRef, 0, maxScreenshotsPerPR)
 		for _, a := range prevAssets {
-			if !admitScreenshotURL(a.SourceURL) {
+			// 只取「本轮开始之前就存在」的行：ensureAssets 在比较之前已经把本轮
+			// 新收集的 URL 写进同一张表（同 head 的 manual rerun 也会再跑视觉
+			// 轮），不过滤就会把新增截图算进上一轮——两侧指纹相等，changed
+			// 误判为 false，新增的那张不会被提示。
+			if a.CreatedAt.After(run.CreatedAt) {
 				continue
 			}
-			prevRefs = append(prevRefs, screenshotRef{URL: a.SourceURL})
+			// 旧版本写入的行可能带 #fragment（规整规则是后来才落地的），而
+			// admitScreenshotURL 不拒 fragment——不规整就让指纹与当前集合恒不
+			// 相等。只剥 fragment：尾部标点属于裸链规整，对图片引用不成立，
+			// 猜错只会让 changed 偏 true，不值得为它冒错删合法字符的风险。
+			u := normalizeRefURL(a.SourceURL, false)
+			if !admitScreenshotURL(u) {
+				continue
+			}
+			prevRefs = append(prevRefs, screenshotRef{URL: u})
 			if len(prevRefs) == maxScreenshotsPerPR {
 				break
 			}
