@@ -750,3 +750,59 @@ func TestReviewFaceSkipsCapacityAdmission(t *testing.T) {
 		t.Fatalf("cached path stat = %v, want 落盘", err)
 	}
 }
+
+// 目录扫描读失败（权限、EIO、只读挂载）不能当成「占用为 0」写进水位：那会
+// 把水位清零，准入闸随后按空目录再放行整整一个上限的字节，与本 PR 声明的
+// 「磁盘有界」正相反。
+func TestRecalibrateCacheUsageKeepsWatermarkWhenScanFails(t *testing.T) {
+	svc, _ := newCapacityTestService(t, 100, 1)
+	if err := os.MkdirAll(svc.cacheDir, 0o750); err != nil {
+		t.Fatalf("mkdir cache dir: %v", err)
+	}
+	held, err := svc.reserveCacheBytes(60)
+	if err != nil {
+		t.Fatalf("reserve: %v", err)
+	}
+	held.settle(60)
+
+	if err := os.Chmod(svc.cacheDir, 0o000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(svc.cacheDir, 0o750) })
+	if _, readErr := os.ReadDir(svc.cacheDir); readErr == nil {
+		t.Skip("目录仍可读（以 root 运行？），无法模拟扫描失败")
+	}
+
+	svc.recalibrateCacheUsage()
+
+	// 水位仍是 60：再要 60 会越过 100。若校准把水位清零，这里会成功。
+	if _, err := svc.reserveCacheBytes(60); !errors.Is(err, ErrCacheFull) {
+		t.Fatalf("reserve after failed scan err = %v, want ErrCacheFull（水位未被清零）", err)
+	}
+}
+
+// 校准在锁外扫目录、锁内赋值：扫描期间完成落盘的字节不能被这次赋值抹掉，
+// 否则水位从此少算（单文件最多 256 MiB），准入闸会多放行同样多的字节。
+func TestRecalibrateCacheUsageKeepsSettlesRacingTheScan(t *testing.T) {
+	svc, _ := newCapacityTestService(t, 100, 1)
+	first, err := svc.reserveCacheBytes(60)
+	if err != nil {
+		t.Fatalf("reserve: %v", err)
+	}
+	first.settle(60)
+
+	// 扫描函数模拟「扫描期间又有 20 字节落盘」，并返回一份陈旧快照（0）。
+	svc.applyCalibration(func() (int64, bool) {
+		extra, err := svc.reserveCacheBytes(20)
+		if err != nil {
+			t.Fatalf("reserve during scan: %v", err)
+		}
+		extra.settle(20)
+		return 0, true
+	})
+
+	// 水位应为 80（放弃陈旧快照）。再要 30 → 110 > 100。
+	if _, err := svc.reserveCacheBytes(30); !errors.Is(err, ErrCacheFull) {
+		t.Fatalf("reserve err = %v, want ErrCacheFull（扫描期结算未被抹掉）", err)
+	}
+}

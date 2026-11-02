@@ -234,7 +234,11 @@ type ProxyService struct {
 	capCommitted  int64
 	capReserved   int64
 	capCalibrated bool
-	allowURL      func(*url.URL) bool
+	// capSettleSeq 每次落盘结算自增：校准在锁外扫目录，赋值前用它判断扫描
+	// 期间有没有新落盘——有就放弃本次校准。快照已过时，覆盖会把这段结算
+	// 抹掉（水位从此少算，准入闸随后多放行同样多的字节）。
+	capSettleSeq uint64
+	allowURL     func(*url.URL) bool
 	// requireHTTPS 只接受 https 上游（截图面）；imagesOnly 只收图片内容。
 	// GitHub 媒体面两者全关：白名单语义 + 图片视频都收，与截图面是两套准入。
 	requireHTTPS bool
@@ -757,6 +761,7 @@ func (r *cacheReservation) settle(actual int64) {
 	r.s.capMu.Lock()
 	r.s.capReserved -= r.bytes
 	r.s.capCommitted += actual
+	r.s.capSettleSeq++
 	r.s.capMu.Unlock()
 }
 
@@ -783,13 +788,7 @@ func (s *ProxyService) reserveCacheBytes(want int64) (*cacheReservation, error) 
 	needCalibrate := !s.capCalibrated
 	s.capMu.Unlock()
 	if needCalibrate {
-		bytes := s.cacheDirBytes()
-		s.capMu.Lock()
-		if !s.capCalibrated {
-			s.capCommitted = bytes
-			s.capCalibrated = true
-		}
-		s.capMu.Unlock()
+		s.applyCalibration(s.cacheDirBytes)
 	}
 
 	s.capMu.Lock()
@@ -804,31 +803,58 @@ func (s *ProxyService) reserveCacheBytes(want int64) (*cacheReservation, error) 
 // recalibrateCacheUsage 按目录实际字节重算已落盘水位（不改进行中的预留）。
 // 过期扫描删完文件后调用：不清零会让被删字节永久占着额度。
 func (s *ProxyService) recalibrateCacheUsage() {
-	bytes := s.cacheDirBytes()
-	s.capMu.Lock()
-	s.capCommitted = bytes
-	s.capCalibrated = true
-	s.capMu.Unlock()
+	s.applyCalibration(s.cacheDirBytes)
 }
 
-// cacheDirBytes 目录里占据容量的字节合计（data 与写盘中转）。
-func (s *ProxyService) cacheDirBytes() int64 {
+// applyCalibration 把一次目录扫描的结果写进已落盘水位。两种情形放弃：
+//   - scan 报告读不完整（目录/单条 stat 失败）：返回值不可信，保留旧水位。
+//     把失败当成 0 会把水位清零，准入闸随后按空目录再放行整整一个上限。
+//   - 扫描期间有新落盘（capSettleSeq 变了）：锁外拿到的快照已过时，覆盖会
+//     抹掉这段结算，水位从此少算。放弃只让水位偏多——多算只让准入更早拒
+//     绝（直通），不会误删，下轮扫描再校准即可。
+func (s *ProxyService) applyCalibration(scan func() (int64, bool)) {
+	s.capMu.Lock()
+	seq := s.capSettleSeq
+	s.capMu.Unlock()
+
+	bytes, ok := scan()
+	if !ok {
+		return
+	}
+
+	s.capMu.Lock()
+	defer s.capMu.Unlock()
+	if s.capSettleSeq != seq {
+		return
+	}
+	s.capCommitted = bytes
+	s.capCalibrated = true
+}
+
+// cacheDirBytes 目录里占据容量的字节合计（data 与写盘中转）。第二个返回值
+// 表示结果是否完整：目录不存在按空目录算（首次准入前的正常状态），其余读
+// 失败与单条 stat 失败都返回 false——总数已经不完整，不能拿它当水位。
+func (s *ProxyService) cacheDirBytes() (int64, bool) {
 	entries, err := os.ReadDir(s.cacheDir)
 	if err != nil {
-		return 0
+		return 0, errors.Is(err, os.ErrNotExist)
 	}
 	var total int64
+	complete := true
 	for _, e := range entries {
 		name := e.Name()
 		if !strings.HasSuffix(name, ".bin") &&
 			!(strings.HasPrefix(name, "media-") && strings.HasSuffix(name, ".tmp")) {
 			continue
 		}
-		if info, err := e.Info(); err == nil {
-			total += info.Size()
+		info, err := e.Info()
+		if err != nil {
+			complete = false
+			continue
 		}
+		total += info.Size()
 	}
-	return total
+	return total, complete
 }
 
 // sweepStaleTmpFiles 回收 CreateTemp 的 media-*.tmp 写盘中转：进程被杀/机器
