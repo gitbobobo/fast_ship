@@ -43,9 +43,11 @@ func (h *GitHubMediaProxyHandler) Proxy(c *gin.Context) {
 	} else if ok && serveCachedMedia(c, cached) {
 		return
 	}
-	// 命中但文件打不开（条目刚被容量回收/过期清扫删掉，GetCached 读到
-	// meta 与 os.Open 之间没有互斥）：按 miss 走重下，淘汰窗口不暴露成破
-	// 图 404——容量回收把这种窗口从「仅过期条目」扩大到了任意旧条目。
+	// 命中但文件打不开（条目刚被过期清扫或人工删除掉，GetCached 读到 meta
+	// 与 os.Open 之间没有互斥）：按 miss 走重下，这个窗口不暴露成破图 404。
+	// 容量机制不删任何已落盘条目（闸长在写入点，见 githubmedia 的
+	// cacheReservation），所以窗口只来自过期清扫——历史上那套「扫描期按最旧
+	// 淘汰」曾在 INT-172 R4 方向审计后被删除，它才会把窗口扩大到任意旧条目。
 
 	if rangeHeader != "" || headOnly {
 		resp, err := h.service.ProxyPass(c.Request.Context(), rawURL, rangeHeader, headOnly)
