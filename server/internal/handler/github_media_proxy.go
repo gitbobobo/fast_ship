@@ -53,17 +53,7 @@ func (h *GitHubMediaProxyHandler) Proxy(c *gin.Context) {
 			writeMediaProxyError(c, err)
 			return
 		}
-		defer resp.Body.Close()
-
-		copyMediaHeaders(c.Writer.Header(), resp.Header)
-		// 传规范化后的类型：直通路径回包的 Content-Type 已是去参小写的基础
-		// 类型，文件名对账用它，别用上游原始值（带参数会对不上表）。
-		setMediaProxyHardeningHeaders(c.Writer.Header(), rawURL, resp.Header.Get("Content-Type"))
-		c.Status(resp.StatusCode)
-		if headOnly {
-			return
-		}
-		_, _ = io.Copy(c.Writer, resp.Body)
+		servePassThrough(c, rawURL, resp, headOnly)
 		return
 	}
 
@@ -77,22 +67,24 @@ func (h *GitHubMediaProxyHandler) Proxy(c *gin.Context) {
 		return
 	}
 
-	// 本地拒绝缓存两种成因走同一条退路——ProxyPass 兜底，把流式响应直接回
-	// 给客户端：单文件超限（ErrMediaTooLarge）、媒体面缓存水位会越过容量上
-	// 限（ErrCacheFull，容量机制不删已落盘条目，所以只拒新字节）。上游自己
-	// 回的 413 不是本地拒绝，走下面的常规错误分支。
+	// 本地拒绝缓存两种成因走同一条退路——把流式响应直接回给客户端：单文件
+	// 超限（ErrMediaTooLarge）、媒体面缓存水位会越过容量上限（ErrCacheFull，
+	// 容量机制不删已落盘条目，所以只拒新字节）。上游自己回的 413 不是本地
+	// 拒绝，走下面的常规错误分支。
 	if errors.Is(err, githubmedia.ErrMediaTooLarge) || errors.Is(err, githubmedia.ErrCacheFull) {
+		// 请求中途被准入闸拒时上游响应已经打开（过了内容类型闸门）：直接复
+		// 用它，不再发第二次上游请求——容量满不是偶发而是稳态，二次 GET 会
+		// 让上游请求数与连接数翻倍。
+		if resp, ok := githubmedia.CacheFullPassthrough(err); ok {
+			servePassThrough(c, rawURL, resp, false)
+			return
+		}
 		resp, passErr := h.service.ProxyPass(c.Request.Context(), rawURL, "", false)
 		if passErr != nil {
 			writeMediaProxyError(c, passErr)
 			return
 		}
-		defer resp.Body.Close()
-
-		copyMediaHeaders(c.Writer.Header(), resp.Header)
-		setMediaProxyHardeningHeaders(c.Writer.Header(), rawURL, resp.Header.Get("Content-Type"))
-		c.Status(resp.StatusCode)
-		_, _ = io.Copy(c.Writer, resp.Body)
+		servePassThrough(c, rawURL, resp, false)
 		return
 	}
 
@@ -109,6 +101,22 @@ func decodeMediaURLParam(value string) string {
 		decoded = next
 	}
 	return decoded
+}
+
+// servePassThrough 把直通响应写回客户端：拷贝相关头、补硬化头与下载文件名、
+// 回状态码、流式拷 body。headOnly 时不拷 body（上游 HEAD 本来就没有）。
+func servePassThrough(c *gin.Context, rawURL string, resp *githubmedia.PassThroughResponse, headOnly bool) {
+	defer resp.Body.Close()
+
+	copyMediaHeaders(c.Writer.Header(), resp.Header)
+	// 传规范化后的类型：直通回包的 Content-Type 已是去参小写的基础类型，
+	// 文件名对账用它，别用上游原始值（带参数会对不上表）。
+	setMediaProxyHardeningHeaders(c.Writer.Header(), rawURL, resp.Header.Get("Content-Type"))
+	c.Status(resp.StatusCode)
+	if headOnly {
+		return
+	}
+	_, _ = io.Copy(c.Writer, resp.Body)
 }
 
 func serveCachedMedia(c *gin.Context, media *githubmedia.CachedMedia) bool {

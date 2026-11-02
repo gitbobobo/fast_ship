@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -846,4 +848,86 @@ func TestCapacityUncalibratedRefusesCachingAndThrottlesRetry(t *testing.T) {
 		t.Fatalf("reserve after backoff: %v, want 成功（校准成功）", err)
 	}
 	held.release()
+}
+
+// newCapacityTestServiceWithHits 同 newCapacityTestService，额外暴露上游命中
+// 计数，用来断言「容量满时不多打上游」。
+func newCapacityTestServiceWithHits(t *testing.T, capacity int64, size int) (*ProxyService, string, *atomic.Int32) {
+	t.Helper()
+	payload := bytes.Repeat([]byte("x"), size)
+	var hits atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(payload)
+	}))
+	t.Cleanup(upstream.Close)
+	parsed, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("parse upstream url: %v", err)
+	}
+	svc := newService(t.TempDir(), serviceConfig{
+		cacheSubdir:   defaultCacheSubdir,
+		cacheTTL:      time.Hour,
+		capacityLimit: capacity,
+		client:        upstream.Client(),
+		allowURL:      func(u *url.URL) bool { return u.Host == parsed.Host },
+	})
+	return svc, upstream.URL, &hits
+}
+
+// 请求中途才被准入闸拒时不能丢掉已经打开的上游响应：把它交给调用方流式回
+// 包，上游只被请求一次。容量满不是偶发而是稳态，二次 GET 会让媒体代理对上
+// 游的请求数与连接数翻倍，抬高上游限流与延迟。
+func TestFetchAndCacheCacheFullReusesUpstreamResponse(t *testing.T) {
+	svc, upstream, hits := newCapacityTestServiceWithHits(t, 100, 64)
+
+	// 先占掉 60 字节水位（未满），随后一次 64 字节的下载放不下。
+	held, err := svc.reserveCacheBytes(60)
+	if err != nil {
+		t.Fatalf("reserve: %v", err)
+	}
+	held.settle(60)
+
+	_, err = svc.FetchAndCache(context.Background(), upstream+"/big.png")
+	if !errors.Is(err, ErrCacheFull) {
+		t.Fatalf("err = %v, want ErrCacheFull", err)
+	}
+	resp, ok := CacheFullPassthrough(err)
+	if !ok || resp == nil {
+		t.Fatalf("CacheFullPassthrough = %v, want 可复用的上游响应", ok)
+	}
+	body, readErr := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if readErr != nil {
+		t.Fatalf("read body: %v", readErr)
+	}
+	if len(body) != 64 {
+		t.Fatalf("body len = %d, want 64（复用已打开的上游响应）", len(body))
+	}
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("upstream hits = %d, want 1（不得二次请求）", got)
+	}
+}
+
+// 水位已满时连回源都不该发：预检直接拒绝，调用方走直通只打一次上游。
+func TestFetchAndCacheCacheFullPrecheckSkipsUpstream(t *testing.T) {
+	svc, upstream, hits := newCapacityTestServiceWithHits(t, 100, 64)
+
+	held, err := svc.reserveCacheBytes(100)
+	if err != nil {
+		t.Fatalf("reserve: %v", err)
+	}
+	held.settle(100)
+
+	_, err = svc.FetchAndCache(context.Background(), upstream+"/any.png")
+	if !errors.Is(err, ErrCacheFull) {
+		t.Fatalf("err = %v, want ErrCacheFull", err)
+	}
+	if _, ok := CacheFullPassthrough(err); ok {
+		t.Fatal("CacheFullPassthrough 非空, want 空（预检拒绝没有上游响应可复用）")
+	}
+	if got := hits.Load(); got != 0 {
+		t.Fatalf("upstream hits = %d, want 0（满容量时预检直接拒绝，不回源）", got)
+	}
 }

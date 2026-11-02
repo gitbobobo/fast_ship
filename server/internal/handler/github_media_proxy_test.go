@@ -473,4 +473,52 @@ func TestGitHubMediaProxyFallsBackToPassthroughWhenCacheFull(t *testing.T) {
 	if got := rec.Body.String(); got != "png-bytes" {
 		t.Fatalf("body = %q, want 直通的字节", got)
 	}
+	// 水位已满时预检直接拒绝，直通只打一次上游。
+	if got := upstreamTransport.hits.Load(); got != 1 {
+		t.Fatalf("upstream hits = %d, want 1（满容量不多打上游）", got)
+	}
+}
+
+// 请求中途才被准入闸拒时，handler 复用已经打开的上游响应，不再发第二次上
+// 游请求：容量满不是偶发而是稳态，二次 GET 会让上游请求数与连接数翻倍。
+func TestGitHubMediaProxyReusesUpstreamResponseWhenCacheFillsMidRequest(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write([]byte("0123456789abcdef0123456789abcdef")) // 32 字节
+	}))
+	defer upstream.Close()
+	target, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("parse upstream url: %v", err)
+	}
+	upstreamTransport := &rewriteToUpstreamTransport{target: target}
+	// 上限 40：第一张 32 字节能进（水位 32），第二张 32 字节放不下。
+	svc := githubmedia.NewProxyService(t.TempDir(),
+		githubmedia.WithHTTPTransport(upstreamTransport),
+		githubmedia.WithCacheCapacity(40))
+
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.GET(githubmedia.ProxyPath, NewGitHubMediaProxyHandler(svc).Proxy)
+	get := func(name string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, githubmedia.ProxyPath+"?url="+
+			url.QueryEscape("http://github.com/user-attachments/assets/"+name), nil)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		return rec
+	}
+
+	if rec := get("first.png"); rec.Code != http.StatusOK {
+		t.Fatalf("first code = %d, want 200（32 ≤ 40，正常缓存）", rec.Code)
+	}
+	rec := get("second.png")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("second code = %d body = %s, want 200（复用已打开的上游响应）", rec.Code, rec.Body.String())
+	}
+	if got := rec.Body.String(); len(got) != 32 {
+		t.Fatalf("second body len = %d, want 32", len(got))
+	}
+	if got := upstreamTransport.hits.Load(); got != 2 {
+		t.Fatalf("upstream hits = %d, want 2（每张各一次，不二次请求）", got)
+	}
 }

@@ -214,6 +214,28 @@ type PassThroughResponse struct {
 	Body       io.ReadCloser
 }
 
+// CacheFullError 媒体面容量准入拒绝。Response 非空表示上游响应已经拿到并
+// 过了内容类型闸门——调用方应直接把它流式回给客户端，**不要再发一次上游请
+// 求**：容量满不是偶发而是稳态（水位停在 1 GiB），二次请求会让媒体代理对上
+// 游的请求数与连接数翻倍，抬高上游限流与延迟。
+type CacheFullError struct {
+	Response *PassThroughResponse
+}
+
+func (e *CacheFullError) Error() string { return ErrCacheFull.Error() }
+
+func (e *CacheFullError) Unwrap() error { return ErrCacheFull }
+
+// CacheFullPassthrough 取出 CacheFullError 里可复用的上游响应；没有（预检
+// 直接拒绝）时返回 nil, false，调用方按普通拒绝走直通。
+func CacheFullPassthrough(err error) (*PassThroughResponse, bool) {
+	var full *CacheFullError
+	if errors.As(err, &full) && full.Response != nil {
+		return full.Response, true
+	}
+	return nil, false
+}
+
 type ProxyService struct {
 	client   *http.Client
 	cacheDir string
@@ -809,6 +831,18 @@ func (s *ProxyService) reserveCacheBytes(want int64) (*cacheReservation, error) 
 // capacityCalibrateRetryInterval 校准失败后的重试下限。读不完整是罕见故障
 // （权限、EIO、只读挂载），退避期内写请求直接直通而不是反复重扫目录。
 var capacityCalibrateRetryInterval = time.Minute
+
+// cacheAdmissionFull 媒体面水位是否已满（含未校准）：满了这次的字节一定放
+// 不下，不必回源就能拒绝。截图面不吃这道闸。
+func (s *ProxyService) cacheAdmissionFull() bool {
+	if s.cacheSubdir != defaultCacheSubdir {
+		return false
+	}
+	s.ensureCapacityCalibrated()
+	s.capMu.Lock()
+	defer s.capMu.Unlock()
+	return !s.capCalibrated || s.capCommitted+s.capReserved >= s.capacityLimit
+}
 
 // recalibrateCacheUsage 按目录实际字节重算已落盘水位（不改进行中的预留）。
 // 过期扫描删完文件后调用：不清零会让被删字节永久占着额度。
@@ -1428,6 +1462,13 @@ func (s *ProxyService) fetchAndCache(ctx context.Context, rawURL, bearer, scope 
 		}
 	}
 
+	// 水位已满就不必回源：这次的字节一定放不下，直接拒绝让调用方直通。容量
+	// 满不是偶发而是稳态，少了这道预检，每个命中不到的请求都会先打一次上游
+	// 拿响应头、再被准入闸拒掉、再由直通重打一次。
+	if s.cacheAdmissionFull() {
+		return nil, ErrCacheFull
+	}
+
 	if err := os.MkdirAll(s.cacheDir, 0o750); err != nil {
 		return nil, markLocalCacheErr(err)
 	}
@@ -1449,7 +1490,14 @@ func (s *ProxyService) fetchAndCache(ctx context.Context, rawURL, bearer, scope 
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	// 容量准入可能把响应体交给调用方流式回包（见下面的 CacheFullError），
+	// 那种情况下这里不能替它关。
+	bodyHandedOff := false
+	defer func() {
+		if !bodyHandedOff {
+			resp.Body.Close()
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, &UpstreamStatusError{StatusCode: resp.StatusCode}
@@ -1485,7 +1533,17 @@ func (s *ProxyService) fetchAndCache(ctx context.Context, rawURL, bearer, scope 
 		}
 		var reserveErr error
 		if reservation, reserveErr = s.reserveCacheBytes(want); reserveErr != nil {
-			return nil, reserveErr
+			// 上游响应已经拿到并过了内容类型闸门：把它交给调用方流式回包，
+			// 别再发一次上游请求（二次 GET 会让满容量稳态下的上游请求数翻
+			// 倍）。硬化头与文件名由 handler 按直通路径同一套规则补。
+			bodyHandedOff = true
+			header := s.cloneRelevantHeaders(resp.Header)
+			header.Set("Content-Type", contentType)
+			return nil, &CacheFullError{Response: &PassThroughResponse{
+				StatusCode: resp.StatusCode,
+				Header:     header,
+				Body:       resp.Body,
+			}}
 		}
 		// 未落盘的路径（下载失败、改名失败）原样退还预留；settle 过的调用
 		// 是空操作。
