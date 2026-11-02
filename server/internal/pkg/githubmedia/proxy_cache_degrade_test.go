@@ -781,28 +781,69 @@ func TestRecalibrateCacheUsageKeepsWatermarkWhenScanFails(t *testing.T) {
 	}
 }
 
-// 校准在锁外扫目录、锁内赋值：扫描期间完成落盘的字节不能被这次赋值抹掉，
-// 否则水位从此少算（单文件最多 256 MiB），准入闸会多放行同样多的字节。
-func TestRecalibrateCacheUsageKeepsSettlesRacingTheScan(t *testing.T) {
-	svc, _ := newCapacityTestService(t, 100, 1)
-	first, err := svc.reserveCacheBytes(60)
-	if err != nil {
-		t.Fatalf("reserve: %v", err)
-	}
-	first.settle(60)
+// 校准在锁外扫目录：扫描期间落盘的字节不能被陈旧快照抹掉。快照之后完成
+// 的 settle 叠加到快照上，水位等于真实占用（而不是只剩快照那份，也不是
+// 只剩新落盘那份——后者会让重启前的存量整段不计入，磁盘可到上限的两倍）。
+func TestRecalibrateCacheUsageAddsSettlesRacingTheScan(t *testing.T) {
+	svc, upstream := newCapacityTestService(t, 100, 32)
 
-	// 扫描函数模拟「扫描期间又有 20 字节落盘」，并返回一份陈旧快照（0）。
 	svc.applyCalibration(func() (int64, bool) {
-		extra, err := svc.reserveCacheBytes(20)
-		if err != nil {
-			t.Fatalf("reserve during scan: %v", err)
+		// 扫描读到空目录（快照 0 字节），随后一次下载落盘 32 字节并结算。
+		if _, err := svc.FetchAndCache(context.Background(), upstream+"/race.png"); err != nil {
+			t.Fatalf("fetch during scan: %v", err)
 		}
-		extra.settle(20)
 		return 0, true
 	})
 
-	// 水位应为 80（放弃陈旧快照）。再要 30 → 110 > 100。
-	if _, err := svc.reserveCacheBytes(30); !errors.Is(err, ErrCacheFull) {
-		t.Fatalf("reserve err = %v, want ErrCacheFull（扫描期结算未被抹掉）", err)
+	// 水位应为 32（= 快照 0 + 扫描期结算 32 = 盘上实际字节）。
+	if _, err := svc.reserveCacheBytes(68); err != nil {
+		t.Fatalf("reserve 68: %v, want 成功（32+68 = 100 ≤ 上限）", err)
 	}
+	if _, err := svc.reserveCacheBytes(1); !errors.Is(err, ErrCacheFull) {
+		t.Fatalf("reserve 1 err = %v, want ErrCacheFull（水位已到 100）", err)
+	}
+}
+
+// 首次校准失败时不能按「水位 0」放行：那一刻账上只有本进程启动后的落盘
+// 量，磁盘上重启前的存量整段不在账上，按它放行能让目录写到上限的两倍。
+// 失败的校准也不随每条写请求重扫目录——退避期内一律直通。
+func TestCapacityUncalibratedRefusesCachingAndThrottlesRetry(t *testing.T) {
+	svc, _ := newCapacityTestService(t, 100, 1)
+	if err := os.MkdirAll(svc.cacheDir, 0o750); err != nil {
+		t.Fatalf("mkdir cache dir: %v", err)
+	}
+	if err := os.Chmod(svc.cacheDir, 0o000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	restored := false
+	restore := func() {
+		if !restored {
+			restored = true
+			_ = os.Chmod(svc.cacheDir, 0o750)
+		}
+	}
+	t.Cleanup(restore)
+	if _, readErr := os.ReadDir(svc.cacheDir); readErr == nil {
+		t.Skip("目录仍可读（以 root 运行？），无法模拟扫描失败")
+	}
+
+	if _, err := svc.reserveCacheBytes(1); !errors.Is(err, ErrCacheFull) {
+		t.Fatalf("reserve err = %v, want ErrCacheFull（未校准不放行）", err)
+	}
+
+	// 权限恢复后立刻再试：仍在退避期，不重扫、继续直通。
+	restore()
+	if _, err := svc.reserveCacheBytes(1); !errors.Is(err, ErrCacheFull) {
+		t.Fatalf("reserve in backoff err = %v, want ErrCacheFull（退避期内不重扫）", err)
+	}
+
+	// 退避到期后重新校准并放行。
+	svc.capMu.Lock()
+	svc.capNextCalibrateAt = time.Time{}
+	svc.capMu.Unlock()
+	held, err := svc.reserveCacheBytes(1)
+	if err != nil {
+		t.Fatalf("reserve after backoff: %v, want 成功（校准成功）", err)
+	}
+	held.release()
 }

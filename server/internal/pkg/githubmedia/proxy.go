@@ -234,11 +234,16 @@ type ProxyService struct {
 	capCommitted  int64
 	capReserved   int64
 	capCalibrated bool
-	// capSettleSeq 每次落盘结算自增：校准在锁外扫目录，赋值前用它判断扫描
-	// 期间有没有新落盘——有就放弃本次校准。快照已过时，覆盖会把这段结算
-	// 抹掉（水位从此少算，准入闸随后多放行同样多的字节）。
-	capSettleSeq uint64
-	allowURL     func(*url.URL) bool
+	// capSettledTotal 落盘结算的累计字节（单调递增）。校准在锁外扫目录，
+	// 用「扫描开始时的累计值」求扫描期间新增的结算量，叠加到快照上——快照
+	// 之后的落盘不会漏算（见 applyCalibration）。
+	capSettledTotal int64
+	// capNextCalibrateAt 校准失败（目录读不完整）后的重试下限：避免每条写
+	// 请求都重扫一遍整个缓存目录。
+	capNextCalibrateAt time.Time
+	// capCalMu 校准单飞：并发首次准入只做一次目录扫描，其余等待复用结果。
+	capCalMu sync.Mutex
+	allowURL func(*url.URL) bool
 	// requireHTTPS 只接受 https 上游（截图面）；imagesOnly 只收图片内容。
 	// GitHub 媒体面两者全关：白名单语义 + 图片视频都收，与截图面是两套准入。
 	requireHTTPS bool
@@ -761,7 +766,7 @@ func (r *cacheReservation) settle(actual int64) {
 	r.s.capMu.Lock()
 	r.s.capReserved -= r.bytes
 	r.s.capCommitted += actual
-	r.s.capSettleSeq++
+	r.s.capSettledTotal += actual
 	r.s.capMu.Unlock()
 }
 
@@ -783,16 +788,17 @@ func (s *ProxyService) reserveCacheBytes(want int64) (*cacheReservation, error) 
 		want = 1
 	}
 	// 首次准入前校准：构造期不扫目录（测试 seed 与扫描会互踩），放这里同样
-	// 只在真正要写盘时付一次 IO。并发首次准入会重复扫一遍，结果收敛。
-	s.capMu.Lock()
-	needCalibrate := !s.capCalibrated
-	s.capMu.Unlock()
-	if needCalibrate {
-		s.applyCalibration(s.cacheDirBytes)
-	}
+	// 只在真正要写盘时付一次 IO。
+	s.ensureCapacityCalibrated()
 
 	s.capMu.Lock()
 	defer s.capMu.Unlock()
+	// 没校准成功就不缓存：水位此刻只剩「本进程启动后的落盘量」，磁盘上重启
+	// 前的存量整段不在账上，按它放行能让目录写到上限的两倍。真实占用未知时
+	// 宁可直通——读不完整是罕见故障，退避期内继续直通，校准成功即自愈。
+	if !s.capCalibrated {
+		return nil, ErrCacheFull
+	}
 	if s.capCommitted+s.capReserved+want > s.capacityLimit {
 		return nil, ErrCacheFull
 	}
@@ -800,35 +806,71 @@ func (s *ProxyService) reserveCacheBytes(want int64) (*cacheReservation, error) 
 	return &cacheReservation{s: s, bytes: want}, nil
 }
 
+// capacityCalibrateRetryInterval 校准失败后的重试下限。读不完整是罕见故障
+// （权限、EIO、只读挂载），退避期内写请求直接直通而不是反复重扫目录。
+var capacityCalibrateRetryInterval = time.Minute
+
 // recalibrateCacheUsage 按目录实际字节重算已落盘水位（不改进行中的预留）。
 // 过期扫描删完文件后调用：不清零会让被删字节永久占着额度。
 func (s *ProxyService) recalibrateCacheUsage() {
 	s.applyCalibration(s.cacheDirBytes)
 }
 
-// applyCalibration 把一次目录扫描的结果写进已落盘水位。两种情形放弃：
-//   - scan 报告读不完整（目录/单条 stat 失败）：返回值不可信，保留旧水位。
-//     把失败当成 0 会把水位清零，准入闸随后按空目录再放行整整一个上限。
-//   - 扫描期间有新落盘（capSettleSeq 变了）：锁外拿到的快照已过时，覆盖会
-//     抹掉这段结算，水位从此少算。放弃只让水位偏多——多算只让准入更早拒
-//     绝（直通），不会误删，下轮扫描再校准即可。
-func (s *ProxyService) applyCalibration(scan func() (int64, bool)) {
+// ensureCapacityCalibrated 保证首次校准已做过。单飞：并发首次准入只扫一遍
+// 目录；校准失败按 capacityCalibrateRetryInterval 退避，不随每条写请求重扫。
+func (s *ProxyService) ensureCapacityCalibrated() {
 	s.capMu.Lock()
-	seq := s.capSettleSeq
+	done := s.capCalibrated
+	s.capMu.Unlock()
+	if done {
+		return
+	}
+
+	s.capCalMu.Lock()
+	defer s.capCalMu.Unlock()
+	s.capMu.Lock()
+	if s.capCalibrated || time.Now().Before(s.capNextCalibrateAt) {
+		s.capMu.Unlock()
+		return
+	}
+	s.capMu.Unlock()
+
+	if s.applyCalibration(s.cacheDirBytes) {
+		s.capMu.Lock()
+		s.capNextCalibrateAt = time.Time{}
+		s.capMu.Unlock()
+		return
+	}
+	s.capMu.Lock()
+	s.capNextCalibrateAt = time.Now().Add(capacityCalibrateRetryInterval)
+	s.capMu.Unlock()
+}
+
+// applyCalibration 把一次目录扫描的结果写进已落盘水位，返回是否校准成功。
+//
+// 快照在锁外读，读完到赋值之间可能有下载落盘（capSettledTotal 增长）：这段
+// 增量叠加到快照上，快照之后的落盘不会漏算。基数取扫描开始时的累计值，已经
+// 落在同一快照里的结算会被重复计入——偏差方向是多算，多算只让准入更早拒绝
+// （直通），少算才会越界。
+//
+// 扫描不完整（目录或单条 stat 读不到）时放弃、保留旧水位：总数已经不可信，
+// 拿它当水位会把存量清零。此时 capCalibrated 保持原值——已经校准过的继续用
+// 旧水位（偏多，安全）；从未校准过的保持未校准，准入闸拒绝缓存直到校准成功。
+func (s *ProxyService) applyCalibration(scan func() (int64, bool)) bool {
+	s.capMu.Lock()
+	base := s.capSettledTotal
 	s.capMu.Unlock()
 
 	bytes, ok := scan()
 	if !ok {
-		return
+		return false
 	}
 
 	s.capMu.Lock()
 	defer s.capMu.Unlock()
-	if s.capSettleSeq != seq {
-		return
-	}
-	s.capCommitted = bytes
+	s.capCommitted = bytes + (s.capSettledTotal - base)
 	s.capCalibrated = true
+	return true
 }
 
 // cacheDirBytes 目录里占据容量的字节合计（data 与写盘中转）。第二个返回值
