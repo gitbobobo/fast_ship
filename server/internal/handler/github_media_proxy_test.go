@@ -374,10 +374,14 @@ func TestMediaProxySVGByExtensionRejectionShortCache(t *testing.T) {
 	}
 }
 
-// 容量回收/过期扫描把 .bin 删在 GetCached 命中与 os.Open 之间（读路径无互
-// 锁，容量回收把这种窗口从「仅过期条目」扩大到任意旧条目）：按 miss 回退
-// 重下，淘汰窗口不暴露成破图 404。
-func TestGitHubMediaProxyServesAfterCacheFileEvictedBetweenHitAndOpen(t *testing.T) {
+// 缓存文件在两次请求之间被删（过期扫描、人工清理、重启后残留的 meta）：
+// GetCached 靠 stat 判 miss，handler 按普通未命中重下，客户端不看到破图。
+//
+// 注意这条**不**覆盖 serveCachedMedia 返回 false 的那个分支（GetCached 与
+// os.Open 之间的删除窗口）：getCachedNormalized 自己会 stat data 文件，文件
+// 先删掉就轮不到那条分支。分支本身由
+// TestServeCachedMediaWritesNothingWhenFileMissing 直接覆盖。
+func TestGitHubMediaProxyRefetchesAfterCacheFileDeleted(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/png")
 		_, _ = w.Write([]byte("png-bytes"))
@@ -520,5 +524,26 @@ func TestGitHubMediaProxyReusesUpstreamResponseWhenCacheFillsMidRequest(t *testi
 	}
 	if got := upstreamTransport.hits.Load(); got != 2 {
 		t.Fatalf("upstream hits = %d, want 2（每张各一次，不二次请求）", got)
+	}
+}
+
+// serveCachedMedia 打开失败时必须返回 false 且不写任何响应：调用方据此按
+// miss 回退重下（GetCached 与 os.Open 之间的删除窗口，读路径无互锁）。它自己
+// 写 404 的话，回退就无从发生，窗口会以一次破图收场。
+func TestServeCachedMediaWritesNothingWhenFileMissing(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	missing := filepath.Join(t.TempDir(), "gone.bin")
+	media := githubmedia.CachedImage(missing, "image/png", 15)
+	media.Metadata.URL = "http://github.com/user-attachments/assets/gone.png"
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/", nil)
+
+	if served := serveCachedMedia(c, media); served {
+		t.Fatal("serveCachedMedia = true, want false（文件打不开）")
+	}
+	if rec.Code != http.StatusOK || rec.Body.Len() != 0 {
+		t.Fatalf("recorder = %d/%q, want 未写任何响应（让调用方回退重下）", rec.Code, rec.Body.String())
 	}
 }
