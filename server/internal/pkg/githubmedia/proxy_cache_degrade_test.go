@@ -1048,3 +1048,50 @@ func TestCapacityRecalibrateRetriesAfterFailure(t *testing.T) {
 	}
 	next.release()
 }
+
+// .gone 是清扫为压 stat→remove 窗口 rename 出来的隔离名：进程在 rename 后、
+// remove 前被杀时留在盘上，要等 2×TTL 才收。不计入容量口径，实际占用就会在
+// 回收前超过声明的上限。
+func TestCacheDirBytesCountsGoneIsolationFiles(t *testing.T) {
+	svc, _ := newCapacityTestService(t, 100, 1)
+	if err := os.MkdirAll(svc.cacheDir, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	for _, name := range []string{"a.bin.gone", "b.json.gone"} {
+		if err := os.WriteFile(filepath.Join(svc.cacheDir, name), bytes.Repeat([]byte("x"), 40), 0o640); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	svc.recalibrateCacheUsage()
+
+	// 水位 80：再要 30 会越过 100。
+	if _, err := svc.reserveCacheBytes(30); !errors.Is(err, ErrCacheFull) {
+		t.Fatalf("reserve err = %v, want ErrCacheFull（隔离残留计入容量）", err)
+	}
+}
+
+// 清扫末尾的校准要拿请求侧的同一把单飞锁：否则请求侧可能读到「清扫删除之前」
+// 的快照、在清扫校准之后才写回，把已删字节重新计进水位——刚释放的额度白丢，
+// 媒体面在下次清扫前一直拒缓存。
+func TestRecalibrateCacheUsageSerializesWithAdmissionCalibration(t *testing.T) {
+	svc, _ := newCapacityTestService(t, 100, 1)
+
+	svc.capCalMu.Lock() // 模拟请求侧正在校准
+	done := make(chan struct{})
+	go func() {
+		svc.recalibrateCacheUsage()
+		close(done)
+	}()
+	select {
+	case <-done:
+		svc.capCalMu.Unlock()
+		t.Fatal("recalibrate 未等待单飞锁, want 阻塞（扫描+赋值与请求侧校准串行）")
+	case <-time.After(100 * time.Millisecond):
+	}
+	svc.capCalMu.Unlock()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("放锁后 recalibrate 仍未完成")
+	}
+}

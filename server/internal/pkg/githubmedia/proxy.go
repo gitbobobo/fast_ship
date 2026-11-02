@@ -862,6 +862,12 @@ func (s *ProxyService) cacheAdmissionFull() bool {
 // recalibrateCacheUsage 按目录实际字节重算已落盘水位（不改进行中的预留）。
 // 过期扫描删完文件后调用：不清零会让被删字节永久占着额度。
 func (s *ProxyService) recalibrateCacheUsage() {
+	// 与请求侧校准共用一把单飞锁：校准是「锁外扫目录、锁内赋值」，两次校准
+	// 并发时，请求侧可能在清扫删除**之前**读到快照、在清扫校准**之后**才写
+	// 回——已删字节被重新计进水位，清扫刚释放的额度白丢，媒体面会在下次
+	// 6h 清扫前一直拒缓存。
+	s.capCalMu.Lock()
+	defer s.capCalMu.Unlock()
 	if s.applyCalibration(s.cacheDirBytes) {
 		s.capMu.Lock()
 		s.capNextCalibrateAt = time.Time{}
@@ -937,7 +943,7 @@ func (s *ProxyService) applyCalibration(scan func() (int64, bool)) bool {
 	return true
 }
 
-// cacheDirBytes 目录里占据容量的字节合计（data 与写盘中转）。第二个返回值
+// cacheDirBytes 目录里占据容量的字节合计（data、写盘中转与隔离残留）。第二个返回值
 // 表示结果是否完整：目录不存在按空目录算（首次准入前的正常状态），其余读
 // 失败与单条 stat 失败都返回 false——总数已经不完整，不能拿它当水位。
 func (s *ProxyService) cacheDirBytes() (int64, bool) {
@@ -949,7 +955,10 @@ func (s *ProxyService) cacheDirBytes() (int64, bool) {
 	complete := true
 	for _, e := range entries {
 		name := e.Name()
-		if !strings.HasSuffix(name, ".bin") &&
+		// .gone 是清扫为压 stat→remove 窗口 rename 出来的隔离名：进程在
+		// rename 后、remove 前被杀时它们留在盘上（`sweepExpiredEntries` 要等
+		// 2×TTL 才收），不计入会让实际占用在回收前超过声明的上限。
+		if !strings.HasSuffix(name, ".bin") && !strings.HasSuffix(name, ".gone") &&
 			!(strings.HasPrefix(name, "media-") && strings.HasSuffix(name, ".tmp")) {
 			continue
 		}

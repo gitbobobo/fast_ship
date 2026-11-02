@@ -524,3 +524,71 @@ func TestCollectScreenshotURLsTruncatesAtLimit(t *testing.T) {
 		}
 	}
 }
+
+// changed 两侧口径必须一致：本轮指纹来自截断后的收集结果，上一轮的行可能
+// 是升级前留下的全量（同一 head 上超过张数上限）。不按同一规则截断，多出来
+// 的旧 URL 会让指纹恒不相等，changed 永远为 true。
+func TestAgentScreenshotsChangedTruncatesPrevAssets(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+
+	base := "https://uiv.frp.musiver.cn/f/"
+	var lines []string
+	for i := 0; i < maxScreenshotsPerPR; i++ {
+		lines = append(lines, fmt.Sprintf("![s%d](%s%d.png)", i, base, i))
+	}
+	body := strings.Join(lines, "\n\n")
+	e.fake.SetPR(repo, 96, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 96, HeadSHA: "sha-cur",
+		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature", Body: body,
+	})
+	combos, err := marshalCombinations([]api.ReviewCombination{testCombo("env-c")})
+	if err != nil {
+		t.Fatalf("marshal combos: %v", err)
+	}
+	e.enableReview(t, func(s *model.ProjectReviewSettings) {
+		s.VisualCombinationsJSON = combos
+	})
+
+	prevRun := e.seedRun(t, repo, 96, "sha-prev", model.ReviewRunCompleted, now)
+	e.svc.db.Model(prevRun).Updates(map[string]any{"kind": model.ReviewKindVisual, "round_number": 1})
+	curRun := e.seedRun(t, repo, 96, "sha-cur", model.ReviewRunQueued, now)
+	e.svc.db.Model(curRun).Updates(map[string]any{"kind": model.ReviewKindVisual, "round_number": 2})
+
+	mk := func(id, head, url string, pos int) *model.ReviewAsset {
+		return &model.ReviewAsset{
+			IntegrationID: model.ForgeIntegrationBuiltinGitHubID, ID: id,
+			RepoFullName: repo, PRNumber: 96, HeadSHA: head,
+			Position: pos, Label: id, SourceURL: url,
+			StoragePath: "/cache/" + id + ".png", MimeType: "image/png", SizeBytes: 10,
+			CreatedAt: now,
+		}
+	}
+	// 上一轮 head：张数上限内的 12 张 + 1 张超限残留（升级前写入的全量）。
+	for i := 0; i < maxScreenshotsPerPR; i++ {
+		if err := e.svc.db.Create(mk(fmt.Sprintf("prev-%d", i), "sha-prev", fmt.Sprintf("%s%d.png", base, i), i)).Error; err != nil {
+			t.Fatalf("seed prev asset: %v", err)
+		}
+	}
+	if err := e.svc.db.Create(mk("prev-extra", "sha-prev", base+"extra.png", maxScreenshotsPerPR)).Error; err != nil {
+		t.Fatalf("seed prev extra: %v", err)
+	}
+	// 当前 head：就是描述里的 12 张。
+	for i := 0; i < maxScreenshotsPerPR; i++ {
+		if err := e.svc.db.Create(mk(fmt.Sprintf("cur-%d", i), "sha-cur", fmt.Sprintf("%s%d.png", base, i), i)).Error; err != nil {
+			t.Fatalf("seed cur asset: %v", err)
+		}
+	}
+
+	items, changed, err := e.review.AgentScreenshots(context.Background(), curRun.ID)
+	if err != nil {
+		t.Fatalf("AgentScreenshots: %v", err)
+	}
+	if len(items) != maxScreenshotsPerPR {
+		t.Fatalf("items = %d, want %d", len(items), maxScreenshotsPerPR)
+	}
+	if changed {
+		t.Fatal("changed = true, want false（上一轮超限残留不应改变指纹）")
+	}
+}

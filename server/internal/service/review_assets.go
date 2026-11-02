@@ -777,6 +777,14 @@ func (s *ReviewService) AgentScreenshots(ctx context.Context, runID string) ([]a
 			Order("position ASC").Find(&prevAssets).Error; err != nil {
 			return nil, false, errs.ErrInternal
 		}
+		// 两侧口径必须一致：本轮指纹来自**截断后**的收集结果，上一轮的行却
+		// 可能是升级前留下的全量（同一 head 上可能超过张数上限）。不按同一
+		// 规则截断，多出来的旧 URL 会持续改变指纹，`changed` 恒为 true，审查
+		// 员每轮都被告知「截图集合已变化」。行按 position 升序，取前 N 条即
+		// 与收集面的「按出现顺序保留前 N 个」同口径。
+		if len(prevAssets) > maxScreenshotsPerPR {
+			prevAssets = prevAssets[:maxScreenshotsPerPR]
+		}
 		prevRefs := make([]screenshotRef, 0, len(prevAssets))
 		for _, a := range prevAssets {
 			prevRefs = append(prevRefs, screenshotRef{URL: a.SourceURL})
