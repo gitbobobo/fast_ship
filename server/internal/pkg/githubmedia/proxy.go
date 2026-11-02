@@ -75,6 +75,10 @@ const (
 	defaultTempFilePattern = "media-*.tmp"
 )
 
+// DefaultMaxCacheEntrySize 单文件缓存上限（导出给下游断言用：探测字节预算
+// 不得小于它，否则第一张图就能把预算吃穿）。
+const DefaultMaxCacheEntrySize = defaultMaxCacheBytes
+
 // defaultCacheCapacity 媒体代理面缓存目录的总容量上限（口径：`data` 与
 // 写盘中转字节合计，见 cacheReservation）。它由**写入点准入闸**执行：水位
 // 会越过上限时不缓存、流式直通，而不是删已落盘条目——容量机制不删任何文
@@ -1536,7 +1540,7 @@ func (s *ProxyService) fetchAndCache(ctx context.Context, rawURL, bearer, scope 
 	if err != nil {
 		return nil, err
 	}
-	// 容量准入可能把响应体交给调用方流式回包（见下面的 CacheFullError），
+	// 容量准入可能把响应体交给调用方流式回包（见下面的 PassthroughError），
 	// 那种情况下这里不能替它关。
 	bodyHandedOff := false
 	defer func() {

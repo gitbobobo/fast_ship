@@ -1250,3 +1250,14 @@ func TestProbeScreenshotsByteBudgetSettlesEvenWhenHashFails(t *testing.T) {
 		t.Fatalf("reason = %q, want 预算耗尽原因", probe.reason)
 	}
 }
+
+// 探测字节预算不得小于下载面的单文件上限：否则第一张图就能把预算吃穿，而
+// 零成功哈希时那条 break 会把结果收敛成 probeUnavailable——视觉轮不开、该
+// head 报「截图无法下载」。「单张不会触发预算」此前只是两个包各自的常量恰好
+// 相等，没有任何东西钉住它。
+func TestScreenshotProbeBudgetNotBelowSingleFileLimit(t *testing.T) {
+	if githubmedia.DefaultMaxCacheEntrySize > screenshotProbeBudget {
+		t.Fatalf("单文件上限 %d > 探测预算 %d：第一张即可触发预算中断",
+			githubmedia.DefaultMaxCacheEntrySize, screenshotProbeBudget)
+	}
+}
