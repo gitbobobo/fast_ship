@@ -118,11 +118,12 @@ func (s *ReviewService) sweepAssetRetention(now time.Time) {
 	// 间失去行与文件（取图 404、截图列表变空），ensureAssets 的复核发生在
 	// 删除之前救不回来。运行进终态后，下一轮恢复按年龄退役。
 	// 分批执行：每批先 SELECT 待退役行（走 idx_review_assets_created_at 定
-	// 位、守卫走 idx_review_runs_asset_head），再按 id DELETE，批间释放
-	// SQLite 唯一写锁——长时间停机后待退役行最多，单条大 DELETE 会把调度/
-	// webhook 写排队到 busy_timeout 超时（INT-184 R2 审查实测）。批失败即
-	// 停：引用集合已是退役前快照，账与快照一致，本轮不做文件回收（下轮重
-	// 试）。
+	// 位、守卫走 idx_review_runs_asset_head），DELETE 复刻选取条件逐行复
+	// 检（R10 审查意见：只按 id 删的话，选取与删除之间重开/重跑冒出的非
+	// 终态运行、补账续的新 created_at 保护不到），批间释放 SQLite 唯一写
+	// 锁——长时间停机后待退役行最多，单条大 DELETE 会把调度/webhook 写排
+	// 队到 busy_timeout 超时（INT-184 R2 审查实测）。批失败即停：引用集
+	// 合已是退役前快照，账与快照一致，本轮不做文件回收（下轮重试）。
 	retired := int64(0)
 	// 非终态集合从 model 常量拼接：新增非终态状态时不会在 SQL 字面量里静
 	// 默漂移（方向审计建议）。常量无注入面。
@@ -142,6 +143,19 @@ func (s *ReviewService) sweepAssetRetention(now time.Time) {
 					AND r.status IN (%s)
 			)
 		LIMIT ?`, strings.Join(activeStatusLiterals, ", "))
+	// DELETE 与 SELECT 共用同一组状态字面量与同一个截止时刻，守卫与删除
+	// 在单条语句内原子化。
+	deleteSQL := fmt.Sprintf(`DELETE FROM review_assets
+		WHERE id IN (?)
+			AND created_at < ?
+			AND NOT EXISTS (
+				SELECT 1 FROM review_runs r
+				WHERE r.integration_id = review_assets.integration_id
+					AND r.repo_full_name = review_assets.repo_full_name
+					AND r.pr_number = review_assets.pr_number
+					AND r.head_sha = review_assets.head_sha
+					AND r.status IN (%s)
+			)`, strings.Join(activeStatusLiterals, ", "))
 	for {
 		// 先选再删：退役时对释放的字节做一次 mtime 续期（os.Chtimes 到本轮
 		// 扫描时刻），让「宽限从退役时刻起算」真正成立——否则旧 mtime 在下
@@ -170,11 +184,17 @@ func (s *ReviewService) sweepAssetRetention(now time.Time) {
 				}
 			}
 		}
-		if err := s.db.Where("id IN ?", ids).Delete(&model.ReviewAsset{}).Error; err != nil {
-			s.logger.Warn("截图资产行退役失败", zap.Error(err))
+		res := s.db.Exec(deleteSQL, ids, now.Add(-reviewAssetRetention))
+		if res.Error != nil {
+			s.logger.Warn("截图资产行退役失败", zap.Error(res.Error))
 			return
 		}
-		retired += int64(len(batch))
+		if res.RowsAffected == 0 {
+			// 整批守卫翻案（全部行在选删之间被重新保护）时停批：满批重选同
+			// 一批会死循环；翻案行下轮自然不再入选。
+			break
+		}
+		retired += res.RowsAffected
 		if len(batch) < reviewAssetRetireBatch {
 			break
 		}

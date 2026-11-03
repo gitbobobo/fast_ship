@@ -2181,13 +2181,6 @@ func (s *ProxyService) servePersistedData(normalized, cachePath string) (*Cached
 	}, true, nil
 }
 
-// touchReviewEntry review 截图面的命中续期（INT-184）：命中即刷新 .bin 的
-// mtime。保留策略按「行引用 + mtime 宽限」判定回收，而行的插入路径既包含
-// 新下载（rename 的 mtime 必新）也包含旧条目命中（ensureAssets/探测重试
-// 命中早已落盘的文件）——不刷新的话，宽限判定看不到「这个文件刚刚又被引
-// 用」，刚插入的行指向的文件会在同一轮扫描里被当成孤儿。媒体面不 touch：
-// 它的回收按 meta 年龄，热点图按每次浏览器读刷新会放大写盘。失败忽略：
-// 续期是尽力而为，下一轮命中还会再刷。
 // logSweepDirReadFail 行账回收目录枚举失败的限频告警：同类告警间隔内只
 // 记一次，logger 未装配（测试）时静默。
 func (s *ProxyService) logSweepDirReadFail(err error) {
@@ -2207,6 +2200,13 @@ func (s *ProxyService) logSweepDirReadFail(err error) {
 		"cache_dir", s.cacheDir, "error", err)
 }
 
+// touchReviewEntry review 截图面的命中续期（INT-184）：命中即刷新 .bin 的
+// mtime。保留策略按「行引用 + mtime 宽限」判定回收，而行的插入路径既包含
+// 新下载（rename 的 mtime 必新）也包含旧条目命中（ensureAssets/探测重试
+// 命中早已落盘的文件）——不刷新的话，宽限判定看不到「这个文件刚刚又被引
+// 用」，刚插入的行指向的文件会在同一轮扫描里被当成孤儿。媒体面不 touch：
+// 它的回收按 meta 年龄，热点图按每次浏览器读刷新会放大写盘。失败忽略：
+// 续期是尽力而为，下一轮命中还会再刷。
 func (s *ProxyService) touchReviewEntry(path string) {
 	if s.cacheSubdir == defaultCacheSubdir || path == "" {
 		return
