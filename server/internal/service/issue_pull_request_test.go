@@ -1522,3 +1522,57 @@ func TestIssueServiceSyncPullRequests_FetchPanicContained(t *testing.T) {
 		t.Fatalf("expected panicked row untouched, got %+v", stored)
 	}
 }
+
+// INT-175 R4/方向审计：写回脱离请求取消——拉取完成后 ctx 被取消，已拉取
+// 的行仍照常落库进 items，不丢已付出代价拿到的数据。
+func TestIssueServiceSyncPullRequests_CancelAfterFetchStillPersists(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID, withTestGitHubToken(t, svc))
+	issue := createTestIssue(t, svc.db, project.ID)
+
+	now := time.Now().UTC()
+	linkIDs := []string{"link-a", "link-b"}
+	prs := []*githubapi.PullRequest{}
+	for i, id := range linkIDs {
+		link := &model.IssuePullRequest{
+			ID: id, IssueID: issue.ID, ProjectID: project.ID,
+			Provider: model.IssuePullRequestProviderGitHub, RepoFullName: "owner/repo",
+			Number: 400 + i, State: model.IssuePullRequestStateOpen,
+			LinkOrigin: model.IssuePullRequestLinkOriginManual,
+			SyncedAt:   now, CreatedAt: now, UpdatedAt: now,
+		}
+		if err := svc.db.Create(link).Error; err != nil {
+			t.Fatalf("seed link: %v", err)
+		}
+		prs = append(prs, testPullRequest("owner/repo", 400+i, "open", nil))
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var calls atomic.Int32
+	fake := &fakeIssueGitHubClient{pullRequests: prSet(prs...)}
+	// 第二次拉取完成后取消：模拟「数据已拿到、客户端随后断开」。
+	fake.onGetPullRequest = func(string, int) {
+		if calls.Add(1) == 2 {
+			cancel()
+		}
+	}
+	stubPullRequestClient(t, svc, fake, "gh-token")
+
+	result, err := svc.issueService.SyncIssuePullRequests(ctx, issue.ID, user.ID)
+	if err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if len(result.Items) != 2 {
+		t.Fatalf("expected both fetched rows persisted despite cancel, got %+v", result)
+	}
+	for _, id := range linkIDs {
+		var stored model.IssuePullRequest
+		if err := svc.db.First(&stored, "id = ?", id).Error; err != nil {
+			t.Fatalf("reload %s: %v", id, err)
+		}
+		if !stored.SyncedAt.After(now) {
+			t.Fatalf("expected row %s synced despite cancel, got %+v", id, stored)
+		}
+	}
+}

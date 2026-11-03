@@ -44,6 +44,12 @@ const (
 	// 批量关单的 batchCloseGitHubConcurrency 同口径）：上游限流温和，N 条
 	// 关联的总耗时约为单条的数倍以内而非线性累加。
 	pullRequestSyncConcurrency = 4
+	// pullRequestSyncWriteTimeout 是写回阶段的独立预算（INT-175 R4/方向审
+	// 计）：写回不跟随拉取 deadline——一条挂到整批预算的慢拉取不能让
+	// 已成功拉取的行全部零落库；也不跟随客户端断开——已付出的代价写
+	// 回是幂等刷新。它与拉取预算一起构成服务端总时长上界（30s+10s<
+	// web 端 60s 超时）。
+	pullRequestSyncWriteTimeout = 10 * time.Second
 )
 
 // pullRequestLink 解析后的 PR 链接：Provider 决定后续取数路径；forgejo 行的
@@ -193,7 +199,8 @@ func (s *IssueService) DetachIssuePullRequest(issueID, userID, linkID string) er
 // 关联行原序——写回仍逐行 UPDATE（SQLite 单写连接下串行不阻塞），响应顺序
 // 与旧串行实现一致，收益全部来自拉取并发。
 // ctx 为请求 context（handler 传 c.Request.Context()），浏览器断开即停止后续
-// 远端请求；测试传 nil 退化为 Background。30s 是整批兜底而非逐条预算。
+// 远端请求；测试传 nil 退化为 Background。拉取预算 30s（整批而非逐条）；
+// 写回独立预算 pullRequestSyncWriteTimeout，脱离请求取消与拉取 deadline。
 func (s *IssueService) SyncIssuePullRequests(ctx context.Context, issueID, userID string) (*IssuePullRequestSyncResultResponse, error) {
 	issue, project, err := s.loadIssueAndProject(issueID, userID)
 	if err != nil {
@@ -216,6 +223,8 @@ func (s *IssueService) SyncIssuePullRequests(ctx context.Context, issueID, userI
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	// fetchCtx 只管阶段 1、2 的远端拉取预算（浏览器断开或 30s 到点即停发
+	// 新请求）；写回阶段另有独立预算，见阶段 3。
 	ctx, cancel := context.WithTimeout(ctx, pullRequestSyncTimeout)
 	defer cancel()
 
@@ -357,10 +366,12 @@ func (s *IssueService) SyncIssuePullRequests(ctx context.Context, issueID, userI
 	}
 
 	// 阶段 3（串行）：按原序逐行写回并组装响应——items/failures 的顺序与
-	// 关联行创建顺序一致，与并发度无关。写回绑定同一 ctx：客户端断开后
-	// 不逐行挂 SQLite busy_timeout（最长 30s/行），剩余未写行统一记失败——
-	// 已拉到的数据宁可记失败也不让 handler goroutine 白等锁。
-	saveRepo := s.pullRequestRepo.WithContext(ctx)
+	// 关联行创建顺序一致，与并发度无关。写回用独立短预算且脱离请求取
+	// 消（WithoutCancel）：已付出代价拉到的数据照常落库，拉取 deadline
+	// 或浏览器断开都不吞掉它们；预算到点才记「未写回」。
+	writeCtx, cancelWrite := context.WithTimeout(context.WithoutCancel(ctx), pullRequestSyncWriteTimeout)
+	defer cancelWrite()
+	saveRepo := s.pullRequestRepo.WithContext(writeCtx)
 	for i := range links {
 		link := &links[i]
 		if failed[i] {
@@ -368,10 +379,6 @@ func (s *IssueService) SyncIssuePullRequests(ctx context.Context, issueID, userI
 			continue
 		}
 		if fetchers[i] == nil {
-			continue
-		}
-		if err := ctx.Err(); err != nil {
-			result.Failures = append(result.Failures, pullRequestSyncFailure(link, "请求已取消或超时，未写回同步结果"))
 			continue
 		}
 		if err := saveRepo.SaveSyncedFields(link); err != nil {
