@@ -63,6 +63,15 @@ func (r *IssuePullRequestRepository) Upsert(link *model.IssuePullRequest) error 
 			{Name: "number"},
 		},
 		DoUpdates: set,
+		// 冲突更新带 synced_at 守卫（INT-175 R12）：attach 与并发 sync 交错
+		// 时，fetch 更晚结束的一方不能把已写入的更新快照覆盖回旧值。守
+		// 卫拦下的冲突走「数据未更新但行存在」路径——调用方按 FindByUnique
+		// 读回现行行，幂等语义不变。
+		Where: clause.Where{
+			Exprs: []clause.Expression{
+				clause.Expr{SQL: "issue_pull_requests.synced_at <= excluded.synced_at"},
+			},
+		},
 	}).Create(link).Error
 }
 

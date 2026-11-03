@@ -108,14 +108,13 @@ func (s *IssueService) AttachIssuePullRequest(issueID, userID string, req Attach
 
 	ctx, cancel := context.WithTimeout(context.Background(), pullRequestAttachTimeout)
 	defer cancel()
-	now := time.Now().UTC()
 	link := &model.IssuePullRequest{
 		ID:         uuid.NewString(),
 		IssueID:    issue.ID,
 		ProjectID:  issue.ProjectID,
 		Number:     parsed.Number,
 		LinkOrigin: model.IssuePullRequestLinkOriginManual,
-		CreatedAt:  now,
+		CreatedAt:  time.Now().UTC(),
 	}
 	link.HostKey = parsed.HostKey // github 行恒空串：主机在唯一键内，跨实例同名 PR 天然并存
 
@@ -145,7 +144,9 @@ func (s *IssueService) AttachIssuePullRequest(issueID, userID string, req Attach
 		if err != nil {
 			return nil, errs.New(errs.ErrForgeAPI.Code, s.forgejoPullRequestFailureText("获取 Forgejo PR", err))
 		}
-		applyForgePullRequestData(link, pr, now)
+		// synced_at/updated_at 取拉取完成时刻而非请求时刻：attach 与并发
+		// sync 的守卫比较才有意义（INT-175 R12）。
+		applyForgePullRequestData(link, pr, time.Now().UTC())
 	default:
 		// GitHub 既有路径原样保留：凭证选择集中在 credentials.pullRequestCredential。
 		link.Provider = model.IssuePullRequestProviderGitHub
@@ -158,7 +159,7 @@ func (s *IssueService) AttachIssuePullRequest(issueID, userID string, req Attach
 		if err != nil {
 			return nil, errs.New(errs.ErrGitHubAPI.Code, fmt.Sprintf("获取 GitHub PR 失败（%s）: %v%s", credKind.usage(), err, pullRequestAccessHint(err, credKind)))
 		}
-		applyPullRequestData(link, pr, now)
+		applyPullRequestData(link, pr, time.Now().UTC())
 	}
 
 	// 原子 upsert：并发/重复 attach 撞唯一键（含 host_key）时由冲突路径刷新既
@@ -405,6 +406,11 @@ func (s *IssueService) SyncIssuePullRequests(ctx context.Context, issueID, userI
 				// 不算失败：读回库内现行行进 items，响应与库一致。读回走
 				// writeCtx；只有真的不存在才记「关联已解除」，其余错误如实
 				// 报读回失败，不把存储故障归因到用户操作。
+				s.logger.Info("sync 关联 PR 写回被时间守卫拦下（已有更新数据）",
+					zap.String("link_id", link.ID),
+					zap.String("issue_id", issue.ID),
+					zap.String("repo", link.RepoFullName),
+					zap.Int("number", link.Number))
 				current, findErr := saveRepo.FindByID(issue.ID, link.ID)
 				switch {
 				case findErr == nil:
