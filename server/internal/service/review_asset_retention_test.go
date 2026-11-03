@@ -457,3 +457,117 @@ func TestAssetRetentionLoopStartStop(t *testing.T) {
 	review.Stop()
 	review.Stop() // 幂等
 }
+
+// 同源自检限量（R7）：快照与缓存目录失配的三个档位（快照为空 / 路径全在
+// 目录外 / 目录候选远大于快照）都进入限量——每轮最多
+// reviewAssetSweepCalmBatch 个文件，剩余的留给运维介入或下一轮，不再一次
+// 清空「仍可能有归属」的历史截图。
+
+// seedOrphans 在缓存目录里落 count 个超宽限的孤儿 .bin，返回路径列表。
+func seedOrphans(t *testing.T, cacheDir string, count int, now time.Time) []string {
+	t.Helper()
+	old := now.Add(-48 * time.Hour)
+	var out []string
+	for i := 0; i < count; i++ {
+		p := filepath.Join(cacheDir, fmt.Sprintf("orphan-%02d.bin", i))
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatalf("write orphan: %v", err)
+		}
+		if err := os.Chtimes(p, old, old); err != nil {
+			t.Fatalf("chtimes orphan: %v", err)
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+func countBinFiles(t *testing.T, cacheDir string) int {
+	t.Helper()
+	entries, err := os.ReadDir(cacheDir)
+	if err != nil {
+		t.Fatalf("read dir: %v", err)
+	}
+	n := 0
+	for _, e := range entries {
+		if filepath.Ext(e.Name()) == ".bin" {
+			n++
+		}
+	}
+	return n
+}
+
+func TestAssetRetentionCalmModeEmptySnapshot(t *testing.T) {
+	review, media, _ := retentionService(t, t.TempDir())
+	now := time.Now().UTC()
+	cacheDir := filepath.Dir(media.ShotPath())
+	seedOrphans(t, cacheDir, 28, now)
+	// shared.bin 是下载桩在 setup 时落的（mtime 新鲜、无行引用）：一并做旧，
+	// 让它进入本轮孤儿判定——快照为空档不豁免任何文件。
+	old := now.Add(-48 * time.Hour)
+	if err := os.Chtimes(media.ShotPath(), old, old); err != nil {
+		t.Fatalf("chtimes shared: %v", err)
+	}
+
+	// 不种任何行：快照为空而目录有条目 → 限量，本轮最多 25 个。目录里的
+	// .bin = 28 孤儿 + 下载桩产物 shared.bin（无行引用，同为孤儿）。
+	review.sweepAssetRetention(now)
+	total := countBinFiles(t, cacheDir) + reviewAssetSweepCalmBatch
+	if got := countBinFiles(t, cacheDir); got != total-reviewAssetSweepCalmBatch {
+		t.Fatalf("remain = %d, want %d（限量档：仅回收 budget 上限）", got, total-reviewAssetSweepCalmBatch)
+	}
+	// 下一轮继续按限量滴漏收敛。
+	review.sweepAssetRetention(now.Add(time.Second))
+	if got := countBinFiles(t, cacheDir); got != 0 {
+		t.Fatalf("remain = %d, want 0（下轮继续限量）", got)
+	}
+}
+
+func TestAssetRetentionCalmModePathsOutsideCacheDir(t *testing.T) {
+	review, media, e := retentionService(t, t.TempDir())
+	repo := "octo/example"
+	now := time.Now().UTC()
+	integrationID := model.ForgeIntegrationBuiltinGitHubID
+	cacheDir := filepath.Dir(media.ShotPath())
+
+	// 引用行存在但 storage_path 在缓存目录之外（存储迁移特征）：under==0
+	// 档 → 限量。
+	row := &model.ReviewAsset{
+		ID: "outside-ref", IntegrationID: integrationID, RepoFullName: repo,
+		PRNumber: 1, HeadSHA: "sha-out", SourceURL: "https://img.example/out",
+		StoragePath: "/elsewhere/outside.bin", CreatedAt: now,
+	}
+	if err := review.db.Create(row).Error; err != nil {
+		t.Fatalf("seed outside row: %v", err)
+	}
+
+	review.sweepAssetRetention(now)
+	// 目录 .bin = 28 孤儿 + 下载桩产物 shared.bin（无行引用，同为孤儿）；
+	// 引用行指向目录外，不参与计数。
+	total := countBinFiles(t, cacheDir) + reviewAssetSweepCalmBatch
+	if got := countBinFiles(t, cacheDir); got != total-reviewAssetSweepCalmBatch {
+		t.Fatalf("remain = %d, want %d（路径全在目录外档限量）", got, total-reviewAssetSweepCalmBatch)
+	}
+	_ = e
+}
+
+func TestAssetRetentionCalmModeRatioCap(t *testing.T) {
+	review, media, _ := retentionService(t, t.TempDir())
+	repo := "octo/example"
+	now := time.Now().UTC()
+	integrationID := model.ForgeIntegrationBuiltinGitHubID
+	cacheDir := filepath.Dir(media.ShotPath())
+	orphans := seedOrphans(t, cacheDir, 28, now)
+
+	// 引用行在本目录内（快照非空且 under>0），但目录候选数（29）远大于快
+	// 照规模（1）→ 比例档 → 限量。
+	seedAsset(t, review, integrationID, repo, 1, "sha-r", "https://img.example/ratio.png", now)
+
+	review.sweepAssetRetention(now)
+	if got := countBinFiles(t, cacheDir); got != len(orphans)-reviewAssetSweepCalmBatch+1 {
+		t.Fatalf("remain = %d, want %d（比例档限量，引用文件保留）", got, len(orphans)-reviewAssetSweepCalmBatch+1)
+	}
+	// 被引用的文件不在限量里，仍保留。
+	if _, err := os.Stat(media.ShotPath()); err != nil {
+		t.Fatalf("被引用的文件被误删: %v", err)
+	}
+}

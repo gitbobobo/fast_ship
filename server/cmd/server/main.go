@@ -375,7 +375,11 @@ func main() {
 			dynamicTrustedHostsCache = hosts
 			dynamicTrustedHostsAt = time.Now()
 			return hosts
-		})
+		},
+		// 行账回收（INT-184）的目录枚举失败限频告警走部署 slog 管道：枚举
+		// 失败会让保留策略静默失效（不删即不回收），warn 是管理员唯一的感
+		// 知入口（R7 审查意见）。
+		githubmedia.WithSweepLogger(appLogger))
 	// review 截图面**不接** TTL 扫描：它的缓存目录（review-screenshot-cache）
 	// 同时是 review_assets 的持久存储（storage_path 直接指向 cached 文件，无
 	// 副本），按 TTL 删除会让超过 24h 的历史截图在 ensure 复核后强制重下，

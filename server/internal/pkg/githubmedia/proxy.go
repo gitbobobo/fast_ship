@@ -311,6 +311,16 @@ type ProxyService struct {
 	metaReadFailMu     sync.Mutex
 	metaReadFailAt     map[string]time.Time
 	metaReadFailLogger *slog.Logger
+	// sweepDirReadFailAt/sweepLogger 行账回收的目录枚举失败限频告警（R7 审
+	// 查）：ReadDir 失败会让保留策略静默失效（不删即不回收），限频 warn 是
+	// 管理员唯一的感知入口。
+	sweepDirReadFailAt map[string]time.Time
+	sweepLogger        *slog.Logger
+}
+
+// WithSweepLogger 行账回收的目录枚举失败告警 logger（生产装配用）。
+func WithSweepLogger(logger *slog.Logger) ProxyOption {
+	return func(cfg *serviceConfig) { cfg.sweepLogger = logger }
 }
 
 // metaReadFailLogInterval 同一 cacheDir 的 meta 读失败告警最小间隔。
@@ -378,6 +388,7 @@ type serviceConfig struct {
 	// ProxyService.githubWebHost）：凭证闸门据此放行部署实例自己的附件路径，
 	// 空值按公共 GitHub 处理。
 	githubWebHost string
+	sweepLogger   *slog.Logger
 }
 
 // ProxyOption NewProxyService 的可选装配项；生产装配不传即为默认 GitHub
@@ -429,7 +440,7 @@ func NewProxyService(cacheRoot string, opts ...ProxyOption) *ProxyService {
 // 旧行为一致。
 // trustedPrivateHostsFunc 是可选的动态可信主机来源（如允许私网的 Forgejo
 // 集成主机清单）——每次拨号现取，与静态名单取并集，传 nil 与旧行为一致。
-func NewReviewMediaService(cacheRoot, githubWebHost string, trustedPrivateHosts []string, trustedPrivateHostsFunc func() []string) *ProxyService {
+func NewReviewMediaService(cacheRoot, githubWebHost string, trustedPrivateHosts []string, trustedPrivateHostsFunc func() []string, opts ...ProxyOption) *ProxyService {
 	return newService(cacheRoot, serviceConfig{
 		cacheSubdir:             "review-screenshot-cache",
 		allowURL:                allowPublicImageHost,
@@ -439,7 +450,7 @@ func NewReviewMediaService(cacheRoot, githubWebHost string, trustedPrivateHosts 
 		trustedPrivateHosts:     trustedPrivateHosts,
 		trustedPrivateHostsFunc: trustedPrivateHostsFunc,
 		githubWebHost:           githubWebHost,
-	})
+	}, opts...)
 }
 
 // allowPublicImageHost 截图面的 host 准入：任意非空 host 即放行（真正的
@@ -448,7 +459,12 @@ func allowPublicImageHost(parsed *url.URL) bool {
 	return parsed != nil && strings.TrimSpace(parsed.Hostname()) != ""
 }
 
-func newService(cacheRoot string, cfg serviceConfig) *ProxyService {
+func newService(cacheRoot string, cfg serviceConfig, opts ...ProxyOption) *ProxyService {
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&cfg)
+		}
+	}
 	if cfg.cacheSubdir == "" {
 		cfg.cacheSubdir = defaultCacheSubdir
 	}
@@ -484,6 +500,7 @@ func newService(cacheRoot string, cfg serviceConfig) *ProxyService {
 	}
 	s := &ProxyService{
 		client:            cfg.client,
+		sweepLogger:       cfg.sweepLogger,
 		cacheDir:          filepath.Join(cacheRoot, cfg.cacheSubdir),
 		cacheSubdir:       cfg.cacheSubdir,
 		cacheTTL:          cfg.cacheTTL,
@@ -1039,6 +1056,8 @@ func (s *ProxyService) SweepUnreferencedEntries(isReferenced func(binPath string
 	}
 	entries, err := os.ReadDir(s.cacheDir)
 	if err != nil {
+		// 同上：枚举失败让本轮文件回收整体跳过，限频 warn 留痕。
+		s.logSweepDirReadFail(err)
 		return 0
 	}
 	removed := 0
@@ -1148,6 +1167,9 @@ func (s *ProxyService) CacheDir() string { return s.cacheDir }
 func (s *ProxyService) CountCacheEntries() int {
 	entries, err := os.ReadDir(s.cacheDir)
 	if err != nil {
+		// 枚举失败会让保留策略静默失效（不删即不回收），限频 warn 是管理员
+		// 唯一的感知入口（R7 审查意见）。
+		s.logSweepDirReadFail(err)
 		return 0
 	}
 	n := 0
@@ -2156,6 +2178,25 @@ func (s *ProxyService) servePersistedData(normalized, cachePath string) (*Cached
 // 用」，刚插入的行指向的文件会在同一轮扫描里被当成孤儿。媒体面不 touch：
 // 它的回收按 meta 年龄，热点图按每次浏览器读刷新会放大写盘。失败忽略：
 // 续期是尽力而为，下一轮命中还会再刷。
+// logSweepDirReadFail 行账回收目录枚举失败的限频告警：同类告警间隔内只
+// 记一次，logger 未装配（测试）时静默。
+func (s *ProxyService) logSweepDirReadFail(err error) {
+	if s.sweepLogger == nil {
+		return
+	}
+	s.metaReadFailMu.Lock()
+	defer s.metaReadFailMu.Unlock()
+	if s.sweepDirReadFailAt == nil {
+		s.sweepDirReadFailAt = make(map[string]time.Time)
+	}
+	if last, ok := s.sweepDirReadFailAt[s.cacheDir]; ok && time.Since(last) < metaReadFailLogInterval {
+		return
+	}
+	s.sweepDirReadFailAt[s.cacheDir] = time.Now()
+	s.sweepLogger.Warn("缓存目录枚举失败，行账回收本轮跳过（权限/挂载/EIO 故障会让保留策略静默失效）",
+		"cache_dir", s.cacheDir, "error", err)
+}
+
 func (s *ProxyService) touchReviewEntry(path string) {
 	if s.cacheSubdir == defaultCacheSubdir || path == "" {
 		return

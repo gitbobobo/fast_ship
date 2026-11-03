@@ -158,14 +158,12 @@ func (s *ReviewService) sweepAssetRetention(now time.Time) {
 			break
 		}
 		ids := make([]string, len(batch))
-		paths := make([]string, 0, len(batch))
 		for i := range batch {
 			ids[i] = batch[i].ID
 			// 续期在 DELETE 之前：多 touch 无害（行若因批失败保留，宽限从本
 			// 轮起算依然正确），崩溃方向安全——先删行后 touch 被杀会留下旧
 			// mtime，下一轮 6h 即判超宽限（R7 审查意见）。
 			if batch[i].StoragePath != "" {
-				paths = append(paths, batch[i].StoragePath)
 				if cerr := os.Chtimes(batch[i].StoragePath, now, now); cerr != nil {
 					s.logger.Warn("退役续期失败，文件将按旧 mtime 进入宽限判定",
 						zap.String("path", batch[i].StoragePath), zap.Error(cerr))
