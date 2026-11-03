@@ -590,3 +590,62 @@ func TestAssetRetentionCalmModeRatioCap(t *testing.T) {
 		t.Fatalf("被引用的文件被误删: %v", err)
 	}
 }
+
+// 命中行重下失败不清既有引用（R12 审查意见）：ENOENT 也可能来自 uploads
+// 卷瞬时不可用——storage_path 被刷成空串后，卷恢复的文件会变成无引用孤儿
+// 被 sweep 永久删除。失败只刷 error，重下成功才整行落账。
+func TestEnsureAssetsRetryFailureKeepsPath(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	ctx := context.Background()
+	media := &fakeReviewMedia{
+		cached:  &githubmedia.CachedMedia{Path: "/cache/keep.png"},
+		anonErr: &githubmedia.UpstreamStatusError{StatusCode: 503},
+	}
+	review := e.withT3(nil, media, nil)
+	body := "![a](https://img.example/keep.png)"
+
+	seededAt := time.Now().UTC().Add(-time.Hour)
+	row := &model.ReviewAsset{
+		ID: "keep-ref", IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		RepoFullName: repo, PRNumber: 1, HeadSHA: "sha-keep",
+		Position: 0, Label: "a", SourceURL: "https://img.example/keep.png",
+		StoragePath: "/elsewhere/vanished.bin", MimeType: "image/png", SizeBytes: 9,
+		CreatedAt: seededAt, RenewedAt: &seededAt,
+	}
+	if err := review.db.Create(row).Error; err != nil {
+		t.Fatalf("seed row: %v", err)
+	}
+
+	if _, _, err := review.ensureAssets(ctx, model.ForgeIntegrationBuiltinGitHubID, repo, 1, "sha-keep", body, 0); err != nil {
+		t.Fatalf("ensureAssets: %v", err)
+	}
+	var got model.ReviewAsset
+	if err := review.db.Where("source_url = ?", "https://img.example/keep.png").First(&got).Error; err != nil {
+		t.Fatalf("row missing: %v", err)
+	}
+	if got.StoragePath != "/elsewhere/vanished.bin" {
+		t.Fatalf("重下失败清掉了既有引用: storage_path = %q", got.StoragePath)
+	}
+	if got.Error == "" {
+		t.Fatal("重下失败应留下 error")
+	}
+	if !got.CreatedAt.Equal(seededAt) || got.RenewedAt == nil || !got.RenewedAt.Equal(seededAt) {
+		t.Fatalf("失败不应动时钟: created_at=%v renewed_at=%v", got.CreatedAt, got.RenewedAt)
+	}
+
+	// 卷恢复（重下成功）→ 整行落账 + 续期。
+	media.anonErr = nil
+	if _, _, err := review.ensureAssets(ctx, model.ForgeIntegrationBuiltinGitHubID, repo, 1, "sha-keep", body, 0); err != nil {
+		t.Fatalf("ensureAssets retry: %v", err)
+	}
+	if err := review.db.Where("source_url = ?", "https://img.example/keep.png").First(&got).Error; err != nil {
+		t.Fatalf("row missing: %v", err)
+	}
+	if got.StoragePath != media.ShotPath() || got.Error != "" {
+		t.Fatalf("重下成功未落账: %q/%q", got.StoragePath, got.Error)
+	}
+	if got.RenewedAt == nil || got.RenewedAt.Before(time.Now().Add(-24*time.Hour)) {
+		t.Fatalf("重下成功未续期: %v", got.RenewedAt)
+	}
+}

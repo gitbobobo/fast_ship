@@ -859,7 +859,8 @@ func createBootIndexes(db *gorm.DB) error {
 	// 建出（idx_review_assets_source，integration_id 键首）；按 (repo, pr, head)
 	// 的查询走它的第二段前缀。
 	db.Exec("DROP INDEX IF EXISTS idx_review_assets_pr_head")
-	// 行账保留策略（INT-184）：退役 DELETE 按 created_at 定位超龄行，NOT
+	// 行账保留策略（INT-184）：退役 DELETE 按 COALESCE(renewed_at,
+	// created_at)（idx_review_assets_retire_clock 表达式索引）定位超龄行，NOT
 	// EXISTS 守卫按 (integration_id, repo, pr, head) 探测在途运行——两个无
 	// 前导列可用的关联查询在全量扫描下会让每 6h 一次的 DELETE 长时间占住
 	// SQLite 单写锁（R2 审查实测：5 万待退役×20 万 run 时 >600s，加索引后

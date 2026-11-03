@@ -514,11 +514,17 @@ func (s *ReviewService) ensureAssets(ctx context.Context, integrationID, repo st
 			// 退役连带回收）；失败不刷新，避免僵尸失败行永不过期。created_at
 			// 保持首次落账时刻不动（R11 审查：AgentScreenshots 拿它判「本轮
 			// 新行」，刷新会让重下的旧行被误剔出上一轮集合）。
-			updates := map[string]any{
-				"storage_path": storagePath, "mime_type": mime,
-				"size_bytes": size, "error": errText,
-			}
+			// 重下失败不清既有引用（R12 审查）：ENOENT 也可能来自 uploads
+			// 卷/子目录瞬时不可用——把 storage_path 刷成空串，卷恢复后的文件
+			// 就变成「无引用 + mtime 超宽限」孤儿，下一轮 sweep 永久删除，正
+			// 好打在本 PR「审查截图不可随意丢弃」的目标上。命中行重下失败只
+			// 刷 error，路径与元数据原样保留，下次复核再试；失败行本就无路
+			// 径，维持空串。重下成功才是全新落账（含续期）。
+			updates := map[string]any{"error": errText}
 			if storagePath != "" {
+				updates["storage_path"] = storagePath
+				updates["mime_type"] = mime
+				updates["size_bytes"] = size
 				updates["renewed_at"] = now
 			}
 			if err := s.db.Model(&model.ReviewAsset{}).Where("id = ?", existing.ID).
@@ -915,13 +921,22 @@ func (s *ReviewService) AgentScreenshots(ctx context.Context, runID string) ([]a
 		//     前的全量（同一 head 上超过上限），多出来的旧 URL 同样会顶住指纹。
 		// 注意不按「当前描述」过滤：描述里真的删掉某张截图时集合确实变了，
 		// 那必须判 changed=true，抹掉它等于把「截图被删」报成未变化。
+		// 「本轮新行」的截止是上一轮运行的完成时刻，不是本轮的创建时刻
+		//（R12 审查）：探测/建运行跨同步时，探测行落在本轮创建之前——按本
+		// 轮创建时刻剔除会把它们误算进上一轮，新增截图被判成「未变化」，
+		// changed 误报 false。上一轮完成之后写的行都属本轮证据；上一轮没有
+		// 完成时刻（生产不该出现）时退回旧口径 run.CreatedAt，宁误报变化。
+		prevCutoff := run.CreatedAt
+		if prevRuns[0].FinishedAt != nil {
+			prevCutoff = *prevRuns[0].FinishedAt
+		}
 		prevRefs := make([]screenshotRef, 0, maxScreenshotsPerPR)
 		for _, a := range prevAssets {
-			// 只取「本轮开始之前就存在」的行：ensureAssets 在比较之前已经把本轮
-			// 新收集的 URL 写进同一张表（同 head 的 manual rerun 也会再跑视觉
-			// 轮），不过滤就会把新增截图算进上一轮——两侧指纹相等，changed
-			// 误判为 false，新增的那张不会被提示。
-			if a.CreatedAt.After(run.CreatedAt) {
+			// 只取「上一轮完成之前就存在」的行：ensureAssets 在比较之前已经
+			// 把本轮新收集的 URL 写进同一张表（同 head 的 manual rerun 也会
+			// 再跑视觉轮），不过滤就会把新增截图算进上一轮——两侧指纹相等，
+			// changed 误判为 false，新增的那张不会被提示。
+			if a.CreatedAt.After(prevCutoff) {
 				continue
 			}
 			// 旧版本写入的行可能带 #fragment（规整规则是后来才落地的），而

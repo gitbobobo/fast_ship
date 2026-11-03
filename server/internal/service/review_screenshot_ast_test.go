@@ -552,7 +552,8 @@ func TestAgentScreenshotsChangedTruncatesPrevAssets(t *testing.T) {
 	})
 
 	prevRun := e.seedRun(t, repo, 96, "sha-prev", model.ReviewRunCompleted, now)
-	e.svc.db.Model(prevRun).Updates(map[string]any{"kind": model.ReviewKindVisual, "round_number": 1})
+	e.svc.db.Model(prevRun).Updates(map[string]any{
+		"kind": model.ReviewKindVisual, "round_number": 1, "finished_at": now})
 	curRun := e.seedRun(t, repo, 96, "sha-cur", model.ReviewRunQueued, now)
 	e.svc.db.Model(curRun).Updates(map[string]any{"kind": model.ReviewKindVisual, "round_number": 2})
 
@@ -620,7 +621,8 @@ func TestAgentScreenshotsChangedDropsUnadmittedPrevRows(t *testing.T) {
 	})
 
 	prevRun := e.seedRun(t, repo, 97, "sha-prev", model.ReviewRunCompleted, now)
-	e.svc.db.Model(prevRun).Updates(map[string]any{"kind": model.ReviewKindVisual, "round_number": 1})
+	e.svc.db.Model(prevRun).Updates(map[string]any{
+		"kind": model.ReviewKindVisual, "round_number": 1, "finished_at": now})
 	curRun := e.seedRun(t, repo, 97, "sha-cur", model.ReviewRunQueued, now)
 	e.svc.db.Model(curRun).Updates(map[string]any{"kind": model.ReviewKindVisual, "round_number": 2})
 
@@ -681,7 +683,8 @@ func TestAgentScreenshotsChangedNormalizesPrevFragments(t *testing.T) {
 	})
 
 	prevRun := e.seedRun(t, repo, 98, "sha-prev", model.ReviewRunCompleted, now)
-	e.svc.db.Model(prevRun).Updates(map[string]any{"kind": model.ReviewKindVisual, "round_number": 1})
+	e.svc.db.Model(prevRun).Updates(map[string]any{
+		"kind": model.ReviewKindVisual, "round_number": 1, "finished_at": now})
 	curRun := e.seedRun(t, repo, 98, "sha-cur", model.ReviewRunQueued, now)
 	e.svc.db.Model(curRun).Updates(map[string]any{"kind": model.ReviewKindVisual, "round_number": 2})
 
@@ -741,7 +744,8 @@ func TestAgentScreenshotsChangedExcludesRowsFromThisRound(t *testing.T) {
 
 	// 两轮同 head：上一轮只见过前 11 张，本轮描述新增了第 12 张。
 	prevRun := e.seedRun(t, repo, 99, "sha-same", model.ReviewRunCompleted, now)
-	e.svc.db.Model(prevRun).Updates(map[string]any{"kind": model.ReviewKindVisual, "round_number": 1})
+	e.svc.db.Model(prevRun).Updates(map[string]any{
+		"kind": model.ReviewKindVisual, "round_number": 1, "finished_at": now})
 	curRun := e.seedRun(t, repo, 99, "sha-same", model.ReviewRunQueued, now)
 	e.svc.db.Model(curRun).Updates(map[string]any{"kind": model.ReviewKindVisual, "round_number": 2})
 
@@ -768,5 +772,60 @@ func TestAgentScreenshotsChangedExcludesRowsFromThisRound(t *testing.T) {
 	}
 	if !changed {
 		t.Fatal("changed = false, want true（本轮新增的截图不能算进上一轮集合）")
+	}
+}
+
+// prevRefs 的「本轮新行」截止是上一轮运行的完成时刻，不是本轮创建时刻
+// （R12 审查意见）：探测/建运行跨同步时探测行落在本轮创建之前，按本轮创
+// 建时刻剔除会把它们误算进上一轮，新增截图被判成「未变化」。
+func TestAgentScreenshotsChangedCutoffAtPrevFinish(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	body := "![a](https://uiv.frp.musiver.cn/f/a.png)\n\n![b](https://uiv.frp.musiver.cn/f/b.png)"
+	e.fake.SetPR(repo, 101, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 101, HeadSHA: "sha-same",
+		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature", Body: body,
+	})
+	combos, err := marshalCombinations([]api.ReviewCombination{testCombo("env-cf")})
+	if err != nil {
+		t.Fatalf("marshal combos: %v", err)
+	}
+	e.enableReview(t, func(s *model.ProjectReviewSettings) {
+		s.VisualCombinationsJSON = combos
+	})
+
+	prevFinished := now.Add(-2 * time.Hour)
+	prevRun := e.seedRun(t, repo, 101, "sha-same", model.ReviewRunCompleted, prevFinished)
+	e.svc.db.Model(prevRun).Updates(map[string]any{
+		"kind": model.ReviewKindVisual, "round_number": 1, "finished_at": prevFinished})
+	curRun := e.seedRun(t, repo, 101, "sha-same", model.ReviewRunQueued, now)
+	e.svc.db.Model(curRun).Updates(map[string]any{"kind": model.ReviewKindVisual, "round_number": 2})
+
+	mk := func(id, url string, createdAt time.Time) *model.ReviewAsset {
+		return &model.ReviewAsset{
+			IntegrationID: model.ForgeIntegrationBuiltinGitHubID, ID: id,
+			RepoFullName: repo, PRNumber: 101, HeadSHA: "sha-same",
+			Position: 0, Label: id, SourceURL: url,
+			StoragePath: "/cache/" + id + ".png", MimeType: "image/png", SizeBytes: 10,
+			CreatedAt: createdAt,
+		}
+	}
+	// a：上一轮完成之前就在（上一轮看到过，属上一轮集合）。
+	if err := e.svc.db.Create(mk("asset-prev", "https://uiv.frp.musiver.cn/f/a.png", prevFinished.Add(-time.Hour))).Error; err != nil {
+		t.Fatalf("seed prev asset: %v", err)
+	}
+	// b：上一轮完成之后、本轮创建之前落账（探测先行/建运行跨同步的特征），
+	// 按旧口径会被误算进上一轮集合。
+	if err := e.svc.db.Create(mk("asset-probe", "https://uiv.frp.musiver.cn/f/b.png", prevFinished.Add(time.Hour))).Error; err != nil {
+		t.Fatalf("seed probe asset: %v", err)
+	}
+
+	_, changed, err := e.review.AgentScreenshots(context.Background(), curRun.ID)
+	if err != nil {
+		t.Fatalf("AgentScreenshots: %v", err)
+	}
+	if !changed {
+		t.Fatal("changed = false, want true（新增截图 b 不得被算进上一轮集合）")
 	}
 }

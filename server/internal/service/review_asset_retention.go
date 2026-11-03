@@ -13,7 +13,9 @@ import (
 // review 截图资产行账保留策略（INT-184）：review-screenshot-cache 面的
 // 持久占用此前只增不减，本文件按「以 review_assets 行为账」回收：
 //
-//   - 行退役：created_at 超过保留期的行删除，但 head 上仍有非终态运行的
+//   - 行退役：保留期时钟 COALESCE(renewed_at, created_at) 超过保留期的行
+//     删除（renewed_at 是保留期时钟，补账续期只刷它，created_at 保持首次
+//     落账时刻不可变，R11），但 head 上仍有非终态运行的
 //     （queued/dispatched/running）除外——在途运行不能丢自己的材料。关闭
 //     PR 的行、旧 head 的行、探测过但没有视觉运行的行（探测落账见
 //     review_assets.go）按同一条年龄规则退出，不为触发条件引入 PR 关闭态
@@ -44,8 +46,8 @@ const reviewAssetSweepEvery = 6 * time.Hour
 
 // reviewAssetRetireBatch 单批退役行数：每批一条独立 DELETE，批间释放
 // SQLite 写锁，让调度/webhook 的写请求插得进来。与
-// idx_review_assets_created_at / idx_review_runs_asset_head 配合，单批耗
-// 时有界。var 是为了让测试注入小值验证多批循环的终止条件。
+// idx_review_assets_retire_clock（保留期时钟表达式索引）/
+// idx_review_runs_asset_head 配合，单批耗时有界。var 是为了让测试注入小值验证多批循环的终止条件。
 var reviewAssetRetireBatch = 2000
 
 // reviewAssetSweepCalmBatch 同源自检失败时的单轮回收上限：备份恢复/存储
@@ -117,10 +119,10 @@ func (s *ReviewService) sweepAssetRetention(now time.Time) {
 	// 接读 storage_path，不经缓存面）——无守卫的话，在途运行会在两次扫描之
 	// 间失去行与文件（取图 404、截图列表变空），ensureAssets 的复核发生在
 	// 删除之前救不回来。运行进终态后，下一轮恢复按年龄退役。
-	// 分批执行：每批先 SELECT 待退役行（走 idx_review_assets_created_at 定
-	// 位、守卫走 idx_review_runs_asset_head），DELETE 复刻选取条件逐行复
+	// 分批执行：每批先 SELECT 待退役行（走 idx_review_assets_retire_clock
+	// 定位、守卫走 idx_review_runs_asset_head），DELETE 复刻选取条件逐行复
 	// 检（R10 审查意见：只按 id 删的话，选取与删除之间重开/重跑冒出的非
-	// 终态运行、补账续的新 created_at 保护不到），批间释放 SQLite 唯一写
+	// 终态运行、补账续的新 renewed_at 保护不到），批间释放 SQLite 唯一写
 	// 锁——长时间停机后待退役行最多，单条大 DELETE 会把调度/webhook 写排
 	// 队到 busy_timeout 超时（INT-184 R2 审查实测）。批失败即停：引用集
 	// 合已是退役前快照，账与快照一致，本轮不做文件回收（下轮重试）。
