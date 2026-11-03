@@ -1,5 +1,5 @@
 # 构建阶段
-FROM golang:1.27.2-alpine AS builder
+FROM golang:1.27.3-alpine AS builder
 WORKDIR /build
 RUN apk add --no-cache build-base
 COPY go.mod go.sum ./
