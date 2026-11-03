@@ -168,10 +168,14 @@ func TestAssetRetentionSkipsHeadsWithActiveRuns(t *testing.T) {
 	if count != 0 {
 		t.Fatalf("无运行的超龄行未退役")
 	}
-	// 引用集合先于退役快照：idle 行本轮刚退役，其文件下一轮才收。
-	review.sweepAssetRetention(now.Add(time.Second))
+	// 引用集合先于退役快照 + 退役即续期：idle 文件宽限内保留，扫到宽限外
+	// 才收（在途运行与 keep 行不受影响）。
+	review.sweepAssetRetention(now.Add(25 * time.Hour))
 	if _, err := os.Stat(idleFile); !os.IsNotExist(err) {
 		t.Fatalf("无运行 head 的文件未回收: %v", err)
+	}
+	if _, err := os.Stat(media.ShotPath()); err != nil {
+		t.Fatalf("在途运行引用的文件被回收: %v", err)
 	}
 
 	// 运行进终态后恢复退役（探测落账语义：无视觉运行的材料不永久遗留）。
@@ -211,10 +215,15 @@ func TestAssetRetentionRetireBatches(t *testing.T) {
 	if count != 0 {
 		t.Fatalf("count = %d, want 0（多批循环删到收敛，实际剩 %d 行）", count, count)
 	}
-	// 引用集合先于退役快照：本轮释放的字节下一轮收（再扫一轮才消失）。
+	// 引用集合先于退役快照 + 退役即续期：释放的字节在下一轮（宽限内）保留，
+	// 扫到宽限外才消失。
 	review.sweepAssetRetention(now.Add(time.Second))
+	if _, err := os.Stat(media.ShotPath()); err != nil {
+		t.Fatalf("退役即续期的字节被提前回收: %v", err)
+	}
+	review.sweepAssetRetention(now.Add(25 * time.Hour))
 	if _, err := os.Stat(media.ShotPath()); !os.IsNotExist(err) {
-		t.Fatalf("退役释放的字节未在下一轮扫描回收: %v", err)
+		t.Fatalf("退役释放的字节未在宽限外回收: %v", err)
 	}
 }
 
@@ -292,7 +301,7 @@ func TestAssetRetentionSweepReentrant(t *testing.T) {
 	}
 
 	for i := 0; i < 3; i++ {
-		review.sweepAssetRetention(now.Add(time.Duration(i) * time.Second))
+		review.sweepAssetRetention(now.Add(time.Duration(i) * 25 * time.Hour))
 	}
 	if _, err := os.Stat(media.ShotPath()); err != nil {
 		t.Fatalf("仍被引用的文件被误删: %v", err)
@@ -339,6 +348,10 @@ func TestEnsureAssetsReverifiesMissingFile(t *testing.T) {
 	}
 	if row.StoragePath != e.media.ShotPath() || row.Error != "" {
 		t.Fatalf("row = %q/%q, want 重下后的路径与空 error", row.StoragePath, row.Error)
+	}
+	// 补账即落账：重下成功刷新 created_at，保留期时钟从这次重下起算（R6）。
+	if row.CreatedAt.Before(time.Now().Add(-24 * time.Hour)) {
+		t.Fatalf("重下成功未刷新 created_at: %v", row.CreatedAt)
 	}
 
 	// 文件在的命中行不重下。
@@ -387,7 +400,7 @@ func TestProbeRecordAssets(t *testing.T) {
 		ID: "probe-failed", IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
 		RepoFullName: repo, PRNumber: 91, HeadSHA: "sha-p", Position: 0,
 		SourceURL: "https://img.example/heal.png", Error: "下载超时",
-		CreatedAt: now,
+		CreatedAt: now.Add(-31 * 24 * time.Hour),
 	}
 	valid := &model.ReviewAsset{
 		ID: "probe-valid", IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
@@ -414,6 +427,10 @@ func TestProbeRecordAssets(t *testing.T) {
 	}
 	if healed.StoragePath != e.media.ShotPath() || healed.Error != "" {
 		t.Fatalf("失败行未修复: %q/%q", healed.StoragePath, healed.Error)
+	}
+	// 修复失败行同样刷新保留期时钟（补账即落账）。
+	if healed.CreatedAt.Before(time.Now().Add(-24 * time.Hour)) {
+		t.Fatalf("修复成功未刷新 created_at: %v", healed.CreatedAt)
 	}
 	var untouched model.ReviewAsset
 	if err := review.db.Where("source_url = ?", "https://img.example/valid.png").First(&untouched).Error; err != nil {

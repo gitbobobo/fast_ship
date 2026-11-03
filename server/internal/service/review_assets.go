@@ -508,12 +508,19 @@ func (s *ReviewService) ensureAssets(ctx context.Context, integrationID, repo st
 			size = cached.Metadata.Size
 		}
 		if seenBefore {
-			// 失败行重试：更新原行（成功填路径，失败刷新原因）。
+			// 失败行重试：更新原行（成功填路径，失败刷新原因）。重下成功视
+			// 为一次新的资产落账：刷新 created_at，保留期时钟从这次重下起算
+			//（R6 审查：否则超龄 head 重审时刚下好的证据会在 24h 内被超龄行
+			// 退役连带回收）；失败不刷新，避免僵尸失败行永不过期。
+			updates := map[string]any{
+				"storage_path": storagePath, "mime_type": mime,
+				"size_bytes": size, "error": errText,
+			}
+			if storagePath != "" {
+				updates["created_at"] = now
+			}
 			if err := s.db.Model(&model.ReviewAsset{}).Where("id = ?", existing.ID).
-				Updates(map[string]any{
-					"storage_path": storagePath, "mime_type": mime,
-					"size_bytes": size, "error": errText,
-				}).Error; err != nil {
+				Updates(updates).Error; err != nil {
 				return "", nil, errs.ErrInternal
 			}
 			continue
@@ -673,6 +680,8 @@ func (s *ReviewService) recordProbeAssets(integrationID, repo string, prNumber i
 				Updates(map[string]any{
 					"storage_path": f.cached.Path, "mime_type": f.cached.Metadata.ContentType,
 					"size_bytes": f.cached.Metadata.Size, "error": "",
+					// 补账即落账：修复失败行同样刷新保留期时钟（R6 审查）。
+					"created_at": now,
 				}).Error; uerr != nil {
 				s.logger.Warn("探测截图落账失败", zap.String("url", scrubLogURLs(f.ref.URL)), zap.Error(uerr))
 			}
@@ -715,6 +724,8 @@ func (s *ReviewService) recordProbeAssets(integrationID, repo string, prNumber i
 					Updates(map[string]any{
 						"storage_path": f.cached.Path, "mime_type": f.cached.Metadata.ContentType,
 						"size_bytes": f.cached.Metadata.Size, "error": "",
+						// 补账即落账：同上刷新保留期时钟。
+						"created_at": now,
 					}).Error; uerr != nil {
 					s.logger.Warn("探测截图落账失败", zap.String("url", scrubLogURLs(f.ref.URL)), zap.Error(uerr))
 				}

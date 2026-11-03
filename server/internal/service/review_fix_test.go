@@ -862,11 +862,11 @@ type fakeReviewMedia struct {
 
 // SweepUnreferencedEntries 行账回收（可选接口）：委托真实服务，无注入时
 // 返回 0（保留策略扫描跳过文件回收）。
-func (f *fakeReviewMedia) SweepUnreferencedEntries(isReferenced func(binPath string) bool, grace time.Duration) int {
+func (f *fakeReviewMedia) SweepUnreferencedEntries(isReferenced func(binPath string) bool, grace time.Duration, now time.Time) int {
 	if f.sweep == nil {
 		return 0
 	}
-	return f.sweep.SweepUnreferencedEntries(isReferenced, grace)
+	return f.sweep.SweepUnreferencedEntries(isReferenced, grace, now)
 }
 
 // fakeScreenshotMedia 恒成功的截图下载桩：临时目录里落一个最小 PNG 当缓存

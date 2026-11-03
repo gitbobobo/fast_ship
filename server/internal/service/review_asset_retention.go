@@ -2,6 +2,7 @@ package service
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -50,7 +51,7 @@ var reviewAssetRetireBatch = 2000
 // reviewAssetSweeper 下载面的行账回收能力（可选）：生产注入的
 // *githubmedia.ProxyService 实现；测试桩可不实现，扫描自动跳过文件回收。
 type reviewAssetSweeper interface {
-	SweepUnreferencedEntries(isReferenced func(binPath string) bool, grace time.Duration) int
+	SweepUnreferencedEntries(isReferenced func(binPath string) bool, grace time.Duration, now time.Time) int
 }
 
 // assetRetentionLoop 保留策略的低频循环：不与 10s 调度 tick 抢执行权，与
@@ -97,11 +98,12 @@ func (s *ReviewService) sweepAssetRetention(now time.Time) {
 	// 接读 storage_path，不经缓存面）——无守卫的话，在途运行会在两次扫描之
 	// 间失去行与文件（取图 404、截图列表变空），ensureAssets 的复核发生在
 	// 删除之前救不回来。运行进终态后，下一轮恢复按年龄退役。
-	// 分批执行：每批一条独立 DELETE，先走 idx_review_assets_created_at 定位
-	// 超龄行、守卫走 idx_review_runs_asset_head，批间释放 SQLite 唯一写锁——
-	// 长时间停机后待退役行最多，单条大 DELETE 会把调度/webhook 写排队到
-	// busy_timeout 超时（INT-184 R2 审查实测）。批失败即停：账不确定时宁可
-	// 保守（已删批次的字节下轮扫描收敛），不继续加载引用集合。
+	// 分批执行：每批先 SELECT 待退役行（走 idx_review_assets_created_at 定
+	// 位、守卫走 idx_review_runs_asset_head），再按 id DELETE，批间释放
+	// SQLite 唯一写锁——长时间停机后待退役行最多，单条大 DELETE 会把调度/
+	// webhook 写排队到 busy_timeout 超时（INT-184 R2 审查实测）。批失败即
+	// 停：引用集合已是退役前快照，账与快照一致，本轮不做文件回收（下轮重
+	// 试）。
 	retired := int64(0)
 	// 非终态集合从 model 常量拼接：新增非终态状态时不会在 SQL 字面量里静
 	// 默漂移（方向审计建议）。常量无注入面。
@@ -110,8 +112,7 @@ func (s *ReviewService) sweepAssetRetention(now time.Time) {
 		"'" + string(model.ReviewRunDispatched) + "'",
 		"'" + string(model.ReviewRunRunning) + "'",
 	}
-	retireSQL := fmt.Sprintf(`DELETE FROM review_assets WHERE id IN (
-		SELECT a.id FROM review_assets a
+	selectSQL := fmt.Sprintf(`SELECT a.id, a.storage_path FROM review_assets a
 		WHERE a.created_at < ?
 			AND NOT EXISTS (
 				SELECT 1 FROM review_runs r
@@ -121,16 +122,40 @@ func (s *ReviewService) sweepAssetRetention(now time.Time) {
 					AND r.head_sha = a.head_sha
 					AND r.status IN (%s)
 			)
-		LIMIT ?
-	)`, strings.Join(activeStatusLiterals, ", "))
+		LIMIT ?`, strings.Join(activeStatusLiterals, ", "))
 	for {
-		res := s.db.Exec(retireSQL, now.Add(-reviewAssetRetention), reviewAssetRetireBatch)
-		if res.Error != nil {
-			s.logger.Warn("截图资产行退役失败", zap.Error(res.Error))
+		// 先选再删：退役时对释放的字节做一次 mtime 续期（os.Chtimes 到本轮
+		// 扫描时刻），让「宽限从退役时刻起算」真正成立——否则旧 mtime 在下
+		// 一轮扫描即判超宽限，退役后新建的排队运行若 6h 内没调
+		// AgentScreenshots 就会在开始前丢文件（R6 审查意见）；运行在宽限内
+		// 启动则 ensureAssets 缓存命中 touch 续保。
+		var batch []model.ReviewAsset
+		if err := s.db.Raw(selectSQL, now.Add(-reviewAssetRetention), reviewAssetRetireBatch).
+			Scan(&batch).Error; err != nil {
+			s.logger.Warn("截图资产行退役失败", zap.Error(err))
 			return
 		}
-		retired += res.RowsAffected
-		if res.RowsAffected < int64(reviewAssetRetireBatch) {
+		if len(batch) == 0 {
+			break
+		}
+		ids := make([]string, len(batch))
+		for i := range batch {
+			ids[i] = batch[i].ID
+		}
+		if err := s.db.Where("id IN ?", ids).Delete(&model.ReviewAsset{}).Error; err != nil {
+			s.logger.Warn("截图资产行退役失败", zap.Error(err))
+			return
+		}
+		for i := range batch {
+			if batch[i].StoragePath == "" {
+				continue
+			}
+			// 失败即忽略：文件不在/磁盘异常都不阻塞本轮，下轮按孤儿判据重
+			// 新评估。
+			_ = os.Chtimes(batch[i].StoragePath, now, now)
+		}
+		retired += int64(len(batch))
+		if len(batch) < reviewAssetRetireBatch {
 			break
 		}
 	}
@@ -148,9 +173,20 @@ func (s *ReviewService) sweepAssetRetention(now time.Time) {
 		return
 	}
 	removed := sweeper.SweepUnreferencedEntries(func(binPath string) bool {
-		_, ok := referenced[binPath]
-		return ok
-	}, reviewAssetSweepGrace)
+		if _, ok := referenced[binPath]; ok {
+			return true
+		}
+		// 快照后插入的行（探测/ensure 落账都发生在快照之后）快照 map看不
+		// 见；命中即 touch 失败（只读盘/NFS）时 mtime 宽限也失效——候选删除
+		// 前做一次真实 DB 复核作最终闸（R6 审查意见）。候选稀少，无索引全
+		// 表扫描的代价可忽略。
+		var live int64
+		if err := s.db.Model(&model.ReviewAsset{}).Where("storage_path = ?", binPath).
+			Limit(1).Count(&live).Error; err == nil && live > 0 {
+			return true
+		}
+		return false
+	}, reviewAssetSweepGrace, now)
 	if retired > 0 || removed > 0 {
 		s.logger.Info("截图资产保留策略扫描",
 			zap.Int64("retired_rows", retired), zap.Int("removed_files", removed))

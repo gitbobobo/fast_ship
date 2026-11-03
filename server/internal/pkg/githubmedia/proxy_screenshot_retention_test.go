@@ -49,7 +49,7 @@ func TestSweepUnreferencedEntriesMediaFaceNoop(t *testing.T) {
 	bin := seedReviewEntry(t, svc, "https://example.com/a.png", 48*time.Hour)
 
 	// 媒体面有自己的 TTL 回收：误调不得删它的条目。
-	if removed := svc.SweepUnreferencedEntries(func(string) bool { return false }, 0); removed != 0 {
+	if removed := svc.SweepUnreferencedEntries(func(string) bool { return false }, 0, time.Now().UTC()); removed != 0 {
 		t.Fatalf("removed = %d, want 0（媒体面 no-op）", removed)
 	}
 	if _, err := os.Stat(bin); err != nil {
@@ -66,7 +66,7 @@ func TestSweepUnreferencedEntriesReferenceAndGrace(t *testing.T) {
 
 	removed := svc.SweepUnreferencedEntries(func(binPath string) bool {
 		return binPath == referenced
-	}, reviewFaceTestGrace)
+	}, reviewFaceTestGrace, time.Now().UTC())
 	if removed != 1 {
 		t.Fatalf("removed = %d, want 1（只收超宽限且无引用的条目）", removed)
 	}
@@ -106,7 +106,7 @@ func TestSweepUnreferencedEntriesOrphanMeta(t *testing.T) {
 		t.Fatalf("write meta: %v", err)
 	}
 
-	removed := svc.SweepUnreferencedEntries(func(string) bool { return false }, reviewFaceTestGrace)
+	removed := svc.SweepUnreferencedEntries(func(string) bool { return false }, reviewFaceTestGrace, time.Now().UTC())
 	if removed != 1 {
 		t.Fatalf("removed = %d, want 1（只收超宽限的孤儿 meta）", removed)
 	}
@@ -126,7 +126,7 @@ func TestSweepUnreferencedEntriesReentrant(t *testing.T) {
 
 	// 中途被杀（第二轮只删得掉剩余条目）与连跑两轮都应收敛到同一终态。
 	for i := 0; i < 2; i++ {
-		svc.SweepUnreferencedEntries(func(string) bool { return false }, reviewFaceTestGrace)
+		svc.SweepUnreferencedEntries(func(string) bool { return false }, reviewFaceTestGrace, time.Now().UTC())
 	}
 	entries, err := os.ReadDir(filepath.Join(root, "review-screenshot-cache"))
 	if err != nil {
@@ -168,7 +168,7 @@ func TestSweepUnreferencedEntriesCrashResidue(t *testing.T) {
 		t.Fatalf("chtimes meta: %v", err)
 	}
 
-	removed := svc.SweepUnreferencedEntries(func(string) bool { return false }, reviewFaceTestGrace)
+	removed := svc.SweepUnreferencedEntries(func(string) bool { return false }, reviewFaceTestGrace, time.Now().UTC())
 	if removed != 2 {
 		t.Fatalf("removed = %d, want 2（崩溃残留与损坏 meta 两条按孤儿判据回收）", removed)
 	}
@@ -192,7 +192,7 @@ func TestSweepUnreferencedEntriesSkipsWhenGateHeld(t *testing.T) {
 
 	gate := svc.acquireDownloadLock(url)
 	gate.sem <- struct{}{} // 模拟同 URL 下载进行中（fetchAndCache 持闸）
-	if removed := svc.SweepUnreferencedEntries(func(string) bool { return false }, reviewFaceTestGrace); removed != 0 {
+	if removed := svc.SweepUnreferencedEntries(func(string) bool { return false }, reviewFaceTestGrace, time.Now().UTC()); removed != 0 {
 		t.Fatalf("removed = %d, want 0（持闸期间跳过）", removed)
 	}
 	if _, err := os.Stat(bin); err != nil {
@@ -201,7 +201,7 @@ func TestSweepUnreferencedEntriesSkipsWhenGateHeld(t *testing.T) {
 	// releaseDownloadLock 自带一次 token 消费，等价于释放上面的持有。
 	svc.releaseDownloadLock(url, gate)
 
-	if removed := svc.SweepUnreferencedEntries(func(string) bool { return false }, reviewFaceTestGrace); removed != 1 {
+	if removed := svc.SweepUnreferencedEntries(func(string) bool { return false }, reviewFaceTestGrace, time.Now().UTC()); removed != 1 {
 		t.Fatalf("removed = %d, want 1（释放闸后正常回收）", removed)
 	}
 }

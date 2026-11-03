@@ -1033,7 +1033,7 @@ func (s *ProxyService) sweepStaleTmpFiles(now time.Time) {
 // .bin 与同名 .json 一起删；meta 在而 data 不在的孤儿 meta 同规则回收
 // （URL 可读时同样持闸）。各步幂等：任意时点被杀，下一轮从同样的判定重
 // 新收敛。媒体面是 no-op：它有自己的 TTL 回收，误调不得删它的条目。
-func (s *ProxyService) SweepUnreferencedEntries(isReferenced func(binPath string) bool, grace time.Duration) int {
+func (s *ProxyService) SweepUnreferencedEntries(isReferenced func(binPath string) bool, grace time.Duration, now time.Time) int {
 	if s.cacheSubdir == defaultCacheSubdir || isReferenced == nil {
 		return 0
 	}
@@ -1041,7 +1041,6 @@ func (s *ProxyService) SweepUnreferencedEntries(isReferenced func(binPath string
 	if err != nil {
 		return 0
 	}
-	now := time.Now().UTC()
 	removed := 0
 	for _, e := range entries {
 		name := e.Name()
