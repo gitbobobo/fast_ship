@@ -1631,3 +1631,30 @@ func TestIssueServiceSyncPullRequests_StaleWriteGuardKeepsNewerData(t *testing.T
 		t.Fatalf("expected newer data preserved, got %+v", stored)
 	}
 }
+
+// INT-175 R15：resolveFailureText 的文案归类——err 本身是 ctx 错误且预算已
+// 终结才记「取消或超时」；缓存命中的真实配置错误（含 AppError）保留原文
+// （GitHub 侧只取 Message，不带 [50000] 内部码）。
+func TestResolveFailureText_Classification(t *testing.T) {
+	svc := setupTestServices(t)
+
+	expired, cancel := context.WithCancel(context.Background())
+	cancel()
+	alive := context.Background()
+
+	if got := resolveFailureText(svc.issueService, expired, context.DeadlineExceeded, false); got != "请求已取消或超时，未继续同步" {
+		t.Fatalf("ctx-dead + ctx-err should be cancel text, got %q", got)
+	}
+	// 配置错误（*errs.AppError）：预算已终结也保留原文且不带内部码。
+	cfgErr := errs.New(errs.ErrInternal.Code, "代码仓库 Token 引用失效，请在项目设置中重新选择")
+	got := resolveFailureText(svc.issueService, expired, cfgErr, false)
+	if !strings.Contains(got, "代码仓库 Token") || strings.Contains(got, "[50000]") {
+		t.Fatalf("expected AppError.Message verbatim, got %q", got)
+	}
+	// err 是 ctx 错误但预算未终结：GitHub 侧走 err.Error() 透出原文；
+	// Forgejo 侧走中性文案不回显原文。
+	got = resolveFailureText(svc.issueService, alive, context.Canceled, true)
+	if got != "读取 Forgejo 集成失败，请稍后重试" {
+		t.Fatalf("expected neutral forgejo text, got %q", got)
+	}
+}

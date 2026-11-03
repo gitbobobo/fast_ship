@@ -415,6 +415,10 @@ func (s *IssueService) SyncIssuePullRequests(ctx context.Context, issueID, userI
 				switch {
 				case findErr == nil:
 					result.Items = append(result.Items, toIssuePullRequestResponse(*current))
+				case errors.Is(findErr, context.Canceled) || errors.Is(findErr, context.DeadlineExceeded):
+					// 写回预算到点连读回也被截断——数据没写进库，文案与写回
+					// 超时同口径，不归成存储读失败（R15）。
+					result.Failures = append(result.Failures, pullRequestSyncFailure(link, "写回超时，请稍后重试同步"))
 				case errors.Is(findErr, gorm.ErrRecordNotFound):
 					result.Failures = append(result.Failures, pullRequestSyncFailure(link, "关联已解除"))
 				default:
@@ -472,7 +476,20 @@ func resolveFailureText(s *IssueService, ctx context.Context, err error, forgejo
 		return "请求已取消或超时，未继续同步"
 	}
 	if forgejo {
+		// err 本身是 ctx 错误但预算未终结（如子 ctx 到期）：不走
+		// forgejoSyncFailureText 把适配器原文回显——与「集成 API 不回
+		// 显错误原文」口径一致，给中性文案（R15）。
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			s.logger.Error("Forgejo 关联行同步失败", zap.Error(err))
+			return "读取 Forgejo 集成失败，请稍后重试"
+		}
 		return s.forgejoSyncFailureText(err)
+	}
+	// GitHub 侧 AppError 只取 Message——内部错误码（[50000]）不回显给
+	// 用户，与 Forgejo 分支经 classify 只取 Message 同口径（R15）。
+	var appErr *errs.AppError
+	if errors.As(err, &appErr) {
+		return appErr.Message
 	}
 	return err.Error()
 }
