@@ -995,3 +995,51 @@ func TestAgentScreenshotsChangedIgnoresRunningPrevRound(t *testing.T) {
 		t.Fatal("changed = false, want true（在途轮次的探测行不得算进参照集合）")
 	}
 }
+
+// 上一轮结论不是 completed（准备阶段失败、从未把截图交给审查员）时不得作
+// 参照：其资产行虽在，无人看过——本轮同集合不得判「未变化」（R15 审查意
+// 见）。
+func TestAgentScreenshotsChangedIgnoresFailedPrevRound(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	body := "![a](https://uiv.frp.musiver.cn/f/a.png)"
+	e.fake.SetPR(repo, 105, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 105, HeadSHA: "sha-same",
+		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature", Body: body,
+	})
+	combos, err := marshalCombinations([]api.ReviewCombination{testCombo("env-fl")})
+	if err != nil {
+		t.Fatalf("marshal combos: %v", err)
+	}
+	e.enableReview(t, func(s *model.ProjectReviewSettings) {
+		s.VisualCombinationsJSON = combos
+	})
+
+	// 上一轮：准备阶段失败（有完成时刻、结论不是 completed），但探测已把资
+	// 产行留下。
+	prevRun := e.seedRun(t, repo, 105, "sha-same", model.ReviewRunFailed, now.Add(-2*time.Hour))
+	e.svc.db.Model(prevRun).Updates(map[string]any{
+		"kind": model.ReviewKindVisual, "round_number": 1, "finished_at": now.Add(-time.Hour)})
+	curRun := e.seedRun(t, repo, 105, "sha-same", model.ReviewRunQueued, now)
+	e.svc.db.Model(curRun).Updates(map[string]any{"kind": model.ReviewKindVisual, "round_number": 2})
+
+	row := &model.ReviewAsset{
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ID:            "asset-failed", RepoFullName: repo, PRNumber: 105, HeadSHA: "sha-same",
+		Position: 0, Label: "a", SourceURL: "https://uiv.frp.musiver.cn/f/a.png",
+		StoragePath: "/cache/a.png", MimeType: "image/png", SizeBytes: 10,
+		CreatedAt: now.Add(-90 * time.Minute),
+	}
+	if err := e.svc.db.Create(row).Error; err != nil {
+		t.Fatalf("seed asset: %v", err)
+	}
+
+	_, changed, err := e.review.AgentScreenshots(context.Background(), curRun.ID)
+	if err != nil {
+		t.Fatalf("AgentScreenshots: %v", err)
+	}
+	if !changed {
+		t.Fatal("changed = false, want true（失败轮次的资产集无人看过，不得作参照）")
+	}
+}

@@ -895,17 +895,18 @@ func (s *ReviewService) AgentScreenshots(ctx context.Context, runID string) ([]a
 		return nil, false, err
 	}
 
-	// changed：本轮指纹与上一轮**已完成**的视觉运行（更早 round）绑定 head
-	// 的资产指纹比较。上一轮运行只在本 (项目, 集成) 账本内找——资产本身按
-	// (集成, 仓库) 归一共享，「何时做过视觉审查」属于执行态，按项目分区。
-	// 只认已完成的运行（R14 审查）：在途轮次还没有可沿用的结论，finished_at
-	// 为 NULL 的运行不作参照——manual rerun/评论唤醒的重叠轮次里它在途是
-	// 正常态，误当参照会把本轮探测行算进上一轮（changed 误报 false）；没有
-	// 已完成参照时 prevRefs 为空，changed 按默认 true，宁误报变化。
+	// changed：本轮指纹与上一轮**结论为 completed** 的视觉运行（更早 round）
+	// 绑定 head 的资产指纹比较。上一轮运行只在本 (项目, 集成) 账本内找——
+	// 资产本身按 (集成, 仓库) 归一共享，「何时做过视觉审查」属于执行态，按
+	// 项目分区。只认 completed（R14/R15 审查）：在途轮次还没有结论，failed/
+	// timed_out/cancelled 也没有——准备阶段失败的运行从未把截图交给审查员，
+	// 无人看过其资产集，误当参照会让「同集合重跑」误判成未变化；manual
+	// rerun/评论唤醒的重叠轮次里在途是正常态，同理不作参照。没有合格参照
+	// 时 prevRefs 为空，changed 按默认 true，宁误报变化。
 	changed := true
 	var prevRuns []model.ReviewRun
-	if err := s.db.Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ? AND kind = ? AND round_number < ? AND finished_at IS NOT NULL",
-		run.ProjectID, run.RepoFullName, run.PRNumber, run.IntegrationID, model.ReviewKindVisual, run.RoundNumber).
+	if err := s.db.Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ? AND kind = ? AND round_number < ? AND status = ? AND finished_at IS NOT NULL",
+		run.ProjectID, run.RepoFullName, run.PRNumber, run.IntegrationID, model.ReviewKindVisual, run.RoundNumber, model.ReviewRunCompleted).
 		Order("round_number DESC").Limit(1).Find(&prevRuns).Error; err != nil {
 		return nil, false, errs.ErrInternal
 	}
