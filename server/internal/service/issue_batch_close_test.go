@@ -272,7 +272,7 @@ func TestCloseOneGitHubIssue_SkipsPatchWhenBatchCanceled(t *testing.T) {
 
 	results := make(chan githubCloseNetResult, 1)
 	issue := model.Issue{Source: model.IssueSourceGitHub, GitHubMeta: &model.IssueGitHubMeta{Number: 7}}
-	closeOneGitHubIssue(ctx, fake, issue, ghclient.UpdateIssueRequest{}, results)
+	closeOneGitHubIssue(ctx, fake, issue, ghclient.UpdateIssueRequest{}, results, nil)
 
 	res := <-results
 	if res.err == nil || !errors.Is(res.err, context.Canceled) {
@@ -283,6 +283,105 @@ func TestCloseOneGitHubIssue_SkipsPatchWhenBatchCanceled(t *testing.T) {
 	}
 	if calls := len(fake.recordedUpdateIssueCalls()); calls != 0 {
 		t.Fatalf("canceled batch must not dispatch PATCH, got %d calls", calls)
+	}
+}
+
+// INT-185（复审 R2）：命中首个限流即熔断——剩余项不再派发，逐条记「未尝试」。
+// 钩子门控与 CancelStopsLater 同构：4 个 worker 全部进入 PATCH 后统一放行，
+// 每个被放行 worker 都必经 trip（全部命中限流），槽位释放只发生在 trip 之后，
+// 因此 calls==4 与文案分布是确定性事实。在途请求经 WithoutCancel 落库的语义
+// 由 CancelStopsLater 覆盖；限流 trip 与相邻 worker 槽位释放之间没有跨
+// goroutine 的 happen-before，熔断按「尽力同时」实现，重叠窗口上限为并发度。
+func TestIssueServiceBatchCloseDoneIssues_RateLimitStopsRemainingDispatch(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID)
+
+	const n = 20
+	started := make(chan struct{}, n)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseHooks := func() { releaseOnce.Do(func() { close(release) }) }
+	fake := &fakeIssueGitHubClient{}
+	fake.onUpdateIssue = func(_ context.Context, _ int) {
+		started <- struct{}{}
+		<-release
+	}
+	metas := seedGitHubDoneIssuesForBatchClose(t, svc, project.ID, n, fake)
+	errs := make(map[int]error, n)
+	for _, m := range metas {
+		errs[m.Number] = &gh.RateLimitError{Message: "API rate limit exceeded for 1.2.3.4."}
+	}
+	fake.updateIssueErrs = errs
+	svc.issueService.newClient = func(token, owner, repo string) ghclient.Client {
+		return fake
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	type outcome struct {
+		resp *BatchCloseDoneIssuesResponse
+		err  error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		resp, err := svc.issueService.BatchCloseDoneIssues(ctx, project.ID, user.ID, string(model.IssueSourceGitHub))
+		done <- outcome{resp: resp, err: err}
+	}()
+	batchExited := false
+	t.Cleanup(func() {
+		cancel()
+		releaseHooks()
+		if batchExited {
+			return
+		}
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+		}
+	})
+
+	for i := 0; i < batchCloseGitHubConcurrency; i++ {
+		select {
+		case <-started:
+		case <-time.After(2 * time.Second):
+			t.Fatal("UpdateIssue never reached concurrency")
+		}
+	}
+	releaseHooks()
+
+	got := <-done
+	batchExited = true
+	if got.err != nil {
+		t.Fatalf("batch close: %v", got.err)
+	}
+	resp := got.resp
+	if calls := len(fake.recordedUpdateIssueCalls()); calls != batchCloseGitHubConcurrency {
+		t.Fatalf("expected dispatch to stop at first wave, got %d calls", calls)
+	}
+	if resp.Succeeded != 0 || resp.Failed != n {
+		t.Fatalf("unexpected result: %+v", resp)
+	}
+	var limited, remaining int
+	for _, f := range resp.Failures {
+		switch f.Error {
+		case batchCloseGitHubRateLimitText:
+			limited++
+		case batchCloseGitHubRateLimitRemainingText:
+			remaining++
+		default:
+			t.Fatalf("unexpected failure copy for %s: %q", f.Id, f.Error)
+		}
+	}
+	if limited != batchCloseGitHubConcurrency || remaining != n-batchCloseGitHubConcurrency {
+		t.Fatalf("expected %d limited + %d remaining, got %d + %d", batchCloseGitHubConcurrency, n-batchCloseGitHubConcurrency, limited, remaining)
+	}
+	var closed int64
+	if err := svc.db.Model(&model.Issue{}).Where("project_id = ? AND state = ?", project.ID, model.IssueStateClosed).Count(&closed).Error; err != nil {
+		t.Fatalf("count closed: %v", err)
+	}
+	if closed != 0 {
+		t.Fatalf("rate-limited closes must not persist, got %d", closed)
 	}
 }
 

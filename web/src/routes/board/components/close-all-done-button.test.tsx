@@ -49,23 +49,22 @@ describe("CloseAllDoneButton select label", () => {
   });
 });
 
-// INT-185（复审 R1）：failures[].error 是服务端分类文案（已跳过/未确认/限流），
-// 必须透传进 toast——只报数量会让用户把部分成功当成整批失败再点一次。
+// INT-185（复审 R2）：failures[].error 是服务端分类文案，混合批次可能同时
+// 出现多类原因，去重后全部展示，避免首条（内部行恒先处理）掩盖 GitHub 类别。
 describe("CloseAllDoneButton failure toast", () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  it("surfaces the first failure error and refs", async () => {
+  it("surfaces all distinct failure reasons with refs", async () => {
     closeMutateAsync.mockResolvedValue({
-      total: 4,
-      succeeded: 0,
-      failed: 4,
+      total: 3,
+      succeeded: 1,
+      failed: 3,
       failures: [
-        { id: "i-3", reference: "INT-3", error: "该问题已在其他操作中被更新，已跳过关闭" },
-        { id: "i-4", reference: "INT-4", error: "更新 GitHub Issue 失败：GitHub API 限流，请稍后重试" },
-        { id: "i-5", reference: "INT-5", error: "x" },
-        { id: "i-6", reference: "INT-6", error: "y" },
+        { id: "i-1", reference: "INT-1", error: "该问题已在其他操作中被更新，已跳过关闭" },
+        { id: "i-5", reference: "INT-5", error: "关闭结果未确认：GitHub 侧可能已关闭，请刷新查看" },
+        { id: "i-6", reference: "INT-6", error: "关闭结果未确认：GitHub 侧可能已关闭，请刷新查看" },
       ],
     });
     const user = userEvent.setup();
@@ -74,7 +73,7 @@ describe("CloseAllDoneButton failure toast", () => {
     await user.click(screen.getByRole("button", { name: "确认关闭" }));
     await waitFor(() => {
       expect(toastWarning).toHaveBeenCalledWith(
-        "已关闭 0 个问题，4 个失败：该问题已在其他操作中被更新，已跳过关闭（INT-3、INT-4、INT-5）",
+        "已关闭 1 个问题，3 个失败：该问题已在其他操作中被更新，已跳过关闭；关闭结果未确认：GitHub 侧可能已关闭，请刷新查看（INT-1、INT-5、INT-6）",
       );
     });
   });

@@ -49,11 +49,14 @@ export function CloseAllDoneButton({ projectId }: { projectId: string }) {
           .map((f) => f.reference ?? f.id)
           .join("、");
         // failures[].error 是服务端的分类文案（已跳过/结果未确认/限流/取消），
-        // 必须透传：首条原因直接进 toast，指引（刷新确认/稍后重试）随文案自带，
-        // 只报数量会让用户把部分成功当成整批失败再点一次（INT-185）。
-        const reason = result.failures[0]?.error;
+        // 必须透传：混合批次可能同时出现多类原因（服务端先处理内部再处理
+        // GitHub），去重后全部展示（上限 3 条），避免首条掩盖其余类别；指引
+        //（刷新确认/稍后重试）随文案自带（INT-185）。
+        const reasons = [
+          ...new Set(result.failures.map((f) => f.error).filter(Boolean)),
+        ].slice(0, 3);
         toast.warning(
-          `已关闭 ${result.succeeded} 个问题，${result.failed} 个失败${reason ? `：${reason}` : ""}${refs ? `（${refs}）` : ""}`,
+          `已关闭 ${result.succeeded} 个问题，${result.failed} 个失败${reasons.length ? `：${reasons.join("；")}` : ""}${refs ? `（${refs}）` : ""}`,
         );
       } else {
         toast.success(`已关闭 ${result.succeeded} 个问题`);
