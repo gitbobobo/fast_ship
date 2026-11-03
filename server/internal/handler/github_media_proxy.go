@@ -152,44 +152,12 @@ func serveCachedMedia(c *gin.Context, media *githubmedia.CachedMedia) bool {
 	return true
 }
 
-// setSameOriginContentHardeningHeaders `?token=` 引入的同源内容出口（GitHub
-// 媒体代理、Issue 附件、头像）统一硬化：用户可控内容不能以 Fast Ship 同源
-// 文档交付。nosniff 禁止浏览器嗅探改判，CSP sandbox 兜底禁脚本禁同源。
-func setSameOriginContentHardeningHeaders(header http.Header) {
-	header.Set("X-Content-Type-Options", "nosniff")
-	header.Set("Content-Security-Policy", "default-src 'none'; sandbox")
-}
-
-// setSameOriginAttachmentHeaders 同上，再加 Content-Disposition: attachment
-// 与文件名。attachment 挡的是顶层导航（「在新标签页打开图片」退化成下载，
-// 而不是打开一份同源文档）。子资源不受影响的依据：HTML 的下载处理只写在
-// 导航算法里，图片/媒体的加载算法没有 attachment 分支，Fetch 也只把
-// document/embed/frame/iframe/object 列为导航请求；WebKit 的 SubresourceLoader
-// 与 AVFoundation 媒体桥接源码里同样没有按 attachment 下载/拒显的分支。
-// Chromium 已实测；Safari 尚无本机实测，属于源码级判断而不是浏览器验证。
-// 不按 Sec-Fetch-Dest 区分：导航请求不止 document（还有 iframe/frame/object/
-// embed），缺失元数据的老客户端还得另定回落，为一个没有证据的 Safari 兼容
-// 问题引入两条缓存键与分支，不值得。
-func setSameOriginAttachmentHeaders(header http.Header, fileName string) {
-	setSameOriginContentHardeningHeaders(header)
-	header.Set("Content-Disposition", contentDisposition(fileName))
-}
-
-// setSameOriginInlineImageHardeningHeaders 给「响应本身就是要在浏览器里当图片
-// 看的同源内容」（截图）用：nosniff 禁止把 image/* 改判成 HTML；CSP 只给
-// `sandbox`——禁脚本、隔离来源，但不设 default-src。
-// 不套 default-src 'none'：Chromium 打开图片地址会生成 `<body><img>` 包装文档，
-// 那个 img 是否受 img-src（回落到 default-src）约束随版本而异（实测 155 不拦，
-// 别的版本可能拦），图片能不能显示不该赌这个实现细节。
-func setSameOriginInlineImageHardeningHeaders(header http.Header) {
-	header.Set("X-Content-Type-Options", "nosniff")
-	header.Set("Content-Security-Policy", "sandbox")
-}
-
 // setMediaProxyHardeningHeaders 媒体代理成功响应的统一硬化头（INT-171）。必须
 // 在 copyMediaHeaders 之后、http.ServeContent 之前设置，避免被上游头覆盖。
+// 硬化头与 disposition 走公共无缓存出口实现（INT-182 attachment 档）；档位
+// Cache-Control 不在这里写——缓存面的 TTL 由 s.cacheTTL 派生，由调用方自己写。
 func setMediaProxyHardeningHeaders(header http.Header, upstreamURL, contentType string) {
-	setSameOriginAttachmentHeaders(header, mediaProxyFileName(upstreamURL, contentType))
+	egress.attachmentHeaders(header, mediaProxyFileName(upstreamURL, contentType))
 }
 
 // mediaProxyFileName 下载文件名：优先上游 URL 末段（GitHub 附件直链多半是没

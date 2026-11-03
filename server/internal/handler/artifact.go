@@ -72,7 +72,8 @@ func (h *ArtifactHandler) Download(c *gin.Context) {
 	}
 	defer reader.Close()
 
-	c.Header("Content-Disposition", "attachment; filename="+fileName)
-	c.Header("Content-Type", "application/octet-stream")
-	c.DataFromReader(200, -1, "application/octet-stream", reader, nil)
+	// 下载档收口（INT-182）：原先的 disposition 是裸拼 filename——未消毒、未
+	// 按 RFC 6266/5987，改走出口 attachment 档后一并修掉，硬化头与档位缓存
+	// 同时从无到有补齐。
+	egress.OctetDownload(c, fileName, -1, reader)
 }

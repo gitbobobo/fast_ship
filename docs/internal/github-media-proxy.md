@@ -30,17 +30,22 @@ svg（`image/svg+xml`、非标准写法 `image/svg`、扩展名 `.svg`）与 HTM
 
 媒体代理的成功响应统一带：`X-Content-Type-Options: nosniff`（禁止嗅探改判）、`Content-Disposition: attachment; filename=…`（挡顶层导航，不让代理地址被当成同源文档打开。子资源不受影响的依据：HTML 的「Handle as a download」只写在导航算法里，图片/媒体加载算法没有 attachment 分支，WebKit 的子资源与媒体桥接源码里也没有；Chromium 实测过，Safari 未实测，属源码级判断。若未来出现可复现的 Safari 子资源拒显，再考虑按 `Sec-Fetch-Dest` 区分；文件名优先取上游 URL 末段，且后缀要与响应类型对账（后缀是上游可控的）：后缀在媒体表里、且反查出的类型与响应类型一致才保留；否则表内类型按响应类型反查替换（`.v2`、结尾一个点、无扩展名、伪装后缀 `x.png` 回 `video/mp4` → `x.mp4`）；表外类型（`image/avif`、`video/x-matroska` 这些按前缀放行但表里没有的）反查不到，保留上游自己的 `.avif`/`.mkv`，只在完全没后缀时退 `.bin`）与 `Content-Security-Policy: default-src 'none'; sandbox`（兜底禁脚本禁同源）。
 
-**同源出口不变量**：同一套硬化头也用在同一组「`?token=` + 用户可控内容」的出口上，全部走 `server/internal/handler/github_media_proxy.go` 的 `setSameOriginContentHardeningHeaders`（`nosniff` + `CSP: default-src 'none'; sandbox`），需要下载语义的再加 `setSameOriginAttachmentHeaders`（带文件名的 `attachment`）：
+**同源出口不变量**：同一组「`?token=`/JWT + 用户可控内容」的无缓存出口统一走 `server/internal/handler/content_egress.go` 的 `contentEgress`（INT-182 收口，鉴权之后的 handler 只按档调用，不再各自拼头）。按档分三种完整响应：
 
-| 出口 | 硬化 | 说明 |
+- `Attachment` / `OctetDownload` 下载档：`nosniff` + `CSP: default-src 'none'; sandbox` + `Content-Disposition: attachment`（文件名消毒 + RFC 6266/5987，收在实现里）+ `Cache-Control: private, max-age=300`；`OctetDownload` 把 Content-Type 固定为 `application/octet-stream`。
+- `InlineImage` / `InlineImageHead` inline 图片档：`nosniff` + `CSP: sandbox` + `Content-Disposition: inline` + 同一档位缓存头。
+- 另有两条只写硬化头、不写档位缓存头的头级路径 `attachmentHeaders` / `inlineImageHeaders`，只留给两条特殊写路径：媒体代理缓存面（Cache-Control 由缓存条目 TTL 派生，不走 300 秒档位）与 review-agent 截图流（无定长、无缓存语义）。
+
+| 出口 | 档位 | 说明 |
 | --- | --- | --- |
-| `/api/github/media-proxy` | nosniff + CSP + attachment | 任意公网图片/视频（仅收媒体类型） |
-| `/api/issues/assets/:aid/content` | nosniff + CSP + attachment | Issue 附件，上传只按前 512 字节嗅探求 `image/*`，「图片魔数 + HTML/SVG 体」的多态文件能过 |
-| `/api/avatars/:uid/:filename` | nosniff + CSP + attachment | 头像 |
-| `/api/screenshot-screens/:sid/content` | nosniff + CSP `sandbox`，保留 `inline` | 截图同样是用户上传 + `?token=`；「在标签页里看截图」是产品行为，`inline` 保留。这一档**不设** `default-src`：Chromium 打开图片地址会生成 `<body><img>` 包装文档，那个 img 是否受 `img-src`（回落到 `default-src`）约束随版本而异，能不能显示不该赌这个实现细节；`sandbox` 单独就够禁脚本 |
-| `/api/screenshot-annotations/:aid/crop` | 同上（nosniff + CSP `sandbox` + `inline`） | 服务端重新编码的裁剪 PNG，无脚本执行风险，但按同一不变量接上，别靠「眼下没风险」豁免 |
-
-`/api/artifacts/:aid/download`、`/api/attachments/:aid/download` 以 `application/octet-stream` + `attachment` 下发，本身不构成同源文档，不在这个不变量里。
+| `/api/github/media-proxy` | attachment（头级路径） | 任意公网图片/视频（仅收媒体类型）；Cache-Control 由缓存面自己写 |
+| `/api/issues/assets/:aid/content` | attachment | Issue 附件，上传只按前 512 字节嗅探求 `image/*`，「图片魔数 + HTML/SVG 体」的多态文件能过 |
+| `/api/attachments/:aid/download` | octet 下载 | Issue 附件下载，INT-182 起补齐完整硬化头 |
+| `/api/artifacts/:aid/download` | octet 下载 | 产物下载，INT-182 起 disposition 走消毒 + RFC 6266/5987 |
+| `/api/avatars/:uid/:filename` | attachment | 头像 |
+| `/api/screenshot-screens/:sid/content` | inline 图片 | 截图同样是用户上传 + `?token=`；「在标签页里看截图」是产品行为，`inline` 保留。这一档**不设** `default-src`：Chromium 打开图片地址会生成 `<body><img>` 包装文档，那个 img 是否受 `img-src`（回落到 `default-src`）约束随版本而异，能不能显示不该赌这个实现细节；`sandbox` 单独就够禁脚本 |
+| `/api/screenshot-annotations/:aid/crop` | inline 图片（GET + HEAD） | 服务端重新编码的裁剪 PNG，无脚本执行风险，但按同一不变量接上，别靠「眼下没风险」豁免 |
+| `/api/review-agent/runs/:runId/screenshots/:assetId` | inline 图片（头级路径） | 流式拷出，无定长无缓存语义；魔数对账 `ResolveImageMIME` 也在出口实现里 |
 
 **残余窗口**：头像地址存在用户表里、改不了缓存键，没法像媒体代理那样加版本参数；只有头像需要按 60 分钟评估——基线里头像的 `Cache-Control` 是 `private, max-age=3600`，部署前已进浏览器的旧响应（没有硬化头）会按它继续被复用，真实残余窗口最长 60 分钟。Issue 附件基线本来就是 `max-age=300`，残余窗口仍是最长 5 分钟（媒体代理旧版是 24h，靠 `v` 版本参数提前退役）。两条出口的 `Cache-Control` 都压到 `private, max-age=300`，只是把窗口之后的新请求压回分钟级，不是旧缓存的退役时间。新增同类出口时照上表接上，别只给媒体代理加。
 
