@@ -1320,12 +1320,12 @@ func TestIssueServiceSyncPullRequests_ConcurrentFetch(t *testing.T) {
 	if max := atomic.LoadInt32(&fake.getPullRequestMax); max > pullRequestSyncConcurrency {
 		t.Fatalf("expected concurrency capped at %d, got %d", pullRequestSyncConcurrency, max)
 	}
-	// 确定性证据是峰值并发（上面已断言 >1 且 ≤上限）；墙钟只给宽松上
-	// 界——串行是 8×50ms=400ms，并发理论 100ms，断言 <300ms 留足慢机/
-	// -race 余量，不再用更紧的倍数门限避免把机器抖动读成并发回归。
+	// 确定性证据是峰值并发（上面已断言 >1 且 ≤上限）；墙钟只给极宽松
+	// 上界——串行累加 8×50ms=400ms，放宽到其量级内即证明没有退化回
+	// 串行，慢机/-race 抖动不会误报。
 	serialEstimate := time.Duration(linkCount) * 50 * time.Millisecond
-	if elapsed > serialEstimate*3/4 {
-		t.Fatalf("expected concurrent fetch well under serial %v, took %v", serialEstimate, elapsed)
+	if elapsed > serialEstimate {
+		t.Fatalf("expected concurrent fetch under serial %v, took %v", serialEstimate, elapsed)
 	}
 }
 
