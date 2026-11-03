@@ -921,13 +921,16 @@ func (s *ReviewService) AgentScreenshots(ctx context.Context, runID string) ([]a
 		//     前的全量（同一 head 上超过上限），多出来的旧 URL 同样会顶住指纹。
 		// 注意不按「当前描述」过滤：描述里真的删掉某张截图时集合确实变了，
 		// 那必须判 changed=true，抹掉它等于把「截图被删」报成未变化。
-		// 「本轮新行」的截止是上一轮运行的完成时刻，不是本轮的创建时刻
-		//（R12 审查）：探测/建运行跨同步时，探测行落在本轮创建之前——按本
-		// 轮创建时刻剔除会把它们误算进上一轮，新增截图被判成「未变化」，
-		// changed 误报 false。上一轮完成之后写的行都属本轮证据；上一轮没有
-		// 完成时刻（生产不该出现）时退回旧口径 run.CreatedAt，宁误报变化。
+		// 「本轮新行」的截止是 min(上一轮完成时刻, 本轮创建时刻)（R12/R13
+		// 审查）：探测/建运行跨同步时，探测行落在本轮创建之前——只按本轮
+		// 创建时刻剔除会把它们误算进上一轮；轮次可重叠时（manual rerun 不
+		// 看在途运行恒开新轮）新轮创建可能早于上一轮完成，只按上一轮完成
+		// 时刻剔除又会把新轮自己的早期行算进上一轮。两者取更早者：上一轮
+		// 完成前且本轮创建前写的行按上一轮证据保留，其余都属本轮，宁误报
+		// 变化不误报未变化。上一轮没有完成时刻（生产不该出现）时退回本轮
+		// 创建时刻。
 		prevCutoff := run.CreatedAt
-		if prevRuns[0].FinishedAt != nil {
+		if prevRuns[0].FinishedAt != nil && prevRuns[0].FinishedAt.Before(run.CreatedAt) {
 			prevCutoff = *prevRuns[0].FinishedAt
 		}
 		prevRefs := make([]screenshotRef, 0, maxScreenshotsPerPR)
@@ -979,6 +982,17 @@ func (s *ReviewService) AgentScreenshots(ctx context.Context, runID string) ([]a
 			items = append(items, item)
 			continue
 		}
+		// 路径在但文件缺失（重下失败的保留引用，R12）：给出原因不给 URL
+		//（端点此刻只会 500），审查员据此记入 unmeasurable（R13 审查意见）。
+		if assetFileMissing(a.StoragePath) {
+			reason := a.Error
+			if reason == "" {
+				reason = "截图文件缺失，重下未成功"
+			}
+			item.Error = api.Ptr(reason)
+			items = append(items, item)
+			continue
+		}
 		// 图片地址带本轮 run 作用域（INT-169）：端点按 runId+令牌双重绑定，
 		// URL 只能取本运行 id，不能从其他运行借。
 		item.Url = "/api/review-agent/runs/" + runID + "/screenshots/" + a.ID
@@ -1006,6 +1020,16 @@ func (s *ReviewService) AgentScreenshotImage(ctx context.Context, runID, assetID
 	}
 	if asset.StoragePath == "" {
 		return "", "", errs.ErrIssueAssetNotFound
+	}
+	// 路径在而文件缺失（重下失败的保留引用，R12）：按 404 带出已记录的原
+	// 因，而不是让 handler 的 os.Open 落成 500「服务器内部错误」——卷瞬时
+	// 不可用期间对外是「截图不可用」，不是服务端故障（R13 审查意见）。
+	if assetFileMissing(asset.StoragePath) {
+		reason := asset.Error
+		if reason == "" {
+			reason = "截图文件缺失"
+		}
+		return "", "", errs.New(errs.ErrIssueAssetNotFound.Code, reason)
 	}
 	mime := asset.MimeType
 	if mime == "" {

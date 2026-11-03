@@ -829,3 +829,111 @@ func TestAgentScreenshotsChangedCutoffAtPrevFinish(t *testing.T) {
 		t.Fatal("changed = false, want true（新增截图 b 不得被算进上一轮集合）")
 	}
 }
+
+// 轮次可重叠（manual rerun 恒开新轮、不看在途运行）：新轮创建可能早于上
+// 一轮完成——prevCutoff 取两者更早者，新轮自己的早期行不得被算进上一轮集
+// 合（R13 审查意见）。
+func TestAgentScreenshotsChangedCutoffOverlappingRounds(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	// 本轮创建于 -45min；上一轮在 -30min 才完成（重叠 15 分钟）。
+	nowUTC := time.Now().UTC()
+	curCreatedAt := nowUTC.Add(-45 * time.Minute)
+	prevFinished := nowUTC.Add(-30 * time.Minute)
+	body := "![a](https://uiv.frp.musiver.cn/f/a.png)\n\n![b](https://uiv.frp.musiver.cn/f/b.png)"
+	e.fake.SetPR(repo, 102, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 102, HeadSHA: "sha-same",
+		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature", Body: body,
+	})
+	combos, err := marshalCombinations([]api.ReviewCombination{testCombo("env-ov")})
+	if err != nil {
+		t.Fatalf("marshal combos: %v", err)
+	}
+	e.enableReview(t, func(s *model.ProjectReviewSettings) {
+		s.VisualCombinationsJSON = combos
+	})
+
+	prevRun := e.seedRun(t, repo, 102, "sha-same", model.ReviewRunCompleted, curCreatedAt.Add(-2*time.Hour))
+	e.svc.db.Model(prevRun).Updates(map[string]any{
+		"kind": model.ReviewKindVisual, "round_number": 1, "finished_at": prevFinished})
+	curRun := e.seedRun(t, repo, 102, "sha-same", model.ReviewRunQueued, curCreatedAt)
+	e.svc.db.Model(curRun).Updates(map[string]any{"kind": model.ReviewKindVisual, "round_number": 2})
+
+	mk := func(id, url string, createdAt time.Time) *model.ReviewAsset {
+		return &model.ReviewAsset{
+			IntegrationID: model.ForgeIntegrationBuiltinGitHubID, ID: id,
+			RepoFullName: repo, PRNumber: 102, HeadSHA: "sha-same",
+			Position: 0, Label: id, SourceURL: url,
+			StoragePath: "/cache/" + id + ".png", MimeType: "image/png", SizeBytes: 10,
+			CreatedAt: createdAt,
+		}
+	}
+	// a：本轮创建之前就在（上一轮证据，计入 prevRefs）。
+	if err := e.svc.db.Create(mk("asset-over-prev", "https://uiv.frp.musiver.cn/f/a.png", curCreatedAt.Add(-time.Hour))).Error; err != nil {
+		t.Fatalf("seed prev asset: %v", err)
+	}
+	// b：落在本轮创建之后、上一轮完成之前的重叠窗口（新轮自己的早期证据，
+	// 不得算进上一轮）。
+	if err := e.svc.db.Create(mk("asset-over-new", "https://uiv.frp.musiver.cn/f/b.png", curCreatedAt.Add(15*time.Minute))).Error; err != nil {
+		t.Fatalf("seed overlap asset: %v", err)
+	}
+
+	_, changed, err := e.review.AgentScreenshots(context.Background(), curRun.ID)
+	if err != nil {
+		t.Fatalf("AgentScreenshots: %v", err)
+	}
+	if !changed {
+		t.Fatal("changed = false, want true（重叠窗口的新增行不得算进上一轮集合）")
+	}
+}
+
+// 路径保留 + 文件缺失 + 重下失败（R12 修复的边界，R13 审查意见）：列表把
+// 该行按带原因的错误项下发（不给必然打不开的 URL），审查员可据此记
+// unmeasurable，而不是拿到 500 的图片地址。
+func TestAgentScreenshotsMissingFileReportsReason(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	body := "![a](https://uiv.frp.musiver.cn/f/gone.png)"
+	e.fake.SetPR(repo, 103, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 103, HeadSHA: "sha-gone",
+		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature", Body: body,
+	})
+	combos, err := marshalCombinations([]api.ReviewCombination{testCombo("env-g")})
+	if err != nil {
+		t.Fatalf("marshal combos: %v", err)
+	}
+	e.enableReview(t, func(s *model.ProjectReviewSettings) {
+		s.VisualCombinationsJSON = combos
+	})
+	visualRun := e.seedRun(t, repo, 103, "sha-gone", model.ReviewRunQueued, now)
+	e.svc.db.Model(visualRun).Update("kind", model.ReviewKindVisual)
+
+	// 命中行：路径指向不存在的文件，重下必失败（503）——重下失败保留引用
+	// 后行带非空路径 + error。
+	e.media.anonErr = &githubmedia.UpstreamStatusError{StatusCode: 503}
+	row := &model.ReviewAsset{
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ID:            "asset-gone", RepoFullName: repo, PRNumber: 103, HeadSHA: "sha-gone",
+		Position: 0, Label: "a", SourceURL: "https://uiv.frp.musiver.cn/f/gone.png",
+		StoragePath: "/cache/vanished-gone.png", MimeType: "image/png", SizeBytes: 10,
+		CreatedAt: now,
+	}
+	if err := e.svc.db.Create(row).Error; err != nil {
+		t.Fatalf("seed asset: %v", err)
+	}
+
+	items, _, err := e.review.AgentScreenshots(context.Background(), visualRun.ID)
+	if err != nil {
+		t.Fatalf("AgentScreenshots: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("items = %d, want 1", len(items))
+	}
+	if items[0].Url != "" {
+		t.Fatalf("url = %q, want 空（文件缺失不给 URL）", items[0].Url)
+	}
+	if items[0].Error == nil || *items[0].Error == "" {
+		t.Fatalf("error = %+v, want 带原因的错误项", items[0].Error)
+	}
+}
