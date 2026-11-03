@@ -16,6 +16,7 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	ghclient "github.com/godbobo/fast_ship/server/internal/pkg/github"
 	gh "github.com/google/go-github/v62/github"
+	"go.uber.org/zap"
 )
 
 func seedGitHubDoneIssuesForBatchClose(t *testing.T, svc *testServices, projectID string, n int, fake *fakeIssueGitHubClient) []model.IssueGitHubMeta {
@@ -769,6 +770,16 @@ func TestIsGitHubRateLimitError(t *testing.T) {
 			Message:  "API rate limit exceeded",
 			Response: resp(http.StatusTooManyRequests),
 		}, true},
+		// INT-185（复审 R13）：裸 429（空 body/无文案、网关自定义文案）也是权威
+		// 限流信号，无需 body 含 rate limit 字样，否则不熔断会继续派发 PATCH。
+		{"ErrorResponse429EmptyBody", &gh.ErrorResponse{
+			Message:  "",
+			Response: resp(http.StatusTooManyRequests),
+		}, true},
+		{"ErrorResponse429CustomGatewayBody", &gh.ErrorResponse{
+			Message:  "request rejected by edge",
+			Response: resp(http.StatusTooManyRequests),
+		}, true},
 		{"ErrorResponse403RateLimitRawBody", &gh.ErrorResponse{
 			Message: "",
 			Response: func() *http.Response {
@@ -915,36 +926,39 @@ func (f *failingBatchCloseStorer) markCollectionsStaleAfterPush(issueID string) 
 	return f.staleErr
 }
 
-// INT-185（复审 R12）：批次 ctx 在事务执行中死亡、驱动/GORM 把取消包装成非
-// ctx 错误时，closeInternalIssues 必须回读 ctx.Err() 归「请求已取消或超时」，
-// 不能误报为「服务器内部错误」让用户重试。让事务里的 UPDATE 命中一个被
-// 取消的 ctx（驱动返回 SQLITE_INTERRUPT 之类的非 ctx 包装错误）验证。
-func TestIssueServiceBatchCloseDoneIssues_InternalTxWrappedCancel(t *testing.T) {
-	svc := setupTestServices(t)
-	user := createTestUser(t, svc.db, "user-1")
-	project := createTestProject(t, svc.db, user.ID)
-	now := time.Now().UTC()
-	seedListFixtureIssues(t, svc, project.ID, []listFixtureIssue{
-		{seq: 1, source: model.IssueSourceInternal, state: model.IssueStateOpen,
-			title: "done", author: "alice", updated: now, created: now,
-			workflow: listFixtureStatus(model.IssueWorkflowStatusDone)},
-	})
-	var issues []model.Issue
-	if err := svc.db.Where("project_id = ?", project.ID).Find(&issues).Error; err != nil {
-		t.Fatalf("load issues: %v", err)
+// INT-185（复审 R12/R13）：事务失败归因——批次 ctx 已死（取消/超时）时逐条
+// 归「请求已取消或超时」，即使驱动/GORM 把事务错误包装成非 ctx 类型；批次
+// 仍存活才报内部错误。用 classifyInternalCloseErr 直接断言三条边界，避免
+// 依赖共享内存库上脆弱的持锁阻塞（R13 Note：原先用例在调用前就 cancel，
+// 顶部早退、从未进事务失败分支）。
+func TestClassifyInternalCloseErr(t *testing.T) {
+	dbErr := errors.New("SQLITE_BUSY: database is locked")
+
+	// 批次 ctx 已死 + 非 ctx 包装错误：回读 ctx.Err() 归取消/超时。
+	done, cancel := context.WithTimeout(context.Background(), -time.Second)
+	defer cancel()
+	if got := classifyInternalCloseErr(done, dbErr, nil); !errors.Is(got, context.DeadlineExceeded) {
+		t.Fatalf("dead ctx must attribute to its own err, got %v", got)
+	}
+	dead, cancel2 := context.WithCancel(context.Background())
+	cancel2()
+	if got := classifyInternalCloseErr(dead, dbErr, nil); !errors.Is(got, context.Canceled) {
+		t.Fatalf("cancelled ctx must attribute to its own err, got %v", got)
 	}
 
-	// 批次 ctx 已死：事务内的驱动错误（SQLITE_INTERRUPT 等非 ctx 包装错误）
-	// 或顶部 ctx.Err() 早退都必须归「请求已取消或超时」，不能落 ErrInternal。
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	resp := &BatchCloseDoneIssuesResponse{Total: 1, Failures: make([]BatchCloseDoneIssueFailure, 0)}
-	svc.issueService.closeInternalIssues(ctx, issues, resp)
-	if resp.Failed != 1 || len(resp.Failures) != 1 {
-		t.Fatalf("expected 1 failed, got %+v", resp)
+	// 批次存活 + ctx err：透传原 err（仍是取消类文案）。
+	live := context.Background()
+	if got := classifyInternalCloseErr(live, context.Canceled, nil); !errors.Is(got, context.Canceled) {
+		t.Fatalf("live ctx with ctx err must passthrough, got %v", got)
 	}
-	// 关键是归「请求已取消或超时」而不是「服务器内部错误」。
-	if resp.Failures[0].Error != "请求已取消或超时，未继续关闭" {
-		t.Fatalf("cancelled internal tx must attribute to cancellation, got %q", resp.Failures[0].Error)
+
+	// 批次存活 + 非 ctx 错误：归 ErrInternal 并记 warn（用 logger 验证告警）。
+	var logged bool
+	warn := func(msg string, fields ...zap.Field) { logged = true }
+	if got := classifyInternalCloseErr(live, dbErr, warn); got != errs.ErrInternal {
+		t.Fatalf("live ctx with wrapped err must be ErrInternal, got %v", got)
+	}
+	if !logged {
+		t.Fatal("internal failure must be logged")
 	}
 }

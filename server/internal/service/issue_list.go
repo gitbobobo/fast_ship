@@ -305,6 +305,24 @@ func classifyGitHubCloseError(err error) error {
 	return &batchClosePatchUnconfirmedError{err: err}
 }
 
+// classifyInternalCloseErr 归类内部事务失败（INT-185 R12/R13）：批次 ctx
+// 已死（取消/超时）时归 ctx 自身 err——驱动/GORM 可能把取消包装成非 ctx
+// 错误（SQLITE_INTERRUPT、SQLITE_BUSY、连接池关闭错误），此时不能误报为
+// 「服务器内部错误」让用户重试；批次仍存活时 ctx err 透传、非 ctx 错误归
+// ErrInternal 并记 warn。warn 为 nil 时不记。
+func classifyInternalCloseErr(ctx context.Context, err error, warn func(string, ...zap.Field)) error {
+	if batchErr := ctx.Err(); batchErr != nil {
+		return batchErr
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	if warn != nil {
+		warn("batch close internal issues failed", zap.Error(err))
+	}
+	return errs.ErrInternal
+}
+
 func (s *IssueService) closeInternalIssues(ctx context.Context, issues []model.Issue, resp *BatchCloseDoneIssuesResponse) {
 	if len(issues) == 0 {
 		return
@@ -334,15 +352,9 @@ func (s *IssueService) closeInternalIssues(ctx context.Context, issues []model.I
 		return s.recRepo.DeleteByIssueIDsTx(tx, closed)
 	})
 	if err != nil {
-		// 除判定 err 本身是 ctx err 外再回读批次状态：驱动/GORM 可能把批次
-		// 取消/超时包装成非 ctx 错误（SQLITE_INTERRUPT、连接池关闭错误），
-		// 批次已死时不能误报为「服务器内部错误」让用户重试（INT-185 R12）。
-		if batchErr := ctx.Err(); batchErr != nil {
-			err = batchErr
-		} else if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-			s.logger.Warn("batch close internal issues failed", zap.Error(err))
-			err = errs.ErrInternal
-		}
+		err = classifyInternalCloseErr(ctx, err, func(msg string, fields ...zap.Field) {
+			s.logger.Warn(msg, fields...)
+		})
 		for _, issue := range issues {
 			appendBatchCloseFailure(resp, issue, err)
 		}
@@ -542,7 +554,12 @@ func isGitHubRateLimitError(err error) bool {
 		return false
 	}
 	code := respErr.Response.StatusCode
-	if code != http.StatusForbidden && code != http.StatusTooManyRequests {
+	// 429 本身是权威限流信号，无需依赖 body 文案——空 body、纯 Retry-After
+	// 或网关/WAF 自定义文案的 429 也必须触发熔断（INT-185 R13）。
+	if code == http.StatusTooManyRequests {
+		return true
+	}
+	if code != http.StatusForbidden {
 		return false
 	}
 	text := strings.ToLower(respErr.Message)
