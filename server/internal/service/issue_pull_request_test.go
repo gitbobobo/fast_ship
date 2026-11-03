@@ -1320,9 +1320,12 @@ func TestIssueServiceSyncPullRequests_ConcurrentFetch(t *testing.T) {
 	if max := atomic.LoadInt32(&fake.getPullRequestMax); max > pullRequestSyncConcurrency {
 		t.Fatalf("expected concurrency capped at %d, got %d", pullRequestSyncConcurrency, max)
 	}
-	// 8 条 × 50ms 串行 ≈ 400ms；并发 4 时应 ≈ 100ms，留足调度余量。
-	if elapsed > 300*time.Millisecond {
-		t.Fatalf("expected concurrent fetch to finish well under serial total, took %v", elapsed)
+	// 并发完成的下界 = ceil(8/4)×50ms = 100ms，串行 = 400ms。用相对倍数
+	// （串行耗时的 2/3 ≈ 267ms）而非固定毫秒数断言，避免慢机器上的墙钟
+	// 抖动被读成并发回归。
+	serialEstimate := time.Duration(linkCount) * 50 * time.Millisecond
+	if elapsed > serialEstimate*2/3 {
+		t.Fatalf("expected concurrent fetch well under serial %v, took %v", serialEstimate, elapsed)
 	}
 }
 

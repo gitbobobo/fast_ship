@@ -1,6 +1,8 @@
 package repository
 
 import (
+	"context"
+
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -16,6 +18,15 @@ func NewIssuePullRequestRepository(db *gorm.DB) *IssuePullRequestRepository {
 
 func (r *IssuePullRequestRepository) Create(link *model.IssuePullRequest) error {
 	return r.db.Create(link).Error
+}
+
+// WithContext 返回绑定 ctx 的仓库视图：UPDATE 的借连接/锁等待随 ctx 取消
+// （INT-175 sync 写回阶段用，避免请求断开后逐行挂 busy_timeout）。
+func (r *IssuePullRequestRepository) WithContext(ctx context.Context) *IssuePullRequestRepository {
+	if r == nil || ctx == nil {
+		return r
+	}
+	return &IssuePullRequestRepository{db: r.db.WithContext(ctx)}
 }
 
 // Upsert 以业务唯一键 (issue_id, provider, host_key, repo_full_name, number) 原子

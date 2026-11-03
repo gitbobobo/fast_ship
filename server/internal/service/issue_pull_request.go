@@ -357,7 +357,10 @@ func (s *IssueService) SyncIssuePullRequests(ctx context.Context, issueID, userI
 	}
 
 	// 阶段 3（串行）：按原序逐行写回并组装响应——items/failures 的顺序与
-	// 关联行创建顺序一致，与并发度无关。
+	// 关联行创建顺序一致，与并发度无关。写回绑定同一 ctx：客户端断开后
+	// 不逐行挂 SQLite busy_timeout（最长 30s/行），剩余未写行统一记失败——
+	// 已拉到的数据宁可记失败也不让 handler goroutine 白等锁。
+	saveRepo := s.pullRequestRepo.WithContext(ctx)
 	for i := range links {
 		link := &links[i]
 		if failed[i] {
@@ -367,9 +370,16 @@ func (s *IssueService) SyncIssuePullRequests(ctx context.Context, issueID, userI
 		if fetchers[i] == nil {
 			continue
 		}
-		if err := s.pullRequestRepo.SaveSyncedFields(link); err != nil {
+		if err := ctx.Err(); err != nil {
+			result.Failures = append(result.Failures, pullRequestSyncFailure(link, "请求已取消或超时，未写回同步结果"))
+			continue
+		}
+		if err := saveRepo.SaveSyncedFields(link); err != nil {
 			msg := "保存失败"
 			switch {
+			case errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded):
+				// 锁等待/借连接被 ctx 打断——与「未写回」同口径。
+				msg = "请求已取消或超时，未写回同步结果"
 			case errors.Is(err, gorm.ErrRecordNotFound):
 				// sync 窗口内被并发 detach——不插回，记一条失败说明。
 				msg = "关联已解除"

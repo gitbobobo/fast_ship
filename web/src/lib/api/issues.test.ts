@@ -57,7 +57,7 @@ describe("issueApi pull request links", () => {
     // sync 的服务端整批预算 30s：客户端超时必须等满，不能靠 ky 默认 10s
     // 提前掐断服务端 ctx（INT-175）。
     expect(post).toHaveBeenCalledWith("issues/issue-1/pull-requests/sync", {
-      timeout: 35_000,
+      timeout: 60_000,
     });
   });
 
