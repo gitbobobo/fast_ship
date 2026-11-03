@@ -22,7 +22,7 @@ func setupBatchCloseInternalTxTestDB(t *testing.T) (*IssueRepository, *gorm.DB, 
 	if err != nil {
 		t.Fatalf("open test db: %v", err)
 	}
-	if err := db.AutoMigrate(&model.User{}, &model.Project{}, &model.Issue{}); err != nil {
+	if err := db.AutoMigrate(&model.User{}, &model.Project{}, &model.Issue{}, &model.IssueInternalMeta{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 
@@ -38,7 +38,7 @@ func setupBatchCloseInternalTxTestDB(t *testing.T) (*IssueRepository, *gorm.DB, 
 	return &IssueRepository{db: db}, db, projectID
 }
 
-func seedInternalIssue(t *testing.T, db *gorm.DB, projectID string, seq int, state model.IssueState) model.Issue {
+func seedInternalIssue(t *testing.T, db *gorm.DB, projectID string, seq int, state model.IssueState, workflow model.IssueWorkflowStatus) model.Issue {
 	t.Helper()
 	now := time.Now().UTC()
 	issue := model.Issue{
@@ -54,17 +54,26 @@ func seedInternalIssue(t *testing.T, db *gorm.DB, projectID string, seq int, sta
 	if err := db.Create(&issue).Error; err != nil {
 		t.Fatalf("seed issue %d: %v", seq, err)
 	}
+	// workflow_status 在 issue_internal_meta 表（关闭事务的 WHERE 经子查询
+	// 关联它），种子必须同步建行。
+	meta := model.IssueInternalMeta{IssueID: issue.ID, WorkflowStatus: workflow}
+	if err := db.Create(&meta).Error; err != nil {
+		t.Fatalf("seed issue %d meta: %v", seq, err)
+	}
 	return issue
 }
 
 func TestIssueRepositoryBatchCloseInternalTx_OnlyHitsOpenRows(t *testing.T) {
 	repo, db, projectID := setupBatchCloseInternalTxTestDB(t)
-	open1 := seedInternalIssue(t, db, projectID, 1, model.IssueStateOpen)
-	open2 := seedInternalIssue(t, db, projectID, 2, model.IssueStateOpen)
-	closedElsewhere := seedInternalIssue(t, db, projectID, 3, model.IssueStateClosed)
+	open1 := seedInternalIssue(t, db, projectID, 1, model.IssueStateOpen, model.IssueWorkflowStatusDone)
+	open2 := seedInternalIssue(t, db, projectID, 2, model.IssueStateOpen, model.IssueWorkflowStatusDone)
+	closedElsewhere := seedInternalIssue(t, db, projectID, 3, model.IssueStateClosed, model.IssueWorkflowStatusDone)
+	// 查询后、事务前被看板拖回开发中：state 仍 open，但 workflow 已不是 done，
+	// 关闭事务不得命中它（INT-185 R6）。
+	draggedBack := seedInternalIssue(t, db, projectID, 4, model.IssueStateOpen, model.IssueWorkflowStatusInProgress)
 
 	closedAt := time.Now().UTC().Truncate(time.Second)
-	closedIDs, err := repo.BatchCloseInternalTx(db, []string{open1.ID, open2.ID, closedElsewhere.ID}, closedAt)
+	closedIDs, err := repo.BatchCloseInternalTx(db, []string{open1.ID, open2.ID, closedElsewhere.ID, draggedBack.ID}, closedAt)
 	if err != nil {
 		t.Fatalf("batch close internal tx: %v", err)
 	}
@@ -78,11 +87,11 @@ func TestIssueRepositoryBatchCloseInternalTx_OnlyHitsOpenRows(t *testing.T) {
 	if !hit[open1.ID] || !hit[open2.ID] {
 		t.Fatalf("open rows must be closed, got %v", closedIDs)
 	}
-	if hit[closedElsewhere.ID] {
-		t.Fatalf("non-open row must miss, got %v", closedIDs)
+	if hit[closedElsewhere.ID] || hit[draggedBack.ID] {
+		t.Fatalf("non-open / non-done rows must miss, got %v", closedIDs)
 	}
 
-	var got, untouched model.Issue
+	var got, untouched, draggedIssue model.Issue
 	if err := db.Where("id = ?", open1.ID).First(&got).Error; err != nil {
 		t.Fatalf("reload open1: %v", err)
 	}
@@ -94,6 +103,18 @@ func TestIssueRepositoryBatchCloseInternalTx_OnlyHitsOpenRows(t *testing.T) {
 	}
 	if untouched.ClosedAt != nil {
 		t.Fatalf("non-open row must stay untouched, got %+v", untouched)
+	}
+	if err := db.Where("id = ?", draggedBack.ID).First(&draggedIssue).Error; err != nil {
+		t.Fatalf("reload draggedBack: %v", err)
+	}
+	var draggedMeta model.IssueInternalMeta
+	if err := db.Where("issue_id = ?", draggedBack.ID).First(&draggedMeta).Error; err != nil {
+		t.Fatalf("reload draggedBack meta: %v", err)
+	}
+	// 目标必须用全新变量：复用已填充结构体时 GORM 会把旧主键追加进 WHERE
+	// （R5 同类教训）。
+	if draggedIssue.State != model.IssueStateOpen || draggedMeta.WorkflowStatus != model.IssueWorkflowStatusInProgress {
+		t.Fatalf("dragged-back row must stay open/in_progress, got issue=%+v meta=%+v", draggedIssue, draggedMeta)
 	}
 
 	// 全部已 closed：再跑一遍必须全部未命中，且不发成功写入。

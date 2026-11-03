@@ -33,7 +33,9 @@ const REQUEST_UNCONFIRMED_COPY =
 
 // 服务端失败文案已收敛为少量固定类别：按文案分组计数、全部展示，每组取样
 // 例引用；明细超上限时显式标注差额，不做容量截断——每新增一类文案都再次
-// 挤掉已有类别是三轮审查反例的根因（INT-185 R3/R4 审计）。
+// 挤掉已有类别是三轮审查反例的根因（INT-185 R3/R4 审计）。明细被截断时
+// ×N 只是下界，会严重低估（如 50/204），不再展示计数，只保留类别与样例
+// （INT-185 R6）。
 export function buildBatchCloseFailureLines(
   result: BatchCloseDoneResponse,
 ): string[] {
@@ -45,9 +47,11 @@ export function buildBatchCloseFailureLines(
     group.sample ??= f.reference;
     groups.set(label, group);
   }
-  const lines = [...groups.entries()].map(([label, { count, sample }]) =>
-    sample ? `${label} ×${count}（如 ${sample}）` : `${label} ×${count}`,
-  );
+  const truncated = result.failed > result.failures.length;
+  const lines = [...groups.entries()].map(([label, { count, sample }]) => {
+    if (truncated) return sample ? `${label}（如 ${sample}）` : label;
+    return sample ? `${label} ×${count}（如 ${sample}）` : `${label} ×${count}`;
+  });
   const unlisted = result.failed - result.failures.length;
   if (unlisted > 0) lines.push(`另有 ${unlisted} 条未列明细`);
   return lines;

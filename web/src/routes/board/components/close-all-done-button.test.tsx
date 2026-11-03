@@ -87,7 +87,7 @@ describe("CloseAllDoneButton failure toast", () => {
     expect(screen.getByText("关闭结果未确认：GitHub 侧可能已关闭，请刷新查看 ×2（如 INT-5）")).toBeInTheDocument();
   });
 
-  it("shows every category even when there are four, plus the unlisted remainder", async () => {
+  it("shows every category even when there are four, dropping counts for truncated details", async () => {
     closeMutateAsync.mockResolvedValue({
       total: 204,
       succeeded: 0,
@@ -101,9 +101,11 @@ describe("CloseAllDoneButton failure toast", () => {
     });
     const description = await closeAndCaptureDescription();
     render(description);
-    // 四类全部可见，不做容量截断；差额显式标注。
-    expect(screen.getByText("GitHub API 限流，未尝试关闭 ×1（如 INT-4）")).toBeInTheDocument();
+    // 四类全部可见；截断时 ×N 只是下界，不展示计数，只保留类别与样例；差额显式标注。
+    expect(screen.getByText("该问题已在其他操作中被更新，已跳过关闭（如 INT-1）")).toBeInTheDocument();
+    expect(screen.getByText("GitHub API 限流，未尝试关闭（如 INT-4）")).toBeInTheDocument();
     expect(screen.getByText("另有 200 条未列明细")).toBeInTheDocument();
+    expect(screen.queryByText(/×\d/)).not.toBeInTheDocument();
   });
 
   it("groups failures without error under 原因未说明 with the sample ref", async () => {

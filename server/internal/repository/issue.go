@@ -53,10 +53,14 @@ func (r *IssueRepository) TouchUpdatedAt(tx *gorm.DB, id string, at time.Time) e
 	return tx.Model(&model.Issue{}).Where("id = ?", id).Update("updated_at", at).Error
 }
 
-// BatchCloseInternalTx 在事务内逐 id 把仍为 open 的内部 Issue 更新为
-// closed/completed，返回本次真正命中的 id 子集。state=open 进 WHERE：行已被
-// 并发方关闭/改写时 RowsAffected 为 0，调用方据此只对命中行计成功并删推荐，
-// 未命中行逐条记失败而不是静默吞掉。ids 为空时不发 SQL（避免 IN ()）。
+// BatchCloseInternalTx 在事务内逐 id 把仍为 open 且仍为 done 的内部 Issue
+// 更新为 closed/completed，返回本次真正命中的 id 子集。WHERE 钉住与待关闭
+// 清单完全相同的条件（issues.state=open + issue_internal_meta.workflow_status
+// = done，经子查询关联）：两条语句之间被看板拖回开发中的行只改 workflow、
+// 不改 state，少了 workflow 条件就会把用户刚拉回的行照样关闭（INT-185
+// R6）。行已被并发方改写时 RowsAffected 为 0，调用方据此只对命中行计成功
+// 并删推荐，未命中行逐条记失败而不是静默吞掉。ids 为空时不发 SQL（避免
+// IN ()）。
 func (r *IssueRepository) BatchCloseInternalTx(tx *gorm.DB, ids []string, closedAt time.Time) ([]string, error) {
 	if len(ids) == 0 {
 		return nil, nil
@@ -64,7 +68,8 @@ func (r *IssueRepository) BatchCloseInternalTx(tx *gorm.DB, ids []string, closed
 	closed := make([]string, 0, len(ids))
 	for _, id := range ids {
 		res := tx.Model(&model.Issue{}).
-			Where("id = ? AND source = ? AND state = ?", id, model.IssueSourceInternal, model.IssueStateOpen).
+			Where("id = ? AND source = ? AND state = ? AND id IN (SELECT issue_id FROM issue_internal_meta WHERE workflow_status = ?)",
+				id, model.IssueSourceInternal, model.IssueStateOpen, model.IssueWorkflowStatusDone).
 			Updates(map[string]any{
 				"state":        model.IssueStateClosed,
 				"state_reason": "completed",
