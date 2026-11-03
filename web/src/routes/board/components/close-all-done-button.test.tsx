@@ -49,14 +49,15 @@ describe("CloseAllDoneButton select label", () => {
   });
 });
 
-// INT-185（复审 R2）：failures[].error 是服务端分类文案，混合批次可能同时
-// 出现多类原因，去重后全部展示，避免首条（内部行恒先处理）掩盖 GitHub 类别。
+// INT-185（复审 R2/R3）：服务端失败文案已收敛为少量固定类别，按文案分组
+// 计数全部展示（每组取样例引用），不做容量截断——截断是三轮审查反例的根因；
+// 明细差额（failed > failures.length）显式标注。
 describe("CloseAllDoneButton failure toast", () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  it("surfaces all distinct failure reasons with refs", async () => {
+  it("groups mixed failure categories with per-group sample refs", async () => {
     closeMutateAsync.mockResolvedValue({
       total: 3,
       succeeded: 1,
@@ -72,13 +73,41 @@ describe("CloseAllDoneButton failure toast", () => {
     await user.click(screen.getByRole("button", { name: /关闭全部/ }));
     await user.click(screen.getByRole("button", { name: "确认关闭" }));
     await waitFor(() => {
-      expect(toastWarning).toHaveBeenCalledWith(
-        "已关闭 1 个问题，3 个失败：该问题已在其他操作中被更新，已跳过关闭；关闭结果未确认：GitHub 侧可能已关闭，请刷新查看（INT-1、INT-5、INT-6）",
-      );
+      expect(toastWarning).toHaveBeenCalledWith("已关闭 1 个问题，3 个失败", {
+        description:
+          "该问题已在其他操作中被更新，已跳过关闭 ×1（如 INT-1）\n关闭结果未确认：GitHub 侧可能已关闭，请刷新查看 ×2（如 INT-5）",
+      });
     });
   });
 
-  it("keeps the count-only copy when failures carry no error", async () => {
+  it("shows every category even when there are four, plus the unlisted remainder", async () => {
+    closeMutateAsync.mockResolvedValue({
+      total: 204,
+      succeeded: 0,
+      failed: 204,
+      failures: [
+        { id: "i-1", reference: "INT-1", error: "该问题已在其他操作中被更新，已跳过关闭" },
+        { id: "i-2", reference: "INT-2", error: "关闭结果未确认：GitHub 侧可能已关闭，请刷新查看" },
+        { id: "i-3", reference: "INT-3", error: "更新 GitHub Issue 失败：GitHub API 限流，请稍后重试" },
+        { id: "i-4", reference: "INT-4", error: "GitHub API 限流，未尝试关闭" },
+      ],
+    });
+    const user = userEvent.setup();
+    render(<CloseAllDoneButton projectId="proj-1" />);
+    await user.click(screen.getByRole("button", { name: /关闭全部/ }));
+    await user.click(screen.getByRole("button", { name: "确认关闭" }));
+    await waitFor(() => {
+      expect(toastWarning).toHaveBeenCalledWith("已关闭 0 个问题，204 个失败", {
+        description: expect.stringContaining("GitHub API 限流，未尝试关闭 ×1（如 INT-4）"),
+      });
+      const description = toastWarning.mock.calls[0][1].description as string;
+      const lines = description.split("\n");
+      expect(lines).toHaveLength(5);
+      expect(lines[4]).toBe("另有 200 条未列明细");
+    });
+  });
+
+  it("groups failures without error under 原因未说明 with the sample ref", async () => {
     closeMutateAsync.mockResolvedValue({
       total: 1,
       succeeded: 0,
@@ -90,7 +119,9 @@ describe("CloseAllDoneButton failure toast", () => {
     await user.click(screen.getByRole("button", { name: /关闭全部/ }));
     await user.click(screen.getByRole("button", { name: "确认关闭" }));
     await waitFor(() => {
-      expect(toastWarning).toHaveBeenCalledWith("已关闭 0 个问题，1 个失败（INT-1）");
+      expect(toastWarning).toHaveBeenCalledWith("已关闭 0 个问题，1 个失败", {
+        description: "原因未说明 ×1（如 INT-1）",
+      });
     });
   });
 });
@@ -127,9 +158,32 @@ describe("formatBatchCloseError", () => {
       method: "POST",
     });
     const options = { method: "POST" } as NormalizedOptions;
-    const html = new Response("<html>oops</html>", { status: 502 });
+    const html = new Response("<html>oops</html>", { status: 400 });
     await expect(formatBatchCloseError(new HTTPError(html, request, options))).resolves.toBe(
       "批量关闭失败",
+    );
+  });
+
+  // INT-185（复审 R3）：网关截断（502/503/504，通常无 JSON 正文）与网络中断
+  // 都是「服务端可能已关闭一部分」的场景，按刷新确认处理；带 JSON message 的
+  // 服务端错误仍优先。
+  it("maps gateway timeouts to the refresh hint", async () => {
+    const request = new Request("https://fast-ship.test/api/projects/p1/issues/batch-close", {
+      method: "POST",
+    });
+    const options = { method: "POST" } as NormalizedOptions;
+    for (const status of [502, 503, 504]) {
+      const html = new Response("<html>gateway oops</html>", { status });
+      await expect(formatBatchCloseError(new HTTPError(html, request, options))).resolves.toBe(
+        "请求超时：部分问题可能已关闭，请刷新看板确认结果",
+      );
+    }
+  });
+
+  it("maps network failures to the refresh hint", async () => {
+    const error = new TypeError("fetch failed");
+    await expect(formatBatchCloseError(error)).resolves.toBe(
+      "请求超时：部分问题可能已关闭，请刷新看板确认结果",
     );
   });
 });

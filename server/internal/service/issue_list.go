@@ -234,12 +234,33 @@ func closeOneGitHubIssue(batchCtx context.Context, client ghclient.Client, issue
 				onRateLimit()
 			}
 		} else {
-			err = errs.New(errs.ErrGitHubAPI.Code, fmt.Sprintf("更新 GitHub Issue 失败: %v", err))
+			err = classifyGitHubCloseError(err)
 		}
 		results <- githubCloseNetResult{issue: issue, err: err}
 		return
 	}
 	results <- githubCloseNetResult{issue: issue, updated: updated}
+}
+
+// classifyGitHubCloseError 把剩余的 GitHub 错误收敛成少量固定类别（INT-185
+// R3 方向审计）：5xx 与传输层错误在 PATCH 已发出的前提下结果未知，按「结果
+// 未确认」处理，宁可多提示刷新确认；其余 ErrorResponse 规范化为「<状态码>
+// <Message>」——go-github 的 Error() 带 METHOD 和完整 URL（含 Issue 号），
+// 逐条不同会让前端分组去重失效，同一类错误必须逐字相同。
+func classifyGitHubCloseError(err error) error {
+	var respErr *gh.ErrorResponse
+	if errors.As(err, &respErr) && respErr.Response != nil {
+		if code := respErr.Response.StatusCode; code >= http.StatusInternalServerError {
+			return &batchClosePatchUnconfirmedError{err: err}
+		}
+		msg := strings.TrimSpace(respErr.Message)
+		if msg == "" {
+			return errs.New(errs.ErrGitHubAPI.Code, fmt.Sprintf("更新 GitHub Issue 失败：%d", respErr.Response.StatusCode))
+		}
+		return errs.New(errs.ErrGitHubAPI.Code, fmt.Sprintf("更新 GitHub Issue 失败：%d %s", respErr.Response.StatusCode, msg))
+	}
+	// 非 ErrorResponse 的传输错误（*url.Error 等）：请求状态未知。
+	return &batchClosePatchUnconfirmedError{err: err}
 }
 
 func (s *IssueService) closeInternalIssues(ctx context.Context, issues []model.Issue, resp *BatchCloseDoneIssuesResponse) {

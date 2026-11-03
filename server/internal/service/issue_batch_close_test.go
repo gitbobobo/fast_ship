@@ -385,6 +385,65 @@ func TestIssueServiceBatchCloseDoneIssues_RateLimitStopsRemainingDispatch(t *tes
 	}
 }
 
+// INT-185（复审 R3 审计）：GitHub 错误文案规范化——5xx 与传输错误按「结果
+// 未确认」，4xx 按「<状态码> <Message>」输出且不含 URL/Issue 号；同类错误
+// 逐字相同，前端按文案分组计数才有效。
+func TestIssueServiceBatchCloseDoneIssues_GitHubErrorCopyNormalization(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID)
+
+	fake := &fakeIssueGitHubClient{}
+	metas := seedGitHubDoneIssuesForBatchClose(t, svc, project.ID, 3, fake)
+	ghResp := func(status int) *http.Response { return &http.Response{StatusCode: status} }
+	fake.updateIssueErrs = map[int]error{
+		metas[0].Number: &gh.ErrorResponse{Message: "Internal Server Error", Response: ghResp(http.StatusBadGateway)},
+		metas[1].Number: &gh.ErrorResponse{Message: "Not Found", Response: ghResp(http.StatusNotFound)},
+		metas[2].Number: &gh.ErrorResponse{Message: "Not Found", Response: ghResp(http.StatusNotFound)},
+	}
+	svc.issueService.newClient = func(token, owner, repo string) ghclient.Client {
+		return fake
+	}
+
+	resp, err := svc.issueService.BatchCloseDoneIssues(context.Background(), project.ID, user.ID, string(model.IssueSourceGitHub))
+	if err != nil {
+		t.Fatalf("batch close: %v", err)
+	}
+	if resp.Succeeded != 0 || resp.Failed != 3 || len(resp.Failures) != 3 {
+		t.Fatalf("unexpected result: %+v", resp)
+	}
+	copies := map[string]int{}
+	for _, f := range resp.Failures {
+		copies[f.Error]++
+	}
+	if got := copies["关闭结果未确认：GitHub 侧可能已关闭，请刷新查看"]; got != 1 {
+		t.Fatalf("502 must be classified as unconfirmed once, got %d in %v", got, copies)
+	}
+	notFound := "更新 GitHub Issue 失败：404 Not Found"
+	if got := copies[notFound]; got != 2 {
+		t.Fatalf("identical 404 copies must dedupe to one group ×2, got %d in %v", got, copies)
+	}
+	if strings.Contains(notFound, "repos/") || strings.Contains(notFound, "https://") {
+		t.Fatalf("normalized copy must not carry URL, got %q", notFound)
+	}
+}
+
+// INT-185（复审 R3 审计）：传输错误（非 ErrorResponse）结果未知，按「结果
+// 未确认」处理。
+func TestClassifyGitHubCloseError(t *testing.T) {
+	ghResp := func(status int) *http.Response { return &http.Response{StatusCode: status} }
+	var unconfirmed *batchClosePatchUnconfirmedError
+	if e := classifyGitHubCloseError(&gh.ErrorResponse{Message: "oops", Response: ghResp(http.StatusBadGateway)}); !errors.As(e, &unconfirmed) {
+		t.Fatalf("5xx must be unconfirmed, got %v", e)
+	}
+	if e := classifyGitHubCloseError(errors.New("connection reset by peer")); !errors.As(e, &unconfirmed) {
+		t.Fatalf("transport error must be unconfirmed, got %v", e)
+	}
+	if e := classifyGitHubCloseError(&gh.ErrorResponse{Response: ghResp(http.StatusNotFound)}); batchCloseItemError(e) != "更新 GitHub Issue 失败：404" {
+		t.Fatalf("empty message must not leave trailing space, got %q", batchCloseItemError(e))
+	}
+}
+
 func TestIssueServiceBatchCloseDoneIssues_MixedSourcesGitHubFailureKeepsInternalClosed(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")
