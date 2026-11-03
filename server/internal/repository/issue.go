@@ -86,6 +86,18 @@ func (r *IssueRepository) BatchCloseInternalTx(tx *gorm.DB, ids []string, closed
 	return closed, nil
 }
 
+// IsOpenAndDone GitHub 批量关闭的行级守卫（INT-185 R7）：PATCH 前按 id 复核
+// 本地行仍为 state=open 且 meta.workflow_status=done——批量窗口内被拖回开发
+// 中的行不发 PATCH、按「已跳过关闭」计入 failures，避免远端/本地被误关。
+func (r *IssueRepository) IsOpenAndDone(id string) (bool, error) {
+	var cnt int64
+	err := r.db.Model(&model.Issue{}).
+		Joins("JOIN issue_internal_meta m ON m.issue_id = issues.id AND m.workflow_status = ?", model.IssueWorkflowStatusDone).
+		Where("issues.id = ? AND issues.state = ?", id, model.IssueStateOpen).
+		Count(&cnt).Error
+	return cnt > 0, err
+}
+
 func (r *IssueRepository) FindByID(id string) (*model.Issue, error) {
 	return r.FindByIDTx(r.db, id)
 }

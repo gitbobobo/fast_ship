@@ -273,7 +273,7 @@ func TestCloseOneGitHubIssue_SkipsPatchWhenBatchCanceled(t *testing.T) {
 
 	results := make(chan githubCloseNetResult, 1)
 	issue := model.Issue{Source: model.IssueSourceGitHub, GitHubMeta: &model.IssueGitHubMeta{Number: 7}}
-	closeOneGitHubIssue(ctx, fake, issue, ghclient.UpdateIssueRequest{}, results, nil, nil)
+	closeOneGitHubIssue(ctx, fake, issue, ghclient.UpdateIssueRequest{}, results, nil, nil, nil)
 
 	res := <-results
 	if res.err == nil || !errors.Is(res.err, context.Canceled) {
@@ -488,6 +488,47 @@ func TestBatchCloseCancelErr_AttributedAtProductionTime(t *testing.T) {
 	// nil 标志等价于未熔断。
 	if got := batchCloseCancelErr(context.Canceled, nil); got != context.Canceled {
 		t.Fatalf("nil flag must keep raw ctx err, got %v", got)
+	}
+}
+
+// INT-185（复审 R7）：发 PATCH 前按 id 复核本地行仍 open+done——被拖回开
+// 发中的行不发 PATCH、按「已跳过关闭」回报；复核出错也不发 PATCH。
+func TestCloseOneGitHubIssue_GuardSkipsBeforePatch(t *testing.T) {
+	issue := model.Issue{Source: model.IssueSourceGitHub, GitHubMeta: &model.IssueGitHubMeta{Number: 9}}
+
+	fake := &fakeIssueGitHubClient{}
+	results := make(chan githubCloseNetResult, 1)
+	closeOneGitHubIssue(context.Background(), fake, issue, ghclient.UpdateIssueRequest{}, results, nil, nil,
+		func(id string) (bool, error) { return false, nil })
+	res := <-results
+	if res.err != errBatchCloseSkippedNotOpen {
+		t.Fatalf("expected skipped-not-open, got %v", res.err)
+	}
+	if len(fake.recordedUpdateIssueCalls()) != 0 {
+		t.Fatal("guard must stop the PATCH")
+	}
+
+	results = make(chan githubCloseNetResult, 1)
+	closeOneGitHubIssue(context.Background(), fake, issue, ghclient.UpdateIssueRequest{}, results, nil, nil,
+		func(id string) (bool, error) { return false, errors.New("db down") })
+	res = <-results
+	if res.err == nil || batchCloseItemError(res.err) != "复核本地状态失败，未关闭该项" {
+		t.Fatalf("expected guard-failure copy, got %v", res.err)
+	}
+	if len(fake.recordedUpdateIssueCalls()) != 0 {
+		t.Fatal("guard error must stop the PATCH")
+	}
+
+	// 守卫通过时照常发 PATCH。
+	results = make(chan githubCloseNetResult, 1)
+	closeOneGitHubIssue(context.Background(), fake, issue, ghclient.UpdateIssueRequest{}, results, nil, nil,
+		func(id string) (bool, error) { return true, nil })
+	res = <-results
+	if res.err != nil {
+		t.Fatalf("guard-passed item must PATCH, got err=%v", res.err)
+	}
+	if len(fake.recordedUpdateIssueCalls()) != 1 {
+		t.Fatalf("expected exactly one PATCH, got %d", len(fake.recordedUpdateIssueCalls()))
 	}
 }
 

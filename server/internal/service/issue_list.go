@@ -211,7 +211,7 @@ const batchCloseGitHubRateLimitRemainingText = "GitHub API 限流，未尝试关
 // 经 WithoutCancel + 独立超时与整批取消解耦；结果只经 results 返回，由调用方
 // 统一落库与计数。命中 API 限流时调用 onRateLimit（可为 nil），由调用方熔断
 // 剩余派发——限流后继续打满配额只会得到重复失败，次级限流还会延长封禁。
-func closeOneGitHubIssue(batchCtx context.Context, client ghclient.Client, issue model.Issue, updateReq ghclient.UpdateIssueRequest, results chan<- githubCloseNetResult, onRateLimit func(), rateLimited *atomic.Bool) {
+func closeOneGitHubIssue(batchCtx context.Context, client ghclient.Client, issue model.Issue, updateReq ghclient.UpdateIssueRequest, results chan<- githubCloseNetResult, onRateLimit func(), rateLimited *atomic.Bool, guard func(id string) (bool, error)) {
 	if issue.GitHubMeta == nil {
 		results <- githubCloseNetResult{issue: issue, err: errs.ErrIssueReadOnly}
 		return
@@ -221,6 +221,20 @@ func closeOneGitHubIssue(batchCtx context.Context, client ghclient.Client, issue
 		// 归类；drain 阶段不再重读全局标志，避免时序改写失败原因。
 		results <- githubCloseNetResult{issue: issue, err: batchCloseCancelErr(err, rateLimited)}
 		return
+	}
+	// 行级守卫（INT-185 R7）：发 PATCH 前按 id 复核本地行仍为 open+done——
+	// 批量窗口内被拖回开发中的行不发 PATCH、按「已跳过关闭」回报；内部来源
+	// 在事务 WHERE 里钉住同条件，GitHub 来源没有事务可依托，只能靠这里。
+	if guard != nil {
+		ok, gerr := guard(issue.ID)
+		if gerr != nil {
+			results <- githubCloseNetResult{issue: issue, err: errs.New(errs.ErrInternal.Code, "复核本地状态失败，未关闭该项")}
+			return
+		}
+		if !ok {
+			results <- githubCloseNetResult{issue: issue, err: errBatchCloseSkippedNotOpen}
+			return
+		}
 	}
 	patchCtx, cancel := context.WithTimeout(context.WithoutCancel(batchCtx), batchCloseGitHubPatchTimeout)
 	defer cancel()
@@ -383,7 +397,9 @@ func (s *IssueService) closeGitHubIssues(ctx context.Context, project *model.Pro
 				if rateLimited.CompareAndSwap(false, true) {
 					dispatchCancel()
 				}
-			}, &rateLimited)
+			}, &rateLimited, func(id string) (bool, error) {
+				return s.issueRepo.IsOpenAndDone(id)
+			})
 		}()
 	}
 
@@ -411,21 +427,22 @@ func (s *IssueService) closeGitHubIssues(ctx context.Context, project *model.Pro
 }
 
 func appendBatchCloseFailure(resp *BatchCloseDoneIssuesResponse, issue model.Issue, err error) {
+	appendBatchFailureEntry(resp, buildBatchCloseFailure(issue, err))
+}
+
+// appendBatchFailureEntry 明细上限内追加；达到上限后，未出现过的新类别样例
+// 仍保留（每类至少出现一次，INT-185 R4/R7），同类不重复追加。批量关闭与
+// 批量 internal-meta 共用，保证共享契约描述对两个端点都成立。
+func appendBatchFailureEntry(resp *BatchCloseDoneIssuesResponse, entry BatchCloseDoneIssueFailure) {
 	resp.Failed++
 	if len(resp.Failures) >= batchCloseDoneMaxFailures {
-		// 明细已达上限：若这是从未出现过的新类别，仍保留样例（审计收敛保证
-		// 每类至少出现一次，INT-185 R4），允许超出明细上限——否则混合批次里
-		// 先占满名额的类别会把后续 GitHub 侧的限流/刷新指引整类吞掉。
-		text := batchCloseItemError(err)
 		for _, f := range resp.Failures {
-			if f.Error == text {
+			if f.Error == entry.Error {
 				return
 			}
 		}
-		resp.Failures = append(resp.Failures, buildBatchCloseFailure(issue, err))
-		return
 	}
-	resp.Failures = append(resp.Failures, buildBatchCloseFailure(issue, err))
+	resp.Failures = append(resp.Failures, entry)
 }
 
 func buildBatchCloseFailure(issue model.Issue, err error) BatchCloseDoneIssueFailure {
