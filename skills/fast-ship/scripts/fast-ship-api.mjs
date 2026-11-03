@@ -27,7 +27,7 @@ const TIMEOUT_MS = 30_000;
 const SYNC_TIMEOUT_MS = 120_000;
 
 function timeoutFor(path) {
-  const p = path.split('?')[0];
+  const p = path.split('?')[0].replace(/\/+$/, '');
   if (/\/pull-requests\/sync$/.test(p)) return SYNC_TIMEOUT_MS;
   return TIMEOUT_MS;
 }
