@@ -6246,6 +6246,8 @@ export interface components {
             label: string;
             /** @description 审查尺寸地址：指向本端点并带缩放参数（长边 ≤1536 的 JPEG，服务端按需生成）；下载失败时字段缺省 */
             url?: string;
+            /** @description false = 该地址将返回原图字节（小而轻原图、超 64MP 解码预算或无解码器），体积不受审查尺寸预算保护；true = 返回缩放变体；下载失败时字段缺省 */
+            scaled?: boolean;
             /** @description 原图像素尺寸（JPEG 应用 EXIF 方向后）；解码失败或缺文件时字段缺省 */
             width?: number | null;
             /** @description 原图像素尺寸（JPEG 应用 EXIF 方向后）；解码失败或缺文件时字段缺省 */

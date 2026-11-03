@@ -4400,6 +4400,9 @@ type ReviewAgentScreenshot struct {
 	// OriginalUrl 原图地址（无缩放参数，即本端点不带 query）；下载失败时字段缺省
 	OriginalUrl *string `json:"original_url,omitempty"`
 
+	// Scaled false = 该地址将返回原图字节（小而轻原图、超 64MP 解码预算或无解码器），体积不受审查尺寸预算保护；true = 返回缩放变体；下载失败时字段缺省
+	Scaled *bool `json:"scaled,omitempty"`
+
 	// Url 审查尺寸地址：指向本端点并带缩放参数（长边 ≤1536 的 JPEG，服务端按需生成）；下载失败时字段缺省
 	Url *string `json:"url,omitempty"`
 

@@ -846,6 +846,11 @@ func (s *ReviewService) AgentScreenshots(ctx context.Context, runID string) ([]a
 			item.Width = api.Ptr(w)
 			item.Height = api.Ptr(h)
 		}
+		// scaled 标示该地址会不会返回缩放变体（判定与取图端点共用同一份逻辑
+		// reviewScreenshotScaled，两处永不打架）：false = 返回原图字节（小而轻
+		// 原图、超 64MP 或无解码器），体积不受审查尺寸预算保护——审查员据此
+		// 决定读不读。
+		item.Scaled = api.Ptr(reviewScreenshotScaled(a.StoragePath, reviewScreenshotMaxEdge))
 		items = append(items, item)
 	}
 	return items, changed, nil
@@ -889,7 +894,7 @@ func (s *ReviewService) AgentScreenshotImage(ctx context.Context, runID, assetID
 	if scale == nil {
 		return original, nil
 	}
-	data, scaledMime, err := scaleReviewScreenshot(asset.StoragePath, asset.MimeType, scale)
+	data, scaledMime, err := scaleReviewScreenshot(ctx, asset.StoragePath, asset.MimeType, scale)
 	if err != nil {
 		if errors.Is(err, errReviewScaleTooLarge) || errors.Is(err, errReviewScaleUnscalable) {
 			// 超像素预算不解码像素；有文件但缩不了（heic/tiff 这类有声明类型
@@ -901,7 +906,8 @@ func (s *ReviewService) AgentScreenshotImage(ctx context.Context, runID, assetID
 		return AgentScreenshotFile{}, errs.ErrIssueAssetNotFound
 	}
 	if data == nil {
-		// 长边不大于目标：不放大，按原图字节透传。
+		// 无需变体（小而轻原图零损失透传，判定与清单 scaled 标示同源）：按原
+		// 图字节透传。
 		return original, nil
 	}
 	original.Data = data

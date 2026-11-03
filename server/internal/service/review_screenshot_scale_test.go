@@ -13,6 +13,7 @@ import (
 	"image/gif"
 	"image/jpeg"
 	"image/png"
+	"math"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -130,6 +131,47 @@ func writeNoiseRGBAPNG(t *testing.T, w, h int, seed int64) string {
 	return path
 }
 
+// clampReviewByte 把像素通道值收进 [0,255]。
+func clampReviewByte(v int) int {
+	if v < 0 {
+		return 0
+	}
+	if v > 255 {
+		return 255
+	}
+	return v
+}
+
+// writeHeavySmallPNG 「小而重」的 PNG：长边在审查目标内（1512×982 的桌面截图
+// 常态），但文件字节远超 500KB 预算。做法是大幅平滑底纹叠逐像素小幅噪声——
+// PNG 的滤波压不住噪声（文件大），JPEG 的 DCT 量化把它抹平（原尺寸编码仍然
+// 很小），恰好落在「透传会击穿字节预算、原尺寸重编码轻松达标」的区间。
+func writeHeavySmallPNG(t *testing.T, w, h int, seed int64) string {
+	t.Helper()
+	rng := rand.New(rand.NewSource(seed))
+	img := image.NewNRGBA(image.Rect(0, 0, w, h))
+	for y := 0; y < h; y++ {
+		row := img.Pix[y*img.Stride : y*img.Stride+w*4]
+		for x := 0; x < w; x++ {
+			base := int(127 + 80*math.Sin(float64(x)/97)*math.Sin(float64(y)/61))
+			n := rng.Intn(33) - 16
+			row[x*4] = byte(clampReviewByte(base + n))
+			row[x*4+1] = byte(clampReviewByte(base - n))
+			row[x*4+2] = byte(clampReviewByte(255 - base))
+			row[x*4+3] = 255
+		}
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatalf("encode png: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "heavy-small.png")
+	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
+		t.Fatalf("write png: %v", err)
+	}
+	return path
+}
+
 func TestParseReviewScaleQuery(t *testing.T) {
 	// 三参数全空 → nil（原图透传语义）。
 	if p, err := parseReviewScaleQuery("", "", ""); p != nil || err != nil {
@@ -174,7 +216,7 @@ func TestParseReviewScaleQuery(t *testing.T) {
 
 func TestScaleReviewScreenshotJPEGDims(t *testing.T) {
 	path := writeTestPNG(t, 2480, 2248)
-	data, mime, err := scaleReviewScreenshot(path, "image/png", &reviewScaleParams{
+	data, mime, err := scaleReviewScreenshot(context.Background(), path, "image/png", &reviewScaleParams{
 		Max: reviewScreenshotMaxEdge, Format: "jpeg", Quality: reviewScreenshotQuality,
 	})
 	if err != nil || data == nil {
@@ -197,19 +239,77 @@ func TestScaleReviewScreenshotJPEGDims(t *testing.T) {
 	}
 }
 
-// max 不小于原图长边：不放大，返回 nil data 由调用方按原图透传。
+// 长边不大于目标且原图字节在预算内（小而轻）：零损失透传，返回 nil data 由
+// 调用方按原图下发；小而重的对偶场景见 TestScaleReviewScreenshotSmallButHeavy。
 func TestScaleReviewScreenshotNoUpscale(t *testing.T) {
 	path := writeTestPNG(t, 640, 400)
-	data, mime, err := scaleReviewScreenshot(path, "image/png", &reviewScaleParams{Max: 3000, Format: "jpeg", Quality: 80})
+	data, mime, err := scaleReviewScreenshot(context.Background(), path, "image/png", &reviewScaleParams{Max: 3000, Format: "jpeg", Quality: 80})
 	if err != nil || data != nil || mime != "" {
 		t.Fatalf("no-upscale = %d bytes, %q, %v; want nil data（不放大）", len(data), mime, err)
+	}
+}
+
+// 小而重：长边在目标内、原图文件字节超预算（1512×982 的桌面截图常态）——
+// 不再无条件透传击穿字节承诺：按原尺寸重编码出 jpeg 变体，尺寸不变、字节落
+// 在预算内。
+func TestScaleReviewScreenshotSmallButHeavy(t *testing.T) {
+	path := writeHeavySmallPNG(t, 1512, 982, 21)
+	// 先证明确实「小而重」：文件字节超预算（否则 nil data 透传语义就对了）。
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if fi.Size() <= reviewScreenshotMaxBytes {
+		t.Fatalf("png 只有 %d bytes，锁不到小而重路径", fi.Size())
+	}
+	data, mime, err := scaleReviewScreenshot(context.Background(), path, "image/png", &reviewScaleParams{
+		Max: reviewScreenshotMaxEdge, Format: "jpeg", Quality: reviewScreenshotQuality,
+	})
+	if err != nil || data == nil || mime != "image/jpeg" {
+		t.Fatalf("small-but-heavy scale: %d bytes, %q, %v", len(data), mime, err)
+	}
+	if len(data) > reviewScreenshotMaxBytes {
+		t.Fatalf("variant = %d bytes, 超出单张 500KB 预算", len(data))
+	}
+	img, err := jpeg.Decode(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("variant decode: %v", err)
+	}
+	if b := img.Bounds(); b.Dx() != 1512 || b.Dy() != 982 {
+		t.Fatalf("variant = %dx%d, want 原尺寸 1512×982（不放大不缩边）", b.Dx(), b.Dy())
+	}
+}
+
+// reviewScreenshotScaled（清单 scaled 标示与取图端点共用的判定）六态：小而轻
+// → false；小而重 → true；长边超目标 → true；非位图、超 64MP、文件缺失 →
+// false。
+func TestReviewScreenshotScaled(t *testing.T) {
+	note := filepath.Join(t.TempDir(), "note.txt")
+	if err := os.WriteFile(note, []byte("definitely not an image"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	for _, c := range []struct {
+		name string
+		path string
+		want bool
+	}{
+		{"小而轻", writeTestPNG(t, 640, 400), false},
+		{"小而重", writeHeavySmallPNG(t, 1512, 982, 21), true},
+		{"长边超目标", writeTestPNG(t, 2480, 2248), true},
+		{"非位图", note, false},
+		{"超 64MP", writeFakeHugePNG(t), false},
+		{"文件缺失", filepath.Join(t.TempDir(), "missing.png"), false},
+	} {
+		if got := reviewScreenshotScaled(c.path, reviewScreenshotMaxEdge); got != c.want {
+			t.Fatalf("%s: scaled = %v, want %v", c.name, got, c.want)
+		}
 	}
 }
 
 // 像素预算：IHDR 声明超限的 PNG 在解码像素前被拦，报「超限」错误。
 func TestScaleReviewScreenshotPixelBudget(t *testing.T) {
 	path := writeFakeHugePNG(t)
-	data, _, err := scaleReviewScreenshot(path, "image/png", &reviewScaleParams{Max: 1536, Format: "jpeg", Quality: 80})
+	data, _, err := scaleReviewScreenshot(context.Background(), path, "image/png", &reviewScaleParams{Max: 1536, Format: "jpeg", Quality: 80})
 	if !errors.Is(err, errReviewScaleTooLarge) || data != nil {
 		t.Fatalf("over-budget = %d bytes, %v; want errReviewScaleTooLarge", len(data), err)
 	}
@@ -227,7 +327,7 @@ func TestScaleReviewScreenshotGIF(t *testing.T) {
 	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
 		t.Fatalf("write gif: %v", err)
 	}
-	data, mime, err := scaleReviewScreenshot(path, "image/gif", &reviewScaleParams{Max: 500, Format: "jpeg", Quality: 80})
+	data, mime, err := scaleReviewScreenshot(context.Background(), path, "image/gif", &reviewScaleParams{Max: 500, Format: "jpeg", Quality: 80})
 	if err != nil || data == nil || mime != "image/jpeg" {
 		t.Fatalf("gif scale: %d bytes, %q, %v", len(data), mime, err)
 	}
@@ -249,7 +349,7 @@ func TestScaleReviewScreenshotWebpDecodeFail(t *testing.T) {
 	if err := os.WriteFile(path, body, 0o600); err != nil {
 		t.Fatalf("write webp: %v", err)
 	}
-	data, _, err := scaleReviewScreenshot(path, "image/webp", &reviewScaleParams{Max: 1536, Format: "jpeg", Quality: 80})
+	data, _, err := scaleReviewScreenshot(context.Background(), path, "image/webp", &reviewScaleParams{Max: 1536, Format: "jpeg", Quality: 80})
 	if !errors.Is(err, errReviewScaleUnscalable) || errors.Is(err, errReviewScaleTooLarge) || data != nil {
 		t.Fatalf("webp garbage = %d bytes, %v; want errReviewScaleUnscalable", len(data), err)
 	}
@@ -262,7 +362,7 @@ func TestScaleReviewScreenshotNonBitmap(t *testing.T) {
 	if err := os.WriteFile(path, []byte("definitely not an image"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	data, _, err := scaleReviewScreenshot(path, "application/octet-stream", &reviewScaleParams{Max: 1536, Format: "jpeg", Quality: 80})
+	data, _, err := scaleReviewScreenshot(context.Background(), path, "application/octet-stream", &reviewScaleParams{Max: 1536, Format: "jpeg", Quality: 80})
 	if !errors.Is(err, errReviewScaleUnscalable) || data != nil {
 		t.Fatalf("non-bitmap = %d bytes, %v; want errReviewScaleUnscalable", len(data), err)
 	}
@@ -272,7 +372,7 @@ func TestScaleReviewScreenshotNonBitmap(t *testing.T) {
 // jpeg 变体。
 func TestScaleReviewScreenshotDeclaredMimeLies(t *testing.T) {
 	path := writeTestPNG(t, 2480, 2248)
-	data, mime, err := scaleReviewScreenshot(path, "image/webp", &reviewScaleParams{
+	data, mime, err := scaleReviewScreenshot(context.Background(), path, "image/webp", &reviewScaleParams{
 		Max: reviewScreenshotMaxEdge, Format: "jpeg", Quality: reviewScreenshotQuality,
 	})
 	if err != nil || data == nil || mime != "image/jpeg" {
@@ -301,7 +401,7 @@ func TestScaleReviewScreenshotByteBudgetJPEG(t *testing.T) {
 	if firstPass.Len() <= reviewScreenshotMaxBytes {
 		t.Fatalf("q80 一遍编码只有 %d bytes，本测试锁不到预算路径", firstPass.Len())
 	}
-	data, mime, err := scaleReviewScreenshot(path, "image/png", &reviewScaleParams{
+	data, mime, err := scaleReviewScreenshot(context.Background(), path, "image/png", &reviewScaleParams{
 		Max: reviewScreenshotMaxEdge, Format: "jpeg", Quality: reviewScreenshotQuality,
 	})
 	if err != nil || data == nil || mime != "image/jpeg" {
@@ -319,7 +419,7 @@ func TestScaleReviewScreenshotByteBudgetJPEG(t *testing.T) {
 // 对 JPEG 是防更病态内容的兑底。）
 func TestScaleReviewScreenshotByteBudgetEdgeHalving(t *testing.T) {
 	path := writeNoiseRGBAPNG(t, 2000, 2000, 11)
-	data, mime, err := scaleReviewScreenshot(path, "image/png", &reviewScaleParams{
+	data, mime, err := scaleReviewScreenshot(context.Background(), path, "image/png", &reviewScaleParams{
 		Max: reviewScreenshotMaxEdge, Format: "png", Quality: reviewScreenshotQuality,
 	})
 	if err != nil || data == nil || mime != "image/png" {
@@ -358,7 +458,7 @@ func TestScaleReviewScreenshotGIFLogicalCanvas(t *testing.T) {
 	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
 		t.Fatalf("write gif: %v", err)
 	}
-	data, mime, err := scaleReviewScreenshot(path, "image/gif", &reviewScaleParams{Max: 500, Format: "jpeg", Quality: 80})
+	data, mime, err := scaleReviewScreenshot(context.Background(), path, "image/gif", &reviewScaleParams{Max: 500, Format: "jpeg", Quality: 80})
 	if err != nil || data == nil || mime != "image/jpeg" {
 		t.Fatalf("gif canvas scale: %d bytes, %q, %v", len(data), mime, err)
 	}
@@ -384,7 +484,7 @@ func TestScaleReviewScreenshotAlphaFlattensToWhite(t *testing.T) {
 	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
 		t.Fatalf("write png: %v", err)
 	}
-	data, _, err := scaleReviewScreenshot(path, "image/png", &reviewScaleParams{Max: 4, Format: "jpeg", Quality: 80})
+	data, _, err := scaleReviewScreenshot(context.Background(), path, "image/png", &reviewScaleParams{Max: 4, Format: "jpeg", Quality: 80})
 	if err != nil || data == nil {
 		t.Fatalf("scale: %v, %d bytes", err, len(data))
 	}
@@ -418,7 +518,7 @@ func TestScaleReviewScreenshotAlphaBlendsOverWhite(t *testing.T) {
 	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
 		t.Fatalf("write png: %v", err)
 	}
-	data, _, err := scaleReviewScreenshot(path, "image/png", &reviewScaleParams{Max: 4, Format: "jpeg", Quality: 80})
+	data, _, err := scaleReviewScreenshot(context.Background(), path, "image/png", &reviewScaleParams{Max: 4, Format: "jpeg", Quality: 80})
 	if err != nil || data == nil {
 		t.Fatalf("scale: %v, %d bytes", err, len(data))
 	}
@@ -441,7 +541,7 @@ func TestScaleReviewScreenshotJPEGExifOrientation(t *testing.T) {
 	if err := os.WriteFile(path, makeJPEGWithOrientation(t, 6, 2480, 1200), 0o600); err != nil {
 		t.Fatalf("write jpeg: %v", err)
 	}
-	data, _, err := scaleReviewScreenshot(path, "image/jpeg", &reviewScaleParams{
+	data, _, err := scaleReviewScreenshot(context.Background(), path, "image/jpeg", &reviewScaleParams{
 		Max: reviewScreenshotMaxEdge, Format: "jpeg", Quality: reviewScreenshotQuality,
 	})
 	if err != nil || data == nil {
@@ -470,14 +570,18 @@ func TestScaleReviewScreenshotJPEGExifOrientation(t *testing.T) {
 }
 
 // INT-186 清单给审查尺寸：有 StoragePath 的行 url 带缩放参数、original_url
-// 不带、width/height 是原图尺寸；下载失败的行维持 error 且可选字段全部缺省。
+// 不带、width/height 是原图尺寸、scaled 标示该地址会不会返回缩放变体（小而
+// 轻原图与非位图行 false，长边超目标的大图行 true）；下载失败的行维持 error
+// 且可选字段全部缺省。
 func TestAgentScreenshotsReviewSizeItems(t *testing.T) {
 	e := newReviewEngineEnv(t)
 	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
 	now := time.Now().UTC()
 	okURL := "https://github.com/user-attachments/assets/ok1"
+	bigURL := "https://github.com/user-attachments/assets/big1"
+	noteURL := "https://github.com/user-attachments/assets/note1"
 	failURL := "https://github.com/user-attachments/assets/fail1"
-	body := "![界面](" + okURL + ")\n\n![缺图](" + failURL + ")"
+	body := "![界面](" + okURL + ")\n\n![大图](" + bigURL + ")\n\n![笔记](" + noteURL + ")\n\n![缺图](" + failURL + ")"
 	e.fake.SetPR(repo, 99, &githubapi.PullRequest{
 		RepoFullName: repo, Number: 99, HeadSHA: "sha-rs",
 		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature", Body: body,
@@ -491,6 +595,27 @@ func TestAgentScreenshotsReviewSizeItems(t *testing.T) {
 		cached:   githubmedia.CachedImage(writeTestPNG(t, 640, 400), "image/png", 15),
 		failURLs: map[string]error{failURL: errors.New("boom")},
 	}
+	// 大图与非位图两行直接落库（带 StoragePath，ensureAssets 查重跳过下载）：
+	// 下载桩只有一份缓存，铺不出两种存储内容。大图行 scaled=true；非位图行
+	// 宽高解不出、scaled=false。
+	seedScaledAsset := func(id string, pos int, path, mime string) {
+		t.Helper()
+		a := &model.ReviewAsset{
+			IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+			ID:            id, RepoFullName: repo, PRNumber: 99, HeadSHA: "sha-rs",
+			Position: pos, Label: id, SourceURL: "https://github.com/user-attachments/assets/" + id,
+			StoragePath: path, MimeType: mime, SizeBytes: 10, CreatedAt: now,
+		}
+		if err := e.svc.db.Create(a).Error; err != nil {
+			t.Fatalf("seed asset %s: %v", id, err)
+		}
+	}
+	seedScaledAsset("big1", 1, writeTestPNG(t, 2480, 2248), "image/png")
+	notePath := filepath.Join(t.TempDir(), "note.txt")
+	if err := os.WriteFile(notePath, []byte("definitely not an image"), 0o600); err != nil {
+		t.Fatalf("write note: %v", err)
+	}
+	seedScaledAsset("note1", 2, notePath, "application/octet-stream")
 	review := e.withT3(nil, media, func(context.Context, string, int64) (string, error) {
 		return "tok", nil
 	})
@@ -499,8 +624,8 @@ func TestAgentScreenshotsReviewSizeItems(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AgentScreenshots: %v", err)
 	}
-	if len(items) != 2 {
-		t.Fatalf("items = %d, want 2", len(items))
+	if len(items) != 4 {
+		t.Fatalf("items = %d, want 4", len(items))
 	}
 	ok := items[0]
 	wantOriginal := "/api/review-agent/runs/" + run.ID + "/screenshots/" + ok.Id
@@ -516,7 +641,29 @@ func TestAgentScreenshotsReviewSizeItems(t *testing.T) {
 	if ok.Width == nil || *ok.Width != 640 || ok.Height == nil || *ok.Height != 400 {
 		t.Fatalf("ok dims = %v×%v, want 640×400", ok.Width, ok.Height)
 	}
-	fail := items[1]
+	// 小而轻（长边在目标内、字节远小于预算）：scaled=false——该地址将返回原
+	// 图字节，体积不受审查尺寸预算保护。
+	if ok.Scaled == nil || *ok.Scaled {
+		t.Fatalf("ok scaled = %v, want false（小而轻原图）", ok.Scaled)
+	}
+	// 大图行：长边超目标，scaled=true。
+	big := items[1]
+	if big.Error != nil || big.Url == nil || big.Width == nil || *big.Width != 2480 || big.Height == nil || *big.Height != 2248 {
+		t.Fatalf("big item = %+v, want 正常大图行", big)
+	}
+	if big.Scaled == nil || !*big.Scaled {
+		t.Fatalf("big scaled = %v, want true（长边超目标）", big.Scaled)
+	}
+	// 非位图行：宽高解不出（字段缺省）、scaled=false——返回的是原图字节且
+	// 体积不受预算保护。
+	note := items[2]
+	if note.Error != nil || note.Url == nil || note.Width != nil || note.Height != nil {
+		t.Fatalf("note item = %+v, want 宽高缺省的资产行", note)
+	}
+	if note.Scaled == nil || *note.Scaled {
+		t.Fatalf("note scaled = %v, want false（非位图）", note.Scaled)
+	}
+	fail := items[3]
 	if fail.Error == nil || *fail.Error == "" || fail.Url != nil || fail.OriginalUrl != nil || fail.Width != nil {
 		t.Fatalf("fail item = %+v, want error 非空且无 url/original_url/width", fail)
 	}
@@ -530,8 +677,8 @@ func TestAgentScreenshotsReviewSizeItems(t *testing.T) {
 	if err := json.Unmarshal(raw, &rows); err != nil {
 		t.Fatalf("unmarshal items: %v", err)
 	}
-	for _, key := range []string{"url", "original_url", "width", "height"} {
-		if _, present := rows[1][key]; present {
+	for _, key := range []string{"url", "original_url", "width", "height", "scaled"} {
+		if _, present := rows[3][key]; present {
 			t.Fatalf("失败行 JSON 含 %q 键: %s", key, raw)
 		}
 	}
