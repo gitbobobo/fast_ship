@@ -1422,7 +1422,10 @@ func TestIssueServiceSyncPullRequests_ResponseKeepsLinkOrder(t *testing.T) {
 	// 四行按 id 序交错成败：link-a(ok)、link-b(fail)、link-c(ok)、
 	// link-d(fail)。ListByIssueID 按 (created_at, id) 排序，同刻落 id 序，
 	// items/failures 应各自按此序交错收集。
-	type seed struct{ id string; num int }
+	type seed struct {
+		id  string
+		num int
+	}
 	seeds := []seed{{"link-a", 1}, {"link-b", 2}, {"link-c", 3}, {"link-d", 4}}
 	for _, s := range seeds {
 		link := &model.IssuePullRequest{

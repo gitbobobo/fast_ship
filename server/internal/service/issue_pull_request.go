@@ -190,7 +190,8 @@ func (s *IssueService) DetachIssuePullRequest(issueID, userID, linkID string) er
 //
 // INT-175：三个阶段分离。访问面解析（凭证/集成读取，带缓存）串行；远端拉取
 // 并发 pullRequestSyncConcurrency，随请求 ctx 断开；写回与响应组装串行且按
-// 关联行原序，SQLite 单写连接下不再每行一次往返，响应顺序与旧串行实现一致。
+// 关联行原序——写回仍逐行 UPDATE（SQLite 单写连接下串行不阻塞），响应顺序
+// 与旧串行实现一致，收益全部来自拉取并发。
 // ctx 为请求 context（handler 传 c.Request.Context()），浏览器断开即停止后续
 // 远端请求；测试传 nil 退化为 Background。30s 是整批兜底而非逐条预算。
 func (s *IssueService) SyncIssuePullRequests(ctx context.Context, issueID, userID string) (*IssuePullRequestSyncResultResponse, error) {
@@ -323,11 +324,28 @@ func (s *IssueService) SyncIssuePullRequests(ctx context.Context, issueID, userI
 			go func() {
 				defer wg.Done()
 				defer sem.Release(1)
+				// 拉取 goroutine 不属于 handler 调用栈：请求级 recover 兜不住，
+				// panic 会杀整个进程——转为该行失败项，保持单行失败域。
+				defer func() {
+					if r := recover(); r != nil {
+						s.logger.Error("同步关联 PR 拉取 panic",
+							zap.String("link_id", link.ID),
+							zap.String("repo", link.RepoFullName),
+							zap.Int("number", link.Number),
+							zap.Any("panic", r),
+							zap.Stack("stack"))
+						markFailed(i, pullRequestSyncFailure(link, "拉取异常，请稍后重试"))
+					}
+				}()
 				if err := fetch(ctx, link); err != nil {
-					if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					if errors.Is(err, context.Canceled) {
+						// 显式取消（浏览器断开）：本行请求没真正发出或被中断，
+						// 文案与「从未发出」一致。
 						markFailed(i, pullRequestSyncFailure(link, "请求已取消或超时，未继续同步"))
 						return
 					}
+					// DeadlineExceeded（含 http.Client.Timeout）按已发起的拉取失
+					// 败处理：走 fetchErrText 保留凭证来源/状态码/限流提示。
 					markFailed(i, pullRequestSyncFailure(link, fetchErrText(s, link, err)))
 				}
 			}()
