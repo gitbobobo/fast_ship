@@ -956,4 +956,8 @@ func TestReviewScreenshotServedAnimatedWebp(t *testing.T) {
 	if sniffWebpAnimation(head) {
 		t.Fatalf("static vp8x flags=0 被误判为动画（head[27] 读错位）")
 	}
+	// 样本只到 flags 字节之前（<21 字节）→ 按保守返回 false，不越界读。
+	if sniffWebpAnimation(head[:20]) {
+		t.Fatalf("样本不足 flags 位（<21 字节）应返回 false")
+	}
 }

@@ -161,10 +161,12 @@ func sniffReviewScaleFormat(head []byte) string {
 }
 
 // sniffWebpAnimation 判样本是否为动画 WebP：WEBP 头后首个 chunk 是 VP8X
-// （偏移 12-15 "VP8X"、16-19 chunk size、20-23 保留、24-26 画布宽-1 小端、
-// 27-29 画布高-1 小端），特性位是 payload 第 1 字节（偏移 20），ANIM=bit1
-// （0x02）。样本不足或首 chunk 不是 VP8X 返回 false（DecodeConfig 会把不可
-// 解的挡到 heavy——本函数只提前拦「头能过但 Decode 不支持 ANIM」的动画）。
+// （偏移 12-15 "VP8X"、16-19 chunk size、20 flags、21-23 保留、24-26 画布宽-1
+// 小端、27-29 画布高-1 小端），特性位是 payload 第 1 字节（偏移 20），
+// ANIM=bit1（0x02）。样本不足或首 chunk 不是 VP8X 返回 false（DecodeConfig
+// 会把不可解的挡到 heavy——本函数只提前拦「头能过但 Decode 不支持 ANIM」的
+// 动画）。上一轮把 head[27] 高度低字节当 flags 读的错位已修正，别照注释再
+// 手算一遍偏移。
 func sniffWebpAnimation(head []byte) bool {
 	if len(head) < 21 || string(head[12:16]) != "VP8X" {
 		return false
@@ -173,8 +175,8 @@ func sniffWebpAnimation(head []byte) bool {
 }
 
 // reviewScreenshotHead 读文件前 32 字节做嗅探与判定样本：PNG 位深（IHDR
-// bit depth 字节在偏移 24）、WebP 动画位（VP8X 在偏移 12，payload 第 4 字节
-// bit 6，样本至少 30 字节才覆盖）；短文件按实际读到的算。
+// bit depth 字节在偏移 24，样本至少 25 字节）、WebP 动画位（VP8X flags 在偏
+// 移 20，样本至少 21 字节）；短文件按实际读到的算。
 func reviewScreenshotHead(path string) ([]byte, error) {
 	f, err := os.Open(path)
 	if err != nil {
