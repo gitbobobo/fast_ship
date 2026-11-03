@@ -39,6 +39,12 @@ const reviewAssetSweepGrace = 24 * time.Hour
 // 孤儿字节最坏一个周期 + 一轮退役延迟内回收。
 const reviewAssetSweepEvery = 6 * time.Hour
 
+// reviewAssetRetireBatch 单批退役行数：每批一条独立 DELETE，批间释放
+// SQLite 写锁，让调度/webhook 的写请求插得进来。与
+// idx_review_assets_created_at / idx_review_runs_asset_head 配合，单批耗
+// 时有界。var 是为了让测试注入小值验证多批循环的终止条件。
+var reviewAssetRetireBatch = 2000
+
 // reviewAssetSweeper 下载面的行账回收能力（可选）：生产注入的
 // *githubmedia.ProxyService 实现；测试桩可不实现，扫描自动跳过文件回收。
 type reviewAssetSweeper interface {
@@ -71,19 +77,35 @@ func (s *ReviewService) sweepAssetRetention(now time.Time) {
 	// 接读 storage_path，不经缓存面）——无守卫的话，在途运行会在两次扫描之
 	// 间失去行与文件（取图 404、截图列表变空），ensureAssets 的复核发生在
 	// 删除之前救不回来。运行进终态后，下一轮恢复按年龄退役。
-	res := s.db.Where("created_at < ?", now.Add(-reviewAssetRetention)).
-		Where("NOT EXISTS (SELECT 1 FROM review_runs r WHERE r.integration_id = review_assets.integration_id"+
-			" AND r.repo_full_name = review_assets.repo_full_name"+
-			" AND r.pr_number = review_assets.pr_number"+
-			" AND r.head_sha = review_assets.head_sha"+
-			" AND r.status IN (?))",
-			[]model.ReviewRunStatus{model.ReviewRunQueued, model.ReviewRunDispatched, model.ReviewRunRunning}).
-		Delete(&model.ReviewAsset{})
-	if res.Error != nil {
-		s.logger.Warn("截图资产行退役失败", zap.Error(res.Error))
-		return
+	// 分批执行：每批一条独立 DELETE，先走 idx_review_assets_created_at 定位
+	// 超龄行、守卫走 idx_review_runs_asset_head，批间释放 SQLite 唯一写锁——
+	// 长时间停机后待退役行最多，单条大 DELETE 会把调度/webhook 写排队到
+	// busy_timeout 超时（INT-184 R2 审查实测）。批失败即停：账不确定时宁可
+	// 保守（已删批次的字节下轮扫描收敛），不继续加载引用集合。
+	retired := int64(0)
+	for {
+		res := s.db.Exec(`DELETE FROM review_assets WHERE id IN (
+			SELECT a.id FROM review_assets a
+			WHERE a.created_at < ?
+				AND NOT EXISTS (
+					SELECT 1 FROM review_runs r
+					WHERE r.integration_id = a.integration_id
+						AND r.repo_full_name = a.repo_full_name
+						AND r.pr_number = a.pr_number
+						AND r.head_sha = a.head_sha
+						AND r.status IN ('queued', 'dispatched', 'running')
+				)
+			LIMIT ?
+		)`, now.Add(-reviewAssetRetention), reviewAssetRetireBatch)
+		if res.Error != nil {
+			s.logger.Warn("截图资产行退役失败", zap.Error(res.Error))
+			return
+		}
+		retired += res.RowsAffected
+		if res.RowsAffected < int64(reviewAssetRetireBatch) {
+			break
+		}
 	}
-	retired := res.RowsAffected
 
 	// 下载面未配置时没有文件可回收，行退役照常推进（失败行与成功行的账都
 	// 在这张表）。

@@ -855,6 +855,13 @@ func createBootIndexes(db *gorm.DB) error {
 	// 建出（idx_review_assets_source，integration_id 键首）；按 (repo, pr, head)
 	// 的查询走它的第二段前缀。
 	db.Exec("DROP INDEX IF EXISTS idx_review_assets_pr_head")
+	// 行账保留策略（INT-184）：退役 DELETE 按 created_at 定位超龄行，NOT
+	// EXISTS 守卫按 (integration_id, repo, pr, head) 探测在途运行——两个无
+	// 前导列可用的关联查询在全量扫描下会让每 6h 一次的 DELETE 长时间占住
+	// SQLite 单写锁（R2 审查实测：5 万待退役×20 万 run 时 >600s，加索引后
+	// 约 2s）；service 层另按小批量执行，批间释放写锁。
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_review_assets_created_at ON review_assets(created_at)")
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_review_runs_asset_head ON review_runs(integration_id, repo_full_name, pr_number, head_sha)")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_notifications_user_dedup ON notifications(user_id, dedup_key)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_notifications_user_updated ON notifications(user_id, updated_at DESC, id)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_notifications_unread ON notifications(user_id, updated_at DESC) WHERE read_at IS NULL")

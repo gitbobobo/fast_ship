@@ -182,6 +182,38 @@ func TestAssetRetentionSkipsHeadsWithActiveRuns(t *testing.T) {
 	}
 }
 
+// 分批退役：批量上限小于待退役行数时循环删到收敛（多批终止条件）。
+func TestAssetRetentionRetireBatches(t *testing.T) {
+	review, media, _ := retentionService(t, t.TempDir())
+	repo := "octo/example"
+	now := time.Now().UTC()
+	integrationID := model.ForgeIntegrationBuiltinGitHubID
+	aged := now.Add(-31 * 24 * time.Hour)
+	for i := 0; i < 5; i++ {
+		seedAsset(t, review, integrationID, repo, 1, fmt.Sprintf("sha-batch-%d", i), fmt.Sprintf("https://img.example/batch-%d", i), aged)
+	}
+
+	orig := reviewAssetRetireBatch
+	reviewAssetRetireBatch = 2
+	defer func() { reviewAssetRetireBatch = orig }()
+	// 行的 created_at 回拨模拟超龄；文件 mtime 同步回拨（生产时序里行退役
+	// 时文件已落盘 30 天），否则宽限会正确地保住新鲜文件。
+	old := now.Add(-48 * time.Hour)
+	if err := os.Chtimes(media.ShotPath(), old, old); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+	review.sweepAssetRetention(now)
+
+	var count int64
+	review.db.Model(&model.ReviewAsset{}).Where("created_at < ?", now.Add(-reviewAssetRetention)).Count(&count)
+	if count != 0 {
+		t.Fatalf("count = %d, want 0（多批循环删到收敛，实际剩 %d 行）", count, count)
+	}
+	if _, err := os.Stat(media.ShotPath()); !os.IsNotExist(err) {
+		t.Fatalf("退役后同轮扫描未回收文件: %v", err)
+	}
+}
+
 // 探测落账的字节转成普通行按年龄退役：「探测过但没有视觉运行」不永久遗留。
 func TestAssetRetentionProbeOnlyBytesCollected(t *testing.T) {
 	review, media, _ := retentionService(t, t.TempDir())
