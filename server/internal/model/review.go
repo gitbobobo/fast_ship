@@ -280,10 +280,16 @@ type ReviewAsset struct {
 	SizeBytes   int64  `gorm:"column:size_bytes" json:"size_bytes"`
 	// Error 下载失败的记录（StoragePath 为空时图片端点回 404）。
 	Error string `gorm:"column:error;type:text" json:"error,omitempty"`
-	// CreatedAt 首次落账时刻；补账（重下成功/修复失败行，INT-184 R6）会刷
-	// 新本列——保留期从最近一次 materialization 起算，刚下好的证据不会因行
-	// 的首次记录时间超龄而被提前回收。
+	// CreatedAt 首次落账时刻，不随补账/续期刷新：AgentScreenshots 以它判
+	// 「行是本轮才写入的」（上一轮集合过滤），重下成功的旧行被刷成新时刻会
+	// 被误剔出上一轮集合、changed 误报 true（R11 审查意见）。保留期时钟看
+	// RenewedAt。
 	CreatedAt time.Time `gorm:"not null" json:"created_at"`
+	// RenewedAt 保留期时钟：首次落账时与 CreatedAt 同值；补账（重下成功/
+	// 修复失败行，INT-184 R6）刷新本列——退役截止按它起算，刚下好的证据
+	// 不会因行的首次记录时间超龄而被提前回收。存量行由启动回填补齐
+	// （createBootIndexes 的 review_assets_renewed_backfill）。
+	RenewedAt *time.Time `gorm:"column:renewed_at" json:"renewed_at"`
 }
 
 func (ReviewAsset) TableName() string { return "review_assets" }

@@ -868,10 +868,23 @@ func createBootIndexes(db *gorm.DB) error {
 	// 回来且日志无痕（R4 审查意见、方向审计采纳）。表不存在（部分 schema
 	// 调 createBootIndexes 的测试路径）时跳过：AutoMigrate 建表后空表也无
 	// 行可索引，下次启动自然补上。
-	for _, idx := range []struct{ name, sql, table string }{
-		{"idx_review_assets_created_at", "CREATE INDEX IF NOT EXISTS idx_review_assets_created_at ON review_assets(created_at)", "review_assets"},
-		{"idx_review_assets_storage_path", "CREATE INDEX IF NOT EXISTS idx_review_assets_storage_path ON review_assets(storage_path)", "review_assets"},
-		{"idx_review_runs_asset_head", "CREATE INDEX IF NOT EXISTS idx_review_runs_asset_head ON review_runs(integration_id, repo_full_name, pr_number, head_sha)", "review_runs"},
+	db.Exec("DROP INDEX IF EXISTS idx_review_assets_created_at")
+	for _, idx := range []struct {
+		name, sql, table string
+		// column 非空时先查列存在（遗留库表在而列未补，部分 schema 的测试
+		// 路径），缺列跳过：AutoMigrate 补列后下次启动自然补上。
+		column string
+	}{
+		// 保留期时钟回填（R11 审查）：renewed_at 列由 AutoMigrate 补出，存量
+		// 行回填为首次落账时刻；此后补账只刷 renewed_at，created_at 恢复不
+		// 可变语义（AgentScreenshots 的「本轮新行」判定依赖它）。
+		{"review_assets_renewed_backfill", "UPDATE review_assets SET renewed_at = created_at WHERE renewed_at IS NULL", "review_assets", "renewed_at"},
+		// 退役时钟表达式索引：退役 SELECT 按 COALESCE(renewed_at, created_at)
+		// 定位（COALESCE 兜住回填遗漏的存量行）。原 created_at 单列索引随之
+		// 失效，循环前统一 DROP。
+		{"idx_review_assets_retire_clock", "CREATE INDEX IF NOT EXISTS idx_review_assets_retire_clock ON review_assets(COALESCE(renewed_at, created_at))", "review_assets", "renewed_at"},
+		{"idx_review_assets_storage_path", "CREATE INDEX IF NOT EXISTS idx_review_assets_storage_path ON review_assets(storage_path)", "review_assets", ""},
+		{"idx_review_runs_asset_head", "CREATE INDEX IF NOT EXISTS idx_review_runs_asset_head ON review_runs(integration_id, repo_full_name, pr_number, head_sha)", "review_runs", ""},
 	} {
 		exists, err := sqliteTableExists(db, idx.table)
 		if err != nil {
@@ -879,6 +892,16 @@ func createBootIndexes(db *gorm.DB) error {
 		}
 		if !exists {
 			continue
+		}
+		if idx.column != "" {
+			var n int64
+			if err := db.Raw(`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`,
+				idx.table, idx.column).Scan(&n).Error; err != nil {
+				return fmt.Errorf("检查列 %s.%s 失败: %w", idx.table, idx.column, err)
+			}
+			if n == 0 {
+				continue
+			}
 		}
 		if err := db.Exec(idx.sql).Error; err != nil {
 			return fmt.Errorf("创建 %s 失败: %w", idx.name, err)

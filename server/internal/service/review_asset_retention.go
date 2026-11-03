@@ -133,7 +133,7 @@ func (s *ReviewService) sweepAssetRetention(now time.Time) {
 		"'" + string(model.ReviewRunRunning) + "'",
 	}
 	selectSQL := fmt.Sprintf(`SELECT a.id, a.storage_path FROM review_assets a
-		WHERE a.created_at < ?
+		WHERE COALESCE(a.renewed_at, a.created_at) < ?
 			AND NOT EXISTS (
 				SELECT 1 FROM review_runs r
 				WHERE r.integration_id = a.integration_id
@@ -144,10 +144,12 @@ func (s *ReviewService) sweepAssetRetention(now time.Time) {
 			)
 		LIMIT ?`, strings.Join(activeStatusLiterals, ", "))
 	// DELETE 与 SELECT 共用同一组状态字面量与同一个截止时刻，守卫与删除
-	// 在单条语句内原子化。
+	// 在单条语句内原子化。退役时钟是 renewed_at（保留期续期只刷它，
+	// R11 审查：created_at 恢复不可变语义后 AgentScreenshots 的「本轮新行」
+	// 判定不再被重下续期干扰），COALESCE 兜住回填前的存量行。
 	deleteSQL := fmt.Sprintf(`DELETE FROM review_assets
 		WHERE id IN (?)
-			AND created_at < ?
+			AND COALESCE(renewed_at, created_at) < ?
 			AND NOT EXISTS (
 				SELECT 1 FROM review_runs r
 				WHERE r.integration_id = review_assets.integration_id

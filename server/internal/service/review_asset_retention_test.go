@@ -111,7 +111,7 @@ func TestAssetRetentionSharedStoragePathNotDeleted(t *testing.T) {
 	// 引用清零：宽限内（mtime 新，下载路径刚写过）不回收；mtime 超宽限后
 	// 下一轮收走。
 	review.db.Model(&model.ReviewAsset{}).Where("id = ?", young.ID).
-		Update("created_at", aged)
+		Update("renewed_at", aged)
 	review.sweepAssetRetention(now.Add(time.Second))
 	if _, err := os.Stat(sharedPath); err != nil {
 		t.Fatalf("宽限内（mtime 新）的无引用文件被提前删除: %v", err)
@@ -249,8 +249,10 @@ func TestAssetRetentionProbeOnlyBytesCollected(t *testing.T) {
 
 	// 行超龄退役 → 文件宽限内保留，mtime 超宽限后回收（生产时序里行退役
 	// 时文件已落盘 30 天，测试回拨 mtime 模拟）。
+	// 超龄拨的是保留期时钟 renewed_at（R11：created_at 已不再随落账刷新，
+	// 退役截止读 renewed_at）。
 	review.db.Model(&model.ReviewAsset{}).Where("1=1").
-		Update("created_at", now.Add(-31*24*time.Hour))
+		Update("renewed_at", now.Add(-31*24*time.Hour))
 	review.sweepAssetRetention(now.Add(time.Second))
 	var count int64
 	review.db.Model(&model.ReviewAsset{}).Count(&count)
@@ -333,8 +335,9 @@ func TestEnsureAssetsReverifiesMissingFile(t *testing.T) {
 	missingPath := filepath.Join(t.TempDir(), "vanished.bin")
 
 	seedAsset(t, review, model.ForgeIntegrationBuiltinGitHubID, repo, 81, "sha-a", "https://img.example/rv.png", time.Now().UTC())
+	seededCreatedAt := time.Now().UTC().Add(-time.Hour)
 	review.db.Model(&model.ReviewAsset{}).Where("1=1").
-		Updates(map[string]any{"storage_path": missingPath})
+		Updates(map[string]any{"storage_path": missingPath, "created_at": seededCreatedAt})
 
 	if _, _, err := review.ensureAssets(ctx, model.ForgeIntegrationBuiltinGitHubID, repo, 81, "sha-a", body, 0); err != nil {
 		t.Fatalf("ensureAssets: %v", err)
@@ -349,9 +352,14 @@ func TestEnsureAssetsReverifiesMissingFile(t *testing.T) {
 	if row.StoragePath != e.media.ShotPath() || row.Error != "" {
 		t.Fatalf("row = %q/%q, want 重下后的路径与空 error", row.StoragePath, row.Error)
 	}
-	// 补账即落账：重下成功刷新 created_at，保留期时钟从这次重下起算（R6）。
-	if row.CreatedAt.Before(time.Now().Add(-24 * time.Hour)) {
-		t.Fatalf("重下成功未刷新 created_at: %v", row.CreatedAt)
+	// 补账即落账：重下成功刷新 renewed_at（保留期时钟，R6）；created_at 保
+	// 持首次落账时刻——AgentScreenshots 拿它判「本轮新行」，被刷新会把重下
+	// 的旧行误剔出上一轮集合、changed 误报 true（R11 审查意见）。
+	if row.RenewedAt == nil || row.RenewedAt.Before(time.Now().Add(-24*time.Hour)) {
+		t.Fatalf("重下成功未刷新 renewed_at: %v", row.RenewedAt)
+	}
+	if !row.CreatedAt.Equal(seededCreatedAt) {
+		t.Fatalf("重下成功不应刷新 created_at: got %v, want %v", row.CreatedAt, seededCreatedAt)
 	}
 
 	// 文件在的命中行不重下。
@@ -428,9 +436,12 @@ func TestProbeRecordAssets(t *testing.T) {
 	if healed.StoragePath != e.media.ShotPath() || healed.Error != "" {
 		t.Fatalf("失败行未修复: %q/%q", healed.StoragePath, healed.Error)
 	}
-	// 修复失败行同样刷新保留期时钟（补账即落账）。
-	if healed.CreatedAt.Before(time.Now().Add(-24 * time.Hour)) {
-		t.Fatalf("修复成功未刷新 created_at: %v", healed.CreatedAt)
+	// 修复失败行同样刷新保留期时钟（补账即落账）；created_at 不动（R11）。
+	if healed.RenewedAt == nil || healed.RenewedAt.Before(time.Now().Add(-24*time.Hour)) {
+		t.Fatalf("修复成功未刷新 renewed_at: %v", healed.RenewedAt)
+	}
+	if healed.CreatedAt.After(time.Now().Add(-24 * time.Hour)) {
+		t.Fatalf("修复成功不应刷新 created_at: %v", healed.CreatedAt)
 	}
 	var untouched model.ReviewAsset
 	if err := review.db.Where("source_url = ?", "https://img.example/valid.png").First(&untouched).Error; err != nil {
