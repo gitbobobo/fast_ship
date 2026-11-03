@@ -17,10 +17,12 @@ import (
 var issueAssetContentPattern = regexp.MustCompile(`(?:https?://[^/\s"')]+)?/api/issues/assets/([0-9a-fA-F-]+)/content(?:\?[^)\s"']*)?`)
 
 const (
-	issueAssetSniffBytes      = 512
-	issueAssetPendingTTL      = 24 * time.Hour
-	batchCloseDoneMaxIssues   = 200
-	batchCloseDoneMaxFailures = 50
+	issueAssetSniffBytes        = 512
+	issueAssetPendingTTL        = 24 * time.Hour
+	batchCloseDoneMaxIssues     = 200
+	batchCloseDoneMaxFailures   = 50
+	batchCloseDoneTimeout       = 30 * time.Second
+	batchCloseGitHubConcurrency = 4
 )
 
 type IssueService struct {

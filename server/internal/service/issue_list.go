@@ -4,15 +4,19 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
 	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
+	ghclient "github.com/godbobo/fast_ship/server/internal/pkg/github"
 	"github.com/godbobo/fast_ship/server/internal/repository"
 	"go.uber.org/zap"
+	"golang.org/x/sync/semaphore"
 	"gorm.io/gorm"
-	"sort"
-	"strings"
-	"time"
 )
 
 // toIssueListQuery 把 service 层过滤器映射为 repository 的查询条件；
@@ -115,9 +119,16 @@ func (s *IssueService) CountIssues(projectID, userID string, filters IssueListFi
 	return total, nil
 }
 
-func (s *IssueService) BatchCloseDoneIssues(projectID, userID, sourceFilter string) (*BatchCloseDoneIssuesResponse, error) {
+func (s *IssueService) BatchCloseDoneIssues(ctx context.Context, projectID, userID, sourceFilter string) (*BatchCloseDoneIssuesResponse, error) {
 	start := time.Now()
-	if _, err := s.projectRepo.FindByID(projectID, userID); err != nil {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, batchCloseDoneTimeout)
+	defer cancel()
+
+	project, err := s.projectRepo.FindByID(projectID, userID)
+	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, errs.ErrProjectNotFound
 		}
@@ -141,36 +152,27 @@ func (s *IssueService) BatchCloseDoneIssues(projectID, userID, sourceFilter stri
 		return nil, errs.ErrBatchCloseTooMany
 	}
 
-	closedState := model.IssueStateClosed
-	stateReason := api.UpdateIssueRequestStateReasonCompleted
 	resp := &BatchCloseDoneIssuesResponse{
 		Total:    int64(total),
 		Failures: make([]BatchCloseDoneIssueFailure, 0),
 	}
 
+	var internalIssues []model.Issue
+	var githubIssues []model.Issue
 	for _, issue := range filtered {
-		_, updateErr := s.UpdateInternalIssue(issue.ID, userID, UpdateInternalIssueRequest{
-			State:       &closedState,
-			StateReason: &stateReason,
-		})
-
-		if updateErr != nil {
-			resp.Failed++
-			if len(resp.Failures) < batchCloseDoneMaxFailures {
-				msg := updateErr.Error()
-				var appErr *errs.AppError
-				if errors.As(updateErr, &appErr) {
-					msg = appErr.Message
-				}
-				resp.Failures = append(resp.Failures, BatchCloseDoneIssueFailure{
-					Id:        issue.ID,
-					Reference: api.Ptr(buildIssueReference(issue)),
-					Error:     msg,
-				})
-			}
-			continue
+		switch issue.Source {
+		case model.IssueSourceInternal:
+			internalIssues = append(internalIssues, issue)
+		case model.IssueSourceGitHub:
+			githubIssues = append(githubIssues, issue)
+		default:
+			appendBatchCloseFailure(resp, issue, errs.ErrIssueReadOnly)
 		}
-		resp.Succeeded++
+	}
+
+	s.closeInternalIssues(ctx, internalIssues, resp)
+	if len(githubIssues) > 0 {
+		s.closeGitHubIssues(ctx, project, githubIssues, resp)
 	}
 
 	resp.ElapsedMs = time.Since(start).Milliseconds()
@@ -184,6 +186,151 @@ func (s *IssueService) BatchCloseDoneIssues(projectID, userID, sourceFilter stri
 		zap.Int64("elapsed_ms", resp.ElapsedMs),
 	)
 	return resp, nil
+}
+
+type githubCloseNetResult struct {
+	issue   model.Issue
+	updated *ghclient.Issue
+	err     error
+}
+
+func (s *IssueService) closeInternalIssues(ctx context.Context, issues []model.Issue, resp *BatchCloseDoneIssuesResponse) {
+	if len(issues) == 0 {
+		return
+	}
+	if err := ctx.Err(); err != nil {
+		for _, issue := range issues {
+			appendBatchCloseFailure(resp, issue, err)
+		}
+		return
+	}
+
+	ids := make([]string, len(issues))
+	for i, issue := range issues {
+		ids[i] = issue.ID
+	}
+	now := time.Now().UTC()
+	err := s.issueRepo.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := s.issueRepo.BatchCloseInternalTx(tx, ids, now); err != nil {
+			return err
+		}
+		return s.recRepo.DeleteByIssueIDsTx(tx, ids)
+	})
+	if err != nil {
+		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			s.logger.Warn("batch close internal issues failed", zap.Error(err))
+			err = errs.ErrInternal
+		}
+		for _, issue := range issues {
+			appendBatchCloseFailure(resp, issue, err)
+		}
+		return
+	}
+	resp.Succeeded += len(issues)
+}
+
+func (s *IssueService) closeGitHubIssues(ctx context.Context, project *model.Project, issues []model.Issue, resp *BatchCloseDoneIssuesResponse) {
+	if err := ctx.Err(); err != nil {
+		for _, issue := range issues {
+			appendBatchCloseFailure(resp, issue, err)
+		}
+		return
+	}
+
+	tokenBytes, appErr := s.credentials.requiredGitHubToken(project)
+	if appErr != nil {
+		for _, issue := range issues {
+			appendBatchCloseFailure(resp, issue, appErr)
+		}
+		return
+	}
+	client := s.newClient(string(tokenBytes), project.GithubOwner, project.GithubRepo)
+
+	closedState := string(model.IssueStateClosed)
+	stateReason := string(api.UpdateIssueRequestStateReasonCompleted)
+	updateReq := ghclient.UpdateIssueRequest{
+		State:       &closedState,
+		StateReason: &stateReason,
+	}
+
+	workers := int64(batchCloseGitHubConcurrency)
+	if n := int64(len(issues)); n < workers {
+		workers = n
+	}
+	sem := semaphore.NewWeighted(workers)
+	results := make(chan githubCloseNetResult, len(issues))
+	var wg sync.WaitGroup
+
+	for _, issue := range issues {
+		issue := issue
+		if err := sem.Acquire(ctx, 1); err != nil {
+			results <- githubCloseNetResult{issue: issue, err: err}
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer sem.Release(1)
+			if issue.GitHubMeta == nil {
+				results <- githubCloseNetResult{issue: issue, err: errs.ErrIssueReadOnly}
+				return
+			}
+			updated, err := client.UpdateIssue(ctx, issue.GitHubMeta.Number, updateReq)
+			if err != nil {
+				if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+					err = errs.New(errs.ErrGitHubAPI.Code, fmt.Sprintf("更新 GitHub Issue 失败: %v", err))
+				}
+				results <- githubCloseNetResult{issue: issue, err: err}
+				return
+			}
+			results <- githubCloseNetResult{issue: issue, updated: updated}
+		}()
+	}
+
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	for res := range results {
+		if res.err != nil {
+			appendBatchCloseFailure(resp, res.issue, res.err)
+			continue
+		}
+		stored, err := s.mirror.upsertGitHubIssue(project.ID, res.updated)
+		if err != nil {
+			appendBatchCloseFailure(resp, res.issue, err)
+			continue
+		}
+		if err := s.mirror.markCollectionsStaleAfterPush(stored.ID); err != nil {
+			appendBatchCloseFailure(resp, res.issue, err)
+			continue
+		}
+		resp.Succeeded++
+	}
+}
+
+func appendBatchCloseFailure(resp *BatchCloseDoneIssuesResponse, issue model.Issue, err error) {
+	resp.Failed++
+	if len(resp.Failures) >= batchCloseDoneMaxFailures {
+		return
+	}
+	resp.Failures = append(resp.Failures, BatchCloseDoneIssueFailure{
+		Id:        issue.ID,
+		Reference: api.Ptr(buildIssueReference(issue)),
+		Error:     batchCloseItemError(err),
+	})
+}
+
+func batchCloseItemError(err error) string {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return "请求已取消或超时，未继续关闭"
+	}
+	var appErr *errs.AppError
+	if errors.As(err, &appErr) {
+		return appErr.Message
+	}
+	return err.Error()
 }
 
 // GetFilterOptions 走只读投影查询（INT-106）：不读整行 Issue，只取两张 meta 表的
