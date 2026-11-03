@@ -408,7 +408,8 @@ func TestReviewFaceSkipsPurgeKeepsEntries(t *testing.T) {
 	svcOld := newService(root, cfg)
 
 	// 无 Scope 的存量条目（bearer 引入前写入）：不删文件——这条目录里的
-	// .bin 是持久资产（ensureAssets 不重下），删了就是永久 404；标记补写后
+	// .bin 是持久资产（ensureAssets 只在文件缺失时重下，上游已删时补不回
+	// 来），删了就是永久 404；标记补写后
 	// 照常命中（跨授权域风险由缓存键隔离与接口鉴权兜住）。
 	unscoped, err := svcOld.normalize("https://uiv.example.com/unscoped.png")
 	if err != nil {

@@ -140,6 +140,72 @@ func TestSweepUnreferencedEntriesReentrant(t *testing.T) {
 	}
 }
 
+// 崩溃残留：写侧 rename data 后、WriteFile meta 前被杀留下的 meta 缺失
+// .bin，与损坏 meta 的 .bin——没有闸 key 可持，按孤儿判据（新鲜 stat mtime
+// 超宽限 + 删除前重问引用）兜底回收；宽限内的保留。
+func TestSweepUnreferencedEntriesCrashResidue(t *testing.T) {
+	root := t.TempDir()
+	svc := NewReviewMediaService(root, "", nil, nil)
+	dir := filepath.Join(root, "review-screenshot-cache")
+	orphanOld := filepath.Join(dir, "residue.bin")
+	orphanFresh := filepath.Join(dir, "newborn.bin")
+	corruptOld := filepath.Join(dir, "corrupt.bin")
+	for _, p := range []string{orphanOld, orphanFresh, corruptOld} {
+		if err := os.WriteFile(p, []byte("\x89PNG\r\n\x1a\nfake"), 0o600); err != nil {
+			t.Fatalf("write %s: %v", p, err)
+		}
+	}
+	old := time.Now().UTC().Add(-48 * time.Hour)
+	for _, p := range []string{orphanOld, corruptOld} {
+		if err := os.Chtimes(p, old, old); err != nil {
+			t.Fatalf("chtimes %s: %v", p, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "corrupt.json"), []byte("{broken"), 0o600); err != nil {
+		t.Fatalf("write corrupt meta: %v", err)
+	}
+	if err := os.Chtimes(filepath.Join(dir, "corrupt.json"), old, old); err != nil {
+		t.Fatalf("chtimes meta: %v", err)
+	}
+
+	removed := svc.SweepUnreferencedEntries(func(string) bool { return false }, reviewFaceTestGrace)
+	if removed != 2 {
+		t.Fatalf("removed = %d, want 2（崩溃残留与损坏 meta 两条按孤儿判据回收）", removed)
+	}
+	for _, p := range []string{orphanOld, corruptOld, filepath.Join(dir, "corrupt.json")} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Fatalf("%s 未回收: %v", p, err)
+		}
+	}
+	if _, err := os.Stat(orphanFresh); err != nil {
+		t.Fatalf("宽限内的新鲜残留被删除: %v", err)
+	}
+}
+
+// 长下载持闸：同 URL 的下载进行中（闸被占）时扫描跳过该条目，下轮再扫；
+// 释放闸后下一轮正常回收。
+func TestSweepUnreferencedEntriesSkipsWhenGateHeld(t *testing.T) {
+	root := t.TempDir()
+	svc := NewReviewMediaService(root, "", nil, nil)
+	url := "https://example.com/downloading.png"
+	bin := seedReviewEntry(t, svc, url, 48*time.Hour)
+
+	gate := svc.acquireDownloadLock(url)
+	gate.sem <- struct{}{} // 模拟同 URL 下载进行中（fetchAndCache 持闸）
+	if removed := svc.SweepUnreferencedEntries(func(string) bool { return false }, reviewFaceTestGrace); removed != 0 {
+		t.Fatalf("removed = %d, want 0（持闸期间跳过）", removed)
+	}
+	if _, err := os.Stat(bin); err != nil {
+		t.Fatalf("持闸期间条目被删除: %v", err)
+	}
+	// releaseDownloadLock 自带一次 token 消费，等价于释放上面的持有。
+	svc.releaseDownloadLock(url, gate)
+
+	if removed := svc.SweepUnreferencedEntries(func(string) bool { return false }, reviewFaceTestGrace); removed != 1 {
+		t.Fatalf("removed = %d, want 1（释放闸后正常回收）", removed)
+	}
+}
+
 // reviewFaceTestGrace 测试用的回收宽限：与宽限语义无关的固定小值，配合
 // seedReviewEntry 的 48h 旧 mtime。
 const reviewFaceTestGrace = time.Hour

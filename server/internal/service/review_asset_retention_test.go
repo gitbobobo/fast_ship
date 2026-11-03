@@ -181,12 +181,24 @@ func TestAssetRetentionSweepReentrant(t *testing.T) {
 
 	keep := seedAsset(t, review, integrationID, repo, 1, "sha-keep", "https://img.example/keep.png", now)
 	gone := seedAsset(t, review, integrationID, repo, 1, "sha-gone", "https://img.example/gone.png", aged)
+	// 超龄行指向自己的文件（区别于新鲜行共享的 shared.bin）：验证只删超龄
+	// 行自己的字节，不伤及仍被引用的条目。
+	cacheDir := filepath.Dir(media.ShotPath())
+	goneFile := filepath.Join(cacheDir, "gone.bin")
+	if err := os.WriteFile(goneFile, []byte("gone"), 0o600); err != nil {
+		t.Fatalf("write gone file: %v", err)
+	}
+	old := now.Add(-48 * time.Hour)
+	if err := os.Chtimes(goneFile, old, old); err != nil {
+		t.Fatalf("chtimes gone file: %v", err)
+	}
+	review.db.Model(&model.ReviewAsset{}).Where("id = ?", gone.ID).
+		Update("storage_path", goneFile)
 	// 模拟「行已删、文件还在」的中间态残留：无行引用的孤儿文件。
-	orphan := filepath.Join(filepath.Dir(media.ShotPath()), "orphan.bin")
+	orphan := filepath.Join(cacheDir, "orphan.bin")
 	if err := os.WriteFile(orphan, []byte("x"), 0o600); err != nil {
 		t.Fatalf("write orphan: %v", err)
 	}
-	old := now.Add(-48 * time.Hour)
 	if err := os.Chtimes(orphan, old, old); err != nil {
 		t.Fatalf("chtimes orphan: %v", err)
 	}
@@ -196,6 +208,9 @@ func TestAssetRetentionSweepReentrant(t *testing.T) {
 	}
 	if _, err := os.Stat(media.ShotPath()); err != nil {
 		t.Fatalf("仍被引用的文件被误删: %v", err)
+	}
+	if _, err := os.Stat(goneFile); !os.IsNotExist(err) {
+		t.Fatalf("超龄行自己的文件未回收: %v", err)
 	}
 	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
 		t.Fatalf("崩溃残留的孤儿文件未收敛: %v", err)
@@ -247,6 +262,27 @@ func TestEnsureAssetsReverifiesMissingFile(t *testing.T) {
 	}
 	if e.media.anonCalls != before {
 		t.Fatalf("anonCalls = %d, want %d（文件在的命中行不应重下）", e.media.anonCalls, before)
+	}
+
+	// 非 ENOENT 的 Stat 错误（含 NUL 的非法路径回 EINVAL，不是 ErrNotExist）
+	// 保持原行：不重下、不清路径——瞬时 I/O 误判缺失会把有效字节送进保留
+	// 策略的回收（INT-184 审查意见）。
+	before = e.media.anonCalls
+	badPath := e.media.ShotPath() + "\x00bad"
+	review.db.Model(&model.ReviewAsset{}).Where("source_url = ?", "https://img.example/rv.png").
+		Update("storage_path", badPath)
+	if _, _, err := review.ensureAssets(ctx, model.ForgeIntegrationBuiltinGitHubID, repo, 81, "sha-a", body, 0); err != nil {
+		t.Fatalf("ensureAssets: %v", err)
+	}
+	if e.media.anonCalls != before {
+		t.Fatalf("anonCalls = %d, want %d（非 ENOENT 错误不应触发重下）", e.media.anonCalls, before)
+	}
+	var kept model.ReviewAsset
+	if err := review.db.Where("source_url = ?", "https://img.example/rv.png").First(&kept).Error; err != nil {
+		t.Fatalf("row missing: %v", err)
+	}
+	if kept.StoragePath != badPath || kept.Error != "" {
+		t.Fatalf("非 ENOENT 错误改写了原行: %+v", kept)
 	}
 }
 

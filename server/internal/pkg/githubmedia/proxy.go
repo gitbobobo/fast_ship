@@ -495,8 +495,8 @@ func newService(cacheRoot string, cfg serviceConfig) *ProxyService {
 		download:          make(map[string]*downloadGate),
 	}
 	// purge 只允许媒体代理面跑（按 cacheSubdir 判定）：review 截图面的目录
-	// 是 review_assets 的持久存储（无副本、ensure 不会重下），标记缺失时清
-	// 空等于删光历史审查截图。
+	// 是 review_assets 的持久存储（无副本、ensure 只在文件缺失时重下，上游
+	// 已删时补不回来），标记缺失时清空等于删光历史审查截图。
 	s.purgeLegacyCacheEntries(cfg.cacheSubdir == defaultCacheSubdir)
 	return s
 }
@@ -560,7 +560,8 @@ func (s *ProxyService) sweepExpiredEntries() {
 	// 面边界（不变量第 1 条）：条目回收只存在于媒体代理面。护栏做在函数入
 	// 口而不是 main.go 装配——StartExpiredSweeper/SweepExpiredEntries 对所
 	// 有实例可见，误接或手动触发 review 实例就会把持久审查截图删成永久
-	// 404（storage_path 直指文件、ensureAssets 不重下）。
+	// 404（storage_path 直指文件、ensureAssets 只在文件缺失时重下，上游已
+	// 删时补不回来）。
 	if s.cacheSubdir != defaultCacheSubdir {
 		return
 	}
@@ -1012,13 +1013,24 @@ func (s *ProxyService) sweepStaleTmpFiles(now time.Time) {
 // SweepUnreferencedEntries review 截图面的行账回收（INT-184，面内唯一的
 // sanctioned 删除路径）：service 层保留策略先删退役的 review_assets 行，
 // 再以 isReferenced 回答「该 .bin 是否仍有行引用」，这里负责目录遍历与删
-// 除本身。判定顺序为先查引用、后查 mtime、再删：行的插入路径（新下载
-// rename / 命中 touch）都会让 mtime 变新，宽限内的文件不回收——引用快照
-// 与删除之间的窗口由 mtime 兜住。.bin 与同名 .json 一起删；meta 在而
-// data 不在的孤儿 meta 同规则回收。各步幂等：任意时点被杀，下一轮从同样
-// 的判定重新收敛。媒体面是 no-op：它有自己的 TTL 回收，误调不得删它的条
-// 目；isReferenced 不得对同一文件既返回 true 又在后续放行——语义由调用
-// 方保证（见 review_asset_retention.go）。
+// 除本身。判定与删除分两级：
+//
+//   - meta 可读（闸 key = entry.URL）：持该 key 的下载闸（与 fetchAndCache
+//     同一把锁）后重问引用、重 stat mtime，再删。行的插入路径必然先经闸内
+//     的 touch/rename（新下载、ensureAssets/探测的缓存命中都在闸内刷新
+//     mtime），行插入紧跟在闸释放之后——持住闸期间不可能有新插入进行，
+//     闸内重 stat 看到的旧 mtime 说明最近确实没有插入动作。闸被长下载持
+//     有时本轮跳过，下轮再扫（与媒体面过期扫描同口径）。DirEntry.Info 可
+//     能是 ReadDir 时的快照（网络盘上尤其如此），一律以闸内 os.Stat 为准。
+//   - meta 读不出（写侧 rename data 后、WriteFile meta 前被杀的崩溃残留，
+//     或损坏 meta）：没有闸 key 可持，退回孤儿判据——新鲜 stat 的 mtime 超
+//     宽限且删除前最后重问引用仍无行才删。行的任何插入都由闸内 touch 先
+//     行刷新 mtime，宽限判定看到旧 mtime 即插入不在进行；残余的毫秒级窗
+//     口由 ensureAssets 的文件复核自愈（缺失按失败重下）。
+//
+// .bin 与同名 .json 一起删；meta 在而 data 不在的孤儿 meta 同规则回收
+// （URL 可读时同样持闸）。各步幂等：任意时点被杀，下一轮从同样的判定重
+// 新收敛。媒体面是 no-op：它有自己的 TTL 回收，误调不得删它的条目。
 func (s *ProxyService) SweepUnreferencedEntries(isReferenced func(binPath string) bool, grace time.Duration) int {
 	if s.cacheSubdir == defaultCacheSubdir || isReferenced == nil {
 		return 0
@@ -1035,37 +1047,108 @@ func (s *ProxyService) SweepUnreferencedEntries(isReferenced func(binPath string
 			continue
 		}
 		binPath := filepath.Join(s.cacheDir, name)
+		metaPath := strings.TrimSuffix(binPath, ".bin") + ".json"
 		if isReferenced(binPath) {
 			continue
 		}
-		info, err := e.Info()
-		if err != nil || now.Sub(info.ModTime()) <= grace {
+		key := s.gateKeyFromMeta(metaPath)
+		if key == "" {
+			// 崩溃残留/损坏 meta：无闸 key，孤儿判据兜底（见函数头注释）。
+			if s.unreferencedAndStale(binPath, isReferenced, grace, now) {
+				if os.Remove(binPath) == nil {
+					removed++
+				}
+				_ = os.Remove(metaPath)
+			}
 			continue
 		}
-		if os.Remove(binPath) == nil {
-			removed++
+		gate := s.acquireDownloadLock(key)
+		select {
+		case gate.sem <- struct{}{}:
+		case <-time.After(5 * time.Second):
+			s.abandonDownloadLock(key, gate)
+			continue
 		}
-		// 同名 meta 一并删（可能本就不存在，忽略错误）。
-		_ = os.Remove(strings.TrimSuffix(binPath, ".bin") + ".json")
+		if s.unreferencedAndStale(binPath, isReferenced, grace, now) {
+			// 先删 data 再删 meta（与媒体面同序）：meta 是条目可达性的事实
+			// 源，先删 meta 后被杀会留下不可达的孤儿 .bin。
+			if os.Remove(binPath) == nil {
+				removed++
+			}
+			_ = os.Remove(metaPath)
+		}
+		s.releaseDownloadLock(key, gate)
 	}
+	// 孤儿 meta（data 不在）：meta 可读时同样持闸复核；读不出时 mtime 超宽
+	// 限直接删（meta 不被任何行引用，删除不破坏可达证据）。
 	for _, e := range entries {
 		name := e.Name()
 		if !strings.HasSuffix(name, ".json") || strings.HasSuffix(name, ".gone") {
 			continue
 		}
 		metaPath := filepath.Join(s.cacheDir, name)
-		if _, err := os.Stat(strings.TrimSuffix(metaPath, ".json") + ".bin"); err == nil {
+		binPath := strings.TrimSuffix(metaPath, ".json") + ".bin"
+		if _, err := os.Stat(binPath); err == nil {
 			continue
 		}
-		info, err := e.Info()
-		if err != nil || now.Sub(info.ModTime()) <= grace {
+		stale := func() bool {
+			info, err := os.Stat(metaPath)
+			return err == nil && now.Sub(info.ModTime()) > grace
+		}
+		key := s.gateKeyFromMeta(metaPath)
+		if key == "" {
+			if stale() {
+				if os.Remove(metaPath) == nil {
+					removed++
+				}
+			}
 			continue
 		}
-		if os.Remove(metaPath) == nil {
-			removed++
+		gate := s.acquireDownloadLock(key)
+		select {
+		case gate.sem <- struct{}{}:
+		case <-time.After(5 * time.Second):
+			s.abandonDownloadLock(key, gate)
+			continue
 		}
+		if _, err := os.Stat(binPath); err != nil && stale() {
+			if os.Remove(metaPath) == nil {
+				removed++
+			}
+		}
+		s.releaseDownloadLock(key, gate)
 	}
 	return removed
+}
+
+// gateKeyFromMeta 从 meta 还原下载闸的 key（scopedCacheID 的底材是原始
+// URL，scope 在 meta 里但闸 map 以 URL 为键——与 fetchAndCache 的
+// acquireDownloadLock(normalized) 同键）。读不出（缺失/损坏/空 URL）返回
+// 空串，调用方走无闸的孤儿判据。
+func (s *ProxyService) gateKeyFromMeta(metaPath string) string {
+	metaBytes, err := os.ReadFile(metaPath)
+	if err != nil {
+		return ""
+	}
+	var entry cacheEntry
+	if json.Unmarshal(metaBytes, &entry) != nil || entry.URL == "" {
+		return ""
+	}
+	return entry.URL
+}
+
+// unreferencedAndStale 删除前的最终判定：无行引用且新鲜 stat 的 mtime 超宽
+// 限。不用 ReadDir 的缓存 Info（可能是目录读取时的快照）；引用在删除前最
+// 后重问一次，盖住快照到删除之间的行插入。
+func (s *ProxyService) unreferencedAndStale(binPath string, isReferenced func(string) bool, grace time.Duration, now time.Time) bool {
+	if isReferenced(binPath) {
+		return false
+	}
+	info, err := os.Stat(binPath)
+	if err != nil || now.Sub(info.ModTime()) <= grace {
+		return false
+	}
+	return true
 }
 
 // restoreGoneBin 把隔离的旧字节原子放回 binPath。os.Link 不会覆盖已存在的
@@ -1090,7 +1173,8 @@ const legacyScopeMarker = ".cache-scope-v2"
 
 // purgeLegacyCacheEntries 旧 scope 标记缺失时的启动清场。只有媒体代理面
 // 允许整目录清空（guardedPurge）：review 截图面的目录是 review_assets 的持
-// 久存储（无副本、ensure 不会重下），删任何条目等于把历史审查截图变成永
+// 久存储（无副本、ensure 只在文件缺失时重下，上游已删时补不回来），删任何
+// 条目等于把历史审查截图变成永
 // 久 404——它只建目录并补写标记，不删、不拒读。标记 stat 出错（非 ENOENT
 // 的 EIO/权限）两个面都跳过——读不出标记不等于标记不存在，宁可不清理也
 // 不能误删持久资产。

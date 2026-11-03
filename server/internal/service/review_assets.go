@@ -487,8 +487,9 @@ func (s *ReviewService) ensureAssets(ctx context.Context, integrationID, repo st
 		// 复核（INT-184）：storage_path 指向的文件必须还在。保留策略按行账
 		// 回收文件，与行插入之间存在理论竞态（引用判定与删除之间插入的行），
 		// 命中行不复核的话一次竞态就是该端点永久 404——缺失按失败行重下，
-		// 缓存命中或重新落盘都能自愈。
-		if seenBefore && existing.StoragePath != "" && assetFileExists(existing.StoragePath) {
+		// 缓存命中或重新落盘都能自愈。只有 ErrNotExist 触发重下：其它 Stat
+		// 错误（瞬时 I/O）保持原行，避免把有效路径误清。
+		if seenBefore && existing.StoragePath != "" && !assetFileMissing(existing.StoragePath) {
 			continue
 		}
 		var storagePath, mime, errText string
@@ -617,13 +618,16 @@ func hashFileSHA256(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// assetFileExists 资产文件复核：路径非空且磁盘上是普通文件才算在。
-func assetFileExists(path string) bool {
+// assetFileMissing 资产文件缺失判定：只有 ErrNotExist 才算缺失并触发重下；
+// 其它 Stat 错误（瞬时 I/O、权限）保持原行不动——误判缺失会走进重下，重下
+// 失败时 Updates 把本来有效的 storage_path 清成空，行失去引用后仅有的字节
+// 会被保留策略当作孤儿回收（INT-184 审查意见）。
+func assetFileMissing(path string) bool {
 	if path == "" {
-		return false
+		return true
 	}
-	info, err := os.Stat(path)
-	return err == nil && info.Mode().IsRegular()
+	_, err := os.Stat(path)
+	return errors.Is(err, os.ErrNotExist)
 }
 
 // screenshotFetch 探测下载成功的单张结果：探测落账（recordProbeAssets）的
@@ -701,6 +705,23 @@ func (s *ReviewService) recordProbeAssets(integrationID, repo string, prNumber i
 		}).Create(asset)
 		if res.Error != nil {
 			s.logger.Warn("探测截图落账失败", zap.String("url", scrubLogURLs(f.ref.URL)), zap.Error(res.Error))
+			continue
+		}
+		// DoNothing 吞掉的并发先到行：ensureAssets 可能刚插入空路径失败行
+		//（First 与 Create 之间），重读后仍为空路径才用本次结果修复；已有
+		// 路径的行保留原行。
+		if res.RowsAffected == 0 {
+			var winner model.ReviewAsset
+			if err := s.db.Where("integration_id = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ? AND source_url = ?",
+				integrationID, repo, prNumber, headSHA, f.ref.URL).First(&winner).Error; err == nil && winner.StoragePath == "" {
+				if uerr := s.db.Model(&model.ReviewAsset{}).Where("id = ?", winner.ID).
+					Updates(map[string]any{
+						"storage_path": f.cached.Path, "mime_type": f.cached.Metadata.ContentType,
+						"size_bytes": f.cached.Metadata.Size, "error": "",
+					}).Error; uerr != nil {
+					s.logger.Warn("探测截图落账失败", zap.String("url", scrubLogURLs(f.ref.URL)), zap.Error(uerr))
+				}
+			}
 		}
 	}
 }
