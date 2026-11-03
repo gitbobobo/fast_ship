@@ -1,10 +1,13 @@
 package handler
 
 import (
+	"bytes"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -369,5 +372,207 @@ func TestMediaProxySVGByExtensionRejectionShortCache(t *testing.T) {
 	}
 	if got := rec.Header().Get("Cache-Control"); got != "private, max-age=60" {
 		t.Fatalf("cache-control = %q, want private, max-age=60（扩展名档短缓存）", got)
+	}
+}
+
+// 缓存文件在两次请求之间被删（过期扫描、人工清理、重启后残留的 meta）：
+// GetCached 靠 stat 判 miss，handler 按普通未命中重下，客户端不看到破图。
+//
+// 注意这条**不**覆盖 serveCachedMedia 返回 false 的那个分支（GetCached 与
+// os.Open 之间的删除窗口）：getCachedNormalized 自己会 stat data 文件，文件
+// 先删掉就轮不到那条分支。分支本身由
+// TestServeCachedMediaWritesNothingWhenFileMissing 直接覆盖。
+func TestGitHubMediaProxyRefetchesAfterCacheFileDeleted(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write([]byte("png-bytes"))
+	}))
+	defer upstream.Close()
+	target, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("parse upstream url: %v", err)
+	}
+	upstreamTransport := &rewriteToUpstreamTransport{target: target}
+	cacheRoot := t.TempDir()
+	svc := githubmedia.NewProxyService(cacheRoot,
+		githubmedia.WithHTTPTransport(upstreamTransport))
+
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.GET(githubmedia.ProxyPath, NewGitHubMediaProxyHandler(svc).Proxy)
+
+	mediaURL := "http://github.com/user-attachments/assets/evicted.png"
+	get := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, githubmedia.ProxyPath+"?url="+url.QueryEscape(mediaURL), nil)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		return rec
+	}
+
+	if rec := get(); rec.Code != http.StatusOK {
+		t.Fatalf("first fetch code = %d, want 200", rec.Code)
+	}
+	firstHits := upstreamTransport.hits.Load()
+
+	// 模拟淘汰窗口：只删 .bin（meta 还在，GetCached 仍命中）。
+	cacheDir := filepath.Join(cacheRoot, "github-media-cache")
+	entries, err := os.ReadDir(cacheDir)
+	if err != nil {
+		t.Fatalf("read cache dir: %v", err)
+	}
+	removed := 0
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".bin") {
+			if err := os.Remove(filepath.Join(cacheDir, e.Name())); err == nil {
+				removed++
+			}
+		}
+	}
+	if removed == 0 {
+		t.Fatal("no .bin removed, want 缓存文件存在")
+	}
+
+	rec := get()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d body = %s, want 200（淘汰窗口回退重下，不 404）", rec.Code, rec.Body.String())
+	}
+	if got := rec.Body.String(); got != "png-bytes" {
+		t.Fatalf("body = %q, want 重下后的字节", got)
+	}
+	if upstreamTransport.hits.Load() != firstHits+1 {
+		t.Fatalf("upstream hits = %d, want %d（回退必须真的回源）", upstreamTransport.hits.Load(), firstHits+1)
+	}
+}
+
+// 水位**已满**时 handler 走「预检拒绝 → ProxyPass」这条退路：客户端照常拿
+// 到字节，只是不缓存，且上游只被请求一次。
+//
+// 必须先真的把水位顶满（两张 32 字节 + 上限 64），否则走的是「中途被拒 →
+// 复用已打开响应」那条分支——两条分支都写 200，只有上游命中次数能区分。
+func TestGitHubMediaProxyFallsBackToPassthroughWhenCacheFull(t *testing.T) {
+	// 载荷必须是注释里说的 32 字节：水位按实际落盘字节计，写短了上限 64 就
+	// 永远顶不满，第三张会走正常缓存路径，「预检拒绝」根本没被覆盖。
+	payload := bytes.Repeat([]byte("p"), 32)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(payload)
+	}))
+	defer upstream.Close()
+	target, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("parse upstream url: %v", err)
+	}
+	upstreamTransport := &rewriteToUpstreamTransport{target: target}
+	// 上限 64 = 两张 32 字节：前两张正常缓存把水位顶满。
+	svc := githubmedia.NewProxyService(t.TempDir(),
+		githubmedia.WithHTTPTransport(upstreamTransport),
+		githubmedia.WithCacheCapacity(64))
+
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.GET(githubmedia.ProxyPath, NewGitHubMediaProxyHandler(svc).Proxy)
+	get := func(name string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, githubmedia.ProxyPath+"?url="+
+			url.QueryEscape("http://github.com/user-attachments/assets/"+name), nil)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		return rec
+	}
+
+	for _, name := range []string{"a.png", "b.png"} {
+		if rec := get(name); rec.Code != http.StatusOK {
+			t.Fatalf("%s code = %d, want 200（32+32 ≤ 64，正常缓存）", name, rec.Code)
+		}
+	}
+	if got := upstreamTransport.hits.Load(); got != 2 {
+		t.Fatalf("warm-up hits = %d, want 2", got)
+	}
+
+	// 水位已满：预检拒绝 → ProxyPass 再打一次上游（总计 3），不再是二次回源
+	// 那种「先打一次被拒、再打一次直通」（那会是 4）。
+	rec := get("c.png")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d body = %s, want 200（直通兜底）", rec.Code, rec.Body.String())
+	}
+	if got := len(rec.Body.String()); got != 32 {
+		t.Fatalf("body len = %d, want 32（直通的字节）", got)
+	}
+	if got := upstreamTransport.hits.Load(); got != 3 {
+		t.Fatalf("upstream hits = %d, want 3（满容量预检不回源，只直通一次）", got)
+	}
+
+	// 再请求同一 URL：被预检拒绝的字节没有落盘，所以不能命中缓存，仍要直通
+	// （hits 再 +1）。这条才真正区分「预检拒绝」与「其实缓存住了」——两者都
+	// 回 200、命中次数也都只是第三次，只有第四次请求能把它们分开。
+	if rec := get("c.png"); rec.Code != http.StatusOK {
+		t.Fatalf("repeat code = %d, want 200", rec.Code)
+	}
+	if got := upstreamTransport.hits.Load(); got != 4 {
+		t.Fatalf("upstream hits = %d, want 4（预检拒绝的字节未落盘，重复请求仍直通）", got)
+	}
+}
+
+// 请求中途才被准入闸拒时，handler 复用已经打开的上游响应，不再发第二次上
+// 游请求：容量满不是偶发而是稳态，二次 GET 会让上游请求数与连接数翻倍。
+func TestGitHubMediaProxyReusesUpstreamResponseWhenCacheFillsMidRequest(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write([]byte("0123456789abcdef0123456789abcdef")) // 32 字节
+	}))
+	defer upstream.Close()
+	target, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("parse upstream url: %v", err)
+	}
+	upstreamTransport := &rewriteToUpstreamTransport{target: target}
+	// 上限 40：第一张 32 字节能进（水位 32），第二张 32 字节放不下。
+	svc := githubmedia.NewProxyService(t.TempDir(),
+		githubmedia.WithHTTPTransport(upstreamTransport),
+		githubmedia.WithCacheCapacity(40))
+
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.GET(githubmedia.ProxyPath, NewGitHubMediaProxyHandler(svc).Proxy)
+	get := func(name string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, githubmedia.ProxyPath+"?url="+
+			url.QueryEscape("http://github.com/user-attachments/assets/"+name), nil)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		return rec
+	}
+
+	if rec := get("first.png"); rec.Code != http.StatusOK {
+		t.Fatalf("first code = %d, want 200（32 ≤ 40，正常缓存）", rec.Code)
+	}
+	rec := get("second.png")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("second code = %d body = %s, want 200（复用已打开的上游响应）", rec.Code, rec.Body.String())
+	}
+	if got := rec.Body.String(); len(got) != 32 {
+		t.Fatalf("second body len = %d, want 32", len(got))
+	}
+	if got := upstreamTransport.hits.Load(); got != 2 {
+		t.Fatalf("upstream hits = %d, want 2（每张各一次，不二次请求）", got)
+	}
+}
+
+// serveCachedMedia 打开失败时必须返回 false 且不写任何响应：调用方据此按
+// miss 回退重下（GetCached 与 os.Open 之间的删除窗口，读路径无互锁）。它自己
+// 写 404 的话，回退就无从发生，窗口会以一次破图收场。
+func TestServeCachedMediaWritesNothingWhenFileMissing(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	missing := filepath.Join(t.TempDir(), "gone.bin")
+	media := githubmedia.CachedImage(missing, "image/png", 15)
+	media.Metadata.URL = "http://github.com/user-attachments/assets/gone.png"
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/", nil)
+
+	if served := serveCachedMedia(c, media); served {
+		t.Fatal("serveCachedMedia = true, want false（文件打不开）")
+	}
+	if rec.Code != http.StatusOK || rec.Body.Len() != 0 {
+		t.Fatalf("recorder = %d/%q, want 未写任何响应（让调用方回退重下）", rec.Code, rec.Body.String())
 	}
 }

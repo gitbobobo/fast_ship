@@ -2,8 +2,10 @@ package githubmedia
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -613,5 +616,482 @@ func TestGetCachedRevalidatesContentTypeGate(t *testing.T) {
 	}
 	if entry.ContentType != "application/octet-stream; charset=binary" {
 		t.Fatalf("param meta content type = %q, want 原样保留（meta 文件不重写）", entry.ContentType)
+	}
+}
+
+// newCapacityTestService 起一个容量上限极小的媒体面服务，上游固定回 size
+// 字节的 png。返回服务与上游 URL 前缀。
+func newCapacityTestService(t *testing.T, capacity int64, size int) (*ProxyService, string) {
+	t.Helper()
+	payload := bytes.Repeat([]byte("x"), size)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(payload)
+	}))
+	t.Cleanup(upstream.Close)
+	parsed, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("parse upstream url: %v", err)
+	}
+	svc := newService(t.TempDir(), serviceConfig{
+		cacheSubdir:   defaultCacheSubdir,
+		cacheTTL:      time.Hour,
+		capacityLimit: capacity,
+		client:        upstream.Client(),
+		allowURL:      func(u *url.URL) bool { return u.Host == parsed.Host },
+	})
+	return svc, upstream.URL
+}
+
+// 容量闸长在写入点：水位会越过上限时不缓存、返回 ErrCacheFull，且**不删
+// 任何已落盘条目**——容量机制不再删文件，TTL 内命中的图片不会因容量变破
+// 图（INT-172 R4 方向审计把「扫描期按最旧淘汰」换成了这条准入闸）。
+func TestFetchAndCacheRejectsWhenCapacityExhausted(t *testing.T) {
+	svc, upstream := newCapacityTestService(t, 40, 32)
+	ctx := context.Background()
+
+	first, err := svc.FetchAndCache(ctx, upstream+"/a.png")
+	if err != nil {
+		t.Fatalf("first fetch: %v", err)
+	}
+
+	// 32 已落盘，再要 32 会越过 40。
+	if _, err := svc.FetchAndCache(ctx, upstream+"/b.png"); !errors.Is(err, ErrCacheFull) {
+		t.Fatalf("second fetch err = %v, want ErrCacheFull", err)
+	}
+
+	// 已落盘条目必须原样在盘上，且仍可命中。
+	if _, err := os.Stat(first.Path); err != nil {
+		t.Fatalf("first entry stat = %v, want 保留（准入闸不删已落盘条目）", err)
+	}
+	if _, ok, err := svc.GetCached(upstream + "/a.png"); err != nil || !ok {
+		t.Fatalf("GetCached = ok:%v err:%v, want 命中", ok, err)
+	}
+}
+
+// 预留计数覆盖并发下载：两次预留各自通过后合并水位仍受上限约束，释放后可
+// 再用——否则一个高并发页面就能把目录推过上限（P2-b 的「并发下载不设限」）。
+func TestReserveCacheBytesCountsConcurrentReservations(t *testing.T) {
+	svc, _ := newCapacityTestService(t, 100, 1)
+
+	first, err := svc.reserveCacheBytes(60)
+	if err != nil {
+		t.Fatalf("first reserve: %v", err)
+	}
+	if _, err := svc.reserveCacheBytes(60); !errors.Is(err, ErrCacheFull) {
+		t.Fatalf("concurrent reserve err = %v, want ErrCacheFull（60+60 > 100）", err)
+	}
+	first.release()
+	if _, err := svc.reserveCacheBytes(60); err != nil {
+		t.Fatalf("reserve after release: %v, want 成功（退还后额度回到 100）", err)
+	}
+}
+
+// 过期扫描删掉条目后要立刻校准水位：不校准，被删字节会一直占着额度，缓存
+// 明明空着却一直拒绝新字节。
+func TestSweepExpiredEntriesRecalibratesCapacity(t *testing.T) {
+	svc, upstream := newCapacityTestService(t, 40, 32)
+	ctx := context.Background()
+
+	if _, err := svc.FetchAndCache(ctx, upstream+"/a.png"); err != nil {
+		t.Fatalf("first fetch: %v", err)
+	}
+	if _, err := svc.FetchAndCache(ctx, upstream+"/b.png"); !errors.Is(err, ErrCacheFull) {
+		t.Fatalf("second fetch err = %v, want ErrCacheFull", err)
+	}
+
+	// 把 a 改成已过期，扫描回收后水位应回到 0。
+	metaPath := svc.metaPath(upstream+"/a.png", "")
+	data, err := os.ReadFile(metaPath)
+	if err != nil {
+		t.Fatalf("read meta: %v", err)
+	}
+	var entry cacheEntry
+	if err := json.Unmarshal(data, &entry); err != nil {
+		t.Fatalf("unmarshal meta: %v", err)
+	}
+	entry.CachedAt = time.Now().UTC().Add(-2 * time.Hour)
+	entry.ExpiresAt = time.Now().UTC().Add(-time.Hour)
+	expired, err := json.Marshal(entry)
+	if err != nil {
+		t.Fatalf("marshal meta: %v", err)
+	}
+	if err := os.WriteFile(metaPath, expired, 0o640); err != nil {
+		t.Fatalf("write meta: %v", err)
+	}
+	svc.SweepExpiredEntries()
+
+	if _, err := svc.FetchAndCache(ctx, upstream+"/b.png"); err != nil {
+		t.Fatalf("fetch after sweep err = %v, want 成功（回收后额度已释放）", err)
+	}
+}
+
+// 截图面不经过容量准入：它是持久资产面，永不删除，上界由张数与探测预算给
+// 出。给它一个形同虚设的上限也必须照常落盘。
+func TestReviewFaceSkipsCapacityAdmission(t *testing.T) {
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(bytes.Repeat([]byte("x"), 64))
+	}))
+	defer upstream.Close()
+	svc := newService(t.TempDir(), serviceConfig{
+		cacheSubdir:   "review-screenshot-cache",
+		cacheTTL:      time.Hour,
+		capacityLimit: 1, // 形同虚设：截图面不吃这道闸
+		client:        upstream.Client(),
+		allowURL:      allowPublicImageHost,
+		requireHTTPS:  true,
+		imagesOnly:    true,
+	})
+
+	cached, err := svc.FetchAndCache(context.Background(), upstream.URL+"/s.png")
+	if err != nil {
+		t.Fatalf("review face fetch: %v, want 成功（不吃容量准入）", err)
+	}
+	if _, err := os.Stat(cached.Path); err != nil {
+		t.Fatalf("cached path stat = %v, want 落盘", err)
+	}
+}
+
+// 目录扫描读失败（权限、EIO、只读挂载）不能当成「占用为 0」写进水位：那会
+// 把水位清零，准入闸随后按空目录再放行整整一个上限的字节，与本 PR 声明的
+// 「磁盘有界」正相反。
+func TestRecalibrateCacheUsageKeepsWatermarkWhenScanFails(t *testing.T) {
+	svc, _ := newCapacityTestService(t, 100, 1)
+	if err := os.MkdirAll(svc.cacheDir, 0o750); err != nil {
+		t.Fatalf("mkdir cache dir: %v", err)
+	}
+	held, err := svc.reserveCacheBytes(60)
+	if err != nil {
+		t.Fatalf("reserve: %v", err)
+	}
+	held.settle(60)
+
+	if err := os.Chmod(svc.cacheDir, 0o000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(svc.cacheDir, 0o750) })
+	if _, readErr := os.ReadDir(svc.cacheDir); readErr == nil {
+		t.Skip("目录仍可读（以 root 运行？），无法模拟扫描失败")
+	}
+
+	svc.recalibrateCacheUsage()
+
+	// 水位仍是 60：再要 60 会越过 100。若校准把水位清零，这里会成功。
+	if _, err := svc.reserveCacheBytes(60); !errors.Is(err, ErrCacheFull) {
+		t.Fatalf("reserve after failed scan err = %v, want ErrCacheFull（水位未被清零）", err)
+	}
+}
+
+// 校准在锁外扫目录：扫描期间落盘的字节不能被陈旧快照抹掉。快照之后完成
+// 的 settle 叠加到快照上，水位等于真实占用（而不是只剩快照那份，也不是
+// 只剩新落盘那份——后者会让重启前的存量整段不计入，磁盘可到上限的两倍）。
+func TestRecalibrateCacheUsageAddsSettlesRacingTheScan(t *testing.T) {
+	svc, upstream := newCapacityTestService(t, 100, 32)
+
+	svc.applyCalibration(func() (int64, bool) {
+		// 扫描读到空目录（快照 0 字节），随后一次下载落盘 32 字节并结算。
+		if _, err := svc.FetchAndCache(context.Background(), upstream+"/race.png"); err != nil {
+			t.Fatalf("fetch during scan: %v", err)
+		}
+		return 0, true
+	})
+
+	// 水位应为 32（= 快照 0 + 扫描期结算 32 = 盘上实际字节）。
+	if _, err := svc.reserveCacheBytes(68); err != nil {
+		t.Fatalf("reserve 68: %v, want 成功（32+68 = 100 ≤ 上限）", err)
+	}
+	if _, err := svc.reserveCacheBytes(1); !errors.Is(err, ErrCacheFull) {
+		t.Fatalf("reserve 1 err = %v, want ErrCacheFull（水位已到 100）", err)
+	}
+}
+
+// 首次校准失败时不能按「水位 0」放行：那一刻账上只有本进程启动后的落盘
+// 量，磁盘上重启前的存量整段不在账上，按它放行能让目录写到上限的两倍。
+// 失败的校准也不随每条写请求重扫目录——退避期内一律直通。
+func TestCapacityUncalibratedRefusesCachingAndThrottlesRetry(t *testing.T) {
+	svc, _ := newCapacityTestService(t, 100, 1)
+	if err := os.MkdirAll(svc.cacheDir, 0o750); err != nil {
+		t.Fatalf("mkdir cache dir: %v", err)
+	}
+	if err := os.Chmod(svc.cacheDir, 0o000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	restored := false
+	restore := func() {
+		if !restored {
+			restored = true
+			_ = os.Chmod(svc.cacheDir, 0o750)
+		}
+	}
+	t.Cleanup(restore)
+	if _, readErr := os.ReadDir(svc.cacheDir); readErr == nil {
+		t.Skip("目录仍可读（以 root 运行？），无法模拟扫描失败")
+	}
+
+	if _, err := svc.reserveCacheBytes(1); !errors.Is(err, ErrCacheFull) {
+		t.Fatalf("reserve err = %v, want ErrCacheFull（未校准不放行）", err)
+	}
+
+	// 权限恢复后立刻再试：仍在退避期，不重扫、继续直通。
+	restore()
+	if _, err := svc.reserveCacheBytes(1); !errors.Is(err, ErrCacheFull) {
+		t.Fatalf("reserve in backoff err = %v, want ErrCacheFull（退避期内不重扫）", err)
+	}
+
+	// 退避到期后重新校准并放行。
+	svc.capMu.Lock()
+	svc.capNextCalibrateAt = time.Time{}
+	svc.capMu.Unlock()
+	held, err := svc.reserveCacheBytes(1)
+	if err != nil {
+		t.Fatalf("reserve after backoff: %v, want 成功（校准成功）", err)
+	}
+	held.release()
+}
+
+// newCapacityTestServiceWithHits 同 newCapacityTestService，额外暴露上游命中
+// 计数，用来断言「容量满时不多打上游」。
+func newCapacityTestServiceWithHits(t *testing.T, capacity int64, size int) (*ProxyService, string, *atomic.Int32) {
+	t.Helper()
+	payload := bytes.Repeat([]byte("x"), size)
+	var hits atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(payload)
+	}))
+	t.Cleanup(upstream.Close)
+	parsed, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("parse upstream url: %v", err)
+	}
+	svc := newService(t.TempDir(), serviceConfig{
+		cacheSubdir:   defaultCacheSubdir,
+		cacheTTL:      time.Hour,
+		capacityLimit: capacity,
+		client:        upstream.Client(),
+		allowURL:      func(u *url.URL) bool { return u.Host == parsed.Host },
+	})
+	return svc, upstream.URL, &hits
+}
+
+// 请求中途才被准入闸拒时不能丢掉已经打开的上游响应：把它交给调用方流式回
+// 包，上游只被请求一次。容量满不是偶发而是稳态，二次 GET 会让媒体代理对上
+// 游的请求数与连接数翻倍，抬高上游限流与延迟。
+func TestFetchAndCacheCacheFullReusesUpstreamResponse(t *testing.T) {
+	svc, upstream, hits := newCapacityTestServiceWithHits(t, 100, 64)
+
+	// 先占掉 60 字节水位（未满），随后一次 64 字节的下载放不下。
+	held, err := svc.reserveCacheBytes(60)
+	if err != nil {
+		t.Fatalf("reserve: %v", err)
+	}
+	held.settle(60)
+
+	_, err = svc.FetchAndCache(context.Background(), upstream+"/big.png")
+	if !errors.Is(err, ErrCacheFull) {
+		t.Fatalf("err = %v, want ErrCacheFull", err)
+	}
+	resp, ok := PassthroughResponse(err)
+	if !ok || resp == nil {
+		t.Fatalf("PassthroughResponse = %v, want 可复用的上游响应", ok)
+	}
+	body, readErr := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if readErr != nil {
+		t.Fatalf("read body: %v", readErr)
+	}
+	if len(body) != 64 {
+		t.Fatalf("body len = %d, want 64（复用已打开的上游响应）", len(body))
+	}
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("upstream hits = %d, want 1（不得二次请求）", got)
+	}
+}
+
+// 水位已满时连回源都不该发：预检直接拒绝，调用方走直通只打一次上游。
+func TestFetchAndCacheCacheFullPrecheckSkipsUpstream(t *testing.T) {
+	svc, upstream, hits := newCapacityTestServiceWithHits(t, 100, 64)
+
+	held, err := svc.reserveCacheBytes(100)
+	if err != nil {
+		t.Fatalf("reserve: %v", err)
+	}
+	held.settle(100)
+
+	_, err = svc.FetchAndCache(context.Background(), upstream+"/any.png")
+	if !errors.Is(err, ErrCacheFull) {
+		t.Fatalf("err = %v, want ErrCacheFull", err)
+	}
+	if _, ok := PassthroughResponse(err); ok {
+		t.Fatal("PassthroughResponse 非空, want 空（预检拒绝没有上游响应可复用）")
+	}
+	if got := hits.Load(); got != 0 {
+		t.Fatalf("upstream hits = %d, want 0（满容量时预检直接拒绝，不回源）", got)
+	}
+}
+
+// 按 Content-Length 判定超限时响应体还没读，可以整份交回调用方直通：重新
+// ProxyPass 会把同一个超限附件再下一次上游。
+func TestFetchAndCacheMediaTooLargeReusesUpstreamResponse(t *testing.T) {
+	payload := bytes.Repeat([]byte("x"), 64)
+	var hits atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(payload)
+	}))
+	defer upstream.Close()
+	parsed, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("parse upstream url: %v", err)
+	}
+	svc := newService(t.TempDir(), serviceConfig{
+		cacheSubdir:       defaultCacheSubdir,
+		cacheTTL:          time.Hour,
+		maxCacheEntrySize: 8, // 上游 64 字节必超
+		client:            upstream.Client(),
+		allowURL:          func(u *url.URL) bool { return u.Host == parsed.Host },
+	})
+
+	_, err = svc.FetchAndCache(context.Background(), upstream.URL+"/big.mp4")
+	if !errors.Is(err, ErrMediaTooLarge) {
+		t.Fatalf("err = %v, want ErrMediaTooLarge", err)
+	}
+	resp, ok := PassthroughResponse(err)
+	if !ok || resp == nil {
+		t.Fatalf("PassthroughResponse = %v, want 可复用的上游响应", ok)
+	}
+	body, readErr := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if readErr != nil {
+		t.Fatalf("read body: %v", readErr)
+	}
+	if len(body) != 64 {
+		t.Fatalf("body len = %d, want 64", len(body))
+	}
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("upstream hits = %d, want 1（不得二次请求）", got)
+	}
+}
+
+// PassthroughError 的契约是「调用方负责关闭并回包」，只对媒体面生效。截图面
+// 的调用方是 service 层，它只把错误往上抛——把打开的响应体交给它，连接与缓
+// 冲永远没人关（泄漏）。截图面必须拿到裸错误，body 由 fetchAndCache 自己关。
+func TestReviewFaceMediaTooLargeReturnsPlainError(t *testing.T) {
+	payload := bytes.Repeat([]byte("x"), 64)
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(payload)
+	}))
+	defer upstream.Close()
+	svc := newService(t.TempDir(), serviceConfig{
+		cacheSubdir:       "review-screenshot-cache",
+		cacheTTL:          time.Hour,
+		maxCacheEntrySize: 8,
+		client:            upstream.Client(),
+		allowURL:          allowPublicImageHost,
+		requireHTTPS:      true,
+		imagesOnly:        true,
+	})
+
+	_, err := svc.FetchAndCache(context.Background(), upstream.URL+"/big.png")
+	if !errors.Is(err, ErrMediaTooLarge) {
+		t.Fatalf("err = %v, want ErrMediaTooLarge", err)
+	}
+	if resp, ok := PassthroughResponse(err); ok {
+		_ = resp.Body.Close()
+		t.Fatal("PassthroughResponse 非空, want 空（截图面不交接响应体，调用方不会关）")
+	}
+}
+
+// 清扫之后校准失败要留待重试：清扫已经把文件删了，水位却还按删之前算——
+// 不重试的话媒体面会因为「反正水位满了」长期退化成直通。
+func TestCapacityRecalibrateRetriesAfterFailure(t *testing.T) {
+	svc, _ := newCapacityTestService(t, 100, 1)
+	if err := os.MkdirAll(svc.cacheDir, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	held, err := svc.reserveCacheBytes(60)
+	if err != nil {
+		t.Fatalf("reserve: %v", err)
+	}
+	held.settle(60)
+
+	if err := os.Chmod(svc.cacheDir, 0o000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	restored := false
+	restore := func() {
+		if !restored {
+			restored = true
+			_ = os.Chmod(svc.cacheDir, 0o750)
+		}
+	}
+	t.Cleanup(restore)
+	if _, readErr := os.ReadDir(svc.cacheDir); readErr == nil {
+		t.Skip("目录仍可读（以 root 运行？），无法模拟扫描失败")
+	}
+
+	svc.recalibrateCacheUsage() // 失败：置 pending
+	restore()
+	// 模拟退避窗口过去（真实实现里由 capacityCalibrateRetryInterval 控制）。
+	svc.capMu.Lock()
+	svc.capNextCalibrateAt = time.Time{}
+	svc.capMu.Unlock()
+
+	// 校准重试成功：目录实际为空，水位回到 0，再预留 60 不该被拒。
+	next, err := svc.reserveCacheBytes(60)
+	if err != nil {
+		t.Fatalf("reserve after retry: %v, want 成功（清扫后重新校准，水位已释放）", err)
+	}
+	next.release()
+}
+
+// .gone 是清扫为压 stat→remove 窗口 rename 出来的隔离名：进程在 rename 后、
+// remove 前被杀时留在盘上，要等 2×TTL 才收。不计入容量口径，实际占用就会在
+// 回收前超过声明的上限。
+func TestCacheDirBytesCountsGoneIsolationFiles(t *testing.T) {
+	svc, _ := newCapacityTestService(t, 100, 1)
+	if err := os.MkdirAll(svc.cacheDir, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	for _, name := range []string{"a.bin.gone", "b.json.gone"} {
+		if err := os.WriteFile(filepath.Join(svc.cacheDir, name), bytes.Repeat([]byte("x"), 40), 0o640); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	svc.recalibrateCacheUsage()
+
+	// 水位 80：再要 30 会越过 100。
+	if _, err := svc.reserveCacheBytes(30); !errors.Is(err, ErrCacheFull) {
+		t.Fatalf("reserve err = %v, want ErrCacheFull（隔离残留计入容量）", err)
+	}
+}
+
+// 清扫末尾的校准要拿请求侧的同一把单飞锁：否则请求侧可能读到「清扫删除之前」
+// 的快照、在清扫校准之后才写回，把已删字节重新计进水位——刚释放的额度白丢，
+// 媒体面在下次清扫前一直拒缓存。
+func TestRecalibrateCacheUsageSerializesWithAdmissionCalibration(t *testing.T) {
+	svc, _ := newCapacityTestService(t, 100, 1)
+
+	svc.capCalMu.Lock() // 模拟请求侧正在校准
+	done := make(chan struct{})
+	go func() {
+		svc.recalibrateCacheUsage()
+		close(done)
+	}()
+	select {
+	case <-done:
+		svc.capCalMu.Unlock()
+		t.Fatal("recalibrate 未等待单飞锁, want 阻塞（扫描+赋值与请求侧校准串行）")
+	case <-time.After(100 * time.Millisecond):
+	}
+	svc.capCalMu.Unlock()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("放锁后 recalibrate 仍未完成")
 	}
 }

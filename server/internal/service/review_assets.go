@@ -53,6 +53,14 @@ const (
 	refSourceLink // 普通链接目的地（ast.Link 与 <a href>）
 )
 
+// maxScreenshotsPerPR 单个 PR 描述收集的截图引用上限：按出现顺序保留前 N
+// 个（去重后），超出部分忽略。上限同时约束探测下载与 ensureAssets 落账——
+// review 截图面是持久资产（永不回收），描述塞几十张图会让磁盘占用随 PR 数
+// 无界增长；正常审查用不了几张图，超出部分本来就开不出有意义的视觉轮。
+// 单张大小另受下载面的单文件上限（256 MiB）与探测字节预算
+// （screenshotProbeBudget）约束。
+const maxScreenshotsPerPR = 12
+
 // prBodyMarkdown PR 描述的 Markdown 解析器（GFM 含 Linkify）。收集走 AST：
 // 「URL 到哪结束」是 GFM 规范已定义的问题——行内代码/围栏代码块不产链接
 // 节点、括号配对与 ASCII 尾标点剥离有规范行为、引用式与尖括号目的地都解析
@@ -308,6 +316,11 @@ func collectScreenshotURLsAt(body, githubWebHost string) []screenshotRef {
 		}
 		refs = append(refs, c.ref)
 	}
+	// 张数截断在去重之后按出现顺序做：保留的是描述里靠前的引用，与「探测
+	// 逐张试、失败行按 position 落账」的顺序语义一致。
+	if len(refs) > maxScreenshotsPerPR {
+		refs = refs[:maxScreenshotsPerPR]
+	}
 	return refs
 }
 
@@ -547,6 +560,20 @@ var screenshotProbeTimeout = 30 * time.Second
 // 顺序重复同一张挂死图。var 是为了让测试缩短等待。
 var screenshotProbeAttemptTimeout = 10 * time.Second
 
+// screenshotProbeBudget 单次探测允许拉进缓存的总字节预算：时间预算管不住
+// 「快速回源的大图」——图床很快时 30s 内能下进几十张大文件，而 review 截
+// 图面是持久资产（永不回收），字节必须有自己的闸。只结算新下载（命中不占
+// 预算，见 probeScreenshots），下载后结算：触发那张已完整落盘，单轮新下
+// 载实际上界是预算 + 单文件上限（那张下一轮命中不重下，不白拉）。超过预
+// 算时本轮停在触发的那张，已成功的照常计入指纹；剩下的引用下轮继续。
+//
+// 口径边界：这是探测的**节奏**闸（每轮新下载量有界），不是持久面的总量
+// 闸——review 截图面按设计持久全部可用截图（视觉证据不可丢弃），单
+// (PR, head) 的磁盘上界 = maxScreenshotsPerPR × 下载面单文件上限；跨 head
+// 的历史资产累积归审查保留策略，不在这里解决。字节闸挡不住落盘总量（探
+// 测逐轮把集合拉齐），挡住的是「一轮同步被大图吃掉整个磁盘预算」。
+const screenshotProbeBudget = 256 << 20
+
 // screenshotProbeResult 探测三态：ready 至少一张可下载；none 全部「不是图」
 // （内容/地址形态被下载面拒）；unavailable 拉不到（网络故障、超时、预算耗
 // 尽）。成败两态表达不了「全部不是图」——那该收敛到 visualNone，而不是每次
@@ -601,7 +628,9 @@ type screenshotProbe struct {
 // 「拉不到」（见 isNotAnImageError）。任一成功 → probeReady（部分失败时内容
 // 指纹为空）；全部探完且全部「不是图」→ probeNone；零成功且存在「拉不到」
 // 或总预算耗尽未探完 → probeUnavailable，reason 取第一条「拉不到」类原因，
-// 没有再取第一条失败原因。探测不写 review_assets——资产行仍由视觉运行时的
+// 没有再取第一条失败原因。字节预算（screenshotProbeBudget）只结算新下载
+// 的字节，缓存命中不占预算——超预算集合逐轮拉齐，不会在同一位置反复中断；
+// 单文件上限等于预算，单张新下载永远不会超限。探测不写 review_assets——资产行仍由视觉运行时的
 // ensureAssets 落账，这里不按资产行计数，避免「已不在描述里的陈旧资产」被
 // 当成可用截图。
 func (s *ReviewService) probeScreenshots(ctx context.Context, integrationID string, installationID int64, prBody string) screenshotProbe {
@@ -615,6 +644,7 @@ func (s *ReviewService) probeScreenshots(ctx context.Context, integrationID stri
 	firstFetchFailReason := ""
 	fetchFailed := false
 	completed := true
+	probedBytes := int64(0)
 	var contentHashes []string
 	for _, ref := range refs {
 		// 单张限时：挂死图只吃掉自己的时限，还有剩余预算就继续试下一张；
@@ -633,6 +663,15 @@ func (s *ReviewService) probeScreenshots(ctx context.Context, integrationID stri
 				}
 				break
 			}
+			// 字节预算在下载成功当场结算，**与哈希成败无关**：新下载的字节
+			// 已经写进持久缓存面，不结算的话哈希读盘失败（EIO/坏块）这条
+			// 路径每张都能绕过预算，单轮新下载上界从「预算 + 单张」放大到
+			// 「张数上限 × 单张」。缓存命中不占预算：命中的大小是确定值，
+			// 计入会让超预算集合每一轮都在同一位置中断，尾部引用永远探不
+			// 到；命中不占预算后超预算集合逐轮拉齐。
+			if !cached.FromCache {
+				probedBytes += cached.Metadata.Size
+			}
 			// 下载成功只读一次盘：哈希在下载当场算，不再在末尾按路径二次
 			// 读取。读失败（磁盘异常）按该张「拉不到」处理，不当成可用图——
 			// 视觉运行时同样会栽在读文件上。
@@ -641,6 +680,19 @@ func (s *ReviewService) probeScreenshots(ctx context.Context, integrationID stri
 				err = fmt.Errorf("%w: %v", githubmedia.ErrLocalCache, hashErr)
 			} else {
 				contentHashes = append(contentHashes, sum)
+			}
+			if probedBytes > screenshotProbeBudget {
+				// 预算触发显式标记未探完：零成功时收敛到 probeUnavailable 而
+				// 不是 probeNone。哈希失败路径也能走到这里（此时
+				// contentHashes 为空），落 probeNone 会把可达截图误判「全部
+				// 不是图」并结清，同一 URL 集合的视觉轮被永久跳过。
+				completed = false
+				if firstReason == "" {
+					firstReason = fmt.Sprintf("截图总大小超过探测预算（%d MiB）", screenshotProbeBudget>>20)
+				}
+				break
+			}
+			if hashErr == nil {
 				continue
 			}
 		}
@@ -725,9 +777,36 @@ func (s *ReviewService) AgentScreenshots(ctx context.Context, runID string) ([]a
 			Order("position ASC").Find(&prevAssets).Error; err != nil {
 			return nil, false, errs.ErrInternal
 		}
-		prevRefs := make([]screenshotRef, 0, len(prevAssets))
+		// 两侧口径必须一致，按收集面的两道规则依次过一遍（行按 position 升序，
+		// 即收集面的「按出现顺序」）：
+		//   - 结构准入：上一轮的行可能混有今天的口径不会再收的残留（旧版本写入
+		//     的 http/data 地址、带 userinfo 的链接）。它们从未展示给审查员，
+		//     却会改变指纹，让 `changed` 恒为 true。
+		//   - 张数上限：本轮指纹来自**截断后**的收集结果，上一轮的行可能是升级
+		//     前的全量（同一 head 上超过上限），多出来的旧 URL 同样会顶住指纹。
+		// 注意不按「当前描述」过滤：描述里真的删掉某张截图时集合确实变了，
+		// 那必须判 changed=true，抹掉它等于把「截图被删」报成未变化。
+		prevRefs := make([]screenshotRef, 0, maxScreenshotsPerPR)
 		for _, a := range prevAssets {
-			prevRefs = append(prevRefs, screenshotRef{URL: a.SourceURL})
+			// 只取「本轮开始之前就存在」的行：ensureAssets 在比较之前已经把本轮
+			// 新收集的 URL 写进同一张表（同 head 的 manual rerun 也会再跑视觉
+			// 轮），不过滤就会把新增截图算进上一轮——两侧指纹相等，changed
+			// 误判为 false，新增的那张不会被提示。
+			if a.CreatedAt.After(run.CreatedAt) {
+				continue
+			}
+			// 旧版本写入的行可能带 #fragment（规整规则是后来才落地的），而
+			// admitScreenshotURL 不拒 fragment——不规整就让指纹与当前集合恒不
+			// 相等。只剥 fragment：尾部标点属于裸链规整，对图片引用不成立，
+			// 猜错只会让 changed 偏 true，不值得为它冒错删合法字符的风险。
+			u := normalizeRefURL(a.SourceURL, false)
+			if !admitScreenshotURL(u) {
+				continue
+			}
+			prevRefs = append(prevRefs, screenshotRef{URL: u})
+			if len(prevRefs) == maxScreenshotsPerPR {
+				break
+			}
 		}
 		changed = screenshotFingerprint(prevRefs) != fingerprint
 	}

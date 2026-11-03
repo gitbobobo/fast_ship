@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
@@ -1132,5 +1133,131 @@ func TestScreenshotErrorText(t *testing.T) {
 		if strings.Contains(got, banned) {
 			t.Fatalf("screenshotErrorText = %q, 不应含 %q", got, banned)
 		}
+	}
+}
+
+// 字节预算：单次探测拉进缓存的总字节超限时停在触发的那张——已有成功图
+// 则 probeReady + 部分指纹，未探的引用本轮不再拉。时间预算管不住快速回源
+// 的大图，而 review 截图面是持久资产，字节必须有自己的一道闸。
+func TestProbeScreenshotsByteBudgetStopsAfterLimit(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	review := e.withT3(nil, e.media, nil)
+	// 桩元数据每张 200 MiB（真实文件极小，只测预算结算不测字节）：第 2 张
+	// 后累计 400 MiB > 预算 256 MiB。
+	path := filepath.Join(t.TempDir(), "shot.png")
+	if err := os.WriteFile(path, []byte("\x89PNG\r\n\x1a\nfake"), 0o600); err != nil {
+		t.Fatalf("write fake png: %v", err)
+	}
+	e.media.cached = githubmedia.CachedImage(path, "image/png", 200<<20)
+
+	var lines []string
+	for i := 0; i < 4; i++ {
+		lines = append(lines, fmt.Sprintf("![s%d](https://uiv.example.com/f/%d.png)", i, i))
+	}
+	probe := review.probeScreenshots(context.Background(), model.ForgeIntegrationBuiltinGitHubID, 1, strings.Join(lines, "\n\n"))
+
+	if probe.result != probeReady {
+		t.Fatalf("probe = %+v, want probeReady（预算触发前已有成功图）", probe)
+	}
+	if e.media.anonCalls != 2 {
+		t.Fatalf("anonCalls = %d, want 2（第 2 张触发预算后停止）", e.media.anonCalls)
+	}
+	if probe.contentFP != "" {
+		t.Fatalf("contentFP = %q, want 空（4 张只探了 2 张，指纹不全按未知处理）", probe.contentFP)
+	}
+}
+
+// 字节预算不结算缓存命中：命中的大小是确定值，计入预算会让超预算集合每一
+// 轮都在同一位置中断，尾部引用永远探不到、内容指纹永远收敛不了。命中不占
+// 预算后，全部命中（或上一轮已下载）的集合一次探齐、拿到全量指纹。
+func TestProbeScreenshotsByteBudgetSkipsCacheHits(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	review := e.withT3(nil, e.media, nil)
+	path := filepath.Join(t.TempDir(), "shot.png")
+	if err := os.WriteFile(path, []byte("\x89PNG\r\n\x1a\nfake"), 0o600); err != nil {
+		t.Fatalf("write fake png: %v", err)
+	}
+	cached := githubmedia.CachedImage(path, "image/png", 200<<20)
+	cached.FromCache = true
+	e.media.cached = cached
+
+	var lines []string
+	for i := 0; i < 4; i++ {
+		lines = append(lines, fmt.Sprintf("![s%d](https://uiv.example.com/f/%d.png)", i, i))
+	}
+	probe := review.probeScreenshots(context.Background(), model.ForgeIntegrationBuiltinGitHubID, 1, strings.Join(lines, "\n\n"))
+
+	if probe.result != probeReady {
+		t.Fatalf("probe = %+v, want probeReady", probe)
+	}
+	if e.media.anonCalls != 4 {
+		t.Fatalf("anonCalls = %d, want 4（命中不占预算，尾部引用不再被饿死）", e.media.anonCalls)
+	}
+	if probe.contentFP == "" {
+		t.Fatal("contentFP 为空, want 全量指纹（4 张全部探齐）")
+	}
+}
+
+// 预算触发不可能把探测结果压成 probeNone：触发点在哈希入账之后，触发时
+// contentHashes 至少有一张，probeReady 分支必然先行返回（触发时置的
+// completed=false 只影响零成功路径，是未来重构的防护而非现行分支）。用超
+// 过预算的单张元数据模拟「单文件上限被调高」的常量分叉形态：这张图是可
+// 服务的，结果必须是 ready + 全量指纹——落 probeNone 会把它误判「全部不
+// 是图」并结清，同一 URL 集合的视觉轮被永久跳过。
+func TestProbeScreenshotsByteBudgetNeverNone(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	review := e.withT3(nil, e.media, nil)
+	path := filepath.Join(t.TempDir(), "shot.png")
+	if err := os.WriteFile(path, []byte("\x89PNG\r\n\x1a\nfake"), 0o600); err != nil {
+		t.Fatalf("write fake png: %v", err)
+	}
+	e.media.cached = githubmedia.CachedImage(path, "image/png", 300<<20)
+
+	probe := review.probeScreenshots(context.Background(), model.ForgeIntegrationBuiltinGitHubID, 1,
+		"![s](https://uiv.example.com/f/x.png)")
+
+	if probe.result != probeReady {
+		t.Fatalf("probe = %+v, want probeReady（预算触发不改变已有成功图的结果）", probe)
+	}
+	if probe.contentFP == "" {
+		t.Fatal("contentFP 为空, want 全量指纹（单张触发时已入账）")
+	}
+}
+
+// 字节预算的结算不能挂在哈希成功分支上：下载成功但读盘哈希失败（EIO/坏块）
+// 时若不结算，每张新下载都能绕过预算，单轮新下载上界从「预算 + 单张」放大
+// 到「张数上限 × 单张」。零成功 + 预算触发必须收敛 probeUnavailable（下轮
+// 再试），不能落 probeNone 结清。
+func TestProbeScreenshotsByteBudgetSettlesEvenWhenHashFails(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	review := e.withT3(nil, e.media, nil)
+	// 下载「成功」，但路径不存在 → hashFileSHA256 失败。
+	e.media.cached = githubmedia.CachedImage(filepath.Join(t.TempDir(), "missing.png"), "image/png", 300<<20)
+
+	var lines []string
+	for i := 0; i < 4; i++ {
+		lines = append(lines, fmt.Sprintf("![s%d](https://uiv.example.com/f/%d.png)", i, i))
+	}
+	probe := review.probeScreenshots(context.Background(), model.ForgeIntegrationBuiltinGitHubID, 1, strings.Join(lines, "\n\n"))
+
+	if e.media.anonCalls != 1 {
+		t.Fatalf("anonCalls = %d, want 1（第一张 300 MiB 超预算即停，不得因哈希失败继续）", e.media.anonCalls)
+	}
+	if probe.result != probeUnavailable {
+		t.Fatalf("probe = %+v, want probeUnavailable（零成功 + 预算触发）", probe)
+	}
+	if !strings.Contains(probe.reason, "预算") {
+		t.Fatalf("reason = %q, want 预算耗尽原因", probe.reason)
+	}
+}
+
+// 探测字节预算不得小于下载面的单文件上限：否则第一张图就能把预算吃穿，而
+// 零成功哈希时那条 break 会把结果收敛成 probeUnavailable——视觉轮不开、该
+// head 报「截图无法下载」。「单张不会触发预算」此前只是两个包各自的常量恰好
+// 相等，没有任何东西钉住它。
+func TestScreenshotProbeBudgetNotBelowSingleFileLimit(t *testing.T) {
+	if githubmedia.DefaultMaxCacheEntrySize > screenshotProbeBudget {
+		t.Fatalf("单文件上限 %d > 探测预算 %d：第一张即可触发预算中断",
+			githubmedia.DefaultMaxCacheEntrySize, screenshotProbeBudget)
 	}
 }
