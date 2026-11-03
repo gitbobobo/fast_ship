@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -30,14 +31,14 @@ import (
 type fakeForgejoPRReader struct {
 	prs       map[string]map[int]*forge.PullRequest
 	errs      map[int]error
-	calls     int
+	calls     int32
 	built     int
 	lastBase  string
 	lastToken string
 }
 
 func (f *fakeForgejoPRReader) GetPullRequest(_ context.Context, repoFullName string, number int) (*forge.PullRequest, error) {
-	f.calls++
+	atomic.AddInt32(&f.calls, 1)
 	if err, ok := f.errs[number]; ok {
 		return nil, err
 	}
@@ -209,8 +210,8 @@ func TestIssueServiceAttachPullRequest_ForgejoSucceeds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("attach forgejo pull request: %v", err)
 	}
-	if reader.calls != 1 || reader.built != 1 {
-		t.Fatalf("expected one build+fetch, got built=%d calls=%d", reader.built, reader.calls)
+	if got := atomic.LoadInt32(&reader.calls); got != 1 || reader.built != 1 {
+		t.Fatalf("expected one build+fetch, got built=%d calls=%d", reader.built, got)
 	}
 	if resp.Provider != model.IssuePullRequestProviderForgejo || resp.RepoFullName != "fjbobo/fast_ship" || resp.Number != 158 {
 		t.Fatalf("unexpected link: %+v", resp)
@@ -479,7 +480,7 @@ func TestIssueServiceSyncPullRequests_ForgejoRefreshesStates(t *testing.T) {
 		testForgePullRequest("o/r", 6, "closed", false, nil),
 	)
 	builtBefore := reader.built
-	result, err := svc.issueService.SyncIssuePullRequests(issue.ID, user.ID)
+	result, err := svc.issueService.SyncIssuePullRequests(nil, issue.ID, user.ID)
 	if err != nil {
 		t.Fatalf("sync: %v", err)
 	}
@@ -505,7 +506,7 @@ func TestIssueServiceSyncPullRequests_ForgejoRefreshesStates(t *testing.T) {
 		testForgePullRequest("o/r", 5, "open", false, nil),
 		testForgePullRequest("o/r", 6, "closed", false, nil),
 	)
-	result, err = svc.issueService.SyncIssuePullRequests(issue.ID, user.ID)
+	result, err = svc.issueService.SyncIssuePullRequests(nil, issue.ID, user.ID)
 	if err != nil {
 		t.Fatalf("second sync: %v", err)
 	}
@@ -553,7 +554,7 @@ func TestIssueServiceSyncPullRequests_ForgejoIntegrationMissingSingleFailure(t *
 		t.Fatalf("delete integration: %v", err)
 	}
 
-	result, err := svc.issueService.SyncIssuePullRequests(issue.ID, user.ID)
+	result, err := svc.issueService.SyncIssuePullRequests(nil, issue.ID, user.ID)
 	if err != nil {
 		t.Fatalf("sync: %v", err)
 	}
@@ -615,7 +616,7 @@ func TestIssueServiceSyncPullRequests_ForgejoDegenerateRowsRecorded(t *testing.T
 		}
 	}
 
-	result, err := svc.issueService.SyncIssuePullRequests(issue.ID, user.ID)
+	result, err := svc.issueService.SyncIssuePullRequests(nil, issue.ID, user.ID)
 	if err != nil {
 		t.Fatalf("sync: %v", err)
 	}
@@ -719,7 +720,7 @@ func TestIssueServiceSyncPullRequests_ForgejoFailureSanitized(t *testing.T) {
 		URL:  "https://internal.forge.local:8443/api/v1/repos/o/r/pulls/5",
 		Body: `{"message":"forbidden internals"}`,
 	}}
-	result, err := svc.issueService.SyncIssuePullRequests(issue.ID, user.ID)
+	result, err := svc.issueService.SyncIssuePullRequests(nil, issue.ID, user.ID)
 	if err != nil {
 		t.Fatalf("sync: %v", err)
 	}
@@ -917,7 +918,7 @@ func TestIssueServiceSyncPullRequests_ForgejoIntegrationRepurposed(t *testing.T)
 		Updates(map[string]any{"base_url": "https://forge-b.example.com", "host_key": "forge-b.example.com:443"}).Error; err != nil {
 		t.Fatalf("repoint integration: %v", err)
 	}
-	result, err := svc.issueService.SyncIssuePullRequests(issue.ID, user.ID)
+	result, err := svc.issueService.SyncIssuePullRequests(nil, issue.ID, user.ID)
 	if err != nil {
 		t.Fatalf("sync: %v", err)
 	}

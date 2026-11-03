@@ -1,10 +1,13 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -401,7 +404,7 @@ func TestIssueServiceSyncPullRequests_RefreshesToMerged(t *testing.T) {
 	mergedAt := time.Now().Add(-time.Hour).UTC()
 	fake.pullRequests = prSet(testPullRequest("owner/repo", 7, "closed", &mergedAt))
 
-	result, err := svc.issueService.SyncIssuePullRequests(issue.ID, user.ID)
+	result, err := svc.issueService.SyncIssuePullRequests(nil, issue.ID, user.ID)
 	if err != nil {
 		t.Fatalf("sync: %v", err)
 	}
@@ -458,7 +461,7 @@ func TestIssueServiceSyncPullRequests_PartialFailureRecorded(t *testing.T) {
 		return fake
 	}
 
-	result, err := svc.issueService.SyncIssuePullRequests(issue.ID, user.ID)
+	result, err := svc.issueService.SyncIssuePullRequests(nil, issue.ID, user.ID)
 	if err != nil {
 		t.Fatalf("sync should not return error on per-row failure, got %v", err)
 	}
@@ -514,7 +517,7 @@ func TestIssueServiceSyncPullRequests_AllFailStillReturns(t *testing.T) {
 	fake := &fakeIssueGitHubClient{pullRequestErr: errors.New("github down")}
 	stubPullRequestClient(t, svc, fake, "gh-token")
 
-	result, err := svc.issueService.SyncIssuePullRequests(issue.ID, user.ID)
+	result, err := svc.issueService.SyncIssuePullRequests(nil, issue.ID, user.ID)
 	if err != nil {
 		t.Fatalf("sync should not return error, got %v", err)
 	}
@@ -556,7 +559,7 @@ func TestIssueServiceSyncPullRequests_RenamedRepoCollisionRecorded(t *testing.T)
 		return fake
 	}
 
-	result, err := svc.issueService.SyncIssuePullRequests(issue.ID, user.ID)
+	result, err := svc.issueService.SyncIssuePullRequests(nil, issue.ID, user.ID)
 	if err != nil {
 		t.Fatalf("sync should not return error, got %v", err)
 	}
@@ -751,7 +754,7 @@ func TestIssueServiceSyncPullRequests_ReopenClearsMergeFields(t *testing.T) {
 	}
 
 	fake.pullRequests = prSet(testPullRequest("owner/repo", 7, "open", nil))
-	result, err := svc.issueService.SyncIssuePullRequests(issue.ID, user.ID)
+	result, err := svc.issueService.SyncIssuePullRequests(nil, issue.ID, user.ID)
 	if err != nil {
 		t.Fatalf("sync: %v", err)
 	}
@@ -791,7 +794,7 @@ func TestIssueServicePullRequests_DoNotTouchWorkflowStatus(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("attach: %v", err)
 	}
-	if _, err := svc.issueService.SyncIssuePullRequests(issue.ID, user.ID); err != nil {
+	if _, err := svc.issueService.SyncIssuePullRequests(nil, issue.ID, user.ID); err != nil {
 		t.Fatalf("sync: %v", err)
 	}
 
@@ -876,7 +879,7 @@ func TestIssueServiceSyncPullRequests_DetachedRowNotResurrected(t *testing.T) {
 	}
 	stubPullRequestClient(t, svc, fake, "gh-token")
 
-	result, err := svc.issueService.SyncIssuePullRequests(issue.ID, user.ID)
+	result, err := svc.issueService.SyncIssuePullRequests(nil, issue.ID, user.ID)
 	if err != nil {
 		t.Fatalf("sync should not return error, got %v", err)
 	}
@@ -1208,7 +1211,7 @@ func TestIssueServiceSyncPullRequests_UsesCodeTokenAndNamesIt(t *testing.T) {
 		return fake
 	}
 
-	result, err := svc.issueService.SyncIssuePullRequests(issue.ID, user.ID)
+	result, err := svc.issueService.SyncIssuePullRequests(nil, issue.ID, user.ID)
 	if err != nil {
 		t.Fatalf("sync: %v", err)
 	}
@@ -1251,7 +1254,7 @@ func TestIssueServiceSyncPullRequests_CorruptCodeTokenRecorded(t *testing.T) {
 		return nil
 	}
 
-	result, err := svc.issueService.SyncIssuePullRequests(issue.ID, user.ID)
+	result, err := svc.issueService.SyncIssuePullRequests(nil, issue.ID, user.ID)
 	if err != nil {
 		t.Fatalf("sync should not return error, got %v", err)
 	}
@@ -1268,5 +1271,198 @@ func TestIssueServiceSyncPullRequests_CorruptCodeTokenRecorded(t *testing.T) {
 	}
 	if stored.Title != "stale" || !stored.SyncedAt.Equal(now) {
 		t.Fatalf("expected failed row untouched, got %+v", stored)
+	}
+}
+
+// INT-175：多条关联的远端拉取并发执行——峰值并发 > 1 且不超过并发上限，
+// 总耗时远低于逐条串行累加。
+func TestIssueServiceSyncPullRequests_ConcurrentFetch(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID, withTestGitHubToken(t, svc))
+	issue := createTestIssue(t, svc.db, project.ID)
+
+	now := time.Now().UTC()
+	const linkCount = 8
+	prs := make([]*githubapi.PullRequest, 0, linkCount)
+	for i := 0; i < linkCount; i++ {
+		link := &model.IssuePullRequest{
+			ID: uuid.NewString(), IssueID: issue.ID, ProjectID: project.ID,
+			Provider: model.IssuePullRequestProviderGitHub, RepoFullName: "owner/repo",
+			Number: 100 + i, State: model.IssuePullRequestStateOpen,
+			LinkOrigin: model.IssuePullRequestLinkOriginManual,
+			SyncedAt:   now, CreatedAt: now, UpdatedAt: now,
+		}
+		if err := svc.db.Create(link).Error; err != nil {
+			t.Fatalf("seed link: %v", err)
+		}
+		prs = append(prs, testPullRequest("owner/repo", 100+i, "open", nil))
+	}
+
+	fake := &fakeIssueGitHubClient{
+		pullRequests:        prSet(prs...),
+		getPullRequestDelay: 50 * time.Millisecond,
+	}
+	stubPullRequestClient(t, svc, fake, "gh-token")
+
+	start := time.Now()
+	result, err := svc.issueService.SyncIssuePullRequests(nil, issue.ID, user.ID)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if len(result.Items) != linkCount || len(result.Failures) != 0 {
+		t.Fatalf("expected %d items and no failures, got %+v", linkCount, result)
+	}
+	if max := atomic.LoadInt32(&fake.getPullRequestMax); max < 2 {
+		t.Fatalf("expected concurrent fetches, max in-flight = %d", max)
+	}
+	if max := atomic.LoadInt32(&fake.getPullRequestMax); max > pullRequestSyncConcurrency {
+		t.Fatalf("expected concurrency capped at %d, got %d", pullRequestSyncConcurrency, max)
+	}
+	// 8 条 × 50ms 串行 ≈ 400ms；并发 4 时应 ≈ 100ms，留足调度余量。
+	if elapsed > 300*time.Millisecond {
+		t.Fatalf("expected concurrent fetch to finish well under serial total, took %v", elapsed)
+	}
+}
+
+// INT-175：请求 ctx 取消后不再发出新的远端请求，未拉取的行记入 failures。
+func TestIssueServiceSyncPullRequests_CancelStopsFetches(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID, withTestGitHubToken(t, svc))
+	issue := createTestIssue(t, svc.db, project.ID)
+
+	now := time.Now().UTC()
+	const linkCount = 8
+	linkIDs := make([]string, 0, linkCount)
+	for i := 0; i < linkCount; i++ {
+		link := &model.IssuePullRequest{
+			ID: uuid.NewString(), IssueID: issue.ID, ProjectID: project.ID,
+			Provider: model.IssuePullRequestProviderGitHub, RepoFullName: "owner/repo",
+			Number: 200 + i, State: model.IssuePullRequestStateOpen,
+			LinkOrigin: model.IssuePullRequestLinkOriginManual,
+			SyncedAt:   now, CreatedAt: now, UpdatedAt: now,
+		}
+		if err := svc.db.Create(link).Error; err != nil {
+			t.Fatalf("seed link: %v", err)
+		}
+		linkIDs = append(linkIDs, link.ID)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var calls atomic.Int32
+	fake := &fakeIssueGitHubClient{
+		pullRequests:        map[string]map[int]*githubapi.PullRequest{},
+		getPullRequestDelay: 5 * time.Second,
+	}
+	// 第一批拉取开始时取消 ctx：其后的行不应再发远端请求。
+	fake.onGetPullRequest = func(string, int) {
+		if calls.Add(1) == 1 {
+			cancel()
+		}
+	}
+	stubPullRequestClient(t, svc, fake, "gh-token")
+
+	start := time.Now()
+	result, err := svc.issueService.SyncIssuePullRequests(ctx, issue.ID, user.ID)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if got := calls.Load(); got > pullRequestSyncConcurrency {
+		t.Fatalf("expected at most %d fetches after cancel, got %d", pullRequestSyncConcurrency, got)
+	}
+	// 延迟 5s 的请求应被 ctx 打断而非跑满。
+	if elapsed > 3*time.Second {
+		t.Fatalf("expected cancel to interrupt pending fetches, took %v", elapsed)
+	}
+	// 取消场景所有行都该进 failures（items 恒空、ID 不重不漏、原因统一），
+	// 且行内旧数据保持不变。响应顺序跟随 ListByIssueID（created_at, id）。
+	if len(result.Items) != 0 {
+		t.Fatalf("expected no items after cancel, got %+v", result.Items)
+	}
+	if len(result.Failures) != linkCount {
+		t.Fatalf("expected %d failures, got %+v", linkCount, result.Failures)
+	}
+	slices.Sort(linkIDs)
+	seen := map[string]bool{}
+	for i, f := range result.Failures {
+		if f.Id != linkIDs[i] {
+			t.Fatalf("expected failures in link order, at %d got %q want %q", i, f.Id, linkIDs[i])
+		}
+		if seen[f.Id] {
+			t.Fatalf("duplicate failure id %q", f.Id)
+		}
+		seen[f.Id] = true
+		if !strings.Contains(f.Error, "取消或超时") {
+			t.Fatalf("expected cancel reason, got %q", f.Error)
+		}
+	}
+	for _, id := range linkIDs {
+		var stored model.IssuePullRequest
+		if err := svc.db.First(&stored, "id = ?", id).Error; err != nil {
+			t.Fatalf("reload link %s: %v", id, err)
+		}
+		if !stored.SyncedAt.Equal(now) {
+			t.Fatalf("expected cancelled row untouched, got %+v", stored)
+		}
+	}
+}
+
+// INT-175：混合成功/失败且完成顺序倒置（先启动的行最后完成）时，
+// items 与 failures 各自仍按关联行序排列——并发不泄漏到响应顺序。
+func TestIssueServiceSyncPullRequests_ResponseKeepsLinkOrder(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID, withTestGitHubToken(t, svc))
+	issue := createTestIssue(t, svc.db, project.ID)
+
+	now := time.Now().UTC()
+	// 四行按 id 序交错成败：link-a(ok)、link-b(fail)、link-c(ok)、
+	// link-d(fail)。ListByIssueID 按 (created_at, id) 排序，同刻落 id 序，
+	// items/failures 应各自按此序交错收集。
+	type seed struct{ id string; num int }
+	seeds := []seed{{"link-a", 1}, {"link-b", 2}, {"link-c", 3}, {"link-d", 4}}
+	for _, s := range seeds {
+		link := &model.IssuePullRequest{
+			ID: s.id, IssueID: issue.ID, ProjectID: project.ID,
+			Provider: model.IssuePullRequestProviderGitHub, RepoFullName: "owner/repo",
+			Number: s.num, State: model.IssuePullRequestStateOpen,
+			LinkOrigin: model.IssuePullRequestLinkOriginManual,
+			SyncedAt:   now, CreatedAt: now, UpdatedAt: now,
+		}
+		if err := svc.db.Create(link).Error; err != nil {
+			t.Fatalf("seed link: %v", err)
+		}
+	}
+
+	// PR#1、#3 登记成功；#2、#4 未登记 → fake 返回 not found 进 failures。
+	// 完成顺序刻意倒置：先启动的 #1 最晚完成（80ms），#4 最先返回错误
+	// （0ms）。阶段 3 若按完成顺序 append，items/failures 就会乱序，本用
+	// 例会立刻失败。
+	fake := &fakeIssueGitHubClient{
+		pullRequests: prSet(
+			testPullRequest("owner/repo", 1, "open", nil),
+			testPullRequest("owner/repo", 3, "open", nil),
+		),
+		getPullRequestDelays: map[int]time.Duration{
+			1: 80 * time.Millisecond,
+			2: 60 * time.Millisecond,
+			3: 20 * time.Millisecond,
+			4: 0,
+		},
+	}
+	stubPullRequestClient(t, svc, fake, "gh-token")
+
+	result, err := svc.issueService.SyncIssuePullRequests(nil, issue.ID, user.ID)
+	if err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if len(result.Items) != 2 || result.Items[0].Id != "link-a" || result.Items[1].Id != "link-c" {
+		t.Fatalf("expected items [link-a link-c] in link order, got %+v", result.Items)
+	}
+	if len(result.Failures) != 2 || result.Failures[0].Id != "link-b" || result.Failures[1].Id != "link-d" {
+		t.Fatalf("expected failures [link-b link-d] in link order, got %+v", result.Failures)
 	}
 }

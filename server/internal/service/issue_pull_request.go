@@ -17,8 +17,11 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	"github.com/godbobo/fast_ship/server/internal/pkg/forges"
 	"github.com/godbobo/fast_ship/server/internal/repository"
+	"sync"
+
 	"github.com/google/uuid"
 	"go.uber.org/zap"
+	"golang.org/x/sync/semaphore"
 	"gorm.io/gorm"
 )
 
@@ -37,6 +40,10 @@ var (
 const (
 	pullRequestAttachTimeout = 15 * time.Second
 	pullRequestSyncTimeout   = 30 * time.Second
+	// pullRequestSyncConcurrency 是 sync 拉取远端 PR 的并发上限（与看板
+	// 批量关单的 batchCloseGitHubConcurrency 同口径）：上游限流温和，N 条
+	// 关联的总耗时约为单条的数倍以内而非线性累加。
+	pullRequestSyncConcurrency = 4
 )
 
 // pullRequestLink 解析后的 PR 链接：Provider 决定后续取数路径；forgejo 行的
@@ -176,11 +183,17 @@ func (s *IssueService) DetachIssuePullRequest(issueID, userID, linkID string) er
 	return nil
 }
 
-// SyncIssuePullRequests 逐条重新拉取该 Issue 下全部已关联 PR 的最新状态。
+// SyncIssuePullRequests 重新拉取该 Issue 下全部已关联 PR 的最新状态。
 // 只更新既有行，不新增、不删除；manual 与 synced 行都会被刷新。
 // 每行是独立失败域：单条拉取/保存失败记入 failures 不中断其余行（旧数据保留），
 // 客户端构造失败使该 repo 下每行各记一条；整体恒返回 200 形状的 {items, failures}。
-func (s *IssueService) SyncIssuePullRequests(issueID, userID string) (*IssuePullRequestSyncResultResponse, error) {
+//
+// INT-175：三个阶段分离。访问面解析（凭证/集成读取，带缓存）串行；远端拉取
+// 并发 pullRequestSyncConcurrency，随请求 ctx 断开；写回与响应组装串行且按
+// 关联行原序，SQLite 单写连接下不再每行一次往返，响应顺序与旧串行实现一致。
+// ctx 为请求 context（handler 传 c.Request.Context()），浏览器断开即停止后续
+// 远端请求；测试传 nil 退化为 Background。30s 是整批兜底而非逐条预算。
+func (s *IssueService) SyncIssuePullRequests(ctx context.Context, issueID, userID string) (*IssuePullRequestSyncResultResponse, error) {
 	issue, project, err := s.loadIssueAndProject(issueID, userID)
 	if err != nil {
 		return nil, err
@@ -199,17 +212,31 @@ func (s *IssueService) SyncIssuePullRequests(issueID, userID string) (*IssuePull
 		return result, nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), pullRequestSyncTimeout)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, pullRequestSyncTimeout)
 	defer cancel()
 
 	clients := make(map[string]githubapi.GitHubClient)
 	clientKinds := make(map[string]pullRequestCredentialKind)
 	clientErrs := make(map[string]error)
 	// forgejo 行按「集成快照 id」缓存单次读取的访问面（客户端+主机快照，
-	// 同一份集成行数据）；provider 分流见循环体。
+	// 同一份集成行数据）；provider 分流见下方循环。
 	forgeAccess := make(map[string]*forgejoSyncAccess)
 	forgeAccessErrs := make(map[string]error)
-	now := time.Now().UTC()
+
+	// 阶段 1（串行）：逐行解析访问面。构造结果按 repo/集成缓存，本阶段产
+	// 生的失败直接计入 failures 且保持关联行顺序。
+	fetchers := make([]func(context.Context, *model.IssuePullRequest) error, len(links))
+	// 并发阶段各 goroutine 只写自己的下标：并行写不同下标的 slice 无竞争，
+	// 不需要 mutex。
+	failureAt := make([]IssuePullRequestSyncFailureItem, len(links))
+	failed := make([]bool, len(links))
+	markFailed := func(i int, item IssuePullRequestSyncFailureItem) {
+		failureAt[i] = item
+		failed[i] = true
+	}
 	for i := range links {
 		link := &links[i]
 
@@ -218,44 +245,107 @@ func (s *IssueService) SyncIssuePullRequests(issueID, userID string) (*IssuePull
 			if link.ForgeIntegrationID == "" {
 				// 快照缺失是关联行自身的数据问题（非集成凭证面故障），
 				// 文案要指引用户解除重联，不走统一脱敏文案。
-				result.Failures = append(result.Failures, pullRequestSyncFailure(link, "关联行缺少 Forgejo 集成快照，请解除后重新关联"))
+				markFailed(i, pullRequestSyncFailure(link, "关联行缺少 Forgejo 集成快照，请解除后重新关联"))
 				continue
 			}
 			// 一次读取集成行同时得到访问面与主机快照：主机不一致（集成改
 			// 指别的主机）按单行失败拦下，取数不会用改指后的新基址。
 			access, err := forgejoSyncAccessFor(s, forgeAccess, forgeAccessErrs, ctx, link)
 			if err != nil {
-				result.Failures = append(result.Failures, pullRequestSyncFailure(link, s.forgejoSyncFailureText(err)))
+				markFailed(i, pullRequestSyncFailure(link, s.forgejoSyncFailureText(err)))
 				continue
 			}
 			if access.hostKey != link.HostKey {
-				result.Failures = append(result.Failures, pullRequestSyncFailure(link, "该 Forgejo 集成已改指其他主机，请解除后重新关联"))
+				markFailed(i, pullRequestSyncFailure(link, "该 Forgejo 集成已改指其他主机，请解除后重新关联"))
 				continue
 			}
-			pr, err := access.reader.GetPullRequest(ctx, link.RepoFullName, link.Number)
-			if err != nil {
-				result.Failures = append(result.Failures, pullRequestSyncFailure(link, s.forgejoPullRequestFailureText("拉取 Forgejo PR", err)))
-				continue
+			reader := access.reader
+			fetchers[i] = func(ctx context.Context, l *model.IssuePullRequest) error {
+				pr, err := reader.GetPullRequest(ctx, l.RepoFullName, l.Number)
+				if err != nil {
+					return err
+				}
+				applyForgePullRequestData(l, pr, time.Now().UTC())
+				return nil
 			}
-			applyForgePullRequestData(link, pr, now)
 		case model.IssuePullRequestProviderGitHub:
 			client, credKind, err := pullRequestSyncClient(s, clients, clientKinds, clientErrs, project, link)
 			if err != nil {
-				result.Failures = append(result.Failures, pullRequestSyncFailure(link, err.Error()))
+				markFailed(i, pullRequestSyncFailure(link, err.Error()))
 				continue
 			}
-			pr, err := client.GetPullRequest(ctx, 0, link.RepoFullName, link.Number)
-			if err != nil {
-				result.Failures = append(result.Failures, pullRequestSyncFailure(link, fmt.Sprintf("拉取失败（%s）: %v%s", credKind.usage(), err, pullRequestAccessHint(err, credKind))))
-				continue
+			fetchers[i] = func(ctx context.Context, l *model.IssuePullRequest) error {
+				pr, err := client.GetPullRequest(ctx, 0, l.RepoFullName, l.Number)
+				if err != nil {
+					return fmt.Errorf("拉取失败（%s）: %w%s", credKind.usage(), err, pullRequestAccessHint(err, credKind))
+				}
+				applyPullRequestData(l, pr, time.Now().UTC())
+				return nil
 			}
-			applyPullRequestData(link, pr, now)
 		default:
 			// 未知 provider（历史脏行等）只算单行失败，不中断其余行。
-			result.Failures = append(result.Failures, pullRequestSyncFailure(link, fmt.Sprintf("不支持的 PR 来源 %q，请解除该关联后重新添加", link.Provider)))
+			markFailed(i, pullRequestSyncFailure(link, fmt.Sprintf("不支持的 PR 来源 %q，请解除该关联后重新添加", link.Provider)))
 			continue
 		}
+	}
 
+	// 阶段 2（并发）：拉取远端 PR 详情。fetcher 自身把数据写进各自独占的
+	// links[i]，无共享可变状态；ctx 断开时未开始的行不再发出新请求。
+	workers := int64(pullRequestSyncConcurrency)
+	var pending int
+	for i := range links {
+		if fetchers[i] != nil {
+			pending++
+		}
+	}
+	if pending > 0 {
+		if n := int64(pending); n < workers {
+			workers = n
+		}
+		sem := semaphore.NewWeighted(workers)
+		var wg sync.WaitGroup
+		for i := range links {
+			fetch := fetchers[i]
+			if fetch == nil {
+				continue
+			}
+			link := &links[i]
+			if err := sem.Acquire(ctx, 1); err != nil {
+				// ctx 已取消：本行与后续所有行都不再发远端请求，统一记失败。
+				for j := i; j < len(links); j++ {
+					if fetchers[j] != nil && !failed[j] {
+						markFailed(j, pullRequestSyncFailure(&links[j], "请求已取消或超时，未继续同步"))
+					}
+				}
+				break
+			}
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				defer sem.Release(1)
+				if err := fetch(ctx, link); err != nil {
+					if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+						markFailed(i, pullRequestSyncFailure(link, "请求已取消或超时，未继续同步"))
+						return
+					}
+					markFailed(i, pullRequestSyncFailure(link, fetchErrText(s, link, err)))
+				}
+			}()
+		}
+		wg.Wait()
+	}
+
+	// 阶段 3（串行）：按原序逐行写回并组装响应——items/failures 的顺序与
+	// 关联行创建顺序一致，与并发度无关。
+	for i := range links {
+		link := &links[i]
+		if failed[i] {
+			result.Failures = append(result.Failures, failureAt[i])
+			continue
+		}
+		if fetchers[i] == nil {
+			continue
+		}
 		if err := s.pullRequestRepo.SaveSyncedFields(link); err != nil {
 			msg := "保存失败"
 			switch {
@@ -273,6 +363,16 @@ func (s *IssueService) SyncIssuePullRequests(issueID, userID string) (*IssuePull
 	}
 
 	return result, nil
+}
+
+// fetchErrText 把并发拉取阶段的错误转成单行失败文案。GitHub 路径的错误已
+// 在 fetcher 内包成带凭证来源与排查提示的文案，直接透出；其余（Forgejo 适
+// 配器原文等）走统一脱敏口径。
+func fetchErrText(s *IssueService, link *model.IssuePullRequest, err error) string {
+	if link.Provider == model.IssuePullRequestProviderForgejo {
+		return s.forgejoPullRequestFailureText("拉取 Forgejo PR", err)
+	}
+	return err.Error()
 }
 
 // pullRequestSyncClient 按 repo 复用/缓存客户端；构造错误同样按 repo 缓存，
