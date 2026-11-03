@@ -65,6 +65,8 @@ func (r *IssuePullRequestRepository) Upsert(link *model.IssuePullRequest) error 
 // 的两个并发 sync 可能按发起顺序倒置落库——慢批次不能把后写入的更新数据
 // 覆盖回旧值。0 行命中有两种含义：行已被解除（ErrRecordNotFound）或库内
 // synced_at 已更新（ErrSyncedAtStale），由调用方 FindByID 区分。
+// 注意：该比较在 SQLite 里是文本字典序——synced_at 只能写 UTC（time.Now().UTC()）
+// 且必须经本驱动写入；混入其它时区/格式会让守卫静默误判（R25）。
 var ErrSyncedAtStale = errors.New("issue_pull_requests.synced_at 已有更新数据")
 
 func (r *IssuePullRequestRepository) SaveSyncedFields(link *model.IssuePullRequest) error {
