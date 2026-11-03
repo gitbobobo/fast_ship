@@ -168,6 +168,8 @@ func TestAssetRetentionSkipsHeadsWithActiveRuns(t *testing.T) {
 	if count != 0 {
 		t.Fatalf("无运行的超龄行未退役")
 	}
+	// 引用集合先于退役快照：idle 行本轮刚退役，其文件下一轮才收。
+	review.sweepAssetRetention(now.Add(time.Second))
 	if _, err := os.Stat(idleFile); !os.IsNotExist(err) {
 		t.Fatalf("无运行 head 的文件未回收: %v", err)
 	}
@@ -209,8 +211,10 @@ func TestAssetRetentionRetireBatches(t *testing.T) {
 	if count != 0 {
 		t.Fatalf("count = %d, want 0（多批循环删到收敛，实际剩 %d 行）", count, count)
 	}
+	// 引用集合先于退役快照：本轮释放的字节下一轮收（再扫一轮才消失）。
+	review.sweepAssetRetention(now.Add(time.Second))
 	if _, err := os.Stat(media.ShotPath()); !os.IsNotExist(err) {
-		t.Fatalf("退役后同轮扫描未回收文件: %v", err)
+		t.Fatalf("退役释放的字节未在下一轮扫描回收: %v", err)
 	}
 }
 

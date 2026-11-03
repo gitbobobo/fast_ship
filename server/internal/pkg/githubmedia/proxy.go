@@ -1057,10 +1057,14 @@ func (s *ProxyService) SweepUnreferencedEntries(isReferenced func(binPath string
 		if key == "" {
 			// 崩溃残留/损坏 meta：无闸 key，孤儿判据兜底（见函数头注释）。
 			if s.unreferencedAndStale(binPath, isReferenced, grace, now) {
-				if os.Remove(binPath) == nil {
+				// 与持闸分支同序：data 删除失败（EIO/EACCES）时不删 meta——留
+				// 下 URL/Scope/闸 key 事实源下轮重试，不制造失去事实源的孤儿。
+				// 计数按 .bin（回收的字节），伴随的 meta 清理不计。
+				err := os.Remove(binPath)
+				if err == nil || errors.Is(err, os.ErrNotExist) {
 					removed++
+					_ = os.Remove(metaPath)
 				}
-				_ = os.Remove(metaPath)
 			}
 			continue
 		}
@@ -1079,9 +1083,8 @@ func (s *ProxyService) SweepUnreferencedEntries(isReferenced func(binPath string
 			// 杀）时照常清 meta。
 			err := os.Remove(binPath)
 			if err == nil || errors.Is(err, os.ErrNotExist) {
-				if os.Remove(metaPath) == nil {
-					removed++
-				}
+				removed++
+				_ = os.Remove(metaPath)
 			}
 		}
 		s.releaseDownloadLock(key, gate)

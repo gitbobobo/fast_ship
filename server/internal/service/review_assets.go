@@ -639,21 +639,17 @@ type screenshotFetch struct {
 	cached *githubmedia.CachedMedia
 }
 
-// probeScreenshots 试下载 PR 描述里的全部截图引用（不做落账，行为与历史
-// 版本一致）。落账版本见 probeAndRecordScreenshots；测试用本入口保持纯
-// 决策语义。
-func (s *ReviewService) probeScreenshots(ctx context.Context, integrationID string, installationID int64, prBody string) screenshotProbe {
-	probe, _ := s.probeScreenshotsWithFetches(ctx, integrationID, installationID, prBody)
-	return probe
-}
-
 // probeAndRecordScreenshots 同步决策用的探测 + 探测落账（INT-184）：成功
 // 下载的引用当场写资产行，探测字节从落盘起就有行引用——「探测过但没有视
 // 觉运行」的字节转成普通行按行保留策略退役，不再需要目录推断。headSHA
 // 与视觉运行落账同源（doSyncPR 已保证 ledger.HeadSHA == pr.HeadSHA，
-// createVisualRuns 按 ledger.HeadSHA 建运行）。
+// createVisualRuns 按 ledger.HeadSHA 建运行）。口径边界：哈希失败或哈希前
+// ctx 到期的成功下载不进 fetches、不落账——字节只由 24h mtime 宽限保护，
+// 之后按孤儿回收；后续视觉运行需要时 ensureAssets 会重下（缓存命中则
+// touch 并补行，上游已删/转私时丢图）——这是磁盘读故障场景，不把未经
+// 内容校验的字节记成可用资产。
 func (s *ReviewService) probeAndRecordScreenshots(ctx context.Context, integrationID, repo string, prNumber int, headSHA string, installationID int64, prBody string) screenshotProbe {
-	probe, fetches := s.probeScreenshotsWithFetches(ctx, integrationID, installationID, prBody)
+	probe, fetches := s.probeScreenshots(ctx, integrationID, installationID, prBody)
 	s.recordProbeAssets(integrationID, repo, prNumber, headSHA, fetches)
 	return probe
 }
@@ -744,11 +740,12 @@ type screenshotProbe struct {
 // 或总预算耗尽未探完 → probeUnavailable，reason 取第一条「拉不到」类原因，
 // 没有再取第一条失败原因。字节预算（screenshotProbeBudget）只结算新下载
 // 的字节，缓存命中不占预算——超预算集合逐轮拉齐，不会在同一位置反复中断；
-// 单文件上限等于预算，单张新下载永远不会超限。本函数不写 review_assets——
-// 同步决策链路用 probeAndRecordScreenshots 落账（成功结果随返回值带出），
-// 视觉运行时仍由 ensureAssets 落账并重试失败行；这里也不按资产行计数，
-// 避免「已不在描述里的陈旧资产」被当成可用截图。
-func (s *ReviewService) probeScreenshotsWithFetches(ctx context.Context, integrationID string, installationID int64, prBody string) (screenshotProbe, []screenshotFetch) {
+// 单文件上限等于预算，单张新下载永远不会超限。本函数是唯一入口，返回探
+// 测结论与成功下载列表：同步决策链路用 probeAndRecordScreenshots 落账
+// （成功结果随返回值带出），测试直接调用并忽略第二个返回值；视觉运行时
+// 仍由 ensureAssets 落账并重试失败行；这里也不按资产行计数，避免「已不在
+// 描述里的陈旧资产」被当成可用截图。
+func (s *ReviewService) probeScreenshots(ctx context.Context, integrationID string, installationID int64, prBody string) (screenshotProbe, []screenshotFetch) {
 	refs := collectScreenshotURLsAt(prBody, s.githubWebHost())
 	if len(refs) == 0 {
 		return screenshotProbe{result: probeNone}, nil

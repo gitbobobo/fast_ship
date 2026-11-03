@@ -181,7 +181,7 @@ func TestProbeScreenshotsClassifiesNotAnImage(t *testing.T) {
 	// 全部「不是图」→ probeNone。
 	e.media.failURLs = map[string]error{badge: githubmedia.ErrUnsupportedUpstreamMedia}
 	e.media.anonErr = githubmedia.ErrUnsupportedUpstreamMedia
-	probe := review.probeScreenshots(context.Background(), model.ForgeIntegrationBuiltinGitHubID, 1, body)
+	probe, _ := review.probeScreenshots(context.Background(), model.ForgeIntegrationBuiltinGitHubID, 1, body)
 	if probe.result != probeNone {
 		t.Fatalf("probe = %+v, want probeNone（全部不是图）", probe)
 	}
@@ -192,7 +192,7 @@ func TestProbeScreenshotsClassifiesNotAnImage(t *testing.T) {
 		badge: githubmedia.ErrUnsupportedUpstreamMedia,
 		png:   errors.New("connection refused"),
 	}
-	probe = review.probeScreenshots(context.Background(), model.ForgeIntegrationBuiltinGitHubID, 1, body)
+	probe, _ = review.probeScreenshots(context.Background(), model.ForgeIntegrationBuiltinGitHubID, 1, body)
 	if probe.result != probeUnavailable {
 		t.Fatalf("probe = %+v, want probeUnavailable（存在拉不到）", probe)
 	}
@@ -205,7 +205,7 @@ func TestProbeScreenshotsClassifiesNotAnImage(t *testing.T) {
 		badge: githubmedia.ErrInvalidMediaURL,
 		png:   githubmedia.ErrInvalidMediaURL,
 	}
-	probe = review.probeScreenshots(context.Background(), model.ForgeIntegrationBuiltinGitHubID, 1, body)
+	probe, _ = review.probeScreenshots(context.Background(), model.ForgeIntegrationBuiltinGitHubID, 1, body)
 	if probe.result != probeNone {
 		t.Fatalf("probe = %+v, want probeNone（形态不支持=不是图）", probe)
 	}

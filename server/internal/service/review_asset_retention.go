@@ -70,10 +70,28 @@ func (s *ReviewService) assetRetentionLoop(cancel <-chan struct{}) {
 	}
 }
 
-// sweepAssetRetention 一轮保留策略扫描：先退役超龄行，再按存活行的
-// storage_path 集合回收无引用字节。行退役失败或引用集合读失败时直接返回，
-// 不动文件——账不确定时宁可保守（下轮重试）。
+// sweepAssetRetention 一轮保留策略扫描：先快照存活行的 storage_path 集合，
+// 再退役超龄行，再按**退役前**的快照回收无引用字节——本轮被退役行释放的
+// 字节下一轮再收（宽限从退役时刻起算，R5 审查意见）：退役守卫只在 DELETE
+// 一刻判定，若快照在删除之后，删除与快照之间新建的运行会在同轮失去文件。
+// 行退役失败或引用集合读失败时直接返回，不动文件——账不确定时宁可保守
+// （下轮重试）。
 func (s *ReviewService) sweepAssetRetention(now time.Time) {
+	// 引用集合先于退役快照（含即将退役的行）：本轮释放的字节留给下一轮，
+	// 关闭 DELETE 与快照之间的新建运行丢失窗口；代价是退役释放的字节晚一
+	// 个扫描周期回收，探测/崩溃残留的真孤儿不受影响（任何快照里都没有它
+	// 们，同轮即收）。
+	var paths []string
+	if err := s.db.Model(&model.ReviewAsset{}).Where("storage_path <> ''").
+		Distinct().Pluck("storage_path", &paths).Error; err != nil {
+		s.logger.Warn("截图资产引用集合读取失败", zap.Error(err))
+		return
+	}
+	referenced := make(map[string]struct{}, len(paths))
+	for _, p := range paths {
+		referenced[p] = struct{}{}
+	}
+
 	// 行退役：跳过仍有非终态运行在身的 head。重开/手动重跑/评论唤醒可能重新
 	// 审查一个超龄 head，而命中行不刷新 created_at（AgentScreenshotImage 直
 	// 接读 storage_path，不经缓存面）——无守卫的话，在途运行会在两次扫描之
@@ -128,16 +146,6 @@ func (s *ReviewService) sweepAssetRetention(now time.Time) {
 	sweeper, ok := s.media.(reviewAssetSweeper)
 	if !ok {
 		return
-	}
-	var paths []string
-	if err := s.db.Model(&model.ReviewAsset{}).Where("storage_path <> ''").
-		Distinct().Pluck("storage_path", &paths).Error; err != nil {
-		s.logger.Warn("截图资产引用集合读取失败", zap.Error(err))
-		return
-	}
-	referenced := make(map[string]struct{}, len(paths))
-	for _, p := range paths {
-		referenced[p] = struct{}{}
 	}
 	removed := sweeper.SweepUnreferencedEntries(func(binPath string) bool {
 		_, ok := referenced[binPath]
