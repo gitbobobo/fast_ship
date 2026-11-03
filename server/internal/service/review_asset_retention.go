@@ -30,7 +30,9 @@ import (
 // 的残余竞态由 ensureAssets 的文件复核自愈（缺失按失败行重下）。
 
 // reviewAssetRetention 资产行保留期：审查截图作为持久视觉证据保留 30 天，
-// 超期行退役、其字节在下一轮扫描回收。
+// 超期行退役；其字节不随行删除——退役时的 Chtimes 把 mtime 续到退役时刻，
+// 宽限（reviewAssetSweepGrace 24h）从那一刻起算，之后的下一次扫描（约
+// 24-30h 后）才回收（R16 审查意见：口径与 sweepAssetRetention 头注释一致）。
 const reviewAssetRetention = 30 * 24 * time.Hour
 
 // reviewAssetSweepGrace 无引用字节的 mtime 宽限：覆盖「文件已落盘、行还没
@@ -100,10 +102,11 @@ func (s *ReviewService) assetRetentionLoop(cancel <-chan struct{}) {
 // 新建的运行会在同轮失去文件）。行退役失败或引用集合读失败时直接返回，
 // 不动文件——账不确定时宁可保守（下轮重试）。
 func (s *ReviewService) sweepAssetRetention(now time.Time) {
-	// 引用集合先于退役快照（含即将退役的行）：本轮释放的字节留给下一轮，
-	// 关闭 DELETE 与快照之间的新建运行丢失窗口；代价是退役释放的字节晚一
-	// 个扫描周期回收，探测/崩溃残留的真孤儿不受影响（任何快照里都没有它
-	// 们，同轮即收）。
+	// 引用集合先于退役快照（含即将退役的行）：本轮被退役行释放的字节不在
+	// 快照里，按无引用回收，宽限从退役时刻的续期起算
+	//（reviewAssetSweepGrace 24h，约 24-30h 后的下一次扫描收走，R16 审查
+	// 意见：口径同步），关闭 DELETE 与快照之间的新建运行丢失窗口。探测/
+	// 崩溃残留的真孤儿不受影响（任何快照里都没有它们，同轮即收）。
 	var paths []string
 	if err := s.db.Model(&model.ReviewAsset{}).Where("storage_path <> ''").
 		Distinct().Pluck("storage_path", &paths).Error; err != nil {
