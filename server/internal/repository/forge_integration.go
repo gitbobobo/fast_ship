@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"context"
 	"errors"
 	"time"
 
@@ -22,6 +23,15 @@ type ForgeIntegrationRepository struct {
 
 func NewForgeIntegrationRepository(db *gorm.DB) *ForgeIntegrationRepository {
 	return &ForgeIntegrationRepository{db: db}
+}
+
+// WithContext 返回绑定 ctx 的仓库视图：查询的借连接等待随 ctx 取消
+// （INT-175 sync 阶段 1 访问面解析的预算用）。
+func (r *ForgeIntegrationRepository) WithContext(ctx context.Context) *ForgeIntegrationRepository {
+	if r == nil || ctx == nil {
+		return r
+	}
+	return &ForgeIntegrationRepository{db: r.db.WithContext(ctx)}
 }
 
 func (r *ForgeIntegrationRepository) Create(row *model.ForgeIntegration) error {

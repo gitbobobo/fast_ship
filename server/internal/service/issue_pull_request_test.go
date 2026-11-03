@@ -1576,3 +1576,58 @@ func TestIssueServiceSyncPullRequests_CancelAfterFetchStillPersists(t *testing.T
 		}
 	}
 }
+
+// INT-175 R8/R9：并发两次 sync——慢批次拉取后写回时，库内已有更快批次的
+// 更新数据（synced_at 更晚）。时间守卫拦下旧快照：不算失败，items 返回
+// 库内现行行（与库一致），库内数据保持新值不被覆盖。
+func TestIssueServiceSyncPullRequests_StaleWriteGuardKeepsNewerData(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID, withTestGitHubToken(t, svc))
+	issue := createTestIssue(t, svc.db, project.ID)
+
+	now := time.Now().UTC()
+	link := &model.IssuePullRequest{
+		ID: "link-1", IssueID: issue.ID, ProjectID: project.ID,
+		Provider: model.IssuePullRequestProviderGitHub, RepoFullName: "owner/repo",
+		Number: 500, State: model.IssuePullRequestStateOpen, Title: "old title",
+		LinkOrigin: model.IssuePullRequestLinkOriginManual,
+		SyncedAt:   now, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := svc.db.Create(link).Error; err != nil {
+		t.Fatalf("seed link: %v", err)
+	}
+
+	// fake 拉取返回 title=new-fetched，但写回时库内 synced_at 已被更新
+	fake := &fakeIssueGitHubClient{
+		pullRequests: prSet(testPullRequest("owner/repo", 500, "open", nil)),
+	}
+	fake.pullRequests["owner/repo"][500].Title = "fetched-stale"
+	stubPullRequestClient(t, svc, fake, "gh-token")
+
+	// 模拟「另一个并发 sync 已写入更新数据」：synced_at 比本次拉取的 now 更晚
+	newer := now.Add(time.Hour)
+	if err := svc.db.Model(&model.IssuePullRequest{}).Where("id = ?", "link-1").
+		Updates(map[string]any{"title": "newer-from-other-sync", "synced_at": newer, "updated_at": newer}).Error; err != nil {
+		t.Fatalf("seed newer state: %v", err)
+	}
+
+	result, err := svc.issueService.SyncIssuePullRequests(nil, issue.ID, user.ID)
+	if err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	// 守卫命中→读回现行行进 items，不记失败
+	if len(result.Items) != 1 || result.Items[0].Title != "newer-from-other-sync" {
+		t.Fatalf("expected item to reflect stored newer row, got %+v", result)
+	}
+	if len(result.Failures) != 0 {
+		t.Fatalf("expected no failures for stale-guarded row, got %+v", result.Failures)
+	}
+	var stored model.IssuePullRequest
+	if err := svc.db.First(&stored, "id = ?", "link-1").Error; err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if stored.Title != "newer-from-other-sync" || !stored.SyncedAt.Equal(newer) {
+		t.Fatalf("expected newer data preserved, got %+v", stored)
+	}
+}

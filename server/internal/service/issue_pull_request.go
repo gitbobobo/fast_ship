@@ -208,12 +208,22 @@ func (s *IssueService) DetachIssuePullRequest(issueID, userID, linkID string) er
 // 时（整批而非逐条，阶段 1 本地 I/O 不挤占）；写回独立预算
 // pullRequestSyncWriteTimeout，脱离请求取消与拉取 deadline。
 func (s *IssueService) SyncIssuePullRequests(ctx context.Context, issueID, userID string) (*IssuePullRequestSyncResultResponse, error) {
-	issue, project, err := s.loadIssueAndProject(issueID, userID)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	// 阶段 1 访问面解析（含前置读库与凭证解密）用独立 30s 预算：所有读
+	// 库都走 ctx 绑定的仓库视图——MaxOpenConns(1) 下借连接等待无上限，
+	// 预算空转会把服务端总时长顶穿客户端超时（INT-175 R9）。
+	resolveCtx, cancelResolve := context.WithTimeout(ctx, pullRequestSyncResolveTimeout)
+	defer cancelResolve()
+	resolved := s.withRepos(resolveCtx)
+
+	issue, project, err := resolved.loadIssueAndProject(issueID, userID)
 	if err != nil {
 		return nil, err
 	}
 
-	links, err := s.pullRequestRepo.ListByIssueID(issue.ID)
+	links, err := resolved.pullRequestRepo.ListByIssueID(issue.ID)
 	if err != nil {
 		return nil, errs.ErrInternal
 	}
@@ -225,17 +235,6 @@ func (s *IssueService) SyncIssuePullRequests(ctx context.Context, issueID, userI
 	if len(links) == 0 {
 		return result, nil
 	}
-
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	// 三段各自有独立时间来源：阶段 1 访问面解析用 resolveCtx（本地 I/O，
-	// 但 MaxOpenConns(1) 下借连接等待无上限，仍要预算）；阶段 2 拉取用
-	// fetchCtx；阶段 3 写回用 writeCtx（WithoutCancel，脱离请求取消）。
-	// 后两者都从请求 ctx 派生，浏览器断开只影响拉取，不影响写回。
-	// 服务端总时长上界 = 解析 30s + 拉取 30s + 写回 40s = 100s。
-	resolveCtx, cancelResolve := context.WithTimeout(ctx, pullRequestSyncResolveTimeout)
-	defer cancelResolve()
 
 	clients := make(map[string]githubapi.GitHubClient)
 	clientKinds := make(map[string]pullRequestCredentialKind)
@@ -269,7 +268,7 @@ func (s *IssueService) SyncIssuePullRequests(ctx context.Context, issueID, userI
 			}
 			// 一次读取集成行同时得到访问面与主机快照：主机不一致（集成改
 			// 指别的主机）按单行失败拦下，取数不会用改指后的新基址。
-			access, err := forgejoSyncAccessFor(s, forgeAccess, forgeAccessErrs, resolveCtx, link)
+			access, err := forgejoSyncAccessFor(resolved, forgeAccess, forgeAccessErrs, resolveCtx, link)
 			if err != nil {
 				markFailed(i, pullRequestSyncFailure(link, s.forgejoSyncFailureText(err)))
 				continue
@@ -288,7 +287,7 @@ func (s *IssueService) SyncIssuePullRequests(ctx context.Context, issueID, userI
 				return nil
 			}
 		case model.IssuePullRequestProviderGitHub:
-			client, credKind, err := pullRequestSyncClient(s, clients, clientKinds, clientErrs, project, link)
+			client, credKind, err := pullRequestSyncClient(resolved, clients, clientKinds, clientErrs, project, link)
 			if err != nil {
 				markFailed(i, pullRequestSyncFailure(link, err.Error()))
 				continue
@@ -361,11 +360,16 @@ func (s *IssueService) SyncIssuePullRequests(ctx context.Context, issueID, userI
 					}
 				}()
 				if err := fetch(fetchCtx, link); err != nil {
-					// 只按 err 归类取消/超时：用 ctx.Err() 反推会把截止瞬间到达
-					// 的真实上游错误（404/403/限流）误报成「未继续同步」，丢掉
-					// 排查提示（INT-175 R7）。适配器返回的 ctx 错误保留错误链，
-					// errors.Is 两个方向都能命中。
-					if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					// 取消/超时判定：浏览器显式取消（Canceled）或本行错误是
+					// deadline 且整批预算确实已到点（fetchCtx.Err() 非 nil）→
+					// 「未继续同步」。只按 fetchCtx.Err() 反推会把截止瞬间到达
+					// 的真实上游错误（404/403/限流）误报（R7）；只看 err 又会
+					// 把 http.Client.Timeout 的上游超时吞掉凭证前缀（R9）——
+					// 两者结合：err 是 deadline 且 fetchCtx 真到点才记取消文案；
+					// err 是 deadline 但 fetchCtx 未到期，说明是客户端/上游自身
+					// 超时，走 fetchErrText 保留提示。
+					if errors.Is(err, context.Canceled) ||
+						(errors.Is(err, context.DeadlineExceeded) && fetchCtx.Err() != nil) {
 						markFailed(i, pullRequestSyncFailure(link, "请求已取消或超时，未继续同步"))
 						return
 					}
@@ -398,12 +402,17 @@ func (s *IssueService) SyncIssuePullRequests(ctx context.Context, issueID, userI
 		if err := saveRepo.SaveSyncedFields(link); err != nil {
 			if errors.Is(err, repository.ErrSyncedAtStale) {
 				// 并发 sync 已写入更新数据（时间守卫拦下本批次的旧快照）——
-				// 不算失败：读回库内现行行进 items，响应与库一致。
-				current, findErr := s.pullRequestRepo.FindByID(issue.ID, link.ID)
-				if findErr == nil {
+				// 不算失败：读回库内现行行进 items，响应与库一致。读回走
+				// writeCtx；只有真的不存在才记「关联已解除」，其余错误如实
+				// 报读回失败，不把存储故障归因到用户操作。
+				current, findErr := saveRepo.FindByID(issue.ID, link.ID)
+				switch {
+				case findErr == nil:
 					result.Items = append(result.Items, toIssuePullRequestResponse(*current))
-				} else {
+				case errors.Is(findErr, gorm.ErrRecordNotFound):
 					result.Failures = append(result.Failures, pullRequestSyncFailure(link, "关联已解除"))
+				default:
+					result.Failures = append(result.Failures, pullRequestSyncFailure(link, "读回同步结果失败"))
 				}
 				continue
 			}
@@ -427,6 +436,24 @@ func (s *IssueService) SyncIssuePullRequests(ctx context.Context, issueID, userI
 	}
 
 	return result, nil
+}
+
+// withRepos 返回绑定 ctx 的服务视图：issue/project/pull_request/forge_
+// integration/token 各仓库的借连接等待随 ctx 取消（INT-175 阶段 1 预算用）。
+// 浅拷贝——其余字段（logger、cfg、clients 工厂、forgeSource）共用不可变。
+func (s *IssueService) withRepos(ctx context.Context) *IssueService {
+	cp := *s
+	cp.issueRepo = s.issueRepo.WithContext(ctx)
+	cp.projectRepo = s.projectRepo.WithContext(ctx)
+	cp.pullRequestRepo = s.pullRequestRepo.WithContext(ctx)
+	cp.forgeIntegrationRepo = s.forgeIntegrationRepo.WithContext(ctx)
+	if s.credentials != nil {
+		cred := *s.credentials
+		cred.projectRepo = cp.projectRepo
+		cred.tokenRepo = s.credentials.tokenRepo.WithContext(ctx)
+		cp.credentials = &cred
+	}
+	return &cp
 }
 
 // fetchErrText 把并发拉取阶段的错误转成单行失败文案。GitHub 路径的错误已
