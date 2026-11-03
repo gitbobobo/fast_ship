@@ -388,7 +388,11 @@ func (s *IssueService) SyncIssuePullRequests(ctx context.Context, issueID, userI
 	// 关联行创建顺序一致，与并发度无关。写回用独立预算且脱离请求取消
 	// （WithoutCancel）：已付出代价拉到的数据照常落库，拉取 deadline 或
 	// 浏览器断开都不吞掉它们；唯一的失败来源是写回预算到点。
-	writeCtx, cancelWrite := context.WithTimeout(context.WithoutCancel(ctx), pullRequestSyncWriteTimeout)
+	writeBudget := pullRequestSyncWriteTimeout
+	if s.syncWriteTimeout > 0 {
+		writeBudget = s.syncWriteTimeout // 测试可注入更小的预算（常量保持生产口径）
+	}
+	writeCtx, cancelWrite := context.WithTimeout(context.WithoutCancel(ctx), writeBudget)
 	defer cancelWrite()
 	saveRepo := s.pullRequestRepo.WithContext(writeCtx)
 	for i := range links {

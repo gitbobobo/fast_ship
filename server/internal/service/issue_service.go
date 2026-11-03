@@ -58,6 +58,9 @@ type IssueService struct {
 	forgeSource          issueForgeSource
 	newForgejoPRReader   func(httpClient *http.Client, apiBase, token string) forgePRReader
 	mirror               *issueMirror
+	// syncWriteTimeout 覆盖 sync 写回预算（默认 pullRequestSyncWriteTimeout）；
+	// 测试注入更小值复现写回超时分支（INT-175）。
+	syncWriteTimeout time.Duration
 }
 
 type IssueListFilters struct {

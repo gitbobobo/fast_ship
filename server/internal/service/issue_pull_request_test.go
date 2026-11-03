@@ -1658,3 +1658,49 @@ func TestResolveFailureText_Classification(t *testing.T) {
 		t.Fatalf("expected neutral forgejo text, got %q", got)
 	}
 }
+
+// INT-175 R16：stale 守卫命中后读回被写回预算截断——记「写回超时」失败项，
+// 不归成存储读失败。
+func TestIssueServiceSyncPullRequests_StaleReadBackWriteTimeout(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID, withTestGitHubToken(t, svc))
+	issue := createTestIssue(t, svc.db, project.ID)
+
+	now := time.Now().UTC()
+	link := &model.IssuePullRequest{
+		ID: "link-1", IssueID: issue.ID, ProjectID: project.ID,
+		Provider: model.IssuePullRequestProviderGitHub, RepoFullName: "owner/repo",
+		Number: 700, State: model.IssuePullRequestStateOpen, Title: "old",
+		LinkOrigin: model.IssuePullRequestLinkOriginManual,
+		SyncedAt:   now, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := svc.db.Create(link).Error; err != nil {
+		t.Fatalf("seed link: %v", err)
+	}
+
+	fake := &fakeIssueGitHubClient{
+		pullRequests: prSet(testPullRequest("owner/repo", 700, "open", nil)),
+	}
+	stubPullRequestClient(t, svc, fake, "gh-token")
+
+	// 并发 sync 已写更新数据（synced_at 更晚）+ 写回预算压到 0→1ns 立即
+	// 到期：UPDATE 撞守卫记 stale，读回也被 writeCtx 截断。
+	newer := now.Add(time.Hour)
+	if err := svc.db.Model(&model.IssuePullRequest{}).Where("id = ?", "link-1").
+		Updates(map[string]any{"title": "newer", "synced_at": newer, "updated_at": newer}).Error; err != nil {
+		t.Fatalf("seed newer: %v", err)
+	}
+	svc.issueService.syncWriteTimeout = time.Nanosecond
+
+	result, err := svc.issueService.SyncIssuePullRequests(nil, issue.ID, user.ID)
+	if err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if len(result.Items) != 0 || len(result.Failures) != 1 {
+		t.Fatalf("expected 1 failure no items, got %+v", result)
+	}
+	if !strings.Contains(result.Failures[0].Error, "写回超时") {
+		t.Fatalf("expected write-timeout text, got %q", result.Failures[0].Error)
+	}
+}
