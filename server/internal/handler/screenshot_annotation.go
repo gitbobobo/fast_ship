@@ -148,10 +148,7 @@ func (h *ScreenshotAnnotationHandler) Crop(c *gin.Context) {
 			middleware.HandleAppError(c, err)
 			return
 		}
-		setSameOriginInlineImageHardeningHeaders(c.Writer.Header())
-		c.Header("Content-Disposition", "inline")
-		c.Header("Cache-Control", "private, max-age=300")
-		c.Data(http.StatusOK, "image/png", nil)
+		egress.InlineImageHead(c, "image/png")
 		return
 	}
 
@@ -162,8 +159,5 @@ func (h *ScreenshotAnnotationHandler) Crop(c *gin.Context) {
 	}
 	defer release()
 
-	setSameOriginInlineImageHardeningHeaders(c.Writer.Header())
-	c.Header("Content-Disposition", "inline")
-	c.Header("Cache-Control", "private, max-age=300")
-	c.DataFromReader(http.StatusOK, int64(reader.Len()), "image/png", reader, nil)
+	egress.InlineImage(c, "image/png", int64(reader.Len()), reader)
 }

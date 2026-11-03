@@ -459,6 +459,10 @@ func (h *T3EnvironmentHandler) GetAttachmentContent(c *gin.Context) {
 		middleware.HandleAppError(c, err)
 		return
 	}
+	// 同源出口不变量（INT-182）：JWT + 用户可控内容（上游 T3 环境上传的附
+	// 件字节，上传侧只放行位图格式），Content-Type 来自上游响应未经再对
+	// 账，按 inline 图片档补硬化头；不复制上游缓存语义，只取头级路径。
+	egress.inlineImageHeaders(c.Writer.Header())
 	c.Data(http.StatusOK, contentType, data)
 }
 
