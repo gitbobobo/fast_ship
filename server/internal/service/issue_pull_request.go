@@ -270,7 +270,7 @@ func (s *IssueService) SyncIssuePullRequests(ctx context.Context, issueID, userI
 			// 指别的主机）按单行失败拦下，取数不会用改指后的新基址。
 			access, err := forgejoSyncAccessFor(resolved, forgeAccess, forgeAccessErrs, resolveCtx, link)
 			if err != nil {
-				markFailed(i, pullRequestSyncFailure(link, s.forgejoSyncFailureText(err)))
+				markFailed(i, pullRequestSyncFailure(link, resolveFailureText(s, resolveCtx, err, true)))
 				continue
 			}
 			if access.hostKey != link.HostKey {
@@ -289,7 +289,7 @@ func (s *IssueService) SyncIssuePullRequests(ctx context.Context, issueID, userI
 		case model.IssuePullRequestProviderGitHub:
 			client, credKind, err := pullRequestSyncClient(resolved, clients, clientKinds, clientErrs, project, link)
 			if err != nil {
-				markFailed(i, pullRequestSyncFailure(link, err.Error()))
+				markFailed(i, pullRequestSyncFailure(link, resolveFailureText(s, resolveCtx, err, false)))
 				continue
 			}
 			fetchers[i] = func(ctx context.Context, l *model.IssuePullRequest) error {
@@ -454,6 +454,20 @@ func (s *IssueService) withRepos(ctx context.Context) *IssueService {
 		cp.credentials = &cred
 	}
 	return &cp
+}
+
+// resolveFailureText 把阶段 1 访问面解析的失败转成单行文案：预算到点或
+// 客户端断开时（resolveCtx.Err() 非 nil），底层 ctx 错误已被凭证/集成读
+// 取归一成 ErrInternal 或脱敏文案，这里统一回到「请求已取消或超时」口径，
+// 与阶段 2 一致；否则按 provider 走原有分类文案。
+func resolveFailureText(s *IssueService, ctx context.Context, err error, forgejo bool) string {
+	if ctx.Err() != nil {
+		return "请求已取消或超时，未继续同步"
+	}
+	if forgejo {
+		return s.forgejoSyncFailureText(err)
+	}
+	return err.Error()
 }
 
 // fetchErrText 把并发拉取阶段的错误转成单行失败文案。GitHub 路径的错误已

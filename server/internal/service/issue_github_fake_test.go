@@ -63,8 +63,6 @@ type fakeIssueGitHubClient struct {
 	getPullRequestDelays   map[int]time.Duration
 	getPullRequestInFlight int32
 	getPullRequestMax      int32
-	// getPullRequestCtxErr 记录有多少次调用拿到已取消的 ctx。
-	getPullRequestCtxErr int32
 	// pullRequestPanics 按 number 注入 panic——sync 拉取 goroutine 的 recover
 	// 兜底用例（INT-175 R2）：panic 不能扩散到进程。
 	pullRequestPanics map[int]any
@@ -308,9 +306,6 @@ func (f *fakeIssueGitHubClient) CreateIssue(_ context.Context, title, body strin
 }
 
 func (f *fakeIssueGitHubClient) GetPullRequest(ctx context.Context, _ int64, repoFullName string, number int) (*githubapi.PullRequest, error) {
-	if ctx != nil && ctx.Err() != nil {
-		atomic.AddInt32(&f.getPullRequestCtxErr, 1)
-	}
 	n := atomic.AddInt32(&f.getPullRequestInFlight, 1)
 	for {
 		max := atomic.LoadInt32(&f.getPullRequestMax)
