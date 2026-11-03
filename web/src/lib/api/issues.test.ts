@@ -10,6 +10,24 @@ vi.mock("./client", () => ({
   },
 }));
 
+describe("issueApi.batchCloseDone", () => {
+  beforeEach(() => {
+    post.mockReset();
+    post.mockReturnValue({ json: vi.fn() });
+  });
+
+  it("uses a 60s timeout so serial upserts after the server deadline can return", async () => {
+    const { issueApi } = await import("./issues");
+
+    issueApi.batchCloseDone("proj-1", { source: "github" });
+
+    expect(post).toHaveBeenCalledWith("projects/proj-1/issues/batch-close", {
+      json: { source: "github" },
+      timeout: 60_000,
+    });
+  });
+});
+
 describe("issueApi pull request links", () => {
   beforeEach(() => {
     post.mockReset();

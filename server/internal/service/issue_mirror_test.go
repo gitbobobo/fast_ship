@@ -1193,7 +1193,7 @@ func TestIssueServiceBatchCloseDoneIssues_GitHubIssuesCloseWithOnePatchEachAndNo
 	}
 
 	beforeComments, beforeTimeline := fake.countCollectionCalls()
-	resp, err := svc.issueService.BatchCloseDoneIssues(project.ID, user.ID, string(model.IssueSourceGitHub))
+	resp, err := svc.issueService.BatchCloseDoneIssues(context.Background(), project.ID, user.ID, string(model.IssueSourceGitHub))
 	if err != nil {
 		t.Fatalf("batch close done issues: %v", err)
 	}

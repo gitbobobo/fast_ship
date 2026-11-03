@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/githubapi"
@@ -44,6 +45,11 @@ type fakeIssueGitHubClient struct {
 	createIssueCalls      []fakeCreateIssueCall
 	createCommentCalls    []fakeCreateCommentCall
 	updateIssueCalls      []fakeUpdateIssueCall
+	updateIssueErrs       map[int]error
+	updateIssueDelay      time.Duration
+	onUpdateIssue         func(ctx context.Context, issueNumber int)
+	updateIssueInFlight   int32
+	updateIssueMax        int32
 	// PR 读取走 githubapi seam：按 repo+number 登记远端 PR。pullRequestErr 对
 	// 所有 repo 生效，pullRequestErrs 按 repo 注入（sync 每行是独立失败域）。
 	pullRequests     map[string]map[int]*githubapi.PullRequest
@@ -56,9 +62,9 @@ type fakeIssueGitHubClient struct {
 	validateErr    error
 	onListIssues   func()
 	onListTimeline func()
-	// mu 保护 listIssuesSince 与 commentListCalls/timelineListCalls：目前只有
-	// ListIssues 会被并发同步路径调用；若未来并发测试命中推送方法，其余记录
-	// 字段需一并加锁。
+	// mu 保护 listIssuesSince、commentListCalls/timelineListCalls 与
+	// updateIssueCalls/updateIssueErrs：ListIssues 与批量关闭的 UpdateIssue
+	// 都会并发命中。
 	mu              sync.Mutex
 	listIssuesSince []*time.Time
 	// commentListCalls/timelineListCalls 按 issue 记录两个集合拉取接口的
@@ -221,7 +227,15 @@ func (f *fakeIssueGitHubClient) CreateIssueComment(_ context.Context, issueNumbe
 	return f.createdComment, nil
 }
 
-func (f *fakeIssueGitHubClient) UpdateIssue(_ context.Context, issueNumber int, req ghclient.UpdateIssueRequest) (*ghclient.Issue, error) {
+func (f *fakeIssueGitHubClient) UpdateIssue(ctx context.Context, issueNumber int, req ghclient.UpdateIssueRequest) (*ghclient.Issue, error) {
+	inFlight := atomic.AddInt32(&f.updateIssueInFlight, 1)
+	defer atomic.AddInt32(&f.updateIssueInFlight, -1)
+	for {
+		old := atomic.LoadInt32(&f.updateIssueMax)
+		if inFlight <= old || atomic.CompareAndSwapInt32(&f.updateIssueMax, old, inFlight) {
+			break
+		}
+	}
 	call := fakeUpdateIssueCall{IssueNumber: issueNumber}
 	if req.Title != nil {
 		call.Title = *req.Title
@@ -238,7 +252,25 @@ func (f *fakeIssueGitHubClient) UpdateIssue(_ context.Context, issueNumber int, 
 	if req.Labels != nil {
 		call.Labels = append([]string(nil), (*req.Labels)...)
 	}
+	f.mu.Lock()
 	f.updateIssueCalls = append(f.updateIssueCalls, call)
+	err := f.updateIssueErrs[issueNumber]
+	f.mu.Unlock()
+	if f.onUpdateIssue != nil {
+		f.onUpdateIssue(ctx, issueNumber)
+	}
+	if delay := f.updateIssueDelay; delay > 0 {
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
 	if len(f.updatedIssuesByNumber) > 0 {
 		item, ok := f.updatedIssuesByNumber[issueNumber]
 		if !ok {
@@ -247,6 +279,12 @@ func (f *fakeIssueGitHubClient) UpdateIssue(_ context.Context, issueNumber int, 
 		return item, nil
 	}
 	return f.updatedIssue, nil
+}
+
+func (f *fakeIssueGitHubClient) recordedUpdateIssueCalls() []fakeUpdateIssueCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]fakeUpdateIssueCall(nil), f.updateIssueCalls...)
 }
 
 func (f *fakeIssueGitHubClient) CreateIssue(_ context.Context, title, body string) (*ghclient.Issue, error) {
