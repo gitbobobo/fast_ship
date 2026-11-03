@@ -160,24 +160,16 @@ func sniffReviewScaleFormat(head []byte) string {
 	return ""
 }
 
-// sniffWebpAnimation 判样本是否为动画 WebP：WEBP 头后的首个 chunk 是 VP8X
-// （偏移 12，4 字节类型 + 4 字节长度 + payload），payload 第 4 字节 bit 6 为
-// ANIM。样本不足按保守返回 false（取图处 decodeConfig 仍会把不可解的挡到
-// heavy——本函数只提前拦截「头能过但像素不可解」的 ANIM 类）。
+// sniffWebpAnimation 判样本是否为动画 WebP：WEBP 头后首个 chunk 是 VP8X
+// （偏移 12-15 "VP8X"、16-19 chunk size、20-23 保留、24-26 画布宽-1 小端、
+// 27-29 画布高-1 小端），特性位是 payload 第 1 字节（偏移 20），ANIM=bit1
+// （0x02）。样本不足或首 chunk 不是 VP8X 返回 false（DecodeConfig 会把不可
+// 解的挡到 heavy——本函数只提前拦「头能过但 Decode 不支持 ANIM」的动画）。
 func sniffWebpAnimation(head []byte) bool {
-	// RIFF(0-3) + WEBP(8-11) + chunk tag(12-15) + size(16-19) + payload(20-23)
-	// VP8X payload：1B 保留 + 3B 宽 + 3B 高 + 1B 特性位 —— 特性位在偏移 23，
-	// 但 payload 第 4 字节（索引 3）才是 ANIM 位，即 head[23+3-1]=head[25]…
-	// 精确布局见 https://www.rfc-editor.org/rfc/rfc6386 + WebP container spec：
-	//   offset 12-15: "VP8X"
-	//   offset 16-19: chunk size (10, little-endian)
-	//   offset 20-23: canvas width-1 (24-bit LE) + height-1 (24-bit LE)
-	//   offset 24-27: 3 bytes（保留/ICC/ANIM/EXIF 等特性位在最后一个字节）
-	// 特性位字节在偏移 27；ANIM = bit 1（0x02）。
-	if len(head) < 28 || string(head[12:16]) != "VP8X" {
+	if len(head) < 21 || string(head[12:16]) != "VP8X" {
 		return false
 	}
-	return head[27]&0x02 != 0
+	return head[20]&0x02 != 0
 }
 
 // reviewScreenshotHead 读文件前 32 字节做嗅探与判定样本：PNG 位深（IHDR

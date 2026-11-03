@@ -921,30 +921,39 @@ func TestAgentScreenshotImageScale(t *testing.T) {
 // 5 轮）。样本直接写文件经 reviewScreenshotHead 取，钉死「嗅探样本 ≥28 字
 // 节」这条接缝（第 3 轮 head 长度教训：只测纯函数会放过样本截断）。
 func TestReviewScreenshotServedAnimatedWebp(t *testing.T) {
-	writeWebpHead := func(anim bool) string {
+	// VP8X 精确布局：offset 12-15 "VP8X"、16-19 chunk size、20 flags、21-23 保
+	// 留、24-26 画布宽-1 小端、27-29 画布高-1 小端；ANIM=flags bit1（0x02）。
+	writeWebpHead := func(flags byte) string {
 		t.Helper()
 		var buf bytes.Buffer
 		buf.WriteString("RIFF")
-		buf.Write([]byte{0, 0, 0, 0}) // 文件总长（不重要）
+		buf.Write([]byte{0, 0, 0, 0})
 		buf.WriteString("WEBP")
 		buf.WriteString("VP8X")
-		buf.Write([]byte{10, 0, 0, 0})            // chunk 长度 10
-		buf.Write([]byte{0, 0, 0})                // 保留 3 字节
-		buf.Write([]byte{0xEF, 0xBE, 0x00, 0x00}) // 宽-1=48767、高-1=1（占位）
-		buf.Write([]byte{0, 0, 0})                // 特性位前 3 字节
-		if anim {
-			buf.WriteByte(0x02) // 特性位最后字节 ANIM=bit1
-		} else {
-			buf.WriteByte(0x00)
-		}
-		path := filepath.Join(t.TempDir(), map[bool]string{true: "anim.webp", false: "still.webp"}[anim])
+		buf.Write([]byte{10, 0, 0, 0})      // chunk 长度 10
+		buf.WriteByte(flags)                // flags 字节在偏移 20
+		buf.Write([]byte{0, 0, 0})          // 保留 3 字节（21-23）
+		buf.Write([]byte{0x2F, 0x00, 0x00}) // 画布宽-1 = 47（24-26）
+		buf.Write([]byte{0x2F, 0x00, 0x00}) // 画布高-1 = 47（27-29）
+		path := filepath.Join(t.TempDir(), "shot.webp")
 		if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
 			t.Fatalf("write webp head: %v", err)
 		}
 		return path
 	}
-	// 动画位开 → original_heavy（原图透传可读）
-	if got := reviewScreenshotServed(writeWebpHead(true), reviewScreenshotMaxEdge); got != ServedOriginalHeavy {
+	// flags=ANIM → original_heavy（DecodeConfig 能过但 Decode 不支持 ANIM，
+	// 原图透传可读）。
+	if got := reviewScreenshotServed(writeWebpHead(0x02), reviewScreenshotMaxEdge); got != ServedOriginalHeavy {
 		t.Fatalf("animated webp served = %v, want original_heavy", got)
+	}
+	// flags=0 的静态 VP8X：不误伤为动画。上一版把 head[27] 高度低字节当
+	// flags 读时 0x2F&0x02≠0 会误判——本用例锁 flags 在偏移 20 不被读错。
+	still := writeWebpHead(0x00)
+	head, err := reviewScreenshotHead(still)
+	if err != nil {
+		t.Fatalf("head: %v", err)
+	}
+	if sniffWebpAnimation(head) {
+		t.Fatalf("static vp8x flags=0 被误判为动画（head[27] 读错位）")
 	}
 }
