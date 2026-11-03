@@ -21,7 +21,8 @@ func (r *IssuePullRequestRepository) Create(link *model.IssuePullRequest) error 
 }
 
 // WithContext 返回绑定 ctx 的仓库视图：UPDATE 的借连接/锁等待随 ctx 取消
-// （INT-175 sync 写回阶段用，避免请求断开后逐行挂 busy_timeout）。
+// （INT-175 sync 写回阶段用，ctx 是独立的写回预算——到点记「写回超时」
+// 而不是无限等唯一写连接）。
 func (r *IssuePullRequestRepository) WithContext(ctx context.Context) *IssuePullRequestRepository {
 	if r == nil || ctx == nil {
 		return r

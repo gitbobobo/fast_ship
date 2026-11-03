@@ -47,9 +47,11 @@ const (
 	// pullRequestSyncWriteTimeout 是写回阶段的独立预算（INT-175 R4/方向审
 	// 计）：写回不跟随拉取 deadline——一条挂到整批预算的慢拉取不能让
 	// 已成功拉取的行全部零落库；也不跟随客户端断开——已付出的代价写
-	// 回是幂等刷新。它与拉取预算一起构成服务端总时长上界（30s+10s<
-	// web 端 60s 超时）。
-	pullRequestSyncWriteTimeout = 10 * time.Second
+	// 回是幂等刷新。预算取 busy_timeout(30s) 量级：MaxOpenConns(1) 下写回
+	// 要排唯一写连接，短于 busy_timeout 会把「正常的锁等待容忍度」变成
+	// 提前判死。服务端总时长上界 = 拉取 30s + 写回 40s = 70s，web 端超
+	// 时 90s。
+	pullRequestSyncWriteTimeout = 40 * time.Second
 )
 
 // pullRequestLink 解析后的 PR 链接：Provider 决定后续取数路径；forgejo 行的
@@ -366,9 +368,9 @@ func (s *IssueService) SyncIssuePullRequests(ctx context.Context, issueID, userI
 	}
 
 	// 阶段 3（串行）：按原序逐行写回并组装响应——items/failures 的顺序与
-	// 关联行创建顺序一致，与并发度无关。写回用独立短预算且脱离请求取
-	// 消（WithoutCancel）：已付出代价拉到的数据照常落库，拉取 deadline
-	// 或浏览器断开都不吞掉它们；预算到点才记「未写回」。
+	// 关联行创建顺序一致，与并发度无关。写回用独立预算且脱离请求取消
+	// （WithoutCancel）：已付出代价拉到的数据照常落库，拉取 deadline 或
+	// 浏览器断开都不吞掉它们；唯一的失败来源是写回预算到点。
 	writeCtx, cancelWrite := context.WithTimeout(context.WithoutCancel(ctx), pullRequestSyncWriteTimeout)
 	defer cancelWrite()
 	saveRepo := s.pullRequestRepo.WithContext(writeCtx)
@@ -385,8 +387,9 @@ func (s *IssueService) SyncIssuePullRequests(ctx context.Context, issueID, userI
 			msg := "保存失败"
 			switch {
 			case errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded):
-				// 锁等待/借连接被 ctx 打断——与「未写回」同口径。
-				msg = "请求已取消或超时，未写回同步结果"
+				// writeCtx 脱离请求取消（WithoutCancel）：能走到这里只有写回
+				// 预算到点一种可能，文案如实说写回超时。
+				msg = "写回超时，请稍后重试同步"
 			case errors.Is(err, gorm.ErrRecordNotFound):
 				// sync 窗口内被并发 detach——不插回，记一条失败说明。
 				msg = "关联已解除"

@@ -45,7 +45,7 @@ attach 与 sync 的失败文案不回显适配器错误原文（集成 API 绝�
 
 `POST .../pull-requests/sync` 刷新全部关联，返回 `{items, failures}`。**每条关联是独立失败域**：单行拉取或保存失败记入 `failures[]`（含关联行 id 与 `repo#number` 前缀的 error），旧数据保留，不中断其余行，整体恒 200。sync 按 provider 分流：github 行按 repo 缓存客户端；forgejo 行按 `forge_integration_id` 缓存客户端（同集成一轮 sync 只构建一次，构造失败同样按 id 缓存逐行记失败）；快照缺失（空 id，提示解除重联）与未知 provider 也只算单行失败。
 
-执行分三段（INT-175）：访问面解析（凭证/集成读取，带缓存）串行；远端拉取并发上限 4，跟随请求 context（浏览器断开即停发后续请求），30s 是整批兜底而非逐条预算；写回与响应组装串行且按关联行原序——items/failures 的顺序与创建顺序一致，与并发度无关。写回用独立 10s 预算并脱离请求取消（`context.WithoutCancel`）：已拉到的数据照常落库，一条慢拉取撞上拉取 deadline 不会让整批零落库。服务端总时长上界 ≈ 40s，web 端调用超时 60s。
+执行分三段（INT-175）：访问面解析（凭证/集成读取，带缓存）串行；远端拉取并发上限 4，跟随请求 context（浏览器断开即停发后续请求），30s 是整批兜底而非逐条预算；写回与响应组装串行且按关联行原序——items/failures 的顺序与创建顺序一致，与并发度无关。写回用独立 40s 预算（对齐 busy_timeout 量级——MaxOpenConns(1) 下要排唯一写连接）并脱离请求取消（`context.WithoutCancel`）：已拉到的数据照常落库，一条慢拉取撞上拉取 deadline 不会让整批零落库；写回预算到点记「写回超时」。服务端总时长上界 = 30s + 40s = 70s，web 端调用超时 90s。
 
 写回用受 (id, issue_id) 约束的 UPDATE 而非 GORM `Save`——后者在 0 行命中时会退化成 INSERT，把 sync 期间被并发 detach 的行原样插回。0 行命中即记「关联已解除」失败项。
 
