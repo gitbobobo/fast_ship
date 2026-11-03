@@ -54,8 +54,8 @@ describe("issueApi pull request links", () => {
 
     issueApi.syncPullRequests("issue-1");
 
-    // 服务端上界 = 解析 30s + 拉取 30s + 写回 40s = 100s，客户端 120s
-    // 等满——不能靠 ky 默认 10s 提前掐断服务端 ctx（INT-175）。
+    // 拉取整批预算 30s + 写回/读库余量，客户端 120s 等满——不能靠
+    // ky 默认 10s 提前掐断服务端 ctx（INT-175）。
     expect(post).toHaveBeenCalledWith("issues/issue-1/pull-requests/sync", {
       timeout: 120_000,
     });

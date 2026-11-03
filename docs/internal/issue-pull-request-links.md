@@ -45,7 +45,7 @@ attach 与 sync 的失败文案不回显适配器错误原文（集成 API 绝�
 
 `POST .../pull-requests/sync` 刷新全部关联，返回 `{items, failures}`。**每条关联是独立失败域**：单行拉取或保存失败记入 `failures[]`（含关联行 id 与 `repo#number` 前缀的 error），旧数据保留，不中断其余行，整体恒 200。sync 按 provider 分流：github 行按 repo 缓存客户端；forgejo 行按 `forge_integration_id` 缓存客户端（同集成一轮 sync 只构建一次，构造失败同样按 id 缓存逐行记失败）；快照缺失（空 id，提示解除重联）与未知 provider 也只算单行失败。
 
-执行分两段（INT-175）：访问面解析（凭证/集成读取，带缓存）串行走请求 ctx；远端拉取并发上限 4、跟随请求 context（浏览器断开即停发后续请求），30s 是整批兜底而非逐条预算；写回与响应组装串行且按关联行原序，脱离请求取消（`context.WithoutCancel` 无预算——已拉到的数据照常落库，与其他端点「不带 ctx 写库」同口径）。items/failures 的顺序与创建顺序一致，与并发度无关。写回带 `synced_at` 时间守卫：并发两次 sync 时慢批次不会用旧数据覆盖已写入的更新数据。守卫依赖墙钟单调——时钟回拨期间 sync 表面成功但刷新静默失效（守卫命中记 Info 日志，含 `fetched_synced_at`）。调用方超时建议 ≥60s（拉取 30s + 写回余量），web 端 120s。attach 的 Upsert 快照守卫与「attach/sync 交错旧快照覆盖」属 INT-188 范围，不在本 PR 处理。
+执行分三个阶段（INT-175）：访问面解析（凭证/集成读取，带缓存）串行走请求 ctx；远端拉取并发上限 4、跟随请求 context（浏览器断开即停发后续请求），30s 是整批兜底而非逐条预算；写回与响应组装串行且按关联行原序——仓库方法不接收 ctx，写库自然脱离请求取消（与其它端点「不带 ctx 写库」同口径），已拉到的数据照常落库。只有拉取阶段有预算：前置读库与写回无上界，调用方超时只约束等待——超时返回后服务端可能仍在写回。items/failures 的顺序与创建顺序一致，与并发度无关。写回带 `synced_at` 时间守卫：并发两次 sync 时慢批次不会用旧数据覆盖已写入的更新数据。守卫依赖墙钟单调——时钟回拨期间 sync 表面成功但刷新静默失效（守卫命中记 Info 日志，含 `fetched_synced_at`）。调用方超时建议 ≥60s（拉取 30s + 写回余量），web 端 120s。attach 的 Upsert 快照守卫与「attach/sync 交错旧快照覆盖」属 INT-188 范围，不在本 PR 处理。
 
 写回用受 (id, issue_id, synced_at) 约束的 UPDATE 而非 GORM `Save`——后者在 0 行命中时会退化成 INSERT，把 sync 期间被并发 detach 的行原样插回。0 行命中有两种含义，用一次 SELECT 区分：行不存在（`ErrRecordNotFound`）→ 记「关联已解除」失败项；行存在但 `synced_at` 更新（`ErrSyncedAtStale`，并发 sync 已写入更新数据）→ 不算失败，读回库内现行行进 items，其余读回错误记「读回同步结果失败」并落日志。
 

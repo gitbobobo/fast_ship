@@ -36,9 +36,9 @@ interface BatchCloseDoneRequest {
 
 /** 服务端 30s 停发新的 GitHub PATCH，之后还要串行落库；60s 给落库留余量。 */
 const BATCH_CLOSE_TIMEOUT_MS = 60_000;
-// 服务端上界 = 解析 30s + 拉取 30s + 写回 40s = 100s（各阶段独立预算，
-// 写回对齐 SQLite busy_timeout 量级）；120s 留余量。写回独立于请求取
-// 消：已拉到的数据照常落库（INT-175）。
+// 只有拉取阶段有 30s 整批预算；前置读库与串行写回无上界（与其它端点
+// 同口径）。120s 只约束客户端等待——超时返回后服务端写回可能仍继续，
+// 数据照常落库（INT-175）。
 const SYNC_PULL_REQUESTS_TIMEOUT_MS = 120_000;
 
 /** 契约名为 IssueBatchResult。 */

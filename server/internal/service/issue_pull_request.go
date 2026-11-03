@@ -194,8 +194,8 @@ func (s *IssueService) DetachIssuePullRequest(issueID, userID, linkID string) er
 // 写回仍逐行 UPDATE（SQLite 单写连接下串行不阻塞），响应顺序与旧串行
 // 实现一致，收益全部来自拉取并发。ctx 为请求 context（handler 传
 // c.Request.Context()），浏览器断开即停止后续远端请求；测试传 nil 退化
-// 为 Background。写回脱离请求取消（WithoutCancel）：已付出的代价拉回
-// 的数据照常落库，与其它端点的「不带 ctx 写库」同口径。
+// 为 Background。写回仓库方法不接收 ctx，自然脱离请求取消——已付出的
+// 代价拉回的数据照常落库，与其它端点的「不带 ctx 写库」同口径。
 func (s *IssueService) SyncIssuePullRequests(ctx context.Context, issueID, userID string) (*IssuePullRequestSyncResultResponse, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -365,9 +365,9 @@ func (s *IssueService) SyncIssuePullRequests(ctx context.Context, issueID, userI
 	}
 
 	// 阶段 3（串行）：按原序逐行写回并组装响应——items/failures 的顺序与
-	// 关联行创建顺序一致，与并发度无关。写回不带请求 ctx（WithoutCancel）：
-	// 已付出代价拉到的数据照常落库，拉取 deadline 或浏览器断开都不吞掉
-	// 它们；与其他端点「不带 ctx 写库」同口径。
+	// 关联行创建顺序一致，与并发度无关。写回仓库方法不接收 ctx：已付出
+	// 代价拉到的数据照常落库，拉取 deadline 或浏览器断开都不吞掉它们；
+	// 与其他端点「不带 ctx 写库」同口径。
 	for i := range links {
 		link := &links[i]
 		if failed[i] {
