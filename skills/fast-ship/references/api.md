@@ -8298,8 +8298,11 @@ GitHub 官方 pull_request / issue_comment 事件 payload（原样验签，服�
 | `items` | object[] | 是 |  |
 | `items[].id` | string | 是 |  |
 | `items[].label` | string | 是 |  |
-| `items[].url` | string | 是 | 指向本端点的图片路径（相对 server.public_url）；下载失败时为空串 |
-| `items[].error` | string（可空） | 否 | 下载/不可用原因；非空时 url 为空，审查员应记入 unmeasurable |
+| `items[].url` | string | 否 | 审查尺寸地址：指向本端点并带缩放参数（长边 ≤1536 的 JPEG，服务端按需生成）；下载失败时字段缺省 |
+| `items[].width` | integer（可空） | 否 | 原图像素尺寸（JPEG 应用 EXIF 方向后）；解码失败或缺文件时字段缺省 |
+| `items[].height` | integer（可空） | 否 | 原图像素尺寸（JPEG 应用 EXIF 方向后）；解码失败或缺文件时字段缺省 |
+| `items[].original_url` | string | 否 | 原图地址（无缩放参数，即本端点不带 query）；下载失败时字段缺省 |
+| `items[].error` | string（可空） | 否 | 下载/不可用原因；非空时无 url，审查员应记入 unmeasurable |
 | `changed` | boolean | 是 | 截图集合相对上一轮视觉审查是否有变化 |
 
 **错误**
@@ -8327,9 +8330,17 @@ GitHub 官方 pull_request / issue_comment 事件 payload（原样验签，服�
 | `runId` | string | 是 | 审查运行 ID |
 | `assetId` | string | 是 |  |
 
+**Query 参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `max` | integer | 否 | 三个参数均未提供时返回原图字节；任一提供时其余取默认（max 1536、format jpeg、quality 80）。取值收进 [320,2000]；超过原图长边不放大按原图返回；宽×高超过 6400 万像素的原图不做缩放按原图透传 |
+| `format` | string（enum: jpeg \| png，默认 jpeg） | 否 | 缩放变体编码格式；省略 jpeg |
+| `quality` | integer | 否 | JPEG 质量 30-95，省略 80 |
+
 **成功响应**
 
-**200** 图片字节
+**200** 原图字节（无缩放参数）或缩放变体字节
 
 二进制内容（image/gif、image/jpeg、image/png、image/webp），无 JSON 信封。
 
@@ -8337,6 +8348,7 @@ GitHub 官方 pull_request / issue_comment 事件 payload（原样验签，服�
 
 | HTTP | 说明 |
 | --- | --- |
+| 400 | 缩放参数非法（max/format/quality，40004 同 ErrReviewResultInvalid） |
 | 401 | 未提供或提供无效凭证（40100-40199） |
 | 403 | 已认证但无权限（40300-40399；40301=API Key 越权，40303=仅限 API Key） |
 | 404 | 资源不存在（40400-40499） |

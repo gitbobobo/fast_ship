@@ -127,3 +127,40 @@ func TestRenderReviewPromptAgentCleanup(t *testing.T) {
 		t.Fatal("视觉模板应保留「提交成功即结束」原文")
 	}
 }
+
+// TestRenderReviewPromptVisualImageBudget INT-186 读图预算：视觉提示词写明
+// 清单给审查尺寸地址（原图按需）、单张/整轮读入预算、成对读取；代码提示词
+// 不含截图读图预算（只动视觉模板）。
+func TestRenderReviewPromptVisualImageBudget(t *testing.T) {
+	run := &model.ReviewRun{
+		ID:            "run-186",
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		RepoFullName:  "o/r", PRNumber: 7, PRTitle: "t", PRURL: "https://x/pr/7",
+		HeadSHA: "sha", BaseRef: "main", HeadRef: "feat",
+	}
+	run.Kind = model.ReviewKindVisual
+	visual := renderReviewPrompt(run, "https://fs.example.com", "fsr_tok")
+	for _, want := range []string{
+		"## 读图预算",
+		"{items:[{id,label,url,width,height,original_url}],changed}",
+		"url` 是审查尺寸地址（长边 ≤1536 的 JPEG）",
+		"original_url` 是原图地址",
+		"默认已带缩放参数，不要自己加参数改尺寸",
+		"original_url` 只用于细节复核",
+		"≤500KB",
+		"≤4MB",
+		"reason 写明预算截断",
+		"不要把全部截图一次性读进上下文",
+	} {
+		if !strings.Contains(visual, want) {
+			t.Fatalf("视觉提示词缺读图预算关键条目: %q", want)
+		}
+	}
+
+	// 代码模板不含截图读图预算。
+	run.Kind = model.ReviewKindCode
+	code := renderReviewPrompt(run, "https://fs.example.com", "fsr_tok")
+	if strings.Contains(code, "读图预算") || strings.Contains(code, "original_url") {
+		t.Fatal("代码提示词不应含截图读图预算")
+	}
+}

@@ -6244,9 +6244,15 @@ export interface components {
         ReviewAgentScreenshot: {
             id: string;
             label: string;
-            /** @description 指向本端点的图片路径（相对 server.public_url）；下载失败时为空串 */
-            url: string;
-            /** @description 下载/不可用原因；非空时 url 为空，审查员应记入 unmeasurable */
+            /** @description 审查尺寸地址：指向本端点并带缩放参数（长边 ≤1536 的 JPEG，服务端按需生成）；下载失败时字段缺省 */
+            url?: string;
+            /** @description 原图像素尺寸（JPEG 应用 EXIF 方向后）；解码失败或缺文件时字段缺省 */
+            width?: number | null;
+            /** @description 原图像素尺寸（JPEG 应用 EXIF 方向后）；解码失败或缺文件时字段缺省 */
+            height?: number | null;
+            /** @description 原图地址（无缩放参数，即本端点不带 query）；下载失败时字段缺省 */
+            original_url?: string;
+            /** @description 下载/不可用原因；非空时无 url，审查员应记入 unmeasurable */
             error?: string | null;
         };
         ReviewCodeFinding: {
@@ -14890,7 +14896,14 @@ export interface operations {
     };
     reviewAgentScreenshotImage: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description 三个参数均未提供时返回原图字节；任一提供时其余取默认（max 1536、format jpeg、quality 80）。取值收进 [320,2000]；超过原图长边不放大按原图返回；宽×高超过 6400 万像素的原图不做缩放按原图透传 */
+                max?: number;
+                /** @description 缩放变体编码格式；省略 jpeg */
+                format?: "jpeg" | "png";
+                /** @description JPEG 质量 30-95，省略 80 */
+                quality?: number;
+            };
             header?: never;
             path: {
                 /** @description 审查运行 ID */
@@ -14901,7 +14914,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description 图片字节 */
+            /** @description 原图字节（无缩放参数）或缩放变体字节 */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -14911,6 +14924,15 @@ export interface operations {
                     "image/jpeg": string;
                     "image/gif": string;
                     "image/webp": string;
+                };
+            };
+            /** @description 缩放参数非法（max/format/quality，40004 同 ErrReviewResultInvalid） */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
             401: components["responses"]["Unauthorized"];

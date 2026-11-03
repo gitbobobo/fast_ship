@@ -837,35 +837,74 @@ func (s *ReviewService) AgentScreenshots(ctx context.Context, runID string) ([]a
 		}
 		// 图片地址带本轮 run 作用域（INT-169）：端点按 runId+令牌双重绑定，
 		// URL 只能取本运行 id，不能从其他运行借。
-		item.Url = "/api/review-agent/runs/" + runID + "/screenshots/" + a.ID
+		item.OriginalUrl = api.Ptr("/api/review-agent/runs/" + runID + "/screenshots/" + a.ID)
+		// url 默认给审查尺寸（长边 ≤1536 的 JPEG，INT-186）：审查代理逐张读原图
+		// 会撑爆模型网关的请求上限；original_url 保留按需取原图的途径。下载失败
+		// 行不走这里，可选字段全部缺省。
+		item.Url = api.Ptr(*item.OriginalUrl + reviewScaleQuery())
+		if w, h := reviewScreenshotDims(a.StoragePath); w > 0 && h > 0 {
+			item.Width = api.Ptr(w)
+			item.Height = api.Ptr(h)
+		}
 		items = append(items, item)
 	}
 	return items, changed, nil
 }
 
-// AgentScreenshotImage 取图片本体：(路径, MIME)。仅视觉运行；校验资产与运行
-// 同 (集成,repo,pr,head)；下载失败或路径缺失 → 40406。
-func (s *ReviewService) AgentScreenshotImage(ctx context.Context, runID, assetID string) (string, string, error) {
+// AgentScreenshotFile 图片端点的下发布：Data 非 nil 时是服务端重新编码的
+// 缩放变体字节（整块写响应）；nil 时按 Path 流式下发原文件。
+type AgentScreenshotFile struct {
+	Path string
+	MIME string
+	Data []byte
+}
+
+// AgentScreenshotImage 取图片本体：scale 为 nil（无缩放参数）按原文件路径与
+// 存储 mime 返回；非 nil 时生成缩放变体字节，超像素预算或有文件但缩不了
+// （嗅探/解码/编码失败）都回退原图透传，文件打不开按 40406。仅视觉运行；
+// 校验资产与运行同 (集成,repo,pr,head)；下载失败或路径缺失 → 40406。
+func (s *ReviewService) AgentScreenshotImage(ctx context.Context, runID, assetID string, scale *reviewScaleParams) (AgentScreenshotFile, error) {
 	run, err := s.loadAgentRun(ctx, runID)
 	if err != nil {
-		return "", "", err
+		return AgentScreenshotFile{}, err
 	}
 	if run.Kind != model.ReviewKindVisual {
-		return "", "", errs.ErrCredentialNotAllowed
+		return AgentScreenshotFile{}, errs.ErrCredentialNotAllowed
 	}
 	var asset model.ReviewAsset
 	if err := s.db.WithContext(ctx).
 		Where("id = ? AND integration_id = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ?",
 			assetID, run.IntegrationID, run.RepoFullName, run.PRNumber, run.HeadSHA).
 		First(&asset).Error; err != nil {
-		return "", "", errs.ErrIssueAssetNotFound
+		return AgentScreenshotFile{}, errs.ErrIssueAssetNotFound
 	}
 	if asset.StoragePath == "" {
-		return "", "", errs.ErrIssueAssetNotFound
+		return AgentScreenshotFile{}, errs.ErrIssueAssetNotFound
 	}
 	mime := asset.MimeType
 	if mime == "" {
 		mime = "application/octet-stream"
 	}
-	return asset.StoragePath, mime, nil
+	original := AgentScreenshotFile{Path: asset.StoragePath, MIME: mime}
+	if scale == nil {
+		return original, nil
+	}
+	data, scaledMime, err := scaleReviewScreenshot(asset.StoragePath, asset.MimeType, scale)
+	if err != nil {
+		if errors.Is(err, errReviewScaleTooLarge) || errors.Is(err, errReviewScaleUnscalable) {
+			// 超像素预算不解码像素；有文件但缩不了（heic/tiff 这类有声明类型
+			// 但本服务无解码器的、以及嗅探/解码/编码失败）也缩不出变体——两
+			// 种都按原图字节透传（流式下发始终安全），别把清单已下发的审查尺
+			// 寸地址变成 404。
+			return original, nil
+		}
+		return AgentScreenshotFile{}, errs.ErrIssueAssetNotFound
+	}
+	if data == nil {
+		// 长边不大于目标：不放大，按原图字节透传。
+		return original, nil
+	}
+	original.Data = data
+	original.MIME = scaledMime
+	return original, nil
 }

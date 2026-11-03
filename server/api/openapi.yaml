@@ -7621,9 +7621,26 @@ paths:
           required: true
           schema:
             type: string
+        - name: max
+          in: query
+          schema:
+            type: integer
+          description: 三个参数均未提供时返回原图字节；任一提供时其余取默认（max 1536、format jpeg、quality 80）。取值收进 [320,2000]；超过原图长边不放大按原图返回；宽×高超过 6400 万像素的原图不做缩放按原图透传
+        - name: format
+          in: query
+          schema:
+            type: string
+            enum: [jpeg, png]
+            default: jpeg
+          description: 缩放变体编码格式；省略 jpeg
+        - name: quality
+          in: query
+          schema:
+            type: integer
+          description: JPEG 质量 30-95，省略 80
       responses:
         '200':
-          description: 图片字节
+          description: 原图字节（无缩放参数）或缩放变体字节
           content:
             image/png:
               schema:
@@ -7641,6 +7658,12 @@ paths:
               schema:
                 type: string
                 format: binary
+        '400':
+          description: 缩放参数非法（max/format/quality，40004 同 ErrReviewResultInvalid）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
@@ -14088,7 +14111,7 @@ components:
 
     ReviewAgentScreenshot:
       type: object
-      required: [id, label, url]
+      required: [id, label]
       properties:
         id:
           type: string
@@ -14096,11 +14119,22 @@ components:
           type: string
         url:
           type: string
-          description: 指向本端点的图片路径（相对 server.public_url）；下载失败时为空串
+          description: 审查尺寸地址：指向本端点并带缩放参数（长边 ≤1536 的 JPEG，服务端按需生成）；下载失败时字段缺省
+        width:
+          type: integer
+          nullable: true
+          description: 原图像素尺寸（JPEG 应用 EXIF 方向后）；解码失败或缺文件时字段缺省
+        height:
+          type: integer
+          nullable: true
+          description: 原图像素尺寸（JPEG 应用 EXIF 方向后）；解码失败或缺文件时字段缺省
+        original_url:
+          type: string
+          description: 原图地址（无缩放参数，即本端点不带 query）；下载失败时字段缺省
         error:
           type: string
           nullable: true
-          description: 下载/不可用原因；非空时 url 为空，审查员应记入 unmeasurable
+          description: 下载/不可用原因；非空时无 url，审查员应记入 unmeasurable
 
     ReviewCodeFinding:
       type: object
