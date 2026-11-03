@@ -47,6 +47,8 @@ attach 与 sync 的失败文案不回显适配器错误原文（集成 API 绝�
 
 执行分三段（INT-175），各阶段有独立预算：访问面解析（凭证/集成读取，带缓存）串行，30s；远端拉取并发上限 4，跟随请求 context（浏览器断开即停发后续请求），30s 是整批兜底而非逐条预算；写回与响应组装串行且按关联行原序，独立 40s 预算（对齐 busy_timeout 量级——MaxOpenConns(1) 下要排唯一写连接）并脱离请求取消（`context.WithoutCancel`）：已拉到的数据照常落库，一条慢拉取撞上拉取 deadline 不会让整批零落库；写回预算到点记「写回超时」。items/failures 的顺序与创建顺序一致，与并发度无关。写回带 `synced_at` 时间守卫：并发两次 sync 时慢批次不会用旧数据覆盖已写入的更新数据（0 行命中按「已有更新数据」读回现行进 items，不记失败，记服务端日志）。attach 的 Upsert 冲突更新里快照字段逐列带同一守卫（`CASE WHEN excluded.synced_at >= 库内`），且 attach 的 `synced_at` 取拉取完成时刻——attach 与并发 sync 交错时旧快照同样不能覆盖更新数据；守卫只约束快照字段，`link_origin` 的 manual 升级与 `forge_integration_id` 换绑永不被旧快照拦下。服务端总时长上界 = 30 + 30 + 40 = 100s，web 端调用超时 120s。
 
+已知限制：`synced_at` 守卫依赖墙钟单调——本机时钟回拨（NTP 校正、休眠恢复）后库内 `synced_at` 会大于后续新拉取的取值，该期间 sync 全部被判 stale（items 返回库内旧数据、failures 为空，表面成功但刷新静默失效），attach 的 Upsert 守卫同样跳过快照更新，直到墙钟追上。守卫命中记 Info 日志（含 `fetched_synced_at`），可按差值识别时钟回拨。
+
 写回用受 (id, issue_id, synced_at) 约束的 UPDATE 而非 GORM `Save`——后者在 0 行命中时会退化成 INSERT，把 sync 期间被并发 detach 的行原样插回。0 行命中有两种含义，用一次 SELECT 区分：行不存在（`ErrRecordNotFound`）→ 记「关联已解除」失败项；行存在但 `synced_at` 更新（`ErrSyncedAtStale`，并发 sync 已写入更新数据）→ 不算失败，读回库内现行行进 items——读回与写回共用 writeCtx，读回被预算截断记「写回超时」失败项，其余读回错误记「读回同步结果失败」。
 
 ## 读侧投影

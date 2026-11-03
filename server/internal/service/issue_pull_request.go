@@ -414,7 +414,8 @@ func (s *IssueService) SyncIssuePullRequests(ctx context.Context, issueID, userI
 					zap.String("link_id", link.ID),
 					zap.String("issue_id", issue.ID),
 					zap.String("repo", link.RepoFullName),
-					zap.Int("number", link.Number))
+					zap.Int("number", link.Number),
+					zap.Time("fetched_synced_at", link.SyncedAt))
 				if s.syncStaleHook != nil {
 					s.syncStaleHook() // 测试缝：在守卫命中与读回之间注入延迟（R17）
 				}
@@ -429,6 +430,12 @@ func (s *IssueService) SyncIssuePullRequests(ctx context.Context, issueID, userI
 				case errors.Is(findErr, gorm.ErrRecordNotFound):
 					result.Failures = append(result.Failures, pullRequestSyncFailure(link, "关联已解除"))
 				default:
+					s.logger.Error("sync 关联 PR stale 读回失败",
+						zap.String("link_id", link.ID),
+						zap.String("issue_id", issue.ID),
+						zap.String("repo", link.RepoFullName),
+						zap.Int("number", link.Number),
+						zap.Error(findErr))
 					result.Failures = append(result.Failures, pullRequestSyncFailure(link, "读回同步结果失败"))
 				}
 				continue

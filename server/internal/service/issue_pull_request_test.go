@@ -1693,7 +1693,11 @@ func TestIssueServiceSyncPullRequests_StaleReadBackWriteTimeout(t *testing.T) {
 		t.Fatalf("seed newer: %v", err)
 	}
 	svc.issueService.syncWriteTimeout = 200 * time.Millisecond
-	svc.issueService.syncStaleHook = func() { time.Sleep(300 * time.Millisecond) }
+	var hookCalls atomic.Int32
+	svc.issueService.syncStaleHook = func() {
+		hookCalls.Add(1)
+		time.Sleep(300 * time.Millisecond)
+	}
 
 	result, err := svc.issueService.SyncIssuePullRequests(nil, issue.ID, user.ID)
 	if err != nil {
@@ -1704,5 +1708,10 @@ func TestIssueServiceSyncPullRequests_StaleReadBackWriteTimeout(t *testing.T) {
 	}
 	if !strings.Contains(result.Failures[0].Error, "写回超时") {
 		t.Fatalf("expected write-timeout text, got %q", result.Failures[0].Error)
+	}
+	// 必须是从 stale 分支通过的——UPDATE 自身超时不会产生 hook 调用，
+	// 没有这个断言用例可能在慢机上走错误分支静默通过（R18）。
+	if hookCalls.Load() != 1 {
+		t.Fatalf("expected stale hook invoked once (proves stale branch taken), got %d", hookCalls.Load())
 	}
 }
