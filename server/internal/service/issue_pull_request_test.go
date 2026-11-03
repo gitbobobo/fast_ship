@@ -1469,3 +1469,53 @@ func TestIssueServiceSyncPullRequests_ResponseKeepsLinkOrder(t *testing.T) {
 		t.Fatalf("expected failures [link-b link-d] in link order, got %+v", result.Failures)
 	}
 }
+
+// INT-175 R2：拉取 goroutine 的 panic 被 recover 兜住——该行记 failures，
+// 其余行照常刷新，进程不挂。
+func TestIssueServiceSyncPullRequests_FetchPanicContained(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID, withTestGitHubToken(t, svc))
+	issue := createTestIssue(t, svc.db, project.ID)
+
+	now := time.Now().UTC()
+	for i, id := range []string{"link-panic", "link-ok"} {
+		link := &model.IssuePullRequest{
+			ID: id, IssueID: issue.ID, ProjectID: project.ID,
+			Provider: model.IssuePullRequestProviderGitHub, RepoFullName: "owner/repo",
+			Number: 300 + i, State: model.IssuePullRequestStateOpen,
+			LinkOrigin: model.IssuePullRequestLinkOriginManual,
+			SyncedAt:   now, CreatedAt: now, UpdatedAt: now,
+		}
+		if err := svc.db.Create(link).Error; err != nil {
+			t.Fatalf("seed link: %v", err)
+		}
+	}
+
+	fake := &fakeIssueGitHubClient{
+		pullRequests:      prSet(testPullRequest("owner/repo", 301, "open", nil)),
+		pullRequestPanics: map[int]any{300: "boom"},
+	}
+	stubPullRequestClient(t, svc, fake, "gh-token")
+
+	result, err := svc.issueService.SyncIssuePullRequests(nil, issue.ID, user.ID)
+	if err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if len(result.Items) != 1 || result.Items[0].Id != "link-ok" {
+		t.Fatalf("expected link-ok refreshed, got %+v", result)
+	}
+	if len(result.Failures) != 1 || result.Failures[0].Id != "link-panic" {
+		t.Fatalf("expected link-panic failure, got %+v", result.Failures)
+	}
+	if !strings.Contains(result.Failures[0].Error, "拉取异常") {
+		t.Fatalf("expected panic failure text, got %q", result.Failures[0].Error)
+	}
+	var stored model.IssuePullRequest
+	if err := svc.db.First(&stored, "id = ?", "link-panic").Error; err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if !stored.SyncedAt.Equal(now) {
+		t.Fatalf("expected panicked row untouched, got %+v", stored)
+	}
+}

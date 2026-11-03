@@ -65,6 +65,9 @@ type fakeIssueGitHubClient struct {
 	getPullRequestMax      int32
 	// getPullRequestCtxErr 记录有多少次调用拿到已取消的 ctx。
 	getPullRequestCtxErr int32
+	// pullRequestPanics 按 number 注入 panic——sync 拉取 goroutine 的 recover
+	// 兜底用例（INT-175 R2）：panic 不能扩散到进程。
+	pullRequestPanics map[int]any
 	// validateErr 注入 ValidateRepository 失败；onListIssues/onListTimeline 分别在
 	// ListIssues / ListIssueTimeline 开头回调（用于在两轮取数之间注入写库）；
 	// listIssuesSince 记录每次调用的 since 参数。
@@ -318,6 +321,9 @@ func (f *fakeIssueGitHubClient) GetPullRequest(ctx context.Context, _ int64, rep
 	defer atomic.AddInt32(&f.getPullRequestInFlight, -1)
 	if f.onGetPullRequest != nil {
 		f.onGetPullRequest(repoFullName, number)
+	}
+	if p, ok := f.pullRequestPanics[number]; ok {
+		panic(p)
 	}
 	delay := f.getPullRequestDelay
 	if d, ok := f.getPullRequestDelays[number]; ok {

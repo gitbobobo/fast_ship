@@ -338,14 +338,17 @@ func (s *IssueService) SyncIssuePullRequests(ctx context.Context, issueID, userI
 					}
 				}()
 				if err := fetch(ctx, link); err != nil {
-					if errors.Is(err, context.Canceled) {
-						// 显式取消（浏览器断开）：本行请求没真正发出或被中断，
-						// 文案与「从未发出」一致。
+					if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+						// 显式取消（浏览器断开）或整批预算到点：文案与「从未发出」
+						// 一致——根因是本次同步的截止，不是上游故障；尤其 Forgejo
+						// 行走 fetchErrText 会被脱敏成「连接或响应异常」，误导运维
+						// 去查集成配置。
 						markFailed(i, pullRequestSyncFailure(link, "请求已取消或超时，未继续同步"))
 						return
 					}
-					// DeadlineExceeded（含 http.Client.Timeout）按已发起的拉取失
-					// 败处理：走 fetchErrText 保留凭证来源/状态码/限流提示。
+					// 上游自身的超时（如 http.Client.Timeout）与真实取数失败按
+					// 已发起的拉取失败处理：走 fetchErrText 保留凭证来源/状态码/
+					// 限流提示。
 					markFailed(i, pullRequestSyncFailure(link, fetchErrText(s, link, err)))
 				}
 			}()
