@@ -1,8 +1,16 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { HTTPError, type NormalizedOptions } from "ky";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { CloseAllDoneButton, formatBatchCloseError } from "./close-all-done-button";
+
+const { closeMutateAsync, toastWarning, toastInfo, toastSuccess, toastError } = vi.hoisted(() => ({
+  closeMutateAsync: vi.fn(),
+  toastWarning: vi.fn(),
+  toastInfo: vi.fn(),
+  toastSuccess: vi.fn(),
+  toastError: vi.fn(),
+}));
 
 vi.mock("@/lib/hooks/use-issues", () => ({
   useBatchClosePreviewCount: () => ({
@@ -10,12 +18,25 @@ vi.mock("@/lib/hooks/use-issues", () => ({
     isLoading: false,
   }),
   useCloseIssuesBatch: () => ({
-    mutateAsync: vi.fn(),
+    mutateAsync: closeMutateAsync,
     isPending: false,
   }),
 }));
 
+vi.mock("sonner", () => ({
+  toast: {
+    info: toastInfo,
+    warning: toastWarning,
+    success: toastSuccess,
+    error: toastError,
+  },
+}));
+
 describe("CloseAllDoneButton select label", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
   it("shows source label in the closed select trigger", async () => {
     const user = userEvent.setup();
     render(<CloseAllDoneButton projectId="proj-1" />);
@@ -25,6 +46,53 @@ describe("CloseAllDoneButton select label", () => {
     const trigger = screen.getByRole("combobox");
     expect(trigger).toHaveTextContent("内部问题");
     expect(trigger).not.toHaveTextContent(/^internal$/);
+  });
+});
+
+// INT-185（复审 R1）：failures[].error 是服务端分类文案（已跳过/未确认/限流），
+// 必须透传进 toast——只报数量会让用户把部分成功当成整批失败再点一次。
+describe("CloseAllDoneButton failure toast", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("surfaces the first failure error and refs", async () => {
+    closeMutateAsync.mockResolvedValue({
+      total: 4,
+      succeeded: 0,
+      failed: 4,
+      failures: [
+        { id: "i-3", reference: "INT-3", error: "该问题已在其他操作中被更新，已跳过关闭" },
+        { id: "i-4", reference: "INT-4", error: "更新 GitHub Issue 失败：GitHub API 限流，请稍后重试" },
+        { id: "i-5", reference: "INT-5", error: "x" },
+        { id: "i-6", reference: "INT-6", error: "y" },
+      ],
+    });
+    const user = userEvent.setup();
+    render(<CloseAllDoneButton projectId="proj-1" />);
+    await user.click(screen.getByRole("button", { name: /关闭全部/ }));
+    await user.click(screen.getByRole("button", { name: "确认关闭" }));
+    await waitFor(() => {
+      expect(toastWarning).toHaveBeenCalledWith(
+        "已关闭 0 个问题，4 个失败：该问题已在其他操作中被更新，已跳过关闭（INT-3、INT-4、INT-5）",
+      );
+    });
+  });
+
+  it("keeps the count-only copy when failures carry no error", async () => {
+    closeMutateAsync.mockResolvedValue({
+      total: 1,
+      succeeded: 0,
+      failed: 1,
+      failures: [{ id: "i-1", reference: "INT-1" }],
+    });
+    const user = userEvent.setup();
+    render(<CloseAllDoneButton projectId="proj-1" />);
+    await user.click(screen.getByRole("button", { name: /关闭全部/ }));
+    await user.click(screen.getByRole("button", { name: "确认关闭" }));
+    await waitFor(() => {
+      expect(toastWarning).toHaveBeenCalledWith("已关闭 0 个问题，1 个失败（INT-1）");
+    });
   });
 });
 

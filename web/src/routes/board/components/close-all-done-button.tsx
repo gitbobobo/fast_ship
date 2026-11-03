@@ -48,8 +48,12 @@ export function CloseAllDoneButton({ projectId }: { projectId: string }) {
           .slice(0, 3)
           .map((f) => f.reference ?? f.id)
           .join("、");
+        // failures[].error 是服务端的分类文案（已跳过/结果未确认/限流/取消），
+        // 必须透传：首条原因直接进 toast，指引（刷新确认/稍后重试）随文案自带，
+        // 只报数量会让用户把部分成功当成整批失败再点一次（INT-185）。
+        const reason = result.failures[0]?.error;
         toast.warning(
-          `已关闭 ${result.succeeded} 个问题，${result.failed} 个失败${refs ? `（${refs}）` : ""}`,
+          `已关闭 ${result.succeeded} 个问题，${result.failed} 个失败${reason ? `：${reason}` : ""}${refs ? `（${refs}）` : ""}`,
         );
       } else {
         toast.success(`已关闭 ${result.succeeded} 个问题`);
