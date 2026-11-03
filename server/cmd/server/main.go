@@ -870,6 +870,7 @@ func createBootIndexes(db *gorm.DB) error {
 	// 行可索引，下次启动自然补上。
 	for _, idx := range []struct{ name, sql, table string }{
 		{"idx_review_assets_created_at", "CREATE INDEX IF NOT EXISTS idx_review_assets_created_at ON review_assets(created_at)", "review_assets"},
+		{"idx_review_assets_storage_path", "CREATE INDEX IF NOT EXISTS idx_review_assets_storage_path ON review_assets(storage_path)", "review_assets"},
 		{"idx_review_runs_asset_head", "CREATE INDEX IF NOT EXISTS idx_review_runs_asset_head ON review_runs(integration_id, repo_full_name, pr_number, head_sha)", "review_runs"},
 	} {
 		exists, err := sqliteTableExists(db, idx.table)

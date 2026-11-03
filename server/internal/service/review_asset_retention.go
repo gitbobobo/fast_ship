@@ -230,7 +230,9 @@ func (s *ReviewService) sweepAssetRetention(now time.Time) {
 	// charged 只记「已扣过预算」的候选：sweeper 对同一候选会问两次（入口
 	// 过滤 + 持闸终检），两次都必须真查库——行可能在上次询问后才插入
 	// （R8 审查意见：旧 allowed 缓存短路了终检，恰好放走快照到取闸之间插
-	// 入的行）；预算记账与安全判定分离，预算只扣一次。
+	// 入的行）；预算记账与安全判定分离，预算只扣一次，终检翻案时退还。
+	// 终检走 idx_review_assets_storage_path（R9 审查意见：无索引时存量清
+	// 理是每候选两次全表扫描，闸内查询还会拖住同 URL 下载）。
 	charged := map[string]bool{}
 	removed := sweeper.SweepUnreferencedEntries(func(binPath string) bool {
 		if _, ok := referenced[binPath]; ok {
@@ -257,6 +259,13 @@ func (s *ReviewService) sweepAssetRetention(now time.Time) {
 			return true
 		}
 		if live > 0 {
+			// 终检翻案（快照到取闸之间插入了行）：退还该候选已扣的预算——
+			// 限量口径是「每轮最多 25 个删除」而非「25 次尝试」（R9 审查意
+			// 见）。闸占超时/删除失败不在此列：预算每轮重置，下轮重扣自愈。
+			if _, done := charged[binPath]; done {
+				delete(charged, binPath)
+				budget++
+			}
 			return true
 		}
 		if _, done := charged[binPath]; !done {
