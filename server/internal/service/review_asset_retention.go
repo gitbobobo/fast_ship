@@ -27,8 +27,10 @@ import (
 const reviewAssetRetention = 30 * 24 * time.Hour
 
 // reviewAssetSweepGrace 无引用字节的 mtime 宽限：覆盖「文件已落盘、行还没
-// 插入」的崩溃窗口与引用快照到删除之间的行插入；宽限必须显著大于探测与
-// 视觉运行之间的排队间隔（每用户在途上限可能压行数小时），24h 取保守值。
+// 插入」的崩溃窗口与引用快照到删除之间的行插入（行插入路径的 mtime 必新：
+// 新下载 rename / 命中 touch，见 proxy.go touchReviewEntry；探测落账即时同
+// 步执行后，R12 时代的「探测与视觉运行间隔数小时」场景已不存在，宽限不再
+// 需要为它留量）。24h 取保守值，显著大于任何插入路径从落盘到落账的耗时。
 const reviewAssetSweepGrace = 24 * time.Hour
 
 // reviewAssetSweepEvery 保留策略扫描周期：与 githubmedia 过期扫描同节奏，
