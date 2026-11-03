@@ -77,7 +77,9 @@ func (c *ProjectCredentials) decryptToken(project *model.Project, tokenID, purpo
 		}
 		c.logger.Error("load github token failed",
 			zap.String("project_id", project.ID), zap.String("token_id", tokenID), zap.Error(err))
-		return nil, errs.ErrInternal
+		// 保留底层错误链：ctx 绑定的读库被取消/超时时，调用方仍能
+		// errors.Is(err, context.Canceled/DeadlineExceeded) 归类（INT-175）。
+		return nil, errs.Wrap(errs.ErrInternal.Code, errs.ErrInternal.Message, err)
 	}
 	tokenBytes, err := crypto.Decrypt(token.TokenEncrypted, []byte(c.cfg.Encryption.Key))
 	if err != nil {

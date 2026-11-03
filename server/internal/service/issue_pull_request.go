@@ -462,12 +462,13 @@ func (s *IssueService) withRepos(ctx context.Context) *IssueService {
 	return &cp
 }
 
-// resolveFailureText 把阶段 1 访问面解析的失败转成单行文案：预算到点或
-// 客户端断开时（resolveCtx.Err() 非 nil），底层 ctx 错误已被凭证/集成读
-// 取归一成 ErrInternal 或脱敏文案，这里统一回到「请求已取消或超时」口径，
-// 与阶段 2 一致；否则按 provider 走原有分类文案。
+// resolveFailureText 把阶段 1 访问面解析的失败转成单行文案：err 本身是
+// ctx 错误且解析预算确实终结时，统一回到「请求已取消或超时」口径（与阶段
+// 2 一致）——底层 ctx 错误已被凭证/集成读取归一成 ErrInternal 或脱敏文
+// 案，这里恢复它；缓存命中的真实配置错误（未配凭证/集成已删）不是 ctx 错
+// 误，保留原文与日志，不被误报成超时（R14）。
 func resolveFailureText(s *IssueService, ctx context.Context, err error, forgejo bool) string {
-	if ctx.Err() != nil {
+	if ctx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
 		return "请求已取消或超时，未继续同步"
 	}
 	if forgejo {
@@ -729,6 +730,11 @@ func forgejoSyncAccessFor(s *IssueService, entries map[string]*forgejoSyncAccess
 // 原样透出；其余（锁忙/IO 等瞬时故障）给中性提示——瞬时故障不能引导用户去
 // 删集成重配。
 func classifyForgeIntegrationReadErr(err error) error {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		// ctx 绑定的读库被取消/超时——原样透出，sync 阶段 1 按 ctx 错误归
+		// 类文案（INT-175），不脱敏成「读取集成失败」误导排查。
+		return err
+	}
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return errors.New("Forgejo 集成不可用或已被删除，请检查集成管理配置")
 	}
