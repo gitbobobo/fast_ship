@@ -937,3 +937,61 @@ func TestAgentScreenshotsMissingFileReportsReason(t *testing.T) {
 		t.Fatalf("error = %+v, want 带原因的错误项", items[0].Error)
 	}
 }
+
+// 上一轮仍在跑（finished_at NULL）是重叠轮次的正常态：它没有可沿用的结
+// 论，不得作为参照——本轮探测行（早于本轮创建、落在其运行窗口内）不算进
+// 上一轮集合，参照回退到最近一个已完成的更早轮次（R14 审查意见）。
+func TestAgentScreenshotsChangedIgnoresRunningPrevRound(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	body := "![a](https://uiv.frp.musiver.cn/f/a.png)\n\n![b](https://uiv.frp.musiver.cn/f/b.png)"
+	e.fake.SetPR(repo, 104, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 104, HeadSHA: "sha-same",
+		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature", Body: body,
+	})
+	combos, err := marshalCombinations([]api.ReviewCombination{testCombo("env-rn")})
+	if err != nil {
+		t.Fatalf("marshal combos: %v", err)
+	}
+	e.enableReview(t, func(s *model.ProjectReviewSettings) {
+		s.VisualCombinationsJSON = combos
+	})
+
+	// 轮次 1：已完成（finished_at = -3h），唯一有结论的参照。
+	r1 := e.seedRun(t, repo, 104, "sha-same", model.ReviewRunCompleted, now.Add(-4*time.Hour))
+	e.svc.db.Model(r1).Updates(map[string]any{
+		"kind": model.ReviewKindVisual, "round_number": 1, "finished_at": now.Add(-3 * time.Hour)})
+	// 轮次 2：仍在跑（finished_at NULL），评论唤醒/manual rerun 的重叠常态。
+	r2 := e.seedRun(t, repo, 104, "sha-same", model.ReviewRunRunning, now.Add(-2*time.Hour))
+	e.svc.db.Model(r2).Updates(map[string]any{"kind": model.ReviewKindVisual, "round_number": 2})
+	// 轮次 3：本轮。
+	curRun := e.seedRun(t, repo, 104, "sha-same", model.ReviewRunQueued, now)
+	e.svc.db.Model(curRun).Updates(map[string]any{"kind": model.ReviewKindVisual, "round_number": 3})
+
+	mk := func(id, url string, createdAt time.Time) *model.ReviewAsset {
+		return &model.ReviewAsset{
+			IntegrationID: model.ForgeIntegrationBuiltinGitHubID, ID: id,
+			RepoFullName: repo, PRNumber: 104, HeadSHA: "sha-same",
+			Position: 0, Label: id, SourceURL: url,
+			StoragePath: "/cache/" + id + ".png", MimeType: "image/png", SizeBytes: 10,
+			CreatedAt: createdAt,
+		}
+	}
+	// a：轮次 1 完成之前就在（参照集合）。
+	if err := e.svc.db.Create(mk("asset-r1", "https://uiv.frp.musiver.cn/f/a.png", now.Add(-5*time.Hour))).Error; err != nil {
+		t.Fatalf("seed r1 asset: %v", err)
+	}
+	// b：轮次 2 在途窗口内落账（探测先行，早于本轮创建）——不得算进参照。
+	if err := e.svc.db.Create(mk("asset-r2probe", "https://uiv.frp.musiver.cn/f/b.png", now.Add(-time.Hour))).Error; err != nil {
+		t.Fatalf("seed r2 asset: %v", err)
+	}
+
+	_, changed, err := e.review.AgentScreenshots(context.Background(), curRun.ID)
+	if err != nil {
+		t.Fatalf("AgentScreenshots: %v", err)
+	}
+	if !changed {
+		t.Fatal("changed = false, want true（在途轮次的探测行不得算进参照集合）")
+	}
+}

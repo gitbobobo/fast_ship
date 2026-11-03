@@ -31,6 +31,14 @@ const (
 	ReviewRunCancelled  ReviewRunStatus = "cancelled"
 )
 
+// ReviewRunActiveStatuses 非终态（在途）状态全集：退役守卫的 SQL 清单从
+// 这里生成（INT-184）。新增非终态状态时把它加进本切片，退役 SELECT/DELETE
+// 的守卫才会跟着覆盖；漏加会让新状态的在途运行在 30 天后连行带文件被退役
+// 回收。终态判断走 Terminal()。
+var ReviewRunActiveStatuses = []ReviewRunStatus{
+	ReviewRunQueued, ReviewRunDispatched, ReviewRunRunning,
+}
+
 // Terminal 是否终态。
 func (s ReviewRunStatus) Terminal() bool {
 	return s == ReviewRunCompleted || s == ReviewRunFailed ||

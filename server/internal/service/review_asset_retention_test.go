@@ -649,3 +649,32 @@ func TestEnsureAssetsRetryFailureKeepsPath(t *testing.T) {
 		t.Fatalf("重下成功未续期: %v", got.RenewedAt)
 	}
 }
+
+// 非终态清单与 model 状态全集的对账（R14 审查意见）：ActiveStatuses 之外
+// 的全部状态必须都是终态——新增在途状态若漏进切片，退役守卫会把它的在
+// 途运行当终态，30 天后连行带文件被退役回收。
+func TestReviewRunActiveStatusesCoverAll(t *testing.T) {
+	all := []model.ReviewRunStatus{
+		model.ReviewRunQueued, model.ReviewRunDispatched, model.ReviewRunRunning,
+		model.ReviewRunCompleted, model.ReviewRunFailed, model.ReviewRunTimedOut,
+		model.ReviewRunCancelled,
+	}
+	active := map[model.ReviewRunStatus]bool{}
+	for _, st := range model.ReviewRunActiveStatuses {
+		if st.Terminal() {
+			t.Fatalf("ActiveStatuses 混入终态状态 %q", st)
+		}
+		active[st] = true
+	}
+	for _, st := range all {
+		if st.Terminal() {
+			if active[st] {
+				t.Fatalf("终态状态 %q 不应出现在 ActiveStatuses", st)
+			}
+			continue
+		}
+		if !active[st] {
+			t.Fatalf("在途状态 %q 未列入 ActiveStatuses（退役守卫不会保护它）", st)
+		}
+	}
+}

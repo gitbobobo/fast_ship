@@ -895,12 +895,16 @@ func (s *ReviewService) AgentScreenshots(ctx context.Context, runID string) ([]a
 		return nil, false, err
 	}
 
-	// changed：本轮指纹与上一轮视觉运行（更早 round）绑定 head 的资产指纹
-	// 比较。上一轮运行只在本 (项目, 集成) 账本内找——资产本身按 (集成, 仓库)
-	// 归一共享，「何时做过视觉审查」属于执行态，按项目分区。
+	// changed：本轮指纹与上一轮**已完成**的视觉运行（更早 round）绑定 head
+	// 的资产指纹比较。上一轮运行只在本 (项目, 集成) 账本内找——资产本身按
+	// (集成, 仓库) 归一共享，「何时做过视觉审查」属于执行态，按项目分区。
+	// 只认已完成的运行（R14 审查）：在途轮次还没有可沿用的结论，finished_at
+	// 为 NULL 的运行不作参照——manual rerun/评论唤醒的重叠轮次里它在途是
+	// 正常态，误当参照会把本轮探测行算进上一轮（changed 误报 false）；没有
+	// 已完成参照时 prevRefs 为空，changed 按默认 true，宁误报变化。
 	changed := true
 	var prevRuns []model.ReviewRun
-	if err := s.db.Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ? AND kind = ? AND round_number < ?",
+	if err := s.db.Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ? AND kind = ? AND round_number < ? AND finished_at IS NOT NULL",
 		run.ProjectID, run.RepoFullName, run.PRNumber, run.IntegrationID, model.ReviewKindVisual, run.RoundNumber).
 		Order("round_number DESC").Limit(1).Find(&prevRuns).Error; err != nil {
 		return nil, false, errs.ErrInternal
@@ -927,10 +931,9 @@ func (s *ReviewService) AgentScreenshots(ctx context.Context, runID string) ([]a
 		// 看在途运行恒开新轮）新轮创建可能早于上一轮完成，只按上一轮完成
 		// 时刻剔除又会把新轮自己的早期行算进上一轮。两者取更早者：上一轮
 		// 完成前且本轮创建前写的行按上一轮证据保留，其余都属本轮，宁误报
-		// 变化不误报未变化。上一轮没有完成时刻（生产不该出现）时退回本轮
-		// 创建时刻。
+		// 变化不误报未变化。参照运行必已完成（查询已过滤），完成时刻非空。
 		prevCutoff := run.CreatedAt
-		if prevRuns[0].FinishedAt != nil && prevRuns[0].FinishedAt.Before(run.CreatedAt) {
+		if prevRuns[0].FinishedAt.Before(run.CreatedAt) {
 			prevCutoff = *prevRuns[0].FinishedAt
 		}
 		prevRefs := make([]screenshotRef, 0, maxScreenshotsPerPR)

@@ -127,12 +127,12 @@ func (s *ReviewService) sweepAssetRetention(now time.Time) {
 	// 队到 busy_timeout 超时（INT-184 R2 审查实测）。批失败即停：引用集
 	// 合已是退役前快照，账与快照一致，本轮不做文件回收（下轮重试）。
 	retired := int64(0)
-	// 非终态集合从 model 常量拼接：新增非终态状态时不会在 SQL 字面量里静
-	// 默漂移（方向审计建议）。常量无注入面。
-	activeStatusLiterals := []string{
-		"'" + string(model.ReviewRunQueued) + "'",
-		"'" + string(model.ReviewRunDispatched) + "'",
-		"'" + string(model.ReviewRunRunning) + "'",
+	// 非终态集合从 model.ReviewRunActiveStatuses 生成（R14 审查意见：切片
+	// 就挂在 model 常量旁并有测试钉住全集，新增在途状态时 SQL 守卫跟着覆
+	// 盖）。切片内容是编译期常量，无注入面。
+	activeStatusLiterals := make([]string, 0, len(model.ReviewRunActiveStatuses))
+	for _, st := range model.ReviewRunActiveStatuses {
+		activeStatusLiterals = append(activeStatusLiterals, "'"+string(st)+"'")
 	}
 	selectSQL := fmt.Sprintf(`SELECT a.id, a.storage_path FROM review_assets a
 		WHERE COALESCE(a.renewed_at, a.created_at) < ?
