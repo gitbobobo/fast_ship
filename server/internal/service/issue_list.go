@@ -211,13 +211,15 @@ const batchCloseGitHubRateLimitRemainingText = "GitHub API 限流，未尝试关
 // 经 WithoutCancel + 独立超时与整批取消解耦；结果只经 results 返回，由调用方
 // 统一落库与计数。命中 API 限流时调用 onRateLimit（可为 nil），由调用方熔断
 // 剩余派发——限流后继续打满配额只会得到重复失败，次级限流还会延长封禁。
-func closeOneGitHubIssue(batchCtx context.Context, client ghclient.Client, issue model.Issue, updateReq ghclient.UpdateIssueRequest, results chan<- githubCloseNetResult, onRateLimit func()) {
+func closeOneGitHubIssue(batchCtx context.Context, client ghclient.Client, issue model.Issue, updateReq ghclient.UpdateIssueRequest, results chan<- githubCloseNetResult, onRateLimit func(), rateLimited *atomic.Bool) {
 	if issue.GitHubMeta == nil {
 		results <- githubCloseNetResult{issue: issue, err: errs.ErrIssueReadOnly}
 		return
 	}
 	if err := batchCtx.Err(); err != nil {
-		results <- githubCloseNetResult{issue: issue, err: err}
+		// 归因当场定死（INT-185 R5）：错误产生于派发阶段，按当时的熔断状态
+		// 归类；drain 阶段不再重读全局标志，避免时序改写失败原因。
+		results <- githubCloseNetResult{issue: issue, err: batchCloseCancelErr(err, rateLimited)}
 		return
 	}
 	patchCtx, cancel := context.WithTimeout(context.WithoutCancel(batchCtx), batchCloseGitHubPatchTimeout)
@@ -365,10 +367,11 @@ func (s *IssueService) closeGitHubIssues(ctx context.Context, project *model.Pro
 			continue
 		}
 		if err := sem.Acquire(dispatchCtx, 1); err != nil {
+			// 归因当场定死（INT-185 R5）：按 Acquire 失败当时的熔断状态归类。
 			if rateLimited.Load() {
 				results <- githubCloseNetResult{issue: issue, err: errs.New(errs.ErrGitHubAPI.Code, batchCloseGitHubRateLimitRemainingText)}
 			} else {
-				results <- githubCloseNetResult{issue: issue, err: err}
+				results <- githubCloseNetResult{issue: issue, err: batchCloseCancelErr(err, &rateLimited)}
 			}
 			continue
 		}
@@ -380,7 +383,7 @@ func (s *IssueService) closeGitHubIssues(ctx context.Context, project *model.Pro
 				if rateLimited.CompareAndSwap(false, true) {
 					dispatchCancel()
 				}
-			})
+			}, &rateLimited)
 		}()
 	}
 
@@ -391,7 +394,7 @@ func (s *IssueService) closeGitHubIssues(ctx context.Context, project *model.Pro
 
 	for res := range results {
 		if res.err != nil {
-			appendBatchCloseFailure(resp, res.issue, classifyGitHubCloseFailure(res.err, &rateLimited))
+			appendBatchCloseFailure(resp, res.issue, res.err)
 			continue
 		}
 		stored, err := s.mirror.upsertGitHubIssue(project.ID, res.updated)
@@ -405,21 +408,6 @@ func (s *IssueService) closeGitHubIssues(ctx context.Context, project *model.Pro
 		}
 		resp.Succeeded++
 	}
-}
-
-// classifyGitHubCloseFailure：worker 守卫/Acquire 以 ctx err 弹回的项，若熔断
-// 已触发，真实原因是限流而不是整批取消——按「未尝试」回报；「结果未确认」
-// 除外（它 Unwrap 后也是 ctx err，但那些 PATCH 已真实发出）。
-func classifyGitHubCloseFailure(err error, rateLimited *atomic.Bool) error {
-	var unconfirmed *batchClosePatchUnconfirmedError
-	if errors.As(err, &unconfirmed) {
-		return err
-	}
-	if rateLimited != nil && rateLimited.Load() &&
-		(errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
-		return errs.New(errs.ErrGitHubAPI.Code, batchCloseGitHubRateLimitRemainingText)
-	}
-	return err
 }
 
 func appendBatchCloseFailure(resp *BatchCloseDoneIssuesResponse, issue model.Issue, err error) {
@@ -446,6 +434,17 @@ func buildBatchCloseFailure(issue model.Issue, err error) BatchCloseDoneIssueFai
 		Reference: api.Ptr(buildIssueReference(issue)),
 		Error:     batchCloseItemError(err),
 	}
+}
+
+// batchCloseCancelErr：派发阶段的 ctx err 按当时的熔断状态当场定死归因——
+// 熔断已触发→「限流未尝试」；否则保留原始 ctx err（整批截止/调用方取消）。
+// drain 阶段不再重读全局标志，避免同一批次的归因随 goroutine 时序漂移
+// （INT-185 R5）。
+func batchCloseCancelErr(err error, rateLimited *atomic.Bool) error {
+	if rateLimited != nil && rateLimited.Load() {
+		return errs.New(errs.ErrGitHubAPI.Code, batchCloseGitHubRateLimitRemainingText)
+	}
+	return err
 }
 
 // batchClosePatchUnconfirmedError 标记「PATCH 已发出但结果未确认」：请求可能

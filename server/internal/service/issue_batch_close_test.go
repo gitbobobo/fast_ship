@@ -273,7 +273,7 @@ func TestCloseOneGitHubIssue_SkipsPatchWhenBatchCanceled(t *testing.T) {
 
 	results := make(chan githubCloseNetResult, 1)
 	issue := model.Issue{Source: model.IssueSourceGitHub, GitHubMeta: &model.IssueGitHubMeta{Number: 7}}
-	closeOneGitHubIssue(ctx, fake, issue, ghclient.UpdateIssueRequest{}, results, nil)
+	closeOneGitHubIssue(ctx, fake, issue, ghclient.UpdateIssueRequest{}, results, nil, nil)
 
 	res := <-results
 	if res.err == nil || !errors.Is(res.err, context.Canceled) {
@@ -465,6 +465,29 @@ func TestAppendBatchCloseFailure_ReservesFirstOfEachCategoryPastCap(t *testing.T
 	last := resp.Failures[len(resp.Failures)-1]
 	if last.Id != "rate-1" || last.Error != batchCloseGitHubRateLimitText {
 		t.Fatalf("expected rate-1 sample kept, got %+v", last)
+	}
+}
+
+// INT-185（复审 R5）：派发阶段的 ctx err 按当时的熔断状态当场定死归因，
+// drain 阶段不再重读全局标志——同一批次的失败原因不随 goroutine 时序漂移。
+func TestBatchCloseCancelErr_AttributedAtProductionTime(t *testing.T) {
+	var flag atomic.Bool
+	// 未熔断：保留原始 ctx err（batchCloseItemError 走「未开始」文案）。
+	got := batchCloseCancelErr(context.DeadlineExceeded, &flag)
+	if got != context.DeadlineExceeded {
+		t.Fatalf("untripped flag must keep raw ctx err, got %v", got)
+	}
+	if batchCloseItemError(got) != "请求已取消或超时，未继续关闭" {
+		t.Fatalf("unexpected copy: %q", batchCloseItemError(got))
+	}
+	// 熔断已触发：当场归因为限流未尝试。
+	flag.Store(true)
+	if batchCloseItemError(batchCloseCancelErr(context.DeadlineExceeded, &flag)) != batchCloseGitHubRateLimitRemainingText {
+		t.Fatalf("tripped flag must attribute to rate limit remaining")
+	}
+	// nil 标志等价于未熔断。
+	if got := batchCloseCancelErr(context.Canceled, nil); got != context.Canceled {
+		t.Fatalf("nil flag must keep raw ctx err, got %v", got)
 	}
 }
 
