@@ -172,14 +172,18 @@ export function CloseAllDoneButton({ projectId }: { projectId: string }) {
 // 导出仅供单测覆盖文案分支。
 export async function formatBatchCloseError(error: unknown): Promise<string> {
   if (error instanceof HTTPError) {
+    const status = error.response.status;
+    // 任何 5xx（含服务端自身 500 带 JSON 正文、网关 502/503/504）都可能已
+    // 在服务端关掉一部分：一律提示刷新确认，不能只回具体文案让用户错过
+    // 已生效部分（INT-185 R9）。body.message 可作细节保留在文案里。
+    if (status >= 500) {
+      const body = await error.response.json<ApiResponse<unknown>>().catch(() => null);
+      return body?.message
+        ? `${REQUEST_UNCONFIRMED_COPY}（${body.message}）`
+        : REQUEST_UNCONFIRMED_COPY;
+    }
     const body = await error.response.json<ApiResponse<unknown>>().catch(() => null);
     if (body?.message) return body.message;
-    // 网关超时（反代 502/503/504 截断长批次）不带 JSON 正文：服务端可能已
-    // 关闭一部分，与 ky 超时同样按「刷新确认」处理，不能报笼统失败（INT-185）。
-    const status = error.response.status;
-    if (status === 502 || status === 503 || status === 504) {
-      return REQUEST_UNCONFIRMED_COPY;
-    }
   }
   // fetch 网络中断抛 TypeError：请求是否到达服务端未知，同样按刷新确认。
   if (error instanceof TypeError) {

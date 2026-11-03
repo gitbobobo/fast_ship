@@ -228,6 +228,13 @@ func closeOneGitHubIssue(batchCtx context.Context, client ghclient.Client, issue
 	if guard != nil {
 		ok, gerr := guard(batchCtx, issue.ID)
 		if gerr != nil {
+			// 守卫带 batchCtx：批次被取消/熔断/超时时守卫本身也返回 ctx err，
+			// 要按「未开始/限流」当场归因，不能误报为「复核失败」内部故障
+			// （INT-185 R9）。
+			if errors.Is(gerr, context.Canceled) || errors.Is(gerr, context.DeadlineExceeded) {
+				results <- githubCloseNetResult{issue: issue, err: batchCloseCancelErr(gerr, rateLimited)}
+				return
+			}
 			results <- githubCloseNetResult{issue: issue, err: errs.New(errs.ErrInternal.Code, "复核本地状态失败，未关闭该项")}
 			return
 		}

@@ -546,6 +546,40 @@ func TestCloseOneGitHubIssue_GuardSkipsBeforePatch(t *testing.T) {
 	}
 }
 
+// INT-185（复审 R9）：守卫在途时批次被取消/熔断——守卫因带 batchCtx 返回
+// ctx err，要按「未开始/限流」归因，不能误报为「复核本地状态失败」。
+func TestCloseOneGitHubIssue_GuardCtxCancelAttribution(t *testing.T) {
+	issue := model.Issue{Source: model.IssueSourceGitHub, GitHubMeta: &model.IssueGitHubMeta{Number: 11}}
+	fake := &fakeIssueGitHubClient{}
+
+	// 未熔断：守卫返回 ctx.Canceled（批次被用户取消/超时），按取消归因。
+	cancelledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var rateLimited atomic.Bool
+	results := make(chan githubCloseNetResult, 1)
+	closeOneGitHubIssue(cancelledCtx, fake, issue, ghclient.UpdateIssueRequest{}, results, nil, &rateLimited,
+		func(ctx context.Context, id string) (bool, error) { return false, ctx.Err() })
+	res := <-results
+	if res.err == nil || !errors.Is(res.err, context.Canceled) {
+		t.Fatalf("guard ctx-cancel must attribute to cancellation (ctx err passthrough), got %v", res.err)
+	}
+
+	// 熔断中：守卫返回 DeadlineExceeded（限流熔断或整批截止），归限流文案。
+	rateLimited.Store(true)
+	timedOut, cancel2 := context.WithTimeout(context.Background(), -time.Second)
+	defer cancel2()
+	results = make(chan githubCloseNetResult, 1)
+	closeOneGitHubIssue(timedOut, fake, issue, ghclient.UpdateIssueRequest{}, results, nil, &rateLimited,
+		func(ctx context.Context, id string) (bool, error) { return false, ctx.Err() })
+	res = <-results
+	if res.err == nil || batchCloseItemError(res.err) != batchCloseGitHubRateLimitRemainingText {
+		t.Fatalf("guard ctx-deadline under fuse must attribute to rate-limit, got %v", res.err)
+	}
+	if len(fake.recordedUpdateIssueCalls()) != 0 {
+		t.Fatal("ctx-cancelled guard must never PATCH")
+	}
+}
+
 func TestIssueServiceBatchCloseDoneIssues_MixedSourcesGitHubFailureKeepsInternalClosed(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")

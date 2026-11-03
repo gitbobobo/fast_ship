@@ -184,9 +184,27 @@ describe("formatBatchCloseError", () => {
 
   // INT-185（复审 R4）：2xx 响应体截断/非 JSON 时 ky 的 .json() 抛
   // SyntaxError——请求已到达服务端、关闭可能已生效，按刷新确认处理。
-  it("maps 2xx response parse failures to the refresh hint", async () => {
-    await expect(formatBatchCloseError(new SyntaxError("Unexpected token < in JSON"))).resolves.toBe(
-      "请求超时：部分问题可能已关闭，请刷新看板确认结果",
+  // INT-185（复审 R9）：服务端自身 500 带 JSON 正文（「服务器内部错误」）
+  // 同样可能已关掉一部分——先按 5xx 走刷新确认，message 作细节保留。
+  it("maps 5xx with JSON body to the refresh hint", async () => {
+    const request = new Request("https://fast-ship.test/api/projects/p1/issues/batch-close", {
+      method: "POST",
+    });
+    const options = { method: "POST" } as NormalizedOptions;
+    const body = new Response(JSON.stringify({ message: "服务器内部错误" }), {
+      status: 500,
+      headers: { "Content-Type": "application/json" },
+    });
+    await expect(formatBatchCloseError(new HTTPError(body, request, options))).resolves.toBe(
+      "请求超时：部分问题可能已关闭，请刷新看板确认结果（服务器内部错误）",
+    );
+    // 4xx 带 message 仍走具体文案。
+    const clientErr = new Response(JSON.stringify({ message: "参数错误" }), {
+      status: 400,
+      headers: { "Content-Type": "application/json" },
+    });
+    await expect(formatBatchCloseError(new HTTPError(clientErr, request, options))).resolves.toBe(
+      "参数错误",
     );
   });
 });
