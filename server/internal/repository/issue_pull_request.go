@@ -60,7 +60,9 @@ func (r *IssuePullRequestRepository) Upsert(link *model.IssuePullRequest) error 
 		})
 	}
 	// synced_at 取两者较大值：守卫命中时保留库内较新时间，不随旧快照回
-	// 拨；updated_at 同口径——行内容没变就不该刷新修改时间。
+	// 拨；updated_at 同口径——快照字段没变就不该刷新修改时间。已知例外：
+	// 守卫拦下快照但 link_origin 升级/integration 换绑仍生效时，行内容变
+	// 了而 updated_at 不刷新——这两列的身份语义重于修改时间，属有意取舍。
 	set = append(set,
 		clause.Assignment{
 			Column: clause.Column{Name: "synced_at"},

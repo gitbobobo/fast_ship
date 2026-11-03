@@ -226,6 +226,13 @@ func (s *IssueService) SyncIssuePullRequests(ctx context.Context, issueID, userI
 
 	links, err := resolved.pullRequestRepo.ListByIssueID(issue.ID)
 	if err != nil {
+		s.logger.Error("sync 关联 PR 列表读取失败",
+			zap.String("issue_id", issueID), zap.Error(err))
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			// 预算到点/借连接超时与真实存储故障分开报（R19），不然用户
+			// 只看到通用 500 无法判断该重试还是查库。
+			return nil, errs.New(errs.ErrInternal.Code, "读取关联列表超时，请稍后重试")
+		}
 		return nil, errs.ErrInternal
 	}
 
@@ -422,6 +429,9 @@ func (s *IssueService) SyncIssuePullRequests(ctx context.Context, issueID, userI
 				current, findErr := saveRepo.FindByID(issue.ID, link.ID)
 				switch {
 				case findErr == nil:
+					s.logger.Info("sync 关联 PR stale 行读回现行数据",
+						zap.String("link_id", link.ID),
+						zap.Time("stored_synced_at", current.SyncedAt))
 					result.Items = append(result.Items, toIssuePullRequestResponse(*current))
 				case errors.Is(findErr, context.Canceled) || errors.Is(findErr, context.DeadlineExceeded):
 					// 写回预算到点连读回也被截断——数据没写进库，文案与写回
@@ -582,16 +592,27 @@ func (s *IssueService) loadIssueAndProject(issueID, userID string) (*model.Issue
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, nil, errs.ErrIssueNotFound
 		}
-		return nil, nil, errs.ErrInternal
+		s.logger.Error("load issue failed", zap.String("issue_id", issueID), zap.Error(err))
+		return nil, nil, loadStoreErr(err)
 	}
 	project, err := s.projectRepo.FindByID(issue.ProjectID, userID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, nil, errs.ErrProjectNotFound
 		}
-		return nil, nil, errs.ErrInternal
+		s.logger.Error("load project failed", zap.String("issue_id", issueID), zap.Error(err))
+		return nil, nil, loadStoreErr(err)
 	}
 	return issue, project, nil
+}
+
+// loadStoreErr 前置读库失败归类：ctx 取消/预算到点与真实存储故障分开报
+// （R19），不然用户只看到通用 500 无法判断该重试还是查库。
+func loadStoreErr(err error) error {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return errs.New(errs.ErrInternal.Code, "读取超时，请稍后重试")
+	}
+	return errs.ErrInternal
 }
 
 // pullRequestClient 为 attach/sync 构造 PR 读取客户端，并返回本次使用的凭证来源。
