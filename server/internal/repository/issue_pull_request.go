@@ -39,13 +39,37 @@ func (r *IssuePullRequestRepository) WithContext(ctx context.Context) *IssuePull
 // 的快照抹掉，那会让 sync 永久报缺快照）。host_key 不在冲突更新列内——它参
 // 与身份判定，不随写入漂移（集成改 base_url 由 sync 的主机比对拦下）。link_
 // origin 只升不降——手动 attach 可把 synced 行升级为 manual，反向不允许（避
-// 免同步投影把手动关联降级、继而被 DeleteMissingSynced 清掉）。
+// 免同步投影把手动关联降级、继而被 DeleteMissingSynced 清掉）。远端快照字段
+// 受 synced_at 守卫（excluded 更旧则保留库内值），但 link_origin 与
+// forge_integration_id 不受守卫——手动 attach 的升级与换绑永不被旧快照拦下。
+// syncedColumns 是远端快照字段：冲突更新时受 synced_at 守卫约束——
+// excluded.synced_at 更旧时保留库内值（INT-175 R13，守卫逐列走 CASE 而
+// 非整条 WHERE，这样 link_origin 的 manual 升级与 forge_integration_id
+// 换绑不会被旧快照连带丢掉）。
+var syncedColumns = []string{
+	"html_url", "title", "state", "is_draft", "author_login",
+	"head_ref", "base_ref", "merged_at", "closed_at",
+}
+
 func (r *IssuePullRequestRepository) Upsert(link *model.IssuePullRequest) error {
-	set := clause.AssignmentColumns([]string{
-		"html_url", "title", "state", "is_draft", "author_login",
-		"head_ref", "base_ref", "merged_at", "closed_at", "synced_at", "updated_at",
-	})
+	set := make(clause.Set, 0, len(syncedColumns)+5)
+	for _, col := range syncedColumns {
+		set = append(set, clause.Assignment{
+			Column: clause.Column{Name: col},
+			Value:  gorm.Expr("CASE WHEN excluded.synced_at >= issue_pull_requests.synced_at THEN excluded." + col + " ELSE issue_pull_requests." + col + " END"),
+		})
+	}
+	// synced_at 取两者较大值：守卫命中时保留库内较新时间，不随旧快照回
+	// 拨；updated_at 同口径——行内容没变就不该刷新修改时间。
 	set = append(set,
+		clause.Assignment{
+			Column: clause.Column{Name: "synced_at"},
+			Value:  gorm.Expr("CASE WHEN excluded.synced_at >= issue_pull_requests.synced_at THEN excluded.synced_at ELSE issue_pull_requests.synced_at END"),
+		},
+		clause.Assignment{
+			Column: clause.Column{Name: "updated_at"},
+			Value:  gorm.Expr("CASE WHEN excluded.synced_at >= issue_pull_requests.synced_at THEN excluded.updated_at ELSE issue_pull_requests.updated_at END"),
+		},
 		clause.Assignment{
 			Column: clause.Column{Name: "forge_integration_id"},
 			Value:  gorm.Expr("CASE WHEN excluded.forge_integration_id <> '' THEN excluded.forge_integration_id ELSE issue_pull_requests.forge_integration_id END"),
@@ -63,15 +87,6 @@ func (r *IssuePullRequestRepository) Upsert(link *model.IssuePullRequest) error 
 			{Name: "number"},
 		},
 		DoUpdates: set,
-		// 冲突更新带 synced_at 守卫（INT-175 R12）：attach 与并发 sync 交错
-		// 时，fetch 更晚结束的一方不能把已写入的更新快照覆盖回旧值。守
-		// 卫拦下的冲突走「数据未更新但行存在」路径——调用方按 FindByUnique
-		// 读回现行行，幂等语义不变。
-		Where: clause.Where{
-			Exprs: []clause.Expression{
-				clause.Expr{SQL: "issue_pull_requests.synced_at <= excluded.synced_at"},
-			},
-		},
 	}).Create(link).Error
 }
 
