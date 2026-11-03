@@ -61,6 +61,9 @@ type IssueService struct {
 	forgeSource          issueForgeSource
 	newForgejoPRReader   func(httpClient *http.Client, apiBase, token string) forgePRReader
 	mirror               *issueMirror
+	// batchCloseStorer 批量关闭的本地落地注入点（仅测试用，INT-185 R11）；
+	// 生产为 nil，回落到 s.mirror。
+	batchCloseStorer batchCloseMirrorStorer
 }
 
 type IssueListFilters struct {

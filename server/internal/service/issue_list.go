@@ -230,9 +230,21 @@ func closeOneGitHubIssue(batchCtx context.Context, client ghclient.Client, issue
 		if gerr != nil {
 			// 守卫带 batchCtx：批次被取消/熔断/超时时守卫本身也返回 ctx err，
 			// 要按「未开始/限流」当场归因，不能误报为「复核失败」内部故障
-			// （INT-185 R9）。
-			if errors.Is(gerr, context.Canceled) || errors.Is(gerr, context.DeadlineExceeded) {
-				results <- githubCloseNetResult{issue: issue, err: batchCloseCancelErr(gerr, rateLimited)}
+			// （INT-185 R9）。驱动/连接池也可能把取消包装成非 ctx 错误，因此
+			// 除 ctx err 判定外再回读批次状态：批次已死（ctx done 或已熔断）
+			// 一律按取消归因，仅批次仍存活才报内部复核失败（INT-185 R11）。
+			if errors.Is(gerr, context.Canceled) || errors.Is(gerr, context.DeadlineExceeded) ||
+				batchCtx.Err() != nil || (rateLimited != nil && rateLimited.Load()) {
+				// gerr 是 ctx err 时透传；批次 ctx 仍活但已熔断（限流）、守卫返回
+				// 非 ctx 包装错误时用 gerr 兜底，保证 err 非 nil。
+				src := gerr
+				if !errors.Is(gerr, context.Canceled) && !errors.Is(gerr, context.DeadlineExceeded) {
+					src = batchCtx.Err()
+					if src == nil {
+						src = context.Canceled
+					}
+				}
+				results <- githubCloseNetResult{issue: issue, err: batchCloseCancelErr(src, rateLimited)}
 				return
 			}
 			results <- githubCloseNetResult{issue: issue, err: errs.New(errs.ErrInternal.Code, "复核本地状态失败，未关闭该项")}
@@ -422,6 +434,10 @@ func (s *IssueService) closeGitHubIssues(ctx context.Context, project *model.Pro
 		close(results)
 	}()
 
+	storer := s.batchCloseStorer
+	if storer == nil {
+		storer = s.mirror
+	}
 	for res := range results {
 		if res.err != nil {
 			appendBatchCloseFailure(resp, res.issue, res.err)
@@ -430,17 +446,24 @@ func (s *IssueService) closeGitHubIssues(ctx context.Context, project *model.Pro
 		// PATCH 已成功（res.err==nil 且 updated 有值），本地落地失败——GitHub
 		// 侧已关闭而本地可能仍 open，必须按「结果未确认」提示刷新，不能用
 		// 普通「服务器内部错误」让用户以为没关成功而重复操作（INT-185 R10）。
-		stored, err := s.mirror.upsertGitHubIssue(project.ID, res.updated)
+		stored, err := storer.upsertGitHubIssue(project.ID, res.updated)
 		if err != nil {
 			appendBatchCloseFailure(resp, res.issue, &batchClosePatchUnconfirmedError{err: err})
 			continue
 		}
-		if err := s.mirror.markCollectionsStaleAfterPush(stored.ID); err != nil {
+		if err := storer.markCollectionsStaleAfterPush(stored.ID); err != nil {
 			appendBatchCloseFailure(resp, res.issue, &batchClosePatchUnconfirmedError{err: err})
 			continue
 		}
 		resp.Succeeded++
 	}
+}
+
+// batchCloseMirrorStorer 抽象「PATCH 成功后本地落地」的两个调用点，便于测试
+// 注入失败路径（INT-185 R11 Note）。生产路径由 *issueMirror 实现。
+type batchCloseMirrorStorer interface {
+	upsertGitHubIssue(projectID string, item *ghclient.Issue) (*model.Issue, error)
+	markCollectionsStaleAfterPush(issueID string) error
 }
 
 func appendBatchCloseFailure(resp *BatchCloseDoneIssuesResponse, issue model.Issue, err error) {

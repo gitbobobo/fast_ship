@@ -844,3 +844,73 @@ func TestIssueMirrorUpsertGitHubIssue_RejectsEmptyPayload(t *testing.T) {
 		t.Fatalf("guard must not write rows, got %d issues", issues)
 	}
 }
+
+// INT-185（复审 R11 Note）：PATCH 成功但本地落地失败（upsertGitHubIssue/
+// markCollectionsStaleAfterPush 返回 error）必须归「结果未确认」——GitHub 已关、
+// 本地可能仍 open，按普通内部错误会让用户以为没关成功而重复操作。注入一个
+// 返回错误的窄 storer，断言计入 failed 且文案为刷新确认类。
+func TestIssueServiceBatchCloseDoneIssues_GitHubLocalPersistFailureIsUnconfirmed(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID)
+
+	fake := &fakeIssueGitHubClient{}
+	svc.issueService.newClient = func(token, owner, repo string) ghclient.Client {
+		return fake
+	}
+	metas := seedGitHubDoneIssuesForBatchClose(t, svc, project.ID, 2, fake)
+
+	// 注入落地失败：upsert 返回 error。
+	failing := &failingBatchCloseStorer{upsertErr: errors.New("disk full")}
+	svc.issueService.batchCloseStorer = failing
+	defer func() { svc.issueService.batchCloseStorer = nil }()
+
+	resp, err := svc.issueService.BatchCloseDoneIssues(context.Background(), project.ID, user.ID, string(model.IssueSourceGitHub))
+	if err != nil {
+		t.Fatalf("batch close: %v", err)
+	}
+	if resp.Failed != 2 || resp.Succeeded != 0 {
+		t.Fatalf("all github rows must fail on upsert, got %+v", resp)
+	}
+	for i, f := range resp.Failures {
+		if f.Error != "关闭结果未确认：GitHub 侧可能已关闭，请刷新查看" {
+			t.Fatalf("failure %d must be the refresh-confirm copy, got %q", i, f.Error)
+		}
+	}
+	// PATCH 确实发出过（远端已关，正是要提示刷新的原因）。
+	if got := len(fake.recordedUpdateIssueCalls()); got != 2 {
+		t.Fatalf("expected 2 PATCH calls, got %d", got)
+	}
+	_ = metas
+
+	// markStale 失败同样归未确认。
+	failing2 := &failingBatchCloseStorer{staleErr: errors.New("stale flag failed")}
+	svc.issueService.batchCloseStorer = failing2
+	resp2, err := svc.issueService.BatchCloseDoneIssues(context.Background(), project.ID, user.ID, string(model.IssueSourceGitHub))
+	if err != nil {
+		t.Fatalf("batch close 2: %v", err)
+	}
+	for i, f := range resp2.Failures {
+		if f.Error != "关闭结果未确认：GitHub 侧可能已关闭，请刷新查看" {
+			t.Fatalf("stale failure %d must be the refresh-confirm copy, got %q", i, f.Error)
+		}
+	}
+}
+
+// failingBatchCloseStorer 测试注入：PATCH 成功后本地落地的两个调用点按字段
+// 返回错误（INT-185 R11）。upsertErr 命中时先返回 upsert 错误。
+type failingBatchCloseStorer struct {
+	upsertErr error
+	staleErr  error
+}
+
+func (f *failingBatchCloseStorer) upsertGitHubIssue(projectID string, item *ghclient.Issue) (*model.Issue, error) {
+	if f.upsertErr != nil {
+		return nil, f.upsertErr
+	}
+	return &model.Issue{ID: "stored"}, nil
+}
+
+func (f *failingBatchCloseStorer) markCollectionsStaleAfterPush(issueID string) error {
+	return f.staleErr
+}
