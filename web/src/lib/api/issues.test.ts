@@ -54,7 +54,11 @@ describe("issueApi pull request links", () => {
 
     issueApi.syncPullRequests("issue-1");
 
-    expect(post).toHaveBeenCalledWith("issues/issue-1/pull-requests/sync");
+    // 拉取整批预算 30s + 写回/读库余量，客户端 120s 等满——不能靠
+    // ky 默认 10s 提前掐断服务端 ctx（INT-175）。
+    expect(post).toHaveBeenCalledWith("issues/issue-1/pull-requests/sync", {
+      timeout: 120_000,
+    });
   });
 
   it("deletes the link by id", async () => {

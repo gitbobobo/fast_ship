@@ -47,7 +47,7 @@ func (h *IssueHandler) SyncPullRequests(c *gin.Context) {
 	issueID := c.Param("iid")
 	userID := middleware.GetUserID(c)
 
-	result, err := h.issueService.SyncIssuePullRequests(issueID, userID)
+	result, err := h.issueService.SyncIssuePullRequests(c.Request.Context(), issueID, userID)
 	if err != nil {
 		middleware.HandleAppError(c, err)
 		return
