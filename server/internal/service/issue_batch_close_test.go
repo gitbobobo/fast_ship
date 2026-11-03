@@ -531,52 +531,83 @@ func TestCloseOneGitHubIssue_GuardSkipsBeforePatch(t *testing.T) {
 		t.Fatalf("expected exactly one PATCH, got %d", len(fake.recordedUpdateIssueCalls()))
 	}
 
-	// 守卫通过但批次已被取消：守卫后再复核（R8），按「未开始」计数不发 PATCH。
-	cancelledCtx, cancel := context.WithCancel(context.Background())
-	cancel()
-	results = make(chan githubCloseNetResult, 1)
-	closeOneGitHubIssue(cancelledCtx, fake, issue, ghclient.UpdateIssueRequest{}, results, nil, nil,
-		func(ctx context.Context, id string) (bool, error) { return true, nil })
-	res = <-results
-	if res.err == nil {
-		t.Fatal("cancelled batch must not PATCH")
-	}
-	if len(fake.recordedUpdateIssueCalls()) != 1 {
-		t.Fatalf("cancelled batch must not issue another PATCH, got %d", len(fake.recordedUpdateIssueCalls()))
-	}
 }
 
-// INT-185（复审 R9）：守卫在途时批次被取消/熔断——守卫因带 batchCtx 返回
-// ctx err，要按「未开始/限流」归因，不能误报为「复核本地状态失败」。
+// INT-185（复审 R9/R10）：守卫真正执行时批次被取消/熔断——守卫因带
+// batchCtx 返回 ctx err，要按「未开始/限流」归因，不能误报为「复核本地
+// 状态失败」。守卫阻塞到批次取消后才返回 ctx.Err()，保证进入守卫出错
+// 分支而非顶部 batchCtx.Err() 提前返回（R10 Note：之前用例在调用前就
+// cancel，guard 从未执行）。
 func TestCloseOneGitHubIssue_GuardCtxCancelAttribution(t *testing.T) {
 	issue := model.Issue{Source: model.IssueSourceGitHub, GitHubMeta: &model.IssueGitHubMeta{Number: 11}}
 	fake := &fakeIssueGitHubClient{}
 
-	// 未熔断：守卫返回 ctx.Canceled（批次被用户取消/超时），按取消归因。
-	cancelledCtx, cancel := context.WithCancel(context.Background())
-	cancel()
+	// 守卫执行中批次被取消（未熔断）：守卫返回 ctx.Canceled，按取消归因。
+	batchCtx, cancel := context.WithCancel(context.Background())
+	guardStarted := make(chan struct{})
 	var rateLimited atomic.Bool
 	results := make(chan githubCloseNetResult, 1)
-	closeOneGitHubIssue(cancelledCtx, fake, issue, ghclient.UpdateIssueRequest{}, results, nil, &rateLimited,
-		func(ctx context.Context, id string) (bool, error) { return false, ctx.Err() })
+	go func() {
+		closeOneGitHubIssue(batchCtx, fake, issue, ghclient.UpdateIssueRequest{}, results, nil, &rateLimited,
+			func(ctx context.Context, id string) (bool, error) {
+				close(guardStarted)
+				<-ctx.Done() // 阻塞到批次取消后返回 ctx err
+				return false, ctx.Err()
+			})
+	}()
+	<-guardStarted
+	cancel()
 	res := <-results
 	if res.err == nil || !errors.Is(res.err, context.Canceled) {
 		t.Fatalf("guard ctx-cancel must attribute to cancellation (ctx err passthrough), got %v", res.err)
 	}
 
-	// 熔断中：守卫返回 DeadlineExceeded（限流熔断或整批截止），归限流文案。
-	rateLimited.Store(true)
-	timedOut, cancel2 := context.WithTimeout(context.Background(), -time.Second)
-	defer cancel2()
+	// 守卫执行中批次被限流熔断：守卫返回 DeadlineExceeded，归限流文案。
+	batchCtx2, cancel2 := context.WithCancel(context.Background())
+	guardStarted2 := make(chan struct{})
+	var rateLimited2 atomic.Bool
+	rateLimited2.Store(true)
 	results = make(chan githubCloseNetResult, 1)
-	closeOneGitHubIssue(timedOut, fake, issue, ghclient.UpdateIssueRequest{}, results, nil, &rateLimited,
-		func(ctx context.Context, id string) (bool, error) { return false, ctx.Err() })
+	go func() {
+		closeOneGitHubIssue(batchCtx2, fake, issue, ghclient.UpdateIssueRequest{}, results, nil, &rateLimited2,
+			func(ctx context.Context, id string) (bool, error) {
+				close(guardStarted2)
+				<-ctx.Done()
+				return false, context.DeadlineExceeded
+			})
+	}()
+	<-guardStarted2
+	cancel2()
 	res = <-results
 	if res.err == nil || batchCloseItemError(res.err) != batchCloseGitHubRateLimitRemainingText {
 		t.Fatalf("guard ctx-deadline under fuse must attribute to rate-limit, got %v", res.err)
 	}
 	if len(fake.recordedUpdateIssueCalls()) != 0 {
 		t.Fatal("ctx-cancelled guard must never PATCH")
+	}
+
+	// 守卫通过但返回后批次才取消：走守卫后第二次 batchCtx.Err() 复核，
+	// 按「未开始」计数不发 PATCH（覆盖 issue_list.go:248-252 复核分支）。
+	batchCtx3, cancel3 := context.WithCancel(context.Background())
+	guardReturned := make(chan struct{})
+	var rateLimited3 atomic.Bool
+	results = make(chan githubCloseNetResult, 1)
+	go func() {
+		closeOneGitHubIssue(batchCtx3, fake, issue, ghclient.UpdateIssueRequest{}, results, nil, &rateLimited3,
+			func(ctx context.Context, id string) (bool, error) {
+				close(guardReturned)
+				<-ctx.Done() // 等批次取消后才返回 true，让第二次 ctx 复核命中
+				return true, nil
+			})
+	}()
+	<-guardReturned
+	cancel3()
+	res = <-results
+	if res.err == nil || !errors.Is(res.err, context.Canceled) {
+		t.Fatalf("post-guard cancellation must attribute to cancellation, got %v", res.err)
+	}
+	if len(fake.recordedUpdateIssueCalls()) != 0 {
+		t.Fatal("post-guard-cancelled item must never PATCH")
 	}
 }
 

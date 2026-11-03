@@ -427,13 +427,16 @@ func (s *IssueService) closeGitHubIssues(ctx context.Context, project *model.Pro
 			appendBatchCloseFailure(resp, res.issue, res.err)
 			continue
 		}
+		// PATCH 已成功（res.err==nil 且 updated 有值），本地落地失败——GitHub
+		// 侧已关闭而本地可能仍 open，必须按「结果未确认」提示刷新，不能用
+		// 普通「服务器内部错误」让用户以为没关成功而重复操作（INT-185 R10）。
 		stored, err := s.mirror.upsertGitHubIssue(project.ID, res.updated)
 		if err != nil {
-			appendBatchCloseFailure(resp, res.issue, err)
+			appendBatchCloseFailure(resp, res.issue, &batchClosePatchUnconfirmedError{err: err})
 			continue
 		}
 		if err := s.mirror.markCollectionsStaleAfterPush(stored.ID); err != nil {
-			appendBatchCloseFailure(resp, res.issue, err)
+			appendBatchCloseFailure(resp, res.issue, &batchClosePatchUnconfirmedError{err: err})
 			continue
 		}
 		resp.Succeeded++
