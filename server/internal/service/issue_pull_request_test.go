@@ -1305,27 +1305,20 @@ func TestIssueServiceSyncPullRequests_ConcurrentFetch(t *testing.T) {
 	}
 	stubPullRequestClient(t, svc, fake, "gh-token")
 
-	start := time.Now()
 	result, err := svc.issueService.SyncIssuePullRequests(nil, issue.ID, user.ID)
-	elapsed := time.Since(start)
 	if err != nil {
 		t.Fatalf("sync: %v", err)
 	}
 	if len(result.Items) != linkCount || len(result.Failures) != 0 {
 		t.Fatalf("expected %d items and no failures, got %+v", linkCount, result)
 	}
+	// 峰值并发断言足以区分串行/并发（串行实现 max 恒为 1）；不再用墙
+	// 钟上界——慢机/-race 抖动会把它打成偶发红灯（R26）。
 	if max := atomic.LoadInt32(&fake.getPullRequestMax); max < 2 {
 		t.Fatalf("expected concurrent fetches, max in-flight = %d", max)
 	}
 	if max := atomic.LoadInt32(&fake.getPullRequestMax); max > pullRequestSyncConcurrency {
 		t.Fatalf("expected concurrency capped at %d, got %d", pullRequestSyncConcurrency, max)
-	}
-	// 确定性证据是峰值并发（上面已断言 >1 且 ≤上限）；墙钟只给极宽松
-	// 上界——串行累加 8×50ms=400ms，放宽到其量级内即证明没有退化回
-	// 串行，慢机/-race 抖动不会误报。
-	serialEstimate := time.Duration(linkCount) * 50 * time.Millisecond
-	if elapsed > serialEstimate {
-		t.Fatalf("expected concurrent fetch under serial %v, took %v", serialEstimate, elapsed)
 	}
 }
 
