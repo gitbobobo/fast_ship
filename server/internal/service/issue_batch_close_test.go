@@ -274,7 +274,7 @@ func TestCloseOneGitHubIssue_SkipsPatchWhenBatchCanceled(t *testing.T) {
 
 	results := make(chan githubCloseNetResult, 1)
 	issue := model.Issue{Source: model.IssueSourceGitHub, GitHubMeta: &model.IssueGitHubMeta{Number: 7}}
-	closeOneGitHubIssue(ctx, fake, issue, ghclient.UpdateIssueRequest{}, results, nil, nil, nil)
+	closeOneGitHubIssue(ctx, fake, issue, ghclient.UpdateIssueRequest{}, results, nil, nil, nil, nil)
 
 	res := <-results
 	if res.err == nil || !errors.Is(res.err, context.Canceled) {
@@ -500,7 +500,7 @@ func TestCloseOneGitHubIssue_GuardSkipsBeforePatch(t *testing.T) {
 	fake := &fakeIssueGitHubClient{}
 	results := make(chan githubCloseNetResult, 1)
 	closeOneGitHubIssue(context.Background(), fake, issue, ghclient.UpdateIssueRequest{}, results, nil, nil,
-		func(ctx context.Context, id string) (bool, error) { return false, nil })
+		func(ctx context.Context, id string) (bool, error) { return false, nil }, nil)
 	res := <-results
 	if res.err != errBatchCloseSkippedNotOpen {
 		t.Fatalf("expected skipped-not-open, got %v", res.err)
@@ -511,7 +511,7 @@ func TestCloseOneGitHubIssue_GuardSkipsBeforePatch(t *testing.T) {
 
 	results = make(chan githubCloseNetResult, 1)
 	closeOneGitHubIssue(context.Background(), fake, issue, ghclient.UpdateIssueRequest{}, results, nil, nil,
-		func(ctx context.Context, id string) (bool, error) { return false, errors.New("db down") })
+		func(ctx context.Context, id string) (bool, error) { return false, errors.New("db down") }, nil)
 	res = <-results
 	if res.err == nil || batchCloseItemError(res.err) != "复核本地状态失败，未关闭该项" {
 		t.Fatalf("expected guard-failure copy, got %v", res.err)
@@ -523,7 +523,7 @@ func TestCloseOneGitHubIssue_GuardSkipsBeforePatch(t *testing.T) {
 	// 守卫通过时照常发 PATCH。
 	results = make(chan githubCloseNetResult, 1)
 	closeOneGitHubIssue(context.Background(), fake, issue, ghclient.UpdateIssueRequest{}, results, nil, nil,
-		func(ctx context.Context, id string) (bool, error) { return true, nil })
+		func(ctx context.Context, id string) (bool, error) { return true, nil }, nil)
 	res = <-results
 	if res.err != nil {
 		t.Fatalf("guard-passed item must PATCH, got err=%v", res.err)
@@ -554,7 +554,7 @@ func TestCloseOneGitHubIssue_GuardCtxCancelAttribution(t *testing.T) {
 				close(guardStarted)
 				<-ctx.Done() // 阻塞到批次取消后返回 ctx err
 				return false, ctx.Err()
-			})
+			}, nil)
 	}()
 	<-guardStarted
 	cancel()
@@ -575,7 +575,7 @@ func TestCloseOneGitHubIssue_GuardCtxCancelAttribution(t *testing.T) {
 				close(guardStarted2)
 				<-ctx.Done()
 				return false, context.DeadlineExceeded
-			})
+			}, nil)
 	}()
 	<-guardStarted2
 	cancel2()
@@ -599,7 +599,7 @@ func TestCloseOneGitHubIssue_GuardCtxCancelAttribution(t *testing.T) {
 				close(guardReturned)
 				<-ctx.Done() // 等批次取消后才返回 true，让第二次 ctx 复核命中
 				return true, nil
-			})
+			}, nil)
 	}()
 	<-guardReturned
 	cancel3()
@@ -960,5 +960,53 @@ func TestClassifyInternalCloseErr(t *testing.T) {
 	}
 	if !logged {
 		t.Fatal("internal failure must be logged")
+	}
+}
+
+// INT-185（复审 R14 Note）：closeInternalIssues 调用点回归保护——注入返回
+// 驱动包装错误（非 ctx 类型）的事务缝，批次 ctx 已死时按批次归因取消/超时
+// 而非「服务器内部错误」。验证 issue_list.go 对 classifyInternalCloseErr 的
+// 调用点没被回退。
+func TestIssueServiceBatchCloseDoneIssues_InternalTxInjectedErrorAttribution(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID)
+	now := time.Now().UTC()
+	seedListFixtureIssues(t, svc, project.ID, []listFixtureIssue{
+		{seq: 1, source: model.IssueSourceInternal, state: model.IssueStateOpen,
+			title: "done", author: "alice", updated: now, created: now,
+			workflow: listFixtureStatus(model.IssueWorkflowStatusDone)},
+	})
+	var issues []model.Issue
+	if err := svc.db.Where("project_id = ?", project.ID).Find(&issues).Error; err != nil {
+		t.Fatalf("load issues: %v", err)
+	}
+
+	// 事务返回驱动包装错误（非 ctx 类型，模拟 SQLITE_INTERRUPT/SQLITE_BUSY）。
+	svc.issueService.runCloseInternalTx = func(ids []string, now time.Time) ([]string, error) {
+		return nil, errors.New("SQLITE_INTERRUPT: interrupted")
+	}
+	defer func() { svc.issueService.runCloseInternalTx = nil }()
+
+	// 批次 ctx 已死（取消）：回读 ctx.Err() 归「请求已取消或超时」。
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	resp := &BatchCloseDoneIssuesResponse{Total: 1, Failures: make([]BatchCloseDoneIssueFailure, 0)}
+	svc.issueService.closeInternalIssues(ctx, issues, resp)
+	if resp.Failed != 1 || len(resp.Failures) != 1 {
+		t.Fatalf("expected 1 failed, got %+v", resp)
+	}
+	if resp.Failures[0].Error != "请求已取消或超时，未继续关闭" {
+		t.Fatalf("dead ctx + wrapped err must attribute to cancellation, got %q", resp.Failures[0].Error)
+	}
+
+	// 批次 ctx 存活：同一包装错误应归「服务器内部错误」（ErrInternal）。
+	resp2 := &BatchCloseDoneIssuesResponse{Total: 1, Failures: make([]BatchCloseDoneIssueFailure, 0)}
+	svc.issueService.closeInternalIssues(context.Background(), issues, resp2)
+	if resp2.Failed != 1 || len(resp2.Failures) != 1 {
+		t.Fatalf("expected 1 failed, got %+v", resp2)
+	}
+	if resp2.Failures[0].Error != errs.ErrInternal.Message {
+		t.Fatalf("live ctx + wrapped err must be ErrInternal, got %q", resp2.Failures[0].Error)
 	}
 }

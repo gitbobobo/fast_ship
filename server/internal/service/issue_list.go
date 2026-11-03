@@ -211,7 +211,7 @@ const batchCloseGitHubRateLimitRemainingText = "GitHub API 限流，未尝试关
 // 经 WithoutCancel + 独立超时与整批取消解耦；结果只经 results 返回，由调用方
 // 统一落库与计数。命中 API 限流时调用 onRateLimit（可为 nil），由调用方熔断
 // 剩余派发——限流后继续打满配额只会得到重复失败，次级限流还会延长封禁。
-func closeOneGitHubIssue(batchCtx context.Context, client ghclient.Client, issue model.Issue, updateReq ghclient.UpdateIssueRequest, results chan<- githubCloseNetResult, onRateLimit func(), rateLimited *atomic.Bool, guard func(ctx context.Context, id string) (bool, error)) {
+func closeOneGitHubIssue(batchCtx context.Context, client ghclient.Client, issue model.Issue, updateReq ghclient.UpdateIssueRequest, results chan<- githubCloseNetResult, onRateLimit func(), rateLimited *atomic.Bool, guard func(ctx context.Context, id string) (bool, error), warn func(string, ...zap.Field)) {
 	if issue.GitHubMeta == nil {
 		results <- githubCloseNetResult{issue: issue, err: errs.ErrIssueReadOnly}
 		return
@@ -266,6 +266,10 @@ func closeOneGitHubIssue(batchCtx context.Context, client ghclient.Client, issue
 	defer cancel()
 	updated, err := client.UpdateIssue(patchCtx, issue.GitHubMeta.Number, updateReq)
 	if err != nil {
+		if warn != nil {
+			warn("batch close github issue: PATCH failed",
+				zap.String("issue_id", issue.ID), zap.Int("number", issue.GitHubMeta.Number), zap.Error(err))
+		}
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			// PATCH 自身超时/取消：远端可能已生效，结果未确认，与
 			// 「未开始」的取消区分开。
@@ -342,15 +346,25 @@ func (s *IssueService) closeInternalIssues(ctx context.Context, issues []model.I
 	}
 	now := time.Now().UTC()
 	var closedIDs []string
-	err := s.issueRepo.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		closed, err := s.issueRepo.BatchCloseInternalTx(tx, ids, now)
-		if err != nil {
-			return err
-		}
+	// runCloseInternalTx 是测试缝（INT-185 R14 Note）：生产为 nil 走真实事务；
+	// 测试注入一个返回驱动包装错误的函数，断言事务失败时按批次 ctx 归因。
+	runTx := s.runCloseInternalTx
+	var err error
+	if runTx != nil {
+		var closed []string
+		closed, err = runTx(ids, now)
 		closedIDs = closed
-		// 推荐只随真正关闭的行删除：未命中行保持原状，推荐与依赖一并保留。
-		return s.recRepo.DeleteByIssueIDsTx(tx, closed)
-	})
+	} else {
+		err = s.issueRepo.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			closed, err := s.issueRepo.BatchCloseInternalTx(tx, ids, now)
+			if err != nil {
+				return err
+			}
+			closedIDs = closed
+			// 推荐只随真正关闭的行删除：未命中行保持原状，推荐与依赖一并保留。
+			return s.recRepo.DeleteByIssueIDsTx(tx, closed)
+		})
+	}
 	if err != nil {
 		err = classifyInternalCloseErr(ctx, err, func(msg string, fields ...zap.Field) {
 			s.logger.Warn(msg, fields...)
@@ -442,6 +456,8 @@ func (s *IssueService) closeGitHubIssues(ctx context.Context, project *model.Pro
 				}
 			}, &rateLimited, func(ctx context.Context, id string) (bool, error) {
 				return s.issueRepo.IsOpenAndDone(ctx, id)
+			}, func(msg string, fields ...zap.Field) {
+				s.logger.Warn(msg, fields...)
 			})
 		}()
 	}
@@ -465,10 +481,14 @@ func (s *IssueService) closeGitHubIssues(ctx context.Context, project *model.Pro
 		// 普通「服务器内部错误」让用户以为没关成功而重复操作（INT-185 R10）。
 		stored, err := storer.upsertGitHubIssue(project.ID, res.updated)
 		if err != nil {
+			s.logger.Warn("batch close github issue: local upsert failed",
+				zap.String("issue_id", res.issue.ID), zap.Error(err))
 			appendBatchCloseFailure(resp, res.issue, &batchClosePatchUnconfirmedError{err: err})
 			continue
 		}
 		if err := storer.markCollectionsStaleAfterPush(stored.ID); err != nil {
+			s.logger.Warn("batch close github issue: mark stale failed",
+				zap.String("issue_id", stored.ID), zap.Error(err))
 			appendBatchCloseFailure(resp, res.issue, &batchClosePatchUnconfirmedError{err: err})
 			continue
 		}
