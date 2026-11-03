@@ -914,3 +914,37 @@ func (f *failingBatchCloseStorer) upsertGitHubIssue(projectID string, item *ghcl
 func (f *failingBatchCloseStorer) markCollectionsStaleAfterPush(issueID string) error {
 	return f.staleErr
 }
+
+// INT-185（复审 R12）：批次 ctx 在事务执行中死亡、驱动/GORM 把取消包装成非
+// ctx 错误时，closeInternalIssues 必须回读 ctx.Err() 归「请求已取消或超时」，
+// 不能误报为「服务器内部错误」让用户重试。让事务里的 UPDATE 命中一个被
+// 取消的 ctx（驱动返回 SQLITE_INTERRUPT 之类的非 ctx 包装错误）验证。
+func TestIssueServiceBatchCloseDoneIssues_InternalTxWrappedCancel(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID)
+	now := time.Now().UTC()
+	seedListFixtureIssues(t, svc, project.ID, []listFixtureIssue{
+		{seq: 1, source: model.IssueSourceInternal, state: model.IssueStateOpen,
+			title: "done", author: "alice", updated: now, created: now,
+			workflow: listFixtureStatus(model.IssueWorkflowStatusDone)},
+	})
+	var issues []model.Issue
+	if err := svc.db.Where("project_id = ?", project.ID).Find(&issues).Error; err != nil {
+		t.Fatalf("load issues: %v", err)
+	}
+
+	// 批次 ctx 已死：事务内的驱动错误（SQLITE_INTERRUPT 等非 ctx 包装错误）
+	// 或顶部 ctx.Err() 早退都必须归「请求已取消或超时」，不能落 ErrInternal。
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	resp := &BatchCloseDoneIssuesResponse{Total: 1, Failures: make([]BatchCloseDoneIssueFailure, 0)}
+	svc.issueService.closeInternalIssues(ctx, issues, resp)
+	if resp.Failed != 1 || len(resp.Failures) != 1 {
+		t.Fatalf("expected 1 failed, got %+v", resp)
+	}
+	// 关键是归「请求已取消或超时」而不是「服务器内部错误」。
+	if resp.Failures[0].Error != "请求已取消或超时，未继续关闭" {
+		t.Fatalf("cancelled internal tx must attribute to cancellation, got %q", resp.Failures[0].Error)
+	}
+}

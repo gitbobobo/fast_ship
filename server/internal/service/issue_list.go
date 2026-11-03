@@ -334,7 +334,12 @@ func (s *IssueService) closeInternalIssues(ctx context.Context, issues []model.I
 		return s.recRepo.DeleteByIssueIDsTx(tx, closed)
 	})
 	if err != nil {
-		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		// 除判定 err 本身是 ctx err 外再回读批次状态：驱动/GORM 可能把批次
+		// 取消/超时包装成非 ctx 错误（SQLITE_INTERRUPT、连接池关闭错误），
+		// 批次已死时不能误报为「服务器内部错误」让用户重试（INT-185 R12）。
+		if batchErr := ctx.Err(); batchErr != nil {
+			err = batchErr
+		} else if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 			s.logger.Warn("batch close internal issues failed", zap.Error(err))
 			err = errs.ErrInternal
 		}
