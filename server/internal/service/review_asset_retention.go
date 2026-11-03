@@ -1,6 +1,8 @@
 package service
 
 import (
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/model"
@@ -83,20 +85,28 @@ func (s *ReviewService) sweepAssetRetention(now time.Time) {
 	// busy_timeout 超时（INT-184 R2 审查实测）。批失败即停：账不确定时宁可
 	// 保守（已删批次的字节下轮扫描收敛），不继续加载引用集合。
 	retired := int64(0)
+	// 非终态集合从 model 常量拼接：新增非终态状态时不会在 SQL 字面量里静
+	// 默漂移（方向审计建议）。常量无注入面。
+	activeStatusLiterals := []string{
+		"'" + string(model.ReviewRunQueued) + "'",
+		"'" + string(model.ReviewRunDispatched) + "'",
+		"'" + string(model.ReviewRunRunning) + "'",
+	}
+	retireSQL := fmt.Sprintf(`DELETE FROM review_assets WHERE id IN (
+		SELECT a.id FROM review_assets a
+		WHERE a.created_at < ?
+			AND NOT EXISTS (
+				SELECT 1 FROM review_runs r
+				WHERE r.integration_id = a.integration_id
+					AND r.repo_full_name = a.repo_full_name
+					AND r.pr_number = a.pr_number
+					AND r.head_sha = a.head_sha
+					AND r.status IN (%s)
+			)
+		LIMIT ?
+	)`, strings.Join(activeStatusLiterals, ", "))
 	for {
-		res := s.db.Exec(`DELETE FROM review_assets WHERE id IN (
-			SELECT a.id FROM review_assets a
-			WHERE a.created_at < ?
-				AND NOT EXISTS (
-					SELECT 1 FROM review_runs r
-					WHERE r.integration_id = a.integration_id
-						AND r.repo_full_name = a.repo_full_name
-						AND r.pr_number = a.pr_number
-						AND r.head_sha = a.head_sha
-						AND r.status IN ('queued', 'dispatched', 'running')
-				)
-			LIMIT ?
-		)`, now.Add(-reviewAssetRetention), reviewAssetRetireBatch)
+		res := s.db.Exec(retireSQL, now.Add(-reviewAssetRetention), reviewAssetRetireBatch)
 		if res.Error != nil {
 			s.logger.Warn("截图资产行退役失败", zap.Error(res.Error))
 			return

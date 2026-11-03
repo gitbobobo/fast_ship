@@ -255,7 +255,8 @@ type ProxyService struct {
 	client   *http.Client
 	cacheDir string
 	// cacheSubdir 该服务实例的缓存面子目录；读路径按它区分媒体代理面（TTL
-	// 与退役生效）和 review 截图面（持久资产，命中即返回，不过期不复核）。
+	// 与退役生效）和 review 截图面（持久资产，命中即返回、不过期不复核，
+	// 回收只走行账保留策略的 SweepUnreferencedEntries）。
 	cacheSubdir       string
 	cacheTTL          time.Duration
 	maxCacheEntrySize int64
@@ -510,8 +511,8 @@ func (s *ProxyService) StartExpiredSweeper() {
 }
 
 // StartStaleTmpSweeper 启动后台 media-*.tmp 清理（随过期扫描一起跑）。给不
-// 接过期回收的面用（review 截图面：.bin/.json 是持久资产不回收，但中断下载
-// 的 tmp 残留同样要清）。
+// 接过期回收的面用（review 截图面：.bin/.json 不接 TTL 回收，回收只走行账
+// 保留策略的 SweepUnreferencedEntries，但中断下载的 tmp 残留同样要清）。
 func (s *ProxyService) StartStaleTmpSweeper() {
 	go func() {
 		s.sweepStaleTmpFiles(time.Now().UTC())
@@ -791,8 +792,9 @@ func (s *ProxyService) sweepExpiredEntries() {
 // 口径：只统计 data 与写盘中转（`.bin` + `media-*.tmp`），meta 每条几百字
 // 节、可忽略。
 //
-// 截图面（review-screenshot-cache）不经过这道闸：它是持久资产面，永不删
-// 除，上界由 maxScreenshotsPerPR × 单文件上限给出，见 service 层。
+// 截图面（review-screenshot-cache）不经过这道闸：它是持久资产面，回收只
+// 走行账保留策略（INT-184），单 head 上界由 maxScreenshotsPerPR × 单文件上
+// 限给出，见 service 层。
 type cacheReservation struct {
 	s       *ProxyService
 	bytes   int64
@@ -1020,8 +1022,7 @@ func (s *ProxyService) sweepStaleTmpFiles(now time.Time) {
 //     的 touch/rename（新下载、ensureAssets/探测的缓存命中都在闸内刷新
 //     mtime），插入本身在闸释放后发生——闸内重 stat 看到旧 mtime 说明插
 //     入的 touch 不在最近，宽限兜住的是 touch 与行插入之间的窗口。闸被长
-//     下载持
-//     有时本轮跳过，下轮再扫（与媒体面过期扫描同口径）。DirEntry.Info 可
+//     下载持有时本轮跳过，下轮再扫（与媒体面过期扫描同口径）。DirEntry.Info 可
 //     能是 ReadDir 时的快照（网络盘上尤其如此），一律以闸内 os.Stat 为准。
 //   - meta 读不出（写侧 rename data 后、WriteFile meta 前被杀的崩溃残留，
 //     或损坏 meta）：没有闸 key 可持，退回孤儿判据——新鲜 stat 的 mtime 超

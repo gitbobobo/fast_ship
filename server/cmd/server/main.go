@@ -859,9 +859,26 @@ func createBootIndexes(db *gorm.DB) error {
 	// EXISTS 守卫按 (integration_id, repo, pr, head) 探测在途运行——两个无
 	// 前导列可用的关联查询在全量扫描下会让每 6h 一次的 DELETE 长时间占住
 	// SQLite 单写锁（R2 审查实测：5 万待退役×20 万 run 时 >600s，加索引后
-	// 约 2s）；service 层另按小批量执行，批间释放写锁。
-	db.Exec("CREATE INDEX IF NOT EXISTS idx_review_assets_created_at ON review_assets(created_at)")
-	db.Exec("CREATE INDEX IF NOT EXISTS idx_review_runs_asset_head ON review_runs(integration_id, repo_full_name, pr_number, head_sha)")
+	// 约 2s）；service 层另按小批量执行，批间释放写锁。表存在而建失败必须
+	// 启动失败（与上方 host_key 索引同款）：静默降级会把分钟级写锁占用带
+	// 回来且日志无痕（R4 审查意见、方向审计采纳）。表不存在（部分 schema
+	// 调 createBootIndexes 的测试路径）时跳过：AutoMigrate 建表后空表也无
+	// 行可索引，下次启动自然补上。
+	for _, idx := range []struct{ name, sql, table string }{
+		{"idx_review_assets_created_at", "CREATE INDEX IF NOT EXISTS idx_review_assets_created_at ON review_assets(created_at)", "review_assets"},
+		{"idx_review_runs_asset_head", "CREATE INDEX IF NOT EXISTS idx_review_runs_asset_head ON review_runs(integration_id, repo_full_name, pr_number, head_sha)", "review_runs"},
+	} {
+		exists, err := sqliteTableExists(db, idx.table)
+		if err != nil {
+			return fmt.Errorf("检查表 %s 失败: %w", idx.table, err)
+		}
+		if !exists {
+			continue
+		}
+		if err := db.Exec(idx.sql).Error; err != nil {
+			return fmt.Errorf("创建 %s 失败: %w", idx.name, err)
+		}
+	}
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_notifications_user_dedup ON notifications(user_id, dedup_key)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_notifications_user_updated ON notifications(user_id, updated_at DESC, id)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_notifications_unread ON notifications(user_id, updated_at DESC) WHERE read_at IS NULL")

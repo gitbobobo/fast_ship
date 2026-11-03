@@ -1138,7 +1138,8 @@ func TestScreenshotErrorText(t *testing.T) {
 
 // 字节预算：单次探测拉进缓存的总字节超限时停在触发的那张——已有成功图
 // 则 probeReady + 部分指纹，未探的引用本轮不再拉。时间预算管不住快速回源
-// 的大图，而 review 截图面是持久资产，字节必须有自己的一道闸。
+// 的大图，而 review 截图面回收滞后至少 30 天（行账保留策略），字节必须有
+// 自己的一道闸。
 func TestProbeScreenshotsByteBudgetStopsAfterLimit(t *testing.T) {
 	e := newReviewEngineEnv(t)
 	review := e.withT3(nil, e.media, nil)

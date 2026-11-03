@@ -506,8 +506,8 @@ func TestAgentScreenshotsFiltersStaleRows(t *testing.T) {
 }
 
 // 张数截断：超过 maxScreenshotsPerPR 的引用按出现顺序保留前 N 个。review
-// 截图面是持久资产（永不回收），收集面是磁盘占用的第一道闸——探测字节
-// 预算与下载面单文件上限都在它之后。
+// 截图面回收滞后至少 30 天（行账保留策略），收集面是磁盘占用的第一道闸——
+// 探测字节预算与下载面单文件上限都在它之后。
 func TestCollectScreenshotURLsTruncatesAtLimit(t *testing.T) {
 	var lines []string
 	for i := 0; i < maxScreenshotsPerPR+8; i++ {
