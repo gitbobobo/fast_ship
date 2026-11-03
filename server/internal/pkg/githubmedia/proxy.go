@@ -3,13 +3,16 @@
 //  1. 面只有三个，规则按面定，不按调用点定：
 //     - 媒体代理面（defaultCacheSubdir）：缓存可丢弃。TTL 回收、scope 标记
 //     缺失时整目录清空、损坏条目回收，只发生在这里。
-//     - 审查截图面（review-screenshot-cache）：缓存不可丢弃——.bin 是
-//     review_assets 持久资产（storage_path 直指文件、ensureAssets 不重下）。
-//     任何代码路径不得删除它的条目；启动只建目录+补标记；无 TTL 删除、
-//     无 purge、无条目回收 sweeper（media-*.tmp 清理是唯一例外，
-//     sweepStaleTmpFiles 不触碰 .bin/.json）；读路径命中即返回（不过期、
-//     不因类型复核 miss）；重下绝不覆盖已落盘的 .bin（fetch 入口护栏：
-//     存在即返回现有字节，类型判不出时 mime 留空，截图端点按魔数兜底）。
+//     - 审查截图面（review-screenshot-cache）：缓存不可随意丢弃——.bin 是
+//     review_assets 持久资产（storage_path 直指文件、ensureAssets 复核缺失
+//     才重下）。删除只有一条 sanctioned 路径：SweepUnreferencedEntries
+//     （按 review_assets 行做引用计数 + mtime 宽限，由 service 层保留策略
+//     调用，INT-184）；除此之外任何代码路径不得删除它的条目；无 TTL 删除、
+//     无 purge（media-*.tmp 清理是唯一例外，sweepStaleTmpFiles 不触碰
+//     .bin/.json）；读路径命中即返回（不过期、不因类型复核 miss）且刷新
+//     条目 mtime（行账宽限判定的依据）；重下绝不覆盖已落盘的 .bin（fetch
+//     入口护栏：存在即返回现有字节，类型判不出时 mime 留空，截图端点按
+//     魔数兜底）。
 //     - 无缓存出口（issue assets、avatars、screenshot content、crop）：不落
 //     缓存目录，只施加同源硬化头与「attachment 或 inline 图片档」判据（按
 //     出口语义：下载类 attachment，截图/裁剪类刻意保留 inline）。
@@ -1006,6 +1009,65 @@ func (s *ProxyService) sweepStaleTmpFiles(now time.Time) {
 	}
 }
 
+// SweepUnreferencedEntries review 截图面的行账回收（INT-184，面内唯一的
+// sanctioned 删除路径）：service 层保留策略先删退役的 review_assets 行，
+// 再以 isReferenced 回答「该 .bin 是否仍有行引用」，这里负责目录遍历与删
+// 除本身。判定顺序为先查引用、后查 mtime、再删：行的插入路径（新下载
+// rename / 命中 touch）都会让 mtime 变新，宽限内的文件不回收——引用快照
+// 与删除之间的窗口由 mtime 兜住。.bin 与同名 .json 一起删；meta 在而
+// data 不在的孤儿 meta 同规则回收。各步幂等：任意时点被杀，下一轮从同样
+// 的判定重新收敛。媒体面是 no-op：它有自己的 TTL 回收，误调不得删它的条
+// 目；isReferenced 不得对同一文件既返回 true 又在后续放行——语义由调用
+// 方保证（见 review_asset_retention.go）。
+func (s *ProxyService) SweepUnreferencedEntries(isReferenced func(binPath string) bool, grace time.Duration) int {
+	if s.cacheSubdir == defaultCacheSubdir || isReferenced == nil {
+		return 0
+	}
+	entries, err := os.ReadDir(s.cacheDir)
+	if err != nil {
+		return 0
+	}
+	now := time.Now().UTC()
+	removed := 0
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasSuffix(name, ".bin") || strings.HasSuffix(name, ".gone") {
+			continue
+		}
+		binPath := filepath.Join(s.cacheDir, name)
+		if isReferenced(binPath) {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil || now.Sub(info.ModTime()) <= grace {
+			continue
+		}
+		if os.Remove(binPath) == nil {
+			removed++
+		}
+		// 同名 meta 一并删（可能本就不存在，忽略错误）。
+		_ = os.Remove(strings.TrimSuffix(binPath, ".bin") + ".json")
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasSuffix(name, ".json") || strings.HasSuffix(name, ".gone") {
+			continue
+		}
+		metaPath := filepath.Join(s.cacheDir, name)
+		if _, err := os.Stat(strings.TrimSuffix(metaPath, ".json") + ".bin"); err == nil {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil || now.Sub(info.ModTime()) <= grace {
+			continue
+		}
+		if os.Remove(metaPath) == nil {
+			removed++
+		}
+	}
+	return removed
+}
+
 // restoreGoneBin 把隔离的旧字节原子放回 binPath。os.Link 不会覆盖已存在的
 // 目标：写侧恰好在该窗口发布了新 data 时 link 失败（EEXIST），旧字节直接
 // 丢弃——先 Stat 后 Rename 的两步恢复有 TOCTOU 窗口，会拿旧字节盖掉新 data
@@ -1498,6 +1560,9 @@ func (s *ProxyService) fetchAndCache(ctx context.Context, rawURL, bearer, scope 
 			return media, nil
 		}
 		if info, statErr := os.Stat(cachePath); statErr == nil {
+			// 存在即返回现有字节（类型判不出时 mime 留空）：命中续期同样
+			// 生效，行插入路径的 mtime 必新。
+			s.touchReviewEntry(cachePath)
 			return &CachedMedia{
 				Metadata: cacheEntry{
 					URL:          normalized,
@@ -1858,6 +1923,7 @@ func (s *ProxyService) getCachedNormalized(normalized, scope string) (*CachedMed
 	}
 
 	entry.Size = info.Size()
+	s.touchReviewEntry(cachePath)
 	return &CachedMedia{
 		Metadata: entry,
 		Path:     cachePath,
@@ -1947,6 +2013,7 @@ func (s *ProxyService) servePersistedData(normalized, cachePath string) (*Cached
 		// 但同样不在读路径删文件。
 		return nil, false, nil
 	}
+	s.touchReviewEntry(cachePath)
 	return &CachedMedia{
 		Metadata: cacheEntry{
 			URL:          normalized,
@@ -1957,6 +2024,21 @@ func (s *ProxyService) servePersistedData(normalized, cachePath string) (*Cached
 		},
 		Path: cachePath,
 	}, true, nil
+}
+
+// touchReviewEntry review 截图面的命中续期（INT-184）：命中即刷新 .bin 的
+// mtime。保留策略按「行引用 + mtime 宽限」判定回收，而行的插入路径既包含
+// 新下载（rename 的 mtime 必新）也包含旧条目命中（ensureAssets/探测重试
+// 命中早已落盘的文件）——不刷新的话，宽限判定看不到「这个文件刚刚又被引
+// 用」，刚插入的行指向的文件会在同一轮扫描里被当成孤儿。媒体面不 touch：
+// 它的回收按 meta 年龄，热点图按每次浏览器读刷新会放大写盘。失败忽略：
+// 续期是尽力而为，下一轮命中还会再刷。
+func (s *ProxyService) touchReviewEntry(path string) {
+	if s.cacheSubdir == defaultCacheSubdir || path == "" {
+		return
+	}
+	now := time.Now().UTC()
+	_ = os.Chtimes(path, now, now)
 }
 
 // SniffImageType 供截图端点对 mime 为空/octet-stream 的持久资产按魔数兜底

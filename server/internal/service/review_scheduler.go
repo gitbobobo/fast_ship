@@ -51,6 +51,7 @@ func (s *ReviewService) Start() {
 	go s.reviewLoop(cancel, kickCh)
 	go s.redeliveryLoop(cancel)
 	go s.forgejoPollLoop(cancel)
+	go s.assetRetentionLoop(cancel)
 }
 
 // Stop 停止调度循环；幂等，未启动时为空操作。

@@ -380,7 +380,8 @@ func main() {
 	// 同时是 review_assets 的持久存储（storage_path 直接指向 cached 文件，无
 	// 副本），按 TTL 删除会让超过 24h 的历史截图取不到且 ensure 不会重下。
 	// 但中断下载的 media-*.tmp 残留两边都一样要清，tmp 清理是独立方法，这里
-	// 只启动它（不触碰 .bin/.json）。
+	// 只启动它（不触碰 .bin/.json）。.bin 的回收走 review_assets 行账保留策
+	// 略（INT-184，ReviewService.Start 里的 assetRetentionLoop），不在这里。
 	reviewMediaService.StartStaleTmpSweeper()
 	// shell 订阅 hub（INT-116）：每环境常驻活跃/归档两条 WS，列表与运行态读取
 	// 从内存回答；环境重配/删除时由环境服务清 entry。这里注册停机钩子：当前

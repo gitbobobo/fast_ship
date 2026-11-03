@@ -484,7 +484,11 @@ func (s *ReviewService) ensureAssets(ctx context.Context, integrationID, repo st
 	}
 	for pos, ref := range refs {
 		existing, seenBefore := have[ref.URL]
-		if seenBefore && existing.StoragePath != "" {
+		// 复核（INT-184）：storage_path 指向的文件必须还在。保留策略按行账
+		// 回收文件，与行插入之间存在理论竞态（引用判定与删除之间插入的行），
+		// 命中行不复核的话一次竞态就是该端点永久 404——缺失按失败行重下，
+		// 缓存命中或重新落盘都能自愈。
+		if seenBefore && existing.StoragePath != "" && assetFileExists(existing.StoragePath) {
 			continue
 		}
 		var storagePath, mime, errText string
@@ -613,6 +617,94 @@ func hashFileSHA256(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
+// assetFileExists 资产文件复核：路径非空且磁盘上是普通文件才算在。
+func assetFileExists(path string) bool {
+	if path == "" {
+		return false
+	}
+	info, err := os.Stat(path)
+	return err == nil && info.Mode().IsRegular()
+}
+
+// screenshotFetch 探测下载成功的单张结果：探测落账（recordProbeAssets）的
+// 输入。pos 是引用在收集结果里的序号（与 ensureAssets 的 position 同口径）。
+type screenshotFetch struct {
+	pos    int
+	ref    screenshotRef
+	cached *githubmedia.CachedMedia
+}
+
+// probeScreenshots 试下载 PR 描述里的全部截图引用（不做落账，行为与历史
+// 版本一致）。落账版本见 probeAndRecordScreenshots；测试用本入口保持纯
+// 决策语义。
+func (s *ReviewService) probeScreenshots(ctx context.Context, integrationID string, installationID int64, prBody string) screenshotProbe {
+	probe, _ := s.probeScreenshotsWithFetches(ctx, integrationID, installationID, prBody)
+	return probe
+}
+
+// probeAndRecordScreenshots 同步决策用的探测 + 探测落账（INT-184）：成功
+// 下载的引用当场写资产行，探测字节从落盘起就有行引用——「探测过但没有视
+// 觉运行」的字节转成普通行按行保留策略退役，不再需要目录推断。headSHA
+// 与视觉运行落账同源（doSyncPR 已保证 ledger.HeadSHA == pr.HeadSHA，
+// createVisualRuns 按 ledger.HeadSHA 建运行）。
+func (s *ReviewService) probeAndRecordScreenshots(ctx context.Context, integrationID, repo string, prNumber int, headSHA string, installationID int64, prBody string) screenshotProbe {
+	probe, fetches := s.probeScreenshotsWithFetches(ctx, integrationID, installationID, prBody)
+	s.recordProbeAssets(integrationID, repo, prNumber, headSHA, fetches)
+	return probe
+}
+
+// recordProbeAssets 探测落账：只写成功结果，失败行仍由 ensureAssets 在视
+// 觉运行时落账并保留「每次重试下载」的语义。已有行的处理：storage_path
+// 非空的行原样保留（同 URL 的缓存路径是同一份文件，重复写无增益）；空路
+// 径行（此前的失败行）用本次结果修复。落账失败只记日志不改变探测结论：
+// 行是保留策略的账，不是探测决策的输入，ensureAssets 在运行时还会兜底。
+func (s *ReviewService) recordProbeAssets(integrationID, repo string, prNumber int, headSHA string, fetches []screenshotFetch) {
+	now := time.Now().UTC()
+	for _, f := range fetches {
+		var existing model.ReviewAsset
+		err := s.db.Where("integration_id = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ? AND source_url = ?",
+			integrationID, repo, prNumber, headSHA, f.ref.URL).First(&existing).Error
+		if err == nil {
+			if existing.StoragePath != "" {
+				continue
+			}
+			if uerr := s.db.Model(&model.ReviewAsset{}).Where("id = ?", existing.ID).
+				Updates(map[string]any{
+					"storage_path": f.cached.Path, "mime_type": f.cached.Metadata.ContentType,
+					"size_bytes": f.cached.Metadata.Size, "error": "",
+				}).Error; uerr != nil {
+				s.logger.Warn("探测截图落账失败", zap.String("url", scrubLogURLs(f.ref.URL)), zap.Error(uerr))
+			}
+			continue
+		}
+		asset := &model.ReviewAsset{
+			ID:            uuid.NewString(),
+			IntegrationID: integrationID,
+			RepoFullName:  repo,
+			PRNumber:      prNumber,
+			HeadSHA:       headSHA,
+			Position:      f.pos,
+			Label:         f.ref.Label,
+			SourceURL:     f.ref.URL,
+			StoragePath:   f.cached.Path,
+			MimeType:      f.cached.Metadata.ContentType,
+			SizeBytes:     f.cached.Metadata.Size,
+			CreatedAt:     now,
+		}
+		// 并发/重入安全：与 ensureAssets 同一冲突目标，同键只保留先到的行。
+		res := s.db.Clauses(clause.OnConflict{
+			Columns: []clause.Column{
+				{Name: "integration_id"}, {Name: "repo_full_name"},
+				{Name: "pr_number"}, {Name: "head_sha"}, {Name: "source_url"},
+			},
+			DoNothing: true,
+		}).Create(asset)
+		if res.Error != nil {
+			s.logger.Warn("探测截图落账失败", zap.String("url", scrubLogURLs(f.ref.URL)), zap.Error(res.Error))
+		}
+	}
+}
+
 // screenshotProbe probeScreenshots 的结果。contentFP 内容指纹只在 result=
 // probeReady 且全部引用都下载成功时非空——只成功一部分时无法证明「内容没
 // 变」，按未知（调用方保守视为变化）处理。
@@ -630,13 +722,14 @@ type screenshotProbe struct {
 // 或总预算耗尽未探完 → probeUnavailable，reason 取第一条「拉不到」类原因，
 // 没有再取第一条失败原因。字节预算（screenshotProbeBudget）只结算新下载
 // 的字节，缓存命中不占预算——超预算集合逐轮拉齐，不会在同一位置反复中断；
-// 单文件上限等于预算，单张新下载永远不会超限。探测不写 review_assets——资产行仍由视觉运行时的
-// ensureAssets 落账，这里不按资产行计数，避免「已不在描述里的陈旧资产」被
-// 当成可用截图。
-func (s *ReviewService) probeScreenshots(ctx context.Context, integrationID string, installationID int64, prBody string) screenshotProbe {
+// 单文件上限等于预算，单张新下载永远不会超限。本函数不写 review_assets——
+// 同步决策链路用 probeAndRecordScreenshots 落账（成功结果随返回值带出），
+// 视觉运行时仍由 ensureAssets 落账并重试失败行；这里也不按资产行计数，
+// 避免「已不在描述里的陈旧资产」被当成可用截图。
+func (s *ReviewService) probeScreenshotsWithFetches(ctx context.Context, integrationID string, installationID int64, prBody string) (screenshotProbe, []screenshotFetch) {
 	refs := collectScreenshotURLsAt(prBody, s.githubWebHost())
 	if len(refs) == 0 {
-		return screenshotProbe{result: probeNone}
+		return screenshotProbe{result: probeNone}, nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, screenshotProbeTimeout)
 	defer cancel()
@@ -646,7 +739,8 @@ func (s *ReviewService) probeScreenshots(ctx context.Context, integrationID stri
 	completed := true
 	probedBytes := int64(0)
 	var contentHashes []string
-	for _, ref := range refs {
+	var fetches []screenshotFetch
+	for pos, ref := range refs {
 		// 单张限时：挂死图只吃掉自己的时限，还有剩余预算就继续试下一张；
 		// 总预算吃满才放弃（剩下的引用继续探测只会继续超时，同步循环还在等）。
 		attemptCtx, cancel := context.WithTimeout(ctx, screenshotProbeAttemptTimeout)
@@ -680,6 +774,7 @@ func (s *ReviewService) probeScreenshots(ctx context.Context, integrationID stri
 				err = fmt.Errorf("%w: %v", githubmedia.ErrLocalCache, hashErr)
 			} else {
 				contentHashes = append(contentHashes, sum)
+				fetches = append(fetches, screenshotFetch{pos: pos, ref: ref, cached: cached})
 			}
 			if probedBytes > screenshotProbeBudget {
 				// 预算触发显式标记未探完：零成功时收敛到 probeUnavailable 而
@@ -725,15 +820,15 @@ func (s *ReviewService) probeScreenshots(ctx context.Context, integrationID stri
 		if len(contentHashes) == len(refs) {
 			probe.contentFP = screenshotContentFingerprintFromHashes(contentHashes)
 		}
-		return probe
+		return probe, fetches
 	}
 	if fetchFailed {
-		return screenshotProbe{result: probeUnavailable, reason: firstFetchFailReason}
+		return screenshotProbe{result: probeUnavailable, reason: firstFetchFailReason}, fetches
 	}
 	if !completed {
-		return screenshotProbe{result: probeUnavailable, reason: firstReason}
+		return screenshotProbe{result: probeUnavailable, reason: firstReason}, fetches
 	}
-	return screenshotProbe{result: probeNone}
+	return screenshotProbe{result: probeNone}, fetches
 }
 
 // AgentScreenshots GET /api/review-agent/runs/:runId/screenshots：仅视觉运行可用。

@@ -855,6 +855,18 @@ type fakeReviewMedia struct {
 	anonErr, bearerErr     error
 	anonCalls, bearerCalls int
 	lastBearer             string
+	// sweep 非 nil 时实现行账回收能力（INT-184）：委托真实 githubmedia 服
+	// 务的 SweepUnreferencedEntries，目录与判定与生产同源；nil 时扫描跳过。
+	sweep *githubmedia.ProxyService
+}
+
+// SweepUnreferencedEntries 行账回收（可选接口）：委托真实服务，无注入时
+// 返回 0（保留策略扫描跳过文件回收）。
+func (f *fakeReviewMedia) SweepUnreferencedEntries(isReferenced func(binPath string) bool, grace time.Duration) int {
+	if f.sweep == nil {
+		return 0
+	}
+	return f.sweep.SweepUnreferencedEntries(isReferenced, grace)
 }
 
 // fakeScreenshotMedia 恒成功的截图下载桩：临时目录里落一个最小 PNG 当缓存
@@ -867,7 +879,6 @@ func fakeScreenshotMedia(t *testing.T) *fakeReviewMedia {
 	}
 	return &fakeReviewMedia{cached: githubmedia.CachedImage(path, "image/png", 15)}
 }
-
 func (f *fakeReviewMedia) FetchAndCache(ctx context.Context, url string) (*githubmedia.CachedMedia, error) {
 	f.anonCalls++
 	if f.blockURLs[url] {
