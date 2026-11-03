@@ -21,6 +21,19 @@ import { argv, stderr, stdout } from 'node:process';
 
 const CONFIG_PATH = join(homedir(), '.config', 'fast-ship', 'config.yaml');
 const TIMEOUT_MS = 30_000;
+// sync 拉取预算 30s + 写回余量（INT-175）；调用方超时要大于服务端
+// 拉取窗口，否则客户端在服务端仍写回时中断并按 retryable 重发一轮。
+const SYNC_TIMEOUT_MS = 120_000;
+
+function timeoutFor(path) {
+  if (/\/pull-requests\/sync$/.test(normalizePath(path))) return SYNC_TIMEOUT_MS;
+  return TIMEOUT_MS;
+}
+
+// 剥查询串与尾随斜杠——timeoutFor/retryable 共用，两侧判定口径一致（R22）。
+function normalizePath(path) {
+  return path.split('?')[0].replace(/\/+$/, '');
+}
 const RETRY_DELAY_MS = 1_000;
 
 // Stable tags for the business codes agents hit most (server/internal/pkg/
@@ -122,7 +135,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // never resent: a lost or 5xx response does not prove the server did not
 // apply it.
 function retryable(method, path) {
-  const p = path.split('?')[0];
+  const p = normalizePath(path);
   if (method === 'GET') return true;
   if (method === 'POST') {
     return /\/pull-requests(?:\/sync)?$/.test(p) || /\/api\/projects\/[^/]+\/logs$/.test(p);
@@ -156,7 +169,7 @@ async function request(method, url, apiKey, body, path) {
           'Content-Type': 'application/json; charset=utf-8',
         },
         body,
-        signal: AbortSignal.timeout(TIMEOUT_MS),
+        signal: AbortSignal.timeout(timeoutFor(path)),
       });
     } catch (err) {
       lastErr = err;

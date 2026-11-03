@@ -36,6 +36,10 @@ interface BatchCloseDoneRequest {
 
 /** 服务端 30s 停发新的 GitHub PATCH，之后还要串行落库；60s 给落库留余量。 */
 const BATCH_CLOSE_TIMEOUT_MS = 60_000;
+// 只有拉取阶段有 30s 整批预算；前置读库与串行写回无上界（与其它端点
+// 同口径）。120s 只约束客户端等待——超时返回后服务端写回可能仍继续，
+// 数据照常落库（INT-175）。
+const SYNC_PULL_REQUESTS_TIMEOUT_MS = 120_000;
 
 /** 契约名为 IssueBatchResult。 */
 type BatchCloseDoneResponse = Schemas["IssueBatchResult"];
@@ -174,7 +178,9 @@ export const issueApi = {
 
   syncPullRequests: (issueId: string) =>
     api
-      .post(`issues/${issueId}/pull-requests/sync`)
+      .post(`issues/${issueId}/pull-requests/sync`, {
+        timeout: SYNC_PULL_REQUESTS_TIMEOUT_MS,
+      })
       .json<ApiResponse<IssuePullRequestSyncResult>>(),
 
   detachPullRequest: (issueId: string, linkId: string) =>

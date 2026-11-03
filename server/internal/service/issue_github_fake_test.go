@@ -56,6 +56,16 @@ type fakeIssueGitHubClient struct {
 	pullRequestErr   error
 	pullRequestErrs  map[string]error
 	onGetPullRequest func(repo string, number int)
+	// getPullRequestDelay 与 getPullRequestInFlight/Max 供并发断言：记录
+	// GetPullRequest 的瞬时并发峰值，延迟则让并发窗口可观测；
+	// getPullRequestDelays 按 number 覆盖统一延迟，可倒排完成顺序。
+	getPullRequestDelay    time.Duration
+	getPullRequestDelays   map[int]time.Duration
+	getPullRequestInFlight int32
+	getPullRequestMax      int32
+	// pullRequestPanics 按 number 注入 panic——sync 拉取 goroutine 的 recover
+	// 兜底用例（INT-175 R2）：panic 不能扩散到进程。
+	pullRequestPanics map[int]any
 	// validateErr 注入 ValidateRepository 失败；onListIssues/onListTimeline 分别在
 	// ListIssues / ListIssueTimeline 开头回调（用于在两轮取数之间注入写库）；
 	// listIssuesSince 记录每次调用的 since 参数。
@@ -295,9 +305,31 @@ func (f *fakeIssueGitHubClient) CreateIssue(_ context.Context, title, body strin
 	return f.createdIssue, f.createIssueErr
 }
 
-func (f *fakeIssueGitHubClient) GetPullRequest(_ context.Context, _ int64, repoFullName string, number int) (*githubapi.PullRequest, error) {
+func (f *fakeIssueGitHubClient) GetPullRequest(ctx context.Context, _ int64, repoFullName string, number int) (*githubapi.PullRequest, error) {
+	n := atomic.AddInt32(&f.getPullRequestInFlight, 1)
+	for {
+		max := atomic.LoadInt32(&f.getPullRequestMax)
+		if n <= max || atomic.CompareAndSwapInt32(&f.getPullRequestMax, max, n) {
+			break
+		}
+	}
+	defer atomic.AddInt32(&f.getPullRequestInFlight, -1)
 	if f.onGetPullRequest != nil {
 		f.onGetPullRequest(repoFullName, number)
+	}
+	if p, ok := f.pullRequestPanics[number]; ok {
+		panic(p)
+	}
+	delay := f.getPullRequestDelay
+	if d, ok := f.getPullRequestDelays[number]; ok {
+		delay = d
+	}
+	if delay > 0 {
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 	}
 	if f.pullRequestErr != nil {
 		return nil, f.pullRequestErr

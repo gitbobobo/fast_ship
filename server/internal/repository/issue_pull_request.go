@@ -1,6 +1,8 @@
 package repository
 
 import (
+	"errors"
+
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -27,6 +29,8 @@ func (r *IssuePullRequestRepository) Create(link *model.IssuePullRequest) error 
 // 与身份判定，不随写入漂移（集成改 base_url 由 sync 的主机比对拦下）。link_
 // origin 只升不降——手动 attach 可把 synced 行升级为 manual，反向不允许（避
 // 免同步投影把手动关联降级、继而被 DeleteMissingSynced 清掉）。
+// 注：synced_at 守卫只约束 sync 的 SaveSyncedFields 写回——attach/sync
+// 交错时旧快照覆盖问题记入 INT-188 另行处理。
 func (r *IssuePullRequestRepository) Upsert(link *model.IssuePullRequest) error {
 	set := clause.AssignmentColumns([]string{
 		"html_url", "title", "state", "is_draft", "author_login",
@@ -56,9 +60,18 @@ func (r *IssuePullRequestRepository) Upsert(link *model.IssuePullRequest) error 
 // SaveSyncedFields 按 (id, issue_id) 更新既有行的同步字段。不用 gorm Save：
 // UPDATE 影响 0 行时它会退化 INSERT，把 sync 期间被并发 detach 的行原样插回。
 // 行不存在时返回 gorm.ErrRecordNotFound 让调用方记失败。
+//
+// 带 synced_at 时间守卫（INT-175 R8）：拉取与写回拆成两段后，同一个 Issue
+// 的两个并发 sync 可能按发起顺序倒置落库——慢批次不能把后写入的更新数据
+// 覆盖回旧值。0 行命中有两种含义：行已被解除（ErrRecordNotFound）或库内
+// synced_at 已更新（ErrSyncedAtStale），由调用方 FindByID 区分。
+// 注意：该比较在 SQLite 里是文本字典序——synced_at 只能写 UTC（time.Now().UTC()）
+// 且必须经本驱动写入；混入其它时区/格式会让守卫静默误判（R25）。
+var ErrSyncedAtStale = errors.New("issue_pull_requests.synced_at 已有更新数据")
+
 func (r *IssuePullRequestRepository) SaveSyncedFields(link *model.IssuePullRequest) error {
 	res := r.db.Model(&model.IssuePullRequest{}).
-		Where("id = ? AND issue_id = ?", link.ID, link.IssueID).
+		Where("id = ? AND issue_id = ? AND synced_at <= ?", link.ID, link.IssueID, link.SyncedAt).
 		Updates(map[string]any{
 			"repo_full_name": link.RepoFullName,
 			"html_url":       link.HTMLURL,
@@ -77,7 +90,14 @@ func (r *IssuePullRequestRepository) SaveSyncedFields(link *model.IssuePullReque
 		return res.Error
 	}
 	if res.RowsAffected == 0 {
-		return gorm.ErrRecordNotFound
+		var current model.IssuePullRequest
+		if err := r.db.Select("id").Where("id = ? AND issue_id = ?", link.ID, link.IssueID).First(&current).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return gorm.ErrRecordNotFound
+			}
+			return err
+		}
+		return ErrSyncedAtStale
 	}
 	return nil
 }
