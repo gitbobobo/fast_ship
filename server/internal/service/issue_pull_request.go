@@ -188,8 +188,9 @@ func (s *IssueService) DetachIssuePullRequest(issueID, userID, linkID string) er
 // 每行是独立失败域：单条拉取/保存失败记入 failures 不中断其余行（旧数据保留），
 // 客户端构造失败使该 repo 下每行各记一条；整体恒返回 200 形状的 {items, failures}。
 //
-// INT-175：三个阶段分离。访问面解析（凭证/集成读取，带缓存）串行走
-// 请求 ctx；远端拉取并发 pullRequestSyncConcurrency 且随请求 ctx 断开
+// INT-175：三个阶段分离。访问面解析（凭证/集成读取，带缓存）串行执
+// 行——读库不接收 ctx（本地读库随请求取消属 INT-187）；远端拉取并发
+// pullRequestSyncConcurrency 且随请求 ctx 断开
 // （30s 整批预算从阶段 2 起算）；写回与响应组装串行且按关联行原序——
 // 写回仍逐行 UPDATE（SQLite 单写连接下串行不阻塞），响应顺序与旧串行
 // 实现一致，收益全部来自拉取并发。ctx 为请求 context（handler 传
