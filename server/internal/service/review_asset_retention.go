@@ -10,9 +10,11 @@ import (
 // review 截图资产行账保留策略（INT-184）：review-screenshot-cache 面的
 // 持久占用此前只增不减，本文件按「以 review_assets 行为账」回收：
 //
-//   - 行退役：created_at 超过保留期的行删除。关闭 PR 的行、旧 head 的行、
-//     探测过但没有视觉运行的行（探测落账见 review_assets.go）按同一条年龄
-//     规则退出，不为触发条件引入 PR 关闭态这样的第二状态源。
+//   - 行退役：created_at 超过保留期的行删除，但 head 上仍有非终态运行的
+//     （queued/dispatched/running）除外——在途运行不能丢自己的材料。关闭
+//     PR 的行、旧 head 的行、探测过但没有视觉运行的行（探测落账见
+//     review_assets.go）按同一条年龄规则退出，不为触发条件引入 PR 关闭态
+//     这样的第二状态源。
 //   - 字节回收：存活行的 storage_path 集合交给 githubmedia 的
 //     SweepUnreferencedEntries（面内唯一的 sanctioned 删除路径），引用计数
 //     + mtime 宽限判定；崩溃窗口（文件已 rename、行未插入）与「行插入前的
@@ -64,7 +66,18 @@ func (s *ReviewService) assetRetentionLoop(cancel <-chan struct{}) {
 // storage_path 集合回收无引用字节。行退役失败或引用集合读失败时直接返回，
 // 不动文件——账不确定时宁可保守（下轮重试）。
 func (s *ReviewService) sweepAssetRetention(now time.Time) {
+	// 行退役：跳过仍有非终态运行在身的 head。重开/手动重跑/评论唤醒可能重新
+	// 审查一个超龄 head，而命中行不刷新 created_at（AgentScreenshotImage 直
+	// 接读 storage_path，不经缓存面）——无守卫的话，在途运行会在两次扫描之
+	// 间失去行与文件（取图 404、截图列表变空），ensureAssets 的复核发生在
+	// 删除之前救不回来。运行进终态后，下一轮恢复按年龄退役。
 	res := s.db.Where("created_at < ?", now.Add(-reviewAssetRetention)).
+		Where("NOT EXISTS (SELECT 1 FROM review_runs r WHERE r.integration_id = review_assets.integration_id"+
+			" AND r.repo_full_name = review_assets.repo_full_name"+
+			" AND r.pr_number = review_assets.pr_number"+
+			" AND r.head_sha = review_assets.head_sha"+
+			" AND r.status IN (?))",
+			[]model.ReviewRunStatus{model.ReviewRunQueued, model.ReviewRunDispatched, model.ReviewRunRunning}).
 		Delete(&model.ReviewAsset{})
 	if res.Error != nil {
 		s.logger.Warn("截图资产行退役失败", zap.Error(res.Error))

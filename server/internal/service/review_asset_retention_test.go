@@ -34,12 +34,12 @@ func retentionMedia(t *testing.T, root string) *fakeReviewMedia {
 	}
 }
 
-func retentionService(t *testing.T, root string) (*ReviewService, *fakeReviewMedia) {
+func retentionService(t *testing.T, root string) (*ReviewService, *fakeReviewMedia, *reviewEngineEnv) {
 	t.Helper()
 	e := newReviewEngineEnv(t)
 	media := retentionMedia(t, root)
 	review := e.withT3(nil, media, nil)
-	return review, media
+	return review, media, e
 }
 
 func seedAsset(t *testing.T, review *ReviewService, integrationID, repo string, prNumber int, headSHA, url string, createdAt time.Time) *model.ReviewAsset {
@@ -82,7 +82,7 @@ func (f *fakeReviewMedia) ShotPath() string {
 // 验收核心用例：同一 storage_path 仍被别的 head 引用时不删。两个 head 的行
 // 共享同一份文件，超龄行退役后文件必须还在；引用清零后下一轮回收。
 func TestAssetRetentionSharedStoragePathNotDeleted(t *testing.T) {
-	review, media := retentionService(t, t.TempDir())
+	review, media, _ := retentionService(t, t.TempDir())
 	repo := "octo/example"
 	now := time.Now().UTC()
 	integrationID := model.ForgeIntegrationBuiltinGitHubID
@@ -130,9 +130,61 @@ func TestAssetRetentionSharedStoragePathNotDeleted(t *testing.T) {
 	}
 }
 
+// 退役守卫：head 上仍有非终态运行时超龄行不退役（重审超龄 head 不能让在
+// 途运行丢行与文件）；运行进终态后下一轮恢复退役。
+func TestAssetRetentionSkipsHeadsWithActiveRuns(t *testing.T) {
+	review, media, e := retentionService(t, t.TempDir())
+	repo := "octo/example"
+	now := time.Now().UTC()
+	integrationID := model.ForgeIntegrationBuiltinGitHubID
+	aged := now.Add(-31 * 24 * time.Hour)
+
+	// 超龄行 + 该 head 一个 running 运行：扫描不退役。
+	active := seedAsset(t, review, integrationID, repo, 1, "sha-live", "https://img.example/active.png", aged)
+	e.seedRun(t, repo, 1, "sha-live", model.ReviewRunRunning, now)
+	// 同仓库同 PR 另一个超龄 head 无运行：照常退役。
+	idle := seedAsset(t, review, integrationID, repo, 1, "sha-idle", "https://img.example/idle.png", aged)
+	idleFile := filepath.Join(filepath.Dir(media.ShotPath()), "idle.bin")
+	if err := os.WriteFile(idleFile, []byte("idle"), 0o600); err != nil {
+		t.Fatalf("write idle file: %v", err)
+	}
+	old := now.Add(-48 * time.Hour)
+	if err := os.Chtimes(idleFile, old, old); err != nil {
+		t.Fatalf("chtimes idle file: %v", err)
+	}
+	review.db.Model(&model.ReviewAsset{}).Where("id = ?", idle.ID).
+		Update("storage_path", idleFile)
+
+	review.sweepAssetRetention(now)
+	var count int64
+	review.db.Model(&model.ReviewAsset{}).Where("id = ?", active.ID).Count(&count)
+	if count != 1 {
+		t.Fatalf("非终态运行在身的超龄行被退役")
+	}
+	if _, err := os.Stat(media.ShotPath()); err != nil {
+		t.Fatalf("在途运行引用的文件被回收: %v", err)
+	}
+	review.db.Model(&model.ReviewAsset{}).Where("id = ?", idle.ID).Count(&count)
+	if count != 0 {
+		t.Fatalf("无运行的超龄行未退役")
+	}
+	if _, err := os.Stat(idleFile); !os.IsNotExist(err) {
+		t.Fatalf("无运行 head 的文件未回收: %v", err)
+	}
+
+	// 运行进终态后恢复退役（探测落账语义：无视觉运行的材料不永久遗留）。
+	review.db.Model(&model.ReviewRun{}).Where("head_sha = ?", "sha-live").
+		Update("status", model.ReviewRunCompleted)
+	review.sweepAssetRetention(now.Add(time.Second))
+	review.db.Model(&model.ReviewAsset{}).Where("id = ?", active.ID).Count(&count)
+	if count != 0 {
+		t.Fatalf("终态后超龄行未退役")
+	}
+}
+
 // 探测落账的字节转成普通行按年龄退役：「探测过但没有视觉运行」不永久遗留。
 func TestAssetRetentionProbeOnlyBytesCollected(t *testing.T) {
-	review, media := retentionService(t, t.TempDir())
+	review, media, _ := retentionService(t, t.TempDir())
 	repo := "octo/example"
 	now := time.Now().UTC()
 	body := "![s](https://img.example/probe.png)"
@@ -173,7 +225,7 @@ func TestAssetRetentionProbeOnlyBytesCollected(t *testing.T) {
 // 删除路径可重入：任意时点被杀（文件已删/meta 已删/两者都在），下一轮都
 // 收敛，且重复扫描不报错、不误删仍被引用的条目。
 func TestAssetRetentionSweepReentrant(t *testing.T) {
-	review, media := retentionService(t, t.TempDir())
+	review, media, _ := retentionService(t, t.TempDir())
 	repo := "octo/example"
 	now := time.Now().UTC()
 	integrationID := model.ForgeIntegrationBuiltinGitHubID

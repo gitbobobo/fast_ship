@@ -1018,8 +1018,9 @@ func (s *ProxyService) sweepStaleTmpFiles(now time.Time) {
 //   - meta 可读（闸 key = entry.URL）：持该 key 的下载闸（与 fetchAndCache
 //     同一把锁）后重问引用、重 stat mtime，再删。行的插入路径必然先经闸内
 //     的 touch/rename（新下载、ensureAssets/探测的缓存命中都在闸内刷新
-//     mtime），行插入紧跟在闸释放之后——持住闸期间不可能有新插入进行，
-//     闸内重 stat 看到的旧 mtime 说明最近确实没有插入动作。闸被长下载持
+//     mtime），插入本身在闸释放后发生——闸内重 stat 看到旧 mtime 说明插
+//     入的 touch 不在最近，宽限兜住的是 touch 与行插入之间的窗口。闸被长
+//     下载持
 //     有时本轮跳过，下轮再扫（与媒体面过期扫描同口径）。DirEntry.Info 可
 //     能是 ReadDir 时的快照（网络盘上尤其如此），一律以闸内 os.Stat 为准。
 //   - meta 读不出（写侧 rename data 后、WriteFile meta 前被杀的崩溃残留，
@@ -1071,11 +1072,16 @@ func (s *ProxyService) SweepUnreferencedEntries(isReferenced func(binPath string
 		}
 		if s.unreferencedAndStale(binPath, isReferenced, grace, now) {
 			// 先删 data 再删 meta（与媒体面同序）：meta 是条目可达性的事实
-			// 源，先删 meta 后被杀会留下不可达的孤儿 .bin。
-			if os.Remove(binPath) == nil {
-				removed++
+			// 源。data 删除失败（EIO/EACCES）时不删 meta——留着 URL/Scope/闸
+			// key 与条目事实源，下轮重试；否则制造失去闸 key 的无 meta .bin，
+			// 只能退回更弱的孤儿判据。data 本就不在（ENOENT，上轮删到一半被
+			// 杀）时照常清 meta。
+			err := os.Remove(binPath)
+			if err == nil || errors.Is(err, os.ErrNotExist) {
+				if os.Remove(metaPath) == nil {
+					removed++
+				}
 			}
-			_ = os.Remove(metaPath)
 		}
 		s.releaseDownloadLock(key, gate)
 	}
@@ -1088,7 +1094,10 @@ func (s *ProxyService) SweepUnreferencedEntries(isReferenced func(binPath string
 		}
 		metaPath := filepath.Join(s.cacheDir, name)
 		binPath := strings.TrimSuffix(metaPath, ".json") + ".bin"
-		if _, err := os.Stat(binPath); err == nil {
+		// 只有 ENOENT 才算 data 不在（与 service 层 assetFileMissing 同口径）：
+		// EIO/EACCES 下 .bin 可能仍在，删 meta 会拆散配对，条目失去
+		// mime/scope/闸 key 的事实源。
+		if _, err := os.Stat(binPath); err == nil || !errors.Is(err, os.ErrNotExist) {
 			continue
 		}
 		stale := func() bool {
@@ -1097,7 +1106,9 @@ func (s *ProxyService) SweepUnreferencedEntries(isReferenced func(binPath string
 		}
 		key := s.gateKeyFromMeta(metaPath)
 		if key == "" {
-			if stale() {
+			// 删除前重读：meta 若被并发重写成可解析条目（同 URL 重新发布）
+			// 则不删——新条目的 data 已在重建，把它当孤儿是误判。
+			if s.gateKeyFromMeta(metaPath) == "" && stale() {
 				if os.Remove(metaPath) == nil {
 					removed++
 				}
@@ -1111,9 +1122,13 @@ func (s *ProxyService) SweepUnreferencedEntries(isReferenced func(binPath string
 			s.abandonDownloadLock(key, gate)
 			continue
 		}
-		if _, err := os.Stat(binPath); err != nil && stale() {
-			if os.Remove(metaPath) == nil {
-				removed++
+		// 闸内复核：写侧发布全程持闸，能拿到闸说明发布不在进行——发布完成
+		// 则 data 在或 meta 已换新（重读闸 key 不一致），都不删。
+		if s.gateKeyFromMeta(metaPath) == key {
+			if _, err := os.Stat(binPath); errors.Is(err, os.ErrNotExist) && stale() {
+				if os.Remove(metaPath) == nil {
+					removed++
+				}
 			}
 		}
 		s.releaseDownloadLock(key, gate)
