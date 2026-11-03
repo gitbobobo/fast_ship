@@ -201,8 +201,9 @@ func (s *IssueService) DetachIssuePullRequest(issueID, userID, linkID string) er
 // 关联行原序——写回仍逐行 UPDATE（SQLite 单写连接下串行不阻塞），响应顺序
 // 与旧串行实现一致，收益全部来自拉取并发。
 // ctx 为请求 context（handler 传 c.Request.Context()），浏览器断开即停止后续
-// 远端请求；测试传 nil 退化为 Background。拉取预算 30s（整批而非逐条）；
-// 写回独立预算 pullRequestSyncWriteTimeout，脱离请求取消与拉取 deadline。
+// 远端请求；测试传 nil 退化为 Background。拉取预算 30s 从阶段 2 开始计
+// 时（整批而非逐条，阶段 1 本地 I/O 不挤占）；写回独立预算
+// pullRequestSyncWriteTimeout，脱离请求取消与拉取 deadline。
 func (s *IssueService) SyncIssuePullRequests(ctx context.Context, issueID, userID string) (*IssuePullRequestSyncResultResponse, error) {
 	issue, project, err := s.loadIssueAndProject(issueID, userID)
 	if err != nil {
@@ -225,10 +226,6 @@ func (s *IssueService) SyncIssuePullRequests(ctx context.Context, issueID, userI
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	// fetchCtx 只管阶段 1、2 的远端拉取预算（浏览器断开或 30s 到点即停发
-	// 新请求）；写回阶段另有独立预算，见阶段 3。
-	ctx, cancel := context.WithTimeout(ctx, pullRequestSyncTimeout)
-	defer cancel()
 
 	clients := make(map[string]githubapi.GitHubClient)
 	clientKinds := make(map[string]pullRequestCredentialKind)
@@ -303,6 +300,10 @@ func (s *IssueService) SyncIssuePullRequests(ctx context.Context, issueID, userI
 
 	// 阶段 2（并发）：拉取远端 PR 详情。fetcher 自身把数据写进各自独占的
 	// links[i]，无共享可变状态；ctx 断开时未开始的行不再发出新请求。
+	// fetchCtx 的 30s 预算从阶段 2 开始才计时——阶段 1 的本地 I/O（凭证
+	// 解密、集成读库）不挤占拉取预算（INT-175 R7）。
+	fetchCtx, cancelFetch := context.WithTimeout(ctx, pullRequestSyncTimeout)
+	defer cancelFetch()
 	workers := int64(pullRequestSyncConcurrency)
 	var pending int
 	for i := range links {
@@ -322,7 +323,7 @@ func (s *IssueService) SyncIssuePullRequests(ctx context.Context, issueID, userI
 				continue
 			}
 			link := &links[i]
-			if err := sem.Acquire(ctx, 1); err != nil {
+			if err := sem.Acquire(fetchCtx, 1); err != nil {
 				// ctx 已取消：本行与后续所有行都不再发远端请求，统一记失败。
 				for j := i; j < len(links); j++ {
 					if fetchers[j] != nil && !failed[j] {
@@ -348,12 +349,12 @@ func (s *IssueService) SyncIssuePullRequests(ctx context.Context, issueID, userI
 						markFailed(i, pullRequestSyncFailure(link, "拉取异常，请稍后重试"))
 					}
 				}()
-				if err := fetch(ctx, link); err != nil {
-					if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
-						// 显式取消（浏览器断开）或整批预算到点：文案与「从未发出」
-						// 一致——根因是本次同步的截止，不是上游故障；尤其 Forgejo
-						// 行走 fetchErrText 会被脱敏成「连接或响应异常」，误导运维
-						// 去查集成配置。
+				if err := fetch(fetchCtx, link); err != nil {
+					// 只按 err 归类取消/超时：用 ctx.Err() 反推会把截止瞬间到达
+					// 的真实上游错误（404/403/限流）误报成「未继续同步」，丢掉
+					// 排查提示（INT-175 R7）。适配器返回的 ctx 错误保留错误链，
+					// errors.Is 两个方向都能命中。
+					if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 						markFailed(i, pullRequestSyncFailure(link, "请求已取消或超时，未继续同步"))
 						return
 					}
