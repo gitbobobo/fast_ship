@@ -8572,7 +8572,7 @@ type ReviewAgentScreenshots200JSONResponseBody struct {
 
 // ReviewAgentScreenshotImageParams defines parameters for ReviewAgentScreenshotImage.
 type ReviewAgentScreenshotImageParams struct {
-	// Max 三个参数均未提供时返回原图字节；任一提供时其余取默认（max 1536、format jpeg、quality 80）。取值收进 [320,2000]；超过原图长边不放大按原图返回；宽×高超过 6400 万像素的原图不做缩放按原图透传
+	// Max 三个参数均未提供时返回原图字节；任一提供时其余取默认（max 1536、format jpeg、quality 80）。取值收进 [320,2000]；超过原图长边不放大按原图返回（长边在目标内但文件超 500KB 的除外——按原尺寸重编码压预算）；宽×高超过 6400 万像素的原图不做缩放按原图透传
 	Max *int `form:"max,omitempty" json:"max,omitempty"`
 
 	// Format 缩放变体编码格式；省略 jpeg

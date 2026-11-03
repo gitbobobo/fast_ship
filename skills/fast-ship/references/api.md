@@ -8335,7 +8335,7 @@ GitHub 官方 pull_request / issue_comment 事件 payload（原样验签，服�
 
 | 名称 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `max` | integer | 否 | 三个参数均未提供时返回原图字节；任一提供时其余取默认（max 1536、format jpeg、quality 80）。取值收进 [320,2000]；超过原图长边不放大按原图返回；宽×高超过 6400 万像素的原图不做缩放按原图透传 |
+| `max` | integer | 否 | 三个参数均未提供时返回原图字节；任一提供时其余取默认（max 1536、format jpeg、quality 80）。取值收进 [320,2000]；超过原图长边不放大按原图返回（长边在目标内但文件超 500KB 的除外——按原尺寸重编码压预算）；宽×高超过 6400 万像素的原图不做缩放按原图透传 |
 | `format` | string（enum: jpeg \| png，默认 jpeg） | 否 | 缩放变体编码格式；省略 jpeg |
 | `quality` | integer | 否 | JPEG 质量 30-95，省略 80 |
 
