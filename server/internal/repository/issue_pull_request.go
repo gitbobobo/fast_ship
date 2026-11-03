@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"errors"
 
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"gorm.io/gorm"
@@ -68,9 +69,16 @@ func (r *IssuePullRequestRepository) Upsert(link *model.IssuePullRequest) error 
 // SaveSyncedFields 按 (id, issue_id) 更新既有行的同步字段。不用 gorm Save：
 // UPDATE 影响 0 行时它会退化 INSERT，把 sync 期间被并发 detach 的行原样插回。
 // 行不存在时返回 gorm.ErrRecordNotFound 让调用方记失败。
+//
+// 带 synced_at 时间守卫（INT-175 R8）：拉取与写回拆成两段后，同一个 Issue
+// 的两个并发 sync 可能按发起顺序倒置落库——慢批次不能把后写入的更新数据
+// 覆盖回旧值。0 行命中有两种含义：行已被解除（ErrRecordNotFound）或库内
+// synced_at 已更新（ErrSyncedAtStale），由调用方 FindByID 区分。
+var ErrSyncedAtStale = errors.New("issue_pull_requests.synced_at 已有更新数据")
+
 func (r *IssuePullRequestRepository) SaveSyncedFields(link *model.IssuePullRequest) error {
 	res := r.db.Model(&model.IssuePullRequest{}).
-		Where("id = ? AND issue_id = ?", link.ID, link.IssueID).
+		Where("id = ? AND issue_id = ? AND synced_at <= ?", link.ID, link.IssueID, link.SyncedAt).
 		Updates(map[string]any{
 			"repo_full_name": link.RepoFullName,
 			"html_url":       link.HTMLURL,
@@ -89,7 +97,14 @@ func (r *IssuePullRequestRepository) SaveSyncedFields(link *model.IssuePullReque
 		return res.Error
 	}
 	if res.RowsAffected == 0 {
-		return gorm.ErrRecordNotFound
+		var current model.IssuePullRequest
+		if err := r.db.Select("id").Where("id = ? AND issue_id = ?", link.ID, link.IssueID).First(&current).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return gorm.ErrRecordNotFound
+			}
+			return err
+		}
+		return ErrSyncedAtStale
 	}
 	return nil
 }

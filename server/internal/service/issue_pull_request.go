@@ -49,9 +49,12 @@ const (
 	// 已成功拉取的行全部零落库；也不跟随客户端断开——已付出的代价写
 	// 回是幂等刷新。预算取 busy_timeout(30s) 量级：MaxOpenConns(1) 下写回
 	// 要排唯一写连接，短于 busy_timeout 会把「正常的锁等待容忍度」变成
-	// 提前判死。服务端总时长上界 = 拉取 30s + 写回 40s = 70s，web 端超
-	// 时 90s。
+	// 提前判死。
 	pullRequestSyncWriteTimeout = 40 * time.Second
+	// pullRequestSyncResolveTimeout 是阶段 1 访问面解析的独立预算（R8）：
+	// 凭证解密与集成读库走请求 ctx，MaxOpenConns(1) 下借连接的等待没有
+	// 上限，不设预算会把服务端总时长顶穿 web 端超时。
+	pullRequestSyncResolveTimeout = 30 * time.Second
 )
 
 // pullRequestLink 解析后的 PR 链接：Provider 决定后续取数路径；forgejo 行的
@@ -226,6 +229,13 @@ func (s *IssueService) SyncIssuePullRequests(ctx context.Context, issueID, userI
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	// 三段各自有独立时间来源：阶段 1 访问面解析用 resolveCtx（本地 I/O，
+	// 但 MaxOpenConns(1) 下借连接等待无上限，仍要预算）；阶段 2 拉取用
+	// fetchCtx；阶段 3 写回用 writeCtx（WithoutCancel，脱离请求取消）。
+	// 后两者都从请求 ctx 派生，浏览器断开只影响拉取，不影响写回。
+	// 服务端总时长上界 = 解析 30s + 拉取 30s + 写回 40s = 100s。
+	resolveCtx, cancelResolve := context.WithTimeout(ctx, pullRequestSyncResolveTimeout)
+	defer cancelResolve()
 
 	clients := make(map[string]githubapi.GitHubClient)
 	clientKinds := make(map[string]pullRequestCredentialKind)
@@ -259,7 +269,7 @@ func (s *IssueService) SyncIssuePullRequests(ctx context.Context, issueID, userI
 			}
 			// 一次读取集成行同时得到访问面与主机快照：主机不一致（集成改
 			// 指别的主机）按单行失败拦下，取数不会用改指后的新基址。
-			access, err := forgejoSyncAccessFor(s, forgeAccess, forgeAccessErrs, ctx, link)
+			access, err := forgejoSyncAccessFor(s, forgeAccess, forgeAccessErrs, resolveCtx, link)
 			if err != nil {
 				markFailed(i, pullRequestSyncFailure(link, s.forgejoSyncFailureText(err)))
 				continue
@@ -301,7 +311,8 @@ func (s *IssueService) SyncIssuePullRequests(ctx context.Context, issueID, userI
 	// 阶段 2（并发）：拉取远端 PR 详情。fetcher 自身把数据写进各自独占的
 	// links[i]，无共享可变状态；ctx 断开时未开始的行不再发出新请求。
 	// fetchCtx 的 30s 预算从阶段 2 开始才计时——阶段 1 的本地 I/O（凭证
-	// 解密、集成读库）不挤占拉取预算（INT-175 R7）。
+	// 解密、集成读库）不挤占拉取预算（INT-175 R7）；它从请求 ctx 派生：
+	// 浏览器断开仍取消拉取，resolveCtx 到点不连带。
 	fetchCtx, cancelFetch := context.WithTimeout(ctx, pullRequestSyncTimeout)
 	defer cancelFetch()
 	workers := int64(pullRequestSyncConcurrency)
@@ -385,6 +396,17 @@ func (s *IssueService) SyncIssuePullRequests(ctx context.Context, issueID, userI
 			continue
 		}
 		if err := saveRepo.SaveSyncedFields(link); err != nil {
+			if errors.Is(err, repository.ErrSyncedAtStale) {
+				// 并发 sync 已写入更新数据（时间守卫拦下本批次的旧快照）——
+				// 不算失败：读回库内现行行进 items，响应与库一致。
+				current, findErr := s.pullRequestRepo.FindByID(issue.ID, link.ID)
+				if findErr == nil {
+					result.Items = append(result.Items, toIssuePullRequestResponse(*current))
+				} else {
+					result.Failures = append(result.Failures, pullRequestSyncFailure(link, "关联已解除"))
+				}
+				continue
+			}
 			msg := "保存失败"
 			switch {
 			case errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded):
