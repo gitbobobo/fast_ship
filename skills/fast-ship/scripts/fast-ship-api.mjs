@@ -21,6 +21,16 @@ import { argv, stderr, stdout } from 'node:process';
 
 const CONFIG_PATH = join(homedir(), '.config', 'fast-ship', 'config.yaml');
 const TIMEOUT_MS = 30_000;
+// sync 服务端上界 = 解析 30s + 拉取 30s + 写回 40s = 100s（INT-175）；
+// 调用方超时要大于它，否则客户端在服务端仍写回时中断并按 retryable
+// 重发一轮。
+const SYNC_TIMEOUT_MS = 120_000;
+
+function timeoutFor(path) {
+  const p = path.split('?')[0];
+  if (/\/pull-requests\/sync$/.test(p)) return SYNC_TIMEOUT_MS;
+  return TIMEOUT_MS;
+}
 const RETRY_DELAY_MS = 1_000;
 
 // Stable tags for the business codes agents hit most (server/internal/pkg/
@@ -156,7 +166,7 @@ async function request(method, url, apiKey, body, path) {
           'Content-Type': 'application/json; charset=utf-8',
         },
         body,
-        signal: AbortSignal.timeout(TIMEOUT_MS),
+        signal: AbortSignal.timeout(timeoutFor(path)),
       });
     } catch (err) {
       lastErr = err;
