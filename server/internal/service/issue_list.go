@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"sort"
 	"strings"
 	"sync"
@@ -14,6 +16,7 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	ghclient "github.com/godbobo/fast_ship/server/internal/pkg/github"
 	"github.com/godbobo/fast_ship/server/internal/repository"
+	gh "github.com/google/go-github/v62/github"
 	"go.uber.org/zap"
 	"golang.org/x/sync/semaphore"
 	"gorm.io/gorm"
@@ -124,8 +127,6 @@ func (s *IssueService) BatchCloseDoneIssues(ctx context.Context, projectID, user
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	ctx, cancel := context.WithTimeout(ctx, batchCloseDoneTimeout)
-	defer cancel()
 
 	project, err := s.projectRepo.FindByID(projectID, userID)
 	if err != nil {
@@ -152,6 +153,12 @@ func (s *IssueService) BatchCloseDoneIssues(ctx context.Context, projectID, user
 		return nil, errs.ErrBatchCloseTooMany
 	}
 
+	// 30s 预算只管关闭阶段（内部事务 + GitHub PATCH）：前置的权限检查与
+	// ListFiltered 本就不收 ctx，不该被整批截止截断；parent 仍是调用方 ctx，
+	// 调用方取消照常生效（INT-185）。
+	closeCtx, cancel := context.WithTimeout(ctx, batchCloseDoneTimeout)
+	defer cancel()
+
 	resp := &BatchCloseDoneIssuesResponse{
 		Total:    int64(total),
 		Failures: make([]BatchCloseDoneIssueFailure, 0),
@@ -170,9 +177,9 @@ func (s *IssueService) BatchCloseDoneIssues(ctx context.Context, projectID, user
 		}
 	}
 
-	s.closeInternalIssues(ctx, internalIssues, resp)
+	s.closeInternalIssues(closeCtx, internalIssues, resp)
 	if len(githubIssues) > 0 {
-		s.closeGitHubIssues(ctx, project, githubIssues, resp)
+		s.closeGitHubIssues(closeCtx, project, githubIssues, resp)
 	}
 
 	resp.ElapsedMs = time.Since(start).Milliseconds()
@@ -194,6 +201,38 @@ type githubCloseNetResult struct {
 	err     error
 }
 
+// closeOneGitHubIssue 执行单个 GitHub Issue 的关闭：PATCH 开始前先判定整批
+// 取消（Acquire 成功不代表 worker 已调度，已取消的批次不得再发新请求），之后
+// 经 WithoutCancel + 独立超时与整批取消解耦；结果只经 results 返回，由调用方
+// 统一落库与计数。
+func closeOneGitHubIssue(batchCtx context.Context, client ghclient.Client, issue model.Issue, updateReq ghclient.UpdateIssueRequest, results chan<- githubCloseNetResult) {
+	if issue.GitHubMeta == nil {
+		results <- githubCloseNetResult{issue: issue, err: errs.ErrIssueReadOnly}
+		return
+	}
+	if err := batchCtx.Err(); err != nil {
+		results <- githubCloseNetResult{issue: issue, err: err}
+		return
+	}
+	patchCtx, cancel := context.WithTimeout(context.WithoutCancel(batchCtx), batchCloseGitHubPatchTimeout)
+	defer cancel()
+	updated, err := client.UpdateIssue(patchCtx, issue.GitHubMeta.Number, updateReq)
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			// PATCH 自身超时/取消：远端可能已生效，结果未确认，与
+			// 「未开始」的取消区分开。
+			err = &batchClosePatchUnconfirmedError{err: err}
+		} else if isGitHubRateLimitError(err) {
+			err = errs.New(errs.ErrGitHubAPI.Code, batchCloseGitHubRateLimitText)
+		} else {
+			err = errs.New(errs.ErrGitHubAPI.Code, fmt.Sprintf("更新 GitHub Issue 失败: %v", err))
+		}
+		results <- githubCloseNetResult{issue: issue, err: err}
+		return
+	}
+	results <- githubCloseNetResult{issue: issue, updated: updated}
+}
+
 func (s *IssueService) closeInternalIssues(ctx context.Context, issues []model.Issue, resp *BatchCloseDoneIssuesResponse) {
 	if len(issues) == 0 {
 		return
@@ -206,15 +245,21 @@ func (s *IssueService) closeInternalIssues(ctx context.Context, issues []model.I
 	}
 
 	ids := make([]string, len(issues))
+	byID := make(map[string]model.Issue, len(issues))
 	for i, issue := range issues {
 		ids[i] = issue.ID
+		byID[issue.ID] = issue
 	}
 	now := time.Now().UTC()
+	var closedIDs []string
 	err := s.issueRepo.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := s.issueRepo.BatchCloseInternalTx(tx, ids, now); err != nil {
+		closed, err := s.issueRepo.BatchCloseInternalTx(tx, ids, now)
+		if err != nil {
 			return err
 		}
-		return s.recRepo.DeleteByIssueIDsTx(tx, ids)
+		closedIDs = closed
+		// 推荐只随真正关闭的行删除：未命中行保持原状，推荐与依赖一并保留。
+		return s.recRepo.DeleteByIssueIDsTx(tx, closed)
 	})
 	if err != nil {
 		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
@@ -226,7 +271,18 @@ func (s *IssueService) closeInternalIssues(ctx context.Context, issues []model.I
 		}
 		return
 	}
-	resp.Succeeded += len(issues)
+	resp.Succeeded += len(closedIDs)
+	closedSet := make(map[string]struct{}, len(closedIDs))
+	for _, id := range closedIDs {
+		closedSet[id] = struct{}{}
+	}
+	for _, id := range ids {
+		if _, ok := closedSet[id]; !ok {
+			// 查询到关闭之间被并发方改写（已非 open）：不重复关闭也不删推荐，
+			// 按失败逐条回报（INT-185）。
+			appendBatchCloseFailure(resp, byID[id], errBatchCloseSkippedNotOpen)
+		}
+	}
 }
 
 func (s *IssueService) closeGitHubIssues(ctx context.Context, project *model.Project, issues []model.Issue, resp *BatchCloseDoneIssuesResponse) {
@@ -271,19 +327,7 @@ func (s *IssueService) closeGitHubIssues(ctx context.Context, project *model.Pro
 		go func() {
 			defer wg.Done()
 			defer sem.Release(1)
-			if issue.GitHubMeta == nil {
-				results <- githubCloseNetResult{issue: issue, err: errs.ErrIssueReadOnly}
-				return
-			}
-			updated, err := client.UpdateIssue(ctx, issue.GitHubMeta.Number, updateReq)
-			if err != nil {
-				if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-					err = errs.New(errs.ErrGitHubAPI.Code, fmt.Sprintf("更新 GitHub Issue 失败: %v", err))
-				}
-				results <- githubCloseNetResult{issue: issue, err: err}
-				return
-			}
-			results <- githubCloseNetResult{issue: issue, updated: updated}
+			closeOneGitHubIssue(ctx, client, issue, updateReq, results)
 		}()
 	}
 
@@ -322,7 +366,67 @@ func appendBatchCloseFailure(resp *BatchCloseDoneIssuesResponse, issue model.Iss
 	})
 }
 
+// batchClosePatchUnconfirmedError 标记「PATCH 已发出但结果未确认」：请求可能
+// 已在 GitHub 侧生效（Issue 已被关闭），只是没等到响应。文案必须提示刷新确认，
+// 不能与「未开始关闭」的取消混为一谈（INT-185）。
+type batchClosePatchUnconfirmedError struct{ err error }
+
+func (e *batchClosePatchUnconfirmedError) Error() string { return e.err.Error() }
+func (e *batchClosePatchUnconfirmedError) Unwrap() error { return e.err }
+
+// errBatchCloseSkippedNotOpen：关闭事务内未命中（并发方已把行改出 open），
+// 不计入成功，按失败逐条回报。
+var errBatchCloseSkippedNotOpen = errors.New("该问题已在其他操作中被更新，已跳过关闭")
+
+const batchCloseGitHubRateLimitText = "更新 GitHub Issue 失败：GitHub API 限流，请稍后重试"
+
+// isGitHubRateLimitError 判定 go-github 错误是否为 API 限流：*RateLimitError、
+// *AbuseRateLimitError，或 403/429 且响应体含 rate limit/abuse detection 字样的
+// *ErrorResponse。判定口径与 PR 域的 pullRequestAccessHint 对齐但不共用
+// （那边是 githubapi.StatusError 的 PR 读取域）；Message 是响应体 JSON 解析出的
+// message 字段，原始 body 由 go-github 解析后回填，可尽力重读。
+func isGitHubRateLimitError(err error) bool {
+	var rateLimit *gh.RateLimitError
+	if errors.As(err, &rateLimit) {
+		return true
+	}
+	var abuse *gh.AbuseRateLimitError
+	if errors.As(err, &abuse) {
+		return true
+	}
+	var respErr *gh.ErrorResponse
+	if !errors.As(err, &respErr) || respErr.Response == nil {
+		return false
+	}
+	code := respErr.Response.StatusCode
+	if code != http.StatusForbidden && code != http.StatusTooManyRequests {
+		return false
+	}
+	text := strings.ToLower(respErr.Message)
+	if raw := readGitHubErrorBody(respErr.Response.Body); raw != "" {
+		text += " " + strings.ToLower(raw)
+	}
+	return strings.Contains(text, "rate limit") || strings.Contains(text, "abuse detection")
+}
+
+// readGitHubErrorBody 尽力读取错误响应体；已被读走或关闭时返回空串，不影响
+// 判定（还有 Message 兜底）。
+func readGitHubErrorBody(body io.ReadCloser) string {
+	if body == nil {
+		return ""
+	}
+	raw, err := io.ReadAll(body)
+	if err != nil {
+		return ""
+	}
+	return string(raw)
+}
+
 func batchCloseItemError(err error) string {
+	var unconfirmed *batchClosePatchUnconfirmedError
+	if errors.As(err, &unconfirmed) {
+		return "关闭结果未确认：GitHub 侧可能已关闭，请刷新查看"
+	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return "请求已取消或超时，未继续关闭"
 	}

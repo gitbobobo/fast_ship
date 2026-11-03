@@ -53,20 +53,32 @@ func (r *IssueRepository) TouchUpdatedAt(tx *gorm.DB, id string, at time.Time) e
 	return tx.Model(&model.Issue{}).Where("id = ?", id).Update("updated_at", at).Error
 }
 
-// BatchCloseInternalTx 把指定内部 Issue 一次更新为 closed/completed。
-// ids 为空时不发 SQL（避免 IN ()）。
-func (r *IssueRepository) BatchCloseInternalTx(tx *gorm.DB, ids []string, closedAt time.Time) error {
+// BatchCloseInternalTx 在事务内逐 id 把仍为 open 的内部 Issue 更新为
+// closed/completed，返回本次真正命中的 id 子集。state=open 进 WHERE：行已被
+// 并发方关闭/改写时 RowsAffected 为 0，调用方据此只对命中行计成功并删推荐，
+// 未命中行逐条记失败而不是静默吞掉。ids 为空时不发 SQL（避免 IN ()）。
+func (r *IssueRepository) BatchCloseInternalTx(tx *gorm.DB, ids []string, closedAt time.Time) ([]string, error) {
 	if len(ids) == 0 {
-		return nil
+		return nil, nil
 	}
-	return tx.Model(&model.Issue{}).
-		Where("id IN ? AND source = ?", ids, model.IssueSourceInternal).
-		Updates(map[string]any{
-			"state":        model.IssueStateClosed,
-			"state_reason": "completed",
-			"closed_at":    closedAt,
-			"updated_at":   closedAt,
-		}).Error
+	closed := make([]string, 0, len(ids))
+	for _, id := range ids {
+		res := tx.Model(&model.Issue{}).
+			Where("id = ? AND source = ? AND state = ?", id, model.IssueSourceInternal, model.IssueStateOpen).
+			Updates(map[string]any{
+				"state":        model.IssueStateClosed,
+				"state_reason": "completed",
+				"closed_at":    closedAt,
+				"updated_at":   closedAt,
+			})
+		if res.Error != nil {
+			return nil, res.Error
+		}
+		if res.RowsAffected > 0 {
+			closed = append(closed, id)
+		}
+	}
+	return closed, nil
 }
 
 func (r *IssueRepository) FindByID(id string) (*model.Issue, error) {

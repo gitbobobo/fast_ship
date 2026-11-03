@@ -23,6 +23,9 @@ const (
 	batchCloseDoneMaxFailures   = 50
 	batchCloseDoneTimeout       = 30 * time.Second
 	batchCloseGitHubConcurrency = 4
+	// 单个在途 GitHub PATCH 的独立上限（INT-185）：整批取消后已发出的请求仍要
+	// 走完并落库，但不允许个别挂起请求把 worker 拖死。
+	batchCloseGitHubPatchTimeout = 15 * time.Second
 )
 
 type IssueService struct {

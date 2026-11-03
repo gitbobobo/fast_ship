@@ -125,10 +125,16 @@ export function CloseAllDoneButton({ projectId }: { projectId: string }) {
   );
 }
 
-async function formatBatchCloseError(error: unknown): Promise<string> {
+// 导出仅供单测覆盖文案分支。
+export async function formatBatchCloseError(error: unknown): Promise<string> {
   if (error instanceof HTTPError) {
     const body = await error.response.json<ApiResponse<unknown>>().catch(() => null);
     if (body?.message) return body.message;
+  }
+  // ky 超时（TimeoutError，非 HTTPError）：整批请求中断，服务端可能已关闭
+  // 一部分，提示刷新确认而不是笼统报「批量关闭失败」（INT-185）。
+  if (error instanceof Error && error.name === "TimeoutError") {
+    return "请求超时：部分问题可能已关闭，请刷新看板确认结果";
   }
   return "批量关闭失败";
 }

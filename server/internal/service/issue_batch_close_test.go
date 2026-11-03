@@ -4,6 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -122,7 +126,7 @@ func TestIssueServiceBatchCloseDoneIssues_InternalDeletesRecommendationsInOneSho
 	}
 }
 
-func TestIssueServiceBatchCloseDoneIssues_GitHubClosesConcurrentlyFasterThanSerial(t *testing.T) {
+func TestIssueServiceBatchCloseDoneIssues_GitHubClosesConcurrently(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")
 	project := createTestProject(t, svc.db, user.ID)
@@ -145,15 +149,10 @@ func TestIssueServiceBatchCloseDoneIssues_GitHubClosesConcurrentlyFasterThanSeri
 	if got := len(fake.recordedUpdateIssueCalls()); got != n {
 		t.Fatalf("expected %d github updates, got %d", n, got)
 	}
-	maxConcurrent := atomic.LoadInt32(&fake.updateIssueMax)
-	if maxConcurrent < 3 {
-		t.Fatalf("expected concurrent UpdateIssue, max=%d", maxConcurrent)
-	}
-	// serialMs 只计 GitHub 等待；本地 upsert 串行，墙钟会更高，但仍应低于
-	// 200 次串行往返。-race 下 upsert 更慢，所以延迟取 20ms 让网络等待占主导。
-	serialMs := n * delay.Milliseconds()
-	if resp.ElapsedMs >= serialMs {
-		t.Fatalf("elapsed %dms is not faster than serial %dms (maxConcurrent=%d)", resp.ElapsedMs, serialMs, maxConcurrent)
+	// 只断言并发度（INT-185）：墙钟对比对负载敏感，改为看 UpdateIssue 瞬时
+	// 并发峰值是否达到 worker 池的水平。
+	if maxConcurrent := atomic.LoadInt32(&fake.updateIssueMax); maxConcurrent < batchCloseGitHubConcurrency {
+		t.Fatalf("expected concurrent UpdateIssue up to %d, max=%d", batchCloseGitHubConcurrency, maxConcurrent)
 	}
 }
 
@@ -163,8 +162,18 @@ func TestIssueServiceBatchCloseDoneIssues_CancelStopsLaterGitHubUpdates(t *testi
 	project := createTestProject(t, svc.db, user.ID)
 
 	const n = 20
-	const delay = 40 * time.Millisecond
-	fake := &fakeIssueGitHubClient{updateIssueDelay: delay}
+	// 确定性同步（INT-185）：worker 阻塞在 onUpdateIssue 钩子时仍占用
+	// semaphore 槽位，用 started/release 两个通道精确钉住「第一波全部进入
+	// PATCH、尚未返回」的时刻，不依赖墙钟窗口。
+	started := make(chan struct{}, n)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseHooks := func() { releaseOnce.Do(func() { close(release) }) }
+	fake := &fakeIssueGitHubClient{}
+	fake.onUpdateIssue = func(_ context.Context, _ int) {
+		started <- struct{}{}
+		<-release
+	}
 	svc.issueService.newClient = func(token, owner, repo string) ghclient.Client {
 		return fake
 	}
@@ -183,51 +192,97 @@ func TestIssueServiceBatchCloseDoneIssues_CancelStopsLaterGitHubUpdates(t *testi
 		done <- outcome{resp: resp, err: err}
 	}()
 
-	deadline := time.Now().Add(2 * time.Second)
-	for len(fake.recordedUpdateIssueCalls()) < batchCloseGitHubConcurrency {
-		if time.Now().After(deadline) {
+	// 失败路径（如等 started 超时 t.Fatal）也要先取消批次再放行钩子里的
+	// worker，让批次 goroutine 有界退出，不把阻塞在钩子上的 goroutine 拖到
+	// 测试结束之后继续碰共享的测试 DB。
+	batchExited := false
+	t.Cleanup(func() {
+		cancel()
+		releaseHooks()
+		if batchExited {
+			return
+		}
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+		}
+	})
+
+	// 第一波全部进入 PATCH（占满全部槽位）后取消：在途请求经 WithoutCancel +
+	// 独立超时不受整批取消影响，必须继续走完并落库；未开始的项不再发请求。
+	for i := 0; i < batchCloseGitHubConcurrency; i++ {
+		select {
+		case <-started:
+		case <-time.After(2 * time.Second):
 			t.Fatal("UpdateIssue never reached concurrency")
 		}
-		time.Sleep(time.Millisecond)
 	}
-	// 等第一波 delay 结束并完成 upsert，再取消，避免「一个都没写下就取消」的假绿。
-	time.Sleep(delay + 20*time.Millisecond)
 	cancel()
+	releaseHooks()
 
 	got := <-done
+	batchExited = true
 	if got.err != nil {
 		t.Fatalf("batch close: %v", got.err)
 	}
-	if got.resp.Succeeded < 1 {
-		t.Fatalf("expected at least one persisted close before cancel, got %+v", got.resp)
+
+	if got.resp.Succeeded != batchCloseGitHubConcurrency {
+		t.Fatalf("expected in-flight %d closes to persist, got Succeeded=%d", batchCloseGitHubConcurrency, got.resp.Succeeded)
 	}
-	if got.resp.Failed == 0 {
-		t.Fatalf("expected cancelled items in failures, got %+v", got.resp)
+	if got.resp.Failed != n-batchCloseGitHubConcurrency || len(got.resp.Failures) != n-batchCloseGitHubConcurrency {
+		t.Fatalf("expected %d never-started failures, got %+v", n-batchCloseGitHubConcurrency, got.resp)
 	}
+	for _, f := range got.resp.Failures {
+		// 未开始的项必须是「未开始关闭」语义，不能是「结果未确认」。
+		if f.Error != "请求已取消或超时，未继续关闭" {
+			t.Fatalf("expected never-started copy for %s, got %q", f.Id, f.Error)
+		}
+	}
+
 	calls := len(fake.recordedUpdateIssueCalls())
-	if calls >= n {
-		t.Fatalf("expected later github updates to be skipped, got %d calls", calls)
-	}
-	if calls > 2*batchCloseGitHubConcurrency {
-		t.Fatalf("expected calls bounded by a couple of worker waves, got %d", calls)
+	if calls != batchCloseGitHubConcurrency {
+		t.Fatalf("expected calls to stop at the first wave, got %d", calls)
 	}
 
 	var stillOpen int64
 	if err := svc.db.Model(&model.Issue{}).Where("project_id = ? AND state = ?", project.ID, model.IssueStateOpen).Count(&stillOpen).Error; err != nil {
 		t.Fatalf("count open: %v", err)
 	}
-	if stillOpen == 0 {
-		t.Fatal("expected remaining github issues to stay open after cancel")
+	if stillOpen != n-batchCloseGitHubConcurrency {
+		t.Fatalf("expected exactly %d github issues to stay open after cancel, got %d", n-batchCloseGitHubConcurrency, stillOpen)
 	}
 	var closed int64
 	if err := svc.db.Model(&model.Issue{}).Where("project_id = ? AND state = ?", project.ID, model.IssueStateClosed).Count(&closed).Error; err != nil {
 		t.Fatalf("count closed: %v", err)
 	}
-	if closed < 1 {
-		t.Fatal("expected a github issue closed locally before cancel")
+	if closed != batchCloseGitHubConcurrency {
+		t.Fatalf("expected %d in-flight closes to land in db, got %d", batchCloseGitHubConcurrency, closed)
 	}
 	if got.resp.Succeeded+got.resp.Failed != n {
 		t.Fatalf("succeeded+failed should cover total, got %+v", got.resp)
+	}
+}
+
+// INT-185：Acquire 成功不等于 worker 已调度——批次取消后、PATCH 开始前的
+// worker 必须直接放弃，不再发新请求（WithoutCancel 只豁免已在途的请求）。
+func TestCloseOneGitHubIssue_SkipsPatchWhenBatchCanceled(t *testing.T) {
+	fake := &fakeIssueGitHubClient{}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // 批次已取消
+
+	results := make(chan githubCloseNetResult, 1)
+	issue := model.Issue{Source: model.IssueSourceGitHub, GitHubMeta: &model.IssueGitHubMeta{Number: 7}}
+	closeOneGitHubIssue(ctx, fake, issue, ghclient.UpdateIssueRequest{}, results)
+
+	res := <-results
+	if res.err == nil || !errors.Is(res.err, context.Canceled) {
+		t.Fatalf("expected canceled err, got %+v", res.err)
+	}
+	if got := batchCloseItemError(res.err); got != "请求已取消或超时，未继续关闭" {
+		t.Fatalf("expected never-started copy, got %q", got)
+	}
+	if calls := len(fake.recordedUpdateIssueCalls()); calls != 0 {
+		t.Fatalf("canceled batch must not dispatch PATCH, got %d calls", calls)
 	}
 }
 
@@ -276,5 +331,191 @@ func TestIssueServiceBatchCloseDoneIssues_MixedSourcesGitHubFailureKeepsInternal
 	}
 	if github.State != model.IssueStateOpen {
 		t.Fatalf("failed github issue should stay open, got %+v", github)
+	}
+}
+
+// INT-185：行在批量关闭查询之后、事务之前被并发方关闭（已非 open）时，
+// 不计入成功、不误删推荐，按失败逐条回报。
+func TestIssueServiceBatchCloseDoneIssues_InternalSkipsAlreadyClosed(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID)
+	now := time.Now().UTC()
+	seedListFixtureIssues(t, svc, project.ID, []listFixtureIssue{
+		{seq: 1, source: model.IssueSourceInternal, state: model.IssueStateOpen,
+			title: "done one", author: "alice",
+			updated: now, created: now,
+			workflow: listFixtureStatus(model.IssueWorkflowStatusDone)},
+	})
+
+	var issues []model.Issue
+	if err := svc.db.Where("project_id = ?", project.ID).Find(&issues).Error; err != nil {
+		t.Fatalf("load issues: %v", err)
+	}
+	if len(issues) != 1 {
+		t.Fatalf("expected 1 issue, got %d", len(issues))
+	}
+	issue := issues[0]
+
+	rec := &model.IssueRecommendation{
+		IssueID: issue.ID, ProjectID: project.ID, Reason: "keep me",
+		Priority: model.IssueRecommendationPriorityMedium, CreatedBy: user.ID,
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := svc.db.Create(rec).Error; err != nil {
+		t.Fatalf("seed recommendation: %v", err)
+	}
+	dep := &model.RecommendationDependency{IssueID: issue.ID, DepIssueID: issue.ID, Position: 0, CreatedAt: now}
+	if err := svc.db.Create(dep).Error; err != nil {
+		t.Fatalf("seed recommendation dep: %v", err)
+	}
+
+	// 模拟并发方提前关闭：行已非 open，事务内的 UPDATE 不应命中。
+	closedAt := now.Add(time.Minute)
+	if _, err := svc.issueRepo.BatchCloseInternalTx(svc.db, []string{issue.ID}, closedAt); err != nil {
+		t.Fatalf("pre-close issue: %v", err)
+	}
+
+	resp := &BatchCloseDoneIssuesResponse{Total: 1, Failures: make([]BatchCloseDoneIssueFailure, 0)}
+	svc.issueService.closeInternalIssues(context.Background(), issues, resp)
+	if resp.Succeeded != 0 || resp.Failed != 1 {
+		t.Fatalf("expected 0 succeeded / 1 failed, got %+v", resp)
+	}
+	if len(resp.Failures) != 1 || resp.Failures[0].Id != issue.ID {
+		t.Fatalf("expected failure on the already-closed issue, got %+v", resp.Failures)
+	}
+	if resp.Failures[0].Error != errBatchCloseSkippedNotOpen.Error() {
+		t.Fatalf("unexpected failure copy: %q", resp.Failures[0].Error)
+	}
+
+	var got model.Issue
+	if err := svc.db.Where("id = ?", issue.ID).First(&got).Error; err != nil {
+		t.Fatalf("reload issue: %v", err)
+	}
+	if got.State != model.IssueStateClosed || got.StateReason != "completed" {
+		t.Fatalf("expected the concurrent close to stand, got %+v", got)
+	}
+	var recs, deps int64
+	if err := svc.db.Model(&model.IssueRecommendation{}).Where("issue_id = ?", issue.ID).Count(&recs).Error; err != nil {
+		t.Fatalf("count recs: %v", err)
+	}
+	if err := svc.db.Model(&model.RecommendationDependency{}).Where("issue_id = ?", issue.ID).Count(&deps).Error; err != nil {
+		t.Fatalf("count deps: %v", err)
+	}
+	if recs != 1 || deps != 1 {
+		t.Fatalf("expected recommendation to stay, got recs=%d deps=%d", recs, deps)
+	}
+}
+
+// INT-185：取消文案分两类——未开始的取消与已发出 PATCH 的未确认结果。
+func TestBatchCloseItemError_CancelCategories(t *testing.T) {
+	for _, err := range []error{context.Canceled, context.DeadlineExceeded} {
+		if got := batchCloseItemError(err); got != "请求已取消或超时，未继续关闭" {
+			t.Fatalf("never-started cancel copy, got %q", got)
+		}
+	}
+	unconfirmed := &batchClosePatchUnconfirmedError{err: context.DeadlineExceeded}
+	if got := batchCloseItemError(unconfirmed); got != "关闭结果未确认：GitHub 侧可能已关闭，请刷新查看" {
+		t.Fatalf("unconfirmed copy, got %q", got)
+	}
+	if !errors.Is(unconfirmed, context.DeadlineExceeded) {
+		t.Fatal("unconfirmed error must unwrap to the underlying ctx err")
+	}
+}
+
+// INT-185：批量关闭识别 GitHub 限流，各类型命中与不命中各测一条。
+func TestIsGitHubRateLimitError(t *testing.T) {
+	resp := func(status int) *http.Response { return &http.Response{StatusCode: status} }
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"RateLimitError", &gh.RateLimitError{Message: "API rate limit exceeded for 1.2.3.4."}, true},
+		{"AbuseRateLimitError", &gh.AbuseRateLimitError{
+			Message:  "You have exceeded a secondary rate limit",
+			Response: resp(http.StatusForbidden),
+		}, true},
+		{"ErrorResponse403RateLimitBody", &gh.ErrorResponse{
+			Message:  "You have exceeded a secondary rate limit",
+			Response: resp(http.StatusForbidden),
+		}, true},
+		{"ErrorResponse429RateLimitBody", &gh.ErrorResponse{
+			Message:  "API rate limit exceeded",
+			Response: resp(http.StatusTooManyRequests),
+		}, true},
+		{"ErrorResponse403RateLimitRawBody", &gh.ErrorResponse{
+			Message: "",
+			Response: func() *http.Response {
+				r := resp(http.StatusForbidden)
+				r.Body = io.NopCloser(strings.NewReader(`{"message":"abuse detection mechanism triggered"}`))
+				return r
+			}(),
+		}, true},
+		{"ErrorResponse403OtherBody", &gh.ErrorResponse{
+			Message:  "Repository request blocked",
+			Response: resp(http.StatusForbidden),
+		}, false},
+		{"ErrorResponse500RateLimitBody", &gh.ErrorResponse{
+			Message:  "rate limit",
+			Response: resp(http.StatusInternalServerError),
+		}, false},
+		{"ErrorResponseNilHTTPResponse", &gh.ErrorResponse{Message: "rate limit"}, false},
+		{"PlainError", errors.New("rate limit exceeded"), false},
+	}
+	for _, tc := range cases {
+		if got := isGitHubRateLimitError(tc.err); got != tc.want {
+			t.Errorf("%s: isGitHubRateLimitError=%v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// INT-185：UpdateIssue 命中限流时 failures 的文案必须指向限流重试。
+func TestIssueServiceBatchCloseDoneIssues_GitHubRateLimitFailureMessage(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID)
+
+	fake := &fakeIssueGitHubClient{}
+	metas := seedGitHubDoneIssuesForBatchClose(t, svc, project.ID, 1, fake)
+	fake.updateIssueErrs = map[int]error{
+		metas[0].Number: &gh.RateLimitError{Message: "API rate limit exceeded for 1.2.3.4."},
+	}
+	svc.issueService.newClient = func(token, owner, repo string) ghclient.Client {
+		return fake
+	}
+
+	resp, err := svc.issueService.BatchCloseDoneIssues(context.Background(), project.ID, user.ID, string(model.IssueSourceGitHub))
+	if err != nil {
+		t.Fatalf("batch close: %v", err)
+	}
+	if resp.Succeeded != 0 || resp.Failed != 1 || len(resp.Failures) != 1 {
+		t.Fatalf("unexpected batch close result: %+v", resp)
+	}
+	if resp.Failures[0].Error != batchCloseGitHubRateLimitText {
+		t.Fatalf("expected rate limit copy, got %q", resp.Failures[0].Error)
+	}
+}
+
+// INT-185：upsertGitHubIssue 的入口守卫——nil 或缺 GitHub ID 的响应返回
+// 错误而不是 panic，且不写任何行。
+func TestIssueMirrorUpsertGitHubIssue_RejectsEmptyPayload(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID)
+
+	if _, err := svc.issueService.mirror.upsertGitHubIssue(project.ID, nil); err == nil {
+		t.Fatal("nil payload must return an error, not panic")
+	}
+	missing := &ghclient.Issue{}
+	if _, err := svc.issueService.mirror.upsertGitHubIssue(project.ID, missing); err == nil {
+		t.Fatal("payload without GitHub ID must return an error, not panic")
+	}
+	var issues int64
+	if err := svc.db.Model(&model.Issue{}).Where("project_id = ?", project.ID).Count(&issues).Error; err != nil {
+		t.Fatalf("count issues: %v", err)
+	}
+	if issues != 0 {
+		t.Fatalf("guard must not write rows, got %d issues", issues)
 	}
 }
