@@ -415,6 +415,9 @@ func (s *IssueService) SyncIssuePullRequests(ctx context.Context, issueID, userI
 					zap.String("issue_id", issue.ID),
 					zap.String("repo", link.RepoFullName),
 					zap.Int("number", link.Number))
+				if s.syncStaleHook != nil {
+					s.syncStaleHook() // 测试缝：在守卫命中与读回之间注入延迟（R17）
+				}
 				current, findErr := saveRepo.FindByID(issue.ID, link.ID)
 				switch {
 				case findErr == nil:

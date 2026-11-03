@@ -1684,14 +1684,16 @@ func TestIssueServiceSyncPullRequests_StaleReadBackWriteTimeout(t *testing.T) {
 	}
 	stubPullRequestClient(t, svc, fake, "gh-token")
 
-	// 并发 sync 已写更新数据（synced_at 更晚）+ 写回预算压到 0→1ns 立即
-	// 到期：UPDATE 撞守卫记 stale，读回也被 writeCtx 截断。
+	// 并发 sync 已写更新数据（synced_at 更晚）→ UPDATE 撞守卫记 stale；
+	// 写回预算给 200ms 足够完成 UPDATE，stale 命中后的 hook 睡眠耗光预
+	// 算，读回被 writeCtx 截断→「写回超时」。
 	newer := now.Add(time.Hour)
 	if err := svc.db.Model(&model.IssuePullRequest{}).Where("id = ?", "link-1").
 		Updates(map[string]any{"title": "newer", "synced_at": newer, "updated_at": newer}).Error; err != nil {
 		t.Fatalf("seed newer: %v", err)
 	}
-	svc.issueService.syncWriteTimeout = time.Nanosecond
+	svc.issueService.syncWriteTimeout = 200 * time.Millisecond
+	svc.issueService.syncStaleHook = func() { time.Sleep(300 * time.Millisecond) }
 
 	result, err := svc.issueService.SyncIssuePullRequests(nil, issue.ID, user.ID)
 	if err != nil {

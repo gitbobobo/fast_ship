@@ -61,6 +61,9 @@ type IssueService struct {
 	// syncWriteTimeout 覆盖 sync 写回预算（默认 pullRequestSyncWriteTimeout）；
 	// 测试注入更小值复现写回超时分支（INT-175）。
 	syncWriteTimeout time.Duration
+	// syncStaleHook 在 stale 守卫命中后、读回现行行前调用（测试缝，INT-175）；
+	// 用于确定性复现「守卫命中 + 读回超时」分支。
+	syncStaleHook func()
 }
 
 type IssueListFilters struct {
