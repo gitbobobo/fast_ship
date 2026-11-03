@@ -509,13 +509,17 @@ func TestAssetRetentionCalmModeEmptySnapshot(t *testing.T) {
 	}
 
 	// 不种任何行：快照为空而目录有条目 → 限量，本轮最多 25 个。目录里的
-	// .bin = 28 孤儿 + 下载桩产物 shared.bin（无行引用，同为孤儿）。
-	review.sweepAssetRetention(now)
-	total := countBinFiles(t, cacheDir) + reviewAssetSweepCalmBatch
-	if got := countBinFiles(t, cacheDir); got != total-reviewAssetSweepCalmBatch {
-		t.Fatalf("remain = %d, want %d（限量档：仅回收 budget 上限）", got, total-reviewAssetSweepCalmBatch)
+	// .bin = 28 孤儿 + 下载桩产物 shared.bin（无行引用，同为孤儿），全部
+	// 已做旧。断言用操作前的计数，不用 sweep 后的（否则恒真，R8 审查意见）。
+	before := countBinFiles(t, cacheDir)
+	if before != 29 {
+		t.Fatalf("fixture .bin = %d, want 29（防 seed 漂移）", before)
 	}
-	// 下一轮继续按限量滴漏收敛。
+	review.sweepAssetRetention(now)
+	if got := countBinFiles(t, cacheDir); got != before-reviewAssetSweepCalmBatch {
+		t.Fatalf("remain = %d, want %d（限量档：仅回收 budget 上限）", got, before-reviewAssetSweepCalmBatch)
+	}
+	// 下一轮继续按限量滴漏收敛（剩余 4 ≤ 预算 25，全部收走）。
 	review.sweepAssetRetention(now.Add(time.Second))
 	if got := countBinFiles(t, cacheDir); got != 0 {
 		t.Fatalf("remain = %d, want 0（下轮继续限量）", got)
@@ -528,6 +532,7 @@ func TestAssetRetentionCalmModePathsOutsideCacheDir(t *testing.T) {
 	now := time.Now().UTC()
 	integrationID := model.ForgeIntegrationBuiltinGitHubID
 	cacheDir := filepath.Dir(media.ShotPath())
+	seedOrphans(t, cacheDir, 28, now)
 
 	// 引用行存在但 storage_path 在缓存目录之外（存储迁移特征）：under==0
 	// 档 → 限量。
@@ -540,12 +545,15 @@ func TestAssetRetentionCalmModePathsOutsideCacheDir(t *testing.T) {
 		t.Fatalf("seed outside row: %v", err)
 	}
 
-	review.sweepAssetRetention(now)
 	// 目录 .bin = 28 孤儿 + 下载桩产物 shared.bin（无行引用，同为孤儿）；
-	// 引用行指向目录外，不参与计数。
-	total := countBinFiles(t, cacheDir) + reviewAssetSweepCalmBatch
-	if got := countBinFiles(t, cacheDir); got != total-reviewAssetSweepCalmBatch {
-		t.Fatalf("remain = %d, want %d（路径全在目录外档限量）", got, total-reviewAssetSweepCalmBatch)
+	// 引用行指向目录外，不参与计数。断言用操作前的计数（R8 审查意见）。
+	before := countBinFiles(t, cacheDir)
+	if before != 29 {
+		t.Fatalf("fixture .bin = %d, want 29（防 seed 漂移）", before)
+	}
+	review.sweepAssetRetention(now)
+	if got := countBinFiles(t, cacheDir); got != before-reviewAssetSweepCalmBatch {
+		t.Fatalf("remain = %d, want %d（路径全在目录外档限量）", got, before-reviewAssetSweepCalmBatch)
 	}
 	_ = e
 }

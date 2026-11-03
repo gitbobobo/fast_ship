@@ -1048,7 +1048,7 @@ func (s *ProxyService) sweepStaleTmpFiles(now time.Time) {
 //     口由 ensureAssets 的文件复核自愈（缺失按失败重下）。
 //
 // .bin 与同名 .json 一起删；meta 在而 data 不在的孤儿 meta 同规则回收
-// （URL 可读时同样持闸）。各步幂等：任意时点被杀，下一轮从同样的判定重
+// （URL 可读时同样持闸，删除前同样过引用复核与限量预算）。各步幂等：任意时点被杀，下一轮从同样的判定重
 // 新收敛。媒体面是 no-op：它有自己的 TTL 回收，误调不得删它的条目。
 func (s *ProxyService) SweepUnreferencedEntries(isReferenced func(binPath string) bool, grace time.Duration, now time.Time) int {
 	if s.cacheSubdir == defaultCacheSubdir || isReferenced == nil {
@@ -1068,6 +1068,13 @@ func (s *ProxyService) SweepUnreferencedEntries(isReferenced func(binPath string
 		}
 		binPath := filepath.Join(s.cacheDir, name)
 		metaPath := strings.TrimSuffix(binPath, ".bin") + ".json"
+		// 先判宽限再问引用：命中 touch 会刷新 mtime，新鲜候选既删不了也不
+		// 该扣限量预算（R8 审查意见——预算只花在真正可能删除的候选上）。
+		// stat 出错（ENOENT：data 已被并发删走，孤儿 meta 循环接手；其他错
+		// 误：判不了宽限就保守跳过）一律不动。
+		if info, err := os.Stat(binPath); err != nil || now.Sub(info.ModTime()) <= grace {
+			continue
+		}
 		if isReferenced(binPath) {
 			continue
 		}
@@ -1129,8 +1136,9 @@ func (s *ProxyService) SweepUnreferencedEntries(isReferenced func(binPath string
 		key := s.gateKeyFromMeta(metaPath)
 		if key == "" {
 			// 删除前重读：meta 若被并发重写成可解析条目（同 URL 重新发布）
-			// 则不删——新条目的 data 已在重建，把它当孤儿是误判。
-			if s.gateKeyFromMeta(metaPath) == "" && stale() {
+			// 则不删——新条目的 data 已在重建，把它当孤儿是误判。行账引用
+			// 复核同口径（孤儿 meta 也扣限量预算，R8 审查意见）。
+			if s.gateKeyFromMeta(metaPath) == "" && stale() && !isReferenced(binPath) {
 				if os.Remove(metaPath) == nil {
 					removed++
 				}
@@ -1145,9 +1153,10 @@ func (s *ProxyService) SweepUnreferencedEntries(isReferenced func(binPath string
 			continue
 		}
 		// 闸内复核：写侧发布全程持闸，能拿到闸说明发布不在进行——发布完成
-		// 则 data 在或 meta 已换新（重读闸 key 不一致），都不删。
+		// 则 data 在或 meta 已换新（重读闸 key 不一致），都不删。行账引用
+		// 复核同口径（孤儿 meta 也扣限量预算，R8 审查意见）。
 		if s.gateKeyFromMeta(metaPath) == key {
-			if _, err := os.Stat(binPath); errors.Is(err, os.ErrNotExist) && stale() {
+			if _, err := os.Stat(binPath); errors.Is(err, os.ErrNotExist) && stale() && !isReferenced(binPath) {
 				if os.Remove(metaPath) == nil {
 					removed++
 				}
@@ -1202,14 +1211,15 @@ func (s *ProxyService) gateKeyFromMeta(metaPath string) string {
 // 限。不用 ReadDir 的缓存 Info（可能是目录读取时的快照）；引用在删除前最
 // 后重问一次，盖住快照到删除之间的行插入。
 func (s *ProxyService) unreferencedAndStale(binPath string, isReferenced func(string) bool, grace time.Duration, now time.Time) bool {
-	if isReferenced(binPath) {
-		return false
-	}
+	// 先 stat 后问：mtime 在闸内被并发续期（新命中）的候选直接跳过，不再
+	// 消耗一次引用复核；stat 与问询都无副作用，换序安全（R8 审查意见）。
 	info, err := os.Stat(binPath)
 	if err != nil || now.Sub(info.ModTime()) <= grace {
 		return false
 	}
-	return true
+	// 删除前最后一次引用复核：闭包每次都真查库（闸已持有，插入在写侧释
+	// 放闸后才落账的行在此可见）。
+	return !isReferenced(binPath)
 }
 
 // restoreGoneBin 把隔离的旧字节原子放回 binPath。os.Link 不会覆盖已存在的

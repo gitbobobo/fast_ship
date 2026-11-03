@@ -227,24 +227,25 @@ func (s *ReviewService) sweepAssetRetention(now time.Time) {
 			zap.Int("referenced", len(referenced)), zap.Int("under_cache_dir", underCacheDir),
 			zap.Int("budget", budget))
 	}
-	// allowed 记「已允许删除」的候选：sweeper 会对同一候选重问（未引用复
-	// 核），避免预算重复扣减与重复 DB 查询。
-	allowed := map[string]bool{}
+	// charged 只记「已扣过预算」的候选：sweeper 对同一候选会问两次（入口
+	// 过滤 + 持闸终检），两次都必须真查库——行可能在上次询问后才插入
+	// （R8 审查意见：旧 allowed 缓存短路了终检，恰好放走快照到取闸之间插
+	// 入的行）；预算记账与安全判定分离，预算只扣一次。
+	charged := map[string]bool{}
 	removed := sweeper.SweepUnreferencedEntries(func(binPath string) bool {
 		if _, ok := referenced[binPath]; ok {
 			return true
 		}
-		if allowed[binPath] {
-			return false
-		}
-		if budget <= 0 {
+		// 预算拦截只对没扣过费的候选生效：已扣费候选（终检的第二次询问）
+		// 若被 budget 拦下，第一次扣的预算就作废、删除落空。
+		if _, done := charged[binPath]; !done && budget <= 0 {
 			// 限量预算用尽：剩余候选一律按有引用跳过，下轮再评估。
 			return true
 		}
 		// 快照后插入的行（探测/ensure 落账都发生在快照之后）快照看不见；
 		// 命中即 touch 失败（只读盘/NFS）时 mtime 宽限也失效——候选删除前
-		// 做一次真实 DB 复核作最终闸（R6 审查意见）。候选稀少，无索引全
-		// 表扫描的代价可忽略。
+		// 做一次真实 DB 复核作最终闸（R6 审查意见），每次询问都真查库
+		// （R8 审查意见）。候选稀少，无索引全表扫描的代价可忽略。
 		var live int64
 		if err := s.db.Model(&model.ReviewAsset{}).Where("storage_path = ?", binPath).
 			Limit(1).Count(&live).Error; err != nil {
@@ -258,8 +259,10 @@ func (s *ReviewService) sweepAssetRetention(now time.Time) {
 		if live > 0 {
 			return true
 		}
-		allowed[binPath] = true
-		budget--
+		if _, done := charged[binPath]; !done {
+			charged[binPath] = true
+			budget--
+		}
 		return false
 	}, reviewAssetSweepGrace, now)
 	if retired > 0 || removed > 0 {
