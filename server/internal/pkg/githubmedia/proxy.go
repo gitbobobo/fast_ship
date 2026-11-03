@@ -1139,6 +1139,27 @@ func (s *ProxyService) SweepUnreferencedEntries(isReferenced func(binPath string
 	return removed
 }
 
+// CacheDir 返回缓存目录路径（service 层行账保留策略的同源自检用）。
+func (s *ProxyService) CacheDir() string { return s.cacheDir }
+
+// CountCacheEntries 返回缓存目录里的 .bin/.json 候选条目数（同源自检用；
+// 目录读不了返回 0——读不了时回收路径本身也走不通，交由上层告警口径处
+// 理）。
+func (s *ProxyService) CountCacheEntries() int {
+	entries, err := os.ReadDir(s.cacheDir)
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, e := range entries {
+		name := e.Name()
+		if strings.HasSuffix(name, ".bin") || strings.HasSuffix(name, ".json") {
+			n++
+		}
+	}
+	return n
+}
+
 // gateKeyFromMeta 从 meta 还原下载闸的 key（scopedCacheID 的底材是原始
 // URL，scope 在 meta 里但闸 map 以 URL 为键——与 fetchAndCache 的
 // acquireDownloadLock(normalized) 同键）。读不出（缺失/损坏/空 URL）返回

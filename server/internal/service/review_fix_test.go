@@ -869,6 +869,21 @@ func (f *fakeReviewMedia) SweepUnreferencedEntries(isReferenced func(binPath str
 	return f.sweep.SweepUnreferencedEntries(isReferenced, grace, now)
 }
 
+// CacheDir / CountCacheEntries 同源自检：委托真实服务，无注入时空串/0。
+func (f *fakeReviewMedia) CacheDir() string {
+	if f.sweep == nil {
+		return ""
+	}
+	return f.sweep.CacheDir()
+}
+
+func (f *fakeReviewMedia) CountCacheEntries() int {
+	if f.sweep == nil {
+		return 0
+	}
+	return f.sweep.CountCacheEntries()
+}
+
 // fakeScreenshotMedia 恒成功的截图下载桩：临时目录里落一个最小 PNG 当缓存
 // 产物（CachedImage 由 githubmedia 提供，cacheEntry 未导出、外部填不了）。
 func fakeScreenshotMedia(t *testing.T) *fakeReviewMedia {

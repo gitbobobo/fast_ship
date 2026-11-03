@@ -48,10 +48,29 @@ const reviewAssetSweepEvery = 6 * time.Hour
 // 时有界。var 是为了让测试注入小值验证多批循环的终止条件。
 var reviewAssetRetireBatch = 2000
 
+// reviewAssetSweepCalmBatch 同源自检失败时的单轮回收上限：备份恢复/存储
+// 迁移/换挂载这类库与目录不同源的运维动作下，快照推断「目录全是孤儿」
+// 是错的——限量回收把误删从一次清空降为缓慢滴漏，运维看到 warn 可介入。
+// var 为测试注入。
+var reviewAssetSweepCalmBatch = 25
+
+// reviewAssetSweepMismatchFactor / reviewAssetSweepDirFloor 同源判定的比
+// 例档与地面：目录候选数超过快照规模十倍且超过地面值才判失配，小部署的
+// 少量孤儿不触发限量。
+const (
+	reviewAssetSweepMismatchFactor = 10
+	reviewAssetSweepDirFloor       = 20
+)
+
 // reviewAssetSweeper 下载面的行账回收能力（可选）：生产注入的
 // *githubmedia.ProxyService 实现；测试桩可不实现，扫描自动跳过文件回收。
 type reviewAssetSweeper interface {
 	SweepUnreferencedEntries(isReferenced func(binPath string) bool, grace time.Duration, now time.Time) int
+	// CacheDir 返回回收目标缓存目录（快照与目录的同源自检用）。
+	CacheDir() string
+	// CountCacheEntries 返回缓存目录里的 .bin/.json 候选条目数（同源判定
+	// 的规模档用）。
+	CountCacheEntries() int
 }
 
 // assetRetentionLoop 保留策略的低频循环：不与 10s 调度 tick 抢执行权，与
@@ -139,20 +158,23 @@ func (s *ReviewService) sweepAssetRetention(now time.Time) {
 			break
 		}
 		ids := make([]string, len(batch))
+		paths := make([]string, 0, len(batch))
 		for i := range batch {
 			ids[i] = batch[i].ID
+			// 续期在 DELETE 之前：多 touch 无害（行若因批失败保留，宽限从本
+			// 轮起算依然正确），崩溃方向安全——先删行后 touch 被杀会留下旧
+			// mtime，下一轮 6h 即判超宽限（R7 审查意见）。
+			if batch[i].StoragePath != "" {
+				paths = append(paths, batch[i].StoragePath)
+				if cerr := os.Chtimes(batch[i].StoragePath, now, now); cerr != nil {
+					s.logger.Warn("退役续期失败，文件将按旧 mtime 进入宽限判定",
+						zap.String("path", batch[i].StoragePath), zap.Error(cerr))
+				}
+			}
 		}
 		if err := s.db.Where("id IN ?", ids).Delete(&model.ReviewAsset{}).Error; err != nil {
 			s.logger.Warn("截图资产行退役失败", zap.Error(err))
 			return
-		}
-		for i := range batch {
-			if batch[i].StoragePath == "" {
-				continue
-			}
-			// 失败即忽略：文件不在/磁盘异常都不阻塞本轮，下轮按孤儿判据重
-			// 新评估。
-			_ = os.Chtimes(batch[i].StoragePath, now, now)
 		}
 		retired += int64(len(batch))
 		if len(batch) < reviewAssetRetireBatch {
@@ -172,19 +194,74 @@ func (s *ReviewService) sweepAssetRetention(now time.Time) {
 	if !ok {
 		return
 	}
+	// 同源自检（R7 审查）：引用快照与缓存目录失配时，「目录里全是孤儿」的
+	// 推断会整批删除仍有归属的历史截图——备份恢复（库回到旧时点、目录还
+	// 在新状态）、存储迁移（行路径全在旧根）、新实例挂旧卷都会触发。三档
+	// 失配改判限量：每轮最多回收 reviewAssetSweepCalmBatch 个文件并 warn
+	// 留痕——误删从一次清空降为缓慢滴漏，运维看到 warn 可介入；正常排水
+	// 的尾巴（全部行退役后的最后一批文件）也走这条限量路径，收敛变慢但
+	// 不永久遗留。
+	dirCandidates := sweeper.CountCacheEntries()
+	underCacheDir := 0
+	for p := range referenced {
+		if strings.HasPrefix(p, sweeper.CacheDir()+string(os.PathSeparator)) {
+			underCacheDir++
+		}
+	}
+	budget := dirCandidates
+	calmReason := ""
+	switch {
+	case dirCandidates == 0:
+		// 目录无候选，无需限量。
+	case len(referenced) == 0:
+		calmReason = "快照为空而缓存目录有条目"
+		budget = reviewAssetSweepCalmBatch
+	case underCacheDir == 0:
+		calmReason = "快照路径均不在本缓存目录下"
+		budget = reviewAssetSweepCalmBatch
+	case dirCandidates > reviewAssetSweepDirFloor && dirCandidates > len(referenced)*reviewAssetSweepMismatchFactor:
+		calmReason = "目录候选数远大于快照规模"
+		budget = reviewAssetSweepCalmBatch
+	}
+	if calmReason != "" {
+		s.logger.Warn("截图资产回收进入限量模式（快照与缓存目录疑似不同源）",
+			zap.String("reason", calmReason), zap.Int("dir_candidates", dirCandidates),
+			zap.Int("referenced", len(referenced)), zap.Int("under_cache_dir", underCacheDir),
+			zap.Int("budget", budget))
+	}
+	// allowed 记「已允许删除」的候选：sweeper 会对同一候选重问（未引用复
+	// 核），避免预算重复扣减与重复 DB 查询。
+	allowed := map[string]bool{}
 	removed := sweeper.SweepUnreferencedEntries(func(binPath string) bool {
 		if _, ok := referenced[binPath]; ok {
 			return true
 		}
-		// 快照后插入的行（探测/ensure 落账都发生在快照之后）快照 map看不
-		// 见；命中即 touch 失败（只读盘/NFS）时 mtime 宽限也失效——候选删除
-		// 前做一次真实 DB 复核作最终闸（R6 审查意见）。候选稀少，无索引全
+		if allowed[binPath] {
+			return false
+		}
+		if budget <= 0 {
+			// 限量预算用尽：剩余候选一律按有引用跳过，下轮再评估。
+			return true
+		}
+		// 快照后插入的行（探测/ensure 落账都发生在快照之后）快照看不见；
+		// 命中即 touch 失败（只读盘/NFS）时 mtime 宽限也失效——候选删除前
+		// 做一次真实 DB 复核作最终闸（R6 审查意见）。候选稀少，无索引全
 		// 表扫描的代价可忽略。
 		var live int64
 		if err := s.db.Model(&model.ReviewAsset{}).Where("storage_path = ?", binPath).
-			Limit(1).Count(&live).Error; err == nil && live > 0 {
+			Limit(1).Count(&live).Error; err != nil {
+			// 查询失败按有引用保守放行（fail-closed，与上方 Pluck 失败直接
+			// return 同口径）：不能把 DB 瞬时错误当「无引用」放行给删除
+			// （R7 审查意见）。
+			s.logger.Warn("截图资产引用复核失败，候选按有引用跳过",
+				zap.String("path", binPath), zap.Error(err))
 			return true
 		}
+		if live > 0 {
+			return true
+		}
+		allowed[binPath] = true
+		budget--
 		return false
 	}, reviewAssetSweepGrace, now)
 	if retired > 0 || removed > 0 {
