@@ -425,13 +425,27 @@ func classifyGitHubCloseFailure(err error, rateLimited *atomic.Bool) error {
 func appendBatchCloseFailure(resp *BatchCloseDoneIssuesResponse, issue model.Issue, err error) {
 	resp.Failed++
 	if len(resp.Failures) >= batchCloseDoneMaxFailures {
+		// 明细已达上限：若这是从未出现过的新类别，仍保留样例（审计收敛保证
+		// 每类至少出现一次，INT-185 R4），允许超出明细上限——否则混合批次里
+		// 先占满名额的类别会把后续 GitHub 侧的限流/刷新指引整类吞掉。
+		text := batchCloseItemError(err)
+		for _, f := range resp.Failures {
+			if f.Error == text {
+				return
+			}
+		}
+		resp.Failures = append(resp.Failures, buildBatchCloseFailure(issue, err))
 		return
 	}
-	resp.Failures = append(resp.Failures, BatchCloseDoneIssueFailure{
+	resp.Failures = append(resp.Failures, buildBatchCloseFailure(issue, err))
+}
+
+func buildBatchCloseFailure(issue model.Issue, err error) BatchCloseDoneIssueFailure {
+	return BatchCloseDoneIssueFailure{
 		Id:        issue.ID,
 		Reference: api.Ptr(buildIssueReference(issue)),
 		Error:     batchCloseItemError(err),
-	})
+	}
 }
 
 // batchClosePatchUnconfirmedError 标记「PATCH 已发出但结果未确认」：请求可能

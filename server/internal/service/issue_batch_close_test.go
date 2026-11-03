@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/model"
+	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	ghclient "github.com/godbobo/fast_ship/server/internal/pkg/github"
 	gh "github.com/google/go-github/v62/github"
 )
@@ -441,6 +442,29 @@ func TestClassifyGitHubCloseError(t *testing.T) {
 	}
 	if e := classifyGitHubCloseError(&gh.ErrorResponse{Response: ghResp(http.StatusNotFound)}); batchCloseItemError(e) != "更新 GitHub Issue 失败：404" {
 		t.Fatalf("empty message must not leave trailing space, got %q", batchCloseItemError(e))
+	}
+}
+
+// INT-185（复审 R4）：明细上限不能吞掉后续类别——先占满名额的类别之后，
+// 新类别的样例仍要进明细（每类至少出现一次），同类第二条不再追加。
+func TestAppendBatchCloseFailure_ReservesFirstOfEachCategoryPastCap(t *testing.T) {
+	resp := &BatchCloseDoneIssuesResponse{Failures: make([]BatchCloseDoneIssueFailure, 0)}
+	for i := 0; i < batchCloseDoneMaxFailures; i++ {
+		appendBatchCloseFailure(resp, model.Issue{ID: fmt.Sprintf("id-%d", i)}, errBatchCloseSkippedNotOpen)
+	}
+	appendBatchCloseFailure(resp, model.Issue{ID: "more-skip"}, errBatchCloseSkippedNotOpen)
+	if len(resp.Failures) != batchCloseDoneMaxFailures {
+		t.Fatalf("same-category past cap must not append, got %d entries", len(resp.Failures))
+	}
+	limitErr := errs.New(errs.ErrGitHubAPI.Code, batchCloseGitHubRateLimitText)
+	appendBatchCloseFailure(resp, model.Issue{ID: "rate-1"}, limitErr)
+	appendBatchCloseFailure(resp, model.Issue{ID: "rate-2"}, limitErr)
+	if len(resp.Failures) != batchCloseDoneMaxFailures+1 {
+		t.Fatalf("new-category sample must append past cap exactly once, got %d", len(resp.Failures))
+	}
+	last := resp.Failures[len(resp.Failures)-1]
+	if last.Id != "rate-1" || last.Error != batchCloseGitHubRateLimitText {
+		t.Fatalf("expected rate-1 sample kept, got %+v", last)
 	}
 }
 
