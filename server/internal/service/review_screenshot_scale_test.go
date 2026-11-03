@@ -915,3 +915,36 @@ func TestAgentScreenshotImageScale(t *testing.T) {
 		t.Fatalf("corrupt pixels = %v, want ErrIssueAssetNotFound（不降级原图）", err)
 	}
 }
+
+// 动画 WebP（VP8X/ANIM）头能过 DecodeConfig 但 Decode 不支持 ANIM——清单
+// 必须标 original_heavy 透传原图，否则取图 404 且原图明明可读（INT-186 第
+// 5 轮）。样本直接写文件经 reviewScreenshotHead 取，钉死「嗅探样本 ≥28 字
+// 节」这条接缝（第 3 轮 head 长度教训：只测纯函数会放过样本截断）。
+func TestReviewScreenshotServedAnimatedWebp(t *testing.T) {
+	writeWebpHead := func(anim bool) string {
+		t.Helper()
+		var buf bytes.Buffer
+		buf.WriteString("RIFF")
+		buf.Write([]byte{0, 0, 0, 0}) // 文件总长（不重要）
+		buf.WriteString("WEBP")
+		buf.WriteString("VP8X")
+		buf.Write([]byte{10, 0, 0, 0})            // chunk 长度 10
+		buf.Write([]byte{0, 0, 0})                // 保留 3 字节
+		buf.Write([]byte{0xEF, 0xBE, 0x00, 0x00}) // 宽-1=48767、高-1=1（占位）
+		buf.Write([]byte{0, 0, 0})                // 特性位前 3 字节
+		if anim {
+			buf.WriteByte(0x02) // 特性位最后字节 ANIM=bit1
+		} else {
+			buf.WriteByte(0x00)
+		}
+		path := filepath.Join(t.TempDir(), map[bool]string{true: "anim.webp", false: "still.webp"}[anim])
+		if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
+			t.Fatalf("write webp head: %v", err)
+		}
+		return path
+	}
+	// 动画位开 → original_heavy（原图透传可读）
+	if got := reviewScreenshotServed(writeWebpHead(true), reviewScreenshotMaxEdge); got != ServedOriginalHeavy {
+		t.Fatalf("animated webp served = %v, want original_heavy", got)
+	}
+}

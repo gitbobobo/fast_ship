@@ -160,8 +160,29 @@ func sniffReviewScaleFormat(head []byte) string {
 	return ""
 }
 
-// reviewScreenshotHead 读文件前 32 字节做嗅探与 16 位 PNG 判定样本（IHDR 的
-// bit depth 字节在偏移 24，16 字节不够）；短文件按实际读到的算。
+// sniffWebpAnimation 判样本是否为动画 WebP：WEBP 头后的首个 chunk 是 VP8X
+// （偏移 12，4 字节类型 + 4 字节长度 + payload），payload 第 4 字节 bit 6 为
+// ANIM。样本不足按保守返回 false（取图处 decodeConfig 仍会把不可解的挡到
+// heavy——本函数只提前拦截「头能过但像素不可解」的 ANIM 类）。
+func sniffWebpAnimation(head []byte) bool {
+	// RIFF(0-3) + WEBP(8-11) + chunk tag(12-15) + size(16-19) + payload(20-23)
+	// VP8X payload：1B 保留 + 3B 宽 + 3B 高 + 1B 特性位 —— 特性位在偏移 23，
+	// 但 payload 第 4 字节（索引 3）才是 ANIM 位，即 head[23+3-1]=head[25]…
+	// 精确布局见 https://www.rfc-editor.org/rfc/rfc6386 + WebP container spec：
+	//   offset 12-15: "VP8X"
+	//   offset 16-19: chunk size (10, little-endian)
+	//   offset 20-23: canvas width-1 (24-bit LE) + height-1 (24-bit LE)
+	//   offset 24-27: 3 bytes（保留/ICC/ANIM/EXIF 等特性位在最后一个字节）
+	// 特性位字节在偏移 27；ANIM = bit 1（0x02）。
+	if len(head) < 28 || string(head[12:16]) != "VP8X" {
+		return false
+	}
+	return head[27]&0x02 != 0
+}
+
+// reviewScreenshotHead 读文件前 32 字节做嗅探与判定样本：PNG 位深（IHDR
+// bit depth 字节在偏移 24）、WebP 动画位（VP8X 在偏移 12，payload 第 4 字节
+// bit 6，样本至少 30 字节才覆盖）；短文件按实际读到的算。
 func reviewScreenshotHead(path string) ([]byte, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -213,6 +234,12 @@ func reviewScreenshotServed(path string, maxEdge int) ReviewScreenshotServed {
 	}
 	kind := sniffReviewScaleFormat(head)
 	if kind == "" {
+		return ServedOriginalHeavy
+	}
+	// 动画 WebP（VP8X 带 ANIM 位）：DecodeConfig 能返回画布尺寸但 Decode 不
+	// 支持 ANIM/ANMF 首帧，清单标 scaled 会让取图 404——原图可读，按 heavy
+	// 透传。
+	if kind == "image/webp" && sniffWebpAnimation(head) {
 		return ServedOriginalHeavy
 	}
 	f, err := os.Open(path)

@@ -8298,7 +8298,7 @@ GitHub 官方 pull_request / issue_comment 事件 payload（原样验签，服�
 | `items` | object[] | 是 |  |
 | `items[].id` | string | 是 |  |
 | `items[].label` | string | 是 |  |
-| `items[].served` | string（enum: scaled \| original_light \| original_heavy） | 否 | 该地址返回哪种字节：scaled = 审查尺寸缩放变体（长边 ≤1536 的 JPEG，字节预算尽力压进单张 500KB：JPEG 降质量、必要时降边；病态输入兑底取最小一份）；original_light = 原图字节但在预算内（长边 ≤1536 且文件 ≤500KB，可正常读）；original_heavy = 原图字节且不受预算保护（宽×高 >6400 万像素、嗅探/头解码不出或文件打不开，尽量不读）。有 StoragePath 的行必有值；下载失败行字段缺省 |
+| `items[].served` | string（enum: scaled \| original_light \| original_heavy） | 否 | 该地址返回哪种字节：scaled = 审查尺寸缩放变体（长边 ≤1536 的 JPEG，字节预算尽力压进单张 500KB：JPEG 降质量、必要时降边；病态输入兑底取最小一份）；original_light = 原图字节但在预算内（长边 ≤1536 且文件 ≤500KB，可正常读）；original_heavy = 原图字节且不受预算保护（宽×高 >6400 万像素、动画 WebP、嗅探/头解码不出或文件打不开，尽量不读）。有 StoragePath 的行必有值；下载失败行字段缺省 |
 | `items[].url` | string | 否 | 审查尺寸地址：指向本端点并带缩放参数；served=scaled 的行返回长边 ≤1536 的 JPEG，original_* 的行返回原图字节；下载失败时字段缺省 |
 | `items[].width` | integer（可空） | 否 | 原图像素尺寸（JPEG 应用 EXIF 方向后）；解码失败或缺文件时字段缺省 |
 | `items[].height` | integer（可空） | 否 | 原图像素尺寸（JPEG 应用 EXIF 方向后）；解码失败或缺文件时字段缺省 |
