@@ -142,14 +142,18 @@ func TestRenderReviewPromptVisualImageBudget(t *testing.T) {
 	visual := renderReviewPrompt(run, "https://fs.example.com", "fsr_tok")
 	for _, want := range []string{
 		"## 读图预算",
-		"{items:[{id,label,url,width,height,original_url,scaled}],changed}",
-		"url` 是审查尺寸地址（长边 ≤1536 的 JPEG）",
+		"{items:[{id,label,url,width,height,original_url,served}],changed}",
+		"served=scaled` 的行返回长边 ≤1536 的 JPEG",
+		"original_*` 的行返回原图字节",
 		"original_url` 是原图地址",
 		"默认已带缩放参数，不要自己加参数改尺寸",
 		"original_url` 只用于细节复核",
 		"≤500KB",
 		"≤4MB",
-		"scaled=false` 的行返回的是原图字节",
+		"served=scaled` 的行是预算内的审查尺寸变体，正常读",
+		"served=original_light` 是原图字节但落在预算内（长边 ≤1536 且文件 ≤500KB），照常可读",
+		"served=original_heavy` 的行是原图字节且不受预算保护",
+		"必须看的读完即停，并在结论里注明读的是原图",
 		"reason 写明预算截断",
 		"不要把全部截图一次性读进上下文",
 	} {

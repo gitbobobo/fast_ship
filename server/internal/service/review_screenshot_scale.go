@@ -49,15 +49,33 @@ const (
 // 的总量一致：Acquire 权重大于总量会永远失败，必须 clamp。
 const reviewScaleSemCapacity = 1024 << 20
 
-// errReviewScaleTooLarge 原图超过解码像素预算：不做缩放，调用方按原图字节透传
-// （原图流式下发不经内存解码，是安全的）。
+// ReviewScreenshotServed 审查尺寸地址对本次请求返回什么字节的归类：清单
+// served 字段与取图端点的变体/透传决策共用同一套枚举（reviewScreenshotServed
+// 一处判定，两处消费，永不打架）。
+type ReviewScreenshotServed string
+
+const (
+	// ServedScaled 返回审查尺寸缩放变体：长边超目标的降边缩放、小而重原图按
+	// 原尺寸重编码压预算——单张字节落在预算内，代理正常读。
+	ServedScaled ReviewScreenshotServed = "scaled"
+	// ServedOriginalLight 返回原图字节但在预算内：长边 ≤ 清单默认目标且文件
+	// ≤500KB——零损失透传，代理可正常读（1440×900 桌面截图这类最常见证据）。
+	ServedOriginalLight ReviewScreenshotServed = "original_light"
+	// ServedOriginalHeavy 返回原图字节且不受预算保护：宽×高 >64MP 解码预算、
+	// 嗅探/头解码不出或文件打不开——代理尽量不读。
+	ServedOriginalHeavy ReviewScreenshotServed = "original_heavy"
+)
+
+// errReviewScaleTooLarge 原图超过解码像素预算：清单已按 original_heavy 标示
+// （判定与清单共用），取图保留此防御分支按原图字节透传（原图流式下发不经
+// 内存解码，是安全的）。
 var errReviewScaleTooLarge = errors.New("review screenshot exceeds decode pixel budget")
 
-// errReviewScaleUnscalable 有文件但出不了缩放变体（嗅探失败、头/像素解码失败、
-// 编码失败）：调用方同样按原图字节透传——原始字节流式下发始终安全，默认审查
-// 尺寸地址保持可读，而不是把清单里已下发的地址变成 404。文件打不开（含不存
-// 在）不算此类，仍走普通错误 → 40406。
-var errReviewScaleUnscalable = errors.New("review screenshot cannot be scaled")
+// errReviewScaleVariantFailed 清单已标 ServedScaled 的行生成变体失败（像素
+// 解码、变体编码、解码字节闸等待被取消）：不再静默降级透传原图——清单承诺
+// 该地址是预算内的审查尺寸变体，降级等于把十几 MB 原图塞给代理。调用方返回
+// 明确错误（40406 语义），代理读到错误记 unmeasurable。
+var errReviewScaleVariantFailed = errors.New("review screenshot variant generation failed")
 
 // reviewScaleParams 图片端点的缩放参数（parseReviewScaleQuery 产出）。
 type reviewScaleParams struct {
@@ -142,7 +160,8 @@ func sniffReviewScaleFormat(head []byte) string {
 	return ""
 }
 
-// reviewScreenshotHead 读文件前 16 字节做嗅探样本；短文件按实际读到的算。
+// reviewScreenshotHead 读文件前 32 字节做嗅探与 16 位 PNG 判定样本（IHDR 的
+// bit depth 字节在偏移 24，16 字节不够）；短文件按实际读到的算。
 func reviewScreenshotHead(path string) ([]byte, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -178,36 +197,38 @@ func reviewScreenshotDims(path string) (int, int) {
 	return cfg.Width, cfg.Height
 }
 
-// reviewScreenshotScaled 判定审查尺寸地址会不会返回缩放变体：清单算 scaled
-// 标示与取图端点的变体/透传决策共用同一份逻辑，两处永不打架。false = 该地址
-// 将返回原图字节（嗅探/头解码失败、超 64MP 解码预算、或长边不大于目标且原
-// 图文件字节落在 500KB 预算内的小而轻原图——零损失透传）；true = 返回缩放
-// 变体（长边超目标的降边缩放、小而重原图按原尺寸重编码压预算）。文件打不开
-// 视为 false：端点本就会 40406，清单该行按原图语义兜底。
-func reviewScreenshotScaled(path string, maxEdge int) bool {
+// reviewScreenshotServed 判定审查尺寸地址对本次请求返回什么字节：清单算
+// served 标示与取图端点的变体/透传决策共用同一份逻辑，两处永不打架。
+//   - ServedScaled：返回缩放变体（长边超目标的降边缩放、小而重原图按原尺寸
+//     重编码压预算）——长边超目标、或长边在目标内但原图文件字节超 500KB 预算。
+//   - ServedOriginalLight：返回原图字节但在预算内（长边 ≤ 目标且文件 ≤500KB
+//     的小而轻原图，零损失透传）。
+//   - ServedOriginalHeavy：返回原图字节且不受预算保护（嗅探/头解码失败、超
+//     64MP 解码预算；文件打不开也归此类兜底——端点本就会 40406，清单按最重
+//     原图语义标示）。
+func reviewScreenshotServed(path string, maxEdge int) ReviewScreenshotServed {
 	head, err := reviewScreenshotHead(path)
 	if err != nil {
-		return false
+		return ServedOriginalHeavy
 	}
 	kind := sniffReviewScaleFormat(head)
 	if kind == "" {
-		return false
+		return ServedOriginalHeavy
 	}
 	f, err := os.Open(path)
 	if err != nil {
-		return false
+		return ServedOriginalHeavy
 	}
 	cfg, err := decodeScreenshotImageConfig(f, kind)
 	f.Close()
 	if err != nil {
-		return false
+		return ServedOriginalHeavy
 	}
 	if int64(cfg.Width)*int64(cfg.Height) > reviewScaleMaxPixels {
-		return false
+		return ServedOriginalHeavy
 	}
-	long := max(cfg.Width, cfg.Height)
-	if long > maxEdge {
-		return true
+	if max(cfg.Width, cfg.Height) > maxEdge {
+		return ServedScaled
 	}
 	// 长边在目标内时按原图文件字节分流（os.Stat 一次，清单已算过 dims，便宜）：
 	// 预算内零损失透传，超预算的原尺寸重编码出变体——审查尺寸承诺的是字节上
@@ -215,27 +236,39 @@ func reviewScreenshotScaled(path string, maxEdge int) bool {
 	// 穿预算，不能因为「不用缩」就无条件透传。
 	fi, err := os.Stat(path)
 	if err != nil {
-		return false
+		return ServedOriginalHeavy
 	}
-	return fi.Size() > reviewScreenshotMaxBytes
+	if fi.Size() > reviewScreenshotMaxBytes {
+		return ServedScaled
+	}
+	return ServedOriginalLight
 }
 
-// scaleReviewScreenshot 生成审查尺寸缩放变体：魔数嗅探真实类型 → 解码原图尺寸
-// → 像素预算守卫 → 变体/透传判定（与清单 scaled 标示同一函数，见
-// reviewScreenshotScaled）→ 占解码字节闸 → 解码像素（JPEG 应用 EXIF 方向）→
-// 按字节预算编码（见 encodeReviewScaleBytes）。错误分两类：文件打不开（含不
-// 存在）返回普通错误 → 调用方 40406；其余「有文件但缩不了」（含字节闸等待被
-// 取消）返回 errReviewScaleUnscalable → 调用方按原图透传。mimeType 只是
-// storage 的声明，真值以嗅探为准。返回 nil data 且 err 为 nil 表示不需要缩放
-// 变体（小而轻原图透传）。
+// scaleReviewScreenshot 生成审查尺寸缩放变体：先过共享判定
+// （reviewScreenshotServed）——original_light/original_heavy 原图透传（与清
+// 单承诺一致）；ServedScaled 解码重编码：嗅探 → 解码原图尺寸 → 像素预算守卫
+// （防御分支）→ 占解码字节闸（权重按格式口径，见
+// screenshotDecodeBytesPerPixel）→ 解码像素（JPEG 应用 EXIF 方向）→ 按字节
+// 预算编码（见 encodeReviewScaleBytes）。scaled 路径的像素解码、变体编码、
+// 字节闸失败返回 errReviewScaleVariantFailed → 调用方 40406，不静默降级透传
+// 原图（清单已承诺该地址是预算内变体）；文件打不开（含不存在）返回普通错误
+// → 调用方 40406。mimeType 只是 storage 的声明，真值以嗅探为准。返回 nil
+// data 且 err 为 nil 表示不需要缩放变体（original_* 原图透传）。
 func scaleReviewScreenshot(ctx context.Context, path, mimeType string, p *reviewScaleParams) (data []byte, mime string, err error) {
 	head, err := reviewScreenshotHead(path)
 	if err != nil {
 		return nil, "", err // 打不开（含不存在）→ 调用方 40406
 	}
+	// 变体/透传决策与清单 served 标示共用同一份逻辑（reviewScreenshotServed）：
+	// original_* 原图透传（与清单承诺一致）；ServedScaled 走到下面解码重编码。
+	if served := reviewScreenshotServed(path, p.Max); served != ServedScaled {
+		return nil, "", nil
+	}
 	kind := sniffReviewScaleFormat(head)
 	if kind == "" {
-		return nil, "", fmt.Errorf("%w: 嗅探不出可解码的位图格式", errReviewScaleUnscalable)
+		// 判定时嗅探得过、现在嗅探不过：文件在两次读之间被换掉了。按变体失败
+		// 兜底（与像素解码失败同路），不透传与清单承诺矛盾的原图。
+		return nil, "", fmt.Errorf("%w: 嗅探不出可解码的位图格式", errReviewScaleVariantFailed)
 	}
 	cf, err := os.Open(path)
 	if err != nil {
@@ -244,33 +277,31 @@ func scaleReviewScreenshot(ctx context.Context, path, mimeType string, p *review
 	cfg, cfgErr := decodeScreenshotImageConfig(cf, kind)
 	cf.Close()
 	if cfgErr != nil {
-		return nil, "", fmt.Errorf("%w: 解码图片头失败: %v", errReviewScaleUnscalable, cfgErr)
+		// 同上：判定时头解得动、现在解不动——按变体失败兜底。
+		return nil, "", fmt.Errorf("%w: 解码图片头失败: %v", errReviewScaleVariantFailed, cfgErr)
 	}
-	// 像素预算守卫：头里声明的尺寸超限时根本不解码像素（防解码爆内存），
-	// 报超限错误由调用方回退原图透传。
+	// 像素预算守卫（防御分支，判定已过滤超限；文件中途被换时兜住，防解码爆
+	// 内存）：报超限错误由调用方回退原图透传。
 	if int64(cfg.Width)*int64(cfg.Height) > reviewScaleMaxPixels {
 		return nil, "", errReviewScaleTooLarge
 	}
 	long := max(cfg.Width, cfg.Height)
-	// 变体/透传决策与清单 scaled 标示共用同一份逻辑（reviewScreenshotScaled）：
-	// 走到这里守卫已过，false 只剩小而轻一种情形——零损失透传；小而重的照常
-	// 往下解码重编码。
-	if !reviewScreenshotScaled(path, p.Max) {
-		return nil, "", nil
-	}
 	// 解码字节闸与截图标注裁剪路径共用（总量 1GiB）：并行视觉运行的解码驻留
-	// 不叠加爆内存，等待随请求 ctx 取消。权重按驻留估——RGBA 像素 宽×高×4，
-	// 加一份编码缓冲冗余 ×2（口径 ×8）；超总容量按容量 clamp。
-	weight := int64(cfg.Width) * int64(cfg.Height) * 8
+	// 不叠加爆内存，等待随请求 ctx 取消。权重按驻留估，口径与 crop 同源——
+	// jpeg/gif 12（EXIF 重排/画布合成多一份全尺寸副本）、16 位 PNG 16（RGBA64
+	// 8B/px 源 + 缩放输出 8B/px）、其余 8；超总容量按容量 clamp。
+	weight := int64(cfg.Width) * int64(cfg.Height) * screenshotDecodeBytesPerPixel(kind, head)
 	if weight > reviewScaleSemCapacity {
 		weight = reviewScaleSemCapacity
 	}
 	if err := screenshotCropBytesSem.Acquire(ctx, weight); err != nil {
-		return nil, "", fmt.Errorf("%w: 解码字节闸等待被取消: %v", errReviewScaleUnscalable, err)
+		return nil, "", fmt.Errorf("%w: 解码字节闸等待被取消: %v", errReviewScaleVariantFailed, err)
 	}
 	defer screenshotCropBytesSem.Release(weight)
 	img, err := decodeReviewScreenshotPixels(path, kind)
 	if err != nil {
+		// 头是好的、像素是坏的（截断下载、IDAT 损坏）：不再伪装成「已知不可
+		// 解码」透传原图，返回变体失败由调用方 40406。
 		return nil, "", err
 	}
 	// 初始长边取 min(目标, 原长边)：降边缩放取目标；小而重重编码取原长边
@@ -324,7 +355,7 @@ func encodeReviewScaleBytes(img image.Image, edge0 int, p *reviewScaleParams) ([
 				encErr = jpeg.Encode(&buf, flat, &jpeg.Options{Quality: q})
 			}
 			if encErr != nil {
-				return nil, "", fmt.Errorf("%w: 变体编码失败: %v", errReviewScaleUnscalable, encErr)
+				return nil, "", fmt.Errorf("%w: 变体编码失败: %v", errReviewScaleVariantFailed, encErr)
 			}
 			if best == nil || buf.Len() < len(best) {
 				best, bestMime = buf.Bytes(), mime
@@ -349,11 +380,11 @@ func encodeReviewScaleBytes(img image.Image, edge0 int, p *reviewScaleParams) ([
 // decodeReviewScreenshotPixels 按嗅探结果解码整图像素：png/webp 走各自解码器，
 // gif 按逻辑画布合成首帧（首帧可能小于 DecodeConfig 的画布且带偏移），jpeg
 // 解码后重开文件扫 EXIF 方向再重排（方向不在像素流里，流已被解码耗尽）。解
-// 码失败包成 errReviewScaleUnscalable（os.Open 失败除外——那是 40406 语义）。
+// 码失败包成 errReviewScaleVariantFailed（os.Open 失败除外——那是 40406 语义）。
 // 与 screenshot_annotation 的裁剪解码分开——这里要全图，走紧凑分派。
 func decodeReviewScreenshotPixels(path, kind string) (image.Image, error) {
 	unscalable := func(err error) error {
-		return fmt.Errorf("%w: %v", errReviewScaleUnscalable, err)
+		return fmt.Errorf("%w: %v", errReviewScaleVariantFailed, err)
 	}
 	f, err := os.Open(path)
 	if err != nil {

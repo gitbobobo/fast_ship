@@ -8298,8 +8298,8 @@ GitHub 官方 pull_request / issue_comment 事件 payload（原样验签，服�
 | `items` | object[] | 是 |  |
 | `items[].id` | string | 是 |  |
 | `items[].label` | string | 是 |  |
-| `items[].url` | string | 否 | 审查尺寸地址：指向本端点并带缩放参数（长边 ≤1536 的 JPEG，服务端按需生成）；下载失败时字段缺省 |
-| `items[].scaled` | boolean | 否 | false = 该地址将返回原图字节（小而轻原图、超 64MP 解码预算或无解码器），体积不受审查尺寸预算保护；true = 返回缩放变体；下载失败时字段缺省 |
+| `items[].served` | string（enum: scaled \| original_light \| original_heavy） | 否 | 该地址返回哪种字节：scaled = 审查尺寸缩放变体（长边 ≤1536 的 JPEG，落在单张 500KB 预算内）；original_light = 原图字节但在预算内（长边 ≤1536 且文件 ≤500KB，可正常读）；original_heavy = 原图字节且不受预算保护（宽×高 >6400 万像素、嗅探/头解码不出或文件打不开，尽量不读）。有 StoragePath 的行必有值；下载失败行字段缺省 |
+| `items[].url` | string | 否 | 审查尺寸地址：指向本端点并带缩放参数；served=scaled 的行返回长边 ≤1536 的 JPEG，original_* 的行返回原图字节；下载失败时字段缺省 |
 | `items[].width` | integer（可空） | 否 | 原图像素尺寸（JPEG 应用 EXIF 方向后）；解码失败或缺文件时字段缺省 |
 | `items[].height` | integer（可空） | 否 | 原图像素尺寸（JPEG 应用 EXIF 方向后）；解码失败或缺文件时字段缺省 |
 | `items[].original_url` | string | 否 | 原图地址（无缩放参数，即本端点不带 query）；下载失败时字段缺省 |

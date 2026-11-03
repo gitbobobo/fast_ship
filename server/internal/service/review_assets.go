@@ -846,11 +846,12 @@ func (s *ReviewService) AgentScreenshots(ctx context.Context, runID string) ([]a
 			item.Width = api.Ptr(w)
 			item.Height = api.Ptr(h)
 		}
-		// scaled 标示该地址会不会返回缩放变体（判定与取图端点共用同一份逻辑
-		// reviewScreenshotScaled，两处永不打架）：false = 返回原图字节（小而轻
-		// 原图、超 64MP 或无解码器），体积不受审查尺寸预算保护——审查员据此
-		// 决定读不读。
-		item.Scaled = api.Ptr(reviewScreenshotScaled(a.StoragePath, reviewScreenshotMaxEdge))
+		// served 标示该地址返回哪种字节（判定与取图端点共用同一份逻辑
+		// reviewScreenshotServed，两处永不打架）：scaled = 预算内的审查尺寸变体；
+		// original_light = 原图字节但落在预算内（可正常读，最常见证据场景）；
+		// original_heavy = 原图字节且不受预算保护（超 64MP、嗅探/头解码不出，
+		// 审查员据此尽量不读）。
+		item.Served = api.Ptr(api.ReviewAgentScreenshotServed(reviewScreenshotServed(a.StoragePath, reviewScreenshotMaxEdge)))
 		items = append(items, item)
 	}
 	return items, changed, nil
@@ -865,9 +866,13 @@ type AgentScreenshotFile struct {
 }
 
 // AgentScreenshotImage 取图片本体：scale 为 nil（无缩放参数）按原文件路径与
-// 存储 mime 返回；非 nil 时生成缩放变体字节，超像素预算或有文件但缩不了
-// （嗅探/解码/编码失败）都回退原图透传，文件打不开按 40406。仅视觉运行；
-// 校验资产与运行同 (集成,repo,pr,head)；下载失败或路径缺失 → 40406。
+// 存储 mime 返回；非 nil 时先过共享判定（reviewScreenshotServed）：
+// original_light/original_heavy 原图透传（与清单承诺一致）；served=scaled 行
+// 解码重编码，变体生成失败（像素解码/编码/字节闸）不再静默降级原图——清单已
+// 承诺该地址是预算内变体，降级等于把十几 MB 塞给代理，返回明确错误（40406）
+// 并记 Warn，代理读到错误记 unmeasurable。文件打不开（含不存在）按 40406。
+// 仅视觉运行；校验资产与运行同 (集成,repo,pr,head)；下载失败或路径缺失 →
+// 40406。
 func (s *ReviewService) AgentScreenshotImage(ctx context.Context, runID, assetID string, scale *reviewScaleParams) (AgentScreenshotFile, error) {
 	run, err := s.loadAgentRun(ctx, runID)
 	if err != nil {
@@ -896,18 +901,23 @@ func (s *ReviewService) AgentScreenshotImage(ctx context.Context, runID, assetID
 	}
 	data, scaledMime, err := scaleReviewScreenshot(ctx, asset.StoragePath, asset.MimeType, scale)
 	if err != nil {
-		if errors.Is(err, errReviewScaleTooLarge) || errors.Is(err, errReviewScaleUnscalable) {
-			// 超像素预算不解码像素；有文件但缩不了（heic/tiff 这类有声明类型
-			// 但本服务无解码器的、以及嗅探/解码/编码失败）也缩不出变体——两
-			// 种都按原图字节透传（流式下发始终安全），别把清单已下发的审查尺
-			// 寸地址变成 404。
+		if errors.Is(err, errReviewScaleTooLarge) {
+			// 防御分支：超像素预算在共享判定里已按 original_heavy 标示透传，走
+			// 到这里只可能是文件在判定与解码之间被换——仍按原图透传（流式下发
+			// 不经内存解码，始终安全），不把清单已下发的地址变成 404。
 			return original, nil
 		}
+		// served=scaled 的行变体生成失败（像素解码/编码/字节闸）：不静默降级
+		// 原图——清单承诺该地址是预算内变体，降级等于把十几 MB 塞给代理。返回
+		// 明确错误（40406 语义），代理读到错误记 unmeasurable；日志带 run/asset
+		// 便于定位，错误文本至多含本地缓存路径，无其他敏感信息。
+		s.logger.Warn("审查截图变体生成失败", zap.String("run_id", runID),
+			zap.String("asset_id", assetID), zap.String("error", err.Error()))
 		return AgentScreenshotFile{}, errs.ErrIssueAssetNotFound
 	}
 	if data == nil {
-		// 无需变体（小而轻原图零损失透传，判定与清单 scaled 标示同源）：按原
-		// 图字节透传。
+		// 无需变体（original_light/original_heavy 原图透传，判定与清单 served
+		// 标示同源）：按原图字节透传。
 		return original, nil
 	}
 	original.Data = data

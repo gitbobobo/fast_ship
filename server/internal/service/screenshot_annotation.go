@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"image"
-	"image/color"
 	"image/draw"
 	"image/gif"
 	"image/jpeg"
@@ -60,14 +59,32 @@ var (
 	screenshotCropBytesSem  = semaphore.NewWeighted(1024 << 20)
 )
 
-// cropBytesPerPixel 返回每像素驻留字节预算；16 位 PNG 需探文件头判 ColorModel，
+// cropBytesPerPixel 返回每像素驻留字节预算；16 位 PNG 需探文件头判位深，
 // 探测失败按最大档预留
 func (s *ScreenshotAnnotationService) cropBytesPerPixel(screen *model.ScreenshotScreen) int64 {
-	switch screen.MimeType {
+	reader, err := s.storage.Get(screen.FilePath)
+	if err != nil {
+		return 16 // 打不开按 16 位 PNG 预留（探测失败按最大档的既有口径）
+	}
+	defer reader.Close()
+	var head [32]byte
+	n, _ := io.ReadFull(reader, head[:])
+	return screenshotDecodeBytesPerPixel(screen.MimeType, head[:n])
+}
+
+// screenshotDecodeBytesPerPixel 返回该格式解码驻留的每像素字节预算口径：
+// jpeg/gif 12——解码源存活期间还要再分配一张全尺寸副本（JPEG 方向 2-8 的
+// EXIF 重排、GIF 偏移帧合成）；16 位 PNG 16——解码为 RGBA64/Gray16（8B/px
+// 源）且输出同为 16 位 PNG；其余 8（8 位 PNG/webp 解码源 + 输出各按 w*h*4）。
+// 截图标注裁剪与审查截图缩放两条解码路径共用，闸权重 = 宽×高×此值。head 是
+// 调用方嗅探出的文件头部样本（判 16 位 PNG 需 IHDR bit depth 字节，至少 25
+// 字节）；kind 为嗅探出的 MIME，判不出的格式按 8 兑底。
+func screenshotDecodeBytesPerPixel(kind string, head []byte) int64 {
+	switch kind {
 	case "image/jpeg", "image/gif":
 		return 12
 	case "image/png":
-		if s.isPNG16Bit(screen) {
+		if screenshotPNG16Bit(head) {
 			return 16
 		}
 		return 8
@@ -76,22 +93,15 @@ func (s *ScreenshotAnnotationService) cropBytesPerPixel(screen *model.Screenshot
 	}
 }
 
-// isPNG16Bit 读 PNG 头判位深：RGBA64/NRGBA64/Gray16/Alpha16 都是 16 位通道
-func (s *ScreenshotAnnotationService) isPNG16Bit(screen *model.ScreenshotScreen) bool {
-	reader, err := s.storage.Get(screen.FilePath)
-	if err != nil {
+// screenshotPNG16Bit 从头部样本判 PNG 位深：IHDR（签名后首个数据块）的
+// bit depth 字节在偏移 24（8 签名 + 4 长度 + 4 类型 + 4 宽 + 4 高），等于 16
+// 时解码为 16 位通道。样本不足或 IHDR 不在首位（文件损坏）按 16 位预留——
+// 探测失败按最大档，与既有 crop 口径一致。
+func screenshotPNG16Bit(head []byte) bool {
+	if len(head) < 25 || string(head[12:16]) != "IHDR" {
 		return true
 	}
-	defer reader.Close()
-	cfg, err := png.DecodeConfig(reader)
-	if err != nil {
-		return true
-	}
-	switch cfg.ColorModel {
-	case color.RGBA64Model, color.NRGBA64Model, color.Gray16Model, color.Alpha16Model:
-		return true
-	}
-	return false
+	return head[24] == 16
 }
 
 // ScreenshotAnnotationListFilters 是项目级标注列表的可选过滤项，空值不参与过滤。

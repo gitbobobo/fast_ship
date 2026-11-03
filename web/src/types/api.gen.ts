@@ -6244,10 +6244,13 @@ export interface components {
         ReviewAgentScreenshot: {
             id: string;
             label: string;
-            /** @description 审查尺寸地址：指向本端点并带缩放参数（长边 ≤1536 的 JPEG，服务端按需生成）；下载失败时字段缺省 */
+            /**
+             * @description 该地址返回哪种字节：scaled = 审查尺寸缩放变体（长边 ≤1536 的 JPEG，落在单张 500KB 预算内）；original_light = 原图字节但在预算内（长边 ≤1536 且文件 ≤500KB，可正常读）；original_heavy = 原图字节且不受预算保护（宽×高 >6400 万像素、嗅探/头解码不出或文件打不开，尽量不读）。有 StoragePath 的行必有值；下载失败行字段缺省
+             * @enum {string}
+             */
+            served?: "scaled" | "original_light" | "original_heavy";
+            /** @description 审查尺寸地址：指向本端点并带缩放参数；served=scaled 的行返回长边 ≤1536 的 JPEG，original_* 的行返回原图字节；下载失败时字段缺省 */
             url?: string;
-            /** @description false = 该地址将返回原图字节（小而轻原图、超 64MP 解码预算或无解码器），体积不受审查尺寸预算保护；true = 返回缩放变体；下载失败时字段缺省 */
-            scaled?: boolean;
             /** @description 原图像素尺寸（JPEG 应用 EXIF 方向后）；解码失败或缺文件时字段缺省 */
             width?: number | null;
             /** @description 原图像素尺寸（JPEG 应用 EXIF 方向后）；解码失败或缺文件时字段缺省 */

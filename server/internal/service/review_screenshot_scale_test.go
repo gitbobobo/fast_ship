@@ -79,6 +79,37 @@ func writeFakeHugePNG(t *testing.T) string {
 	return path
 }
 
+// writeCorruptPixelsPNG 手拼「头可解但像素损坏」的 PNG：真 PNG 签名 + IHDR
+// 声明 2000×2000（长边超目标 → 清单判 scaled）+ 截断的 IDAT（像素解码必败），
+// 用来锁「scaled 行失败不得静默降级原图」。
+func writeCorruptPixelsPNG(t *testing.T) string {
+	t.Helper()
+	var buf bytes.Buffer
+	buf.WriteString("\x89PNG\r\n\x1a\n")
+	chunk := func(kind string, data []byte) {
+		var head [4]byte
+		binary.BigEndian.PutUint32(head[:], uint32(len(data)))
+		buf.Write(head[:])
+		buf.WriteString(kind)
+		buf.Write(data)
+		var crc [4]byte
+		binary.BigEndian.PutUint32(crc[:], crc32.ChecksumIEEE(append([]byte(kind), data...)))
+		buf.Write(crc[:])
+	}
+	ihdr := make([]byte, 13)
+	binary.BigEndian.PutUint32(ihdr[0:4], 2000)
+	binary.BigEndian.PutUint32(ihdr[4:8], 2000)
+	ihdr[8] = 8 // bit depth
+	ihdr[9] = 2 // truecolor RGB
+	chunk("IHDR", ihdr)
+	chunk("IDAT", []byte{0x78, 0x9c, 0x00, 0x11, 0x22}) // 截断的 zlib 流，解不出像素
+	path := filepath.Join(t.TempDir(), "corrupt.png")
+	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
+		t.Fatalf("write corrupt png: %v", err)
+	}
+	return path
+}
+
 // writeNoisePNG 逐像素确定性噪声 PNG：压不下去，字节量级同真实繁忙截图，
 // 用来证明字节预算强制真的在工作（纯色 PNG 压得太小，锁不住预算路径）。
 func writeNoisePNG(t *testing.T, w, h int, seed int64) string {
@@ -280,38 +311,98 @@ func TestScaleReviewScreenshotSmallButHeavy(t *testing.T) {
 	}
 }
 
-// reviewScreenshotScaled（清单 scaled 标示与取图端点共用的判定）六态：小而轻
-// → false；小而重 → true；长边超目标 → true；非位图、超 64MP、文件缺失 →
-// false。
-func TestReviewScreenshotScaled(t *testing.T) {
+// reviewScreenshotServed（清单 served 标示与取图端点共用的判定）七态：小而轻
+// → original_light；小而重、长边超目标 → scaled；非位图、伪 heic、超 64MP、
+// 文件缺失 → original_heavy。
+func TestReviewScreenshotServed(t *testing.T) {
 	note := filepath.Join(t.TempDir(), "note.txt")
 	if err := os.WriteFile(note, []byte("definitely not an image"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
+	heic := filepath.Join(t.TempDir(), "shot.heic")
+	if err := os.WriteFile(heic, []byte("\x00\x00\x00\x18ftypheic\x00\x00\x00\x00heicmif1hevc"), 0o600); err != nil {
+		t.Fatalf("write heic: %v", err)
+	}
 	for _, c := range []struct {
 		name string
 		path string
-		want bool
+		want ReviewScreenshotServed
 	}{
-		{"小而轻", writeTestPNG(t, 640, 400), false},
-		{"小而重", writeHeavySmallPNG(t, 1512, 982, 21), true},
-		{"长边超目标", writeTestPNG(t, 2480, 2248), true},
-		{"非位图", note, false},
-		{"超 64MP", writeFakeHugePNG(t), false},
-		{"文件缺失", filepath.Join(t.TempDir(), "missing.png"), false},
+		{"小而轻", writeTestPNG(t, 640, 400), ServedOriginalLight},
+		{"小而重", writeHeavySmallPNG(t, 1512, 982, 21), ServedScaled},
+		{"长边超目标", writeTestPNG(t, 2480, 2248), ServedScaled},
+		{"非位图", note, ServedOriginalHeavy},
+		{"伪 heic", heic, ServedOriginalHeavy},
+		{"超 64MP", writeFakeHugePNG(t), ServedOriginalHeavy},
+		{"文件缺失", filepath.Join(t.TempDir(), "missing.png"), ServedOriginalHeavy},
 	} {
-		if got := reviewScreenshotScaled(c.path, reviewScreenshotMaxEdge); got != c.want {
-			t.Fatalf("%s: scaled = %v, want %v", c.name, got, c.want)
+		if got := reviewScreenshotServed(c.path, reviewScreenshotMaxEdge); got != c.want {
+			t.Fatalf("%s: served = %q, want %q", c.name, got, c.want)
 		}
 	}
 }
 
-// 像素预算：IHDR 声明超限的 PNG 在解码像素前被拦，报「超限」错误。
+// 解码字节闸权重按格式口径（与截图标注裁剪共用同一份估算函数）：16 位 PNG
+// 手拼 IHDR（bit depth=16）权 16；8 位 PNG/webp/未知权 8；jpeg/gif 权 12；
+// 样本截断或 IHDR 不在首位（损坏）按最大档 16 预留。
+func TestScreenshotDecodeBytesPerPixel(t *testing.T) {
+	makePNGHead := func(bitDepth, colorType byte) []byte {
+		head := make([]byte, 32)
+		copy(head, "\x89PNG\r\n\x1a\n")
+		binary.BigEndian.PutUint32(head[8:12], 13) // IHDR 数据长度
+		copy(head[12:16], "IHDR")
+		binary.BigEndian.PutUint32(head[16:20], 2000)
+		binary.BigEndian.PutUint32(head[20:24], 1000)
+		head[24] = bitDepth
+		head[25] = colorType
+		return head
+	}
+	cases := []struct {
+		name string
+		kind string
+		head []byte
+		want int64
+	}{
+		{"16 位 PNG", "image/png", makePNGHead(16, 2), 16},
+		{"16 位灰度 PNG", "image/png", makePNGHead(16, 0), 16},
+		{"8 位 PNG", "image/png", makePNGHead(8, 2), 8},
+		{"调色板 PNG", "image/png", makePNGHead(4, 3), 8},
+		{"jpeg", "image/jpeg", []byte("\xff\xd8\xff\xe0"), 12},
+		{"gif", "image/gif", []byte("GIF89a"), 12},
+		{"webp", "image/webp", []byte("RIFF....WEBP"), 8},
+		{"未知格式", "application/octet-stream", []byte("junk"), 8},
+		{"样本截断", "image/png", makePNGHead(8, 2)[:20], 16},
+		{"IHDR 不在首位", "image/png", func() []byte {
+			head := makePNGHead(8, 2)
+			copy(head[12:16], "XXXX")
+			return head
+		}(), 16},
+	}
+	for _, c := range cases {
+		if got := screenshotDecodeBytesPerPixel(c.kind, c.head); got != c.want {
+			t.Fatalf("%s: bytes/px = %d, want %d", c.name, got, c.want)
+		}
+	}
+}
+
+// 像素预算：IHDR 声明超限的图经共享判定归 original_heavy，直接透传不解码
+// （取图端点的防御分支见 TestAgentScreenshotImageScale）。
 func TestScaleReviewScreenshotPixelBudget(t *testing.T) {
 	path := writeFakeHugePNG(t)
 	data, _, err := scaleReviewScreenshot(context.Background(), path, "image/png", &reviewScaleParams{Max: 1536, Format: "jpeg", Quality: 80})
-	if !errors.Is(err, errReviewScaleTooLarge) || data != nil {
-		t.Fatalf("over-budget = %d bytes, %v; want errReviewScaleTooLarge", len(data), err)
+	if err != nil || data != nil {
+		t.Fatalf("over-budget = %d bytes, %v; want original_heavy 原图透传（nil data）", len(data), err)
+	}
+}
+
+// 头可解但像素损坏（真 PNG 头声明 2000×2000 进 scaled 行 + 截断的 IDAT）：
+// 不再静默降级透传原图——清单已承诺该地址是预算内变体，返回
+// errReviewScaleVariantFailed 由调用方 40406，代理读到错误记 unmeasurable。
+func TestScaleReviewScreenshotCorruptPixels(t *testing.T) {
+	path := writeCorruptPixelsPNG(t)
+	data, _, err := scaleReviewScreenshot(context.Background(), path, "image/png", &reviewScaleParams{Max: 1536, Format: "jpeg", Quality: 80})
+	if !errors.Is(err, errReviewScaleVariantFailed) || errors.Is(err, errReviewScaleTooLarge) || data != nil {
+		t.Fatalf("corrupt pixels = %d bytes, %v; want errReviewScaleVariantFailed", len(data), err)
 	}
 }
 
@@ -340,31 +431,31 @@ func TestScaleReviewScreenshotGIF(t *testing.T) {
 	}
 }
 
-// webp 魔数 + 乱体：嗅探认出 webp、像素解码失败 → errReviewScaleUnscalable，
-// 调用方按原图透传（不是 40406，也不是像素超限）——标准库无 webp 编码器，
-// 无法构造真 webp。
-func TestScaleReviewScreenshotWebpDecodeFail(t *testing.T) {
+// webp 魔数 + 乱体：嗅探认出 webp、头解码失败 → 经共享判定归 original_heavy，
+// 原图透传（nil data 且无错误——清单已按最重原图标示，承诺一致，不报错也不
+// 出变体）。
+func TestScaleReviewScreenshotWebpUndecodable(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "shot.webp")
 	body := append([]byte("RIFF\x24\x00\x00\x00WEBP"), make([]byte, 36)...)
 	if err := os.WriteFile(path, body, 0o600); err != nil {
 		t.Fatalf("write webp: %v", err)
 	}
 	data, _, err := scaleReviewScreenshot(context.Background(), path, "image/webp", &reviewScaleParams{Max: 1536, Format: "jpeg", Quality: 80})
-	if !errors.Is(err, errReviewScaleUnscalable) || errors.Is(err, errReviewScaleTooLarge) || data != nil {
-		t.Fatalf("webp garbage = %d bytes, %v; want errReviewScaleUnscalable", len(data), err)
+	if err != nil || data != nil {
+		t.Fatalf("webp garbage = %d bytes, %v; want original_heavy 原图透传（nil data）", len(data), err)
 	}
 }
 
-// 存储内容不是位图：嗅探失败 → errReviewScaleUnscalable，调用方按原图透传
-// 而不是 404（下载面本来就允许入库有声明类型的非解码位图，如 heic/tiff）。
+// 存储内容不是位图：嗅探失败 → 经共享判定归 original_heavy，原图透传而不是
+// 404（下载面本来就允许入库有声明类型的非解码位图，如 heic/tiff）。
 func TestScaleReviewScreenshotNonBitmap(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "note.txt")
 	if err := os.WriteFile(path, []byte("definitely not an image"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	data, _, err := scaleReviewScreenshot(context.Background(), path, "application/octet-stream", &reviewScaleParams{Max: 1536, Format: "jpeg", Quality: 80})
-	if !errors.Is(err, errReviewScaleUnscalable) || data != nil {
-		t.Fatalf("non-bitmap = %d bytes, %v; want errReviewScaleUnscalable", len(data), err)
+	if err != nil || data != nil {
+		t.Fatalf("non-bitmap = %d bytes, %v; want original_heavy 原图透传（nil data）", len(data), err)
 	}
 }
 
@@ -570,9 +661,9 @@ func TestScaleReviewScreenshotJPEGExifOrientation(t *testing.T) {
 }
 
 // INT-186 清单给审查尺寸：有 StoragePath 的行 url 带缩放参数、original_url
-// 不带、width/height 是原图尺寸、scaled 标示该地址会不会返回缩放变体（小而
-// 轻原图与非位图行 false，长边超目标的大图行 true）；下载失败的行维持 error
-// 且可选字段全部缺省。
+// 不带、width/height 是原图尺寸、served 标示该地址返回哪种字节（小而轻
+// original_light，长边超目标/小而重 scaled，非位图/超 64MP original_heavy）；
+// 下载失败的行维持 error 且可选字段全部缺省。
 func TestAgentScreenshotsReviewSizeItems(t *testing.T) {
 	e := newReviewEngineEnv(t)
 	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
@@ -580,8 +671,9 @@ func TestAgentScreenshotsReviewSizeItems(t *testing.T) {
 	okURL := "https://github.com/user-attachments/assets/ok1"
 	bigURL := "https://github.com/user-attachments/assets/big1"
 	noteURL := "https://github.com/user-attachments/assets/note1"
+	hugeURL := "https://github.com/user-attachments/assets/huge1"
 	failURL := "https://github.com/user-attachments/assets/fail1"
-	body := "![界面](" + okURL + ")\n\n![大图](" + bigURL + ")\n\n![笔记](" + noteURL + ")\n\n![缺图](" + failURL + ")"
+	body := "![界面](" + okURL + ")\n\n![大图](" + bigURL + ")\n\n![笔记](" + noteURL + ")\n\n![假大图](" + hugeURL + ")\n\n![缺图](" + failURL + ")"
 	e.fake.SetPR(repo, 99, &githubapi.PullRequest{
 		RepoFullName: repo, Number: 99, HeadSHA: "sha-rs",
 		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature", Body: body,
@@ -595,9 +687,9 @@ func TestAgentScreenshotsReviewSizeItems(t *testing.T) {
 		cached:   githubmedia.CachedImage(writeTestPNG(t, 640, 400), "image/png", 15),
 		failURLs: map[string]error{failURL: errors.New("boom")},
 	}
-	// 大图与非位图两行直接落库（带 StoragePath，ensureAssets 查重跳过下载）：
-	// 下载桩只有一份缓存，铺不出两种存储内容。大图行 scaled=true；非位图行
-	// 宽高解不出、scaled=false。
+	// 大图、假大图与非位图三行直接落库（带 StoragePath，ensureAssets 查重跳过
+	// 下载）：下载桩只有一份缓存，铺不出多种存储内容。大图行 served=scaled；
+	// 假大图行宽高解不出但头声明超预算、非位图行嗅探不出，都归 original_heavy。
 	seedScaledAsset := func(id string, pos int, path, mime string) {
 		t.Helper()
 		a := &model.ReviewAsset{
@@ -616,6 +708,7 @@ func TestAgentScreenshotsReviewSizeItems(t *testing.T) {
 		t.Fatalf("write note: %v", err)
 	}
 	seedScaledAsset("note1", 2, notePath, "application/octet-stream")
+	seedScaledAsset("huge1", 3, writeFakeHugePNG(t), "image/png")
 	review := e.withT3(nil, media, func(context.Context, string, int64) (string, error) {
 		return "tok", nil
 	})
@@ -624,8 +717,8 @@ func TestAgentScreenshotsReviewSizeItems(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AgentScreenshots: %v", err)
 	}
-	if len(items) != 4 {
-		t.Fatalf("items = %d, want 4", len(items))
+	if len(items) != 5 {
+		t.Fatalf("items = %d, want 5", len(items))
 	}
 	ok := items[0]
 	wantOriginal := "/api/review-agent/runs/" + run.ID + "/screenshots/" + ok.Id
@@ -641,31 +734,36 @@ func TestAgentScreenshotsReviewSizeItems(t *testing.T) {
 	if ok.Width == nil || *ok.Width != 640 || ok.Height == nil || *ok.Height != 400 {
 		t.Fatalf("ok dims = %v×%v, want 640×400", ok.Width, ok.Height)
 	}
-	// 小而轻（长边在目标内、字节远小于预算）：scaled=false——该地址将返回原
-	// 图字节，体积不受审查尺寸预算保护。
-	if ok.Scaled == nil || *ok.Scaled {
-		t.Fatalf("ok scaled = %v, want false（小而轻原图）", ok.Scaled)
+	// 小而轻（长边在目标内、字节远小于预算）：served=original_light——原图字
+	// 节但落在预算内，代理可正常读。
+	if ok.Served == nil || *ok.Served != "original_light" {
+		t.Fatalf("ok served = %v, want original_light（小而轻原图）", ok.Served)
 	}
-	// 大图行：长边超目标，scaled=true。
+	// 大图行：长边超目标，served=scaled。
 	big := items[1]
 	if big.Error != nil || big.Url == nil || big.Width == nil || *big.Width != 2480 || big.Height == nil || *big.Height != 2248 {
 		t.Fatalf("big item = %+v, want 正常大图行", big)
 	}
-	if big.Scaled == nil || !*big.Scaled {
-		t.Fatalf("big scaled = %v, want true（长边超目标）", big.Scaled)
+	if big.Served == nil || *big.Served != "scaled" {
+		t.Fatalf("big served = %v, want scaled（长边超目标）", big.Served)
 	}
-	// 非位图行：宽高解不出（字段缺省）、scaled=false——返回的是原图字节且
-	// 体积不受预算保护。
+	// 非位图行：宽高解不出（字段缺省）、served=original_heavy——原图字节且
+	// 不受预算保护。
 	note := items[2]
 	if note.Error != nil || note.Url == nil || note.Width != nil || note.Height != nil {
 		t.Fatalf("note item = %+v, want 宽高缺省的资产行", note)
 	}
-	if note.Scaled == nil || *note.Scaled {
-		t.Fatalf("note scaled = %v, want false（非位图）", note.Scaled)
+	if note.Served == nil || *note.Served != "original_heavy" {
+		t.Fatalf("note served = %v, want original_heavy（非位图）", note.Served)
 	}
-	fail := items[3]
-	if fail.Error == nil || *fail.Error == "" || fail.Url != nil || fail.OriginalUrl != nil || fail.Width != nil {
-		t.Fatalf("fail item = %+v, want error 非空且无 url/original_url/width", fail)
+	// 假大图行：IHDR 声明超 64MP（头解得动也不解码像素），served=original_heavy。
+	huge := items[3]
+	if huge.Error != nil || huge.Url == nil || huge.Served == nil || *huge.Served != "original_heavy" {
+		t.Fatalf("huge item = %+v, want served=original_heavy（超 64MP）", huge)
+	}
+	fail := items[4]
+	if fail.Error == nil || *fail.Error == "" || fail.Url != nil || fail.OriginalUrl != nil || fail.Width != nil || fail.Served != nil {
+		t.Fatalf("fail item = %+v, want error 非空且无 url/original_url/width/served", fail)
 	}
 	// 线上表示：失败行的可选字段在 JSON 里是缺省（不是空值），锁住不含
 	// url/original_url/width/height 键。
@@ -677,16 +775,23 @@ func TestAgentScreenshotsReviewSizeItems(t *testing.T) {
 	if err := json.Unmarshal(raw, &rows); err != nil {
 		t.Fatalf("unmarshal items: %v", err)
 	}
-	for _, key := range []string{"url", "original_url", "width", "height", "scaled"} {
-		if _, present := rows[3][key]; present {
+	for _, key := range []string{"url", "original_url", "width", "height", "served"} {
+		if _, present := rows[4][key]; present {
 			t.Fatalf("失败行 JSON 含 %q 键: %s", key, raw)
+		}
+	}
+	// 有 StoragePath 的行 served 必返：正常行 JSON 都含 served 键。
+	for i := range 4 {
+		if _, present := rows[i]["served"]; !present {
+			t.Fatalf("行 %d JSON 缺 served 键: %s", i, raw)
 		}
 	}
 }
 
-// AgentScreenshotImage：无参数 → path 透传；带参数 → jpeg 变体字节；超像素
-// 预算或有文件但缩不了（伪 heic）→ 回退原图透传；StoragePath 指向不存在的
-// 文件 → 40406 语义。
+// AgentScreenshotImage：无参数 → path 透传；带参数 → jpeg 变体字节；清单已标
+// original_heavy 的（超像素预算、伪 heic）照常原图透传；served=scaled 行手造
+// 「头可解但像素损坏」的 PNG → 40406 而非原图（不静默降级）；StoragePath
+// 指向不存在的文件 → 40406 语义。
 func TestAgentScreenshotImageScale(t *testing.T) {
 	e := newReviewEngineEnv(t)
 	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
@@ -712,6 +817,7 @@ func TestAgentScreenshotImageScale(t *testing.T) {
 	seedAsset("asset-big", bigPath)
 	seedAsset("asset-missing", missingPath)
 	seedAsset("asset-huge", writeFakeHugePNG(t))
+	seedAsset("asset-corrupt", writeCorruptPixelsPNG(t))
 	// 伪 heic：ftyp 盒魔数、有 Content-Type 位图声明但本服务无解码器。
 	heicPath := filepath.Join(t.TempDir(), "shot.heic")
 	heicBody := []byte("\x00\x00\x00\x18ftypheic\x00\x00\x00\x00heicmif1hevc")
@@ -750,10 +856,11 @@ func TestAgentScreenshotImageScale(t *testing.T) {
 		t.Fatalf("scaled long edge = %d, want %d", img.Bounds().Dx(), reviewScreenshotMaxEdge)
 	}
 
-	// 原图超像素预算：回退原图透传（Path + 存储 mime，Data nil）。
+	// 原图超像素预算：清单已标 original_heavy，照常原图透传（Path + 存储
+	// mime，Data nil）。
 	file, err = review.AgentScreenshotImage(ctx, run.ID, "asset-huge", scale)
 	if err != nil || file.Data != nil || file.Path == "" || file.MIME != "image/png" {
-		t.Fatalf("over-budget fallback = %+v, %v; want 原图透传", file, err)
+		t.Fatalf("over-budget passthrough = %+v, %v; want 原图透传", file, err)
 	}
 
 	// StoragePath 指向不存在的文件：带参数走缩放 → 40406 语义。
@@ -762,15 +869,24 @@ func TestAgentScreenshotImageScale(t *testing.T) {
 		t.Fatalf("missing file = %v, want ErrIssueAssetNotFound", err)
 	}
 
-	// 伪 heic（有文件但无解码器）：带缩放参数 → 原图透传（Data nil、Path 原样）
-	// 而不是 40406——默认审查尺寸地址保持可读。
+	// 伪 heic（有文件但无解码器，清单已标 original_heavy）：带缩放参数 → 原
+	// 图透传（Data nil、Path 原样）而不是 40406——默认审查尺寸地址保持可读，
+	// 与清单承诺一致。
 	file, err = review.AgentScreenshotImage(ctx, run.ID, "asset-heic", scale)
 	if err != nil || file.Data != nil || file.Path != heicPath || file.MIME != "image/heic" {
-		t.Fatalf("unscalable fallback = %+v, %v; want 原图透传", file, err)
+		t.Fatalf("original_heavy passthrough = %+v, %v; want 原图透传", file, err)
 	}
 	// 同文件不带参数：照常透传。
 	file, err = review.AgentScreenshotImage(ctx, run.ID, "asset-heic", nil)
 	if err != nil || file.Data != nil || file.Path != heicPath || file.MIME != "image/heic" {
 		t.Fatalf("unscalable passthrough = %+v, %v; want 原图透传", file, err)
+	}
+
+	// served=scaled 行但像素损坏（真 PNG 头 + 截断 IDAT）：不再静默降级透传
+	// 原图——清单承诺该地址是预算内变体，降级等于把十几 MB 塞给代理；返回
+	// 40406 让代理记 unmeasurable。
+	_, err = review.AgentScreenshotImage(ctx, run.ID, "asset-corrupt", scale)
+	if !errors.Is(err, errs.ErrIssueAssetNotFound) {
+		t.Fatalf("corrupt pixels = %v, want ErrIssueAssetNotFound（不降级原图）", err)
 	}
 }
