@@ -6245,7 +6245,7 @@ export interface components {
             id: string;
             label: string;
             /**
-             * @description 该地址返回哪种字节：scaled = 审查尺寸缩放变体（长边 ≤1536 的 JPEG，落在单张 500KB 预算内）；original_light = 原图字节但在预算内（长边 ≤1536 且文件 ≤500KB，可正常读）；original_heavy = 原图字节且不受预算保护（宽×高 >6400 万像素、嗅探/头解码不出或文件打不开，尽量不读）。有 StoragePath 的行必有值；下载失败行字段缺省
+             * @description 该地址返回哪种字节：scaled = 审查尺寸缩放变体（长边 ≤1536 的 JPEG，字节预算尽力压进单张 500KB：JPEG 降质量、必要时降边；病态输入兑底取最小一份）；original_light = 原图字节但在预算内（长边 ≤1536 且文件 ≤500KB，可正常读）；original_heavy = 原图字节且不受预算保护（宽×高 >6400 万像素、嗅探/头解码不出或文件打不开，尽量不读）。有 StoragePath 的行必有值；下载失败行字段缺省
              * @enum {string}
              */
             served?: "scaled" | "original_light" | "original_heavy";

@@ -4421,7 +4421,7 @@ type ReviewAgentScreenshot struct {
 	// OriginalUrl 原图地址（无缩放参数，即本端点不带 query）；下载失败时字段缺省
 	OriginalUrl *string `json:"original_url,omitempty"`
 
-	// Served 该地址返回哪种字节：scaled = 审查尺寸缩放变体（长边 ≤1536 的 JPEG，落在单张 500KB 预算内）；original_light = 原图字节但在预算内（长边 ≤1536 且文件 ≤500KB，可正常读）；original_heavy = 原图字节且不受预算保护（宽×高 >6400 万像素、嗅探/头解码不出或文件打不开，尽量不读）。有 StoragePath 的行必有值；下载失败行字段缺省
+	// Served 该地址返回哪种字节：scaled = 审查尺寸缩放变体（长边 ≤1536 的 JPEG，字节预算尽力压进单张 500KB：JPEG 降质量、必要时降边；病态输入兑底取最小一份）；original_light = 原图字节但在预算内（长边 ≤1536 且文件 ≤500KB，可正常读）；original_heavy = 原图字节且不受预算保护（宽×高 >6400 万像素、嗅探/头解码不出或文件打不开，尽量不读）。有 StoragePath 的行必有值；下载失败行字段缺省
 	Served *ReviewAgentScreenshotServed `json:"served,omitempty"`
 
 	// Url 审查尺寸地址：指向本端点并带缩放参数；served=scaled 的行返回长边 ≤1536 的 JPEG，original_* 的行返回原图字节；下载失败时字段缺省
@@ -4431,7 +4431,7 @@ type ReviewAgentScreenshot struct {
 	Width *int `json:"width,omitempty"`
 }
 
-// ReviewAgentScreenshotServed 该地址返回哪种字节：scaled = 审查尺寸缩放变体（长边 ≤1536 的 JPEG，落在单张 500KB 预算内）；original_light = 原图字节但在预算内（长边 ≤1536 且文件 ≤500KB，可正常读）；original_heavy = 原图字节且不受预算保护（宽×高 >6400 万像素、嗅探/头解码不出或文件打不开，尽量不读）。有 StoragePath 的行必有值；下载失败行字段缺省
+// ReviewAgentScreenshotServed 该地址返回哪种字节：scaled = 审查尺寸缩放变体（长边 ≤1536 的 JPEG，字节预算尽力压进单张 500KB：JPEG 降质量、必要时降边；病态输入兑底取最小一份）；original_light = 原图字节但在预算内（长边 ≤1536 且文件 ≤500KB，可正常读）；original_heavy = 原图字节且不受预算保护（宽×高 >6400 万像素、嗅探/头解码不出或文件打不开，尽量不读）。有 StoragePath 的行必有值；下载失败行字段缺省
 type ReviewAgentScreenshotServed string
 
 // ReviewCodeFinding defines model for ReviewCodeFinding.

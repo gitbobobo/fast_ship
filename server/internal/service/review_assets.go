@@ -899,7 +899,7 @@ func (s *ReviewService) AgentScreenshotImage(ctx context.Context, runID, assetID
 	if scale == nil {
 		return original, nil
 	}
-	data, scaledMime, err := scaleReviewScreenshot(ctx, asset.StoragePath, asset.MimeType, scale)
+	data, scaledMime, err := scaleReviewScreenshot(ctx, asset.StoragePath, scale)
 	if err != nil {
 		if errors.Is(err, errReviewScaleTooLarge) {
 			// 防御分支：超像素预算在共享判定里已按 original_heavy 标示透传，走

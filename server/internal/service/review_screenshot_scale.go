@@ -168,7 +168,7 @@ func reviewScreenshotHead(path string) ([]byte, error) {
 		return nil, err
 	}
 	defer f.Close()
-	var head [16]byte
+	var head [32]byte
 	n, _ := io.ReadFull(f, head[:])
 	return head[:n], nil
 }
@@ -252,9 +252,9 @@ func reviewScreenshotServed(path string, maxEdge int) ReviewScreenshotServed {
 // 预算编码（见 encodeReviewScaleBytes）。scaled 路径的像素解码、变体编码、
 // 字节闸失败返回 errReviewScaleVariantFailed → 调用方 40406，不静默降级透传
 // 原图（清单已承诺该地址是预算内变体）；文件打不开（含不存在）返回普通错误
-// → 调用方 40406。mimeType 只是 storage 的声明，真值以嗅探为准。返回 nil
+// → 调用方 40406。返回 nil
 // data 且 err 为 nil 表示不需要缩放变体（original_* 原图透传）。
-func scaleReviewScreenshot(ctx context.Context, path, mimeType string, p *reviewScaleParams) (data []byte, mime string, err error) {
+func scaleReviewScreenshot(ctx context.Context, path string, p *reviewScaleParams) (data []byte, mime string, err error) {
 	head, err := reviewScreenshotHead(path)
 	if err != nil {
 		return nil, "", err // 打不开（含不存在）→ 调用方 40406

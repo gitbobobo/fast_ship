@@ -49,11 +49,12 @@ const (
 // 解码后内存，一张声明 30000×30000 的 PNG 解码要 ~3.6GB
 const maxScreenshotDecodePixels = 64_000_000
 
-// 裁剪并发闸：个数上限 4，且按图像素数加权限总驻留内存。PNG/WebP 权 =
-// 像素×8（解码源 + PNG 输出缓冲各按 w*h*4 估算）；JPEG/GIF 权 = 像素×12，
-// 多留一份副本预算——JPEG 方向 2-8 的 EXIF 重排与 GIF 偏移帧合成都要在解码源
-// 存活期间再分配一张全尺寸 RGBA；16 位 PNG 解码为 RGBA64（8B/px 源）且输出
-// 同为 16 位 PNG，权 = 像素×16。总量封顶 1GiB，单张 64MP 16 位 PNG 也能拿满。
+// 裁剪并发闸：个数上限 4，且按图像素数加权限总驻留内存。权重按下方共享的
+// screenshotDecodeBytesPerPixel 口径：PNG/WebP 权 = 像素×8；JPEG/GIF 权 =
+// 像素×12，多留一份副本预算——JPEG 方向 2-8 的 EXIF 重排与 GIF 偏移帧合成
+// 都要在解码源存活期间再分配一张全尺寸 RGBA；16 位 PNG 权 = 像素×16（两条
+// 路径共用口径，理由见共享函数注释）。总量封顶 1GiB，单张 64MP 16 位 PNG
+// 也能拿满。
 var (
 	screenshotCropDecodeSem = make(chan struct{}, 4)
 	screenshotCropBytesSem  = semaphore.NewWeighted(1024 << 20)
@@ -74,8 +75,10 @@ func (s *ScreenshotAnnotationService) cropBytesPerPixel(screen *model.Screenshot
 
 // screenshotDecodeBytesPerPixel 返回该格式解码驻留的每像素字节预算口径：
 // jpeg/gif 12——解码源存活期间还要再分配一张全尺寸副本（JPEG 方向 2-8 的
-// EXIF 重排、GIF 偏移帧合成）；16 位 PNG 16——解码为 RGBA64/Gray16（8B/px
-// 源）且输出同为 16 位 PNG；其余 8（8 位 PNG/webp 解码源 + 输出各按 w*h*4）。
+// EXIF 重排、GIF 偏移帧合成）；16 位 PNG 16——解码源是 RGBA64/Gray16（8B/px），
+// 两条路径的后续驻留各不同（裁剪输出 16 位 PNG 编码缓冲，缩放再叠 RGBA 缩放
+// 副本与编码缓冲），按两者较大者 16 预留；其余 8（8 位 PNG/webp 解码源 + 输出
+// 各按 w*h*4）。
 // 截图标注裁剪与审查截图缩放两条解码路径共用，闸权重 = 宽×高×此值。head 是
 // 调用方嗅探出的文件头部样本（判 16 位 PNG 需 IHDR bit depth 字节，至少 25
 // 字节）；kind 为嗅探出的 MIME，判不出的格式按 8 兑底。

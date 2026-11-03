@@ -154,6 +154,8 @@ func TestRenderReviewPromptVisualImageBudget(t *testing.T) {
 		"served=original_light` 是原图字节但落在预算内（长边 ≤1536 且文件 ≤500KB），照常可读",
 		"served=original_heavy` 的行是原图字节且不受预算保护",
 		"必须看的读完即停，并在结论里注明读的是原图",
+		"取图失败（404）时把该图写进",
+		"不要改读 ",
 		"reason 写明预算截断",
 		"不要把全部截图一次性读进上下文",
 	} {
