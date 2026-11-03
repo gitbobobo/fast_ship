@@ -26,9 +26,13 @@ const TIMEOUT_MS = 30_000;
 const SYNC_TIMEOUT_MS = 120_000;
 
 function timeoutFor(path) {
-  const p = path.split('?')[0].replace(/\/+$/, '');
-  if (/\/pull-requests\/sync$/.test(p)) return SYNC_TIMEOUT_MS;
+  if (/\/pull-requests\/sync$/.test(normalizePath(path))) return SYNC_TIMEOUT_MS;
   return TIMEOUT_MS;
+}
+
+// 剥查询串与尾随斜杠——timeoutFor/retryable 共用，两侧判定口径一致（R22）。
+function normalizePath(path) {
+  return path.split('?')[0].replace(/\/+$/, '');
 }
 const RETRY_DELAY_MS = 1_000;
 
@@ -131,7 +135,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // never resent: a lost or 5xx response does not prove the server did not
 // apply it.
 function retryable(method, path) {
-  const p = path.split('?')[0];
+  const p = normalizePath(path);
   if (method === 'GET') return true;
   if (method === 'POST') {
     return /\/pull-requests(?:\/sync)?$/.test(p) || /\/api\/projects\/[^/]+\/logs$/.test(p);
