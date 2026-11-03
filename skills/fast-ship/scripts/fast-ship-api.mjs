@@ -21,9 +21,8 @@ import { argv, stderr, stdout } from 'node:process';
 
 const CONFIG_PATH = join(homedir(), '.config', 'fast-ship', 'config.yaml');
 const TIMEOUT_MS = 30_000;
-// sync 服务端上界 = 解析 30s + 拉取 30s + 写回 40s = 100s（INT-175）；
-// 调用方超时要大于它，否则客户端在服务端仍写回时中断并按 retryable
-// 重发一轮。
+// sync 拉取预算 30s + 写回余量（INT-175）；调用方超时要大于服务端
+// 拉取窗口，否则客户端在服务端仍写回时中断并按 retryable 重发一轮。
 const SYNC_TIMEOUT_MS = 120_000;
 
 function timeoutFor(path) {

@@ -1,7 +1,6 @@
 package repository
 
 import (
-	"context"
 	"errors"
 	"time"
 
@@ -21,15 +20,6 @@ type UserGitHubTokenRepository struct {
 
 func NewUserGitHubTokenRepository(db *gorm.DB) *UserGitHubTokenRepository {
 	return &UserGitHubTokenRepository{db: db}
-}
-
-// WithContext 返回绑定 ctx 的仓库视图：查询的借连接等待随 ctx 取消
-// （INT-175 sync 阶段 1 凭证读取的预算用）。
-func (r *UserGitHubTokenRepository) WithContext(ctx context.Context) *UserGitHubTokenRepository {
-	if r == nil || ctx == nil {
-		return r
-	}
-	return &UserGitHubTokenRepository{db: r.db.WithContext(ctx)}
 }
 
 func (r *UserGitHubTokenRepository) Create(token *model.UserGitHubToken) error {

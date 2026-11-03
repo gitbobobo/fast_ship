@@ -1,7 +1,6 @@
 package repository
 
 import (
-	"context"
 	"errors"
 	"strings"
 	"time"
@@ -26,15 +25,6 @@ type ProjectRepository struct {
 
 func NewProjectRepository(db *gorm.DB) *ProjectRepository {
 	return &ProjectRepository{db: db}
-}
-
-// WithContext 返回绑定 ctx 的仓库视图：查询的借连接等待随 ctx 取消
-// （INT-175 sync 前置读库的预算用）。
-func (r *ProjectRepository) WithContext(ctx context.Context) *ProjectRepository {
-	if r == nil || ctx == nil {
-		return r
-	}
-	return &ProjectRepository{db: r.db.WithContext(ctx)}
 }
 
 func (r *ProjectRepository) Create(project *model.Project) error {

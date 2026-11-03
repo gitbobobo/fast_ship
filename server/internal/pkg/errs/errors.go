@@ -6,25 +6,14 @@ import "fmt"
 type AppError struct {
 	Code    int
 	Message string
-	// cause 保留底层错误链（可选）：errors.Is/As 可穿透到原始错误，如
-	// context.DeadlineExceeded——文案仍按 Message 显示。
-	cause error
 }
 
 func (e *AppError) Error() string {
 	return fmt.Sprintf("[%d] %s", e.Code, e.Message)
 }
 
-func (e *AppError) Unwrap() error { return e.cause }
-
 func New(code int, message string) *AppError {
 	return &AppError{Code: code, Message: message}
-}
-
-// Wrap 同 New，但保留底层错误链——用于「对用户给业务文案、对 errors.Is
-// 保留底层原因（如 ctx 取消）」的场景。
-func Wrap(code int, message string, cause error) *AppError {
-	return &AppError{Code: code, Message: message, cause: cause}
 }
 
 // 参数校验错误 40001-40099

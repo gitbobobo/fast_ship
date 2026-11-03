@@ -1,7 +1,6 @@
 package repository
 
 import (
-	"context"
 	"errors"
 
 	"github.com/godbobo/fast_ship/server/internal/model"
@@ -21,16 +20,6 @@ func (r *IssuePullRequestRepository) Create(link *model.IssuePullRequest) error 
 	return r.db.Create(link).Error
 }
 
-// WithContext 返回绑定 ctx 的仓库视图：UPDATE 的借连接/锁等待随 ctx 取消
-// （INT-175 sync 写回阶段用，ctx 是独立的写回预算——到点记「写回超时」
-// 而不是无限等唯一写连接）。
-func (r *IssuePullRequestRepository) WithContext(ctx context.Context) *IssuePullRequestRepository {
-	if r == nil || ctx == nil {
-		return r
-	}
-	return &IssuePullRequestRepository{db: r.db.WithContext(ctx)}
-}
-
 // Upsert 以业务唯一键 (issue_id, provider, host_key, repo_full_name, number) 原子
 // 插入或刷新：不同 Forgejo 实例的同名 PR 天然是两行并存（host_key 在键内），
 // 不需要任何覆盖守卫；同主机重复 attach 就是普通 upsert。冲突时更新同步字段
@@ -39,39 +28,15 @@ func (r *IssuePullRequestRepository) WithContext(ctx context.Context) *IssuePull
 // 的快照抹掉，那会让 sync 永久报缺快照）。host_key 不在冲突更新列内——它参
 // 与身份判定，不随写入漂移（集成改 base_url 由 sync 的主机比对拦下）。link_
 // origin 只升不降——手动 attach 可把 synced 行升级为 manual，反向不允许（避
-// 免同步投影把手动关联降级、继而被 DeleteMissingSynced 清掉）。远端快照字段
-// 受 synced_at 守卫（excluded 更旧则保留库内值），但 link_origin 与
-// forge_integration_id 不受守卫——手动 attach 的升级与换绑永不被旧快照拦下。
-// syncedColumns 是远端快照字段：冲突更新时受 synced_at 守卫约束——
-// excluded.synced_at 更旧时保留库内值（INT-175 R13，守卫逐列走 CASE 而
-// 非整条 WHERE，这样 link_origin 的 manual 升级与 forge_integration_id
-// 换绑不会被旧快照连带丢掉）。
-var syncedColumns = []string{
-	"html_url", "title", "state", "is_draft", "author_login",
-	"head_ref", "base_ref", "merged_at", "closed_at",
-}
-
+// 免同步投影把手动关联降级、继而被 DeleteMissingSynced 清掉）。
+// 注：synced_at 守卫只约束 sync 的 SaveSyncedFields 写回——attach/sync
+// 交错时旧快照覆盖问题记入 INT-188 另行处理。
 func (r *IssuePullRequestRepository) Upsert(link *model.IssuePullRequest) error {
-	set := make(clause.Set, 0, len(syncedColumns)+5)
-	for _, col := range syncedColumns {
-		set = append(set, clause.Assignment{
-			Column: clause.Column{Name: col},
-			Value:  gorm.Expr("CASE WHEN excluded.synced_at >= issue_pull_requests.synced_at THEN excluded." + col + " ELSE issue_pull_requests." + col + " END"),
-		})
-	}
-	// synced_at 取两者较大值：守卫命中时保留库内较新时间，不随旧快照回
-	// 拨；updated_at 同口径——快照字段没变就不该刷新修改时间。已知例外：
-	// 守卫拦下快照但 link_origin 升级/integration 换绑仍生效时，行内容变
-	// 了而 updated_at 不刷新——这两列的身份语义重于修改时间，属有意取舍。
+	set := clause.AssignmentColumns([]string{
+		"html_url", "title", "state", "is_draft", "author_login",
+		"head_ref", "base_ref", "merged_at", "closed_at", "synced_at", "updated_at",
+	})
 	set = append(set,
-		clause.Assignment{
-			Column: clause.Column{Name: "synced_at"},
-			Value:  gorm.Expr("CASE WHEN excluded.synced_at >= issue_pull_requests.synced_at THEN excluded.synced_at ELSE issue_pull_requests.synced_at END"),
-		},
-		clause.Assignment{
-			Column: clause.Column{Name: "updated_at"},
-			Value:  gorm.Expr("CASE WHEN excluded.synced_at >= issue_pull_requests.synced_at THEN excluded.updated_at ELSE issue_pull_requests.updated_at END"),
-		},
 		clause.Assignment{
 			Column: clause.Column{Name: "forge_integration_id"},
 			Value:  gorm.Expr("CASE WHEN excluded.forge_integration_id <> '' THEN excluded.forge_integration_id ELSE issue_pull_requests.forge_integration_id END"),
