@@ -11,7 +11,7 @@ COPY web/ .
 
 RUN pnpm build
 
-FROM golang:1.27.2-alpine AS server-builder
+FROM golang:1.27.3-alpine AS server-builder
 
 WORKDIR /app/server
 
