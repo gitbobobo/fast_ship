@@ -499,7 +499,7 @@ func TestCloseOneGitHubIssue_GuardSkipsBeforePatch(t *testing.T) {
 	fake := &fakeIssueGitHubClient{}
 	results := make(chan githubCloseNetResult, 1)
 	closeOneGitHubIssue(context.Background(), fake, issue, ghclient.UpdateIssueRequest{}, results, nil, nil,
-		func(id string) (bool, error) { return false, nil })
+		func(ctx context.Context, id string) (bool, error) { return false, nil })
 	res := <-results
 	if res.err != errBatchCloseSkippedNotOpen {
 		t.Fatalf("expected skipped-not-open, got %v", res.err)
@@ -510,7 +510,7 @@ func TestCloseOneGitHubIssue_GuardSkipsBeforePatch(t *testing.T) {
 
 	results = make(chan githubCloseNetResult, 1)
 	closeOneGitHubIssue(context.Background(), fake, issue, ghclient.UpdateIssueRequest{}, results, nil, nil,
-		func(id string) (bool, error) { return false, errors.New("db down") })
+		func(ctx context.Context, id string) (bool, error) { return false, errors.New("db down") })
 	res = <-results
 	if res.err == nil || batchCloseItemError(res.err) != "复核本地状态失败，未关闭该项" {
 		t.Fatalf("expected guard-failure copy, got %v", res.err)
@@ -522,13 +522,27 @@ func TestCloseOneGitHubIssue_GuardSkipsBeforePatch(t *testing.T) {
 	// 守卫通过时照常发 PATCH。
 	results = make(chan githubCloseNetResult, 1)
 	closeOneGitHubIssue(context.Background(), fake, issue, ghclient.UpdateIssueRequest{}, results, nil, nil,
-		func(id string) (bool, error) { return true, nil })
+		func(ctx context.Context, id string) (bool, error) { return true, nil })
 	res = <-results
 	if res.err != nil {
 		t.Fatalf("guard-passed item must PATCH, got err=%v", res.err)
 	}
 	if len(fake.recordedUpdateIssueCalls()) != 1 {
 		t.Fatalf("expected exactly one PATCH, got %d", len(fake.recordedUpdateIssueCalls()))
+	}
+
+	// 守卫通过但批次已被取消：守卫后再复核（R8），按「未开始」计数不发 PATCH。
+	cancelledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	results = make(chan githubCloseNetResult, 1)
+	closeOneGitHubIssue(cancelledCtx, fake, issue, ghclient.UpdateIssueRequest{}, results, nil, nil,
+		func(ctx context.Context, id string) (bool, error) { return true, nil })
+	res = <-results
+	if res.err == nil {
+		t.Fatal("cancelled batch must not PATCH")
+	}
+	if len(fake.recordedUpdateIssueCalls()) != 1 {
+		t.Fatalf("cancelled batch must not issue another PATCH, got %d", len(fake.recordedUpdateIssueCalls()))
 	}
 }
 

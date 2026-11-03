@@ -56,7 +56,8 @@ func (r *IssueRepository) TouchUpdatedAt(tx *gorm.DB, id string, at time.Time) e
 // BatchCloseInternalTx 在事务内逐 id 把仍为 open 且仍为 done 的内部 Issue
 // 更新为 closed/completed，返回本次真正命中的 id 子集。WHERE 钉住与待关闭
 // 清单完全相同的条件（issues.state=open + issue_internal_meta.workflow_status
-// = done，经子查询关联）：两条语句之间被看板拖回开发中的行只改 workflow、
+// = done，关联 EXISTS 走 issue_id 主键，逐 id 不重扫 meta 表，INT-185 R8）：
+// 两条语句之间被看板拖回开发中的行只改 workflow、
 // 不改 state，少了 workflow 条件就会把用户刚拉回的行照样关闭（INT-185
 // R6）。行已被并发方改写时 RowsAffected 为 0，调用方据此只对命中行计成功
 // 并删推荐，未命中行逐条记失败而不是静默吞掉。ids 为空时不发 SQL（避免
@@ -68,7 +69,7 @@ func (r *IssueRepository) BatchCloseInternalTx(tx *gorm.DB, ids []string, closed
 	closed := make([]string, 0, len(ids))
 	for _, id := range ids {
 		res := tx.Model(&model.Issue{}).
-			Where("id = ? AND source = ? AND state = ? AND id IN (SELECT issue_id FROM issue_internal_meta WHERE workflow_status = ?)",
+			Where("id = ? AND source = ? AND state = ? AND EXISTS (SELECT 1 FROM issue_internal_meta WHERE issue_id = issues.id AND workflow_status = ?)",
 				id, model.IssueSourceInternal, model.IssueStateOpen, model.IssueWorkflowStatusDone).
 			Updates(map[string]any{
 				"state":        model.IssueStateClosed,
@@ -89,9 +90,11 @@ func (r *IssueRepository) BatchCloseInternalTx(tx *gorm.DB, ids []string, closed
 // IsOpenAndDone GitHub 批量关闭的行级守卫（INT-185 R7）：PATCH 前按 id 复核
 // 本地行仍为 state=open 且 meta.workflow_status=done——批量窗口内被拖回开发
 // 中的行不发 PATCH、按「已跳过关闭」计入 failures，避免远端/本地被误关。
-func (r *IssueRepository) IsOpenAndDone(id string) (bool, error) {
+// 带 ctx（INT-185 R8）：守卫排在单连接池的长事务后也能被批次取消打断，
+// 不会把请求拖过整批预算。
+func (r *IssueRepository) IsOpenAndDone(ctx context.Context, id string) (bool, error) {
 	var cnt int64
-	err := r.db.Model(&model.Issue{}).
+	err := r.db.WithContext(ctx).Model(&model.Issue{}).
 		Joins("JOIN issue_internal_meta m ON m.issue_id = issues.id AND m.workflow_status = ?", model.IssueWorkflowStatusDone).
 		Where("issues.id = ? AND issues.state = ?", id, model.IssueStateOpen).
 		Count(&cnt).Error

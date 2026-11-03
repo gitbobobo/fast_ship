@@ -211,7 +211,7 @@ const batchCloseGitHubRateLimitRemainingText = "GitHub API 限流，未尝试关
 // 经 WithoutCancel + 独立超时与整批取消解耦；结果只经 results 返回，由调用方
 // 统一落库与计数。命中 API 限流时调用 onRateLimit（可为 nil），由调用方熔断
 // 剩余派发——限流后继续打满配额只会得到重复失败，次级限流还会延长封禁。
-func closeOneGitHubIssue(batchCtx context.Context, client ghclient.Client, issue model.Issue, updateReq ghclient.UpdateIssueRequest, results chan<- githubCloseNetResult, onRateLimit func(), rateLimited *atomic.Bool, guard func(id string) (bool, error)) {
+func closeOneGitHubIssue(batchCtx context.Context, client ghclient.Client, issue model.Issue, updateReq ghclient.UpdateIssueRequest, results chan<- githubCloseNetResult, onRateLimit func(), rateLimited *atomic.Bool, guard func(ctx context.Context, id string) (bool, error)) {
 	if issue.GitHubMeta == nil {
 		results <- githubCloseNetResult{issue: issue, err: errs.ErrIssueReadOnly}
 		return
@@ -226,13 +226,20 @@ func closeOneGitHubIssue(batchCtx context.Context, client ghclient.Client, issue
 	// 批量窗口内被拖回开发中的行不发 PATCH、按「已跳过关闭」回报；内部来源
 	// 在事务 WHERE 里钉住同条件，GitHub 来源没有事务可依托，只能靠这里。
 	if guard != nil {
-		ok, gerr := guard(issue.ID)
+		ok, gerr := guard(batchCtx, issue.ID)
 		if gerr != nil {
 			results <- githubCloseNetResult{issue: issue, err: errs.New(errs.ErrInternal.Code, "复核本地状态失败，未关闭该项")}
 			return
 		}
 		if !ok {
 			results <- githubCloseNetResult{issue: issue, err: errBatchCloseSkippedNotOpen}
+			return
+		}
+		// 守卫过后、发 PATCH 前再复核批次状态（INT-185 R8）：守卫本身可能
+		// 在连接池里排了一阵，期间批次已被取消/超时的不再开始新 PATCH，
+		// 按「未开始」计数。
+		if err := batchCtx.Err(); err != nil {
+			results <- githubCloseNetResult{issue: issue, err: batchCloseCancelErr(err, rateLimited)}
 			return
 		}
 	}
@@ -397,8 +404,8 @@ func (s *IssueService) closeGitHubIssues(ctx context.Context, project *model.Pro
 				if rateLimited.CompareAndSwap(false, true) {
 					dispatchCancel()
 				}
-			}, &rateLimited, func(id string) (bool, error) {
-				return s.issueRepo.IsOpenAndDone(id)
+			}, &rateLimited, func(ctx context.Context, id string) (bool, error) {
+				return s.issueRepo.IsOpenAndDone(ctx, id)
 			})
 		}()
 	}
