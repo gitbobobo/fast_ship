@@ -97,7 +97,8 @@ type botActionSpec struct {
 // botActionSpecGroups 按工具聚合各适配文件声明的 spec 组；组内顺序即 v14 的
 // 动作声明顺序（沿用既有发布顺序，不重排）。做成函数而非包级 var：工具面
 // 构建（botToolRegistryV14）与执行器在同一依赖网里，var 形式会构成初始化
-// 循环；注册表本体在首次访问时构建（见 botActionSpecsAll）。
+// 循环；注册表本体在首次访问时构建，NewBotService 启动期显式预构建
+// （见 botActionSpecsAll），规格错误在进程启动即暴露。
 func botActionSpecGroupsAll() map[string][]*botActionSpec {
 	return map[string][]*botActionSpec{
 		"fs_project":       botProjectActionSpecs(),
@@ -138,6 +139,7 @@ var (
 )
 
 // botActionSpecsAll 返回包级注册表（键 "tool/action"），首次访问时构建；
+// NewBotService 在启动路径显式调用一次，保证规格错误在进程启动即 panic
 // 重复注册、键不完整或执行入口全空都按编程错误 panic（与 schema 生成同
 // 口径，不能带病启动）。
 func botActionSpecsAll() map[string]*botActionSpec {
