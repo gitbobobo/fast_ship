@@ -153,7 +153,7 @@ func (s *QuotaScheduler) runRound(now time.Time) bool {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			s.svc.FetchAccountNow(context.Background(), accountID)
+			s.svc.FetchAccountIfDue(context.Background(), accountID, now)
 		}(due[i].ID)
 	}
 	wg.Wait()

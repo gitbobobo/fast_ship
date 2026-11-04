@@ -69,14 +69,14 @@ func (r *QuotaAccountRepository) ListDueAmong(ids []string, now time.Time) ([]mo
 }
 
 // EarliestNextRetryAt 返回调度器的下一次唤醒时刻与是否存在待处理账号：
-// 取全部账号里最早者——next_retry_at 为 NULL 的行 ListDue 视为立即到期，
-// 同样参与唤醒并返回零值时刻；未来行提前唤醒；已到期行把等待压到
-// nextWait 的保底之下限，调度抖动（重算落在到期之后）不会睡满整轮。
+// 取全部账号里最早者——SQLite 升序把 NULL 排最前（next_retry_at 为空的行
+// ListDue 视为立即到期，返回零值时刻）；未来行提前唤醒；已到期行把等待
+// 压到 nextWait 的保底之下限，调度抖动（重算落在到期之后）不会睡满整轮。
+// ORDER BY ASC LIMIT 1 走 next_retry_at 索引首行，不产生临时排序。
 // 没有任何账号返回 ok=false。
 func (r *QuotaAccountRepository) EarliestNextRetryAt() (time.Time, bool, error) {
 	var account model.QuotaAccount
-	err := r.db.Order("next_retry_at IS NULL DESC, next_retry_at ASC").
-		Limit(1).First(&account).Error
+	err := r.db.Order("next_retry_at ASC").Limit(1).Take(&account).Error
 	var zero time.Time
 	if err != nil {
 		if err == gorm.ErrRecordNotFound {

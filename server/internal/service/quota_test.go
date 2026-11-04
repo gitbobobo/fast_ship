@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -904,6 +905,10 @@ func TestQuotaScheduler_RoundRecheckIgnoresMidRoundRows(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "quota-recheck")
 	gate := make(chan struct{})
+	var releaseOnce sync.Once
+	// 幂等解闸：任何失败路径都要先放开闸再等 Stop，否则 Stop 会等住
+	// 被闸住的抓取、测试挂到 go test 超时（方向顾问裁决）。
+	release := func() { releaseOnce.Do(func() { close(gate) }) }
 	aFetched := make(chan struct{}, 1)
 	cFetched := make(chan struct{}, 1)
 	service := newTestQuotaService(svc, fakeQuotaProvider("fake", func(_ context.Context, _ *http.Client, _ string, creds quota.Credentials) (quota.Snapshot, error) {
@@ -942,8 +947,15 @@ func TestQuotaScheduler_RoundRecheckIgnoresMidRoundRows(t *testing.T) {
 
 	sched.Start()
 	defer sched.Stop()
+	defer release()
 
-	<-aFetched // 本轮已在抓 A
+	// 本轮已在抓 A；无超时等待会在「调度器不再唤醒」的回归下挂到 go test
+	// 整体超时，故障定位成本高（fast-ship-bot 第 3 轮 Note 2）。
+	select {
+	case <-aFetched:
+	case <-time.After(5 * time.Second):
+		t.Fatal("调度器 5s 内未拾起到期账号")
+	}
 
 	// 模拟 HTTP 侧 Create 在轮进行中先落库（NULL next_retry_at，同步抓取
 	// 尚未写回），不发 Kick。
@@ -959,13 +971,117 @@ func TestQuotaScheduler_RoundRecheckIgnoresMidRoundRows(t *testing.T) {
 	if err := svc.db.Create(accountC).Error; err != nil {
 		t.Fatalf("seed account C: %v", err)
 	}
-	close(gate) // 放行 A 的抓取，本轮收尾
+	release() // 放行 A 的抓取，本轮收尾（与失败路径同一个幂等入口）
 
 	// A 消化正常 → 不误判 stalled：C 应在下一轮 ~1s 被拾起，而不是等满 30s。
 	select {
 	case <-cFetched:
 	case <-time.After(5 * time.Second):
 		t.Fatal("轮内插入的 NULL 行应在下一轮 ~1s 被拾起；等满 30s 说明轮末复查把正常轮次误判为未消化")
+	}
+}
+
+// 锁外选中的候选可能已被 HTTP 侧同步抓取先行消化：后台拿到锁后必须重判
+// 到期资格，不得重复外呼供应商（fast-ship-bot 第 3 轮 P2；方向顾问收敛点：
+// 唤醒只发现候选，锁内才决定后台执行资格）。
+func TestQuotaScheduler_FetchIfDueSkipsAdvancedCandidate(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "quota-ifdue")
+	gate := make(chan struct{})
+	var mu sync.Mutex
+	calls := 0
+	service := newTestQuotaService(svc, fakeQuotaProvider("fake", func(_ context.Context, _ *http.Client, _ string, _ quota.Credentials) (quota.Snapshot, error) {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		<-gate
+		return fakeQuotaSnapshot(), nil
+	}))
+	cfg := svc.cfg
+	cfg.Quota.IntervalMinutes = 10
+	sched := NewQuotaScheduler(service, repository.NewQuotaAccountRepository(svc.db), cfg, zap.NewNop())
+
+	enc, err := crypto.Encrypt([]byte(`{"api_key":"k"}`), []byte(cfg.Encryption.Key))
+	if err != nil {
+		t.Fatalf("encrypt creds: %v", err)
+	}
+	retryAt := time.Now().UTC().Add(-time.Minute) // 已到期
+	account := &model.QuotaAccount{
+		ID: uuid.NewString(), UserID: user.ID, Provider: "fake", Label: "due",
+		CredentialHint: "…x", Status: model.QuotaStatusProviderError,
+		CredentialsEncrypted: enc, NextRetryAt: &retryAt,
+	}
+	if err := svc.db.Create(account).Error; err != nil {
+		t.Fatalf("seed account: %v", err)
+	}
+
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(gate) }) }
+	defer release()
+
+	// HTTP 侧同步抓取先持锁（FetchAccountNow 强制入口），供应商调用被闸住。
+	httpDone := make(chan struct{})
+	go func() {
+		defer close(httpDone)
+		service.FetchAccountNow(context.Background(), account.ID)
+	}()
+	// 等 HTTP 抓取进入供应商调用（持锁并被闸住）。
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		mu.Lock()
+		n := calls
+		mu.Unlock()
+		if n >= 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("HTTP 抓取 5s 内未进入供应商调用")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// 后台轮次在锁外把该账号选为 due，随后阻塞在抓取锁上。
+	now := time.Now().UTC()
+	roundDone := make(chan struct{})
+	go func() {
+		defer close(roundDone)
+		sched.runRound(now)
+	}()
+	time.Sleep(100 * time.Millisecond) // 让 runRound 完成 ListDue 并阻塞在锁上
+
+	release() // HTTP 抓取完成并写回未来，释放抓取锁
+	<-httpDone
+	<-roundDone
+
+	mu.Lock()
+	total := calls
+	mu.Unlock()
+	if total != 1 {
+		t.Fatalf("provider 被调用 %d 次，want 1（后台候选已被 HTTP 先行消化，锁内应跳过）", total)
+	}
+	if stored := storedQuotaAccount(t, svc, account.ID); stored.Status != model.QuotaStatusOK {
+		t.Fatalf("账号应为 ok，得到 %q", stored.Status)
+	}
+}
+
+// ListDue 查询失败时 runRound 必须上报 stalled（未消化），驱动唤醒底座抬到
+// min(30s, interval)——方向顾问建议补证的两条不变量之一。
+func TestQuotaScheduler_RunRoundStalledOnQueryError(t *testing.T) {
+	svc := setupTestServices(t)
+	createTestUser(t, svc.db, "quota-stall-err")
+	service := newTestQuotaService(svc, fakeQuotaProvider("fake", func(context.Context, *http.Client, string, quota.Credentials) (quota.Snapshot, error) {
+		return fakeQuotaSnapshot(), nil
+	}))
+	sched := NewQuotaScheduler(service, repository.NewQuotaAccountRepository(svc.db), svc.cfg, zap.NewNop())
+
+	sqlDB, err := svc.db.DB()
+	if err != nil {
+		t.Fatalf("db: %v", err)
+	}
+	sqlDB.Close() // 后续查询全部报错，模拟持久化故障
+
+	if !sched.runRound(time.Now().UTC()) {
+		t.Fatal("ListDue 失败必须上报未消化（stalled）")
 	}
 }
 
