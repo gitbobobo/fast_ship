@@ -290,10 +290,10 @@ func TestCloseOneGitHubIssue_SkipsPatchWhenBatchCanceled(t *testing.T) {
 
 // INT-185（复审 R2）：命中首个限流即熔断——剩余项不再派发，逐条记「未尝试」。
 // 钩子门控与 CancelStopsLater 同构：4 个 worker 全部进入 PATCH 后统一放行，
-// 每个被放行 worker 都必经 trip（全部命中限流），槽位释放只发生在 trip 之后，
-// 因此 calls==4 与文案分布是确定性事实。在途请求经 WithoutCancel 落库的语义
-// 由 CancelStopsLater 覆盖；限流 trip 与相邻 worker 槽位释放之间没有跨
-// goroutine 的 happen-before，熔断按「尽力同时」实现，重叠窗口上限为并发度。
+// 每个被放行 worker 都必经 trip（全部命中限流），且每个触发 worker 都在释放
+// 槽位前幂等 cancel（INT-191 R1），槽位释放只发生在取消完成之后，因此
+// calls==4 与文案分布是确定性事实。在途请求经 WithoutCancel 落库的语义
+// 由 CancelStopsLater 覆盖。
 func TestIssueServiceBatchCloseDoneIssues_RateLimitStopsRemainingDispatch(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")
@@ -387,6 +387,163 @@ func TestIssueServiceBatchCloseDoneIssues_RateLimitStopsRemainingDispatch(t *tes
 	}
 }
 
+// INT-191：认证失败（401）与无权限（非限流 403）纳入熔断——剩余项不再派发，
+// 触发项与未派发项按类别区分文案。钩子门控与 RateLimitStopsRemainingDispatch
+// 同构：4 个 worker 全部进入 PATCH 后统一放行，且每个触发 worker 都在释放槽
+// 位前幂等 cancel（INT-191 R1），calls==并发度与文案分布是确定性事实。
+// 文案在这里逐字断言，锁死稳定性（前端按文案分组去重）。
+func TestIssueServiceBatchCloseDoneIssues_AuthFailureStopsRemainingDispatch(t *testing.T) {
+	const n = 20
+	cases := []struct {
+		name      string
+		patchErr  error
+		itemText  string
+		remaining string
+	}{
+		{
+			name:      "401 trips with auth copy",
+			patchErr:  &gh.ErrorResponse{Message: "Bad credentials", Response: &http.Response{StatusCode: http.StatusUnauthorized}},
+			itemText:  "更新 GitHub Issue 失败：GitHub 认证失败，请检查凭证",
+			remaining: "GitHub 认证失败，未尝试关闭",
+		},
+		{
+			name:      "non-ratelimit 403 trips with forbidden copy",
+			patchErr:  &gh.ErrorResponse{Message: "Repository request blocked", Response: &http.Response{StatusCode: http.StatusForbidden}},
+			itemText:  "更新 GitHub Issue 失败：GitHub 仓库无权限，请检查授权",
+			remaining: "GitHub 仓库无权限，未尝试关闭",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := setupTestServices(t)
+			user := createTestUser(t, svc.db, "user-1")
+			project := createTestProject(t, svc.db, user.ID)
+
+			started := make(chan struct{}, n)
+			release := make(chan struct{})
+			var releaseOnce sync.Once
+			releaseHooks := func() { releaseOnce.Do(func() { close(release) }) }
+			fake := &fakeIssueGitHubClient{}
+			fake.onUpdateIssue = func(_ context.Context, _ int) {
+				started <- struct{}{}
+				<-release
+			}
+			metas := seedGitHubDoneIssuesForBatchClose(t, svc, project.ID, n, fake)
+			errsByNumber := make(map[int]error, n)
+			for _, m := range metas {
+				errsByNumber[m.Number] = tc.patchErr
+			}
+			fake.updateIssueErrs = errsByNumber
+			svc.issueService.newClient = func(token, owner, repo string) ghclient.Client {
+				return fake
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			type outcome struct {
+				resp *BatchCloseDoneIssuesResponse
+				err  error
+			}
+			done := make(chan outcome, 1)
+			go func() {
+				resp, err := svc.issueService.BatchCloseDoneIssues(ctx, project.ID, user.ID, string(model.IssueSourceGitHub))
+				done <- outcome{resp: resp, err: err}
+			}()
+			batchExited := false
+			t.Cleanup(func() {
+				cancel()
+				releaseHooks()
+				if batchExited {
+					return
+				}
+				select {
+				case <-done:
+				case <-time.After(2 * time.Second):
+				}
+			})
+
+			for i := 0; i < batchCloseGitHubConcurrency; i++ {
+				select {
+				case <-started:
+				case <-time.After(2 * time.Second):
+					t.Fatal("UpdateIssue never reached concurrency")
+				}
+			}
+			releaseHooks()
+
+			got := <-done
+			batchExited = true
+			if got.err != nil {
+				t.Fatalf("batch close: %v", got.err)
+			}
+			resp := got.resp
+			if calls := len(fake.recordedUpdateIssueCalls()); calls != batchCloseGitHubConcurrency {
+				t.Fatalf("expected dispatch to stop at first wave, got %d calls", calls)
+			}
+			if resp.Succeeded != 0 || resp.Failed != n {
+				t.Fatalf("unexpected result: %+v", resp)
+			}
+			var tripped, remaining int
+			for _, f := range resp.Failures {
+				switch f.Error {
+				case tc.itemText:
+					tripped++
+				case tc.remaining:
+					remaining++
+				default:
+					t.Fatalf("unexpected failure copy for %s: %q", f.Id, f.Error)
+				}
+			}
+			if tripped != batchCloseGitHubConcurrency || remaining != n-batchCloseGitHubConcurrency {
+				t.Fatalf("expected %d tripped + %d remaining, got %d + %d", batchCloseGitHubConcurrency, n-batchCloseGitHubConcurrency, tripped, remaining)
+			}
+			var closed int64
+			if err := svc.db.Model(&model.Issue{}).Where("project_id = ? AND state = ?", project.ID, model.IssueStateClosed).Count(&closed).Error; err != nil {
+				t.Fatalf("count closed: %v", err)
+			}
+			if closed != 0 {
+				t.Fatalf("aborted closes must not persist, got %d", closed)
+			}
+		})
+	}
+}
+
+// INT-191：404 是单条 Issue 状态（已转移/删除），不熔断——整批逐条 PATCH，
+// 逐条按规范化文案回报，不出现「未尝试」类熔断文案。
+func TestIssueServiceBatchCloseDoneIssues_NotFoundDoesNotTripDispatch(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID)
+
+	const n = 10 // 多于并发度，超发波次证明熔断未截断派发
+	fake := &fakeIssueGitHubClient{}
+	metas := seedGitHubDoneIssuesForBatchClose(t, svc, project.ID, n, fake)
+	errsByNumber := make(map[int]error, n)
+	for _, m := range metas {
+		errsByNumber[m.Number] = &gh.ErrorResponse{Message: "Not Found", Response: &http.Response{StatusCode: http.StatusNotFound}}
+	}
+	fake.updateIssueErrs = errsByNumber
+	svc.issueService.newClient = func(token, owner, repo string) ghclient.Client {
+		return fake
+	}
+
+	resp, err := svc.issueService.BatchCloseDoneIssues(context.Background(), project.ID, user.ID, string(model.IssueSourceGitHub))
+	if err != nil {
+		t.Fatalf("batch close: %v", err)
+	}
+	if calls := len(fake.recordedUpdateIssueCalls()); calls != n {
+		t.Fatalf("404 must not trip dispatch, expected %d PATCH calls, got %d", n, calls)
+	}
+	if resp.Succeeded != 0 || resp.Failed != n {
+		t.Fatalf("unexpected result: %+v", resp)
+	}
+	for _, f := range resp.Failures {
+		if f.Error != "更新 GitHub Issue 失败：404 Not Found" {
+			t.Fatalf("unexpected 404 copy for %s: %q", f.Id, f.Error)
+		}
+	}
+}
+
 // INT-185（复审 R3 审计）：GitHub 错误文案规范化——5xx 与传输错误按「结果
 // 未确认」，4xx 按「<状态码> <Message>」输出且不含 URL/Issue 号；同类错误
 // 逐字相同，前端按文案分组计数才有效。
@@ -471,20 +628,29 @@ func TestAppendBatchCloseFailure_ReservesFirstOfEachCategoryPastCap(t *testing.T
 
 // INT-185（复审 R5）：派发阶段的 ctx err 按当时的熔断状态当场定死归因，
 // drain 阶段不再重读全局标志——同一批次的失败原因不随 goroutine 时序漂移。
+// INT-191：归因按触发类别取「未尝试」文案，限流/认证/权限各不相同。
 func TestBatchCloseCancelErr_AttributedAtProductionTime(t *testing.T) {
-	var flag atomic.Bool
+	var trip atomic.Int32
 	// 未熔断：保留原始 ctx err（batchCloseItemError 走「未开始」文案）。
-	got := batchCloseCancelErr(context.DeadlineExceeded, &flag)
+	got := batchCloseCancelErr(context.DeadlineExceeded, &trip)
 	if got != context.DeadlineExceeded {
 		t.Fatalf("untripped flag must keep raw ctx err, got %v", got)
 	}
 	if batchCloseItemError(got) != "请求已取消或超时，未继续关闭" {
 		t.Fatalf("unexpected copy: %q", batchCloseItemError(got))
 	}
-	// 熔断已触发：当场归因为限流未尝试。
-	flag.Store(true)
-	if batchCloseItemError(batchCloseCancelErr(context.DeadlineExceeded, &flag)) != batchCloseGitHubRateLimitRemainingText {
+	// 熔断已触发：按触发类别当场归因为「未尝试」。
+	trip.Store(int32(abortRateLimit))
+	if batchCloseItemError(batchCloseCancelErr(context.DeadlineExceeded, &trip)) != batchCloseGitHubRateLimitRemainingText {
 		t.Fatalf("tripped flag must attribute to rate limit remaining")
+	}
+	trip.Store(int32(abortAuth))
+	if batchCloseItemError(batchCloseCancelErr(context.DeadlineExceeded, &trip)) != abortAuth.remainingText() {
+		t.Fatalf("tripped flag must attribute to auth remaining")
+	}
+	trip.Store(int32(abortForbidden))
+	if batchCloseItemError(batchCloseCancelErr(context.DeadlineExceeded, &trip)) != abortForbidden.remainingText() {
+		t.Fatalf("tripped flag must attribute to forbidden remaining")
 	}
 	// nil 标志等价于未熔断。
 	if got := batchCloseCancelErr(context.Canceled, nil); got != context.Canceled {
@@ -535,7 +701,7 @@ func TestCloseOneGitHubIssue_GuardSkipsBeforePatch(t *testing.T) {
 }
 
 // INT-185（复审 R9/R10）：守卫真正执行时批次被取消/熔断——守卫因带
-// batchCtx 返回 ctx err，要按「未开始/限流」归因，不能误报为「复核本地
+// batchCtx 返回 ctx err，要按「未开始/熔断类别」归因，不能误报为「复核本地
 // 状态失败」。守卫阻塞到批次取消后才返回 ctx.Err()，保证进入守卫出错
 // 分支而非顶部 batchCtx.Err() 提前返回（R10 Note：之前用例在调用前就
 // cancel，guard 从未执行）。
@@ -546,10 +712,10 @@ func TestCloseOneGitHubIssue_GuardCtxCancelAttribution(t *testing.T) {
 	// 守卫执行中批次被取消（未熔断）：守卫返回 ctx.Canceled，按取消归因。
 	batchCtx, cancel := context.WithCancel(context.Background())
 	guardStarted := make(chan struct{})
-	var rateLimited atomic.Bool
+	var trip atomic.Int32
 	results := make(chan githubCloseNetResult, 1)
 	go func() {
-		closeOneGitHubIssue(batchCtx, fake, issue, ghclient.UpdateIssueRequest{}, results, nil, &rateLimited,
+		closeOneGitHubIssue(batchCtx, fake, issue, ghclient.UpdateIssueRequest{}, results, nil, &trip,
 			func(ctx context.Context, id string) (bool, error) {
 				close(guardStarted)
 				<-ctx.Done() // 阻塞到批次取消后返回 ctx err
@@ -566,11 +732,11 @@ func TestCloseOneGitHubIssue_GuardCtxCancelAttribution(t *testing.T) {
 	// 守卫执行中批次被限流熔断：守卫返回 DeadlineExceeded，归限流文案。
 	batchCtx2, cancel2 := context.WithCancel(context.Background())
 	guardStarted2 := make(chan struct{})
-	var rateLimited2 atomic.Bool
-	rateLimited2.Store(true)
+	var trip2 atomic.Int32
+	trip2.Store(int32(abortRateLimit))
 	results = make(chan githubCloseNetResult, 1)
 	go func() {
-		closeOneGitHubIssue(batchCtx2, fake, issue, ghclient.UpdateIssueRequest{}, results, nil, &rateLimited2,
+		closeOneGitHubIssue(batchCtx2, fake, issue, ghclient.UpdateIssueRequest{}, results, nil, &trip2,
 			func(ctx context.Context, id string) (bool, error) {
 				close(guardStarted2)
 				<-ctx.Done()
@@ -591,10 +757,10 @@ func TestCloseOneGitHubIssue_GuardCtxCancelAttribution(t *testing.T) {
 	// 按「未开始」计数不发 PATCH（覆盖 issue_list.go:248-252 复核分支）。
 	batchCtx3, cancel3 := context.WithCancel(context.Background())
 	guardReturned := make(chan struct{})
-	var rateLimited3 atomic.Bool
+	var trip3 atomic.Int32
 	results = make(chan githubCloseNetResult, 1)
 	go func() {
-		closeOneGitHubIssue(batchCtx3, fake, issue, ghclient.UpdateIssueRequest{}, results, nil, &rateLimited3,
+		closeOneGitHubIssue(batchCtx3, fake, issue, ghclient.UpdateIssueRequest{}, results, nil, &trip3,
 			func(ctx context.Context, id string) (bool, error) {
 				close(guardReturned)
 				<-ctx.Done() // 等批次取消后才返回 true，让第二次 ctx 复核命中
@@ -802,6 +968,37 @@ func TestIsGitHubRateLimitError(t *testing.T) {
 	for _, tc := range cases {
 		if got := isGitHubRateLimitError(tc.err); got != tc.want {
 			t.Errorf("%s: isGitHubRateLimitError=%v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// INT-191：整批性失败类别判定——限流（含限流文案 403、裸 429）归
+// abortRateLimit，401 归 abortAuth，其余 403 归 abortForbidden；404、5xx、
+// 传输错误是单条或结果未知，不熔断。
+func TestGitHubBatchCloseAbort(t *testing.T) {
+	resp := func(status int) *http.Response { return &http.Response{StatusCode: status} }
+	cases := []struct {
+		name       string
+		err        error
+		wantReason batchCloseGitHubAbortReason
+		wantFatal  bool
+	}{
+		{"RateLimitError", &gh.RateLimitError{Message: "API rate limit exceeded for 1.2.3.4."}, abortRateLimit, true},
+		{"AbuseRateLimitError", &gh.AbuseRateLimitError{Message: "You have exceeded a secondary rate limit", Response: resp(http.StatusForbidden)}, abortRateLimit, true},
+		{"ErrorResponse403RateLimitBody", &gh.ErrorResponse{Message: "You have exceeded a secondary rate limit", Response: resp(http.StatusForbidden)}, abortRateLimit, true},
+		{"ErrorResponse429CustomGatewayBody", &gh.ErrorResponse{Message: "request rejected by edge", Response: resp(http.StatusTooManyRequests)}, abortRateLimit, true},
+		{"ErrorResponse401", &gh.ErrorResponse{Message: "Bad credentials", Response: resp(http.StatusUnauthorized)}, abortAuth, true},
+		{"ErrorResponse403OtherBody", &gh.ErrorResponse{Message: "Repository request blocked", Response: resp(http.StatusForbidden)}, abortForbidden, true},
+		{"ErrorResponse404", &gh.ErrorResponse{Message: "Not Found", Response: resp(http.StatusNotFound)}, abortNone, false},
+		{"ErrorResponse410Gone", &gh.ErrorResponse{Message: "Gone", Response: resp(http.StatusGone)}, abortNone, false},
+		{"ErrorResponse500", &gh.ErrorResponse{Message: "Internal Server Error", Response: resp(http.StatusInternalServerError)}, abortNone, false},
+		{"ErrorResponseNilHTTPResponse", &gh.ErrorResponse{Message: "Bad credentials"}, abortNone, false},
+		{"PlainError", errors.New("connection reset by peer"), abortNone, false},
+	}
+	for _, tc := range cases {
+		reason, fatal := githubBatchCloseAbort(tc.err)
+		if fatal != tc.wantFatal || reason != tc.wantReason {
+			t.Errorf("%s: got (%v, %v), want (%v, %v)", tc.name, reason, fatal, tc.wantReason, tc.wantFatal)
 		}
 	}
 }
