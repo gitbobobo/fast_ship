@@ -9,8 +9,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/model"
@@ -327,19 +329,89 @@ func TestT3Int148SettlementReadOnlyGuard(t *testing.T) {
 		t.Fatalf("access = %v", created.Access)
 	}
 
+	// Create 已预热常驻订阅（INT-132）：等它稳定，守卫的断言窗口从这里
+	// 起算——预热连接建立的 server.getConfig（INT-190）属于 hub 后台拨号，
+	// -race 改变调度后会先于断言落进记录，不圈窗口就被误计入。
+	before := awaitPrewarmSubscriptions(t, e.fake)
+
 	if _, err := e.th.SettleThread(ctx, userID, created.Id, "th-1"); err == nil || t3ErrCode(err) != errs.ErrPermissionDenied.Code {
 		t.Fatalf("settle 应返回 40300，实得 %v", err)
 	}
 	if _, err := e.th.UnsettleThread(ctx, userID, created.Id, "th-1"); err == nil || t3ErrCode(err) != errs.ErrPermissionDenied.Code {
 		t.Fatalf("unsettle 应返回 40300，实得 %v", err)
 	}
-	for _, rpc := range e.fake.recordedRPC() {
-		if rpc.method == "orchestration.dispatchCommand" || rpc.method == "server.getConfig" {
-			t.Fatalf("只读环境不得发出 %s", rpc.method)
+	assertNoSettlementRPC(t, e.fake, before)
+
+	// 重连豁免回归（审查 R1 P2）：hub 每次连接建立（含 fake 5s 空闲读超时
+	// 或 dropConnections 触发的重连）都会在订阅前重发握手 server.getConfig。
+	// 窗口刻意罩住整个重连握手：若断言仍按「窗口内见 getConfig 即失败」扫描，
+	// 慢机器/网络抖动下窗口被重连流量污染又会假失败（本 PR 要消除的正是它）。
+	subsBefore := e.fake.subscribeShellCount()
+	e.fake.dropConnections()
+	before = len(e.fake.recordedRPC())
+	deadline := time.Now().Add(5 * time.Second)
+	for e.fake.subscribeShellCount() <= subsBefore {
+		if time.Now().After(deadline) {
+			t.Fatalf("预热连接重连后未重新订阅")
 		}
+		time.Sleep(10 * time.Millisecond)
 	}
+
+	if _, err := e.th.SettleThread(ctx, userID, created.Id, "th-1"); err == nil || t3ErrCode(err) != errs.ErrPermissionDenied.Code {
+		t.Fatalf("重连后 settle 应返回 40300，实得 %v", err)
+	}
+	if _, err := e.th.UnsettleThread(ctx, userID, created.Id, "th-1"); err == nil || t3ErrCode(err) != errs.ErrPermissionDenied.Code {
+		t.Fatalf("重连后 unsettle 应返回 40300，实得 %v", err)
+	}
+	assertNoSettlementRPC(t, e.fake, before)
+
 	var appErr *errs.AppError
 	if _, err := e.th.SettleThread(ctx, userID, "env-missing", "th-1"); !errors.As(err, &appErr) || appErr.Code != errs.ErrT3EnvironmentNotFound.Code {
 		t.Fatalf("环境不存在应返回 40417，实得 %v", err)
+	}
+}
+
+// assertNoSettlementRPC 断言窗口内没有被测结算路径发出的 RPC：
+//
+//   - orchestration.dispatchCommand 任何来源都不允许：hub 连接面只做
+//     握手+订阅，派发命令只可能来自写路径；
+//   - server.getConfig 按连接归属：hub 每次连接建立（初始预热、断线重连）
+//     都会在订阅前重发握手 getConfig（t3_shell_hub.go:925），「窗口内出现过
+//     orchestration.subscribeShell 的连接」即 hub 连接面，握手流量豁免；
+//     其余连接上的 getConfig 只能是被测结算拨号（t3_settle.go 在自拨会话上
+//     调 requireT3ThreadSettlement），正是回归信号，照报。
+//
+// 重连握手两帧分属 hub 写、fake 读两条 goroutine 路径，getConfig 落记录时
+// 同连接的 subscribeShell 可能还在途：对这类连接给 1s 有界宽限再判失败
+// （回归场景下 getConfig 永远等不到订阅，多花 1s 才失败，不影响正确性）。
+func assertNoSettlementRPC(t *testing.T, f *fakeT3Environment, before int) {
+	t.Helper()
+	deadline := time.Now().Add(1 * time.Second)
+	for {
+		window := f.recordedRPC()[before:]
+		subscribed := map[int]bool{}
+		for _, rpc := range window {
+			if rpc.method == "orchestration.subscribeShell" {
+				subscribed[rpc.conn] = true
+			}
+		}
+		violation := ""
+		for _, rpc := range window {
+			switch rpc.method {
+			case "orchestration.dispatchCommand":
+				t.Fatalf("只读环境不得发出 orchestration.dispatchCommand")
+			case "server.getConfig":
+				if !subscribed[rpc.conn] && violation == "" {
+					violation = fmt.Sprintf("只读环境不得发出 server.getConfig（连接 %d 未建立订阅，非 hub 连接面流量）", rpc.conn)
+				}
+			}
+		}
+		if violation == "" {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s", violation)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

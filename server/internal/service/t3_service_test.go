@@ -73,6 +73,7 @@ type fakeT3Environment struct {
 	activeStream  *fakeT3WSStream
 	archiveStream *fakeT3WSStream
 	conns         []*websocket.Conn // 已建立的 WS 连接（dropConnections 用）
+	nextConnID    int               // 连接序号计数器：RPC 记录按连接归属断言用（不清零，dropConnections 后不复用）
 	nextSeq       int               // 推送增量的序号基线（高于所有 fixture 的 snapshotSequence）
 
 	// 写路径（INT-85）可配置响应。设置自上游 #26238 起内嵌在 getConfig 的
@@ -152,6 +153,7 @@ func (st *fakeT3WSStream) push(values ...json.RawMessage) error {
 type t3RecordedRPC struct {
 	method  string
 	payload json.RawMessage
+	conn    int // 发出该 RPC 的 WS 连接序号（serveWS 内按连接分配）；按连接归属做断言用
 }
 
 func newFakeT3Environment(t *testing.T) *fakeT3Environment {
@@ -572,6 +574,8 @@ func (f *fakeT3Environment) serveWS(conn *websocket.Conn) {
 		turnItems[id] = item
 	}
 	f.conns = append(f.conns, conn)
+	f.nextConnID++
+	connID := f.nextConnID // 连接序号：RPC 记录按连接归属断言（INT-190 审查 R1）
 	f.mu.Unlock()
 	// 连接结束只注销本连接注册的全局流引用（其它连接——hub 两条长驻连接、
 	// 一次性 RPC 连接——的引用不能被顺手清掉）。
@@ -631,7 +635,7 @@ func (f *fakeT3Environment) serveWS(conn *websocket.Conn) {
 				return
 			}
 			f.mu.Lock()
-			f.gotRPC = append(f.gotRPC, t3RecordedRPC{method: frame.Method, payload: frame.Payload})
+			f.gotRPC = append(f.gotRPC, t3RecordedRPC{method: frame.Method, payload: frame.Payload, conn: connID})
 			f.mu.Unlock()
 			switch frame.Method {
 			case t3RPCSubscribeShell:
