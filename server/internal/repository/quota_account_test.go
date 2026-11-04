@@ -120,7 +120,8 @@ func TestQuotaAccountRepository_ListDue(t *testing.T) {
 	}
 
 	// ListDueAmong 只看指定 ID 集合：集合外的到期行（如轮内 HTTP 侧新插入
-	// 的行）不算「未消化」。
+	// 的行）不算「未消化」；是否被外部接管由调度器按 next_retry_at 快照
+	// 逐行比对判断，不在这里做时间比较。
 	among, err := repo.ListDueAmong([]string{overdue.ID, futureRow.ID}, now)
 	if err != nil {
 		t.Fatalf("list due among: %v", err)

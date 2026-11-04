@@ -1064,6 +1064,100 @@ func TestQuotaScheduler_FetchIfDueSkipsAdvancedCandidate(t *testing.T) {
 	}
 }
 
+// 轮内被 HTTP 接管的行（换凭据把 next_retry_at 重置回 NULL，同步抓取在
+// 途）不算「未消化」：updated_at 已被外部推进，复查不把它算作写回失败，
+// 不误触 stalled 底座（fast-ship-bot 第 4 轮 P2）。
+func TestQuotaScheduler_RoundRecheckIgnoresExternallyResetRows(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "quota-recheck-reset")
+	gate := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(gate) }) }
+	defer release()
+	aFetched := make(chan struct{}, 1)
+	service := newTestQuotaService(svc, fakeQuotaProvider("fake", func(_ context.Context, _ *http.Client, _ string, creds quota.Credentials) (quota.Snapshot, error) {
+		if creds["api_key"] == "gate" {
+			select {
+			case aFetched <- struct{}{}:
+			default:
+			}
+			<-gate // 挡住 A 的抓取，给测试留出「接管 B」的窗口
+		}
+		return fakeQuotaSnapshot(), nil
+	}))
+	cfg := svc.cfg
+	cfg.Quota.IntervalMinutes = 10
+	sched := NewQuotaScheduler(service, repository.NewQuotaAccountRepository(svc.db), cfg, zap.NewNop())
+
+	now := time.Now().UTC()
+	enc, err := crypto.Encrypt([]byte(`{"api_key":"gate"}`), []byte(cfg.Encryption.Key))
+	if err != nil {
+		t.Fatalf("encrypt creds: %v", err)
+	}
+	encB, err := crypto.Encrypt([]byte(`{"api_key":"b"}`), []byte(cfg.Encryption.Key))
+	if err != nil {
+		t.Fatalf("encrypt creds B: %v", err)
+	}
+	retryPast := now.Add(-time.Minute) // 已到期
+	accountA := &model.QuotaAccount{
+		ID: uuid.NewString(), UserID: user.ID, Provider: "fake", Label: "gate",
+		CredentialHint: "…x", Status: model.QuotaStatusProviderError,
+		CredentialsEncrypted: enc, NextRetryAt: &retryPast,
+	}
+	accountB := &model.QuotaAccount{
+		ID: uuid.NewString(), UserID: user.ID, Provider: "fake", Label: "reset",
+		CredentialHint: "…b", Status: model.QuotaStatusProviderError,
+		CredentialsEncrypted: encB, NextRetryAt: &retryPast,
+	}
+	if err := svc.db.Create(accountA).Error; err != nil {
+		t.Fatalf("seed account A: %v", err)
+	}
+	if err := svc.db.Create(accountB).Error; err != nil {
+		t.Fatalf("seed account B: %v", err)
+	}
+
+	roundDone := make(chan struct{})
+	var stalled bool
+	go func() {
+		defer close(roundDone)
+		stalled = sched.runRound(now)
+	}()
+
+	// 等 A 被闸住（本轮挂在它的抓取上），B 先正常消化并写回。
+	select {
+	case <-aFetched:
+	case <-time.After(5 * time.Second):
+		release()
+		t.Fatal("调度器 5s 内未拾起到期账号")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		b := storedQuotaAccount(t, svc, accountB.ID)
+		if b.NextRetryAt != nil && b.NextRetryAt.After(now) {
+			break
+		}
+		if time.Now().After(deadline) {
+			release()
+			t.Fatal("B 5s 内未写回")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// HTTP 侧「换凭据」接管 B：重置 NULL + 推进 updated_at，同步抓取在途。
+	if err := svc.db.Model(&model.QuotaAccount{}).Where("id = ?", accountB.ID).Updates(map[string]interface{}{
+		"next_retry_at": nil,
+		"updated_at":    now.Add(time.Second),
+	}).Error; err != nil {
+		t.Fatalf("reset B: %v", err)
+	}
+
+	release() // 放行 A，本轮收尾
+	<-roundDone
+	if stalled {
+		t.Fatal("轮内被外部接管的行不应判为未消化（stalled 误报会把整轮唤醒抬到 30s）")
+	}
+}
+
 // ListDue 查询失败时 runRound 必须上报 stalled（未消化），驱动唤醒底座抬到
 // min(30s, interval)——方向顾问建议补证的两条不变量之一。
 func TestQuotaScheduler_RunRoundStalledOnQueryError(t *testing.T) {

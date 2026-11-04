@@ -55,9 +55,10 @@ func (r *QuotaAccountRepository) ListDue(now time.Time) ([]model.QuotaAccount, e
 }
 
 // ListDueAmong 返回 ids 里仍处到期状态（next_retry_at 为空或已到期）的账号：
-// 供调度器轮末复查「本轮该抓的账号是否都已消化」——只看本轮起始时的
-// due 集合，不把轮内 HTTP 侧新插入的行（如新建账号尚未落写回的 NULL 行）
-// 误算成未消化。
+// 供调度器轮末复查「本轮该抓的账号是否仍未被消化」。是否已被外部接管
+// 由调度器按轮初的 next_retry_at 快照逐行比对判断（值未变才是本轮写回
+// 失败留下的未消化）——不用 updated_at 比较：gorm 自动时间戳按本地时区
+// 偏移写文本，与 UTC 参数跨偏移做文本比较不可靠。
 func (r *QuotaAccountRepository) ListDueAmong(ids []string, now time.Time) ([]model.QuotaAccount, error) {
 	var accounts []model.QuotaAccount
 	if len(ids) == 0 {
