@@ -54,19 +54,41 @@ func (r *QuotaAccountRepository) ListDue(now time.Time) ([]model.QuotaAccount, e
 	return accounts, err
 }
 
-// EarliestNextRetryAt 返回全部账号里最早的未来 next_retry_at，
-// 供调度器把下一次唤醒提前到该时刻；没有返回 nil。
-func (r *QuotaAccountRepository) EarliestNextRetryAt(now time.Time) (*time.Time, error) {
+// ListDueAmong 返回 ids 里仍处到期状态（next_retry_at 为空或已到期）的账号：
+// 供调度器轮末复查「本轮该抓的账号是否仍未被消化」。是否已被外部接管
+// 由调度器按轮初的 next_retry_at 快照逐行比对判断（值未变才是本轮写回
+// 失败留下的未消化）——不用 updated_at 比较：gorm 自动时间戳按本地时区
+// 偏移写文本，与 UTC 参数跨偏移做文本比较不可靠。
+func (r *QuotaAccountRepository) ListDueAmong(ids []string, now time.Time) ([]model.QuotaAccount, error) {
+	var accounts []model.QuotaAccount
+	if len(ids) == 0 {
+		return accounts, nil
+	}
+	err := r.db.Where("id IN ? AND (next_retry_at IS NULL OR next_retry_at <= ?)", ids, now).
+		Find(&accounts).Error
+	return accounts, err
+}
+
+// EarliestNextRetryAt 返回调度器的下一次唤醒时刻与是否存在待处理账号：
+// 取全部账号里最早者——SQLite 升序把 NULL 排最前（next_retry_at 为空的行
+// ListDue 视为立即到期，返回零值时刻）；未来行提前唤醒；已到期行把等待
+// 压到 nextWait 的保底之下限，调度抖动（重算落在到期之后）不会睡满整轮。
+// ORDER BY ASC LIMIT 1 走 next_retry_at 索引首行，不产生临时排序。
+// 没有任何账号返回 ok=false。
+func (r *QuotaAccountRepository) EarliestNextRetryAt() (time.Time, bool, error) {
 	var account model.QuotaAccount
-	err := r.db.Where("next_retry_at IS NOT NULL AND next_retry_at > ?", now).
-		Order("next_retry_at ASC").Limit(1).First(&account).Error
+	err := r.db.Order("next_retry_at ASC").Limit(1).Take(&account).Error
+	var zero time.Time
 	if err != nil {
 		if err == gorm.ErrRecordNotFound {
-			return nil, nil
+			return zero, false, nil
 		}
-		return nil, err
+		return zero, false, err
 	}
-	return account.NextRetryAt, nil
+	if account.NextRetryAt == nil {
+		return zero, true, nil
+	}
+	return *account.NextRetryAt, true, nil
 }
 
 // UpdateLabel 只写标签列，不碰凭据与抓取结果，避免与抓取写互相覆盖。

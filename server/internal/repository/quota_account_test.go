@@ -79,7 +79,9 @@ func TestQuotaAccountRepository_UserIsolation(t *testing.T) {
 	}
 }
 
-// ListDue 选 next_retry_at 为空或到期的行；EarliestNextRetryAt 返回最早未来值。
+// ListDue 选 next_retry_at 为空或到期的行；EarliestNextRetryAt 返回调度器
+// 下一次唤醒时刻：NULL 行视为零值（立即到期），到期行早于未来行，
+// 无任何账号时 ok=false。
 func TestQuotaAccountRepository_ListDue(t *testing.T) {
 	db, repo := setupQuotaAccountTestDB(t)
 	seedQuotaAccountUser(t, db, "u1")
@@ -89,7 +91,7 @@ func TestQuotaAccountRepository_ListDue(t *testing.T) {
 	past := now.Add(-time.Minute)
 	overdue := seedQuotaAccount(t, db, "u1", func(a *model.QuotaAccount) { a.NextRetryAt = &past })
 	future := now.Add(5 * time.Minute)
-	seedQuotaAccount(t, db, "u1", func(a *model.QuotaAccount) { a.NextRetryAt = &future })
+	futureRow := seedQuotaAccount(t, db, "u1", func(a *model.QuotaAccount) { a.NextRetryAt = &future })
 
 	due, err := repo.ListDue(now)
 	if err != nil {
@@ -103,9 +105,37 @@ func TestQuotaAccountRepository_ListDue(t *testing.T) {
 		t.Fatalf("expected pending + overdue due, got %+v", ids)
 	}
 
-	earliest, err := repo.EarliestNextRetryAt(now)
-	if err != nil || earliest == nil || earliest.Sub(future).Abs() > time.Second {
-		t.Fatalf("earliest = %v err=%v, want ~%v", earliest, err, future)
+	earliest, ok, err := repo.EarliestNextRetryAt()
+	if err != nil || !ok || !earliest.IsZero() {
+		t.Fatalf("earliest = %v ok=%v err=%v, want 零值（NULL 行视为立即到期）", earliest, ok, err)
+	}
+
+	// 清掉 NULL 行后，最早值是已到期的 past（到期行早于未来行参与唤醒）。
+	if err := db.Where("id = ?", pending.ID).Delete(&model.QuotaAccount{}).Error; err != nil {
+		t.Fatalf("delete pending: %v", err)
+	}
+	earliest, ok, err = repo.EarliestNextRetryAt()
+	if err != nil || !ok || earliest.Sub(past).Abs() > time.Second {
+		t.Fatalf("earliest = %v ok=%v err=%v, want ~%v（到期行优先）", earliest, ok, err, past)
+	}
+
+	// ListDueAmong 只看指定 ID 集合：集合外的到期行（如轮内 HTTP 侧新插入
+	// 的行）不算「未消化」；是否被外部接管由调度器按 next_retry_at 快照
+	// 逐行比对判断，不在这里做时间比较。
+	among, err := repo.ListDueAmong([]string{overdue.ID, futureRow.ID}, now)
+	if err != nil {
+		t.Fatalf("list due among: %v", err)
+	}
+	if len(among) != 1 || among[0].ID != overdue.ID {
+		t.Fatalf("ListDueAmong = %+v, want only overdue", among)
+	}
+
+	// 没有任何账号时不该唤醒。
+	if err := db.Where("1 = 1").Delete(&model.QuotaAccount{}).Error; err != nil {
+		t.Fatalf("delete all: %v", err)
+	}
+	if _, ok, err := repo.EarliestNextRetryAt(); err != nil || ok {
+		t.Fatalf("empty table: ok=%v err=%v, want ok=false", ok, err)
 	}
 }
 

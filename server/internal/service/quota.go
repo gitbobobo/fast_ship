@@ -424,13 +424,39 @@ func (s *QuotaService) Probe(req *TestQuotaCredentialsRequest) (*api.QuotaProbe,
 	return probe, nil
 }
 
-// FetchAccountNow 供调度器按账号 id 抓一次（内部串行化）。行已删除时静默跳过。
+// FetchAccountNow 是强制抓取入口（HTTP 侧建号同步抓取/换凭据/手动刷新），
+// 内部串行化；行已删除时静默跳过。它不做到期判定——调用方已明确要求
+// 立即抓取。后台调度器走 FetchAccountIfDue，避免重复外呼。
 func (s *QuotaService) FetchAccountNow(ctx context.Context, accountID string) {
 	mu := s.lockFor(accountID)
 	mu.Lock()
 	defer mu.Unlock()
 	account, err := s.repo.FindByIDAny(accountID)
 	if err != nil {
+		return
+	}
+	s.fetchLocked(ctx, account)
+}
+
+// FetchAccountIfDue 供后台调度器使用：拿到账号抓取锁后重读行，仅当
+// next_retry_at 为空或已到期（仍具备后台执行资格）才真正抓取。锁外的
+// due 快照会过期——锁互斥只能串行、不能去重，HTTP 侧的同步抓取/手动
+// 刷新可能已在本轮选中候选之后先行完成并写回未来；这道锁内判定关闭
+// 「HTTP 已先行消化候选时，后台重复外呼」的窗口。反方向（后台先抓、
+// HTTP 强制入口随后再抓一次）是强制抓取的既定代价，不在本判定范围内。
+// now 用本轮传入的固定基准，与 ListDue、轮末复查一致；不带宽限期，
+// 宽限期会重新引入 INT-194。
+func (s *QuotaService) FetchAccountIfDue(ctx context.Context, accountID string, now time.Time) {
+	mu := s.lockFor(accountID)
+	mu.Lock()
+	defer mu.Unlock()
+	account, err := s.repo.FindByIDAny(accountID)
+	if err != nil {
+		s.logger.Warn("后台抓取跳过：读取账号失败",
+			zap.String("account_id", accountID), zap.Error(err))
+		return
+	}
+	if account.NextRetryAt != nil && account.NextRetryAt.After(now) {
 		return
 	}
 	s.fetchLocked(ctx, account)
