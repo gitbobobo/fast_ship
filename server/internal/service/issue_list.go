@@ -203,11 +203,11 @@ type githubCloseNetResult struct {
 }
 
 // batchCloseGitHubAbortReason：整批性失败类别，命中任一类即熔断，剩余项不再
-// 派发。限流（INT-185）之外，INT-191 把认证失败（401）与无权限（非限流 403）
-// 纳入——凭证失效或无权限时继续逐条 PATCH 只会得到同因重复失败，最多白打
-// batchCloseDoneMaxIssues 条。404 是单条 Issue 状态（已转移/删除），归
-// classifyGitHubCloseError 逐条回报，不熔断；限流 403 与非限流 403 的区分
-// 沿用 isGitHubRateLimitError 现有口径。
+// 派发。限流（INT-185）之外，INT-191 把认证失败（401）与无权限/访问受限
+// （非限流 403）纳入——凭证失效或访问被拒时继续逐条 PATCH 只会得到同因重复
+// 失败，最多白打 batchCloseDoneMaxIssues 条。404 是单条 Issue 状态（已转移/
+// 删除），归 classifyGitHubCloseError 逐条回报，不熔断；限流 403 与非限流
+// 403 的区分沿用 isGitHubRateLimitError 现有口径。
 type batchCloseGitHubAbortReason int32
 
 const (
@@ -225,7 +225,10 @@ func (r batchCloseGitHubAbortReason) itemText() string {
 	case abortAuth:
 		return "更新 GitHub Issue 失败：GitHub 认证失败，请检查凭证"
 	case abortForbidden:
-		return "更新 GitHub Issue 失败：GitHub 仓库无权限，请检查授权"
+		// 403 成因不止仓库权限（企业策略、平台限制、反代/WAF 也返回 403），
+		// 文案不写死「无权限」，避免把用户钉死在授权检查上；真实成因看服务端
+		// warn 日志（issue_id + 底层 err，INT-191 R1 bot）。
+		return "更新 GitHub Issue 失败：GitHub 仓库无权限或访问受限，请检查授权"
 	default:
 		return batchCloseGitHubRateLimitText
 	}
@@ -238,7 +241,7 @@ func (r batchCloseGitHubAbortReason) remainingText() string {
 	case abortAuth:
 		return "GitHub 认证失败，未尝试关闭"
 	case abortForbidden:
-		return "GitHub 仓库无权限，未尝试关闭"
+		return "GitHub 仓库无权限或访问受限，未尝试关闭"
 	default:
 		return batchCloseGitHubRateLimitRemainingText
 	}
@@ -632,8 +635,9 @@ func githubBatchCloseAbort(err error) (batchCloseGitHubAbortReason, bool) {
 	case http.StatusUnauthorized:
 		return abortAuth, true
 	case http.StatusForbidden:
-		// 含限流文案的 403 已在上面归入限流；落到这里的 403 是无权限类
-		//（仓库封锁、App 未授权等），同样整批无效。
+		// 含限流文案的 403 已在上面归入限流；落到这里的 403 成因不止仓库权限
+		//（企业策略、平台限制、反代/WAF 也可能），但同一仓库/凭证下重试只会
+		// 同因失败，熔断不变；归为「无权限或访问受限」类别，不写死成因。
 		return abortForbidden, true
 	}
 	return abortNone, false

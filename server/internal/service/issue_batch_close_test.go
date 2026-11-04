@@ -409,8 +409,8 @@ func TestIssueServiceBatchCloseDoneIssues_AuthFailureStopsRemainingDispatch(t *t
 		{
 			name:      "non-ratelimit 403 trips with forbidden copy",
 			patchErr:  &gh.ErrorResponse{Message: "Repository request blocked", Response: &http.Response{StatusCode: http.StatusForbidden}},
-			itemText:  "更新 GitHub Issue 失败：GitHub 仓库无权限，请检查授权",
-			remaining: "GitHub 仓库无权限，未尝试关闭",
+			itemText:  "更新 GitHub Issue 失败：GitHub 仓库无权限或访问受限，请检查授权",
+			remaining: "GitHub 仓库无权限或访问受限，未尝试关闭",
 		},
 	}
 	for _, tc := range cases {
