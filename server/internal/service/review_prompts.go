@@ -137,6 +137,13 @@ head 提交 {{head_sha}}。你只通过接口读取截图，不接触代码，�
 - 每条发现写清具体元素、位置和改法，不写「优化一下体验」这类空话。
 - 全部使用中文。
 
+## 读图预算
+- 默认只读清单给的审查尺寸 ` + "`url`" + `；` + "`original_url`" + ` 只用于细节复核（缩放后文字/对比度仍判断不了），并在发现里注明用了原图及理由。
+- 单张图片读入 ≤500KB、整轮会话读入图片总量 ≤4MB；清单的审查尺寸通常单张远低于预算。接近上限时先审完已读的截图，没读的写进 ` + "`unmeasurable`" + `（reason 写明预算截断），不要硬塞。
+- 清单里 ` + "`served=scaled`" + ` 的行是预算内的审查尺寸变体，正常读；` + "`served=original_light`" + ` 是原图字节但落在预算内（长边 ≤1536 且文件 ≤500KB），照常可读；` + "`served=original_heavy`" + ` 的行是原图字节且不受预算保护：能不读就不读；必须看的读完即停，并在结论里注明读的是原图。
+- 任一张的 url 取图失败（404）时把该图写进 ` + "`unmeasurable`" + `（reason 写明生成失败或文件不可读），不要改读 ` + "`original_url`" + ` 硬读原图，也不要反复重试。
+- 前后对比成对读取：读一组、形成这一组的结论，再读下一组；不要把全部截图一次性读进上下文。
+
 ## 重点检查
 - 层级：主任务一眼可见；标题、主按钮、次要信息的权重合理，焦点不打架。
 - 间距：对齐和边距一致；元素不贴边、不溢出、不截断、不重叠。
@@ -192,8 +199,8 @@ head 提交 {{head_sha}}。你只通过接口读取截图，不接触代码，�
 
 ## 接口（全部要求 ` + "`Authorization: Bearer`" + ` 请求头，构造方式见「凭证」）
 - ` + "`GET {{public_url}}/api/review-agent/runs/{{run_id}}/pull-request`" + ` → PR 元数据（含描述里的截图说明）
-- ` + "`GET {{public_url}}/api/review-agent/runs/{{run_id}}/screenshots`" + ` → 截图清单 {items:[{id,label,url}],changed}
-- ` + "`GET {{public_url}}/api/review-agent/runs/{{run_id}}/screenshots/{id}`" + ` → 图片本体
+- ` + "`GET {{public_url}}/api/review-agent/runs/{{run_id}}/screenshots`" + ` → 截图清单 {items:[{id,label,url,width,height,original_url,served}],changed}；` + "`width`" + `/` + "`height`" + ` 是原图像素尺寸，` + "`original_url`" + ` 是原图地址，` + "`served`" + ` 标示 ` + "`url`" + ` 返回哪种字节（见读图预算）：` + "`served=scaled`" + ` 的行返回长边 ≤1536 的 JPEG；` + "`original_*`" + ` 的行返回原图字节
+- ` + "`GET {{public_url}}/api/review-agent/runs/{{run_id}}/screenshots/{id}`" + ` → 图片本体；清单给的 ` + "`url`" + ` 默认已带缩放参数，不要自己加参数改尺寸
 - ` + "`GET {{public_url}}/api/review-agent/runs/{{run_id}}/history`" + ` → 历史上下文（Markdown，可能为空）
 - ` + "`POST {{public_url}}/api/review-agent/runs/{{run_id}}/result`" + ` → 提交结论，请求体：
   {
