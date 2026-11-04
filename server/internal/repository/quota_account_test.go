@@ -79,8 +79,9 @@ func TestQuotaAccountRepository_UserIsolation(t *testing.T) {
 	}
 }
 
-// ListDue 选 next_retry_at 为空或到期的行；EarliestNextRetryAt 返回最早值
-// （含到期行——到期行参与唤醒计算，让调度器下一轮自愈）。
+// ListDue 选 next_retry_at 为空或到期的行；EarliestNextRetryAt 返回调度器
+// 下一次唤醒时刻：NULL 行视为零值（立即到期），到期行早于未来行，
+// 无任何账号时 ok=false。
 func TestQuotaAccountRepository_ListDue(t *testing.T) {
 	db, repo := setupQuotaAccountTestDB(t)
 	seedQuotaAccountUser(t, db, "u1")
@@ -104,9 +105,26 @@ func TestQuotaAccountRepository_ListDue(t *testing.T) {
 		t.Fatalf("expected pending + overdue due, got %+v", ids)
 	}
 
-	earliest, err := repo.EarliestNextRetryAt()
-	if err != nil || earliest == nil || earliest.Sub(past).Abs() > time.Second {
-		t.Fatalf("earliest = %v err=%v, want ~%v（到期行优先）", earliest, err, past)
+	earliest, ok, err := repo.EarliestNextRetryAt()
+	if err != nil || !ok || !earliest.IsZero() {
+		t.Fatalf("earliest = %v ok=%v err=%v, want 零值（NULL 行视为立即到期）", earliest, ok, err)
+	}
+
+	// 清掉 NULL 行后，最早值是已到期的 past（到期行早于未来行参与唤醒）。
+	if err := db.Where("id = ?", pending.ID).Delete(&model.QuotaAccount{}).Error; err != nil {
+		t.Fatalf("delete pending: %v", err)
+	}
+	earliest, ok, err = repo.EarliestNextRetryAt()
+	if err != nil || !ok || earliest.Sub(past).Abs() > time.Second {
+		t.Fatalf("earliest = %v ok=%v err=%v, want ~%v（到期行优先）", earliest, ok, err, past)
+	}
+
+	// 没有任何账号时不该唤醒。
+	if err := db.Where("1 = 1").Delete(&model.QuotaAccount{}).Error; err != nil {
+		t.Fatalf("delete all: %v", err)
+	}
+	if _, ok, err := repo.EarliestNextRetryAt(); err != nil || ok {
+		t.Fatalf("empty table: ok=%v err=%v, want ok=false", ok, err)
 	}
 }
 

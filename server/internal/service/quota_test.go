@@ -849,6 +849,54 @@ func TestQuotaScheduler_DueAccountSelfHealsWithoutKick(t *testing.T) {
 	}
 }
 
+// stalled 状态（上轮未消化到期账号，ListDue 出错或写回落库失败）把唤醒
+// 保底抬到 min(30s, interval)：持久化故障期间真实供应商抓取不能被压到
+// 1 秒节奏（fast-ship-bot 第 1 轮 P2）；恢复正常即回落 nextWait 的
+// 1 秒抖动自愈节奏。
+func TestQuotaScheduler_WaitDurationStalledFloor(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "quota-stall-floor")
+	service := newTestQuotaService(svc, fakeQuotaProvider("fake", func(context.Context, *http.Client, string, quota.Credentials) (quota.Snapshot, error) {
+		return fakeQuotaSnapshot(), nil
+	}))
+	cfg := svc.cfg
+	cfg.Quota.IntervalMinutes = 10
+	repo := repository.NewQuotaAccountRepository(svc.db)
+	sched := NewQuotaScheduler(service, repo, cfg, zap.NewNop())
+	now := time.Now().UTC()
+
+	// 无账号：按常规 interval；stalled 底座只抬高过短的等待，
+	// 不会把常规 interval 拉短。
+	if got := sched.waitDuration(now, false); got != 10*time.Minute {
+		t.Fatalf("waitDuration(false) = %v, want 10m", got)
+	}
+	if got := sched.waitDuration(now, true); got != 10*time.Minute {
+		t.Fatalf("waitDuration(true) = %v, want 10m（底座不拉短 interval）", got)
+	}
+
+	// 到期账号：健康时按 1 秒抖动自愈；stalled 时仍被底座抬到 30s，
+	// 不让真实抓取以 1 Hz 重试。
+	enc, err := crypto.Encrypt([]byte(`{"api_key":"k"}`), []byte(cfg.Encryption.Key))
+	if err != nil {
+		t.Fatalf("encrypt creds: %v", err)
+	}
+	retryAt := now.Add(-time.Minute)
+	account := &model.QuotaAccount{
+		ID: uuid.NewString(), UserID: user.ID, Provider: "fake", Label: "due",
+		CredentialHint: "…x", Status: model.QuotaStatusProviderError,
+		CredentialsEncrypted: enc, NextRetryAt: &retryAt,
+	}
+	if err := svc.db.Create(account).Error; err != nil {
+		t.Fatalf("seed account: %v", err)
+	}
+	if got := sched.waitDuration(now, false); got != time.Second {
+		t.Fatalf("waitDuration(false, due) = %v, want 1s", got)
+	}
+	if got := sched.waitDuration(now, true); got != 30*time.Second {
+		t.Fatalf("waitDuration(true, due) = %v, want 30s floor", got)
+	}
+}
+
 // 网页「API Key」页的 sk-amr-… 模型面密钥在 create/update/probe 上都明确 40031（不发请求）。
 func TestQuotaService_SkAmrKeyRejectedOnCreateUpdateAndProbe(t *testing.T) {
 	svc := setupTestServices(t)

@@ -72,8 +72,13 @@ CodexBar（MIT）Swift 源码为准；OpenDesign 部分另见下方专节。
 `quota.max_concurrency`（默认 3），单次请求超时 `quota.request_timeout_seconds`
 （默认 20s）；单账号失败互不影响。
 
-下一次唤醒不是固定 10 分钟边界，而是取 `min(now + interval, 最早的未来
-next_retry_at)`：失败退避到期与「窗口预抓」都按自己的时刻唤醒。
+下一次唤醒不是固定 10 分钟边界，而是取 `min(now + interval, 最早的
+next_retry_at)`：失败退避到期与「窗口预抓」都按自己的时刻唤醒。到期行与
+`next_retry_at` 为 NULL（视为立即到期）的行都参与唤醒计算，把等待压到
+保底 1 秒——HTTP 侧 Kick 消费后重算落在到期之后的调度抖动（INT-194），
+会在下一轮被 ListDue 拾起自愈。上一轮未能消化到期账号（ListDue 出错或
+抓取写回落库失败）时，唤醒保底抬到 `min(30s, interval)`，避免持久化故障
+期间以约 1 Hz 真实外呼供应商；任一轮恢复消化即回落 1 秒节奏。
 窗口预抓（契约 §7）：成功快照里任一窗口 `reset_at` 落在「现在 + interval」
 之内时，把该账号 `next_retry_at` 提前到 `reset_at + 30s`（取 min），让额度
 进度条在重置后很快刷出满额；无临近重置时 `next_retry_at` 也落

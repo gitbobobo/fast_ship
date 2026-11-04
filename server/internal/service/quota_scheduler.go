@@ -64,11 +64,15 @@ func (s *QuotaScheduler) Stop() {
 
 func (s *QuotaScheduler) loop() {
 	defer close(s.doneCh)
+	// stalled：上一轮未能消化到期账号（ListDue 出错或写回落库失败，见
+	// runRound）。该状态下唤醒保底抬到 stalledWakeFloor；任何一轮恢复消化
+	// 即回落 1 秒抖动自愈节奏。
+	var stalled bool
 	if s.cfg.Quota.RunOnStartup {
-		s.runRound(s.now().UTC())
+		stalled = s.runRound(s.now().UTC())
 	}
 	for {
-		timer := time.NewTimer(s.nextWait(s.now().UTC()))
+		timer := time.NewTimer(s.waitDuration(s.now().UTC(), stalled))
 		select {
 		case <-s.stopCh:
 			timer.Stop()
@@ -78,18 +82,19 @@ func (s *QuotaScheduler) loop() {
 			timer.Stop()
 			continue
 		case t := <-timer.C:
-			s.runRound(t.UTC())
+			stalled = s.runRound(t.UTC())
 		}
 	}
 }
 
-// nextWait 算距下一轮的实际等待：常规 interval 与最早的 next_retry_at 取小——
-// 未来值提前唤醒，到期值压成非正数后取保底 1 秒。保底本身就是防忙循环的
-// 直接保障：落库失败或抓取耗时跨过重试时刻时行仍可能到期，此时按 1 秒
-// 节奏重试自愈；「重算时账号已到期」的调度抖动同样在下一轮被 ListDue 拾起。
+// nextWait 算距下一轮的基础等待：常规 interval 与最早的 next_retry_at 取小——
+// 未来值提前唤醒，NULL 行与到期行压成非正数后取保底 1 秒。保底本身就是
+// 防忙循环的直接保障；「重算时账号已到期」的调度抖动同样在下一轮被
+// ListDue 拾起。持续失败（写回落库失败、查询失败）由 waitDuration 的
+// stalled 底座放慢节奏，不靠本保底。
 func (s *QuotaScheduler) nextWait(now time.Time) time.Duration {
 	wait := s.cfg.Quota.Interval()
-	if earliest, err := s.repo.EarliestNextRetryAt(); err == nil && earliest != nil {
+	if earliest, ok, err := s.repo.EarliestNextRetryAt(); err == nil && ok {
 		if d := earliest.Sub(now); d < wait {
 			wait = d
 		}
@@ -102,15 +107,38 @@ func (s *QuotaScheduler) nextWait(now time.Time) time.Duration {
 	return wait
 }
 
+// stalledWakeFloor 是「上一轮未能消化到期账号」状态下的唤醒保底：ListDue
+// 出错，或抓取写回落库失败让行仍处到期时，真实供应商抓取不能被压到
+// 1 秒节奏——否则磁盘满、文件锁等持久化故障会让调度器以约 1 Hz 外呼
+// 供应商（较常规间隔快数百倍），有触发限流的风险。上限定为常规 interval。
+const stalledWakeFloor = 30 * time.Second
+
+// waitDuration 在 nextWait 基础上应用 stalled 底座：上一轮未能把到期账号
+// 清零（ListDue 出错或写回落库失败）时，等待抬到 min(stalledWakeFloor,
+// interval)；任何一轮恢复消化（写回成功、账号离开到期集合）即回落 1 秒
+// 抖动自愈节奏。
+func (s *QuotaScheduler) waitDuration(now time.Time, stalled bool) time.Duration {
+	wait := s.nextWait(now)
+	if stalled {
+		if floor := min(stalledWakeFloor, s.cfg.Quota.Interval()); wait < floor {
+			wait = floor
+		}
+	}
+	return wait
+}
+
 // runRound 抓一轮到期账号：并发上限内各账号独立抓取，单账号失败互不影响。
-func (s *QuotaScheduler) runRound(now time.Time) {
+// 返回本轮是否未能消化到期账号（ListDue 出错，或轮末复查仍有账号到期——
+// 抓取写回落库失败；复查以本轮起始时刻为基准，成功写回的值均晚于它），
+// 驱动 loop 在持续故障状态抬高唤醒保底（见 stalledWakeFloor）。
+func (s *QuotaScheduler) runRound(now time.Time) bool {
 	due, err := s.repo.ListDue(now)
 	if err != nil {
 		s.logger.Error("查询到期额度账号失败", zap.Error(err))
-		return
+		return true
 	}
 	if len(due) == 0 {
-		return
+		return false
 	}
 	sem := make(chan struct{}, s.cfg.Quota.MaxConcurrencyV())
 	var wg sync.WaitGroup
@@ -124,4 +152,11 @@ func (s *QuotaScheduler) runRound(now time.Time) {
 		}(due[i].ID)
 	}
 	wg.Wait()
+	// 轮末复查：正常情况下每个账号的写回都把 next_retry_at 推到未来，
+	// ListDue 应为空；仍有剩余说明写回落库失败、账号仍到期。
+	remaining, err := s.repo.ListDue(now)
+	if err != nil {
+		return true
+	}
+	return len(remaining) > 0
 }
