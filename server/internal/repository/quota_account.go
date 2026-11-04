@@ -54,6 +54,20 @@ func (r *QuotaAccountRepository) ListDue(now time.Time) ([]model.QuotaAccount, e
 	return accounts, err
 }
 
+// ListDueAmong 返回 ids 里仍处到期状态（next_retry_at 为空或已到期）的账号：
+// 供调度器轮末复查「本轮该抓的账号是否都已消化」——只看本轮起始时的
+// due 集合，不把轮内 HTTP 侧新插入的行（如新建账号尚未落写回的 NULL 行）
+// 误算成未消化。
+func (r *QuotaAccountRepository) ListDueAmong(ids []string, now time.Time) ([]model.QuotaAccount, error) {
+	var accounts []model.QuotaAccount
+	if len(ids) == 0 {
+		return accounts, nil
+	}
+	err := r.db.Where("id IN ? AND (next_retry_at IS NULL OR next_retry_at <= ?)", ids, now).
+		Find(&accounts).Error
+	return accounts, err
+}
+
 // EarliestNextRetryAt 返回调度器的下一次唤醒时刻与是否存在待处理账号：
 // 取全部账号里最早者——next_retry_at 为 NULL 的行 ListDue 视为立即到期，
 // 同样参与唤醒并返回零值时刻；未来行提前唤醒；已到期行把等待压到

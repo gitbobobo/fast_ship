@@ -91,7 +91,7 @@ func TestQuotaAccountRepository_ListDue(t *testing.T) {
 	past := now.Add(-time.Minute)
 	overdue := seedQuotaAccount(t, db, "u1", func(a *model.QuotaAccount) { a.NextRetryAt = &past })
 	future := now.Add(5 * time.Minute)
-	seedQuotaAccount(t, db, "u1", func(a *model.QuotaAccount) { a.NextRetryAt = &future })
+	futureRow := seedQuotaAccount(t, db, "u1", func(a *model.QuotaAccount) { a.NextRetryAt = &future })
 
 	due, err := repo.ListDue(now)
 	if err != nil {
@@ -117,6 +117,16 @@ func TestQuotaAccountRepository_ListDue(t *testing.T) {
 	earliest, ok, err = repo.EarliestNextRetryAt()
 	if err != nil || !ok || earliest.Sub(past).Abs() > time.Second {
 		t.Fatalf("earliest = %v ok=%v err=%v, want ~%v（到期行优先）", earliest, ok, err, past)
+	}
+
+	// ListDueAmong 只看指定 ID 集合：集合外的到期行（如轮内 HTTP 侧新插入
+	// 的行）不算「未消化」。
+	among, err := repo.ListDueAmong([]string{overdue.ID, futureRow.ID}, now)
+	if err != nil {
+		t.Fatalf("list due among: %v", err)
+	}
+	if len(among) != 1 || among[0].ID != overdue.ID {
+		t.Fatalf("ListDueAmong = %+v, want only overdue", among)
 	}
 
 	// 没有任何账号时不该唤醒。

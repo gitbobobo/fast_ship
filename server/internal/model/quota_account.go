@@ -23,9 +23,11 @@ type QuotaAccount struct {
 	LastSuccessAt        *time.Time `json:"last_success_at"`
 	SnapshotJSON         string     `gorm:"type:text;not null" json:"-"`
 	FailureCount         int        `gorm:"not null" json:"failure_count"`
-	NextRetryAt          *time.Time `json:"next_retry_at"`
-	CreatedAt            time.Time  `gorm:"not null" json:"created_at"`
-	UpdatedAt            time.Time  `gorm:"not null" json:"updated_at"`
+	// 调度唤醒/到期查询（EarliestNextRetryAt / ListDue）按本列过滤排序，
+	// 账号数增长后避免到期态下每秒唤醒的全表扫描。
+	NextRetryAt *time.Time `gorm:"index" json:"next_retry_at"`
+	CreatedAt   time.Time  `gorm:"not null" json:"created_at"`
+	UpdatedAt   time.Time  `gorm:"not null" json:"updated_at"`
 
 	User User `gorm:"foreignKey:UserID;constraint:OnDelete:CASCADE" json:"-"`
 }

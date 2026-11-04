@@ -128,9 +128,10 @@ func (s *QuotaScheduler) waitDuration(now time.Time, stalled bool) time.Duration
 }
 
 // runRound 抓一轮到期账号：并发上限内各账号独立抓取，单账号失败互不影响。
-// 返回本轮是否未能消化到期账号（ListDue 出错，或轮末复查仍有账号到期——
-// 抓取写回落库失败；复查以本轮起始时刻为基准，成功写回的值均晚于它），
-// 驱动 loop 在持续故障状态抬高唤醒保底（见 stalledWakeFloor）。
+// 返回本轮是否未能消化到期账号：ListDue 出错，或轮末复查发现本轮该抓的
+// 账号仍有到期（抓取写回落库失败；复查只看本轮起始的 due 集合，轮内
+// HTTP 侧新插入的行不算），驱动 loop 在持续故障状态抬高唤醒保底（见
+// stalledWakeFloor）。
 func (s *QuotaScheduler) runRound(now time.Time) bool {
 	due, err := s.repo.ListDue(now)
 	if err != nil {
@@ -139,6 +140,10 @@ func (s *QuotaScheduler) runRound(now time.Time) bool {
 	}
 	if len(due) == 0 {
 		return false
+	}
+	dueIDs := make([]string, len(due))
+	for i := range due {
+		dueIDs[i] = due[i].ID
 	}
 	sem := make(chan struct{}, s.cfg.Quota.MaxConcurrencyV())
 	var wg sync.WaitGroup
@@ -152,9 +157,9 @@ func (s *QuotaScheduler) runRound(now time.Time) bool {
 		}(due[i].ID)
 	}
 	wg.Wait()
-	// 轮末复查：正常情况下每个账号的写回都把 next_retry_at 推到未来，
-	// ListDue 应为空；仍有剩余说明写回落库失败、账号仍到期。
-	remaining, err := s.repo.ListDue(now)
+	// 轮末复查：本轮该抓的账号正常都被写回推到未来，应全部离开到期
+	// 集合；仍有剩余说明写回落库失败。
+	remaining, err := s.repo.ListDueAmong(dueIDs, now)
 	if err != nil {
 		return true
 	}

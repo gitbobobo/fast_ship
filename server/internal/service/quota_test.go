@@ -897,6 +897,78 @@ func TestQuotaScheduler_WaitDurationStalledFloor(t *testing.T) {
 	}
 }
 
+// 轮末复查只看本轮起始的 due 集合：轮进行中 HTTP 侧插入的新账号（NULL
+// 行，同步抓取在途）不算「未消化」，不触发 stalled 底座——否则其他账号
+// 的窗口预抓与到期拾起被无谓推迟 30s（fast-ship-bot 第 2 轮 P2）。
+func TestQuotaScheduler_RoundRecheckIgnoresMidRoundRows(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "quota-recheck")
+	gate := make(chan struct{})
+	aFetched := make(chan struct{}, 1)
+	cFetched := make(chan struct{}, 1)
+	service := newTestQuotaService(svc, fakeQuotaProvider("fake", func(_ context.Context, _ *http.Client, _ string, creds quota.Credentials) (quota.Snapshot, error) {
+		if creds["api_key"] == "gate" {
+			select {
+			case aFetched <- struct{}{}:
+			default:
+			}
+			<-gate // 挡住本轮，给测试留出「轮内插入」的窗口
+			return fakeQuotaSnapshot(), nil
+		}
+		select {
+		case cFetched <- struct{}{}:
+		default:
+		}
+		return fakeQuotaSnapshot(), nil
+	}))
+	cfg := svc.cfg
+	cfg.Quota.IntervalMinutes = 10
+	repo := repository.NewQuotaAccountRepository(svc.db)
+	sched := NewQuotaScheduler(service, repo, cfg, zap.NewNop())
+
+	enc, err := crypto.Encrypt([]byte(`{"api_key":"gate"}`), []byte(cfg.Encryption.Key))
+	if err != nil {
+		t.Fatalf("encrypt creds: %v", err)
+	}
+	retryAt := time.Now().UTC().Add(-time.Minute) // 已到期
+	accountA := &model.QuotaAccount{
+		ID: uuid.NewString(), UserID: user.ID, Provider: "fake", Label: "due",
+		CredentialHint: "…x", Status: model.QuotaStatusProviderError,
+		CredentialsEncrypted: enc, NextRetryAt: &retryAt,
+	}
+	if err := svc.db.Create(accountA).Error; err != nil {
+		t.Fatalf("seed account A: %v", err)
+	}
+
+	sched.Start()
+	defer sched.Stop()
+
+	<-aFetched // 本轮已在抓 A
+
+	// 模拟 HTTP 侧 Create 在轮进行中先落库（NULL next_retry_at，同步抓取
+	// 尚未写回），不发 Kick。
+	encC, err := crypto.Encrypt([]byte(`{"api_key":"c"}`), []byte(cfg.Encryption.Key))
+	if err != nil {
+		t.Fatalf("encrypt creds C: %v", err)
+	}
+	accountC := &model.QuotaAccount{
+		ID: uuid.NewString(), UserID: user.ID, Provider: "fake", Label: "mid-round",
+		CredentialHint: "…c", Status: model.QuotaStatusPending,
+		CredentialsEncrypted: encC,
+	}
+	if err := svc.db.Create(accountC).Error; err != nil {
+		t.Fatalf("seed account C: %v", err)
+	}
+	close(gate) // 放行 A 的抓取，本轮收尾
+
+	// A 消化正常 → 不误判 stalled：C 应在下一轮 ~1s 被拾起，而不是等满 30s。
+	select {
+	case <-cFetched:
+	case <-time.After(5 * time.Second):
+		t.Fatal("轮内插入的 NULL 行应在下一轮 ~1s 被拾起；等满 30s 说明轮末复查把正常轮次误判为未消化")
+	}
+}
+
 // 网页「API Key」页的 sk-amr-… 模型面密钥在 create/update/probe 上都明确 40031（不发请求）。
 func TestQuotaService_SkAmrKeyRejectedOnCreateUpdateAndProbe(t *testing.T) {
 	svc := setupTestServices(t)
