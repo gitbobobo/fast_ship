@@ -13,64 +13,14 @@ import (
 	"gorm.io/gorm"
 )
 
-// fs_schedule 的确认受理（INT-136）：哪些动作需要确认、受理期校验、确认卡的
-// 范围与预览、以及确认后的异步执行。集中在一个文件里，避免确认语义散进通用
-// 工具表、域服务与会话收尾；其余 fs_schedule 生命周期仍在 bot_schedule.go。
+// fs_schedule 的确认受理（INT-136）：确认语义收进动作注册表（INT-195，原
+// botScheduleConfirmation 判定函数已删除，create/update/run/enable/delete
+// 的 Confirm 闭包见下方 spec 组）、受理期校验、确认卡的范围与预览、以及确认
+// 后的异步执行，集中在文件里，避免确认语义散进通用工具表、域服务与会话
+// 收尾；其余 fs_schedule 生命周期仍在 bot_schedule.go。
 //
 // 规则不随工具集版本变化（冻结在 v3–v7 的会话同样生效）：RequiresConfirmation
 // 与 Mode 都不在 wire 字节里，不影响任何已发布版本的 tools_hash。
-
-// botScheduleConfirmation 判定 fs_schedule 动作是否需要用户确认，并据此把
-// 调用改成异步受理（平台只有异步路径存在确认）。规则不随工具集版本变化：
-// 冻结在 v3–v7 的会话同样生效，wire 字节里没有该信息，不影响 tools_hash。
-// 规则：create 恒需确认；update 出现 instruction/needs_report/model 任一
-// （含 null，出现即算）需确认，只改 name/cron/timezone 保持同步；run 在
-// dry_run 解析为布尔 true 时免确认（只读预览），否则需确认；enable（重新
-// 武装一个用户已停用、运行内默认放行写操作的任务）与 delete（不可逆地抹掉
-// 任务）也要确认。disable 保持同步：它是收紧权限、随时可逆（enable 要确认），
-// 阻止它是净损失。返回的 error 是受理期参数校验，避免为一个必然执行失败的
-// 调用弹确认卡。
-func botScheduleConfirmation(action string, raw map[string]json.RawMessage) (bool, error) {
-	switch action {
-	case "create":
-		if err := botValidateScheduleAcceptArgs(raw); err != nil {
-			return false, err
-		}
-		return true, nil
-	case "update":
-		sensitive := false
-		for _, field := range []string{"instruction", "needs_report", "model"} {
-			if _, ok := raw[field]; ok {
-				sensitive = true
-				break
-			}
-		}
-		if !sensitive {
-			return false, nil
-		}
-		if err := botValidateScheduleAcceptArgs(raw); err != nil {
-			return false, err
-		}
-		return true, nil
-	case "run":
-		var dryRun bool
-		if v, ok := raw["dry_run"]; ok {
-			// 解析失败按非 true 处理：仍要确认，不会放行真实触发。
-			_ = json.Unmarshal(v, &dryRun)
-		}
-		return !dryRun, nil
-	case "enable", "delete":
-		return true, nil
-	case "list", "runs", "state_get", "state_set", "disable", "status":
-		// 只读动作与 disable（收紧权限、可逆）同步免确认；status 是 v2 冻结
-		// 工具集里 list 的旧名，同样只读。
-		return false, nil
-	}
-	// 未识别动作按「需要确认」处理（fail closed）：未来给工具集加动作却漏
-	// 更新本表时，宁可多弹确认卡、由 worker 显式拒绝，也不能让新动作继承
-	// 免确认默认值、静默放行持久化写。
-	return true, nil
-}
 
 // botValidateScheduleAcceptArgs 是需要确认的 create/update 的受理期参数校验：
 // cron 与执行层（parseScheduleCron）同一解析路径，时区必须是 IANA 名称。
@@ -102,22 +52,203 @@ func botValidateScheduleAcceptArgs(raw map[string]json.RawMessage) error {
 // 写操作，允许它建/改/手动跑任务等于允许无确认地造出一个以后每次运行都放行
 // 写操作的会话；允许它 enable/disable/delete 等于能静默重新武装用户已经停用
 // 的任务、或者抹掉全部任务。这些都属于「管理任务」，一律回主线操作。
-// 由调用方在 schedule 会话的受理路径上调用。
+// 放行面收进动作注册表（spec.ScheduleOK：list/runs/state_get/state_set 与
+// v2 墓碑动作 status）；非 fs_schedule 工具不受此约束，未注册动作拒绝
+// （fail closed：未来新动作默认不允许在定时任务会话里使用，等明确分类后再
+// 放行）。由调用方在 schedule 会话的受理路径上调用。
 func botScheduleManageDenied(prepared *botPreparedCall) error {
 	if prepared.ToolName != "fs_schedule" {
 		return nil
 	}
-	switch prepared.Action {
-	case "list", "runs", "state_get", "state_set", "status":
+	if spec := botActionSpecOf(prepared.ToolName, prepared.Action); spec != nil && spec.ScheduleOK {
 		// 只读查询与本任务小状态是定时任务会话的正常能力；status 是 v2
 		// 冻结工具集里 list 的旧名。
 		return nil
 	}
-	// 管理动作（create/update/run/enable/disable/delete）一律拒绝；未识别
-	// 动作同样拒绝（fail closed）：未来新动作默认不允许在定时任务会话里
-	// 使用，等明确分类后再放行。
 	return errs.New(errs.ErrInvalidParams.Code,
 		"定时任务运行中不能创建/修改/启停/删除/手动运行定时任务（防止绕过写操作确认），请在主线对话里操作")
+}
+
+// ---------- fs_schedule 动作注册表（INT-195）：确认语义、策略档、会话放行 ----------
+
+// botScheduleActionSpecs 是 fs_schedule 的动作声明（含 v2 墓碑动作 status）。
+// 确认语义在这里一处声明：create/enable/delete 恒需确认、update 出现敏感
+// 字段需确认、run 非 dry_run 需确认（Confirm 按参数动态判定，命中时受理端
+// 改判异步）；只读动作与 disable 同步免确认——disable 是收紧权限、随时可逆
+// （enable 要确认），阻止它是净损失。确认即授权：批准创建或修改等于授权该
+// 任务以后每次运行默认放行写操作。update/run 的同步与异步双入口是确认分流
+// 的真实形态：免确认参数保持同步，需确认参数在批准后由 worker 执行。
+// create/delete/enable 恒需确认、不声明 SyncExec：同步分派对它们保持旧
+// 白名单的拒绝语义（「同步工具不执行该动作」），不给绕过受理直接写库留
+// 第二把钥匙。
+func botScheduleActionSpecs() []*botActionSpec {
+	// confirmCreate：create 恒需确认，受理期校验避免为必然失败的调用弹卡。
+	confirmCreate := func(raw map[string]json.RawMessage) (bool, error) {
+		if err := botValidateScheduleAcceptArgs(raw); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	// confirmUpdate：只改 name/cron/timezone 保持同步；出现 instruction/
+	// needs_report/model 任一（含 null，出现即算）需确认。
+	confirmUpdate := func(raw map[string]json.RawMessage) (bool, error) {
+		for _, field := range []string{"instruction", "needs_report", "model"} {
+			if _, ok := raw[field]; ok {
+				if err := botValidateScheduleAcceptArgs(raw); err != nil {
+					return false, err
+				}
+				return true, nil
+			}
+		}
+		return false, nil
+	}
+	// confirmRun：dry_run 解析为布尔 true 时免确认（只读预览）；解析失败按
+	// 非 true 处理——仍要确认，不会放行真实触发。
+	confirmRun := func(raw map[string]json.RawMessage) (bool, error) {
+		var dryRun bool
+		if v, ok := raw["dry_run"]; ok {
+			_ = json.Unmarshal(v, &dryRun)
+		}
+		return !dryRun, nil
+	}
+	// confirmTrue：enable（重新武装一个用户已停用、运行内默认放行写操作的
+	// 任务）与 delete（不可逆地抹掉任务）恒需确认。
+	confirmTrue := func(map[string]json.RawMessage) (bool, error) {
+		return true, nil
+	}
+	return []*botActionSpec{
+		{
+			Tool: "fs_schedule", Action: "list",
+			Description: "列出本机器人的定时任务",
+			Mode:        model.BotExecutionSync, ReadOnly: true, ScheduleOK: true,
+			Forbidden: []string{"dry_run", "state"},
+			SyncExec:  (*BotService).execScheduleListAction,
+		},
+		{
+			Tool: "fs_schedule", Action: "create",
+			Description: "创建定时任务（name/cron/instruction 必填；时区可选，省略即用户时区）。需要用户确认：受理后等待批准，批准即授权该任务以后每次运行默认放行写操作",
+			Mode:        model.BotExecutionSync, Confirmation: confirmDynamic, Confirm: confirmCreate,
+			Required: req("name", "cron", "instruction"), Forbidden: []string{"task_id", "dry_run", "state"},
+			PolicyTier: "tier3",
+			// 不声明 SyncExec：create 恒需确认，同步分派保持旧白名单的拒绝语义
+			//（「同步工具不执行该动作」），不给绕过受理直接写库留第二把钥匙。
+			AsyncExec: botScheduleAsyncRun((*BotService).execScheduleCreate),
+			Scope:     resolveScheduleActionScope,
+		},
+		{
+			Tool: "fs_schedule", Action: "update",
+			Description: "修改定时任务（task_id 必填；提供即改）。只改 name/cron/timezone 同步生效；改动 instruction/needs_report/model 需要用户确认并异步受理，批准即授权该任务以后每次运行默认放行写操作",
+			Mode:        model.BotExecutionSync, Confirmation: confirmDynamic, Confirm: confirmUpdate,
+			Required: req("task_id"), Forbidden: []string{"dry_run", "state", "limit", "offset"},
+			PolicyTier: "tier3",
+			// 双入口是确认分流的真实形态：免确认参数走同步，敏感字段确认后走异步。
+			SyncExec:  (*BotService).execScheduleUpdateAction,
+			AsyncExec: botScheduleAsyncRun((*BotService).execScheduleUpdate),
+			Scope:     resolveScheduleActionScope,
+		},
+		{
+			Tool: "fs_schedule", Action: "delete",
+			Description: "删除定时任务（task_id 必填；运行记录保留）。需要用户确认：删除不可逆",
+			Mode:        model.BotExecutionSync, Confirmation: confirmDynamic, Confirm: confirmTrue,
+			Required: req("task_id"), Forbidden: []string{
+				"dry_run", "state", "limit", "offset", "name", "cron", "timezone", "instruction", "model", "needs_report",
+			},
+			PolicyTier: "tier3",
+			// 不声明 SyncExec，理由同 create：不可逆写动作不走同步分派。
+			AsyncExec: botScheduleAsyncRun((*BotService).execScheduleDelete),
+			Scope:     resolveScheduleActionScope,
+		},
+		{
+			Tool: "fs_schedule", Action: "runs",
+			Description: "查看任务最近运行记录（task_id 必填；trigger_source 区分 cron/manual）",
+			Mode:        model.BotExecutionSync, ReadOnly: true, ScheduleOK: true,
+			Required: req("task_id"), Forbidden: []string{"dry_run", "state"},
+			SyncExec: (*BotService).execScheduleRunsAction,
+		},
+		{
+			Tool: "fs_schedule", Action: "run",
+			Description: "立即手动执行一次任务（task_id 必填；不要求任务启用；已有未结束运行时拒绝）。dry_run=true 只预览（同步返回）；非 dry_run 需要用户确认、异步受理，结果以后台结果送达",
+			Mode:        model.BotExecutionSync, Confirmation: confirmDynamic, Confirm: confirmRun,
+			Required: req("task_id"), Forbidden: []string{
+				"state", "limit", "offset", "name", "cron", "timezone", "instruction", "model", "needs_report",
+			},
+			ReadOnlyIf: botScheduleRunDryRunReadOnly,
+			SyncExec:   (*BotService).execScheduleRunAction,
+			AsyncExec:  botScheduleAsyncRun((*BotService).execScheduleRun),
+			Scope:      resolveScheduleActionScope,
+		},
+		{
+			Tool: "fs_schedule", Action: "enable",
+			Description: "启用任务并重算下次运行时间（task_id 必填）。需要用户确认：启用等于重新武装一个以后每次运行默认放行写操作的任务",
+			Mode:        model.BotExecutionSync, Confirmation: confirmDynamic, Confirm: confirmTrue,
+			Required: req("task_id"), Forbidden: []string{
+				"dry_run", "state", "limit", "offset", "name", "cron", "timezone", "instruction", "model", "needs_report",
+			},
+			// 不声明 SyncExec，理由同 create：重新武装已确认任务不经同步分派。
+			AsyncExec: botScheduleAsyncRun(func(s *BotService, call *model.BotToolCall, args *botScheduleTaskArgs) (string, error) {
+				return s.execScheduleEnable(call, args, true)
+			}),
+			Scope: resolveScheduleActionScope,
+		},
+		{
+			Tool: "fs_schedule", Action: "disable",
+			Description: "停用任务，不再触发（task_id 必填）",
+			// disable 是收紧权限、随时可逆（enable 要确认），阻止它是净损失：
+			// 与旧 botScheduleConfirmation 的免确认口径一致，显式声明。
+			Mode: model.BotExecutionSync, Confirmation: confirmNever,
+			Required: req("task_id"), Forbidden: []string{
+				"dry_run", "state", "limit", "offset", "name", "cron", "timezone", "instruction", "model", "needs_report",
+			},
+			SyncExec: (*BotService).execScheduleDisableAction,
+		},
+		{
+			Tool: "fs_schedule", Action: "state_get",
+			Description: "读取本任务跨运行保留的小状态（无参数；只能在定时任务运行中使用）。当前值已随运行时上下文 task_state 字段给出，通常不必在开局调用",
+			Mode:        model.BotExecutionSync, ReadOnly: true, ScheduleOK: true, ScheduleContext: true,
+			Forbidden: []string{"task_id", "dry_run", "state", "limit", "offset"},
+			SyncExec:  (*BotService).execScheduleStateGetAction,
+		},
+		{
+			Tool: "fs_schedule", Action: "state_set",
+			Description: "写入本任务的小状态（state 为任意 JSON 值，省略或 null 表示清空；只能在定时任务运行中使用）。与当前完全相同的内容直接回 unchanged、不产生变更，没有变化就不要重复写",
+			Mode:        model.BotExecutionSync, Confirmation: confirmNever, ScheduleOK: true, FenceExempt: true,
+			Forbidden: []string{"task_id", "dry_run", "limit", "offset"},
+			SyncExec:  (*BotService).execScheduleStateSetAction,
+		},
+	}
+}
+
+// botScheduleRunDryRunReadOnly 是 run 的参数相关只读判定：dry_run=true 是
+// 只读预览（不建运行、不执行），新输入到达时应当执行完。
+func botScheduleRunDryRunReadOnly(call *model.BotToolCall) bool {
+	var args botScheduleTaskArgs
+	if err := json.Unmarshal([]byte(call.ArgumentsJSON), &args); err != nil {
+		return false
+	}
+	return args.DryRunBool()
+}
+
+// resolveScheduleActionScope 是 fs_schedule 确认动作的注册表范围入口：范围
+// 与确认卡预览的解析在 resolveScheduleScope（create 的范围是任务集合，其余
+// 是单个任务）。
+func resolveScheduleActionScope(s *BotService, bot *model.Bot, prepared *botPreparedCall, raw map[string]json.RawMessage, _ *botCallExecContext) error {
+	return s.resolveScheduleScope(bot, prepared, raw)
+}
+
+// botScheduleAsyncRun 包装确认动作的执行体：worker 内执行后把 JSON 结果以
+// json.RawMessage 返回，让 botBuildOutcome 原样透传执行器的结果。
+func botScheduleAsyncRun(body func(*BotService, *model.BotToolCall, *botScheduleTaskArgs) (string, error)) func(*BotService, context.Context, *model.BotToolCall) (interface{}, error) {
+	return func(s *BotService, _ context.Context, call *model.BotToolCall) (interface{}, error) {
+		args, err := botScheduleExecArgs(call)
+		if err != nil {
+			return nil, err
+		}
+		out, err := body(s, call, args)
+		if err != nil {
+			return nil, err
+		}
+		return json.RawMessage(out), nil
+	}
 }
 
 // ---------- fs_schedule 确认受理（INT-136）：范围、确认卡预览与异步执行 ----------
@@ -431,19 +562,6 @@ func rawBoolPtr(raw json.RawMessage) *bool {
 	return &b
 }
 
-// runScheduleWrite 在 worker 内执行需要确认的 fs_schedule 动作（create/update
-// 敏感字段/run）。确认在受理端判定，这里只负责执行并把结果交给后台结果通道；
-// 返回 json.RawMessage 让 botBuildOutcome 原样透传 execScheduleTool 的结果。
-func (s *BotService) runScheduleWrite(ctx context.Context, call *model.BotToolCall) (interface{}, error) {
-	switch call.Action {
-	case "create", "update", "run", "enable", "delete":
-	default:
-		return nil, errs.New(errs.ErrInvalidParams.Code,
-			"fs_schedule 只有 create/update/run/enable/delete 走异步确认路径: "+call.Action)
-	}
-	out, err := s.execScheduleTool(call)
-	if err != nil {
-		return nil, err
-	}
-	return json.RawMessage(out), nil
-}
+// （原 runScheduleWrite 按动作 switch 的适配器已删除，INT-195 起 fs_schedule
+// 确认动作的 worker 执行入口由注册表 AsyncExec 直接指向单动作闭包
+// botScheduleAsyncRun，见上方 spec 组。）

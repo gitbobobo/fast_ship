@@ -21,7 +21,7 @@ import (
 // int124MemoryCall 直接执行一条 fs_memory 工具调用。
 func int124MemoryCall(t *testing.T, env *botTestEnv, botID, args string) string {
 	t.Helper()
-	out, err := env.bots.execMemoryTool(&model.BotToolCall{
+	out, err := botMemoryTestExec(env.bots, &model.BotToolCall{
 		ID: uuid.NewString(), BotID: botID, ToolName: "fs_memory",
 		ArgumentsJSON: args,
 	})
@@ -91,7 +91,7 @@ func TestInt124MemoryReadMissingReturnsEmpty(t *testing.T) {
 	}
 
 	// 显式读历史版本：缺失路径仍是非法操作。
-	if _, err := env.bots.execMemoryTool(&model.BotToolCall{
+	if _, err := botMemoryTestExec(env.bots, &model.BotToolCall{
 		ID: uuid.NewString(), BotID: bot.ID, ToolName: "fs_memory",
 		ArgumentsJSON: `{"action":"read","path":"MEMORY.md","version":1}`,
 	}); err == nil {
@@ -105,7 +105,7 @@ func TestInt124MemoryReadMissingReturnsEmpty(t *testing.T) {
 		`{"action":"delete","path":"MEMORY.md"}`,
 		`{"action":"restore","path":"MEMORY.md","version":1}`,
 	} {
-		if _, err := env.bots.execMemoryTool(&model.BotToolCall{
+		if _, err := botMemoryTestExec(env.bots, &model.BotToolCall{
 			ID: uuid.NewString(), BotID: bot.ID, ToolName: "fs_memory", ArgumentsJSON: args,
 		}); err == nil {
 			t.Fatalf("写入类动作对缺失文件应报错: %s", args)
@@ -765,14 +765,14 @@ func TestInt124MemoryReadVersionStatus(t *testing.T) {
 		`{"action":"read","path":"MEMORY.md","version":-1}`,
 		`{"action":"read","path":"USER.md","version":0}`,
 	} {
-		if _, err := env.bots.execMemoryTool(&model.BotToolCall{
+		if _, err := botMemoryTestExec(env.bots, &model.BotToolCall{
 			ID: uuid.NewString(), BotID: bot.ID, ToolName: "fs_memory", ArgumentsJSON: args,
 		}); err == nil || err.Error() != errs.ErrInvalidParams.Error() {
 			t.Fatalf("version<=0 应为非法参数: %s → %v", args, err)
 		}
 	}
 	// 缺失路径 + 合法 version 保持「记忆文件不存在」（现状不变）。
-	if _, err := env.bots.execMemoryTool(&model.BotToolCall{
+	if _, err := botMemoryTestExec(env.bots, &model.BotToolCall{
 		ID: uuid.NewString(), BotID: bot.ID, ToolName: "fs_memory",
 		ArgumentsJSON: `{"action":"read","path":"USER.md","version":1}`,
 	}); err == nil || !strings.Contains(err.Error(), "记忆文件不存在") {

@@ -11,83 +11,153 @@ import (
 
 // fs_project 适配：读取直连 ProjectService；写操作由后台 worker 执行。
 // 首期 create/update 只开放名称、描述、仓库 URL，不接受 token 引用或密钥。
+// 动作注册表 spec 组见文件末尾（INT-195）。
 
+func (s *BotService) execProjectList(_ *model.Bot, _ context.Context, call *model.BotToolCall) (string, error) {
+	var args botProjectArgs
+	if err := json.Unmarshal([]byte(call.ArgumentsJSON), &args); err != nil {
+		return "", errs.ErrInvalidParams
+	}
+	page, pageSize, err := botValidatePage(args.Page, args.PageSize)
+	if err != nil {
+		return "", err
+	}
+	// 默认排除搁置中的项目（INT-165）：项目清单是「接下来操作哪个」的
+	// 挑选面；include_shelved=true 时连搁置项目一起返回（总数字段同口径）。
+	items, total, err := s.projects.List(s.botUserIDOf(call.BotID), page, pageSize,
+		args.IncludeShelved != nil && *args.IncludeShelved)
+	if err != nil {
+		return "", err
+	}
+	// 与 get 一致走瘦身投影：完整响应带 GitHub 凭证引用 ID，不进模型上下文。
+	slim := make([]map[string]interface{}, 0, len(items))
+	for i := range items {
+		slim = append(slim, botSlimProject(&items[i]))
+	}
+	return botMarshalResult(botSlimPage("projects", slim, total, page, pageSize))
+}
+
+func (s *BotService) execProjectGet(_ *model.Bot, _ context.Context, call *model.BotToolCall) (string, error) {
+	var args botProjectArgs
+	if err := json.Unmarshal([]byte(call.ArgumentsJSON), &args); err != nil {
+		return "", errs.ErrInvalidParams
+	}
+	if strings.TrimSpace(args.ID) == "" {
+		return "", errs.ErrInvalidParams
+	}
+	project, err := s.projects.Get(args.ID, s.botUserIDOf(call.BotID))
+	if err != nil {
+		return "", err
+	}
+	return botMarshalResult(botSlimProject(project))
+}
+
+// execProjectRead 是聚合兼容入口（既有调用方/测试使用）：按参数里的 action
+// 经注册表分派到单动作入口；同步受理路径由 botExecuteSyncTool 直达单动作
+// 方法，不再经过这里。
 func (s *BotService) execProjectRead(ctx context.Context, call *model.BotToolCall) (string, error) {
 	var args botProjectArgs
 	if err := json.Unmarshal([]byte(call.ArgumentsJSON), &args); err != nil {
 		return "", errs.ErrInvalidParams
 	}
-	userID := s.botUserIDOf(call.BotID)
-	switch args.Action {
-	case "list":
-		page, pageSize, err := botValidatePage(args.Page, args.PageSize)
-		if err != nil {
-			return "", err
-		}
-		// 默认排除搁置中的项目（INT-165）：项目清单是「接下来操作哪个」的
-		// 挑选面；include_shelved=true 时连搁置项目一起返回（总数字段同口径）。
-		items, total, err := s.projects.List(userID, page, pageSize,
-			args.IncludeShelved != nil && *args.IncludeShelved)
-		if err != nil {
-			return "", err
-		}
-		// 与 get 一致走瘦身投影：完整响应带 GitHub 凭证引用 ID，不进模型上下文。
-		slim := make([]map[string]interface{}, 0, len(items))
-		for i := range items {
-			slim = append(slim, botSlimProject(&items[i]))
-		}
-		return botMarshalResult(botSlimPage("projects", slim, total, page, pageSize))
-	case "get":
-		if strings.TrimSpace(args.ID) == "" {
-			return "", errs.ErrInvalidParams
-		}
-		project, err := s.projects.Get(args.ID, userID)
-		if err != nil {
-			return "", err
-		}
-		return botMarshalResult(botSlimProject(project))
-	}
-	return "", errs.New(errs.ErrInvalidParams.Code, "fs_project 不支持该读取动作")
+	return s.botExecSyncAction(ctx, nil, call, args.Action, "fs_project 不支持该读取动作")
 }
 
-// runProjectWrite 在 worker 内执行 fs_project 写操作（确认/授权已完成）。
-func (s *BotService) runProjectWrite(ctx context.Context, call *model.BotToolCall) (interface{}, error) {
+// runProjectCreate/runProjectUpdate 在 worker 内执行 fs_project 写操作
+// （确认/授权已完成；注册表 AsyncExec 直接指向单动作方法）。结果与读取一致
+// 走瘦身投影：完整响应带凭证引用，会随后台结果发给模型供应商。
+func (s *BotService) runProjectCreate(_ context.Context, call *model.BotToolCall) (interface{}, error) {
 	var args botProjectArgs
 	if err := json.Unmarshal([]byte(call.ArgumentsJSON), &args); err != nil {
 		return nil, errs.ErrInvalidParams
 	}
 	userID := s.botUserIDOf(call.BotID)
-	switch args.Action {
-	case "create":
-		req := &CreateProjectRequest{
-			Name:        strings.TrimSpace(args.Name),
-			Description: args.Description,
-		}
-		if args.RepositoryURL != "" {
-			req.RepositoryUrl = &args.RepositoryURL
-		}
-		resp, err := s.projects.Create(userID, req)
-		if err != nil {
-			return nil, err
-		}
-		// 写结果与读取一致走瘦身投影：完整响应带凭证引用，会随后台结果
-		// 发给模型供应商。
-		return botSlimProject(resp), nil
-	case "update":
-		req := &UpdateProjectRequest{Description: args.Description}
-		if name := strings.TrimSpace(args.Name); name != "" {
-			req.Name = &name
-		}
-		if args.RepositoryURL != "" {
-			req.RepositoryUrl = &args.RepositoryURL
-		}
-		resp, err := s.projects.Update(args.ID, userID, req)
-		if err != nil {
-			return nil, err
-		}
-		return botSlimProject(resp), nil
+	req := &CreateProjectRequest{
+		Name:        strings.TrimSpace(args.Name),
+		Description: args.Description,
 	}
-	return nil, errs.New(errs.ErrInvalidParams.Code, "fs_project 不支持该写动作")
+	if args.RepositoryURL != "" {
+		req.RepositoryUrl = &args.RepositoryURL
+	}
+	resp, err := s.projects.Create(userID, req)
+	if err != nil {
+		return nil, err
+	}
+	return botSlimProject(resp), nil
+}
+
+func (s *BotService) runProjectUpdate(_ context.Context, call *model.BotToolCall) (interface{}, error) {
+	var args botProjectArgs
+	if err := json.Unmarshal([]byte(call.ArgumentsJSON), &args); err != nil {
+		return nil, errs.ErrInvalidParams
+	}
+	userID := s.botUserIDOf(call.BotID)
+	req := &UpdateProjectRequest{Description: args.Description}
+	if name := strings.TrimSpace(args.Name); name != "" {
+		req.Name = &name
+	}
+	if args.RepositoryURL != "" {
+		req.RepositoryUrl = &args.RepositoryURL
+	}
+	resp, err := s.projects.Update(args.ID, userID, req)
+	if err != nil {
+		return nil, err
+	}
+	return botSlimProject(resp), nil
+}
+
+// runProjectWrite 是聚合兼容入口（既有调用方/测试使用）：经注册表 AsyncExec
+// 分派；worker 主路径由 runAsyncTool 直达单动作方法。
+func (s *BotService) runProjectWrite(ctx context.Context, call *model.BotToolCall) (interface{}, error) {
+	var args botProjectArgs
+	if err := json.Unmarshal([]byte(call.ArgumentsJSON), &args); err != nil {
+		return nil, errs.ErrInvalidParams
+	}
+	spec := botActionSpecOf(call.ToolName, args.Action)
+	if spec == nil || spec.AsyncExec == nil {
+		return nil, errs.New(errs.ErrInvalidParams.Code, "fs_project 不支持该写动作")
+	}
+	return spec.AsyncExec(s, ctx, call)
+}
+
+// botProjectActionSpecs 是 fs_project 的动作声明（INT-195）：范围解析与策略
+// 档位随 spec 声明；scope 解析的细节在 resolveProjectScope。
+func botProjectActionSpecs() []*botActionSpec {
+	scope := func(s *BotService, bot *model.Bot, prepared *botPreparedCall, raw map[string]json.RawMessage, _ *botCallExecContext) error {
+		s.resolveProjectScope(bot, prepared, raw)
+		return nil
+	}
+	return []*botActionSpec{
+		{
+			Tool: "fs_project", Action: "list",
+			Description: "列出当前用户项目（默认排除搁置中项目；include_shelved=true 时包含）",
+			Mode:        model.BotExecutionSync, ReadOnly: true,
+			SyncExec: (*BotService).execProjectList,
+		},
+		{
+			Tool: "fs_project", Action: "get",
+			Description: "读取项目详情",
+			Mode:        model.BotExecutionSync, ReadOnly: true,
+			Required: req("id"), Forbidden: []string{"include_shelved"},
+			SyncExec: (*BotService).execProjectGet,
+		},
+		{
+			Tool: "fs_project", Action: "create",
+			Description: "创建项目",
+			Mode:        model.BotExecutionAsync, Confirmation: confirmAlways,
+			Required: req("name"), Forbidden: []string{"id", "include_shelved"},
+			AsyncExec: (*BotService).runProjectCreate,
+			Scope:     scope,
+		},
+		{
+			Tool: "fs_project", Action: "update",
+			Description: "更新项目（名称/描述/仓库 URL）",
+			Mode:        model.BotExecutionAsync, Confirmation: confirmAlways,
+			Required: req("id"), Forbidden: []string{"include_shelved"},
+			AsyncExec: (*BotService).runProjectUpdate,
+			Scope:     scope,
+		},
+	}
 }
 
 // resolveProjectScope 在建卡前解析写操作的范围与字段约束。

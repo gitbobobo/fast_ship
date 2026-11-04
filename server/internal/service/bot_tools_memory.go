@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -15,7 +16,7 @@ import (
 
 // 记忆工具执行（INT-102）：全部同步、无需确认（只管机器人自己的记忆）。
 // 写入在短事务内完成（文件更新、版本取号、50 版清理、FTS 同步同一事务）；
-// operation_key 用服务端调用 ID 幂等。
+// operation_key 用服务端调用 ID 幂等。动作注册表 spec 组见文件末尾（INT-195）。
 
 func botIsMemoryWriteCall(call *model.BotToolCall) bool {
 	if call == nil || call.ToolName != "fs_memory" {
@@ -37,27 +38,98 @@ const (
 	botMemoryListMaxLimit     = 200
 )
 
-func (s *BotService) execMemoryTool(call *model.BotToolCall) (string, error) {
+// botMemoryExecArgs 解出 fs_memory 执行参数；needPath 的动作先做路径校验
+// （status/list 无路径概念，与拆分前 execMemoryTool 的免检口径一致）。
+func botMemoryExecArgs(call *model.BotToolCall, needPath bool) (*botMemoryArgs, error) {
 	var args botMemoryArgs
 	if err := json.Unmarshal([]byte(call.ArgumentsJSON), &args); err != nil {
-		return "", errs.ErrInvalidParams
+		return nil, errs.ErrInvalidParams
 	}
-	if args.Action != "status" && args.Action != "list" {
+	if needPath {
 		if err := botValidateMemoryPath(args.Path); err != nil {
-			return "", err
+			return nil, err
 		}
 	}
-	switch args.Action {
-	case "list":
-		return s.execMemoryList(call, &args)
-	case "read":
-		return s.execMemoryRead(call, &args)
-	case "create", "replace", "append", "delete", "restore":
-		return s.execMemoryWrite(call, &args)
-	case "history":
-		return s.execMemoryHistory(call, &args)
+	return &args, nil
+}
+
+// fs_memory 各动作的入口（注册表 SyncExec 指向这些方法表达式）：解析参数后
+// 转交执行体；写动作共享 execMemoryWrite 的事务实现。
+
+// execCapabilityStatusAction 是 fs_memory/status 与 fs_schedule/status（v2
+// 墓碑动作）的注册表入口：能力查询的 available 按本 run 冻结的工具集水位
+// 判定（与会话工具面同一事实源），不读 bots 行活值。bot 由 executeSyncCall
+// 透传；nil 属编程错误（生产路径不存在），防御性拒绝而不是解引用 panic
+// （面板审查 R1：旧聚合兼容入口曾把 nil bot 送进这里）。
+func (s *BotService) execCapabilityStatusAction(bot *model.Bot, _ context.Context, call *model.BotToolCall) (string, error) {
+	if bot == nil {
+		return "", errs.New(errs.ErrInvalidParams.Code, "能力查询需要本 run 的工具集水位: "+call.ToolName+"/"+call.Action)
 	}
-	return "", errs.New(errs.ErrInvalidParams.Code, "不支持的 fs_memory 动作: "+args.Action)
+	return s.execCapabilityStatus(call, bot.ToolsetVersion)
+}
+
+func (s *BotService) execMemoryListAction(_ *model.Bot, _ context.Context, call *model.BotToolCall) (string, error) {
+	args, err := botMemoryExecArgs(call, false)
+	if err != nil {
+		return "", err
+	}
+	return s.execMemoryList(call, args)
+}
+
+func (s *BotService) execMemoryReadAction(_ *model.Bot, _ context.Context, call *model.BotToolCall) (string, error) {
+	args, err := botMemoryExecArgs(call, true)
+	if err != nil {
+		return "", err
+	}
+	return s.execMemoryRead(call, args)
+}
+
+func (s *BotService) execMemoryCreateAction(_ *model.Bot, _ context.Context, call *model.BotToolCall) (string, error) {
+	args, err := botMemoryExecArgs(call, true)
+	if err != nil {
+		return "", err
+	}
+	return s.execMemoryWrite(call, args)
+}
+
+func (s *BotService) execMemoryReplaceAction(_ *model.Bot, _ context.Context, call *model.BotToolCall) (string, error) {
+	args, err := botMemoryExecArgs(call, true)
+	if err != nil {
+		return "", err
+	}
+	return s.execMemoryWrite(call, args)
+}
+
+func (s *BotService) execMemoryAppendAction(_ *model.Bot, _ context.Context, call *model.BotToolCall) (string, error) {
+	args, err := botMemoryExecArgs(call, true)
+	if err != nil {
+		return "", err
+	}
+	return s.execMemoryWrite(call, args)
+}
+
+func (s *BotService) execMemoryDeleteAction(_ *model.Bot, _ context.Context, call *model.BotToolCall) (string, error) {
+	args, err := botMemoryExecArgs(call, true)
+	if err != nil {
+		return "", err
+	}
+	return s.execMemoryWrite(call, args)
+}
+
+func (s *BotService) execMemoryHistoryAction(_ *model.Bot, _ context.Context, call *model.BotToolCall) (string, error) {
+	args, err := botMemoryExecArgs(call, true)
+	if err != nil {
+		return "", err
+	}
+	return s.execMemoryHistory(call, args)
+}
+
+func (s *BotService) execMemoryRestoreAction(_ *model.Bot, _ context.Context, call *model.BotToolCall) (string, error) {
+	args, err := botMemoryExecArgs(call, true)
+	if err != nil {
+		return "", err
+	}
+	return s.execMemoryWrite(call, args)
 }
 
 func (s *BotService) execMemoryList(call *model.BotToolCall, args *botMemoryArgs) (string, error) {
@@ -336,7 +408,7 @@ func (s *BotService) execMemoryHistory(call *model.BotToolCall, args *botMemoryA
 	return botMarshalResult(out)
 }
 
-func (s *BotService) execMemorySearch(call *model.BotToolCall) (string, error) {
+func (s *BotService) execMemorySearch(_ *model.Bot, _ context.Context, call *model.BotToolCall) (string, error) {
 	var args botMemorySearchArgs
 	if err := json.Unmarshal([]byte(call.ArgumentsJSON), &args); err != nil {
 		return "", errs.ErrInvalidParams
@@ -381,4 +453,90 @@ func (s *BotService) execMemorySearch(call *model.BotToolCall) (string, error) {
 		"hits": items, "total": total, "offset": offset, "limit": limit,
 		"note": "正文用 fs_memory action=read path=<path> 取回",
 	})
+}
+
+// botMemoryActionSpecs 是 fs_memory 的动作声明（INT-195）：写操作全部同步、
+// 无需确认（只管机器人自己的记忆）；平台自有回执（元数据与写 ack）豁免围栏，
+// 带正文的 read 与检索结果不豁免、照常进围栏。status 是能力查询（SyncExec
+// 消费 bot.ToolsetVersion）。
+func botMemoryActionSpecs() []*botActionSpec {
+	return []*botActionSpec{
+		{
+			Tool: "fs_memory", Action: "status",
+			Description: "查询记忆能力状态与注入上限",
+			Mode:        model.BotExecutionSync, ReadOnly: true, FenceExempt: true,
+			SyncExec: (*BotService).execCapabilityStatusAction,
+		},
+		{
+			Tool: "fs_memory", Action: "list",
+			Description: "列出记忆文件元数据（prefix 可选）",
+			Mode:        model.BotExecutionSync, ReadOnly: true, FenceExempt: true,
+			SyncExec: (*BotService).execMemoryListAction,
+		},
+		{
+			Tool: "fs_memory", Action: "read",
+			Description: "读取当前正文或指定版本（offset/limit 按 Unicode 字符）",
+			Mode:        model.BotExecutionSync, ReadOnly: true,
+			Required: req("path"),
+			SyncExec: (*BotService).execMemoryReadAction,
+		},
+		{
+			Tool: "fs_memory", Action: "create",
+			Description: "新建记忆文件（已存在则冲突；墓碑可重建）",
+			// 同步写、不经确认：只管机器人自己的记忆，expected_version 乐观锁
+			// 控并发，误写可靠版本历史恢复。
+			Mode: model.BotExecutionSync, Confirmation: confirmNever, FenceExempt: true,
+			Required: append(req("path"), reqAllowEmpty("content")...),
+			SyncExec: (*BotService).execMemoryCreateAction,
+		},
+		{
+			Tool: "fs_memory", Action: "replace",
+			Description: "整体替换正文（需 expected_version）",
+			Mode:        model.BotExecutionSync, Confirmation: confirmNever, FenceExempt: true,
+			Required: append(append(req("path"), reqAllowEmpty("content")...), req("expected_version")...),
+			SyncExec: (*BotService).execMemoryReplaceAction,
+		},
+		{
+			Tool: "fs_memory", Action: "append",
+			Description: "追加正文（需 expected_version）",
+			Mode:        model.BotExecutionSync, Confirmation: confirmNever, FenceExempt: true,
+			Required: append(append(req("path"), reqAllowEmpty("content")...), req("expected_version")...),
+			SyncExec: (*BotService).execMemoryAppendAction,
+		},
+		{
+			Tool: "fs_memory", Action: "delete",
+			Description: "删除文件（写墓碑版本，历史保留；需 expected_version）",
+			Mode:        model.BotExecutionSync, Confirmation: confirmNever, FenceExempt: true,
+			Required: req("path", "expected_version"),
+			SyncExec: (*BotService).execMemoryDeleteAction,
+		},
+		{
+			Tool: "fs_memory", Action: "history",
+			Description: "查看最近版本元数据",
+			Mode:        model.BotExecutionSync, ReadOnly: true, FenceExempt: true,
+			Required: req("path"),
+			SyncExec: (*BotService).execMemoryHistoryAction,
+		},
+		{
+			Tool: "fs_memory", Action: "restore",
+			Description: "把指定旧版本恢复为新当前版本（需 expected_version）",
+			Mode:        model.BotExecutionSync, Confirmation: confirmNever, FenceExempt: true,
+			Required: req("path", "version", "expected_version"),
+			SyncExec: (*BotService).execMemoryRestoreAction,
+		},
+	}
+}
+
+// botMemorySearchActionSpecs 是 fs_memory_search 的动作声明：命中片段可能是
+// 模型抄进来的外部文本，不豁免围栏。
+func botMemorySearchActionSpecs() []*botActionSpec {
+	return []*botActionSpec{
+		{
+			Tool: "fs_memory_search", Action: "search",
+			Description: "关键词全文检索本机器人记忆",
+			Mode:        model.BotExecutionSync, ReadOnly: true,
+			Required: req("query"),
+			SyncExec: (*BotService).execMemorySearch,
+		},
+	}
 }

@@ -55,7 +55,7 @@ func seedStateRequestAndCall(t *testing.T, env *botTestEnv, run *model.BotRun, a
 func botScheduleStateCall(t *testing.T, env *botTestEnv, run *model.BotRun, args string) (string, error) {
 	t.Helper()
 	call := seedStateRequestAndCall(t, env, run, args)
-	return env.bots.execScheduleTool(call)
+	return botScheduleTestExec(env.bots, call)
 }
 
 // mustStateCall 同上，但执行失败即 Fatal。

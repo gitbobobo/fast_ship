@@ -553,7 +553,7 @@ func TestBotFoldedResultReadableViaFsResultRead(t *testing.T) {
 		t.Fatalf("publish: %v", err)
 	}
 	// fs_result.read 取回完整内容
-	out, err := env.bots.execResultRead(&model.BotToolCall{
+	out, err := env.bots.execResultRead(nil, context.Background(), &model.BotToolCall{
 		BotID: bot.ID, ArgumentsJSON: `{"action":"read","call_id":"call-r","offset":0,"limit":30000}`,
 	})
 	if err != nil || !strings.Contains(out, strings.Repeat("x", 100)) {

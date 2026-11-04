@@ -176,19 +176,14 @@ func (s *BotService) RecoverOnStartup() error {
 		isAsync := call.ExecutionMode == string(model.BotExecutionAsync)
 		effect := isAsync && call.Status == model.BotCallStatusRunning
 		interruptNote := "调用被服务重启中断；请先用读取类工具核实现状，再决定是否重试"
-		// wait（INT-160）专门分支：无任何副作用，重启只让等待丢失；结果带
-		// 结构化 outcome，模型拿到的是「等待中断」而不是「执行失败」。
-		isWait := call.ToolName == "fs_thread" && call.Action == "wait"
+		// wait（INT-160）专门分支（注册表 NoSideEffect 判定）：无任何副作用，
+		// 重启只让等待丢失；结果带结构化 outcome，模型拿到的是「等待中断」
+		// 而不是「执行失败」。
+		isWait := botActionNoSideEffectOf(call)
 		recoverOutcome := botToolOutcome{ResultJSON: "{}", PreviewJSON: "{}", ResultChars: 2}
 		if isWait {
 			effect = false
-			recoverRaw := `{"outcome":"server_restarted"}`
-			recoverOutcome = botToolOutcome{
-				ResultJSON:  recoverRaw,
-				PreviewJSON: recoverRaw,
-				ResultChars: int64(len([]rune(recoverRaw))),
-				WaitResult:  json.RawMessage(recoverRaw),
-			}
+			recoverOutcome = botWaitInterruptedOutcome(call, "server_restarted", nil)
 			interruptNote = "wait 被服务重启中断（wait 无副作用，线程不受影响）；如仍需跟踪请重新发起"
 		}
 		if botIsMemoryWriteCall(call) {

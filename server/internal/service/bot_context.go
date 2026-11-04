@@ -531,7 +531,7 @@ func botProjectMessages(rows []model.BotMessage, folded map[string]string, nonce
 			} else {
 				// 出口围栏（INT-136）：整条业务结果默认当数据，新增字段/嵌套
 				// 对象/远端错误文本自动落在围栏内；平台自有回执按 tool/action
-				// 豁免（见 botResultFenceExemptTools）。
+				// 豁免（动作注册表 spec.FenceExempt）。
 				content.Content = botFenceToolResult(nonce, content.ToolName, content.Action, content.Content)
 			}
 			// 回执/结果配对：协议回复引用 provider_tool_call_id；每个调用恰好

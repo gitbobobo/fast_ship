@@ -294,6 +294,36 @@ func (s *BotService) threadWaitAttach(bot *model.Bot, call *model.BotToolCall, c
 	s.waitMu.Unlock()
 }
 
+// botWaitInterruptedOutcome 构造 wait 被外部中断时的统一结构化结果（INT-160；
+// 取消竞速与服务重启恢复两处共用，动作属性由注册表 NoSideEffect 判定）。
+// outcome 说明中断原因；resolvedAt 非 nil 表示取消竞速收尾——取消竞速落到
+// 终态裁决时 waitResolveCancelled 的富结果 CAS 不上，这里用账本行重建同构
+// payload（waiting_for 从 args.on 归一化，attached_at 取受理时刻），不留最小
+// 体丢上下文；服务重启恢复传 nil，只标 outcome（等待丢失，无任何副作用）。
+func botWaitInterruptedOutcome(call *model.BotToolCall, outcome string, resolvedAt *time.Time) botToolOutcome {
+	payload := map[string]interface{}{"outcome": outcome}
+	if resolvedAt != nil {
+		payload["resolved_at"] = rfc3339(resolvedAt)
+		var wargs botThreadArgs
+		_ = json.Unmarshal([]byte(call.ArgumentsJSON), &wargs)
+		if conds, cerr := botWaitParseOn(wargs.On); cerr == nil {
+			payload["waiting_for"] = conds
+		}
+		attachedAt := call.StartedAt
+		if attachedAt == nil {
+			attachedAt = &call.CreatedAt
+		}
+		payload["attached_at"] = rfc3339(attachedAt)
+	}
+	raw := marshalJSONString(payload)
+	return botToolOutcome{
+		ResultJSON:  raw,
+		PreviewJSON: raw,
+		ResultChars: int64(len([]rune(raw))),
+		WaitResult:  json.RawMessage(raw),
+	}
+}
+
 // waitDrop 摘除已收尾的评估现场。
 func (s *BotService) waitDrop(callID string) {
 	s.waitMu.Lock()

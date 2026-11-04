@@ -468,7 +468,7 @@ func TestBotInt110ResultReadAdvancesWithEscaping(t *testing.T) {
 		ArgumentsHash: "x", ExecutionMode: "sync", Status: model.BotCallStatusQueued,
 		ExecutionContextJSON: "{}", CreatedAt: time.Now().UTC(),
 	}
-	content, err := env.bots.botExecuteSyncTool(context.Background(), reader)
+	content, err := env.bots.botExecuteSyncTool(context.Background(), nil, reader)
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}

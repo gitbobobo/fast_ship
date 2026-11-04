@@ -51,12 +51,12 @@ func TestBotInt148ThreadToolsetV9(t *testing.T) {
 		if def.Mode != model.BotExecutionAsync || !def.RequiresConfirmation {
 			t.Fatalf("%s 应为异步需确认动作: %+v", action, def)
 		}
-		if botReadOnlyActions["fs_thread/"+action] {
+		spec := botActionSpecOf("fs_thread", action)
+		if spec.ReadOnly {
 			t.Fatalf("%s 是写动作，不得列入只读", action)
 		}
-		rule, ok := botActionRules["fs_thread/"+action]
-		if !ok || len(rule.Required) != 2 || rule.Required[0].Name != "env_id" || rule.Required[1].Name != "thread_id" {
-			t.Fatalf("%s 的字段规则应为 env_id+thread_id: %+v", action, rule)
+		if spec == nil || len(spec.Required) != 2 || spec.Required[0].Name != "env_id" || spec.Required[1].Name != "thread_id" {
+			t.Fatalf("%s 的字段规则应为 env_id+thread_id: %+v", action, spec.Required)
 		}
 	}
 	// v9–v11 的 fs_thread 参数冻结在 botThreadArgsV9Frozen，v12（INT-159）
@@ -80,7 +80,7 @@ func TestBotInt148ThreadToolsetV9(t *testing.T) {
 		t.Fatalf("v8 fs_thread 应冻结在 botThreadArgsV5Frozen")
 	}
 
-	// schema：action 枚举含新动作，必填字段描述由 botActionRules 注出。
+	// schema：action 枚举含新动作，必填字段描述由动作注册表注出。
 	raw, _ := json.Marshal(thread.Parameters)
 	var schema struct {
 		Properties struct {

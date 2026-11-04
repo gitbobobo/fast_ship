@@ -1419,7 +1419,7 @@ func TestBotCancelOwnCallTool(t *testing.T) {
 	if err := env.bots.calls.CreateTx(env.db, call); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	content, err := env.bots.botExecuteSyncTool(context.Background(), call)
+	content, err := env.bots.botExecuteSyncTool(context.Background(), nil, call)
 	if err != nil {
 		t.Fatalf("fs_cancel: %v", err)
 	}
@@ -1476,7 +1476,7 @@ func TestBotCapabilityAndHelp(t *testing.T) {
 		Status: model.BotCallStatusQueued, ExecutionContextJSON: "{}",
 		CreatedAt: time.Now().UTC(),
 	}
-	content, err := env.bots.botExecuteSyncTool(context.Background(), call)
+	content, err := env.bots.botExecuteSyncTool(context.Background(), nil, call)
 	if err != nil {
 		t.Fatalf("fs_help: %v", err)
 	}
@@ -1527,7 +1527,7 @@ func TestBotResultTruncation(t *testing.T) {
 		ArgumentsHash: "x", ExecutionMode: "sync", Status: model.BotCallStatusQueued,
 		ExecutionContextJSON: "{}", CreatedAt: time.Now().UTC(),
 	}
-	content, err := env.bots.botExecuteSyncTool(context.Background(), reader)
+	content, err := env.bots.botExecuteSyncTool(context.Background(), nil, reader)
 	if err != nil {
 		t.Fatalf("fs_result.read: %v", err)
 	}
@@ -1557,7 +1557,7 @@ func TestBotResultTruncation(t *testing.T) {
 		ArgumentsHash: "x", ExecutionMode: "sync", Status: model.BotCallStatusQueued,
 		ExecutionContextJSON: "{}", CreatedAt: time.Now().UTC(),
 	}
-	fullContent, err := env.bots.botExecuteSyncTool(context.Background(), fullRead)
+	fullContent, err := env.bots.botExecuteSyncTool(context.Background(), nil, fullRead)
 	if err != nil {
 		t.Fatalf("fs_result.read full: %v", err)
 	}
@@ -1594,7 +1594,7 @@ func TestBotResultTruncation(t *testing.T) {
 		ArgumentsHash: "x", ExecutionMode: "sync", Status: model.BotCallStatusQueued,
 		ExecutionContextJSON: "{}", CreatedAt: time.Now().UTC(),
 	}
-	if _, err := env.bots.botExecuteSyncTool(context.Background(), peek); !errors.Is(err, errs.ErrBotCallNotFound) {
+	if _, err := env.bots.botExecuteSyncTool(context.Background(), nil, peek); !errors.Is(err, errs.ErrBotCallNotFound) {
 		t.Fatalf("越权读取应 40426: %v", err)
 	}
 }
@@ -3130,7 +3130,7 @@ func TestBotHelpResultIsValidJSON(t *testing.T) {
 		Action: "read", ExecutionMode: string(model.BotExecutionSync),
 		Status: model.BotCallStatusRunning, CreatedAt: time.Now().UTC(),
 	}
-	content, err := env.bots.botExecuteSyncTool(context.Background(), call)
+	content, err := env.bots.botExecuteSyncTool(context.Background(), nil, call)
 	if err != nil {
 		t.Fatalf("exec: %v", err)
 	}

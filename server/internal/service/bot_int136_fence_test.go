@@ -157,7 +157,8 @@ func TestBotInt136FenceCoversEveryToolAction(t *testing.T) {
 		for _, action := range tool.Actions {
 			payload := `{"name":"x"}`
 			out := botFenceToolResult(nonce, tool.Name, action.Name, payload)
-			exempt := botResultFenceExemptTools[tool.Name+"/"+action.Name]
+			spec := botActionSpecOf(tool.Name, action.Name)
+			exempt := spec != nil && spec.FenceExempt
 			if exempt {
 				if out != payload {
 					t.Fatalf("%s/%s 在豁免表里但被围栏", tool.Name, action.Name)
@@ -612,7 +613,7 @@ func TestBotInt136FenceResultContinuation(t *testing.T) {
 		t.Fatalf("夹具应包含注入文本")
 	}
 	offset := utf8.RuneCountInString(result[:byteOffset])
-	out, err := env.bots.execResultRead(&model.BotToolCall{
+	out, err := env.bots.execResultRead(nil, context.Background(), &model.BotToolCall{
 		ID: uuid.NewString(), BotID: bot.ID,
 		ArgumentsJSON: `{"action":"read","call_id":"` + callID + `","offset":` +
 			strconv.Itoa(offset) + `,"limit":200}`,
@@ -642,7 +643,7 @@ func TestBotInt136FenceResultContinuation(t *testing.T) {
 		Updates(map[string]interface{}{"result_json": mem, "tool_name": "fs_memory", "action": "read"}).Error; err != nil {
 		t.Fatalf("seed mem: %v", err)
 	}
-	out2, err := env.bots.execResultRead(&model.BotToolCall{
+	out2, err := env.bots.execResultRead(nil, context.Background(), &model.BotToolCall{
 		ID: uuid.NewString(), BotID: bot.ID,
 		ArgumentsJSON: `{"action":"read","call_id":"` + memCallID + `","offset":0,"limit":8}`,
 	})
@@ -673,7 +674,7 @@ func TestBotInt136ResultContinuationRawPayload(t *testing.T) {
 		Updates(map[string]interface{}{"result_json": result, "tool_name": "fs_issue", "action": "get"}).Error; err != nil {
 		t.Fatalf("seed result: %v", err)
 	}
-	out, err := env.bots.execResultRead(&model.BotToolCall{
+	out, err := env.bots.execResultRead(nil, context.Background(), &model.BotToolCall{
 		ID: uuid.NewString(), BotID: bot.ID,
 		ArgumentsJSON: `{"action":"read","call_id":"` + callID + `","offset":0,"limit":10}`,
 	})
