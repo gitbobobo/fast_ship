@@ -841,6 +841,11 @@ func TestAgentScreenshotImageScale(t *testing.T) {
 	}
 	seedAsset("asset-big", bigPath)
 	seedAsset("asset-missing", missingPath)
+	// 缺失行的原因必须优先透出（R13 契约：asset.Error > 通用文案）。
+	if err := e.svc.db.Model(&model.ReviewAsset{}).Where("id = ?", "asset-missing").
+		Update("error", "下载超时").Error; err != nil {
+		t.Fatalf("seed missing reason: %v", err)
+	}
 	seedAsset("asset-huge", writeFakeHugePNG(t))
 	seedAsset("asset-corrupt", writeCorruptPixelsPNG(t))
 	// 伪 heic：ftyp 盒魔数、有 Content-Type 位图声明但本服务无解码器。
@@ -889,9 +894,18 @@ func TestAgentScreenshotImageScale(t *testing.T) {
 	}
 
 	// StoragePath 指向不存在的文件：带参数走缩放 → 40406 语义。
+	// 按错误码断言而非 errors.Is：INT-184 的缺失文件归因对这条路返回同码
+	// (40406) 带原因的消息（AssetError 优先），AppError 没有按码的 Is 方法，
+	// errors.Is 对定制消息实例不成立；全局加 Is 会改变既有同码区分逻辑。
 	_, err = review.AgentScreenshotImage(ctx, run.ID, "asset-missing", scale)
-	if !errors.Is(err, errs.ErrIssueAssetNotFound) {
-		t.Fatalf("missing file = %v, want ErrIssueAssetNotFound", err)
+	var appErr *errs.AppError
+	if !errors.As(err, &appErr) || appErr.Code != errs.ErrIssueAssetNotFound.Code {
+		t.Fatalf("missing file = %v, want code %d", err, errs.ErrIssueAssetNotFound.Code)
+	}
+	// 原因优先于通用文案（R13 契约的回归闸）：改回裸 sentinel 或丢掉
+	// asset.Error 优先级时这里失败，而不是随 404 语义一起静默退化。
+	if appErr.Message != "下载超时" {
+		t.Fatalf("message = %q, want 行上记录的 asset.Error", appErr.Message)
 	}
 
 	// 伪 heic（有文件但无解码器，清单已标 original_heavy）：带缩放参数 → 原

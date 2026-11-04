@@ -930,8 +930,8 @@ func TestAgentScreenshotsMissingFileReportsReason(t *testing.T) {
 	if len(items) != 1 {
 		t.Fatalf("items = %d, want 1", len(items))
 	}
-	if items[0].Url != "" {
-		t.Fatalf("url = %q, want 空（文件缺失不给 URL）", items[0].Url)
+	if items[0].Url != nil {
+		t.Fatalf("url = %q, want 空（文件缺失不给 URL）", *items[0].Url)
 	}
 	if items[0].Error == nil || *items[0].Error == "" {
 		t.Fatalf("error = %+v, want 带原因的错误项", items[0].Error)

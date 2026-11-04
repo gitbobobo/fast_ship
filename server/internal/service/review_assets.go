@@ -986,8 +986,10 @@ func (s *ReviewService) AgentScreenshots(ctx context.Context, runID string) ([]a
 			items = append(items, item)
 			continue
 		}
-		// 路径在但文件缺失（重下失败的保留引用，R12）：给出原因不给 URL
-		//（端点此刻只会 500），审查员据此记入 unmeasurable（R13 审查意见）。
+		// 路径在但文件缺失（重下失败的保留引用，R12）：给出原因不给 URL，
+		// 审查员据此记入 unmeasurable（R13 审查意见）。取图端点对同一行按
+		// 40406 带同一原因返回（见 AgentScreenshotImage），不会落 500——列表
+		// 这里仍不给 URL，是因为审查员不需要为一个已知不可用项发起请求。
 		if assetFileMissing(a.StoragePath) {
 			reason := a.Error
 			if reason == "" {
@@ -1061,7 +1063,7 @@ func (s *ReviewService) AgentScreenshotImage(ctx context.Context, runID, assetID
 		if reason == "" {
 			reason = "截图文件缺失"
 		}
-		return "", "", errs.New(errs.ErrIssueAssetNotFound.Code, reason)
+		return AgentScreenshotFile{}, errs.New(errs.ErrIssueAssetNotFound.Code, reason)
 	}
 	mime := asset.MimeType
 	if mime == "" {
