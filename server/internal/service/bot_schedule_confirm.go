@@ -130,10 +130,12 @@ func botScheduleActionSpecs() []*botActionSpec {
 			Mode:        model.BotExecutionSync, Confirmation: confirmDynamic, Confirm: confirmCreate,
 			Required: req("name", "cron", "instruction"), Forbidden: []string{"task_id", "dry_run", "state"},
 			PolicyTier: "tier3",
-			// 不声明 SyncExec：create 恒需确认，同步分派保持旧白名单的拒绝语义
-			//（「同步工具不执行该动作」），不给绕过受理直接写库留第二把钥匙。
-			AsyncExec: botScheduleAsyncRun((*BotService).execScheduleCreate),
-			Scope:     resolveScheduleActionScope,
+			// SyncExecForbidden：create 恒需确认（confirmDynamic+恒真闭包），
+			// 构建期禁止同步入口，同步分派保持旧白名单的拒绝语义（「同步工具
+			// 不执行该动作」），不给绕过受理直接写库留第二把钥匙。
+			SyncExecForbidden: true,
+			AsyncExec:         botScheduleAsyncRun((*BotService).execScheduleCreate),
+			Scope:             resolveScheduleActionScope,
 		},
 		{
 			Tool: "fs_schedule", Action: "update",
@@ -154,9 +156,10 @@ func botScheduleActionSpecs() []*botActionSpec {
 				"dry_run", "state", "limit", "offset", "name", "cron", "timezone", "instruction", "model", "needs_report",
 			},
 			PolicyTier: "tier3",
-			// 不声明 SyncExec，理由同 create：不可逆写动作不走同步分派。
-			AsyncExec: botScheduleAsyncRun((*BotService).execScheduleDelete),
-			Scope:     resolveScheduleActionScope,
+			// SyncExecForbidden 理由同 create：不可逆写动作不走同步分派。
+			SyncExecForbidden: true,
+			AsyncExec:         botScheduleAsyncRun((*BotService).execScheduleDelete),
+			Scope:             resolveScheduleActionScope,
 		},
 		{
 			Tool: "fs_schedule", Action: "runs",
@@ -184,7 +187,8 @@ func botScheduleActionSpecs() []*botActionSpec {
 			Required: req("task_id"), Forbidden: []string{
 				"dry_run", "state", "limit", "offset", "name", "cron", "timezone", "instruction", "model", "needs_report",
 			},
-			// 不声明 SyncExec，理由同 create：重新武装已确认任务不经同步分派。
+			// SyncExecForbidden 理由同 create：重新武装已确认任务不经同步分派。
+			SyncExecForbidden: true,
 			AsyncExec: botScheduleAsyncRun(func(s *BotService, call *model.BotToolCall, args *botScheduleTaskArgs) (string, error) {
 				return s.execScheduleEnable(call, args, true)
 			}),

@@ -128,6 +128,15 @@ func TestBotActionRegistryValidatesSpecs(t *testing.T) {
 			return "{}", nil
 		}
 	}))
+	// SyncExecForbidden 显式声明同步入口非法：带 SyncExec 即 panic（覆盖
+	// confirmDynamic+恒真闭包的 create/enable/delete），不带则合法。
+	mustPanic("禁同步入口却带 SyncExec", base(func(s *botActionSpec) {
+		s.SyncExecForbidden = true
+		s.SyncExec = func(*BotService, *model.Bot, context.Context, *model.BotToolCall) (string, error) {
+			return "{}", nil
+		}
+	}))
+	mustOK("禁同步入口且无 SyncExec", base(func(s *botActionSpec) { s.SyncExecForbidden = true }))
 	// 未知分类拒绝。
 	mustPanic("未知分类", base(func(s *botActionSpec) { s.Confirmation = botConfirmKind("sometimes") }))
 	// 合法形态：never / always / dynamic。
@@ -200,6 +209,12 @@ func TestBotSyncDispatchKeepsLegacyRejections(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "同步工具不执行该动作") {
 			t.Fatalf("fs_schedule/%s 的同步分派应保持旧拒绝语义: %v", action, err)
 		}
+	}
+	// run 的同步入口保留 dry_run 门禁：非 dry_run 到达同步路径即拒（与拆分前
+	// botExecuteSyncTool 的专用拒绝一致），零值 BotService 不触库。
+	runCall := &model.BotToolCall{ToolName: "fs_schedule", Action: "run", ArgumentsJSON: `{"action":"run","task_id":"t1"}`}
+	if _, err := (&BotService{}).execScheduleRunAction(nil, context.Background(), runCall); err == nil || !strings.Contains(err.Error(), "非 dry_run 的 run 需要用户确认") {
+		t.Fatalf("非 dry_run 的 run 同步直达应被门禁拒绝: %v", err)
 	}
 }
 
@@ -407,9 +422,9 @@ func botMemoryTestExec(s *BotService, call *model.BotToolCall) (string, error) {
 		"不支持的 fs_memory 动作: "+args.Action)
 }
 
-// botScheduleTestExec 是原 execScheduleTool 聚合入口的测试替代：优先走
-// AsyncExec 执行体直连（不带确认分流与 dry_run 门禁），供测试直接驱动
-// fs_schedule 写执行体；类型断言失败按内部错误处理，不吞掉。
+// botScheduleTestExec 是原 execScheduleTool 聚合入口的测试替代：优先 AsyncExec
+// 执行体直连（与拆分前测试语义一致——确认型写动作直接驱动执行体，不带确认
+// 分流）；仅 SyncExec 的动作（读动作、disable、state 读写）走同步入口。
 func botScheduleTestExec(s *BotService, call *model.BotToolCall) (string, error) {
 	args, err := botScheduleExecArgs(call)
 	if err != nil {
@@ -429,6 +444,25 @@ func botScheduleTestExec(s *BotService, call *model.BotToolCall) (string, error)
 			return "", errs.ErrInternal
 		}
 		return string(raw), nil
+	}
+	return spec.SyncExec(s, nil, context.Background(), call)
+}
+
+// botScheduleTestExecSync 与生产同步分派同口径（SyncExec 优先）：专门覆盖
+// 免确认 update、run 的 dry_run 门禁、disable 等同步入口——这些分支若被改
+// 坏，同步路径用例才会失败（fast-ship-bot R1 Note 3：原聚合入口 AsyncExec
+// 优先，同步入口无直接覆盖）。
+func botScheduleTestExecSync(s *BotService, call *model.BotToolCall) (string, error) {
+	args, err := botScheduleExecArgs(call)
+	if err != nil {
+		return "", err
+	}
+	spec := botActionSpecOf("fs_schedule", args.Action)
+	if spec == nil {
+		return "", errs.New(errs.ErrInvalidParams.Code, "不支持的 fs_schedule 动作: "+args.Action)
+	}
+	if spec.SyncExec == nil {
+		return "", errs.New(errs.ErrInvalidParams.Code, "同步工具不执行该动作: fs_schedule/"+args.Action)
 	}
 	return spec.SyncExec(s, nil, context.Background(), call)
 }

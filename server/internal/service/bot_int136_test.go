@@ -1208,7 +1208,9 @@ func TestBotInt136SyncUpdateSkipsPreviewAndWatermark(t *testing.T) {
 	}
 	call := &model.BotToolCall{BotID: bot.ID, ArgumentsJSON: args,
 		ExecutionContextJSON: marshalExecContext(execCtx)}
-	if _, err := botScheduleTestExec(env.bots, call); err != nil {
+	// 同步口径 helper：本用例验证的就是免确认 update 的同步入口（SyncExec），
+	// 不是 AsyncExec 包装的确认后执行体。
+	if _, err := botScheduleTestExecSync(env.bots, call); err != nil {
 		t.Fatalf("同步 update 不应被修订比对挡住: %v", err)
 	}
 	var reloaded model.BotScheduleTask
@@ -1234,7 +1236,7 @@ func TestBotInt136SyncUpdateSkipsPreviewAndWatermark(t *testing.T) {
 	}
 	badCall := &model.BotToolCall{BotID: bot.ID, ArgumentsJSON: badArgs,
 		ExecutionContextJSON: marshalExecContext(badCtx)}
-	_, execErr := botScheduleTestExec(env.bots, badCall)
+	_, execErr := botScheduleTestExecSync(env.bots, badCall)
 	if execErr == nil || !strings.Contains(execErr.Error(), "指令") {
 		t.Fatalf("执行层应返回具体字段错误（指令不合法）: %v", execErr)
 	}

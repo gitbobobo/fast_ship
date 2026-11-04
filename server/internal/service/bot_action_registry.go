@@ -52,8 +52,15 @@ type botActionSpec struct {
 	// 的调用弹确认卡。
 	Confirmation botConfirmKind
 	Confirm      func(raw map[string]json.RawMessage) (bool, error)
-	Required     []botRequiredField
-	Forbidden    []string
+	// SyncExecForbidden 显式声明「本动作不得有同步执行入口」，构建期强制
+	//（SyncExec 非 nil 即 panic）。confirmAlways 的动作已由确认分类自动禁止；
+	// 这个标志服务 confirmDynamic + 恒真闭包的动作（fs_schedule 的 create/
+	// enable/delete）：它们运行时恒改判异步，但静态分类上与 update/run 同为
+	// dynamic，护栏无法从分类推断——用标志把「不给绕过受理直接写留第二把
+	// 钥匙」从约定变成可校验的声明（fast-ship-bot R1 Note）。
+	SyncExecForbidden bool
+	Required          []botRequiredField
+	Forbidden         []string
 	// SyncExec/AsyncExec 是执行入口，至少一者非 nil（fs_schedule update/run
 	// 两者都有：确认分流是真实形态——受理端按参数动态改判异步，同步分支服务
 	// 免确认参数；确认恒真的动作只声明 AsyncExec，同步分派保持旧白名单的
@@ -180,6 +187,9 @@ func botValidateActionSpec(spec *botActionSpec) {
 	// 参数同步分支），不在禁止之列。
 	if spec.Confirmation == confirmAlways && spec.SyncExec != nil {
 		panic("bot action registry: 恒需确认的动作不得带同步执行入口 " + key)
+	}
+	if spec.SyncExecForbidden && spec.SyncExec != nil {
+		panic("bot action registry: 已声明禁止同步入口的动作带了 SyncExec " + key)
 	}
 }
 

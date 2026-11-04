@@ -1216,6 +1216,12 @@ func (s *BotService) execScheduleDisableAction(_ *model.Bot, _ context.Context, 
 }
 
 func (s *BotService) execScheduleStateGetAction(_ *model.Bot, _ context.Context, call *model.BotToolCall) (string, error) {
+	// 与其它同步入口同口径：先过 botScheduleExecArgs（非 run 动作携带 dry_run
+	// 即拒），保持拆分前 execScheduleTool 的执行器级兜底统一（fast-ship-bot
+	// R1 Note；受理端 spec.Forbidden 已拒，这里是防内部直达调用的同层兜底）。
+	if _, err := botScheduleExecArgs(call); err != nil {
+		return "", err
+	}
 	return s.execScheduleStateGet(call)
 }
 
