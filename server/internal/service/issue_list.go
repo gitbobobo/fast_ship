@@ -205,8 +205,10 @@ type githubCloseNetResult struct {
 // batchCloseGitHubAbortReason：整批性失败类别，命中任一类即熔断，剩余项不再
 // 派发。限流（INT-185）之外，INT-191 把认证失败（401）与无权限/访问受限
 // （非限流 403）纳入——凭证失效或访问被拒时继续逐条 PATCH 只会得到同因重复
-// 失败，最多白打 batchCloseDoneMaxIssues 条。404 是单条 Issue 状态（已转移/
-// 删除），归 classifyGitHubCloseError 逐条回报，不熔断；限流 403 与非限流
+// 失败，最多白打 batchCloseDoneMaxIssues 条。404/410 成因两义——可能是仓库
+// 级（token 失去可见性、issues 被禁用），也可能是单条（Issue 已转移/删除），
+// 状态码无法区分；本期按单条处理，归 classifyGitHubCloseError 逐条回报，
+// 不熔断（INT-191 验收钉死；仓库级取舍另立 INT-198）。限流 403 与非限流
 // 403 的区分沿用 isGitHubRateLimitError 现有口径。
 type batchCloseGitHubAbortReason int32
 
@@ -621,8 +623,9 @@ const batchCloseGitHubRateLimitRemainingText = "GitHub API 限流，未尝试关
 // githubBatchCloseAbort 判定 PATCH 错误是否为整批性失败并给出类别：限流
 // （口径见 isGitHubRateLimitError：*RateLimitError、*AbuseRateLimitError、
 // 429、含限流文案的 403）、认证失败（401）、无权限（其余 403）。404 与其他
-// 状态码是单条结果（Issue 已转移/删除等），返回 false 由
-// classifyGitHubCloseError 逐条回报，不得熔断（INT-191）。
+// 状态码按单条结果逐条回报，不得熔断（INT-191）：404/410 的仓库级成因
+// （token 失去可见性、issues 被禁用）与单条成因（已转移/删除）状态码无法
+// 区分，本期的取舍与候选口径见 INT-198。
 func githubBatchCloseAbort(err error) (batchCloseGitHubAbortReason, bool) {
 	if isGitHubRateLimitError(err) {
 		return abortRateLimit, true
