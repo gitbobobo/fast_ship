@@ -54,11 +54,12 @@ func (r *QuotaAccountRepository) ListDue(now time.Time) ([]model.QuotaAccount, e
 	return accounts, err
 }
 
-// EarliestNextRetryAt 返回全部账号里最早的未来 next_retry_at，
-// 供调度器把下一次唤醒提前到该时刻；没有返回 nil。
-func (r *QuotaAccountRepository) EarliestNextRetryAt(now time.Time) (*time.Time, error) {
+// EarliestNextRetryAt 返回全部账号里最早的 next_retry_at，含已到期的行：
+// 未来行让调度器提前唤醒，到期行把等待压到 nextWait 的保底之下限，
+// 调度抖动（重算落在到期之后）不会睡满整轮。没有任何行返回 nil。
+func (r *QuotaAccountRepository) EarliestNextRetryAt() (*time.Time, error) {
 	var account model.QuotaAccount
-	err := r.db.Where("next_retry_at IS NOT NULL AND next_retry_at > ?", now).
+	err := r.db.Where("next_retry_at IS NOT NULL").
 		Order("next_retry_at ASC").Limit(1).First(&account).Error
 	if err != nil {
 		if err == gorm.ErrRecordNotFound {

@@ -79,7 +79,8 @@ func TestQuotaAccountRepository_UserIsolation(t *testing.T) {
 	}
 }
 
-// ListDue 选 next_retry_at 为空或到期的行；EarliestNextRetryAt 返回最早未来值。
+// ListDue 选 next_retry_at 为空或到期的行；EarliestNextRetryAt 返回最早值
+// （含到期行——到期行参与唤醒计算，让调度器下一轮自愈）。
 func TestQuotaAccountRepository_ListDue(t *testing.T) {
 	db, repo := setupQuotaAccountTestDB(t)
 	seedQuotaAccountUser(t, db, "u1")
@@ -103,9 +104,9 @@ func TestQuotaAccountRepository_ListDue(t *testing.T) {
 		t.Fatalf("expected pending + overdue due, got %+v", ids)
 	}
 
-	earliest, err := repo.EarliestNextRetryAt(now)
-	if err != nil || earliest == nil || earliest.Sub(future).Abs() > time.Second {
-		t.Fatalf("earliest = %v err=%v, want ~%v", earliest, err, future)
+	earliest, err := repo.EarliestNextRetryAt()
+	if err != nil || earliest == nil || earliest.Sub(past).Abs() > time.Second {
+		t.Fatalf("earliest = %v err=%v, want ~%v（到期行优先）", earliest, err, past)
 	}
 }
 

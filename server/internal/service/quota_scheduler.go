@@ -12,8 +12,9 @@ import (
 
 // QuotaScheduler 是额度抓取的后台循环（INT-109）：每轮抓 next_retry_at 到期
 // （或为空）的账号，并发受 max_concurrency 限制，单账号失败不影响其它账号。
-// 下一次唤醒取「now + interval」与最早的未来 next_retry_at 的较小值——
-// 失败退避到期与窗口重置预抓都能按自己的时刻唤醒，不用等满一轮。
+// 下一次唤醒取「now + interval」与最早的 next_retry_at 的较小值——失败退避
+// 到期与窗口重置预抓都按自己的时刻唤醒；到期行把等待压到保底 1 秒，
+// kick 已消费但重算落在到期之后的调度抖动会在下一轮自愈（INT-194）。
 type QuotaScheduler struct {
 	svc    *QuotaService
 	repo   *repository.QuotaAccountRepository
@@ -82,11 +83,13 @@ func (s *QuotaScheduler) loop() {
 	}
 }
 
-// nextWait 算距下一轮的实际等待：常规 interval 与最早的未来 next_retry_at 取小；
-// 保底正数避免忙循环（已有到期账号时下一轮立刻跑）。
+// nextWait 算距下一轮的实际等待：常规 interval 与最早的 next_retry_at 取小——
+// 未来值提前唤醒，到期值压成非正数后取保底 1 秒。保底本身就是防忙循环的
+// 直接保障：落库失败或抓取耗时跨过重试时刻时行仍可能到期，此时按 1 秒
+// 节奏重试自愈；「重算时账号已到期」的调度抖动同样在下一轮被 ListDue 拾起。
 func (s *QuotaScheduler) nextWait(now time.Time) time.Duration {
 	wait := s.cfg.Quota.Interval()
-	if earliest, err := s.repo.EarliestNextRetryAt(now); err == nil && earliest != nil {
+	if earliest, err := s.repo.EarliestNextRetryAt(); err == nil && earliest != nil {
 		if d := earliest.Sub(now); d < wait {
 			wait = d
 		}

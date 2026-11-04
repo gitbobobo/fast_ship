@@ -770,14 +770,73 @@ func TestQuotaScheduler_KickWakesEarlierRetry(t *testing.T) {
 	}
 	sched.Kick()
 
+	// 重算可能落在到期之后（全量跑的调度抖动，INT-194 的原始失败场景）：
+	// 到期行把等待压到 1 秒保底，循环仍然收敛，不再睡满原 interval。
+	// 全量跑时 CPU 争抢会拖延协程唤醒，5 秒窗口留给这种调度延迟。
 	select {
 	case <-fetched:
-	case <-time.After(3 * time.Second):
-		t.Fatal("Kick 后 3s 内没有重抓——调度器仍在睡原来的 60 分钟定时器")
+	case <-time.After(5 * time.Second):
+		t.Fatal("Kick 后 5s 内没有重抓——调度器仍在睡原来的 60 分钟定时器")
 	}
 	// 抓取协程在 fake provider 返回后才落库；收到 fetched 只是开始抓取，立刻
 	// 断言会和落库竞态。有界轮询到状态写完。
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		stored := storedQuotaAccount(t, svc, account.ID)
+		if stored.Status == model.QuotaStatusOK {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("重抓后账号应为 ok，得到 %q", stored.Status)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// INT-194 回归：到期账号没有任何 kick 也必须被拾起。曾几何时重算只看未来的
+// next_retry_at，kick 消费后若重算落在到期之后，循环按整轮 interval 睡死，
+// 全量跑偶发超时而单跑必过。现在到期行参与唤醒计算，下一轮保底 1 秒自愈。
+func TestQuotaScheduler_DueAccountSelfHealsWithoutKick(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "quota-due-selfheal")
+	fetched := make(chan struct{}, 4)
+	service := newTestQuotaService(svc, fakeQuotaProvider("fake", func(context.Context, *http.Client, string, quota.Credentials) (quota.Snapshot, error) {
+		select {
+		case fetched <- struct{}{}:
+		default:
+		}
+		return fakeQuotaSnapshot(), nil
+	}))
+	cfg := svc.cfg
+	cfg.Quota.IntervalMinutes = 60
+	cfg.Quota.RunOnStartup = false
+	repo := repository.NewQuotaAccountRepository(svc.db)
+	sched := NewQuotaScheduler(service, repo, cfg, zap.NewNop())
+
+	enc, err := crypto.Encrypt([]byte(`{"api_key":"k"}`), []byte(cfg.Encryption.Key))
+	if err != nil {
+		t.Fatalf("encrypt creds: %v", err)
+	}
+	retryAt := time.Now().UTC().Add(-time.Minute) // 已到期
+	account := &model.QuotaAccount{
+		ID: uuid.NewString(), UserID: user.ID, Provider: "fake", Label: "backoff",
+		CredentialHint: "…x", Status: model.QuotaStatusProviderError,
+		CredentialsEncrypted: enc, NextRetryAt: &retryAt,
+	}
+	if err := svc.db.Create(account).Error; err != nil {
+		t.Fatalf("seed account: %v", err)
+	}
+
+	// 种子在 Start 之前：循环首轮重算就面对已到期账号，不经任何 kick。
+	sched.Start()
+	defer sched.Stop()
+
+	select {
+	case <-fetched:
+	case <-time.After(5 * time.Second):
+		t.Fatal("到期账号未经 kick 也应在保底 1s 后被下一轮拾起——调度器睡满了 interval")
+	}
+	deadline := time.Now().Add(5 * time.Second)
 	for {
 		stored := storedQuotaAccount(t, svc, account.ID)
 		if stored.Status == model.QuotaStatusOK {
