@@ -55,8 +55,9 @@ const (
 
 // maxScreenshotsPerPR 单个 PR 描述收集的截图引用上限：按出现顺序保留前 N
 // 个（去重后），超出部分忽略。上限同时约束探测下载与 ensureAssets 落账——
-// review 截图面是持久资产（永不回收），描述塞几十张图会让磁盘占用随 PR 数
-// 无界增长；正常审查用不了几张图，超出部分本来就开不出有意义的视觉轮。
+// review 截图面按行账保留 30 天回收（INT-184，见 review_asset_retention.go），
+// 回收滞后至少 30 天，磁盘占用仍必须在源头设闸：描述塞几十张图会让磁盘占用
+// 随 PR 数增长；正常审查用不了几张图，超出部分本来就开不出有意义的视觉轮。
 // 单张大小另受下载面的单文件上限（256 MiB）与探测字节预算
 // （screenshotProbeBudget）约束。
 const maxScreenshotsPerPR = 12
@@ -484,7 +485,12 @@ func (s *ReviewService) ensureAssets(ctx context.Context, integrationID, repo st
 	}
 	for pos, ref := range refs {
 		existing, seenBefore := have[ref.URL]
-		if seenBefore && existing.StoragePath != "" {
+		// 复核（INT-184）：storage_path 指向的文件必须还在。保留策略按行账
+		// 回收文件，与行插入之间存在理论竞态（引用判定与删除之间插入的行），
+		// 命中行不复核的话一次竞态就是该端点永久 404——缺失按失败行重下，
+		// 缓存命中或重新落盘都能自愈。只有 ErrNotExist 触发重下：其它 Stat
+		// 错误（瞬时 I/O）保持原行，避免把有效路径误清。
+		if seenBefore && existing.StoragePath != "" && !assetFileMissing(existing.StoragePath) {
 			continue
 		}
 		var storagePath, mime, errText string
@@ -502,12 +508,27 @@ func (s *ReviewService) ensureAssets(ctx context.Context, integrationID, repo st
 			size = cached.Metadata.Size
 		}
 		if seenBefore {
-			// 失败行重试：更新原行（成功填路径，失败刷新原因）。
+			// 失败行重试：更新原行（成功填路径，失败刷新原因）。重下成功视
+			// 为一次新的资产落账：刷新 renewed_at，保留期时钟从这次重下起算
+			//（R6 审查：否则超龄 head 重审时刚下好的证据会在 24h 内被超龄行
+			// 退役连带回收）；失败不刷新，避免僵尸失败行永不过期。created_at
+			// 保持首次落账时刻不动（R11 审查：AgentScreenshots 拿它判「本轮
+			// 新行」，刷新会让重下的旧行被误剔出上一轮集合）。
+			// 重下失败不清既有引用（R12 审查）：ENOENT 也可能来自 uploads
+			// 卷/子目录瞬时不可用——把 storage_path 刷成空串，卷恢复后的文件
+			// 就变成「无引用 + mtime 超宽限」孤儿，下一轮 sweep 永久删除，正
+			// 好打在本 PR「审查截图不可随意丢弃」的目标上。命中行重下失败只
+			// 刷 error，路径与元数据原样保留，下次复核再试；失败行本就无路
+			// 径，维持空串。重下成功才是全新落账（含续期）。
+			updates := map[string]any{"error": errText}
+			if storagePath != "" {
+				updates["storage_path"] = storagePath
+				updates["mime_type"] = mime
+				updates["size_bytes"] = size
+				updates["renewed_at"] = now
+			}
 			if err := s.db.Model(&model.ReviewAsset{}).Where("id = ?", existing.ID).
-				Updates(map[string]any{
-					"storage_path": storagePath, "mime_type": mime,
-					"size_bytes": size, "error": errText,
-				}).Error; err != nil {
+				Updates(updates).Error; err != nil {
 				return "", nil, errs.ErrInternal
 			}
 			continue
@@ -526,6 +547,7 @@ func (s *ReviewService) ensureAssets(ctx context.Context, integrationID, repo st
 			SizeBytes:     size,
 			Error:         errText,
 			CreatedAt:     now,
+			RenewedAt:     &now,
 		}
 		// 并发/重入安全：同 (集成,repo,pr,head,source_url) 只保留先到的行
 		// （唯一索引 idx_review_assets_source 是冲突目标）。
@@ -562,7 +584,7 @@ var screenshotProbeAttemptTimeout = 10 * time.Second
 
 // screenshotProbeBudget 单次探测允许拉进缓存的总字节预算：时间预算管不住
 // 「快速回源的大图」——图床很快时 30s 内能下进几十张大文件，而 review 截
-// 图面是持久资产（永不回收），字节必须有自己的闸。只结算新下载（命中不占
+// 图面回收滞后至少 30 天（行账保留策略，INT-184），字节必须有自己的闸。只结算新下载（命中不占
 // 预算，见 probeScreenshots），下载后结算：触发那张已完整落盘，单轮新下
 // 载实际上界是预算 + 单文件上限（那张下一轮命中不重下，不白拉）。超过预
 // 算时本轮停在触发的那张，已成功的照常计入指纹；剩下的引用下轮继续。
@@ -613,6 +635,115 @@ func hashFileSHA256(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
+// assetFileMissing 资产文件缺失判定：只有 ErrNotExist 才算缺失并触发重下；
+// 其它 Stat 错误（瞬时 I/O、权限）保持原行不动——误判缺失会走进重下，重下
+// 失败时 Updates 把本来有效的 storage_path 清成空，行失去引用后仅有的字节
+// 会被保留策略当作孤儿回收（INT-184 审查意见）。
+func assetFileMissing(path string) bool {
+	if path == "" {
+		return true
+	}
+	_, err := os.Stat(path)
+	return errors.Is(err, os.ErrNotExist)
+}
+
+// screenshotFetch 探测下载成功的单张结果：探测落账（recordProbeAssets）的
+// 输入。pos 是引用在收集结果里的序号（与 ensureAssets 的 position 同口径）。
+type screenshotFetch struct {
+	pos    int
+	ref    screenshotRef
+	cached *githubmedia.CachedMedia
+}
+
+// probeAndRecordScreenshots 同步决策用的探测 + 探测落账（INT-184）：成功
+// 下载的引用当场写资产行，探测字节从落盘起就有行引用——「探测过但没有视
+// 觉运行」的字节转成普通行按行保留策略退役，不再需要目录推断。headSHA
+// 与视觉运行落账同源（doSyncPR 已保证 ledger.HeadSHA == pr.HeadSHA，
+// createVisualRuns 按 ledger.HeadSHA 建运行）。口径边界：哈希失败或哈希前
+// ctx 到期的成功下载不进 fetches、不落账——字节只由 24h mtime 宽限保护，
+// 之后按孤儿回收；后续视觉运行需要时 ensureAssets 会重下（缓存命中则
+// touch 并补行，上游已删/转私时丢图）——这是磁盘读故障场景，不把未经
+// 内容校验的字节记成可用资产。
+func (s *ReviewService) probeAndRecordScreenshots(ctx context.Context, integrationID, repo string, prNumber int, headSHA string, installationID int64, prBody string) screenshotProbe {
+	probe, fetches := s.probeScreenshots(ctx, integrationID, installationID, prBody)
+	s.recordProbeAssets(integrationID, repo, prNumber, headSHA, fetches)
+	return probe
+}
+
+// recordProbeAssets 探测落账：只写成功结果，失败行仍由 ensureAssets 在视
+// 觉运行时落账并保留「每次重试下载」的语义。已有行的处理：storage_path
+// 非空的行原样保留（同 URL 的缓存路径是同一份文件，重复写无增益）；空路
+// 径行（此前的失败行）用本次结果修复。落账失败只记日志不改变探测结论：
+// 行是保留策略的账，不是探测决策的输入，ensureAssets 在运行时还会兜底。
+func (s *ReviewService) recordProbeAssets(integrationID, repo string, prNumber int, headSHA string, fetches []screenshotFetch) {
+	now := time.Now().UTC()
+	for _, f := range fetches {
+		var existing model.ReviewAsset
+		err := s.db.Where("integration_id = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ? AND source_url = ?",
+			integrationID, repo, prNumber, headSHA, f.ref.URL).First(&existing).Error
+		if err == nil {
+			if existing.StoragePath != "" {
+				continue
+			}
+			if uerr := s.db.Model(&model.ReviewAsset{}).Where("id = ?", existing.ID).
+				Updates(map[string]any{
+					"storage_path": f.cached.Path, "mime_type": f.cached.Metadata.ContentType,
+					"size_bytes": f.cached.Metadata.Size, "error": "",
+					// 补账即落账：修复失败行同样刷新保留期时钟（R6 审查）。
+					"renewed_at": now,
+				}).Error; uerr != nil {
+				s.logger.Warn("探测截图落账失败", zap.String("url", scrubLogURLs(f.ref.URL)), zap.Error(uerr))
+			}
+			continue
+		}
+		asset := &model.ReviewAsset{
+			ID:            uuid.NewString(),
+			IntegrationID: integrationID,
+			RepoFullName:  repo,
+			PRNumber:      prNumber,
+			HeadSHA:       headSHA,
+			Position:      f.pos,
+			Label:         f.ref.Label,
+			SourceURL:     f.ref.URL,
+			StoragePath:   f.cached.Path,
+			MimeType:      f.cached.Metadata.ContentType,
+			SizeBytes:     f.cached.Metadata.Size,
+			CreatedAt:     now,
+			RenewedAt:     &now,
+		}
+		// 并发/重入安全：与 ensureAssets 同一冲突目标，同键只保留先到的行。
+		res := s.db.Clauses(clause.OnConflict{
+			Columns: []clause.Column{
+				{Name: "integration_id"}, {Name: "repo_full_name"},
+				{Name: "pr_number"}, {Name: "head_sha"}, {Name: "source_url"},
+			},
+			DoNothing: true,
+		}).Create(asset)
+		if res.Error != nil {
+			s.logger.Warn("探测截图落账失败", zap.String("url", scrubLogURLs(f.ref.URL)), zap.Error(res.Error))
+			continue
+		}
+		// DoNothing 吞掉的并发先到行：ensureAssets 可能刚插入空路径失败行
+		//（First 与 Create 之间），重读后仍为空路径才用本次结果修复；已有
+		// 路径的行保留原行。
+		if res.RowsAffected == 0 {
+			var winner model.ReviewAsset
+			if err := s.db.Where("integration_id = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ? AND source_url = ?",
+				integrationID, repo, prNumber, headSHA, f.ref.URL).First(&winner).Error; err == nil && winner.StoragePath == "" {
+				if uerr := s.db.Model(&model.ReviewAsset{}).Where("id = ?", winner.ID).
+					Updates(map[string]any{
+						"storage_path": f.cached.Path, "mime_type": f.cached.Metadata.ContentType,
+						"size_bytes": f.cached.Metadata.Size, "error": "",
+						// 补账即落账：同上刷新保留期时钟。
+						"renewed_at": now,
+					}).Error; uerr != nil {
+					s.logger.Warn("探测截图落账失败", zap.String("url", scrubLogURLs(f.ref.URL)), zap.Error(uerr))
+				}
+			}
+		}
+	}
+}
+
 // screenshotProbe probeScreenshots 的结果。contentFP 内容指纹只在 result=
 // probeReady 且全部引用都下载成功时非空——只成功一部分时无法证明「内容没
 // 变」，按未知（调用方保守视为变化）处理。
@@ -630,13 +761,15 @@ type screenshotProbe struct {
 // 或总预算耗尽未探完 → probeUnavailable，reason 取第一条「拉不到」类原因，
 // 没有再取第一条失败原因。字节预算（screenshotProbeBudget）只结算新下载
 // 的字节，缓存命中不占预算——超预算集合逐轮拉齐，不会在同一位置反复中断；
-// 单文件上限等于预算，单张新下载永远不会超限。探测不写 review_assets——资产行仍由视觉运行时的
-// ensureAssets 落账，这里不按资产行计数，避免「已不在描述里的陈旧资产」被
-// 当成可用截图。
-func (s *ReviewService) probeScreenshots(ctx context.Context, integrationID string, installationID int64, prBody string) screenshotProbe {
+// 单文件上限等于预算，单张新下载永远不会超限。本函数是唯一入口，返回探
+// 测结论与成功下载列表：同步决策链路用 probeAndRecordScreenshots 落账
+// （成功结果随返回值带出），测试直接调用并忽略第二个返回值；视觉运行时
+// 仍由 ensureAssets 落账并重试失败行；这里也不按资产行计数，避免「已不在
+// 描述里的陈旧资产」被当成可用截图。
+func (s *ReviewService) probeScreenshots(ctx context.Context, integrationID string, installationID int64, prBody string) (screenshotProbe, []screenshotFetch) {
 	refs := collectScreenshotURLsAt(prBody, s.githubWebHost())
 	if len(refs) == 0 {
-		return screenshotProbe{result: probeNone}
+		return screenshotProbe{result: probeNone}, nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, screenshotProbeTimeout)
 	defer cancel()
@@ -646,7 +779,8 @@ func (s *ReviewService) probeScreenshots(ctx context.Context, integrationID stri
 	completed := true
 	probedBytes := int64(0)
 	var contentHashes []string
-	for _, ref := range refs {
+	var fetches []screenshotFetch
+	for pos, ref := range refs {
 		// 单张限时：挂死图只吃掉自己的时限，还有剩余预算就继续试下一张；
 		// 总预算吃满才放弃（剩下的引用继续探测只会继续超时，同步循环还在等）。
 		attemptCtx, cancel := context.WithTimeout(ctx, screenshotProbeAttemptTimeout)
@@ -680,6 +814,7 @@ func (s *ReviewService) probeScreenshots(ctx context.Context, integrationID stri
 				err = fmt.Errorf("%w: %v", githubmedia.ErrLocalCache, hashErr)
 			} else {
 				contentHashes = append(contentHashes, sum)
+				fetches = append(fetches, screenshotFetch{pos: pos, ref: ref, cached: cached})
 			}
 			if probedBytes > screenshotProbeBudget {
 				// 预算触发显式标记未探完：零成功时收敛到 probeUnavailable 而
@@ -725,15 +860,15 @@ func (s *ReviewService) probeScreenshots(ctx context.Context, integrationID stri
 		if len(contentHashes) == len(refs) {
 			probe.contentFP = screenshotContentFingerprintFromHashes(contentHashes)
 		}
-		return probe
+		return probe, fetches
 	}
 	if fetchFailed {
-		return screenshotProbe{result: probeUnavailable, reason: firstFetchFailReason}
+		return screenshotProbe{result: probeUnavailable, reason: firstFetchFailReason}, fetches
 	}
 	if !completed {
-		return screenshotProbe{result: probeUnavailable, reason: firstReason}
+		return screenshotProbe{result: probeUnavailable, reason: firstReason}, fetches
 	}
-	return screenshotProbe{result: probeNone}
+	return screenshotProbe{result: probeNone}, fetches
 }
 
 // AgentScreenshots GET /api/review-agent/runs/:runId/screenshots：仅视觉运行可用。
@@ -760,13 +895,18 @@ func (s *ReviewService) AgentScreenshots(ctx context.Context, runID string) ([]a
 		return nil, false, err
 	}
 
-	// changed：本轮指纹与上一轮视觉运行（更早 round）绑定 head 的资产指纹
-	// 比较。上一轮运行只在本 (项目, 集成) 账本内找——资产本身按 (集成, 仓库)
-	// 归一共享，「何时做过视觉审查」属于执行态，按项目分区。
+	// changed：本轮指纹与上一轮**结论为 completed** 的视觉运行（更早 round）
+	// 绑定 head 的资产指纹比较。上一轮运行只在本 (项目, 集成) 账本内找——
+	// 资产本身按 (集成, 仓库) 归一共享，「何时做过视觉审查」属于执行态，按
+	// 项目分区。只认 completed（R14/R15 审查）：在途轮次还没有结论，failed/
+	// timed_out/cancelled 也没有——准备阶段失败的运行从未把截图交给审查员，
+	// 无人看过其资产集，误当参照会让「同集合重跑」误判成未变化；manual
+	// rerun/评论唤醒的重叠轮次里在途是正常态，同理不作参照。没有合格参照
+	// 时 prevRefs 为空，changed 按默认 true，宁误报变化。
 	changed := true
 	var prevRuns []model.ReviewRun
-	if err := s.db.Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ? AND kind = ? AND round_number < ?",
-		run.ProjectID, run.RepoFullName, run.PRNumber, run.IntegrationID, model.ReviewKindVisual, run.RoundNumber).
+	if err := s.db.Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ? AND kind = ? AND round_number < ? AND status = ? AND finished_at IS NOT NULL",
+		run.ProjectID, run.RepoFullName, run.PRNumber, run.IntegrationID, model.ReviewKindVisual, run.RoundNumber, model.ReviewRunCompleted).
 		Order("round_number DESC").Limit(1).Find(&prevRuns).Error; err != nil {
 		return nil, false, errs.ErrInternal
 	}
@@ -786,13 +926,24 @@ func (s *ReviewService) AgentScreenshots(ctx context.Context, runID string) ([]a
 		//     前的全量（同一 head 上超过上限），多出来的旧 URL 同样会顶住指纹。
 		// 注意不按「当前描述」过滤：描述里真的删掉某张截图时集合确实变了，
 		// 那必须判 changed=true，抹掉它等于把「截图被删」报成未变化。
+		// 「本轮新行」的截止是 min(上一轮完成时刻, 本轮创建时刻)（R12/R13
+		// 审查）：探测/建运行跨同步时，探测行落在本轮创建之前——只按本轮
+		// 创建时刻剔除会把它们误算进上一轮；轮次可重叠时（manual rerun 不
+		// 看在途运行恒开新轮）新轮创建可能早于上一轮完成，只按上一轮完成
+		// 时刻剔除又会把新轮自己的早期行算进上一轮。两者取更早者：上一轮
+		// 完成前且本轮创建前写的行按上一轮证据保留，其余都属本轮，宁误报
+		// 变化不误报未变化。参照运行必已完成（查询已过滤），完成时刻非空。
+		prevCutoff := run.CreatedAt
+		if prevRuns[0].FinishedAt.Before(run.CreatedAt) {
+			prevCutoff = *prevRuns[0].FinishedAt
+		}
 		prevRefs := make([]screenshotRef, 0, maxScreenshotsPerPR)
 		for _, a := range prevAssets {
-			// 只取「本轮开始之前就存在」的行：ensureAssets 在比较之前已经把本轮
-			// 新收集的 URL 写进同一张表（同 head 的 manual rerun 也会再跑视觉
-			// 轮），不过滤就会把新增截图算进上一轮——两侧指纹相等，changed
-			// 误判为 false，新增的那张不会被提示。
-			if a.CreatedAt.After(run.CreatedAt) {
+			// 只取「上一轮完成之前就存在」的行：ensureAssets 在比较之前已经
+			// 把本轮新收集的 URL 写进同一张表（同 head 的 manual rerun 也会
+			// 再跑视觉轮），不过滤就会把新增截图算进上一轮——两侧指纹相等，
+			// changed 误判为 false，新增的那张不会被提示。
+			if a.CreatedAt.After(prevCutoff) {
 				continue
 			}
 			// 旧版本写入的行可能带 #fragment（规整规则是后来才落地的），而
@@ -835,37 +986,115 @@ func (s *ReviewService) AgentScreenshots(ctx context.Context, runID string) ([]a
 			items = append(items, item)
 			continue
 		}
+		// 路径在但文件缺失（重下失败的保留引用，R12）：给出原因不给 URL，
+		// 审查员据此记入 unmeasurable（R13 审查意见）。取图端点对同一行按
+		// 40406 带同一原因返回（见 AgentScreenshotImage），不会落 500——列表
+		// 这里仍不给 URL，是因为审查员不需要为一个已知不可用项发起请求。
+		if assetFileMissing(a.StoragePath) {
+			reason := a.Error
+			if reason == "" {
+				reason = "截图文件缺失，重下未成功"
+			}
+			item.Error = api.Ptr(reason)
+			items = append(items, item)
+			continue
+		}
 		// 图片地址带本轮 run 作用域（INT-169）：端点按 runId+令牌双重绑定，
 		// URL 只能取本运行 id，不能从其他运行借。
-		item.Url = "/api/review-agent/runs/" + runID + "/screenshots/" + a.ID
+		item.OriginalUrl = api.Ptr("/api/review-agent/runs/" + runID + "/screenshots/" + a.ID)
+		// url 默认给审查尺寸（长边 ≤1536 的 JPEG，INT-186）：审查代理逐张读原图
+		// 会撑爆模型网关的请求上限；original_url 保留按需取原图的途径。下载失败
+		// 行不走这里，可选字段全部缺省。
+		item.Url = api.Ptr(*item.OriginalUrl + reviewScaleQuery())
+		if w, h := reviewScreenshotDims(a.StoragePath); w > 0 && h > 0 {
+			item.Width = api.Ptr(w)
+			item.Height = api.Ptr(h)
+		}
+		// served 标示该地址返回哪种字节（判定与取图端点共用同一份逻辑
+		// reviewScreenshotServed，两处永不打架）：scaled = 预算内的审查尺寸变体；
+		// original_light = 原图字节但落在预算内（可正常读，最常见证据场景）；
+		// original_heavy = 原图字节且不受预算保护（超 64MP、嗅探/头解码不出，
+		// 审查员据此尽量不读）。
+		item.Served = api.Ptr(api.ReviewAgentScreenshotServed(reviewScreenshotServed(a.StoragePath, reviewScreenshotMaxEdge)))
 		items = append(items, item)
 	}
 	return items, changed, nil
 }
 
-// AgentScreenshotImage 取图片本体：(路径, MIME)。仅视觉运行；校验资产与运行
-// 同 (集成,repo,pr,head)；下载失败或路径缺失 → 40406。
-func (s *ReviewService) AgentScreenshotImage(ctx context.Context, runID, assetID string) (string, string, error) {
+// AgentScreenshotFile 图片端点的下发布：Data 非 nil 时是服务端重新编码的
+// 缩放变体字节（整块写响应）；nil 时按 Path 流式下发原文件。
+type AgentScreenshotFile struct {
+	Path string
+	MIME string
+	Data []byte
+}
+
+// AgentScreenshotImage 取图片本体：scale 为 nil（无缩放参数）按原文件路径与
+// 存储 mime 返回；非 nil 时先过共享判定（reviewScreenshotServed）：
+// original_light/original_heavy 原图透传（与清单承诺一致）；served=scaled 行
+// 解码重编码，变体生成失败（像素解码/编码/字节闸）不再静默降级原图——清单已
+// 承诺该地址是预算内变体，降级等于把十几 MB 塞给代理，返回明确错误（40406）
+// 并记 Warn，代理读到错误记 unmeasurable。文件打不开（含不存在）按 40406。
+// 仅视觉运行；校验资产与运行同 (集成,repo,pr,head)；下载失败或路径缺失 →
+// 40406。
+func (s *ReviewService) AgentScreenshotImage(ctx context.Context, runID, assetID string, scale *reviewScaleParams) (AgentScreenshotFile, error) {
 	run, err := s.loadAgentRun(ctx, runID)
 	if err != nil {
-		return "", "", err
+		return AgentScreenshotFile{}, err
 	}
 	if run.Kind != model.ReviewKindVisual {
-		return "", "", errs.ErrCredentialNotAllowed
+		return AgentScreenshotFile{}, errs.ErrCredentialNotAllowed
 	}
 	var asset model.ReviewAsset
 	if err := s.db.WithContext(ctx).
 		Where("id = ? AND integration_id = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ?",
 			assetID, run.IntegrationID, run.RepoFullName, run.PRNumber, run.HeadSHA).
 		First(&asset).Error; err != nil {
-		return "", "", errs.ErrIssueAssetNotFound
+		return AgentScreenshotFile{}, errs.ErrIssueAssetNotFound
 	}
 	if asset.StoragePath == "" {
-		return "", "", errs.ErrIssueAssetNotFound
+		return AgentScreenshotFile{}, errs.ErrIssueAssetNotFound
+	}
+	// 路径在而文件缺失（重下失败的保留引用，R12）：按 404 带出已记录的原
+	// 因，而不是让 handler 的 os.Open 落成 500「服务器内部错误」——卷瞬时
+	// 不可用期间对外是「截图不可用」，不是服务端故障（R13 审查意见）。
+	if assetFileMissing(asset.StoragePath) {
+		reason := asset.Error
+		if reason == "" {
+			reason = "截图文件缺失"
+		}
+		return AgentScreenshotFile{}, errs.New(errs.ErrIssueAssetNotFound.Code, reason)
 	}
 	mime := asset.MimeType
 	if mime == "" {
 		mime = "application/octet-stream"
 	}
-	return asset.StoragePath, mime, nil
+	original := AgentScreenshotFile{Path: asset.StoragePath, MIME: mime}
+	if scale == nil {
+		return original, nil
+	}
+	data, scaledMime, err := scaleReviewScreenshot(ctx, asset.StoragePath, scale)
+	if err != nil {
+		if errors.Is(err, errReviewScaleTooLarge) {
+			// 防御分支：超像素预算在共享判定里已按 original_heavy 标示透传，走
+			// 到这里只可能是文件在判定与解码之间被换——仍按原图透传（流式下发
+			// 不经内存解码，始终安全），不把清单已下发的地址变成 404。
+			return original, nil
+		}
+		// served=scaled 的行变体生成失败（像素解码/编码/字节闸）：不静默降级
+		// 原图——清单承诺该地址是预算内变体，降级等于把十几 MB 塞给代理。返回
+		// 明确错误（40406 语义），代理读到错误记 unmeasurable；日志带 run/asset
+		// 便于定位，错误文本至多含本地缓存路径，无其他敏感信息。
+		s.logger.Warn("审查截图变体生成失败", zap.String("run_id", runID),
+			zap.String("asset_id", assetID), zap.String("error", err.Error()))
+		return AgentScreenshotFile{}, errs.ErrIssueAssetNotFound
+	}
+	if data == nil {
+		// 无需变体（original_light/original_heavy 原图透传，判定与清单 served
+		// 标示同源）：按原图字节透传。
+		return original, nil
+	}
+	original.Data = data
+	original.MIME = scaledMime
+	return original, nil
 }

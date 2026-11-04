@@ -3,13 +3,16 @@
 //  1. 面只有三个，规则按面定，不按调用点定：
 //     - 媒体代理面（defaultCacheSubdir）：缓存可丢弃。TTL 回收、scope 标记
 //     缺失时整目录清空、损坏条目回收，只发生在这里。
-//     - 审查截图面（review-screenshot-cache）：缓存不可丢弃——.bin 是
-//     review_assets 持久资产（storage_path 直指文件、ensureAssets 不重下）。
-//     任何代码路径不得删除它的条目；启动只建目录+补标记；无 TTL 删除、
-//     无 purge、无条目回收 sweeper（media-*.tmp 清理是唯一例外，
-//     sweepStaleTmpFiles 不触碰 .bin/.json）；读路径命中即返回（不过期、
-//     不因类型复核 miss）；重下绝不覆盖已落盘的 .bin（fetch 入口护栏：
-//     存在即返回现有字节，类型判不出时 mime 留空，截图端点按魔数兜底）。
+//     - 审查截图面（review-screenshot-cache）：缓存不可随意丢弃——.bin 是
+//     review_assets 持久资产（storage_path 直指文件、ensureAssets 复核缺失
+//     才重下）。删除只有一条 sanctioned 路径：SweepUnreferencedEntries
+//     （按 review_assets 行做引用计数 + mtime 宽限，由 service 层保留策略
+//     调用，INT-184）；除此之外任何代码路径不得删除它的条目；无 TTL 删除、
+//     无 purge（media-*.tmp 清理是唯一例外，sweepStaleTmpFiles 不触碰
+//     .bin/.json）；读路径命中即返回（不过期、不因类型复核 miss）且刷新
+//     条目 mtime（行账宽限判定的依据）；重下绝不覆盖已落盘的 .bin（fetch
+//     入口护栏：存在即返回现有字节，类型判不出时 mime 留空，截图端点按
+//     魔数兜底）。
 //     - 无缓存出口（issue assets、avatars、screenshot content、crop）：不落
 //     缓存目录，只施加同源硬化头与「attachment 或 inline 图片档」判据（按
 //     出口语义：下载类 attachment，截图/裁剪类刻意保留 inline）。
@@ -252,7 +255,8 @@ type ProxyService struct {
 	client   *http.Client
 	cacheDir string
 	// cacheSubdir 该服务实例的缓存面子目录；读路径按它区分媒体代理面（TTL
-	// 与退役生效）和 review 截图面（持久资产，命中即返回，不过期不复核）。
+	// 与退役生效）和 review 截图面（持久资产，命中即返回、不过期不复核，
+	// 回收只走行账保留策略的 SweepUnreferencedEntries）。
 	cacheSubdir       string
 	cacheTTL          time.Duration
 	maxCacheEntrySize int64
@@ -307,6 +311,16 @@ type ProxyService struct {
 	metaReadFailMu     sync.Mutex
 	metaReadFailAt     map[string]time.Time
 	metaReadFailLogger *slog.Logger
+	// sweepDirReadFailAt/sweepLogger 行账回收的目录枚举失败限频告警（R7 审
+	// 查）：ReadDir 失败会让保留策略静默失效（不删即不回收），限频 warn 是
+	// 管理员唯一的感知入口。
+	sweepDirReadFailAt map[string]time.Time
+	sweepLogger        *slog.Logger
+}
+
+// WithSweepLogger 行账回收的目录枚举失败告警 logger（生产装配用）。
+func WithSweepLogger(logger *slog.Logger) ProxyOption {
+	return func(cfg *serviceConfig) { cfg.sweepLogger = logger }
 }
 
 // metaReadFailLogInterval 同一 cacheDir 的 meta 读失败告警最小间隔。
@@ -374,6 +388,7 @@ type serviceConfig struct {
 	// ProxyService.githubWebHost）：凭证闸门据此放行部署实例自己的附件路径，
 	// 空值按公共 GitHub 处理。
 	githubWebHost string
+	sweepLogger   *slog.Logger
 }
 
 // ProxyOption NewProxyService 的可选装配项；生产装配不传即为默认 GitHub
@@ -425,7 +440,7 @@ func NewProxyService(cacheRoot string, opts ...ProxyOption) *ProxyService {
 // 旧行为一致。
 // trustedPrivateHostsFunc 是可选的动态可信主机来源（如允许私网的 Forgejo
 // 集成主机清单）——每次拨号现取，与静态名单取并集，传 nil 与旧行为一致。
-func NewReviewMediaService(cacheRoot, githubWebHost string, trustedPrivateHosts []string, trustedPrivateHostsFunc func() []string) *ProxyService {
+func NewReviewMediaService(cacheRoot, githubWebHost string, trustedPrivateHosts []string, trustedPrivateHostsFunc func() []string, opts ...ProxyOption) *ProxyService {
 	return newService(cacheRoot, serviceConfig{
 		cacheSubdir:             "review-screenshot-cache",
 		allowURL:                allowPublicImageHost,
@@ -435,7 +450,7 @@ func NewReviewMediaService(cacheRoot, githubWebHost string, trustedPrivateHosts 
 		trustedPrivateHosts:     trustedPrivateHosts,
 		trustedPrivateHostsFunc: trustedPrivateHostsFunc,
 		githubWebHost:           githubWebHost,
-	})
+	}, opts...)
 }
 
 // allowPublicImageHost 截图面的 host 准入：任意非空 host 即放行（真正的
@@ -444,7 +459,12 @@ func allowPublicImageHost(parsed *url.URL) bool {
 	return parsed != nil && strings.TrimSpace(parsed.Hostname()) != ""
 }
 
-func newService(cacheRoot string, cfg serviceConfig) *ProxyService {
+func newService(cacheRoot string, cfg serviceConfig, opts ...ProxyOption) *ProxyService {
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&cfg)
+		}
+	}
 	if cfg.cacheSubdir == "" {
 		cfg.cacheSubdir = defaultCacheSubdir
 	}
@@ -480,6 +500,7 @@ func newService(cacheRoot string, cfg serviceConfig) *ProxyService {
 	}
 	s := &ProxyService{
 		client:            cfg.client,
+		sweepLogger:       cfg.sweepLogger,
 		cacheDir:          filepath.Join(cacheRoot, cfg.cacheSubdir),
 		cacheSubdir:       cfg.cacheSubdir,
 		cacheTTL:          cfg.cacheTTL,
@@ -492,8 +513,8 @@ func newService(cacheRoot string, cfg serviceConfig) *ProxyService {
 		download:          make(map[string]*downloadGate),
 	}
 	// purge 只允许媒体代理面跑（按 cacheSubdir 判定）：review 截图面的目录
-	// 是 review_assets 的持久存储（无副本、ensure 不会重下），标记缺失时清
-	// 空等于删光历史审查截图。
+	// 是 review_assets 的持久存储（无副本、ensure 只在文件缺失时重下，上游
+	// 已删时补不回来），标记缺失时清空等于删光历史审查截图。
 	s.purgeLegacyCacheEntries(cfg.cacheSubdir == defaultCacheSubdir)
 	return s
 }
@@ -507,8 +528,8 @@ func (s *ProxyService) StartExpiredSweeper() {
 }
 
 // StartStaleTmpSweeper 启动后台 media-*.tmp 清理（随过期扫描一起跑）。给不
-// 接过期回收的面用（review 截图面：.bin/.json 是持久资产不回收，但中断下载
-// 的 tmp 残留同样要清）。
+// 接过期回收的面用（review 截图面：.bin/.json 不接 TTL 回收，回收只走行账
+// 保留策略的 SweepUnreferencedEntries，但中断下载的 tmp 残留同样要清）。
 func (s *ProxyService) StartStaleTmpSweeper() {
 	go func() {
 		s.sweepStaleTmpFiles(time.Now().UTC())
@@ -557,7 +578,8 @@ func (s *ProxyService) sweepExpiredEntries() {
 	// 面边界（不变量第 1 条）：条目回收只存在于媒体代理面。护栏做在函数入
 	// 口而不是 main.go 装配——StartExpiredSweeper/SweepExpiredEntries 对所
 	// 有实例可见，误接或手动触发 review 实例就会把持久审查截图删成永久
-	// 404（storage_path 直指文件、ensureAssets 不重下）。
+	// 404（storage_path 直指文件、ensureAssets 只在文件缺失时重下，上游已
+	// 删时补不回来）。
 	if s.cacheSubdir != defaultCacheSubdir {
 		return
 	}
@@ -787,8 +809,9 @@ func (s *ProxyService) sweepExpiredEntries() {
 // 口径：只统计 data 与写盘中转（`.bin` + `media-*.tmp`），meta 每条几百字
 // 节、可忽略。
 //
-// 截图面（review-screenshot-cache）不经过这道闸：它是持久资产面，永不删
-// 除，上界由 maxScreenshotsPerPR × 单文件上限给出，见 service 层。
+// 截图面（review-screenshot-cache）不经过这道闸：它是持久资产面，回收只
+// 走行账保留策略（INT-184），单 head 上界由 maxScreenshotsPerPR × 单文件上
+// 限给出，见 service 层。
 type cacheReservation struct {
 	s       *ProxyService
 	bytes   int64
@@ -1006,6 +1029,199 @@ func (s *ProxyService) sweepStaleTmpFiles(now time.Time) {
 	}
 }
 
+// SweepUnreferencedEntries review 截图面的行账回收（INT-184，面内唯一的
+// sanctioned 删除路径）：service 层保留策略先删退役的 review_assets 行，
+// 再以 isReferenced 回答「该 .bin 是否仍有行引用」，这里负责目录遍历与删
+// 除本身。判定与删除分两级：
+//
+//   - meta 可读（闸 key = entry.URL）：持该 key 的下载闸（与 fetchAndCache
+//     同一把锁）后重问引用、重 stat mtime，再删。行的插入路径必然先经闸内
+//     的 touch/rename（新下载、ensureAssets/探测的缓存命中都在闸内刷新
+//     mtime），插入本身在闸释放后发生——闸内重 stat 看到旧 mtime 说明插
+//     入的 touch 不在最近，宽限兜住的是 touch 与行插入之间的窗口。闸被长
+//     下载持有时本轮跳过，下轮再扫（与媒体面过期扫描同口径）。DirEntry.Info 可
+//     能是 ReadDir 时的快照（网络盘上尤其如此），一律以闸内 os.Stat 为准。
+//   - meta 读不出（写侧 rename data 后、WriteFile meta 前被杀的崩溃残留，
+//     或损坏 meta）：没有闸 key 可持，退回孤儿判据——新鲜 stat 的 mtime 超
+//     宽限且删除前最后重问引用仍无行才删。行的任何插入都由闸内 touch 先
+//     行刷新 mtime，宽限判定看到旧 mtime 即插入不在进行；残余的毫秒级窗
+//     口由 ensureAssets 的文件复核自愈（缺失按失败重下）。
+//
+// .bin 与同名 .json 一起删；meta 在而 data 不在的孤儿 meta 同规则回收
+// （URL 可读时同样持闸，删除前同样过引用复核与限量预算）。各步幂等：任意时点被杀，下一轮从同样的判定重
+// 新收敛。媒体面是 no-op：它有自己的 TTL 回收，误调不得删它的条目。
+func (s *ProxyService) SweepUnreferencedEntries(isReferenced func(binPath string) bool, grace time.Duration, now time.Time) int {
+	if s.cacheSubdir == defaultCacheSubdir || isReferenced == nil {
+		return 0
+	}
+	entries, err := os.ReadDir(s.cacheDir)
+	if err != nil {
+		// 同上：枚举失败让本轮文件回收整体跳过，限频 warn 留痕。
+		s.logSweepDirReadFail(err)
+		return 0
+	}
+	removed := 0
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasSuffix(name, ".bin") || strings.HasSuffix(name, ".gone") {
+			continue
+		}
+		binPath := filepath.Join(s.cacheDir, name)
+		metaPath := strings.TrimSuffix(binPath, ".bin") + ".json"
+		// 先判宽限再问引用：命中 touch 会刷新 mtime，新鲜候选既删不了也不
+		// 该扣限量预算（R8 审查意见——预算只花在真正可能删除的候选上）。
+		// stat 出错（ENOENT：data 已被并发删走，孤儿 meta 循环接手；其他错
+		// 误：判不了宽限就保守跳过）一律不动。
+		if info, err := os.Stat(binPath); err != nil || now.Sub(info.ModTime()) <= grace {
+			continue
+		}
+		if isReferenced(binPath) {
+			continue
+		}
+		key := s.gateKeyFromMeta(metaPath)
+		if key == "" {
+			// 崩溃残留/损坏 meta：无闸 key，孤儿判据兜底（见函数头注释）。
+			if s.unreferencedAndStale(binPath, isReferenced, grace, now) {
+				// 与持闸分支同序：data 删除失败（EIO/EACCES）时不删 meta——留
+				// 下 URL/Scope/闸 key 事实源下轮重试，不制造失去事实源的孤儿。
+				// 计数按 .bin（回收的字节），伴随的 meta 清理不计。
+				err := os.Remove(binPath)
+				if err == nil || errors.Is(err, os.ErrNotExist) {
+					removed++
+					_ = os.Remove(metaPath)
+				}
+			}
+			continue
+		}
+		gate := s.acquireDownloadLock(key)
+		select {
+		case gate.sem <- struct{}{}:
+		case <-time.After(5 * time.Second):
+			s.abandonDownloadLock(key, gate)
+			continue
+		}
+		if s.unreferencedAndStale(binPath, isReferenced, grace, now) {
+			// 先删 data 再删 meta（与媒体面同序）：meta 是条目可达性的事实
+			// 源。data 删除失败（EIO/EACCES）时不删 meta——留着 URL/Scope/闸
+			// key 与条目事实源，下轮重试；否则制造失去闸 key 的无 meta .bin，
+			// 只能退回更弱的孤儿判据。data 本就不在（ENOENT，上轮删到一半被
+			// 杀）时照常清 meta。
+			err := os.Remove(binPath)
+			if err == nil || errors.Is(err, os.ErrNotExist) {
+				removed++
+				_ = os.Remove(metaPath)
+			}
+		}
+		s.releaseDownloadLock(key, gate)
+	}
+	// 孤儿 meta（data 不在）：meta 可读时同样持闸复核；读不出时 mtime 超宽
+	// 限直接删（meta 不被任何行引用，删除不破坏可达证据）。
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasSuffix(name, ".json") || strings.HasSuffix(name, ".gone") {
+			continue
+		}
+		metaPath := filepath.Join(s.cacheDir, name)
+		binPath := strings.TrimSuffix(metaPath, ".json") + ".bin"
+		// 只有 ENOENT 才算 data 不在（与 service 层 assetFileMissing 同口径）：
+		// EIO/EACCES 下 .bin 可能仍在，删 meta 会拆散配对，条目失去
+		// mime/scope/闸 key 的事实源。
+		if _, err := os.Stat(binPath); err == nil || !errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		stale := func() bool {
+			info, err := os.Stat(metaPath)
+			return err == nil && now.Sub(info.ModTime()) > grace
+		}
+		key := s.gateKeyFromMeta(metaPath)
+		if key == "" {
+			// 删除前重读：meta 若被并发重写成可解析条目（同 URL 重新发布）
+			// 则不删——新条目的 data 已在重建，把它当孤儿是误判。行账引用
+			// 复核同口径（孤儿 meta 也扣限量预算，R8 审查意见）。
+			if s.gateKeyFromMeta(metaPath) == "" && stale() && !isReferenced(binPath) {
+				if os.Remove(metaPath) == nil {
+					removed++
+				}
+			}
+			continue
+		}
+		gate := s.acquireDownloadLock(key)
+		select {
+		case gate.sem <- struct{}{}:
+		case <-time.After(5 * time.Second):
+			s.abandonDownloadLock(key, gate)
+			continue
+		}
+		// 闸内复核：写侧发布全程持闸，能拿到闸说明发布不在进行——发布完成
+		// 则 data 在或 meta 已换新（重读闸 key 不一致），都不删。行账引用
+		// 复核同口径（孤儿 meta 也扣限量预算，R8 审查意见）。
+		if s.gateKeyFromMeta(metaPath) == key {
+			if _, err := os.Stat(binPath); errors.Is(err, os.ErrNotExist) && stale() && !isReferenced(binPath) {
+				if os.Remove(metaPath) == nil {
+					removed++
+				}
+			}
+		}
+		s.releaseDownloadLock(key, gate)
+	}
+	return removed
+}
+
+// CacheDir 返回缓存目录路径（service 层行账保留策略的同源自检用）。
+func (s *ProxyService) CacheDir() string { return s.cacheDir }
+
+// CountCacheEntries 返回缓存目录里的 .bin/.json 候选条目数（同源自检用；
+// 目录读不了返回 0——读不了时回收路径本身也走不通，交由上层告警口径处
+// 理）。
+func (s *ProxyService) CountCacheEntries() int {
+	entries, err := os.ReadDir(s.cacheDir)
+	if err != nil {
+		// 枚举失败会让保留策略静默失效（不删即不回收），限频 warn 是管理员
+		// 唯一的感知入口（R7 审查意见）。
+		s.logSweepDirReadFail(err)
+		return 0
+	}
+	n := 0
+	for _, e := range entries {
+		name := e.Name()
+		if strings.HasSuffix(name, ".bin") || strings.HasSuffix(name, ".json") {
+			n++
+		}
+	}
+	return n
+}
+
+// gateKeyFromMeta 从 meta 还原下载闸的 key（scopedCacheID 的底材是原始
+// URL，scope 在 meta 里但闸 map 以 URL 为键——与 fetchAndCache 的
+// acquireDownloadLock(normalized) 同键）。读不出（缺失/损坏/空 URL）返回
+// 空串，调用方走无闸的孤儿判据。
+func (s *ProxyService) gateKeyFromMeta(metaPath string) string {
+	metaBytes, err := os.ReadFile(metaPath)
+	if err != nil {
+		return ""
+	}
+	var entry cacheEntry
+	if json.Unmarshal(metaBytes, &entry) != nil || entry.URL == "" {
+		return ""
+	}
+	return entry.URL
+}
+
+// unreferencedAndStale 删除前的最终判定：无行引用且新鲜 stat 的 mtime 超宽
+// 限。不用 ReadDir 的缓存 Info（可能是目录读取时的快照）；引用在删除前最
+// 后重问一次，盖住快照到删除之间的行插入。
+func (s *ProxyService) unreferencedAndStale(binPath string, isReferenced func(string) bool, grace time.Duration, now time.Time) bool {
+	// 先 stat 后问：mtime 在闸内被并发续期（新命中）的候选直接跳过，不再
+	// 消耗一次引用复核；stat 与问询都无副作用，换序安全（R8 审查意见）。
+	info, err := os.Stat(binPath)
+	if err != nil || now.Sub(info.ModTime()) <= grace {
+		return false
+	}
+	// 删除前最后一次引用复核：闭包每次都真查库（闸已持有，插入在写侧释
+	// 放闸后才落账的行在此可见）。
+	return !isReferenced(binPath)
+}
+
 // restoreGoneBin 把隔离的旧字节原子放回 binPath。os.Link 不会覆盖已存在的
 // 目标：写侧恰好在该窗口发布了新 data 时 link 失败（EEXIST），旧字节直接
 // 丢弃——先 Stat 后 Rename 的两步恢复有 TOCTOU 窗口，会拿旧字节盖掉新 data
@@ -1028,7 +1244,8 @@ const legacyScopeMarker = ".cache-scope-v2"
 
 // purgeLegacyCacheEntries 旧 scope 标记缺失时的启动清场。只有媒体代理面
 // 允许整目录清空（guardedPurge）：review 截图面的目录是 review_assets 的持
-// 久存储（无副本、ensure 不会重下），删任何条目等于把历史审查截图变成永
+// 久存储（无副本、ensure 只在文件缺失时重下，上游已删时补不回来），删任何
+// 条目等于把历史审查截图变成永
 // 久 404——它只建目录并补写标记，不删、不拒读。标记 stat 出错（非 ENOENT
 // 的 EIO/权限）两个面都跳过——读不出标记不等于标记不存在，宁可不清理也
 // 不能误删持久资产。
@@ -1498,6 +1715,9 @@ func (s *ProxyService) fetchAndCache(ctx context.Context, rawURL, bearer, scope 
 			return media, nil
 		}
 		if info, statErr := os.Stat(cachePath); statErr == nil {
+			// 存在即返回现有字节（类型判不出时 mime 留空）：命中续期同样
+			// 生效，行插入路径的 mtime 必新。
+			s.touchReviewEntry(cachePath)
 			return &CachedMedia{
 				Metadata: cacheEntry{
 					URL:          normalized,
@@ -1858,6 +2078,7 @@ func (s *ProxyService) getCachedNormalized(normalized, scope string) (*CachedMed
 	}
 
 	entry.Size = info.Size()
+	s.touchReviewEntry(cachePath)
 	return &CachedMedia{
 		Metadata: entry,
 		Path:     cachePath,
@@ -1947,6 +2168,7 @@ func (s *ProxyService) servePersistedData(normalized, cachePath string) (*Cached
 		// 但同样不在读路径删文件。
 		return nil, false, nil
 	}
+	s.touchReviewEntry(cachePath)
 	return &CachedMedia{
 		Metadata: cacheEntry{
 			URL:          normalized,
@@ -1957,6 +2179,40 @@ func (s *ProxyService) servePersistedData(normalized, cachePath string) (*Cached
 		},
 		Path: cachePath,
 	}, true, nil
+}
+
+// logSweepDirReadFail 行账回收目录枚举失败的限频告警：同类告警间隔内只
+// 记一次，logger 未装配（测试）时静默。
+func (s *ProxyService) logSweepDirReadFail(err error) {
+	if s.sweepLogger == nil {
+		return
+	}
+	s.metaReadFailMu.Lock()
+	defer s.metaReadFailMu.Unlock()
+	if s.sweepDirReadFailAt == nil {
+		s.sweepDirReadFailAt = make(map[string]time.Time)
+	}
+	if last, ok := s.sweepDirReadFailAt[s.cacheDir]; ok && time.Since(last) < metaReadFailLogInterval {
+		return
+	}
+	s.sweepDirReadFailAt[s.cacheDir] = time.Now()
+	s.sweepLogger.Warn("缓存目录枚举失败，行账回收本轮跳过（权限/挂载/EIO 故障会让保留策略静默失效）",
+		"cache_dir", s.cacheDir, "error", err)
+}
+
+// touchReviewEntry review 截图面的命中续期（INT-184）：命中即刷新 .bin 的
+// mtime。保留策略按「行引用 + mtime 宽限」判定回收，而行的插入路径既包含
+// 新下载（rename 的 mtime 必新）也包含旧条目命中（ensureAssets/探测重试
+// 命中早已落盘的文件）——不刷新的话，宽限判定看不到「这个文件刚刚又被引
+// 用」，刚插入的行指向的文件会在同一轮扫描里被当成孤儿。媒体面不 touch：
+// 它的回收按 meta 年龄，热点图按每次浏览器读刷新会放大写盘。失败忽略：
+// 续期是尽力而为，下一轮命中还会再刷。
+func (s *ProxyService) touchReviewEntry(path string) {
+	if s.cacheSubdir == defaultCacheSubdir || path == "" {
+		return
+	}
+	now := time.Now().UTC()
+	_ = os.Chtimes(path, now, now)
 }
 
 // SniffImageType 供截图端点对 mime 为空/octet-stream 的持久资产按魔数兜底

@@ -64,13 +64,28 @@ func (h *ReviewAgentHandler) Screenshots(c *gin.Context) {
 }
 
 // ScreenshotImage GET /api/review-agent/runs/:runId/screenshots/:assetId
+// max/format/quality 任一给出时服务端出缩放变体（INT-186，清单默认给审查
+// 尺寸地址）；全空按原图字节流式下发。
 func (h *ReviewAgentHandler) ScreenshotImage(c *gin.Context) {
-	path, mime, err := h.reviewService.AgentScreenshotImage(c.Request.Context(), middleware.GetRunID(c), c.Param("assetId"))
+	scale, err := service.ParseReviewScaleQuery(c.Query("max"), c.Query("format"), c.Query("quality"))
+	if err != nil {
+		response.BadRequest(c, errs.ErrReviewResultInvalid.Code, "缩放参数非法: "+err.Error())
+		return
+	}
+	file, err := h.reviewService.AgentScreenshotImage(c.Request.Context(), middleware.GetRunID(c), c.Param("assetId"), scale)
 	if err != nil {
 		middleware.HandleAppError(c, err)
 		return
 	}
-	f, err := os.Open(path)
+	if file.Data != nil {
+		// 缩放变体是服务端重新编码的字节：同样的 egress 硬化头，整块写响应。
+		egress.inlineImageHeaders(c.Writer.Header())
+		c.Header("Content-Type", file.MIME)
+		c.Status(http.StatusOK)
+		_, _ = c.Writer.Write(file.Data)
+		return
+	}
+	f, err := os.Open(file.Path)
 	if err != nil {
 		middleware.HandleAppError(c, err)
 		return
@@ -84,8 +99,8 @@ func (h *ReviewAgentHandler) ScreenshotImage(c *gin.Context) {
 	egress.inlineImageHeaders(c.Writer.Header())
 	// 兜底 mime 为空/octet-stream 时按魔数重判（对账收在出口实现里）：判得出
 	// 就给具体类型（有 nosniff 也不会被嗅探利用），判不出保守原样下发。
-	mime = egress.ResolveImageMIME(f, mime)
-	c.Header("Content-Type", mime)
+	file.MIME = egress.ResolveImageMIME(f, file.MIME)
+	c.Header("Content-Type", file.MIME)
 	c.Status(http.StatusOK)
 	_, _ = io.Copy(c.Writer, f)
 }

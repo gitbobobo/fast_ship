@@ -560,6 +560,27 @@ func (e ReviewActivityIssueKind) Valid() bool {
 	}
 }
 
+// Defines values for ReviewAgentScreenshotServed.
+const (
+	OriginalHeavy ReviewAgentScreenshotServed = "original_heavy"
+	OriginalLight ReviewAgentScreenshotServed = "original_light"
+	Scaled        ReviewAgentScreenshotServed = "scaled"
+)
+
+// Valid indicates whether the value is a known member of the ReviewAgentScreenshotServed enum.
+func (e ReviewAgentScreenshotServed) Valid() bool {
+	switch e {
+	case OriginalHeavy:
+		return true
+	case OriginalLight:
+		return true
+	case Scaled:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for ReviewCodeFindingLevel.
 const (
 	Note ReviewCodeFindingLevel = "Note"
@@ -1481,6 +1502,24 @@ func (e UploadScreenshotMultipartBodyTheme) Valid() bool {
 	case UploadScreenshotMultipartBodyThemeDark:
 		return true
 	case UploadScreenshotMultipartBodyThemeLight:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ReviewAgentScreenshotImageParamsFormat.
+const (
+	Jpeg ReviewAgentScreenshotImageParamsFormat = "jpeg"
+	Png  ReviewAgentScreenshotImageParamsFormat = "png"
+)
+
+// Valid indicates whether the value is a known member of the ReviewAgentScreenshotImageParamsFormat enum.
+func (e ReviewAgentScreenshotImageParamsFormat) Valid() bool {
+	switch e {
+	case Jpeg:
+		return true
+	case Png:
 		return true
 	default:
 		return false
@@ -4371,14 +4410,29 @@ type ReviewAgentPullRequest struct {
 
 // ReviewAgentScreenshot defines model for ReviewAgentScreenshot.
 type ReviewAgentScreenshot struct {
-	// Error 下载/不可用原因；非空时 url 为空，审查员应记入 unmeasurable
+	// Error 下载/不可用原因；非空时无 url，审查员应记入 unmeasurable
 	Error *string `json:"error,omitempty"`
-	Id    string  `json:"id"`
-	Label string  `json:"label"`
 
-	// Url 指向本端点的图片路径（相对 server.public_url）；下载失败时为空串
-	Url string `json:"url"`
+	// Height 原图像素尺寸（JPEG 应用 EXIF 方向后）；解码失败或缺文件时字段缺省
+	Height *int   `json:"height,omitempty"`
+	Id     string `json:"id"`
+	Label  string `json:"label"`
+
+	// OriginalUrl 原图地址（无缩放参数，即本端点不带 query）；下载失败时字段缺省
+	OriginalUrl *string `json:"original_url,omitempty"`
+
+	// Served 该地址返回哪种字节：scaled = 审查尺寸缩放变体（长边 ≤1536 的 JPEG，字节预算尽力压进单张 500KB：JPEG 降质量、必要时降边；病态输入兑底取最小一份）；original_light = 原图字节但在预算内（长边 ≤1536 且文件 ≤500KB，可正常读）；original_heavy = 原图字节且不受预算保护（宽×高 >6400 万像素、动画 WebP、嗅探/头解码不出或文件打不开，尽量不读）。有 StoragePath 的行必有值；下载失败行字段缺省
+	Served *ReviewAgentScreenshotServed `json:"served,omitempty"`
+
+	// Url 审查尺寸地址：指向本端点并带缩放参数；served=scaled 的行返回长边 ≤1536 的 JPEG，original_* 的行返回原图字节；下载失败时字段缺省
+	Url *string `json:"url,omitempty"`
+
+	// Width 原图像素尺寸（JPEG 应用 EXIF 方向后）；解码失败或缺文件时字段缺省
+	Width *int `json:"width,omitempty"`
 }
+
+// ReviewAgentScreenshotServed 该地址返回哪种字节：scaled = 审查尺寸缩放变体（长边 ≤1536 的 JPEG，字节预算尽力压进单张 500KB：JPEG 降质量、必要时降边；病态输入兑底取最小一份）；original_light = 原图字节但在预算内（长边 ≤1536 且文件 ≤500KB，可正常读）；original_heavy = 原图字节且不受预算保护（宽×高 >6400 万像素、动画 WebP、嗅探/头解码不出或文件打不开，尽量不读）。有 StoragePath 的行必有值；下载失败行字段缺省
+type ReviewAgentScreenshotServed string
 
 // ReviewCodeFinding defines model for ReviewCodeFinding.
 type ReviewCodeFinding struct {
@@ -8515,6 +8569,21 @@ type ReviewAgentScreenshots200JSONResponseBody struct {
 	// Message 人类可读信息；成功时为 "success"
 	Message string `json:"message"`
 }
+
+// ReviewAgentScreenshotImageParams defines parameters for ReviewAgentScreenshotImage.
+type ReviewAgentScreenshotImageParams struct {
+	// Max 三个参数均未提供时返回原图字节；任一提供时其余取默认（max 1536、format jpeg、quality 80）。取值收进 [320,2000]；超过原图长边不放大按原图返回（长边在目标内但文件超 500KB 的除外——按原尺寸重编码压预算）；宽×高超过 6400 万像素的原图不做缩放按原图透传
+	Max *int `form:"max,omitempty" json:"max,omitempty"`
+
+	// Format 缩放变体编码格式；省略 jpeg
+	Format *ReviewAgentScreenshotImageParamsFormat `form:"format,omitempty" json:"format,omitempty"`
+
+	// Quality JPEG 质量 30-95，省略 80
+	Quality *int `form:"quality,omitempty" json:"quality,omitempty"`
+}
+
+// ReviewAgentScreenshotImageParamsFormat defines parameters for ReviewAgentScreenshotImage.
+type ReviewAgentScreenshotImageParamsFormat string
 
 // ListReviewProjects200JSONResponseBody_Data defines parameters for ListReviewProjects.
 type ListReviewProjects200JSONResponseBody_Data struct {

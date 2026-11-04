@@ -726,8 +726,8 @@ func TestSweepExpiredEntriesRecalibratesCapacity(t *testing.T) {
 	}
 }
 
-// 截图面不经过容量准入：它是持久资产面，永不删除，上界由张数与探测预算给
-// 出。给它一个形同虚设的上限也必须照常落盘。
+// 截图面不经过容量准入：它是持久资产面，回收只走行账保留策略（INT-184），
+// 上界由张数与探测预算给出。给它一个形同虚设的上限也必须照常落盘。
 func TestReviewFaceSkipsCapacityAdmission(t *testing.T) {
 	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/png")
