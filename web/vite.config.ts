@@ -38,5 +38,14 @@ export default defineConfig({
     pool: "forks",
     globals: true,
     setupFiles: "./src/test/setup.ts",
+    server: {
+      deps: {
+        // @uiw/react-md-editor 的 ESM 里 import CSS（自身 markdown-editor.css
+        // 与 react-markdown-preview 的 styles），外部化时落到 node 原生 loader
+        // 直接报 Unknown file extension ".css"。内联进 vite 转换管线，CSS 按
+        // 测试默认策略 stub，不实际加载。
+        inline: [/@uiw\/react-md-editor/, /@uiw\/react-markdown-preview/],
+      },
+    },
   },
 })

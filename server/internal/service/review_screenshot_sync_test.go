@@ -920,7 +920,7 @@ func TestProbeScreenshotsAttemptTimeoutLetsLaterScreensThrough(t *testing.T) {
 
 	body := "![a](" + hangURL + ") ![b](" + okURL + ")"
 	start := time.Now()
-	probe := review.probeScreenshots(context.Background(), model.ForgeIntegrationBuiltinGitHubID, 1, body)
+	probe, _ := review.probeScreenshots(context.Background(), model.ForgeIntegrationBuiltinGitHubID, 1, body)
 	elapsed := time.Since(start)
 
 	if probe.result != probeReady {
@@ -958,7 +958,7 @@ func TestProbeScreenshotsAllBlockedStopsAtBudget(t *testing.T) {
 	}()
 
 	start := time.Now()
-	probe := review.probeScreenshots(context.Background(), model.ForgeIntegrationBuiltinGitHubID, 1, strings.Join(refs, " "))
+	probe, _ := review.probeScreenshots(context.Background(), model.ForgeIntegrationBuiltinGitHubID, 1, strings.Join(refs, " "))
 	elapsed := time.Since(start)
 
 	if probe.result != probeUnavailable {
@@ -1138,7 +1138,8 @@ func TestScreenshotErrorText(t *testing.T) {
 
 // 字节预算：单次探测拉进缓存的总字节超限时停在触发的那张——已有成功图
 // 则 probeReady + 部分指纹，未探的引用本轮不再拉。时间预算管不住快速回源
-// 的大图，而 review 截图面是持久资产，字节必须有自己的一道闸。
+// 的大图，而 review 截图面回收滞后至少 30 天（行账保留策略），字节必须有
+// 自己的一道闸。
 func TestProbeScreenshotsByteBudgetStopsAfterLimit(t *testing.T) {
 	e := newReviewEngineEnv(t)
 	review := e.withT3(nil, e.media, nil)
@@ -1154,7 +1155,7 @@ func TestProbeScreenshotsByteBudgetStopsAfterLimit(t *testing.T) {
 	for i := 0; i < 4; i++ {
 		lines = append(lines, fmt.Sprintf("![s%d](https://uiv.example.com/f/%d.png)", i, i))
 	}
-	probe := review.probeScreenshots(context.Background(), model.ForgeIntegrationBuiltinGitHubID, 1, strings.Join(lines, "\n\n"))
+	probe, _ := review.probeScreenshots(context.Background(), model.ForgeIntegrationBuiltinGitHubID, 1, strings.Join(lines, "\n\n"))
 
 	if probe.result != probeReady {
 		t.Fatalf("probe = %+v, want probeReady（预算触发前已有成功图）", probe)
@@ -1185,7 +1186,7 @@ func TestProbeScreenshotsByteBudgetSkipsCacheHits(t *testing.T) {
 	for i := 0; i < 4; i++ {
 		lines = append(lines, fmt.Sprintf("![s%d](https://uiv.example.com/f/%d.png)", i, i))
 	}
-	probe := review.probeScreenshots(context.Background(), model.ForgeIntegrationBuiltinGitHubID, 1, strings.Join(lines, "\n\n"))
+	probe, _ := review.probeScreenshots(context.Background(), model.ForgeIntegrationBuiltinGitHubID, 1, strings.Join(lines, "\n\n"))
 
 	if probe.result != probeReady {
 		t.Fatalf("probe = %+v, want probeReady", probe)
@@ -1213,7 +1214,7 @@ func TestProbeScreenshotsByteBudgetNeverNone(t *testing.T) {
 	}
 	e.media.cached = githubmedia.CachedImage(path, "image/png", 300<<20)
 
-	probe := review.probeScreenshots(context.Background(), model.ForgeIntegrationBuiltinGitHubID, 1,
+	probe, _ := review.probeScreenshots(context.Background(), model.ForgeIntegrationBuiltinGitHubID, 1,
 		"![s](https://uiv.example.com/f/x.png)")
 
 	if probe.result != probeReady {
@@ -1238,7 +1239,7 @@ func TestProbeScreenshotsByteBudgetSettlesEvenWhenHashFails(t *testing.T) {
 	for i := 0; i < 4; i++ {
 		lines = append(lines, fmt.Sprintf("![s%d](https://uiv.example.com/f/%d.png)", i, i))
 	}
-	probe := review.probeScreenshots(context.Background(), model.ForgeIntegrationBuiltinGitHubID, 1, strings.Join(lines, "\n\n"))
+	probe, _ := review.probeScreenshots(context.Background(), model.ForgeIntegrationBuiltinGitHubID, 1, strings.Join(lines, "\n\n"))
 
 	if e.media.anonCalls != 1 {
 		t.Fatalf("anonCalls = %d, want 1（第一张 300 MiB 超预算即停，不得因哈希失败继续）", e.media.anonCalls)

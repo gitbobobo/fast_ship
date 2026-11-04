@@ -181,7 +181,7 @@ func TestProbeScreenshotsClassifiesNotAnImage(t *testing.T) {
 	// 全部「不是图」→ probeNone。
 	e.media.failURLs = map[string]error{badge: githubmedia.ErrUnsupportedUpstreamMedia}
 	e.media.anonErr = githubmedia.ErrUnsupportedUpstreamMedia
-	probe := review.probeScreenshots(context.Background(), model.ForgeIntegrationBuiltinGitHubID, 1, body)
+	probe, _ := review.probeScreenshots(context.Background(), model.ForgeIntegrationBuiltinGitHubID, 1, body)
 	if probe.result != probeNone {
 		t.Fatalf("probe = %+v, want probeNone（全部不是图）", probe)
 	}
@@ -192,7 +192,7 @@ func TestProbeScreenshotsClassifiesNotAnImage(t *testing.T) {
 		badge: githubmedia.ErrUnsupportedUpstreamMedia,
 		png:   errors.New("connection refused"),
 	}
-	probe = review.probeScreenshots(context.Background(), model.ForgeIntegrationBuiltinGitHubID, 1, body)
+	probe, _ = review.probeScreenshots(context.Background(), model.ForgeIntegrationBuiltinGitHubID, 1, body)
 	if probe.result != probeUnavailable {
 		t.Fatalf("probe = %+v, want probeUnavailable（存在拉不到）", probe)
 	}
@@ -205,7 +205,7 @@ func TestProbeScreenshotsClassifiesNotAnImage(t *testing.T) {
 		badge: githubmedia.ErrInvalidMediaURL,
 		png:   githubmedia.ErrInvalidMediaURL,
 	}
-	probe = review.probeScreenshots(context.Background(), model.ForgeIntegrationBuiltinGitHubID, 1, body)
+	probe, _ = review.probeScreenshots(context.Background(), model.ForgeIntegrationBuiltinGitHubID, 1, body)
 	if probe.result != probeNone {
 		t.Fatalf("probe = %+v, want probeNone（形态不支持=不是图）", probe)
 	}
@@ -506,8 +506,8 @@ func TestAgentScreenshotsFiltersStaleRows(t *testing.T) {
 }
 
 // 张数截断：超过 maxScreenshotsPerPR 的引用按出现顺序保留前 N 个。review
-// 截图面是持久资产（永不回收），收集面是磁盘占用的第一道闸——探测字节
-// 预算与下载面单文件上限都在它之后。
+// 截图面回收滞后至少 30 天（行账保留策略），收集面是磁盘占用的第一道闸——
+// 探测字节预算与下载面单文件上限都在它之后。
 func TestCollectScreenshotURLsTruncatesAtLimit(t *testing.T) {
 	var lines []string
 	for i := 0; i < maxScreenshotsPerPR+8; i++ {
@@ -552,7 +552,8 @@ func TestAgentScreenshotsChangedTruncatesPrevAssets(t *testing.T) {
 	})
 
 	prevRun := e.seedRun(t, repo, 96, "sha-prev", model.ReviewRunCompleted, now)
-	e.svc.db.Model(prevRun).Updates(map[string]any{"kind": model.ReviewKindVisual, "round_number": 1})
+	e.svc.db.Model(prevRun).Updates(map[string]any{
+		"kind": model.ReviewKindVisual, "round_number": 1, "finished_at": now})
 	curRun := e.seedRun(t, repo, 96, "sha-cur", model.ReviewRunQueued, now)
 	e.svc.db.Model(curRun).Updates(map[string]any{"kind": model.ReviewKindVisual, "round_number": 2})
 
@@ -620,7 +621,8 @@ func TestAgentScreenshotsChangedDropsUnadmittedPrevRows(t *testing.T) {
 	})
 
 	prevRun := e.seedRun(t, repo, 97, "sha-prev", model.ReviewRunCompleted, now)
-	e.svc.db.Model(prevRun).Updates(map[string]any{"kind": model.ReviewKindVisual, "round_number": 1})
+	e.svc.db.Model(prevRun).Updates(map[string]any{
+		"kind": model.ReviewKindVisual, "round_number": 1, "finished_at": now})
 	curRun := e.seedRun(t, repo, 97, "sha-cur", model.ReviewRunQueued, now)
 	e.svc.db.Model(curRun).Updates(map[string]any{"kind": model.ReviewKindVisual, "round_number": 2})
 
@@ -681,7 +683,8 @@ func TestAgentScreenshotsChangedNormalizesPrevFragments(t *testing.T) {
 	})
 
 	prevRun := e.seedRun(t, repo, 98, "sha-prev", model.ReviewRunCompleted, now)
-	e.svc.db.Model(prevRun).Updates(map[string]any{"kind": model.ReviewKindVisual, "round_number": 1})
+	e.svc.db.Model(prevRun).Updates(map[string]any{
+		"kind": model.ReviewKindVisual, "round_number": 1, "finished_at": now})
 	curRun := e.seedRun(t, repo, 98, "sha-cur", model.ReviewRunQueued, now)
 	e.svc.db.Model(curRun).Updates(map[string]any{"kind": model.ReviewKindVisual, "round_number": 2})
 
@@ -741,7 +744,8 @@ func TestAgentScreenshotsChangedExcludesRowsFromThisRound(t *testing.T) {
 
 	// 两轮同 head：上一轮只见过前 11 张，本轮描述新增了第 12 张。
 	prevRun := e.seedRun(t, repo, 99, "sha-same", model.ReviewRunCompleted, now)
-	e.svc.db.Model(prevRun).Updates(map[string]any{"kind": model.ReviewKindVisual, "round_number": 1})
+	e.svc.db.Model(prevRun).Updates(map[string]any{
+		"kind": model.ReviewKindVisual, "round_number": 1, "finished_at": now})
 	curRun := e.seedRun(t, repo, 99, "sha-same", model.ReviewRunQueued, now)
 	e.svc.db.Model(curRun).Updates(map[string]any{"kind": model.ReviewKindVisual, "round_number": 2})
 
@@ -768,5 +772,274 @@ func TestAgentScreenshotsChangedExcludesRowsFromThisRound(t *testing.T) {
 	}
 	if !changed {
 		t.Fatal("changed = false, want true（本轮新增的截图不能算进上一轮集合）")
+	}
+}
+
+// prevRefs 的「本轮新行」截止是上一轮运行的完成时刻，不是本轮创建时刻
+// （R12 审查意见）：探测/建运行跨同步时探测行落在本轮创建之前，按本轮创
+// 建时刻剔除会把它们误算进上一轮，新增截图被判成「未变化」。
+func TestAgentScreenshotsChangedCutoffAtPrevFinish(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	body := "![a](https://uiv.frp.musiver.cn/f/a.png)\n\n![b](https://uiv.frp.musiver.cn/f/b.png)"
+	e.fake.SetPR(repo, 101, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 101, HeadSHA: "sha-same",
+		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature", Body: body,
+	})
+	combos, err := marshalCombinations([]api.ReviewCombination{testCombo("env-cf")})
+	if err != nil {
+		t.Fatalf("marshal combos: %v", err)
+	}
+	e.enableReview(t, func(s *model.ProjectReviewSettings) {
+		s.VisualCombinationsJSON = combos
+	})
+
+	prevFinished := now.Add(-2 * time.Hour)
+	prevRun := e.seedRun(t, repo, 101, "sha-same", model.ReviewRunCompleted, prevFinished)
+	e.svc.db.Model(prevRun).Updates(map[string]any{
+		"kind": model.ReviewKindVisual, "round_number": 1, "finished_at": prevFinished})
+	curRun := e.seedRun(t, repo, 101, "sha-same", model.ReviewRunQueued, now)
+	e.svc.db.Model(curRun).Updates(map[string]any{"kind": model.ReviewKindVisual, "round_number": 2})
+
+	mk := func(id, url string, createdAt time.Time) *model.ReviewAsset {
+		return &model.ReviewAsset{
+			IntegrationID: model.ForgeIntegrationBuiltinGitHubID, ID: id,
+			RepoFullName: repo, PRNumber: 101, HeadSHA: "sha-same",
+			Position: 0, Label: id, SourceURL: url,
+			StoragePath: "/cache/" + id + ".png", MimeType: "image/png", SizeBytes: 10,
+			CreatedAt: createdAt,
+		}
+	}
+	// a：上一轮完成之前就在（上一轮看到过，属上一轮集合）。
+	if err := e.svc.db.Create(mk("asset-prev", "https://uiv.frp.musiver.cn/f/a.png", prevFinished.Add(-time.Hour))).Error; err != nil {
+		t.Fatalf("seed prev asset: %v", err)
+	}
+	// b：上一轮完成之后、本轮创建之前落账（探测先行/建运行跨同步的特征），
+	// 按旧口径会被误算进上一轮集合。
+	if err := e.svc.db.Create(mk("asset-probe", "https://uiv.frp.musiver.cn/f/b.png", prevFinished.Add(time.Hour))).Error; err != nil {
+		t.Fatalf("seed probe asset: %v", err)
+	}
+
+	_, changed, err := e.review.AgentScreenshots(context.Background(), curRun.ID)
+	if err != nil {
+		t.Fatalf("AgentScreenshots: %v", err)
+	}
+	if !changed {
+		t.Fatal("changed = false, want true（新增截图 b 不得被算进上一轮集合）")
+	}
+}
+
+// 轮次可重叠（manual rerun 恒开新轮、不看在途运行）：新轮创建可能早于上
+// 一轮完成——prevCutoff 取两者更早者，新轮自己的早期行不得被算进上一轮集
+// 合（R13 审查意见）。
+func TestAgentScreenshotsChangedCutoffOverlappingRounds(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	// 本轮创建于 -45min；上一轮在 -30min 才完成（重叠 15 分钟）。
+	nowUTC := time.Now().UTC()
+	curCreatedAt := nowUTC.Add(-45 * time.Minute)
+	prevFinished := nowUTC.Add(-30 * time.Minute)
+	body := "![a](https://uiv.frp.musiver.cn/f/a.png)\n\n![b](https://uiv.frp.musiver.cn/f/b.png)"
+	e.fake.SetPR(repo, 102, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 102, HeadSHA: "sha-same",
+		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature", Body: body,
+	})
+	combos, err := marshalCombinations([]api.ReviewCombination{testCombo("env-ov")})
+	if err != nil {
+		t.Fatalf("marshal combos: %v", err)
+	}
+	e.enableReview(t, func(s *model.ProjectReviewSettings) {
+		s.VisualCombinationsJSON = combos
+	})
+
+	prevRun := e.seedRun(t, repo, 102, "sha-same", model.ReviewRunCompleted, curCreatedAt.Add(-2*time.Hour))
+	e.svc.db.Model(prevRun).Updates(map[string]any{
+		"kind": model.ReviewKindVisual, "round_number": 1, "finished_at": prevFinished})
+	curRun := e.seedRun(t, repo, 102, "sha-same", model.ReviewRunQueued, curCreatedAt)
+	e.svc.db.Model(curRun).Updates(map[string]any{"kind": model.ReviewKindVisual, "round_number": 2})
+
+	mk := func(id, url string, createdAt time.Time) *model.ReviewAsset {
+		return &model.ReviewAsset{
+			IntegrationID: model.ForgeIntegrationBuiltinGitHubID, ID: id,
+			RepoFullName: repo, PRNumber: 102, HeadSHA: "sha-same",
+			Position: 0, Label: id, SourceURL: url,
+			StoragePath: "/cache/" + id + ".png", MimeType: "image/png", SizeBytes: 10,
+			CreatedAt: createdAt,
+		}
+	}
+	// a：本轮创建之前就在（上一轮证据，计入 prevRefs）。
+	if err := e.svc.db.Create(mk("asset-over-prev", "https://uiv.frp.musiver.cn/f/a.png", curCreatedAt.Add(-time.Hour))).Error; err != nil {
+		t.Fatalf("seed prev asset: %v", err)
+	}
+	// b：落在本轮创建之后、上一轮完成之前的重叠窗口（新轮自己的早期证据，
+	// 不得算进上一轮）。
+	if err := e.svc.db.Create(mk("asset-over-new", "https://uiv.frp.musiver.cn/f/b.png", curCreatedAt.Add(15*time.Minute))).Error; err != nil {
+		t.Fatalf("seed overlap asset: %v", err)
+	}
+
+	_, changed, err := e.review.AgentScreenshots(context.Background(), curRun.ID)
+	if err != nil {
+		t.Fatalf("AgentScreenshots: %v", err)
+	}
+	if !changed {
+		t.Fatal("changed = false, want true（重叠窗口的新增行不得算进上一轮集合）")
+	}
+}
+
+// 路径保留 + 文件缺失 + 重下失败（R12 修复的边界，R13 审查意见）：列表把
+// 该行按带原因的错误项下发（不给必然打不开的 URL），审查员可据此记
+// unmeasurable，而不是拿到 500 的图片地址。
+func TestAgentScreenshotsMissingFileReportsReason(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	body := "![a](https://uiv.frp.musiver.cn/f/gone.png)"
+	e.fake.SetPR(repo, 103, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 103, HeadSHA: "sha-gone",
+		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature", Body: body,
+	})
+	combos, err := marshalCombinations([]api.ReviewCombination{testCombo("env-g")})
+	if err != nil {
+		t.Fatalf("marshal combos: %v", err)
+	}
+	e.enableReview(t, func(s *model.ProjectReviewSettings) {
+		s.VisualCombinationsJSON = combos
+	})
+	visualRun := e.seedRun(t, repo, 103, "sha-gone", model.ReviewRunQueued, now)
+	e.svc.db.Model(visualRun).Update("kind", model.ReviewKindVisual)
+
+	// 命中行：路径指向不存在的文件，重下必失败（503）——重下失败保留引用
+	// 后行带非空路径 + error。
+	e.media.anonErr = &githubmedia.UpstreamStatusError{StatusCode: 503}
+	row := &model.ReviewAsset{
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ID:            "asset-gone", RepoFullName: repo, PRNumber: 103, HeadSHA: "sha-gone",
+		Position: 0, Label: "a", SourceURL: "https://uiv.frp.musiver.cn/f/gone.png",
+		StoragePath: "/cache/vanished-gone.png", MimeType: "image/png", SizeBytes: 10,
+		CreatedAt: now,
+	}
+	if err := e.svc.db.Create(row).Error; err != nil {
+		t.Fatalf("seed asset: %v", err)
+	}
+
+	items, _, err := e.review.AgentScreenshots(context.Background(), visualRun.ID)
+	if err != nil {
+		t.Fatalf("AgentScreenshots: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("items = %d, want 1", len(items))
+	}
+	if items[0].Url != "" {
+		t.Fatalf("url = %q, want 空（文件缺失不给 URL）", items[0].Url)
+	}
+	if items[0].Error == nil || *items[0].Error == "" {
+		t.Fatalf("error = %+v, want 带原因的错误项", items[0].Error)
+	}
+}
+
+// 上一轮仍在跑（finished_at NULL）是重叠轮次的正常态：它没有可沿用的结
+// 论，不得作为参照——本轮探测行（早于本轮创建、落在其运行窗口内）不算进
+// 上一轮集合，参照回退到最近一个已完成的更早轮次（R14 审查意见）。
+func TestAgentScreenshotsChangedIgnoresRunningPrevRound(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	body := "![a](https://uiv.frp.musiver.cn/f/a.png)\n\n![b](https://uiv.frp.musiver.cn/f/b.png)"
+	e.fake.SetPR(repo, 104, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 104, HeadSHA: "sha-same",
+		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature", Body: body,
+	})
+	combos, err := marshalCombinations([]api.ReviewCombination{testCombo("env-rn")})
+	if err != nil {
+		t.Fatalf("marshal combos: %v", err)
+	}
+	e.enableReview(t, func(s *model.ProjectReviewSettings) {
+		s.VisualCombinationsJSON = combos
+	})
+
+	// 轮次 1：已完成（finished_at = -3h），唯一有结论的参照。
+	r1 := e.seedRun(t, repo, 104, "sha-same", model.ReviewRunCompleted, now.Add(-4*time.Hour))
+	e.svc.db.Model(r1).Updates(map[string]any{
+		"kind": model.ReviewKindVisual, "round_number": 1, "finished_at": now.Add(-3 * time.Hour)})
+	// 轮次 2：仍在跑（finished_at NULL），评论唤醒/manual rerun 的重叠常态。
+	r2 := e.seedRun(t, repo, 104, "sha-same", model.ReviewRunRunning, now.Add(-2*time.Hour))
+	e.svc.db.Model(r2).Updates(map[string]any{"kind": model.ReviewKindVisual, "round_number": 2})
+	// 轮次 3：本轮。
+	curRun := e.seedRun(t, repo, 104, "sha-same", model.ReviewRunQueued, now)
+	e.svc.db.Model(curRun).Updates(map[string]any{"kind": model.ReviewKindVisual, "round_number": 3})
+
+	mk := func(id, url string, createdAt time.Time) *model.ReviewAsset {
+		return &model.ReviewAsset{
+			IntegrationID: model.ForgeIntegrationBuiltinGitHubID, ID: id,
+			RepoFullName: repo, PRNumber: 104, HeadSHA: "sha-same",
+			Position: 0, Label: id, SourceURL: url,
+			StoragePath: "/cache/" + id + ".png", MimeType: "image/png", SizeBytes: 10,
+			CreatedAt: createdAt,
+		}
+	}
+	// a：轮次 1 完成之前就在（参照集合）。
+	if err := e.svc.db.Create(mk("asset-r1", "https://uiv.frp.musiver.cn/f/a.png", now.Add(-5*time.Hour))).Error; err != nil {
+		t.Fatalf("seed r1 asset: %v", err)
+	}
+	// b：轮次 2 在途窗口内落账（探测先行，早于本轮创建）——不得算进参照。
+	if err := e.svc.db.Create(mk("asset-r2probe", "https://uiv.frp.musiver.cn/f/b.png", now.Add(-time.Hour))).Error; err != nil {
+		t.Fatalf("seed r2 asset: %v", err)
+	}
+
+	_, changed, err := e.review.AgentScreenshots(context.Background(), curRun.ID)
+	if err != nil {
+		t.Fatalf("AgentScreenshots: %v", err)
+	}
+	if !changed {
+		t.Fatal("changed = false, want true（在途轮次的探测行不得算进参照集合）")
+	}
+}
+
+// 上一轮结论不是 completed（准备阶段失败、从未把截图交给审查员）时不得作
+// 参照：其资产行虽在，无人看过——本轮同集合不得判「未变化」（R15 审查意
+// 见）。
+func TestAgentScreenshotsChangedIgnoresFailedPrevRound(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	body := "![a](https://uiv.frp.musiver.cn/f/a.png)"
+	e.fake.SetPR(repo, 105, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 105, HeadSHA: "sha-same",
+		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature", Body: body,
+	})
+	combos, err := marshalCombinations([]api.ReviewCombination{testCombo("env-fl")})
+	if err != nil {
+		t.Fatalf("marshal combos: %v", err)
+	}
+	e.enableReview(t, func(s *model.ProjectReviewSettings) {
+		s.VisualCombinationsJSON = combos
+	})
+
+	// 上一轮：准备阶段失败（有完成时刻、结论不是 completed），但探测已把资
+	// 产行留下。
+	prevRun := e.seedRun(t, repo, 105, "sha-same", model.ReviewRunFailed, now.Add(-2*time.Hour))
+	e.svc.db.Model(prevRun).Updates(map[string]any{
+		"kind": model.ReviewKindVisual, "round_number": 1, "finished_at": now.Add(-time.Hour)})
+	curRun := e.seedRun(t, repo, 105, "sha-same", model.ReviewRunQueued, now)
+	e.svc.db.Model(curRun).Updates(map[string]any{"kind": model.ReviewKindVisual, "round_number": 2})
+
+	row := &model.ReviewAsset{
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ID:            "asset-failed", RepoFullName: repo, PRNumber: 105, HeadSHA: "sha-same",
+		Position: 0, Label: "a", SourceURL: "https://uiv.frp.musiver.cn/f/a.png",
+		StoragePath: "/cache/a.png", MimeType: "image/png", SizeBytes: 10,
+		CreatedAt: now.Add(-90 * time.Minute),
+	}
+	if err := e.svc.db.Create(row).Error; err != nil {
+		t.Fatalf("seed asset: %v", err)
+	}
+
+	_, changed, err := e.review.AgentScreenshots(context.Background(), curRun.ID)
+	if err != nil {
+		t.Fatalf("AgentScreenshots: %v", err)
+	}
+	if !changed {
+		t.Fatal("changed = false, want true（失败轮次的资产集无人看过，不得作参照）")
 	}
 }

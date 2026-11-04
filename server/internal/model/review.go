@@ -31,6 +31,14 @@ const (
 	ReviewRunCancelled  ReviewRunStatus = "cancelled"
 )
 
+// ReviewRunActiveStatuses 非终态（在途）状态全集：退役守卫的 SQL 清单从
+// 这里生成（INT-184）。新增非终态状态时把它加进本切片，退役 SELECT/DELETE
+// 的守卫才会跟着覆盖；漏加会让新状态的在途运行在 30 天后连行带文件被退役
+// 回收。终态判断走 Terminal()。
+var ReviewRunActiveStatuses = []ReviewRunStatus{
+	ReviewRunQueued, ReviewRunDispatched, ReviewRunRunning,
+}
+
 // Terminal 是否终态。
 func (s ReviewRunStatus) Terminal() bool {
 	return s == ReviewRunCompleted || s == ReviewRunFailed ||
@@ -279,8 +287,17 @@ type ReviewAsset struct {
 	MimeType    string `gorm:"column:mime_type;type:text" json:"mime_type"`
 	SizeBytes   int64  `gorm:"column:size_bytes" json:"size_bytes"`
 	// Error 下载失败的记录（StoragePath 为空时图片端点回 404）。
-	Error     string    `gorm:"column:error;type:text" json:"error,omitempty"`
+	Error string `gorm:"column:error;type:text" json:"error,omitempty"`
+	// CreatedAt 首次落账时刻，不随补账/续期刷新：AgentScreenshots 以它判
+	// 「行是本轮才写入的」（上一轮集合过滤），重下成功的旧行被刷成新时刻会
+	// 被误剔出上一轮集合、changed 误报 true（R11 审查意见）。保留期时钟看
+	// RenewedAt。
 	CreatedAt time.Time `gorm:"not null" json:"created_at"`
+	// RenewedAt 保留期时钟：首次落账时与 CreatedAt 同值；补账（重下成功/
+	// 修复失败行，INT-184 R6）刷新本列——退役截止按它起算，刚下好的证据
+	// 不会因行的首次记录时间超龄而被提前回收。存量行由启动回填补齐
+	// （createBootIndexes 的 review_assets_renewed_backfill）。
+	RenewedAt *time.Time `gorm:"column:renewed_at" json:"renewed_at"`
 }
 
 func (ReviewAsset) TableName() string { return "review_assets" }

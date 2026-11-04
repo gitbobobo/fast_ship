@@ -1628,7 +1628,9 @@ func (s *ReviewService) decideVisualForPR(ctx context.Context, ledger *model.Rev
 	newContentFP := ""
 	if !judgedNone && in.CodeAllTerminalOK && in.HasVisualCombos && in.AnyUIChanged && in.HasScreenshots &&
 		(in.ScreensChanged || in.AnyUIChangedSinceLastVisual) {
-		probe := s.probeScreenshots(ctx, ledger.IntegrationID, ledger.InstallationID, pr.Body)
+		// 探测 + 落账（INT-184）：成功下载的引用当场写资产行，探测字节从落盘
+		// 起就有行引用；没有视觉运行时按行保留策略退役，不再依赖目录推断。
+		probe := s.probeAndRecordScreenshots(ctx, ledger.IntegrationID, ledger.RepoFullName, ledger.PRNumber, ledger.HeadSHA, ledger.InstallationID, pr.Body)
 		switch probe.result {
 		case probeReady:
 			newContentFP = probe.contentFP

@@ -375,12 +375,18 @@ func main() {
 			dynamicTrustedHostsCache = hosts
 			dynamicTrustedHostsAt = time.Now()
 			return hosts
-		})
+		},
+		// 行账回收（INT-184）的目录枚举失败限频告警走部署 slog 管道：枚举
+		// 失败会让保留策略静默失效（不删即不回收），warn 是管理员唯一的感
+		// 知入口（R7 审查意见）。
+		githubmedia.WithSweepLogger(appLogger))
 	// review 截图面**不接** TTL 扫描：它的缓存目录（review-screenshot-cache）
 	// 同时是 review_assets 的持久存储（storage_path 直接指向 cached 文件，无
-	// 副本），按 TTL 删除会让超过 24h 的历史截图取不到且 ensure 不会重下。
-	// 但中断下载的 media-*.tmp 残留两边都一样要清，tmp 清理是独立方法，这里
-	// 只启动它（不触碰 .bin/.json）。
+	// 副本），按 TTL 删除会让超过 24h 的历史截图在 ensure 复核后强制重下，
+	// 上游已删/转私时直接失败——历史证据永久丢失。但中断下载的 media-*.tmp
+	// 残留两边都一样要清，tmp 清理是独立方法，这里只启动它（不触碰
+	// .bin/.json）。.bin 的回收走 review_assets 行账保留策略（INT-184，
+	// ReviewService.Start 里的 assetRetentionLoop），不在这里。
 	reviewMediaService.StartStaleTmpSweeper()
 	// shell 订阅 hub（INT-116）：每环境常驻活跃/归档两条 WS，列表与运行态读取
 	// 从内存回答；环境重配/删除时由环境服务清 entry。这里注册停机钩子：当前
@@ -853,6 +859,55 @@ func createBootIndexes(db *gorm.DB) error {
 	// 建出（idx_review_assets_source，integration_id 键首）；按 (repo, pr, head)
 	// 的查询走它的第二段前缀。
 	db.Exec("DROP INDEX IF EXISTS idx_review_assets_pr_head")
+	// 行账保留策略（INT-184）：退役 DELETE 按 COALESCE(renewed_at,
+	// created_at)（idx_review_assets_retire_clock 表达式索引）定位超龄行，NOT
+	// EXISTS 守卫按 (integration_id, repo, pr, head) 探测在途运行——两个无
+	// 前导列可用的关联查询在全量扫描下会让每 6h 一次的 DELETE 长时间占住
+	// SQLite 单写锁（R2 审查实测：5 万待退役×20 万 run 时 >600s，加索引后
+	// 约 2s）；service 层另按小批量执行，批间释放写锁。表存在而建失败必须
+	// 启动失败（与上方 host_key 索引同款）：静默降级会把分钟级写锁占用带
+	// 回来且日志无痕（R4 审查意见、方向审计采纳）。表不存在（部分 schema
+	// 调 createBootIndexes 的测试路径）时跳过：AutoMigrate 建表后空表也无
+	// 行可索引，下次启动自然补上。
+	db.Exec("DROP INDEX IF EXISTS idx_review_assets_created_at")
+	for _, idx := range []struct {
+		name, sql, table string
+		// column 非空时先查列存在（遗留库表在而列未补，部分 schema 的测试
+		// 路径），缺列跳过：AutoMigrate 补列后下次启动自然补上。
+		column string
+	}{
+		// 保留期时钟回填（R11 审查）：renewed_at 列由 AutoMigrate 补出，存量
+		// 行回填为首次落账时刻；此后补账只刷 renewed_at，created_at 恢复不
+		// 可变语义（AgentScreenshots 的「本轮新行」判定依赖它）。
+		{"review_assets_renewed_backfill", "UPDATE review_assets SET renewed_at = created_at WHERE renewed_at IS NULL", "review_assets", "renewed_at"},
+		// 退役时钟表达式索引：退役 SELECT 按 COALESCE(renewed_at, created_at)
+		// 定位（COALESCE 兜住回填遗漏的存量行）。原 created_at 单列索引随之
+		// 失效，循环前统一 DROP。
+		{"idx_review_assets_retire_clock", "CREATE INDEX IF NOT EXISTS idx_review_assets_retire_clock ON review_assets(COALESCE(renewed_at, created_at))", "review_assets", "renewed_at"},
+		{"idx_review_assets_storage_path", "CREATE INDEX IF NOT EXISTS idx_review_assets_storage_path ON review_assets(storage_path)", "review_assets", ""},
+		{"idx_review_runs_asset_head", "CREATE INDEX IF NOT EXISTS idx_review_runs_asset_head ON review_runs(integration_id, repo_full_name, pr_number, head_sha)", "review_runs", ""},
+	} {
+		exists, err := sqliteTableExists(db, idx.table)
+		if err != nil {
+			return fmt.Errorf("检查表 %s 失败: %w", idx.table, err)
+		}
+		if !exists {
+			continue
+		}
+		if idx.column != "" {
+			var n int64
+			if err := db.Raw(`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`,
+				idx.table, idx.column).Scan(&n).Error; err != nil {
+				return fmt.Errorf("检查列 %s.%s 失败: %w", idx.table, idx.column, err)
+			}
+			if n == 0 {
+				continue
+			}
+		}
+		if err := db.Exec(idx.sql).Error; err != nil {
+			return fmt.Errorf("创建 %s 失败: %w", idx.name, err)
+		}
+	}
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_notifications_user_dedup ON notifications(user_id, dedup_key)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_notifications_user_updated ON notifications(user_id, updated_at DESC, id)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_notifications_unread ON notifications(user_id, updated_at DESC) WHERE read_at IS NULL")
