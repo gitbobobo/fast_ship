@@ -327,13 +327,18 @@ func TestT3Int148SettlementReadOnlyGuard(t *testing.T) {
 		t.Fatalf("access = %v", created.Access)
 	}
 
+	// Create 已预热常驻订阅（INT-132）：等它稳定，守卫的断言窗口从这里
+	// 起算——预热连接建立的 server.getConfig（INT-190）属于 hub 后台拨号，
+	// -race 改变调度后会先于断言落进记录，不圈窗口就被误计入。
+	before := awaitPrewarmSubscriptions(t, e.fake)
+
 	if _, err := e.th.SettleThread(ctx, userID, created.Id, "th-1"); err == nil || t3ErrCode(err) != errs.ErrPermissionDenied.Code {
 		t.Fatalf("settle 应返回 40300，实得 %v", err)
 	}
 	if _, err := e.th.UnsettleThread(ctx, userID, created.Id, "th-1"); err == nil || t3ErrCode(err) != errs.ErrPermissionDenied.Code {
 		t.Fatalf("unsettle 应返回 40300，实得 %v", err)
 	}
-	for _, rpc := range e.fake.recordedRPC() {
+	for _, rpc := range e.fake.recordedRPC()[before:] {
 		if rpc.method == "orchestration.dispatchCommand" || rpc.method == "server.getConfig" {
 			t.Fatalf("只读环境不得发出 %s", rpc.method)
 		}
