@@ -202,16 +202,60 @@ type githubCloseNetResult struct {
 	err     error
 }
 
-// batchCloseGitHubRateLimitRemainingText：熔断后未派发项的失败文案，与单条
-// 限流文案区分——这些项根本没发过请求，不能写成「结果未确认」。
-const batchCloseGitHubRateLimitRemainingText = "GitHub API 限流，未尝试关闭"
+// batchCloseGitHubAbortReason：整批性失败类别，命中任一类即熔断，剩余项不再
+// 派发。限流（INT-185）之外，INT-191 把认证失败（401）与无权限/访问受限
+// （非限流 403）纳入——凭证失效或访问被拒时继续逐条 PATCH 只会得到同因重复
+// 失败，最多白打 batchCloseDoneMaxIssues 条。404/410 成因两义——可能是仓库
+// 级（token 失去可见性、issues 被禁用），也可能是单条（Issue 已转移/删除），
+// 状态码无法区分；本期按单条处理，归 classifyGitHubCloseError 逐条回报，
+// 不熔断（INT-191 验收钉死；仓库级取舍另立 INT-198）。限流 403 与非限流
+// 403 的区分沿用 isGitHubRateLimitError 现有口径。
+type batchCloseGitHubAbortReason int32
+
+const (
+	// abortNone：未熔断。
+	abortNone batchCloseGitHubAbortReason = iota
+	abortRateLimit
+	abortAuth
+	abortForbidden
+)
+
+// itemText：熔断触发项自身的失败文案。逐字固定、不含 URL/Issue 号，前端按
+// 文案分组去重才有效（INT-185 R3/R4）。
+func (r batchCloseGitHubAbortReason) itemText() string {
+	switch r {
+	case abortAuth:
+		return "更新 GitHub Issue 失败：GitHub 认证失败，请检查凭证"
+	case abortForbidden:
+		// 403 成因不止仓库权限（企业策略、平台限制、反代/WAF 也返回 403），
+		// 文案不写死「无权限」，避免把用户钉死在授权检查上；真实成因看服务端
+		// warn 日志（issue_id + 底层 err，INT-191 R1 bot）。
+		return "更新 GitHub Issue 失败：GitHub 仓库无权限或访问受限，请检查授权"
+	default:
+		return batchCloseGitHubRateLimitText
+	}
+}
+
+// remainingText：熔断后未派发项的失败文案，与触发项文案区分——这些项根本
+// 没发过请求，不能写成「结果未确认」。
+func (r batchCloseGitHubAbortReason) remainingText() string {
+	switch r {
+	case abortAuth:
+		return "GitHub 认证失败，未尝试关闭"
+	case abortForbidden:
+		return "GitHub 仓库无权限或访问受限，未尝试关闭"
+	default:
+		return batchCloseGitHubRateLimitRemainingText
+	}
+}
 
 // closeOneGitHubIssue 执行单个 GitHub Issue 的关闭：PATCH 开始前先判定整批
 // 取消（Acquire 成功不代表 worker 已调度，已取消的批次不得再发新请求），之后
 // 经 WithoutCancel + 独立超时与整批取消解耦；结果只经 results 返回，由调用方
-// 统一落库与计数。命中 API 限流时调用 onRateLimit（可为 nil），由调用方熔断
-// 剩余派发——限流后继续打满配额只会得到重复失败，次级限流还会延长封禁。
-func closeOneGitHubIssue(batchCtx context.Context, client ghclient.Client, issue model.Issue, updateReq ghclient.UpdateIssueRequest, results chan<- githubCloseNetResult, onRateLimit func(), rateLimited *atomic.Bool, guard func(ctx context.Context, id string) (bool, error), warn func(string, ...zap.Field)) {
+// 统一落库与计数。命中整批性失败（限流/认证/权限）时调用 onAbort（可为 nil）
+// 上报类别，由调用方熔断剩余派发——这类失败继续派发只会得到同因重复失败；
+// 404 等单条错误不熔断，逐条回报（INT-191）。
+func closeOneGitHubIssue(batchCtx context.Context, client ghclient.Client, issue model.Issue, updateReq ghclient.UpdateIssueRequest, results chan<- githubCloseNetResult, onAbort func(batchCloseGitHubAbortReason), trip *atomic.Int32, guard func(ctx context.Context, id string) (bool, error), warn func(string, ...zap.Field)) {
 	if issue.GitHubMeta == nil {
 		results <- githubCloseNetResult{issue: issue, err: errs.ErrIssueReadOnly}
 		return
@@ -219,7 +263,7 @@ func closeOneGitHubIssue(batchCtx context.Context, client ghclient.Client, issue
 	if err := batchCtx.Err(); err != nil {
 		// 归因当场定死（INT-185 R5）：错误产生于派发阶段，按当时的熔断状态
 		// 归类；drain 阶段不再重读全局标志，避免时序改写失败原因。
-		results <- githubCloseNetResult{issue: issue, err: batchCloseCancelErr(err, rateLimited)}
+		results <- githubCloseNetResult{issue: issue, err: batchCloseCancelErr(err, trip)}
 		return
 	}
 	// 行级守卫（INT-185 R7）：发 PATCH 前按 id 复核本地行仍为 open+done——
@@ -234,9 +278,9 @@ func closeOneGitHubIssue(batchCtx context.Context, client ghclient.Client, issue
 			// 除 ctx err 判定外再回读批次状态：批次已死（ctx done 或已熔断）
 			// 一律按取消归因，仅批次仍存活才报内部复核失败（INT-185 R11）。
 			if errors.Is(gerr, context.Canceled) || errors.Is(gerr, context.DeadlineExceeded) ||
-				batchCtx.Err() != nil || (rateLimited != nil && rateLimited.Load()) {
-				// gerr 是 ctx err 时透传；批次 ctx 仍活但已熔断（限流）、守卫返回
-				// 非 ctx 包装错误时用 gerr 兜底，保证 err 非 nil。
+				batchCtx.Err() != nil || (trip != nil && trip.Load() != int32(abortNone)) {
+				// gerr 是 ctx err 时透传；批次 ctx 仍活但已熔断（限流/认证/权限）、
+				// 守卫返回非 ctx 包装错误时用 gerr 兜底，保证 err 非 nil。
 				src := gerr
 				if !errors.Is(gerr, context.Canceled) && !errors.Is(gerr, context.DeadlineExceeded) {
 					src = batchCtx.Err()
@@ -244,7 +288,7 @@ func closeOneGitHubIssue(batchCtx context.Context, client ghclient.Client, issue
 						src = context.Canceled
 					}
 				}
-				results <- githubCloseNetResult{issue: issue, err: batchCloseCancelErr(src, rateLimited)}
+				results <- githubCloseNetResult{issue: issue, err: batchCloseCancelErr(src, trip)}
 				return
 			}
 			// 守卫非 ctx 错误（SQLITE_BUSY、连接池/驱动故障）：底层 gerr 先记
@@ -265,7 +309,7 @@ func closeOneGitHubIssue(batchCtx context.Context, client ghclient.Client, issue
 		// 在连接池里排了一阵，期间批次已被取消/超时的不再开始新 PATCH，
 		// 按「未开始」计数。
 		if err := batchCtx.Err(); err != nil {
-			results <- githubCloseNetResult{issue: issue, err: batchCloseCancelErr(err, rateLimited)}
+			results <- githubCloseNetResult{issue: issue, err: batchCloseCancelErr(err, trip)}
 			return
 		}
 	}
@@ -281,10 +325,12 @@ func closeOneGitHubIssue(batchCtx context.Context, client ghclient.Client, issue
 			// PATCH 自身超时/取消：远端可能已生效，结果未确认，与
 			// 「未开始」的取消区分开。
 			err = &batchClosePatchUnconfirmedError{err: err}
-		} else if isGitHubRateLimitError(err) {
-			err = errs.New(errs.ErrGitHubAPI.Code, batchCloseGitHubRateLimitText)
-			if onRateLimit != nil {
-				onRateLimit()
+		} else if reason, fatal := githubBatchCloseAbort(err); fatal {
+			// 整批性失败（限流/认证/权限，INT-191）：触发项按类别文案回报并上报
+			// 熔断；404 等单条错误走 classifyGitHubCloseError。
+			err = errs.New(errs.ErrGitHubAPI.Code, reason.itemText())
+			if onAbort != nil {
+				onAbort(reason)
 			}
 		} else {
 			err = classifyGitHubCloseError(err)
@@ -427,29 +473,32 @@ func (s *IssueService) closeGitHubIssues(ctx context.Context, project *model.Pro
 	results := make(chan githubCloseNetResult, len(issues))
 	var wg sync.WaitGroup
 
-	// 派发上下文与整批截止分开（INT-185 R2）：命中首个限流即熔断，剩余项不再
-	// 向已被限流的 API 发请求；已派发的 PATCH 经 WithoutCancel 与本取消解耦，
-	// 仍会走完并落库。熔断与相邻 worker 的槽位释放没有跨 goroutine 时序保证，
-	// trip 落地前后的极小窗口内至多再发出并发度条请求——有界且可接受，不为
-	// 此引入同步 trip。
+	// 派发上下文与整批截止分开（INT-185 R2）：命中首个整批性失败（限流/认证/
+	// 权限，INT-191）即熔断，剩余项不再向必然同样失败的 API 发请求；已派发的
+	// PATCH 经 WithoutCancel 与本取消解耦，仍会走完并落库。槽位释放时序：每个
+	// 触发 worker 都在释放槽位前幂等 cancel（见下方 onAbort，INT-191 R1），
+	// 纯触发批次（如整批 401/403）槽位释放后派发循环的 Acquire 与 worker 顶部
+	// 的 ctx 复核必然看到已取消，不再有额外 PATCH；混合批次中非触发项的槽位
+	// 释放仍可能落在 trip 落地前的极小窗口内，至多再发出并发度条请求——有界
+	// 且可接受。
 	dispatchCtx, dispatchCancel := context.WithCancel(ctx)
 	defer dispatchCancel()
-	var rateLimited atomic.Bool
+	var trip atomic.Int32 // batchCloseGitHubAbortReason
 
 	for _, issue := range issues {
 		issue := issue
-		// 熔断预检短路（INT-185 R2）：槽位释放后若已限流，不再派发——不能让
-		// 后续项走到 worker 守卫里以「已取消」文案弹回。
-		if rateLimited.Load() {
-			results <- githubCloseNetResult{issue: issue, err: errs.New(errs.ErrGitHubAPI.Code, batchCloseGitHubRateLimitRemainingText)}
+		// 熔断预检短路（INT-185 R2）：槽位释放后若已熔断，按类别回报「未尝试」，
+		// 不再派发——不能让后续项走到 worker 守卫里以「已取消」文案弹回。
+		if r := batchCloseGitHubAbortReason(trip.Load()); r != abortNone {
+			results <- githubCloseNetResult{issue: issue, err: errs.New(errs.ErrGitHubAPI.Code, r.remainingText())}
 			continue
 		}
 		if err := sem.Acquire(dispatchCtx, 1); err != nil {
 			// 归因当场定死（INT-185 R5）：按 Acquire 失败当时的熔断状态归类。
-			if rateLimited.Load() {
-				results <- githubCloseNetResult{issue: issue, err: errs.New(errs.ErrGitHubAPI.Code, batchCloseGitHubRateLimitRemainingText)}
+			if r := batchCloseGitHubAbortReason(trip.Load()); r != abortNone {
+				results <- githubCloseNetResult{issue: issue, err: errs.New(errs.ErrGitHubAPI.Code, r.remainingText())}
 			} else {
-				results <- githubCloseNetResult{issue: issue, err: batchCloseCancelErr(err, &rateLimited)}
+				results <- githubCloseNetResult{issue: issue, err: batchCloseCancelErr(err, &trip)}
 			}
 			continue
 		}
@@ -457,11 +506,14 @@ func (s *IssueService) closeGitHubIssues(ctx context.Context, project *model.Pro
 		go func() {
 			defer wg.Done()
 			defer sem.Release(1)
-			closeOneGitHubIssue(dispatchCtx, client, issue, updateReq, results, func() {
-				if rateLimited.CompareAndSwap(false, true) {
-					dispatchCancel()
-				}
-			}, &rateLimited, func(ctx context.Context, id string) (bool, error) {
+			closeOneGitHubIssue(dispatchCtx, client, issue, updateReq, results, func(r batchCloseGitHubAbortReason) {
+				// 首个触发类别 CAS 生效，后续触发项只贡献类别不改写已定类别；
+				// dispatchCancel 幂等：每个触发 worker 释放槽位前都确保取消已完成，
+				// 否则 CAS 赢家在 cancel 前暂停时，输家先释放的槽位会被派发循环
+				// 取走多发一条 PATCH（INT-191 R1 审查）。
+				trip.CompareAndSwap(int32(abortNone), int32(r))
+				dispatchCancel()
+			}, &trip, func(ctx context.Context, id string) (bool, error) {
 				return s.issueRepo.IsOpenAndDone(ctx, id)
 			}, func(msg string, fields ...zap.Field) {
 				s.logger.Warn(msg, fields...)
@@ -538,12 +590,14 @@ func buildBatchCloseFailure(issue model.Issue, err error) BatchCloseDoneIssueFai
 }
 
 // batchCloseCancelErr：派发阶段的 ctx err 按当时的熔断状态当场定死归因——
-// 熔断已触发→「限流未尝试」；否则保留原始 ctx err（整批截止/调用方取消）。
-// drain 阶段不再重读全局标志，避免同一批次的归因随 goroutine 时序漂移
-// （INT-185 R5）。
-func batchCloseCancelErr(err error, rateLimited *atomic.Bool) error {
-	if rateLimited != nil && rateLimited.Load() {
-		return errs.New(errs.ErrGitHubAPI.Code, batchCloseGitHubRateLimitRemainingText)
+// 熔断已触发→按触发类别的「未尝试」文案；否则保留原始 ctx err（整批截止/
+// 调用方取消）。drain 阶段不再重读全局标志，避免同一批次的归因随 goroutine
+// 时序漂移（INT-185 R5）。
+func batchCloseCancelErr(err error, trip *atomic.Int32) error {
+	if trip != nil {
+		if r := batchCloseGitHubAbortReason(trip.Load()); r != abortNone {
+			return errs.New(errs.ErrGitHubAPI.Code, r.remainingText())
+		}
 	}
 	return err
 }
@@ -561,6 +615,36 @@ func (e *batchClosePatchUnconfirmedError) Unwrap() error { return e.err }
 var errBatchCloseSkippedNotOpen = errors.New("该问题已在其他操作中被更新，已跳过关闭")
 
 const batchCloseGitHubRateLimitText = "更新 GitHub Issue 失败：GitHub API 限流，请稍后重试"
+
+// batchCloseGitHubRateLimitRemainingText：限流熔断后未派发项的失败文案（
+// INT-185）；认证/权限类别的同位文案见 batchCloseGitHubAbortReason.remainingText。
+const batchCloseGitHubRateLimitRemainingText = "GitHub API 限流，未尝试关闭"
+
+// githubBatchCloseAbort 判定 PATCH 错误是否为整批性失败并给出类别：限流
+// （口径见 isGitHubRateLimitError：*RateLimitError、*AbuseRateLimitError、
+// 429、含限流文案的 403）、认证失败（401）、无权限（其余 403）。404 与其他
+// 状态码按单条结果逐条回报，不得熔断（INT-191）：404/410 的仓库级成因
+// （token 失去可见性、issues 被禁用）与单条成因（已转移/删除）状态码无法
+// 区分，本期的取舍与候选口径见 INT-198。
+func githubBatchCloseAbort(err error) (batchCloseGitHubAbortReason, bool) {
+	if isGitHubRateLimitError(err) {
+		return abortRateLimit, true
+	}
+	var respErr *gh.ErrorResponse
+	if !errors.As(err, &respErr) || respErr.Response == nil {
+		return abortNone, false
+	}
+	switch respErr.Response.StatusCode {
+	case http.StatusUnauthorized:
+		return abortAuth, true
+	case http.StatusForbidden:
+		// 含限流文案的 403 已在上面归入限流；落到这里的 403 成因不止仓库权限
+		//（企业策略、平台限制、反代/WAF 也可能），但同一仓库/凭证下重试只会
+		// 同因失败，熔断不变；归为「无权限或访问受限」类别，不写死成因。
+		return abortForbidden, true
+	}
+	return abortNone, false
+}
 
 // isGitHubRateLimitError 判定 go-github 错误是否为 API 限流：*RateLimitError、
 // *AbuseRateLimitError，或 403/429 且响应体含 rate limit/abuse detection 字样的
