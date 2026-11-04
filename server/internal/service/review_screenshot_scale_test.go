@@ -841,6 +841,11 @@ func TestAgentScreenshotImageScale(t *testing.T) {
 	}
 	seedAsset("asset-big", bigPath)
 	seedAsset("asset-missing", missingPath)
+	// 缺失行的原因必须优先透出（R13 契约：asset.Error > 通用文案）。
+	if err := e.svc.db.Model(&model.ReviewAsset{}).Where("id = ?", "asset-missing").
+		Update("error", "下载超时").Error; err != nil {
+		t.Fatalf("seed missing reason: %v", err)
+	}
 	seedAsset("asset-huge", writeFakeHugePNG(t))
 	seedAsset("asset-corrupt", writeCorruptPixelsPNG(t))
 	// 伪 heic：ftyp 盒魔数、有 Content-Type 位图声明但本服务无解码器。
@@ -896,6 +901,11 @@ func TestAgentScreenshotImageScale(t *testing.T) {
 	var appErr *errs.AppError
 	if !errors.As(err, &appErr) || appErr.Code != errs.ErrIssueAssetNotFound.Code {
 		t.Fatalf("missing file = %v, want code %d", err, errs.ErrIssueAssetNotFound.Code)
+	}
+	// 原因优先于通用文案（R13 契约的回归闸）：改回裸 sentinel 或丢掉
+	// asset.Error 优先级时这里失败，而不是随 404 语义一起静默退化。
+	if appErr.Message != "下载超时" {
+		t.Fatalf("message = %q, want 行上记录的 asset.Error", appErr.Message)
 	}
 
 	// 伪 heic（有文件但无解码器，清单已标 original_heavy）：带缩放参数 → 原
