@@ -1,7 +1,8 @@
 // 工具调用的本地化展示映射表：调用卡/确认卡只查表渲染，不展示原始
 // 工具标识（原始 tool.action 收进「查看原始调用」）。
-// 唯一事实源是 server/internal/service/bot_tools.go 的 botToolRegistryV8()
-// 与 botReadOnlyActions——后端新增或改名工具/action 时必须同步此表。
+// 唯一事实源是 server/internal/service/bot_action_registry.go 的动作注册表
+// （botActionSpec：工具与 action 清单、ReadOnly 只读集合，v14 动作面由 spec
+// 组生成）——后端新增或改名工具/action 时必须同步此表。
 // fs_schedule 的 create、涉及 instruction/needs_report/model 的 update、
 // run（dry_run=true 预览除外）、enable、delete 需要用户确认后异步执行；
 // list/runs/disable 与只改 name/cron/timezone 的 update、dry_run 预览仍是

@@ -128,6 +128,22 @@ SDK 重试显式关零（`option.WithMaxRetries(0)`）：连接测试与被中�
 
 ### 工具与确认
 
+**动作注册表（INT-195）**：每个工具动作的全部行为属性在
+`bot_action_registry.go` 的 `botActionSpec` 一处声明——字段约束
+（`Required`/`Forbidden`）、读写分类（`ReadOnly`/`ReadOnlyIf`）、执行入口
+（`SyncExec`/`AsyncExec`，方法表达式直指单动作方法）、确认分类
+（`Confirmation`：never/always/dynamic，dynamic 配 `Confirm` 闭包）、写策略
+（`PolicyTier`/`PolicyRule`/`CandidateFunc`）、围栏豁免（`FenceExempt`）、
+定时任务会话放行与上下文投影（`ScheduleOK`/`ScheduleContext`）、无副作用
+（`NoSideEffect`）、受理范围（`Scope`）。字段校验、同步/异步分派、确认判定、
+策略分档、围栏豁免、会话拦截全部查这张表，源码里不再保留按动作名分派的平行
+switch/表。写动作必须显式声明确认分类（漏声明构建期 panic，零值不再等价于
+免确认）；恒确认动作禁带同步执行入口（`confirmAlways` 自动禁止，
+`SyncExecForbidden` 显式禁止）。当前工具集 v14 的 Actions 由 spec 组生成
+（`botToolRegistryV14FromGroups`），工具级形状复用 v13 链条输出保证 wire
+字节逐字节稳定；v1–v13 与 `bot_args_frozen.go` 是冻结快照，遗留动作
+`fs_schedule/status` 以墓碑 spec 保留冻结会话行为。
+
 工具集按 `bots.toolset_version` 列冻结并版本化：v1 = INT-101 的 10 工具 /
 29 action（`fs_memory`/`fs_schedule` 占位），v2 起 `fs_memory` 开放
 `list/read/history/create/replace/append/delete/restore`（读类同步、写类
@@ -149,7 +165,8 @@ v10（INT-136）在 v9 上只改 `fs_schedule` 的工具/动作描述（说明�
 可选执行配置 `model_selection`/`runtime_mode`/`workspace`（省略时模型沿用项目默认、runtime_mode 为 full-access、workspace 用项目主检出），
 `composer_options` 返回归一化的 `providers` 模型目录与 `not_settable`
 不可设置项清单，list/get 摘要回显 `provider`/`model`/`branch`；
-非 launch 动作携带这三个字段会被拒绝而不是静默忽略（`botActionRules`）；
+非 launch 动作携带这三个字段会被拒绝而不是静默忽略（动作注册表
+`botActionSpec.Forbidden`）；
 v13（INT-160）演进 `fs_thread`——新增异步动作 `wait`（线程等待，见下节）；
 v14（INT-165）演进 `fs_project`——`list` 新增 `include_shelved`
 （默认排除搁置中的项目，见「fs_project 搁置过滤」节）。
@@ -504,8 +521,9 @@ token 口径合成一次聚合）、关联维护合计、父 run 与任务反查
   操作调用——仅 `status=succeeded` 或 `effect_may_have_occurred` 的写调用算
   有效，被拒/取消/失败/未执行的不挡空转（仓库层 triple 查询带
   `effective_write` 聚合列）。
-  写/读判定的事实源是服务层 `botReadOnlyActions`（键 `tool_name/action`），
-  未列出的动作按写处理；因是 Go 映射无法下推 SQL，查询按
+  写/读判定的事实源是服务层动作注册表 `botActionSpec.ReadOnly`
+  （键 `tool_name/action`，查表入口 `botActionReadOnlyOf`），
+  未声明的动作按写处理；因是 Go 映射无法下推 SQL，查询按
   `SELECT DISTINCT run_id, tool_name, action` 取去重组合回内存过滤。
   `idle_rate` 分母 0 → null；`idle_cost` 只累计空转 run 的显示成本。
 - **context_growth**：窗口内每个有请求的 run 按 (ordinal,id) 字典序取首个请求
@@ -873,22 +891,26 @@ path→version，无新笔记的空成功不会让次日重跑全部 daily。恢
 执行 Issue/线程写操作，且 schedule 会话里还能再建任务。修法是把确认放到
 【建/改/手动运行任务】这一步，**不改**「运行内默认放行」这个产品决定。
 
-- **哪些动作要确认**（`botScheduleConfirmation`，在 `botPrepareToolCall` 受理
-  端判定、对所有工具集版本含冻结的 v3–v7 立即生效，不进 wire 字节）：
+- **哪些动作要确认**（INT-195 起收进动作注册表：fs_schedule 各动作的
+  `spec.Confirmation`/`Confirm` 声明在 `bot_schedule_confirm.go`，在
+  `botPrepareToolCall` 受理端判定、对所有工具集版本含冻结的 v3–v7 立即生效，
+  不进 wire 字节）：
   `create` 恒需确认；`update` 只在参数里出现 `instruction`/`needs_report`/
   `model` 任一（含显式 null）时确认，只改 `name`/`cron`/`timezone` 仍是同步；
   `run` 除 `dry_run` 解析为布尔 true（只读预览）外都要确认；`enable`（重新
   武装一个运行内默认放行写操作的任务）与 `delete`（不可逆地抹掉任务）也要
   确认。`disable` 与 `list`/`runs`/`state_get`/`state_set` 保持同步——disable
-  是收紧权限、随时可逆（enable 要确认），拦它只会拖慢止血。**未识别动作
-  一律按需要确认处理（fail closed）**：分类是对动作名的枚举，未来给工具集
-  加动作却漏更新本表时，宁可多弹确认卡、由 worker 显式拒绝，也不能让新动作
-  继承免确认默认值、静默放行持久化写。同一 fail-closed 口径贯穿全链：
-  `botScheduleManageDenied` 只显式放行 `list`/`runs`/`state_get`/`state_set`
-  （以及 v2 旧名 `status`），未识别动作在定时任务会话里默认拒绝；
+  是收紧权限、随时可逆（enable 要确认），拦它只会拖慢止血。**确认语义必须显式声明（fail closed 前移到构建期）**：
+  写动作在注册表漏声明确认分类、dynamic 漏带 Confirm 闭包、恒确认动作带
+  SyncExec 入口，注册表构建时直接 panic——不能带病启动，宁可启动失败也不让
+  新动作继承免确认默认值、静默放行持久化写；未注册动作在受理端按
+  「不支持的工具动作」拒绝。同一 fail-closed 口径贯穿全链：
+  `botScheduleManageDenied` 只放行 `spec.ScheduleOK` 的动作
+  （`list`/`runs`/`state_get`/`state_set` 以及 v2 旧名 `status`），
+  未识别动作在定时任务会话里默认拒绝；
   `DecideCall` 的「始终允许」只允许
-  `run`，未识别动作默认拒绝豁免；`runScheduleWrite`/`execScheduleTool`/
-  `botReadOnlyActions` 本身就是显式枚举+默认拒绝/按写处理。受影响动作在受理
+  `run`，未识别动作默认拒绝豁免；动作注册表本身就是显式枚举+默认拒绝/按写
+  处理（`SyncExecForbidden` 另行禁止恒确认动作带同步直达入口）。受影响动作在受理
   时改判为 async + RequiresConfirmation：回执 `status=pending_confirmation`，
   批准后 queued → worker 执行，结果以【平台后台结果】送达。
 - **后台结果的人话渲染**：`botResultSummary` 只截到 200 字符，直接把工具
@@ -988,8 +1010,8 @@ path→version，无新笔记的空成功不会让次日重跑全部 daily。恢
 - **`run` 只收 `task_id`/`dry_run`**（`enable`/`delete` 同理，只收 `task_id`；
   `limit`/`offset` 这类执行器忽略的参数在这些动作上也一并拒绝）：
   执行器按 `task_id` 读库里的任务配置，模型传的 `name`/`instruction`/
-  `needs_report` 等一概不生效，因此在受理端直接拒绝（`botActionRules` 的
-  Forbidden）——否则确认卡可以展示一份无害指令、实际跑的是任务里存的另一份。
+  `needs_report` 等一概不生效，因此在受理端直接拒绝（动作注册表
+  `botActionSpec.Forbidden`）——否则确认卡可以展示一份无害指令、实际跑的是任务里存的另一份。
   确认卡的生效配置一律以服务端快照为准，这三个动作不看参数。
 - **存量任务的一次性复核提示（发布策略）**：确认机制上线前创建的任务，其
   指令从未经用户确认、部署后仍按原 cron 触发。`bot_schedule_tasks.confirmed`
@@ -1041,7 +1063,7 @@ CAS 为 queued；reject：置 rejected 并落唯一终态；always_allow：同�
 - **不可信数据围栏（出口级、默认拒绝）**：判定放在**模型输入的出口**，不是
   各处投影里逐字段列清单。`botFenceToolResult` 把整条工具结果（JSON 原样）
   包进 `<untrusted_data nonce="…" source="tool_result:<tool>">…</untrusted_data>`，
-  判定只看 tool/action 是否在 `botResultFenceExemptTools`（帮助、停止/取消、
+  判定只看 tool/action 的注册表 `spec.FenceExempt`（帮助、停止/取消、
   记忆的路径与版本列表、`state_set` 的 ack 这类平台自有元数据/回执）；带正文
   的读取（记忆内容、检索片段、续读结果、任务状态）一律走围栏。新增工具、新增字段、嵌套对象、
   远端错误文本都自动落在围栏内——**漏列只会过围，不会漏围**；以前逐字段
@@ -1153,7 +1175,7 @@ CAS 终结；running 记录取消并取消 context，worker 落唯一终态且
   `bot_args_frozen.go` 的冻结结构体逐字节保留（`botToolsetV1FrozenHash` /
   `V2FrozenHash` / `V3FrozenHash` 钉死；v3 与 v4 工具/动作/描述相同，仅参数
   结构体不同）。各动作必填字段写进 `action` 字段的 schema 描述
-  （`botActionRules` 同时是服务端校验的唯一事实源）；不用 `if/then` 是因为
+  （动作注册表 `botActionSpec.Required` 同时是服务端校验的唯一事实源）；不用 `if/then` 是因为
   多数 OpenAI 兼容后端不校验 JSON Schema，条件分支只增加每请求约 700 token
   的固定开销而无强制力。
 - **列表筛选与分页**：`fs_thread list` 默认只返回未归档、未结算的线程
@@ -1250,8 +1272,8 @@ CAS 终结；running 记录取消并取消 context，worker 落唯一终态且
   `current_value`/`choices`），跳过停用/未安装/`unavailable` 的 provider
   与缺 slug 的模型，机器人侧不硬编码模型清单；`not_settable` 如实列出
   机器人不能指定的配置项（interaction_mode、附件、幂等身份）。这三个
-  字段只对 launch 合法：其余 fs_thread 动作携带会被 `botActionRules`
-  拒绝而不是静默忽略。list/get 的线程摘要回显 `provider`/`model`/`branch`
+  字段只对 launch 合法：其余 fs_thread 动作携带会被动作注册表
+  `botActionSpec.Forbidden` 拒绝而不是静默忽略。list/get 的线程摘要回显 `provider`/`model`/`branch`
   （`botSlimThreadSummary`），launch 后回读确认生效配置看这里。
 - **结果续读无损**：`fs_result.read` 把整个读取体控制在预算内（必要时收缩
   `content` 并迭代收敛），保证不会被通用截断再切一次——否则按 `next_offset`
@@ -1262,7 +1284,7 @@ CAS 终结；running 记录取消并取消 context，worker 落唯一终态且
   不会把新输入盖过去），尚未开始的写操作补 `not_executed`：同步写走协议回复
   （`error_code=not_executed`，不再复用参数校验的 40001），已受理但尚未被
   worker 认领的异步写走后台结果（CAS `queued→not_executed`，认领竞速失败即
-  跳过）；读类调用（`botReadOnlyActions` 判定）允许执行完，已有结果不丢。
+  跳过）；读类调用（动作注册表 `botActionSpec.ReadOnly` 判定）允许执行完，已有结果不丢。
 - **停止按钮 = 用户消息**：`POST /runs/:id/stop` 追加一条「停止」用户消息并
   唤醒（`client_message_id=stop:<runID>` 幂等），是否结束由机器人结合上下文决定，
   真正要停自己时仍可用 `fs_stop`。INT-137 起另加宽限兜底：受理停止时（追加
@@ -1415,8 +1437,8 @@ CAS 终结；running 记录取消并取消 context，worker 落唯一终态且
   `thread_id+env_id` 链接到 `/threads/{env}/{tid}`，其余 ID 没有对应路由
   时只显示短标识不造坏链；分页与 `expected_*` 等次要参数不进 chips。
 - **映射表维护约定**：`tool-labels.ts` 是前端侧副本，唯一事实源是
-  `server/internal/service/bot_tools.go` 的 `botToolRegistryV10()`（工具与
-  action 清单）和 `botReadOnlyActions`（只读集合）。effect 不能靠
+  `server/internal/service/bot_action_registry.go` 的动作注册表（工具与
+  action 清单、`botActionSpec.ReadOnly` 只读集合；v14 动作面由 spec 组生成）。effect 不能靠
   `requires_confirmation` 推断——`fs_schedule` 的 list/runs/disable、
   dry_run=true 的 run 与只改 name/cron/timezone 的 update 仍同步执行、不需确认，
   但 disable/update 仍是写入；enable/delete 需要确认并异步受理。后端新增/改名工具或 action 时必须同步
@@ -1872,7 +1894,7 @@ hub 按「用户 × 环境」维持的内存 ThreadShell（INT-116）与异步�
 - **参数只进 v14**：`botProjectArgs` 新增 `include_shelved`（`*bool`），v4–v13
   的 fs_project 参数冻结在 `botProjectArgsV13Frozen`——v13 及更早会话携带该
   字段按未知参数拒绝，参数面不回写已发布版本。
-- **`include_shelved` 只对 list 生效**（`botActionRules`）：get/create/update
+- **`include_shelved` 只对 list 生效**（动作注册表 `botActionSpec.Forbidden`）：get/create/update
   携带即拒——放行会被静默丢弃，模型却以为读到了搁置项目或把它写进了项目配置。
 - **搁置状态本身不对机器人开放**：REST 的 shelve/unshelve 仅 JWT（API Key 被
   403 拦在路由层），fs_project 没有 shelve 动作——搁置/恢复是用户的产品决策，

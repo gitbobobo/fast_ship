@@ -11,7 +11,8 @@ import {
 import { cn } from "@/lib/utils";
 import { botActionErrorText, ParamChips } from "./bot-tool-card";
 
-// fs_schedule 里需要确认的动作（与 server 的 botScheduleConfirmation 对齐）：
+// fs_schedule 里需要确认的动作（与 server 动作注册表的确认分类对齐：spec
+// Confirmation/Confirm，声明在 bot_schedule_confirm.go）：
 // create、敏感字段 update、非 dry_run run、enable、delete。disable 与
 // name/cron/timezone-only update 仍同步免确认，不会出现在确认卡上。
 const SCHEDULE_CONFIRM_ACTIONS = new Set(["create", "update", "run", "enable", "delete"]);
