@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -135,5 +136,37 @@ func TestIssueRepositoryBatchCloseInternalTx_EmptyIDs(t *testing.T) {
 	}
 	if len(closedIDs) != 0 {
 		t.Fatalf("expected no ids, got %v", closedIDs)
+	}
+}
+
+// INT-185（复审 R15 Note）：IsOpenAndDone 真库回归——守卫 WHERE
+// （issues.state=open + issue_internal_meta.workflow_status=done）是 GitHub 来源
+// 唯一的误关保护，条件日后被改错（漏 workflow_status 或写成 closed）时服务层
+// 注入假 guard 的用例全绿、线上却表现为「拖回行仍被远端关闭」。seed 三种
+// 组合断言只有 open+done 返回 true。
+func TestIssueRepositoryIsOpenAndDone(t *testing.T) {
+	repo, db, projectID := setupBatchCloseInternalTxTestDB(t)
+	openDone := seedInternalIssue(t, db, projectID, 1, model.IssueStateOpen, model.IssueWorkflowStatusDone)
+	openInProgress := seedInternalIssue(t, db, projectID, 2, model.IssueStateOpen, model.IssueWorkflowStatusInProgress)
+	closedDone := seedInternalIssue(t, db, projectID, 3, model.IssueStateClosed, model.IssueWorkflowStatusDone)
+
+	cases := []struct {
+		name string
+		id   string
+		want bool
+	}{
+		{"open+done", openDone.ID, true},
+		{"open+in_progress(拖回行不得守卫通过)", openInProgress.ID, false},
+		{"closed+done", closedDone.ID, false},
+		{"missing id", "nonexistent-id", false},
+	}
+	for _, tc := range cases {
+		got, err := repo.IsOpenAndDone(context.Background(), tc.id)
+		if err != nil {
+			t.Fatalf("%s: IsOpenAndDone err: %v", tc.name, err)
+		}
+		if got != tc.want {
+			t.Fatalf("%s: IsOpenAndDone=%v, want %v", tc.name, got, tc.want)
+		}
 	}
 }

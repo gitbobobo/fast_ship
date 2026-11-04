@@ -247,6 +247,13 @@ func closeOneGitHubIssue(batchCtx context.Context, client ghclient.Client, issue
 				results <- githubCloseNetResult{issue: issue, err: batchCloseCancelErr(src, rateLimited)}
 				return
 			}
+			// 守卫非 ctx 错误（SQLITE_BUSY、连接池/驱动故障）：底层 gerr 先记
+			// warn 再返回静态文案——数据库抖动整批变「复核失败」时线上要有
+			// 证据定位，与 PATCH/落地失败的日志口径一致（INT-185 R15）。
+			if warn != nil {
+				warn("batch close github issue: guard failed",
+					zap.String("issue_id", issue.ID), zap.Error(gerr))
+			}
 			results <- githubCloseNetResult{issue: issue, err: errs.New(errs.ErrInternal.Code, "复核本地状态失败，未关闭该项")}
 			return
 		}
