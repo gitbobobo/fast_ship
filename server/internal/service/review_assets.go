@@ -1061,7 +1061,7 @@ func (s *ReviewService) AgentScreenshotImage(ctx context.Context, runID, assetID
 		if reason == "" {
 			reason = "截图文件缺失"
 		}
-		return "", "", errs.New(errs.ErrIssueAssetNotFound.Code, reason)
+		return AgentScreenshotFile{}, errs.New(errs.ErrIssueAssetNotFound.Code, reason)
 	}
 	mime := asset.MimeType
 	if mime == "" {

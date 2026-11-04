@@ -889,9 +889,13 @@ func TestAgentScreenshotImageScale(t *testing.T) {
 	}
 
 	// StoragePath 指向不存在的文件：带参数走缩放 → 40406 语义。
+	// 按错误码断言而非 errors.Is：INT-184 的缺失文件归因对这条路返回同码
+	// (40406) 带原因的消息（AssetError 优先），AppError 没有按码的 Is 方法，
+	// errors.Is 对定制消息实例不成立；全局加 Is 会改变既有同码区分逻辑。
 	_, err = review.AgentScreenshotImage(ctx, run.ID, "asset-missing", scale)
-	if !errors.Is(err, errs.ErrIssueAssetNotFound) {
-		t.Fatalf("missing file = %v, want ErrIssueAssetNotFound", err)
+	var appErr *errs.AppError
+	if !errors.As(err, &appErr) || appErr.Code != errs.ErrIssueAssetNotFound.Code {
+		t.Fatalf("missing file = %v, want code %d", err, errs.ErrIssueAssetNotFound.Code)
 	}
 
 	// 伪 heic（有文件但无解码器，清单已标 original_heavy）：带缩放参数 → 原
