@@ -1461,19 +1461,19 @@ func TestBotMemoryScopeAndPaths(t *testing.T) {
 	b := env.createBot(t, createBotTestUser(t, env.db, "sb"))
 	writeBotMemory(t, env, a.ID, "USER.md", "A私有", "sc-a")
 	out, err := botMemoryTestExec(env.bots, &model.BotToolCall{
-		ID: uuid.NewString(), BotID: b.ID, ArgumentsJSON: `{"action":"read","path":"USER.md"}`,
+		ID: uuid.NewString(), BotID: b.ID, ToolName: "fs_memory", ArgumentsJSON: `{"action":"read","path":"USER.md"}`,
 	})
 	if err == nil && strings.Contains(out, "A私有") {
 		t.Fatalf("跨机器人不得读到正文")
 	}
 	_, err = botMemoryTestExec(env.bots, &model.BotToolCall{
-		ID: uuid.NewString(), BotID: a.ID, ArgumentsJSON: `{"action":"read","path":" USER.md"}`,
+		ID: uuid.NewString(), BotID: a.ID, ToolName: "fs_memory", ArgumentsJSON: `{"action":"read","path":" USER.md"}`,
 	})
 	if err == nil {
 		t.Fatalf("带空白路径不得清洗后接受")
 	}
 	_, err = botMemoryTestExec(env.bots, &model.BotToolCall{
-		ID: uuid.NewString(), BotID: a.ID, ArgumentsJSON: `{"action":"read","path":""}`,
+		ID: uuid.NewString(), BotID: a.ID, ToolName: "fs_memory", ArgumentsJSON: `{"action":"read","path":""}`,
 	})
 	if err == nil {
 		t.Fatalf("空路径应拒绝")
