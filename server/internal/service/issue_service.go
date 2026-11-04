@@ -23,6 +23,9 @@ const (
 	batchCloseDoneMaxFailures   = 50
 	batchCloseDoneTimeout       = 30 * time.Second
 	batchCloseGitHubConcurrency = 4
+	// 单个在途 GitHub PATCH 的独立上限（INT-185）：整批取消后已发出的请求仍要
+	// 走完并落库，但不允许个别挂起请求把 worker 拖死。
+	batchCloseGitHubPatchTimeout = 15 * time.Second
 )
 
 type IssueService struct {
@@ -58,6 +61,12 @@ type IssueService struct {
 	forgeSource          issueForgeSource
 	newForgejoPRReader   func(httpClient *http.Client, apiBase, token string) forgePRReader
 	mirror               *issueMirror
+	// batchCloseStorer 批量关闭的本地落地注入点（仅测试用，INT-185 R11）；
+	// 生产为 nil，回落到 s.mirror。
+	batchCloseStorer batchCloseMirrorStorer
+	// runCloseInternalTx 内部关闭事务注入点（仅测试用，INT-185 R14 Note）：
+	// 生产为 nil 走真实事务；测试注入一个返回包装错误的函数断言归因。
+	runCloseInternalTx func(ids []string, now time.Time) ([]string, error)
 }
 
 type IssueListFilters struct {

@@ -161,18 +161,18 @@ func (s *IssueService) BatchUpdateInternalMeta(userID string, items []BatchUpdat
 			_, updateErr = s.UpdateInternalMeta(item.IssueId, userID, *item.WorkflowStatus, actor)
 		}
 		if updateErr != nil {
-			resp.Failed++
-			if len(resp.Failures) < batchCloseDoneMaxFailures {
-				msg := updateErr.Error()
-				var appErr *errs.AppError
-				if errors.As(updateErr, &appErr) {
-					msg = appErr.Message
-				}
-				resp.Failures = append(resp.Failures, BatchCloseDoneIssueFailure{
-					Id:    item.IssueId,
-					Error: msg,
-				})
+			msg := updateErr.Error()
+			var appErr *errs.AppError
+			if errors.As(updateErr, &appErr) {
+				msg = appErr.Message
 			}
+			// 与批量关闭共用 appendBatchFailureEntry：达到上限后每类新文案各
+			// 保留一条样例，与共享契约 IssueBatchResult.failures 的描述一致
+			// （INT-185 R7）。
+			appendBatchFailureEntry(resp, BatchCloseDoneIssueFailure{
+				Id:    item.IssueId,
+				Error: msg,
+			})
 			continue
 		}
 		resp.Succeeded++

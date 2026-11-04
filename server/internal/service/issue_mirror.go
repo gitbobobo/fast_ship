@@ -387,6 +387,12 @@ func (m *issueMirror) syncRepositoryLabels(ctx context.Context, client ghclient.
 }
 
 func (m *issueMirror) upsertGitHubIssue(projectID string, item *ghclient.Issue) (*model.Issue, error) {
+	// 入口守卫（INT-185）：上游返回 nil 或缺 GitHub ID 的响应（网络异常、
+	// 非预期响应体）不能在这里 panic，统一转成调用方可记录、可计入 failures
+	// 的错误；同步/创建/更新路径的调用方都只拿 error 判断，行为安全。
+	if item == nil || item.GetID() == 0 {
+		return nil, errs.New(errs.ErrGitHubAPI.Code, "GitHub 返回的 Issue 数据缺失，无法同步")
+	}
 	now := time.Now().UTC()
 
 	var issue *model.Issue

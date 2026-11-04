@@ -71,7 +71,7 @@ GET 响应为 `{items: [...]}`，单条含 `issue` 摘要（id / project_id / pr
 
 - `IssueService.UpdateInternalMeta`（`issue_meta.go`）：`workflow_status` 被置为 `in_progress` / `done` 时，在同一事务内 `recRepo.DeleteTx`。ship hook 自动流转、看板拖拽、API 写状态都经此函数。
 - `IssueService.UpdateInternalIssue`（`issue.go`）：`state` 变为 `closed` 时同事务删除。单条内部 Issue 关闭经此路径。
-- `IssueService.BatchCloseDoneIssues`（`issue_list.go`，INT-174）：内部来源在单事务里批量改 `state=closed` 并 `DeleteByIssueIDsTx`；GitHub 来源关闭后仍走 `upsertGitHubIssue`（见下条）。
+- `IssueService.BatchCloseDoneIssues`（`issue_list.go`，INT-174/INT-185）：内部来源在单事务里批量改 `state=closed` 并 `DeleteByIssueIDsTx`，但推荐只随本次真正关闭的行删除（`BatchCloseInternalTx` 返回的命中 id，即 `RowsAffected>0` 的行）；列表与关闭之间被并发方改出 open 的行不计成功、不删推荐、逐条记入 failures。GitHub 来源关闭后仍走 `upsertGitHubIssue`（见下条）。
 - `issueMirror.upsertGitHubIssue`（`issue_mirror.go`）：GitHub 同步落地 `state=closed` 时，issue 的 Create/Save 与 `recRepo.DeleteTx` 放在 `issueRepo.Transaction` 同一事务，Delete 失败回滚不留「已关闭仍被推荐」残留；非 closed 路径不变。GitHub 侧关单、Web 端关 GitHub issue（经 `UpdateInternalIssue` → GitHub API → `upsertGitHubIssue`）均覆盖。
 
 项目删除 / Issue 级联删除由 FK `OnDelete: CASCADE` 兜底，无额外代码。

@@ -2625,7 +2625,7 @@ Issue CRUD、过滤、同步、清单、发货钩子与图片附件
 | `total` | integer（int64） | 是 |  |
 | `succeeded` | integer | 是 |  |
 | `failed` | integer | 是 |  |
-| `failures` | object[] | 是 | 最多返回前 50 条失败明细 |
+| `failures` | object[] | 是 | 按失败原因保留明细：通常最多前 50 条；达到上限后每类新文案各保留一条样例，最坏与单批条数相同（batchCloseDoneMaxIssues=200），不只是「略超 50」 |
 | `failures[].id` | string | 是 | Issue ID |
 | `failures[].reference` | string | 否 | omitempty；INT-n 或 GH-n |
 | `failures[].error` | string | 是 |  |
@@ -3222,7 +3222,7 @@ omitempty；无 meta 且无 checklist 时整个字段缺省
 | `total` | integer（int64） | 是 |  |
 | `succeeded` | integer | 是 |  |
 | `failed` | integer | 是 |  |
-| `failures` | object[] | 是 | 最多返回前 50 条失败明细 |
+| `failures` | object[] | 是 | 按失败原因保留明细：通常最多前 50 条；达到上限后每类新文案各保留一条样例，最坏与单批条数相同（batchCloseDoneMaxIssues=200），不只是「略超 50」 |
 | `failures[].id` | string | 是 | Issue ID |
 | `failures[].reference` | string | 否 | omitempty；INT-n 或 GH-n |
 | `failures[].error` | string | 是 |  |

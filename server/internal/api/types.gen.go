@@ -3515,7 +3515,7 @@ type IssueBatchResult struct {
 	ElapsedMs int64 `json:"elapsed_ms"`
 	Failed    int   `json:"failed"`
 
-	// Failures 最多返回前 50 条失败明细
+	// Failures 按失败原因保留明细：通常最多前 50 条；达到上限后每类新文案各保留一条样例，最坏与单批条数相同（batchCloseDoneMaxIssues=200），不只是「略超 50」
 	Failures  []IssueBatchFailure `json:"failures"`
 	Succeeded int                 `json:"succeeded"`
 	Total     int64               `json:"total"`

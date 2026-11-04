@@ -42,7 +42,7 @@ const BATCH_CLOSE_TIMEOUT_MS = 60_000;
 const SYNC_PULL_REQUESTS_TIMEOUT_MS = 120_000;
 
 /** 契约名为 IssueBatchResult。 */
-type BatchCloseDoneResponse = Schemas["IssueBatchResult"];
+export type BatchCloseDoneResponse = Schemas["IssueBatchResult"];
 
 interface CreateInternalIssueCommentRequest {
   body: string;

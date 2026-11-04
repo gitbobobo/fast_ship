@@ -138,3 +138,35 @@ func TestIssueServiceBatchUpdateInternalMeta_RejectsOverLimit(t *testing.T) {
 		t.Fatalf("expected ErrInvalidParams for oversized items, got %v", err)
 	}
 }
+
+// INT-185（复审 R7）：internal-meta 与批量关闭共用 IssueBatchResult.failures
+// 契约与语义——达到 50 条明细上限后，每类新文案各保留一条样例，后出现的
+// 类别不再被静默丢弃。
+func TestIssueServiceBatchUpdateInternalMeta_CategorySamplePastCap(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-batch-meta-cap")
+
+	items := make([]BatchUpdateInternalMetaItem, 0, batchCloseDoneMaxFailures+1)
+	// 前 50 条同类失败（workflow 为 nil → 参数无效），占满明细上限。
+	for i := 0; i < batchCloseDoneMaxFailures; i++ {
+		items = append(items, BatchUpdateInternalMetaItem{IssueId: uuid.NewString()})
+	}
+	// 第 51 条新类别失败（问题不存在），样例必须越过上限保留。
+	missing := uuid.NewString()
+	items = append(items, BatchUpdateInternalMetaItem{IssueId: missing, WorkflowStatus: batchMetaStatus(model.IssueWorkflowStatusDone)})
+
+	resp, err := svc.issueService.BatchUpdateInternalMeta(user.ID, items, "test")
+	if err != nil {
+		t.Fatalf("batch update internal meta: %v", err)
+	}
+	if resp.Failed != batchCloseDoneMaxFailures+1 {
+		t.Fatalf("unexpected failed count: %+v", resp)
+	}
+	if len(resp.Failures) != batchCloseDoneMaxFailures+1 {
+		t.Fatalf("expected new-category sample past cap, got %d entries", len(resp.Failures))
+	}
+	last := resp.Failures[len(resp.Failures)-1]
+	if last.Id != missing {
+		t.Fatalf("expected the new-category sample kept, got %+v", last)
+	}
+}

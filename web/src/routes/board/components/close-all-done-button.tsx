@@ -20,10 +20,42 @@ import {
   type IssueSourceFilter,
   ISSUE_SOURCE_FILTER_OPTIONS,
 } from "@/lib/issue-source";
+import type { BatchCloseDoneResponse } from "@/lib/api/issues";
 import { HTTPError } from "ky";
 import { toast } from "sonner";
 
 const BATCH_CLOSE_MAX = 200;
+
+// 整请求层「结果未确认」的统一文案：远端可能已生效（部分关闭已落地），
+// 误报失败的代价高于多提示一次刷新（INT-185）。
+const REQUEST_UNCONFIRMED_COPY =
+  "请求超时：部分问题可能已关闭，请刷新看板确认结果";
+
+// 服务端失败文案已收敛为少量固定类别：按文案分组计数、全部展示，每组取样
+// 例引用；明细超上限时显式标注差额，不做容量截断——每新增一类文案都再次
+// 挤掉已有类别是三轮审查反例的根因（INT-185 R3/R4 审计）。明细被截断时
+// ×N 只是下界，会严重低估（如 50/204），不再展示计数，只保留类别与样例
+// （INT-185 R6）。
+export function buildBatchCloseFailureLines(
+  result: BatchCloseDoneResponse,
+): string[] {
+  const groups = new Map<string, { count: number; sample?: string }>();
+  for (const f of result.failures) {
+    const label = f.error || "原因未说明";
+    const group = groups.get(label) ?? { count: 0 };
+    group.count += 1;
+    group.sample ??= f.reference;
+    groups.set(label, group);
+  }
+  const truncated = result.failed > result.failures.length;
+  const lines = [...groups.entries()].map(([label, { count, sample }]) => {
+    if (truncated) return sample ? `${label}（如 ${sample}）` : label;
+    return sample ? `${label} ×${count}（如 ${sample}）` : `${label} ×${count}`;
+  });
+  const unlisted = result.failed - result.failures.length;
+  if (unlisted > 0) lines.push(`另有 ${unlisted} 条未列明细`);
+  return lines;
+}
 
 export function CloseAllDoneButton({ projectId }: { projectId: string }) {
   const [open, setOpen] = useState(false);
@@ -39,26 +71,38 @@ export function CloseAllDoneButton({ projectId }: { projectId: string }) {
   const exceedsLimit = (previewCount ?? 0) > BATCH_CLOSE_MAX;
 
   const handleClose = async () => {
+    // catch 只包请求本身（INT-185 R4）：分组与 toast 抛出的 TypeError 不能被
+    // 误报成「请求超时」。
+    let result: BatchCloseDoneResponse;
     try {
-      const result = await closeBatch.mutateAsync({ source: sourceFilter });
-      if (result.total === 0) {
-        toast.info("当前筛选条件下没有需要关闭的问题");
-      } else if (result.failed > 0) {
-        const refs = result.failures
-          .slice(0, 3)
-          .map((f) => f.reference ?? f.id)
-          .join("、");
-        toast.warning(
-          `已关闭 ${result.succeeded} 个问题，${result.failed} 个失败${refs ? `（${refs}）` : ""}`,
-        );
-      } else {
-        toast.success(`已关闭 ${result.succeeded} 个问题`);
-      }
+      result = await closeBatch.mutateAsync({ source: sourceFilter });
     } catch (error) {
       toast.error(await formatBatchCloseError(error));
-    } finally {
       setOpen(false);
+      return;
     }
+    if (result.total === 0) {
+      toast.info("当前筛选条件下没有需要关闭的问题");
+    } else if (result.failed > 0) {
+      // 服务端已把失败文案收敛成少量固定类别（不含 URL/Issue 号，INT-185
+      // R3 审计）：按文案分组计数、全部展示，每组取样例引用；不做容量截断
+      // ——每新增一类服务端文案都会再次挤掉已有类别，那是三轮审查反例的根因。
+      const lines = buildBatchCloseFailureLines(result);
+      // description 传 ReactNode（sonner 把字符串当普通文本渲染，\n 会被
+      // 折叠成一段，R4）。
+      toast.warning(`已关闭 ${result.succeeded} 个问题，${result.failed} 个失败`, {
+        description: (
+          <div className="flex flex-col gap-0.5">
+            {lines.map((line, index) => (
+              <div key={`${index}-${line}`}>{line}</div>
+            ))}
+          </div>
+        ),
+      });
+    } else {
+      toast.success(`已关闭 ${result.succeeded} 个问题`);
+    }
+    setOpen(false);
   };
 
   const previewText =
@@ -125,10 +169,35 @@ export function CloseAllDoneButton({ projectId }: { projectId: string }) {
   );
 }
 
-async function formatBatchCloseError(error: unknown): Promise<string> {
+// 导出仅供单测覆盖文案分支。
+export async function formatBatchCloseError(error: unknown): Promise<string> {
   if (error instanceof HTTPError) {
+    const status = error.response.status;
+    // 任何 5xx（含服务端自身 500 带 JSON 正文、网关 502/503/504）都可能已
+    // 在服务端关掉一部分：一律提示刷新确认，不能只回具体文案让用户错过
+    // 已生效部分（INT-185 R9）。body.message 可作细节保留在文案里。
+    if (status >= 500) {
+      const body = await error.response.json<ApiResponse<unknown>>().catch(() => null);
+      return body?.message
+        ? `${REQUEST_UNCONFIRMED_COPY}（${body.message}）`
+        : REQUEST_UNCONFIRMED_COPY;
+    }
     const body = await error.response.json<ApiResponse<unknown>>().catch(() => null);
     if (body?.message) return body.message;
+  }
+  // fetch 网络中断抛 TypeError：请求是否到达服务端未知，同样按刷新确认。
+  if (error instanceof TypeError) {
+    return REQUEST_UNCONFIRMED_COPY;
+  }
+  // 2xx 响应体截断/非 JSON 时 ky 的 .json() 抛 SyntaxError：请求已到达
+  // 服务端、关闭可能已生效，同样按刷新确认而不是笼统失败（INT-185 R4）。
+  if (error instanceof SyntaxError) {
+    return REQUEST_UNCONFIRMED_COPY;
+  }
+  // ky 超时（TimeoutError，非 HTTPError）：整批请求中断，服务端可能已关闭
+  // 一部分，提示刷新确认而不是笼统报「批量关闭失败」（INT-185）。
+  if (error instanceof Error && error.name === "TimeoutError") {
+    return REQUEST_UNCONFIRMED_COPY;
   }
   return "批量关闭失败";
 }
