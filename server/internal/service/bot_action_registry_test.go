@@ -151,7 +151,13 @@ func TestBotActionRegistryValidatesSpecs(t *testing.T) {
 	mustPanic("未知分类", base(func(s *botActionSpec) { s.Confirmation = botConfirmKind("sometimes") }))
 	// 合法形态：never / always / dynamic。
 	mustOK("never", base(func(*botActionSpec) {}))
-	mustOK("always", base(func(s *botActionSpec) { s.Confirmation = confirmAlways; s.Mode = model.BotExecutionAsync }))
+	mustOK("always", base(func(s *botActionSpec) {
+		s.Confirmation = confirmAlways
+		s.Mode = model.BotExecutionAsync
+		s.AsyncExec = func(*BotService, context.Context, *model.BotToolCall) (interface{}, error) {
+			return nil, nil
+		}
+	}))
 	mustOK("dynamic", base(func(s *botActionSpec) {
 		s.Confirmation = confirmDynamic
 		s.Confirm = func(map[string]json.RawMessage) (bool, error) { return true, nil }
