@@ -140,9 +140,10 @@ SDK 重试显式关零（`option.WithMaxRetries(0)`）：连接测试与被中�
 枚举）是它的直接投影，属性表不再有平行事实源。**边界**：各域的范围解析与
 幂等身份仍按动作在域函数内实现（`resolveThreadScope`/`buildThreadExecIDs`/
 `resolveScheduleScope`/`resolveIssueScope`，由动作的 `spec.Scope` 引用）；
-新增 fs_thread/fs_schedule 写动作时必须同步扩展这些域函数——漏扩展的需确认
-动作会被 `botRequireScope` 拒绝（fail safe），免确认异步动作会带空幂等身份
-执行（重试可能重复写远端），并同步更新前端 `tool-labels` 与本文档。写动作必须显式声明确认分类（漏声明构建期 panic，零值不再等价于
+新增 fs_thread/fs_schedule 写动作时必须同步扩展这些域函数——免确认动作
+只能是同步形态（构建期强制，免确认异步会在启动期被拒绝），异步写动作必须
+恒确认或动态确认；漏扩展域函数的需确认动作会被 `botRequireScope` 拒绝
+（fail safe），并同步更新前端 `tool-labels` 与本文档。写动作必须显式声明确认分类（漏声明构建期 panic，零值不再等价于
 免确认）；恒确认动作禁带同步执行入口（`confirmAlways` 自动禁止，
 `SyncExecForbidden` 显式禁止）。当前工具集 v14 的 Actions 由 spec 组生成
 （`botToolRegistryV14FromGroups`），工具级形状复用 v13 链条输出保证 wire

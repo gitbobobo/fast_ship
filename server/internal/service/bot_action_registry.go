@@ -366,9 +366,10 @@ func botActionSpecOf(tool, action string) *botActionSpec {
 	return botActionSpecsAll()[tool+"/"+action]
 }
 
-// 测试如需临时扩展注册表，直接写 botActionSpecsAll() 返回的 map 并在测试
-// 结束时恢复原值（helper 在 bot_action_registry_test.go，带保存/恢复语义）；
-// 生产代码不提供改表入口。
+// 测试如需临时扩展注册表，走 bot_action_registry_test.go 的 botWithTestSpecs
+//（复制整表后原子发布新快照，测试结束恢复），不要原地改 botActionSpecsAll()
+// 返回的 map——常驻 goroutine 在并发读它（fast-ship-bot R23）。生产代码不
+// 提供改表入口。
 
 // botActionReadOnlyOf 是动作的静态只读标记；未知动作按写处理（fail closed）。
 func botActionReadOnlyOf(tool, action string) bool {

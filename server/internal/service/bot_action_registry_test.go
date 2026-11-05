@@ -404,15 +404,26 @@ func TestBotActionRegistryDrivesEverySystem(t *testing.T) {
 		}
 	})
 	t.Run("围栏", func(t *testing.T) {
+		// 不原地改已发布 spec 的字段（与常驻读方存在数据竞争，快船 bot R23）：
+		// 豁免与不豁免用两个独立注入的动作表达。
 		payload := `{"name":"x"}`
 		if got := botFenceToolResult("nonce123", "fs_issue", "boom_test", payload); got != payload {
 			t.Fatalf("FenceExempt=true 应豁免围栏: %s", got)
 		}
-		boomSync.FenceExempt = false
-		if got := botFenceToolResult("nonce123", "fs_issue", "boom_test", payload); !strings.HasPrefix(got, `<untrusted_data nonce="nonce123"`) {
+		boomNoFence := &botActionSpec{
+			Tool: "fs_issue", Action: "boom_plain_test",
+			Description: "测试动作（验收后恢复）",
+			Mode:        model.BotExecutionSync, Confirmation: confirmNever,
+			PolicyRule: "boom_test_rule",
+			Required:   req("query"), Forbidden: []string{"state"},
+			SyncExec: func(*BotService, *model.Bot, context.Context, *model.BotToolCall) (string, error) {
+				return "{}", nil
+			},
+		}
+		botWithTestSpecs(t, boomNoFence)
+		if got := botFenceToolResult("nonce123", "fs_issue", "boom_plain_test", payload); !strings.HasPrefix(got, `<untrusted_data nonce="nonce123"`) {
 			t.Fatalf("FenceExempt=false 应进围栏: %s", got)
 		}
-		boomSync.FenceExempt = true
 	})
 	t.Run("定时任务会话拦截", func(t *testing.T) {
 		schedOK := &botActionSpec{
@@ -426,8 +437,15 @@ func TestBotActionRegistryDrivesEverySystem(t *testing.T) {
 		if err := botScheduleManageDenied(&botPreparedCall{ToolName: "fs_schedule", Action: "boom_test"}); err != nil {
 			t.Fatalf("ScheduleOK=true 应在定时任务会话放行: %v", err)
 		}
-		schedOK.ScheduleOK = false
-		if err := botScheduleManageDenied(&botPreparedCall{ToolName: "fs_schedule", Action: "boom_test"}); err == nil {
+		schedDenied := &botActionSpec{
+			Tool: "fs_schedule", Action: "boom_denied_test",
+			Description: "测试动作（验收后恢复）",
+			Mode:        model.BotExecutionSync, Confirmation: confirmNever,
+			Forbidden: []string{"dry_run"},
+			SyncExec:  (*BotService).execCapabilityStatusAction,
+		}
+		botWithTestSpecs(t, schedDenied)
+		if err := botScheduleManageDenied(&botPreparedCall{ToolName: "fs_schedule", Action: "boom_denied_test"}); err == nil {
 			t.Fatal("ScheduleOK=false 应在定时任务会话被拒绝")
 		}
 		// 未注册动作保持拒绝（fail closed）。
