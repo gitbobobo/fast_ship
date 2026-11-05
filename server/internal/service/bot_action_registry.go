@@ -86,9 +86,10 @@ type botActionSpec struct {
 	ScheduleOK      bool
 	ScheduleContext bool
 	// NoSideEffect 标记无写副作用的动作（wait）：取消竞速与服务重启恢复据此
-	// 不标「可能已写出」，结果带结构化中断 outcome。目前仅 wait 声明；中断
-	// 结果构造（botWaitInterruptedOutcome）是 wait 模块专属——新增无副作用
-	// 动作时需自带中断结果构造或扩展该 helper，不能盲用 wait 形态的 payload。
+	// 不标「可能已写出」，结果带结构化中断 outcome。必须与 AcceptanceOnly
+	// 同真同假（构建期强制，方向审计 F1）——目前仅 wait 声明；中断结果构造
+	// （botWaitInterruptedOutcome）是 wait 模块专属——新增无副作用动作时需
+	// 自带中断结果构造或扩展该 helper，不能盲用 wait 形态的 payload。
 	NoSideEffect bool
 	// MemoryWrite 标记记忆写动作：重启恢复据此判定「效果未知/已落库」并
 	// 给出专用中断提示（fast-ship-bot R16，替代按动作名的平行表）。
@@ -177,7 +178,55 @@ func botValidateActionSpecEntry(spec *botActionSpec) {
 	if spec.SyncExec == nil && spec.AsyncExec == nil && !spec.AcceptanceOnly {
 		panic("bot action registry: 执行入口缺失 " + key)
 	}
+	// 两个生命周期标志必须同真同假（方向审计 F1）：受理即 running 分支按
+	// AcceptanceOnly 进入，取消竞速与重启恢复按 NoSideEffect 判定——单边
+	// 声明会让同一动作在两条路径上得到不同语义。该组合目前只支持 wait 领域
+	// 生命周期，不是通用「无副作用任务框架」。
+	if spec.AcceptanceOnly != spec.NoSideEffect {
+		panic("bot action registry: AcceptanceOnly 与 NoSideEffect 必须同真同假 " + key)
+	}
 	botValidateActionSpec(spec)
+	botValidateExecutionForm(spec)
+}
+
+// botValidateExecutionForm 校验「声明形态 → 执行路径」的对应关系（方向审计
+// F2 的执行形态矩阵）：本期支持的五种形态之外一律构建期拒绝，不再按每轮
+// 发现补孤立特例——
+//  1. 同步读取/免确认同步写：Mode=sync + SyncExec；
+//  2. 恒确认异步写：confirmAlways + Mode=async + AsyncExec；
+//  3. 动态确认双出口：confirmDynamic + Mode=sync + SyncExec + AsyncExec；
+//  4. 历史同步元数据、运行时恒改判异步：confirmDynamic + SyncExecForbidden
+//     + AsyncExec（Mode=sync）；
+//  5. wait 受理生命周期：AcceptanceOnly + NoSideEffect，无执行入口。
+func botValidateExecutionForm(spec *botActionSpec) {
+	key := spec.Tool + "/" + spec.Action
+	if spec.AcceptanceOnly {
+		// 形态 5 的细项（Mode/确认分类/执行入口/档位）已由 botValidateActionSpec
+		// 与上方同真同假检查覆盖。
+		return
+	}
+	switch spec.Confirmation {
+	case confirmAlways:
+		// 形态 2
+		if spec.Mode != model.BotExecutionAsync || spec.AsyncExec == nil ||
+			spec.SyncExec != nil || spec.SyncExecForbidden {
+			panic("bot action registry: 恒确认动作必须是「async + AsyncExec、无同步入口/禁同步声明」的形态 " + key)
+		}
+	case confirmDynamic:
+		// 形态 3（双出口）与 4（禁同步 + AsyncExec）：dynamic 只支持 sync 形态；
+		// SyncExec 的有无必须与 SyncExecForbidden 声明一致。
+		if spec.Mode != model.BotExecutionSync || spec.AsyncExec == nil ||
+			(spec.SyncExec != nil) == spec.SyncExecForbidden {
+			panic("bot action registry: dynamic 动作必须是「sync + AsyncExec + SyncExec/禁同步二选一」的形态 " + key)
+		}
+	case confirmNever:
+		// 形态 1；「普通免确认异步」（async + AsyncExec 而无受理钩子）不支持——
+		// 主线受理会落 pending_confirmation 默认分支，与其免确认含义相悖。
+		if spec.Mode != model.BotExecutionSync || spec.SyncExec == nil || spec.AsyncExec != nil ||
+			spec.SyncExecForbidden || spec.PolicyTier != "" {
+			panic("bot action registry: 免确认动作必须是「sync + SyncExec」的形态（不支持免确认异步） " + key)
+		}
+	}
 }
 
 // botValidateActionSpec 校验单条 spec 的内部一致性（编程错误直接 panic，

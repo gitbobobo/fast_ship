@@ -536,6 +536,102 @@ func botMemoryTestExec(s *BotService, call *model.BotToolCall) (string, error) {
 // 读动作与全部写动作都不消费 ToolsetVersion；需要水位的 status 查询自行
 // 传真实 bot）。仅供测试使用——生产分派走 botExecuteSyncTool / runAsyncTool。
 
+// TestBotActionRegistryExecutionFormMatrix 是执行形态矩阵测试（方向审计
+// F2）：五种本期支持的合法形态经完整入口校验通过；「普通免确认异步」「
+// sync 缺 SyncExec」「恒确认带禁同步声明」「dynamic 出路与禁同步冲突」「
+// 生命周期单边声明」等非法组合构建期拒绝——声明形态与执行路径的对应关系
+// 在启动期封闭，不再按每轮发现补孤立特例。
+func TestBotActionRegistryExecutionFormMatrix(t *testing.T) {
+	entry := func(spec *botActionSpec) (panicked bool) {
+		defer func() {
+			if recover() != nil {
+				panicked = true
+			}
+		}()
+		botValidateActionSpecEntry(spec)
+		return false
+	}
+	// 合法五形态。
+	legal := []*botActionSpec{
+		// 形态 1：同步读取/免确认同步写
+		{Tool: "fs_issue", Action: "f1", Mode: model.BotExecutionSync, Confirmation: confirmNever,
+			Required: req("query"), SyncExec: func(*BotService, *model.Bot, context.Context, *model.BotToolCall) (string, error) {
+				return "{}", nil
+			}},
+		// 形态 2：恒确认异步写
+		{Tool: "fs_issue", Action: "f2", Mode: model.BotExecutionAsync, Confirmation: confirmAlways, PolicyTier: "tier3",
+			Required: req("query"), AsyncExec: func(*BotService, context.Context, *model.BotToolCall) (interface{}, error) {
+				return json.RawMessage("{}"), nil
+			}},
+		// 形态 3：动态确认双出口
+		{Tool: "fs_issue", Action: "f3", Mode: model.BotExecutionSync, Confirmation: confirmDynamic, PolicyTier: "tier2",
+			Required: req("query"),
+			SyncExec: func(*BotService, *model.Bot, context.Context, *model.BotToolCall) (string, error) {
+				return "{}", nil
+			},
+			AsyncExec: func(*BotService, context.Context, *model.BotToolCall) (interface{}, error) {
+				return json.RawMessage("{}"), nil
+			},
+			Confirm: func(map[string]json.RawMessage) (bool, error) { return false, nil }},
+		// 形态 4：历史同步元数据、运行时恒改判异步
+		{Tool: "fs_schedule", Action: "f4", Mode: model.BotExecutionSync, Confirmation: confirmDynamic, PolicyTier: "tier2",
+			Required: req("task_id"), SyncExecForbidden: true,
+			AsyncExec: func(*BotService, context.Context, *model.BotToolCall) (interface{}, error) {
+				return json.RawMessage("{}"), nil
+			},
+			Confirm: func(map[string]json.RawMessage) (bool, error) { return true, nil }},
+		// 形态 5：wait 受理生命周期
+		{Tool: "fs_thread", Action: "f5", Mode: model.BotExecutionAsync, Confirmation: confirmNever,
+			AcceptanceOnly: true, NoSideEffect: true, Required: req("env_id", "thread_id")},
+	}
+	for i, spec := range legal {
+		if panicked := entry(spec); panicked {
+			t.Fatalf("合法形态 %d 不应被拒绝", i+1)
+		}
+	}
+	// 非法组合（每条对应矩阵的一个出口）。
+	illegal := []*botActionSpec{
+		// 普通 sync 缺 SyncExec
+		{Tool: "fs_issue", Action: "x1", Mode: model.BotExecutionSync, Confirmation: confirmNever},
+		// 普通免确认异步（无受理钩子）：受理会落 pending_confirmation
+		{Tool: "fs_issue", Action: "x2", Mode: model.BotExecutionAsync, Confirmation: confirmNever, PolicyTier: "tier2",
+			AsyncExec: func(*BotService, context.Context, *model.BotToolCall) (interface{}, error) {
+				return json.RawMessage("{}"), nil
+			}},
+		// 恒确认带禁同步声明（形态 2 不含）
+		{Tool: "fs_issue", Action: "x3", Mode: model.BotExecutionAsync, Confirmation: confirmAlways, PolicyTier: "tier2",
+			SyncExecForbidden: true,
+			AsyncExec: func(*BotService, context.Context, *model.BotToolCall) (interface{}, error) {
+				return json.RawMessage("{}"), nil
+			}},
+		// dynamic 双出口却声明禁同步（形态 3 不含）
+		{Tool: "fs_issue", Action: "x4", Mode: model.BotExecutionSync, Confirmation: confirmDynamic, PolicyTier: "tier2",
+			SyncExecForbidden: true,
+			SyncExec:          func(*BotService, *model.Bot, context.Context, *model.BotToolCall) (string, error) { return "{}", nil },
+			AsyncExec: func(*BotService, context.Context, *model.BotToolCall) (interface{}, error) {
+				return json.RawMessage("{}"), nil
+			},
+			Confirm: func(map[string]json.RawMessage) (bool, error) { return true, nil }},
+		// dynamic 配 async 形态（形态 3/4 都是 sync）
+		{Tool: "fs_issue", Action: "x5", Mode: model.BotExecutionAsync, Confirmation: confirmDynamic, PolicyTier: "tier2",
+			AsyncExec: func(*BotService, context.Context, *model.BotToolCall) (interface{}, error) {
+				return json.RawMessage("{}"), nil
+			},
+			Confirm: func(map[string]json.RawMessage) (bool, error) { return true, nil }},
+		// 生命周期单边声明（AcceptanceOnly 真而 NoSideEffect 假）
+		{Tool: "fs_thread", Action: "x6", Mode: model.BotExecutionAsync, Confirmation: confirmNever,
+			AcceptanceOnly: true, Required: req("env_id")},
+		// 生命周期单边声明（NoSideEffect 真而 AcceptanceOnly 假）：会吞掉本来的执行入口
+		{Tool: "fs_thread", Action: "x7", Mode: model.BotExecutionSync, Confirmation: confirmNever, NoSideEffect: true,
+			SyncExec: func(*BotService, *model.Bot, context.Context, *model.BotToolCall) (string, error) { return "{}", nil }},
+	}
+	for i, spec := range illegal {
+		if panicked := entry(spec); !panicked {
+			t.Fatalf("非法组合 %d 应被构建期拒绝", i+1)
+		}
+	}
+}
+
 func botProjectReadTestExec(s *BotService, ctx context.Context, call *model.BotToolCall) (string, error) {
 	var args botProjectArgs
 	if err := json.Unmarshal([]byte(call.ArgumentsJSON), &args); err != nil {

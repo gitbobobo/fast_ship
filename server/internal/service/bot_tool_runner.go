@@ -246,7 +246,7 @@ func (s *BotService) commitAssistantTurn(bot *model.Bot, run *model.BotRun, requ
 		if prepared != nil {
 			waitSpec = botActionSpecOf(prepared.ToolName, prepared.Action)
 		}
-		if entry.prepared != nil && waitSpec != nil && waitSpec.NoSideEffect {
+		if entry.prepared != nil && waitSpec != nil && waitSpec.AcceptanceOnly {
 			// wait 受理端专门校验（INT-160）：定时任务会话内等待上限 15 分钟
 			//（schedule run 要等全部异步调用落终态，超长等待会吃掉整个结算
 			// 预算），防循环限额（每机器人 3 个、同线程 1 个、每小时 6 次）。
