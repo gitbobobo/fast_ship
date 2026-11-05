@@ -144,7 +144,7 @@ func botProjectActionSpecs() []*botActionSpec {
 		{
 			Tool: "fs_project", Action: "create",
 			Description: "创建项目",
-			Mode:        model.BotExecutionAsync, Confirmation: confirmAlways,
+			Mode:        model.BotExecutionAsync, Confirmation: confirmAlways, PolicyTier: "tier2",
 			Required: req("name"), Forbidden: []string{"id", "include_shelved"},
 			AsyncExec: (*BotService).runProjectCreate,
 			Scope:     scope,
@@ -152,7 +152,7 @@ func botProjectActionSpecs() []*botActionSpec {
 		{
 			Tool: "fs_project", Action: "update",
 			Description: "更新项目（名称/描述/仓库 URL）",
-			Mode:        model.BotExecutionAsync, Confirmation: confirmAlways,
+			Mode:        model.BotExecutionAsync, Confirmation: confirmAlways, PolicyTier: "tier2",
 			Required: req("id"), Forbidden: []string{"include_shelved"},
 			AsyncExec: (*BotService).runProjectUpdate,
 			Scope:     scope,

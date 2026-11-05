@@ -175,6 +175,7 @@ func botScheduleActionSpecs() []*botActionSpec {
 			Required: req("task_id"), Forbidden: []string{
 				"state", "limit", "offset", "name", "cron", "timezone", "instruction", "model", "needs_report",
 			},
+			PolicyTier: "tier2",
 			ReadOnlyIf: botScheduleRunDryRunReadOnly,
 			SyncExec:   (*BotService).execScheduleRunAction,
 			AsyncExec:  botScheduleAsyncRun((*BotService).execScheduleRun),
@@ -189,6 +190,7 @@ func botScheduleActionSpecs() []*botActionSpec {
 			},
 			// SyncExecForbidden 理由同 create：重新武装已确认任务不经同步分派。
 			SyncExecForbidden: true,
+			PolicyTier:        "tier2",
 			AsyncExec: botScheduleAsyncRun(func(s *BotService, call *model.BotToolCall, args *botScheduleTaskArgs) (string, error) {
 				return s.execScheduleEnable(call, args, true)
 			}),

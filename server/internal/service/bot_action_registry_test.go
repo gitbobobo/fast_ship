@@ -154,6 +154,7 @@ func TestBotActionRegistryValidatesSpecs(t *testing.T) {
 	mustOK("always", base(func(s *botActionSpec) {
 		s.Confirmation = confirmAlways
 		s.Mode = model.BotExecutionAsync
+		s.PolicyTier = "tier2"
 		s.AsyncExec = func(*BotService, context.Context, *model.BotToolCall) (interface{}, error) {
 			return nil, nil
 		}

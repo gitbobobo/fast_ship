@@ -417,7 +417,7 @@ func botThreadActionSpecs() []*botActionSpec {
 		{
 			Tool: "fs_thread", Action: "settle",
 			Description: "结算线程：收进 T3 历史区，之后默认 list 不再返回（要带 settled=true 才看得到）；结算会清掉置顶与该线程所有 PR 监听；线程还在跑、有排队消息或有待应答的审批/提问时会被拒绝",
-			Mode:        model.BotExecutionAsync, Confirmation: confirmAlways,
+			Mode:        model.BotExecutionAsync, Confirmation: confirmAlways, PolicyTier: "tier2",
 			Required: req("env_id", "thread_id"), Forbidden: botThreadLaunchWaitForbidden,
 			PolicyRule: botPolicyRuleSettleIdle,
 			AsyncExec:  (*BotService).runThreadSettle,
@@ -426,7 +426,7 @@ func botThreadActionSpecs() []*botActionSpec {
 		{
 			Tool: "fs_thread", Action: "unsettle",
 			Description: "撤销结算，把线程放回默认列表",
-			Mode:        model.BotExecutionAsync, Confirmation: confirmAlways,
+			Mode:        model.BotExecutionAsync, Confirmation: confirmAlways, PolicyTier: "tier2",
 			Required: req("env_id", "thread_id"), Forbidden: botThreadLaunchWaitForbidden,
 			PolicyRule: botPolicyRuleUnsettle,
 			AsyncExec:  (*BotService).runThreadUnsettle,
@@ -444,7 +444,7 @@ func botThreadActionSpecs() []*botActionSpec {
 		{
 			Tool: "fs_thread", Action: "wait",
 			Description: "挂起等待线程变化后唤醒（受理即 running，不进执行队列，无写副作用）：on 选触发条件（idle/needs_reply/error，缺省全部），线程开始运行并命中条件（idle 需稳定约 20 秒）即唤醒；约 60 秒内线程始终没开始运行以 not_started 唤醒；到 timeout_minutes 上限按 outcome 区分 timeout_unchanged（确实没动）/timeout_progressing（在动但未到终态）/watch_degraded（连接不可信，结论仅供参考）/thread_gone。唤醒的「平台后台结果」带 wait_result：变化字段前后对比、queue.held、最近 3 条条目摘要。每机器人同时最多 3 个、同一线程 1 个（重复挂立即返回 already_waiting 与已有调用 ID）、同一线程 1 小时内最多挂 6 次；定时任务会话内 timeout_minutes 不得超过 15。取消用 fs_cancel。",
-			Mode:        model.BotExecutionAsync, Confirmation: confirmNever, NoSideEffect: true,
+			Mode:        model.BotExecutionAsync, Confirmation: confirmNever, PolicyTier: "tier2", NoSideEffect: true,
 			Required: req("env_id", "thread_id"), Forbidden: botThreadWaitForbidden,
 			AsyncExec: (*BotService).runThreadWait,
 			Scope:     threadScope,

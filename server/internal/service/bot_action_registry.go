@@ -204,6 +204,25 @@ func botValidateActionSpec(spec *botActionSpec) {
 	if spec.Confirmation == confirmAlways && spec.Mode != model.BotExecutionAsync {
 		panic("bot action registry: 恒需确认的动作必须是异步形态 " + key)
 	}
+	// Mode 必须显式声明且属枚举（快船 bot R8 Note）：零值受理后会凭空生成
+	// 确认卡、批准后才在 worker 里报「没有异步实现」，错误暴露点后移。
+	if spec.Mode != model.BotExecutionSync && spec.Mode != model.BotExecutionAsync {
+		panic("bot action registry: Mode 缺失或未知 " + key)
+	}
+	// PolicyTier 只被异步受理的写策略评估消费（快船 bot R8）：async 动作必须
+	// 显式声明 tier2/tier3——空值静默等价 tier2 会让新写动作在定时任务会话从
+	// 「同步拒绝」降为「默认放行并自动执行」（fail open）；SyncExec-only 的动作
+	// 永不进策略评估，声明 tier 反而是死数据，一并拒绝。
+	switch {
+	case spec.AsyncExec != nil:
+		if spec.PolicyTier != "tier2" && spec.PolicyTier != "tier3" {
+			panic("bot action registry: 异步动作必须显式声明的 PolicyTier（tier2/tier3） " + key)
+		}
+	default:
+		if spec.PolicyTier != "" {
+			panic("bot action registry: 仅同步的动作不得声明 PolicyTier（策略评估不可达） " + key)
+		}
+	}
 }
 
 func botBuildActionSpecs() map[string]*botActionSpec {
