@@ -30,7 +30,10 @@ func (s *BotService) execThreadList(_ *model.Bot, ctx context.Context, call *mod
 	if err := json.Unmarshal([]byte(call.ArgumentsJSON), &args); err != nil {
 		return "", errs.ErrInvalidParams
 	}
-	list, err := s.threads.List(ctx, s.botUserIDOf(call.BotID))
+	// userID 取一次复用：两次查询除多一跳 DB 外，第二次瞬时失败会得到空
+	// userID，整页补详情静默降级（fast-ship-bot R10；拆分前只取一次）。
+	userID := s.botUserIDOf(call.BotID)
+	list, err := s.threads.List(ctx, userID)
 	if err != nil {
 		return "", err
 	}
@@ -41,7 +44,7 @@ func (s *BotService) execThreadList(_ *model.Bot, ctx context.Context, call *mod
 	// INT-156：页内逐条补 activity 与末条回复摘要——巡检过去要为「线程
 	// 有没有回话」逐线程 get，现在 list 一次带回。空页直接跳过。
 	if items, ok := result["items"].([]map[string]interface{}); ok && len(items) > 0 {
-		s.botEnrichThreadListItems(ctx, s.botUserIDOf(call.BotID), items)
+		s.botEnrichThreadListItems(ctx, userID, items)
 	}
 	return botMarshalResult(result)
 }
@@ -79,7 +82,8 @@ func (s *BotService) execThreadComposerOptions(_ *model.Bot, ctx context.Context
 	if err := json.Unmarshal([]byte(call.ArgumentsJSON), &args); err != nil {
 		return "", errs.ErrInvalidParams
 	}
-	opts, err := s.threads.ComposerOptions(ctx, s.botUserIDOf(call.BotID), args.EnvID)
+	userID := s.botUserIDOf(call.BotID)
+	opts, err := s.threads.ComposerOptions(ctx, userID, args.EnvID)
 	if err != nil {
 		return "", err
 	}
@@ -105,7 +109,7 @@ func (s *BotService) execThreadComposerOptions(_ *model.Bot, ctx context.Context
 		// 恒 ≤ 活值——活值已低于当前版时冻结版必也低，标注恒正确；
 		// 活值≥当前版的旧会话仍会漏标（双重降级才出现，方向安全），
 		// 但比按 0 兜底更贴近事实（代码审查 Note）。
-		if bot, berr := s.bots.FindByIDAndUser(call.BotID, s.botUserIDOf(call.BotID)); berr == nil {
+		if bot, berr := s.bots.FindByIDAndUser(call.BotID, userID); berr == nil {
 			botToolsetVer = bot.ToolsetVersion
 		}
 	}

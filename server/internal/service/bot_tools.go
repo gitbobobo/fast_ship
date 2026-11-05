@@ -738,6 +738,22 @@ func botToolRegistryV14FromGroups(groups map[string][]*botActionSpec) []*botTool
 		}
 		tool.Actions = actions
 	}
+	// 组必须全部落在链条输出的工具上：新增「工具」（而非动作）时只加 spec
+	// 组不会自动进工具面——静默忽略会让新工具的调用永远 unknown 且启动期
+	// 无报错（fast-ship-bot R10），在这里显式 panic 对齐「规格错误拒绝带病
+	// 启动」口径，提示同步扩链条。
+	for name := range groups {
+		found := false
+		for _, tool := range tools {
+			if tool.Name == name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			panic("bot action registry: spec 组声明的工具不在 v13 链条输出中 " + name + "（新增工具需同步扩注册表链条）")
+		}
+	}
 	return tools
 }
 
