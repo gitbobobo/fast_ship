@@ -235,6 +235,9 @@ func TestBotInt160ToolsetV13(t *testing.T) {
 		t.Fatalf("wait 应为异步、不需确认: %+v", waitDef)
 	}
 	waitSpec := botActionSpecOf("fs_thread", "wait")
+	if waitSpec == nil {
+		t.Fatalf("wait 应在注册表中")
+	}
 	if waitSpec.ReadOnly {
 		t.Fatalf("wait 不是同步读取动作，不得列入只读")
 	}

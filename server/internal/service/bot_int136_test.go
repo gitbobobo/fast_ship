@@ -1569,24 +1569,33 @@ func TestBotInt136UnknownActionFailsClosed(t *testing.T) {
 		}
 	}
 	// 需确认动作的动态判定与拆分前 botScheduleConfirmation 逐项同口径。
+	// scheduleConfirmOf 先判 nil：注册表真漏动作时给清晰 Fatal 而不是
+	// nil 指针崩溃（fast-ship-bot R14，与 R13 的 nil 先判同族）。
+	scheduleConfirmOf := func(a string) func(map[string]json.RawMessage) (bool, error) {
+		spec := botActionSpecOf("fs_schedule", a)
+		if spec == nil {
+			t.Fatalf("fs_schedule/%s 应在注册表中", a)
+		}
+		return spec.Confirm
+	}
 	for _, a := range []string{"create", "enable", "delete"} {
-		needs, err := botActionSpecOf("fs_schedule", a).Confirm(map[string]json.RawMessage{})
+		needs, err := scheduleConfirmOf(a)(map[string]json.RawMessage{})
 		if err != nil || !needs {
 			t.Fatalf("%s 应恒需确认: needs=%v err=%v", a, needs, err)
 		}
 	}
-	if needs, err := botActionSpecOf("fs_schedule", "update").Confirm(map[string]json.RawMessage{}); err != nil || needs {
+	if needs, err := scheduleConfirmOf("update")(map[string]json.RawMessage{}); err != nil || needs {
 		t.Fatalf("update 空参数应免确认: needs=%v err=%v", needs, err)
 	}
-	if needs, err := botActionSpecOf("fs_schedule", "update").Confirm(map[string]json.RawMessage{
+	if needs, err := scheduleConfirmOf("update")(map[string]json.RawMessage{
 		"instruction": []byte(`"x"`),
 	}); err != nil || !needs {
 		t.Fatalf("update 带敏感字段应需确认: needs=%v err=%v", needs, err)
 	}
-	if needs, err := botActionSpecOf("fs_schedule", "run").Confirm(map[string]json.RawMessage{}); err != nil || !needs {
+	if needs, err := scheduleConfirmOf("run")(map[string]json.RawMessage{}); err != nil || !needs {
 		t.Fatalf("run 非 dry_run 应需确认: needs=%v err=%v", needs, err)
 	}
-	if needs, err := botActionSpecOf("fs_schedule", "run").Confirm(map[string]json.RawMessage{
+	if needs, err := scheduleConfirmOf("run")(map[string]json.RawMessage{
 		"dry_run": []byte(`true`),
 	}); err != nil || needs {
 		t.Fatalf("run dry_run=true 应免确认: needs=%v err=%v", needs, err)
