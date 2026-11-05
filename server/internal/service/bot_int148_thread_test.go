@@ -52,10 +52,13 @@ func TestBotInt148ThreadToolsetV9(t *testing.T) {
 			t.Fatalf("%s 应为异步需确认动作: %+v", action, def)
 		}
 		spec := botActionSpecOf("fs_thread", action)
+		if spec == nil {
+			t.Fatalf("v9 fs_thread 动作 %s 应在注册表中", action)
+		}
 		if spec.ReadOnly {
 			t.Fatalf("%s 是写动作，不得列入只读", action)
 		}
-		if spec == nil || len(spec.Required) != 2 || spec.Required[0].Name != "env_id" || spec.Required[1].Name != "thread_id" {
+		if len(spec.Required) != 2 || spec.Required[0].Name != "env_id" || spec.Required[1].Name != "thread_id" {
 			t.Fatalf("%s 的字段规则应为 env_id+thread_id: %+v", action, spec.Required)
 		}
 	}

@@ -158,8 +158,22 @@ func botRequiresConfirmationOf(spec *botActionSpec) bool {
 	return spec.Confirmation == confirmAlways
 }
 
-// botValidateActionSpec 校验单条 spec 的内部一致性（构建时逐条调用，编程
-// 错误直接 panic，不能带病启动）：
+// botValidateActionSpecEntry 是构建与测试注入共用的单条入口校验：键完整、
+// 执行入口存在、内部一致性与交叉约束（botValidateActionSpec）。重复注册属
+// 注册表聚合语义，仍由 botBuildActionSpecs 查表时检查。
+func botValidateActionSpecEntry(spec *botActionSpec) {
+	key := spec.Tool + "/" + spec.Action
+	if spec.Tool == "" || spec.Action == "" {
+		panic("bot action registry: spec 键不完整: " + key)
+	}
+	if spec.SyncExec == nil && spec.AsyncExec == nil {
+		panic("bot action registry: 执行入口缺失 " + key)
+	}
+	botValidateActionSpec(spec)
+}
+
+// botValidateActionSpec 校验单条 spec 的内部一致性（编程错误直接 panic，
+// 不能带病启动）：
 //   - 写动作（非 ReadOnly）必须显式声明确认分类，零值不再等价于免确认
 //     （旧 botScheduleConfirmation 的 fail-closed 护栏）；
 //   - confirmDynamic 与 Confirm 闭包一一对应；
@@ -241,16 +255,10 @@ func botBuildActionSpecs() map[string]*botActionSpec {
 	for _, group := range groups {
 		for _, spec := range group {
 			key := spec.Tool + "/" + spec.Action
-			if spec.Tool == "" || spec.Action == "" {
-				panic("bot action registry: spec 键不完整: " + key)
-			}
 			if _, dup := out[key]; dup {
 				panic("bot action registry: 重复注册 " + key)
 			}
-			if spec.SyncExec == nil && spec.AsyncExec == nil {
-				panic("bot action registry: 执行入口缺失 " + key)
-			}
-			botValidateActionSpec(spec)
+			botValidateActionSpecEntry(spec)
 			out[key] = spec
 		}
 	}

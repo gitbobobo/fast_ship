@@ -30,9 +30,10 @@ import (
 func botWithTestSpecs(t *testing.T, specs ...*botActionSpec) {
 	t.Helper()
 	for _, spec := range specs {
-		// 临时 spec 先过构建校验：验收用的声明必须能通过启动期校验，否则
-		// 「新增动作只需一条 spec」验收的本身就是伪命题（快船 bot R12）。
-		botValidateActionSpec(spec)
+		// 临时 spec 与构建路径共用同一条入口校验：键完整、执行入口存在、
+		// 内部一致性与交叉约束——验收声明必须能通过启动期校验，否则
+		// 「新增动作只需一条 spec」验收的本身就是伪命题（快船 bot R12/R13）。
+		botValidateActionSpecEntry(spec)
 	}
 	m := botActionSpecsAll()
 	saved := make(map[string]*botActionSpec, len(specs))
