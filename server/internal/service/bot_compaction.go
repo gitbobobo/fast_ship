@@ -160,9 +160,15 @@ func (s *BotService) now() time.Time {
 	return time.Now().UTC()
 }
 
-// setNowFn 注入固定时钟（测试装配用，fn 非空）。原子写：后台窗口探测
-// goroutine 会在测试改时钟的同时经 now() 读它（INT-196）。
+// setNowFn 注入固定时钟（测试装配用）；传 nil 恢复真实时钟，与原裸字段的
+// 空值语义一致——后台窗口探测 goroutine 会在测试改时钟的同时经 now() 读它
+// （INT-196），写入走原子，nil 也一样，不把回退语义变成后台 goroutine 里的
+// 空指针 panic。
 func (s *BotService) setNowFn(fn func() time.Time) {
+	if fn == nil {
+		s.nowFn.Store(nil)
+		return
+	}
 	s.nowFn.Store(&fn)
 }
 
