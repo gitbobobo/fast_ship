@@ -162,18 +162,15 @@ type botWritePolicyEval struct {
 // ---------- 分档 ----------
 
 // botPolicyCandidateRule 返回 tier1 候选规则 ID；非候选（返回空）按基础档处理。
-// 候选判定收进动作注册表（INT-195）：settle/unsettle 静态规则由 spec.PolicyRule
-// 声明，send 只有精确命中「继续」模板才是候选（spec.CandidateFunc 动态判定：
-// 非模板的 send 直接落 tier3），规则归属（误判检测）同由 spec.PolicyRule 提供。
+// 候选判定只由 spec.CandidateFunc 决定（INT-195）：静态命中（settle/unsettle
+// 恒候选）也用闭包表达；PolicyRule 只承担规则归属（误判检测），不构成候选
+// 资格——为归因声明规则的动作不得顺带获得 tier1 自动放行路径（快船 bot R20）。
 func botPolicyCandidateRule(prepared *botPreparedCall) string {
 	spec := botActionSpecOf(prepared.ToolName, prepared.Action)
-	if spec == nil {
+	if spec == nil || spec.CandidateFunc == nil {
 		return ""
 	}
-	if spec.CandidateFunc != nil {
-		return spec.CandidateFunc(prepared)
-	}
-	return spec.PolicyRule
+	return spec.CandidateFunc(prepared)
 }
 
 // botPolicyBaseTier 是非 tier1 候选写动作的基础档（由注册表 spec.PolicyTier

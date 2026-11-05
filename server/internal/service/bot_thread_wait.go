@@ -22,7 +22,8 @@ import (
 //
 // 关键行为契约：
 //   - 受理即 running、不进 queued：ListQueued 会把 queued 调用推给 worker，
-//     而 runThreadWrite 没有 wait 实现，会被错误认领。受理置 running 并写
+//     而 wait 是 AcceptanceOnly（无执行入口），会被 worker 以「没有异步实现」
+//     拒绝。受理置 running 并写
 //     started_at，由本文件的评估器调 finalizeCall 收尾（该函数支持从 running
 //     做条件更新 CAS）。
 //   - 不新增订阅、不新增常驻 goroutine：评估器挂在既有 5s 扫描（scanOnce）

@@ -70,10 +70,10 @@ type botActionSpec struct {
 	// (*BotService).execIssueGet）。
 	SyncExec  func(*BotService, *model.Bot, context.Context, *model.BotToolCall) (string, error)
 	AsyncExec func(*BotService, context.Context, *model.BotToolCall) (interface{}, error)
-	// 写策略：PolicyTier 是非 tier1 候选的基础档（空 = tier2）；PolicyRule 是
-	// 覆盖本动作的 tier1 规则 ID；CandidateFunc 是动态候选（fs_thread/send 的
-	// 「继续」模板），与 PolicyRule 并存——候选判定用 CandidateFunc，规则归属
-	// （误判检测）用 PolicyRule。
+	// 写策略：PolicyTier 是非 tier1 候选的基础档（空 = tier2）。候选资格只由
+	// CandidateFunc 决定——静态恒候选（settle/unsettle）用返回常量的闭包表达；
+	// PolicyRule 只承担规则归属（误判检测用），单独声明它不构成候选资格，
+	// 也不会改变动作的确认/放行行为（快船 bot R20 澄清的语义边界）。
 	PolicyTier    string
 	PolicyRule    string
 	CandidateFunc func(*botPreparedCall) string

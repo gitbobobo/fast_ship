@@ -87,8 +87,6 @@ func (s *BotService) execIssueTimeline(_ *model.Bot, _ context.Context, call *mo
 	return botMarshalResult(botSlimPage("timeline", botSlimIssueTimeline(items), total, page, pageSize))
 }
 
-// execIssueRead 是聚合兼容入口（既有调用方/测试使用）：按 call.Action 经
-// 注册表分派到单动作入口；同步受理路径由 botExecuteSyncTool 直达单动作方法。
 // botSlimIssues 列表投影：保工具决策所需的最小字段。
 func botSlimIssues(items []IssueResponse) []map[string]interface{} {
 	out := make([]map[string]interface{}, 0, len(items))
@@ -335,8 +333,6 @@ func (s *BotService) runIssueComment(ctx context.Context, call *model.BotToolCal
 	return comment, nil
 }
 
-// runIssueWrite 是聚合兼容入口（既有调用方/测试使用）：经注册表 AsyncExec
-// 分派；worker 主路径由 runAsyncTool 直达单动作方法。
 // resolveIssueScope 建卡前解析 fs_issue 写操作范围：指定 Fast Ship 项目。
 func (s *BotService) resolveIssueScope(bot *model.Bot, prepared *botPreparedCall, raw map[string]json.RawMessage) {
 	prepared.ScopeKind = botScopeIssueProject

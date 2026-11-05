@@ -52,9 +52,6 @@ func (s *BotService) execProjectGet(_ *model.Bot, _ context.Context, call *model
 	return botMarshalResult(botSlimProject(project))
 }
 
-// execProjectRead 是聚合兼容入口（既有调用方/测试使用）：按参数里的 action
-// 经注册表分派到单动作入口；同步受理路径由 botExecuteSyncTool 直达单动作
-// 方法，不再经过这里。
 // runProjectCreate/runProjectUpdate 在 worker 内执行 fs_project 写操作
 // （确认/授权已完成；注册表 AsyncExec 直接指向单动作方法）。结果与读取一致
 // 走瘦身投影：完整响应带凭证引用，会随后台结果发给模型供应商。
@@ -98,10 +95,9 @@ func (s *BotService) runProjectUpdate(_ context.Context, call *model.BotToolCall
 	return botSlimProject(resp), nil
 }
 
-// runProjectWrite 是聚合兼容入口（既有调用方/测试使用）：经注册表 AsyncExec
-// 分派；worker 主路径由 runAsyncTool 直达单动作方法。
 // botProjectActionSpecs 是 fs_project 的动作声明（INT-195）：范围解析与策略
-// 档位随 spec 声明；scope 解析的细节在 resolveProjectScope。
+// 档位随 spec 声明；scope 解析的细节在 resolveProjectScope。测试驱动写执行体
+// 用测试侧的 botProjectWriteTestExec（生产分派走 runAsyncTool）。
 func botProjectActionSpecs() []*botActionSpec {
 	scope := func(s *BotService, bot *model.Bot, prepared *botPreparedCall, raw map[string]json.RawMessage, _ *botCallExecContext) error {
 		s.resolveProjectScope(bot, prepared, raw)

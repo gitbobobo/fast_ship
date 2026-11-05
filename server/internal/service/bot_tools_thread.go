@@ -155,8 +155,6 @@ func (s *BotService) execThreadWorkspaceOptions(_ *model.Bot, ctx context.Contex
 	return botMarshalResult(opts)
 }
 
-// execThreadRead 是聚合兼容入口（既有调用方/测试使用）：经注册表 SyncExec
-// 分派；同步受理路径由 botExecuteSyncTool 直达单动作方法。
 // fs_environment 各读取动作的入口（注册表 SyncExec 指向这些方法表达式）。
 
 func (s *BotService) execEnvironmentList(_ *model.Bot, ctx context.Context, call *model.BotToolCall) (string, error) {
@@ -184,8 +182,6 @@ func (s *BotService) execEnvironmentProjects(_ *model.Bot, ctx context.Context, 
 	return botMarshalResult(map[string]interface{}{"projects": projects})
 }
 
-// execEnvironmentRead 是聚合兼容入口（既有调用方/测试使用）：经注册表
-// SyncExec 分派。
 // botCallExecContext 是调用记录 execution_context 的统一形态：服务端生成的
 // T3 幂等身份 + 受理时解析的授权范围。
 type botCallExecContext struct {
@@ -397,18 +393,20 @@ func botThreadActionSpecs() []*botActionSpec {
 			Description: "结算线程：收进 T3 历史区，之后默认 list 不再返回（要带 settled=true 才看得到）；结算会清掉置顶与该线程所有 PR 监听；线程还在跑、有排队消息或有待应答的审批/提问时会被拒绝",
 			Mode:        model.BotExecutionAsync, Confirmation: confirmAlways, PolicyTier: "tier2",
 			Required: req("env_id", "thread_id"), Forbidden: botThreadLaunchWaitForbidden,
-			PolicyRule: botPolicyRuleSettleIdle,
-			AsyncExec:  (*BotService).runThreadSettle,
-			Scope:      threadScope,
+			PolicyRule:    botPolicyRuleSettleIdle,
+			CandidateFunc: func(*botPreparedCall) string { return botPolicyRuleSettleIdle },
+			AsyncExec:     (*BotService).runThreadSettle,
+			Scope:         threadScope,
 		},
 		{
 			Tool: "fs_thread", Action: "unsettle",
 			Description: "撤销结算，把线程放回默认列表",
 			Mode:        model.BotExecutionAsync, Confirmation: confirmAlways, PolicyTier: "tier2",
 			Required: req("env_id", "thread_id"), Forbidden: botThreadLaunchWaitForbidden,
-			PolicyRule: botPolicyRuleUnsettle,
-			AsyncExec:  (*BotService).runThreadUnsettle,
-			Scope:      threadScope,
+			PolicyRule:    botPolicyRuleUnsettle,
+			CandidateFunc: func(*botPreparedCall) string { return botPolicyRuleUnsettle },
+			AsyncExec:     (*BotService).runThreadUnsettle,
+			Scope:         threadScope,
 		},
 		{
 			Tool: "fs_thread", Action: "resume_queue",

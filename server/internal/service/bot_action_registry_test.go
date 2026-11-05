@@ -386,8 +386,10 @@ func TestBotActionRegistryDrivesEverySystem(t *testing.T) {
 		if got := botPolicyRuleForAction("fs_issue", "boom_test"); got != "boom_test_rule" {
 			t.Fatalf("botPolicyRuleForAction 应读 spec.PolicyRule: %q", got)
 		}
-		if got := botPolicyCandidateRule(prepRule); got != "boom_test_rule" {
-			t.Fatalf("botPolicyCandidateRule 无动态候选时应回 PolicyRule: %q", got)
+		// 候选资格只由 CandidateFunc 决定（快船 bot R20）：仅为误判归因声明
+		// PolicyRule 不构成候选资格（否则误判归因声明会顺带获得自动放行路径）。
+		if got := botPolicyCandidateRule(prepRule); got != "" {
+			t.Fatalf("仅声明 PolicyRule 不应构成候选资格: %q", got)
 		}
 	})
 	t.Run("围栏", func(t *testing.T) {
