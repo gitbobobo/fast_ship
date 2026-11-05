@@ -35,21 +35,32 @@ func botWithTestSpecs(t *testing.T, specs ...*botActionSpec) {
 		// 「新增动作只需一条 spec」验收的本身就是伪命题（快船 bot R12/R13）。
 		botValidateActionSpecEntry(spec)
 	}
-	m := botActionSpecsAll()
+	// 快照替换而非原地写：常驻 worker/扫描 goroutine 在并发读同一张表，
+	// 原地写会触发运行时 fatal（fast-ship-bot R22）。恢复同样以新快照发布。
+	cur := make(map[string]*botActionSpec, len(botActionSpecsAll()))
+	for k, v := range botActionSpecsAll() {
+		cur[k] = v
+	}
 	saved := make(map[string]*botActionSpec, len(specs))
 	for _, spec := range specs {
 		key := spec.Tool + "/" + spec.Action
-		saved[key] = m[key]
-		m[key] = spec
+		saved[key] = cur[key]
+		cur[key] = spec
 	}
+	botActionSpecsPtr.Store(&cur)
 	t.Cleanup(func() {
+		now := make(map[string]*botActionSpec, len(botActionSpecsAll()))
+		for k, v := range botActionSpecsAll() {
+			now[k] = v
+		}
 		for key, old := range saved {
 			if old == nil {
-				delete(m, key)
+				delete(now, key)
 			} else {
-				m[key] = old
+				now[key] = old
 			}
 		}
+		botActionSpecsPtr.Store(&now)
 	})
 }
 

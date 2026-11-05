@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"sync"
+	"sync/atomic"
 
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
@@ -146,18 +147,22 @@ func botLegacyActionSpecs() []*botActionSpec {
 
 var (
 	botActionSpecsOnce sync.Once
-	botActionSpecs     map[string]*botActionSpec
+	// 注册表以不可变快照发布：读方（含常驻 worker/扫描 goroutine）经原子
+	// 指针取整表，写方（仅测试注入）整表替换——并发读写不再是 map 同时
+	// 读写（fast-ship-bot R22）。
+	botActionSpecsPtr atomic.Pointer[map[string]*botActionSpec]
 )
 
 // botActionSpecsAll 返回包级注册表（键 "tool/action"），首次访问时构建；
-// NewBotService 在启动路径显式调用一次，保证规格错误在进程启动即 panic
+// NewBotService 在启动路径显式调用一次，保证规格错误在进程启动即 panic。
 // 重复注册、键不完整或执行入口全空都按编程错误 panic（与 schema 生成同
-// 口径，不能带病启动）。
+// 口径，不能带病启动）。返回的快照不可变：写方（仅测试）复制整表替换。
 func botActionSpecsAll() map[string]*botActionSpec {
 	botActionSpecsOnce.Do(func() {
-		botActionSpecs = botBuildActionSpecs()
+		m := botBuildActionSpecs()
+		botActionSpecsPtr.Store(&m)
 	})
-	return botActionSpecs
+	return *botActionSpecsPtr.Load()
 }
 
 // botRequiresConfirmationOf 报告动作的静态确认标记（v14 生成 botActionDef
