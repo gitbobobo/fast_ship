@@ -250,7 +250,7 @@ func botValidateExecutionForm(spec *botActionSpec) {
 //   - 写动作（非 ReadOnly）必须显式声明确认分类，零值不再等价于免确认
 //     （旧 botScheduleConfirmation 的 fail-closed 护栏）；
 //   - confirmDynamic 与 Confirm 闭包一一对应；
-//   - 只读动作不得声明恒需确认（矛盾语义）。
+//   - 只读动作不得声明任何确认分类（ReadOnly 恒为零值确认）。
 func botValidateActionSpec(spec *botActionSpec) {
 	key := spec.Tool + "/" + spec.Action
 	switch spec.Confirmation {
@@ -283,8 +283,10 @@ func botValidateActionSpec(spec *botActionSpec) {
 	default:
 		panic("bot action registry: 未知确认分类 " + string(spec.Confirmation) + " " + key)
 	}
-	if spec.ReadOnly && spec.Confirmation == confirmAlways {
-		panic("bot action registry: 只读动作不得恒需确认 " + key)
+	// 只读桶钉在 ReadOnly 声明上：读动作恒为零值确认，任何显式确认分类都
+	// 会让形态矩阵按写桶校验、失去只读形态背书（快船 bot R25）。
+	if spec.ReadOnly && spec.Confirmation != "" {
+		panic("bot action registry: 只读动作不得声明确认分类（ReadOnly 恒为零值确认） " + key)
 	}
 	// confirmAlways 的动作不得携带 SyncExec：恒需确认意味着受理端必须走
 	// 异步确认，同步直达入口就是绕过确认的第二把钥匙（面板 R2 指出的护栏缝）。

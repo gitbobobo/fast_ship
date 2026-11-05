@@ -136,8 +136,10 @@ func TestBotActionRegistryValidatesSpecs(t *testing.T) {
 	mustPanic("never 带 Confirm", base(func(s *botActionSpec) {
 		s.Confirm = func(map[string]json.RawMessage) (bool, error) { return true, nil }
 	}))
-	// 只读动作不得恒需确认（矛盾语义）。
+	// 只读动作不得声明任何确认分类：零值确认 ⇔ ReadOnly 是形态矩阵只读桶
+	// 的入口等价式，显式分类会静默换桶（快船 bot R25）。
 	mustPanic("只读恒需确认", base(func(s *botActionSpec) { s.Confirmation = confirmAlways; s.ReadOnly = true }))
+	mustPanic("只读免确认", base(func(s *botActionSpec) { s.Confirmation = confirmNever; s.ReadOnly = true }))
 	// 恒需确认的动作不得带同步执行入口（绕过确认的第二把钥匙，面板 R2）。
 	mustPanic("恒需确认带同步入口", base(func(s *botActionSpec) {
 		s.Confirmation = confirmAlways

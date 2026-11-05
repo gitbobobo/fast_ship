@@ -1825,8 +1825,8 @@ hub 按「用户 × 环境」维持的内存 ThreadShell（INT-116）与异步�
 `watch_degraded` 是唯一例外。
 
 - **受理即 running、不进 queued**：`ListQueued` 会把 queued 调用推给 worker，
-  而 `fs_thread/wait` 是仅受理钩子动作（无执行入口），会被 queued 认领错误
-  挂起。受理在
+  而 `fs_thread/wait` 是仅受理钩子动作（无执行入口），误入队会被 worker
+  以「工具没有异步实现」拒绝并落 failed。受理在
   `commitAssistantTurn` 里直接置 `running` 并写 `started_at`（走既有 prepared
   管线：async、不要求确认、不属于写操作的确认分支，`fs_cancel` 可取消），
   事务提交后不调 `enqueueCallWork`，改为向评估器注册（botID、env_id、
