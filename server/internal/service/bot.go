@@ -97,6 +97,13 @@ func NewBotService(
 	threads *T3ThreadsService,
 	bindings *T3BindingService,
 ) *BotService {
+	// 动作注册表启动期预构建（INT-195）：规格错误（写动作漏声明确认分类、
+	// 恒确认动作带同步入口等）在进程启动时 panic 拒绝带病启动，而不是等到
+	// 首个会话查表才在请求/worker goroutine 里炸（快船 bot R3 Note）。
+	// 工具面（schema 生成 + wire 哈希）同理预构建，组完整性与生成期校验
+	// 也在启动期暴露（快船 bot R4 Note）。
+	botActionSpecsAll()
+	botToolsetOf()
 	return &BotService{
 		db:         db,
 		cfg:        cfg,

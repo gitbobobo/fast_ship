@@ -165,7 +165,7 @@ type botProjectArgs struct {
 }
 
 // botIssueArgs 是 fs_issue 的参数超集：schema 描述并集，服务端按 action
-// 校验必填/禁止字段（botActionRules）。
+// 校验必填/禁止字段（动作注册表 spec）。
 // v3 起 action 枚举用 `enum=a,enum=b` 语法逐项声明（`enum=a,b` 只会生成
 // 第一个取值）；v1/v2 的旧字节由 bot_args_frozen.go 的冻结结构体保留。
 type botIssueArgs struct {
@@ -547,10 +547,11 @@ func botToolRegistryV9() []*botToolDef {
 // 的 update、非 dry_run 的 run 需要用户确认、异步受理、结果以后台结果送达；
 // 批准创建或修改任务等于授权该任务以后每次运行默认放行写操作；定时任务运行中
 // 不能 create/update/run/enable/disable/delete。动作清单与参数结构体不变（仍 10 个动作、共用
-// botScheduleTaskArgs）。确认判定的事实源是 botScheduleConfirmation（版本
-// 无关、在受理端生效），动作定义里的 Mode/RequiresConfirmation 不进 wire
-// 字节、保持原样，v9 及更早版本是冻结副本——本注册表的任何变化（含共享工具
-// 的描述调整）不得影响它们，否则存量会话的前缀/tools_hash 失稳。
+// botScheduleTaskArgs）。确认判定的事实源是受理端注册表确认语义（版本
+// 无关、在受理端生效；INT-195 起收进 fs_schedule 动作 spec.Confirm），动作
+// 定义里的 Mode/RequiresConfirmation 不进 wire 字节、保持原样，v9 及更早
+// 版本是冻结副本——本注册表的任何变化（含共享工具的描述调整）不得影响
+// 它们，否则存量会话的前缀/tools_hash 失稳。
 func botToolRegistryV10() []*botToolDef {
 	// INT-148 的线程结算与 INT-136 的确认描述独立，继承 v9 后只覆盖任务工具。
 	tools := botToolRegistryV9()
@@ -695,26 +696,62 @@ func botToolRegistryV13() []*botToolDef {
 	return tools
 }
 
-// botToolRegistryV14 是当前发布注册表（INT-165 项目搁置）：在 v13（INT-160）
-// 之上只演进 fs_project——list 默认排除搁置中的项目、include_shelved=true
-// 时连搁置项目一起返回，工具描述同步提及（get/create/update 不接受
-// include_shelved，botActionRules 拒绝）。v13 及更早版本是冻结副本——本注册
-// 表的任何变化（含共享工具的描述调整）不得影响它们，否则存量会话的前缀/
-// tools_hash 失稳。
+// botToolRegistryV14 是当前发布注册表（INT-165 项目搁置 + INT-195 动作注册
+// 表）：工具级形状（顺序、工具级描述、参数结构体）沿用 v13 链条的既有输出
+// 并在其上应用 INT-165 的 fs_project 覆写——保证 wire 字节与发布时逐字节
+// 一致；每个工具的 Actions 从动作注册表 spec 组生成（Name/Description/Mode/
+// RequiresConfirmation 按 spec，顺序即组内声明顺序），动作清单不再手写。
+// v13 及更早版本是冻结副本——本注册表的任何变化（含共享工具的描述调整）
+// 不得影响它们，否则存量会话的前缀/tools_hash 失稳。
 func botToolRegistryV14() []*botToolDef {
+	return botToolRegistryV14FromGroups(botActionSpecGroupsAll())
+}
+
+// botToolRegistryV14FromGroups 是 v14 生成的参数化形态：从给定 spec 组构建
+// 工具面。生产入口传全部注册组；验收测试传带临时动作的组副本，走同一条
+// 真实生成路径（面板审查 R1：验收必须覆盖工具面生成，不能只打查表 map）。
+func botToolRegistryV14FromGroups(groups map[string][]*botActionSpec) []*botToolDef {
 	tools := botToolRegistryV13()
 	for _, tool := range tools {
-		if tool.Name != "fs_project" {
-			continue
+		if tool.Name == "fs_project" {
+			// INT-165 的 fs_project 覆写原样保留：list 动作描述随注册表 spec。
+			tool.Description = "操作 Fast Ship 项目：list/get 读取，create/update 为需确认的写操作（首期只开放名称、描述、仓库 URL）。list 默认排除搁置中的项目，include_shelved=true 时连搁置项目一起返回；搁置中的项目在 dashboard、推荐汇总等挑选面同样被排除，但读写照常可用。"
+			// v14 用活跃参数结构体：include_shelved 随本版新增；v13 的 wire 字节
+			// 由冻结副本 botProjectArgsV13Frozen 保留。
+			tool.ArgsType = reflect.TypeOf(botProjectArgs{})
 		}
-		tool.Description = "操作 Fast Ship 项目：list/get 读取，create/update 为需确认的写操作（首期只开放名称、描述、仓库 URL）。list 默认排除搁置中的项目，include_shelved=true 时连搁置项目一起返回；搁置中的项目在 dashboard、推荐汇总等挑选面同样被排除，但读写照常可用。"
-		// v14 用活跃参数结构体：include_shelved 随本版新增；v13 的 wire 字节
-		// 由冻结副本 botProjectArgsV13Frozen 保留。
-		tool.ArgsType = reflect.TypeOf(botProjectArgs{})
-		for i := range tool.Actions {
-			if tool.Actions[i].Name == "list" {
-				tool.Actions[i].Description = "列出当前用户项目（默认排除搁置中项目；include_shelved=true 时包含）"
+		specs, ok := groups[tool.Name]
+		if !ok || len(specs) == 0 {
+			panic("bot action registry: 工具缺少动作声明 " + tool.Name)
+		}
+		actions := make([]botActionDef, 0, len(specs))
+		for _, spec := range specs {
+			if spec.Tool != tool.Name {
+				panic("bot action registry: spec 归属工具不符 " + spec.Tool + "/" + spec.Action)
 			}
+			actions = append(actions, botActionDef{
+				Name:                 spec.Action,
+				Description:          spec.Description,
+				Mode:                 spec.Mode,
+				RequiresConfirmation: botRequiresConfirmationOf(spec),
+			})
+		}
+		tool.Actions = actions
+	}
+	// 组必须全部落在链条输出的工具上：新增「工具」（而非动作）时只加 spec
+	// 组不会自动进工具面——静默忽略会让新工具的调用永远 unknown 且启动期
+	// 无报错（fast-ship-bot R10），在这里显式 panic 对齐「规格错误拒绝带病
+	// 启动」口径，提示同步扩链条。
+	for name := range groups {
+		found := false
+		for _, tool := range tools {
+			if tool.Name == name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			panic("bot action registry: spec 组声明的工具不在 v13 链条输出中 " + name + "（新增工具需同步扩注册表链条）")
 		}
 	}
 	return tools
@@ -1098,11 +1135,19 @@ func botBuildToolset(version int64, tools []*botToolDef) *botToolsetHolder {
 		if version >= botConditionalSchemaVersion {
 			botAnnotateActionRequirements(tool, parsed)
 		}
+		// 当前版本的 action 枚举改由注册表生成（INT-195，快船 bot R11）：
+		// 动作清单的唯一声明点是 spec 组，枚举不再单独维护在参数结构体 tag
+		// 里——只加 spec 漏改 tag 的漂移从根上消失。冻结版本用各自的冻结
+		// 结构体 tag，不受影响。spec 组顺序沿用 tag 的历史声明顺序，wire
+		// 字节逐字节稳定（哈希基线测试兜底）。
+		if version == botToolsetVersion {
+			botInjectActionEnum(tool.Actions, parsed)
+		}
 		tool.Parameters = shared.FunctionParameters(parsed)
 		holder.byName[tool.Name] = tool
 		for i := range tool.Actions {
 			action := tool.Actions[i]
-			action.ReadOnly = botReadOnlyActions[tool.Name+"/"+action.Name]
+			action.ReadOnly = botActionReadOnlyOf(tool.Name, action.Name)
 			tool.Actions[i] = action
 			holder.byAction[tool.Name+"/"+action.Name] = action
 		}
@@ -1197,26 +1242,14 @@ func botUseFrozenArgs(version int64, tools []*botToolDef) {
 // 描述的工具集版本。v1/v2/v3 的 wire 字节已冻结，不能注入。
 const botConditionalSchemaVersion int64 = 4
 
-// botReadOnlyActions 标记纯读取动作；未列出的动作按写处理。
-var botReadOnlyActions = map[string]bool{
-	"fs_project/list": true, "fs_project/get": true,
-	"fs_issue/list": true, "fs_issue/get": true, "fs_issue/comments": true, "fs_issue/timeline": true,
-	"fs_thread/list": true, "fs_thread/get": true, "fs_thread/item": true,
-	"fs_thread/composer_options": true, "fs_thread/workspace_options": true,
-	"fs_environment/list": true, "fs_environment/projects": true,
-	"fs_schedule/list": true, "fs_schedule/runs": true, "fs_schedule/status": true,
-	// state_get 是任务小状态的只读动作（INT-123）；state_set 是同步写，不列。
-	"fs_schedule/state_get": true,
-	"fs_memory/status":      true, "fs_memory/list": true, "fs_memory/read": true, "fs_memory/history": true,
-	"fs_memory_search/search": true,
-	"fs_help/read":            true, "fs_result/read": true,
-}
+// （原 botReadOnlyActions 平行表已删除，INT-195 起只读标记由动作注册表
+// spec.ReadOnly 提供，查表入口见 botActionReadOnlyOf。）
 
 // botAnnotateActionRequirements 把各动作的必填字段写进 action 字段的 schema
-// 描述里（服务端校验的事实源是 botActionRules，这里只是同一份规则的机器可读
-// 投影）。只注解该工具当前声明的动作：botActionRules 是全局事实源、会先于
-// schema 发布新动作（如 v5 的 fs_schedule/run），冻结版本声明里没有的动作
-// 不能被注出来，否则其 wire 字节失稳。不用 allOf/if-then 的原因：不少
+// 描述里（事实源是动作注册表 spec.Required，这里只是同一份规则的机器可读
+// 投影）。只注解该工具当前声明的动作：注册表是全局事实源、会先于 schema
+// 发布新动作（如 v5 的 fs_schedule/run），冻结版本声明里没有的动作不能被
+// 注出来，否则其 wire 字节失稳。不用 allOf/if-then 的原因：不少
 // OpenAI 兼容后端根本不校验 JSON Schema，条件分支只带来每请求约 700 token
 // 的固定开销，没有实际强制力；真正的强制在服务端。描述按 action 名排序，
 // 保证 wire 字节稳定（tools_hash）。
@@ -1227,8 +1260,8 @@ func botAnnotateActionRequirements(tool *botToolDef, schema map[string]interface
 		declared[tool.Actions[i].Name] = true
 	}
 	actions := make([]string, 0, 8)
-	for key, rule := range botActionRules {
-		if !strings.HasPrefix(key, prefix) || len(rule.Required) == 0 {
+	for key, spec := range botActionSpecsAll() {
+		if !strings.HasPrefix(key, prefix) || len(spec.Required) == 0 {
 			continue
 		}
 		if action := strings.TrimPrefix(key, prefix); declared[action] {
@@ -1241,8 +1274,8 @@ func botAnnotateActionRequirements(tool *botToolDef, schema map[string]interface
 	sort.Strings(actions)
 	parts := make([]string, 0, len(actions))
 	for _, action := range actions {
-		names := make([]string, 0, len(botActionRules[prefix+action].Required))
-		for _, field := range botActionRules[prefix+action].Required {
+		names := make([]string, 0, len(botActionSpecsAll()[prefix+action].Required))
+		for _, field := range botActionSpecsAll()[prefix+action].Required {
 			names = append(names, field.Name)
 		}
 		parts = append(parts, action+"="+strings.Join(names, "\u3001"))
@@ -1256,6 +1289,26 @@ func botAnnotateActionRequirements(tool *botToolDef, schema map[string]interface
 		return
 	}
 	actionField["description"] = "必填字段（服务端强制）：" + strings.Join(parts, "；")
+}
+
+// botInjectActionEnum 把工具的 action 枚举改写为动作声明顺序（当前版本
+// 专用，来源是 spec 组生成的 tool.Actions）：动作清单的唯一声明点是注册表，
+// schema 枚举是其投影。无 action 属性的工具（fs_help/fs_stop 的零参数
+// 结构体）跳过。
+func botInjectActionEnum(actions []botActionDef, schema map[string]interface{}) {
+	properties, ok := schema["properties"].(map[string]interface{})
+	if !ok {
+		return
+	}
+	actionField, ok := properties["action"].(map[string]interface{})
+	if !ok {
+		return
+	}
+	enum := make([]interface{}, 0, len(actions))
+	for _, action := range actions {
+		enum = append(enum, action.Name)
+	}
+	actionField["enum"] = enum
 }
 
 // botToolsTokenEstimate 工具定义的 token 占用估算：chars/4（估算值，标注估算方式）。
@@ -1449,20 +1502,16 @@ func botPrepareToolCall(ts *botToolsetHolder, toolName, rawArguments string) (*b
 			return nil, err
 		}
 	}
-	if toolName == "fs_schedule" {
-		// 受理端判定 fs_schedule 确认（INT-136）：规则不随工具集版本变化，
-		// 冻结在 v3–v7 的会话同样立即生效（RequiresConfirmation/Mode 不在
-		// wire 字节里，不影响已冻结的 tools_hash）。
-		needs, err := botScheduleConfirmation(prepared.Action, rawMap)
-		if err != nil {
-			return nil, err
-		}
-		if needs {
-			// 平台只有异步路径存在确认：改判为异步待确认，执行结果以后台
-			// 结果送达模型。
-			prepared.Mode = model.BotExecutionAsync
-			prepared.RequiresConfirmation = true
-		}
+	// 受理端确认语义收进动作注册表（INT-195，原 botScheduleConfirmation 的
+	// fs_schedule 特例拦截）：Confirm 非 nil 的动作（fs_schedule
+	// create/update/run/enable/delete）按参数动态判定，命中时改判异步待确认
+	//（平台只有异步路径存在确认，执行结果以后台结果送达模型）；Confirm==nil
+	// 的动作保持 byAction 字面量的静态值。规则不随工具集版本变化：冻结在
+	// v3–v7 的会话同样立即生效（RequiresConfirmation/Mode 不在 wire 字节里，
+	// 不影响已冻结的 tools_hash）。未注册动作不在这里出现——byAction 查表
+	// 已先行拒绝。
+	if err := botApplyActionConfirmation(prepared, botActionSpecOf(toolName, prepared.Action), rawMap); err != nil {
+		return nil, err
 	}
 	return prepared, nil
 }
@@ -1549,14 +1598,8 @@ type botRequiredField struct {
 	AllowEmpty bool
 }
 
-// botActionRule 描述一个工具动作的字段约束：Required 是服务端校验与 v3
-// 起的 schema 描述共同的事实源；Forbidden 是明确禁止出现的字段——只要出现在
-// 原始参数里就拒（包括显式 null：归一化会把 null 变回「未提供」，不能让带预览
-// 标记的调用在归一化后看起来没带）。
-type botActionRule struct {
-	Required  []botRequiredField
-	Forbidden []string
-}
+// （原 botActionRule 类型与 botActionRules 平行表已删除，INT-195 起字段约束
+// 由动作注册表 spec 的 Required/Forbidden 提供。）
 
 func req(names ...string) []botRequiredField {
 	out := make([]botRequiredField, 0, len(names))
@@ -1585,117 +1628,28 @@ var botThreadLaunchConfigFields = []string{"model_selection", "runtime_mode", "w
 var botThreadLaunchWaitForbidden = append(
 	append([]string{}, botThreadLaunchConfigFields...), "on", "timeout_minutes")
 
-// botActionRules 是「工具/动作 → 字段约束」的单一事实源：服务端校验与 v3
-// 起的 schema 描述都由它生成，避免中文描述与机器校验各说各话。列出的动作
-// 才被接受；未列出的动作一律返回 40001。
-var botActionRules = map[string]botActionRule{
-	// include_shelved（INT-165）只对 list 生效：get/create/update 携带即拒，
-	// 否则会被静默丢弃、模型却以为读到了搁置项目或把它写进了项目配置。
-	"fs_project/list":   {},
-	"fs_project/get":    {Required: req("id"), Forbidden: []string{"include_shelved"}},
-	"fs_project/update": {Required: req("id"), Forbidden: []string{"include_shelved"}},
-	"fs_project/create": {Required: req("name"), Forbidden: []string{"id", "include_shelved"}},
+// botThreadWaitForbidden 是 wait（INT-160）专用的禁带清单：执行配置与其它
+// 全部字段一概不生效，出现即拒——放行会被静默丢弃，模型却以为带了过滤条件
+// 或改了运行中线程的配置。env_id/thread_id 必填由 spec.Required 声明，
+// on/timeout_minutes 的取值由 botThreadWaitParams 校验。
+var botThreadWaitForbidden = append(
+	append([]string{}, botThreadLaunchConfigFields...),
+	"item_id", "project_id", "query", "cursor", "text", "title",
+	"include_archived", "settled", "status", "updated_after",
+	"page", "page_size", "item_limit", "item_offset",
+)
 
-	"fs_issue/list":              {Required: req("project_id")},
-	"fs_issue/get":               {Required: req("issue_id")},
-	"fs_issue/comments":          {Required: req("issue_id")},
-	"fs_issue/timeline":          {Required: req("issue_id")},
-	"fs_issue/update":            {Required: req("issue_id")},
-	"fs_issue/set_workflow":      {Required: req("issue_id", "workflow_status")},
-	"fs_issue/replace_checklist": {Required: req("issue_id", "items")},
-	"fs_issue/comment":           {Required: req("issue_id", "comment_body")},
-	"fs_issue/create":            {Required: req("project_id", "title")},
+// （原 botActionRules 平行表已删除，INT-195 起字段约束由动作注册表各工具
+// spec 组的 Required/Forbidden 提供：bot_tools_project.go / bot_tools_issue.go /
+// bot_tools_thread.go / bot_tools_memory.go / bot_schedule_confirm.go /
+// bot_results.go。列出的动作才被接受；未注册动作一律返回 40001。）
 
-	// launch 的执行配置（INT-159：model_selection/runtime_mode/workspace）只对
-	// launch 生效；on/timeout_minutes 是 v13 起 wait 的字段（INT-160）只对
-	// wait 生效；其它动作携带即拒——放行会被静默丢弃，模型却以为挂了等待
-	// 或改了运行中线程的配置。
-	"fs_thread/list":              {Forbidden: botThreadLaunchWaitForbidden},
-	"fs_thread/get":               {Required: req("env_id", "thread_id"), Forbidden: botThreadLaunchWaitForbidden},
-	"fs_thread/item":              {Required: req("env_id", "thread_id", "item_id"), Forbidden: botThreadLaunchWaitForbidden},
-	"fs_thread/composer_options":  {Required: req("env_id"), Forbidden: botThreadLaunchWaitForbidden},
-	"fs_thread/workspace_options": {Required: req("env_id", "project_id"), Forbidden: botThreadLaunchWaitForbidden},
-	"fs_thread/launch":            {Required: req("env_id", "project_id", "text"), Forbidden: []string{"on", "timeout_minutes"}},
-	"fs_thread/send":              {Required: req("env_id", "thread_id", "text"), Forbidden: botThreadLaunchWaitForbidden},
-	"fs_thread/stop":              {Required: req("env_id", "thread_id"), Forbidden: botThreadLaunchWaitForbidden},
-	// 结算与队列恢复（INT-148）：都只认 env_id + thread_id，不收其它参数。
-	"fs_thread/settle":       {Required: req("env_id", "thread_id"), Forbidden: botThreadLaunchWaitForbidden},
-	"fs_thread/unsettle":     {Required: req("env_id", "thread_id"), Forbidden: botThreadLaunchWaitForbidden},
-	"fs_thread/resume_queue": {Required: req("env_id", "thread_id"), Forbidden: botThreadLaunchWaitForbidden},
-	// wait（INT-160）：env_id + thread_id 必填；on/timeout_minutes 可选，取值
-	// 由 botThreadWaitParams 校验。其余字段一概不生效，出现即拒——放行会被
-	// 静默丢弃，模型却以为带了过滤条件。
-	"fs_thread/wait": {Required: req("env_id", "thread_id"), Forbidden: append(
-		append([]string{}, botThreadLaunchConfigFields...),
-		"item_id", "project_id", "query", "cursor", "text", "title",
-		"include_archived", "settled", "status", "updated_after",
-		"page", "page_size", "item_limit", "item_offset",
-	)},
-
-	"fs_environment/list":     {},
-	"fs_environment/projects": {},
-
-	// dry_run 只配合 run（INT-121 审查修正）：预览标记被其它动作的分支忽略
-	// 时，模型会误以为带了标记就没副作用。显式 false 也拒绝——语义是「这个
-	// 动作不接受 dry_run」，而不是「按不预览执行」。
-	// state 只配合 state_set（INT-123）：其它动作携带即拒（含 null），避免
-	// 「带状态参数仍被当成管理动作」的误用；state_get/state_set 的任务由本次
-	// schedule run 隐式决定，不收 task_id。
-	// run 只接受 task_id/dry_run（INT-136 审查）：执行器按 task_id 读库里的
-	// 任务配置，模型传的 name/instruction/needs_report 等一概不生效——若放行，
-	// 确认卡可以展示一份无害指令、实际跑的却是任务里存的另一份。
-	"fs_schedule/status": {Forbidden: []string{"dry_run", "state"}},
-	"fs_schedule/list":   {Forbidden: []string{"dry_run", "state"}},
-	"fs_schedule/create": {Required: req("name", "cron", "instruction"), Forbidden: []string{"task_id", "dry_run", "state"}},
-	"fs_schedule/update": {Required: req("task_id"), Forbidden: []string{"dry_run", "state", "limit", "offset"}},
-	// delete 与 run/enable 同一口径：执行器只按 task_id 删，配置字段不生效，
-	// 放行会让确认卡的原始参数与审计账本出现一段从未生效的「指令」。
-	"fs_schedule/delete": {Required: req("task_id"), Forbidden: []string{
-		"dry_run", "state", "limit", "offset", "name", "cron", "timezone", "instruction", "model", "needs_report",
-	}},
-	"fs_schedule/runs": {Required: req("task_id"), Forbidden: []string{"dry_run", "state"}},
-	"fs_schedule/run": {Required: req("task_id"), Forbidden: []string{
-		"state", "limit", "offset", "name", "cron", "timezone", "instruction", "model", "needs_report",
-	}},
-	// enable/delete 只按 task_id 改开关或删除，配置字段一概不生效——放行会让
-	// 确认卡展示一份无害配置、实际按库里的另一份执行（与 run 同一理由）。
-	"fs_schedule/enable": {Required: req("task_id"), Forbidden: []string{
-		"dry_run", "state", "limit", "offset", "name", "cron", "timezone", "instruction", "model", "needs_report",
-	}},
-	// disable 与 run/enable/delete 同一口径：执行器只按 task_id 改开关，其它配置
-	// 字段一律拒绝（放行会被静默丢弃，模型却以为改成功了）。
-	"fs_schedule/disable": {Required: req("task_id"), Forbidden: []string{
-		"dry_run", "state", "limit", "offset", "name", "cron", "timezone", "instruction", "model", "needs_report",
-	}},
-	"fs_schedule/state_get": {Forbidden: []string{"task_id", "dry_run", "state", "limit", "offset"}},
-	// state_set 只收 state（其余字段——含分页——一律视为误用）。
-	"fs_schedule/state_set": {Forbidden: []string{"task_id", "dry_run", "limit", "offset"}},
-
-	"fs_memory/status":  {},
-	"fs_memory/list":    {},
-	"fs_memory/read":    {Required: req("path")},
-	"fs_memory/history": {Required: req("path")},
-	"fs_memory/create":  {Required: append(req("path"), reqAllowEmpty("content")...)},
-	"fs_memory/replace": {Required: append(append(req("path"), reqAllowEmpty("content")...), req("expected_version")...)},
-	"fs_memory/append":  {Required: append(append(req("path"), reqAllowEmpty("content")...), req("expected_version")...)},
-	"fs_memory/delete":  {Required: req("path", "expected_version")},
-	"fs_memory/restore": {Required: req("path", "version", "expected_version")},
-
-	"fs_memory_search/search": {Required: req("query")},
-
-	"fs_help/read":     {},
-	"fs_stop/stop":     {},
-	"fs_result/read":   {Required: req("call_id")},
-	"fs_cancel/cancel": {Required: req("call_id")},
-}
-
-// botValidateActionFields 按工具+action 校验必填/禁止字段（botActionRules 是
-// 唯一事实源；同一份规则也生成 action 字段的必填描述）。
+// botValidateActionFields 按工具+action 校验必填/禁止字段（动作注册表
+// spec 是唯一事实源；同一份规则也生成 action 字段的必填描述）。
 func botValidateActionFields(toolName, action string, raw map[string]json.RawMessage) error {
-	key := toolName + "/" + action
-	rule, ok := botActionRules[key]
-	if !ok {
-		return errs.New(errs.ErrInvalidParams.Code, "不支持的工具动作: "+key)
+	spec := botActionSpecOf(toolName, action)
+	if spec == nil {
+		return errs.New(errs.ErrInvalidParams.Code, "不支持的工具动作: "+toolName+"/"+action)
 	}
 	has := func(field string) bool {
 		v, ok := raw[field]
@@ -1717,12 +1671,12 @@ func botValidateActionFields(toolName, action string, raw map[string]json.RawMes
 	bad := func(msg string) error {
 		return errs.New(errs.ErrInvalidParams.Code, msg)
 	}
-	for _, field := range rule.Required {
+	for _, field := range spec.Required {
 		if !has(field.Name) || (!field.AllowEmpty && isEmptyString(field.Name)) {
 			return bad(toolName + " " + action + " 需要 " + field.Name)
 		}
 	}
-	for _, field := range rule.Forbidden {
+	for _, field := range spec.Forbidden {
 		// 存在即拒（含 null）：Forbidden 表达的是「这个动作不接受该字段」，
 		// 不是「该字段不得有值」。归一化会丢弃 null，按 has() 判断会把
 		// {"dry_run":null} 这类调用放行成真实写入。
@@ -1736,51 +1690,12 @@ func botValidateActionFields(toolName, action string, raw map[string]json.RawMes
 // ---------- 执行 ----------
 
 // botExecuteSyncTool 在主线循环内执行同步工具：读取类、帮助、结果续读、停止
-// 与取消。能力查询（fs_*/status）由 executeSyncCall 分派：available 需要本
-// run 冻结的工具集水位，通用分派里拿不到。返回进入协议回复的内容（JSON 字符串）。
-func (s *BotService) botExecuteSyncTool(ctx context.Context, call *model.BotToolCall) (string, error) {
-	switch call.ToolName + "/" + call.Action {
-	case "fs_project/list", "fs_project/get":
-		return s.execProjectRead(ctx, call)
-	case "fs_issue/list", "fs_issue/get", "fs_issue/comments", "fs_issue/timeline":
-		return s.execIssueRead(ctx, call)
-	case "fs_thread/list", "fs_thread/get", "fs_thread/item", "fs_thread/composer_options", "fs_thread/workspace_options":
-		return s.execThreadRead(ctx, call)
-	case "fs_environment/list", "fs_environment/projects":
-		return s.execEnvironmentRead(ctx, call)
-	case "fs_schedule/list", "fs_schedule/update",
-		"fs_schedule/runs", "fs_schedule/disable",
-		"fs_schedule/state_get", "fs_schedule/state_set":
-		// 定时任务管理（INT-103，INT-121 加 run，INT-123 加任务小状态）：
-		// 同步动作立即生效，与 fs_memory 写同类。INT-136 起 create、非 dry_run
-		// 的 run、enable/delete 与改动 instruction/needs_report/model 的 update
-		// 只能走异步确认路径（runAsyncTool → runScheduleWrite）；这里保留
-		// update 的同步分支（只改 name/cron/timezone 仍同步）与 disable。
-		return s.execScheduleTool(call)
-	case "fs_schedule/run":
-		// dry_run=true 的 run 是只读预览，保持同步返回（受理判定对它免确认）；
-		// 非 dry_run 的 run 走到这里说明绕过了受理判定，显式拒绝而不是触发。
-		var runArgs botScheduleTaskArgs
-		if err := json.Unmarshal([]byte(call.ArgumentsJSON), &runArgs); err != nil || !runArgs.DryRunBool() {
-			return "", errs.New(errs.ErrInvalidParams.Code, "非 dry_run 的 run 需要用户确认，只能异步执行；预览请显式携带 dry_run=true")
-		}
-		return s.execScheduleTool(call)
-	case "fs_memory/list", "fs_memory/read", "fs_memory/create", "fs_memory/replace",
-		"fs_memory/append", "fs_memory/delete", "fs_memory/history", "fs_memory/restore":
-		return s.execMemoryTool(call)
-	case "fs_memory_search/search":
-		return s.execMemorySearch(call)
-	case "fs_help/read":
-		// 帮助文本包成 JSON：结果会以 json.RawMessage 透出到调用列表与
-		// 快照，裸文本会让整个响应无法序列化。
-		return marshalJSONString(map[string]string{"text": botHelpText}), nil
-	case "fs_result/read":
-		return s.execResultRead(call)
-	case "fs_stop/stop":
-		return s.execStopCurrentRun(call)
-	case "fs_cancel/cancel":
-		return s.execCancelOwnCall(call)
-	default:
-		return "", errs.New(errs.ErrInvalidParams.Code, "同步工具不执行该动作: "+call.ToolName+"/"+call.Action)
-	}
+// 与取消、fs_memory 写，以及定时任务管理的同步动作（INT-103 起同步立即生效；
+// INT-136 起 create、非 dry_run 的 run、enable/delete 与敏感字段 update 走
+// 异步确认路径，由注册表 AsyncExec 承接）。按动作注册表分派到单动作方法；
+// 能力查询（fs_memory/status 与 fs_schedule/status 墓碑动作）的 SyncExec
+// 消费 bot.ToolsetVersion——available 按本 run 冻结的工具集水位判定，通用
+// 分派里拿不到，由 executeSyncCall 透传。返回进入协议回复的内容（JSON 字符串）。
+func (s *BotService) botExecuteSyncTool(ctx context.Context, bot *model.Bot, call *model.BotToolCall) (string, error) {
+	return s.botExecSyncAction(ctx, bot, call, "", "同步工具不执行该动作: "+call.ToolName+"/"+call.Action)
 }

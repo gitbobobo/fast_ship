@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"time"
@@ -134,7 +135,7 @@ func botErrMessage(err error) string {
 }
 
 // execResultRead 按 call_id + offset + limit 读取已存结果（Unicode 字符计）。
-func (s *BotService) execResultRead(call *model.BotToolCall) (string, error) {
+func (s *BotService) execResultRead(_ *model.Bot, _ context.Context, call *model.BotToolCall) (string, error) {
 	var args botResultArgs
 	if err := json.Unmarshal([]byte(call.ArgumentsJSON), &args); err != nil {
 		return "", errs.ErrInvalidParams
@@ -264,8 +265,15 @@ const botHelpText = `Fast Ship 机器人工具说明：
 - 记忆：fs_memory list/read/create/replace/append/delete/history/restore（写操作需 expected_version 乐观锁）；fs_memory_search search 关键词检索（≥3 字符全文匹配）。USER.md 记用户画像，MEMORY.md 记长期事实，daily/YYYY-MM-DD.md 是每日笔记。
 - 定时任务：fs_schedule list/create/update/delete/runs/run/enable/disable。cron 是标准五字段（分 时 日 月 周），时区用独立 IANA 字段（可选，省略即用户时区，「每天 9 点」按用户所在地执行；update 不传时区=保持原值）。list/runs/disable 与只改 name/cron/timezone 的 update、dry_run=true 的 run 同步立即生效；create、改动 instruction/needs_report/model 的 update、run（dry_run=true 预览除外）、enable、delete 需要用户确认：先受理（回执 status=pending_confirmation），用户批准后在后台执行，结果以「平台后台结果」消息送达，不要把受理当成已执行；批准创建或修改任务等于授权该任务以后每次运行默认放行写操作，enable 等于重新启用一个以后每次运行默认放行写操作的任务，delete 不可逆。任务由你创建/修改/删除；用户只能查看与开关。run 立即手动执行一次：显式触发就是一次执行、不要求任务启用，回执只表示已受理（终态用 runs 查询，trigger_source 区分 cron/manual）；同一任务已有未结束运行时被拒绝；dry_run=true 只预览、不建运行记录。定时任务运行中不能管理任务（防止绕过写操作确认），请在主线对话里操作。每次运行是独立会话，只带你的记忆与任务指令，写操作默认放行；无话可说时只回复一行 [[SILENT]]。任务各有一块跨运行保留的小状态：state_get（无参数）读取、state_set 写入（state 为任意 JSON 值，≤8192 UTF-8 字节；省略或 null 即清空）；这两个动作只能在定时任务运行（schedule run）内使用，主线会话调用会被拒绝。当前状态已随运行时上下文的 task_state 字段给出（带 task_state_updated_at；是本次运行开始时的快照，省略表示当时为空，运行中变化后要最新值才调 state_get），开局不必调 state_get；写入与当前完全相同的内容会直接回 unchanged、不产生变更——没有变化就不要重复写。任务指令写「意图」而不是固定操作步骤：说清目标、什么情况才需要汇报、去重方式（用 state_get/state_set 记「上次已报的 ID」，只报新增），例如「每天 9 点检查新 issue，有新的才告诉我」；只有新内容确实值得打断用户的周期检查才开 needs_report=true。`
 
+// execHelpRead 读取嵌入程序的工具使用说明（fs_help/read）：帮助文本包成
+// JSON，结果会以 json.RawMessage 透出到调用列表与快照，裸文本会让整个响应
+// 无法序列化。（原实现在 botExecuteSyncTool 的 case 内联，INT-195 拆出。）
+func (s *BotService) execHelpRead(_ *model.Bot, _ context.Context, _ *model.BotToolCall) (string, error) {
+	return marshalJSONString(map[string]string{"text": botHelpText}), nil
+}
+
 // execStopCurrentRun 请求停止当前主线 run；回复后由安全点收尾为 stopped。
-func (s *BotService) execStopCurrentRun(call *model.BotToolCall) (string, error) {
+func (s *BotService) execStopCurrentRun(_ *model.Bot, _ context.Context, call *model.BotToolCall) (string, error) {
 	now := time.Now().UTC()
 	ok, err := s.runs.UpdateColumns(s.runIDOfCall(call), map[string]interface{}{"finished_at": nil},
 		map[string]interface{}{"stop_requested_at": now})
@@ -280,7 +288,7 @@ func (s *BotService) execStopCurrentRun(call *model.BotToolCall) (string, error)
 
 // execCancelOwnCall 取消本机器人的指定后台调用（用户界面取消等价指令，
 // 不再弹二次确认）。终态由 cancelBotCall 原子落定。
-func (s *BotService) execCancelOwnCall(call *model.BotToolCall) (string, error) {
+func (s *BotService) execCancelOwnCall(_ *model.Bot, _ context.Context, call *model.BotToolCall) (string, error) {
 	var args botCancelArgs
 	if err := json.Unmarshal([]byte(call.ArgumentsJSON), &args); err != nil {
 		return "", errs.ErrInvalidParams
@@ -311,4 +319,57 @@ func (s *BotService) botUserIDOf(botID string) string {
 		return ""
 	}
 	return bot.UserID
+}
+
+// ---------- 平台自有工具的动作注册表（INT-195） ----------
+// 帮助、结果续读、停止与取消是平台完全自有的回执：豁免出不可信围栏。
+
+func botHelpActionSpecs() []*botActionSpec {
+	return []*botActionSpec{
+		{
+			Tool: "fs_help", Action: "read",
+			Description: "读取使用说明",
+			Mode:        model.BotExecutionSync, ReadOnly: true, FenceExempt: true,
+			SyncExec: (*BotService).execHelpRead,
+		},
+	}
+}
+
+func botResultActionSpecs() []*botActionSpec {
+	return []*botActionSpec{
+		{
+			Tool: "fs_result", Action: "read",
+			Description: "读取完整结果",
+			// 续读内容是业务数据（外部文本随时可能混入），不豁免围栏。
+			Mode: model.BotExecutionSync, ReadOnly: true,
+			Required: req("call_id"),
+			SyncExec: (*BotService).execResultRead,
+		},
+	}
+}
+
+func botStopActionSpecs() []*botActionSpec {
+	return []*botActionSpec{
+		{
+			Tool: "fs_stop", Action: "stop",
+			Description: "停止当前 run",
+			// stop/cancel 是同步控制动作但非纯读取：不在旧 botReadOnlyActions
+			// 表里，新输入到达时按写处理（补 not_executed），这里保持同口径。
+			// 两者都是即时控制动作、不经确认（confirmNever 显式声明）。
+			Mode: model.BotExecutionSync, Confirmation: confirmNever, FenceExempt: true,
+			SyncExec: (*BotService).execStopCurrentRun,
+		},
+	}
+}
+
+func botCancelActionSpecs() []*botActionSpec {
+	return []*botActionSpec{
+		{
+			Tool: "fs_cancel", Action: "cancel",
+			Description: "取消后台调用",
+			Mode:        model.BotExecutionSync, Confirmation: confirmNever, FenceExempt: true,
+			Required: req("call_id"),
+			SyncExec: (*BotService).execCancelOwnCall,
+		},
+	}
 }

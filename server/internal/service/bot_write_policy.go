@@ -162,55 +162,42 @@ type botWritePolicyEval struct {
 // ---------- 分档 ----------
 
 // botPolicyCandidateRule 返回 tier1 候选规则 ID；非候选（返回空）按基础档处理。
-// send 只有精确命中「继续」模板才是候选：非模板的 send 直接落 tier3。
+// 候选判定只由 spec.CandidateFunc 决定（INT-195）：静态命中（settle/unsettle
+// 恒候选）也用闭包表达；PolicyRule 只承担规则归属（误判检测），不构成候选
+// 资格——为归因声明规则的动作不得顺带获得 tier1 自动放行路径（快船 bot R20）。
 func botPolicyCandidateRule(prepared *botPreparedCall) string {
-	switch prepared.ToolName + "/" + prepared.Action {
-	case "fs_thread/settle":
-		return botPolicyRuleSettleIdle
-	case "fs_thread/unsettle":
-		return botPolicyRuleUnsettle
-	case "fs_thread/send":
-		var args botThreadArgs
-		_ = json.Unmarshal([]byte(prepared.ArgumentsJSON), &args)
-		if botPolicyIsContinueTemplate(args.Text) {
-			return botPolicyRuleSendContinue
-		}
+	spec := botActionSpecOf(prepared.ToolName, prepared.Action)
+	if spec == nil || spec.CandidateFunc == nil {
+		return ""
 	}
-	return ""
+	return spec.CandidateFunc(prepared)
 }
 
-// botPolicyBaseTier 是非 tier1 候选写动作的基础档：launch、fs_schedule
-// create/update/delete、fs_issue 全部写动作与不满足 tier1 条件的
-// send/stop/settle/unsettle/resume_queue 是 tier3；其余（fs_project 写、
-// fs_schedule run/enable）是 tier2。
+// botPolicyBaseTier 是非 tier1 候选写动作的基础档（由注册表 spec.PolicyTier
+// 声明，空 = tier2）：launch、fs_schedule create/update/delete、fs_issue 全部
+// 写动作与不满足 tier1 条件的 send/stop/settle/unsettle/resume_queue 是
+// tier3；其余（fs_project 写、fs_schedule run/enable）是 tier2。查无 spec
+// 的未注册动作回 tier3（宁可多确认，fail closed）：需要确认的调用在受理端
+// 已被 byAction 查表拦截，这里只是兜底。
 func botPolicyBaseTier(prepared *botPreparedCall) string {
-	switch prepared.ToolName {
-	case "fs_issue":
+	spec := botActionSpecOf(prepared.ToolName, prepared.Action)
+	if spec == nil {
+		// 查无 spec 按最严档兜底（fail closed，与拆分前 fs_issue 分支对未
+		// 列出动作回 tier3 同向）：该状态今天不可达（需确认的调用先过
+		// byAction 查表），兜底只为注册表与工具面万一失一致时宁可多确认。
 		return "tier3"
-	case "fs_schedule":
-		switch prepared.Action {
-		case "create", "update", "delete":
-			return "tier3"
-		}
-	case "fs_thread":
-		switch prepared.Action {
-		case "launch", "stop", "resume_queue", "send":
-			return "tier3"
-		}
+	}
+	if spec.PolicyTier != "" {
+		return spec.PolicyTier
 	}
 	return "tier2"
 }
 
-// botPolicyRuleForAction 把一个动作映射回覆盖它的 tier1 规则（误判检测用）；
-// 不被任何规则覆盖的动作返回空。
+// botPolicyRuleForAction 把一个动作映射回覆盖它的 tier1 规则（误判检测用）：
+// 注册表 spec.PolicyRule；不被任何规则覆盖的动作返回空。
 func botPolicyRuleForAction(toolName, action string) string {
-	switch toolName + "/" + action {
-	case "fs_thread/send":
-		return botPolicyRuleSendContinue
-	case "fs_thread/settle":
-		return botPolicyRuleSettleIdle
-	case "fs_thread/unsettle":
-		return botPolicyRuleUnsettle
+	if spec := botActionSpecOf(toolName, action); spec != nil {
+		return spec.PolicyRule
 	}
 	return ""
 }
@@ -814,9 +801,14 @@ func (s *BotService) detectPolicyInverseAcceptance(botID, action, envID, threadI
 	}
 }
 
-// detectPolicyMisjudgeOnDecision 在确认决定落库后检测用户方向：拒批同目标写、
-// 批准与刚自动放行动作方向相反的写（send「继续」后确认 stop、自动 unsettle
-// 后批准 settle 卡或反向），都按 (rule, scope) 记一次误判。
+// detectPolicyMisjudgeOnDecision 在确认决定落库后检测用户决定与近期自动放行的
+// 冲突（误判信号）：拒批同目标写、批准与刚自动放行动作方向相反的写（send
+// 「继续」后确认 stop、自动 unsettle 后批准 settle 卡或反向），都按
+// (rule, scope) 记一次误判。取舍说明（INT-195）：这里的 approve-stop→
+// SendContinue 与 settle/unsettle 反向检测是 tier1 规则之间的关系逻辑
+// （谁覆盖谁、用户推翻谁），不是单个动作的属性，因此保留为独立判定而不收进
+// 动作注册表——动作 spec 只声明规则归属（PolicyRule），规则间的关联在这里
+// 表达。
 func (s *BotService) detectPolicyMisjudgeOnDecision(botID string, call *model.BotToolCall, decision string) {
 	var execCtx botCallExecContext
 	_ = json.Unmarshal([]byte(call.ExecutionContextJSON), &execCtx)

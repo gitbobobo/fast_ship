@@ -351,7 +351,7 @@ func botInt156ThreadCall(t *testing.T, env *botTestEnv, botID, args string) map[
 		Status: model.BotCallStatusQueued, ExecutionContextJSON: "{}",
 		CreatedAt: time.Now().UTC(),
 	}
-	content, err := env.bots.botExecuteSyncTool(context.Background(), call)
+	content, err := env.bots.botExecuteSyncTool(context.Background(), nil, call)
 	if err != nil {
 		t.Fatalf("fs_thread list: %v", err)
 	}

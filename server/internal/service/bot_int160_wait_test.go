@@ -234,14 +234,17 @@ func TestBotInt160ToolsetV13(t *testing.T) {
 	if waitDef.Mode != model.BotExecutionAsync || waitDef.RequiresConfirmation {
 		t.Fatalf("wait 应为异步、不需确认: %+v", waitDef)
 	}
-	if botReadOnlyActions["fs_thread/wait"] {
+	waitSpec := botActionSpecOf("fs_thread", "wait")
+	if waitSpec == nil {
+		t.Fatalf("wait 应在注册表中")
+	}
+	if waitSpec.ReadOnly {
 		t.Fatalf("wait 不是同步读取动作，不得列入只读")
 	}
-	rule := botActionRules["fs_thread/wait"]
-	if len(rule.Required) != 2 || rule.Required[0].Name != "env_id" || rule.Required[1].Name != "thread_id" {
-		t.Fatalf("wait 的字段规则应为 env_id+thread_id: %+v", rule)
+	if len(waitSpec.Required) != 2 || waitSpec.Required[0].Name != "env_id" || waitSpec.Required[1].Name != "thread_id" {
+		t.Fatalf("wait 的字段规则应为 env_id+thread_id: %+v", waitSpec.Required)
 	}
-	if len(rule.Forbidden) == 0 {
+	if len(waitSpec.Forbidden) == 0 {
 		t.Fatalf("wait 应声明不接受的字段")
 	}
 

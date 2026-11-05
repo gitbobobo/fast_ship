@@ -127,7 +127,7 @@ func TestBotInt165ProjectListFiltersShelved(t *testing.T) {
 
 	list := func(args string) (items []map[string]interface{}, total int) {
 		t.Helper()
-		raw, err := env.bots.execProjectRead(context.Background(), &model.BotToolCall{
+		raw, err := botProjectReadTestExec(env.bots, context.Background(), &model.BotToolCall{
 			ID: "call-" + uuid.NewString()[:8], BotID: bot.ID, ToolName: "fs_project",
 			Action: "list", ArgumentsJSON: args,
 		})
@@ -164,7 +164,7 @@ func TestBotInt165ProjectListFiltersShelved(t *testing.T) {
 	}
 
 	// get 对搁置项目照常可用（读写不受搁置影响）。
-	raw, err := env.bots.execProjectRead(context.Background(), &model.BotToolCall{
+	raw, err := botProjectReadTestExec(env.bots, context.Background(), &model.BotToolCall{
 		ID: "call-" + uuid.NewString()[:8], BotID: bot.ID, ToolName: "fs_project",
 		Action: "get", ArgumentsJSON: `{"action":"get","id":"` + shelvedRow.Id + `"}`,
 	})

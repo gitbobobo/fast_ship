@@ -2,6 +2,7 @@ package service
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -325,8 +326,8 @@ func botScheduleFoldMap(rows []model.BotMessage) map[string]string {
 			// last_reply，折成引用就得再发一轮 fs_result.read，而降本的目的
 			// 恰是消掉这种多出来的读轮次。list 结果本身已按 botResultBudgetChars
 			// 截断（≤16000 字符），内联最坏有界；模型可用 page_size 自控大小。
-			if tc.ToolName == "fs_schedule" && tc.Action == "state_get" ||
-				tc.ToolName == "fs_thread" && tc.Action == "list" {
+			// 豁免集由动作注册表 ScheduleContext 声明（INT-195）。
+			if spec := botActionSpecOf(tc.ToolName, tc.Action); spec != nil && spec.ScheduleContext {
 				exempt[tc.CallID] = true
 			}
 		}
@@ -1139,47 +1140,104 @@ func (s *BotService) StopScheduleRun(userID, botID, taskID, runID string) (*BotR
 }
 
 // ---------- fs_schedule 工具执行（同步动作立即生效；create/敏感字段 update/
-// 非 dry_run 的 run 自 INT-136 起走确认后的异步路径，见文件末尾受理段） ----------
+// 非 dry_run 的 run 自 INT-136 起走确认后的异步路径，动作注册表见
+// bot_schedule_confirm.go） ----------
 
-func (s *BotService) execScheduleTool(call *model.BotToolCall) (string, error) {
+// botScheduleExecArgs 解出 fs_schedule 执行参数，并对非 run 动作兜底拒绝
+// dry_run（与动作注册表 Forbidden 同一规则，兜住绕过受理直达执行器的路径）：
+// 其它分支不读 dry_run，若放行，带预览标记的 delete/update 等请求仍会产生
+// 真实写入。按原始参数判存在（含 null）：归一化会把 null 变回「未提供」，
+// 不能让带预览标记的调用在归一化后看起来没带。
+func botScheduleExecArgs(call *model.BotToolCall) (*botScheduleTaskArgs, error) {
 	var args botScheduleTaskArgs
 	if err := json.Unmarshal([]byte(call.ArgumentsJSON), &args); err != nil {
-		return "", errs.ErrInvalidParams
+		return nil, errs.ErrInvalidParams
 	}
-	// dry_run 只配合 run（与 botActionRules 的 Forbidden 同一规则，这里兜底
-	// 执行器直接调用的路径）：其它分支不读 dry_run，若放行，带预览标记的
-	// delete/update 等请求仍会产生真实写入。按原始参数判存在（含 null），
-	// 归一化会把 null 变回「未提供」。
+	// 分派键与参数声明的一致性（fast-ship-bot R16）：生产分派按 call.Action
+	// 选入口、这里按 args.Action 判 dry_run 豁免——拆分前二者天然同源，拆分
+	// 后不一致（被改写的账本行/历史数据）可能借道豁免，直接拒绝。
+	if call.Action != "" && args.Action != call.Action {
+		return nil, errs.New(errs.ErrInvalidParams.Code,
+			"fs_schedule 参数 action 与调用不一致: "+args.Action+" / "+call.Action)
+	}
 	if args.Action != "run" {
 		var raw map[string]json.RawMessage
 		if err := json.Unmarshal([]byte(call.ArgumentsJSON), &raw); err != nil {
-			return "", errs.ErrInvalidParams
+			return nil, errs.ErrInvalidParams
 		}
 		if _, ok := raw["dry_run"]; ok {
-			return "", errs.New(errs.ErrInvalidParams.Code, "fs_schedule 只有 run 动作接受 dry_run")
+			return nil, errs.New(errs.ErrInvalidParams.Code, "fs_schedule 只有 run 动作接受 dry_run")
 		}
 	}
-	switch args.Action {
-	case "list":
-		return s.execScheduleList(call, &args)
-	case "create":
-		return s.execScheduleCreate(call, &args)
-	case "update":
-		return s.execScheduleUpdate(call, &args)
-	case "delete":
-		return s.execScheduleDelete(call, &args)
-	case "runs":
-		return s.execScheduleRuns(call, &args)
-	case "run":
-		return s.execScheduleRun(call, &args)
-	case "enable", "disable":
-		return s.execScheduleEnable(call, &args, args.Action == "enable")
-	case "state_get":
-		return s.execScheduleStateGet(call)
-	case "state_set":
-		return s.execScheduleStateSet(call, &args)
+	return &args, nil
+}
+
+// fs_schedule 各动作的同步入口（注册表 SyncExec 指向这些方法表达式）：解析
+// 参数后转交执行体。run 的入口保留同步路径的 dry_run 门禁；create/enable/
+// delete 恒需确认、不声明 SyncExec——同步分派对它们保持旧白名单的拒绝语义。
+
+func (s *BotService) execScheduleListAction(_ *model.Bot, _ context.Context, call *model.BotToolCall) (string, error) {
+	args, err := botScheduleExecArgs(call)
+	if err != nil {
+		return "", err
 	}
-	return "", errs.New(errs.ErrInvalidParams.Code, "不支持的 fs_schedule 动作: "+args.Action)
+	return s.execScheduleList(call, args)
+}
+
+func (s *BotService) execScheduleUpdateAction(_ *model.Bot, _ context.Context, call *model.BotToolCall) (string, error) {
+	args, err := botScheduleExecArgs(call)
+	if err != nil {
+		return "", err
+	}
+	return s.execScheduleUpdate(call, args)
+}
+
+func (s *BotService) execScheduleRunsAction(_ *model.Bot, _ context.Context, call *model.BotToolCall) (string, error) {
+	args, err := botScheduleExecArgs(call)
+	if err != nil {
+		return "", err
+	}
+	return s.execScheduleRuns(call, args)
+}
+
+func (s *BotService) execScheduleRunAction(_ *model.Bot, _ context.Context, call *model.BotToolCall) (string, error) {
+	// dry_run=true 的 run 是只读预览，保持同步返回（受理判定对它免确认）；
+	// 非 dry_run 的 run 走到同步路径说明绕过了受理判定，显式拒绝而不是触发。
+	var runArgs botScheduleTaskArgs
+	if err := json.Unmarshal([]byte(call.ArgumentsJSON), &runArgs); err != nil || !runArgs.DryRunBool() {
+		return "", errs.New(errs.ErrInvalidParams.Code, "非 dry_run 的 run 需要用户确认，只能异步执行；预览请显式携带 dry_run=true")
+	}
+	args, err := botScheduleExecArgs(call)
+	if err != nil {
+		return "", err
+	}
+	return s.execScheduleRun(call, args)
+}
+
+func (s *BotService) execScheduleDisableAction(_ *model.Bot, _ context.Context, call *model.BotToolCall) (string, error) {
+	args, err := botScheduleExecArgs(call)
+	if err != nil {
+		return "", err
+	}
+	return s.execScheduleEnable(call, args, false)
+}
+
+func (s *BotService) execScheduleStateGetAction(_ *model.Bot, _ context.Context, call *model.BotToolCall) (string, error) {
+	// 与其它同步入口同口径：先过 botScheduleExecArgs（非 run 动作携带 dry_run
+	// 即拒），保持拆分前 execScheduleTool 的执行器级兜底统一（fast-ship-bot
+	// R1 Note；受理端 spec.Forbidden 已拒，这里是防内部直达调用的同层兜底）。
+	if _, err := botScheduleExecArgs(call); err != nil {
+		return "", err
+	}
+	return s.execScheduleStateGet(call)
+}
+
+func (s *BotService) execScheduleStateSetAction(_ *model.Bot, _ context.Context, call *model.BotToolCall) (string, error) {
+	args, err := botScheduleExecArgs(call)
+	if err != nil {
+		return "", err
+	}
+	return s.execScheduleStateSet(call, args)
 }
 
 // scheduleRunTaskOf 解出调用所属 schedule run 的任务：state_get/state_set 只在

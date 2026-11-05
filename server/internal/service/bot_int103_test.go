@@ -778,7 +778,7 @@ func botScheduleCall(t *testing.T, env *botTestEnv, botID, args string) (string,
 			}
 		}
 	}
-	return env.bots.execScheduleTool(call)
+	return botScheduleTestExec(env.bots, call)
 }
 
 func TestBotScheduleToolLifecycle(t *testing.T) {
@@ -1086,7 +1086,7 @@ func TestBotScheduleToolsetVersions(t *testing.T) {
 	}
 	// v7（INT-138 起冻结）的 fs_schedule：10 个同步动作，state_get/state_set
 	// 与 state 参数进 schema，参数用冻结副本 botScheduleTaskArgsV7；确认判定
-	// 在受理端（botScheduleConfirmation），不在冻结字节里。
+	// 在受理端（动作注册表 spec.Confirm），不在冻结字节里。
 	sched7 := v7.byName["fs_schedule"]
 	if sched7 == nil || len(sched7.Actions) != 10 {
 		t.Fatalf("v7 fs_schedule 应有 10 个动作: %+v", sched7)
@@ -1109,7 +1109,7 @@ func TestBotScheduleToolsetVersions(t *testing.T) {
 	if sched7.ArgsType.Name() != "botScheduleTaskArgsV7" {
 		t.Fatalf("v7 fs_schedule 应使用冻结参数结构体 botScheduleTaskArgsV7，实得 %s", sched7.ArgsType.Name())
 	}
-	if !botReadOnlyActions["fs_schedule/state_get"] || botReadOnlyActions["fs_schedule/state_set"] {
+	if !botActionReadOnlyOf("fs_schedule", "state_get") || botActionReadOnlyOf("fs_schedule", "state_set") {
 		t.Fatalf("state_get 应计入只读动作，state_set 应按写处理")
 	}
 	v7SchemaRaw, _ := json.Marshal(sched7.Parameters)

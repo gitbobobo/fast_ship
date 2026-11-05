@@ -546,13 +546,13 @@ func TestBotFoldedResultRead(t *testing.T) {
 	if folded[tr.ID] == "" {
 		t.Fatalf("真实压缩应折叠大结果")
 	}
-	page1, err := env.bots.execResultRead(&model.BotToolCall{
+	page1, err := env.bots.execResultRead(nil, context.Background(), &model.BotToolCall{
 		BotID: bot.ID, ArgumentsJSON: `{"action":"read","call_id":"call-real-fold","offset":0,"limit":20}`,
 	})
 	if err != nil || !strings.Contains(page1, "完整结果") {
 		t.Fatalf("read page1: %v %s", err, page1)
 	}
-	page2, err := env.bots.execResultRead(&model.BotToolCall{
+	page2, err := env.bots.execResultRead(nil, context.Background(), &model.BotToolCall{
 		BotID: bot.ID, ArgumentsJSON: `{"action":"read","call_id":"call-real-fold","offset":20,"limit":20}`,
 	})
 	if err != nil || !strings.Contains(page2, `"offset":20`) {
@@ -1308,7 +1308,7 @@ func TestBotRememberPreference(t *testing.T) {
 		ID: uuid.NewString(), BotID: bot.ID, ToolName: "fs_memory", Action: "create",
 		ArgumentsJSON: `{"action":"create","path":"USER.md","content":"用户喜欢绿茶"}`,
 	}
-	out, err := env.bots.execMemoryTool(call)
+	out, err := botMemoryTestExec(env.bots, call)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -1319,7 +1319,7 @@ func TestBotRememberPreference(t *testing.T) {
 		ID: uuid.NewString(), BotID: bot.ID, ToolName: "fs_memory", Action: "read",
 		ArgumentsJSON: `{"action":"read","path":"USER.md"}`,
 	}
-	got, err := env.bots.execMemoryTool(read)
+	got, err := botMemoryTestExec(env.bots, read)
 	if err != nil || !strings.Contains(got, "用户喜欢绿茶") {
 		t.Fatalf("read 应返回正文: %v %s", err, got)
 	}
@@ -1460,20 +1460,20 @@ func TestBotMemoryScopeAndPaths(t *testing.T) {
 	a := env.createBot(t, createBotTestUser(t, env.db, "sa"))
 	b := env.createBot(t, createBotTestUser(t, env.db, "sb"))
 	writeBotMemory(t, env, a.ID, "USER.md", "A私有", "sc-a")
-	out, err := env.bots.execMemoryTool(&model.BotToolCall{
-		ID: uuid.NewString(), BotID: b.ID, ArgumentsJSON: `{"action":"read","path":"USER.md"}`,
+	out, err := botMemoryTestExec(env.bots, &model.BotToolCall{
+		ID: uuid.NewString(), BotID: b.ID, ToolName: "fs_memory", ArgumentsJSON: `{"action":"read","path":"USER.md"}`,
 	})
 	if err == nil && strings.Contains(out, "A私有") {
 		t.Fatalf("跨机器人不得读到正文")
 	}
-	_, err = env.bots.execMemoryTool(&model.BotToolCall{
-		ID: uuid.NewString(), BotID: a.ID, ArgumentsJSON: `{"action":"read","path":" USER.md"}`,
+	_, err = botMemoryTestExec(env.bots, &model.BotToolCall{
+		ID: uuid.NewString(), BotID: a.ID, ToolName: "fs_memory", ArgumentsJSON: `{"action":"read","path":" USER.md"}`,
 	})
 	if err == nil {
 		t.Fatalf("带空白路径不得清洗后接受")
 	}
-	_, err = env.bots.execMemoryTool(&model.BotToolCall{
-		ID: uuid.NewString(), BotID: a.ID, ArgumentsJSON: `{"action":"read","path":""}`,
+	_, err = botMemoryTestExec(env.bots, &model.BotToolCall{
+		ID: uuid.NewString(), BotID: a.ID, ToolName: "fs_memory", ArgumentsJSON: `{"action":"read","path":""}`,
 	})
 	if err == nil {
 		t.Fatalf("空路径应拒绝")

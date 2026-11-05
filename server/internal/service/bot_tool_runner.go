@@ -238,7 +238,15 @@ func (s *BotService) commitAssistantTurn(bot *model.Bot, run *model.BotRun, requ
 				entry.prepared = nil
 			}
 		}
-		if entry.prepared != nil && prepared.ToolName == "fs_thread" && prepared.Action == "wait" {
+		// 受理即 running 的动作收进注册表声明（NoSideEffect 家族，目前
+		// 仅 wait）：受理、取消竞速、重启恢复共用同一事实源。wait 的挂钩
+		// （threadWaitAttach/waiting_for 回执）是该家族当前的唯一成员，
+		// 新增成员时同步扩展其受理与中断语义（fast-ship-bot R17）。
+		var waitSpec *botActionSpec
+		if prepared != nil {
+			waitSpec = botActionSpecOf(prepared.ToolName, prepared.Action)
+		}
+		if entry.prepared != nil && waitSpec != nil && waitSpec.AcceptanceOnly {
 			// wait 受理端专门校验（INT-160）：定时任务会话内等待上限 15 分钟
 			//（schedule run 要等全部异步调用落终态，超长等待会吃掉整个结算
 			// 预算），防循环限额（每机器人 3 个、同线程 1 个、每小时 6 次）。
@@ -348,8 +356,9 @@ func (s *BotService) commitAssistantTurn(bot *model.Bot, run *model.BotRun, requ
 			switch {
 			case entry.waitAccepted:
 				// wait（INT-160）：受理即 running（不进 queued——ListQueued 会
-				// 把 queued 调用推给 worker，而 runThreadWrite 没有 wait 实现，
-				// 会被错误认领）。started_at 即挂上时刻，由评估器收尾。
+				// 把 queued 调用推给 worker，而 wait 是 AcceptanceOnly，没有
+				// 执行入口，误入队会被 worker 以「没有异步实现」拒绝；真实
+				// 执行由评估器收尾）。started_at 即挂上时刻。
 				call.Status = model.BotCallStatusRunning
 				call.StartedAt = &now
 			case entry.prepared.Mode == model.BotExecutionSync:
@@ -645,7 +654,10 @@ func (s *BotService) commitAssistantTurn(bot *model.Bot, run *model.BotRun, requ
 	return calls, nil
 }
 
-// resolveCallScope 在受理时解析写操作范围并填充执行上下文；读操作不设范围。
+// resolveCallScope 在受理时解析动作范围并填充执行上下文；范围解析按动作
+// 注册表声明（spec.Scope）：fs_issue 的读动作也挂范围（与拆分前一致，
+// resolveIssueScope 分支前置 ScopeKind）；fs_thread 的 T3 幂等身份回填并入
+// 各 thread 动作的 Scope（原工具级 switch 已删除）。
 func (s *BotService) resolveCallScope(bot *model.Bot, prepared *botPreparedCall, rawArguments string, execCtx *botCallExecContext) error {
 	var raw map[string]json.RawMessage
 	_ = json.Unmarshal([]byte(rawArguments), &raw)
@@ -653,20 +665,8 @@ func (s *BotService) resolveCallScope(bot *model.Bot, prepared *botPreparedCall,
 	execCtx.ScopeID = prepared.ScopeID
 	execCtx.Fields = prepared.FieldsConstraint
 
-	switch prepared.ToolName {
-	case "fs_project":
-		s.resolveProjectScope(bot, prepared, raw)
-	case "fs_issue":
-		s.resolveIssueScope(bot, prepared, raw)
-	case "fs_thread":
-		s.resolveThreadScope(prepared, raw)
-		threadID, commandID, messageID := buildThreadExecIDs(prepared.Action)
-		execCtx.ThreadID, execCtx.CommandID, execCtx.MessageID = threadID, commandID, messageID
-		if prepared.EnvironmentID != nil {
-			execCtx.EnvID = *prepared.EnvironmentID
-		}
-	case "fs_schedule":
-		if err := s.resolveScheduleScope(bot, prepared, raw); err != nil {
+	if spec := botActionSpecOf(prepared.ToolName, prepared.Action); spec != nil && spec.Scope != nil {
+		if err := spec.Scope(s, bot, prepared, raw, execCtx); err != nil {
 			return err
 		}
 	}
@@ -772,16 +772,10 @@ func (s *BotService) executeSyncCall(bot *model.Bot, runID string, call *model.B
 	call.Status = model.BotCallStatusRunning
 	call.StartedAt = &now
 
-	// 能力查询（fs_*/status）的 available 按本 run 冻结的工具集水位判定——
-	// 与会话工具面同一事实源，在这里把 bot 副本的水位透传给执行器；其余动作
-	// 走通用分派。
-	var content string
-	var execErr error
-	if call.Action == "status" && (call.ToolName == "fs_schedule" || call.ToolName == "fs_memory") {
-		content, execErr = s.execCapabilityStatus(call, bot.ToolsetVersion)
-	} else {
-		content, execErr = s.botExecuteSyncTool(ctx, call)
-	}
+	// 通用分派：能力查询（fs_memory/status 与 fs_schedule/status 墓碑）的
+	// SyncExec 自行消费 bot.ToolsetVersion（available 按本 run 冻结的工具集
+	// 水位判定，与会话工具面同一事实源），不再需要工具级特例拦截。
+	content, execErr := s.botExecuteSyncTool(ctx, bot, call)
 	outcome := botBuildOutcomeRaw(call.ID, content, execErr)
 	status := model.BotCallStatusSucceeded
 	if execErr != nil {
@@ -884,22 +878,24 @@ func (s *BotService) closeUnstartedAsyncCall(call *model.BotToolCall, reason str
 	s.wakeForCallResult(call.BotID, call, string(model.BotCallStatusNotExecuted))
 }
 
-// botCallIsReadOnly 判断一个调用是否是纯读取动作：只有同步执行且命中读类
-// 动作表才算。同步执行的写动作（fs_memory 写、fs_schedule 管理）不是读。
+// botCallIsReadOnly 判断一个调用是否是纯读取动作：只有同步执行且命中注册表
+// 只读声明（spec.ReadOnly，或 fs_schedule/run 的 dry_run=true 预览这类参数
+// 相关只读）才算。同步执行的写动作（fs_memory 写、fs_schedule 管理）不是读。
 func botCallIsReadOnly(call *model.BotToolCall) bool {
 	if call.ExecutionMode != string(model.BotExecutionSync) {
 		return false
 	}
-	if botReadOnlyActions[call.ToolName+"/"+call.Action] {
+	spec := botActionSpecOf(call.ToolName, call.Action)
+	if spec == nil {
+		return false
+	}
+	if spec.ReadOnly {
 		return true
 	}
 	// fs_schedule/run 的 dry_run=true 是只读预览（不建运行、不执行），参数决定
 	// 语义：新输入到达时它应当执行完，而不是被标成 not_executed。
-	if call.ToolName == "fs_schedule" && call.Action == "run" {
-		var args botScheduleTaskArgs
-		if err := json.Unmarshal([]byte(call.ArgumentsJSON), &args); err == nil && args.DryRunBool() {
-			return true
-		}
+	if spec.ReadOnlyIf != nil {
+		return spec.ReadOnlyIf(call)
 	}
 	return false
 }
@@ -1059,20 +1055,14 @@ func (s *BotService) executeQueuedCall(callID string) {
 	s.finalizeCall(bot, s.runIDOfCall(call), call, status, outcome, execErr, false)
 }
 
-// runAsyncTool 分派异步写操作到对应适配器。
+// runAsyncTool 分派异步写操作：动作注册表 AsyncExec 直接指向单动作执行器；
+// 无异步实现的动作（含未知工具）保持既有错误文案。
 func (s *BotService) runAsyncTool(ctx context.Context, call *model.BotToolCall) (interface{}, error) {
-	switch call.ToolName {
-	case "fs_project":
-		return s.runProjectWrite(ctx, call)
-	case "fs_issue":
-		return s.runIssueWrite(ctx, call)
-	case "fs_thread":
-		return s.runThreadWrite(ctx, call)
-	case "fs_schedule":
-		// INT-136：create/update 敏感字段/run 在确认后由 worker 执行。
-		return s.runScheduleWrite(ctx, call)
+	spec := botActionSpecOf(call.ToolName, call.Action)
+	if spec == nil || spec.AsyncExec == nil {
+		return nil, errs.New(errs.ErrInvalidParams.Code, "工具没有异步实现: "+call.ToolName)
 	}
-	return nil, errs.New(errs.ErrInvalidParams.Code, "工具没有异步实现: "+call.ToolName)
+	return spec.AsyncExec(s, ctx, call)
 }
 
 // abortIfCancelRequested 核对持久化的取消标记；已受理的取消直接落
@@ -1090,9 +1080,9 @@ func (s *BotService) abortIfCancelRequested(bot *model.Bot, call *model.BotToolC
 
 // cancelRaceCols 构造取消竞速下的终态列：取消标记在执行与落定之间落上时，
 // 成功/失败结论不得以原状态送达。复检失败发生在任何外部写入之前，effect
-// false；wait（INT-160）无任何副作用，取消也不例外，结果体覆写为
-// outcome=cancelled；其余调用 effect 恒 true（保守记「可能已写出」），
-// 结果保持原样。
+// false；注册表 NoSideEffect 的动作（wait，INT-160）无任何副作用，取消也
+// 不例外，结果体覆写为 outcome=cancelled；其余调用 effect 恒 true（保守记
+// 「可能已写出」），结果保持原样。
 func cancelRaceCols(call *model.BotToolCall, outcome botToolOutcome, execErr error, now time.Time) (model.BotToolCallStatus, botToolOutcome, bool, map[string]interface{}) {
 	// 缺省按「可能已写出」处理：取消与已派发写入竞速时，适配器报错
 	//（context.Canceled/超时/丢响应）不代表远端没应用——保守留痕让模型
@@ -1103,32 +1093,11 @@ func cancelRaceCols(call *model.BotToolCall, outcome botToolOutcome, execErr err
 		effect = false
 	}
 	status := model.BotCallStatusCancelled
-	if call.ToolName == "fs_thread" && call.Action == "wait" {
+	// 无写副作用的动作（wait，注册表 NoSideEffect）：取消也不例外，结果体
+	// 覆写为 outcome=cancelled。
+	if botActionNoSideEffectOf(call) {
 		effect = false
-		// 取消竞速落到本分支时 waitResolveCancelled 的富结果 CAS 不上，
-		// 这里用账本行重建同构 payload（waiting_for 从 args.on 归一化，
-		// attached_at 取受理时刻），不留最小体丢上下文。
-		payload := map[string]interface{}{
-			"outcome":     "cancelled",
-			"resolved_at": rfc3339(&now),
-		}
-		var wargs botThreadArgs
-		_ = json.Unmarshal([]byte(call.ArgumentsJSON), &wargs)
-		if conds, cerr := botWaitParseOn(wargs.On); cerr == nil {
-			payload["waiting_for"] = conds
-		}
-		attachedAt := call.StartedAt
-		if attachedAt == nil {
-			attachedAt = &call.CreatedAt
-		}
-		payload["attached_at"] = rfc3339(attachedAt)
-		cancelRaw := marshalJSONString(payload)
-		outcome = botToolOutcome{
-			ResultJSON:  cancelRaw,
-			PreviewJSON: cancelRaw,
-			ResultChars: int64(len([]rune(cancelRaw))),
-			WaitResult:  json.RawMessage(cancelRaw),
-		}
+		outcome = botWaitInterruptedOutcome(call, "cancelled", &now)
 	}
 	cols := map[string]interface{}{
 		"status":                   status,

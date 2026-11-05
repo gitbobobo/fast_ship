@@ -1419,7 +1419,7 @@ func TestBotCancelOwnCallTool(t *testing.T) {
 	if err := env.bots.calls.CreateTx(env.db, call); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	content, err := env.bots.botExecuteSyncTool(context.Background(), call)
+	content, err := env.bots.botExecuteSyncTool(context.Background(), nil, call)
 	if err != nil {
 		t.Fatalf("fs_cancel: %v", err)
 	}
@@ -1476,7 +1476,7 @@ func TestBotCapabilityAndHelp(t *testing.T) {
 		Status: model.BotCallStatusQueued, ExecutionContextJSON: "{}",
 		CreatedAt: time.Now().UTC(),
 	}
-	content, err := env.bots.botExecuteSyncTool(context.Background(), call)
+	content, err := env.bots.botExecuteSyncTool(context.Background(), nil, call)
 	if err != nil {
 		t.Fatalf("fs_help: %v", err)
 	}
@@ -1527,7 +1527,7 @@ func TestBotResultTruncation(t *testing.T) {
 		ArgumentsHash: "x", ExecutionMode: "sync", Status: model.BotCallStatusQueued,
 		ExecutionContextJSON: "{}", CreatedAt: time.Now().UTC(),
 	}
-	content, err := env.bots.botExecuteSyncTool(context.Background(), reader)
+	content, err := env.bots.botExecuteSyncTool(context.Background(), nil, reader)
 	if err != nil {
 		t.Fatalf("fs_result.read: %v", err)
 	}
@@ -1557,7 +1557,7 @@ func TestBotResultTruncation(t *testing.T) {
 		ArgumentsHash: "x", ExecutionMode: "sync", Status: model.BotCallStatusQueued,
 		ExecutionContextJSON: "{}", CreatedAt: time.Now().UTC(),
 	}
-	fullContent, err := env.bots.botExecuteSyncTool(context.Background(), fullRead)
+	fullContent, err := env.bots.botExecuteSyncTool(context.Background(), nil, fullRead)
 	if err != nil {
 		t.Fatalf("fs_result.read full: %v", err)
 	}
@@ -1594,7 +1594,7 @@ func TestBotResultTruncation(t *testing.T) {
 		ArgumentsHash: "x", ExecutionMode: "sync", Status: model.BotCallStatusQueued,
 		ExecutionContextJSON: "{}", CreatedAt: time.Now().UTC(),
 	}
-	if _, err := env.bots.botExecuteSyncTool(context.Background(), peek); !errors.Is(err, errs.ErrBotCallNotFound) {
+	if _, err := env.bots.botExecuteSyncTool(context.Background(), nil, peek); !errors.Is(err, errs.ErrBotCallNotFound) {
 		t.Fatalf("越权读取应 40426: %v", err)
 	}
 }
@@ -1869,7 +1869,7 @@ func TestBotIssueUpdatePreservesBody(t *testing.T) {
 		ArgumentsJSON: fmt.Sprintf(`{"action":"update","issue_id":%q,"title":%q}`, issue.Id, newTitle),
 		ExecutionMode: string(model.BotExecutionAsync), Status: model.BotCallStatusRunning,
 	}
-	if _, err := env.bots.runIssueWrite(context.Background(), call); err != nil {
+	if _, err := botIssueWriteTestExec(env.bots, context.Background(), call); err != nil {
 		t.Fatalf("runIssueWrite(仅标题): %v", err)
 	}
 	fresh, err := env.bots.issues.Get(issue.Id, userID)
@@ -1891,7 +1891,7 @@ func TestBotIssueUpdatePreservesBody(t *testing.T) {
 		ArgumentsJSON: fmt.Sprintf(`{"action":"update","issue_id":%q,"body":%q}`, issue.Id, newBody),
 		ExecutionMode: string(model.BotExecutionAsync), Status: model.BotCallStatusRunning,
 	}
-	if _, err := env.bots.runIssueWrite(context.Background(), call2); err != nil {
+	if _, err := botIssueWriteTestExec(env.bots, context.Background(), call2); err != nil {
 		t.Fatalf("runIssueWrite(带正文): %v", err)
 	}
 	fresh2, err := env.bots.issues.Get(issue.Id, userID)
@@ -3130,7 +3130,7 @@ func TestBotHelpResultIsValidJSON(t *testing.T) {
 		Action: "read", ExecutionMode: string(model.BotExecutionSync),
 		Status: model.BotCallStatusRunning, CreatedAt: time.Now().UTC(),
 	}
-	content, err := env.bots.botExecuteSyncTool(context.Background(), call)
+	content, err := env.bots.botExecuteSyncTool(context.Background(), nil, call)
 	if err != nil {
 		t.Fatalf("exec: %v", err)
 	}
@@ -3342,7 +3342,7 @@ func TestBotProjectListSlimsTokenRefs(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("create project: %v", err)
 	}
-	raw, err := env.bots.execProjectRead(context.Background(), &model.BotToolCall{
+	raw, err := botProjectReadTestExec(env.bots, context.Background(), &model.BotToolCall{
 		ID: "call-plist", BotID: bot.ID, ToolName: "fs_project",
 		Action: "list", ArgumentsJSON: `{"action":"list","page":1,"page_size":20}`,
 	})
@@ -3510,7 +3510,7 @@ func TestBotProjectWriteResultSlimsTokenRefs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
-	out, err := env.bots.runProjectWrite(context.Background(), &model.BotToolCall{
+	out, err := botProjectWriteTestExec(env.bots, context.Background(), &model.BotToolCall{
 		ID: "call-pwrite", BotID: bot.ID, ToolName: "fs_project", Action: "update",
 		ArgumentsJSON: `{"action":"update","id":"` + created.Id + `","description":"更新"}`,
 	})

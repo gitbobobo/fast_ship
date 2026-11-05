@@ -22,190 +22,164 @@ import (
 // fs_thread / fs_environment 适配：只操作已连接环境；T3 的 scope/operate 守卫
 // 继续由现有 service 执行，不扩大远端权限。
 
-func (s *BotService) execThreadRead(ctx context.Context, call *model.BotToolCall) (string, error) {
-	userID := s.botUserIDOf(call.BotID)
+// fs_thread 各读取动作的入口（注册表 SyncExec 指向这些方法表达式）：解析参数
+// 后各自投影；分页、排序与瘦身投影的共享 helper 保持共享。
+
+func (s *BotService) execThreadList(_ *model.Bot, ctx context.Context, call *model.BotToolCall) (string, error) {
 	var args botThreadArgs
 	if err := json.Unmarshal([]byte(call.ArgumentsJSON), &args); err != nil {
 		return "", errs.ErrInvalidParams
 	}
-	switch call.Action {
-	case "list":
-		list, err := s.threads.List(ctx, userID)
-		if err != nil {
-			return "", err
-		}
-		result, err := botSlimThreadList(list, &args)
-		if err != nil {
-			return "", err
-		}
-		// INT-156：页内逐条补 activity 与末条回复摘要——巡检过去要为「线程
-		// 有没有回话」逐线程 get，现在 list 一次带回。空页直接跳过。
-		if items, ok := result["items"].([]map[string]interface{}); ok && len(items) > 0 {
-			s.botEnrichThreadListItems(ctx, userID, items)
-		}
-		return botMarshalResult(result)
-	case "get":
-		detail, err := s.threads.Detail(ctx, userID, args.EnvID, args.ThreadID)
-		if err != nil {
-			return "", err
-		}
-		result, err := botSlimThreadDetail(detail, &args)
-		if err != nil {
-			return "", err
-		}
-		return botMarshalResult(result)
-	case "item":
-		item, err := s.threads.ItemDetail(ctx, userID, args.EnvID, args.ThreadID, args.ItemID)
-		if err != nil {
-			return "", err
-		}
-		return botMarshalResult(botSlimThreadItem(item))
-	case "composer_options":
-		opts, err := s.threads.ComposerOptions(ctx, userID, args.EnvID)
-		if err != nil {
-			return "", err
-		}
-		// 透出启动器需要的项目（含 default_model_selection）与归一化的模型
-		// 目录，不透传 T3 全量 config/settings；项目标题来自配对的 T3 服务/
-		// 仓库，进围栏（INT-136）。providers 供 launch 的 model_selection 直接
-		// 回填；not_settable 如实列出机器人不能指定的配置项（INT-159）。
-		notSettable := botThreadNotSettable
-		botToolsetVer := int64(0)
-		// 读发起本次调用的请求所冻结的工具集版本，不读 bots 表活值：
-		// 另一条对话线先激活新版本会把行版本推进，本会话仍冻结旧 schema
-		// 时 not_settable 标注会缺失（代码审查）。
-		if req, err := s.requests.FindByID(call.RequestID); err == nil {
-			botToolsetVer = req.ToolsetVersion
-		} else {
-			if !errors.Is(err, gorm.ErrRecordNotFound) {
-				// 查询失败要留痕便于排查 DB 抖动（代码审查：与
-				// matchAuthorization 的降级留痕同口径）。
-				s.logger.Warn("bot 工具集版本查询失败，回退 bots 表活值",
-					zap.String("bot_id", call.BotID), zap.Error(err))
-			}
-			// 降级回退 bots 表活值而非 0：活值只前进不回退，会话冻结版本
-			// 恒 ≤ 活值——活值已低于当前版时冻结版必也低，标注恒正确；
-			// 活值≥当前版的旧会话仍会漏标（双重降级才出现，方向安全），
-			// 但比按 0 兜底更贴近事实（代码审查 Note）。
-			if bot, berr := s.bots.FindByIDAndUser(call.BotID, userID); berr == nil {
-				botToolsetVer = bot.ToolsetVersion
-			}
-		}
-		// 能力门按能力引入版本（v12 = INT-159）判，不按当前发布版本：这三个
-		// 字段自 v12 起就在冻结 schema 里，v12/v13 会话携带照常受理——若按
-		// botToolsetVersion 判，当前版本升到 14 后它们会被误标成不可用，模型
-		// 白白放弃可用配置。只有冻结在 v11 及更早的会话才真的不含这些字段。
-		if botToolsetVer > 0 && botToolsetVer < 12 {
-			// 冻结在 v11 及更早的会话也看得到 providers 目录：如实标注这些字段
-			// 本版本不可用，避免模型被引导去传会被受理拒绝的参数（云端审查）。
-			notSettable = append(append([]map[string]string{}, botThreadNotSettable...),
-				map[string]string{
-					"field":  "model_selection/runtime_mode/workspace",
-					"reason": fmt.Sprintf("本会话工具集 v%d 不含这些字段（传了会被受理拒绝）；压缩升级到 v%d 后可用", botToolsetVer, botToolsetVersion),
-				})
-		}
-		providers, providersDrifted := botSlimComposerProviders(opts.Config)
-		resp := map[string]interface{}{
-			"projects":     opts.Projects,
-			"providers":    providers,
-			"not_settable": notSettable,
-		}
-		if providersDrifted {
-			// 上游 providers 字段形状与约定不符（键名漂移等）：目录可能不完整，
-			// 显式标注而不是让模型目录静默消失（代码审查 Note）。
-			s.logger.Warn("composer_options providers 上游字段形状漂移",
-				zap.String("bot_id", call.BotID))
-			resp["providers_warning"] = "上游 providers 字段形状与预期不符，模型目录可能不完整；launch 的 model_selection 取值来源可能缺失"
-		}
-		return botMarshalResult(resp)
-	case "workspace_options":
-		opts, err := s.threads.WorkspaceOptions(ctx, userID, args.EnvID, args.ProjectID, args.Query, args.Cursor)
-		if err != nil {
-			return "", err
-		}
-		// 远程 VCS 引用名与工作树路径同属仓库侧可控文本，进围栏（INT-136）。
-		return botMarshalResult(opts)
+	// userID 取一次复用：两次查询除多一跳 DB 外，第二次瞬时失败会得到空
+	// userID，整页补详情静默降级（fast-ship-bot R10；拆分前只取一次）。
+	userID := s.botUserIDOf(call.BotID)
+	list, err := s.threads.List(ctx, userID)
+	if err != nil {
+		return "", err
 	}
-	return "", errs.New(errs.ErrInvalidParams.Code, "fs_thread 不支持该读取动作")
+	result, err := botSlimThreadList(list, &args)
+	if err != nil {
+		return "", err
+	}
+	// INT-156：页内逐条补 activity 与末条回复摘要——巡检过去要为「线程
+	// 有没有回话」逐线程 get，现在 list 一次带回。空页直接跳过。
+	if items, ok := result["items"].([]map[string]interface{}); ok && len(items) > 0 {
+		s.botEnrichThreadListItems(ctx, userID, items)
+	}
+	return botMarshalResult(result)
 }
 
-func (s *BotService) execEnvironmentRead(ctx context.Context, call *model.BotToolCall) (string, error) {
-	userID := s.botUserIDOf(call.BotID)
-	switch call.Action {
-	case "list":
-		envs, err := s.threads.List(ctx, userID)
-		if err != nil {
-			return "", err
-		}
-		out := make([]map[string]interface{}, 0, len(envs.Environments))
-		for _, env := range envs.Environments {
-			out = append(out, map[string]interface{}{
-				"id":     env.Id,
-				"name":   env.Name,
-				"status": string(env.Status),
-				"access": string(env.Access),
-			})
-		}
-		return botMarshalResult(map[string]interface{}{"environments": out})
-	case "projects":
-		projects, err := s.bindings.DiscoverProjects(ctx, userID)
-		if err != nil {
-			return "", err
-		}
-		return botMarshalResult(map[string]interface{}{"projects": projects})
-	}
-	return "", errs.New(errs.ErrInvalidParams.Code, "fs_environment 不支持该动作")
-}
-
-// runThreadWrite 在 worker 内执行 fs_thread 写操作。T3 的 command/thread/
-// message ID 在受理时由服务端生成（execution_context），不让模型指定幂等身份。
-func (s *BotService) runThreadWrite(ctx context.Context, call *model.BotToolCall) (interface{}, error) {
-	userID := s.botUserIDOf(call.BotID)
-	var execCtx botCallExecContext
-	_ = json.Unmarshal([]byte(call.ExecutionContextJSON), &execCtx)
-
+func (s *BotService) execThreadGet(_ *model.Bot, ctx context.Context, call *model.BotToolCall) (string, error) {
 	var args botThreadArgs
 	if err := json.Unmarshal([]byte(call.ArgumentsJSON), &args); err != nil {
-		return nil, errs.ErrInvalidParams
+		return "", errs.ErrInvalidParams
 	}
-	switch call.Action {
-	case "launch":
-		req := &T3CreateThreadRequest{
-			ProjectId: args.ProjectID,
-			Message:   botThreadMessage(args.Text),
-		}
-		if title := strings.TrimSpace(args.Title); title != "" {
-			req.Title = &title
-		}
-		if execCtx.ThreadID != "" {
-			req.ThreadId = &execCtx.ThreadID
-		}
-		// 可选执行配置（INT-159）：未指定时不落任何字段，沿用项目默认。
-		if err := botThreadLaunchConfig(&args, req); err != nil {
-			return nil, err
-		}
-		// 复用 launchSent 语义：结果只表示启动 RPC 的结果，不代表远端完成。
-		result, _, err := s.threads.CreateThreadForAgent(ctx, userID, args.EnvID, req)
-		return result, err
-	case "send":
-		req := &T3SendMessageRequest{Text: args.Text}
-		if execCtx.CommandID != "" {
-			req.CommandId = &execCtx.CommandID
-		}
-		if execCtx.MessageID != "" {
-			req.MessageId = &execCtx.MessageID
-		}
-		return s.threads.SendMessage(ctx, userID, args.EnvID, args.ThreadID, req)
-	case "stop":
-		return s.threads.StopThread(ctx, userID, args.EnvID, args.ThreadID)
-	case "settle":
-		return s.threads.SettleThread(ctx, userID, args.EnvID, args.ThreadID)
-	case "unsettle":
-		return s.threads.UnsettleThread(ctx, userID, args.EnvID, args.ThreadID)
-	case "resume_queue":
-		return s.threads.ResumeQueue(ctx, userID, args.EnvID, args.ThreadID)
+	detail, err := s.threads.Detail(ctx, s.botUserIDOf(call.BotID), args.EnvID, args.ThreadID)
+	if err != nil {
+		return "", err
 	}
-	return nil, errs.New(errs.ErrInvalidParams.Code, "fs_thread 不支持该写动作")
+	result, err := botSlimThreadDetail(detail, &args)
+	if err != nil {
+		return "", err
+	}
+	return botMarshalResult(result)
+}
+
+func (s *BotService) execThreadItem(_ *model.Bot, ctx context.Context, call *model.BotToolCall) (string, error) {
+	var args botThreadArgs
+	if err := json.Unmarshal([]byte(call.ArgumentsJSON), &args); err != nil {
+		return "", errs.ErrInvalidParams
+	}
+	item, err := s.threads.ItemDetail(ctx, s.botUserIDOf(call.BotID), args.EnvID, args.ThreadID, args.ItemID)
+	if err != nil {
+		return "", err
+	}
+	return botMarshalResult(botSlimThreadItem(item))
+}
+
+func (s *BotService) execThreadComposerOptions(_ *model.Bot, ctx context.Context, call *model.BotToolCall) (string, error) {
+	var args botThreadArgs
+	if err := json.Unmarshal([]byte(call.ArgumentsJSON), &args); err != nil {
+		return "", errs.ErrInvalidParams
+	}
+	userID := s.botUserIDOf(call.BotID)
+	opts, err := s.threads.ComposerOptions(ctx, userID, args.EnvID)
+	if err != nil {
+		return "", err
+	}
+	// 透出启动器需要的项目（含 default_model_selection）与归一化的模型
+	// 目录，不透传 T3 全量 config/settings；项目标题来自配对的 T3 服务/
+	// 仓库，进围栏（INT-136）。providers 供 launch 的 model_selection 直接
+	// 回填；not_settable 如实列出机器人不能指定的配置项（INT-159）。
+	notSettable := botThreadNotSettable
+	botToolsetVer := int64(0)
+	// 读发起本次调用的请求所冻结的工具集版本，不读 bots 表活值：
+	// 另一条对话线先激活新版本会把行版本推进，本会话仍冻结旧 schema
+	// 时 not_settable 标注会缺失（代码审查）。
+	if req, err := s.requests.FindByID(call.RequestID); err == nil {
+		botToolsetVer = req.ToolsetVersion
+	} else {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			// 查询失败要留痕便于排查 DB 抖动（代码审查：与
+			// matchAuthorization 的降级留痕同口径）。
+			s.logger.Warn("bot 工具集版本查询失败，回退 bots 表活值",
+				zap.String("bot_id", call.BotID), zap.Error(err))
+		}
+		// 降级回退 bots 表活值而非 0：活值只前进不回退，会话冻结版本
+		// 恒 ≤ 活值——活值已低于当前版时冻结版必也低，标注恒正确；
+		// 活值≥当前版的旧会话仍会漏标（双重降级才出现，方向安全），
+		// 但比按 0 兜底更贴近事实（代码审查 Note）。
+		if bot, berr := s.bots.FindByIDAndUser(call.BotID, userID); berr == nil {
+			botToolsetVer = bot.ToolsetVersion
+		}
+	}
+	// 能力门按能力引入版本（v12 = INT-159）判，不按当前发布版本：这三个
+	// 字段自 v12 起就在冻结 schema 里，v12/v13 会话携带照常受理——若按
+	// botToolsetVersion 判，当前版本升到 14 后它们会被误标成不可用，模型
+	// 白白放弃可用配置。只有冻结在 v11 及更早的会话才真的不含这些字段。
+	if botToolsetVer > 0 && botToolsetVer < 12 {
+		// 冻结在 v11 及更早的会话也看得到 providers 目录：如实标注这些字段
+		// 本版本不可用，避免模型被引导去传会被受理拒绝的参数（云端审查）。
+		notSettable = append(append([]map[string]string{}, botThreadNotSettable...),
+			map[string]string{
+				"field":  "model_selection/runtime_mode/workspace",
+				"reason": fmt.Sprintf("本会话工具集 v%d 不含这些字段（传了会被受理拒绝）；压缩升级到 v%d 后可用", botToolsetVer, botToolsetVersion),
+			})
+	}
+	providers, providersDrifted := botSlimComposerProviders(opts.Config)
+	resp := map[string]interface{}{
+		"projects":     opts.Projects,
+		"providers":    providers,
+		"not_settable": notSettable,
+	}
+	if providersDrifted {
+		// 上游 providers 字段形状与约定不符（键名漂移等）：目录可能不完整，
+		// 显式标注而不是让模型目录静默消失（代码审查 Note）。
+		s.logger.Warn("composer_options providers 上游字段形状漂移",
+			zap.String("bot_id", call.BotID))
+		resp["providers_warning"] = "上游 providers 字段形状与预期不符，模型目录可能不完整；launch 的 model_selection 取值来源可能缺失"
+	}
+	return botMarshalResult(resp)
+}
+
+func (s *BotService) execThreadWorkspaceOptions(_ *model.Bot, ctx context.Context, call *model.BotToolCall) (string, error) {
+	var args botThreadArgs
+	if err := json.Unmarshal([]byte(call.ArgumentsJSON), &args); err != nil {
+		return "", errs.ErrInvalidParams
+	}
+	opts, err := s.threads.WorkspaceOptions(ctx, s.botUserIDOf(call.BotID), args.EnvID, args.ProjectID, args.Query, args.Cursor)
+	if err != nil {
+		return "", err
+	}
+	// 远程 VCS 引用名与工作树路径同属仓库侧可控文本，进围栏（INT-136）。
+	return botMarshalResult(opts)
+}
+
+// fs_environment 各读取动作的入口（注册表 SyncExec 指向这些方法表达式）。
+
+func (s *BotService) execEnvironmentList(_ *model.Bot, ctx context.Context, call *model.BotToolCall) (string, error) {
+	envs, err := s.threads.List(ctx, s.botUserIDOf(call.BotID))
+	if err != nil {
+		return "", err
+	}
+	out := make([]map[string]interface{}, 0, len(envs.Environments))
+	for _, env := range envs.Environments {
+		out = append(out, map[string]interface{}{
+			"id":     env.Id,
+			"name":   env.Name,
+			"status": string(env.Status),
+			"access": string(env.Access),
+		})
+	}
+	return botMarshalResult(map[string]interface{}{"environments": out})
+}
+
+func (s *BotService) execEnvironmentProjects(_ *model.Bot, ctx context.Context, call *model.BotToolCall) (string, error) {
+	projects, err := s.bindings.DiscoverProjects(ctx, s.botUserIDOf(call.BotID))
+	if err != nil {
+		return "", err
+	}
+	return botMarshalResult(map[string]interface{}{"projects": projects})
 }
 
 // botCallExecContext 是调用记录 execution_context 的统一形态：服务端生成的
@@ -231,6 +205,245 @@ type botCallExecContext struct {
 
 func botThreadMessage(text string) api.CreateT3ThreadRequest_Message {
 	return api.CreateT3ThreadRequest_Message{Text: text}
+}
+
+// botThreadWriteArgs 解出 fs_thread 写动作的参数与执行上下文：T3 幂等身份
+// （thread/command/message ID）在受理时由服务端生成并镜像进 execution_context，
+// 执行侧只消费，不让模型指定。
+func botThreadWriteArgs(call *model.BotToolCall) (botThreadArgs, botCallExecContext, error) {
+	var execCtx botCallExecContext
+	_ = json.Unmarshal([]byte(call.ExecutionContextJSON), &execCtx)
+	var args botThreadArgs
+	if err := json.Unmarshal([]byte(call.ArgumentsJSON), &args); err != nil {
+		return args, execCtx, errs.ErrInvalidParams
+	}
+	return args, execCtx, nil
+}
+
+// fs_thread 各写动作的 worker 执行入口（注册表 AsyncExec 直接指向单动作方法）。
+// T3 的 command/thread/message 幂等身份取自执行上下文。
+
+func (s *BotService) runThreadLaunch(ctx context.Context, call *model.BotToolCall) (interface{}, error) {
+	userID := s.botUserIDOf(call.BotID)
+	args, execCtx, err := botThreadWriteArgs(call)
+	if err != nil {
+		return nil, err
+	}
+	req := &T3CreateThreadRequest{
+		ProjectId: args.ProjectID,
+		Message:   botThreadMessage(args.Text),
+	}
+	if title := strings.TrimSpace(args.Title); title != "" {
+		req.Title = &title
+	}
+	if execCtx.ThreadID != "" {
+		req.ThreadId = &execCtx.ThreadID
+	}
+	// 可选执行配置（INT-159）：未指定时不落任何字段，沿用项目默认。
+	if err := botThreadLaunchConfig(&args, req); err != nil {
+		return nil, err
+	}
+	// 复用 launchSent 语义：结果只表示启动 RPC 的结果，不代表远端完成。
+	result, _, err := s.threads.CreateThreadForAgent(ctx, userID, args.EnvID, req)
+	return result, err
+}
+
+func (s *BotService) runThreadSend(ctx context.Context, call *model.BotToolCall) (interface{}, error) {
+	userID := s.botUserIDOf(call.BotID)
+	args, execCtx, err := botThreadWriteArgs(call)
+	if err != nil {
+		return nil, err
+	}
+	req := &T3SendMessageRequest{Text: args.Text}
+	if execCtx.CommandID != "" {
+		req.CommandId = &execCtx.CommandID
+	}
+	if execCtx.MessageID != "" {
+		req.MessageId = &execCtx.MessageID
+	}
+	return s.threads.SendMessage(ctx, userID, args.EnvID, args.ThreadID, req)
+}
+
+func (s *BotService) runThreadStop(ctx context.Context, call *model.BotToolCall) (interface{}, error) {
+	args, _, err := botThreadWriteArgs(call)
+	if err != nil {
+		return nil, err
+	}
+	return s.threads.StopThread(ctx, s.botUserIDOf(call.BotID), args.EnvID, args.ThreadID)
+}
+
+func (s *BotService) runThreadSettle(ctx context.Context, call *model.BotToolCall) (interface{}, error) {
+	args, _, err := botThreadWriteArgs(call)
+	if err != nil {
+		return nil, err
+	}
+	return s.threads.SettleThread(ctx, s.botUserIDOf(call.BotID), args.EnvID, args.ThreadID)
+}
+
+func (s *BotService) runThreadUnsettle(ctx context.Context, call *model.BotToolCall) (interface{}, error) {
+	args, _, err := botThreadWriteArgs(call)
+	if err != nil {
+		return nil, err
+	}
+	return s.threads.UnsettleThread(ctx, s.botUserIDOf(call.BotID), args.EnvID, args.ThreadID)
+}
+
+func (s *BotService) runThreadResumeQueue(ctx context.Context, call *model.BotToolCall) (interface{}, error) {
+	args, _, err := botThreadWriteArgs(call)
+	if err != nil {
+		return nil, err
+	}
+	return s.threads.ResumeQueue(ctx, s.botUserIDOf(call.BotID), args.EnvID, args.ThreadID)
+}
+
+// ---------- fs_thread / fs_environment 动作注册表（INT-195） ----------
+
+// botThreadActionSpecs 是 fs_thread 的动作声明：launch 的执行配置与 wait 的
+// on/timeout_minutes 只对本动作合法（Forbidden 清单见 bot_tools.go 的共享
+// 名单）；写动作的范围解析与 T3 幂等身份回填并入各动作的 Scope；send 的
+// tier1 候选按「继续」模板动态判定（CandidateFunc），规则归属同由 PolicyRule
+// 提供；wait 无写副作用（NoSideEffect），受理即 running、不走确认/授权。
+func botThreadActionSpecs() []*botActionSpec {
+	// threadScope 是线程写动作共用的注册表范围入口：范围解析在
+	// resolveThreadScope，执行上下文回填 T3 幂等身份与环境 ID。
+	threadScope := func(s *BotService, bot *model.Bot, prepared *botPreparedCall, raw map[string]json.RawMessage, execCtx *botCallExecContext) error {
+		s.resolveThreadScope(prepared, raw)
+		threadID, commandID, messageID := buildThreadExecIDs(prepared.Action)
+		execCtx.ThreadID, execCtx.CommandID, execCtx.MessageID = threadID, commandID, messageID
+		if prepared.EnvironmentID != nil {
+			execCtx.EnvID = *prepared.EnvironmentID
+		}
+		return nil
+	}
+	// sendCandidate 是 send 的 tier1 候选判定：只有精确命中「继续」模板才是
+	// 候选，非模板的 send 直接落 tier3。
+	sendCandidate := func(prepared *botPreparedCall) string {
+		var args botThreadArgs
+		_ = json.Unmarshal([]byte(prepared.ArgumentsJSON), &args)
+		if botPolicyIsContinueTemplate(args.Text) {
+			return botPolicyRuleSendContinue
+		}
+		return ""
+	}
+	return []*botActionSpec{
+		{
+			Tool: "fs_thread", Action: "list",
+			Description: "列出全部环境的线程（默认不含归档与已结算线程；已结算的要带 settled=true 才看得到；每项带 provider/model/branch）。每项自带 activity 与 last_reply（末条助手回复摘要；无助手回复则省略；单条详情读不到时 detail_unavailable=true，读超时/预算耗尽被中止的标 detail_skipped=true），通常不必再逐条 get",
+			Mode:        model.BotExecutionSync, ReadOnly: true, ScheduleContext: true,
+			Forbidden: botThreadLaunchWaitForbidden,
+			SyncExec:  (*BotService).execThreadList,
+		},
+		{
+			Tool: "fs_thread", Action: "get",
+			Description: "读取线程详情（thread 带 provider/model/branch 回显实际配置）",
+			Mode:        model.BotExecutionSync, ReadOnly: true,
+			Required: req("env_id", "thread_id"), Forbidden: botThreadLaunchWaitForbidden,
+			SyncExec: (*BotService).execThreadGet,
+		},
+		{
+			Tool: "fs_thread", Action: "item",
+			Description: "读取线程条目",
+			Mode:        model.BotExecutionSync, ReadOnly: true,
+			Required: req("env_id", "thread_id", "item_id"), Forbidden: botThreadLaunchWaitForbidden,
+			SyncExec: (*BotService).execThreadItem,
+		},
+		{
+			Tool: "fs_thread", Action: "composer_options",
+			Description: "读取启动器选项：projects（含 default_model_selection）、providers 可用模型目录（instance_id/models[].slug/options 供 launch 的 model_selection 回填）与 not_settable 不可设置项",
+			Mode:        model.BotExecutionSync, ReadOnly: true,
+			Required: req("env_id"), Forbidden: botThreadLaunchWaitForbidden,
+			SyncExec: (*BotService).execThreadComposerOptions,
+		},
+		{
+			Tool: "fs_thread", Action: "workspace_options",
+			Description: "读取工作区/引用选项（launch 的 workspace.base_ref/branch/worktree_path 取这里的引用名与 worktree 路径）",
+			Mode:        model.BotExecutionSync, ReadOnly: true,
+			Required: req("env_id", "project_id"), Forbidden: botThreadLaunchWaitForbidden,
+			SyncExec: (*BotService).execThreadWorkspaceOptions,
+		},
+		{
+			Tool: "fs_thread", Action: "launch",
+			Description: "在新线程中启动 T3 任务（可选 model_selection/runtime_mode/workspace，取值分别见 composer_options 的 providers 与 workspace_options；省略时模型沿用项目默认、运行模式为 full-access、工作区为项目主检出）",
+			Mode:        model.BotExecutionAsync, Confirmation: confirmAlways,
+			Required: req("env_id", "project_id", "text"), Forbidden: []string{"on", "timeout_minutes"},
+			PolicyTier: "tier3",
+			AsyncExec:  (*BotService).runThreadLaunch,
+			Scope:      threadScope,
+		},
+		{
+			Tool: "fs_thread", Action: "send",
+			Description: "向既有线程发消息（queue_after_active）：线程在跑时进入排队；队列里已有被挂起的排队消息时，新消息也会继承挂起（要先 resume_queue）",
+			Mode:        model.BotExecutionAsync, Confirmation: confirmAlways,
+			Required: req("env_id", "thread_id", "text"), Forbidden: botThreadLaunchWaitForbidden,
+			PolicyTier: "tier3", PolicyRule: botPolicyRuleSendContinue, CandidateFunc: sendCandidate,
+			AsyncExec: (*BotService).runThreadSend,
+			Scope:     threadScope,
+		},
+		{
+			Tool: "fs_thread", Action: "stop",
+			Description: "停止线程当前运行（按环境能力走 thread.stop 或 run.interrupt + holdQueue）：thread.stop 由服务端选目标、挂队列、停子任务（受理即成功，含空闲线程）；旧环境回退路径存在可中断 run/后台工作才派发 run.interrupt，并挂起排队消息、结束 PR 监听、停掉子任务，只剩 PR 监听这类不可中断占位时是空操作（stopped=false，监听继续）；回执只表示受理，是否已停用 fs_thread get 的 activity.stopping 判断",
+			Mode:        model.BotExecutionAsync, Confirmation: confirmAlways,
+			Required: req("env_id", "thread_id"), Forbidden: botThreadLaunchWaitForbidden,
+			PolicyTier: "tier3",
+			AsyncExec:  (*BotService).runThreadStop,
+			Scope:      threadScope,
+		},
+		{
+			Tool: "fs_thread", Action: "settle",
+			Description: "结算线程：收进 T3 历史区，之后默认 list 不再返回（要带 settled=true 才看得到）；结算会清掉置顶与该线程所有 PR 监听；线程还在跑、有排队消息或有待应答的审批/提问时会被拒绝",
+			Mode:        model.BotExecutionAsync, Confirmation: confirmAlways, PolicyTier: "tier2",
+			Required: req("env_id", "thread_id"), Forbidden: botThreadLaunchWaitForbidden,
+			PolicyRule:    botPolicyRuleSettleIdle,
+			CandidateFunc: func(*botPreparedCall) string { return botPolicyRuleSettleIdle },
+			AsyncExec:     (*BotService).runThreadSettle,
+			Scope:         threadScope,
+		},
+		{
+			Tool: "fs_thread", Action: "unsettle",
+			Description: "撤销结算，把线程放回默认列表",
+			Mode:        model.BotExecutionAsync, Confirmation: confirmAlways, PolicyTier: "tier2",
+			Required: req("env_id", "thread_id"), Forbidden: botThreadLaunchWaitForbidden,
+			PolicyRule:    botPolicyRuleUnsettle,
+			CandidateFunc: func(*botPreparedCall) string { return botPolicyRuleUnsettle },
+			AsyncExec:     (*BotService).runThreadUnsettle,
+			Scope:         threadScope,
+		},
+		{
+			Tool: "fs_thread", Action: "resume_queue",
+			Description: "恢复该线程被挂起的消息队列，排队消息继续执行",
+			Mode:        model.BotExecutionAsync, Confirmation: confirmAlways,
+			Required: req("env_id", "thread_id"), Forbidden: botThreadLaunchWaitForbidden,
+			PolicyTier: "tier3",
+			AsyncExec:  (*BotService).runThreadResumeQueue,
+			Scope:      threadScope,
+		},
+		{
+			Tool: "fs_thread", Action: "wait",
+			Description: "挂起等待线程变化后唤醒（受理即 running，不进执行队列，无写副作用）：on 选触发条件（idle/needs_reply/error，缺省全部），线程开始运行并命中条件（idle 需稳定约 20 秒）即唤醒；约 60 秒内线程始终没开始运行以 not_started 唤醒；到 timeout_minutes 上限按 outcome 区分 timeout_unchanged（确实没动）/timeout_progressing（在动但未到终态）/watch_degraded（连接不可信，结论仅供参考）/thread_gone。唤醒的「平台后台结果」带 wait_result：变化字段前后对比、queue.held、最近 3 条条目摘要。每机器人同时最多 3 个、同一线程 1 个（重复挂立即返回 already_waiting 与已有调用 ID）、同一线程 1 小时内最多挂 6 次；定时任务会话内 timeout_minutes 不得超过 15。取消用 fs_cancel。",
+			Mode:        model.BotExecutionAsync, Confirmation: confirmNever, NoSideEffect: true,
+			Required: req("env_id", "thread_id"), Forbidden: botThreadWaitForbidden,
+			AcceptanceOnly: true,
+			Scope:          threadScope,
+		},
+	}
+}
+
+// botEnvironmentActionSpecs 是 fs_environment 的动作声明（只读取）。
+func botEnvironmentActionSpecs() []*botActionSpec {
+	return []*botActionSpec{
+		{
+			Tool: "fs_environment", Action: "list",
+			Description: "列出已连接环境",
+			Mode:        model.BotExecutionSync, ReadOnly: true,
+			SyncExec: (*BotService).execEnvironmentList,
+		},
+		{
+			Tool: "fs_environment", Action: "projects",
+			Description: "发现各环境的 T3 项目",
+			Mode:        model.BotExecutionSync, ReadOnly: true,
+			SyncExec: (*BotService).execEnvironmentProjects,
+		},
+	}
 }
 
 // resolveThreadScope 建卡前解析 fs_thread 写操作范围。

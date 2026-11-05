@@ -289,7 +289,7 @@ func TestBotInt110IssueUpdateWriteProtection(t *testing.T) {
 		ArgumentsJSON: fmt.Sprintf(`{"action":"update","issue_id":%q,"title":"偷偷改","expected_updated_at":"2000-01-01T00:00:00Z"}`, issue.Id),
 		ExecutionMode: string(model.BotExecutionAsync), Status: model.BotCallStatusRunning,
 	}
-	result, err := env.bots.runIssueWrite(context.Background(), call)
+	result, err := botIssueWriteTestExec(env.bots, context.Background(), call)
 	if err != nil {
 		t.Fatalf("conflict run: %v", err)
 	}
@@ -312,7 +312,7 @@ func TestBotInt110IssueUpdateWriteProtection(t *testing.T) {
 		ArgumentsJSON: fmt.Sprintf(`{"action":"update","issue_id":%q,"title":"新标题","expected_updated_at":%q}`, issue.Id, current.UpdatedAt),
 		ExecutionMode: string(model.BotExecutionAsync), Status: model.BotCallStatusRunning,
 	}
-	if _, err := env.bots.runIssueWrite(context.Background(), call2); err != nil {
+	if _, err := botIssueWriteTestExec(env.bots, context.Background(), call2); err != nil {
 		t.Fatalf("update: %v", err)
 	}
 	fresh, err := env.bots.issues.Get(issue.Id, userID)
@@ -468,7 +468,7 @@ func TestBotInt110ResultReadAdvancesWithEscaping(t *testing.T) {
 		ArgumentsHash: "x", ExecutionMode: "sync", Status: model.BotCallStatusQueued,
 		ExecutionContextJSON: "{}", CreatedAt: time.Now().UTC(),
 	}
-	content, err := env.bots.botExecuteSyncTool(context.Background(), reader)
+	content, err := env.bots.botExecuteSyncTool(context.Background(), nil, reader)
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}

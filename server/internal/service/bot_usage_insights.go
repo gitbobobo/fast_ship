@@ -128,7 +128,7 @@ func (s *BotService) GetBotUsageInsights(userID, rangeParam, botID string) (*api
 	if err != nil {
 		return nil, errs.ErrInternal
 	}
-	// 读/写判定的事实源是服务层注册表：命中 botReadOnlyActions 为读，未列出
+	// 读/写判定的事实源是服务层动作注册表：命中 spec.ReadOnly 为读，未声明
 	// 的（含未知动作）按写处理。
 	toolCallRuns := make(map[string]bool, len(scheduleRunIDs))
 	writeCallRuns := make(map[string]bool, len(scheduleRunIDs))
@@ -136,7 +136,7 @@ func (s *BotService) GetBotUsageInsights(userID, rangeParam, botID string) (*api
 		toolCallRuns[t.RunID] = true
 		// 「有写」要求调用实际/可能落效：被拒、取消、未执行或失败的写
 		// 调用没有产生写入，该 run 仍算白跑（EffectiveWrite 见仓库层）。
-		if t.EffectiveWrite && !botReadOnlyActions[t.ToolName+"/"+t.Action] {
+		if t.EffectiveWrite && !botActionReadOnlyOf(t.ToolName, t.Action) {
 			writeCallRuns[t.RunID] = true
 		}
 	}

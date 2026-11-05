@@ -12,65 +12,79 @@ import (
 
 // fs_issue 适配：读取直连 IssueService；写操作由后台 worker 执行。
 // userID 始终取机器人归属人；actor 由服务端生成，不接受模型传入。
+// 动作注册表 spec 组见文件末尾（INT-195）。
 
 const botIssueActor = "bot"
 
-func (s *BotService) execIssueRead(ctx context.Context, call *model.BotToolCall) (string, error) {
-	userID := s.botUserIDOf(call.BotID)
+// fs_issue 各读取动作的入口（注册表 SyncExec 指向这些方法表达式）：解析参数
+// 后各自投影；分页校验与瘦身投影保持共享。
+
+func (s *BotService) execIssueList(_ *model.Bot, _ context.Context, call *model.BotToolCall) (string, error) {
 	var args botIssueArgs
 	if err := json.Unmarshal([]byte(call.ArgumentsJSON), &args); err != nil {
 		return "", errs.ErrInvalidParams
 	}
-	switch call.Action {
-	case "list":
-		page, pageSize, err := botValidatePage(args.Page, args.PageSize)
-		if err != nil {
-			return "", err
-		}
-		filters := IssueListFilters{
-			State:    args.State,
-			Query:    args.Query,
-			Label:    args.Label,
-			Source:   args.Source,
-			Workflow: args.Workflow,
-			Sort:     args.Sort,
-		}
-		items, total, err := s.issues.List(args.ProjectID, userID, filters, page, pageSize)
-		if err != nil {
-			return "", err
-		}
-		return botMarshalResult(botSlimPage("issues", botSlimIssues(items), total, page, pageSize))
-	case "get", "comments", "timeline":
-		switch call.Action {
-		case "get":
-			issue, err := s.issues.Get(args.IssueID, userID)
-			if err != nil {
-				return "", err
-			}
-			return botMarshalResult(botSlimIssueDetail(issue))
-		case "comments":
-			page, pageSize, pageErr := botValidatePage(args.Page, args.PageSize)
-			if pageErr != nil {
-				return "", pageErr
-			}
-			items, total, err := s.issues.ListComments(args.IssueID, userID, page, pageSize)
-			if err != nil {
-				return "", err
-			}
-			return botMarshalResult(botSlimPage("comments", botSlimIssueComments(items), total, page, pageSize))
-		default:
-			page, pageSize, pageErr := botValidatePage(args.Page, args.PageSize)
-			if pageErr != nil {
-				return "", pageErr
-			}
-			items, total, err := s.issues.ListTimeline(args.IssueID, userID, page, pageSize)
-			if err != nil {
-				return "", err
-			}
-			return botMarshalResult(botSlimPage("timeline", botSlimIssueTimeline(items), total, page, pageSize))
-		}
+	page, pageSize, err := botValidatePage(args.Page, args.PageSize)
+	if err != nil {
+		return "", err
 	}
-	return "", errs.New(errs.ErrInvalidParams.Code, "fs_issue 不支持该读取动作")
+	filters := IssueListFilters{
+		State:    args.State,
+		Query:    args.Query,
+		Label:    args.Label,
+		Source:   args.Source,
+		Workflow: args.Workflow,
+		Sort:     args.Sort,
+	}
+	items, total, err := s.issues.List(args.ProjectID, s.botUserIDOf(call.BotID), filters, page, pageSize)
+	if err != nil {
+		return "", err
+	}
+	return botMarshalResult(botSlimPage("issues", botSlimIssues(items), total, page, pageSize))
+}
+
+func (s *BotService) execIssueGet(_ *model.Bot, _ context.Context, call *model.BotToolCall) (string, error) {
+	var args botIssueArgs
+	if err := json.Unmarshal([]byte(call.ArgumentsJSON), &args); err != nil {
+		return "", errs.ErrInvalidParams
+	}
+	issue, err := s.issues.Get(args.IssueID, s.botUserIDOf(call.BotID))
+	if err != nil {
+		return "", err
+	}
+	return botMarshalResult(botSlimIssueDetail(issue))
+}
+
+func (s *BotService) execIssueComments(_ *model.Bot, _ context.Context, call *model.BotToolCall) (string, error) {
+	var args botIssueArgs
+	if err := json.Unmarshal([]byte(call.ArgumentsJSON), &args); err != nil {
+		return "", errs.ErrInvalidParams
+	}
+	page, pageSize, err := botValidatePage(args.Page, args.PageSize)
+	if err != nil {
+		return "", err
+	}
+	items, total, err := s.issues.ListComments(args.IssueID, s.botUserIDOf(call.BotID), page, pageSize)
+	if err != nil {
+		return "", err
+	}
+	return botMarshalResult(botSlimPage("comments", botSlimIssueComments(items), total, page, pageSize))
+}
+
+func (s *BotService) execIssueTimeline(_ *model.Bot, _ context.Context, call *model.BotToolCall) (string, error) {
+	var args botIssueArgs
+	if err := json.Unmarshal([]byte(call.ArgumentsJSON), &args); err != nil {
+		return "", errs.ErrInvalidParams
+	}
+	page, pageSize, err := botValidatePage(args.Page, args.PageSize)
+	if err != nil {
+		return "", err
+	}
+	items, total, err := s.issues.ListTimeline(args.IssueID, s.botUserIDOf(call.BotID), page, pageSize)
+	if err != nil {
+		return "", err
+	}
+	return botMarshalResult(botSlimPage("timeline", botSlimIssueTimeline(items), total, page, pageSize))
 }
 
 // botSlimIssues 列表投影：保工具决策所需的最小字段。
@@ -188,109 +202,135 @@ func botIssueConflictResult(reason string, current *IssueResponse) map[string]in
 	}
 }
 
-// runIssueWrite 在 worker 内执行 fs_issue 写操作。
-func (s *BotService) runIssueWrite(ctx context.Context, call *model.BotToolCall) (interface{}, error) {
+// fs_issue 各写动作的 worker 执行入口（注册表 AsyncExec 直接指向单动作方法；
+// botIssueActor 语义同前）。
+
+func (s *BotService) runIssueCreate(ctx context.Context, call *model.BotToolCall) (interface{}, error) {
 	userID := s.botUserIDOf(call.BotID)
 	var args botIssueArgs
 	if err := json.Unmarshal([]byte(call.ArgumentsJSON), &args); err != nil {
 		return nil, errs.ErrInvalidParams
 	}
-	switch call.Action {
-	case "create":
-		req := CreateInternalIssueRequest{
-			Title: strings.TrimSpace(args.Title),
-			Body:  args.Body,
-		}
-		source := strings.TrimSpace(args.Source)
-		if source == "" || source == "internal" {
-			created, err := s.issues.CreateInternalIssue(args.ProjectID, userID, req)
-			if err != nil {
-				return nil, err
-			}
-			return botSlimIssueDetail(created), nil
-		}
-		if source == "github" {
-			created, err := s.issues.CreateGitHubIssueContext(ctx, args.ProjectID, userID, req)
-			if err != nil {
-				return nil, err
-			}
-			return botSlimIssueDetail(created), nil
-		}
-		return nil, errs.New(errs.ErrInvalidParams.Code, "source 只支持 internal/github")
-	case "update":
-		// 写入保护：确认期间目标被别人改过就不执行，回冲突与最新内容。
-		if expected := strings.TrimSpace(args.ExpectedUpdatedAt); expected != "" {
-			current, err := s.issues.Get(args.IssueID, userID)
-			if err != nil {
-				return nil, err
-			}
-			if strings.TrimSpace(current.UpdatedAt) != expected {
-				return botIssueConflictResult("issue_updated", current), nil
-			}
-		}
-		req := UpdateInternalIssueRequest{}
-		// 只在调用参数真的带了 body 时才替换；字段级更新不得清空正文。
-		if args.Body != nil {
-			req.Body = args.Body
-		}
-		if strings.TrimSpace(args.Title) != "" {
-			title := strings.TrimSpace(args.Title)
-			req.Title = &title
-		}
-		if args.Labels != nil {
-			req.Labels = *args.Labels
-		}
-		if args.StateReason != nil {
-			reason := api.UpdateIssueRequestStateReason(*args.StateReason)
-			req.StateReason = &reason
-		}
-		if args.State != "" {
-			state := model.IssueState(args.State)
-			req.State = &state
-		}
-		updated, err := s.issues.UpdateInternalIssueContext(ctx, args.IssueID, userID, req)
-		if err != nil {
-			return nil, err
-		}
-		return botSlimIssueDetail(updated), nil
-	case "set_workflow":
-		status := model.IssueWorkflowStatus(strings.TrimSpace(args.WorkflowStatus))
-		meta, err := s.issues.UpdateInternalMeta(args.IssueID, userID, status, botIssueActor)
-		if err != nil {
-			return nil, err
-		}
-		return meta, nil
-	case "replace_checklist":
-		// 写入保护：清单整组替换前核对上次读到的清单版本。
-		if expected := strings.TrimSpace(args.ExpectedChecklistUpdatedAt); expected != "" {
-			current, err := s.issues.Get(args.IssueID, userID)
-			if err != nil {
-				return nil, err
-			}
-			currentVersion := ""
-			if current.InternalMeta != nil && current.InternalMeta.ChecklistUpdatedAt != nil {
-				currentVersion = strings.TrimSpace(*current.InternalMeta.ChecklistUpdatedAt)
-			}
-			if currentVersion != expected {
-				return botIssueConflictResult("checklist_updated", current), nil
-			}
-		}
-		req := ReplaceIssueChecklistRequest{Items: args.Items}
-		meta, err := s.issues.ReplaceChecklist(args.IssueID, userID, req, botIssueActor)
-		if err != nil {
-			return nil, err
-		}
-		return meta, nil
-	case "comment":
-		req := CreateInternalIssueCommentRequest{Body: args.CommentBody}
-		// 复用已有幂等入口；幂等键是服务端调用 ID，不让模型指定。
-		comment, err := s.issues.CreateInternalCommentIdempotentContext(ctx, args.IssueID, userID, req, botIssueActor, call.ID)
-		if err != nil {
-			return nil, err
-		}
-		return comment, nil
+	req := CreateInternalIssueRequest{
+		Title: strings.TrimSpace(args.Title),
+		Body:  args.Body,
 	}
-	return nil, errs.New(errs.ErrInvalidParams.Code, "fs_issue 不支持该写动作")
+	source := strings.TrimSpace(args.Source)
+	if source == "" || source == "internal" {
+		created, err := s.issues.CreateInternalIssue(args.ProjectID, userID, req)
+		if err != nil {
+			return nil, err
+		}
+		return botSlimIssueDetail(created), nil
+	}
+	if source == "github" {
+		created, err := s.issues.CreateGitHubIssueContext(ctx, args.ProjectID, userID, req)
+		if err != nil {
+			return nil, err
+		}
+		return botSlimIssueDetail(created), nil
+	}
+	return nil, errs.New(errs.ErrInvalidParams.Code, "source 只支持 internal/github")
+}
+
+func (s *BotService) runIssueUpdate(ctx context.Context, call *model.BotToolCall) (interface{}, error) {
+	userID := s.botUserIDOf(call.BotID)
+	var args botIssueArgs
+	if err := json.Unmarshal([]byte(call.ArgumentsJSON), &args); err != nil {
+		return nil, errs.ErrInvalidParams
+	}
+	// 写入保护：确认期间目标被别人改过就不执行，回冲突与最新内容。
+	if expected := strings.TrimSpace(args.ExpectedUpdatedAt); expected != "" {
+		current, err := s.issues.Get(args.IssueID, userID)
+		if err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(current.UpdatedAt) != expected {
+			return botIssueConflictResult("issue_updated", current), nil
+		}
+	}
+	req := UpdateInternalIssueRequest{}
+	// 只在调用参数真的带了 body 时才替换；字段级更新不得清空正文。
+	if args.Body != nil {
+		req.Body = args.Body
+	}
+	if strings.TrimSpace(args.Title) != "" {
+		title := strings.TrimSpace(args.Title)
+		req.Title = &title
+	}
+	if args.Labels != nil {
+		req.Labels = *args.Labels
+	}
+	if args.StateReason != nil {
+		reason := api.UpdateIssueRequestStateReason(*args.StateReason)
+		req.StateReason = &reason
+	}
+	if args.State != "" {
+		state := model.IssueState(args.State)
+		req.State = &state
+	}
+	updated, err := s.issues.UpdateInternalIssueContext(ctx, args.IssueID, userID, req)
+	if err != nil {
+		return nil, err
+	}
+	return botSlimIssueDetail(updated), nil
+}
+
+func (s *BotService) runIssueSetWorkflow(_ context.Context, call *model.BotToolCall) (interface{}, error) {
+	userID := s.botUserIDOf(call.BotID)
+	var args botIssueArgs
+	if err := json.Unmarshal([]byte(call.ArgumentsJSON), &args); err != nil {
+		return nil, errs.ErrInvalidParams
+	}
+	status := model.IssueWorkflowStatus(strings.TrimSpace(args.WorkflowStatus))
+	meta, err := s.issues.UpdateInternalMeta(args.IssueID, userID, status, botIssueActor)
+	if err != nil {
+		return nil, err
+	}
+	return meta, nil
+}
+
+func (s *BotService) runIssueReplaceChecklist(_ context.Context, call *model.BotToolCall) (interface{}, error) {
+	userID := s.botUserIDOf(call.BotID)
+	var args botIssueArgs
+	if err := json.Unmarshal([]byte(call.ArgumentsJSON), &args); err != nil {
+		return nil, errs.ErrInvalidParams
+	}
+	// 写入保护：清单整组替换前核对上次读到的清单版本。
+	if expected := strings.TrimSpace(args.ExpectedChecklistUpdatedAt); expected != "" {
+		current, err := s.issues.Get(args.IssueID, userID)
+		if err != nil {
+			return nil, err
+		}
+		currentVersion := ""
+		if current.InternalMeta != nil && current.InternalMeta.ChecklistUpdatedAt != nil {
+			currentVersion = strings.TrimSpace(*current.InternalMeta.ChecklistUpdatedAt)
+		}
+		if currentVersion != expected {
+			return botIssueConflictResult("checklist_updated", current), nil
+		}
+	}
+	req := ReplaceIssueChecklistRequest{Items: args.Items}
+	meta, err := s.issues.ReplaceChecklist(args.IssueID, userID, req, botIssueActor)
+	if err != nil {
+		return nil, err
+	}
+	return meta, nil
+}
+
+func (s *BotService) runIssueComment(ctx context.Context, call *model.BotToolCall) (interface{}, error) {
+	userID := s.botUserIDOf(call.BotID)
+	var args botIssueArgs
+	if err := json.Unmarshal([]byte(call.ArgumentsJSON), &args); err != nil {
+		return nil, errs.ErrInvalidParams
+	}
+	req := CreateInternalIssueCommentRequest{Body: args.CommentBody}
+	// 复用已有幂等入口；幂等键是服务端调用 ID，不让模型指定。
+	comment, err := s.issues.CreateInternalCommentIdempotentContext(ctx, args.IssueID, userID, req, botIssueActor, call.ID)
+	if err != nil {
+		return nil, err
+	}
+	return comment, nil
 }
 
 // resolveIssueScope 建卡前解析 fs_issue 写操作范围：指定 Fast Ship 项目。
@@ -334,4 +374,95 @@ func (s *BotService) issueScopeOf(issueID, userID string) (string, string, error
 		return "", "", err
 	}
 	return issue.ProjectId, string(issue.Source), nil
+}
+
+// botIssueActionSpecs 是 fs_issue 的动作声明（INT-195）：全部写动作 tier3、
+// 范围解析（issue→project 回填）随 spec 声明，scope 细节在 resolveIssueScope。
+// 读动作也挂同一 Scope：与拆分前一致（resolveCallScope 对每个受理调用都跑
+// 范围解析，旧 resolveIssueScope 在分支前置 ScopeKind=issue_project，读动作
+// 的 execution_context 同样带归属项目与 source 约束），不是只给写动作。
+func botIssueActionSpecs() []*botActionSpec {
+	scope := func(s *BotService, bot *model.Bot, prepared *botPreparedCall, raw map[string]json.RawMessage, _ *botCallExecContext) error {
+		s.resolveIssueScope(bot, prepared, raw)
+		return nil
+	}
+	return []*botActionSpec{
+		{
+			Tool: "fs_issue", Action: "list",
+			Description: "按项目列出 Issue",
+			Mode:        model.BotExecutionSync, ReadOnly: true,
+			Required: req("project_id"),
+			SyncExec: (*BotService).execIssueList,
+			Scope:    scope,
+		},
+		{
+			Tool: "fs_issue", Action: "get",
+			Description: "读取 Issue 详情",
+			Mode:        model.BotExecutionSync, ReadOnly: true,
+			Required: req("issue_id"),
+			SyncExec: (*BotService).execIssueGet,
+			Scope:    scope,
+		},
+		{
+			Tool: "fs_issue", Action: "comments",
+			Description: "读取 Issue 评论",
+			Mode:        model.BotExecutionSync, ReadOnly: true,
+			Required: req("issue_id"),
+			SyncExec: (*BotService).execIssueComments,
+			Scope:    scope,
+		},
+		{
+			Tool: "fs_issue", Action: "timeline",
+			Description: "读取 Issue 时间线",
+			Mode:        model.BotExecutionSync, ReadOnly: true,
+			Required: req("issue_id"),
+			SyncExec: (*BotService).execIssueTimeline,
+			Scope:    scope,
+		},
+		{
+			Tool: "fs_issue", Action: "create",
+			Description: "创建 Issue（内部或 GitHub）",
+			Mode:        model.BotExecutionAsync, Confirmation: confirmAlways,
+			Required:   req("project_id", "title"),
+			PolicyTier: "tier3",
+			AsyncExec:  (*BotService).runIssueCreate,
+			Scope:      scope,
+		},
+		{
+			Tool: "fs_issue", Action: "update",
+			Description: "更新 Issue 标题/正文/状态/标签",
+			Mode:        model.BotExecutionAsync, Confirmation: confirmAlways,
+			Required:   req("issue_id"),
+			PolicyTier: "tier3",
+			AsyncExec:  (*BotService).runIssueUpdate,
+			Scope:      scope,
+		},
+		{
+			Tool: "fs_issue", Action: "set_workflow",
+			Description: "设置工作流状态",
+			Mode:        model.BotExecutionAsync, Confirmation: confirmAlways,
+			Required:   req("issue_id", "workflow_status"),
+			PolicyTier: "tier3",
+			AsyncExec:  (*BotService).runIssueSetWorkflow,
+			Scope:      scope,
+		},
+		{
+			Tool: "fs_issue", Action: "replace_checklist",
+			Description: "整组替换验收清单",
+			Mode:        model.BotExecutionAsync, Confirmation: confirmAlways,
+			Required:   req("issue_id", "items"),
+			PolicyTier: "tier3",
+			AsyncExec:  (*BotService).runIssueReplaceChecklist,
+			Scope:      scope,
+		},
+		{
+			Tool: "fs_issue", Action: "comment",
+			Description: "发表 Issue 评论",
+			Mode:        model.BotExecutionAsync, Confirmation: confirmAlways,
+			Required:   req("issue_id", "comment_body"),
+			PolicyTier: "tier3",
+			AsyncExec:  (*BotService).runIssueComment,
+			Scope:      scope,
+		},
+	}
 }

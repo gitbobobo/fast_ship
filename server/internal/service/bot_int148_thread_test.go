@@ -51,12 +51,15 @@ func TestBotInt148ThreadToolsetV9(t *testing.T) {
 		if def.Mode != model.BotExecutionAsync || !def.RequiresConfirmation {
 			t.Fatalf("%s 应为异步需确认动作: %+v", action, def)
 		}
-		if botReadOnlyActions["fs_thread/"+action] {
+		spec := botActionSpecOf("fs_thread", action)
+		if spec == nil {
+			t.Fatalf("v9 fs_thread 动作 %s 应在注册表中", action)
+		}
+		if spec.ReadOnly {
 			t.Fatalf("%s 是写动作，不得列入只读", action)
 		}
-		rule, ok := botActionRules["fs_thread/"+action]
-		if !ok || len(rule.Required) != 2 || rule.Required[0].Name != "env_id" || rule.Required[1].Name != "thread_id" {
-			t.Fatalf("%s 的字段规则应为 env_id+thread_id: %+v", action, rule)
+		if len(spec.Required) != 2 || spec.Required[0].Name != "env_id" || spec.Required[1].Name != "thread_id" {
+			t.Fatalf("%s 的字段规则应为 env_id+thread_id: %+v", action, spec.Required)
 		}
 	}
 	// v9–v11 的 fs_thread 参数冻结在 botThreadArgsV9Frozen，v12（INT-159）
@@ -80,7 +83,7 @@ func TestBotInt148ThreadToolsetV9(t *testing.T) {
 		t.Fatalf("v8 fs_thread 应冻结在 botThreadArgsV5Frozen")
 	}
 
-	// schema：action 枚举含新动作，必填字段描述由 botActionRules 注出。
+	// schema：action 枚举含新动作，必填字段描述由动作注册表注出。
 	raw, _ := json.Marshal(thread.Parameters)
 	var schema struct {
 		Properties struct {
@@ -443,7 +446,7 @@ func pairBotT3(t *testing.T, env *botTestEnv, userID, name string) (*fakeT3Envir
 	return fake, created.Id
 }
 
-// runThreadWrite 端到端：三个动作经服务层派发到 fake T3，payload 齐备；
+// fs_thread 写动作经注册表 spec 端到端派发到 fake T3，payload 齐备；
 // 能力缺失时错误原样上抛（不吞成 invalid params）。
 func TestBotInt148ThreadWriteDispatch(t *testing.T) {
 	env := setupBotTestEnv(t)
@@ -463,7 +466,7 @@ func TestBotInt148ThreadWriteDispatch(t *testing.T) {
 			ArgumentsJSON:        `{"action":"` + action + `","env_id":"` + envID + `","thread_id":"th-1"}`,
 			ExecutionContextJSON: `{}`,
 		}
-		return env.bots.runThreadWrite(context.Background(), call)
+		return botThreadWriteTestExec(env.bots, context.Background(), call)
 	}
 
 	for _, action := range []string{"settle", "unsettle", "resume_queue"} {

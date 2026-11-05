@@ -1023,7 +1023,7 @@ func TestBotInt136StateSetKeepsTaskRevision(t *testing.T) {
 	if err := env.bots.calls.CreateTx(env.db, call); err != nil {
 		t.Fatalf("seed call: %v", err)
 	}
-	if _, err := env.bots.execScheduleTool(call); err != nil {
+	if _, err := botScheduleTestExec(env.bots, call); err != nil {
 		t.Fatalf("state_set: %v", err)
 	}
 	after, err := env.bots.schedTasks.FindByID(task.ID)
@@ -1208,7 +1208,9 @@ func TestBotInt136SyncUpdateSkipsPreviewAndWatermark(t *testing.T) {
 	}
 	call := &model.BotToolCall{BotID: bot.ID, ArgumentsJSON: args,
 		ExecutionContextJSON: marshalExecContext(execCtx)}
-	if _, err := env.bots.execScheduleTool(call); err != nil {
+	// 同步口径 helper：本用例验证的就是免确认 update 的同步入口（SyncExec），
+	// 不是 AsyncExec 包装的确认后执行体。
+	if _, err := botScheduleTestExecSync(env.bots, call); err != nil {
 		t.Fatalf("同步 update 不应被修订比对挡住: %v", err)
 	}
 	var reloaded model.BotScheduleTask
@@ -1234,7 +1236,7 @@ func TestBotInt136SyncUpdateSkipsPreviewAndWatermark(t *testing.T) {
 	}
 	badCall := &model.BotToolCall{BotID: bot.ID, ArgumentsJSON: badArgs,
 		ExecutionContextJSON: marshalExecContext(badCtx)}
-	_, execErr := env.bots.execScheduleTool(badCall)
+	_, execErr := botScheduleTestExecSync(env.bots, badCall)
 	if execErr == nil || !strings.Contains(execErr.Error(), "指令") {
 		t.Fatalf("执行层应返回具体字段错误（指令不合法）: %v", execErr)
 	}
@@ -1309,7 +1311,7 @@ func TestBotInt136ConfirmedFlagLifecycle(t *testing.T) {
 		t.Fatalf("preview: %+v %v", preview, err)
 	}
 	createCall.ExecutionContextJSON = marshalExecContext(botCallExecContext{Schedule: preview})
-	if _, err := env.bots.execScheduleTool(createCall); err != nil {
+	if _, err := botScheduleTestExec(env.bots, createCall); err != nil {
 		t.Fatalf("create exec: %v", err)
 	}
 	var created model.BotScheduleTask
@@ -1330,7 +1332,7 @@ func TestBotInt136ConfirmedFlagLifecycle(t *testing.T) {
 		`{"action":"disable","task_id":"` + legacy.ID + `"}`,
 	} {
 		call := &model.BotToolCall{BotID: bot.ID, ArgumentsJSON: args}
-		if _, err := env.bots.execScheduleTool(call); err != nil {
+		if _, err := botScheduleTestExec(env.bots, call); err != nil {
 			t.Fatalf("exec %s: %v", args, err)
 		}
 		var reloaded model.BotScheduleTask
@@ -1346,7 +1348,7 @@ func TestBotInt136ConfirmedFlagLifecycle(t *testing.T) {
 	// 批准即复核。
 	confUpdate := &model.BotToolCall{BotID: bot.ID, RequiresConfirmation: true,
 		ArgumentsJSON: `{"action":"update","task_id":"` + legacy.ID + `","needs_report":false}`}
-	if _, err := env.bots.execScheduleTool(confUpdate); err != nil {
+	if _, err := botScheduleTestExec(env.bots, confUpdate); err != nil {
 		t.Fatalf("confirmed update: %v", err)
 	}
 	var afterUpdate model.BotScheduleTask
@@ -1371,7 +1373,7 @@ func TestBotInt136ConfirmedFlagLifecycle(t *testing.T) {
 	}
 	confEnable := &model.BotToolCall{BotID: bot.ID, RequiresConfirmation: true,
 		ArgumentsJSON: `{"action":"enable","task_id":"` + legacy2.ID + `"}`}
-	if _, err := env.bots.execScheduleTool(confEnable); err != nil {
+	if _, err := botScheduleTestExec(env.bots, confEnable); err != nil {
 		t.Fatalf("confirmed enable: %v", err)
 	}
 	var afterEnable model.BotScheduleTask
@@ -1527,13 +1529,13 @@ func TestBotInt136DuplicateKeysRejected(t *testing.T) {
 
 // ---------- 7. 未识别动作 fail closed ----------
 
-// 分类是对动作名的枚举：未来给工具集加动作却漏更新分类表时，默认必须落向
-// 最严一侧——受理端要求确认（而不是免确认同步执行），schedule 会话直接拒绝。
-// 这是 INT-136 的护栏对新动作的延伸：宁可多弹卡，不能静默放行持久化写。
+// 分类是对动作名的枚举：确认分类收进动作注册表（INT-195）后，fail closed
+// 由两道栅栏保证——未注册动作在定时任务会话直接拒绝；当前工具集的每个
+// fs_schedule 动作都有显式分类（免确认动作静态声明、需确认动作由 Confirm
+// 动态判定），不可能继承免确认默认值静默放行持久化写。
 func TestBotInt136UnknownActionFailsClosed(t *testing.T) {
-	needs, err := botScheduleConfirmation("pause", map[string]json.RawMessage{})
-	if err != nil || !needs {
-		t.Fatalf("未识别动作应按需要确认处理: needs=%v err=%v", needs, err)
+	if botActionSpecOf("fs_schedule", "pause") != nil {
+		t.Fatal("未识别动作不应在注册表中")
 	}
 	if err := botScheduleManageDenied(&botPreparedCall{
 		ToolName: "fs_schedule", Action: "pause",
@@ -1541,11 +1543,15 @@ func TestBotInt136UnknownActionFailsClosed(t *testing.T) {
 		t.Fatal("未识别动作应在定时任务会话被拒绝")
 	}
 	// 已知动作口径不变：只读/降权动作免确认、schedule 会话可用（status 是
-	// v2 冻结工具集里 list 的旧名，同样只读）。
+	// v2 冻结工具集里 list 的旧名，同样只读）；disable 免确认但属管理动作、
+	// 在定时任务会话同样被拒。
 	for _, a := range []string{"list", "runs", "state_get", "state_set", "disable", "status"} {
-		needs, err := botScheduleConfirmation(a, map[string]json.RawMessage{})
-		if err != nil || needs {
-			t.Fatalf("%s 应保持免确认: needs=%v err=%v", a, needs, err)
+		spec := botActionSpecOf("fs_schedule", a)
+		if spec == nil {
+			t.Fatalf("%s 应在注册表中", a)
+		}
+		if spec.Confirm != nil || botRequiresConfirmationOf(spec) {
+			t.Fatalf("%s 应保持免确认（静态声明，无动态 Confirm）", a)
 		}
 	}
 	for _, a := range []string{"list", "runs", "state_get", "state_set", "status"} {
@@ -1561,6 +1567,38 @@ func TestBotInt136UnknownActionFailsClosed(t *testing.T) {
 		}); err == nil {
 			t.Fatalf("%s 应在定时任务会话被拒绝", a)
 		}
+	}
+	// 需确认动作的动态判定与拆分前 botScheduleConfirmation 逐项同口径。
+	// scheduleConfirmOf 先判 nil：注册表真漏动作时给清晰 Fatal 而不是
+	// nil 指针崩溃（fast-ship-bot R14，与 R13 的 nil 先判同族）。
+	scheduleConfirmOf := func(a string) func(map[string]json.RawMessage) (bool, error) {
+		spec := botActionSpecOf("fs_schedule", a)
+		if spec == nil {
+			t.Fatalf("fs_schedule/%s 应在注册表中", a)
+		}
+		return spec.Confirm
+	}
+	for _, a := range []string{"create", "enable", "delete"} {
+		needs, err := scheduleConfirmOf(a)(map[string]json.RawMessage{})
+		if err != nil || !needs {
+			t.Fatalf("%s 应恒需确认: needs=%v err=%v", a, needs, err)
+		}
+	}
+	if needs, err := scheduleConfirmOf("update")(map[string]json.RawMessage{}); err != nil || needs {
+		t.Fatalf("update 空参数应免确认: needs=%v err=%v", needs, err)
+	}
+	if needs, err := scheduleConfirmOf("update")(map[string]json.RawMessage{
+		"instruction": []byte(`"x"`),
+	}); err != nil || !needs {
+		t.Fatalf("update 带敏感字段应需确认: needs=%v err=%v", needs, err)
+	}
+	if needs, err := scheduleConfirmOf("run")(map[string]json.RawMessage{}); err != nil || !needs {
+		t.Fatalf("run 非 dry_run 应需确认: needs=%v err=%v", needs, err)
+	}
+	if needs, err := scheduleConfirmOf("run")(map[string]json.RawMessage{
+		"dry_run": []byte(`true`),
+	}); err != nil || needs {
+		t.Fatalf("run dry_run=true 应免确认: needs=%v err=%v", needs, err)
 	}
 }
 

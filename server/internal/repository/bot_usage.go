@@ -620,7 +620,8 @@ func (r *BotUsageRepository) ListMaintenanceRequestRows(maintRunIDs []string) ([
 }
 
 // RunToolCallTriple 是 run 名下出现过的 (tool_name, action) 去重组合（空转判定
-// 用）：读/写判定的事实源 botReadOnlyActions 是服务层的 Go 映射，无法下推成
+// 用）：读/写判定的事实源（服务层动作注册表 botActionSpec.ReadOnly）是 Go
+// 映射，无法下推成
 // SQL 条件，取去重组合回内存过滤，行数远小于调用行总数。
 type RunToolCallTriple struct {
 	RunID    string `gorm:"column:run_id"`

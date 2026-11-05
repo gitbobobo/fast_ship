@@ -315,7 +315,7 @@ func TestBotInt159ComposerOptionsExec(t *testing.T) {
 		BotID: bot.ID, ToolName: "fs_thread", Action: "composer_options",
 		ArgumentsJSON: `{"action":"composer_options","env_id":"` + envID + `"}`,
 	}
-	raw, err := env.bots.execThreadRead(context.Background(), call)
+	raw, err := botThreadReadTestExec(env.bots, context.Background(), call)
 	if err != nil {
 		t.Fatalf("composer_options: %v", err)
 	}
@@ -401,7 +401,7 @@ func TestBotInt159ComposerOptionsFrozenVersionGate(t *testing.T) {
 			ToolName: "fs_thread", Action: "composer_options",
 			ArgumentsJSON: `{"action":"composer_options","env_id":"` + envID + `"}`,
 		}
-		raw, err := env.bots.execThreadRead(context.Background(), call)
+		raw, err := botThreadReadTestExec(env.bots, context.Background(), call)
 		if err != nil {
 			t.Fatalf("composer_options: %v", err)
 		}
@@ -463,7 +463,7 @@ func TestBotInt159LaunchDispatch(t *testing.T) {
 			ArgumentsJSON:        args,
 			ExecutionContextJSON: `{}`,
 		}
-		return env.bots.runThreadWrite(context.Background(), call)
+		return botThreadWriteTestExec(env.bots, context.Background(), call)
 	}
 	launches := func() []map[string]any {
 		var out []map[string]any
