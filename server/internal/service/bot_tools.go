@@ -1135,6 +1135,14 @@ func botBuildToolset(version int64, tools []*botToolDef) *botToolsetHolder {
 		if version >= botConditionalSchemaVersion {
 			botAnnotateActionRequirements(tool, parsed)
 		}
+		// 当前版本的 action 枚举改由注册表生成（INT-195，快船 bot R11）：
+		// 动作清单的唯一声明点是 spec 组，枚举不再单独维护在参数结构体 tag
+		// 里——只加 spec 漏改 tag 的漂移从根上消失。冻结版本用各自的冻结
+		// 结构体 tag，不受影响。spec 组顺序沿用 tag 的历史声明顺序，wire
+		// 字节逐字节稳定（哈希基线测试兜底）。
+		if version == botToolsetVersion {
+			botInjectActionEnum(tool.Actions, parsed)
+		}
 		tool.Parameters = shared.FunctionParameters(parsed)
 		holder.byName[tool.Name] = tool
 		for i := range tool.Actions {
@@ -1281,6 +1289,26 @@ func botAnnotateActionRequirements(tool *botToolDef, schema map[string]interface
 		return
 	}
 	actionField["description"] = "必填字段（服务端强制）：" + strings.Join(parts, "；")
+}
+
+// botInjectActionEnum 把工具的 action 枚举改写为动作声明顺序（当前版本
+// 专用，来源是 spec 组生成的 tool.Actions）：动作清单的唯一声明点是注册表，
+// schema 枚举是其投影。无 action 属性的工具（fs_help/fs_stop 的零参数
+// 结构体）跳过。
+func botInjectActionEnum(actions []botActionDef, schema map[string]interface{}) {
+	properties, ok := schema["properties"].(map[string]interface{})
+	if !ok {
+		return
+	}
+	actionField, ok := properties["action"].(map[string]interface{})
+	if !ok {
+		return
+	}
+	enum := make([]interface{}, 0, len(actions))
+	for _, action := range actions {
+		enum = append(enum, action.Name)
+	}
+	actionField["enum"] = enum
 }
 
 // botToolsTokenEstimate 工具定义的 token 占用估算：chars/4（估算值，标注估算方式）。

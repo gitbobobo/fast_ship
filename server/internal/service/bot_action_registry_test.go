@@ -376,6 +376,21 @@ func TestBotActionRegistryDrivesEverySystem(t *testing.T) {
 		if _, ok := holder.byAction["fs_issue/boom_confirm_test"]; !ok {
 			t.Fatal("动态确认测试动作应随声明组进入 v14 工具面")
 		}
+		// 当前版本 action 枚举由注册表生成（botInjectActionEnum）：注入动作
+		// 必须出现在 schema 枚举里，模型才看得到（快船 bot R11 的 P2 根因）。
+		properties, _ := holder.byName["fs_issue"].Parameters["properties"].(map[string]interface{})
+		actionField, _ := properties["action"].(map[string]interface{})
+		enumSeen := false
+		if raw, ok := actionField["enum"].([]interface{}); ok {
+			for _, v := range raw {
+				if s, _ := v.(string); s == "boom_test" {
+					enumSeen = true
+				}
+			}
+		}
+		if !enumSeen {
+			t.Fatalf("注入动作应进入当前版本 schema 的 action 枚举: %v", actionField["enum"])
+		}
 	})
 
 	// 3) 真实受理路径：botPrepareToolCall 全链路（键白名单 → 字段校验 →
