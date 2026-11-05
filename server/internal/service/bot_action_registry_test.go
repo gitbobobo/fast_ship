@@ -137,11 +137,21 @@ func TestBotActionRegistryValidatesSpecs(t *testing.T) {
 		}
 	}))
 	mustOK("禁同步入口且无 SyncExec", base(func(s *botActionSpec) { s.SyncExecForbidden = true }))
+	// Mode 与执行入口/确认分类交叉校验（快船 bot R5）：async 无 AsyncExec、
+	// confirmAlways 配 sync，都在构建期拒绝而不是等到批准后的 worker 才炸。
+	mustPanic("async 缺 AsyncExec", base(func(s *botActionSpec) {
+		s.Confirmation = confirmNever
+		s.Mode = model.BotExecutionAsync
+	}))
+	mustPanic("恒确认配 sync 形态", base(func(s *botActionSpec) {
+		s.Confirmation = confirmAlways
+		s.Mode = model.BotExecutionSync
+	}))
 	// 未知分类拒绝。
 	mustPanic("未知分类", base(func(s *botActionSpec) { s.Confirmation = botConfirmKind("sometimes") }))
 	// 合法形态：never / always / dynamic。
 	mustOK("never", base(func(*botActionSpec) {}))
-	mustOK("always", base(func(s *botActionSpec) { s.Confirmation = confirmAlways }))
+	mustOK("always", base(func(s *botActionSpec) { s.Confirmation = confirmAlways; s.Mode = model.BotExecutionAsync }))
 	mustOK("dynamic", base(func(s *botActionSpec) {
 		s.Confirmation = confirmDynamic
 		s.Confirm = func(map[string]json.RawMessage) (bool, error) { return true, nil }

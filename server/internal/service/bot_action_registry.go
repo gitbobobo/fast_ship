@@ -86,7 +86,9 @@ type botActionSpec struct {
 	ScheduleOK      bool
 	ScheduleContext bool
 	// NoSideEffect 标记无写副作用的动作（wait）：取消竞速与服务重启恢复据此
-	// 不标「可能已写出」，结果带结构化中断 outcome。
+	// 不标「可能已写出」，结果带结构化中断 outcome。目前仅 wait 声明；中断
+	// 结果构造（botWaitInterruptedOutcome）是 wait 模块专属——新增无副作用
+	// 动作时需自带中断结果构造或扩展该 helper，不能盲用 wait 形态的 payload。
 	NoSideEffect bool
 	// ReadOnlyIf 是参数相关的只读判定（fs_schedule/run 的 dry_run=true）。
 	ReadOnlyIf func(*model.BotToolCall) bool
@@ -192,6 +194,15 @@ func botValidateActionSpec(spec *botActionSpec) {
 	}
 	if spec.SyncExecForbidden && spec.SyncExec != nil {
 		panic("bot action registry: 已声明禁止同步入口的动作带了 SyncExec " + key)
+	}
+	// Mode 与执行入口/确认分类交叉校验（快船 bot R5）：错配不再等到运行时——
+	// async 动作没有 AsyncExec 会在批准后的 worker 里才报「没有异步实现」；
+	// confirmAlways 配 Mode=sync 会以同步形态落账、污染 closeUnstarted 语义。
+	if spec.Mode == model.BotExecutionAsync && spec.AsyncExec == nil {
+		panic("bot action registry: 异步动作缺少 AsyncExec 入口 " + key)
+	}
+	if spec.Confirmation == confirmAlways && spec.Mode != model.BotExecutionAsync {
+		panic("bot action registry: 恒需确认的动作必须是异步形态 " + key)
 	}
 }
 
