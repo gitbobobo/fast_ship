@@ -29,6 +29,11 @@ import (
 // 与同进程请求会拿到被污染的分派（面板审查 R1：注销不能是裸 delete）。
 func botWithTestSpecs(t *testing.T, specs ...*botActionSpec) {
 	t.Helper()
+	for _, spec := range specs {
+		// 临时 spec 先过构建校验：验收用的声明必须能通过启动期校验，否则
+		// 「新增动作只需一条 spec」验收的本身就是伪命题（快船 bot R12）。
+		botValidateActionSpec(spec)
+	}
 	m := botActionSpecsAll()
 	saved := make(map[string]*botActionSpec, len(specs))
 	for _, spec := range specs {
@@ -266,7 +271,7 @@ func TestBotActionRegistryDrivesEverySystem(t *testing.T) {
 		Tool: "fs_issue", Action: "boom_test",
 		Description: "测试动作（验收后恢复）",
 		Mode:        model.BotExecutionSync, Confirmation: confirmNever,
-		PolicyTier: "tier3", PolicyRule: "boom_test_rule",
+		PolicyRule:  "boom_test_rule",
 		FenceExempt: true,
 		Required:    req("query"), Forbidden: []string{"state"},
 		SyncExec: func(_ *BotService, _ *model.Bot, _ context.Context, _ *model.BotToolCall) (string, error) {
@@ -279,10 +284,13 @@ func TestBotActionRegistryDrivesEverySystem(t *testing.T) {
 	boomConfirm := &botActionSpec{
 		Tool: "fs_issue", Action: "boom_confirm_test",
 		Description: "测试动作（验收后恢复）",
-		Mode:        model.BotExecutionSync, Confirmation: confirmDynamic,
+		Mode:        model.BotExecutionSync, Confirmation: confirmDynamic, PolicyTier: "tier3",
 		Required: req("query"),
 		SyncExec: func(*BotService, *model.Bot, context.Context, *model.BotToolCall) (string, error) {
 			return "{}", nil
+		},
+		AsyncExec: func(*BotService, context.Context, *model.BotToolCall) (interface{}, error) {
+			return json.RawMessage("{}"), nil
 		},
 		Confirm: func(raw map[string]json.RawMessage) (bool, error) {
 			_, sensitive := raw["state"]
@@ -316,14 +324,17 @@ func TestBotActionRegistryDrivesEverySystem(t *testing.T) {
 		}
 	})
 	t.Run("策略档位", func(t *testing.T) {
-		prep := &botPreparedCall{ToolName: "fs_issue", Action: "boom_test"}
+		// 基础档只被异步受理的策略评估消费，断言用带 AsyncExec 的
+		// boom_confirm_test；规则归属（误判检测）用 boom_test 的静态声明。
+		prep := &botPreparedCall{ToolName: "fs_issue", Action: "boom_confirm_test"}
 		if got := botPolicyBaseTier(prep); got != "tier3" {
 			t.Fatalf("botPolicyBaseTier 应读 spec.PolicyTier: %s", got)
 		}
+		prepRule := &botPreparedCall{ToolName: "fs_issue", Action: "boom_test"}
 		if got := botPolicyRuleForAction("fs_issue", "boom_test"); got != "boom_test_rule" {
 			t.Fatalf("botPolicyRuleForAction 应读 spec.PolicyRule: %q", got)
 		}
-		if got := botPolicyCandidateRule(prep); got != "boom_test_rule" {
+		if got := botPolicyCandidateRule(prepRule); got != "boom_test_rule" {
 			t.Fatalf("botPolicyCandidateRule 无动态候选时应回 PolicyRule: %q", got)
 		}
 	})
@@ -433,9 +444,12 @@ func TestBotActionRegistryDynamicConfirmError(t *testing.T) {
 	spec := &botActionSpec{
 		Tool: "fs_issue", Action: "confirm_test",
 		Description: "测试动作（验收后恢复）",
-		Mode:        model.BotExecutionSync, Confirmation: confirmDynamic,
+		Mode:        model.BotExecutionSync, Confirmation: confirmDynamic, PolicyTier: "tier2",
 		SyncExec: func(*BotService, *model.Bot, context.Context, *model.BotToolCall) (string, error) {
 			return "{}", nil
+		},
+		AsyncExec: func(*BotService, context.Context, *model.BotToolCall) (interface{}, error) {
+			return json.RawMessage("{}"), nil
 		},
 		Confirm: func(map[string]json.RawMessage) (bool, error) {
 			return false, errs.New(errs.ErrInvalidParams.Code, "受理期校验失败")
