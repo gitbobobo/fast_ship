@@ -224,6 +224,13 @@ func botValidateActionSpec(spec *botActionSpec) {
 	if spec.Confirmation == confirmAlways && spec.Mode != model.BotExecutionAsync {
 		panic("bot action registry: 恒需确认的动作必须是异步形态 " + key)
 	}
+	// dynamic + sync 形态必须声明同步出路：Confirm 可能返回 false 的动作若
+	// 既无 SyncExec 又未声明 SyncExecForbidden，免确认参数会在受理后执行时
+	// 才报「同步工具不执行该动作」——同一错配的启动期前移（快船 bot R15）。
+	if spec.Confirmation == confirmDynamic && spec.Mode == model.BotExecutionSync &&
+		spec.SyncExec == nil && !spec.SyncExecForbidden {
+		panic("bot action registry: dynamic 动作的同步形态必须声明 SyncExec 或 SyncExecForbidden " + key)
+	}
 	// Mode 必须显式声明且属枚举（快船 bot R8 Note）：零值受理后会凭空生成
 	// 确认卡、批准后才在 worker 里报「没有异步实现」，错误暴露点后移。
 	if spec.Mode != model.BotExecutionSync && spec.Mode != model.BotExecutionAsync {

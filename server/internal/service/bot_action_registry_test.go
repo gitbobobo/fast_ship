@@ -153,6 +153,21 @@ func TestBotActionRegistryValidatesSpecs(t *testing.T) {
 		s.Confirmation = confirmAlways
 		s.Mode = model.BotExecutionSync
 	}))
+	// dynamic + sync 既无 SyncExec 又未声明 SyncExecForbidden：免确认参数的
+	// 出路缺失，构建期拒绝（快船 bot R15）。
+	mustPanic("dynamic 同步形态无出路", base(func(s *botActionSpec) {
+		s.Confirmation = confirmDynamic
+		s.Confirm = func(map[string]json.RawMessage) (bool, error) { return true, nil }
+	}))
+	mustOK("dynamic 同步形态声明禁同步", base(func(s *botActionSpec) {
+		s.Confirmation = confirmDynamic
+		s.PolicyTier = "tier2"
+		s.Confirm = func(map[string]json.RawMessage) (bool, error) { return true, nil }
+		s.SyncExecForbidden = true
+		s.AsyncExec = func(*BotService, context.Context, *model.BotToolCall) (interface{}, error) {
+			return json.RawMessage("{}"), nil
+		}
+	}))
 	// 未知分类拒绝。
 	mustPanic("未知分类", base(func(s *botActionSpec) { s.Confirmation = botConfirmKind("sometimes") }))
 	// 合法形态：never / always / dynamic。
@@ -168,9 +183,12 @@ func TestBotActionRegistryValidatesSpecs(t *testing.T) {
 	mustOK("dynamic", base(func(s *botActionSpec) {
 		s.Confirmation = confirmDynamic
 		s.PolicyTier = "tier2"
+		// sync 形态的 dynamic 必须声明同步出路（create 形态：禁同步入口，
+		// 异步执行体承接确认后的执行）。
+		s.SyncExecForbidden = true
 		s.Confirm = func(map[string]json.RawMessage) (bool, error) { return true, nil }
 		s.AsyncExec = func(*BotService, context.Context, *model.BotToolCall) (interface{}, error) {
-			return nil, nil
+			return json.RawMessage("{}"), nil
 		}
 	}))
 	mustPanic("dynamic 缺 AsyncExec", base(func(s *botActionSpec) {
