@@ -1943,9 +1943,9 @@ func TestBotNightlyOutputCappedByDetectedLimit(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed nightly cache: %v", err)
 	}
-	env.bots.nowFn = func() time.Time {
+	env.bots.setNowFn(func() time.Time {
 		return time.Date(2026, 10, 16, 4, 0, 0, 0, time.UTC)
-	}
+	})
 	botRow, _ := env.bots.bots.Get(bot.ID)
 	env.bots.runNightlyForBot(botRow.ID, "nightly:2026-10-16")
 

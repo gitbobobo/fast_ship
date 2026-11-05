@@ -154,10 +154,16 @@ func botCeilRatio(n int64, ratio float64) int64 {
 }
 
 func (s *BotService) now() time.Time {
-	if s.nowFn != nil {
-		return s.nowFn()
+	if fn := s.nowFn.Load(); fn != nil {
+		return (*fn)()
 	}
 	return time.Now().UTC()
+}
+
+// setNowFn 注入固定时钟（测试装配用，fn 非空）。原子写：后台窗口探测
+// goroutine 会在测试改时钟的同时经 now() 读它（INT-196）。
+func (s *BotService) setNowFn(fn func() time.Time) {
+	s.nowFn.Store(&fn)
 }
 
 func (s *BotService) maintenanceStopped(ctx context.Context, run *model.BotRun) bool {

@@ -1300,7 +1300,7 @@ func TestBotActivationDeferralExpiresMidRun(t *testing.T) {
 	// 此刻拨过保留窗口再放行，第二轮的安全点复核必须看到推迟已过期。
 	first := env.fake.nextRequest(t, 10*time.Second)
 	retain := env.cfg.Bots.Runtime.PromptCacheRetain()
-	env.bots.nowFn = func() time.Time { return time.Now().UTC().Add(retain + time.Minute) }
+	env.bots.setNowFn(func() time.Time { return time.Now().UTC().Add(retain + time.Minute) })
 	close(hold)
 
 	waitForBot(t, "midrun activation", 15*time.Second, func() bool { return env.botSettled(bot.ID) })
