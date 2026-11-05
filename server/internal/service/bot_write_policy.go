@@ -802,7 +802,7 @@ func (s *BotService) detectPolicyInverseAcceptance(botID, action, envID, threadI
 // 「继续」后确认 stop、自动 unsettle 后批准 settle 卡或反向），都按
 // (rule, scope) 记一次误判。取舍说明（INT-195）：这里的 approve-stop→
 // SendContinue 与 settle/unsettle 反向检测是 tier1 规则之间的关系逻辑
-//（谁覆盖谁、用户推翻谁），不是单个动作的属性，因此保留为独立判定而不收进
+// （谁覆盖谁、用户推翻谁），不是单个动作的属性，因此保留为独立判定而不收进
 // 动作注册表——动作 spec 只声明规则归属（PolicyRule），规则间的关联在这里
 // 表达。
 func (s *BotService) detectPolicyMisjudgeOnDecision(botID string, call *model.BotToolCall, decision string) {
