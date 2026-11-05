@@ -238,7 +238,15 @@ func (s *BotService) commitAssistantTurn(bot *model.Bot, run *model.BotRun, requ
 				entry.prepared = nil
 			}
 		}
-		if entry.prepared != nil && prepared.ToolName == "fs_thread" && prepared.Action == "wait" {
+		// 受理即 running 的动作收进注册表声明（NoSideEffect 家族，目前
+		// 仅 wait）：受理、取消竞速、重启恢复共用同一事实源。wait 的挂钩
+		// （threadWaitAttach/waiting_for 回执）是该家族当前的唯一成员，
+		// 新增成员时同步扩展其受理与中断语义（fast-ship-bot R17）。
+		var waitSpec *botActionSpec
+		if prepared != nil {
+			waitSpec = botActionSpecOf(prepared.ToolName, prepared.Action)
+		}
+		if entry.prepared != nil && waitSpec != nil && waitSpec.NoSideEffect {
 			// wait 受理端专门校验（INT-160）：定时任务会话内等待上限 15 分钟
 			//（schedule run 要等全部异步调用落终态，超长等待会吃掉整个结算
 			// 预算），防循环限额（每机器人 3 个、同线程 1 个、每小时 6 次）。

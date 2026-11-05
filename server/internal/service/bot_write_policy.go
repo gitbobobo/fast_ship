@@ -183,7 +183,14 @@ func botPolicyCandidateRule(prepared *botPreparedCall) string {
 // 按 tier2 处理（需要确认的调用在受理端已被 byAction 查表拦截，这里只是
 // 兑底）。
 func botPolicyBaseTier(prepared *botPreparedCall) string {
-	if spec := botActionSpecOf(prepared.ToolName, prepared.Action); spec != nil && spec.PolicyTier != "" {
+	spec := botActionSpecOf(prepared.ToolName, prepared.Action)
+	if spec == nil {
+		// 查无 spec 按最严档兜底（fail closed，与拆分前 fs_issue 分支对未
+		// 列出动作回 tier3 同向）：该状态今天不可达（需确认的调用先过
+		// byAction 查表），兜底只为注册表与工具面万一失一致时宁可多确认。
+		return "tier3"
+	}
+	if spec.PolicyTier != "" {
 		return spec.PolicyTier
 	}
 	return "tier2"
