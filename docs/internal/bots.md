@@ -140,10 +140,21 @@ SDK 重试显式关零（`option.WithMaxRetries(0)`）：连接测试与被中�
 枚举）是它的直接投影，属性表不再有平行事实源。**边界**：各域的范围解析与
 幂等身份仍按动作在域函数内实现（`resolveThreadScope`/`buildThreadExecIDs`/
 `resolveScheduleScope`/`resolveIssueScope`，由动作的 `spec.Scope` 引用）；
-新增 fs_thread/fs_schedule 写动作时必须同步扩展这些域函数——免确认动作
-只能是同步形态（构建期强制，免确认异步会在启动期被拒绝），异步写动作必须
-恒确认或动态确认；漏扩展域函数的需确认动作会被 `botRequireScope` 拒绝
-（fail safe），并同步更新前端 `tool-labels` 与本文档。写动作必须显式声明确认分类（漏声明构建期 panic，零值不再等价于
+新增 fs_thread/fs_schedule 写动作时必须同步扩展这些域函数——免确认**写**
+动作只能是同步形态（构建期强制，免确认异步会在启动期被拒绝），异步写动作
+必须恒确认或动态确认；唯一例外是 `AcceptanceOnly` 受理生命周期（当前仅
+`fs_thread/wait`，免确认异步形态但无执行入口，不落 worker 认领）。
+漏扩展域函数的需确认动作会被 `botRequireScope` 拒绝（fail safe），并同步
+更新前端 `tool-labels` 与本文档。
+
+除 scope/幂等身份外，以下按动作名分派仍留在域/规则层（方向审计 N3，新增
+动作需逐一核对，全部 fail closed，漏改表现为「新动作在对应场景被拒」）：
+`bot_authorization.go` 的 `always_allow` 白名单（仅 `fs_schedule/run`）、
+`bot_tools.go` 的 launch/wait 受理期专用校验、`bot_tools_memory.go` 的
+action→memory 操作映射、`bot_results.go` 的 capability 查询分支，以及前端
+`bot-confirmation-card.tsx`/`tool-labels.ts` 的动作展示副本表（与
+`SCHEDULE_CONFIRM_ACTIONS`/`SCHEDULE_ALWAYS_ALLOW_ACTIONS` 同族，项目既有
+约定为手工同步）。写动作必须显式声明确认分类（漏声明构建期 panic，零值不再等价于
 免确认）；恒确认动作禁带同步执行入口（`confirmAlways` 自动禁止，
 `SyncExecForbidden` 显式禁止）。当前工具集 v14 的 Actions 由 spec 组生成
 （`botToolRegistryV14FromGroups`），工具级形状复用 v13 链条输出保证 wire
@@ -1201,9 +1212,10 @@ CAS 终结；running 记录取消并取消 context，worker 落唯一终态且
   `active_run_id`/`active_run_status`/`has_pending_requests`/
   `pending_background_task_count`/`stopping`，平静线程是空对象）与
   `last_reply`（末条 `assistant_message` 正文摘要，`truncateBotRunes`
-  截 300 字符；无线程助手回复则省略该键）。实现是 `execThreadRead` 对页内
-  每条并发补 `threads.Detail`（并发 4、单条 10s、整页 25s 总闸）；单条
-  Detail 失败置 `detail_unavailable=true` 不中断整页；读超时/预算耗尽
+  截 300 字符；无线程助手回复则省略该键）。实现是 `fs_thread/list` 的
+  `execThreadList`，对页内每条并发补 `threads.Detail`（并发 4、单条 10s、
+  整页 25s 总闸）；单条 Detail 失败置 `detail_unavailable=true` 不中断整页；
+  读超时/预算耗尽
   被中止的（排队没轮到、或 Detail 途中被总闸/单条预算杀掉，回调入口与
   err 路径各查一次 ctx）归 `detail_skipped=true`——真读不到与预算耗尽
   要可分（`activity`/`last_reply` 缺席的条目不能按平静读，先看 `detail_*`
@@ -1813,7 +1825,8 @@ hub 按「用户 × 环境」维持的内存 ThreadShell（INT-116）与异步�
 `watch_degraded` 是唯一例外。
 
 - **受理即 running、不进 queued**：`ListQueued` 会把 queued 调用推给 worker，
-  而 `runThreadWrite` 没有 wait 实现，会被错误认领。受理在
+  而 `fs_thread/wait` 是仅受理钩子动作（无执行入口），会被 queued 认领错误
+  挂起。受理在
   `commitAssistantTurn` 里直接置 `running` 并写 `started_at`（走既有 prepared
   管线：async、不要求确认、不属于写操作的确认分支，`fs_cancel` 可取消），
   事务提交后不调 `enqueueCallWork`，改为向评估器注册（botID、env_id、

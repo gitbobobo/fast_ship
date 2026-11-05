@@ -653,6 +653,16 @@ func TestBotActionRegistryExecutionFormMatrix(t *testing.T) {
 		// 生命周期单边声明（NoSideEffect 真而 AcceptanceOnly 假）：会吞掉本来的执行入口
 		{Tool: "fs_thread", Action: "x7", Mode: model.BotExecutionSync, Confirmation: confirmNever, NoSideEffect: true,
 			SyncExec: func(*BotService, *model.Bot, context.Context, *model.BotToolCall) (string, error) { return "{}", nil }},
+		// 只读桶声明异步入口（同步分派会拒绝，运行时才暴露——方向审计 N1）
+		{Tool: "fs_issue", Action: "x8", Mode: model.BotExecutionSync, ReadOnly: true, PolicyTier: "tier2",
+			AsyncExec: func(*BotService, context.Context, *model.BotToolCall) (interface{}, error) {
+				return json.RawMessage("{}"), nil
+			}},
+		// 只读桶配 async 形态：not_executed 读保护静默失效（方向审计 N1 次生后果）
+		{Tool: "fs_issue", Action: "x9", Mode: model.BotExecutionAsync, ReadOnly: true, PolicyTier: "tier2",
+			AsyncExec: func(*BotService, context.Context, *model.BotToolCall) (interface{}, error) {
+				return json.RawMessage("{}"), nil
+			}},
 	}
 	for i, spec := range illegal {
 		if panicked := entry(spec); !panicked {

@@ -211,6 +211,13 @@ func botValidateExecutionForm(spec *botActionSpec) {
 		return
 	}
 	switch spec.Confirmation {
+	case "":
+		// 形态 0：只读（仅同步读取入口）。只读桶整体在矩阵内（方向审计
+		// N1：此前 24 条只读动作是「恰好合法」而非「被校验」）。
+		if spec.Mode != model.BotExecutionSync || spec.SyncExec == nil || spec.AsyncExec != nil ||
+			spec.SyncExecForbidden || spec.PolicyTier != "" {
+			panic("bot action registry: 只读动作必须是「sync + SyncExec」的形态 " + key)
+		}
 	case confirmAlways:
 		// 形态 2
 		if spec.Mode != model.BotExecutionAsync || spec.AsyncExec == nil ||
@@ -231,6 +238,10 @@ func botValidateExecutionForm(spec *botActionSpec) {
 			spec.SyncExecForbidden || spec.PolicyTier != "" {
 			panic("bot action registry: 免确认动作必须是「sync + SyncExec」的形态（不支持免确认异步） " + key)
 		}
+	default:
+		// botValidateActionSpec 已枚举校验过确认分类，default 不可达；保留
+		// 兜底使矩阵对未知分类 fail closed。
+		panic("bot action registry: 未知确认分类无法匹配执行形态 " + key)
 	}
 }
 

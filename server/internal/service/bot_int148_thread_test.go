@@ -446,7 +446,7 @@ func pairBotT3(t *testing.T, env *botTestEnv, userID, name string) (*fakeT3Envir
 	return fake, created.Id
 }
 
-// runThreadWrite 端到端：三个动作经服务层派发到 fake T3，payload 齐备；
+// fs_thread 写动作经注册表 spec 端到端派发到 fake T3，payload 齐备；
 // 能力缺失时错误原样上抛（不吞成 invalid params）。
 func TestBotInt148ThreadWriteDispatch(t *testing.T) {
 	env := setupBotTestEnv(t)
