@@ -946,6 +946,79 @@ func TestIssueServiceAttachPullRequest_UpgradesSyncedOrigin(t *testing.T) {
 	}
 }
 
+// INT-188：attach 与并发 sync 交错时旧快照不得覆盖较新数据。库内已有 sync
+// 刚写入的较新快照（merged，synced_at 更晚），attach 拉到更旧的 open 快照：
+// 冲突更新被时间守卫拦下，响应读回库内现行行；link_origin 升级为 manual
+// 是身份语义，不受守卫拦限。
+func TestIssueServiceAttachPullRequest_StaleSnapshotKeepsNewerData(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID, withTestGitHubToken(t, svc))
+	issue := createTestIssue(t, svc.db, project.ID)
+
+	now := time.Now().UTC()
+	syncFetchedAt := now.Add(time.Hour) // 库内快照比 attach 将要拉到的更新
+	mergedAt := now.Add(30 * time.Minute)
+	if err := svc.db.Create(&model.IssuePullRequest{
+		ID:           "link-synced",
+		IssueID:      issue.ID,
+		ProjectID:    project.ID,
+		Provider:     model.IssuePullRequestProviderGitHub,
+		RepoFullName: "owner/repo",
+		Number:       7,
+		Title:        "newer-from-sync",
+		HTMLURL:      "https://github.com/owner/repo/pull/7",
+		State:        model.IssuePullRequestStateMerged,
+		MergedAt:     &mergedAt,
+		AuthorLogin:  "sync-author",
+		LinkOrigin:   model.IssuePullRequestLinkOriginSynced,
+		SyncedAt:     syncFetchedAt,
+		CreatedAt:    now,
+		UpdatedAt:    syncFetchedAt,
+	}).Error; err != nil {
+		t.Fatalf("seed synced link: %v", err)
+	}
+
+	// attach 拉到旧快照：open、无 merged_at、旧标题。
+	fake := &fakeIssueGitHubClient{
+		pullRequests: prSet(testPullRequest("owner/repo", 7, "open", nil)),
+	}
+	fake.pullRequests["owner/repo"][7].Title = "fetched-stale"
+	fake.pullRequests["owner/repo"][7].AuthorLogin = "attach-author"
+	stubPullRequestClient(t, svc, fake, "gh-token")
+
+	resp, err := svc.issueService.AttachIssuePullRequest(issue.ID, user.ID, AttachIssuePullRequestRequest{
+		Url: "https://github.com/owner/repo/pull/7",
+	})
+	if err != nil {
+		t.Fatalf("attach over newer synced row: %v", err)
+	}
+	// 响应读回库内现行行：较新快照保留，不回显本次拉到的旧数据。
+	if resp.Id != "link-synced" || resp.Title != "newer-from-sync" || resp.State != model.IssuePullRequestStateMerged {
+		t.Fatalf("stale attach must keep stored newer snapshot, got %+v", resp)
+	}
+	if resp.AuthorLogin != "sync-author" {
+		t.Fatalf("snapshot columns must stay at sync values, got %+v", resp)
+	}
+	if resp.LinkOrigin != model.IssuePullRequestLinkOriginManual {
+		t.Fatalf("manual upgrade must not be blocked by snapshot guard, got %q", resp.LinkOrigin)
+	}
+	if parsed, parseErr := time.Parse(time.RFC3339, resp.SyncedAt); parseErr != nil || !parsed.Equal(syncFetchedAt.Truncate(time.Second)) {
+		t.Fatalf("synced_at must not roll back to stale attach time, got %q", resp.SyncedAt)
+	}
+
+	var stored model.IssuePullRequest
+	if err := svc.db.First(&stored, "id = ?", "link-synced").Error; err != nil {
+		t.Fatalf("reload link: %v", err)
+	}
+	if stored.Title != "newer-from-sync" || stored.State != model.IssuePullRequestStateMerged || stored.MergedAt == nil {
+		t.Fatalf("expected newer snapshot persisted, got %+v", stored)
+	}
+	if !stored.SyncedAt.Equal(syncFetchedAt) {
+		t.Fatalf("synced_at must stay at sync snapshot time, got %v", stored.SyncedAt)
+	}
+}
+
 // 已配代码仓库 Token 的项目 attach 只用它：client factory 收到的必须是
 // code-token 而非公开仓库 Token。internal 项目（未配反馈仓库）只配代码仓库
 // Token 同样生效。

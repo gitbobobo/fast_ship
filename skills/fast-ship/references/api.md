@@ -3668,7 +3668,7 @@ AI 生成 checklist 建议（需已配置 AI 设置；JWT 与 API Key 均可）
 请求体只传 PR URL，服务端解析后立即从远端 forge 拉取 title/state/is_draft/author/head/base/merged_at 等字段入库；拉取失败返回错误，不落记录。
 两种 URL 形状：`https://github.com/<owner>/<repo>/pull/<number>` 走 GitHub（项目凭证，未配则以未认证方式拉公共仓库）；`http(s)://<host>/<owner>/<repo>/pulls/<number>` 走 Forgejo——读项目绑定的代码集成行并比对 host_key（行缺失/主机不一致/类型不符 → 40007），通过后该行交 ForgejoClientFor 构建客户端并用机器人 PAT 拉取；本地凭证面故障（行已删/kind 不符/解密失败/读库瞬时故障）→ 50000，上游 Forgejo 故障 → 50206。不同 Forgejo 实例的同名 PR 作为独立关联并存。
 允许跨仓库：URL 可以是任意仓库的 PR，不要求等于项目配置的仓库。
-重复 attach 同一 PR（唯一键 issue_id+provider+host_key+repo_full_name+number）幂等返回既有记录并顺带刷新状态与集成快照；不同 Forgejo 实例的同名 PR 是不同键，并存为独立关联。Forgejo 路径读项目绑定的代码集成行并比对 host_key，绑定缺失/主机不一致/类型不符 → 40007；本地凭证面故障（行已删/kind 不符/解密失败/读库瞬时故障）→ 50000，上游 Forgejo 故障 → 50206。attach 产生的行 `link_origin=manual`；PR 状态与 Issue workflow_status 不联动。
+重复 attach 同一 PR（唯一键 issue_id+provider+host_key+repo_full_name+number）幂等返回既有记录并刷新快照列，但快照列受 synced_at 时间守卫：本次拉取比库内已有数据更旧（并发 sync/attach 先落了新快照，或服务器时钟回拨/NTP 调整导致库内时间为未来）时不覆盖，响应读回库内现行行（此时可能非本次拉到的内容；恢复手段：detach 后重新 attach 换新行）。不同 Forgejo 实例的同名 PR 是不同键，并存为独立关联。Forgejo 路径读项目绑定的代码集成行并比对 host_key，绑定缺失/主机不一致/类型不符 → 40007；本地凭证面故障（行已删/kind 不符/解密失败/读库瞬时故障）→ 50000，上游 Forgejo 故障 → 50206。attach 产生的行 `link_origin=manual`；PR 状态与 Issue workflow_status 不联动。
 
 **鉴权**：JWT+API Key
 
@@ -3688,7 +3688,7 @@ AI 生成 checklist 建议（需已配置 AI 设置；JWT 与 API Key 均可）
 
 **成功响应**
 
-**200** 关联记录（重复 attach 返回既有行并刷新状态）
+**200** 关联记录（重复 attach 返回既有行；快照列受 synced_at 守卫，响应为库内现行行，可能是比本次拉取更新的数据）
 
 `data`：
 
@@ -3729,7 +3729,7 @@ AI 生成 checklist 建议（需已配置 AI 设置；JWT 与 API Key 均可）
 
 刷新该 Issue 下全部已关联 PR 的状态
 
-重新拉取全部已关联 PR 的最新信息并更新 state/merged_at/closed_at 等字段：github 行走项目凭证，forgejo 行按关联时落的集成快照重建 Forgejo 客户端（集成被删/解密失败/未知 provider 只记单行失败）。远端拉取并发执行（上限 4）且跟随请求取消——客户端断开或 30s 整批预算到点后不再发出新的远端请求，剩余未拉取的行记 failures；写回不跟随请求取消（已拉取的数据照常落库），带 synced_at 时间守卫防止并发同步互相覆盖更新数据。只更新既有行，不新增、不删除；每条关联是独立失败域——单行拉取或保存失败记入 failures 不中断其余行（失败行保留旧数据），整体恒返回 200。仅 Issue/项目不存在返回 404，读取关联列表失败返回 500。只有拉取阶段有 30s 预算，前置读库与写回无上界；调用方超时只约束等待（超时返回后服务端写回可能仍继续），建议大于 60s。
+重新拉取全部已关联 PR 的最新信息并更新 state/merged_at/closed_at 等字段：github 行走项目凭证，forgejo 行按关联时落的集成快照重建 Forgejo 客户端（集成被删/解密失败/未知 provider 只记单行失败）。远端拉取并发执行（上限 4）且跟随请求取消——客户端断开或 30s 整批预算到点后不再发出新的远端请求，剩余未拉取的行记 failures；写回不跟随请求取消（已拉取的数据照常落库），带 synced_at 时间守卫防止并发同步互相覆盖更新数据，attach 交错到达的旧快照同样被拦（响应读回库内现行行）。只更新既有行，不新增、不删除；每条关联是独立失败域——单行拉取或保存失败记入 failures 不中断其余行（失败行保留旧数据），整体恒返回 200。仅 Issue/项目不存在返回 404，读取关联列表失败返回 500。只有拉取阶段有 30s 预算，前置读库与写回无上界；调用方超时只约束等待（超时返回后服务端写回可能仍继续），建议大于 60s。
 
 **鉴权**：JWT+API Key
 

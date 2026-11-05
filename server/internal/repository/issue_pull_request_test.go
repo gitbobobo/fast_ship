@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -189,6 +190,260 @@ func TestIssuePullRequestCascadeInDDLAndDelete(t *testing.T) {
 	}
 	if count != 0 {
 		t.Fatalf("expected links cascaded with issue, got %d", count)
+	}
+}
+
+// 以显式时间戳建行，供确定性交错用例控制快照新旧。
+func seedIssuePullRequestAt(t *testing.T, db *gorm.DB, issueID string, number int, origin model.IssuePullRequestLinkOrigin, at time.Time, title string, state model.IssuePullRequestState) *model.IssuePullRequest {
+	t.Helper()
+
+	link := &model.IssuePullRequest{
+		ID:           uuid.NewString(),
+		IssueID:      issueID,
+		ProjectID:    "project-1",
+		Provider:     model.IssuePullRequestProviderGitHub,
+		RepoFullName: "owner/repo",
+		Number:       number,
+		Title:        title,
+		HTMLURL:      "https://github.com/owner/repo/pull/" + strconv.Itoa(number),
+		State:        state,
+		LinkOrigin:   origin,
+		SyncedAt:     at,
+		CreatedAt:    at,
+		UpdatedAt:    at,
+	}
+	if err := db.Create(link).Error; err != nil {
+		t.Fatalf("seed link at %v: %v", at, err)
+	}
+	return link
+}
+
+// INT-188 确定性交错（sync 先写新、attach 后到旧）：sync 先落较新快照，
+// attach 带着更旧的快照到达时，快照列不得回拨；link_origin 升级与
+// forge_integration_id 换绑是身份语义，不受守卫拦限；空集成快照不覆盖。
+func TestIssuePullRequestUpsert_SyncedNewerSurvivesStaleAttach(t *testing.T) {
+	db, repo := setupIssuePullRequestTestDB(t)
+	issue := createIssuePullRequestTestIssue(t, db, "project-1")
+
+	t0 := time.Now().UTC().Add(-2 * time.Hour)
+	attachFetchedAt := t0.Add(time.Hour)   // attach 快照时刻（旧）
+	syncFetchedAt := t0.Add(2 * time.Hour) // sync 快照时刻（新）
+
+	seedIssuePullRequestAt(t, db, issue.ID, 7, model.IssuePullRequestLinkOriginSynced, t0, "initial", model.IssuePullRequestStateOpen)
+
+	// sync 用 SaveSyncedFields 写入较新快照（merged）。
+	mergedAt := syncFetchedAt.Add(-30 * time.Minute)
+	synced := &model.IssuePullRequest{
+		ID: "", IssueID: issue.ID, Provider: model.IssuePullRequestProviderGitHub,
+		RepoFullName: "owner/repo", Number: 7,
+		HTMLURL: "https://github.com/owner/repo/pull/7/new", Title: "newer-from-sync",
+		State: model.IssuePullRequestStateMerged, MergedAt: &mergedAt,
+		AuthorLogin: "sync-author", SyncedAt: syncFetchedAt, UpdatedAt: syncFetchedAt,
+	}
+	stored, err := repo.FindByUnique(issue.ID, model.IssuePullRequestProviderGitHub, "", "owner/repo", 7)
+	if err != nil {
+		t.Fatalf("find seeded row: %v", err)
+	}
+	synced.ID = stored.ID
+	if err := repo.SaveSyncedFields(synced); err != nil {
+		t.Fatalf("sync write: %v", err)
+	}
+
+	// attach 带更旧的快照到达：快照列必须被守卫拦下。
+	staleAttach := &model.IssuePullRequest{
+		ID: uuid.NewString(), IssueID: issue.ID, ProjectID: issue.ProjectID,
+		Provider: model.IssuePullRequestProviderGitHub, RepoFullName: "owner/repo", Number: 7,
+		HTMLURL: "https://github.com/owner/repo/pull/7", Title: "stale-from-attach",
+		State: model.IssuePullRequestStateOpen, AuthorLogin: "attach-author",
+		LinkOrigin: model.IssuePullRequestLinkOriginManual, ForgeIntegrationID: "int-new",
+		SyncedAt: attachFetchedAt, CreatedAt: attachFetchedAt, UpdatedAt: attachFetchedAt,
+	}
+	if err := repo.Upsert(staleAttach); err != nil {
+		t.Fatalf("stale attach upsert: %v", err)
+	}
+
+	row, err := repo.FindByUnique(issue.ID, model.IssuePullRequestProviderGitHub, "", "owner/repo", 7)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if row.Title != "newer-from-sync" || row.State != model.IssuePullRequestStateMerged || row.MergedAt == nil {
+		t.Fatalf("stale attach must not overwrite newer snapshot, got %+v", row)
+	}
+	if row.HTMLURL != "https://github.com/owner/repo/pull/7/new" || row.AuthorLogin != "sync-author" {
+		t.Fatalf("snapshot columns must stay at sync values, got %+v", row)
+	}
+	if !row.SyncedAt.Equal(syncFetchedAt) || !row.UpdatedAt.Equal(syncFetchedAt) {
+		t.Fatalf("synced_at/updated_at must not roll back to stale attach time, got %v/%v", row.SyncedAt, row.UpdatedAt)
+	}
+	// 身份列不受守卫：manual 升级与集成换绑生效。
+	if row.LinkOrigin != model.IssuePullRequestLinkOriginManual {
+		t.Fatalf("manual upgrade must not be blocked by snapshot guard, got %q", row.LinkOrigin)
+	}
+	if row.ForgeIntegrationID != "int-new" {
+		t.Fatalf("integration rebind must not be blocked by snapshot guard, got %q", row.ForgeIntegrationID)
+	}
+
+	// 空集成快照的调用方不得把已换绑的快照抹掉（既有语义在守卫下依旧成立）。
+	emptySnap := *staleAttach
+	emptySnap.ForgeIntegrationID = ""
+	if err := repo.Upsert(&emptySnap); err != nil {
+		t.Fatalf("empty-snapshot upsert: %v", err)
+	}
+	row2, err := repo.FindByUnique(issue.ID, model.IssuePullRequestProviderGitHub, "", "owner/repo", 7)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if row2.ForgeIntegrationID != "int-new" {
+		t.Fatalf("empty integration snapshot must not wipe existing value, got %q", row2.ForgeIntegrationID)
+	}
+	if row2.Title != "newer-from-sync" {
+		t.Fatalf("empty-snapshot upsert must stay guarded, got %+v", row2)
+	}
+}
+
+// INT-188 反向交错（attach 先写旧、sync 后到新）：attach 的旧快照先落库，
+// sync 带更新快照到达时照常胜出——时间守卫只拦旧压新，不拦新压旧。
+func TestIssuePullRequestUpsert_StaleAttachFirstSyncNewerWins(t *testing.T) {
+	db, repo := setupIssuePullRequestTestDB(t)
+	issue := createIssuePullRequestTestIssue(t, db, "project-1")
+
+	t0 := time.Now().UTC().Add(-2 * time.Hour)
+	attachFetchedAt := t0.Add(time.Hour)
+	syncFetchedAt := t0.Add(2 * time.Hour)
+
+	seedIssuePullRequestAt(t, db, issue.ID, 7, model.IssuePullRequestLinkOriginManual, t0, "initial", model.IssuePullRequestStateOpen)
+
+	attachSnap := &model.IssuePullRequest{
+		ID: uuid.NewString(), IssueID: issue.ID, ProjectID: issue.ProjectID,
+		Provider: model.IssuePullRequestProviderGitHub, RepoFullName: "owner/repo", Number: 7,
+		Title: "attach-t1", State: model.IssuePullRequestStateOpen,
+		LinkOrigin: model.IssuePullRequestLinkOriginManual,
+		SyncedAt:   attachFetchedAt, CreatedAt: attachFetchedAt, UpdatedAt: attachFetchedAt,
+	}
+	if err := repo.Upsert(attachSnap); err != nil {
+		t.Fatalf("attach upsert: %v", err)
+	}
+
+	syncSnap := &model.IssuePullRequest{
+		ID: "", IssueID: issue.ID, Provider: model.IssuePullRequestProviderGitHub,
+		RepoFullName: "owner/repo", Number: 7,
+		Title: "sync-t2", State: model.IssuePullRequestStateClosed,
+		AuthorLogin: "sync-author", SyncedAt: syncFetchedAt, UpdatedAt: syncFetchedAt,
+	}
+	stored, err := repo.FindByUnique(issue.ID, model.IssuePullRequestProviderGitHub, "", "owner/repo", 7)
+	if err != nil {
+		t.Fatalf("find row: %v", err)
+	}
+	syncSnap.ID = stored.ID
+	if err := repo.SaveSyncedFields(syncSnap); err != nil {
+		t.Fatalf("sync write: %v", err)
+	}
+
+	row, err := repo.FindByUnique(issue.ID, model.IssuePullRequestProviderGitHub, "", "owner/repo", 7)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if row.Title != "sync-t2" || row.State != model.IssuePullRequestStateClosed {
+		t.Fatalf("newer sync snapshot must win over earlier attach write, got %+v", row)
+	}
+	if !row.SyncedAt.Equal(syncFetchedAt) {
+		t.Fatalf("synced_at must advance to sync snapshot time, got %v", row.SyncedAt)
+	}
+	if row.LinkOrigin != model.IssuePullRequestLinkOriginManual {
+		t.Fatalf("manual origin must survive sync write, got %q", row.LinkOrigin)
+	}
+}
+
+// 写入端 UTC 归一化（INT-188 审查 P2）：调用方传入非 UTC 时区的 time.Time
+// 时，落库前强制归一——否则 SQLite 文本字典序会按墙钟而非真实时刻比较，
+// 西边时区的新快照会被守卫误判为旧快照。
+func TestIssuePullRequestUpsert_NonUTCTimeNormalizedForGuard(t *testing.T) {
+	db, repo := setupIssuePullRequestTestDB(t)
+	issue := createIssuePullRequestTestIssue(t, db, "project-1")
+
+	t0 := time.Now().UTC().Add(-time.Hour)
+	utcMinus8 := time.FixedZone("UTC-8", -8*3600)
+	seedIssuePullRequestAt(t, db, issue.ID, 7, model.IssuePullRequestLinkOriginManual, t0, "initial", model.IssuePullRequestStateOpen)
+
+	// 比库内新 1 小时的真实时刻，但以 UTC-8 墙钟表达（文本序会落到 t0 之前）：
+	// 未归一时守卫会把它误判为旧快照并拦下；归一后必须正常刷新。
+	newerInstant := t0.Add(time.Hour)
+	attachSnap := &model.IssuePullRequest{
+		ID: uuid.NewString(), IssueID: issue.ID, ProjectID: issue.ProjectID,
+		Provider: model.IssuePullRequestProviderGitHub, RepoFullName: "owner/repo", Number: 7,
+		Title: "newer-non-utc", State: model.IssuePullRequestStateOpen,
+		LinkOrigin: model.IssuePullRequestLinkOriginManual,
+		SyncedAt:   newerInstant.In(utcMinus8), CreatedAt: newerInstant.In(utcMinus8), UpdatedAt: newerInstant.In(utcMinus8),
+	}
+	if err := repo.Upsert(attachSnap); err != nil {
+		t.Fatalf("non-utc upsert: %v", err)
+	}
+	row, err := repo.FindByUnique(issue.ID, model.IssuePullRequestProviderGitHub, "", "owner/repo", 7)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if row.Title != "newer-non-utc" {
+		t.Fatalf("non-UTC newer snapshot must refresh after normalization, got %+v", row)
+	}
+	if !row.SyncedAt.Equal(newerInstant) {
+		t.Fatalf("synced_at must advance to the real instant, got %v want %v", row.SyncedAt, newerInstant)
+	}
+	// 读回的时区必须是 UTC：若写入端未归一，存储文本会带源时区偏移，读回后
+	// location 就不是 UTC（文本字典序比较的时序一致依赖这一格式）。
+	if row.SyncedAt.Location() != time.UTC {
+		t.Fatalf("stored synced_at must be UTC after normalization, got location %v (%v)", row.SyncedAt.Location(), row.SyncedAt)
+	}
+
+	// SaveSyncedFields 同口径：更新的真实时刻以 UTC-8 表达，归一后守卫放行。
+	syncSnap := &model.IssuePullRequest{
+		ID: row.ID, IssueID: issue.ID, Provider: model.IssuePullRequestProviderGitHub,
+		RepoFullName: "owner/repo", Number: 7,
+		Title: "newer-non-utc-sync", State: model.IssuePullRequestStateClosed,
+		SyncedAt: newerInstant.Add(time.Hour).In(utcMinus8), UpdatedAt: newerInstant.Add(time.Hour).In(utcMinus8),
+	}
+	if err := repo.SaveSyncedFields(syncSnap); err != nil {
+		t.Fatalf("non-utc sync write: %v", err)
+	}
+	row2, err := repo.FindByUnique(issue.ID, model.IssuePullRequestProviderGitHub, "", "owner/repo", 7)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if row2.Title != "newer-non-utc-sync" || row2.State != model.IssuePullRequestStateClosed {
+		t.Fatalf("non-UTC newer sync write must apply after normalization, got %+v", row2)
+	}
+	if !row2.SyncedAt.Equal(newerInstant.Add(time.Hour)) {
+		t.Fatalf("synced_at must advance to the sync instant, got %v", row2.SyncedAt)
+	}
+}
+
+// 同时刻快照是同批等价新鲜度：重复 attach 幂等刷新不被守卫误拦。
+func TestIssuePullRequestUpsert_EqualSyncedAtRefreshes(t *testing.T) {
+	db, repo := setupIssuePullRequestTestDB(t)
+	issue := createIssuePullRequestTestIssue(t, db, "project-1")
+
+	at := time.Now().UTC().Add(-time.Hour)
+	seedIssuePullRequestAt(t, db, issue.ID, 7, model.IssuePullRequestLinkOriginManual, at, "first", model.IssuePullRequestStateOpen)
+
+	sameTime := &model.IssuePullRequest{
+		ID: uuid.NewString(), IssueID: issue.ID, ProjectID: issue.ProjectID,
+		Provider: model.IssuePullRequestProviderGitHub, RepoFullName: "owner/repo", Number: 7,
+		Title: "second", State: model.IssuePullRequestStateOpen,
+		LinkOrigin: model.IssuePullRequestLinkOriginManual,
+		SyncedAt:   at, CreatedAt: at, UpdatedAt: at,
+	}
+	if err := repo.Upsert(sameTime); err != nil {
+		t.Fatalf("equal-time upsert: %v", err)
+	}
+
+	row, err := repo.FindByUnique(issue.ID, model.IssuePullRequestProviderGitHub, "", "owner/repo", 7)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if row.Title != "second" {
+		t.Fatalf("equal synced_at is same vintage and must refresh, got %+v", row)
+	}
+	if !row.SyncedAt.Equal(at) {
+		t.Fatalf("synced_at must stay at shared vintage, got %v", row.SyncedAt)
 	}
 }
 

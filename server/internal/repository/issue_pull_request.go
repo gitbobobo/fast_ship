@@ -16,7 +16,16 @@ func NewIssuePullRequestRepository(db *gorm.DB) *IssuePullRequestRepository {
 	return &IssuePullRequestRepository{db: db}
 }
 
+// syncedColumns 是 attach Upsert 冲突更新里受 synced_at 守卫约束的远端快照列。
+var syncedColumns = []string{
+	"html_url", "title", "state", "is_draft", "author_login",
+	"head_ref", "base_ref", "merged_at", "closed_at",
+}
+
 func (r *IssuePullRequestRepository) Create(link *model.IssuePullRequest) error {
+	// synced_at 落库前归一 UTC：守卫的文本字典序比较依赖统一格式
+	//（INT-175 R25 的前提在写入端强制化，不再只是注释约定）。
+	link.SyncedAt = link.SyncedAt.UTC()
 	return r.db.Create(link).Error
 }
 
@@ -28,15 +37,39 @@ func (r *IssuePullRequestRepository) Create(link *model.IssuePullRequest) error 
 // 的快照抹掉，那会让 sync 永久报缺快照）。host_key 不在冲突更新列内——它参
 // 与身份判定，不随写入漂移（集成改 base_url 由 sync 的主机比对拦下）。link_
 // origin 只升不降——手动 attach 可把 synced 行升级为 manual，反向不允许（避
-// 免同步投影把手动关联降级、继而被 DeleteMissingSynced 清掉）。
-// 注：synced_at 守卫只约束 sync 的 SaveSyncedFields 写回——attach/sync
-// 交错时旧快照覆盖问题记入 INT-188 另行处理。
+// 免同步投影把手动关联降级、继而被 DeleteMissingSynced 清掉）。快照列受
+// synced_at 守卫（INT-188）：excluded.synced_at 更旧时保留库内值，attach 与
+// 并发 sync/attach 交错时旧快照不再覆盖较新数据；守卫逐列走 CASE 而非整条
+// DO UPDATE WHERE（INT-175 R13 的设计），link_origin 的 manual 升级与
+// forge_integration_id 换绑（身份语义，重于修改时间）不被旧快照连带拦下。
 func (r *IssuePullRequestRepository) Upsert(link *model.IssuePullRequest) error {
-	set := clause.AssignmentColumns([]string{
-		"html_url", "title", "state", "is_draft", "author_login",
-		"head_ref", "base_ref", "merged_at", "closed_at", "synced_at", "updated_at",
-	})
+	// synced_at/updated_at 落库前归一 UTC（R25 前提在写入端强制化）：
+	// excluded.synced_at 与库内列的文本字典序比较依赖统一格式。
+	link.SyncedAt = link.SyncedAt.UTC()
+	link.UpdatedAt = link.UpdatedAt.UTC()
+	set := make(clause.Set, 0, len(syncedColumns)+4)
+	for _, col := range syncedColumns {
+		set = append(set, clause.Assignment{
+			Column: clause.Column{Name: col},
+			Value:  gorm.Expr("CASE WHEN excluded.synced_at >= issue_pull_requests.synced_at THEN excluded." + col + " ELSE issue_pull_requests." + col + " END"),
+		})
+	}
+	// synced_at 取两者较大值：守卫命中时保留库内较新时间，不随旧快照回拨
+	//（回拨会让后续 sync 的守卫比较失真）。updated_at 不是独立取 max，而是
+	// 随快照判定走：快照被接受才随写本次值，否则保留库内值——守卫拦下快
+	// 照时行内容未变，不该刷修改时间。前提是调用方让 UpdatedAt 与 SyncedAt
+	// 同源（当前唯一调用方 attach 两者均取拉取完成时刻）；若未来出现两者
+	// 不等的调用方，需先重新论证这里的口径。守卫命中但身份列生效时行变了
+	// 而 updated_at 不刷是有意取舍，与 SaveSyncedFields 口径一致。
 	set = append(set,
+		clause.Assignment{
+			Column: clause.Column{Name: "synced_at"},
+			Value:  gorm.Expr("CASE WHEN excluded.synced_at >= issue_pull_requests.synced_at THEN excluded.synced_at ELSE issue_pull_requests.synced_at END"),
+		},
+		clause.Assignment{
+			Column: clause.Column{Name: "updated_at"},
+			Value:  gorm.Expr("CASE WHEN excluded.synced_at >= issue_pull_requests.synced_at THEN excluded.updated_at ELSE issue_pull_requests.updated_at END"),
+		},
 		clause.Assignment{
 			Column: clause.Column{Name: "forge_integration_id"},
 			Value:  gorm.Expr("CASE WHEN excluded.forge_integration_id <> '' THEN excluded.forge_integration_id ELSE issue_pull_requests.forge_integration_id END"),
@@ -65,11 +98,14 @@ func (r *IssuePullRequestRepository) Upsert(link *model.IssuePullRequest) error 
 // 的两个并发 sync 可能按发起顺序倒置落库——慢批次不能把后写入的更新数据
 // 覆盖回旧值。0 行命中有两种含义：行已被解除（ErrRecordNotFound）或库内
 // synced_at 已更新（ErrSyncedAtStale），由调用方 FindByID 区分。
-// 注意：该比较在 SQLite 里是文本字典序——synced_at 只能写 UTC（time.Now().UTC()）
-// 且必须经本驱动写入；混入其它时区/格式会让守卫静默误判（R25）。
+// 注意：该比较在 SQLite 里是文本字典序——写入端已把 synced_at 统一归一
+// UTC（见各写方法），混入其它时区/格式的路径会被归一拉回，不再依赖调用
+// 方自觉（R25 前提强制化，INT-188 审查）。
 var ErrSyncedAtStale = errors.New("issue_pull_requests.synced_at 已有更新数据")
 
 func (r *IssuePullRequestRepository) SaveSyncedFields(link *model.IssuePullRequest) error {
+	link.SyncedAt = link.SyncedAt.UTC()
+	link.UpdatedAt = link.UpdatedAt.UTC()
 	res := r.db.Model(&model.IssuePullRequest{}).
 		Where("id = ? AND issue_id = ? AND synced_at <= ?", link.ID, link.IssueID, link.SyncedAt).
 		Updates(map[string]any{
