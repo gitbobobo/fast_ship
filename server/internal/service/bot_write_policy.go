@@ -179,9 +179,9 @@ func botPolicyCandidateRule(prepared *botPreparedCall) string {
 // botPolicyBaseTier 是非 tier1 候选写动作的基础档（由注册表 spec.PolicyTier
 // 声明，空 = tier2）：launch、fs_schedule create/update/delete、fs_issue 全部
 // 写动作与不满足 tier1 条件的 send/stop/settle/unsettle/resume_queue 是
-// tier3；其余（fs_project 写、fs_schedule run/enable）是 tier2。未注册动作
-// 按 tier2 处理（需要确认的调用在受理端已被 byAction 查表拦截，这里只是
-// 兑底）。
+// tier3；其余（fs_project 写、fs_schedule run/enable）是 tier2。查无 spec
+// 的未注册动作回 tier3（宁可多确认，fail closed）：需要确认的调用在受理端
+// 已被 byAction 查表拦截，这里只是兜底。
 func botPolicyBaseTier(prepared *botPreparedCall) string {
 	spec := botActionSpecOf(prepared.ToolName, prepared.Action)
 	if spec == nil {
