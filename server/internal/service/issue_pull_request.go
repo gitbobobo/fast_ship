@@ -167,6 +167,21 @@ func (s *IssueService) AttachIssuePullRequest(issueID, userID string, req Attach
 	if err != nil {
 		return nil, errs.ErrInternal
 	}
+	// 守卫命中可观测性（与 sync 的 stale 分支同口径）：库内 synced_at 比本次
+	// 拉取更晚（并发 sync/attach 已写新数据、服务器时钟回拨/NTP 调整、未来
+	// 数据）时快照列被保留，响应读回库内现行行——用户拿 200 与较旧内容，
+	// 运维需要从日志区分「远端确实返回旧数据」与「本次快照未成为最新」。
+	// 两种成因（本次写被拦、写入后被并发写回超越）在此无法区分，日志按
+	// 事实记。
+	if stored.SyncedAt.After(link.SyncedAt) {
+		s.logger.Info("attach 关联 PR 快照落后于库内现行数据（守卫拦下或并发写回更晚落地），响应读回库内现行行",
+			zap.String("link_id", stored.ID),
+			zap.String("issue_id", issue.ID),
+			zap.String("repo", stored.RepoFullName),
+			zap.Int("number", stored.Number),
+			zap.Time("fetched_synced_at", link.SyncedAt),
+			zap.Time("stored_synced_at", stored.SyncedAt))
+	}
 	resp := toIssuePullRequestResponse(*stored)
 	return &resp, nil
 }
