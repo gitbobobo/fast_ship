@@ -82,8 +82,10 @@ type forgePRReader interface {
 // 支持双 provider）。输入只是 PR URL：github.com 链接沿用 GitHub 路径（凭证与
 // 报错口径不变）；其他主机的 /pulls/{n} 链接按主机键找部署级 Forgejo 集成，
 // 用集成机器人 PAT 拉取详情并落集成快照。解析/查集成/拉取失败直接报错不落
-// 记录。同一 PR 重复 attach 幂等——返回既有行并顺带刷新。允许跨仓库，
-// repo_full_name 可以是任意仓库，不要求等于项目配置的仓库。
+// 记录。同一 PR 重复 attach 幂等——返回既有行并顺带刷新；快照列受 synced_at
+// 守卫约束（INT-188）：与并发 sync 交错时旧快照不覆盖库内较新数据，响应
+// 读回库内现行行。允许跨仓库，repo_full_name 可以是任意仓库，不要求等于
+// 项目配置的仓库。
 func (s *IssueService) AttachIssuePullRequest(issueID, userID string, req AttachIssuePullRequestRequest) (*IssuePullRequestResponse, error) {
 	parsed, ok := parsePullRequestLink(req.Url)
 	if !ok {
@@ -134,7 +136,10 @@ func (s *IssueService) AttachIssuePullRequest(issueID, userID string, req Attach
 		if err != nil {
 			return nil, errs.New(errs.ErrForgeAPI.Code, s.forgejoPullRequestFailureText("获取 Forgejo PR", err))
 		}
-		applyForgePullRequestData(link, pr, now)
+		// synced_at/updated_at 取拉取完成时刻而非请求时刻（INT-175 R12）：
+		// 守卫比较的是「快照新鲜度」，慢拉取不能让实际更新的快照带上更
+		// 旧的时间戳，否则会被并发 sync 的较新写回误拦。
+		applyForgePullRequestData(link, pr, time.Now().UTC())
 	default:
 		// GitHub 既有路径原样保留：凭证选择集中在 credentials.pullRequestCredential。
 		link.Provider = model.IssuePullRequestProviderGitHub
@@ -147,7 +152,8 @@ func (s *IssueService) AttachIssuePullRequest(issueID, userID string, req Attach
 		if err != nil {
 			return nil, errs.New(errs.ErrGitHubAPI.Code, fmt.Sprintf("获取 GitHub PR 失败（%s）: %v%s", credKind.usage(), err, pullRequestAccessHint(err, credKind)))
 		}
-		applyPullRequestData(link, pr, now)
+		// 口径同 Forgejo 路径：快照时间取拉取完成时刻（INT-175 R12）。
+		applyPullRequestData(link, pr, time.Now().UTC())
 	}
 
 	// 原子 upsert：并发/重复 attach 撞唯一键（含 host_key）时由冲突路径刷新既
