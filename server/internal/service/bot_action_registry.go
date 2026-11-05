@@ -90,6 +90,9 @@ type botActionSpec struct {
 	// 结果构造（botWaitInterruptedOutcome）是 wait 模块专属——新增无副作用
 	// 动作时需自带中断结果构造或扩展该 helper，不能盲用 wait 形态的 payload。
 	NoSideEffect bool
+	// MemoryWrite 标记记忆写动作：重启恢复据此判定「效果未知/已落库」并
+	// 给出专用中断提示（fast-ship-bot R16，替代按动作名的平行表）。
+	MemoryWrite bool
 	// ReadOnlyIf 是参数相关的只读判定（fs_schedule/run 的 dry_run=true）。
 	ReadOnlyIf func(*model.BotToolCall) bool
 	// Scope 是受理范围解析（异步写动作声明；含 fs_thread 的执行上下文回填）。
@@ -185,9 +188,17 @@ func botValidateActionSpec(spec *botActionSpec) {
 		if !spec.ReadOnly {
 			panic("bot action registry: 写动作未声明确认分类 " + key)
 		}
+		if spec.Confirm != nil {
+			panic("bot action registry: 未分类动作不得携带 Confirm 闭包 " + key)
+		}
 	case confirmDynamic:
 		if spec.Confirm == nil {
 			panic("bot action registry: confirmDynamic 缺少 Confirm 闭包 " + key)
+		}
+		if spec.ReadOnly {
+			// 读动作永不确认：误声明的只读动作不得被 Confirm 改判异步待确认
+			//（快船 bot R16，护栏覆盖「读动作永不确认」的另一半）。
+			panic("bot action registry: 只读动作不得声明 confirmDynamic " + key)
 		}
 		// dynamic 意味着运行时可能改判异步：AsyncExec 必须存在，否则确认卡
 		// 批准后 worker 才报「没有异步实现」（快船 bot R9 Note，与 Mode 零值

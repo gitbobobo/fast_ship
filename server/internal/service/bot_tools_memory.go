@@ -19,14 +19,11 @@ import (
 // operation_key 用服务端调用 ID 幂等。动作注册表 spec 组见文件末尾（INT-195）。
 
 func botIsMemoryWriteCall(call *model.BotToolCall) bool {
-	if call == nil || call.ToolName != "fs_memory" {
+	if call == nil {
 		return false
 	}
-	switch call.Action {
-	case "create", "replace", "append", "delete", "restore":
-		return true
-	}
-	return false
+	spec := botActionSpecOf(call.ToolName, call.Action)
+	return spec != nil && spec.MemoryWrite
 }
 
 const (
@@ -485,28 +482,28 @@ func botMemoryActionSpecs() []*botActionSpec {
 			Description: "新建记忆文件（已存在则冲突；墓碑可重建）",
 			// 同步写、不经确认：只管机器人自己的记忆，expected_version 乐观锁
 			// 控并发，误写可靠版本历史恢复。
-			Mode: model.BotExecutionSync, Confirmation: confirmNever, FenceExempt: true,
+			Mode: model.BotExecutionSync, Confirmation: confirmNever, MemoryWrite: true, FenceExempt: true,
 			Required: append(req("path"), reqAllowEmpty("content")...),
 			SyncExec: (*BotService).execMemoryCreateAction,
 		},
 		{
 			Tool: "fs_memory", Action: "replace",
 			Description: "整体替换正文（需 expected_version）",
-			Mode:        model.BotExecutionSync, Confirmation: confirmNever, FenceExempt: true,
+			Mode:        model.BotExecutionSync, Confirmation: confirmNever, MemoryWrite: true, FenceExempt: true,
 			Required: append(append(req("path"), reqAllowEmpty("content")...), req("expected_version")...),
 			SyncExec: (*BotService).execMemoryReplaceAction,
 		},
 		{
 			Tool: "fs_memory", Action: "append",
 			Description: "追加正文（需 expected_version）",
-			Mode:        model.BotExecutionSync, Confirmation: confirmNever, FenceExempt: true,
+			Mode:        model.BotExecutionSync, Confirmation: confirmNever, MemoryWrite: true, FenceExempt: true,
 			Required: append(append(req("path"), reqAllowEmpty("content")...), req("expected_version")...),
 			SyncExec: (*BotService).execMemoryAppendAction,
 		},
 		{
 			Tool: "fs_memory", Action: "delete",
 			Description: "删除文件（写墓碑版本，历史保留；需 expected_version）",
-			Mode:        model.BotExecutionSync, Confirmation: confirmNever, FenceExempt: true,
+			Mode:        model.BotExecutionSync, Confirmation: confirmNever, MemoryWrite: true, FenceExempt: true,
 			Required: req("path", "expected_version"),
 			SyncExec: (*BotService).execMemoryDeleteAction,
 		},
@@ -520,7 +517,7 @@ func botMemoryActionSpecs() []*botActionSpec {
 		{
 			Tool: "fs_memory", Action: "restore",
 			Description: "把指定旧版本恢复为新当前版本（需 expected_version）",
-			Mode:        model.BotExecutionSync, Confirmation: confirmNever, FenceExempt: true,
+			Mode:        model.BotExecutionSync, Confirmation: confirmNever, MemoryWrite: true, FenceExempt: true,
 			Required: req("path", "version", "expected_version"),
 			SyncExec: (*BotService).execMemoryRestoreAction,
 		},

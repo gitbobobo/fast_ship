@@ -1153,6 +1153,13 @@ func botScheduleExecArgs(call *model.BotToolCall) (*botScheduleTaskArgs, error) 
 	if err := json.Unmarshal([]byte(call.ArgumentsJSON), &args); err != nil {
 		return nil, errs.ErrInvalidParams
 	}
+	// 分派键与参数声明的一致性（fast-ship-bot R16）：生产分派按 call.Action
+	// 选入口、这里按 args.Action 判 dry_run 豁免——拆分前二者天然同源，拆分
+	// 后不一致（被改写的账本行/历史数据）可能借道豁免，直接拒绝。
+	if call.Action != "" && args.Action != call.Action {
+		return nil, errs.New(errs.ErrInvalidParams.Code,
+			"fs_schedule 参数 action 与调用不一致: "+args.Action+" / "+call.Action)
+	}
 	if args.Action != "run" {
 		var raw map[string]json.RawMessage
 		if err := json.Unmarshal([]byte(call.ArgumentsJSON), &raw); err != nil {
