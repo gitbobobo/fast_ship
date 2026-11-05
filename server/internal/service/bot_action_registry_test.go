@@ -161,6 +161,14 @@ func TestBotActionRegistryValidatesSpecs(t *testing.T) {
 	}))
 	mustOK("dynamic", base(func(s *botActionSpec) {
 		s.Confirmation = confirmDynamic
+		s.PolicyTier = "tier2"
+		s.Confirm = func(map[string]json.RawMessage) (bool, error) { return true, nil }
+		s.AsyncExec = func(*BotService, context.Context, *model.BotToolCall) (interface{}, error) {
+			return nil, nil
+		}
+	}))
+	mustPanic("dynamic 缺 AsyncExec", base(func(s *botActionSpec) {
+		s.Confirmation = confirmDynamic
 		s.Confirm = func(map[string]json.RawMessage) (bool, error) { return true, nil }
 	}))
 }

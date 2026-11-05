@@ -175,6 +175,12 @@ func botValidateActionSpec(spec *botActionSpec) {
 		if spec.Confirm == nil {
 			panic("bot action registry: confirmDynamic 缺少 Confirm 闭包 " + key)
 		}
+		// dynamic 意味着运行时可能改判异步：AsyncExec 必须存在，否则确认卡
+		// 批准后 worker 才报「没有异步实现」（快船 bot R9 Note，与 Mode 零值
+		// 同一故障家族的最后一个入口）。
+		if spec.AsyncExec == nil {
+			panic("bot action registry: confirmDynamic 缺少 AsyncExec 入口 " + key)
+		}
 	case confirmNever, confirmAlways:
 		if spec.Confirm != nil {
 			panic("bot action registry: 静态确认分类不得携带 Confirm 闭包 " + key)
