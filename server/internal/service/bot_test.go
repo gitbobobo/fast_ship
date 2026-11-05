@@ -1869,7 +1869,7 @@ func TestBotIssueUpdatePreservesBody(t *testing.T) {
 		ArgumentsJSON: fmt.Sprintf(`{"action":"update","issue_id":%q,"title":%q}`, issue.Id, newTitle),
 		ExecutionMode: string(model.BotExecutionAsync), Status: model.BotCallStatusRunning,
 	}
-	if _, err := env.bots.runIssueWrite(context.Background(), call); err != nil {
+	if _, err := botIssueWriteTestExec(env.bots, context.Background(), call); err != nil {
 		t.Fatalf("runIssueWrite(仅标题): %v", err)
 	}
 	fresh, err := env.bots.issues.Get(issue.Id, userID)
@@ -1891,7 +1891,7 @@ func TestBotIssueUpdatePreservesBody(t *testing.T) {
 		ArgumentsJSON: fmt.Sprintf(`{"action":"update","issue_id":%q,"body":%q}`, issue.Id, newBody),
 		ExecutionMode: string(model.BotExecutionAsync), Status: model.BotCallStatusRunning,
 	}
-	if _, err := env.bots.runIssueWrite(context.Background(), call2); err != nil {
+	if _, err := botIssueWriteTestExec(env.bots, context.Background(), call2); err != nil {
 		t.Fatalf("runIssueWrite(带正文): %v", err)
 	}
 	fresh2, err := env.bots.issues.Get(issue.Id, userID)
@@ -3342,7 +3342,7 @@ func TestBotProjectListSlimsTokenRefs(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("create project: %v", err)
 	}
-	raw, err := env.bots.execProjectRead(context.Background(), &model.BotToolCall{
+	raw, err := botProjectReadTestExec(env.bots, context.Background(), &model.BotToolCall{
 		ID: "call-plist", BotID: bot.ID, ToolName: "fs_project",
 		Action: "list", ArgumentsJSON: `{"action":"list","page":1,"page_size":20}`,
 	})
@@ -3510,7 +3510,7 @@ func TestBotProjectWriteResultSlimsTokenRefs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
-	out, err := env.bots.runProjectWrite(context.Background(), &model.BotToolCall{
+	out, err := botProjectWriteTestExec(env.bots, context.Background(), &model.BotToolCall{
 		ID: "call-pwrite", BotID: bot.ID, ToolName: "fs_project", Action: "update",
 		ArgumentsJSON: `{"action":"update","id":"` + created.Id + `","description":"更新"}`,
 	})

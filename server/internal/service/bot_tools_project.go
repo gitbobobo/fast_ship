@@ -55,14 +55,6 @@ func (s *BotService) execProjectGet(_ *model.Bot, _ context.Context, call *model
 // execProjectRead 是聚合兼容入口（既有调用方/测试使用）：按参数里的 action
 // 经注册表分派到单动作入口；同步受理路径由 botExecuteSyncTool 直达单动作
 // 方法，不再经过这里。
-func (s *BotService) execProjectRead(ctx context.Context, call *model.BotToolCall) (string, error) {
-	var args botProjectArgs
-	if err := json.Unmarshal([]byte(call.ArgumentsJSON), &args); err != nil {
-		return "", errs.ErrInvalidParams
-	}
-	return s.botExecSyncAction(ctx, nil, call, args.Action, "fs_project 不支持该读取动作")
-}
-
 // runProjectCreate/runProjectUpdate 在 worker 内执行 fs_project 写操作
 // （确认/授权已完成；注册表 AsyncExec 直接指向单动作方法）。结果与读取一致
 // 走瘦身投影：完整响应带凭证引用，会随后台结果发给模型供应商。
@@ -108,18 +100,6 @@ func (s *BotService) runProjectUpdate(_ context.Context, call *model.BotToolCall
 
 // runProjectWrite 是聚合兼容入口（既有调用方/测试使用）：经注册表 AsyncExec
 // 分派；worker 主路径由 runAsyncTool 直达单动作方法。
-func (s *BotService) runProjectWrite(ctx context.Context, call *model.BotToolCall) (interface{}, error) {
-	var args botProjectArgs
-	if err := json.Unmarshal([]byte(call.ArgumentsJSON), &args); err != nil {
-		return nil, errs.ErrInvalidParams
-	}
-	spec := botActionSpecOf(call.ToolName, args.Action)
-	if spec == nil || spec.AsyncExec == nil {
-		return nil, errs.New(errs.ErrInvalidParams.Code, "fs_project 不支持该写动作")
-	}
-	return spec.AsyncExec(s, ctx, call)
-}
-
 // botProjectActionSpecs 是 fs_project 的动作声明（INT-195）：范围解析与策略
 // 档位随 spec 声明；scope 解析的细节在 resolveProjectScope。
 func botProjectActionSpecs() []*botActionSpec {

@@ -466,7 +466,7 @@ func TestBotInt148ThreadWriteDispatch(t *testing.T) {
 			ArgumentsJSON:        `{"action":"` + action + `","env_id":"` + envID + `","thread_id":"th-1"}`,
 			ExecutionContextJSON: `{}`,
 		}
-		return env.bots.runThreadWrite(context.Background(), call)
+		return botThreadWriteTestExec(env.bots, context.Background(), call)
 	}
 
 	for _, action := range []string{"settle", "unsettle", "resume_queue"} {

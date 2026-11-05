@@ -157,10 +157,6 @@ func (s *BotService) execThreadWorkspaceOptions(_ *model.Bot, ctx context.Contex
 
 // execThreadRead 是聚合兼容入口（既有调用方/测试使用）：经注册表 SyncExec
 // 分派；同步受理路径由 botExecuteSyncTool 直达单动作方法。
-func (s *BotService) execThreadRead(ctx context.Context, call *model.BotToolCall) (string, error) {
-	return s.botExecSyncAction(ctx, nil, call, "", "fs_thread 不支持该读取动作")
-}
-
 // fs_environment 各读取动作的入口（注册表 SyncExec 指向这些方法表达式）。
 
 func (s *BotService) execEnvironmentList(_ *model.Bot, ctx context.Context, call *model.BotToolCall) (string, error) {
@@ -190,10 +186,6 @@ func (s *BotService) execEnvironmentProjects(_ *model.Bot, ctx context.Context, 
 
 // execEnvironmentRead 是聚合兼容入口（既有调用方/测试使用）：经注册表
 // SyncExec 分派。
-func (s *BotService) execEnvironmentRead(ctx context.Context, call *model.BotToolCall) (string, error) {
-	return s.botExecSyncAction(ctx, nil, call, "", "fs_environment 不支持该动作")
-}
-
 // botCallExecContext 是调用记录 execution_context 的统一形态：服务端生成的
 // T3 幂等身份 + 受理时解析的授权范围。
 type botCallExecContext struct {
@@ -306,24 +298,6 @@ func (s *BotService) runThreadResumeQueue(ctx context.Context, call *model.BotTo
 		return nil, err
 	}
 	return s.threads.ResumeQueue(ctx, s.botUserIDOf(call.BotID), args.EnvID, args.ThreadID)
-}
-
-// runThreadWait 是 wait 的注册表执行入口占位：wait 的真实执行发生在受理事务
-// 提交后——threadWaitAttach 注册评估现场（受理即 running、不进 worker 队列，
-// 由 bot_thread_wait.go 的评估器收尾），worker 路径永远不会到达这里。挂这个
-// 入口只为满足注册表「执行入口至少一者非 nil」并保住拆分前的兑底文案。
-func (s *BotService) runThreadWait(_ context.Context, call *model.BotToolCall) (interface{}, error) {
-	return nil, errs.New(errs.ErrInvalidParams.Code, "fs_thread 不支持该写动作")
-}
-
-// runThreadWrite 是聚合兼容入口（既有调用方/测试使用）：经注册表 AsyncExec
-// 分派；worker 主路径由 runAsyncTool 直达单动作方法。
-func (s *BotService) runThreadWrite(ctx context.Context, call *model.BotToolCall) (interface{}, error) {
-	spec := botActionSpecOf(call.ToolName, call.Action)
-	if spec == nil || spec.AsyncExec == nil {
-		return nil, errs.New(errs.ErrInvalidParams.Code, "fs_thread 不支持该写动作")
-	}
-	return spec.AsyncExec(s, ctx, call)
 }
 
 // ---------- fs_thread / fs_environment 动作注册表（INT-195） ----------
@@ -448,10 +422,10 @@ func botThreadActionSpecs() []*botActionSpec {
 		{
 			Tool: "fs_thread", Action: "wait",
 			Description: "挂起等待线程变化后唤醒（受理即 running，不进执行队列，无写副作用）：on 选触发条件（idle/needs_reply/error，缺省全部），线程开始运行并命中条件（idle 需稳定约 20 秒）即唤醒；约 60 秒内线程始终没开始运行以 not_started 唤醒；到 timeout_minutes 上限按 outcome 区分 timeout_unchanged（确实没动）/timeout_progressing（在动但未到终态）/watch_degraded（连接不可信，结论仅供参考）/thread_gone。唤醒的「平台后台结果」带 wait_result：变化字段前后对比、queue.held、最近 3 条条目摘要。每机器人同时最多 3 个、同一线程 1 个（重复挂立即返回 already_waiting 与已有调用 ID）、同一线程 1 小时内最多挂 6 次；定时任务会话内 timeout_minutes 不得超过 15。取消用 fs_cancel。",
-			Mode:        model.BotExecutionAsync, Confirmation: confirmNever, PolicyTier: "tier2", NoSideEffect: true,
+			Mode:        model.BotExecutionAsync, Confirmation: confirmNever, NoSideEffect: true,
 			Required: req("env_id", "thread_id"), Forbidden: botThreadWaitForbidden,
-			AsyncExec: (*BotService).runThreadWait,
-			Scope:     threadScope,
+			AcceptanceOnly: true,
+			Scope:          threadScope,
 		},
 	}
 }

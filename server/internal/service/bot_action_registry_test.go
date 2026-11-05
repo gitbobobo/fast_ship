@@ -153,6 +153,39 @@ func TestBotActionRegistryValidatesSpecs(t *testing.T) {
 		s.Confirmation = confirmAlways
 		s.Mode = model.BotExecutionSync
 	}))
+	// AcceptanceOnly（仅受理钩子动作，wait）：完整合法形态与四条死数据禁令。
+	mustOK("仅受理钩子动作", base(func(s *botActionSpec) {
+		s.Confirmation = confirmNever
+		s.Mode = model.BotExecutionAsync
+		s.AcceptanceOnly = true
+	}))
+	mustPanic("仅受理钩子带 AsyncExec", base(func(s *botActionSpec) {
+		s.Confirmation = confirmNever
+		s.Mode = model.BotExecutionAsync
+		s.AcceptanceOnly = true
+		s.AsyncExec = func(*BotService, context.Context, *model.BotToolCall) (interface{}, error) {
+			return nil, nil
+		}
+	}))
+	mustPanic("仅受理钩子带 SyncExec", base(func(s *botActionSpec) {
+		s.Confirmation = confirmNever
+		s.Mode = model.BotExecutionAsync
+		s.AcceptanceOnly = true
+		s.SyncExec = func(*BotService, *model.Bot, context.Context, *model.BotToolCall) (string, error) {
+			return "{}", nil
+		}
+	}))
+	mustPanic("仅受理钩子声明 PolicyTier", base(func(s *botActionSpec) {
+		s.Confirmation = confirmNever
+		s.Mode = model.BotExecutionAsync
+		s.AcceptanceOnly = true
+		s.PolicyTier = "tier2"
+	}))
+	mustPanic("仅受理钩子非免确认", base(func(s *botActionSpec) {
+		s.Confirmation = confirmAlways
+		s.Mode = model.BotExecutionAsync
+		s.AcceptanceOnly = true
+	}))
 	// dynamic + sync 既无 SyncExec 又未声明 SyncExecForbidden：免确认参数的
 	// 出路缺失，构建期拒绝（快船 bot R15）。
 	mustPanic("dynamic 同步形态无出路", base(func(s *botActionSpec) {
@@ -493,6 +526,60 @@ func botMemoryTestExec(s *BotService, call *model.BotToolCall) (string, error) {
 	}
 	return s.botExecSyncAction(context.Background(), nil, call, args.Action,
 		"不支持的 fs_memory 动作: "+args.Action)
+}
+
+// ---------- 读写聚合入口的测试替代（R19：生产转发层已删） ----------
+//
+// 语义与被替代的聚合入口逐字一致：按注册表分派，bot 传 nil（fs_thread 的
+// 读动作与全部写动作都不消费 ToolsetVersion；需要水位的 status 查询自行
+// 传真实 bot）。仅供测试使用——生产分派走 botExecuteSyncTool / runAsyncTool。
+
+func botProjectReadTestExec(s *BotService, ctx context.Context, call *model.BotToolCall) (string, error) {
+	var args botProjectArgs
+	if err := json.Unmarshal([]byte(call.ArgumentsJSON), &args); err != nil {
+		return "", errs.ErrInvalidParams
+	}
+	return s.botExecSyncAction(ctx, nil, call, args.Action, "fs_project 不支持该读取动作")
+}
+
+func botIssueReadTestExec(s *BotService, ctx context.Context, call *model.BotToolCall) (string, error) {
+	return s.botExecSyncAction(ctx, nil, call, "", "fs_issue 不支持该读取动作")
+}
+
+func botThreadReadTestExec(s *BotService, ctx context.Context, call *model.BotToolCall) (string, error) {
+	return s.botExecSyncAction(ctx, nil, call, "", "fs_thread 不支持该读取动作")
+}
+
+func botEnvironmentReadTestExec(s *BotService, ctx context.Context, call *model.BotToolCall) (string, error) {
+	return s.botExecSyncAction(ctx, nil, call, "", "fs_environment 不支持该动作")
+}
+
+func botProjectWriteTestExec(s *BotService, ctx context.Context, call *model.BotToolCall) (interface{}, error) {
+	var args botProjectArgs
+	if err := json.Unmarshal([]byte(call.ArgumentsJSON), &args); err != nil {
+		return nil, errs.ErrInvalidParams
+	}
+	spec := botActionSpecOf(call.ToolName, args.Action)
+	if spec == nil || spec.AsyncExec == nil {
+		return nil, errs.New(errs.ErrInvalidParams.Code, "fs_project 不支持该写动作")
+	}
+	return spec.AsyncExec(s, ctx, call)
+}
+
+func botIssueWriteTestExec(s *BotService, ctx context.Context, call *model.BotToolCall) (interface{}, error) {
+	spec := botActionSpecOf(call.ToolName, call.Action)
+	if spec == nil || spec.AsyncExec == nil {
+		return nil, errs.New(errs.ErrInvalidParams.Code, "fs_issue 不支持该写动作")
+	}
+	return spec.AsyncExec(s, ctx, call)
+}
+
+func botThreadWriteTestExec(s *BotService, ctx context.Context, call *model.BotToolCall) (interface{}, error) {
+	spec := botActionSpecOf(call.ToolName, call.Action)
+	if spec == nil || spec.AsyncExec == nil {
+		return nil, errs.New(errs.ErrInvalidParams.Code, "fs_thread 不支持该写动作")
+	}
+	return spec.AsyncExec(s, ctx, call)
 }
 
 // botScheduleTestExec 是原 execScheduleTool 聚合入口的测试替代：优先 AsyncExec

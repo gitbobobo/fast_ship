@@ -93,6 +93,11 @@ type botActionSpec struct {
 	// MemoryWrite 标记记忆写动作：重启恢复据此判定「效果未知/已落库」并
 	// 给出专用中断提示（fast-ship-bot R16，替代按动作名的平行表）。
 	MemoryWrite bool
+	// AcceptanceOnly 标记「仅受理钩子执行」的动作（wait）：受理即 running、
+	// 由领域评估器收尾，永不进 worker 队列——无需 AsyncExec 与 PolicyTier
+	//（占位假入口会让误入队的调用回一条与工具面矛盾的参数错误，快船 bot
+	// R19）。校验：Mode=async、无任何执行入口、confirmNever。
+	AcceptanceOnly bool
 	// ReadOnlyIf 是参数相关的只读判定（fs_schedule/run 的 dry_run=true）。
 	ReadOnlyIf func(*model.BotToolCall) bool
 	// Scope 是受理范围解析（异步写动作声明；含 fs_thread 的执行上下文回填）。
@@ -169,7 +174,7 @@ func botValidateActionSpecEntry(spec *botActionSpec) {
 	if spec.Tool == "" || spec.Action == "" {
 		panic("bot action registry: spec 键不完整: " + key)
 	}
-	if spec.SyncExec == nil && spec.AsyncExec == nil {
+	if spec.SyncExec == nil && spec.AsyncExec == nil && !spec.AcceptanceOnly {
 		panic("bot action registry: 执行入口缺失 " + key)
 	}
 	botValidateActionSpec(spec)
@@ -229,8 +234,25 @@ func botValidateActionSpec(spec *botActionSpec) {
 	// Mode 与执行入口/确认分类交叉校验（快船 bot R5）：错配不再等到运行时——
 	// async 动作没有 AsyncExec 会在批准后的 worker 里才报「没有异步实现」；
 	// confirmAlways 配 Mode=sync 会以同步形态落账、污染 closeUnstarted 语义。
-	if spec.Mode == model.BotExecutionAsync && spec.AsyncExec == nil {
+	if spec.Mode == model.BotExecutionAsync && spec.AsyncExec == nil && !spec.AcceptanceOnly {
 		panic("bot action registry: 异步动作缺少 AsyncExec 入口 " + key)
+	}
+	if spec.AcceptanceOnly {
+		// 仅受理钩子动作的完整形态（wait）：running 由受理分支落，异步与
+		// 同步执行入口、策略档都是死数据；worker 认领这类行是编程错误，
+		// 构建期就拒绝其存在形态。
+		if spec.AsyncExec != nil || spec.SyncExec != nil {
+			panic("bot action registry: 仅受理钩子动作不得带执行入口 " + key)
+		}
+		if spec.Mode != model.BotExecutionAsync {
+			panic("bot action registry: 仅受理钩子动作必须是异步形态 " + key)
+		}
+		if spec.Confirmation != confirmNever {
+			panic("bot action registry: 仅受理钩子动作只能免确认 " + key)
+		}
+		if spec.PolicyTier != "" {
+			panic("bot action registry: 仅受理钩子动作不得声明 PolicyTier（策略评估不可达） " + key)
+		}
 	}
 	if spec.Confirmation == confirmAlways && spec.Mode != model.BotExecutionAsync {
 		panic("bot action registry: 恒需确认的动作必须是异步形态 " + key)
