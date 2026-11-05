@@ -23,6 +23,9 @@ var syncedColumns = []string{
 }
 
 func (r *IssuePullRequestRepository) Create(link *model.IssuePullRequest) error {
+	// synced_at 落库前归一 UTC：守卫的文本字典序比较依赖统一格式
+	//（INT-175 R25 的前提在写入端强制化，不再只是注释约定）。
+	link.SyncedAt = link.SyncedAt.UTC()
 	return r.db.Create(link).Error
 }
 
@@ -40,6 +43,10 @@ func (r *IssuePullRequestRepository) Create(link *model.IssuePullRequest) error 
 // DO UPDATE WHERE（INT-175 R13 的设计），link_origin 的 manual 升级与
 // forge_integration_id 换绑（身份语义，重于修改时间）不被旧快照连带拦下。
 func (r *IssuePullRequestRepository) Upsert(link *model.IssuePullRequest) error {
+	// synced_at/updated_at 落库前归一 UTC（R25 前提在写入端强制化）：
+	// excluded.synced_at 与库内列的文本字典序比较依赖统一格式。
+	link.SyncedAt = link.SyncedAt.UTC()
+	link.UpdatedAt = link.UpdatedAt.UTC()
 	set := make(clause.Set, 0, len(syncedColumns)+4)
 	for _, col := range syncedColumns {
 		set = append(set, clause.Assignment{
@@ -88,11 +95,18 @@ func (r *IssuePullRequestRepository) Upsert(link *model.IssuePullRequest) error 
 // 的两个并发 sync 可能按发起顺序倒置落库——慢批次不能把后写入的更新数据
 // 覆盖回旧值。0 行命中有两种含义：行已被解除（ErrRecordNotFound）或库内
 // synced_at 已更新（ErrSyncedAtStale），由调用方 FindByID 区分。
-// 注意：该比较在 SQLite 里是文本字典序——synced_at 只能写 UTC（time.Now().UTC()）
-// 且必须经本驱动写入；混入其它时区/格式会让守卫静默误判（R25）。
+// 带 synced_at 时间守卫（INT-175 R8）：拉取与写回拆成两段后，同一个 Issue
+// 的两个并发 sync 可能按发起顺序倒置落库——慢批次不能把后写入的更新数据
+// 覆盖回旧值。0 行命中有两种含义：行已被解除（ErrRecordNotFound）或库内
+// synced_at 已更新（ErrSyncedAtStale），由调用方 FindByID 区分。
+// 注意：该比较在 SQLite 里是文本字典序——写入端已把 synced_at 统一归一
+// UTC（见各写方法），混入其它时区/格式的路径会被归一拉回，不再依赖调用
+// 方自觉（R25 前提强制化，INT-188 审查）。
 var ErrSyncedAtStale = errors.New("issue_pull_requests.synced_at 已有更新数据")
 
 func (r *IssuePullRequestRepository) SaveSyncedFields(link *model.IssuePullRequest) error {
+	link.SyncedAt = link.SyncedAt.UTC()
+	link.UpdatedAt = link.UpdatedAt.UTC()
 	res := r.db.Model(&model.IssuePullRequest{}).
 		Where("id = ? AND issue_id = ? AND synced_at <= ?", link.ID, link.IssueID, link.SyncedAt).
 		Updates(map[string]any{

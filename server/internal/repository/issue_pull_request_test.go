@@ -354,6 +354,68 @@ func TestIssuePullRequestUpsert_StaleAttachFirstSyncNewerWins(t *testing.T) {
 	}
 }
 
+// 写入端 UTC 归一化（INT-188 审查 P2）：调用方传入非 UTC 时区的 time.Time
+// 时，落库前强制归一——否则 SQLite 文本字典序会按墙钟而非真实时刻比较，
+// 西边时区的新快照会被守卫误判为旧快照。
+func TestIssuePullRequestUpsert_NonUTCTimeNormalizedForGuard(t *testing.T) {
+	db, repo := setupIssuePullRequestTestDB(t)
+	issue := createIssuePullRequestTestIssue(t, db, "project-1")
+
+	t0 := time.Now().UTC().Add(-time.Hour)
+	utcMinus8 := time.FixedZone("UTC-8", -8*3600)
+	seedIssuePullRequestAt(t, db, issue.ID, 7, model.IssuePullRequestLinkOriginManual, t0, "initial", model.IssuePullRequestStateOpen)
+
+	// 比库内新 1 小时的真实时刻，但以 UTC-8 墙钟表达（文本序会落到 t0 之前）：
+	// 未归一时守卫会把它误判为旧快照并拦下；归一后必须正常刷新。
+	newerInstant := t0.Add(time.Hour)
+	attachSnap := &model.IssuePullRequest{
+		ID: uuid.NewString(), IssueID: issue.ID, ProjectID: issue.ProjectID,
+		Provider: model.IssuePullRequestProviderGitHub, RepoFullName: "owner/repo", Number: 7,
+		Title: "newer-non-utc", State: model.IssuePullRequestStateOpen,
+		LinkOrigin: model.IssuePullRequestLinkOriginManual,
+		SyncedAt:   newerInstant.In(utcMinus8), CreatedAt: newerInstant.In(utcMinus8), UpdatedAt: newerInstant.In(utcMinus8),
+	}
+	if err := repo.Upsert(attachSnap); err != nil {
+		t.Fatalf("non-utc upsert: %v", err)
+	}
+	row, err := repo.FindByUnique(issue.ID, model.IssuePullRequestProviderGitHub, "", "owner/repo", 7)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if row.Title != "newer-non-utc" {
+		t.Fatalf("non-UTC newer snapshot must refresh after normalization, got %+v", row)
+	}
+	if !row.SyncedAt.Equal(newerInstant) {
+		t.Fatalf("synced_at must advance to the real instant, got %v want %v", row.SyncedAt, newerInstant)
+	}
+	// 读回的时区必须是 UTC：若写入端未归一，存储文本会带源时区偏移，读回后
+	// location 就不是 UTC（文本字典序比较的时序一致依赖这一格式）。
+	if row.SyncedAt.Location() != time.UTC {
+		t.Fatalf("stored synced_at must be UTC after normalization, got location %v (%v)", row.SyncedAt.Location(), row.SyncedAt)
+	}
+
+	// SaveSyncedFields 同口径：更新的真实时刻以 UTC-8 表达，归一后守卫放行。
+	syncSnap := &model.IssuePullRequest{
+		ID: row.ID, IssueID: issue.ID, Provider: model.IssuePullRequestProviderGitHub,
+		RepoFullName: "owner/repo", Number: 7,
+		Title: "newer-non-utc-sync", State: model.IssuePullRequestStateClosed,
+		SyncedAt: newerInstant.Add(time.Hour).In(utcMinus8), UpdatedAt: newerInstant.Add(time.Hour).In(utcMinus8),
+	}
+	if err := repo.SaveSyncedFields(syncSnap); err != nil {
+		t.Fatalf("non-utc sync write: %v", err)
+	}
+	row2, err := repo.FindByUnique(issue.ID, model.IssuePullRequestProviderGitHub, "", "owner/repo", 7)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if row2.Title != "newer-non-utc-sync" || row2.State != model.IssuePullRequestStateClosed {
+		t.Fatalf("non-UTC newer sync write must apply after normalization, got %+v", row2)
+	}
+	if !row2.SyncedAt.Equal(newerInstant.Add(time.Hour)) {
+		t.Fatalf("synced_at must advance to the sync instant, got %v", row2.SyncedAt)
+	}
+}
+
 // 同时刻快照是同批等价新鲜度：重复 attach 幂等刷新不被守卫误拦。
 func TestIssuePullRequestUpsert_EqualSyncedAtRefreshes(t *testing.T) {
 	db, repo := setupIssuePullRequestTestDB(t)
