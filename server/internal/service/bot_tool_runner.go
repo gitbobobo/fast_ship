@@ -348,8 +348,9 @@ func (s *BotService) commitAssistantTurn(bot *model.Bot, run *model.BotRun, requ
 			switch {
 			case entry.waitAccepted:
 				// wait（INT-160）：受理即 running（不进 queued——ListQueued 会
-				// 把 queued 调用推给 worker，而 runThreadWrite 没有 wait 实现，
-				// 会被错误认领）。started_at 即挂上时刻，由评估器收尾。
+				// 把 queued 调用推给 worker，而 wait 的真实执行由评估器收尾，
+				// 其 AsyncExec 只是保持拆分前兜底拒绝文案的占位入口）。
+				// started_at 即挂上时刻。
 				call.Status = model.BotCallStatusRunning
 				call.StartedAt = &now
 			case entry.prepared.Mode == model.BotExecutionSync:

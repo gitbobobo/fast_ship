@@ -392,12 +392,11 @@ func (s *BotService) issueScopeOf(issueID, userID string) (string, string, error
 	return issue.ProjectId, string(issue.Source), nil
 }
 
-// botIssueActionSpecs 是 fs_issue 的动作声明。读动作也挂 Scope：与拆分前一致
-// （resolveCallScope 对每个受理调用都跑范围解析，旧 resolveIssueScope 在分支
-// 前置 ScopeKind=issue_project，读动作的 execution_context 同样带归属项目与
-// source 约束），不是只给写动作。
 // botIssueActionSpecs 是 fs_issue 的动作声明（INT-195）：全部写动作 tier3、
-// 范围解析（issue→project 回填）随 spec 声明；scope 细节在 resolveIssueScope。
+// 范围解析（issue→project 回填）随 spec 声明，scope 细节在 resolveIssueScope。
+// 读动作也挂同一 Scope：与拆分前一致（resolveCallScope 对每个受理调用都跑
+// 范围解析，旧 resolveIssueScope 在分支前置 ScopeKind=issue_project，读动作
+// 的 execution_context 同样带归属项目与 source 约束），不是只给写动作。
 func botIssueActionSpecs() []*botActionSpec {
 	scope := func(s *BotService, bot *model.Bot, prepared *botPreparedCall, raw map[string]json.RawMessage, _ *botCallExecContext) error {
 		s.resolveIssueScope(bot, prepared, raw)
