@@ -55,9 +55,12 @@ func (r *IssuePullRequestRepository) Upsert(link *model.IssuePullRequest) error 
 		})
 	}
 	// synced_at 取两者较大值：守卫命中时保留库内较新时间，不随旧快照回拨
-	//（回拨会让后续 sync 的守卫比较失真）；updated_at 同口径——守卫拦下快
-	// 照时行内容未变，不刷修改时间。守卫命中但 link_origin/集成换绑生效时
-	// 行变了而 updated_at 不刷是有意取舍，与 SaveSyncedFields 口径一致。
+	//（回拨会让后续 sync 的守卫比较失真）。updated_at 不是独立取 max，而是
+	// 随快照判定走：快照被接受才随写本次值，否则保留库内值——守卫拦下快
+	// 照时行内容未变，不该刷修改时间。前提是调用方让 UpdatedAt 与 SyncedAt
+	// 同源（当前唯一调用方 attach 两者均取拉取完成时刻）；若未来出现两者
+	// 不等的调用方，需先重新论证这里的口径。守卫命中但身份列生效时行变了
+	// 而 updated_at 不刷是有意取舍，与 SaveSyncedFields 口径一致。
 	set = append(set,
 		clause.Assignment{
 			Column: clause.Column{Name: "synced_at"},
@@ -91,10 +94,6 @@ func (r *IssuePullRequestRepository) Upsert(link *model.IssuePullRequest) error 
 // UPDATE 影响 0 行时它会退化 INSERT，把 sync 期间被并发 detach 的行原样插回。
 // 行不存在时返回 gorm.ErrRecordNotFound 让调用方记失败。
 //
-// 带 synced_at 时间守卫（INT-175 R8）：拉取与写回拆成两段后，同一个 Issue
-// 的两个并发 sync 可能按发起顺序倒置落库——慢批次不能把后写入的更新数据
-// 覆盖回旧值。0 行命中有两种含义：行已被解除（ErrRecordNotFound）或库内
-// synced_at 已更新（ErrSyncedAtStale），由调用方 FindByID 区分。
 // 带 synced_at 时间守卫（INT-175 R8）：拉取与写回拆成两段后，同一个 Issue
 // 的两个并发 sync 可能按发起顺序倒置落库——慢批次不能把后写入的更新数据
 // 覆盖回旧值。0 行命中有两种含义：行已被解除（ErrRecordNotFound）或库内

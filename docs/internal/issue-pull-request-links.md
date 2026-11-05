@@ -18,7 +18,7 @@ provider 双源（INT-181）：`github`（github.com PR，走项目凭证）与 
 ## 不变量
 
 - **唯一键** `(issue_id, provider, host_key, repo_full_name, number)`。attach 是 upsert：同主机重复 attach 幂等，不产生第二行，刷新同步字段；集成快照仅在新值非空时刷新（保护既有行不被空快照调用方抹掉）。不同实例的同名 PR 是不同键，并存。
-- **快照列受 `synced_at` 时间守卫（INT-188）**。attach Upsert 与 sync 写回的快照列（html_url/title/state/draft/author/refs/merged_at/closed_at/synced_at/updated_at）只在 `excluded.synced_at >= 库内 synced_at` 时才写入——attach/sync 交错或并发时，先拉到的旧快照不覆盖后写入的较新数据；同一时刻的快照同批等价，照常幂等刷新。守卫逐列走 CASE 而非整条 WHERE：`link_origin` 升级与 `forge_integration_id` 换绑是身份语义，不受守卫拦限。守卫依赖墙钟单调且 synced_at 只能 UTC 写入（SQLite 文本字典序比较）。
+- **快照列受 `synced_at` 时间守卫（INT-188）**。attach Upsert 与 sync 写回的快照列（html_url/title/state/draft/author/refs/merged_at/closed_at/synced_at/updated_at）只在 `excluded.synced_at >= 库内 synced_at` 时才写入——attach/sync 交错或并发时，先拉到的旧快照不覆盖后写入的较新数据；同一时刻的快照同批等价，照常幂等刷新。守卫逐列走 CASE 而非整条 WHERE：`link_origin` 升级与 `forge_integration_id` 换绑是身份语义，不受守卫拦限。守卫依赖墙钟单调；synced_at 的 UTC 归一已由写入端强制（Upsert/SaveSyncedFields/Create 落库前归一，SQLite 文本字典序比较依赖统一格式）。
 - **`link_origin` 只升不降**。`manual`（用户/agent 显式 attach）是终态；`synced`（远端同步投影产生，如 timeline cross-referenced）可被手动 attach 升级为 manual，反向不允许。Upsert 的冲突更新用 CASE 表达式实现：`excluded.link_origin='manual'` 才写 manual，否则保留原值。违反这条会让同步清理把用户挂的 PR 当成投影残留删掉。
 - **清理只碰 synced**。`DeleteMissingSynced`（按 origin 过滤）是同步投影的回收口；manual 行永不进入候选集。
 - **PR 状态与 `workflow_status` 无耦合**。PR 全合并不等于需求完成，二者互不驱动。
