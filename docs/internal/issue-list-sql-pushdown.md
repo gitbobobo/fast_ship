@@ -123,6 +123,13 @@ INTEGER 的双向唯一映射（doc 普通 INTEGER PRIMARY KEY，issue_id UNIQUE
   的 issues.id 不变、doc 复用，先删 FTS 旧行再按同一 doc 重插；DELETE 先删
   FTS 行再删映射行。列值统一 `COALESCE(..., '')`：body 列可空，NULL 索引成
   空串（空串不含 trigram，永不命中），与 LIKE 对 NULL 不匹配的旧语义等价。
+- **UPDATE 触发器带双层守卫**：`AFTER UPDATE OF title, body` 把触发范围收窄
+  到 SET 里列出这两列的语句（只改 state/updated_at/closed_at 的元数据写入
+  路径——TouchUpdatedAt、批量关闭、同步回写——完全不走重索引），`WHEN
+  OLD.title IS NOT NEW.title OR OLD.body IS NOT NEW.body` 再按值判断，全列
+  写入（如 gorm Save）但 title/body 未变的也不重写。无守卫时一次元数据
+  UPDATE 会成批重写正文索引（2000 行 × 3KB 正文实测 511ms，带守卫 3.2ms）。
+  IS NOT 对 NULL 安全。
 - 删 project 外键级联删 issues 时 AFTER DELETE 触发器逐行同步，实测 FTS 与
   映射均无孤儿行。唯一的理论成因是未来 DROP/重建 issues 表的迁移（触发器随
   表消失），孤儿行按 issues.id 回连主表不影响结果正确性、只白占空间；此类
@@ -133,21 +140,29 @@ INTEGER 的双向唯一映射（doc 普通 INTEGER PRIMARY KEY，issue_id UNIQUE
 `EnsureIssueFTSSchema`（repository/issue_fts.go）在 AutoMigrate 之后建映射表 +
 虚表 + 触发器，然后按两个方向幂等回填（各自 NOT IN 去重，重复启动无副作用）：
 「有 issues 行、无映射行」补 issue_fts_docs，「有映射行、无 FTS 行」按 doc 重插
-FTS。main.go 在 `EnsureBotSchema` 同位置之后调用，失败 `fatal`；`--dry-run` 路径
-在此之前已 return，不受影响。AutoMigrate 重跑对既有表是空操作，新触发器以
-IF NOT EXISTS 保留，增量同步不中断（有测试锁定）。
+FTS。回填前先比三方计数（issues / issue_fts_docs / issues_fts），一致则直接
+跳过——两个 NOT IN 反连接都要扫全表，无缺口也付全量成本（十万行量级实测
+约 200ms），计数不一致才对账。main.go 在 `EnsureBotSchema` 同位置之后调用，
+失败 `fatal`；`--dry-run` 路径在此之前已 return，不受影响。
+
+**触发器定义按原文比对收敛**：三条触发器不用 IF NOT EXISTS，ensure 按
+sqlite_master 里的存量定义与代码里的期望串逐字比对，漂移即 DROP 重建——日后
+修改触发器定义不需要换名登记，改完常量存量库下次启动自动收敛（IF NOT
+EXISTS 对旧定义是静默空操作，会造成行为与代码分叉，与虚表的旧形态收敛是
+同一类陷阱，有测试锁定存量定义与期望串逐字一致）。
 
 **旧形态收敛**：`CREATE VIRTUAL TABLE IF NOT EXISTS` 对已存在的第 1 轮结构（带
 UNINDEXED issue_id 列）是静默空操作，靠 IF NOT EXISTS 收敛不到新形态。ensure
 先摘旧触发器（trg_issues_fts_*——新触发器换了名字 trg_issues_fts_doc_*，旧定
 义必须显式 DROP，IF NOT EXISTS 拦不住，残留会在重建后的结构上引用不存在的
-列），再按 sqlite_master 里的虚表 DDL 原文检测旧结构（新形态 DDL 不含
-issue_id 字样），命中即 DROP 旧虚表，然后按新形态重建并回填。**顺序不可反**：
+列），再按 `PRAGMA table_info` 精确判定虚表形态：列集合恰为 {title, body} 才
+是当前形态，其余（第 1 轮的 issue_id 列、或未来任何意外形态）一律 DROP 重建，
+不依赖 DDL 原文子串。命中即 DROP 旧虚表，然后按新形态重建并回填。**顺序不可反**：
 若先删虚表、后摘触发器，两步之间进程退出会留下引用已删表的触发器，SQLite
 编译任何 issues 上的 UPDATE 时即报 no such table，下一次启动连常规迁移里的
 UPDATE 都过不去，永远到不了修复入口；先摘触发器后，中断残留只会是「无触发器
 的旧虚表」或「缺触发器的新虚表」，都由后续启动的 legacy 检测与回填收敛。整个
-收敛过程包在一个事务里。任何起点（新库 / 第 1 轮库 / 中断残留 / 新形态库）跑完
+收敛过程包在一个事务里。任何起点（新库 / 第 1 轮库 / 中断残留 / 旧触发器定义）跑完
 都收敛到同一结构（有测试锁定：TestIssueFTS_LegacyShapeConvergence 与
 TestIssueFTS_InterruptedMigrationSelfHeals）。
 

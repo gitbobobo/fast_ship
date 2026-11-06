@@ -6,6 +6,7 @@ package repository
 
 import (
 	"fmt"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -764,4 +765,91 @@ END`,
 		t.Fatalf("update after legacy rebuild: %v", err)
 	}
 	assertIssueFTSHits(t, repo, projectID, "终态词", []string{"fts-rc01"})
+}
+
+// TestIssueFTS_MetadataOnlyUpdateSkipsReindex 元数据写入不走重索引（P2 修复）：
+// TouchUpdatedAt / 全列 Save（title/body 值未变）后 FTS 行 rowid 集合不变——
+// UPDATE OF + WHEN 双层守卫生效；正文真实变更仍正常重索引。最后断言三条触发
+// 器的存量定义与期望串逐字一致（收敛逻辑按原文比对，这里锁住比对基准）。
+func TestIssueFTS_MetadataOnlyUpdateSkipsReindex(t *testing.T) {
+	db, projectID := setupIssueFTSTestDB(t)
+	if err := EnsureIssueFTSSchema(db); err != nil {
+		t.Fatalf("ensure fts: %v", err)
+	}
+	repo := NewIssueRepository(db)
+	issue := seedFTSIssue(t, db, projectID, "mo01", 1, "metadata marker", "正文 marker", "alice")
+	assertIssueFTSHits(t, repo, projectID, "marker", []string{"fts-mo01"})
+
+	ftsRowids := func() []int {
+		var ids []int
+		if err := db.Raw(`SELECT rowid FROM issues_fts ORDER BY rowid`).Scan(&ids).Error; err != nil {
+			t.Fatalf("select fts rowids: %v", err)
+		}
+		return ids
+	}
+	before := ftsRowids()
+
+	// 元数据写入：SET 不含 title/body，OF 守卫直接跳过。
+	if err := repo.TouchUpdatedAt(db, issue.ID, time.Now().UTC().Add(time.Hour)); err != nil {
+		t.Fatalf("touch updated_at: %v", err)
+	}
+	if got := ftsRowids(); !reflect.DeepEqual(got, before) {
+		t.Fatalf("metadata-only update must not rewrite fts rows: %v -> %v", before, got)
+	}
+
+	// 全列写入但 title/body 值未变（gorm Save）：WHEN 守卫按值跳过。
+	if err := repo.Save(&issue); err != nil {
+		t.Fatalf("no-op save: %v", err)
+	}
+	if got := ftsRowids(); !reflect.DeepEqual(got, before) {
+		t.Fatalf("no-op save must not rewrite fts rows: %v -> %v", before, got)
+	}
+
+	// 正文真实变更仍重索引（守卫不吞变更）：旧正文独有短语不再命中，标题
+	// 里的 marker 不受影响。
+	if err := db.Model(&model.Issue{}).Where("id = ?", issue.ID).Update("body", "新的正文词").Error; err != nil {
+		t.Fatalf("update body: %v", err)
+	}
+	assertIssueFTSHits(t, repo, projectID, "正文 marker", nil)
+	assertIssueFTSHits(t, repo, projectID, "新的正文词", []string{"fts-mo01"})
+	assertIssueFTSHits(t, repo, projectID, "marker", []string{"fts-mo01"})
+
+	for _, trg := range issueFTSDocTriggers {
+		var ddl string
+		if err := db.Raw(`SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?`, trg.name).Scan(&ddl).Error; err != nil {
+			t.Fatalf("read trigger %s: %v", trg.name, err)
+		}
+		if ddl != trg.create {
+			t.Fatalf("trigger %s stored definition drifted from expected:\nstored: %s\nwant:  %s", trg.name, ddl, trg.create)
+		}
+	}
+}
+
+// TestIssueFTS_UnexpectedShapeRebuilds 异形虚表按列集合精确判定重建（Note 2）：
+// 列集合 ≠ {title, body}（含 issue_ids_json 这类名字近似的未来形态）一律
+// DROP 重建并回填，不依赖 DDL 原文子串判断。
+func TestIssueFTS_UnexpectedShapeRebuilds(t *testing.T) {
+	db, projectID := setupIssueFTSTestDB(t)
+	seedFTSIssue(t, db, projectID, "us01", 1, "unexpected marker", "正文无查询词", "alice")
+	if err := db.Exec(`CREATE VIRTUAL TABLE issues_fts USING fts5(issue_ids_json UNINDEXED, title, body, tokenize='trigram')`).Error; err != nil {
+		t.Fatalf("seed unexpected shape: %v", err)
+	}
+	if err := db.Exec(`INSERT INTO issues_fts(issue_ids_json, title, body) VALUES ('x', 'stale words', '')`).Error; err != nil {
+		t.Fatalf("seed stale fts row: %v", err)
+	}
+	if err := EnsureIssueFTSSchema(db); err != nil {
+		t.Fatalf("ensure fts: %v", err)
+	}
+	repo := NewIssueRepository(db)
+	// 重建后杂行清掉、存量行回填可命中。
+	assertIssueFTSHits(t, repo, projectID, "stale", nil)
+	assertIssueFTSHits(t, repo, projectID, "unexpected", []string{"fts-us01"})
+
+	var cols []struct{ Name string }
+	if err := db.Raw(`PRAGMA table_info(issues_fts)`).Scan(&cols).Error; err != nil {
+		t.Fatalf("pragma table_info: %v", err)
+	}
+	if len(cols) != 2 || cols[0].Name != "title" || cols[1].Name != "body" {
+		t.Fatalf("columns after rebuild = %+v, want [title body]", cols)
+	}
 }
