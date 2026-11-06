@@ -39,6 +39,15 @@ type fakeModelUsage struct {
 }
 
 type fakeModelTurn struct {
+	// Match 非空时，本 turn 只服务给请求体包含该子串的请求（INT-201）：
+	// 同一 bot 的主线/后台回执/新输入可能由不同 run 先后发请求，共享 FIFO
+	// 队列的消费顺序依赖 goroutine 时序；带 Match 的 turn 按内容显式排布，
+	// 等自己的请求，不被别的 run 抢走。选择规则：先取第一个命中的
+	// Match turn；无命中再按 FIFO 取第一个无 Match 的 turn；全部剩余
+	// turn 都带 Match 且无一命中时按脚本耗尽处理（strict 报错，否则默认
+	// 文本回复）。标记要选只在该请求出现的子串——系统提示与工具描述里的
+	// 词语（如 not_executed）从首个请求起就在请求体里，不能当标记。
+	Match     string
 	Text      string
 	ToolCalls []fakeModelToolCall
 	Usage     *fakeModelUsage
@@ -127,9 +136,24 @@ func newFakeModelServer(t *testing.T, turns ...fakeModelTurn) *fakeModelServer {
 		}
 		f.mu.Lock()
 		var turn fakeModelTurn
-		if len(f.turns) > 0 {
-			turn = f.turns[0]
-			f.turns = f.turns[1:]
+		pick := -1
+		for i, cand := range f.turns {
+			if cand.Match != "" && strings.Contains(string(body), cand.Match) {
+				pick = i
+				break
+			}
+		}
+		if pick < 0 {
+			for i, cand := range f.turns {
+				if cand.Match == "" {
+					pick = i
+					break
+				}
+			}
+		}
+		if pick >= 0 {
+			turn = f.turns[pick]
+			f.turns = append(f.turns[:pick], f.turns[pick+1:]...)
 		} else if f.strict {
 			f.mu.Unlock()
 			w.Header().Set("Content-Type", "application/json")
@@ -1181,13 +1205,20 @@ func TestBotReject(t *testing.T) {
 
 func TestBotAuthorization(t *testing.T) {
 	env := setupBotTestEnv(t,
-		// run1 请求1：发起 a1（待确认）
-		fakeModelTurn{ToolCalls: []fakeModelToolCall{{ID: "call-a1", Name: "fs_project", Args: `{"action":"create","name":"授权项目1"}`}}},
-		// run1 请求2：看到回执，先答复用户（pending 不阻塞主线）
-		fakeModelTurn{Text: "已受理，等确认"},
-		// run2 请求：后台结果送达后模型再发起 a2（同规则应免确认）
-		fakeModelTurn{ToolCalls: []fakeModelToolCall{{ID: "call-a2", Name: "fs_project", Args: `{"action":"create","name":"授权项目2"}`}}},
-		fakeModelTurn{Text: "第二个也建好了"},
+		// run1 请求1：发起 a1（待确认）。首个请求体里只有这条用户消息。
+		fakeModelTurn{Match: "建项目", ToolCalls: []fakeModelToolCall{{ID: "call-a1", Name: "fs_project", Args: `{"action":"create","name":"授权项目1"}`}}},
+		// run1 请求2：看到回执，先答复用户（pending 不阻塞主线）。a1 的参数
+		// 已进历史，首个请求体里没有「授权项目1」。
+		fakeModelTurn{Match: "授权项目1", Text: "已受理，等确认"},
+		// 「再建一个」run：同规则免确认直接发起 a2。后台回执 run 与用户输入
+		// 到达的先后不定（INT-201 flake 根因）：回执 run 若先发请求，可能在
+		// 安全点让位，未认领的写操作按产品语义被关成 not_executed——所以 a2
+		// 只服务给含「再建一个」的请求，回执 run 抢不到这条脚本，它拿到
+		// 默认文本回复自然收尾。
+		fakeModelTurn{Match: "再建一个", ToolCalls: []fakeModelToolCall{{ID: "call-a2", Name: "fs_project", Args: `{"action":"create","name":"授权项目2"}`}}},
+		// a2 的后台回执 run：看到建好的项目，答复收尾。a2 发起前请求体里
+		// 没有「授权项目2」，不会被发起 run 自己抢走。
+		fakeModelTurn{Match: "授权项目2", Text: "第二个也建好了"},
 	)
 	userID := createBotTestUser(t, env.db, "botauth")
 	bot := env.createBot(t, userID)
