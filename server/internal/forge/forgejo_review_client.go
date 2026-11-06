@@ -620,7 +620,9 @@ func (c *ForgejoReviewClient) GetRepository(ctx context.Context, repoFullName st
 
 // TreeEntriesAtRef 用 contents 端点列目录（Forgejo 无 GitHub 的
 // git/trees/{ref}:{dir} 取子树语法）：2xx 且是数组 → 取每项 name 成集合；
-// 2xx 但单个对象 → dir 实际是文件，没有子条目，返回空集；404 探根目录
+// 2xx 但单个文件对象（带 name）→ dir 实际是文件，没有子条目，返回空集；
+// 其余 200 非数组形状（错误信封等异常体）不当缺席证据，按调用失败上报；
+// 404 探根目录
 // 消歧——ref 级失败按调用失败上报，不能误报成「目录不存在」诱导 Agent
 // 重写合法 findings。dir 含空段、.、.. 按目录不存在返回空集不发请求——
 // 与 githubapi 实现同口径，防路径别名绕过文件归属校验。
@@ -669,9 +671,17 @@ func (c *ForgejoReviewClient) TreeEntriesAtRef(ctx context.Context, repoFullName
 	var items []struct {
 		Name string `json:"name"`
 	}
-	if json.Unmarshal(raw, &items) != nil {
-		// 单文件对象：dir 实际是文件而非目录——没有子条目。
-		return map[string]bool{}, nil
+	if err := json.Unmarshal(raw, &items); err != nil {
+		// 非数组：contents 单文件对象（带 name）说明 dir 实际是文件，
+		// 没有子条目→空集；其余 200 非数组形状（错误信封等异常体）
+		// 不能当缺席证据，按调用失败上报。
+		var fileObj struct {
+			Name string `json:"name"`
+		}
+		if json.Unmarshal(raw, &fileObj) == nil && fileObj.Name != "" {
+			return map[string]bool{}, nil
+		}
+		return nil, fmt.Errorf("forge: contents %q 返回了非清单响应", dir)
 	}
 	entries := make(map[string]bool, len(items))
 	for _, it := range items {

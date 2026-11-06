@@ -756,6 +756,11 @@ func TestForgejoClient_TreeEntriesAtRef(t *testing.T) {
 			_, _ = w.Write([]byte(`{"name":"file.go","path":"file.go","type":"file"}`))
 			return
 		}
+		if strings.HasSuffix(r.URL.Path, "/contents/weird") {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"message":"odd envelope"}`))
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`[{"name":"a.go","type":"file"},{"name":"sub","type":"dir"}]`))
 	})
@@ -783,9 +788,16 @@ func TestForgejoClient_TreeEntriesAtRef(t *testing.T) {
 	if err != nil || len(entries) != 0 {
 		t.Fatalf("404 = %v, %v, want empty nil", entries, err)
 	}
+
 	got = lastServeLog(t, logs)
 	if got.path != "/api/v1/repos/o/r/contents/?ref=sha-1" {
 		t.Fatalf("消歧应探测根目录, got %q", got.path)
+	}
+
+	// 200 但既非清单也非文件对象（错误信封等异常体）→ 调用失败，
+	// 不当「目录不存在」的缺席证据。
+	if _, err = client.TreeEntriesAtRef(ctx, "o/r", "weird", "sha-1"); err == nil {
+		t.Fatal("非清单 200 响应须按调用失败上报")
 	}
 
 	// 根级目录 404（本身就是根目录）→ ref/仓库级故障，报错而非空集。
