@@ -969,6 +969,27 @@ func (s *ReviewService) AgentScreenshots(ctx context.Context, runID string) ([]a
 	for _, ref := range collectScreenshotURLsAt(pr.Body, s.githubWebHost()) {
 		currentURLs[ref.URL] = struct{}{}
 	}
+	// 整轮预算按张数均分（INT-193）：先数出本轮真正会展示 URL 的行（原图
+	// 透传与缩放变体都可能占字节，都算分母），min(单张上限, 4MB/N) 就是本轮
+	// 每行的单张预算——写进地址的 bytes 参数，取图端点按同一参数强制；清单
+	// 承诺与端点行为同源，无状态，不定义累计口径。代理只读清单地址时，N 张
+	// 全读满也在整轮预算内（12 张 × 341KiB ≈ 4MB，不再有单张上限 × 12 = 6MB
+	// 的算术缺口）；N ≤ 8 时份额不低于单张上限，典型 3-6 张的截图组不变。
+	// 快照集合（INT-193 审查）：第一遍把「本轮会下发 URL 的行」记下来，第二
+	// 遍只允许集合内的行拿到 URL——两遍之间卷恢复/并发缓存让新文件重新可见
+	// 时，不能临时扩充分母（否则预算按小集合均分、URL 却发出去更多行）；反
+	// 方向（文件在第二遍前消失）保守降级为不可读错误行。
+	servableIDs := make(map[string]struct{}, len(assets))
+	for _, a := range assets {
+		if _, current := currentURLs[a.SourceURL]; !current {
+			continue
+		}
+		if a.StoragePath == "" || assetFileMissing(a.StoragePath) {
+			continue
+		}
+		servableIDs[a.ID] = struct{}{}
+	}
+	budget := reviewPerImageBudget(len(servableIDs))
 	items := make([]api.ReviewAgentScreenshot, 0, len(assets))
 	for _, a := range assets {
 		if _, current := currentURLs[a.SourceURL]; !current {
@@ -986,11 +1007,12 @@ func (s *ReviewService) AgentScreenshots(ctx context.Context, runID string) ([]a
 			items = append(items, item)
 			continue
 		}
-		// 路径在但文件缺失（重下失败的保留引用，R12）：给出原因不给 URL，
-		// 审查员据此记入 unmeasurable（R13 审查意见）。取图端点对同一行按
-		// 40406 带同一原因返回（见 AgentScreenshotImage），不会落 500——列表
-		// 这里仍不给 URL，是因为审查员不需要为一个已知不可用项发起请求。
-		if assetFileMissing(a.StoragePath) {
+		// 不在快照集合（路径在但第一遍缺文件，第二遍才恢复：分母不临时扩充）
+		// 或文件缺失（重下失败的保留引用，R12）：给出原因不给 URL，审查员据
+		// 此记入 unmeasurable（R13 审查意见）。取图端点对同一行按 40406 带同
+		// 一原因返回（见 AgentScreenshotImage），不会落 500——列表这里仍不给
+		// URL，是因为审查员不需要为一个已知不可用项发起请求。
+		if _, counted := servableIDs[a.ID]; !counted || assetFileMissing(a.StoragePath) {
 			reason := a.Error
 			if reason == "" {
 				reason = "截图文件缺失，重下未成功"
@@ -1004,18 +1026,18 @@ func (s *ReviewService) AgentScreenshots(ctx context.Context, runID string) ([]a
 		item.OriginalUrl = api.Ptr("/api/review-agent/runs/" + runID + "/screenshots/" + a.ID)
 		// url 默认给审查尺寸（长边 ≤1536 的 JPEG，INT-186）：审查代理逐张读原图
 		// 会撑爆模型网关的请求上限；original_url 保留按需取原图的途径。下载失败
-		// 行不走这里，可选字段全部缺省。
-		item.Url = api.Ptr(*item.OriginalUrl + reviewScaleQuery())
+		// 行不走这里，可选字段全部缺省。bytes 按本轮张数均分（INT-193）。
+		item.Url = api.Ptr(*item.OriginalUrl + reviewScaleQuery(budget))
 		if w, h := reviewScreenshotDims(a.StoragePath); w > 0 && h > 0 {
 			item.Width = api.Ptr(w)
 			item.Height = api.Ptr(h)
 		}
 		// served 标示该地址返回哪种字节（判定与取图端点共用同一份逻辑
-		// reviewScreenshotServed，两处永不打架）：scaled = 预算内的审查尺寸变体；
-		// original_light = 原图字节但落在预算内（可正常读，最常见证据场景）；
-		// original_heavy = 原图字节且不受预算保护（超 64MP、嗅探/头解码不出，
-		// 审查员据此尽量不读）。
-		item.Served = api.Ptr(api.ReviewAgentScreenshotServed(reviewScreenshotServed(a.StoragePath, reviewScreenshotMaxEdge)))
+		// reviewScreenshotServed，同一预算参数，两处永不打架）：scaled = 预算内的
+		// 审查尺寸变体；original_light = 原图字节但落在预算内（可正常读，最常见
+		// 证据场景）；original_heavy = 原图字节且不受预算保护（超 64MP、嗅探/头
+		// 解码不出，审查员据此尽量不读）。
+		item.Served = api.Ptr(api.ReviewAgentScreenshotServed(reviewScreenshotServed(a.StoragePath, reviewScreenshotMaxEdge, budget)))
 		items = append(items, item)
 	}
 	return items, changed, nil
@@ -1029,10 +1051,11 @@ type AgentScreenshotFile struct {
 	Data []byte
 }
 
-// AgentScreenshotImage 取图片本体：scale 为 nil（无缩放参数）按原文件路径与
+// AgentScreenshotImage 取图片本体：scale=nil（无缩放参数）按原文件路径与
 // 存储 mime 返回；非 nil 时先过共享判定（reviewScreenshotServed）：
 // original_light/original_heavy 原图透传（与清单承诺一致）；served=scaled 行
-// 解码重编码，变体生成失败（像素解码/编码/字节闸）不再静默降级原图——清单已
+// 解码重编码，单张字节预算取请求参数 p.Bytes（清单按张数均分写入，
+// INT-193）；变体生成失败（像素解码/编码/字节闸）不再静默降级原图——清单已
 // 承诺该地址是预算内变体，降级等于把十几 MB 塞给代理，返回明确错误（40406）
 // 并记 Warn，代理读到错误记 unmeasurable。文件打不开（含不存在）按 40406。
 // 仅视觉运行；校验资产与运行同 (集成,repo,pr,head)；下载失败或路径缺失 →

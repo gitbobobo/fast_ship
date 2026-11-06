@@ -1,15 +1,15 @@
 package repository
 
-// INT-209 搜索延迟基准：万级 issue 夹具上测带 q 的列表 p50/p95，用于
-// LIKE 全表扫描与 FTS 改造的前后对比。常规 `go test ./...` 不跑基准，
-// 复测命令：
+// INT-209/INT-212 搜索延迟基准：万级 issue 夹具上测带 q 的列表 p50/p95，
+// 用于 LIKE 全表扫描与 FTS 改造、count/list 合并的前后对比。常规
+// `go test ./...` 不跑基准，复测命令：
 //
 //	go test ./internal/repository -run '^$' -bench BenchmarkIssueSearchLatency -benchtime 1x -v
 //
 // 夹具确定性（固定种子）：10k issue，正文长度接近真实分布（60% 短文
 // 200–800B、30% 中篇 1–3KB、10% 长文 4–15KB，中英混排 + 日志块），
 // 约一半挂 GitHub meta。基准复刻生产连接形状（临时文件库 + WAL +
-// synchronous(NORMAL)），测「CountFiltered + ListFiltered」一次完整列表。
+// synchronous(NORMAL)），测生产列表路径 ListFilteredWithTotal 一次完整列表。
 
 import (
 	"fmt"
@@ -221,11 +221,7 @@ func BenchmarkIssueSearchLatency(b *testing.B) {
 		var hits int64
 		for i := 0; i < iters; i++ {
 			start := time.Now()
-			total, err := repo.CountFiltered(listQuery)
-			if err != nil {
-				b.Fatalf("count %q: %v", q, err)
-			}
-			issues, err := repo.ListFiltered(listQuery, "updated_desc", 0, 20)
+			issues, total, err := repo.ListFilteredWithTotal(listQuery, "updated_desc", 0, 20)
 			if err != nil {
 				b.Fatalf("list %q: %v", q, err)
 			}
@@ -251,10 +247,7 @@ func BenchmarkIssueSearchLatency(b *testing.B) {
 	latencies := make([]float64, 0, iters)
 	for i := 0; i < iters; i++ {
 		start := time.Now()
-		if _, err := repo.CountFiltered(listOnly); err != nil {
-			b.Fatalf("count baseline: %v", err)
-		}
-		if _, err := repo.ListFiltered(listOnly, "updated_desc", 0, 20); err != nil {
+		if _, _, err := repo.ListFilteredWithTotal(listOnly, "updated_desc", 0, 20); err != nil {
 			b.Fatalf("list baseline: %v", err)
 		}
 		latencies = append(latencies, float64(time.Since(start).Microseconds())/1000.0)

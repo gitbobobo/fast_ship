@@ -38,10 +38,11 @@ func toIssueListQuery(projectID string, filters IssueListFilters) repository.Iss
 	}
 }
 
-// List 过滤、排序、分页全部下推 SQL（INT-106）：单次 COUNT + 单次分页 SELECT
-// （LIMIT/OFFSET，投影不含正文），meta/shipHook/未读/PR 聚合只按本页 Issue 查询，
-// 读盘量与项目 Issue 总量解耦。列表响应不携带正文（Body/BodyHtml 为空串，
-// 详情走 Get）。page 超过末页时返回空切片且 total 不变，与迁移前一致。
+// List 过滤、排序、分页全部下推 SQL（INT-106）：带 q 时单条 SQL 同时取 total
+// 与本页（INT-212，免付两次搜索过滤成本），无 q 时 COUNT + 分页 SELECT；
+// meta/shipHook/未读/PR 聚合只按本页 Issue 查询，读盘量与项目 Issue 总量解耦。
+// 列表响应不携带正文（Body/BodyHtml 为空串，详情走 Get）。page 超过末页时
+// 返回空切片且 total 不变，与迁移前一致。
 func (s *IssueService) List(projectID, userID string, filters IssueListFilters, page, pageSize int) ([]IssueResponse, int64, error) {
 	if _, err := s.projectRepo.FindByID(projectID, userID); err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -51,16 +52,11 @@ func (s *IssueService) List(projectID, userID string, filters IssueListFilters, 
 	}
 
 	query := toIssueListQuery(projectID, filters)
-	total, err := s.issueRepo.CountFiltered(query)
-	if err != nil {
-		return nil, 0, errs.ErrInternal
-	}
-
 	offset := (page - 1) * pageSize
 	if offset < 0 {
 		offset = 0
 	}
-	pageIssues, err := s.issueRepo.ListFiltered(query, filters.Sort, offset, pageSize)
+	pageIssues, total, err := s.issueRepo.ListFilteredWithTotal(query, filters.Sort, offset, pageSize)
 	if err != nil {
 		return nil, 0, errs.ErrInternal
 	}
