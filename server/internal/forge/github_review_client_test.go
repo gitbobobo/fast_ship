@@ -29,7 +29,7 @@ type recordingAPI struct {
 	reviewInput    githubapi.ReviewInput
 	status         statusCall
 	repoErr        error
-	pathExists     bool
+	entries        map[string]bool
 	pathErr        error
 }
 
@@ -110,9 +110,9 @@ func (r *recordingAPI) ListPullRequestFiles(_ context.Context, installationID in
 	return nil, true, nil
 }
 
-func (r *recordingAPI) PathExistsAtRef(_ context.Context, installationID int64, _, _, _ string) (bool, error) {
+func (r *recordingAPI) TreeEntriesAtRef(_ context.Context, installationID int64, _, _, _ string) (map[string]bool, error) {
 	r.mark(installationID)
-	return r.pathExists, r.pathErr
+	return r.entries, r.pathErr
 }
 
 func (r *recordingAPI) ResolveInstallation(_ context.Context, _ string) (int64, error) {
@@ -289,14 +289,20 @@ func TestGitHubReviewClientConvertsListAndSubmitTypes(t *testing.T) {
 func TestGitHubReviewClientTreeTruncated(t *testing.T) {
 	api := &recordingAPI{pathErr: githubapi.ErrTreeTruncated}
 	client := NewGitHubReviewClient(api, 1)
-	exists, err := client.PathExistsAtRef(context.Background(), "o/r", "x/y.go", "sha")
-	if exists || !errors.Is(err, ErrTreeTruncated) {
-		t.Fatalf("truncated = (%v, %v), want (false, ErrTreeTruncated)", exists, err)
+	entries, err := client.TreeEntriesAtRef(context.Background(), "o/r", "x", "sha")
+	if len(entries) != 0 || !errors.Is(err, ErrTreeTruncated) {
+		t.Fatalf("truncated = (%v, %v), want (empty, ErrTreeTruncated)", entries, err)
 	}
-	// 非截断错误原样透传，不误归一。
+	// 非截断错误原样透传，不误归一；清单本身透传不改写。
 	api.pathErr = errors.New("boom")
-	if _, err := client.PathExistsAtRef(context.Background(), "o/r", "x/y.go", "sha"); errors.Is(err, ErrTreeTruncated) {
+	if _, err := client.TreeEntriesAtRef(context.Background(), "o/r", "x", "sha"); errors.Is(err, ErrTreeTruncated) {
 		t.Fatalf("普通错误不应归一为 ErrTreeTruncated, got %v", err)
+	}
+	api.pathErr = nil
+	api.entries = map[string]bool{"a.go": true}
+	entries, err = client.TreeEntriesAtRef(context.Background(), "o/r", "", "sha")
+	if err != nil || len(entries) != 1 || !entries["a.go"] {
+		t.Fatalf("entries passthrough = %v %v", entries, err)
 	}
 }
 

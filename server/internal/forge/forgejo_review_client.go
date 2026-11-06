@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -127,12 +128,18 @@ func (c *ForgejoReviewClient) do(ctx context.Context, method, path string, in, o
 		return err
 	}
 	defer resp.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, respBodyMaxBytes))
+	// 多读 1 字节区分「静默截断」与「完整响应」：截断的 JSON 会在
+	// Unmarshal 报解析错，调用方无法把它与真正的畸形响应区分——
+	// 目录清单调用方需要把超限归一为「不可判定」而非调用失败。
+	data, err := io.ReadAll(io.LimitReader(resp.Body, respBodyMaxBytes+1))
 	if err != nil {
 		return err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return c.statusErr(method, path, resp, data)
+		return c.statusErr(method, path, resp, data[:min(len(data), respBodyMaxBytes)])
+	}
+	if len(data) > respBodyMaxBytes {
+		return fmt.Errorf("%w: forge: %s %s 响应超过 %d 字节读入上限", errRespTooLarge, method, path, respBodyMaxBytes)
 	}
 	if out != nil && len(data) > 0 {
 		if err := json.Unmarshal(data, out); err != nil {
@@ -144,6 +151,10 @@ func (c *ForgejoReviewClient) do(ctx context.Context, method, path string, in, o
 
 // respBodyMaxBytes 响应读取上限：diff/评论最大几十 MB 量级，兜底防异常端点。
 const respBodyMaxBytes = 64 << 20
+
+// errRespTooLarge do() 的 2xx 响应超 respBodyMaxBytes 的哨兵：调用方据此
+// 把「清单不可判定」与真正的解析/调用失败区分（目录清单→ErrTreeTruncated）。
+var errRespTooLarge = errors.New("forge: response body too large")
 
 // forgejoPagingLimit / forgejoMaxPages 列表分页页大小与页数上限：50 × 20 页
 // = 1000 条，与 GitHub 适配器的 per_page=100 × 10 页同量级。
@@ -607,40 +618,66 @@ func (c *ForgejoReviewClient) GetRepository(ctx context.Context, repoFullName st
 	return c.do(ctx, http.MethodGet, "/repos/"+repo, nil, nil)
 }
 
-// PathExistsAtRef 用 contents 端点判存在（Forgejo 无 GitHub 的
-// git/trees/{ref}:{dir} 取子树语法）：2xx → 存在（文件/目录同算），404 →
-// 不存在。非规范路径（前导 /、空段、.、..）本地判不存在不发请求——与
-// githubapi 实现同口径，防路径别名绕过文件归属校验。
-func (c *ForgejoReviewClient) PathExistsAtRef(ctx context.Context, repoFullName, path, ref string) (bool, error) {
+// TreeEntriesAtRef 用 contents 端点列目录（Forgejo 无 GitHub 的
+// git/trees/{ref}:{dir} 取子树语法）：2xx 且是数组 → 取每项 name 成集合；
+// 2xx 但单个对象 → dir 实际是文件，没有子条目，返回空集；404 探根目录
+// 消歧——ref 级失败按调用失败上报，不能误报成「目录不存在」诱导 Agent
+// 重写合法 findings。dir 含空段、.、.. 按目录不存在返回空集不发请求——
+// 与 githubapi 实现同口径，防路径别名绕过文件归属校验。
+func (c *ForgejoReviewClient) TreeEntriesAtRef(ctx context.Context, repoFullName, dir, ref string) (map[string]bool, error) {
 	repo, err := repoPath(repoFullName)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
-	segs := strings.Split(path, "/")
-	for i, s := range segs {
-		if s == "" || s == "." || s == ".." {
-			return false, nil
+	contentsPath := "/repos/" + repo + "/contents/"
+	if dir != "" {
+		segs := strings.Split(dir, "/")
+		escaped := make([]string, 0, len(segs))
+		for _, s := range segs {
+			if s == "" || s == "." || s == ".." {
+				return map[string]bool{}, nil
+			}
+			escaped = append(escaped, pathSegment(s))
 		}
-		segs[i] = pathSegment(s)
+		contentsPath += strings.Join(escaped, "/")
 	}
 	qref := url.QueryEscape(ref)
-	err = c.do(ctx, http.MethodGet,
-		"/repos/"+repo+"/contents/"+strings.Join(segs, "/")+"?ref="+qref,
-		nil, nil)
-	if err == nil {
-		return true, nil
+	var raw json.RawMessage
+	err = c.do(ctx, http.MethodGet, contentsPath+"?ref="+qref, nil, &raw)
+	if err != nil {
+		// 目录清单超读入上限——与 GitHub 侧 truncated=true 同属不完整
+		// 证据：不可判定，不可当缺席证明，也不该 50200 卡死重试。
+		if errors.Is(err, errRespTooLarge) {
+			return nil, fmt.Errorf("%w: %q 的目录清单超读入上限，存在性不可判定", ErrTreeTruncated, dir)
+		}
+		if !IsNotFound(err) {
+			return nil, err
+		}
+		// contents 404 恒有歧义（目录不存在 vs ref/仓库不可达）：根级请求
+		// 本身 404 即 ref 无效；否则探根目录区分，根也在 → dir 确实缺。
+		if dir == "" {
+			return nil, err
+		}
+		if rootErr := c.do(ctx, http.MethodGet, "/repos/"+repo+"/contents/?ref="+qref, nil, nil); rootErr != nil {
+			if errors.Is(rootErr, errRespTooLarge) {
+				return nil, fmt.Errorf("%w: 根目录清单超读入上限，%q 的存在性不可判定", ErrTreeTruncated, dir)
+			}
+			return nil, rootErr
+		}
+		return map[string]bool{}, nil
 	}
-	if !IsNotFound(err) {
-		return false, err
+	var items []struct {
+		Name string `json:"name"`
 	}
-	// contents 404 恒有歧义（路径不存在 vs ref/仓库不可达）：探根目录区分，
-	// ref 级失败按调用失败上报，不能误报成「文件不存在」诱导 Agent 重写
-	// 合法 findings。
-	rootErr := c.do(ctx, http.MethodGet, "/repos/"+repo+"/contents/?ref="+qref, nil, nil)
-	if rootErr != nil {
-		return false, rootErr
+	if json.Unmarshal(raw, &items) != nil {
+		// 单文件对象：dir 实际是文件而非目录——没有子条目。
+		return map[string]bool{}, nil
 	}
-	return false, nil
+	entries := make(map[string]bool, len(items))
+	for _, it := range items {
+		entries[it.Name] = true
+	}
+	return entries, nil
 }
 
 // ListOpenPullRequests open PR 枚举（轮询补漏专用，不在 ReviewClient 方法面）。
