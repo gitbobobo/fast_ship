@@ -1975,7 +1975,6 @@ func priorOpenBlocks(level *string) bool {
 	return true
 }
 
-// visualFailureCount 视觉结论里仍未处理的问题条数：本轮 findings 的
 // visualFailureCount 单个视觉结论的失败计数（findings 的
 // blocker/worth_fixing + prior 里 status=open 且按 priorOpenBlocks 阻塞的条目
 // ——提示词契约让未解决项只标 prior(open)，未解决与否的真相就在这一段；兼容
