@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"errors"
 
 	"github.com/godbobo/fast_ship/server/internal/config"
@@ -77,6 +78,12 @@ func (c *ProjectCredentials) decryptToken(project *model.Project, tokenID, purpo
 		}
 		c.logger.Error("load github token failed",
 			zap.String("project_id", project.ID), zap.String("token_id", tokenID), zap.Error(err))
+		// 仅 ctx 取消/超时保留底层错误链（INT-187）：sync 阶段 1 据此归类
+		// 「读取超时」；其余读库失败维持 ErrInternal 单例，不破坏调用方
+		// errors.Is(err, errs.ErrInternal) 的身份判断。
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, errs.Wrap(errs.ErrInternal.Code, errs.ErrInternal.Message, err)
+		}
 		return nil, errs.ErrInternal
 	}
 	tokenBytes, err := crypto.Decrypt(token.TokenEncrypted, []byte(c.cfg.Encryption.Key))

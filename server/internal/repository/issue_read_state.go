@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"context"
 	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/model"
@@ -15,6 +16,15 @@ type IssueReadStateRepository struct {
 
 func NewIssueReadStateRepository(db *gorm.DB) *IssueReadStateRepository {
 	return &IssueReadStateRepository{db: db}
+}
+
+// WithContext 返回绑定 ctx 的仓库视图：查询的借连接等待随 ctx 取消
+// （INT-187 issue 列表未读计数的口径用）。
+func (r *IssueReadStateRepository) WithContext(ctx context.Context) *IssueReadStateRepository {
+	if r == nil || ctx == nil {
+		return r
+	}
+	return &IssueReadStateRepository{db: r.db.WithContext(ctx)}
 }
 
 func (r *IssueReadStateRepository) Get(userID, issueID string) (*model.IssueReadState, error) {

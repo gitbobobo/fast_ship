@@ -36,7 +36,9 @@ func (s *BotService) execIssueList(_ *model.Bot, _ context.Context, call *model.
 		Workflow: args.Workflow,
 		Sort:     args.Sort,
 	}
-	items, total, err := s.issues.List(args.ProjectID, s.botUserIDOf(call.BotID), filters, page, pageSize)
+	// fs_issue 工具不在热点端点清单（INT-187）内：传 nil 让 List 退化为
+	// Background，读库行为与迁移前一致（不随 bot 调用取消）。
+	items, total, err := s.issues.List(nil, args.ProjectID, s.botUserIDOf(call.BotID), filters, page, pageSize)
 	if err != nil {
 		return "", err
 	}

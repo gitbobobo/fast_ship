@@ -92,7 +92,7 @@ func (h *IssueHandler) List(c *gin.Context) {
 		pageSize = 20
 	}
 
-	items, total, err := h.issueService.List(projectID, userID, filters, page, pageSize)
+	items, total, err := h.issueService.List(c.Request.Context(), projectID, userID, filters, page, pageSize)
 	if err != nil {
 		middleware.HandleAppError(c, err)
 		return
@@ -119,7 +119,7 @@ func (h *IssueHandler) Count(c *gin.Context) {
 	userID := middleware.GetUserID(c)
 	filters := parseIssueListFilters(c)
 
-	count, err := h.issueService.CountIssues(projectID, userID, filters)
+	count, err := h.issueService.CountIssues(c.Request.Context(), projectID, userID, filters)
 	if err != nil {
 		middleware.HandleAppError(c, err)
 		return

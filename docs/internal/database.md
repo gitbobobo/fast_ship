@@ -79,3 +79,13 @@ INT-129 新增两处：
 事务回滚则数据不变直接退出；恢复手段是回退上一版镜像 + 备份文件。
 
 新增外键到存量子表时一律走这套机制：给模型补 belongs-to 字段、把期望外键加进 `legacyFKTables`，不要指望 AutoMigrate 自己处理悬空行。
+
+## 读库随请求 ctx 取消的口径（INT-187）
+
+`SetMaxOpenConns(1)` + `busy_timeout` 只覆盖 SQLite 锁等待，借连接排队（池级等待）没有随请求取消的上限——客户端已断开的读库请求仍会无限排下去。口径拍板为**只对热点端点启用**「随请求 ctx 取消」：不做全应用统一迁移，不改连接池大小与 busy_timeout，不批量给其余仓库方法补 ctx；写库路径一律不带 ctx（已付出的写动作不随浏览器断开丢弃，与全站其余端点同口径）；新写的仓库方法默认接受 ctx。
+
+统一入口三层：仓库 `WithContext(ctx)` 返回绑定 ctx 的浅视图（nil 接收者/nil ctx 原样返回，方法集不变）；service `IssueService.withRepos(ctx)` 浅拷贝出带 ctx 视图的服务（issue/project/internalMeta/githubRepoLabel/readState/pullRequest/forgeIntegration 七仓 + credentials 与 shipHookService 内嵌的仓库，nil ctx 退化 Background）；`loadStoreErr(err)` 统一归类——ctx 错误（Canceled/DeadlineExceeded）折成 `[50000] 读取超时，请稍后重试` 并经 `errs.Wrap` 保留错误链（调用方与测试仍能 `errors.Is` 到原始 ctx 错误），其余按 `ErrInternal`。`gorm.ErrRecordNotFound → 404 类` 的判断保持在归类之前。
+
+已迁热点：issue 列表与计数（`List`/`CountIssues`，归属校验 + 全部分页读库）；批量关闭的前置读库（`BatchCloseDoneIssues` 的项目查找与 done 列表，关闭事务/GitHub PATCH 照旧不入此视图）；关联 PR sync 的阶段 1 前置读库（`SyncIssuePullRequests`，独立 30s 预算 `pullRequestSyncResolveTimeout`，拉取与写回不动）。
+
+基线核对（2026-11-06，/api/self-logs 近 30 天 WARN+）：无读库超时/排队症状，仅 github 模块 2 条对 GitHub 的 HTTP 超时——故只迁热点，不做全应用迁移；后续出现读库超时告警时再按同一机制扩清单。

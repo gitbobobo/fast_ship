@@ -290,7 +290,7 @@ func TestIssueServiceList_SQLPushdownConsistencyMatrix(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			items, total, err := svc.issueService.List(project.ID, user.ID, tc.filters, tc.page, tc.pageSize)
+			items, total, err := svc.issueService.List(nil, project.ID, user.ID, tc.filters, tc.page, tc.pageSize)
 			if err != nil {
 				t.Fatalf("list: %v", err)
 			}
@@ -321,7 +321,7 @@ func TestIssueServiceCountIssues_MatchesListTotals(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := svc.issueService.CountIssues(project.ID, user.ID, tc.filters)
+			got, err := svc.issueService.CountIssues(nil, project.ID, user.ID, tc.filters)
 			if err != nil {
 				t.Fatalf("count issues: %v", err)
 			}
@@ -343,7 +343,7 @@ func TestIssueServiceList_OmitsBodyButKeepsDetail(t *testing.T) {
 		gh: &listFixtureGHMeta{number: 101, labels: `["bug"]`, assignees: `[{"login":"alice"}]`, milestone: `{"title":"S1"}`, commentsCount: 2},
 	}})
 
-	items, total, err := svc.issueService.List(project.ID, user.ID, IssueListFilters{}, 1, 20)
+	items, total, err := svc.issueService.List(nil, project.ID, user.ID, IssueListFilters{}, 1, 20)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -380,7 +380,7 @@ func TestIssueServiceList_EmptyProject(t *testing.T) {
 	user := createTestUser(t, svc.db, "user-1")
 	project := createTestProject(t, svc.db, user.ID)
 
-	items, total, err := svc.issueService.List(project.ID, user.ID, IssueListFilters{Query: "anything"}, 2, 20)
+	items, total, err := svc.issueService.List(nil, project.ID, user.ID, IssueListFilters{Query: "anything"}, 2, 20)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -495,13 +495,13 @@ func TestIssueServiceList_JSONColumnBadDataAndLegacyShapes(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			items, total, err := svc.issueService.List(project.ID, user.ID, tc.filters, 1, 100)
+			items, total, err := svc.issueService.List(nil, project.ID, user.ID, tc.filters, 1, 100)
 			if err != nil {
 				t.Fatalf("list: %v", err)
 			}
 			expectListSeqs(t, items, total, int64(len(tc.wantSeqs)), tc.wantSeqs)
 
-			count, err := svc.issueService.CountIssues(project.ID, user.ID, tc.filters)
+			count, err := svc.issueService.CountIssues(nil, project.ID, user.ID, tc.filters)
 			if err != nil {
 				t.Fatalf("count issues: %v", err)
 			}
