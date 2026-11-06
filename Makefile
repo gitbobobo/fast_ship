@@ -55,10 +55,10 @@ test: test-server test-web
 test-server:
 	@cd server && go test ./...
 
-# 竞态检测为可选目标，不进 test/test-server 必需门禁：internal/service 在
-# -race 下单包即越过默认 10m 超时（INT-205 的测试基建债，句柄与 goroutine
-# 累积），全量实测约 10.5min 且高负载会偶发超时。修完 INT-205 后再评估
-# 是否纳入必需检查（INT-197）。
+# 竞态检测为可选目标，不进 test/test-server 必需门禁（INT-197 待评估）：
+# INT-205 修复后 internal/service 单包 -race 实测 504-680s（同机三连，负载
+# 波动明显），最差仍越过默认 10m，显式 -timeout 20m 兑底；包级 TestMain
+# 泄漏守卫保证结束时无 connectionOpener/worker/loop 残留。
 test-server-race:
 	@cd server && go test -race -timeout 20m ./...
 

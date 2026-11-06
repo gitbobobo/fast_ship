@@ -17,8 +17,17 @@
 
 `-race` 全量比无 race 慢约 7 倍，且瓶颈集中在 `internal/service`：该包测试从不关闭 gorm SQLite 句柄、`BotService.Start` 无对应 `Stop`，goroutine 与内存随用例数累积（panic 转储约 1400+ goroutine，详见 INT-205）。高负载下运行会以超时 panic 收场，被点名的测试随负载漂移——门禁信号不可靠。
 
-`internal/service` 恰恰是并发敏感包，「只对敏感包启用 -race」省不下它的成本，等价于全量。所以结论：
+### INT-205 修复后的现状（2026-11-07 同机实测，darwin/arm64 go1.27.3）
 
-- 现阶段 `-race` 只做**可选目标** `make test-server-race`，显式 `-timeout 20m` 兜底，不挂进 `test`/`test-server`。
-- 修完 INT-205（测试关闭 DB、`BotService.Stop`）后重测全量 `-race` 耗时，再评估是否纳入必需检查。
+INT-205 修掉了上述基建债：全部测试句柄走 `t.Cleanup` 关闭（含 selflog Store，补了 `Close`）、`BotService.Stop` 收敛全部后台 goroutine、包级 `TestMain` 泄漏守卫让「测试结束后仍有 connectionOpener / worker / loop 残留」直接 FAIL。同机对照（main d22ed874）：
+
+| 运行 | 耗时 | 结果 |
+| --- | --- | --- |
+| 修复前 `go test -race -count=1 ./internal/service/` | 525s | 泄漏守卫报 1458 connectionOpener + 100 workerLoop + 5 maintWorkerLoop + 5 条 loop 残留；另有既有用例在服务器 goroutine 回调里 `t.Fatalf` panic 整包（同 PR 修复） |
+| 修复后连跑 3 次 | 504s / 557s / 680s | 全部通过，守卫零残留 |
+
+结论：
+
+- **门禁价值在确定性而非速度**：-race 的开销主要在插桩，句柄/goroutine 泄漏的消除在本机负载噪声（±30%）下体现不出可靠的耗时下降；但它让「超时 panic 随负载漂移、点名测试漂移」的失效模式失去土壤——最差实测 680s 仍越过默认 10m，所以 `-race` 保持**可选目标**，显式 `-timeout 20m` 兜底（20m 内余量充足），是否纳入必需检查仍由 INT-197 评估。
+- 泄漏守卫是常驻回归门：任何新测试忘了关句柄或起了不受 Stop 管的后台 goroutine，包会直接 FAIL 并打出样本栈。
 - 不设跳过名单。
