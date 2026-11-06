@@ -64,10 +64,10 @@ func (h *ReviewAgentHandler) Screenshots(c *gin.Context) {
 }
 
 // ScreenshotImage GET /api/review-agent/runs/:runId/screenshots/:assetId
-// max/format/quality 任一给出时服务端出缩放变体（INT-186，清单默认给审查
-// 尺寸地址）；全空按原图字节流式下发。
+// max/format/quality/bytes 任一给出时服务端出缩放变体（INT-186，清单默认给
+// 审查尺寸地址，bytes 按本轮张数均分写入，INT-193）；全空按原图字节流式下发。
 func (h *ReviewAgentHandler) ScreenshotImage(c *gin.Context) {
-	scale, err := service.ParseReviewScaleQuery(c.Query("max"), c.Query("format"), c.Query("quality"))
+	scale, err := service.ParseReviewScaleQuery(c.Query("max"), c.Query("format"), c.Query("quality"), c.Query("bytes"))
 	if err != nil {
 		response.BadRequest(c, errs.ErrReviewResultInvalid.Code, "缩放参数非法: "+err.Error())
 		return
