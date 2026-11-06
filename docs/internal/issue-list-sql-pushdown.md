@@ -142,7 +142,10 @@ INTEGER 的双向唯一映射（doc 普通 INTEGER PRIMARY KEY，issue_id UNIQUE
 「有 issues 行、无映射行」补 issue_fts_docs，「有映射行、无 FTS 行」按 doc 重插
 FTS。回填前先比三方计数（issues / issue_fts_docs / issues_fts），一致则直接
 跳过——两个 NOT IN 反连接都要扫全表，无缺口也付全量成本（十万行量级实测
-约 200ms），计数不一致才对账。main.go 在 `EnsureBotSchema` 同位置之后调用，
+约 200ms），计数不一致才对账。取舍：计数相等只是必要条件，「缺一行 FTS 行 +
+多一行孤儿」这类等量缺口不会被自愈（正常写路径不可能产生，只可能来自人工
+修库或未来重建迁移，应手工清理后重跑 ensure；精确验证与对账同阶成本，不为
+它放弃快速路径）。main.go 在 `EnsureBotSchema` 同位置之后调用，
 失败 `fatal`；`--dry-run` 路径在此之前已 return，不受影响。
 
 **触发器定义按原文比对收敛**：三条触发器不用 IF NOT EXISTS，ensure 按

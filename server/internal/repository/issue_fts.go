@@ -174,7 +174,11 @@ func EnsureIssueFTSSchema(db *gorm.DB) error {
 		// 行、无 FTS 行 → 按映射 doc 重插 FTS。旧形态 DROP 重建后 FTS 为空，两条
 		// 连跑即完成全量重建。三方计数一致时直接跳过（启动快速路径）：两个
 		// NOT IN 反连接都要扫全表，无缺口也付全量成本，十万行量级实测 ~200ms；
-		// 计数不一致才对账。
+		// 计数不一致才对账。注意快速路径的取舍：计数相等只是必要条件，「缺一行
+		// FTS 行 + 多一行孤儿 FTS 行」这类等量缺口不会被自愈——正常写路径不可能
+		// 产生（触发器成对维护、外键级联有测试锁定），只可能来自人工修库或未来
+		// 的 issues 重建迁移，应手工清理孤儿行后重跑本函数；精确验证与对账同阶
+		// 成本，为它放弃快速路径就失去意义（INT-209 审查 R2 实测确认该边界）。
 		var issueCount, docCount, ftsCount int64
 		if err := tx.Model(&model.Issue{}).Count(&issueCount).Error; err != nil {
 			return fmt.Errorf("issue fts count issues: %w", err)
