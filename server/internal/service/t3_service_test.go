@@ -1353,6 +1353,45 @@ func listUntil(t *testing.T, e *t3TestEnv, userID string, until func(*T3ThreadLi
 	}
 }
 
+// waitArchiveReady 等到归档面按需快照落地且可信（ArchiveErr==nil）。归档
+// 面是后台补齐（INT-173），活跃面就绪不蕴含归档面可信；断言依赖「两面都
+// 没有」或归档行存在之前，必须先等这个前提成立，否则 G1 会如实回可重试
+// 的 50202（单 P 调度下即 INT-211 的确定性失败）。轮询用 PeekShell：它
+// 自身会 kick 一次后台拉取，等待期间不需要额外的驱动手段。
+func waitArchiveReady(t *testing.T, e *t3TestEnv, userID, envID string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		view, err := e.th.PeekShell(userID, envID)
+		if err == nil && view != nil && view.State == t3ShellReady && view.Snaps != nil && view.Snaps.ArchiveErr == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for archive face ready, last state=%v snaps=%v", viewStateName(view), view != nil && view.Snaps != nil)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// viewStateName 把视图状态翻成可读名（仅测试失败输出用）。
+func viewStateName(view *t3ShellView) string {
+	if view == nil {
+		return "<nil>"
+	}
+	switch view.State {
+	case t3ShellReady:
+		return "ready"
+	case t3ShellSyncing:
+		return "syncing"
+	case t3ShellStale:
+		return "stale"
+	case t3ShellFailed:
+		return fmt.Sprintf("failed(%v)", view.Err)
+	default:
+		return fmt.Sprintf("unknown(%d)", view.State)
+	}
+}
+
 func TestT3ThreadsAggregationAndErrorIsolation(t *testing.T) {
 	e := setupT3ServiceTest(t)
 	userID := e.createUser(t)
@@ -1773,6 +1812,10 @@ func TestT3ThreadDetailNormalization(t *testing.T) {
 		t.Fatalf("rolled-back ghost item must not appear")
 	}
 
+	// 归档面按需快照（INT-173）由后台预热，与首读无先后保证；单 P 调度下
+	// 本断言可能跑到快照落地之前，G1 会如实回 50202「归档尚未同步完成」
+	// 而不是 40418。先等归档面可信，「两面都没有」才是可下结论的完整前提。
+	waitArchiveReady(t, e, userID, env.Id)
 	// 上游 404 → 40418
 	if _, err := e.th.Detail(ctx, userID, env.Id, "th-missing"); err == nil || t3ErrCode(err) != errs.ErrT3ThreadNotFound.Code {
 		t.Fatalf("expected thread not found, got %v", err)
@@ -1855,7 +1898,9 @@ func TestT3ThreadDetailUsesTrustedShell(t *testing.T) {
 		t.Fatalf("child detail thread = %+v", child.Thread)
 	}
 
-	// 归档线程详情：只在归档快照里 → archived
+	// 归档线程详情：只在归档快照里 → archived。归档面按需快照后台预热，
+	// 先等它可信再断言（同 TestT3ThreadDetailNormalization 的 G1 前提）。
+	waitArchiveReady(t, e, userID, env.Id)
 	old, err := e.th.Detail(ctx, userID, env.Id, "th-old")
 	if err != nil {
 		t.Fatalf("archived detail: %v", err)
@@ -1895,6 +1940,9 @@ func TestT3ThreadDetailUsesTrustedShell(t *testing.T) {
 	e.fake.mu.Lock()
 	e.fake.projections["th-ghost"] = wireProjection(appThreadFixture("th-ghost", "幽灵", nil), oneRow("th-ghost", "g1"))
 	e.fake.mu.Unlock()
+	// 两面部没有的结论以归档面可信为前提（TTL 内早已就绪，重等一次是零成
+	// 本的自明前置，见 waitArchiveReady）。
+	waitArchiveReady(t, e, userID, env.Id)
 	_, err = e.th.Detail(ctx, userID, env.Id, "th-ghost")
 	if err == nil || t3ErrCode(err) != errs.ErrT3Upstream.Code {
 		t.Fatalf("expected explicit failure when shell is unreadable, got %v", err)
