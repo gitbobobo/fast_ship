@@ -98,6 +98,72 @@ func TestIssueListWithTotal_Equivalence(t *testing.T) {
 	}
 }
 
+// TestIssueListWithTotal_OffsetEquivalence 补充分页边界：第二页、offset 恰好
+// 等于总数、含 NUL 的 LIKE 分支查询、limit<=0（不加 LIMIT，镜像 ListFiltered），
+// total 与页内容都必须与两次查询一致。
+func TestIssueListWithTotal_OffsetEquivalence(t *testing.T) {
+	repo, projectID := setupIssueListWithTotalTestDB(t)
+	lq := IssueListQuery{ProjectID: projectID, Query: "webhook"}
+	wantTotal, err := repo.CountFiltered(lq)
+	if err != nil {
+		t.Fatalf("count: %v", err)
+	}
+
+	// 第二页：与 ListFiltered 的第二页逐条一致。
+	wantPage, err := repo.ListFiltered(lq, "updated_desc", 10, 10)
+	if err != nil {
+		t.Fatalf("list page2: %v", err)
+	}
+	gotPage, gotTotal, err := repo.ListFilteredWithTotal(lq, "updated_desc", 10, 10)
+	if err != nil {
+		t.Fatalf("with total page2: %v", err)
+	}
+	if gotTotal != wantTotal || len(gotPage) != len(wantPage) {
+		t.Fatalf("第二页不一致：want total=%d rows=%d，got total=%d rows=%d", wantTotal, len(wantPage), gotTotal, len(gotPage))
+	}
+	for i := range wantPage {
+		if gotPage[i].ID != wantPage[i].ID {
+			t.Fatalf("第二页 page[%d] 不一致：want %s got %s", i, wantPage[i].ID, gotPage[i].ID)
+		}
+	}
+
+	// offset 恰好等于总数：空切片 + total 不变。
+	page, total, err := repo.ListFilteredWithTotal(lq, "updated_desc", int(wantTotal), 10)
+	if err != nil {
+		t.Fatalf("with total offset==total: %v", err)
+	}
+	if len(page) != 0 || total != wantTotal {
+		t.Fatalf("offset==total 应返回空切片且 total 不变：got rows=%d total=%d want %d", len(page), total, wantTotal)
+	}
+
+	// 含 NUL 的查询走 LIKE 分支（trigram 无法表达 NUL），窗口路径语义不变。
+	nulQuery := IssueListQuery{ProjectID: projectID, Query: "ab\x00cd"}
+	nullWantTotal, err := repo.CountFiltered(nulQuery)
+	if err != nil {
+		t.Fatalf("count nul: %v", err)
+	}
+	nullWantPage, err := repo.ListFiltered(nulQuery, "updated_desc", 0, 10)
+	if err != nil {
+		t.Fatalf("list nul: %v", err)
+	}
+	nullGotPage, nullGotTotal, err := repo.ListFilteredWithTotal(nulQuery, "updated_desc", 0, 10)
+	if err != nil {
+		t.Fatalf("with total nul: %v", err)
+	}
+	if nullGotTotal != nullWantTotal || len(nullGotPage) != len(nullWantPage) {
+		t.Fatalf("NUL 查询不一致：want total=%d rows=%d，got total=%d rows=%d", nullWantTotal, len(nullWantPage), nullGotTotal, len(nullGotPage))
+	}
+
+	// limit<=0 不加 LIMIT：窗口路径返回全部命中，total 一致。
+	allPage, allTotal, err := repo.ListFilteredWithTotal(lq, "updated_desc", 0, 0)
+	if err != nil {
+		t.Fatalf("with total limit0: %v", err)
+	}
+	if allTotal != wantTotal || len(allPage) != int(wantTotal) {
+		t.Fatalf("limit<=0 应返回全部命中：got rows=%d total=%d want %d", len(allPage), allTotal, wantTotal)
+	}
+}
+
 // TestIssueListWithTotal_PageBeyondEnd 翻页超过末页时返回空切片且 total 不变：
 // 窗口行集为空拿不到聚合值，offset>0 必须回退 COUNT 补上 total。
 func TestIssueListWithTotal_PageBeyondEnd(t *testing.T) {
@@ -180,10 +246,47 @@ func explainIssueSearchWithTotal(t *testing.T, repo *IssueRepository, projectID,
 	return details
 }
 
-// TestIssueListWithTotal_ExplainPlan 锁执行计划：≥3 rune 查询的合并 SQL 仍走
-// issues_fts MATCH + issue_fts_docs 映射，1–2 rune 不得触碰 FTS。
+// TestIssueListWithTotal_ExplainPlan 锁执行计划：先用 sqlRecorder 捕获
+// ListFilteredWithTotal 实际执行的 SQL（生产方法本身，非测试重建），断言窗口
+// 投影、FTS 子查询与分页子句都在；再对同形态 SQL 跑 EXPLAIN QUERY PLAN，
+// ≥3 rune 仍走 issues_fts MATCH + issue_fts_docs 映射，1–2 rune 不得触碰 FTS。
 func TestIssueListWithTotal_ExplainPlan(t *testing.T) {
 	repo, projectID := setupIssueListWithTotalTestDB(t)
+
+	for _, tc := range []struct {
+		query      string
+		wantFTSSQL bool
+	}{{query: "webhook", wantFTSSQL: true}, {query: "ab", wantFTSSQL: false}} {
+		recorder := &sqlRecorder{}
+		wrapped := &IssueRepository{db: repo.db.Session(&gorm.Session{Logger: recorder})}
+		lq := IssueListQuery{ProjectID: projectID, Query: tc.query}
+		page, total, err := wrapped.ListFilteredWithTotal(lq, "updated_desc", 0, 10)
+		if err != nil {
+			t.Fatalf("with total %q: %v", tc.query, err)
+		}
+		if total == 0 || len(page) == 0 {
+			t.Fatalf("夹具应命中：q=%q total=%d rows=%d", tc.query, total, len(page))
+		}
+		var listSQL string
+		for _, sql := range recorder.queries {
+			if strings.Contains(sql, "COUNT(*) OVER() AS match_total") {
+				listSQL = sql
+				break
+			}
+		}
+		if listSQL == "" {
+			t.Fatalf("生产方法未发出窗口 SQL（%d 条）：q=%q", len(recorder.queries), tc.query)
+		}
+		if strings.Contains(listSQL, " body") || strings.Contains(listSQL, "body_html") {
+			t.Fatalf("生产窗口 SQL 投影不得携带正文：%s", listSQL)
+		}
+		if !strings.Contains(listSQL, "LIMIT") {
+			t.Fatalf("生产窗口 SQL 缺 LIMIT：%s", listSQL)
+		}
+		if strings.Contains(listSQL, "issues_fts") != tc.wantFTSSQL {
+			t.Fatalf("q=%q 生产 SQL 的 FTS 子查询出现与否不符（want %v）：%s", tc.query, tc.wantFTSSQL, listSQL)
+		}
+	}
 
 	details := explainIssueSearchWithTotal(t, repo, projectID, "webhook")
 	ftsHit, docsSeen := false, false

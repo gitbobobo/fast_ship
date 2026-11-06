@@ -266,8 +266,9 @@ INT-209 交接的后续评估条目，三个候选方向的数据依据与结论
    在带 q 时给 `ListFiltered` 的投影追加 `COUNT(*) OVER() AS match_total`，
    单条 SQL 同时返回 total 与本页（SQLite ≥3.25，glebarez/modernc 驱动支持，
    空窗口定义为整个结果集，语义与 COUNT(*) 同一 WHERE 完全一致）；`IssueService.List`
-   改走该方法。窗口形态的执行计划不变：EXPLAIN 仍见 `SCAN issues_fts VIRTUAL
-   TABLE INDEX 0:M` + `issue_fts_docs` 主键点查（有测试锁定）。
+   改走该方法。窗口形态的 FTS 子查询访问路径不变：EXPLAIN 仍见 `SCAN issues_fts
+   VIRTUAL TABLE INDEX 0:M` + `issue_fts_docs` 主键点查（窗口聚合本身在排序层
+   新增执行节点；生产方法实际执行的 SQL 形状有测试锁定）。
 3. **维持现状——否**。上面的合并收益以实测数据推翻了「收益/成本比已合理」的
    判断，且实现面只有一处查询编排。
 
@@ -290,10 +291,10 @@ INT-209 交接的后续评估条目，三个候选方向的数据依据与结论
   （102.6 vs 122.4ms，验收线「不再高于」达成）；1–2 rune 分支与选择性查询全部
   变快，无回退。绝对值随机器负载波动，背靠背相对值为唯一有效口径（INT-209
   同一结论）。
-- **无 q 列表保持两次查询**：无 q 时过滤只剩 project_id，没有可复用的搜索
-  成本；窗口函数会强制全量物化排序（无法用 ORDER BY+LIMIT 的 top-N 堆），
-  万级实测 +8%（37.4→40.4ms）。`ListFilteredWithTotal` 内部按 `q.Query == ""`
-  分流，生产最常见路径零变化。
+- **无 q 列表保持两次查询**（可叠加 state/label 等其他筛选）：窗口函数的收益
+  只来自消除第二次搜索过滤，无 q 时没有这笔成本；且 ORDER BY+LIMIT 的 top-N
+  堆排序会被窗口强制升级成全量物化（万级无筛选实测 +8%，37.4→40.4ms）。
+  `ListFilteredWithTotal` 内部按 `q.Query == ""` 分流，未测得收益的路径零变化。
 - **total 语义不变**：COUNT(*) OVER() 与 COUNT(*) 同一 WHERE、join 不行扇出，
   六类查询（MATCH/LIKE/数字/作者/零命中/无 q）的等价性有测试锁定。
 - **超末页边界**：窗口行集为空时聚合值拿不到——零命中（offset=0）直接记 0；

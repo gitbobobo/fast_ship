@@ -365,9 +365,10 @@ func (r *IssueRepository) ListFiltered(q IssueListQuery, sortKey string, offset,
 // COUNT(*) OVER() 同时取 total 与本页：q 搜索的过滤成本（≥3 rune 的 FTS MATCH、
 // 1–2 rune 的正文全表 LIKE）原先由 count 与 list 各付一次，高命中查询下占了
 // 总延迟的一半以上，合并后只付一次（万级夹具实测：release checklist
-// 148.3→102.6ms，旧 LIKE 基线 122.4ms；ab 116.4→62.3ms）。无 q 时过滤只剩
-// project_id，没有可复用的搜索成本，窗口函数反而把 top-20 堆排序升级成全量
-// 物化（万级实测 +8%），保持两次查询不变。total 语义不变：仍是过滤后总数
+// 148.3→102.6ms，旧 LIKE 基线 122.4ms；ab 116.4→62.3ms）。无 q 时窗口函数
+// 没有可消除的搜索成本（收益只来自消除第二次搜索过滤），反而会把
+// ORDER BY+LIMIT 的 top-N 堆排序升级成全量物化（万级无筛选实测 +8%），
+// 保持两次查询不变。total 语义不变：仍是过滤后总数
 // （COUNT(*) OVER() 与 COUNT(*) 同一 WHERE，join 不行扇出，有等价测试锁定）；
 // 列表响应不携带正文与 ListFiltered 一致。
 func (r *IssueRepository) ListFilteredWithTotal(q IssueListQuery, sortKey string, offset, limit int) ([]model.Issue, int64, error) {
