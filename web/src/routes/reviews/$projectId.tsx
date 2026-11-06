@@ -450,29 +450,24 @@ function ReviewSettingsForm({
 
       {/* 轮次上限（INT-204）：超过后审查只报告阻断问题，控制小 PR 的轮数。 */}
       <section className="space-y-2">
-        <div className="flex items-center gap-2">
-          <Label
-            htmlFor="round-cap"
-            className="font-normal text-sm text-foreground"
-          >
-            轮次上限
-          </Label>
-          {/* 共享 Input：焦点环/暗色背景/禁用态与全应用一致；默认描边加深
-              一档（border-input 与白卡几乎同色，视觉审查 R4 worth_fixing），
-              宽度固定不跟随 w-full。 */}
-          <Input
-            id="round-cap"
-            type="number"
-            min={1}
-            max={ROUND_CAP_MAX}
-            step={1}
-            value={Number.isNaN(form.round_cap) ? "" : form.round_cap}
-            disabled={readOnly || submitting}
-            onChange={(e) => set("round_cap", e.target.valueAsNumber)}
-            aria-label="轮次上限"
-            className="w-20 border-muted-foreground/50 tabular-nums"
-          />
-        </div>
+        <h2 className="text-sm font-medium text-muted-foreground">
+          轮次上限
+        </h2>
+        {/* 共享 Input：焦点环/暗色背景/禁用态与全应用一致；默认描边加深
+            一档（border-input 与白卡几乎同色，视觉审查 R4 worth_fixing），
+            宽度固定不跟随 w-full。 */}
+        <Input
+          id="round-cap"
+          type="number"
+          min={1}
+          max={ROUND_CAP_MAX}
+          step={1}
+          value={Number.isNaN(form.round_cap) ? "" : form.round_cap}
+          disabled={readOnly || submitting}
+          onChange={(e) => set("round_cap", e.target.valueAsNumber)}
+          aria-label="轮次上限"
+          className="w-20 border-muted-foreground/50 tabular-nums"
+        />
         <p className="text-xs text-muted-foreground">
           按 PR 计受审 head 数（同 head 重跑不计）；超过后代码审查只报告
           P0/P1 阻断问题（P2/Note 省略），视觉审查不受影响。默认 3，
