@@ -467,8 +467,20 @@ func setupBotTestEnv(t *testing.T, turns ...fakeModelTurn) *botTestEnv {
 	fake := newFakeModelServer(t, turns...)
 	bots := NewBotService(base.db, base.cfg, zap.NewNop(), projectService, base.issueService, t3Threads, t3Binding)
 	// Stop 先于 setupTestServices 注册的 DB 池关闭执行（LIFO）：周期 loop、
-	// worker 池与在跑的主线槽全部退出后才关池（INT-205）。
-	t.Cleanup(bots.Stop)
+	// worker 池与在跑的主线槽全部退出后才关池（INT-205）。等待有界：Stop
+	// 真卡死时 Cleanup 不能连坐挂死整包——包尾泄漏守卫会给出来栈。
+	t.Cleanup(func() {
+		done := make(chan struct{})
+		go func() {
+			bots.Stop()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(30 * time.Second):
+			t.Logf("BotService.Stop 清理等待超时：Stop 已卡死，交给包尾泄漏守卫报告")
+		}
+	})
 	return &botTestEnv{testServices: base, bots: bots, fake: fake}
 }
 

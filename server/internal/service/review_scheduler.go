@@ -39,7 +39,7 @@ const reviewNetworkStageBudget = 60 * time.Second
 // 补漏挂在同一组循环里（INT-167 任务 3）：共用 cancel，tick 频率更低。
 func (s *ReviewService) Start() {
 	s.mu.Lock()
-	if s.cancel != nil {
+	if s.cancel != nil || s.stopped {
 		s.mu.Unlock()
 		return
 	}
@@ -47,8 +47,8 @@ func (s *ReviewService) Start() {
 	kickCh := make(chan struct{}, 1)
 	s.cancel = cancel
 	s.kickCh = kickCh
-	s.mu.Unlock()
 	s.loopWg.Add(4)
+	s.mu.Unlock()
 	go func() { defer s.loopWg.Done(); s.reviewLoop(cancel, kickCh) }()
 	go func() { defer s.loopWg.Done(); s.redeliveryLoop(cancel) }()
 	go func() { defer s.loopWg.Done(); s.forgejoPollLoop(cancel) }()
@@ -57,9 +57,16 @@ func (s *ReviewService) Start() {
 
 // Stop 停止调度循环并等四条循环退出（含启动即跑的首扫）：测试侧 Cleanup
 // 在 Stop 后关闭 DB 池，不等会让还在首扫里的查询撞上已关的池（INT-205）。
-// 幂等，未启动时为空操作。
+// 幂等：并发的后续 Stop 也等同一轮收尾完成；未启动时也置终态，Start 不再
+// 启动。
 func (s *ReviewService) Stop() {
 	s.mu.Lock()
+	if s.stopped {
+		s.mu.Unlock()
+		<-s.stopDone
+		return
+	}
+	s.stopped = true
 	cancel := s.cancel
 	s.cancel = nil
 	s.kickCh = nil
@@ -68,6 +75,7 @@ func (s *ReviewService) Stop() {
 		close(cancel)
 		s.loopWg.Wait()
 	}
+	close(s.stopDone)
 }
 
 func (s *ReviewService) reviewLoop(cancel <-chan struct{}, kickCh <-chan struct{}) {

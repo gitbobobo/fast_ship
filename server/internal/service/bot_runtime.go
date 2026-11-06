@@ -470,6 +470,14 @@ func (s *BotService) activeRunOf(botID string) (*model.BotRun, bool) {
 // 处理「停止」文本；只推进到停止消息的 seq，之后到达的新消息不受影响），
 // 最后取消执行槽 context，循环在安全点落 stopped。
 func (s *BotService) hardStopRun(botID, runID string, stopSeq int64, acceptedOrdinal int64) {
+	// 停止后不再落库：RequestStop 的宽限计时器可能在 Stop 收尾后才到期，
+	// 不拦的话会摸已关的 DB 池（INT-205，评审 Note）。
+	s.bgMu.Lock()
+	stopped := s.stopped
+	s.bgMu.Unlock()
+	if stopped {
+		return
+	}
 	ok, err := s.runs.MarkStopRequested(runID, acceptedOrdinal, stopSeq, time.Now().UTC())
 	if err != nil || !ok {
 		return

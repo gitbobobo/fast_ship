@@ -56,7 +56,7 @@ test-server:
 	@cd server && go test ./...
 
 # 竞态检测为可选目标，不进 test/test-server 必需门禁（INT-197 待评估）：
-# INT-205 修复后 internal/service 单包 -race 实测 504-680s（同机三连，负载
+# INT-205 修复后 internal/service 单包 -race 实测 504-690s（同机四连，负载
 # 波动明显），最差仍越过默认 10m，显式 -timeout 20m 兑底；包级 TestMain
 # 泄漏守卫保证结束时无 connectionOpener/worker/loop 残留。
 test-server-race:

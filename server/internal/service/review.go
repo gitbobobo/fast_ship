@@ -102,10 +102,15 @@ type ReviewService struct {
 	// Start/Stop 并发安全。kickCh 缓冲 1：连续投递只补一轮 tick，不堆积。
 	// loopWg 跟踪四条循环，Stop 等它们退出后（含启动即跑的首扫）才返回——
 	// 测试侧 Cleanup 在 Stop 后关 DB 池，不等会让首扫撞上已关的池（INT-205）。
-	mu     sync.Mutex
-	kickCh chan struct{}
-	cancel chan struct{}
-	loopWg sync.WaitGroup
+	// Add(4) 与 cancel 的发布同锁：并发 Stop 的 Wait 不会漏数。stopped 是
+	// 终态标志：Stop 后 Start 不再启动循环；stopDone 让并发的后续 Stop 等
+	// 同一轮收尾完成。
+	mu       sync.Mutex
+	kickCh   chan struct{}
+	cancel   chan struct{}
+	stopped  bool
+	loopWg   sync.WaitGroup
+	stopDone chan struct{}
 
 	// worktreeTries：归档/工作区读取等回收阶段的有限重试计数（进程内即可：
 	// 进程重启后未完成的运行下个 tick 重新计，上限内不会漏终态）。
@@ -177,6 +182,7 @@ func NewReviewService(
 		prepRetryChecked: map[string]time.Time{},
 		prLocks:          map[string]*sync.Mutex{},
 		projectLocks:     map[string]*sync.Mutex{},
+		stopDone:         make(chan struct{}),
 	}
 }
 
