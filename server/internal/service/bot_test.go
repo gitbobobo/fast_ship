@@ -104,7 +104,9 @@ type fakeModelServer struct {
 // 打挂测试进程。
 func newFakeModelServer(t *testing.T, turns ...fakeModelTurn) *fakeModelServer {
 	t.Helper()
-	f := &fakeModelServer{requests: make(chan fakeModelRequest, 64), shutdown: make(chan struct{}), turns: turns}
+	// turns 克隆一份：handler 在 f.mu 下原地搬移剩余脚本，不改写调用方
+	// 传入切片的底层数组——测试仍可安全复用自己持有的脚本文本。
+	f := &fakeModelServer{requests: make(chan fakeModelRequest, 64), shutdown: make(chan struct{}), turns: append([]fakeModelTurn(nil), turns...)}
 	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// 模型窗口探测（INT-115）打 GET /models：默认 404（探测失败是
 		// best-effort 路径），且不计入 requests 通道——计入会让断言聊天请求
@@ -300,10 +302,13 @@ func (f *fakeModelServer) URL() string { return f.srv.URL }
 
 // fakeModelReply POST 一条请求体并返回拼接后的正文与状态码。turn 文本被
 // 拆成两片流式 chunk，逐片解码拼接后才能做整体子串断言；非 SSE 响应
-// （strict 脚本耗尽的纯 JSON 错误体）原样返回。
+// （strict 脚本耗尽的纯 JSON 错误体）原样返回。带超时的 client：本文件
+// 的脚本都不带 Hold，未来复用到 Hold/HoldFor/Stall 脚本时限时失败，
+// 而不是挂到 go test 整体超时。
 func fakeModelReply(t *testing.T, f *fakeModelServer, body string) (int, string) {
 	t.Helper()
-	resp, err := http.Post(f.URL(), "application/json", strings.NewReader(body))
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Post(f.URL(), "application/json", strings.NewReader(body))
 	if err != nil {
 		t.Fatalf("fake model 请求失败: %v", err)
 	}
