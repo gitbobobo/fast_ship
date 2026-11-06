@@ -83,6 +83,9 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 		&model.IssueCollabDocument{},
 		&model.IssuePullRequest{},
 		&model.IssueRecommendation{},
+		// List 聚合查 github_repo_labels：旧代码吞错掩盖了本环境缺表，
+		// INT-187 起标签读库失败按存储故障上报，生产恒有此表。
+		&model.GitHubRepoLabel{},
 		&model.RecommendationDependency{},
 		&model.ScreenshotScreen{},
 		&model.ScreenshotAnnotation{},
