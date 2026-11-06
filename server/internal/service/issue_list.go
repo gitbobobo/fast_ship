@@ -421,10 +421,12 @@ func (p *batchCloseRepoProbe) outcome(batchCtx context.Context, client ghclient.
 		probeCtx, cancel := context.WithTimeout(batchCtx, batchCloseGitHubPatchTimeout)
 		defer cancel()
 		repo, _, err := client.FetchRepository(probeCtx)
-		if err != nil && warn != nil {
-			// 探测失败只落 verdict 不可见：不记 warn，线上无法区分「超时/5xx
-			// /凭证异常」与「仓库真不可见被定案」，与 PATCH/守卫失败的日志口径
-			// 一致（INT-198 R1 bot）。
+		if err != nil && warn != nil &&
+			!errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			// 探测失败记 warn：verdict 落 inconclusive 退回逐条回报，线上据此
+			// 区分「5xx/凭证异常/限流」与「仓库真不可见被定案」，与 PATCH/守卫
+			// 失败的日志口径一致（INT-198 R1/R2 bot）。批次取消/截止（含在途
+			// 探测被熔断取消）是预期路径，ctx err 不记避免误导日志。
 			warn("batch close github issue: repo probe failed", zap.Error(err))
 		}
 		switch {
@@ -755,11 +757,11 @@ const batchCloseGitHubRateLimitRemainingText = "GitHub API 限流，未尝试关
 
 // githubBatchCloseAbort 判定 PATCH 错误是否为整批性失败并给出类别：限流
 // （口径见 isGitHubRateLimitError：*RateLimitError、*AbuseRateLimitError、
-// 429、含限流文案的 403）、认证失败（401）、无权限（其余 403）。404/410 不在
+// 429、含限流文案的 403）、认证失败（401）、无权限（其余 403）。404/410 均不在
 // 此判定熔断（INT-191）：两者成因两义，由 closeOneGitHubIssue 的
-// resolveGitHubClose404Gone 探测定案（INT-198）——410（issues 被禁用）直接
-// 整仓级熔断（abortRepoUnavailable），404 经 batchCloseRepoProbe 区分仓库
-// 不可见与单条转移/删除，探测不可定因时退回逐条回报。
+// resolveGitHubClose404Gone 经仓库探测定案（INT-198；已删除的 Issue 同样
+// 返回 410，单条成因）——仓库不可见或禁用 Issue 熔断（abortRepoUnavailable），
+// 单条转移/删除逐条回报，探测不可定因时退回逐条回报。
 func githubBatchCloseAbort(err error) (batchCloseGitHubAbortReason, bool) {
 	if isGitHubRateLimitError(err) {
 		return abortRateLimit, true
