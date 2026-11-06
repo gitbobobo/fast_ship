@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"context"
 	"errors"
 	"time"
 
@@ -18,6 +19,15 @@ type IssueShipHookRepository struct {
 
 func NewIssueShipHookRepository(db *gorm.DB) *IssueShipHookRepository {
 	return &IssueShipHookRepository{db: db}
+}
+
+// WithContext 返回绑定 ctx 的仓库视图：查询的借连接等待随 ctx 取消
+// （INT-187 issue 列表 shipHook 聚合的口径用）。
+func (r *IssueShipHookRepository) WithContext(ctx context.Context) *IssueShipHookRepository {
+	if r == nil || ctx == nil {
+		return r
+	}
+	return &IssueShipHookRepository{db: r.db.WithContext(ctx)}
 }
 
 func (r *IssueShipHookRepository) Upsert(hook *model.IssueShipHook) error {

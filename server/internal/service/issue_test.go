@@ -131,7 +131,7 @@ func TestIssueServiceUpdateInternalMeta_ReflectsInGetAndList(t *testing.T) {
 		t.Fatalf("expected internal meta on get, got %+v", got.InternalMeta)
 	}
 
-	items, total, err := svc.issueService.List(project.ID, project.UserID, IssueListFilters{Workflow: "in_progress"}, 1, 20)
+	items, total, err := svc.issueService.List(nil, project.ID, project.UserID, IssueListFilters{Workflow: "in_progress"}, 1, 20)
 	if err != nil {
 		t.Fatalf("list issues by workflow: %v", err)
 	}
@@ -139,7 +139,7 @@ func TestIssueServiceUpdateInternalMeta_ReflectsInGetAndList(t *testing.T) {
 		t.Fatalf("expected one filtered issue, got total=%d len=%d", total, len(items))
 	}
 
-	items, total, err = svc.issueService.List(project.ID, project.UserID, IssueListFilters{Workflow: "unset"}, 1, 20)
+	items, total, err = svc.issueService.List(nil, project.ID, project.UserID, IssueListFilters{Workflow: "unset"}, 1, 20)
 	if err != nil {
 		t.Fatalf("list issues by unset workflow: %v", err)
 	}
@@ -317,7 +317,7 @@ func TestIssueServiceCreateInternalIssue_CreatesLocalIssue(t *testing.T) {
 		t.Fatalf("expected todo workflow meta, got %+v", created.InternalMeta)
 	}
 
-	items, total, err := svc.issueService.List(project.ID, user.ID, IssueListFilters{}, 1, 20)
+	items, total, err := svc.issueService.List(nil, project.ID, user.ID, IssueListFilters{}, 1, 20)
 	if err != nil {
 		t.Fatalf("list issues: %v", err)
 	}
@@ -1647,7 +1647,7 @@ func TestIssueServiceList_FiltersByInternalLabels(t *testing.T) {
 		t.Fatalf("update issue 1 labels: %v", err)
 	}
 
-	items, total, err := svc.issueService.List(project.ID, user.ID, IssueListFilters{Label: "bug"}, 1, 20)
+	items, total, err := svc.issueService.List(nil, project.ID, user.ID, IssueListFilters{Label: "bug"}, 1, 20)
 	if err != nil {
 		t.Fatalf("list issues by label: %v", err)
 	}

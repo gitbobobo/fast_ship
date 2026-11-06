@@ -44,6 +44,10 @@ const (
 	// 批量关单的 batchCloseGitHubConcurrency 同口径）：上游限流温和，N 条
 	// 关联的总耗时约为单条的数倍以内而非线性累加。
 	pullRequestSyncConcurrency = 4
+	// pullRequestSyncResolveTimeout 是阶段 1 访问面解析的独立预算（INT-187）：
+	// 凭证解密与集成读库走请求 ctx，MaxOpenConns(1) 下借连接的等待没有
+	// 上限，不设预算会把服务端总时长顶穿 web 端超时。
+	pullRequestSyncResolveTimeout = 30 * time.Second
 )
 
 // pullRequestLink 解析后的 PR 链接：Provider 决定后续取数路径；forgejo 行的
@@ -92,7 +96,7 @@ func (s *IssueService) AttachIssuePullRequest(issueID, userID string, req Attach
 		return nil, errs.New(errs.ErrInvalidParams.Code, "无法识别的 PR 链接，支持 https://github.com/<owner>/<repo>/pull/<number> 或 http(s)://<host>/<owner>/<repo>/pulls/<number>")
 	}
 
-	issue, project, err := s.loadIssueAndProject(issueID, userID)
+	issue, project, err := s.loadIssueAndProject(context.Background(), issueID, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -188,7 +192,7 @@ func (s *IssueService) AttachIssuePullRequest(issueID, userID string, req Attach
 
 // DetachIssuePullRequest 解除 Issue 与某个 PR 的关联（按关联行 id）。
 func (s *IssueService) DetachIssuePullRequest(issueID, userID, linkID string) error {
-	if _, _, err := s.loadIssueAndProject(issueID, userID); err != nil {
+	if _, _, err := s.loadIssueAndProject(context.Background(), issueID, userID); err != nil {
 		return err
 	}
 
@@ -209,27 +213,37 @@ func (s *IssueService) DetachIssuePullRequest(issueID, userID, linkID string) er
 // 每行是独立失败域：单条拉取/保存失败记入 failures 不中断其余行（旧数据保留），
 // 客户端构造失败使该 repo 下每行各记一条；整体恒返回 200 形状的 {items, failures}。
 //
-// INT-175：三个阶段分离。访问面解析（凭证/集成读取，带缓存）串行执
-// 行——读库不接收 ctx（本地读库随请求取消属 INT-187）；远端拉取并发
-// pullRequestSyncConcurrency 且随请求 ctx 断开
-// （30s 整批预算从阶段 2 起算）；写回与响应组装串行且按关联行原序——
-// 写回仍逐行 UPDATE（SQLite 单写连接下串行不阻塞），响应顺序与旧串行
-// 实现一致，收益全部来自拉取并发。ctx 为请求 context（handler 传
-// c.Request.Context()），浏览器断开即停止后续远端请求；测试传 nil 退化
-// 为 Background。写回仓库方法不接收 ctx，自然脱离请求取消——已付出的
-// 代价拉回的数据照常落库，与其它端点的「不带 ctx 写库」同口径。
+// INT-175：三个阶段分离。访问面解析（凭证/集成读取，带缓存）串行执行，
+// 前置读库走独立 30s 预算的 resolveCtx 视图（INT-187：MaxOpenConns(1) 下
+// 借连接等待无上限，随请求取消需要预算兜底）；远端拉取并发
+// pullRequestSyncConcurrency 且随请求 ctx 断开（30s 整批预算从阶段 2
+// 起算）；写回与响应组装串行且按关联行原序——写回仍逐行 UPDATE（SQLite
+// 单写连接下串行不阻塞），响应顺序与旧串行实现一致，收益全部来自拉取并发。
+// ctx 为请求 context（handler 传 c.Request.Context()），浏览器断开即停止
+// 后续远端请求；测试传 nil 退化为 Background。写回仓库方法不接收 ctx，
+// 自然脱离请求取消——已付出的代价拉回的数据照常落库，与其它端点的
+// 「不带 ctx 写库」同口径。
 func (s *IssueService) SyncIssuePullRequests(ctx context.Context, issueID, userID string) (*IssuePullRequestSyncResultResponse, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	issue, project, err := s.loadIssueAndProject(issueID, userID)
+	// 阶段 1 访问面解析（含前置读库与凭证解密）用独立 30s 预算：所有读
+	// 库都走 ctx 绑定的仓库视图——MaxOpenConns(1) 下借连接等待无上限，
+	// 预算空转会把服务端总时长顶穿客户端超时（INT-187）。
+	resolveCtx, cancelResolve := context.WithTimeout(ctx, pullRequestSyncResolveTimeout)
+	defer cancelResolve()
+	resolved := s.withRepos(resolveCtx)
+
+	issue, project, err := resolved.loadIssueAndProject(resolveCtx, issueID, userID)
 	if err != nil {
 		return nil, err
 	}
 
-	links, err := s.pullRequestRepo.ListByIssueID(issue.ID)
+	links, err := resolved.pullRequestRepo.ListByIssueID(issue.ID)
 	if err != nil {
-		return nil, errs.ErrInternal
+		s.logger.Error("sync 关联 PR 列表读取失败",
+			zap.String("issue_id", issueID), zap.Error(err))
+		return nil, loadStoreErr(err)
 	}
 
 	result := &IssuePullRequestSyncResultResponse{
@@ -272,9 +286,9 @@ func (s *IssueService) SyncIssuePullRequests(ctx context.Context, issueID, userI
 			}
 			// 一次读取集成行同时得到访问面与主机快照：主机不一致（集成改
 			// 指别的主机）按单行失败拦下，取数不会用改指后的新基址。
-			access, err := forgejoSyncAccessFor(s, forgeAccess, forgeAccessErrs, ctx, link)
+			access, err := forgejoSyncAccessFor(resolved, forgeAccess, forgeAccessErrs, resolveCtx, link)
 			if err != nil {
-				markFailed(i, pullRequestSyncFailure(link, s.forgejoSyncFailureText(err)))
+				markFailed(i, pullRequestSyncFailure(link, resolveFailureText(s, resolveCtx, err, true)))
 				continue
 			}
 			if access.hostKey != link.HostKey {
@@ -291,9 +305,9 @@ func (s *IssueService) SyncIssuePullRequests(ctx context.Context, issueID, userI
 				return nil
 			}
 		case model.IssuePullRequestProviderGitHub:
-			client, credKind, err := pullRequestSyncClient(s, clients, clientKinds, clientErrs, project, link)
+			client, credKind, err := pullRequestSyncClient(resolved, clients, clientKinds, clientErrs, project, link)
 			if err != nil {
-				markFailed(i, pullRequestSyncFailure(link, err.Error()))
+				markFailed(i, pullRequestSyncFailure(link, resolveFailureText(s, resolveCtx, err, false)))
 				continue
 			}
 			fetchers[i] = func(ctx context.Context, l *model.IssuePullRequest) error {
@@ -458,6 +472,34 @@ func fetchErrText(s *IssueService, link *model.IssuePullRequest, err error) stri
 	return err.Error()
 }
 
+// resolveFailureText 把阶段 1 访问面解析的失败转成单行文案：err 本身是
+// ctx 错误且解析预算确实终结时，统一回到「请求已取消或超时」口径（与阶段
+// 2 一致）——底层 ctx 错误已被凭证/集成读取归一成 ErrInternal 或脱敏文
+// 案，这里恢复它；缓存命中的真实配置错误（未配凭证/集成已删）不是 ctx 错
+// 误，保留原文与日志，不被误报成超时。
+func resolveFailureText(s *IssueService, ctx context.Context, err error, forgejo bool) string {
+	if ctx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+		return "请求已取消或超时，未继续同步"
+	}
+	if forgejo {
+		// err 本身是 ctx 错误但预算未终结（如子 ctx 到期）：不走
+		// forgejoSyncFailureText 把适配器原文回显——与「集成 API 不回
+		// 显错误原文」口径一致，给中性文案。
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			s.logger.Error("Forgejo 关联行同步失败", zap.Error(err))
+			return "读取 Forgejo 集成失败，请稍后重试"
+		}
+		return s.forgejoSyncFailureText(err)
+	}
+	// GitHub 侧 AppError 只取 Message——内部错误码（[50000]）不回显给
+	// 用户，与 Forgejo 分支经 classify 只取 Message 同口径。
+	var appErr *errs.AppError
+	if errors.As(err, &appErr) {
+		return appErr.Message
+	}
+	return err.Error()
+}
+
 // pullRequestSyncClient 按 repo 复用/缓存客户端；构造错误同样按 repo 缓存，
 // 让同 repo 的后续行各自记一条失败而不是重复构造。凭证来源随客户端一并返回
 // 并缓存（构造失败时也缓存），供每行失败文案标明本次用的是哪种凭证。
@@ -516,20 +558,26 @@ func (s *IssueService) pullRequestSummariesByIssueIDs(issues []model.Issue) (map
 }
 
 // loadIssueAndProject 取出 Issue 并校验调用方对所属项目的访问权，返回两者供后续使用。
-func (s *IssueService) loadIssueAndProject(issueID, userID string) (*model.Issue, *model.Project, error) {
-	issue, err := s.issueRepo.FindByID(issueID)
+// ctx 只服务读库的随请求取消（INT-187）：随请求取消的热点（sync 阶段 1）
+// 传其预算 ctx；行为保持不变的调用方（attach/detach 的前置读库）传
+// Background，读库不带取消语义。
+func (s *IssueService) loadIssueAndProject(ctx context.Context, issueID, userID string) (*model.Issue, *model.Project, error) {
+	resolved := s.withRepos(ctx)
+	issue, err := resolved.issueRepo.FindByID(issueID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, nil, errs.ErrIssueNotFound
 		}
-		return nil, nil, errs.ErrInternal
+		s.logger.Error("load issue failed", zap.String("issue_id", issueID), zap.Error(err))
+		return nil, nil, loadStoreErr(err)
 	}
-	project, err := s.projectRepo.FindByID(issue.ProjectID, userID)
+	project, err := resolved.projectRepo.FindByID(issue.ProjectID, userID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, nil, errs.ErrProjectNotFound
 		}
-		return nil, nil, errs.ErrInternal
+		s.logger.Error("load project failed", zap.String("issue_id", issueID), zap.Error(err))
+		return nil, nil, loadStoreErr(err)
 	}
 	return issue, project, nil
 }
@@ -701,6 +749,11 @@ func forgejoSyncAccessFor(s *IssueService, entries map[string]*forgejoSyncAccess
 // 原样透出；其余（锁忙/IO 等瞬时故障）给中性提示——瞬时故障不能引导用户去
 // 删集成重配。
 func classifyForgeIntegrationReadErr(err error) error {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		// ctx 绑定的读库被取消/超时——原样透出，sync 阶段 1 按 ctx 错误归
+		// 类文案（INT-187），不脱敏成「读取集成失败」误导排查。
+		return err
+	}
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return errors.New("Forgejo 集成不可用或已被删除，请检查集成管理配置")
 	}

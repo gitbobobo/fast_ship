@@ -136,9 +136,11 @@ func (s *IssueShipHookService) shipHooksByIssueIDs(issues []model.Issue) (map[st
 		issueIDs = append(issueIDs, issue.ID)
 	}
 
+	// 原始错误透传：唯一调用方 List 经 loadStoreErr 统一归类（INT-187），
+	// 在这里折成 ErrInternal 会吞掉 ctx 取消链，超时文案归不了类。
 	raw, err := s.shipHookRepo.ListByIssueIDs(issueIDs)
 	if err != nil {
-		return nil, errs.ErrInternal
+		return nil, err
 	}
 
 	result := make(map[string]*model.IssueShipHook, len(raw))

@@ -158,16 +158,19 @@ func (s *IssueService) resolveLabels(projectID string, labelNames []string, labe
 	return result
 }
 
-func (s *IssueService) buildLabelMap(projectID string) map[string]model.GitHubRepoLabel {
+func (s *IssueService) buildLabelMap(projectID string) (map[string]model.GitHubRepoLabel, error) {
 	allLabels, err := s.githubRepoLabelRepo.ListByProject(projectID)
 	if err != nil {
-		return nil
+		// 错误交给调用方归类（INT-187 审查 R1）：在这里吞掉会把取消/读库
+		// 故障折成「无标签」，响应组装再经 resolveLabels 用无 ctx 仓库
+		// 兑底重查——空页上 200 照返，取消链丢失。
+		return nil, err
 	}
 	m := make(map[string]model.GitHubRepoLabel, len(allLabels))
 	for _, l := range allLabels {
 		m[l.Name] = l
 	}
-	return m
+	return m, nil
 }
 
 func buildIssueReference(issue model.Issue) string {

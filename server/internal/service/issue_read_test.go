@@ -59,7 +59,7 @@ func TestListCountsUnreadGitHubComments(t *testing.T) {
 	}
 	createReadTestComment(t, svc.db, internalIssue.ID, -1, "站内评论", base)
 
-	items, _, err := svc.issueService.List(project.ID, "user-1", IssueListFilters{}, 1, 20)
+	items, _, err := svc.issueService.List(nil, project.ID, "user-1", IssueListFilters{}, 1, 20)
 	if err != nil {
 		t.Fatalf("list issues: %v", err)
 	}

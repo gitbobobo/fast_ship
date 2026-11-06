@@ -1,6 +1,8 @@
 package service
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"regexp"
 	"time"
@@ -8,6 +10,7 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/config"
 	"github.com/godbobo/fast_ship/server/internal/forge"
 	"github.com/godbobo/fast_ship/server/internal/githubapi"
+	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	ghclient "github.com/godbobo/fast_ship/server/internal/pkg/github"
 	"github.com/godbobo/fast_ship/server/internal/pkg/storage"
 	"github.com/godbobo/fast_ship/server/internal/repository"
@@ -168,4 +171,46 @@ func NewIssueService(
 		syncing: make(map[string]struct{}),
 	}
 	return s
+}
+
+// withRepos 返回绑定 ctx 的服务视图：热点端点（INT-187）的前置读库借连接
+// 等待随 ctx 取消——MaxOpenConns(1) 下借连接排队没有超时上限，不绑 ctx
+// 的读库无法随请求取消。浅拷贝——其余字段（logger、cfg、clients 工厂、
+// forgeSource、mirror）共用不可变；credentials/shipHookService 同样浅拷贝
+// 并只替换其中走库的字段。nil ctx 退化 Background（测试与内部调用用）。
+func (s *IssueService) withRepos(ctx context.Context) *IssueService {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	cp := *s
+	cp.issueRepo = s.issueRepo.WithContext(ctx)
+	cp.projectRepo = s.projectRepo.WithContext(ctx)
+	cp.internalMetaRepo = s.internalMetaRepo.WithContext(ctx)
+	cp.githubRepoLabelRepo = s.githubRepoLabelRepo.WithContext(ctx)
+	cp.readStateRepo = s.readStateRepo.WithContext(ctx)
+	cp.pullRequestRepo = s.pullRequestRepo.WithContext(ctx)
+	cp.forgeIntegrationRepo = s.forgeIntegrationRepo.WithContext(ctx)
+	if s.credentials != nil {
+		cred := *s.credentials
+		cred.projectRepo = cp.projectRepo
+		cred.tokenRepo = s.credentials.tokenRepo.WithContext(ctx)
+		cp.credentials = &cred
+	}
+	if s.shipHookService != nil {
+		hook := *s.shipHookService
+		hook.shipHookRepo = s.shipHookService.shipHookRepo.WithContext(ctx)
+		cp.shipHookService = &hook
+	}
+	return &cp
+}
+
+// loadStoreErr 热点前置读库失败归类：ctx 取消/预算到点与真实存储故障分开
+// 报，不然用户只看到通用 500 无法判断该重试还是查库；ctx 错误经 Wrap 保留
+// 错误链——调用方与测试仍能 errors.Is 到原始的 context.Canceled/
+// DeadlineExceeded。
+func loadStoreErr(err error) error {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return errs.Wrap(errs.ErrInternal.Code, "读取超时，请稍后重试", err)
+	}
+	return errs.ErrInternal
 }

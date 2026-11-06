@@ -43,12 +43,20 @@ func toIssueListQuery(projectID string, filters IssueListFilters) repository.Iss
 // meta/shipHook/未读/PR 聚合只按本页 Issue 查询，读盘量与项目 Issue 总量解耦。
 // 列表响应不携带正文（Body/BodyHtml 为空串，详情走 Get）。page 超过末页时
 // 返回空切片且 total 不变，与迁移前一致。
-func (s *IssueService) List(projectID, userID string, filters IssueListFilters, page, pageSize int) ([]IssueResponse, int64, error) {
-	if _, err := s.projectRepo.FindByID(projectID, userID); err != nil {
+// ctx 为请求 context（handler 传 c.Request.Context()），nil 退化为 Background：
+// 归属校验与全部分页读库走 ctx 绑定的仓库视图，借连接等待随请求取消
+// （INT-187 热点口径），失败经 loadStoreErr 归类。
+func (s *IssueService) List(ctx context.Context, projectID, userID string, filters IssueListFilters, page, pageSize int) ([]IssueResponse, int64, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	resolved := s.withRepos(ctx)
+
+	if _, err := resolved.projectRepo.FindByID(projectID, userID); err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, 0, errs.ErrProjectNotFound
 		}
-		return nil, 0, errs.ErrInternal
+		return nil, 0, loadStoreErr(err)
 	}
 
 	query := toIssueListQuery(projectID, filters)
@@ -56,31 +64,34 @@ func (s *IssueService) List(projectID, userID string, filters IssueListFilters, 
 	if offset < 0 {
 		offset = 0
 	}
-	pageIssues, total, err := s.issueRepo.ListFilteredWithTotal(query, filters.Sort, offset, pageSize)
+	pageIssues, total, err := resolved.issueRepo.ListFilteredWithTotal(query, filters.Sort, offset, pageSize)
 	if err != nil {
-		return nil, 0, errs.ErrInternal
+		return nil, 0, loadStoreErr(err)
 	}
 
-	metaByIssueID, err := s.internalMetaByIssueIDs(pageIssues)
+	metaByIssueID, err := resolved.internalMetaByIssueIDs(pageIssues)
 	if err != nil {
-		return nil, 0, errs.ErrInternal
+		return nil, 0, loadStoreErr(err)
 	}
 
-	labelMap := s.buildLabelMap(projectID)
-
-	shipHooksByIssueID, err := s.shipHookService.shipHooksByIssueIDs(pageIssues)
+	labelMap, err := resolved.buildLabelMap(projectID)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, loadStoreErr(err)
 	}
 
-	unread, err := s.unreadCountsByIssueIDs(userID, pageIssues)
+	shipHooksByIssueID, err := resolved.shipHookService.shipHooksByIssueIDs(pageIssues)
 	if err != nil {
-		return nil, 0, errs.ErrInternal
+		return nil, 0, loadStoreErr(err)
 	}
 
-	pullRequestSummaries, err := s.pullRequestSummariesByIssueIDs(pageIssues)
+	unread, err := resolved.unreadCountsByIssueIDs(userID, pageIssues)
 	if err != nil {
-		return nil, 0, errs.ErrInternal
+		return nil, 0, loadStoreErr(err)
+	}
+
+	pullRequestSummaries, err := resolved.pullRequestSummariesByIssueIDs(pageIssues)
+	if err != nil {
+		return nil, 0, loadStoreErr(err)
 	}
 
 	resp := make([]IssueResponse, 0, len(pageIssues))
@@ -104,17 +115,24 @@ func (s *IssueService) List(projectID, userID string, filters IssueListFilters, 
 	return resp, total, nil
 }
 
-func (s *IssueService) CountIssues(projectID, userID string, filters IssueListFilters) (int64, error) {
-	if _, err := s.projectRepo.FindByID(projectID, userID); err != nil {
+// CountIssues 与 List 同口径（INT-187）：归属校验与计数读库随请求 ctx 取消，
+// nil ctx 退化为 Background。
+func (s *IssueService) CountIssues(ctx context.Context, projectID, userID string, filters IssueListFilters) (int64, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	resolved := s.withRepos(ctx)
+
+	if _, err := resolved.projectRepo.FindByID(projectID, userID); err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return 0, errs.ErrProjectNotFound
 		}
-		return 0, errs.ErrInternal
+		return 0, loadStoreErr(err)
 	}
 
-	total, err := s.issueRepo.CountFiltered(toIssueListQuery(projectID, filters))
+	total, err := resolved.issueRepo.CountFiltered(toIssueListQuery(projectID, filters))
 	if err != nil {
-		return 0, errs.ErrInternal
+		return 0, loadStoreErr(err)
 	}
 	return total, nil
 }
@@ -124,25 +142,30 @@ func (s *IssueService) BatchCloseDoneIssues(ctx context.Context, projectID, user
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	// 前置读库（项目查找与 done 列表）随请求 ctx 取消（INT-187）；关闭
+	// 阶段不经此视图：写库事务沿用 INT-185 的 closeCtx 预算（借连接随预算
+	// 取消），mirror 写回不带 ctx——行为与迁移前一致。
+	resolved := s.withRepos(ctx)
 
-	project, err := s.projectRepo.FindByID(projectID, userID)
+	project, err := resolved.projectRepo.FindByID(projectID, userID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, errs.ErrProjectNotFound
 		}
-		return nil, errs.ErrInternal
+		return nil, loadStoreErr(err)
 	}
 
 	// 只取 done+open 的行，多取 1 条探测是否超上限，等价于迁移前的 total 判断；
-	// 排序键取默认 updated_desc（本场景只关心行集，不关心顺序）。
+	// 排序键取默认 updated_desc（本场景只关心行集，不关心顺序）。前置读库走
+	// 请求 ctx 视图（INT-187），不入下方整批预算。
 	filters := IssueListFilters{
 		State:    string(model.IssueStateOpen),
 		Workflow: string(model.IssueWorkflowStatusDone),
 		Source:   sourceFilter,
 	}
-	filtered, err := s.issueRepo.ListFiltered(toIssueListQuery(projectID, filters), "updated_desc", 0, batchCloseDoneMaxIssues+1)
+	filtered, err := resolved.issueRepo.ListFiltered(toIssueListQuery(projectID, filters), "updated_desc", 0, batchCloseDoneMaxIssues+1)
 	if err != nil {
-		return nil, errs.ErrInternal
+		return nil, loadStoreErr(err)
 	}
 
 	total := len(filtered)
@@ -150,8 +173,8 @@ func (s *IssueService) BatchCloseDoneIssues(ctx context.Context, projectID, user
 		return nil, errs.ErrBatchCloseTooMany
 	}
 
-	// 30s 预算只管关闭阶段（内部事务 + GitHub PATCH）：前置的权限检查与
-	// ListFiltered 本就不收 ctx，不该被整批截止截断；parent 仍是调用方 ctx，
+	// 30s 预算只管关闭阶段（内部事务 + GitHub PATCH）：前置读库已随请求
+	// ctx 取消（INT-187），不该被整批截止截断；parent 仍是调用方 ctx，
 	// 调用方取消照常生效（INT-185）。
 	closeCtx, cancel := context.WithTimeout(ctx, batchCloseDoneTimeout)
 	defer cancel()

@@ -607,7 +607,7 @@ func TestIssueServiceList_IncludesPullRequestSummary(t *testing.T) {
 		}
 	}
 
-	items, total, err := svc.issueService.List(project.ID, user.ID, IssueListFilters{}, 1, 20)
+	items, total, err := svc.issueService.List(nil, project.ID, user.ID, IssueListFilters{}, 1, 20)
 	if err != nil {
 		t.Fatalf("list issues: %v", err)
 	}

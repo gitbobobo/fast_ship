@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"context"
 	"errors"
 
 	"github.com/godbobo/fast_ship/server/internal/model"
@@ -14,6 +15,16 @@ type IssuePullRequestRepository struct {
 
 func NewIssuePullRequestRepository(db *gorm.DB) *IssuePullRequestRepository {
 	return &IssuePullRequestRepository{db: db}
+}
+
+// WithContext 返回绑定 ctx 的仓库视图：查询的借连接等待随 ctx 取消
+// （INT-187 列表 PR 聚合与 sync 阶段 1 前置读库的口径用；写回不带 ctx，
+// 仍走池根）。
+func (r *IssuePullRequestRepository) WithContext(ctx context.Context) *IssuePullRequestRepository {
+	if r == nil || ctx == nil {
+		return r
+	}
+	return &IssuePullRequestRepository{db: r.db.WithContext(ctx)}
 }
 
 // syncedColumns 是 attach Upsert 冲突更新里受 synced_at 守卫约束的远端快照列。

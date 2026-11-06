@@ -173,7 +173,7 @@ func TestIssueServiceSyncProjectIssues_ImportsIssuesCommentsAndTimeline(t *testi
 		t.Fatalf("unexpected sync result: %+v", result)
 	}
 
-	issues, total, err := svc.issueService.List(project.ID, project.UserID, IssueListFilters{}, 1, 20)
+	issues, total, err := svc.issueService.List(nil, project.ID, project.UserID, IssueListFilters{}, 1, 20)
 	if err != nil {
 		t.Fatalf("list issues: %v", err)
 	}

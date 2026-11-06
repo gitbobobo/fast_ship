@@ -903,6 +903,15 @@ func NewIssueInternalMetaRepository(db *gorm.DB) *IssueInternalMetaRepository {
 	return &IssueInternalMetaRepository{db: db}
 }
 
+// WithContext 返回绑定 ctx 的仓库视图：查询的借连接等待随 ctx 取消
+// （INT-187 issue 列表分页读库的口径用）。
+func (r *IssueInternalMetaRepository) WithContext(ctx context.Context) *IssueInternalMetaRepository {
+	if r == nil || ctx == nil {
+		return r
+	}
+	return &IssueInternalMetaRepository{db: r.db.WithContext(ctx)}
+}
+
 func (r *IssueInternalMetaRepository) Get(issueID string) (*model.IssueInternalMeta, error) {
 	return r.GetTx(r.db, issueID)
 }
@@ -995,6 +1004,15 @@ type GitHubRepoLabelRepository struct {
 
 func NewGitHubRepoLabelRepository(db *gorm.DB) *GitHubRepoLabelRepository {
 	return &GitHubRepoLabelRepository{db: db}
+}
+
+// WithContext 返回绑定 ctx 的仓库视图：查询的借连接等待随 ctx 取消
+// （INT-187 issue 列表标签聚合的口径用）。
+func (r *GitHubRepoLabelRepository) WithContext(ctx context.Context) *GitHubRepoLabelRepository {
+	if r == nil || ctx == nil {
+		return r
+	}
+	return &GitHubRepoLabelRepository{db: r.db.WithContext(ctx)}
 }
 
 func (r *GitHubRepoLabelRepository) DeleteByProject(projectID string) error {
