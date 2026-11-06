@@ -470,8 +470,9 @@ function ReviewSettingsForm({
         />
         <p className="text-xs text-muted-foreground">
           按 PR 计受审 head 数（同 head 重跑不计）；超过后代码审查只报告
-          P0/P1 阻断问题（P2/Note 省略），视觉审查不受影响。默认 3，
-          范围 1–20。
+          P0/P1 阻断问题（P2/Note 省略），视觉审查不受影响。
+          <br />
+          默认 3，范围 1–20。
         </p>
       </section>
 
