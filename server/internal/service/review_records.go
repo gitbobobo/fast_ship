@@ -471,6 +471,26 @@ func runSummary(r *model.ReviewRun, envNames map[string]string) api.ReviewRunSum
 		}
 		sum.Findings = append(sum.Findings, reviewFindingFromCode(&f))
 	}
+	// 遗留阻断项投影（审查 R6）：与视觉分支同构——增量轮把未修完的 P1 只标
+	// prior(open) 时，详情抽屉不能再是 0 条、与 CodeStatus=failure 自相矛盾。
+	// 计数按 priorOpenBlocks 阻塞口径，P2/Note 遗留只陈列不计数；级别缺失时
+	// 展示兜底为 P1（与阻塞口径一致，留空会渲染残缺行）。
+	for _, p := range result.Prior {
+		if p.Status != api.ReviewPriorDecisionStatusOpen {
+			continue
+		}
+		if priorOpenBlocks(p.Level) {
+			count++
+		}
+		level := "P1"
+		if p.Level != nil && strings.TrimSpace(*p.Level) != "" {
+			level = *p.Level
+		}
+		sum.Findings = append(sum.Findings, api.ReviewFinding{
+			Level: level,
+			Body:  "上轮遗留：" + p.Body,
+		})
+	}
 	sum.FindingsCount = api.Ptr(count)
 	sum.UiChanged = api.Ptr(result.UiChanged)
 	return sum

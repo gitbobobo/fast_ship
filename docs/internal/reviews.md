@@ -591,6 +591,16 @@ GitHub App 投递失败（公网隧道超时/502）不会自动重试，一次�
   填 –；行内 review 跳过 P2（Note 本来就跳过），`fetchInlineLines` 的
   need 判定也只认 P0/P1（只有 P2 时不再读 diff）。
 
+R6 补全 prior(open) 的全部可见面：`summarizeCodeRuns`/`buildCodeComment`
+（R5）之外，详情抽屉投影（`runSummary`，代码分支以「上轮遗留：」前缀陈列
+阻塞项并计数，P2/Note 遗留只陈列不计数）、Web 活动计数（`reviewCountResult`
+代码分支落 P0/P1 桶，级别缺失按 P1 兜底）与视觉衔接全净判定
+（`codeRunsVisualInputs`）同判遗留阻断；判定函数统一复用视觉侧的
+`priorOpenBlocks`（Minor 不因代码/视觉词表混用而被误判阻断）。派发与同步
+的超限判定共用 `reviewedHeadCount`：同一轮内该计数是时不变的（当前轮按
+运行行存在计、历史轮的 `dispatched_at` 在 supersede 后不会再变化），两处
+口径恒等。
+
 视觉审查不参与增量复核与轮次上限：截图集合与轮次无关，沿用机制（见
 「视觉审查衔接」）已避免重复消耗。
 
@@ -873,8 +883,9 @@ rune 截断加 `...`，不劈断多字节字符）；状态未变不重复调用
 `kind=visual`，同 `round_number`），并把 `视觉审查` 置 pending「视觉审查中」：
 
 1. 所有代码运行 `completed`（无 failed/timed_out/cancelled）且无 P0/P1
-   （INT-204 起 P2 不再阻断视觉衔接，与 commit status 绿灯同口径——否则
-   只有 P2 的 UI PR 会绿灯合入却从未做过视觉审查）；
+   （含 `prior(open)` 遗留阻断项，审查 R6——与 commit status 的
+   `summarizeCodeRuns` 同口径；INT-204 起 P2 不再阻断视觉衔接，否则只有
+   P2 的 UI PR 会绿灯合入却从未做过视觉审查）；
 2. 配置了视觉组合（0 个则永不启动，也不设 `视觉审查` 状态）；
 3. **至少一张截图下载成功**（下载面见下；描述里的截图引用数只是前置）；
 4. 至少一个代码运行 `ui_changed=true`；

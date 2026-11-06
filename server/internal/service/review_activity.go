@@ -494,11 +494,12 @@ func reviewCollectRunIssues(runs []model.ReviewRun, kind api.ReviewActivityIssue
 	}
 }
 
-// reviewCountResult 把一条结论计入发现计数（代码计 P0/P1/P2，视觉计
-// blocker/worth_fixing）；result_json 无法解析返回 false。视觉分支把 prior
-// 里 status=open 且按 priorOpenBlocks 阻塞的条目一并计入——与 GitHub status
-// 的红绿判定（visualFailureCount）同一口径，否则 Web 侧「需要处理」会漏掉
-// 模型只写进 prior(open) 的未解决项。
+// reviewCountResult 把一条结论计入发现计数（代码计 P0/P1/P2 + prior(open)
+// 阻塞项，视觉计 blocker/worth_fixing + 同款阻塞项）；result_json 无法解析
+// 返回 false。两个分支都把 prior 里 status=open 且按 priorOpenBlocks 阻塞
+// 的条目一并计入——与 GitHub status 的红绿判定同一口径（代码侧
+// summarizeCodeRuns 计 codeOpenPriorBlocks，审查 R5/R6），否则 Web 侧「需要
+// 处理」会漏掉模型只写进 prior(open) 的未解决项。
 func reviewCountResult(kind model.ReviewKind, raw string, findings *api.ReviewFindingCounts) bool {
 	if kind == model.ReviewKindVisual {
 		var result api.ReviewVisualResult
@@ -539,6 +540,20 @@ func reviewCountResult(kind model.ReviewKind, raw string, findings *api.ReviewFi
 			findings.P1++
 		case api.P2:
 			findings.P2++
+		}
+	}
+	// 代码 prior(open) 阻塞项（审查 R6）：与视觉分支同构——增量轮只标
+	// prior(open) 的遗留 P0/P1 落进对应计数桶，needs_action 的 P0/P1 口径
+	// 与 GitHub status 红绿一致；级别缺失或未知按 P1 兜底（阻塞的必须有
+	// 位置可落）。
+	for _, p := range result.Prior {
+		if p.Status != api.ReviewPriorDecisionStatusOpen || !priorOpenBlocks(p.Level) {
+			continue
+		}
+		if p.Level != nil && *p.Level == string(api.P0) {
+			findings.P0++
+		} else {
+			findings.P1++
 		}
 	}
 	return true

@@ -848,22 +848,14 @@ func codeOpenPriorBlocks(prior []api.ReviewPriorDecision) int {
 	return n
 }
 
-// priorBlocks 单条 prior 处置是否阻断（审查 R5）：open 且级别缺失/未知或
-// P0/P1 阻断，P2/Note 非阻断（与 findings 同口径）；fixed/rejected 已了结
-// 不阻断。
+// priorBlocks 单条 prior 处置是否阻断（审查 R5）：open 且按 priorOpenBlocks
+// 阻塞——级别缺失/未知或 P0/P1 阻断，P2/Note/Minor 非阻断；fixed/rejected
+// 已了结不阻断。判定函数与视觉侧共用 priorOpenBlocks，单一口径（审查 R6）。
 func priorBlocks(p api.ReviewPriorDecision) bool {
 	if p.Status != api.ReviewPriorDecisionStatusOpen {
 		return false
 	}
-	if p.Level == nil {
-		return true
-	}
-	switch *p.Level {
-	case "P2", "Note":
-		return false
-	default:
-		return true
-	}
+	return priorOpenBlocks(p.Level)
 }
 
 // summarizeCodeRuns 代码审查汇总状态（status 描述 ≤140 字符由调用方截断）。
@@ -1753,8 +1745,8 @@ type visualDecisionOutcome struct {
 
 // codeRunsVisualInputs 从代码运行行汇总视觉衔接输入（INT-204 抽出便于单测）：
 // 是否全部终态、是否全净（completed 且无 P0/P1——P2 不是阻断问题，不再阻断
-// 视觉衔接，否则只有 P2 的 UI PR 会绿灯合入却从未做过视觉审查）、是否有 UI
-// 改动与上轮视觉后 UI 改动。
+// 视觉衔接，否则只有 P2 的 UI PR 会绿灯合入却从未做过视觉审查；prior(open)
+// 的遗留阻断同样阻断全净，审查 R6）、是否有 UI 改动与上轮视觉后 UI 改动。
 func codeRunsVisualInputs(codeRuns []model.ReviewRun) (allTerminal, allOK, anyUI, anySinceLast bool) {
 	allTerminal, allOK = true, true
 	for _, r := range codeRuns {
@@ -1774,6 +1766,12 @@ func codeRunsVisualInputs(codeRuns []model.ReviewRun) (allTerminal, allOK, anyUI
 			if f.Level == api.P0 || f.Level == api.P1 {
 				allOK = false
 			}
+		}
+		// 遗留阻断（审查 R6）：prior(open) 的 P0/P1 与 summarizeCodeRuns
+		// 同口径计入全净判定——否则增量轮把未修完的 P1 只标 prior(open)
+		// 时，代码状态红、视觉衔接却当全净启动，违背「代码未全净不开视觉」。
+		if codeOpenPriorBlocks(result.Prior) > 0 {
+			allOK = false
 		}
 		anyUI = anyUI || result.UiChanged
 		anySinceLast = anySinceLast || result.UiChangedSinceLastVisual

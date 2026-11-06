@@ -627,6 +627,16 @@ func TestCodeRunsVisualInputsP2NotBlocking(t *testing.T) {
 	if _, allOK, _, _ := codeRunsVisualInputs([]model.ReviewRun{broken}); allOK {
 		t.Fatal("结论不可解析应阻断视觉衔接")
 	}
+
+	// prior(open) 的 P1 是遗留阻断（审查 R6）：视觉衔接的全净口径与
+	// summarizeCodeRuns 同判，否则代码状态红、视觉却在待修代码上启动。
+	p1Prior := model.ReviewRun{Kind: model.ReviewKindCode, Status: model.ReviewRunCompleted,
+		ResultJSON: `{"summary":"s","findings":[],
+			"prior":[{"level":"P1","file":"a.go","body":"遗留","status":"open"}],
+			"ui_changed":true,"ui_changed_since_last_visual":false}`}
+	if _, allOK, _, _ := codeRunsVisualInputs([]model.ReviewRun{p1Prior}); allOK {
+		t.Fatal("prior open P1 应阻断全净判定")
+	}
 }
 
 // TestCodeHistoryCarriesOpenPrior INT-204 审查 R1：增量提示词要求核对仍为
@@ -669,5 +679,54 @@ func TestCodeHistoryCarriesOpenPrior(t *testing.T) {
 	}
 	if n := strings.Count(h, "作者驳回了但我认为仍成立"); n != 1 {
 		t.Fatalf("跨组合重复的 open prior 应只渲染一次, got %d:\n%s", n, h)
+	}
+}
+
+// TestRunSummaryCodeCarriesOpenPrior 审查 R6：详情抽屉的代码投影带上
+// prior(open) 遗留项——阻塞项（含级别缺失）计入 findings_count 并以
+// 「上轮遗留：」前缀陈列，P2 遗留只陈列不计数；与 CodeStatus=failure 的
+// 红绿一致，抽屉不再是「0 条发现」。
+func TestRunSummaryCodeCarriesOpenPrior(t *testing.T) {
+	run := model.ReviewRun{Kind: model.ReviewKindCode, Status: model.ReviewRunCompleted,
+		ResultJSON: `{"summary":"s","findings":[{"level":"P2","file":"a.go","body":"边界"}],
+			"prior":[{"level":"P1","file":"x.go","line":9,"body":"遗留P1","status":"open"},
+			         {"body":"没写级别","status":"open"},
+			         {"level":"P2","file":"y.go","body":"遗留P2","status":"open"}],
+			"ui_changed":false}`}
+	sum := runSummary(&run, nil)
+	if sum.FindingsCount == nil || *sum.FindingsCount != 3 {
+		t.Fatalf("findings_count = %v, want 3（P2 finding + 两条阻塞遗留，P2 遗留不计数）", sum.FindingsCount)
+	}
+	for _, want := range []string{"上轮遗留：遗留P1", "上轮遗留：没写级别", "上轮遗留：遗留P2"} {
+		found := false
+		for _, f := range sum.Findings {
+			if strings.Contains(f.Body, want) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("详情投影缺遗留条目 %q: %+v", want, sum.Findings)
+		}
+	}
+}
+
+// TestReviewCountResultCodeOpenPrior 审查 R6：Web 活动计数的代码分支把
+// prior(open) 阻塞项落进 P0/P1 桶（级别缺失按 P1 兜底）、fixed/P2 不计——
+// needs_action 的 P0/P1 口径与 GitHub status 红绿一致。
+func TestReviewCountResultCodeOpenPrior(t *testing.T) {
+	raw := `{"summary":"s","findings":[],
+		"prior":[{"level":"P1","file":"a","body":"x","status":"open"},
+		         {"body":"nil 级别","status":"open"},
+		         {"level":"P0","file":"b","body":"z","status":"open"},
+		         {"level":"P2","file":"c","body":"y","status":"open"},
+		         {"level":"P1","file":"d","body":"fixed","status":"fixed"}],
+		"ui_changed":false}`
+	findings := api.ReviewFindingCounts{}
+	if ok := reviewCountResult(model.ReviewKindCode, raw, &findings); !ok {
+		t.Fatal("reviewCountResult 应解析成功")
+	}
+	if findings.P0 != 1 || findings.P1 != 2 || findings.P2 != 0 {
+		t.Fatalf("计数桶 = %+v, want P0=1 P1=2 P2=0", findings)
 	}
 }
