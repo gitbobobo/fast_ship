@@ -48,13 +48,16 @@ func (s *ReviewService) Start() {
 	s.cancel = cancel
 	s.kickCh = kickCh
 	s.mu.Unlock()
-	go s.reviewLoop(cancel, kickCh)
-	go s.redeliveryLoop(cancel)
-	go s.forgejoPollLoop(cancel)
-	go s.assetRetentionLoop(cancel)
+	s.loopWg.Add(4)
+	go func() { defer s.loopWg.Done(); s.reviewLoop(cancel, kickCh) }()
+	go func() { defer s.loopWg.Done(); s.redeliveryLoop(cancel) }()
+	go func() { defer s.loopWg.Done(); s.forgejoPollLoop(cancel) }()
+	go func() { defer s.loopWg.Done(); s.assetRetentionLoop(cancel) }()
 }
 
-// Stop 停止调度循环；幂等，未启动时为空操作。
+// Stop 停止调度循环并等四条循环退出（含启动即跑的首扫）：测试侧 Cleanup
+// 在 Stop 后关闭 DB 池，不等会让还在首扫里的查询撞上已关的池（INT-205）。
+// 幂等，未启动时为空操作。
 func (s *ReviewService) Stop() {
 	s.mu.Lock()
 	cancel := s.cancel
@@ -63,6 +66,7 @@ func (s *ReviewService) Stop() {
 	s.mu.Unlock()
 	if cancel != nil {
 		close(cancel)
+		s.loopWg.Wait()
 	}
 }
 

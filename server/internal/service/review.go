@@ -100,9 +100,12 @@ type ReviewService struct {
 
 	// 调度循环状态：kick 与 cancel 都经 mu 保护，供 webhook goroutine 与
 	// Start/Stop 并发安全。kickCh 缓冲 1：连续投递只补一轮 tick，不堆积。
+	// loopWg 跟踪四条循环，Stop 等它们退出后（含启动即跑的首扫）才返回——
+	// 测试侧 Cleanup 在 Stop 后关 DB 池，不等会让首扫撞上已关的池（INT-205）。
 	mu     sync.Mutex
 	kickCh chan struct{}
 	cancel chan struct{}
+	loopWg sync.WaitGroup
 
 	// worktreeTries：归档/工作区读取等回收阶段的有限重试计数（进程内即可：
 	// 进程重启后未完成的运行下个 tick 重新计，上限内不会漏终态）。
