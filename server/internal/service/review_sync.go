@@ -858,6 +858,40 @@ func priorBlocks(p api.ReviewPriorDecision) bool {
 	return priorOpenBlocks(p.Level)
 }
 
+// codePriorDedupeKey 跨运行去重键（INT-207）：级别+定位+正文，与 codeHistory
+// 渲染历史遗留的 seenPrior 键同一构造（审查 R5）——同一把尺判断「同一条遗留」。
+func codePriorDedupeKey(p api.ReviewPriorDecision) string {
+	return fmt.Sprintf("%s|%s|%s", priorLevelText(p.Level), priorLoc(p), p.Body)
+}
+
+// codeOpenPriorBlocksAcrossRuns 跨运行去重后的 prior(open) 阻塞遗留计数
+// （INT-207）：多组合增量轮里同一历史遗留项会被每个组合各自标 open（各自的
+// 复核结论都真实），逐运行求和会把 1 条遗留显示成 N 条。这里按 codeHistory
+// 同款键「首个报告的运行计数，其余跳过」——单运行时与 codeOpenPriorBlocks
+// 相等，多组合时等于实际遗留条目数。result_json 不可解析的运行照旧跳过。
+func codeOpenPriorBlocksAcrossRuns(runs []model.ReviewRun) int {
+	seen := map[string]bool{}
+	n := 0
+	for i := range runs {
+		var result api.ReviewCodeResult
+		if json.Unmarshal([]byte(runs[i].ResultJSON), &result) != nil {
+			continue
+		}
+		for _, p := range result.Prior {
+			if !priorBlocks(p) {
+				continue
+			}
+			key := codePriorDedupeKey(p)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			n++
+		}
+	}
+	return n
+}
+
 // summarizeCodeRuns 代码审查汇总状态（status 描述 ≤140 字符由调用方截断）。
 // 状态数两处（审查 R5）：result.findings 的 P0/P1/P2 + prior(open) 的遗留
 // 阻断项——增量提示词要求把未解决项标 prior 处置，只看 findings 的话未修
@@ -885,8 +919,9 @@ func summarizeCodeRuns(runs []model.ReviewRun, overCap bool) (state, description
 	}
 	counts := map[string]int{"P0": 0, "P1": 0, "P2": 0}
 	// openBlocks 是 prior(open) 里的遗留阻断项（审查 R5）：增量轮未修完的
-	// P0/P1 被标 prior(open) 时同样计入判红，不能绿灯合并。
-	openBlocks := 0
+	// P0/P1 被标 prior(open) 时同样计入判红，不能绿灯合并。多组合按
+	// （级别+定位+正文）跨运行去重（INT-207），同一条遗留不被算 N 次。
+	openBlocks := codeOpenPriorBlocksAcrossRuns(runs)
 	for _, r := range runs {
 		var result api.ReviewCodeResult
 		if json.Unmarshal([]byte(r.ResultJSON), &result) != nil {
@@ -902,7 +937,6 @@ func summarizeCodeRuns(runs []model.ReviewRun, overCap bool) (state, description
 				counts["P2"]++
 			}
 		}
-		openBlocks += codeOpenPriorBlocks(result.Prior)
 	}
 	// 阻断口径（审查 R5）：findings 的 P0/P1 + prior(open) 遗留阻断项。
 	if counts["P0"]+counts["P1"]+openBlocks > 0 {
@@ -929,7 +963,8 @@ func summarizeCodeRuns(runs []model.ReviewRun, overCap bool) (state, description
 
 // summarizeVisualRuns 视觉审查汇总：active → pending；未完成的运行 → error；
 // blocker/worth_fixing（含 prior 里仍未解决的）→ failure；否则 success。计数
-// 走 visualFailureCount，与状态判定、评论渲染、Web 计数同一口径。
+// 走 visualFailureTotals（findings 逐运行求和 + prior(open) 遗留跨运行去重，
+// INT-207），与状态判定、评论渲染、Web 计数同一口径。
 func summarizeVisualRuns(runs []model.ReviewRun) (state, description string) {
 	for _, r := range runs {
 		if !r.Status.Terminal() {
@@ -941,14 +976,7 @@ func summarizeVisualRuns(runs []model.ReviewRun) (state, description string) {
 			return "error", "视觉审查未完成：" + runCombinationLabel(&r) + " 失败"
 		}
 	}
-	n := 0
-	for _, r := range runs {
-		var result api.ReviewVisualResult
-		if json.Unmarshal([]byte(r.ResultJSON), &result) != nil {
-			continue
-		}
-		n += visualFailureCount(&result)
-	}
+	n := visualFailureTotals(runs)
 	if n > 0 {
 		return "failure", fmt.Sprintf("发现 %d 条问题", n)
 	}
@@ -1069,8 +1097,9 @@ func buildCodeComment(meta reviewCommentMeta, codeRuns []model.ReviewRun, inline
 	totals := map[string]int{"P0": 0, "P1": 0, "P2": 0}
 	// totalsOpenBlocks 汇总 prior(open) 的遗留阻断项（审查 R5）：与
 	// summarizeCodeRuns 同口径，未修完的 P0/P1 标 prior(open) 也计入判红，
-	// 不让它在任何用户可见面上消失。
-	totalsOpenBlocks := 0
+	// 不让它在任何用户可见面上消失。多组合按（级别+定位+正文）跨运行去重
+	// （INT-207），同一条遗留不被算 N 次；各组合分节仍完整渲染自己的遗留。
+	totalsOpenBlocks := codeOpenPriorBlocksAcrossRuns(codeRuns)
 	for i := range codeRuns {
 		r := &codeRuns[i]
 		st := comboStat{status: reviewRunStatusText(r.Status)}
@@ -1097,7 +1126,6 @@ func buildCodeComment(meta reviewCommentMeta, codeRuns []model.ReviewRun, inline
 					totals[lvl] += c[lvl]
 				}
 				st.openPrior = openPriorDecisions(result.Prior)
-				totalsOpenBlocks += codeOpenPriorBlocks(result.Prior)
 			}
 		case r.Status.Terminal():
 			unfinished++
@@ -1947,12 +1975,12 @@ func priorOpenBlocks(level *string) bool {
 	return true
 }
 
-// visualFailureCount 视觉结论里仍未处理的问题条数：本轮 findings 的
+// visualFailureCount 单个视觉结论的失败计数（findings 的
 // blocker/worth_fixing + prior 里 status=open 且按 priorOpenBlocks 阻塞的条目
-// （提示词契约让未解决项只标 prior(open)，未解决与否的真相就在这一段；兼容
-// 旧轮次「重写进 findings」的结论，两条路径都计）。状态汇总、沿用描述、Web
-// 计数都走它，保证各处红绿判定一致（musiver PR #563 的红绿反复正是
-// prior(open) 不计导致的）。
+// ——提示词契约让未解决项只标 prior(open)，未解决与否的真相就在这一段；兼容
+// 旧轮次「重写进 findings」的结论，两条路径都计）。跨运行聚合不走它：多组合
+// 各自标 open 的同一历史遗留会被逐运行重复计数，聚合用 visualFailureTotals
+// （INT-207）；它现在只服务 visualResultHasFailure 这类单结论布尔判定。
 func visualFailureCount(result *api.ReviewVisualResult) int {
 	if result == nil {
 		return 0
@@ -1974,6 +2002,40 @@ func visualFailureCount(result *api.ReviewVisualResult) int {
 	return n
 }
 
+// visualFailureTotals 视觉段跨运行的失败计数聚合（INT-207）：findings 的
+// blocker/worth_fixing 逐运行求和（各组合本轮新发现本就互不相同），prior(open)
+// 阻塞遗留按 codePriorDedupeKey（级别+定位+正文；视觉遗留通常无定位，退化为
+// 级别+正文）跨运行去重——同一历史遗留被每个视觉组合各自标 open 时只算一条，
+// 与代码侧 codeOpenPriorBlocksAcrossRuns、Web 活动计数同一把尺。
+// result_json 不可解析的运行照旧跳过。
+func visualFailureTotals(runs []model.ReviewRun) int {
+	n := 0
+	seenPrior := map[string]bool{}
+	for i := range runs {
+		var result api.ReviewVisualResult
+		if json.Unmarshal([]byte(runs[i].ResultJSON), &result) != nil {
+			continue
+		}
+		for _, f := range result.Findings {
+			if f.Severity == api.Blocker || f.Severity == api.WorthFixing {
+				n++
+			}
+		}
+		for _, p := range result.Prior {
+			if p.Status != api.ReviewPriorDecisionStatusOpen || !priorOpenBlocks(p.Level) {
+				continue
+			}
+			key := codePriorDedupeKey(p)
+			if seenPrior[key] {
+				continue
+			}
+			seenPrior[key] = true
+			n++
+		}
+	}
+	return n
+}
+
 // visualResultHasFailure 视觉结论是否含未处理问题（findings 与 prior(open)
 // 合并口径，见 visualFailureCount）。
 func visualResultHasFailure(raw string) bool {
@@ -1984,23 +2046,21 @@ func visualResultHasFailure(raw string) bool {
 	return visualFailureCount(&result) > 0
 }
 
-// visualCarryDescription 沿用旧视觉 failure 时的 status 描述。
+// visualCarryDescription 沿用旧视觉 failure 时的 status 描述。只聚合最近
+// 一轮（priorRuns 按 round DESC 排序，取首个同轮前缀），计数走
+// visualFailureTotals：同一遗留被多个视觉组合各自标 open 时只算一条（INT-207）。
 func visualCarryDescription(priorRuns []model.ReviewRun) string {
-	n := 0
-	lastRound := 0
-	for _, r := range priorRuns {
-		if lastRound == 0 {
-			lastRound = r.RoundNumber
-		}
-		if r.RoundNumber != lastRound {
+	if len(priorRuns) == 0 {
+		return "截图复核意见尚未处理"
+	}
+	lastRound := priorRuns
+	for i, r := range priorRuns {
+		if r.RoundNumber != priorRuns[0].RoundNumber {
+			lastRound = priorRuns[:i]
 			break
 		}
-		var result api.ReviewVisualResult
-		if json.Unmarshal([]byte(r.ResultJSON), &result) != nil {
-			continue
-		}
-		n += visualFailureCount(&result)
 	}
+	n := visualFailureTotals(lastRound)
 	if n == 0 {
 		return "截图复核意见尚未处理"
 	}

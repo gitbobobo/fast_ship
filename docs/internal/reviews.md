@@ -775,16 +775,16 @@ rune 截断加 `...`，不劈断多字节字符）；状态未变不重复调用
 | `代码审查` | 任一组合未终态 | `pending`「审查中」 |
 | | 任一 `failed/timed_out/cancelled` | `error`「审查未完成：<组合> 失败」（取第一个失败组合） |
 | | 全部 completed 且 P0+P1 > 0 | `failure`「发现问题：P1 x 条，P2 x 条」（所有组合合计，只列非零级别，按 P0→P1→P2；prior 的 fixed/rejected 是已了结的处置不计入——审查 R5：**prior(open) 里的遗留阻断项计入判红**，见下行） |
-| | 全部 completed 且 findings 无阻断但 prior(open) 有遗留阻断（级别缺失/未知或 P0/P1，`codeOpenPriorBlocks`） | `failure`「发现问题：遗留未解决 N 条」（审查 R5：增量提示词让模型把未修完项标 prior(open)，只看 findings 的话已知阻断问题会从所有面消失、PR 绿灯合并；原则对齐视觉侧 `priorOpenBlocks`） |
+| | 全部 completed 且 findings 无阻断但 prior(open) 有遗留阻断（级别缺失/未知或 P0/P1，`codeOpenPriorBlocks`） | `failure`「发现问题：遗留未解决 N 条」（审查 R5：增量提示词让模型把未修完项标 prior(open)，只看 findings 的话已知阻断问题会从所有面消失、PR 绿灯合并；原则对齐视觉侧 `priorOpenBlocks`。N 按（级别+定位+正文）跨组合去重——INT-207：多组合各自标 open 的同一历史遗留只算一条，与评论结论、Web 计数同尺） |
 | | 全部 completed 且只有 P2 | `success`「审查通过（P2 建议 N 条）」——P2 是修法局部的边界建议，不判红（INT-204：实测 75% 轮次最严重只是 P2，全量重审下判红会让 PR 永远挂红）；**超限轮次纯「审查通过」不带建议数**（审查 R2） |
 | | 超限轮次（审查 R2） | failure 只列 P0/P1、success 不带 P2 计数——状态文案与超限评论/行内的「只报告 P0/P1」同口径（`summarizeCodeRuns` 认 overCap） |
 | | 全部 completed 且全净 | `success`「审查通过」 |
 | `视觉审查` | 代码审查未全部终态 | 不写（`visualWait`：结论还可能变，不提前落 status/评论/指纹） |
 | | 视觉运行启动 | `pending`「视觉审查中」 |
-| | 有 blocker / worth fixing，含 `prior` 里 `status=open` 且原级别为 blocker/worth_fixing 的遗留 | `failure`「发现 N 条问题」 |
+| | 有 blocker / worth fixing，含 `prior` 里 `status=open` 且原级别为 blocker/worth_fixing 的遗留 | `failure`「发现 N 条问题」（N 的 prior(open) 部分按（级别+定位+正文）跨组合去重，findings 逐组合求和——INT-207，与 Web 活动计数同尺） |
 | | 只有 minor 或无发现 | `success`「审查通过」 |
 | | 本轮无事可做（截图内容未变、上轮视觉后无 UI 改动）且上一轮通过 | `success`「审查通过（沿用上一轮，截图未变化）」 |
-| | 本轮无事可做且上一轮遗留 blocker / worth fixing | `failure`「截图复核意见尚未处理（上轮 N 条）」 |
+| | 本轮无事可做且上一轮遗留 blocker / worth fixing | `failure`「截图复核意见尚未处理（上轮 N 条）」（N 取最近一轮，prior(open) 跨组合去重——INT-207） |
 
 代码审查 `error` 时不启动视觉审查，等手动重新审查；未配置视觉组合时永不
 设 `视觉审查` 状态。代码运行未全部终态时**不写任何视觉产出**（等待分支见
