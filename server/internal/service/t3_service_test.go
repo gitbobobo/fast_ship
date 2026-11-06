@@ -295,15 +295,22 @@ func (f *fakeT3Environment) tokenFormCount() int {
 // pushActive 在最近注册的活跃订阅流上推送流项并等待 Ack。
 func (f *fakeT3Environment) pushActive(t *testing.T, values ...json.RawMessage) {
 	t.Helper()
+	if !f.tryPushActive(values...) {
+		t.Fatalf("push active values: 无订阅流或推送失败")
+	}
+}
+
+// tryPushActive 是 pushActive 的不致命变体：供 fake 服务器 goroutine 上的
+// 回调使用——晚到的回调可能落在测试结束后（订阅已关），沿用 t.Fatalf 会
+// panic 整个测试进程（INT-205 基线 -race 实测）。推送不出去按静默丢弃。
+func (f *fakeT3Environment) tryPushActive(values ...json.RawMessage) bool {
 	f.mu.Lock()
 	st := f.activeStream
 	f.mu.Unlock()
 	if st == nil {
-		t.Fatalf("no active subscription stream to push on")
+		return false
 	}
-	if err := st.push(values...); err != nil {
-		t.Fatalf("push active values: %v", err)
-	}
+	return st.push(values...) == nil
 }
 
 // nextPushSeq 取下一个增量序号（高于快照序号，只前进不回卷）。
@@ -322,6 +329,14 @@ func (f *fakeT3Environment) pushThreadDelta(t *testing.T, thread map[string]any)
 		"kind": "thread.updated", "sequence": f.nextPushSeq(), "location": "active", "thread": thread,
 	})
 	f.pushActive(t, value)
+}
+
+// tryPushThreadDelta 同 pushThreadDelta，但不携带 *testing.T：见 tryPushActive。
+func (f *fakeT3Environment) tryPushThreadDelta(thread map[string]any) bool {
+	value := mustJSON(map[string]any{
+		"kind": "thread.updated", "sequence": f.nextPushSeq(), "location": "active", "thread": thread,
+	})
+	return f.tryPushActive(value)
 }
 
 // pushThreadRemoval 推送 thread.removed{location:active} 增量。
@@ -918,6 +933,7 @@ func setupT3ServiceTest(t *testing.T) *t3TestEnv {
 	if err != nil {
 		t.Fatalf("open test db: %v", err)
 	}
+	cleanupTestDB(t, db)
 	if err := db.AutoMigrate(&model.User{}, &model.T3Environment{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
