@@ -51,6 +51,32 @@ func TestRequireAuth_AllowsJWT(t *testing.T) {
 	}
 }
 
+// INT-203：签名合法但缺 exp 的 JWT 必须在认证层被拒——中间件若把 exp 按 0
+// 透传，等价于令牌永不过期，登出也拿不到真实过期时间。
+func TestRequireAuth_RejectsJWTWithoutExp(t *testing.T) {
+	env := setupAuthMiddlewareTest(t)
+
+	claims := jwt.MapClaims{
+		"sub":      "user-1",
+		"username": "tester",
+		"jti":      "jti-no-exp",
+		"iat":      time.Now().Unix(),
+	}
+	signed, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte(env.cfg.JWT.Secret))
+	if err != nil {
+		t.Fatalf("sign token: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/protected", nil)
+	req.Header.Set("Authorization", "Bearer "+signed)
+	rec := httptest.NewRecorder()
+	env.router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestRequireAuth_AllowsAPIKey(t *testing.T) {
 	env := setupAuthMiddlewareTest(t)
 	rawKey := "RAWAPIKEY1234567890"

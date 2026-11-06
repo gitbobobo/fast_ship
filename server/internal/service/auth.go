@@ -216,8 +216,11 @@ func (s *AuthService) Login(ctx context.Context, req *LoginRequest) (*AuthRespon
 }
 
 func (s *AuthService) Logout(jti string, exp time.Time, refreshToken string) error {
-	if err := s.jwtBlacklistRepo.Add(jti, exp); err != nil {
-		return err
+	// API Key 登出没有 jti（INT-203）：空 jti 不写黑名单，只吊销 refresh token。
+	if jti != "" {
+		if err := s.jwtBlacklistRepo.Add(jti, exp); err != nil {
+			return err
+		}
 	}
 
 	if refreshToken != "" {

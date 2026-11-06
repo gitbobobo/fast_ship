@@ -178,6 +178,23 @@ func TestAuthServiceLogoutRevokesRefreshToken(t *testing.T) {
 	}
 }
 
+// INT-203：API Key 登出没有 jti，空 jti 不得写入黑名单。
+func TestAuthServiceLogoutEmptyJtiSkipsBlacklist(t *testing.T) {
+	services := setupAuthTestServices(t)
+
+	if err := services.authService.Logout("", time.Time{}, ""); err != nil {
+		t.Fatalf("logout without jti: %v", err)
+	}
+
+	var count int64
+	if err := services.db.Model(&model.JWTBlacklist{}).Count(&count).Error; err != nil {
+		t.Fatalf("count jwt blacklist: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected empty jwt blacklist, got %d rows", count)
+	}
+}
+
 func TestAuthServiceUpdatePasswordRevokesOldSessions(t *testing.T) {
 	services := setupAuthTestServices(t)
 	ctx := context.Background()
