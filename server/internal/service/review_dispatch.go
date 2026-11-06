@@ -229,9 +229,10 @@ func projectIDForRun(db *gorm.DB, runID string) string {
 
 // prevReviewedHeadSHA 增量复核的上一轮受审 head（INT-204）：取上一轮
 // （round_number-1）同 (project, repo, pr, integration) 的代码运行作基线，
-// 三个条件全部满足才可增量：①上一轮至少有一个 completed 运行（快推时上一
-// 轮会被 supersede 置 cancelled，或 failed/timed_out——它的改动从未被审过，
-// 只能靠全量兕住）；②上一轮 head 与本轮不同（manual/comment 同 head 重跑
+// 三个条件全部满足才可增量：①上一轮所有代码组合都 completed——快推时上一
+// 轮会被 supersede 置 cancelled（或 failed/timed_out），未完成的组合对
+// 历史代码的覆盖从未发生，只能靠全量兜住（审查 R2：多组合的 any 语义会
+// 漏覆盖）；②上一轮 head 与本轮不同（manual/comment 同 head 重跑
 // 恒开新轮，diff X...X 为空，重审必须是全量）；③base_ref 精确一致（分支名
 // 大小写敏感；base 变了整体 diff 的对照面已换，增量口径不成立）。返回空串
 // = 回退全量；查询失败只记 Warn 回退全量，派发不该因一次读库失败而失败。
@@ -245,14 +246,16 @@ func (s *ReviewService) prevReviewedHeadSHA(ctx context.Context, run *model.Revi
 	if len(prevRuns) == 0 || prevRuns[0].BaseRef != run.BaseRef {
 		return ""
 	}
-	completed := false
+	// 上一轮必须每个代码组合都 completed（审查 R2）：any 语义下多组合项目
+	// 里部分组合 failed/timed_out/cancelled 时，这些组合对 prev 之前代码的
+	// 覆盖从未发生，增量口径又会把未改动代码上的新问题压到 P0/P1——历史
+	// 侧的 P2/Note 就永久丢了；有缺口就回退全量。
 	for i := range prevRuns {
-		if prevRuns[i].Status == model.ReviewRunCompleted {
-			completed = true
-			break
+		if prevRuns[i].Status != model.ReviewRunCompleted {
+			return ""
 		}
 	}
-	if !completed || strings.EqualFold(prevRuns[0].HeadSHA, run.HeadSHA) {
+	if strings.EqualFold(prevRuns[0].HeadSHA, run.HeadSHA) {
 		return ""
 	}
 	return prevRuns[0].HeadSHA
@@ -278,12 +281,14 @@ func (s *ReviewService) reviewRoundCap(projectID string) int {
 
 // reviewedHeadCount 本 PR 截至某轮（含）受审的 head 数（INT-204）：manual/
 // comment 同 head 重跑恒开新轮但不引入新审查对象，不消耗轮次上限额度，所以
-// 上限按 distinct head_sha 计而非轮次号。查询失败按 upToRound（旧轮数口径）
-// 兜底记 Warn，不让派发/同步失败。
+// 上限按 distinct head_sha 计而非轮次号；且只计真正派发过的 head
+// （dispatched_at 非空）——排队后从未派发就被 supersede 的 head 没消耗过
+// 任何审查，连快推 3–4 次也不会把第一次真正复审提前推进超限口径（审查
+// R2）。查询失败按 upToRound（旧轮数口径）兜底记 Warn，不让派发/同步失败。
 func (s *ReviewService) reviewedHeadCount(projectID, repoFullName string, prNumber int, integrationID string, upToRound int) int {
 	var n int64
 	if err := s.db.Model(&model.ReviewRun{}).
-		Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ? AND kind = ? AND round_number <= ?",
+		Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ? AND kind = ? AND round_number <= ? AND dispatched_at IS NOT NULL",
 			projectID, repoFullName, prNumber, integrationID, model.ReviewKindCode, upToRound).
 		Distinct("head_sha").Count(&n).Error; err != nil {
 		s.logger.Warn("统计受审 head 数失败，轮次上限按轮数口径处理",

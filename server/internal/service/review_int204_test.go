@@ -39,35 +39,48 @@ func int204Run(t *testing.T, findings, prior string) model.ReviewRun {
 func TestSummarizeCodeRunsP0P1OnlyBlocking(t *testing.T) {
 	// 只有 P2 → success，描述含条数。
 	st, desc := summarizeCodeRuns([]model.ReviewRun{int204Run(t,
-		`[{"level":"P2","file":"a.go","line":1,"body":"边界"}]`, `[]`)})
+		`[{"level":"P2","file":"a.go","line":1,"body":"边界"}]`, `[]`)}, false)
 	if st != "success" || !strings.Contains(desc, "P2 建议 1 条") {
 		t.Fatalf("P2-only: state=%q desc=%q, want success + 条数", st, desc)
 	}
 
 	// 含 P1（配 P2/Note）→ failure，描述按级别计数。
 	st, desc = summarizeCodeRuns([]model.ReviewRun{int204Run(t,
-		`[{"level":"P1","file":"a.go","line":1,"body":"bug"},{"level":"P2","file":"b.go","body":"边界"},{"level":"Note","file":"c.go","body":"nit"}]`, `[]`)})
+		`[{"level":"P1","file":"a.go","line":1,"body":"bug"},{"level":"P2","file":"b.go","body":"边界"},{"level":"Note","file":"c.go","body":"nit"}]`, `[]`)}, false)
 	if st != "failure" || !strings.Contains(desc, "P1 1 条") || !strings.Contains(desc, "P2 1 条") || strings.Contains(desc, "Note") {
 		t.Fatalf("P1: state=%q desc=%q", st, desc)
 	}
 
 	// 含 P0 → failure。
 	st, _ = summarizeCodeRuns([]model.ReviewRun{int204Run(t,
-		`[{"level":"P0","file":"a.go","line":1,"body":"崩溃"}]`, `[]`)})
+		`[{"level":"P0","file":"a.go","line":1,"body":"崩溃"}]`, `[]`)}, false)
 	if st != "failure" {
 		t.Fatalf("P0: state=%q, want failure", st)
 	}
 
+	// 超限口径（审查 R2）：描述只列 P0/P1——failure 不再带 P2 计数，
+	// P2-only 直接「审查通过」不带建议数，与超限评论的红绿口径一致。
+	st, desc = summarizeCodeRuns([]model.ReviewRun{int204Run(t,
+		`[{"level":"P1","file":"a.go","line":1,"body":"bug"},{"level":"P2","file":"b.go","body":"边界"}]`, `[]`)}, true)
+	if st != "failure" || !strings.Contains(desc, "P1 1 条") || strings.Contains(desc, "P2") {
+		t.Fatalf("超限 failure 描述应只列 P0/P1: state=%q desc=%q", st, desc)
+	}
+	st, desc = summarizeCodeRuns([]model.ReviewRun{int204Run(t,
+		`[{"level":"P2","file":"a.go","line":1,"body":"边界"}]`, `[]`)}, true)
+	if st != "success" || desc != "审查通过" {
+		t.Fatalf("超限 P2-only 应为纯「审查通过」: state=%q desc=%q", st, desc)
+	}
+
 	// prior.rejected（P1 级别、带 reason）不是本轮新问题：不计入状态。
 	st, desc = summarizeCodeRuns([]model.ReviewRun{int204Run(t, `[]`,
-		`[{"level":"P1","file":"a.go","line":1,"body":"原发现","status":"rejected","reason":"有意为之"}]`)})
+		`[{"level":"P1","file":"a.go","line":1,"body":"原发现","status":"rejected","reason":"有意为之"}]`)}, false)
 	if st != "success" || !strings.Contains(desc, "审查通过") {
 		t.Fatalf("prior rejected 不计入状态: state=%q desc=%q", st, desc)
 	}
 
 	// prior.open 同理不计入——只有下一轮 findings 里的新条目才判状态。
 	st, _ = summarizeCodeRuns([]model.ReviewRun{int204Run(t, `[]`,
-		`[{"level":"P1","file":"a.go","line":1,"body":"仍存在","status":"open"}]`)})
+		`[{"level":"P1","file":"a.go","line":1,"body":"仍存在","status":"open"}]`)}, false)
 	if st != "success" {
 		t.Fatalf("prior open 不计入状态: state=%q", st)
 	}
@@ -76,7 +89,7 @@ func TestSummarizeCodeRunsP0P1OnlyBlocking(t *testing.T) {
 	st, desc = summarizeCodeRuns([]model.ReviewRun{
 		int204Run(t, `[{"level":"P1","file":"a.go","line":1,"body":"bug"}]`, `[]`),
 		int204Run(t, `[{"level":"P2","file":"b.go","body":"边界"}]`, `[]`),
-	})
+	}, false)
 	if st != "failure" || !strings.Contains(desc, "P1 1 条") || !strings.Contains(desc, "P2 1 条") {
 		t.Fatalf("多组合: state=%q desc=%q", st, desc)
 	}
@@ -164,13 +177,25 @@ func TestPrevReviewedHeadSHAAndRoundCap(t *testing.T) {
 	ctx := context.Background()
 
 	r1 := e.seedRun(t, repo, 30, "sha-1", model.ReviewRunCompleted, now)
-	e.svc.db.Model(r1).Updates(map[string]any{"base_ref": "main"})
+	e.svc.db.Model(r1).Updates(map[string]any{"base_ref": "main", "dispatched_at": now})
 	r2 := e.seedRun(t, repo, 30, "sha-2", model.ReviewRunCompleted, now)
-	e.svc.db.Model(r2).Updates(map[string]any{"base_ref": "main", "round_number": 2})
+	e.svc.db.Model(r2).Updates(map[string]any{"base_ref": "main", "round_number": 2, "dispatched_at": now})
 
 	// 上一轮存在且 base 一致 → 增量基线。
 	if got := e.review.prevReviewedHeadSHA(ctx, r2); got != "sha-1" {
 		t.Fatalf("prev = %q, want sha-1", got)
+	}
+
+	// 多组合项目里上一轮部分组合未完成（审查 R2）：any 语义会漏掉未完成
+	// 组合对历史代码的覆盖 → 回退全量；全部 completed 后恢复增量。
+	r1b := e.seedRun(t, repo, 30, "sha-1", model.ReviewRunTimedOut, now)
+	e.svc.db.Model(r1b).Updates(map[string]any{"base_ref": "main", "instance_id": "o4-mini"})
+	if got := e.review.prevReviewedHeadSHA(ctx, r2); got != "" {
+		t.Fatalf("上一轮部分组合未完成应回退全量, prev = %q", got)
+	}
+	e.svc.db.Model(r1b).Updates(map[string]any{"status": model.ReviewRunCompleted})
+	if got := e.review.prevReviewedHeadSHA(ctx, r2); got != "sha-1" {
+		t.Fatalf("上一轮全部 completed 后应恢复增量, prev = %q", got)
 	}
 	// base 变化 → 回退全量。
 	e.svc.db.Model(r2).Updates(map[string]any{"base_ref": "develop"})
@@ -205,12 +230,22 @@ func TestPrevReviewedHeadSHAAndRoundCap(t *testing.T) {
 	}
 	e.svc.db.Model(r2).Updates(map[string]any{"head_sha": "sha-2"})
 
-	// reviewedHeadCount：同 head 重跑不重复计（sha-1 两轮 + sha-2 一轮 → 2）。
-	// 统计不受运行状态影响：失败轮的 head 同样消耗过审查尝试。
+	// reviewedHeadCount：同 head 重跑不重复计（sha-1 两轮 + sha-2 一轮 → 2），
+	// 统计只认真正派发过的 head（dispatched_at 非空，审查 R2）——排队后从未
+	// 派发就被 supersede 的 head 不消耗额度；失败轮只要派发过就照常计。
 	r3 := e.seedRun(t, repo, 30, "sha-2", model.ReviewRunFailed, now)
-	e.svc.db.Model(r3).Updates(map[string]any{"base_ref": "main", "round_number": 3})
+	e.svc.db.Model(r3).Updates(map[string]any{"base_ref": "main", "round_number": 3, "dispatched_at": now})
 	if got := e.review.reviewedHeadCount(e.project.ID, repo, 30, r2.IntegrationID, 3); got != 2 {
 		t.Fatalf("reviewedHeadCount = %d, want 2（同 head 重跑不重复计）", got)
+	}
+	r4 := e.seedRun(t, repo, 30, "sha-3", model.ReviewRunCancelled, now)
+	e.svc.db.Model(r4).Updates(map[string]any{"base_ref": "main", "round_number": 4})
+	if got := e.review.reviewedHeadCount(e.project.ID, repo, 30, r2.IntegrationID, 4); got != 2 {
+		t.Fatalf("从未派发的 head 不应计入额度: got %d, want 2", got)
+	}
+	e.svc.db.Model(r4).Updates(map[string]any{"dispatched_at": now})
+	if got := e.review.reviewedHeadCount(e.project.ID, repo, 30, r2.IntegrationID, 4); got != 3 {
+		t.Fatalf("派发过的 head 应计入: got %d, want 3", got)
 	}
 
 	// 轮次上限：有行取行值；0 归一为 3；无行默认 3。

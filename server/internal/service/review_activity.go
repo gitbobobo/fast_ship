@@ -653,8 +653,11 @@ func reviewVisualStage(visualRuns []model.ReviewRun, configured int,
 		stage.Status = api.ReviewStageProgressStatusPending
 	case codeStage.Status == api.ReviewStageProgressStatusFailed ||
 		(codeStage.Status == api.ReviewStageProgressStatusCompleted &&
-			findings.P0+findings.P1+findings.P2 > 0):
-		// 前端文案「未启动」。
+			findings.P0+findings.P1 > 0):
+		// 前端文案「未启动」。只认 P0/P1（INT-204 审查 R2）：P2 不再阻断
+		// 视觉衔接后，P2-only 的代码会真的开视觉——截图全部下载失败时账本
+		// 会写 visual_status=failure，这里再判 skipped 就和失败状态自相矛盾
+		// （本分支排在 visual_status 判定之前）。
 		stage.Status = api.ReviewStageProgressStatusSkipped
 	case pr.VisualStatus == "pending":
 		stage.Status = api.ReviewStageProgressStatusPending

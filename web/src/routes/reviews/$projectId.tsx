@@ -470,8 +470,8 @@ function ReviewSettingsForm({
           />
         </div>
         <p className="text-xs text-muted-foreground">
-          超过该轮数后，审查只报告 P0/P1
-          阻断问题（P2/Note 省略）。默认 3，范围 1–20。
+          按受审 head 数计（同 head 重跑不计），超过后审查只报告
+          P0/P1 阻断问题（P2/Note 省略）。默认 3，范围 1–20。
         </p>
       </section>
 

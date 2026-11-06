@@ -357,8 +357,29 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 		return errs.ErrInternal
 	}
 
+	// 项目轮次上限（INT-204）：评论、状态描述与行内的超限口径按设置行的
+	// round_cap 判。读取失败按默认 3 兜底记 Warn——同步不该因一次设置读取
+	// 失败而中断；无行（项目被删/停用竞态）同属兜底，后续的 guarded 写前
+	// 复核会拦截失效目标。必须在步骤 1 之前算好：commit status 描述也按
+	// 超限口径省略 P2，否则状态文案与顶层评论红绿口径不一致（审查 R2）。
+	roundCap := reviewDefaultRoundCap
+	var capRow model.ProjectReviewSettings
+	if err := s.db.Select("round_cap").
+		Where("project_id = ? AND enabled", ledger.ProjectID).First(&capRow).Error; err != nil {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			s.logger.Warn("读取项目轮次上限失败，按默认值处理",
+				zap.String("project", ledger.ProjectID), zap.Error(err))
+		}
+	} else {
+		roundCap = normalizeRoundCap(capRow.RoundCap)
+	}
+	// 超限判定按受审 head 数而非轮次号：manual/comment 同 head 重跑不消耗
+	// 额度（INT-204 审查 R1）。这里一次算好，状态/评论/行内/diff 读取共用。
+	reviewedHeads := s.reviewedHeadCount(ledger.ProjectID, ledger.RepoFullName, ledger.PRNumber, ledger.IntegrationID, ledger.RoundNumber)
+	overCap := roundCap > 0 && reviewedHeads > roundCap
+
 	// 1. 代码 commit status（状态变化才写）。
-	codeState, codeDesc := summarizeCodeRuns(codeRuns)
+	codeState, codeDesc := summarizeCodeRuns(codeRuns, overCap)
 	if codeState != ledger.CodeStatus {
 		if err := client.CreateCommitStatus(ctx, ledger.RepoFullName,
 			ledger.HeadSHA, codeState, reviewCodeStatusContext, statusDesc(codeDesc), targetURL); err != nil {
@@ -585,24 +606,7 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 	// 只有行内 review 依赖 diff；暂时性错误交给 step 4 推迟行内阶段（本轮不
 	// 标记已发布，下一轮同步重试），diff 超限的确定性失败按「本轮无行内行」
 	// 降级收尾（见 step 4 的 inlineDeferred）。
-	// 项目轮次上限（INT-204）：评论与行内的超限口径按设置行的 round_cap 判。
-	// 读取失败按默认 3 兜底记 Warn——同步不该因一次设置读取失败而中断；无行
-	// （项目被删/停用竞态）同属兜底，后续的 guarded 写前复核会拦截失效目标。
-	roundCap := reviewDefaultRoundCap
-	var capRow model.ProjectReviewSettings
-	if err := s.db.Select("round_cap").
-		Where("project_id = ? AND enabled", ledger.ProjectID).First(&capRow).Error; err != nil {
-		if !errors.Is(err, gorm.ErrRecordNotFound) {
-			s.logger.Warn("读取项目轮次上限失败，按默认值处理",
-				zap.String("project", ledger.ProjectID), zap.Error(err))
-		}
-	} else {
-		roundCap = normalizeRoundCap(capRow.RoundCap)
-	}
-	// 超限判定按受审 head 数而非轮次号：manual/comment 同 head 重跑不消耗
-	// 额度（INT-204 审查 R1）。这里一次算好，评论/行内/diff 读取共用。
-	reviewedHeads := s.reviewedHeadCount(ledger.ProjectID, ledger.RepoFullName, ledger.PRNumber, ledger.IntegrationID, ledger.RoundNumber)
-	overCap := roundCap > 0 && reviewedHeads > roundCap
+	// 项目轮次上限已在步骤 1 前算好（roundCap/reviewedHeads/overCap）。
 	inlineLines, inlineErr := s.fetchInlineLines(ctx, client, ledger, codeRuns, overCap)
 	diffUnavailable := errors.Is(inlineErr, errReviewDiffTooLarge)
 	switch {
@@ -834,8 +838,11 @@ func (s *ReviewService) upsertVisualComment(ctx context.Context, client forge.Re
 // rejected/open），不是本轮新问题，一律不计入（INT-204，有单测钉死）。
 // 判红口径（INT-204）：只有 P0/P1 才 failure——P2 是修法局部的边界建议，
 // 全量重审下每轮都可能有，判红会让小 PR 永远挂红；只有 P2 时 success 且
-// 描述带条数，复核者仍能看到建议量。
-func summarizeCodeRuns(runs []model.ReviewRun) (state, description string) {
+// 描述带条数，复核者仍能看到建议量。overCap（审查 R2）：超限轮的描述也
+// 按「只报告 P0/P1」收敛——failure 只列 P0/P1，P2-only 直接「审查通过」，
+// 与顶层评论「无阻断问题。」的红绿口径一致，不然状态文案把超限口径又
+// 破坏了。
+func summarizeCodeRuns(runs []model.ReviewRun, overCap bool) (state, description string) {
 	if len(runs) == 0 {
 		return "pending", "审查中"
 	}
@@ -867,15 +874,19 @@ func summarizeCodeRuns(runs []model.ReviewRun) (state, description string) {
 		}
 	}
 	if counts["P0"]+counts["P1"] > 0 {
+		levels := []string{"P0", "P1"}
+		if !overCap {
+			levels = append(levels, "P2")
+		}
 		var parts []string
-		for _, lvl := range []string{"P0", "P1", "P2"} {
+		for _, lvl := range levels {
 			if counts[lvl] > 0 {
 				parts = append(parts, fmt.Sprintf("%s %d 条", lvl, counts[lvl]))
 			}
 		}
 		return "failure", "发现问题：" + strings.Join(parts, "，")
 	}
-	if counts["P2"] > 0 {
+	if counts["P2"] > 0 && !overCap {
 		return "success", fmt.Sprintf("审查通过（P2 建议 %d 条）", counts["P2"])
 	}
 	return "success", "审查通过"

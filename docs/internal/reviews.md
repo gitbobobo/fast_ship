@@ -545,11 +545,13 @@ GitHub App 投递失败（公网隧道超时/502）不会自动重试，一次�
 
 - **增量复核**：第 2 轮起，`prevReviewedHeadSHA` 取上一轮（
   `round_number-1`）同 (project, repo, pr, integration) 代码运行作基线，
-  三个条件全部满足才可增量，否则回退全量：①上一轮至少有一个 `completed`
-  运行——快推时上一轮会被 supersede 置 cancelled（或 failed/timed_out），
-  它的改动从未被审过，只能靠全量兕住；②上一轮 head 与本轮不同
-  （manual/comment 同 head 重跑恒开新轮，`diff X...X` 为空，重审必须全
-  量）；③`base_ref` 精确一致（分支名大小写敏感，不归一）。
+  三个条件全部满足才可增量，否则回退全量：①上一轮所有代码组合都
+  `completed`——快推时上一轮会被 supersede 置 cancelled（或
+  failed/timed_out），多组合项目里部分组合未完成时（any 语义会漏掉未完成
+  组合对历史代码的覆盖，审查 R2）同样回退，未审过的改动只能靠全量兜住；
+  ②上一轮 head 与本轮不同（manual/comment 同 head 重跑恒开新轮，
+  `diff X...X` 为空，重审必须全量）；③`base_ref` 精确一致（分支名大小写
+  敏感，不归一）。
   增量模式的提示词差异：「怎么查」第一条 bullet 改为先
   `git diff <prev>...<head>` 核对本轮改动（整体 diff 只作上下文）；新增
   「## 本轮范围」节，声明本轮只审增量并复核历史 open 条目，**落在未改动
@@ -564,16 +566,18 @@ GitHub App 投递失败（公网隧道超时/502）不会自动重试，一次�
   无描述按标题），附最小改动纪律。
 - **轮次上限**：`reviewRoundCap` 读 `project_review_settings.round_cap`
   （无行/失败/0 按默认 3 兜底）。超限按**受审 head 数**计而非轮次号
-  （`reviewedHeadCount`：截至本轮 `distinct head_sha`——manual/comment 同
-  head 重跑不引入新审查对象，不消耗额度；查询失败按轮数口径兜底）：超过
-  上限即「超限」，提示词在分级节末尾追加「已过轮次上限 N（按受审 head 计）：
-  本轮只报告 P0/P1，P2/Note 一律省略，不要提交」；同步侧（`doSyncPR` 再读
-  一次设置行，失败按 3 兜底）把上限与受审 head 数传进评论与行内面——顶层
-  评论一句话结论与计数只看 P0/P1（无阻断时不带 P2 建议数），总览表下注明
-  「已过轮次上限 N（按受审 head 计），仅报告阻断问题。」，分节不渲染 P2、
-  Note 折叠整段不出现，P2/Note 计数列也填 –；行内 review 跳过 P2（Note
-  本来就跳过），`fetchInlineLines` 的 need 判定也只认 P0/P1（只有 P2 时
-  不再读 diff）。
+  （`reviewedHeadCount`：截至本轮 `distinct head_sha`，且只计真正派发过的
+  head（`dispatched_at` 非空，审查 R2）——manual/comment 同 head 重跑不
+  引入新审查对象、排队后从未派发就被 supersede 的 head 没消耗过审查，都
+  不消耗额度；查询失败按轮数口径兜底）：超过上限即「超限」，提示词在分级
+  节末尾追加「已过轮次上限 N（按受审 head 计）：本轮只报告 P0/P1，
+  P2/Note 一律省略，不要提交」；同步侧（`doSyncPR` 再读一次设置行，失败
+  按 3 兜底）把上限与受审 head 数传进状态/评论/行内面——commit status
+  描述与顶层评论结论都只看 P0/P1（failure 不带 P2 计数、无阻断时不带 P2
+  建议数，审查 R2），总览表下注明「已过轮次上限 N（按受审 head 计），仅
+  报告阻断问题。」，分节不渲染 P2、Note 折叠整段不出现，P2/Note 计数列也
+  填 –；行内 review 跳过 P2（Note 本来就跳过），`fetchInlineLines` 的
+  need 判定也只认 P0/P1（只有 P2 时不再读 diff）。
 
 视觉审查不参与增量复核与轮次上限：截图集合与轮次无关，沿用机制（见
 「视觉审查衔接」）已避免重复消耗。
@@ -746,7 +750,8 @@ rune 截断加 `...`，不劈断多字节字符）；状态未变不重复调用
 | `代码审查` | 任一组合未终态 | `pending`「审查中」 |
 | | 任一 `failed/timed_out/cancelled` | `error`「审查未完成：<组合> 失败」（取第一个失败组合） |
 | | 全部 completed 且 P0+P1 > 0 | `failure`「发现问题：P1 x 条，P2 x 条」（所有组合合计，只列非零级别，按 P0→P1→P2；**只数 findings，prior 一律不计入**——rejected/open 都是对上一轮的处置，不是本轮新问题） |
-| | 全部 completed 且只有 P2 | `success`「审查通过（P2 建议 N 条）」——P2 是修法局部的边界建议，不判红（INT-204：实测 75% 轮次最严重只是 P2，全量重审下判红会让 PR 永远挂红） |
+| | 全部 completed 且只有 P2 | `success`「审查通过（P2 建议 N 条）」——P2 是修法局部的边界建议，不判红（INT-204：实测 75% 轮次最严重只是 P2，全量重审下判红会让 PR 永远挂红）；**超限轮次纯「审查通过」不带建议数**（审查 R2） |
+| | 超限轮次（审查 R2） | failure 只列 P0/P1、success 不带 P2 计数——状态文案与超限评论/行内的「只报告 P0/P1」同口径（`summarizeCodeRuns` 认 overCap） |
 | | 全部 completed 且全净 | `success`「审查通过」 |
 | `视觉审查` | 代码审查未全部终态 | 不写（`visualWait`：结论还可能变，不提前落 status/评论/指纹） |
 | | 视觉运行启动 | `pending`「视觉审查中」 |
