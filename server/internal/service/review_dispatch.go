@@ -307,18 +307,19 @@ func (s *ReviewService) reviewRoundCap(projectID string) int {
 // 超限口径（审查 R2）；当前轮（round_number = upTo）按运行行存在即计，不
 // 看 dispatched_at——首个组合渲染提示词时本轮还没派发，不这样算的话同轮
 // 各组合与同步侧会拿到不同的受审 head 数，同一个 head 有一半组合全量、一
-// 半超限（审查 R3）。查询失败按 upToRound（旧轮数口径）兜底记 Warn，不让
-// 派发/同步失败。
+// 半超限（审查 R3）。查询失败按 0 兜底（fail-open，审查 R5）：上限口径会隐去 P2/Note，一次瞬
+// 时 DB 抖动就让未超限的 PR 静默变严是错误方向——宁可多审一轮；只记
+// Warn，不让派发/同步失败。
 func (s *ReviewService) reviewedHeadCount(projectID, repoFullName string, prNumber int, integrationID string, upToRound int) int {
 	var n int64
 	if err := s.db.Model(&model.ReviewRun{}).
 		Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ? AND kind = ? AND round_number <= ? AND (round_number = ? OR dispatched_at IS NOT NULL)",
 			projectID, repoFullName, prNumber, integrationID, model.ReviewKindCode, upToRound, upToRound).
 		Distinct("head_sha").Count(&n).Error; err != nil {
-		s.logger.Warn("统计受审 head 数失败，轮次上限按轮数口径处理",
+		s.logger.Warn("统计受审 head 数失败，本轮按不超限处理",
 			zap.String("project", projectID), zap.String("repo", repoFullName),
 			zap.Int("pr", prNumber), zap.Error(err))
-		return upToRound
+		return 0
 	}
 	return int(n)
 }

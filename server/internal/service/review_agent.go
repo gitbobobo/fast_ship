@@ -174,6 +174,10 @@ func (s *ReviewService) codeHistory(ctx context.Context, run *model.ReviewRun) (
 			}
 		}
 		fmt.Fprintf(&b, "## 上一轮（轮次 %d，head %s）\n", run.RoundNumber-1, reviewShortSHA(prevRuns[0].HeadSHA))
+		// 跨组合去重（审查 R5）：多组合项目里同一未解决条目常被多个组合各
+		// 自标 open，逐条渲染会让下一轮历史重复 N 次、诱发重复 prior；首个
+		// 报告它的组合渲染，其余跳过。
+		seenPrior := map[string]bool{}
 		for _, r := range prevRuns {
 			// 历史上下文是纯文本：选项拼在标题行，不用 <sub>（那是渲染层的小字）。
 			label := runCombinationLabel(&r)
@@ -196,14 +200,12 @@ func (s *ReviewService) codeHistory(ctx context.Context, run *model.ReviewRun) (
 					// open 后会在下一轮历史里消失，复核断链（对齐 visualHistory
 					// 的 openPrior 补偿，INT-204 审查 R1）。
 					for _, p := range openPriorDecisions(result.Prior) {
-						loc := ""
-						if p.File != nil {
-							loc = *p.File
-							if p.Line != nil && *p.Line > 0 {
-								loc = fmt.Sprintf("%s:%d", *p.File, *p.Line)
-							}
+						key := fmt.Sprintf("%s|%s|%s", priorLevelText(p.Level), priorLoc(p), p.Body)
+						if seenPrior[key] {
+							continue
 						}
-						fmt.Fprintf(&b, "- 仍未解决 · %s %s %s\n", priorLevelText(p.Level), loc, p.Body)
+						seenPrior[key] = true
+						fmt.Fprintf(&b, "- 仍未解决 · %s %s %s\n", priorLevelText(p.Level), priorLoc(p), p.Body)
 					}
 				}
 			} else {
@@ -332,6 +334,17 @@ func (s *ReviewService) visualHistory(ctx context.Context, run *model.ReviewRun)
 		}
 	}
 	return strings.TrimRight(b.String(), "\n"), nil
+}
+
+// priorLoc prior 条目的 file:line 定位文本（无文件时空串）。
+func priorLoc(p api.ReviewPriorDecision) string {
+	if p.File == nil {
+		return ""
+	}
+	if p.Line != nil && *p.Line > 0 {
+		return fmt.Sprintf("%s:%d", *p.File, *p.Line)
+	}
+	return *p.File
 }
 
 // runsAtRound 取本 (项目, 集成) 同 PR 指定轮次、指定 kind 的运行（按创建序）。

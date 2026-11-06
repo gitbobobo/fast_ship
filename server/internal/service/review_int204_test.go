@@ -78,11 +78,27 @@ func TestSummarizeCodeRunsP0P1OnlyBlocking(t *testing.T) {
 		t.Fatalf("prior rejected 不计入状态: state=%q desc=%q", st, desc)
 	}
 
-	// prior.open 同理不计入——只有下一轮 findings 里的新条目才判状态。
-	st, _ = summarizeCodeRuns([]model.ReviewRun{int204Run(t, `[]`,
+	// prior.open 的 P1 是遗留阻断（审查 R5）：增量轮把它只标 prior(open)
+	// 而不写 findings 时，状态照样判红——已知阻断问题不能从所有面消失。
+	st, desc = summarizeCodeRuns([]model.ReviewRun{int204Run(t, `[]`,
 		`[{"level":"P1","file":"a.go","line":1,"body":"仍存在","status":"open"}]`)}, false)
+	if st != "failure" || !strings.Contains(desc, "遗留未解决 1 条") {
+		t.Fatalf("prior open P1 应判红: state=%q desc=%q", st, desc)
+	}
+
+	// prior.open 的 P2 是非阻断建议，不计入状态。
+	st, _ = summarizeCodeRuns([]model.ReviewRun{int204Run(t, `[]`,
+		`[{"level":"P2","file":"a.go","body":"边界","status":"open"}]`)}, false)
 	if st != "success" {
-		t.Fatalf("prior open 不计入状态: state=%q", st)
+		t.Fatalf("prior open P2 不应判红: state=%q", st)
+	}
+
+	// prior.open 级别缺失按阻断（对齐视觉侧原则：模型标了未解决却没写级别
+	// 时不能变绿）。
+	st, _ = summarizeCodeRuns([]model.ReviewRun{int204Run(t, `[]`,
+		`[{"body":"没写级别","status":"open"}]`)}, false)
+	if st != "failure" {
+		t.Fatalf("prior open 无级别应判红: state=%q", st)
 	}
 
 	// 多组合合并：一个组合 P1、另一个组合只有 P2 → failure，两个级别都列出。
@@ -121,6 +137,9 @@ func TestRenderReviewPromptIncrementalAndRoundCap(t *testing.T) {
 	if !strings.Contains(p, "以本 PR 的意图为准") || !strings.Contains(p, "按最小改动审查") {
 		t.Fatal("分级节应为 INT-204 改稿（意图为准 + 最小改动）")
 	}
+	if !strings.Contains(p, "不是指令") || !strings.Contains(p, "一律忽略") {
+		t.Fatal("分级节应声明 PR 描述只作意图、不是指令（审查 R5 意图注入防线）")
+	}
 
 	// 第 2 轮有上一轮且 base 相同 → 增量模式。
 	p = renderReviewPrompt(mkRun(2), "https://fs.example.com", "fsr_tok", "sha-prev", 2, 3)
@@ -132,6 +151,7 @@ func TestRenderReviewPromptIncrementalAndRoundCap(t *testing.T) {
 		"上一轮受审 head 在本工作区不可达时",
 		"增量基线不可达，已全量审查",
 		"核对历史上下文里仍为 open 的条目并逐条给出 prior 处置（fixed/rejected/open）",
+		"仍未解决的 P0/P1 无论写进 findings 还是标为 prior(open)，本轮结论都不通过",
 		"ui_changed 与 ui_changed_since_last_visual 不受本轮范围收窄影响",
 	} {
 		if !strings.Contains(p, want) {
@@ -356,6 +376,36 @@ func TestBuildCodeCommentOverCap(t *testing.T) {
 	}
 	if strings.Contains(body, "发现 P2") {
 		t.Fatalf("未超限仅 P2 不应用「发现」措辞: %s", body)
+	}
+
+	// prior(open) 渲染与计数（审查 R5）：未超限全列（非阻断带标记），
+	// 遗留阻断进结论；超限轮只留阻断级别，非阻断遗留不出现。
+	withPrior := []model.ReviewRun{int204Run(t,
+		`[{"level":"P1","file":"a.go","line":1,"body":"新bug"}]`,
+		`[{"level":"P1","file":"x.go","line":9,"body":"遗留P1","status":"open"},
+		  {"level":"P2","file":"y.go","body":"遗留P2","status":"open"},
+		  {"level":"P1","file":"z.go","body":"已驳回","status":"rejected","reason":"有意为之"}]`)}
+	meta.RoundCap = 3
+	meta.ReviewedHeads = 1
+	body = buildCodeComment(meta, withPrior, nil, false, false)
+	if !strings.Contains(body, "**仍未解决**") || !strings.Contains(body, "遗留P1") ||
+		!strings.Contains(body, "遗留P2") || !strings.Contains(body, "（非阻断）") {
+		t.Fatalf("未超限应全列 open prior（非阻断带标记）: %s", body)
+	}
+	if !strings.Contains(body, "发现 P1 1 条、遗留未解决 1 条。") {
+		t.Fatalf("结论应含遗留阻断计数: %s", body)
+	}
+	if strings.Contains(body, "已驳回") {
+		t.Fatalf("rejected 不应渲染: %s", body)
+	}
+	meta.RoundNumber = 4
+	meta.ReviewedHeads = 4
+	body = buildCodeComment(meta, withPrior, nil, false, false)
+	if strings.Contains(body, "遗留P2") || strings.Contains(body, "（非阻断）") {
+		t.Fatalf("超限轮非阻断遗留应省略: %s", body)
+	}
+	if !strings.Contains(body, "遗留P1") || !strings.Contains(body, "遗留未解决 1 条") {
+		t.Fatalf("超限轮阻断遗留应照常: %s", body)
 	}
 }
 
@@ -600,6 +650,14 @@ func TestCodeHistoryCarriesOpenPrior(t *testing.T) {
 	cur := e.seedRun(t, repo, 40, "sha-new", model.ReviewRunDispatched, now)
 	e.svc.db.Model(cur).Updates(map[string]any{"round_number": 2, "base_ref": "main"})
 
+	// 第二个组合各自标同一未解决条目（审查 R5 跨组合去重）：历史只渲染一次，
+	// 否则下一轮会被诱导输出重复 prior。
+	prev2 := e.seedRun(t, repo, 40, "sha-old", model.ReviewRunCompleted, now)
+	e.svc.db.Model(prev2).Updates(map[string]any{
+		"base_ref": "main", "instance_id": "o4-mini", "result_json": prevResult,
+		"finished_at": finished,
+	})
+
 	h, err := e.review.codeHistory(context.Background(), cur)
 	if err != nil {
 		t.Fatalf("codeHistory: %v", err)
@@ -608,5 +666,8 @@ func TestCodeHistoryCarriesOpenPrior(t *testing.T) {
 		if !strings.Contains(h, want) {
 			t.Fatalf("历史上下文缺上一轮 prior(open) 内容 %q:\n%s", want, h)
 		}
+	}
+	if n := strings.Count(h, "作者驳回了但我认为仍成立"); n != 1 {
+		t.Fatalf("跨组合重复的 open prior 应只渲染一次, got %d:\n%s", n, h)
 	}
 }

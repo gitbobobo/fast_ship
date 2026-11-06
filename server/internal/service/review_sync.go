@@ -833,9 +833,44 @@ func (s *ReviewService) upsertVisualComment(ctx context.Context, client forge.Re
 	return s.upsertPRComment(ctx, client, ledger, reviewVisualCommentMarker, body, "visual_comment_id", ledger.VisualCommentID)
 }
 
+// codeOpenPriorBlocks 结论里仍未解决（status=open）且会阻断的 prior 条目数
+// （审查 R5）：增量提示词要求把未解决项逐条标 prior 处置，若平台只看
+// findings，未修完的 P0/P1 会从所有用户可见面消失、PR 绿灯合并。原则对齐
+// 视觉侧 priorOpenBlocks：级别缺失或未知一律视为阻断（模型显式标了「仍未
+// 解决」却漏写级别时不能让结论变绿），P0/P1 阻断，P2/Note 不阻断。
+func codeOpenPriorBlocks(prior []api.ReviewPriorDecision) int {
+	n := 0
+	for _, p := range prior {
+		if priorBlocks(p) {
+			n++
+		}
+	}
+	return n
+}
+
+// priorBlocks 单条 prior 处置是否阻断（审查 R5）：open 且级别缺失/未知或
+// P0/P1 阻断，P2/Note 非阻断（与 findings 同口径）；fixed/rejected 已了结
+// 不阻断。
+func priorBlocks(p api.ReviewPriorDecision) bool {
+	if p.Status != api.ReviewPriorDecisionStatusOpen {
+		return false
+	}
+	if p.Level == nil {
+		return true
+	}
+	switch *p.Level {
+	case "P2", "Note":
+		return false
+	default:
+		return true
+	}
+}
+
 // summarizeCodeRuns 代码审查汇总状态（status 描述 ≤140 字符由调用方截断）。
-// 状态只数 result.findings 里的 P0/P1/P2：prior 是对上一轮发现的处置（含
-// rejected/open），不是本轮新问题，一律不计入（INT-204，有单测钉死）。
+// 状态数两处（审查 R5）：result.findings 的 P0/P1/P2 + prior(open) 的遗留
+// 阻断项——增量提示词要求把未解决项标 prior 处置，只看 findings 的话未修
+// 完的 P0/P1 会绿灯合并；prior 的 fixed/rejected 是已了结的处置，不计入
+// （INT-204，有单测钉死）。
 // 判红口径（INT-204）：只有 P0/P1 才 failure——P2 是修法局部的边界建议，
 // 全量重审下每轮都可能有，判红会让小 PR 永远挂红；只有 P2 时 success 且
 // 描述带条数，复核者仍能看到建议量。overCap（审查 R2）：超限轮的描述也
@@ -857,6 +892,9 @@ func summarizeCodeRuns(runs []model.ReviewRun, overCap bool) (state, description
 		}
 	}
 	counts := map[string]int{"P0": 0, "P1": 0, "P2": 0}
+	// openBlocks 是 prior(open) 里的遗留阻断项（审查 R5）：增量轮未修完的
+	// P0/P1 被标 prior(open) 时同样计入判红，不能绿灯合并。
+	openBlocks := 0
 	for _, r := range runs {
 		var result api.ReviewCodeResult
 		if json.Unmarshal([]byte(r.ResultJSON), &result) != nil {
@@ -872,8 +910,10 @@ func summarizeCodeRuns(runs []model.ReviewRun, overCap bool) (state, description
 				counts["P2"]++
 			}
 		}
+		openBlocks += codeOpenPriorBlocks(result.Prior)
 	}
-	if counts["P0"]+counts["P1"] > 0 {
+	// 阻断口径（审查 R5）：findings 的 P0/P1 + prior(open) 遗留阻断项。
+	if counts["P0"]+counts["P1"]+openBlocks > 0 {
 		levels := []string{"P0", "P1"}
 		if !overCap {
 			levels = append(levels, "P2")
@@ -883,6 +923,9 @@ func summarizeCodeRuns(runs []model.ReviewRun, overCap bool) (state, description
 			if counts[lvl] > 0 {
 				parts = append(parts, fmt.Sprintf("%s %d 条", lvl, counts[lvl]))
 			}
+		}
+		if openBlocks > 0 {
+			parts = append(parts, fmt.Sprintf("遗留未解决 %d 条", openBlocks))
 		}
 		return "failure", "发现问题：" + strings.Join(parts, "，")
 	}
@@ -1025,10 +1068,17 @@ func buildCodeComment(meta reviewCommentMeta, codeRuns []model.ReviewRun, inline
 	type comboStat struct {
 		status string         // 总览表状态列文案
 		counts map[string]int // nil = 未完成或 result_json 不可解析，总览表填 –
+		// openPrior 本组合结论里仍未解决（status=open）的 prior 条目（审查
+		// R5）：分节渲染「仍未解决」，超限轮只留阻断级别。
+		openPrior []api.ReviewPriorDecision
 	}
 	stats := make([]comboStat, len(codeRuns))
 	completed, unfinished := 0, 0
 	totals := map[string]int{"P0": 0, "P1": 0, "P2": 0}
+	// totalsOpenBlocks 汇总 prior(open) 的遗留阻断项（审查 R5）：与
+	// summarizeCodeRuns 同口径，未修完的 P0/P1 标 prior(open) 也计入判红，
+	// 不让它在任何用户可见面上消失。
+	totalsOpenBlocks := 0
 	for i := range codeRuns {
 		r := &codeRuns[i]
 		st := comboStat{status: reviewRunStatusText(r.Status)}
@@ -1054,6 +1104,8 @@ func buildCodeComment(meta reviewCommentMeta, codeRuns []model.ReviewRun, inline
 				for _, lvl := range []string{"P0", "P1", "P2"} {
 					totals[lvl] += c[lvl]
 				}
+				st.openPrior = openPriorDecisions(result.Prior)
+				totalsOpenBlocks += codeOpenPriorBlocks(result.Prior)
 			}
 		case r.Status.Terminal():
 			unfinished++
@@ -1069,7 +1121,23 @@ func buildCodeComment(meta reviewCommentMeta, codeRuns []model.ReviewRun, inline
 	// 超限轮（INT-204）只看阻断问题：P0/P1>0 时计数也只列 P0/P1（P2 已被
 	// 口径省略）；无阻断但有 P2 时明说建议量；全净措辞从「P0–P2」换成「阻断
 	// 问题」，与超限口径一致。
-	blocking := totals["P0"] + totals["P1"]
+	// 阻断口径（审查 R5）：findings 的 P0/P1 + prior(open) 遗留阻断项，
+	// 与 summarizeCodeRuns 同口径——增量轮未修完的 P0/P1 标 prior(open)
+	// 也判红，不在任何面上消失。
+	blocking := totals["P0"] + totals["P1"] + totalsOpenBlocks
+	// appendBlockingParts 组一句话结论的级别计数，两个分支共用遗留段。
+	appendBlockingParts := func(levels []string) string {
+		var parts []string
+		for _, lvl := range levels {
+			if totals[lvl] > 0 {
+				parts = append(parts, fmt.Sprintf("%s %d 条", lvl, totals[lvl]))
+			}
+		}
+		if totalsOpenBlocks > 0 {
+			parts = append(parts, fmt.Sprintf("遗留未解决 %d 条", totalsOpenBlocks))
+		}
+		return strings.Join(parts, "、")
+	}
 	switch {
 	case completed+unfinished < len(codeRuns):
 		fmt.Fprintf(&b, "审查进行中：%d/%d 个组合已完成。\n\n", completed, len(codeRuns))
@@ -1093,21 +1161,9 @@ func buildCodeComment(meta reviewCommentMeta, codeRuns []model.ReviewRun, inline
 	case overCap:
 		// 超限轮有阻断问题时计数只列 P0/P1：P2/Note 已被口径省略，不该再
 		// 出现在结论里。
-		var parts []string
-		for _, lvl := range []string{"P0", "P1"} {
-			if totals[lvl] > 0 {
-				parts = append(parts, fmt.Sprintf("%s %d 条", lvl, totals[lvl]))
-			}
-		}
-		fmt.Fprintf(&b, "发现 %s。\n\n", strings.Join(parts, "、"))
+		fmt.Fprintf(&b, "发现 %s。\n\n", appendBlockingParts([]string{"P0", "P1"}))
 	default:
-		var parts []string
-		for _, lvl := range []string{"P0", "P1", "P2"} {
-			if totals[lvl] > 0 {
-				parts = append(parts, fmt.Sprintf("%s %d 条", lvl, totals[lvl]))
-			}
-		}
-		fmt.Fprintf(&b, "发现 %s。\n\n", strings.Join(parts, "、"))
+		fmt.Fprintf(&b, "发现 %s。\n\n", appendBlockingParts([]string{"P0", "P1", "P2"}))
 	}
 
 	// 总览表：每组合一行；计数列只对 completed 且可解析的组合统计。
@@ -1199,6 +1255,36 @@ func buildCodeComment(meta reviewCommentMeta, codeRuns []model.ReviewRun, inline
 						}
 					}
 					b.WriteString("\n</details>\n")
+				}
+				// 仍未解决（审查 R5）：prior(open) 是上一轮遗留的未了结项，
+				// 不渲染就会从评论里消失。超限轮只留阻断级别，P2/Note 遗留
+				// 与 findings 里的口径一致被省略；未超限全列，非阻断条目
+				// 带「（非阻断）」标记。
+				var shown bool
+				for _, pr := range stats[i].openPrior {
+					blocks := priorBlocks(pr)
+					if overCap && !blocks {
+						continue
+					}
+					if !shown {
+						b.WriteString("**仍未解决**\n")
+						shown = true
+					}
+					loc := ""
+					if pr.File != nil {
+						loc = *pr.File
+						if pr.Line != nil && *pr.Line > 0 {
+							loc = fmt.Sprintf("%s:%d", *pr.File, *pr.Line)
+						}
+					}
+					tag := ""
+					if !blocks {
+						tag = "（非阻断）"
+					}
+					fmt.Fprintf(&b, "- 仍未解决 · %s %s%s：%s\n", priorLevelText(pr.Level), loc, tag, pr.Body)
+				}
+				if shown {
+					b.WriteString("\n")
 				}
 			}
 		case r.Status.Terminal():
