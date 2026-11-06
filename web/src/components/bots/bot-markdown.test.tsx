@@ -304,7 +304,12 @@ describe("BotMarkdown", () => {
     }
   });
 
-  it("按行边界增量喂养：每一步中间态都与全新挂载的同一文本一致", () => {
+  // 满载下（全量并行 worker 抢 CPU）这个数千次同步渲染的重循环会超出
+  // vitest 默认 5s 超时，单独跑稳定 0.4s：显式放宽，避免全量跑偶发红。
+  it(
+    "按行边界增量喂养：每一步中间态都与全新挂载的同一文本一致",
+    { timeout: 60_000 },
+    () => {
     for (const [name, text] of [...EQUIV_SAMPLES, ...BAIL_SAMPLES]) {
       const lines = text.split("\n");
       const { container, rerender, unmount } = render(
