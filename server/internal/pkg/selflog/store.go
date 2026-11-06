@@ -149,3 +149,13 @@ func (s *Store) FileSize() int64 {
 	}
 	return total
 }
+
+// Close 关闭底层连接池：测试 Cleanup 与进程退出的收尾路径。不关的话每
+// 个句柄的 connectionOpener goroutine 常驻到进程结束（INT-205 泄漏守卫）。
+func (s *Store) Close() error {
+	sqlDB, err := s.db.DB()
+	if err != nil {
+		return err
+	}
+	return sqlDB.Close()
+}

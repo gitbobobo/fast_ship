@@ -14,6 +14,7 @@ func TestSelfLogServiceRejectsEmptyRequester(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
+	t.Cleanup(func() { _ = store.Close() })
 	svc := NewSelfLogService(store)
 	ctx := context.Background()
 
