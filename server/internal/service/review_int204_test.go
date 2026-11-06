@@ -230,9 +230,19 @@ func TestPrevReviewedHeadSHAAndRoundCap(t *testing.T) {
 	}
 	e.svc.db.Model(r2).Updates(map[string]any{"head_sha": "sha-2"})
 
-	// reviewedHeadCount：同 head 重跑不重复计（sha-1 两轮 + sha-2 一轮 → 2），
-	// 统计只认真正派发过的 head（dispatched_at 非空，审查 R2）——排队后从未
-	// 派发就被 supersede 的 head 不消耗额度；失败轮只要派发过就照常计。
+	// 本轮组合在上一轮没有同组合的 completed 运行（审查 R3：项目中途新增
+	// 组合）→ 回退全量；恢复已知组合后增量照常。先恢复 base（大小写用例
+	// 把它改成了 Main）。
+	e.svc.db.Model(r2).Updates(map[string]any{"base_ref": "main"})
+	e.svc.db.Model(r2).Updates(map[string]any{"instance_id": "brand-new"})
+	if got := e.review.prevReviewedHeadSHA(ctx, r2); got != "" {
+		t.Fatalf("新组合无上一轮覆盖应回退全量, prev = %q", got)
+	}
+	e.svc.db.Model(r2).Updates(map[string]any{"instance_id": "claude"})
+
+	// reviewedHeadCount：同 head 重跑不重复计（sha-1 两轮 + sha-2 一轮 → 2）。
+	// 历史轮只计派发过的 head；当前轮按运行行存在即计（审查 R3：首个组合
+	// 渲染提示词时本轮还没派发，同轮组合与同步侧才不会拿到不同计数）。
 	r3 := e.seedRun(t, repo, 30, "sha-2", model.ReviewRunFailed, now)
 	e.svc.db.Model(r3).Updates(map[string]any{"base_ref": "main", "round_number": 3, "dispatched_at": now})
 	if got := e.review.reviewedHeadCount(e.project.ID, repo, 30, r2.IntegrationID, 3); got != 2 {
@@ -240,12 +250,18 @@ func TestPrevReviewedHeadSHAAndRoundCap(t *testing.T) {
 	}
 	r4 := e.seedRun(t, repo, 30, "sha-3", model.ReviewRunCancelled, now)
 	e.svc.db.Model(r4).Updates(map[string]any{"base_ref": "main", "round_number": 4})
-	if got := e.review.reviewedHeadCount(e.project.ID, repo, 30, r2.IntegrationID, 4); got != 2 {
-		t.Fatalf("从未派发的 head 不应计入额度: got %d, want 2", got)
-	}
-	e.svc.db.Model(r4).Updates(map[string]any{"dispatched_at": now})
 	if got := e.review.reviewedHeadCount(e.project.ID, repo, 30, r2.IntegrationID, 4); got != 3 {
-		t.Fatalf("派发过的 head 应计入: got %d, want 3", got)
+		t.Fatalf("当前轮 head 按运行行存在即计（派发前也计）: got %d, want 3", got)
+	}
+	// 历史轮（round < upTo）从未派发就被 supersede 的 head 不消耗额度。
+	r5 := e.seedRun(t, repo, 30, "sha-4", model.ReviewRunCancelled, now)
+	e.svc.db.Model(r5).Updates(map[string]any{"base_ref": "main", "round_number": 3})
+	if got := e.review.reviewedHeadCount(e.project.ID, repo, 30, r2.IntegrationID, 4); got != 3 {
+		t.Fatalf("历史轮从未派发的 head 不应计入: got %d, want 3", got)
+	}
+	e.svc.db.Model(r5).Updates(map[string]any{"dispatched_at": now})
+	if got := e.review.reviewedHeadCount(e.project.ID, repo, 30, r2.IntegrationID, 4); got != 4 {
+		t.Fatalf("历史轮派发过的 head 应计入: got %d, want 4", got)
 	}
 
 	// 轮次上限：有行取行值；0 归一为 3；无行默认 3。

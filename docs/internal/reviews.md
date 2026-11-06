@@ -545,13 +545,15 @@ GitHub App 投递失败（公网隧道超时/502）不会自动重试，一次�
 
 - **增量复核**：第 2 轮起，`prevReviewedHeadSHA` 取上一轮（
   `round_number-1`）同 (project, repo, pr, integration) 代码运行作基线，
-  三个条件全部满足才可增量，否则回退全量：①上一轮所有代码组合都
+  四个条件全部满足才可增量，否则回退全量：①上一轮所有代码组合都
   `completed`——快推时上一轮会被 supersede 置 cancelled（或
   failed/timed_out），多组合项目里部分组合未完成时（any 语义会漏掉未完成
   组合对历史代码的覆盖，审查 R2）同样回退，未审过的改动只能靠全量兜住；
-  ②上一轮 head 与本轮不同（manual/comment 同 head 重跑恒开新轮，
-  `diff X...X` 为空，重审必须全量）；③`base_ref` 精确一致（分支名大小写
-  敏感，不归一）。
+  ②本轮组合在上一轮有同组合的 `completed` 运行（身份按环境+harness+模型
+  +规范化 options 全比）——项目中途新增/更换组合时，新组合对 base...prev
+  的覆盖从未发生（审查 R3）；③上一轮 head 与本轮不同（manual/comment 同
+  head 重跑恒开新轮，`diff X...X` 为空，重审必须全量）；④`base_ref` 精确
+  一致（分支名大小写敏感，不归一）。
   增量模式的提示词差异：「怎么查」第一条 bullet 改为先
   `git diff <prev>...<head>` 核对本轮改动（整体 diff 只作上下文）；新增
   「## 本轮范围」节，声明本轮只审增量并复核历史 open 条目，**落在未改动
@@ -566,10 +568,12 @@ GitHub App 投递失败（公网隧道超时/502）不会自动重试，一次�
   无描述按标题），附最小改动纪律。
 - **轮次上限**：`reviewRoundCap` 读 `project_review_settings.round_cap`
   （无行/失败/0 按默认 3 兜底）。超限按**受审 head 数**计而非轮次号
-  （`reviewedHeadCount`：截至本轮 `distinct head_sha`，且只计真正派发过的
-  head（`dispatched_at` 非空，审查 R2）——manual/comment 同 head 重跑不
-  引入新审查对象、排队后从未派发就被 supersede 的 head 没消耗过审查，都
-  不消耗额度；查询失败按轮数口径兜底）：超过上限即「超限」，提示词在分级
+  （`reviewedHeadCount`：截至本轮 `distinct head_sha`；历史轮只计真正派
+  发过的 head（`dispatched_at` 非空，审查 R2）——排队后从未派发就被
+  supersede 的 head 没消耗过审查，不消耗额度；当前轮按运行行存在即计、
+  不看 dispatched_at——首个组合渲染提示词时本轮还没派发，按存在计同轮组
+  合与同步侧才拿同一份计数，不会同一 head 一半组合全量、一半超限（审查
+  R3）；查询失败按轮数口径兜底）：超过上限即「超限」，提示词在分级
   节末尾追加「已过轮次上限 N（按受审 head 计）：本轮只报告 P0/P1，
   P2/Note 一律省略，不要提交」；同步侧（`doSyncPR` 再读一次设置行，失败
   按 3 兜底）把上限与受审 head 数传进状态/评论/行内面——commit status

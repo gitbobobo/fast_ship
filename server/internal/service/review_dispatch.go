@@ -229,13 +229,16 @@ func projectIDForRun(db *gorm.DB, runID string) string {
 
 // prevReviewedHeadSHA 增量复核的上一轮受审 head（INT-204）：取上一轮
 // （round_number-1）同 (project, repo, pr, integration) 的代码运行作基线，
-// 三个条件全部满足才可增量：①上一轮所有代码组合都 completed——快推时上一
+// 四个条件全部满足才可增量：①上一轮所有代码组合都 completed——快推时上一
 // 轮会被 supersede 置 cancelled（或 failed/timed_out），未完成的组合对
 // 历史代码的覆盖从未发生，只能靠全量兜住（审查 R2：多组合的 any 语义会
-// 漏覆盖）；②上一轮 head 与本轮不同（manual/comment 同 head 重跑
-// 恒开新轮，diff X...X 为空，重审必须是全量）；③base_ref 精确一致（分支名
-// 大小写敏感；base 变了整体 diff 的对照面已换，增量口径不成立）。返回空串
-// = 回退全量；查询失败只记 Warn 回退全量，派发不该因一次读库失败而失败。
+// 漏覆盖）；②本轮组合在上一轮有同组合的 completed 运行——项目中途新增/
+// 更换组合时，新组合对 base...prev 的覆盖从未发生，没有同组合历史结论就
+// 回退全量（审查 R3，身份按环境+harness+模型+规范化 options 全比）；
+// ③上一轮 head 与本轮不同（manual/comment 同 head 重跑恒开新轮，
+// diff X...X 为空，重审必须是全量）；④base_ref 精确一致（分支名大小写敏
+// 感；base 变了整体 diff 的对照面已换，增量口径不成立）。返回空串 = 回退
+// 全量；查询失败只记 Warn 回退全量，派发不该因一次读库失败而失败。
 func (s *ReviewService) prevReviewedHeadSHA(ctx context.Context, run *model.ReviewRun) string {
 	prevRuns, err := s.runsAtRound(ctx, run, run.RoundNumber-1, model.ReviewKindCode)
 	if err != nil {
@@ -254,6 +257,23 @@ func (s *ReviewService) prevReviewedHeadSHA(ctx context.Context, run *model.Revi
 		if prevRuns[i].Status != model.ReviewRunCompleted {
 			return ""
 		}
+	}
+	// 本轮组合必须在上一轮有自己的 completed 覆盖（审查 R3）：项目中途新增
+	// 或更换组合时，新组合在上一轮根本没有运行，增量口径会让它漏审
+	// base...prev 的 P2/Note——没有同组合的历史结论就回退全量。组合身份按
+	// 环境+harness+模型+规范化的 options 全比（与组合唯一索引同口径），
+	// 任何一项不同都视为新组合。
+	covered := false
+	for i := range prevRuns {
+		p := &prevRuns[i]
+		if p.EnvironmentID == run.EnvironmentID && p.InstanceID == run.InstanceID &&
+			p.Model == run.Model && p.ModelOptionsJSON == run.ModelOptionsJSON {
+			covered = true
+			break
+		}
+	}
+	if !covered {
+		return ""
 	}
 	if strings.EqualFold(prevRuns[0].HeadSHA, run.HeadSHA) {
 		return ""
@@ -281,15 +301,19 @@ func (s *ReviewService) reviewRoundCap(projectID string) int {
 
 // reviewedHeadCount 本 PR 截至某轮（含）受审的 head 数（INT-204）：manual/
 // comment 同 head 重跑恒开新轮但不引入新审查对象，不消耗轮次上限额度，所以
-// 上限按 distinct head_sha 计而非轮次号；且只计真正派发过的 head
-// （dispatched_at 非空）——排队后从未派发就被 supersede 的 head 没消耗过
-// 任何审查，连快推 3–4 次也不会把第一次真正复审提前推进超限口径（审查
-// R2）。查询失败按 upToRound（旧轮数口径）兜底记 Warn，不让派发/同步失败。
+// 上限按 distinct head_sha 计而非轮次号。历史轮（round_number < upTo）只
+// 计真正派发过的 head（dispatched_at 非空）——排队后从未派发就被 supersede
+// 的 head 没消耗过任何审查，连快推 3–4 次也不会把第一次真正复审提前推进
+// 超限口径（审查 R2）；当前轮（round_number = upTo）按运行行存在即计，不
+// 看 dispatched_at——首个组合渲染提示词时本轮还没派发，不这样算的话同轮
+// 各组合与同步侧会拿到不同的受审 head 数，同一个 head 有一半组合全量、一
+// 半超限（审查 R3）。查询失败按 upToRound（旧轮数口径）兜底记 Warn，不让
+// 派发/同步失败。
 func (s *ReviewService) reviewedHeadCount(projectID, repoFullName string, prNumber int, integrationID string, upToRound int) int {
 	var n int64
 	if err := s.db.Model(&model.ReviewRun{}).
-		Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ? AND kind = ? AND round_number <= ? AND dispatched_at IS NOT NULL",
-			projectID, repoFullName, prNumber, integrationID, model.ReviewKindCode, upToRound).
+		Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ? AND kind = ? AND round_number <= ? AND (round_number = ? OR dispatched_at IS NOT NULL)",
+			projectID, repoFullName, prNumber, integrationID, model.ReviewKindCode, upToRound, upToRound).
 		Distinct("head_sha").Count(&n).Error; err != nil {
 		s.logger.Warn("统计受审 head 数失败，轮次上限按轮数口径处理",
 			zap.String("project", projectID), zap.String("repo", repoFullName),
