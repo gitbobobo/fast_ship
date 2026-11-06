@@ -288,7 +288,7 @@ func (s *IssueService) SyncIssuePullRequests(ctx context.Context, issueID, userI
 			// 指别的主机）按单行失败拦下，取数不会用改指后的新基址。
 			access, err := forgejoSyncAccessFor(resolved, forgeAccess, forgeAccessErrs, resolveCtx, link)
 			if err != nil {
-				markFailed(i, pullRequestSyncFailure(link, resolveFailureText(s, resolveCtx, err, true)))
+				markFailed(i, pullRequestSyncFailure(link, resolveFailureText(s, ctx, resolveCtx, err, true)))
 				continue
 			}
 			if access.hostKey != link.HostKey {
@@ -307,7 +307,7 @@ func (s *IssueService) SyncIssuePullRequests(ctx context.Context, issueID, userI
 		case model.IssuePullRequestProviderGitHub:
 			client, credKind, err := pullRequestSyncClient(resolved, clients, clientKinds, clientErrs, project, link)
 			if err != nil {
-				markFailed(i, pullRequestSyncFailure(link, resolveFailureText(s, resolveCtx, err, false)))
+				markFailed(i, pullRequestSyncFailure(link, resolveFailureText(s, ctx, resolveCtx, err, false)))
 				continue
 			}
 			fetchers[i] = func(ctx context.Context, l *model.IssuePullRequest) error {
@@ -472,13 +472,19 @@ func fetchErrText(s *IssueService, link *model.IssuePullRequest, err error) stri
 	return err.Error()
 }
 
-// resolveFailureText 把阶段 1 访问面解析的失败转成单行文案：err 本身是
-// ctx 错误且解析预算确实终结时，统一回到「请求已取消或超时」口径（与阶段
-// 2 一致）——底层 ctx 错误已被凭证/集成读取归一成 ErrInternal 或脱敏文
-// 案，这里恢复它；缓存命中的真实配置错误（未配凭证/集成已删）不是 ctx 错
-// 误，保留原文与日志，不被误报成超时。
-func resolveFailureText(s *IssueService, ctx context.Context, err error, forgejo bool) string {
-	if ctx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+// resolveFailureText 把阶段 1 访问面解析的失败转成单行文案。err 本身是
+// ctx 错误且解析预算确实终结时分两种：请求 ctx 已终结（客户端断开或请
+// 求超时）回「请求已取消或超时」口径（与阶段 2 一致，底层 ctx 错误已被
+// 凭证/集成读取归一成 ErrInternal 或脱敏文案，这里恢复它）；只是
+// resolveCtx 自身 30s 预算到点而请求仍活时回「解析超时」——该行失败会
+// 与已解析成功行出现在同一响应里，用户可原地重试，不应误导成请求级取消。
+// 缓存命中的真实配置错误（未配凭证/集成已删）不是 ctx 错误，保留原文与
+// 日志，不被误报成超时。
+func resolveFailureText(s *IssueService, reqCtx, resolveCtx context.Context, err error, forgejo bool) string {
+	if isCtxErr := errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded); isCtxErr && resolveCtx.Err() != nil {
+		if errors.Is(resolveCtx.Err(), context.DeadlineExceeded) && reqCtx.Err() == nil {
+			return "解析超时，请稍后重试"
+		}
 		return "请求已取消或超时，未继续同步"
 	}
 	if forgejo {

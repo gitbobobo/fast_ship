@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
@@ -110,6 +111,51 @@ func TestBuildLabelMapCanceledContextReadsTimeout(t *testing.T) {
 
 	_, err := svc.issueService.withRepos(canceledCtx(t)).buildLabelMap(project.ID)
 	assertReadTimeoutErr(t, loadStoreErr(err))
+}
+
+// INT-187 审查 R1（fast-ship-bot P2）：resolveFailureText 要区分「解析预算
+// 到点但请求仍活」与「请求 ctx 已终结」——前者给可重试的「解析超时」文案，
+// 后者统一「请求已取消或超时」。分类全靠 ctx/err 组合，确定性、无 sleep。
+func TestResolveFailureTextClassification(t *testing.T) {
+	svc := setupTestServices(t)
+
+	// 已过期的 resolveCtx（请求仍活）：模拟阶段 1 预算到点。
+	expiredResolve := func() context.Context {
+		ctx, cancel := context.WithTimeout(context.Background(), -time.Second)
+		cancel()
+		return ctx
+	}
+
+	// 请求已取消（客户端断开）：两 provider 同口径归请求级取消。
+	for _, forgejo := range []bool{true, false} {
+		got := resolveFailureText(svc.issueService, canceledCtx(t), canceledCtx(t), context.Canceled, forgejo)
+		if got != "请求已取消或超时，未继续同步" {
+			t.Fatalf("forgejo=%v 请求取消应为「请求已取消或超时」，实际: %s", forgejo, got)
+		}
+	}
+
+	// resolveCtx 自身预算到点、请求仍活：单行可重试失败，与成功行同处一
+	// 个响应，文案必须区别于请求级取消。
+	for _, forgejo := range []bool{true, false} {
+		got := resolveFailureText(svc.issueService, context.Background(), expiredResolve(), context.DeadlineExceeded, forgejo)
+		if got != "解析超时，请稍后重试" {
+			t.Fatalf("forgejo=%v 预算到点应为「解析超时，请稍后重试」，实际: %s", forgejo, got)
+		}
+	}
+
+	// err 是 ctx 错误但两个 ctx 都未终结（子 ctx 提前到期）：Forgejo 给
+	// 中性文案不回显原文，GitHub 走 AppError/原文。
+	got := resolveFailureText(svc.issueService, context.Background(), context.Background(), context.DeadlineExceeded, true)
+	if got != "读取 Forgejo 集成失败，请稍后重试" {
+		t.Fatalf("Forgejo 子 ctx 到期应为中性文案，实际: %s", got)
+	}
+	appErr := errs.New(errs.ErrInternal.Code, "内部提示")
+	if got := resolveFailureText(svc.issueService, context.Background(), context.Background(), appErr, false); got != "内部提示" {
+		t.Fatalf("GitHub AppError 应只回显 Message，实际: %s", got)
+	}
+	if got := resolveFailureText(svc.issueService, context.Background(), context.Background(), errors.New("boom"), false); got != "boom" {
+		t.Fatalf("GitHub 普通错误应回显原文，实际: %s", got)
+	}
 }
 
 func TestLoadStoreErrClassification(t *testing.T) {
