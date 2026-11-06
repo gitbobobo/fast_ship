@@ -178,6 +178,65 @@ func TestAuthServiceLogoutRevokesRefreshToken(t *testing.T) {
 	}
 }
 
+// INT-203：API Key 登出没有 jti，空 jti 不得写入黑名单。
+func TestAuthServiceLogoutEmptyJtiSkipsBlacklist(t *testing.T) {
+	services := setupAuthTestServices(t)
+
+	if err := services.authService.Logout("", time.Time{}, ""); err != nil {
+		t.Fatalf("logout without jti: %v", err)
+	}
+
+	var count int64
+	if err := services.db.Model(&model.JWTBlacklist{}).Count(&count).Error; err != nil {
+		t.Fatalf("count jwt blacklist: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected empty jwt blacklist, got %d rows", count)
+	}
+}
+
+// INT-203：登出带未知/已吊销的 refresh token 必须幂等成功——FindByHash 过滤
+// 有效 token，查不到「没有可吊销的东西」不算错误。
+func TestAuthServiceLogoutUnknownRefreshTokenIdempotent(t *testing.T) {
+	services := setupAuthTestServices(t)
+
+	if err := services.authService.Logout("jti-idempotent", time.Now().Add(time.Hour), "fsr_totally-unknown-token"); err != nil {
+		t.Fatalf("logout with unknown refresh token: %v", err)
+	}
+
+	// 已吊销的 token 再登出：同样幂等成功。
+	user := createTestUser(t, services.db, "user-logout-twice")
+	refreshToken, created, err := services.authService.generateRefreshToken(user)
+	if err != nil || !created {
+		t.Fatalf("generate refresh token: %v", err)
+	}
+	if err := services.authService.Logout("jti-first", time.Now().Add(time.Hour), refreshToken); err != nil {
+		t.Fatalf("first logout: %v", err)
+	}
+	if err := services.authService.Logout("jti-second", time.Now().Add(time.Hour), refreshToken); err != nil {
+		t.Fatalf("second logout (already revoked): %v", err)
+	}
+}
+
+// INT-203 审查 R2：JWT 登出带未知 refresh token 时仍要拉黑 access token——
+// 先吊销后拉黑的顺序下，「无可吊销」不得短路黑名单写入，否则重试链路里
+// access token 永远拉不黑。
+func TestAuthServiceLogoutUnknownRefreshTokenStillBlacklistsJTI(t *testing.T) {
+	services := setupAuthTestServices(t)
+
+	if err := services.authService.Logout("jti-nofound-blacklist", time.Now().Add(time.Hour), "fsr_totally-unknown-token"); err != nil {
+		t.Fatalf("logout: %v", err)
+	}
+
+	blacklisted, err := services.jwtBlacklistRepo.Exists("jti-nofound-blacklist")
+	if err != nil {
+		t.Fatalf("check jwt blacklist: %v", err)
+	}
+	if !blacklisted {
+		t.Fatalf("expected access token jti to be blacklisted despite unknown refresh token")
+	}
+}
+
 func TestAuthServiceUpdatePasswordRevokesOldSessions(t *testing.T) {
 	services := setupAuthTestServices(t)
 	ctx := context.Background()

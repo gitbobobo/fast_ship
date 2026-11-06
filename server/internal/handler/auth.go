@@ -14,6 +14,7 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/config"
 	"github.com/godbobo/fast_ship/server/internal/middleware"
+	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	"github.com/godbobo/fast_ship/server/internal/pkg/response"
 	"github.com/godbobo/fast_ship/server/internal/pkg/storage"
 	"github.com/godbobo/fast_ship/server/internal/service"
@@ -63,14 +64,30 @@ func (h *AuthHandler) Login(c *gin.Context) {
 }
 
 func (h *AuthHandler) Logout(c *gin.Context) {
-	jti := c.GetString(middleware.ContextKeyJTI)
-	expFloat, _ := c.Get(middleware.ContextKeyExp)
-	exp := time.Unix(int64(expFloat.(float64)), 0)
-
 	var body api.LogoutJSONBody
 	_ = c.ShouldBindJSON(&body)
 
-	if err := h.authService.Logout(jti, exp, api.Deref(body.RefreshToken)); err != nil {
+	// API Key 没有 jti/exp（INT-203）：不进 JWT 黑名单，仅吊销请求体
+	// 携带的 refresh token，避免对 nil 做 float64 断言 panic。
+	if middleware.GetAuthType(c) == middleware.AuthTypeApiKey {
+		if err := h.authService.Logout("", time.Time{}, api.Deref(body.RefreshToken)); err != nil {
+			middleware.HandleAppError(c, err)
+			return
+		}
+		response.SuccessEmpty(c)
+		return
+	}
+
+	// JWT 路径：中间件已用 WithExpirationRequired 在认证层拒绝缺 exp 的令牌
+	// （INT-203）；这里 comma-ok 兑底，exp 缺失按无效令牌返回 401，不做无保护断言。
+	expValue, ok := c.Get(middleware.ContextKeyExp)
+	expFloat, ok := expValue.(float64)
+	if !ok {
+		response.Unauthorized(c, errs.ErrTokenInvalid.Code, errs.ErrTokenInvalid.Message)
+		return
+	}
+
+	if err := h.authService.Logout(c.GetString(middleware.ContextKeyJTI), time.Unix(int64(expFloat), 0), api.Deref(body.RefreshToken)); err != nil {
 		middleware.HandleAppError(c, err)
 		return
 	}

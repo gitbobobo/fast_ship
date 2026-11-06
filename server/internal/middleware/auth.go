@@ -116,12 +116,14 @@ func RequireAdmin(authService *service.AuthService) gin.HandlerFunc {
 }
 
 func handleJWTAuth(c *gin.Context, tokenString string, cfg *config.Config, authService *service.AuthService) {
+	// INT-203：缺 exp 的 JWT 在认证层就拒绝。否则 exp 会按 0 透传（等价
+	// 永不过期），登出也拿不到真实过期时间。
 	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, errors.New("unexpected signing method")
 		}
 		return []byte(cfg.JWT.Secret), nil
-	})
+	}, jwt.WithExpirationRequired())
 
 	if err != nil || !token.Valid {
 		response.Unauthorized(c, errs.ErrTokenInvalid.Code, errs.ErrTokenInvalid.Message)
