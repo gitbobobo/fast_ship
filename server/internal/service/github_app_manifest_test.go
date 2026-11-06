@@ -33,6 +33,7 @@ func manifestTestService(t *testing.T) (*GitHubAppManifestService, *IntegrationS
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
+	cleanupTestDB(t, db)
 	if err := db.AutoMigrate(&model.DeploymentSettings{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}

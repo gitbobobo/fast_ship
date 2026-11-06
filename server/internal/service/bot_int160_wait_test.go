@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1230,6 +1231,9 @@ func TestBotInt160WaitBaselineBeforeSiblingSend(t *testing.T) {
 	var sentMu sync.Mutex
 	var waitCallID string
 	sent, waitWasAttached := false, false
+	// pushLost 记录竞态注入增量的推送失败：测试进行中失败说明订阅流没就绪，
+	// 基线断言会空转（评审 B）；测试结束后的晚到失败在尾部断言之后才置位。
+	var pushLost atomic.Bool
 	fake.onDispatch = func(payload json.RawMessage) {
 		var p struct {
 			Type     string `json:"type"`
@@ -1244,11 +1248,16 @@ func TestBotInt160WaitBaselineBeforeSiblingSend(t *testing.T) {
 		_, waitWasAttached = env.bots.waits[waitCallID]
 		env.bots.waitMu.Unlock()
 		sentMu.Unlock()
-		fake.pushThreadDelta(t, shellThread(int160PolicyIdleThread, "待续", "running", map[string]any{
+		// 回调跑在 fake 服务器 goroutine 上，可能晚于测试结束（-race 拖慢
+		// 时序）：不能带 *testing.T 推送，晚到的增量静默丢弃；进行中的失败
+		// 记入 pushLost，测试尾部断言。
+		if !fake.tryPushThreadDelta(shellThread(int160PolicyIdleThread, "待续", "running", map[string]any{
 			"activeRunId":        "run-new",
 			"latestRunId":        "run-new",
 			"latestRunStartedAt": "2026-10-24T00:00:00.000Z",
-		}))
+		})) {
+			pushLost.Store(true)
+		}
 	}
 	argsSend := `{"action":"send","env_id":"` + envID + `","thread_id":"` + int160PolicyIdleThread + `","text":"请继续"}`
 	argsWait := `{"action":"wait","env_id":"` + envID + `","thread_id":"` + int160PolicyIdleThread + `","on":"idle"}`
@@ -1292,6 +1301,9 @@ func TestBotInt160WaitBaselineBeforeSiblingSend(t *testing.T) {
 	sentMu.Unlock()
 	if !attached {
 		t.Fatalf("send 的 dispatch RPC 到达时 wait 必须已完成注册")
+	}
+	if pushLost.Load() {
+		t.Fatalf("dispatch 回调的线程增量推送失败：订阅流未就绪，竞态断言落空")
 	}
 }
 

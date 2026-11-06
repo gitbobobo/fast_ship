@@ -40,6 +40,7 @@ func integrationTestServiceDSN(t *testing.T, dsn string) (*IntegrationService, *
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
+	cleanupTestDB(t, db)
 	if err := db.AutoMigrate(&model.DeploymentSettings{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}

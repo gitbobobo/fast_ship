@@ -27,6 +27,7 @@ func setupLogServiceTest(t *testing.T) (*LogService, *gorm.DB, string, string) {
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
+	cleanupTestDB(t, db)
 
 	migrateLogTestSchema(db)
 

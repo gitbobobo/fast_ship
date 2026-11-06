@@ -49,6 +49,7 @@ func forgeTestService(t *testing.T) *forgeTestEnv {
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
+	cleanupTestDB(t, db)
 	if err := db.AutoMigrate(&model.ForgeIntegration{}, &model.Project{}, &model.User{}, &model.DeploymentSettings{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}

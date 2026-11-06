@@ -520,24 +520,28 @@ func (s *BotService) refreshModelWindow(ctx context.Context, baseURL, apiKey, mo
 
 // refreshBotModelWindowAsync 后台探测并缓存该机器人当前模型的窗口元数据。
 // 结果只写缓存与日志：失败不冒泡为业务失败，也不阻塞调用方（创建/更新响应、
-// run 开始都不等待网络）。
+// run 开始都不等待网络）。经 spawnBg 登记并派生自 runCtx：Stop 能等到它
+// 退出并即时取消在途探测（INT-205）。
 func (s *BotService) refreshBotModelWindowAsync(botID string) {
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), botWindowDetectTimeout)
-		defer cancel()
-		bot, err := s.bots.Get(botID)
-		if err != nil {
-			return
-		}
-		key, err := s.decryptAPIKey(bot)
-		if err != nil {
-			return
-		}
-		if err := s.refreshModelWindow(ctx, bot.BaseURL, key, bot.Model); err != nil {
-			s.logger.Info("模型窗口探测未成功",
-				zap.String("bot_id", botID), zap.String("model", bot.Model), zap.Error(err))
-		}
-	}()
+	s.spawnBg(func() { s.runWindowProbe(botID) })
+}
+
+// runWindowProbe 是后台窗口探测的 goroutine 主体（泄漏守卫按方法名统计）。
+func (s *BotService) runWindowProbe(botID string) {
+	ctx, cancel := context.WithTimeout(s.runCtx, botWindowDetectTimeout)
+	defer cancel()
+	bot, err := s.bots.Get(botID)
+	if err != nil {
+		return
+	}
+	key, err := s.decryptAPIKey(bot)
+	if err != nil {
+		return
+	}
+	if err := s.refreshModelWindow(ctx, bot.BaseURL, key, bot.Model); err != nil {
+		s.logger.Info("模型窗口探测未成功",
+			zap.String("bot_id", botID), zap.String("model", bot.Model), zap.Error(err))
+	}
 }
 
 // ensureModelWindow 是「窗口新鲜度」的唯一入口：只有本轮确实要按窗口做压缩

@@ -84,6 +84,22 @@ type BotService struct {
 	// budgetKick 在 usage 落账后轻量触发一次预算评估（INT-164）：容量 1
 	// 起合并作用，写路径只发信号不背评估成本；60s tick 是兜底节拍。
 	budgetKick chan struct{}
+
+	// 停止（INT-205）：stopCh 关闭即全部周期循环退出；bgMu+stopped 让 Stop
+	// 与后台 goroutine 的注册互斥，Wait 不会撞上 Add；stopDone 让并发调用的
+	// 后续 Stop 也等同一轮收尾完成。Stop 是终态收尾（测试 Cleanup / 进程
+	// 退出），Stop 后不再唤醒或入队。
+	stopCh   chan struct{}
+	bgMu     sync.Mutex
+	stopped  bool
+	bgWg     sync.WaitGroup
+	stopDone chan struct{}
+
+	// runCtx 是全部后台执行的父 context：Stop 一取消，包括「已登记但尚未
+	// 把自己注册进槽位表」的执行槽在内的所有派生 context 立即失效，取消与
+	// 注册之间没有竞态窗口（评审 A 发现 1/2）。生产不调 Stop，行为不变。
+	runCtx    context.Context
+	runCancel context.CancelFunc
 }
 
 type botMaintJob struct {
@@ -107,6 +123,7 @@ func NewBotService(
 	// 也在启动期暴露（快船 bot R4 Note）。
 	botActionSpecsAll()
 	botToolsetOf()
+	runCtx, runCancel := context.WithCancel(context.Background())
 	return &BotService{
 		db:         db,
 		cfg:        cfg,
@@ -131,6 +148,10 @@ func NewBotService(
 		waits:      map[string]*botWaitEntry{},
 		waitCfg:    defaultBotWaitEvalConfig(),
 		budgetKick: make(chan struct{}, 1),
+		stopCh:     make(chan struct{}),
+		stopDone:   make(chan struct{}),
+		runCtx:     runCtx,
+		runCancel:  runCancel,
 	}
 }
 

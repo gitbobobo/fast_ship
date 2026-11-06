@@ -20,6 +20,7 @@ func startResolvedPipeline(t *testing.T, resolver selflog.OwnerResolver) (*selfl
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
+	t.Cleanup(func() { _ = store.Close() })
 	p, err := selflog.Start(selflog.Options{
 		Sink:          store,
 		Stdout:        slog.NewTextHandler(io.Discard, nil),

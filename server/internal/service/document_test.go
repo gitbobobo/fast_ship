@@ -24,6 +24,7 @@ func setupDocumentServiceTest(t *testing.T) (*DocumentService, *gorm.DB, string,
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
+	cleanupTestDB(t, db)
 
 	if err := db.AutoMigrate(&model.User{}, &model.Project{}, &model.Document{}); err != nil {
 		t.Fatalf("migrate: %v", err)

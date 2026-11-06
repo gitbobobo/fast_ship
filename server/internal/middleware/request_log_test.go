@@ -30,6 +30,7 @@ func newRequestLogEnv(t *testing.T) *requestLogEnv {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
+	t.Cleanup(func() { _ = store.Close() })
 	pipeline, err := selflog.Start(selflog.Options{
 		Sink:          store,
 		Stdout:        slog.NewTextHandler(io.Discard, nil),

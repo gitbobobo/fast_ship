@@ -25,6 +25,7 @@ func testPipeline(t *testing.T, opts func(*Options)) (*Pipeline, *Store) {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
+	t.Cleanup(func() { _ = store.Close() })
 
 	o := Options{
 		Sink:          store,
@@ -702,6 +703,7 @@ func TestCleanupConcurrentWritesDoNotDropBatches(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
+	t.Cleanup(func() { _ = store.Close() })
 	ctx := context.Background()
 	now := time.Now().UTC()
 	old := make([]Entry, 0, 2500)
@@ -772,6 +774,7 @@ func TestCapacityAndWritePerformance(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
+	t.Cleanup(func() { _ = store.Close() })
 	defer store.db.Exec("DELETE FROM self_logs")
 
 	const total = 5000

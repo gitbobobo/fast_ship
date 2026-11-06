@@ -205,6 +205,8 @@ func (s *BotService) budgetEvalLoop() {
 		includePrev := pendingPrev
 		pendingPrev = false
 		select {
+		case <-s.stopCh:
+			return
 		case <-ticker.C:
 		case <-s.budgetKick:
 			if time.Since(lastEval) < botBudgetKickMinInterval {

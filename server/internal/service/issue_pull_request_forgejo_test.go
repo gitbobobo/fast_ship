@@ -647,6 +647,7 @@ func TestForgeClientSource_IssueServiceWiring(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
+	cleanupTestDB(t, db)
 	if err := db.AutoMigrate(&model.ForgeIntegration{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}

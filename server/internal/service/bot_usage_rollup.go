@@ -569,7 +569,12 @@ func (s *BotService) scanUsageRollupOnce() {
 func (s *BotService) usageRollupLoop() {
 	ticker := time.NewTicker(60 * time.Second)
 	defer ticker.Stop()
-	for range ticker.C {
-		s.scanUsageRollupOnce()
+	for {
+		select {
+		case <-s.stopCh:
+			return
+		case <-ticker.C:
+			s.scanUsageRollupOnce()
+		}
 	}
 }

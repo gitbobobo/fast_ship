@@ -32,6 +32,7 @@ func setupMemberTestServices(t *testing.T) *memberTestServices {
 	if err != nil {
 		t.Fatalf("open test db: %v", err)
 	}
+	cleanupTestDB(t, db)
 	if err := db.AutoMigrate(&model.User{}, &model.JWTBlacklist{}, &model.RefreshToken{}, &model.Invite{}); err != nil {
 		t.Fatalf("migrate test db: %v", err)
 	}

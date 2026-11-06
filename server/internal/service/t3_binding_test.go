@@ -65,6 +65,7 @@ func setupT3BindingTest(t *testing.T) *t3BindingTestEnv {
 	if err != nil {
 		t.Fatalf("open test db: %v", err)
 	}
+	cleanupTestDB(t, db)
 	if err := db.AutoMigrate(
 		&model.User{},
 		&model.UserGitHubToken{},

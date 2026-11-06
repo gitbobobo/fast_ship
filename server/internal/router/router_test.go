@@ -1025,6 +1025,7 @@ func setupRouterTestEnvMaybeLogs(t *testing.T, captureLogs bool, opts ...routerC
 	if err != nil {
 		t.Fatalf("open self log store: %v", err)
 	}
+	t.Cleanup(func() { _ = selfLogStore.Close() })
 	var selfLogPipeline *selflog.Pipeline
 	var appLogger *slog.Logger
 	if captureLogs {

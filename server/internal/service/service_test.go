@@ -68,6 +68,7 @@ func setupTestServices(t *testing.T) *testServices {
 	if err != nil {
 		t.Fatalf("open test db: %v", err)
 	}
+	cleanupTestDB(t, db)
 
 	if err := db.AutoMigrate(
 		&model.User{},
@@ -214,6 +215,21 @@ func setupTestServices(t *testing.T) *testServices {
 	svc.shipService = NewShipService(versionRepo, projectRepo, tokenRepo, artifactRepo, issueRepo, shipHookRepo, svc.issueService, fileStorage, cfg, zap.NewNop())
 
 	return svc
+}
+
+// cleanupTestDB 注册 t.Cleanup 关闭 sql.DB 句柄：共享缓存内存 SQLite 的
+// connectionOpener 在句柄关闭前常驻，上千个用例累积的 goroutine 与内存页
+// 曾把全量 -race 拖过门禁超时（INT-205）。各测试装配点在 gorm.Open 后立即
+// 注册；t.Cleanup 的 LIFO 顺序保证后注册的服务层停止逻辑（如 BotService
+// Stop）先跑，后台组件全部退出后才关池。
+func cleanupTestDB(t *testing.T, db *gorm.DB) {
+	t.Helper()
+	t.Cleanup(func() {
+		sqlDB, err := db.DB()
+		if err == nil {
+			sqlDB.Close() //nolint:errcheck // 测试收尾的连接池关闭，失败无从上报
+		}
+	})
 }
 
 // autoTokenRef 是 createTestProject 里两个引用列的哨兵值：opts 未显式指定引用时，

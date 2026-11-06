@@ -927,13 +927,18 @@ func (s *BotService) startWorkers() {
 	s.workCh = make(chan string, 256)
 	s.callCancels = map[string]context.CancelFunc{}
 	for i := 0; i < botWorkerCount; i++ {
-		go s.workerLoop()
+		s.spawnBg(s.workerLoop)
 	}
 }
 
 func (s *BotService) workerLoop() {
-	for callID := range s.workCh {
-		s.executeQueuedCall(callID)
+	for {
+		select {
+		case <-s.stopCh:
+			return
+		case callID := <-s.workCh:
+			s.executeQueuedCall(callID)
+		}
 	}
 }
 
@@ -1022,7 +1027,7 @@ func (s *BotService) executeQueuedCall(callID string) {
 		Payload: botToolCallResponseOf(call),
 	})
 
-	ctx, cancel := context.WithTimeout(context.Background(), botAsyncExecTimeout)
+	ctx, cancel := context.WithTimeout(s.runCtx, botAsyncExecTimeout)
 	s.registerCallCancel(callID, cancel)
 	defer func() {
 		cancel()

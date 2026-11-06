@@ -100,8 +100,13 @@ func (s *BotService) scheduleLoop() {
 	ticker := time.NewTicker(botScheduleTickInterval)
 	defer ticker.Stop()
 	s.scheduleTick(time.Now().UTC())
-	for range ticker.C {
-		s.scheduleTick(time.Now().UTC())
+	for {
+		select {
+		case <-s.stopCh:
+			return
+		case <-ticker.C:
+			s.scheduleTick(time.Now().UTC())
+		}
 	}
 }
 
@@ -509,7 +514,10 @@ func (s *BotService) wakeScheduleRun(botID, runID string) {
 	if s.rt.acquire(slot, &botWake{Trigger: run.TriggerSource, Key: run.TriggerKey}) == nil {
 		return
 	}
-	go s.runScheduleSlot(botID, runID)
+	if !s.spawnBg(func() { s.runScheduleSlot(botID, runID) }) {
+		// 停止后不再启动执行槽：把槽还回去，别让占槽悬挂。
+		s.rt.release(slot)
+	}
 }
 
 // runScheduleSlot 是单个 schedule run 的执行槽：载入 run 进 botLoop 后立即
@@ -536,7 +544,7 @@ func (s *BotService) runScheduleSlot(botID, runID string) {
 		s.rt.release(botScheduleSlotKey(runID))
 		return
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(s.runCtx)
 	s.rt.setCancel(botScheduleSlotKey(runID), cancel)
 	func() {
 		defer cancel()

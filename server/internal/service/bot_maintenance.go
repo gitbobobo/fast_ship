@@ -190,21 +190,31 @@ type botNightlyFileVer struct {
 func (s *BotService) ensureMaintWorker() {
 	s.maintOnce.Do(func() {
 		s.maintJobs = make(chan botMaintJob, 64)
-		go s.maintWorkerLoop()
+		s.spawnBg(s.maintWorkerLoop)
 	})
 }
 
 func (s *BotService) maintWorkerLoop() {
-	for job := range s.maintJobs {
-		s.runNightlyForBot(job.botID, job.triggerKey)
+	for {
+		select {
+		case <-s.stopCh:
+			return
+		case job := <-s.maintJobs:
+			s.runNightlyForBot(job.botID, job.triggerKey)
+		}
 	}
 }
 
 func (s *BotService) nightlyLoop() {
 	ticker := time.NewTicker(60 * time.Second)
 	defer ticker.Stop()
-	for range ticker.C {
-		s.scanNightlyOnce()
+	for {
+		select {
+		case <-s.stopCh:
+			return
+		case <-ticker.C:
+			s.scanNightlyOnce()
+		}
 	}
 }
 
@@ -296,7 +306,7 @@ func (s *BotService) runNightlyForBot(botID, triggerKey string) {
 	if txErr != nil || !created {
 		return
 	}
-	s.RunMemoryConsolidation(context.Background(), bot, maintRun)
+	s.RunMemoryConsolidation(s.runCtx, bot, maintRun)
 }
 
 func (s *BotService) nightlyModelOf(bot *model.Bot) string {

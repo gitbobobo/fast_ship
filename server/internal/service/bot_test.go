@@ -466,6 +466,21 @@ func setupBotTestEnv(t *testing.T, turns ...fakeModelTurn) *botTestEnv {
 	t3Binding := NewT3BindingService(t3Threads, base.projectRepo, repository.NewProjectT3BindingRepository(base.db))
 	fake := newFakeModelServer(t, turns...)
 	bots := NewBotService(base.db, base.cfg, zap.NewNop(), projectService, base.issueService, t3Threads, t3Binding)
+	// Stop 先于 setupTestServices 注册的 DB 池关闭执行（LIFO）：周期 loop、
+	// worker 池与在跑的主线槽全部退出后才关池（INT-205）。等待有界：Stop
+	// 真卡死时 Cleanup 不能连坐挂死整包——包尾泄漏守卫会给出来栈。
+	t.Cleanup(func() {
+		done := make(chan struct{})
+		go func() {
+			bots.Stop()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(30 * time.Second):
+			t.Logf("BotService.Stop 清理等待超时：Stop 已卡死，交给包尾泄漏守卫报告")
+		}
+	})
 	return &botTestEnv{testServices: base, bots: bots, fake: fake}
 }
 
@@ -2730,6 +2745,19 @@ func TestBotStartWorkerPoolOnce(t *testing.T) {
 	if env.bots.workCh != firstCh {
 		t.Fatalf("Start 不得重建 worker 池（会搁浅原 worker 与取消句柄）")
 	}
+}
+
+// Stop 收敛全部后台 goroutine（INT-205）：Start 起的周期 loop、worker 池与
+// 维护 worker 都要退出，Stop 必须有界返回且重复调用幂等；泄漏由包级
+// TestMain 的守卫负责任何测试结束后残留。
+func TestBotStopJoinsBackgroundGoroutines(t *testing.T) {
+	env := setupBotTestEnv(t)
+	env.bots.Start()
+	completeWithin(t, "BotService.Stop", func() error {
+		env.bots.Stop()
+		env.bots.Stop() // 幂等
+		return nil
+	})
 }
 
 func TestBotRejectWakesRuntime(t *testing.T) {
