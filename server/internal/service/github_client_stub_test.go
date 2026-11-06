@@ -23,6 +23,10 @@ func (stubGitHubClient) ValidateRepository(context.Context) error {
 	return stubErr("ValidateRepository")
 }
 
+func (stubGitHubClient) FetchRepository(context.Context) (*gh.Repository, *gh.Response, error) {
+	return nil, nil, stubErr("FetchRepository")
+}
+
 func (stubGitHubClient) ListIssues(context.Context, string, *time.Time, int, int) ([]*ghclient.Issue, *gh.Response, error) {
 	return nil, nil, stubErr("ListIssues")
 }

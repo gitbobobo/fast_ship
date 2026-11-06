@@ -21,6 +21,10 @@ func ptr[T any](v T) *T { return &v }
 // 的 *PRClient 实现，两个 adapter 共享同一份 REST 代码。
 type Client interface {
 	ValidateRepository(ctx context.Context) error
+	// FetchRepository 拉取绑定仓库的元数据（含 has_issues）：批量关闭用它区分
+	// 404 的整仓级与单条成因（INT-198）。与 ValidateRepository 同一端点，但
+	// 保留仓库与响应，调用方按 has_issues 细分。
+	FetchRepository(ctx context.Context) (*gh.Repository, *gh.Response, error)
 	ListIssues(ctx context.Context, state string, since *time.Time, page, perPage int) ([]*Issue, *gh.Response, error)
 	GetIssue(ctx context.Context, issueNumber int) (*Issue, error)
 	ListRepositoryLabels(ctx context.Context, page, perPage int) ([]*gh.Label, *gh.Response, error)
@@ -126,8 +130,12 @@ func newHTTPClient(token string, timeout time.Duration) *http.Client {
 }
 
 func (c *TokenClient) ValidateRepository(ctx context.Context) error {
-	_, _, err := c.client.Repositories.Get(ctx, c.owner, c.repo)
+	_, _, err := c.FetchRepository(ctx)
 	return err
+}
+
+func (c *TokenClient) FetchRepository(ctx context.Context) (*gh.Repository, *gh.Response, error) {
+	return c.client.Repositories.Get(ctx, c.owner, c.repo)
 }
 
 func (c *TokenClient) ListIssues(ctx context.Context, state string, since *time.Time, page, perPage int) ([]*Issue, *gh.Response, error) {
