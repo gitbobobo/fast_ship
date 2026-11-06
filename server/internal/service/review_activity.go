@@ -363,7 +363,9 @@ func buildPullRequestActivity(pr *model.ReviewPullRequest, projectName string,
 			}
 			return false
 		}
-		codeFindings := findings.P0 + findings.P1 + findings.P2
+		// needs_action 口径与 commit status 一致（INT-204）：只看 P0/P1 阻断
+		// 问题，P2 建议保留在计数里单独展示，不驱动红字分组。
+		codeFindings := findings.P0 + findings.P1
 		visualFindings := findings.Blocker + findings.WorthFixing
 		if pr.CodeStatus == "failure" && codeFindings == 0 && !hasKindIssue(api.ReviewActivityIssueKindCode) {
 			issues = append(issues, api.ReviewActivityIssue{

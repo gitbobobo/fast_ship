@@ -599,7 +599,11 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 	} else {
 		roundCap = normalizeRoundCap(capRow.RoundCap)
 	}
-	inlineLines, inlineErr := s.fetchInlineLines(ctx, client, ledger, codeRuns, roundCap)
+	// 超限判定按受审 head 数而非轮次号：manual/comment 同 head 重跑不消耗
+	// 额度（INT-204 审查 R1）。这里一次算好，评论/行内/diff 读取共用。
+	reviewedHeads := s.reviewedHeadCount(ledger.ProjectID, ledger.RepoFullName, ledger.PRNumber, ledger.IntegrationID, ledger.RoundNumber)
+	overCap := roundCap > 0 && reviewedHeads > roundCap
+	inlineLines, inlineErr := s.fetchInlineLines(ctx, client, ledger, codeRuns, overCap)
 	diffUnavailable := errors.Is(inlineErr, errReviewDiffTooLarge)
 	switch {
 	case diffUnavailable:
@@ -618,6 +622,7 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 		RoundNumber:     ledger.RoundNumber,
 		DiffUnavailable: diffUnavailable,
 		RoundCap:        roundCap,
+		ReviewedHeads:   reviewedHeads,
 		links:           links,
 	}, codeRuns, inlineLines, visualPending, visualCarry)
 	// upsertPRComment 自己按正文去重：diff 读不到的重试里正文没变就不 PATCH，
@@ -646,7 +651,7 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 	// 都不进这里——降级时若进了本函数，空 inlineLines 不会提交任何 review，却会
 	// 把 posted_at 写上，下一次同步事件就不再补发，自愈通道随之关闭。
 	if inlineErr == nil {
-		if err := s.postInlineReviews(ctx, client, ledger, codeRuns, inlineLines, epoch, now, roundCap); err != nil {
+		if err := s.postInlineReviews(ctx, client, ledger, codeRuns, inlineLines, epoch, now, overCap); err != nil {
 			return err
 		}
 	}
@@ -913,11 +918,15 @@ type reviewCommentMeta struct {
 	HeadSHA         string
 	RoundNumber     int
 	DiffUnavailable bool
-	// RoundCap 项目轮次上限（INT-204）：RoundNumber 超过它进入「超限」口径
-	// ——一句话结论与计数只看 P0/P1、表格下注明超限、分节不渲染 P2/Note、
-	// 行内跳过 P2。0 = 不限（仅测试手写 meta 出现；生产路径必须填设置值，
-	// 读取失败按默认 3 兜底）。
+	// RoundCap 项目轮次上限（INT-204）：与 ReviewedHeads 一起定超限口径
+	// ——ReviewedHeads 超过 RoundCap 即超限：一句话结论与计数只看 P0/P1、
+	// 表格下注明超限、分节不渲染 P2/Note、行内跳过 P2。上限按受审 head 数计
+	// （manual/comment 同 head 重跑不消耗额度，审查 R1）。0 = 不限（仅测试
+	// 手写 meta 出现；生产路径必须填设置值，读取失败按默认 3 兜底）。
 	RoundCap int
+	// ReviewedHeads 本 PR 截至本轮受审的 head 数（同 RoundCap，INT-204；
+	// 0 仅测试手写 meta）。
+	ReviewedHeads int
 	// links 行锚链接的集成构造面（INT-166）：零值 = 内置 github-default 口径
 	// （forgeBase 对空串去尾后为空，仅测试手写 meta 时出现；生产路径一律经
 	// forgeLinksForProject 解析并自带兜底）。
@@ -998,8 +1007,9 @@ func writeCodeFinding(b *strings.Builder, meta reviewCommentMeta, f api.ReviewCo
 // 超限轮次（meta.RoundCap > 0 且 RoundNumber 超过它，INT-204）：一句话结论
 // 与计数只看 P0/P1，分节不渲染 P2、Note 折叠整段不出现，表格下注明超限。
 func buildCodeComment(meta reviewCommentMeta, codeRuns []model.ReviewRun, inlineLines map[string]map[int]bool, visualPending, visualCarryFailure bool) string {
-	// 超限判定：roundCap<=0 = 不限（仅测试手写 meta），生产路径总填设置值。
-	overCap := meta.RoundCap > 0 && meta.RoundNumber > meta.RoundCap
+	// 超限判定：按受审 head 数而非轮次号（同 head 重跑不消耗额度，审查 R1）；
+	// RoundCap<=0 = 不限（仅测试手写 meta），生产路径总填设置值。
+	overCap := meta.RoundCap > 0 && meta.ReviewedHeads > meta.RoundCap
 	// 状态与计数先算一次：一句话结论与总览表共用，避免两处各解析一遍 result_json。
 	type comboStat struct {
 		status string         // 总览表状态列文案
@@ -1111,7 +1121,7 @@ func buildCodeComment(meta reviewCommentMeta, codeRuns []model.ReviewRun, inline
 	// 超限轮注明（INT-204）：表格下紧跟一行，说明本轮只列阻断问题——P2/Note
 	// 不在分节里出现是口径决定，不是结果丢失。
 	if overCap {
-		fmt.Fprintf(&b, "已过第 %d 轮，仅报告阻断问题。\n\n", meta.RoundCap)
+		fmt.Fprintf(&b, "已过轮次上限 %d（按受审 head 计），仅报告阻断问题。\n\n", meta.RoundCap)
 	}
 
 	if visualPending {
@@ -1196,16 +1206,15 @@ func buildCodeComment(meta reviewCommentMeta, codeRuns []model.ReviewRun, inline
 // 注记与行内 review 的行判定共用同一份结果，diff 只读一次。本轮没有已完成的
 // 带行号 P0–P2 发现时返回 nil、不读 diff——此时行内 review 也发不出任何
 // 意见，评论注记口径随之放宽（有行号的不加注，因为无从判断）。超限轮次
-// （roundCap>0 且 ledger.RoundNumber 超过它，INT-204）只认 P0/P1：P2 行内
-// 已被口径跳过，不再为它读 diff。
+// （overCap，按受审 head 数判定，INT-204）只认 P0/P1：P2 行内已被口径跳过，
+// 不再为它读 diff。
 // 读 diff 失败时返回的 err 可能是 errReviewDiffTooLarge（GitHub 判定 diff
 // 超出上限的确定性失败，调用方据此降级收尾）；其余为可重试错误。
 // 扫描范围刻意不收窄到「尚未行内标注过」的发现（PostedAt == nil）：每次
 // resync 都要重算整份注记（已发过的行内 review 不会撤销，注记必须随之保持
 // 准确），轻微多一次 diff 读取可接受。
 func (s *ReviewService) fetchInlineLines(ctx context.Context, client forge.ReviewClient,
-	ledger *model.ReviewPullRequest, codeRuns []model.ReviewRun, roundCap int) (map[string]map[int]bool, error) {
-	overCap := roundCap > 0 && ledger.RoundNumber > roundCap
+	ledger *model.ReviewPullRequest, codeRuns []model.ReviewRun, overCap bool) (map[string]map[int]bool, error) {
 	need := false
 	for i := range codeRuns {
 		if codeRuns[i].Status != model.ReviewRunCompleted {
@@ -1374,13 +1383,12 @@ func buildScreensUnavailableComment(meta reviewCommentMeta, priorRuns []model.Re
 // postInlineReviews 每个 completed 且 posted_at IS NULL 的代码运行：
 // P0–P2 且行号落在 diff 右侧有效行内 → SubmitReview；posted_at=now。
 // inlineLines 由调用方传入（fetchInlineLines 的结果），本函数不再自己读 diff
-// ——它与顶层评论的「未行内标注」注记同源，保证两处判定一致。roundCap 是
-// 项目轮次上限：超限轮（INT-204）行内只发 P0/P1，P2 与 Note 一样跳过。
+// ——它与顶层评论的「未行内标注」注记同源，保证两处判定一致。overCap 是
+// 超限轮标记（按受审 head 数判定，INT-204）：超限轮行内只发 P0/P1，P2 与
+// Note 一样跳过。
 func (s *ReviewService) postInlineReviews(ctx context.Context, client forge.ReviewClient,
 	ledger *model.ReviewPullRequest, codeRuns []model.ReviewRun, inlineLines map[string]map[int]bool,
-	epoch int, now time.Time, roundCap int) error {
-	// 超限判定提前算一次：roundCap<=0 = 不限（仅测试直调出现）。
-	overCap := roundCap > 0 && ledger.RoundNumber > roundCap
+	epoch int, now time.Time, overCap bool) error {
 	var pending []model.ReviewRun
 	for _, r := range codeRuns {
 		if r.Status == model.ReviewRunCompleted && r.PostedAt == nil {
@@ -1576,7 +1584,7 @@ type visualDecisionInput struct {
 	// 未终态时视觉决策整体悬置（visualWait）——代码结论未落定，任何视觉
 	// 判断都可能建立在即将被推翻的输入上。
 	CodeAllTerminal             bool
-	CodeAllTerminalOK           bool // 全部代码运行 completed 且无 P0/P1/P2
+	CodeAllTerminalOK           bool // 全部代码运行 completed 且无 P0/P1（INT-204 起 P2 不再阻断视觉衔接）
 	HasVisualCombos             bool
 	HasScreenshots              bool
 	AnyUIChanged                bool
@@ -1646,34 +1654,46 @@ type visualDecisionOutcome struct {
 	PriorRuns      []model.ReviewRun // 最近一轮视觉运行（沿用场景用）
 }
 
-// decideVisualForPR 组装真实输入并调 decideVisual。
-func (s *ReviewService) decideVisualForPR(ctx context.Context, ledger *model.ReviewPullRequest,
-	pr *forge.PullRequest, codeRuns []model.ReviewRun) (visualDecisionOutcome, error) {
-	in := visualDecisionInput{CodeAllTerminal: true, CodeAllTerminalOK: true}
-	anyUI, anySinceLast := false, false
+// codeRunsVisualInputs 从代码运行行汇总视觉衔接输入（INT-204 抽出便于单测）：
+// 是否全部终态、是否全净（completed 且无 P0/P1——P2 不是阻断问题，不再阻断
+// 视觉衔接，否则只有 P2 的 UI PR 会绿灯合入却从未做过视觉审查）、是否有 UI
+// 改动与上轮视觉后 UI 改动。
+func codeRunsVisualInputs(codeRuns []model.ReviewRun) (allTerminal, allOK, anyUI, anySinceLast bool) {
+	allTerminal, allOK = true, true
 	for _, r := range codeRuns {
 		if !r.Status.Terminal() {
-			in.CodeAllTerminal = false
+			allTerminal = false
 		}
 		if r.Status != model.ReviewRunCompleted {
-			in.CodeAllTerminalOK = false
+			allOK = false
 			continue
 		}
 		var result api.ReviewCodeResult
 		if json.Unmarshal([]byte(r.ResultJSON), &result) != nil {
-			in.CodeAllTerminalOK = false
+			allOK = false
 			continue
 		}
 		for _, f := range result.Findings {
-			if f.Level == api.P0 || f.Level == api.P1 || f.Level == api.P2 {
-				in.CodeAllTerminalOK = false
+			if f.Level == api.P0 || f.Level == api.P1 {
+				allOK = false
 			}
 		}
 		anyUI = anyUI || result.UiChanged
 		anySinceLast = anySinceLast || result.UiChangedSinceLastVisual
 	}
-	in.AnyUIChanged = anyUI
-	in.AnyUIChangedSinceLastVisual = anySinceLast
+	return
+}
+
+// decideVisualForPR 组装真实输入并调 decideVisual。
+func (s *ReviewService) decideVisualForPR(ctx context.Context, ledger *model.ReviewPullRequest,
+	pr *forge.PullRequest, codeRuns []model.ReviewRun) (visualDecisionOutcome, error) {
+	allTerminal, allOK, anyUI, anySinceLast := codeRunsVisualInputs(codeRuns)
+	in := visualDecisionInput{
+		CodeAllTerminal:             allTerminal,
+		CodeAllTerminalOK:           allOK,
+		AnyUIChanged:                anyUI,
+		AnyUIChangedSinceLastVisual: anySinceLast,
+	}
 
 	// 视觉组合是否配置。
 	var settings model.ProjectReviewSettings

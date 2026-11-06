@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/api"
@@ -146,9 +147,12 @@ func (s *ReviewService) launchRun(ctx context.Context, runID string, now time.Ti
 		return
 	}
 	// 增量复核基线与轮次上限（INT-204）：都只在令牌签发之后、渲染提示词之前
-	// 现查一次，查询失败分别回退全量/默认 3，不让派发失败。
+	// 现查一次，查询失败分别回退全量/默认 3，不让派发失败。上限按受审 head
+	// 数计（reviewedHeadCount），同 head 重跑不消耗额度。
 	prompt := renderReviewPrompt(&run, publicURL, token,
-		s.prevReviewedHeadSHA(ctx, &run), s.reviewRoundCap(run.ProjectID))
+		s.prevReviewedHeadSHA(ctx, &run),
+		s.reviewedHeadCount(run.ProjectID, run.RepoFullName, run.PRNumber, run.IntegrationID, run.RoundNumber),
+		s.reviewRoundCap(run.ProjectID))
 
 	// 模型选择：options 按 id 排序映射成 T3 [{id,value}]。
 	selection := &api.T3ModelSelection{InstanceId: run.InstanceID, Model: run.Model}
@@ -224,11 +228,13 @@ func projectIDForRun(db *gorm.DB, runID string) string {
 }
 
 // prevReviewedHeadSHA 增量复核的上一轮受审 head（INT-204）：取上一轮
-// （round_number-1）同 (project, repo, pr, integration) 的首个代码运行，其
-// base 与本轮完全一致才可作增量基线——分支名大小写敏感（main/Main 是不同
-// 分支），必须精确比较；base 变了整体 diff 的对照面已换，增量口径不成立。
-// 返回空串 = 回退全量（首轮、无上一轮运行、base 变化）；查询失败只记 Warn
-// 回退全量，派发不该因一次读库失败而失败。
+// （round_number-1）同 (project, repo, pr, integration) 的代码运行作基线，
+// 三个条件全部满足才可增量：①上一轮至少有一个 completed 运行（快推时上一
+// 轮会被 supersede 置 cancelled，或 failed/timed_out——它的改动从未被审过，
+// 只能靠全量兕住）；②上一轮 head 与本轮不同（manual/comment 同 head 重跑
+// 恒开新轮，diff X...X 为空，重审必须是全量）；③base_ref 精确一致（分支名
+// 大小写敏感；base 变了整体 diff 的对照面已换，增量口径不成立）。返回空串
+// = 回退全量；查询失败只记 Warn 回退全量，派发不该因一次读库失败而失败。
 func (s *ReviewService) prevReviewedHeadSHA(ctx context.Context, run *model.ReviewRun) string {
 	prevRuns, err := s.runsAtRound(ctx, run, run.RoundNumber-1, model.ReviewKindCode)
 	if err != nil {
@@ -237,6 +243,16 @@ func (s *ReviewService) prevReviewedHeadSHA(ctx context.Context, run *model.Revi
 		return ""
 	}
 	if len(prevRuns) == 0 || prevRuns[0].BaseRef != run.BaseRef {
+		return ""
+	}
+	completed := false
+	for i := range prevRuns {
+		if prevRuns[i].Status == model.ReviewRunCompleted {
+			completed = true
+			break
+		}
+	}
+	if !completed || strings.EqualFold(prevRuns[0].HeadSHA, run.HeadSHA) {
 		return ""
 	}
 	return prevRuns[0].HeadSHA
@@ -258,6 +274,24 @@ func (s *ReviewService) reviewRoundCap(projectID string) int {
 		return reviewDefaultRoundCap
 	}
 	return normalizeRoundCap(row.RoundCap)
+}
+
+// reviewedHeadCount 本 PR 截至某轮（含）受审的 head 数（INT-204）：manual/
+// comment 同 head 重跑恒开新轮但不引入新审查对象，不消耗轮次上限额度，所以
+// 上限按 distinct head_sha 计而非轮次号。查询失败按 upToRound（旧轮数口径）
+// 兜底记 Warn，不让派发/同步失败。
+func (s *ReviewService) reviewedHeadCount(projectID, repoFullName string, prNumber int, integrationID string, upToRound int) int {
+	var n int64
+	if err := s.db.Model(&model.ReviewRun{}).
+		Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ? AND kind = ? AND round_number <= ?",
+			projectID, repoFullName, prNumber, integrationID, model.ReviewKindCode, upToRound).
+		Distinct("head_sha").Count(&n).Error; err != nil {
+		s.logger.Warn("统计受审 head 数失败，轮次上限按轮数口径处理",
+			zap.String("project", projectID), zap.String("repo", repoFullName),
+			zap.Int("pr", prNumber), zap.Error(err))
+		return upToRound
+	}
+	return int(n)
 }
 
 // failRunDispatch 派发失败终态：failed + 消费令牌 + 置 PR sync_pending + 通知。

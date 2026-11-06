@@ -96,11 +96,11 @@ func TestRenderReviewPromptIncrementalAndRoundCap(t *testing.T) {
 	}
 
 	// 首轮全量：diff 范围用 base_ref，无增量节、无 prev SHA、无未渲染占位符。
-	p := renderReviewPrompt(mkRun(1), "https://fs.example.com", "fsr_tok", "", 3)
+	p := renderReviewPrompt(mkRun(1), "https://fs.example.com", "fsr_tok", "", 1, 3)
 	if !strings.Contains(p, "git diff main...sha-head") {
 		t.Fatal("全量模式应保留 base_ref 的整段 diff 指令")
 	}
-	for _, banned := range []string{"## 本轮范围", "sha-prev", "{{", "已过第", "核对历史上下文里仍为 open"} {
+	for _, banned := range []string{"## 本轮范围", "sha-prev", "{{", "已过轮次上限", "核对历史上下文里仍为 open", "增量基线不可达"} {
 		if strings.Contains(p, banned) {
 			t.Fatalf("全量模式不应含 %q", banned)
 		}
@@ -110,12 +110,14 @@ func TestRenderReviewPromptIncrementalAndRoundCap(t *testing.T) {
 	}
 
 	// 第 2 轮有上一轮且 base 相同 → 增量模式。
-	p = renderReviewPrompt(mkRun(2), "https://fs.example.com", "fsr_tok", "sha-prev", 3)
+	p = renderReviewPrompt(mkRun(2), "https://fs.example.com", "fsr_tok", "sha-prev", 2, 3)
 	for _, want := range []string{
 		"## 本轮范围",
 		"这是第 2 轮增量复核：上一轮受审 head 是 sha-prev",
 		"git diff sha-prev...sha-head",
 		"落在未改动代码上的新问题只报 P0/P1",
+		"上一轮受审 head 在本工作区不可达时",
+		"增量基线不可达，已全量审查",
 		"核对历史上下文里仍为 open 的条目并逐条给出 prior 处置（fixed/rejected/open）",
 		"ui_changed 与 ui_changed_since_last_visual 不受本轮范围收窄影响",
 	} {
@@ -123,25 +125,31 @@ func TestRenderReviewPromptIncrementalAndRoundCap(t *testing.T) {
 			t.Fatalf("增量模式缺关键内容: %q", want)
 		}
 	}
-	if strings.Contains(p, "{{") || strings.Contains(p, "已过第") {
+	if strings.Contains(p, "{{") || strings.Contains(p, "已过轮次上限") {
 		t.Fatal("增量模式不应有未渲染占位符或超限指令")
 	}
 
-	// 超限（第 4 轮、上限 3）→ 分级节末尾含 P0/P1-only 指令。
-	p = renderReviewPrompt(mkRun(4), "https://fs.example.com", "fsr_tok", "", 3)
-	if !strings.Contains(p, "已过第 4 轮（轮次上限 3）：本轮只报告 P0/P1，P2/Note 一律省略，不要提交") {
+	// 超限（受审 head 数 4 > 上限 3）→ 分级节末尾含 P0/P1-only 指令。
+	p = renderReviewPrompt(mkRun(4), "https://fs.example.com", "fsr_tok", "", 4, 3)
+	if !strings.Contains(p, "已过轮次上限 3（按受审 head 计）：本轮只报告 P0/P1，P2/Note 一律省略，不要提交") {
 		t.Fatalf("超限模式缺 P0/P1-only 指令: %s", p)
 	}
 
-	// 未超限（第 3 轮、上限 3）→ 不含超限指令。
-	p = renderReviewPrompt(mkRun(3), "https://fs.example.com", "fsr_tok", "", 3)
-	if strings.Contains(p, "已过第") {
+	// 未超限（受审 head 数 3 = 上限 3）→ 不含超限指令。
+	p = renderReviewPrompt(mkRun(3), "https://fs.example.com", "fsr_tok", "", 3, 3)
+	if strings.Contains(p, "已过轮次上限") {
 		t.Fatal("未超限不应含超限指令")
 	}
 
+	// 同 head 重跑不消耗额度：第 4 轮但只审过 3 个 head → 未超限（审查 R1）。
+	p = renderReviewPrompt(mkRun(4), "https://fs.example.com", "fsr_tok", "", 3, 3)
+	if strings.Contains(p, "已过轮次上限") {
+		t.Fatal("同 head 重跑不应消耗轮次上限额度")
+	}
+
 	// roundCap<=0 = 不限轮：超限指令不出现（仅测试手写场景的防御）。
-	p = renderReviewPrompt(mkRun(4), "https://fs.example.com", "fsr_tok", "", 0)
-	if strings.Contains(p, "已过第") {
+	p = renderReviewPrompt(mkRun(4), "https://fs.example.com", "fsr_tok", "", 4, 0)
+	if strings.Contains(p, "已过轮次上限") {
 		t.Fatal("roundCap<=0 应视为不限轮")
 	}
 }
@@ -181,6 +189,30 @@ func TestPrevReviewedHeadSHAAndRoundCap(t *testing.T) {
 		t.Fatalf("首轮应回退全量, prev = %q", got)
 	}
 
+	// 上一轮从未审完（快推被 supersede 取消/失败）→ 其改动从未被审，增量
+	// 会漏掉它们 → 回退全量（审查 R1）。
+	e.svc.db.Model(r1).Updates(map[string]any{"status": model.ReviewRunCancelled})
+	if got := e.review.prevReviewedHeadSHA(ctx, r2); got != "" {
+		t.Fatalf("上一轮无 completed 运行应回退全量, prev = %q", got)
+	}
+	e.svc.db.Model(r1).Updates(map[string]any{"status": model.ReviewRunCompleted})
+
+	// manual/comment 同 head 重跑（上一轮 head == 本轮 head）→ diff X...X 为空，
+	// 重审必须全量（审查 R1）。
+	e.svc.db.Model(r2).Updates(map[string]any{"head_sha": "sha-1"})
+	if got := e.review.prevReviewedHeadSHA(ctx, r2); got != "" {
+		t.Fatalf("同 head 重跑应回退全量, prev = %q", got)
+	}
+	e.svc.db.Model(r2).Updates(map[string]any{"head_sha": "sha-2"})
+
+	// reviewedHeadCount：同 head 重跑不重复计（sha-1 两轮 + sha-2 一轮 → 2）。
+	// 统计不受运行状态影响：失败轮的 head 同样消耗过审查尝试。
+	r3 := e.seedRun(t, repo, 30, "sha-2", model.ReviewRunFailed, now)
+	e.svc.db.Model(r3).Updates(map[string]any{"base_ref": "main", "round_number": 3})
+	if got := e.review.reviewedHeadCount(e.project.ID, repo, 30, r2.IntegrationID, 3); got != 2 {
+		t.Fatalf("reviewedHeadCount = %d, want 2（同 head 重跑不重复计）", got)
+	}
+
 	// 轮次上限：有行取行值；0 归一为 3；无行默认 3。
 	setRow := func(cap int) {
 		t.Helper()
@@ -213,11 +245,11 @@ func TestBuildCodeCommentOverCap(t *testing.T) {
 			  {"level":"Note","file":"d.go","body":"nit"}]`, `[]`)}
 	}
 
-	// 超限（上限 3、第 4 轮）：P2/Note 不出现，表格下有注明行。
+	// 超限（受审 head 数 4 > 上限 3，第 4 轮）：P2/Note 不出现，表格下有注明行。
 	meta := reviewCommentMeta{RepoFullName: "o/r", HeadSHA: "abcdef1234567890",
-		links: githubLinks("https://github.com"), RoundNumber: 4, RoundCap: 3}
+		links: githubLinks("https://github.com"), RoundNumber: 4, RoundCap: 3, ReviewedHeads: 4}
 	body := buildCodeComment(meta, mkRuns(t), nil, false, false)
-	if !strings.Contains(body, "已过第 3 轮，仅报告阻断问题。") {
+	if !strings.Contains(body, "已过轮次上限 3（按受审 head 计），仅报告阻断问题。") {
 		t.Fatalf("超限评论缺注明行: %s", body)
 	}
 	if !strings.Contains(body, "发现 P0 1 条、P1 1 条。") {
@@ -255,7 +287,7 @@ func TestBuildCodeCommentOverCap(t *testing.T) {
 	// 未超限（RoundCap 未填 = 不限）：P0–P2 与 Note 折叠照常。
 	meta.RoundCap = 0
 	body = buildCodeComment(meta, mkRuns(t), nil, false, false)
-	if strings.Contains(body, "已过第") {
+	if strings.Contains(body, "已过轮次上限") {
 		t.Fatal("未超限不应有注明行")
 	}
 	if !strings.Contains(body, "**P2**") || !strings.Contains(body, "<details>") {
@@ -299,9 +331,9 @@ func TestPostInlineReviewsOverCapSkipsP2(t *testing.T) {
 		t.Fatalf("reviewClient: %v", err)
 	}
 	lines := map[string]map[int]bool{"a": {1: true, 2: true, 3: true, 4: true}}
-	// 超限（上限 3、第 4 轮）：只提交 P0/P1 行内。
+	// 超限（受审 head 数 4 > 上限 3）：只提交 P0/P1 行内。
 	if err := e.review.postInlineReviews(context.Background(), client, ledger,
-		[]model.ReviewRun{*run}, lines, 1, now, 3); err != nil {
+		[]model.ReviewRun{*run}, lines, 1, now, true); err != nil {
 		t.Fatalf("postInlineReviews: %v", err)
 	}
 	inputs := e.fake.ReviewInputs()
@@ -320,11 +352,11 @@ func TestPostInlineReviewsOverCapSkipsP2(t *testing.T) {
 		t.Fatalf("超限行内不应含 P2/Note: %v", bodies)
 	}
 
-	// 未超限（roundCap=0 不限）：换一条新运行（运行 id 不重复，避免上一条
+	// 未超限（overCap=false）：换一条新运行（运行 id 不重复，避免上一条
 	// review 的对账认领吞掉本次提交），P2 行内照常，Note 仍跳过。
 	run2 := e.seedMixedFindingsRun(t, repo, 21, "sha-cap", now)
 	if err := e.review.postInlineReviews(context.Background(), client, ledger,
-		[]model.ReviewRun{*run2}, lines, 1, now, 0); err != nil {
+		[]model.ReviewRun{*run2}, lines, 1, now, false); err != nil {
 		t.Fatalf("postInlineReviews(不限): %v", err)
 	}
 	inputs = e.fake.ReviewInputs()
@@ -378,7 +410,7 @@ func TestFetchInlineLinesOverCapNeed(t *testing.T) {
 	}
 
 	// 超限：只有 P2 → 不读 diff、无有效行。
-	lines, err := e.review.fetchInlineLines(context.Background(), client, ledger, []model.ReviewRun{*run}, 3)
+	lines, err := e.review.fetchInlineLines(context.Background(), client, ledger, []model.ReviewRun{*run}, true)
 	if err != nil || lines != nil {
 		t.Fatalf("超限仅 P2 不应读 diff: lines=%v err=%v", lines, err)
 	}
@@ -386,8 +418,8 @@ func TestFetchInlineLinesOverCapNeed(t *testing.T) {
 		t.Fatalf("超限仅 P2 不应触发 diff 读取, got %d", n)
 	}
 
-	// 不限轮：同一份结论会读 diff。
-	if _, err := e.review.fetchInlineLines(context.Background(), client, ledger, []model.ReviewRun{*run}, 0); err != nil {
+	// 不超限：同一份结论会读 diff。
+	if _, err := e.review.fetchInlineLines(context.Background(), client, ledger, []model.ReviewRun{*run}, false); err != nil {
 		t.Fatalf("不限轮 fetchInlineLines: %v", err)
 	}
 	if n := e.fake.CallCounts()["GetPullRequestDiff"]; n != 1 {
@@ -459,6 +491,71 @@ func TestReviewSettingsRoundCap(t *testing.T) {
 		_, err := rs.UpdateSettings(context.Background(), user.ID, project.ID, input(&b))
 		if code := appErrorCode(t, err); code != errs.ErrInvalidParams.Code {
 			t.Fatalf("round_cap=%d: code = %d, want %d (err=%v)", bad, code, errs.ErrInvalidParams.Code, err)
+		}
+	}
+}
+
+// TestCodeRunsVisualInputsP2NotBlocking INT-204 审查 R1：视觉衔接的「全净」
+// 口径与 commit status 一致——只有 P2 不再阻断（否则 P2-only 的 UI PR 绿灯
+// 合入却从未做过视觉审查）；P0/P1 与解析失败照常阻断。
+func TestCodeRunsVisualInputsP2NotBlocking(t *testing.T) {
+	p2Only := model.ReviewRun{Kind: model.ReviewKindCode, Status: model.ReviewRunCompleted,
+		ResultJSON: `{"summary":"s","findings":[{"level":"P2","file":"a.go","line":1,"body":"边界"}],
+			"prior":[],"ui_changed":true,"ui_changed_since_last_visual":false}`}
+	allTerminal, allOK, anyUI, anySince := codeRunsVisualInputs([]model.ReviewRun{p2Only})
+	if !allTerminal || !allOK || !anyUI || anySince {
+		t.Fatalf("P2-only: terminal=%v ok=%v anyUI=%v anySince=%v, want true/true/true/false",
+			allTerminal, allOK, anyUI, anySince)
+	}
+
+	p1 := p2Only
+	p1.ResultJSON = `{"summary":"s","findings":[{"level":"P1","file":"a.go","line":1,"body":"bug"}],
+		"prior":[],"ui_changed":true,"ui_changed_since_last_visual":false}`
+	if _, allOK, _, _ := codeRunsVisualInputs([]model.ReviewRun{p1}); allOK {
+		t.Fatal("P1 应阻断视觉衔接")
+	}
+
+	running := p2Only
+	running.Status = model.ReviewRunRunning
+	if allTerminal, allOK, _, _ := codeRunsVisualInputs([]model.ReviewRun{running}); allTerminal || allOK {
+		t.Fatal("在途运行应 terminal=false ok=false")
+	}
+
+	broken := p2Only
+	broken.ResultJSON = `{broken`
+	if _, allOK, _, _ := codeRunsVisualInputs([]model.ReviewRun{broken}); allOK {
+		t.Fatal("结论不可解析应阻断视觉衔接")
+	}
+}
+
+// TestCodeHistoryCarriesOpenPrior INT-204 审查 R1：增量提示词要求核对仍为
+// open 的条目，历史上下文必须把上一轮 prior(open) 带出来，否则模型标成
+// open 的问题会在下一轮消失、复核断链（对齐 visualHistory 的补偿）。
+func TestCodeHistoryCarriesOpenPrior(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+
+	prev := e.seedRun(t, repo, 40, "sha-old", model.ReviewRunCompleted, now)
+	prevResult := `{"summary":"上一轮","findings":[{"level":"P1","file":"a.go","line":1,"body":"旧发现"}],
+		"prior":[{"level":"P1","file":"a.go","line":1,"body":"作者驳回了但我认为仍成立","status":"open"}],
+		"ui_changed":false,"ui_changed_since_last_visual":false}`
+	if err := e.svc.db.Model(prev).Updates(map[string]any{"result_json": prevResult}).Error; err != nil {
+		t.Fatalf("seed prev result: %v", err)
+	}
+	finished := now.Add(-time.Hour)
+	e.svc.db.Model(prev).Updates(map[string]any{"finished_at": finished})
+
+	cur := e.seedRun(t, repo, 40, "sha-new", model.ReviewRunDispatched, now)
+	e.svc.db.Model(cur).Updates(map[string]any{"round_number": 2, "base_ref": "main"})
+
+	h, err := e.review.codeHistory(context.Background(), cur)
+	if err != nil {
+		t.Fatalf("codeHistory: %v", err)
+	}
+	for _, want := range []string{"仍未解决 · P1", "a.go:1", "作者驳回了但我认为仍成立"} {
+		if !strings.Contains(h, want) {
+			t.Fatalf("历史上下文缺上一轮 prior(open) 内容 %q:\n%s", want, h)
 		}
 	}
 }

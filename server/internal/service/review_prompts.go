@@ -61,10 +61,10 @@ const reviewCodePromptGrading = `## 分级
 
 `
 
-// reviewCodePromptOverCap 超限轮次（RoundNumber > round_cap）追加在分级节
-// 末尾的指令：只报告 P0/P1——超限轮的意义只剩阻断问题兜底，纯建议不再
-// 消耗同步与复核。
-const reviewCodePromptOverCap = `已过第 {{round_number}} 轮（轮次上限 {{round_cap}}）：本轮只报告 P0/P1，P2/Note 一律省略，不要提交。
+// reviewCodePromptOverCap 超限轮次追加在分级节末尾的指令：只报告 P0/P1——
+// 超限轮的意义只剩阻断问题兑底，纯建议不再消耗同步与复核。上限按受审 head
+// 数计：同 head 的 manual/comment 重跑不消耗额度（INT-204 审查 R1）。
+const reviewCodePromptOverCap = `已过轮次上限 {{round_cap}}（按受审 head 计）：本轮只报告 P0/P1，P2/Note 一律省略，不要提交。
 
 `
 
@@ -77,6 +77,8 @@ const reviewCodePromptRoundScope = `## 本轮范围
 这是第 {{round_number}} 轮增量复核：上一轮受审 head 是 {{prev_reviewed_sha}}。
 本轮只审 ` + "`git diff {{prev_reviewed_sha}}...{{head_sha}}`" + ` 的改动，并核对历史里仍为 open 的条目；
 落在未改动代码上的新问题只报 P0/P1。
+上一轮受审 head 在本工作区不可达时（force-push/rebase 后可能发生，` + "`git diff`" + ` 直接报错），
+改用 ` + "`git diff {{base_ref}}...{{head_sha}}`" + ` 全量审查，并在结论 summary 首句注明「增量基线不可达，已全量审查」。
 ui_changed 与 ui_changed_since_last_visual 不受本轮范围收窄影响：仍按整个 PR
 （` + "`git diff {{base_ref}}...{{head_sha}}`" + `）与自上次视觉审查以来的界面变化判断。
 
@@ -273,14 +275,16 @@ head 提交 {{head_sha}}。你只通过接口读取截图，不接触代码，�
 // kind 占位符取中文名（代码审查/视觉审查）。
 // prevReviewedSHA 非空 = 增量模式（INT-204）：代码提示词收窄到上一轮受审
 // head 之后的 diff，并加「本轮范围」与 prior 处置要求；空串 = 全量。
-// roundCap<=0 = 不限轮（仅测试手写场景；生产路径总传设置值，读取失败按
-// 默认 3 兜底）。视觉审查不参与增量与轮次上限，模板原样渲染。
-func renderReviewPrompt(run *model.ReviewRun, publicURL, runToken string, prevReviewedSHA string, roundCap int) string {
+// reviewedHeads 是本 PR 截至本轮受审的 head 数；roundCap<=0 = 不限轮（仅
+// 测试手写场景；生产路径总传设置值，读取失败按默认 3 兜底）。超限判定按
+// 受审 head 数而非轮次号：manual/comment 同 head 重跑不消耗额度（审查
+// R1）。视觉审查不参与增量与轮次上限，模板原样渲染。
+func renderReviewPrompt(run *model.ReviewRun, publicURL, runToken string, prevReviewedSHA string, reviewedHeads, roundCap int) string {
 	if run.Kind == model.ReviewKindVisual {
 		return replacePromptPlaceholders(reviewVisualSystemPrompt, run, publicURL, runToken, "", roundCap)
 	}
 	incremental := prevReviewedSHA != ""
-	overCap := roundCap > 0 && run.RoundNumber > roundCap
+	overCap := roundCap > 0 && reviewedHeads > roundCap
 
 	var b strings.Builder
 	b.WriteString(reviewCodePromptHead)

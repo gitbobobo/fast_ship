@@ -21,7 +21,7 @@ func TestRenderReviewPromptCredentials(t *testing.T) {
 	}
 	for _, kind := range []model.ReviewKind{model.ReviewKindCode, model.ReviewKindVisual} {
 		run.Kind = kind
-		prompt := renderReviewPrompt(run, "https://fs.example/", "fsr_testtoken123", "", 3)
+		prompt := renderReviewPrompt(run, "https://fs.example/", "fsr_testtoken123", "", 1, 3)
 		if !strings.Contains(prompt, "## 临时目录与凭证") {
 			t.Fatalf("%s 提示词缺临时目录与凭证节", kind)
 		}
@@ -58,7 +58,7 @@ func TestRenderReviewPromptAgentCleanup(t *testing.T) {
 		HeadSHA: "sha170", BaseRef: "main", HeadRef: "feat-1",
 	}
 	run.Kind = model.ReviewKindCode
-	code := renderReviewPrompt(run, "https://fs.example.com", "fsr_tok", "", 3)
+	code := renderReviewPrompt(run, "https://fs.example.com", "fsr_tok", "", 1, 3)
 
 	// 只读条款的狭窄例外：收尾是唯一允许的改动。
 	if !strings.Contains(code, "唯一例外：提交结论成功后按「收尾」节删除本轮专属的工作树与临时分支") {
@@ -119,7 +119,7 @@ func TestRenderReviewPromptAgentCleanup(t *testing.T) {
 
 	// 视觉模板：无收尾节、无 cleanup 行；结束文案原文保留。
 	run.Kind = model.ReviewKindVisual
-	visual := renderReviewPrompt(run, "https://fs.example.com", "fsr_tok", "", 3)
+	visual := renderReviewPrompt(run, "https://fs.example.com", "fsr_tok", "", 1, 3)
 	if strings.Contains(visual, "收尾") || strings.Contains(visual, "cleanup: worktree=") {
 		t.Fatal("视觉模板不应含收尾节（视觉不开工作区）")
 	}
@@ -139,7 +139,7 @@ func TestRenderReviewPromptVisualImageBudget(t *testing.T) {
 		HeadSHA: "sha", BaseRef: "main", HeadRef: "feat",
 	}
 	run.Kind = model.ReviewKindVisual
-	visual := renderReviewPrompt(run, "https://fs.example.com", "fsr_tok", "", 3)
+	visual := renderReviewPrompt(run, "https://fs.example.com", "fsr_tok", "", 1, 3)
 	for _, want := range []string{
 		"## 读图预算",
 		"{items:[{id,label,url,width,height,original_url,served}],changed}",
@@ -166,7 +166,7 @@ func TestRenderReviewPromptVisualImageBudget(t *testing.T) {
 
 	// 代码模板不含截图读图预算。
 	run.Kind = model.ReviewKindCode
-	code := renderReviewPrompt(run, "https://fs.example.com", "fsr_tok", "", 3)
+	code := renderReviewPrompt(run, "https://fs.example.com", "fsr_tok", "", 1, 3)
 	if strings.Contains(code, "读图预算") || strings.Contains(code, "original_url") {
 		t.Fatal("代码提示词不应含截图读图预算")
 	}

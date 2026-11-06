@@ -191,6 +191,20 @@ func (s *ReviewService) codeHistory(ctx context.Context, run *model.ReviewRun) (
 						}
 						fmt.Fprintf(&b, "- %s %s %s\n", f.Level, loc, f.Body)
 					}
+					// 增量提示词要求核对仍为 open 的条目并逐条给 prior 处置，
+					// 但这些条目只存在于 prior 里：不补这段，模型把它们标成
+					// open 后会在下一轮历史里消失，复核断链（对齐 visualHistory
+					// 的 openPrior 补偿，INT-204 审查 R1）。
+					for _, p := range openPriorDecisions(result.Prior) {
+						loc := ""
+						if p.File != nil {
+							loc = *p.File
+							if p.Line != nil && *p.Line > 0 {
+								loc = fmt.Sprintf("%s:%d", *p.File, *p.Line)
+							}
+						}
+						fmt.Fprintf(&b, "- 仍未解决 · %s %s %s\n", priorLevelText(p.Level), loc, p.Body)
+					}
 				}
 			} else {
 				fmt.Fprintf(&b, "- （本组合未完成：%s）\n", r.Status)
