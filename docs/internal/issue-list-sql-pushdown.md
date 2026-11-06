@@ -75,8 +75,10 @@ JSON 上会抛 malformed JSON），必须嵌在 `json_valid` 为真的 CASE 分�
 
 - **大小写折叠只对 ASCII**：SQLite 的 `lower()` / `LIKE` 只折叠 ASCII，Go 的
   `strings.EqualFold` / `strings.ToLower` 是 Unicode 感知。非 ASCII 大写字母（如
-  `É`）在 q 搜索、label/assignee/milestone 精确匹配里不再折叠；中文无大小写不受影响。
-  不为此引入自定义 SQL 函数。
+  `É`）在 1–2 rune 的 q 搜索（LIKE 分支）与 label/assignee/milestone 精确匹配里
+  不再折叠；中文无大小写不受影响。≥3 rune 的 q 搜索自 INT-209 走 FTS5 trigram，
+  折叠口径变宽，实测结论见下文「q 搜索走 FTS5 trigram」一节。不为此引入自定义
+  SQL 函数。
 
 ## 索引
 
@@ -88,3 +90,141 @@ ORDER BY 第二键是 `CASE WHEN ... THEN gh.number ELSE issues.sequence_number 
 跨表表达式，任何 issues 表上的复合索引都无法覆盖，SQLite 必须用临时 B 树排序。
 该排序有界：OFFSET/LIMIT 截断之后才输出，1200 条量级实测 200 次目标查询合计
 10-40ms，无索引瓶颈。因此 `createBootIndexes` 没有为此登记新索引。
+
+## q 搜索走 FTS5 trigram（INT-209）
+
+### 背景
+
+`buildIssueSearchCondition` 原本对 title/body/author_login/reference 四路都用
+`lower(...) LIKE '%q%'`——正文列前导通配无法走索引，每行都要扫全文。夹具 1 万条
+issue（临时文件库 + WAL，Apple M3 Pro）实测带关键词列表 p50 78-126ms、p95 ≥100ms
+（`server/internal/repository/issue_search_bench_test.go`，常规 `go test` 不跑，
+复测命令见文件头注释）。
+
+### 索引结构
+
+`issues_fts` 是派生全文索引（FTS5 trigram），只存 title/body 两个索引列，事实
+来源是 issues 表，照搬 `bot_memory_fts` 先例（见 docs/internal/bots.md「长期
+记忆」）。FTS 行身份用整数 docid：`issue_fts_docs` 维护 issue_id TEXT ↔ doc
+INTEGER 的双向唯一映射（doc 普通 INTEGER PRIMARY KEY，issue_id UNIQUE），FTS
+行以 doc 为显式 rowid 写入：
+
+- **为什么不做 issue_id 列**：第 1 轮把 issue_id 作为 UNINDEXED 列存进 FTS，
+  `SELECT issue_id FROM issues_fts WHERE MATCH` 物化结果集时要按 docid 逐条
+  回读 %_content 行，万级夹具上 count+list 各付一次（实测同一 MATCH 只取
+  rowid 13.5ms、取 issue_id 列要 35.8ms；release checklist 30.9 vs 76.4ms），
+  是高命中查询 p50 回退的主因。
+- **为什么不用 issues 自身 rowid 做身份**：issues 是 TEXT 主键、无 INTEGER
+  主键，VACUUM 会重排无 INTEGER 主键表的 rowid，当不了 FTS docid。
+- doc 不用 AUTOINCREMENT：映射行与 FTS 行总在同一触发器里成对删，id 复用无
+  风险。
+- 三条触发器（trg_issues_fts_doc_insert/update/delete）同步 issues 的
+  INSERT/UPDATE/DELETE：INSERT 先补映射行、再按同一 doc 写 FTS 行；UPDATE
+  的 issues.id 不变、doc 复用，先删 FTS 旧行再按同一 doc 重插；DELETE 先删
+  FTS 行再删映射行。列值统一 `COALESCE(..., '')`：body 列可空，NULL 索引成
+  空串（空串不含 trigram，永不命中），与 LIKE 对 NULL 不匹配的旧语义等价。
+- 删 project 外键级联删 issues 时 AFTER DELETE 触发器逐行同步，实测 FTS 与
+  映射均无孤儿行。唯一的理论成因是未来 DROP/重建 issues 表的迁移（触发器随
+  表消失），孤儿行按 issues.id 回连主表不影响结果正确性、只白占空间；此类
+  迁移应同步 DROP issues_fts 与 issue_fts_docs 并重跑 ensure（见下）。
+
+### 接线与幂等回填
+
+`EnsureIssueFTSSchema`（repository/issue_fts.go）在 AutoMigrate 之后建映射表 +
+虚表 + 触发器，然后按两个方向幂等回填（各自 NOT IN 去重，重复启动无副作用）：
+「有 issues 行、无映射行」补 issue_fts_docs，「有映射行、无 FTS 行」按 doc 重插
+FTS。main.go 在 `EnsureBotSchema` 同位置之后调用，失败 `fatal`；`--dry-run` 路径
+在此之前已 return，不受影响。AutoMigrate 重跑对既有表是空操作，新触发器以
+IF NOT EXISTS 保留，增量同步不中断（有测试锁定）。
+
+**旧形态收敛**：`CREATE VIRTUAL TABLE IF NOT EXISTS` 对已存在的第 1 轮结构（带
+UNINDEXED issue_id 列）是静默空操作，靠 IF NOT EXISTS 收敛不到新形态。ensure
+先摘旧触发器（trg_issues_fts_*——新触发器换了名字 trg_issues_fts_doc_*，旧定
+义必须显式 DROP，IF NOT EXISTS 拦不住，残留会在重建后的结构上引用不存在的
+列），再按 sqlite_master 里的虚表 DDL 原文检测旧结构（新形态 DDL 不含
+issue_id 字样），命中即 DROP 旧虚表，然后按新形态重建并回填。**顺序不可反**：
+若先删虚表、后摘触发器，两步之间进程退出会留下引用已删表的触发器，SQLite
+编译任何 issues 上的 UPDATE 时即报 no such table，下一次启动连常规迁移里的
+UPDATE 都过不去，永远到不了修复入口；先摘触发器后，中断残留只会是「无触发器
+的旧虚表」或「缺触发器的新虚表」，都由后续启动的 legacy 检测与回填收敛。整个
+收敛过程包在一个事务里。任何起点（新库 / 第 1 轮库 / 中断残留 / 新形态库）跑完
+都收敛到同一结构（有测试锁定：TestIssueFTS_LegacyShapeConvergence 与
+TestIssueFTS_InterruptedMigrationSelfHeals）。
+
+### 查询口径
+
+- **≥3 rune**（Unicode 字符计，同 `SearchFTS`）：title/body 走
+  `issues.id IN (SELECT issue_fts_docs.issue_id FROM issues_fts JOIN
+  issue_fts_docs ON issue_fts_docs.doc = issues_fts.rowid WHERE issues_fts
+  MATCH ?)`，MATCH 参数经 `ftsMatchLiteral` 引号编码（同包复用，不开放任意
+  FTS 表达式）。MATCH 只取 FTS rowid，映射表按 INTEGER PRIMARY KEY 点查换回
+  issue_id，不回读 FTS content 行；外层仍用 IN 子查询，`buildFilteredQuery`
+  其余组合语义不动。子查询不写表别名：别名会让 EXPLAIN QUERY PLAN 里映射表
+  只显示别名，计划不可读。
+- **1–2 rune 或含 NUL**：整组退回四路 LIKE（trigram 最小可匹配 3 字符，短查询在 FTS 上
+  不可表达；FTS5 字面量无法表达 NUL，查询解析器会提前终止报 unterminated
+  string，含 NUL 的查询退回 LIKE 保持旧行为——驱动会把 NUL 截断、模式退化，
+  改造前就存在，原样保留）。
+- author_login 与 reference（`INT-`/`GH-` 编号）两列小、保持 LIKE，不进 FTS；
+  纯数字精确匹配分支（`issueQueryAsNumber`）不动。
+
+EXPLAIN QUERY PLAN（万级夹具，`webhook`）：外层 `SEARCH issues USING INDEX
+idx_issues_project_id (project_id=?)`，子查询 `LIST SUBQUERY 1` + `SCAN issues_fts
+VIRTUAL TABLE INDEX 0:M2` + `SEARCH issue_fts_docs USING INTEGER PRIMARY KEY
+(rowid=?)`——title/body 匹配走 FTS 扫描、映射换 id 走主键点查，无 content
+回读（有测试锁定）。
+
+### 大小写折叠差异（实测，modernc 驱动，不为此做处理）
+
+- **≥3 rune MATCH 分支**：trigram 折叠非 ASCII 大小写——`ÉCOLE FRANÇAISE` 命中
+  正文 `École française`、`ПРИВЕТ` 命中 `привет мир`；比 LIKE 更宽（接近 Go
+  `strings.ToLower` 方向），命中集合相对旧行为是扩张。不去音调：`ecole` 不命中
+  `école`。
+- **1–2 rune LIKE 分支**：沿用 ASCII-only 折叠的旧边界——查询 `ÉC` 不命中
+  `École`；而 3 rune 的 `éco` 经 FTS 折叠命中。同一对非 ASCII 大小写，两个分支
+  命中方向相反。
+- 命中等价测试（issue_fts_test.go）以 Go 参考实现
+  `strings.Contains(strings.ToLower(...))` 为期望，固定查询集（混合大小写英文、
+  中文、带空格短语、含引号、含 %/_、数字、作者名）逐条一致；非 ASCII 大小写
+  差异单独锁行为（TestIssueFTS_CaseFoldingBoundary）。
+
+### 性能实测边界
+
+FTS 命中率决定收益方向（万级夹具单项目实测，一次 Count+List）。第 1 轮
+（issue_id 列形态）选择性查询显著变快（`INT-2` 111→74ms、`shipbobo` 126→47ms），
+但高命中查询一致回退（`webhook` 77.7→126.7ms、`release checklist` 80.1→163.9ms、
+`404` 83.0→99.6ms），根因是 MATCH 子查询物化结果集时按 issue_id 列逐条回读
+%_content 行。
+
+第 2 轮（docid 映射形态）消掉 content 回读后（2026-11 实测，Apple M3 Pro，
+临时文件库 + WAL；两轮独立复测一致；注意：当天机器负载 4.4-6.6，未等到空闲
+窗口，绝对值偏保守，空闲机复测由后续验收负责）：
+
+| 查询 | 命中 | LIKE 基线 | 第 1 轮 FTS | 第 2 轮（映射） |
+|---|---|---|---|---|
+| webhook | 9587 | 77.7ms | 126.7ms | 81.8-83.2ms |
+| release checklist | 9540 | 80.1ms | 163.9ms | 114.1-115.1ms |
+| 404 | 8275 | 83.0ms | 99.6ms | 56.8-58.9ms |
+| INT-2 | 2300 | 111ms | 74ms | 54.1-55.1ms |
+| shipbobo | 5715 | 126ms | 46.5ms | 42.7-47.5ms |
+| retry | 9914 | — | — | 75.5-76.7ms |
+| 数据库连接 | 9560 | — | — | 73.3-75.6ms |
+| 超时（1–2 rune，LIKE 分支） | 9594 | — | — | 85.7-88.2ms |
+| ab（1–2 rune，LIKE 分支） | 2048 | — | — | 114.8-118.6ms |
+| 无 q 对照 | — | — | — | 35.6-40.5ms |
+
+- 全部查询相对第 1 轮一致变快，降幅与消除的 content 回读成本吻合
+  （约 22-45ms/次执行 × count+list 两次）。
+- 加和验证：实测 p50 ≈ 无 q floor + 2 × 第 1 轮诊断的 rowid-only 子查询成本
+  （`webhook` 2×13.5+51 ≈ 78 vs 实测 81.8-83.2；`release checklist`
+  2×30.9+51 ≈ 113 vs 实测 114.1-115.1）——MATCH 子查询已按 rowid-only 成本
+  运行，EXPLAIN 证实无 content 回读（见上「查询口径」）。
+- `404` 在负载下已低于 LIKE 基线；`webhook` 与基线差 5% 以内（负载噪声量
+  级）；`release checklist` 剩余差距是 doclist 短语验证成本（两词短语在
+  9540 命中上交并 + 位置验证，约 31ms/次执行），属 trigram 索引形态在该最坏
+  夹具上的固有成本，非本形态可再优化项；空闲机上的严格基线对比由后续验收
+  复测裁定。`ab`/`超时` 走未改动的 1–2 rune LIKE 分支，其绝对值就是旧 LIKE
+  形态在短查询上的原成本（2048 命中的 2 字符前导通配扫描）。
+- EXISTS 关联子查询逐行重跑 MATCH 的替代方案维持第 1 轮结论：实测 174s/条，
+  不可用。若后续还要压 `release checklist` 一类最坏情况，方向是服务层
+  count/list 合并或索引形态，另立条目评估。

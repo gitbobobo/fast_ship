@@ -224,6 +224,12 @@ func main() {
 		fatal("机器人表结构初始化失败", err)
 	}
 
+	// Issue 全文检索（INT-209）：FTS5 派生索引 + 同步触发器 + 存量回填，
+	// 与机器人侧同一原则——失败启动退出，绝不带错运行。
+	if err := repository.EnsureIssueFTSSchema(db); err != nil {
+		fatal("Issue 全文索引初始化失败", err)
+	}
+
 	// 初始化 Repository
 	userRepo := repository.NewUserRepository(db)
 	userAISettingRepo := repository.NewUserAISettingRepository(db)
