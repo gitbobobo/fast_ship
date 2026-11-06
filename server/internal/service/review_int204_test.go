@@ -723,10 +723,137 @@ func TestReviewCountResultCodeOpenPrior(t *testing.T) {
 		         {"level":"P1","file":"d","body":"fixed","status":"fixed"}],
 		"ui_changed":false}`
 	findings := api.ReviewFindingCounts{}
-	if ok := reviewCountResult(model.ReviewKindCode, raw, &findings); !ok {
+	if ok := reviewCountResult(model.ReviewKindCode, raw, &findings, map[string]bool{}); !ok {
 		t.Fatal("reviewCountResult 应解析成功")
 	}
 	if findings.P0 != 1 || findings.P1 != 2 || findings.P2 != 0 {
 		t.Fatalf("计数桶 = %+v, want P0=1 P1=2 P2=0", findings)
+	}
+}
+
+// TestSummarizeCodeRunsPriorDedupedAcrossRuns INT-207：多组合增量轮里同一
+// 历史遗留被每个组合各自标 open，commit status 描述按（级别+定位+正文）跨
+// 运行去重——1 条实际遗留显示 1 条，不再按组合放大；不同定位/正文的仍各算
+// 一条。红绿判定不受影响（遗留本身仍判红）。
+func TestSummarizeCodeRunsPriorDedupedAcrossRuns(t *testing.T) {
+	// 两个组合各自报同一条遗留（同键），第二个组合另报一条不同定位+正文的：
+	// 去重后 2 条（修复前按组合求和是 3 条）。
+	st, desc := summarizeCodeRuns([]model.ReviewRun{
+		int204Run(t, `[]`, `[{"level":"P1","file":"x.go","line":9,"body":"遗留P1","status":"open"}]`),
+		int204Run(t, `[]`, `[{"level":"P1","file":"x.go","line":9,"body":"遗留P1","status":"open"},
+		                     {"level":"P0","file":"y.go","line":2,"body":"另一条","status":"open"}]`),
+	}, false)
+	if st != "failure" || !strings.Contains(desc, "遗留未解决 2 条") {
+		t.Fatalf("跨组合去重: state=%q desc=%q, want 遗留未解决 2 条", st, desc)
+	}
+
+	// 同文件同行但正文不同是两条遗留，不合并。
+	st, desc = summarizeCodeRuns([]model.ReviewRun{
+		int204Run(t, `[]`, `[{"level":"P1","file":"x.go","line":9,"body":"第一种描述","status":"open"}]`),
+		int204Run(t, `[]`, `[{"level":"P1","file":"x.go","line":9,"body":"第二种描述","status":"open"}]`),
+	}, false)
+	if st != "failure" || !strings.Contains(desc, "遗留未解决 2 条") {
+		t.Fatalf("同定位不同正文应各算一条: state=%q desc=%q", st, desc)
+	}
+
+	// 无行号的遗留按文件定位参与去重：两组合同文件同正文只算一条。
+	st, desc = summarizeCodeRuns([]model.ReviewRun{
+		int204Run(t, `[]`, `[{"level":"P1","file":"x.go","body":"无行遗留","status":"open"}]`),
+		int204Run(t, `[]`, `[{"level":"P1","file":"x.go","body":"无行遗留","status":"open"}]`),
+	}, false)
+	if st != "failure" || !strings.Contains(desc, "遗留未解决 1 条") {
+		t.Fatalf("无行号遗留也应去重: state=%q desc=%q", st, desc)
+	}
+
+	// 一个组合标 fixed 后不再是遗留：另一组合的 open 仍计一条。
+	st, desc = summarizeCodeRuns([]model.ReviewRun{
+		int204Run(t, `[]`, `[{"level":"P1","file":"x.go","line":9,"body":"遗留P1","status":"fixed"}]`),
+		int204Run(t, `[]`, `[{"level":"P1","file":"x.go","line":9,"body":"遗留P1","status":"open"}]`),
+	}, false)
+	if st != "failure" || !strings.Contains(desc, "遗留未解决 1 条") {
+		t.Fatalf("fixed 不计、另一组合的 open 计一条: state=%q desc=%q", st, desc)
+	}
+}
+
+// TestBuildCodeCommentPriorDedupedAcrossRuns INT-207：顶层评论一句话结论的
+// 「遗留未解决 N 条」跨组合去重；各组合分节仍完整渲染自己的遗留（信息不丢，
+// 与 R7 处置的「各组合分节都完整渲染」一致）。
+func TestBuildCodeCommentPriorDedupedAcrossRuns(t *testing.T) {
+	dup := []model.ReviewRun{
+		int204Run(t, `[]`, `[{"level":"P1","file":"x.go","line":9,"body":"遗留P1","status":"open"}]`),
+		int204Run(t, `[]`, `[{"level":"P1","file":"x.go","line":9,"body":"遗留P1","status":"open"}]`),
+	}
+	meta := reviewCommentMeta{RepoFullName: "o/r", HeadSHA: "abcdef1234567890",
+		links: githubLinks("https://github.com"), RoundNumber: 2, RoundCap: 3, ReviewedHeads: 2}
+	body := buildCodeComment(meta, dup, nil, false, false)
+	if !strings.Contains(body, "遗留未解决 1 条。") {
+		t.Fatalf("结论的遗留计数应去重为 1 条:\n%s", body)
+	}
+	// 信息不丢：同一条遗留在每个组合分节各渲染一次（两个组合都报了它）。
+	if n := strings.Count(body, "- 仍未解决 · P1 x.go:9：遗留P1"); n != 2 {
+		t.Fatalf("各组合分节应完整渲染遗留（出现 2 次），实际 %d 次:\n%s", n, body)
+	}
+
+	// 超限轮同口径：去重后的遗留阻断计数进结论。
+	meta.RoundNumber = 4
+	meta.ReviewedHeads = 4
+	body = buildCodeComment(meta, dup, nil, false, false)
+	if !strings.Contains(body, "遗留未解决 1 条。") {
+		t.Fatalf("超限轮结论的遗留计数也应去重:\n%s", body)
+	}
+}
+
+// TestReviewCountResultPriorDedupedAcrossRuns INT-207：Web 活动计数的代码与
+// 视觉两分支都按（级别+定位+正文）在段内跨运行去重——同一历史遗留被多个
+// 组合各自标 open 时首页/抽屉的计数不放大；跨段不去重。
+func TestReviewCountResultPriorDedupedAcrossRuns(t *testing.T) {
+	codeRun := func(prior string) model.ReviewRun {
+		return int204Run(t, `[]`, prior)
+	}
+	issues := []api.ReviewActivityIssue{}
+	findings := api.ReviewFindingCounts{}
+	reviewCollectRunIssues([]model.ReviewRun{
+		codeRun(`[{"level":"P1","file":"x.go","line":9,"body":"遗留P1","status":"open"}]`),
+		codeRun(`[{"level":"P1","file":"x.go","line":9,"body":"遗留P1","status":"open"},
+		         {"level":"P0","file":"y.go","line":1,"body":"另一条","status":"open"}]`),
+	}, api.ReviewActivityIssueKindCode, &findings, &issues)
+	if findings.P0 != 1 || findings.P1 != 1 {
+		t.Fatalf("代码段计数桶 = %+v, want P0=1 P1=1（同一条遗留只计一次）", findings)
+	}
+
+	// 视觉段同理：两个视觉组合各自标同一条 open worth_fixing 只计一次。
+	visRun := func(body string) model.ReviewRun {
+		raw, err := json.Marshal(map[string]any{
+			"summary": "s", "findings": []any{}, "unmeasurable": []any{},
+			"prior": []map[string]any{{"level": "worth_fixing", "body": body, "status": "open"}},
+		})
+		if err != nil {
+			t.Fatalf("marshal visual result: %v", err)
+		}
+		return model.ReviewRun{Kind: model.ReviewKindVisual, Status: model.ReviewRunCompleted,
+			ResultJSON: string(raw), Model: "m", InstanceID: "claude", EnvironmentID: "env"}
+	}
+	findings = api.ReviewFindingCounts{}
+	reviewCollectRunIssues([]model.ReviewRun{visRun("对比度不足"), visRun("对比度不足")},
+		api.ReviewActivityIssueKindVisual, &findings, &issues)
+	if findings.WorthFixing != 1 {
+		t.Fatalf("视觉段计数桶 = %+v, want worth_fixing=1（同一条遗留只计一次）", findings)
+	}
+
+	// 代码与视觉两段不去重：同一正文在两段各算一次（键空间不同）。
+	findings = api.ReviewFindingCounts{}
+	seen := map[string]bool{}
+	if ok := reviewCountResult(model.ReviewKindCode,
+		`{"summary":"s","findings":[],"prior":[{"level":"P1","file":"x.go","line":9,"body":"遗留P1","status":"open"}],"ui_changed":false}`,
+		&findings, seen); !ok {
+		t.Fatal("代码分支应解析成功")
+	}
+	if ok := reviewCountResult(model.ReviewKindVisual,
+		`{"summary":"s","findings":[],"prior":[{"level":"worth_fixing","body":"遗留P1","status":"open"}],"unmeasurable":[]}`,
+		&findings, seen); !ok {
+		t.Fatal("视觉分支应解析成功")
+	}
+	if findings.P1 != 1 || findings.WorthFixing != 1 {
+		t.Fatalf("跨段计数桶 = %+v, want P1=1 worth_fixing=1", findings)
 	}
 }

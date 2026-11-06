@@ -84,7 +84,7 @@ func TestVisualPriorOpenCountsAsFailure(t *testing.T) {
 
 	// Web 侧「需要处理」计数同口径：blocker/worth_fixing 各加一。
 	findings := &api.ReviewFindingCounts{}
-	if !reviewCountResult(model.ReviewKindVisual, int150Result, findings) {
+	if !reviewCountResult(model.ReviewKindVisual, int150Result, findings, map[string]bool{}) {
 		t.Fatal("reviewCountResult = false, want true")
 	}
 	if findings.Blocker != 0 || findings.WorthFixing != 1 {
