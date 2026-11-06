@@ -857,3 +857,69 @@ func TestReviewCountResultPriorDedupedAcrossRuns(t *testing.T) {
 		t.Fatalf("跨段计数桶 = %+v, want P1=1 worth_fixing=1", findings)
 	}
 }
+
+// TestSummarizeVisualRunsPriorDedupedAcrossRuns INT-207 视觉侧（R1 审查）：
+// 多视觉组合各自标同一条 open 遗留时，status 描述按（级别+定位+正文）去重
+// ——不再按组合放大；findings 的本轮新发现仍逐组合求和；红绿判定不变。
+func TestSummarizeVisualRunsPriorDedupedAcrossRuns(t *testing.T) {
+	visRun := func(findings, prior string) model.ReviewRun {
+		raw, err := json.Marshal(map[string]any{
+			"summary": "s", "findings": json.RawMessage(findings),
+			"prior": json.RawMessage(prior), "unmeasurable": []any{},
+		})
+		if err != nil {
+			t.Fatalf("marshal visual result: %v", err)
+		}
+		return model.ReviewRun{Kind: model.ReviewKindVisual, Status: model.ReviewRunCompleted,
+			ResultJSON: string(raw), Model: "m", InstanceID: "claude", EnvironmentID: "env"}
+	}
+	// 两个组合各标同一条 open 遗留，其一另有一条本轮 worth_fixing：
+	// 遗留去重算 1 条 + findings 逐组合求和 1 条 = 2 条（修复前 3 条）。
+	state, desc := summarizeVisualRuns([]model.ReviewRun{
+		visRun(`[]`, `[{"level":"worth_fixing","body":"对比度不足","status":"open"}]`),
+		visRun(`[{"severity":"worth_fixing","screenshot":"s","dimension":"spacing","body":"间距","fix":"改"}]`,
+			`[{"level":"worth_fixing","body":"对比度不足","status":"open"}]`),
+	})
+	if state != "failure" || !strings.Contains(desc, "发现 2 条问题") {
+		t.Fatalf("视觉 status: state=%q desc=%q, want 发现 2 条问题（遗留去重 1 + 新发现 1）", state, desc)
+	}
+	// 单组合单条遗留的旧行为不回归。
+	state, desc = summarizeVisualRuns([]model.ReviewRun{
+		visRun(`[]`, `[{"level":"worth_fixing","body":"对比度不足","status":"open"}]`),
+	})
+	if state != "failure" || !strings.Contains(desc, "发现 1 条问题") {
+		t.Fatalf("单组合遗留: state=%q desc=%q, want 发现 1 条问题", state, desc)
+	}
+}
+
+// TestVisualCarryDescriptionPriorDedupedAcrossRuns INT-207 视觉沿用路径
+// （R1 审查）：「截图复核意见尚未处理（上轮 N 条）」的 N 按最近一轮跨组合
+// 去重；更早一轮的遗留不计入（沿用只看最近一轮）。
+func TestVisualCarryDescriptionPriorDedupedAcrossRuns(t *testing.T) {
+	visRun := func(round int, body, status string) model.ReviewRun {
+		raw, err := json.Marshal(map[string]any{
+			"summary": "s", "findings": []any{}, "unmeasurable": []any{},
+			"prior": []map[string]any{{"level": "worth_fixing", "body": body, "status": status}},
+		})
+		if err != nil {
+			t.Fatalf("marshal visual result: %v", err)
+		}
+		return model.ReviewRun{Kind: model.ReviewKindVisual, Status: model.ReviewRunCompleted,
+			ResultJSON: string(raw), RoundNumber: round, Model: "m", InstanceID: "claude", EnvironmentID: "env"}
+	}
+	// 最近一轮（round 2）两个组合各标同一条遗留；round 1 另一条不同正文的
+	// 遗留不计入：N = 1（修复前 3）。
+	desc := visualCarryDescription([]model.ReviewRun{
+		visRun(2, "对比度不足", "open"),
+		visRun(2, "对比度不足", "open"),
+		visRun(1, "更早的一条", "open"),
+	})
+	if desc != "截图复核意见尚未处理（上轮 1 条）" {
+		t.Fatalf("沿用描述 = %q, want 上轮 1 条（同轮去重、更早轮不计）", desc)
+	}
+	// 最近一轮只剩 fixed 了结的遗留时不带计数后缀。
+	desc = visualCarryDescription([]model.ReviewRun{visRun(2, "对比度不足", "fixed")})
+	if desc != "截图复核意见尚未处理" {
+		t.Fatalf("沿用描述 = %q, want 不带计数后缀", desc)
+	}
+}
