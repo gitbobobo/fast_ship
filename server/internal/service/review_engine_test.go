@@ -451,6 +451,8 @@ func TestReviewResultValidation(t *testing.T) {
 		RepoFullName:  repo, PRNumber: 12, ProjectID: e.project.ID, UserID: e.user.ID,
 		InstallationID: 42, HeadSHA: "sha-r", RoundNumber: 1, UpdatedAt: now,
 	})
+	// 文件归属校验按登记树严格判定：合法 finding 的路径要登记。
+	e.fake.SetTreeFiles(repo, "sha-r", "a.go")
 
 	newRun := func(status model.ReviewRunStatus) *model.ReviewRun {
 		return e.seedRun(t, repo, 12, "sha-r", status, now)

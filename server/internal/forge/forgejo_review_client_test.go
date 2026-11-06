@@ -737,54 +737,108 @@ func TestForgejoClient_ListPullRequestFiles_MaxResponseItemsShrink(t *testing.T)
 	}
 }
 
-// TestForgejoClient_PathExistsAtRef INT-169 文件归属的 Forgejo 实现：contents
-// 端点 2xx→存在、404 经根目录探测消歧（根在→不存在，根也 404→调用失败）、
-// 非规范路径本地判不存在且零请求。
-func TestForgejoClient_PathExistsAtRef(t *testing.T) {
+// TestForgejoClient_TreeEntriesAtRef INT-169 文件归属的 Forgejo 实现：
+// contents 端点列目录（2xx 数组→条目名集合；单个文件对象→dir 实际是文件
+// →空集）、404 经根目录探测消歧（根在→目录确实缺→空集，根也 404→调用
+// 失败）、非规范目录本地判空且零请求。
+func TestForgejoClient_TreeEntriesAtRef(t *testing.T) {
 	client, logs := newForgejoTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("ref") == "bad-ref" {
 			http.Error(w, `{"message":"not found"}`, http.StatusNotFound)
 			return
 		}
-		if strings.Contains(r.URL.Path, "gone.go") {
+		if strings.HasSuffix(r.URL.Path, "/contents/gone") {
 			http.Error(w, `{"message":"not found"}`, http.StatusNotFound)
 			return
 		}
+		if strings.HasSuffix(r.URL.Path, "/contents/file.go") {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"name":"file.go","path":"file.go","type":"file"}`))
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/contents/weird") {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"message":"odd envelope"}`))
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"name":"a.go","path":"dir/a.go","type":"file"}`))
+		_, _ = w.Write([]byte(`[{"name":"a.go","type":"file"},{"name":"sub","type":"dir"}]`))
 	})
 	ctx := context.Background()
 
-	ok, err := client.PathExistsAtRef(ctx, "o/r", "dir/a.go", "sha-1")
-	if err != nil || !ok {
-		t.Fatalf("存在路径 = %v, %v", ok, err)
+	// 目录 → 直接子条目名集合；URL 是 contents/{dir}?ref=。
+	entries, err := client.TreeEntriesAtRef(ctx, "o/r", "dir", "sha-1")
+	if err != nil || len(entries) != 2 || !entries["a.go"] || !entries["sub"] {
+		t.Fatalf("entries = %v, %v, want {a.go sub}", entries, err)
 	}
 	got := lastServeLog(t, logs)
 	if got.method != http.MethodGet ||
-		got.path != "/api/v1/repos/o/r/contents/dir/a.go?ref=sha-1" {
+		got.path != "/api/v1/repos/o/r/contents/dir?ref=sha-1" {
 		t.Fatalf("请求形状: %s %s", got.method, got.path)
 	}
 
-	// 路径 404 + 根目录 200 → 路径确实不存在。
-	ok, err = client.PathExistsAtRef(ctx, "o/r", "gone.go", "sha-1")
-	if err != nil || ok {
-		t.Fatalf("404 = %v, %v, want false,nil", ok, err)
+	// dir 实际是文件：2xx 单对象 → 空集（不是目录，没有子条目）。
+	entries, err = client.TreeEntriesAtRef(ctx, "o/r", "file.go", "sha-1")
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("file-as-dir = %v, %v, want empty nil", entries, err)
 	}
+
+	// 目录 404 + 根目录 200 → 目录确实缺，空集。
+	entries, err = client.TreeEntriesAtRef(ctx, "o/r", "gone", "sha-1")
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("404 = %v, %v, want empty nil", entries, err)
+	}
+
 	got = lastServeLog(t, logs)
 	if got.path != "/api/v1/repos/o/r/contents/?ref=sha-1" {
 		t.Fatalf("消歧应探测根目录, got %q", got.path)
 	}
 
-	// 根目录也 404 → ref/仓库级故障，报错而非「不存在」。
-	if _, err = client.PathExistsAtRef(ctx, "o/r", "any.go", "bad-ref"); err == nil {
+	// 200 但既非清单也非文件对象（错误信封等异常体）→ 调用失败，
+	// 不当「目录不存在」的缺席证据。
+	if _, err = client.TreeEntriesAtRef(ctx, "o/r", "weird", "sha-1"); err == nil {
+		t.Fatal("非清单 200 响应须按调用失败上报")
+	}
+
+	// 根级目录 404（本身就是根目录）→ ref/仓库级故障，报错而非空集。
+	if _, err = client.TreeEntriesAtRef(ctx, "o/r", "", "bad-ref"); err == nil {
+		t.Fatal("ref 级 404 须透传为错误")
+	}
+	// 目录 404 + 根目录也 404 → 同样报错。
+	if _, err = client.TreeEntriesAtRef(ctx, "o/r", "gone", "bad-ref"); err == nil {
 		t.Fatal("ref 级 404 须透传为错误")
 	}
 
-	for _, bad := range []string{"/a.go", "a//b.go", "./a.go", "../x", "a.go/"} {
+	// 含空格/中文的目录段必须转义发出。
+	entries, err = client.TreeEntriesAtRef(ctx, "o/r", "设计 文档", "sha-1")
+	if err != nil || len(entries) != 2 {
+		t.Fatalf("unicode dir = %v, %v", entries, err)
+	}
+	got = lastServeLog(t, logs)
+	if got.path != "/api/v1/repos/o/r/contents/%E8%AE%BE%E8%AE%A1%20%E6%96%87%E6%A1%A3?ref=sha-1" {
+		t.Fatalf("unicode 请求形状: %s", got.path)
+	}
+
+	// 非规范目录：本地判空，请求不得发出。
+	for _, bad := range []string{"/a", "a//b", "./a", "../x", "a/"} {
 		before := len(*logs)
-		ok, err = client.PathExistsAtRef(ctx, "o/r", bad, "sha-1")
-		if err != nil || ok || len(*logs) != before {
-			t.Fatalf("别名 %q = %v, %v, 请求数 %d→%d", bad, ok, err, before, len(*logs))
+		entries, err = client.TreeEntriesAtRef(ctx, "o/r", bad, "sha-1")
+		if err != nil || len(entries) != 0 || len(*logs) != before {
+			t.Fatalf("别名 %q = %v, %v, 请求数 %d→%d", bad, entries, err, before, len(*logs))
 		}
+	}
+}
+
+// TestForgejoClient_TreeEntriesAtRefOversizedDir 目录清单超 respBodyMaxBytes：
+// 与 GitHub truncated/ErrBodyTooLarge 同属不完整证据——归一为
+// ErrTreeTruncated（不可判定放行），不是解析失败 50200 卡死重交。
+func TestForgejoClient_TreeEntriesAtRefOversizedDir(t *testing.T) {
+	client, _ := newForgejoTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `[{"name":"`+strings.Repeat("a", respBodyMaxBytes)+`"}]`)
+	})
+	_, err := client.TreeEntriesAtRef(context.Background(), "o/r", "big", "sha-1")
+	if !errors.Is(err, ErrTreeTruncated) {
+		t.Fatalf("超限清单应归一为 ErrTreeTruncated, got %v", err)
 	}
 }

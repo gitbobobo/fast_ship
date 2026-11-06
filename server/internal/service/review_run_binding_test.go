@@ -364,6 +364,13 @@ func TestAgentSubmitResultFileCheckBudget(t *testing.T) {
 	})
 	run := e.seedRun(t, repo, 24, "sha-b", model.ReviewRunRunning, now)
 
+	// 登记前 64 条路径让树查询全部命中，预算拦在第 65 条唯一路径上。
+	indexed := make([]string, 0, findingFileCheckLimit)
+	for i := 0; i < findingFileCheckLimit; i++ {
+		indexed = append(indexed, fmt.Sprintf("dir%d/f.go", i))
+	}
+	e.fake.SetTreeFiles(repo, "sha-b", indexed...)
+
 	var sb strings.Builder
 	sb.WriteString(`{"findings":[`)
 	for i := 0; i < findingFileCheckLimit+1; i++ {
@@ -382,6 +389,47 @@ func TestAgentSubmitResultFileCheckBudget(t *testing.T) {
 	e.svc.db.First(&after, "id = ?", run.ID)
 	if after.Status != model.ReviewRunRunning {
 		t.Fatalf("status = %q, budget rejection must not change run", after.Status)
+	}
+}
+
+// TestAgentSubmitResultOneTreeFetchPerDir 同父目录的多个 finding 共享一次
+// 目录清单拉取（INT-210）：树查询按 (ref, 父目录) 去重，不逐路径扇出。
+func TestAgentSubmitResultOneTreeFetchPerDir(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	e.fake.SetPR(repo, 34, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 34, HeadSHA: "sha-m",
+		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
+	})
+	e.svc.db.Create(&model.ReviewPullRequest{
+		RepoFullName: repo, PRNumber: 34, ProjectID: e.project.ID, UserID: e.user.ID,
+		InstallationID: 42, HeadSHA: "sha-m", RoundNumber: 1, UpdatedAt: now,
+	})
+	e.fake.SetTreeFiles(repo, "sha-m", "root.go", "docs/a.go", "docs/b.go", "docs/c.go")
+
+	run := e.seedRun(t, repo, 34, "sha-m", model.ReviewRunRunning, now)
+	e.svc.db.Create(&model.ReviewRunToken{
+		RunID: run.ID, TokenHash: "h-dir", CreatedAt: now, ExpiresAt: now.Add(time.Hour),
+	})
+
+	body := `{"findings":[
+		{"level":"P1","file":"root.go","body":"x"},
+		{"level":"P2","file":"docs/a.go","body":"x"},
+		{"level":"P2","file":"docs/b.go","body":"x"},
+		{"level":"P2","file":"docs/c.go","body":"x"}],
+		"prior":[],"summary":"s","ui_changed":false,"ui_changed_since_last_visual":false}`
+	if err := e.review.AgentSubmitResult(context.Background(), run.ID, []byte(body)); err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	// 根目录 + docs 目录各一次；同目录的 3 个路径不再重复拉清单。
+	if got := e.fake.CallCounts()["TreeEntriesAtRef"]; got != 2 {
+		t.Fatalf("TreeEntriesAtRef calls = %d, want 2 (根 + docs 各一次)", got)
+	}
+	var after model.ReviewRun
+	e.svc.db.First(&after, "id = ?", run.ID)
+	if after.Status != model.ReviewRunCompleted {
+		t.Fatalf("status = %q, want completed", after.Status)
 	}
 }
 

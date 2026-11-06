@@ -115,8 +115,8 @@ func (stubGitHubClient) ResolveInstallation(context.Context, string) (int64, err
 	return 0, stubErr("ResolveInstallation")
 }
 
-func (stubGitHubClient) PathExistsAtRef(context.Context, int64, string, string, string) (bool, error) {
-	return false, stubErr("PathExistsAtRef")
+func (stubGitHubClient) TreeEntriesAtRef(context.Context, int64, string, string, string) (map[string]bool, error) {
+	return nil, stubErr("TreeEntriesAtRef")
 }
 
 func (stubGitHubClient) ListPullRequestFiles(context.Context, int64, string, int) ([]string, bool, error) {

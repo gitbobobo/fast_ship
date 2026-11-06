@@ -43,10 +43,12 @@ type ReviewClient interface {
 	CreateCommitStatus(ctx context.Context, repoFullName, sha, state, statusContext, description, targetURL string) error
 	// 仓库级检查：nil 表示可访问；403/404 经 *StatusError 返回。
 	GetRepository(ctx context.Context, repoFullName string) error
-	// PathExistsAtRef 仓库相对路径在指定 ref（commit SHA 等）的树中是否存在
-	// （INT-169 文件归属校验：审查 findings 的 file 必须落在本轮 head 树里）。
-	// 非规范路径（绝对路径、空段、.、..）按不存在处理而非规范化。
-	PathExistsAtRef(ctx context.Context, repoFullName, path, ref string) (bool, error)
+	// TreeEntriesAtRef 列出指定 ref（commit SHA 等）树中某目录的直接子条目
+	// 名集合（INT-169 文件归属校验：审查 findings 的 file 按父目录列清单、
+	// 末段名判存在，同目录去重共享一次平台调用）。dir="" 是仓库根，否则
+	// 是规范相对目录路径；非规范 dir（空段、.、..）按目录不存在返回空集。
+	// 响应截断→包装 ErrTreeTruncated（存在性不可判定）。
+	TreeEntriesAtRef(ctx context.Context, repoFullName, dir, ref string) (map[string]bool, error)
 	// Kind 报告适配器的集成 kind（github/forgejo）。
 	Kind() string
 }

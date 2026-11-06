@@ -156,12 +156,12 @@ func (c *GitHubReviewClient) GetRepository(ctx context.Context, repoFullName str
 	return c.api.GetRepository(ctx, c.installationID, repoFullName)
 }
 
-func (c *GitHubReviewClient) PathExistsAtRef(ctx context.Context, repoFullName, path, ref string) (bool, error) {
-	exists, err := c.api.PathExistsAtRef(ctx, c.installationID, repoFullName, path, ref)
+func (c *GitHubReviewClient) TreeEntriesAtRef(ctx context.Context, repoFullName, dir, ref string) (map[string]bool, error) {
+	entries, err := c.api.TreeEntriesAtRef(ctx, c.installationID, repoFullName, dir, ref)
 	if errors.Is(err, githubapi.ErrTreeTruncated) {
-		return false, fmt.Errorf("%w: %s@%s", ErrTreeTruncated, path, ref)
+		return nil, fmt.Errorf("%w: %s@%s", ErrTreeTruncated, dir, ref)
 	}
-	return exists, err
+	return entries, err
 }
 
 // Bearer 媒体下载令牌：委派底层实现的 Bearer(ctx, installationID)（私有仓库
