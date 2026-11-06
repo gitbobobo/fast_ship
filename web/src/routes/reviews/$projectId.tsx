@@ -4,6 +4,7 @@ import { Plus } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
@@ -456,7 +457,10 @@ function ReviewSettingsForm({
           >
             轮次上限
           </Label>
-          <input
+          {/* 共享 Input：焦点环/暗色背景/禁用态与全应用一致；默认描边加深
+              一档（border-input 与白卡几乎同色，视觉审查 R4 worth_fixing），
+              宽度固定不跟随 w-full。 */}
+          <Input
             id="round-cap"
             type="number"
             min={1}
@@ -466,12 +470,13 @@ function ReviewSettingsForm({
             disabled={readOnly || submitting}
             onChange={(e) => set("round_cap", e.target.valueAsNumber)}
             aria-label="轮次上限"
-            className="h-8 w-20 rounded-md border border-input bg-transparent px-2 text-sm tabular-nums"
+            className="w-20 border-muted-foreground/50 tabular-nums"
           />
         </div>
         <p className="text-xs text-muted-foreground">
-          按受审 head 数计（同 head 重跑不计），超过后审查只报告
-          P0/P1 阻断问题（P2/Note 省略）。默认 3，范围 1–20。
+          按 PR 计受审 head 数（同 head 重跑不计）；超过后代码审查只报告
+          P0/P1 阻断问题（P2/Note 省略），视觉审查不受影响。默认 3，
+          范围 1–20。
         </p>
       </section>
 
