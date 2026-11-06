@@ -4421,17 +4421,17 @@ type ReviewAgentScreenshot struct {
 	// OriginalUrl 原图地址（无缩放参数，即本端点不带 query）；下载失败时字段缺省
 	OriginalUrl *string `json:"original_url,omitempty"`
 
-	// Served 该地址返回哪种字节：scaled = 审查尺寸缩放变体（长边 ≤1536 的 JPEG，字节预算尽力压进单张 500KB：JPEG 降质量、必要时降边；病态输入兑底取最小一份）；original_light = 原图字节但在预算内（长边 ≤1536 且文件 ≤500KB，可正常读）；original_heavy = 原图字节且不受预算保护（宽×高 >6400 万像素、动画 WebP、嗅探/头解码不出或文件打不开，尽量不读）。有 StoragePath 的行必有值；下载失败行字段缺省
+	// Served 该地址返回哪种字节：scaled = 审查尺寸缩放变体（长边 ≤1536 的 JPEG，单张字节预算强制：JPEG 降质量、必要时降边；长边到下限仍超预算的病态输入返回取图错误 40406，记 unmeasurable，不静默超限下发）；original_light = 原图字节但在预算内（长边 ≤1536 且文件 ≤单张预算，可正常读）；original_heavy = 原图字节且不受预算保护（宽×高 >6400 万像素、动画 WebP、嗅探/头解码不出或文件打不开，尽量不读）。单张预算由服务端按本轮可读张数把整轮 4MB 均分（≤8 张 512000，更多张为 4194304/张数，INT-193），同轮各行一致。有 StoragePath 的行必有值；下载失败行字段缺省
 	Served *ReviewAgentScreenshotServed `json:"served,omitempty"`
 
-	// Url 审查尺寸地址：指向本端点并带缩放参数；served=scaled 的行返回长边 ≤1536 的 JPEG，original_* 的行返回原图字节；下载失败时字段缺省
+	// Url 审查尺寸地址：指向本端点并带缩放参数（含按张数均分的单张预算 bytes，INT-193）；served=scaled 的行返回长边 ≤1536 的 JPEG，original_* 的行返回原图字节；下载失败时字段缺省
 	Url *string `json:"url,omitempty"`
 
 	// Width 原图像素尺寸（JPEG 应用 EXIF 方向后）；解码失败或缺文件时字段缺省
 	Width *int `json:"width,omitempty"`
 }
 
-// ReviewAgentScreenshotServed 该地址返回哪种字节：scaled = 审查尺寸缩放变体（长边 ≤1536 的 JPEG，字节预算尽力压进单张 500KB：JPEG 降质量、必要时降边；病态输入兑底取最小一份）；original_light = 原图字节但在预算内（长边 ≤1536 且文件 ≤500KB，可正常读）；original_heavy = 原图字节且不受预算保护（宽×高 >6400 万像素、动画 WebP、嗅探/头解码不出或文件打不开，尽量不读）。有 StoragePath 的行必有值；下载失败行字段缺省
+// ReviewAgentScreenshotServed 该地址返回哪种字节：scaled = 审查尺寸缩放变体（长边 ≤1536 的 JPEG，单张字节预算强制：JPEG 降质量、必要时降边；长边到下限仍超预算的病态输入返回取图错误 40406，记 unmeasurable，不静默超限下发）；original_light = 原图字节但在预算内（长边 ≤1536 且文件 ≤单张预算，可正常读）；original_heavy = 原图字节且不受预算保护（宽×高 >6400 万像素、动画 WebP、嗅探/头解码不出或文件打不开，尽量不读）。单张预算由服务端按本轮可读张数把整轮 4MB 均分（≤8 张 512000，更多张为 4194304/张数，INT-193），同轮各行一致。有 StoragePath 的行必有值；下载失败行字段缺省
 type ReviewAgentScreenshotServed string
 
 // ReviewCodeFinding defines model for ReviewCodeFinding.
@@ -8578,7 +8578,7 @@ type ReviewAgentScreenshots200JSONResponseBody struct {
 
 // ReviewAgentScreenshotImageParams defines parameters for ReviewAgentScreenshotImage.
 type ReviewAgentScreenshotImageParams struct {
-	// Max 三个参数均未提供时返回原图字节；任一提供时其余取默认（max 1536、format jpeg、quality 80）。取值收进 [320,2000]；超过原图长边不放大按原图返回（长边在目标内但文件超 500KB 的除外——按原尺寸重编码压预算）；宽×高超过 6400 万像素的原图不做缩放按原图透传
+	// Max 四个参数均未提供时返回原图字节；任一提供时其余取默认（max 1536、format jpeg、quality 80、bytes 512000）。取值收进 [320,2000]；超过原图长边不放大按原图返回（长边在目标内但文件超单张字节预算的除外——按原尺寸重编码压预算）；宽×高超过 6400 万像素的原图不做缩放按原图透传
 	Max *int `form:"max,omitempty" json:"max,omitempty"`
 
 	// Format 缩放变体编码格式；省略 jpeg
@@ -8586,6 +8586,9 @@ type ReviewAgentScreenshotImageParams struct {
 
 	// Quality JPEG 质量 30-95，省略 80
 	Quality *int `form:"quality,omitempty" json:"quality,omitempty"`
+
+	// Bytes 单张字节预算 65536-512000，省略 512000（单张上限）。清单地址按本轮可读张数把整轮 4MB 均分后写入（INT-193，min(512000, 4194304/张数)），取图端点按同一参数强制单张字节上限；编码后超预算降质量重编、仍超对半降边；长边到下限仍超预算返回 40406（不静默超限下发）
+	Bytes *int `form:"bytes,omitempty" json:"bytes,omitempty"`
 }
 
 // ReviewAgentScreenshotImageParamsFormat defines parameters for ReviewAgentScreenshotImage.

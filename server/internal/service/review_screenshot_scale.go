@@ -27,11 +27,19 @@ const (
 	reviewScreenshotMaxEdge = 1536
 	// reviewScreenshotQuality 清单默认的 JPEG 编码质量。
 	reviewScreenshotQuality = 80
-	// reviewScreenshotMaxBytes 单张缩放变体的字节预算：提示词「读图预算」向
-	// 审查代理承诺单张 ≤500KB——服务端强制版，编码后查字节数，超了降质量重
+	// reviewScreenshotMaxBytes 单张缩放变体的字节预算上限：提示词「读图预算」
+	// 向审查代理承诺单张 ≤500KB——服务端强制版，编码后查字节数，超了降质量重
 	// 编、仍超对半降边，而不是指望模型自律（不可压缩的繁忙截图 q80 一遍编码
-	// 就会超线）。
+	// 就会超线）。清单按本轮张数把整轮预算均分后写入每行地址的 bytes 参数
+	// （reviewPerImageBudget），张数多时单张预算低于此上限。
 	reviewScreenshotMaxBytes = 500 << 10
+	// reviewRoundBudgetBytes 整轮读图字节预算（INT-193）：单张上限 500KB ×
+	// 单 PR 张数上限 12 = 6MB，超过模型网关的整轮预算（提示词的 ≤4MB 线）——
+	// 网关按整轮请求体拒绝（413），正是 INT-186 要消除的故障形态。清单生成时
+	// 按本轮可读张数 N 把它均分（min(500KB, 4MB/N)）写进每行的 bytes 参数：
+	// 无状态（不定义累计口径），代理只读清单地址时 12 张全读满也在整轮预算内；
+	// N ≤ 8 时份额不低于单张上限，典型 3-6 张的截图组预算不变。
+	reviewRoundBudgetBytes = 4 << 20
 )
 
 // 缩放参数的 clamp 边界与像素预算：清单 URL 由服务端按常量生成，agent 手改
@@ -42,7 +50,11 @@ const (
 	reviewScaleMaxEdge    = 2000
 	reviewScaleMinQuality = 30
 	reviewScaleMaxQuality = 95
-	reviewScaleMaxPixels  = 64_000_000
+	// reviewScaleMinBytes 手改 bytes 参数的下限：预算是「这张最多给多少字节」
+	// 的上限旋钮，改小只影响自己读到的清晰度，收进下限避免病态输入编出不可读
+	// 的碎片；改大收进 reviewScreenshotMaxBytes，代理抬不回单张上限。
+	reviewScaleMinBytes  = 64 << 10
+	reviewScaleMaxPixels = 64_000_000
 )
 
 // reviewScaleSemCapacity 解码字节闸按容量 clamp 的上限，与 screenshotCropBytesSem
@@ -59,7 +71,7 @@ const (
 	// 原尺寸重编码压预算——单张字节落在预算内，代理正常读。
 	ServedScaled ReviewScreenshotServed = "scaled"
 	// ServedOriginalLight 返回原图字节但在预算内：长边 ≤ 清单默认目标且文件
-	// ≤500KB——零损失透传，代理可正常读（1440×900 桌面截图这类最常见证据）。
+	// ≤ 单张预算——零损失透传，代理可正常读（1440×900 桌面截图这类最常见证据）。
 	ServedOriginalLight ReviewScreenshotServed = "original_light"
 	// ServedOriginalHeavy 返回原图字节且不受预算保护：宽×高 >64MP 解码预算、
 	// 嗅探/头解码不出或文件打不开——代理尽量不读。
@@ -77,29 +89,49 @@ var errReviewScaleTooLarge = errors.New("review screenshot exceeds decode pixel 
 // 明确错误（40406 语义），代理读到错误记 unmeasurable。
 var errReviewScaleVariantFailed = errors.New("review screenshot variant generation failed")
 
-// reviewScaleParams 图片端点的缩放参数（parseReviewScaleQuery 产出）。
+// reviewPerImageBudget 按本轮可读截图张数均分整轮预算：min(单张上限, 整轮/N)。
+// N ≤ 8 时整轮份额不低于单张上限，预算维持 500KB（典型 3-6 张的截图组不受
+// 影响）；张数更多时单张预算收紧到整轮份额（12 张 ≈ 341KiB，Σ 单张 = 整轮
+// 预算，整除余数弃掉只会更低）。n ≤ 0 按单张上限（无图轮次用不到预算）。
+func reviewPerImageBudget(n int) int {
+	if n <= 0 {
+		return reviewScreenshotMaxBytes
+	}
+	per := reviewRoundBudgetBytes / n
+	if per > reviewScreenshotMaxBytes {
+		per = reviewScreenshotMaxBytes
+	}
+	return per
+}
+
+// reviewScaleParams 图片端点的缩放参数（parseReviewScaleQuery 产出）。Bytes
+// 是单张字节预算：清单地址按本轮张数均分写入（reviewPerImageBudget），代理
+// 手改收进 [reviewScaleMinBytes, reviewScreenshotMaxBytes]。
 type reviewScaleParams struct {
 	Max     int
 	Format  string // "jpeg" 或 "png"
 	Quality int
+	Bytes   int
 }
 
-// ParseReviewScaleQuery 供 handler 层解析图片端点的 max/format/quality query；
-// 实现见 parseReviewScaleQuery。
-func ParseReviewScaleQuery(maxRaw, formatRaw, qualityRaw string) (*reviewScaleParams, error) {
-	return parseReviewScaleQuery(maxRaw, formatRaw, qualityRaw)
+// ParseReviewScaleQuery 供 handler 层解析图片端点的 max/format/quality/bytes
+// query；实现见 parseReviewScaleQuery。
+func ParseReviewScaleQuery(maxRaw, formatRaw, qualityRaw, bytesRaw string) (*reviewScaleParams, error) {
+	return parseReviewScaleQuery(maxRaw, formatRaw, qualityRaw, bytesRaw)
 }
 
-// parseReviewScaleQuery 解析缩放参数：三个参数全空 → nil（原图透传语义）；
-// 给了任何一个则其余按默认值补全；非法数值报错（调用方回 400）。
-func parseReviewScaleQuery(maxRaw, formatRaw, qualityRaw string) (*reviewScaleParams, error) {
-	if maxRaw == "" && formatRaw == "" && qualityRaw == "" {
+// parseReviewScaleQuery 解析缩放参数：四个参数全空 → nil（原图透传语义）；
+// 给了任何一个则其余按默认值补全（bytes 默认单张上限，清单地址按张数均分后
+// 显式写入）；非法数值报错（调用方回 400）。
+func parseReviewScaleQuery(maxRaw, formatRaw, qualityRaw, bytesRaw string) (*reviewScaleParams, error) {
+	if maxRaw == "" && formatRaw == "" && qualityRaw == "" && bytesRaw == "" {
 		return nil, nil
 	}
 	p := &reviewScaleParams{
 		Max:     reviewScreenshotMaxEdge,
 		Format:  "jpeg",
 		Quality: reviewScreenshotQuality,
+		Bytes:   reviewScreenshotMaxBytes,
 	}
 	if maxRaw != "" {
 		n, err := strconv.Atoi(maxRaw)
@@ -122,6 +154,13 @@ func parseReviewScaleQuery(maxRaw, formatRaw, qualityRaw string) (*reviewScalePa
 		}
 		p.Quality = clampReviewScale(n, reviewScaleMinQuality, reviewScaleMaxQuality)
 	}
+	if bytesRaw != "" {
+		n, err := strconv.Atoi(bytesRaw)
+		if err != nil {
+			return nil, fmt.Errorf("bytes 不是合法整数")
+		}
+		p.Bytes = clampReviewScale(n, reviewScaleMinBytes, reviewScreenshotMaxBytes)
+	}
 	return p, nil
 }
 
@@ -136,11 +175,13 @@ func clampReviewScale(v, lo, hi int) int {
 	return v
 }
 
-// reviewScaleQuery 清单 url 追加的缩放参数串：审查尺寸默认值按常量拼，
-// 不散落魔法数。
-func reviewScaleQuery() string {
+// reviewScaleQuery 清单 url 追加的缩放参数串：审查尺寸默认值按常量拼，单张
+// 字节预算按本轮张数均分后显式写入（bytes）——取图端点按同一参数强制，清单
+// 承诺与端点行为同源。
+func reviewScaleQuery(perImageBytes int) string {
 	return "?max=" + strconv.Itoa(reviewScreenshotMaxEdge) +
-		"&format=jpeg&quality=" + strconv.Itoa(reviewScreenshotQuality)
+		"&format=jpeg&quality=" + strconv.Itoa(reviewScreenshotQuality) +
+		"&bytes=" + strconv.Itoa(perImageBytes)
 }
 
 // sniffReviewScaleFormat 读文件头魔数判真实图片类型：storage 的 MimeType 可能
@@ -215,13 +256,14 @@ func reviewScreenshotDims(path string) (int, int) {
 // reviewScreenshotServed 判定审查尺寸地址对本次请求返回什么字节：清单算
 // served 标示与取图端点的变体/透传决策共用同一份逻辑，两处永不打架。
 //   - ServedScaled：返回缩放变体（长边超目标的降边缩放、小而重原图按原尺寸
-//     重编码压预算）——长边超目标、或长边在目标内但原图文件字节超 500KB 预算。
-//   - ServedOriginalLight：返回原图字节但在预算内（长边 ≤ 目标且文件 ≤500KB
-//     的小而轻原图，零损失透传）。
+//     重编码压预算）——长边超目标、或长边在目标内但原图文件字节超预算
+//     （budgetBytes，清单按本轮张数均分写入）。
+//   - ServedOriginalLight：返回原图字节但在预算内（长边 ≤ 目标且文件不超
+//     预算的小而轻原图，零损失透传）。
 //   - ServedOriginalHeavy：返回原图字节且不受预算保护（嗅探/头解码失败、超
 //     64MP 解码预算；文件打不开也归此类兜底——端点本就会 40406，清单按最重
 //     原图语义标示）。
-func reviewScreenshotServed(path string, maxEdge int) ReviewScreenshotServed {
+func reviewScreenshotServed(path string, maxEdge, budgetBytes int) ReviewScreenshotServed {
 	head, err := reviewScreenshotHead(path)
 	if err != nil {
 		return ServedOriginalHeavy
@@ -259,7 +301,7 @@ func reviewScreenshotServed(path string, maxEdge int) ReviewScreenshotServed {
 	if err != nil {
 		return ServedOriginalHeavy
 	}
-	if fi.Size() > reviewScreenshotMaxBytes {
+	if fi.Size() > int64(budgetBytes) {
 		return ServedScaled
 	}
 	return ServedOriginalLight
@@ -282,7 +324,7 @@ func scaleReviewScreenshot(ctx context.Context, path string, p *reviewScaleParam
 	}
 	// 变体/透传决策与清单 served 标示共用同一份逻辑（reviewScreenshotServed）：
 	// original_* 原图透传（与清单承诺一致）；ServedScaled 走到下面解码重编码。
-	if served := reviewScreenshotServed(path, p.Max); served != ServedScaled {
+	if served := reviewScreenshotServed(path, p.Max, p.Bytes); served != ServedScaled {
 		return nil, "", nil
 	}
 	kind := sniffReviewScaleFormat(head)
@@ -332,11 +374,12 @@ func scaleReviewScreenshot(ctx context.Context, path string, p *reviewScaleParam
 
 // encodeReviewScaleBytes 缩放并按字节预算编码：先把长边缩到 edge0（调用方
 // 取 min(目标, 原长边)，小而重重编码时等于原图长边）按请求档位编码（典型 UI
-// 截图这一遍就达标，零额外成本）；超 reviewScreenshotMaxBytes 时 JPEG 降质量
-// 重编、最低档仍超就对半降目标长边（下限 reviewScaleMinEdge）从 p.Quality 重
-// 新走梯次，第一份进预算的胜出。长边到下限仍超（病态输入）兑底返回全循环字
-// 节最小的一份——预算是尽力保证，最小的一份也总好过把清单已下发的地址变成
-// 404。
+// 截图这一遍就达标，零额外成本）；超 p.Bytes（清单按张数均分的单张预算，
+// INT-193）时 JPEG 降质量重编、最低档仍超就对半降目标长边（下限
+// reviewScaleMinEdge）从 p.Quality 重新走梯次，第一份进预算的胜出。长边到
+// 下限仍超（病态输入、或手改的低预算根本不可达，如 png 小预算高熵图）时
+// 返回 errReviewScaleVariantFailed 由调用方 40406——预算是对外承诺，宁可
+// 让代理记 unmeasurable，也不能伪装成「预算内」静默超限下发（INT-193 审查）。
 func encodeReviewScaleBytes(img image.Image, edge0 int, p *reviewScaleParams) ([]byte, string, error) {
 	// JPEG 质量梯次：请求档位打头，其后只收严格更低的预设档（请求 50 不回
 	// 跳 65；请求档本身是低档时自然去重）。PNG 没有质量旋钮，qualities 只留
@@ -351,8 +394,6 @@ func encodeReviewScaleBytes(img image.Image, edge0 int, p *reviewScaleParams) ([
 		}
 	}
 	srcLong := max(img.Bounds().Dx(), img.Bounds().Dy())
-	var best []byte
-	bestMime := ""
 	edge := edge0
 	for {
 		// 长边不小于原图时不重采样（1:1 CatmullRom 只会软化像素），直接编码原
@@ -378,10 +419,7 @@ func encodeReviewScaleBytes(img image.Image, edge0 int, p *reviewScaleParams) ([
 			if encErr != nil {
 				return nil, "", fmt.Errorf("%w: 变体编码失败: %v", errReviewScaleVariantFailed, encErr)
 			}
-			if best == nil || buf.Len() < len(best) {
-				best, bestMime = buf.Bytes(), mime
-			}
-			if buf.Len() <= reviewScreenshotMaxBytes {
+			if buf.Len() <= p.Bytes {
 				return buf.Bytes(), mime, nil
 			}
 		}
@@ -395,7 +433,9 @@ func encodeReviewScaleBytes(img image.Image, edge0 int, p *reviewScaleParams) ([
 			edge = reviewScaleMinEdge
 		}
 	}
-	return best, bestMime, nil
+	// 全梯次走完仍超预算：预算是对外承诺，返回变体失败（40406）让代理记
+	// unmeasurable，不静默下发超限字节。
+	return nil, "", fmt.Errorf("%w: 长边降到下限仍超预算 %d", errReviewScaleVariantFailed, p.Bytes)
 }
 
 // decodeReviewScreenshotPixels 按嗅探结果解码整图像素：png/webp 走各自解码器，
