@@ -20,13 +20,17 @@ GitHub meta 含 raw_json），在内存里过滤、排序后才按 page_size 切
 - `ListFiltered(q, sortKey, offset, limit)`：显式投影（不含 body/body_html）+ ORDER BY +
   OFFSET/LIMIT；GitHub meta 用 `Preload(..., Select(...))` 装载本页所需列（不含
   raw_json 与 collections_*）。
+- `ListFilteredWithTotal(q, sortKey, offset, limit)`（INT-212）：带 q 时单条 SQL 用
+  `COUNT(*) OVER()` 同时取 total 与本页，免付两次搜索过滤成本；无 q 时内部仍走
+  CountFiltered + ListFiltered（见「count/list 合并」一节）。
 - `ListFilterOptionSources`：GetFilterOptions 的只读投影，只取两张 meta 表的
   标签/指派人/里程碑 JSON。
 
-service 层（`issue_list.go`）只做映射与编排：`List` 先 `CountFiltered` 再 `ListFiltered`
-取本页，meta/shipHook/未读/PR 聚合全部只按本页 issue 查询；`BatchCloseDoneIssues` 取
-`batchCloseDoneMaxIssues+1` 条探测超上限。内存实现 `matchesIssueFilters`、`sortIssues`
-及只被它们使用的 helper 已删除。
+service 层（`issue_list.go`）只做映射与编排：`List` 经 `ListFilteredWithTotal` 一次拿
+total 与本页（INT-212），meta/shipHook/未读/PR 聚合全部只按本页 issue 查询；`CountIssues`
+只取 total，仍走 `CountFiltered`；`BatchCloseDoneIssues` 取 `batchCloseDoneMaxIssues+1`
+条探测超上限，仍走 `ListFiltered`。内存实现 `matchesIssueFilters`、`sortIssues` 及只被
+它们使用的 helper 已删除。
 
 ## 行为契约
 
@@ -244,5 +248,56 @@ FTS 命中率决定收益方向（万级夹具单项目实测，一次 Count+Lis
   复测裁定。`ab`/`超时` 走未改动的 1–2 rune LIKE 分支，其绝对值就是旧 LIKE
   形态在短查询上的原成本（2048 命中的 2 字符前导通配扫描）。
 - EXISTS 关联子查询逐行重跑 MATCH 的替代方案维持第 1 轮结论：实测 174s/条，
-  不可用。若后续还要压 `release checklist` 一类最坏情况，方向是服务层
-  count/list 合并或索引形态，另立条目评估。
+  不可用。若后续还要压 `release checklist` 一类最坏情况，出路见下节 count/list
+  合并（INT-212 已实施）。
+
+### count/list 合并（INT-212，已实施）
+
+INT-209 交接的后续评估条目，三个候选方向的数据依据与结论：
+
+1. **索引形态进一步压榨——不做**。contentless + docid 映射不可行：issues 无
+   INTEGER 主键，VACUUM 会重排 rowid，内容外置后 FTS 行身份无从锚定（当前形态
+   的 doc 映射表锚的是 FTS 行自身 rowid，没有这个问题）。`detail=none` 会丢掉
+   短语位置验证，`release checklist` 这类多词查询会产生误命中，需要回连主表
+   逐条后置过滤，省下的成本又被填回去，不值得。
+2. **服务层 count/list 合并——做（本节）**。q 搜索的过滤成本（≥3 rune 的 FTS
+   MATCH、1–2 rune 的正文全表 LIKE）原先由 count 与 list 各付一次，高命中查询
+   占总延迟一半以上；合并后只付一次。实现：`ListFilteredWithTotal`（repository）
+   在带 q 时给 `ListFiltered` 的投影追加 `COUNT(*) OVER() AS match_total`，
+   单条 SQL 同时返回 total 与本页（SQLite ≥3.25，glebarez/modernc 驱动支持，
+   空窗口定义为整个结果集，语义与 COUNT(*) 同一 WHERE 完全一致）；`IssueService.List`
+   改走该方法。窗口形态的执行计划不变：EXPLAIN 仍见 `SCAN issues_fts VIRTUAL
+   TABLE INDEX 0:M` + `issue_fts_docs` 主键点查（有测试锁定）。
+3. **维持现状——否**。上面的合并收益以实测数据推翻了「收益/成本比已合理」的
+   判断，且实现面只有一处查询编排。
+
+实测（万级夹具，同负载背靠背交错测量，三形态同轮对比；另一次 `benchtime 1x`
+独立复测与交错测量趋势一致）：
+
+| 查询 | 命中 | 旧 LIKE | 合并前（2 查） | 合并后（窗口） |
+|---|---|---|---|---|
+| release checklist | 9540 | 122.4ms | 148.3ms | 102.6ms |
+| webhook | 9587 | 102.3ms | 105.4ms | 77.2ms |
+| 数据库连接 | 9560 | 102.6ms | 86.8ms | 66.4ms |
+| 404 | 8275 | 101.5ms | 71.5ms | 53.9ms |
+| INT-2 | 2300 | 119.6ms | 55.6ms | 33.7ms |
+| shipbobo | 5715 | 138.4ms | 49.4ms | 36.4ms |
+| ab（1–2 rune） | 2048 | 117.3ms | 116.4ms | 62.3ms |
+| 超时（1–2 rune） | 9594 | 86.5ms | 86.0ms | 62.7ms |
+| 无 q | 10000 | 41.1ms | 37.4ms | —（保持 2 查） |
+
+- 病理角 `release checklist` 合并后 p50 低于同负载背靠背的旧 LIKE 基线
+  （102.6 vs 122.4ms，验收线「不再高于」达成）；1–2 rune 分支与选择性查询全部
+  变快，无回退。绝对值随机器负载波动，背靠背相对值为唯一有效口径（INT-209
+  同一结论）。
+- **无 q 列表保持两次查询**：无 q 时过滤只剩 project_id，没有可复用的搜索
+  成本；窗口函数会强制全量物化排序（无法用 ORDER BY+LIMIT 的 top-N 堆），
+  万级实测 +8%（37.4→40.4ms）。`ListFilteredWithTotal` 内部按 `q.Query == ""`
+  分流，生产最常见路径零变化。
+- **total 语义不变**：COUNT(*) OVER() 与 COUNT(*) 同一 WHERE、join 不行扇出，
+  六类查询（MATCH/LIKE/数字/作者/零命中/无 q）的等价性有测试锁定。
+- **超末页边界**：窗口行集为空时聚合值拿不到——零命中（offset=0）直接记 0；
+  offset>0 回退一次 `CountFiltered`，保持「page 超过末页时返回空切片且 total
+  不变」契约（List 的 page 来自客户端，超末页是常态路径不是异常）。
+- `CountIssues` 与 `BatchCloseDoneIssues` 不在合并范围：前者只要 total（本来就
+  是单查询），后者只要本页（limit 探测），各自维持原方法。

@@ -361,6 +361,66 @@ func (r *IssueRepository) ListFiltered(q IssueListQuery, sortKey string, offset,
 	return issues, nil
 }
 
+// ListFilteredWithTotal 同步取过滤后总数与本页（INT-212）。带 q 时单条 SQL 用
+// COUNT(*) OVER() 同时取 total 与本页：q 搜索的过滤成本（≥3 rune 的 FTS MATCH、
+// 1–2 rune 的正文全表 LIKE）原先由 count 与 list 各付一次，高命中查询下占了
+// 总延迟的一半以上，合并后只付一次（万级夹具实测：release checklist
+// 148.3→102.6ms，旧 LIKE 基线 122.4ms；ab 116.4→62.3ms）。无 q 时过滤只剩
+// project_id，没有可复用的搜索成本，窗口函数反而把 top-20 堆排序升级成全量
+// 物化（万级实测 +8%），保持两次查询不变。total 语义不变：仍是过滤后总数
+// （COUNT(*) OVER() 与 COUNT(*) 同一 WHERE，join 不行扇出，有等价测试锁定）；
+// 列表响应不携带正文与 ListFiltered 一致。
+func (r *IssueRepository) ListFilteredWithTotal(q IssueListQuery, sortKey string, offset, limit int) ([]model.Issue, int64, error) {
+	if q.Query == "" {
+		total, err := r.CountFiltered(q)
+		if err != nil {
+			return nil, 0, err
+		}
+		issues, err := r.ListFiltered(q, sortKey, offset, limit)
+		if err != nil {
+			return nil, 0, err
+		}
+		return issues, total, nil
+	}
+	// 窗口列挂在投影末尾：空行集（超末页或零命中）拿不到聚合值，rows 为空
+	// 时 total 不可信——零命中（offset=0）可直接记 0；offset>0 说明只是翻页
+	// 超过末页，回退一次 COUNT 保持「page 超过末页时返回空切片且 total 不变」
+	// 的契约（List 的 page 参数来自客户端，超末页是常态路径不是异常）。
+	type issueListRow struct {
+		model.Issue
+		MatchTotal int64
+	}
+	var rows []issueListRow
+	query := r.buildFilteredQuery(q).
+		Select(issueListColumns+", COUNT(*) OVER() AS match_total").
+		Order(issueListOrderClause(sortKey)).
+		Offset(offset).
+		Preload("GitHubMeta", func(db *gorm.DB) *gorm.DB {
+			return db.Select(issueGitHubMetaListColumns)
+		})
+	if limit > 0 {
+		query = query.Limit(limit)
+	}
+	if err := query.Find(&rows).Error; err != nil {
+		return nil, 0, err
+	}
+	issues := make([]model.Issue, len(rows))
+	for i, row := range rows {
+		issues[i] = row.Issue
+	}
+	if len(rows) == 0 {
+		if offset <= 0 {
+			return issues, 0, nil
+		}
+		total, err := r.CountFiltered(q)
+		if err != nil {
+			return nil, 0, err
+		}
+		return issues, total, nil
+	}
+	return issues, rows[0].MatchTotal, nil
+}
+
 // ListFilterOptionSources 投影项目全部 Issue 的筛选下拉数据源（不含正文与
 // raw_json）：每行一个 Issue，摘出两张 meta 表的标签/指派人/里程碑 JSON，
 // meta 缺失的列 COALESCE 成空串，交由上层按空处理。
