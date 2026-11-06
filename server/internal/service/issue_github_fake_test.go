@@ -72,6 +72,13 @@ type fakeIssueGitHubClient struct {
 	validateErr    error
 	onListIssues   func()
 	onListTimeline func()
+	// fetchRepositoryRepo/fetchRepositoryErr 注入批量关闭的仓库探测响应
+	// （INT-198）；fetchRepositoryCalls 记录调用次数，断言同一批只探测一次；
+	// fetchRepositoryEmpty 注入「请求成功但仓库响应为空」的防御分支用例。
+	fetchRepositoryRepo  *gh.Repository
+	fetchRepositoryErr   error
+	fetchRepositoryEmpty bool
+	fetchRepositoryCalls int
 	// mu 保护 listIssuesSince、commentListCalls/timelineListCalls 与
 	// updateIssueCalls/updateIssueErrs：ListIssues 与批量关闭的 UpdateIssue
 	// 都会并发命中。
@@ -104,6 +111,29 @@ type fakeUpdateIssueCall struct {
 
 func (f *fakeIssueGitHubClient) ValidateRepository(context.Context) error {
 	return f.validateErr
+}
+
+func (f *fakeIssueGitHubClient) FetchRepository(context.Context) (*gh.Repository, *gh.Response, error) {
+	f.mu.Lock()
+	f.fetchRepositoryCalls++
+	f.mu.Unlock()
+	if f.fetchRepositoryEmpty {
+		return nil, &gh.Response{}, nil
+	}
+	// 未配置仓库响应时按未实现报错：探测不可定因退回逐条回报，与 stub 兜底
+	// 语义一致——不能让 (nil, nil) 被误读为整仓级熔断（INT-198）；显式注入
+	// 「成功但空响应」用 fetchRepositoryEmpty。
+	if f.fetchRepositoryRepo == nil && f.fetchRepositoryErr == nil {
+		return nil, nil, stubErr("FetchRepository")
+	}
+	return f.fetchRepositoryRepo, &gh.Response{}, f.fetchRepositoryErr
+}
+
+// countFetchRepositoryCalls 返回仓库探测累计调用次数（INT-198 断言只探测一次）。
+func (f *fakeIssueGitHubClient) countFetchRepositoryCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.fetchRepositoryCalls
 }
 
 func (f *fakeIssueGitHubClient) ListIssues(_ context.Context, _ string, since *time.Time, _, _ int) ([]*ghclient.Issue, *gh.Response, error) {
