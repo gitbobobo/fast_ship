@@ -298,6 +298,124 @@ func newFakeModelServer(t *testing.T, turns ...fakeModelTurn) *fakeModelServer {
 
 func (f *fakeModelServer) URL() string { return f.srv.URL }
 
+// fakeModelReply POST 一条请求体并返回拼接后的正文与状态码。turn 文本被
+// 拆成两片流式 chunk，逐片解码拼接后才能做整体子串断言；非 SSE 响应
+// （strict 脚本耗尽的纯 JSON 错误体）原样返回。
+func fakeModelReply(t *testing.T, f *fakeModelServer, body string) (int, string) {
+	t.Helper()
+	resp, err := http.Post(f.URL(), "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("fake model 请求失败: %v", err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("读 fake model 响应失败: %v", err)
+	}
+	var out strings.Builder
+	sawSSE := false
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		sawSSE = true
+		payload := strings.TrimPrefix(line, "data: ")
+		if payload == "[DONE]" {
+			continue
+		}
+		var chunk struct {
+			Choices []struct {
+				Delta struct {
+					Content string `json:"content"`
+				} `json:"delta"`
+			} `json:"choices"`
+		}
+		if json.Unmarshal([]byte(payload), &chunk) != nil {
+			continue
+		}
+		for _, c := range chunk.Choices {
+			out.WriteString(c.Delta.Content)
+		}
+	}
+	if !sawSSE {
+		return resp.StatusCode, string(raw)
+	}
+	return resp.StatusCode, out.String()
+}
+
+// TestFakeModelTurnMatchDispatch 锁定 Match 分发契约（INT-201）：命中优先
+// 于 FIFO、未命中请求拿默认文本且不消耗 Match turn、无 Match 时保持原 FIFO、
+// strict 下全部剩余 turn 未命中报脚本耗尽。分发逻辑若回退为纯 FIFO，
+// TestBotAuthorization 在有利调度下仍可能通过，这里提供确定性回归。
+func TestFakeModelTurnMatchDispatch(t *testing.T) {
+	t.Run("命中优先且乱序可达", func(t *testing.T) {
+		f := newFakeModelServer(t,
+			fakeModelTurn{Match: "beta", Text: "乙答"},
+			fakeModelTurn{Match: "alpha", Text: "甲答"},
+		)
+		// 队首是 beta 的 turn，但 alpha 请求先到：命中优先，不能被队首挡住。
+		code, body := fakeModelReply(t, f, `{"messages":[{"content":"ask alpha"}]}`)
+		if code != 200 || !strings.Contains(body, "甲答") || strings.Contains(body, "乙答") {
+			t.Fatalf("alpha 请求应拿到甲答: %d %s", code, body)
+		}
+		code, body = fakeModelReply(t, f, `{"messages":[{"content":"ask beta"}]}`)
+		if code != 200 || !strings.Contains(body, "乙答") {
+			t.Fatalf("beta 请求应拿到乙答: %d %s", code, body)
+		}
+	})
+
+	t.Run("未命中拿默认文本且保留 Match turn", func(t *testing.T) {
+		f := newFakeModelServer(t, fakeModelTurn{Match: "alpha", Text: "甲答"})
+		code, body := fakeModelReply(t, f, `{"messages":[{"content":"无关请求"}]}`)
+		if code != 200 || !strings.Contains(body, "脚本外的默认回复") {
+			t.Fatalf("未命中应拿默认回复: %d %s", code, body)
+		}
+		// Match turn 未被无关请求消耗，自己的请求仍能拿到。
+		code, body = fakeModelReply(t, f, `{"messages":[{"content":"ask alpha"}]}`)
+		if code != 200 || !strings.Contains(body, "甲答") {
+			t.Fatalf("Match turn 不应被无关请求抢走: %d %s", code, body)
+		}
+	})
+
+	t.Run("无 Match 保持原 FIFO", func(t *testing.T) {
+		f := newFakeModelServer(t,
+			fakeModelTurn{Text: "第一轮"},
+			fakeModelTurn{Text: "第二轮"},
+		)
+		for _, want := range []string{"第一轮", "第二轮"} {
+			code, body := fakeModelReply(t, f, `{"messages":[]}`)
+			if code != 200 || !strings.Contains(body, want) {
+				t.Fatalf("FIFO 应依次拿到 %s: %d %s", want, code, body)
+			}
+		}
+	})
+
+	t.Run("混合脚本命中优先于无 Match 队首", func(t *testing.T) {
+		f := newFakeModelServer(t,
+			fakeModelTurn{Text: "队首文本"},
+			fakeModelTurn{Match: "alpha", Text: "甲答"},
+		)
+		code, body := fakeModelReply(t, f, `{"messages":[{"content":"ask alpha"}]}`)
+		if code != 200 || !strings.Contains(body, "甲答") || strings.Contains(body, "队首文本") {
+			t.Fatalf("命中 turn 应优先于无 Match 队首: %d %s", code, body)
+		}
+		code, body = fakeModelReply(t, f, `{"messages":[]}`)
+		if code != 200 || !strings.Contains(body, "队首文本") {
+			t.Fatalf("无 Match turn 应回退按 FIFO 服务: %d %s", code, body)
+		}
+	})
+
+	t.Run("strict 下全部剩余未命中报脚本耗尽", func(t *testing.T) {
+		f := newFakeModelServer(t, fakeModelTurn{Match: "alpha", Text: "甲答"})
+		f.strict = true
+		code, body := fakeModelReply(t, f, `{"messages":[{"content":"无关请求"}]}`)
+		if code != 500 || !strings.Contains(body, "script_exhausted") {
+			t.Fatalf("strict 未命中应报脚本耗尽: %d %s", code, body)
+		}
+	})
+}
+
 func (f *fakeModelServer) nextRequest(t *testing.T, timeout time.Duration) fakeModelRequest {
 	t.Helper()
 	select {
@@ -1216,8 +1334,10 @@ func TestBotAuthorization(t *testing.T) {
 		// 只服务给含「再建一个」的请求，回执 run 抢不到这条脚本，它拿到
 		// 默认文本回复自然收尾。
 		fakeModelTurn{Match: "再建一个", ToolCalls: []fakeModelToolCall{{ID: "call-a2", Name: "fs_project", Args: `{"action":"create","name":"授权项目2"}`}}},
-		// a2 的后台回执 run：看到建好的项目，答复收尾。a2 发起前请求体里
-		// 没有「授权项目2」，不会被发起 run 自己抢走。
+		// a2 受理后的下一轮请求：a2 提交时参数已进历史、调用排队中，模型
+		// 据此答复收尾。a2 提交前没有任何请求体含「授权项目2」，不会被提前
+		// 抢走；a2 执行完的后台回执 run 轮到时脚本已耗尽，拿默认文本自然
+		// 收尾。
 		fakeModelTurn{Match: "授权项目2", Text: "第二个也建好了"},
 	)
 	userID := createBotTestUser(t, env.db, "botauth")
@@ -1245,9 +1365,23 @@ func TestBotAuthorization(t *testing.T) {
 		t.Fatalf("授权范围不符: %+v", authzs[0])
 	}
 
-	// run1 在后台继续消化脚本（a2 的调用在 run2），按名字等待而不是按数量。
+	// run1 已结束，a1 在后台执行：按名字等待而不是按数量。
 	waitForBot(t, "项目1 创建", 20*time.Second, func() bool {
 		return botProjectExists(t, env, userID, "授权项目1")
+	})
+	// 项目行与后台结果消息是两个事务（INT-201 panel 复审）：看到项目不
+	// 等于回执已入历史。若「再建一个」run 的快照不含回执、回执又在该 run
+	// 提交 a2 之后才落库，安全点会把刚排队未认领的 a2 关成 not_executed。
+	// 回执落库后再发消息，之后启动的 run 一开始就把它当已消费输入，中途
+	// 不再有新输入。
+	waitForBot(t, "a1 后台结果落库", 15*time.Second, func() bool {
+		msgs, _, _, _ := env.bots.ListMessages(userID, bot.ID, 0, 0, 100)
+		for _, m := range msgs {
+			if m.Kind == "background_result" && m.CallID != nil && *m.CallID == call1ID {
+				return true
+			}
+		}
+		return false
 	})
 
 	// 第二次同规则调用：免确认直接排队执行。
