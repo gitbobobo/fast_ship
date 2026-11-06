@@ -200,7 +200,7 @@ func (s *ReviewService) codeHistory(ctx context.Context, run *model.ReviewRun) (
 					// open 后会在下一轮历史里消失，复核断链（对齐 visualHistory
 					// 的 openPrior 补偿，INT-204 审查 R1）。
 					for _, p := range openPriorDecisions(result.Prior) {
-						key := fmt.Sprintf("%s|%s|%s", priorLevelText(p.Level), priorLoc(p), p.Body)
+						key := codePriorDedupeKey(p)
 						if seenPrior[key] {
 							continue
 						}
