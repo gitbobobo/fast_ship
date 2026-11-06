@@ -206,10 +206,10 @@ type githubCloseNetResult struct {
 // 派发。限流（INT-185）之外，INT-191 把认证失败（401）与无权限/访问受限
 // （非限流 403）纳入——凭证失效或访问被拒时继续逐条 PATCH 只会得到同因重复
 // 失败，最多白打 batchCloseDoneMaxIssues 条。INT-198 把仓库级 404/410（token
-// 失去可见性、issues 被禁用）也纳入（abortRepoUnavailable）：410 直接熔断，
-// 404 由 batchCloseRepoProbe 探测定案（两者的单条成因状态码无法区分，真单
-// 条 404 仍逐条回报，INT-191 验收口径保持）。限流 403 与非限流
-// 403 的区分沿用 isGitHubRateLimitError 现有口径。
+// 失去可见性、issues 被禁用）也纳入（abortRepoUnavailable）：两者的单条成因
+// 状态码重叠（Issue 已转移/删除，GitHub 对已删除的 Issue 同样返回 410），
+// 由 batchCloseRepoProbe 探测定案，真单条仍逐条回报（INT-191 验收口径保持）。
+// 限流 403 与非限流 403 的区分沿用 isGitHubRateLimitError 现有口径。
 type batchCloseGitHubAbortReason int32
 
 const (
@@ -219,9 +219,9 @@ const (
 	abortAuth
 	abortForbidden
 	// abortRepoUnavailable：仓库不可见（token 未授权/仓库改名或删除）或已禁用
-	// Issue——整仓级、对全部条目同因复现（INT-198）。404 经仓库探测定案后触发；
-	// PATCH 410 直接触发、不探测（issues 被禁用即整仓级，探测无法改写结论，见
-	// resolveGitHubClose404Gone）。
+	// Issue——整仓级、对全部条目同因复现（INT-198）。404/410 经仓库探测定案后
+	// 触发：已删除的 Issue 也返回 410（单条成因），探测证实仓库不可见或禁用
+	// Issue 才熔断（见 resolveGitHubClose404Gone）。
 	abortRepoUnavailable
 )
 
@@ -265,8 +265,8 @@ func (r batchCloseGitHubAbortReason) remainingText() string {
 // 经 WithoutCancel + 独立超时与整批取消解耦；结果只经 results 返回，由调用方
 // 统一落库与计数。命中整批性失败（限流/认证/权限、仓库不可见/禁用 Issue）时
 // 调用 onAbort（可为 nil）上报类别，由调用方熔断剩余派发——这类失败继续派发
-// 只会得到同因重复失败；404 经仓库探测定案（INT-198）：整仓级熔断，真单条
-// 不熔断逐条回报（INT-191）；其余单条错误不熔断，逐条回报。
+// 只会得到同因重复失败；404/410 经仓库探测定案（INT-198）：整仓级熔断，真
+// 单条不熔断逐条回报（INT-191）；其余单条错误不熔断，逐条回报。
 func closeOneGitHubIssue(batchCtx context.Context, client ghclient.Client, probe *batchCloseRepoProbe, issue model.Issue, updateReq ghclient.UpdateIssueRequest, results chan<- githubCloseNetResult, onAbort func(batchCloseGitHubAbortReason), trip *atomic.Int32, guard func(ctx context.Context, id string) (bool, error), warn func(string, ...zap.Field)) {
 	if issue.GitHubMeta == nil {
 		results <- githubCloseNetResult{issue: issue, err: errs.ErrIssueReadOnly}
@@ -347,7 +347,7 @@ func closeOneGitHubIssue(batchCtx context.Context, client ghclient.Client, probe
 		} else if status, ok := gitHubCloseErrorStatus(err); ok && (status == http.StatusNotFound || status == http.StatusGone) {
 			// 404/410 的仓库级成因与单条成因状态码重叠（INT-191 留下的两义性），
 			// 定案与文案在 resolveGitHubClose404Gone（INT-198）。
-			err = resolveGitHubClose404Gone(batchCtx, client, probe, status, err, onAbort)
+			err = resolveGitHubClose404Gone(batchCtx, client, probe, err, onAbort, warn)
 		} else {
 			err = classifyGitHubCloseError(err)
 		}
@@ -392,16 +392,17 @@ const (
 	// repoProbeRepoGone：仓库 404（token 不可见/仓库已删或改名）或可见但
 	// has_issues=false（issues 被禁用）——整仓级，熔断。
 	repoProbeRepoGone
-	// repoProbeIssueVisible：仓库可见且开启 Issue——404 是单条成因
-	// （已转移/删除），逐条回报不熔断（INT-191 验收口径）。
+	// repoProbeIssueVisible：仓库可见且开启 Issue——404/410 是单条成因
+	// （已转移/删除，GitHub 对已删除的 Issue 同样返回 410），逐条回报不熔断
+	// （INT-191 验收口径）。
 	repoProbeIssueVisible
 	// repoProbeRateLimited：探测遇限流——按已有限流类别处理（INT-198）。
 	repoProbeRateLimited
 )
 
-// batchCloseRepoProbe：批内仓库可见性探测（INT-198）。首个 404 触发一次
+// batchCloseRepoProbe：批内仓库可见性探测（INT-198）。首个 404/410 触发一次
 // FetchRepository（GET /repos/{owner}/{repo}），结论缓存到批结束：并发命中
-// 404 的 worker 经 sync.Once 共享同一次探测，不重发。探测挂 batchCtx（派发
+// 404/410 的 worker 经 sync.Once 共享同一次探测，不重发。探测挂 batchCtx（派发
 // 上下文）：整批截止/熔断取消探测，计入 30s 预算；批次已熔断时在途探测被
 // 取消后按 repoProbeInconclusive 退回逐条回报，不改写已定熔断类别。
 type batchCloseRepoProbe struct {
@@ -410,8 +411,9 @@ type batchCloseRepoProbe struct {
 }
 
 // outcome 返回批内仓库探测结论；probe 为 nil 时按 repoProbeInconclusive（
-// 测试直呼 closeOneGitHubIssue 的旧用例无探测可用，保持逐条回报现状）。
-func (p *batchCloseRepoProbe) outcome(batchCtx context.Context, client ghclient.Client) batchCloseRepoProbeOutcome {
+// 测试直呼 closeOneGitHubIssue 的旧用例无探测可用，保持逐条回报现状）。warn
+// 为 nil 时不记日志。
+func (p *batchCloseRepoProbe) outcome(batchCtx context.Context, client ghclient.Client, warn func(string, ...zap.Field)) batchCloseRepoProbeOutcome {
 	if p == nil {
 		return repoProbeInconclusive
 	}
@@ -419,6 +421,12 @@ func (p *batchCloseRepoProbe) outcome(batchCtx context.Context, client ghclient.
 		probeCtx, cancel := context.WithTimeout(batchCtx, batchCloseGitHubPatchTimeout)
 		defer cancel()
 		repo, _, err := client.FetchRepository(probeCtx)
+		if err != nil && warn != nil {
+			// 探测失败只落 verdict 不可见：不记 warn，线上无法区分「超时/5xx
+			// /凭证异常」与「仓库真不可见被定案」，与 PATCH/守卫失败的日志口径
+			// 一致（INT-198 R1 bot）。
+			warn("batch close github issue: repo probe failed", zap.Error(err))
+		}
 		switch {
 		case err == nil && repo != nil && (repo.HasIssues == nil || repo.GetHasIssues()):
 			// 仓库可见；has_issues 缺失视为开启——探测信息不全时退回
@@ -443,18 +451,13 @@ func (p *batchCloseRepoProbe) outcome(batchCtx context.Context, client ghclient.
 }
 
 // resolveGitHubClose404Gone 定案 PATCH 404/410 的失败文案与熔断（INT-198）：
-// 410 是 issues 被仓库设置禁用的整仓级信号，探测结果无法改写结论，直接熔断
-// 省一次探测；404 成因两义，探测一次仓库区分——整仓级熔断并回报固定文案，
-// 单条成因回报「找不到该 Issue」，探测失败退回 classifyGitHubCloseError 现状
-// 逐条回报，探测遇限流按限流类别熔断。
-func resolveGitHubClose404Gone(batchCtx context.Context, client ghclient.Client, probe *batchCloseRepoProbe, patchStatus int, patchErr error, onAbort func(batchCloseGitHubAbortReason)) error {
-	if patchStatus == http.StatusGone {
-		if onAbort != nil {
-			onAbort(abortRepoUnavailable)
-		}
-		return errs.New(errs.ErrGitHubAPI.Code, abortRepoUnavailable.itemText())
-	}
-	switch probe.outcome(batchCtx, client) {
+// 两者成因两义——仓库不可见（token 失去可见性/仓库已删或改名）与 issues 被
+// 禁用是整仓级；Issue 已转移/删除是单条（GitHub 对已删除的 Issue 同样返回
+// 410，官方文档口径，INT-198 R1 bot）。批内首个 404/410 探测一次仓库区分——
+// 整仓级熔断并回报固定文案，单条成因回报「找不到该 Issue」，探测失败退回
+// classifyGitHubCloseError 现状逐条回报，探测遇限流按限流类别熔断。
+func resolveGitHubClose404Gone(batchCtx context.Context, client ghclient.Client, probe *batchCloseRepoProbe, patchErr error, onAbort func(batchCloseGitHubAbortReason), warn func(string, ...zap.Field)) error {
+	switch probe.outcome(batchCtx, client, warn) {
 	case repoProbeRepoGone:
 		if onAbort != nil {
 			onAbort(abortRepoUnavailable)
@@ -607,9 +610,9 @@ func (s *IssueService) closeGitHubIssues(ctx context.Context, project *model.Pro
 	// （见下方 onAbort，INT-191 R1），纯触发批次（如整批 401/403）槽位释放后
 	// 派发循环的 Acquire 与 worker 顶部的 ctx 复核必然看到已取消，不再有额外
 	// PATCH；混合批次中非触发项的槽位释放仍可能落在 trip 落地前的极小窗口内，
-	// 至多再发出并发度条请求——有界且可接受。404 的定案依赖批内
-	// 仓库探测（probe，INT-198；410 直接熔断不探测，见 resolveGitHubClose404Gone）：
-	// sync.Once 缓存到批结束，并发命中 404 的 worker 共享同一次 FetchRepository。
+	// 至多再发出并发度条请求——有界且可接受。404/410 的定案依赖批内
+	// 仓库探测（probe，INT-198）：sync.Once 缓存到批结束，并发命中 404/410 的
+	// worker 共享同一次 FetchRepository。
 	dispatchCtx, dispatchCancel := context.WithCancel(ctx)
 	defer dispatchCancel()
 	var trip atomic.Int32 // batchCloseGitHubAbortReason

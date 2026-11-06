@@ -620,9 +620,9 @@ func TestIssueServiceBatchCloseDoneIssues_IssuesDisabledProbeAbortsBatch(t *test
 	assertRepoGoneCopies(t, resp)
 }
 
-// INT-198：PATCH 本身 410（issues 被禁用的整仓级信号）——探测结果无法改写
-// 结论，直接熔断不探测。
-func TestIssueServiceBatchCloseDoneIssues_Gone410AbortsBatchWithoutProbe(t *testing.T) {
+// INT-198：PATCH 410 探测证实仓库不可见（token 失去可见性）——与其他整仓级
+// 成因一致熔断，同一批只探测一次。
+func TestIssueServiceBatchCloseDoneIssues_Gone410ProbeAbortsBatch(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")
 	project := createTestProject(t, svc.db, user.ID)
@@ -635,6 +635,7 @@ func TestIssueServiceBatchCloseDoneIssues_Gone410AbortsBatchWithoutProbe(t *test
 		errsByNumber[m.Number] = &gh.ErrorResponse{Message: "Gone", Response: &http.Response{StatusCode: http.StatusGone}}
 	}
 	fake.updateIssueErrs = errsByNumber
+	fake.fetchRepositoryErr = &gh.ErrorResponse{Message: "Not Found", Response: &http.Response{StatusCode: http.StatusNotFound}}
 	svc.issueService.newClient = func(token, owner, repo string) ghclient.Client {
 		return fake
 	}
@@ -643,16 +644,56 @@ func TestIssueServiceBatchCloseDoneIssues_Gone410AbortsBatchWithoutProbe(t *test
 	if err != nil {
 		t.Fatalf("batch close: %v", err)
 	}
-	if calls := fake.countFetchRepositoryCalls(); calls != 0 {
-		t.Fatalf("410 must abort without probing, got %d probe calls", calls)
+	if calls := fake.countFetchRepositoryCalls(); calls != 1 {
+		t.Fatalf("410 must probe exactly once, got %d probe calls", calls)
 	}
 	if calls := len(fake.recordedUpdateIssueCalls()); calls > batchCloseGitHubConcurrency || calls >= n {
-		t.Fatalf("410 must cut dispatch short, got %d PATCH calls (batch %d)", calls, n)
+		t.Fatalf("repo-gone 410 must cut dispatch short, got %d PATCH calls (batch %d)", calls, n)
 	}
 	if resp.Succeeded != 0 || resp.Failed != n {
 		t.Fatalf("unexpected result: %+v", resp)
 	}
 	assertRepoGoneCopies(t, resp)
+}
+
+// INT-198：PATCH 410 但仓库可见且开启 Issue（GitHub 对已删除的 Issue 同样
+// 返回 410，官方文档口径）——单条成因，逐条回报「找不到该 Issue」，不熔断。
+func TestIssueServiceBatchCloseDoneIssues_Gone410SingleCauseReportsPerItem(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID)
+
+	const n = 10
+	fake := &fakeIssueGitHubClient{}
+	metas := seedGitHubDoneIssuesForBatchClose(t, svc, project.ID, n, fake)
+	errsByNumber := make(map[int]error, n)
+	for _, m := range metas {
+		errsByNumber[m.Number] = &gh.ErrorResponse{Message: "Gone", Response: &http.Response{StatusCode: http.StatusGone}}
+	}
+	fake.updateIssueErrs = errsByNumber
+	fake.fetchRepositoryRepo = &gh.Repository{HasIssues: gh.Bool(true)}
+	svc.issueService.newClient = func(token, owner, repo string) ghclient.Client {
+		return fake
+	}
+
+	resp, err := svc.issueService.BatchCloseDoneIssues(context.Background(), project.ID, user.ID, string(model.IssueSourceGitHub))
+	if err != nil {
+		t.Fatalf("batch close: %v", err)
+	}
+	if calls := fake.countFetchRepositoryCalls(); calls != 1 {
+		t.Fatalf("probe must run exactly once per batch, got %d", calls)
+	}
+	if calls := len(fake.recordedUpdateIssueCalls()); calls != n {
+		t.Fatalf("single-cause 410 must not trip dispatch, expected %d PATCH calls, got %d", n, calls)
+	}
+	if resp.Succeeded != 0 || resp.Failed != n {
+		t.Fatalf("unexpected result: %+v", resp)
+	}
+	for _, f := range resp.Failures {
+		if f.Error != batchCloseGitHubIssueNotFoundText {
+			t.Fatalf("unexpected single-cause 410 copy for %s: %q", f.Id, f.Error)
+		}
+	}
 }
 
 // INT-198：真单条 404（仓库可见且开启 Issue，Issue 已转移/删除）——保持
@@ -1286,7 +1327,7 @@ func TestBatchCloseRepoProbeOutcome(t *testing.T) {
 		fake := &fakeIssueGitHubClient{fetchRepositoryRepo: tc.repo, fetchRepositoryErr: tc.err, fetchRepositoryEmpty: tc.empty}
 		probe := &batchCloseRepoProbe{}
 		for i := 0; i < 2; i++ {
-			if got := probe.outcome(context.Background(), fake); got != tc.want {
+			if got := probe.outcome(context.Background(), fake, nil); got != tc.want {
 				t.Errorf("%s: outcome=%v, want %v", tc.name, got, tc.want)
 			}
 		}
@@ -1294,7 +1335,7 @@ func TestBatchCloseRepoProbeOutcome(t *testing.T) {
 			t.Errorf("%s: probe must run once per batch, got %d", tc.name, calls)
 		}
 	}
-	if got := (*batchCloseRepoProbe)(nil).outcome(context.Background(), &fakeIssueGitHubClient{}); got != repoProbeInconclusive {
+	if got := (*batchCloseRepoProbe)(nil).outcome(context.Background(), &fakeIssueGitHubClient{}, nil); got != repoProbeInconclusive {
 		t.Errorf("nil probe must be inconclusive, got %v", got)
 	}
 }
