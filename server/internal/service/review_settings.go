@@ -23,12 +23,30 @@ import (
 const (
 	reviewMaxCodeCombinations   = 5
 	reviewMaxVisualCombinations = 3
+
+	// reviewDefaultRoundCap 项目轮次上限的缺省值（INT-204）：设置无行、入参
+	// 省略或显式 0、同步/派发路径读取失败时都按它走——大 PR 逐轮全量重审的
+	// 成本主要由默认档兜住，不要求每个项目显式配置。
+	reviewDefaultRoundCap = 3
+	// reviewMaxRoundCap 轮次上限的合法上界：上限只是止血阈值，不是配额，
+	// 放得太宽就失去了「超过后只看阻断问题」的意图。
+	reviewMaxRoundCap = 20
 )
 
 // reviewComboError 组合结构/归属/绑定校验失败一律 40001（参数类错误，
 // 不是 41202 前置条件缺项——前置条件指部署与项目级资源是否就绪）。
 func reviewComboError(format string, args ...any) error {
 	return errs.New(errs.ErrInvalidParams.Code, fmt.Sprintf(format, args...))
+}
+
+// normalizeRoundCap 轮次上限归一（INT-204）：0/负值按缺省 3 处理。落库列
+// not null default 3，正常不会读到 0；这里兜底的是升级窗口内存量行的读值
+// 与直调构造的结构体，超上界交给保存时的校验、读取侧不擅自钳制。
+func normalizeRoundCap(n int) int {
+	if n <= 0 {
+		return reviewDefaultRoundCap
+	}
+	return n
 }
 
 // persistedCombination 落库的组合 JSON 元素：与 api.ReviewCombination 同形，
@@ -92,6 +110,7 @@ func (s *ReviewService) GetSettings(ctx context.Context, userID, projectID strin
 		TriggerSynchronize:    true,
 		TriggerReadyForReview: false,
 		TriggerReopened:       false,
+		RoundCap:              reviewDefaultRoundCap,
 		CodeCombinations:      codeCombos,
 		VisualCombinations:    visualCombos,
 		Prerequisites:         prereqs,
@@ -102,6 +121,7 @@ func (s *ReviewService) GetSettings(ctx context.Context, userID, projectID strin
 		out.TriggerSynchronize = row.TriggerSynchronize
 		out.TriggerReadyForReview = row.TriggerReadyForReview
 		out.TriggerReopened = row.TriggerReopened
+		out.RoundCap = normalizeRoundCap(row.RoundCap)
 	}
 	if takenBy != "" {
 		out.TakenBy = api.Ptr(takenBy)
@@ -121,6 +141,17 @@ func (s *ReviewService) UpdateSettings(ctx context.Context, userID, projectID st
 	}
 	if input == nil {
 		return nil, reviewComboError("请求体不能为空")
+	}
+
+	// 轮次上限（INT-204）：可选输入，省略或 0 按缺省 3 落库；越界返回与组合
+	// 校验同风格的 400。不挂在 enabled 分支里——关闭审查的项目也允许调整
+	// 该值，下次开启即生效。
+	roundCap := reviewDefaultRoundCap
+	if input.RoundCap != nil && *input.RoundCap != 0 {
+		if *input.RoundCap < 1 || *input.RoundCap > reviewMaxRoundCap {
+			return nil, reviewComboError("轮次上限需 1-%d", reviewMaxRoundCap)
+		}
+		roundCap = *input.RoundCap
 	}
 
 	codeCombos := input.CodeCombinations
@@ -218,6 +249,7 @@ func (s *ReviewService) UpdateSettings(ctx context.Context, userID, projectID st
 		TriggerSynchronize:     input.TriggerSynchronize,
 		TriggerReadyForReview:  input.TriggerReadyForReview,
 		TriggerReopened:        input.TriggerReopened,
+		RoundCap:               roundCap,
 		CodeCombinationsJSON:   codeJSON,
 		VisualCombinationsJSON: visualJSON,
 		UpdatedAt:              now,

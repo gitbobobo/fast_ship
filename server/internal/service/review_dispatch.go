@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"strconv"
 	"time"
 
@@ -144,7 +145,10 @@ func (s *ReviewService) launchRun(ctx context.Context, runID string, now time.Ti
 		fail("签发运行令牌失败")
 		return
 	}
-	prompt := renderReviewPrompt(&run, publicURL, token)
+	// 增量复核基线与轮次上限（INT-204）：都只在令牌签发之后、渲染提示词之前
+	// 现查一次，查询失败分别回退全量/默认 3，不让派发失败。
+	prompt := renderReviewPrompt(&run, publicURL, token,
+		s.prevReviewedHeadSHA(ctx, &run), s.reviewRoundCap(run.ProjectID))
 
 	// 模型选择：options 按 id 排序映射成 T3 [{id,value}]。
 	selection := &api.T3ModelSelection{InstanceId: run.InstanceID, Model: run.Model}
@@ -217,6 +221,43 @@ func projectIDForRun(db *gorm.DB, runID string) string {
 	var projectID string
 	_ = db.Model(&model.ReviewRun{}).Where("id = ?", runID).Select("project_id").Scan(&projectID).Error
 	return projectID
+}
+
+// prevReviewedHeadSHA 增量复核的上一轮受审 head（INT-204）：取上一轮
+// （round_number-1）同 (project, repo, pr, integration) 的首个代码运行，其
+// base 与本轮完全一致才可作增量基线——分支名大小写敏感（main/Main 是不同
+// 分支），必须精确比较；base 变了整体 diff 的对照面已换，增量口径不成立。
+// 返回空串 = 回退全量（首轮、无上一轮运行、base 变化）；查询失败只记 Warn
+// 回退全量，派发不该因一次读库失败而失败。
+func (s *ReviewService) prevReviewedHeadSHA(ctx context.Context, run *model.ReviewRun) string {
+	prevRuns, err := s.runsAtRound(ctx, run, run.RoundNumber-1, model.ReviewKindCode)
+	if err != nil {
+		s.logger.Warn("查询上一轮代码运行失败，回退全量审查",
+			zap.String("run", run.ID), zap.Error(err))
+		return ""
+	}
+	if len(prevRuns) == 0 || prevRuns[0].BaseRef != run.BaseRef {
+		return ""
+	}
+	return prevRuns[0].HeadSHA
+}
+
+// reviewRoundCap 项目轮次上限（INT-204）：无设置行或查询失败都按默认 3 兜底
+// 并记 Warn——超限口径只是减速阈值，读取失败不该阻断开轮；无行只会出现在
+// 排队窗口内项目被停用/删除的竞态里，同样值得留痕。
+func (s *ReviewService) reviewRoundCap(projectID string) int {
+	var row model.ProjectReviewSettings
+	if err := s.db.Select("round_cap").Where("project_id = ?", projectID).First(&row).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			s.logger.Warn("项目无审查设置行，轮次上限按默认值处理",
+				zap.String("project", projectID))
+		} else {
+			s.logger.Warn("读取项目轮次上限失败，按默认值处理",
+				zap.String("project", projectID), zap.Error(err))
+		}
+		return reviewDefaultRoundCap
+	}
+	return normalizeRoundCap(row.RoundCap)
 }
 
 // failRunDispatch 派发失败终态：failed + 消费令牌 + 置 PR sync_pending + 通知。

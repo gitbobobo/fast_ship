@@ -66,7 +66,7 @@ Issue 与 Release、无代码；代码在另一仓库）。`project.CodeRepo()` 
 
 | 表 | 关键列 | 说明 |
 | --- | --- | --- |
-| `project_review_settings` | PK `project_id`；`user_id`；`integration_id/repo_full_name`（审查对象快照，INT-167）；`enabled`；`trigger_opened/synchronize/ready_for_review/reopened`；`code_combinations_json`/`visual_combinations_json` | 项目级开关与组合。组合元素：`environment_id`、`instance_id`（harness/provider 实例）、`model`、`options`（canonical `[{id,value}]` 数组，思考强度等）、`t3_project_id`（保存时由 `project_t3_bindings` 快照，不信任客户端回传）。代码组合启用时 1–5 个必填；视觉组合 0–3 个，0 个即从不启动视觉审查。`integration_id` 是归一值（空绑定 = `github-default`），保存设置与改绑项目时同点写入。 |
+| `project_review_settings` | PK `project_id`；`user_id`；`integration_id/repo_full_name`（审查对象快照，INT-167）；`enabled`；`trigger_opened/synchronize/ready_for_review/reopened`；`round_cap`（轮次上限，INT-204，默认 3、取值 1–20）；`code_combinations_json`/`visual_combinations_json` | 项目级开关与组合。组合元素：`environment_id`、`instance_id`（harness/provider 实例）、`model`、`options`（canonical `[{id,value}]` 数组，思考强度等）、`t3_project_id`（保存时由 `project_t3_bindings` 快照，不信任客户端回传）。代码组合启用时 1–5 个必填；视觉组合 0–3 个，0 个即从不启动视觉审查。`integration_id` 是归一值（空绑定 = `github-default`），保存设置与改绑项目时同点写入。`round_cap` 是同一 PR 的轮次上限（INT-204）：`round_number` 超过它进入「超限」口径（见「增量复核与轮次上限」）；AutoMigrate 就地加列，存量行落列默认 3，缺省/0 读取时归一为 3。 |
 | `review_runs` | `kind(code\|visual)`、`repo_full_name/pr_number/head_sha/round_number/integration_id`、`installation_id`、`trigger_action`、`pr_title/pr_url/base_ref/head_ref`、组合列 `environment_id/t3_project_id/instance_id/model/model_options_json`、预分配 `thread_id/launch_command_id/initial_message_id`、`status(queued\|dispatched\|running\|completed\|failed\|timed_out\|cancelled)`、`dispatch_started_at/dispatched_at/started_at/finished_at/deadline_at`、`error_code/error_message`、`prep_retry_count`、`summary/result_json`、`review_id/posted_at`、`worktree_path/worktree_branch/worktree_state/worktree_reason/worktree_error`、`stop_attempted_at`、`archived_at` | 一次审查运行 = 一轮 × 一个组合。同一 (集成, repo, pr, head_sha) 的代码与视觉运行共享 `round_number`（视觉是同一轮内的第二段）。`integration_id` 是普通列不入键（INT-167）：按集成选 client、按集成隔离同名仓库的历史。`dispatched_at` 在启动 RPC 结果确认或 Agent 首次持令牌鉴权时写入，为空 = 线程是否建成未确认。`prep_retry_count` 是 T3 工作区准备失败后的自动重试次数（INT-147，须持久化：进程重启不能把已用掉的重试名额清零）。`worktree_branch` 是线程投影读到的本轮专属分支名（INT-170，「空才补」回写，与 `worktree_path` 同款——线程 404 后的两步回收靠行内快照；两列都是新增可空列，升级前已有的行是 NULL，「空才补」条件须兼容 `IS NULL`，否则旧库行静默写不进、快照丢失）。`worktree_state` 值域 `none/removed/failed/branch_pending`（INT-170：`branch_pending` = 工作树已删、本轮专属分支仍在，服务端无删分支 RPC，复查登记 ref 全集、分支消失才 `removed`）。`worktree_reason` 是回收问题分类码（INT-170：`archive_failed/thread_read/registry_error/registry_incomplete/remove_budget_pending/remove_unavailable/ownership_error/ownership_mismatch/worktree_remove/remove_uncertain/branch_pending/env_binding/branch_unknown`；`removed` 时清空；`ownership_error` = 归属核验所需的本地 DB 读连续失败，区别于 `registry_error` 的 T3 登记读失败；`remove_budget_pending` = 删除执行的行内预算耗尽待重试，`remove_unavailable` = 删除请求未送达远端待重试，两者与 `registry_incomplete` 的登记读取不完整分键），聚合通知按（环境, 仓库, 原因）分键查询受影响清单。`archived_at` 是终态后线程归档写回的时刻；归档有限重试超限后也写入（不再重试），失败原因见 `worktree_error` 与 `review_cleanup_failed` 聚合通知。 |
 | `review_run_tokens` | PK `run_id`；`token_hash`（UNIQUE）；`expires_at`；`consumed_at` | 每次运行一个 `fsr_` 令牌，只存完整令牌的 SHA-256。 |
 | `review_pull_requests` | PK `(project_id, repo_full_name, pr_number, integration_id)`；`user_id/installation_id`；`round_number/head_sha`；`pr_updated_at`（受理该 head 时实拉快照的时刻——只推 head 的 advancePRHeadTx 路径不写 seen，时序判定的账本兜底基准，随 head 推进）；`code_comment_id/visual_comment_id`；`code_status/visual_status`；`visual_screens_fingerprint`（`c:<urlFP>:<contentFP>` / `u:<urlFP>`，见「视觉审查衔接」）；`sync_pending/sync_epoch/sync_error` | 一个 PR 的审查总账：评论落点、最近一次推送的 commit status 结论、视觉截图指纹、事务外同步标记（置 pending 时 epoch+1，清标记按开始时 epoch 条件写）。主键含 `project_id` 与 `integration_id`：同仓库换项目接管或改绑集成后各一本账。 |
@@ -501,8 +501,10 @@ GitHub App 投递失败（公网隧道超时/502）不会自动重试，一次�
   损坏）同落 `failed`/`error_code=access_denied` +
   `review_dispatch_failed` 通知；只有瞬时错误才不落终态不签令牌、等
   认领超窗重试。
-- 提示词系统写死（`review_prompts.go` 常量）：代码审查要求自查证（git diff
-  + 读文件）、以找 bug 为主、P0/P1/P2/Note 分级、历史处置规则、判断
+- 提示词系统写死（`review_prompts.go` 常量，按模式拼装，见「增量复核与
+  轮次上限」）：代码审查要求自查证（git diff + 读文件）、以找 bug 为主、
+  P0/P1/P2/Note 分级（INT-204 改稿：以 PR 意图为准 + 最小改动纪律——
+  意图之外的新增代码/测试/守卫以 Note 标出）、历史处置规则、判断
   `ui_changed` 与 `ui_changed_since_last_visual`；视觉审查按层级/间距/排版/
   颜色/交互/文案/可访问性七维度、blocker/worth_fixing/minor 三级，先核对
   截图是否体现 PR 描述的改动，给出具体检查项（WCAG AA 对比度、点击区域、
@@ -534,6 +536,36 @@ GitHub App 投递失败（公网隧道超时/502）不会自动重试，一次�
   代码审查另约束产出形态：`summary` ≤2 句（结论 + 关键影响），finding
   按「问题 / 影响 / 建议」组织，`line` 无法定位到 HEAD 行时省略（顶层评论
   会注明未行内标注）。
+
+### 增量复核与轮次上限（INT-204）
+
+代码审查默认每轮全量重审整个 PR diff，小 PR 也会被逐轮重审；两个降本机
+制都在派发时（`launchRun`，令牌签发之后、渲染提示词之前）现查一次，查询
+失败回退默认值、不让派发失败：
+
+- **增量复核**：第 2 轮起，`prevReviewedHeadSHA` 取上一轮（
+  `round_number-1`）同 (project, repo, pr, integration) 的首个代码运行的
+  `head_sha` 作为「上一轮受审 head」；其 `base_ref` 与本轮精确一致（分支名
+  大小写敏感，不归一）才可作增量基线——base 变化、无上一轮运行、首轮都回
+  退全量。
+  增量模式的提示词差异：「怎么查」第一条 bullet 改为先
+  `git diff <prev>...<head>` 核对本轮改动（整体 diff 只作上下文）；新增
+  「## 本轮范围」节，声明本轮只审增量并复核历史 open 条目，**落在未改动
+  代码上的新问题只报 P0/P1**；「历史处置」节补一句 open 条目要逐条给
+  prior 处置（fixed/rejected/open）。分级节整体改为以 PR 意图为准（意图
+  取 PR 描述 body，无描述按标题），附最小改动纪律。
+- **轮次上限**：`reviewRoundCap` 读 `project_review_settings.round_cap`
+  （无行/失败/0 按默认 3 兜底）。`round_number > round_cap` 即「超限」：
+  提示词在分级节末尾追加「已过第 N 轮（轮次上限 N）：本轮只报告 P0/P1，
+  P2/Note 一律省略，不要提交」；同步侧（`doSyncPR` 再读一次设置行，失败
+  按 3 兜底）把上限传进评论与行内面——顶层评论一句话结论与计数只看 P0/P1
+  （无阻断时不带 P2 建议数），总览表下注明「已过第 N 轮，仅报告阻断问题。」，
+  分节不渲染 P2、Note 折叠整段不出现，P2/Note 计数列也填 –；行内 review
+  跳过 P2（Note 本来就跳过），`fetchInlineLines` 的 need 判定也只认 P0/P1
+  （只有 P2 时不再读 diff）。
+
+视觉审查不参与增量复核与轮次上限：截图集合与轮次无关，沿用机制（见
+「视觉审查衔接」）已避免重复消耗。
 
 ### 工作区准备失败重试（`review_prep_retry.go`）
 
@@ -702,8 +734,9 @@ rune 截断加 `...`，不劈断多字节字符）；状态未变不重复调用
 | --- | --- | --- |
 | `代码审查` | 任一组合未终态 | `pending`「审查中」 |
 | | 任一 `failed/timed_out/cancelled` | `error`「审查未完成：<组合> 失败」（取第一个失败组合） |
-| | 全部 completed 且有 P0/P1/P2 | `failure`「发现问题：P1 x 条，P2 x 条」（所有组合合计，只列非零级别，按 P0→P1→P2） |
-| | 全部 completed 且无 P0/P1/P2 | `success`「审查通过」 |
+| | 全部 completed 且 P0+P1 > 0 | `failure`「发现问题：P1 x 条，P2 x 条」（所有组合合计，只列非零级别，按 P0→P1→P2；**只数 findings，prior 一律不计入**——rejected/open 都是对上一轮的处置，不是本轮新问题） |
+| | 全部 completed 且只有 P2 | `success`「审查通过（P2 建议 N 条）」——P2 是修法局部的边界建议，不判红（INT-204：实测 75% 轮次最严重只是 P2，全量重审下判红会让 PR 永远挂红） |
+| | 全部 completed 且全净 | `success`「审查通过」 |
 | `视觉审查` | 代码审查未全部终态 | 不写（`visualWait`：结论还可能变，不提前落 status/评论/指纹） |
 | | 视觉运行启动 | `pending`「视觉审查中」 |
 | | 有 blocker / worth fixing，含 `prior` 里 `status=open` 且原级别为 blocker/worth_fixing 的遗留 | `failure`「发现 N 条问题」 |
@@ -721,14 +754,22 @@ rune 截断加 `...`，不劈断多字节字符）；状态未变不重复调用
 - 代码审查：标记 `<!-- fast-ship-code-review -->`（`FindPullRequestComment`
   找回 → `Update`/`Create`）。结构（`buildCodeComment`）：
   - 标题 `## 代码审查 · <短SHA> · 第 N 轮`，下一行一句话结论（通过 /
-    P0–P2 计数 / 审查进行中 / N 个组合未完成）。
+    P0–P2 计数 / 审查进行中 / N 个组合未完成）。无阻断但有 P2 →
+    「无阻断问题，另有 P2 建议 N 条。」（与 success 状态同口径，不写
+    「发现」制造红感）。**超限轮次**（INT-204，见「增量复核与轮次上限」）
+    结论与计数只看 P0/P1：无阻断 →「无阻断问题。」（不带 P2 建议数），
+    有阻断 → 只列 P0/P1，全净 →「全部组合通过，未发现阻断问题。」。
   - 总览表 `组合 | 状态 | P0 | P1 | P2 | Note`：组合列是 `模型 · 实例`，
-    计数只对 completed 且结论可解析的组合统计，其余填 `–`。
+    计数只对 completed 且结论可解析的组合统计，其余填 `–`；超限轮次
+    P2/Note 两列也填 `–`。表格下在超限轮次紧跟一行「已过第 N 轮，仅报告
+    阻断问题。」。
   - 按组合分节：`### 模型 · 实例` + 一行 `<sub>k=v · k=v</sub>`（选项去
     JSON 引号，只截断选项本身、不截模型/实例），summary 用引用块。
   - P0→P1→P2 每条：`**级别** [file:line](HEAD blob 行锚点)` 换行正文；
     无法行内标注（无行号，或行号不在本次 diff 右侧有效行）的条目在位置后
-    注明「未行内标注」。Note 全部折叠进 `<details>`。
+    注明「未行内标注」。Note 全部折叠进 `<details>`。**超限轮次 P2 发现
+    不渲染、Note 折叠整段不出现**（历史轮结论在超限同步事件里重渲染时也
+    一致），P0/P1 照常。
   - 视觉待办/截图遗留提示在表格之后，末尾固定复审说明（推送后自动复审）。
   - 行内标注判定与行内 review 共用一次 `GetPullRequestDiff` + 右侧有效行
     集合（`fetchInlineLines`），不再重复拉取。**diff 读取失败只推迟行内
@@ -745,7 +786,8 @@ rune 截断加 `...`，不劈断多字节字符）；状态未变不重复调用
     可能成功的确定性失败，只认结构化 code、不凭状态码判定（406 是通用的
     Unacceptable，误判会把暂时性失败降级成终态）。此时本轮按「无行内 review」
     降级收尾：顶层评论照常写并注明「本轮 GitHub 拒绝读取 PR diff（超出上限），
-    未发行内 review」，P0–P2 仍完整列在评论里（不静默丢）；有行号但本轮无法
+    未发行内 review」，P0–P2 仍完整列在评论里（不静默丢；超限轮次按超限
+    口径只列 P0/P1，见「增量复核与轮次上限」）；有行号但本轮无法
     核对 diff 的发现不加「未行内标注」注记（无行号的发现本来就加，与是否读
     diff 无关）；行内运行保持 `posted_at` 为空，账本清 `sync_pending`/
     `sync_error`（本轮终态、不入退避）。同一 (head, round) 的下一次同步事件
@@ -782,7 +824,8 @@ rune 截断加 `...`，不劈断多字节字符）；状态未变不重复调用
 每个 `completed` 且 `posted_at` 为空的代码运行：有 P0–P2 且行号落在 diff
 右侧有效行内时 `SubmitReview(event=COMMENT, body=summary, comments=[...])`
 （`side=RIGHT`）；行号不在 diff 范围内的条目并入顶层评论，没有有效行内
-条目不提交 review。**Note 不发行内评论。**提交后写 `review_id` 与
+条目不提交 review。**Note 不发行内评论。**超限轮次（INT-204）P2 与 Note
+一样跳过，行内只发 P0/P1。提交后写 `review_id` 与
 `posted_at`。
 
 ## 视觉审查衔接
@@ -1243,6 +1286,8 @@ SHA-256 前 16 位。
 组合本身在 service 边界校验（一律 40001）：`environment_id/instance_id/model`
 必填；代码 1–5 个、视觉 0–3 个；按 `environment_id+instance_id+model+
 options canonical JSON` 判重（同一搭配不同思考强度算不同组合）。
+`round_cap` 可选（INT-204）：省略或 0 按默认 3 落库，越界（<1 或 >20）
+同样 40001；不挂在 enabled 分支里，关闭审查的项目也允许调整。
 
 **环境能力**：组合里的环境必须是可写会话（具备 `orchestration:operate`）；
 只读会话在保存时直接 400，前置条件也会把它标成缺项——否则每次派发都只会落

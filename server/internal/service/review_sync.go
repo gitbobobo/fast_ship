@@ -585,7 +585,21 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 	// 只有行内 review 依赖 diff；暂时性错误交给 step 4 推迟行内阶段（本轮不
 	// 标记已发布，下一轮同步重试），diff 超限的确定性失败按「本轮无行内行」
 	// 降级收尾（见 step 4 的 inlineDeferred）。
-	inlineLines, inlineErr := s.fetchInlineLines(ctx, client, ledger, codeRuns)
+	// 项目轮次上限（INT-204）：评论与行内的超限口径按设置行的 round_cap 判。
+	// 读取失败按默认 3 兜底记 Warn——同步不该因一次设置读取失败而中断；无行
+	// （项目被删/停用竞态）同属兜底，后续的 guarded 写前复核会拦截失效目标。
+	roundCap := reviewDefaultRoundCap
+	var capRow model.ProjectReviewSettings
+	if err := s.db.Select("round_cap").
+		Where("project_id = ? AND enabled", ledger.ProjectID).First(&capRow).Error; err != nil {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			s.logger.Warn("读取项目轮次上限失败，按默认值处理",
+				zap.String("project", ledger.ProjectID), zap.Error(err))
+		}
+	} else {
+		roundCap = normalizeRoundCap(capRow.RoundCap)
+	}
+	inlineLines, inlineErr := s.fetchInlineLines(ctx, client, ledger, codeRuns, roundCap)
 	diffUnavailable := errors.Is(inlineErr, errReviewDiffTooLarge)
 	switch {
 	case diffUnavailable:
@@ -603,6 +617,7 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 		HeadSHA:         ledger.HeadSHA,
 		RoundNumber:     ledger.RoundNumber,
 		DiffUnavailable: diffUnavailable,
+		RoundCap:        roundCap,
 		links:           links,
 	}, codeRuns, inlineLines, visualPending, visualCarry)
 	// upsertPRComment 自己按正文去重：diff 读不到的重试里正文没变就不 PATCH，
@@ -631,7 +646,7 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 	// 都不进这里——降级时若进了本函数，空 inlineLines 不会提交任何 review，却会
 	// 把 posted_at 写上，下一次同步事件就不再补发，自愈通道随之关闭。
 	if inlineErr == nil {
-		if err := s.postInlineReviews(ctx, client, ledger, codeRuns, inlineLines, epoch, now); err != nil {
+		if err := s.postInlineReviews(ctx, client, ledger, codeRuns, inlineLines, epoch, now, roundCap); err != nil {
 			return err
 		}
 	}
@@ -810,6 +825,11 @@ func (s *ReviewService) upsertVisualComment(ctx context.Context, client forge.Re
 }
 
 // summarizeCodeRuns 代码审查汇总状态（status 描述 ≤140 字符由调用方截断）。
+// 状态只数 result.findings 里的 P0/P1/P2：prior 是对上一轮发现的处置（含
+// rejected/open），不是本轮新问题，一律不计入（INT-204，有单测钉死）。
+// 判红口径（INT-204）：只有 P0/P1 才 failure——P2 是修法局部的边界建议，
+// 全量重审下每轮都可能有，判红会让小 PR 永远挂红；只有 P2 时 success 且
+// 描述带条数，复核者仍能看到建议量。
 func summarizeCodeRuns(runs []model.ReviewRun) (state, description string) {
 	if len(runs) == 0 {
 		return "pending", "审查中"
@@ -841,8 +861,7 @@ func summarizeCodeRuns(runs []model.ReviewRun) (state, description string) {
 			}
 		}
 	}
-	total := counts["P0"] + counts["P1"] + counts["P2"]
-	if total > 0 {
+	if counts["P0"]+counts["P1"] > 0 {
 		var parts []string
 		for _, lvl := range []string{"P0", "P1", "P2"} {
 			if counts[lvl] > 0 {
@@ -850,6 +869,9 @@ func summarizeCodeRuns(runs []model.ReviewRun) (state, description string) {
 			}
 		}
 		return "failure", "发现问题：" + strings.Join(parts, "，")
+	}
+	if counts["P2"] > 0 {
+		return "success", fmt.Sprintf("审查通过（P2 建议 %d 条）", counts["P2"])
 	}
 	return "success", "审查通过"
 }
@@ -891,6 +913,11 @@ type reviewCommentMeta struct {
 	HeadSHA         string
 	RoundNumber     int
 	DiffUnavailable bool
+	// RoundCap 项目轮次上限（INT-204）：RoundNumber 超过它进入「超限」口径
+	// ——一句话结论与计数只看 P0/P1、表格下注明超限、分节不渲染 P2/Note、
+	// 行内跳过 P2。0 = 不限（仅测试手写 meta 出现；生产路径必须填设置值，
+	// 读取失败按默认 3 兜底）。
+	RoundCap int
 	// links 行锚链接的集成构造面（INT-166）：零值 = 内置 github-default 口径
 	// （forgeBase 对空串去尾后为空，仅测试手写 meta 时出现；生产路径一律经
 	// forgeLinksForProject 解析并自带兜底）。
@@ -968,7 +995,11 @@ func writeCodeFinding(b *strings.Builder, meta reviewCommentMeta, f api.ReviewCo
 // 按级别排序的发现、Note 折叠）+ 视觉待办/遗留提示 + 复审说明。
 // inlineLines 是 PR diff 右侧有效行（nil 表示本轮没读 diff）：有行号的
 // P0–P2 若不在其中，注明「未行内标注」提示作者该条只在评论里。
+// 超限轮次（meta.RoundCap > 0 且 RoundNumber 超过它，INT-204）：一句话结论
+// 与计数只看 P0/P1，分节不渲染 P2、Note 折叠整段不出现，表格下注明超限。
 func buildCodeComment(meta reviewCommentMeta, codeRuns []model.ReviewRun, inlineLines map[string]map[int]bool, visualPending, visualCarryFailure bool) string {
+	// 超限判定：roundCap<=0 = 不限（仅测试手写 meta），生产路径总填设置值。
+	overCap := meta.RoundCap > 0 && meta.RoundNumber > meta.RoundCap
 	// 状态与计数先算一次：一句话结论与总览表共用，避免两处各解析一遍 result_json。
 	type comboStat struct {
 		status string         // 总览表状态列文案
@@ -1014,13 +1045,40 @@ func buildCodeComment(meta reviewCommentMeta, codeRuns []model.ReviewRun, inline
 	fmt.Fprintf(&b, "## 代码审查 · %s · 第 %d 轮\n\n", reviewShortSHA(meta.HeadSHA), meta.RoundNumber)
 
 	// 一句话结论：优先级 在途 → 未完成 → 全净 → 按级别计数（只列非零级别）。
+	// 超限轮（INT-204）只看阻断问题：P0/P1>0 时计数也只列 P0/P1（P2 已被
+	// 口径省略）；无阻断但有 P2 时明说建议量；全净措辞从「P0–P2」换成「阻断
+	// 问题」，与超限口径一致。
+	blocking := totals["P0"] + totals["P1"]
 	switch {
 	case completed+unfinished < len(codeRuns):
 		fmt.Fprintf(&b, "审查进行中：%d/%d 个组合已完成。\n\n", completed, len(codeRuns))
 	case unfinished > 0:
 		fmt.Fprintf(&b, "%d 个组合未完成。\n\n", unfinished)
-	case totals["P0"]+totals["P1"]+totals["P2"] == 0:
-		b.WriteString("全部组合通过，未发现 P0–P2 问题。\n\n")
+	case blocking+totals["P2"] == 0:
+		cleanText := "全部组合通过，未发现 P0–P2 问题。"
+		if overCap {
+			cleanText = "全部组合通过，未发现阻断问题。"
+		}
+		b.WriteString(cleanText + "\n\n")
+	case blocking == 0:
+		// P2 不是阻断问题（INT-204）：状态已是 success，结论措辞与之一致，
+		// 不写「发现」制造红感。超限轮更严：P2/Note 一律省略，连建议数也不
+		// 出现在结论里（契约「超限后只报告 P0/P1」）。
+		if overCap {
+			b.WriteString("无阻断问题。\n\n")
+		} else {
+			fmt.Fprintf(&b, "无阻断问题，另有 P2 建议 %d 条。\n\n", totals["P2"])
+		}
+	case overCap:
+		// 超限轮有阻断问题时计数只列 P0/P1：P2/Note 已被口径省略，不该再
+		// 出现在结论里。
+		var parts []string
+		for _, lvl := range []string{"P0", "P1"} {
+			if totals[lvl] > 0 {
+				parts = append(parts, fmt.Sprintf("%s %d 条", lvl, totals[lvl]))
+			}
+		}
+		fmt.Fprintf(&b, "发现 %s。\n\n", strings.Join(parts, "、"))
 	default:
 		var parts []string
 		for _, lvl := range []string{"P0", "P1", "P2"} {
@@ -1032,18 +1090,29 @@ func buildCodeComment(meta reviewCommentMeta, codeRuns []model.ReviewRun, inline
 	}
 
 	// 总览表：每组合一行；计数列只对 completed 且可解析的组合统计。
+	// 超限轮（INT-204）P2/Note 计数列也省略（填 –）：口径是「只报告 P0/P1」，
+	// 计数可见而正文隐藏会自相矛盾；省略行为由表格下的注明行解释。
 	b.WriteString("| 组合 | 状态 | P0 | P1 | P2 | Note |\n| --- | --- | --- | --- | --- | --- |\n")
 	for i := range codeRuns {
 		// 未完成或不可解析的组合四个计数列各填一个 –。
 		cell := "– | – | – | –"
 		if c := stats[i].counts; c != nil {
-			cell = fmt.Sprintf("%d | %d | %d | %d", c["P0"], c["P1"], c["P2"], c["Note"])
+			if overCap {
+				cell = fmt.Sprintf("%d | %d | – | –", c["P0"], c["P1"])
+			} else {
+				cell = fmt.Sprintf("%d | %d | %d | %d", c["P0"], c["P1"], c["P2"], c["Note"])
+			}
 		}
 		// 组合名进表格：换行拆行、竖线拆列，都要处理。
 		fmt.Fprintf(&b, "| %s | %s | %s |\n",
 			markdownTableCell(runCombinationLabel(&codeRuns[i])), stats[i].status, cell)
 	}
 	b.WriteString("\n")
+	// 超限轮注明（INT-204）：表格下紧跟一行，说明本轮只列阻断问题——P2/Note
+	// 不在分节里出现是口径决定，不是结果丢失。
+	if overCap {
+		fmt.Fprintf(&b, "已过第 %d 轮，仅报告阻断问题。\n\n", meta.RoundCap)
+	}
 
 	if visualPending {
 		b.WriteString("视觉审查尚未结束，将复核截图。\n\n")
@@ -1086,7 +1155,14 @@ func buildCodeComment(meta reviewCommentMeta, codeRuns []model.ReviewRun, inline
 				var notes []api.ReviewCodeFinding
 				for _, f := range result.Findings {
 					if f.Level == api.Note {
-						notes = append(notes, f)
+						// 超限轮 Note 一律省略（提示词已要求不提交，这里是防御
+						// 历史轮结论在超限同步事件里重渲染）。
+						if !overCap {
+							notes = append(notes, f)
+						}
+						continue
+					}
+					if overCap && f.Level == api.P2 {
 						continue
 					}
 					writeCodeFinding(&b, meta, f, inlineLines)
@@ -1119,14 +1195,17 @@ func buildCodeComment(meta reviewCommentMeta, codeRuns []model.ReviewRun, inline
 // fetchInlineLines 读取 PR diff 并解析右侧有效行：顶层评论的「未行内标注」
 // 注记与行内 review 的行判定共用同一份结果，diff 只读一次。本轮没有已完成的
 // 带行号 P0–P2 发现时返回 nil、不读 diff——此时行内 review 也发不出任何
-// 意见，评论注记口径随之放宽（有行号的不加注，因为无从判断）。
+// 意见，评论注记口径随之放宽（有行号的不加注，因为无从判断）。超限轮次
+// （roundCap>0 且 ledger.RoundNumber 超过它，INT-204）只认 P0/P1：P2 行内
+// 已被口径跳过，不再为它读 diff。
 // 读 diff 失败时返回的 err 可能是 errReviewDiffTooLarge（GitHub 判定 diff
 // 超出上限的确定性失败，调用方据此降级收尾）；其余为可重试错误。
 // 扫描范围刻意不收窄到「尚未行内标注过」的发现（PostedAt == nil）：每次
 // resync 都要重算整份注记（已发过的行内 review 不会撤销，注记必须随之保持
 // 准确），轻微多一次 diff 读取可接受。
 func (s *ReviewService) fetchInlineLines(ctx context.Context, client forge.ReviewClient,
-	ledger *model.ReviewPullRequest, codeRuns []model.ReviewRun) (map[string]map[int]bool, error) {
+	ledger *model.ReviewPullRequest, codeRuns []model.ReviewRun, roundCap int) (map[string]map[int]bool, error) {
+	overCap := roundCap > 0 && ledger.RoundNumber > roundCap
 	need := false
 	for i := range codeRuns {
 		if codeRuns[i].Status != model.ReviewRunCompleted {
@@ -1137,9 +1216,15 @@ func (s *ReviewService) fetchInlineLines(ctx context.Context, client forge.Revie
 			continue
 		}
 		for _, f := range result.Findings {
-			if f.Line != nil && *f.Line > 0 && (f.Level == api.P0 || f.Level == api.P1 || f.Level == api.P2) {
-				need = true
-				break
+			if f.Line != nil && *f.Line > 0 {
+				switch f.Level {
+				case api.P0, api.P1:
+					need = true
+				case api.P2:
+					if !overCap {
+						need = true
+					}
+				}
 			}
 		}
 		if need {
@@ -1289,11 +1374,13 @@ func buildScreensUnavailableComment(meta reviewCommentMeta, priorRuns []model.Re
 // postInlineReviews 每个 completed 且 posted_at IS NULL 的代码运行：
 // P0–P2 且行号落在 diff 右侧有效行内 → SubmitReview；posted_at=now。
 // inlineLines 由调用方传入（fetchInlineLines 的结果），本函数不再自己读 diff
-// ——它与顶层评论的「未行内标注」注记同源，保证两处判定一致。diff 读不到时
-// 调用方根本不进本函数（推迟到下一轮）。
+// ——它与顶层评论的「未行内标注」注记同源，保证两处判定一致。roundCap 是
+// 项目轮次上限：超限轮（INT-204）行内只发 P0/P1，P2 与 Note 一样跳过。
 func (s *ReviewService) postInlineReviews(ctx context.Context, client forge.ReviewClient,
 	ledger *model.ReviewPullRequest, codeRuns []model.ReviewRun, inlineLines map[string]map[int]bool,
-	epoch int, now time.Time) error {
+	epoch int, now time.Time, roundCap int) error {
+	// 超限判定提前算一次：roundCap<=0 = 不限（仅测试直调出现）。
+	overCap := roundCap > 0 && ledger.RoundNumber > roundCap
 	var pending []model.ReviewRun
 	for _, r := range codeRuns {
 		if r.Status == model.ReviewRunCompleted && r.PostedAt == nil {
@@ -1346,6 +1433,9 @@ func (s *ReviewService) postInlineReviews(ctx context.Context, client forge.Revi
 		var comments []forge.ReviewInlineComment
 		for _, f := range result.Findings {
 			if f.Level == api.Note || f.Line == nil || *f.Line < 1 {
+				continue
+			}
+			if overCap && f.Level == api.P2 {
 				continue
 			}
 			if lines, ok := valid[f.File]; ok && lines[*f.Line] {

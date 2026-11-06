@@ -6055,6 +6055,8 @@ export interface components {
             trigger_synchronize: boolean;
             trigger_ready_for_review: boolean;
             trigger_reopened: boolean;
+            /** @description 轮次上限（默认 3，取值 1–20）：同一 PR 的审查轮次超过该值后，只报告 P0/P1 阻断问题，P2/Note 省略 */
+            round_cap: number;
             code_combinations: components["schemas"]["ReviewCombination"][];
             visual_combinations: components["schemas"]["ReviewCombination"][];
             prerequisites: components["schemas"]["ReviewPrerequisite"][];
@@ -6068,6 +6070,8 @@ export interface components {
             trigger_synchronize: boolean;
             trigger_ready_for_review: boolean;
             trigger_reopened: boolean;
+            /** @description 轮次上限，可选；省略或 0 按默认 3 处理，取值 1–20 */
+            round_cap?: number;
             code_combinations: components["schemas"]["ReviewCombination"][];
             visual_combinations: components["schemas"]["ReviewCombination"][];
         };
