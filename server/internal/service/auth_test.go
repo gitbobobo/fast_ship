@@ -218,6 +218,25 @@ func TestAuthServiceLogoutUnknownRefreshTokenIdempotent(t *testing.T) {
 	}
 }
 
+// INT-203 审查 R2：JWT 登出带未知 refresh token 时仍要拉黑 access token——
+// 先吊销后拉黑的顺序下，「无可吊销」不得短路黑名单写入，否则重试链路里
+// access token 永远拉不黑。
+func TestAuthServiceLogoutUnknownRefreshTokenStillBlacklistsJTI(t *testing.T) {
+	services := setupAuthTestServices(t)
+
+	if err := services.authService.Logout("jti-nofound-blacklist", time.Now().Add(time.Hour), "fsr_totally-unknown-token"); err != nil {
+		t.Fatalf("logout: %v", err)
+	}
+
+	blacklisted, err := services.jwtBlacklistRepo.Exists("jti-nofound-blacklist")
+	if err != nil {
+		t.Fatalf("check jwt blacklist: %v", err)
+	}
+	if !blacklisted {
+		t.Fatalf("expected access token jti to be blacklisted despite unknown refresh token")
+	}
+}
+
 func TestAuthServiceUpdatePasswordRevokesOldSessions(t *testing.T) {
 	services := setupAuthTestServices(t)
 	ctx := context.Background()

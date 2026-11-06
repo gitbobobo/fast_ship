@@ -216,28 +216,30 @@ func (s *AuthService) Login(ctx context.Context, req *LoginRequest) (*AuthRespon
 }
 
 func (s *AuthService) Logout(jti string, exp time.Time, refreshToken string) error {
-	// API Key 登出没有 jti（INT-203）：空 jti 不写黑名单，只吊销 refresh token。
-	if jti != "" {
-		if err := s.jwtBlacklistRepo.Add(jti, exp); err != nil {
-			return err
-		}
-	}
-
+	// 先吊销 refresh token 再拉黑 JWT（INT-203 审查 R2）：吊销失败时 JWT
+	// 尚未进黑名单，同一 JWT 重试登出仍能走到吊销逻辑；反过来先拉黑，
+	// 重试会被 40104 挡在认证层，refresh token 永远无法补吊销。
 	if refreshToken != "" {
 		raw := strings.TrimPrefix(refreshToken, "fsr_")
 		tokenHash := HashApiKey(raw)
 		rt, err := s.refreshTokenRepo.FindByHash(tokenHash)
 		if err != nil {
 			// 未知/过期/已吊销按幂等成功：FindByHash 已过滤有效 token，
-			// 「没有可吊销的东西」不构成错误。
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return nil
+			// 「没有可吊销的东西」不构成错误，但要继续拉黑 JWT（重试
+			// 链路里 access token 的拉黑不能被短路）。
+			if !errors.Is(err, gorm.ErrRecordNotFound) {
+				// 存储故障不得静默吞掉：返回 200 但 token 仍可用比报错
+				// 更糟（INT-203 审查 R1）；此时 JWT 未拉黑，重试可达。
+				return err
 			}
-			// 存储故障不得静默吞掉：返回 200 但 token 仍可用比报错更糟
-			// （INT-203 审查 R1）。
+		} else if err := s.refreshTokenRepo.Revoke(rt.ID); err != nil {
 			return err
 		}
-		if err := s.refreshTokenRepo.Revoke(rt.ID); err != nil {
+	}
+
+	// API Key 登出没有 jti（INT-203）：空 jti 不写黑名单。
+	if jti != "" {
+		if err := s.jwtBlacklistRepo.Add(jti, exp); err != nil {
 			return err
 		}
 	}
