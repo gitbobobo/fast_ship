@@ -227,8 +227,18 @@ func (s *AuthService) Logout(jti string, exp time.Time, refreshToken string) err
 		raw := strings.TrimPrefix(refreshToken, "fsr_")
 		tokenHash := HashApiKey(raw)
 		rt, err := s.refreshTokenRepo.FindByHash(tokenHash)
-		if err == nil {
-			_ = s.refreshTokenRepo.Revoke(rt.ID)
+		if err != nil {
+			// 未知/过期/已吊销按幂等成功：FindByHash 已过滤有效 token，
+			// 「没有可吊销的东西」不构成错误。
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil
+			}
+			// 存储故障不得静默吞掉：返回 200 但 token 仍可用比报错更糟
+			// （INT-203 审查 R1）。
+			return err
+		}
+		if err := s.refreshTokenRepo.Revoke(rt.ID); err != nil {
+			return err
 		}
 	}
 

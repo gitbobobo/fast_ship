@@ -195,6 +195,29 @@ func TestAuthServiceLogoutEmptyJtiSkipsBlacklist(t *testing.T) {
 	}
 }
 
+// INT-203：登出带未知/已吊销的 refresh token 必须幂等成功——FindByHash 过滤
+// 有效 token，查不到「没有可吊销的东西」不算错误。
+func TestAuthServiceLogoutUnknownRefreshTokenIdempotent(t *testing.T) {
+	services := setupAuthTestServices(t)
+
+	if err := services.authService.Logout("jti-idempotent", time.Now().Add(time.Hour), "fsr_totally-unknown-token"); err != nil {
+		t.Fatalf("logout with unknown refresh token: %v", err)
+	}
+
+	// 已吊销的 token 再登出：同样幂等成功。
+	user := createTestUser(t, services.db, "user-logout-twice")
+	refreshToken, created, err := services.authService.generateRefreshToken(user)
+	if err != nil || !created {
+		t.Fatalf("generate refresh token: %v", err)
+	}
+	if err := services.authService.Logout("jti-first", time.Now().Add(time.Hour), refreshToken); err != nil {
+		t.Fatalf("first logout: %v", err)
+	}
+	if err := services.authService.Logout("jti-second", time.Now().Add(time.Hour), refreshToken); err != nil {
+		t.Fatalf("second logout (already revoked): %v", err)
+	}
+}
+
 func TestAuthServiceUpdatePasswordRevokesOldSessions(t *testing.T) {
 	services := setupAuthTestServices(t)
 	ctx := context.Background()
