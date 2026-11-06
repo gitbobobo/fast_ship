@@ -46,6 +46,7 @@ const settings = {
   trigger_synchronize: true,
   trigger_ready_for_review: false,
   trigger_reopened: false,
+  round_cap: 3,
   code_combinations: [],
   visual_combinations: [],
   prerequisites: [],

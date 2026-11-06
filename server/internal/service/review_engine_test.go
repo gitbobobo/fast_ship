@@ -576,20 +576,20 @@ func TestReviewSummarizeAndComment(t *testing.T) {
 	fail := `{"findings":[{"level":"P0","file":"a.go","line":1,"body":"crash"},{"level":"Note","file":"b.go","body":"nit"}],"prior":[],"summary":"bad","ui_changed":false,"ui_changed_since_last_visual":false}`
 
 	// 在途 → pending。
-	if st, _ := summarizeCodeRuns([]model.ReviewRun{mkRun(model.ReviewRunRunning, "")}); st != "pending" {
+	if st, _ := summarizeCodeRuns([]model.ReviewRun{mkRun(model.ReviewRunRunning, "")}, false); st != "pending" {
 		t.Fatalf("running state = %q", st)
 	}
 	// 有失败运行 → error。
-	if st, _ := summarizeCodeRuns([]model.ReviewRun{mkRun(model.ReviewRunCompleted, pass), mkRun(model.ReviewRunFailed, "")}); st != "error" {
+	if st, _ := summarizeCodeRuns([]model.ReviewRun{mkRun(model.ReviewRunCompleted, pass), mkRun(model.ReviewRunFailed, "")}, false); st != "error" {
 		t.Fatalf("mixed state = %q", st)
 	}
 	// P0 → failure，描述计数。
-	st, desc := summarizeCodeRuns([]model.ReviewRun{mkRun(model.ReviewRunCompleted, fail)})
+	st, desc := summarizeCodeRuns([]model.ReviewRun{mkRun(model.ReviewRunCompleted, fail)}, false)
 	if st != "failure" || !strings.Contains(desc, "P0 1 条") {
 		t.Fatalf("failure state/desc = %q/%q", st, desc)
 	}
 	// 全净 → success。
-	if st, _ := summarizeCodeRuns([]model.ReviewRun{mkRun(model.ReviewRunCompleted, pass)}); st != "success" {
+	if st, _ := summarizeCodeRuns([]model.ReviewRun{mkRun(model.ReviewRunCompleted, pass)}, false); st != "success" {
 		t.Fatalf("clean state = %q", st)
 	}
 

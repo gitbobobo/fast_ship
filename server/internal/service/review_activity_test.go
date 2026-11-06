@@ -946,7 +946,35 @@ func TestListPullRequestActivity_ActiveWithCancelledStays(t *testing.T) {
 }
 
 // 同轮一条 completed 带发现、另一条 cancelled：进需要处理，不能丢弃。
+// 发现用 P1（INT-204 起 P2 不再是 needs_action 口径的发现）。
 func TestListPullRequestActivity_FindingsWithCancelledNeedsAction(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "u1")
+	project := createTestProject(t, svc.db, user.ID)
+	repo := "octo/repo"
+	createActivitySettings(t, svc.db, user.ID, project.ID, repo, 2, 0, true)
+	result := `{"summary":"s","findings":[{"level":"P1","file":"a.go","body":"x"}],"prior":[],"ui_changed":false,"ui_changed_since_last_visual":false}`
+	createTestReviewPR(t, svc.db, user.ID, project.ID, repo, 1, 1, func(p *model.ReviewPullRequest) {
+		p.VisualStatus = ""
+	})
+	createActivityRun(t, svc.db, user.ID, project.ID, repo, 1, func(r *model.ReviewRun) {
+		r.ResultJSON = result
+	})
+	createActivityRun(t, svc.db, user.ID, project.ID, repo, 1, func(r *model.ReviewRun) {
+		r.Status = model.ReviewRunCancelled
+		r.ErrorCode = "superseded"
+	})
+
+	rs, _ := readyReviewService(t, svc)
+	page := listActivity(t, rs, user.ID, "", 0, 0)
+	if page.Counts.NeedsAction != 1 || page.Items[0].Findings.P1 != 1 {
+		t.Fatalf("应进需要处理: %+v %+v", page.Counts, page.Items[0].Findings)
+	}
+}
+
+// INT-204 口径：只有 P2 的轮次（含 cancelled 组合）不再是「需要处理」——
+// 与 commit status 绿灯一致，条目整体不进首页（夹 cancelled 的净轮不返回）。
+func TestListPullRequestActivity_P2OnlyNotNeedsAction(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "u1")
 	project := createTestProject(t, svc.db, user.ID)
@@ -966,8 +994,8 @@ func TestListPullRequestActivity_FindingsWithCancelledNeedsAction(t *testing.T) 
 
 	rs, _ := readyReviewService(t, svc)
 	page := listActivity(t, rs, user.ID, "", 0, 0)
-	if page.Counts.NeedsAction != 1 || page.Items[0].Findings.P2 != 1 {
-		t.Fatalf("应进需要处理: %+v %+v", page.Counts, page.Items[0].Findings)
+	if page.Counts.NeedsAction != 0 {
+		t.Fatalf("P2-only 不应进需要处理: %+v", page.Counts)
 	}
 }
 

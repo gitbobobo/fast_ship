@@ -7689,6 +7689,7 @@ PR 审查（INT-135，仅 JWT）：项目级审查设置、审查总览与审查
 | `trigger_synchronize` | boolean | 是 |  |
 | `trigger_ready_for_review` | boolean | 是 |  |
 | `trigger_reopened` | boolean | 是 |  |
+| `round_cap` | integer | 是 | 轮次上限（默认 3，取值 1–20）：按受审 head 数计（同 head 的重跑不计），超过后只报告 P0/P1 阻断问题，P2/Note 省略 |
 | `code_combinations` | object[]（≤5 项） | 是 |  |
 | `code_combinations[].environment_id` | string | 是 |  |
 | `code_combinations[].instance_id` | string | 是 | T3 provider 实例 id（harness 维度） |
@@ -7752,6 +7753,7 @@ PR 审查（INT-135，仅 JWT）：项目级审查设置、审查总览与审查
 | `trigger_synchronize` | boolean | 是 |  |
 | `trigger_ready_for_review` | boolean | 是 |  |
 | `trigger_reopened` | boolean | 是 |  |
+| `round_cap` | integer | 否 | 轮次上限，可选；省略或 0 按默认 3 处理，取值 1–20。按受审 head 数计（同 head 的重跑不计） |
 | `code_combinations` | object[]（≤5 项） | 是 |  |
 | `code_combinations[].environment_id` | string | 是 |  |
 | `code_combinations[].instance_id` | string | 是 | T3 provider 实例 id（harness 维度） |
@@ -7786,6 +7788,7 @@ PR 审查（INT-135，仅 JWT）：项目级审查设置、审查总览与审查
 | `trigger_synchronize` | boolean | 是 |  |
 | `trigger_ready_for_review` | boolean | 是 |  |
 | `trigger_reopened` | boolean | 是 |  |
+| `round_cap` | integer | 是 | 轮次上限（默认 3，取值 1–20）：按受审 head 数计（同 head 的重跑不计），超过后只报告 P0/P1 阻断问题，P2/Note 省略 |
 | `code_combinations` | object[]（≤5 项） | 是 |  |
 | `code_combinations[].environment_id` | string | 是 |  |
 | `code_combinations[].instance_id` | string | 是 | T3 provider 实例 id（harness 维度） |

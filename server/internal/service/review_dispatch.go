@@ -7,7 +7,9 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/api"
@@ -144,7 +146,13 @@ func (s *ReviewService) launchRun(ctx context.Context, runID string, now time.Ti
 		fail("签发运行令牌失败")
 		return
 	}
-	prompt := renderReviewPrompt(&run, publicURL, token)
+	// 增量复核基线与轮次上限（INT-204）：都只在令牌签发之后、渲染提示词之前
+	// 现查一次，查询失败分别回退全量/默认 3，不让派发失败。上限按受审 head
+	// 数计（reviewedHeadCount），同 head 重跑不消耗额度。
+	prompt := renderReviewPrompt(&run, publicURL, token,
+		s.prevReviewedHeadSHA(ctx, &run),
+		s.reviewedHeadCount(run.ProjectID, run.RepoFullName, run.PRNumber, run.IntegrationID, run.RoundNumber),
+		s.reviewRoundCap(run.ProjectID))
 
 	// 模型选择：options 按 id 排序映射成 T3 [{id,value}]。
 	selection := &api.T3ModelSelection{InstanceId: run.InstanceID, Model: run.Model}
@@ -217,6 +225,103 @@ func projectIDForRun(db *gorm.DB, runID string) string {
 	var projectID string
 	_ = db.Model(&model.ReviewRun{}).Where("id = ?", runID).Select("project_id").Scan(&projectID).Error
 	return projectID
+}
+
+// prevReviewedHeadSHA 增量复核的上一轮受审 head（INT-204）：取上一轮
+// （round_number-1）同 (project, repo, pr, integration) 的代码运行作基线，
+// 四个条件全部满足才可增量：①上一轮所有代码组合都 completed——快推时上一
+// 轮会被 supersede 置 cancelled（或 failed/timed_out），未完成的组合对
+// 历史代码的覆盖从未发生，只能靠全量兜住（审查 R2：多组合的 any 语义会
+// 漏覆盖）；②本轮组合在上一轮有同组合的 completed 运行——项目中途新增/
+// 更换组合时，新组合对 base...prev 的覆盖从未发生，没有同组合历史结论就
+// 回退全量（审查 R3，身份按环境+harness+模型+规范化 options 全比）；
+// ③上一轮 head 与本轮不同（manual/comment 同 head 重跑恒开新轮，
+// diff X...X 为空，重审必须是全量）；④base_ref 精确一致（分支名大小写敏
+// 感；base 变了整体 diff 的对照面已换，增量口径不成立）。返回空串 = 回退
+// 全量；查询失败只记 Warn 回退全量，派发不该因一次读库失败而失败。
+func (s *ReviewService) prevReviewedHeadSHA(ctx context.Context, run *model.ReviewRun) string {
+	prevRuns, err := s.runsAtRound(ctx, run, run.RoundNumber-1, model.ReviewKindCode)
+	if err != nil {
+		s.logger.Warn("查询上一轮代码运行失败，回退全量审查",
+			zap.String("run", run.ID), zap.Error(err))
+		return ""
+	}
+	if len(prevRuns) == 0 || prevRuns[0].BaseRef != run.BaseRef {
+		return ""
+	}
+	// 上一轮必须每个代码组合都 completed（审查 R2）：any 语义下多组合项目
+	// 里部分组合 failed/timed_out/cancelled 时，这些组合对 prev 之前代码的
+	// 覆盖从未发生，增量口径又会把未改动代码上的新问题压到 P0/P1——历史
+	// 侧的 P2/Note 就永久丢了；有缺口就回退全量。
+	for i := range prevRuns {
+		if prevRuns[i].Status != model.ReviewRunCompleted {
+			return ""
+		}
+	}
+	// 本轮组合必须在上一轮有自己的 completed 覆盖（审查 R3）：项目中途新增
+	// 或更换组合时，新组合在上一轮根本没有运行，增量口径会让它漏审
+	// base...prev 的 P2/Note——没有同组合的历史结论就回退全量。组合身份按
+	// 环境+harness+模型+规范化的 options 全比（与组合唯一索引同口径），
+	// 任何一项不同都视为新组合。
+	covered := false
+	for i := range prevRuns {
+		p := &prevRuns[i]
+		if p.EnvironmentID == run.EnvironmentID && p.InstanceID == run.InstanceID &&
+			p.Model == run.Model && p.ModelOptionsJSON == run.ModelOptionsJSON {
+			covered = true
+			break
+		}
+	}
+	if !covered {
+		return ""
+	}
+	if strings.EqualFold(prevRuns[0].HeadSHA, run.HeadSHA) {
+		return ""
+	}
+	return prevRuns[0].HeadSHA
+}
+
+// reviewRoundCap 项目轮次上限（INT-204）：无设置行或查询失败都按默认 3 兜底
+// 并记 Warn——超限口径只是减速阈值，读取失败不该阻断开轮；无行只会出现在
+// 排队窗口内项目被停用/删除的竞态里，同样值得留痕。
+func (s *ReviewService) reviewRoundCap(projectID string) int {
+	var row model.ProjectReviewSettings
+	if err := s.db.Select("round_cap").Where("project_id = ?", projectID).First(&row).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			s.logger.Warn("项目无审查设置行，轮次上限按默认值处理",
+				zap.String("project", projectID))
+		} else {
+			s.logger.Warn("读取项目轮次上限失败，按默认值处理",
+				zap.String("project", projectID), zap.Error(err))
+		}
+		return reviewDefaultRoundCap
+	}
+	return normalizeRoundCap(row.RoundCap)
+}
+
+// reviewedHeadCount 本 PR 截至某轮（含）受审的 head 数（INT-204）：manual/
+// comment 同 head 重跑恒开新轮但不引入新审查对象，不消耗轮次上限额度，所以
+// 上限按 distinct head_sha 计而非轮次号。历史轮（round_number < upTo）只
+// 计真正派发过的 head（dispatched_at 非空）——排队后从未派发就被 supersede
+// 的 head 没消耗过任何审查，连快推 3–4 次也不会把第一次真正复审提前推进
+// 超限口径（审查 R2）；当前轮（round_number = upTo）按运行行存在即计，不
+// 看 dispatched_at——首个组合渲染提示词时本轮还没派发，不这样算的话同轮
+// 各组合与同步侧会拿到不同的受审 head 数，同一个 head 有一半组合全量、一
+// 半超限（审查 R3）。查询失败按 0 兜底（fail-open，审查 R5）：上限口径会隐去 P2/Note，一次瞬
+// 时 DB 抖动就让未超限的 PR 静默变严是错误方向——宁可多审一轮；只记
+// Warn，不让派发/同步失败。
+func (s *ReviewService) reviewedHeadCount(projectID, repoFullName string, prNumber int, integrationID string, upToRound int) int {
+	var n int64
+	if err := s.db.Model(&model.ReviewRun{}).
+		Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ? AND kind = ? AND round_number <= ? AND (round_number = ? OR dispatched_at IS NOT NULL)",
+			projectID, repoFullName, prNumber, integrationID, model.ReviewKindCode, upToRound, upToRound).
+		Distinct("head_sha").Count(&n).Error; err != nil {
+		s.logger.Warn("统计受审 head 数失败，本轮按不超限处理",
+			zap.String("project", projectID), zap.String("repo", repoFullName),
+			zap.Int("pr", prNumber), zap.Error(err))
+		return 0
+	}
+	return int(n)
 }
 
 // failRunDispatch 派发失败终态：failed + 消费令牌 + 置 PR sync_pending + 通知。

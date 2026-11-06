@@ -4,6 +4,7 @@ import { Plus } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
@@ -29,6 +30,8 @@ import { uuid } from "@/lib/uuid";
 
 const CODE_MAX = 5;
 const VISUAL_MAX = 3;
+/** 轮次上限的合法上界（INT-204），与服务端 review_settings 校验一致。 */
+const ROUND_CAP_MAX = 20;
 
 export default function ReviewProjectPage() {
   const { projectId = "" } = useParams();
@@ -123,6 +126,8 @@ interface ReviewFormState {
   trigger_synchronize: boolean;
   trigger_ready_for_review: boolean;
   trigger_reopened: boolean;
+  /** 轮次上限（INT-204）：超过后只报告 P0/P1，P2/Note 省略。 */
+  round_cap: number;
   code: CombinationFormItem[];
   visual: CombinationFormItem[];
 }
@@ -138,6 +143,8 @@ function settingsToForm(settings: ReviewSettings): ReviewFormState {
     trigger_synchronize: settings.trigger_synchronize,
     trigger_ready_for_review: settings.trigger_ready_for_review,
     trigger_reopened: settings.trigger_reopened,
+    // 旧响应缺 round_cap 时按服务端缺省 3 兜底。
+    round_cap: settings.round_cap || 3,
     code: (settings.code_combinations ?? []).map(toFormItem),
     visual: (settings.visual_combinations ?? []).map(toFormItem),
   };
@@ -257,6 +264,13 @@ function ReviewSettingsForm({
     if (form.enabled && form.code.length > CODE_MAX) {
       return `代码审查组合最多 ${CODE_MAX} 个`;
     }
+    if (
+      !Number.isInteger(form.round_cap) ||
+      form.round_cap < 1 ||
+      form.round_cap > ROUND_CAP_MAX
+    ) {
+      return `轮次上限需为 1–${ROUND_CAP_MAX} 的整数`;
+    }
     return null;
   };
 
@@ -273,6 +287,7 @@ function ReviewSettingsForm({
       trigger_synchronize: form.trigger_synchronize,
       trigger_ready_for_review: form.trigger_ready_for_review,
       trigger_reopened: form.trigger_reopened,
+      round_cap: form.round_cap,
       code_combinations: form.code.map((item) =>
         toCombinationInput(item.value),
       ),
@@ -430,6 +445,38 @@ function ReviewSettingsForm({
         </div>
         <p className="text-xs text-muted-foreground">
           草稿与 fork 仓库的 PR 不审查；推送后有 60 秒防抖。
+        </p>
+      </section>
+
+      {/* 轮次上限（INT-204）：超过后审查只报告阻断问题，控制小 PR 的轮数。 */}
+      <section className="space-y-2">
+        <div className="flex items-center gap-2">
+          <Label
+            htmlFor="round-cap"
+            className="font-normal text-sm text-foreground"
+          >
+            轮次上限
+          </Label>
+          {/* 共享 Input：焦点环/暗色背景/禁用态与全应用一致；默认描边加深
+              一档（border-input 与白卡几乎同色，视觉审查 R4 worth_fixing），
+              宽度固定不跟随 w-full。 */}
+          <Input
+            id="round-cap"
+            type="number"
+            min={1}
+            max={ROUND_CAP_MAX}
+            step={1}
+            value={Number.isNaN(form.round_cap) ? "" : form.round_cap}
+            disabled={readOnly || submitting}
+            onChange={(e) => set("round_cap", e.target.valueAsNumber)}
+            aria-label="轮次上限"
+            className="w-20 border-muted-foreground/50 tabular-nums"
+          />
+        </div>
+        <p className="text-xs text-muted-foreground">
+          按 PR 计受审 head 数（同 head 重跑不计）；超过后代码审查只报告
+          P0/P1 阻断问题（P2/Note 省略），视觉审查不受影响。默认 3，
+          范围 1–20。
         </p>
       </section>
 

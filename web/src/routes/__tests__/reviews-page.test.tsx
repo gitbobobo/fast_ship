@@ -156,6 +156,7 @@ function baseSettings(overrides: Partial<ReviewSettings> = {}): ReviewSettings {
     trigger_synchronize: true,
     trigger_ready_for_review: false,
     trigger_reopened: false,
+    round_cap: 3,
     code_combinations: [
       {
         environment_id: "env-1",
@@ -944,6 +945,7 @@ describe("ReviewProjectPage 设置", () => {
       trigger_synchronize: true,
       trigger_ready_for_review: false,
       trigger_reopened: false,
+      round_cap: 3,
     });
     expect(input.code_combinations).toEqual([
       {
@@ -958,6 +960,41 @@ describe("ReviewProjectPage 设置", () => {
     await waitFor(() =>
       expect(toast.success).toHaveBeenCalledWith("审查设置已保存"),
     );
+  });
+
+  it("轮次上限可编辑且提交带上新值", async () => {
+    const user = userEvent.setup();
+    mockSettings(baseSettings({ round_cap: 3 }));
+
+    renderDetail();
+
+    const input = screen.getByLabelText("轮次上限");
+    await user.clear(input);
+    await user.type(input, "5");
+    await user.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => expect(updateSettings).toHaveBeenCalledTimes(1));
+    expect(updateSettings.mock.calls[0][0].round_cap).toBe(5);
+    await waitFor(() =>
+      expect(toast.success).toHaveBeenCalledWith("审查设置已保存"),
+    );
+  });
+
+  it("轮次上限越界：保存时提示且不调用 updateSettings", async () => {
+    const user = userEvent.setup();
+    mockSettings(baseSettings());
+
+    renderDetail();
+
+    const input = screen.getByLabelText("轮次上限");
+    await user.clear(input);
+    await user.type(input, "25");
+    await user.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() =>
+      expect(toast.error).toHaveBeenCalledWith("轮次上限需为 1–20 的整数"),
+    );
+    expect(updateSettings).not.toHaveBeenCalled();
   });
 
   it("不再有「审查记录」tab", () => {

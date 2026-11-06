@@ -100,6 +100,12 @@ type ProjectReviewSettings struct {
 	CodeCombinationsJSON   string `gorm:"column:code_combinations_json;type:text" json:"code_combinations_json"`
 	VisualCombinationsJSON string `gorm:"column:visual_combinations_json;type:text" json:"visual_combinations_json"`
 
+	// RoundCap 轮次上限（INT-204）：同一 PR 的轮次 RoundNumber 超过该值后进入
+	// 「超限」口径——审查提示词只要求报告 P0/P1，顶层评论不渲染 P2/Note、行内
+	// review 跳过 P2。取值 1–20（校验在 review_settings.go，缺省/0 按 3 归一）。
+	// AutoMigrate 就地加列，存量行落列默认 3，无需独立迁移。
+	RoundCap int `gorm:"column:round_cap;not null;default:3" json:"round_cap"`
+
 	CreatedAt time.Time `gorm:"not null" json:"created_at"`
 	UpdatedAt time.Time `gorm:"not null" json:"updated_at"`
 
