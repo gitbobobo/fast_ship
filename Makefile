@@ -4,7 +4,7 @@
 	help \
 	dev dev-server dev-web \
 	build build-server build-web \
-	test test-server test-web test-release \
+	test test-server test-server-race test-web test-release \
 	lint lint-server lint-web \
 	tidy tidy-server \
 	api-types api-docs \
@@ -22,6 +22,7 @@ help:
 	@printf "  make test         Run server and web tests\n"
 	@printf "  make test-server  Run Go tests\n"
 	@printf "  make test-web     Run web tests\n"
+	@printf "  make test-server-race  Run Go tests with the race detector (opt-in)\n"
 	@printf "  make test-release Run isolated release script checks\n"
 	@printf "  make lint         Run server and web lint checks\n"
 	@printf "  make lint-server  Check Go formatting and run go vet\n"
@@ -53,6 +54,13 @@ test: test-server test-web
 
 test-server:
 	@cd server && go test ./...
+
+# 竞态检测为可选目标，不进 test/test-server 必需门禁：internal/service 在
+# -race 下单包即越过默认 10m 超时（INT-205 的测试基建债，句柄与 goroutine
+# 累积），全量实测约 10.5min 且高负载会偶发超时。修完 INT-205 后再评估
+# 是否纳入必需检查（INT-197）。
+test-server-race:
+	@cd server && go test -race -timeout 20m ./...
 
 test-web:
 	@pnpm --dir web test
