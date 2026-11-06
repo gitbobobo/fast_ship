@@ -26,6 +26,7 @@ func forgeSourceTestDB(t *testing.T) (*gorm.DB, *config.Config) {
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
+	cleanupTestDB(t, db)
 	cfg := &config.Config{Encryption: config.EncryptionConfig{Key: "12345678901234567890123456789012"}}
 	return db, cfg
 }

@@ -19,6 +19,7 @@ func setupDeploymentSettingsTest(t *testing.T, cfgPublicURL string) (*Deployment
 	if err != nil {
 		t.Fatalf("open test db: %v", err)
 	}
+	cleanupTestDB(t, db)
 	if err := db.AutoMigrate(&model.DeploymentSettings{}); err != nil {
 		t.Fatalf("migrate test db: %v", err)
 	}

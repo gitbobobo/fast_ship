@@ -130,6 +130,25 @@ func (rt *botRuntimeState) release(botID string) (requeue bool, wake *botWake) {
 	return requeue, wake
 }
 
+// spawnBg 在停止前启动受跟踪的后台 goroutine：停止后不再新增，Stop 的
+// Wait 就不会与 WaitGroup 的 Add 并发（复用禁忌）。返回是否真的启动：
+// 已占用资源（如执行槽）的调用方在 false 时必须释放，保持「占槽即有人在
+// 跑」的不变量。计数由 goroutine 自己的 defer Done 释放。
+func (s *BotService) spawnBg(fn func()) bool {
+	s.bgMu.Lock()
+	if s.stopped {
+		s.bgMu.Unlock()
+		return false
+	}
+	s.bgWg.Add(1)
+	s.bgMu.Unlock()
+	go func() {
+		defer s.bgWg.Done()
+		fn()
+	}()
+	return true
+}
+
 // ---------- 唤醒与启动 ----------
 
 // Start 启动主线调度与后台 worker（在启动恢复之后调用）。
@@ -147,15 +166,37 @@ func (s *BotService) Start() {
 	// 丢失已登记的取消句柄）。
 	s.ensureWorkers()
 	s.ensureMaintWorker()
-	go s.scanLoop()
-	go s.nightlyLoop()
-	go s.scheduleLoop()
-	go s.budgetEvalLoop()
-	go s.usageRollupLoop()
+	s.spawnBg(s.scanLoop)
+	s.spawnBg(s.nightlyLoop)
+	s.spawnBg(s.scheduleLoop)
+	s.spawnBg(s.budgetEvalLoop)
+	s.spawnBg(s.usageRollupLoop)
 	// 按天花费汇总（INT-164）：周期 loop 管昨天及以前的补齐；启动立即异步
 	// 跑一遍同一扫描，首次上线的全量回填就是「全部日期未覆盖」的同路径。
-	go s.scanUsageRollupOnce()
+	s.spawnBg(s.scanUsageRollupOnce)
 	s.scanNightlyOnce()
+}
+
+// Stop 停止全部后台 goroutine：5 条周期 loop、worker 池、维护 worker、
+// 一次性扫描与在跑的执行槽（INT-205）。先取消服务级 runCtx——所有派生的
+// 执行 context（含已入槽但尚未注册 cancel 的）立刻失效，取消与注册之间
+// 没有竞态窗口；再关 stopCh 让周期循环退出；bgWg.Wait 等全部收尾。幂等：
+// 并发的后续 Stop 也等同一轮收尾完成才返回。终态：Stop 后的实例不再唤醒
+// 或入队；剩余少量 Background 短预算同步探测（窗口/线程详情）最多让 Wait
+// 多等一个预算周期。
+func (s *BotService) Stop() {
+	s.bgMu.Lock()
+	if s.stopped {
+		s.bgMu.Unlock()
+		<-s.stopDone
+		return
+	}
+	s.stopped = true
+	s.bgMu.Unlock()
+	s.runCancel()
+	close(s.stopCh)
+	s.bgWg.Wait()
+	close(s.stopDone)
 }
 
 // wakeRuntime 唤醒某机器人的主线：有 goroutine 在跑就标记 requeue（安全点
@@ -165,7 +206,10 @@ func (s *BotService) wakeRuntime(botID string, wake botWake) {
 		s.rt.markRequeue(botID, &wake)
 		return
 	}
-	go s.runBotSlot(botID)
+	if !s.spawnBg(func() { s.runBotSlot(botID) }) {
+		// 停止后不再启动执行槽：把槽还回去，别让占槽悬挂。
+		s.rt.release(botID)
+	}
 }
 
 // finishRunAfterPanic 把 panic 槽位上仍在 running 的落库 run 置 failed
@@ -211,7 +255,9 @@ func (s *BotService) runBotSlot(botID string) {
 	}()
 	wake := s.rt.takePending(botID, botWake{Trigger: model.BotTriggerUserMessage})
 	for {
-		ctx, cancel := context.WithCancel(context.Background())
+		// 派生自服务级 runCtx：Stop 取消父 context 时，这里还没来得及注册
+		// 进槽位表的新 context 也一并失效，不会有逃过取消的执行（INT-205）。
+		ctx, cancel := context.WithCancel(s.runCtx)
 		s.rt.setCancel(botID, cancel)
 		// cancel 挂在 runBot 的 panic 展开上：主线 panic 也不能泄漏 context。
 		func() {
@@ -221,6 +267,13 @@ func (s *BotService) runBotSlot(botID string) {
 		requeue, pending := s.rt.release(botID)
 		if !requeue {
 			return
+		}
+		// 停止后不再重入：重入会用全新 context 绕过取消，Stop 的等待会被
+		// 重入循环拖着不放（INT-205）。
+		select {
+		case <-s.stopCh:
+			return
+		default:
 		}
 		if pending != nil {
 			wake = *pending
@@ -239,8 +292,13 @@ func (s *BotService) runBotSlot(botID string) {
 func (s *BotService) scanLoop() {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
-	for range ticker.C {
-		s.scanOnce()
+	for {
+		select {
+		case <-s.stopCh:
+			return
+		case <-ticker.C:
+			s.scanOnce()
+		}
 	}
 }
 
