@@ -171,7 +171,7 @@ func TestBodyTooLargeDetection(t *testing.T) {
 
 // 目录清单超读入上限（>8MiB）按 ErrTreeTruncated 不可判定处理——不完整
 // 证据不能当缺席证明，也不能让归属校验每次 50200 卡到 deadline。
-func TestPathExistsAtRefOversizedTree(t *testing.T) {
+func TestTreeEntriesAtRefOversizedTree(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(make([]byte, bodyReadMaxBytes+1))
@@ -179,7 +179,7 @@ func TestPathExistsAtRefOversizedTree(t *testing.T) {
 	defer ts.Close()
 
 	c := NewClient(&fakeAuth{token: "t"}, ts.URL)
-	_, err := c.PathExistsAtRef(context.Background(), 1, "octocat/hw", "bigdir/f.go", "sha-x")
+	_, err := c.TreeEntriesAtRef(context.Background(), 1, "octocat/hw", "bigdir", "sha-x")
 	if !errors.Is(err, ErrTreeTruncated) {
 		t.Fatalf("oversized tree = %v, want ErrTreeTruncated", err)
 	}
@@ -309,10 +309,10 @@ func TestFindPullRequestComment_PaginatesToPage2(t *testing.T) {
 	}
 }
 
-// TestPathExistsAtRef 非递归 git/trees 归属判定（INT-169）：URL 形状
-// /git/trees/{ref}:{dir}、父目录条目精确匹配末段名、404→不存在、
-// 截断未命中→报错、非规范路径本地拒绝且不发请求。
-func TestPathExistsAtRef(t *testing.T) {
+// TestTreeEntriesAtRef 非递归 git/trees 目录清单（INT-169）：URL 形状
+// /git/trees/{ref}:{dir}、返回直接子条目名集合、非规范目录本地拒绝且
+// 不发请求。
+func TestTreeEntriesAtRef(t *testing.T) {
 	var gotPath string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.EscapedPath()
@@ -328,42 +328,37 @@ func TestPathExistsAtRef(t *testing.T) {
 	c := NewClient(&fakeAuth{token: "tok"}, ts.URL)
 	ctx := context.Background()
 
-	// 命中末段条目 → true；URL 是 /git/trees/{ref}:{dir}（dir 段逐段转义、
-	// 以字面 / 拼接）。
-	ok, err := c.PathExistsAtRef(ctx, 1, "octocat/hw", "dir/sub/a.go", "sha-1")
-	if err != nil || !ok {
-		t.Fatalf("exists = %v %v, want true", ok, err)
+	// URL 是 /git/trees/{ref}:{dir}（dir 段逐段转义、以字面 / 拼接），
+	// 条目按响应原样成集合。
+	entries, err := c.TreeEntriesAtRef(ctx, 1, "octocat/hw", "dir/sub", "sha-1")
+	if err != nil || len(entries) != 2 || !entries["a.go"] || !entries["sub"] {
+		t.Fatalf("entries = %v %v, want {a.go sub}", entries, err)
 	}
 	if gotPath != "/repos/octocat/hw/git/trees/sha-1:dir/sub" {
 		t.Fatalf("request path = %q, want git/trees/sha-1:dir/sub", gotPath)
 	}
-	// 父目录存在但末段不在条目中 → false（b.go 不在 tree 列表）。
-	ok, err = c.PathExistsAtRef(ctx, 1, "octocat/hw", "dir/sub/b.go", "sha-1")
-	if err != nil || ok {
-		t.Fatalf("missing entry = %v %v, want false nil", ok, err)
-	}
-	// 根级文件：treeish 无 :dir 后缀。
-	ok, err = c.PathExistsAtRef(ctx, 1, "octocat/hw", "a.go", "sha-1")
-	if err != nil || !ok {
-		t.Fatalf("root file = %v %v, want true", ok, err)
+	// 根目录：treeish 无 :dir 后缀。
+	entries, err = c.TreeEntriesAtRef(ctx, 1, "octocat/hw", "", "sha-1")
+	if err != nil || len(entries) != 2 {
+		t.Fatalf("root entries = %v %v, want 2 entries", entries, err)
 	}
 	if gotPath != "/repos/octocat/hw/git/trees/sha-1" {
 		t.Fatalf("root request path = %q, want git/trees/sha-1", gotPath)
 	}
-	// 含空格/中文的路径段必须转义发出。
-	ok, err = c.PathExistsAtRef(ctx, 1, "octocat/hw", "docs/设计 文档/a.go", "sha-1")
-	if err != nil || !ok {
-		t.Fatalf("unicode path = %v %v, want true", ok, err)
+	// 含空格/中文的目录段必须转义发出。
+	entries, err = c.TreeEntriesAtRef(ctx, 1, "octocat/hw", "docs/设计 文档", "sha-1")
+	if err != nil || len(entries) != 2 {
+		t.Fatalf("unicode dir = %v %v", entries, err)
 	}
 	if gotPath != "/repos/octocat/hw/git/trees/sha-1:docs/%E8%AE%BE%E8%AE%A1%20%E6%96%87%E6%A1%A3" {
 		t.Fatalf("unicode request path = %q", gotPath)
 	}
-	// 非规范路径：本地判不存在，请求不得发出。
-	for _, bad := range []string{"/a.go", "a//b.go", "./a.go", "a.go/./b.go", "../x", "a.go/../b.go", "a.go/", ""} {
+	// 非规范目录：本地判不存在，请求不得发出。
+	for _, bad := range []string{"/a", "a//b", "./a", "a/./b", "../x", "a/../b", "a/"} {
 		gotPath = ""
-		ok, err = c.PathExistsAtRef(ctx, 1, "octocat/hw", bad, "sha-1")
-		if err != nil || ok {
-			t.Fatalf("alias %q = %v %v, want false nil", bad, ok, err)
+		entries, err = c.TreeEntriesAtRef(ctx, 1, "octocat/hw", bad, "sha-1")
+		if err != nil || len(entries) != 0 {
+			t.Fatalf("alias %q = %v %v, want empty nil", bad, entries, err)
 		}
 		if gotPath != "" {
 			t.Fatalf("alias %q must not issue HTTP request, got %q", bad, gotPath)
@@ -371,12 +366,12 @@ func TestPathExistsAtRef(t *testing.T) {
 	}
 }
 
-// TestPathExistsAtRefNotFoundAndTruncated 404 消歧（r2 Note）：dir 级
-// 404 会回探根树——根在则路径不存在（false,nil），根也 404/出错则按
-// 调用失败上报（ref/仓库不可达不能误报成「文件不存在」）；根级请求
-// 自身 404 恒为错误。tree 截断且未命中→ErrTreeTruncated（r4：不可判定，
-// 「不在截断清单内」不能当缺席证明，service 按放行+Warn 而非 50200）。
-func TestPathExistsAtRefNotFoundAndTruncated(t *testing.T) {
+// TestTreeEntriesAtRefNotFoundAndTruncated 404 消歧（r2 Note）：dir 级
+// 404 会回探根树——根在则目录确实缺（空集,nil），根也 404/出错则按
+// 调用失败上报（ref/仓库不可达不能误报成「目录不存在」）；根级请求
+// 自身 404 恒为错误。tree 截断→ErrTreeTruncated（r4：不可判定，「不在
+// 截断清单内」不能当缺席证明，service 按放行+Warn 而非 50200）。
+func TestTreeEntriesAtRefNotFoundAndTruncated(t *testing.T) {
 	var rootStatus int
 	var rootPayload any
 	dirStatus := http.StatusNotFound
@@ -392,38 +387,38 @@ func TestPathExistsAtRefNotFoundAndTruncated(t *testing.T) {
 	c := NewClient(&fakeAuth{token: "tok"}, ts.URL)
 	ctx := context.Background()
 
-	// dir 404 + 根树 200 → 目录确实缺，路径不存在。
+	// dir 404 + 根树 200 → 目录确实缺，空集。
 	rootStatus, rootPayload = http.StatusOK, map[string]any{
 		"tree": []map[string]any{{"path": "other.go", "type": "blob"}},
 	}
-	ok, err := c.PathExistsAtRef(ctx, 1, "octocat/hw", "x/y.go", "sha-1")
-	if err != nil || ok {
-		t.Fatalf("dir 404 + root 200 = %v %v, want false nil", ok, err)
+	entries, err := c.TreeEntriesAtRef(ctx, 1, "octocat/hw", "x", "sha-1")
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("dir 404 + root 200 = %v %v, want empty nil", entries, err)
 	}
 
-	// dir 404 + 根树 404 → ref/仓库级故障，报错而非「不存在」。
+	// dir 404 + 根树 404 → ref/仓库级故障，报错而非「目录不存在」。
 	rootStatus, rootPayload = http.StatusNotFound, map[string]any{"message": "Not Found"}
-	if _, err = c.PathExistsAtRef(ctx, 1, "octocat/hw", "x/y.go", "sha-1"); err == nil {
-		t.Fatal("root probe 404 must surface as error, not file-not-found")
+	if _, err = c.TreeEntriesAtRef(ctx, 1, "octocat/hw", "x", "sha-1"); err == nil {
+		t.Fatal("root probe 404 must surface as error, not empty listing")
 	}
 
-	// 根级路径请求 404（本身就是根树）→ 恒为 ref 级错误。
-	if _, err = c.PathExistsAtRef(ctx, 1, "octocat/hw", "y.go", "sha-1"); err == nil {
+	// 根级请求 404（本身就是根树）→ 恒为 ref 级错误。
+	if _, err = c.TreeEntriesAtRef(ctx, 1, "octocat/hw", "", "sha-1"); err == nil {
 		t.Fatal("root request 404 must error")
 	}
 
-	// 根树 200 但截断且未命中 → ErrTreeTruncated（用根级路径直查根树）。
+	// 根树 200 但截断 → ErrTreeTruncated（用根级目录直查根树）。
 	rootStatus, rootPayload = http.StatusOK, map[string]any{
 		"tree":      []map[string]any{{"path": "other.go", "type": "blob"}},
 		"truncated": true,
 	}
-	if _, err := c.PathExistsAtRef(ctx, 1, "octocat/hw", "y.go", "sha-1"); !errors.Is(err, ErrTreeTruncated) {
-		t.Fatalf("truncated miss = %v, want ErrTreeTruncated", err)
+	if _, err := c.TreeEntriesAtRef(ctx, 1, "octocat/hw", "", "sha-1"); !errors.Is(err, ErrTreeTruncated) {
+		t.Fatalf("truncated root = %v, want ErrTreeTruncated", err)
 	}
 
 	// dir 请求本身 5xx → 透传（不进根探）。
 	dirStatus = http.StatusInternalServerError
-	if _, err := c.PathExistsAtRef(ctx, 1, "octocat/hw", "x/y.go", "sha-1"); err == nil {
+	if _, err := c.TreeEntriesAtRef(ctx, 1, "octocat/hw", "x", "sha-1"); err == nil {
 		t.Fatal("5xx must propagate")
 	}
 }
