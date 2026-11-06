@@ -702,11 +702,13 @@ Agent 执行，服务端的 run 强校验是兜底。
 `line>=1`；非法 → 400（40004 口径）并提示修正重交，不改运行状态。提交前用 App 令牌 `GetPullRequest` 核对 PR
 当前状态与 HEAD：PR 已关闭/合并，或 HEAD 与运行 `head_sha` 不一致 → 本轮
 作废（`cancelled/superseded`、消费令牌、置 `sync_pending`），返回 **40920**。
-**文件归属（INT-169）**：代码审查 `findings` 的 `file` 逐个经
-`PathExistsAtRef` 核对在本轮 `head_sha` 树中存在——实现走非递归
-`git/trees/{ref}:{dir}` 取父目录条目精确匹配末段名（contents API 的 2xx
-会把目录/符号链接/子模块混进来，不严格；Forgejo 侧无 `ref:path` 语法，
-走 contents 端点）；树未命中再用本轮 PR 变更文件清单兜底一次——PR
+**文件归属（INT-169）**：代码审查 `findings` 的 `file` 逐个核对在本轮
+`head_sha` 树中存在——实现走 `TreeEntriesAtRef` 列目录直接子条目、末段
+名判存在：GitHub 用非递归 `git/trees/{ref}:{dir}`（contents API 的 2xx
+会把目录/符号链接/子模块混进来，不严格）；Forgejo 侧无 `ref:path` 语法，
+走 contents 端点列目录（2xx 单对象 → dir 实际是文件 → 空集）。树查询
+按 (ref, 父目录) 去重：同一父目录的多个路径共享一次目录清单拉取，
+不逐路径扇出；树未命中再用本轮 PR 变更文件清单兜底一次——PR
 删除/重命名走的文件仍是合法审查对象（「不该删它」指向的正是已删文件），
 只在树与清单都查不到才拒。清单来自 `pulls/N/files` 分页端点（rename 的
 `filename`+`previous_filename` 两侧都收）——平台对超大 PR 的 diff 文本
@@ -717,11 +719,12 @@ GitHub `git/trees` 截断（`truncated=true`，>10 万条目目录，归一为
 `ErrTreeTruncated`）或目录清单超读入上限（>8MiB，同样归一
 `ErrTreeTruncated`）。这些都按「存在性不可判定」放行并
 Warn 记录，而非 40004/50200——重试只拿到同一份不完整证据，拒收会把
-合法运行卡到 deadline。404 消歧：dir/路径级 404 回探根树/根目录，
-根也 404 按调用失败（50200）而非「文件不存在」上报，避免把 ref/仓库级
-故障误报成审查对象错误。同路径去重且去重后上限 64 条
-（每个唯一路径一次平台调用，需要整体预算；该上限已写入 Agent 提示词
-契约——改动面极广时 Agent 应合并同文件发现或裁剪次要条目）；前导 `/`、`..`/`.`/空段
+合法运行卡到 deadline。404 消歧：dir 级 404 回探根树/根目录（根级请求
+自身 404 即 ref 无效），根也 404 按调用失败（50200）而非「文件不存在」
+上报，避免把 ref/仓库级故障误报成审查对象错误。同路径去重且去重后上限
+64 条（预算按唯一路径计，平台调用按唯一父目录各一次；该上限已写入
+Agent 提示词契约——改动面极广时 Agent 应合并同文件发现或裁剪次要条目）；
+前导 `/`、`..`/`.`/空段
 等别名不做归一化、一律按不存在处理（校验过的形态原样入库，别名会造成
 校验对象与存储值不一致）。树与 diff 都查不到 → **40004**「核对审查对象」且不产生任何状态副作用，
 可修正重交；`prior` 不查（历史意见里已删除/重命名的路径合法）；只查
@@ -772,16 +775,16 @@ rune 截断加 `...`，不劈断多字节字符）；状态未变不重复调用
 | `代码审查` | 任一组合未终态 | `pending`「审查中」 |
 | | 任一 `failed/timed_out/cancelled` | `error`「审查未完成：<组合> 失败」（取第一个失败组合） |
 | | 全部 completed 且 P0+P1 > 0 | `failure`「发现问题：P1 x 条，P2 x 条」（所有组合合计，只列非零级别，按 P0→P1→P2；prior 的 fixed/rejected 是已了结的处置不计入——审查 R5：**prior(open) 里的遗留阻断项计入判红**，见下行） |
-| | 全部 completed 且 findings 无阻断但 prior(open) 有遗留阻断（级别缺失/未知或 P0/P1，`codeOpenPriorBlocks`） | `failure`「发现问题：遗留未解决 N 条」（审查 R5：增量提示词让模型把未修完项标 prior(open)，只看 findings 的话已知阻断问题会从所有面消失、PR 绿灯合并；原则对齐视觉侧 `priorOpenBlocks`） |
+| | 全部 completed 且 findings 无阻断但 prior(open) 有遗留阻断（级别缺失/未知或 P0/P1，`codeOpenPriorBlocks`） | `failure`「发现问题：遗留未解决 N 条」（审查 R5：增量提示词让模型把未修完项标 prior(open)，只看 findings 的话已知阻断问题会从所有面消失、PR 绿灯合并；原则对齐视觉侧 `priorOpenBlocks`。N 按（级别+定位+正文）跨组合去重——INT-207：多组合各自标 open 的同一历史遗留只算一条，与评论结论、Web 计数同尺） |
 | | 全部 completed 且只有 P2 | `success`「审查通过（P2 建议 N 条）」——P2 是修法局部的边界建议，不判红（INT-204：实测 75% 轮次最严重只是 P2，全量重审下判红会让 PR 永远挂红）；**超限轮次纯「审查通过」不带建议数**（审查 R2） |
 | | 超限轮次（审查 R2） | failure 只列 P0/P1、success 不带 P2 计数——状态文案与超限评论/行内的「只报告 P0/P1」同口径（`summarizeCodeRuns` 认 overCap） |
 | | 全部 completed 且全净 | `success`「审查通过」 |
 | `视觉审查` | 代码审查未全部终态 | 不写（`visualWait`：结论还可能变，不提前落 status/评论/指纹） |
 | | 视觉运行启动 | `pending`「视觉审查中」 |
-| | 有 blocker / worth fixing，含 `prior` 里 `status=open` 且原级别为 blocker/worth_fixing 的遗留 | `failure`「发现 N 条问题」 |
+| | 有 blocker / worth fixing，含 `prior` 里 `status=open` 且原级别为 blocker/worth_fixing 的遗留 | `failure`「发现 N 条问题」（N 的 prior(open) 部分按（级别+定位+正文）跨组合去重，findings 逐组合求和——INT-207，与 Web 活动计数同尺） |
 | | 只有 minor 或无发现 | `success`「审查通过」 |
 | | 本轮无事可做（截图内容未变、上轮视觉后无 UI 改动）且上一轮通过 | `success`「审查通过（沿用上一轮，截图未变化）」 |
-| | 本轮无事可做且上一轮遗留 blocker / worth fixing | `failure`「截图复核意见尚未处理（上轮 N 条）」 |
+| | 本轮无事可做且上一轮遗留 blocker / worth fixing | `failure`「截图复核意见尚未处理（上轮 N 条）」（N 取最近一轮，prior(open) 跨组合去重——INT-207） |
 
 代码审查 `error` 时不启动视觉审查，等手动重新审查；未配置视觉组合时永不
 设 `视觉审查` 状态。代码运行未全部终态时**不写任何视觉产出**（等待分支见

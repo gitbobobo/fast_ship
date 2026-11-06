@@ -53,11 +53,14 @@ type GitHubClient interface {
 	// 的 id 字段）：rerun 等没有 webhook installation 快照的路径用。
 	// 静态 token / 匿名实现不支持解析，返回错误（调用方不得把 0 当安装 id 继续）。
 	ResolveInstallation(ctx context.Context, repoFullName string) (int64, error)
-	// PathExistsAtRef 仓库相对路径在指定 ref（commit SHA 等）的树中是否存在
-	// （GET /repos/{o}/{r}/git/trees/{ref}:{dir} 取父目录条目精确匹配末段；
-	// INT-169 审查结果文件归属校验）。true=存在（blob/tree/commit 条目均可），
-	// 不存在→false；tree 响应截断且未命中时报错（无法判定，不猜不存在）。
-	PathExistsAtRef(ctx context.Context, installationID int64, repoFullName, path, ref string) (bool, error)
+	// TreeEntriesAtRef 列出指定 ref（commit SHA 等）树中某目录的直接子条目
+	// 名集合（GET /repos/{o}/{r}/git/trees/{ref} 或 {ref}:{dir} 非递归；INT-169
+	// 审查结果文件归属校验按 (ref, 父目录) 去重后逐目录调用，blob/tree/commit
+	// 条目都收）。dir="" 是仓库根，否则是规范相对目录路径；含空段、「.」「..」
+	// 的 dir 视为目录不存在，返回空集不发请求。dir 级 404 探根树消歧（根在
+	// →目录确实缺→空集）；响应截断或超读入上限→包装 ErrTreeTruncated
+	// （条目清单不完整，无法判定，不猜不存在）。
+	TreeEntriesAtRef(ctx context.Context, installationID int64, repoFullName, dir, ref string) (map[string]bool, error)
 	// ListPullRequestFiles PR 变更文件清单（GET pulls/N/files 分页）：rename
 	// 两侧（filename+previous_filename）都收，去重。complete=false 表示清单
 	// 被平台封顶截断（GitHub 3000 文件上限）——缺席不能当不存在证据。
@@ -538,30 +541,26 @@ type gitTreeEntry struct {
 	Type string `json:"type"` // blob / tree / commit（子模块）
 }
 
-// PathExistsAtRef 用非递归 git/trees 判路径存在性：拉取父目录的直接条目、
-// 精确匹配末段名——contents API 会把目录/符号链接/子模块和大文件都混进
-// 2xx，无法严格回答「树中是否有此路径」。路径必须是规范的仓库相对形态：
-// 前导 /、空段、「.」「..」一律按不存在处理——不静默归一化（校验过的
-// 形态会被原样存进结果，别名会造成校验对象与存储值不一致，且转义拦不下
-// 它们，HTTP 层归一化可能把请求拼到别的端点上）。
-func (c *restClient) PathExistsAtRef(ctx context.Context, installationID int64, repoFullName, path, ref string) (bool, error) {
+// TreeEntriesAtRef 用非递归 git/trees 列目录直接条目：文件归属校验按
+// (ref, 父目录) 去重后逐目录拉一次清单、末段名在集合里判存在——同父目录
+// 的多个路径共享一次平台往返，逐路径查询会对同目录重复下载同一份清单。
+// dir 必须是规范的仓库相对形态：空段、「.」「..」按目录不存在处理返回空
+// 集不发请求——不静默归一化（校验过的形态会被原样存进结果，别名会造成
+// 校验对象与存储值不一致，且转义拦不下它们，HTTP 层归一化可能把请求拼到
+// 别的端点上）。
+func (c *restClient) TreeEntriesAtRef(ctx context.Context, installationID int64, repoFullName, dir, ref string) (map[string]bool, error) {
 	owner, name, err := splitRepo(repoFullName)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
-	segs := strings.Split(path, "/")
-	for _, s := range segs {
-		if s == "" || s == "." || s == ".." {
-			return false, nil
-		}
-	}
-	base := segs[len(segs)-1]
-	dir := strings.Join(segs[:len(segs)-1], "/")
-	escapedRef := url.PathEscape(ref)
-	treeish := escapedRef
+	treeish := url.PathEscape(ref)
 	if dir != "" {
-		escaped := make([]string, 0, len(segs)-1)
-		for _, s := range segs[:len(segs)-1] {
+		segs := strings.Split(dir, "/")
+		escaped := make([]string, 0, len(segs))
+		for _, s := range segs {
+			if s == "" || s == "." || s == ".." {
+				return map[string]bool{}, nil
+			}
 			escaped = append(escaped, url.PathEscape(s))
 		}
 		treeish += ":" + strings.Join(escaped, "/")
@@ -575,40 +574,47 @@ func (c *restClient) PathExistsAtRef(ctx context.Context, installationID int64, 
 		// 目录清单超读入上限（>8MiB 的大目录）——与 truncated=true 同属
 		// 不完整证据：不可判定，不可当缺席证明，也不该 50200 卡死重试。
 		if errors.Is(err, ErrBodyTooLarge) {
-			return false, fmt.Errorf("%w: %q 的目录清单超读入上限，无法判定是否存在", ErrTreeTruncated, path)
+			return nil, fmt.Errorf("%w: %s 清单超读入上限，无法判定是否存在", ErrTreeTruncated, dirName(dir))
 		}
 		if !IsNotFound(err) {
-			return false, err
+			return nil, err
 		}
 		// 404 有歧义：dir 级可能是「目录真不存在」，也可能是 ref/仓库本身
 		// 不可达——后者报「文件不存在」会把基础设施故障误报成 Agent 的
 		// 审查对象错误。探一次根树区分：根 404/出错 → 按调用失败上报；
-		// 根在 → dir 确实缺，路径不存在。根级请求本身 404 即 ref 无效。
+		// 根在 → dir 确实缺，返回空集。根级请求本身 404 即 ref 无效。
 		if dir == "" {
-			return false, err
+			return nil, err
 		}
 		var root gitTreeWire
 		rootErr := c.withToken(ctx, installationID, func(bearer string) error {
 			return c.h.doJSON(ctx, http.MethodGet,
-				fmt.Sprintf("/repos/%s/%s/git/trees/%s", owner, name, escapedRef), bearer, nil, &root)
+				fmt.Sprintf("/repos/%s/%s/git/trees/%s", owner, name, url.PathEscape(ref)), bearer, nil, &root)
 		})
 		if rootErr != nil {
 			if errors.Is(rootErr, ErrBodyTooLarge) {
-				return false, fmt.Errorf("%w: 根树清单超读入上限，无法判定 %q 是否存在", ErrTreeTruncated, path)
+				return nil, fmt.Errorf("%w: 根树清单超读入上限，无法判定 %s 的存在性", ErrTreeTruncated, dirName(dir))
 			}
-			return false, rootErr
+			return nil, rootErr
 		}
-		return false, nil
+		return map[string]bool{}, nil
 	}
+	entries := make(map[string]bool, len(out.Tree))
 	for _, e := range out.Tree {
-		if e.Path == base {
-			return true, nil
-		}
+		entries[e.Path] = true
 	}
 	if out.Truncated {
-		return false, fmt.Errorf("%w: 无法判定 %q 是否存在", ErrTreeTruncated, path)
+		return nil, fmt.Errorf("%w: %s 清单被平台截断，存在性不可判定", ErrTreeTruncated, dirName(dir))
 	}
-	return false, nil
+	return entries, nil
+}
+
+// dirName 目录在错误文本里的显示名：根目录没有路径段，给个可读占位。
+func dirName(dir string) string {
+	if dir == "" {
+		return "(根)"
+	}
+	return fmt.Sprintf("%q", dir)
 }
 
 // pullRequestFileWire pulls/N/files 元素：status=renamed 时 previous_filename

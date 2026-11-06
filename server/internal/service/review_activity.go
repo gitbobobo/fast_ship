@@ -475,14 +475,17 @@ func reviewActivityCanRerun(settings model.ProjectReviewSettings, pr *model.Revi
 
 // reviewCollectRunIssues 遍历当前轮同段运行：completed 的解析 result_json 计
 // 发现计数（解析失败加「结论无法解析」issue）；failed/timed_out 生成待处理
-// issue；cancelled 是系统动作，一律忽略。
+// issue；cancelled 是系统动作，一律忽略。代码与视觉两段各自建去重集合：同段
+// 多组合各自标 open 的同一历史遗留只计一次（INT-207），跨段不去重（两段键
+// 空间不同：代码遗留带 file:line，视觉遗留无）。
 func reviewCollectRunIssues(runs []model.ReviewRun, kind api.ReviewActivityIssueKind,
 	findings *api.ReviewFindingCounts, issues *[]api.ReviewActivityIssue) {
+	seenPrior := map[string]bool{}
 	for i := range runs {
 		r := &runs[i]
 		switch r.Status {
 		case model.ReviewRunCompleted:
-			if !reviewCountResult(r.Kind, r.ResultJSON, findings) {
+			if !reviewCountResult(r.Kind, r.ResultJSON, findings, seenPrior) {
 				*issues = append(*issues, api.ReviewActivityIssue{
 					Kind: kind, Reason: reviewIssueReasonUnparsed,
 					Message: "审查结论无法解析，请查看 GitHub",
@@ -499,8 +502,11 @@ func reviewCollectRunIssues(runs []model.ReviewRun, kind api.ReviewActivityIssue
 // 返回 false。两个分支都把 prior 里 status=open 且按 priorOpenBlocks 阻塞
 // 的条目一并计入——与 GitHub status 的红绿判定同一口径（代码侧
 // summarizeCodeRuns 计 codeOpenPriorBlocks，审查 R5/R6），否则 Web 侧「需要
-// 处理」会漏掉模型只写进 prior(open) 的未解决项。
-func reviewCountResult(kind model.ReviewKind, raw string, findings *api.ReviewFindingCounts) bool {
+// 处理」会漏掉模型只写进 prior(open) 的未解决项。seenPrior 是同段内跨运行
+// 去重集合（INT-207，调用方按段创建）：多组合各自标 open 的同一历史遗留
+// 按（级别+定位+正文）只计一次，与 codeHistory 渲染去重、commit status
+// 描述与顶层评论结论同一把尺；测试直接调用时传新建的 map 即可。
+func reviewCountResult(kind model.ReviewKind, raw string, findings *api.ReviewFindingCounts, seenPrior map[string]bool) bool {
 	if kind == model.ReviewKindVisual {
 		var result api.ReviewVisualResult
 		if err := json.Unmarshal([]byte(raw), &result); err != nil {
@@ -518,6 +524,12 @@ func reviewCountResult(kind model.ReviewKind, raw string, findings *api.ReviewFi
 			if p.Status != api.ReviewPriorDecisionStatusOpen || !priorOpenBlocks(p.Level) {
 				continue
 			}
+			// 同段多组合各自标 open 的同一历史遗留只计一次（INT-207）。
+			key := codePriorDedupeKey(p)
+			if seenPrior[key] {
+				continue
+			}
+			seenPrior[key] = true
 			// 计数桶只有两格：blocker 归 Blocker，其余阻塞级别（含 nil 兜底与
 			// P0/P1 等未知形态）都归 WorthFixing——阻塞的必须有位置可落。
 			if p.Level != nil && *p.Level == string(api.Blocker) {
@@ -545,11 +557,16 @@ func reviewCountResult(kind model.ReviewKind, raw string, findings *api.ReviewFi
 	// 代码 prior(open) 阻塞项（审查 R6）：与视觉分支同构——增量轮只标
 	// prior(open) 的遗留 P0/P1 落进对应计数桶，needs_action 的 P0/P1 口径
 	// 与 GitHub status 红绿一致；级别缺失或未知按 P1 兜底（阻塞的必须有
-	// 位置可落）。
+	// 位置可落）。同段多组合各自标 open 的同一历史遗留只计一次（INT-207）。
 	for _, p := range result.Prior {
 		if p.Status != api.ReviewPriorDecisionStatusOpen || !priorOpenBlocks(p.Level) {
 			continue
 		}
+		key := codePriorDedupeKey(p)
+		if seenPrior[key] {
+			continue
+		}
+		seenPrior[key] = true
 		if p.Level != nil && *p.Level == string(api.P0) {
 			findings.P0++
 		} else {

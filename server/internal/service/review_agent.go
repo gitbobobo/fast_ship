@@ -200,7 +200,7 @@ func (s *ReviewService) codeHistory(ctx context.Context, run *model.ReviewRun) (
 					// open 后会在下一轮历史里消失，复核断链（对齐 visualHistory
 					// 的 openPrior 补偿，INT-204 审查 R1）。
 					for _, p := range openPriorDecisions(result.Prior) {
-						key := fmt.Sprintf("%s|%s|%s", priorLevelText(p.Level), priorLoc(p), p.Body)
+						key := codePriorDedupeKey(p)
 						if seenPrior[key] {
 							continue
 						}
@@ -648,17 +648,27 @@ func (s *ReviewService) AgentSubmitResult(ctx context.Context, runID string, bod
 
 // checkFindingFilesInTree INT-169 文件归属：代码审查新发现的仓库相对路径
 // 逐个在运行 head_sha 的树中查存在性（同一路径去重，去重后上限 64 条——
-// 每个唯一路径一次平台调用，需要整体预算）。不存在 → 40004 要求核对
-// 审查对象；平台调用失败 → 50200（调用方可重交）。树未命中的路径再用
-// 本轮 PR 变更文件清单兜底一次：PR 删除/重命名走的文件仍是合法审查
+// 每个唯一路径计入预算）。树查询按父目录列清单：同一父目录的多个路径
+// 共享一次平台调用（惰性拉取、按目录缓存，含「不可判定」态），把逐路径
+// 最多 64 次平台往返压到最多 64 个不同目录各一次。不存在 → 40004 要求
+// 核对审查对象；平台调用失败 → 50200（调用方可重交）。树未命中的路径再
+// 用本轮 PR 变更文件清单兜底一次：PR 删除/重命名走的文件仍是合法审查
 // 对象（「不该删这个文件」指向的正是已删文件本身），只在 head 树与
 // 变更清单里都查不到才算路径错误。清单来自分页 files 端点而非 diff 文本
 // ——平台对超大 PR 的 diff 可能无标记静默截断，不能当否决证据；清单
 // 本身不完整（如 GitHub 3000 文件封顶）时缺席同样不作否决，放行并 Warn。
 const findingFileCheckLimit = 64
 
+// findingDirListing 一次目录清单拉取的缓存条目。indeterminate=树响应截断：
+// 该目录下一切路径的存在性都不可判定，一律放行不再拉取。
+type findingDirListing struct {
+	entries       map[string]bool
+	indeterminate bool
+}
+
 func (s *ReviewService) checkFindingFilesInTree(ctx context.Context, client forge.ReviewClient, run *model.ReviewRun, findings []api.ReviewCodeFinding) error {
 	seen := map[string]bool{}
+	listings := map[string]findingDirListing{}
 	var prFiles map[string]bool
 	filesTried, filesComplete := false, true
 	for i, f := range findings {
@@ -669,27 +679,39 @@ func (s *ReviewService) checkFindingFilesInTree(ctx context.Context, client forg
 		if len(seen) > findingFileCheckLimit {
 			return reviewResultErr("findings 涉及的不同文件路径超过 %d 个，超出归属校验预算——请合并同文件发现或裁剪次要条目后重交", findingFileCheckLimit)
 		}
-		exists, err := client.PathExistsAtRef(ctx, run.RepoFullName, f.File, run.HeadSHA)
-		if err != nil {
-			if errors.Is(err, forge.ErrTreeTruncated) {
-				// 树条目截断：「不在截断清单内」不等于不存在——与清单
-				// 兜底不可证同口径放行并 Warn，不按调用失败把合法提交
-				// 卡成永久 50200（重试只拿到同一份截断树）。
-				s.logger.Warn("审查文件归属树响应截断，路径存在性不可判定，放行",
-					zap.String("run_id", run.ID),
-					zap.String("repo", run.RepoFullName),
-					zap.String("file", f.File),
-				)
+		// 非规范路径（绝对路径、空段、.、..）本地判「树中无此条目」，
+		// 不发请求、不静默归一化，直接走清单兜底——别名会造成校验对象
+		// 与存储值不一致。
+		if dir, base, ok := splitTreePath(f.File); ok {
+			lst, cached := listings[dir]
+			if !cached {
+				entries, err := client.TreeEntriesAtRef(ctx, run.RepoFullName, dir, run.HeadSHA)
+				switch {
+				case errors.Is(err, forge.ErrTreeTruncated):
+					// 树条目截断：「不在截断清单内」不等于不存在——与
+					// 清单兜底不可证同口径放行并 Warn，不按调用失败把
+					// 合法提交卡成永久 50200（重试只拿到同一份截断树）。
+					s.logger.Warn("审查文件归属树响应截断，路径存在性不可判定，放行",
+						zap.String("run_id", run.ID),
+						zap.String("repo", run.RepoFullName),
+						zap.String("dir", dir),
+					)
+					lst = findingDirListing{indeterminate: true}
+				case err != nil:
+					return errs.New(errs.ErrGitHubAPI.Code, "校验 findings 文件归属失败: "+err.Error())
+				default:
+					lst = findingDirListing{entries: entries}
+				}
+				listings[dir] = lst
+			}
+			if lst.indeterminate || lst.entries[base] {
 				continue
 			}
-			return errs.New(errs.ErrGitHubAPI.Code, "校验 findings 文件归属失败: "+err.Error())
-		}
-		if exists {
-			continue
 		}
 		if !filesTried {
 			filesTried = true
 			var paths []string
+			var err error
 			paths, filesComplete, err = client.ListPullRequestFiles(ctx, run.RepoFullName, run.PRNumber)
 			if err != nil {
 				return errs.New(errs.ErrGitHubAPI.Code, "校验 findings 文件归属失败: "+err.Error())
@@ -711,6 +733,21 @@ func (s *ReviewService) checkFindingFilesInTree(ctx context.Context, client forg
 		}
 	}
 	return nil
+}
+
+// splitTreePath 拆父目录与末段名；路径含空段、「.」「..」时 ok=false
+// （不规范化——校验过的形态会原样存进结果）。
+func splitTreePath(p string) (dir, base string, ok bool) {
+	segs := strings.Split(p, "/")
+	for _, s := range segs {
+		if s == "" || s == "." || s == ".." {
+			return "", "", false
+		}
+	}
+	if len(segs) == 1 {
+		return "", segs[0], true
+	}
+	return strings.Join(segs[:len(segs)-1], "/"), segs[len(segs)-1], true
 }
 
 // decodeStrict 严格反序列化：未知字段与类型错误一律 40004。
