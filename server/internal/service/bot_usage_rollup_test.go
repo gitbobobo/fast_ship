@@ -88,7 +88,7 @@ func TestBotUsageRollupMatchesRealtime(t *testing.T) {
 	bot2 := env.createBot(t, userID)
 
 	fixed := time.Now().UTC().Truncate(time.Hour)
-	env.bots.nowFn = func() time.Time { return fixed }
+	env.bots.setNowFn(func() time.Time { return fixed })
 
 	// 前天：主线 run（已计价 + 未计价请求 + reasoning/provider USD）+ 同日
 	// 关联维护。
@@ -221,7 +221,7 @@ func TestBotUsageRollupIdempotentAndDirtyDay(t *testing.T) {
 	setUserTimezone(t, env, userID, "UTC")
 	bot := env.createBot(t, userID)
 	fixed := time.Now().UTC().Truncate(time.Hour)
-	env.bots.nowFn = func() time.Time { return fixed }
+	env.bots.setNowFn(func() time.Time { return fixed })
 
 	run := seedUsageRun(t, env, bot.ID, func(r *model.BotRun) {
 		r.CreatedAt = usageDayAt(fixed, 2)
@@ -264,7 +264,7 @@ func TestBotUsageRollupNullSemantics(t *testing.T) {
 	setUserTimezone(t, env, userID, "UTC")
 	bot := env.createBot(t, userID)
 	fixed := time.Now().UTC().Truncate(time.Hour)
-	env.bots.nowFn = func() time.Time { return fixed }
+	env.bots.setNowFn(func() time.Time { return fixed })
 
 	run := seedUsageRun(t, env, bot.ID, func(r *model.BotRun) {
 		r.CreatedAt = usageDayAt(fixed, 1)
@@ -315,7 +315,7 @@ func TestBotUsageDeletePreservesUsageHistory(t *testing.T) {
 	setUserTimezone(t, env, userID, "UTC")
 	bot := env.createBot(t, userID)
 	fixed := time.Now().UTC().Truncate(time.Hour)
-	env.bots.nowFn = func() time.Time { return fixed }
+	env.bots.setNowFn(func() time.Time { return fixed })
 
 	task := seedScheduleTask(t, env, bot.ID, nil)
 	sched := seedUsageRun(t, env, bot.ID, func(r *model.BotRun) {
@@ -412,7 +412,7 @@ func TestBotUsageRollupTimezoneRecompute(t *testing.T) {
 	bot := env.createBot(t, userID)
 	// 注入时钟固定在 UTC 凌晨 02:00——东京（+9）已是当天上午 11 点。
 	fixed := time.Now().UTC().Truncate(24 * time.Hour).Add(2 * time.Hour)
-	env.bots.nowFn = func() time.Time { return fixed }
+	env.bots.setNowFn(func() time.Time { return fixed })
 
 	// run 记日：UTC 大前天 20:00（UTC+9 已是昨天 05:00）——两个时区把它记到
 	// 不同的日子，且两侧都在「昨天或更早」的可汇总范围里。
@@ -477,7 +477,7 @@ func TestBotUsageRollupTaskNameSurvivesDelete(t *testing.T) {
 	bot := env.createBot(t, userID)
 
 	fixed := time.Now().UTC().Truncate(time.Hour)
-	env.bots.nowFn = func() time.Time { return fixed }
+	env.bots.setNowFn(func() time.Time { return fixed })
 
 	task := seedScheduleTask(t, env, bot.ID, nil)
 	run := seedUsageRun(t, env, bot.ID, func(r *model.BotRun) {
@@ -549,7 +549,7 @@ func TestBotUsageRollupTaskNameTombstone(t *testing.T) {
 	// 注入时钟固定在 UTC 凌晨 02:00——run 落在 UTC 前天 22:00，东京口径
 	// 下也是「昨天或更早」，两个时区都在可汇总范围里。
 	fixed := time.Now().UTC().Truncate(24 * time.Hour).Add(2 * time.Hour)
-	env.bots.nowFn = func() time.Time { return fixed }
+	env.bots.setNowFn(func() time.Time { return fixed })
 
 	task := seedScheduleTask(t, env, bot.ID, nil)
 	run := seedUsageRun(t, env, bot.ID, func(r *model.BotRun) {
@@ -607,7 +607,7 @@ func TestBotUsageRollupWriteProbeGate(t *testing.T) {
 		t.Fatalf("读 bot: %v", err)
 	}
 	fixed := time.Now().UTC().Truncate(time.Hour)
-	env.bots.nowFn = func() time.Time { return fixed }
+	env.bots.setNowFn(func() time.Time { return fixed })
 
 	oldDay := usageDayAt(fixed, 4).Format("2006-01-02")
 	run := seedUsageRun(t, env, bot.ID, func(r *model.BotRun) {

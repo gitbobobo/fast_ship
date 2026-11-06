@@ -118,7 +118,7 @@ func TestBotBudgetDailyThresholdAlertsOnce(t *testing.T) {
 
 	// 固定时钟：2026-03-10 12:00 UTC（用户未声明时区 → UTC 当地日）。
 	now := time.Date(2026, 3, 10, 12, 0, 0, 0, time.UTC)
-	env.bots.nowFn = func() time.Time { return now }
+	env.bots.setNowFn(func() time.Time { return now })
 	seedBudgetRun(t, env, bot.ID, 0.8, now.Add(-time.Hour))
 
 	saved, err := env.bots.UpsertBotBudget(userID, bot.ID, "daily", &BotBudgetUpsertRequest{
@@ -199,7 +199,7 @@ func TestBotBudgetMonthlyPreviousPeriodBackfill(t *testing.T) {
 	bot := env.createBot(t, userID)
 
 	now := time.Date(2026, 3, 1, 10, 0, 0, 0, time.UTC)
-	env.bots.nowFn = func() time.Time { return now }
+	env.bots.setNowFn(func() time.Time { return now })
 	// 二月的一笔花费：当前月窗口为空，只有上一周期回看能看见。
 	seedBudgetRun(t, env, bot.ID, 0.9, time.Date(2026, 2, 20, 8, 0, 0, 0, time.UTC))
 
@@ -242,7 +242,7 @@ func TestBotBudgetPreviousWindowSkippedOnTick(t *testing.T) {
 
 	// 3 月 10 日（宽限早已过），上一周期二月花费已越阈。
 	now := time.Date(2026, 3, 10, 10, 0, 0, 0, time.UTC)
-	env.bots.nowFn = func() time.Time { return now }
+	env.bots.setNowFn(func() time.Time { return now })
 	seedBudgetRun(t, env, bot.ID, 0.9, time.Date(2026, 2, 20, 8, 0, 0, 0, time.UTC))
 	if _, err := env.bots.UpsertBotBudget(userID, bot.ID, "monthly", &BotBudgetUpsertRequest{
 		AmountUSD: 1, Thresholds: []float64{0.8},
@@ -276,7 +276,7 @@ func TestBotBudgetTaskScopeAndLinkedMain(t *testing.T) {
 	task := seedScheduleTask(t, env, bot.ID, nil)
 
 	now := time.Date(2026, 3, 10, 12, 0, 0, 0, time.UTC)
-	env.bots.nowFn = func() time.Time { return now }
+	env.bots.setNowFn(func() time.Time { return now })
 	schedRun := seedBudgetScheduleRun(t, env, bot.ID, task.ID, 0.5, now.Add(-3*time.Hour))
 	seedBudgetLinkedMainRun(t, env, bot.ID, schedRun.ID, 0.3, now.Add(-2*time.Hour))
 	// 无关主线花费只进机器人口径，不进任务口径。
@@ -445,7 +445,7 @@ func TestBotBudgetUnsetKeepsBehavior(t *testing.T) {
 	userID := createBotTestUser(t, env.db, "budget164none")
 	bot := env.createBot(t, userID)
 	now := time.Date(2026, 3, 10, 12, 0, 0, 0, time.UTC)
-	env.bots.nowFn = func() time.Time { return now }
+	env.bots.setNowFn(func() time.Time { return now })
 	seedBudgetRun(t, env, bot.ID, 42, now.Add(-time.Minute))
 
 	env.bots.evalBudgetsOnce(true)

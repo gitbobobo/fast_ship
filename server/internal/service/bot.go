@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/config"
@@ -72,8 +73,10 @@ type BotService struct {
 	// streamHub 是 SSE 订阅注册表；事件先落库再发布，订阅方按 seq 去重。
 	streamHub *botStreamHub
 
-	// nowFn 可注入时钟（夜间整理测试）；空则用 time.Now。
-	nowFn func() time.Time
+	// nowFn 可注入时钟（测试装配）；空则用 time.Now。原子读写：Create/Update
+	// 落的后台窗口探测 goroutine 会在测试改时钟的同时经 now() 读它——裸字段
+	// 下这是一场真数据竞争，-race 全量跑时偶发把当时在跑的测试点名（INT-196）。
+	nowFn atomic.Pointer[func() time.Time]
 	// maintJobs 是全局单一维护队列（夜间整理）；compaction 走主线不入队。
 	maintJobs chan botMaintJob
 	maintOnce sync.Once

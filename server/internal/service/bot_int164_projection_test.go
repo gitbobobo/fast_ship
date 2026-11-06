@@ -116,7 +116,7 @@ func TestBotUsageProviderCostDisplayMerge(t *testing.T) {
 	setUserTimezone(t, env, userID, "UTC")
 	bot := env.createBot(t, userID)
 	fixed := time.Now().UTC().Truncate(time.Hour)
-	env.bots.nowFn = func() time.Time { return fixed }
+	env.bots.setNowFn(func() time.Time { return fixed })
 
 	setProviderCost := func(reqID string, pc float64) {
 		t.Helper()

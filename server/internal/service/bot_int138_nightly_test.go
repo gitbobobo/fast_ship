@@ -40,9 +40,9 @@ func int138NightlyRuns(t *testing.T, env *botTestEnv, botID string) int64 {
 func int138AssertShanghaiNightly(t *testing.T, env *botTestEnv, botID string) {
 	t.Helper()
 	// UTC 18:59 = 上海次日 02:59：未到当地触发时刻。
-	env.bots.nowFn = func() time.Time {
+	env.bots.setNowFn(func() time.Time {
 		return time.Date(2026, 10, 16, 18, 59, 0, 0, time.UTC)
-	}
+	})
 	env.bots.scanNightlyOnce()
 	// 入队发生在 scanNightlyOnce 内（缓冲 channel），若误触发 worker 很快
 	// 就会建档；给一小段窗口再数，把「真没触发」和「还没来得及跑」区分开。
@@ -52,9 +52,9 @@ func int138AssertShanghaiNightly(t *testing.T, env *botTestEnv, botID string) {
 	}
 
 	// UTC 19:00 = 上海次日 03:00：触发，触发键取当地日期。
-	env.bots.nowFn = func() time.Time {
+	env.bots.setNowFn(func() time.Time {
 		return time.Date(2026, 10, 16, 19, 0, 0, 0, time.UTC)
-	}
+	})
 	env.bots.scanNightlyOnce()
 	var run model.BotMaintenanceRun
 	waitForBot(t, "夜间运行建档", 10*time.Second, func() bool {

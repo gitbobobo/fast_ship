@@ -349,9 +349,9 @@ func TestInt124NightlyCatchUp(t *testing.T) {
 	env.fake.strict = true
 	userID := createBotTestUser(t, env.db, "int124night")
 	bot := env.createBot(t, userID)
-	env.bots.nowFn = func() time.Time {
+	env.bots.setNowFn(func() time.Time {
 		return time.Date(2026, 10, 16, 4, 0, 0, 0, time.UTC)
-	}
+	})
 	const date = "2026-10-16"
 	const baseKey = "nightly:" + date
 

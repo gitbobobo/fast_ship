@@ -1630,9 +1630,9 @@ func TestBotNightlyConsolidation(t *testing.T) {
 	bot := env.createBot(t, userID)
 	writeBotMemory(t, env, bot.ID, "daily/2026-10-15.md", "- 用户叫 Bobo\n- 项目天狼星", "n-d")
 	env.cfg.Bots.Memory.NightlyModel = "cheap-nightly"
-	env.bots.nowFn = func() time.Time {
+	env.bots.setNowFn(func() time.Time {
 		return time.Date(2026, 10, 16, 2, 0, 0, 0, time.UTC)
-	}
+	})
 	var before int64
 	env.db.Model(&model.BotMaintenanceRun{}).Where("bot_id = ? AND kind = ?", bot.ID, model.BotMaintenanceNightly).Count(&before)
 	env.bots.scanNightlyOnce()
@@ -1641,9 +1641,9 @@ func TestBotNightlyConsolidation(t *testing.T) {
 	if early != before {
 		t.Fatalf("03:00 前不应触发")
 	}
-	env.bots.nowFn = func() time.Time {
+	env.bots.setNowFn(func() time.Time {
 		return time.Date(2026, 10, 16, 4, 0, 0, 0, time.UTC)
-	}
+	})
 	botRow, _ := env.bots.bots.Get(bot.ID)
 	env.bots.runNightlyForBot(botRow.ID, "nightly:2026-10-16")
 	mem, err := repository.NewBotMemoryRepository(env.db).FindFile(bot.ID, "MEMORY.md")
