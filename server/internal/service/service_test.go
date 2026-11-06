@@ -119,6 +119,12 @@ func setupTestServices(t *testing.T) *testServices {
 		t.Fatalf("migrate test db: %v", err)
 	}
 
+	// INT-209：q 搜索依赖 issues_fts 派生索引，由启动接线补齐；service 测试
+	// 绕过 main.go，这里与生产顺序一致（AutoMigrate 之后）补齐。
+	if err := repository.EnsureIssueFTSSchema(db); err != nil {
+		t.Fatalf("ensure issue fts: %v", err)
+	}
+
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_user_name ON projects(user_id, name)")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_versions_project_version ON versions(project_id, version_number)")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issues_project_sequence ON issues(project_id, sequence_number)")

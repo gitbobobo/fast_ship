@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"gorm.io/gorm"
@@ -182,17 +183,39 @@ func issueQueryAsNumber(query string) (int, bool) {
 	return num, err == nil
 }
 
-// buildIssueSearchCondition 构造 q 搜索条件：标题/正文/作者/reference 的大小写
-// 不敏感子串，纯数字时再 OR 序号与 GitHub number 精确匹配。整组条件带括号，
-// 与其他过滤器之间保持 AND 语义。已知边界：SQLite 的 lower/LIKE 只折叠 ASCII，
-// 与 Go strings.ToLower 的 Unicode 折叠在非 ASCII 大写字母上不一致（中文无影响）。
+// buildIssueSearchCondition 构造 q 搜索条件：按 Unicode rune 数分流（trigram
+// 最小可匹配 3 字符）——≥3 字符时标题/正文走 issues_fts 派生索引（参数化
+// MATCH，字面量经 ftsMatchLiteral 引号编码，先例 bot_memory_fts），作者登录名
+// 与 reference 两列小、保持 LIKE；1–2 字符整组退回四路 LIKE（短查询在
+// trigram 上不可表达）。外层仍用 IN 子查询（子查询内部 MATCH 只取 FTS
+// rowid、经 docid 映射表换回 issue_id，不回读 FTS content 行），保持
+// buildFilteredQuery 其余组合语义不动。纯数字时再 OR 序号与 GitHub number
+// 精确匹配。整组条件带括号，与其他过滤器之间保持 AND 语义。已知边界：LIKE/lower() 只折叠
+// ASCII，而 trigram 的 case folding 口径更宽（实测结论见
+// docs/internal/issue-list-sql-pushdown.md），两个分支对非 ASCII 大小写的
+// 命中存在差异，不为此做额外处理。
 func buildIssueSearchCondition(query string) (string, []interface{}) {
-	pattern := "%" + escapeLikePattern(strings.ToLower(query)) + "%"
 	referenceExpr := "CASE WHEN issues.source = 'github' AND gh.number IS NOT NULL " +
 		"THEN 'GH-' || gh.number ELSE 'INT-' || issues.sequence_number END"
-	expr := "(lower(issues.title) LIKE ? ESCAPE '\\' OR lower(issues.body) LIKE ? ESCAPE '\\' " +
-		"OR lower(issues.author_login) LIKE ? ESCAPE '\\' OR lower(" + referenceExpr + ") LIKE ? ESCAPE '\\')"
-	args := []interface{}{pattern, pattern, pattern, pattern}
+	pattern := "%" + escapeLikePattern(strings.ToLower(query)) + "%"
+	var expr string
+	var args []interface{}
+	if utf8.RuneCountInString(query) >= 3 && !strings.ContainsRune(query, '\x00') {
+		// 标题/正文走派生索引：前导通配的全表 LIKE 是万级 issue 下列表变慢
+		// 的主因，trigram MATCH 能走 FTS 扫描。子查询只取 rowid 经映射表换
+		// issue_id：直接取 UNINDEXED 的 issue_id 列要逐条回读 FTS content 行，
+		// 万级高命中查询的物化成本压不住（INT-209 第 1 轮实测）。含 NUL 的
+		// 查询整组退回 LIKE：FTS5 字面量无法表达 NUL（查询解析器提前终止报
+		// unterminated string），而旧 LIKE 对 NUL 正常工作（旧行为是空结果
+		// 而非报错），不能为修索引引入 500 回归。
+		expr = "(issues.id IN (SELECT issue_fts_docs.issue_id FROM issues_fts JOIN issue_fts_docs ON issue_fts_docs.doc = issues_fts.rowid WHERE issues_fts MATCH ?) " +
+			"OR lower(issues.author_login) LIKE ? ESCAPE '\\' OR lower(" + referenceExpr + ") LIKE ? ESCAPE '\\')"
+		args = append(args, ftsMatchLiteral(query), pattern, pattern)
+	} else {
+		expr = "(lower(issues.title) LIKE ? ESCAPE '\\' OR lower(issues.body) LIKE ? ESCAPE '\\' " +
+			"OR lower(issues.author_login) LIKE ? ESCAPE '\\' OR lower(" + referenceExpr + ") LIKE ? ESCAPE '\\')"
+		args = append(args, pattern, pattern, pattern, pattern)
+	}
 	if num, ok := issueQueryAsNumber(query); ok {
 		expr += " OR issues.sequence_number = ? OR gh.number = ?"
 		args = append(args, num, num)
