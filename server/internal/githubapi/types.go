@@ -105,15 +105,6 @@ func (e *StatusError) Error() string {
 	return fmt.Sprintf("githubapi: %s %s -> %d: %s", e.Method, e.URL, e.StatusCode, truncateBody(e.Body))
 }
 
-// IsForbidden 判断 err 是否 403（直接或包在链里）。
-func IsForbidden(err error) bool {
-	var se *StatusError
-	if errors.As(err, &se) {
-		return se.StatusCode == http.StatusForbidden
-	}
-	return errors.Is(err, ErrForbidden)
-}
-
 // IsNotFound 判断 err 是否 404（评论被删后 PATCH 失败，回退到按标记找回）。
 func IsNotFound(err error) bool {
 	var se *StatusError

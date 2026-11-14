@@ -48,9 +48,6 @@ export type ReviewUnmeasurable = Schemas["ReviewUnmeasurable"];
 
 /* ---------------- /reviews 首页 PR 动态（INT-141） ---------------- */
 
-export type ReviewPullRequestGroup =
-  Schemas["ReviewPullRequestActivity"]["group"];
-
 /** 进行中细分阶段；仅 in_progress 组的行返回。 */
 export type ReviewActivityStage = NonNullable<
   Schemas["ReviewPullRequestActivity"]["stage"]
@@ -174,18 +171,6 @@ export function reviewRunStatusLabel(status: ReviewRunStatus): string {
       return "已取消";
     default:
       return status;
-  }
-}
-
-/** PR 动态分组标签（服务端已算好分组，这里只做文案）。 */
-export function reviewGroupLabel(group: ReviewPullRequestGroup): string {
-  switch (group) {
-    case "in_progress":
-      return "进行中";
-    case "needs_action":
-      return "需要处理";
-    case "recently_passed":
-      return "最近通过";
   }
 }
 

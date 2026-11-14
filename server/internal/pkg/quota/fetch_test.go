@@ -1332,11 +1332,22 @@ func TestRegistryProvidesAllFetchers(t *testing.T) {
 			t.Fatalf("供应商 %s 缺少默认 baseURL", p.ID)
 		}
 	}
-	if _, ok := Lookup(nil, "factory"); !ok {
-		t.Fatalf("Lookup 应能找到 factory")
+	// 未知 id 的未命中语义由 service 层 providerByID 承担（见
+	// TestQuotaService 的 Create/Probe 未知供应商用例）；Lookup 已删，
+	// 这里只核注册表内容：唯一且包含 factory。
+	foundFactory := false
+	seen := make(map[string]bool, len(Registry(nil)))
+	for _, p := range Registry(nil) {
+		if seen[p.ID] {
+			t.Fatalf("供应商 id 重复：%q", p.ID)
+		}
+		seen[p.ID] = true
+		if p.ID == "factory" {
+			foundFactory = true
+		}
 	}
-	if _, ok := Lookup(nil, "nope"); ok {
-		t.Fatalf("Lookup 不应找到未知供应商")
+	if !foundFactory {
+		t.Fatalf("Registry 应能找到 factory")
 	}
 }
 
@@ -2356,9 +2367,16 @@ func TestOpenDesignUnknownAndMissingDurations(t *testing.T) {
 
 // 模型面密钥（网页「API Key」页给的 sk-amr-…）必须在发请求前被拦下并明确说明。
 func TestOpenDesignModelPlaneKeyRejected(t *testing.T) {
-	provider, ok := Lookup(nil, "opendesign")
-	if !ok {
-		t.Fatalf("Lookup 应能找到 opendesign")
+	var provider Provider
+	found := false
+	for _, p := range Registry(nil) {
+		if p.ID == "opendesign" {
+			provider, found = p, true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("Registry 应能找到 opendesign")
 	}
 	if provider.Validate == nil {
 		t.Fatalf("opendesign 应带 Validate 钩子")

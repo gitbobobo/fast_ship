@@ -2290,23 +2290,6 @@ func normalizeMediaURL(rawURL string) (string, error) {
 	return normalizeAllowedURL(rawURL, isAllowedGitHubMediaURL)
 }
 
-// IsGitHubMediaURL URL 是否属于 GitHub 媒体域（与 media-proxy 白名单同一
-// 口径，且必须是完整的 https URL：有 host、无 userinfo、无 fragment）。
-// service 层用它决定下载失败后是否值得带 App 安装令牌重试——外部图床拿了
-// 令牌等于拿到仓库凭证，所以按「可发请求的地址」准入而不是只看域名；http
-// 明文的 GitHub 域名同样不算（截图下载面只走 https）。只影响这个导出闸门，
-// isAllowedGitHubMediaURL 保持原语义（GitHub 媒体面有意允许 http）。
-func IsGitHubMediaURL(raw string) bool {
-	parsed, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil || parsed == nil {
-		return false
-	}
-	if parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" {
-		return false
-	}
-	return isAllowedGitHubMediaURL(parsed)
-}
-
 // githubHost 公共 GitHub 的 Web 域；部署未配置 GHE 时的默认 Web 地址。
 const githubHost = "github.com"
 
@@ -2371,7 +2354,8 @@ func normalizeGitHubWebHost(webHost string) string {
 
 // IsGitHubMediaURLFor 带部署口径的 bearer 重试闸门：能否把 App 安装令牌发给
 // 该上游。令牌属于一个 GitHub 实例，所以只发给本部署的实例：公共 GitHub
-// 部署（webHost 为空或 github.com）沿用 IsGitHubMediaURL 的媒体域白名单；
+// 部署（webHost 为空或 github.com）沿用 isAllowedGitHubMediaURL 的媒体域白名单
+// （另有导出闸门的形状准入：https、无 userinfo、无 fragment）；
 // GHE 部署只放行实例自己的附件直链（https、authority 恰为 webHost、无
 // userinfo、无 fragment、规范附件路径），公共 GitHub 域也不放行——那不是
 // 本实例，令牌在那里也没有意义。外部图床与同 host 的其他路径一律不放行。
@@ -2399,17 +2383,6 @@ func IsGitHubMediaURLFor(raw, webHost string) bool {
 		return false
 	}
 	return isGitHubAttachmentPath(parsed)
-}
-
-// IsGitHubAttachmentURL URL 是否是公共 GitHub 的附件形态直链：github.com 的
-// user-attachments/assets 附件，或 user-images.githubusercontent.com 用户
-// 图片——GitHub 拖入/粘贴附件的标准形态，路径通常没有文件名扩展名。service
-// 层收集 PR 描述裸贴链接时用它豁免「必须有位图扩展名」的要求；能否发 App
-// 安装令牌另由 IsGitHubMediaURL / IsGitHubMediaURLFor 按「可发请求的地址」
-// 把关，两个口径独立。公共 GitHub 固定口径；GHE 部署用
-// IsGitHubAttachmentURLFor。
-func IsGitHubAttachmentURL(raw string) bool {
-	return IsGitHubAttachmentURLFor(raw, githubHost)
 }
 
 // IsGitHubAttachmentURLFor URL 是否是该部署 GitHub 实例的附件形态直链。
@@ -2461,19 +2434,6 @@ func isAllowedGitHubMediaURL(parsed *url.URL) bool {
 	default:
 		return false
 	}
-}
-
-// isAllowedContentType 内容类型准入：GitHub 媒体面收位图与视频；截图面
-// （imagesOnly）只收位图——octet-stream 与空 Content-Type 时按扩展名回退。
-// svg 两个面都拒（INT-171）：用户态媒体代理的响应字节以 Fast Ship 同源交付，
-// svg 在新标签页打开就是同源文档、能执行脚本，视觉审查也只吃位图。拒收
-// 两路并行——内容类型按 image/svg 前缀拒（标准写法 image/svg+xml 与非标准
-// 变体 image/svg 一并覆盖），扩展名回退集合不含 .svg。
-// 只答放不放行的薄封装；写缓存/回客户端前用 normalizeResponseContentType
-// 拿规范化类型。
-func (s *ProxyService) isAllowedContentType(contentType string, rawURL string) bool {
-	_, ok := s.normalizeMediaContentType(contentType, rawURL)
-	return ok
 }
 
 // normalizeMediaContentType 「准入 + 规范化」判定：上游类型原样是

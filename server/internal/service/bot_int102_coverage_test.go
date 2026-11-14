@@ -1550,7 +1550,7 @@ func TestBotPreCompactionArchive(t *testing.T) {
 	if dbArchive != 1 || dbSummary != wantBatches || totalReq != 1+int64(wantBatches) {
 		t.Fatalf("维护请求应恰为归档1+摘要%d，实得 total=%d arch=%d sum=%d", wantBatches, totalReq, dbArchive, dbSummary)
 	}
-	fresh, _ := repository.NewBotMaintenanceRepository(env.db).FindByID(maint.ID)
+	fresh := maintenanceRunByID(t, env.db, maint.ID)
 	if fresh.ArchiveAttemptedAt == nil {
 		t.Fatalf("archive_attempted_at 应持久化")
 	}
@@ -1748,7 +1748,7 @@ func TestBotNightlyConflictAndRecovery(t *testing.T) {
 	if err := env.bots.RecoverOnStartup(); err != nil {
 		t.Fatalf("recover: %v", err)
 	}
-	fresh, _ := repository.NewBotMaintenanceRepository(env.db).FindByID(crash.ID)
+	fresh := maintenanceRunByID(t, env.db, crash.ID)
 	if fresh.Status != model.BotMaintenanceFailed || fresh.ErrorCode == nil || *fresh.ErrorCode != "server_restarted" {
 		t.Fatalf("恢复应标记 server_restarted: %+v", fresh)
 	}

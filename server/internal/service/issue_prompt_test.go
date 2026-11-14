@@ -3,7 +3,6 @@ package service
 import (
 	"context"
 	"errors"
-	"strings"
 	"testing"
 	"time"
 
@@ -346,113 +345,5 @@ func TestIssuePromptServiceUpdatePromptsExistingReadError(t *testing.T) {
 	})
 	if !errors.Is(err, errs.ErrInternal) {
 		t.Fatalf("expected ErrInternal on existing-read error, got: %v", err)
-	}
-}
-
-// TestBuildIssuePrompt 新提示词格式（INT-89）：模板正文在前、引用块在结尾、
-// 无 /fast-ship 前缀、npx 命令带 --skill fast-ship、含项目/问题 ID、
-// 推荐理由仅推荐场景出现。
-func TestBuildIssuePrompt(t *testing.T) {
-	cases := []struct {
-		name  string
-		input IssuePromptInput
-		want  string
-	}{
-		{
-			name:  "normal",
-			input: IssuePromptInput{ProjectID: "p1", IssueID: "i1", Content: "请处理此问题"},
-			want: `请处理此问题
-
-> 以下信息由 Fast Ship 附加。请使用 fast-ship 技能查询并处理该问题。
-> 若当前环境未安装 fast-ship 技能，先征得用户同意，再执行：
-> ` + "`npx skills add https://github.com/gitbobobo/fast_ship --skill fast-ship`" + `
-> 项目ID：p1
-> 问题ID：i1`,
-		},
-		{
-			name:  "recommendation with reason",
-			input: IssuePromptInput{ProjectID: "p1", IssueID: "i2", Content: "请处理此问题", Reason: "阻塞主链路"},
-			want: `请处理此问题
-
-> 以下信息由 Fast Ship 附加。请使用 fast-ship 技能查询并处理该问题。
-> 若当前环境未安装 fast-ship 技能，先征得用户同意，再执行：
-> ` + "`npx skills add https://github.com/gitbobobo/fast_ship --skill fast-ship`" + `
-> 项目ID：p1
-> 问题ID：i2
-> 推荐理由：阻塞主链路`,
-		},
-		{
-			name:  "multiline reason keeps blockquote",
-			input: IssuePromptInput{ProjectID: "p1", IssueID: "i3", Content: "正文", Reason: "阻塞主链路\n依赖 INT-80"},
-			want: `正文
-
-> 以下信息由 Fast Ship 附加。请使用 fast-ship 技能查询并处理该问题。
-> 若当前环境未安装 fast-ship 技能，先征得用户同意，再执行：
-> ` + "`npx skills add https://github.com/gitbobobo/fast_ship --skill fast-ship`" + `
-> 项目ID：p1
-> 问题ID：i3
-> 推荐理由：阻塞主链路
-> 依赖 INT-80`,
-		},
-		{
-			name:  "whitespace reason omitted",
-			input: IssuePromptInput{ProjectID: "p1", IssueID: "i3", Content: "请处理此问题", Reason: "   "},
-			want: `请处理此问题
-
-> 以下信息由 Fast Ship 附加。请使用 fast-ship 技能查询并处理该问题。
-> 若当前环境未安装 fast-ship 技能，先征得用户同意，再执行：
-> ` + "`npx skills add https://github.com/gitbobobo/fast_ship --skill fast-ship`" + `
-> 项目ID：p1
-> 问题ID：i3`,
-		},
-		{
-			name:  "trailing newlines trimmed from content",
-			input: IssuePromptInput{ProjectID: "p1", IssueID: "i4", Content: "请处理此问题\n\n"},
-			want: `请处理此问题
-
-> 以下信息由 Fast Ship 附加。请使用 fast-ship 技能查询并处理该问题。
-> 若当前环境未安装 fast-ship 技能，先征得用户同意，再执行：
-> ` + "`npx skills add https://github.com/gitbobobo/fast_ship --skill fast-ship`" + `
-> 项目ID：p1
-> 问题ID：i4`,
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := BuildIssuePrompt(tc.input)
-			if got != tc.want {
-				t.Fatalf("unexpected prompt:\n%s", got)
-			}
-			if strings.HasPrefix(got, "/fast-ship") {
-				t.Fatalf("prompt must not carry /fast-ship prefix: %q", got)
-			}
-			if !strings.Contains(got, "--skill fast-ship") {
-				t.Fatalf("prompt must carry --skill fast-ship: %q", got)
-			}
-			// 附加块是末尾连续 > 行：从「以下信息由 Fast Ship 附加」行起到结尾都应以 > 开头。
-			lines := strings.Split(got, "\n")
-			blockStart := -1
-			for i, line := range lines {
-				if strings.HasPrefix(line, "> 以下信息由 Fast Ship 附加") {
-					blockStart = i
-					break
-				}
-			}
-			if blockStart < 0 {
-				t.Fatalf("appended block missing: %q", got)
-			}
-			for _, line := range lines[blockStart:] {
-				if !strings.HasPrefix(line, ">") {
-					t.Fatalf("appended block must be a trailing > quote block, line: %q", line)
-				}
-			}
-			hasReason := strings.Contains(got, "推荐理由")
-			if strings.TrimSpace(tc.input.Reason) == "" && hasReason {
-				t.Fatalf("non-recommendation prompt must omit 推荐理由: %q", got)
-			}
-			if strings.TrimSpace(tc.input.Reason) != "" && !hasReason {
-				t.Fatalf("recommendation prompt must include 推荐理由: %q", got)
-			}
-		})
 	}
 }

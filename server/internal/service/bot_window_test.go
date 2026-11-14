@@ -17,6 +17,7 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/repository"
 	"github.com/google/uuid"
+	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
 
@@ -73,7 +74,9 @@ func (w *windowProbeSrv) setModels(code int, body string) {
 // 地址与密钥落在 AI 提供商行（INT-133），bot 行只存引用。
 func createBotRowAt(t *testing.T, env *botTestEnv, userID, baseURL, modelName string) *model.Bot {
 	t.Helper()
-	cipher, last4, err := env.bots.encryptAPIKey("sk-window-4321")
+	// 加密口径与生产一致：走 AIProviderService（BotService 不再自带加密），
+	// 同一 cfg.Encryption.Key，密文可被 decryptAPIKey 解开。
+	cipher, last4, err := NewAIProviderService(env.db, env.cfg, zap.NewNop()).encryptAPIKey("sk-window-4321")
 	if err != nil {
 		t.Fatalf("encrypt: %v", err)
 	}
@@ -120,7 +123,7 @@ func createBotRowAt(t *testing.T, env *botTestEnv, userID, baseURL, modelName st
 // 与密钥，INT-133 后地址与密钥只存在于 provider 行）。
 func createProviderRowAt(t *testing.T, env *botTestEnv, userID, baseURL, apiKey string) string {
 	t.Helper()
-	cipher, last4, err := env.bots.encryptAPIKey(apiKey)
+	cipher, last4, err := NewAIProviderService(env.db, env.cfg, zap.NewNop()).encryptAPIKey(apiKey)
 	if err != nil {
 		t.Fatalf("encrypt: %v", err)
 	}
@@ -602,7 +605,7 @@ func TestBotCompactionPrecheckFastFail(t *testing.T) {
 	if comp.ErrorCode == nil || *comp.ErrorCode != "target_unreachable" {
 		t.Fatalf("应记 target_unreachable: %+v", comp.ErrorCode)
 	}
-	fresh, _ := repository.NewBotMaintenanceRepository(env.db).FindByID(out.Run.ID)
+	fresh := maintenanceRunByID(t, env.db, out.Run.ID)
 	if fresh.Status != model.BotMaintenanceFailed {
 		t.Fatalf("维护运行应 failed: %s", fresh.Status)
 	}
@@ -1766,10 +1769,15 @@ func seedMaintRun(t *testing.T, env *botTestEnv, botID string) *model.BotMainten
 		ConfigSnapshotJSON: "{}", InputSnapshotJSON: "{}", ResultJSON: "{}",
 		CreatedAt: now, StartedAt: &now,
 	}
-	if err := repository.NewBotMaintenanceRepository(env.db).CreateTx(env.db, run); err != nil {
+	// 夹具必须新建一行：trigger key 含随机段，命中已有行说明夹具没落库。
+	maint, created, err := repository.NewBotMaintenanceRepository(env.db).CreateOrFindTx(env.db, run)
+	if err != nil {
 		t.Fatalf("seed maint run: %v", err)
 	}
-	return run
+	if !created || maint.ID != run.ID {
+		t.Fatalf("seed maint run: 期望新建一行，实得 created=%v id=%s", created, maint.ID)
+	}
+	return maint
 }
 
 // TestAuxModelRequestCapsOutputToDetectedLimit（F1）：即使调用方给超大 maxOut，

@@ -329,6 +329,7 @@ func TestGitHubReviewClientErrorPassthrough(t *testing.T) {
 	}{
 		{"404", &githubapi.StatusError{StatusCode: 404, Method: "PATCH", URL: "/x", Body: "nf"}, true, false, false},
 		{"403", &githubapi.StatusError{StatusCode: 403, Method: "GET", URL: "/y", Body: "f"}, false, true, false},
+		{"400", &githubapi.StatusError{StatusCode: 400, Method: "GET", URL: "/b", Body: "bad"}, false, false, false},
 		{"too_large", &githubapi.StatusError{StatusCode: 406, Method: "GET", URL: "/z",
 			Body: `{"errors":[{"code":"too_large"}]}`}, false, false, true},
 		{"网络错误", errors.New("dial tcp: refused"), false, false, false},
@@ -370,6 +371,10 @@ func TestForgeStatusErrorRecognized(t *testing.T) {
 	}
 	if !IsForbidden(fmt.Errorf("wrap: %w", ErrForbidden)) {
 		t.Fatal("ErrForbidden 哨兵应被 IsForbidden 识别")
+	}
+	// githubapi.ErrForbidden 哨兵（GitHub 适配器透传形态）同口径识别。
+	if !IsForbidden(githubapi.ErrForbidden) || !IsForbidden(fmt.Errorf("wrap: %w", githubapi.ErrForbidden)) {
+		t.Fatal("githubapi.ErrForbidden 哨兵应被 IsForbidden 识别（含链中）")
 	}
 }
 

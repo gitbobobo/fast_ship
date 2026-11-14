@@ -31,12 +31,6 @@ func (r *BotWritePolicyRuleRepository) ListByBot(botID string) ([]model.BotWrite
 	return rows, err
 }
 
-// UpsertEnabled 写开关与误判状态（读-改-写；SQLite 单写者，调用方保证
-// 同一 (bot, rule) 的并发修改只有检测器与用户开关两处，且都以最新行为准）。
-func (r *BotWritePolicyRuleRepository) UpsertEnabled(row *model.BotWritePolicyRule) error {
-	return r.db.Save(row).Error
-}
-
 // UpsertEnabledTx 事务版写开关与误判状态：误判检测的「读行 → 计数推进 →
 // 关闭落库 → 通知落库」必须整体在一个事务里，否则并发丢更新、或崩溃把
 // 关闭与通知拆成两半（已关规则直接 return，通知就永远丢了）。
