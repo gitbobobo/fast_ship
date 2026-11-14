@@ -11,9 +11,8 @@ const (
 // ReviewClient 审查链路对代码托管平台的全部访问面（INT-167 泛化）：githubapi
 // .GitHubClient 首位的 installationID 由适配器构造时收编，方法面只描述平台
 // 无关的审查语义。ResolveInstallation 不在本接口——App 安装解析是 GitHub
-// 专属 seam，留在 githubapi/githubapp 侧；rerun 等需要安装 id 的路径经解析
-// 后把值传进 resolver。GetRepository 的 installationID=0「先解析安装再查仓
-// 库」语义由 GitHub 适配器原样透传保底。
+// 专属 seam，由 resolver 在构造适配器时按仓库现解析（INT-230），调用方不再
+// 透传安装快照。GetRepository 的安装语义由适配器原样透传保底。
 type ReviewClient interface {
 	// 元数据
 	GetPullRequest(ctx context.Context, repoFullName string, number int) (*PullRequest, error)
@@ -55,7 +54,11 @@ type ReviewClient interface {
 
 // BearerSource 审查客户端可选暴露的媒体下载 bearer：私有仓库附件下载用
 // （githubapp.Client 持有安装令牌；无凭证实现返回空串 = 匿名下载）。经类型
-// 断言取用，不进 ReviewClient 方法面。
+// 断言取用，不进 ReviewClient 方法面。凭证缓存作用域由 BearerScope 给出：
+// 同一作用域的媒体缓存条目视为同一凭证，轮换/换集成不误命中。
 type BearerSource interface {
 	Bearer(ctx context.Context) (string, error)
+	// BearerScope 凭证缓存作用域（如 install:<id>）；调用方只透传给媒体
+	// 缓存，不作平台判别。
+	BearerScope() string
 }

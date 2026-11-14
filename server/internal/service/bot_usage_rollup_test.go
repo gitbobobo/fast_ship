@@ -474,7 +474,11 @@ func TestBotUsageRollupTaskNameSurvivesDelete(t *testing.T) {
 	env := setupBotTestEnv(t)
 	userID := createBotTestUser(t, env.db, "tasknamedel")
 	setUserTimezone(t, env, userID, "UTC")
-	bot := env.createBot(t, userID)
+	created := env.createBot(t, userID)
+	bot, err := env.bots.bots.Get(created.ID)
+	if err != nil {
+		t.Fatalf("读 bot: %v", err)
+	}
 
 	fixed := time.Now().UTC().Truncate(time.Hour)
 	env.bots.setNowFn(func() time.Time { return fixed })
@@ -488,7 +492,7 @@ func TestBotUsageRollupTaskNameSurvivesDelete(t *testing.T) {
 	})
 	seedUsageRequest(t, env, run.ID, ptrCost(1.0), "tnd-1")
 
-	if err := env.bots.rollupBotUsage(bot.ID, fixed, true, false); err != nil {
+	if err := env.bots.rollupBotUsage(botUsageMetaOf(bot), fixed, true, false); err != nil {
 		t.Fatalf("first rollup: %v", err)
 	}
 	yesterday := usageDayAt(fixed, 1).Format("2006-01-02")
@@ -505,7 +509,7 @@ func TestBotUsageRollupTaskNameSurvivesDelete(t *testing.T) {
 	if err := env.db.Delete(&model.BotScheduleTask{}, "id = ?", task.ID).Error; err != nil {
 		t.Fatalf("delete task: %v", err)
 	}
-	if err := env.bots.rollupBotUsage(bot.ID, fixed, true, false); err != nil {
+	if err := env.bots.rollupBotUsage(botUsageMetaOf(bot), fixed, true, false); err != nil {
 		t.Fatalf("re-rollup: %v", err)
 	}
 	var row2 model.BotUsageDaily
@@ -544,7 +548,11 @@ func TestBotUsageRollupTaskNameTombstone(t *testing.T) {
 	env := setupBotTestEnv(t)
 	userID := createBotTestUser(t, env.db, "tasktomb")
 	setUserTimezone(t, env, userID, "UTC")
-	bot := env.createBot(t, userID)
+	created := env.createBot(t, userID)
+	bot, err := env.bots.bots.Get(created.ID)
+	if err != nil {
+		t.Fatalf("读 bot: %v", err)
+	}
 
 	// 注入时钟固定在 UTC 凌晨 02:00——run 落在 UTC 前天 22:00，东京口径
 	// 下也是「昨天或更早」，两个时区都在可汇总范围里。
@@ -564,7 +572,7 @@ func TestBotUsageRollupTaskNameTombstone(t *testing.T) {
 	if err := env.bots.deleteScheduleTask(bot.ID, task.ID, ""); err != nil {
 		t.Fatalf("delete task: %v", err)
 	}
-	if err := env.bots.rollupBotUsage(bot.ID, fixed, true, false); err != nil {
+	if err := env.bots.rollupBotUsage(botUsageMetaOf(bot), fixed, true, false); err != nil {
 		t.Fatalf("rollup: %v", err)
 	}
 	assertTaskName := func(want string) {
@@ -587,7 +595,7 @@ func TestBotUsageRollupTaskNameTombstone(t *testing.T) {
 
 	// 有效时区变化 → 整表清空重建：旧快照已没了，名字仍要来自墓碑。
 	setUserTimezone(t, env, userID, "Asia/Tokyo")
-	if err := env.bots.rollupBotUsage(bot.ID, fixed, true, false); err != nil {
+	if err := env.bots.rollupBotUsage(botUsageMetaOf(bot), fixed, true, false); err != nil {
 		t.Fatalf("re-rollup after tz change: %v", err)
 	}
 	assertTaskName(task.Name)
@@ -619,7 +627,7 @@ func TestBotUsageRollupWriteProbeGate(t *testing.T) {
 
 	spansOf := func() []string {
 		t.Helper()
-		plan, err := env.bots.usageRollupPlan(env.db, bot, fixed, false)
+		plan, err := env.bots.usageRollupPlan(env.db, botUsageMetaOf(bot), fixed, false)
 		if err != nil {
 			t.Fatalf("plan: %v", err)
 		}

@@ -243,7 +243,7 @@ type stubReviewResolver struct {
 	client forge.ReviewClient
 }
 
-func (r stubReviewResolver) ClientFor(context.Context, string, string, int64) (forge.ReviewClient, error) {
+func (r stubReviewResolver) ClientFor(context.Context, string, string) (forge.ReviewClient, error) {
 	return r.client, nil
 }
 

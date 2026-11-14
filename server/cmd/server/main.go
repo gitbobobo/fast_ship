@@ -17,7 +17,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
 	"github.com/godbobo/fast_ship/server/internal/config"
-	"github.com/godbobo/fast_ship/server/internal/forge"
 	"github.com/godbobo/fast_ship/server/internal/handler"
 	"github.com/godbobo/fast_ship/server/internal/middleware"
 	"github.com/godbobo/fast_ship/server/internal/model"
@@ -107,6 +106,12 @@ var autoMigrateModels = []interface{}{
 	// host_key 回填见 migrateForgeHostKeys（必须先于 createBootIndexes 的
 	// 同归一主机唯一索引）。
 	&model.ForgeIntegration{},
+	// OAuth 2.1 授权服务（INT-222）：客户端注册、授权总账、授权码与令牌。
+	&model.OAuthClient{},
+	&model.OAuthAuthorization{},
+	&model.OAuthAuthorizationCode{},
+	&model.OAuthAccessToken{},
+	&model.OAuthRefreshToken{},
 }
 
 func init() {
@@ -273,6 +278,8 @@ func main() {
 	deploymentSettingsRepo := repository.NewDeploymentSettingsRepository(db)
 	// 代码仓集成（INT-166）。
 	forgeIntegrationRepo := repository.NewForgeIntegrationRepository(db)
+	// OAuth 2.1 授权服务（INT-222）。
+	oauthRepo := repository.NewOAuthRepository(db)
 
 	// 业务库就绪后再注入归属解析器：注入前的入库日志只能是启动类（显式 system_scope）。
 	selfLogPipeline.SetOwnerResolver(service.NewSelfLogOwnerResolver(db))
@@ -294,6 +301,14 @@ func main() {
 	// 部署设置（INT-129）：public_url 网页配置的唯一读取入口；既有读取点
 	// 统一改经它解析。
 	deploymentSettingsService := service.NewDeploymentSettingsService(deploymentSettingsRepo, cfg)
+	// OAuth 2.1 授权服务（INT-222）：所有对外 URL（issuer、发现文档、端点）
+	// 一律基于部署公开基址拼装，不新增 config 字段。
+	oauthService := service.NewOAuthService(oauthRepo, userRepo, projectRepo, authService, service.OAuthServiceOptions{
+		PublicURL: deploymentSettingsService,
+		Logger:    appLogger.With(slog.String("module", "oauth")),
+	})
+	// 改密联动：改密事务内同步吊销该用户全部 OAuth 授权与令牌。
+	authService.SetOAuthService(oauthService)
 	// 集成（INT-129）：部署级 GitHub App 身份，管理员配置、保存即生效。
 	integrationService := service.NewIntegrationService(deploymentSettingsRepo, cfg, githubLogger)
 	integrationService.SetPublicURLSource(deploymentSettingsService)
@@ -450,24 +465,10 @@ func main() {
 	// PR 审查（INT-135）：webhook 幂等入口 + 审查调度循环（防抖/排队/派发/
 	// 超时/同步/工作区清理）。ghPR 是 App 访问面，App 身份与 public_url
 	// 分别取部署集成与部署设置服务；T3 线程/工作区与截图缓存复用现有服务。
-	// 截图下载的令牌来源（INT-167）：按运行/设置的集成身份解析审查客户端，
-	// 再向支持凭证的实现取 bearer——GitHub 是安装令牌，Forgejo 是机器人 PAT
-	// （经 forgeSource 现取，review_assets 只对 GitHub 实例的附件路径使用）；
-	// fake/不支持凭证的实现保持匿名（返回空串）。
-	reviewClients := forge.NewReviewClients(ghPR, forgeSource)
-	mediaBearer := func(ctx context.Context, integrationID string, installationID int64) (string, error) {
-		client, err := reviewClients.ClientFor(ctx, integrationID, "", installationID)
-		if err != nil {
-			return "", err
-		}
-		source, ok := client.(forge.BearerSource)
-		if !ok {
-			return "", nil
-		}
-		return source.Bearer(ctx)
-	}
+	// 截图 bearer 凭证收进 GitHub 适配器（INT-230）：私有仓库附件下载经审查
+	// 客户端的 BearerSource 断言取安装令牌，无需在此另建凭证闭包。
 	reviewService := service.NewReviewService(db, projectRepo, webhookDeliveryRepo, notificationSink,
-		ghPR, integrationService, deploymentSettingsService, t3ThreadsService, reviewMediaService, mediaBearer,
+		ghPR, integrationService, deploymentSettingsService, t3ThreadsService, reviewMediaService,
 		forgeIntegrationRepo, cfg, reviewLogger)
 	// 删除项目会 CASCADE 掉审查运行行，先让审查服务尽力停线程/归档/回收工作区。
 	projectService.SetReviewCleaner(reviewService)
@@ -514,6 +515,11 @@ func main() {
 	memberHandler := handler.NewMemberHandler(memberService)
 	deploymentSettingsHandler := handler.NewDeploymentSettingsHandler(deploymentSettingsService)
 	forgeIntegrationHandler := handler.NewForgeIntegrationHandler(forgeIntegrationService)
+	oauthHandler := handler.NewOAuthHandler(oauthService)
+
+	// MCP Streamable HTTP 端点（INT-222）：工具层复用 IssueService，鉴权挑战
+	// 复用 OAuth 令牌校验。
+	mcpHandler := handler.NewMCPHandler(service.NewMCPService(issueService))
 
 	cleanAuthArtifacts := func() {
 		if err := jwtBlacklistRepo.CleanExpired(); err != nil {
@@ -588,7 +594,7 @@ func main() {
 	r.MaxMultipartMemory = uploadMultipartMemoryLimit(cfg.Upload.MaxFileSize)
 
 	// 注册路由
-	router.Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, githubTokenHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, screenshotAnnotationHandler, mediaProxyHandler, t3EnvironmentHandler, t3BindingHandler, notificationHandler, reviewHandler, reviewAgentHandler, reviewService, botHandler, aiProviderHandler, selfLogHandler, githubWebhookHandler, forgeWebhookHandler, quotaHandler, deploymentGitHubAppHandler, memberHandler, deploymentSettingsHandler, forgeIntegrationHandler, authService, apiKeyRepo)
+	router.Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, githubTokenHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, screenshotAnnotationHandler, mediaProxyHandler, t3EnvironmentHandler, t3BindingHandler, notificationHandler, reviewHandler, reviewAgentHandler, reviewService, botHandler, aiProviderHandler, selfLogHandler, githubWebhookHandler, forgeWebhookHandler, quotaHandler, deploymentGitHubAppHandler, memberHandler, deploymentSettingsHandler, forgeIntegrationHandler, mcpHandler, oauthHandler, oauthService, authService, apiKeyRepo)
 
 	// 启动服务。ReadHeaderTimeout 挡慢速请求头长期占连接；不设 Read/WriteTimeout
 	// 保住上传/下载/媒体代理等长传输；IdleTimeout 回收 keep-alive 空闲连接。

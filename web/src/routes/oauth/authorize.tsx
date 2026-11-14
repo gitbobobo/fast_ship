@@ -1,0 +1,306 @@
+import { useMemo, useState } from "react";
+import { Navigate, useLocation, useSearchParams } from "react-router";
+import { AlertTriangle, Loader2 } from "lucide-react";
+
+import { FastShipLogo } from "@/components/ui/fast-ship-logo";
+
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Label } from "@/components/ui/label";
+import { Checkbox } from "@/components/ui/checkbox";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import { useAuthStore } from "@/lib/store/auth-store";
+import { useOAuthAuthorizePreview } from "@/lib/hooks/use-oauth";
+import { oauthApi } from "@/lib/api/oauth";
+import { Link } from "react-router";
+import { errorText, loginRedirectPath } from "@/lib/api/client";
+import { authApi } from "@/lib/api/auth";
+
+/** 缺一不可的 PKCE 参数；state 与 scope 不参与预取，只透传。 */
+const REQUIRED_PARAMS = [
+  "client_id",
+  "redirect_uri",
+  "code_challenge",
+  "code_challenge_method",
+] as const;
+
+function missingParams(search: URLSearchParams): string[] {
+  return REQUIRED_PARAMS.filter((key) => !search.get(key));
+}
+
+export default function OAuthAuthorizePage() {
+  const token = useAuthStore((s) => s.token);
+  const location = useLocation();
+  const [searchParams] = useSearchParams();
+
+  // 未登录：带完整 query 去登录页，登录后由 ?next 机制回到本页，
+  // PKCE 的 code_challenge/state 是一次性的，丢了整个授权就得重来。
+  if (!token) {
+    const next = `${location.pathname}${location.search}`;
+    return (
+      <Navigate to={`/login?next=${encodeURIComponent(next)}`} replace />
+    );
+  }
+
+  return <AuthorizeConsent searchParams={searchParams} />;
+}
+
+function AuthorizeConsent({ searchParams }: { searchParams: URLSearchParams }) {
+  const logout = useAuthStore((s) => s.logout);
+  const missing = useMemo(() => missingParams(searchParams), [searchParams]);
+  const previewParams = missing.length
+    ? null
+    : {
+        client_id: searchParams.get("client_id")!,
+        redirect_uri: searchParams.get("redirect_uri")!,
+        code_challenge: searchParams.get("code_challenge")!,
+        code_challenge_method: searchParams.get(
+          "code_challenge_method",
+        )! as "S256",
+      };
+
+  const preview = useOAuthAuthorizePreview(previewParams);
+
+  // 项目多选与读写档：至少选 1 个项目才允许提交。
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [write, setWrite] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+
+  if (missing.length) {
+    return (
+      <ConsentShell>
+        <ErrorPanel
+          title="授权链接无效"
+          message={`缺少必要参数：${missing.join("、")}。请从应用发起授权流程重新进入。`}
+        />
+      </ConsentShell>
+    );
+  }
+
+  if (preview.isLoading) {
+    return (
+      <ConsentShell>
+        <div className="flex items-center justify-center gap-2 py-12 text-sm text-muted-foreground">
+          <Loader2 className="h-4 w-4 animate-spin" />
+          正在加载授权信息...
+        </div>
+      </ConsentShell>
+    );
+  }
+
+  if (preview.isError || !preview.data) {
+    return (
+      <ConsentShell>
+        <ErrorPanel
+          title="无法发起授权"
+          message={errorText(
+            preview.error,
+            "该应用不存在或授权参数非法，请确认链接来自可信来源后重试。",
+          )}
+        />
+      </ConsentShell>
+    );
+  }
+
+  const { client_name, projects, username, email } = preview.data;
+
+  const toggleProject = (id: string, checked: boolean) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (checked) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  };
+
+  const onSubmit = async () => {
+    setSubmitError(null);
+    setSubmitting(true);
+    try {
+      const res = await oauthApi.authorize({
+        client_id: previewParams!.client_id,
+        redirect_uri: previewParams!.redirect_uri,
+        code_challenge: previewParams!.code_challenge,
+        code_challenge_method: "S256",
+        state: searchParams.get("state") ?? undefined,
+        project_ids: [...selectedIds],
+        write,
+      });
+      // redirect 由服务端拼好（含 code 与 state），整页跳转出应用。
+      window.location.href = res.data.redirect;
+    } catch (err) {
+      setSubmitError(errorText(err, "授权失败，请重试"));
+      setSubmitting(false);
+    }
+  };
+
+  // 拒绝授权：走服务端 /oauth/deny——redirect_uri 的注册匹配由服务端
+  // 校验后 302 回调客户端并携带 error=access_denied（RFC 6749 §4.1.2.1），
+  // 客户端收到明确的中止信号而不是干等。
+  const onDeny = () => {
+    const deny = new URL("/oauth/deny", window.location.origin);
+    deny.searchParams.set("client_id", previewParams!.client_id);
+    deny.searchParams.set("redirect_uri", previewParams!.redirect_uri);
+    const state = searchParams.get("state");
+    if (state) deny.searchParams.set("state", state);
+    window.location.href = deny.pathname + deny.search;
+  };
+
+  // 切换账号：与 UserNav 同语义——先吊销服务端会话（失败也继续），再清
+  // 本地凭证进登录页，回跳参数保留本次授权请求，并带上客户端名供登录页提示。
+  const onSwitchAccount = async () => {
+    const refreshToken = useAuthStore.getState().refreshToken;
+    try {
+      await authApi.logout(refreshToken ?? undefined);
+    } finally {
+      logout();
+      window.location.href =
+        loginRedirectPath() + "&client=" + encodeURIComponent(client_name);
+    }
+  };
+
+  return (
+    <ConsentShell>
+      <Card>
+        <CardHeader className="pt-4 text-center">
+          <CardTitle className="text-xl">授权访问</CardTitle>
+          {/* 客户端名是用户点「同意」前最该核对的信息，独立一行大字展示。 */}
+          <p className="mt-1.5 text-base font-semibold break-all">
+            「{client_name}」
+          </p>
+        </CardHeader>
+        <CardContent className="space-y-5 pb-4">
+          <p className="text-center text-sm text-muted-foreground">
+            请求访问你的 Fast Ship 账号
+            {projects.length > 0 && (
+              <>，该应用将获得所选项目的{write ? "读写" : "只读"}权限</>
+            )}
+            。
+          </p>
+          <div className="flex items-center justify-between gap-2 rounded-md bg-muted/50 px-3 py-2 text-sm">
+            <span className="min-w-0 truncate text-muted-foreground">
+              当前登录：
+              <span className="font-medium text-foreground">{username}</span>
+              {email && <span className="text-muted-foreground">（{email}）</span>}
+            </span>
+            <Button
+              variant="link"
+              size="sm"
+              className="h-auto px-3 py-2 text-primary underline underline-offset-2"
+              onClick={onSwitchAccount}
+            >
+              切换账号
+            </Button>
+          </div>
+
+          <div className="space-y-2">
+            <Label>选择要授权的项目（可多选）</Label>
+            {projects.length === 0 ? (
+              <p className="rounded-md border bg-muted/40 p-3 text-sm text-muted-foreground">
+                你还没有任何项目，无法授权。可前往
+                <Link
+                  to="/projects"
+                  className="mx-0.5 text-primary underline underline-offset-2"
+                >
+                  项目列表
+                </Link>
+                创建项目后重新发起授权。
+              </p>
+            ) : (
+              <div className="space-y-2">
+                {projects.map((project) => (
+                  <label
+                    key={project.id}
+                    className="flex cursor-pointer items-center gap-2 rounded-md border p-2.5 text-sm"
+                  >
+                    <Checkbox
+                      className="rounded-[2px]"
+                      checked={selectedIds.has(project.id)}
+                      onCheckedChange={(checked) =>
+                        toggleProject(project.id, checked === true)
+                      }
+                    />
+                    {project.name}
+                  </label>
+                ))}
+              </div>
+            )}
+            {/* 占位常驻防跳动：未选时引导，已选时说明授权边界 */}
+            {projects.length > 0 && (
+              <p className="text-xs text-muted-foreground">
+                {selectedIds.size === 0
+                  ? "至少选择 1 个项目后才能授权"
+                  : "仅授权勾选的项目，可随时在设置中吊销"}
+              </p>
+            )}
+          </div>
+
+          {projects.length > 0 && (
+          <div className="space-y-2">
+            <Label>访问权限</Label>
+            {/* 选项与上方项目勾选同一套描边行样式：分组观感一致、长文不贴边。 */}
+            <RadioGroup
+              value={write ? "write" : "read"}
+              onValueChange={(value) => setWrite(value === "write")}
+              className="[&>label]:rounded-md [&>label]:border [&>label]:p-2.5"
+            >
+              <RadioGroupItem value="read">只读（查看项目与问题）</RadioGroupItem>
+              <RadioGroupItem value="write">
+                读写（创建/更新/关闭/重开问题，可发表评论）
+              </RadioGroupItem>
+            </RadioGroup>
+          </div>
+          )}
+
+          {submitError && (
+            <p className="text-sm text-destructive">{submitError}</p>
+          )}
+
+          <div className="flex gap-3">
+            <Button
+              variant="outline"
+              className="min-h-11 flex-1"
+              disabled={submitting}
+              onClick={onDeny}
+            >
+              取消
+            </Button>
+            <Button
+              className="min-h-11 flex-1"
+              disabled={selectedIds.size === 0 || submitting}
+              onClick={onSubmit}
+            >
+              {submitting ? "授权中..." : "同意授权"}
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+    </ConsentShell>
+  );
+}
+
+function ConsentShell({ children }: { children: React.ReactNode }) {
+  // 与登录/注册同一套品牌版式（FastShipLogo），避免授权流程中换品牌观感。
+  return (
+    <div className="flex min-h-dvh flex-col items-center justify-center bg-muted/40 px-4 py-8">
+      <div className="mb-8 flex items-center gap-2">
+        <FastShipLogo className="h-7 w-7" />
+        <span className="text-2xl font-bold tracking-tight">Fast Ship</span>
+      </div>
+      <div className="w-full max-w-md">{children}</div>
+    </div>
+  );
+}
+
+function ErrorPanel({ title, message }: { title: string; message: string }) {
+  return (
+    <Card>
+      <CardContent className="flex flex-col items-center gap-3 py-10 text-center">
+        <AlertTriangle className="h-8 w-8 text-destructive" />
+        <p className="text-base font-medium">{title}</p>
+        <p className="text-sm text-muted-foreground">{message}</p>
+      </CardContent>
+    </Card>
+  );
+}

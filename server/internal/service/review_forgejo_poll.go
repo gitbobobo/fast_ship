@@ -94,7 +94,7 @@ func (s *ReviewService) pollForgejoProject(settings *model.ProjectReviewSettings
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), reviewForgejoPollTimeout)
 	defer cancel()
-	client, err := s.reviewClient(ctx, settings.IntegrationID, repo, 0)
+	client, err := s.reviewClient(ctx, settings.IntegrationID, repo)
 	if err != nil {
 		return s.disableReviewOnDeterministic(settings, err)
 	}

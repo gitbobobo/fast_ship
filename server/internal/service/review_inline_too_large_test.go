@@ -60,7 +60,7 @@ func TestReviewSyncDiffTooLargeDowngradesThenSelfHeals(t *testing.T) {
 		githubapp.StaticClients{Client: client},
 		fakeReviewAppSource{ok: true},
 		fakeReviewPublicURL("https://fs.example.com"),
-		nil, e.media, nil, repository.NewForgeIntegrationRepository(e.svc.db), e.svc.cfg, zap.NewNop())
+		nil, e.media, repository.NewForgeIntegrationRepository(e.svc.db), e.svc.cfg, zap.NewNop())
 	// 带行号 P1 才会触发 diff 读取（fetchInlineLines 只在这种发现存在时读）。
 	run := e.seedRunWithFindings(t, repo, 78, "sha-tl", now)
 	e.enableReview(t)
@@ -204,7 +204,7 @@ func TestReviewSyncDiff406WithoutTooLargeStaysRetryable(t *testing.T) {
 		githubapp.StaticClients{Client: &diff406NoCodeClient{GitHubClient: e.fake}},
 		fakeReviewAppSource{ok: true},
 		fakeReviewPublicURL("https://fs.example.com"),
-		nil, e.media, nil, repository.NewForgeIntegrationRepository(e.svc.db), e.svc.cfg, zap.NewNop())
+		nil, e.media, repository.NewForgeIntegrationRepository(e.svc.db), e.svc.cfg, zap.NewNop())
 	review.syncPendingPRs(now)
 
 	if got := len(e.fake.StatusesForContext(reviewCodeStatusContext)); got == 0 {
@@ -262,7 +262,7 @@ func TestReviewSyncDiffTooLargeKeepsAllFindingsAndClearsStaleFailure(t *testing.
 		githubapp.StaticClients{Client: client},
 		fakeReviewAppSource{ok: true},
 		fakeReviewPublicURL("https://fs.example.com"),
-		nil, e.media, nil, repository.NewForgeIntegrationRepository(e.svc.db), e.svc.cfg, zap.NewNop())
+		nil, e.media, repository.NewForgeIntegrationRepository(e.svc.db), e.svc.cfg, zap.NewNop())
 
 	// 组合 A：已发行内 review（posted_at 非空），降级不得把它的终态改回去。
 	postedAt := now.Add(-time.Hour)
@@ -438,7 +438,7 @@ func TestReviewSyncDiffTooLargeDoesNotClearNewPending(t *testing.T) {
 		githubapp.StaticClients{Client: &epochBumpTooLargeClient{GitHubClient: e.fake, db: e.svc.db, repo: repo, pr: 83}},
 		fakeReviewAppSource{ok: true},
 		fakeReviewPublicURL("https://fs.example.com"),
-		nil, e.media, nil, repository.NewForgeIntegrationRepository(e.svc.db), e.svc.cfg, zap.NewNop())
+		nil, e.media, repository.NewForgeIntegrationRepository(e.svc.db), e.svc.cfg, zap.NewNop())
 	review.syncPendingPRs(now)
 
 	var ledger model.ReviewPullRequest

@@ -40,6 +40,8 @@ type routerTestEnv struct {
 	selfLogPipeline *selflog.Pipeline
 	// botService 供机器人 E2E 在同一 SQLite 上模拟重启恢复（INT-101）。
 	botService *service.BotService
+	// oauthService 供 OAuth 路由测试直接调 ValidateAccessToken（INT-222）。
+	oauthService *service.OAuthService
 }
 
 type routerEnvelope struct {
@@ -954,6 +956,12 @@ func setupRouterTestEnvMaybeLogs(t *testing.T, captureLogs bool, opts ...routerC
 		&model.DeploymentSettings{},
 		// 代码仓集成（INT-166）。
 		&model.ForgeIntegration{},
+		// OAuth 2.1 授权服务（INT-222）。
+		&model.OAuthClient{},
+		&model.OAuthAuthorization{},
+		&model.OAuthAuthorizationCode{},
+		&model.OAuthAccessToken{},
+		&model.OAuthRefreshToken{},
 	); err != nil {
 		t.Fatalf("migrate test db: %v", err)
 	}
@@ -1076,7 +1084,7 @@ func setupRouterTestEnvMaybeLogs(t *testing.T, captureLogs bool, opts ...routerC
 	t3BindingService := service.NewT3BindingService(t3ThreadsService, projectRepo, repository.NewProjectT3BindingRepository(db))
 	notificationSink := service.NewNotificationSink(db)
 	notificationService := service.NewNotificationService(repository.NewNotificationRepository(db))
-	reviewService := service.NewReviewService(db, projectRepo, repository.NewGitHubWebhookDeliveryRepository(db), notificationSink, nil, nil, nil, nil, nil, nil, nil, cfg, zap.NewNop())
+	reviewService := service.NewReviewService(db, projectRepo, repository.NewGitHubWebhookDeliveryRepository(db), notificationSink, nil, nil, nil, nil, nil, nil, cfg, zap.NewNop())
 	botService := service.NewBotService(db, cfg, zap.NewNop(), projectService, issueService, t3ThreadsService, t3BindingService)
 	aiProviderHandler := handler.NewAIProviderHandler(service.NewAIProviderService(db, cfg, zap.NewNop()))
 
@@ -1116,6 +1124,12 @@ func setupRouterTestEnvMaybeLogs(t *testing.T, captureLogs bool, opts ...routerC
 	memberHandler := handler.NewMemberHandler(service.NewMemberService(userRepo, repository.NewInviteRepository(db), nil))
 	deploymentSettingsHandler := handler.NewDeploymentSettingsHandler(deploymentSettingsService)
 	forgeIntegrationHandler := handler.NewForgeIntegrationHandler(service.NewForgeIntegrationService(repository.NewForgeIntegrationRepository(db), integrationService, cfg, zap.NewNop()))
+	oauthService := service.NewOAuthService(repository.NewOAuthRepository(db), userRepo, projectRepo, authService, service.OAuthServiceOptions{
+		PublicURL: deploymentSettingsService,
+	})
+	authService.SetOAuthService(oauthService)
+	oauthHandler := handler.NewOAuthHandler(oauthService)
+	mcpHandler := handler.NewMCPHandler(service.NewMCPService(issueService))
 
 	selfLogHandler := handler.NewSelfLogHandler(service.NewSelfLogService(selfLogStore))
 
@@ -1123,7 +1137,7 @@ func setupRouterTestEnvMaybeLogs(t *testing.T, captureLogs bool, opts ...routerC
 	if captureLogs && appLogger != nil {
 		r.Use(middleware.RequestLog(appLogger))
 	}
-	Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, githubTokenHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, screenshotAnnotationHandler, mediaProxyHandler, t3EnvironmentHandler, t3BindingHandler, notificationHandler, reviewHandler, reviewAgentHandler, reviewService, botHandler, aiProviderHandler, selfLogHandler, githubWebhookHandler, forgeWebhookHandler, quotaHandler, deploymentGitHubAppHandler, memberHandler, deploymentSettingsHandler, forgeIntegrationHandler, authService, apiKeyRepo)
+	Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, githubTokenHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, screenshotAnnotationHandler, mediaProxyHandler, t3EnvironmentHandler, t3BindingHandler, notificationHandler, reviewHandler, reviewAgentHandler, reviewService, botHandler, aiProviderHandler, selfLogHandler, githubWebhookHandler, forgeWebhookHandler, quotaHandler, deploymentGitHubAppHandler, memberHandler, deploymentSettingsHandler, forgeIntegrationHandler, mcpHandler, oauthHandler, oauthService, authService, apiKeyRepo)
 
 	return &routerTestEnv{
 		router:          r,
@@ -1132,6 +1146,7 @@ func setupRouterTestEnvMaybeLogs(t *testing.T, captureLogs bool, opts ...routerC
 		selfLogStore:    selfLogStore,
 		selfLogPipeline: selfLogPipeline,
 		botService:      botService,
+		oauthService:    oauthService,
 	}
 }
 

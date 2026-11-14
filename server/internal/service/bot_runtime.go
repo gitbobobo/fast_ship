@@ -174,7 +174,10 @@ func (s *BotService) Start() {
 	// 按天花费汇总（INT-164）：周期 loop 管昨天及以前的补齐；启动立即异步
 	// 跑一遍同一扫描，首次上线的全量回填就是「全部日期未覆盖」的同路径。
 	s.spawnBg(s.scanUsageRollupOnce)
-	s.scanNightlyOnce()
+	// 夜间扫描不阻塞监听（INT-228）：bot 数增长时全量扫描会拉长启动到
+	// ListenAndServe 的窗口；扫描本身只触发到点的维护，入队后由维护
+	// worker 消化，挪进后台与其它周期 loop 同一守护方式。
+	s.spawnBg(s.scanNightlyOnce)
 }
 
 // Stop 停止全部后台 goroutine：5 条周期 loop、worker 池、维护 worker、

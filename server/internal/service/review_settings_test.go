@@ -39,7 +39,7 @@ func newReviewTestService(t *testing.T, svc *testServices, gh PRGitHubClients, a
 	t.Helper()
 	return NewReviewService(svc.db, svc.projectRepo,
 		repository.NewGitHubWebhookDeliveryRepository(svc.db),
-		NewNotificationSink(svc.db), gh, app, url, nil, nil, nil, repository.NewForgeIntegrationRepository(svc.db), svc.cfg, zap.NewNop())
+		NewNotificationSink(svc.db), gh, app, url, nil, nil, repository.NewForgeIntegrationRepository(svc.db), svc.cfg, zap.NewNop())
 }
 
 // readyReviewService 所有前置条件就绪的 ReviewService：App 已配置、安装可达、

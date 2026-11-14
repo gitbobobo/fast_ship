@@ -99,7 +99,7 @@ func (s *ReviewService) AgentPullRequest(ctx context.Context, runID string) (*ap
 	if err != nil {
 		return nil, err
 	}
-	client, err := s.reviewClient(ctx, run.IntegrationID, run.RepoFullName, run.InstallationID)
+	client, err := s.reviewClient(ctx, run.IntegrationID, run.RepoFullName)
 	if err != nil {
 		return nil, err
 	}
@@ -128,7 +128,7 @@ func (s *ReviewService) AgentDiff(ctx context.Context, runID string) (*api.Revie
 	if err != nil {
 		return nil, err
 	}
-	client, err := s.reviewClient(ctx, run.IntegrationID, run.RepoFullName, run.InstallationID)
+	client, err := s.reviewClient(ctx, run.IntegrationID, run.RepoFullName)
 	if err != nil {
 		return nil, err
 	}
@@ -230,7 +230,7 @@ func (s *ReviewService) codeHistory(ctx context.Context, run *model.ReviewRun) (
 // appendNewDiscussion 把 after 之后的行内评论与会话评论按时间正序写进 b。
 // 本系统自己发的结论（机器人标记/自身 review）过滤掉。limit 最近 50 条。
 func (s *ReviewService) appendNewDiscussion(ctx context.Context, run *model.ReviewRun, b *strings.Builder, after time.Time, all bool) error {
-	client, err := s.reviewClient(ctx, run.IntegrationID, run.RepoFullName, run.InstallationID)
+	client, err := s.reviewClient(ctx, run.IntegrationID, run.RepoFullName)
 	if err != nil {
 		return err
 	}
@@ -493,7 +493,7 @@ func (s *ReviewService) AgentSubmitResult(ctx context.Context, runID string, bod
 	}
 
 	// 提交前核对 PR 实时状态：已关闭或 head 已前进 → 本轮作废（取消 + 消费令牌 + sync）。
-	client, err := s.reviewClient(ctx, run.IntegrationID, run.RepoFullName, run.InstallationID)
+	client, err := s.reviewClient(ctx, run.IntegrationID, run.RepoFullName)
 	if err != nil {
 		if completedReplay() {
 			return nil
@@ -918,27 +918,19 @@ func (s *ReviewService) RerunReview(ctx context.Context, userID, projectID strin
 		return nil, errs.New(errs.ErrInvalidParams.Code,
 			"该审查记录属于其他集成的历史记录，不能重跑")
 	}
-	// rerun 没有 webhook installation 快照：GitHub 先解析真实安装 id 再取
-	// PR，解析失败不得拿 0 当安装 id 继续写库；非 GitHub 集成没有安装语义，
-	// installationID=0 经 resolver 走集成凭证取 PR——ResolveInstallation 是
-	// GitHub App 专有概念，不进 forge.ReviewClient 方法面。
-	var installationID int64
-	if reviewIntegrationID(settings.IntegrationID) == model.ForgeIntegrationBuiltinGitHubID {
-		resolved, err := s.resolveGitHubInstallation(ctx, repo)
-		if err != nil {
-			// 访问面未配置（resolveGitHubInstallation 直接回 AppError）原样透出；
-			// 其余（%w 包裹的平台错误）包装回 50200 AppError，对外形态与
-			// %w 化之前一致。
-			var appErr *errs.AppError
-			if errors.As(err, &appErr) {
-				return nil, err
-			}
-			return nil, errs.New(errs.ErrGitHubAPI.Code, err.Error())
-		}
-		installationID = resolved
-	}
-	client, err := s.reviewClient(ctx, settings.IntegrationID, repo, installationID)
+	// rerun 没有 webhook installation 快照：GitHub 侧的安装解析已内联进
+	// resolver 的适配器（INT-230），按仓库现解析、失败不落库不实拉；非
+	// GitHub 集成没有安装语义，经 resolver 走集成凭证取 PR。GitHub 构造
+	// 错误（安装不存在/访问面未配置等）包装回 50200 AppError，对外形态与
+	// service 侧解析时代一致；Forgejo 凭证来源错误维持原样透出。
+	client, err := s.reviewClient(ctx, settings.IntegrationID, repo)
 	if err != nil {
+		if reviewIntegrationID(settings.IntegrationID) == model.ForgeIntegrationBuiltinGitHubID {
+			var appErr *errs.AppError
+			if !errors.As(err, &appErr) {
+				return nil, errs.New(errs.ErrGitHubAPI.Code, err.Error())
+			}
+		}
 		return nil, err
 	}
 	pr, err := client.GetPullRequest(ctx, repo, prNumber)
@@ -991,7 +983,9 @@ func (s *ReviewService) RerunReview(ctx context.Context, userID, projectID strin
 		}
 		var openErr error
 		round, openErr = s.openRoundTx(tx, project, &settings, repo, prNumber,
-			pr.HeadSHA, "manual", pr.Title, pr.HTMLURL, pr.BaseRef, pr.HeadRef, installationID, pr.UpdatedAt, now)
+			// 安装快照不随 rerun 落新值（INT-230：解析已内联适配器，不在端点
+			// 路径再发一次）：传 0 保留总账既有快照。
+			pr.HeadSHA, "manual", pr.Title, pr.HTMLURL, pr.BaseRef, pr.HeadRef, 0, pr.UpdatedAt, now)
 		return openErr
 	})
 	if err != nil {

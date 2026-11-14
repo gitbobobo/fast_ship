@@ -6,9 +6,12 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/githubapi"
 	"github.com/godbobo/fast_ship/server/internal/model"
+	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
+	"github.com/godbobo/fast_ship/server/internal/pkg/githubapp"
 )
 
 // sourceStub 恒返回同一 githubapi 访问面的解析器桩，并记录调用次数（断言
@@ -45,26 +48,186 @@ func (s *forgejoSourceStub) ForgejoClient(_ context.Context, integrationID strin
 }
 
 func TestResolverBuiltinGitHub(t *testing.T) {
-	api := &recordingAPI{}
+	api := &recordingAPI{resolveInst: 42}
 	source := &sourceStub{api: api}
 	resolver := NewReviewClients(source, nil)
 	ctx := context.Background()
 
-	// 空串与内置 github-default 同走 GitHub 分支，安装 id 收编进适配器。
+	// 空串与内置 github-default 同走 GitHub 分支，安装 id 由 resolver 按仓库
+	// 现解析（INT-230）后收编进适配器。
 	for _, integrationID := range []string{"", model.ForgeIntegrationBuiltinGitHubID} {
-		client, err := resolver.ClientFor(ctx, integrationID, "o/r", 42)
+		client, err := resolver.ClientFor(ctx, integrationID, "o/r")
 		if err != nil {
 			t.Fatalf("integrationID=%q: %v", integrationID, err)
 		}
 		if client.Kind() != KindGitHub {
 			t.Fatalf("integrationID=%q: Kind = %q", integrationID, client.Kind())
 		}
-		// 透传断言：调用经适配器落到同一访问面，安装 id 为构造值。
+		if api.resolveRepo != "o/r" {
+			t.Fatalf("integrationID=%q: ResolveInstallation repo = %q, want o/r", integrationID, api.resolveRepo)
+		}
+		// 透传断言：调用经适配器落到同一访问面，安装 id 为解析值。
 		if _, err := client.GetPullRequest(ctx, "o/r", 1); err != nil || api.last() != 42 {
 			t.Fatalf("integrationID=%q: installationID = %d, want 42 (err=%v)", integrationID, api.last(), err)
 		}
 	}
 }
+
+// TestResolverGitHubResolveFailure 安装解析失败包装成 ErrGitHubAPI AppError：
+// 消息带原因文本、错误链保留底层错误（确定性失败归类依赖 %w 链）。
+func TestResolverGitHubResolveFailure(t *testing.T) {
+	cause := &githubapi.StatusError{StatusCode: 404, Method: "GET", URL: "/repos/o/r/installation"}
+	resolver := NewReviewClients(&sourceStub{api: &recordingAPI{resolveErr: cause}}, nil)
+	_, err := resolver.ClientFor(context.Background(), model.ForgeIntegrationBuiltinGitHubID, "o/r")
+	var appErr *errs.AppError
+	if !errors.As(err, &appErr) || appErr.Code != errs.ErrGitHubAPI.Code {
+		t.Fatalf("err = %v, want ErrGitHubAPI AppError", err)
+	}
+	if !strings.Contains(appErr.Message, "解析仓库安装失败") {
+		t.Fatalf("message = %q, want 前缀 解析仓库安装失败", appErr.Message)
+	}
+	if !errors.Is(err, cause) {
+		t.Fatal("底层 StatusError 不得脱离错误链")
+	}
+}
+
+// TestResolverInstallationCache 安装 id 成功结果按 repo 短 TTL 缓存：同一
+// resolver 两次构造同仓库客户端只打一次 ResolveInstallation；瞬时失败不
+// 缓存，下一构造仍实查（INT-230 复审 P2：防抖/同步/开轮每轮一次 JWT 解
+// 析会放大 App 级配额）。
+func TestResolverInstallationCache(t *testing.T) {
+	ctx := context.Background()
+	api := &recordingAPI{resolveInst: 42}
+	resolver := NewReviewClients(&sourceStub{api: api}, nil)
+
+	for i := 0; i < 2; i++ {
+		if _, err := resolver.ClientFor(ctx, model.ForgeIntegrationBuiltinGitHubID, "o/r"); err != nil {
+			t.Fatalf("ClientFor #%d: %v", i, err)
+		}
+	}
+	if api.resolveCalls != 1 {
+		t.Fatalf("resolveCalls = %d, want 1（命中缓存不再打 JWT）", api.resolveCalls)
+	}
+
+	// 不同仓库不共享缓存槽。
+	if _, err := resolver.ClientFor(ctx, model.ForgeIntegrationBuiltinGitHubID, "o/r2"); err != nil {
+		t.Fatal(err)
+	}
+	if api.resolveCalls != 2 {
+		t.Fatalf("resolveCalls = %d, want 2（异仓库实查）", api.resolveCalls)
+	}
+
+	// 瞬时失败不缓存：两次构造都实查。
+	failAPI := &recordingAPI{resolveErr: errors.New("boom")}
+	failResolver := NewReviewClients(&sourceStub{api: failAPI}, nil)
+	for i := 0; i < 2; i++ {
+		if _, err := failResolver.ClientFor(ctx, model.ForgeIntegrationBuiltinGitHubID, "o/r"); err == nil {
+			t.Fatalf("ClientFor #%d want err", i)
+		}
+	}
+	if failAPI.resolveCalls != 2 {
+		t.Fatalf("failAPI.resolveCalls = %d, want 2（瞬时失败不缓存）", failAPI.resolveCalls)
+	}
+}
+
+// TestResolverInstallationNegCache 确定性失败（仓库未装 App 的 404）按负
+// TTL 缓存：命中不再签 JWT，错误仍按 AppError + cause 链透出；负 TTL 内
+// 装完 App 也不会立刻翻正（复审 Note：压住未安装支路的配额放大）。
+func TestResolverInstallationNegCache(t *testing.T) {
+	ctx := context.Background()
+	cause := &githubapi.StatusError{StatusCode: 404, Method: "GET", URL: "/repos/o/r/installation"}
+	api := &recordingAPI{resolveErr: cause}
+	resolver := NewReviewClients(&sourceStub{api: api}, nil)
+
+	for i := 0; i < 2; i++ {
+		_, err := resolver.ClientFor(ctx, model.ForgeIntegrationBuiltinGitHubID, "o/r")
+		if !errors.Is(err, cause) {
+			t.Fatalf("ClientFor #%d err = %v, want cause 链带 StatusError", i, err)
+		}
+	}
+	if api.resolveCalls != 1 {
+		t.Fatalf("resolveCalls = %d, want 1（负缓存命中不再打 JWT）", api.resolveCalls)
+	}
+}
+
+// TestResolverStaleInstallRetry 缓存的安装 id 陈旧（TTL 窗口内 App 重装）
+// 时调用自愈：401/404/非限流 403 经 reResolve 作废条目重解析并重试一次，
+// 后续构造直接取到新 id（复审 P2：不自愈会按确定性失败误丢投递）。
+func TestResolverStaleInstallRetry(t *testing.T) {
+	ctx := context.Background()
+	notFound := &githubapi.StatusError{StatusCode: 404, Method: "GET", URL: "/repos/o/r/pulls/1"}
+	api := &recordingAPI{resolveInst: 1, prErrForID: map[int64]error{1: notFound}}
+	resolver := NewReviewClients(&sourceStub{api: api}, nil)
+
+	client, err := resolver.ClientFor(ctx, model.ForgeIntegrationBuiltinGitHubID, "o/r")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 安装变更：新解析返回 2；旧 id 1 的调用仍 404。
+	api.resolveInst = 2
+
+	if _, err := client.GetPullRequest(ctx, "o/r", 1); err != nil {
+		t.Fatalf("GetPullRequest = %v, want 自愈成功", err)
+	}
+	if api.resolveCalls != 2 {
+		t.Fatalf("resolveCalls = %d, want 2（作废缓存后实查一次）", api.resolveCalls)
+	}
+	if api.last() != 2 {
+		t.Fatalf("retry installationID = %d, want 2", api.last())
+	}
+
+	// 自愈后缓存已更新：新构造不再解析，直接拿 2。
+	if _, err := resolver.ClientFor(ctx, model.ForgeIntegrationBuiltinGitHubID, "o/r"); err != nil {
+		t.Fatal(err)
+	}
+	if api.resolveCalls != 2 {
+		t.Fatalf("resolveCalls = %d, want 2（自愈结果已入缓存）", api.resolveCalls)
+	}
+}
+
+// TestResolverHookDeliveryAccess 投递对账的 GitHub 专属访问面：实现有投递
+// 记录面时透出（连同安装令牌客户端）；没有时 nil,nil,nil；访问面缺失报哨兵。
+func TestResolverHookDeliveryAccess(t *testing.T) {
+	ctx := context.Background()
+
+	// 实现没有投递记录面：静默无能力。
+	hooks, api, err := NewReviewClients(&sourceStub{api: &recordingAPI{}}, nil).HookDeliveryAccess(ctx)
+	if err != nil || hooks != nil || api != nil {
+		t.Fatalf("无投递记录面 = (%v,%v,%v), want (nil,nil,nil)", hooks, api, err)
+	}
+
+	// 实现有投递记录面：透出 hooks 与同一客户端。
+	withHooks := &hookAPIStub{recordingAPI: &recordingAPI{resolveInst: 7}}
+	resolver := NewReviewClients(&sourceStub{api: withHooks}, nil)
+	hooks, api, err = resolver.HookDeliveryAccess(ctx)
+	if err != nil || hooks == nil || api == nil {
+		t.Fatalf("有投递记录面 = (%v,%v,%v), want 非空 hooks/api", hooks, api, err)
+	}
+	if _, ok := interface{}(api).(githubapp.HookDeliveries); !ok {
+		t.Fatal("api 应为 githubapp.HookDeliveries 实现")
+	}
+
+	// GitHub 访问面未配置：哨兵错误。
+	_, _, err = NewReviewClients(nil, nil).HookDeliveryAccess(ctx)
+	if !errors.Is(err, ErrGitHubAccessUnconfigured) {
+		t.Fatalf("err = %v, want ErrGitHubAccessUnconfigured", err)
+	}
+}
+
+// hookAPIStub recordingAPI + 投递记录面，模拟 githubapp.Client 形态。
+type hookAPIStub struct {
+	*recordingAPI
+}
+
+func (h *hookAPIStub) ListHookDeliveries(context.Context, time.Time) ([]githubapp.HookDelivery, error) {
+	return nil, nil
+}
+
+func (h *hookAPIStub) GetHookDelivery(_ context.Context, _ int64) (githubapp.HookDeliveryDetail, error) {
+	return githubapp.HookDeliveryDetail{}, nil
+}
+
+func (h *hookAPIStub) RedeliverHookDelivery(context.Context, int64) error { return nil }
 
 // TestResolverForgejoBranch 非 GitHub 集成走 Forgejo 凭证来源：按集成 id 现取
 // 三件套组装适配器，Kind/Bearer 来自适配器；来源错误原样透出且不碰 GitHub 侧。
@@ -74,7 +237,7 @@ func TestResolverForgejoBranch(t *testing.T) {
 	resolver := NewReviewClients(gh, fj)
 	ctx := context.Background()
 
-	client, err := resolver.ClientFor(ctx, "forgejo-abc", "o/r", 0)
+	client, err := resolver.ClientFor(ctx, "forgejo-abc", "o/r")
 	if err != nil {
 		t.Fatalf("ClientFor: %v", err)
 	}
@@ -95,13 +258,13 @@ func TestResolverForgejoBranch(t *testing.T) {
 	// 来源错误透出，GitHub 侧依旧零调用。
 	fjErr := &forgejoSourceStub{err: errors.New("集成不存在")}
 	resolver = NewReviewClients(gh, fjErr)
-	if _, err := resolver.ClientFor(ctx, "forgejo-xyz", "o/r", 0); !errors.Is(err, fjErr.err) {
+	if _, err := resolver.ClientFor(ctx, "forgejo-xyz", "o/r"); !errors.Is(err, fjErr.err) {
 		t.Fatalf("err = %v, want 来源错误透出", err)
 	}
 
 	// 来源未配置（部署没装配）：明确错误，不静默回落 GitHub。
 	resolver = NewReviewClients(gh, nil)
-	_, err = resolver.ClientFor(ctx, "forgejo-abc", "o/r", 0)
+	_, err = resolver.ClientFor(ctx, "forgejo-abc", "o/r")
 	if err == nil || !strings.Contains(err.Error(), "凭证来源未配置") {
 		t.Fatalf("err = %v, want 凭证来源未配置", err)
 	}
@@ -119,11 +282,11 @@ func TestResolverForgejoLoginCacheKeyByPAT(t *testing.T) {
 	resolver := NewReviewClients(nil, fj)
 	ctx := context.Background()
 
-	c1, err := resolver.ClientFor(ctx, "forgejo-abc", "o/r", 0)
+	c1, err := resolver.ClientFor(ctx, "forgejo-abc", "o/r")
 	if err != nil {
 		t.Fatalf("ClientFor: %v", err)
 	}
-	c1b, err := resolver.ClientFor(ctx, "forgejo-abc", "o/r", 0)
+	c1b, err := resolver.ClientFor(ctx, "forgejo-abc", "o/r")
 	if err != nil {
 		t.Fatalf("ClientFor: %v", err)
 	}
@@ -133,7 +296,7 @@ func TestResolverForgejoLoginCacheKeyByPAT(t *testing.T) {
 	}
 
 	fj.token = "pat-b" // PAT 轮换
-	c2, err := resolver.ClientFor(ctx, "forgejo-abc", "o/r", 0)
+	c2, err := resolver.ClientFor(ctx, "forgejo-abc", "o/r")
 	if err != nil {
 		t.Fatalf("ClientFor: %v", err)
 	}
@@ -150,15 +313,16 @@ func TestResolverForgejoLoginCacheKeyByPAT(t *testing.T) {
 
 func TestResolverNilGitHubSource(t *testing.T) {
 	resolver := NewReviewClients(nil, nil)
-	if _, err := resolver.ClientFor(context.Background(), "", "o/r", 1); err == nil {
-		t.Fatal("GitHub 访问面缺失应返回错误")
+	_, err := resolver.ClientFor(context.Background(), "", "o/r")
+	if !errors.Is(err, ErrGitHubAccessUnconfigured) {
+		t.Fatalf("err = %v, want ErrGitHubAccessUnconfigured", err)
 	}
 }
 
 func TestResolverPropagatesSourceError(t *testing.T) {
 	want := errors.New("GitHub App 未配置")
 	resolver := NewReviewClients(&sourceStub{err: want}, nil)
-	if _, err := resolver.ClientFor(context.Background(), model.ForgeIntegrationBuiltinGitHubID, "o/r", 1); !errors.Is(err, want) {
+	if _, err := resolver.ClientFor(context.Background(), model.ForgeIntegrationBuiltinGitHubID, "o/r"); !errors.Is(err, want) {
 		t.Fatalf("err = %v, want 源错误原样透出", err)
 	}
 }
@@ -166,9 +330,9 @@ func TestResolverPropagatesSourceError(t *testing.T) {
 func TestResolverClientSatisfiesBearerSource(t *testing.T) {
 	// GitHub 路径行为不变：底层有凭证面时，解析出的客户端可取媒体下载
 	// bearer；没有时 Bearer 返回空串（匿名下载）。
-	bAPI := &withBearer{recordingAPI: &recordingAPI{}, token: "tok"}
+	bAPI := &withBearer{recordingAPI: &recordingAPI{resolveInst: 5}, token: "tok"}
 	resolver := NewReviewClients(&sourceStub{api: bAPI}, nil)
-	client, err := resolver.ClientFor(context.Background(), "", "o/r", 5)
+	client, err := resolver.ClientFor(context.Background(), "", "o/r")
 	if err != nil {
 		t.Fatalf("ClientFor: %v", err)
 	}
@@ -176,9 +340,12 @@ func TestResolverClientSatisfiesBearerSource(t *testing.T) {
 	if err != nil || tok != "tok" {
 		t.Fatalf("Bearer = (%q,%v), want (tok,nil)", tok, err)
 	}
+	if scope := client.(BearerSource).BearerScope(); scope != "install:5" {
+		t.Fatalf("BearerScope = %q, want install:5", scope)
+	}
 
 	plainResolver := NewReviewClients(&sourceStub{api: &recordingAPI{}}, nil)
-	client, err = plainResolver.ClientFor(context.Background(), model.ForgeIntegrationBuiltinGitHubID, "o/r", 5)
+	client, err = plainResolver.ClientFor(context.Background(), model.ForgeIntegrationBuiltinGitHubID, "o/r")
 	if err != nil {
 		t.Fatalf("ClientFor: %v", err)
 	}

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/api"
+	"github.com/godbobo/fast_ship/server/internal/forge"
 	"github.com/godbobo/fast_ship/server/internal/githubapi"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/githubapp"
@@ -206,8 +207,7 @@ func (f *fakeReviewT3) RetryPreparation(ctx context.Context, _, _, threadID, t3R
 
 // withT3 在共享测试库上组装一个带 T3/媒体桩的 ReviewService。media 传 nil
 // 时用环境的默认成功桩（没有截图引用的 PR 不受影响）。
-func (e *reviewEngineEnv) withT3(t3 reviewT3, media reviewMedia,
-	bearer func(context.Context, string, int64) (string, error)) *ReviewService {
+func (e *reviewEngineEnv) withT3(t3 reviewT3, media reviewMedia) *ReviewService {
 	if media == nil {
 		media = e.media
 	}
@@ -217,7 +217,7 @@ func (e *reviewEngineEnv) withT3(t3 reviewT3, media reviewMedia,
 		githubapp.StaticClients{Client: e.fake},
 		fakeReviewAppSource{ok: true},
 		fakeReviewPublicURL("https://fs.example.com"),
-		t3, media, bearer, repository.NewForgeIntegrationRepository(e.svc.db), e.svc.cfg, zap.NewNop())
+		t3, media, repository.NewForgeIntegrationRepository(e.svc.db), e.svc.cfg, zap.NewNop())
 }
 
 // seedDispatchedRun 落一行已确认派发的运行（dispatched_at 非空），可指定
@@ -270,7 +270,7 @@ func TestReviewCleanupOwnership(t *testing.T) {
 	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
 	now := time.Now().UTC()
 	t3 := &fakeReviewT3{}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 
 	// 绑定需要真实存在的环境（FK）。
 	env := createT3TestEnv(t, e.svc.db, e.user.ID, "env-c")
@@ -364,7 +364,7 @@ func TestCleanupConcurrentRunsAllBranchPending(t *testing.T) {
 		refs = append(refs, T3Worktree{Path: path, RefNames: []string{branch}})
 	}
 	t3 := &fakeReviewT3{threadWorktrees: threadWT, worktrees: refs}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 
 	review.cleanupWorktrees(now)
 
@@ -409,7 +409,7 @@ func TestCleanupThreadNotFoundRemoves(t *testing.T) {
 	env := createT3TestEnv(t, e.svc.db, e.user.ID, "env-gone")
 	createTestT3Binding(t, e.svc.db, e.project.ID, env.ID, "t3p")
 	t3 := &fakeReviewT3{threadWTErr: errT3ThreadNotFound}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 
 	run := e.seedCleanableRun(t, repo, 44, env, model.ReviewRunCompleted, "", now)
 	for i := 0; i < reviewWorktreeMaxTries-1; i++ {
@@ -444,7 +444,7 @@ func TestCleanupThreadReadErrorRetries(t *testing.T) {
 	env := createT3TestEnv(t, e.svc.db, e.user.ID, "env-flaky")
 	createTestT3Binding(t, e.svc.db, e.project.ID, env.ID, "t3p")
 	t3 := &fakeReviewT3{threadWTErr: errors.New("upstream boom")}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 
 	run := e.seedCleanableRun(t, repo, 45, env, model.ReviewRunCompleted, "", now)
 	for i := 0; i < reviewWorktreeMaxTries-1; i++ {
@@ -481,7 +481,7 @@ func TestCleanupUnregisteredWorktreeSkipsDelete(t *testing.T) {
 	t3 := &fakeReviewT3{
 		worktrees: []T3Worktree{{Path: "/wt/someone-else", RefNames: []string{"br-x"}}},
 	}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 
 	run := e.seedCleanableRun(t, repo, 46, env, model.ReviewRunCompleted, "", now)
 	t3.threadWorktrees = map[string]T3ThreadWorktree{
@@ -513,7 +513,7 @@ func TestCleanupRefNameMismatchFails(t *testing.T) {
 	t3 := &fakeReviewT3{
 		worktrees: []T3Worktree{{Path: "/wt/x", RefNames: []string{"br-other"}}},
 	}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 
 	run := e.seedCleanableRun(t, repo, 47, env, model.ReviewRunCompleted, "", now)
 	t3.threadWorktrees = map[string]T3ThreadWorktree{
@@ -546,7 +546,7 @@ func TestCleanupRowPathMismatchFails(t *testing.T) {
 	t3 := &fakeReviewT3{
 		worktrees: []T3Worktree{{Path: "/wt/new", RefNames: []string{"br-n"}}},
 	}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 
 	run := e.seedCleanableRun(t, repo, 48, env, model.ReviewRunCompleted, "/wt/old", now)
 	t3.threadWorktrees = map[string]T3ThreadWorktree{
@@ -577,7 +577,7 @@ func TestCleanupListRegistryErrorRetries(t *testing.T) {
 	env := createT3TestEnv(t, e.svc.db, e.user.ID, "env-listerr")
 	createTestT3Binding(t, e.svc.db, e.project.ID, env.ID, "t3p")
 	t3 := &fakeReviewT3{listErr: errors.New("listRefs down")}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 
 	run := e.seedCleanableRun(t, repo, 49, env, model.ReviewRunCompleted, "", now)
 	t3.threadWorktrees = map[string]T3ThreadWorktree{
@@ -607,7 +607,7 @@ func TestReviewArchiveStage(t *testing.T) {
 	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
 	now := time.Now().UTC()
 	t3 := &fakeReviewT3{archiveErr: errors.New("archive rpc down")}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 
 	visual := e.seedDispatchedRun(t, repo, 2, model.ReviewKindVisual, model.ReviewRunCompleted, "", false, now)
 	code := e.seedDispatchedRun(t, repo, 2, model.ReviewKindCode, model.ReviewRunCompleted, "/wt/c", false, now)
@@ -845,6 +845,23 @@ func TestReviewWebhookUncheckedAction(t *testing.T) {
 	}
 }
 
+// tokenBearerClient GitHub 审查客户端桩：BearerSource 返回固定令牌，供
+// 媒体 bearer 路径断言（INT-230 后凭证随适配器走）。
+type tokenBearerClient struct {
+	forge.ReviewClient
+	token string
+	scope string
+}
+
+func (c *tokenBearerClient) Bearer(context.Context) (string, error) { return c.token, nil }
+
+func (c *tokenBearerClient) BearerScope() string {
+	if c.scope == "" {
+		return "install:1"
+	}
+	return c.scope
+}
+
 // fakeReviewMedia 截图下载桩：匿名/Bearer 两路分开计数与注入错误。failURLs
 // 按 URL 注入失败（其余成功），覆盖「部分截图可用」的场景；blockURLs 的
 // URL 阻塞到 ctx.Done 再失败，模拟靠前地址握手挂起的黑洞（F32）。
@@ -926,13 +943,14 @@ func TestReviewAssetsBearerRetry(t *testing.T) {
 	ctx := context.Background()
 	cached := &githubmedia.CachedMedia{Path: "/cache/shot.png"}
 	media := &fakeReviewMedia{cached: cached, anonErr: &githubmedia.UpstreamStatusError{StatusCode: 404}}
-	review := e.withT3(nil, media, func(context.Context, string, int64) (string, error) {
-		return "installation-token-1", nil
-	})
+	review := e.withT3(nil, media)
+	// INT-230：媒体令牌随审查客户端走（BearerSource 断言），不再经 service
+	// 侧闭包注入。
+	client := &tokenBearerClient{ReviewClient: anonGitHubClient(42), token: "installation-token-1"}
 	body := "intro ![a](https://github.com/user-attachments/assets/xyz) tail"
 
 	// 匿名失败 → Bearer 重试成功 → 行带 storage_path。
-	_, assets, err := review.ensureAssets(ctx, model.ForgeIntegrationBuiltinGitHubID, repo, 71, "sha-a", body, 42)
+	_, assets, err := review.ensureAssets(ctx, model.ForgeIntegrationBuiltinGitHubID, repo, 71, "sha-a", body, client)
 	if err != nil {
 		t.Fatalf("ensureAssets: %v", err)
 	}
@@ -947,7 +965,7 @@ func TestReviewAssetsBearerRetry(t *testing.T) {
 	e.svc.db.Model(&model.ReviewAsset{}).Where("source_url LIKE ?", "%xyz%").
 		Updates(map[string]any{"storage_path": "", "error": "prev failure"})
 	media.anonErr = nil
-	_, assets, err = review.ensureAssets(ctx, model.ForgeIntegrationBuiltinGitHubID, repo, 71, "sha-a", body, 42)
+	_, assets, err = review.ensureAssets(ctx, model.ForgeIntegrationBuiltinGitHubID, repo, 71, "sha-a", body, client)
 	if err != nil {
 		t.Fatalf("ensureAssets retry: %v", err)
 	}
@@ -1052,7 +1070,7 @@ func TestCleanupEmptyBranchMatchesByPath(t *testing.T) {
 	t3 := &fakeReviewT3{
 		worktrees: []T3Worktree{{Path: "/wt/x", RefNames: []string{"whatever"}}},
 	}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 
 	run := e.seedCleanableRun(t, repo, 62, env, model.ReviewRunCompleted, "", now)
 	t3.threadWorktrees = map[string]T3ThreadWorktree{
@@ -1095,7 +1113,7 @@ func TestCleanupTerminalRowsNotClaimers(t *testing.T) {
 		},
 		worktrees: []T3Worktree{{Path: "/wt/recycled", RefNames: []string{"br-new"}}},
 	}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 
 	run := e.seedCleanableRun(t, repo, 64, env, model.ReviewRunCompleted, "", now)
 	e.svc.db.Model(run).Update("thread_id", "th-current")
@@ -1124,7 +1142,7 @@ func TestCleanupTriesPerReason(t *testing.T) {
 		threadWTErrs: []error{errT3ThreadNotFound, errT3ThreadNotFound},
 		threadWTErr:  errors.New("upstream boom"),
 	}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 
 	run := e.seedCleanableRun(t, repo, 65, env, model.ReviewRunCompleted, "", now)
 	// 两个 tick 404（notfound 计数）+ 一个 tick 读失败（thread 计数=1）：
@@ -1171,7 +1189,7 @@ func TestCleanupNotFoundCounterResetsAfterSuccess(t *testing.T) {
 		worktrees: []T3Worktree{{Path: "/wt/404-reset", RefNames: []string{"br-404"}}},
 		listErr:   errors.New("registry down"),
 	}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 
 	// tick1/2：两个 404（累计 2，未到上限）。
 	review.cleanupRunWorktree(run, now)

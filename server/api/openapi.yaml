@@ -25,6 +25,8 @@ tags:
     description: AI 设置、标题/清单生成与全局提示词
   - name: api-keys
     description: API Key 管理（仅 JWT）
+  - name: oauth
+    description: OAuth 2.1 授权服务（INT-222，仅 JWT）：授权页预取/提交与授权管理。协议端点（/oauth/register、/oauth/token、/.well-known/*）按 RFC 7591/6749/8414/9728 原生格式工作，不在本规范内
   - name: github-tokens
     description: 用户级 GitHub Token 库（仅 JWT）
   - name: projects
@@ -2096,6 +2098,131 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/oauth/authorize:
+    get:
+      tags: [oauth]
+      operationId: getOAuthAuthorize
+      summary: OAuth 授权页预取
+      description: |
+        校验 client_id / redirect_uri（与注册精确匹配）/ code_challenge（仅 S256、
+        合法 base64url），返回客户端名与当前用户项目清单，供授权页勾选。
+        state 由前端透传，不在本端点处理。
+      security:
+        - jwtAuth: []
+      parameters:
+        - name: client_id
+          in: query
+          required: true
+          schema: {type: string}
+        - name: redirect_uri
+          in: query
+          required: true
+          schema: {type: string}
+        - name: code_challenge
+          in: query
+          required: true
+          schema: {type: string}
+        - name: code_challenge_method
+          in: query
+          required: true
+          schema: {type: string, enum: [S256]}
+      responses:
+        '200':
+          description: 客户端名与项目清单
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/OAuthAuthorizePreview'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [oauth]
+      operationId: submitOAuthAuthorize
+      summary: OAuth 授权提交（签发授权码）
+      description: |
+        同一事务里 upsert 该 user+client 的授权（重授权覆盖 scope）并写入授权码
+        （10 分钟有效、单次使用）。project_ids 必须属于当前用户且非空；write 为
+        true 时 scope 记 write（隐含 read）。返回带回 code 与 state 的 redirect 地址。
+      security:
+        - jwtAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OAuthAuthorizeRequest'
+      responses:
+        '200':
+          description: 授权成功，返回 redirect 地址
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/OAuthAuthorizeResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/oauth/authorizations:
+    get:
+      tags: [oauth]
+      operationId: listOAuthAuthorizations
+      summary: 列出当前用户的 OAuth 授权
+      security:
+        - jwtAuth: []
+      responses:
+        '200':
+          description: 授权清单（客户端名、scope、创建时间、id）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/OAuthAuthorization'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/oauth/authorizations/{id}:
+    delete:
+      tags: [oauth]
+      operationId: deleteOAuthAuthorization
+      summary: 吊销 OAuth 授权
+      description: 仅本人；吊销授权并同时吊销该授权下全部 access/refresh 令牌（即时生效）。
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OAuthAuthorizationId'
+      responses:
+        '200':
+          $ref: '#/components/responses/EmptySuccess'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
         '500':
@@ -9571,6 +9698,13 @@ components:
       schema:
         type: string
       description: API Key ID
+    OAuthAuthorizationId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+      description: OAuth 授权 ID（UUID）
     QuotaAccountId:
       name: id
       in: path
@@ -10634,6 +10768,81 @@ components:
           maxLength: 100
           x-oapi-codegen-extra-tags:
             binding: required,min=1,max=100
+    OAuthAuthorizePreview:
+      type: object
+      required: [username, email, client_name, projects]
+      properties:
+        username:
+          type: string
+          description: 当前登录用户名（授权页展示身份，防共享电脑误授权）
+        email:
+          type: string
+          description: 当前登录邮箱
+        client_name:
+          type: string
+          description: 客户端注册名
+        projects:
+          type: array
+          items:
+            $ref: '#/components/schemas/OAuthProjectOption'
+    OAuthProjectOption:
+      type: object
+      required: [id, name]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+    OAuthAuthorizeRequest:
+      type: object
+      required: [client_id, redirect_uri, code_challenge, code_challenge_method, project_ids]
+      properties:
+        client_id:
+          type: string
+        redirect_uri:
+          type: string
+          description: 必须与客户端注册的某个 redirect_uri 精确匹配
+        code_challenge:
+          type: string
+          description: PKCE S256 challenge（合法 base64url，43-128 字符）
+        code_challenge_method:
+          type: string
+          enum: [S256]
+        state:
+          type: string
+          description: 客户端 state，原样拼回 redirect
+        project_ids:
+          type: array
+          minItems: 1
+          items:
+            type: string
+          description: 授权的项目集合，必须全部属于当前用户
+        write:
+          type: boolean
+          default: false
+          description: 全局读写档；true 时 scope 记 write（隐含 read）
+    OAuthAuthorizeResult:
+      type: object
+      required: [redirect]
+      properties:
+        redirect:
+          type: string
+          description: redirect_uri?code=..&state=..，前端据此跳转
+    OAuthAuthorization:
+      type: object
+      required: [id, client_name, scopes, created_at]
+      properties:
+        id:
+          type: string
+        client_name:
+          type: string
+        scopes:
+          type: string
+          description: 空格分隔的 scope 串（project:<uuid>:read / project:<uuid>:write）
+        created_at:
+          type: string
+          format: date-time
+          description: 最近一次授权/重授权时间
     ApiKey:
       type: object
       required: [id, user_id, name, key_prefix, key_hash, last_used_at, created_at]

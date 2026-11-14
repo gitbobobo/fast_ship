@@ -43,7 +43,7 @@ func newCodeRepoEnv(t *testing.T) *codeRepoEnv {
 		githubapp.StaticClients{Client: fake},
 		fakeReviewAppSource{ok: true},
 		fakeReviewPublicURL("https://fs.example.com"),
-		nil, nil, nil, repository.NewForgeIntegrationRepository(svc.db), svc.cfg, zap.NewNop())
+		nil, nil, repository.NewForgeIntegrationRepository(svc.db), svc.cfg, zap.NewNop())
 	user := createTestUser(t, svc.db, "code-repo-user")
 	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
 		p.GithubOwner = "pub"

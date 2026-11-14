@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/api"
+	"github.com/godbobo/fast_ship/server/internal/forge"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	"go.uber.org/zap"
@@ -592,7 +593,8 @@ func (s *ReviewService) reviewPrerequisites(ctx context.Context, project *model.
 		installed := false
 		installDetail := "Forgejo 代码仓库集成不可用"
 		if integrationConfigured && repoLinked {
-			client, err := s.reviewClient(ctx, reviewIntegrationID(project.CodeIntegrationID), repoFullName, 0)
+			// 取审查客户端不再传安装哨兵（INT-230）：Forgejo 经集成凭证构造。
+			client, err := s.reviewClient(ctx, reviewIntegrationID(project.CodeIntegrationID), repoFullName)
 			switch {
 			case err != nil:
 				installDetail = "Forgejo 集成访问面不可用：" + err.Error()
@@ -628,15 +630,22 @@ func (s *ReviewService) reviewPrerequisites(ctx context.Context, project *model.
 		repoFullName := repoOwner + "/" + repoName
 		repoLinked := repoOwner != "" && repoName != ""
 
-		// 2. App 已安装到该仓库：保存/读取前实时调一次 GitHub（安装令牌
-		// GetRepository），失败即缺项。部署未配置 App 时不发起调用。仓库级
-		// 检查经 resolver 取审查客户端：installationID=0 传给适配器后由
-		// githubapp.Client 保留「先解析安装再查仓库」的既有语义。
+		// 2. App 已安装到该仓库：保存/读取前实时调一次 GitHub，失败即缺项。
+		// 仓库级检查经 resolver 取审查客户端：安装解析已内联进适配器（INT-230），
+		// 未配置 App / 未安装都在构造或 GetRepository 处报真实原因。
 		installed := false
 		installDetail := "部署未配置 GitHub App"
-		if appConfigured && repoLinked && s.gh != nil {
-			client, err := s.reviewClient(ctx, model.ForgeIntegrationBuiltinGitHubID, repoFullName, 0)
+		if appConfigured && repoLinked {
+			client, err := s.reviewClient(ctx, model.ForgeIntegrationBuiltinGitHubID, repoFullName)
 			switch {
+			case errors.Is(err, forge.ErrGitHubAccessUnconfigured):
+				installDetail = "部署未配置 GitHub App"
+			case err != nil && !forge.IsRateLimit(err) &&
+				(forge.IsNotFound(err) || forge.IsForbidden(err) || forge.IsUnauthorized(err)):
+				// 安装解析内联进 resolver 后，「App 未装到该仓库」在构造阶段就
+				// 失败（404；凭证被拒为 401/403）——仍按未安装归类，不误报
+				// 访问面不可用，与改造前 GetRepository 分支口径一致。
+				installDetail = "App 未安装到该仓库或仓库不可访问：" + err.Error()
 			case err != nil:
 				installDetail = "GitHub App 访问面不可用：" + err.Error()
 			default:

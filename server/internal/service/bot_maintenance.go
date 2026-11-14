@@ -220,27 +220,30 @@ func (s *BotService) nightlyLoop() {
 
 func (s *BotService) scanNightlyOnce() {
 	s.ensureMaintWorker()
-	ids, err := repository.NewBotMaintenanceRepository(s.db).ListBotIDs()
+	// 扫描投影（INT-228）：一条查询取出 id 与归属用户声明的时区，不为时区
+	// Get 整行——整行读取会把系统提示词与 provider 密文反复拖进每次扫描。
+	rows, err := repository.NewBotMaintenanceRepository(s.db).ListBotOwnerTimezones()
 	if err != nil {
+		// 与预算/汇总投影同口径：候选读持续失败时夜间整理不再入队，
+		// 必须留日志信号（INT-228 复审）。
+		s.logger.Warn("夜间扫描读取候选失败", zap.Error(err))
 		return
 	}
 	hour, minute := s.cfg.Bots.Memory.NightlyClock()
 	now := s.now()
-	for _, botID := range ids {
+	for _, row := range rows {
 		// 触发时刻与日期按各 bot 归属用户的有效时区分别计算（INT-138）：
 		// 同一批 bot 的「当地 03:00」可能落在不同的 UTC 时刻与日期上。
-		// 用户未声明时区时回退部署配置，与旧的全局口径一致。
-		bot, err := s.bots.Get(botID)
-		if err != nil {
-			continue
-		}
-		_, loc := s.botOwnerTimezoneOf(bot)
+		// 用户未声明时区（或用户行已随级联删除消失）时回退部署配置，
+		// 与旧的全局口径一致。
+		_, loc := s.botEffectiveTimezone(row.Timezone)
 		local := now.In(loc)
 		todayClock := time.Date(local.Year(), local.Month(), local.Day(), hour, minute, 0, 0, loc)
 		if local.Before(todayClock) {
 			continue
 		}
 		date := local.Format("2006-01-02")
+		botID := row.BotID
 		select {
 		case s.maintJobs <- botMaintJob{botID: botID, triggerKey: s.nightlyTriggerKey(botID, date)}:
 		default:

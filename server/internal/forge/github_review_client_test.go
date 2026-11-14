@@ -16,6 +16,7 @@ type recordingAPI struct {
 	inst []int64 // 每次调用收到的 installationID（按调用序）
 
 	pr             *githubapi.PullRequest
+	prErrForID     map[int64]error // GetPullRequest 按安装 id 注入错误
 	diff           string
 	diffErr        error
 	reviewComments []githubapi.ReviewComment
@@ -31,6 +32,11 @@ type recordingAPI struct {
 	repoErr        error
 	entries        map[string]bool
 	pathErr        error
+
+	resolveInst  int64  // ResolveInstallation 返回的安装 id
+	resolveErr   error  // ResolveInstallation 注入的错误
+	resolveRepo  string // 最近一次 ResolveInstallation 收到的仓库名
+	resolveCalls int    // ResolveInstallation 调用次数（缓存断言用）
 }
 
 // statusCall 一次 CreateCommitStatus 的入参快照。
@@ -49,6 +55,9 @@ func (r *recordingAPI) last() int64 {
 
 func (r *recordingAPI) GetPullRequest(_ context.Context, installationID int64, _ string, _ int) (*githubapi.PullRequest, error) {
 	r.mark(installationID)
+	if err := r.prErrForID[installationID]; err != nil {
+		return nil, err
+	}
 	return r.pr, nil
 }
 
@@ -115,8 +124,10 @@ func (r *recordingAPI) TreeEntriesAtRef(_ context.Context, installationID int64,
 	return r.entries, r.pathErr
 }
 
-func (r *recordingAPI) ResolveInstallation(_ context.Context, _ string) (int64, error) {
-	return 0, errors.New("recordingAPI: 不支持解析")
+func (r *recordingAPI) ResolveInstallation(_ context.Context, repoFullName string) (int64, error) {
+	r.resolveCalls++
+	r.resolveRepo = repoFullName
+	return r.resolveInst, r.resolveErr
 }
 
 // withBearer 模拟 githubapp.Client 的凭证面：Bearer(ctx, installationID)。

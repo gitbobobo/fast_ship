@@ -360,7 +360,7 @@ func TestPrepRetrySchedulerSendsAfterGrace(t *testing.T) {
 	t3 := &fakeReviewT3{prepFailed: map[string]*T3FailedPreparation{
 		run.ThreadID: {RunID: "t3-run-1", FailedAt: seedAt.Add(-time.Minute).Format(time.RFC3339), Message: prepT3FailureMessage},
 	}}
-	svc := e.withT3(t3, nil, nil)
+	svc := e.withT3(t3, nil)
 
 	tickAt := seedAt.Add(time.Minute)
 	svc.retryFailedPreparations(tickAt)
@@ -397,7 +397,7 @@ func TestPrepRetrySchedulerWaitsGrace(t *testing.T) {
 	t3 := &fakeReviewT3{prepFailed: map[string]*T3FailedPreparation{
 		run.ThreadID: {RunID: "t3-run-1", FailedAt: seedAt.Add(-10 * time.Second).Format(time.RFC3339), Message: prepT3FailureMessage},
 	}}
-	svc := e.withT3(t3, nil, nil)
+	svc := e.withT3(t3, nil)
 
 	svc.retryFailedPreparations(seedAt)
 	if len(t3.retried) != 0 {
@@ -443,7 +443,7 @@ func TestPrepRetrySchedulerCapFailsRun(t *testing.T) {
 	t3 := &fakeReviewT3{prepFailed: map[string]*T3FailedPreparation{
 		run.ThreadID: {RunID: "t3-run-1", FailedAt: seedAt.Add(-time.Minute).Format(time.RFC3339), Message: prepT3FailureMessage},
 	}}
-	svc := e.withT3(t3, nil, nil)
+	svc := e.withT3(t3, nil)
 
 	svc.retryFailedPreparations(seedAt)
 
@@ -495,7 +495,7 @@ func TestPrepRetrySchedulerRPCFailureKeepsCount(t *testing.T) {
 			run.ThreadID: {RunID: "t3-run-1", FailedAt: seedAt.Add(-time.Minute).Format(time.RFC3339), Message: prepT3FailureMessage},
 		},
 	}
-	svc := e.withT3(t3, nil, nil)
+	svc := e.withT3(t3, nil)
 	if err := e.svc.db.Create(&model.ReviewRunToken{
 		RunID: run.ID, TokenHash: "hash-rpc-fail", CreatedAt: seedAt,
 		ExpiresAt: run.DeadlineAt.Add(reviewTokenGrace),
@@ -570,7 +570,7 @@ func TestPrepRetryRotatesPastBudget(t *testing.T) {
 		clock.advance(30*time.Second + 500*time.Millisecond)
 		return nil, nil // 投影判定「不可重试」：只验查了谁
 	}
-	svc := e.withT3(t3, nil, nil)
+	svc := e.withT3(t3, nil)
 
 	budget := 60 * time.Second
 	// 假时钟同时驱动预算与 60s 节流窗口：每条读 30.5s，窗口会在三轮里真实
@@ -616,7 +616,7 @@ func TestPrepRetrySchedulerThrottlesQuery(t *testing.T) {
 	seedAt := time.Date(2026, 10, 22, 1, 0, 0, 0, time.UTC)
 	run := seedPrepRetryRun(t, e, repo, 35, seedAt)
 	t3 := &fakeReviewT3{} // 投影判定不可重试（无失败条目）
-	svc := e.withT3(t3, nil, nil)
+	svc := e.withT3(t3, nil)
 
 	svc.retryFailedPreparations(seedAt)
 	svc.retryFailedPreparations(seedAt.Add(10 * time.Second))
@@ -658,7 +658,7 @@ func TestPrepRetrySeparateReadAndRPCBudgets(t *testing.T) {
 			return nil
 		},
 	}
-	svc := e.withT3(t3, nil, nil)
+	svc := e.withT3(t3, nil)
 	svc.prepRetryReadTimeout = 40 * time.Millisecond
 	svc.prepRetryRPCTimeout = 40 * time.Millisecond
 
@@ -680,7 +680,7 @@ func TestPrepRetryThrottleIgnoresStaleTickTime(t *testing.T) {
 	seedAt := time.Date(2026, 10, 22, 1, 0, 0, 0, time.UTC)
 	run := seedPrepRetryRun(t, e, repo, 38, seedAt)
 	t3 := &fakeReviewT3{}
-	svc := e.withT3(t3, nil, nil)
+	svc := e.withT3(t3, nil)
 
 	svc.retryFailedPreparations(seedAt)
 	if len(t3.prepCalls) != 1 {
@@ -719,7 +719,7 @@ func TestPrepRetryExtendsTokenWithDeadline(t *testing.T) {
 	t3 := &fakeReviewT3{prepFailed: map[string]*T3FailedPreparation{
 		run.ThreadID: {RunID: "t3-run-1", FailedAt: seedAt.Add(-time.Minute).Format(time.RFC3339), Message: prepT3FailureMessage},
 	}}
-	svc := e.withT3(t3, nil, nil)
+	svc := e.withT3(t3, nil)
 
 	tickAt := seedAt.Add(time.Minute)
 	svc.retryFailedPreparations(tickAt)
@@ -771,7 +771,7 @@ func TestPrepRetryTerminalRunUntouched(t *testing.T) {
 				Updates(map[string]any{"status": model.ReviewRunCancelled, "error_code": "user_cancelled"}).Error
 		},
 	}
-	svc := e.withT3(t3, nil, nil)
+	svc := e.withT3(t3, nil)
 
 	svc.retryFailedPreparations(seedAt.Add(time.Minute))
 
@@ -817,7 +817,7 @@ func TestPrepRetryBatchFairness(t *testing.T) {
 	}
 
 	t3 := &fakeReviewT3{}
-	svc := e.withT3(t3, nil, nil)
+	svc := e.withT3(t3, nil)
 
 	// 第一轮：全部 21 条入节流表（fake 调用即时返回，不触发阶段预算）。
 	svc.retryFailedPreparations(seedAt)
@@ -869,7 +869,7 @@ func TestPrepRetryCursorRotation(t *testing.T) {
 		return out
 	}
 	e := newReviewEngineEnv(t)
-	svc := e.withT3(&fakeReviewT3{}, nil, nil)
+	svc := e.withT3(&fakeReviewT3{}, nil)
 
 	if got := svc.prepRetryFromCursor(nil); len(got) != 0 {
 		t.Fatalf("空候选应返回空, got %v", order(got))
