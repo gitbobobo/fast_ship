@@ -77,7 +77,7 @@ describe("buildIssuePrompt", () => {
   });
 
   it("trims trailing newlines from the template before appending the block", () => {
-    // 与服务端 BuildIssuePrompt 的 TrimRight 同口径：尾部换行不产生多余空行
+    // 尾部换行先裁剪：模板末尾空行不产生引用块前的多余空行
     const prompt = buildIssuePrompt({
       projectId: "p1",
       issueId: "i1",

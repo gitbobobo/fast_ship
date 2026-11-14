@@ -185,13 +185,13 @@ func TestIsAllowedContentTypeGateMatrix(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name+"/media-face", func(t *testing.T) {
-			if got := mediaFace.isAllowedContentType(tc.contentType, tc.rawURL); got != tc.mediaWant {
-				t.Fatalf("media face isAllowedContentType(%q, %q) = %v, want %v", tc.contentType, tc.rawURL, got, tc.mediaWant)
+			if _, got := mediaFace.normalizeMediaContentType(tc.contentType, tc.rawURL); got != tc.mediaWant {
+				t.Fatalf("media face normalizeMediaContentType(%q, %q) ok = %v, want %v", tc.contentType, tc.rawURL, got, tc.mediaWant)
 			}
 		})
 		t.Run(tc.name+"/screenshot-face", func(t *testing.T) {
-			if got := screenshotFace.isAllowedContentType(tc.contentType, tc.rawURL); got != tc.screenWant {
-				t.Fatalf("screenshot face isAllowedContentType(%q, %q) = %v, want %v", tc.contentType, tc.rawURL, got, tc.screenWant)
+			if _, got := screenshotFace.normalizeMediaContentType(tc.contentType, tc.rawURL); got != tc.screenWant {
+				t.Fatalf("screenshot face normalizeMediaContentType(%q, %q) ok = %v, want %v", tc.contentType, tc.rawURL, got, tc.screenWant)
 			}
 		})
 	}

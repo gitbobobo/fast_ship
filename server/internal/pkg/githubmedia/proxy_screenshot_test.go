@@ -984,7 +984,9 @@ func TestFetchWithBearerSendsTokenToDeploymentAttachments(t *testing.T) {
 	}
 }
 
-func TestIsGitHubMediaURL(t *testing.T) {
+func TestIsGitHubMediaURLForShape(t *testing.T) {
+	// bearer 重试闸门的形状准入（公共部署口径）：外部图床拿了令牌等于拿到
+	// 仓库凭证，所以只发「可发请求的地址」——https、有 host、无 userinfo。
 	yes := []string{
 		"https://github.com/user-attachments/assets/abc",
 		"https://private-user-images.githubusercontent.com/abc",
@@ -994,28 +996,35 @@ func TestIsGitHubMediaURL(t *testing.T) {
 		"https://uiv.example.com/f/x.png",
 		"https://evil.example.com/github.com/user-attachments/assets/abc",
 		"github.com/user-attachments/assets/abc", // 无 scheme：解析后 Host 为空
-		// http 明文不算 GitHub 媒体域：这个闸门决定 bearer 令牌重试，令牌只
-		// 发 https 上游（截图下载面也只走 https）。注意 isAllowedGitHubMediaURL
-		// 有意允许 http，两个口径不同——这里回归的是导出闸门的形状准入。
+		// http 明文不算：令牌只发 https 上游（截图下载面也只走 https）。注意
+		// isAllowedGitHubMediaURL 有意允许 http，两个口径不同。
 		"http://github.com/user-attachments/assets/x",
+		// github.com 上的非规范附件路径：形状（https/host/无 userinfo）本身合规，
+		// 但附件路径不规范——公共部署闸门同样拒（无部署口径的旧版本只查媒体域
+		// 前缀，会放行这几条）。
+		"https://github.com/user-attachments/assets/",
+		"https://github.com/user-attachments/assets/../other",
+		"https://github.com/user-attachments/assets/%2e%2e/x",
+		"https://github.com//user-attachments/assets/abc",
 		"", ":", "not a url",
 	}
 	for _, raw := range yes {
-		if !IsGitHubMediaURL(raw) {
-			t.Fatalf("IsGitHubMediaURL(%q) = false, want true", raw)
+		if !IsGitHubMediaURLFor(raw, "github.com") {
+			t.Fatalf("IsGitHubMediaURLFor(%q, github.com) = false, want true", raw)
 		}
 	}
 	for _, raw := range no {
-		if IsGitHubMediaURL(raw) {
-			t.Fatalf("IsGitHubMediaURL(%q) = true, want false", raw)
+		if IsGitHubMediaURLFor(raw, "github.com") {
+			t.Fatalf("IsGitHubMediaURLFor(%q, github.com) = true, want false", raw)
 		}
 	}
 }
 
-// IsGitHubAttachmentURL 只认附件形态（github.com 的 user-attachments/assets
-// 与 user-images.githubusercontent.com），不要求文件名扩展名——GitHub 拖入/
-// 粘贴附件的标准直链恰恰没有扩展名。其余 GitHub 域名与路径不算：service 层
-// 用它豁免裸链收集的位图扩展名要求，收得太宽会把普通网页链接误当截图。
+// IsGitHubAttachmentURLFor(raw, "github.com") 只认公共 GitHub 的附件形态
+// （github.com 的 user-attachments/assets 与 user-images.githubusercontent.com），
+// 不要求文件名扩展名——GitHub 拖入/粘贴附件的标准直链恰恰没有扩展名。其余
+// GitHub 域名与路径不算：service 层用它豁免裸链收集的位图扩展名要求，收得
+// 太宽会把普通网页链接误当截图。
 func TestIsGitHubAttachmentURL(t *testing.T) {
 	yes := []string{
 		"https://github.com/user-attachments/assets/abc-123",
@@ -1031,13 +1040,13 @@ func TestIsGitHubAttachmentURL(t *testing.T) {
 		"", "not a url",
 	}
 	for _, raw := range yes {
-		if !IsGitHubAttachmentURL(raw) {
-			t.Fatalf("IsGitHubAttachmentURL(%q) = false, want true", raw)
+		if !IsGitHubAttachmentURLFor(raw, "github.com") {
+			t.Fatalf("IsGitHubAttachmentURLFor(%q) = false, want true", raw)
 		}
 	}
 	for _, raw := range no {
-		if IsGitHubAttachmentURL(raw) {
-			t.Fatalf("IsGitHubAttachmentURL(%q) = true, want false", raw)
+		if IsGitHubAttachmentURLFor(raw, "github.com") {
+			t.Fatalf("IsGitHubAttachmentURLFor(%q) = true, want false", raw)
 		}
 	}
 }
@@ -1275,7 +1284,7 @@ func TestIsGitHubMediaURLFor(t *testing.T) {
 		// GHE host 上的普通页面/非附件路径：令牌不放行。
 		{"https://ghe.example.com/owner/repo", "ghe.example.com"},
 		{"https://ghe.example.com/user-attachments/assets", "ghe.example.com"}, // 缺 id 段
-		// http 明文不发令牌（与 IsGitHubMediaURL 的形状准入一致）。
+		// http 明文不发令牌（公共部署闸门同一形状准入）。
 		{"http://ghe.example.com/user-attachments/assets/x", "ghe.example.com"},
 		// userinfo / fragment 形态不可发。
 		{"https://token@ghe.example.com/user-attachments/assets/x", "ghe.example.com"},

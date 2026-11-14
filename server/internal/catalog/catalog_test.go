@@ -62,11 +62,15 @@ func TestCatalogLoadedAndQueries(t *testing.T) {
 		t.Fatalf("目录外地址不应命中")
 	}
 
-	// 规范化与快照时间。
+	// 规范化。
 	if got := NormalizeBaseURL(" https://api.example.com/ "); got != "https://api.example.com" {
 		t.Fatalf("NormalizeBaseURL: %q", got)
 	}
-	if GeneratedAt() == "" {
-		t.Fatalf("目录应带数据快照时间")
+
+	// 内置目录必须带数据快照时间（发版时由生成脚本写入；缺了说明生成物
+	// 损坏，费用与目录时间戳都会失真）。
+	load()
+	if parsed.GeneratedAt == "" {
+		t.Fatalf("内置目录应带数据快照时间")
 	}
 }

@@ -19,12 +19,6 @@ func NewBotMaintenanceRepository(db *gorm.DB) *BotMaintenanceRepository {
 	return &BotMaintenanceRepository{db: db}
 }
 
-// CreateTx 在事务内创建维护运行；唯一索引冲突返回 gorm.ErrRecordNotFound
-// 之外的唯一性错误（调用方以 errors.Is/As 判断按已存在处理）。
-func (r *BotMaintenanceRepository) CreateTx(tx *gorm.DB, run *model.BotMaintenanceRun) error {
-	return tx.Create(run).Error
-}
-
 // CreateOrFindTx 幂等创建：同 (bot, kind, trigger_key) 已存在时返回既有行
 // （created=false），调用方据此跳过或续接。
 func (r *BotMaintenanceRepository) CreateOrFindTx(tx *gorm.DB, run *model.BotMaintenanceRun) (*model.BotMaintenanceRun, bool, error) {
@@ -43,15 +37,6 @@ func (r *BotMaintenanceRepository) FindByTriggerKeyTx(tx *gorm.DB, botID, kind, 
 	var row model.BotMaintenanceRun
 	if err := tx.Where("bot_id = ? AND kind = ? AND trigger_key = ?", botID, kind, triggerKey).
 		First(&row).Error; err != nil {
-		return nil, err
-	}
-	return &row, nil
-}
-
-// FindByID 取维护运行。
-func (r *BotMaintenanceRepository) FindByID(id string) (*model.BotMaintenanceRun, error) {
-	var row model.BotMaintenanceRun
-	if err := r.db.Where("id = ?", id).First(&row).Error; err != nil {
 		return nil, err
 	}
 	return &row, nil

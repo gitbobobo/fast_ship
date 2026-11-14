@@ -694,14 +694,6 @@ func (s *BotService) resolveTestTarget(userID string, req *TestConnectionRequest
 
 // ---------- 密钥 ----------
 
-func (s *BotService) encryptAPIKey(plain string) ([]byte, string, error) {
-	cipher, err := crypto.Encrypt([]byte(plain), []byte(s.cfg.Encryption.Key))
-	if err != nil {
-		return nil, "", errs.ErrInternal
-	}
-	return cipher, botKeyLast4(plain), nil
-}
-
 func (s *BotService) decryptAPIKey(bot *model.Bot) (string, error) {
 	plain, err := crypto.Decrypt(bot.APIKeyEncrypted, []byte(s.cfg.Encryption.Key))
 	if err != nil {

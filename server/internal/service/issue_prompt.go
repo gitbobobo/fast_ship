@@ -185,39 +185,3 @@ func (s *IssuePromptService) validatePreferences(ctx context.Context, userID str
 	}
 	return nil
 }
-
-// IssuePromptInput 组装「启动线程」提示词的输入（与 web 端 issue-prompt.ts 同名）。
-type IssuePromptInput struct {
-	ProjectID string
-	IssueID   string
-	Content   string
-	// Reason 仅推荐场景传入（推荐理由）；其余场景置空。
-	Reason string
-}
-
-// BuildIssuePrompt 组装发送给 Agent 的完整提示词（INT-89）：用户模板正文在前，
-// 系统附加信息以 > 引用块附在结尾——附加块完全由系统生成，用户只编辑模板
-// 正文。npx 命令必须带 --skill fast-ship：仓库 skills/ 下还有内部技能，
-// 不指定会被一并安装（实测 `npx skills add --list` 发现 3 个技能）。
-// Reason 非空才追加推荐理由行（仅推荐场景）。
-func BuildIssuePrompt(in IssuePromptInput) string {
-	var b strings.Builder
-	b.WriteString(strings.TrimRight(in.Content, "\n"))
-	b.WriteString("\n\n> 以下信息由 Fast Ship 附加。请使用 fast-ship 技能查询并处理该问题。\n")
-	b.WriteString("> 若当前环境未安装 fast-ship 技能，先征得用户同意，再执行：\n")
-	b.WriteString("> `npx skills add https://github.com/gitbobobo/fast_ship --skill fast-ship`\n")
-	b.WriteString("> 项目ID：" + in.ProjectID + "\n")
-	b.WriteString("> 问题ID：" + in.IssueID)
-	if reason := strings.TrimSpace(in.Reason); reason != "" {
-		// 多行理由逐行补 > 前缀，保持整段仍是合法引用块；标签只出现在首行
-		//（与 web 端 issue-prompt.ts 同口径）。
-		for i, line := range strings.Split(reason, "\n") {
-			if i == 0 {
-				b.WriteString("\n> 推荐理由：" + line)
-			} else {
-				b.WriteString("\n> " + line)
-			}
-		}
-	}
-	return b.String()
-}

@@ -232,10 +232,7 @@ func TestInt124SilentArchiveWatermark(t *testing.T) {
 	// 不追加 daily。
 	mr2 := int124SeedMaintRun(t, env, bot.ID, "compaction:threshold:g1:s-int124-2")
 	env.bots.runSilentArchive(context.Background(), botRow, mr2, plan)
-	row2, err := repository.NewBotMaintenanceRepository(env.db).FindByID(mr2.ID)
-	if err != nil {
-		t.Fatalf("reload maint: %v", err)
-	}
+	row2 := maintenanceRunByID(t, env.db, mr2.ID)
 	if !strings.Contains(row2.ResultJSON, "already_archived") {
 		t.Fatalf("第二轮应记 already_archived: %s", row2.ResultJSON)
 	}
@@ -270,10 +267,7 @@ func TestInt124SilentArchiveFailureKeepsWatermark(t *testing.T) {
 	}
 	mr := int124SeedMaintRun(t, env, bot.ID, "compaction:threshold:g0:s-int124-bad")
 	env.bots.runSilentArchive(context.Background(), botRow, mr, plan)
-	row, err := repository.NewBotMaintenanceRepository(env.db).FindByID(mr.ID)
-	if err != nil {
-		t.Fatalf("reload maint: %v", err)
-	}
+	row := maintenanceRunByID(t, env.db, mr.ID)
 	if !strings.Contains(row.ResultJSON, "bad_output") {
 		t.Fatalf("坏输出应记 bad_output: %s", row.ResultJSON)
 	}
@@ -520,10 +514,7 @@ func TestInt124SilentArchiveSentPrefixWatermark(t *testing.T) {
 		strings.Contains(body1, "charlie") {
 		t.Fatalf("第一轮请求应只含前缀 m1+m2，不含段尾 m3: %s", body1)
 	}
-	row1, err := repository.NewBotMaintenanceRepository(env.db).FindByID(mr1.ID)
-	if err != nil {
-		t.Fatalf("reload maint: %v", err)
-	}
+	row1 := maintenanceRunByID(t, env.db, mr1.ID)
 	if !strings.Contains(row1.ResultJSON, `"archive":"ok"`) {
 		t.Fatalf("第一轮应正常归档: %s", row1.ResultJSON)
 	}
@@ -553,10 +544,7 @@ func TestInt124SilentArchiveSentPrefixWatermark(t *testing.T) {
 	if n := int124ArchiveRequests(t, env, mr2.ID); n != 1 {
 		t.Fatalf("第二轮应恰好 1 次归档请求，实得 %d", n)
 	}
-	row2, err := repository.NewBotMaintenanceRepository(env.db).FindByID(mr2.ID)
-	if err != nil {
-		t.Fatalf("reload maint: %v", err)
-	}
+	row2 := maintenanceRunByID(t, env.db, mr2.ID)
 	if !strings.Contains(row2.ResultJSON, `"archive":"ok"`) ||
 		strings.Contains(row2.ResultJSON, "already_archived") {
 		t.Fatalf("第二轮应补发归档而不是 already_archived: %s", row2.ResultJSON)
@@ -641,10 +629,7 @@ func TestInt124SilentArchiveBacklogAcrossCycles(t *testing.T) {
 	if n := int124ArchiveRequests(t, env, mr2.ID); n != 1 {
 		t.Fatalf("第二轮应恰好 1 次归档请求，实得 %d", n)
 	}
-	row2, err := repository.NewBotMaintenanceRepository(env.db).FindByID(mr2.ID)
-	if err != nil {
-		t.Fatalf("reload maint: %v", err)
-	}
+	row2 := maintenanceRunByID(t, env.db, mr2.ID)
 	if !strings.Contains(row2.ResultJSON, `"archive":"ok"`) ||
 		strings.Contains(row2.ResultJSON, "already_archived") {
 		t.Fatalf("第二轮应补发积压而不是 already_archived: %s", row2.ResultJSON)
@@ -694,10 +679,7 @@ func TestInt124SilentArchiveAllDuplicate(t *testing.T) {
 
 	mr := int124SeedMaintRun(t, env, bot.ID, "compaction:threshold:g0:s-int124-dup")
 	env.bots.runSilentArchive(context.Background(), botRow, mr, plan)
-	row, err := repository.NewBotMaintenanceRepository(env.db).FindByID(mr.ID)
-	if err != nil {
-		t.Fatalf("reload maint: %v", err)
-	}
+	row := maintenanceRunByID(t, env.db, mr.ID)
 	if !strings.Contains(row.ResultJSON, "all_duplicate") {
 		t.Fatalf("全判重应记 all_duplicate: %s", row.ResultJSON)
 	}
@@ -716,10 +698,7 @@ func TestInt124SilentArchiveAllDuplicate(t *testing.T) {
 	// 水位已覆盖：同段再跑 already_archived、不发请求。
 	mr2 := int124SeedMaintRun(t, env, bot.ID, "compaction:threshold:g1:s-int124-dup2")
 	env.bots.runSilentArchive(context.Background(), botRow, mr2, plan)
-	row2, err := repository.NewBotMaintenanceRepository(env.db).FindByID(mr2.ID)
-	if err != nil {
-		t.Fatalf("reload maint: %v", err)
-	}
+	row2 := maintenanceRunByID(t, env.db, mr2.ID)
 	if !strings.Contains(row2.ResultJSON, "already_archived") {
 		t.Fatalf("同段重试应 already_archived: %s", row2.ResultJSON)
 	}

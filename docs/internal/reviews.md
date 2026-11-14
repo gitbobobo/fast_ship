@@ -1026,7 +1026,7 @@ Linkify；去重保序，label 取 alt 或「截图 N」）。收集走 AST 而�
 - 行内代码、围栏代码块、HTML 注释不产链接节点，自然不收集（旧正则会误收）。
 
 三个来源的 URL 统一剥 `#fragment`（不是资源本身，下载面 normalize 会拒、
-`IsGitHubMediaURL` 也因此判 false 导致 bearer 重试失效）；裸链再做尾标点兜
+`IsGitHubMediaURLFor` 也因此判 false 导致 bearer 重试失效）；裸链再做尾标点兜
 底裁剪——cutset 为 GFM 尾标点集 `?!.,:*_~'` ∪ Unicode `Pe`（右闭合）∪
 `Pf`（右引号）∪ 中文句读 `。，、；：！？…`，并补一次「`)` 多于 `(`」的括
 号配对（Linkify 已做过一轮，中文句读等非 GFM 字符不归它管）；只裁尾部不动
@@ -1080,7 +1080,7 @@ Content-Disposition / CSP 硬化头，两面 svg 判定共用一处实现，口�
 **本部署的 GitHub 实例**、且只在匿名被 401/403/404 拒时重试一次（私有附件
 对匿名请求正是回这两个码）：外部图床匿名失败即止，协议不支持、不是图片、
 超限、内网地址这类确定性失败也不重试。凭证闸门按部署推导
-（`IsGitHubMediaURLFor`）：公共 GitHub 部署沿用 `IsGitHubMediaURL` 的媒体域
+（`IsGitHubMediaURLFor`）：公共 GitHub 部署沿用 `isAllowedGitHubMediaURL` 的媒体域
 白名单（`github.com` 上的附件路径同样要求解码后的规范形态，点段不能借前缀
 把令牌带出附件目录）；GHE 部署只放行本实例 authority（含端口，`https://<host>:<port>/…`
 的端口不同即不算同一实例；默认端口按 scheme 判定，https 的 `:80` 保留）上的

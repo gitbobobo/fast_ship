@@ -432,6 +432,17 @@ func (f *fakeModelServer) nextRequest(t *testing.T, timeout time.Duration) fakeM
 	}
 }
 
+// maintenanceRunByID 按 id 读回维护运行。生产只有 trigger key 幂等读与未完成
+// 列表，没有按 id 读单行的入口；测试读回直接用表查询，不为测试保留仓储包装。
+func maintenanceRunByID(t *testing.T, db *gorm.DB, id string) *model.BotMaintenanceRun {
+	t.Helper()
+	var row model.BotMaintenanceRun
+	if err := db.Where("id = ?", id).First(&row).Error; err != nil {
+		t.Fatalf("read maintenance run %s: %v", id, err)
+	}
+	return &row
+}
+
 // ---------- 测试装配 ----------
 
 type botTestEnv struct {

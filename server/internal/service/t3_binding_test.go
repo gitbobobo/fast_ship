@@ -43,6 +43,21 @@ func createT3TestEnv(t *testing.T, db *gorm.DB, userID, name string) *model.T3En
 	return env
 }
 
+// t3BindingByEnv 走生产读入口 ListByProjectID 取单个绑定：不存在时返回
+// gorm.ErrRecordNotFound，与逐行读取同一断言口径。
+func t3BindingByEnv(ctx context.Context, repo *repository.ProjectT3BindingRepository, projectID, envID string) (*model.ProjectT3Binding, error) {
+	rows, err := repo.ListByProjectID(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	for i := range rows {
+		if rows[i].EnvironmentID == envID {
+			return &rows[i], nil
+		}
+	}
+	return nil, gorm.ErrRecordNotFound
+}
+
 type t3BindingTestEnv struct {
 	db   *gorm.DB
 	cfg  *config.Config
@@ -242,7 +257,7 @@ func TestT3BindingUpsertListDeleteLifecycle(t *testing.T) {
 	}
 
 	// 同 (project_id, environment_id) 重复 PUT 覆盖快照，列表仍一条。
-	stored, err := e.repo.FindByID(ctx, project.ID, envID)
+	stored, err := t3BindingByEnv(ctx, e.repo, project.ID, envID)
 	if err != nil {
 		t.Fatalf("load stored binding: %v", err)
 	}
@@ -263,7 +278,7 @@ func TestT3BindingUpsertListDeleteLifecycle(t *testing.T) {
 	if len(items) != 1 || items[0].T3ProjectId != "p-2" {
 		t.Fatalf("expected overwrite to single binding, got %#v", items)
 	}
-	stored, err = e.repo.FindByID(ctx, project.ID, envID)
+	stored, err = t3BindingByEnv(ctx, e.repo, project.ID, envID)
 	if err != nil {
 		t.Fatalf("reload binding: %v", err)
 	}
@@ -328,7 +343,7 @@ func TestT3BindingUpsertValidation(t *testing.T) {
 				t.Fatalf("expected code %d, got err %v (code %d)", tc.wantCode, err, code)
 			}
 			// 不保存未校验的绑定。
-			if _, findErr := e.repo.FindByID(ctx, tc.projectID, tc.envID); !errors.Is(findErr, gorm.ErrRecordNotFound) {
+			if _, findErr := t3BindingByEnv(ctx, e.repo, tc.projectID, tc.envID); !errors.Is(findErr, gorm.ErrRecordNotFound) {
 				t.Fatalf("expected no binding persisted, got err %v", findErr)
 			}
 		})
@@ -452,7 +467,7 @@ func TestT3BindingCascade(t *testing.T) {
 	if err := e.db.Delete(&model.Project{}, "id = ?", project.ID).Error; err != nil {
 		t.Fatalf("delete project: %v", err)
 	}
-	if _, err := e.repo.FindByID(ctx, project.ID, envID); !errors.Is(err, gorm.ErrRecordNotFound) {
+	if _, err := t3BindingByEnv(ctx, e.repo, project.ID, envID); !errors.Is(err, gorm.ErrRecordNotFound) {
 		t.Fatalf("expected binding cascaded on project delete, got %v", err)
 	}
 
@@ -464,7 +479,7 @@ func TestT3BindingCascade(t *testing.T) {
 	if err := e.db.Delete(&model.T3Environment{}, "id = ?", envID).Error; err != nil {
 		t.Fatalf("delete env: %v", err)
 	}
-	if _, err := e.repo.FindByID(ctx, project2.ID, envID); !errors.Is(err, gorm.ErrRecordNotFound) {
+	if _, err := t3BindingByEnv(ctx, e.repo, project2.ID, envID); !errors.Is(err, gorm.ErrRecordNotFound) {
 		t.Fatalf("expected binding cascaded on env delete, got %v", err)
 	}
 }

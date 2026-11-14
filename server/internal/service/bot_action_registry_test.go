@@ -681,16 +681,8 @@ func botProjectReadTestExec(s *BotService, ctx context.Context, call *model.BotT
 	return s.botExecSyncAction(ctx, nil, call, args.Action, "fs_project 不支持该读取动作")
 }
 
-func botIssueReadTestExec(s *BotService, ctx context.Context, call *model.BotToolCall) (string, error) {
-	return s.botExecSyncAction(ctx, nil, call, "", "fs_issue 不支持该读取动作")
-}
-
 func botThreadReadTestExec(s *BotService, ctx context.Context, call *model.BotToolCall) (string, error) {
 	return s.botExecSyncAction(ctx, nil, call, "", "fs_thread 不支持该读取动作")
-}
-
-func botEnvironmentReadTestExec(s *BotService, ctx context.Context, call *model.BotToolCall) (string, error) {
-	return s.botExecSyncAction(ctx, nil, call, "", "fs_environment 不支持该动作")
 }
 
 func botProjectWriteTestExec(s *BotService, ctx context.Context, call *model.BotToolCall) (interface{}, error) {

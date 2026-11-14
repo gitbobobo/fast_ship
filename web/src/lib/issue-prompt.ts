@@ -31,8 +31,7 @@ export function normalizeIssuePrompts(
  * 推荐理由仅推荐场景出现。不再有 /fast-ship 前缀。
  */
 export function buildIssuePrompt(input: IssuePromptInput): string {
-  // 尾部换行不进正文（与服务端 BuildIssuePrompt 的 TrimRight 同口径），
-  // 否则 web 生成的提示词比服务端多出空行，两边格式不一致。
+  // 尾部换行不进正文：模板末尾的空行会渲染成引用块前的多余空行。
   const content = input.content.replace(/\n+$/, "");
   const lines = [
     "以下信息由 Fast Ship 附加。请使用 fast-ship 技能查询并处理该问题。",

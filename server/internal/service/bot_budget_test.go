@@ -14,13 +14,12 @@ import (
 // INT-164 预算与超限告警：每日/每月预算的花费口径、阈值告警「同一周期同一
 // 阈值只告警一次」、上一周期回看兜底、任务预算归属与未设预算零行为。
 //
-// 预算表不在 repository.BotModels 里（由主代理接线），测试自行建表并补齐
-// 部分唯一索引。
+// 预算表已并入 repository.BotModels；测试仍自行补齐部分唯一索引。
 
 func setupBotBudgetEnv(t *testing.T) *botTestEnv {
 	t.Helper()
 	env := setupBotTestEnv(t)
-	if err := env.db.AutoMigrate(repository.BotBudgetModels()...); err != nil {
+	if err := env.db.AutoMigrate(repository.BotModels()...); err != nil {
 		t.Fatalf("migrate bot budget: %v", err)
 	}
 	for _, ddl := range repository.BotBudgetDDL {

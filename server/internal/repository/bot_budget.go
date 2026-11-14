@@ -9,13 +9,6 @@ import (
 	"gorm.io/gorm"
 )
 
-// BotBudgetModels 返回预算表模型。**接线说明**：主代理把它并入
-// bot_schema.go 的 BotModels()，把 BotBudgetDDL 并入 botSchemaDDL，本文件
-// 不直接修改 bot_schema.go（与并行任务的文件分工）。
-func BotBudgetModels() []interface{} {
-	return []interface{}{&model.BotBudget{}}
-}
-
 // BotBudgetDDL 是 AutoMigrate 建不了的部分唯一索引与查询索引，全部幂等。
 // 同一目标同一周期至多一条预算：bot 预算与 task 预算各自一条部分唯一索引
 // （另一列恒为 NULL，普通复合唯一索引挡不住）。

@@ -302,16 +302,6 @@ func Registry(baseURLs map[string]string) []Provider {
 	return providers
 }
 
-// Lookup 按 id 找一个供应商；baseURLs 语义同 Registry。
-func Lookup(baseURLs map[string]string, id string) (Provider, bool) {
-	for _, p := range Registry(baseURLs) {
-		if p.ID == id {
-			return p, true
-		}
-	}
-	return Provider{}, false
-}
-
 // Percent 计算 used/limit 的百分比并夹到 [0,100]、四舍五入到 1 位小数。
 func Percent(used, limit float64) *float64 {
 	if limit <= 0 {
