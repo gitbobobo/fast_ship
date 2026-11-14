@@ -21,6 +21,10 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useIssue } from "@/lib/hooks/use-issues";
 import { useIssueCollab } from "@/lib/hooks/use-issue-collab";
 import { useEnvironments } from "@/lib/hooks/use-threads";
+import {
+  buildBoardSourceSearchParams,
+  type BoardIssueColumnContext,
+} from "@/lib/issue-list-context";
 import { ISSUE_WORKFLOW_STATUS_LABELS } from "@/lib/issue-workflow-status";
 import { canOperate } from "@/lib/threads-compose";
 import { cn } from "@/lib/utils";
@@ -183,6 +187,8 @@ interface RecommendationDetailPaneProps {
   launchHandleRef: Ref<RecommendationDetailPaneHandle>;
   /** 跨项目（全量推荐）时在标题行补项目名。 */
   showProject?: boolean;
+  /** 按 issue 所在列编码详情页来源上下文；列未知（含 issue 未加载）时不带参数。 */
+  getIssueColumnContext?: (issue: Issue) => BoardIssueColumnContext | null;
 }
 
 /**
@@ -199,6 +205,7 @@ export function RecommendationDetailPane({
   restorePending = false,
   launchHandleRef,
   showProject = false,
+  getIssueColumnContext,
 }: RecommendationDetailPaneProps) {
   const [peekDep, setPeekDep] = useState<RecommendationDependency | null>(null);
   const [launchOpen, setLaunchOpen] = useState(false);
@@ -397,7 +404,20 @@ export function RecommendationDetailPane({
             </Button>
           ))}
         <Link
-          to={`/projects/${issue?.project_id ?? peekDep?.project_id ?? item.issue.project_id}/issues/${issue?.id ?? displayIssueId}`}
+          to={{
+            pathname: `/projects/${issue?.project_id ?? peekDep?.project_id ?? item.issue.project_id}/issues/${issue?.id ?? displayIssueId}`,
+            search: issue
+              ? (() => {
+                  // 取实际展示问题（含 peek 依赖）的列上下文；列未知时不带来源参数
+                  const columnContext =
+                    getIssueColumnContext?.(issue) ?? null;
+                  const search = columnContext
+                    ? buildBoardSourceSearchParams(columnContext).toString()
+                    : "";
+                  return search ? `?${search}` : "";
+                })()
+              : "",
+          }}
           className={cn(
             buttonVariants({ variant: "ghost", size: "sm" }),
             "ml-auto h-7 gap-1.5 text-xs text-muted-foreground hover:text-foreground",

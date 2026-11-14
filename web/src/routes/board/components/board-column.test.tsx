@@ -1,6 +1,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { BoardIssueColumnContext } from "@/lib/issue-list-context";
 import { BoardColumn } from "./board-column";
 import { resetScrollPositions } from "@/lib/scroll-positions";
 
@@ -22,8 +23,23 @@ vi.mock("@/lib/hooks/use-issues", () => ({
 }));
 
 vi.mock("./board-issue-card", () => ({
-  BoardIssueCard: ({ issue }: { issue: Issue }) => (
-    <div data-issue-id={issue.id}>{issue.title}</div>
+  BoardIssueCard: ({
+    issue,
+    getColumnContext,
+  }: {
+    issue: Issue;
+    getColumnContext?: (issue: Issue) => BoardIssueColumnContext | null;
+  }) => (
+    <div
+      data-issue-id={issue.id}
+      data-column-context={
+        getColumnContext
+          ? JSON.stringify(getColumnContext(issue))
+          : undefined
+      }
+    >
+      {issue.title}
+    </div>
   ),
 }));
 
@@ -111,7 +127,12 @@ describe("BoardColumn scroll restoration", () => {
   it("restores the column list offset after leaving and coming back", () => {
     const { unmount } = render(
       <MemoryRouter>
-        <BoardColumn columnId="todo" projectId="project-1" />
+        <BoardColumn
+          columnId="todo"
+          projectId="project-1"
+          filter={{ label: "", source: "all" }}
+          onFilterChange={() => {}}
+        />
       </MemoryRouter>,
     );
 
@@ -124,7 +145,12 @@ describe("BoardColumn scroll restoration", () => {
 
     render(
       <MemoryRouter>
-        <BoardColumn columnId="todo" projectId="project-1" />
+        <BoardColumn
+          columnId="todo"
+          projectId="project-1"
+          filter={{ label: "", source: "all" }}
+          onFilterChange={() => {}}
+        />
       </MemoryRouter>,
     );
 
@@ -132,5 +158,47 @@ describe("BoardColumn scroll restoration", () => {
       ".overflow-y-auto",
     ) as HTMLElement;
     expect(restored.scrollTop).toBe(720);
+  });
+
+  it("passes the column context down to issue cards", () => {
+    render(
+      <MemoryRouter>
+        <BoardColumn
+          columnId="todo"
+          projectId="project-1"
+          filter={{ label: "bug", source: "github" }}
+          onFilterChange={() => {}}
+          getIssueColumnContext={() => ({
+            workflowStatus: "todo",
+            label: "bug",
+            source: "github",
+          })}
+        />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByText("问题 issue-0")).toHaveAttribute(
+      "data-column-context",
+      JSON.stringify({ workflowStatus: "todo", label: "bug", source: "github" }),
+    );
+  });
+
+  it("forwards column filter changes to the owner", () => {
+    const onFilterChange = vi.fn();
+    render(
+      <MemoryRouter>
+        <BoardColumn
+          columnId="todo"
+          projectId="project-1"
+          filter={{ label: "", source: "all" }}
+          onFilterChange={onFilterChange}
+        />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "筛选" }));
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "GitHub 问题" }));
+
+    expect(onFilterChange).toHaveBeenCalledWith({ label: "", source: "github" });
   });
 });

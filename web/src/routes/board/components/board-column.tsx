@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { useDroppable } from "@dnd-kit/core";
 import { Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -6,6 +6,9 @@ import {
   useInfiniteBoardIssues,
   useIssueFilterOptions,
 } from "@/lib/hooks/use-issues";
+import {
+  type BoardIssueColumnContext,
+} from "@/lib/issue-list-context";
 import { COLUMNS, type ColumnId } from "@/routes/board/lib/utils";
 import { getColumnScrollKey } from "@/routes/board/lib/board-scroll";
 import { usePersistedScroll } from "@/lib/hooks/use-persisted-scroll";
@@ -13,26 +16,24 @@ import { BoardIssueCard } from "./board-issue-card";
 import {
   BoardColumnFilter,
   type BoardColumnFilterValue,
-  DEFAULT_BOARD_COLUMN_FILTER,
 } from "./board-column-filter";
 import { CloseAllDoneButton } from "./close-all-done-button";
 
 export function BoardColumn({
   columnId,
   projectId,
+  filter,
+  onFilterChange,
+  getIssueColumnContext,
 }: {
   columnId: ColumnId;
   projectId: string;
+  /** 列筛选由 BoardPage 持有（受控），供卡片跳详情时编码来源上下文 */
+  filter: BoardColumnFilterValue;
+  onFilterChange: (next: BoardColumnFilterValue) => void;
+  getIssueColumnContext?: (issue: Issue) => BoardIssueColumnContext | null;
 }) {
   const column = COLUMNS.find((c) => c.id === columnId)!;
-
-  const [filter, setFilter] = useState<BoardColumnFilterValue>(
-    DEFAULT_BOARD_COLUMN_FILTER,
-  );
-
-  useEffect(() => {
-    setFilter(DEFAULT_BOARD_COLUMN_FILTER);
-  }, [projectId]);
 
   const { data: filterOptionsData } = useIssueFilterOptions(projectId);
   const labels = filterOptionsData?.labels ?? [];
@@ -102,7 +103,7 @@ export function BoardColumn({
           <BoardColumnFilter
             labels={labels}
             value={filter}
-            onChange={setFilter}
+            onChange={onFilterChange}
           />
           {column.id === "done" && !isLoading && total > 0 && (
             <CloseAllDoneButton projectId={projectId} />
@@ -128,7 +129,11 @@ export function BoardColumn({
         ) : (
           <>
             {issues.map((issue) => (
-              <BoardIssueCard key={issue.id} issue={issue} />
+              <BoardIssueCard
+                key={issue.id}
+                issue={issue}
+                getColumnContext={getIssueColumnContext}
+              />
             ))}
             {hasNextPage && (
               <div ref={sentinelRef} className="flex justify-center py-2">

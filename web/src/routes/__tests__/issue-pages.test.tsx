@@ -1,4 +1,4 @@
-import { fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as ReactRouter from "react-router";
 import { MemoryRouter, Route, Routes } from "react-router";
@@ -11,6 +11,7 @@ import { renderWithRoute, withTestQueryClient } from "@/test/render";
 import { useProject, useProjects } from "@/lib/hooks/use-projects";
 import {
   useIssues,
+  useInfiniteIssueList,
   useIssue,
   useIssueFilterOptions,
   useIssueRepoLabels,
@@ -47,6 +48,24 @@ function hasExactTextContent(text: string) {
   return (_: string, element: Element | null) =>
     element?.textContent === text &&
     Array.from(element.children).every((child) => child.textContent !== text);
+}
+
+/** 测试内展示当前 location 并提供真实返回按钮的探针 */
+function HistoryProbe() {
+  const location = ReactRouter.useLocation();
+  const navigate = ReactRouter.useNavigate();
+  return (
+    <>
+      <span data-testid="location-probe">
+        {location.pathname}
+        {location.search}
+        {location.hash}
+      </span>
+      <button type="button" onClick={() => navigate(-1)}>
+        history-back
+      </button>
+    </>
+  );
 }
 
 function createDeferred<T>() {
@@ -206,6 +225,7 @@ vi.mock("@/lib/hooks/use-issues", async (importOriginal) => {
   return {
     ...actual,
     useIssues: vi.fn(),
+    useInfiniteIssueList: vi.fn(),
     useIssue: vi.fn(),
     useIssueFilterOptions: vi.fn(),
     useIssueRepoLabels: vi.fn(),
@@ -683,6 +703,33 @@ describe("Issue pages", () => {
       mutate: vi.fn(),
     } as unknown as ReturnType<typeof useMarkIssueRead>);
 
+    vi.mocked(useInfiniteIssueList).mockReturnValue({
+      data: undefined,
+      isLoading: false,
+      isError: false,
+      refetch: vi.fn(),
+      fetchNextPage: vi.fn(),
+      hasNextPage: false,
+      isFetching: false,
+      isFetchingNextPage: false,
+    } as unknown as ReturnType<typeof useInfiniteIssueList>);
+
+    // 详情页按视口宽度决定左栏/抽屉；默认宽屏（xl+）
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      writable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        matches: false,
+        media: query,
+        onchange: null,
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      })),
+    });
+
     vi.mocked(useRecommendations).mockReturnValue({
       data: undefined,
       isLoading: false,
@@ -705,8 +752,6 @@ describe("Issue pages", () => {
     expect(screen.getByText("负责人")).toBeInTheDocument();
     expect(screen.getAllByText("进度 50%").length).toBeGreaterThan(0);
     expect(screen.getByText("1/2 项完成")).toBeInTheDocument();
-    expect(screen.getByText("上一条")).toBeInTheDocument();
-    expect(screen.getByText("下一条")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "返回" })).toBeInTheDocument();
     expect(screen.getByText("关闭了问题")).toBeInTheDocument();
     expect(screen.getByText(hasExactTextContent("Looks good"))).toBeInTheDocument();
@@ -1179,6 +1224,253 @@ describe("Issue pages", () => {
     expect(screen.getByText("开发中")).toBeInTheDocument();
   });
 
+  describe("issue detail source list (INT-231)", () => {
+    function mockSourceListPages(pages: { items: Issue[]; total: number; page: number }[]) {
+      vi.mocked(useInfiniteIssueList).mockReturnValue({
+        data: { pages },
+        isLoading: false,
+        isError: false,
+        refetch: vi.fn(),
+        fetchNextPage: vi.fn(),
+        hasNextPage: false,
+        isFetching: false,
+        isFetchingNextPage: false,
+      } as unknown as ReturnType<typeof useInfiniteIssueList>);
+    }
+
+    function sourceIssue(id: string, reference: string, title: string, overrides: Partial<Issue> = {}) {
+      return buildGitHubIssue({ id, reference, title, ...overrides });
+    }
+
+    it("hides the source list entry without source context", () => {
+      mockIssueDetailData();
+
+      renderWithRoute(<IssueDetailPage />, {
+        path: "/projects/:id/issues/:iid",
+        initialEntry: "/projects/proj-1/issues/issue-1",
+      });
+
+      expect(screen.queryByRole("button", { name: "来源列表 [" })).not.toBeInTheDocument();
+    });
+
+    it("parses board source params and highlights the current issue", () => {
+      mockIssueDetailData();
+      mockSourceListPages([
+        {
+          items: [
+            sourceIssue("issue-0", "GH-41", "Previous issue"),
+            sourceIssue("issue-1", "GH-42", "Crash on launch"),
+            sourceIssue("issue-2", "GH-43", "Next issue"),
+          ],
+          total: 3,
+          page: 1,
+        },
+      ]);
+
+      renderWithRoute(<IssueDetailPage />, {
+        path: "/projects/:id/issues/:iid",
+        initialEntry:
+          "/projects/proj-1/issues/issue-1?issue_from=board&issue_workflow_status=todo&issue_label=bug",
+      });
+
+      expect(screen.getByRole("button", { name: "来源列表 [" })).toBeInTheDocument();
+      const list = screen.getByTestId("issue-source-list");
+      expect(list).toBeInTheDocument();
+      const current = within(list).getByRole("button", { current: true });
+      expect(current).toHaveAttribute("data-issue-id", "issue-1");
+      expect(within(list).getByText("GH-41")).toBeInTheDocument();
+      expect(within(list).getByText("GH-43")).toBeInTheDocument();
+    });
+
+    it("walks the source list with j/k via replace and returns through real history", async () => {
+      mockIssueDetailData();
+      mockSourceListPages([
+        {
+          items: [
+            sourceIssue("issue-0", "GH-41", "Previous issue"),
+            sourceIssue("issue-1", "GH-42", "Crash on launch"),
+            sourceIssue("issue-2", "GH-43", "Next issue"),
+          ],
+          total: 3,
+          page: 1,
+        },
+      ]);
+
+      // 真实历史：board → 详情（push）；j/k 用 replace 翻页，一次返回回到进入前位置链
+      const { unmount } = render(
+        withTestQueryClient(
+          <MemoryRouter
+            initialEntries={[
+              "/board?project=proj-1",
+              "/projects/proj-1/issues/issue-1?issue_from=board&issue_workflow_status=todo",
+            ]}
+          >
+            <Routes>
+              <Route path="/board" element={<div data-testid="board-page" />} />
+              <Route path="/projects/:id/issues/:iid" element={<IssueDetailPage />} />
+            </Routes>
+            <HistoryProbe />
+          </MemoryRouter>,
+        ),
+      );
+
+      expect(screen.getByTestId("location-probe")).toHaveTextContent(
+        "/projects/proj-1/issues/issue-1?issue_from=board&issue_workflow_status=todo",
+      );
+
+      fireEvent.keyDown(window, { key: "j" });
+      await waitFor(() =>
+        expect(screen.getByTestId("location-probe")).toHaveTextContent(
+          "/projects/proj-1/issues/issue-2?issue_from=board&issue_workflow_status=todo",
+        ),
+      );
+
+      fireEvent.keyDown(window, { key: "k" });
+      await waitFor(() =>
+        expect(screen.getByTestId("location-probe")).toHaveTextContent(
+          "/projects/proj-1/issues/issue-1?issue_from=board&issue_workflow_status=todo",
+        ),
+      );
+
+      fireEvent.keyDown(window, { key: "j" });
+      await waitFor(() =>
+        expect(screen.getByTestId("location-probe")).toHaveTextContent("issues/issue-2"),
+      );
+
+      // 连续两次 replace 只占一个历史条目：回到进入前的看板
+      fireEvent.click(screen.getByRole("button", { name: "history-back" }));
+      await waitFor(() =>
+        expect(screen.getByTestId("board-page")).toBeInTheDocument(),
+      );
+
+      unmount();
+    });
+
+    it("ignores j while an input is focused", async () => {
+      mockIssueDetailData();
+      mockSourceListPages([
+        {
+          items: [
+            sourceIssue("issue-1", "GH-42", "Crash on launch"),
+            sourceIssue("issue-2", "GH-43", "Next issue"),
+          ],
+          total: 2,
+          page: 1,
+        },
+      ]);
+
+      render(
+        withTestQueryClient(
+          <MemoryRouter
+            initialEntries={[
+              "/projects/proj-1/issues/issue-1?issue_from=board&issue_workflow_status=todo",
+            ]}
+          >
+            <Routes>
+              <Route path="/projects/:id/issues/:iid" element={<IssueDetailPage />} />
+            </Routes>
+            <HistoryProbe />
+          </MemoryRouter>,
+        ),
+      );
+
+      const composer = screen.getByPlaceholderText("使用 Markdown 输入评论内容");
+      composer.focus();
+      // 真实按键从焦点元素冒泡到 window，target 是输入框
+      fireEvent.keyDown(composer, { key: "j" });
+
+      expect(screen.getByTestId("location-probe")).toHaveTextContent("issues/issue-1");
+    });
+
+    it("keeps the stale current issue in place when the query drops it", () => {
+      mockIssueDetailData();
+      mockSourceListPages([
+        {
+          items: [
+            sourceIssue("issue-0", "GH-41", "Previous issue"),
+            sourceIssue("issue-1", "GH-42", "Crash on launch"),
+            sourceIssue("issue-2", "GH-43", "Next issue"),
+          ],
+          total: 3,
+          page: 1,
+        },
+      ]);
+
+      const view = renderWithRoute(<IssueDetailPage />, {
+        path: "/projects/:id/issues/:iid",
+        initialEntry:
+          "/projects/proj-1/issues/issue-1?issue_from=board&issue_workflow_status=todo",
+      });
+
+      // 查询移出 issue-1：issue-1 仍在原位置保留，带「已不符合来源条件」标记
+      mockSourceListPages([
+        {
+          items: [
+            sourceIssue("issue-0", "GH-41", "Previous issue"),
+            sourceIssue("issue-2", "GH-43", "Next issue"),
+          ],
+          total: 2,
+          page: 1,
+        },
+      ]);
+      view.rerender(
+        withTestQueryClient(
+          <MemoryRouter initialEntries={["/projects/proj-1/issues/issue-1?issue_from=board&issue_workflow_status=todo"]}>
+            <Routes>
+              <Route path="/projects/:id/issues/:iid" element={<IssueDetailPage />} />
+            </Routes>
+          </MemoryRouter>,
+        ),
+      );
+
+      const list = screen.getByTestId("issue-source-list");
+      const current = within(list).getByRole("button", { current: true });
+      expect(current).toHaveAttribute("data-issue-id", "issue-1");
+      expect(within(current).getByText("已不符合来源条件")).toBeInTheDocument();
+      expect(within(list).getByText("GH-41")).toBeInTheDocument();
+      expect(within(list).getByText("GH-43")).toBeInTheDocument();
+    });
+
+    it("keeps list source params when navigating with j", async () => {
+      mockIssueDetailData();
+      mockSourceListPages([
+        {
+          items: [
+            sourceIssue("issue-1", "GH-42", "Crash on launch"),
+            sourceIssue("issue-2", "GH-43", "Next issue"),
+          ],
+          total: 2,
+          page: 1,
+        },
+      ]);
+
+      render(
+        withTestQueryClient(
+          <MemoryRouter
+            initialEntries={[
+              "/projects/proj-1/issues/issue-1?issue_state=open&issue_q=crash&issue_label=bug&issue_source=github&issue_sort=updated_desc&issue_page=2&comments_page=3",
+            ]}
+          >
+            <Routes>
+              <Route path="/projects/:id/issues/:iid" element={<IssueDetailPage />} />
+            </Routes>
+            <HistoryProbe />
+          </MemoryRouter>,
+        ),
+      );
+
+      fireEvent.keyDown(window, { key: "j" });
+      await waitFor(() =>
+        expect(screen.getByTestId("location-probe")).toHaveTextContent(
+          "issue_state=open&issue_q=crash&issue_label=bug&issue_source=github&issue_sort=updated_desc",
+        ),
+      );
+      // issue_page 跟随目标所在页（第 1 页不编码）；comments_page/hash 不随翻页带入下一问题
+      expect(screen.getByTestId("location-probe").textContent).not.toContain("issue_page");
+      expect(screen.getByTestId("location-probe").textContent).not.toContain("comments_page");
+    });
+  });
+
   it("preserves unsaved checklist edits when the issue refetches", async () => {
     mockIssueDetailData();
     const user = userEvent.setup();
@@ -1559,10 +1851,10 @@ describe("Issue pages", () => {
       }),
     );
     expect(toast.success).toHaveBeenCalledWith("内部问题已创建");
+    // 新建问题没有真实来源列表，navigate 到无 issue_* 参数的详情
     expect(navigate).toHaveBeenCalledWith(
       {
         pathname: "/projects/proj-1/issues/internal-issue-1",
-        search: "?issue_state=open&issue_source=internal&issue_sort=updated_desc",
       },
       { replace: true },
     );

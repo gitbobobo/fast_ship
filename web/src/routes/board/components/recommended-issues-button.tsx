@@ -36,11 +36,17 @@ import {
   RecommendationDetailPane,
   type RecommendationDetailPaneHandle,
 } from "./recommendation-detail-pane";
+import {
+  type BoardIssueColumnContext,
+} from "@/lib/issue-list-context";
 
 type RecommendationTab = "active" | "deferred";
 
 // 对齐 server 端 defer_note 的 500 rune 上限（前端按字符数近似）
 const DEFER_NOTE_MAX_LENGTH = 500;
+
+/** 看板列上下文 → 详情页来源参数；列未知（含 issue 数据未加载）时不带参数 */
+type GetIssueColumnContext = (issue: Issue) => BoardIssueColumnContext | null;
 
 /**
  * 看板筛选行的「推荐」按钮与推荐弹框。
@@ -51,8 +57,10 @@ const DEFER_NOTE_MAX_LENGTH = 500;
  */
 export function RecommendedIssuesButton({
   projectId,
+  getIssueColumnContext,
 }: {
   projectId?: string;
+  getIssueColumnContext?: GetIssueColumnContext;
 }) {
   const [open, setOpen] = useState(false);
   const [tab, setTab] = useState<RecommendationTab>("active");
@@ -290,6 +298,7 @@ export function RecommendedIssuesButton({
           onRemove={() => setPendingRemove(selectedItem)}
           launchHandleRef={launchHandleRef}
           showProject={!projectId}
+          getIssueColumnContext={getIssueColumnContext}
         />
       ) : (
         <div className="hidden sm:block" />

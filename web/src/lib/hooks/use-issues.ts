@@ -85,6 +85,58 @@ export function useInfiniteBoardIssues(
   });
 }
 
+export interface InfiniteIssueListFilters {
+  state?: string;
+  q?: string;
+  label?: string;
+  source?: string;
+  workflow_status?: string;
+  sort?: string;
+}
+
+/**
+ * 详情页来源列表的无限滚动查询（page_size=20）。
+ * queryKey 形状（key[3]="infinite"）必须被 isIssueListOrBoardQuery 识别，
+ * 否则标记已读后列表里的未读标记不会清除。
+ */
+export function useInfiniteIssueList(
+  projectId: string,
+  filters: InfiniteIssueListFilters,
+  options?: { enabled?: boolean },
+) {
+  return useInfiniteQuery({
+    queryKey: [
+      "projects",
+      projectId,
+      "issues",
+      "infinite",
+      filters.state ?? "all",
+      filters.q ?? "",
+      filters.label ?? "",
+      filters.source ?? "",
+      filters.workflow_status ?? "",
+      filters.sort ?? "updated_desc",
+    ],
+    initialPageParam: 1,
+    queryFn: async ({ pageParam }) => {
+      const res = await issueApi.list(projectId, {
+        ...filters,
+        page: pageParam,
+        page_size: 20,
+      });
+      return res.data;
+    },
+    getNextPageParam: (lastPage) => {
+      const totalPages = Math.max(
+        Math.ceil(lastPage.total / lastPage.page_size),
+        1,
+      );
+      return lastPage.page < totalPages ? lastPage.page + 1 : undefined;
+    },
+    enabled: !!projectId && (options?.enabled ?? true),
+  });
+}
+
 export function useIssueFilterOptions(projectId: string) {
   return useQuery({
     queryKey: ["projects", projectId, "issues", "filter-options"],
@@ -281,7 +333,7 @@ function isIssueListOrBoardQuery(query: Query): boolean {
   if (key[0] !== "projects" || key[2] !== "issues") {
     return false;
   }
-  if (key[3] === "board") {
+  if (key[3] === "board" || key[3] === "infinite") {
     return true;
   }
   if (

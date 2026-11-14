@@ -1,4 +1,4 @@
-import { useMemo, useState, useEffect, useCallback } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams, Link } from "react-router";
 import {
   DndContext,
@@ -25,11 +25,24 @@ import {
   getColumnStatusValue,
 } from "@/routes/board/lib/utils";
 import { usePersistedScroll } from "@/lib/hooks/use-persisted-scroll";
+import {
+  type BoardIssueColumnContext,
+} from "@/lib/issue-list-context";
 import { BoardColumn } from "@/routes/board/components/board-column";
+import {
+  DEFAULT_BOARD_COLUMN_FILTER,
+  type BoardColumnFilterValue,
+} from "@/routes/board/components/board-column-filter";
 import { RecommendedIssuesButton } from "@/routes/board/components/recommended-issues-button";
 import {
   BoardIssueCardOverlay,
 } from "@/routes/board/components/board-issue-card";
+
+function createDefaultColumnFilters(): Record<ColumnId, BoardColumnFilterValue> {
+  return Object.fromEntries(
+    COLUMNS.map((column) => [column.id, DEFAULT_BOARD_COLUMN_FILTER]),
+  ) as Record<ColumnId, BoardColumnFilterValue>;
+}
 
 export default function BoardPage() {
   const { data: projectsData, isLoading: projectsLoading } = useProjects();
@@ -72,6 +85,40 @@ export default function BoardPage() {
   }, [activeProjectId, urlProjectId, searchParams, setSearchParams]);
 
   const [activeIssue, setActiveIssue] = useState<Issue | null>(null);
+
+  // 各列筛选提升到页面持有：卡片跳详情时要按所在列编码来源上下文；项目切换时重置
+  const [columnFilters, setColumnFilters] = useState<Record<ColumnId, BoardColumnFilterValue>>(
+    createDefaultColumnFilters,
+  );
+  useEffect(() => {
+    setColumnFilters(createDefaultColumnFilters());
+  }, [activeProjectId]);
+
+  const handleColumnFilterChange = useCallback(
+    (columnId: ColumnId, next: BoardColumnFilterValue) => {
+      setColumnFilters((prev) => ({ ...prev, [columnId]: next }));
+    },
+    [],
+  );
+
+  /** 列 = issue.internal_meta?.workflow_status 对应列；列未知（含数据未加载）返回 null */
+  const getIssueColumnContext = useCallback(
+    (issue: Issue): BoardIssueColumnContext | null => {
+      const workflowStatus = issue.internal_meta?.workflow_status ?? "";
+      const column = COLUMNS.find((c) => c.statusValue === workflowStatus);
+      if (!column) {
+        return null;
+      }
+      const filter = columnFilters[column.id] ?? DEFAULT_BOARD_COLUMN_FILTER;
+      return {
+        workflowStatus:
+          column.id === "unset" ? "unset" : column.statusValue,
+        label: filter.label,
+        source: filter.source,
+      };
+    },
+    [columnFilters],
+  );
 
   const updateWorkflowStatus = useUpdateIssueWorkflowStatus();
 
@@ -173,6 +220,7 @@ export default function BoardPage() {
           {!projectsLoading && !isEmptyProject && (
             <RecommendedIssuesButton
               projectId={activeProjectId || undefined}
+              getIssueColumnContext={getIssueColumnContext}
             />
           )}
         </div>
@@ -232,6 +280,9 @@ export default function BoardPage() {
                   key={column.id}
                   columnId={column.id}
                   projectId={activeProjectId}
+                  filter={columnFilters[column.id] ?? DEFAULT_BOARD_COLUMN_FILTER}
+                  onFilterChange={(next) => handleColumnFilterChange(column.id, next)}
+                  getIssueColumnContext={getIssueColumnContext}
                 />
               ))}
             </div>

@@ -292,6 +292,62 @@ describe("BoardIssueCard", () => {
     expect(onPointerDown).not.toHaveBeenCalled();
   });
 
+  describe("detail link source context", () => {
+    it("keeps a plain detail link without a column context provider", () => {
+      renderInRouter(<BoardIssueCard issue={issue} />);
+
+      expect(screen.getByRole("link", { name: `${issue.reference} ${issue.title}` })).toHaveAttribute(
+        "href",
+        "/projects/project-1/issues/issue-1",
+      );
+    });
+
+    it("encodes the column status and active filters into the link search", () => {
+      renderInRouter(
+        <BoardIssueCard
+          issue={issue}
+          getColumnContext={() => ({
+            workflowStatus: "in_progress",
+            label: "bug",
+            source: "github",
+          })}
+        />,
+      );
+
+      expect(screen.getByRole("link", { name: `${issue.reference} ${issue.title}` })).toHaveAttribute(
+        "href",
+        "/projects/project-1/issues/issue-1?issue_from=board&issue_workflow_status=in_progress&issue_label=bug&issue_source=github",
+      );
+    });
+
+    it("drops label/source params when the column filter is all and encodes unset columns", () => {
+      renderInRouter(
+        <BoardIssueCard
+          issue={{ ...issue, internal_meta: { ...issue.internal_meta!, workflow_status: "" } }}
+          getColumnContext={() => ({
+            workflowStatus: "unset",
+            label: "",
+            source: "all",
+          })}
+        />,
+      );
+
+      expect(screen.getByRole("link", { name: `${issue.reference} ${issue.title}` })).toHaveAttribute(
+        "href",
+        "/projects/project-1/issues/issue-1?issue_from=board&issue_workflow_status=unset",
+      );
+    });
+
+    it("keeps a plain detail link when the column context is unknown", () => {
+      renderInRouter(<BoardIssueCard issue={issue} getColumnContext={() => null} />);
+
+      expect(screen.getByRole("link", { name: `${issue.reference} ${issue.title}` })).toHaveAttribute(
+        "href",
+        "/projects/project-1/issues/issue-1",
+      );
+    });
+  });
+
   describe("unread comments", () => {
     it("outlines the card in github blue and names the unread state", () => {
       renderInRouter(
