@@ -153,21 +153,24 @@ export function IssueSourceList({
                     {entry.issue.title}
                   </span>
                   {entry.stale && (
-                    <span className="mt-1 inline-flex items-center rounded border border-dashed px-1 py-0.5 text-[10px] text-muted-foreground">
+                    <span className="mt-1 inline-flex items-center rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground">
                       已不符合来源条件
                     </span>
                   )}
                 </span>
-                <span
-                  className={cn(
-                    "mt-0.5 shrink-0 rounded-full border px-1.5 py-0.5 text-[10px] font-medium uppercase",
-                    entry.issue.state === "open"
-                      ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
-                      : "border-rose-500/20 bg-rose-500/10 text-rose-600 dark:text-rose-400",
-                  )}
-                >
-                  {entry.issue.state === "open" ? "Open" : "Closed"}
-                </span>
+                {/* stale 行的快照状态可能已过期（如同屏详情已 CLOSED），不再展示胶囊 */}
+                {!entry.stale && (
+                  <span
+                    className={cn(
+                      "mt-0.5 shrink-0 rounded-full border px-1.5 py-0.5 text-[10px] font-semibold uppercase",
+                      entry.issue.state === "open"
+                        ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-700 dark:border-emerald-500/30 dark:bg-emerald-500/15 dark:text-emerald-300"
+                        : "border-rose-500/20 bg-rose-500/10 text-rose-700 dark:border-rose-500/30 dark:bg-rose-500/15 dark:text-rose-300",
+                    )}
+                  >
+                    {entry.issue.state === "open" ? "Open" : "Closed"}
+                  </span>
+                )}
               </button>
             </li>
           );

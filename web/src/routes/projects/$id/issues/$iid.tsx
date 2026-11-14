@@ -1236,14 +1236,24 @@ export default function IssueDetailPage() {
                             desktopSourceListOpen ||
                             (isNarrowViewport && isSourceSheetOpen)
                           }
+                          aria-pressed={
+                            desktopSourceListOpen ||
+                            (isNarrowViewport && isSourceSheetOpen)
+                          }
                           aria-controls="issue-source-list-panel"
-                          title="来源列表（[）"
+                          title={
+                            desktopSourceListOpen
+                              ? "收起列表（[）"
+                              : "来源列表（[）"
+                          }
                         >
                           <List className="mr-1.5 h-3.5 w-3.5" />
-                          来源列表
-                          <kbd className="ml-1.5 rounded border border-muted-foreground/40 bg-muted px-1 font-mono text-[10px] text-foreground/70">
-                            [
-                          </kbd>
+                          {desktopSourceListOpen ? "收起列表" : "来源列表"}
+                          {!isNarrowViewport && (
+                            <kbd className="ml-1.5 rounded border border-muted-foreground/40 bg-muted px-1.5 py-px font-mono text-[11px] leading-none text-foreground/70">
+                              [
+                            </kbd>
+                          )}
                         </Button>
                       )}
                       <Button
