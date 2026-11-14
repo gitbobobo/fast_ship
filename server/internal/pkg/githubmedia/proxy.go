@@ -2354,8 +2354,8 @@ func normalizeGitHubWebHost(webHost string) string {
 
 // IsGitHubMediaURLFor 带部署口径的 bearer 重试闸门：能否把 App 安装令牌发给
 // 该上游。令牌属于一个 GitHub 实例，所以只发给本部署的实例：公共 GitHub
-// 部署（webHost 为空或 github.com）沿用 isAllowedGitHubMediaURL 的媒体域白名单
-// （另有导出闸门的形状准入：https、无 userinfo、无 fragment）；
+// 部署（webHost 为空或 github.com）沿用 isAllowedGitHubMediaURL 的媒体域白名单；
+// 形状准入（https、无 userinfo、无 fragment）统一在本函数开头判定，不依赖其他闸门；
 // GHE 部署只放行实例自己的附件直链（https、authority 恰为 webHost、无
 // userinfo、无 fragment、规范附件路径），公共 GitHub 域也不放行——那不是
 // 本实例，令牌在那里也没有意义。外部图床与同 host 的其他路径一律不放行。
