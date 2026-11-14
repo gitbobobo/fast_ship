@@ -173,7 +173,7 @@ export function IssueSourceList({
           );
         })}
       </ul>
-      {hasNextPage && (
+      {(hasNextPage || isError) && (
         <div ref={sentinelRef} className="flex justify-center py-2">
           {isError ? (
             <button
@@ -181,7 +181,7 @@ export function IssueSourceList({
               onClick={onRetry}
               className="rounded-md border px-2.5 py-1 text-xs font-medium hover:bg-muted"
             >
-              加载更多失败，点击重试
+              {hasNextPage ? "加载更多失败，点击重试" : "刷新失败，点击重试"}
             </button>
           ) : (
             isFetchingNextPage && (

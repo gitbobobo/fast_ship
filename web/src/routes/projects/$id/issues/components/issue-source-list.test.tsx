@@ -77,6 +77,16 @@ describe("IssueSourceList", () => {
     expect(onRetry).toHaveBeenCalledTimes(1);
   });
 
+  it("offers a retry after a background refresh fails with all pages loaded", () => {
+    const onRetry = vi.fn();
+    renderList({ isError: true, hasNextPage: false, onRetry });
+
+    expect(screen.getByTestId("issue-source-list")).toBeInTheDocument();
+    expect(screen.getByText("GH-1")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "刷新失败，点击重试" }));
+    expect(onRetry).toHaveBeenCalledTimes(1);
+  });
+
   it("replaces the list with the error panel only when nothing is loaded", () => {
     renderList({ isError: true, entries: [] });
 
