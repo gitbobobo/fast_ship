@@ -68,10 +68,10 @@ function ScopeSummary({
 
   return (
     <div className="flex items-center gap-2">
-      <Badge variant={write ? "default" : "secondary"} className="px-2 py-0.5">
+      <Badge variant={write ? "default" : "outline"} className="px-2 py-0.5">
         {write ? "读写" : "只读"}
       </Badge>
-      <span className="text-sm text-muted-foreground">· {projectLabel}</span>
+      <span className="text-sm text-foreground">· {projectLabel}</span>
     </div>
   );
 }
@@ -116,7 +116,7 @@ export default function OAuthAppsPage() {
             </p>
           </div>
         ) : (
-          <div className="overflow-hidden rounded-lg border">
+          <div className="overflow-x-auto rounded-lg border">
             <Table>
               <TableHeader>
                 <TableRow>
@@ -129,7 +129,7 @@ export default function OAuthAppsPage() {
               <TableBody>
                 {authorizations.map((auth) => (
                   <TableRow key={auth.id}>
-                    <TableCell className="font-medium">
+                    <TableCell className="max-w-72 font-medium [overflow-wrap:anywhere]">
                       {auth.client_name}
                     </TableCell>
                     <TableCell>

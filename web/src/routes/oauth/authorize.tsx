@@ -175,7 +175,7 @@ function AuthorizeConsent({ searchParams }: { searchParams: URLSearchParams }) {
             <Button
               variant="link"
               size="sm"
-              className="h-auto p-0"
+              className="h-auto px-2 py-1.5 text-primary underline underline-offset-2"
               onClick={onSwitchAccount}
             >
               切换账号
@@ -222,7 +222,9 @@ function AuthorizeConsent({ searchParams }: { searchParams: URLSearchParams }) {
               disabled={projects.length === 0}
             >
               <RadioGroupItem value="read">只读（查看项目与问题）</RadioGroupItem>
-              <RadioGroupItem value="write">读写（可创建和更新问题）</RadioGroupItem>
+              <RadioGroupItem value="write">
+                读写（创建/更新/关闭/重开问题，可发表评论）
+              </RadioGroupItem>
             </RadioGroup>
           </div>
 
