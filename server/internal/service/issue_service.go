@@ -209,13 +209,14 @@ func (s *IssueService) withRepos(ctx context.Context) *IssueService {
 // 错误链——调用方与测试仍能 errors.Is 到原始的 context.Canceled/
 // DeadlineExceeded。
 //
-// 服务端侧同时落一条结构化日志（INT-215）：cause 字段区分客户端主动取消
-// （context_canceled）、借连接等待/预算到点（context_deadline_exceeded）
-// 与其余存储故障（store_error），排查时不必再靠客户端文案倒推；回给客户
-// 端的文案口径不变。级别分级：正常取消是预期行为只记 Info，避免高频断连
-// 刷出告警风暴；到点与真实存储故障记 Warn。extra 追加调用方上下文
-// （如 issue_id），调用点不再各自重复记录同一错误。
-func (s *IssueService) loadStoreErr(err error, extra ...zap.Field) error {
+// 服务端侧同时落一条结构化日志（INT-215）：op 字段标识读库步骤（调用点
+// 传入），cause 字段区分客户端主动取消（context_canceled）、借连接等待/
+// 预算到点（context_deadline_exceeded）与其余存储故障（store_error），
+// 排查时不必再靠客户端文案倒推；回给客户端的文案口径不变。级别分级：
+// 正常取消是预期行为只记 Info，避免高频断连刷出告警风暴；到点与真实存储
+// 故障记 Warn。extra 追加调用方上下文（如 issue_id），调用点不再各自重复
+// 记录同一错误。
+func (s *IssueService) loadStoreErr(op string, err error, extra ...zap.Field) error {
 	canceled := errors.Is(err, context.Canceled)
 	deadline := !canceled && errors.Is(err, context.DeadlineExceeded)
 	cause := "store_error"
@@ -225,7 +226,7 @@ func (s *IssueService) loadStoreErr(err error, extra ...zap.Field) error {
 	case deadline:
 		cause = "context_deadline_exceeded"
 	}
-	fields := append([]zap.Field{zap.String("cause", cause), zap.Error(err)}, extra...)
+	fields := append([]zap.Field{zap.String("op", op), zap.String("cause", cause), zap.Error(err)}, extra...)
 	if canceled {
 		s.logger.Info("热点读库失败", fields...)
 	} else {

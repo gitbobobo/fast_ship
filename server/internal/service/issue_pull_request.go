@@ -243,7 +243,7 @@ func (s *IssueService) SyncIssuePullRequests(ctx context.Context, issueID, userI
 	if err != nil {
 		// cause 与 issue_id 一并由 loadStoreErr 的统一日志携带（INT-215），
 		// 这里不再重复记录同一错误。
-		return nil, s.loadStoreErr(err, zap.String("issue_id", issueID))
+		return nil, s.loadStoreErr("sync_pr_links", err, zap.String("issue_id", issueID))
 	}
 
 	result := &IssuePullRequestSyncResultResponse{
@@ -574,14 +574,14 @@ func (s *IssueService) loadIssueAndProject(ctx context.Context, issueID, userID 
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, nil, errs.ErrIssueNotFound
 		}
-		return nil, nil, s.loadStoreErr(err, zap.String("issue_id", issueID))
+		return nil, nil, s.loadStoreErr("load_issue", err, zap.String("issue_id", issueID))
 	}
 	project, err := resolved.projectRepo.FindByID(issue.ProjectID, userID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, nil, errs.ErrProjectNotFound
 		}
-		return nil, nil, s.loadStoreErr(err, zap.String("issue_id", issueID))
+		return nil, nil, s.loadStoreErr("load_project", err, zap.String("issue_id", issueID))
 	}
 	return issue, project, nil
 }
