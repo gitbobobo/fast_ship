@@ -41,10 +41,26 @@ export default function LoginPage() {
 
   return (
     <Card>
-      <CardHeader className="text-center">
+      <CardHeader className="pt-4 text-center">
         <CardTitle className="text-xl">登录</CardTitle>
+        {searchParams.get("client") ? (
+          <p className="mt-1 text-sm text-muted-foreground">
+            登录后继续为
+            <span className="font-medium text-foreground">
+              「{searchParams.get("client")}」
+            </span>
+            授权
+          </p>
+        ) : (
+          next?.startsWith("/oauth/authorize") && (
+            <p className="mt-1 text-sm text-muted-foreground">
+              登录后将返回并继续授权流程
+            </p>
+          )
+        )}
       </CardHeader>
       <CardContent>
+        <DenyOAuthLink next={next} />
         <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
           {error && (
             <p className="text-sm text-destructive text-center">{error}</p>
@@ -92,5 +108,43 @@ export default function LoginPage() {
         </p>
       </CardContent>
     </Card>
+  );
+}
+
+/**
+ * OAuth 授权流程中的「放弃授权」出口：跳转到同源 /oauth/deny，由服务端
+ * 校验 client 与 redirect_uri 注册匹配后以 error=access_denied 回调客户端
+ * （RFC 6749 §4.1.2.1）。登录页不做任何客户端侧重定向拼装——重定向目标
+ * 一律经服务端校验，避免开放重定向。
+ */
+function DenyOAuthLink({ next }: { next: string | null }) {
+  let denyHref: string | null = null;
+  if (next?.startsWith("/oauth/authorize")) {
+    try {
+      const target = new URL(next, window.location.origin);
+      const clientID = target.searchParams.get("client_id");
+      const redirectURI = target.searchParams.get("redirect_uri");
+      if (clientID && redirectURI) {
+        const deny = new URL("/oauth/deny", window.location.origin);
+        deny.searchParams.set("client_id", clientID);
+        deny.searchParams.set("redirect_uri", redirectURI);
+        const state = target.searchParams.get("state");
+        if (state) deny.searchParams.set("state", state);
+        denyHref = deny.pathname + deny.search;
+      }
+    } catch {
+      denyHref = null;
+    }
+  }
+  if (!denyHref) return null;
+  return (
+    <p className="mt-3 mb-4 text-center">
+      <a
+        href={denyHref}
+        className="inline-flex h-8 items-center rounded-md border border-border px-3 text-sm text-muted-foreground transition-colors hover:border-foreground/40 hover:text-foreground"
+      >
+        取消授权并返回应用
+      </a>
+    </p>
   );
 }

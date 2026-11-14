@@ -47,6 +47,12 @@ var (
 	// 重放/换管理员一律要求重新发起；GitHub 侧 code 404/422 同理。
 	ErrGitHubManifestStateInvalid = New(40009, "创建流程已过期或已失效，请重新创建 App")
 	ErrGitHubManifestCodeInvalid  = New(40010, "GitHub 授权码已过期或已被使用，请重新创建 App")
+	// OAuth 2.1 授权服务（INT-222）：管理面错误（协议端点 /oauth/* 按 RFC 6749
+	// 用 {error, error_description}，不走这些码）。
+	ErrOAuthRedirectURIMismatch = New(40011, "redirect_uri 与客户端注册不一致")
+	ErrOAuthChallengeInvalid    = New(40012, "code_challenge 无效，仅支持 S256")
+	ErrOAuthProjectsInvalid     = New(40013, "project_ids 包含不属于当前用户的项目")
+	ErrOAuthProjectsEmpty       = New(40014, "project_ids 不能为空")
 )
 
 // 认证错误 40100-40199
@@ -114,6 +120,9 @@ var (
 	ErrReviewPullRequestNotFound = New(40434, "审查 PR 记录不存在")
 	// 部署级代码仓集成（INT-166）。
 	ErrForgeIntegrationNotFound = New(40435, "代码集成不存在")
+	// OAuth 2.1 授权服务（INT-222）。
+	ErrOAuthClientNotFound        = New(40436, "OAuth 客户端不存在")
+	ErrOAuthAuthorizationNotFound = New(40437, "OAuth 授权不存在")
 )
 
 // 业务冲突 40900-40999

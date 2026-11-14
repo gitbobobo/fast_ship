@@ -34,6 +34,8 @@ type AuthService struct {
 	// 还没有用户」的首个用户，之后一律拒绝（等同没有邀请可用）；仅 main 注入，
 	// 测试可自行注入，避免改动既有构造调用。
 	invites *repository.InviteRepository
+	// oauth 可选依赖（INT-222）：改密事务内吊销 OAuth 授权与令牌。
+	oauth *OAuthService
 }
 
 func NewAuthService(userRepo *repository.UserRepository, jwtBlacklistRepo *repository.JWTBlacklistRepository, refreshTokenRepo *repository.RefreshTokenRepository, cfg *config.Config, logger *slog.Logger) *AuthService {
@@ -52,6 +54,12 @@ func NewAuthService(userRepo *repository.UserRepository, jwtBlacklistRepo *repos
 // SetInviteRepository 注入邀请仓储（INT-129，main 在建表后调用一次）。
 func (s *AuthService) SetInviteRepository(repo *repository.InviteRepository) {
 	s.invites = repo
+}
+
+// SetOAuthService 注入 OAuth 服务（INT-222，main 在建表后调用一次）：改密
+// 事务内同步吊销该用户全部 OAuth 授权与令牌。未注入时改密不触碰 OAuth 表。
+func (s *AuthService) SetOAuthService(oauth *OAuthService) {
+	s.oauth = oauth
 }
 
 func (s *AuthService) log(ctx context.Context) *slog.Logger {
@@ -386,11 +394,20 @@ func (s *AuthService) UpdatePassword(ctx context.Context, userID string, req *Up
 		return nil, errs.ErrInternal
 	}
 
+	// OAuth 联动（INT-222）：改密事务内同步吊销该用户全部 OAuth 授权与
+	// access/refresh 令牌。未注入 OAuthService（既有测试与构造路径）时跳过。
+	var oauthRevoke func(tx *gorm.DB) error
+	if s.oauth != nil {
+		oauthRevoke = func(tx *gorm.DB) error {
+			return s.oauth.RevokeAllForUserTx(tx, userID)
+		}
+	}
+
 	// 版本号在事务内自增并回读：并发改密必须各自推进，否则先后两次改密
 	// 停在同一版本，前一次换出的 access token 会错误地保持有效。
 	// 把刚通过 bcrypt 校验的旧哈希作为写谓词——授权依据在写时点必须
 	// 仍然成立，否则并发改密会拿着已作废的旧密码证明覆盖新密码。
-	newVersion, err := s.userRepo.UpdatePasswordAndRotateSessions(userID, user.PasswordHash, string(hashedPassword), next)
+	newVersion, err := s.userRepo.UpdatePasswordAndRotateSessions(userID, user.PasswordHash, string(hashedPassword), next, oauthRevoke)
 	if errors.Is(err, repository.ErrPasswordChanged) {
 		return nil, errs.ErrLoginFailed
 	}

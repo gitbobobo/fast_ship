@@ -1,7 +1,8 @@
 import { useState } from "react";
+import { Link } from "react-router";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { Plus, Copy, Trash2 } from "lucide-react";
+import { Info, Plus, Copy, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -110,6 +111,19 @@ export default function ApiKeysPage() {
             <br />
             支持：读取项目/问题/版本、上传构建产物、创建和更新 Issue。
           </p>
+          <div className="mt-3 flex items-start gap-2 rounded-md border-l-2 border-l-primary/60 bg-muted/70 px-3 py-2.5 text-sm text-muted-foreground">
+            <Info className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
+            <span>
+              API Key 保留给脚本与 CI 使用；MCP 客户端建议改用 OAuth，在
+              <Link
+                to="/settings/oauth-apps"
+                className="font-medium text-primary underline underline-offset-2 hover:opacity-80"
+              >
+                「已授权的应用」页
+              </Link>
+              统一管理。
+            </span>
+          </div>
         </div>
 
         <Dialog open={createOpen} onOpenChange={setCreateOpen}>
@@ -222,11 +236,13 @@ export default function ApiKeysPage() {
                             <Button
                               variant="ghost"
                               size="sm"
+                              className="text-destructive hover:bg-destructive/10 hover:text-destructive"
                               aria-label={`删除 API Key ${key.name}`}
                             />
                           }
                         >
-                          <Trash2 className="h-4 w-4" />
+                          <Trash2 className="mr-1.5 h-3.5 w-3.5" />
+                          删除
                         </AlertDialogTrigger>
                         <AlertDialogContent>
                           <AlertDialogHeader>
