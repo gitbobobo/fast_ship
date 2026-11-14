@@ -58,7 +58,7 @@ export function IssueSourceList({
   }, [currentIssueId, entries.length]);
 
   useEffect(() => {
-    if (!hasNextPage || isFetchingNextPage) {
+    if (!hasNextPage || isFetchingNextPage || isError) {
       return;
     }
     const el = sentinelRef.current;
@@ -75,7 +75,7 @@ export function IssueSourceList({
     );
     observer.observe(el);
     return () => observer.disconnect();
-  }, [hasNextPage, isFetchingNextPage, onLoadMore]);
+  }, [hasNextPage, isFetchingNextPage, isError, onLoadMore]);
 
   if (isLoading) {
     return (
@@ -86,7 +86,8 @@ export function IssueSourceList({
     );
   }
 
-  if (isError) {
+  // 有已加载条目时分页/后台刷新失败不整替列表：只在内联提供重试，保住用户已看到的内容
+  if (isError && entries.length === 0) {
     return (
       <div className={cn("flex flex-col items-center gap-2 p-6 text-sm text-muted-foreground", className)}>
         <span>来源列表加载失败</span>
@@ -167,8 +168,18 @@ export function IssueSourceList({
       </ul>
       {hasNextPage && (
         <div ref={sentinelRef} className="flex justify-center py-2">
-          {isFetchingNextPage && (
-            <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+          {isError ? (
+            <button
+              type="button"
+              onClick={onRetry}
+              className="rounded-md border px-2.5 py-1 text-xs font-medium hover:bg-muted"
+            >
+              加载更多失败，点击重试
+            </button>
+          ) : (
+            isFetchingNextPage && (
+              <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+            )
           )}
         </div>
       )}

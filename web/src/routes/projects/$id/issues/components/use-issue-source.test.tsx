@@ -767,6 +767,98 @@ describe("useIssueSourceList", () => {
     expect(screen.getAllByTestId("entry-issue-4")).toHaveLength(1);
   });
 
+  it("keeps sequential reverse-order drops in their original relative order", () => {
+    mockQuery([
+      page([
+        makeIssue("issue-1", "GH-1", "A"),
+        makeIssue("issue-2", "GH-2", "B"),
+        makeIssue("issue-3", "GH-3", "C"),
+        makeIssue("issue-4", "GH-4", "D"),
+      ]),
+    ]);
+
+    // 先访问 C 并被移出：锚定渲染后继 D
+    const view = renderHarness("/projects/proj-1/issues/issue-3", {
+      currentIssueIdOverride: "issue-3",
+    });
+    mockQuery([
+      page([
+        makeIssue("issue-1", "GH-1", "A"),
+        makeIssue("issue-2", "GH-2", "B"),
+        makeIssue("issue-4", "GH-4", "D"),
+      ]),
+    ]);
+    view.rerender(
+      <MemoryRouter initialEntries={["/projects/proj-1/issues/issue-3"]}>
+        {harnessElement({ currentIssueIdOverride: "issue-3" })}
+      </MemoryRouter>,
+    );
+
+    // K 回到 B 再被移出：B 的渲染后继是 stale 的 C，逆序移出仍应保持 B→C
+    view.rerender(
+      <MemoryRouter initialEntries={["/projects/proj-1/issues/issue-2"]}>
+        {harnessElement({ currentIssueIdOverride: "issue-2" })}
+      </MemoryRouter>,
+    );
+    mockQuery([
+      page([makeIssue("issue-1", "GH-1", "A"), makeIssue("issue-4", "GH-4", "D")]),
+    ]);
+    view.rerender(
+      <MemoryRouter initialEntries={["/projects/proj-1/issues/issue-2"]}>
+        {harnessElement({ currentIssueIdOverride: "issue-2" })}
+      </MemoryRouter>,
+    );
+
+    expect(entryIds()).toEqual([
+      "entry-issue-1",
+      "entry-issue-2",
+      "entry-issue-3",
+      "entry-issue-4",
+    ]);
+    expect(screen.getByTestId("entry-issue-2")).toHaveAttribute("data-stale", "true");
+    expect(screen.getByTestId("entry-issue-3")).toHaveAttribute("data-stale", "true");
+  });
+
+  it("releases pending advance when a fetch completes without growing the list", async () => {
+    const fetchNextPage = vi.fn().mockResolvedValue(undefined);
+    mockQuery([
+      page([makeIssue("issue-1", "GH-1", "A"), makeIssue("issue-2", "GH-2", "B")]),
+    ], { hasNextPage: true, fetchNextPage });
+
+    const view = renderHarness("/projects/proj-1/issues/issue-2", {
+      currentIssueIdOverride: "issue-2",
+    });
+
+    // 末项 J 触发补拉
+    act(() => {
+      screen.getByRole("button", { name: "next" }).click();
+    });
+    expect(screen.getByTestId("advancing")).toHaveTextContent("true");
+
+    // 补拉进行中
+    mockQuery([
+      page([makeIssue("issue-1", "GH-1", "A"), makeIssue("issue-2", "GH-2", "B")]),
+    ], { hasNextPage: true, fetchNextPage, isFetchingNextPage: true });
+    view.rerender(
+      <MemoryRouter initialEntries={["/projects/proj-1/issues/issue-2"]}>
+        {harnessElement({ currentIssueIdOverride: "issue-2" })}
+      </MemoryRouter>,
+    );
+
+    // 完成：新页全部被跨页去重/为空，列表没增长 → 释放 J/K
+    mockQuery([
+      page([makeIssue("issue-1", "GH-1", "A"), makeIssue("issue-2", "GH-2", "B")]),
+    ], { hasNextPage: true, fetchNextPage });
+    view.rerender(
+      <MemoryRouter initialEntries={["/projects/proj-1/issues/issue-2"]}>
+        {harnessElement({ currentIssueIdOverride: "issue-2" })}
+      </MemoryRouter>,
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("advancing")).toHaveTextContent("false"),
+    );
+  });
+
   it("removes a retained item once it re-hits the query while another issue is current", () => {
     mockQuery([
       page([

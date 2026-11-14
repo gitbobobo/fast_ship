@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router";
 import {
   buildBoardSourceSearchParams,
@@ -125,6 +125,10 @@ export function useIssueSourceList(options: {
   const [retained, setRetained] = useState<RetainedIssue[]>(NO_RETAINED);
   const [anchor, setAnchor] = useState<IssueAnchor | null>(null);
   const [pendingAdvance, setPendingAdvance] = useState(false);
+  /** 末项 J 触发补拉时的 items 长度；补拉成功但列表没增长（新增页全被去重/空页）时据此释放 J/K */
+  const [advanceFromLength, setAdvanceFromLength] = useState<number | null>(null);
+  /** 本次 pending 期间是否观察到过 isFetchingNextPage=true：区分「拉取已完成无增长」与「尚未开始/无法观测」 */
+  const sawAdvanceFetchingRef = useRef(false);
 
   // 来源或项目变化时清空保留项与补拉状态。声明在锚点 effect 之前，同一提交内先
   // 清空状态；配合 scopeKey 校验挡住旧闭包对新作用域保留集合的写入
@@ -132,6 +136,7 @@ export function useIssueSourceList(options: {
     setRetained(NO_RETAINED);
     setAnchor(null);
     setPendingAdvance(false);
+    setAdvanceFromLength(null);
   }, [projectId, scopeKey]);
 
   // 任何保留项重新命中查询即从集合移除——真实条目让保留项让位，不只处理当前问题；
@@ -147,17 +152,101 @@ export function useIssueSourceList(options: {
     }
   }, [enabled, rawItems, retained]);
 
+  // 保留项渲染列表：真实条目 + stale 保留项（按 beforeId 链解析插入）。供锚点取
+  // 渲染后继（可含 stale 项）与展示使用
+  const items = useMemo<IssueSourceEntry[]>(() => {
+    const entries: IssueSourceEntry[] = rawItems.map((issue) => ({ issue }));
+    const rawIds = new Set(entries.map((entry) => entry.issue.id));
+    // 保留项按「后继邻居身份」重建位置：先沿 beforeId 链解析到第一个真实条目锚点
+    // （后继本身也被保留时继续向后），链尾为空、锚点已不在列表也未入保留集合或异常
+    // 成环时落到列表末尾；再按锚点分组插入。组内按链深降序稳定排序：先移出的项
+    // 链上经过的保留项更多、离锚更远、应排在前——逆序移出时仍保持移出前的相对顺序
+    // （顺序移出与逆序移出两种时序都还原为原列表顺序）。真实条目在场的保留项
+    // 让位，天然去重且无重复渲染键。
+    const retainedById = new Map(
+      retained.map((entry) => [entry.issue.id, entry]),
+    );
+    const resolved = new Map<
+      string,
+      { key: string | null; depth: number }
+    >();
+    for (const entry of retained) {
+      if (rawIds.has(entry.issue.id)) {
+        continue;
+      }
+      let key = entry.beforeId;
+      let depth = 0;
+      const visited = new Set<string>([entry.issue.id]);
+      while (key !== null && !rawIds.has(key)) {
+        const next = retainedById.get(key);
+        if (!next || visited.has(key)) {
+          key = null;
+          break;
+        }
+        visited.add(key);
+        key = next.beforeId;
+        depth += 1;
+      }
+      resolved.set(entry.issue.id, { key, depth });
+    }
+    const groups = new Map<string | null, RetainedIssue[]>();
+    for (const entry of retained) {
+      const info = resolved.get(entry.issue.id);
+      if (!info) {
+        continue;
+      }
+      const group = groups.get(info.key);
+      if (group) {
+        group.push(entry);
+      } else {
+        groups.set(info.key, [entry]);
+      }
+    }
+    for (const group of groups.values()) {
+      // 稳定排序：同链深时保持移出顺序
+      group.sort((a, b) => {
+        const depthA = resolved.get(a.issue.id)?.depth ?? 0;
+        const depthB = resolved.get(b.issue.id)?.depth ?? 0;
+        return depthB - depthA;
+      });
+    }
+    const result: IssueSourceEntry[] = [];
+    for (const entry of entries) {
+      const group = groups.get(entry.issue.id);
+      if (group) {
+        for (const item of group) {
+          result.push({ issue: item.issue, stale: true });
+        }
+      }
+      result.push(entry);
+    }
+    const tail = groups.get(null);
+    if (tail) {
+      for (const item of tail) {
+        result.push({ issue: item.issue, stale: true });
+      }
+    }
+    return result;
+  }, [rawItems, retained]);
+
   // 当前问题命中查询时更新锚点（记录后继邻居身份），脱离查询后按锚点移入保留集合。
-  // scopeKey 校验防止来源/项目切换同一提交内的旧闭包锚点被误移入新作用域的保留集合。
+  // 后继取自渲染列表而非原始查询：两者之间可能夹着 stale 保留项，逆序移出时
+  // 只有渲染后继能保住各项的相对顺序。scopeKey 校验防止来源/项目切换同一提交内
+  // 的旧闭包锚点被误移入新作用域的保留集合。
   useEffect(() => {
     if (!enabled || !currentIssueId) {
       return;
     }
-    const index = rawItems.findIndex((item) => item.id === currentIssueId);
-    if (index >= 0) {
-      const issue = rawItems[index];
+    const rawIndex = rawItems.findIndex((item) => item.id === currentIssueId);
+    if (rawIndex >= 0) {
+      const issue = rawItems[rawIndex];
+      const renderedIndex = items.findIndex(
+        (entry) => entry.issue.id === currentIssueId,
+      );
       const beforeId =
-        index + 1 < rawItems.length ? rawItems[index + 1].id : null;
+        renderedIndex >= 0 && renderedIndex + 1 < items.length
+          ? items[renderedIndex + 1].issue.id
+          : null;
       setAnchor((prev) =>
         prev && prev.issue === issue && prev.beforeId === beforeId
           ? prev
@@ -177,7 +266,7 @@ export function useIssueSourceList(options: {
       );
       setAnchor(null);
     }
-  }, [enabled, currentIssueId, rawItems, anchor, scopeKey]);
+  }, [enabled, currentIssueId, rawItems, items, anchor, scopeKey]);
 
   // 当前问题尚未出现在已加载页时按顺序补拉（不能把「还没加载到」当「已移出筛选」）。
   // 已移出的保留项与锚定后移出的问题不再追拉剩余页——它们已被查询明确过滤。
@@ -209,58 +298,6 @@ export function useIssueSourceList(options: {
     hasNextPage,
     fetchNextPage,
   ]);
-
-  const items = useMemo<IssueSourceEntry[]>(() => {
-    const entries: IssueSourceEntry[] = rawItems.map((issue) => ({ issue }));
-    const rawIds = new Set(entries.map((entry) => entry.issue.id));
-    // 保留项按「后继邻居身份」重建位置：先沿 beforeId 链解析到第一个真实条目锚点
-    // （后继本身也被保留时继续向后），链尾为空、锚点已不在列表也未入保留集合或异常
-    // 成环时落到列表末尾；再按锚点分组插入，组内保持移出顺序。真实条目在场的保留项
-    // 让位，天然去重且无重复渲染键。
-    const retainedById = new Map(
-      retained.map((entry) => [entry.issue.id, entry]),
-    );
-    const groups = new Map<string | null, RetainedIssue[]>();
-    for (const entry of retained) {
-      if (rawIds.has(entry.issue.id)) {
-        continue;
-      }
-      let key = entry.beforeId;
-      const visited = new Set<string>([entry.issue.id]);
-      while (key !== null && !rawIds.has(key)) {
-        const next = retainedById.get(key);
-        if (!next || visited.has(key)) {
-          key = null;
-          break;
-        }
-        visited.add(key);
-        key = next.beforeId;
-      }
-      const group = groups.get(key);
-      if (group) {
-        group.push(entry);
-      } else {
-        groups.set(key, [entry]);
-      }
-    }
-    const result: IssueSourceEntry[] = [];
-    for (const entry of entries) {
-      const group = groups.get(entry.issue.id);
-      if (group) {
-        for (const item of group) {
-          result.push({ issue: item.issue, stale: true });
-        }
-      }
-      result.push(entry);
-    }
-    const tail = groups.get(null);
-    if (tail) {
-      for (const item of tail) {
-        result.push({ issue: item.issue, stale: true });
-      }
-    }
-    return result;
-  }, [rawItems, retained]);
 
   const currentIndex = useMemo(
     () => items.findIndex((entry) => entry.issue.id === currentIssueId),
@@ -302,6 +339,7 @@ export function useIssueSourceList(options: {
   // 翻页（点击列表项）后放弃进行中的自动前进，避免与用户选择打架
   useEffect(() => {
     setPendingAdvance(false);
+    setAdvanceFromLength(null);
   }, [currentIssueId]);
 
   const goToNext = useCallback(() => {
@@ -313,6 +351,7 @@ export function useIssueSourceList(options: {
       return;
     }
     if (hasNextPage && !isFetchingNextPage) {
+      setAdvanceFromLength(items.length);
       setPendingAdvance(true);
       void fetchNextPage();
     }
@@ -334,16 +373,33 @@ export function useIssueSourceList(options: {
     navigateToIssue(items[currentIndex - 1].issue);
   }, [enabled, pendingAdvance, currentIndex, items, navigateToIssue]);
 
-  // 末项补拉完成后自动前进；补拉失败（isError）或没有更多页时放弃，恢复 J/K
+  // 末项补拉完成后自动前进；补拉失败（isError）、没有更多页、或补拉完成后列表没
+  // 增长（新增页全部被跨页去重/空页）时放弃，恢复 J/K 供用户重试或反向移动。
+  // 无增长释放只在观察到过 isFetchingNextPage=true（拉取确已完成）后生效，
+  // 避免拉取进行中就被误判为无增长而提前释放
   useEffect(() => {
-    if (!pendingAdvance || isFetchingNextPage) {
+    if (!pendingAdvance) {
+      return;
+    }
+    if (isFetchingNextPage) {
+      sawAdvanceFetchingRef.current = true;
       return;
     }
     if (currentIndex >= 0 && currentIndex < items.length - 1) {
       setPendingAdvance(false);
+      setAdvanceFromLength(null);
+      sawAdvanceFetchingRef.current = false;
       navigateToIssue(items[currentIndex + 1].issue);
-    } else if (!hasNextPage || isError) {
+    } else if (
+      !hasNextPage ||
+      isError ||
+      (sawAdvanceFetchingRef.current &&
+        advanceFromLength !== null &&
+        items.length <= advanceFromLength)
+    ) {
       setPendingAdvance(false);
+      setAdvanceFromLength(null);
+      sawAdvanceFetchingRef.current = false;
     }
   }, [
     pendingAdvance,
@@ -352,6 +408,7 @@ export function useIssueSourceList(options: {
     items,
     hasNextPage,
     isError,
+    advanceFromLength,
     navigateToIssue,
   ]);
 
