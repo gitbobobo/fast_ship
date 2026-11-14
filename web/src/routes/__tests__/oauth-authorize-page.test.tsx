@@ -89,7 +89,7 @@ describe("OAuthAuthorizePage", () => {
     preview.mockResolvedValue({ data: previewFixture });
     renderPage(`/oauth/authorize${fullQuery}`);
 
-    expect(await screen.findByText("Claude Code MCP")).toBeInTheDocument();
+    expect(await screen.findByText("「Claude Code MCP」")).toBeInTheDocument();
     expect(screen.getByText("verifybot")).toBeInTheDocument();
     expect(screen.getByText(/verifybot@example.com/)).toBeInTheDocument();
     // 品牌文案也叫 Fast Ship，项目用 checkbox 角色断言避免撞名。

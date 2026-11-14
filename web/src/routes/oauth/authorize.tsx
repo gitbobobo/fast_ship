@@ -165,10 +165,13 @@ function AuthorizeConsent({ searchParams }: { searchParams: URLSearchParams }) {
       <Card>
         <CardHeader className="pt-4 text-center">
           <CardTitle className="text-xl">授权访问</CardTitle>
+          {/* 客户端名是用户点「同意」前最该核对的信息，独立一行大字展示。 */}
+          <p className="mt-1.5 text-base font-semibold break-all">
+            「{client_name}」
+          </p>
         </CardHeader>
         <CardContent className="space-y-5 pb-4">
-          <p className="text-sm text-muted-foreground">
-            「<span className="font-medium text-foreground">{client_name}</span>」
+          <p className="text-center text-sm text-muted-foreground">
             请求访问你的 Fast Ship 账号
             {projects.length > 0 && (
               <>，该应用将获得所选项目的{write ? "读写" : "只读"}权限</>
@@ -236,10 +239,11 @@ function AuthorizeConsent({ searchParams }: { searchParams: URLSearchParams }) {
           {projects.length > 0 && (
           <div className="space-y-2">
             <Label>访问权限</Label>
+            {/* 选项与上方项目勾选同一套描边行样式：分组观感一致、长文不贴边。 */}
             <RadioGroup
               value={write ? "write" : "read"}
               onValueChange={(value) => setWrite(value === "write")}
-              className="max-sm:[&>label]:py-3"
+              className="[&>label]:rounded-md [&>label]:border [&>label]:p-2.5"
             >
               <RadioGroupItem value="read">只读（查看项目与问题）</RadioGroupItem>
               <RadioGroupItem value="write">
