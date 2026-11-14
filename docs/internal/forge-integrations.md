@@ -134,7 +134,7 @@ forgejo 绑定项目换语义不换码：
 - **GetSettings**：`code_integration_id` 非空时两项平台前置条件改为
   「代码仓集成已配置（Forgejo）」（集成行存在且 `kind=forgejo`）与「代码仓
   集成可访问该仓库」（经 resolver 取 Forgejo 适配器实时 `GetRepository`，
-  `installationID=0`——安装语义对 Forgejo 不存在）。仓库名不发往 GitHub 查
+  安装语义对 Forgejo 不存在）。仓库名不发往 GitHub 查
   安装：同名 GitHub 仓的安装不代表 forgejo 仓可用。Token 项同样换语义：
   「代码仓集成 PAT 已配置（Forgejo）」按集成行 `token_encrypted` 非空判定
   ——纯 Forgejo 部署没有 GitHub 凭证可绑，项目侧 Token 绑定对 Forgejo 仓
@@ -215,7 +215,8 @@ Forgejo 仓库的 PR 审查与 GitHub 走同一条协调管线（webhook 事务�
   同口径命中：service 走确定性降级收尾（顶层评论降级），不按可重试
   错误无限退避挂住 `sync_pending`。
 - **resolver**：`forge.ReviewClients.ClientFor` 三分支——空串/`github-default`
-  → GitHub 适配器；其余 id → 经 `ForgejoSource`（`service/forge_client_source.go`
+  → GitHub 适配器（安装 id 由 resolver 内联 `ResolveInstallation` 按仓库
+  现解析，成功结果按 repo 短 TTL 缓存，INT-230）；其余 id → 经 `ForgejoSource`（`service/forge_client_source.go`
   的 `ForgeClientSource`）现取「SSRF client + 展开基址 + 解密 PAT」组装
   Forgejo 适配器（每次现取现建，不缓存凭证——轮换立即生效）；来源缺失/集成
   不存在/kind 不符/解密失败都在这条链上明确报错，不静默回落 GitHub。

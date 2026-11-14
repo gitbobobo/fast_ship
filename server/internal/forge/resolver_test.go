@@ -91,6 +91,45 @@ func TestResolverGitHubResolveFailure(t *testing.T) {
 	}
 }
 
+// TestResolverInstallationCache 安装 id 成功结果按 repo 短 TTL 缓存：同一
+// resolver 两次构造同仓库客户端只打一次 ResolveInstallation；失败不缓存，
+// 下一构造仍实查（INT-230 复审 P2：防抖/同步/开轮每轮一次 JWT 解析会放大
+// App 级配额）。
+func TestResolverInstallationCache(t *testing.T) {
+	ctx := context.Background()
+	api := &recordingAPI{resolveInst: 42}
+	resolver := NewReviewClients(&sourceStub{api: api}, nil)
+
+	for i := 0; i < 2; i++ {
+		if _, err := resolver.ClientFor(ctx, model.ForgeIntegrationBuiltinGitHubID, "o/r"); err != nil {
+			t.Fatalf("ClientFor #%d: %v", i, err)
+		}
+	}
+	if api.resolveCalls != 1 {
+		t.Fatalf("resolveCalls = %d, want 1（命中缓存不再打 JWT）", api.resolveCalls)
+	}
+
+	// 不同仓库不共享缓存槽。
+	if _, err := resolver.ClientFor(ctx, model.ForgeIntegrationBuiltinGitHubID, "o/r2"); err != nil {
+		t.Fatal(err)
+	}
+	if api.resolveCalls != 2 {
+		t.Fatalf("resolveCalls = %d, want 2（异仓库实查）", api.resolveCalls)
+	}
+
+	// 失败不缓存：两次构造都实查。
+	failAPI := &recordingAPI{resolveErr: errors.New("boom")}
+	failResolver := NewReviewClients(&sourceStub{api: failAPI}, nil)
+	for i := 0; i < 2; i++ {
+		if _, err := failResolver.ClientFor(ctx, model.ForgeIntegrationBuiltinGitHubID, "o/r"); err == nil {
+			t.Fatalf("ClientFor #%d want err", i)
+		}
+	}
+	if failAPI.resolveCalls != 2 {
+		t.Fatalf("failAPI.resolveCalls = %d, want 2（失败不缓存）", failAPI.resolveCalls)
+	}
+}
+
 // TestResolverHookDeliveryAccess 投递对账的 GitHub 专属访问面：实现有投递
 // 记录面时透出（连同安装令牌客户端）；没有时 nil,nil,nil；访问面缺失报哨兵。
 func TestResolverHookDeliveryAccess(t *testing.T) {

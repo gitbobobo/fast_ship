@@ -640,6 +640,12 @@ func (s *ReviewService) reviewPrerequisites(ctx context.Context, project *model.
 			switch {
 			case errors.Is(err, forge.ErrGitHubAccessUnconfigured):
 				installDetail = "部署未配置 GitHub App"
+			case err != nil && !forge.IsRateLimit(err) &&
+				(forge.IsNotFound(err) || forge.IsForbidden(err) || forge.IsUnauthorized(err)):
+				// 安装解析内联进 resolver 后，「App 未装到该仓库」在构造阶段就
+				// 失败（404；凭证被拒为 401/403）——仍按未安装归类，不误报
+				// 访问面不可用，与改造前 GetRepository 分支口径一致。
+				installDetail = "App 未安装到该仓库或仓库不可访问：" + err.Error()
 			case err != nil:
 				installDetail = "GitHub App 访问面不可用：" + err.Error()
 			default:

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/githubapi"
 	"github.com/godbobo/fast_ship/server/internal/model"
@@ -52,6 +53,22 @@ type ReviewClients struct {
 	// 缓存命中即不再探测，按键分槽才不会有陈旧 login 滞留窗口；裸 PAT 不进
 	// 常驻 map key（明文凭证不该常驻内存），同集成旧槽在新槽建立时逐出。
 	forgejoLogins sync.Map
+	// installations GitHub 安装解析短 TTL 缓存（key=repoFullName）：安装解析
+	// 每次都要签 App JWT 打 /repos/{o}/{r}/installation，而安装关系极少变
+	// 化——命中即不再打 JWT，防抖 tick/同步账本/开轮每轮一次的构造不再放大
+	// App 级配额。只缓存成功结果：未安装的仓库每轮仍实查，装完下一轮即生效。
+	// 安装变更在 TTL 内拿到旧 id 的代价与旧行为（webhook 快照旧 id）等价：
+	// 后续请求 401/404 按确定性失败归类，窗口过后自愈。
+	installations sync.Map
+}
+
+// installationCacheTTL 安装 id 缓存时长（见 installations 字段注释）。
+const installationCacheTTL = 5 * time.Minute
+
+// installationCacheEntry installations 的值：解析到的安装 id 与过期时刻。
+type installationCacheEntry struct {
+	id  int64
+	exp time.Time
 }
 
 // 编译期钉住实现满足 resolver 契约。
@@ -102,12 +119,30 @@ func (r *ReviewClients) ClientFor(ctx context.Context, integrationID, repoFullNa
 	}
 	// 安装 id 按仓库现解析（INT-230）：调用方不再透传 webhook 快照。%v 文案
 	// 进 AppError 消息（对外形态与 service 侧解析时代一致），cause 保留链条
-	// 供确定性失败归类（401/403/404 且非限流）。
-	installationID, err := api.ResolveInstallation(ctx, repoFullName)
+	// 供确定性失败归类（401/403/404 且非限流）。成功结果走 installations
+	// 短 TTL 缓存，命中不打 JWT（见字段注释）。
+	installationID, err := r.resolveInstallation(ctx, api, repoFullName)
 	if err != nil {
-		return nil, errs.Wrap(errs.ErrGitHubAPI.Code, fmt.Sprintf("解析仓库安装失败: %v", err), err)
+		return nil, err
 	}
 	return NewGitHubReviewClient(api, installationID), nil
+}
+
+// resolveInstallation 按仓库解析 GitHub App 安装 id，成功结果按 repo 短
+// TTL 缓存（INT-230 复审：无缓存时防抖/同步/开轮每轮一次 JWT 解析会放大
+// App 级配额）。失败不缓存，错误照旧包装。
+func (r *ReviewClients) resolveInstallation(ctx context.Context, api githubapi.GitHubClient, repoFullName string) (int64, error) {
+	if v, ok := r.installations.Load(repoFullName); ok {
+		if e, ok := v.(installationCacheEntry); ok && time.Now().Before(e.exp) {
+			return e.id, nil
+		}
+	}
+	installationID, err := api.ResolveInstallation(ctx, repoFullName)
+	if err != nil {
+		return 0, errs.Wrap(errs.ErrGitHubAPI.Code, fmt.Sprintf("解析仓库安装失败: %v", err), err)
+	}
+	r.installations.Store(repoFullName, installationCacheEntry{id: installationID, exp: time.Now().Add(installationCacheTTL)})
+	return installationID, nil
 }
 
 // HookDeliveryAccess 投递对账的 GitHub App 访问面（INT-230 重投边界）：

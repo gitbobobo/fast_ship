@@ -32,9 +32,10 @@ type recordingAPI struct {
 	entries        map[string]bool
 	pathErr        error
 
-	resolveInst int64  // ResolveInstallation 返回的安装 id
-	resolveErr  error  // ResolveInstallation 注入的错误
-	resolveRepo string // 最近一次 ResolveInstallation 收到的仓库名
+	resolveInst  int64  // ResolveInstallation 返回的安装 id
+	resolveErr   error  // ResolveInstallation 注入的错误
+	resolveRepo  string // 最近一次 ResolveInstallation 收到的仓库名
+	resolveCalls int    // ResolveInstallation 调用次数（缓存断言用）
 }
 
 // statusCall 一次 CreateCommitStatus 的入参快照。
@@ -120,6 +121,7 @@ func (r *recordingAPI) TreeEntriesAtRef(_ context.Context, installationID int64,
 }
 
 func (r *recordingAPI) ResolveInstallation(_ context.Context, repoFullName string) (int64, error) {
+	r.resolveCalls++
 	r.resolveRepo = repoFullName
 	return r.resolveInst, r.resolveErr
 }

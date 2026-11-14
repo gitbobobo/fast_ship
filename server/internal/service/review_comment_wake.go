@@ -380,8 +380,9 @@ func (s *ReviewService) observeAcceptedHead(ctx context.Context, integrationID, 
 
 // handleCommentWake 评论唤醒的两阶段编排（照 revalidateTiedWebhook 模式）：
 //
-//	阶段一（事务外）：幂等预查 + 纯 payload 守卫 + installation 兜底解析 +
-//	只读观察总账 head + 实拉 PR 实况（实拉独享超时 ctx）。「该不该唤醒」
+//	阶段一（事务外）：幂等预查 + 纯 payload 守卫 + 构造审查客户端（安装
+//	解析已内联进 resolver，INT-230）+ 只读观察总账 head + 实拉 PR 实况
+//	（实拉独享超时 ctx）。「该不该唤醒」
 //	以实时 State/head 为准，不信事件体（重投/迟到的 payload 是旧快照）；
 //	构造客户端/实拉/安装解析的确定性失败重投结果相同，判丢弃并补登幂等
 //	账；瞬时错误返回 error 让 handler 回 500 由平台重投——此时库里没有
