@@ -74,9 +74,6 @@ func (r *BotMaintenanceRepository) ListUnfinished() ([]model.BotMaintenanceRun, 
 	return rows, err
 }
 
-// ListDueNightly 扫描候选：id 与归属用户时区的投影查询见
-// ListBotOwnerTimezones（INT-228）。
-
 // ListSucceeded 列出某机器人某类全部成功维护运行（按时间升序，供累计消费水位）。
 func (r *BotMaintenanceRepository) ListSucceeded(botID string, kind model.BotMaintenanceKind) ([]model.BotMaintenanceRun, error) {
 	var rows []model.BotMaintenanceRun

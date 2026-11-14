@@ -224,6 +224,9 @@ func (s *BotService) scanNightlyOnce() {
 	// Get 整行——整行读取会把系统提示词与 provider 密文反复拖进每次扫描。
 	rows, err := repository.NewBotMaintenanceRepository(s.db).ListBotOwnerTimezones()
 	if err != nil {
+		// 与预算/汇总投影同口径：候选读持续失败时夜间整理不再入队，
+		// 必须留日志信号（INT-228 复审）。
+		s.logger.Warn("夜间扫描读取候选失败", zap.Error(err))
 		return
 	}
 	hour, minute := s.cfg.Bots.Memory.NightlyClock()
