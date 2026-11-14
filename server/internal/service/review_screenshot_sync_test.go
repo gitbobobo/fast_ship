@@ -98,7 +98,7 @@ func TestCollectScreenshotURLsBareImageLinks(t *testing.T) {
 	}
 
 	// # 与紧贴的中文句读不是资源的一部分：fragment 会被下载面 normalize 拒
-	// （IsGitHubMediaURL 也因此判 false，bearer 重试失效），句读会破坏扩展名
+	// （IsGitHubMediaURLFor 也因此判 false，bearer 重试失效），句读会破坏扩展名
 	// 判定——收集时都要剥掉。
 	refs = collectScreenshotURLs("见 https://uiv.frp.musiver.cn/f/a.png#frag")
 	if len(refs) != 1 || refs[0].URL != "https://uiv.frp.musiver.cn/f/a.png" {
@@ -320,7 +320,7 @@ func TestCollectScreenshotURLsTrimsWrappingPunct(t *testing.T) {
 }
 
 // J3：md/HTML 引用里的 #fragment 统一剥掉——fragment 不是资源本身，下载面
-// normalize 会拒、IsGitHubMediaURL 也因此判 false，私有附件带 fragment 时
+// normalize 会拒、IsGitHubMediaURLFor 也因此判 false，私有附件带 fragment 时
 // 不会触发 bearer 重试；收集结果与后续指纹都用去 fragment 后的 URL。
 func TestCollectScreenshotURLsStripsFragmentFromMarkup(t *testing.T) {
 	refs := collectScreenshotURLs("![附件](https://github.com/user-attachments/assets/uuid#frag)")

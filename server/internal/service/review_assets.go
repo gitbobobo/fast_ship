@@ -99,7 +99,7 @@ func trimTrailingPunct(u string) string {
 }
 
 // normalizeRefURL 收集层的引用 URL 规整：先剥 #fragment（不是资源本身——
-// 下载面 normalize 会拒 fragment，IsGitHubMediaURL 也因此判 false，私有附
+// 下载面 normalize 会拒 fragment，IsGitHubMediaURLFor 也因此判 false，私有附
 // 件带 fragment 时 bearer 重试失效）；裸链再裁掉尾部粘住的句读/引号。收集
 // 结果与后续指纹都用规整后的 URL。
 func normalizeRefURL(u string, bare bool) string {

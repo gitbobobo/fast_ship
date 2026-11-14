@@ -47,10 +47,6 @@ type botToolDef struct {
 	Actions    []botActionDef
 }
 
-// botArgsHelp / botArgsResult / botArgsStop / botArgsCancel 等零字段工具
-// 共用空参数对象。
-type botNoArgs struct{}
-
 // botScheduleArgs 是 fs_schedule/fs_memory 在 v1/v2 冻结注册表里的占位参数
 // 结构体；v3 起 fs_schedule 使用独立的参数结构体（v3/v4 冻结副本与 v5 当前
 // 版本见 bot_args_frozen.go 与下方），此结构体只为存量会话的前缀稳定保留，

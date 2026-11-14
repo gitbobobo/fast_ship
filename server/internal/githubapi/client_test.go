@@ -240,17 +240,8 @@ func TestListPullRequestFilesOversizedPage(t *testing.T) {
 }
 
 func TestStatusErrorHelpers(t *testing.T) {
-	if !IsForbidden(&StatusError{StatusCode: http.StatusForbidden}) {
-		t.Fatal("403 must be forbidden")
-	}
-	if !IsForbidden(ErrForbidden) {
-		t.Fatal("sentinel must be forbidden")
-	}
 	if !IsNotFound(&StatusError{StatusCode: http.StatusNotFound}) {
 		t.Fatal("404 must be not found")
-	}
-	if IsForbidden(&StatusError{StatusCode: http.StatusBadRequest}) {
-		t.Fatal("400 must not be forbidden")
 	}
 }
 

@@ -98,12 +98,6 @@ func Catalog() []Provider {
 	return out
 }
 
-// GeneratedAt 是数据快照时间（目录内模型的最大 last_updated）。
-func GeneratedAt() string {
-	load()
-	return parsed.GeneratedAt
-}
-
 // FindProvider 按目录 id 查找；custom 不是目录成员。
 func FindProvider(id string) (Provider, bool) {
 	load()

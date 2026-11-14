@@ -12,11 +12,11 @@ import (
 // 告警，不改变运行行为；归属校验与既有机器人端点同语义（他人资源 40424、
 // 任务不属于该机器人 40429），参数非法 40001，未认证 401。
 
-// setupBotBudgetREST 建库并补齐预算表（预算表接线前不由 BotModels 迁移）。
+// setupBotBudgetREST 建库并补齐预算表唯一/查询索引（表结构由 BotModels 迁移）。
 func setupBotBudgetREST(t *testing.T) *e2eEnv {
 	t.Helper()
 	e := setupE2E(t)
-	if err := e.env.db.AutoMigrate(repository.BotBudgetModels()...); err != nil {
+	if err := e.env.db.AutoMigrate(repository.BotModels()...); err != nil {
 		t.Fatalf("migrate bot budget: %v", err)
 	}
 	for _, ddl := range repository.BotBudgetDDL {

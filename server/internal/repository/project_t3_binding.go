@@ -23,15 +23,6 @@ func (r *ProjectT3BindingRepository) ListByProjectID(ctx context.Context, projec
 	return bindings, err
 }
 
-func (r *ProjectT3BindingRepository) FindByID(ctx context.Context, projectID, environmentID string) (*model.ProjectT3Binding, error) {
-	var binding model.ProjectT3Binding
-	err := r.db.WithContext(ctx).Where("project_id = ? AND environment_id = ?", projectID, environmentID).First(&binding).Error
-	if err != nil {
-		return nil, err
-	}
-	return &binding, nil
-}
-
 // Upsert 写入绑定快照；同一 (project_id, environment_id) 重复写入覆盖
 // t3_project_id/title/workspace_root 与 updated_at，created_at 保留首次写入值。
 func (r *ProjectT3BindingRepository) Upsert(ctx context.Context, binding *model.ProjectT3Binding) error {

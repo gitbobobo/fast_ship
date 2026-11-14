@@ -503,7 +503,7 @@ func TestBotCompactionSafeCutAndFold(t *testing.T) {
 	if compactions != 1 {
 		t.Fatalf("应有一条压缩记录")
 	}
-	fresh, _ := repository.NewBotMaintenanceRepository(env.db).FindByID(maintRun.ID)
+	fresh := maintenanceRunByID(t, env.db, maintRun.ID)
 	if fresh.Status != model.BotMaintenanceSucceeded {
 		t.Fatalf("维护运行应 succeeded，实得 %s", fresh.Status)
 	}

@@ -1183,7 +1183,7 @@ func TestQuotaScheduler_RunRoundStalledOnQueryError(t *testing.T) {
 func TestQuotaService_SkAmrKeyRejectedOnCreateUpdateAndProbe(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "quota-skamr")
-	realProvider, ok := quota.Lookup(nil, "opendesign")
+	realProvider, ok := lookupQuotaProviderForTest(t, "opendesign")
 	if !ok {
 		t.Fatalf("真实注册表应含 opendesign")
 	}
@@ -1238,4 +1238,15 @@ func TestQuotaService_SkAmrKeyRejectedOnCreateUpdateAndProbe(t *testing.T) {
 	if count != 1 {
 		t.Fatalf("被拒绝的凭据不得落库，count=%d", count)
 	}
+}
+
+// lookupQuotaProviderForTest 按 id 从注册表取供应商（替代已删除的 quota.Lookup）。
+func lookupQuotaProviderForTest(t *testing.T, id string) (quota.Provider, bool) {
+	t.Helper()
+	for _, p := range quota.Registry(nil) {
+		if p.ID == id {
+			return p, true
+		}
+	}
+	return quota.Provider{}, false
 }
