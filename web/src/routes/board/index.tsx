@@ -23,6 +23,7 @@ import {
   COLUMNS,
   type ColumnId,
   getColumnStatusValue,
+  getBoardWorkflowStatusParam,
 } from "@/routes/board/lib/utils";
 import { usePersistedScroll } from "@/lib/hooks/use-persisted-scroll";
 import {
@@ -104,15 +105,19 @@ export default function BoardPage() {
   /** 列 = issue.internal_meta?.workflow_status 对应列；列未知（含数据未加载）返回 null */
   const getIssueColumnContext = useCallback(
     (issue: Issue): BoardIssueColumnContext | null => {
-      const workflowStatus = issue.internal_meta?.workflow_status ?? "";
-      const column = COLUMNS.find((c) => c.statusValue === workflowStatus);
+      const column = COLUMNS.find(
+        (c) => c.statusValue === (issue.internal_meta?.workflow_status ?? ""),
+      );
       if (!column) {
+        return null;
+      }
+      const workflowStatusParam = getBoardWorkflowStatusParam(column.statusValue);
+      if (!workflowStatusParam) {
         return null;
       }
       const filter = columnFilters[column.id] ?? DEFAULT_BOARD_COLUMN_FILTER;
       return {
-        workflowStatus:
-          column.id === "unset" ? "unset" : column.statusValue,
+        workflowStatus: workflowStatusParam,
         label: filter.label,
         source: filter.source,
       };

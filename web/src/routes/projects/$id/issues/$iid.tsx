@@ -294,7 +294,10 @@ export default function IssueDetailPage() {
     currentIssueId: iid ?? "",
     currentIssueProjectId: issue?.project_id,
   });
-  const sourceCountLabel = `${source.totalCount ?? source.items.length} 个`;
+  // 条数取渲染行数（含 stale 保留项），与用户看到的列表一致；加载中不显示
+  const sourceCountLabel = source.isLoading
+    ? null
+    : `${source.items.length} 个`;
 
   const toggleSourceList = useCallback(() => {
     if (!hasSourceContext) {
@@ -1105,7 +1108,9 @@ export default function IssueDetailPage() {
                   <div className="min-w-0">
                     <h2 className="text-sm font-semibold">来源列表</h2>
                     <p className="mt-0.5 truncate text-xs text-muted-foreground">
-                      {sourceLabel} · {sourceCountLabel}
+                      {sourceCountLabel
+                        ? `${sourceLabel} · ${sourceCountLabel}`
+                        : sourceLabel}
                     </p>
                   </div>
                   <Button
@@ -1371,7 +1376,9 @@ export default function IssueDetailPage() {
             <SheetHeader className="border-b pb-3">
               <SheetTitle>来源列表</SheetTitle>
               <p className="mt-0.5 truncate text-xs text-muted-foreground">
-                {sourceLabel} · {sourceCountLabel}
+                {sourceCountLabel
+                  ? `${sourceLabel} · ${sourceCountLabel}`
+                  : sourceLabel}
               </p>
             </SheetHeader>
             <div
