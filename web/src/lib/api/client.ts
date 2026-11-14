@@ -146,6 +146,12 @@ export const api = ky.create({
     ],
     afterResponse: [
       async (request, options, response) => {
+        // 认证端点自身（登录）的 401 交给调用方展示表单错误：这里没有可换
+        // 的凭证，任何跳转都是自我回跳（登录失败会把用户正在填的表单整页
+        // 冲掉，还会往 next 里嵌套一层当前地址）。
+        if (new URL(request.url).pathname === "/api/auth/login") {
+          return;
+        }
         if (
           response.status !== 401 ||
           request.headers.get(REFRESH_RETRY_HEADER) === "1"

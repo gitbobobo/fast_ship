@@ -641,6 +641,10 @@ func TestOAuthRefreshScopeNarrowing(t *testing.T) {
 	if narrow.Scope != "project:"+project.ID+":read" {
 		t.Fatalf("新令牌应持窄 scope，得到 %s", narrow.Scope)
 	}
+	// 降权刷新应同事务吊销仍持宽 scope 的旧 access。
+	if _, err := s.oauth.ValidateAccessToken(context.Background(), pair.AccessToken); err == nil {
+		t.Fatalf("降权刷新后旧 access 应失效")
+	}
 	info, err := s.oauth.ValidateAccessToken(context.Background(), narrow.AccessToken)
 	if err != nil {
 		t.Fatalf("窄 access 应有效: %v", err)

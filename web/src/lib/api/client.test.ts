@@ -276,4 +276,23 @@ describe("api client auth retry", () => {
     const expected = `/login?next=${encodeURIComponent("/oauth/authorize?client_id=c1&code_challenge=xyz&state=s1")}`;
     expect(window.location.href.endsWith(expected)).toBe(true);
   });
+
+  it("login 401 不触发登出与跳转（表单错误由登录页展示）", async () => {
+    await import("./client");
+    const apiConfig = kyCreateMock.mock.calls[1][0];
+    const afterResponse = apiConfig.hooks.afterResponse[0];
+    const request = new Request("http://localhost/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    });
+
+    const result = await afterResponse(
+      request,
+      {},
+      new Response(null, { status: 401 }),
+    );
+
+    expect(result).toBeUndefined();
+    expect(authState.logout).not.toHaveBeenCalled();
+  });
 });

@@ -644,10 +644,18 @@ func (s *OAuthService) RefreshToken(ctx context.Context, req *OAuthTokenRequest)
 		}
 
 		// RFC 6749 §6：请求带 scope 时按请求收窄新令牌（已验 subset），
-		// 不再沿用旧授权的全部 scope。
+		// 不再沿用旧授权的全部 scope；降权时同事务吊销该授权下仍持原
+		// （更宽）scope 的旧 access，与重授权缩权的即时收权语义一致。
 		granted := rt.Scope
 		if req.Scope != "" {
 			granted = req.Scope
+			if granted != rt.Scope {
+				if err := tx.Model(&model.OAuthAccessToken{}).
+					Where("authorization_id = ? AND revoked_at IS NULL", rt.AuthorizationID).
+					Update("revoked_at", time.Now()).Error; err != nil {
+					return err
+				}
+			}
 		}
 
 		nextAccess := &model.OAuthAccessToken{

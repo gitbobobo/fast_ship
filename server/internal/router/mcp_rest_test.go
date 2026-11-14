@@ -138,13 +138,17 @@ func TestMCPToolsEndToEnd(t *testing.T) {
 	}
 	readToken, _ := body["access_token"].(string)
 
-	// 同 scope 重授权：scope 集合未变不应吊销旧令牌（避免误伤续授权场景）。
-	verifierSame, challengeSame := oauthPKCEPair()
+	// 同 scope 重授权：scope 集合未变不应吊销旧令牌（避免误伤续授权场景），
+	// 重授权后旧 read token 必须仍可用。
+	_, challengeSame := oauthPKCEPair()
 	code, _ = oauthAuthorize(t, env, auth.Token, readClientID, redirectURI, challengeSame, "s1b", []string{projectID}, false)
 	if code != http.StatusOK {
 		t.Fatalf("authorize read (same scope): %d", code)
 	}
-	_ = verifierSame
+	if initCode, _, _ := mcpPost(t, env, readToken, "initialize", 20,
+		`{"protocolVersion":"`+mcpProtocolVersion+`","capabilities":{},"clientInfo":{"name":"router-test","version":"0"}}`); initCode != http.StatusOK {
+		t.Fatalf("同 scope 重授权后旧 read token 应仍有效: %d", initCode)
+	}
 
 	// 第二次授权：写 scope（独立客户端；同 client 变档授权会吊销旧令牌）。
 	verifier2, challenge2 := oauthPKCEPair()
