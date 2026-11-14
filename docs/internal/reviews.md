@@ -289,10 +289,14 @@ Forgejo 适配器（`internal/forge/forgejo_review_client.go`）直连 v1 REST
 （认证 `Authorization: token {PAT}`，详见 docs/internal/forge-integrations.md）。
 `forge.ReviewClients.ClientFor` 三分支：空串/`github-default` → GitHub；其余
 id → `ForgejoSource`（service 层 `ForgeClientSource`，按集成行现取 SSRF
-client + 展开基址 + 解密 PAT，不缓存凭证）组装 Forgejo 适配器。调用方
-（调度/同步/资产/设置）只认 resolver，媒体下载 bearer 经 `BearerSource`
-接口按集成解析——GitHub 是安装令牌、Forgejo 是机器人 PAT（review_assets
-只对 GitHub 实例的附件路径带凭证）。
+client + 展开基址 + 解密 PAT，不缓存凭证）组装 Forgejo 适配器。GitHub
+分支的安装 id 由 resolver 内联 `ResolveInstallation` 按仓库现解析
+（INT-230：`ClientFor` 不再接 `installationID`，webhook 安装快照只剩
+落库数据语义），成功结果按 repo 短 TTL（5min）缓存，命中不再签 JWT；
+失败不缓存。调用方（调度/同步/资产/设置）只认 resolver，媒体下载
+bearer 经 `BearerSource` 断言按集成解析——GitHub 是安装令牌、Forgejo
+是机器人 PAT（review_assets 只对 GitHub 实例的附件路径带凭证；缓存按
+`BearerScope` 分桶）。
 
 **Forgejo 轮询补漏（`review_forgejo_poll.go`）**：webhook 丢投递的兜底。5
 分钟 ticker（挂在 `Start()` 的循环组，启动不立即跑首轮）对每个「启用审查且
@@ -1317,7 +1321,7 @@ SHA-256 前 16 位。
 | GET | `/api/projects/{id}/review-settings` | 设置 + `repo_full_name`（实际审查的代码仓库，原样大小写）+ `prerequisites[]`（缺项 `missing=true` + `detail`）+ `taken_by`。prerequisite 的 `github_app_installation` 每次实时调一次 GitHub。 |
 | PUT | `/api/projects/{id}/review-settings` | 全量保存。组合结构/归属/绑定/数量/重复问题 40001（只读会话的环境同样拒绝）；启用时前置条件缺项 41202（逐条写进 message）；同仓库占用 40922（带占用者）。`enabled=false` 跳过前置校验、允许零组合。 |
 | GET | `/api/projects/{id}/review-records` | 审查记录：`items[]` 每个 PR 一行，内嵌 `rounds[]`（轮次、head、触发方式、时间）与每轮 `code_runs[]`/`visual_runs[]`（含 `findings[]`/`unmeasurable[]`）。`?limit=` 默认 20、上限 100。首页改版后网页不再有入口，接口保留。 |
-| POST | `/api/projects/{id}/reviews/rerun` | 重新审查：body `{pr_number}`。项目必须 enabled（否则 40923）。rerun 没有 webhook installation 快照：先 `ResolveInstallation` 解析真实安装 id（解析不支持/失败直接报错，不拿 0 继续），再用安装令牌 `GetPullRequest` 实时取当前 head，走与 webhook 相同的「取消旧 SHA + 开轮」事务路径（`trigger_action=manual`，恒开新轮），安装 id 落进运行与总账。PR 已关闭/合并时直接报错（40001「PR 已关闭」），不开轮；跨仓 fork（实拉 head 仓库缺失或与 base 仓库不同名）同样报错（40001「fork PR 不能重跑审查」）。返回 `{accepted, head_sha, round_number}`。 |
+| POST | `/api/projects/{id}/reviews/rerun` | 重新审查：body `{pr_number}`。项目必须 enabled（否则 40923）。rerun 没有 webhook installation 快照：安装 id 由 resolver 内联 `ResolveInstallation` 按仓库现解析（INT-230，解析失败直接报错，不拿 0 继续），用安装令牌 `GetPullRequest` 实时取当前 head，走与 webhook 相同的「取消旧 SHA + 开轮」事务路径（`trigger_action=manual`，恒开新轮）；安装 id 不再落新值——rerun 传 0，开轮事务保留总账既有快照。PR 已关闭/合并时直接报错（40001「PR 已关闭」），不开轮；跨仓 fork（实拉 head 仓库缺失或与 base 仓库不同名）同样报错（40001「fork PR 不能重跑审查」）。返回 `{accepted, head_sha, round_number}`。 |
 
 ## 开启前置与同仓库唯一
 
@@ -1327,7 +1331,10 @@ SHA-256 前 16 位。
 
 1. 部署 GitHub App 已配置（`deployment_settings` 的 App 身份；
    `github_app.fake` + `server.mode=debug` 视为已配置）。
-2. App 已安装到该仓库：用安装令牌调 `GetRepository`，失败即未安装。
+2. App 已安装到该仓库：经 resolver 构造审查客户端（内联
+   `ResolveInstallation`，INT-230），解析失败的 401/403/404（非限流）
+   与后续 `GetRepository` 失败同判「未安装/仓库不可访问」缺项，其余错误
+   报「访问面不可用」。
 3. `server.public_url` 已配置（Agent 端点基址进提示词，不从 Host 推断）。
 4. 项目绑定了公开或代码仓库 Token（`public_github_token_id` /
    `code_github_token_id`）。

@@ -49,7 +49,7 @@ func TestCleanupBranchPendingEntryAndRecovery(t *testing.T) {
 		// 只能核验，删不了。
 		refNames: []string{"main", "br-bp"},
 	}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 
 	review.cleanupRunWorktree(run, now)
 
@@ -120,7 +120,7 @@ func TestCleanupBothStepsGoneRemoved(t *testing.T) {
 		},
 		refNames: []string{"main"}, // 只剩主干：工作树与本轮分支都没了
 	}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 
 	review.cleanupRunWorktree(run, now)
 
@@ -155,7 +155,7 @@ func TestCleanupRemoveUncertainThenConfirmed(t *testing.T) {
 		worktrees:       []T3Worktree{{Path: "/wt/unc"}},
 		removeUncertain: true,
 	}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 
 	// 第 1 tick：结果不可见 → 保持 none + 待确认，不发通知。
 	review.cleanupRunWorktree(run, now)
@@ -208,7 +208,7 @@ func TestCleanupRemoveUncertainCapsAtFailed(t *testing.T) {
 		worktrees:       []T3Worktree{{Path: "/wt/unc2"}},
 		removeUncertain: true,
 	}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 
 	// 三轮「不可见」之间按退避推进时钟；每轮都重过线程读取、登记读取与
 	// 归属核验（重发删除前的安全前提）。
@@ -250,7 +250,7 @@ func TestCleanupRemoveDefiniteErrorFails(t *testing.T) {
 		worktrees: []T3Worktree{{Path: "/wt/err"}},
 		removeErr: errors.New("upstream command failed"),
 	}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 
 	review.cleanupRunWorktree(run, now)
 
@@ -286,7 +286,7 @@ func TestCleanupRegistryIncompleteStaysNone(t *testing.T) {
 		},
 		listIncomplete: true,
 	}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 
 	// 三轮「不完整」按退避推进；前两轮不发通知，第三轮起发。
 	at := now
@@ -358,7 +358,7 @@ func TestCleanupThreadNotFoundContinuesFromRowSnapshot(t *testing.T) {
 		worktrees:   []T3Worktree{{Path: "/wt/snap", RefNames: []string{"br-snap"}}},
 		refNames:    []string{"br-snap"},
 	}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 
 	for i := 0; i < reviewWorktreeMaxTries; i++ {
 		review.cleanupRunWorktree(run, now)
@@ -389,7 +389,7 @@ func TestCleanupRowWithoutBranchRemoved(t *testing.T) {
 		worktrees: []T3Worktree{{Path: "/wt/nb", RefNames: []string{"whatever"}}},
 		refNames:  []string{"main"},
 	}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 
 	review.cleanupRunWorktree(run, now)
 
@@ -426,7 +426,7 @@ func TestCleanupEmptyPathWithRowBranchGoesBranchStep(t *testing.T) {
 		},
 		refNames: []string{"main", "br-only"},
 	}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 
 	for i := 0; i < reviewWorktreeMaxTries; i++ {
 		review.cleanupRunWorktree(run, now)
@@ -457,7 +457,7 @@ func TestCleanupOwnershipMismatchReason(t *testing.T) {
 		},
 		worktrees: []T3Worktree{{Path: "/wt/new", RefNames: []string{"br-n"}}},
 	}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 
 	review.cleanupRunWorktree(run, now)
 
@@ -487,7 +487,7 @@ func TestCleanupAggregateBatchesRunsByReason(t *testing.T) {
 			r2.ThreadID: {Path: "/wt/a2", Branch: "br-a2"},
 		},
 	}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 
 	review.cleanupRunWorktree(r1, now)
 	review.cleanupRunWorktree(r2, now)

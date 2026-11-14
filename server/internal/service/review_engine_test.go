@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/api"
+	"github.com/godbobo/fast_ship/server/internal/forge"
 	"github.com/godbobo/fast_ship/server/internal/githubapi"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
@@ -37,6 +38,21 @@ type reviewEngineEnv struct {
 	project *model.Project
 }
 
+// anonGitHubClient 测试用 GitHub 适配器：下载路径只断言 BearerSource 形态
+// （无底层 API 时 Bearer 返回空串走匿名），不产生平台调用。
+func anonGitHubClient(installationID int64) forge.ReviewClient {
+	return forge.NewGitHubReviewClient(nil, installationID)
+}
+
+// bearerAPI githubapi 访问面桩：恒返回同一媒体令牌（INT-230 后令牌随适配
+// 器的底层凭证面走，测试经 Bearer(ctx, installationID) 注入）。
+type bearerAPI struct {
+	githubapi.GitHubClient
+	token string
+}
+
+func (b bearerAPI) Bearer(context.Context, int64) (string, error) { return b.token, nil }
+
 func newReviewEngineEnv(t *testing.T) *reviewEngineEnv {
 	t.Helper()
 	svc := setupTestServices(t)
@@ -48,7 +64,7 @@ func newReviewEngineEnv(t *testing.T) *reviewEngineEnv {
 		githubapp.StaticClients{Client: fake},
 		fakeReviewAppSource{ok: true},
 		fakeReviewPublicURL("https://fs.example.com"),
-		nil, media, nil, repository.NewForgeIntegrationRepository(svc.db), svc.cfg, zap.NewNop())
+		nil, media, repository.NewForgeIntegrationRepository(svc.db), svc.cfg, zap.NewNop())
 	user := createTestUser(t, svc.db, "reviewer")
 	project := createTestProject(t, svc.db, user.ID)
 	return &reviewEngineEnv{svc: svc, review: review, fake: fake, media: media, user: user, project: project}
@@ -704,14 +720,15 @@ func TestReviewRerun(t *testing.T) {
 	if len(runs) != 1 || runs[0].Status != model.ReviewRunDispatched {
 		t.Fatalf("round-2 runs = %+v", runs)
 	}
-	// F3：rerun 先解析真实安装 id（fake 默认 1）并落库，不写 0。
-	if runs[0].InstallationID != 1 {
-		t.Fatalf("run installation_id = %d, want 1（ResolveInstallation）", runs[0].InstallationID)
+	// INT-230：rerun 不再解析/落库安装 id（解析已内联适配器，仅构造用）；
+	// 传 0 让 openRoundTx 保留总账既有快照（此前无总账则为 0）。
+	if runs[0].InstallationID != 0 {
+		t.Fatalf("run installation_id = %d, want 0（不随 rerun 落新值）", runs[0].InstallationID)
 	}
 	var ledger model.ReviewPullRequest
 	e.svc.db.First(&ledger, "repo_full_name = ? AND pr_number = 2", repo)
-	if ledger.InstallationID != 1 {
-		t.Fatalf("ledger installation_id = %d, want 1", ledger.InstallationID)
+	if ledger.InstallationID != 0 {
+		t.Fatalf("ledger installation_id = %d, want 0", ledger.InstallationID)
 	}
 }
 

@@ -17,6 +17,7 @@ import (
 	"unicode"
 
 	"github.com/godbobo/fast_ship/server/internal/api"
+	"github.com/godbobo/fast_ship/server/internal/forge"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	"github.com/godbobo/fast_ship/server/internal/pkg/githubmedia"
@@ -359,7 +360,7 @@ var errForgejoMediaPrivate = errors.New("Forgejo 私有附件暂不支持带凭�
 // 失败，不白铸令牌（每次同步都会重来，探测路径还占预算）。令牌是仓库凭证，
 // 外部图床一律不发（防止 PR 描述里的外链图床靠回 403 换走安装令牌）。media
 // 未配置视为该部署不支持截图审查。
-func (s *ReviewService) downloadScreenshot(ctx context.Context, integrationID string, installationID int64, url string) (*githubmedia.CachedMedia, error) {
+func (s *ReviewService) downloadScreenshot(ctx context.Context, client forge.ReviewClient, integrationID, url string) (*githubmedia.CachedMedia, error) {
 	if s.media == nil {
 		return nil, errReviewMediaUnconfigured
 	}
@@ -376,27 +377,32 @@ func (s *ReviewService) downloadScreenshot(ctx context.Context, integrationID st
 	default:
 		return nil, err
 	}
-	// 带凭证重试只面向 GitHub 媒体：forge 集成显式短路（今天恰好靠
-	// installationID=0 挡住；未来迁移工具若回填非零 installation，PAT 也不
-	// 得随 Bearer 出域到 github 主机）。Forgejo 附件匿名 401/403 打独立
-	// sentinel（公开仓匿名也能拉，401/403 多半是私有附件）；404 不归类
-	// ——公开仓附件被删同样回 404，报「请改用公开图片链接」是误导。
+	// 带凭证重试只面向 GitHub 媒体：forge 集成按集成身份显式短路（INT-230：
+	// 不再用安装哨兵判平台——凭证收进各自适配器，PAT 不得随 Bearer 出域到
+	// github 主机）。Forgejo 附件匿名 401/403 打独立 sentinel（公开仓匿名
+	// 也能拉，401/403 多半是私有附件）；404 不归类——公开仓附件被删同样
+	// 回 404，报「请改用公开图片链接」是误导。
 	if reviewIntegrationID(integrationID) != model.ForgeIntegrationBuiltinGitHubID {
 		if upstream.StatusCode != http.StatusNotFound {
 			return nil, fmt.Errorf("%w（upstream %d）: %w", errForgejoMediaPrivate, upstream.StatusCode, err)
 		}
 		return nil, err
 	}
-	if !githubmedia.IsGitHubMediaURLFor(url, s.githubWebHost()) || s.mediaBearer == nil || installationID == 0 {
+	if !githubmedia.IsGitHubMediaURLFor(url, s.githubWebHost()) {
 		return nil, err
 	}
-	bearer, berr := s.mediaBearer(ctx, integrationID, installationID)
+	// bearer 与缓存作用域都来自审查客户端自身（BearerSource 断言）：安装
+	// id 已被适配器收编，令牌拉进缓存的私有附件条目只对同一安装命中（见
+	// cacheEntry.Scope）。无凭证实现返回空串 = 匿名下载。
+	src, ok := client.(forge.BearerSource)
+	if !ok {
+		return nil, err
+	}
+	bearer, berr := src.Bearer(ctx)
 	if berr != nil || bearer == "" {
 		return nil, err
 	}
-	// scope 用安装 id：令牌拉进缓存的私有附件条目只对同一安装命中（见
-	// cacheEntry.Scope）。
-	return s.media.FetchAndCacheWithBearer(ctx, url, bearer, fmt.Sprintf("install:%d", installationID))
+	return s.media.FetchAndCacheWithBearer(ctx, url, bearer, src.BearerScope())
 }
 
 // screenshotErrorText 用户可见的下载失败原因。网络层原始错误（*url.Error 的
@@ -467,9 +473,10 @@ func (s *ReviewService) githubWebHost() string {
 // ensureAssets 保证 (集成,repo,pr,head) 的截图资产已落账：逐引用查重 → 未下
 // 载的走 downloadScreenshot；失败行（storage_path 为空）每次重试下载，成功则
 // 更新原行。私有仓库附件匿名拉不到：GitHub 媒体域（含部署实例附件路径）
-// 失败且有安装 id 时带 App 令牌重试一次。下载失败也落一行（error 非空、
-// storage_path 空），图片端点据此回 404。返回本次指纹与资产列表。
-func (s *ReviewService) ensureAssets(ctx context.Context, integrationID, repo string, prNumber int, headSHA, prBody string, installationID int64) (string, []model.ReviewAsset, error) {
+// 失败时经客户端适配器带安装令牌重试一次（INT-230：bearer 随适配器走）。
+// 下载失败也落一行（error 非空、storage_path 空），图片端点据此回 404。
+// 返回本次指纹与资产列表。
+func (s *ReviewService) ensureAssets(ctx context.Context, integrationID, repo string, prNumber int, headSHA, prBody string, client forge.ReviewClient) (string, []model.ReviewAsset, error) {
 	refs := collectScreenshotURLsAt(prBody, s.githubWebHost())
 	fingerprint := screenshotFingerprint(refs)
 	now := time.Now().UTC()
@@ -495,7 +502,7 @@ func (s *ReviewService) ensureAssets(ctx context.Context, integrationID, repo st
 		}
 		var storagePath, mime, errText string
 		var size int64
-		if cached, err := s.downloadScreenshot(ctx, integrationID, installationID, ref.URL); err != nil {
+		if cached, err := s.downloadScreenshot(ctx, client, integrationID, ref.URL); err != nil {
 			// 原始错误（含网络层英文文案）只进日志，落库的是中文可读原因；
 			// URL 与错误文本先脱敏——*url.Error 内嵌重定向后的完整地址，预签
 			// 名 query 不落日志。
@@ -664,8 +671,8 @@ type screenshotFetch struct {
 // 之后按孤儿回收；后续视觉运行需要时 ensureAssets 会重下（缓存命中则
 // touch 并补行，上游已删/转私时丢图）——这是磁盘读故障场景，不把未经
 // 内容校验的字节记成可用资产。
-func (s *ReviewService) probeAndRecordScreenshots(ctx context.Context, integrationID, repo string, prNumber int, headSHA string, installationID int64, prBody string) screenshotProbe {
-	probe, fetches := s.probeScreenshots(ctx, integrationID, installationID, prBody)
+func (s *ReviewService) probeAndRecordScreenshots(ctx context.Context, integrationID, repo string, prNumber int, headSHA string, client forge.ReviewClient, prBody string) screenshotProbe {
+	probe, fetches := s.probeScreenshots(ctx, integrationID, client, prBody)
 	s.recordProbeAssets(integrationID, repo, prNumber, headSHA, fetches)
 	return probe
 }
@@ -766,7 +773,7 @@ type screenshotProbe struct {
 // （成功结果随返回值带出），测试直接调用并忽略第二个返回值；视觉运行时
 // 仍由 ensureAssets 落账并重试失败行；这里也不按资产行计数，避免「已不在
 // 描述里的陈旧资产」被当成可用截图。
-func (s *ReviewService) probeScreenshots(ctx context.Context, integrationID string, installationID int64, prBody string) (screenshotProbe, []screenshotFetch) {
+func (s *ReviewService) probeScreenshots(ctx context.Context, integrationID string, client forge.ReviewClient, prBody string) (screenshotProbe, []screenshotFetch) {
 	refs := collectScreenshotURLsAt(prBody, s.githubWebHost())
 	if len(refs) == 0 {
 		return screenshotProbe{result: probeNone}, nil
@@ -784,7 +791,7 @@ func (s *ReviewService) probeScreenshots(ctx context.Context, integrationID stri
 		// 单张限时：挂死图只吃掉自己的时限，还有剩余预算就继续试下一张；
 		// 总预算吃满才放弃（剩下的引用继续探测只会继续超时，同步循环还在等）。
 		attemptCtx, cancel := context.WithTimeout(ctx, screenshotProbeAttemptTimeout)
-		cached, err := s.downloadScreenshot(attemptCtx, integrationID, installationID, ref.URL)
+		cached, err := s.downloadScreenshot(attemptCtx, client, integrationID, ref.URL)
 		cancel()
 		if err == nil {
 			// 每张开始哈希前检查总预算：前面的图把预算吃光时这张不再读盘
@@ -882,7 +889,7 @@ func (s *ReviewService) AgentScreenshots(ctx context.Context, runID string) ([]a
 	if run.Kind != model.ReviewKindVisual {
 		return nil, false, errs.ErrCredentialNotAllowed
 	}
-	client, err := s.reviewClient(ctx, run.IntegrationID, run.RepoFullName, run.InstallationID)
+	client, err := s.reviewClient(ctx, run.IntegrationID, run.RepoFullName)
 	if err != nil {
 		return nil, false, err
 	}
@@ -890,7 +897,7 @@ func (s *ReviewService) AgentScreenshots(ctx context.Context, runID string) ([]a
 	if err != nil {
 		return nil, false, errs.New(errs.ErrGitHubAPI.Code, "读取 PR 失败: "+err.Error())
 	}
-	fingerprint, assets, err := s.ensureAssets(ctx, run.IntegrationID, run.RepoFullName, run.PRNumber, run.HeadSHA, pr.Body, run.InstallationID)
+	fingerprint, assets, err := s.ensureAssets(ctx, run.IntegrationID, run.RepoFullName, run.PRNumber, run.HeadSHA, pr.Body, client)
 	if err != nil {
 		return nil, false, err
 	}

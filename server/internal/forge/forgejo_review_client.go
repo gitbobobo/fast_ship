@@ -75,6 +75,11 @@ func (c *ForgejoReviewClient) Kind() string { return KindForgejo }
 // （review_assets 只对 GitHub 实例的附件路径带凭证）。
 func (c *ForgejoReviewClient) Bearer(context.Context) (string, error) { return c.token, nil }
 
+// BearerScope 凭证缓存作用域：按 API 基址分桶（PAT 不出域，本作用域仅在
+// 调用方真的走 bearer 下载时用于媒体缓存分桶；审查资产路径对 Forgejo 显式
+// 短路，取不到值）。
+func (c *ForgejoReviewClient) BearerScope() string { return "forgejo:" + c.apiBase }
+
 // statusErr 非 2xx 响应统一包装：body 截断防大 payload 撑爆日志，结构与
 // GitHub 适配器透传的 githubapi.StatusError 同构。限流判定在截断前对完整
 // body 做（限流字样落在被丢弃中段时也不丢判定），Body 文本只做展示与日志。

@@ -587,13 +587,13 @@ type failOnceResolver struct {
 	onFail func()
 }
 
-func (f *failOnceResolver) ClientFor(ctx context.Context, integrationID, repoFullName string, installationID int64) (forge.ReviewClient, error) {
+func (f *failOnceResolver) ClientFor(ctx context.Context, integrationID, repoFullName string) (forge.ReviewClient, error) {
 	if !f.failed {
 		f.failed = true
 		f.onFail()
 		return nil, errors.New("resolver down")
 	}
-	return f.inner.ClientFor(ctx, integrationID, repoFullName, installationID)
+	return f.inner.ClientFor(ctx, integrationID, repoFullName)
 }
 
 // TestAgentSubmitResultConcurrentReplayAtClientResolve client 解析失败出口

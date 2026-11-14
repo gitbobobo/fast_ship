@@ -78,7 +78,7 @@ func setupWebhookEnv(t *testing.T, secrets WebhookSecretSource) *webhookHandlerE
 	sink := service.NewNotificationSink(db)
 	review := service.NewReviewService(db, repository.NewProjectRepository(db),
 		repository.NewGitHubWebhookDeliveryRepository(db), sink,
-		githubapp.StaticClients{Client: fake}, nil, nil, nil, nil, nil,
+		githubapp.StaticClients{Client: fake}, nil, nil, nil, nil,
 		repository.NewForgeIntegrationRepository(db), cfg, logger)
 
 	integrationSvc := service.NewIntegrationService(repository.NewDeploymentSettingsRepository(db), cfg, logger)

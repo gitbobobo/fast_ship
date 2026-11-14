@@ -5,14 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"strings"
 	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/forge"
-	"github.com/godbobo/fast_ship/server/internal/githubapi"
 	"github.com/godbobo/fast_ship/server/internal/model"
-	"github.com/godbobo/fast_ship/server/internal/pkg/githubapp"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -310,32 +307,6 @@ func commentWakeAuthorized(p *commentWakePayload, pr *forge.PullRequest) bool {
 		strings.EqualFold(p.Comment.User.Login, pr.AuthorLogin)
 }
 
-// deterministicCommentWakeSetupErr 评论唤醒前置解析的确定性失败：访问面未
-// 配置（两个哨兵：resolveGitHubInstallation 的 gh==nil 与 reviewClient 链
-// 路的 githubapp.ErrAppNotConfigured——webhook-secret-only 部署的永久配置
-// 态，重投只会得到同一结果）、App 部署配置解密失败（密文损坏/加密密钥
-// 轮换出错，重投同样不自愈）与平台 401/403/404 且非限流（仓库无安装、
-// 凭证吊销/权限不足）。限流 403 与网络/5xx/设置读取失败属瞬时，透出 500
-// 让平台重投。其余 AppError（部署设置读取失败等 ErrInternal）也是瞬时
-// DB 故障——只有两个哨兵按确定性处理，不能一提子以 errs.AppError 判定
-// （fast-ship-bot 第 1 轮 P2、codex 第 11 轮 P2）。
-func deterministicCommentWakeSetupErr(err error) bool {
-	if errors.Is(err, errReviewGitHubAccessUnconfigured) ||
-		errors.Is(err, githubapp.ErrAppNotConfigured) ||
-		errors.Is(err, errGitHubAppDecrypt) {
-		return true
-	}
-	var statusErr *githubapi.StatusError
-	if errors.As(err, &statusErr) {
-		switch statusErr.StatusCode {
-		case http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound:
-			return !forge.IsRateLimit(err)
-		}
-		return false
-	}
-	return false
-}
-
 // reviewForkDenyTTL 跨仓 fork 否定判定的缓存时长：判定来自实拉快照，
 // PR 不会从 fork 变同仓（fork 关系不可逆），TTL 只是内存占用与改名窗口
 // 的平衡——改名后 base 仓库名变化会走出判定范围（key 含 repo 名）。
@@ -409,8 +380,9 @@ func (s *ReviewService) observeAcceptedHead(ctx context.Context, integrationID, 
 
 // handleCommentWake 评论唤醒的两阶段编排（照 revalidateTiedWebhook 模式）：
 //
-//	阶段一（事务外）：幂等预查 + 纯 payload 守卫 + installation 兜底解析 +
-//	只读观察总账 head + 实拉 PR 实况（实拉独享超时 ctx）。「该不该唤醒」
+//	阶段一（事务外）：幂等预查 + 纯 payload 守卫 + 构造审查客户端（安装
+//	解析已内联进 resolver，INT-230）+ 只读观察总账 head + 实拉 PR 实况
+//	（实拉独享超时 ctx）。「该不该唤醒」
 //	以实时 State/head 为准，不信事件体（重投/迟到的 payload 是旧快照）；
 //	构造客户端/实拉/安装解析的确定性失败重投结果相同，判丢弃并补登幂等
 //	账；瞬时错误返回 error 让 handler 回 500 由平台重投——此时库里没有
@@ -530,40 +502,20 @@ func (s *ReviewService) handleCommentWake(ctx context.Context, integrationID, ev
 		return false, nil
 	}
 	installationID := payload.Installation.ID
-	// GitHub 投递缺 installation 快照（代理剥字段等）时按仓库解析兜底；
-	// Forgejo 恒 0（无安装语义，resolver 按集成凭证取 PR）。解析失败按
-	// 确定性归类：访问面未配置/App 无该仓库安装（404）/凭证被拒（401、
-	// 非限流 403）重投只会得到同一结果——判丢弃并补登幂等账；瞬时错误
-	// （限流/网络）返回 error 让 handler 回 500。
-	if integrationID == model.ForgeIntegrationBuiltinGitHubID && installationID == 0 {
-		resolved, err := s.resolveGitHubInstallation(ctx, repo)
-		if err != nil {
-			if deterministicCommentWakeSetupErr(err) {
-				s.logger.Warn("评论唤醒安装解析确定性失败，丢弃投递",
-					zap.String("integration", integrationID),
-					zap.String("delivery", deliveryID), zap.Error(err))
-				s.recordDroppedDelivery(ctx, integrationID, deliveryID, event)
-				return false, nil
-			}
-			s.logger.Warn("评论唤醒安装解析失败",
-				zap.String("integration", integrationID),
-				zap.String("delivery", deliveryID), zap.Error(err))
-			return false, err
-		}
-		installationID = resolved
-	}
+	// 安装快照只是落库数据（INT-230）：客户端构造不再携带 webhook 安装 id，
+	// GitHub 由 resolver 的适配器按仓库现解析、Forgejo 按集成凭证取 PR。
+	// 构造失败按确定性归类：安装不存在/App 未配置/访问面未配置/凭证被拒
+	// （401、非限流 403）、集成行已删/密文损坏重投只会得到同一结果——判
+	// 丢弃并补登幂等账；瞬时错误（限流/网络）返回 error 让 handler 回 500。
 
 	// 阶段一（事务外）：构造审查客户端。实拉独享超时预算（照
 	// consumeDebounce：从 Background 派生并显式取消），开轮事务与补登账用
 	// 请求 ctx——实拉的倒计时不再渗入后续库操作。
 	pullCtx, pullCancel := context.WithTimeout(context.Background(), reviewForgejoPollTimeout)
 	defer pullCancel()
-	client, err := s.reviewClient(pullCtx, integrationID, repo, installationID)
+	client, err := s.reviewClient(pullCtx, integrationID, repo)
 	if err != nil {
-		// 集成行已删/密文损坏/部署未配置 App 身份（ErrAppNotConfigured）等
-		// 确定性失败重投只会得到同一错误——判丢弃并补登幂等账，不让平台
-		// 无限重投；瞬时错误才透出 500。
-		if deterministicReviewAccessErr(err) || errors.Is(err, githubapp.ErrAppNotConfigured) {
+		if deterministicReviewAccessErr(err) {
 			s.logger.Warn("评论唤醒构造客户端确定性失败，丢弃投递",
 				zap.String("integration", integrationID),
 				zap.String("delivery", deliveryID), zap.Error(err))

@@ -89,7 +89,7 @@ func TestArchiveRunsWaitsForTurnSettle(t *testing.T) {
 	now := time.Now().UTC()
 	run := e.seedDispatchedRun(t, repo, 81, model.ReviewKindCode, model.ReviewRunCompleted, "", false, now)
 	t3 := &fakeReviewT3{settled: map[string]t3TurnVerdict{run.ThreadID: turnUnsettled}}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 
 	review.archiveRuns(now)
 
@@ -129,7 +129,7 @@ func TestArchiveRunsSettleGraceExpiry(t *testing.T) {
 	run := e.seedDispatchedRun(t, repo, 82, model.ReviewKindCode, model.ReviewRunCompleted, "", false, now)
 	e.svc.db.Model(run).Update("finished_at", now.Add(-11*time.Minute))
 	t3 := &fakeReviewT3{settled: map[string]t3TurnVerdict{run.ThreadID: turnUnsettled}}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 
 	review.archiveRuns(now)
 
@@ -155,7 +155,7 @@ func TestArchiveRunsNoFinishedAt(t *testing.T) {
 	run := e.seedDispatchedRun(t, repo, 80, model.ReviewKindCode, model.ReviewRunCompleted, "", false, now)
 	e.svc.db.Model(run).Update("finished_at", nil)
 	t3 := &fakeReviewT3{settled: map[string]t3TurnVerdict{run.ThreadID: turnUnsettled}}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 
 	review.archiveRuns(now)
 
@@ -177,7 +177,7 @@ func TestArchiveRunsSettleThreadNotFound(t *testing.T) {
 	now := time.Now().UTC()
 	run := e.seedDispatchedRun(t, repo, 83, model.ReviewKindCode, model.ReviewRunCompleted, "", false, now)
 	t3 := &fakeReviewT3{settledErr: errT3ThreadNotFound}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 
 	// 上限前：既不走归档 RPC 也不落 archived_at。
 	for i := 0; i < reviewWorktreeMaxTries-1; i++ {
@@ -224,7 +224,7 @@ func TestArchiveRunsUnconfirmedWaitsSettle(t *testing.T) {
 		"finished_at": now,
 	})
 	t3 := &fakeReviewT3{settled: map[string]t3TurnVerdict{run.ThreadID: turnUnsettled}}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 
 	review.archiveRuns(now)
 
@@ -263,7 +263,7 @@ func TestArchiveRunsArchiveErrorThreadGone(t *testing.T) {
 	run := e.seedDispatchedRun(t, repo, 86, model.ReviewKindCode, model.ReviewRunCompleted, "", false, now)
 	e.svc.db.Model(run).Update("finished_at", nil) // 跳过收尾判定直接归档
 	t3 := &fakeReviewT3{archiveErr: errors.New("upstream command failed"), settledErr: errT3ThreadNotFound}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 
 	// 上限前：归档每 tick 尝试、归因 404 只计连续计数，不落账不计归档失败。
 	review.archiveRuns(now)
@@ -302,7 +302,7 @@ func TestArchiveRunsTombstoneThread(t *testing.T) {
 	// 窗口内墓碑：一次投影读直接落账，零归档 RPC。
 	run := e.seedDispatchedRun(t, repo, 87, model.ReviewKindCode, model.ReviewRunCompleted, "", false, now)
 	t3 := &fakeReviewT3{settled: map[string]t3TurnVerdict{run.ThreadID: turnThreadGone}}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 	review.archiveRuns(now)
 	if len(t3.archived) != 0 {
 		t.Fatalf("墓碑线程不得走归档 RPC，archived = %v", t3.archived)
@@ -321,7 +321,7 @@ func TestArchiveRunsTombstoneThread(t *testing.T) {
 		archiveErr: errors.New("upstream command failed"),
 		settled:    map[string]t3TurnVerdict{run2.ThreadID: turnThreadGone},
 	}
-	review2 := e.withT3(t3b, nil, nil)
+	review2 := e.withT3(t3b, nil)
 	review2.archiveRuns(now)
 	e.svc.db.First(&after, "id = ?", run2.ID)
 	if after.ArchivedAt == nil {
@@ -343,7 +343,7 @@ func TestArchiveRunsSettleReadError(t *testing.T) {
 	now := time.Now().UTC()
 	run := e.seedDispatchedRun(t, repo, 85, model.ReviewKindCode, model.ReviewRunCompleted, "", false, now)
 	t3 := &fakeReviewT3{settledErr: errors.New("projection down")}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 
 	review.archiveRuns(now)
 	if len(t3.archived) != 0 {

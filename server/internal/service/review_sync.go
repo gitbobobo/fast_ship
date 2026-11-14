@@ -271,15 +271,15 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 	if ledger.HeadSHA == "" {
 		return nil
 	}
-	client, err := s.reviewClient(ctx, ledger.IntegrationID, ledger.RepoFullName, ledger.InstallationID)
+	rawClient, err := s.reviewClient(ctx, ledger.IntegrationID, ledger.RepoFullName)
 	if err != nil {
 		return err
 	}
 	// 每次平台写之前复核本轮仍有效（账本 epoch 未推进、项目审查仓库仍是
 	// 本仓库）：同步可能持续数十秒，期间项目改仓库/停用审查不该把产出写到
 	// 已切换掉的旧仓库，而远端副作用发出去就收不回来。
-	client = guardedSyncClient{
-		ReviewClient: client,
+	client := guardedSyncClient{
+		ReviewClient: rawClient,
 		check:        func() error { return s.syncTargetStillCurrent(ledger, epoch) },
 	}
 	pr, err := client.GetPullRequest(ctx, ledger.RepoFullName, ledger.PRNumber)
@@ -403,7 +403,7 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 	visualCarry := false
 	visualPending := len(visualRuns) == 0
 	if len(visualRuns) == 0 {
-		outcome, decErr := s.decideVisualForPR(ctx, ledger, pr, codeRuns)
+		outcome, decErr := s.decideVisualForPR(ctx, ledger, pr, codeRuns, rawClient)
 		if decErr != nil {
 			return decErr
 		}
@@ -1809,7 +1809,7 @@ func codeRunsVisualInputs(codeRuns []model.ReviewRun) (allTerminal, allOK, anyUI
 
 // decideVisualForPR 组装真实输入并调 decideVisual。
 func (s *ReviewService) decideVisualForPR(ctx context.Context, ledger *model.ReviewPullRequest,
-	pr *forge.PullRequest, codeRuns []model.ReviewRun) (visualDecisionOutcome, error) {
+	pr *forge.PullRequest, codeRuns []model.ReviewRun, client forge.ReviewClient) (visualDecisionOutcome, error) {
 	allTerminal, allOK, anyUI, anySinceLast := codeRunsVisualInputs(codeRuns)
 	in := visualDecisionInput{
 		CodeAllTerminal:             allTerminal,
@@ -1863,7 +1863,9 @@ func (s *ReviewService) decideVisualForPR(ctx context.Context, ledger *model.Rev
 		(in.ScreensChanged || in.AnyUIChangedSinceLastVisual) {
 		// 探测 + 落账（INT-184）：成功下载的引用当场写资产行，探测字节从落盘
 		// 起就有行引用；没有视觉运行时按行保留策略退役，不再依赖目录推断。
-		probe := s.probeAndRecordScreenshots(ctx, ledger.IntegrationID, ledger.RepoFullName, ledger.PRNumber, ledger.HeadSHA, ledger.InstallationID, pr.Body)
+		// 探测只读媒体不写平台：用未包守卫的客户端（INT-230 后 bearer 也随
+		// 客户端适配器走，守卫包装器不透传 BearerSource 断言）。
+		probe := s.probeAndRecordScreenshots(ctx, ledger.IntegrationID, ledger.RepoFullName, ledger.PRNumber, ledger.HeadSHA, client, pr.Body)
 		switch probe.result {
 		case probeReady:
 			newContentFP = probe.contentFP

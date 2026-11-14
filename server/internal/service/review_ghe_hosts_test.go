@@ -21,7 +21,7 @@ func collectScreenshotURLs(body string) []screenshotRef {
 func TestScreenshotAttachmentURLsByDeploymentHost(t *testing.T) {
 	e := newReviewEngineEnv(t)
 	e.svc.cfg.GitHubApp.APIBaseURL = "https://ghe.example.com/api/v3"
-	review := e.withT3(nil, nil, nil)
+	review := e.withT3(nil, nil)
 	if got := review.githubWebHost(); got != "ghe.example.com" {
 		t.Fatalf("githubWebHost = %q, want ghe.example.com", got)
 	}
@@ -43,10 +43,10 @@ func TestScreenshotAttachmentURLsByDeploymentHost(t *testing.T) {
 		cached:  &githubmedia.CachedMedia{Path: "/cache/ghe.png"},
 		anonErr: &githubmedia.UpstreamStatusError{StatusCode: 404},
 	}
-	review = e.withT3(nil, media, func(context.Context, string, int64) (string, error) {
-		return "ghe-installation-token", nil
-	})
-	_, assets, err := review.ensureAssets(context.Background(), model.ForgeIntegrationBuiltinGitHubID, repo, 91, "sha-ghe", body, 7)
+	review = e.withT3(nil, media)
+	// INT-230：媒体令牌随审查客户端走（BearerSource 断言）。
+	client := &tokenBearerClient{ReviewClient: anonGitHubClient(7), token: "ghe-installation-token", scope: "install:7"}
+	_, assets, err := review.ensureAssets(context.Background(), model.ForgeIntegrationBuiltinGitHubID, repo, 91, "sha-ghe", body, client)
 	if err != nil {
 		t.Fatalf("ensureAssets: %v", err)
 	}
@@ -66,7 +66,7 @@ func TestScreenshotAttachmentURLsByDeploymentHost(t *testing.T) {
 func TestScreenshotAttachmentURLsGHEAuthority(t *testing.T) {
 	e := newReviewEngineEnv(t)
 	e.svc.cfg.GitHubApp.APIBaseURL = "https://ghe.example.com:8443/api/v3"
-	review := e.withT3(nil, nil, nil)
+	review := e.withT3(nil, nil)
 	if got := review.githubWebHost(); got != "ghe.example.com:8443" {
 		t.Fatalf("githubWebHost = %q, want ghe.example.com:8443（端口要保留）", got)
 	}

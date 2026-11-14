@@ -40,7 +40,7 @@ func TestReviewClosedDebounceSkipsRound(t *testing.T) {
 	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
 	now := time.Now().UTC()
 	t3 := &fakeReviewT3{}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 
 	// 已合并：防抖行（closed 投递丢失/未到的残留）到期后不开轮。
 	e.fake.SetPR(repo, 51, &githubapi.PullRequest{
@@ -94,7 +94,7 @@ func TestReviewDebounceReadFailureRetries(t *testing.T) {
 	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
 	now := time.Now().UTC()
 	t3 := &fakeReviewT3{}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 
 	// 不登记 PR：GetPullRequest 返回错误。
 	seedClosedDebounce(t, e, repo, 56, "sha-c56", now)
@@ -138,7 +138,7 @@ func TestReviewDebounceDeterministicErrorDropsRow(t *testing.T) {
 	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
 	now := time.Now().UTC()
 	t3 := &fakeReviewT3{}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 
 	// 绑定不存在的 Forgejo 集成：resolver → findForgejoRow 行不存在
 	// （ErrRecordNotFound）→ 确定性失败，直接删行不推后。
@@ -171,7 +171,7 @@ func TestReviewDebounceRateLimitRetries(t *testing.T) {
 	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
 	now := time.Now().UTC()
 	t3 := &fakeReviewT3{}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 
 	review.clients = pollStubResolver{byIntegration: map[string]forge.ReviewClient{
 		model.ForgeIntegrationBuiltinGitHubID: &pollStubClient{errByRepo: map[string]error{
@@ -212,7 +212,7 @@ func TestReviewClosedDispatchCancelsRun(t *testing.T) {
 	env := createT3TestEnv(t, e.svc.db, e.user.ID, "env-closed-d")
 	createTestT3Binding(t, e.svc.db, e.project.ID, env.ID, "t3p")
 	t3 := &fakeReviewT3{}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 
 	e.fake.SetPR(repo, 54, &githubapi.PullRequest{
 		RepoFullName: repo, Number: 54, State: "closed",
@@ -311,7 +311,7 @@ func TestReviewDispatchAccessErrTerminals(t *testing.T) {
 	env := createT3TestEnv(t, e.svc.db, e.user.ID, "env-det-acc")
 	createTestT3Binding(t, e.svc.db, e.project.ID, env.ID, "t3p")
 	t3 := &fakeReviewT3{}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 
 	e.svc.db.Create(&model.ReviewPullRequest{
 		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
@@ -524,7 +524,7 @@ func TestReviewArchiveSkipsNeverLaunched(t *testing.T) {
 	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
 	now := time.Now().UTC()
 	t3 := &fakeReviewT3{}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 
 	// pr_closed 且从未确认建线程（dispatch_started_at 已被派发认领写入）。
 	pclosed := e.seedDispatchedRun(t, repo, 59, model.ReviewKindCode, model.ReviewRunCancelled, "", false, now)
@@ -591,10 +591,11 @@ func TestReviewArchiveSkipsNeverLaunched(t *testing.T) {
 // 判丢弃补登幂等账，而不是无限重试/500 刷错。
 func TestReviewDecryptErrorsAreDeterministic(t *testing.T) {
 	if !deterministicReviewAccessErr(errGitHubAppDecrypt) {
-		t.Fatal("防抖分类应把 App 配置解密失败当确定性失败")
+		t.Fatal("防抖/评论唤醒分类应把 App 配置解密失败当确定性失败")
 	}
-	if !deterministicCommentWakeSetupErr(errGitHubAppDecrypt) {
-		t.Fatal("评论唤醒分类应把 App 配置解密失败当确定性失败")
+	// INT-230：访问面未配置哨兵移到 forge 侧，同按确定性归类。
+	if !deterministicReviewAccessErr(forge.ErrGitHubAccessUnconfigured) {
+		t.Fatal("分类应把 GitHub 访问面未配置当确定性失败")
 	}
 }
 
@@ -610,7 +611,7 @@ func TestReviewDebounceInstallationFallback(t *testing.T) {
 		e.enableReview(t)
 		repo := e.project.GithubOwner + "/" + e.project.GithubRepo
 		t3 := &fakeReviewT3{}
-		review := e.withT3(t3, nil, nil)
+		review := e.withT3(t3, nil)
 		e.fake.SetPR(repo, 81, &githubapi.PullRequest{
 			RepoFullName: repo, Number: 81, State: "open", HeadSHA: "sha-81",
 			HeadRepoFullName: repo, Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
@@ -636,10 +637,16 @@ func TestReviewDebounceInstallationFallback(t *testing.T) {
 
 		review.processDueDebounces(now)
 
+		// INT-230：客户端构造固定按仓库现解析一次安装（webhook 快照只是落库
+		// 数据，不再省解析调用）。
+		resolved := false
 		for _, c := range e.fake.Calls {
 			if c.Method == "ResolveInstallation" {
-				t.Fatal("总账快照可用时不得发安装解析调用")
+				resolved = true
 			}
+		}
+		if !resolved {
+			t.Fatal("客户端构造应按仓库解析安装")
 		}
 		var runs int64
 		e.svc.db.Model(&model.ReviewRun{}).Where("pr_number = 81").Count(&runs)
@@ -657,18 +664,20 @@ func TestReviewDebounceInstallationFallback(t *testing.T) {
 		if ledger.InstallationID != 7 || run.InstallationID != 7 {
 			t.Fatalf("installation 快照应沿总账值 7: ledger=%d run=%d", ledger.InstallationID, run.InstallationID)
 		}
+
 		if got := e.debounceCount(t); got != 0 {
 			t.Fatalf("防抖行应被消费，剩 %d", got)
 		}
 	})
 
-	// 案例二：无总账——按仓库解析安装（fake 固定返回 1），照常开轮。
+	// 案例二：无总账——客户端构造按仓库解析安装（fake 固定返回 1），照常
+	// 开轮；解析值只是客户端构造用（INT-230），不再作为数据落库。
 	t.Run("resolve", func(t *testing.T) {
 		e := newReviewEngineEnv(t)
 		e.enableReview(t)
 		repo := e.project.GithubOwner + "/" + e.project.GithubRepo
 		t3 := &fakeReviewT3{}
-		review := e.withT3(t3, nil, nil)
+		review := e.withT3(t3, nil)
 		e.fake.SetPR(repo, 82, &githubapi.PullRequest{
 			RepoFullName: repo, Number: 82, State: "open", HeadSHA: "sha-82",
 			HeadRepoFullName: repo, Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
@@ -707,8 +716,8 @@ func TestReviewDebounceInstallationFallback(t *testing.T) {
 		if err := e.svc.db.Where("pr_number = 82 AND head_sha = ?", "sha-82").First(&run).Error; err != nil {
 			t.Fatalf("运行行应存在: %v", err)
 		}
-		if ledger.InstallationID != 1 || run.InstallationID != 1 {
-			t.Fatalf("解析出的安装 id 应落账本与运行行: ledger=%d run=%d", ledger.InstallationID, run.InstallationID)
+		if ledger.InstallationID != 0 || run.InstallationID != 0 {
+			t.Fatalf("解析出的安装 id 只是构造入参，不得落库: ledger=%d run=%d", ledger.InstallationID, run.InstallationID)
 		}
 	})
 }

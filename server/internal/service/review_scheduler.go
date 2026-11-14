@@ -209,29 +209,9 @@ func deterministicReviewAccessErr(err error) bool {
 		errors.Is(err, errForgeIntegrationDecrypt) || errors.Is(err, errGitHubAppDecrypt) ||
 		// App 身份未配置同属永久配置态（webhook-secret-only 部署等），与
 		// 评论唤醒分类同口径（fast-ship-bot 第 40 轮 Note）。
-		errors.Is(err, githubapp.ErrAppNotConfigured)
-}
-
-// debounceInstallationID 防抖实况读的安装 id 兜底：GitHub 投递缺
-// installation 快照（代理剥字段）时防抖行内为 0——直接拿 0 换 token 会
-// 404 并被确定性分支删行静默丢推送（fast-ship-bot 第 36 轮 P2）。先沿用
-// 总账快照（openRoundTx 对 0 有「保留旧值」兜底，但新加的实读让那条路走
-// 不到），仍缺才按仓库解析安装（评论唤醒同款）。
-func (s *ReviewService) debounceInstallationID(ctx context.Context, row *model.ReviewDebounce) (int64, error) {
-	if row.InstallationID != 0 || row.IntegrationID != model.ForgeIntegrationBuiltinGitHubID {
-		return row.InstallationID, nil
-	}
-	var ledger model.ReviewPullRequest
-	lErr := s.db.Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ?",
-		row.ProjectID, row.RepoFullName, row.PRNumber, row.IntegrationID).
-		First(&ledger).Error
-	if lErr == nil && ledger.InstallationID != 0 {
-		return ledger.InstallationID, nil
-	}
-	if lErr != nil && !errors.Is(lErr, gorm.ErrRecordNotFound) {
-		return 0, lErr
-	}
-	return s.resolveGitHubInstallation(ctx, row.RepoFullName)
+		errors.Is(err, githubapp.ErrAppNotConfigured) ||
+		// GitHub 访问面未配置同为永久配置态（INT-230：哨兵移到 forge 侧）。
+		errors.Is(err, forge.ErrGitHubAccessUnconfigured)
 }
 
 // consumeDebounce 一行防抖的消费：先在事务外读 PR 实况——防抖行可能是已
@@ -245,17 +225,13 @@ func (s *ReviewService) consumeDebounce(row *model.ReviewDebounce, now time.Time
 	// 单次 PR 实况读 10s：这是「读一次 PR 状态」的检查而非数据传输，超时只
 	// 意味着本轮不开轮（fire_at 推后），10s 足够，别占满整个阶段预算。
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	installationID, instErr := s.debounceInstallationID(ctx, row)
-	var client forge.ReviewClient
+	// 防抖行/总账里的安装快照只是落库数据（INT-230）：客户端构造由 resolver
+	// 的 GitHub 适配器按仓库现解析安装，row 内为 0 只影响 openRoundTx 的
+	// 落库快照（0 保留总账旧值），不再影响取数。
+	client, err := s.reviewClient(ctx, row.IntegrationID, row.RepoFullName)
 	var pr *forge.PullRequest
-	var err error
-	if instErr == nil {
-		client, err = s.reviewClient(ctx, row.IntegrationID, row.RepoFullName, installationID)
-		if err == nil {
-			pr, err = client.GetPullRequest(ctx, row.RepoFullName, row.PRNumber)
-		}
-	} else {
-		err = instErr
+	if err == nil {
+		pr, err = client.GetPullRequest(ctx, row.RepoFullName, row.PRNumber)
 	}
 	cancel()
 	if err != nil {
@@ -324,12 +300,11 @@ func (s *ReviewService) consumeDebounce(row *model.ReviewDebounce, now time.Time
 		if settings.RepoFullName != row.RepoFullName || settings.IntegrationID != row.IntegrationID {
 			return nil
 		}
-		// 传兜底解析后的 installationID：首次审查（无总账）时 row 内为 0，
-		// openRoundTx 的「0 保留旧值」兜底无从生效，账本与运行行会以 0 派发
-		// 失败（fast-ship-bot 第 37 轮 P2）。
+		// 安装快照按防抖行落库（INT-230：仅数据语义，0 保留总账旧值；客户端
+		// 构造的安装解析已在 resolver 内联，不再派发失败）。
 		_, err := s.openRoundTx(tx, &project, &settings,
 			row.RepoFullName, row.PRNumber, row.HeadSHA, row.Action,
-			row.PRTitle, row.PRURL, row.BaseRef, row.HeadRef, installationID, nil, now)
+			row.PRTitle, row.PRURL, row.BaseRef, row.HeadRef, row.InstallationID, nil, now)
 		return err
 	})
 	if err != nil {

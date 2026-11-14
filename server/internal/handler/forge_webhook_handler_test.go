@@ -60,7 +60,7 @@ func setupForgeWebhookEnv(t *testing.T) *forgeWebhookEnv {
 	logger := zap.NewNop()
 	review := service.NewReviewService(db, repository.NewProjectRepository(db),
 		repository.NewGitHubWebhookDeliveryRepository(db), service.NewNotificationSink(db),
-		githubapp.StaticClients{Client: githubapp.NewFake()}, nil, nil, nil, nil, nil,
+		githubapp.StaticClients{Client: githubapp.NewFake()}, nil, nil, nil, nil,
 		repository.NewForgeIntegrationRepository(db), cfg, logger)
 	forgeSource := service.NewForgeClientSource(repository.NewForgeIntegrationRepository(db), cfg, logger)
 	forgeHandler := NewForgeWebhookHandler(review, forgeSource)

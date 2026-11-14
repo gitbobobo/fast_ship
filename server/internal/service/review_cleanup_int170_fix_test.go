@@ -59,7 +59,7 @@ func TestCleanupWorktreesSkipsNotDueAndStillReclaims(t *testing.T) {
 		worktrees: []T3Worktree{{Path: "/wt/fair", RefNames: []string{freshBranch}}},
 		refNames:  refNames,
 	}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 
 	// 第 1 轮：20 条 pending 全部到期（尚无退避排程），恰好占满批量名额；
 	// 第 21 条留在窗口外。
@@ -143,7 +143,7 @@ func TestCleanupBackoffRestartsFromBaseAfterRecovery(t *testing.T) {
 		worktrees:       []T3Worktree{{Path: "/wt/breset"}},
 		removeUncertain: true,
 	}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 	// 预置半截阶梯（attempts=3 → 若不清再排就是 240s）。
 	review.worktreeMu.Lock()
 	review.worktreeBackoff[run.ID+"|"+worktreeReasonRemoveUncertain] =
@@ -185,7 +185,7 @@ func TestCleanupNullBranchSnapshotBackfilledBeforePending(t *testing.T) {
 		worktrees: []T3Worktree{{Path: "/wt/nullb", RefNames: []string{"br-nullb"}}},
 		refNames:  []string{"br-nullb"},
 	}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 
 	review.cleanupRunWorktree(run, now)
 
@@ -231,7 +231,7 @@ func TestCleanupEmptyThreadBranchFallsBackToRowSnapshot(t *testing.T) {
 		},
 		refNames: []string{"br-rowfb", "br-b"},
 	}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 
 	review.cleanupRunWorktree(runA, now)
 	var afterA model.ReviewRun
@@ -264,7 +264,7 @@ func TestCleanupRecoverySkipsUnpublishedKey(t *testing.T) {
 
 	// 键不存在 + 受影响清单为空：纯恢复刷新 → 跳过，不建通知。
 	r1 := e.seedCleanableRun(t, repo, 214, env, model.ReviewRunCompleted, "", now)
-	review := e.withT3(&fakeReviewT3{}, nil, nil)
+	review := e.withT3(&fakeReviewT3{}, nil)
 	review.publishCleanupAggregate(r1, worktreeReasonRemoveUncertain, now)
 	if got := e.cleanupFailedCount(t); got != 0 {
 		t.Fatalf("未发布过键的恢复刷新建了 %d 条通知, want 0", got)
@@ -316,7 +316,7 @@ func TestCleanupRemoveNotAttemptedGoesPendingThenConverges(t *testing.T) {
 		worktrees:          []T3Worktree{{Path: "/wt/notatt"}},
 		removeNotAttempted: true,
 	}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 
 	review.cleanupRunWorktree(run, now)
 	var mid model.ReviewRun
@@ -454,7 +454,7 @@ func TestCleanupAggregateTruncatesAtLimitPlusOne(t *testing.T) {
 	// 发布入参只提供环境/仓库/用户身份，自身不带该原因（不进清单）。
 	head := e.seedCleanableRun(t, repo, 400, env, model.ReviewRunCompleted, "", now)
 
-	review := e.withT3(&fakeReviewT3{}, nil, nil)
+	review := e.withT3(&fakeReviewT3{}, nil)
 	review.publishCleanupAggregate(head, worktreeReasonRegistryIncomplete, now)
 	var note model.Notification
 	e.svc.db.First(&note, "kind = ? AND user_id = ?", model.NotificationReviewCleanupFailed, e.user.ID)
@@ -492,7 +492,7 @@ func TestCleanupRegistryCounterResetsOnSuccess(t *testing.T) {
 		listErr:  errors.New("registry flaky"),
 		refNames: []string{"br-rst"},
 	}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 
 	// 两次瞬时登记错误：计数涨到 2。
 	review.cleanupRunWorktree(run, now)
@@ -556,7 +556,7 @@ func TestCleanupRecoverUncertainPublishesPriorKey(t *testing.T) {
 		},
 		worktrees: []T3Worktree{{Path: "/wt/b", RefNames: []string{"br-b"}}},
 	}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 
 	// 既有通知：清单含 A、B 两行（A 的 failed 触发了聚合发布）。
 	review.publishCleanupAggregate(runA, worktreeReasonRemoveUncertain, now)
@@ -607,7 +607,7 @@ func TestCleanupBranchPendingLateWorktreeReclaimed(t *testing.T) {
 		worktrees: []T3Worktree{{Path: "/wt/late", RefNames: []string{"br-late"}}},
 		refNames:  []string{"br-late"},
 	}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 
 	// 复查：登记出绑定本分支的 worktree → 路径写回 + 转 none。
 	review.cleanupRunWorktree(run, now)
@@ -673,7 +673,7 @@ func TestCleanupOwnershipErrorsUseOwnCounter(t *testing.T) {
 		},
 		worktrees: []T3Worktree{{Path: "/wt/x", RefNames: []string{"br-x"}}},
 	}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 
 	review.cleanupRunWorktree(run, now)
 	if got := review.worktreeTries[run.ID+"|"+worktreeTryOwnership]; got != 1 {
@@ -710,7 +710,7 @@ func TestCleanupAggregateFiltersByUser(t *testing.T) {
 		"worktree_reason": worktreeReasonRegistryError,
 	})
 
-	review := e.withT3(&fakeReviewT3{}, nil, nil)
+	review := e.withT3(&fakeReviewT3{}, nil)
 	review.publishCleanupAggregate(mine, worktreeReasonRegistryError, now)
 
 	var note model.Notification
@@ -735,7 +735,7 @@ func TestCleanupAggregateQueryErrorDoesNotPublish(t *testing.T) {
 	e.svc.db.Model(run).Updates(map[string]any{
 		"worktree_state": model.ReviewWorktreeFailed, "worktree_reason": worktreeReasonRegistryError,
 	})
-	review := e.withT3(&fakeReviewT3{}, nil, nil)
+	review := e.withT3(&fakeReviewT3{}, nil)
 	review.publishCleanupAggregate(run, worktreeReasonRegistryError, now)
 	var before model.Notification
 	if err := e.svc.db.First(&before,
@@ -773,7 +773,7 @@ func TestCleanupPendingReasonSwitchRefreshesOldKey(t *testing.T) {
 		"worktree_reason": worktreeReasonRegistryIncomplete, "worktree_error": "登记读取未在预算内完成",
 	})
 	run.WorktreeReason, run.WorktreeError = worktreeReasonRegistryIncomplete, "登记读取未在预算内完成"
-	review := e.withT3(&fakeReviewT3{}, nil, nil)
+	review := e.withT3(&fakeReviewT3{}, nil)
 	review.publishCleanupAggregate(run, worktreeReasonRegistryIncomplete, now)
 	var note model.Notification
 	if err := e.svc.db.First(&note,
@@ -814,7 +814,7 @@ func TestCleanupRecoveredPathAvoidsPingPong(t *testing.T) {
 		// 投影持续无路径（线程真的没登记 worktreePath）。
 		worktrees: []T3Worktree{{Path: "/wt/late", RefNames: []string{"br-late"}}},
 	}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 
 	for i := 0; i < reviewWorktreeMaxTries; i++ {
 		review.cleanupRunWorktree(run, now)
@@ -846,7 +846,7 @@ func TestCleanupDerivesBranchFromRegistry(t *testing.T) {
 		threadWorktreeErrs: map[string]error{run.ThreadID: errT3ThreadNotFound},
 		worktrees:          []T3Worktree{{Path: "/wt/legacy", RefNames: []string{"br-legacy"}}},
 	}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 
 	for i := 0; i < reviewWorktreeMaxTries; i++ {
 		review.cleanupRunWorktree(run, now)
@@ -868,7 +868,7 @@ func TestCleanupDerivesBranchFromRegistry(t *testing.T) {
 // 未到期，防积压饿死真正到期的行。
 func TestWorktreeReclaimDueSkipsUnarchived(t *testing.T) {
 	e := newReviewEngineEnv(t)
-	review := e.withT3(&fakeReviewT3{}, nil, nil)
+	review := e.withT3(&fakeReviewT3{}, nil)
 	now := time.Now().UTC()
 
 	dispatchedUnarchived := &model.ReviewRun{
@@ -913,7 +913,7 @@ func TestCleanupRemoveBudgetExhaustedGoesPending(t *testing.T) {
 		worktrees: []T3Worktree{{Path: "/wt/b", RefNames: []string{"br-b"}}},
 		removeErr: fmt.Errorf("%w: %s", errRegistryIncomplete, context.DeadlineExceeded),
 	}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 
 	review.cleanupRunWorktree(run, now)
 	var after model.ReviewRun
@@ -949,7 +949,7 @@ func TestCleanupUnmappedBranchFailsNotRemoved(t *testing.T) {
 		// 登记里 worktree 已不在，但疑似存活的专属分支 ref 仍在。
 		refNames: []string{"t3-orphan"},
 	}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 
 	for i := 0; i < reviewWorktreeMaxTries; i++ {
 		review.cleanupRunWorktree(run, now)
@@ -985,7 +985,7 @@ func TestCleanupBudgetPendingConvergesFailed(t *testing.T) {
 		},
 		listIncomplete: true,
 	}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 
 	at := now
 	for i := 0; i < reviewBudgetPendingMaxTries; i++ {
@@ -1022,7 +1022,7 @@ func TestCleanupAmbiguousRegistryRefsFailNotRemoved(t *testing.T) {
 		worktrees: []T3Worktree{{Path: "/wt/live", RefNames: []string{"br-x", "br-y"}}},
 		refNames:  []string{"br-x", "br-y"},
 	}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 
 	review.cleanupRunWorktree(run, now)
 	var after model.ReviewRun
@@ -1046,7 +1046,7 @@ func TestCleanupBranchPendingConvergesFailed(t *testing.T) {
 
 	run := seedBranchPendingRow(t, e, repo, 620, env, "br-stuck", now.Add(-time.Hour))
 	t3 := &fakeReviewT3{refNames: []string{"br-stuck"}}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 
 	for i := 0; i < reviewBranchPendingMaxTries; i++ {
 		review.recheckBranchPending(context.Background(), run, now.Add(time.Duration(i)*time.Hour))
@@ -1076,7 +1076,7 @@ func TestCleanup404RowBranchOnlyChecksRegistry(t *testing.T) {
 		threadWorktreeErrs: map[string]error{run.ThreadID: errT3ThreadNotFound},
 		refNames:           []string{"br-orphan"},
 	}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 
 	for i := 0; i < reviewWorktreeMaxTries; i++ {
 		review.cleanupRunWorktree(run, now)
@@ -1100,7 +1100,7 @@ func TestCleanupBranchPendingIncompleteConverges(t *testing.T) {
 
 	run := seedBranchPendingRow(t, e, repo, 640, env, "br-slow", now.Add(-time.Hour))
 	t3 := &fakeReviewT3{listIncomplete: true}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 
 	for i := 0; i < reviewBudgetPendingMaxTries; i++ {
 		review.recheckBranchPending(context.Background(), run, now.Add(time.Duration(i)*time.Hour))
@@ -1135,7 +1135,7 @@ func TestCleanupBranchPendingPrefersSamePathBinding(t *testing.T) {
 		},
 		refNames: []string{"br-multi"},
 	}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 
 	review.recheckBranchPending(context.Background(), run, now)
 	var after model.ReviewRun
@@ -1164,7 +1164,7 @@ func TestCleanupBranchPendingNoPathMultiBindingFails(t *testing.T) {
 		},
 		refNames: []string{"br-many"},
 	}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 
 	review.recheckBranchPending(context.Background(), run, now)
 	var after model.ReviewRun
@@ -1202,7 +1202,7 @@ func TestCleanupPendingWriteFailureKeepsMemoryState(t *testing.T) {
 	defer e.svc.db.Exec("DROP TRIGGER block_reason")
 
 	// 清除路径：写失败 → 内存原因保持，不得先行清空。
-	review := e.withT3(&fakeReviewT3{}, nil, nil)
+	review := e.withT3(&fakeReviewT3{}, nil)
 	review.recoverFromPending(run, now)
 	if run.WorktreeReason != worktreeReasonRemoveUncertain {
 		t.Fatalf("写失败内存态不得清空, got %q", run.WorktreeReason)
@@ -1238,7 +1238,7 @@ func TestCleanupRemoveBudgetPendingConverges(t *testing.T) {
 		// recoverFromPending 复位，永远停在 1。
 		removeErr: fmt.Errorf("%w: %s", errRegistryIncomplete, context.DeadlineExceeded),
 	}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 
 	for i := 0; i < reviewBudgetPendingMaxTries; i++ {
 		review.cleanupRunWorktree(run, now.Add(time.Duration(i)*6*time.Minute))
@@ -1275,7 +1275,7 @@ func TestCleanupBranchPendingMissingEnvConverges(t *testing.T) {
 	run.WorktreeState = model.ReviewWorktreeBranchPending
 	run.WorktreeReason = worktreeReasonBranchPending
 	run.WorktreeBranch = "br-unb"
-	review := e.withT3(&fakeReviewT3{}, nil, nil)
+	review := e.withT3(&fakeReviewT3{}, nil)
 
 	at := now
 	for i := 0; i < reviewBranchPendingMaxTries; i++ {
@@ -1313,7 +1313,7 @@ func TestCleanupBranchPendingMissingEnvConverges(t *testing.T) {
 // 退化成跨成功累计，叠满上限误收 failed。
 func TestRecoverFromPendingResetsCounterBeforeReasonCheck(t *testing.T) {
 	e := newReviewEngineEnv(t)
-	review := e.withT3(&fakeReviewT3{}, nil, nil)
+	review := e.withT3(&fakeReviewT3{}, nil)
 	now := time.Now().UTC()
 
 	// 写失败场景：计数已累积、行内原因留空。

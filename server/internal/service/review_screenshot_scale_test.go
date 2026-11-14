@@ -23,9 +23,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/godbobo/fast_ship/server/internal/forge"
 	"github.com/godbobo/fast_ship/server/internal/githubapi"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
+	"github.com/godbobo/fast_ship/server/internal/pkg/githubapp"
 	"github.com/godbobo/fast_ship/server/internal/pkg/githubmedia"
 )
 
@@ -736,9 +738,9 @@ func TestAgentScreenshotsReviewSizeItems(t *testing.T) {
 	}
 	seedScaledAsset("note1", 2, notePath, "application/octet-stream")
 	seedScaledAsset("huge1", 3, writeFakeHugePNG(t), "image/png")
-	review := e.withT3(nil, media, func(context.Context, string, int64) (string, error) {
-		return "tok", nil
-	})
+	review := e.withT3(nil, media)
+	// INT-230：媒体令牌随审查客户端的底层 API 凭证面走。
+	review.clients = forge.NewReviewClients(githubapp.StaticClients{Client: bearerAPI{GitHubClient: e.fake, token: "tok"}}, nil)
 
 	items, _, err := review.AgentScreenshots(context.Background(), run.ID)
 	if err != nil {
