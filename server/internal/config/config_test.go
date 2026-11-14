@@ -381,6 +381,12 @@ func TestBotsRuntimeConfig(t *testing.T) {
 // 长度按原始值校验（实际加解密用未经裁剪的字节）；每个场景断言报错
 // 指向对应字段。
 func TestLoadRejectsInsecureSecrets(t *testing.T) {
+	// 屏蔽调用环境可能导出的 JWT_SECRET / ENCRYPTION_KEY：viper.BindEnv
+	// 会用非空环境变量覆盖 yaml，不清空则拒绝路径在导出过密钥的 shell
+	// 里测不到。置空串即可，viper 不用空环境变量覆盖 yaml。
+	t.Setenv("JWT_SECRET", "")
+	t.Setenv("ENCRYPTION_KEY", "")
+
 	tests := []struct {
 		name    string
 		mutate  func(body string) string
@@ -453,6 +459,9 @@ func TestLoadRejectsInsecureSecrets(t *testing.T) {
 
 // INT-221：16/24/32 字节都是 AES 合法密钥长度，既有合法配置不被误伤。
 func TestLoadAcceptsValidAESKeyLengths(t *testing.T) {
+	t.Setenv("JWT_SECRET", "")
+	t.Setenv("ENCRYPTION_KEY", "")
+
 	for _, key := range []string{
 		"1234567890123456",
 		"123456789012345678901234",

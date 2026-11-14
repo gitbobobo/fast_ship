@@ -67,6 +67,8 @@ make dev
 后端默认读取 `server/configs/config.yaml`，可用 `CONFIG_PATH` 指定其他文件：
 
 ```bash
+# 指定的配置文件必须自带合法密钥（占位值会被启动校验拒绝，且指定
+# CONFIG_PATH 后 make dev 不再注入开发密钥）
 CONFIG_PATH=/path/to/config.yaml make dev-server
 ```
 
@@ -102,9 +104,17 @@ docker run -d -p 4888:4888 \
   fast_ship
 ```
 
-> 曾用公开默认值（`change-me*`）运行过的实例需要轮换：换 `JWT_SECRET` 即可让
-> 已签发的登录态失效；换 `ENCRYPTION_KEY` 前需用旧钥解密、新钥重加密库存密文
-> （GitHub Token、API Key 等），否则存量密文无法解密。
+> 曾用公开默认值（`change-me*`）运行过的实例需要轮换，且注意：升级到本版
+> 之后应用会直接拒绝以旧钥启动，轮换要在**升级前**的旧版本上完成：
+>
+> 1. 在界面记录需要保留的凭据（GitHub Token、Bot API Key、Forge 集成令牌等）。
+> 2. 在旧版本配置里把 `ENCRYPTION_KEY` 换成新的随机值并重启（旧版本不校验
+>    密钥占位值，可正常启动），然后在界面重新录入上述凭据——新密文以新钥加密。
+> 3. 把 `JWT_SECRET` 换成新的随机值并重启，所有已签发登录态随之失效，重新登录即可。
+> 4. 完成后再升级到新版本。
+>
+> 没有保留价值的数据（如仅试部署过的实例）可直接清空数据库重来。项目暂无
+> 脱机重加密工具；需要批量迁移大量密文的部署，请先在 issue 里反馈。
 
 推送 `v*` 格式的 Git tag 会触发 GitHub Actions 构建并推送多架构镜像到 `ghcr.io/<owner>/<repo>`，同时打上对应 tag 与 `latest`：
 
