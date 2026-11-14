@@ -71,10 +71,10 @@ function ScopeSummary({
   return (
     <div className="flex items-center gap-2">
       <Badge
-        variant={write ? "default" : "outline"}
+        variant="outline"
         className={cn(
           "px-2 py-0.5",
-          !write && "border-border bg-background text-foreground",
+          write ? "border-primary/40 text-foreground" : "border-border text-muted-foreground",
         )}
       >
         {write ? "读写" : "只读"}
@@ -100,7 +100,7 @@ export default function OAuthAppsPage() {
   };
 
   return (
-    <SettingsPageShell>
+    <SettingsPageShell wide>
       <div className="space-y-6">
         <div>
           <h2 className="text-lg font-medium">已授权的应用</h2>

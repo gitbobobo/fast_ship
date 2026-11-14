@@ -163,10 +163,10 @@ function AuthorizeConsent({ searchParams }: { searchParams: URLSearchParams }) {
   return (
     <ConsentShell>
       <Card>
-        <CardHeader className="text-center">
+        <CardHeader className="pt-4 text-center">
           <CardTitle className="text-xl">授权访问</CardTitle>
         </CardHeader>
-        <CardContent className="space-y-5">
+        <CardContent className="space-y-5 pb-4">
           <p className="text-sm text-muted-foreground">
             「<span className="font-medium text-foreground">{client_name}</span>」
             请求访问你的 Fast Ship 账号
@@ -184,7 +184,7 @@ function AuthorizeConsent({ searchParams }: { searchParams: URLSearchParams }) {
             <Button
               variant="link"
               size="sm"
-              className="h-auto px-2 py-1.5 text-primary underline underline-offset-2"
+              className="h-auto px-3 py-2 text-primary underline underline-offset-2"
               onClick={onSwitchAccount}
             >
               切换账号
@@ -239,7 +239,7 @@ function AuthorizeConsent({ searchParams }: { searchParams: URLSearchParams }) {
             <RadioGroup
               value={write ? "write" : "read"}
               onValueChange={(value) => setWrite(value === "write")}
-              className="max-sm:[&>label]:min-h-11 max-sm:[&>label]:items-center"
+              className="max-sm:[&>label]:py-3"
             >
               <RadioGroupItem value="read">只读（查看项目与问题）</RadioGroupItem>
               <RadioGroupItem value="write">
