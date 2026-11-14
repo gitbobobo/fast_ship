@@ -16,6 +16,7 @@ import {
   Network,
   Globe,
   Users,
+  ShieldCheck,
   type LucideIcon,
 } from "lucide-react";
 
@@ -35,6 +36,7 @@ const settingsNavItems: {
   { to: "/settings/github-tokens", label: "GitHub Tokens", icon: KeySquare },
   { to: "/settings/integrations", label: "集成", icon: Plug },
   { to: "/settings/api-keys", label: "API Keys", icon: Key },
+  { to: "/settings/oauth-apps", label: "已授权的应用", icon: ShieldCheck },
   { to: "/settings/environments", label: "环境", icon: Server },
   { to: "/settings/deployment", label: "部署", icon: Globe, adminOnly: true },
   { to: "/settings/members", label: "成员", icon: Users, adminOnly: true },
