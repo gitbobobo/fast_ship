@@ -14,21 +14,23 @@ export interface IssueSourceEntry {
 }
 
 /**
- * 当前问题锚点：查询命中时的「后继邻居」身份（beforeId = 后继真实条目 id，列表末尾为
+ * 当前问题锚点：渲染列表中的前后邻居身份（beforeId = 后继、afterId = 前驱，边界为
  * null）。不用原始下标：多个保留项的记录先后发生，下标会随移出互相挤压而错位；
- * 邻居身份在重建时按链解析，仍能保持各保留项彼此的相对顺序。scopeKey（项目+来源
- * 筛选）用于来源/项目切换瞬间的竞态防护。
+ * 双邻居在重建时迭代解析，仍能保持各项的相对顺序。scopeKey（项目+来源筛选）用于
+ * 来源/项目切换瞬间的竞态防护。
  */
 interface IssueAnchor {
   issue: Issue;
   beforeId: string | null;
+  afterId: string | null;
   scopeKey: string;
 }
 
-/** 已被查询移出的保留项：集合，跨 iid 切换持续到来源/项目变化或卸载；beforeId 语义同 IssueAnchor */
+/** 已被查询移出的保留项：集合，跨 iid 切换持续到来源/项目变化或卸载；邻居语义同 IssueAnchor */
 interface RetainedIssue {
   issue: Issue;
   beforeId: string | null;
+  afterId: string | null;
 }
 
 /** 保留集合的空态常量：保证引用稳定，避免 reset 效果在挂载时触发多余重渲染 */
@@ -152,87 +154,57 @@ export function useIssueSourceList(options: {
     }
   }, [enabled, rawItems, retained]);
 
-  // 保留项渲染列表：真实条目 + stale 保留项（按 beforeId 链解析插入）。供锚点取
-  // 渲染后继（可含 stale 项）与展示使用
+  // 保留项渲染列表：真实条目 + stale 保留项（按移出时的前后邻居迭代放置）。供锚点
+  // 取渲染邻居（可含 stale 项）与展示使用
   const items = useMemo<IssueSourceEntry[]>(() => {
     const entries: IssueSourceEntry[] = rawItems.map((issue) => ({ issue }));
     const rawIds = new Set(entries.map((entry) => entry.issue.id));
-    // 保留项按「后继邻居身份」重建位置：先沿 beforeId 链解析到第一个真实条目锚点
-    // （后继本身也被保留时继续向后），链尾为空、锚点已不在列表也未入保留集合或异常
-    // 成环时落到列表末尾；再按锚点分组插入。组内按链深降序稳定排序：先移出的项
-    // 链上经过的保留项更多、离锚更远、应排在前——逆序移出时仍保持移出前的相对顺序
-    // （顺序移出与逆序移出两种时序都还原为原列表顺序）。真实条目在场的保留项
-    // 让位，天然去重且无重复渲染键。
-    const retainedById = new Map(
-      retained.map((entry) => [entry.issue.id, entry]),
+    // 保留项按「双邻居身份」重建位置：优先插在后继（beforeId）之前，后继不可解析
+    // （它也是保留项且尚未放置，或已不在列表）时改插在前驱（afterId）之后；两个
+    // 邻居都不可解析时延迟到下一轮，多轮无进展则落到列表末尾。迭代放置使相邻保留
+    // 项互为锚点时也能还原移出前的相对顺序（顺序/逆序移出均一致），且后加载的真实
+    // 条目不会插到保留项之前（末条移出后的位置也稳定）。真实条目在场的保留项让位，
+    // 天然去重且无重复渲染键。
+    const result: IssueSourceEntry[] = [...entries];
+    let pending: RetainedIssue[] = retained.filter(
+      (entry) => !rawIds.has(entry.issue.id),
     );
-    const resolved = new Map<
-      string,
-      { key: string | null; depth: number }
-    >();
-    for (const entry of retained) {
-      if (rawIds.has(entry.issue.id)) {
-        continue;
-      }
-      let key = entry.beforeId;
-      let depth = 0;
-      const visited = new Set<string>([entry.issue.id]);
-      while (key !== null && !rawIds.has(key)) {
-        const next = retainedById.get(key);
-        if (!next || visited.has(key)) {
-          key = null;
-          break;
+    let progress = true;
+    while (pending.length > 0 && progress) {
+      progress = false;
+      const remaining: RetainedIssue[] = [];
+      for (const entry of pending) {
+        const indexOf = (id: string | null) =>
+          id === null ? -1 : result.findIndex((e) => e.issue.id === id);
+        const beforeIndex = indexOf(entry.beforeId);
+        if (beforeIndex >= 0) {
+          result.splice(beforeIndex, 0, { issue: entry.issue, stale: true });
+          progress = true;
+          continue;
         }
-        visited.add(key);
-        key = next.beforeId;
-        depth += 1;
-      }
-      resolved.set(entry.issue.id, { key, depth });
-    }
-    const groups = new Map<string | null, RetainedIssue[]>();
-    for (const entry of retained) {
-      const info = resolved.get(entry.issue.id);
-      if (!info) {
-        continue;
-      }
-      const group = groups.get(info.key);
-      if (group) {
-        group.push(entry);
-      } else {
-        groups.set(info.key, [entry]);
-      }
-    }
-    for (const group of groups.values()) {
-      // 稳定排序：同链深时保持移出顺序
-      group.sort((a, b) => {
-        const depthA = resolved.get(a.issue.id)?.depth ?? 0;
-        const depthB = resolved.get(b.issue.id)?.depth ?? 0;
-        return depthB - depthA;
-      });
-    }
-    const result: IssueSourceEntry[] = [];
-    for (const entry of entries) {
-      const group = groups.get(entry.issue.id);
-      if (group) {
-        for (const item of group) {
-          result.push({ issue: item.issue, stale: true });
+        if (entry.afterId !== null) {
+          const afterIndex = indexOf(entry.afterId);
+          if (afterIndex >= 0) {
+            result.splice(afterIndex + 1, 0, { issue: entry.issue, stale: true });
+            progress = true;
+            continue;
+          }
         }
+        remaining.push(entry);
       }
-      result.push(entry);
+      pending = remaining;
     }
-    const tail = groups.get(null);
-    if (tail) {
-      for (const item of tail) {
-        result.push({ issue: item.issue, stale: true });
-      }
+    // 两个邻居都无法解析（如邻居已被删除）：追加到列表末尾，保持可见与可翻页
+    for (const entry of pending) {
+      result.push({ issue: entry.issue, stale: true });
     }
     return result;
   }, [rawItems, retained]);
 
-  // 当前问题命中查询时更新锚点（记录后继邻居身份），脱离查询后按锚点移入保留集合。
-  // 后继取自渲染列表而非原始查询：两者之间可能夹着 stale 保留项，逆序移出时
-  // 只有渲染后继能保住各项的相对顺序。scopeKey 校验防止来源/项目切换同一提交内
-  // 的旧闭包锚点被误移入新作用域的保留集合。
+  // 当前问题命中查询时更新锚点（记录渲染列表中的前后邻居身份），脱离查询后按锚点
+  // 移入保留集合。邻居取自渲染列表而非原始查询：两者之间可能夹着 stale 保留项，
+  // 双邻居才能在逆序移出、末条移出后补页等时序下保住各项的相对顺序与位置。
+  // scopeKey 校验防止来源/项目切换同一提交内的旧闭包锚点被误移入新作用域的保留集合。
   useEffect(() => {
     if (!enabled || !currentIssueId) {
       return;
@@ -247,10 +219,15 @@ export function useIssueSourceList(options: {
         renderedIndex >= 0 && renderedIndex + 1 < items.length
           ? items[renderedIndex + 1].issue.id
           : null;
+      const afterId =
+        renderedIndex > 0 ? items[renderedIndex - 1].issue.id : null;
       setAnchor((prev) =>
-        prev && prev.issue === issue && prev.beforeId === beforeId
+        prev &&
+        prev.issue === issue &&
+        prev.beforeId === beforeId &&
+        prev.afterId === afterId
           ? prev
-          : { issue, beforeId, scopeKey },
+          : { issue, beforeId, afterId, scopeKey },
       );
       return;
     }
@@ -262,7 +239,14 @@ export function useIssueSourceList(options: {
       setRetained((prev) =>
         prev.some((entry) => entry.issue.id === currentIssueId)
           ? prev
-          : [...prev, { issue: anchor.issue, beforeId: anchor.beforeId }],
+          : [
+              ...prev,
+              {
+                issue: anchor.issue,
+                beforeId: anchor.beforeId,
+                afterId: anchor.afterId,
+              },
+            ],
       );
       setAnchor(null);
     }

@@ -859,6 +859,40 @@ describe("useIssueSourceList", () => {
     );
   });
 
+  it("keeps a tail-dropped retained item ahead of later-loaded pages", () => {
+    // 末条移出（beforeId=null、afterId=A）后补拉到新页：保留项应仍在新条目之前，
+    // 且 J 能按顺序走到新条目（不会被保留项挡在末位）
+    mockQuery([page([makeIssue("issue-1", "GH-1", "A"), makeIssue("issue-2", "GH-2", "B")])], {
+      hasNextPage: true,
+    });
+
+    const view = renderHarness("/projects/proj-1/issues/issue-2", {
+      currentIssueIdOverride: "issue-2",
+    });
+
+    mockQuery([
+      page([
+        makeIssue("issue-1", "GH-1", "A"),
+        makeIssue("issue-3", "GH-3", "C"),
+      ]),
+    ]);
+    view.rerender(
+      <MemoryRouter initialEntries={["/projects/proj-1/issues/issue-2"]}>
+        {harnessElement({ currentIssueIdOverride: "issue-2" })}
+      </MemoryRouter>,
+    );
+
+    expect(entryIds()).toEqual(["entry-issue-1", "entry-issue-2", "entry-issue-3"]);
+    expect(screen.getByTestId("entry-issue-2")).toHaveAttribute("data-stale", "true");
+    expect(screen.getByTestId("current-index")).toHaveTextContent("1");
+    act(() => {
+      screen.getByRole("button", { name: "next" }).click();
+    });
+    return waitFor(() =>
+      expect(screen.getByTestId("location")).toHaveTextContent("issues/issue-3"),
+    );
+  });
+
   it("removes a retained item once it re-hits the query while another issue is current", () => {
     mockQuery([
       page([
