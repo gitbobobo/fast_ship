@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/api"
+	"github.com/godbobo/fast_ship/server/internal/forge"
 	"github.com/godbobo/fast_ship/server/internal/githubapi"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
@@ -603,7 +604,7 @@ func TestReviewInlineReviewRechecksEpoch(t *testing.T) {
 		githubapp.StaticClients{Client: &epochBumpOnDiffClient{GitHubClient: e.fake, db: e.svc.db, repo: repo, pr: 99}},
 		fakeReviewAppSource{ok: true},
 		fakeReviewPublicURL("https://fs.example.com"),
-		nil, nil, nil, repository.NewForgeIntegrationRepository(e.svc.db), e.svc.cfg, zap.NewNop())
+		nil, nil, repository.NewForgeIntegrationRepository(e.svc.db), e.svc.cfg, zap.NewNop())
 	review.syncPendingPRs(now)
 
 	if got := e.fake.ReviewEvents(repo); len(got) != 0 {
@@ -623,7 +624,7 @@ func TestArchiveRunsStopsUnconfirmedLaunch(t *testing.T) {
 		"environment_id": env.ID, "dispatch_started_at": now, "dispatched_at": nil,
 	})
 	t3 := &fakeReviewT3{}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 	review.archiveRuns(now)
 
 	if len(t3.stopped) != 1 || t3.stopped[0] != run.ThreadID {
@@ -767,7 +768,7 @@ func TestCreateVisualRunsStopsWhenDisabled(t *testing.T) {
 		githubapp.StaticClients{Client: &disableOnPRClient{GitHubClient: e.fake, db: e.svc.db, projectID: e.project.ID}},
 		fakeReviewAppSource{ok: true},
 		fakeReviewPublicURL("https://fs.example.com"),
-		nil, nil, nil, repository.NewForgeIntegrationRepository(e.svc.db), e.svc.cfg, zap.NewNop())
+		nil, nil, repository.NewForgeIntegrationRepository(e.svc.db), e.svc.cfg, zap.NewNop())
 	review.syncPendingPRs(now)
 
 	var visual int64
@@ -866,7 +867,7 @@ func TestRerunRejectsWhenDisabledMidFlight(t *testing.T) {
 		githubapp.StaticClients{Client: client},
 		fakeReviewAppSource{ok: true},
 		fakeReviewPublicURL("https://fs.example.com"),
-		nil, nil, nil, repository.NewForgeIntegrationRepository(e.svc.db), e.svc.cfg, zap.NewNop())
+		nil, nil, repository.NewForgeIntegrationRepository(e.svc.db), e.svc.cfg, zap.NewNop())
 
 	_, err := review.RerunReview(context.Background(), e.user.ID, e.project.ID, 92, "")
 	if err == nil {
@@ -945,7 +946,7 @@ func TestLaunchPersistsWorkspaceRootAfterAgentFirstAuth(t *testing.T) {
 			return &T3ThreadLaunchResult{ThreadId: *req.ThreadId}, true, nil
 		},
 	}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 	run := e.seedRun(t, repo, 95, "sha-af", model.ReviewRunDispatched, now)
 	runID = run.ID
 	e.svc.db.Model(run).Update("environment_id", env.ID)
@@ -1061,9 +1062,9 @@ func TestAgentScreenshotsSkipFailedAssets(t *testing.T) {
 		anonErr:   errors.New("anon forbidden"),
 		bearerErr: errors.New("bearer forbidden"),
 	}
-	review := e.withT3(nil, media, func(context.Context, string, int64) (string, error) {
-		return "tok", nil
-	})
+	review := e.withT3(nil, media)
+	// INT-230：媒体令牌随审查客户端的底层 API 凭证面走。
+	review.clients = forge.NewReviewClients(githubapp.StaticClients{Client: bearerAPI{GitHubClient: e.fake, token: "tok"}}, nil)
 
 	items, _, err := review.AgentScreenshots(context.Background(), run.ID)
 	if err != nil {

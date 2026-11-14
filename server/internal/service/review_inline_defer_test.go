@@ -57,7 +57,7 @@ func TestReviewDiffFailureKeepsTopLevelOutput(t *testing.T) {
 		githubapp.StaticClients{Client: &diffFailClient{GitHubClient: e.fake}},
 		fakeReviewAppSource{ok: true},
 		fakeReviewPublicURL("https://fs.example.com"),
-		nil, e.media, nil, repository.NewForgeIntegrationRepository(e.svc.db), e.svc.cfg, zap.NewNop())
+		nil, e.media, repository.NewForgeIntegrationRepository(e.svc.db), e.svc.cfg, zap.NewNop())
 	review.syncPendingPRs(now)
 
 	if got := len(e.fake.StatusesForContext(reviewCodeStatusContext)); got == 0 {
@@ -148,7 +148,7 @@ func TestReviewDiffFailureWithoutPendingInlineKeepsSyncPending(t *testing.T) {
 		githubapp.StaticClients{Client: &diffFailClient{GitHubClient: e.fake}},
 		fakeReviewAppSource{ok: true},
 		fakeReviewPublicURL("https://fs.example.com"),
-		nil, e.media, nil, repository.NewForgeIntegrationRepository(e.svc.db), e.svc.cfg, zap.NewNop())
+		nil, e.media, repository.NewForgeIntegrationRepository(e.svc.db), e.svc.cfg, zap.NewNop())
 	review.syncPendingPRs(now)
 
 	var ledger model.ReviewPullRequest
@@ -207,7 +207,7 @@ func TestReviewDiffFailureRewritesCommentWhenBodyChanges(t *testing.T) {
 		githubapp.StaticClients{Client: &diffFailClient{GitHubClient: e.fake}},
 		fakeReviewAppSource{ok: true},
 		fakeReviewPublicURL("https://fs.example.com"),
-		nil, e.media, nil, repository.NewForgeIntegrationRepository(e.svc.db), e.svc.cfg, zap.NewNop())
+		nil, e.media, repository.NewForgeIntegrationRepository(e.svc.db), e.svc.cfg, zap.NewNop())
 	review.syncPendingPRs(now)
 
 	var ledger model.ReviewPullRequest
@@ -244,7 +244,7 @@ func TestReviewDiffFailureRewritesCommentWhenBodyChanges(t *testing.T) {
 // 情况下不 PATCH，并把找回的 id 补记回账本。
 func TestUpsertPRCommentDedupesOwnComment(t *testing.T) {
 	e := newReviewEngineEnv(t)
-	review := e.withT3(nil, nil, nil)
+	review := e.withT3(nil, nil)
 	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
 	ctx := context.Background()
 	const marker = reviewCodeCommentMarker
@@ -321,7 +321,7 @@ func TestReviewSyncFailureBacksOff(t *testing.T) {
 		githubapp.StaticClients{Client: client},
 		fakeReviewAppSource{ok: true},
 		fakeReviewPublicURL("https://fs.example.com"),
-		nil, e.media, nil, repository.NewForgeIntegrationRepository(e.svc.db), e.svc.cfg, zap.NewNop())
+		nil, e.media, repository.NewForgeIntegrationRepository(e.svc.db), e.svc.cfg, zap.NewNop())
 	review.syncPendingPRs(now)
 	calls := client.calls
 	var ledger model.ReviewPullRequest
@@ -398,7 +398,7 @@ func TestReviewSyncCarriesVisualSuccessStatusOnce(t *testing.T) {
 		githubapp.StaticClients{Client: &diffFailClient{GitHubClient: e.fake}},
 		fakeReviewAppSource{ok: true},
 		fakeReviewPublicURL("https://fs.example.com"),
-		nil, e.media, nil, repository.NewForgeIntegrationRepository(e.svc.db), e.svc.cfg, zap.NewNop())
+		nil, e.media, repository.NewForgeIntegrationRepository(e.svc.db), e.svc.cfg, zap.NewNop())
 	review.syncPendingPRs(now)
 	if got := len(e.fake.StatusesForContext(reviewVisualStatusContext)); got != 1 {
 		t.Fatalf("沿用上一轮通过应写 1 条视觉状态，实际 %d", got)
@@ -470,7 +470,7 @@ func TestReviewSyncRetryKeepsVisualStatusSingle(t *testing.T) {
 		githubapp.StaticClients{Client: client},
 		fakeReviewAppSource{ok: true},
 		fakeReviewPublicURL("https://fs.example.com"),
-		nil, e.media, nil, repository.NewForgeIntegrationRepository(e.svc.db), e.svc.cfg, zap.NewNop())
+		nil, e.media, repository.NewForgeIntegrationRepository(e.svc.db), e.svc.cfg, zap.NewNop())
 	review.syncPendingPRs(now)
 	if got := len(e.fake.StatusesForContext(reviewVisualStatusContext)); got != 1 {
 		t.Fatalf("首次应写 1 条视觉状态，实际 %d", got)

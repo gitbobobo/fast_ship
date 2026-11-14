@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -13,7 +12,7 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/forge"
 	"github.com/godbobo/fast_ship/server/internal/githubapi"
 	"github.com/godbobo/fast_ship/server/internal/model"
-	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
+	"github.com/godbobo/fast_ship/server/internal/pkg/githubapp"
 	"github.com/godbobo/fast_ship/server/internal/pkg/githubmedia"
 	"github.com/godbobo/fast_ship/server/internal/repository"
 	"go.uber.org/zap"
@@ -75,13 +74,14 @@ type ReviewService struct {
 	cfg          *config.Config
 	logger       *zap.Logger
 
-	// gh 是 App 安装令牌访问面；appSource 回答部署是否配置了 App 身份；
-	// publicURL 回答部署对外地址。三者均可为 nil——对应前置条件按缺失处理。
-	gh        PRGitHubClients
+	// appSource 回答部署是否配置了 App 身份；publicURL 回答部署对外地址。
+	// 两者均可为 nil——对应前置条件按缺失处理。（INT-230：ReviewService 不
+	// 再另持一份 GitHub 访问字段，安装解析与投递重投都经 clients 的
+	// GitHub 适配器侧。）
 	appSource GitHubAppSource
 	publicURL PublicURLSource
-	// clients 按 (集成, 仓库, 安装) 解析审查链路访问面（INT-167）：内置 GitHub
-	// 与 Forgejo 两个分支。forgeIntegrations 集成行读取面，服务于设置启用的
+	// clients 按集成身份解析审查链路访问面（INT-167/INT-230）：内置 GitHub
+	// 与 Forgejo 两个分支，GitHub 安装解析内联在适配器侧。forgeIntegrations 集成行读取面，服务于设置启用的
 	// 集成校验与轮询补漏的项目↔集成一致性复核。
 	clients           forge.ReviewClientResolver
 	forgeIntegrations forgeIntegrationLookup
@@ -92,11 +92,10 @@ type ReviewService struct {
 	// commentWakeMentions）。零值即可用（sync.Map），无需初始化。
 	mentionsSlugCache sync.Map
 	// t3 线程/工作区执行面、media 截图缓存下载面；均可为 nil（对应阶段按失败处理）。
-	// mediaBearer 为截图下载取安装令牌（私有仓库附件）：入参集成身份与安装 id；
-	// 可为 nil（不支持凭证下载时保持匿名）。
-	t3          reviewT3
-	media       reviewMedia
-	mediaBearer func(ctx context.Context, integrationID string, installationID int64) (string, error)
+	// 截图 bearer 凭证经审查客户端的 BearerSource 断言取得（INT-230：媒体
+	// 凭证收进 GitHub 适配器，不再经 service 侧闭包）。
+	t3    reviewT3
+	media reviewMedia
 
 	// 调度循环状态：kick 与 cancel 都经 mu 保护，供 webhook goroutine 与
 	// Start/Stop 并发安全。kickCh 缓冲 1：连续投递只补一轮 tick，不堆积。
@@ -158,7 +157,6 @@ func NewReviewService(
 	publicURL PublicURLSource,
 	t3 reviewT3,
 	media reviewMedia,
-	mediaBearer func(ctx context.Context, integrationID string, installationID int64) (string, error),
 	forgeIntegrations forgeIntegrationLookup,
 	cfg *config.Config,
 	logger *zap.Logger,
@@ -172,10 +170,10 @@ func NewReviewService(
 	return &ReviewService{
 		db: db, projects: projects, deliveries: deliveries,
 		redeliveries: repository.NewGitHubWebhookRedeliveryRepository(db),
-		sink:         sink, gh: gh, appSource: appSource, publicURL: publicURL,
+		sink:         sink, appSource: appSource, publicURL: publicURL,
 		clients:           forge.NewReviewClients(gh, forgejoSrc),
 		forgeIntegrations: forgeIntegrations,
-		t3:                t3, media: media, mediaBearer: mediaBearer,
+		t3:                t3, media: media,
 		cfg: cfg, logger: logger,
 		worktreeTries:    map[string]int{},
 		worktreeBackoff:  map[string]*worktreeBackoffEntry{},
@@ -339,10 +337,11 @@ func (s *ReviewService) revalidateTiedWebhook(ctx context.Context, integrationID
 	// 后续补登幂等账/重进受理事务用请求 ctx——实拉的倒计时不再渗入库操作。
 	pullCtx, cancel := context.WithTimeout(context.Background(), reviewForgejoPollTimeout)
 	defer cancel()
-	client, err := s.reviewClient(pullCtx, integrationID, repo, p.Installation.ID)
+	client, err := s.reviewClient(pullCtx, integrationID, repo)
 	if err != nil {
-		// 确定性失败（集成行已删/密文损坏）重投只会得到同一错误——判丢弃
-		// 并补登幂等账，不让平台无限重投；瞬时错误才透出 500。
+		// 确定性失败（安装不存在/App 未配置、集成行已删/密文损坏）重投只
+		// 会得到同一错误——判丢弃并补登幂等账，不让平台无限重投；瞬时错误
+		// 才透出 500。
 		if deterministicReviewAccessErr(err) {
 			s.logger.Warn("同刻异 head 复核构造客户端确定性失败，丢弃投递",
 				zap.String("integration", integrationID),
@@ -470,43 +469,31 @@ type RunTokenResolver interface {
 }
 
 // PRGitHubClients 解析审查链路的 GitHub App 访问面（INT-129 部署级身份：
-// 每套部署一个 App，客户端按部署当前配置现取）。
+// 每套部署一个 App，客户端按部署当前配置现取）。只在构造 resolver 时消费：
+// 运行期安装解析与投递重投都经 clients 的 GitHub 适配器侧（INT-230）。
 type PRGitHubClients interface {
 	ClientFor(ctx context.Context) (githubapi.GitHubClient, error)
 }
 
-// reviewClient 按运行的 (集成, 仓库, 安装) 快照解析审查客户端（INT-167）：
-// 安装 id 收编进适配器，审查链路的方法面不再携带 installation 参数。GitHub
-// 行为不变；非内置集成由 resolver 明确拒绝。
-func (s *ReviewService) reviewClient(ctx context.Context, integrationID, repoFullName string, installationID int64) (forge.ReviewClient, error) {
-	return s.clients.ClientFor(ctx, integrationID, repoFullName, installationID)
+// reviewClient 按运行的 (集成, 仓库) 快照解析审查客户端（INT-167/INT-230）：
+// 安装 id 由 resolver 的 GitHub 适配器侧按仓库现解析，方法面与构造入参都不
+// 再携带 installation 快照。GitHub 行为不变；非内置集成由 resolver 明确拒绝。
+func (s *ReviewService) reviewClient(ctx context.Context, integrationID, repoFullName string) (forge.ReviewClient, error) {
+	return s.clients.ClientFor(ctx, integrationID, repoFullName)
 }
 
-// errReviewGitHubAccessUnconfigured GitHub 访问面未配置的哨兵：
-// resolveGitHubInstallation 唯一按「确定性失败」返回的 AppError——ClientFor
-// 链路上的其他 AppError（部署设置读取失败等 ErrInternal）是瞬时 DB 故障，
-// 评论唤醒不得判丢弃烧幂等账（fast-ship-bot 第 1 轮 P2）。
-var errReviewGitHubAccessUnconfigured = errs.New(errs.ErrGitHubAPI.Code, "GitHub 访问面未配置")
-
-// resolveGitHubInstallation GitHub 专属 seam：rerun 这类没有 webhook 安装
-// 快照的路径按仓库名解析 App 安装 id。ResolveInstallation 不在
-// forge.ReviewClient 方法面内（App 安装解析对其他集成不存在），留在
-// githubapi/githubapp 侧。
-func (s *ReviewService) resolveGitHubInstallation(ctx context.Context, repoFullName string) (int64, error) {
-	if s.gh == nil {
-		return 0, errReviewGitHubAccessUnconfigured
+// hookDeliveryAccess 投递对账的 GitHub App 访问面（INT-230 重投边界）：经
+// clients 的 GitHub 适配器取投递记录与安装令牌客户端，ReviewService 不再
+// 持有第二套 GitHub 访问字段。hooks 为 nil（err 为 nil）表示解析器实现没有
+// 投递记录面（静态令牌、测试桩等），对账整轮静默跳过。
+func (s *ReviewService) hookDeliveryAccess(ctx context.Context) (githubapp.HookDeliveries, githubapi.GitHubClient, error) {
+	ra, ok := s.clients.(interface {
+		HookDeliveryAccess(ctx context.Context) (githubapp.HookDeliveries, githubapi.GitHubClient, error)
+	})
+	if !ok {
+		return nil, nil, nil
 	}
-	api, err := s.gh.ClientFor(ctx)
-	if err != nil {
-		return 0, err
-	}
-	installationID, err := api.ResolveInstallation(ctx, repoFullName)
-	if err != nil {
-		// %w 保留原因：评论唤醒按错误链分类确定性失败（401/403/404 且非限流）；
-		// rerun 的对外形态由调用处包装回 AppError，不回归。
-		return 0, fmt.Errorf("解析仓库安装失败: %w", err)
-	}
-	return installationID, nil
+	return ra.HookDeliveryAccess(ctx)
 }
 
 // reviewIntegrationID 审查侧的集成归一键（INT-167）：项目绑定空串 = 内置

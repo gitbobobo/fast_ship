@@ -99,7 +99,7 @@ func (s *ReviewService) launchRun(ctx context.Context, runID string, now time.Ti
 	// 被拒/吊销、集成行缺失、密文损坏）每轮重认领结果相同：按消费防抖/轮询
 	// 的同一口径直接落终态报真实原因，不空转到 deadline 误报超时。
 	prCtx, prCancel := context.WithTimeout(ctx, 30*time.Second)
-	client, clientErr := s.reviewClient(prCtx, run.IntegrationID, run.RepoFullName, run.InstallationID)
+	client, clientErr := s.reviewClient(prCtx, run.IntegrationID, run.RepoFullName)
 	var pr *forge.PullRequest
 	if clientErr == nil {
 		pr, clientErr = client.GetPullRequest(prCtx, run.RepoFullName, run.PRNumber)

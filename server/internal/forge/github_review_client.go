@@ -36,8 +36,9 @@ func PullRequestFromGitHub(pr *githubapi.PullRequest) *PullRequest {
 }
 
 // GitHubReviewClient forge.ReviewClient 的 GitHub 适配器：构造时收编
-// installationID，方法 1:1 透传到 githubapi.GitHubClient（请求序列、安装 id
-// 语义与错误都保持原样），数据类型逐字段转换成 forge 中性类型。
+// installationID（由 resolver 按仓库现解析，INT-230），方法 1:1 透传到
+// githubapi.GitHubClient（请求序列、安装 id 语义与错误都保持原样），数据
+// 类型逐字段转换成 forge 中性类型。
 type GitHubReviewClient struct {
 	api            githubapi.GitHubClient
 	installationID int64
@@ -46,9 +47,10 @@ type GitHubReviewClient struct {
 // 编译期钉住适配器满足审查访问面契约。
 var _ ReviewClient = (*GitHubReviewClient)(nil)
 
-// NewGitHubReviewClient 把 GitHub 访问面与安装 id 组装成审查客户端。installationID=0
-// 原样保留：只出现在仓库级前置检查，githubapp.Client 对 0 的「先解析安装再
-// 查仓库」语义在底层不变。
+// NewGitHubReviewClient 把 GitHub 访问面与安装 id 组装成审查客户端。调用
+// 方不经此构造（resolver 是唯一入口）；installationID=0 原样保留：只出现在
+// 仓库级前置检查，githubapp.Client 对 0 的「先解析安装再查仓库」语义在
+// 底层不变。
 func NewGitHubReviewClient(api githubapi.GitHubClient, installationID int64) *GitHubReviewClient {
 	return &GitHubReviewClient{api: api, installationID: installationID}
 }
@@ -175,4 +177,10 @@ func (c *GitHubReviewClient) Bearer(ctx context.Context) (string, error) {
 		return "", nil
 	}
 	return src.Bearer(ctx, c.installationID)
+}
+
+// BearerScope 凭证缓存作用域：按安装 id 分桶，私有附件缓存条目只对同一
+// 安装命中（见 githubmedia cacheEntry.Scope）。
+func (c *GitHubReviewClient) BearerScope() string {
+	return fmt.Sprintf("install:%d", c.installationID)
 }

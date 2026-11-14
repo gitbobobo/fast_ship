@@ -938,7 +938,7 @@ func TestVisualSyncOneScreenContentChangedReopens(t *testing.T) {
 	media := &perURLMedia{fakeReviewMedia: e.media, overrides: map[string]*githubmedia.CachedMedia{
 		u1: shotX, u2: shotY, u3: shotY2,
 	}}
-	e.review = e.withT3(nil, media, nil)
+	e.review = e.withT3(nil, media)
 
 	body1 := "![一](" + u1 + ") ![二](" + u2 + ")"
 	body2 := "![一](" + u1 + ") ![二新](" + u3 + ")"
@@ -1018,7 +1018,7 @@ func TestVisualSyncReversedRefOrderSameContentCarries(t *testing.T) {
 	media := &perURLMedia{fakeReviewMedia: e.media, overrides: map[string]*githubmedia.CachedMedia{
 		u1: shotX, u2: shotY, u3: shotX, u4: shotY,
 	}}
-	e.review = e.withT3(nil, media, nil)
+	e.review = e.withT3(nil, media)
 
 	body1 := "![一](" + u1 + ") ![二](" + u2 + ")"
 	body2 := "![二](" + u4 + ") ![一](" + u3 + ")"
@@ -1163,7 +1163,7 @@ func TestVisualSyncFingerprintStoredWhenGitHubPendingWriteFails(t *testing.T) {
 		githubapp.StaticClients{Client: client},
 		fakeReviewAppSource{ok: true},
 		fakeReviewPublicURL("https://fs.example.com"),
-		nil, e.media, nil, repository.NewForgeIntegrationRepository(e.svc.db), e.svc.cfg, zap.NewNop())
+		nil, e.media, repository.NewForgeIntegrationRepository(e.svc.db), e.svc.cfg, zap.NewNop())
 	review.syncPendingPRs(now)
 
 	// 前置确认同步确实失败：GitHub 写错误被记成 sync_error，pending 保留给重试。

@@ -262,7 +262,7 @@ type pollStubResolver struct {
 	byIntegration map[string]forge.ReviewClient
 }
 
-func (r pollStubResolver) ClientFor(_ context.Context, integrationID string, _ string, _ int64) (forge.ReviewClient, error) {
+func (r pollStubResolver) ClientFor(_ context.Context, integrationID string, _ string) (forge.ReviewClient, error) {
 	if client, ok := r.byIntegration[integrationID]; ok {
 		return client, nil
 	}

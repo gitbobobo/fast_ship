@@ -17,7 +17,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
 	"github.com/godbobo/fast_ship/server/internal/config"
-	"github.com/godbobo/fast_ship/server/internal/forge"
 	"github.com/godbobo/fast_ship/server/internal/handler"
 	"github.com/godbobo/fast_ship/server/internal/middleware"
 	"github.com/godbobo/fast_ship/server/internal/model"
@@ -450,24 +449,10 @@ func main() {
 	// PR 审查（INT-135）：webhook 幂等入口 + 审查调度循环（防抖/排队/派发/
 	// 超时/同步/工作区清理）。ghPR 是 App 访问面，App 身份与 public_url
 	// 分别取部署集成与部署设置服务；T3 线程/工作区与截图缓存复用现有服务。
-	// 截图下载的令牌来源（INT-167）：按运行/设置的集成身份解析审查客户端，
-	// 再向支持凭证的实现取 bearer——GitHub 是安装令牌，Forgejo 是机器人 PAT
-	// （经 forgeSource 现取，review_assets 只对 GitHub 实例的附件路径使用）；
-	// fake/不支持凭证的实现保持匿名（返回空串）。
-	reviewClients := forge.NewReviewClients(ghPR, forgeSource)
-	mediaBearer := func(ctx context.Context, integrationID string, installationID int64) (string, error) {
-		client, err := reviewClients.ClientFor(ctx, integrationID, "", installationID)
-		if err != nil {
-			return "", err
-		}
-		source, ok := client.(forge.BearerSource)
-		if !ok {
-			return "", nil
-		}
-		return source.Bearer(ctx)
-	}
+	// 截图 bearer 凭证收进 GitHub 适配器（INT-230）：私有仓库附件下载经审查
+	// 客户端的 BearerSource 断言取安装令牌，无需在此另建凭证闭包。
 	reviewService := service.NewReviewService(db, projectRepo, webhookDeliveryRepo, notificationSink,
-		ghPR, integrationService, deploymentSettingsService, t3ThreadsService, reviewMediaService, mediaBearer,
+		ghPR, integrationService, deploymentSettingsService, t3ThreadsService, reviewMediaService,
 		forgeIntegrationRepo, cfg, reviewLogger)
 	// 删除项目会 CASCADE 掉审查运行行，先让审查服务尽力停线程/归档/回收工作区。
 	projectService.SetReviewCleaner(reviewService)

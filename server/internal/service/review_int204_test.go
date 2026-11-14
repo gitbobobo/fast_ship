@@ -427,7 +427,7 @@ func TestPostInlineReviewsOverCapSkipsP2(t *testing.T) {
 	}
 	run := e.seedMixedFindingsRun(t, repo, 21, "sha-cap", now)
 
-	client, err := e.review.reviewClient(context.Background(), model.ForgeIntegrationBuiltinGitHubID, repo, 1)
+	client, err := e.review.reviewClient(context.Background(), model.ForgeIntegrationBuiltinGitHubID, repo)
 	if err != nil {
 		t.Fatalf("reviewClient: %v", err)
 	}
@@ -505,7 +505,7 @@ func TestFetchInlineLinesOverCapNeed(t *testing.T) {
 	if err := e.svc.db.Model(run).Updates(map[string]any{"result_json": result}).Error; err != nil {
 		t.Fatalf("seed result: %v", err)
 	}
-	client, err := e.review.reviewClient(context.Background(), model.ForgeIntegrationBuiltinGitHubID, repo, 1)
+	client, err := e.review.reviewClient(context.Background(), model.ForgeIntegrationBuiltinGitHubID, repo)
 	if err != nil {
 		t.Fatalf("reviewClient: %v", err)
 	}

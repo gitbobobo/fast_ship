@@ -185,7 +185,7 @@ func TestReviewCommentWakeAlwaysNewRound(t *testing.T) {
 		t.Fatalf("webhook opened: %v", err)
 	}
 	t3 := &fakeReviewT3{}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 	// 防抖窗口 60s：推进时钟让第 1 轮的防抖行到期开轮。
 	review.processDueDebounces(now.Add(2 * time.Minute))
 	var round1 []model.ReviewRun
@@ -273,7 +273,7 @@ func TestReviewCommentWakeVisualInflightDoesNotBlock(t *testing.T) {
 		t.Fatalf("webhook opened: %v", err)
 	}
 	t3 := &fakeReviewT3{}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 	review.processDueDebounces(now.Add(2 * time.Minute))
 	if err := e.svc.db.Model(&model.ReviewRun{}).
 		Where("repo_full_name = ? AND pr_number = 23 AND kind = ?", repo, model.ReviewKindCode).
@@ -1399,8 +1399,9 @@ func TestReviewCommentWakeInstallationResolveFails(t *testing.T) {
 	// 投递缺 installation 快照（payload 无 installation 字段）才走兜底解析。
 	body := issueCommentBody("@fast-ship-bot", repo, 53, -1)
 
-	// 确定性失败：访问面未配置（gh==nil）——重投只会得到同一结果。
-	e.review.gh = nil
+	// 确定性失败：访问面未配置（resolver 报哨兵）——重投只会得到同一结果。
+	origClients := e.review.clients
+	e.review.clients = errClientResolver{err: forge.ErrGitHubAccessUnconfigured}
 	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-inst-1", body); err != nil {
 		t.Fatalf("访问面未配置应判丢弃返回 nil，实得 %v", err)
 	}
@@ -1416,6 +1417,7 @@ func TestReviewCommentWakeInstallationResolveFails(t *testing.T) {
 	if deliveries != 1 {
 		t.Fatalf("确定性解析失败幂等账应落定，实得 %d", deliveries)
 	}
+	e.review.clients = origClients
 
 	// 瞬时失败：fake 未配置安装 id，解析回非状态错误——透出 500 且不落账。
 	e2 := newReviewEngineEnv(t)
@@ -1437,18 +1439,13 @@ func TestReviewCommentWakeInstallationResolveFails(t *testing.T) {
 	}
 }
 
-// stubGHClientFor 构造 ClientFor 可注入错误的 gh 访问面（-fast-ship-bot
-// 第 1 轮 P2：ClientFor 链路的 ErrInternal 是瞬时 DB 故障，不得判丢弃）。
-type stubGHClientFor struct{ err error }
-
-func (s stubGHClientFor) ClientFor(context.Context) (githubapi.GitHubClient, error) {
-	return nil, s.err
-}
-
-// errClientResolver 审查客户端解析桩：ClientFor 直接返回指定错误。
+// errClientResolver 审查客户端解析桩：ClientFor 直接返回指定错误
+// （-fast-ship-bot 第 1 轮 P2：链路的 ErrInternal 是瞬时 DB 故障，不得判
+// 丢弃；访问面未配置哨兵按确定性丢弃补登幂等账——INT-230 后注入点在
+// clients 解析器上）。
 type errClientResolver struct{ err error }
 
-func (r errClientResolver) ClientFor(context.Context, string, string, int64) (forge.ReviewClient, error) {
+func (r errClientResolver) ClientFor(context.Context, string, string) (forge.ReviewClient, error) {
 	return nil, r.err
 }
 
@@ -1466,8 +1463,8 @@ func TestReviewCommentWakeClientForTransientErr(t *testing.T) {
 	})
 	body := issueCommentBody("@fast-ship-bot", repo, 54, -1)
 
-	origGH := e.review.gh
-	e.review.gh = stubGHClientFor{err: errs.New(errs.ErrInternal.Code, "读取部署设置失败")}
+	origClients := e.review.clients
+	e.review.clients = errClientResolver{err: errs.New(errs.ErrInternal.Code, "读取部署设置失败")}
 	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-cf-1", body); err == nil {
 		t.Fatal("ClientFor 瞬时 AppError 应透出 error（500，平台重投）")
 	}
@@ -1480,7 +1477,7 @@ func TestReviewCommentWakeClientForTransientErr(t *testing.T) {
 	}
 
 	// 恢复后同 delivery 重投：完整重走并开轮。
-	e.review.gh = origGH
+	e.review.clients = origClients
 	if err := e.review.HandleGitHubWebhook(ctx, "issue_comment", "d-cf-1", body); err != nil {
 		t.Fatalf("恢复后重投应完整重走并开轮: %v", err)
 	}

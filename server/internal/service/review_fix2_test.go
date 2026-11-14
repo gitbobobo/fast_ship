@@ -140,7 +140,7 @@ func TestReviewSyncEpochGuard(t *testing.T) {
 		githubapp.StaticClients{Client: &epochBumpClient{GitHubClient: e.fake, db: e.svc.db, repo: repo, pr: 77}},
 		fakeReviewAppSource{ok: true},
 		fakeReviewPublicURL("https://fs.example.com"),
-		nil, nil, nil, repository.NewForgeIntegrationRepository(e.svc.db), e.svc.cfg, zap.NewNop())
+		nil, nil, repository.NewForgeIntegrationRepository(e.svc.db), e.svc.cfg, zap.NewNop())
 	review.syncPendingPRs(now)
 
 	var after model.ReviewPullRequest
@@ -261,7 +261,7 @@ func TestReviewLaunchRunSuccess(t *testing.T) {
 			return &T3ThreadLaunchResult{ThreadId: *req.ThreadId}, true, nil
 		},
 	}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 
 	run := e.seedRun(t, repo, 33, "sha-d", model.ReviewRunDispatched, now)
 	e.svc.db.Model(run).Update("environment_id", env.ID)
@@ -302,7 +302,7 @@ func TestReviewCleanupCancelledNoDelete(t *testing.T) {
 	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
 	now := time.Now().UTC()
 	t3 := &fakeReviewT3{threadWTErr: errT3ThreadNotFound}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 
 	env := createT3TestEnv(t, e.svc.db, e.user.ID, "env-cx")
 	createTestT3Binding(t, e.svc.db, e.project.ID, env.ID, "t3p")
@@ -397,7 +397,7 @@ func TestReviewLaunchCancelledDuringPrepareStillRecordsThread(t *testing.T) {
 			return &T3ThreadLaunchResult{ThreadId: *req.ThreadId}, true, nil
 		},
 	}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 	run := e.seedRun(t, repo, 34, "sha-race", model.ReviewRunDispatched, now)
 	runID = run.ID
 	e.svc.db.Model(run).Update("environment_id", env.ID)
@@ -461,7 +461,7 @@ func TestCleanupBeforeProjectDelete(t *testing.T) {
 			{Path: "/ws/wt-thread", RefNames: []string{"br-del"}},
 		},
 	}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 	review.CleanupBeforeProjectDelete(context.Background(), e.project.ID)
 
 	for _, want := range []string{active.ThreadID, unconfirmed.ThreadID} {
@@ -530,7 +530,7 @@ func TestCleanupBeforeProjectDeleteVerifiesOwnership(t *testing.T) {
 			{Path: "/ws/wt-old"},
 		},
 	}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 	review.CleanupBeforeProjectDelete(context.Background(), e.project.ID)
 
 	if len(t3.removed) != 1 || t3.removed[0] != "/ws/wt-free" {
@@ -562,7 +562,7 @@ func TestCleanupUsesLaunchWorkspaceRoot(t *testing.T) {
 		},
 		worktrees: []T3Worktree{{Path: "/ws/wt-snap", RefNames: []string{"br-ws"}}},
 	}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 	review.cleanupWorktrees(now)
 
 	if len(t3.removed) != 1 || t3.removed[0] != "/ws/wt-snap" {
@@ -582,7 +582,7 @@ func TestCleanupUsesLaunchWorkspaceRoot(t *testing.T) {
 func TestCleanupLegacyThreads(t *testing.T) {
 	e := newReviewEngineEnv(t)
 	t3 := &fakeReviewT3{}
-	review := e.withT3(t3, nil, nil)
+	review := e.withT3(t3, nil)
 	now := time.Now().UTC()
 	if err := e.svc.db.Create(&model.LegacyAutomationThread{
 		UserID: e.user.ID, EnvironmentID: "env-old", ThreadID: "legacy-th", CreatedAt: now,

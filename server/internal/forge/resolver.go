@@ -12,14 +12,18 @@ import (
 
 	"github.com/godbobo/fast_ship/server/internal/githubapi"
 	"github.com/godbobo/fast_ship/server/internal/model"
+	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
+	"github.com/godbobo/fast_ship/server/internal/pkg/githubapp"
 )
 
-// ReviewClientResolver 按 (集成, 仓库, 安装) 解析审查链路的访问面。审查侧的
+// ReviewClientResolver 按集成身份解析审查链路的访问面。审查侧的
 // integrationID 是归一快照（空串 = 内置 GitHub，其余为 forge_integrations.id）。
 type ReviewClientResolver interface {
-	// ClientFor 内置 GitHub 返回包好安装 id 的适配器；Forgejo 集成经凭证来源
-	// 现取 SSRF 安全 client + PAT 组装适配器（INT-167 任务 3）。
-	ClientFor(ctx context.Context, integrationID, repoFullName string, installationID int64) (ReviewClient, error)
+	// ClientFor 内置 GitHub 返回包好安装 id 的适配器——安装 id 由本侧按仓
+	// 库现解析（INT-230：installationID 不再经调用方透传，webhook 快照只
+	// 剩落库数据语义）；Forgejo 集成经凭证来源现取 SSRF 安全 client + PAT
+	// 组装适配器（INT-167 任务 3）。
+	ClientFor(ctx context.Context, integrationID, repoFullName string) (ReviewClient, error)
 }
 
 // GitHubApps 解析器取得部署级 GitHub 访问面的最小接口，与 service.PRGitHubClients
@@ -53,13 +57,17 @@ type ReviewClients struct {
 // 编译期钉住实现满足 resolver 契约。
 var _ ReviewClientResolver = (*ReviewClients)(nil)
 
+// ErrGitHubAccessUnconfigured 部署没有 GitHub App 访问面的哨兵：确定性配
+// 置态（重试只得到同一结果），调用方按确定性失败归类。
+var ErrGitHubAccessUnconfigured = errors.New("GitHub 访问面未配置")
+
 // NewReviewClients 用部署级 GitHub 访问面与 Forgejo 凭证来源构造 resolver；
 // 两者均可为 nil（对应「访问面未配置」的既有口径，ClientFor 报明确错误）。
 func NewReviewClients(gh GitHubApps, forgejo ForgejoSource) *ReviewClients {
 	return &ReviewClients{gh: gh, forgejo: forgejo}
 }
 
-func (r *ReviewClients) ClientFor(ctx context.Context, integrationID, repoFullName string, installationID int64) (ReviewClient, error) {
+func (r *ReviewClients) ClientFor(ctx context.Context, integrationID, repoFullName string) (ReviewClient, error) {
 	if integrationID != "" && integrationID != model.ForgeIntegrationBuiltinGitHubID {
 		if r.forgejo == nil {
 			return nil, fmt.Errorf("forge: 集成 %s（仓库 %s）的 Forgejo 凭证来源未配置", integrationID, repoFullName)
@@ -86,11 +94,39 @@ func (r *ReviewClients) ClientFor(ctx context.Context, integrationID, repoFullNa
 			withLoginCache(slot.(*ForgejoLoginCache)), nil
 	}
 	if r.gh == nil {
-		return nil, errors.New("GitHub 访问面未配置")
+		return nil, ErrGitHubAccessUnconfigured
 	}
 	api, err := r.gh.ClientFor(ctx)
 	if err != nil {
 		return nil, err
 	}
+	// 安装 id 按仓库现解析（INT-230）：调用方不再透传 webhook 快照。%v 文案
+	// 进 AppError 消息（对外形态与 service 侧解析时代一致），cause 保留链条
+	// 供确定性失败归类（401/403/404 且非限流）。
+	installationID, err := api.ResolveInstallation(ctx, repoFullName)
+	if err != nil {
+		return nil, errs.Wrap(errs.ErrGitHubAPI.Code, fmt.Sprintf("解析仓库安装失败: %v", err), err)
+	}
 	return NewGitHubReviewClient(api, installationID), nil
+}
+
+// HookDeliveryAccess 投递对账的 GitHub App 访问面（INT-230 重投边界）：
+// /app/hook/* 端点只认 App JWT、不按 installation 区分，不进 ReviewClient
+// 方法面；实况闸门的 PR 实拉复用安装令牌客户端（安装 id 取自投递 payload）。
+// 重投是 GitHub 专属能力，收在适配器侧，调用方不再持有第二套 GitHub 访问
+// 字段。返回 hooks 为 nil（err 为 nil）表示实现没有投递记录面（静态令牌等），
+// 对账整轮静默跳过。
+func (r *ReviewClients) HookDeliveryAccess(ctx context.Context) (githubapp.HookDeliveries, githubapi.GitHubClient, error) {
+	if r.gh == nil {
+		return nil, nil, ErrGitHubAccessUnconfigured
+	}
+	api, err := r.gh.ClientFor(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	hooks, ok := api.(githubapp.HookDeliveries)
+	if !ok {
+		return nil, nil, nil
+	}
+	return hooks, api, nil
 }

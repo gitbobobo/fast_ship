@@ -86,9 +86,6 @@ type hookDeliveryState struct {
 // 超上限后不再重试并发站内通知。循环内的判定顺序：跳过已送达 → 已判关闭
 // 静默跳过 → PR 实况闸门 → 超限通知 → 每轮重投预算 → 重投。
 func (s *ReviewService) reconcileWebhookDeliveries(now time.Time) {
-	if s.gh == nil {
-		return
-	}
 	// 投递记录是 App 维度、映射不到具体项目：通知发给所有启用审查的用户；
 	// 没有启用审查的项目时整个对账都没有意义。
 	var userIDs []string
@@ -100,17 +97,18 @@ func (s *ReviewService) reconcileWebhookDeliveries(now time.Time) {
 	if len(userIDs) == 0 {
 		return
 	}
-	// 网络面（ClientFor + 列表 + 重投）共用同一个兜底超时，先建 ctx 再取客户端。
+	// 网络面（列表 + 重投）共用同一个兜底超时，先建 ctx 再取客户端。访问面
+	// 经 clients 的 GitHub 适配器取（INT-230：重投不挂 ReviewService 的第二
+	// 套 GitHub 字段）。
 	ctx, cancel := context.WithTimeout(context.Background(), reviewRedeliveryTimeout)
 	defer cancel()
-	client, err := s.gh.ClientFor(ctx)
+	hooks, client, err := s.hookDeliveryAccess(ctx)
 	if err != nil {
 		// App 未配置等前置缺失是常态，不按错误处理。
 		s.logger.Info("投递对账跳过：无法取得 GitHub 客户端", zap.Error(err))
 		return
 	}
-	hooks, ok := client.(githubapp.HookDeliveries)
-	if !ok {
+	if hooks == nil {
 		return // 静态令牌等实现没有投递记录访问面
 	}
 	items, err := hooks.ListHookDeliveries(ctx, now.Add(-reviewRedeliveryLookback))

@@ -38,7 +38,7 @@ func retentionService(t *testing.T, root string) (*ReviewService, *fakeReviewMed
 	t.Helper()
 	e := newReviewEngineEnv(t)
 	media := retentionMedia(t, root)
-	review := e.withT3(nil, media, nil)
+	review := e.withT3(nil, media)
 	return review, media, e
 }
 
@@ -235,7 +235,7 @@ func TestAssetRetentionProbeOnlyBytesCollected(t *testing.T) {
 	body := "![s](https://img.example/probe.png)"
 
 	probe := review.probeAndRecordScreenshots(context.Background(),
-		model.ForgeIntegrationBuiltinGitHubID, repo, 1, "sha-x", 1, body)
+		model.ForgeIntegrationBuiltinGitHubID, repo, 1, "sha-x", anonGitHubClient(1), body)
 	if probe.result != probeReady {
 		t.Fatalf("probe = %+v, want probeReady", probe)
 	}
@@ -328,7 +328,7 @@ func TestAssetRetentionSweepReentrant(t *testing.T) {
 // 自愈路径）；文件在时不重下。
 func TestEnsureAssetsReverifiesMissingFile(t *testing.T) {
 	e := newReviewEngineEnv(t)
-	review := e.withT3(nil, e.media, nil)
+	review := e.withT3(nil, e.media)
 	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
 	ctx := context.Background()
 	body := "![a](https://img.example/rv.png)"
@@ -339,7 +339,7 @@ func TestEnsureAssetsReverifiesMissingFile(t *testing.T) {
 	review.db.Model(&model.ReviewAsset{}).Where("1=1").
 		Updates(map[string]any{"storage_path": missingPath, "created_at": seededCreatedAt})
 
-	if _, _, err := review.ensureAssets(ctx, model.ForgeIntegrationBuiltinGitHubID, repo, 81, "sha-a", body, 0); err != nil {
+	if _, _, err := review.ensureAssets(ctx, model.ForgeIntegrationBuiltinGitHubID, repo, 81, "sha-a", body, anonGitHubClient(0)); err != nil {
 		t.Fatalf("ensureAssets: %v", err)
 	}
 	if e.media.anonCalls != 1 {
@@ -366,7 +366,7 @@ func TestEnsureAssetsReverifiesMissingFile(t *testing.T) {
 	before := e.media.anonCalls
 	review.db.Model(&model.ReviewAsset{}).Where("source_url = ?", "https://img.example/rv.png").
 		Update("storage_path", e.media.ShotPath())
-	if _, _, err := review.ensureAssets(ctx, model.ForgeIntegrationBuiltinGitHubID, repo, 81, "sha-a", body, 0); err != nil {
+	if _, _, err := review.ensureAssets(ctx, model.ForgeIntegrationBuiltinGitHubID, repo, 81, "sha-a", body, anonGitHubClient(0)); err != nil {
 		t.Fatalf("ensureAssets: %v", err)
 	}
 	if e.media.anonCalls != before {
@@ -380,7 +380,7 @@ func TestEnsureAssetsReverifiesMissingFile(t *testing.T) {
 	badPath := e.media.ShotPath() + "\x00bad"
 	review.db.Model(&model.ReviewAsset{}).Where("source_url = ?", "https://img.example/rv.png").
 		Update("storage_path", badPath)
-	if _, _, err := review.ensureAssets(ctx, model.ForgeIntegrationBuiltinGitHubID, repo, 81, "sha-a", body, 0); err != nil {
+	if _, _, err := review.ensureAssets(ctx, model.ForgeIntegrationBuiltinGitHubID, repo, 81, "sha-a", body, anonGitHubClient(0)); err != nil {
 		t.Fatalf("ensureAssets: %v", err)
 	}
 	if e.media.anonCalls != before {
@@ -399,7 +399,7 @@ func TestEnsureAssetsReverifiesMissingFile(t *testing.T) {
 // 已有成功行原样保留，不因探测重写。
 func TestProbeRecordAssets(t *testing.T) {
 	e := newReviewEngineEnv(t)
-	review := e.withT3(nil, e.media, nil)
+	review := e.withT3(nil, e.media)
 	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
 	now := time.Now().UTC()
 
@@ -424,7 +424,7 @@ func TestProbeRecordAssets(t *testing.T) {
 
 	body := "![h](https://img.example/heal.png) ![v](https://img.example/valid.png) ![n](https://img.example/new.png)"
 	probe := review.probeAndRecordScreenshots(context.Background(),
-		model.ForgeIntegrationBuiltinGitHubID, repo, 91, "sha-p", 1, body)
+		model.ForgeIntegrationBuiltinGitHubID, repo, 91, "sha-p", anonGitHubClient(1), body)
 	if probe.result != probeReady {
 		t.Fatalf("probe = %+v, want probeReady", probe)
 	}
@@ -462,7 +462,7 @@ func TestProbeRecordAssets(t *testing.T) {
 // 保留策略循环随 Start 启停（幂等 Start 不会叠加第二个循环）。
 func TestAssetRetentionLoopStartStop(t *testing.T) {
 	e := newReviewEngineEnv(t)
-	review := e.withT3(nil, e.media, nil)
+	review := e.withT3(nil, e.media)
 	review.Start()
 	review.Start() // 幂等
 	review.Stop()
@@ -602,7 +602,7 @@ func TestEnsureAssetsRetryFailureKeepsPath(t *testing.T) {
 		cached:  &githubmedia.CachedMedia{Path: "/cache/keep.png"},
 		anonErr: &githubmedia.UpstreamStatusError{StatusCode: 503},
 	}
-	review := e.withT3(nil, media, nil)
+	review := e.withT3(nil, media)
 	body := "![a](https://img.example/keep.png)"
 
 	seededAt := time.Now().UTC().Add(-time.Hour)
@@ -617,7 +617,7 @@ func TestEnsureAssetsRetryFailureKeepsPath(t *testing.T) {
 		t.Fatalf("seed row: %v", err)
 	}
 
-	if _, _, err := review.ensureAssets(ctx, model.ForgeIntegrationBuiltinGitHubID, repo, 1, "sha-keep", body, 0); err != nil {
+	if _, _, err := review.ensureAssets(ctx, model.ForgeIntegrationBuiltinGitHubID, repo, 1, "sha-keep", body, anonGitHubClient(0)); err != nil {
 		t.Fatalf("ensureAssets: %v", err)
 	}
 	var got model.ReviewAsset
@@ -636,7 +636,7 @@ func TestEnsureAssetsRetryFailureKeepsPath(t *testing.T) {
 
 	// 卷恢复（重下成功）→ 整行落账 + 续期。
 	media.anonErr = nil
-	if _, _, err := review.ensureAssets(ctx, model.ForgeIntegrationBuiltinGitHubID, repo, 1, "sha-keep", body, 0); err != nil {
+	if _, _, err := review.ensureAssets(ctx, model.ForgeIntegrationBuiltinGitHubID, repo, 1, "sha-keep", body, anonGitHubClient(0)); err != nil {
 		t.Fatalf("ensureAssets retry: %v", err)
 	}
 	if err := review.db.Where("source_url = ?", "https://img.example/keep.png").First(&got).Error; err != nil {

@@ -31,6 +31,10 @@ type recordingAPI struct {
 	repoErr        error
 	entries        map[string]bool
 	pathErr        error
+
+	resolveInst int64  // ResolveInstallation 返回的安装 id
+	resolveErr  error  // ResolveInstallation 注入的错误
+	resolveRepo string // 最近一次 ResolveInstallation 收到的仓库名
 }
 
 // statusCall 一次 CreateCommitStatus 的入参快照。
@@ -115,8 +119,9 @@ func (r *recordingAPI) TreeEntriesAtRef(_ context.Context, installationID int64,
 	return r.entries, r.pathErr
 }
 
-func (r *recordingAPI) ResolveInstallation(_ context.Context, _ string) (int64, error) {
-	return 0, errors.New("recordingAPI: 不支持解析")
+func (r *recordingAPI) ResolveInstallation(_ context.Context, repoFullName string) (int64, error) {
+	r.resolveRepo = repoFullName
+	return r.resolveInst, r.resolveErr
 }
 
 // withBearer 模拟 githubapp.Client 的凭证面：Bearer(ctx, installationID)。

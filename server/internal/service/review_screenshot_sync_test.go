@@ -906,7 +906,7 @@ func TestVisualSyncScreensUnavailableCarriesPriorHint(t *testing.T) {
 // 超时后用剩余预算继续试下一张。
 func TestProbeScreenshotsAttemptTimeoutLetsLaterScreensThrough(t *testing.T) {
 	e := newReviewEngineEnv(t)
-	review := e.withT3(nil, e.media, nil)
+	review := e.withT3(nil, e.media)
 	hangURL := "https://uiv.frp.musiver.cn/f/hang.png"
 	okURL := "https://uiv.frp.musiver.cn/f/ok.png"
 	e.media.blockURLs = map[string]bool{hangURL: true}
@@ -920,7 +920,7 @@ func TestProbeScreenshotsAttemptTimeoutLetsLaterScreensThrough(t *testing.T) {
 
 	body := "![a](" + hangURL + ") ![b](" + okURL + ")"
 	start := time.Now()
-	probe, _ := review.probeScreenshots(context.Background(), model.ForgeIntegrationBuiltinGitHubID, 1, body)
+	probe, _ := review.probeScreenshots(context.Background(), model.ForgeIntegrationBuiltinGitHubID, anonGitHubClient(1), body)
 	elapsed := time.Since(start)
 
 	if probe.result != probeReady {
@@ -941,7 +941,7 @@ func TestProbeScreenshotsAttemptTimeoutLetsLaterScreensThrough(t *testing.T) {
 // 无限等待。
 func TestProbeScreenshotsAllBlockedStopsAtBudget(t *testing.T) {
 	e := newReviewEngineEnv(t)
-	review := e.withT3(nil, e.media, nil)
+	review := e.withT3(nil, e.media)
 	e.media.blockURLs = map[string]bool{}
 	var refs []string
 	for i := 0; i < 15; i++ {
@@ -958,7 +958,7 @@ func TestProbeScreenshotsAllBlockedStopsAtBudget(t *testing.T) {
 	}()
 
 	start := time.Now()
-	probe, _ := review.probeScreenshots(context.Background(), model.ForgeIntegrationBuiltinGitHubID, 1, strings.Join(refs, " "))
+	probe, _ := review.probeScreenshots(context.Background(), model.ForgeIntegrationBuiltinGitHubID, anonGitHubClient(1), strings.Join(refs, " "))
 	elapsed := time.Since(start)
 
 	if probe.result != probeUnavailable {
@@ -981,12 +981,10 @@ func TestReviewAssetsNoBearerForExternalHost(t *testing.T) {
 	ctx := context.Background()
 	cached := &githubmedia.CachedMedia{Path: "/cache/shot.png"}
 	media := &fakeReviewMedia{cached: cached, anonErr: errors.New("forbidden anon")}
-	review := e.withT3(nil, media, func(context.Context, string, int64) (string, error) {
-		return "installation-token-1", nil
-	})
+	review := e.withT3(nil, media)
 	body := "![界面](https://uiv.example.com/f/x.png)"
 
-	_, assets, err := review.ensureAssets(ctx, model.ForgeIntegrationBuiltinGitHubID, repo, 71, "sha-ext", body, 42)
+	_, assets, err := review.ensureAssets(ctx, model.ForgeIntegrationBuiltinGitHubID, repo, 71, "sha-ext", body, anonGitHubClient(42))
 	if err != nil {
 		t.Fatalf("ensureAssets: %v", err)
 	}
@@ -1012,9 +1010,9 @@ func TestDownloadScreenshotUnconfiguredMedia(t *testing.T) {
 		githubapp.StaticClients{Client: e.fake},
 		fakeReviewAppSource{ok: true},
 		fakeReviewPublicURL("https://fs.example.com"),
-		nil, nil, nil, repository.NewForgeIntegrationRepository(e.svc.db), e.svc.cfg, zap.NewNop())
+		nil, nil, repository.NewForgeIntegrationRepository(e.svc.db), e.svc.cfg, zap.NewNop())
 
-	_, err := review.downloadScreenshot(context.Background(), model.ForgeIntegrationBuiltinGitHubID, 1, "https://uiv.example.com/f/x.png")
+	_, err := review.downloadScreenshot(context.Background(), anonGitHubClient(1), model.ForgeIntegrationBuiltinGitHubID, "https://uiv.example.com/f/x.png")
 	if !errors.Is(err, errReviewMediaUnconfigured) {
 		t.Fatalf("err = %v, want errReviewMediaUnconfigured", err)
 	}
@@ -1030,7 +1028,7 @@ func TestDownloadScreenshotUnconfiguredMedia(t *testing.T) {
 func TestDownloadScreenshotBearerRetryOnlyOnAuthFailure(t *testing.T) {
 	e := newReviewEngineEnv(t)
 	mediaURL := "https://github.com/user-attachments/assets/xyz"
-	bearer := func(context.Context, string, int64) (string, error) { return "installation-token-1", nil }
+	bearerClient := &tokenBearerClient{ReviewClient: anonGitHubClient(42), token: "installation-token-1"}
 
 	deterministic := []struct {
 		name string
@@ -1044,8 +1042,8 @@ func TestDownloadScreenshotBearerRetryOnlyOnAuthFailure(t *testing.T) {
 	}
 	for _, c := range deterministic {
 		media := &fakeReviewMedia{cached: &githubmedia.CachedMedia{Path: "/cache/shot.png"}, anonErr: c.err}
-		review := e.withT3(nil, media, bearer)
-		if _, err := review.downloadScreenshot(context.Background(), model.ForgeIntegrationBuiltinGitHubID, 42, mediaURL); !errors.Is(err, c.err) {
+		review := e.withT3(nil, media)
+		if _, err := review.downloadScreenshot(context.Background(), anonGitHubClient(42), model.ForgeIntegrationBuiltinGitHubID, mediaURL); !errors.Is(err, c.err) {
 			t.Fatalf("%s: err = %v, want 原样返回匿名错误", c.name, err)
 		}
 		if media.anonCalls != 1 || media.bearerCalls != 0 {
@@ -1057,8 +1055,8 @@ func TestDownloadScreenshotBearerRetryOnlyOnAuthFailure(t *testing.T) {
 	// 私有附件匿名 404：带令牌重试，令牌传到下载面那一路。
 	media := &fakeReviewMedia{cached: &githubmedia.CachedMedia{Path: "/cache/shot.png"},
 		anonErr: &githubmedia.UpstreamStatusError{StatusCode: 404}}
-	review := e.withT3(nil, media, bearer)
-	got, err := review.downloadScreenshot(context.Background(), model.ForgeIntegrationBuiltinGitHubID, 42, mediaURL)
+	review := e.withT3(nil, media)
+	got, err := review.downloadScreenshot(context.Background(), bearerClient, model.ForgeIntegrationBuiltinGitHubID, mediaURL)
 	if err != nil {
 		t.Fatalf("404 + bearer 重试: %v", err)
 	}
@@ -1142,7 +1140,7 @@ func TestScreenshotErrorText(t *testing.T) {
 // 自己的一道闸。
 func TestProbeScreenshotsByteBudgetStopsAfterLimit(t *testing.T) {
 	e := newReviewEngineEnv(t)
-	review := e.withT3(nil, e.media, nil)
+	review := e.withT3(nil, e.media)
 	// 桩元数据每张 200 MiB（真实文件极小，只测预算结算不测字节）：第 2 张
 	// 后累计 400 MiB > 预算 256 MiB。
 	path := filepath.Join(t.TempDir(), "shot.png")
@@ -1155,7 +1153,7 @@ func TestProbeScreenshotsByteBudgetStopsAfterLimit(t *testing.T) {
 	for i := 0; i < 4; i++ {
 		lines = append(lines, fmt.Sprintf("![s%d](https://uiv.example.com/f/%d.png)", i, i))
 	}
-	probe, _ := review.probeScreenshots(context.Background(), model.ForgeIntegrationBuiltinGitHubID, 1, strings.Join(lines, "\n\n"))
+	probe, _ := review.probeScreenshots(context.Background(), model.ForgeIntegrationBuiltinGitHubID, anonGitHubClient(1), strings.Join(lines, "\n\n"))
 
 	if probe.result != probeReady {
 		t.Fatalf("probe = %+v, want probeReady（预算触发前已有成功图）", probe)
@@ -1173,7 +1171,7 @@ func TestProbeScreenshotsByteBudgetStopsAfterLimit(t *testing.T) {
 // 预算后，全部命中（或上一轮已下载）的集合一次探齐、拿到全量指纹。
 func TestProbeScreenshotsByteBudgetSkipsCacheHits(t *testing.T) {
 	e := newReviewEngineEnv(t)
-	review := e.withT3(nil, e.media, nil)
+	review := e.withT3(nil, e.media)
 	path := filepath.Join(t.TempDir(), "shot.png")
 	if err := os.WriteFile(path, []byte("\x89PNG\r\n\x1a\nfake"), 0o600); err != nil {
 		t.Fatalf("write fake png: %v", err)
@@ -1186,7 +1184,7 @@ func TestProbeScreenshotsByteBudgetSkipsCacheHits(t *testing.T) {
 	for i := 0; i < 4; i++ {
 		lines = append(lines, fmt.Sprintf("![s%d](https://uiv.example.com/f/%d.png)", i, i))
 	}
-	probe, _ := review.probeScreenshots(context.Background(), model.ForgeIntegrationBuiltinGitHubID, 1, strings.Join(lines, "\n\n"))
+	probe, _ := review.probeScreenshots(context.Background(), model.ForgeIntegrationBuiltinGitHubID, anonGitHubClient(1), strings.Join(lines, "\n\n"))
 
 	if probe.result != probeReady {
 		t.Fatalf("probe = %+v, want probeReady", probe)
@@ -1207,14 +1205,14 @@ func TestProbeScreenshotsByteBudgetSkipsCacheHits(t *testing.T) {
 // 是图」并结清，同一 URL 集合的视觉轮被永久跳过。
 func TestProbeScreenshotsByteBudgetNeverNone(t *testing.T) {
 	e := newReviewEngineEnv(t)
-	review := e.withT3(nil, e.media, nil)
+	review := e.withT3(nil, e.media)
 	path := filepath.Join(t.TempDir(), "shot.png")
 	if err := os.WriteFile(path, []byte("\x89PNG\r\n\x1a\nfake"), 0o600); err != nil {
 		t.Fatalf("write fake png: %v", err)
 	}
 	e.media.cached = githubmedia.CachedImage(path, "image/png", 300<<20)
 
-	probe, _ := review.probeScreenshots(context.Background(), model.ForgeIntegrationBuiltinGitHubID, 1,
+	probe, _ := review.probeScreenshots(context.Background(), model.ForgeIntegrationBuiltinGitHubID, anonGitHubClient(1),
 		"![s](https://uiv.example.com/f/x.png)")
 
 	if probe.result != probeReady {
@@ -1231,7 +1229,7 @@ func TestProbeScreenshotsByteBudgetNeverNone(t *testing.T) {
 // 再试），不能落 probeNone 结清。
 func TestProbeScreenshotsByteBudgetSettlesEvenWhenHashFails(t *testing.T) {
 	e := newReviewEngineEnv(t)
-	review := e.withT3(nil, e.media, nil)
+	review := e.withT3(nil, e.media)
 	// 下载「成功」，但路径不存在 → hashFileSHA256 失败。
 	e.media.cached = githubmedia.CachedImage(filepath.Join(t.TempDir(), "missing.png"), "image/png", 300<<20)
 
@@ -1239,7 +1237,7 @@ func TestProbeScreenshotsByteBudgetSettlesEvenWhenHashFails(t *testing.T) {
 	for i := 0; i < 4; i++ {
 		lines = append(lines, fmt.Sprintf("![s%d](https://uiv.example.com/f/%d.png)", i, i))
 	}
-	probe, _ := review.probeScreenshots(context.Background(), model.ForgeIntegrationBuiltinGitHubID, 1, strings.Join(lines, "\n\n"))
+	probe, _ := review.probeScreenshots(context.Background(), model.ForgeIntegrationBuiltinGitHubID, anonGitHubClient(1), strings.Join(lines, "\n\n"))
 
 	if e.media.anonCalls != 1 {
 		t.Fatalf("anonCalls = %d, want 1（第一张 300 MiB 超预算即停，不得因哈希失败继续）", e.media.anonCalls)
