@@ -1108,10 +1108,11 @@ export default function IssueDetailPage() {
                 <div className="flex items-center justify-between border-b px-4 py-2.5">
                   <div className="min-w-0">
                     <h2 className="text-sm font-semibold">来源列表</h2>
-                    <p className="mt-0.5 truncate text-xs text-muted-foreground">
-                      {sourceCountLabel
-                        ? `${sourceLabel} · ${sourceCountLabel}`
-                        : sourceLabel}
+                    <p className="mt-0.5 flex text-xs text-muted-foreground">
+                      <span className="min-w-0 truncate">{sourceLabel}</span>
+                      {sourceCountLabel ? (
+                        <span className="shrink-0"> · {sourceCountLabel}</span>
+                      ) : null}
                     </p>
                   </div>
                   <Button
@@ -1369,10 +1370,11 @@ export default function IssueDetailPage() {
           >
             <SheetHeader className="border-b pb-3">
               <SheetTitle>来源列表</SheetTitle>
-              <p className="mt-0.5 truncate text-xs text-muted-foreground">
-                {sourceCountLabel
-                  ? `${sourceLabel} · ${sourceCountLabel}`
-                  : sourceLabel}
+              <p className="mt-0.5 flex text-xs text-muted-foreground">
+                <span className="min-w-0 truncate">{sourceLabel}</span>
+                {sourceCountLabel ? (
+                  <span className="shrink-0"> · {sourceCountLabel}</span>
+                ) : null}
               </p>
             </SheetHeader>
             <div
