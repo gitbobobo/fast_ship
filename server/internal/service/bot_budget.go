@@ -300,12 +300,20 @@ func (s *BotService) evalUserBudgets(repo *repository.BotBudgetRepository, userI
 	botIDs := make([]string, 0, len(botIDSet))
 	for botID := range botIDSet {
 		botIDs = append(botIDs, botID)
-		if bot, err := s.bots.Get(botID); err == nil {
-			botNames[botID] = bot.Name
-		}
 	}
 	if len(botIDs) == 0 {
 		return
+	}
+	// bot 名字用投影批量取（INT-228）：不为名字 Get 整行——整行读取会把
+	// 系统提示词与 provider 密文反复拷进内存。bot 已删除时投影无行，预算
+	// 按目标缺失跳过，与旧行为一致；批量读失败整轮跳过（无名字不可发布
+	// 告警），与全部单条读失败等价。
+	metas, err := repository.NewBotRepository(s.db).BotMetasByIDs(botIDs)
+	if err != nil {
+		s.logger.Warn("预算评估读取机器人名字失败", zap.Error(err))
+	}
+	for _, meta := range metas {
+		botNames[meta.ID] = meta.Name
 	}
 
 	spendCache := map[botBudgetWindowKey]repository.BotBudgetSpend{}
