@@ -876,6 +876,71 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/oauth/authorize": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * OAuth 授权页预取
+         * @description 校验 client_id / redirect_uri（与注册精确匹配）/ code_challenge（仅 S256、
+         *     合法 base64url），返回客户端名与当前用户项目清单，供授权页勾选。
+         *     state 由前端透传，不在本端点处理。
+         */
+        get: operations["getOAuthAuthorize"];
+        put?: never;
+        /**
+         * OAuth 授权提交（签发授权码）
+         * @description 同一事务里 upsert 该 user+client 的授权（重授权覆盖 scope）并写入授权码
+         *     （10 分钟有效、单次使用）。project_ids 必须属于当前用户且非空；write 为
+         *     true 时 scope 记 write（隐含 read）。返回带回 code 与 state 的 redirect 地址。
+         */
+        post: operations["submitOAuthAuthorize"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/oauth/authorizations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** 列出当前用户的 OAuth 授权 */
+        get: operations["listOAuthAuthorizations"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/oauth/authorizations/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * 吊销 OAuth 授权
+         * @description 仅本人；吊销授权并同时吊销该授权下全部 access/refresh 令牌（即时生效）。
+         */
+        delete: operations["deleteOAuthAuthorization"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/github-tokens": {
         parameters: {
             query?: never;
@@ -4273,6 +4338,48 @@ export interface components {
         CreateApiKeyRequest: {
             name: string;
         };
+        OAuthAuthorizePreview: {
+            /** @description 客户端注册名 */
+            client_name: string;
+            projects: components["schemas"]["OAuthProjectOption"][];
+        };
+        OAuthProjectOption: {
+            id: string;
+            name: string;
+        };
+        OAuthAuthorizeRequest: {
+            client_id: string;
+            /** @description 必须与客户端注册的某个 redirect_uri 精确匹配 */
+            redirect_uri: string;
+            /** @description PKCE S256 challenge（合法 base64url，43-128 字符） */
+            code_challenge: string;
+            /** @enum {string} */
+            code_challenge_method: "S256";
+            /** @description 客户端 state，原样拼回 redirect */
+            state?: string;
+            /** @description 授权的项目集合，必须全部属于当前用户 */
+            project_ids: string[];
+            /**
+             * @description 全局读写档；true 时 scope 记 write（隐含 read）
+             * @default false
+             */
+            write: boolean;
+        };
+        OAuthAuthorizeResult: {
+            /** @description redirect_uri?code=..&state=..，前端据此跳转 */
+            redirect: string;
+        };
+        OAuthAuthorization: {
+            id: string;
+            client_name: string;
+            /** @description 空格分隔的 scope 串（project:<uuid>:read / project:<uuid>:write） */
+            scopes: string;
+            /**
+             * Format: date-time
+             * @description 最近一次授权/重授权时间
+             */
+            created_at: string;
+        };
         ApiKey: {
             id: string;
             user_id: string;
@@ -7573,6 +7680,8 @@ export interface components {
         T3AttachmentId: string;
         /** @description API Key ID */
         ProjectOrKeyId: string;
+        /** @description OAuth 授权 ID（UUID） */
+        OAuthAuthorizationId: string;
         /** @description 额度账号 ID（UUID） */
         QuotaAccountId: string;
         /** @description 设备授权会话 ID（POST 返回的 id） */
@@ -9780,6 +9889,107 @@ export interface operations {
             200: components["responses"]["EmptySuccess"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getOAuthAuthorize: {
+        parameters: {
+            query: {
+                client_id: string;
+                redirect_uri: string;
+                code_challenge: string;
+                code_challenge_method: "S256";
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 客户端名与项目清单 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"] & {
+                        data?: components["schemas"]["OAuthAuthorizePreview"];
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    submitOAuthAuthorize: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OAuthAuthorizeRequest"];
+            };
+        };
+        responses: {
+            /** @description 授权成功，返回 redirect 地址 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"] & {
+                        data?: components["schemas"]["OAuthAuthorizeResult"];
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listOAuthAuthorizations: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 授权清单（客户端名、scope、创建时间、id） */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope"] & {
+                        data?: components["schemas"]["OAuthAuthorization"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    deleteOAuthAuthorization: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description OAuth 授权 ID（UUID） */
+                id: components["parameters"]["OAuthAuthorizationId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: components["responses"]["EmptySuccess"];
+            401: components["responses"]["Unauthorized"];
             404: components["responses"]["NotFound"];
             500: components["responses"]["InternalError"];
         };

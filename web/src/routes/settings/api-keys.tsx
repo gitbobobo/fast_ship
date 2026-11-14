@@ -109,6 +109,8 @@ export default function ApiKeysPage() {
             API Key 适用于 CI/CD 等自动化场景。
             <br />
             支持：读取项目/问题/版本、上传构建产物、创建和更新 Issue。
+            <br />
+            API Key 保留给脚本与 CI 使用，MCP 客户端建议改用 OAuth 接入（「已授权的应用」页统一管理）。
           </p>
         </div>
 

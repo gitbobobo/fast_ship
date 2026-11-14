@@ -47,6 +47,9 @@ func Setup(
 	memberHandler *handler.MemberHandler,
 	deploymentSettingsHandler *handler.DeploymentSettingsHandler,
 	forgeIntegrationHandler *handler.ForgeIntegrationHandler,
+	mcpHandler *handler.MCPHandler,
+	oauthHandler *handler.OAuthHandler,
+	oauthService *service.OAuthService,
 	authService *service.AuthService,
 	apiKeyRepo *repository.ApiKeyRepository,
 ) {
@@ -455,6 +458,28 @@ func Setup(
 		selfLogs.GET("", selfLogHandler.ListSelfLogs)
 		selfLogs.GET("/aggregate", selfLogHandler.AggregateSelfLogs)
 		selfLogs.GET("/trace", selfLogHandler.TraceSelfLogs)
+	}
+
+	// OAuth 2.1 授权服务（INT-222）。
+	// 协议端点公开（无认证），不套 Fast Ship envelope；挂在根路径下，
+	// /.well-known/oauth-authorization-server 必须能从 issuer 根发现。
+	r.GET("/.well-known/oauth-protected-resource", oauthHandler.WellKnownProtectedResource)
+	r.GET("/.well-known/oauth-authorization-server", oauthHandler.WellKnownAuthorizationServer)
+	r.POST("/oauth/register", oauthHandler.Register)
+	r.POST("/oauth/token", oauthHandler.Token)
+
+	// MCP Streamable HTTP 端点（INT-222）：静态路径 /mcp，不与现有路由冲突
+	//（Web 面板走 NoRoute 回落）。Bearer 鉴权挑战在前，协议处理在后；
+	// GET/POST/DELETE 由 SDK handler 分派，无状态模式不分配 session。
+	r.Any("/mcp", middleware.RequireMCPToken(oauthService), mcpHandler.Handle)
+
+	// OAuth 管理 API：授权页预取/提交与授权清单管理，仅 JWT。
+	oauthAPI := api.Group("/oauth", middleware.RequireJWT(cfg, authService))
+	{
+		oauthAPI.GET("/authorize", oauthHandler.AuthorizeGet)
+		oauthAPI.POST("/authorize", oauthHandler.AuthorizePost)
+		oauthAPI.GET("/authorizations", oauthHandler.ListAuthorizations)
+		oauthAPI.DELETE("/authorizations/:id", oauthHandler.DeleteAuthorization)
 	}
 
 	// GitHub App webhook 入站（INT-93）：公开端点，X-Hub-Signature-256 验签。

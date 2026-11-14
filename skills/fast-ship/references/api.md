@@ -740,6 +740,154 @@ API Key 管理（仅 JWT）
 | 404 | 资源不存在（40400-40499） |
 | 500 | 服务器内部错误（50000） |
 
+## oauth
+
+OAuth 2.1 授权服务（INT-222，仅 JWT）：授权页预取/提交与授权管理。协议端点（/oauth/register、/oauth/token、/.well-known/*）按 RFC 7591/6749/8414/9728 原生格式工作，不在本规范内
+
+### GET `/api/oauth/authorize`
+
+<!-- operationId: getOAuthAuthorize -->
+
+OAuth 授权页预取
+
+校验 client_id / redirect_uri（与注册精确匹配）/ code_challenge（仅 S256、
+合法 base64url），返回客户端名与当前用户项目清单，供授权页勾选。
+state 由前端透传，不在本端点处理。
+
+**鉴权**：仅 JWT
+
+**Query 参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `client_id` | string | 是 |  |
+| `redirect_uri` | string | 是 |  |
+| `code_challenge` | string | 是 |  |
+| `code_challenge_method` | string（enum: S256） | 是 |  |
+
+**成功响应**
+
+**200** 客户端名与项目清单
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `client_name` | string | 是 | 客户端注册名 |
+| `projects` | object[] | 是 |  |
+| `projects[].id` | string | 是 |  |
+| `projects[].name` | string | 是 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 400 | 请求参数无效（40001-40099） |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 500 | 服务器内部错误（50000） |
+
+### POST `/api/oauth/authorize`
+
+<!-- operationId: submitOAuthAuthorize -->
+
+OAuth 授权提交（签发授权码）
+
+同一事务里 upsert 该 user+client 的授权（重授权覆盖 scope）并写入授权码
+（10 分钟有效、单次使用）。project_ids 必须属于当前用户且非空；write 为
+true 时 scope 记 write（隐含 read）。返回带回 code 与 state 的 redirect 地址。
+
+**鉴权**：仅 JWT
+
+**请求体**
+
+`application/json`，必填。
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `client_id` | string | 是 |  |
+| `redirect_uri` | string | 是 | 必须与客户端注册的某个 redirect_uri 精确匹配 |
+| `code_challenge` | string | 是 | PKCE S256 challenge（合法 base64url，43-128 字符） |
+| `code_challenge_method` | string（enum: S256） | 是 |  |
+| `state` | string | 否 | 客户端 state，原样拼回 redirect |
+| `project_ids` | string[]（≥1 项） | 是 | 授权的项目集合，必须全部属于当前用户 |
+| `write` | boolean（默认 false） | 否 | 全局读写档；true 时 scope 记 write（隐含 read） |
+
+**成功响应**
+
+**200** 授权成功，返回 redirect 地址
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `redirect` | string | 是 | redirect_uri?code=..&state=..，前端据此跳转 |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 400 | 请求参数无效（40001-40099） |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 500 | 服务器内部错误（50000） |
+
+### GET `/api/oauth/authorizations`
+
+<!-- operationId: listOAuthAuthorizations -->
+
+列出当前用户的 OAuth 授权
+
+**鉴权**：仅 JWT
+
+**成功响应**
+
+**200** 授权清单（客户端名、scope、创建时间、id）
+
+`data` 为数组。
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 |  |
+| `client_name` | string | 是 |  |
+| `scopes` | string | 是 | 空格分隔的 scope 串（project:<uuid>:read / project:<uuid>:write） |
+| `created_at` | string（date-time） | 是 | 最近一次授权/重授权时间 |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 500 | 服务器内部错误（50000） |
+
+### DELETE `/api/oauth/authorizations/{id}`
+
+<!-- operationId: deleteOAuthAuthorization -->
+
+吊销 OAuth 授权
+
+仅本人；吊销授权并同时吊销该授权下全部 access/refresh 令牌（即时生效）。
+
+**鉴权**：仅 JWT
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | OAuth 授权 ID（UUID） |
+
+**成功响应**
+
+**200** 操作成功（data 为 null）
+
+`data` 为 null。
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 404 | 资源不存在（40400-40499） |
+| 500 | 服务器内部错误（50000） |
+
 ## github-tokens
 
 用户级 GitHub Token 库（仅 JWT）

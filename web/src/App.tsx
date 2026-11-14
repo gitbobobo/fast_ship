@@ -21,6 +21,7 @@ import AuthLayout from "@/routes/_auth-layout";
 import SettingsLayout from "@/routes/settings/layout";
 
 const LoginPage = lazy(() => import("@/routes/login"));
+const OAuthAuthorizePage = lazy(() => import("@/routes/oauth/authorize"));
 const RegisterPage = lazy(() => import("@/routes/register"));
 const DashboardPage = lazy(() => import("@/routes/dashboard/index"));
 const ProjectsPage = lazy(() => import("@/routes/projects/index"));
@@ -48,6 +49,7 @@ const SettingsIssuePromptsPage = lazy(
   () => import("@/routes/settings/issue-prompts"),
 );
 const ApiKeysPage = lazy(() => import("@/routes/settings/api-keys"));
+const OAuthAppsPage = lazy(() => import("@/routes/settings/oauth-apps"));
 const GithubTokensPage = lazy(
   () => import("@/routes/settings/github-tokens"),
 );
@@ -127,6 +129,12 @@ export default function App() {
                 element={<LazyPage render={<RegisterPage />} />}
               />
             </Route>
+
+            {/* OAuth 授权同意页：公开路由，页面自身处理登录回跳与错误态 */}
+            <Route
+              path="/oauth/authorize"
+              element={<LazyPage render={<OAuthAuthorizePage />} />}
+ />
 
             {/* 已登录路由 */}
             <Route element={<AppLayout />}>
@@ -231,6 +239,10 @@ export default function App() {
                 <Route
                   path="api-keys"
                   element={<LazyPage render={<ApiKeysPage />} />}
+                />
+                <Route
+                  path="oauth-apps"
+                  element={<LazyPage render={<OAuthAppsPage />} />}
                 />
                 <Route
                   path="github-tokens"

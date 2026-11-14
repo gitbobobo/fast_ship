@@ -102,7 +102,7 @@ var ErrPasswordChanged = errors.New("password changed concurrently")
 // 事务内完成，用调用方预读的 nextVersion 写回会让两次改密停在同一版本。
 // expectedHash 是调用方刚通过 bcrypt 校验的旧密码哈希：写路径必须以它为谓词，
 // 否则先校验旧密码、另一事务先提交改密的请求会拿着已作废的授权覆盖新密码。
-func (r *UserRepository) UpdatePasswordAndRotateSessions(userID, expectedHash, passwordHash string, next *model.RefreshToken) (int, error) {
+func (r *UserRepository) UpdatePasswordAndRotateSessions(userID, expectedHash, passwordHash string, next *model.RefreshToken, extraHooks ...func(tx *gorm.DB) error) (int, error) {
 	now := time.Now()
 	var newVersion int
 	err := r.db.Transaction(func(tx *gorm.DB) error {
@@ -125,6 +125,16 @@ func (r *UserRepository) UpdatePasswordAndRotateSessions(userID, expectedHash, p
 			Where("user_id = ? AND revoked_at IS NULL", userID).
 			Update("revoked_at", now).Error; err != nil {
 			return err
+		}
+		// OAuth 联动（INT-222）：同一事务内吊销该用户的 OAuth 授权与令牌；
+		// 只用 tx 句柄（单连接池规则）。未注入 OAuth 服务时为空，不触碰。
+		for _, hook := range extraHooks {
+			if hook == nil {
+				continue
+			}
+			if err := hook(tx); err != nil {
+				return err
+			}
 		}
 		return tx.Create(next).Error
 	})

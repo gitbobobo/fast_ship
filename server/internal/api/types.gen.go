@@ -404,6 +404,21 @@ func (e NotificationKind) Valid() bool {
 	}
 }
 
+// Defines values for OAuthAuthorizeRequestCodeChallengeMethod.
+const (
+	OAuthAuthorizeRequestCodeChallengeMethodS256 OAuthAuthorizeRequestCodeChallengeMethod = "S256"
+)
+
+// Valid indicates whether the value is a known member of the OAuthAuthorizeRequestCodeChallengeMethod enum.
+func (e OAuthAuthorizeRequestCodeChallengeMethod) Valid() bool {
+	switch e {
+	case OAuthAuthorizeRequestCodeChallengeMethodS256:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for QuotaAccountStatus.
 const (
 	QuotaAccountStatusCredentialInvalid QuotaAccountStatus = "credential_invalid"
@@ -1388,6 +1403,21 @@ func (e UpsertBotScheduleTaskBudgetParamsPeriod) Valid() bool {
 	case UpsertBotScheduleTaskBudgetParamsPeriodDaily:
 		return true
 	case UpsertBotScheduleTaskBudgetParamsPeriodMonthly:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for GetOAuthAuthorizeParamsCodeChallengeMethod.
+const (
+	GetOAuthAuthorizeParamsCodeChallengeMethodS256 GetOAuthAuthorizeParamsCodeChallengeMethod = "S256"
+)
+
+// Valid indicates whether the value is a known member of the GetOAuthAuthorizeParamsCodeChallengeMethod enum.
+func (e GetOAuthAuthorizeParamsCodeChallengeMethod) Valid() bool {
+	switch e {
+	case GetOAuthAuthorizeParamsCodeChallengeMethodS256:
 		return true
 	default:
 		return false
@@ -4020,6 +4050,61 @@ type Notification struct {
 // NotificationKind defines model for Notification.Kind.
 type NotificationKind string
 
+// OAuthAuthorization defines model for OAuthAuthorization.
+type OAuthAuthorization struct {
+	ClientName string `json:"client_name"`
+
+	// CreatedAt 最近一次授权/重授权时间
+	CreatedAt string `json:"created_at"`
+	Id        string `json:"id"`
+
+	// Scopes 空格分隔的 scope 串（project:<uuid>:read / project:<uuid>:write）
+	Scopes string `json:"scopes"`
+}
+
+// OAuthAuthorizePreview defines model for OAuthAuthorizePreview.
+type OAuthAuthorizePreview struct {
+	// ClientName 客户端注册名
+	ClientName string               `json:"client_name"`
+	Projects   []OAuthProjectOption `json:"projects"`
+}
+
+// OAuthAuthorizeRequest defines model for OAuthAuthorizeRequest.
+type OAuthAuthorizeRequest struct {
+	ClientId string `json:"client_id"`
+
+	// CodeChallenge PKCE S256 challenge（合法 base64url，43-128 字符）
+	CodeChallenge       string                                   `json:"code_challenge"`
+	CodeChallengeMethod OAuthAuthorizeRequestCodeChallengeMethod `json:"code_challenge_method"`
+
+	// ProjectIds 授权的项目集合，必须全部属于当前用户
+	ProjectIds []string `json:"project_ids"`
+
+	// RedirectUri 必须与客户端注册的某个 redirect_uri 精确匹配
+	RedirectUri string `json:"redirect_uri"`
+
+	// State 客户端 state，原样拼回 redirect
+	State *string `json:"state,omitempty"`
+
+	// Write 全局读写档；true 时 scope 记 write（隐含 read）
+	Write *bool `json:"write,omitempty"`
+}
+
+// OAuthAuthorizeRequestCodeChallengeMethod defines model for OAuthAuthorizeRequest.CodeChallengeMethod.
+type OAuthAuthorizeRequestCodeChallengeMethod string
+
+// OAuthAuthorizeResult defines model for OAuthAuthorizeResult.
+type OAuthAuthorizeResult struct {
+	// Redirect redirect_uri?code=..&state=..，前端据此跳转
+	Redirect string `json:"redirect"`
+}
+
+// OAuthProjectOption defines model for OAuthProjectOption.
+type OAuthProjectOption struct {
+	Id   string `json:"id"`
+	Name string `json:"name"`
+}
+
 // PaginatedData 分页响应 data 形状；与 Envelope allOf 组合后 items 由兄弟 schema 收窄为具体类型
 type PaginatedData struct {
 	// Items 当前页条目（元素类型由组合 schema 收窄）
@@ -5987,6 +6072,9 @@ type IssueId = string
 // NotificationId defines model for NotificationId.
 type NotificationId = string
 
+// OAuthAuthorizationId defines model for OAuthAuthorizationId.
+type OAuthAuthorizationId = string
+
 // Page defines model for Page.
 type Page = int
 
@@ -7752,6 +7840,47 @@ type GetUnreadNotificationCount200JSONResponseBody struct {
 	Message string `json:"message"`
 }
 
+// ListOAuthAuthorizations200JSONResponseBody defines parameters for ListOAuthAuthorizations.
+type ListOAuthAuthorizations200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                  `json:"code"`
+	Data []OAuthAuthorization `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// GetOAuthAuthorizeParams defines parameters for GetOAuthAuthorize.
+type GetOAuthAuthorizeParams struct {
+	ClientId            string                                     `form:"client_id" json:"client_id"`
+	RedirectUri         string                                     `form:"redirect_uri" json:"redirect_uri"`
+	CodeChallenge       string                                     `form:"code_challenge" json:"code_challenge"`
+	CodeChallengeMethod GetOAuthAuthorizeParamsCodeChallengeMethod `form:"code_challenge_method" json:"code_challenge_method"`
+}
+
+// GetOAuthAuthorizeParamsCodeChallengeMethod defines parameters for GetOAuthAuthorize.
+type GetOAuthAuthorizeParamsCodeChallengeMethod string
+
+// GetOAuthAuthorize200JSONResponseBody defines parameters for GetOAuthAuthorize.
+type GetOAuthAuthorize200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                    `json:"code"`
+	Data *OAuthAuthorizePreview `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// SubmitOAuthAuthorize200JSONResponseBody defines parameters for SubmitOAuthAuthorize.
+type SubmitOAuthAuthorize200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                   `json:"code"`
+	Data *OAuthAuthorizeResult `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
 // ListProjectsParams defines parameters for ListProjects.
 type ListProjectsParams struct {
 	// Page 页码，<1 按 1 处理
@@ -9129,6 +9258,9 @@ type UpsertShipHookJSONRequestBody = UpsertShipHookRequest
 
 // UpdateMemberRoleJSONRequestBody defines body for UpdateMemberRole for application/json ContentType.
 type UpdateMemberRoleJSONRequestBody = UpdateMemberRoleRequest
+
+// SubmitOAuthAuthorizeJSONRequestBody defines body for SubmitOAuthAuthorize for application/json ContentType.
+type SubmitOAuthAuthorizeJSONRequestBody = OAuthAuthorizeRequest
 
 // CreateProjectJSONRequestBody defines body for CreateProject for application/json ContentType.
 type CreateProjectJSONRequestBody = CreateProjectRequest
