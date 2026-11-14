@@ -1,12 +1,15 @@
 # OAuth 2.1 授权服务与 MCP 资源（INT-222）
 
 Fast Ship 作为 OAuth 2.1 授权服务器，保护 MCP 资源 `{PublicURL}/mcp`。本篇记录
-授权服务核心（数据模型、令牌族、发现端点、失效模型）；`/mcp` 协议端点与 Web
-授权页由后续任务接入，届时在此续写。
+授权服务核心（数据模型、令牌族、发现端点、失效模型）、`/mcp` 协议端点与 Web
+授权面。
 
 实现分布：`server/internal/model/oauth.go`、`server/internal/repository/oauth.go`、
-`server/internal/service/oauth.go`、`server/internal/handler/oauth.go`。路由装配在
-`router.Setup`（协议端点挂根路径）与 `cmd/server/main.go`。
+`server/internal/service/oauth.go`、`server/internal/handler/oauth.go`（含 `/mcp`
+端点与工具宿主 `service/mcp.go`、鉴权中间件 `middleware/mcp_auth.go`）。路由装配在
+`router.Setup`（协议端点挂根路径）与 `cmd/server/main.go`。浏览器授权页是 SPA
+路由 `web/src/routes/oauth/authorize.tsx`（未登录经 `?next=` 回跳，登录后选择
+项目与读写档）；设置页「已授权的应用」在 `web/src/routes/settings/oauth-apps.tsx`。
 
 ## 基址与资源标识
 
@@ -52,7 +55,10 @@ Fast Ship 作为 OAuth 2.1 授权服务器，保护 MCP 资源 `{PublicURL}/mcp`
   `BuildOAuthScopes` 排序去重后算出空格分隔的 scope 串。
 - `project_ids` 必须全部属于当前用户且非空（40013/40014），权限不得超出授权集合。
 - 重授权（同 user+client 再次授权）覆盖 scope 并复活吊销标记：授权总账一行
-  `(user, client)`，`oauth_authorizations` 上有唯一索引。
+  `(user, client)`，`oauth_authorizations` 上有唯一索引；`created_at` 同步刷新为
+  最近一次授权时间（「已授权的应用」展示语义）。scope 集合发生变化（含缩权）时，
+  同一事务内吊销该授权名下全部旧 access/refresh 令牌并作废未消费旧授权码——
+  否则旧令牌仍持变更前 scope，权限超出本次授权档。
 
 ## 授权码流程
 
@@ -86,10 +92,12 @@ Fast Ship 作为 OAuth 2.1 授权服务器，保护 MCP 资源 `{PublicURL}/mcp`
 ## refresh 轮换与栅栏
 
 - `grant_type=refresh_token`：校验未吊销未过期、client 匹配、请求 scope 不超出
-  原授权（`invalid_scope`）、用户 `token_version` 未变（改密即拒，双保险覆盖
+  原授权（`invalid_scope`；write 隐含 read，持 `:write` 请求只读属降权不算越界）、
+  用户 `token_version` 未变（改密即拒，双保险覆盖
   吊销扫描窗口）。轮换 = 条件吊销旧行（`RowsAffected=1` 才继续，与
   `RefreshTokenRepository.Rotate` 同型栅栏）+ 同事务签发新对；并发轮换/改密
-  抢先吊销旧行后整体失败，不产生新行。
+  抢先吊销旧行后整体失败，不产生新行。请求带 scope 时新令牌按请求收窄
+  （RFC 6749 §6），不带则沿用原授权 scope。
 
 ## 访问令牌校验（资源服务器）
 
@@ -187,8 +195,7 @@ revoked/expired）→ `AuthService.IsTokenVersionCurrent` 通过。返回
 - `fastship_list_issues` 的关键词搜索依赖 FTS 表，生产可用；无状态会话不
   保留游标，深翻页按 page/page_size 逐页拉。
 
-## 后续任务待续
+## 后续候选（未排期）
 
-- `/oauth/authorize` 浏览器授权页（8414 元数据已指向它）。
 - 令牌清理：`oauth_authorization_codes` 过期/已用行与吊销令行的后台清扫
   （对齐 `refreshTokenRepo.CleanExpired` 的做法）。

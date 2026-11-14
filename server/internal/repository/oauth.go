@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"strings"
 	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/model"
@@ -48,9 +49,21 @@ func (r *OAuthRepository) UpsertAuthorizationTx(tx *gorm.DB, auth *model.OAuthAu
 	if err == nil {
 		res := tx.Model(&model.OAuthAuthorization{}).
 			Where("id = ?", existing.ID).
-			Updates(map[string]any{"scopes": auth.Scopes, "revoked_at": nil})
+			Updates(map[string]any{"scopes": auth.Scopes, "revoked_at": nil, "created_at": auth.CreatedAt})
 		if res.Error != nil {
 			return "", res.Error
+		}
+		// 权限档变化（含缩权）：同一事务吊销该授权名下旧令牌、作废未消费旧
+		// 授权码——否则旧 fsm_/fsn_ 令牌仍持有变更前的 scope，权限超出本次
+		// 授权选定的项目与读写档（审查 P2：缩权重授权必须即时收权）。
+		if !scopeSetsEqual(existing.Scopes, auth.Scopes) {
+			now := time.Now()
+			if err := revokeTokensByAuthorizationTx(tx, existing.ID, now); err != nil {
+				return "", err
+			}
+			if err := invalidateCodesByAuthorizationTx(tx, existing.ID, now); err != nil {
+				return "", err
+			}
 		}
 		return existing.ID, nil
 	}
@@ -141,6 +154,38 @@ func revokeTokensByAuthorizationTx(tx *gorm.DB, authorizationID string, now time
 	return tx.Model(&model.OAuthRefreshToken{}).
 		Where("authorization_id = ? AND revoked_at IS NULL", authorizationID).
 		Update("revoked_at", now).Error
+}
+
+// invalidateCodesByAuthorizationTx 作废该授权下未消费的授权码（缩权重授权时
+// 同事务调用，防止旧码换出持旧 scope 的新令牌）。
+func invalidateCodesByAuthorizationTx(tx *gorm.DB, authorizationID string, now time.Time) error {
+	return tx.Model(&model.OAuthAuthorizationCode{}).
+		Where("authorization_id = ? AND used_at IS NULL", authorizationID).
+		Update("used_at", now).Error
+}
+
+// scopeSetsEqual 精确集合相等（顺序无关）：scope 串由 BuildOAuthScopes 归一
+// 生成，这里只判「集合是否真的变了」，避免同集合不同顺序触发误吊销。
+func scopeSetsEqual(a, b string) bool {
+	setA, setB := scopeSet(a), scopeSet(b)
+	if len(setA) != len(setB) {
+		return false
+	}
+	for s := range setA {
+		if !setB[s] {
+			return false
+		}
+	}
+	return true
+}
+
+// scopeSet 把 scope 串拆成集合。
+func scopeSet(scopes string) map[string]bool {
+	set := make(map[string]bool)
+	for _, s := range strings.Fields(scopes) {
+		set[s] = true
+	}
+	return set
 }
 
 // ---- 授权码 ----

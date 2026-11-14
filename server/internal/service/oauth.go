@@ -82,13 +82,19 @@ func ScopeHasWrite(scopes, projectID string) bool {
 	return scopeSet(scopes)["project:"+projectID+":write"]
 }
 
-// ScopeSubset 校验 requested 是否不超出 granted。
+// ScopeSubset 校验 requested 是否不超出 granted。write 隐含 read：持有
+// :write 的客户端请求只读 scope（RFC 6749 §6 降权）不算越界。
 func ScopeSubset(granted, requested string) bool {
 	grantedSet := scopeSet(granted)
 	for s := range scopeSet(requested) {
-		if !grantedSet[s] {
-			return false
+		if grantedSet[s] {
+			continue
 		}
+		// :read 未直接授予时，看同项目 :write 是否在授权内。
+		if strings.HasSuffix(s, ":read") && grantedSet[strings.TrimSuffix(s, ":read")+":write"] {
+			continue
+		}
+		return false
 	}
 	return true
 }
@@ -629,13 +635,20 @@ func (s *OAuthService) RefreshToken(ctx context.Context, req *OAuthTokenRequest)
 			return err
 		}
 
+		// RFC 6749 §6：请求带 scope 时按请求收窄新令牌（已验 subset），
+		// 不再沿用旧授权的全部 scope。
+		granted := rt.Scope
+		if req.Scope != "" {
+			granted = req.Scope
+		}
+
 		nextAccess := &model.OAuthAccessToken{
 			ID:              uuid.NewString(),
 			TokenHash:       HashOAuthToken(rawAccess),
 			UserID:          rt.UserID,
 			ClientID:        rt.ClientID,
 			AuthorizationID: rt.AuthorizationID,
-			Scope:           rt.Scope,
+			Scope:           granted,
 			TokenVersion:    user.TokenVersion,
 			ExpiresAt:       time.Now().Add(oauthAccessTokenTTL),
 			CreatedAt:       time.Now(),
@@ -646,7 +659,7 @@ func (s *OAuthService) RefreshToken(ctx context.Context, req *OAuthTokenRequest)
 			UserID:          rt.UserID,
 			ClientID:        rt.ClientID,
 			AuthorizationID: rt.AuthorizationID,
-			Scope:           rt.Scope,
+			Scope:           granted,
 			TokenVersion:    user.TokenVersion,
 			ExpiresAt:       time.Now().Add(oauthRefreshTokenTTL),
 			CreatedAt:       time.Now(),
@@ -667,7 +680,7 @@ func (s *OAuthService) RefreshToken(ctx context.Context, req *OAuthTokenRequest)
 			TokenType:    "Bearer",
 			ExpiresIn:    int(oauthAccessTokenTTL.Seconds()),
 			RefreshToken: OAuthRefreshTokenPrefix + rawRefresh,
-			Scope:        rt.Scope,
+			Scope:        granted,
 		}
 		return nil
 	})

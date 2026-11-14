@@ -254,4 +254,26 @@ describe("api client auth retry", () => {
     const retriedRequest = kyMock.mock.calls[0][0] as Request;
     expect(retriedRequest.headers.get("Authorization")).toBe("Bearer refreshed-token");
   });
+
+  it("redirects to login with next preserving path and query when refresh fails", async () => {
+    refreshPostMock.mockRejectedValue(new Error("refresh failed"));
+    window.history.replaceState(
+      {},
+      "",
+      "/oauth/authorize?client_id=c1&code_challenge=xyz&state=s1",
+    );
+
+    await import("./client");
+    const apiConfig = kyCreateMock.mock.calls[1][0];
+    const afterResponse = apiConfig.hooks.afterResponse[0];
+    const request = new Request("http://localhost/api/projects", {
+      headers: { Authorization: "Bearer access-token" },
+    });
+
+    await afterResponse(request, {}, new Response(null, { status: 401 }));
+
+    expect(authState.logout).toHaveBeenCalled();
+    const expected = `/login?next=${encodeURIComponent("/oauth/authorize?client_id=c1&code_challenge=xyz&state=s1")}`;
+    expect(window.location.href.endsWith(expected)).toBe(true);
+  });
 });

@@ -551,3 +551,112 @@ func TestOAuthAuthorizePreviewValidation(t *testing.T) {
 		t.Fatalf("未知客户端应拒绝")
 	}
 }
+
+// 缩权重授权：旧 access/refresh 即时吊销、未消费旧码作废、created_at 刷新为
+// 最近一次授权时间（审查 P2：权限不得超出本次授权档）。
+func TestOAuthReauthorizeNarrowingRevokesTokens(t *testing.T) {
+	s := setupOAuthTestServices(t)
+	user := createTestUser(t, s.db, uuid.NewString())
+	project := createOAuthTestProject(t, s.db, user.ID)
+	client := s.createClient(t)
+
+	// 第一次：write 授权并换出令牌。
+	verifier, _ := pkcePair()
+	code := s.authorize(t, user.ID, client, project.ID, true, verifier)
+	pair, err := s.oauth.ExchangeAuthorizationCode(context.Background(), &OAuthTokenRequest{
+		ClientID: client.ClientID, Code: code,
+		RedirectURI: "https://client.example.com/cb", CodeVerifier: verifier,
+	})
+	if err != nil {
+		t.Fatalf("exchange: %v", err)
+	}
+	if _, err := s.oauth.ValidateAccessToken(context.Background(), pair.AccessToken); err != nil {
+		t.Fatalf("旧 access 应有效: %v", err)
+	}
+
+	// 第二次：缩权为只读重授权（先睡 2ms 保证 created_at 可观测地前进）。
+	time.Sleep(2 * time.Millisecond)
+	verifier2, _ := pkcePair()
+	s.authorize(t, user.ID, client, project.ID, false, verifier2)
+
+	if _, err := s.oauth.ValidateAccessToken(context.Background(), pair.AccessToken); err == nil {
+		t.Fatalf("缩权重授权后旧 access 应失效")
+	}
+	if _, err := s.oauth.RefreshToken(context.Background(), &OAuthTokenRequest{
+		ClientID: client.ClientID, RefreshToken: pair.RefreshToken,
+	}); err == nil {
+		t.Fatalf("缩权重授权后旧 refresh 应失效")
+	}
+
+	// 未消费旧码：第一次授权流程里没有多余旧码，再造一条旧码验证作废。
+	verifier3, _ := pkcePair()
+	code3 := s.authorize(t, user.ID, client, project.ID, false, verifier3)
+	verifier4, _ := pkcePair()
+	s.authorize(t, user.ID, client, project.ID, false, verifier4) // scope 未变不吊销，再缩一次制造变化
+	verifier5, _ := pkcePair()
+	s.authorize(t, user.ID, client, project.ID, true, verifier5)
+	_, err = s.oauth.ExchangeAuthorizationCode(context.Background(), &OAuthTokenRequest{
+		ClientID: client.ClientID, Code: code3,
+		RedirectURI: "https://client.example.com/cb", CodeVerifier: verifier3,
+	})
+	if err == nil {
+		t.Fatalf("scope 变化后未消费旧码应作废")
+	}
+
+	rows, err := s.oauth.ListAuthorizations(user.ID)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("重授权应仍是一行: %v %v", rows, err)
+	}
+	if rows[0].Scopes != "project:"+project.ID+":write" {
+		t.Fatalf("scope 应为最新授权档: %s", rows[0].Scopes)
+	}
+}
+
+// refresh 按请求收窄（RFC 6749 §6）：请求只读 scope 成功、新令牌持窄 scope；
+// write 隐含 read 使 write 客户端请求只读不算越界。
+func TestOAuthRefreshScopeNarrowing(t *testing.T) {
+	s := setupOAuthTestServices(t)
+	user := createTestUser(t, s.db, uuid.NewString())
+	project := createOAuthTestProject(t, s.db, user.ID)
+	client := s.createClient(t)
+
+	verifier, _ := pkcePair()
+	code := s.authorize(t, user.ID, client, project.ID, true, verifier)
+	pair, err := s.oauth.ExchangeAuthorizationCode(context.Background(), &OAuthTokenRequest{
+		ClientID: client.ClientID, Code: code,
+		RedirectURI: "https://client.example.com/cb", CodeVerifier: verifier,
+	})
+	if err != nil {
+		t.Fatalf("exchange: %v", err)
+	}
+
+	// write 客户端请求只读：子集判定应放行（write 隐含 read）。
+	narrow, err := s.oauth.RefreshToken(context.Background(), &OAuthTokenRequest{
+		ClientID: client.ClientID, RefreshToken: pair.RefreshToken,
+		Scope: "project:" + project.ID + ":read",
+	})
+	if err != nil {
+		t.Fatalf("降权刷新应成功: %v", err)
+	}
+	if narrow.Scope != "project:"+project.ID+":read" {
+		t.Fatalf("新令牌应持窄 scope，得到 %s", narrow.Scope)
+	}
+	info, err := s.oauth.ValidateAccessToken(context.Background(), narrow.AccessToken)
+	if err != nil {
+		t.Fatalf("窄 access 应有效: %v", err)
+	}
+	if ScopeHasWrite(info.Scopes, project.ID) {
+		t.Fatalf("窄 access 不应再有写权限")
+	}
+	if !ScopeHasRead(info.Scopes, project.ID) {
+		t.Fatalf("窄 access 应保留读权限")
+	}
+
+	// 请求超出授权的 scope：拒绝。
+	if _, err := s.oauth.RefreshToken(context.Background(), &OAuthTokenRequest{
+		ClientID: client.ClientID, RefreshToken: narrow.RefreshToken,
+		Scope: "project:" + project.ID + ":write",
+	}); err == nil {
+		t.Fatalf("请求写权限应被拒绝")
+	}
+}

@@ -108,6 +108,15 @@ export function errorText(err: unknown, fallback: string): string {
   return err instanceof ApiRequestError && err.message ? err.message : fallback;
 }
 
+/** 401 且 refresh 也失效后的登录回跳地址：当前地址（含 query）作 next，
+ * OAuth 同意页的一次性参数（code_challenge/state）登录后必须还在。 */
+export function loginRedirectPath(): string {
+  const next = encodeURIComponent(
+    window.location.pathname + window.location.search,
+  );
+  return `/login?next=${next}`;
+}
+
 export async function decodeApiError<T>(promise: Promise<T>): Promise<T> {
   try {
     return await promise;
@@ -157,7 +166,7 @@ export const api = ky.create({
           return ky(request, options);
         } catch {
           useAuthStore.getState().logout();
-          window.location.href = "/login";
+          window.location.href = loginRedirectPath();
         }
       },
     ],

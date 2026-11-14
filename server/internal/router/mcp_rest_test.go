@@ -114,11 +114,13 @@ func TestMCPToolsEndToEnd(t *testing.T) {
 	projectID, _ := body["data"].(map[string]interface{})["id"].(string)
 
 	clientID := oauthRegisterClient(t, env)
+	readClientID := oauthRegisterClient(t, env)
 	verifier, challenge := oauthPKCEPair()
 	const redirectURI = "https://client.example.com/cb"
 
-	// 第一次授权：只读 scope。
-	code, redirect := oauthAuthorize(t, env, auth.Token, clientID, redirectURI, challenge, "s1", []string{projectID}, false)
+	// 第一次授权：只读 scope（独立客户端；同客户端变档重授权会吊销旧令牌，
+	// 见下方写 scope 授权与缩权语义）。
+	code, redirect := oauthAuthorize(t, env, auth.Token, readClientID, redirectURI, challenge, "s1", []string{projectID}, false)
 	if code != http.StatusOK {
 		t.Fatalf("authorize read: %d", code)
 	}
@@ -126,7 +128,7 @@ func TestMCPToolsEndToEnd(t *testing.T) {
 
 	form := url.Values{}
 	form.Set("grant_type", "authorization_code")
-	form.Set("client_id", clientID)
+	form.Set("client_id", readClientID)
 	form.Set("code", readCode)
 	form.Set("redirect_uri", redirectURI)
 	form.Set("code_verifier", verifier)
@@ -136,7 +138,15 @@ func TestMCPToolsEndToEnd(t *testing.T) {
 	}
 	readToken, _ := body["access_token"].(string)
 
-	// 第二次授权：写 scope（覆盖同 client 的授权，旧 access 保留旧 scope 快照）。
+	// 同 scope 重授权：scope 集合未变不应吊销旧令牌（避免误伤续授权场景）。
+	verifierSame, challengeSame := oauthPKCEPair()
+	code, _ = oauthAuthorize(t, env, auth.Token, readClientID, redirectURI, challengeSame, "s1b", []string{projectID}, false)
+	if code != http.StatusOK {
+		t.Fatalf("authorize read (same scope): %d", code)
+	}
+	_ = verifierSame
+
+	// 第二次授权：写 scope（独立客户端；同 client 变档授权会吊销旧令牌）。
 	verifier2, challenge2 := oauthPKCEPair()
 	code, redirect = oauthAuthorize(t, env, auth.Token, clientID, redirectURI, challenge2, "s2", []string{projectID}, true)
 	if code != http.StatusOK {
@@ -298,21 +308,35 @@ func TestMCPToolsEndToEnd(t *testing.T) {
 		t.Fatalf("scope 外项目应拒: %v", result)
 	}
 
+	// 变档重授权 → 旧令牌即时吊销（缩权/扩权同语义）。
+	_, challenge3 := oauthPKCEPair()
+	code, redirect = oauthAuthorize(t, env, auth.Token, clientID, redirectURI, challenge3, "s3", []string{projectID}, false)
+	if code != http.StatusOK {
+		t.Fatalf("authorize downgrade: %d", code)
+	}
+	code, _, _ = mcpPost(t, env, writeToken, "initialize", 42,
+		`{"protocolVersion":"`+mcpProtocolVersion+`","capabilities":{},"clientInfo":{"name":"router-test","version":"0"}}`)
+	if code != http.StatusUnauthorized {
+		t.Fatalf("变档重授权后旧 write token 应 401: %d", code)
+	}
+
 	// DELETE 授权 → 全部令牌即时失效。
 	listCode, listBody := doRouterJSON(t, env, "Bearer "+auth.Token, http.MethodGet, "/api/oauth/authorizations", "")
 	if listCode != http.StatusOK {
 		t.Fatalf("list authorizations: %d %v", listCode, listBody)
 	}
 	items, _ := listBody["data"].([]interface{})
-	if len(items) != 1 {
-		t.Fatalf("应有 1 条授权: %v", listBody)
+	if len(items) != 2 {
+		t.Fatalf("应有 2 条授权（写客户端 + 只读客户端）: %v", listBody)
 	}
-	authID, _ := items[0].(map[string]interface{})["id"].(string)
-	delCode, _ := doRouterJSON(t, env, "Bearer "+auth.Token, http.MethodDelete, "/api/oauth/authorizations/"+authID, "")
-	if delCode != http.StatusOK {
-		t.Fatalf("delete authorization: %d", delCode)
+	for _, item := range items {
+		authID, _ := item.(map[string]interface{})["id"].(string)
+		delCode, _ := doRouterJSON(t, env, "Bearer "+auth.Token, http.MethodDelete, "/api/oauth/authorizations/"+authID, "")
+		if delCode != http.StatusOK {
+			t.Fatalf("delete authorization: %d", delCode)
+		}
 	}
-	code, _, _ = mcpPost(t, env, writeToken, "initialize", 3, `{}`)
+	code, _, _ = mcpPost(t, env, readToken, "initialize", 3, `{}`)
 	if code != http.StatusUnauthorized {
 		t.Fatalf("吊销后应 401，得到 %d", code)
 	}
