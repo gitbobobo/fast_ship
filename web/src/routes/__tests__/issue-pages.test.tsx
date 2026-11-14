@@ -1250,7 +1250,7 @@ describe("Issue pages", () => {
         initialEntry: "/projects/proj-1/issues/issue-1",
       });
 
-      expect(screen.queryByRole("button", { name: "来源列表 [" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "来源列表" })).not.toBeInTheDocument();
     });
 
     it("parses board source params and highlights the current issue", () => {
@@ -1273,7 +1273,7 @@ describe("Issue pages", () => {
           "/projects/proj-1/issues/issue-1?issue_from=board&issue_workflow_status=todo&issue_label=bug",
       });
 
-      expect(screen.getByRole("button", { name: "收起列表 [" })).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "来源列表" })).not.toBeInTheDocument();
       const list = screen.getByTestId("issue-source-list");
       expect(list).toBeInTheDocument();
       const current = within(list).getByRole("button", { current: true });

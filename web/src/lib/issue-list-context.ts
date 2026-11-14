@@ -120,17 +120,12 @@ const BOARD_WORKFLOW_STATUS_PARAM_LABELS: Record<
   unset: "未设置",
 };
 
-const ISSUE_STATE_PARAM_LABELS: Record<string, string> = {
-  open: "开启",
-  closed: "关闭",
-};
-
 /** 来源列表标题副行：说明来源是哪一列/哪组筛选，让「在哪个上下文里翻页」一眼可辨 */
 export function describeIssueSourceContext(context: IssueSourceContext): string {
   if (context.kind === "board") {
-    const segments = [BOARD_WORKFLOW_STATUS_PARAM_LABELS[context.workflowStatus]];
+    const segments = [`列 ${BOARD_WORKFLOW_STATUS_PARAM_LABELS[context.workflowStatus]}`];
     if (context.label) {
-      segments.push(`标签 ${context.label}`);
+      segments.push(`标签 "${context.label}"`);
     }
     if (context.source) {
       segments.push(`来源 ${context.source}`);
@@ -139,12 +134,14 @@ export function describeIssueSourceContext(context: IssueSourceContext): string 
   }
   if (context.kind === "list") {
     const segments: string[] = [];
-    segments.push(ISSUE_STATE_PARAM_LABELS[context.state] ?? "全部状态");
+    if (context.state) {
+      segments.push(`状态 ${context.state === "open" ? "OPEN" : "CLOSED"}`);
+    }
     if (context.q) {
-      segments.push(`搜索 ${context.q}`);
+      segments.push(`搜索 "${context.q}"`);
     }
     if (context.label) {
-      segments.push(`标签 ${context.label}`);
+      segments.push(`标签 "${context.label}"`);
     }
     if (context.source) {
       segments.push(`来源 ${context.source}`);
@@ -158,7 +155,7 @@ export function describeIssueSourceContext(context: IssueSourceContext): string 
         }`,
       );
     }
-    return segments.join(" · ");
+    return segments.length > 0 ? segments.join(" · ") : "全部";
   }
   return "";
 }

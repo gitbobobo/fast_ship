@@ -1116,15 +1116,12 @@ export default function IssueDetailPage() {
                   <Button
                     variant="ghost"
                     size="sm"
-                    className="h-6 shrink-0 gap-1 px-1.5 text-[10px] text-muted-foreground"
+                    className="h-6 shrink-0 px-1.5 text-[10px] text-muted-foreground"
                     onClick={toggleSourceList}
-                    aria-label="收起来源列表"
-                    title="收起（[）"
+                    aria-label="收起来源列表（快捷键 [）"
+                    title="收起（快捷键 [）"
                   >
                     收起
-                    <kbd className="rounded border border-muted-foreground/40 bg-muted px-1 font-mono text-[10px] text-foreground/70">
-                      [
-                    </kbd>
                   </Button>
                 </div>
                 <IssueSourceList
@@ -1226,34 +1223,19 @@ export default function IssueDetailPage() {
                       <h1 className="flex-1 text-xl font-semibold leading-snug text-foreground md:text-2xl">
                         {issue.reference} {issue.title}
                       </h1>
-                      {hasSourceContext && (
+                      {/* 宽屏展开时面板头已有「收起」，标题旁按钮仅在未展开/窄屏时作入口，避免双控件 */}
+                      {hasSourceContext && !desktopSourceListOpen && (
                         <Button
                           variant="outline"
                           size="sm"
                           className="shrink-0"
                           onClick={toggleSourceList}
-                          aria-expanded={
-                            desktopSourceListOpen ||
-                            (isNarrowViewport && isSourceSheetOpen)
-                          }
-                          aria-pressed={
-                            desktopSourceListOpen ||
-                            (isNarrowViewport && isSourceSheetOpen)
-                          }
+                          aria-expanded={isNarrowViewport && isSourceSheetOpen}
                           aria-controls="issue-source-list-panel"
-                          title={
-                            desktopSourceListOpen
-                              ? "收起列表（[）"
-                              : "来源列表（[）"
-                          }
+                          title="来源列表（快捷键 [）"
                         >
                           <List className="mr-1.5 h-3.5 w-3.5" />
-                          {desktopSourceListOpen ? "收起列表" : "来源列表"}
-                          {!isNarrowViewport && (
-                            <kbd className="ml-1.5 rounded border border-muted-foreground/40 bg-muted px-1.5 py-px font-mono text-[11px] leading-none text-foreground/70">
-                              [
-                            </kbd>
-                          )}
+                          来源列表
                         </Button>
                       )}
                       <Button
