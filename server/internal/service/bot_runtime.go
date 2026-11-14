@@ -303,14 +303,14 @@ func (s *BotService) scanLoop() {
 }
 
 func (s *BotService) scanOnce() {
-	// 未消费输入：粗筛（水位落后）后按真实模型输入判定——后台结果等非
-	// 输入消息也推高账本水位，裸水位比较会让空闲 bot 永远被扫中空转。
-	var bots []model.Bot
-	if err := s.db.Where("offered_input_seq < next_message_seq - 1").Find(&bots).Error; err == nil {
-		for _, b := range bots {
-			if !s.hasUnconsumedInput(&b) {
-				continue
-			}
+	// 未消费输入：一条 SQL 直接按真实模型输入筛 bot（ListBotsWithUnconsumedInput）——
+	// 后台结果等非输入消息也推高账本水位，裸水位比较会让空闲 bot 永远被扫中
+	// 空转；投影只含触发键所需列，不加载人设大字段，也不对每个候选逐个 COUNT。
+	cands, err := s.bots.ListBotsWithUnconsumedInput()
+	if err != nil {
+		s.logger.Warn("扫描未消费输入失败", zap.Error(err))
+	} else {
+		for _, b := range cands {
 			if _, busy := s.activeRunOf(b.ID); !busy {
 				s.wakeRuntime(b.ID, botWake{
 					Trigger: model.BotTriggerUserMessage,
