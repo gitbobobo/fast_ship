@@ -102,7 +102,7 @@ describe("OAuthAppsPage", () => {
     } as unknown as ReturnType<typeof useOAuthAuthorizations>);
     renderPage();
 
-    expect(screen.getByText("项目 unknown-…")).toBeInTheDocument();
+    expect(screen.getByText(/项目 unknown-…/)).toBeInTheDocument();
   });
 
   it("空列表显示空态", () => {

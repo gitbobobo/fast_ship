@@ -71,7 +71,7 @@ function ScopeSummary({
       <Badge variant={write ? "default" : "secondary"} className="px-2 py-0.5">
         {write ? "读写" : "只读"}
       </Badge>
-      <span className="text-sm text-muted-foreground">{projectLabel}</span>
+      <span className="text-sm text-muted-foreground">· {projectLabel}</span>
     </div>
   );
 }
@@ -163,6 +163,7 @@ export default function OAuthAppsPage() {
                           <AlertDialogFooter>
                             <AlertDialogCancel>取消</AlertDialogCancel>
                             <AlertDialogAction
+                              variant="destructive"
                               onClick={() => handleRevoke(auth.id)}
                             >
                               确认吊销

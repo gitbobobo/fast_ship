@@ -43,6 +43,11 @@ export default function LoginPage() {
     <Card>
       <CardHeader className="text-center">
         <CardTitle className="text-xl">登录</CardTitle>
+        {next?.startsWith("/oauth/authorize") && (
+          <p className="mt-1 text-sm text-muted-foreground">
+            登录后将返回并继续授权流程
+          </p>
+        )}
       </CardHeader>
       <CardContent>
         <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">

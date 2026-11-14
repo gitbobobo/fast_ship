@@ -206,13 +206,10 @@ function AuthorizeConsent({ searchParams }: { searchParams: URLSearchParams }) {
                 ))}
               </div>
             )}
-            {/* 占位常驻：禁用↔可用切换不引起卡片高度跳动；无项目时由上方
-                空态文案说明原因，不再叠一条自相矛盾的红色提示 */}
+            {/* 常驻中性引导：占位固定不跳动；红色报错留给真正的错误 */}
             {projects.length > 0 && (
-              <p
-                className={`text-xs text-destructive ${selectedIds.size === 0 ? "" : "invisible"}`}
-              >
-                请至少选择 1 个项目
+              <p className="text-xs text-muted-foreground">
+                至少选择 1 个项目后才能授权
               </p>
             )}
           </div>
@@ -222,6 +219,7 @@ function AuthorizeConsent({ searchParams }: { searchParams: URLSearchParams }) {
             <RadioGroup
               value={write ? "write" : "read"}
               onValueChange={(value) => setWrite(value === "write")}
+              disabled={projects.length === 0}
             >
               <RadioGroupItem value="read">只读（查看项目与问题）</RadioGroupItem>
               <RadioGroupItem value="write">读写（可创建和更新问题）</RadioGroupItem>

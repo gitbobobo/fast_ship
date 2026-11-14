@@ -132,7 +132,7 @@ describe("OAuthAuthorizePage", () => {
 
     const submit = await screen.findByRole("button", { name: "同意授权" });
     expect(submit).toBeDisabled();
-    expect(screen.getByText("请至少选择 1 个项目")).toBeInTheDocument();
+    expect(screen.getByText("至少选择 1 个项目后才能授权")).toBeInTheDocument();
 
     await user.click(screen.getByRole("checkbox", { name: "Fast Ship" }));
     expect(submit).toBeEnabled();
