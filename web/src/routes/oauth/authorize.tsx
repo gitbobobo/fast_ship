@@ -1,6 +1,8 @@
 import { useMemo, useState } from "react";
 import { Navigate, useLocation, useSearchParams } from "react-router";
-import { AlertTriangle, Loader2, ShieldCheck } from "lucide-react";
+import { AlertTriangle, Loader2 } from "lucide-react";
+
+import { FastShipLogo } from "@/components/ui/fast-ship-logo";
 
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -159,7 +161,7 @@ function AuthorizeConsent({ searchParams }: { searchParams: URLSearchParams }) {
   return (
     <ConsentShell>
       <Card>
-        <CardHeader>
+        <CardHeader className="text-center">
           <CardTitle className="text-xl">授权访问</CardTitle>
         </CardHeader>
         <CardContent className="space-y-5">
@@ -185,7 +187,7 @@ function AuthorizeConsent({ searchParams }: { searchParams: URLSearchParams }) {
           </div>
 
           <div className="space-y-2">
-            <Label>选择要授权的项目</Label>
+            <Label>选择要授权的项目（可多选）</Label>
             {projects.length === 0 ? (
               <p className="rounded-md border bg-muted/40 p-3 text-sm text-muted-foreground">
                 你还没有任何项目，无法授权。可前往
@@ -205,6 +207,7 @@ function AuthorizeConsent({ searchParams }: { searchParams: URLSearchParams }) {
                     className="flex cursor-pointer items-center gap-2 rounded-md border p-2.5 text-sm"
                   >
                     <Checkbox
+                      className="rounded-[2px]"
                       checked={selectedIds.has(project.id)}
                       onCheckedChange={(checked) =>
                         toggleProject(project.id, checked === true)
@@ -231,7 +234,7 @@ function AuthorizeConsent({ searchParams }: { searchParams: URLSearchParams }) {
               value={write ? "write" : "read"}
               onValueChange={(value) => setWrite(value === "write")}
               disabled={projects.length === 0}
-              className="max-sm:[&>label]:min-h-11 max-sm:[&>label]:items-center"
+              className="[&>label]:min-h-11 [&>label]:items-center"
             >
               <RadioGroupItem value="read">只读（查看项目与问题）</RadioGroupItem>
               <RadioGroupItem value="write">
@@ -247,14 +250,14 @@ function AuthorizeConsent({ searchParams }: { searchParams: URLSearchParams }) {
           <div className="flex gap-3">
             <Button
               variant="outline"
-              className="max-sm:min-h-11 flex-1"
+              className="min-h-11 flex-1"
               disabled={submitting}
               onClick={onDeny}
             >
               取消
             </Button>
             <Button
-              className="max-sm:min-h-11 flex-1"
+              className="min-h-11 flex-1"
               disabled={selectedIds.size === 0 || submitting}
               onClick={onSubmit}
             >
@@ -268,10 +271,11 @@ function AuthorizeConsent({ searchParams }: { searchParams: URLSearchParams }) {
 }
 
 function ConsentShell({ children }: { children: React.ReactNode }) {
+  // 与登录/注册同一套品牌版式（FastShipLogo），避免授权流程中换品牌观感。
   return (
     <div className="flex min-h-dvh flex-col items-center justify-center bg-muted/40 px-4 py-8">
       <div className="mb-8 flex items-center gap-2">
-        <ShieldCheck className="h-6 w-6 text-primary" />
+        <FastShipLogo className="h-7 w-7" />
         <span className="text-2xl font-bold tracking-tight">Fast Ship</span>
       </div>
       <div className="w-full max-w-md">{children}</div>
