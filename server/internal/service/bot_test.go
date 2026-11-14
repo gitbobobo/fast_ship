@@ -3589,39 +3589,9 @@ func TestBotIssueWriteAuthzBindsTargetSource(t *testing.T) {
 	}
 }
 
-func TestBotScanSkipsNonInputWatermarkLag(t *testing.T) {
-	// 正常回复后账本水位被 assistant/tool-reply 行推高，而输入水位已记录
-	// 到用户输入 seq：裸水位比较永远「落后」，扫描会永远空转；谓词必须
-	// 只认真正的模型输入。
-	env := setupBotTestEnv(t)
-	userID := createBotTestUser(t, env.db, "botskipscan")
-	bot := env.createBot(t, userID)
-	msgs := repository.NewBotMessageRepository(env.db)
-	appendMsg := func(kind model.BotMessageKind) {
-		t.Helper()
-		if err := env.db.Transaction(func(tx *gorm.DB) error {
-			seq, err := env.bots.bots.NextMessageSeqTx(tx, bot.ID)
-			if err != nil {
-				return err
-			}
-			return msgs.AppendTx(tx, &model.BotMessage{
-				ID: uuid.NewString(), BotID: bot.ID, Seq: seq,
-				Kind: kind, ContentJSON: `{}`, CreatedAt: time.Now().UTC(),
-			})
-		}); err != nil {
-			t.Fatalf("append: %v", err)
-		}
-	}
-	appendMsg(model.BotMessageKindUser)      // seq 1：输入，已被消费（offered=1）
-	appendMsg(model.BotMessageKindAssistant) // seq 2：非输入，推高账本水位
-	if env.bots.hasUnconsumedInput(&model.Bot{ID: bot.ID, OfferedInputSeq: 1, NextMessageSeq: 3}) {
-		t.Fatalf("只有非输入消息推高账本时不得判定有未消费输入")
-	}
-	appendMsg(model.BotMessageKindUser) // seq 3：新输入未消费
-	if !env.bots.hasUnconsumedInput(&model.Bot{ID: bot.ID, OfferedInputSeq: 1, NextMessageSeq: 4}) {
-		t.Fatalf("未消费的用户输入必须被识别")
-	}
-}
+// TestBotScanSkipsNonInputWatermarkLag 已随 hasUnconsumedInput 清理（INT-227
+// 第 1 轮审查）：口径断言由 repository 的 TestListBotsWithUnconsumedInputScopes
+// 与 service 的 TestBotScanOnceIdleBotsCostOneQuery 覆盖。
 
 func TestBotAsyncClaimRechecksCancelAfterRegister(t *testing.T) {
 	// 取消落在 claim 与 cancel 注册之间：注册后核对标记，不再执行外部写入。
