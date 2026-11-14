@@ -10,6 +10,7 @@ import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { useAuthStore } from "@/lib/store/auth-store";
 import { useOAuthAuthorizePreview } from "@/lib/hooks/use-oauth";
 import { oauthApi } from "@/lib/api/oauth";
+import { Link } from "react-router";
 import { errorText, loginRedirectPath } from "@/lib/api/client";
 import { authApi } from "@/lib/api/auth";
 
@@ -164,7 +165,7 @@ function AuthorizeConsent({ searchParams }: { searchParams: URLSearchParams }) {
         <CardContent className="space-y-5">
           <p className="text-sm text-muted-foreground">
             <span className="font-medium text-foreground">{client_name}</span>
-            {" "}请求访问你的 Fast Ship 账号。该应用将获得所选项目的
+            请求访问你的 Fast Ship 账号。该应用将获得所选项目的
             {write ? "读写" : "只读"}权限。
           </p>
           <div className="flex items-center justify-between rounded-md bg-muted/50 px-3 py-2 text-sm">
@@ -187,7 +188,14 @@ function AuthorizeConsent({ searchParams }: { searchParams: URLSearchParams }) {
             <Label>选择要授权的项目</Label>
             {projects.length === 0 ? (
               <p className="rounded-md border bg-muted/40 p-3 text-sm text-muted-foreground">
-                你还没有任何项目，无法授权。
+                你还没有任何项目，无法授权。可前往
+                <Link
+                  to="/projects"
+                  className="mx-0.5 text-primary underline underline-offset-2"
+                >
+                  项目列表
+                </Link>
+                创建项目后重新发起授权。
               </p>
             ) : (
               <div className="space-y-2">
@@ -223,6 +231,7 @@ function AuthorizeConsent({ searchParams }: { searchParams: URLSearchParams }) {
               value={write ? "write" : "read"}
               onValueChange={(value) => setWrite(value === "write")}
               disabled={projects.length === 0}
+              className="max-sm:[&>label]:min-h-11 max-sm:[&>label]:items-center"
             >
               <RadioGroupItem value="read">只读（查看项目与问题）</RadioGroupItem>
               <RadioGroupItem value="write">
@@ -238,14 +247,14 @@ function AuthorizeConsent({ searchParams }: { searchParams: URLSearchParams }) {
           <div className="flex gap-3">
             <Button
               variant="outline"
-              className="flex-1"
+              className="max-sm:min-h-11 flex-1"
               disabled={submitting}
               onClick={onDeny}
             >
               取消
             </Button>
             <Button
-              className="flex-1"
+              className="max-sm:min-h-11 flex-1"
               disabled={selectedIds.size === 0 || submitting}
               onClick={onSubmit}
             >

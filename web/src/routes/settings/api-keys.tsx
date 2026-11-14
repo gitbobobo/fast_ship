@@ -117,7 +117,7 @@ export default function ApiKeysPage() {
               API Key 保留给脚本与 CI 使用；MCP 客户端建议改用 OAuth，在
               <Link
                 to="/settings/oauth-apps"
-                className="mx-0.5 font-medium text-primary underline underline-offset-2 hover:opacity-80"
+                className="font-medium text-primary underline underline-offset-2 hover:opacity-80"
               >
                 「已授权的应用」页
               </Link>

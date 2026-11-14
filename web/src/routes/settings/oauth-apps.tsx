@@ -138,10 +138,12 @@ export default function OAuthAppsPage() {
                 {authorizations.map((auth) => (
                   <TableRow key={auth.id}>
                     <TableCell
-                      className="font-medium [overflow-wrap:anywhere]"
+                      className="font-medium"
                       title={auth.client_name}
                     >
-                      <span className="line-clamp-2">{auth.client_name}</span>
+                      <span className="block truncate">
+                        {auth.client_name}
+                      </span>
                     </TableCell>
                     <TableCell>
                       <ScopeSummary authorization={auth} projects={projects} />
