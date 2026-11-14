@@ -36,15 +36,23 @@ type BotMeta struct {
 }
 
 // BotMetasByIDs 按 id 批量取投影行，只查 id/user_id/name 三列；已删除的
-// bot 不返回行，调用方按目标缺失跳过。
+// bot 不返回行，调用方按目标缺失跳过。分批与花费页 IN 查询同规则
+// （ChunkIDs/UsageQueryBatch），bot 数超过 SQLite 变量数上限也不退化。
 func (r *BotRepository) BotMetasByIDs(ids []string) ([]BotMeta, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
 	var rows []BotMeta
-	err := r.db.Model(&model.Bot{}).
-		Select("id", "user_id", "name").
-		Where("id IN ?", ids).
-		Scan(&rows).Error
-	return rows, err
+	for _, batch := range ChunkIDs(ids, UsageQueryBatch) {
+		var part []BotMeta
+		err := r.db.Model(&model.Bot{}).
+			Select("id", "user_id", "name").
+			Where("id IN ?", batch).
+			Scan(&part).Error
+		if err != nil {
+			return nil, err
+		}
+		rows = append(rows, part...)
+	}
+	return rows, nil
 }

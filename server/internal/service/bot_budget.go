@@ -306,11 +306,12 @@ func (s *BotService) evalUserBudgets(repo *repository.BotBudgetRepository, userI
 	}
 	// bot 名字用投影批量取（INT-228）：不为名字 Get 整行——整行读取会把
 	// 系统提示词与 provider 密文反复拷进内存。bot 已删除时投影无行，预算
-	// 按目标缺失跳过，与旧行为一致；批量读失败整轮跳过（无名字不可发布
-	// 告警），与全部单条读失败等价。
+	// 按目标缺失跳过，与旧行为一致；批量读失败整轮明确放弃（不用部分
+	// 结果，无名字不可发布告警），与全部单条读失败等价，下一轮重试。
 	metas, err := repository.NewBotRepository(s.db).BotMetasByIDs(botIDs)
 	if err != nil {
 		s.logger.Warn("预算评估读取机器人名字失败", zap.Error(err))
+		return
 	}
 	for _, meta := range metas {
 		botNames[meta.ID] = meta.Name

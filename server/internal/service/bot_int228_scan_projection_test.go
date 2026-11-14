@@ -1,6 +1,7 @@
 package service
 
 import (
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -102,36 +103,69 @@ func TestInt228NightlyScanReadsProjectionOnly(t *testing.T) {
 	if joinQueries != 1 {
 		t.Fatalf("扫描候选应为一条 LEFT JOIN users 的时区投影，实得 %d: %v", joinQueries, sqls())
 	}
+	// 严格限制候选查询的投影列：只有 id 与时区，夹带任何其他列都算越界。
+	int228AssertProjectionColumns(t, sqls(), "`bots`", "bots.id as bot_id,coalesce(users.timezone, '') as timezone")
 }
 
-// int228AssertProjectionColumns 断言对某表的查询只投影允许列（剥掉引号
-// 与反引号后逐列比对），并禁止 SELECT *。
+// int228AssertProjectionColumns 断言对某表的查询只投影允许列（剥掉引号、
+// 反引号、括号与 as 别名后逐列比对），并禁止 SELECT *。逗号按括号深度
+// 切分，避免 COALESCE(a, b) 内的逗号被误拆。
 func int228AssertProjectionColumns(t *testing.T, sqls []string, table, allowed string) {
 	t.Helper()
 	allowedSet := map[string]bool{}
-	for _, col := range strings.Split(allowed, ",") {
-		allowedSet[strings.TrimSpace(col)] = true
+	for _, col := range splitTopLevel(allowed) {
+		col = strings.TrimSpace(col)
+		allowedSet[col] = true
+		// 别名形式同义：allowed 里写 "id AS bot_id" 时 "id" 也算允许。
+		if asIdx := strings.LastIndex(strings.ToLower(col), " as "); asIdx >= 0 {
+			allowedSet[strings.TrimSpace(col[:asIdx])] = true
+		}
 	}
 	for _, sql := range sqls {
 		lower := strings.ToLower(sql)
 		fromIdx := strings.Index(lower, "from "+table)
-		if fromIdx < 0 {
-			continue
-		}
-		if !strings.HasPrefix(lower, "select ") {
+		if fromIdx < 0 || !strings.HasPrefix(lower, "select ") {
 			continue
 		}
 		selectList := lower[len("select "):fromIdx]
-		for _, col := range strings.Split(selectList, ",") {
-			col = strings.Trim(strings.TrimSpace(col), "`\" '")
-			if col == "" || col == "*" {
-				t.Fatalf("对 %s 只允许投影 %s，实得 SQL: %s", table, allowed, sql)
+		for _, expr := range splitTopLevel(selectList) {
+			expr = strings.TrimSpace(expr)
+			// 函数表达式保留括号整体比对；普通列剥掉 as 别名后比对。
+			if strings.HasSuffix(expr, ")") {
+				if !allowedSet[expr] {
+					t.Fatalf("对 %s 只允许投影 %s，投影表达式 %q 越界，实得 SQL: %s", table, allowed, expr, sql)
+				}
+				continue
 			}
-			if !allowedSet[col] {
-				t.Fatalf("对 %s 只允许投影 %s，投影列 %q 越界，实得 SQL: %s", table, allowed, col, sql)
+			if asIdx := strings.LastIndex(expr, " as "); asIdx >= 0 {
+				expr = strings.TrimSpace(expr[:asIdx])
+			}
+			expr = strings.Trim(expr, "`\" '")
+			if expr == "" || expr == "*" || !allowedSet[expr] {
+				t.Fatalf("对 %s 只允许投影 %s，投影列 %q 越界，实得 SQL: %s", table, allowed, expr, sql)
 			}
 		}
 	}
+}
+
+// splitTopLevel 按顶层逗号切分表达式（括号内的逗号不切）。
+func splitTopLevel(s string) []string {
+	var out []string
+	depth, start := 0, 0
+	for i, r := range s {
+		switch r {
+		case '(':
+			depth++
+		case ')':
+			depth--
+		case ',':
+			if depth == 0 {
+				out = append(out, s[start:i])
+				start = i + 1
+			}
+		}
+	}
+	return append(out, s[start:])
 }
 
 // TestInt228BudgetEvalReadsProjectionOnly 预算评估取 bot 名字走 IN 投影，
@@ -179,12 +213,9 @@ func TestInt228RollupScanReadsProjectionOnly(t *testing.T) {
 	}
 
 	int228AssertNoSensitiveReads(t, sqls())
-	for _, sql := range sqls() {
-		lower := strings.ToLower(sql)
-		if strings.Contains(lower, "from `bots`") && strings.Contains(lower, "select *") {
-			t.Fatalf("汇总路径不得 SELECT * 整行读 bots，实得 SQL: %s", sql)
-		}
-	}
+	// 汇总路径对 bots 只允许 id/user_id/name 投影与 count(*) 存在复检，
+	// 不允许任何整行或敏感列读取。
+	int228AssertProjectionColumns(t, sqls(), "`bots`", "id,user_id,name,count(*)")
 
 	// 汇总结果仍在：投影改造不改变功能结果。
 	var daily model.BotUsageDaily
@@ -206,6 +237,8 @@ func TestInt228StartDoesNotWaitForNightlyScan(t *testing.T) {
 	blocked := make(chan struct{})
 	release := make(chan struct{})
 	var once sync.Once
+	// 失败分支也要放行阻塞回调，否则清理里的 Stop 等不到扫描收尾。
+	t.Cleanup(func() { once.Do(func() { close(release) }) })
 	int228CaptureQueries(t, env.db, func(tx *gorm.DB) {
 		sql := strings.ToLower(tx.Statement.SQL.String())
 		if !strings.Contains(sql, "coalesce(users.timezone") {
@@ -282,5 +315,41 @@ func TestInt228ListBotOwnerTimezonesProjection(t *testing.T) {
 	}
 	if rows[1].BotID != b2.ID || rows[1].Timezone != "" {
 		t.Fatalf("未声明时区 bot 候选应为空串（由调用方回退）: %+v", rows[1])
+	}
+}
+
+// TestInt228BotMetasByIDsChunksBatches IN 查询跨批次：批量投影按
+// UsageQueryBatch 分块，bot 数超单批时不丟行（SQLite 变量数上限不退化）。
+func TestInt228BotMetasByIDsChunksBatches(t *testing.T) {
+	env := setupBotTestEnv(t)
+	origBatch := repository.UsageQueryBatch
+	repository.UsageQueryBatch = 1
+	t.Cleanup(func() { repository.UsageQueryBatch = origBatch })
+
+	want := map[string]bool{}
+	for i := 0; i < 3; i++ {
+		userID := createBotTestUser(t, env.db, fmt.Sprintf("int228chunk-%d", i))
+		bot := createBotRowAt(t, env, userID, "http://127.0.0.1:9", "fake-model")
+		want[bot.ID] = true
+	}
+
+	ids := make([]string, 0, len(want))
+	for id := range want {
+		ids = append(ids, id)
+	}
+	rows, err := repository.NewBotRepository(env.db).BotMetasByIDs(ids)
+	if err != nil {
+		t.Fatalf("BotMetasByIDs: %v", err)
+	}
+	if len(rows) != len(want) {
+		t.Fatalf("跨批次应取回全部投影行，实得 %d/%d: %+v", len(rows), len(want), rows)
+	}
+	for _, row := range rows {
+		if !want[row.ID] {
+			t.Fatalf("未知投影行: %+v", row)
+		}
+		if row.Name == "" || row.UserID == "" {
+			t.Fatalf("投影行应带 name/user_id: %+v", row)
+		}
 	}
 }
