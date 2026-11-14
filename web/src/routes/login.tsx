@@ -56,6 +56,7 @@ export default function LoginPage() {
         )}
       </CardHeader>
       <CardContent>
+        <DenyOAuthLink next={next} />
         <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
           {error && (
             <p className="text-sm text-destructive text-center">{error}</p>
@@ -103,5 +104,34 @@ export default function LoginPage() {
         </p>
       </CardContent>
     </Card>
+  );
+}
+
+/**
+ * OAuth 授权流程中的「放弃授权」出口：next 指向授权页时可解析出
+ * redirect_uri/state，以 error=access_denied 回调客户端（RFC 6749
+ * §4.1.2.1），让发起方收到明确的中止信号而不是干等回调。
+ */
+function DenyOAuthLink({ next }: { next: string | null }) {
+  if (!next?.startsWith("/oauth/authorize")) return null;
+  let denyUrl: string;
+  try {
+    const target = new URL(next, window.location.origin);
+    const redirectURI = target.searchParams.get("redirect_uri");
+    if (!redirectURI) return null;
+    const deny = new URL(redirectURI);
+    const state = target.searchParams.get("state");
+    deny.searchParams.set("error", "access_denied");
+    if (state) deny.searchParams.set("state", state);
+    denyUrl = deny.toString();
+  } catch {
+    return null;
+  }
+  return (
+    <p className="mb-4 text-center text-sm">
+      <a href={denyUrl} className="text-muted-foreground underline underline-offset-2 hover:text-foreground">
+        取消授权并返回应用
+      </a>
+    </p>
   );
 }

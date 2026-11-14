@@ -166,9 +166,12 @@ function AuthorizeConsent({ searchParams }: { searchParams: URLSearchParams }) {
         </CardHeader>
         <CardContent className="space-y-5">
           <p className="text-sm text-muted-foreground">
-            <span className="font-medium text-foreground">{client_name}</span>
-            请求访问你的 Fast Ship 账号。该应用将获得所选项目的
-            {write ? "读写" : "只读"}权限。
+            「<span className="font-medium text-foreground">{client_name}</span>」
+            请求访问你的 Fast Ship 账号
+            {projects.length > 0 && (
+              <>，该应用将获得所选项目的{write ? "读写" : "只读"}权限</>
+            )}
+            。
           </p>
           <div className="flex items-center justify-between rounded-md bg-muted/50 px-3 py-2 text-sm">
             <span className="text-muted-foreground">
@@ -228,13 +231,13 @@ function AuthorizeConsent({ searchParams }: { searchParams: URLSearchParams }) {
             )}
           </div>
 
+          {projects.length > 0 && (
           <div className="space-y-2">
             <Label>访问权限</Label>
             <RadioGroup
               value={write ? "write" : "read"}
               onValueChange={(value) => setWrite(value === "write")}
-              disabled={projects.length === 0}
-              className="[&>label]:min-h-11 [&>label]:items-center"
+              className="max-sm:[&>label]:min-h-11 max-sm:[&>label]:items-center"
             >
               <RadioGroupItem value="read">只读（查看项目与问题）</RadioGroupItem>
               <RadioGroupItem value="write">
@@ -242,6 +245,7 @@ function AuthorizeConsent({ searchParams }: { searchParams: URLSearchParams }) {
               </RadioGroupItem>
             </RadioGroup>
           </div>
+          )}
 
           {submitError && (
             <p className="text-sm text-destructive">{submitError}</p>
