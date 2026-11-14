@@ -107,7 +107,8 @@ func TestBotScanOnceIdleBotsCostOneQuery(t *testing.T) {
 	env.db.Logger = rec
 	rec.reset()
 	env.bots.scanOnce()
-	scanStmts := scanQueryStmts(rec.all())
+	allFirst := rec.all()
+	scanStmts := scanQueryStmts(allFirst)
 	if len(scanStmts) != 1 {
 		t.Fatalf("3 个空闲 bot 的扫描应恰好一条 SQL，实得 %d 条: %v", len(scanStmts), scanStmts)
 	}
@@ -118,6 +119,13 @@ func TestBotScanOnceIdleBotsCostOneQuery(t *testing.T) {
 	if strings.Contains(lower, "count(") {
 		t.Fatalf("扫描不得逐 bot COUNT: %s", scanStmts[0])
 	}
+	// 全量 SQL 里也不得有对 bot_messages 的 COUNT（防新查询旁边叠加旧路径）。
+	for _, sql := range allFirst {
+		l := strings.ToLower(sql)
+		if strings.Contains(l, "bot_messages") && strings.Contains(l, "count(") {
+			t.Fatalf("扫描不得对 bot_messages 做 COUNT: %s", sql)
+		}
+	}
 
 	// 再落 4 个同样的空闲 bot：查询数不变，不随闲置 bot 数线性增长。
 	for i := 0; i < 4; i++ {
@@ -127,8 +135,14 @@ func TestBotScanOnceIdleBotsCostOneQuery(t *testing.T) {
 	}
 	rec.reset()
 	env.bots.scanOnce()
-	if got := scanQueryStmts(rec.all()); len(got) != 1 {
+	allSecond := rec.all()
+	if got := scanQueryStmts(allSecond); len(got) != 1 {
 		t.Fatalf("7 个空闲 bot 的扫描仍应恰好一条 SQL，实得 %d 条: %v", len(got), got)
+	}
+	// 完整查询数也不随闲置 bot 数增长（防其他扫描子路径偷偷随 bot 数线性化）。
+	if len(allSecond) != len(allFirst) {
+		t.Fatalf("扫描总查询数不应随闲置 bot 数变化: 3 bot=%d 条，7 bot=%d 条\nfirst=%v\nsecond=%v",
+			len(allFirst), len(allSecond), allFirst, allSecond)
 	}
 
 	// 空闲 bot 不得被扫描唤醒。
@@ -160,5 +174,13 @@ func TestBotScanOnceIdleBotsCostOneQuery(t *testing.T) {
 	}
 	if fresh.OfferedInputSeq < newSeq {
 		t.Fatalf("唤醒后输入水位应推进: offered=%d new=%d", fresh.OfferedInputSeq, newSeq)
+	}
+	// 其余空闲 bot 在真实输入被处理后仍保持沉默（防误删 bot_id 关联的误唤醒）。
+	for _, bot := range bots[1:] {
+		var runCount int64
+		env.db.Model(&model.BotRun{}).Where("bot_id = ?", bot.ID).Count(&runCount)
+		if runCount != 0 {
+			t.Fatalf("无输入的 bot 不得被误唤醒: bot=%s runs=%d", bot.ID, runCount)
+		}
 	}
 }

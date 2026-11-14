@@ -187,6 +187,24 @@ func TestListBotsWithUnconsumedInputScopes(t *testing.T) {
 		t.Fatalf("schedule_event 应命中: rows=%v err=%v", rows, err)
 	}
 	_ = seqEvt
+
+	// 多 bot 混合状态：命中集合必须精确匹配，误删 bot_id 关联会在这里暴露。
+	idle := createWakeScanBot(t, db, "空闲", "规则")
+	iseq := appendWakeMsg(t, db, idle, model.BotMessageKindUser, model.BotSessionKindMain)
+	appendWakeMsg(t, db, idle, model.BotMessageKindAssistant, model.BotSessionKindMain)
+	if err := db.Model(&model.Bot{}).Where("id = ?", idle.ID).
+		Update("offered_input_seq", iseq).Error; err != nil {
+		t.Fatalf("consume idle input: %v", err)
+	}
+	createWakeScanBot(t, db, "无消息", "规则") // 从未聊过的 bot
+	rows, err = repo.ListBotsWithUnconsumedInput()
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	got := idsOf(rows)
+	if len(got) != 1 || got[0] != bot.ID {
+		t.Fatalf("命中集合应恰为有真实未消费输入的 bot: got=%v", got)
+	}
 }
 
 // 查询形状：一条 SQL 完成，不随闲置 bot 数增长，不加载人设大字段，
@@ -224,6 +242,12 @@ func TestListBotsWithUnconsumedInputQueryShape(t *testing.T) {
 		}
 		if strings.Contains(lower, "persona_prompt") || strings.Contains(lower, "system_prompt_text") {
 			t.Fatalf("扫描不得加载人设大字段: %s", sql)
+		}
+		if strings.Contains(lower, "bots.*") || strings.Contains(lower, "select *") {
+			t.Fatalf("扫描不得通配/整行加载: %s", sql)
+		}
+		if !strings.Contains(lower, "select bots.id, bots.next_message_seq from") {
+			t.Fatalf("外层投影应恰为 id 与 next_message_seq: %s", sql)
 		}
 		if strings.Contains(lower, "count(") {
 			t.Fatalf("扫描不得逐 bot COUNT: %s", sql)
