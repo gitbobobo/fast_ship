@@ -295,4 +295,16 @@ describe("api client auth retry", () => {
     expect(result).toBeUndefined();
     expect(authState.logout).not.toHaveBeenCalled();
   });
+
+  it("loginRedirectPath 用当前地址（含 query）构造 next", async () => {
+    window.history.replaceState(
+      {},
+      "",
+      "/oauth/authorize?client_id=c1&state=s1",
+    );
+    const { loginRedirectPath } = await import("./client");
+    expect(loginRedirectPath()).toBe(
+      `/login?next=${encodeURIComponent("/oauth/authorize?client_id=c1&state=s1")}`,
+    );
+  });
 });

@@ -11,6 +11,7 @@ import { useAuthStore } from "@/lib/store/auth-store";
 import { useOAuthAuthorizePreview } from "@/lib/hooks/use-oauth";
 import { oauthApi } from "@/lib/api/oauth";
 import { errorText, loginRedirectPath } from "@/lib/api/client";
+import { authApi } from "@/lib/api/auth";
 
 /** 缺一不可的 PKCE 参数；state 与 scope 不参与预取，只透传。 */
 const REQUIRED_PARAMS = [
@@ -141,10 +142,16 @@ function AuthorizeConsent({ searchParams }: { searchParams: URLSearchParams }) {
     window.location.href = u.toString();
   };
 
-  // 切换账号：先登出再进登录页，回跳参数保留本次授权请求。
-  const onSwitchAccount = () => {
-    logout();
-    window.location.href = loginRedirectPath();
+  // 切换账号：与 UserNav 同语义——先吊销服务端会话（失败也继续），再清
+  // 本地凭证进登录页，回跳参数保留本次授权请求。
+  const onSwitchAccount = async () => {
+    const refreshToken = useAuthStore.getState().refreshToken;
+    try {
+      await authApi.logout(refreshToken ?? undefined);
+    } finally {
+      logout();
+      window.location.href = loginRedirectPath();
+    }
   };
 
   return (
@@ -199,12 +206,15 @@ function AuthorizeConsent({ searchParams }: { searchParams: URLSearchParams }) {
                 ))}
               </div>
             )}
-            {/* 占位常驻：禁用↔可用切换不引起卡片高度跳动 */}
-            <p
-              className={`text-xs text-destructive ${selectedIds.size === 0 ? "" : "invisible"}`}
-            >
-              请至少选择 1 个项目
-            </p>
+            {/* 占位常驻：禁用↔可用切换不引起卡片高度跳动；无项目时由上方
+                空态文案说明原因，不再叠一条自相矛盾的红色提示 */}
+            {projects.length > 0 && (
+              <p
+                className={`text-xs text-destructive ${selectedIds.size === 0 ? "" : "invisible"}`}
+              >
+                请至少选择 1 个项目
+              </p>
+            )}
           </div>
 
           <div className="space-y-2">
@@ -223,7 +233,12 @@ function AuthorizeConsent({ searchParams }: { searchParams: URLSearchParams }) {
           )}
 
           <div className="flex gap-3">
-            <Button variant="outline" className="flex-1" onClick={onDeny}>
+            <Button
+              variant="outline"
+              className="flex-1"
+              disabled={submitting}
+              onClick={onDeny}
+            >
               取消
             </Button>
             <Button

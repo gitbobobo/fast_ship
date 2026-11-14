@@ -6,17 +6,23 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import OAuthAuthorizePage from "@/routes/oauth/authorize";
 import { withTestQueryClient } from "@/test/render";
 import { signInAs, signOut, teardownAuth } from "@/test/auth";
+import { useAuthStore } from "@/lib/store/auth-store";
 import type { components } from "@/types/api.gen";
 
 type OAuthAuthorizePreview = components["schemas"]["OAuthAuthorizePreview"];
 
-const { preview, authorize } = vi.hoisted(() => ({
+const { preview, authorize, authLogout } = vi.hoisted(() => ({
   preview: vi.fn(),
   authorize: vi.fn(),
+  authLogout: vi.fn(),
 }));
 
 vi.mock("@/lib/api/oauth", () => ({
   oauthApi: { preview, authorize },
+}));
+
+vi.mock("@/lib/api/auth", () => ({
+  authApi: { logout: authLogout },
 }));
 
 const previewFixture: OAuthAuthorizePreview = {
@@ -166,7 +172,7 @@ describe("OAuthAuthorizePage", () => {
     expect(authorize).not.toHaveBeenCalled();
   });
 
-  it("切换账号：登出并带 next 进登录页", async () => {
+  it("切换账号：吊销服务端会话、清本地凭证并带 next 进登录页", async () => {
     preview.mockResolvedValue({ data: previewFixture });
     const user = userEvent.setup();
     renderPage(`/oauth/authorize${fullQuery}`);
@@ -174,10 +180,14 @@ describe("OAuthAuthorizePage", () => {
     await screen.findByRole("button", { name: "同意授权" });
     await user.click(screen.getByRole("button", { name: "切换账号" }));
 
+    // 服务端会话吊销被调用（与 UserNav 同语义）
+    await waitFor(() => expect(authLogout).toHaveBeenCalled());
+    // 本地凭证已清（触发未登录 <Navigate> 进登录页，next 保留完整授权参数）
     const expectedNext = encodeURIComponent(`/oauth/authorize${fullQuery}`);
     expect(screen.getByTestId("login-page")).toHaveTextContent(
       `?next=${expectedNext}`,
     );
+    expect(useAuthStore.getState().token).toBeNull();
   });
 
   it("选读写档后提交带 write: true", async () => {
