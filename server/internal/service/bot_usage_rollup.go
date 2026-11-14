@@ -38,6 +38,16 @@ import (
 // 该 bot 的剩余日期直接放弃，不算错误。
 var errBotRolledOut = errors.New("bot usage rollup: bot deleted during rollup")
 
+// botUsageMeta 是汇总路径持有的 bot 元数据投影（INT-228）：只带 id、归属
+// 用户与名字，不为汇总 Get 整行——整行读取会把系统提示词与 provider 密文
+// 反复拖进每分钟的扫描。别名指向仓库层投影行，扫描/删除路径直接复用。
+type botUsageMeta = repository.BotMeta
+
+// botUsageMetaOf 把完整 bot 行降成汇总投影（删除路径手里已有整行时用）。
+func botUsageMetaOf(bot *model.Bot) botUsageMeta {
+	return botUsageMeta{ID: bot.ID, UserID: bot.UserID, Name: bot.Name}
+}
+
 // usageRollupPlan 是一次单 bot 汇总计划：解析出的有效时区、需要重算的日期
 // 区间（升序）与时区变更触发的整表清空标记。
 type usageRollupPlan struct {
@@ -75,15 +85,15 @@ func (s *BotService) usageTimezoneOf(db *gorm.DB, userID string) (string, *time.
 // 把今天的部分快照也落进汇总）。候选日里「未覆盖 ∪ 指纹不符 ∪ 最近 2 个
 // 当地日」进入 spans；任何已存标记的时区与当前有效时区不同 → wipe=true
 // 且全部日期重算（清空后明细会重建汇总，date 按新时区重排）。
-func (s *BotService) usageRollupPlan(db *gorm.DB, bot *model.Bot, now time.Time, includeToday bool) (*usageRollupPlan, error) {
+func (s *BotService) usageRollupPlan(db *gorm.DB, meta botUsageMeta, now time.Time, includeToday bool) (*usageRollupPlan, error) {
 	repo := repository.NewBotUsageRollupRepository(db)
-	tzName, loc, err := s.usageTimezoneOf(db, bot.UserID)
+	tzName, loc, err := s.usageTimezoneOf(db, meta.UserID)
 	if err != nil {
 		return nil, err
 	}
 	plan := &usageRollupPlan{tzName: tzName, loc: loc}
 
-	earliest, err := repo.EarliestUsageAt(bot.ID)
+	earliest, err := repo.EarliestUsageAt(meta.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -97,7 +107,7 @@ func (s *BotService) usageRollupPlan(db *gorm.DB, bot *model.Bot, now time.Time,
 	}
 	// 时区判脏先于「无日可算」短路：旧时区写下的行必须在新时区下清掉，
 	// 哪怕新时区里一个可结算日都没有（明细全落在今天）。
-	marks, err := repo.MarksByBot(bot.ID)
+	marks, err := repo.MarksByBot(meta.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -150,7 +160,7 @@ func (s *BotService) usageRollupPlan(db *gorm.DB, bot *model.Bot, now time.Time,
 	// 探针与标记 LastWriteNs 同为纳秒精度（账本原文解析，不经 strftime
 	// 毫秒截断）——同毫秒的迟到写入仍能在纳秒上越过水位被判新写，避免
 	// 「截断后相等 ⇒ 误判无新写」的盲区。
-	probe, err := repo.SpanWriteMax(bot.ID, spans[0].Start, spans[len(spans)-1].End)
+	probe, err := repo.SpanWriteMax(meta.ID, spans[0].Start, spans[len(spans)-1].End)
 	if err != nil {
 		return nil, err
 	}
@@ -163,7 +173,7 @@ func (s *BotService) usageRollupPlan(db *gorm.DB, bot *model.Bot, now time.Time,
 		return plan, nil
 	}
 
-	fps, err := repo.DayFingerprints(bot.ID, spans)
+	fps, err := repo.DayFingerprints(meta.ID, spans)
 	if err != nil {
 		return nil, err
 	}
@@ -205,11 +215,11 @@ func usageDayBucketOf(row repository.UsageRunRow, taskByRefRun map[string]string
 //   - 当日创建的维护行把请求/成本/token 折进父 run 的桶（父行不存在或属于
 //     其他 bot → maintenance 桶）；不产生 runs，也不进 display 样本。
 //   - 金额/token 空集合保持 NULL（缺失 ≠ 0）。
-func (s *BotService) usageDayRows(tx *gorm.DB, bot *model.Bot, span repository.UsageDaySpan, now time.Time) ([]model.BotUsageDaily, error) {
+func (s *BotService) usageDayRows(tx *gorm.DB, meta botUsageMeta, span repository.UsageDaySpan, now time.Time) ([]model.BotUsageDaily, error) {
 	usage := repository.NewBotUsageRepository(tx)
 	roll := repository.NewBotUsageRollupRepository(tx)
 
-	runs, err := usage.ListRunsInWindow([]string{bot.ID}, span.Start, span.End)
+	runs, err := usage.ListRunsInWindow([]string{meta.ID}, span.Start, span.End)
 	if err != nil {
 		return nil, err
 	}
@@ -221,7 +231,7 @@ func (s *BotService) usageDayRows(tx *gorm.DB, bot *model.Bot, span repository.U
 	if err != nil {
 		return nil, err
 	}
-	maintRows, err := usage.ListMaintenanceRunsInWindow([]string{bot.ID}, span.Start, span.End)
+	maintRows, err := usage.ListMaintenanceRunsInWindow([]string{meta.ID}, span.Start, span.End)
 	if err != nil {
 		return nil, err
 	}
@@ -292,9 +302,9 @@ func (s *BotService) usageDayRows(tx *gorm.DB, bot *model.Bot, span repository.U
 		if acc == nil {
 			acc = &bucketAcc{row: &model.BotUsageDaily{
 				ID:             uuid.NewString(),
-				UserID:         bot.UserID,
-				BotID:          bot.ID,
-				BotName:        bot.Name,
+				UserID:         meta.UserID,
+				BotID:          meta.ID,
+				BotName:        meta.Name,
 				ScheduleTaskID: taskID,
 				Date:           span.Date,
 				Kind:           kind,
@@ -337,7 +347,7 @@ func (s *BotService) usageDayRows(tx *gorm.DB, bot *model.Bot, span repository.U
 		kind, taskID := model.BotUsageDayMaintenance, (*string)(nil)
 		if m.ParentRunID != nil {
 			// 桶跟父 run 走；父 run 行不存在或属于其他 bot 才落 maintenance。
-			if parent, ok := parentByID[*m.ParentRunID]; ok && parent.BotID == bot.ID {
+			if parent, ok := parentByID[*m.ParentRunID]; ok && parent.BotID == meta.ID {
 				kind, taskID = usageDayBucketOf(parent, taskByRefRun)
 			}
 		}
@@ -393,9 +403,9 @@ func (s *BotService) usageDayRows(tx *gorm.DB, bot *model.Bot, span repository.U
 // rollupBotDayTx 在事务内替换一个 (bot,date) 的全部桶行并写覆盖标记：
 // 明细指纹用与判脏同一函数（DayFingerprints）在事务内现算——写入的口径
 // 就是判定的口径。
-func (s *BotService) rollupBotDayTx(tx *gorm.DB, bot *model.Bot, tzName string, span repository.UsageDaySpan, now time.Time) error {
+func (s *BotService) rollupBotDayTx(tx *gorm.DB, meta botUsageMeta, tzName string, span repository.UsageDaySpan, now time.Time) error {
 	repo := repository.NewBotUsageRollupRepository(tx)
-	rows, err := s.usageDayRows(tx, bot, span, now)
+	rows, err := s.usageDayRows(tx, meta, span, now)
 	if err != nil {
 		return err
 	}
@@ -416,7 +426,7 @@ func (s *BotService) rollupBotDayTx(tx *gorm.DB, bot *model.Bot, tzName string, 
 				taskIDs = append(taskIDs, *rows[i].ScheduleTaskID)
 			}
 		}
-		prev, err := repo.PrevTaskNamesTx(tx, bot.ID, span.Date)
+		prev, err := repo.PrevTaskNamesTx(tx, meta.ID, span.Date)
 		if err != nil {
 			return err
 		}
@@ -436,14 +446,14 @@ func (s *BotService) rollupBotDayTx(tx *gorm.DB, bot *model.Bot, tzName string, 
 			}
 		}
 	}
-	fps, err := repo.DayFingerprints(bot.ID, []repository.UsageDaySpan{span})
+	fps, err := repo.DayFingerprints(meta.ID, []repository.UsageDaySpan{span})
 	if err != nil {
 		return err
 	}
 	fp := fps[span.Date]
 	mark := &model.BotUsageRollupDay{
-		UserID:            bot.UserID,
-		BotID:             bot.ID,
+		UserID:            meta.UserID,
+		BotID:             meta.ID,
 		Date:              span.Date,
 		Timezone:          tzName,
 		RolledAt:          now,
@@ -460,18 +470,20 @@ func (s *BotService) rollupBotDayTx(tx *gorm.DB, bot *model.Bot, tzName string, 
 // 用：全部查询走 tx（生产单连接，混用 s.db 会自锁）。计划/清空/逐日替换
 // 都在调用方的事务里提交。
 func (s *BotService) rollupBotDaysTx(tx *gorm.DB, bot *model.Bot, now time.Time) error {
-	plan, err := s.usageRollupPlan(tx, bot, now, true)
+	// 删除事务手里已有整行，降成投影后走同一条路径（INT-228）。
+	meta := botUsageMetaOf(bot)
+	plan, err := s.usageRollupPlan(tx, meta, now, true)
 	if err != nil {
 		return err
 	}
 	repo := repository.NewBotUsageRollupRepository(tx)
 	if plan.wipe {
-		if err := repo.WipeBotTx(tx, bot.ID); err != nil {
+		if err := repo.WipeBotTx(tx, meta.ID); err != nil {
 			return err
 		}
 	}
 	for _, span := range plan.spans {
-		if err := s.rollupBotDayTx(tx, bot, plan.tzName, span, now); err != nil {
+		if err := s.rollupBotDayTx(tx, meta, plan.tzName, span, now); err != nil {
 			return err
 		}
 	}
@@ -481,22 +493,24 @@ func (s *BotService) rollupBotDaysTx(tx *gorm.DB, bot *model.Bot, now time.Time)
 // rollupBotUsageRange 在事务外补齐该 bot 的全部汇总缺口（含今天）：删除
 // 路径在正式删除事务之前调用——逐日各走一个小事务，补齐失败中止删除。
 func (s *BotService) rollupBotUsageRange(botID string) error {
-	return s.rollupBotUsage(botID, s.now(), true, false)
-}
-
-// rollupBotUsage 是扫描与删除路径共用的单 bot 汇总流程：bot 已消失直接
-// 返回；时区变更先整表清空再重算；逐日一个小事务，提交前复检 bot 仍存在
-// （与删除竞速）。keepGoing=true（周期扫描）单日失败记 warn 继续下一天；
-// false（删除前补齐）首个失败即返回。
-func (s *BotService) rollupBotUsage(botID string, now time.Time, includeToday, keepGoing bool) error {
-	bot, err := s.bots.Get(botID)
+	// 投影读元数据（INT-228）：bot 已消失时无行，等同旧的 RecordNotFound。
+	metas, err := repository.NewBotRepository(s.db).BotMetasByIDs([]string{botID})
 	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil
-		}
 		return err
 	}
-	plan, err := s.usageRollupPlan(s.db, bot, now, includeToday)
+	if len(metas) == 0 {
+		return nil
+	}
+	return s.rollupBotUsage(metas[0], s.now(), true, false)
+}
+
+// rollupBotUsage 是扫描与删除路径共用的单 bot 汇总流程：meta 由调用方以
+// 投影查询提供（扫描批量取，删除路径单条取），bot 已消失时调用方直接跳
+// 过；时区变更先整表清空再重算；逐日一个小事务，提交前复检 bot 仍存在
+// （与删除竞速）。keepGoing=true（周期扫描）单日失败记 warn 继续下一天；
+// false（删除前补齐）首个失败即返回。
+func (s *BotService) rollupBotUsage(meta botUsageMeta, now time.Time, includeToday, keepGoing bool) error {
+	plan, err := s.usageRollupPlan(s.db, meta, now, includeToday)
 	if err != nil {
 		return err
 	}
@@ -504,14 +518,14 @@ func (s *BotService) rollupBotUsage(botID string, now time.Time, includeToday, k
 		err := s.db.Transaction(func(tx *gorm.DB) error {
 			// 与逐日写同一复检：清空若抢在删除归档后提交，会把刚归档的
 			// 历史行抹掉——bot 已删直接收工，不动它的汇总。
-			exists, err := repository.NewBotUsageRollupRepository(tx).BotExistsTx(tx, bot.ID)
+			exists, err := repository.NewBotUsageRollupRepository(tx).BotExistsTx(tx, meta.ID)
 			if err != nil {
 				return err
 			}
 			if !exists {
 				return errBotRolledOut
 			}
-			return repository.NewBotUsageRollupRepository(tx).WipeBotTx(tx, bot.ID)
+			return repository.NewBotUsageRollupRepository(tx).WipeBotTx(tx, meta.ID)
 		})
 		if errors.Is(err, errBotRolledOut) {
 			return nil
@@ -522,21 +536,21 @@ func (s *BotService) rollupBotUsage(botID string, now time.Time, includeToday, k
 	}
 	for _, span := range plan.spans {
 		err := s.db.Transaction(func(tx *gorm.DB) error {
-			exists, err := repository.NewBotUsageRollupRepository(tx).BotExistsTx(tx, bot.ID)
+			exists, err := repository.NewBotUsageRollupRepository(tx).BotExistsTx(tx, meta.ID)
 			if err != nil {
 				return err
 			}
 			if !exists {
 				return errBotRolledOut
 			}
-			return s.rollupBotDayTx(tx, bot, plan.tzName, span, now)
+			return s.rollupBotDayTx(tx, meta, plan.tzName, span, now)
 		})
 		if errors.Is(err, errBotRolledOut) {
 			return nil // bot 在补齐期间被删：剩余日期没意义，直接收工
 		}
 		if err != nil {
 			s.logger.Warn("按天花费汇总失败",
-				zap.String("bot_id", bot.ID), zap.String("date", span.Date), zap.Error(err))
+				zap.String("bot_id", meta.ID), zap.String("date", span.Date), zap.Error(err))
 			if !keepGoing {
 				return err
 			}
@@ -555,9 +569,16 @@ func (s *BotService) scanUsageRollupOnce() {
 		s.logger.Warn("按天花费汇总扫描失败", zap.Error(err))
 		return
 	}
-	for _, botID := range ids {
-		if err := s.rollupBotUsage(botID, now, false, true); err != nil {
-			s.logger.Warn("按天花费汇总失败", zap.String("bot_id", botID), zap.Error(err))
+	// 元数据批量投影（INT-228）：不为 id/user_id/name Get 整行；已删除
+	// bot 的投影无行，直接跳过（明细行随归档保留，汇总不再补）。
+	metas, err := repository.NewBotRepository(s.db).BotMetasByIDs(ids)
+	if err != nil {
+		s.logger.Warn("按天花费汇总读取机器人元数据失败", zap.Error(err))
+		return
+	}
+	for _, meta := range metas {
+		if err := s.rollupBotUsage(meta, now, false, true); err != nil {
+			s.logger.Warn("按天花费汇总失败", zap.String("bot_id", meta.ID), zap.Error(err))
 		}
 	}
 }

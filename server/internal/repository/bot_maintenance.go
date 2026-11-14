@@ -74,13 +74,6 @@ func (r *BotMaintenanceRepository) ListUnfinished() ([]model.BotMaintenanceRun, 
 	return rows, err
 }
 
-// ListDueNightly 扫描候选：全部 bot（协调器再按本地日期与配置过滤）。
-func (r *BotMaintenanceRepository) ListBotIDs() ([]string, error) {
-	var ids []string
-	err := r.db.Model(&model.Bot{}).Order("created_at ASC").Pluck("id", &ids).Error
-	return ids, err
-}
-
 // ListSucceeded 列出某机器人某类全部成功维护运行（按时间升序，供累计消费水位）。
 func (r *BotMaintenanceRepository) ListSucceeded(botID string, kind model.BotMaintenanceKind) ([]model.BotMaintenanceRun, error) {
 	var rows []model.BotMaintenanceRun
