@@ -56,18 +56,26 @@ type ReviewClients struct {
 	// installations GitHub 安装解析短 TTL 缓存（key=repoFullName）：安装解析
 	// 每次都要签 App JWT 打 /repos/{o}/{r}/installation，而安装关系极少变
 	// 化——命中即不再打 JWT，防抖 tick/同步账本/开轮每轮一次的构造不再放大
-	// App 级配额。只缓存成功结果：未安装的仓库每轮仍实查，装完下一轮即生效。
-	// 安装变更在 TTL 内拿到旧 id 的代价与旧行为（webhook 快照旧 id）等价：
-	// 后续请求 401/404 按确定性失败归类，窗口过后自愈。
+	// App 级配额。确定性失败（仓库未装 App 等 401/403/404 非限流）按更短
+	// 负 TTL 缓存：最常见滞留支路不再每轮打 JWT，装完负 TTL 内即生效。
+	// TTL 内安装变更拿到旧 id：适配器经 reResolve 钩子作废条目重解析并重
+	// 试一次（见 GitHubReviewClient），不自愈才按确定性失败归类。
 	installations sync.Map
 }
 
-// installationCacheTTL 安装 id 缓存时长（见 installations 字段注释）。
-const installationCacheTTL = 5 * time.Minute
+const (
+	// installationCacheTTL 安装 id 成功结果的缓存时长。
+	installationCacheTTL = 5 * time.Minute
+	// installationNegCacheTTL 确定性失败（未安装/凭证被拒）的负缓存时长：
+	// 比成功 TTL 短——装完 App 很快生效，又压住未安装支路的 JWT 放大。
+	installationNegCacheTTL = time.Minute
+)
 
-// installationCacheEntry installations 的值：解析到的安装 id 与过期时刻。
+// installationCacheEntry installations 的值：解析结果与过期时刻。err 非空
+// 时是确定性失败的原始 cause（AppError 包装在取用处按当前语义重建）。
 type installationCacheEntry struct {
 	id  int64
+	err error
 	exp time.Time
 }
 
@@ -125,20 +133,35 @@ func (r *ReviewClients) ClientFor(ctx context.Context, integrationID, repoFullNa
 	if err != nil {
 		return nil, err
 	}
-	return NewGitHubReviewClient(api, installationID), nil
+	client := NewGitHubReviewClient(api, installationID)
+	// reResolve：调用命中陈旧安装（401/404、非限流 403）时作废本仓库缓存
+	// 条目重解析——TTL 窗口内的 App 卸装重装/仓库转组不再把确定性失败误判
+	// 成丢投递（INT-230 复审 P2）。
+	client.reResolve = func(ctx context.Context) (int64, error) {
+		r.installations.Delete(repoFullName)
+		return r.resolveInstallation(ctx, api, repoFullName)
+	}
+	return client, nil
 }
 
-// resolveInstallation 按仓库解析 GitHub App 安装 id，成功结果按 repo 短
-// TTL 缓存（INT-230 复审：无缓存时防抖/同步/开轮每轮一次 JWT 解析会放大
-// App 级配额）。失败不缓存，错误照旧包装。
+// resolveInstallation 按仓库解析 GitHub App 安装 id：成功结果按 repo 短
+// TTL 缓存、确定性失败按更短负 TTL 缓存（INT-230 复审：无缓存时防抖/同
+// 步/开轮与未安装支路的重试每轮一次 JWT 解析会放大 App 级配额）。瞬时
+// 失败不缓存，错误照旧包装。
 func (r *ReviewClients) resolveInstallation(ctx context.Context, api githubapi.GitHubClient, repoFullName string) (int64, error) {
 	if v, ok := r.installations.Load(repoFullName); ok {
 		if e, ok := v.(installationCacheEntry); ok && time.Now().Before(e.exp) {
+			if e.err != nil {
+				return 0, errs.Wrap(errs.ErrGitHubAPI.Code, fmt.Sprintf("解析仓库安装失败: %v", e.err), e.err)
+			}
 			return e.id, nil
 		}
 	}
 	installationID, err := api.ResolveInstallation(ctx, repoFullName)
 	if err != nil {
+		if !IsRateLimit(err) && (IsUnauthorized(err) || IsForbidden(err) || IsNotFound(err)) {
+			r.installations.Store(repoFullName, installationCacheEntry{err: err, exp: time.Now().Add(installationNegCacheTTL)})
+		}
 		return 0, errs.Wrap(errs.ErrGitHubAPI.Code, fmt.Sprintf("解析仓库安装失败: %v", err), err)
 	}
 	r.installations.Store(repoFullName, installationCacheEntry{id: installationID, exp: time.Now().Add(installationCacheTTL)})

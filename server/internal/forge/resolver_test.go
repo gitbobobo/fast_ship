@@ -92,9 +92,9 @@ func TestResolverGitHubResolveFailure(t *testing.T) {
 }
 
 // TestResolverInstallationCache 安装 id 成功结果按 repo 短 TTL 缓存：同一
-// resolver 两次构造同仓库客户端只打一次 ResolveInstallation；失败不缓存，
-// 下一构造仍实查（INT-230 复审 P2：防抖/同步/开轮每轮一次 JWT 解析会放大
-// App 级配额）。
+// resolver 两次构造同仓库客户端只打一次 ResolveInstallation；瞬时失败不
+// 缓存，下一构造仍实查（INT-230 复审 P2：防抖/同步/开轮每轮一次 JWT 解
+// 析会放大 App 级配额）。
 func TestResolverInstallationCache(t *testing.T) {
 	ctx := context.Background()
 	api := &recordingAPI{resolveInst: 42}
@@ -117,7 +117,7 @@ func TestResolverInstallationCache(t *testing.T) {
 		t.Fatalf("resolveCalls = %d, want 2（异仓库实查）", api.resolveCalls)
 	}
 
-	// 失败不缓存：两次构造都实查。
+	// 瞬时失败不缓存：两次构造都实查。
 	failAPI := &recordingAPI{resolveErr: errors.New("boom")}
 	failResolver := NewReviewClients(&sourceStub{api: failAPI}, nil)
 	for i := 0; i < 2; i++ {
@@ -126,7 +126,62 @@ func TestResolverInstallationCache(t *testing.T) {
 		}
 	}
 	if failAPI.resolveCalls != 2 {
-		t.Fatalf("failAPI.resolveCalls = %d, want 2（失败不缓存）", failAPI.resolveCalls)
+		t.Fatalf("failAPI.resolveCalls = %d, want 2（瞬时失败不缓存）", failAPI.resolveCalls)
+	}
+}
+
+// TestResolverInstallationNegCache 确定性失败（仓库未装 App 的 404）按负
+// TTL 缓存：命中不再签 JWT，错误仍按 AppError + cause 链透出；负 TTL 内
+// 装完 App 也不会立刻翻正（复审 Note：压住未安装支路的配额放大）。
+func TestResolverInstallationNegCache(t *testing.T) {
+	ctx := context.Background()
+	cause := &githubapi.StatusError{StatusCode: 404, Method: "GET", URL: "/repos/o/r/installation"}
+	api := &recordingAPI{resolveErr: cause}
+	resolver := NewReviewClients(&sourceStub{api: api}, nil)
+
+	for i := 0; i < 2; i++ {
+		_, err := resolver.ClientFor(ctx, model.ForgeIntegrationBuiltinGitHubID, "o/r")
+		if !errors.Is(err, cause) {
+			t.Fatalf("ClientFor #%d err = %v, want cause 链带 StatusError", i, err)
+		}
+	}
+	if api.resolveCalls != 1 {
+		t.Fatalf("resolveCalls = %d, want 1（负缓存命中不再打 JWT）", api.resolveCalls)
+	}
+}
+
+// TestResolverStaleInstallRetry 缓存的安装 id 陈旧（TTL 窗口内 App 重装）
+// 时调用自愈：401/404/非限流 403 经 reResolve 作废条目重解析并重试一次，
+// 后续构造直接取到新 id（复审 P2：不自愈会按确定性失败误丢投递）。
+func TestResolverStaleInstallRetry(t *testing.T) {
+	ctx := context.Background()
+	notFound := &githubapi.StatusError{StatusCode: 404, Method: "GET", URL: "/repos/o/r/pulls/1"}
+	api := &recordingAPI{resolveInst: 1, prErrForID: map[int64]error{1: notFound}}
+	resolver := NewReviewClients(&sourceStub{api: api}, nil)
+
+	client, err := resolver.ClientFor(ctx, model.ForgeIntegrationBuiltinGitHubID, "o/r")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 安装变更：新解析返回 2；旧 id 1 的调用仍 404。
+	api.resolveInst = 2
+
+	if _, err := client.GetPullRequest(ctx, "o/r", 1); err != nil {
+		t.Fatalf("GetPullRequest = %v, want 自愈成功", err)
+	}
+	if api.resolveCalls != 2 {
+		t.Fatalf("resolveCalls = %d, want 2（作废缓存后实查一次）", api.resolveCalls)
+	}
+	if api.last() != 2 {
+		t.Fatalf("retry installationID = %d, want 2", api.last())
+	}
+
+	// 自愈后缓存已更新：新构造不再解析，直接拿 2。
+	if _, err := resolver.ClientFor(ctx, model.ForgeIntegrationBuiltinGitHubID, "o/r"); err != nil {
+		t.Fatal(err)
+	}
+	if api.resolveCalls != 2 {
+		t.Fatalf("resolveCalls = %d, want 2（自愈结果已入缓存）", api.resolveCalls)
 	}
 }
 

@@ -16,6 +16,7 @@ type recordingAPI struct {
 	inst []int64 // 每次调用收到的 installationID（按调用序）
 
 	pr             *githubapi.PullRequest
+	prErrForID     map[int64]error // GetPullRequest 按安装 id 注入错误
 	diff           string
 	diffErr        error
 	reviewComments []githubapi.ReviewComment
@@ -54,6 +55,9 @@ func (r *recordingAPI) last() int64 {
 
 func (r *recordingAPI) GetPullRequest(_ context.Context, installationID int64, _ string, _ int) (*githubapi.PullRequest, error) {
 	r.mark(installationID)
+	if err := r.prErrForID[installationID]; err != nil {
+		return nil, err
+	}
 	return r.pr, nil
 }
 
