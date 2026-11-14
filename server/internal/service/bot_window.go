@@ -520,10 +520,42 @@ func (s *BotService) refreshModelWindow(ctx context.Context, baseURL, apiKey, mo
 
 // refreshBotModelWindowAsync 后台探测并缓存该机器人当前模型的窗口元数据。
 // 结果只写缓存与日志：失败不冒泡为业务失败，也不阻塞调用方（创建/更新响应、
-// run 开始都不等待网络）。经 spawnBg 登记并派生自 runCtx：Stop 能等到它
+// run 开始都不等待网络）。经 spawnProbe 登记并派生自 runCtx：Stop 能等到它
 // 退出并即时取消在途探测（INT-205）。
 func (s *BotService) refreshBotModelWindowAsync(botID string) {
-	s.spawnBg(func() { s.runWindowProbe(botID) })
+	s.spawnProbe(func() { s.runWindowProbe(botID) })
+}
+
+// spawnProbe 启动一个后台窗口探测，同时登记进 bgWg（Stop 的收尾）与 probeWg
+// （waitWindowProbes 的等待）。登记与 goroutine 启动在同一个 bgMu 临界区内
+// 完成（INT-232）：等待者持 bgMu 时不可能看到「已计数但尚未启动」的探测，
+// 提交者也不会在 Add 之后卡在 bgMu 上等等待者——没有这个原子性，等待会与
+// 提交互锁。
+func (s *BotService) spawnProbe(fn func()) bool {
+	s.bgMu.Lock()
+	defer s.bgMu.Unlock()
+	if s.stopped {
+		return false
+	}
+	s.bgWg.Add(1)
+	s.probeWg.Add(1)
+	go func() {
+		defer s.bgWg.Done()
+		defer s.probeWg.Done()
+		fn()
+	}()
+	return true
+}
+
+// waitWindowProbes 等全部在途后台窗口探测收敛（INT-232）：测试在替换共享
+// gorm Logger 等全局对象前用它建立确定性同步点，探测不再与测试竞争
+// 同一批 gorm 内部字段。持 bgMu 等：新增探测的 Add 被挡在外面，而 Done
+// 不需要锁，Wait 不会撞上 Add（与 spawnBg/Stop 同一纪律）；探测内的加锁
+// 只在 spawnProbe 完成之前，goroutine 一旦启动就不再取 bgMu，等待必然收敛。
+func (s *BotService) waitWindowProbes() {
+	s.bgMu.Lock()
+	defer s.bgMu.Unlock()
+	s.probeWg.Wait()
 }
 
 // runWindowProbe 是后台窗口探测的 goroutine 主体（泄漏守卫按方法名统计）。
