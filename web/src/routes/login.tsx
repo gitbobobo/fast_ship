@@ -41,7 +41,7 @@ export default function LoginPage() {
 
   return (
     <Card>
-      <CardHeader className="text-center">
+      <CardHeader className="pt-4 text-center">
         <CardTitle className="text-xl">登录</CardTitle>
         {searchParams.get("client") ? (
           <p className="mt-1 text-sm text-muted-foreground">
@@ -134,8 +134,11 @@ function DenyOAuthLink({ next }: { next: string | null }) {
   }
   if (!denyHref) return null;
   return (
-    <p className="mb-4 text-center text-sm">
-      <a href={denyHref} className="text-muted-foreground underline underline-offset-2 hover:text-foreground">
+    <p className="mt-3 mb-4 text-center">
+      <a
+        href={denyHref}
+        className="inline-flex h-8 items-center rounded-md border border-border px-3 text-sm text-muted-foreground transition-colors hover:border-foreground/40 hover:text-foreground"
+      >
         取消授权并返回应用
       </a>
     </p>

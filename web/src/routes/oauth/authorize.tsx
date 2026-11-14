@@ -175,8 +175,8 @@ function AuthorizeConsent({ searchParams }: { searchParams: URLSearchParams }) {
             )}
             。
           </p>
-          <div className="flex items-center justify-between rounded-md bg-muted/50 px-3 py-2 text-sm">
-            <span className="text-muted-foreground">
+          <div className="flex items-center justify-between gap-2 rounded-md bg-muted/50 px-3 py-2 text-sm">
+            <span className="min-w-0 truncate text-muted-foreground">
               当前登录：
               <span className="font-medium text-foreground">{username}</span>
               {email && <span className="text-muted-foreground">（{email}）</span>}
