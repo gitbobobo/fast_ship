@@ -415,6 +415,7 @@ export function useIssueSourceList(options: {
   return {
     items,
     currentIndex,
+    totalCount: data?.pages[0]?.total ?? null,
     isLoading,
     isError,
     refetch,

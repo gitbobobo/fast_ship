@@ -128,18 +128,25 @@ export function IssueSourceList({
                 onClick={() => onSelect(entry.issue)}
                 title={entry.stale ? "已不符合来源条件，仅保留在此处" : undefined}
                 className={cn(
-                  "flex w-full items-start gap-2 rounded-lg px-2 py-1.5 text-left text-sm transition-colors",
+                  "flex w-full items-start gap-2 rounded-lg border-l-2 px-2 py-1.5 text-left text-sm transition-colors",
                   entry.stale
-                    ? "text-muted-foreground/70 hover:bg-muted/50"
-                    : "text-foreground/90 hover:bg-muted",
-                  isCurrent && "bg-accent text-foreground hover:bg-accent",
+                    ? "border-transparent text-muted-foreground/70 hover:bg-muted/50"
+                    : "border-transparent text-foreground/90 hover:bg-muted",
+                  isCurrent &&
+                    "border-primary bg-accent font-medium text-foreground hover:bg-accent",
                 )}
               >
                 <span className="mt-0.5 flex w-3 shrink-0 justify-center">
                   {hasUnread ? <UnreadDot /> : null}
                 </span>
                 <span className="min-w-0 flex-1">
-                  <span className={cn("block font-mono text-xs text-muted-foreground", entry.stale && "opacity-60")}>
+                  <span
+                    className={cn(
+                      "block font-mono text-xs text-muted-foreground",
+                      entry.stale && "opacity-60",
+                      isCurrent && "font-semibold text-primary",
+                    )}
+                  >
                     {entry.issue.reference}
                   </span>
                   <span className="mt-0.5 line-clamp-2 block leading-snug">

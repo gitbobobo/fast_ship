@@ -1,3 +1,5 @@
+import { ISSUE_WORKFLOW_STATUS_LABELS } from "@/lib/issue-workflow-status";
+
 export interface IssueListContext {
   state?: string;
   q?: string;
@@ -108,6 +110,59 @@ export function buildBoardSourceSearchParams(context: BoardIssueColumnContext) {
  * issue_from=board 且 issue_workflow_status 为合法列值才算 board（非法/缺失不算）；
  * 未知 issue_from 值一律 none；无 issue_from 时出现任一 issue_* 参数即 list。
  */
+const BOARD_WORKFLOW_STATUS_PARAM_LABELS: Record<
+  BoardWorkflowStatusParam,
+  string
+> = {
+  todo: "待处理",
+  in_progress: "开发中",
+  done: "已完成",
+  unset: "未设置",
+};
+
+const ISSUE_STATE_PARAM_LABELS: Record<string, string> = {
+  open: "开启",
+  closed: "关闭",
+};
+
+/** 来源列表标题副行：说明来源是哪一列/哪组筛选，让「在哪个上下文里翻页」一眼可辨 */
+export function describeIssueSourceContext(context: IssueSourceContext): string {
+  if (context.kind === "board") {
+    const segments = [BOARD_WORKFLOW_STATUS_PARAM_LABELS[context.workflowStatus]];
+    if (context.label) {
+      segments.push(`标签 ${context.label}`);
+    }
+    if (context.source) {
+      segments.push(`来源 ${context.source}`);
+    }
+    return segments.join(" · ");
+  }
+  if (context.kind === "list") {
+    const segments: string[] = [];
+    segments.push(ISSUE_STATE_PARAM_LABELS[context.state] ?? "全部状态");
+    if (context.q) {
+      segments.push(`搜索 ${context.q}`);
+    }
+    if (context.label) {
+      segments.push(`标签 ${context.label}`);
+    }
+    if (context.source) {
+      segments.push(`来源 ${context.source}`);
+    }
+    if (context.workflowStatus) {
+      segments.push(
+        `内部状态 ${
+          ISSUE_WORKFLOW_STATUS_LABELS[
+            context.workflowStatus as keyof typeof ISSUE_WORKFLOW_STATUS_LABELS
+          ] ?? context.workflowStatus
+        }`,
+      );
+    }
+    return segments.join(" · ");
+  }
+  return "";
+}
+
 export function readIssueSourceContext(
   searchParams: URLSearchParams,
 ): IssueSourceContext {

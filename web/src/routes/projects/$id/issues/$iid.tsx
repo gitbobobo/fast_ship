@@ -76,7 +76,10 @@ import { useIssuePromptList } from "@/lib/hooks/use-issue-prompt";
 import { useEnvironments } from "@/lib/hooks/use-threads";
 import { buildIssuePrompt } from "@/lib/issue-prompt";
 import { canOperate } from "@/lib/threads-compose";
-import { readIssueSourceContext } from "@/lib/issue-list-context";
+import {
+  describeIssueSourceContext,
+  readIssueSourceContext,
+} from "@/lib/issue-list-context";
 import { ISSUE_SOURCE_LABELS } from "@/lib/issue-source";
 import { useAuthStore } from "@/lib/store/auth-store";
 import { useProjectPreferenceStore } from "@/lib/store/project-preference-store";
@@ -281,6 +284,8 @@ export default function IssueDetailPage() {
   const hasSourceContext =
     issueSourceContext.kind !== "none" &&
     (issue === undefined || issue.project_id === id);
+  // 面板标题副行：说明来源是哪一列/哪组筛选与条数，宽屏栏与抽屉共用
+  const sourceLabel = describeIssueSourceContext(issueSourceContext);
   const desktopSourceListOpen =
     hasSourceContext && !isNarrowViewport && issueSourceListExpanded;
   const source = useIssueSourceList({
@@ -289,6 +294,7 @@ export default function IssueDetailPage() {
     currentIssueId: iid ?? "",
     currentIssueProjectId: issue?.project_id,
   });
+  const sourceCountLabel = `${source.totalCount ?? source.items.length} 个`;
 
   const toggleSourceList = useCallback(() => {
     if (!hasSourceContext) {
@@ -1096,16 +1102,24 @@ export default function IssueDetailPage() {
                 className="overflow-hidden rounded-2xl border bg-card shadow-sm"
               >
                 <div className="flex items-center justify-between border-b px-4 py-2.5">
-                  <h2 className="text-sm font-semibold">来源列表</h2>
+                  <div className="min-w-0">
+                    <h2 className="text-sm font-semibold">来源列表</h2>
+                    <p className="mt-0.5 truncate text-xs text-muted-foreground">
+                      {sourceLabel} · {sourceCountLabel}
+                    </p>
+                  </div>
                   <Button
                     variant="ghost"
                     size="sm"
-                    className="h-6 px-1.5 font-mono text-[10px] text-muted-foreground"
+                    className="h-6 shrink-0 gap-1 px-1.5 text-[10px] text-muted-foreground"
                     onClick={toggleSourceList}
                     aria-label="收起来源列表"
                     title="收起（[）"
                   >
-                    [
+                    收起
+                    <kbd className="rounded border border-muted-foreground/40 bg-muted px-1 font-mono text-[10px] text-foreground/70">
+                      [
+                    </kbd>
                   </Button>
                 </div>
                 <IssueSourceList
@@ -1222,7 +1236,7 @@ export default function IssueDetailPage() {
                         >
                           <List className="mr-1.5 h-3.5 w-3.5" />
                           来源列表
-                          <kbd className="ml-1.5 rounded border bg-muted px-1 font-mono text-[10px] text-muted-foreground">
+                          <kbd className="ml-1.5 rounded border border-muted-foreground/40 bg-muted px-1 font-mono text-[10px] text-foreground/70">
                             [
                           </kbd>
                         </Button>
@@ -1356,6 +1370,9 @@ export default function IssueDetailPage() {
           >
             <SheetHeader className="border-b pb-3">
               <SheetTitle>来源列表</SheetTitle>
+              <p className="mt-0.5 truncate text-xs text-muted-foreground">
+                {sourceLabel} · {sourceCountLabel}
+              </p>
             </SheetHeader>
             <div
               id="issue-source-list-panel"
