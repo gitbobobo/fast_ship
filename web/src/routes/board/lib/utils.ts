@@ -11,3 +11,12 @@ export function getColumnStatusValue(columnId: ColumnId): (typeof COLUMNS)[numbe
   const col = COLUMNS.find((c) => c.id === columnId);
   return col ? col.statusValue : "";
 }
+
+/** 列状态 → URL 参数值：其余列同名，「未设置」列编码为 unset */
+export function getBoardWorkflowStatusParam(statusValue: string): "todo" | "in_progress" | "done" | "unset" | null {
+  const column = COLUMNS.find((c) => c.statusValue === statusValue);
+  if (!column) {
+    return null;
+  }
+  return column.id === "unset" ? "unset" : column.statusValue;
+}

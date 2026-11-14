@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Environment } from "@/lib/api/threads";
+import type { BoardIssueColumnContext } from "@/lib/issue-list-context";
 import { makeEnvironment } from "@/test/threads";
 import { RecommendedIssuesButton } from "./recommended-issues-button";
 
@@ -232,10 +233,13 @@ function mockRecommendations(items: IssueRecommendation[]) {
   });
 }
 
-function renderButton() {
+function renderButton(props: { getIssueColumnContext?: (issue: Issue) => BoardIssueColumnContext | null } = {}) {
   return render(
     <MemoryRouter>
-      <RecommendedIssuesButton projectId="project-1" />
+      <RecommendedIssuesButton
+        projectId="project-1"
+        getIssueColumnContext={props.getIssueColumnContext}
+      />
     </MemoryRouter>,
   );
 }
@@ -339,6 +343,51 @@ describe("RecommendedIssuesButton", () => {
     expect(screen.getByText("先做这个能解锁后续工作")).toBeInTheDocument();
     expect(screen.getByText("高优任务的正文")).toBeInTheDocument();
     expect(screen.getByText("1/2 项完成")).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: /打开完整详情页/ }),
+    ).toHaveAttribute("href", "/projects/project-1/issues/issue-1");
+  });
+
+  it("encodes the displayed issue's column context into the detail link", async () => {
+    mockRecommendations(ALL_ITEMS);
+    renderButton({
+      getIssueColumnContext: (issue) => ({
+        workflowStatus:
+          issue.internal_meta?.workflow_status === ""
+            ? ("unset" as const)
+            : (issue.internal_meta?.workflow_status ?? "todo"),
+        label: "",
+        source: "internal",
+      }),
+    });
+    await openDialog();
+
+    // 默认选中 issue-1（todo 列），详情链接带所在列与该列筛选
+    await screen.findByRole("heading", { name: "高优任务" });
+    expect(
+      screen.getByRole("link", { name: /打开完整详情页/ }),
+    ).toHaveAttribute(
+      "href",
+      "/projects/project-1/issues/issue-1?issue_from=board&issue_workflow_status=todo&issue_source=internal",
+    );
+
+    // 切到 peek 依赖时取展示目标的上下文
+    fireEvent.click(screen.getByRole("button", { name: /INT-0 前置任务/ }));
+    await screen.findByRole("heading", { name: "前置任务" });
+    expect(
+      screen.getByRole("link", { name: /打开完整详情页/ }),
+    ).toHaveAttribute(
+      "href",
+      "/projects/project-1/issues/dep-1?issue_from=board&issue_workflow_status=done&issue_source=internal",
+    );
+  });
+
+  it("keeps a plain detail link when the column context is unknown", async () => {
+    mockRecommendations(ALL_ITEMS);
+    renderButton({ getIssueColumnContext: () => null });
+    await openDialog();
+
+    await screen.findByRole("heading", { name: "高优任务" });
     expect(
       screen.getByRole("link", { name: /打开完整详情页/ }),
     ).toHaveAttribute("href", "/projects/project-1/issues/issue-1");

@@ -5,6 +5,10 @@ import { GripVertical } from "lucide-react";
 import { GithubIcon } from "@/components/ui/github-icon";
 import { IssuePullRequestBadge } from "@/components/issues/issue-pull-request-badge";
 import { IssueShipHookBadge } from "@/components/issues/issue-ship-hook-badge";
+import {
+  buildBoardSourceSearchParams,
+  type BoardIssueColumnContext,
+} from "@/lib/issue-list-context";
 import { cn } from "@/lib/utils";
 import { formatRelativeTime } from "@/lib/utils/format";
 
@@ -34,16 +38,32 @@ function IssueReferenceTitle({ issue }: { issue: Issue }) {
   );
 }
 
-function BoardIssueCardContent({ issue }: { issue: Issue }) {
+/** 由 BoardPage 提供：按 issue 所在列与该列筛选编码来源上下文；列未知时返回 null */
+type GetIssueColumnContext = (issue: Issue) => BoardIssueColumnContext | null;
+
+function BoardIssueCardContent({
+  issue,
+  getColumnContext,
+}: {
+  issue: Issue;
+  getColumnContext?: GetIssueColumnContext;
+}) {
   const titleClassName =
     "min-w-0 flex-1 line-clamp-2 text-sm font-medium leading-snug";
+  const columnContext = getColumnContext?.(issue) ?? null;
+  const sourceSearch = columnContext
+    ? buildBoardSourceSearchParams(columnContext).toString()
+    : "";
 
   return (
     <>
       <div className="mb-2 flex items-start gap-2">
         <GripVertical className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground/50" />
         <Link
-          to={`/projects/${issue.project_id}/issues/${issue.id}`}
+          to={{
+            pathname: `/projects/${issue.project_id}/issues/${issue.id}`,
+            search: sourceSearch ? `?${sourceSearch}` : "",
+          }}
           className={cn(titleClassName, "hover:text-primary")}
           onPointerDown={(e) => e.stopPropagation()}
           onClick={(e) => e.stopPropagation()}
@@ -90,7 +110,13 @@ function BoardIssueCardContent({ issue }: { issue: Issue }) {
   );
 }
 
-export function BoardIssueCard({ issue }: { issue: Issue }) {
+export function BoardIssueCard({
+  issue,
+  getColumnContext,
+}: {
+  issue: Issue;
+  getColumnContext?: GetIssueColumnContext;
+}) {
   const { attributes, listeners, setNodeRef, transform, isDragging } =
     useDraggable({
       id: issue.id,
@@ -117,7 +143,7 @@ export function BoardIssueCard({ issue }: { issue: Issue }) {
       )}
       aria-label={hasUnreadComments(issue) ? unreadAriaLabel(issue) : undefined}
     >
-      <BoardIssueCardContent issue={issue} />
+      <BoardIssueCardContent issue={issue} getColumnContext={getColumnContext} />
     </div>
   );
 }

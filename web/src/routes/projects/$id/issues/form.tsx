@@ -21,18 +21,7 @@ import {
   useUploadIssueAsset,
 } from "@/lib/hooks/use-issues";
 import { useProject } from "@/lib/hooks/use-projects";
-import { buildIssueDetailSearchParams } from "@/lib/issue-list-context";
 import { toast } from "sonner";
-
-function buildCreatedIssueDetailSearch(issue: Issue) {
-  return buildIssueDetailSearchParams({
-    state: issue.state,
-    source: issue.source,
-    workflowStatus: issue.internal_meta?.workflow_status ?? "",
-    sort: "updated_desc",
-    page: 1,
-  }).toString();
-}
 
 export default function IssueFormPage() {
   const navigate = useNavigate();
@@ -81,12 +70,11 @@ export default function IssueFormPage() {
           payload.workflow_status = values.workflow_status;
         }
         const res = await createIssue.mutateAsync(payload);
-        const nextIssueDetailSearch = buildCreatedIssueDetailSearch(res.data);
         toast.success(values.source === "github" ? "GitHub 问题已创建" : "内部问题已创建");
+        // 新建问题没有真实来源列表，navigate 到无 issue_* 参数的详情
         navigate(
           {
             pathname: `/projects/${id}/issues/${res.data.id}`,
-            search: nextIssueDetailSearch ? `?${nextIssueDetailSearch}` : "",
           },
           { replace: true },
         );

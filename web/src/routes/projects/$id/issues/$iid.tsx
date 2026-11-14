@@ -2,8 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate, useParams, useSearchParams } from "react-router";
 import {
   CheckCircle2,
-  ChevronLeft,
-  ChevronRight,
   Circle,
   Copy,
   Ellipsis,
@@ -16,8 +14,10 @@ import {
   MessageSquare,
   Pencil,
   PanelLeft,
+  PanelLeftClose,
   Play,
   RefreshCw,
+  List,
 } from "lucide-react";
 import { GitHubContent } from "@/components/github-content";
 import { CollaborationArea } from "@/components/issues/collaboration-area";
@@ -60,7 +60,6 @@ import {
   useCreateIssueComment,
   useInfiniteIssueComments,
   useInfiniteIssueTimeline,
-  useIssues,
   useMarkIssueReadWhenLoaded,
   useSyncProjectIssues,
   useUpdateIssue,
@@ -78,9 +77,14 @@ import { useIssuePromptList } from "@/lib/hooks/use-issue-prompt";
 import { useEnvironments } from "@/lib/hooks/use-threads";
 import { buildIssuePrompt } from "@/lib/issue-prompt";
 import { canOperate } from "@/lib/threads-compose";
-import { readIssueDetailContext } from "@/lib/issue-list-context";
+import {
+  describeIssueSourceContext,
+  readIssueSourceContext,
+} from "@/lib/issue-list-context";
 import { ISSUE_SOURCE_LABELS } from "@/lib/issue-source";
 import { useAuthStore } from "@/lib/store/auth-store";
+import { useProjectPreferenceStore } from "@/lib/store/project-preference-store";
+import { useIsMobile } from "@/lib/hooks/use-is-mobile";
 import {
   containsLocalIssueAssetReference,
   GITHUB_LOCAL_ASSET_NOTICE,
@@ -105,6 +109,44 @@ import {
   type IssueChecklistDraftItem,
 } from "./components/issue-checklist-card";
 import { IssueRecommendationBanner } from "./components/issue-recommendation-banner";
+import { IssueSourceList } from "./components/issue-source-list";
+import { useIssueSourceList } from "./components/use-issue-source";
+
+// 详情页全局快捷键要避让的浮层：Dialog/AlertDialog/Sheet/下拉菜单/Popover/Select 打开时
+// J/K/［ 让位浮层内部交互；来源列表抽屉自身不在此列（见下方过滤）
+const OVERLAY_SELECTOR = [
+  '[data-slot="dialog-content"]',
+  '[data-slot="alert-dialog-content"]',
+  '[data-slot="sheet-content"]',
+  '[data-slot="dropdown-menu-content"]',
+  '[data-slot="popover-content"]',
+  '[data-slot="select-content"]',
+].join(",");
+
+function isForeignOverlayOpen() {
+  if (typeof document === "undefined") {
+    return false;
+  }
+  const overlays = document.querySelectorAll(OVERLAY_SELECTOR);
+  for (const overlay of overlays) {
+    // 来源列表抽屉打开时［/J/K 仍归详情页，不算外来浮层
+    if (overlay.hasAttribute("data-issue-source-sheet")) {
+      continue;
+    }
+    return true;
+  }
+  return false;
+}
+
+function isEditableTarget(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) {
+    return false;
+  }
+  if (target.isContentEditable) {
+    return true;
+  }
+  return ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName);
+}
 
 function StateBadge({ state }: { state: "open" | "closed" }) {
   const isOpen = state === "open";
@@ -188,7 +230,10 @@ export default function IssueDetailPage() {
   const location = useLocation();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
-  const issueContext = readIssueDetailContext(searchParams);
+  const issueSourceContext = useMemo(
+    () => readIssueSourceContext(searchParams),
+    [searchParams],
+  );
   const commentsPage = Math.max(Number(searchParams.get("comments_page") ?? "1") || 1, 1);
   const timelinePage = Math.max(Number(searchParams.get("timeline_page") ?? "1") || 1, 1);
   const isCommentAnchorHash = location.hash.startsWith("#issuecomment-");
@@ -227,6 +272,83 @@ export default function IssueDetailPage() {
   const { data: issue, isLoading } = useIssue(iid!);
   const { data: project } = useProject(id!);
   const { data: repoLabels } = useIssueRepoLabels(id!);
+
+  // 来源列表：同一来源下跨 iid 持有；当前问题不属于来源项目时隐藏入口
+  const isNarrowViewport = useIsMobile(1280);
+  const issueSourceListExpanded = useProjectPreferenceStore(
+    (state) => state.issueSourceListExpanded,
+  );
+  const setIssueSourceListExpanded = useProjectPreferenceStore(
+    (state) => state.setIssueSourceListExpanded,
+  );
+  const [isSourceSheetOpen, setIsSourceSheetOpen] = useState(false);
+  const hasSourceContext =
+    issueSourceContext.kind !== "none" &&
+    (issue === undefined || issue.project_id === id);
+  // 面板标题副行：说明来源是哪一列/哪组筛选与条数，宽屏栏与抽屉共用
+  const sourceLabel = describeIssueSourceContext(issueSourceContext);
+  const desktopSourceListOpen =
+    hasSourceContext && !isNarrowViewport && issueSourceListExpanded;
+  const source = useIssueSourceList({
+    projectId: id!,
+    context: issueSourceContext,
+    currentIssueId: iid ?? "",
+    currentIssueProjectId: issue?.project_id,
+  });
+  // 条数取符合来源条件的行数（不含 stale 保留项），与副标题的筛选描述自洽；加载中不显示
+  const sourceCountLabel = source.isLoading
+    ? null
+    : `${source.items.filter((entry) => !entry.stale).length} 个`;
+
+  const toggleSourceList = useCallback(() => {
+    if (!hasSourceContext) {
+      return;
+    }
+    if (isNarrowViewport) {
+      setIsSourceSheetOpen((open) => !open);
+    } else {
+      setIssueSourceListExpanded(!issueSourceListExpanded);
+    }
+  }, [
+    hasSourceContext,
+    isNarrowViewport,
+    issueSourceListExpanded,
+    setIssueSourceListExpanded,
+  ]);
+
+  const {
+    goToNext,
+    goToPrevious,
+  } = source;
+
+  // 全局快捷键：［ 展开收起来源列表，J/K 按来源列表顺序翻页。
+  // 避让：defaultPrevented、IME 组合态、修饰键、输入控件、其他 Dialog/Sheet/
+  // DropdownMenu/Popover/Select 浮层打开时。
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.isComposing) {
+        return;
+      }
+      if (event.metaKey || event.ctrlKey || event.altKey) {
+        return;
+      }
+      if (isEditableTarget(event.target) || isForeignOverlayOpen()) {
+        return;
+      }
+      if (event.key === "[") {
+        event.preventDefault();
+        toggleSourceList();
+      } else if (event.key === "j") {
+        event.preventDefault();
+        goToNext();
+      } else if (event.key === "k") {
+        event.preventDefault();
+        goToPrevious();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [toggleSourceList, goToNext, goToPrevious]);
   // 命中推荐时在正文卡片上方展示横幅；queryKey 与看板弹框同源，命中缓存
   const { data: recommendationsData } = useRecommendations(id);
   const recommendation = useMemo(
@@ -235,41 +357,14 @@ export default function IssueDetailPage() {
       null,
     [recommendationsData, iid],
   );
-  const isInternalIssue = issue?.source === "internal";
-  const shouldShowLocalAssetNotice =
-    issue?.source === "github" && containsLocalIssueAssetReference(issue.body);
   const updateIssue = useUpdateIssue(iid!, id);
   const updateInternalMeta = useUpdateIssueInternalMeta(iid!, id);
   const createComment = useCreateIssueComment(iid!, id);
   const replaceChecklist = useReplaceIssueChecklist(iid!, id);
   const suggestChecklist = useIssueChecklistSuggestions(iid!);
-  // 当前页与 prev/next 页共用同一组筛选，只有 page 不同
-  const issueListFilters = {
-    state: issueContext.state === "all" ? undefined : issueContext.state || undefined,
-    q: issueContext.q || undefined,
-    label: issueContext.label === "all" ? undefined : issueContext.label || undefined,
-    source: issueContext.source === "all" ? undefined : issueContext.source || undefined,
-    workflow_status:
-      issueContext.workflowStatus === "all"
-        ? undefined
-        : issueContext.workflowStatus || undefined,
-    sort: issueContext.sort,
-  };
-  const { data: issueListData } = useIssues(id!, {
-    ...issueListFilters,
-    page: issueContext.page,
-    page_size: 20,
-  });
-  const { data: prevPageData } = useIssues(id!, {
-    ...issueListFilters,
-    page: issueContext.page > 1 ? issueContext.page - 1 : 1,
-    page_size: 20,
-  });
-  const { data: nextPageData } = useIssues(id!, {
-    ...issueListFilters,
-    page: issueContext.page + 1,
-    page_size: 20,
-  });
+  const isInternalIssue = issue?.source === "internal";
+  const shouldShowLocalAssetNotice =
+    issue?.source === "github" && containsLocalIssueAssetReference(issue.body);
   const {
     data: infiniteCommentsData,
     fetchNextPage: fetchNextCommentsPage,
@@ -334,22 +429,6 @@ export default function IssueDetailPage() {
     labelPersistedRef.current = issueLabelNames;
     setLabelDraftState(null);
   }, [issueLabelNames, setLabelDraftState]);
-
-  const pageIssues = issueListData?.items ?? [];
-  const issueIndex = pageIssues.findIndex((item) => item.id === iid);
-  const currentTotalPages = Math.max(Math.ceil((issueListData?.total ?? 0) / (issueListData?.page_size ?? 20)), 1);
-  const previousIssue =
-    issueIndex > 0
-      ? pageIssues[issueIndex - 1]
-      : issueContext.page > 1
-        ? (prevPageData?.items ?? []).at(-1) ?? null
-        : null;
-  const nextIssue =
-    issueIndex >= 0 && issueIndex < pageIssues.length - 1
-      ? pageIssues[issueIndex + 1]
-      : issueContext.page < currentTotalPages
-        ? (nextPageData?.items ?? [])[0] ?? null
-        : null;
 
   const comments = useMemo(
     () => infiniteCommentsData?.pages.flatMap((page) => page.items) ?? [],
@@ -520,13 +599,6 @@ export default function IssueDetailPage() {
       }
     };
   }, [loadedCommentsPages, loadedTimelinePages, location.hash]);
-
-  const navigateToIssue = (targetIssueId: string) => {
-    navigate({
-      pathname: `/projects/${id}/issues/${targetIssueId}`,
-      search: location.search,
-    });
-  };
 
   const handleSync = async () => {
     try {
@@ -904,29 +976,6 @@ export default function IssueDetailPage() {
           <HeaderActions
             primary={
               <div className="flex flex-wrap items-center gap-2">
-                <div className="mr-2 flex items-center gap-1">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    disabled={!previousIssue}
-                    onClick={() => previousIssue && navigateToIssue(previousIssue.id)}
-                    title={previousIssue ? previousIssue.reference : "没有上一条"}
-                  >
-                    <ChevronLeft className="mr-1.5 h-3.5 w-3.5" />
-                    上一条
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    disabled={!nextIssue}
-                    onClick={() => nextIssue && navigateToIssue(nextIssue.id)}
-                    title={nextIssue ? nextIssue.reference : "没有下一条"}
-                  >
-                    下一条
-                    <ChevronRight className="ml-1.5 h-3.5 w-3.5" />
-                  </Button>
-                </div>
-
                 <DropdownMenu>
                   <DropdownMenuTrigger
                     render={
@@ -1035,8 +1084,69 @@ export default function IssueDetailPage() {
           />
         }
       />
-      <div className="mx-auto w-full max-w-7xl p-4 md:p-6">
-        <div className="grid gap-6 lg:grid-cols-[1fr_300px] xl:grid-cols-[1fr_340px]">
+      <div
+        className={cn(
+          "mx-auto w-full p-4 md:p-6",
+          desktopSourceListOpen ? "max-w-[100rem]" : "max-w-7xl",
+        )}
+      >
+        <div
+          className={cn(
+            "grid gap-6",
+            desktopSourceListOpen
+              ? "xl:grid-cols-[280px_minmax(0,1fr)_340px]"
+              : "lg:grid-cols-[1fr_300px] xl:grid-cols-[1fr_340px]",
+          )}
+        >
+          {/* 来源列表左栏（仅宽屏 xl+ 且展开时） */}
+          {desktopSourceListOpen && (
+            <aside className="min-w-0 xl:sticky xl:top-20 xl:self-start">
+              <div
+                id="issue-source-list-panel"
+                className="overflow-hidden rounded-2xl border bg-card shadow-sm"
+              >
+                <div className="flex items-center justify-between border-b px-4 py-2.5">
+                  <div className="min-w-0">
+                    <h2 className="text-sm font-semibold">来源列表</h2>
+                    <p className="mt-0.5 flex text-xs text-muted-foreground">
+                      <span className="min-w-0 truncate">{sourceLabel}</span>
+                      {sourceCountLabel ? (
+                        <span className="shrink-0"> · {sourceCountLabel}</span>
+                      ) : null}
+                    </p>
+                  </div>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-7 shrink-0 gap-1 px-2 text-xs"
+                    onClick={toggleSourceList}
+                    aria-label="收起来源列表（快捷键 [）"
+                    title="收起（快捷键 [）"
+                  >
+                    <PanelLeftClose className="h-3.5 w-3.5" />
+                    收起
+                  </Button>
+                </div>
+                <IssueSourceList
+                  entries={source.items}
+                  currentIssueId={iid ?? ""}
+                  onSelect={source.goToIssue}
+                  isLoading={source.isLoading}
+                  isError={source.isError}
+                  onRetry={() => void source.refetch()}
+                  hasNextPage={source.hasNextPage}
+                  isFetchingNextPage={source.isFetchingNextPage}
+                  onLoadMore={() => {
+                    if (source.hasNextPage && !source.isFetchingNextPage) {
+                      void source.fetchNextPage();
+                    }
+                  }}
+                  className="max-h-[calc(100vh-11rem)] overflow-y-auto"
+                />
+              </div>
+            </aside>
+          )}
+
           {/* Main Content */}
           <div className="min-w-0 space-y-6 [&_img]:cursor-zoom-in" onClick={handleImageClick}>
             {recommendation ? (
@@ -1116,6 +1226,21 @@ export default function IssueDetailPage() {
                       <h1 className="flex-1 text-xl font-semibold leading-snug text-foreground md:text-2xl">
                         {issue.reference} {issue.title}
                       </h1>
+                      {/* 宽屏展开时面板头已有「收起」，标题旁按钮仅在未展开/窄屏时作入口，避免双控件 */}
+                      {hasSourceContext && !desktopSourceListOpen && (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="shrink-0"
+                          onClick={toggleSourceList}
+                          aria-expanded={isNarrowViewport && isSourceSheetOpen}
+                          aria-controls="issue-source-list-panel"
+                          title="来源列表（快捷键 [）"
+                        >
+                          <List className="mr-1.5 h-3.5 w-3.5" />
+                          来源列表
+                        </Button>
+                      )}
                       <Button
                         variant="ghost"
                         size="sm"
@@ -1231,6 +1356,53 @@ export default function IssueDetailPage() {
           </div>
         </SheetContent>
       </Sheet>
+
+      {/* 窄屏（xl 以下）来源列表抽屉：从左侧覆盖；［ 可关闭，J/K 继续可用 */}
+      {hasSourceContext && isNarrowViewport && (
+        <Sheet
+          open={isSourceSheetOpen}
+          onOpenChange={setIsSourceSheetOpen}
+        >
+          <SheetContent
+            side="left"
+            data-issue-source-sheet="true"
+            className="w-[300px] max-w-[85vw] gap-0"
+          >
+            <SheetHeader className="border-b pb-3">
+              <SheetTitle>来源列表</SheetTitle>
+              <p className="mt-0.5 flex text-xs text-muted-foreground">
+                <span className="min-w-0 truncate">{sourceLabel}</span>
+                {sourceCountLabel ? (
+                  <span className="shrink-0"> · {sourceCountLabel}</span>
+                ) : null}
+              </p>
+            </SheetHeader>
+            <div
+              id="issue-source-list-panel"
+              className="min-h-0 flex-1 overflow-y-auto"
+            >
+              <IssueSourceList
+                entries={source.items}
+                currentIssueId={iid ?? ""}
+                onSelect={(issue) => {
+                  source.goToIssue(issue);
+                  setIsSourceSheetOpen(false);
+                }}
+                isLoading={source.isLoading}
+                isError={source.isError}
+                onRetry={() => void source.refetch()}
+                hasNextPage={source.hasNextPage}
+                isFetchingNextPage={source.isFetchingNextPage}
+                onLoadMore={() => {
+                  if (source.hasNextPage && !source.isFetchingNextPage) {
+                    void source.fetchNextPage();
+                  }
+                }}
+              />
+            </div>
+          </SheetContent>
+        </Sheet>
+      )}
 
       {/* 清单建议弹框全局只渲染一份，由 checklistController 驱动 */}
       <IssueChecklistSuggestionsDialog controller={checklistController} />
