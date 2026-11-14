@@ -51,6 +51,8 @@ Do not use `make dev` for verification. It binds fixed ports (server 4888 via `c
    FAST_SHIP_UPLOAD_STORAGE_PATH="$V/scratch/data/uploads" \
    FAST_SHIP_WEB_DIST_DIR="$REPO/web/dist" \
    FAST_SHIP_ISSUES_AUTO_SYNC_ENABLED=false \
+   JWT_SECRET="$(openssl rand -hex 24)" \
+   ENCRYPTION_KEY="$(openssl rand -hex 16)" \
    nohup "$V/scratch/fast_ship" > "$V/server.log" 2>&1 &
    echo $! > "$V/scratch/server.pid"
    ```

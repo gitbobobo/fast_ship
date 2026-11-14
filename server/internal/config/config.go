@@ -431,6 +431,47 @@ func (c QuotaConfig) ManualRefreshCooldown() time.Duration {
 	return time.Duration(c.ManualRefreshCooldownSeconds) * time.Second
 }
 
+// insecureSecrets 是公开仓库与文档里的已知占位密钥原文；用它们启动等于把
+// 签名密钥与 AES 密钥交给任何读过 README 的人，Load 直接拒绝。
+var insecureSecrets = map[string]bool{
+	"change-me":                        true,
+	"change-me-in-production":          true,
+	"change-me-32-bytes-in-production": true,
+}
+
+// validate 启动期拒绝空置与公开占位值的 jwt.secret，避免照文档部署即可伪造
+// 登录态（INT-221）。
+func (c JWTConfig) validate() error {
+	secret := strings.TrimSpace(c.Secret)
+	if secret == "" {
+		return fmt.Errorf("jwt.secret 不能为空：请生成随机密钥（如 openssl rand -hex 24），或用环境变量 JWT_SECRET 注入")
+	}
+	if insecureSecrets[secret] {
+		return fmt.Errorf("jwt.secret 是公开的占位默认值，拒绝启动：请生成随机密钥（如 openssl rand -hex 24），或用环境变量 JWT_SECRET 注入")
+	}
+	return nil
+}
+
+// validate 启动期拒绝空置与公开占位值的 encryption.key，并校验长度是 AES
+// 合法密钥长度——非法长度要到第一次加解密才报错，部署者只会看到莫名的
+// crypto 失败（INT-221）。长度按原始值校验：实际加解密用的是未经裁剪的
+// []byte(c.Key)（见 service 层），TrimSpace 结果只用于空白与占位值判断。
+func (c EncryptionConfig) validate() error {
+	trimmed := strings.TrimSpace(c.Key)
+	if trimmed == "" {
+		return fmt.Errorf("encryption.key 不能为空：请生成 32 字节随机密钥（如 openssl rand -hex 16 的输出），或用环境变量 ENCRYPTION_KEY 注入")
+	}
+	if insecureSecrets[trimmed] {
+		return fmt.Errorf("encryption.key 是公开的占位默认值，拒绝启动：请生成随机 32 字节密钥（如 openssl rand -hex 16 的输出），或用环境变量 ENCRYPTION_KEY 注入")
+	}
+	switch len(c.Key) {
+	case 16, 24, 32:
+	default:
+		return fmt.Errorf("encryption.key 长度必须是 16/24/32 字节（AES 合法密钥长度），当前 %d 字节；推荐 openssl rand -hex 16 生成 32 字节密钥", len(c.Key))
+	}
+	return nil
+}
+
 // validate 配置级校验：明显非法值直接拒绝启动。
 func (c BotsConfig) validate() error {
 	if c.Context.CompressionRatio != 0 && (c.Context.CompressionRatio <= 0 || c.Context.CompressionRatio >= 1) {
@@ -539,6 +580,12 @@ func Load(path string) (*Config, error) {
 
 	var cfg Config
 	if err := viper.Unmarshal(&cfg); err != nil {
+		return nil, err
+	}
+	if err := cfg.JWT.validate(); err != nil {
+		return nil, err
+	}
+	if err := cfg.Encryption.validate(); err != nil {
 		return nil, err
 	}
 	if err := cfg.Bots.validate(); err != nil {

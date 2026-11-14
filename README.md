@@ -67,6 +67,8 @@ make dev
 后端默认读取 `server/configs/config.yaml`，可用 `CONFIG_PATH` 指定其他文件：
 
 ```bash
+# 指定的配置文件必须自带合法密钥（占位值会被启动校验拒绝，且指定
+# CONFIG_PATH 后 make dev 不再注入开发密钥）
 CONFIG_PATH=/path/to/config.yaml make dev-server
 ```
 
@@ -77,8 +79,8 @@ CONFIG_PATH=/path/to/config.yaml make dev-server
 | `server.port` | `4888` | API 监听端口 |
 | `server.web_dist_dir` | 空 | 设置后由后端直接托管前端 SPA（生产模式） |
 | `database.path` | `./data/fast_ship.db` | SQLite 数据库文件 |
-| `jwt.secret` / `jwt.expire_hours` | — / `24` | JWT 签名密钥与有效期 |
-| `encryption.key` | — | 32 字节 AES 密钥，用于加密存储 GitHub Token |
+| `jwt.secret` / `jwt.expire_hours` | — / `24` | JWT 签名密钥（必填，空值或公开占位值会拒绝启动）与有效期 |
+| `encryption.key` | — | 32 字节 AES 密钥（必填），用于加密存储 GitHub Token；空值或公开占位值会拒绝启动 |
 | `upload.max_file_size` / `storage_path` | `500MB` / `./data/uploads` | 产物与附件上传 |
 | `issues.auto_sync_*` | 开启，每 15 分钟 | GitHub Issue 自动同步 |
 
@@ -90,12 +92,32 @@ CONFIG_PATH=/path/to/config.yaml make dev-server
 
 ```bash
 docker build -t fast_ship .
+
+# 生成后注入；用占位值或缺省启动会直接失败（INT-221）。
+# ENCRYPTION_KEY 支持 16/24/32 字节，推荐 32 字节；openssl rand -hex 16 的输出即 32 字符
+export JWT_SECRET="$(openssl rand -hex 24)"
+export ENCRYPTION_KEY="$(openssl rand -hex 16)"
+
 docker run -d -p 4888:4888 \
-  -e JWT_SECRET=change-me \
-  -e ENCRYPTION_KEY=change-me-32-bytes-in-production \
+  -e JWT_SECRET -e ENCRYPTION_KEY \
   -v fast-ship-data:/app/data \
   fast_ship
 ```
+
+> 曾用公开默认值（`change-me*`）运行过的实例需要轮换，且注意：升级到本版
+> 之后应用会直接拒绝以旧钥启动，轮换要在**升级前**的旧版本上完成：
+>
+> 1. 库存凭据明文不可读回（界面只显示前缀），且旧密文用的正是公开占位
+>    密钥、应视为已泄露：请到 GitHub / Forgejo / 模型提供商吊销旧 token
+>    并生成新值，列出需要重建的集成清单。
+> 2. 在旧版本配置里把 `ENCRYPTION_KEY` 换成新的随机值并重启（旧版本不校验
+>    密钥占位值，可正常启动），然后在界面录入第 1 步生成的新凭据——新密文
+>    以新钥加密。
+> 3. 把 `JWT_SECRET` 换成新的随机值并重启，所有已签发登录态随之失效，重新登录即可。
+> 4. 完成后再升级到新版本。
+>
+> 没有保留价值的数据（如仅试部署过的实例）可直接清空数据库重来。项目暂无
+> 脱机重加密工具；需要批量迁移大量密文的部署，请先在 issue 里反馈。
 
 推送 `v*` 格式的 Git tag 会触发 GitHub Actions 构建并推送多架构镜像到 `ghcr.io/<owner>/<repo>`，同时打上对应 tag 与 `latest`：
 
