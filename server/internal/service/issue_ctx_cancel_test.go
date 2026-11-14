@@ -110,7 +110,7 @@ func TestBuildLabelMapCanceledContextReadsTimeout(t *testing.T) {
 	project := createTestProject(t, svc.db, user.ID)
 
 	_, err := svc.issueService.withRepos(canceledCtx(t)).buildLabelMap(project.ID)
-	assertReadTimeoutErr(t, loadStoreErr(err))
+	assertReadTimeoutErr(t, svc.issueService.loadStoreErr(err))
 }
 
 // INT-187 审查 R1（fast-ship-bot P2）：resolveFailureText 要区分「解析预算
@@ -159,14 +159,16 @@ func TestResolveFailureTextClassification(t *testing.T) {
 }
 
 func TestLoadStoreErrClassification(t *testing.T) {
+	svc := setupTestServices(t)
+
 	// ctx 错误 → Wrap 文案 + 错误链透出。
-	assertReadTimeoutErr(t, loadStoreErr(context.Canceled))
-	assertReadTimeoutErr(t, loadStoreErr(context.DeadlineExceeded))
+	assertReadTimeoutErr(t, svc.issueService.loadStoreErr(context.Canceled))
+	assertReadTimeoutErr(t, svc.issueService.loadStoreErr(context.DeadlineExceeded))
 	// 包装后的 ctx 错误（如 repo/driver 包了一层）同样按链归类。
-	assertReadTimeoutErr(t, loadStoreErr(fmt.Errorf("query: %w", context.Canceled)))
+	assertReadTimeoutErr(t, svc.issueService.loadStoreErr(fmt.Errorf("query: %w", context.Canceled)))
 
 	// 其余错误 → ErrInternal 原样（无超时文案，也不保留无关错误链）。
-	err := loadStoreErr(fmt.Errorf("boom"))
+	err := svc.issueService.loadStoreErr(fmt.Errorf("boom"))
 	if !errors.Is(err, errs.ErrInternal) {
 		t.Fatalf("普通错误应归类为 errs.ErrInternal，实际: %v", err)
 	}
