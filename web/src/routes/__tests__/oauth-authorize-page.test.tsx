@@ -20,6 +20,8 @@ vi.mock("@/lib/api/oauth", () => ({
 }));
 
 const previewFixture: OAuthAuthorizePreview = {
+  username: "verifybot",
+  email: "verifybot@example.com",
   client_name: "Claude Code MCP",
   projects: [
     { id: "p-1", name: "Fast Ship" },
@@ -77,11 +79,13 @@ describe("OAuthAuthorizePage", () => {
     );
   });
 
-  it("预览成功：显示客户端名与项目清单", async () => {
+  it("预览成功：显示当前账号、客户端名与项目清单", async () => {
     preview.mockResolvedValue({ data: previewFixture });
     renderPage(`/oauth/authorize${fullQuery}`);
 
     expect(await screen.findByText("Claude Code MCP")).toBeInTheDocument();
+    expect(screen.getByText("verifybot")).toBeInTheDocument();
+    expect(screen.getByText(/verifybot@example.com/)).toBeInTheDocument();
     // 品牌文案也叫 Fast Ship，项目用 checkbox 角色断言避免撞名。
     expect(
       screen.getByRole("checkbox", { name: "Fast Ship" }),
@@ -143,6 +147,36 @@ describe("OAuthAuthorizePage", () => {
       expect(window.location.href).toBe(
         "http://localhost:7777/callback?code=c1&state=st-1",
       ),
+    );
+  });
+
+  it("取消授权：以 access_denied 回调并保留 state", async () => {
+    preview.mockResolvedValue({ data: previewFixture });
+    const user = userEvent.setup();
+    renderPage(`/oauth/authorize${fullQuery}`);
+
+    await screen.findByRole("button", { name: "同意授权" });
+    await user.click(screen.getByRole("button", { name: "取消" }));
+
+    await waitFor(() =>
+      expect(window.location.href).toBe(
+        "http://localhost:7777/callback?error=access_denied&state=st-1",
+      ),
+    );
+    expect(authorize).not.toHaveBeenCalled();
+  });
+
+  it("切换账号：登出并带 next 进登录页", async () => {
+    preview.mockResolvedValue({ data: previewFixture });
+    const user = userEvent.setup();
+    renderPage(`/oauth/authorize${fullQuery}`);
+
+    await screen.findByRole("button", { name: "同意授权" });
+    await user.click(screen.getByRole("button", { name: "切换账号" }));
+
+    const expectedNext = encodeURIComponent(`/oauth/authorize${fullQuery}`);
+    expect(screen.getByTestId("login-page")).toHaveTextContent(
+      `?next=${expectedNext}`,
     );
   });
 

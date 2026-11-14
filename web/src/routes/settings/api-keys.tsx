@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Link } from "react-router";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Plus, Copy, Trash2 } from "lucide-react";
@@ -109,8 +110,16 @@ export default function ApiKeysPage() {
             API Key 适用于 CI/CD 等自动化场景。
             <br />
             支持：读取项目/问题/版本、上传构建产物、创建和更新 Issue。
-            <br />
-            API Key 保留给脚本与 CI 使用，MCP 客户端建议改用 OAuth 接入（「已授权的应用」页统一管理）。
+          </p>
+          <p className="mt-3 rounded-md border-l-2 border-l-primary/60 bg-muted/50 px-3 py-2 text-sm text-muted-foreground">
+            API Key 保留给脚本与 CI 使用。MCP 客户端建议改用{" "}
+            <Link
+              to="/settings/oauth-apps"
+              className="text-primary underline-offset-2 hover:underline"
+            >
+              OAuth 接入
+            </Link>
+            （「已授权的应用」页统一管理）。
           </p>
         </div>
 
@@ -224,11 +233,13 @@ export default function ApiKeysPage() {
                             <Button
                               variant="ghost"
                               size="sm"
+                              className="text-destructive hover:bg-destructive/10 hover:text-destructive"
                               aria-label={`删除 API Key ${key.name}`}
                             />
                           }
                         >
-                          <Trash2 className="h-4 w-4" />
+                          <Trash2 className="mr-1.5 h-3.5 w-3.5" />
+                          删除
                         </AlertDialogTrigger>
                         <AlertDialogContent>
                           <AlertDialogHeader>

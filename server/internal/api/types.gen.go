@@ -4065,8 +4065,14 @@ type OAuthAuthorization struct {
 // OAuthAuthorizePreview defines model for OAuthAuthorizePreview.
 type OAuthAuthorizePreview struct {
 	// ClientName 客户端注册名
-	ClientName string               `json:"client_name"`
-	Projects   []OAuthProjectOption `json:"projects"`
+	ClientName string `json:"client_name"`
+
+	// Email 当前登录邮箱
+	Email    string               `json:"email"`
+	Projects []OAuthProjectOption `json:"projects"`
+
+	// Username 当前登录用户名（授权页展示身份，防共享电脑误授权）
+	Username string `json:"username"`
 }
 
 // OAuthAuthorizeRequest defines model for OAuthAuthorizeRequest.

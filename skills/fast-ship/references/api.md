@@ -773,6 +773,8 @@ state 由前端透传，不在本端点处理。
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
+| `username` | string | 是 | 当前登录用户名（授权页展示身份，防共享电脑误授权） |
+| `email` | string | 是 | 当前登录邮箱 |
 | `client_name` | string | 是 | 客户端注册名 |
 | `projects` | object[] | 是 |  |
 | `projects[].id` | string | 是 |  |

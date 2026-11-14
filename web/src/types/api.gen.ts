@@ -4339,6 +4339,10 @@ export interface components {
             name: string;
         };
         OAuthAuthorizePreview: {
+            /** @description 当前登录用户名（授权页展示身份，防共享电脑误授权） */
+            username: string;
+            /** @description 当前登录邮箱 */
+            email: string;
             /** @description 客户端注册名 */
             client_name: string;
             projects: components["schemas"]["OAuthProjectOption"][];

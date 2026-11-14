@@ -251,9 +251,11 @@ func VerifyPKCE(verifier, challenge string) bool {
 
 // ---- 授权端点 ----
 
-// OAuthAuthorizePreview GET /api/oauth/authorize 的投影：客户端名 + 该用户
-// 项目清单（供授权页勾选）。
+// OAuthAuthorizePreview GET /api/oauth/authorize 的投影：当前账号（授权页
+// 需展示身份，防共享电脑误授权）、客户端名 + 该用户项目清单（供授权页勾选）。
 type OAuthAuthorizePreview struct {
+	Username   string               `json:"username"`
+	Email      string               `json:"email"`
 	ClientName string               `json:"client_name"`
 	Projects   []OAuthProjectOption `json:"projects"`
 }
@@ -296,12 +298,16 @@ func (s *OAuthService) checkAuthorizeParams(clientID, redirectURI, challenge, me
 	return client, nil
 }
 
-// AuthorizePreview GET /api/oauth/authorize：校验参数后返回客户端名与该用户
-// 项目清单。state 由调用方透传，服务端不校验。
+// AuthorizePreview GET /api/oauth/authorize：校验参数后返回当前账号、客户端名
+// 与该用户项目清单。state 由调用方透传，服务端不校验。
 func (s *OAuthService) AuthorizePreview(ctx context.Context, userID, clientID, redirectURI, challenge, method string) (*OAuthAuthorizePreview, error) {
 	client, err := s.checkAuthorizeParams(clientID, redirectURI, challenge, method)
 	if err != nil {
 		return nil, err
+	}
+	user, err := s.userRepo.FindByID(userID)
+	if err != nil {
+		return nil, errs.ErrInternal
 	}
 	projects, err := s.projectRepo.ListByUser(userID)
 	if err != nil {
@@ -312,6 +318,8 @@ func (s *OAuthService) AuthorizePreview(ctx context.Context, userID, clientID, r
 		options = append(options, OAuthProjectOption{ID: p.ID, Name: p.Name})
 	}
 	return &OAuthAuthorizePreview{
+		Username:   user.Username,
+		Email:      user.Email,
 		ClientName: client.ClientName,
 		Projects:   options,
 	}, nil

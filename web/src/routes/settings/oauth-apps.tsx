@@ -67,11 +67,11 @@ function ScopeSummary({
   }, [authorization.scopes, projects]);
 
   return (
-    <div className="space-y-1">
-      <Badge variant={write ? "default" : "secondary"}>
+    <div className="flex items-center gap-2">
+      <Badge variant={write ? "default" : "secondary"} className="px-2 py-0.5">
         {write ? "读写" : "只读"}
       </Badge>
-      <p className="text-sm text-muted-foreground">{projectLabel}</p>
+      <span className="text-sm text-muted-foreground">{projectLabel}</span>
     </div>
   );
 }
@@ -143,6 +143,7 @@ export default function OAuthAppsPage() {
                             <Button
                               variant="ghost"
                               size="sm"
+                              className="text-destructive hover:bg-destructive/10 hover:text-destructive"
                               aria-label={`吊销 ${auth.client_name} 的授权`}
                             />
                           }

@@ -10770,8 +10770,14 @@ components:
             binding: required,min=1,max=100
     OAuthAuthorizePreview:
       type: object
-      required: [client_name, projects]
+      required: [username, email, client_name, projects]
       properties:
+        username:
+          type: string
+          description: 当前登录用户名（授权页展示身份，防共享电脑误授权）
+        email:
+          type: string
+          description: 当前登录邮箱
         client_name:
           type: string
           description: 客户端注册名

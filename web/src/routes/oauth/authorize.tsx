@@ -10,7 +10,7 @@ import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { useAuthStore } from "@/lib/store/auth-store";
 import { useOAuthAuthorizePreview } from "@/lib/hooks/use-oauth";
 import { oauthApi } from "@/lib/api/oauth";
-import { errorText } from "@/lib/api/client";
+import { errorText, loginRedirectPath } from "@/lib/api/client";
 
 /** 缺一不可的 PKCE 参数；state 与 scope 不参与预取，只透传。 */
 const REQUIRED_PARAMS = [
@@ -42,6 +42,7 @@ export default function OAuthAuthorizePage() {
 }
 
 function AuthorizeConsent({ searchParams }: { searchParams: URLSearchParams }) {
+  const logout = useAuthStore((s) => s.logout);
   const missing = useMemo(() => missingParams(searchParams), [searchParams]);
   const previewParams = missing.length
     ? null
@@ -98,7 +99,7 @@ function AuthorizeConsent({ searchParams }: { searchParams: URLSearchParams }) {
     );
   }
 
-  const { client_name, projects } = preview.data;
+  const { client_name, projects, username, email } = preview.data;
 
   const toggleProject = (id: string, checked: boolean) => {
     setSelectedIds((prev) => {
@@ -130,18 +131,49 @@ function AuthorizeConsent({ searchParams }: { searchParams: URLSearchParams }) {
     }
   };
 
+  // 拒绝授权：以 error=access_denied 回调客户端（RFC 6749 §4.1.2.1），
+  // redirect_uri 已经过服务端注册校验，客户端会收到明确的中止信号而不是干等。
+  const onDeny = () => {
+    const u = new URL(previewParams!.redirect_uri);
+    u.searchParams.set("error", "access_denied");
+    const state = searchParams.get("state");
+    if (state) u.searchParams.set("state", state);
+    window.location.href = u.toString();
+  };
+
+  // 切换账号：先登出再进登录页，回跳参数保留本次授权请求。
+  const onSwitchAccount = () => {
+    logout();
+    window.location.href = loginRedirectPath();
+  };
+
   return (
     <ConsentShell>
       <Card>
-        <CardHeader className="text-center">
+        <CardHeader>
           <CardTitle className="text-xl">授权访问</CardTitle>
         </CardHeader>
         <CardContent className="space-y-5">
           <p className="text-sm text-muted-foreground">
             <span className="font-medium text-foreground">{client_name}</span>
             {" "}请求访问你的 Fast Ship 账号。该应用将获得所选项目的
-            {write ? "读写" : "只读"}访问。
+            {write ? "读写" : "只读"}权限。
           </p>
+          <div className="flex items-center justify-between rounded-md bg-muted/50 px-3 py-2 text-sm">
+            <span className="text-muted-foreground">
+              当前登录：
+              <span className="font-medium text-foreground">{username}</span>
+              {email && <span className="text-muted-foreground">（{email}）</span>}
+            </span>
+            <Button
+              variant="link"
+              size="sm"
+              className="h-auto p-0"
+              onClick={onSwitchAccount}
+            >
+              切换账号
+            </Button>
+          </div>
 
           <div className="space-y-2">
             <Label>选择要授权的项目</Label>
@@ -167,6 +199,12 @@ function AuthorizeConsent({ searchParams }: { searchParams: URLSearchParams }) {
                 ))}
               </div>
             )}
+            {/* 占位常驻：禁用↔可用切换不引起卡片高度跳动 */}
+            <p
+              className={`text-xs text-destructive ${selectedIds.size === 0 ? "" : "invisible"}`}
+            >
+              请至少选择 1 个项目
+            </p>
           </div>
 
           <div className="space-y-2">
@@ -184,18 +222,18 @@ function AuthorizeConsent({ searchParams }: { searchParams: URLSearchParams }) {
             <p className="text-sm text-destructive">{submitError}</p>
           )}
 
-          <Button
-            className="w-full"
-            disabled={selectedIds.size === 0 || submitting}
-            onClick={onSubmit}
-          >
-            {submitting ? "授权中..." : "同意授权"}
-          </Button>
-          {selectedIds.size === 0 && (
-            <p className="text-center text-xs text-muted-foreground">
-              请至少选择 1 个项目
-            </p>
-          )}
+          <div className="flex gap-3">
+            <Button variant="outline" className="flex-1" onClick={onDeny}>
+              取消
+            </Button>
+            <Button
+              className="flex-1"
+              disabled={selectedIds.size === 0 || submitting}
+              onClick={onSubmit}
+            >
+              {submitting ? "授权中..." : "同意授权"}
+            </Button>
+          </div>
         </CardContent>
       </Card>
     </ConsentShell>
