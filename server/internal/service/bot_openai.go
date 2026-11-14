@@ -81,6 +81,15 @@ type botModelToolCall struct {
 	Arguments string // 原始 JSON 字符串（跨 chunk 拼接）
 }
 
+// botToolCallAccum 按流式分片累积单个工具调用的 id/name/arguments：
+// 用 strings.Builder 缓冲，流结束后一次性生成字符串，避免循环里反复
+// 拼接整串（拷贝量随全文长度二次增长，INT-229）。
+type botToolCallAccum struct {
+	id   string
+	name strings.Builder
+	args strings.Builder
+}
+
 // botStreamRequest 是 contextBuilder 的产物：消息数组 + 固定工具数组。
 type botStreamRequest struct {
 	Messages []openai.ChatCompletionMessageParamUnion
@@ -141,8 +150,10 @@ func botStreamChat(ctx context.Context, client *openai.Client, baseURL string, r
 	defer stream.Close()
 
 	reply := &botModelReply{}
+	// 正文与工具调用分片都走 Builder 缓冲，流结束再一次性取串（INT-229）。
+	var textBuf strings.Builder
 	// 流式工具调用按 index 分片拼接。
-	parts := map[int64]*botModelToolCall{}
+	parts := map[int64]*botToolCallAccum{}
 	order := []int64{}
 	firstChunkSeen := false
 
@@ -189,7 +200,7 @@ func botStreamChat(ctx context.Context, client *openai.Client, baseURL string, r
 					now := time.Now().UTC()
 					reply.FirstDeltaAt = &now
 				}
-				reply.Text += text
+				textBuf.WriteString(text)
 				if onDelta != nil {
 					onDelta(text)
 				}
@@ -200,22 +211,19 @@ func botStreamChat(ctx context.Context, client *openai.Client, baseURL string, r
 			for _, tc := range choice.Delta.ToolCalls {
 				part, ok := parts[tc.Index]
 				if !ok {
-					part = &botModelToolCall{}
+					part = &botToolCallAccum{}
 					parts[tc.Index] = part
 					order = append(order, tc.Index)
 				}
 				if tc.ID != "" {
-					part.ID = tc.ID
+					part.id = tc.ID
 				}
-				if tc.Function.Name != "" {
-					part.Name += tc.Function.Name
-				}
-				if tc.Function.Arguments != "" {
-					part.Arguments += tc.Function.Arguments
-				}
+				part.name.WriteString(tc.Function.Name)
+				part.args.WriteString(tc.Function.Arguments)
 			}
 		}
 	}
+	reply.Text = textBuf.String()
 	sErr := stream.Err()
 	// 无论成败都先拼装已收到的工具调用片段：调用方按「本次尝试是否已有
 	// 输出」决定能否重试，半截的工具调用必须可见。
@@ -224,7 +232,7 @@ func botStreamChat(ctx context.Context, client *openai.Client, baseURL string, r
 		// 缺 name 无法合成语义：丢弃。干净结束时计入缺名异常——断流残片
 		// 的缺名是截断的后果而非上游协议畸形，不计入避免观测噪音
 		// （INT-139 R12 / 云端复审）。
-		if part.Name == "" {
+		if part.name.Len() == 0 {
 			if sErr == nil {
 				reply.DroppedToolCalls++
 			}
@@ -233,11 +241,16 @@ func botStreamChat(ctx context.Context, client *openai.Client, baseURL string, r
 		// 缺 id 的合成平台 id：部分兼容服务流式不返回 id，静默丢弃会让
 		// 调用丢失、本轮无结果。配对键 provider_tool_call_id 存在我们账本
 		// 里、回放什么就按什么配对，本地合成不破坏协议闭合。
-		if part.ID == "" {
-			part.ID = fmt.Sprintf("call_%d_%s", idx, uuid.NewString())
+		id := part.id
+		if id == "" {
+			id = fmt.Sprintf("call_%d_%s", idx, uuid.NewString())
 			reply.SynthesizedToolCallIDs++
 		}
-		reply.ToolCalls = append(reply.ToolCalls, *part)
+		reply.ToolCalls = append(reply.ToolCalls, botModelToolCall{
+			ID:        id,
+			Name:      part.name.String(),
+			Arguments: part.args.String(),
+		})
 	}
 	if err := sErr; err != nil {
 		// 只有看门狗取消（父 ctx 仍存活且错误为取消）才改写为超时错误：

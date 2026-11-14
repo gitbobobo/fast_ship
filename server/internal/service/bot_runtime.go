@@ -174,7 +174,10 @@ func (s *BotService) Start() {
 	// 按天花费汇总（INT-164）：周期 loop 管昨天及以前的补齐；启动立即异步
 	// 跑一遍同一扫描，首次上线的全量回填就是「全部日期未覆盖」的同路径。
 	s.spawnBg(s.scanUsageRollupOnce)
-	s.scanNightlyOnce()
+	// 夜间扫描不阻塞监听（INT-228）：bot 数增长时全量扫描会拉长启动到
+	// ListenAndServe 的窗口；扫描本身只触发到点的维护，入队后由维护
+	// worker 消化，挪进后台与其它周期 loop 同一守护方式。
+	s.spawnBg(s.scanNightlyOnce)
 }
 
 // Stop 停止全部后台 goroutine：5 条周期 loop、worker 池、维护 worker、
@@ -303,14 +306,14 @@ func (s *BotService) scanLoop() {
 }
 
 func (s *BotService) scanOnce() {
-	// 未消费输入：粗筛（水位落后）后按真实模型输入判定——后台结果等非
-	// 输入消息也推高账本水位，裸水位比较会让空闲 bot 永远被扫中空转。
-	var bots []model.Bot
-	if err := s.db.Where("offered_input_seq < next_message_seq - 1").Find(&bots).Error; err == nil {
-		for _, b := range bots {
-			if !s.hasUnconsumedInput(&b) {
-				continue
-			}
+	// 未消费输入：一条 SQL 直接按真实模型输入筛 bot（ListBotsWithUnconsumedInput）——
+	// 后台结果等非输入消息也推高账本水位，裸水位比较会让空闲 bot 永远被扫中
+	// 空转；投影只含触发键所需列，不加载人设大字段，也不对每个候选逐个 COUNT。
+	cands, err := s.bots.ListBotsWithUnconsumedInput()
+	if err != nil {
+		s.logger.Warn("扫描未消费输入失败", zap.Error(err))
+	} else {
+		for _, b := range cands {
 			if _, busy := s.activeRunOf(b.ID); !busy {
 				s.wakeRuntime(b.ID, botWake{
 					Trigger: model.BotTriggerUserMessage,
@@ -374,14 +377,6 @@ func (s *BotService) listUnfinishedScheduleRuns() []model.BotRun {
 	s.logger.Warn("未完成的定时任务运行过多，本轮扫描触到上限",
 		zap.Int("scanned", len(out)))
 	return out
-}
-
-// hasUnconsumedInput 判断 bot 是否确有未交给模型的输入（主线会话内的 user /
-// background_result / schedule_event）；账本水位差可能来自非输入消息与
-// schedule 会话的消息。
-func (s *BotService) hasUnconsumedInput(b *model.Bot) bool {
-	hasNew, err := s.messages.HasModelInputSince(b.ID, model.BotSessionKindMain, "", b.OfferedInputSeq)
-	return err == nil && hasNew
 }
 
 func itoa64(v int64) string {

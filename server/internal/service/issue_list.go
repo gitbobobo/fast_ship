@@ -56,7 +56,7 @@ func (s *IssueService) List(ctx context.Context, projectID, userID string, filte
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, 0, errs.ErrProjectNotFound
 		}
-		return nil, 0, loadStoreErr(err)
+		return nil, 0, s.loadStoreErr("list_project_find", err)
 	}
 
 	query := toIssueListQuery(projectID, filters)
@@ -66,32 +66,32 @@ func (s *IssueService) List(ctx context.Context, projectID, userID string, filte
 	}
 	pageIssues, total, err := resolved.issueRepo.ListFilteredWithTotal(query, filters.Sort, offset, pageSize)
 	if err != nil {
-		return nil, 0, loadStoreErr(err)
+		return nil, 0, s.loadStoreErr("list_issues", err)
 	}
 
 	metaByIssueID, err := resolved.internalMetaByIssueIDs(pageIssues)
 	if err != nil {
-		return nil, 0, loadStoreErr(err)
+		return nil, 0, s.loadStoreErr("list_internal_meta", err)
 	}
 
 	labelMap, err := resolved.buildLabelMap(projectID)
 	if err != nil {
-		return nil, 0, loadStoreErr(err)
+		return nil, 0, s.loadStoreErr("list_labels", err)
 	}
 
 	shipHooksByIssueID, err := resolved.shipHookService.shipHooksByIssueIDs(pageIssues)
 	if err != nil {
-		return nil, 0, loadStoreErr(err)
+		return nil, 0, s.loadStoreErr("list_ship_hooks", err)
 	}
 
 	unread, err := resolved.unreadCountsByIssueIDs(userID, pageIssues)
 	if err != nil {
-		return nil, 0, loadStoreErr(err)
+		return nil, 0, s.loadStoreErr("list_unread", err)
 	}
 
 	pullRequestSummaries, err := resolved.pullRequestSummariesByIssueIDs(pageIssues)
 	if err != nil {
-		return nil, 0, loadStoreErr(err)
+		return nil, 0, s.loadStoreErr("list_pr_summaries", err)
 	}
 
 	resp := make([]IssueResponse, 0, len(pageIssues))
@@ -127,12 +127,12 @@ func (s *IssueService) CountIssues(ctx context.Context, projectID, userID string
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return 0, errs.ErrProjectNotFound
 		}
-		return 0, loadStoreErr(err)
+		return 0, s.loadStoreErr("count_project_find", err)
 	}
 
 	total, err := resolved.issueRepo.CountFiltered(toIssueListQuery(projectID, filters))
 	if err != nil {
-		return 0, loadStoreErr(err)
+		return 0, s.loadStoreErr("count_issues", err)
 	}
 	return total, nil
 }
@@ -152,7 +152,7 @@ func (s *IssueService) BatchCloseDoneIssues(ctx context.Context, projectID, user
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, errs.ErrProjectNotFound
 		}
-		return nil, loadStoreErr(err)
+		return nil, s.loadStoreErr("batch_close_project_find", err)
 	}
 
 	// 只取 done+open 的行，多取 1 条探测是否超上限，等价于迁移前的 total 判断；
@@ -165,7 +165,7 @@ func (s *IssueService) BatchCloseDoneIssues(ctx context.Context, projectID, user
 	}
 	filtered, err := resolved.issueRepo.ListFiltered(toIssueListQuery(projectID, filters), "updated_desc", 0, batchCloseDoneMaxIssues+1)
 	if err != nil {
-		return nil, loadStoreErr(err)
+		return nil, s.loadStoreErr("batch_close_list_done", err)
 	}
 
 	total := len(filtered)

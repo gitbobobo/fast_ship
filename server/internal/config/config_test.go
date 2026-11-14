@@ -1,8 +1,10 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -21,7 +23,7 @@ database:
   log_sql: false
 
 jwt:
-  secret: "change-me"
+  secret: "test-only-secret-0123456789"
   expire_hours: 24
 
 upload:
@@ -64,7 +66,7 @@ database:
   log_sql: false
 
 jwt:
-  secret: "change-me"
+  secret: "test-only-secret-0123456789"
   expire_hours: 24
 
 upload:
@@ -104,7 +106,7 @@ database:
   log_sql: false
 
 jwt:
-  secret: "change-me"
+  secret: "test-only-secret-0123456789"
   expire_hours: 24
 
 upload:
@@ -299,7 +301,7 @@ database:
   log_sql: false
 
 jwt:
-  secret: "change-me"
+  secret: "test-only-secret-0123456789"
   expire_hours: 24
 
 upload:
@@ -372,5 +374,133 @@ func TestBotsRuntimeConfig(t *testing.T) {
 	}
 	if err := (BotsConfig{Runtime: negative}).validate(); err == nil {
 		t.Fatalf("负的流超时应被 validate 拒绝")
+	}
+}
+
+// INT-221：启动时拒绝空置或公开占位值的 jwt.secret / encryption.key，
+// 长度按原始值校验（实际加解密用未经裁剪的字节）；每个场景断言报错
+// 指向对应字段。
+func TestLoadRejectsInsecureSecrets(t *testing.T) {
+	// 屏蔽调用环境可能导出的 JWT_SECRET / ENCRYPTION_KEY：viper.BindEnv
+	// 会用非空环境变量覆盖 yaml，不清空则拒绝路径在导出过密钥的 shell
+	// 里测不到。置空串即可，viper 不用空环境变量覆盖 yaml。
+	t.Setenv("JWT_SECRET", "")
+	t.Setenv("ENCRYPTION_KEY", "")
+
+	tests := []struct {
+		name    string
+		mutate  func(body string) string
+		wantErr string
+	}{
+		{
+			name: "jwt.secret 为空",
+			mutate: func(body string) string {
+				return strings.Replace(body, `secret: "test-only-secret-0123456789"`, `secret: ""`, 1)
+			},
+			wantErr: "jwt.secret",
+		},
+		{
+			name: "jwt.secret 是公开占位值 change-me",
+			mutate: func(body string) string {
+				return strings.Replace(body, `secret: "test-only-secret-0123456789"`, `secret: "change-me"`, 1)
+			},
+			wantErr: "jwt.secret",
+		},
+		{
+			name: "jwt.secret 是公开占位值 change-me-in-production",
+			mutate: func(body string) string {
+				return strings.Replace(body, `secret: "test-only-secret-0123456789"`, `secret: "change-me-in-production"`, 1)
+			},
+			wantErr: "jwt.secret",
+		},
+		{
+			name: "encryption.key 为空",
+			mutate: func(body string) string {
+				return strings.Replace(body, `key: "12345678901234567890123456789012"`, `key: ""`, 1)
+			},
+			wantErr: "encryption.key",
+		},
+		{
+			name: "encryption.key 是公开占位值 change-me-32-bytes-in-production",
+			mutate: func(body string) string {
+				return strings.Replace(body, `key: "12345678901234567890123456789012"`, `key: "change-me-32-bytes-in-production"`, 1)
+			},
+			wantErr: "encryption.key",
+		},
+		{
+			name: "encryption.key 长度不是 AES 合法密钥长度",
+			mutate: func(body string) string {
+				return strings.Replace(body, `key: "12345678901234567890123456789012"`, `key: "short-key"`, 1)
+			},
+			wantErr: "encryption.key",
+		},
+		{
+			name: "encryption.key 首尾空白使原始长度越界（裁剪值不能绕过校验）",
+			mutate: func(body string) string {
+				return strings.Replace(body, `key: "12345678901234567890123456789012"`, `key: " 12345678901234567890123456789012"`, 1)
+			},
+			wantErr: "encryption.key",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, []byte(tt.mutate(baseConfigYAML)), 0o600); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+			if _, err := Load(path); err == nil {
+				t.Fatalf("Load 应拒绝该配置")
+			} else if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("错误应指向 %s，got %v", tt.wantErr, err)
+			}
+		})
+	}
+}
+
+// INT-221：16/24/32 字节都是 AES 合法密钥长度，既有合法配置不被误伤。
+func TestLoadAcceptsValidAESKeyLengths(t *testing.T) {
+	t.Setenv("JWT_SECRET", "")
+	t.Setenv("ENCRYPTION_KEY", "")
+
+	for _, key := range []string{
+		"1234567890123456",
+		"123456789012345678901234",
+		"12345678901234567890123456789012",
+	} {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		content := strings.Replace(baseConfigYAML,
+			`key: "12345678901234567890123456789012"`, fmt.Sprintf("key: %q", key), 1)
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+		if _, err := Load(path); err != nil {
+			t.Fatalf("%d 字节合法密钥应可启动: %v", len(key), err)
+		}
+	}
+}
+
+// INT-221：仓库自带的 configs/config.yaml 用占位密钥交付；部署者可用
+// JWT_SECRET / ENCRYPTION_KEY 环境变量注入合法值，覆盖 yaml 里的占位值。
+func TestLoadEnvOverridesInsecureSecrets(t *testing.T) {
+	t.Setenv("JWT_SECRET", "env-injected-secret-0123456789")
+	t.Setenv("ENCRYPTION_KEY", "0123456789abcdef0123456789abcdef")
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	content := strings.Replace(strings.Replace(
+		baseConfigYAML, `secret: "test-only-secret-0123456789"`, `secret: "change-me"`, 1),
+		`key: "12345678901234567890123456789012"`, `key: "change-me-32-bytes-in-production"`, 1)
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("环境变量注入的合法密钥应可启动: %v", err)
+	}
+	if cfg.JWT.Secret != "env-injected-secret-0123456789" {
+		t.Fatalf("JWT_SECRET 环境变量应覆盖 yaml，got %q", cfg.JWT.Secret)
+	}
+	if cfg.Encryption.Key != "0123456789abcdef0123456789abcdef" {
+		t.Fatalf("ENCRYPTION_KEY 环境变量应覆盖 yaml，got %q", cfg.Encryption.Key)
 	}
 }
