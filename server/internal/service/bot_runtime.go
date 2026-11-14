@@ -376,14 +376,6 @@ func (s *BotService) listUnfinishedScheduleRuns() []model.BotRun {
 	return out
 }
 
-// hasUnconsumedInput 判断 bot 是否确有未交给模型的输入（主线会话内的 user /
-// background_result / schedule_event）；账本水位差可能来自非输入消息与
-// schedule 会话的消息。
-func (s *BotService) hasUnconsumedInput(b *model.Bot) bool {
-	hasNew, err := s.messages.HasModelInputSince(b.ID, model.BotSessionKindMain, "", b.OfferedInputSeq)
-	return err == nil && hasNew
-}
-
 func itoa64(v int64) string {
 	return strconv.FormatInt(v, 10)
 }

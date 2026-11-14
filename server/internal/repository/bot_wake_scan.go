@@ -20,6 +20,11 @@ func (r *BotRepository) ListBotsWithUnconsumedInput() ([]BotWakeScanRow, error) 
 	var rows []BotWakeScanRow
 	err := r.db.Table("bots").
 		Select("bots.id, bots.next_message_seq").
+		// 水位粗筛作附加条件（等价性）：账本约束下消息 seq ≤ next-1，故
+		// 「存在 seq > offered 的输入」必然蕴含 offered < next-1。先算术排除
+		// 已追平的机器人（从未聊过、输入全部已消费），这些行不再做
+		// bot_messages 索引探测；命中集合不变（第 1 轮审查 Note）。
+		Where("bots.offered_input_seq < bots.next_message_seq - 1").
 		Where("EXISTS (?)", r.db.Model(&model.BotMessage{}).Select("1").
 			Where("bot_messages.bot_id = bots.id").
 			Where("bot_messages.session_kind = ?", model.BotSessionKindMain).
