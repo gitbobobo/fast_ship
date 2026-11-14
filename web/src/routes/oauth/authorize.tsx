@@ -135,14 +135,16 @@ function AuthorizeConsent({ searchParams }: { searchParams: URLSearchParams }) {
     }
   };
 
-  // 拒绝授权：以 error=access_denied 回调客户端（RFC 6749 §4.1.2.1），
-  // redirect_uri 已经过服务端注册校验，客户端会收到明确的中止信号而不是干等。
+  // 拒绝授权：走服务端 /oauth/deny——redirect_uri 的注册匹配由服务端
+  // 校验后 302 回调客户端并携带 error=access_denied（RFC 6749 §4.1.2.1），
+  // 客户端收到明确的中止信号而不是干等。
   const onDeny = () => {
-    const u = new URL(previewParams!.redirect_uri);
-    u.searchParams.set("error", "access_denied");
+    const deny = new URL("/oauth/deny", window.location.origin);
+    deny.searchParams.set("client_id", previewParams!.client_id);
+    deny.searchParams.set("redirect_uri", previewParams!.redirect_uri);
     const state = searchParams.get("state");
-    if (state) u.searchParams.set("state", state);
-    window.location.href = u.toString();
+    if (state) deny.searchParams.set("state", state);
+    window.location.href = deny.pathname + deny.search;
   };
 
   // 切换账号：与 UserNav 同语义——先吊销服务端会话（失败也继续），再清

@@ -164,11 +164,16 @@ describe("OAuthAuthorizePage", () => {
     await screen.findByRole("button", { name: "同意授权" });
     await user.click(screen.getByRole("button", { name: "取消" }));
 
-    await waitFor(() =>
-      expect(window.location.href).toBe(
-        "http://localhost:7777/callback?error=access_denied&state=st-1",
-      ),
-    );
+    await waitFor(() => {
+      // 跳目标是同源 /oauth/deny（重定向目标由服务端校验后 302 附加 error）
+      const deny = new URL(window.location.href);
+      expect(deny.pathname).toBe("/oauth/deny");
+      expect(deny.searchParams.get("client_id")).toBe("client-1");
+      expect(deny.searchParams.get("redirect_uri")).toBe(
+        "http://localhost:7777/callback",
+      );
+      expect(deny.searchParams.get("state")).toBe("st-1");
+    });
     expect(authorize).not.toHaveBeenCalled();
   });
 

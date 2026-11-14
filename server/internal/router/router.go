@@ -467,6 +467,7 @@ func Setup(
 	r.GET("/.well-known/oauth-authorization-server", oauthHandler.WellKnownAuthorizationServer)
 	r.POST("/oauth/register", oauthHandler.Register)
 	r.POST("/oauth/token", oauthHandler.Token)
+	r.GET("/oauth/deny", oauthHandler.Deny)
 
 	// MCP Streamable HTTP 端点（INT-222）：静态路径 /mcp，不与现有路由冲突
 	//（Web 面板走 NoRoute 回落）。Bearer 鉴权挑战在前，协议处理在后；

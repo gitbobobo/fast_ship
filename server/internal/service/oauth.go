@@ -266,6 +266,27 @@ type OAuthProjectOption struct {
 	Name string `json:"name"`
 }
 
+// GetRegisteredRedirect 校验客户端存在且 redirect_uri 与注册精确匹配，
+// 供 deny 端点使用：重定向目标必须经服务端校验，防止开放重定向。
+func (s *OAuthService) GetRegisteredRedirect(clientID, redirectURI string) (*model.OAuthClient, error) {
+	if strings.TrimSpace(clientID) == "" || strings.TrimSpace(redirectURI) == "" {
+		return nil, errs.ErrInvalidParams
+	}
+	client, err := s.repo.FindClient(clientID)
+	if err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, errs.ErrOAuthClientNotFound
+		}
+		return nil, errs.ErrInternal
+	}
+	for _, uri := range RedirectURIsOf(client) {
+		if uri == redirectURI {
+			return client, nil
+		}
+	}
+	return nil, errs.ErrOAuthRedirectURIMismatch
+}
+
 // checkAuthorizeParams 授权端点共用的入参校验：客户端存在、PKCE S256、
 // redirect_uri 精确匹配。校验通过返回客户端。
 func (s *OAuthService) checkAuthorizeParams(clientID, redirectURI, challenge, method string) (*model.OAuthClient, error) {

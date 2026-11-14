@@ -363,3 +363,51 @@ func doRouterJSON(t *testing.T, env *routerTestEnv, bearer string, method, path,
 }
 
 // doRouterJSON 带 JSON body 的路由调用，返回 (status, parsed body)。
+
+// deny 端点：注册 redirect_uri 校验通过后 302 携 error=access_denied；
+// 未注册 redirect_uri 一律 400、绝不重定向（防开放重定向）。
+
+// deny 端点：注册 redirect_uri 校验通过后 302 携 error=access_denied；
+// 未注册 redirect_uri 一律 400、绝不重定向（防开放重定向）。
+func TestOAuthDenyRedirect(t *testing.T) {
+	env := oauthEnv(t)
+	auth := registerAndLoginRouterUser(t, env.router, "denyuser", "denyuser@example.com", "Password123!")
+	doRouterJSON(t, env, "Bearer "+auth.Token, http.MethodPost, "/api/projects", `{"name":"deny-project","description":"d"}`)
+
+	clientID := oauthRegisterClient(t, env)
+	const redirectURI = "https://client.example.com/cb"
+
+	// 注册 redirect_uri：302 回调携带 error=access_denied 与原样 state。
+	denyPath := "/oauth/deny?client_id=" + clientID +
+		"&redirect_uri=" + url.QueryEscape(redirectURI) + "&state=deny-st"
+	req := httptest.NewRequest(http.MethodGet, denyPath, nil)
+	w := httptest.NewRecorder()
+	env.router.ServeHTTP(w, req)
+	if w.Code != http.StatusFound {
+		t.Fatalf("deny 应 302: %d %s", w.Code, w.Body.String())
+	}
+	loc := w.Header().Get("Location")
+	if !strings.HasPrefix(loc, redirectURI+"?") ||
+		!strings.Contains(loc, "error=access_denied") ||
+		!strings.Contains(loc, "state=deny-st") {
+		t.Fatalf("Location 错误: %s", loc)
+	}
+
+	// 未注册 redirect_uri：400，无 Location。
+	req = httptest.NewRequest(http.MethodGet, "/oauth/deny?client_id="+clientID+
+		"&redirect_uri="+url.QueryEscape("https://evil.example.com/cb")+"&state=x", nil)
+	w = httptest.NewRecorder()
+	env.router.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest || w.Header().Get("Location") != "" {
+		t.Fatalf("未注册 redirect_uri 应 400 且不重定向: %d %q", w.Code, w.Header().Get("Location"))
+	}
+
+	// 未知 client：400。
+	req = httptest.NewRequest(http.MethodGet, "/oauth/deny?client_id=nope"+
+		"&redirect_uri="+url.QueryEscape(redirectURI), nil)
+	w = httptest.NewRecorder()
+	env.router.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("未知 client 应 400: %d", w.Code)
+	}
+}

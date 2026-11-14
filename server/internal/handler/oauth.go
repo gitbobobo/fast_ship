@@ -3,6 +3,7 @@ package handler
 import (
 	"errors"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -155,6 +156,32 @@ func firstNonEmpty(values ...string) string {
 }
 
 // WellKnownProtectedResource GET /.well-known/oauth-protected-resource（RFC 9728）。
+// Deny GET /oauth/deny：放弃授权的服务端出口。校验 client_id 与
+// redirect_uri 注册精确匹配后，302 回调 redirect_uri 并携带
+// error=access_denied（RFC 6749 §4.1.2.1）与原样 state；校验失败一律
+// 400、绝不重定向——把端点当作开放重定向跳板的请求在此拦截。
+func (h *OAuthHandler) Deny(c *gin.Context) {
+	clientID := c.Query("client_id")
+	redirectURI := c.Query("redirect_uri")
+	if _, err := h.oauthService.GetRegisteredRedirect(clientID, redirectURI); err != nil {
+		oauthError(c, http.StatusBadRequest, "invalid_request", "客户端不存在或 redirect_uri 未注册")
+		return
+	}
+	target, err := url.Parse(redirectURI)
+	if err != nil {
+		oauthError(c, http.StatusBadRequest, "invalid_request", "redirect_uri 无效")
+		return
+	}
+	q := target.Query()
+	q.Set("error", "access_denied")
+	if state := c.Query("state"); state != "" {
+		q.Set("state", state)
+	}
+	target.RawQuery = q.Encode()
+	c.Header("Cache-Control", "no-store")
+	c.Redirect(http.StatusFound, target.String())
+}
+
 func (h *OAuthHandler) WellKnownProtectedResource(c *gin.Context) {
 	if h.oauthService.BaseURL(c.Request.Context()) == "" {
 		oauthError(c, http.StatusServiceUnavailable, "temporarily_unavailable", "尚未配置 public_url，请先在「设置 → 部署」填写对外访问地址")

@@ -108,28 +108,34 @@ export default function LoginPage() {
 }
 
 /**
- * OAuth 授权流程中的「放弃授权」出口：next 指向授权页时可解析出
- * redirect_uri/state，以 error=access_denied 回调客户端（RFC 6749
- * §4.1.2.1），让发起方收到明确的中止信号而不是干等回调。
+ * OAuth 授权流程中的「放弃授权」出口：跳转到同源 /oauth/deny，由服务端
+ * 校验 client 与 redirect_uri 注册匹配后以 error=access_denied 回调客户端
+ * （RFC 6749 §4.1.2.1）。登录页不做任何客户端侧重定向拼装——重定向目标
+ * 一律经服务端校验，避免开放重定向。
  */
 function DenyOAuthLink({ next }: { next: string | null }) {
-  if (!next?.startsWith("/oauth/authorize")) return null;
-  let denyUrl: string;
-  try {
-    const target = new URL(next, window.location.origin);
-    const redirectURI = target.searchParams.get("redirect_uri");
-    if (!redirectURI) return null;
-    const deny = new URL(redirectURI);
-    const state = target.searchParams.get("state");
-    deny.searchParams.set("error", "access_denied");
-    if (state) deny.searchParams.set("state", state);
-    denyUrl = deny.toString();
-  } catch {
-    return null;
+  let denyHref: string | null = null;
+  if (next?.startsWith("/oauth/authorize")) {
+    try {
+      const target = new URL(next, window.location.origin);
+      const clientID = target.searchParams.get("client_id");
+      const redirectURI = target.searchParams.get("redirect_uri");
+      if (clientID && redirectURI) {
+        const deny = new URL("/oauth/deny", window.location.origin);
+        deny.searchParams.set("client_id", clientID);
+        deny.searchParams.set("redirect_uri", redirectURI);
+        const state = target.searchParams.get("state");
+        if (state) deny.searchParams.set("state", state);
+        denyHref = deny.pathname + deny.search;
+      }
+    } catch {
+      denyHref = null;
+    }
   }
+  if (!denyHref) return null;
   return (
     <p className="mb-4 text-center text-sm">
-      <a href={denyUrl} className="text-muted-foreground underline underline-offset-2 hover:text-foreground">
+      <a href={denyHref} className="text-muted-foreground underline underline-offset-2 hover:text-foreground">
         取消授权并返回应用
       </a>
     </p>
