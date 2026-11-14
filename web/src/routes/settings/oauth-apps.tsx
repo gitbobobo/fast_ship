@@ -1,6 +1,8 @@
 import { useMemo } from "react";
 import { ShieldOff } from "lucide-react";
 
+import { cn } from "@/lib/utils";
+
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -68,7 +70,13 @@ function ScopeSummary({
 
   return (
     <div className="flex items-center gap-2">
-      <Badge variant={write ? "default" : "outline"} className="px-2 py-0.5">
+      <Badge
+        variant={write ? "default" : "outline"}
+        className={cn(
+          "px-2 py-0.5",
+          !write && "border-border bg-background text-foreground",
+        )}
+      >
         {write ? "读写" : "只读"}
       </Badge>
       <span className="text-sm text-foreground">· {projectLabel}</span>
@@ -117,20 +125,23 @@ export default function OAuthAppsPage() {
           </div>
         ) : (
           <div className="overflow-x-auto rounded-lg border">
-            <Table>
+            <Table className="table-fixed">
               <TableHeader>
                 <TableRow>
                   <TableHead>应用</TableHead>
-                  <TableHead>授权范围</TableHead>
-                  <TableHead>授权时间</TableHead>
-                  <TableHead className="text-right">操作</TableHead>
+                  <TableHead className="w-44">授权范围</TableHead>
+                  <TableHead className="w-44">授权时间</TableHead>
+                  <TableHead className="w-24 text-right">操作</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {authorizations.map((auth) => (
                   <TableRow key={auth.id}>
-                    <TableCell className="max-w-72 font-medium [overflow-wrap:anywhere]">
-                      {auth.client_name}
+                    <TableCell
+                      className="font-medium [overflow-wrap:anywhere]"
+                      title={auth.client_name}
+                    >
+                      <span className="line-clamp-2">{auth.client_name}</span>
                     </TableCell>
                     <TableCell>
                       <ScopeSummary authorization={auth} projects={projects} />

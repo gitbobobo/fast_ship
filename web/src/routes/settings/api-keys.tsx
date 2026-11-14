@@ -114,14 +114,14 @@ export default function ApiKeysPage() {
           <div className="mt-3 flex items-start gap-2 rounded-md border-l-2 border-l-primary/60 bg-muted/70 px-3 py-2.5 text-sm text-muted-foreground">
             <Info className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
             <span>
-              API Key 保留给脚本与 CI 使用。MCP 客户端建议改用 OAuth 接入，在{" "}
+              API Key 保留给脚本与 CI 使用；MCP 客户端建议改用 OAuth，在
               <Link
                 to="/settings/oauth-apps"
-                className="font-medium text-primary underline underline-offset-2 hover:opacity-80"
+                className="mx-0.5 font-medium text-primary underline underline-offset-2 hover:opacity-80"
               >
-                已授权的应用
+                「已授权的应用」页
               </Link>
-              页统一管理。
+              统一管理。
             </span>
           </div>
         </div>

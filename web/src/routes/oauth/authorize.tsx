@@ -143,14 +143,15 @@ function AuthorizeConsent({ searchParams }: { searchParams: URLSearchParams }) {
   };
 
   // 切换账号：与 UserNav 同语义——先吊销服务端会话（失败也继续），再清
-  // 本地凭证进登录页，回跳参数保留本次授权请求。
+  // 本地凭证进登录页，回跳参数保留本次授权请求，并带上客户端名供登录页提示。
   const onSwitchAccount = async () => {
     const refreshToken = useAuthStore.getState().refreshToken;
     try {
       await authApi.logout(refreshToken ?? undefined);
     } finally {
       logout();
-      window.location.href = loginRedirectPath();
+      window.location.href =
+        loginRedirectPath() + "&client=" + encodeURIComponent(client_name);
     }
   };
 
@@ -206,10 +207,12 @@ function AuthorizeConsent({ searchParams }: { searchParams: URLSearchParams }) {
                 ))}
               </div>
             )}
-            {/* 常驻中性引导：占位固定不跳动；红色报错留给真正的错误 */}
+            {/* 占位常驻防跳动：未选时引导，已选时说明授权边界 */}
             {projects.length > 0 && (
               <p className="text-xs text-muted-foreground">
-                至少选择 1 个项目后才能授权
+                {selectedIds.size === 0
+                  ? "至少选择 1 个项目后才能授权"
+                  : "仅授权勾选的项目，可随时在设置中吊销"}
               </p>
             )}
           </div>

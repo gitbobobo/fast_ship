@@ -43,10 +43,16 @@ export default function LoginPage() {
     <Card>
       <CardHeader className="text-center">
         <CardTitle className="text-xl">登录</CardTitle>
-        {next?.startsWith("/oauth/authorize") && (
+        {searchParams.get("client") ? (
           <p className="mt-1 text-sm text-muted-foreground">
-            登录后将返回并继续授权流程
+            登录后继续为「{searchParams.get("client")}」授权
           </p>
+        ) : (
+          next?.startsWith("/oauth/authorize") && (
+            <p className="mt-1 text-sm text-muted-foreground">
+              登录后将返回并继续授权流程
+            </p>
+          )
         )}
       </CardHeader>
       <CardContent>
