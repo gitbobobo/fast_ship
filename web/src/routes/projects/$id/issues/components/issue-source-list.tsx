@@ -153,7 +153,7 @@ export function IssueSourceList({
                     {entry.issue.title}
                   </span>
                   {entry.stale && (
-                    <span className="mt-1 inline-flex items-center rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground">
+                    <span className="mt-1 inline-flex items-center rounded border border-border/60 bg-background px-1.5 py-0.5 text-xs text-muted-foreground">
                       已不符合来源条件
                     </span>
                   )}

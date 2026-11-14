@@ -14,6 +14,7 @@ import {
   MessageSquare,
   Pencil,
   PanelLeft,
+  PanelLeftClose,
   Play,
   RefreshCw,
   List,
@@ -294,10 +295,10 @@ export default function IssueDetailPage() {
     currentIssueId: iid ?? "",
     currentIssueProjectId: issue?.project_id,
   });
-  // 条数取渲染行数（含 stale 保留项），与用户看到的列表一致；加载中不显示
+  // 条数取符合来源条件的行数（不含 stale 保留项），与副标题的筛选描述自洽；加载中不显示
   const sourceCountLabel = source.isLoading
     ? null
-    : `${source.items.length} 个`;
+    : `${source.items.filter((entry) => !entry.stale).length} 个`;
 
   const toggleSourceList = useCallback(() => {
     if (!hasSourceContext) {
@@ -1114,13 +1115,14 @@ export default function IssueDetailPage() {
                     </p>
                   </div>
                   <Button
-                    variant="ghost"
+                    variant="outline"
                     size="sm"
-                    className="h-6 shrink-0 px-1.5 text-[10px] text-muted-foreground"
+                    className="h-7 shrink-0 gap-1 px-2 text-xs"
                     onClick={toggleSourceList}
                     aria-label="收起来源列表（快捷键 [）"
                     title="收起（快捷键 [）"
                   >
+                    <PanelLeftClose className="h-3.5 w-3.5" />
                     收起
                   </Button>
                 </div>
