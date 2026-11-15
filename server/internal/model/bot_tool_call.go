@@ -25,6 +25,11 @@ type BotToolCall struct {
 
 	Status BotToolCallStatus `gorm:"type:text;not null" json:"status"`
 
+	// Revision 是行内单调代次（INT-217）：每次改投影字段的更新与状态 CAS
+	// 在同一条 UPDATE 里 +1。浏览器只按 revision 覆盖（大者胜，相等补字段），
+	// 快照与 SSE 交错时不再按状态排名猜先后。AutoMigrate 自动加列，存量行 0。
+	Revision int64 `gorm:"not null;default:0" json:"revision"`
+
 	// Decision 是用户的确认决定；可空，与 DecidedAt 一起落。
 	Decision  *string    `gorm:"type:text" json:"decision,omitempty"`
 	DecidedAt *time.Time `json:"decided_at,omitempty"`

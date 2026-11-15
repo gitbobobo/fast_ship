@@ -143,6 +143,8 @@ export interface BotCall {
   execution_mode: "sync" | "async";
   requires_confirmation: boolean;
   status: BotCallStatus;
+  /** 单调代次：服务端每次改投影字段的更新与状态 CAS 同一条 UPDATE +1；合并只认 revision。 */
+  revision: number;
   decision?: BotCallDecision | null;
   decided_at?: string | null;
   error_code?: string | null;

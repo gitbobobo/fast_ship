@@ -7471,6 +7471,13 @@ export interface components {
             requires_confirmation: boolean;
             /** @description pending_confirmation / queued / running / succeeded / failed / rejected / cancelled / not_executed */
             status: string;
+            /**
+             * Format: int64
+             * @description 单调代次（INT-217）：每次改投影字段的更新与状态 CAS 在同一条
+             *     UPDATE 里 +1；浏览器只按 revision 覆盖（大者胜，相等补字段，
+             *     小者丢弃），快照与 SSE 交错时不再按状态排名猜先后。
+             */
+            revision: number;
             /** @description approve / reject / always_allow */
             decision?: string | null;
             /** Format: date-time */

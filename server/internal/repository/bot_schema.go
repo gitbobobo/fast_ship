@@ -235,6 +235,7 @@ func EnsureBotSchema(db *gorm.DB) error {
 	// 投影；幂等，新建库上影响 0 行。
 	dupWaitCleanup := `UPDATE bot_tool_calls
 SET status = 'failed',
+    revision = revision + 1,
     error_code = 'server_restarted',
     error_message = '服务在等待中重启，等待已中断（wait 无副作用）；如仍需跟踪请重新发起'
 WHERE tool_name = 'fs_thread' AND action = 'wait' AND status = 'running'

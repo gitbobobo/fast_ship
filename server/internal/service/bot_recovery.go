@@ -292,9 +292,15 @@ func (s *BotService) RecoverOnStartup() error {
 				if err := s.appendToolReplyTx(tx, call.BotID, runID, call.RequestID, call, reply, now); err != nil {
 					return err
 				}
+				// 事件负载用事务内重读的完整投影：内存对象只改了 status，
+				// finished_at/error_code/revision 以提交时点的行为准（INT-217）。
+				projection, perr := s.callProjectionTx(tx, call.ID)
+				if perr != nil {
+					return perr
+				}
 				return s.appendEventTx(tx, call.BotID, runIDPtr(runID), call.ID, model.BotEventToolResult, botEventEnvelope{
 					Kind: "tool_result", Phase: "terminal",
-					Payload: botToolCallResponseOf(call),
+					Payload: *projection,
 				})
 			})
 			if txErr != nil {

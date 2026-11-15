@@ -9503,6 +9503,7 @@ before_seq/after_seq 都是排他 seq 边界，页内按 seq 正序；不使用 
 | `calls[].execution_mode` | string | 是 | sync / async |
 | `calls[].requires_confirmation` | boolean | 是 |  |
 | `calls[].status` | string | 是 | pending_confirmation / queued / running / succeeded / failed / rejected / cancelled / not_executed |
+| `calls[].revision` | integer（int64） | 是 | 单调代次（INT-217）：每次改投影字段的更新与状态 CAS 在同一条 UPDATE 里 +1；浏览器只按 revision 覆盖（大者胜，相等补字段， 小者丢弃），快照与 SSE 交错时不再按状态排名猜先后。 |
 | `calls[].decision` | string（可空） | 否 | approve / reject / always_allow |
 | `calls[].decided_at` | string（date-time，可空） | 否 |  |
 | `calls[].authorization_id` | string（可空） | 否 |  |
@@ -9683,6 +9684,7 @@ client_message_id 必填（幂等键）：同键同正文返回已有消息；�
 | `calls[].execution_mode` | string | 是 | sync / async |
 | `calls[].requires_confirmation` | boolean | 是 |  |
 | `calls[].status` | string | 是 | pending_confirmation / queued / running / succeeded / failed / rejected / cancelled / not_executed |
+| `calls[].revision` | integer（int64） | 是 | 单调代次（INT-217）：每次改投影字段的更新与状态 CAS 在同一条 UPDATE 里 +1；浏览器只按 revision 覆盖（大者胜，相等补字段， 小者丢弃），快照与 SSE 交错时不再按状态排名猜先后。 |
 | `calls[].decision` | string（可空） | 否 | approve / reject / always_allow |
 | `calls[].decided_at` | string（date-time，可空） | 否 |  |
 | `calls[].authorization_id` | string（可空） | 否 |  |
@@ -10692,6 +10694,7 @@ status 逗号分隔；常用 pending_confirmation 查待确认卡片、queued/ru
 | `items[].execution_mode` | string | 是 | sync / async |
 | `items[].requires_confirmation` | boolean | 是 |  |
 | `items[].status` | string | 是 | pending_confirmation / queued / running / succeeded / failed / rejected / cancelled / not_executed |
+| `items[].revision` | integer（int64） | 是 | 单调代次（INT-217）：每次改投影字段的更新与状态 CAS 在同一条 UPDATE 里 +1；浏览器只按 revision 覆盖（大者胜，相等补字段， 小者丢弃），快照与 SSE 交错时不再按状态排名猜先后。 |
 | `items[].decision` | string（可空） | 否 | approve / reject / always_allow |
 | `items[].decided_at` | string（date-time，可空） | 否 |  |
 | `items[].authorization_id` | string（可空） | 否 |  |
@@ -10749,6 +10752,7 @@ status 逗号分隔；常用 pending_confirmation 查待确认卡片、queued/ru
 | `execution_mode` | string | 是 | sync / async |
 | `requires_confirmation` | boolean | 是 |  |
 | `status` | string | 是 | pending_confirmation / queued / running / succeeded / failed / rejected / cancelled / not_executed |
+| `revision` | integer（int64） | 是 | 单调代次（INT-217）：每次改投影字段的更新与状态 CAS 在同一条 UPDATE 里 +1；浏览器只按 revision 覆盖（大者胜，相等补字段， 小者丢弃），快照与 SSE 交错时不再按状态排名猜先后。 |
 | `decision` | string（可空） | 否 | approve / reject / always_allow |
 | `decided_at` | string（date-time，可空） | 否 |  |
 | `authorization_id` | string（可空） | 否 |  |
@@ -10858,6 +10862,7 @@ status 逗号分隔；常用 pending_confirmation 查待确认卡片、queued/ru
 | `execution_mode` | string | 是 | sync / async |
 | `requires_confirmation` | boolean | 是 |  |
 | `status` | string | 是 | pending_confirmation / queued / running / succeeded / failed / rejected / cancelled / not_executed |
+| `revision` | integer（int64） | 是 | 单调代次（INT-217）：每次改投影字段的更新与状态 CAS 在同一条 UPDATE 里 +1；浏览器只按 revision 覆盖（大者胜，相等补字段， 小者丢弃），快照与 SSE 交错时不再按状态排名猜先后。 |
 | `decision` | string（可空） | 否 | approve / reject / always_allow |
 | `decided_at` | string（date-time，可空） | 否 |  |
 | `authorization_id` | string（可空） | 否 |  |
@@ -10921,6 +10926,7 @@ effect_may_have_occurred=true（不声称回滚）。已终结调用幂等返回
 | `execution_mode` | string | 是 | sync / async |
 | `requires_confirmation` | boolean | 是 |  |
 | `status` | string | 是 | pending_confirmation / queued / running / succeeded / failed / rejected / cancelled / not_executed |
+| `revision` | integer（int64） | 是 | 单调代次（INT-217）：每次改投影字段的更新与状态 CAS 在同一条 UPDATE 里 +1；浏览器只按 revision 覆盖（大者胜，相等补字段， 小者丢弃），快照与 SSE 交错时不再按状态排名猜先后。 |
 | `decision` | string（可空） | 否 | approve / reject / always_allow |
 | `decided_at` | string（date-time，可空） | 否 |  |
 | `authorization_id` | string（可空） | 否 |  |

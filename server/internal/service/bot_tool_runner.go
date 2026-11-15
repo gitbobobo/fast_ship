@@ -815,9 +815,15 @@ func (s *BotService) closeUnstartedSyncCalls(calls []*model.BotToolCall, reason 
 			if err := s.appendToolReplyTx(tx, call.BotID, runID, call.RequestID, call, reply, now); err != nil {
 				return err
 			}
+			// 事件负载用事务内重读的完整投影：内存对象只改了 status，
+			// finished_at/error_code/revision 以提交时点的行为准。
+			projection, perr := s.callProjectionTx(tx, call.ID)
+			if perr != nil {
+				return perr
+			}
 			return s.appendEventTx(tx, call.BotID, runIDPtr(runID), call.ID, model.BotEventToolResult, botEventEnvelope{
 				Kind: "tool_result", Phase: "terminal",
-				Payload: botToolCallResponseOf(call),
+				Payload: *projection,
 			})
 		})
 		if txErr != nil {
@@ -994,6 +1000,8 @@ func (s *BotService) executeQueuedCall(callID string) {
 	// 已撤销的授权不能再把调用推进到 running。
 	now := time.Now().UTC()
 	var claimed, authzRevoked bool
+	// running 事件负载：认领事务内重读的完整投影（含提交时点 revision）。
+	var runningProjection *BotToolCallResponse
 	claimErr := s.db.Transaction(func(tx *gorm.DB) error {
 		claimed, authzRevoked = false, false
 		if call.AuthorizationID != nil {
@@ -1008,6 +1016,12 @@ func (s *BotService) executeQueuedCall(callID string) {
 		}
 		var err error
 		claimed, err = repository.NewBotToolCallRepository(tx).ClaimQueuedTx(tx, callID, now)
+		if err != nil || !claimed {
+			return err
+		}
+		// 认领事务内重读投影：running 事件的 revision 是认领提交时点的行
+		// revision，与后续终态事件严格递增（INT-217）。
+		runningProjection, err = s.callProjectionTx(tx, callID)
 		return err
 	})
 	if claimErr != nil {
@@ -1024,7 +1038,7 @@ func (s *BotService) executeQueuedCall(callID string) {
 	// 事件带 run：会话判别由此推导，schedule 会话的执行事件不进聊天页。
 	s.emitEvent(bot.ID, runIDPtr(s.runIDOfCall(call)), call.ID, model.BotEventToolCall, botEventEnvelope{
 		Kind: "tool_call", Phase: "running",
-		Payload: botToolCallResponseOf(call),
+		Payload: *runningProjection,
 	})
 
 	ctx, cancel := context.WithTimeout(s.runCtx, botAsyncExecTimeout)
@@ -1190,9 +1204,15 @@ func (s *BotService) finalizeCall(bot *model.Bot, runID string, call *model.BotT
 			if err := s.appendToolReplyTx(tx, call.BotID, runID, call.RequestID, call, reply, now); err != nil {
 				return err
 			}
+			// 事件负载用事务内重读的完整投影：终态字段与 revision 以提交
+			// 时点的行为准（INT-217）。
+			projection, perr := s.callProjectionTx(tx, call.ID)
+			if perr != nil {
+				return perr
+			}
 			return s.appendEventTx(tx, call.BotID, runIDPtr(runID), call.ID, model.BotEventToolResult, botEventEnvelope{
 				Kind: "tool_result", Phase: "terminal",
-				Payload: botToolCallResponseOf(call),
+				Payload: *projection,
 			})
 		}
 		// 平台后台结果只属于异步调用（完成事件不复用 provider_tool_call_id）。
@@ -1316,9 +1336,14 @@ func (s *BotService) cancelBotCall(call *model.BotToolCall) (*model.BotToolCall,
 				if err := s.appendToolReplyTx(tx, call.BotID, runID, call.RequestID, call, reply, now); err != nil {
 					return err
 				}
+				// 事件负载用事务内重读的完整投影（INT-217）。
+				projection, perr := s.callProjectionTx(tx, call.ID)
+				if perr != nil {
+					return perr
+				}
 				return s.appendEventTx(tx, call.BotID, runIDPtr(runID), call.ID, model.BotEventToolResult, botEventEnvelope{
 					Kind: "tool_result", Phase: "terminal",
-					Payload: botToolCallResponseOf(call),
+					Payload: *projection,
 				})
 			}
 			// 终态结果消息（唯一 terminal，仅异步调用）。
@@ -1372,6 +1397,12 @@ func (s *BotService) appendBackgroundResultTx(tx *gorm.DB, runID string, call *m
 // appendBackgroundResultMsgTx 是显式错误码的版本：终态原因不总能用一个
 // error 表达（如平台侧未执行 not_executed），此时直接给错误码与说明。
 func (s *BotService) appendBackgroundResultMsgTx(tx *gorm.DB, runID string, call *model.BotToolCall, status model.BotToolCallStatus, outcome botToolOutcome, errorCode, errorMessage string, effect bool, now time.Time) error {
+	// 事件负载的调用投影一律用事务内重读：调用方传入的内存对象只改了
+	// status，finished_at/error_code/revision 以提交时点的行为准（INT-217）。
+	projection, perr := s.callProjectionTx(tx, call.ID)
+	if perr != nil {
+		return perr
+	}
 	result := botBackgroundResultContent{
 		CallID: call.ID, ToolName: call.ToolName, Action: call.Action,
 		Status: string(status), EffectMayHaveOccurred: effect,
@@ -1423,24 +1454,42 @@ func (s *BotService) appendBackgroundResultMsgTx(tx *gorm.DB, runID string, call
 			"effect_may_have_occurred": effect,
 			// 平台后台结果的完整消息投影：订阅端不靠快照重读也能渲染。
 			"message": botMessageResponseOf(msg),
+			// 完整调用投影（含 revision）嵌在 call 字段：订阅端按 revision
+			// 覆盖调用缓存；顶层保留 web 已消费的字段，避免隐性字段污染。
+			"call": projection,
 		},
 	})
 }
 
-// revertQueuedCall 授权失效时把排队调用退回待确认；事件带完整调用投影，
-// 订阅端合并后立即恢复审批控件，不靠重读。
+// revertQueuedCall 授权失效时把排队调用退回待确认；状态转移、重读与事件
+// 同一事务：事件带提交时点的完整投影与 revision，订阅端合并后立即恢复审批
+// 控件，不靠重读；worker 已并发认领时 CAS 0 行，不回退也不发事件。
 func (s *BotService) revertQueuedCall(call *model.BotToolCall) {
-	ok, err := s.calls.UpdateWhere(call.ID, string(model.BotCallStatusQueued), map[string]interface{}{
-		"status":           model.BotCallStatusPendingConfirmation,
-		"authorization_id": nil,
+	var reverted bool
+	txErr := s.db.Transaction(func(tx *gorm.DB) error {
+		ok, err := repository.NewBotToolCallRepository(tx).UpdateWhereTx(tx, call.ID,
+			string(model.BotCallStatusQueued), map[string]interface{}{
+				"status":           model.BotCallStatusPendingConfirmation,
+				"authorization_id": nil,
+			})
+		if err != nil || !ok {
+			return err
+		}
+		reverted = true
+		projection, perr := s.callProjectionTx(tx, call.ID)
+		if perr != nil {
+			return perr
+		}
+		return s.appendEventTx(tx, call.BotID, nil, call.ID, model.BotEventToolCall, botEventEnvelope{
+			Kind: "tool_call", Phase: "awaiting_confirmation",
+			Payload: *projection,
+		})
 	})
-	if err != nil || !ok {
+	if txErr != nil {
+		s.logger.Warn("回退排队调用失败", zap.String("call_id", call.ID), zap.Error(txErr))
 		return
 	}
-	call.Status = model.BotCallStatusPendingConfirmation
-	call.AuthorizationID = nil
-	s.emitEvent(call.BotID, nil, call.ID, model.BotEventToolCall, botEventEnvelope{
-		Kind: "tool_call", Phase: "awaiting_confirmation",
-		Payload: botToolCallResponseOf(call),
-	})
+	if reverted {
+		s.publishEvent(call.BotID)
+	}
 }
