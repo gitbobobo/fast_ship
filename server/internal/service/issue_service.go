@@ -9,7 +9,6 @@ import (
 
 	"github.com/godbobo/fast_ship/server/internal/config"
 	"github.com/godbobo/fast_ship/server/internal/forge"
-	"github.com/godbobo/fast_ship/server/internal/githubapi"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	ghclient "github.com/godbobo/fast_ship/server/internal/pkg/github"
 	"github.com/godbobo/fast_ship/server/internal/pkg/storage"
@@ -55,14 +54,14 @@ type IssueService struct {
 	logger              *zap.Logger
 	credentials         *ProjectCredentials
 	newClient           ghclient.ClientFactory
-	// newPRClient 构造关联 PR 读取客户端（attach/sync）；测试注入替身的缝。
-	newPRClient func(token string) githubapi.GitHubClient
+	// newPRClient 构造关联 PR 的中性读取端（attach/sync）；测试注入替身的缝。
+	newPRClient func(token string) pullRequestReader
 	// 关联 PR 的 Forgejo 侧（INT-181）：forgeIntegrationRepo 按主机键查集成，
 	// forgeSource 按集成行现取访问三件套（生产接 ForgeClientSource），
 	// newForgejoPRReader 由三件套组装读取客户端（测试注入替身的缝）。
 	forgeIntegrationRepo *repository.ForgeIntegrationRepository
 	forgeSource          issueForgeSource
-	newForgejoPRReader   func(httpClient *http.Client, apiBase, token string) forgePRReader
+	newForgejoPRReader   func(httpClient *http.Client, apiBase, token string) pullRequestReader
 	mirror               *issueMirror
 	// batchCloseStorer 批量关闭的本地落地注入点（仅测试用，INT-185 R11）；
 	// 生产为 nil，回落到 s.mirror。
@@ -143,12 +142,15 @@ func NewIssueService(
 		newClient: func(token, owner, repo string) ghclient.Client {
 			return ghclient.NewClient(token, owner, repo)
 		},
-		newPRClient: func(token string) githubapi.GitHubClient {
-			return ghclient.NewPRClient(token)
+		// 关联 PR 的 GitHub 读取端走中性适配器：installationID=0 对静态 Token
+		// 客户端无意义（staticTokenAuth.Bearer 忽略安装 id），错误原样透传，
+		// errors.As 仍能命中 *githubapi.StatusError。
+		newPRClient: func(token string) pullRequestReader {
+			return forge.NewGitHubReviewClient(ghclient.NewPRClient(token), 0)
 		},
 		forgeIntegrationRepo: forgeIntegrationRepo,
 		forgeSource:          forgeSource,
-		newForgejoPRReader: func(httpClient *http.Client, apiBase, token string) forgePRReader {
+		newForgejoPRReader: func(httpClient *http.Client, apiBase, token string) pullRequestReader {
 			return forge.NewForgejoReviewClient(httpClient, apiBase, token)
 		},
 	}

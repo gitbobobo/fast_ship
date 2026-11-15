@@ -76,9 +76,11 @@ type issueForgeSource interface {
 // 编译期钉住 ForgeClientSource 满足关联 PR 链路的凭证面。
 var _ issueForgeSource = (*ForgeClientSource)(nil)
 
-// forgePRReader 关联 PR 链路对 Forgejo 平台的最小读取面（INT-181）：forge.ReviewClient
-// 的 GetPullRequest 子集，测试桩不必实现整个审查方法面。
-type forgePRReader interface {
+// pullRequestReader 关联 PR 链路的最小读取面（INT-219 收口）：GitHub 与
+// Forgejo 两侧取数统一返回中性 forge.PullRequest——GitHub 侧由
+// forge.NewGitHubReviewClient 适配用户 Token 的 PRClient，Forgejo 侧由
+// newForgejoPRReader 组装；测试桩只需实现 GetPullRequest 一个方法。
+type pullRequestReader interface {
 	GetPullRequest(ctx context.Context, repoFullName string, number int) (*forge.PullRequest, error)
 }
 
@@ -143,16 +145,17 @@ func (s *IssueService) AttachIssuePullRequest(issueID, userID string, req Attach
 		// synced_at/updated_at 取拉取完成时刻而非请求时刻（INT-175 R12）：
 		// 守卫比较的是「快照新鲜度」，慢拉取不能让实际更新的快照带上更
 		// 旧的时间戳，否则会被并发 sync 的较新写回误拦。
-		applyForgePullRequestData(link, pr, time.Now().UTC())
+		applyPullRequestData(link, pr, time.Now().UTC())
 	default:
-		// GitHub 既有路径原样保留：凭证选择集中在 credentials.pullRequestCredential。
+		// GitHub 既有路径原样保留：凭证选择集中在 credentials.pullRequestCredential，
+		// 中性 reader 把 installationID 收进适配器（静态 Token 客户端忽略它）。
 		link.Provider = model.IssuePullRequestProviderGitHub
 		link.RepoFullName = parsed.Owner + "/" + parsed.Repo
-		client, credKind, err := s.pullRequestClient(project)
+		reader, credKind, err := s.pullRequestClient(project)
 		if err != nil {
 			return nil, err
 		}
-		pr, err := client.GetPullRequest(ctx, 0, link.RepoFullName, parsed.Number)
+		pr, err := reader.GetPullRequest(ctx, link.RepoFullName, parsed.Number)
 		if err != nil {
 			return nil, errs.New(errs.ErrGitHubAPI.Code, fmt.Sprintf("获取 GitHub PR 失败（%s）: %v%s", credKind.usage(), err, pullRequestAccessHint(err, credKind)))
 		}
@@ -254,7 +257,7 @@ func (s *IssueService) SyncIssuePullRequests(ctx context.Context, issueID, userI
 		return result, nil
 	}
 
-	clients := make(map[string]githubapi.GitHubClient)
+	clients := make(map[string]pullRequestReader)
 	clientKinds := make(map[string]pullRequestCredentialKind)
 	clientErrs := make(map[string]error)
 	// forgejo 行按「集成快照 id」缓存单次读取的访问面（客户端+主机快照，
@@ -301,17 +304,17 @@ func (s *IssueService) SyncIssuePullRequests(ctx context.Context, issueID, userI
 				if err != nil {
 					return err
 				}
-				applyForgePullRequestData(l, pr, time.Now().UTC())
+				applyPullRequestData(l, pr, time.Now().UTC())
 				return nil
 			}
 		case model.IssuePullRequestProviderGitHub:
-			client, credKind, err := pullRequestSyncClient(resolved, clients, clientKinds, clientErrs, project, link)
+			reader, credKind, err := pullRequestSyncClient(resolved, clients, clientKinds, clientErrs, project, link)
 			if err != nil {
 				markFailed(i, pullRequestSyncFailure(link, resolveFailureText(s, ctx, resolveCtx, err, false)))
 				continue
 			}
 			fetchers[i] = func(ctx context.Context, l *model.IssuePullRequest) error {
-				pr, err := client.GetPullRequest(ctx, 0, l.RepoFullName, l.Number)
+				pr, err := reader.GetPullRequest(ctx, l.RepoFullName, l.Number)
 				if err != nil {
 					return fmt.Errorf("拉取失败（%s）: %w%s", credKind.usage(), err, pullRequestAccessHint(err, credKind))
 				}
@@ -509,7 +512,7 @@ func resolveFailureText(s *IssueService, reqCtx, resolveCtx context.Context, err
 // pullRequestSyncClient 按 repo 复用/缓存客户端；构造错误同样按 repo 缓存，
 // 让同 repo 的后续行各自记一条失败而不是重复构造。凭证来源随客户端一并返回
 // 并缓存（构造失败时也缓存），供每行失败文案标明本次用的是哪种凭证。
-func pullRequestSyncClient(s *IssueService, clients map[string]githubapi.GitHubClient, clientKinds map[string]pullRequestCredentialKind, clientErrs map[string]error, project *model.Project, link *model.IssuePullRequest) (githubapi.GitHubClient, pullRequestCredentialKind, error) {
+func pullRequestSyncClient(s *IssueService, clients map[string]pullRequestReader, clientKinds map[string]pullRequestCredentialKind, clientErrs map[string]error, project *model.Project, link *model.IssuePullRequest) (pullRequestReader, pullRequestCredentialKind, error) {
 	if client, ok := clients[link.RepoFullName]; ok {
 		return client, clientKinds[link.RepoFullName], nil
 	}
@@ -589,7 +592,7 @@ func (s *IssueService) loadIssueAndProject(ctx context.Context, issueID, userID 
 // pullRequestClient 为 attach/sync 构造 PR 读取客户端，并返回本次使用的凭证来源。
 // 凭证选择集中在 credentials.pullRequestCredential：已配代码仓库 Token 只用它，
 // 未配则匿名读公共 PR，不借公开仓库 Token；解密失败报错不降级。
-func (s *IssueService) pullRequestClient(project *model.Project) (githubapi.GitHubClient, pullRequestCredentialKind, error) {
+func (s *IssueService) pullRequestClient(project *model.Project) (pullRequestReader, pullRequestCredentialKind, error) {
 	tokenBytes, kind, appErr := s.credentials.pullRequestCredential(project)
 	if appErr != nil {
 		return nil, kind, appErr
@@ -714,7 +717,7 @@ func (s *IssueService) forgejoIntegrationForProject(project *model.Project, host
 // forgejoSyncAccess 一次读取集成行得到的同步访问面：host 校验与 PR 取数用
 // 同一份集成行数据——不存在「校验用旧行、取数用新行」的竞态窗口（R8）。
 type forgejoSyncAccess struct {
-	reader  forgePRReader
+	reader  pullRequestReader
 	hostKey string
 }
 
@@ -848,53 +851,13 @@ func isGitHubPathName(s string) bool {
 	return s != "" && !strings.HasPrefix(s, ".") && !strings.HasSuffix(s, ".")
 }
 
-// applyPullRequestData 把 GitHub PR 详情刷进关联行（状态与合并时间一并重置，closed→open 复活也能纠正回来）。
-// repo_full_name 归一到 GitHub 返回的 canonical 名——GitHub 仓库名不区分大小写，
-// 但唯一索引区分，直接用 URL 原文会让 Owner/Repo 与 owner/repo 落成两行。
-func applyPullRequestData(link *model.IssuePullRequest, pr *githubapi.PullRequest, now time.Time) {
-	if pr.RepoFullName != "" {
-		link.RepoFullName = pr.RepoFullName
-	}
-	link.Title = pr.Title
-	if pr.HTMLURL != "" {
-		link.HTMLURL = pr.HTMLURL
-	}
-	link.State = pullRequestStateFromGitHub(pr)
-	link.IsDraft = pr.Draft
-	link.AuthorLogin = pr.AuthorLogin
-	link.HeadRef = pr.HeadRef
-	link.BaseRef = pr.BaseRef
-	link.MergedAt = nil
-	if pr.MergedAt != nil {
-		mergedAt := pr.MergedAt.UTC()
-		link.MergedAt = &mergedAt
-	}
-	link.ClosedAt = nil
-	if pr.ClosedAt != nil {
-		closedAt := pr.ClosedAt.UTC()
-		link.ClosedAt = &closedAt
-	}
-	link.SyncedAt = now
-	link.UpdatedAt = now
-}
-
-// pullRequestStateFromGitHub 映射 PR 状态：GitHub closed 且 merged_at 非空视为 merged。
-func pullRequestStateFromGitHub(pr *githubapi.PullRequest) model.IssuePullRequestState {
-	if pr.State != "closed" {
-		return model.IssuePullRequestStateOpen
-	}
-	if pr.MergedAt != nil {
-		return model.IssuePullRequestStateMerged
-	}
-	return model.IssuePullRequestStateClosed
-}
-
-// applyForgePullRequestData 把 Forgejo PR 详情刷进关联行，字段口径与
-// applyPullRequestData 一致（状态与合并时间一并重置，closed→open 复活也能纠
-// 正回来）：repo_full_name 归一到平台返回的 canonical 名（base 仓库 full_name），
-// 状态按 State/Merged 映射。集成快照不在此重写——sync 按关联行已有的
+// applyPullRequestData 把中性 PR 详情刷进关联行（INT-219 收口后 GitHub/Forgejo
+// 共用一份；状态与合并时间一并重置，closed→open 复活也能纠正回来）。
+// repo_full_name 归一到平台返回的 canonical 名（base 仓库 full_name）——GitHub
+// 仓库名不区分大小写，但唯一索引区分，直接用 URL 原文会让 Owner/Repo 与
+// owner/repo 落成两行。集成快照不在此重写——sync 按关联行已有的
 // ForgeIntegrationID 重建客户端。
-func applyForgePullRequestData(link *model.IssuePullRequest, pr *forge.PullRequest, now time.Time) {
+func applyPullRequestData(link *model.IssuePullRequest, pr *forge.PullRequest, now time.Time) {
 	if pr.RepoFullName != "" {
 		link.RepoFullName = pr.RepoFullName
 	}
@@ -902,7 +865,7 @@ func applyForgePullRequestData(link *model.IssuePullRequest, pr *forge.PullReque
 	if pr.HTMLURL != "" {
 		link.HTMLURL = pr.HTMLURL
 	}
-	link.State = pullRequestStateFromForge(pr)
+	link.State = pullRequestState(pr)
 	link.IsDraft = pr.Draft
 	link.AuthorLogin = pr.AuthorLogin
 	link.HeadRef = pr.HeadRef
@@ -921,11 +884,11 @@ func applyForgePullRequestData(link *model.IssuePullRequest, pr *forge.PullReque
 	link.UpdatedAt = now
 }
 
-// pullRequestStateFromForge 映射 PR 状态：Forgejo 的 closed 且平台标记合并
-// （merged=true 或 merged_at 非空，历史/异常快照两者可能缺一）视为 merged——
-// 与 pullRequestStateFromGitHub 的 closed+merged_at 口径对齐，避免「平台已标
-// merged 但 merged_at 缺失」的老数据永久显示 closed。
-func pullRequestStateFromForge(pr *forge.PullRequest) model.IssuePullRequestState {
+// pullRequestState 映射 PR 状态：closed 且平台标记合并（merged=true 或
+// merged_at 非空，历史/异常快照两者可能缺一）视为 merged——merged 标记由各
+// 平台适配器归一进中性类型，避免「平台已标 merged 但 merged_at 缺失」的老
+// 数据永久显示 closed。
+func pullRequestState(pr *forge.PullRequest) model.IssuePullRequestState {
 	if pr.State != "closed" {
 		return model.IssuePullRequestStateOpen
 	}

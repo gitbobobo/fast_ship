@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/config"
-	"github.com/godbobo/fast_ship/server/internal/githubapi"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	"go.uber.org/zap"
@@ -164,7 +163,7 @@ func TestAttachPullRequest_CorruptTokenDoesNotFallBackToAnonymous(t *testing.T) 
 	})
 	issue := createInternalTestIssue(t, svc.db, project.ID)
 
-	svc.issueService.newPRClient = func(string) githubapi.GitHubClient {
+	svc.issueService.newPRClient = func(string) pullRequestReader {
 		t.Fatalf("github client must not be built when token decryption fails")
 		return nil
 	}

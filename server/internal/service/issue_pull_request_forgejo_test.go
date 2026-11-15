@@ -55,7 +55,7 @@ func (f *fakeForgejoPRReader) GetPullRequest(_ context.Context, repoFullName str
 func stubForgejoPRReader(t *testing.T, svc *testServices, wantBase, wantToken string) *fakeForgejoPRReader {
 	t.Helper()
 	reader := &fakeForgejoPRReader{}
-	svc.issueService.newForgejoPRReader = func(_ *http.Client, apiBase, token string) forgePRReader {
+	svc.issueService.newForgejoPRReader = func(_ *http.Client, apiBase, token string) pullRequestReader {
 		reader.built++
 		reader.lastBase, reader.lastToken = apiBase, token
 		if wantBase != "" && apiBase != wantBase {
@@ -250,7 +250,7 @@ func TestIssueServiceAttachPullRequest_ForgejoIntegrationMissing(t *testing.T) {
 	project := createTestProject(t, svc.db, user.ID)
 	issue := createTestIssue(t, svc.db, project.ID)
 
-	svc.issueService.newForgejoPRReader = func(*http.Client, string, string) forgePRReader {
+	svc.issueService.newForgejoPRReader = func(*http.Client, string, string) pullRequestReader {
 		t.Fatalf("forgejo reader must not be built without integration")
 		return nil
 	}
@@ -282,7 +282,7 @@ func TestIssueServiceAttachPullRequest_ForgejoProjectNotBound(t *testing.T) {
 	issue := createTestIssue(t, svc.db, project.ID)
 	createForgejoIntegrationRow(t, svc.db, "fj-1", "https://forge.example.com", "fj-pat")
 
-	svc.issueService.newForgejoPRReader = func(*http.Client, string, string) forgePRReader {
+	svc.issueService.newForgejoPRReader = func(*http.Client, string, string) pullRequestReader {
 		t.Fatalf("forgejo reader must not be built for unbound project")
 		return nil
 	}
@@ -750,10 +750,9 @@ func TestIssueServiceForgejoIntegrationIDForHost_EmptyKeyRejected(t *testing.T) 
 	}
 }
 
-// 状态映射与 GitHub 同口径：closed 且 merged_at 非空才标 merged，
-// closed 但缺 merged_at（平台异常快照）按 closed 落，不给 OpenAPI 承诺外的
-// 「merged 且 merged_at 为空」组合。
-func TestPullRequestStateFromForge(t *testing.T) {
+// 状态映射双平台共用（INT-219 收口）：closed 且平台标记合并（merged=true
+// 或 merged_at 非空，历史/异常快照两者可能缺一）即标 merged。
+func TestPullRequestState(t *testing.T) {
 	mergedAt := time.Now().UTC()
 	cases := []struct {
 		name string
@@ -767,7 +766,7 @@ func TestPullRequestStateFromForge(t *testing.T) {
 		{name: "closed 未合并", pr: forge.PullRequest{State: "closed", Merged: false, ClosedAt: &mergedAt}, want: model.IssuePullRequestStateClosed},
 	}
 	for _, tc := range cases {
-		if got := pullRequestStateFromForge(&tc.pr); got != tc.want {
+		if got := pullRequestState(&tc.pr); got != tc.want {
 			t.Fatalf("%s: state = %v, want %v", tc.name, got, tc.want)
 		}
 	}
