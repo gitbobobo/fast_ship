@@ -20,7 +20,7 @@ import (
 // WS 订阅连接，把原来每个请求一次的全量 shell 快照拉取摊销成常驻订阅 +
 // 增量推送；归档面自 INT-173 起改为按需一次性快照——上游 #26238 删除了
 // orchestration.subscribeArchivedShell，官方客户端已改用
-// getArchivedShellSnapshot（见 t3ShellEntry 的 arch* 字段与 t3ArchiveFetchState）。
+// getArchivedShellSnapshot（簿记字段已并入 t3ShellState 的 s.mu，INT-216）。
 // 旧上游（#26238 之前）归档面只有常驻 subscribeArchivedShell：按需快照
 // 首次读取被判方法拒绝（确定性 Exit Failure）时，entry 永久切到回退的
 // 常驻订阅路径（见 t3_shell_archive.go 的 mode 判定与
@@ -444,14 +444,17 @@ func (h *t3ShellHub) newEntryLocked(key string, env *model.T3Environment, token 
 		configRevision: env.ConfigRevision,
 		fingerprint:    t3ShellFingerprint(env.Address, token),
 		// 连接目标与指纹用同一规范化地址，避免结尾斜杠让 WS 路径拼出 //ws。
-		address:           t3ShellNormalizedAddress(env.Address),
-		token:             token,
-		state:             newT3ShellState(),
-		notify:            make(chan struct{}),
-		activeConn:        t3ShellConnConnecting,
-		archTTL:           h.cfg.ArchiveTTL,
-		archiveStaleGrace: h.cfg.ArchiveStaleGrace,
-		legacyCh:          make(chan struct{}, 1),
+		address: t3ShellNormalizedAddress(env.Address),
+		token:   token,
+		state: func() *t3ShellState {
+			st := newT3ShellState()
+			st.archiveTTL = h.cfg.ArchiveTTL
+			st.archiveStaleGrace = h.cfg.ArchiveStaleGrace
+			return st
+		}(),
+		notify:     make(chan struct{}),
+		activeConn: t3ShellConnConnecting,
+		legacyCh:   make(chan struct{}, 1),
 		// 缓冲 1：信号丢失/重复都无害（读循环消费前再核对 state 备忘，
 		// 见 readArchiveLegacyLoop 的 legacyReconnect 分支）。
 		legacyReconnect: make(chan struct{}, 1),
@@ -475,8 +478,8 @@ func (h *t3ShellHub) newEntryLocked(key string, env *model.T3Environment, token 
 		defer e.wg.Done()
 		// 停泊与激活由监督循环首部的 mode 闸门承担（waitArchiveLegacyActive）：
 		// mode=Unknown 期间停在 legacyCh 上（不占连接、不打上游），
-		// switchToArchiveLegacy 放行；自愈回 Unknown 后闸门重新停泊，可重复
-		// 激活。entry 停/hub 关时闸门退出，goroutine 随之结束。
+		// EndFetch 的 ActivateLegacy 效果放行；自愈回 Unknown 后闸门重新
+		// 停泊，可重复激活。entry 停/hub 关时闸门退出，goroutine 随之结束。
 		h.runArchiveLegacySubscription(e)
 	}()
 	// 归档面首次拉取随 entry 建立并行预热（R18 P2）：按需快照只在读路径
@@ -547,14 +550,6 @@ type t3ShellEntry struct {
 	obsConn      t3ShellConnState
 	lastSyncedAt time.Time
 
-	// archTTL 归档快照缓存有效期（取自 hub 配置，entry 建立后不变）。
-	archTTL time.Duration
-	// archiveStaleGrace TTL 过期后的宽限期（R16 P2-2）：见配置字段注释。
-	archiveStaleGrace time.Duration
-	// arch 是归档按需快照的簿记（TTL/失败冷却/在途合并），见
-	// t3_shell_archive.go——并发读由 arch.inFlight 哨兵合并成一次上游调用。
-	arch t3ArchiveFetchState
-
 	// 已发布的事件状态缓存（INT-132）：publishStateIfChanged 在 entry 锁内
 	// 比较，只有翻转才对外发布；errText 一并缓存，stale/failed 下失败原因
 	// 的变化（如「网络不可达」→「凭证被拒」）对用户是不同的提示，也要触发。
@@ -573,11 +568,11 @@ type t3ShellEntry struct {
 
 	// legacyCh 是旧面归档订阅 goroutine 的激活信号（缓冲 1，非阻塞发送）：
 	// entry 创建时监督循环停在 mode 闸门上（不占连接、不打上游）；按需快照
-	// 被判「方法明确拒绝」后 switchToArchiveLegacy 发信号放行；自愈回
-	// Unknown 后再次切换时重复发信号、重复放行。信号只是唤醒——闸门醒来
-	// 复核 mode 现值，多余的信号留在缓冲里无害。用 channel 而不是「发现失
-	// 败时直接 go」——entry 创建时 wg.Add 已完成，中途 Add 会与 done 观察者
-	// 的 Wait 竞态（sync 文档禁止）。
+	// 被判「方法明确拒绝」后由 runEffects 的 ActivateLegacy 发信号放行；
+	// 自愈回 Unknown 后再次切换时重复发信号、重复放行。信号只是唤醒——
+	// 闸门醒来复核 mode 现值，多余的信号留在缓冲里无害。用 channel 而不是
+	// 「发现失败时直接 go」——entry 创建时 wg.Add 已完成，中途 Add 会与
+	// done 观察者的 Wait 竞态（sync 文档禁止）。
 	legacyCh chan struct{}
 
 	// legacyReconnect 是旧面归档订阅的「请重建连接」信号：写后失效在订阅
@@ -643,7 +638,7 @@ func (e *t3ShellEntry) isStopped() bool {
 // refreshLocked 在活跃面可信标记或连接状态变化时更新观察值并广播（关闭并
 // 替换 notify）。调用方持有 entry 锁。
 func (e *t3ShellEntry) refreshLocked() {
-	st := e.state.status()
+	st := e.state.Status()
 	changed := false
 	if st.ActiveReady != e.obsReady {
 		e.obsReady = st.ActiveReady
@@ -701,7 +696,7 @@ func (e *t3ShellEntry) refresh() {
 // 保证对「当前状态」的判定永不漂移；事件发布每帧都跑，绝不能为此整份拷贝
 // 快照。调用方持有 entry 锁。
 func (e *t3ShellEntry) stateLocked() t3ShellViewState {
-	st := e.state.status()
+	st := e.state.Status()
 	switch {
 	case !st.ActiveReady:
 		if e.activeConn == t3ShellConnFailed {
@@ -742,7 +737,7 @@ func (e *t3ShellEntry) viewLocked() *t3ShellView {
 	case t3ShellFailed:
 		view.Err = e.activeErr
 	case t3ShellStale:
-		view.Snaps = e.state.snapshots()
+		view.Snaps = e.state.Snapshots()
 		view.Err = e.activeErr
 		if !e.lastSyncedAt.IsZero() {
 			view.SyncedAgo = time.Since(e.lastSyncedAt)
@@ -750,7 +745,7 @@ func (e *t3ShellEntry) viewLocked() *t3ShellView {
 	default:
 		// Ready：带快照；Syncing：无数据。
 		if view.State == t3ShellReady {
-			view.Snaps = e.state.snapshots()
+			view.Snaps = e.state.Snapshots()
 		}
 	}
 	return view
@@ -767,7 +762,7 @@ func (e *t3ShellEntry) waitView(ctx context.Context) (*t3ShellView, error) {
 		e.kickArchiveRefresh()
 		e.mu.Lock()
 		view := e.viewLocked()
-		hasAuthority := e.state.status().ActiveReady
+		hasAuthority := e.state.Status().ActiveReady
 		firstFailed := !hasAuthority && e.activeConn == t3ShellConnFailed
 		stopped := e.isStopped()
 		notifyCh := e.notify
@@ -955,9 +950,9 @@ func (h *t3ShellHub) connectFaceOnce(e *t3ShellEntry, archived bool) t3ShellConn
 	if e.forceResyncPending() {
 		// 置位时已未追平，这里再显式清一次：任何交错都不得把旧缓存
 		// 在权威快照到达前当成可信。
-		e.state.markActiveSynced(false)
+		e.state.MarkActiveSynced(false)
 		e.refresh()
-	} else if st := e.state.status(); st.ActiveReady {
+	} else if st := e.state.Status(); st.ActiveReady {
 		if wantMarker {
 			// 有完成标记能力才带游标恢复：上游会在回放之后发
 			// synchronized，我们据此确认追平。
@@ -969,7 +964,7 @@ func (h *t3ShellHub) connectFaceOnce(e *t3ShellEntry, archived bool) t3ShellConn
 		// （退回权威全量）：没有任何新数据就宣称追平会把旧缓存当成可信
 		// 运行态，违反「陈旧快照不得当作可信」——官方客户端的新 session
 		// 也是先加载权威快照、失败才退回全量，而不是直接沿用上一会话缓存。
-		e.state.markActiveSynced(false)
+		e.state.MarkActiveSynced(false)
 		e.refresh()
 	}
 	if wantMarker {
@@ -1094,7 +1089,7 @@ func (h *t3ShellHub) readStreamLoop(e *t3ShellEntry, session *t3RPCSession, conn
 			// 就置强制全量重同步并结束本连接；已追平（标记或权威帧已到）
 			// 则撤销等待，后续只做保活。
 			if !markerDeadline.IsZero() && time.Now().After(markerDeadline) {
-				if st := e.state.status(); !st.ActiveSynced {
+				if st := e.state.Status(); !st.ActiveSynced {
 					e.setForceResync()
 					h.endFaceConnection(e, archived, fmt.Errorf("未在预算内等到 synchronized 标记，改走强制全量重同步"))
 					return t3ShellConnResult{credential: credential, syncedAt: e.syncConfirmedAt()}
@@ -1127,9 +1122,10 @@ func (h *t3ShellHub) readStreamLoop(e *t3ShellEntry, session *t3RPCSession, conn
 // 得上最近一次真实失败原因。err 为 nil（停机取消）时记「未就绪」而不抹
 // 掉既有失败原因。
 func (h *t3ShellHub) endFaceConnection(e *t3ShellEntry, archived bool, connErr error) {
-	if archived && e.archiveLegacyActive() {
-		e.state.markArchiveFailed(connErr)
-		h.publishArchiveFaceEvent(e, false)
+	if archived {
+		// legacy 把关收进状态机（审修 R9 P2-1）：LegacyEnded 只在 legacy
+		// 模式下清表 + ArchiveErr，残余的非 legacy 连接终止是 no-op。
+		h.runEffects(e, e.state.LegacyEnded(connErr))
 	}
 	e.noteConnState(archived, t3ShellConnFailed, connErr)
 	if connErr != nil {
@@ -1183,76 +1179,42 @@ func (e *t3ShellEntry) syncConfirmedAt() time.Time {
 // 且 ArchiveErr 仍 nil，最长一个 TTL 内 wait 误判 thread_gone。因此用
 // defer 兜住所有返回路径：帧级记下 leftActiveFace 即失效。
 func (h *t3ShellHub) applyActiveValues(e *t3ShellEntry, values []json.RawMessage) error {
-	batch := t3ShellEventBatch{}
-	// removedIDs 是**确实从活跃面移走**的线程（由 state 判定并返回，R9 噪声
-	// 过滤的真实链路）：只有它们需要等归档对账。armedRegisteredIDs 是其中
-	// 「已在应用移除的同一临界区登记过」的部分（R7/R8），帧后回调不再重复登记。
-	removedIDs := make([]string, 0, 1)
-	armedRegisteredIDs := make([]string, 0, 1)
-	// provenIDs 是「帧自身带着归档行、且归档面已有该行」的 ID（#156 R13-codex）：
-	// state 在应用帧时就判定无需对账，帧后回调必须尊重这个结论——否则会给
-	// 它重新登记、把一条已有归档据的线程白降级一个宽限窗口。
-	provenIDs := make([]string, 0, 1)
-	// hadUncertain 记录本批之前是否有待对账（#156 R33）：解账可能只由
-	// thread.updated(location=active)/活跃快照触发，那时 removedIDs 是空的，
-	// 不能拿「本批有移除」当发布条件。
-	hadUncertain := e.state.pendingArchiveUncertain() > 0
-	// leftActiveFace 只表示「本批出现过离开活跃面的帧」，用于按需快照模式的
-	// 缓存失效（噪声帧多失效一次只是多付一次快照，不影响可信度语义）。
-	leftActiveFace := false
-	defer func() {
-		if leftActiveFace {
-			h.invalidateArchiveEntryAfterActiveRemoval(e, removedIDs, armedRegisteredIDs, provenIDs)
-		}
-	}()
+	// 逐帧解码在前：解码失败的帧不进入状态机，但解码成功的部分仍按批应用
+	// ——失效以 Chunk 为单位且出错也要执行（R15 P2）：已应用帧造成的移除
+	// 随 ApplyActive 返回的 Effects 落地，不因后续帧坏而漏失效。
+	items := make([]t3ShellStreamItem, 0, len(values))
+	var decodeErr error
 	for _, raw := range values {
 		var item t3ShellStreamItem
 		if err := json.Unmarshal(raw, &item); err != nil {
-			return fmt.Errorf("活跃流帧解析失败: %w", err)
+			decodeErr = fmt.Errorf("活跃流帧解析失败: %w", err)
+			break
 		}
-		removed, armedRegistered, proven, err := e.state.applyActiveItemDetailed(item)
-		if err != nil {
-			return err
-		}
-		// 线程离开活跃面即归档集可能变了（见函数头）：增量帧的 removal 由
-		// hub 按帧型判定；全量快照整体替换的移除由 state 在同一临界区内算
-		// 出并返回，两边一并失效归档缓存。
-		// 逐个记下离开活跃面的线程 ID：订阅模式下要按 ID 等归档增量对账
-		// （跟进 PR② / #156 R1），无关线程的增量不能替它们恢复可信。
-		if len(removed) > 0 {
-			removedIDs = append(removedIDs, removed...)
-			if armedRegistered {
-				armedRegisteredIDs = append(armedRegisteredIDs, removed...)
-			}
-			// proven 只认 state 的结论（#156 R14）：帧型 + armed 推断会误判
-			// 「帧在 arm 之前应用」的情形，把排队的归档增量跳过。
-			if len(proven) > 0 {
-				provenIDs = append(provenIDs, proven...)
-			}
-			leftActiveFace = true
-		}
-		switch {
-		case item.Kind == "thread.removed", item.Kind == "thread.updated" && item.Location != "active":
-			// 离开活跃面的帧一律触发缓存失效判定；登记只认 state 返回的
-			// 「确实移走」的 ID（removedIDs，见上）。
-			leftActiveFace = true
-		}
-		batch.observeActive(&item)
+		items = append(items, item)
+	}
+	// 移除→待对账/失效、撤可信、发布与到期排程全部由状态机在同一临界区内
+	// 完成（INT-216）：「活跃面已删、归档面尚未失效」的可读窗口不复存在；
+	// legacy 模式的待对账登记与模式判定也不可分（armed ≡ legacy，原
+	// R7/R8 帧后补登记在新模型下无对应竞态）。调用方只执行返回的
+	// Effects。
+	eff, applyErr := e.state.ApplyActive(items)
+	h.runEffects(e, eff)
+	if decodeErr != nil {
+		return decodeErr
+	}
+	if applyErr != nil {
+		return applyErr
+	}
+	batch := t3ShellEventBatch{}
+	for i := range items {
+		batch.observeActive(&items[i])
 		// 权威全量快照落地（无 enrichment 标记）→ 强制重同步要求到此结束。
 		// 元数据帧不算：它不是权威数据。
-		if item.Kind == "snapshot" && item.Snapshot != nil && len(item.ResolvedRepositoryIdentityRoots) == 0 {
+		if items[i].Kind == "snapshot" && items[i].Snapshot != nil && len(items[i].ResolvedRepositoryIdentityRoots) == 0 {
 			e.clearForceResync()
 		}
 	}
 	h.publishThreadEvent(e, batch.ids, batch.full)
-	// 活跃面回现（location=active / 活跃快照带回）会直接解账并把 archiveErr 从
-	// stale 清成 nil（#156 R32）：这条翻转也必须经过统一发布口同步宣布基准，
-	// 否则 archAnnounced 停在 stale，下一次登记在归档行集合未变时会被指纹判
-	// 「无新话可说」而不发降级事件。只在「待对账被清空」时调用，避免无翻转的
-	// 批次产生多余事件；指纹去重再兜一层。
-	if hadUncertain && e.state.pendingArchiveUncertain() == 0 {
-		h.publishArchiveFaceEvent(e, false)
-	}
 	return nil
 }
 
