@@ -137,61 +137,6 @@ func (s *t3RPCSession) callInspect(ctx context.Context, method string, payload a
 	}
 }
 
-// callFirstChunkValue 订阅一个流式方法，把第一个 Chunk 的每个 value 交给 handle，
-// handle 返回 stop 后发送 Interrupt 并结束。handle 遇到的第一个错误优先返回；
-// Ack/Interrupt 等 I/O 失败只在没有业务错误可报时向上传播——连接层失败不掩盖
-// handle 给出的真实原因。读路径不包 rpcUncertainError：流式订阅是查询面，
-// 没有「远端副作用已发生但结果不可见」的问题需要分类（INT-170）。
-func (s *t3RPCSession) callFirstChunkValue(ctx context.Context, method string, payload any, handle func(value json.RawMessage) (stop bool, err error)) error {
-	id := s.nextID
-	s.nextID++
-	defer s.closeOnCancel(ctx)()
-	if err := s.sendRequest(ctx, id, method, payload); err != nil {
-		return err
-	}
-	var handleErr error
-	for {
-		frame, err := s.readFrame(ctx)
-		if err != nil {
-			if handleErr != nil {
-				return handleErr
-			}
-			return err
-		}
-		if frame.isExitFor(id) {
-			if _, err := frame.exitValue(); err != nil && handleErr == nil {
-				return err
-			}
-			return handleErr
-		}
-		if !frame.isChunkFor(id) {
-			continue
-		}
-		stop := false
-		for _, value := range frame.Values {
-			if s, err := handle(value); err != nil {
-				if handleErr == nil {
-					handleErr = err
-				}
-				stop = true
-				break
-			} else if s {
-				stop = true
-				break
-			}
-		}
-		if err := s.sendAck(ctx, id); err != nil && handleErr == nil {
-			handleErr = err
-		}
-		if stop {
-			if err := s.sendInterrupt(ctx, id); err != nil && handleErr == nil {
-				handleErr = err
-			}
-			return handleErr
-		}
-	}
-}
-
 func (s *t3RPCSession) sendRequest(ctx context.Context, id int, method string, payload any) error {
 	frame := rpcRequestFrame{Tag: "Request", ID: id, Method: method, Payload: payload, Headers: []any{}}
 	data, err := json.Marshal(frame)
@@ -206,10 +151,6 @@ func (s *t3RPCSession) sendRequest(ctx context.Context, id int, method string, p
 
 func (s *t3RPCSession) sendAck(ctx context.Context, requestID any) error {
 	return s.sendRaw(ctx, map[string]any{"_tag": "Ack", "requestId": requestID})
-}
-
-func (s *t3RPCSession) sendInterrupt(ctx context.Context, requestID any) error {
-	return s.sendRaw(ctx, map[string]any{"_tag": "Interrupt", "requestId": requestID, "interruptors": []any{}})
 }
 
 func (s *t3RPCSession) sendRaw(ctx context.Context, msg any) error {
