@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strings"
 	"sync"
 	"time"
 
@@ -16,7 +15,6 @@ import (
 	ghclient "github.com/godbobo/fast_ship/server/internal/pkg/github"
 	"github.com/godbobo/fast_ship/server/internal/pkg/storage"
 	"github.com/godbobo/fast_ship/server/internal/repository"
-	gh "github.com/google/go-github/v62/github"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
@@ -401,7 +399,7 @@ func (s *ShipService) recordFailure(version *model.Version, stage model.ShipStag
 
 func (s *ShipService) describeGitHubRepositoryAccessError(project *model.Project, err error) string {
 	switch {
-	case isGitHubPATAccessError(err):
+	case ghclient.IsPATAccessError(err):
 		return fmt.Sprintf(
 			"当前 GitHub Token 无权访问仓库 %s/%s。Fine-grained Token 请确认 Resource owner 为 %s、Repository access 包含该仓库，并授予 Contents: Read and write；Classic Token 请确认包含 repo scope。",
 			project.GithubOwner,
@@ -418,7 +416,7 @@ func (s *ShipService) describeGitHubRepositoryAccessError(project *model.Project
 }
 
 func (s *ShipService) describeGitHubOperationError(project *model.Project, err error) string {
-	if isGitHubPATAccessError(err) {
+	if ghclient.IsPATAccessError(err) {
 		return fmt.Sprintf(
 			"GitHub Token 无权操作仓库 %s/%s。Fine-grained Token 请确认 Resource owner 为 %s、Repository access 包含该仓库，并授予 Contents: Read and write；Classic Token 请确认包含 repo scope。",
 			project.GithubOwner,
@@ -434,18 +432,7 @@ func (s *ShipService) describeGitHubOperationError(project *model.Project, err e
 	return err.Error()
 }
 
-func isGitHubPATAccessError(err error) bool {
-	var errResp *gh.ErrorResponse
-	if errors.As(err, &errResp) {
-		if errResp.Response != nil && errResp.Response.StatusCode == 403 {
-			return strings.Contains(strings.ToLower(errResp.Message), "resource not accessible by personal access token")
-		}
-	}
-
-	return strings.Contains(strings.ToLower(err.Error()), "resource not accessible by personal access token")
-}
-
 func isGitHubStatus(err error, statusCode int) bool {
-	var errResp *gh.ErrorResponse
-	return errors.As(err, &errResp) && errResp.Response != nil && errResp.Response.StatusCode == statusCode
+	status, ok := ghclient.ErrorStatus(err)
+	return ok && status == statusCode
 }

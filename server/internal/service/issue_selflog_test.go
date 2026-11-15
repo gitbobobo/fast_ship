@@ -9,7 +9,6 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	ghclient "github.com/godbobo/fast_ship/server/internal/pkg/github"
-	gh "github.com/google/go-github/v62/github"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
@@ -28,20 +27,19 @@ func TestIssueServiceCreateGitHubIssue_LogsCarryUserID(t *testing.T) {
 	now := time.Now().UTC()
 	fake := &fakeIssueGitHubClient{
 		createdIssue: &ghclient.Issue{
-			Issue: gh.Issue{
-				ID:                int64Ptr(201),
-				Number:            intPtr(88),
-				State:             stringPtr("open"),
-				Title:             stringPtr("GitHub 新建问题"),
-				Body:              stringPtr("GitHub 问题描述"),
-				HTMLURL:           stringPtr("https://github.com/owner/repo/issues/88"),
-				User:              &gh.User{Login: stringPtr("alice")},
-				AuthorAssociation: stringPtr("MEMBER"),
-				Labels:            []*gh.Label{},
-				Comments:          intPtr(0),
-				CreatedAt:         &gh.Timestamp{Time: now},
-				UpdatedAt:         &gh.Timestamp{Time: now},
-			},
+			ID:                int64Ptr(201),
+			Number:            intPtr(88),
+			State:             stringPtr("open"),
+			Title:             stringPtr("GitHub 新建问题"),
+			Body:              stringPtr("GitHub 问题描述"),
+			HTMLURL:           stringPtr("https://github.com/owner/repo/issues/88"),
+			User:              &ghclient.User{Login: stringPtr("alice")},
+			AuthorAssociation: stringPtr("MEMBER"),
+			Labels:            []*ghclient.Label{},
+			Comments:          intPtr(0),
+			CreatedAt:         timePtr(now),
+			UpdatedAt:         timePtr(now),
+
 			BodyHTML: stringPtr("<p>GitHub 问题描述</p>"),
 		},
 		// 注入时间线拉取失败，触发 sync timeline 降级日志。

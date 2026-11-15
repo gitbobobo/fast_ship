@@ -191,6 +191,17 @@ func toJSONString(v any) string {
 	return string(data)
 }
 
+// rawJSONString 优先写领域对象解码时保留在 Raw 上的完整 GitHub 原始载荷：
+// 取证列要存未映射字段，时间线 PayloadJSON 里的 html_url 供前端生成
+// 「复制 GitHub 深链接」。测试替身手工构造的对象没有 Raw，回退到领域
+// 字段序列化。
+func rawJSONString(v any, raw json.RawMessage) string {
+	if len(raw) > 0 {
+		return string(raw)
+	}
+	return toJSONString(v)
+}
+
 func parseJSON[T any](raw string) T {
 	var target T
 	if strings.TrimSpace(raw) == "" {

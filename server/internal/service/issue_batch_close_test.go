@@ -47,7 +47,7 @@ func seedGitHubDoneIssuesForBatchClose(t *testing.T, svc *testServices, projectI
 		item := testGitHubSyncIssue(m.GitHubIssueID, m.Number, closedAt)
 		item.State = stringPtr("closed")
 		item.StateReason = stringPtr("completed")
-		item.ClosedAt = &gh.Timestamp{Time: closedAt}
+		item.ClosedAt = timePtr(closedAt)
 		fake.updatedIssuesByNumber[m.Number] = item
 	}
 	return metas
@@ -599,7 +599,7 @@ func TestIssueServiceBatchCloseDoneIssues_IssuesDisabledProbeAbortsBatch(t *test
 		errsByNumber[m.Number] = &gh.ErrorResponse{Message: "Not Found", Response: &http.Response{StatusCode: http.StatusNotFound}}
 	}
 	fake.updateIssueErrs = errsByNumber
-	fake.fetchRepositoryRepo = &gh.Repository{HasIssues: gh.Bool(false)}
+	fake.fetchRepositoryRepo = &ghclient.Repository{HasIssues: boolPtr(false)}
 	svc.issueService.newClient = func(token, owner, repo string) ghclient.Client {
 		return fake
 	}
@@ -671,7 +671,7 @@ func TestIssueServiceBatchCloseDoneIssues_Gone410SingleCauseReportsPerItem(t *te
 		errsByNumber[m.Number] = &gh.ErrorResponse{Message: "Gone", Response: &http.Response{StatusCode: http.StatusGone}}
 	}
 	fake.updateIssueErrs = errsByNumber
-	fake.fetchRepositoryRepo = &gh.Repository{HasIssues: gh.Bool(true)}
+	fake.fetchRepositoryRepo = &ghclient.Repository{HasIssues: boolPtr(true)}
 	svc.issueService.newClient = func(token, owner, repo string) ghclient.Client {
 		return fake
 	}
@@ -711,7 +711,7 @@ func TestIssueServiceBatchCloseDoneIssues_SingleCause404ReportsPerItem(t *testin
 		errsByNumber[m.Number] = &gh.ErrorResponse{Message: "Not Found", Response: &http.Response{StatusCode: http.StatusNotFound}}
 	}
 	fake.updateIssueErrs = errsByNumber
-	fake.fetchRepositoryRepo = &gh.Repository{HasIssues: gh.Bool(true)}
+	fake.fetchRepositoryRepo = &ghclient.Repository{HasIssues: boolPtr(true)}
 	svc.issueService.newClient = func(token, owner, repo string) ghclient.Client {
 		return fake
 	}
@@ -1265,7 +1265,7 @@ func TestIsGitHubRateLimitError(t *testing.T) {
 		{"PlainError", errors.New("rate limit exceeded"), false},
 	}
 	for _, tc := range cases {
-		if got := isGitHubRateLimitError(tc.err); got != tc.want {
+		if got := ghclient.IsRateLimitError(tc.err); got != tc.want {
 			t.Errorf("%s: isGitHubRateLimitError=%v, want %v", tc.name, got, tc.want)
 		}
 	}
@@ -1309,14 +1309,14 @@ func TestBatchCloseRepoProbeOutcome(t *testing.T) {
 	ghResp := func(status int) *http.Response { return &http.Response{StatusCode: status} }
 	cases := []struct {
 		name  string
-		repo  *gh.Repository
+		repo  *ghclient.Repository
 		err   error
 		empty bool // 注入「请求成功但仓库响应为空」
 		want  batchCloseRepoProbeOutcome
 	}{
-		{"RepoVisibleWithIssues", &gh.Repository{HasIssues: gh.Bool(true)}, nil, false, repoProbeIssueVisible},
-		{"RepoVisibleMissingHasIssues", &gh.Repository{}, nil, false, repoProbeIssueVisible},
-		{"RepoHasIssuesDisabled", &gh.Repository{HasIssues: gh.Bool(false)}, nil, false, repoProbeRepoGone},
+		{"RepoVisibleWithIssues", &ghclient.Repository{HasIssues: boolPtr(true)}, nil, false, repoProbeIssueVisible},
+		{"RepoVisibleMissingHasIssues", &ghclient.Repository{}, nil, false, repoProbeIssueVisible},
+		{"RepoHasIssuesDisabled", &ghclient.Repository{HasIssues: boolPtr(false)}, nil, false, repoProbeRepoGone},
 		{"RepoNotFound", nil, &gh.ErrorResponse{Message: "Not Found", Response: ghResp(http.StatusNotFound)}, false, repoProbeRepoGone},
 		{"EmptyRepoResponse", nil, nil, true, repoProbeInconclusive},
 		{"ProbeRateLimited", nil, &gh.RateLimitError{Message: "API rate limit exceeded"}, false, repoProbeRateLimited},

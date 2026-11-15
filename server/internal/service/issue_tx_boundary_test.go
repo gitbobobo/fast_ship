@@ -13,7 +13,6 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	ghclient "github.com/godbobo/fast_ship/server/internal/pkg/github"
-	gh "github.com/google/go-github/v62/github"
 	"github.com/google/uuid"
 )
 
@@ -96,16 +95,14 @@ func TestIssueMirrorUpsertGitHubIssue_ClosedPathRollsBackWhenRecommendationDelet
 
 	now := time.Now().UTC()
 	item := &ghclient.Issue{
-		Issue: gh.Issue{
-			ID:        gh.Int64(1001),
-			Number:    gh.Int(42),
-			State:     gh.String("closed"),
-			Title:     gh.String("同步后的标题"),
-			CreatedAt: &gh.Timestamp{Time: now.Add(-time.Hour)},
-			UpdatedAt: &gh.Timestamp{Time: now},
-			ClosedAt:  &gh.Timestamp{Time: now},
-			User:      &gh.User{Login: gh.String("alice")},
-		},
+		ID:        int64Ptr(1001),
+		Number:    intPtr(42),
+		State:     stringPtr("closed"),
+		Title:     stringPtr("同步后的标题"),
+		CreatedAt: timePtr(now.Add(-time.Hour)),
+		UpdatedAt: timePtr(now),
+		ClosedAt:  timePtr(now),
+		User:      &ghclient.User{Login: stringPtr("alice")},
 	}
 	if _, err := ts.issueService.mirror.upsertGitHubIssue(issue.ProjectID, item); err != errs.ErrInternal {
 		t.Fatalf("expected internal error, got %v", err)

@@ -17,24 +17,27 @@ import (
 func ptr[T any](v T) *T { return &v }
 
 // Client 业务 service 依赖的 GitHub repo 能力面（Issue 同步/写、分支、发布）。
-// 实现只有 *TokenClient；PR 读取（关联 PR 的 attach/sync）走 githubapi.GitHubClient
-// 的 *PRClient 实现，两个 adapter 共享同一份 REST 代码。
+// 接口只暴露领域类型（types.go）：分页返回下一页页码（0 表示末页），
+// go-github 的 Response/Repository/Label/Release 类型不外泄，错误分类经
+// errors.go 的判定助手完成。实现只有 *TokenClient；PR 读取（关联 PR 的
+// attach/sync）走 githubapi.GitHubClient 的 *PRClient 实现，两个 adapter
+// 共享同一份 REST 代码。
 type Client interface {
 	ValidateRepository(ctx context.Context) error
 	// FetchRepository 拉取绑定仓库的元数据（含 has_issues）：批量关闭用它区分
 	// 404 的整仓级与单条成因（INT-198）。与 ValidateRepository 同一端点，但
-	// 保留仓库与响应，调用方按 has_issues 细分。
-	FetchRepository(ctx context.Context) (*gh.Repository, *gh.Response, error)
-	ListIssues(ctx context.Context, state string, since *time.Time, page, perPage int) ([]*Issue, *gh.Response, error)
+	// 保留仓库投影，调用方按 has_issues 细分。
+	FetchRepository(ctx context.Context) (*Repository, error)
+	ListIssues(ctx context.Context, state string, since *time.Time, page, perPage int) ([]*Issue, int, error)
 	GetIssue(ctx context.Context, issueNumber int) (*Issue, error)
-	ListRepositoryLabels(ctx context.Context, page, perPage int) ([]*gh.Label, *gh.Response, error)
-	ListIssueComments(ctx context.Context, issueNumber, page, perPage int) ([]*IssueComment, *gh.Response, error)
-	ListIssueTimeline(ctx context.Context, issueNumber, page, perPage int) ([]*TimelineEvent, *gh.Response, error)
+	ListRepositoryLabels(ctx context.Context, page, perPage int) ([]*Label, int, error)
+	ListIssueComments(ctx context.Context, issueNumber, page, perPage int) ([]*IssueComment, int, error)
+	ListIssueTimeline(ctx context.Context, issueNumber, page, perPage int) ([]*TimelineEvent, int, error)
 	CreateIssueComment(ctx context.Context, issueNumber int, body string) (*IssueComment, error)
 	UpdateIssue(ctx context.Context, issueNumber int, req UpdateIssueRequest) (*Issue, error)
 	CreateIssue(ctx context.Context, title, body string) (*Issue, error)
 	CreateTag(ctx context.Context, tag, commitish string) error
-	CreateRelease(ctx context.Context, tag, name, body string) (*gh.RepositoryRelease, error)
+	CreateRelease(ctx context.Context, tag, name, body string) (*Release, error)
 	UploadAsset(ctx context.Context, releaseID int64, filename string, file *os.File) error
 	ListBranches(ctx context.Context) ([]*Branch, string, error)
 }
@@ -54,48 +57,53 @@ type TokenClient struct {
 
 const mediaTypeFullJSON = "application/vnd.github.full+json"
 
-type Issue struct {
-	gh.Issue
-	BodyHTML *string `json:"body_html,omitempty"`
-}
-
-func (i *Issue) GetBodyHTML() string {
-	if i == nil || i.BodyHTML == nil {
-		return ""
+// nextPageOf 取响应的下一页页码；无响应（请求失败）时按末页处理。
+func nextPageOf(resp *gh.Response) int {
+	if resp == nil {
+		return 0
 	}
-	return *i.BodyHTML
+	return resp.NextPage
 }
 
-type IssueComment struct {
-	gh.IssueComment
-	BodyHTML *string `json:"body_html,omitempty"`
-}
-
-func (c *IssueComment) GetBodyHTML() string {
-	if c == nil || c.BodyHTML == nil {
-		return ""
+func repositoryFromSDK(repo *gh.Repository) *Repository {
+	if repo == nil {
+		return nil
 	}
-	return *c.BodyHTML
+	return &Repository{HasIssues: repo.HasIssues}
 }
 
-type UpdateIssueRequest struct {
-	Title       *string   `json:"title,omitempty"`
-	Body        *string   `json:"body,omitempty"`
-	State       *string   `json:"state,omitempty"`
-	StateReason *string   `json:"state_reason,omitempty"`
-	Labels      *[]string `json:"labels,omitempty"`
+func labelFromSDK(label *gh.Label) *Label {
+	if label == nil {
+		return nil
+	}
+	return &Label{
+		Name:        label.Name,
+		Color:       label.Color,
+		Description: label.Description,
+	}
 }
 
-// Branch represents a GitHub branch
-type Branch struct {
-	Name    string `json:"name"`
-	SHA     string `json:"sha"`
-	Default bool   `json:"default"`
+func releaseFromSDK(release *gh.RepositoryRelease) *Release {
+	if release == nil {
+		return nil
+	}
+	return &Release{
+		ID:      release.ID,
+		HTMLURL: release.HTMLURL,
+	}
 }
 
-func (c *TokenClient) ListRepositoryLabels(ctx context.Context, page, perPage int) ([]*gh.Label, *gh.Response, error) {
+func (c *TokenClient) ListRepositoryLabels(ctx context.Context, page, perPage int) ([]*Label, int, error) {
 	opts := &gh.ListOptions{Page: page, PerPage: perPage}
-	return c.client.Issues.ListLabels(ctx, c.owner, c.repo, opts)
+	labels, resp, err := c.client.Issues.ListLabels(ctx, c.owner, c.repo, opts)
+	if err != nil {
+		return nil, nextPageOf(resp), err
+	}
+	out := make([]*Label, 0, len(labels))
+	for _, label := range labels {
+		out = append(out, labelFromSDK(label))
+	}
+	return out, nextPageOf(resp), nil
 }
 
 // githubRequestTimeout 兜底所有 GitHub API 调用：连接半死时无超时的请求会
@@ -130,15 +138,19 @@ func newHTTPClient(token string, timeout time.Duration) *http.Client {
 }
 
 func (c *TokenClient) ValidateRepository(ctx context.Context) error {
-	_, _, err := c.FetchRepository(ctx)
+	_, err := c.FetchRepository(ctx)
 	return err
 }
 
-func (c *TokenClient) FetchRepository(ctx context.Context) (*gh.Repository, *gh.Response, error) {
-	return c.client.Repositories.Get(ctx, c.owner, c.repo)
+func (c *TokenClient) FetchRepository(ctx context.Context) (*Repository, error) {
+	repo, _, err := c.client.Repositories.Get(ctx, c.owner, c.repo)
+	if err != nil {
+		return nil, err
+	}
+	return repositoryFromSDK(repo), nil
 }
 
-func (c *TokenClient) ListIssues(ctx context.Context, state string, since *time.Time, page, perPage int) ([]*Issue, *gh.Response, error) {
+func (c *TokenClient) ListIssues(ctx context.Context, state string, since *time.Time, page, perPage int) ([]*Issue, int, error) {
 	query := url.Values{}
 	if state != "" {
 		query.Set("state", state)
@@ -158,19 +170,19 @@ func (c *TokenClient) ListIssues(ctx context.Context, state string, since *time.
 	path := fmt.Sprintf("repos/%s/%s/issues?%s", c.owner, c.repo, query.Encode())
 	req, err := c.client.NewRequest("GET", path, nil)
 	if err != nil {
-		return nil, nil, err
+		return nil, 0, err
 	}
 	req.Header.Set("Accept", mediaTypeFullJSON)
 
 	var issues []*Issue
 	resp, err := c.client.Do(ctx, req, &issues)
 	if err != nil {
-		return nil, resp, err
+		return nil, nextPageOf(resp), err
 	}
-	return issues, resp, nil
+	return issues, nextPageOf(resp), nil
 }
 
-func (c *TokenClient) ListIssueComments(ctx context.Context, issueNumber, page, perPage int) ([]*IssueComment, *gh.Response, error) {
+func (c *TokenClient) ListIssueComments(ctx context.Context, issueNumber, page, perPage int) ([]*IssueComment, int, error) {
 	query := url.Values{}
 	query.Set("sort", "created")
 	query.Set("direction", "asc")
@@ -184,51 +196,19 @@ func (c *TokenClient) ListIssueComments(ctx context.Context, issueNumber, page, 
 	path := fmt.Sprintf("repos/%s/%s/issues/%d/comments?%s", c.owner, c.repo, issueNumber, query.Encode())
 	req, err := c.client.NewRequest("GET", path, nil)
 	if err != nil {
-		return nil, nil, err
+		return nil, 0, err
 	}
 	req.Header.Set("Accept", mediaTypeFullJSON)
 
 	var comments []*IssueComment
 	resp, err := c.client.Do(ctx, req, &comments)
 	if err != nil {
-		return nil, resp, err
+		return nil, nextPageOf(resp), err
 	}
-	return comments, resp, nil
+	return comments, nextPageOf(resp), nil
 }
 
-type TimelineIssueType struct {
-	ID     int64  `json:"id,omitempty"`
-	NodeID string `json:"node_id,omitempty"`
-	Name   string `json:"name,omitempty"`
-	Color  string `json:"color,omitempty"`
-}
-
-func (t *TimelineIssueType) GetName() string {
-	if t == nil {
-		return ""
-	}
-	return t.Name
-}
-func (t *TimelineIssueType) GetColor() string {
-	if t == nil {
-		return ""
-	}
-	return t.Color
-}
-
-type TimelineEvent struct {
-	gh.Timeline
-	IssueType *TimelineIssueType `json:"issue_type,omitempty"`
-}
-
-func (t *TimelineEvent) GetIssueType() *TimelineIssueType {
-	if t == nil {
-		return nil
-	}
-	return t.IssueType
-}
-
-func (c *TokenClient) ListIssueTimeline(ctx context.Context, issueNumber, page, perPage int) ([]*TimelineEvent, *gh.Response, error) {
+func (c *TokenClient) ListIssueTimeline(ctx context.Context, issueNumber, page, perPage int) ([]*TimelineEvent, int, error) {
 	query := url.Values{}
 	if page > 0 {
 		query.Set("page", fmt.Sprintf("%d", page))
@@ -239,15 +219,15 @@ func (c *TokenClient) ListIssueTimeline(ctx context.Context, issueNumber, page, 
 	path := fmt.Sprintf("repos/%s/%s/issues/%d/timeline?%s", c.owner, c.repo, issueNumber, query.Encode())
 	req, err := c.client.NewRequest("GET", path, nil)
 	if err != nil {
-		return nil, nil, err
+		return nil, 0, err
 	}
 
 	var events []*TimelineEvent
 	resp, err := c.client.Do(ctx, req, &events)
 	if err != nil {
-		return nil, resp, err
+		return nil, nextPageOf(resp), err
 	}
-	return events, resp, nil
+	return events, nextPageOf(resp), nil
 }
 
 func (c *TokenClient) CreateIssueComment(ctx context.Context, issueNumber int, body string) (*IssueComment, error) {
@@ -345,11 +325,11 @@ func (c *TokenClient) CreateTag(ctx context.Context, tag, commitish string) erro
 }
 
 // CreateRelease 创建 GitHub Release（如果不存在则创建，已存在则返回已有的）
-func (c *TokenClient) CreateRelease(ctx context.Context, tag, name, body string) (*gh.RepositoryRelease, error) {
+func (c *TokenClient) CreateRelease(ctx context.Context, tag, name, body string) (*Release, error) {
 	// 检查是否已存在
 	release, _, err := c.client.Repositories.GetReleaseByTag(ctx, c.owner, c.repo, tag)
 	if err == nil {
-		return release, nil
+		return releaseFromSDK(release), nil
 	}
 	if !isNotFound(err) {
 		return nil, err
@@ -361,7 +341,7 @@ func (c *TokenClient) CreateRelease(ctx context.Context, tag, name, body string)
 		Body:    ptr(body),
 	}
 	release, _, err = c.client.Repositories.CreateRelease(ctx, c.owner, c.repo, rel)
-	return release, err
+	return releaseFromSDK(release), err
 }
 
 // UploadAsset 上传文件到 Release

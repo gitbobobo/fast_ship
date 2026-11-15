@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"sort"
 	"strings"
@@ -17,7 +16,6 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	ghclient "github.com/godbobo/fast_ship/server/internal/pkg/github"
 	"github.com/godbobo/fast_ship/server/internal/repository"
-	gh "github.com/google/go-github/v62/github"
 	"go.uber.org/zap"
 	"golang.org/x/sync/semaphore"
 	"gorm.io/gorm"
@@ -228,7 +226,7 @@ type githubCloseNetResult struct {
 // 失去可见性、issues 被禁用）也纳入（abortRepoUnavailable）：两者的单条成因
 // 状态码重叠（Issue 已转移/删除，GitHub 对已删除的 Issue 同样返回 410），
 // 由 batchCloseRepoProbe 探测定案，真单条仍逐条回报（INT-191 验收口径保持）。
-// 限流 403 与非限流 403 的区分沿用 isGitHubRateLimitError 现有口径。
+// 限流 403 与非限流 403 的区分沿用 ghclient.IsRateLimitError 现有口径。
 type batchCloseGitHubAbortReason int32
 
 const (
@@ -363,7 +361,7 @@ func closeOneGitHubIssue(batchCtx context.Context, client ghclient.Client, probe
 			if onAbort != nil {
 				onAbort(reason)
 			}
-		} else if status, ok := gitHubCloseErrorStatus(err); ok && (status == http.StatusNotFound || status == http.StatusGone) {
+		} else if status, ok := ghclient.ErrorStatus(err); ok && (status == http.StatusNotFound || status == http.StatusGone) {
 			// 404/410 的仓库级成因与单条成因状态码重叠（INT-191 留下的两义性），
 			// 定案与文案在 resolveGitHubClose404Gone（INT-198）。
 			err = resolveGitHubClose404Gone(batchCtx, client, probe, err, onAbort, warn)
@@ -379,19 +377,18 @@ func closeOneGitHubIssue(batchCtx context.Context, client ghclient.Client, probe
 // classifyGitHubCloseError 把剩余的 GitHub 错误收敛成少量固定类别（INT-185
 // R3 方向审计）：5xx 与传输层错误在 PATCH 已发出的前提下结果未知，按「结果
 // 未确认」处理，宁可多提示刷新确认；其余 ErrorResponse 规范化为「<状态码>
-// <Message>」——go-github 的 Error() 带 METHOD 和完整 URL（含 Issue 号），
+// <Message>」——底层 SDK 的 Error() 带 METHOD 和完整 URL（含 Issue 号），
 // 逐条不同会让前端分组去重失效，同一类错误必须逐字相同。
 func classifyGitHubCloseError(err error) error {
-	var respErr *gh.ErrorResponse
-	if errors.As(err, &respErr) && respErr.Response != nil {
-		if code := respErr.Response.StatusCode; code >= http.StatusInternalServerError {
+	if status, msg, ok := ghclient.ErrorStatusMessage(err); ok {
+		if status >= http.StatusInternalServerError {
 			return &batchClosePatchUnconfirmedError{err: err}
 		}
-		msg := strings.TrimSpace(respErr.Message)
+		msg = strings.TrimSpace(msg)
 		if msg == "" {
-			return errs.New(errs.ErrGitHubAPI.Code, fmt.Sprintf("更新 GitHub Issue 失败：%d", respErr.Response.StatusCode))
+			return errs.New(errs.ErrGitHubAPI.Code, fmt.Sprintf("更新 GitHub Issue 失败：%d", status))
 		}
-		return errs.New(errs.ErrGitHubAPI.Code, fmt.Sprintf("更新 GitHub Issue 失败：%d %s", respErr.Response.StatusCode, msg))
+		return errs.New(errs.ErrGitHubAPI.Code, fmt.Sprintf("更新 GitHub Issue 失败：%d %s", status, msg))
 	}
 	// 非 ErrorResponse 的传输错误（*url.Error 等）：请求状态未知。
 	return &batchClosePatchUnconfirmedError{err: err}
@@ -439,7 +436,7 @@ func (p *batchCloseRepoProbe) outcome(batchCtx context.Context, client ghclient.
 	p.once.Do(func() {
 		probeCtx, cancel := context.WithTimeout(batchCtx, batchCloseGitHubPatchTimeout)
 		defer cancel()
-		repo, _, err := client.FetchRepository(probeCtx)
+		repo, err := client.FetchRepository(probeCtx)
 		if err != nil && warn != nil &&
 			!errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 			// 探测失败记 warn：verdict 落 inconclusive 退回逐条回报，线上据此
@@ -457,10 +454,10 @@ func (p *batchCloseRepoProbe) outcome(batchCtx context.Context, client ghclient.
 			// 仓库可见且明确 has_issues=false：issues 被仓库设置禁用，整仓级。
 			p.verdict = repoProbeRepoGone
 		case err == nil:
-			// 空仓库响应（go-github 成功路径不会返回 nil 仓库，防御分支）：
+			// 空仓库响应（SDK 成功路径不会返回 nil 仓库，防御分支）：
 			// 信息不足定不了因，退回逐条回报，不凭空响应熔断整批。
 			p.verdict = repoProbeInconclusive
-		case isGitHubRateLimitError(err):
+		case ghclient.IsRateLimitError(err):
 			p.verdict = repoProbeRateLimited
 		case isGitHubStatusNotFoundError(err):
 			p.verdict = repoProbeRepoGone
@@ -496,20 +493,10 @@ func resolveGitHubClose404Gone(batchCtx context.Context, client ghclient.Client,
 	}
 }
 
-// gitHubCloseErrorStatus 提取 ErrorResponse 的 HTTP 状态码；非 ErrorResponse
-// 或缺响应时返回 false。
-func gitHubCloseErrorStatus(err error) (int, bool) {
-	var respErr *gh.ErrorResponse
-	if !errors.As(err, &respErr) || respErr.Response == nil {
-		return 0, false
-	}
-	return respErr.Response.StatusCode, true
-}
-
 // isGitHubStatusNotFoundError 判定错误是否为 404 ErrorResponse；仓库探测用它
 // 区分「token 看不见仓库」（INT-198）。
 func isGitHubStatusNotFoundError(err error) bool {
-	status, ok := gitHubCloseErrorStatus(err)
+	status, ok := ghclient.ErrorStatus(err)
 	return ok && status == http.StatusNotFound
 }
 
@@ -775,21 +762,21 @@ const batchCloseGitHubRateLimitText = "更新 GitHub Issue 失败：GitHub API �
 const batchCloseGitHubRateLimitRemainingText = "GitHub API 限流，未尝试关闭"
 
 // githubBatchCloseAbort 判定 PATCH 错误是否为整批性失败并给出类别：限流
-// （口径见 isGitHubRateLimitError：*RateLimitError、*AbuseRateLimitError、
+// （口径见 ghclient.IsRateLimitError：*RateLimitError、*AbuseRateLimitError、
 // 429、含限流文案的 403）、认证失败（401）、无权限（其余 403）。404/410 均不在
 // 此判定熔断（INT-191）：两者成因两义，由 closeOneGitHubIssue 的
 // resolveGitHubClose404Gone 经仓库探测定案（INT-198；已删除的 Issue 同样
 // 返回 410，单条成因）——仓库不可见或禁用 Issue 熔断（abortRepoUnavailable），
 // 单条转移/删除逐条回报，探测不可定因时退回逐条回报。
 func githubBatchCloseAbort(err error) (batchCloseGitHubAbortReason, bool) {
-	if isGitHubRateLimitError(err) {
+	if ghclient.IsRateLimitError(err) {
 		return abortRateLimit, true
 	}
-	var respErr *gh.ErrorResponse
-	if !errors.As(err, &respErr) || respErr.Response == nil {
+	status, ok := ghclient.ErrorStatus(err)
+	if !ok {
 		return abortNone, false
 	}
-	switch respErr.Response.StatusCode {
+	switch status {
 	case http.StatusUnauthorized:
 		return abortAuth, true
 	case http.StatusForbidden:
@@ -799,53 +786,6 @@ func githubBatchCloseAbort(err error) (batchCloseGitHubAbortReason, bool) {
 		return abortForbidden, true
 	}
 	return abortNone, false
-}
-
-// isGitHubRateLimitError 判定 go-github 错误是否为 API 限流：*RateLimitError、
-// *AbuseRateLimitError，或 403/429 且响应体含 rate limit/abuse detection 字样的
-// *ErrorResponse。判定口径与 PR 域的 pullRequestAccessHint 对齐但不共用
-// （那边是 githubapi.StatusError 的 PR 读取域）；Message 是响应体 JSON 解析出的
-// message 字段，原始 body 由 go-github 解析后回填，可尽力重读。
-func isGitHubRateLimitError(err error) bool {
-	var rateLimit *gh.RateLimitError
-	if errors.As(err, &rateLimit) {
-		return true
-	}
-	var abuse *gh.AbuseRateLimitError
-	if errors.As(err, &abuse) {
-		return true
-	}
-	var respErr *gh.ErrorResponse
-	if !errors.As(err, &respErr) || respErr.Response == nil {
-		return false
-	}
-	code := respErr.Response.StatusCode
-	// 429 本身是权威限流信号，无需依赖 body 文案——空 body、纯 Retry-After
-	// 或网关/WAF 自定义文案的 429 也必须触发熔断（INT-185 R13）。
-	if code == http.StatusTooManyRequests {
-		return true
-	}
-	if code != http.StatusForbidden {
-		return false
-	}
-	text := strings.ToLower(respErr.Message)
-	if raw := readGitHubErrorBody(respErr.Response.Body); raw != "" {
-		text += " " + strings.ToLower(raw)
-	}
-	return strings.Contains(text, "rate limit") || strings.Contains(text, "abuse detection")
-}
-
-// readGitHubErrorBody 尽力读取错误响应体；已被读走或关闭时返回空串，不影响
-// 判定（还有 Message 兜底）。
-func readGitHubErrorBody(body io.ReadCloser) string {
-	if body == nil {
-		return ""
-	}
-	raw, err := io.ReadAll(body)
-	if err != nil {
-		return ""
-	}
-	return string(raw)
 }
 
 func batchCloseItemError(err error) string {
@@ -943,7 +883,7 @@ func (s *IssueService) GetRepositoryLabels(projectID, userID string) ([]IssueLab
 	labelsByKey := make(map[string]IssueLabelResponse)
 
 	for {
-		items, resp, err := client.ListRepositoryLabels(context.Background(), page, perPage)
+		items, nextPage, err := client.ListRepositoryLabels(context.Background(), page, perPage)
 		if err != nil {
 			return nil, errs.New(errs.ErrGitHubAPI.Code, fmt.Sprintf("获取 GitHub 标签失败: %v", err))
 		}
@@ -967,10 +907,10 @@ func (s *IssueService) GetRepositoryLabels(projectID, userID string) ([]IssueLab
 			}
 		}
 
-		if resp == nil || resp.NextPage == 0 {
+		if nextPage == 0 {
 			break
 		}
-		page = resp.NextPage
+		page = nextPage
 	}
 
 	labels := make([]IssueLabelResponse, 0, len(labelsByKey))

@@ -12,49 +12,42 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	ghclient "github.com/godbobo/fast_ship/server/internal/pkg/github"
-	gh "github.com/google/go-github/v62/github"
 	"github.com/google/uuid"
 )
 
 func testGitHubSyncIssue(id int64, number int, at time.Time) *ghclient.Issue {
 	return &ghclient.Issue{
-		Issue: gh.Issue{
-			ID:        int64Ptr(id),
-			NodeID:    stringPtr(fmt.Sprintf("I_kw%d", id)),
-			Number:    intPtr(number),
-			State:     stringPtr("open"),
-			Title:     stringPtr(fmt.Sprintf("Issue %d", number)),
-			Body:      stringPtr("body"),
-			HTMLURL:   stringPtr(fmt.Sprintf("https://github.com/owner/repo/issues/%d", number)),
-			User:      &gh.User{Login: stringPtr("alice"), AvatarURL: stringPtr("https://example.com/alice.png")},
-			CreatedAt: &gh.Timestamp{Time: at},
-			UpdatedAt: &gh.Timestamp{Time: at},
-		},
+		ID:        int64Ptr(id),
+		NodeID:    stringPtr(fmt.Sprintf("I_kw%d", id)),
+		Number:    intPtr(number),
+		State:     stringPtr("open"),
+		Title:     stringPtr(fmt.Sprintf("Issue %d", number)),
+		Body:      stringPtr("body"),
+		HTMLURL:   stringPtr(fmt.Sprintf("https://github.com/owner/repo/issues/%d", number)),
+		User:      &ghclient.User{Login: stringPtr("alice"), AvatarURL: stringPtr("https://example.com/alice.png")},
+		CreatedAt: timePtr(at),
+		UpdatedAt: timePtr(at),
 	}
 }
 
 func testGitHubSyncComment(id int64, body string, at time.Time) *ghclient.IssueComment {
 	return &ghclient.IssueComment{
-		IssueComment: gh.IssueComment{
-			ID:        int64Ptr(id),
-			NodeID:    stringPtr(fmt.Sprintf("IC_kw%d", id)),
-			Body:      stringPtr(body),
-			HTMLURL:   stringPtr(fmt.Sprintf("https://github.com/owner/repo/issues/42#issuecomment-%d", id)),
-			User:      &gh.User{Login: stringPtr("bob"), AvatarURL: stringPtr("https://example.com/bob.png")},
-			CreatedAt: &gh.Timestamp{Time: at},
-			UpdatedAt: &gh.Timestamp{Time: at},
-		},
+		ID:        int64Ptr(id),
+		NodeID:    stringPtr(fmt.Sprintf("IC_kw%d", id)),
+		Body:      stringPtr(body),
+		HTMLURL:   stringPtr(fmt.Sprintf("https://github.com/owner/repo/issues/42#issuecomment-%d", id)),
+		User:      &ghclient.User{Login: stringPtr("bob"), AvatarURL: stringPtr("https://example.com/bob.png")},
+		CreatedAt: timePtr(at),
+		UpdatedAt: timePtr(at),
 	}
 }
 
 func testGitHubSyncTimelineEvent(id int64, event string, at time.Time) *ghclient.TimelineEvent {
 	return &ghclient.TimelineEvent{
-		Timeline: gh.Timeline{
-			ID:        int64Ptr(id),
-			Event:     stringPtr(event),
-			Actor:     &gh.User{Login: stringPtr("alice"), AvatarURL: stringPtr("https://example.com/alice.png")},
-			CreatedAt: &gh.Timestamp{Time: at},
-		},
+		ID:        int64Ptr(id),
+		Event:     stringPtr(event),
+		Actor:     &ghclient.User{Login: stringPtr("alice"), AvatarURL: stringPtr("https://example.com/alice.png")},
+		CreatedAt: timePtr(at),
 	}
 }
 
@@ -106,38 +99,36 @@ func TestIssueServiceSyncProjectIssues_ImportsIssuesCommentsAndTimeline(t *testi
 	fake := &fakeIssueGitHubClient{
 		issues: []*ghclient.Issue{
 			{
-				Issue: gh.Issue{
-					ID:                int64Ptr(101),
-					NodeID:            stringPtr("I_kw123"),
-					Number:            intPtr(42),
-					State:             stringPtr("open"),
-					Title:             stringPtr("Crash on launch"),
-					Body:              stringPtr("App crashes on startup"),
-					HTMLURL:           stringPtr("https://github.com/owner/repo/issues/42"),
-					User:              &gh.User{Login: stringPtr("alice"), AvatarURL: stringPtr("https://example.com/alice.png")},
-					AuthorAssociation: stringPtr("MEMBER"),
-					Labels:            []*gh.Label{{Name: stringPtr("bug"), Color: stringPtr("d73a4a")}},
-					Comments:          intPtr(1),
-					CreatedAt:         &gh.Timestamp{Time: now.Add(-2 * time.Hour)},
-					UpdatedAt:         &gh.Timestamp{Time: now.Add(-1 * time.Hour)},
-					Reactions:         &gh.Reactions{TotalCount: intPtr(1), PlusOne: intPtr(1)},
-				},
+				ID:                int64Ptr(101),
+				NodeID:            stringPtr("I_kw123"),
+				Number:            intPtr(42),
+				State:             stringPtr("open"),
+				Title:             stringPtr("Crash on launch"),
+				Body:              stringPtr("App crashes on startup"),
+				HTMLURL:           stringPtr("https://github.com/owner/repo/issues/42"),
+				User:              &ghclient.User{Login: stringPtr("alice"), AvatarURL: stringPtr("https://example.com/alice.png")},
+				AuthorAssociation: stringPtr("MEMBER"),
+				Labels:            []*ghclient.Label{{Name: stringPtr("bug"), Color: stringPtr("d73a4a")}},
+				Comments:          intPtr(1),
+				CreatedAt:         timePtr(now.Add(-2 * time.Hour)),
+				UpdatedAt:         timePtr(now.Add(-1 * time.Hour)),
+				Reactions:         &ghclient.Reactions{TotalCount: intPtr(1), PlusOne: intPtr(1)},
+
 				BodyHTML: stringPtr("<p>App crashes on <strong>startup</strong></p>"),
 			},
 		},
 		comments: map[int][]*ghclient.IssueComment{
 			42: {
 				{
-					IssueComment: gh.IssueComment{
-						ID:                int64Ptr(501),
-						NodeID:            stringPtr("IC_kw123"),
-						Body:              stringPtr("I can reproduce this"),
-						HTMLURL:           stringPtr("https://github.com/owner/repo/issues/42#issuecomment-501"),
-						User:              &gh.User{Login: stringPtr("bob"), AvatarURL: stringPtr("https://example.com/bob.png")},
-						AuthorAssociation: stringPtr("CONTRIBUTOR"),
-						CreatedAt:         &gh.Timestamp{Time: now.Add(-30 * time.Minute)},
-						UpdatedAt:         &gh.Timestamp{Time: now.Add(-30 * time.Minute)},
-					},
+					ID:                int64Ptr(501),
+					NodeID:            stringPtr("IC_kw123"),
+					Body:              stringPtr("I can reproduce this"),
+					HTMLURL:           stringPtr("https://github.com/owner/repo/issues/42#issuecomment-501"),
+					User:              &ghclient.User{Login: stringPtr("bob"), AvatarURL: stringPtr("https://example.com/bob.png")},
+					AuthorAssociation: stringPtr("CONTRIBUTOR"),
+					CreatedAt:         timePtr(now.Add(-30 * time.Minute)),
+					UpdatedAt:         timePtr(now.Add(-30 * time.Minute)),
+
 					BodyHTML: stringPtr("<p>I can reproduce this</p><p><img src=\"https://example.com/repro.png\" alt=\"repro\"></p>"),
 				},
 			},
@@ -145,13 +136,11 @@ func TestIssueServiceSyncProjectIssues_ImportsIssuesCommentsAndTimeline(t *testi
 		timeline: map[int][]*ghclient.TimelineEvent{
 			42: {
 				{
-					Timeline: gh.Timeline{
-						ID:        int64Ptr(701),
-						Event:     stringPtr("labeled"),
-						Actor:     &gh.User{Login: stringPtr("alice"), AvatarURL: stringPtr("https://example.com/alice.png")},
-						Label:     &gh.Label{Name: stringPtr("bug")},
-						CreatedAt: &gh.Timestamp{Time: now.Add(-20 * time.Minute)},
-					},
+					ID:        int64Ptr(701),
+					Event:     stringPtr("labeled"),
+					Actor:     &ghclient.User{Login: stringPtr("alice"), AvatarURL: stringPtr("https://example.com/alice.png")},
+					Label:     &ghclient.Label{Name: stringPtr("bug")},
+					CreatedAt: timePtr(now.Add(-20 * time.Minute)),
 				},
 			},
 		},
@@ -1184,7 +1173,7 @@ func TestIssueServiceBatchCloseDoneIssues_GitHubIssuesCloseWithOnePatchEachAndNo
 		item := testGitHubSyncIssue(m.GitHubIssueID, m.Number, closedAt)
 		item.State = stringPtr("closed")
 		item.StateReason = stringPtr("completed")
-		item.ClosedAt = &gh.Timestamp{Time: closedAt}
+		item.ClosedAt = timePtr(closedAt)
 		if fake.updatedIssuesByNumber == nil {
 			fake.updatedIssuesByNumber = map[int]*ghclient.Issue{}
 		}
@@ -1987,7 +1976,7 @@ func TestSyncRepositoryLabels(t *testing.T) {
 	projectID := createTestProject(t, svc.db, user.ID).ID
 
 	fake := &fakeIssueGitHubClient{
-		repoLabels: []*gh.Label{
+		repoLabels: []*ghclient.Label{
 			{Name: stringPtr("bug"), Color: stringPtr("d73a4a"), Description: stringPtr("Bug desc")},
 			{Name: stringPtr("feature"), Color: stringPtr("a2eeef"), Description: stringPtr("Feature desc")},
 		},
@@ -2008,7 +1997,7 @@ func TestSyncRepositoryLabels(t *testing.T) {
 
 	// Verify atomic replace: sync again with different labels
 	fake2 := &fakeIssueGitHubClient{
-		repoLabels: []*gh.Label{
+		repoLabels: []*ghclient.Label{
 			{Name: stringPtr("docs"), Color: stringPtr("0075ca"), Description: stringPtr("Docs desc")},
 		},
 	}
