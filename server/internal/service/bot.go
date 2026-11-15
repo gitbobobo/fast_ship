@@ -95,6 +95,12 @@ type BotService struct {
 	bgWg     sync.WaitGroup
 	stopDone chan struct{}
 
+	// probeWg 跟踪在途的后台窗口探测（INT-232）：登记与 goroutine 启动同在
+	// bgMu 临界区内（spawnProbe），waitWindowProbes 也持 bgMu 等，Add 与 Wait
+	// 因此不会并发；Done 不需要锁。探测本体仍由 bgWg 跟踪，Stop 的收尾语义
+	// 不变；probeWg 只提供「等探测收敛」的等待原语。
+	probeWg sync.WaitGroup
+
 	// runCtx 是全部后台执行的父 context：Stop 一取消，包括「已登记但尚未
 	// 把自己注册进槽位表」的执行槽在内的所有派生 context 立即失效，取消与
 	// 注册之间没有竞态窗口（评审 A 发现 1/2）。生产不调 Stop，行为不变。

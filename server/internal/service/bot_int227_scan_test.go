@@ -103,6 +103,10 @@ func TestBotScanOnceIdleBotsCostOneQuery(t *testing.T) {
 		bots = append(bots, bot)
 	}
 
+	// createBot 派生的后台窗口探测会并发读写同一 gorm 句柄：换 Logger 前
+	// 先等在途探测全部收敛（INT-232），后续两次测量窗口内也不再有探测写入，
+	// 查询数断言才与探测时序无关。
+	env.bots.waitWindowProbes()
 	rec := &int227SQLRecorder{}
 	env.db.Logger = rec
 	rec.reset()
@@ -133,6 +137,7 @@ func TestBotScanOnceIdleBotsCostOneQuery(t *testing.T) {
 		markReplied(bot.ID)
 		bots = append(bots, bot)
 	}
+	env.bots.waitWindowProbes()
 	rec.reset()
 	env.bots.scanOnce()
 	allSecond := rec.all()
