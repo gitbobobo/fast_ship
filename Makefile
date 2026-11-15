@@ -56,11 +56,15 @@ test-server:
 	@cd server && go test ./...
 
 # 竞态检测为可选目标，不进 test/test-server 必需门禁（INT-197 待评估）：
-# INT-205 修复后 internal/service 单包 -race 实测 504-763s（同机五连，负载
-# 波动明显），最差仍越过默认 10m，显式 -timeout 20m 兑底；包级 TestMain
-# 泄漏守卫保证结束时无 connectionOpener/worker/loop 残留。
+# INT-205 修复后 internal/service 单包 -race 实测 504-763s（2026-11-07 darwin/arm64
+# 同机五连，不含其后合入的 Round 预算大用例），最差仍越过默认 10m，显式 -timeout
+# 兑底；包级 TestMain 泄漏守卫保证结束时无 connectionOpener/worker/loop 残留。
+# INT-200（2026-11-15）：套件增长后于 linux/amd64 12 核同机 4 次独立全包实测
+# 1023~1097s（零 race、零超时，其中 Round 单测 ~160s、Bot 族 ~385s 为新旧共存的
+# 正当成本），20m 余量仅 100~180s，经方向顾问审计按执行预算重新定标为 25m；
+# 判定线：单包耗时 ≤ 25m 的 80%（20m）。不再随套件增长自动上调。
 test-server-race:
-	@cd server && go test -race -timeout 20m ./...
+	@cd server && go test -race -timeout 25m ./...
 
 test-web:
 	@pnpm --dir web test
