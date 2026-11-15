@@ -10,13 +10,16 @@ import (
 
 	"github.com/godbobo/fast_ship/server/internal/githubapi"
 	ghclient "github.com/godbobo/fast_ship/server/internal/pkg/github"
-	gh "github.com/google/go-github/v62/github"
 )
+
+func boolPtr(v bool) *bool { return &v }
+
+func timePtr(v time.Time) *time.Time { return &v }
 
 type fakeIssueGitHubClient struct {
 	stubGitHubClient
 	issues        []*ghclient.Issue
-	repoLabels    []*gh.Label
+	repoLabels    []*ghclient.Label
 	repoLabelsErr error
 	comments      map[int][]*ghclient.IssueComment
 	timeline      map[int][]*ghclient.TimelineEvent
@@ -75,7 +78,7 @@ type fakeIssueGitHubClient struct {
 	// fetchRepositoryRepo/fetchRepositoryErr 注入批量关闭的仓库探测响应
 	// （INT-198）；fetchRepositoryCalls 记录调用次数，断言同一批只探测一次；
 	// fetchRepositoryEmpty 注入「请求成功但仓库响应为空」的防御分支用例。
-	fetchRepositoryRepo  *gh.Repository
+	fetchRepositoryRepo  *ghclient.Repository
 	fetchRepositoryErr   error
 	fetchRepositoryEmpty bool
 	fetchRepositoryCalls int
@@ -113,20 +116,20 @@ func (f *fakeIssueGitHubClient) ValidateRepository(context.Context) error {
 	return f.validateErr
 }
 
-func (f *fakeIssueGitHubClient) FetchRepository(context.Context) (*gh.Repository, *gh.Response, error) {
+func (f *fakeIssueGitHubClient) FetchRepository(context.Context) (*ghclient.Repository, error) {
 	f.mu.Lock()
 	f.fetchRepositoryCalls++
 	f.mu.Unlock()
 	if f.fetchRepositoryEmpty {
-		return nil, &gh.Response{}, nil
+		return nil, nil
 	}
 	// 未配置仓库响应时按未实现报错：探测不可定因退回逐条回报，与 stub 兜底
 	// 语义一致——不能让 (nil, nil) 被误读为整仓级熔断（INT-198）；显式注入
 	// 「成功但空响应」用 fetchRepositoryEmpty。
 	if f.fetchRepositoryRepo == nil && f.fetchRepositoryErr == nil {
-		return nil, nil, stubErr("FetchRepository")
+		return nil, stubErr("FetchRepository")
 	}
-	return f.fetchRepositoryRepo, &gh.Response{}, f.fetchRepositoryErr
+	return f.fetchRepositoryRepo, f.fetchRepositoryErr
 }
 
 // countFetchRepositoryCalls 返回仓库探测累计调用次数（INT-198 断言只探测一次）。
@@ -136,7 +139,7 @@ func (f *fakeIssueGitHubClient) countFetchRepositoryCalls() int {
 	return f.fetchRepositoryCalls
 }
 
-func (f *fakeIssueGitHubClient) ListIssues(_ context.Context, _ string, since *time.Time, _, _ int) ([]*ghclient.Issue, *gh.Response, error) {
+func (f *fakeIssueGitHubClient) ListIssues(_ context.Context, _ string, since *time.Time, _, _ int) ([]*ghclient.Issue, int, error) {
 	if f.onListIssues != nil {
 		f.onListIssues()
 	}
@@ -148,7 +151,7 @@ func (f *fakeIssueGitHubClient) ListIssues(_ context.Context, _ string, since *t
 	}
 	f.listIssuesSince = append(f.listIssuesSince, recorded)
 	f.mu.Unlock()
-	return f.issues, &gh.Response{NextPage: 0}, nil
+	return f.issues, 0, nil
 }
 
 func (f *fakeIssueGitHubClient) recordedSinceCalls() []*time.Time {
@@ -201,11 +204,11 @@ func (f *fakeIssueGitHubClient) countGetIssueCalls() int {
 	return total
 }
 
-func (f *fakeIssueGitHubClient) ListRepositoryLabels(context.Context, int, int) ([]*gh.Label, *gh.Response, error) {
-	return f.repoLabels, &gh.Response{NextPage: 0}, f.repoLabelsErr
+func (f *fakeIssueGitHubClient) ListRepositoryLabels(context.Context, int, int) ([]*ghclient.Label, int, error) {
+	return f.repoLabels, 0, f.repoLabelsErr
 }
 
-func (f *fakeIssueGitHubClient) ListIssueComments(_ context.Context, issueNumber, page, _ int) ([]*ghclient.IssueComment, *gh.Response, error) {
+func (f *fakeIssueGitHubClient) ListIssueComments(_ context.Context, issueNumber, page, _ int) ([]*ghclient.IssueComment, int, error) {
 	f.mu.Lock()
 	if f.commentListCalls == nil {
 		f.commentListCalls = map[int]int{}
@@ -213,7 +216,7 @@ func (f *fakeIssueGitHubClient) ListIssueComments(_ context.Context, issueNumber
 	f.commentListCalls[issueNumber]++
 	f.mu.Unlock()
 	if err := f.commentErrs[issueNumber][page]; err != nil {
-		return nil, nil, err
+		return nil, 0, err
 	}
 	if pages, ok := f.commentsPages[issueNumber]; ok {
 		var items []*ghclient.IssueComment
@@ -224,12 +227,12 @@ func (f *fakeIssueGitHubClient) ListIssueComments(_ context.Context, issueNumber
 		if page < len(pages) {
 			next = page + 1
 		}
-		return items, &gh.Response{NextPage: next}, nil
+		return items, next, nil
 	}
-	return f.comments[issueNumber], &gh.Response{NextPage: 0}, nil
+	return f.comments[issueNumber], 0, nil
 }
 
-func (f *fakeIssueGitHubClient) ListIssueTimeline(_ context.Context, issueNumber, page, _ int) ([]*ghclient.TimelineEvent, *gh.Response, error) {
+func (f *fakeIssueGitHubClient) ListIssueTimeline(_ context.Context, issueNumber, page, _ int) ([]*ghclient.TimelineEvent, int, error) {
 	if f.onListTimeline != nil {
 		f.onListTimeline()
 	}
@@ -240,7 +243,7 @@ func (f *fakeIssueGitHubClient) ListIssueTimeline(_ context.Context, issueNumber
 	f.timelineListCalls[issueNumber]++
 	f.mu.Unlock()
 	if err := f.timelineErrs[issueNumber][page]; err != nil {
-		return nil, nil, err
+		return nil, 0, err
 	}
 	if pages, ok := f.timelinePages[issueNumber]; ok {
 		var items []*ghclient.TimelineEvent
@@ -251,9 +254,9 @@ func (f *fakeIssueGitHubClient) ListIssueTimeline(_ context.Context, issueNumber
 		if page < len(pages) {
 			next = page + 1
 		}
-		return items, &gh.Response{NextPage: next}, nil
+		return items, next, nil
 	}
-	return f.timeline[issueNumber], &gh.Response{NextPage: 0}, nil
+	return f.timeline[issueNumber], 0, nil
 }
 
 func (f *fakeIssueGitHubClient) CreateIssueComment(_ context.Context, issueNumber int, body string) (*ghclient.IssueComment, error) {

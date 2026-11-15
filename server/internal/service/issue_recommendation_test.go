@@ -10,7 +10,6 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	ghclient "github.com/godbobo/fast_ship/server/internal/pkg/github"
-	gh "github.com/google/go-github/v62/github"
 	"github.com/google/uuid"
 )
 
@@ -713,16 +712,14 @@ func TestIssueRecommendation_RemovedOnGitHubSyncClose(t *testing.T) {
 	}
 
 	item := &ghclient.Issue{
-		Issue: gh.Issue{
-			ID:        gh.Int64(1001),
-			Number:    gh.Int(42),
-			State:     gh.String("closed"),
-			Title:     gh.String(issue.Title),
-			CreatedAt: &gh.Timestamp{Time: time.Now().UTC().Add(-time.Hour)},
-			UpdatedAt: &gh.Timestamp{Time: time.Now().UTC()},
-			ClosedAt:  &gh.Timestamp{Time: time.Now().UTC()},
-			User:      &gh.User{Login: gh.String("alice")},
-		},
+		ID:        int64Ptr(1001),
+		Number:    intPtr(42),
+		State:     stringPtr("closed"),
+		Title:     stringPtr(issue.Title),
+		CreatedAt: timePtr(time.Now().UTC().Add(-time.Hour)),
+		UpdatedAt: timePtr(time.Now().UTC()),
+		ClosedAt:  timePtr(time.Now().UTC()),
+		User:      &ghclient.User{Login: stringPtr("alice")},
 	}
 	if _, err := ts.issueService.mirror.upsertGitHubIssue(issue.ProjectID, item); err != nil {
 		t.Fatalf("upsert github issue: %v", err)
@@ -737,16 +734,14 @@ func TestIssueRecommendation_GitHubSyncClosedCreate(t *testing.T) {
 	ts, issue, _ := setupRecommendationIssue(t)
 
 	item := &ghclient.Issue{
-		Issue: gh.Issue{
-			ID:        gh.Int64(2002),
-			Number:    gh.Int(43),
-			State:     gh.String("closed"),
-			Title:     gh.String("已关闭的新 issue"),
-			CreatedAt: &gh.Timestamp{Time: time.Now().UTC().Add(-time.Hour)},
-			UpdatedAt: &gh.Timestamp{Time: time.Now().UTC()},
-			ClosedAt:  &gh.Timestamp{Time: time.Now().UTC()},
-			User:      &gh.User{Login: gh.String("bob")},
-		},
+		ID:        int64Ptr(2002),
+		Number:    intPtr(43),
+		State:     stringPtr("closed"),
+		Title:     stringPtr("已关闭的新 issue"),
+		CreatedAt: timePtr(time.Now().UTC().Add(-time.Hour)),
+		UpdatedAt: timePtr(time.Now().UTC()),
+		ClosedAt:  timePtr(time.Now().UTC()),
+		User:      &ghclient.User{Login: stringPtr("bob")},
 	}
 	stored, err := ts.issueService.mirror.upsertGitHubIssue(issue.ProjectID, item)
 	if err != nil {

@@ -105,7 +105,7 @@ func TestShipServiceShip_SuccessUpdatesVersionAndUploadsAssets(t *testing.T) {
 	}
 
 	fake := &fakeGitHubClient{
-		release: &gh.RepositoryRelease{
+		release: &ghclient.Release{
 			ID:      int64Ptr(42),
 			HTMLURL: stringPtr("https://github.com/owner/repo/releases/tag/v1.0.0"),
 		},
@@ -288,7 +288,7 @@ func TestShipServiceShip_UploadFailureRecordsFailureState(t *testing.T) {
 	}
 
 	fake := &fakeGitHubClient{
-		release:        &gh.RepositoryRelease{ID: int64Ptr(42)},
+		release:        &ghclient.Release{ID: int64Ptr(42)},
 		uploadAssetErr: errors.New("asset upload failed"),
 	}
 	svc.shipService.newClient = func(token, owner, repo string) ghclient.Client {
@@ -330,7 +330,7 @@ type fakeGitHubClient struct {
 	createTagErr     error
 	createReleaseErr error
 	uploadAssetErr   error
-	release          *gh.RepositoryRelease
+	release          *ghclient.Release
 
 	createTagCalls     int
 	createReleaseCalls int
@@ -348,7 +348,7 @@ func (f *fakeGitHubClient) CreateTag(context.Context, string, string) error {
 	return f.createTagErr
 }
 
-func (f *fakeGitHubClient) CreateRelease(context.Context, string, string, string) (*gh.RepositoryRelease, error) {
+func (f *fakeGitHubClient) CreateRelease(context.Context, string, string, string) (*ghclient.Release, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.createReleaseCalls++
@@ -394,7 +394,7 @@ func stubSuccessfulShipClient(t *testing.T, svc *testServices, releaseURL string
 		releaseURL = "https://github.com/owner/repo/releases/tag/v1.0.0"
 	}
 	fake := &fakeGitHubClient{
-		release: &gh.RepositoryRelease{
+		release: &ghclient.Release{
 			ID:      int64Ptr(42),
 			HTMLURL: stringPtr(releaseURL),
 		},
@@ -637,20 +637,18 @@ func TestShipServiceShip_GitHubCommentFailureStillShips(t *testing.T) {
 	fakeIssueGH := &fakeIssueGitHubClient{
 		createCommentErr: errors.New("comment api down"),
 		updatedIssue: &ghclient.Issue{
-			Issue: gh.Issue{
-				ID:          int64Ptr(1001),
-				NodeID:      stringPtr("I_kw_test"),
-				Number:      intPtr(42),
-				State:       stringPtr("closed"),
-				StateReason: stringPtr("completed"),
-				Title:       stringPtr("Crash on launch"),
-				Body:        stringPtr("App crashes"),
-				HTMLURL:     stringPtr("https://github.com/owner/repo/issues/42"),
-				User:        &gh.User{Login: stringPtr("alice"), AvatarURL: stringPtr("https://avatars.example/alice.png")},
-				CreatedAt:   &gh.Timestamp{Time: issue.CreatedAt},
-				UpdatedAt:   &gh.Timestamp{Time: closedAt},
-				ClosedAt:    &gh.Timestamp{Time: closedAt},
-			},
+			ID:          int64Ptr(1001),
+			NodeID:      stringPtr("I_kw_test"),
+			Number:      intPtr(42),
+			State:       stringPtr("closed"),
+			StateReason: stringPtr("completed"),
+			Title:       stringPtr("Crash on launch"),
+			Body:        stringPtr("App crashes"),
+			HTMLURL:     stringPtr("https://github.com/owner/repo/issues/42"),
+			User:        &ghclient.User{Login: stringPtr("alice"), AvatarURL: stringPtr("https://avatars.example/alice.png")},
+			CreatedAt:   &issue.CreatedAt,
+			UpdatedAt:   &closedAt,
+			ClosedAt:    &closedAt,
 		},
 		timeline: map[int][]*ghclient.TimelineEvent{42: {}},
 	}

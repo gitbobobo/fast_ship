@@ -210,7 +210,7 @@ func (s *IssueService) CreateInternalCommentIdempotentContext(parent context.Con
 		if idempotencyKey != "" {
 			marker := fmt.Sprintf("<!-- fast-ship-hook:%s -->", idempotencyKey)
 			for page := 1; createdComment == nil; {
-				items, response, listErr := client.ListIssueComments(ctx, issue.GitHubMeta.Number, page, 100)
+				items, nextPage, listErr := client.ListIssueComments(ctx, issue.GitHubMeta.Number, page, 100)
 				if listErr != nil {
 					return nil, errs.New(errs.ErrGitHubAPI.Code, fmt.Sprintf("查询 GitHub Issue 评论失败: %v", listErr))
 				}
@@ -220,10 +220,10 @@ func (s *IssueService) CreateInternalCommentIdempotentContext(parent context.Con
 						break
 					}
 				}
-				if response == nil || response.NextPage == 0 {
+				if nextPage == 0 {
 					break
 				}
-				page = response.NextPage
+				page = nextPage
 			}
 			if createdComment == nil {
 				commentBody += "\n\n" + marker

@@ -12,7 +12,6 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	ghclient "github.com/godbobo/fast_ship/server/internal/pkg/github"
 	"github.com/godbobo/fast_ship/server/internal/repository"
-	gh "github.com/google/go-github/v62/github"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
@@ -114,7 +113,7 @@ func (m *issueMirror) Sync(ctx context.Context, project *model.Project) (*IssueS
 	collectionSizes := map[string]issueCollectionSize{}
 
 	for {
-		items, resp, err := client.ListIssues(ctx, "all", since, page, perPage)
+		items, nextPage, err := client.ListIssues(ctx, "all", since, page, perPage)
 		if err != nil {
 			return failSync(errs.New(errs.ErrGitHubAPI.Code, fmt.Sprintf("同步 GitHub Issues 失败: %v", err)))
 		}
@@ -181,10 +180,10 @@ func (m *issueMirror) Sync(ctx context.Context, project *model.Project) (*IssueS
 			}
 		}
 
-		if resp == nil || resp.NextPage == 0 {
+		if nextPage == 0 {
 			break
 		}
-		page = resp.NextPage
+		page = nextPage
 	}
 
 	// 增量列表之后的有界兜底（INT-105）：把落到增量窗口之外的空水位 Issue 也补齐，
@@ -352,7 +351,7 @@ func (m *issueMirror) syncRepositoryLabels(ctx context.Context, client ghclient.
 	var allLabels []model.GitHubRepoLabel
 
 	for {
-		items, resp, err := client.ListRepositoryLabels(ctx, page, perPage)
+		items, nextPage, err := client.ListRepositoryLabels(ctx, page, perPage)
 		if err != nil {
 			return err
 		}
@@ -374,10 +373,10 @@ func (m *issueMirror) syncRepositoryLabels(ctx context.Context, client ghclient.
 			})
 		}
 
-		if resp == nil || resp.NextPage == 0 {
+		if nextPage == 0 {
 			break
 		}
-		page = resp.NextPage
+		page = nextPage
 	}
 
 	if err := m.githubRepoLabelRepo.ReplaceAllForProject(projectID, allLabels); err != nil {
@@ -459,7 +458,7 @@ func (m *issueMirror) upsertGitHubIssue(projectID string, item *ghclient.Issue) 
 		// 新 meta 直接进入兜底队列（水位可能要到下一次镜像才推进）；已存在的行因
 		// UpsertTx 不更新该列而保留原队列位置（INT-105）。
 		CollectionsHealQueuedAt: &now,
-		RawJSON:                 toJSONString(item),
+		RawJSON:                 rawJSONString(item, item.Raw),
 	}
 
 	if err := m.issueRepo.Transaction(func(tx *gorm.DB) error {
@@ -541,7 +540,7 @@ func (m *issueMirror) fetchComments(ctx context.Context, client ghclient.Client,
 	var comments []*model.IssueComment
 
 	for {
-		items, resp, err := client.ListIssueComments(ctx, issueNumber, page, perPage)
+		items, nextPage, err := client.ListIssueComments(ctx, issueNumber, page, perPage)
 		if err != nil {
 			return nil, errs.New(errs.ErrGitHubAPI.Code, fmt.Sprintf("同步 Issue 评论失败: %v", err))
 		}
@@ -553,10 +552,10 @@ func (m *issueMirror) fetchComments(ctx context.Context, client ghclient.Client,
 			comments = append(comments, buildGitHubIssueCommentModel(issueID, item))
 		}
 
-		if resp == nil || resp.NextPage == 0 {
+		if nextPage == 0 {
 			break
 		}
-		page = resp.NextPage
+		page = nextPage
 	}
 
 	return comments, nil
@@ -570,7 +569,7 @@ func (m *issueMirror) fetchTimeline(ctx context.Context, client ghclient.Client,
 	var events []*model.IssueTimelineEvent
 
 	for {
-		items, resp, err := client.ListIssueTimeline(ctx, issueNumber, page, perPage)
+		items, nextPage, err := client.ListIssueTimeline(ctx, issueNumber, page, perPage)
 		if err != nil {
 			return nil, errs.New(errs.ErrGitHubAPI.Code, fmt.Sprintf("同步 Issue 动态失败: %v", err))
 		}
@@ -589,15 +588,15 @@ func (m *issueMirror) fetchTimeline(ctx context.Context, client ghclient.Client,
 				ActorAvatarURL:  firstNonEmpty(item.GetActor().GetAvatarURL(), item.GetUser().GetAvatarURL()),
 				Body:            item.GetBody(),
 				Summary:         summarizeTimeline(item),
-				PayloadJSON:     toJSONString(item),
+				PayloadJSON:     rawJSONString(item, item.Raw),
 				GitHubCreatedAt: item.GetCreatedAt().UTC(),
 			})
 		}
 
-		if resp == nil || resp.NextPage == 0 {
+		if nextPage == 0 {
 			break
 		}
-		page = resp.NextPage
+		page = nextPage
 	}
 
 	return events, nil
@@ -761,7 +760,7 @@ func buildGitHubIssueCommentModel(issueID string, item *ghclient.IssueComment) *
 		AuthorAvatarURL:   item.GetUser().GetAvatarURL(),
 		AuthorAssociation: item.GetAuthorAssociation(),
 		ReactionsJSON:     toJSONString(mapReactions(item.Reactions)),
-		RawJSON:           toJSONString(item),
+		RawJSON:           rawJSONString(item, item.Raw),
 	}
 	if createdAt := item.GetCreatedAt(); !createdAt.IsZero() {
 		comment.GitHubCreatedAt = createdAt.UTC()
@@ -778,7 +777,7 @@ func buildGitHubIssueCommentModel(issueID string, item *ghclient.IssueComment) *
 	return comment
 }
 
-func mapUsers(users []*gh.User) []issueUserPayload {
+func mapUsers(users []*ghclient.User) []issueUserPayload {
 	out := make([]issueUserPayload, 0, len(users))
 	for _, user := range users {
 		if user == nil || user.GetLogin() == "" {
@@ -792,7 +791,7 @@ func mapUsers(users []*gh.User) []issueUserPayload {
 	return out
 }
 
-func mapLabelNames(labels []*gh.Label) []string {
+func mapLabelNames(labels []*ghclient.Label) []string {
 	out := make([]string, 0, len(labels))
 	for _, label := range labels {
 		if label == nil {
@@ -806,7 +805,7 @@ func mapLabelNames(labels []*gh.Label) []string {
 	return out
 }
 
-func mapMilestone(m *gh.Milestone) *issueMilestonePayload {
+func mapMilestone(m *ghclient.Milestone) *issueMilestonePayload {
 	if m == nil || m.GetTitle() == "" {
 		return nil
 	}
@@ -818,7 +817,7 @@ func mapMilestone(m *gh.Milestone) *issueMilestonePayload {
 	}
 }
 
-func mapReactions(r *gh.Reactions) IssueReactionSummaryResponse {
+func mapReactions(r *ghclient.Reactions) IssueReactionSummaryResponse {
 	if r == nil {
 		return IssueReactionSummaryResponse{}
 	}

@@ -8,7 +8,6 @@ import (
 
 	"github.com/godbobo/fast_ship/server/internal/githubapi"
 	ghclient "github.com/godbobo/fast_ship/server/internal/pkg/github"
-	gh "github.com/google/go-github/v62/github"
 )
 
 // stubGitHubClient 未实现方法的兜底：各测试 fake 内嵌它补齐 ghclient.Client 与
@@ -23,28 +22,28 @@ func (stubGitHubClient) ValidateRepository(context.Context) error {
 	return stubErr("ValidateRepository")
 }
 
-func (stubGitHubClient) FetchRepository(context.Context) (*gh.Repository, *gh.Response, error) {
-	return nil, nil, stubErr("FetchRepository")
+func (stubGitHubClient) FetchRepository(context.Context) (*ghclient.Repository, error) {
+	return nil, stubErr("FetchRepository")
 }
 
-func (stubGitHubClient) ListIssues(context.Context, string, *time.Time, int, int) ([]*ghclient.Issue, *gh.Response, error) {
-	return nil, nil, stubErr("ListIssues")
+func (stubGitHubClient) ListIssues(context.Context, string, *time.Time, int, int) ([]*ghclient.Issue, int, error) {
+	return nil, 0, stubErr("ListIssues")
 }
 
 func (stubGitHubClient) GetIssue(context.Context, int) (*ghclient.Issue, error) {
 	return nil, stubErr("GetIssue")
 }
 
-func (stubGitHubClient) ListRepositoryLabels(context.Context, int, int) ([]*gh.Label, *gh.Response, error) {
-	return nil, nil, stubErr("ListRepositoryLabels")
+func (stubGitHubClient) ListRepositoryLabels(context.Context, int, int) ([]*ghclient.Label, int, error) {
+	return nil, 0, stubErr("ListRepositoryLabels")
 }
 
-func (stubGitHubClient) ListIssueComments(context.Context, int, int, int) ([]*ghclient.IssueComment, *gh.Response, error) {
-	return nil, nil, stubErr("ListIssueComments")
+func (stubGitHubClient) ListIssueComments(context.Context, int, int, int) ([]*ghclient.IssueComment, int, error) {
+	return nil, 0, stubErr("ListIssueComments")
 }
 
-func (stubGitHubClient) ListIssueTimeline(context.Context, int, int, int) ([]*ghclient.TimelineEvent, *gh.Response, error) {
-	return nil, nil, stubErr("ListIssueTimeline")
+func (stubGitHubClient) ListIssueTimeline(context.Context, int, int, int) ([]*ghclient.TimelineEvent, int, error) {
+	return nil, 0, stubErr("ListIssueTimeline")
 }
 
 func (stubGitHubClient) CreateIssueComment(context.Context, int, string) (*ghclient.IssueComment, error) {
@@ -63,7 +62,7 @@ func (stubGitHubClient) CreateTag(context.Context, string, string) error {
 	return stubErr("CreateTag")
 }
 
-func (stubGitHubClient) CreateRelease(context.Context, string, string, string) (*gh.RepositoryRelease, error) {
+func (stubGitHubClient) CreateRelease(context.Context, string, string, string) (*ghclient.Release, error) {
 	return nil, stubErr("CreateRelease")
 }
 

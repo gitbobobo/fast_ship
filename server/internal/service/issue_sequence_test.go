@@ -9,7 +9,6 @@ import (
 
 	"github.com/godbobo/fast_ship/server/internal/model"
 	ghclient "github.com/godbobo/fast_ship/server/internal/pkg/github"
-	gh "github.com/google/go-github/v62/github"
 )
 
 // INT-96 回归：sequence_number 的 MAX+1 取号必须与 INSERT 同事务。生产
@@ -52,15 +51,15 @@ func TestIssueMirrorUpsert_ConcurrentWithManualCreate(t *testing.T) {
 	results := runConcurrently(mirrorN+manualN, func(i int) error {
 		if i%2 == 0 {
 			n := i / 2
-			item := &ghclient.Issue{Issue: gh.Issue{
-				ID:        gh.Int64(int64(7000 + n)),
-				Number:    gh.Int(700 + n),
-				State:     gh.String("open"),
-				Title:     gh.String(fmt.Sprintf("镜像问题 %d", n)),
-				CreatedAt: &gh.Timestamp{Time: now},
-				UpdatedAt: &gh.Timestamp{Time: now},
-				User:      &gh.User{Login: gh.String("alice")},
-			}}
+			item := &ghclient.Issue{
+				ID:        int64Ptr(int64(7000 + n)),
+				Number:    intPtr(700 + n),
+				State:     stringPtr("open"),
+				Title:     stringPtr(fmt.Sprintf("镜像问题 %d", n)),
+				CreatedAt: timePtr(now),
+				UpdatedAt: timePtr(now),
+				User:      &ghclient.User{Login: stringPtr("alice")},
+			}
 			_, err := svc.issueService.mirror.upsertGitHubIssue(project.ID, item)
 			return err
 		}
@@ -90,15 +89,15 @@ func TestIssueMirrorUpsert_ConcurrentSameGitHubIssueIsDeduplicated(t *testing.T)
 		project := createTestProject(t, svc.db, user.ID)
 		now := time.Now().UTC()
 		itemFor := func() *ghclient.Issue {
-			return &ghclient.Issue{Issue: gh.Issue{
-				ID:        gh.Int64(4242),
-				Number:    gh.Int(42),
-				State:     gh.String("open"),
-				Title:     gh.String("同一个 GitHub issue"),
-				CreatedAt: &gh.Timestamp{Time: now},
-				UpdatedAt: &gh.Timestamp{Time: now},
-				User:      &gh.User{Login: gh.String("alice")},
-			}}
+			return &ghclient.Issue{
+				ID:        int64Ptr(4242),
+				Number:    intPtr(42),
+				State:     stringPtr("open"),
+				Title:     stringPtr("同一个 GitHub issue"),
+				CreatedAt: timePtr(now),
+				UpdatedAt: timePtr(now),
+				User:      &ghclient.User{Login: stringPtr("alice")},
+			}
 		}
 		results := runConcurrently(2, func(i int) error {
 			_, err := svc.issueService.mirror.upsertGitHubIssue(project.ID, itemFor())
