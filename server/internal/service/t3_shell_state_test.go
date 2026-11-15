@@ -1511,6 +1511,51 @@ func TestShellState_RemovalDuringLegacySwitchIsRecorded(t *testing.T) {
 // intPtrTestLocal 是测试内的小工具：取整型地址。
 func intPtrTestLocal(v int) *int { return &v }
 
+// 批内坏帧出错时，已应用项造成的副作用不能丢（审修 P2）：早先登记的待
+// 对账条目仍要拿到 SettleAt 排程与 dedup 发布，否则连接被判失败后、重连
+// 再落地之前，面会超过宽限期一直 stale。
+func TestShellState_ApplyLegacyErrorStillReturnsEffects(t *testing.T) {
+	state := newT3ShellState()
+	state.archiveStaleGrace = 10 * time.Second
+	if _, _, err := stApplyTracked(state, t3ShellStreamItem{
+		Kind: "snapshot", Snapshot: &t3ShellSnapshot{SchemaVersion: 1, SnapshotSequence: 1, Threads: shellTestThreads(shellTestThread("th-1", "线程"))},
+	}); err != nil {
+		t.Fatalf("seed active: %v", err)
+	}
+	ticket, admitted, _ := state.BeginFetch()
+	if !admitted {
+		t.Fatalf("must admit the on-demand probe")
+	}
+	if eff := state.EndFetch(ticket, t3FetchOutcome{kind: t3FetchMethodMissing, err: errors.New("method missing")}); !eff.ActivateLegacy {
+		t.Fatalf("method missing must activate legacy mode, got %+v", eff)
+	}
+	// legacy 下活跃面移除即登记待对账（armed ≡ legacy）。
+	if _, err := state.ApplyActive([]t3ShellStreamItem{
+		{Kind: "thread.removed", Sequence: intPtrTestLocal(2), ThreadID: "th-1"},
+	}); err != nil {
+		t.Fatalf("apply removal: %v", err)
+	}
+	if stPending(state) == 0 {
+		t.Fatalf("removal under legacy must register uncertainty")
+	}
+
+	// 批内第一项落地、第二项是坏帧：返回错误的同时必须带已累积 Effects。
+	stamp := state.LegacyStamp()
+	eff, err := state.ApplyLegacy(stamp, []t3ArchiveStreamItem{
+		{Kind: "thread.updated", Sequence: intPtrTestLocal(3), Thread: shellTestThread("th-a", "归档")},
+		{Kind: "thread.updated"},
+	})
+	if err == nil {
+		t.Fatalf("a malformed item must fail the batch")
+	}
+	if eff.SettleAt.IsZero() {
+		t.Fatalf("registered uncertainty must still get a settle deadline, got %+v", eff)
+	}
+	if eff.Publish != t3PublishDedup {
+		t.Fatalf("batch landing must still publish the face update, got %+v", eff)
+	}
+}
+
 // arm 之后补登记：帧应用发生在 arm 之前时，armed 路径没登记过，帧后回调必须
 // 补上（#156 R8-1）。按全局 armed 标志一刀切会漏掉这些 ID。
 func TestShellState_RegistrationAfterArmCoversEarlierRemoval(t *testing.T) {
@@ -2015,25 +2060,6 @@ func TestShellState_ExpiryKeepsFreshnessFloor(t *testing.T) {
 	}
 }
 
-// 同一批「先移除再回现」的线程不该被帧后回调重新登记（#156 R36）。
-func TestShellState_ExcludeActiveThreads(t *testing.T) {
-	state := newT3ShellState()
-	if _, _, err := stApplyTracked(state, t3ShellStreamItem{
-		Kind: "snapshot", Snapshot: &t3ShellSnapshot{SchemaVersion: 1, SnapshotSequence: 1, Threads: shellTestThreads(shellTestThread("th-1", "线程"))},
-	}); err != nil {
-		t.Fatalf("seed active: %v", err)
-	}
-	if _, _, err := stApplyTracked(state, t3ShellStreamItem{
-		Kind: "thread.updated", Sequence: intPtrTestLocal(2), Location: "active",
-		Thread: shellTestThread("th-1", "线程"),
-	}); err != nil {
-		t.Fatalf("apply active update: %v", err)
-	}
-	if got := stExclude(state, []string{"th-1", "th-2"}); len(got) != 1 || got[0] != "th-2" {
-		t.Fatalf("only non-active threads may stay, got %v", got)
-	}
-}
-
 // 订阅路径：变更前采集的快照（observedAt 早于 floor）只换数据、不能封窗，
 // 也不再请求重连（#156 R38：批量归档期间重连风暴比多等一个宽限更糟）。
 func TestShellState_StreamPrestaleSnapshotDoesNotReconnect(t *testing.T) {
@@ -2171,12 +2197,6 @@ func stEarliest(s *t3ShellState) (time.Time, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.earliestUncertainDeadlineLocked()
-}
-
-func stExclude(s *t3ShellState, ids []string) []string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.excludeActiveThreadsLocked(ids)
 }
 
 func stPending(s *t3ShellState) int {

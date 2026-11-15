@@ -797,18 +797,6 @@ func (s *t3ShellState) refreshArchiveMembershipTrustLocked() {
 	}
 }
 
-// excludeActiveThreadsLocked 是无锁内核（调用方须持 s.mu）。
-func (s *t3ShellState) excludeActiveThreadsLocked(ids []string) []string {
-	out := make([]string, 0, len(ids))
-	for _, id := range ids {
-		if _, active := s.activeThreads.byID[id]; active {
-			continue
-		}
-		out = append(out, id)
-	}
-	return out
-}
-
 // earliestUncertainDeadlineLocked 是无锁内核（调用方须持 s.mu）。
 func (s *t3ShellState) earliestUncertainDeadlineLocked() (time.Time, bool) {
 	var earliest time.Time
@@ -1000,7 +988,7 @@ func (k t3PublishKind) stronger(o t3PublishKind) t3PublishKind {
 
 // t3ShellEffects 是状态机写方法返回的声明式副作用清单。hub 侧统一执行器
 // runEffects 按固定顺序执行：排定时器 → 重连信号 → 激活 legacy → 发布 →
-// refresh → 补拉。多个转移的 Effects 按 OR 合并（Publish 取强者）。
+// refresh → 补拉。单次调用内分段结算用 Publish.stronger 取强档。
 type t3ShellEffects struct {
 	Publish         t3PublishKind
 	Refresh         bool      // e.refresh()：可信标记可能翻转，唤醒等待者
@@ -1011,21 +999,6 @@ type t3ShellEffects struct {
 	// Err 携带需要调用方代记日志的失败原因（状态机纯内存不持 logger）；
 	// runEffects 不消费它，由调用方按需 Warn。
 	Err error
-}
-
-// merge 按 OR 合并另一份 Effects（同一次转移的多个子效果聚合）。
-func (e *t3ShellEffects) merge(o t3ShellEffects) {
-	e.Publish = e.Publish.stronger(o.Publish)
-	e.Refresh = e.Refresh || o.Refresh
-	e.SignalReconnect = e.SignalReconnect || o.SignalReconnect
-	e.ActivateLegacy = e.ActivateLegacy || o.ActivateLegacy
-	if e.SettleAt.IsZero() || (!o.SettleAt.IsZero() && o.SettleAt.Before(e.SettleAt)) {
-		e.SettleAt = o.SettleAt
-	}
-	e.Refetch = e.Refetch || o.Refetch
-	if e.Err == nil {
-		e.Err = o.Err
-	}
 }
 
 // t3FetchTicket 是 BeginFetch 准入时取样的拉取证：失效世代（落地世代护栏）
@@ -1298,11 +1271,16 @@ func (s *t3ShellState) ApplyLegacy(stamp t3LegacyStamp, items []t3ArchiveStreamI
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var eff t3ShellEffects
+	var applyErr error
 	for i := range items {
 		if err := s.applyArchiveItemLocked(&items[i], stamp.gen, stamp.at); err != nil {
-			return eff, err
+			applyErr = err
+			break
 		}
 	}
+	// 批内出错也照常结算 Effects（与 ApplyActive 同型，审修 P2）：早先项已
+	// 登记的待对账条目不能因后续坏帧丢到期排程——连接虽将被判失败清表，
+	// 但在监督循环重连再落地之前，SettleAt 是唯一按宽限清理的通道。
 	if s.archiveReconnectPendingGen > stamp.gen {
 		eff.SignalReconnect = true
 	}
@@ -1312,7 +1290,7 @@ func (s *t3ShellState) ApplyLegacy(stamp t3LegacyStamp, items []t3ArchiveStreamI
 		}
 	}
 	eff.Publish = eff.Publish.stronger(t3PublishDedup)
-	return eff, nil
+	return eff, applyErr
 }
 
 // LegacyEnded 是旧面订阅连接的统一收尾（G1）：legacy 模式下任何终止都
