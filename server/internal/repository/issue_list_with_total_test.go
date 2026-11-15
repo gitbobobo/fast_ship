@@ -277,18 +277,16 @@ func TestIssueListWithTotal_ExplainPlan(t *testing.T) {
 		if listSQL == "" {
 			t.Fatalf("生产方法未发出窗口 SQL（%d 条）：q=%q", len(recorder.queries), tc.query)
 		}
-		// 守卫只作用于投影段：body 允许出现在 WHERE 的 LIKE 搜索里，
-		// 不变量是列表响应不携带正文，而非 SQL 全文不含该列名。
+		// 守卫用白名单等值：投影必须恰好是 issueListColumns + 窗口计数列，
+		// 不变量是列表响应不携带正文。issues.body、body_html、非限定 body、
+		// issues.*/裸 * 通配、额外列、投影内子查询等任何偏离都不等值而失败。
 		projEnd := strings.Index(listSQL, " FROM ")
 		if projEnd < 0 {
 			t.Fatalf("无法定位投影段：%s", listSQL)
 		}
-		projection := listSQL[:projEnd]
-		if strings.Contains(projection, "issues.body") || strings.Contains(projection, "body_html") {
-			t.Fatalf("生产窗口 SQL 投影不得携带正文列：%s", listSQL)
-		}
-		if strings.Contains(projection, "issues.*") {
-			t.Fatalf("生产窗口 SQL 投影不得退化为 issues.* 通配：%s", listSQL)
+		wantProjection := "SELECT " + issueListColumns + ", COUNT(*) OVER() AS match_total"
+		if projection := listSQL[:projEnd]; projection != wantProjection {
+			t.Fatalf("生产窗口 SQL 投影偏离白名单（不得携带正文列、通配投影或额外列）：\n got: %s\nwant: %s", projection, wantProjection)
 		}
 		if !strings.Contains(listSQL, "LIMIT") {
 			t.Fatalf("生产窗口 SQL 缺 LIMIT：%s", listSQL)
