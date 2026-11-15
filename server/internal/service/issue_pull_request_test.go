@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/godbobo/fast_ship/server/internal/forge"
 	"github.com/godbobo/fast_ship/server/internal/githubapi"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
@@ -77,11 +78,11 @@ func withTestGitHubToken(t *testing.T, svc *testServices) func(*model.Project) {
 
 func stubPullRequestClient(t *testing.T, svc *testServices, fake *fakeIssueGitHubClient, wantToken string) {
 	t.Helper()
-	svc.issueService.newPRClient = func(token string) githubapi.GitHubClient {
+	svc.issueService.newPRClient = func(token string) pullRequestReader {
 		if token != wantToken {
 			t.Fatalf("unexpected token: %q", token)
 		}
-		return fake
+		return forge.NewGitHubReviewClient(fake, 0)
 	}
 }
 
@@ -114,11 +115,11 @@ func TestIssueServiceAttachPullRequest_InternalIssueSucceeds(t *testing.T) {
 			gotRepo = repo
 		},
 	}
-	svc.issueService.newPRClient = func(token string) githubapi.GitHubClient {
+	svc.issueService.newPRClient = func(token string) pullRequestReader {
 		if token != "" {
 			t.Fatalf("expected empty token for internal project, got %q", token)
 		}
-		return fake
+		return forge.NewGitHubReviewClient(fake, 0)
 	}
 
 	resp, err := svc.issueService.AttachIssuePullRequest(issue.ID, user.ID, AttachIssuePullRequestRequest{
@@ -206,11 +207,11 @@ func TestIssueServiceAttachPullRequest_CrossRepoURL(t *testing.T) {
 			gotRepo = repo
 		},
 	}
-	svc.issueService.newPRClient = func(token string) githubapi.GitHubClient {
+	svc.issueService.newPRClient = func(token string) pullRequestReader {
 		if token != "gh-token" {
 			t.Fatalf("expected decrypted project token, got %q", token)
 		}
-		return fake
+		return forge.NewGitHubReviewClient(fake, 0)
 	}
 
 	resp, err := svc.issueService.AttachIssuePullRequest(issue.ID, user.ID, AttachIssuePullRequestRequest{
@@ -233,7 +234,7 @@ func TestIssueServiceAttachPullRequest_RejectsBadURL(t *testing.T) {
 	project := createTestProject(t, svc.db, user.ID, withTestGitHubToken(t, svc))
 	issue := createTestIssue(t, svc.db, project.ID)
 
-	svc.issueService.newPRClient = func(string) githubapi.GitHubClient {
+	svc.issueService.newPRClient = func(string) pullRequestReader {
 		t.Fatalf("github client must not be built for unparseable URL")
 		return nil
 	}
@@ -454,11 +455,11 @@ func TestIssueServiceSyncPullRequests_PartialFailureRecorded(t *testing.T) {
 			"gone/repo": errors.New("404 not found"),
 		},
 	}
-	svc.issueService.newPRClient = func(token string) githubapi.GitHubClient {
+	svc.issueService.newPRClient = func(token string) pullRequestReader {
 		if token != "gh-token" {
 			t.Fatalf("unexpected token: %q", token)
 		}
-		return fake
+		return forge.NewGitHubReviewClient(fake, 0)
 	}
 
 	result, err := svc.issueService.SyncIssuePullRequests(nil, issue.ID, user.ID)
@@ -552,11 +553,11 @@ func TestIssueServiceSyncPullRequests_RenamedRepoCollisionRecorded(t *testing.T)
 			"new-org/repo": {7: canonical},
 		},
 	}
-	svc.issueService.newPRClient = func(token string) githubapi.GitHubClient {
+	svc.issueService.newPRClient = func(token string) pullRequestReader {
 		if token != "gh-token" {
 			t.Fatalf("unexpected token: %q", token)
 		}
-		return fake
+		return forge.NewGitHubReviewClient(fake, 0)
 	}
 
 	result, err := svc.issueService.SyncIssuePullRequests(nil, issue.ID, user.ID)
@@ -1080,7 +1081,7 @@ func TestIssueServiceAttachPullRequest_CorruptCodeTokenNoFallback(t *testing.T) 
 	})
 	issue := createInternalTestIssue(t, svc.db, project.ID)
 
-	svc.issueService.newPRClient = func(string) githubapi.GitHubClient {
+	svc.issueService.newPRClient = func(string) pullRequestReader {
 		t.Fatalf("github client must not be built when code token decryption fails")
 		return nil
 	}
@@ -1277,11 +1278,11 @@ func TestIssueServiceSyncPullRequests_UsesCodeTokenAndNamesIt(t *testing.T) {
 			"gone/repo": &githubapi.StatusError{StatusCode: http.StatusNotFound, Method: http.MethodGet, URL: "/repos/gone/repo/pulls/9"},
 		},
 	}
-	svc.issueService.newPRClient = func(token string) githubapi.GitHubClient {
+	svc.issueService.newPRClient = func(token string) pullRequestReader {
 		if token != "code-token" {
 			t.Fatalf("expected code token, got %q", token)
 		}
-		return fake
+		return forge.NewGitHubReviewClient(fake, 0)
 	}
 
 	result, err := svc.issueService.SyncIssuePullRequests(nil, issue.ID, user.ID)
@@ -1322,7 +1323,7 @@ func TestIssueServiceSyncPullRequests_CorruptCodeTokenRecorded(t *testing.T) {
 		t.Fatalf("seed link: %v", err)
 	}
 
-	svc.issueService.newPRClient = func(string) githubapi.GitHubClient {
+	svc.issueService.newPRClient = func(string) pullRequestReader {
 		t.Fatalf("github client must not be built when pr token decryption fails")
 		return nil
 	}
