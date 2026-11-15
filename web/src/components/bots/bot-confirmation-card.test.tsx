@@ -22,6 +22,7 @@ function makeCall(overrides: Partial<BotCall> = {}): BotCall {
     execution_mode: "async",
     requires_confirmation: true,
     status: "pending_confirmation",
+    revision: 0,
     created_at: "2026-10-17T01:00:00Z",
     ...overrides,
   };

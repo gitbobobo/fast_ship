@@ -266,6 +266,7 @@ const pendingCall: BotCall = {
   execution_mode: "sync",
   requires_confirmation: true,
   status: "pending_confirmation",
+  revision: 0,
   created_at: "2026-10-18T00:00:01Z",
 };
 
@@ -342,6 +343,7 @@ describe("BotMessageView 中间回合隐藏", () => {
     execution_mode: "sync",
     requires_confirmation: false,
     status: "running",
+    revision: 0,
     created_at: "2026-10-18T00:00:01Z",
   };
 
@@ -409,6 +411,7 @@ const scheduleCreateCall: BotCall = {
   execution_mode: "async",
   requires_confirmation: true,
   status: "succeeded",
+  revision: 0,
   execution_context: {
     schedule: {
       task_id: "task-0001",

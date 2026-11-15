@@ -17,6 +17,19 @@ func NewBotToolCallRepository(db *gorm.DB) *BotToolCallRepository {
 	return &BotToolCallRepository{db: db}
 }
 
+// botCallUpdateCols 给调用行的更新统一注入 revision 自增（INT-217）：
+// revision 与状态 CAS 同一条 UPDATE +1，行内单调，浏览器只按 revision 覆盖。
+// 所有改投影字段的仓储方法都必须经它，调用方不可能忘；非投影字段多 bump
+// 无害。BackfillResultItems 明确不走这里（result_items 不进 API 投影）。
+func botCallUpdateCols(cols map[string]interface{}) map[string]interface{} {
+	out := make(map[string]interface{}, len(cols)+1)
+	for k, v := range cols {
+		out[k] = v
+	}
+	out["revision"] = gorm.Expr("revision + 1")
+	return out
+}
+
 func (r *BotToolCallRepository) CreateTx(tx *gorm.DB, call *model.BotToolCall) error {
 	return tx.Create(call).Error
 }
@@ -272,7 +285,7 @@ func (r *BotToolCallRepository) ListScheduleDeniedByRunTx(tx *gorm.DB, runID str
 func (r *BotToolCallRepository) ClaimQueuedTx(tx *gorm.DB, callID string, startedAt time.Time) (bool, error) {
 	res := tx.Model(&model.BotToolCall{}).
 		Where("id = ? AND status = ?", callID, model.BotCallStatusQueued).
-		Updates(map[string]interface{}{"status": model.BotCallStatusRunning, "started_at": startedAt})
+		Updates(botCallUpdateCols(map[string]interface{}{"status": model.BotCallStatusRunning, "started_at": startedAt}))
 	if res.Error != nil {
 		return false, res.Error
 	}
@@ -286,7 +299,7 @@ func (r *BotToolCallRepository) UpdateWhere(callID string, fromStatus string, co
 	if fromStatus != "" {
 		q = q.Where("status = ?", fromStatus)
 	}
-	res := q.Updates(cols)
+	res := q.Updates(botCallUpdateCols(cols))
 	if res.Error != nil {
 		return false, res.Error
 	}
@@ -301,7 +314,7 @@ func (r *BotToolCallRepository) UpdateWhereRunningFreshTx(tx *gorm.DB, callID st
 	res := tx.Model(&model.BotToolCall{}).
 		Where("id = ? AND status = ? AND cancel_requested_at IS NULL",
 			callID, model.BotCallStatusRunning).
-		Updates(cols)
+		Updates(botCallUpdateCols(cols))
 	if res.Error != nil {
 		return false, res.Error
 	}
@@ -314,7 +327,7 @@ func (r *BotToolCallRepository) UpdateWhereRunningFreshTx(tx *gorm.DB, callID st
 func (r *BotToolCallRepository) UpdateWhereUnfinishedTx(tx *gorm.DB, callID string, cols map[string]interface{}) (bool, error) {
 	res := tx.Model(&model.BotToolCall{}).
 		Where("id = ? AND finished_at IS NULL", callID).
-		Updates(cols)
+		Updates(botCallUpdateCols(cols))
 	if res.Error != nil {
 		return false, res.Error
 	}
@@ -327,7 +340,7 @@ func (r *BotToolCallRepository) UpdateWhereTx(tx *gorm.DB, callID string, fromSt
 	if fromStatus != "" {
 		q = q.Where("status = ?", fromStatus)
 	}
-	res := q.Updates(cols)
+	res := q.Updates(botCallUpdateCols(cols))
 	if res.Error != nil {
 		return false, res.Error
 	}

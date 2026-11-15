@@ -1064,6 +1064,39 @@ CAS 为 queued；reject：置 rejected 并落唯一终态；always_allow：同�
 认领前重新核对归属与授权；撤销只写 `revoked_at` 并让尚未认领的调用回到待
 确认。重复相同决定幂等，冲突决定 40926。
 
+### 调用状态序与 revision（INT-217）
+
+调用状态序曾有两份实现：服务端 CAS 状态转移与浏览器 `use-bot-chat.ts` 的
+`CALL_STATUS_RANK`（快照/SSE 交错时按状态排名补洞）。定案：服务端为调用行发
+单调代次，浏览器只按 revision 覆盖，不再按状态排名猜先后。
+
+- **行内单调**：`bot_tool_calls.revision` 在仓储层集中注入——全部改投影字段
+  的更新方法（`ClaimQueuedTx`/`UpdateWhere`/`UpdateWhereTx`/
+  `UpdateWhereRunningFreshTx`/`UpdateWhereUnfinishedTx`）经
+  `botCallUpdateCols` 在与状态 CAS 同一条 UPDATE 里 `revision = revision + 1`；
+  0 行（CAS 失败）不 bump，非投影字段多 bump 无害。`EnsureBotSchema` 的
+  running wait 去重直落终态也 +1。`BackfillResultItems` 明确不 bump
+  （result_items 不进 API 投影）。
+- **事件完整投影**：所有 `tool_call`/`tool_result` 事件的 payload 携带提交时点
+  的完整 `botToolCallResponseOf` 投影（自然含 revision）。事务内事件经
+  `callProjectionTx(tx, callID)` 重读该行构造——内存对象在 CAS 后只反映改动
+  字段；例外是提案事件（行在同一事务内刚创建，rev=0）与撞重 wait 的后台
+  结果，二者直接用事务内内存对象，值与提交时点一致。异步后台结果的完整投影
+  嵌在 payload 的 `call` 字段，顶层保留 web 已消费的 `status`/`message_id`
+  /`message` 等（避免隐性字段污染）；决定事件仍在事务外发，但带的是决定事务
+  提交时点的投影——worker 抢先发了 running 时，迟到的决定事件 revision 更小，
+  浏览器自动忽略，不会把 running 回退成 queued。
+- **浏览器合并**：`mergeCall` 单一规则——缓存无记录用 incoming；
+  `incoming.revision` 更大整条替换；相等按字段合并（undefined 不覆盖，
+  显式 null 不清缓存里已有的非空事实）；更小保留缓存。revision 运行时缺省
+  按 0（旧数据兜底，与同样缺省的缓存同分退化为字段合并；无缓存且缺
+  revision 的旧事件重放垫最小占位形状）。快照安装
+  （`mergeCallSnapshots`）、SSE 折叠与 HTTP 响应共用这条规则；`RUN_STATUS_RANK`
+  与 run 合并、bot 水位合并不变。
+- **代次空档是预期**：取消标记（`cancel_requested_at`，走 `UpdateWhere`）
+  会 bump revision 但不发事件——订阅端会观察到 running(rev N) →
+  cancelled(rev N+2)，中间的 N+1 没有对应事件；合并只比较数值，不是异常。
+
 ## 外部内容围栏与平台事件 nonce（INT-136）
 
 动机：从 GitHub 同步的 Issue 标题/正文、评论、时间线，以及 T3 线程标题与

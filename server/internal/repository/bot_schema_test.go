@@ -77,6 +77,14 @@ func TestEnsureBotSchemaDedupesRunningWaits(t *testing.T) {
 	if other.Status != model.BotCallStatusRunning {
 		t.Fatalf("异线程 wait 不应被误清: %s", other.Status)
 	}
+	// 直落终态也 bump revision（INT-217）：被移出 running 的行代次前进，
+	// 保留行与异线程行不动。
+	if dropped.Revision != 1 {
+		t.Fatalf("去重落 failed 的行 revision 应为 1，实得 %d", dropped.Revision)
+	}
+	if kept.Revision != 0 || other.Revision != 0 {
+		t.Fatalf("保留行不得 bump: kept=%d other=%d", kept.Revision, other.Revision)
+	}
 
 	// 索引已建好：同键再插 running 必须被拒。
 	dup := &model.BotToolCall{

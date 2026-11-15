@@ -117,6 +117,7 @@ const queuedCall: BotCall = {
   execution_mode: "async",
   requires_confirmation: true,
   status: "queued",
+  revision: 1,
   created_at: "2026-10-15T00:00:40Z",
 };
 
@@ -190,7 +191,7 @@ describe("useBotChat", () => {
 
     emit(
       "tool_result",
-      { call_id: "c1", phase: "terminal", payload: { id: "c1", status: "succeeded" } },
+      { call_id: "c1", phase: "terminal", payload: { id: "c1", status: "succeeded", revision: 2 } },
       20,
     );
     await waitFor(() => expect(result.current.calls[0]?.status).toBe("succeeded"));
@@ -1282,6 +1283,7 @@ describe("useBotChat", () => {
       execution_mode: "async",
       requires_confirmation: true,
       status: "pending_confirmation",
+      revision: 0,
       created_at: "2026-10-15T00:00:40Z",
     };
     api.getChatSnapshot.mockResolvedValue(snapshotWith({ calls: [pending] }));
@@ -1527,45 +1529,197 @@ describe("foldStreamEvent", () => {
       label: "去设置",
     });
   });
-  it("同分快照也合并：权威快照补齐缓存缺失的终态字段", () => {
-    const previous: BotCall[] = [{
-      id: "call-1", bot_id: "bot-1", tool_name: "fs_issue", action: "create",
-      status: "failed", created_at: "2026-01-01T00:00:00Z",
-    } as unknown as BotCall];
-    const authoritative: BotCall = {
-      id: "call-1", bot_id: "bot-1", tool_name: "fs_issue", action: "create",
-      status: "failed", error_code: "github_unauthorized", error_message: "402",
+  // 完整调用投影 fixture（服务端事件/快照的 payload 形状，INT-217）。
+  function callProjection(
+    id: string,
+    status: BotCall["status"],
+    revision: number,
+    extra: Partial<BotCall> = {},
+  ): BotCall {
+    return {
+      id,
+      bot_id: "bot-1",
+      tool_name: "fs_issue",
+      action: "update",
+      arguments: {},
+      execution_mode: "async",
+      requires_confirmation: false,
+      status,
+      revision,
+      decision: null,
+      decided_at: null,
+      execution_context: {},
+      result_preview: null,
+      truncated: false,
+      error_code: null,
+      error_message: null,
+      effect_may_have_occurred: false,
       created_at: "2026-01-01T00:00:00Z",
-    } as unknown as BotCall;
+      started_at: null,
+      finished_at: null,
+      ...extra,
+    };
+  }
+
+  it("同 revision 快照也合并：补齐缓存缺失的终态字段，反向不丢已有字段", () => {
+    const previous = [callProjection("call-1", "failed", 3)];
+    const authoritative = callProjection("call-1", "failed", 3, {
+      error_code: "github_unauthorized",
+      error_message: "402",
+    });
     const merged = mergeCallSnapshots(previous, [authoritative]);
     expect(merged[0].error_code).toBe("github_unauthorized");
-    // 反向（快照更旧更空）也不丢缓存里已有的字段。
-    const back = mergeCallSnapshots([authoritative], [{
-      id: "call-1", bot_id: "bot-1", tool_name: "fs_issue", action: "create",
-      status: "failed", created_at: "2026-01-01T00:00:00Z",
-    } as unknown as BotCall]);
+    // 反向（快照更旧更空、同 revision）也不丢缓存里已有的字段。
+    const back = mergeCallSnapshots([authoritative], previous);
     expect(back[0].error_code).toBe("github_unauthorized");
   });
-  it("快照合并顺着批准转移方向：queued 胜过缓存的 pending_confirmation", () => {
+
+  it("旧快照不回退 SSE 已折叠的新状态：revision 小者丢弃", () => {
+    const cached = [callProjection("call-1", "running", 2)];
+    const stale = [callProjection("call-1", "queued", 1)];
+    const merged = mergeCallSnapshots(cached, stale);
+    expect(merged[0].status).toBe("running");
+    expect(merged[0].revision).toBe(2);
+  });
+
+  it("新 SSE 覆盖旧快照：revision 大者整条替换", () => {
     const { state, sinks: sinksObj } = sinks();
-    state.calls = [{
-      id: "call-1", bot_id: "bot-1", tool_name: "fs_issue", action: "create",
-      status: "pending_confirmation", created_at: "2026-01-01T00:00:00Z",
-    } as unknown as BotCall];
+    state.calls = [callProjection("call-1", "queued", 1)];
     foldStreamEvent(
       {
-        event: "tool_call",
+        event: "tool_result",
         data: JSON.stringify({
           call_id: "call-1",
-          payload: { id: "call-1", status: "queued" },
+          payload: callProjection("call-1", "succeeded", 3, {
+            result_preview: { ok: true },
+            finished_at: "2026-01-01T00:05:00Z",
+          }),
         }),
         id: 12,
       },
       sinksObj,
     );
-    expect(state.calls[0].status).toBe("queued");
+    expect(state.calls[0].status).toBe("succeeded");
+    expect(state.calls[0].revision).toBe(3);
+    expect(state.calls[0].result_preview).toEqual({ ok: true });
   });
-  it("异步终态 tool_result 携带完整后台结果消息并入时间线", () => {
+
+  it("整条替换清掉旧非空字段：新投影的 null 不得被缓存粘住", () => {
+    const { state, sinks: sinksObj } = sinks();
+    state.calls = [
+      callProjection("call-1", "running", 2, {
+        error_code: "stale_error",
+        error_message: "旧错误",
+      }),
+    ];
+    foldStreamEvent(
+      {
+        event: "tool_result",
+        data: JSON.stringify({
+          call_id: "call-1",
+          payload: callProjection("call-1", "succeeded", 3),
+        }),
+        id: 13,
+      },
+      sinksObj,
+    );
+    expect(state.calls[0].status).toBe("succeeded");
+    expect(state.calls[0].error_code).toBeNull();
+    expect(state.calls[0].error_message).toBeNull();
+  });
+
+  it("无缓存且缺 revision 的旧事件垫占位形状，incoming 字段覆盖", () => {
+    const { state, sinks: sinksObj } = sinks();
+    foldStreamEvent(
+      {
+        event: "tool_result",
+        data: JSON.stringify({
+          call_id: "call-old",
+          payload: { id: "call-old", status: "rejected" },
+        }),
+        id: 14,
+      },
+      sinksObj,
+    );
+    const merged = state.calls[0];
+    expect(merged.status).toBe("rejected");
+    expect(merged.revision).toBeUndefined();
+    // 占位默认值：缺字段不读穿 undefined（确认卡、后台筛选、工具名插值）。
+    expect(merged.tool_name).toBe("");
+    expect(merged.arguments).toEqual({});
+    expect(merged.execution_mode).toBe("async");
+    expect(merged.requires_confirmation).toBe(true);
+  });
+
+  it("决定事件迟到：running 不被旧 revision 的 queued 投影回退", () => {
+    const { state, sinks: sinksObj } = sinks();
+    // worker 已认领并发了 running（revision 2）；用户决定事务更早提交，
+    // 决定事件带提交时点 revision 1，迟到到达必须被忽略。
+    state.calls = [callProjection("call-1", "running", 2)];
+    foldStreamEvent(
+      {
+        event: "tool_result",
+        data: JSON.stringify({
+          call_id: "call-1",
+          payload: callProjection("call-1", "queued", 1, {
+            decision: "approve",
+          }),
+        }),
+        id: 13,
+      },
+      sinksObj,
+    );
+    expect(state.calls[0].status).toBe("running");
+  });
+
+  it("revertQueuedCall 合法回退：更大 revision 让确认卡重新出现", () => {
+    const { state, sinks: sinksObj } = sinks();
+    state.calls = [callProjection("call-1", "queued", 2)];
+    foldStreamEvent(
+      {
+        event: "tool_call",
+        data: JSON.stringify({
+          call_id: "call-1",
+          payload: callProjection("call-1", "pending_confirmation", 3),
+        }),
+        id: 14,
+      },
+      sinksObj,
+    );
+    expect(state.calls[0].status).toBe("pending_confirmation");
+    expect(state.calls[0].revision).toBe(3);
+  });
+
+  it("缺 revision 的旧事件按 0 兜底：与同样缺省的缓存按字段合并", () => {
+    const { state, sinks: sinksObj } = sinks();
+    // 旧服务端/旧快照没有 revision 字段：双方按 0 同分，保留字段合并行为。
+    state.calls = [
+      {
+        id: "call-1", bot_id: "bot-1", tool_name: "fs_issue", action: "update",
+        status: "queued", created_at: "2026-01-01T00:00:00Z",
+      } as unknown as BotCall,
+    ];
+    foldStreamEvent(
+      {
+        event: "tool_call",
+        data: JSON.stringify({
+          call_id: "call-1",
+          payload: { id: "call-1", status: "running" },
+        }),
+        id: 15,
+      },
+      sinksObj,
+    );
+    expect(state.calls[0].status).toBe("running");
+    // 带新 revision 的快照随后仍能接管缺省 0 的缓存。
+    const upgraded = mergeCallSnapshots(
+      state.calls,
+      [callProjection("call-1", "succeeded", 1)],
+    );
+    expect(upgraded[0].status).toBe("succeeded");
+  });
+
+  it("异步终态 tool_result 的完整投影嵌在 call 字段，顶层字段保留", () => {
     const { state, sinks: sinksObj } = sinks();
     const backgroundMessage: BotMessage = {
       id: "m-bg",
@@ -1581,10 +1735,10 @@ describe("foldStreamEvent", () => {
         data: JSON.stringify({
           call_id: "call-1",
           payload: {
-            id: "call-1",
             status: "succeeded",
             message_id: "m-bg",
             message: backgroundMessage,
+            call: callProjection("call-1", "succeeded", 3),
           },
         }),
         id: 11,
@@ -1592,7 +1746,9 @@ describe("foldStreamEvent", () => {
       sinksObj,
     );
     expect(state.messages.map((m) => m.id)).toEqual(["m-bg"]);
-    expect(state.calls.map((c) => `${c.id}:${c.status}`)).toEqual(["call-1:succeeded"]);
+    expect(state.calls.map((c) => `${c.id}:${c.status}:${c.revision}`)).toEqual([
+      "call-1:succeeded:3",
+    ]);
   });
 
   it("schedule_event delta 折叠为完整消息，与刷新后的账本一致", () => {

@@ -171,41 +171,67 @@ export function mergeMessages(
   return [...byId.values()].sort((a, b) => a.seq - b.seq);
 }
 
-/** SSE 只携带调用快照的部分字段：与已存记录按字段合并，undefined 不覆盖。 */
+/**
+ * revision 运行时缺省按 0：旧服务端/旧快照不带该字段时与同样缺省的缓存
+ * 同分，退化为按字段合并的旧行为（旧数据兜底）。
+ */
+function revisionOf(call: Pick<BotCall, "revision">): number {
+  return typeof call.revision === "number" ? call.revision : 0;
+}
+
+/** 无缓存且缺 revision 的旧持久事件重放用的最小占位形状（沿用旧实现
+ *  的兜底默认值）：缺字段按 undefined 渲染会把确认卡、后台结果筛选和
+ *  工具名插值打穿（INT-217 panel F3 / 云审 Note2）。 */
+const CALL_PLACEHOLDER: Omit<BotCall, "id" | "revision"> = {
+  bot_id: "",
+  tool_name: "",
+  action: "",
+  arguments: {},
+  execution_mode: "async",
+  requires_confirmation: true,
+  status: "queued",
+  created_at: "",
+};
+
+/**
+ * 单一 revision 合并规则（INT-217）：服务端为调用行发单调 revision，每次改
+ * 投影字段的更新与状态 CAS 同一条 UPDATE +1。缓存无记录用 incoming；
+ * incoming.revision 更大整条替换；相等按字段合并（undefined 不覆盖，补齐
+ * 缺失字段）；更小保留缓存——快照与 SSE 交错、决定事件迟到都不再回退新状态。
+ * incoming 应是服务端的完整投影；缺 revision 时按 0 兜底。
+ */
 export function mergeCall(
   previous: BotCall | undefined,
-  patch: Partial<BotCall> & { id: string },
+  incoming: BotCall,
 ): BotCall {
-  const base: BotCall = previous ?? {
-    id: patch.id,
-    bot_id: "",
-    tool_name: "",
-    action: "",
-    arguments: {},
-    execution_mode: "async",
-    requires_confirmation: true,
-    status: "queued",
-    created_at: "",
-  };
-  const merged: BotCall = { ...base };
-  for (const [key, value] of Object.entries(patch)) {
-    if (value !== undefined) {
-      (merged as unknown as Record<string, unknown>)[key] = value;
-    }
+  if (!previous) {
+    // 新服务端的事件/快照都是完整投影，原样入缓存；缺 revision 的旧事件
+    // 只带部分字段，先垫占位形状再覆盖，避免 undefined 读穿。
+    if (typeof incoming.revision === "number") return incoming;
+    return { ...CALL_PLACEHOLDER, ...incoming };
+  }
+  if (revisionOf(incoming) > revisionOf(previous)) return incoming;
+  if (revisionOf(incoming) < revisionOf(previous)) return previous;
+  const merged: BotCall = { ...previous };
+  for (const [key, value] of Object.entries(incoming)) {
+    if (value === undefined) continue;
+    const cached = (merged as unknown as Record<string, unknown>)[key];
+    // 同 revision 意味同一行状态，显式 null 只是投影的字段缺省：不清掉
+    // 缓存里已折叠到的非空事实（如终态 error_code）。
+    if (value === null && cached != null) continue;
+    (merged as unknown as Record<string, unknown>)[key] = value;
   }
   return merged;
 }
 
 export function mergeCalls(
   previous: BotCall[],
-  patch: Partial<BotCall> & { id: string },
+  incoming: BotCall,
 ): BotCall[] {
-  const index = previous.findIndex((c) => c.id === patch.id);
-  if (index === -1) {
-    return [...previous, mergeCall(undefined, patch)];
-  }
+  const index = previous.findIndex((c) => c.id === incoming.id);
+  if (index === -1) return [...previous, mergeCall(undefined, incoming)];
   const next = [...previous];
-  next[index] = mergeCall(previous[index], patch);
+  next[index] = mergeCall(previous[index], incoming);
   return next;
 }
 
@@ -228,20 +254,6 @@ export function mergeRun(
 
 // ---- 快照安装合并：防止迟到的旧快照覆盖 SSE 已折叠的新状态 ----
 
-/** 状态推进序：更靠后的状态胜出；同分保留已缓存值。
- *  批准转移是 pending_confirmation → queued，序必须顺着转移方向，
- *  否则权威快照里的 queued 会输给缓存里的旧待确认卡。 */
-const CALL_STATUS_RANK: Record<BotCallStatus, number> = {
-  pending_confirmation: 0,
-  queued: 1,
-  running: 2,
-  succeeded: 3,
-  failed: 3,
-  rejected: 3,
-  cancelled: 3,
-  not_executed: 3,
-};
-
 /** run 状态推进序：终态 > running > queued；同分保留已缓存值。 */
 const RUN_STATUS_RANK: Record<BotRunStatus, number> = {
   queued: 0,
@@ -257,14 +269,7 @@ export function mergeCallSnapshots(
 ): BotCall[] {
   const merged = new Map(previous.map((c) => [c.id, c]));
   for (const call of incoming) {
-    const cached = merged.get(call.id);
-    if (!cached || CALL_STATUS_RANK[call.status] > CALL_STATUS_RANK[cached.status]) {
-      merged.set(call.id, call);
-    } else if (CALL_STATUS_RANK[call.status] === CALL_STATUS_RANK[cached.status]) {
-      // 同分也合并：缓存里的终态可能缺 error/result 元数据（只收到过
-      // 状态级 tool_result 事件的标签页），权威快照字段更全就补齐。
-      merged.set(call.id, { ...cached, ...call });
-    }
+    merged.set(call.id, mergeCall(merged.get(call.id), call));
   }
   return [...merged.values()];
 }
@@ -495,20 +500,22 @@ export function foldStreamEvent(
     }
     case "tool_call":
     case "tool_result": {
-      const patch = (data.payload ?? {}) as Partial<BotCall>;
+      const raw = (data.payload ?? {}) as {
+        call?: BotCall | undefined;
+        message?: BotMessage | undefined;
+      } & Partial<BotCall>;
+      // 异步后台结果把完整调用投影嵌在 call 字段（顶层保留 web 已消费的
+      // status/message_id/message 等，避免隐性字段污染）；其余调用事件
+      // payload 顶层即完整投影。
+      const patch: Partial<BotCall> = raw.call ?? raw;
       const id = patch.id ?? data.call_id;
       if (!id) break;
       // 全量列表进 mergeCalls：只传匹配项会把缓存整表替换成一个调用，
       // 第二张确认卡一出现就把第一张挤掉。
-      sinks.setCalls(mergeCalls(sinks.getCalls(), { ...patch, id }));
+      sinks.setCalls(mergeCalls(sinks.getCalls(), { ...patch, id } as BotCall));
       // 异步终态事件的平台后台结果带完整消息投影：不等快照重读直接入时间线。
-      const resultPayload = data.payload as
-        | { message?: BotMessage | undefined }
-        | undefined;
-      if (resultPayload?.message?.id) {
-        sinks.setMessages(
-          mergeMessages(sinks.getMessages(), [resultPayload.message]),
-        );
+      if (raw.message?.id) {
+        sinks.setMessages(mergeMessages(sinks.getMessages(), [raw.message]));
       }
       break;
     }

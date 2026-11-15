@@ -89,6 +89,7 @@ type BotToolCallResponse struct {
 	ExecutionMode         string          `json:"execution_mode"`
 	RequiresConfirmation  bool            `json:"requires_confirmation"`
 	Status                string          `json:"status"`
+	Revision              int64           `json:"revision"`
 	Decision              *string         `json:"decision"`
 	DecidedAt             *string         `json:"decided_at"`
 	AuthorizationID       *string         `json:"authorization_id"`
@@ -117,6 +118,7 @@ func botToolCallResponseOf(call *model.BotToolCall) BotToolCallResponse {
 		ExecutionMode:         call.ExecutionMode,
 		RequiresConfirmation:  call.RequiresConfirmation,
 		Status:                string(call.Status),
+		Revision:              call.Revision,
 		Decision:              call.Decision,
 		DecidedAt:             rfc3339(call.DecidedAt),
 		AuthorizationID:       call.AuthorizationID,
@@ -141,7 +143,10 @@ func botToolCallResponseOf(call *model.BotToolCall) BotToolCallResponse {
 		// 徽标与降级/过期说明。
 		resp.Policy = json.RawMessage(call.PolicyJSON)
 	}
-	if call.ResultPreviewJSON != nil {
+	if call.ResultPreviewJSON != nil && json.Valid([]byte(*call.ResultPreviewJSON)) {
+		// 非法 JSON（含历史竞速路径写脏的空串）按无结果处理：RawMessage
+		// 携带不合法字节会让 MarshalJSON 报错，把终态事务整个回滚，
+		// 异步调用将停在 running 等重启恢复（INT-217 审查 P2）。
 		resp.ResultPreview = json.RawMessage(*call.ResultPreviewJSON)
 	}
 	return resp
@@ -174,6 +179,15 @@ func botAuthorizationResponseOf(a *model.BotAuthorization) BotAuthorizationRespo
 		ExpiresAt:     rfc3339(a.ExpiresAt),
 		RevokedAt:     rfc3339(a.RevokedAt),
 	}
+}
+
+func (s *BotService) callProjectionTx(tx *gorm.DB, callID string) (*BotToolCallResponse, error) {
+	row, err := repository.NewBotToolCallRepository(tx).FindByID(callID)
+	if err != nil {
+		return nil, err
+	}
+	resp := botToolCallResponseOf(row)
+	return &resp, nil
 }
 
 // CallDecisionRequest 是确认卡片的决定。
@@ -219,6 +233,8 @@ func (s *BotService) DecideCall(userID, botID, callID string, req *CallDecisionR
 
 	now := time.Now().UTC()
 	decisionStr := string(decision)
+	// 事务提交时点的完整调用投影，供事务外的决定事件使用。
+	var decisionProjection *BotToolCallResponse
 
 	// always_allow 的精确授权值：同一事务中建立并批准当前调用。
 	var newAuthz *model.BotAuthorization
@@ -292,6 +308,15 @@ func (s *BotService) DecideCall(userID, botID, callID string, req *CallDecisionR
 		if !ok {
 			return errs.ErrBotCallStateConflict
 		}
+		// 决定事件的 revision 必须是本事务提交时点的行 revision：worker
+		// 抢先认领并发了 running 事件时，决定事件仍在事务外按原发点发出，
+		// 但带的是旧 revision——浏览器按 revision 覆盖，迟到的决定事件
+		// 自动被忽略，不会把 running 回退成 queued（INT-217）。
+		projection, perr := s.callProjectionTx(tx, callID)
+		if perr != nil {
+			return perr
+		}
+		decisionProjection = projection
 		// 审计决定消息（幂等）。
 		if err := s.appendAuditMessageTx(tx, botID, call, func(seq int64) *model.BotMessage {
 			raw, _ := json.Marshal(botDecisionContent{CallID: callID, Decision: decisionStr})
@@ -319,16 +344,15 @@ func (s *BotService) DecideCall(userID, botID, callID string, req *CallDecisionR
 		return nil, errs.New(errs.ErrInternal.Code, "决定事务失败: "+botErrMessage(txErr))
 	}
 
-	// 决定后事件与 worker 唤醒（事务外）。
+	// 决定后事件与 worker 唤醒（事务外）：事件负载带完整投影与提交时点
+	// revision（见事务内说明）。
 	callIDCopy := callID
 	// 分级放行误判检测（INT-160）：用户方向是事实源——拒批同目标写、或批准
 	// 与刚自动放行动作方向相反的写，都按 (rule, scope) 记一次误判。
 	s.detectPolicyMisjudgeOnDecision(botID, call, decisionStr)
 	s.emitEvent(botID, nil, callIDCopy, model.BotEventToolResult, botEventEnvelope{
 		Kind: "tool_result", Phase: "decision",
-		Payload: map[string]interface{}{"decision": decisionStr, "status": map[bool]string{
-			true: string(model.BotCallStatusRejected), false: string(model.BotCallStatusQueued),
-		}[decision == model.BotDecisionReject]},
+		Payload: *decisionProjection,
 	})
 	if decision != model.BotDecisionReject {
 		s.enqueueCallWork(callID)

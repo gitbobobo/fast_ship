@@ -12,6 +12,7 @@ function makeScheduleCall(overrides: Partial<BotCall> = {}): BotCall {
     execution_mode: "async",
     requires_confirmation: true,
     status: "succeeded",
+    revision: 0,
     execution_context: {
       schedule: {
         task_id: "task-0001",

@@ -16054,7 +16054,7 @@ components:
 
     BotToolCall:
       type: object
-      required: [id, bot_id, request_id, provider_tool_call_id, tool_name, action, arguments, execution_mode, requires_confirmation, status, execution_context, result_chars, truncated, effect_may_have_occurred, created_at]
+      required: [id, bot_id, request_id, provider_tool_call_id, tool_name, action, arguments, execution_mode, requires_confirmation, status, revision, execution_context, result_chars, truncated, effect_may_have_occurred, created_at]
       properties:
         id:
           type: string
@@ -16081,6 +16081,13 @@ components:
         status:
           type: string
           description: pending_confirmation / queued / running / succeeded / failed / rejected / cancelled / not_executed
+        revision:
+          type: integer
+          format: int64
+          description: |
+            单调代次（INT-217）：每次改投影字段的更新与状态 CAS 在同一条
+            UPDATE 里 +1；浏览器只按 revision 覆盖（大者胜，相等补字段，
+            小者丢弃），快照与 SSE 交错时不再按状态排名猜先后。
         decision:
           type: string
           nullable: true

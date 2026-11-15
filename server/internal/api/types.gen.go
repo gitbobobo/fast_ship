@@ -2259,7 +2259,12 @@ type BotToolCall struct {
 
 	// ResultPreview 进入模型上下文的受限结果（完整结果走 result 端点）
 	ResultPreview map[string]interface{} `json:"result_preview,omitempty"`
-	StartedAt     *string                `json:"started_at,omitempty"`
+
+	// Revision 单调代次（INT-217）：每次改投影字段的更新与状态 CAS 在同一条
+	// UPDATE 里 +1；浏览器只按 revision 覆盖（大者胜，相等补字段，
+	// 小者丢弃），快照与 SSE 交错时不再按状态排名猜先后。
+	Revision  int64   `json:"revision"`
+	StartedAt *string `json:"started_at,omitempty"`
 
 	// Status pending_confirmation / queued / running / succeeded / failed / rejected / cancelled / not_executed
 	Status    string `json:"status"`
