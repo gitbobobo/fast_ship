@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 
 	"go.uber.org/zap"
@@ -38,71 +37,23 @@ import (
 //     谎报列表完整。
 //   - 世代护栏：拉取发起时记一个失效计数（generation），落地时计数已变
 //     （拉取途中发生失效）则该结果是写前状态——只换数据不封可信窗口、不
-//     记失败冷却，并置 arch.needsRefetch；落地收尾（kick 的后台 defer）
-//     消费该标志，立即补发一次写后拉取，不依赖外部再读一次。
+//     记失败冷却；EndFetch 以 Effects.Refetch 表达补拉诉求，落地收尾
+//     （runEffects）立即补发一次写后拉取，不依赖外部再读一次。
 //   - 坏负载分派（复审遗留：不得与世代不符合并成同一种 false）：
 //     applyArchiveSnapshot 拒收的快照（如线程缺 ID 的结构性坏数据）是
-//     「本次读取失败」，走 noteArchiveFetchFailed 记 ArchiveErr 真实原因 +
-//     retryAfter 冷却——否则毒快照每次读取都立即重拨、永不冷却；世代
-//     语义由失败路径自行判定（写前坏负载不记冷却、只留 needsRefetch）。
+//     「本次读取失败」，记 ArchiveErr 真实原因 + retryAfter 冷却——否则
+//     毒快照每次读取都立即重拨、永不冷却；世代语义由失败路径自行判定
+//     （写前坏负载不记冷却、经 Refetch 表达补拉）。
 //     簿记提交（validUntil/retryAfter）在同一临界区内随世代校验收尾
 //     （Finding R1）——「应用成功后、封窗前发生失效」没有缝隙；没有
 //     这道护栏，写前快照会被 applyArchiveSnapshot + validUntil 重新
 //     封为可信整一个 TTL，「下次读拉到写后状态」的承诺落空。
 
-// t3ArchiveMode 是归档面的读取通道。
-type t3ArchiveMode int
-
-const (
-	// t3ArchiveModeUnknown 尚未判定：默认走按需快照，第一次拉取遇到
-	// 「方法不存在」的明确拒绝即切订阅面。
-	t3ArchiveModeUnknown t3ArchiveMode = iota
-	// t3ArchiveModeSnapshot 按需快照路径已确认（至少一次拉取已经发起）。
-	t3ArchiveModeSnapshot
-	// t3ArchiveModeLegacy 旧上游归档面（#26238 之前）：只有常驻
-	// subscribeArchivedShell，getArchivedShellSnapshot 被判方法不存在过。
-	// 归档读由常驻订阅 goroutine 喂（快照 + 增量），TTL/失效簿记不再起作用。
-	t3ArchiveModeLegacy
-)
-
-// t3ArchiveFetchState 是 entry 级归档快照簿记：锁内只做「是否需要发一次
-// 拉取」的判定，网络 I/O 全在锁外。
-type t3ArchiveFetchState struct {
-	mu sync.Mutex
-	// mode 归档面通道判定：未知（默认走按需快照）/ 按需快照已确认 / 旧面
-	// 订阅。读按全局锁序 s.mu → arch.mu；写只在三种已定义场景发生——
-	// admitArchiveRefresh 的准入临界区（s.mu→arch.mu 持有中翻 snapshot），
-	// switchToArchiveLegacy 的同序临界区（翻 legacy + 撤可信不可分），与
-	// resetArchiveModeToUnknown 的同序临界区（订阅被判方法不存在 → 回
-	// Unknown 重探测，审修 R8 P2）。
-	// mode 不得在无 s.mu 的纯 arch.mu 临界区里改——会把「archiveReady
-	// 尚可信但 mode 已翻」的中间态放给视图读者。
-	mode t3ArchiveMode
-	// 以下字段只在按需快照模式下有意义（legacy 订阅面自己维持可信度）：
-	// validUntil 是「当前 state 里的归档快照可信到哪一刻」：来自
-	// applyArchiveSnapshot 可信化成功时刻 + TTL。零值表示从未成功/已失效。
-	validUntil time.Time
-	// retryAfter 是下一次允许发起拉取的时刻：失败同样记账（noEarlierThan
-	// = 失败时刻 + TTL），否则归档面持续失败时每次读取都会各拨一条连接
-	// 重试——按需面没有常驻退避循环，并发错误风暴靠这个窗口压住。
-	retryAfter time.Time
-	// inFlight 已在途拉取的哨兵：登记「已发起」，TTL/冷却外的并发读出
-	// 合并到这一次而不重复拨号——由发起方在拉取结束后清。
-	inFlight bool
-	// refetchStartedAt 是本次在途拉取的发起时刻（R20 P2）：撤可信锚在这里
-	// 而不是 validUntil 的年龄——「过期多久」不代表「重拉挂了多久」，空闲
-	// 回来后首次读刚发起的拉取不该被判过期太久。拉取结束（落地/失败）
-	// 时清零。
-	refetchStartedAt time.Time
-	// needsRefetch 表示「在途拉取期间发生过失效」：在途结果已是写前状态，
-	// inFlight 落地后需要紧跟一次新拉取补回写后状态。kick 的放行条件
-	// 把它当作「簿记已无效」处理（validUntil/retryAfter 均被失效清零），
-	// 真正起决定作用的是世代护栏——它只是簿记语义上的备忘，防止误读成
-	// 「失败冷却还在生效」。消费点在 kick 的后台收尾：inFlight 清零时若
-	// 该标志置位，清零并立即补发一次写后拉取（不再依赖「之后恰好还有
-	// 一次读」触发 kick）。
-	needsRefetch bool
-}
+// 归档面读取通道与按需簿记已并入 t3ShellState（INT-216）：archiveLegacy
+// 布尔取代原三态 mode（生产代码只比较「是否 legacy」），
+// validUntil/retryAfter/inFlight/refetchStartedAt 与可信度转移同在 s.mu
+// 一个临界区内完成——原 s.mu → arch.mu 的嵌套锁序不再存在（R3 P1-A 的
+// ABBA 隐患随之消失，全局锁序简化为 entry.mu → s.mu）。
 
 // kickArchiveRefresh 是归档面按需拉取的入口：缓存仍可信（validUntil
 // 未到）或失败冷却中（retryAfter 未到）则不发；需要拉取时经 inFlight
@@ -111,36 +62,23 @@ type t3ArchiveFetchState struct {
 // 发布一次归档面事件——撤可信是面状态翻转，浏览器必须被告知（见下方
 // revoked 分支）。
 //
-// inFlight 与 needsRefetch 协作：在途拉取已登记、但期间发生过失效
-// （needsRefetch）时，「等它落地」不承诺写后状态——kick 在这里把它当作
-// 「已经有人在拉」跳过即可，落地收尾（下方 goroutine 的 defer）会消费
-// 该标志并自动补发真正写后的拉取，不需要浏览器再发一次读：否则写命令
+// inFlight 期间的失效由世代护栏兜底：在途拉取已登记、但期间发生过失效时，
+// 「等它落地」不承诺写后状态——kick 把它当作「已经有人在拉」跳过即可；
+// 写前结果落地不封窗，EndFetch 经 Effects.Refetch 表达补拉诉求，
+// runEffects 自动补发真正写后的拉取，不需要浏览器再发一次读：否则写命令
 // 与在途拉取交错的窗口里，归档面会停在「已失效重拉中」直到外部读取——
 // 停在降级态的页面收不到事件（落地指纹若与宣布过的相同，发布层也不发）
 // 就永远不会再来读，两面消失。世代护栏保证写前那次落地不会把窗口封回
 // 可信；补拉链条的终止条件同样由世代判定承担：补拉拿到的是写后快照，
-// 世代相符即落地封窗，标志不再置位——只有补拉期间又发生失效才会再留
-// 标志再补拉，写停止后链条自然收敛，无空转。
+// 世代相符即落地封窗、不再请求补拉——只有补拉期间又发生失效才会再
+// 补拉，写停止后链条自然收敛，无空转。
 func (e *t3ShellEntry) kickArchiveRefresh() {
-	// 准入、撤可信与 inFlight 哨兵在同一临界区收尾（锁序 s.mu → arch.mu）：
-	// 读者不可能观测到「inFlight 已置位而 archiveReady 未撤」的中间态——
-	// 旧实现在放 arch.mu 后才调 noteArchiveExpired，后到读者见 inFlight
-	// 直接返回，拿到的视图仍报可信（复审遗留竞态）。
-	admitted, revoked := e.admitArchiveRefresh()
-	if revoked {
-		// 撤可信是归档面对外可见状态的一次翻转（ArchiveErr 从无到 stale），
-		// 与落地/失败同款发布一次（P1，R12）：只 refresh 不发布时宣布基准
-		// （archAnnounced）停在撤可信前的可信指纹，随后同数据补拉落地与
-		// 基准一致被判「无新话可说」——降级那次响应之后没有任何事件，
-		// 前端降级横幅挂到用户下次手动读才消失。指纹去重保证只有真实翻转
-		// 才发声：已不可信面的重复撤可信（noteArchiveExpiredLocked 的
-		// no-op 路径）与文案未变的失败照旧静默。发布在锁外：
-		// admitArchiveRefresh 已返回，s.mu/arch.mu 均已释放；
-		// publishArchiveFaceEvent 自取 state 指纹（s.mu）与 e.mu、锁外发布，
-		// 与落地/失败发布同一锁边界，不引入持锁发布点。
-		e.hub.publishArchiveFaceEvent(e, false)
-		e.refresh()
-	}
+	// 准入、撤可信与 inFlight 哨兵在 BeginFetch 的同一临界区内收尾：
+	// 读者不可能观测到「inFlight 已置位而 archiveReady 未撤」的中间态。
+	// 撤可信（revoked）的发布经 Effects 表达——指纹去重保证只有真实翻转
+	// 才发声（P1，R12）。
+	ticket, admitted, eff := e.state.BeginFetch()
+	e.hub.runEffects(e, eff)
 	if !admitted {
 		return
 	}
@@ -153,7 +91,7 @@ func (e *t3ShellEntry) kickArchiveRefresh() {
 	// 并发合并由 inFlight 哨兵承担（锁内判定后才放行），不走
 	// singleflight.Do——它的「等共享结果返回」会把后台拉取的挂起传染给
 	// 调用方；按需面所有读者都是「发起即走」，没有等结果的强拉入口。
-	fetchCtx, cancelFetch := context.WithTimeout(e.hub.ctx, e.archTTL)
+	fetchCtx, cancelFetch := context.WithTimeout(e.hub.ctx, e.hub.cfg.ArchiveTTL)
 	// 计入 entry 生命周期（#156 R21）：否则 Close 等不到这次拉取，可能在
 	// ensureArchive 仍在收尾/发布失败时就返回。停机后不再接收新计数——
 	// Wait 已开始，Add 会 panic。
@@ -163,10 +101,7 @@ func (e *t3ShellEntry) kickArchiveRefresh() {
 		cancelFetch()
 		// 准入已经置过 inFlight/refetchStartedAt，这里不落 goroutine 就不会有人
 		// 收尾（#156 R35 Note）：停机后仍持有该 entry 的读会永远看到「重拉在途」。
-		e.arch.mu.Lock()
-		e.arch.inFlight = false
-		e.arch.refetchStartedAt = time.Time{}
-		e.arch.mu.Unlock()
+		e.hub.runEffects(e, e.state.EndFetch(ticket, t3FetchOutcome{kind: t3FetchAborted}))
 		return
 	}
 	e.wg.Add(1)
@@ -174,89 +109,19 @@ func (e *t3ShellEntry) kickArchiveRefresh() {
 	go func() {
 		defer e.wg.Done()
 		defer cancelFetch()
-		defer func() {
-			e.arch.mu.Lock()
-			e.arch.inFlight = false
-			e.arch.refetchStartedAt = time.Time{}
-			// 世代护栏的闭环：落地留下 needsRefetch（拉取途中发生过失效，
-			// 在途结果是写前状态——apply 的世代不符落地与失败路径的世代
-			// 不符都留它）时，收尾处清零并立即补发一次写后拉取。标志在
-			// 清 inFlight 的同一临界区消费：补拉落地若再遇失效会再次留
-			// 标志并再经这里补拉；没有新失效则世代相符落地、封窗可信，
-			// 链条自然终止。entry 已停时不补拉——面已无服务对象，标志
-			// 清零即可（否则停机路径上的空转会无限接龙）。
-			refetch := e.arch.needsRefetch
-			e.arch.needsRefetch = false
-			e.arch.mu.Unlock()
-			if refetch && !e.isStopped() {
-				e.kickArchiveRefresh()
-			}
-		}()
-		_ = e.ensureArchive(fetchCtx)
-	}()
-}
-
-// admitArchiveRefresh 登记一次按需拉取：返回 (admitted, revoked)。admitted
-// 为假表示缓存仍可信、失败冷却中、或已有在途拉取（并发读合并到那一次）；
-// revoked 为真表示本次准入同时把已过期的可信面撤为不可信（Finding R2），
-// 调用方应在临界区外发布归档面事件（撤可信是面状态翻转，见
-// kickArchiveRefresh）并 refresh 广播。
-//
-// 原子性不变量（复审遗留竞态）：「判定过期 + 撤可信 + 设 inFlight」必须对
-// 读者不可分。临界区按 s.mu → arch.mu 嵌套——与 applyArchiveSnapshot 的
-// commit（s.mu 持锁内取 arch.mu）同向，全局锁序 e.mu → s.mu → arch.mu 上
-// 不存在 arch.mu → s.mu 的反向嵌套（InvalidateArchive/落地收尾都只在锁外
-// 或同级顺序取 arch.mu），无成环可能。inFlight 在 arch.mu
-// 下置位、archiveReady 在 s.mu 下撤回，但二者在同一持锁序列内提交：任何
-// 能读到 inFlight=true 的读者（需 arch.mu 已过准入或走 arch.mu 之外的
-// s.mu 视图）见到的 archiveReady 必已撤回——视图组装必经 s.mu，而 s.mu
-// 在整个准入序列中被持有。
-func (e *t3ShellEntry) admitArchiveRefresh() (admitted bool, revoked bool) {
-	e.state.mu.Lock()
-	defer e.state.mu.Unlock()
-	e.arch.mu.Lock()
-	defer e.arch.mu.Unlock()
-	now := time.Now()
-	// 订阅模式由常驻流供数，按需拉取在 admission 内短路——避免周期空拨。
-	if e.arch.mode == t3ArchiveModeLegacy {
-		return false, false
-	}
-	if e.arch.inFlight {
-		// 在途过久才撤可信（R17 P2-1 / R20 P2）：判据锚在**本次拉取发起
-		// 时刻**上，而不是 validUntil 的年龄——过期只说明该重拉了，空闲
-		// 回来后首次读自己刚发起的那次拉取不该被判「过期太久」。重拉一旦
-		// 发起，后续读全走这条早退，撤可信只能落在这里，否则慢/挂起的在途
-		// 窗口里过期快照仍被报 archiveReady=true、ArchiveErr=nil，Peek/wait
-		// 据此判 thread_gone（R2 要堵的窗口）。撤可信与在途状态在同一临界区
-		// 内完成，对读者不可分。
-		// 仅在缓存仍过期时才撤（跟进 PR①，Codex :214）：重拉可能已经成功
-		// 落地（archiveReady=true、validUntil 在未来），只是 kick 的后台
-		// defer 还没来得及清 inFlight/refetchStartedAt——这个窗口里按「在途
-		// 过久」撤可信会把刚恢复的面重新打回不可信；而 inFlight 清空后，
-		// 后续准入看到未来的 validUntil 不再重拉，降级就会持续整个 TTL。
-		revoked := !e.arch.refetchStartedAt.IsZero() &&
-			now.Sub(e.arch.refetchStartedAt) > e.archiveStaleGrace &&
-			!now.Before(e.arch.validUntil)
-		if revoked {
-			e.state.noteArchiveExpiredLocked()
+		outcome := e.ensureArchive(fetchCtx)
+		eff := e.state.EndFetch(ticket, outcome)
+		if eff.Err != nil {
+			e.hub.logger.Warn("t3 归档快照读取失败",
+				zap.String("environment_id", e.envID),
+				zap.Error(eff.Err))
 		}
-		return false, revoked
-	}
-	if now.Before(e.arch.validUntil) || now.Before(e.arch.retryAfter) {
-		return false, false
-	}
-	// 按需路径已确认：第一次发起拉取把 mode 记为 snapshot（同一临界区
-	// 提交，与「inFlight 置位」不可分）。
-	e.arch.mode = t3ArchiveModeSnapshot
-	// 准入判定通过：validUntil 一定是零值或已过。过期只表示「该重拉了」，
-	// 不等于数据作废（R16 P2-2）：本次读取仍返回上一份快照，不因「触发重拉
-	// 的这次读」就把面标 degraded——否则每个环境每 TTL（以及空闲回来的
-	// 首次读）都会有一次读被误报降级。撤可信改由在途时长兜底（上面的
-	// inFlight 分支）：重拉真的挂了超过 ArchiveStaleGrace 才降级。
-	e.arch.inFlight = true
-	e.arch.refetchStartedAt = now
-	e.arch.needsRefetch = false
-	return true, false
+		// 补拉（Effects.Refetch）在 runEffects 末尾执行：世代不符/被
+		// freshnessFloor 丢弃的写前结果未封窗，收尾后紧跟一次写后拉取
+		// ——世代护栏保证写前那次落地不会把窗口封回可信，链条的终止
+		// 条件同样由世代判定承担（写停止后自然收敛，无空转）。
+		e.hub.runEffects(e, eff)
+	}()
 }
 
 // ensureArchive 执行一次归档快照拉取：探测 → 拨一次性会话 →
@@ -277,7 +142,7 @@ func (e *t3ShellEntry) admitArchiveRefresh() (admitted bool, revoked bool) {
 // 「环境不可能中途有该方法」记为 entry 的 mode，此后 kickArchiveRefresh
 // 不再发按需拨号，归档由常驻订阅流喂；环境原地升级/误判的对称自愈在
 // 订阅面（subscribe 被判方法不存在 → mode 回 Unknown 重探测，审修
-// R8 P2，见本文件末尾 resetArchiveModeToUnknown）。
+// R8 P2，见 t3_shell_state.go 的 LegacyMethodMissing）。
 //
 // 失败只记 ArchiveErr（noteArchiveFetchFailed），不动已有快照——归档面
 // 没有增量通道，失败时保留旧快照比「清空并谎报归档列表为空」更不坏；
@@ -298,14 +163,12 @@ func (e *t3ShellEntry) admitArchiveRefresh() (admitted bool, revoked bool) {
 // （与标记兜底会话的 orphan 问题同理）。上游完全沉默时，后台拉取由
 // kickArchiveRefresh 叠加的 TTL 上限兜底（至多占住一个缓存窗口），单次
 // RPC 自身另受 DialBudget/单帧超时约束。
-func (e *t3ShellEntry) ensureArchive(ctx context.Context) error {
-	// entry 停/hub 关：不拨号。拉取是按需的，不给已停的面补位。
+func (e *t3ShellEntry) ensureArchive(ctx context.Context) t3FetchOutcome {
+	// entry 停/hub 关：不拨号。拉取是按需的，不给已停的面补位（中止结局
+	// 由 EndFetch 清在途标记，R35）。
 	if e.isStopped() {
-		return nil
+		return t3FetchOutcome{kind: t3FetchAborted}
 	}
-	// 世代取样先于任何网络 I/O：保证「失效发生在拉取途中」恒能被
-	// 落地判定识别——取样之后再发生的失效一定把计数推高。
-	generation := e.state.archiveGenerationNow()
 	connCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	watchDone := make(chan struct{})
@@ -328,14 +191,14 @@ func (e *t3ShellEntry) ensureArchive(ctx context.Context) error {
 		if status == T3EnvironmentStatusRepair {
 			err = fmt.Errorf("%w: %s", errT3CredentialRejected, probeMsg)
 		}
-		return e.noteArchiveFetchFailed(err, generation)
+		return t3FetchOutcome{kind: t3FetchFailed, err: err}
 	}
 
 	dialCtx, cancelDial := context.WithTimeout(connCtx, e.hub.cfg.DialBudget)
 	session, err := dialT3RPC(dialCtx, wsBaseOf(e.address), e.token)
 	cancelDial()
 	if err != nil {
-		return e.noteArchiveFetchFailed(err, generation)
+		return t3FetchOutcome{kind: t3FetchFailed, err: err}
 	}
 	defer session.Close()
 	unregisterCancel := session.closeOnCancel(connCtx)
@@ -345,26 +208,11 @@ func (e *t3ShellEntry) ensureArchive(ctx context.Context) error {
 	if err != nil {
 		// 旧面回退：仅「方法不存在」的明确信号才切订阅面——
 		// rpcUncertainError 与任意业务失败都不构成该证据（见函数头）。
+		// 「先记失败、后切 legacy」由 EndFetch 在同一临界区内完成（R5 P2）。
 		if isArchiveSnapshotMethodMissing(err) {
-			// 先记失败、后切换（R5 P2）：switchToArchiveLegacy 放行的常驻
-			// 订阅可能紧跟着落地权威快照（archiveErr=nil、archiveReady=
-			// true），若先切换后收尾，这次失败记账会把刚恢复可信的订阅面
-			// 重新写回失败态——legacy 流可能很久不发下一帧，正确的归档
-			// 数据要背负到那时。先收尾则切换发生在记账之后，随后落地的
-			// 订阅快照必然覆盖它。世代判定不受顺序影响（切换不推进
-			// archiveGeneration）；记下的 retryAfter 冷却随切换保留（R14
-			// P2-2），legacy 准入本就按 mode 短路、簿记不参与判定——保留
-			// 是为了在订阅面同样被判方法不存在时（resetArchiveModeToUnknown
-			// 回 Unknown）留一个现成的探测冷却：清零会让「两个方法都不存
-			// 在」的环境每次读都立即重探测，ping-pong 永不收敛。切换内
-			// noteArchiveExpiredLocked 在 archiveReady 已撤时是 no-op，
-			// archiveErr 保留本次真实失败原因——「失败、订阅重拉中」，
-			// 语义如实。
-			failure := e.noteArchiveFetchFailed(err, generation)
-			e.switchToArchiveLegacy()
-			return failure
+			return t3FetchOutcome{kind: t3FetchMethodMissing, err: err}
 		}
-		return e.noteArchiveFetchFailed(err, generation)
+		return t3FetchOutcome{kind: t3FetchFailed, err: err}
 	}
 	// 应答形状校验（审修 B + R8 P2）：归档 RPC 是宽松解码——Exit Success
 	// 的 value 为 null、应答多包一层（{snapshot:{...}}）、字段改名都零错误
@@ -386,36 +234,15 @@ func (e *t3ShellEntry) ensureArchive(ctx context.Context) error {
 		} else {
 			err = fmt.Errorf("归档快照应答解析失败: %w", err)
 		}
-		return e.noteArchiveFetchFailed(err, generation)
+		return t3FetchOutcome{kind: t3FetchFailed, err: err}
 	}
 	var snapshot t3ArchivedShellSnapshot
 	if err := json.Unmarshal(value, &snapshot); err != nil {
-		return e.noteArchiveFetchFailed(fmt.Errorf("归档快照响应解析失败: %w", err), generation)
+		return t3FetchOutcome{kind: t3FetchFailed, err: fmt.Errorf("归档快照响应解析失败: %w", err)}
 	}
-	// 世代校验与簿记提交原子化（Finding R1）：commit 在 apply 的同一个
-	// 临界区内收尾，「应用成功到封窗之间发生失效」没有可插入的缝隙——
-	// 失效要么先于落地（世代不符 → needsRefetch 备忘，不封窗），要么在
-	// commit 之后（由 InvalidateArchive 清零），不存在「已失效却被
-	// validUntil 封窗」的交错。
-	// 落地分派（复审遗留：坏负载不得与世代不符合并）：apply 返回 err 即
-	// 坏负载（reset 拒收，如线程缺 ID）——走失败路径：ArchiveErr 记真实
-	// 解析/校验错误、retryAfter 记冷却窗口，阻断毒快照的无冷却重试风暴；
-	// 世代语义由 noteArchiveFetchFailed 自行判定（写前坏负载不记冷却、
-	// 只留 needsRefetch），该路径自带 publishThreadEvent/refresh。err=nil
-	// （世代不符或相符）时簿记已由 apply 临界区内的 commit 收尾。
-	// 快照的采集时刻取本次拉取的发起时刻（#156 R16）：送达时刻会晚于它，
-	// 拿送达时刻当证据会把「移除之前采好的重连快照」误当成新一轮对账。
-	e.arch.mu.Lock()
-	observedAt := e.arch.refetchStartedAt
-	e.arch.mu.Unlock()
-	if _, applyErr := e.state.applyArchiveSnapshotAt(snapshot, generation, e.commitArchiveApply, observedAt); applyErr != nil {
-		return e.noteArchiveFetchFailed(applyErr, generation)
-	}
-	// 落地发布经指纹去重（审修 R9 P2-2）：集合真变才 Full；TTL 例行重拉
-	// 同一份数据不发任何事件；失效/失败后的恢复发轻量 State 提示。
-	e.hub.publishArchiveFaceEvent(e, false)
-	e.refresh()
-	return nil
+	// 世代护栏/簿记提交/坏负载分流全部由 EndFetch 在同一临界区内收尾
+	// （Finding R1）；快照采集时刻取 ticket.startedAt（#156 R16）。
+	return t3FetchOutcome{kind: t3FetchSnapshot, snapshot: snapshot}
 }
 
 // isArchiveSnapshotMethodMissing 判定 getArchivedShellSnapshot 的失败是否
@@ -438,186 +265,6 @@ func isArchiveSnapshotMethodMissing(err error) bool {
 		strings.Contains(msg, "methodnotfound")
 }
 
-// switchToArchiveLegacy 把该 entry 切到旧面订阅模式。临界区与
-// admitArchiveRefresh 同序（s.mu → arch.mu）：mode 翻转与「撤可信+簿记
-// 收尾」对读者不可分——准入判定在本临界区之外不可能看到「mode 已是
-// legacy 而 archiveReady 仍可信」的中间态；此后 kickArchiveRefresh 短路
-// 不再发按需拨号。调用方先经 noteArchiveFetchFailed 记失败、再进入本
-// 切换（顺序依据见 ensureArchive：先收尾失败、后放行订阅，权威快照落地
-// 才不会被失败收尾重新盖回失败态）；inFlight 由其 defer 清理；归档数据
-// 由随后放行的常驻订阅 goroutine 补齐（entry 创建时已停泊，激活可重复：
-// 自愈回 Unknown 后重探测再次判方法不存在时，本函数再次放行它）。
-// retryAfter 不在这里清零（R14 P2-2）：刚记的失败冷却保留下来，若订阅
-// 面随后也被判方法不存在，resetArchiveModeToUnknown 回 Unknown 后它就
-// 是现成的探测冷却，双方法缺失的环境至多每冷却窗口重探测一次，而不是
-// 每次读都重拨；冷却过期后照常重探测（误判/升级自愈不受影响）。
-func (e *t3ShellEntry) switchToArchiveLegacy() {
-	e.state.mu.Lock()
-	e.arch.mu.Lock()
-	e.arch.mode = t3ArchiveModeLegacy
-	// 与 mode 翻转同一临界区开启「移除即登记待对账」（#156 R6）：若延到锁外
-	// 再 arm，窗口内到达的活跃面移除会看到 legacy 模式却仍未 armed，既不进
-	// 按需失效路径、也不登记待对账——随后订阅快照恢复可信时，对应归档增量
-	// 可能仍在队列里，wait 会把缺失线程当定论。
-	e.arch.validUntil = time.Time{}
-	// retryAfter 保留（R14 P2-2）：见函数头。legacy 准入按 mode 短路，
-	// 簿记在订阅模式下不参与判定；它只在 resetArchiveModeToUnknown 回
-	// Unknown 后重新生效，作双方法缺失环境的探测冷却。
-	e.arch.needsRefetch = false
-	e.state.noteArchiveExpiredLocked() // archiveReady → false，留行但报已失效
-	e.state.armArchiveUncertainLocked(true, e.archiveStaleGrace)
-	e.arch.mu.Unlock()
-	e.state.mu.Unlock()
-	// 放行停在 mode 闸门上的旧面订阅 goroutine（runArchiveLegacySubscription
-	// 首部）：mode 已提交为 legacy，信号只是唤醒，闸门醒来会复核现值。
-	// 缓冲 1 + 非阻塞发送：重复激活时丢弃多余信号——闸门每次醒来都按 mode
-	// 现值行事，丢信号不丢激活。
-	select {
-	case e.legacyCh <- struct{}{}:
-	default:
-	}
-}
-
-// resetArchiveModeToUnknown 把 legacy mode 重置回 Unknown（审修 R8 P2）：
-// 常驻订阅以「方法不存在」的明确 Exit 失败时，本该有订阅面的环境反而
-// 没有——这是「环境中途升级回新版（getArchivedShellSnapshot 已可用，地
-// 址与凭证不变、entry 不重建）或上次误判（代理层返回的 unknown method
-// 文案不是方法分派结果）」的证据。回 Unknown 后按需簿记里仍留上次探
-// 测失败记下的 retryAfter 冷却（R14 P2-2，不再无条件清零）：冷却期内读
-// 取照旧封住探测，过期后的下一次 kick 按准入流程重探测按需快照——环境
-// 确实已升级则按需路径恢复供数；是真旧环境则探测会再次判方法不存在、
-// 经 switchToArchiveLegacy 切回订阅面，每轮 ping-pong 至多隔一个冷却窗
-// 口（探测失败记账→切订阅→订阅判方法不存在→回 Unknown，冷却保留）——
-// 若在回退时无条件清零冷却，「两个方法都不存在」的环境（未来上游移除
-// 归档读、或代理统一回 unknown method）会每读各付一次探测+拨号+唤醒订
-// 阅，永不收敛，与本函数旧注释的「只多付一次探测拨号」相违。只在确认方法不存在时才回退判定——订阅的其他失败（断线、业务拒
-// 绝）不重置，否则真旧环境的普通故障会让按需面每轮空拨。
-//
-// 回退同时撤归档面可信（R13 P2-2，同一临界区）：订阅供数通道已被判不
-// 存在，面上的订阅快照——可能来自早已死去的供数连接——不得继续被当
-// 完整结论；旧的实现只清簿记不撤 archiveReady/archiveErr，而
-// admitArchiveRefresh 的 expired 判定只看 validUntil（已清零），重探测
-// 的按需拉取会被当「首次读取」，旧快照在按需落地（≤ TTL）前一直报
-// archiveReady=true+ArchiveErr=nil，列表/详情/wait 拿它当完整结论。撤
-// 可信用 noteArchiveExpiredLocked 语义（留旧行、报「已失效重拉中」），
-// 可信只在按需快照世代相符落地时恢复。
-//
-// 订阅监督循环随 mode 一起收缰（审修 R9 P2-1）：循环每轮重连前经 mode
-// 闸门（waitArchiveLegacyActive）复核，mode 离开 legacy 即停泊回等
-// legacyCh 的待命态——否则重置后的订阅重连仍会照旧失败，每次失败经
-// endFaceConnection 把归档面再清一遍，而按需簿记刚被封窗时 kick 短路不
-// 重拉，归档面会整整消失一个 TTL。锁序与 switchToArchiveLegacy 同一临界
-// 区（s.mu → arch.mu）：mode 翻回与簿记清理对准入判定不可分——读者不
-// 会看到「mode 已是 Unknown 而探测冷却尚未就位」的能立即准入的中间态
-// （R14 P2-2 起 retryAfter 随切换保留，该原子性同时是 ping-pong 阻尼成
-// 立的前提）。
-func (e *t3ShellEntry) resetArchiveModeToUnknown() {
-	e.state.mu.Lock()
-	e.arch.mu.Lock()
-	// 幂等：只有订阅模式才有得回退。mode 若已被其他路径改离 legacy（理论
-	// 上不存在第二条写法），不覆盖它。
-	reset := false
-	if e.arch.mode == t3ArchiveModeLegacy {
-		e.arch.mode = t3ArchiveModeUnknown
-		// 簿记收尾（R14 P2-2）：validUntil 清零（撤可信由下方
-		// noteArchiveExpiredLocked 承担，旧快照不得继续报完整）；
-		// retryAfter 保留——上次探测失败记下的冷却就是回 Unknown 后的
-		// 探测冷却，让「双方法都不存在」的 ping-pong 每轮至少隔一个
-		// TTL，而不是每读都重探测。冷却已过期（升级发生在最后一次探
-		// 测失败很久之后）时它自然不再封窗，下一次读照常准入重探测：
-		// 误判/升级自愈只延迟到冷却到期，不会被钉死。
-		e.arch.validUntil = time.Time{}
-		e.arch.needsRefetch = false
-		// 同一临界区撤归档面可信（R13 P2-2）：订阅供数通道已被判不存在，
-		// 面上最近一次订阅快照（可能来自早已死去的连接）不得继续当完整
-		// 结论——否则在下一次按需快照落地（≤ TTL）前，列表/详情/wait
-		// 拿旧快照谎报完整。noteArchiveExpiredLocked 语义：archiveReady
-		// 撤回 false、archiveStale 置位、ArchiveErr 标「已失效重拉中」、
-		// 旧行保留供展示；可信只在按需快照世代相符落地时恢复。不在这里
-		// 发布事件：撤回后到落地前的窗口里读取的响应自身携带 stale 文案，
-		// 同数据落地后指纹与宣布基准一致照旧静默——浏览器无需为这个
-		// 过渡窗口整环境重取；落地失败则失败路径经指纹比对发 State。
-		// 已不可信的面（失败/已失效）重撤是 no-op，保留更准确的既有文案。
-		// 离开订阅模式：关闭「移除即登记待对账」并清空遗留条目（#156 R5/R8-2）。
-		// 遗留条目既没有定时器清理（调度在 hub 帧后回调里），又会让后续订阅
-		// 快照永远报 stale；按需快照路径的可信由 TTL 簿记负责。
-		e.state.armArchiveUncertainLocked(false, 0)
-		e.state.clearArchiveMembershipUncertainLocked()
-		e.state.noteArchiveExpiredLocked()
-		reset = true
-	}
-	e.arch.mu.Unlock()
-	e.state.mu.Unlock()
-	if reset {
-		e.hub.logger.Info("t3 归档订阅被判方法不存在，mode 回 Unknown 重探测按需快照",
-			zap.String("environment_id", e.envID))
-	}
-}
-
-// commitArchiveApply 是 applyArchiveSnapshot 的临界区簿记收尾：世代相符
-// （本次确实是写后/当前状态）才封可信窗口——可信窗口 = 应用成功时刻 +
-// TTL（不是探测/拨号时刻——失败不应把窗口起算点往后挪，下一轮换新快照）。
-// 世代不符说明拉取途中发生过失效，本次快照是写前状态——只留
-// needsRefetch 备忘（validUntil/retryAfter 已被失效清零，kick 本来就会
-// 放行；它存在的意义是让「需要再拉」这个意图在簿记里显式可查，而不是
-// 隐式依赖两个零值时间）。坏负载（reset 拒收）不经本回调——其簿记由
-// 失败路径 commitArchiveFailure 收尾，两处不得双记。本回调在 s.mu 临界
-// 区内执行；锁序 s.mu →
-// arch.mu 全局一致（kick/失效/落地收尾都在锁外或同级顺序取
-// arch.mu），无反向嵌套、不与 waitView/refresh 成环。
-func (e *t3ShellEntry) commitArchiveApply(trusted bool) {
-	e.arch.mu.Lock()
-	defer e.arch.mu.Unlock()
-	if trusted {
-		e.arch.validUntil = time.Now().Add(e.archTTL)
-		e.arch.retryAfter = time.Time{}
-		e.arch.needsRefetch = false
-		return
-	}
-	e.arch.needsRefetch = true
-}
-
-// commitArchiveFailure 是 noteArchiveFetchFailed 的临界区簿记收尾：当前
-// 世代失败记冷却窗口（retryAfter = now + TTL，失败窗口内不重复打上游）；
-// 写前失败不记冷却（不封窗），只留 needsRefetch 备忘——validUntil/
-// retryAfter 已随失效清零，kick 会立即放行补拉写后状态。锁序与
-// commitArchiveApply 一致。
-func (e *t3ShellEntry) commitArchiveFailure(applied bool) {
-	e.arch.mu.Lock()
-	defer e.arch.mu.Unlock()
-	if applied {
-		e.arch.retryAfter = time.Now().Add(e.archTTL)
-		e.arch.needsRefetch = false
-		return
-	}
-	e.arch.needsRefetch = true
-}
-
-// noteArchiveFetchFailed 统一归档拉取失败路径：写 ArchiveErr（不推翻已有
-// 快照）、冷却记账（retryAfter = now + TTL，失败窗口内不重复打上游）、
-// refresh（失败/就绪翻转会广播给等待者与订阅者），返回传入的错误供
-// 日志/诊断使用。
-//
-// 世代护栏：拉取期间发生过失效（generation 与当前失效计数不一致）时，
-// 「这次读失败」只说明写前那次读取失败——既不覆盖失效留下的「已失效
-// 重拉中」语义，也不记冷却窗口（否则已失效的窗口会被 retryAfter 封死，
-// 失效后本该立刻重拉的读要等到冷却结束）。此时仍记 needsRefetch：写前
-// 失败不回答写后状态，落地后需要一次新拉取。
-func (e *t3ShellEntry) noteArchiveFetchFailed(err error, generation int64) error {
-	// 世代校验与冷却簿记原子化（Finding R1 对称路径）：commit 在同一
-	// 临界区内收尾，不存在「应用失败后、记冷却前发生失效」把已作废
-	// 的窗口用 retryAfter 封死的交错。
-	e.state.noteArchiveFetchFailed(err, generation, e.commitArchiveFailure)
-	// 失败发布经指纹去重（审修 R9 P2-2）：同一 ArchiveErr 反复失败不再
-	// 每次发 Full——订阅端只需在错误首次出现/变化时知道一次。
-	e.hub.publishArchiveFaceEvent(e, false)
-	e.refresh()
-	e.hub.logger.Warn("t3 归档快照读取失败",
-		zap.String("environment_id", e.envID),
-		zap.Error(err))
-	return err
-}
-
 // InvalidateArchive 作废环境的归档快照缓存：下一次读取重新拉取。归档相关
 // 写命令派发成功后调用（见 t3_settle.go/t3_review.go），不依赖 TTL 兜底。
 // entry 不存在时无需处理（下一个 View 会建 entry 并走未就绪路径）。
@@ -629,120 +276,67 @@ func (h *t3ShellHub) InvalidateArchive(userID, envID string) {
 	if e == nil {
 		return
 	}
-	h.invalidateArchiveEntry(e)
+	h.runEffects(e, e.state.Invalidate())
 }
 
-// invalidateArchiveEntryAfterActiveRemoval 是活跃面「离开」帧触发的失效
-// （R16 P2-1）：订阅模式下归档集本就由常驻流的增量维护（归档与删除都会各自
-// 送达 thread.updated/removed），主动断连只会让 endFaceConnection 清空整张
-// 归档表再按退避重连——批量移除时重连窗口内新请求又把备忘置位、新连接读
-// 完即被再拆，归档表可持续为空，列表缺行、bot 侧把环境计入 incomplete。
-// 因此订阅模式跳过；按需快照模式的 TTL 缓存必须靠这里失效（别处/别的
-// 客户端的归档迁移只能从这里得知）。写命令触发的失效仍走
-// InvalidateArchive，不受本函数影响。
-// 订阅模式下不断流，但要**标记归档集暂不可信**（跟进 PR②，Codex :608）：
-// 活跃面与归档订阅是两条流，顺序无保证——别的客户端归档线程时，active 的
-// thread.removed 可能先于 archived 的 thread.updated 到达。若这段窗口里
-// ArchiveErr 仍为 nil，并发 bot wait 会把「活跃面与归档面都没有」当成可信
-// 结论而误判 thread_gone。标记只影响可信度（旧行保留），恢复只有三条路径：
-// **含该线程的归档全量快照**、**线程在活跃面重新出现**、**宽限到期**——
-// 归档增量只换行、不解账（#156 R15：排队的增量可能来自更早一轮归档周期），
-// 所以不能写成「下一次订阅数据落地即恢复」。
-func (h *t3ShellHub) invalidateArchiveEntryAfterActiveRemoval(e *t3ShellEntry, leftIDs, armedRegisteredIDs, provenIDs []string) {
-	e.arch.mu.Lock()
-	legacy := e.arch.mode == t3ArchiveModeLegacy
-	e.arch.mu.Unlock()
-	if legacy {
-		// 按线程 ID 记账（Codex #156 R1）：只有这些线程自己的归档增量（或
-		// 权威快照）能解除不确定，无关线程的增量不算对账；settle 上界用
-		// 与撤可信一致的宽限（线程可能是被彻底删除，归档面不会有增量）。
-		// 只登记「未由 armed 路径登记」的 ID（#156 R7/R8）：已登记过的再登记会
-		// 把已被归档流对账的 ID 重新打回待对账（白 stale 一个宽限窗口），而
-		// 完全跳过又会漏掉「帧应用发生在 arm 之前」的移除。
-		// provenIDs 同理要排除（#156 R13-codex）：那些移除的帧自身带着归档行、
-		// 且归档面已有该行，state 已判定无需对账，帧后回调不能把它重新登记。
-		handled := append(append([]string{}, armedRegisteredIDs...), provenIDs...)
-		todo := e.state.excludeActiveThreads(t3IDsNotIn(leftIDs, handled))
-		// 登记与「是否 arm」在同一临界区内完成（#156 R27）：先读 arch.mode 再
-		// 登记的两步之间，resetArchiveModeToUnknown 可能已清空集合、撤 arm，
-		// 登记就落进一个已经离开订阅模式的 state。
-		pending := e.state.registerArchiveMembershipUncertainIfArmed(todo, e.archiveStaleGrace)
-		if pending == 0 && len(armedRegisteredIDs) == 0 {
-			return
+// runEffects 是状态机返回的 t3ShellEffects 的统一执行器（INT-216）：固定
+// 顺序排定时器 → 重连信号 → 激活 legacy → 发布 → refresh → 补拉。全部
+// 副作用在锁外执行——状态机是纯内存的，不持 hub/entry 引用。
+func (h *t3ShellHub) runEffects(e *t3ShellEntry, eff t3ShellEffects) {
+	if !eff.SettleAt.IsZero() {
+		h.scheduleArchiveMembershipSettle(e, eff.SettleAt)
+	}
+	if eff.SignalReconnect {
+		e.signalArchiveReconnect()
+	}
+	if eff.ActivateLegacy {
+		// 放行停在闸门上的旧面订阅 goroutine：mode 已在 EndFetch 临界区内
+		// 提交为 legacy，信号只是唤醒——闸门醒来复核现值。缓冲 1 + 非阻塞
+		// 发送：重复激活时丢弃多余信号，丢信号不丢激活。
+		select {
+		case e.legacyCh <- struct{}{}:
+		default:
 		}
-		// 发布交给指纹去重（#156 R5）：armed 状态下标记已在应用移除的同一
-		// 临界区里置好，这里的 flipped 会是 false，但宣布基准（archAnnounced）
-		// 还没更新——若不发布，浏览器收不到降级事件，到期恢复也会因指纹相同
-		// 而静默。函数内部按「集合+内容+文案」比对，重复调用不产生多余事件。
-		e.hub.publishArchiveFaceEvent(e, false)
-		// 到期恢复必须发事件（#156 R2）：线程可能被彻底删除、永远等不到
-		// 归档增量，只在读路径懒清会让打开中的页面一直停在降级态
-		// （use-threads 不轮询，SSE 心跳不带数据）。
-		//
-		// 定时器每次登记都调度（#156 R3-P1 / R4 / R12）：判据不能只看「可信度是否
-		// 翻转」或「是否新增 ID」——同一窗口内的第二次移除不会翻转 archiveErr；
-		// 而同一 ID 只有在「先回到活跃面（解账）再离开」时才会重新登记、拿到新的
-		// 截止时刻（重复投递的噪声移除被 R9/R10 过滤）。两种情形若跳过调度，那批
-		// ID 就永远等不到到期清理，归档面会永久 stale。到期清理按各自截止时刻
-		// 裁剪，重复调度只是多一次空转。
-		h.scheduleArchiveMembershipSettle(e, e.archiveStaleGrace)
-		return
 	}
-	h.invalidateArchiveEntry(e)
-}
-
-// t3IDsNotIn 返回 ids 里不在 done 中的 ID（保序、去空）：用于「只登记未由
-// armed 路径处理过的移除」（#156 R7/R8）。
-func t3IDsNotIn(ids, done []string) []string {
-	if len(done) == 0 {
-		return ids
+	switch eff.Publish {
+	case t3PublishDedup:
+		h.publishArchiveFaceEvent(e, false)
+	case t3PublishForceFull:
+		h.publishArchiveFaceEvent(e, true)
 	}
-	skip := make(map[string]struct{}, len(done))
-	for _, id := range done {
-		skip[id] = struct{}{}
+	if eff.Refresh {
+		e.refresh()
 	}
-	out := make([]string, 0, len(ids))
-	for _, id := range ids {
-		if id == "" {
-			continue
-		}
-		if _, ok := skip[id]; ok {
-			continue
-		}
-		out = append(out, id)
+	if eff.Refetch && !e.isStopped() {
+		e.kickArchiveRefresh()
 	}
-	return out
 }
 
 // scheduleArchiveMembershipSettle 在宽限到期时清理「归属待对账」并发布可信度
 // 恢复事件（#156 R2）。线程可能是被彻底删除、永远等不到归档增量，所以不确定
 // 状态必须有时间上界，且这条转变要让浏览器知道。entry 停机后丢弃回调。
-func (h *t3ShellHub) scheduleArchiveMembershipSettle(e *t3ShellEntry, settle time.Duration) {
-	if settle <= 0 {
-		return
-	}
-	// 定时器按**最早截止时刻**排程（#156 R23）：只按「本次登记 + settle」排会
-	// 让早先登记条目的截止时刻被后来的登记不断顺延——连续移除间隔小于宽限时
-	// 定时器永远不到期，早期 ID 早已过截止却仍待对账，归档面永久 stale 且集合
-	// 无界增长。到期回调里再按剩余最早截止续排，每条目的上界就是自己。
-	deadline, ok := e.state.earliestArchiveUncertainDeadline()
-	if !ok {
+// deadline 由状态机在登记/清理的同一临界区内算好的最早截止（Effects.SettleAt）：
+// 定时器按它排程，每条目的上界就是它自己的截止时刻——早先登记的条目不会被
+// 后来的登记顺延（#156 R23）。
+func (h *t3ShellHub) scheduleArchiveMembershipSettle(e *t3ShellEntry, deadline time.Time) {
+	if deadline.IsZero() {
 		return
 	}
 	e.mu.Lock()
+	defer e.mu.Unlock()
 	if e.isStopped() {
 		// 停机之后再装定时器没人会 Stop 它（#156 R19）。
-		e.mu.Unlock()
 		return
 	}
 	if e.settleTimer != nil && !e.settleAt.After(deadline) {
 		// 已有更早（或同刻）的排程，不后移。
-		e.mu.Unlock()
 		return
 	}
 	delay := time.Until(deadline)
-	if delay < 0 {
-		delay = 0
+	if delay <= 0 {
+		// 截止已过的剩余条目立刻再看一眼（不能把负延迟交给 AfterFunc
+		// 语义含糊化）：expire 会按 now 裁掉它们（#156 R23 Note）。
+		delay = time.Millisecond
 	}
 	if e.settleTimer == nil {
 		e.settleTimer = time.AfterFunc(delay, func() { h.settleArchiveMembership(e) })
@@ -750,11 +344,11 @@ func (h *t3ShellHub) scheduleArchiveMembershipSettle(e *t3ShellEntry, settle tim
 		e.settleTimer.Reset(delay)
 	}
 	e.settleAt = deadline
-	e.mu.Unlock()
 }
 
-// settleArchiveMembership 是一次到期清理（#156 R23）：清掉已过截止的条目，
-// 若仍有剩余则按它们的最早截止续排。
+// settleArchiveMembership 是一次到期清理（#156 R23）：状态机内清掉已过截止
+// 的条目并返回下一个最早截止（Effects.SettleAt 续排），可信翻转经
+// runEffects 发布。定时器槽位先清再执行 effects，保证续排不被旧槽位挡下。
 func (h *t3ShellHub) settleArchiveMembership(e *t3ShellEntry) {
 	// 与停机串行（#156 R12-codex）：shutdown 在同一把锁里 Stop，回调一旦
 	// 开跑就持锁到结束，shutdown 返回后不再有在途回调（Close 才算真正收干净）。
@@ -763,65 +357,16 @@ func (h *t3ShellHub) settleArchiveMembership(e *t3ShellEntry) {
 	if e.isStopped() {
 		return
 	}
-	if e.state.expireArchiveMembershipUncertain() {
-		h.publishArchiveFaceEvent(e, false)
-		e.refresh()
-	}
+	// 先清定时器槽位再跑 Settle（审修：先 Settle 后清槽会留下窗口——并发
+	// 新登记在 schedule 里看到旧槽位仍占着且截止更早而跳过排程，随后槽位
+	// 被这里清空，新条目就丢了定时器、面长期 stale）。槽位清空后，并发的
+	// scheduleArchiveMembershipSettle 会看到空槽位自行装新定时器。
 	e.mu.Lock()
 	e.settleTimer = nil
 	e.settleAt = time.Time{}
 	e.mu.Unlock()
-	if deadline, ok := e.state.earliestArchiveUncertainDeadline(); ok {
-		delay := time.Until(deadline)
-		if delay <= 0 {
-			// 剩余条目的截止已过但还没被这轮清理到（expire 取 now 之后又过了
-			// 一会儿）：不能把负延迟交给 schedule（它在 settle<=0 时直接返回，
-			// 于是这些条目再也没有定时器 → 面永久 stale）。压到 1ms 立刻再看
-			// 一眼，expire 会按 now 裁掉它们。
-			delay = time.Millisecond
-		}
-		h.scheduleArchiveMembershipSettle(e, delay)
-	}
-}
-
-// invalidateArchiveEntry 是 InvalidateArchive 的 entry 级入口：hub 内部已持
-// entry 句柄的调用方（活跃流 thread.removed，见 applyActiveValues）不必再查
-// 一次注册表。
-//
-// 失效即标不可信：簿记清零之外，还要让归档面在视图层立刻变成「不完整但
-// 保留旧行」——noteArchiveInvalidated 撤销 archiveReady 并把 ArchiveErr
-// 标为「已失效重拉中」；archivedThreads 旧行保留供展示（清表会把「不
-// 确定」变成「确定为空」，比保留旧行更糟）。世代计数推进同时给所有在途
-// 拉取下了护栏：写前那次落地时 generation 对不上，数据照换但不再把窗口
-// 封回可信（见 ensureArchive 的世代护栏）。
-func (h *t3ShellHub) invalidateArchiveEntry(e *t3ShellEntry) {
-	e.state.noteArchiveInvalidated()
-	e.arch.mu.Lock()
-	legacy := e.arch.mode == t3ArchiveModeLegacy
-	if !legacy {
-		e.arch.validUntil = time.Time{}
-		e.arch.retryAfter = time.Time{}
-		e.arch.needsRefetch = false
-		// 在途拉取落地时会因世代不符改走「只换数据」路径并留下
-		// needsRefetch——此处不预置：在途拉取尚未结束，下一 kick 仍被
-		// inFlight 合并，由落地收尾决定是否需要补拉。
-	}
-	e.arch.mu.Unlock()
-	if legacy {
-		// 订阅模式：写后失效的正确动作是让常驻订阅断开重连——常驻流
-		// 只收增量、不自发重发全量，「增量落地后整表重置」会把归档面
-		// 清空到下一次断线才恢复（R3 P1-B）。重连 subscribe 即收权威
-		// 全量快照（写后状态）。备忘记 state（s.mu）、信号走
-		// legacyReconnect：arch.mu 只在判 mode/清簿记时短暂持有，绝不
-		// 在持锁状态下反向取 s.mu（全局锁序 s.mu → arch.mu，R3 P1-A）。
-		e.state.noteArchiveReconnectRequested()
-		e.signalArchiveReconnect()
-	}
-	// 归档面可信度翻转，等归档读的等待者/订阅者需要看到「已失效」；
-	// 写后失效强制发一次 Full（forceFull）：归档集「可能」变了但去向不可
-	// 辨，浏览器必须整环境重拉一次，不做指纹去重。
-	e.hub.publishArchiveFaceEvent(e, true)
-	e.refresh()
+	eff := e.state.Settle()
+	h.runEffects(e, eff)
 }
 
 // ------ 旧面订阅回退（INT-173 审修） ------
@@ -843,18 +388,15 @@ func (e *t3ShellEntry) signalArchiveReconnect() {
 
 // waitArchiveLegacyActive 是旧面订阅监督循环的 mode 闸门（审修 R9 P2-1）：
 // mode 仍处 legacy 时立即放行；已离开 legacy（自愈回 Unknown、按需面重新
-// 接管）则停泊在 legacyCh 上待命，直到 switchToArchiveLegacy 再次放行或
+// 接管）则停泊在 legacyCh 上待命，直到按需快照被判方法不存在经
+// Effects.ActivateLegacy 再次放行或
 // entry/hub 停机。返回 false 表示停机，监督循环应退出。停泊不打上游——
 // 非 legacy 环境里 subscribe 只会得到「方法不存在」，重连只是反复挨拒、
-// 每次失败还把归档面再清一遍。读 mode 只取 arch.mu（与
-// invalidateArchiveEntry 的判定同型：纯读不涉及「archiveReady 尚可信但
-// mode 已翻」的中间态问题）。
+// 每次失败还把归档面再清一遍。读 mode 只取 s.mu（纯读不涉及
+// 「archiveReady 尚可信但 mode 已翻」的中间态问题）。
 func (e *t3ShellEntry) waitArchiveLegacyActive() bool {
 	for {
-		e.arch.mu.Lock()
-		legacy := e.arch.mode == t3ArchiveModeLegacy
-		e.arch.mu.Unlock()
-		if legacy {
+		if e.state.IsLegacy() {
 			return true
 		}
 		select {
@@ -867,16 +409,6 @@ func (e *t3ShellEntry) waitArchiveLegacyActive() bool {
 			return false
 		}
 	}
-}
-
-// archiveLegacyActive 报告归档面当前是否由旧面订阅供数（mode==legacy）。
-// endFaceConnection 用它把关收窄：只有订阅模式的数据可信度才随连接生死
-// （G1：清表 + ArchiveErr），按需快照模式的归档面由 TTL 簿记管可信，旧面
-// 残余连接（自愈后尚未收尾的那条）的终止不得再动归档表。
-func (e *t3ShellEntry) archiveLegacyActive() bool {
-	e.arch.mu.Lock()
-	defer e.arch.mu.Unlock()
-	return e.arch.mode == t3ArchiveModeLegacy
 }
 
 //
@@ -897,9 +429,9 @@ func (e *t3ShellEntry) archiveLegacyActive() bool {
 // runArchiveLegacySubscription 是旧面归档常驻订阅的监督循环：探测 → 拨号
 // → 订阅 → 读循环，结束后按分类退避重连（复用活跃面的 backoffFor）。随
 // entry/hub 生命周期退出；mode 闸门让它只在 legacy 模式下发起连接——
-// entry 创建时停在闸门上待命（不占连接、不打上游），
-// switchToArchiveLegacy 放行；自愈回 Unknown（resetArchiveModeToUnknown）
-// 后下一轮闸门把它重新停泊，订阅不再重连（审修 R9 P2-1：否则旧面连接
+// entry 创建时停在闸门上待命（不占连接、不打上游），EndFetch 的
+// ActivateLegacy 效果放行；自愈回 Unknown（LegacyMethodMissing）后
+// 下一轮闸门把它重新停泊，订阅不再重连（审修 R9 P2-1：否则旧面连接
 // 的持续失败会反复清空已由按需面接管的归档表）。
 //
 // 稳定判定用归档面自己的数据落地时刻（审修 R6-C，syncedAt 取自本连接
@@ -915,7 +447,7 @@ func (h *t3ShellHub) runArchiveLegacySubscription(e *t3ShellEntry) {
 	attempts := 0
 	for {
 		// mode 闸门：非 legacy（Unknown/Snapshot）不发起任何订阅连接，
-		// 停泊等 switchToArchiveLegacy 的放行信号或停机。闸门在每轮重连
+		// 停泊等 ActivateLegacy 的放行信号或停机。闸门在每轮重连
 		// 前复核，mode 已在临界区提交后才可能放行。
 		if !e.waitArchiveLegacyActive() {
 			return
@@ -1002,24 +534,22 @@ func (h *t3ShellHub) connectArchiveLegacyOnce(e *t3ShellEntry) t3ShellConnResult
 	// 「发送后窗口内记录的新请求世代必然大于邮戳」。若在发送后、或任何
 	// 可阻塞调用（noteConnState 取 e.mu，可能等一次大快照拷贝）之后取，
 	// 窗口内发生的归档写后失效记入的请求世代会被算进邮戳——该连接送达
-	// 的变更前快照落地时 connectionStart >= pendingGen 成立，备忘被误清，
+	// 的变更前快照落地时 stamp.gen >= pendingGen 成立，备忘被误清，
 	// 排队的 reconnect 信号被当无备忘忽略，写后全量不再重拉。拨号/探测
 	// 是订阅发出之前的事，在它们之前的请求本就该计入邮戳——唯一不能计
-	// 入的是「本连接 subscribe 已发出之后」的那批。
-	connectionStart := e.state.archiveReconnectTarget()
+	// 入的是「本连接 subscribe 已发出之后」的那批。LegacyStamp 一次取回
+	// 请求世代与连接建立时刻（后者即快照采集时刻的保守下界，#156 R18：
+	// 服务端可能在收到订阅时立刻采样）。
+	stamp := e.state.LegacyStamp()
 	e.noteConnState(true, t3ShellConnConnecting, nil)
 	requestID := session.nextID
 	session.nextID++
-	// connStartAt 必须在**发出 subscribe 之前**取（#156 R18）：服务端可能在收到
-	// 订阅时立刻采样快照，取在发送之后就等于把「本连接之前采好的快照」也算成
-	// 晚于连接建立，旧快照会被当成新对账证据。
-	connStartAt := time.Now()
 	if err := session.sendRequest(connCtx, requestID, t3RPCSubscribeArchivedShell, map[string]any{}); err != nil {
 		h.endFaceConnection(e, true, err)
 		return t3ShellConnResult{}
 	}
 	e.noteConnState(true, t3ShellConnSubscribed, nil)
-	return h.readArchiveLegacyLoop(e, session, connCtx, requestID, connectionStart, connStartAt)
+	return h.readArchiveLegacyLoop(e, session, connCtx, requestID, stamp)
 }
 
 // readArchiveLegacyLoop 是旧归档订阅的读循环：只认本 requestID 的 Chunk/
@@ -1028,7 +558,7 @@ func (h *t3ShellHub) connectArchiveLegacyOnce(e *t3ShellEntry) t3ShellConnResult
 // 出发邮戳，随流项交给落地路径做备忘世代判定（R4 P2）。另有第三条出
 // 路：legacyReconnect 信号在守旧备忘仍置位时主动断开，交监督循环重连
 // 取权威全量（R3 P1-B）。返回连接结局。
-func (h *t3ShellHub) readArchiveLegacyLoop(e *t3ShellEntry, session *t3RPCSession, connCtx context.Context, requestID int, connectionStart int64, connStartAt time.Time) t3ShellConnResult {
+func (h *t3ShellHub) readArchiveLegacyLoop(e *t3ShellEntry, session *t3RPCSession, connCtx context.Context, requestID int, stamp t3LegacyStamp) t3ShellConnResult {
 	frames := make(chan *rpcFrame, 16)
 	readErrCh := make(chan error, 1)
 	readerDone := make(chan struct{})
@@ -1086,7 +616,7 @@ func (h *t3ShellHub) readArchiveLegacyLoop(e *t3ShellEntry, session *t3RPCSessio
 			lastFrame = time.Now()
 			switch {
 			case frame.Tag == "Chunk" && frame.requestIDMatches(requestID):
-				if applyErr := h.applyArchiveValues(e, frame.Values, connectionStart, connStartAt); applyErr != nil {
+				if applyErr := h.applyArchiveValues(e, frame.Values, stamp); applyErr != nil {
 					h.endFaceConnection(e, true, applyErr)
 					return t3ShellConnResult{syncedAt: dataSeenAt}
 				}
@@ -1101,14 +631,19 @@ func (h *t3ShellHub) readArchiveLegacyLoop(e *t3ShellEntry, session *t3RPCSessio
 					credential = errors.Is(err, errT3CredentialRejected)
 					// 方法不存在的 Exit 是「环境中途升级/上次误判」的证据：本
 					// 该有订阅面的环境反而没有，说明按需快照路径可能已可用。
-					// 先重置 mode、再收尾连接（审修 R9 P2-1）：reset 后
-					// endFaceConnection 看到的是非 legacy 面，不再 markArchiveFailed
-					// 清表/写 ArchiveErr——这次失败只证明「订阅通道不存在」，
+					// 先退出 legacy、再收尾连接（审修 R9 P2-1）：之后
+					// endFaceConnection 经 LegacyEnded 看到的是非 legacy 面，
+					// 不再清表/写 ArchiveErr——这次失败只证明「订阅通道不存在」，
 					// 不证明「归档数据作废」，清表会让按需面接管前的窗口里归
-					// 档行凭空消失。mode 回 Unknown 交给下一次 kick 重探测；真
+					// 档行凭空消失。下一次读 BeginFetch 重探测按需快照；真
 					// 旧环境的其他订阅失败文案不命中窄条件，不会误复活按需拨号。
 					if isArchiveSnapshotMethodMissing(err) {
-						e.resetArchiveModeToUnknown()
+						wasLegacy := e.state.IsLegacy()
+						h.runEffects(e, e.state.LegacyMethodMissing())
+						if wasLegacy {
+							e.hub.logger.Info("t3 归档订阅被判方法不存在，回按需探测重试",
+								zap.String("environment_id", e.envID))
+						}
 					}
 					h.endFaceConnection(e, true, err)
 				} else {
@@ -1118,15 +653,14 @@ func (h *t3ShellHub) readArchiveLegacyLoop(e *t3ShellEntry, session *t3RPCSessio
 			default:
 			}
 		case <-e.legacyReconnect:
-			// 守旧备忘消费（s.mu 单锁，不与 arch.mu 嵌套——锁序全局只有
-			// s.mu → arch.mu）：订阅面没有按需拉取可发，写后失效的正确动作
+			// 守旧备忘消费：订阅面没有按需拉取可发，写后失效的正确动作
 			// 是断开后由监督循环重连——新 subscribe 即收权威
 			// 全量快照。常驻流只收增量，「增量落地后整表重置」会把归档面
 			// 清空到下一次断线（R3 P1-B）。信号可早到/重复：备忘已被权威
 			// 快照（邮戳 ≥ 备忘世代的那张）或连接终止清掉时 consume 为假，
 			// 忽略即可。备忘世代比本连接邮戳新时不做门控——那正是「本连接
 			// 的订阅取的是变更前状态」的证据，断开它就是兑现（R4 P2）。
-			if !e.state.consumeArchiveReconnect() {
+			if !e.state.ConsumeLegacyReconnect() {
 				continue
 			}
 			h.endFaceConnection(e, true, errArchiveReconnectRequested)
@@ -1144,38 +678,36 @@ func (h *t3ShellHub) readArchiveLegacyLoop(e *t3ShellEntry, session *t3RPCSessio
 	}
 }
 
-// applyArchiveValues 把旧归档流 Chunk 的全部 value 依次解码并应用到状
-// 态，发布语义同活跃面。connectionStart 是本连接的 reconnect 出发邮戳，
-// 交给快照项做守旧备忘的世代判定（R4 P2）。
-func (h *t3ShellHub) applyArchiveValues(e *t3ShellEntry, values []json.RawMessage, connectionStart int64, connStartAt time.Time) error {
-	batch := t3ShellEventBatch{}
+// applyArchiveValues 把旧归档流 Chunk 的全部 value 依次解码并经
+// ApplyLegacy 按批应用，发布语义同活跃面。stamp 是本连接的出发邮戳，
+// 交给快照项做守旧备忘的世代判定（R4 P2）与快照采集时刻判定（R17）。
+// 归档流自己也可能登记待对账（#156 R24）、变更前快照被拒时记重建备忘
+// （#156 R29）——SettleAt/SignalReconnect 都由 ApplyLegacy 的 Effects
+// 带回，经 runEffects 统一执行；宣布基准随每次落地同步（R17 P2-2，由
+// Effects.Publish=dedup 表达）。
+func (h *t3ShellHub) applyArchiveValues(e *t3ShellEntry, values []json.RawMessage, stamp t3LegacyStamp) error {
+	items := make([]t3ArchiveStreamItem, 0, len(values))
+	var decodeErr error
 	for _, raw := range values {
 		var item t3ArchiveStreamItem
 		if err := json.Unmarshal(raw, &item); err != nil {
-			return fmt.Errorf("归档流帧解析失败: %w", err)
+			decodeErr = fmt.Errorf("归档流帧解析失败: %w", err)
+			break
 		}
-		if err := e.state.applyArchiveItemAt(item, connectionStart, connStartAt); err != nil {
-			return err
-		}
-		batch.observeArchive(&item)
-		// 归档流自己也可能登记待对账（#156 R24：删掉某线程在归档面的唯一一行，
-		// 而它也不在活跃面）。这条路径不会经过活跃面的帧后回调，所以定时器要在
-		// 这里补排——否则条目只能等下次活跃移除或快照，面会一直 stale。
-		// 变更前快照被拒时 state 会记重建备忘（#156 R29）：这里要真的把信号
-		// 发给读循环，否则备忘只等下一次自然断连才兑现，期间面一直是 stale。
-		if e.state.archiveReconnectTarget() > connectionStart {
-			e.signalArchiveReconnect()
-		}
-		if e.state.pendingArchiveUncertain() > 0 {
-			h.scheduleArchiveMembershipSettle(e, e.archiveStaleGrace)
-		}
+		items = append(items, item)
+	}
+	eff, applyErr := e.state.ApplyLegacy(stamp, items)
+	h.runEffects(e, eff)
+	if decodeErr != nil {
+		return decodeErr
+	}
+	if applyErr != nil {
+		return applyErr
+	}
+	batch := t3ShellEventBatch{}
+	for i := range items {
+		batch.observeArchive(&items[i])
 	}
 	h.publishThreadEvent(e, batch.ids, batch.full)
-	// 宣布基准随本次落地同步（R17 P2-2）：旧面订阅落地只发线程事件时，
-	// archAnnounced 停在更早的失败/初始状态——「连上拿快照 → 同一错误再次
-	// 断开」的循环里，清表后的发布拿空表+同一文案去比对旧基准，判「无新
-	// 话可说」而完全不发事件，浏览器继续展示服务端已清掉的归档行。落地后
-	// 同步基准，清表就是真实的集合变化（发 Full）。
-	h.publishArchiveFaceEvent(e, false)
 	return nil
 }

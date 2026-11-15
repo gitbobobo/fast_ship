@@ -2400,9 +2400,10 @@ func TestT3ShellHub_InvalidateMarksArchiveUntrusted(t *testing.T) {
 }
 
 // 世代护栏的确定性交错：暂停 getArchivedShellSnapshot 应答 → 触发归档写并
-// 失效 → 放行写前应答 → 该应答不得把窗口封回可信；落地留下的 needsRefetch
-// 由收尾自动补拉兑现，把补拉压住后中间态可确定性观察（旧实现依赖「之后
-// 恰好还有一次读」，写命令后无人再读时归档面永远停在降级态，R11 P2-1）。
+// 失效 → 放行写前应答 → 该应答不得把窗口封回可信；EndFetch 返回的
+// Refetch 由收尾自动补拉兑现，把补拉压住后中间态可确定性观察（旧实现依赖
+// 「之后恰好还有一次读」，写命令后无人再读时归档面永远停在降级态，
+// R11 P2-1）。
 func TestT3ShellHub_InFlightPreWriteSnapshotCannotSealWindow(t *testing.T) {
 	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
 	// 先暂停归档应答再建 entry：首读就停在「已发起未落地」。pause 挂在
@@ -2441,18 +2442,16 @@ func TestT3ShellHub_InFlightPreWriteSnapshotCannotSealWindow(t *testing.T) {
 	// 拉取在途（写前应答未落地）时发生归档写：失效。
 	hub.InvalidateArchive("user-1", "env-1")
 
-	// 放行写前应答，随后自动补拉被 hold 压住：中间态可确定性观察——落
-	// 地不得把窗口封回可信（ArchiveErr 非空）、写前数据可换行但不可信。
+	// 放行写前应答，随后自动补拉被 hold 压住：中间态可确定性观察——写
+	// 前快照被 freshnessFloor 整条丢弃（采集早于失效，既不封窗也不换行，
+	// #156 R28/R39），面保持不可信；补拉在途。
 	srv.resumeArchive()
 	collector.await(true) // 自动补拉已发起（无任何读参与）：它确实不依赖后续读
 	view := waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
-		return v.Snaps != nil && v.Snaps.ArchiveErr != nil && len(v.Snaps.Archived.Threads) == 1
+		return v.Snaps != nil && v.Snaps.ArchiveErr != nil
 	})
 	if !errors.Is(view.Snaps.ArchiveErr, errT3ShellArchiveStale) {
 		t.Fatalf("pre-write snapshot must not reseal the window as trusted, snaps = %+v", view.Snaps)
-	}
-	if view.Snaps.Archived.Threads[0].ID != "th-a" {
-		t.Fatalf("pre-write data may replace rows but not trust, got %+v", view.Snaps.Archived.Threads)
 	}
 
 	// 写后快照放行补拉落地：归档面重新可信，含写后新线程。
@@ -2465,11 +2464,11 @@ func TestT3ShellHub_InFlightPreWriteSnapshotCannotSealWindow(t *testing.T) {
 }
 
 // 「apply 成功后、簿记提交前发生失效」的确定性交错（Finding R1 端到端）：
-// 世代校验与簿记提交已在同一临界区原子化，失效只可能发生在 commit 之后
-// （簿记清零）或之前（世代不符走 needsRefetch），不存在「apply 成功了但
-// 簿记把已失效的窗口封回 60s」的缝隙。用 pauseArchive 挂住在途拉取，
-// Invalidate 后放行写前应答：落地不得封窗，收尾自动补拉写后状态（无读
-// 参与——若落地误封窗，needsRefetch 不会留下，补拉不会发生）。
+// 世代校验与簿记提交已在同一临界区原子化，失效只可能发生在收尾之后
+// （簿记清零）或之前（世代不符由 Effects.Refetch 表达），不存在「apply
+// 成功了但簿记把已失效的窗口封回 60s」的缝隙。用 pauseArchive 挂住在途
+// 拉取，Invalidate 后放行写前应答：落地不得封窗，收尾自动补拉写后状态
+// （无读参与——若落地误封窗，Refetch 不会表达，补拉不会发生）。
 func TestT3ShellHub_BookkeepingCommitCannotSealAfterInvalidation(t *testing.T) {
 	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
 	srv.pauseArchive()
@@ -2503,8 +2502,8 @@ func TestT3ShellHub_BookkeepingCommitCannotSealAfterInvalidation(t *testing.T) {
 	hub.InvalidateArchive("user-1", "env-1")
 	calls := srv.archiveCallCount()
 
-	// 放行写前应答：世代护栏让落地只换数据，commit 簿记（needsRefetch
-	// 备忘）不得封窗——收尾立即自动补拉写后快照，不受 inFlight 之外
+	// 放行写前应答：世代护栏让落地只换数据，收尾簿记（Effects.Refetch
+	// 补拉诉求）不得封窗——收尾立即自动补拉写后快照，不受 inFlight 之外
 	// 的任何窗口阻挡，也不需要任何后续读参与（补拉连接先于一切读出现）。
 	srv.resumeArchive()
 	collector.await(true)
@@ -2518,12 +2517,12 @@ func TestT3ShellHub_BookkeepingCommitCannotSealAfterInvalidation(t *testing.T) {
 }
 
 // 世代护栏的闭环（R11 P2-1）：写命令与在途拉取交错 → 在途结果落地为写前
-// 状态（needsRefetch 备忘）→ 落地收尾必须自己补发一次写后拉取，不再依赖
-// 「之后恰好还有一次读」——否则写命令后无人再读时，归档面永远停
+// 状态（Effects.Refetch 补拉诉求）→ 落地收尾必须自己补发一次写后拉取，
+// 不再依赖「之后恰好还有一次读」——否则写命令后无人再读时，归档面永远停
 // 「已失效重拉中」、缺新归档线程，且落地指纹若无变化连事件都不发，浏览器
 // 收不到提示就永远不会再读。补拉拿到写后快照（含新线程）恢复可信并发事
-// 件；链条终止由世代判定承担：无新失效则补拉世代相符落地封窗，不再留
-// 标志，无空转（用例末尾的静默窗口验证）。
+// 件；链条终止由世代判定承担：无新失效则补拉世代相符落地封窗，不再表达
+// Refetch，无空转（用例末尾的静默窗口验证）。
 func TestT3ShellHub_GenerationMismatchLandingAutoRefetches(t *testing.T) {
 	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
 	// 按序应答：第 1 次（写前，被压住）答 [th-a]；第 2 次（收尾自动补拉）
@@ -2563,7 +2562,7 @@ func TestT3ShellHub_GenerationMismatchLandingAutoRefetches(t *testing.T) {
 	hub.InvalidateArchive("user-1", "env-1")
 
 	// 放行写前应答。此后不再发任何 View/Peek：写前落地只换数据不封窗，
-	// 留下 needsRefetch，落地收尾必须自己补拉。
+	// EndFetch 表达 Refetch，落地收尾必须自己补拉。
 	srv.resumeArchive()
 
 	// 自动补拉的证据：无读者参与，归档 RPC 被再次调用（第 2 项队列应答）。
@@ -2600,8 +2599,8 @@ func TestT3ShellHub_GenerationMismatchLandingAutoRefetches(t *testing.T) {
 }
 
 // 同型交错落在失败路径（R11 P2-1 对称覆盖）：写前拉取以真实失败告终
-// （非「方法不存在」，不触发 legacy 回退）且世代已变——不记冷却、只留
-// needsRefetch，落地收尾同样必须自动补拉并拿到写后快照。
+// （非「方法不存在」，不触发 legacy 回退）且世代已变——不记冷却、只表达
+// Refetch，落地收尾同样必须自动补拉并拿到写后快照。
 func TestT3ShellHub_GenerationMismatchFailureAutoRefetches(t *testing.T) {
 	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
 	srv.pauseArchive()
@@ -2787,9 +2786,9 @@ func TestT3ShellHub_InvalidatedThenFailedFetchKeepsRows(t *testing.T) {
 }
 
 // 结构性坏快照（线程缺 ID）不得与「世代不符」合并成同一种 false（复审
-// 遗留）：坏负载是本次读取失败——ArchiveErr 记真实解析/校验错误、
-// retryAfter 记冷却窗口，冷却内连续 View/Peek 不重复拨号（不出现
-// needsRefetch 触发的无冷却重试循环）；修好上游后冷却过期重拉成功，
+// 遗留）：坏负载是本次读取失败——EndFetch 记 ArchiveErr 真实解析/校验
+// 错误 + retryAfter 冷却且 Refetch 为 false，冷却内连续 View/Peek 不重
+// 复拨号（不出现无冷却重试循环）；修好上游后冷却过期重拉成功，
 // 归档面恢复可信。
 func TestT3ShellHub_BadArchivePayloadRecordsCooldown(t *testing.T) {
 	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
@@ -2809,17 +2808,19 @@ func TestT3ShellHub_BadArchivePayloadRecordsCooldown(t *testing.T) {
 		t.Fatalf("bad payload must surface as a real error, got %v", view.Snaps.ArchiveErr)
 	}
 
-	// 簿记走失败路径：记了 retryAfter 冷却，而不是 needsRefetch 备忘。
+	// 簿记走失败路径：EndFetch 按本次读取失败收尾——Err 承载坏负载原因、
+	// retryAfter 记冷却，Refetch 为 false（坏负载不触发补拉）。
 	e := hub.entries[t3ShellHubKey("user-1", "env-1")]
-	e.arch.mu.Lock()
-	cooled := !e.arch.retryAfter.IsZero() && !e.arch.needsRefetch
-	e.arch.mu.Unlock()
+	e.state.mu.Lock()
+	cooled := !e.state.retryAfter.IsZero()
+	retryAfter := e.state.retryAfter
+	e.state.mu.Unlock()
 	if !cooled {
-		t.Fatalf("bad payload must record the failure cooldown, not a needsRefetch memo (retryAfter=%v needsRefetch=%v)", e.arch.retryAfter, e.arch.needsRefetch)
+		t.Fatalf("bad payload must record the failure cooldown (retryAfter=%v)", retryAfter)
 	}
 
-	// (b)+(c) 冷却内连续 View/Peek 不重复打上游：毒快照不得借
-	// needsRefetch 绕过冷却形成重拨风暴。
+	// (b)+(c) 冷却内连续 View/Peek 不重复打上游：毒快照不得绕过冷却形成
+	// 重拨风暴。
 	calls := srv.archiveCallCount()
 	for i := 0; i < 3; i++ {
 		if _, err := hub.View(context.Background(), env, "tok"); err != nil {
@@ -3001,9 +3002,9 @@ func TestT3ShellHub_MethodNotFoundCaseVariantsFallBack(t *testing.T) {
 }
 
 // legacy 回退的失败收尾时序（R5 P2）：方法不存在切订阅面时必须先记失败、
-// 后切换——switchToArchiveLegacy 放行的常驻订阅可能紧跟着落地权威快照
-// （archiveErr=nil、archiveReady=true），先切换后收尾会把刚恢复可信的
-// 订阅面重新写回失败态，legacy 流可能很久不发下一帧。闸门压住订阅首帧：
+// 后切换——EndFetch 的 ActivateLegacy 放行的常驻订阅可能紧跟着落地权威
+// 快照（archiveErr=nil、archiveReady=true），先切换后收尾会把刚恢复可信
+// 的订阅面重新写回失败态，legacy 流可能很久不发下一帧。闸门压住订阅首帧：
 // 订阅激活即证失败收尾已完成（修复后：先记账、后放行订阅），断言失败
 // 如实记账、权威落地后恢复可信且失败不再被写回。
 func TestT3ShellHub_LegacyFallbackFailureNotedBeforeLanding(t *testing.T) {
@@ -3150,7 +3151,7 @@ func TestT3ShellHub_LegacyInvalidateTriggersReconnectRefetch(t *testing.T) {
 
 // 旧面守旧备忘与增量落地并发（R3 P1-A）：失效置备忘时恰有在途增量落地，
 // 修复前落地收尾持 arch.mu 取 s.mu（arch.mu → s.mu 反向嵌套），与任何
-// s.mu → arch.mu 序列（如 admitArchiveRefresh 准入）并发即 ABBA 死锁、
+// s.mu → arch.mu 序列（如 BeginFetch 准入）并发即 ABBA 死锁、
 // s.mu 永久占住。本用例先在测试线程持住 s.mu，再推送增量：若落地路径仍
 // 取 arch.mu → s.mu，它会卡在等 s.mu（不崩溃、可多次重演）；持锁期间
 // 置失效并发 reconnect 信号，随后放锁——增量落地 + 备忘消费 +
@@ -3710,8 +3711,8 @@ func TestT3ShellHub_LegacyPreChangeSnapshotStaysUntrusted(t *testing.T) {
 // legacy mode 自愈（审修 R8 P2，end-to-end）：订阅连接因「方法不存在」
 // Exit 失败时 mode 回 Unknown——下一次读重探测按需快照（环境可能中途
 // 升级回新版/上次误判）。真旧环境重探测会再次判方法不存在、经
-// switchToArchiveLegacy 切回订阅面（多付一次探测拨号、不死锁）；环境
-// 确实升级了则按需路径恢复供数。订阅的其他失败（非方法级）不误重置。
+// EndFetch 的 ActivateLegacy 切回订阅面（多付一次探测拨号、不死锁）；
+// 环境确实升级了则按需路径恢复供数。订阅的其他失败（非方法级）不误重置。
 func TestT3ShellHub_LegacyMethodNotFoundResetsToUnknown(t *testing.T) {
 	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
 	srv.setArchiveLegacy(true)
@@ -3762,10 +3763,10 @@ func TestT3ShellHub_LegacyMethodNotFoundResetsToUnknown(t *testing.T) {
 	hub.mu.Unlock()
 	healed := false
 	for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); {
-		entry.arch.mu.Lock()
-		mode := entry.arch.mode
-		entry.arch.mu.Unlock()
-		if mode == t3ArchiveModeUnknown {
+		entry.state.mu.Lock()
+		legacy := entry.state.archiveLegacy
+		entry.state.mu.Unlock()
+		if !legacy {
 			healed = true
 			break
 		}
@@ -3903,10 +3904,10 @@ func TestT3ShellHub_BothArchiveMethodsMissingDamPerReadReprobe(t *testing.T) {
 	// 同一临界区提交，两者同时可见）。
 	firstRound := false
 	for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); {
-		entry.arch.mu.Lock()
-		mode, retryAfter := entry.arch.mode, entry.arch.retryAfter
-		entry.arch.mu.Unlock()
-		if mode == t3ArchiveModeUnknown && !retryAfter.IsZero() {
+		entry.state.mu.Lock()
+		legacy, retryAfter := entry.state.archiveLegacy, entry.state.retryAfter
+		entry.state.mu.Unlock()
+		if !legacy && !retryAfter.IsZero() {
 			firstRound = true
 			break
 		}
@@ -4141,10 +4142,10 @@ func TestT3ShellHub_LegacyHealQuietAfterUpgrade(t *testing.T) {
 	}
 	healed := false
 	for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); {
-		entry.arch.mu.Lock()
-		mode := entry.arch.mode
-		entry.arch.mu.Unlock()
-		if mode == t3ArchiveModeUnknown {
+		entry.state.mu.Lock()
+		legacy := entry.state.archiveLegacy
+		entry.state.mu.Unlock()
+		if !legacy {
 			healed = true
 			break
 		}
@@ -4242,13 +4243,17 @@ func TestT3ShellHub_EndArchiveTeardownRespectsMode(t *testing.T) {
 	}
 
 	// legacy：订阅面数据随连接生死（G1），终止照旧清表 + ArchiveErr。
-	// 直接置 mode（不经 switchToArchiveLegacy，避免放行真订阅拨号）；
-	// 写序沿全局锁序 s.mu → arch.mu。
-	entry.state.mu.Lock()
-	entry.arch.mu.Lock()
-	entry.arch.mode = t3ArchiveModeLegacy
-	entry.arch.mu.Unlock()
-	entry.state.mu.Unlock()
+	// 走生产切入路径：Invalidate 清封窗 → BeginFetch 探测 → EndFetch
+	// (method missing) 切 legacy。Effects.ActivateLegacy 不经 runEffects
+	// 执行，不放行真订阅拨号，只改状态机内部模式。
+	entry.state.Invalidate()
+	ticket, admitted, _ := entry.state.BeginFetch()
+	if !admitted {
+		t.Fatalf("must admit the on-demand probe")
+	}
+	if eff := entry.state.EndFetch(ticket, t3FetchOutcome{kind: t3FetchMethodMissing, err: errors.New("method missing")}); !eff.ActivateLegacy {
+		t.Fatalf("method missing must activate legacy mode, got %+v", eff)
+	}
 	hub.endFaceConnection(entry, true, errors.New("legacy 订阅连接结束"))
 	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
 		return v.Snaps != nil && v.Snaps.ArchiveErr != nil && len(v.Snaps.Archived.Threads) == 0
@@ -4520,7 +4525,7 @@ func TestT3ShellHub_AuthoritativeSnapshotRemovalInvalidatesArchive(t *testing.T)
 // mode 重置必须撤归档面可信（R13 P2-2）：订阅被判方法不存在 → 订阅供数
 // 通道已死，最近一次订阅快照（可能来自早已死去的连接）不得在按需落地
 // （≤ TTL）前继续报 archiveReady=true+ArchiveErr=nil——旧实现只清簿记，
-// admitArchiveRefresh 的 expired 判定（validUntil 非零）不命中，重探测被
+// BeginFetch 的 expired 判定（validUntil 非零）不命中，重探测被
 // 当「首次读取」，列表/详情/wait 在整个窗口里拿旧快照当完整结论。修复后
 // reset 在同一临界区撤可信（留行、报 stale），按需快照落地才恢复。
 func TestT3ShellHub_LegacyResetRetractsArchiveTrust(t *testing.T) {
@@ -4570,10 +4575,10 @@ func TestT3ShellHub_LegacyResetRetractsArchiveTrust(t *testing.T) {
 	}
 	healed := false
 	for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); {
-		entry.arch.mu.Lock()
-		mode := entry.arch.mode
-		entry.arch.mu.Unlock()
-		if mode == t3ArchiveModeUnknown {
+		entry.state.mu.Lock()
+		legacy := entry.state.archiveLegacy
+		entry.state.mu.Unlock()
+		if !legacy {
 			healed = true
 			break
 		}
@@ -5464,7 +5469,10 @@ func TestT3ShellHub_MembershipSettleNotStarvedByNewRemovals(t *testing.T) {
 	if entry == nil {
 		t.Fatalf("entry not found")
 	}
-	if pending := entry.state.pendingArchiveUncertain(); pending > 1 {
+	entry.state.mu.Lock()
+	pending := len(entry.state.archiveUncertain)
+	entry.state.mu.Unlock()
+	if pending > 1 {
 		t.Fatalf("earlier removals must expire on their own deadlines, still pending=%d", pending)
 	}
 

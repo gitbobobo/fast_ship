@@ -43,7 +43,7 @@ API Key 开放的 T3 只读面（不含凭证、不含线程内容）；线程�
 | 配对链接解析 | `server/internal/service/t3_pairing.go` |
 | T3 HTTP 客户端（换 token/探测/线程详情/项目表/字节转发） | `server/internal/service/t3_client.go` |
 | T3 WS RPC 客户端（effect rpc JSON 帧） | `server/internal/service/t3_ws.go` |
-| shell 订阅纯状态（活跃/归档两面 reducer） | `server/internal/service/t3_shell_state.go` |
+| shell 订阅纯状态机（活跃/归档两面 + 信任字段 + 按需簿记，单锁 `s.mu`） | `server/internal/service/t3_shell_state.go` |
 | shell 订阅 hub（每环境一条常驻活跃 WS + 按需归档快照 + 变更通知） | `server/internal/service/t3_shell_hub.go` |
 | shell 变更事件与按用户订阅 | `server/internal/service/t3_shell_events.go` |
 | 浏览器 SSE 订阅与查询失效 | `server/internal/handler/t3_environment.go`（`/api/threads/stream`）、`web/src/lib/thread-stream.ts`、`web/src/lib/hooks/use-threads.ts` |
@@ -269,6 +269,24 @@ Peek）后台触发重拉——拉取不阻塞本次视图，落地/失败经 re
 带回），或**宽限到期**——归档增量只换行、不解账（两条流
 顺序不定，排队的增量可能来自更早一轮归档周期）。
 
+  **状态机接口面（INT-216）**：`t3ShellState` 本身即是那个 in-process
+  状态机——数据行、信任字段与按需簿记同处一 struct，全部受 `s.mu` 一把
+  锁保护（原独立的归档簿记锁 `arch.mu` 已删除，全局锁序简化为
+  `hub.mu → entry.mu → s.mu`；`subsMu` 独立，不与该链交叉）。对外的写
+  方法只有短接口：`ApplyActive`（按批应用活跃帧，移除→待对账/失效在
+  同一临界区内完成）、`BeginFetch`/`EndFetch`（按需拉取准入与收尾，
+  方法不存在的结局在同一临界区内先记失败、后切 legacy）、`Invalidate`
+  （写后失效）、`LegacyStamp`/`ApplyLegacy`/`LegacyEnded`/
+  `ConsumeLegacyReconnect`/`LegacyMethodMissing`/`IsLegacy`（旧面订阅
+  通道）、`Settle`（待对账到期清理）、`MarkActiveSynced`，以及只读
+  `Snapshots`/`Status`/`Fingerprint`。所有写方法返回声明式
+  `t3ShellEffects`（发布/refresh/重连信号/激活 legacy/到期排程/补拉），
+  由 hub 侧 `runEffects` 按固定顺序在锁外执行——状态机纯内存、不持
+  hub/entry 引用，归档可信度转移不再依赖调用方先后顺序。归档面事件
+  去重经机内单调 `archiveRev`：指纹（行摘要+可信度文案）变化时推进，
+  宣布基准只接受 rev 单调递增的写入，指纹取值与基准比较分属两把锁也
+  不会被旧指纹覆盖。
+
   **已知取舍（INT-173，方案 1 定案）**：宽限到期会**直接**恢复可信，不要求
   先取一张权威快照。理由是线程可能被彻底删除，归档流永远不会有它的行——
   若到期也要等「包含它的快照」，这类线程会让归档面永久 degraded。代价是
@@ -293,13 +311,13 @@ Peek）后台触发重拉——拉取不阻塞本次视图，落地/失败经 re
   发成功后 `InvalidateArchive` 立即作废缓存并让归档面报「已失效重拉中」
   （`ArchiveErr` 非空、旧行保留——活跃订阅随即把线程从活跃面摘除，这段
   窗口里归档面若仍报可信会把线程误判为不存在）。拉取发起时记失效计
-  数（generation），拉取途中发生失效则该次结果是写前状态：只换数据、不
-  封可信窗口也不记失败冷却；落地收尾（kick 的后台 defer）消费
-  `needsRefetch` 备忘，**自动补发一次写后拉取**——不依赖浏览器再发读
-  （停在降级态的页面收不到事件就永远不会再读）；补拉落地恢复可信并发
-  事件（集合变 Full、可信度翻转 State）。终止靠世代判定自然收敛：补拉
-  拿到写后快照即世代相符落地封窗，只有补拉期间又发生失效才会再留备忘
-  再补拉（世代护栏）。
+  数（generation），拉取途中发生失效则该次结果是写前状态：世代不符或
+  被 freshnessFloor 丢弃即不封可信窗口也不记失败冷却；`EndFetch` 在同一
+  临界区内返回 `Effects.Refetch`，**自动补发一次写后拉取**——不依赖
+  浏览器再发读（停在降级态的页面收不到事件就永远不会再读）；补拉落地
+  恢复可信并发事件（集合变 Full、可信度翻转 State）。终止靠世代判定
+  自然收敛：补拉拿到写后快照即世代相符落地封窗，只有补拉期间又发生
+  失效才会再要求补拉（世代护栏）。
 - **项目表只有活跃面一份权威来源**：归档快照的 `Projects` 一律忽略
   （F7）；归档线程的项目名从活跃项目表取，项目已删除时显示无名（与
   「项目已删除」一致）。
