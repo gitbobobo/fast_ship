@@ -36,7 +36,7 @@ github.com/www.github.com 域内形状不符（如 `/pulls/{n}`）按无效（40
 
 ### 集成快照
 
-forgejo 行落 `forge_integration_id`（可空列，AutoMigrate 追加；github 行恒空串）：`repo_full_name` 只有 owner/repo 没有 host，sync 必须按快照 id 重建该行的 Forgejo 客户端。重复 attach 时 upsert 会把快照刷新为本次解析结果（换绑集成后重新绑定项目再 attach 即跟随）；**空快照不覆盖**——upsert 冲突路径对快照用 `excluded <> ''` 才写，未来空快照的调用方（同步投影等）不会把 manual 行的快照抹掉。状态映射：Forgejo `closed &&（平台标记 merged=true 或 merged_at 非空，历史/异常快照可能只有其一）→ merged`，其余 closed → closed，否则 open（与 GitHub 的 closed+merged_at 口径对齐；merged 行的 merged_at 可能为空，OpenAPI 已按此措辞）；`repo_full_name` 归一到平台返回的 canonical 名。
+forgejo 行落 `forge_integration_id`（可空列，AutoMigrate 追加；github 行恒空串）：`repo_full_name` 只有 owner/repo 没有 host，sync 必须按快照 id 重建该行的 Forgejo 客户端。重复 attach 时 upsert 会把快照刷新为本次解析结果（换绑集成后重新绑定项目再 attach 即跟随）；**空快照不覆盖**——upsert 冲突路径对快照用 `excluded <> ''` 才写，未来空快照的调用方（同步投影等）不会把 manual 行的快照抹掉。状态映射：两平台同口径（INT-219 收口后共用 `pullRequestState`）`closed &&（平台标记 merged=true 或 merged_at 非空，历史/异常快照可能只有其一）→ merged`，其余 closed → closed，否则 open（merged 行的 merged_at 可能为空，OpenAPI 已按此措辞；GitHub 行同样可能落到该组合）；`repo_full_name` 归一到平台返回的 canonical 名。
 
 attach 与 sync 的失败文案不回显适配器错误原文（集成 API 绝对地址、响应体只进服务端日志）：Forgejo 状态码错误给「Forgejo API 状态码 N」+提示，传输/解析失败归一为「连接或响应异常」。GitHub 与 Forgejo 对「PR 不存在」与「无权访问」都返回 404，提示同时保留两种可能（GitHub 附「核查仓库访问范围与 Pull requests 读权限」）；限流另给提示，不断言单一原因。
 
