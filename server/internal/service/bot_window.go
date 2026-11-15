@@ -177,18 +177,6 @@ var botDetectClient = &http.Client{Timeout: botWindowDetectTimeout}
 
 var errModelWindowUnknown = errors.New("模型元数据中未找到可用上下文窗口")
 
-// detectModelWindow 拉取当前 API 地址的模型元数据（GET {baseURL}/models，
-// Bearer 鉴权），返回目标模型的能力。网络/解析失败返回 error，调用方按
-// 「不阻塞每轮对话」处理；找得到模型但缺失窗口字段时保持 0 并返回
-// errModelWindowUnknown。
-func (s *BotService) detectModelWindow(ctx context.Context, baseURL, apiKey, modelName string) (*botModelCapability, error) {
-	det, err := s.detectModelWindows(ctx, baseURL, apiKey, modelName)
-	if err != nil {
-		return nil, err
-	}
-	return det.Target, nil
-}
-
 // botModelWindowEntry 是 /models 列表内的一个模型条目（模型名 + 元数据）。
 type botModelWindowEntry struct {
 	Model           string
@@ -391,24 +379,6 @@ func botRawMessageInt64(item map[string]json.RawMessage, names []string) int64 {
 		}
 	}
 	return 0
-}
-
-// persistModelWindow 把一份已探测的能力写入窗口缓存（单行）。测试 seeding 与
-// 全列表落缓存的 persistModelWindows 共用同一 upsert 语义。成功行不带
-// FailedAt（nil → Upsert 写 NULL），既有失败退避随成功写入一并清除。
-func (s *BotService) persistModelWindow(baseURL, modelName string, cap *botModelCapability) error {
-	now := s.now()
-	return s.windows.Upsert(&model.BotModelWindow{
-		ID:              uuid.NewString(),
-		BaseURL:         botNormalizeBaseURL(baseURL),
-		Model:           modelName,
-		ContextWindow:   cap.WindowTokens,
-		MaxOutputTokens: cap.MaxOutputTokens,
-		Source:          "detected",
-		Detail:          cap.Detail,
-		FetchedAt:       now,
-		UpdatedAt:       now,
-	})
 }
 
 // persistModelWindows 把一次 /models 探测得到的列表写入窗口缓存（INT-115

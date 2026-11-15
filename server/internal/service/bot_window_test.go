@@ -149,6 +149,19 @@ func findWindowRow(t *testing.T, env *botTestEnv, baseURL, modelName string) *mo
 	return row
 }
 
+// seedModelWindow 直接落一行探测缓存（测试 seeding）：走生产的全列表落库
+// 入口 persistModelWindows，与线上写入同一 upsert 语义。
+func seedModelWindow(t *testing.T, s *BotService, baseURL, modelName string, windowTokens, maxOutputTokens int64) {
+	t.Helper()
+	if err := s.persistModelWindows(baseURL, "", []botModelWindowEntry{{
+		Model:           modelName,
+		ContextWindow:   windowTokens,
+		MaxOutputTokens: maxOutputTokens,
+	}}); err != nil {
+		t.Fatalf("seed window cache: %v", err)
+	}
+}
+
 // ---------- A：探测、缓存与解析顺序 ----------
 
 func TestBotWindowDetectDeepSeekShape(t *testing.T) {
@@ -158,10 +171,11 @@ func TestBotWindowDetectDeepSeekShape(t *testing.T) {
 	userID := createBotTestUser(t, env.db, "winseek")
 	bot := createBotRowAt(t, env, userID, ps.URL(), "deepseek-flash")
 
-	cap, err := env.bots.detectModelWindow(context.Background(), ps.URL(), "sk-x", "deepseek-flash")
+	det, err := env.bots.detectModelWindows(context.Background(), ps.URL(), "sk-x", "deepseek-flash")
 	if err != nil {
 		t.Fatalf("detect: %v", err)
 	}
+	cap := det.Target
 	if cap.WindowTokens != 1048576 || cap.MaxOutputTokens != 262144 || !cap.Detected || cap.Source != "detected" {
 		t.Fatalf("探测结果不符: %+v", cap)
 	}
@@ -193,10 +207,11 @@ func TestBotWindowDetectLenientShapes(t *testing.T) {
 	}
 	for i, tc := range cases {
 		ps := newWindowProbeServer(t, 200, tc.body)
-		cap, err := env.bots.detectModelWindow(context.Background(), ps.URL(), "sk-x", "m1")
+		det, err := env.bots.detectModelWindows(context.Background(), ps.URL(), "sk-x", "m1")
 		if err != nil {
 			t.Fatalf("%s: detect: %v", tc.name, err)
 		}
+		cap := det.Target
 		if cap.WindowTokens != tc.wantWin || cap.MaxOutputTokens != tc.wantOut {
 			t.Fatalf("%s: got %+v", tc.name, cap)
 		}
@@ -212,7 +227,7 @@ func TestBotWindowMissingFieldsFallsBack(t *testing.T) {
 	userID := createBotTestUser(t, env.db, "winmiss")
 	bot := createBotRowAt(t, env, userID, ps.URL(), "m1")
 
-	if _, err := env.bots.detectModelWindow(context.Background(), ps.URL(), "sk-x", "m1"); err == nil {
+	if _, err := env.bots.detectModelWindows(context.Background(), ps.URL(), "sk-x", "m1"); err == nil {
 		t.Fatalf("缺失窗口字段应返回 error")
 	}
 	// 未装缓存 → 回退默认窗口，输出上限缺失不得当成 0 参与。
@@ -335,7 +350,7 @@ func TestBotWindowDetectFailurePaths(t *testing.T) {
 	env := setupBotTestEnv(t)
 	// HTTP 500。
 	ps := newWindowProbeServer(t, 500, `{"error":"boom"}`)
-	if _, err := env.bots.detectModelWindow(context.Background(), ps.URL(), "sk-x", "m1"); err == nil {
+	if _, err := env.bots.detectModelWindows(context.Background(), ps.URL(), "sk-x", "m1"); err == nil {
 		t.Fatalf("500 应返回 error")
 	}
 	if err := env.bots.refreshModelWindow(context.Background(), ps.URL(), "sk-x", "m1"); err == nil {
@@ -353,7 +368,7 @@ func TestBotWindowDetectFailurePaths(t *testing.T) {
 	t.Cleanup(func() { close(hang); srv.Close() })
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
-	if _, err := env.bots.detectModelWindow(ctx, srv.URL, "sk-x", "m1"); err == nil {
+	if _, err := env.bots.detectModelWindows(ctx, srv.URL, "sk-x", "m1"); err == nil {
 		t.Fatalf("超时应返回 error")
 	}
 	// 失败后解析仍可用（回退），不阻塞预算计算。
@@ -1618,11 +1633,7 @@ func TestBotSummaryOutputCappedByDetectedLimit(t *testing.T) {
 	userID := createBotTestUser(t, env.db, "sumcap")
 	bot := createBotRowAt(t, env, userID, env.fake.URL(), "fake-model")
 	// 探测结果：窗口 128k、输出上限 8k。
-	if err := env.bots.persistModelWindow(env.fake.URL(), "fake-model", &botModelCapability{
-		WindowTokens: 131072, MaxOutputTokens: 8192, Source: "detected", Detail: "GET /models",
-	}); err != nil {
-		t.Fatalf("seed cache: %v", err)
-	}
+	seedModelWindow(t, env.bots, env.fake.URL(), "fake-model", 131072, 8192)
 	env.cfg.Bots.Context.WindowTokens = 131072
 	seedCompactableLedger(t, env, bot.ID, strings.Repeat("很长的旧历史。", 8000))
 	botRow, _ := env.bots.bots.Get(bot.ID)
@@ -1685,16 +1696,8 @@ func TestBotMetricsUseRunSnapshotAddress(t *testing.T) {
 	const addrA = "https://svc-a.example.com/v1"
 	const addrB = "https://svc-b.example.com/v1"
 	bot := createBotRowAt(t, env, userID, addrB, "m1")
-	if err := env.bots.persistModelWindow(addrA, "m1", &botModelCapability{
-		WindowTokens: 1048576, Source: "detected", Detail: "GET /models",
-	}); err != nil {
-		t.Fatalf("seed A: %v", err)
-	}
-	if err := env.bots.persistModelWindow(addrB, "m1", &botModelCapability{
-		WindowTokens: 4096, Source: "detected", Detail: "GET /models",
-	}); err != nil {
-		t.Fatalf("seed B: %v", err)
-	}
+	seedModelWindow(t, env.bots, addrA, "m1", 1048576, 0)
+	seedModelWindow(t, env.bots, addrB, "m1", 4096, 0)
 
 	now := time.Now().UTC()
 	run := &model.BotRun{
@@ -1734,11 +1737,7 @@ func TestBotChatSnapshotMetricsWithoutRequest(t *testing.T) {
 	ps := newWindowProbeServer(t, 200, `{"data":[{"id":"fake-model","context_window":4096}]}`)
 	userID := createBotTestUser(t, env.db, "winmetrics3")
 	bot := createBotRowAt(t, env, userID, ps.URL(), "fake-model")
-	if err := env.bots.persistModelWindow(ps.URL(), "fake-model", &botModelCapability{
-		WindowTokens: 4096, Source: "detected", Detail: "GET /models",
-	}); err != nil {
-		t.Fatalf("seed cache: %v", err)
-	}
+	seedModelWindow(t, env.bots, ps.URL(), "fake-model", 4096, 0)
 
 	// 全新 bot（没有任何主线请求）：metrics 仍产出，Request 为 nil，
 	// 已探测到的窗口可见。
@@ -1786,11 +1785,7 @@ func TestAuxModelRequestCapsOutputToDetectedLimit(t *testing.T) {
 	env := setupBotTestEnv(t, fakeModelTurn{Text: "ok"})
 	userID := createBotTestUser(t, env.db, "auxcap")
 	bot := createBotRowAt(t, env, userID, env.fake.URL(), "fake-model")
-	if err := env.bots.persistModelWindow(env.fake.URL(), "fake-model", &botModelCapability{
-		WindowTokens: 65536, MaxOutputTokens: 512, Source: "detected", Detail: "GET /models",
-	}); err != nil {
-		t.Fatalf("seed cache: %v", err)
-	}
+	seedModelWindow(t, env.bots, env.fake.URL(), "fake-model", 65536, 512)
 	maintRun := seedMaintRun(t, env, bot.ID)
 
 	if _, err := env.bots.auxModelRequest(context.Background(), bot, maintRun,
@@ -1816,11 +1811,7 @@ func TestAuxModelRequestRejectsOverWindowInput(t *testing.T) {
 	env := setupBotTestEnv(t)
 	userID := createBotTestUser(t, env.db, "auxover")
 	bot := createBotRowAt(t, env, userID, env.fake.URL(), "fake-model")
-	if err := env.bots.persistModelWindow(env.fake.URL(), "fake-model", &botModelCapability{
-		WindowTokens: 512, Source: "detected", Detail: "GET /models",
-	}); err != nil {
-		t.Fatalf("seed cache: %v", err)
-	}
+	seedModelWindow(t, env.bots, env.fake.URL(), "fake-model", 512, 0)
 	maintRun := seedMaintRun(t, env, bot.ID)
 
 	// 超窗输入 + 超大 maxOut 同时给：关口都必须拦下。
@@ -1857,11 +1848,7 @@ func TestSilentArchiveUsesCapabilityBudgets(t *testing.T) {
 	bot := env.createBot(t, userID)
 	env.cfg.Bots.Context.WindowTokens = 30000
 	env.cfg.Bots.Context.ArchiveModel = "arch-model"
-	if err := env.bots.persistModelWindow(env.fake.URL(), "arch-model", &botModelCapability{
-		WindowTokens: 65536, MaxOutputTokens: 512, Source: "detected", Detail: "GET /models",
-	}); err != nil {
-		t.Fatalf("seed arch cache: %v", err)
-	}
+	seedModelWindow(t, env.bots, env.fake.URL(), "arch-model", 65536, 512)
 	seedCompactableLedger(t, env, bot.ID, strings.Repeat("很长的旧历史。", 1200))
 	botRow, _ := env.bots.bots.Get(bot.ID)
 	run := botFixtureRun(t, env, botRow)
@@ -1902,11 +1889,7 @@ func TestSilentArchiveOverWindowSkipsRequest(t *testing.T) {
 	env.cfg.Bots.Context.WindowTokens = 30000
 	env.cfg.Bots.Context.ArchiveModel = "arch-model"
 	// 归档模型窗口很小：装不下「输入+输出」。
-	if err := env.bots.persistModelWindow(env.fake.URL(), "arch-model", &botModelCapability{
-		WindowTokens: 8192, Source: "detected", Detail: "GET /models",
-	}); err != nil {
-		t.Fatalf("seed arch cache: %v", err)
-	}
+	seedModelWindow(t, env.bots, env.fake.URL(), "arch-model", 8192, 0)
 	seedCompactableLedger(t, env, bot.ID, strings.Repeat("很长的旧历史。", 1200))
 	botRow, _ := env.bots.bots.Get(bot.ID)
 	run := botFixtureRun(t, env, botRow)
@@ -1946,11 +1929,7 @@ func TestBotNightlyOutputCappedByDetectedLimit(t *testing.T) {
 	bot := env.createBot(t, userID)
 	writeBotMemory(t, env, bot.ID, "daily/2026-10-15.md", "- 用户叫 Bobo\n- 项目天狼星", "n-cap")
 	env.cfg.Bots.Memory.NightlyModel = "cheap-nightly"
-	if err := env.bots.persistModelWindow(env.fake.URL(), "cheap-nightly", &botModelCapability{
-		WindowTokens: 65536, MaxOutputTokens: 1024, Source: "detected", Detail: "GET /models",
-	}); err != nil {
-		t.Fatalf("seed nightly cache: %v", err)
-	}
+	seedModelWindow(t, env.bots, env.fake.URL(), "cheap-nightly", 65536, 1024)
 	env.bots.setNowFn(func() time.Time {
 		return time.Date(2026, 10, 16, 4, 0, 0, 0, time.UTC)
 	})
@@ -2007,11 +1986,7 @@ func TestAuxGateUsesManualWindowAndDetectedCap(t *testing.T) {
 	env := setupBotTestEnv(t, fakeModelTurn{Text: "ok"})
 	userID := createBotTestUser(t, env.db, "auxmanual")
 	bot := createBotRowAt(t, env, userID, env.fake.URL(), "fake-model")
-	if err := env.bots.persistModelWindow(env.fake.URL(), "fake-model", &botModelCapability{
-		WindowTokens: 1048576, MaxOutputTokens: 262144, Source: "detected", Detail: "GET /models",
-	}); err != nil {
-		t.Fatalf("seed cache: %v", err)
-	}
+	seedModelWindow(t, env.bots, env.fake.URL(), "fake-model", 1048576, 262144)
 	env.cfg.Bots.Context.ModelWindows = map[string]int64{"fake-model": 2000000}
 	maintRun := seedMaintRun(t, env, bot.ID)
 
@@ -2125,11 +2100,7 @@ func TestBotWindowFailureMarkerDoesNotShadowCaseVariantSuccess(t *testing.T) {
 	run := botFixtureRun(t, env, bot)
 
 	// M1 曾被精确探测成功；随后 m1 探测失败只落 m1 失败标记。
-	if err := env.bots.persistModelWindow(ps.URL(), "M1", &botModelCapability{
-		WindowTokens: 65536, MaxOutputTokens: 16384, Source: "detected", Detail: "GET /models",
-	}); err != nil {
-		t.Fatalf("seed M1: %v", err)
-	}
+	seedModelWindow(t, env.bots, ps.URL(), "M1", 65536, 16384)
 	ps.setModels(500, `{"error":"boom"}`)
 	if err := env.bots.refreshModelWindow(context.Background(), ps.URL(), "sk-x", "m1"); err == nil {
 		t.Fatalf("第二次 refresh 应失败")
@@ -2244,11 +2215,7 @@ func TestBotWindowCatalogTier(t *testing.T) {
 	}
 
 	// detected 优先于 catalog：写入探测缓存后应命中缓存而不是目录。
-	if err := env.bots.persistModelWindow(ps.URL(), catalogModel.ID, &botModelCapability{
-		WindowTokens: 12345, MaxOutputTokens: 678, Source: "detected", Detail: "GET /models",
-	}); err != nil {
-		t.Fatalf("seed detected row: %v", err)
-	}
+	seedModelWindow(t, env.bots, ps.URL(), catalogModel.ID, 12345, 678)
 	if cap := env.bots.capabilityFor("zai", ps.URL(), catalogModel.ID); cap.Source != "detected" || cap.WindowTokens != 12345 {
 		t.Fatalf("detected 应优先于 catalog: %+v", cap)
 	}

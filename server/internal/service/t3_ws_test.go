@@ -8,7 +8,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -22,12 +21,9 @@ type fakeT3WSServer struct {
 	t              *testing.T
 	mu             sync.Mutex // 保护 gotRequests（handler 与测试 goroutine 各自读写）
 	wantBearer     string
-	snapshotValue  json.RawMessage // subscribeShell 首块 value
 	projectionExit json.RawMessage // 一次性请求返回的 success value（可选）
 
 	gotRequests     []map[string]any
-	gotAcks         atomic.Int64 // handler goroutine 写、测试 goroutine 读，原子计数避免 data race
-	gotInterrupts   atomic.Int64
 	failWithError   map[string]any // 非空时对所有请求返回该 Fail 错误
 	refuseAuth      bool           // 握手时拒绝 Bearer
 	wrongProtocolOK bool           // true 时不校验 orchestrationProtocol query
@@ -97,54 +93,15 @@ func (f *fakeT3WSServer) handler() websocket.Handler {
 					return
 				}
 				switch frame.Method {
-				case "orchestration.subscribeShell":
-					_ = sendT3Frame(conn, map[string]any{
-						"_tag":      "Chunk",
-						"requestId": id,
-						"values":    []json.RawMessage{f.snapshotValue},
-					})
-					// 首块无需 Ack 即可发出；等待 Ack 后若来了 Interrupt 就退出。
-					if f.waitForAckOrInterrupt(conn) {
-						return
-					}
-					_ = sendT3Frame(conn, exitSuccessFrame(id, f.snapshotValue))
 				case "orchestration.getArchivedShellSnapshot":
 					_ = sendT3Frame(conn, exitSuccessFrame(id, f.projectionExit))
 				default:
 					_ = sendT3Frame(conn, exitSuccessFrame(id, f.projectionExit))
 				}
-			case "Ack":
-				f.gotAcks.Add(1)
-			case "Interrupt":
-				f.gotInterrupts.Add(1)
 			case "Eof", "Ping":
 			}
 		}
 	})
-}
-
-// waitForAckOrInterrupt 返回是否收到 Interrupt。
-func (f *fakeT3WSServer) waitForAckOrInterrupt(conn *websocket.Conn) bool {
-	for {
-		var data []byte
-		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-		if err := websocket.Message.Receive(conn, &data); err != nil {
-			return true // 连接关闭视作结束
-		}
-		var frame struct {
-			Tag string `json:"_tag"`
-		}
-		if err := json.Unmarshal(data, &frame); err != nil {
-			return true
-		}
-		switch frame.Tag {
-		case "Ack":
-			f.gotAcks.Add(1)
-		case "Interrupt":
-			f.gotInterrupts.Add(1)
-			return true
-		}
-	}
 }
 
 func sendT3Frame(conn *websocket.Conn, frame any) error {
@@ -188,116 +145,6 @@ func startFakeT3WSServer(t *testing.T, fake *fakeT3WSServer) string {
 	}))
 	t.Cleanup(server.Close)
 	return server.URL
-}
-
-func TestDialAndSubscribeShell_HappyPath(t *testing.T) {
-	snapshot := json.RawMessage(`{
-		"kind": "snapshot",
-		"snapshot": {
-			"schemaVersion": 1,
-			"snapshotSequence": 3,
-			"projects": [{"id": "p-1", "title": "Fast Ship"}],
-			"threads": [{"id": "th-1", "projectId": "p-1", "title": "线程一", "status": "running"}],
-			"archivedThreads": [{"id": "th-2", "projectId": "p-1", "title": "归档", "status": "idle", "archivedAt": "2026-10-01T00:00:00.000Z"}]
-		}
-	}`)
-	fake := &fakeT3WSServer{t: t, wantBearer: "tok-1", snapshotValue: snapshot}
-	serverURL := startFakeT3WSServer(t, fake)
-	wsBase := "ws" + strings.TrimPrefix(serverURL, "http")
-
-	session, err := dialT3RPC(context.Background(), wsBase, "tok-1")
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	defer session.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	var got t3ShellSnapshot
-	err = session.callFirstChunkValue(ctx, "orchestration.subscribeShell", map[string]any{}, func(value json.RawMessage) (bool, error) {
-		var item struct {
-			Kind     string          `json:"kind"`
-			Snapshot t3ShellSnapshot `json:"snapshot"`
-		}
-		if err := json.Unmarshal(value, &item); err != nil {
-			return true, err
-		}
-		if item.Kind != "snapshot" {
-			return false, nil
-		}
-		got = item.Snapshot
-		return true, nil
-	})
-	if err != nil {
-		t.Fatalf("subscribeShell: %v", err)
-	}
-
-	if len(got.Threads) != 1 || got.Threads[0].ID != "th-1" {
-		t.Fatalf("threads = %+v", got.Threads)
-	}
-	if len(got.ArchivedThreads) != 1 || got.ArchivedThreads[0].ID != "th-2" {
-		t.Fatalf("archived = %+v", got.ArchivedThreads)
-	}
-	if len(got.Projects) != 1 || got.Projects[0].Title != "Fast Ship" {
-		t.Fatalf("projects = %+v", got.Projects)
-	}
-
-	// 请求帧形状：_tag=Request、tag=方法名、payload={}、headers=[]
-	if len(fake.gotRequests) != 1 {
-		t.Fatalf("requests = %+v", fake.gotRequests)
-	}
-	if fake.gotRequests[0]["tag"] != "orchestration.subscribeShell" {
-		t.Fatalf("method = %v", fake.gotRequests[0]["tag"])
-	}
-	if string(fake.gotRequests[0]["payload"].(json.RawMessage)) != "{}" {
-		t.Fatalf("payload = %v", fake.gotRequests[0]["payload"])
-	}
-	// Ack/Interrupt 由服务端 goroutine 异步读取，轮询等待后再断言。
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && fake.gotInterrupts.Load() == 0 {
-		time.Sleep(10 * time.Millisecond)
-	}
-	if fake.gotAcks.Load() < 1 {
-		t.Fatalf("expected at least one Ack, got %d", fake.gotAcks.Load())
-	}
-	if fake.gotInterrupts.Load() != 1 {
-		t.Fatalf("expected one Interrupt, got %d", fake.gotInterrupts.Load())
-	}
-}
-
-func TestSubscribeShell_AuthzFailureMapsToCredentialRejected(t *testing.T) {
-	snapshot := json.RawMessage(`{"kind":"snapshot","snapshot":{"schemaVersion":1,"snapshotSequence":1,"projects":[],"threads":[],"archivedThreads":[]}}`)
-	// Bearer 匹配（HTTP 探测已单独覆盖凭证失效），让请求进入方法级授权失败分支。
-	fake := &fakeT3WSServer{t: t, wantBearer: "expired", snapshotValue: snapshot}
-	fake.failWithError = map[string]any{
-		"_tag":          "EnvironmentAuthorizationError",
-		"message":       "The authenticated token is missing required scope: orchestration:read.",
-		"requiredScope": "orchestration:read",
-	}
-	serverURL := startFakeT3WSServer(t, fake)
-	wsBase := "ws" + strings.TrimPrefix(serverURL, "http")
-
-	session, err := dialT3RPC(context.Background(), wsBase, "expired")
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	defer session.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	err = session.callFirstChunkValue(ctx, "orchestration.subscribeShell", map[string]any{}, func(json.RawMessage) (bool, error) {
-		return false, nil
-	})
-	if err == nil {
-		t.Fatalf("expected authorization error")
-	}
-	if _, msg := t3StatusFromError(err); msg == "" {
-		t.Fatalf("expected status mapping, got %v", err)
-	}
-	if !errors.Is(err, errT3CredentialRejected) {
-		t.Fatalf("expected credential error classification, got %v", err)
-	}
 }
 
 func TestOneShotCall_ExitSuccess(t *testing.T) {
