@@ -183,8 +183,12 @@ func (h *t3ShellHub) publishToUser(userID string, ev T3ShellEvent) {
 // 「归档线程暂不可读」降级。首次发布无条件放行。
 type t3ArchiveAnnounced struct {
 	announced bool
-	rows      []t3ArchiveRowDigest
-	err       string
+	// rev 是已宣布指纹的修订号（INT-216）：状态机的 archiveRev 由指纹
+	// 内容派生、只增不减——指纹取值（s.mu）与基准比较（e.mu）分属两把
+	// 锁，后取的旧指纹不得覆盖先到的新基准，只接受 rev 单调递增的写入。
+	rev  int64
+	rows []t3ArchiveRowDigest
+	err  string
 }
 
 // archiveDigestIDs 摘取行摘要序列的 ID 子序列（保序）：Full/State 的分派
@@ -226,12 +230,26 @@ func archiveDigestIDs(rows []t3ArchiveRowDigest) []string {
 // 指纹比较与缓存更新在 e.mu 内完成，发布在锁外（与 noteConnState 同一锁
 // 边界：发布路径不持 entry 锁）。锁序 e.mu → s.mu 与全局一致。
 func (h *t3ShellHub) publishArchiveFaceEvent(e *t3ShellEntry, forceFull bool) {
-	rows, errText := e.state.archiveFaceFingerprint()
+	rows, errText, rev := e.state.Fingerprint()
 	e.mu.Lock()
+	if e.archAnnounced.announced && rev <= e.archAnnounced.rev {
+		if !forceFull {
+			// 后取的旧指纹不得覆盖先到的新基准（INT-216）：指纹取值与
+			// 基准比较分属 s.mu/e.mu 两把锁，rev 单调递增保证只有更新
+			// 的可见状态才能写基准。
+			e.mu.Unlock()
+			return
+		}
+		// 强制 Full 是「必须宣布」的写后失效：照常发布但不回退基准。
+		e.mu.Unlock()
+		h.publishThreadEvent(e, nil, true)
+		return
+	}
 	full := forceFull || !e.archAnnounced.announced ||
 		!slices.Equal(archiveDigestIDs(rows), archiveDigestIDs(e.archAnnounced.rows))
 	stateHint := !full && (!slices.Equal(rows, e.archAnnounced.rows) || errText != e.archAnnounced.err)
 	e.archAnnounced.announced = true
+	e.archAnnounced.rev = rev
 	e.archAnnounced.rows = rows
 	e.archAnnounced.err = errText
 	statePayload := ""
