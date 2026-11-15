@@ -153,6 +153,11 @@ func findWindowRow(t *testing.T, env *botTestEnv, baseURL, modelName string) *mo
 // 入口 persistModelWindows，与线上写入同一 upsert 语义。
 func seedModelWindow(t *testing.T, s *BotService, baseURL, modelName string, windowTokens, maxOutputTokens int64) {
 	t.Helper()
+	// persistModelWindows 会静默跳过空模型名与 <=0 的窗口，seeding 拿到这种参数
+	// 时直接在这里失败，避免错误在后续断言里表现为「缓存缺失」。
+	if modelName == "" || windowTokens <= 0 {
+		t.Fatalf("seedModelWindow 需要非空模型名与正窗口: model=%q window=%d", modelName, windowTokens)
+	}
 	if err := s.persistModelWindows(baseURL, "", []botModelWindowEntry{{
 		Model:           modelName,
 		ContextWindow:   windowTokens,

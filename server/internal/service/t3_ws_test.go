@@ -92,12 +92,9 @@ func (f *fakeT3WSServer) handler() websocket.Handler {
 					_ = sendT3Frame(conn, exitFailureFrame(id, f.failWithError))
 					return
 				}
-				switch frame.Method {
-				case "orchestration.getArchivedShellSnapshot":
-					_ = sendT3Frame(conn, exitSuccessFrame(id, f.projectionExit))
-				default:
-					_ = sendT3Frame(conn, exitSuccessFrame(id, f.projectionExit))
-				}
+				// 这个 fake 只服务一次性请求：除 silent/failWithError 外，一切方法
+				// 都以 projectionExit 成功退出，不区分具体 RPC 名字。
+				_ = sendT3Frame(conn, exitSuccessFrame(id, f.projectionExit))
 			case "Eof", "Ping":
 			}
 		}
