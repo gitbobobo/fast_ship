@@ -1080,10 +1080,12 @@ CAS 为 queued；reject：置 rejected 并落唯一终态；always_allow：同�
 - **事件完整投影**：所有 `tool_call`/`tool_result` 事件的 payload 携带提交时点
   的完整 `botToolCallResponseOf` 投影（自然含 revision）。事务内事件经
   `callProjectionTx(tx, callID)` 重读该行构造——内存对象在 CAS 后只反映改动
-  字段；异步后台结果的完整投影嵌在 payload 的 `call` 字段，顶层保留 web 已
-  消费的 `status`/`message_id`/`message` 等（避免隐性字段污染）；决定事件仍在
-  事务外发，但带的是决定事务提交时点的投影——worker 抢先发了 running 时，
-  迟到的决定事件 revision 更小，浏览器自动忽略，不会把 running 回退成 queued。
+  字段；例外是提案事件（行在同一事务内刚创建，rev=0）与撞重 wait 的后台
+  结果，二者直接用事务内内存对象，值与提交时点一致。异步后台结果的完整投影
+  嵌在 payload 的 `call` 字段，顶层保留 web 已消费的 `status`/`message_id`
+  /`message` 等（避免隐性字段污染）；决定事件仍在事务外发，但带的是决定事务
+  提交时点的投影——worker 抢先发了 running 时，迟到的决定事件 revision 更小，
+  浏览器自动忽略，不会把 running 回退成 queued。
 - **浏览器合并**：`mergeCall` 单一规则——缓存无记录用 incoming；
   `incoming.revision` 更大整条替换；相等按字段合并（undefined 不覆盖，
   显式 null 不清缓存里已有的非空事实）；更小保留缓存。revision 运行时缺省

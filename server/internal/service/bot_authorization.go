@@ -143,9 +143,10 @@ func botToolCallResponseOf(call *model.BotToolCall) BotToolCallResponse {
 		// 徽标与降级/过期说明。
 		resp.Policy = json.RawMessage(call.PolicyJSON)
 	}
-	if call.ResultPreviewJSON != nil && *call.ResultPreviewJSON != "" {
-		// 空串（历史竞速路径写脏的值）按无结果处理：RawMessage 传空字节
-		// 会让 MarshalJSON 报 unexpected end of JSON input。
+	if call.ResultPreviewJSON != nil && json.Valid([]byte(*call.ResultPreviewJSON)) {
+		// 非法 JSON（含历史竞速路径写脏的空串）按无结果处理：RawMessage
+		// 携带不合法字节会让 MarshalJSON 报错，把终态事务整个回滚，
+		// 异步调用将停在 running 等重启恢复（INT-217 审查 P2）。
 		resp.ResultPreview = json.RawMessage(*call.ResultPreviewJSON)
 	}
 	return resp

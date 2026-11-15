@@ -181,14 +181,15 @@ function revisionOf(call: Pick<BotCall, "revision">): number {
 
 /** 无缓存且缺 revision 的旧持久事件重放用的最小占位形状（沿用旧实现
  *  的兜底默认值）：缺字段按 undefined 渲染会把确认卡、后台结果筛选和
- *  工具名插值打穿（INT-217 panel F3）。 */
-const CALL_PLACEHOLDER: Omit<BotCall, "id" | "revision" | "status"> = {
+ *  工具名插值打穿（INT-217 panel F3 / 云审 Note2）。 */
+const CALL_PLACEHOLDER: Omit<BotCall, "id" | "revision"> = {
   bot_id: "",
   tool_name: "",
   action: "",
   arguments: {},
   execution_mode: "async",
   requires_confirmation: true,
+  status: "queued",
   created_at: "",
 };
 

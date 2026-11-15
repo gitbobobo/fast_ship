@@ -236,3 +236,23 @@ func TestBotCallRevisionRevertQueued(t *testing.T) {
 		t.Fatalf("未找到回退事件")
 	}
 }
+
+// 脏 result_preview_json（非法 JSON、历史竞速路径的空串）按无结果处理：
+// RawMessage 携带不合法字节会让事件 payload 的 json.Marshal 报错，把终态
+// 事务整个回滚（INT-217 云审 P2）。
+func TestBotCallResponseToleratesDirtyResultPreview(t *testing.T) {
+	cases := []string{"not-json{{", "", "  "}
+	for _, dirty := range cases {
+		call := &model.BotToolCall{
+			ID: "call-dirty", BotID: "bot-1", Status: model.BotCallStatusSucceeded,
+			ResultPreviewJSON: &dirty,
+		}
+		resp := botToolCallResponseOf(call)
+		if resp.ResultPreview != nil {
+			t.Fatalf("脏值 %q 应按无结果处理，得到 %s", dirty, string(resp.ResultPreview))
+		}
+		if _, err := json.Marshal(resp); err != nil {
+			t.Fatalf("脏值 %q 的投影应可序列化: %v", dirty, err)
+		}
+	}
+}
