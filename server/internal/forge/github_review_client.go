@@ -51,10 +51,11 @@ type GitHubReviewClient struct {
 // 编译期钉住适配器满足审查访问面契约。
 var _ ReviewClient = (*GitHubReviewClient)(nil)
 
-// NewGitHubReviewClient 把 GitHub 访问面与安装 id 组装成审查客户端。调用
-// 方不经此构造（resolver 是唯一入口）；installationID=0 原样保留：只出现在
-// 仓库级前置检查，githubapp.Client 对 0 的「先解析安装再查仓库」语义在
-// 底层不变。
+// NewGitHubReviewClient 把 GitHub 访问面与安装 id 组装成审查客户端。合法
+// 调用方两个：审查链路经 resolver 按仓库解析安装 id；关联 PR 链路（service
+// 的 newPRClient）以 installationID=0 适配静态 Token 的 PRClient——0 是占位
+// 值，staticTokenAuth.Bearer 忽略安装 id。换成 App 安装客户端时不得沿用 0：
+// githubapp.Client 对 0 的「先解析安装再查仓库」语义在底层不变。
 func NewGitHubReviewClient(api githubapi.GitHubClient, installationID int64) *GitHubReviewClient {
 	return &GitHubReviewClient{api: api, installationID: installationID}
 }
