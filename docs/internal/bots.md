@@ -369,7 +369,7 @@ next_offset}`；`fs_result.read` 按 Unicode 字符续读，不切断 UTF-8。
   max_completion_tokens/max_tokens/output_token_limit 顺序取第一个 >0 的值
   （数字或数字字符串都接受）；精确匹配优先，其次大小写不敏感。探测失败不
   阻塞每轮对话，只写日志并落一行短 TTL 失败标记（见下）。探测与持久化拆成
-  `detectModelWindow` + `persistModelWindows` 两步：`TestConnection` 探测一次
+  `detectModelWindows` + `persistModelWindows` 两步：`TestConnection` 探测一次
   后持久化同一份结果（响应与缓存同源，不做第二次 /models 请求）；持久化按
   列表落**全部模型**——同一事务为列表内每个 `ContextWindow>0` 的条目 upsert
   一行（地址相同、模型名各自），配置成列表内其他模型的 SummaryModel/
