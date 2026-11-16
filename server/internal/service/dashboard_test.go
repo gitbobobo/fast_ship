@@ -386,7 +386,7 @@ func TestWaitingThreadsAggregates(t *testing.T) {
 		shellThread("th-w2", "run 等待输入", "idle", map[string]any{
 			"activityRunStatus": "waiting",
 		}),
-		shellThread("th-r", "正在跑", "running", nil),
+		shellThread("th-r", "正在跑", "queued", nil),
 		shellThread("th-sub", "子代理", "idle", map[string]any{
 			"activityRunStatus": "waiting",
 			"lineage":           map[string]any{"parentThreadId": "th-w1", "relationshipToParent": "subagent", "rootThreadId": "th-w1"},
@@ -433,6 +433,20 @@ func TestWaitingThreadsAggregates(t *testing.T) {
 	}
 	if !titles["等待审批"] || !titles["run 等待输入"] {
 		t.Fatalf("unexpected items: %+v", result.Items)
+	}
+
+	// 单遍历同时产出每环境活跃计数：th-w1 waiting（原始 status=queued 但
+	// pendingRuntimeRequest 优先）、th-w2 waiting、th-r 原始 queued（被折进
+	// running 并单独计入 Queued）、子代理排除。
+	if len(result.Environments) != 1 {
+		t.Fatalf("environments=%d, want 1", len(result.Environments))
+	}
+	activity := result.Environments[0]
+	if activity.EnvironmentName != "工作站" || !activity.Readable {
+		t.Fatalf("activity header: %+v", activity)
+	}
+	if activity.Running != 1 || activity.Waiting != 2 || activity.Queued != 1 {
+		t.Fatalf("activity counts: %+v, want running=1 waiting=2 queued=1", activity)
 	}
 }
 
@@ -958,5 +972,65 @@ func TestDashboardAiQuotaBlock(t *testing.T) {
 	}
 	if resp.Ai.Quota == nil || resp.Ai.Quota.Complete == nil || *resp.Ai.Quota.Complete || resp.Ai.Quota.Accounts == nil {
 		t.Fatalf("quota must degrade with structure: %+v", resp.Ai.Quota)
+	}
+}
+
+// AI 面板 t3 子块与 t3_waiting 组共用同一 WaitingThreads 结果：每环境
+// running/waiting/queued/readable 透传、complete 透传；err 时子块降级；
+// 无环境（result=nil）时子块缺席。
+func TestDashboardAiT3Block(t *testing.T) {
+	db := newDashboardServiceTestDB(t)
+	userID := dashboardSeedUser(t, db)
+
+	svc := newDashboardService(t, db, &fakeUnreadCounter{count: 0}, &fakeT3WaitingSource{
+		result: &T3WaitingResult{
+			Items: []T3WaitingItem{{EnvironmentID: "env-1", EnvironmentName: "工作站", ThreadID: "th-1", Title: "t"}},
+			Environments: []T3EnvironmentActivity{
+				{EnvironmentID: "env-1", EnvironmentName: "工作站", Running: 2, Waiting: 1, Queued: 1, Readable: true},
+				{EnvironmentID: "env-2", EnvironmentName: "离线机", Readable: false},
+			},
+			Complete: false,
+		},
+	})
+	resp, err := svc.GetOverview(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("GetOverview: %v", err)
+	}
+	t3 := resp.Ai.T3
+	if t3 == nil || t3.Complete == nil || *t3.Complete {
+		t.Fatalf("t3 block: %+v", t3)
+	}
+	if len(t3.Environments) != 2 {
+		t.Fatalf("environments=%d, want 2", len(t3.Environments))
+	}
+	if t3.Environments[0].Running != 2 || t3.Environments[0].Waiting != 1 || t3.Environments[0].Queued != 1 || !t3.Environments[0].Readable {
+		t.Fatalf("env-1 row: %+v", t3.Environments[0])
+	}
+	if t3.Environments[1].Readable {
+		t.Fatalf("env-2 row must be unreadable: %+v", t3.Environments[1])
+	}
+	// 同一结果驱动 t3_waiting 组
+	if g := findGroup(resp.ActionItemGroups, api.T3Waiting); g == nil || g.Count != 1 || g.Complete == nil || *g.Complete {
+		t.Fatalf("t3_waiting group must share the same snapshot: %+v", g)
+	}
+
+	// err：子块与组同时降级
+	errSvc := newDashboardService(t, db, &fakeUnreadCounter{count: 0}, &fakeT3WaitingSource{err: errors.New("boom")})
+	resp, err = errSvc.GetOverview(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("GetOverview must not fail: %v", err)
+	}
+	if resp.Ai.T3 == nil || resp.Ai.T3.Complete == nil || *resp.Ai.T3.Complete || resp.Ai.T3.Environments == nil {
+		t.Fatalf("t3 block must degrade with structure: %+v", resp.Ai.T3)
+	}
+
+	// 无环境：子块缺席
+	noneSvc := newDashboardService(t, db, &fakeUnreadCounter{count: 0}, &fakeT3WaitingSource{result: nil})
+	resp, err = noneSvc.GetOverview(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("GetOverview: %v", err)
+	}
+	if resp.Ai.T3 != nil {
+		t.Fatal("t3 block must be absent when user has no environments")
 	}
 }

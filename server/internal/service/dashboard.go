@@ -153,9 +153,17 @@ func (s *DashboardService) GetOverview(ctx context.Context, userID string) (*Das
 		})
 	}
 
+	// T3 只读快照只取一次：「待我处理」组与 AI 面板共用同一结果，绝不
+	// 调第二次 PeekActive（INT-235 单遍历约束）。窄接口缺席时不取数。
+	var t3Snap dashboardT3Snapshot
+	if s.t3Waiting != nil {
+		t3Snap.queried = true
+		t3Snap.result, t3Snap.err = s.t3Waiting.WaitingThreads(ctx, userID)
+	}
+
 	// 「待我处理」聚合区：固定顺序输出。单组失败只降级该组
 	// （complete=false），绝不拖垮整页，也绝不静默清零伪装成「一切正常」。
-	resp.ActionItemGroups = append(resp.ActionItemGroups, s.actionGroups(ctx, userID)...)
+	resp.ActionItemGroups = append(resp.ActionItemGroups, s.actionGroups(ctx, userID, t3Snap)...)
 
 	// 发版节奏（阶段三）：纯 SQL 聚合，单块失败降级 complete=false。
 	resp.Release = s.buildRelease(userID)
@@ -164,14 +172,23 @@ func (s *DashboardService) GetOverview(ctx context.Context, userID string) (*Das
 	resp.Flow = s.buildFlow(userID, startInclusive, endExclusive)
 
 	// AI 运行面板（阶段三）：各子块独立降级；T3 与「待我处理」共用同一
-	// 遍历结果（见 actionGroups），quota/bots 走窄接口。
-	resp.Ai = s.buildAi(ctx, userID)
+	// 遍历结果（见上），quota/bots 走窄接口。
+	resp.Ai = s.buildAi(ctx, userID, t3Snap)
 
 	return resp, nil
 }
 
-func (s *DashboardService) buildAi(ctx context.Context, userID string) *api.DashboardAi {
+// dashboardT3Snapshot 是 WaitingThreads 的一次取数结果，供「待我处理」组与
+// AI 面板两个消费方共用：queried=窄接口在场且已取数；result=nil=无环境。
+type dashboardT3Snapshot struct {
+	queried bool
+	result  *T3WaitingResult
+	err     error
+}
+
+func (s *DashboardService) buildAi(ctx context.Context, userID string, t3Snap dashboardT3Snapshot) *api.DashboardAi {
 	ai := &api.DashboardAi{
+		T3:      s.buildAiT3(t3Snap),
 		Reviews: s.buildAiReviews(userID, time.Now().UTC()),
 		Bots:    s.buildAiBots(userID),
 		Quota:   s.buildAiQuota(userID),
@@ -189,6 +206,7 @@ func (s *DashboardService) buildAi(ctx context.Context, userID string) *api.Dash
 			failed++
 		}
 	}
+	check(aiT3Complete(ai.T3), ai.T3 != nil)
 	check(ai.Reviews.Complete, ai.Reviews != nil)
 	check(aiBotsComplete(ai.Bots), ai.Bots != nil)
 	check(aiQuotaComplete(ai.Quota), ai.Quota != nil)
@@ -196,6 +214,13 @@ func (s *DashboardService) buildAi(ctx context.Context, userID string) *api.Dash
 		ai.Complete = api.Ptr(false)
 	}
 	return ai
+}
+
+func aiT3Complete(t *api.DashboardAiT3) *bool {
+	if t == nil {
+		return nil
+	}
+	return t.Complete
 }
 
 func aiBotsComplete(b *api.DashboardAiBots) *bool {
@@ -210,6 +235,38 @@ func aiQuotaComplete(q *api.DashboardAiQuota) *bool {
 		return nil
 	}
 	return q.Complete
+}
+
+// buildAiT3 每环境活跃线程计数：直接取自与「待我处理」组同一次遍历的
+// 结果。查询错误 → 子块降级（结构完整）；无 T3 环境（result=nil）→ 缺席。
+func (s *DashboardService) buildAiT3(t3Snap dashboardT3Snapshot) *api.DashboardAiT3 {
+	if !t3Snap.queried {
+		return nil
+	}
+	if t3Snap.err != nil {
+		return &api.DashboardAiT3{
+			Complete:     api.Ptr(false),
+			Environments: []api.DashboardAiT3Environment{},
+		}
+	}
+	if t3Snap.result == nil {
+		return nil
+	}
+	environments := make([]api.DashboardAiT3Environment, 0, len(t3Snap.result.Environments))
+	for _, env := range t3Snap.result.Environments {
+		environments = append(environments, api.DashboardAiT3Environment{
+			EnvironmentId:   env.EnvironmentID,
+			EnvironmentName: env.EnvironmentName,
+			Running:         env.Running,
+			Waiting:         env.Waiting,
+			Queued:          env.Queued,
+			Readable:        env.Readable,
+		})
+	}
+	return &api.DashboardAiT3{
+		Complete:     api.Ptr(t3Snap.result.Complete),
+		Environments: environments,
+	}
 }
 
 // buildAiReviews 审查四分桶：按 PR 归一（code_status success→passed /
@@ -467,25 +524,24 @@ func dashboardActionGroup[Row any](
 
 // actionGroups 按固定顺序组装六个组：t3_waiting（无环境时缺席）→
 // review_failed → recommendations → ship_failed → quota_attention →
-// unread_notifications。
-func (s *DashboardService) actionGroups(ctx context.Context, userID string) []DashboardActionItemGroup {
+// unread_notifications。t3 组从传入的单遍历快照取数。
+func (s *DashboardService) actionGroups(ctx context.Context, userID string, t3Snap dashboardT3Snapshot) []DashboardActionItemGroup {
 	groups := make([]DashboardActionItemGroup, 0, 6)
 
-	if s.t3Waiting != nil {
+	if t3Snap.queried {
 		// T3 聚合只允许降级成「组不完整」，绝不拖垮整页：出错按全不可读
 		// 处理（count=0 complete=false），result=nil 表示无环境、整组缺席。
-		result, err := s.t3Waiting.WaitingThreads(ctx, userID)
 		switch {
-		case err != nil:
+		case t3Snap.err != nil:
 			groups = append(groups, DashboardActionItemGroup{
 				Kind:     api.T3Waiting,
 				Count:    0,
 				Complete: api.Ptr(false),
 				Items:    []DashboardActionItem{},
 			})
-		case result != nil:
+		case t3Snap.result != nil:
 			items := make([]DashboardActionItem, 0, dashboardActionItemsMax)
-			for _, w := range result.Items {
+			for _, w := range t3Snap.result.Items {
 				if len(items) >= dashboardActionItemsMax {
 					break
 				}
@@ -496,8 +552,8 @@ func (s *DashboardService) actionGroups(ctx context.Context, userID string) []Da
 			}
 			groups = append(groups, DashboardActionItemGroup{
 				Kind:     api.T3Waiting,
-				Count:    len(result.Items),
-				Complete: api.Ptr(result.Complete),
+				Count:    len(t3Snap.result.Items),
+				Complete: api.Ptr(t3Snap.result.Complete),
 				Items:    items,
 			})
 		}

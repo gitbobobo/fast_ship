@@ -236,14 +236,29 @@ type T3WaitingItem struct {
 	UpdatedAt       string
 }
 
+// T3EnvironmentActivity 一个环境的活跃线程计数（仪表盘 AI 面板行）。Readable=
+// false 时其余计数无效。Queued 是原始 shell status="queued" 的线程数：该状态
+// 在 t3ThreadStatus 的兜底分支里被折进 running（t3_wire.go），这里单独计数
+// 供面板区分「已排队未开跑」，无需动跨端契约。
+type T3EnvironmentActivity struct {
+	EnvironmentID   string
+	EnvironmentName string
+	Running         int
+	Waiting         int
+	Queued          int
+	Readable        bool
+}
+
 // T3WaitingResult 是 WaitingThreads 的聚合结果：Items 为等待中的线程
-// （跨环境合流、按更新时间倒序）；Complete=false 表示任一环境未 ready
-// （Syncing/Stale/Failed/凭证不可用）或全部不可读，展示侧据此标「部分
-// 环境暂不可用」。返回 nil（而非空 result）表示用户没有任何 T3 环境，
-// 调用方不渲染该组。
+// （跨环境合流、按更新时间倒序）；Environments 为每环境活跃计数（一次遍历
+// 同时产出，供「待我处理」组与 AI 面板共用，绝不调第二次 PeekActive）；
+// Complete=false 表示任一环境未 ready（Syncing/Stale/Failed/凭证不可用）
+// 或全部不可读，展示侧据此标「部分环境暂不可用」。返回 nil（而非空 result）
+// 表示用户没有任何 T3 环境，调用方不渲染该组。
 type T3WaitingResult struct {
-	Items    []T3WaitingItem
-	Complete bool
+	Items        []T3WaitingItem
+	Environments []T3EnvironmentActivity
+	Complete     bool
 }
 
 // WaitingThreads 汇总各环境里状态为 waiting 的活跃线程（判定沿用
@@ -260,13 +275,15 @@ func (s *T3ThreadsService) WaitingThreads(ctx context.Context, userID string) (*
 		return nil, nil
 	}
 
-	result := &T3WaitingResult{Items: []T3WaitingItem{}, Complete: true}
+	result := &T3WaitingResult{Items: []T3WaitingItem{}, Environments: []T3EnvironmentActivity{}, Complete: true}
 	readable := 0
 	for i := range envs {
 		env := &envs[i]
+		activity := T3EnvironmentActivity{EnvironmentID: env.ID, EnvironmentName: env.Name}
 		token, err := s.bearerToken(env)
 		if err != nil {
 			result.Complete = false
+			result.Environments = append(result.Environments, activity)
 			continue
 		}
 		view, err := s.shellHub.PeekActive(env, token)
@@ -274,22 +291,38 @@ func (s *T3ThreadsService) WaitingThreads(ctx context.Context, userID string) (*
 			// 未就绪/陈旧/失败：该环境本次不可读，组标不完整；陈旧快照不
 			// 当可信运行态（与详情口径一致），不拿旧数据凑数。
 			result.Complete = false
+			result.Environments = append(result.Environments, activity)
 			continue
 		}
 		readable++
+		activity.Readable = true
 		for i := range view.Snaps.Active.Threads {
 			shell := &view.Snaps.Active.Threads[i]
-			if t3IsSubagentThread(shell) || t3ThreadStatus(shell) != api.T3ThreadSummaryStatusWaiting {
+			if t3IsSubagentThread(shell) {
 				continue
 			}
-			result.Items = append(result.Items, T3WaitingItem{
-				EnvironmentID:   env.ID,
-				EnvironmentName: env.Name,
-				ThreadID:        shell.ID,
-				Title:           shell.Title,
-				UpdatedAt:       shell.UpdatedAt,
-			})
+			status := t3ThreadStatus(shell)
+			switch status {
+			case api.T3ThreadSummaryStatusRunning:
+				activity.Running++
+			case api.T3ThreadSummaryStatusWaiting:
+				activity.Waiting++
+				result.Items = append(result.Items, T3WaitingItem{
+					EnvironmentID:   env.ID,
+					EnvironmentName: env.Name,
+					ThreadID:        shell.ID,
+					Title:           shell.Title,
+					UpdatedAt:       shell.UpdatedAt,
+				})
+			}
+			// 原始 shell status 单独看：queued 被 t3ThreadStatus 折进 running，
+			// 面板要区分「已排队未开跑」就靠这一列；只计运行相位的线程
+			//（pendingRuntimeRequest 优先落 waiting 的不算，它不在排队开跑）。
+			if status == api.T3ThreadSummaryStatusRunning && shell.Status == "queued" {
+				activity.Queued++
+			}
 		}
+		result.Environments = append(result.Environments, activity)
 	}
 	// 全部环境都不可读：count=0 且 complete=false（不是「一切正常」）。
 	if readable == 0 {
