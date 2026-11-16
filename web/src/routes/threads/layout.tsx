@@ -120,8 +120,14 @@ export default function ThreadsLayout() {
             <Plus className="size-4" />
           </Button>
           {/* 线程页不走公共 Header，通知入口要在这里单独补一份（INT-236）。
-              详情打开时右栏自带 Header 的通知铃，这里不重复渲染。 */}
-          {!threadOpen && <NotificationBell />}
+              详情打开时右栏自带 Header 的通知铃，这里不重复渲染；用分隔线
+              把它与线程列内操作区分开，表明是页面级入口。 */}
+          {!threadOpen && (
+            <>
+              <span aria-hidden className="mx-1 h-4 w-px bg-border" />
+              <NotificationBell />
+            </>
+          )}
         </div>
         {isLoading ? (
           <>
