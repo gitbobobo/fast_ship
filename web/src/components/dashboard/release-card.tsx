@@ -1,7 +1,8 @@
-import { Rocket } from "lucide-react";
+import { GitPullRequest, History, PackageOpen, Rocket } from "lucide-react";
 import { Link } from "react-router";
 import { Card, CardContent } from "@/components/ui/card";
 import {
+  SectionHeader,
   SectionUnavailable,
   formatScheduleTime,
 } from "@/components/dashboard/panel-bits";
@@ -11,7 +12,8 @@ type ReleaseBlock = components["schemas"]["DashboardRelease"];
 
 /**
  * 发布节奏卡（INT-235 阶段三）：待发版列表、近期发版时间线与未合并 PR
- * 计数。从仪表盘页拆出（panel P8），纯展示，数据由页面装配。
+ * 计数。三块统一为 AI 卡的「图标 + 粗体标签 + 值/空态」层级（视觉
+ * round1 V2），纯展示，数据由页面装配。
  */
 export function ReleaseCard({ release }: { release: ReleaseBlock }) {
   // 首条发版推「距上次发版 N 天」；今天发版显示「今天」。降级载荷里的列表
@@ -22,8 +24,8 @@ export function ReleaseCard({ release }: { release: ReleaseBlock }) {
 
   return (
     <Card className="overflow-hidden" data-testid="release-card">
-      <CardContent className="space-y-4 p-5">
-        <div className="flex items-center gap-2">
+      <CardContent className="p-5">
+        <div className="mb-4 flex items-center gap-2">
           <Rocket className="h-4 w-4 text-muted-foreground" />
           <h3 className="text-sm font-semibold">发布节奏</h3>
           {lastReleaseText && (
@@ -36,11 +38,24 @@ export function ReleaseCard({ release }: { release: ReleaseBlock }) {
         {release.complete === false ? (
           <SectionUnavailable />
         ) : (
-          <>
-            <div>
-              <h4 className="mb-2 text-xs font-medium text-muted-foreground">
-                待发版 {release.pending_count}
-              </h4>
+          <div className="divide-y">
+            <section
+              className="space-y-2 py-3 first:pt-0"
+              data-testid="release-pending-section"
+            >
+              <SectionHeader
+                icon={PackageOpen}
+                title="待发版"
+                // count 徽章只在 >0 时显示（视觉 round1 V5）：0 与「没有待发
+                // 版」同现是重复表达，空态行负责表达。
+                trailing={
+                  release.pending_count > 0 ? (
+                    <span className="rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium tabular-nums text-muted-foreground">
+                      {release.pending_count}
+                    </span>
+                  ) : undefined
+                }
+              />
               {release.pending_versions.length === 0 ? (
                 <p className="text-xs text-muted-foreground">没有待发版</p>
               ) : (
@@ -62,12 +77,13 @@ export function ReleaseCard({ release }: { release: ReleaseBlock }) {
                   ))}
                 </ul>
               )}
-            </div>
+            </section>
 
-            <div>
-              <h4 className="mb-2 text-xs font-medium text-muted-foreground">
-                近期发版
-              </h4>
+            <section
+              className="space-y-2 py-3"
+              data-testid="release-recent-section"
+            >
+              <SectionHeader icon={History} title="近期发版" />
               {release.recent_releases.length === 0 ? (
                 <p className="text-xs text-muted-foreground">
                   还没有发版记录
@@ -101,14 +117,20 @@ export function ReleaseCard({ release }: { release: ReleaseBlock }) {
                   ))}
                 </ol>
               )}
-            </div>
+            </section>
 
-            <p className="border-t pt-3 text-xs text-muted-foreground">
-              {release.unmerged_pr_issue_count > 0
-                ? `${release.unmerged_pr_issue_count} 个开启问题还有未合并的 PR`
-                : "没有挂着未合并 PR 的问题"}
-            </p>
-          </>
+            <section
+              className="space-y-2 py-3"
+              data-testid="release-unmerged-section"
+            >
+              <SectionHeader icon={GitPullRequest} title="未合并 PR" />
+              <p className="text-xs text-muted-foreground">
+                {release.unmerged_pr_issue_count > 0
+                  ? `${release.unmerged_pr_issue_count} 个开启问题还有未合并的 PR`
+                  : "没有挂着未合并 PR 的问题"}
+              </p>
+            </section>
+          </div>
         )}
       </CardContent>
     </Card>

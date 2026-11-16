@@ -65,6 +65,11 @@ describe("AiPanelCard", () => {
     expect(screen.getByText("未计价")).toBeInTheDocument();
     expect(screen.getByText(/下次任务/)).toBeInTheDocument();
     expect(screen.getByText(/晚报 · 值夜机器人/)).toBeInTheDocument();
+    // 视觉 round1 V6：窗口口径收进标题，脚注只在有数据时出现
+    expect(screen.getByText("机器人（近 7 天）")).toBeInTheDocument();
+    expect(
+      screen.getByText("按你的时区（Asia/Shanghai）当地日聚合"),
+    ).toBeInTheDocument();
   });
 
   it("keeps healthy env rows visible when the block is partially readable", () => {
@@ -184,7 +189,36 @@ describe("AiPanelCard", () => {
 
     expect(screen.queryByText(/通过率/)).not.toBeInTheDocument();
     expect(screen.getByText("未配置机器人")).toBeInTheDocument();
-    expect(screen.getByText("近 7 天（按你的时区）")).toBeInTheDocument();
+    // 空态不显示任何窗口说明（视觉 round1 V6）
+    expect(screen.queryByText(/按你的时区/)).not.toBeInTheDocument();
+    expect(screen.getByText("机器人（近 7 天）")).toBeInTheDocument();
+  });
+
+  it("keeps the T3 block visible with a 未配置 empty state when ai.t3 is absent (视觉 round1 V1)", () => {
+    // 契约：ai.t3 缺席 ⟺ 用户没有 T3 环境；区块不能整块消失，
+    // 空态行 + /threads 入口与 quota/bots 的「未配置…」同层级。
+    render(
+      <MemoryRouter>
+        <AiPanelCard
+          ai={{
+            reviews: {
+              passed: 0,
+              blocked: 0,
+              errored: 0,
+              in_flight: 0,
+              pass_rate: null,
+            },
+          }}
+        />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByTestId("ai-t3-section")).toHaveTextContent(
+      "未配置 T3 环境",
+    );
+    expect(
+      screen.getByRole("link", { name: "查看线程" }),
+    ).toHaveAttribute("href", "/threads");
   });
 
   it("renders quota mini bars with remaining percent and status badges", () => {

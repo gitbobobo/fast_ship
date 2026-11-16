@@ -54,6 +54,37 @@ describe("DashboardPage", () => {
     expect(screen.getByText("日均 <0.1")).toBeInTheDocument();
     // 方向图标已移出本需求：不再对两周合计做涨跌判断。
     expect(screen.queryByRole("img", { name: /最近 7 天/ })).toBeNull();
+    // 视觉 round1 V3：趋势线横向撑满（viewBox 比例单位 + preserveAspectRatio），
+    // 线下带同色淡面积；有非零数据才画。
+    const sparkline = screen.getByTestId("kpi-sparkline");
+    expect(sparkline).toHaveAttribute("preserveAspectRatio", "none");
+    expect(sparkline).toHaveClass("w-full");
+    expect(sparkline.querySelector("polygon")).not.toBeNull();
+  });
+
+  it("moves the tone color to the value and keeps the label row neutral (视觉 round1 V4)", async () => {
+    vi.mocked(useDashboardOverview).mockReturnValue({
+      data: {
+        open_issues_by_project: [],
+        daily_resolved: dailyResolvedWith({ 29: 1 }),
+      },
+      isLoading: false,
+    } as unknown as ReturnType<typeof useDashboardOverview>);
+
+    await renderDashboardPage();
+
+    // 标签行固定中性色，不再继承 tone 色 + opacity（浅色底上对比度不达标）
+    const label = screen.getByText("近 30 天已解决");
+    expect(label.parentElement).toHaveClass("text-gray-700", "dark:text-gray-300");
+    expect(label.parentElement).not.toHaveClass("opacity-70");
+    // tone 色移到数值元素：已解决 > 0 → positive 绿
+    const [resolvedValue] = screen
+      .getAllByTestId("kpi-value")
+      .filter((el) => el.textContent === "1");
+    expect(resolvedValue).toHaveClass(
+      "text-emerald-700",
+      "dark:text-emerald-400",
+    );
   });
 
   it("hides stale header numbers when cached data is followed by a failed refetch", async () => {
@@ -112,10 +143,10 @@ describe("DashboardPage", () => {
     expect(
       screen.getAllByText(/未解决问题|open issues|开放问题/i).length,
     ).toBeGreaterThan(0);
-    expect(
-      screen.getAllByText(/近 ?30 ?天.*已解决|30-?day resolved|最近 30 天已解决/i)
-        .length,
-    ).toBeGreaterThan(0);
+    // 视觉 round1 V7：图表卡标题与 KPI 卡区分——图表「每日已解决」/「近 30 天 · UTC 日」，KPI 保持「近 30 天已解决」
+    expect(screen.getByText("每日已解决")).toBeInTheDocument();
+    expect(screen.getByText("近 30 天 · UTC 日")).toBeInTheDocument();
+    expect(screen.getByText("近 30 天已解决")).toBeInTheDocument();
     expect(screen.getByText("Alpha App")).toBeInTheDocument();
     expect(screen.getByText("Beta Console")).toBeInTheDocument();
     expect(screen.getAllByText("2").length).toBeGreaterThan(0);
@@ -140,10 +171,10 @@ describe("DashboardPage", () => {
     expect(
       screen.getAllByText(/未解决问题|open issues|开放问题/i).length,
     ).toBeGreaterThan(0);
-    expect(
-      screen.getAllByText(/近 ?30 ?天.*已解决|30-?day resolved|最近 30 天已解决/i)
-        .length,
-    ).toBeGreaterThan(0);
+    // 视觉 round1 V7：KPI 卡标题保持，图表卡标题改为「每日已解决」
+    expect(screen.getByText("每日已解决")).toBeInTheDocument();
+    expect(screen.getByText("近 30 天 · UTC 日")).toBeInTheDocument();
+    expect(screen.getByText("近 30 天已解决")).toBeInTheDocument();
     expect(screen.getAllByText("0").length).toBeGreaterThanOrEqual(2);
     // 每个图表只保留一个空状态，且带一个真实的配置入口。
     expect(screen.getAllByText("暂无已配置项目")).toHaveLength(1);
@@ -157,6 +188,8 @@ describe("DashboardPage", () => {
     expect(
       screen.queryByRole("img", { name: "stacked area chart" }),
     ).not.toBeInTheDocument();
+    // 全零不画迷你趋势（视觉 round1 V3 保留原门禁）。
+    expect(screen.queryByTestId("kpi-sparkline")).not.toBeInTheDocument();
     expect(screen.queryByText(/日均 0\.0/)).not.toBeInTheDocument();
   });
 

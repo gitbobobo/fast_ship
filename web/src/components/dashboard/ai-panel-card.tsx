@@ -1,4 +1,5 @@
 import { Bot, Gauge, GitPullRequest, Hourglass } from "lucide-react";
+import { Link } from "react-router";
 import { Card, CardContent } from "@/components/ui/card";
 import {
   SectionHeader,
@@ -28,7 +29,9 @@ const QUOTA_STATUS_BADGE: Record<string, string> = {
  */
 export function AiPanelCard({ ai }: { ai: AiBlock }) {
   const sections = [
-    ai.t3 != null && <AiT3Section key="t3" t3={ai.t3} />,
+    // t3 缺席 ≠ 没有区块（视觉 round1 V1）：契约是「缺 t3 ⟺ 无 T3 环境」，
+    // 区块本身仍要出现，空态在 AiT3Section 内表达。
+    <AiT3Section key="t3" t3={ai.t3} />,
     ai.reviews != null && <AiReviewsSection key="reviews" reviews={ai.reviews} />,
     ai.bots != null && <AiBotsSection key="bots" bots={ai.bots} />,
     ai.quota != null && <AiQuotaSection key="quota" quota={ai.quota} />,
@@ -51,7 +54,25 @@ export function AiPanelCard({ ai }: { ai: AiBlock }) {
   );
 }
 
-function AiT3Section({ t3 }: { t3: NonNullable<AiBlock["t3"]> }) {
+function AiT3Section({ t3 }: { t3: AiBlock["t3"] }) {
+  // 契约：ai.t3 缺席 ⟺ 用户没有 T3 环境（视觉 round1 V1）。区块保留标头，
+  // 给「未配置 T3 环境」空态 + /threads 入口，与 quota/bots 的「未配置…」同层级。
+  if (t3 == null) {
+    return (
+      <section className="space-y-2 py-3 first:pt-0" data-testid="ai-t3-section">
+        <SectionHeader icon={Hourglass} title="T3 线程" />
+        <p className="flex items-center justify-between gap-2 text-xs">
+          <span className="text-muted-foreground">未配置 T3 环境</span>
+          <Link
+            to="/threads"
+            className="shrink-0 text-primary hover:underline"
+          >
+            查看线程
+          </Link>
+        </p>
+      </section>
+    );
+  }
   // 降级不整块短路（panel P3）：可读环境的行照常展示，不可读的行才标
   // 「本轮不可读」；有环境行且降级时区块标头加琥珀徽章（与「待我处理」
   // t3_waiting 组同款），文案按可读行数区分：有可读行「部分环境暂不可
@@ -180,21 +201,14 @@ function BucketStat({
 function AiBotsSection({ bots }: { bots: NonNullable<AiBlock["bots"]> }) {
   return (
     <section className="space-y-2 py-3" data-testid="ai-bots-section">
-      <SectionHeader
-        icon={Bot}
-        title="机器人"
-        trailing={
-          <span className="text-[11px] text-muted-foreground">
-            近 7 天（按你的时区）
-          </span>
-        }
-      />
+      <SectionHeader icon={Bot} title="机器人（近 7 天）" />
       {bots.complete === false ? (
         <SectionUnavailable />
       ) : bots.bot_count === 0 ? (
         <p className="text-xs text-muted-foreground">未配置机器人</p>
       ) : (
-        <div className="space-y-1.5 text-xs">
+        <>
+          <div className="space-y-1.5 text-xs">
           <div className="flex items-center justify-between gap-2">
             <span className="text-muted-foreground">
               Tokens · 请求（{bots.bot_count} 个机器人）
@@ -226,7 +240,12 @@ function AiBotsSection({ bots }: { bots: NonNullable<AiBlock["bots"]> }) {
               </span>
             </div>
           )}
-        </div>
+          </div>
+          {/* 窗口口径只对有数据的区块说明：未配置/降级时不显示（视觉 round1 V6） */}
+          <p className="text-[11px] text-muted-foreground">
+            按你的时区（{bots.timezone}）当地日聚合
+          </p>
+        </>
       )}
     </section>
   );

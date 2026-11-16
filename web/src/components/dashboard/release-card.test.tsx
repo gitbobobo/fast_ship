@@ -37,14 +37,42 @@ describe("ReleaseCard", () => {
     );
 
     expect(screen.getByTestId("release-card")).toBeInTheDocument();
-    expect(screen.getByText("待发版 2")).toBeInTheDocument();
+    // 视觉 round1 V2：三块统一为「图标 + 标签 + 值」层级，label 与 count 分元素
+    expect(
+      screen.getByTestId("release-pending-section"),
+    ).toHaveTextContent("待发版");
+    expect(screen.getByText("2")).toBeInTheDocument();
     expect(
       screen.getByRole("link", { name: /v2\.0\.0/ }),
     ).toHaveAttribute("href", "/projects/p1/versions/v1");
+    expect(screen.getByText("近期发版")).toBeInTheDocument();
+    expect(screen.getByText("未合并 PR")).toBeInTheDocument();
     expect(screen.getByText(/距上次发版/)).toBeInTheDocument();
     expect(
       screen.getByText("3 个开启问题还有未合并的 PR"),
     ).toBeInTheDocument();
+  });
+
+  it("hides the pending count badge at 0 and lets the empty row speak (视觉 round1 V5)", () => {
+    // 「待发版 0」与「没有待发版」不再同现：徽章 0 时不渲染。
+    render(
+      <MemoryRouter>
+        <ReleaseCard
+          release={{
+            pending_count: 0,
+            pending_versions: [],
+            recent_releases: [],
+            unmerged_pr_issue_count: 0,
+          }}
+        />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByText("待发版")).toBeInTheDocument();
+    expect(screen.getByText("没有待发版")).toBeInTheDocument();
+    expect(screen.queryByText("0")).not.toBeInTheDocument();
+    expect(screen.getByText("还没有发版记录")).toBeInTheDocument();
+    expect(screen.getByText("没有挂着未合并 PR 的问题")).toBeInTheDocument();
   });
 
   it("hides the last-release badge when the block is degraded even with recent releases", () => {

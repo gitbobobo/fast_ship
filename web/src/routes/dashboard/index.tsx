@@ -334,9 +334,9 @@ export default function DashboardPage() {
                 <CardContent className="p-5">
                   <div className="mb-5 flex items-center justify-between">
                     <div>
-                      <h3 className="text-sm font-semibold">近 30 天已解决</h3>
+                      <h3 className="text-sm font-semibold">每日已解决</h3>
                       <p className="text-xs text-muted-foreground">
-                        每日已解决问题数量趋势
+                        近 30 天 · UTC 日
                       </p>
                     </div>
                     {!unavailable && totalResolvedIssues > 0 && (
@@ -475,12 +475,20 @@ function KpiCard({
   sparkline?: number[];
 }) {
   const toneClasses = {
-    neutral:
-      "bg-muted/40 text-foreground ring-foreground/10 hover:ring-foreground/20",
+    neutral: "bg-muted/40 ring-foreground/10 hover:ring-foreground/20",
     warning:
-      "bg-amber-500/[0.06] text-amber-700 ring-amber-500/20 hover:ring-amber-500/30 dark:bg-amber-500/10 dark:text-amber-400",
+      "bg-amber-500/[0.06] ring-amber-500/20 hover:ring-amber-500/30 dark:bg-amber-500/10",
     positive:
-      "bg-emerald-500/[0.06] text-emerald-700 ring-emerald-500/20 hover:ring-emerald-500/30 dark:bg-emerald-500/10 dark:text-emerald-400",
+      "bg-emerald-500/[0.06] ring-emerald-500/20 hover:ring-emerald-500/30 dark:bg-emerald-500/10",
+  };
+
+  // tone 色只上数值与图标（视觉 round1 V4）：原来卡根节点的 amber/emerald-700
+  // 会让标签（继承 + opacity-70）在浅色底上对比度只剩 ~2.7–3.0:1；标签行
+  // 固定中性色，不随 tone 变。
+  const toneText = {
+    neutral: "text-foreground",
+    warning: "text-amber-700 dark:text-amber-400",
+    positive: "text-emerald-700 dark:text-emerald-400",
   };
 
   const className = cn(
@@ -491,19 +499,20 @@ function KpiCard({
 
   const body = (
     <>
-      <div className="flex items-center gap-2 text-xs font-medium opacity-70">
-        <Icon className="h-4 w-4" />
+      <div className="flex items-center gap-2 text-xs font-medium text-gray-700 dark:text-gray-300">
+        <Icon className={cn("h-4 w-4", toneText[tone])} />
         <span>{label}</span>
       </div>
       {isLoading ? (
         <Skeleton className="h-10 w-24" />
       ) : (
         <div
+          data-testid="kpi-value"
           className={cn(
             "tracking-tighter tabular-nums",
             value === null
               ? "text-3xl font-normal text-muted-foreground"
-              : "text-4xl font-bold",
+              : cn("text-4xl font-bold", toneText[tone]),
           )}
         >
           {value ?? "—"}
@@ -534,15 +543,19 @@ function Sparkline({
 }) {
   if (values.length < 2 || values.every((value) => value === 0)) return null;
   const max = Math.max(...values);
-  const width = 72;
+  // viewBox 用比例单位（宽 100）+ preserveAspectRatio="none"，横向撑满卡片
+  // 内容宽度（视觉 round1 V3）；描边配 non-scaling-stroke，避免非等比拉伸
+  // 后线条粗细不均；圆点会被拉伸压变形，所以不画点。
+  const width = 100;
   const height = 24;
-  const points = values
+  const linePoints = values
     .map((value, index) => {
       const x = (index / (values.length - 1)) * width;
       const y = height - 2 - (value / max) * (height - 4);
       return `${x.toFixed(1)},${y.toFixed(1)}`;
     })
     .join(" ");
+  const areaPoints = `0,${height} ${linePoints} ${width},${height}`;
   const stroke = {
     neutral: "text-muted-foreground",
     warning: "text-amber-700 dark:text-amber-400",
@@ -552,17 +565,21 @@ function Sparkline({
   return (
     <svg
       viewBox={`0 0 ${width} ${height}`}
-      className={cn("h-6 w-18", stroke)}
+      className={cn("h-6 w-full", stroke)}
+      preserveAspectRatio="none"
       aria-hidden="true"
       data-testid="kpi-sparkline"
     >
+      {/* 线下同色淡面积（视觉 round1 V3）：趋势带表达方向感 */}
+      <polygon points={areaPoints} fill="currentColor" opacity={0.12} />
       <polyline
-        points={points}
+        points={linePoints}
         fill="none"
         stroke="currentColor"
         strokeWidth="1.5"
         strokeLinejoin="round"
         strokeLinecap="round"
+        vectorEffect="non-scaling-stroke"
       />
     </svg>
   );
