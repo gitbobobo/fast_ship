@@ -13,10 +13,7 @@ import {
   MessagesSquare,
   Bot,
   GitPullRequest,
-  Bell,
-  Gauge,
 } from "lucide-react";
-import { useUnreadNotificationCount } from "@/lib/hooks/use-notifications";
 import {
   Tooltip,
   TooltipContent,
@@ -30,54 +27,62 @@ import { useLastBotId } from "@/lib/store/last-bot-store";
 import { useSidebarStore } from "@/lib/store/sidebar-store";
 import { cn } from "@/lib/utils";
 
-const navItems = [
-  { to: "/dashboard", label: "仪表盘", icon: LayoutDashboard, end: true },
-  { to: "/projects", label: "项目", icon: Package, end: true },
-  { to: "/issues", label: "问题", icon: Bug, end: true },
-  { to: "/logs", label: "日志", icon: ScrollText, end: false },
-  { to: "/documents", label: "文档", icon: FileText, end: true },
-  { to: "/board", label: "看板", icon: Kanban, end: true },
-  { to: "/threads", label: "线程", icon: MessagesSquare, end: false },
-  { to: "/bots", label: "机器人", icon: Bot, end: false },
-  { to: "/reviews", label: "审查", icon: GitPullRequest, end: false },
-  { to: "/quota", label: "套餐额度", icon: Gauge, end: true },
-  { to: "/notifications", label: "通知", icon: Bell, end: true },
-  { to: "/versions", label: "版本", icon: Tags, end: true },
-  { to: "/screenshots", label: "截图", icon: Images, end: true },
-];
-
-function unreadLabel(label: string, unread: number) {
-  if (unread <= 0) return label;
-  return `${label}（${unread > 99 ? "99+" : unread} 条未读）`;
+interface NavItem {
+  to: string;
+  label: string;
+  icon: React.ElementType;
+  end?: boolean;
+  // 跳转目标被改写成具体页面时（如 /bots/<lastBotId>），NavLink 的
+  // to 前缀匹配只认那一页，分区高亮会丢；用它按分区前缀判定激活态。
+  activePrefix?: string;
 }
+
+// 侧边栏按用途分三组：主入口、项目内功能、智能体相关；组标题仅作视觉分区，
+// 不可折叠。收起态下不显示标题，用分隔线代替。
+const navGroups: { label?: string; items: NavItem[] }[] = [
+  {
+    items: [
+      { to: "/dashboard", label: "仪表盘", icon: LayoutDashboard, end: true },
+      { to: "/projects", label: "项目", icon: Package, end: true },
+    ],
+  },
+  {
+    label: "项目内",
+    items: [
+      { to: "/issues", label: "问题", icon: Bug, end: true },
+      { to: "/board", label: "看板", icon: Kanban, end: true },
+      { to: "/versions", label: "版本", icon: Tags, end: true },
+      { to: "/documents", label: "文档", icon: FileText, end: true },
+      { to: "/screenshots", label: "截图", icon: Images, end: true },
+      { to: "/logs", label: "日志", icon: ScrollText, end: false },
+    ],
+  },
+  {
+    label: "智能体",
+    items: [
+      { to: "/threads", label: "线程", icon: MessagesSquare, end: false },
+      { to: "/bots", label: "机器人", icon: Bot, end: false },
+      { to: "/reviews", label: "审查", icon: GitPullRequest, end: false },
+    ],
+  },
+];
 
 function SidebarNavItem({
   item,
   collapsed,
   onNavigate,
-  unread = 0,
 }: {
-  item: {
-    to: string;
-    label: string;
-    icon: React.ElementType;
-    end?: boolean;
-    // 跳转目标被改写成具体页面时（如 /bots/<lastBotId>），NavLink 的
-    // to 前缀匹配只认那一页，分区高亮会丢；用它按分区前缀判定激活态。
-    activePrefix?: string;
-  };
+  item: NavItem;
   collapsed: boolean;
   onNavigate?: () => void;
-  unread?: number;
 }) {
-  const name = unreadLabel(item.label, unread);
   const { pathname } = useLocation();
   const link = (
     <NavLink
       to={item.to}
       end={item.end}
       onClick={onNavigate}
-      aria-label={name}
+      aria-label={item.label}
       className={({ isActive }) =>
         cn(
           "relative flex items-center rounded-md text-sm font-medium transition-all duration-200",
@@ -92,15 +97,7 @@ function SidebarNavItem({
         )
       }
     >
-      <span className="relative shrink-0">
-        <item.icon className="h-4 w-4" />
-        {unread > 0 && collapsed && (
-          <span
-            data-testid="sidebar-unread-dot"
-            className="absolute -right-0.5 -top-0.5 h-1.5 w-1.5 rounded-full bg-destructive"
-          />
-        )}
-      </span>
+      <item.icon className="h-4 w-4 shrink-0" />
       <span
         className={cn(
           "transition-all duration-200 overflow-hidden whitespace-nowrap",
@@ -109,18 +106,6 @@ function SidebarNavItem({
       >
         {item.label}
       </span>
-      {unread > 0 && !collapsed && (
-        <span
-          data-testid="sidebar-unread-badge"
-          className={cn(
-            "ml-auto flex h-4 min-w-4 items-center justify-center rounded-full px-1",
-            "text-[10px] font-medium leading-none",
-            "bg-destructive text-white",
-          )}
-        >
-          {unread > 99 ? "99+" : unread}
-        </span>
-      )}
     </NavLink>
   );
 
@@ -128,7 +113,7 @@ function SidebarNavItem({
     return (
       <Tooltip>
         <TooltipTrigger render={link} />
-        <TooltipContent side="right">{name}</TooltipContent>
+        <TooltipContent side="right">{item.label}</TooltipContent>
       </Tooltip>
     );
   }
@@ -181,7 +166,6 @@ function NavContent({
   collapsed?: boolean;
   onNavigate?: () => void;
 }) {
-  const unread = useUnreadNotificationCount().data ?? 0;
   // 「机器人」菜单项直跳上次打开的聊天（INT-157）；没打开过就进列表。
   const lastBotId = useLastBotId();
 
@@ -202,25 +186,42 @@ function NavContent({
       </div>
       <nav
         className={cn(
-          "flex-1 space-y-1 overflow-y-auto transition-all duration-200",
+          "flex-1 overflow-y-auto transition-all duration-200",
           collapsed ? "p-2" : "p-3"
         )}
       >
-        {navItems.map((item) => (
-          <SidebarNavItem
-            key={item.to}
-            item={{
-              ...item,
-              to:
-                item.to === "/bots" && lastBotId
-                  ? `/bots/${lastBotId}`
-                  : item.to,
-              activePrefix: item.to === "/bots" ? "/bots" : undefined,
-            }}
-            collapsed={!!collapsed}
-            onNavigate={onNavigate}
-            unread={item.to === "/notifications" ? unread : 0}
-          />
+        {navGroups.map((group, groupIndex) => (
+          <div
+            key={group.label ?? "main"}
+            className={cn("space-y-1", groupIndex > 0 && "mt-4")}
+          >
+            {group.label &&
+              (collapsed ? (
+                <div
+                  data-testid="sidebar-group-separator"
+                  className="my-2 border-t"
+                />
+              ) : (
+                <div className="px-3 py-1 text-xs text-muted-foreground">
+                  {group.label}
+                </div>
+              ))}
+            {group.items.map((item) => (
+              <SidebarNavItem
+                key={item.to}
+                item={{
+                  ...item,
+                  to:
+                    item.to === "/bots" && lastBotId
+                      ? `/bots/${lastBotId}`
+                      : item.to,
+                  activePrefix: item.to === "/bots" ? "/bots" : undefined,
+                }}
+                collapsed={!!collapsed}
+                onNavigate={onNavigate}
+              />
+            ))}
+          </div>
         ))}
       </nav>
       <SidebarBottom collapsed={!!collapsed} />

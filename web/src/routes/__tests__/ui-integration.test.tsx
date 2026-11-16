@@ -275,38 +275,19 @@ describe("UI Integration Tests", () => {
       expect(logLink).toHaveAttribute("aria-current", "page");
     });
 
-    it("renders reviews and notifications as top-level sidebar items", () => {
+    it("renders reviews as a sidebar item and drops notifications/quota items", () => {
       renderWithProviders(<Sidebar />, { initialEntry: "/reviews" });
 
       const reviews = screen.getByRole("link", { name: "审查" });
       expect(reviews).toHaveAttribute("href", "/reviews");
       expect(reviews).toHaveAttribute("aria-current", "page");
 
-      const notifications = screen.getByRole("link", { name: "通知" });
-      expect(notifications).toHaveAttribute("href", "/notifications");
-    });
-
-    it("keeps notifications sidebar item active on /notifications", () => {
-      renderWithProviders(<Sidebar />, { initialEntry: "/notifications" });
-
-      expect(screen.getByRole("link", { name: "通知" })).toHaveAttribute(
-        "aria-current",
-        "page",
-      );
-    });
-
-    it("shows unread count on the notifications sidebar item", () => {
-      vi.mocked(useUnreadNotificationCount).mockReturnValue({
-        data: 3,
-      } as unknown as ReturnType<typeof useUnreadNotificationCount>);
-
-      renderWithProviders(<Sidebar />, { initialEntry: "/dashboard" });
-
-      const notifications = screen.getByRole("link", {
-        name: "通知（3 条未读）",
-      });
-      expect(notifications).toHaveAttribute("href", "/notifications");
-      expect(screen.getByTestId("sidebar-unread-badge")).toHaveTextContent("3");
+      expect(
+        screen.queryByRole("link", { name: "通知" }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("link", { name: "套餐额度" }),
+      ).not.toBeInTheDocument();
     });
 
     it("renders settings layout with all navigation items", () => {
