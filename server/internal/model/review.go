@@ -248,7 +248,10 @@ type ReviewPullRequest struct {
 	// 轮 P2）。
 	PRUpdatedAt *time.Time `gorm:"column:pr_updated_at" json:"-"`
 
-	// CodeCommentID/VisualCommentID 机器人顶层评论 id；0=尚未创建（按隐藏标记找回）。
+	// CodeCommentID/VisualCommentID 本轮顶层评论 id；0=本轮尚未创建。每轮
+	// 开轮（轮次推进，openRoundTx）时清零（INT-233）：顶层评论每轮新发、发出
+	// 后不再改写；id 写回失败时按「marker + 轮次标记」前缀找回补记，历史轮
+	// 的评论永不触碰。
 	CodeCommentID   int64 `gorm:"column:code_comment_id" json:"code_comment_id,omitempty"`
 	VisualCommentID int64 `gorm:"column:visual_comment_id" json:"visual_comment_id,omitempty"`
 

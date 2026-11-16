@@ -167,8 +167,8 @@ Forgejo 仓库的 PR 审查与 GitHub 走同一条协调管线（webhook 事务�
   传输预算放宽一档）。
   请求映射：PR 元数据 `GET /repos/{o}/{r}/pulls/{n}`；diff
   `GET …/pulls/{n}.diff`（text/plain 整段读）；PR 会话评论
-  `GET/POST /repos/{o}/{r}/issues/{n}/comments`、`PATCH …/issues/comments/{id}`
-  （Forgejo 里 PR 与 issue 共用评论空间）；行内 review
+  `GET/POST /repos/{o}/{r}/issues/{n}/comments`（Forgejo 里 PR 与 issue 共用
+  评论空间；顶层评论只建不改，无 PATCH 通道——INT-233）；行内 review
   `POST …/pulls/{n}/reviews`（`{event, body, commit_id, comments:[{path, body,
   new_position}]}`，RIGHT 侧行号映射 `new_position`、LEFT 映射
   `old_position`，`commit_id` 把 review 钉在运行绑定的 head 上）；对账
@@ -182,21 +182,18 @@ Forgejo 仓库的 PR 审查与 GitHub 走同一条协调管线（webhook 事务�
   （`read:user` scope——仓库范围 PAT 拿不到，Forgejo 的 user/* scope 组
   不能授给 specific-repository token，见 token-scope 文档），再从写接口
   响应（`POST …/comments`、`POST …/reviews`）的 `user.login` 学习并缓存——
-  **PATCH 路径不学**：评论对象的 user 是原作者不是编辑者，marker-only
-  退化命中他人伪造评论且 PAT 有权编辑他人评论时会把攻击者 login 学进
-  缓存，Self 标记与对账认领随之持久认敌为己。**退化边界只有非限流的
+  学习面只保留「响应 user 必然等于 PAT 所属账号」的 POST 路径（评论对象的
+  user 是原作者不是编辑者；顶层评论已无 PATCH 通道）。**退化边界只有非限流的
   403**——仓库级 PAT 拿不到 `read:user` 的确定性信号是 403 才落到
-  marker-only 认领；`/user` 404 不降级（更像 `api_base_url` 指错路径
+  前缀-only 认领；`/user` 404 不降级（更像 `api_base_url` 指错路径
   前缀，静默降级会让 Self 过滤失效且无报错线索）。403 降级前先判
   `forge.IsRateLimit`（body 含 rate
   limit/abuse detection 字样），限流 403 与权限 403 无法从状态码区分，
-  静默降级会在限流窗口整窗关掉「作者==自己」过滤（伪造 marker 的他人
-  评论可能被覆写一次，PATCH 403 时按「非己评论」改走新建，但不会因此
-  发不出评论——该 403 回退已排除限流：body 含 rate limit 字样的
-  403/429 落到报错重试，否则限流窗口每次同步都多发一条重复顶层评论）；
-  瞬时网络错误、5xx、非预期 401 一律传播挂起本轮重试——
-  瞬时故障也降级会把伪造覆写窗口从「仅仓库级 PAT 契约」扩大到任意故障
-  时刻，且 PAT 有仓库管理权限时覆写他人评论连 403 兜底都没有。login
+  静默降级会在限流窗口整窗关掉「作者==自己」过滤；瞬时网络错误、5xx、
+  非预期 401 一律传播挂起本轮重试——瞬时故障也降级会把伪造窗口从「仅仓库级
+  PAT 契约」扩大到任意故障时刻。前缀-only 退化下，伪造「marker + 本轮轮次
+  标记」评论会让机器人这一轮跳过发布（INT-233，评论只建不改后无覆写风险；
+  commit status 与行内 review 不受影响，取舍见 reviews.md 顶层评论节）。login
   学到之后立刻恢复按作者过滤。学到的 login 存进 resolver 按
   `(integrationID, PAT)` 分槽的共享缓存（`ReviewClients.forgejoLogins`）
   跨适配器实例存活——适配器每次现取现建，仓库级 PAT 下不共享则 Self

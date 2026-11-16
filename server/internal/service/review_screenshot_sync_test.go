@@ -635,12 +635,12 @@ func TestVisualSyncProbeSkippedKeepsPriorSuccess(t *testing.T) {
 	}
 }
 
-// F26 回归：上一轮视觉有 blocker → 早先同步走 carry 分支，把「沿用上一轮
+// INT-233 口径：上一轮视觉有 blocker → 早先同步走 carry 分支，把「沿用上一轮
 // 视觉审查结论（截图未变化，意见尚未处理）」发到 PR 上并记 visual_comment_id；
 // 随后 PR 描述换了截图集合（指纹变化）、新截图全部下载失败 → 本轮决策变为
-// 「截图无法下载」。此时已存在的视觉评论必须改写成「截图全部无法下载」并
-// 保留上一轮意见条目——「截图未变化」的旧说法与当前 head 不符。
-func TestVisualSyncScreensUnavailableUpdatesExistingVisualComment(t *testing.T) {
+// 「截图无法下载」。同一轮的评论发出后不再改写：既有视觉评论原样保留（含
+// 「截图未变化」的说法），新结论只由视觉 commit status 表达，也不新发第二条。
+func TestVisualSyncScreensUnavailableKeepsSameRoundComment(t *testing.T) {
 	e := newReviewEngineEnv(t)
 	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
 	now := time.Now().UTC()
@@ -698,8 +698,8 @@ func TestVisualSyncScreensUnavailableUpdatesExistingVisualComment(t *testing.T) 
 	e.setLedgerPending(t, repo, 88)
 	e.review.syncPendingPRs(now.Add(time.Second))
 
-	// 已存在的视觉评论被改写：仍只有一条（更新而非新发），不再有「截图未
-	// 变化」，换成「截图全部无法下载」语义并保留上一轮 finding 文本。
+	// 同轮评论不改写（INT-233）：仍只有 carry 那一条，原样保留；新结论由
+	// 视觉 commit status 表达。
 	var visuals []string
 	for _, c := range e.fake.Comments(repo, 88) {
 		if strings.Contains(c, reviewVisualCommentMarker) {
@@ -707,26 +707,22 @@ func TestVisualSyncScreensUnavailableUpdatesExistingVisualComment(t *testing.T) 
 		}
 	}
 	if len(visuals) != 1 {
-		t.Fatalf("visual comments = %d, want 1（更新既有评论而不是新发）", len(visuals))
+		t.Fatalf("visual comments = %d, want 1（同轮不新发第二条）", len(visuals))
 	}
 	comment := visuals[0]
-	if strings.Contains(comment, "截图未变化") {
-		t.Fatalf("comment = %q, 不应再宣称「截图未变化」", comment)
+	if !strings.Contains(comment, "截图未变化") || !strings.Contains(comment, "按钮叠在文字上") {
+		t.Fatalf("carry 评论应原样保留, got: %s", comment)
 	}
-	if !strings.Contains(comment, "全部无法下载") || !strings.Contains(comment, "未做视觉审查") {
-		t.Fatalf("comment = %q, want 「截图全部无法下载，未做视觉审查」语义", comment)
-	}
-	if !strings.Contains(comment, "按钮叠在文字上") {
-		t.Fatalf("comment = %q, want 保留上一轮 finding 文本", comment)
+	statuses := e.fake.StatusesForContext(reviewVisualStatusContext)
+	if len(statuses) == 0 || !strings.Contains(statuses[len(statuses)-1].Description, "无法下载") {
+		t.Fatalf("visual status 应表达「截图无法下载」: %+v", statuses)
 	}
 }
 
-// G4 回归：upsertPRComment 末尾写回 visual_comment_id 失败（账本 id 被留成
-// 0，PR 上评论其实已发出）时，「截图无法下载」分支旧实现按
-// VisualCommentID != 0 短路，跳过改写——上一轮 carry 发的「截图未变化」评论
-// 原样留在 PR 上，与「截图无法下载」的 failure status 互相矛盾。新实现只看
-// 上一轮有无视觉运行，savedID 为 0 时按 marker 找回既有评论改写。
-func TestVisualSyncScreensUnavailableRewritesCarryCommentWithoutLedgerID(t *testing.T) {
+// 账本 id 写回失败恢复（INT-233）：carry 同步发出评论后把 visual_comment_id
+// 清零（模拟写回失败），下一轮同轮同步按「marker + 轮次标记」前缀找回既有
+// 评论——跳过发布并把 id 补记回账本，不重复发第二条。
+func TestVisualSyncScreensUnavailableRecoversIDViaPrefix(t *testing.T) {
 	e := newReviewEngineEnv(t)
 	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
 	now := time.Now().UTC()
@@ -791,8 +787,7 @@ func TestVisualSyncScreensUnavailableRewritesCarryCommentWithoutLedgerID(t *test
 	e.setLedgerPending(t, repo, 91)
 	e.review.syncPendingPRs(now.Add(time.Second))
 
-	// PR 上那条 carry 评论被改写：仍只有一条（按 marker 找回更新而非新发），
-	// 不再有「截图未变化」，换成「截图全部无法下载」语义并保留上一轮 finding。
+	// 前缀找回命中本轮 carry 评论：跳过发布，不重复发第二条；id 补记回账本。
 	var visuals []string
 	for _, c := range e.fake.Comments(repo, 91) {
 		if strings.Contains(c, reviewVisualCommentMarker) {
@@ -800,17 +795,18 @@ func TestVisualSyncScreensUnavailableRewritesCarryCommentWithoutLedgerID(t *test
 		}
 	}
 	if len(visuals) != 1 {
-		t.Fatalf("visual comments = %d, want 1（按 marker 找回既有评论更新）", len(visuals))
+		t.Fatalf("visual comments = %d, want 1（前缀找回后不重复发）", len(visuals))
 	}
-	comment := visuals[0]
-	if strings.Contains(comment, "截图未变化") {
-		t.Fatalf("comment = %q, 不应再宣称「截图未变化」", comment)
+	if !strings.Contains(visuals[0], "截图未变化") {
+		t.Fatalf("carry 评论应原样保留, got: %s", visuals[0])
 	}
-	if !strings.Contains(comment, "全部无法下载") || !strings.Contains(comment, "未做视觉审查") {
-		t.Fatalf("comment = %q, want 「截图全部无法下载，未做视觉审查」语义", comment)
+	var ledger2 model.ReviewPullRequest
+	e.svc.db.First(&ledger2, "repo_full_name = ? AND pr_number = 91", repo)
+	if ledger2.VisualCommentID == 0 {
+		t.Fatal("找回后应把 visual_comment_id 补记回账本")
 	}
-	if !strings.Contains(comment, "按钮叠在文字上") {
-		t.Fatalf("comment = %q, want 保留上一轮 finding 文本", comment)
+	if ledger2.VisualCommentID != ledger.VisualCommentID {
+		t.Fatalf("找回的 id 应与原评论一致: %d != %d", ledger2.VisualCommentID, ledger.VisualCommentID)
 	}
 }
 

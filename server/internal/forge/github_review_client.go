@@ -174,13 +174,6 @@ func (c *GitHubReviewClient) CreatePullRequestComment(ctx context.Context, repoF
 	})
 }
 
-func (c *GitHubReviewClient) UpdatePullRequestComment(ctx context.Context, repoFullName string, commentID int64, body string) error {
-	_, err := staleRetry(c, ctx, func(id int64) (bool, error) {
-		return true, c.api.UpdatePullRequestComment(ctx, id, repoFullName, commentID, body)
-	})
-	return err
-}
-
 func (c *GitHubReviewClient) ListReviews(ctx context.Context, repoFullName string, number int) ([]ReviewSummary, error) {
 	list, err := staleRetry(c, ctx, func(id int64) ([]githubapi.ReviewSummary, error) {
 		return c.api.ListReviews(ctx, id, repoFullName, number)

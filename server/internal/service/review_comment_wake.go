@@ -214,7 +214,7 @@ func commentWakePayloadBaseGuards(body []byte) *commentWakePayload {
 	// 用户评论里的 @fast-ship-bot——不排除会形成「发布结论 → 再唤醒」
 	// 的无限审查循环（每轮 supersede 上一轮，持续烧额度）。两类识别：
 	// 平台标记的 Bot 账号；机器评论自带的隐藏 HTML 标记。标记判定与
-	// upsertPRComment 的 own 口径同源（TrimSpace 后前缀匹配）：机器结论
+	// postRoundComment 的找回口径同源（TrimSpace 后前缀匹配）：机器结论
 	// 的 marker 固定在正文开头，人类引用/摘录机器人评论片段（marker
 	// 落在正文中间）不该被误杀（fast-ship-bot 第 4 轮 P2）。
 	trimmedBody := strings.TrimSpace(p.Comment.Body)

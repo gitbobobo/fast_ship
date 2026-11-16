@@ -522,8 +522,9 @@ func TestReviewCommentWakeGuards(t *testing.T) {
 		// 平台标记的 Bot 账号自评论：正文可能引用用户评论里的 mention，
 		// 不排除会形成「发布结论 → 再唤醒」的无限审查循环。
 		issueCommentBody("@fast-ship-bot 结论：发现问题", repo, 25, 42, setCommentUserType("Bot")),
-		// 机器评论的隐藏标记固定在正文开头（与 upsertPRComment 的 own 判定
-		// 同口径），marker 开头的整条评论不唤醒。
+
+		// 机器人结论评论的隐藏标记固定在正文开头（唤醒判定只看第一行 marker，
+		// 与轮次标记行无关），marker 开头的整条评论不唤醒。
 		issueCommentBody("<!-- fast-ship-code-review -->\n结论 含 @fast-ship-bot", repo, 25, 42),
 		issueCommentBody("<!-- codex-pull-request-review-summary -->\n含 @fast-ship-bot", repo, 25, 42),
 		// 无缘者（author_association NONE）：公开仓库陌生人原本触发不了

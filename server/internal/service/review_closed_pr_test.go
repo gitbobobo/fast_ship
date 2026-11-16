@@ -420,7 +420,7 @@ func TestReviewClosedSyncWritesNothing(t *testing.T) {
 	e.review.syncPendingPRs(now)
 
 	counts := e.fake.CallCounts()
-	for _, m := range []string{"CreateCommitStatus", "CreatePullRequestComment", "UpdatePullRequestComment", "SubmitReview"} {
+	for _, m := range []string{"CreateCommitStatus", "CreatePullRequestComment", "SubmitReview"} {
 		if counts[m] != 0 {
 			t.Fatalf("已关闭 PR 不得有 GitHub 写 %s: %+v", m, counts)
 		}

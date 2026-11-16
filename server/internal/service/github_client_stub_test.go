@@ -94,10 +94,6 @@ func (stubGitHubClient) CreatePullRequestComment(context.Context, int64, string,
 	return 0, stubErr("CreatePullRequestComment")
 }
 
-func (stubGitHubClient) UpdatePullRequestComment(context.Context, int64, string, int64, string) error {
-	return stubErr("UpdatePullRequestComment")
-}
-
 func (stubGitHubClient) SubmitReview(context.Context, int64, string, int, githubapi.ReviewInput) (int64, error) {
 	return 0, stubErr("SubmitReview")
 }

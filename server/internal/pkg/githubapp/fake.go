@@ -490,22 +490,6 @@ func (f *Fake) CreatePullRequestComment(ctx context.Context, installationID int6
 	return id, nil
 }
 
-func (f *Fake) UpdatePullRequestComment(ctx context.Context, installationID int64, repoFullName string, commentID int64, body string) error {
-	f.record("UpdatePullRequestComment", repoFullName, int(commentID%100000), "")
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	key := fakeRepoKey(repoFullName)
-	for number, list := range f.comments[key] {
-		for i := range list {
-			if list[i].ID == commentID {
-				f.comments[key][number][i].Body = body
-				return nil
-			}
-		}
-	}
-	return &githubapi.StatusError{StatusCode: 404, Method: "PATCH", URL: "issues/comments", Body: "not found"}
-}
-
 func (f *Fake) SubmitReview(ctx context.Context, installationID int64, repoFullName string, number int, in githubapi.ReviewInput) (int64, error) {
 	f.record("SubmitReview", repoFullName, number, in.Event)
 	f.mu.Lock()

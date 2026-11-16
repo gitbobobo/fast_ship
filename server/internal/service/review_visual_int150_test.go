@@ -274,18 +274,12 @@ func TestVisualSyncWaitsForCodeTerminal(t *testing.T) {
 	if e.media.anonCalls != 0 {
 		t.Fatalf("anonCalls = %d, want 0（等待分支不探测）", e.media.anonCalls)
 	}
-	// 代码顶层评论照常发布（视觉提示不出现——视觉还没轮到）。
-	codePosted := false
+	// 代码顶层评论只在全部组合终态后发（INT-233）：在途期间不发，进行中
+	// 状态由 pending 的 commit status 表达。
 	for _, c := range e.fake.Comments(repo, 83) {
 		if strings.Contains(c, reviewCodeCommentMarker) {
-			codePosted = true
-			if strings.Contains(c, "视觉审查尚未结束") {
-				t.Fatalf("code comment = %q, 等待分支不应带视觉待办提示", c)
-			}
+			t.Fatalf("code comment = %q, 代码未终态不应发顶层评论", c)
 		}
-	}
-	if !codePosted {
-		t.Fatalf("comments = %v, want 代码顶层评论照常发布", e.fake.Comments(repo, 83))
 	}
 
 	// 第二个组合完成：下一次同步事件正常开视觉轮（判定不再悬置）。
@@ -695,18 +689,12 @@ func TestVisualSyncWaitsForCodeTerminalBeforeCarrySuccess(t *testing.T) {
 	if e.media.anonCalls != 0 {
 		t.Fatalf("anonCalls = %d, want 0（等待分支不探测）", e.media.anonCalls)
 	}
-	// 代码顶层评论照常发布；上一轮是通过的，不得带遗留提示。
-	codePosted := false
+	// 代码顶层评论只在全部组合终态后发（INT-233）；发的时候上一轮是通过
+	// 的，不得带遗留提示（见终态后的同步断言）。
 	for _, c := range e.fake.Comments(repo, 97) {
 		if strings.Contains(c, reviewCodeCommentMarker) {
-			codePosted = true
-			if strings.Contains(c, "截图复核意见尚未处理") {
-				t.Fatalf("code comment = %q, 上一轮通过不应带遗留提示", c)
-			}
+			t.Fatalf("code comment = %q, 代码未终态不应发顶层评论", c)
 		}
-	}
-	if !codePosted {
-		t.Fatalf("comments = %v, want 代码顶层评论照常发布", e.fake.Comments(repo, 97))
 	}
 }
 
