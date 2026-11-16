@@ -1,5 +1,5 @@
 import { useNavigate } from "react-router";
-import { User, LogOut, Settings, Sun, Moon, Monitor } from "lucide-react";
+import { User, LogOut, Settings, Gauge, Sun, Moon, Monitor } from "lucide-react";
 import { Avatar, AvatarImage, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import {
@@ -105,6 +105,10 @@ export function UserNav({
         <DropdownMenuItem onClick={() => navigate("/settings")}>
           <Settings className="mr-2 h-4 w-4" />
           设置
+        </DropdownMenuItem>
+        <DropdownMenuItem onClick={() => navigate("/quota")}>
+          <Gauge className="mr-2 h-4 w-4" />
+          套餐额度
         </DropdownMenuItem>
         <DropdownMenuItem
           onClick={() =>
