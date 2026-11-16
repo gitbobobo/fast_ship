@@ -240,6 +240,81 @@ func (r *DashboardRepository) ListFailedShips(userID string, limit int) (int64, 
 	return total, items, err
 }
 
+// DashboardPendingVersion 一个待发版版本。
+type DashboardPendingVersion struct {
+	VersionID     string    `gorm:"column:version_id"`
+	VersionNumber string    `gorm:"column:version_number"`
+	ProjectID     string    `gorm:"column:project_id"`
+	ProjectName   string    `gorm:"column:project_name"`
+	CreatedAt     time.Time `gorm:"column:created_at"`
+}
+
+// ListPendingVersions status=pending（未发货）的版本，排除搁置项目；按
+// created_at 升序——创建越早等得越久，越该先处理。count 是全量 pending 数，
+// items 截前 limit 条。
+func (r *DashboardRepository) ListPendingVersions(userID string, limit int) (int64, []DashboardPendingVersion, error) {
+	items := make([]DashboardPendingVersion, 0, limit)
+	base := r.db.
+		Table("versions AS v").
+		Select("v.id AS version_id, v.version_number, v.project_id, p.name AS project_name, v.created_at").
+		Joins("JOIN projects p ON p.id = v.project_id").
+		Where("p.user_id = ?", userID).
+		Where("v.status = ?", string(model.VersionStatusPending)).
+		Where(projectNotShelvedSQL("p"), time.Now().UTC()).
+		Order("v.created_at ASC")
+	total, err := r.countAndScan(base, limit, &items)
+	return total, items, err
+}
+
+// DashboardRecentRelease 一个已发版版本。
+type DashboardRecentRelease struct {
+	VersionID     string     `gorm:"column:version_id"`
+	VersionNumber string     `gorm:"column:version_number"`
+	ProjectID     string     `gorm:"column:project_id"`
+	ProjectName   string     `gorm:"column:project_name"`
+	CreatedAt     time.Time  `gorm:"column:created_at"`
+	ShippedAt     *time.Time `gorm:"column:shipped_at"`
+}
+
+// ListRecentReleases 最近 limit 次已发版，按 shipped_at 降序。有意**不加时间
+// 窗口**：shipped_at 是文本存储，历史行（ship.go 已改为写 UTC）存在本地时区
+// 偏移的写法，窗口过滤会因字典序与真实时间序错位漏行/多行；发布节奏卡只看
+// 最近几次，全表按版本量级极小，排序取前即可。
+func (r *DashboardRepository) ListRecentReleases(userID string, limit int) ([]DashboardRecentRelease, error) {
+	items := make([]DashboardRecentRelease, 0, limit)
+	err := r.db.
+		Table("versions AS v").
+		Select("v.id AS version_id, v.version_number, v.project_id, p.name AS project_name, v.created_at, v.shipped_at").
+		Joins("JOIN projects p ON p.id = v.project_id").
+		Where("p.user_id = ?", userID).
+		Where("v.status = ?", string(model.VersionStatusShipped)).
+		Where("v.shipped_at IS NOT NULL").
+		Where(projectNotShelvedSQL("p"), time.Now().UTC()).
+		Order("v.shipped_at DESC").
+		Limit(limit).
+		Scan(&items).Error
+	return items, err
+}
+
+// CountUnmergedPRIssues 开启且至少关联一个未合并 PR（含 closed 未合并）的
+// 问题数，按 issue 去重、排除搁置项目。连接方向 projects(user_id 索引) →
+// issues(project_id) → issue_pull_requests(issue_id/project_id 各有索引)，
+// 与其它仪表盘查询同向，不从关联表出发全表扫。
+func (r *DashboardRepository) CountUnmergedPRIssues(userID string) (int64, error) {
+	var total int64
+	err := r.db.
+		Table("projects AS p").
+		Select("COUNT(DISTINCT i.id)").
+		Joins("JOIN issues i ON i.project_id = p.id").
+		Joins("JOIN issue_pull_requests l ON l.issue_id = i.id").
+		Where("p.user_id = ?", userID).
+		Where("i.state = ?", model.IssueStateOpen).
+		Where("l.state != ?", model.IssuePullRequestStateMerged).
+		Where(projectNotShelvedSQL("p"), time.Now().UTC()).
+		Scan(&total).Error
+	return total, err
+}
+
 // DashboardQuotaAttention 一条需要处理的配额账号。
 type DashboardQuotaAttention struct {
 	Label    string `gorm:"column:label"`

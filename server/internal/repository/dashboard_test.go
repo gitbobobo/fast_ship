@@ -22,7 +22,8 @@ func newDashboardTestDB(t *testing.T) *gorm.DB {
 	if err := db.AutoMigrate(
 		&model.User{}, &model.Project{}, &model.Issue{}, &model.IssueInternalMeta{},
 		&model.IssueRecommendation{}, &model.ReviewRun{}, &model.ReviewPullRequest{},
-		&model.Version{}, &model.QuotaAccount{},
+		&model.Version{}, &model.QuotaAccount{}, &model.IssuePullRequest{},
+		&model.BotScheduleTask{}, &model.Bot{},
 	); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
@@ -364,5 +365,127 @@ func TestDashboardListAttentionQuotaAccounts(t *testing.T) {
 	}
 	if total != 2 || len(items) != 2 {
 		t.Fatalf("expected 2 attention accounts, got total=%d items=%+v", total, items)
+	}
+}
+
+// ListPendingVersions：status=pending 按 created_at 升序，count 为全量；搁置
+// 项目与非本用户排除；shipped 不混入。
+func TestDashboardListPendingVersions(t *testing.T) {
+	db := newDashboardTestDB(t)
+	userID := dashboardTestUser(t, db)
+	other := dashboardTestUser(t, db)
+	now := time.Now().UTC()
+
+	mkProject := func(name, owner string, shelved bool) string {
+		return dashboardTestProject(t, db, owner, name, now, shelved)
+	}
+	pid := mkProject("项目A", userID, false)
+	shelved := mkProject("搁置项目", userID, true)
+	otherPid := mkProject("他人项目", other, false)
+
+	mkVersion := func(projectID, number string, status model.VersionStatus, created time.Time) {
+		if err := db.Create(&model.Version{
+			ID: uuid.NewString(), ProjectID: projectID, VersionNumber: number,
+			Status: status, CreatedAt: created,
+		}).Error; err != nil {
+			t.Fatalf("create version: %v", err)
+		}
+	}
+	mkVersion(pid, "v3.0.0", model.VersionStatusPending, now.Add(-time.Hour))
+	mkVersion(pid, "v2.0.0", model.VersionStatusPending, now.Add(-3*time.Hour))
+	mkVersion(pid, "v1.0.0", model.VersionStatusShipped, now.Add(-2*time.Hour))
+	mkVersion(shelved, "v8.8.8", model.VersionStatusPending, now.Add(-4*time.Hour))
+	mkVersion(otherPid, "v7.7.7", model.VersionStatusPending, now.Add(-5*time.Hour))
+
+	repo := NewDashboardRepository(db)
+	total, items, err := repo.ListPendingVersions(userID, 3)
+	if err != nil {
+		t.Fatalf("ListPendingVersions: %v", err)
+	}
+	if total != 2 || len(items) != 2 {
+		t.Fatalf("total=%d items=%d, want 2/2", total, len(items))
+	}
+	if items[0].VersionNumber != "v2.0.0" || items[1].VersionNumber != "v3.0.0" {
+		t.Fatalf("must be created_at ascending: %+v", items)
+	}
+}
+
+// ListRecentReleases：按 shipped_at 降序取前 N，**不加时间窗口**——40 天前的
+// 发版也在列表里（窗口会因文本存储的时间写法错位漏行）。
+func TestDashboardListRecentReleases(t *testing.T) {
+	db := newDashboardTestDB(t)
+	userID := dashboardTestUser(t, db)
+	now := time.Now().UTC()
+	pid := dashboardTestProject(t, db, userID, "项目A", now, false)
+
+	mkShipped := func(number string, shipped time.Time) {
+		if err := db.Create(&model.Version{
+			ID: uuid.NewString(), ProjectID: pid, VersionNumber: number,
+			Status: model.VersionStatusShipped, CreatedAt: shipped.Add(-time.Hour), ShippedAt: &shipped,
+		}).Error; err != nil {
+			t.Fatalf("create version: %v", err)
+		}
+	}
+	mkShipped("v1.0.0", now.Add(-24*time.Hour))
+	mkShipped("v1.1.0", now.Add(-40*24*time.Hour))
+	// pending 与无 shipped_at 的行不进列表
+	if err := db.Create(&model.Version{
+		ID: uuid.NewString(), ProjectID: pid, VersionNumber: "v2.0.0",
+		Status: model.VersionStatusPending, CreatedAt: now,
+	}).Error; err != nil {
+		t.Fatalf("create version: %v", err)
+	}
+
+	repo := NewDashboardRepository(db)
+	items, err := repo.ListRecentReleases(userID, 5)
+	if err != nil {
+		t.Fatalf("ListRecentReleases: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("items=%d, want 2", len(items))
+	}
+	if items[0].VersionNumber != "v1.0.0" || items[1].VersionNumber != "v1.1.0" {
+		t.Fatalf("must be shipped_at descending (no window): %+v", items)
+	}
+}
+
+// CountUnmergedPRIssues：开启且至少关联一个非 merged PR（closed 未合并也算），
+// 按 issue 去重、搁置项目排除、非本用户排除。
+func TestDashboardCountUnmergedPRIssues(t *testing.T) {
+	db := newDashboardTestDB(t)
+	userID := dashboardTestUser(t, db)
+	other := dashboardTestUser(t, db)
+	now := time.Now().UTC()
+	pid := dashboardTestProject(t, db, userID, "项目A", now, false)
+	shelved := dashboardTestProject(t, db, userID, "搁置项目", now, true)
+	otherPid := dashboardTestProject(t, db, other, "他人项目", now, false)
+
+	mkIssueWithPR := func(projectID string, state model.IssueState, prStates ...model.IssuePullRequestState) {
+		iid := dashboardTestIssue(t, db, projectID, "i")
+		if err := db.Model(&model.Issue{}).Where("id = ?", iid).Update("state", state).Error; err != nil {
+			t.Fatalf("update issue: %v", err)
+		}
+		for i, ps := range prStates {
+			if err := db.Create(&model.IssuePullRequest{
+				ID: uuid.NewString(), IssueID: iid, ProjectID: projectID, RepoFullName: "o/r",
+				Number: i + 1, State: ps, SyncedAt: now, CreatedAt: now, UpdatedAt: now,
+			}).Error; err != nil {
+				t.Fatalf("create pr link: %v", err)
+			}
+		}
+	}
+	mkIssueWithPR(pid, model.IssueStateOpen, model.IssuePullRequestStateOpen, model.IssuePullRequestStateClosed)
+	mkIssueWithPR(pid, model.IssueStateOpen, model.IssuePullRequestStateMerged)
+	mkIssueWithPR(pid, model.IssueStateClosed, model.IssuePullRequestStateOpen)
+	mkIssueWithPR(shelved, model.IssueStateOpen, model.IssuePullRequestStateOpen)
+	mkIssueWithPR(otherPid, model.IssueStateOpen, model.IssuePullRequestStateOpen)
+
+	repo := NewDashboardRepository(db)
+	total, err := repo.CountUnmergedPRIssues(userID)
+	if err != nil {
+		t.Fatalf("CountUnmergedPRIssues: %v", err)
+	}
+	if total != 1 {
+		t.Fatalf("total=%d, want 1", total)
 	}
 }

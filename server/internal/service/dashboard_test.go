@@ -46,7 +46,8 @@ func newDashboardServiceTestDB(t *testing.T) *gorm.DB {
 	if err := db.AutoMigrate(
 		&model.User{}, &model.Project{}, &model.Issue{}, &model.IssueInternalMeta{},
 		&model.IssueRecommendation{}, &model.ReviewRun{}, &model.ReviewPullRequest{},
-		&model.Version{}, &model.QuotaAccount{},
+		&model.Version{}, &model.QuotaAccount{}, &model.IssuePullRequest{},
+		&model.BotScheduleTask{}, &model.Bot{},
 	); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
@@ -380,5 +381,122 @@ func TestWaitingThreadsAggregates(t *testing.T) {
 	}
 	if !titles["等待审批"] || !titles["run 等待输入"] {
 		t.Fatalf("unexpected items: %+v", result.Items)
+	}
+}
+
+// buildRelease：pending 全量计数+升序截前 3；recent 按 shipped_at 降序；未合并
+// PR 关联的开启问题去重、搁置排除；href 走版本路由。
+func TestDashboardReleaseBlock(t *testing.T) {
+	db := newDashboardServiceTestDB(t)
+	userID := dashboardSeedUser(t, db)
+	other := dashboardSeedUser(t, db)
+	now := time.Now().UTC()
+
+	mkProject := func(name string, owner string, shelved bool) string {
+		id := uuid.NewString()
+		p := &model.Project{ID: id, UserID: owner, Name: name, CreatedAt: now, UpdatedAt: now}
+		if shelved {
+			s := now
+			until := now.Add(24 * time.Hour)
+			p.ShelvedAt = &s
+			p.ShelvedUntil = &until
+		}
+		if err := db.Create(p).Error; err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	pid := mkProject("项目A", userID, false)
+	shelvedPid := mkProject("搁置项目", userID, true)
+	otherPid := mkProject("他人项目", other, false)
+
+	mkVersion := func(projectID, number string, status model.VersionStatus, created time.Time, shipped *time.Time) {
+		if err := db.Create(&model.Version{
+			ID: uuid.NewString(), ProjectID: projectID, VersionNumber: number,
+			Status: status, CreatedAt: created, ShippedAt: shipped,
+		}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	// pending 三条：创建顺序与期望展示顺序（升序）相反
+	mkVersion(pid, "v3.0.0", model.VersionStatusPending, now.Add(-time.Hour), nil)
+	mkVersion(pid, "v2.0.0", model.VersionStatusPending, now.Add(-3*time.Hour), nil)
+	mkVersion(shelvedPid, "v9.9.9", model.VersionStatusPending, now.Add(-4*time.Hour), nil)
+	// shipped 两条：40 天前的更早，展示时应排第二
+	mkVersion(pid, "v1.1.0", model.VersionStatusShipped, now.Add(-41*24*time.Hour), ptrTime(now.Add(-40*24*time.Hour)))
+	mkVersion(pid, "v1.0.0", model.VersionStatusShipped, now.Add(-2*24*time.Hour), ptrTime(now.Add(-24*time.Hour)))
+
+	// 未合并 PR 关联：open issue + open PR → 计 1；同 issue 再关联 closed 未合并 PR 仍计 1（按 issue 去重）
+	mkIssueWithPR := func(projectID string, state model.IssueState, prState model.IssuePullRequestState) {
+		iid := uuid.NewString()
+		if err := db.Create(&model.Issue{ID: iid, ProjectID: projectID, Title: "i", State: state, CreatedAt: now, UpdatedAt: now}).Error; err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Create(&model.IssuePullRequest{
+			ID: uuid.NewString(), IssueID: iid, ProjectID: projectID, RepoFullName: "o/r",
+			Number: 1, State: prState, SyncedAt: now, CreatedAt: now, UpdatedAt: now,
+		}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	mkIssueWithPR(pid, model.IssueStateOpen, model.IssuePullRequestStateOpen)
+	mkIssueWithPR(otherPid, model.IssueStateOpen, model.IssuePullRequestStateOpen)
+	// 已合并关联不算
+	mkIssueWithPR(pid, model.IssueStateOpen, model.IssuePullRequestStateMerged)
+	// 关闭的 issue 不算
+	mkIssueWithPR(pid, model.IssueStateClosed, model.IssuePullRequestStateOpen)
+
+	svc := newDashboardService(t, db, &fakeUnreadCounter{count: 0}, &fakeT3WaitingSource{result: nil})
+	resp, err := svc.GetOverview(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("GetOverview: %v", err)
+	}
+	release := resp.Release
+	if release == nil {
+		t.Fatal("release block missing")
+	}
+	if release.Complete != nil {
+		t.Fatal("release complete must be omitted on success")
+	}
+	if release.PendingCount != 2 || len(release.PendingVersions) != 2 {
+		t.Fatalf("pending: count=%d rows=%d, want 2/2（搁置项目排除）", release.PendingCount, len(release.PendingVersions))
+	}
+	if release.PendingVersions[0].VersionNumber != "v2.0.0" || release.PendingVersions[1].VersionNumber != "v3.0.0" {
+		t.Fatalf("pending must be created_at ascending: %+v", release.PendingVersions)
+	}
+	if len(release.RecentReleases) != 2 || release.RecentReleases[0].VersionNumber != "v1.0.0" || release.RecentReleases[1].VersionNumber != "v1.1.0" {
+		t.Fatalf("recent must be shipped_at descending: %+v", release.RecentReleases)
+	}
+	if release.RecentReleases[0].Href != "/projects/"+pid+"/versions/"+release.RecentReleases[0].VersionId {
+		t.Fatalf("bad href: %s", release.RecentReleases[0].Href)
+	}
+	if _, err := time.Parse(time.RFC3339, release.RecentReleases[0].ShippedAt); err != nil {
+		t.Fatalf("shipped_at must parse: %v", err)
+	}
+	if release.UnmergedPrIssueCount != 1 {
+		t.Fatalf("unmerged_pr_issue_count=%d, want 1（去重/关闭/已合并/他人排除）", release.UnmergedPrIssueCount)
+	}
+}
+
+// release 块查询失败 → 整块降级 complete=false、结构完整，绝不 500。
+func TestDashboardReleaseDegradedOnError(t *testing.T) {
+	db := newDashboardServiceTestDB(t)
+	userID := dashboardSeedUser(t, db)
+	if err := db.Exec("DROP TABLE issue_pull_requests").Error; err != nil {
+		t.Fatalf("drop table: %v", err)
+	}
+	svc := newDashboardService(t, db, &fakeUnreadCounter{count: 0}, &fakeT3WaitingSource{result: nil})
+	resp, err := svc.GetOverview(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("GetOverview must not fail: %v", err)
+	}
+	if resp.Release == nil {
+		t.Fatal("release block must degrade, not disappear")
+	}
+	if resp.Release.Complete == nil || *resp.Release.Complete {
+		t.Fatal("release complete must be present and false")
+	}
+	if resp.Release.PendingVersions == nil || resp.Release.RecentReleases == nil {
+		t.Fatal("degraded release must keep complete structure")
 	}
 }

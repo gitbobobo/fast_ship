@@ -15,6 +15,8 @@ const (
 	dashboardResolvedWindowDays   = 30
 	dashboardFailedReviewLookback = 14 * 24 * time.Hour
 	dashboardActionItemsMax       = 5
+	dashboardPendingVersionsMax   = 3
+	dashboardRecentReleasesMax    = 5
 )
 
 // dashboardT3WaitingSource 是 DashboardService 对 T3 侧的唯一依赖：窄接口，
@@ -81,6 +83,12 @@ func dashboardItem(title, detail, href string) DashboardActionItem {
 	return item
 }
 
+// dashboardVersionHref 版本详情的站内路径；发版节奏卡与 ship_failed 组共用
+// 同一路由形态，路由变更时随 dashboardActionItemHref 一处对齐。
+func dashboardVersionHref(projectID, versionID string) string {
+	return dashboardActionItemHref(api.ShipFailed, dashboardActionRef{projectID: projectID, versionID: versionID})
+}
+
 func (s *DashboardService) GetOverview(ctx context.Context, userID string) (*DashboardOverviewResponse, error) {
 	openCounts, err := s.dashboardRepo.GetOpenIssueCounts(userID)
 	if err != nil {
@@ -128,7 +136,64 @@ func (s *DashboardService) GetOverview(ctx context.Context, userID string) (*Das
 	// （complete=false），绝不拖垮整页，也绝不静默清零伪装成「一切正常」。
 	resp.ActionItemGroups = append(resp.ActionItemGroups, s.actionGroups(ctx, userID)...)
 
+	// 发版节奏（阶段三）：纯 SQL 聚合，单块失败降级 complete=false。
+	resp.Release = s.buildRelease(userID)
+
 	return resp, nil
+}
+
+// buildRelease 发版节奏聚合：待发版（pending 升序）+ 近期发版（shipped_at
+// 降序，无时间窗口）+ 未合并 PR 关联的开启问题数。三个子查询任一失败整块
+// 降级（complete=false、结构仍完整），绝不 500。
+func (s *DashboardService) buildRelease(userID string) *api.DashboardRelease {
+	release := &api.DashboardRelease{
+		PendingVersions: []api.DashboardReleaseVersion{},
+		RecentReleases:  []api.DashboardReleaseShipped{},
+	}
+	pendingTotal, pendingRows, err := s.dashboardRepo.ListPendingVersions(userID, dashboardPendingVersionsMax)
+	if err != nil {
+		release.Complete = api.Ptr(false)
+		return release
+	}
+	release.PendingCount = int(pendingTotal)
+	for _, row := range pendingRows {
+		release.PendingVersions = append(release.PendingVersions, api.DashboardReleaseVersion{
+			VersionId:     row.VersionID,
+			VersionNumber: row.VersionNumber,
+			ProjectId:     row.ProjectID,
+			ProjectName:   row.ProjectName,
+			CreatedAt:     row.CreatedAt.UTC().Format(time.RFC3339Nano),
+			Href:          dashboardVersionHref(row.ProjectID, row.VersionID),
+		})
+	}
+
+	recentRows, err := s.dashboardRepo.ListRecentReleases(userID, dashboardRecentReleasesMax)
+	if err != nil {
+		release.Complete = api.Ptr(false)
+		return release
+	}
+	for _, row := range recentRows {
+		item := api.DashboardReleaseShipped{
+			VersionId:     row.VersionID,
+			VersionNumber: row.VersionNumber,
+			ProjectId:     row.ProjectID,
+			ProjectName:   row.ProjectName,
+			CreatedAt:     row.CreatedAt.UTC().Format(time.RFC3339Nano),
+			Href:          dashboardVersionHref(row.ProjectID, row.VersionID),
+		}
+		if row.ShippedAt != nil {
+			item.ShippedAt = row.ShippedAt.UTC().Format(time.RFC3339Nano)
+		}
+		release.RecentReleases = append(release.RecentReleases, item)
+	}
+
+	unmerged, err := s.dashboardRepo.CountUnmergedPRIssues(userID)
+	if err != nil {
+		release.Complete = api.Ptr(false)
+		return release
+	}
+	release.UnmergedPrIssueCount = int(unmerged)
+	return release
 }
 
 // dashboardActionGroup 一个「待我处理」组的统一骨架：查询失败降级为
