@@ -44,14 +44,14 @@ export function ReleaseCard({ release }: { release: ReleaseBlock }) {
               data-testid="release-pending-section"
             >
               {release.pending_count === 0 ? (
-                /* 0 时不再「待发版？——没有待发版」自问自答（W9）：单行标签 + 右侧 muted 暂无 */
-                <SectionHeader
-                  icon={PackageOpen}
-                  title="待发版"
-                  trailing={
-                    <span className="text-xs text-muted-foreground">暂无</span>
-                  }
-                />
+                /* 空态三行统一「标签一行 + 值一行左对齐」（round4 X4）：
+                   不再有「待发版」行右侧「暂无」的右对齐异类，措辞统一「暂无…」句式 */
+                <>
+                  <SectionHeader icon={PackageOpen} title="待发版" />
+                  <p className="pl-6 text-xs text-muted-foreground">
+                    暂无待发版
+                  </p>
+                </>
               ) : (
                 <>
                   <SectionHeader
@@ -92,7 +92,7 @@ export function ReleaseCard({ release }: { release: ReleaseBlock }) {
               <SectionHeader icon={History} title="近期发版" />
               {release.recent_releases.length === 0 ? (
                 <p className="pl-6 text-xs text-muted-foreground">
-                  还没有发版记录
+                  暂无发版记录
                 </p>
               ) : (
                 <ol className="space-y-1.5 pl-6">
@@ -133,7 +133,7 @@ export function ReleaseCard({ release }: { release: ReleaseBlock }) {
               <p className="pl-6 text-xs text-muted-foreground">
                 {release.unmerged_pr_issue_count > 0
                   ? `${release.unmerged_pr_issue_count} 个开启问题还有未合并的 PR`
-                  : "没有挂着未合并 PR 的问题"}
+                  : "暂无挂着未合并 PR 的问题"}
               </p>
             </section>
           </div>

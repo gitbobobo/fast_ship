@@ -227,6 +227,8 @@ describe("AiPanelCard", () => {
     const threadsLink = screen.getByRole("link", { name: "查看线程 →" });
     expect(threadsLink).toHaveAttribute("href", "/threads");
     expect(threadsLink).toHaveClass("text-primary");
+    // 点击区扩到移动端可用（round4 X6）：inline-flex + px-3 py-2.5，整行高 ~44px
+    expect(threadsLink).toHaveClass("inline-flex", "px-3", "py-2.5");
     // 空态行与标签文字共用左基线（W2：图标 16 + gap 8 = pl-6）
     expect(screen.getByText("未配置 T3 环境").parentElement).toHaveClass("pl-6");
   });

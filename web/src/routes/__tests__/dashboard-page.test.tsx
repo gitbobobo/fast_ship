@@ -60,6 +60,9 @@ describe("DashboardPage", () => {
     expect(sparkline).toHaveAttribute("preserveAspectRatio", "none");
     expect(sparkline).toHaveClass("w-full");
     expect(sparkline.querySelector("polygon")).not.toBeNull();
+    // round4 X5：sparkline 下方标窗口「近 7 天」，与卡标题「近 30 天」区分口径。
+    expect(screen.getByText("近 7 天")).toBeInTheDocument();
+    expect(screen.getByText("近 7 天")).toHaveClass("text-[11px]");
   });
 
   it("moves the tone color to the value and keeps the label row neutral (视觉 round1 V4)", async () => {
@@ -191,6 +194,27 @@ describe("DashboardPage", () => {
     // 全零不画迷你趋势（视觉 round1 V3 保留原门禁）。
     expect(screen.queryByTestId("kpi-sparkline")).not.toBeInTheDocument();
     expect(screen.queryByText(/日均 0\.0/)).not.toBeInTheDocument();
+  });
+
+  it("styles the daily-resolved chart green with a 今日 axis marker (round4 X2/X7)", async () => {
+    vi.mocked(useDashboardOverview).mockReturnValue({
+      data: {
+        open_issues_by_project: [],
+        daily_resolved: dailyResolvedWith({ 29: 2 }),
+      },
+      isLoading: false,
+    } as unknown as ReturnType<typeof useDashboardOverview>);
+
+    await renderDashboardPage();
+
+    // 页面 mock 不含 flow，唯一的 area 图即「每日已解决」。
+    const charts = screen.getAllByRole("img", { name: "stacked area chart" });
+    expect(charts).toHaveLength(1);
+    // X2：单系列用第 1 颜色槽（绿），与流转效率卡的已解决同色。
+    const path = charts[0].querySelector("path[stroke]");
+    expect(path).toHaveAttribute("stroke", "oklch(0.65 0.18 150)");
+    // X7：末点轴区标「今日」。
+    expect(charts[0].textContent).toContain("今日");
   });
 
   it("shows a retryable error state instead of an empty account when the overview fails", async () => {

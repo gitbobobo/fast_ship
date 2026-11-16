@@ -359,6 +359,8 @@ export default function DashboardPage() {
                     <MetricChart
                       points={dailyResolvedPoints}
                       variant="area"
+                      colorIndex={1}
+                      lastPointLabel="今日"
                       emptyMessage="暂无已解决问题数据"
                     />
                   )}
@@ -565,25 +567,30 @@ function Sparkline({
   }[tone];
 
   return (
-    <svg
-      viewBox={`0 0 ${width} ${height}`}
-      className={cn("h-6 w-full", stroke)}
-      preserveAspectRatio="none"
-      aria-hidden="true"
-      data-testid="kpi-sparkline"
-    >
-      {/* 线下同色淡面积（视觉 round1 V3）：趋势带表达方向感 */}
-      <polygon points={areaPoints} fill="currentColor" opacity={0.12} />
-      <polyline
-        points={linePoints}
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.5"
-        strokeLinejoin="round"
-        strokeLinecap="round"
-        vectorEffect="non-scaling-stroke"
-      />
-    </svg>
+    <div className="space-y-1">
+      <svg
+        viewBox={`0 0 ${width} ${height}`}
+        className={cn("h-6 w-full", stroke)}
+        preserveAspectRatio="none"
+        aria-hidden="true"
+        data-testid="kpi-sparkline"
+      >
+        {/* 线下同色淡面积（视觉 round1 V3）：趋势带表达方向感 */}
+        <polygon points={areaPoints} fill="currentColor" opacity={0.12} />
+        <polyline
+          points={linePoints}
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          strokeLinejoin="round"
+          strokeLinecap="round"
+          vectorEffect="non-scaling-stroke"
+        />
+      </svg>
+      {/* 窗口说明（round4 X5）：sparkline 只画尾 7 天，与卡标题「近 30 天」
+          不同窗，不标会被读成同一个口径。 */}
+      <p className="text-[11px] text-muted-foreground">近 7 天</p>
+    </div>
   );
 }
 

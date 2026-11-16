@@ -57,8 +57,9 @@ describe("ReleaseCard", () => {
     ).toHaveClass("pl-6");
   });
 
-  it("collapses the empty pending section into one label + muted row (W9)", () => {
-    // pending_count=0 不再「待发版？——没有待发版」自问自答：单行标签 + 右侧 muted 暂无。
+  it("unifies the three empty rows as label + left-aligned muted value (round4 X4)", () => {
+    // 三行空态统一「标签一行 + 值一行左对齐」，措辞统一「暂无…」句式：
+    // 不再有「待发版」行右侧「暂无」的右对齐异类。
     render(
       <MemoryRouter>
         <ReleaseCard
@@ -73,11 +74,12 @@ describe("ReleaseCard", () => {
     );
 
     expect(screen.getByText("待发版")).toBeInTheDocument();
-    expect(screen.getByText("暂无")).toBeInTheDocument();
-    expect(screen.queryByText("没有待发版")).not.toBeInTheDocument();
+    expect(screen.getByText("暂无待发版")).toHaveClass("pl-6");
+    expect(screen.queryByText("暂无")).not.toBeInTheDocument();
     expect(screen.queryByText("0")).not.toBeInTheDocument();
-    expect(screen.getByText("还没有发版记录")).toBeInTheDocument();
-    expect(screen.getByText("没有挂着未合并 PR 的问题")).toBeInTheDocument();
+    expect(screen.getByText("暂无发版记录")).toHaveClass("pl-6");
+    expect(screen.queryByText("还没有发版记录")).not.toBeInTheDocument();
+    expect(screen.getByText("暂无挂着未合并 PR 的问题")).toHaveClass("pl-6");
   });
 
   it("hides the last-release badge when the block is degraded even with recent releases", () => {

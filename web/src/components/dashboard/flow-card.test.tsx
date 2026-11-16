@@ -52,6 +52,8 @@ describe("FlowCard", () => {
     // 双序列图例（W1）：新建/已解决 色点与面积图两条序列同色
     expect(screen.getByText("新建")).toBeInTheDocument();
     expect(screen.getByText("已解决")).toBeInTheDocument();
+    // 叠加模式末点轴区标「今日」（X7）；FlowCard 把 stacked=false 传给 MetricChart
+    expect(screen.getByText("今日")).toBeInTheDocument();
     expect(screen.getByTestId("backlog-age-bar")).toBeInTheDocument();
     expect(screen.getByText("7 天内 2")).toBeInTheDocument();
     expect(screen.getByText("30 天以上 1")).toBeInTheDocument();
@@ -124,6 +126,31 @@ describe("FlowCard", () => {
     expect(screen.getByText("中位 3 小时 · 2 个问题")).toBeInTheDocument();
     expect(screen.getByText("中位 1 小时 · 3 个问题")).toBeInTheDocument();
     expect(screen.getByText("中位 1.0 天 · 4 个问题")).toBeInTheDocument();
+  });
+
+  it("renders overlay lines: dashed created, green resolved, staggered end labels (X1/X2/X3)", () => {
+    const { container } = render(
+      <MemoryRouter>
+        <FlowCard flow={completeFlow} points={flowPoints} />
+      </MemoryRouter>,
+    );
+
+    // 叠加折线（X1）：新建首序列细虚线、已解决实线，不再是堆叠面积层。
+    const created = container.querySelector('path[data-series="created"]');
+    const resolved = container.querySelector('path[data-series="resolved"]');
+    expect(created).toHaveAttribute("stroke-dasharray");
+    expect(resolved?.getAttribute("stroke-dasharray")).toBeNull();
+    // 颜色（X2）：已解决绿（CHART_COLORS[1]）与「每日已解决」卡同色，新建蓝。
+    expect(created).toHaveAttribute("stroke", "oklch(0.65 0.18 250)");
+    expect(resolved).toHaveAttribute("stroke", "oklch(0.65 0.18 150)");
+
+    // 线末数值标签（X3）：末点新建 4、已解决 0，两条标签错开不重叠。
+    const endLabels = Array.from(
+      container.querySelectorAll("svg text[data-series]"),
+    );
+    expect(endLabels.map((n) => n.textContent)).toEqual(["4", "0"]);
+    const ys = endLabels.map((node) => Number(node.getAttribute("y")));
+    expect(Math.abs(ys[0] - ys[1])).toBeGreaterThanOrEqual(11);
   });
 
   it("hides the series legend when the chart degrades to an empty state (W1)", () => {

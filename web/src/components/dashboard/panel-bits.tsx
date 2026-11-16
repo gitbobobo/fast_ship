@@ -36,7 +36,8 @@ export function SectionUnavailable() {
 }
 
 /** 行内空态入口的标准写法（W6）：主色 + 尾部箭头 + hover 变色，
- *  不要用灰字伪装成不可点的文字。 */
+ *  不要用灰字伪装成不可点的文字。点击区扩到移动端可用（round4 X6）：
+ *  inline-flex + px-3 py-2.5 让整行触控目标接近 44px。 */
 export function SectionEmptyLink({
   to,
   children,
@@ -47,7 +48,7 @@ export function SectionEmptyLink({
   return (
     <Link
       to={to}
-      className="shrink-0 text-primary underline-offset-2 transition-colors hover:text-primary/75"
+      className="inline-flex shrink-0 items-center px-3 py-2.5 text-primary underline-offset-2 transition-colors hover:text-primary/75"
     >
       {children} →
     </Link>

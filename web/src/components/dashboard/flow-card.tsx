@@ -65,12 +65,18 @@ export function FlowCard({
           <>
             <div className="space-y-2">
               {/* 双序列图例（W1）：复用 bot 用量页的 MetricChartLegend，
-                  色点与两条堆叠序列同色，顺序与副标题一致；单序列的
+                  色点与两条叠加序列同色，顺序与副标题一致；单序列的
                   「每日已解决」图不用图例（组件 ≤1 系列时自动返回 null） */}
               {!chartEmpty && <MetricChartLegend points={points} />}
+              {/* 叠加折线（round4 X1）：新建/已解决是两个独立流量，不是可加
+                  分量——堆叠顶边=累计值会把「已解决」画成 KPI 的数倍。叠加
+                  模式下两条线各自 y=自身值（新建细虚线、已解决实线），线末
+                  直接标数值（X3）；末点轴区标「今日」（X7）。 */}
               <MetricChart
                 points={points}
                 variant="area"
+                stacked={false}
+                lastPointLabel="今日"
                 emptyMessage="近 30 天暂无新建或已解决"
               />
             </div>
