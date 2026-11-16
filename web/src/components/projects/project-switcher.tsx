@@ -33,6 +33,20 @@ interface ProjectSwitcherProps {
   [attribute: `data-${string}`]: string | number | boolean | undefined;
 }
 
+// 首个用户可见字符（字素）：项目名以复合 emoji 开头时，按码点取首项会拆坏
+// 旗帜/ZWJ 序列（🇨🇳→🇨、👩‍💻→👩），用 Intl.Segmenter 按字素切；环境不支持时退回码点。
+function firstGrapheme(name: string): string {
+  if (typeof Intl !== "undefined" && "Segmenter" in Intl) {
+    const segmenter = new Intl.Segmenter(undefined, {
+      granularity: "grapheme",
+    });
+    const first = segmenter.segment(name)[Symbol.iterator]().next();
+    if (!first.done) return first.value.segment;
+    return "?";
+  }
+  return Array.from(name)[0] ?? "?";
+}
+
 export function ProjectSwitcher({
   projects,
   value,
@@ -91,9 +105,9 @@ export function ProjectSwitcher({
         )}
       >
         {variant === "sidebar-collapsed" ? (
-          // 收起态：项目首字母方块，完整名称交给 tooltip（侧边栏负责渲染）
+          // 收起态：项目首字素方块，完整名称交给 tooltip（侧边栏负责渲染）
           <span aria-hidden="true" className="leading-none">
-            {Array.from(activeProject?.name ?? "?")[0] ?? "?"}
+            {firstGrapheme(activeProject?.name ?? "?")}
           </span>
         ) : (
           <>

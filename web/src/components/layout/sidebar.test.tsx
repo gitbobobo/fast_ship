@@ -320,4 +320,28 @@ describe("MobileNav 项目上下文与桌面侧边栏一致", () => {
     );
     expect(screen.getByRole("navigation")).toBeInTheDocument();
   });
+
+  it("全局页切换项目后 Sheet 收起（不依赖 pathname 变化）", async () => {
+    render(
+      withTestQueryClient(
+        <MemoryRouter initialEntries={["/dashboard"]}>
+          <MobileNav />
+        </MemoryRouter>,
+      ),
+    );
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button"));
+    await screen.findByRole("button", { name: "切换项目：Alpha" });
+
+    // 全局页分支只更新偏好、不改 pathname，Sheet 必须由 onNavigate 显式关闭
+    await pickProject("Beta");
+
+    expect(
+      useProjectPreferenceStore.getState().lastSelectedProjectId,
+    ).toBe("p-beta");
+    expect(
+      screen.queryByRole("button", { name: "切换项目：Alpha" }),
+    ).not.toBeInTheDocument();
+  });
 });

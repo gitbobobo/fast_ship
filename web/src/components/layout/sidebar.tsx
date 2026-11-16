@@ -245,11 +245,13 @@ function NavContent({
 
   // 切换规则（INT-237）：项目级页面 → projectSwitchPath 延续同名 section
   // （列表页丢页内 query，详情/new/edit/runId 回对应列表页）；全局页无法
-  // 延续项目上下文，只记住偏好，侧边栏链接随之更新。
+  // 延续项目上下文，只记住偏好，侧边栏链接随之更新。切完必调 onNavigate，
+  // 让移动端 Sheet 收起——全局页不改变 pathname，不能依赖路由变化自动关闭。
   const handleSwitchProject = (nextId: string) => {
     const to = projectSwitchPath(pathname, nextId);
     if (to) navigate(to);
     else setLastSelectedProjectId(nextId);
+    onNavigate?.();
   };
 
   const renderNavItem = (item: NavItem) => (
