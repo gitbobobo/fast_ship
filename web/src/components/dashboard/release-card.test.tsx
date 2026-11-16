@@ -46,4 +46,35 @@ describe("ReleaseCard", () => {
       screen.getByText("3 个开启问题还有未合并的 PR"),
     ).toBeInTheDocument();
   });
+
+  it("hides the last-release badge when the block is degraded even with recent releases", () => {
+    // recent_releases 在降级载荷里是清零占位，不能据此推「距上次发版」
+    //（panel P4）。
+    render(
+      <MemoryRouter>
+        <ReleaseCard
+          release={{
+            complete: false,
+            pending_count: 0,
+            pending_versions: [],
+            recent_releases: [
+              {
+                version_id: "v0",
+                version_number: "v1.9.0",
+                project_id: "p1",
+                project_name: "Alpha App",
+                created_at: "2026-05-20T00:00:00Z",
+                shipped_at: "2026-05-20T08:00:00Z",
+                href: "/projects/p1/versions/v0",
+              },
+            ],
+            unmerged_pr_issue_count: 0,
+          }}
+        />
+      </MemoryRouter>,
+    );
+
+    expect(screen.queryByText(/距上次发版/)).not.toBeInTheDocument();
+    expect(screen.getByTestId("release-card")).toHaveTextContent("暂不可用");
+  });
 });

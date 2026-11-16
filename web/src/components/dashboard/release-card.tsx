@@ -14,9 +14,11 @@ type ReleaseBlock = components["schemas"]["DashboardRelease"];
  * 计数。从仪表盘页拆出（panel P8），纯展示，数据由页面装配。
  */
 export function ReleaseCard({ release }: { release: ReleaseBlock }) {
-  // 首条发版推「距上次发版 N 天」；今天发版显示「今天」。
+  // 首条发版推「距上次发版 N 天」；今天发版显示「今天」。降级载荷里的列表
+  // 是清零占位，不能据此推「距上次发版」，徽章随 complete 门禁（panel P4）。
   const lastRelease = release.recent_releases[0];
-  const lastReleaseText = daysAgoText(lastRelease?.shipped_at);
+  const lastReleaseText =
+    release.complete !== false ? daysAgoText(lastRelease?.shipped_at) : null;
 
   return (
     <Card className="overflow-hidden" data-testid="release-card">
