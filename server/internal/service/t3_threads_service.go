@@ -227,6 +227,78 @@ func (s *T3ThreadsService) PeekShell(userID, envID string) (*t3ShellView, error)
 	return s.shellHub.Peek(env, token)
 }
 
+// T3WaitingItem 一条等待用户处理的线程（仪表盘「待我处理」的条目）。
+type T3WaitingItem struct {
+	EnvironmentID   string
+	EnvironmentName string
+	ThreadID        string
+	Title           string
+	UpdatedAt       string
+}
+
+// T3WaitingResult 是 WaitingThreads 的聚合结果：Items 为等待中的线程
+// （跨环境合流、按更新时间倒序）；Complete=false 表示任一环境未 ready
+// （Syncing/Stale/Failed/凭证不可用）或全部不可读，展示侧据此标「部分
+// 环境暂不可用」。返回 nil（而非空 result）表示用户没有任何 T3 环境，
+// 调用方不渲染该组。
+type T3WaitingResult struct {
+	Items    []T3WaitingItem
+	Complete bool
+}
+
+// WaitingThreads 汇总各环境里状态为 waiting 的活跃线程（判定沿用
+// t3ThreadStatus：pendingRuntimeRequest、run 状态 waiting）。全程非阻塞：
+// 只读 hub 活跃面快照（PeekActive，不触发归档面后台补齐），环境未 ready
+// 只把 complete 降级为 false。单环境失败不拖垮其它环境；任何内部错误
+// 归一为 errs.ErrInternal（调用方把整组降级，绝不 500）。
+func (s *T3ThreadsService) WaitingThreads(ctx context.Context, userID string) (*T3WaitingResult, error) {
+	envs, err := s.envRepo.ListByUserID(ctx, userID)
+	if err != nil {
+		return nil, errs.ErrInternal
+	}
+	if len(envs) == 0 {
+		return nil, nil
+	}
+
+	result := &T3WaitingResult{Items: []T3WaitingItem{}, Complete: true}
+	readable := 0
+	for i := range envs {
+		env := &envs[i]
+		token, err := s.bearerToken(env)
+		if err != nil {
+			result.Complete = false
+			continue
+		}
+		view, err := s.shellHub.PeekActive(env, token)
+		if err != nil || view == nil || view.State != t3ShellReady || view.Snaps == nil {
+			// 未就绪/陈旧/失败：该环境本次不可读，组标不完整；陈旧快照不
+			// 当可信运行态（与详情口径一致），不拿旧数据凑数。
+			result.Complete = false
+			continue
+		}
+		readable++
+		for i := range view.Snaps.Active.Threads {
+			shell := &view.Snaps.Active.Threads[i]
+			if t3IsSubagentThread(shell) || t3ThreadStatus(shell) != api.T3ThreadSummaryStatusWaiting {
+				continue
+			}
+			result.Items = append(result.Items, T3WaitingItem{
+				EnvironmentID:   env.ID,
+				EnvironmentName: env.Name,
+				ThreadID:        shell.ID,
+				Title:           shell.Title,
+				UpdatedAt:       shell.UpdatedAt,
+			})
+		}
+	}
+	// 全部环境都不可读：count=0 且 complete=false（不是「一切正常」）。
+	if readable == 0 {
+		result.Complete = false
+	}
+	sortT3WaitingItems(result.Items)
+	return result, nil
+}
+
 // ItemDetail 读取单个条目的完整正文（detail_available=true 的条目才走到
 // 远程补读）。成员校验在先：先取指定线程的可见时间线确认条目属于它，再从
 // 可信行本身派生 getTurnItem 参数（threadId/itemId 取行内 item 的持久身份），

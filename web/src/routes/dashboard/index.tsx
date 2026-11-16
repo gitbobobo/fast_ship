@@ -1,10 +1,16 @@
 import { useMemo } from "react";
 import {
   Activity,
+  Bell,
   Bug,
   CalendarDays,
+  CircleAlert,
   FolderKanban,
+  Gauge,
+  Hourglass,
   Plus,
+  Rocket,
+  Sparkles,
   TriangleAlert,
 } from "lucide-react";
 import { Link } from "react-router";
@@ -19,7 +25,11 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useDashboardOverview } from "@/lib/hooks/use-dashboard";
 import { useProjects } from "@/lib/hooks/use-projects";
+import type { components } from "@/types/api.gen";
 import { cn } from "@/lib/utils";
+
+type ActionItemGroup = components["schemas"]["DashboardActionItemGroup"];
+type ActionItemKind = components["schemas"]["DashboardActionItemKind"];
 
 function formatDateLabel(date: string) {
   return date.slice(5);
@@ -52,6 +62,20 @@ function getGreeting() {
   return "晚上好";
 }
 
+const ACTION_GROUP_META: Record<
+  ActionItemKind,
+  { label: string; icon: typeof Activity }
+> = {
+  t3_waiting: { label: "T3 线程待处理", icon: Hourglass },
+  review_failed: { label: "审查失败/超时", icon: CircleAlert },
+  recommendations: { label: "推荐任务", icon: Sparkles },
+  ship_failed: { label: "发版失败", icon: Rocket },
+  quota_attention: { label: "额度需处理", icon: Gauge },
+  unread_notifications: { label: "未读通知", icon: Bell },
+};
+
+const BAR_CHART_MAX_ROWS = 10;
+
 export default function DashboardPage() {
   const { data, isLoading, isError, refetch } = useDashboardOverview();
   const { data: projectsData } = useProjects();
@@ -69,27 +93,29 @@ export default function DashboardPage() {
         label: item.project_name,
         shortLabel: item.project_name,
         value: item.open_issue_count,
+        href: `/issues?project=${item.project_id}&state=open`,
       })) ?? []
     );
   }, [data]);
 
   const dailyResolvedPoints = useMemo<MetricChartSeriesPoint[]>(() => {
+    // 面积图只画总量：后端不再回传逐项目拆分，单系列值即当日已解决总数。
     return (
       data?.daily_resolved.map((item) => ({
         label: item.date,
         shortLabel: formatDateLabel(item.date),
         value: item.resolved_count,
-        series:
-          item.projects?.map((p) => ({
-            id: p.project_id,
-            name: p.project_name,
-            value: p.count,
-          })) ?? [],
+        series: item.resolved_count
+          ? [{ id: "total", name: "已解决", value: item.resolved_count }]
+          : [],
       })) ?? []
     );
   }, [data]);
 
   const configuredProjectCount = data?.open_issues_by_project.length ?? 0;
+  const projectsWithOpenIssues =
+    data?.open_issues_by_project.filter((item) => item.open_issue_count > 0)
+      .length ?? 0;
   const totalOpenIssues =
     data?.open_issues_by_project.reduce(
       (sum, item) => sum + item.open_issue_count,
@@ -100,11 +126,6 @@ export default function DashboardPage() {
       (sum, item) => sum + item.resolved_count,
       0,
     ) ?? 0;
-
-  const maxDailyResolved = useMemo(() => {
-    if (!data?.daily_resolved.length) return 0;
-    return Math.max(...data.daily_resolved.map((d) => d.resolved_count));
-  }, [data]);
 
   const avgDailyResolved = useMemo(() => {
     if (!data?.daily_resolved.length) return 0;
@@ -148,6 +169,22 @@ export default function DashboardPage() {
           </div>
         )}
 
+        {/* 待我处理：加载用骨架屏，失败不渲染，绝不能把旧数字当当前状态 */}
+        {isLoading ? (
+          <Card className="overflow-hidden">
+            <CardContent className="space-y-4 p-5">
+              <Skeleton className="h-4 w-24" />
+              <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+                <Skeleton className="h-28 w-full" />
+                <Skeleton className="h-28 w-full" />
+                <Skeleton className="h-28 w-full" />
+              </div>
+            </CardContent>
+          </Card>
+        ) : isError ? null : (
+          <ActionItemsCard groups={data?.action_item_groups ?? []} />
+        )}
+
         {/* KPI Cards */}
         <section className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           <KpiCard
@@ -156,6 +193,7 @@ export default function DashboardPage() {
             value={unavailable ? null : configuredProjectCount}
             isLoading={isLoading}
             tone="neutral"
+            href="/projects"
           />
           <KpiCard
             icon={Bug}
@@ -199,7 +237,9 @@ export default function DashboardPage() {
                 <div>
                   <h3 className="text-sm font-semibold">开放问题</h3>
                   <p className="text-xs text-muted-foreground">
-                    按项目分布的未解决问题数量
+                    {unavailable
+                      ? "—"
+                      : `${projectsWithOpenIssues} 个项目有开启问题`}
                   </p>
                 </div>
                 {!unavailable && totalOpenIssues > 0 && (
@@ -217,6 +257,13 @@ export default function DashboardPage() {
                   points={openIssuePoints}
                   variant="bar"
                   emptyMessage="暂无已配置项目"
+                  maxRows={BAR_CHART_MAX_ROWS}
+                  collapsedLabel={(hidden) =>
+                    `其他 ${hidden.length} 个项目共 ${hidden.reduce(
+                      (sum, p) => sum + p.value,
+                      0,
+                    )} 条`
+                  }
                   emptyAction={
                     <Button
                       size="sm"
@@ -238,7 +285,7 @@ export default function DashboardPage() {
                 <div>
                   <h3 className="text-sm font-semibold">近 30 天已解决</h3>
                   <p className="text-xs text-muted-foreground">
-                    各项目每日已解决问题数量趋势
+                    每日已解决问题数量趋势
                   </p>
                 </div>
                 {!unavailable && totalResolvedIssues > 0 && (
@@ -261,32 +308,6 @@ export default function DashboardPage() {
             </CardContent>
           </Card>
         </section>
-
-        {/* Bottom stats */}
-        <section className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          <StatPill
-            label="最高日解决"
-            value={unavailable ? "—" : String(maxDailyResolved)}
-          />
-          <StatPill
-            label="日均解决"
-            value={
-              unavailable ? "—" : formatDailyAverage(avgDailyResolved)
-            }
-          />
-          <StatPill
-            label="活跃项目"
-            value={unavailable ? "—" : String(configuredProjectCount)}
-          />
-          <StatPill
-            label="问题总量"
-            value={
-              unavailable
-                ? "—"
-                : String(totalOpenIssues + totalResolvedIssues)
-            }
-          />
-        </section>
       </div>
     </div>
   );
@@ -294,18 +315,92 @@ export default function DashboardPage() {
 
 /* ─── Subcomponents ─── */
 
+/** 「待我处理」聚合区：只列有待办或部分不可用的组；全部清零时折叠成「一切正常」。 */
+function ActionItemsCard({ groups }: { groups: ActionItemGroup[] }) {
+  const visible = groups.filter(
+    (group) => group.count > 0 || group.complete === false,
+  );
+
+  return (
+    <Card className="overflow-hidden">
+      <CardContent className="p-5">
+        <h3 className="mb-4 text-sm font-semibold">待我处理</h3>
+        {visible.length === 0 ? (
+          <p className="text-xs text-muted-foreground">一切正常</p>
+        ) : (
+          <div className="grid gap-5 sm:grid-cols-2 xl:grid-cols-3">
+            {visible.map((group) => (
+              <ActionItemGroupSection key={group.kind} group={group} />
+            ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function ActionItemGroupSection({ group }: { group: ActionItemGroup }) {
+  const meta = ACTION_GROUP_META[group.kind];
+  // 服务端先于前端上线新 kind 时跳过未知组，而不是整卡崩溃。
+  if (!meta) return null;
+  const Icon = meta.icon;
+  const incomplete = group.complete === false;
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center gap-2">
+        <Icon className="h-4 w-4 shrink-0 text-muted-foreground" />
+        <span className="text-xs font-medium">{meta.label}</span>
+        <span
+          className={cn(
+            "ml-auto rounded-full px-2 py-0.5 text-[11px] font-medium tabular-nums",
+            incomplete
+              ? "bg-amber-500/10 text-amber-700 dark:text-amber-400"
+              : "bg-muted text-muted-foreground",
+          )}
+        >
+          {incomplete
+            ? group.count > 0
+              ? `${group.count}+ · 部分环境暂不可用`
+              : "暂不可用"
+            : group.count}
+        </span>
+      </div>
+      <ul className="space-y-1">
+        {group.items.map((item, idx) => (
+          <li key={`${item.href}-${item.title}-${idx}`}>
+            <Link
+              to={item.href}
+              className="block rounded-md px-2 py-1.5 -mx-2 transition-colors hover:bg-muted/60"
+            >
+              <div className="truncate text-xs font-medium">{item.title}</div>
+              {item.detail && (
+                <div className="truncate text-[11px] text-muted-foreground">
+                  {item.detail}
+                </div>
+              )}
+            </Link>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 function KpiCard({
   icon: Icon,
   label,
   value,
   isLoading,
   tone = "neutral",
+  href,
 }: {
   icon: typeof Activity;
   label: string;
   value: number | null;
   isLoading: boolean;
   tone?: "neutral" | "warning" | "positive";
+  href?: string;
 }) {
   const toneClasses = {
     neutral:
@@ -316,13 +411,14 @@ function KpiCard({
       "bg-emerald-500/[0.06] text-emerald-700 ring-emerald-500/20 hover:ring-emerald-500/30 dark:bg-emerald-500/10 dark:text-emerald-400",
   };
 
-  return (
-    <div
-      className={cn(
-        "flex flex-col gap-3 rounded-2xl p-5 ring-1 transition-all duration-300",
-        toneClasses[tone],
-      )}
-    >
+  const className = cn(
+    "flex flex-col gap-3 rounded-2xl p-5 ring-1 transition-all duration-300",
+    toneClasses[tone],
+    href && "cursor-pointer",
+  );
+
+  const body = (
+    <>
       <div className="flex items-center gap-2 text-xs font-medium opacity-70">
         <Icon className="h-4 w-4" />
         <span>{label}</span>
@@ -341,16 +437,15 @@ function KpiCard({
           {value ?? "—"}
         </div>
       )}
-    </div>
+    </>
   );
-}
 
-function StatPill({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex items-center justify-between rounded-xl border border-border/60 px-4 py-3">
-      <span className="text-xs text-muted-foreground">{label}</span>
-      <span className="text-sm font-semibold tabular-nums">{value}</span>
-    </div>
+  return href ? (
+    <Link to={href} className={className}>
+      {body}
+    </Link>
+  ) : (
+    <div className={className}>{body}</div>
   );
 }
 

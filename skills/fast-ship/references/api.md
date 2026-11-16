@@ -5258,10 +5258,14 @@ title/body/parent_id 至少传一个
 | `daily_resolved` | object[] | 是 | 固定近 30 天（含今天），逐日排列 |
 | `daily_resolved[].date` | string | 是 | YYYY-MM-DD |
 | `daily_resolved[].resolved_count` | integer | 是 |  |
-| `daily_resolved[].projects` | object[] | 是 | 当日无数据的项目不出现（可为 null/空） |
-| `daily_resolved[].projects[].project_id` | string | 是 |  |
-| `daily_resolved[].projects[].project_name` | string | 是 |  |
-| `daily_resolved[].projects[].count` | integer | 是 |  |
+| `action_item_groups` | object[] | 是 | 「待我处理」聚合区，固定顺序；无 T3 环境时不含 t3_waiting 组。review_failed 仅近 14 天且仅当前轮次+当前 head 的失败/超时审查，按 PR 去重；ship_failed 含 pending 发货失败与已发货 hooks failed/incomplete |
+| `action_item_groups[].kind` | string（enum: t3_waiting \| review_failed \| recommendations \| ship_failed \| quota_attention \| unread_notifications） | 是 |  |
+| `action_item_groups[].count` | integer | 是 |  |
+| `action_item_groups[].complete` | boolean | 否 | false = 该组数据不完整/不可读（t3_waiting 任一环境未 ready，或其它组查询失败降级）；成功时不返回 |
+| `action_item_groups[].items` | object[]（≤5 项） | 是 |  |
+| `action_item_groups[].items[].title` | string | 是 |  |
+| `action_item_groups[].items[].detail` | string | 否 | 补充说明（如项目名/环境名），无则省略 |
+| `action_item_groups[].items[].href` | string | 是 | 站内跳转路径 |
 
 **错误**
 

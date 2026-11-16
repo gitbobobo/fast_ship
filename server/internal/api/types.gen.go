@@ -95,6 +95,36 @@ func (e CreateT3ThreadRequestRuntimeMode) Valid() bool {
 	}
 }
 
+// Defines values for DashboardActionItemKind.
+const (
+	QuotaAttention      DashboardActionItemKind = "quota_attention"
+	Recommendations     DashboardActionItemKind = "recommendations"
+	ReviewFailed        DashboardActionItemKind = "review_failed"
+	ShipFailed          DashboardActionItemKind = "ship_failed"
+	T3Waiting           DashboardActionItemKind = "t3_waiting"
+	UnreadNotifications DashboardActionItemKind = "unread_notifications"
+)
+
+// Valid indicates whether the value is a known member of the DashboardActionItemKind enum.
+func (e DashboardActionItemKind) Valid() bool {
+	switch e {
+	case QuotaAttention:
+		return true
+	case Recommendations:
+		return true
+	case ReviewFailed:
+		return true
+	case ShipFailed:
+		return true
+	case T3Waiting:
+		return true
+	case UnreadNotifications:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for DeploymentSettingsPublicUrlSource.
 const (
 	DeploymentSettingsPublicUrlSourceConfig   DeploymentSettingsPublicUrlSource = "config"
@@ -3058,25 +3088,40 @@ type CreatedInvite struct {
 	UsedBy *string `json:"used_by"`
 }
 
+// DashboardActionItem defines model for DashboardActionItem.
+type DashboardActionItem struct {
+	// Detail 补充说明（如项目名/环境名），无则省略
+	Detail *string `json:"detail,omitempty"`
+
+	// Href 站内跳转路径
+	Href  string `json:"href"`
+	Title string `json:"title"`
+}
+
+// DashboardActionItemGroup defines model for DashboardActionItemGroup.
+type DashboardActionItemGroup struct {
+	// Complete false = 该组数据不完整/不可读（t3_waiting 任一环境未 ready，或其它组查询失败降级）；成功时不返回
+	Complete *bool                   `json:"complete,omitempty"`
+	Count    int                     `json:"count"`
+	Items    []DashboardActionItem   `json:"items"`
+	Kind     DashboardActionItemKind `json:"kind"`
+}
+
+// DashboardActionItemKind defines model for DashboardActionItemKind.
+type DashboardActionItemKind string
+
 // DashboardDailyResolvedPoint defines model for DashboardDailyResolvedPoint.
 type DashboardDailyResolvedPoint struct {
 	// Date YYYY-MM-DD
-	Date string `json:"date"`
-
-	// Projects 当日无数据的项目不出现（可为 null/空）
-	Projects      []DashboardDailyResolvedProjectPoint `json:"projects"`
-	ResolvedCount int                                  `json:"resolved_count"`
-}
-
-// DashboardDailyResolvedProjectPoint defines model for DashboardDailyResolvedProjectPoint.
-type DashboardDailyResolvedProjectPoint struct {
-	Count       int    `json:"count"`
-	ProjectId   string `json:"project_id"`
-	ProjectName string `json:"project_name"`
+	Date          string `json:"date"`
+	ResolvedCount int    `json:"resolved_count"`
 }
 
 // DashboardOverview defines model for DashboardOverview.
 type DashboardOverview struct {
+	// ActionItemGroups 「待我处理」聚合区，固定顺序；无 T3 环境时不含 t3_waiting 组。review_failed 仅近 14 天且仅当前轮次+当前 head 的失败/超时审查，按 PR 去重；ship_failed 含 pending 发货失败与已发货 hooks failed/incomplete
+	ActionItemGroups []DashboardActionItemGroup `json:"action_item_groups"`
+
 	// DailyResolved 固定近 30 天（含今天），逐日排列
 	DailyResolved       []DashboardDailyResolvedPoint    `json:"daily_resolved"`
 	OpenIssuesByProject []DashboardProjectOpenIssuePoint `json:"open_issues_by_project"`

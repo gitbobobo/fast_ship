@@ -17,7 +17,7 @@ func NewDashboardHandler(dashboardService *service.DashboardService) *DashboardH
 
 func (h *DashboardHandler) Overview(c *gin.Context) {
 	userID := middleware.GetUserID(c)
-	result, err := h.dashboardService.GetOverview(userID)
+	result, err := h.dashboardService.GetOverview(c.Request.Context(), userID)
 	if err != nil {
 		middleware.HandleAppError(c, err)
 		return

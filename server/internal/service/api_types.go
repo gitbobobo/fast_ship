@@ -111,10 +111,12 @@ type (
 	IssueChecklistSuggestionItem      = api.IssueChecklistSuggestions_Items
 
 	// dashboard
-	DashboardOverviewResponse          = api.DashboardOverview
-	DashboardProjectOpenIssuePoint     = api.DashboardProjectOpenIssuePoint
-	DashboardDailyResolvedPoint        = api.DashboardDailyResolvedPoint
-	DashboardDailyResolvedProjectPoint = api.DashboardDailyResolvedProjectPoint
+	DashboardOverviewResponse      = api.DashboardOverview
+	DashboardProjectOpenIssuePoint = api.DashboardProjectOpenIssuePoint
+	DashboardDailyResolvedPoint    = api.DashboardDailyResolvedPoint
+	DashboardActionItemGroup       = api.DashboardActionItemGroup
+	DashboardActionItem            = api.DashboardActionItem
+	DashboardActionItemKind        = api.DashboardActionItemKind
 
 	// documents
 	CreateDocumentRequest = api.CreateDocumentRequest
