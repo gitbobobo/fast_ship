@@ -45,16 +45,20 @@ describe("ReleaseCard", () => {
     expect(
       screen.getByRole("link", { name: /v2\.0\.0/ }),
     ).toHaveAttribute("href", "/projects/p1/versions/v1");
+    // 值行与标签文字共用左基线（W2）
+    expect(
+      screen.getByRole("link", { name: /v2\.0\.0/ }).closest("ul"),
+    ).toHaveClass("pl-6");
     expect(screen.getByText("近期发版")).toBeInTheDocument();
     expect(screen.getByText("未合并 PR")).toBeInTheDocument();
     expect(screen.getByText(/距上次发版/)).toBeInTheDocument();
     expect(
       screen.getByText("3 个开启问题还有未合并的 PR"),
-    ).toBeInTheDocument();
+    ).toHaveClass("pl-6");
   });
 
-  it("hides the pending count badge at 0 and lets the empty row speak (视觉 round1 V5)", () => {
-    // 「待发版 0」与「没有待发版」不再同现：徽章 0 时不渲染。
+  it("collapses the empty pending section into one label + muted row (W9)", () => {
+    // pending_count=0 不再「待发版？——没有待发版」自问自答：单行标签 + 右侧 muted 暂无。
     render(
       <MemoryRouter>
         <ReleaseCard
@@ -69,7 +73,8 @@ describe("ReleaseCard", () => {
     );
 
     expect(screen.getByText("待发版")).toBeInTheDocument();
-    expect(screen.getByText("没有待发版")).toBeInTheDocument();
+    expect(screen.getByText("暂无")).toBeInTheDocument();
+    expect(screen.queryByText("没有待发版")).not.toBeInTheDocument();
     expect(screen.queryByText("0")).not.toBeInTheDocument();
     expect(screen.getByText("还没有发版记录")).toBeInTheDocument();
     expect(screen.getByText("没有挂着未合并 PR 的问题")).toBeInTheDocument();

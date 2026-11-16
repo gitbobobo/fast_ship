@@ -429,8 +429,42 @@ describe("DashboardPage INT-235 阶段二/三（流转效率 / AI 面板 / 发�
 
     await renderDashboardPage();
 
-    // N=daily_resolved 尾 7 天合计；M=待处理组 count 合计
-    expect(screen.getByText("近 7 天解决 5 个，5 件事等你处理")).toBeInTheDocument();
+    // N=daily_resolved 30 天合计（与「近 30 天已解决」KPI 同源，W7）；M=待处理组 count 合计
+    expect(screen.getByText("近 30 天解决 5 个问题，5 件事等你处理")).toBeInTheDocument();
+  });
+
+  it("places the flow card between 待我处理 and the open-issues chart (W8)", async () => {
+    vi.mocked(useDashboardOverview).mockReturnValue({
+      data: {
+        open_issues_by_project: [
+          { project_id: "p1", project_name: "Alpha App", open_issue_count: 1 },
+        ],
+        daily_resolved: dailyResolvedWith({}),
+        flow: {
+          todo_count: 1,
+          in_progress_count: 0,
+          daily_created: [],
+          cycle_time_by_project: [],
+          backlog_age: { under_7d: 1, d7_to_30d: 0, over_30d: 0 },
+        },
+      },
+      isLoading: false,
+    } as unknown as ReturnType<typeof useDashboardOverview>);
+
+    await renderDashboardPage();
+
+    // 仅 DOM 顺序调整：流转效率属趋势段，上移后 1440×900 首屏至少入镜卡头
+    const actionItems = screen.getByText("待我处理");
+    const flowCard = screen.getByTestId("flow-card");
+    const openIssues = screen.getByText("开放问题");
+    expect(
+      actionItems.compareDocumentPosition(flowCard) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      flowCard.compareDocumentPosition(openIssues) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
   });
 
   it("marks the hero pending total with + when any action group is incomplete", async () => {
@@ -448,7 +482,7 @@ describe("DashboardPage INT-235 阶段二/三（流转效率 / AI 面板 / 发�
 
     await renderDashboardPage();
 
-    expect(screen.getByText("近 7 天解决 0 个，3+ 件事等你处理")).toBeInTheDocument();
+    expect(screen.getByText("近 30 天解决 0 个问题，3+ 件事等你处理")).toBeInTheDocument();
   });
 
   it("falls back to the greeting while unavailable", async () => {
@@ -466,7 +500,7 @@ describe("DashboardPage INT-235 阶段二/三（流转效率 / AI 面板 / 发�
     await renderDashboardPage();
 
     // 摘要句依赖数据可用性：失败时回退问候语，绝不展示旧数字
-    expect(screen.queryByText(/近 7 天解决/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/近 30 天解决/)).not.toBeInTheDocument();
     expect(screen.getByText(/查看今日项目概况/)).toBeInTheDocument();
   });
 

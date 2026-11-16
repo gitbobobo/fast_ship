@@ -297,4 +297,58 @@ describe("MetricChart", () => {
     expect(screen.queryByText("2026-05-01")).not.toBeInTheDocument();
     expect(screen.getByText("暂无已解决问题数据")).toBeInTheDocument();
   });
+
+  it("insets the last area point from the plot's right edge (W10)", () => {
+    const points = Array.from({ length: 5 }, (_, index) => ({
+      label: `2026-05-0${index + 1}`,
+      shortLabel: `D${index}`,
+      value: index + 1,
+      series: [{ id: "s1", name: "Alpha", value: index + 1 }],
+    }));
+
+    const { container } = render(
+      <MetricChart
+        points={points}
+        variant="area"
+        emptyMessage="暂无已解决问题数据"
+      />,
+    );
+
+    const path = container.querySelector("svg path");
+    expect(path).not.toBeNull();
+    // 面积路径坐标成对出现（x,y）：取最大 x 即末点。
+    const numbers = (path!.getAttribute("d") ?? "").match(/[\d.]+/g) ?? [];
+    const xs = numbers
+      .map(Number)
+      .filter((_, i) => i % 2 === 0);
+    // 测试环境无布局，chartWidth 用默认 720：绘图区右缘 = 720-40 = 680，
+    // 末点必须内收 6px（= 674），与右边框脱开。
+    expect(Math.max(...xs)).toBe(674);
+    expect(Math.max(...xs)).toBeLessThan(680);
+  });
+
+  it("keeps columns-variant coordinates unchanged by the area end inset (W10)", () => {
+    const points = Array.from({ length: 5 }, (_, index) => ({
+      label: `2026-05-0${index + 1}`,
+      shortLabel: `D${index}`,
+      value: 1,
+      series: [{ id: "s1", name: "Alpha", value: 1 }],
+    }));
+
+    const { container } = render(
+      <MetricChart
+        points={points}
+        variant="columns"
+        emptyMessage="窗口内没有已计价花费"
+      />,
+    );
+
+    // columns 按槽位居中（bot 用量页零变化）：末柱中心 = 40 + (640/5)×4.5 = 616。
+    const rects = container.querySelectorAll("svg rect");
+    expect(rects.length).toBeGreaterThan(0);
+    const last = rects[rects.length - 1];
+    const center =
+      Number(last.getAttribute("x")) + Number(last.getAttribute("width")) / 2;
+    expect(center).toBeCloseTo(616, 5);
+  });
 });

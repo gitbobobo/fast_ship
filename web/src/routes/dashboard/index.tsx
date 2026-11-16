@@ -97,8 +97,6 @@ export default function DashboardPage() {
   const anyGroupIncomplete = groups.some(
     (group) => group.complete === false,
   );
-  const resolvedLast7Days =
-    data?.daily_resolved.slice(-7).reduce((sum, point) => sum + point.resolved_count, 0) ?? 0;
 
   const openIssuePoints = useMemo<MetricChartPoint[]>(() => {
     return (
@@ -172,7 +170,8 @@ export default function DashboardPage() {
 
       <div className="flex-1 space-y-8 p-4 md:p-6">
         {/* Hero：有数据时给一句摘要（「今天」是 UTC 日，不能用于东八区早上，
-            所以问候语只在无数据可说时兜底）；任一组不完整用 M+ 表达下界 */}
+            所以问候语只在无数据可说时兜底）；任一组不完整用 M+ 表达下界。
+            N 与「近 30 天已解决」KPI 同源（30 天合计），不再另立尾 7 天窗口（W7） */}
         <section className="space-y-1">
           <p className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
             {formatDate()}
@@ -180,7 +179,7 @@ export default function DashboardPage() {
           <h2 className="text-2xl font-bold tracking-tight md:text-3xl">
             {unavailable
               ? `${getGreeting()}，查看今日项目概况`
-              : `近 7 天解决 ${resolvedLast7Days} 个，${pendingTotal}${
+              : `近 30 天解决 ${totalResolvedIssues} 个问题，${pendingTotal}${
                   anyGroupIncomplete ? "+" : ""
                 } 件事等你处理`}
           </h2>
@@ -209,7 +208,7 @@ export default function DashboardPage() {
         )}
 
         <div className="grid items-start gap-8 xl:grid-cols-2">
-          {/* 左列：KPI → 待我处理 → 图表 → 流转效率；窄屏按 DOM 顺序单列 */}
+          {/* 左列：KPI → 待我处理 → 流转效率 → 图表；窄屏按 DOM 顺序单列 */}
           <div className="space-y-8">
             {/* KPI Cards */}
             <section className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
@@ -278,6 +277,13 @@ export default function DashboardPage() {
               </Card>
             ) : isError ? null : (
               <ActionItemsCard groups={groups} />
+            )}
+
+            {/* 流转效率（W8）：属于原需求「左侧待处理与趋势」的趋势段，
+                上移到待我处理之后、图表之前，让 1440×900 首屏至少入镜卡头；
+                仅 DOM 顺序，不改样式 */}
+            {!isLoading && !isError && data?.flow && (
+              <FlowCard flow={data.flow} points={flowPoints} />
             )}
 
             {/* Charts：左列内纵向堆叠（半宽列里并排会挤坏刻度） */}
@@ -359,10 +365,6 @@ export default function DashboardPage() {
                 </CardContent>
               </Card>
             </section>
-
-            {!isLoading && !isError && data?.flow && (
-              <FlowCard flow={data.flow} points={flowPoints} />
-            )}
           </div>
 
           {/* 右列：AI 运行面板 → 发布节奏 */}

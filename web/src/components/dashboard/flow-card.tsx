@@ -1,11 +1,23 @@
 import { Card, CardContent } from "@/components/ui/card";
 import {
   MetricChart,
+  MetricChartLegend,
   type MetricChartSeriesPoint,
 } from "@/components/dashboard/metric-chart";
 import type { components } from "@/types/api.gen";
 
 type FlowBlock = components["schemas"]["DashboardFlow"];
+
+/**
+ * 完成周期自适应单位（W3）：<1 小时显示「<1 小时」，不足一天显示「N 小时」
+ * （四舍五入到小时），≥1 天显示一位小数的「N 天」。阈值按天数比 1/24，
+ * 避免先乘 24 引入的浮点误差。
+ */
+function formatMedianDays(medianDays: number): string {
+  if (medianDays < 1 / 24) return "<1 小时";
+  if (medianDays < 1) return `${Math.round(medianDays * 24)} 小时`;
+  return `${medianDays.toFixed(1)} 天`;
+}
 
 /**
  * 流转效率卡（INT-235 阶段二）：新建 vs 已解决堆叠面积图、各项目完成周期
@@ -22,6 +34,9 @@ export function FlowCard({
     flow.backlog_age.under_7d +
     flow.backlog_age.d7_to_30d +
     flow.backlog_age.over_30d;
+  // 全零时图表转空状态，图例不能留在空态上方（与 MetricChart 的 isEmpty 同口径）
+  const chartEmpty =
+    points.length === 0 || points.every((point) => point.value === 0);
 
   return (
     <Card className="overflow-hidden" data-testid="flow-card">
@@ -34,16 +49,12 @@ export function FlowCard({
             </p>
           </div>
           {/* 恒等式：待办+进行中 == Σ open_issue_count（剩余开启问题 KPI）；
-              降级时零值占位不可见，避免被读成真实读数 */}
+              降级时零值占位不可见，避免被读成真实读数。
+              纯文本元信息（W5），与「日均 x.x」同款，不再用药丸底色 */}
           {flow.complete !== false && (
-            <div className="flex items-center gap-1.5">
-              <span className="rounded-full bg-muted px-2.5 py-0.5 text-xs font-medium tabular-nums text-muted-foreground">
-                待办 {flow.todo_count}
-              </span>
-              <span className="rounded-full bg-primary/10 px-2.5 py-0.5 text-xs font-medium tabular-nums text-primary">
-                进行中 {flow.in_progress_count}
-              </span>
-            </div>
+            <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
+              待办 {flow.todo_count} · 进行中 {flow.in_progress_count}
+            </span>
           )}
         </div>
 
@@ -52,11 +63,17 @@ export function FlowCard({
           <p className="text-xs text-muted-foreground">暂不可用</p>
         ) : (
           <>
-            <MetricChart
-              points={points}
-              variant="area"
-              emptyMessage="近 30 天暂无新建或已解决"
-            />
+            <div className="space-y-2">
+              {/* 双序列图例（W1）：复用 bot 用量页的 MetricChartLegend，
+                  色点与两条堆叠序列同色，顺序与副标题一致；单序列的
+                  「每日已解决」图不用图例（组件 ≤1 系列时自动返回 null） */}
+              {!chartEmpty && <MetricChartLegend points={points} />}
+              <MetricChart
+                points={points}
+                variant="area"
+                emptyMessage="近 30 天暂无新建或已解决"
+              />
+            </div>
 
             <div>
               <h4 className="mb-2 text-xs font-medium text-muted-foreground">
@@ -73,8 +90,8 @@ export function FlowCard({
                     >
                       <span className="min-w-0 truncate">{row.project_name}</span>
                       <span className="shrink-0 tabular-nums text-muted-foreground">
-                        中位 {row.median_days.toFixed(1)} 天 ·{" "}
-                        {row.completed_count} 个
+                        中位 {formatMedianDays(row.median_days)} ·{" "}
+                        {row.completed_count} 个问题
                       </span>
                     </li>
                   ))}
@@ -101,17 +118,19 @@ export function FlowCard({
   );
 }
 
+/** 积压年龄三档配色（W4）：条段与下方标签前的小圆点共用同一色，
+ *  新（emerald）→ 渐旧（amber → red），一眼读出年龄结构。 */
 const BACKLOG_SEGMENTS: Array<{
   key: "under_7d" | "d7_to_30d" | "over_30d";
   label: string;
   className: string;
 }> = [
-  { key: "under_7d", label: "7 天内", className: "bg-primary/70" },
+  { key: "under_7d", label: "7 天内", className: "bg-emerald-500/70" },
   { key: "d7_to_30d", label: "7-30 天", className: "bg-amber-500/60" },
   {
     key: "over_30d",
     label: "30 天以上",
-    className: "bg-muted-foreground/50",
+    className: "bg-red-500/60",
   },
 ];
 
@@ -144,8 +163,18 @@ function BacklogAgeBar({
       </div>
       <div className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
         {BACKLOG_SEGMENTS.map((segment) => (
-          <span key={segment.key} className="tabular-nums">
-            {segment.label} {age[segment.key]}
+          <span
+            key={segment.key}
+            className="inline-flex items-center gap-1.5 tabular-nums"
+          >
+            {/* 标签前同色小点（W4）：与条段逐档对应，无值档也保留作图例 */}
+            <span
+              aria-hidden="true"
+              className={`h-2 w-2 shrink-0 rounded-full ${segment.className}`}
+            />
+            <span>
+              {segment.label} {age[segment.key]}
+            </span>
           </span>
         ))}
       </div>

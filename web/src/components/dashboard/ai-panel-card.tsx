@@ -1,9 +1,9 @@
 import { Bot, Gauge, GitPullRequest, Hourglass } from "lucide-react";
-import { Link } from "react-router";
 import { Card, CardContent } from "@/components/ui/card";
 import {
   SectionHeader,
   SectionUnavailable,
+  SectionEmptyLink,
   formatScheduleTime,
 } from "@/components/dashboard/panel-bits";
 import {
@@ -61,14 +61,10 @@ function AiT3Section({ t3 }: { t3: AiBlock["t3"] }) {
     return (
       <section className="space-y-2 py-3 first:pt-0" data-testid="ai-t3-section">
         <SectionHeader icon={Hourglass} title="T3 线程" />
-        <p className="flex items-center justify-between gap-2 text-xs">
+        {/* 值/空态行与标签文字共用左基线（W2） */}
+        <p className="flex items-center justify-between gap-2 pl-6 text-xs">
           <span className="text-muted-foreground">未配置 T3 环境</span>
-          <Link
-            to="/threads"
-            className="shrink-0 text-primary hover:underline"
-          >
-            查看线程
-          </Link>
+          <SectionEmptyLink to="/threads">查看线程</SectionEmptyLink>
         </p>
       </section>
     );
@@ -97,10 +93,10 @@ function AiT3Section({ t3 }: { t3: AiBlock["t3"] }) {
         degraded ? (
           <SectionUnavailable />
         ) : (
-          <p className="text-xs text-muted-foreground">没有活跃线程</p>
+          <p className="pl-6 text-xs text-muted-foreground">没有活跃线程</p>
         )
       ) : (
-        <ul className="space-y-1">
+        <ul className="space-y-1 pl-6">
           {t3.environments.map((env) => (
             <li
               key={env.environment_id}
@@ -151,9 +147,9 @@ function AiReviewsSection({
       {reviews.complete === false ? (
         <SectionUnavailable />
       ) : total === 0 ? (
-        <p className="text-xs text-muted-foreground">近 30 天没有审查记录</p>
+        <p className="pl-6 text-xs text-muted-foreground">近 30 天没有审查记录</p>
       ) : (
-        <div className="grid grid-cols-4 gap-2 text-center">
+        <div className="grid grid-cols-4 gap-2 pl-6 text-center">
           <BucketStat label="通过" value={reviews.passed} tone="positive" />
           <BucketStat label="阻塞" value={reviews.blocked} tone="warning" />
           <BucketStat label="出错" value={reviews.errored} tone="danger" />
@@ -205,10 +201,10 @@ function AiBotsSection({ bots }: { bots: NonNullable<AiBlock["bots"]> }) {
       {bots.complete === false ? (
         <SectionUnavailable />
       ) : bots.bot_count === 0 ? (
-        <p className="text-xs text-muted-foreground">未配置机器人</p>
+        <p className="pl-6 text-xs text-muted-foreground">未配置机器人</p>
       ) : (
         <>
-          <div className="space-y-1.5 text-xs">
+          <div className="space-y-1.5 pl-6 text-xs">
           <div className="flex items-center justify-between gap-2">
             <span className="text-muted-foreground">
               Tokens · 请求（{bots.bot_count} 个机器人）
@@ -242,7 +238,7 @@ function AiBotsSection({ bots }: { bots: NonNullable<AiBlock["bots"]> }) {
           )}
           </div>
           {/* 窗口口径只对有数据的区块说明：未配置/降级时不显示（视觉 round1 V6） */}
-          <p className="text-[11px] text-muted-foreground">
+          <p className="pl-6 text-[11px] text-muted-foreground">
             按你的时区（{bots.timezone}）当地日聚合
           </p>
         </>
@@ -258,9 +254,9 @@ function AiQuotaSection({ quota }: { quota: NonNullable<AiBlock["quota"]> }) {
       {quota.complete === false ? (
         <SectionUnavailable />
       ) : quota.accounts.length === 0 ? (
-        <p className="text-xs text-muted-foreground">未配置额度账号</p>
+        <p className="pl-6 text-xs text-muted-foreground">未配置额度账号</p>
       ) : (
-        <ul className="space-y-1.5">
+        <ul className="space-y-1.5 pl-6">
           {quota.accounts.map((account) => (
             <li
               key={account.id}

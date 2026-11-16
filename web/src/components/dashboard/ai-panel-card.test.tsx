@@ -57,8 +57,15 @@ describe("AiPanelCard", () => {
     // K>0 括号注记包含关系；K=0 维持「运行 N · 等待 M」（panel P13）
     expect(screen.getByText("运行 2（含排队 1）· 等待 1")).toBeInTheDocument();
     expect(screen.getByText("运行 1 · 等待 3")).toBeInTheDocument();
+    // 值行与标签文字共用左基线（W2）
+    expect(
+      screen.getByText("运行 2（含排队 1）· 等待 1").closest("ul"),
+    ).toHaveClass("pl-6");
     // 通过率 = 3/(3+1) = 75%
     expect(screen.getByText("通过率 75%")).toBeInTheDocument();
+    // 四分桶与机器人行同样对齐标签左基线（W2）
+    expect(screen.getByText("通过").closest("div.grid")).toHaveClass("pl-6");
+    expect(screen.getByText(/按你的时区/)).toHaveClass("pl-6");
     expect(screen.getByText("Tokens · 请求（1 个机器人）")).toBeInTheDocument();
     expect(screen.getByText(/3,456 · 12/)).toBeInTheDocument();
     // cost=null 是缺失不是 0：显示「未计价」而不是 $0.00
@@ -216,9 +223,12 @@ describe("AiPanelCard", () => {
     expect(screen.getByTestId("ai-t3-section")).toHaveTextContent(
       "未配置 T3 环境",
     );
-    expect(
-      screen.getByRole("link", { name: "查看线程" }),
-    ).toHaveAttribute("href", "/threads");
+    // 行内空态入口标准写法（W6）：主色 + 尾部箭头，hover 变色，不再是灰字伪链接
+    const threadsLink = screen.getByRole("link", { name: "查看线程 →" });
+    expect(threadsLink).toHaveAttribute("href", "/threads");
+    expect(threadsLink).toHaveClass("text-primary");
+    // 空态行与标签文字共用左基线（W2：图标 16 + gap 8 = pl-6）
+    expect(screen.getByText("未配置 T3 环境").parentElement).toHaveClass("pl-6");
   });
 
   it("renders quota mini bars with remaining percent and status badges", () => {

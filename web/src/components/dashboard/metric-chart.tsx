@@ -266,6 +266,9 @@ const CHART_HEIGHT = 240;
 const CHART_PADDING_X = 40;
 const CHART_PADDING_TOP = 24;
 const CHART_PADDING_BOTTOM = 30;
+/** 面积图末点右缘内收（W10）：最后一个点与绘图区右边框脱开，不再视觉上贴边。
+ *  columns 变体按槽位居中、本就内收，坐标计算不受此值影响。 */
+const AREA_END_INSET = 6;
 
 interface SeriesMeta {
   id: string;
@@ -570,7 +573,11 @@ function StackedSeriesChart({
     x:
       shape === "columns"
         ? CHART_PADDING_X + slotWidth * (index + 0.5)
-        : CHART_PADDING_X + (plotWidth * index) / denominator,
+        : // 面积图只有末点内收 6px（W10），中间点坐标不变：视觉差异最小。
+          CHART_PADDING_X +
+          ((plotWidth - (index === shapedData.length - 1 ? AREA_END_INSET : 0)) *
+            index) /
+            denominator,
     yTotal: getY(point.total),
     stacks: point.stacks.map((stack) => ({
       ...stack,

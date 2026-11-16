@@ -43,39 +43,45 @@ export function ReleaseCard({ release }: { release: ReleaseBlock }) {
               className="space-y-2 py-3 first:pt-0"
               data-testid="release-pending-section"
             >
-              <SectionHeader
-                icon={PackageOpen}
-                title="待发版"
-                // count 徽章只在 >0 时显示（视觉 round1 V5）：0 与「没有待发
-                // 版」同现是重复表达，空态行负责表达。
-                trailing={
-                  release.pending_count > 0 ? (
-                    <span className="rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium tabular-nums text-muted-foreground">
-                      {release.pending_count}
-                    </span>
-                  ) : undefined
-                }
-              />
-              {release.pending_versions.length === 0 ? (
-                <p className="text-xs text-muted-foreground">没有待发版</p>
+              {release.pending_count === 0 ? (
+                /* 0 时不再「待发版？——没有待发版」自问自答（W9）：单行标签 + 右侧 muted 暂无 */
+                <SectionHeader
+                  icon={PackageOpen}
+                  title="待发版"
+                  trailing={
+                    <span className="text-xs text-muted-foreground">暂无</span>
+                  }
+                />
               ) : (
-                <ul className="space-y-1">
-                  {release.pending_versions.map((version) => (
-                    <li key={version.version_id}>
-                      <Link
-                        to={version.href}
-                        className="flex items-center justify-between gap-2 rounded-md px-2 py-1.5 -mx-2 transition-colors hover:bg-muted/60"
-                      >
-                        <span className="truncate text-xs font-medium tabular-nums">
-                          {version.version_number}
-                        </span>
-                        <span className="min-w-0 truncate text-[11px] text-muted-foreground">
-                          {version.project_name}
-                        </span>
-                      </Link>
-                    </li>
-                  ))}
-                </ul>
+                <>
+                  <SectionHeader
+                    icon={PackageOpen}
+                    title="待发版"
+                    // count 徽章只在 >0 时显示（视觉 round1 V5）
+                    trailing={
+                      <span className="rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium tabular-nums text-muted-foreground">
+                        {release.pending_count}
+                      </span>
+                    }
+                  />
+                  <ul className="space-y-1 pl-6">
+                    {release.pending_versions.map((version) => (
+                      <li key={version.version_id}>
+                        <Link
+                          to={version.href}
+                          className="flex items-center justify-between gap-2 rounded-md px-2 py-1.5 -mx-2 transition-colors hover:bg-muted/60"
+                        >
+                          <span className="truncate text-xs font-medium tabular-nums">
+                            {version.version_number}
+                          </span>
+                          <span className="min-w-0 truncate text-[11px] text-muted-foreground">
+                            {version.project_name}
+                          </span>
+                        </Link>
+                      </li>
+                    ))}
+                  </ul>
+                </>
               )}
             </section>
 
@@ -85,11 +91,11 @@ export function ReleaseCard({ release }: { release: ReleaseBlock }) {
             >
               <SectionHeader icon={History} title="近期发版" />
               {release.recent_releases.length === 0 ? (
-                <p className="text-xs text-muted-foreground">
+                <p className="pl-6 text-xs text-muted-foreground">
                   还没有发版记录
                 </p>
               ) : (
-                <ol className="space-y-1.5">
+                <ol className="space-y-1.5 pl-6">
                   {release.recent_releases.map((releaseItem) => (
                     <li
                       key={releaseItem.version_id}
@@ -124,7 +130,7 @@ export function ReleaseCard({ release }: { release: ReleaseBlock }) {
               data-testid="release-unmerged-section"
             >
               <SectionHeader icon={GitPullRequest} title="未合并 PR" />
-              <p className="text-xs text-muted-foreground">
+              <p className="pl-6 text-xs text-muted-foreground">
                 {release.unmerged_pr_issue_count > 0
                   ? `${release.unmerged_pr_issue_count} 个开启问题还有未合并的 PR`
                   : "没有挂着未合并 PR 的问题"}
