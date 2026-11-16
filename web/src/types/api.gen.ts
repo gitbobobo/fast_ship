@@ -5396,7 +5396,7 @@ export interface components {
             total_requests: number;
             /**
              * Format: int64
-             * @description prompt+completion+reasoning（NULL 记 0）
+             * @description prompt+completion（NULL 记 0）；reasoning ⊆ completion 已含其中，不重复计
              */
             total_tokens: number;
             /** @description 最近一次将触发的已启用定时任务；没有时省略 */
@@ -7050,7 +7050,7 @@ export interface components {
         BotUsageTotals: {
             /**
              * Format: int64
-             * @description token 总量 = prompt + completion + reasoning（供应商未返回按 0 计），与 total_requests 同窗口
+             * @description token 总量 = prompt + completion（reasoning ⊆ completion 已含其中不重复计，供应商未返回按 0 计），与 total_requests 同窗口
              */
             total_tokens: number;
             /**

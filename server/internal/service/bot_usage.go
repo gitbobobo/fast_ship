@@ -475,10 +475,10 @@ type botUsageBotAcc struct {
 	pricedReq       int64
 	cachedSum       int64
 	promptSum       int64
-	// completionSum/reasoningSum 供仪表盘 total_tokens 共用（INT-235）：
-	// prompt+completion+reasoning，供应商未返回按 0 计。
+	// completionSum 供仪表盘 total_tokens 共用（INT-235）：total =
+	// prompt+completion。reasoning ⊆ completion（model/bot.go ReasoningTokens），
+	// 不再重复计入——曾误加出「total 超过各分项之和」的读数。
 	completionSum int64
-	reasoningSum  int64
 }
 
 // totalCost 机器人三桶之和（任一非空即非空，全空保持 null）。
@@ -486,9 +486,10 @@ func (a *botUsageBotAcc) totalCost() *float64 {
 	return botSumOptional(botSumOptional(a.costMain, a.costSchedule), a.costMaintenance)
 }
 
-// totalTokens 三类 token 合计（reasoning 未返回按 0），与 total_requests 同窗口。
+// totalTokens 两类 token 合计（reasoning ⊆ completion 已含其中，未返回按 0），
+// 与 total_requests 同窗口。
 func (a *botUsageBotAcc) totalTokens() int64 {
-	return a.promptSum + a.completionSum + a.reasoningSum
+	return a.promptSum + a.completionSum
 }
 
 // botUsageDayAcc 是窗口内单个当地日的金额与「当日有请求机器人」累加。
@@ -857,9 +858,6 @@ func (s *BotService) loadBotUsageLedger(userID, rangeParam, botID string, maintD
 		acc.cachedSum += agg.CachedSum
 		acc.promptSum += agg.PromptSum
 		acc.completionSum += agg.CompletionSum
-		if agg.ReasoningSum != nil {
-			acc.reasoningSum += *agg.ReasoningSum
-		}
 
 		// 显示成本 = run 自身 + 关联维护（都为空则 null），桶归属随显示成本。
 		// run 自身与维护金额都走实收优先口径（provider_cost 覆盖估算）。
@@ -925,9 +923,6 @@ func (s *BotService) loadBotUsageLedger(userID, rangeParam, botID string, maintD
 		acc.cachedSum += agg.CachedSum
 		acc.promptSum += agg.PromptSum
 		acc.completionSum += agg.CompletionSum
-		if agg.ReasoningSum != nil {
-			acc.reasoningSum += *agg.ReasoningSum
-		}
 
 		day := dayOf(m.CreatedAt)
 		if day != nil && agg.Total > 0 {
@@ -980,9 +975,6 @@ func (s *BotService) loadBotUsageLedger(userID, rangeParam, botID string, maintD
 		acc.cachedSum += row.CachedTokens
 		acc.promptSum += row.PromptTokens
 		acc.completionSum += row.CompletionTokens
-		if row.ReasoningTokens != nil {
-			acc.reasoningSum += *row.ReasoningTokens
-		}
 		acc.runs += row.Runs // maintenance 桶行恒 0
 		samples := botUsageDailyCosts(row.DisplayCosts)
 		acc.displayCosts = append(acc.displayCosts, samples...)

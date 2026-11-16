@@ -5306,7 +5306,7 @@ title/body/parent_id 至少传一个
 | `ai.bots.timezone` | string | 是 | 用量统计的生效时区（IANA 名称） |
 | `ai.bots.cost` | number（double，可空） | 是 | 近 7 天显示成本合计（USD）；无金额请求为 null（缺失 ≠ 0，前端显示「未计价」） |
 | `ai.bots.total_requests` | integer（int64） | 是 |  |
-| `ai.bots.total_tokens` | integer（int64） | 是 | prompt+completion+reasoning（NULL 记 0） |
+| `ai.bots.total_tokens` | integer（int64） | 是 | prompt+completion（NULL 记 0）；reasoning ⊆ completion 已含其中，不重复计 |
 | `ai.bots.next_schedule` | object | 否 | 最近一次将触发的已启用定时任务；没有时省略 |
 | `ai.bots.next_schedule.bot_id` | string | 是 |  |
 | `ai.bots.next_schedule.bot_name` | string | 是 |  |
@@ -9091,7 +9091,7 @@ unpriced_requests。
 | `start` | string（date-time） | 是 | 统计窗口起点 UTC（含） |
 | `end` | string（date-time） | 是 | 统计窗口终点 UTC（不含，即查询时刻） |
 | `totals` | object | 是 |  |
-| `totals.total_tokens` | integer（int64） | 是 | token 总量 = prompt + completion + reasoning（供应商未返回按 0 计），与 total_requests 同窗口 |
+| `totals.total_tokens` | integer（int64） | 是 | token 总量 = prompt + completion（reasoning ⊆ completion 已含其中不重复计，供应商未返回按 0 计），与 total_requests 同窗口 |
 | `totals.cost` | number（double，可空） | 是 | 窗口内显示成本合计（USD，请求级实收优先）；无任何金额请求为 null（缺失 ≠ 0） |
 | `totals.daily_average` | number（double，可空） | 是 | cost / 窗口天数；cost 为 null 时同 null |
 | `totals.total_requests` | integer（int64） | 是 | 模型请求总数（主线/定时 + 维护） |

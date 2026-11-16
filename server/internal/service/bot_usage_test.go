@@ -1198,9 +1198,10 @@ func TestBotUsageOverviewSkipsMaintenanceDetailRows(t *testing.T) {
 	}
 }
 
-// 仪表盘 total_tokens（INT-235）：prompt+completion+reasoning（未返回按 0），
-// 与 total_requests 同窗口；维护请求同样计入。seedUsageRequest 计价时
-// prompt=1000/completion=100，seedUsageMaintenance prompt=500。
+// 仪表盘/用量总览 total_tokens（INT-235）：prompt+completion（reasoning ⊆
+// completion 已含其中，不重复计），与 total_requests 同窗口；维护请求同样计入。
+// seedUsageRequest 计价时 prompt=1000/completion=100，seedUsageMaintenance
+// prompt=500；r1 另带 reasoning=77 用于验证不再重复计入。
 func TestBotUsageTotalTokens(t *testing.T) {
 	env := setupBotTestEnv(t)
 	userID := createBotTestUser(t, env.db, "usagetokens")
@@ -1219,9 +1220,10 @@ func TestBotUsageTotalTokens(t *testing.T) {
 	if err != nil {
 		t.Fatalf("overview: %v", err)
 	}
-	// prompt 2500 + completion 200 + reasoning 77 = 2777
-	if overview.Totals.TotalTokens != 2777 {
-		t.Fatalf("total_tokens=%d, want 2777（prompt+completion+reasoning+维护 prompt）", overview.Totals.TotalTokens)
+	// prompt 2500 + completion 200 + 维护 prompt 500 = 2700；
+	// reasoning 77 ⊆ completion，不得重复计入（旧口径误得 2777）。
+	if overview.Totals.TotalTokens != 2700 {
+		t.Fatalf("total_tokens=%d, want 2700（prompt+completion，reasoning 不重复计）", overview.Totals.TotalTokens)
 	}
 	if overview.Totals.TotalRequests != 3 {
 		t.Fatalf("total_requests=%d, want 3", overview.Totals.TotalRequests)

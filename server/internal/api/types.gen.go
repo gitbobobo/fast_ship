@@ -2791,7 +2791,7 @@ type BotUsageTotals struct {
 	// TotalRequests 模型请求总数（主线/定时 + 维护）
 	TotalRequests int64 `json:"total_requests"`
 
-	// TotalTokens token 总量 = prompt + completion + reasoning（供应商未返回按 0 计），与 total_requests 同窗口
+	// TotalTokens token 总量 = prompt + completion（reasoning ⊆ completion 已含其中不重复计，供应商未返回按 0 计），与 total_requests 同窗口
 	TotalTokens int64 `json:"total_tokens"`
 
 	// UnpricedRequests 无金额请求数（估算与实收都为空：自定义提供商、目录无价、缺 usage、v0.1.63 前旧记录）
@@ -3155,7 +3155,7 @@ type DashboardAiBots struct {
 	Timezone      string `json:"timezone"`
 	TotalRequests int64  `json:"total_requests"`
 
-	// TotalTokens prompt+completion+reasoning（NULL 记 0）
+	// TotalTokens prompt+completion（NULL 记 0）；reasoning ⊆ completion 已含其中，不重复计
 	TotalTokens int64 `json:"total_tokens"`
 }
 
