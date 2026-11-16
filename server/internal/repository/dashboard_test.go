@@ -449,6 +449,62 @@ func TestDashboardListRecentReleases(t *testing.T) {
 	}
 }
 
+// ListRecentReleases 混合时区排序回归：字典序会把带偏移的历史行排错
+//（"2026-05-21T02:00:00+08:00" > "2026-05-20T20:00:00Z"，但真实时间前者更早），
+// 必须在 Go 侧解析后按真实时间倒序；解析失败的行垫底不丢弃。
+func TestDashboardListRecentReleasesMixedTimezones(t *testing.T) {
+	db := newDashboardTestDB(t)
+	userID := dashboardTestUser(t, db)
+	now := time.Now().UTC()
+	pid := dashboardTestProject(t, db, userID, "项目A", now, false)
+
+	// 直接写历史文本形态，绕开驱动的时间转换。
+	mkRawShipped := func(number, rawShipped string) string {
+		id := uuid.NewString()
+		if err := db.Create(&model.Version{
+			ID: id, ProjectID: pid, VersionNumber: number,
+			Status: model.VersionStatusShipped, CreatedAt: now,
+		}).Error; err != nil {
+			t.Fatalf("create version: %v", err)
+		}
+		if err := db.Exec("UPDATE versions SET shipped_at = ? WHERE id = ?", rawShipped, id).Error; err != nil {
+			t.Fatalf("write raw shipped_at: %v", err)
+		}
+		return id
+	}
+	// 字典序最大的行真实时间最晚：+08:00 偏移行（= 2026-05-20T18:00:00Z）
+	mkRawShipped("v1.0.0", "2026-05-21T02:00:00+08:00")
+	mkRawShipped("v1.1.0", "2026-05-20T20:00:00Z")
+	mkRawShipped("v1.2.0", "不是时间")
+
+	repo := NewDashboardRepository(db)
+	items, err := repo.ListRecentReleases(userID, 5)
+	if err != nil {
+		t.Fatalf("ListRecentReleases: %v", err)
+	}
+	if len(items) != 3 {
+		t.Fatalf("items=%d, want 3（解析失败的行不丢弃）", len(items))
+	}
+	if items[0].VersionNumber != "v1.1.0" || items[1].VersionNumber != "v1.0.0" || items[2].VersionNumber != "v1.2.0" {
+		t.Fatalf("must be real-time descending with unparseable last: %+v", items)
+	}
+	// 偏移行解析后归一到真实时刻（服务层会 .UTC() 输出）
+	if items[1].ShippedAt == nil || !items[1].ShippedAt.Equal(time.Date(2026, 5, 20, 18, 0, 0, 0, time.UTC)) {
+		t.Fatalf("+08:00 row must parse to its instant: %+v", items[1].ShippedAt)
+	}
+	if items[2].ShippedAt != nil {
+		t.Fatalf("unparseable row must keep ShippedAt nil: %+v", items[2].ShippedAt)
+	}
+
+	top2, err := repo.ListRecentReleases(userID, 2)
+	if err != nil {
+		t.Fatalf("ListRecentReleases limit: %v", err)
+	}
+	if len(top2) != 2 || top2[0].VersionNumber != "v1.1.0" || top2[1].VersionNumber != "v1.0.0" {
+		t.Fatalf("top-2 must cut the unparseable row: %+v", top2)
+	}
+}
+
 // CountUnmergedPRIssues：开启且至少关联一个非 merged PR（closed 未合并也算），
 // 按 issue 去重、搁置项目排除、非本用户排除。
 func TestDashboardCountUnmergedPRIssues(t *testing.T) {

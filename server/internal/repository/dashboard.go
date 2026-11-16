@@ -2,6 +2,7 @@ package repository
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -266,7 +267,8 @@ func (r *DashboardRepository) ListPendingVersions(userID string, limit int) (int
 	return total, items, err
 }
 
-// DashboardRecentRelease 一个已发版版本。
+// DashboardRecentRelease 一个已发版版本。ShippedAt 是 Go 侧解析后的真实时间；
+// 文本解析失败的行保持 nil（展示层只见版本号不见时间，排序垫底）。
 type DashboardRecentRelease struct {
 	VersionID     string     `gorm:"column:version_id"`
 	VersionNumber string     `gorm:"column:version_number"`
@@ -276,12 +278,34 @@ type DashboardRecentRelease struct {
 	ShippedAt     *time.Time `gorm:"column:shipped_at"`
 }
 
-// ListRecentReleases 最近 limit 次已发版，按 shipped_at 降序。有意**不加时间
-// 窗口**：shipped_at 是文本存储，历史行（ship.go 已改为写 UTC）存在本地时区
-// 偏移的写法，窗口过滤会因字典序与真实时间序错位漏行/多行；发布节奏卡只看
-// 最近几次，全表按版本量级极小，排序取前即可。
+// dashboardShippedAtRow 是 ListRecentReleases 的扫描行：shipped_at 有意扫成
+// 字符串——驱动解析不了的写法不应让整个查询报错降级。
+type dashboardShippedAtRow struct {
+	VersionID     string    `gorm:"column:version_id"`
+	VersionNumber string    `gorm:"column:version_number"`
+	ProjectID     string    `gorm:"column:project_id"`
+	ProjectName   string    `gorm:"column:project_name"`
+	CreatedAt     time.Time `gorm:"column:created_at"`
+	ShippedAtRaw  string    `gorm:"column:shipped_at"`
+}
+
+// dashboardShippedAtLayouts 是 shipped_at 文本的历史写法：ship.go 现统一写
+// UTC（RFC3339），存量行有本地时区偏移（如 +08:00）与空格分隔的写法；无
+// 偏移的历史行按 UTC 读。
+var dashboardShippedAtLayouts = []string{
+	time.RFC3339,
+	"2006-01-02 15:04:05Z07:00",
+	"2006-01-02T15:04:05",
+	"2006-01-02 15:04:05",
+}
+
+// ListRecentReleases 最近 limit 次已发版。有意**不在 SQL 侧排序/截断**：
+// shipped_at 是文本存储，历史行（ship.go 已改为写 UTC）存在本地时区偏移的
+// 写法，字典序与真实时间序错位会把最新发版排丢。候选全取（表按版本量级极
+// 小，仍不加时间窗口），Go 侧解析后按真实时间倒序取前 limit；解析失败的行
+// 排最后不丢弃（按 created_at 垄底保持稳定序）。
 func (r *DashboardRepository) ListRecentReleases(userID string, limit int) ([]DashboardRecentRelease, error) {
-	items := make([]DashboardRecentRelease, 0, limit)
+	var rows []dashboardShippedAtRow
 	err := r.db.
 		Table("versions AS v").
 		Select("v.id AS version_id, v.version_number, v.project_id, p.name AS project_name, v.created_at, v.shipped_at").
@@ -290,10 +314,62 @@ func (r *DashboardRepository) ListRecentReleases(userID string, limit int) ([]Da
 		Where("v.status = ?", string(model.VersionStatusShipped)).
 		Where("v.shipped_at IS NOT NULL").
 		Where(projectNotShelvedSQL("p"), time.Now().UTC()).
-		Order("v.shipped_at DESC").
-		Limit(limit).
-		Scan(&items).Error
-	return items, err
+		Order("v.created_at DESC").
+		Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+
+	type candidate struct {
+		item  DashboardRecentRelease
+		at    time.Time
+		valid bool
+	}
+	list := make([]candidate, 0, len(rows))
+	for i := range rows {
+		raw := &rows[i]
+		item := DashboardRecentRelease{
+			VersionID:     raw.VersionID,
+			VersionNumber: raw.VersionNumber,
+			ProjectID:     raw.ProjectID,
+			ProjectName:   raw.ProjectName,
+			CreatedAt:     raw.CreatedAt,
+		}
+		at, ok := parseShippedAt(raw.ShippedAtRaw)
+		if ok {
+			t := at
+			item.ShippedAt = &t
+		}
+		list = append(list, candidate{item: item, at: at, valid: ok})
+	}
+	sort.SliceStable(list, func(i, j int) bool {
+		switch {
+		case list[i].valid != list[j].valid:
+			return list[i].valid // 可解析的排前；解析失败的垫底不丢弃
+		case list[i].valid:
+			return list[i].at.After(list[j].at)
+		default:
+			return list[i].item.CreatedAt.After(list[j].item.CreatedAt)
+		}
+	})
+	if len(list) > limit {
+		list = list[:limit]
+	}
+	items := make([]DashboardRecentRelease, 0, len(list))
+	for _, c := range list {
+		items = append(items, c.item)
+	}
+	return items, nil
+}
+
+// parseShippedAt 按历史写法集合逐个尝试解析 shipped_at 文本；全部失配返回 false。
+func parseShippedAt(raw string) (time.Time, bool) {
+	for _, layout := range dashboardShippedAtLayouts {
+		if t, err := time.Parse(layout, raw); err == nil {
+			return t, true
+		}
+	}
+	return time.Time{}, false
 }
 
 // CountUnmergedPRIssues 开启且至少关联一个未合并 PR（含 closed 未合并）的
