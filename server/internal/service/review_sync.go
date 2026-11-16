@@ -54,9 +54,9 @@ const (
 // reviewRoundTag 顶层评论第二行的轮次标记（INT-233）：评论按「marker + 轮次
 // 标记」两行合并前缀找回，同一 marker 的历史轮评论不会被认成本轮的——评论
 // 因此每轮新发、发出后不再改写。sha 用完整 head SHA，避免短 SHA 碰撞。
-// suffix 区分评论角色：终态结论（代码评论、视觉结论）无后缀；视觉沿用/
-// 截图不可用的占位评论带 ":carry"——同轮决策翻转到真正开轮时清掉占位评论
-// id，终态评论按自己的前缀找回/新建，不会被占位评论短路。
+// suffix 区分评论角色：终态结论（代码评论、视觉结论）无后缀；视觉沿用占位
+// 带 ":carry"、截图不可用占位带 ":screens"——视觉评论一律不按账本 id 短路、
+// 只认本角色前缀找回，角色互翻互不认领，终态也不会被占位评论短路。
 func reviewRoundTag(meta reviewCommentMeta, suffix string) string {
 	return fmt.Sprintf("<!-- fast-ship-round:%s:%d%s -->", meta.HeadSHA, meta.RoundNumber, suffix)
 }
@@ -483,7 +483,7 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 				}, outcome.PriorRuns)
 				if err := s.postRoundComment(ctx, client, ledger,
 					roundCommentPrefix(reviewVisualCommentMarker, ledger, roundTagScreensNote),
-					body, "visual_comment_id", ledger.VisualCommentID); err != nil {
+					body, "visual_comment_id", 0); err != nil {
 					return err
 				}
 			}
@@ -808,19 +808,17 @@ func (s *ReviewService) postVisualComment(ctx context.Context, client forge.Revi
 		links:        links,
 	}
 	body := buildVisualComment(meta, visualRuns, priorRuns, carryText)
-	// 终态结论不按 visual_comment_id 短路、只认终态前缀找回：占位评论
-	// （沿用/截图不可用）与建视觉运行不同事务，占位 id 可能残留在列里，
-	// 按 savedID 短路会让本轮终态 findings 永久漏发（INT-233 审查 R2 P2）。
-	// 终态前缀与占位前缀天然不同，找回幂等，代价只是每 tick 一次列表读。
-	savedID := int64(0)
+	// 视觉评论一律不按 visual_comment_id 短路、只认本角色前缀找回
+	// （INT-233 审查 R2/R3）：列里可能残留任一占位角色的 id（占位与建视觉
+	// 运行非原子、角色互翻），按 savedID 短路会静默吞掉本轮对应角色的评论。
+	// 角色前缀互不相同，找回幂等，代价只是每 tick 一次列表读；列只作记录。
 	tagSuffix := roundTagConclusion
 	if carryText != "" {
 		tagSuffix = roundTagCarryNote
-		savedID = ledger.VisualCommentID
 	}
 	return s.postRoundComment(ctx, client, ledger,
 		roundCommentPrefix(reviewVisualCommentMarker, ledger, tagSuffix),
-		body, "visual_comment_id", savedID)
+		body, "visual_comment_id", 0)
 }
 
 // codeOpenPriorBlocks 结论里仍未解决（status=open）且会阻断的 prior 条目数

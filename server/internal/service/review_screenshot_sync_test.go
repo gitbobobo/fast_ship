@@ -698,20 +698,29 @@ func TestVisualSyncScreensUnavailableKeepsSameRoundComment(t *testing.T) {
 	e.setLedgerPending(t, repo, 88)
 	e.review.syncPendingPRs(now.Add(time.Second))
 
-	// 同轮评论不改写（INT-233）：仍只有 carry 那一条，原样保留；新结论由
-	// 视觉 commit status 表达。
+	// 同轮评论不改写（INT-233）：carry 占位原样保留；角色互翻时「截图不可用」
+	// 占位按 :screens 前缀新发自己的说明（互不认领），当前结论由视觉 status
+	// 表达。
 	var visuals []string
 	for _, c := range e.fake.Comments(repo, 88) {
 		if strings.Contains(c, reviewVisualCommentMarker) {
 			visuals = append(visuals, c)
 		}
 	}
-	if len(visuals) != 1 {
-		t.Fatalf("visual comments = %d, want 1（同轮不新发第二条）", len(visuals))
+	if len(visuals) != 2 {
+		t.Fatalf("visual comments = %d, want 2（:carry 占位 + :screens 占位各一条）", len(visuals))
 	}
-	comment := visuals[0]
-	if !strings.Contains(comment, "截图未变化") || !strings.Contains(comment, "按钮叠在文字上") {
-		t.Fatalf("carry 评论应原样保留, got: %s", comment)
+	hasCarry, hasScreens := false, false
+	for _, c := range visuals {
+		if strings.Contains(c, "截图未变化") && strings.Contains(c, "按钮叠在文字上") {
+			hasCarry = true
+		}
+		if strings.Contains(c, "未做视觉审查") && strings.Contains(c, ":screens") {
+			hasScreens = true
+		}
+	}
+	if !hasCarry || !hasScreens {
+		t.Fatalf("应同时存在 :carry 与 :screens 占位评论: %v", visuals)
 	}
 	statuses := e.fake.StatusesForContext(reviewVisualStatusContext)
 	if len(statuses) == 0 || !strings.Contains(statuses[len(statuses)-1].Description, "无法下载") {
@@ -819,6 +828,96 @@ func TestVisualSyncScreensUnavailablePostsOwnRoleAfterIDLoss(t *testing.T) {
 	}
 	if ledger2.VisualCommentID == ledger.VisualCommentID {
 		t.Fatalf("补记的应是 :screens 新评论 id, 不该等于被清零前的 carry id %d", ledger.VisualCommentID)
+	}
+}
+
+// INT-233 审查 R3 P2 回归：同轮「截图不可用 → 沿用」翻转（描述改回旧截图
+// 集合、指纹回到已存值）时，沿用评论不按残留的 :screens 占位 id 短路——
+// 视觉评论一律只认本角色前缀找回，:carry 照常新发。
+func TestVisualSyncCarryPostsAfterScreensFlip(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	origBody := "![界面](https://uiv.frp.musiver.cn/f/x.png)"
+	// 初始描述是「新集合」：与账本指纹（旧集合）不同 → ScreensChanged。
+	newBody := "![新界面](https://uiv.frp.musiver.cn/f/new.png)"
+	e.fake.SetPR(repo, 94, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 94, HeadSHA: "sha-sc", Body: newBody,
+		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
+	})
+	visualCombos, err := marshalCombinations([]api.ReviewCombination{testCombo("env-sc")})
+	if err != nil {
+		t.Fatalf("marshal combos: %v", err)
+	}
+	e.enableReview(t, func(s *model.ProjectReviewSettings) {
+		s.VisualCombinationsJSON = visualCombos
+	})
+	// 上一轮（round 1）视觉发现 blocker（沿用失败分支可达）。
+	prior := e.seedRun(t, repo, 94, "sha-prev", model.ReviewRunCompleted, now.Add(-time.Hour))
+	e.svc.db.Model(prior).Updates(map[string]any{
+		"kind": model.ReviewKindVisual, "round_number": 1,
+		"result_json": `{"summary":"有阻断问题","findings":[{"severity":"blocker","screenshot":"界面","dimension":"hierarchy","body":"按钮叠在文字上","fix":"调整层级"}],"prior":[],"unmeasurable":[]}`,
+	})
+	// 本轮代码干净、UI 有改动但不在上轮视觉之后（carry 分支可达）。
+	run := e.seedRun(t, repo, 94, "sha-sc", model.ReviewRunCompleted, now)
+	e.svc.db.Model(run).Updates(map[string]any{
+		"round_number": 2, "summary": "干净",
+		"result_json": `{"summary":"干净","findings":[],"prior":[],"ui_changed":true,"ui_changed_since_last_visual":false}`,
+	})
+	fp := screenshotFingerprint(collectScreenshotURLs(origBody))
+	if err := e.svc.db.Create(&model.ReviewPullRequest{
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: repo, PRNumber: 94, UserID: e.user.ID,
+		InstallationID: 1, HeadSHA: "sha-sc", RoundNumber: 2,
+		VisualScreensFingerprint: fp, SyncPending: true, SyncEpoch: 1, UpdatedAt: now,
+	}).Error; err != nil {
+		t.Fatalf("seed ledger: %v", err)
+	}
+
+	// tick1：新截图集合探测全部失败 → :screens 占位评论入账。
+	e.media.anonErr = errors.New("connection refused")
+	e.review.syncPendingPRs(now)
+	var ledger model.ReviewPullRequest
+	e.svc.db.First(&ledger, "repo_full_name = ? AND pr_number = 94", repo)
+	if ledger.VisualCommentID == 0 {
+		t.Fatal(":screens 占位应已发出并记账（场景前置不成立）")
+	}
+	screensID := ledger.VisualCommentID
+
+	// tick2：描述改回旧集合（指纹回到已存值）→ carryFailure；沿用评论
+	// 不得按残留的 :screens id 短路。
+	e.fake.SetPR(repo, 94, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 94, HeadSHA: "sha-sc", Body: origBody,
+		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
+	})
+	e.media.anonErr = nil
+	e.setLedgerPending(t, repo, 94)
+	e.review.syncPendingPRs(now.Add(time.Second))
+
+	var visuals []string
+	for _, c := range e.fake.Comments(repo, 94) {
+		if strings.Contains(c, reviewVisualCommentMarker) {
+			visuals = append(visuals, c)
+		}
+	}
+	if len(visuals) != 2 {
+		t.Fatalf("visual comments = %d, want 2（:screens 占位 + :carry 沿用各一条）", len(visuals))
+	}
+	hasScreens, hasCarry := false, false
+	for _, c := range visuals {
+		if strings.Contains(c, "未做视觉审查") && strings.Contains(c, ":screens") {
+			hasScreens = true
+		}
+		if strings.Contains(c, "意见尚未处理") && strings.Contains(c, ":carry") {
+			hasCarry = true
+		}
+	}
+	if !hasScreens || !hasCarry {
+		t.Fatalf("应同时存在 :screens 与 :carry 占位评论: %v", visuals)
+	}
+	e.svc.db.First(&ledger, "repo_full_name = ? AND pr_number = 94", repo)
+	if ledger.VisualCommentID == 0 || ledger.VisualCommentID == screensID {
+		t.Fatalf("账本应记 :carry 评论的新 id, got=%d screens=%d", ledger.VisualCommentID, screensID)
 	}
 }
 
