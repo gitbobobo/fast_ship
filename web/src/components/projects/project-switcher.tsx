@@ -98,7 +98,7 @@ export function ProjectSwitcher({
           variant === "default" &&
             "h-8 w-fit justify-between py-2 pr-2 pl-2.5 whitespace-nowrap",
           variant === "sidebar" &&
-            "h-8 w-full justify-between py-2 pr-2 pl-2.5 whitespace-nowrap",
+            "h-11 w-full justify-between py-2 pr-2 pl-2.5 whitespace-nowrap md:h-9",
           variant === "sidebar-collapsed" &&
             "relative size-8 shrink-0 justify-center font-medium hover:bg-accent/60",
           className,
@@ -194,7 +194,7 @@ export function ProjectSwitcher({
                       aria-current={selected || undefined}
                       onClick={() => handleSelect(project)}
                       className={cn(
-                        "min-w-0 rounded-lg border border-border p-3 text-left text-sm transition-colors outline-none hover:bg-accent focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50",
+                        "flex min-w-0 flex-col justify-center rounded-lg border border-border p-3 text-left text-sm transition-colors outline-none hover:bg-accent focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50",
                         selected && "border-primary bg-primary/5 ring-1 ring-primary",
                       )}
                     >
