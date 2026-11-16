@@ -1,8 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
-  useLocation,
-  useNavigate,
-  useSearchParams,
   Link,
 } from "react-router";
 import {
@@ -12,20 +9,16 @@ import {
   type DragEndEvent,
   type DragStartEvent,
 } from "@dnd-kit/core";
-import { Package, Plus } from "lucide-react";
-import { ProjectSwitcher } from "@/components/projects/project-switcher";
+import { Plus } from "lucide-react";
 import { Header } from "@/components/layout/header";
 import { HeaderActions } from "@/components/layout/header-actions";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
-import { Skeleton } from "@/components/ui/skeleton";
-import { useProjects } from "@/lib/hooks/use-projects";
 import { useUpdateIssueWorkflowStatus } from "@/lib/hooks/use-issues";
-import { useProjectPreferenceStore } from "@/lib/store/project-preference-store";
-import { useRouteProject } from "@/lib/current-project";
-import { projectSwitchPath } from "@/lib/project-nav";
 import { toast } from "sonner";
-import { getActiveProjectId } from "@/lib/projects";
+import {
+  ProjectBreadcrumb,
+  ProjectPageGate,
+} from "@/components/projects/project-page-chrome";
 import {
   COLUMNS,
   type ColumnId,
@@ -53,49 +46,24 @@ function createDefaultColumnFilters(): Record<ColumnId, BoardColumnFilterValue> 
 }
 
 export default function BoardPage() {
-  const { data: projectsData, isLoading: projectsLoading } = useProjects();
-  const projects = useMemo(() => projectsData?.items ?? [], [projectsData]);
-
-  const [searchParams, setSearchParams] = useSearchParams();
-  const navigate = useNavigate();
-  const { pathname } = useLocation();
-  // 新路径 /projects/:id/board 由路径提供项目；过渡期旧链接仍读 ?project=
-  const { projectId: routeProjectId } = useRouteProject();
-  const urlProjectId = routeProjectId || searchParams.get("project");
-  const { lastSelectedProjectId, setLastSelectedProjectId } =
-    useProjectPreferenceStore();
-
-  const [selectedProjectId, setSelectedProjectId] = useState<string>(
-    () => urlProjectId ?? lastSelectedProjectId ?? "",
+  // 项目上下文只认路径：列表加载中先渲染占位（冷启动无效 ID 不给数据请求窗口），
+  // 确认无效整页空态，其余放行（列表查询失败交给页面自身兜底）
+  return (
+    <ProjectPageGate>
+      {({ projectId, project }) => (
+        <BoardPageContent projectId={projectId} project={project} />
+      )}
+    </ProjectPageGate>
   );
+}
 
-  const activeProjectId = useMemo(
-    () =>
-      routeProjectId || getActiveProjectId(projects, selectedProjectId, urlProjectId),
-    [routeProjectId, projects, selectedProjectId, urlProjectId],
-  );
-
-  // 当 activeProjectId 回退时（如存储的项目被删除），同步 state 和 store
-  useEffect(() => {
-    if (!projectsLoading && activeProjectId !== selectedProjectId) {
-      setSelectedProjectId(activeProjectId);
-      setLastSelectedProjectId(activeProjectId || null);
-    }
-  }, [
-    projectsLoading,
-    activeProjectId,
-    selectedProjectId,
-    setLastSelectedProjectId,
-  ]);
-
-  // Sync URL when active project changes
-  useEffect(() => {
-    if (activeProjectId && activeProjectId !== urlProjectId) {
-      const next = new URLSearchParams(searchParams);
-      next.set("project", activeProjectId);
-      setSearchParams(next, { replace: true });
-    }
-  }, [activeProjectId, urlProjectId, searchParams, setSearchParams]);
+function BoardPageContent({
+  projectId,
+  project,
+}: {
+  projectId: string;
+  project: Project | undefined;
+}) {
 
   const [activeIssue, setActiveIssue] = useState<Issue | null>(null);
 
@@ -105,7 +73,7 @@ export default function BoardPage() {
   );
   useEffect(() => {
     setColumnFilters(createDefaultColumnFilters());
-  }, [activeProjectId]);
+  }, [projectId]);
 
   const handleColumnFilterChange = useCallback(
     (columnId: ColumnId, next: BoardColumnFilterValue) => {
@@ -172,151 +140,74 @@ export default function BoardPage() {
     [updateWorkflowStatus],
   );
 
-  const handleProjectChange = (value: string | null) => {
-    const nextValue = value ?? "";
-    // 新路径以 URL 为唯一事实源：切换项目即导航到目标项目的看板页，
-    // selectedProjectId 由回填 effect 对齐；旧路径维持 state + ?project= 行为
-    const to = projectSwitchPath(pathname, nextValue);
-    if (to) {
-      navigate(to);
-    } else {
-      setSelectedProjectId(nextValue);
-      const next = new URLSearchParams();
-      if (nextValue) {
-        next.set("project", nextValue);
-      }
-      setSearchParams(next, { replace: true });
-    }
-    setLastSelectedProjectId(nextValue || null);
-  };
-
-  const isEmptyProject = !projectsLoading && projects.length === 0;
-  const noProjectSelected = !projectsLoading && !activeProjectId;
-  const boardReady = Boolean(activeProjectId) && !projectsLoading;
+  // projectId 来自路径，挂载即可恢复横向滚动位置，无需等项目列表
   const boardScrollRef = usePersistedScroll<HTMLDivElement>(
-    `board-x:${activeProjectId}`,
-    { ready: boardReady, axis: "left" },
+    `board-x:${projectId}`,
+    { ready: true, axis: "left" },
   );
 
   return (
     <div className="flex h-full flex-col">
       <Header
-        title="看板"
+        title={<ProjectBreadcrumb section="看板" project={project} />}
         actions={
-          activeProjectId ? (
-            <HeaderActions
-              primary={
-                <Button
-                  variant="outline"
-                  size="sm"
-                  render={
-                    <Link
-                      to={{
-                        pathname: `/projects/${activeProjectId}/issues/new`,
-                      }}
-                    />
-                  }
-                >
-                  <Plus className="mr-1.5 h-3.5 w-3.5" />
-                  新建问题
-                </Button>
-              }
-            />
-          ) : undefined
+          <HeaderActions
+            primary={
+              <Button
+                variant="outline"
+                size="sm"
+                render={
+                  <Link
+                    to={{
+                      pathname: `/projects/${projectId}/issues/new`,
+                    }}
+                  />
+                }
+              >
+                <Plus className="mr-1.5 h-3.5 w-3.5" />
+                新建问题
+              </Button>
+            }
+          />
         }
       />
       <div className="flex flex-1 flex-col overflow-hidden p-4 md:p-6">
-        {/* Project selector */}
+        {/* 工具行：项目选择已上移侧边栏，这里只留推荐问题入口 */}
         <div className="mb-4 flex flex-wrap items-center gap-3">
-          {projectsLoading ? (
-            <Skeleton className="h-10 w-48 rounded-md" />
-          ) : isEmptyProject ? (
-            <p className="text-sm text-muted-foreground">暂无项目</p>
-          ) : (
-            <ProjectSwitcher
-              value={activeProjectId}
-              onValueChange={handleProjectChange}
-              projects={projects}
-              placeholder="请选择项目"
-              className="w-auto min-w-32"
-            />
-          )}
-          {!projectsLoading && !isEmptyProject && (
-            <RecommendedIssuesButton
-              projectId={activeProjectId || undefined}
-              getIssueColumnContext={getIssueColumnContext}
-            />
-          )}
+          <RecommendedIssuesButton
+            projectId={projectId}
+            getIssueColumnContext={getIssueColumnContext}
+          />
         </div>
 
         {/* Board */}
-        {projectsLoading ? (
-          <div className="flex flex-1 gap-4 overflow-hidden">
-            {COLUMNS.map((col) => (
-              <div
-                key={col.id}
-                className="flex min-w-[280px] max-w-[320px] flex-1 flex-col rounded-lg border bg-muted/20"
-              >
-                <div className="border-b px-3 py-2.5">
-                  <Skeleton className="h-5 w-24" />
-                </div>
-                <div className="space-y-2 p-2.5">
-                  {Array.from({ length: 3 }).map((_, i) => (
-                    <Skeleton key={i} className="h-24 rounded-md" />
-                  ))}
-                </div>
-              </div>
+        <DndContext
+          collisionDetection={pointerWithin}
+          autoScroll={false}
+          onDragStart={handleDragStart}
+          onDragEnd={handleDragEnd}
+        >
+          <div
+            ref={boardScrollRef}
+            className="flex flex-1 gap-4 overflow-x-auto py-1 pb-2"
+          >
+            {COLUMNS.map((column) => (
+              <BoardColumn
+                key={column.id}
+                columnId={column.id}
+                projectId={projectId}
+                filter={columnFilters[column.id] ?? DEFAULT_BOARD_COLUMN_FILTER}
+                onFilterChange={(next) => handleColumnFilterChange(column.id, next)}
+                getIssueColumnContext={getIssueColumnContext}
+              />
             ))}
           </div>
-        ) : isEmptyProject ? (
-          <Card className="flex-1">
-            <CardContent className="flex flex-col items-center justify-center py-16 text-center">
-              <Package className="mb-4 h-12 w-12 text-muted-foreground/50" />
-              <h3 className="text-lg font-medium">暂无项目</h3>
-              <p className="mt-1 text-sm text-muted-foreground">
-                创建项目后即可同步和管理 GitHub Issues
-              </p>
-            </CardContent>
-          </Card>
-        ) : noProjectSelected ? (
-          <Card className="flex-1">
-            <CardContent className="flex flex-col items-center justify-center py-16 text-center">
-              <Package className="mb-4 h-12 w-12 text-muted-foreground/50" />
-              <h3 className="text-lg font-medium">请选择项目</h3>
-              <p className="mt-1 text-sm text-muted-foreground">
-                从上方下拉菜单选择一个项目以查看看板
-              </p>
-            </CardContent>
-          </Card>
-        ) : (
-          <DndContext
-            collisionDetection={pointerWithin}
-            autoScroll={false}
-            onDragStart={handleDragStart}
-            onDragEnd={handleDragEnd}
-          >
-            <div
-              ref={boardScrollRef}
-              className="flex flex-1 gap-4 overflow-x-auto py-1 pb-2"
-            >
-              {COLUMNS.map((column) => (
-                <BoardColumn
-                  key={column.id}
-                  columnId={column.id}
-                  projectId={activeProjectId}
-                  filter={columnFilters[column.id] ?? DEFAULT_BOARD_COLUMN_FILTER}
-                  onFilterChange={(next) => handleColumnFilterChange(column.id, next)}
-                  getIssueColumnContext={getIssueColumnContext}
-                />
-              ))}
-            </div>
-            <DragOverlay dropAnimation={null}>
-              {activeIssue ? (
-                <BoardIssueCardOverlay issue={activeIssue} />
-              ) : null}
-            </DragOverlay>
-          </DndContext>
-        )}
+          <DragOverlay dropAnimation={null}>
+            {activeIssue ? (
+              <BoardIssueCardOverlay issue={activeIssue} />
+            ) : null}
+          </DragOverlay>
+        </DndContext>
       </div>
     </div>
   );

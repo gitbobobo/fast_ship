@@ -8,6 +8,7 @@ import { useAuthStore } from "@/lib/store/auth-store";
 import { useLastBotStore } from "@/lib/store/last-bot-store";
 import { useProjectPreferenceStore } from "@/lib/store/project-preference-store";
 import { useSidebarStore } from "@/lib/store/sidebar-store";
+import { registerNavigationGuard } from "@/lib/navigation-guard";
 import { withTestQueryClient } from "@/test/render";
 
 vi.mock("@/components/user-nav", () => ({
@@ -214,6 +215,77 @@ describe("Sidebar 项目切换器与项目内导航（INT-237 PR2）", () => {
 
     expect(utils.currentLocation()?.pathname).toBe("/projects/p-beta/issues");
     expect(utils.currentLocation()?.search).toBe("");
+  });
+
+  it("导航守卫取消时切换器中止跳转，留在原页面", async () => {
+    const confirmMock = vi.fn().mockReturnValue(false);
+    vi.stubGlobal("confirm", confirmMock);
+    const unregister = registerNavigationGuard(() => "有未保存的修改");
+    const utils = renderSidebar("/projects/p-alpha/issues");
+
+    try {
+      await pickProject("Beta");
+
+      expect(utils.currentLocation()?.pathname).toBe(
+        "/projects/p-alpha/issues",
+      );
+      expect(confirmMock).toHaveBeenCalledWith("有未保存的修改");
+      expect(
+        useProjectPreferenceStore.getState().lastSelectedProjectId,
+      ).not.toBe("p-beta");
+    } finally {
+      unregister();
+    }
+  });
+
+  it("导航守卫确认后切换照常进行", async () => {
+    vi.stubGlobal("confirm", vi.fn().mockReturnValue(true));
+    const unregister = registerNavigationGuard(() => "有未保存的修改");
+    const utils = renderSidebar("/projects/p-alpha/issues");
+
+    try {
+      await pickProject("Beta");
+
+      expect(utils.currentLocation()?.pathname).toBe("/projects/p-beta/issues");
+    } finally {
+      unregister();
+    }
+  });
+
+  it("同页但带 query 的链接点击仍过导航守卫（?doc= 编辑中点「文档」）", async () => {
+    const confirmMock = vi.fn().mockReturnValue(false);
+    vi.stubGlobal("confirm", confirmMock);
+    const unregister = registerNavigationGuard(() => "有未保存的修改");
+    const utils = renderSidebar("/projects/p-alpha/documents?doc=d-1");
+
+    try {
+      await userEvent.setup().click(screen.getByRole("link", { name: "文档" }));
+
+      // 该点击会剥掉 ?doc=（真实导航，非空操作）：守卫取消后必须原地不动
+      expect(utils.currentLocation()?.pathname).toBe("/projects/p-alpha/documents");
+      expect(utils.currentLocation()?.search).toBe("?doc=d-1");
+      expect(confirmMock).toHaveBeenCalledTimes(1);
+    } finally {
+      unregister();
+    }
+  });
+
+  it("侧栏链接点击同样受导航守卫拦截", async () => {
+    const confirmMock = vi.fn().mockReturnValue(false);
+    vi.stubGlobal("confirm", confirmMock);
+    const unregister = registerNavigationGuard(() => "有未保存的修改");
+    const utils = renderSidebar("/projects/p-alpha/documents");
+
+    try {
+      await userEvent.setup().click(screen.getByRole("link", { name: "问题" }));
+
+      expect(utils.currentLocation()?.pathname).toBe(
+        "/projects/p-alpha/documents",
+      );
+      expect(confirmMock).toHaveBeenCalledTimes(1);
+    } finally {
+      unregister();
+    }
   });
 
   it("详情子页切换项目：回目标项目对应列表页", async () => {

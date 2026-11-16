@@ -1,17 +1,16 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { useLocation, useNavigate, useSearchParams } from "react-router";
+import { useSearchParams } from "react-router";
+import { registerNavigationGuard } from "@/lib/navigation-guard";
 import {
   ChevronRight,
   FilePlus2,
   FileText,
   FolderPlus,
-  Inbox,
   Save,
   Trash2,
 } from "lucide-react";
-import { ProjectSwitcher } from "@/components/projects/project-switcher";
 import { Header } from "@/components/layout/header";
-import { HeaderActions } from "@/components/layout/header-actions";
+import { ProjectBreadcrumb, ProjectPageGate } from "@/components/projects/project-page-chrome";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -31,7 +30,6 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { MarkdownEditor } from "@/components/ui/markdown-editor";
-import { useProjects } from "@/lib/hooks/use-projects";
 import {
   useCreateDocument,
   useDeleteDocument,
@@ -39,10 +37,6 @@ import {
   useDocuments,
   useUpdateDocument,
 } from "@/lib/hooks/use-documents";
-import { useProjectPreferenceStore } from "@/lib/store/project-preference-store";
-import { getActiveProjectId } from "@/lib/projects";
-import { useRouteProject } from "@/lib/current-project";
-import { projectSwitchPath } from "@/lib/project-nav";
 import { usePersistedScroll } from "@/lib/hooks/use-persisted-scroll";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
@@ -152,52 +146,38 @@ function confirmIfDirty(isDirty: boolean, message: string): boolean {
 }
 
 export default function DocumentsPage() {
-  const { data: projectsData, isLoading: projectsLoading } = useProjects();
-  const projects = useMemo(() => projectsData?.items ?? [], [projectsData]);
+  // 项目上下文只认路径：列表加载中先渲染占位（冷启动无效 ID 不给数据请求窗口），
+  // 确认无效整页空态，其余放行（列表查询失败交给页面自身兜底）
+  return (
+    <ProjectPageGate>
+      {({ projectId, project }) => (
+        <DocumentsPageContent projectId={projectId} project={project} />
+      )}
+    </ProjectPageGate>
+  );
+}
 
+function DocumentsPageContent({
+  projectId,
+  project,
+}: {
+  projectId: string;
+  project: Project | undefined;
+}) {
   const [searchParams, setSearchParams] = useSearchParams();
-  const navigate = useNavigate();
-  const { pathname } = useLocation();
-  // 新路径 /projects/:id/documents 由路径提供项目；过渡期旧链接仍读 ?project=
-  const { projectId: routeProjectId } = useRouteProject();
-  const urlProjectId = routeProjectId || searchParams.get("project");
   const urlDocId = searchParams.get("doc") ?? "";
-  const { lastSelectedProjectId, setLastSelectedProjectId } =
-    useProjectPreferenceStore();
-
-  const [selectedProjectId, setSelectedProjectId] = useState<string>(
-    () => urlProjectId ?? lastSelectedProjectId ?? "",
-  );
-
-  const activeProjectId = useMemo(
-    () =>
-      routeProjectId || getActiveProjectId(projects, selectedProjectId, urlProjectId),
-    [routeProjectId, projects, selectedProjectId, urlProjectId],
-  );
-
-  useEffect(() => {
-    if (!projectsLoading && activeProjectId !== selectedProjectId) {
-      setSelectedProjectId(activeProjectId);
-      setLastSelectedProjectId(activeProjectId || null);
-    }
-  }, [
-    projectsLoading,
-    activeProjectId,
-    selectedProjectId,
-    setLastSelectedProjectId,
-  ]);
 
   const {
     data: listData,
     isLoading: listLoading,
     isError: listError,
-  } = useDocuments(activeProjectId);
+  } = useDocuments(projectId);
 
   const items = useMemo(() => listData?.items ?? [], [listData]);
   const tree = useMemo(() => buildTree(items), [items]);
   const treeScrollRef = usePersistedScroll<HTMLDivElement>(
-    `documents:tree:${activeProjectId}`,
-    { ready: Boolean(activeProjectId) && !listLoading },
+    `documents:tree:${projectId}`,
+    { ready: Boolean(projectId) && !listLoading },
   );
 
   const selectedDocId = urlDocId;
@@ -207,9 +187,9 @@ export default function DocumentsPage() {
     isError: detailError,
   } = useDocument(selectedDocId);
 
-  const createDocument = useCreateDocument(activeProjectId);
-  const updateDocument = useUpdateDocument(activeProjectId);
-  const deleteDocument = useDeleteDocument(activeProjectId);
+  const createDocument = useCreateDocument(projectId);
+  const updateDocument = useUpdateDocument(projectId);
+  const deleteDocument = useDeleteDocument(projectId);
 
   const [editTitle, setEditTitle] = useState("");
   const [editBody, setEditBody] = useState("");
@@ -255,6 +235,15 @@ export default function DocumentsPage() {
     return () => window.removeEventListener("beforeunload", onBeforeUnload);
   }, [isDirty]);
 
+  // 站内导航（侧边栏链接、项目切换）不触发 beforeunload：脏时登记守卫，
+  // 由侧边栏在导航前逐一询问，用户可取消留在原文档
+  useEffect(() => {
+    if (!isDirty) return;
+    return registerNavigationGuard(() =>
+      "当前文档有未保存的修改，切换将丢弃这些修改。是否继续？",
+    );
+  }, [isDirty]);
+
   const parentOptions = useMemo(() => {
     if (!selectedDocId) return items;
     const excluded = collectSubtreeIds(items, selectedDocId);
@@ -270,31 +259,6 @@ export default function DocumentsPage() {
     setSearchParams(next, { replace: true });
   };
 
-  const handleProjectChange = (value: string | null) => {
-    if (
-      !confirmIfDirty(
-        isDirty,
-        "当前文档有未保存的修改，切换项目将丢弃这些修改。是否继续？",
-      )
-    ) {
-      return;
-    }
-    const nextValue = value ?? "";
-    // 新路径以 URL 为唯一事实源：切换项目即导航，state 由回填 effect 对齐；
-    // 旧路径维持 state + ?project= 行为
-    const to = projectSwitchPath(pathname, nextValue);
-    if (to) {
-      navigate(to);
-    } else {
-      setSelectedProjectId(nextValue);
-      const next = new URLSearchParams();
-      if (nextValue) next.set("project", nextValue);
-      setSearchParams(next, { replace: true });
-    }
-    setLastSelectedProjectId(nextValue || null);
-    resetEditorState();
-  };
-
   const handleSelectDoc = (id: string) => {
     if (id === selectedDocId) return;
     if (
@@ -306,18 +270,13 @@ export default function DocumentsPage() {
       return;
     }
     resetEditorState();
-    // 项目已在路径里，页面内 query 只保留 doc 等页面内状态，不再回写 project
+    // 项目已在路径里，页面内 query 只保留 doc 等页面内状态
     updateSearchParams({
-      project: null,
       doc: id,
     });
   };
 
   const handleCreate = async (parentId?: string) => {
-    if (!activeProjectId) {
-      toast.error("请先选择项目");
-      return;
-    }
     if (
       !confirmIfDirty(
         isDirty,
@@ -334,7 +293,6 @@ export default function DocumentsPage() {
       });
       resetEditorState();
       updateSearchParams({
-        project: null,
         doc: res.data.id,
       });
       toast.success("已创建文档");
@@ -383,7 +341,6 @@ export default function DocumentsPage() {
       await deleteDocument.mutateAsync(selectedDocId);
       resetEditorState();
       updateSearchParams({
-        project: null,
         doc: null,
       });
       toast.success("已删除文档");
@@ -392,20 +349,11 @@ export default function DocumentsPage() {
     }
   };
 
-  let mainContent: ReactNode;
-  if (!activeProjectId) {
-    mainContent = (
-      <div className="flex flex-1 flex-col items-center justify-center gap-2 text-muted-foreground">
-        <Inbox className="h-10 w-10" />
-        <p>请先选择项目</p>
-      </div>
-    );
-  } else {
-    mainContent = (
-      <div
-        className="flex min-h-0 flex-1 overflow-hidden border-t"
-        data-testid="documents-workspace"
-      >
+  const mainContent: ReactNode = (
+    <div
+      className="flex min-h-0 flex-1 overflow-hidden border-t"
+      data-testid="documents-workspace"
+    >
         <aside
           className="flex w-72 shrink-0 flex-col border-r bg-muted/20"
           data-testid="document-tree"
@@ -555,29 +503,11 @@ export default function DocumentsPage() {
           )}
         </section>
       </div>
-    );
-  }
+  );
 
   return (
     <div className="flex h-screen flex-col">
-      <Header
-        title="文档"
-        actions={
-          <HeaderActions
-            primary={
-              <ProjectSwitcher
-                value={activeProjectId}
-                onValueChange={handleProjectChange}
-                disabled={projectsLoading || projects.length === 0}
-                projects={projects}
-                placeholder="选择项目"
-                className="w-48"
-                data-testid="documents-project-select"
-              />
-            }
-          />
-        }
-      />
+      <Header title={<ProjectBreadcrumb section="文档" project={project} />} />
       {mainContent}
     </div>
   );

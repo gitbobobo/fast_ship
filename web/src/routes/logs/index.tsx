@@ -1,15 +1,13 @@
-import { useEffect, useMemo, useState } from "react";
-import { Link, useLocation, useNavigate, useSearchParams } from "react-router";
+import { useState } from "react";
+import { Link, useSearchParams } from "react-router";
 import {
   ChevronLeft,
   ChevronRight,
   Copy,
   Inbox,
   RotateCcw,
-  ScrollText,
   Trash2,
 } from "lucide-react";
-import { ProjectSwitcher } from "@/components/projects/project-switcher";
 import { Header } from "@/components/layout/header";
 import { HeaderActions } from "@/components/layout/header-actions";
 import { Button } from "@/components/ui/button";
@@ -27,16 +25,15 @@ import {
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
 import { Skeleton } from "@/components/ui/skeleton";
-import { useProjects } from "@/lib/hooks/use-projects";
 import {
   useClearProjectLogs,
   useDeleteLogRun,
   useLogRuns,
 } from "@/lib/hooks/use-logs";
-import { useProjectPreferenceStore } from "@/lib/store/project-preference-store";
-import { getActiveProjectId } from "@/lib/projects";
-import { useRouteProject } from "@/lib/current-project";
-import { projectSwitchPath } from "@/lib/project-nav";
+import {
+  ProjectBreadcrumb,
+  ProjectPageGate,
+} from "@/components/projects/project-page-chrome";
 import { copyWithToast } from "@/lib/copy";
 import { toast } from "sonner";
 
@@ -53,44 +50,25 @@ function formatTime(value: string | null): string {
 }
 
 export default function LogsPage() {
-  const { data: projectsData, isLoading: projectsLoading } = useProjects();
-  const projects = useMemo(() => projectsData?.items ?? [], [projectsData]);
+  // 项目上下文只认路径：列表加载中先渲染占位（冷启动无效 ID 不给数据请求窗口），
+  // 确认无效整页空态，其余放行（列表查询失败交给页面自身兜底）
+  return (
+    <ProjectPageGate>
+      {({ projectId, project }) => (
+        <LogsPageContent projectId={projectId} project={project} />
+      )}
+    </ProjectPageGate>
+  );
+}
 
+function LogsPageContent({
+  projectId,
+  project,
+}: {
+  projectId: string;
+  project: Project | undefined;
+}) {
   const [searchParams, setSearchParams] = useSearchParams();
-  const navigate = useNavigate();
-  const { pathname } = useLocation();
-  // 新路径 /projects/:id/logs 由路径提供项目；过渡期旧链接仍读 ?project=
-  const { projectId: routeProjectId } = useRouteProject();
-  const urlProjectId = routeProjectId || searchParams.get("project");
-  const { lastSelectedProjectId, setLastSelectedProjectId } =
-    useProjectPreferenceStore();
-
-  const [selectedProjectId, setSelectedProjectId] = useState<string>(
-    () => urlProjectId ?? lastSelectedProjectId ?? "",
-  );
-
-  const activeProjectId = useMemo(
-    () =>
-      routeProjectId || getActiveProjectId(projects, selectedProjectId, urlProjectId),
-    [routeProjectId, projects, selectedProjectId, urlProjectId],
-  );
-
-  const activeProject = useMemo(
-    () => projects.find((p) => p.id === activeProjectId),
-    [projects, activeProjectId],
-  );
-
-  useEffect(() => {
-    if (!projectsLoading && activeProjectId !== selectedProjectId) {
-      setSelectedProjectId(activeProjectId);
-      setLastSelectedProjectId(activeProjectId || null);
-    }
-  }, [
-    projectsLoading,
-    activeProjectId,
-    selectedProjectId,
-    setLastSelectedProjectId,
-  ]);
 
   const runIdFilter = searchParams.get("run_id") ?? "";
   const sourceFilter = searchParams.get("source") ?? "";
@@ -102,7 +80,7 @@ export default function LogsPage() {
     data: runsData,
     isLoading: runsLoading,
     isError: runsError,
-  } = useLogRuns(activeProjectId, {
+  } = useLogRuns(projectId, {
     run_id: runIdFilter || undefined,
     source: sourceFilter || undefined,
     from: datetimeLocalToISO(fromFilter),
@@ -115,8 +93,8 @@ export default function LogsPage() {
     null,
   );
 
-  const deleteRun = useDeleteLogRun(activeProjectId);
-  const clearProjectLogs = useClearProjectLogs(activeProjectId);
+  const deleteRun = useDeleteLogRun(projectId);
+  const clearProjectLogs = useClearProjectLogs(projectId);
 
   const runs = runsData?.items ?? [];
   const total = runsData?.total ?? 0;
@@ -139,24 +117,6 @@ export default function LogsPage() {
       next.delete("page");
     }
     setSearchParams(next, { replace: true });
-  };
-
-  const handleProjectChange = (value: string | null) => {
-    const nextValue = value ?? "";
-    // 新路径以 URL 为唯一事实源：切换项目即导航，state 由回填 effect 对齐；
-    // 旧路径维持 state + ?project= 行为
-    const to = projectSwitchPath(pathname, nextValue);
-    if (to) {
-      navigate(to);
-    } else {
-      setSelectedProjectId(nextValue);
-      const next = new URLSearchParams();
-      if (nextValue) {
-        next.set("project", nextValue);
-      }
-      setSearchParams(next, { replace: true });
-    }
-    setLastSelectedProjectId(nextValue || null);
   };
 
   const handleResetFilters = () => {
@@ -193,213 +153,182 @@ export default function LogsPage() {
   return (
     <>
       <Header
-        title="日志"
+        title={<ProjectBreadcrumb section="日志" project={project} />}
         actions={
-          activeProjectId ? (
-            <HeaderActions
-              primary={
-                <AlertDialog>
-                  <AlertDialogTrigger
-                    render={
-                      <Button variant="outline" size="sm" className="text-destructive">
-                        <Trash2 className="h-4 w-4" />
-                        清空项目日志
-                      </Button>
-                    }
-                  />
-                  <AlertDialogContent>
-                    <AlertDialogHeader>
-                      <AlertDialogTitle>清空项目日志？</AlertDialogTitle>
-                      <AlertDialogDescription>
-                        将删除「{activeProject?.name}」下的全部日志运行与条目，此操作不可撤销。
-                      </AlertDialogDescription>
-                    </AlertDialogHeader>
-                    <AlertDialogFooter>
-                      <AlertDialogCancel>取消</AlertDialogCancel>
-                      <AlertDialogAction
-                        onClick={() => void handleClearProject()}
-                        disabled={clearProjectLogs.isPending}
-                      >
-                        确认清空
-                      </AlertDialogAction>
-                    </AlertDialogFooter>
-                  </AlertDialogContent>
-                </AlertDialog>
-              }
-            />
-          ) : undefined
+          <HeaderActions
+            primary={
+              <AlertDialog>
+                <AlertDialogTrigger
+                  render={
+                    <Button variant="outline" size="sm" className="text-destructive">
+                      <Trash2 className="h-4 w-4" />
+                      清空项目日志
+                    </Button>
+                  }
+                />
+                <AlertDialogContent>
+                  <AlertDialogHeader>
+                    <AlertDialogTitle>清空项目日志？</AlertDialogTitle>
+                    <AlertDialogDescription>
+                      将删除「{project?.name}」下的全部日志运行与条目，此操作不可撤销。
+                    </AlertDialogDescription>
+                  </AlertDialogHeader>
+                  <AlertDialogFooter>
+                    <AlertDialogCancel>取消</AlertDialogCancel>
+                    <AlertDialogAction
+                      onClick={() => void handleClearProject()}
+                      disabled={clearProjectLogs.isPending}
+                    >
+                      确认清空
+                    </AlertDialogAction>
+                  </AlertDialogFooter>
+                </AlertDialogContent>
+              </AlertDialog>
+            }
+          />
         }
       />
       <div className="p-4 md:p-6 space-y-6">
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-            {projectsLoading ? (
-              <Skeleton className="h-10 w-48 rounded-md" />
-            ) : projects.length === 0 ? (
-              <p className="text-sm text-muted-foreground">暂无项目</p>
-            ) : (
-              <ProjectSwitcher
-                value={activeProjectId}
-                onValueChange={handleProjectChange}
-                projects={projects}
-                placeholder="请选择项目"
-                className="w-auto min-w-32"
-              />
-            )}
-          </div>
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+          <Input
+            placeholder="run_id"
+            value={runIdFilter}
+            onChange={(e) =>
+              updateSearchParams({ run_id: e.target.value || null }, true)
+            }
+          />
+          <Input
+            placeholder="运行 source"
+            value={sourceFilter}
+            onChange={(e) =>
+              updateSearchParams({ source: e.target.value || null }, true)
+            }
+          />
+          <Input
+            type="datetime-local"
+            value={fromFilter}
+            onChange={(e) =>
+              updateSearchParams({ from_local: e.target.value || null }, true)
+            }
+          />
+          <Input
+            type="datetime-local"
+            value={toFilter}
+            onChange={(e) =>
+              updateSearchParams({ to_local: e.target.value || null }, true)
+            }
+          />
+          {canResetFilters && (
+            <Button variant="ghost" size="sm" onClick={handleResetFilters}>
+              <RotateCcw className="h-4 w-4" />
+              重置筛选
+            </Button>
+          )}
         </div>
 
-        {!activeProjectId ? (
+        {runsLoading ? (
+          <div className="space-y-3">
+            {Array.from({ length: 5 }).map((_, i) => (
+              <Skeleton key={i} className="h-24 w-full rounded-lg" />
+            ))}
+          </div>
+        ) : runsError ? (
+          <Card>
+            <CardContent className="flex flex-col items-center justify-center gap-2 py-16 text-destructive">
+              <p className="text-sm">加载运行失败，请稍后重试</p>
+            </CardContent>
+          </Card>
+        ) : runs.length === 0 ? (
           <Card>
             <CardContent className="flex flex-col items-center justify-center gap-2 py-16 text-muted-foreground">
-              <ScrollText className="h-10 w-10 opacity-40" />
-              <p className="text-sm">请先选择项目以查看日志运行</p>
+              <Inbox className="h-10 w-10 opacity-40" />
+              <p className="text-sm">暂无匹配的日志运行</p>
             </CardContent>
           </Card>
         ) : (
-          <>
-            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-              <Input
-                placeholder="run_id"
-                value={runIdFilter}
-                onChange={(e) =>
-                  updateSearchParams({ run_id: e.target.value || null }, true)
-                }
-              />
-              <Input
-                placeholder="运行 source"
-                value={sourceFilter}
-                onChange={(e) =>
-                  updateSearchParams({ source: e.target.value || null }, true)
-                }
-              />
-              <Input
-                type="datetime-local"
-                value={fromFilter}
-                onChange={(e) =>
-                  updateSearchParams({ from_local: e.target.value || null }, true)
-                }
-              />
-              <Input
-                type="datetime-local"
-                value={toFilter}
-                onChange={(e) =>
-                  updateSearchParams({ to_local: e.target.value || null }, true)
-                }
-              />
-              {canResetFilters && (
-                <Button variant="ghost" size="sm" onClick={handleResetFilters}>
-                  <RotateCcw className="h-4 w-4" />
-                  重置筛选
-                </Button>
-              )}
-            </div>
-
-            {runsLoading ? (
-              <div className="space-y-3">
-                {Array.from({ length: 5 }).map((_, i) => (
-                  <Skeleton key={i} className="h-24 w-full rounded-lg" />
-                ))}
-              </div>
-            ) : runsError ? (
-              <Card>
-                <CardContent className="flex flex-col items-center justify-center gap-2 py-16 text-destructive">
-                  <p className="text-sm">加载运行失败，请稍后重试</p>
-                </CardContent>
-              </Card>
-            ) : runs.length === 0 ? (
-              <Card>
-                <CardContent className="flex flex-col items-center justify-center gap-2 py-16 text-muted-foreground">
-                  <Inbox className="h-10 w-10 opacity-40" />
-                  <p className="text-sm">暂无匹配的日志运行</p>
-                </CardContent>
-              </Card>
-            ) : (
-              <div className="space-y-3" data-testid="log-run-list">
-                {runs.map((run) => (
-                  <Card
-                    key={run.run_id}
-                    className="transition-all hover:border-primary/50 hover:shadow-sm"
-                  >
-                    <CardContent className="p-4">
-                      <div className="flex flex-wrap items-start gap-3">
-                        <Link
-                          to={`/projects/${activeProjectId}/logs/${run.run_id}`}
-                          className="group min-w-0 flex-1 space-y-1"
-                        >
-                          <p className="whitespace-pre-wrap text-sm font-medium group-hover:text-primary">
-                            {run.description || "（无说明）"}
-                          </p>
-                          <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
-                            <span>{run.entry_count} 条</span>
-                            <span className="font-mono">run:{run.run_id}</span>
-                            {run.source && <span>src:{run.source}</span>}
-                            <span>最近 {formatTime(run.last_entry_at)}</span>
-                          </div>
-                        </Link>
-                        <div className="flex items-center gap-1">
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            className="h-7"
-                            title={run.run_id}
-                            onClick={() =>
-                              void copyWithToast(run.run_id, "已复制运行 ID")
-                            }
-                          >
-                            <Copy className="h-3.5 w-3.5" />
-                            复制运行 ID
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            className="h-7 text-destructive"
-                            disabled={deleteRun.isPending}
-                            onClick={() => setPendingDeleteRunId(run.run_id)}
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                            删除
-                          </Button>
-                        </div>
+          <div className="space-y-3" data-testid="log-run-list">
+            {runs.map((run) => (
+              <Card
+                key={run.run_id}
+                className="transition-all hover:border-primary/50 hover:shadow-sm"
+              >
+                <CardContent className="p-4">
+                  <div className="flex flex-wrap items-start gap-3">
+                    <Link
+                      to={`/projects/${projectId}/logs/${run.run_id}`}
+                      className="group min-w-0 flex-1 space-y-1"
+                    >
+                      <p className="whitespace-pre-wrap text-sm font-medium group-hover:text-primary">
+                        {run.description || "（无说明）"}
+                      </p>
+                      <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
+                        <span>{run.entry_count} 条</span>
+                        <span className="font-mono">run:{run.run_id}</span>
+                        {run.source && <span>src:{run.source}</span>}
+                        <span>最近 {formatTime(run.last_entry_at)}</span>
                       </div>
-                    </CardContent>
-                  </Card>
-                ))}
-              </div>
-            )}
+                    </Link>
+                    <div className="flex items-center gap-1">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-7"
+                        title={run.run_id}
+                        onClick={() =>
+                          void copyWithToast(run.run_id, "已复制运行 ID")
+                        }
+                      >
+                        <Copy className="h-3.5 w-3.5" />
+                        复制运行 ID
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 text-destructive"
+                        disabled={deleteRun.isPending}
+                        onClick={() => setPendingDeleteRunId(run.run_id)}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                        删除
+                      </Button>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            ))}
+          </div>
+        )}
 
-            {totalPages > 1 && (
-              <div className="flex items-center justify-between">
-                <p className="text-sm text-muted-foreground">
-                  共 {total} 次运行，第 {page} / {totalPages} 页
-                </p>
-                <div className="flex items-center gap-2">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    disabled={page <= 1}
-                    onClick={() =>
-                      updateSearchParams({ page: String(page - 1) })
-                    }
-                  >
-                    <ChevronLeft className="h-4 w-4" />
-                    上一页
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    disabled={page >= totalPages}
-                    onClick={() =>
-                      updateSearchParams({ page: String(page + 1) })
-                    }
-                  >
-                    下一页
-                    <ChevronRight className="h-4 w-4" />
-                  </Button>
-                </div>
-              </div>
-            )}
-          </>
+        {totalPages > 1 && (
+          <div className="flex items-center justify-between">
+            <p className="text-sm text-muted-foreground">
+              共 {total} 次运行，第 {page} / {totalPages} 页
+            </p>
+            <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={page <= 1}
+                onClick={() =>
+                  updateSearchParams({ page: String(page - 1) })
+                }
+              >
+                <ChevronLeft className="h-4 w-4" />
+                上一页
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={page >= totalPages}
+                onClick={() =>
+                  updateSearchParams({ page: String(page + 1) })
+                }
+              >
+                下一页
+                <ChevronRight className="h-4 w-4" />
+              </Button>
+            </div>
+          </div>
         )}
       </div>
 

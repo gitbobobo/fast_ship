@@ -1,12 +1,11 @@
-import { useState, useEffect, useMemo } from "react";
-import { Link, useLocation, useNavigate, useSearchParams } from "react-router";
+import { useState, useEffect } from "react";
+import { Link, useSearchParams } from "react-router";
 import { Plus, Package } from "lucide-react";
 import { VersionFormDialog } from "@/components/versions/version-form-dialog";
-import { getActiveProjectId } from "@/lib/projects";
-import { useProjectPreferenceStore } from "@/lib/store/project-preference-store";
-import { useRouteProject } from "@/lib/current-project";
-import { projectSwitchPath } from "@/lib/project-nav";
-import { ProjectSwitcher } from "@/components/projects/project-switcher";
+import {
+  ProjectBreadcrumb,
+  ProjectPageGate,
+} from "@/components/projects/project-page-chrome";
 import { Header } from "@/components/layout/header";
 import { HeaderActions } from "@/components/layout/header-actions";
 import { Button } from "@/components/ui/button";
@@ -16,130 +15,64 @@ import {
   CardContent,
 } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
-import { useProjects } from "@/lib/hooks/use-projects";
 import { useVersions } from "@/lib/hooks/use-versions";
 import { formatRelativeTime } from "@/lib/utils/format";
 
 export default function VersionsPage() {
-  const { data: projectsData, isLoading: projectsLoading } = useProjects();
-  const projects = useMemo(
-    () => projectsData?.items ?? [],
-    [projectsData?.items],
+  // 项目上下文只认路径：列表加载中先渲染占位（冷启动无效 ID 不给数据请求窗口），
+  // 确认无效整页空态，其余放行（列表查询失败交给页面自身兜底）
+  return (
+    <ProjectPageGate>
+      {({ projectId, project }) => (
+        <VersionsPageContent projectId={projectId} project={project} />
+      )}
+    </ProjectPageGate>
   );
+}
+
+function VersionsPageContent({
+  projectId,
+  project,
+}: {
+  projectId: string;
+  project: Project | undefined;
+}) {
   const [searchParams, setSearchParams] = useSearchParams();
-  const navigate = useNavigate();
-  const { pathname } = useLocation();
-  // 新路径 /projects/:id/versions 由路径提供项目；过渡期旧链接仍读 ?project=
-  const { projectId: routeProjectId } = useRouteProject();
-  const urlProjectId = routeProjectId || searchParams.get("project");
-  const { lastSelectedProjectId, setLastSelectedProjectId } =
-    useProjectPreferenceStore();
-  const [selectedProjectId, setSelectedProjectId] = useState<string>(
-    () => urlProjectId ?? lastSelectedProjectId ?? "",
-  );
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
-  const activeProjectId = useMemo(
-    () =>
-      routeProjectId || getActiveProjectId(projects, selectedProjectId, urlProjectId),
-    [routeProjectId, projects, selectedProjectId, urlProjectId],
-  );
-
-  // 当 activeProjectId 回退到第一个项目时（如存储的项目被删除），同步 state 和 store
-  useEffect(() => {
-    if (!projectsLoading && activeProjectId !== selectedProjectId) {
-      setSelectedProjectId(activeProjectId);
-      setLastSelectedProjectId(activeProjectId || null);
-    }
-  }, [
-    projectsLoading,
-    activeProjectId,
-    selectedProjectId,
-    setLastSelectedProjectId,
-  ]);
 
   useEffect(() => {
-    if (
-      !projectsLoading &&
-      searchParams.get("create") === "1" &&
-      activeProjectId
-    ) {
+    if (searchParams.get("create") === "1") {
       setCreateDialogOpen(true);
       const next = new URLSearchParams(searchParams);
       next.delete("create");
       setSearchParams(next, { replace: true });
     }
-  }, [projectsLoading, searchParams, activeProjectId, setSearchParams]);
+  }, [searchParams, setSearchParams]);
 
   const { data: versionsData, isLoading: versionsLoading } = useVersions(
-    activeProjectId,
+    projectId,
   );
   const versions = versionsData?.items ?? [];
 
   return (
     <>
       <Header
-        title="版本"
+        title={<ProjectBreadcrumb section="版本" project={project} />}
         actions={
-          activeProjectId ? (
-            <HeaderActions
-              primary={
-                <Button size="sm" onClick={() => setCreateDialogOpen(true)}>
-                  <Plus className="mr-1.5 h-3.5 w-3.5" />
-                  创建版本
-                </Button>
-              }
-            />
-          ) : undefined
+          <HeaderActions
+            primary={
+              <Button size="sm" onClick={() => setCreateDialogOpen(true)}>
+                <Plus className="mr-1.5 h-3.5 w-3.5" />
+                创建版本
+              </Button>
+            }
+          />
         }
       />
       <div className="p-4 md:p-6 space-y-6">
         {/* 版本列表 */}
         <div>
-          <div className="mb-4 flex items-center justify-between gap-3">
-            <div className="flex items-center gap-3">
-              {projectsLoading ? (
-                <Skeleton className="h-10 w-64 rounded-md" />
-              ) : projects.length === 0 ? (
-                <p className="text-sm text-muted-foreground">暂无项目</p>
-              ) : (
-                <ProjectSwitcher
-                  value={activeProjectId}
-                  onValueChange={(value) => {
-                    const nextValue = value ?? "";
-                    // 新路径以 URL 为唯一事实源：切换项目即导航，state 由回填 effect 对齐；
-                    // 旧路径维持 state 行为
-                    const to = projectSwitchPath(pathname, nextValue);
-                    if (to) {
-                      navigate(to);
-                    } else {
-                      setSelectedProjectId(nextValue);
-                    }
-                    setLastSelectedProjectId(nextValue || null);
-                  }}
-                  projects={projects}
-                  placeholder="请选择项目"
-                  className="w-64"
-                />
-              )}
-            </div>
-          </div>
-
-          {projectsLoading ? (
-            <div className="space-y-3">
-              {Array.from({ length: 3 }).map((_, i) => (
-                <Skeleton key={i} className="h-16 rounded-lg" />
-              ))}
-            </div>
-          ) : projects.length === 0 ? (
-            <Card>
-              <CardContent className="flex flex-col items-center py-10">
-                <Package className="mb-3 h-10 w-10 text-muted-foreground/50" />
-                <p className="text-sm text-muted-foreground">
-                  暂无项目
-                </p>
-              </CardContent>
-            </Card>
-          ) : versionsLoading ? (
+          {versionsLoading ? (
             <div className="space-y-3">
               {Array.from({ length: 3 }).map((_, i) => (
                 <Skeleton key={i} className="h-16 rounded-lg" />
@@ -159,7 +92,7 @@ export default function VersionsPage() {
               {versions.map((version) => (
                 <Link
                   key={version.id}
-                  to={`/projects/${activeProjectId}/versions/${version.id}`}
+                  to={`/projects/${projectId}/versions/${version.id}`}
                 >
                   <Card className="transition-colors hover:border-primary/50">
                     <CardContent className="flex items-center justify-between py-4">
@@ -197,7 +130,7 @@ export default function VersionsPage() {
       <VersionFormDialog
         open={createDialogOpen}
         onOpenChange={setCreateDialogOpen}
-        projectId={activeProjectId}
+        projectId={projectId}
       />
     </>
   );

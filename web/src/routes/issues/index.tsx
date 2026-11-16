@@ -1,8 +1,5 @@
-import { useDeferredValue, useMemo, useState, useEffect } from "react";
+import { useDeferredValue } from "react";
 import { Link, useLocation, useNavigate, useSearchParams } from "react-router";
-import { useProjectPreferenceStore } from "@/lib/store/project-preference-store";
-import { useRouteProject } from "@/lib/current-project";
-import { projectSwitchPath } from "@/lib/project-nav";
 import {
   Bug,
   ChevronLeft,
@@ -12,7 +9,6 @@ import {
   ExternalLink,
   Inbox,
   Link2,
-  Package,
   Pencil,
   Plus,
   RefreshCw,
@@ -21,7 +17,6 @@ import {
   Clock,
   CheckCircle2,
 } from "lucide-react";
-import { ProjectSwitcher } from "@/components/projects/project-switcher";
 import { Header } from "@/components/layout/header";
 import { HeaderActions } from "@/components/layout/header-actions";
 import { Button } from "@/components/ui/button";
@@ -40,8 +35,10 @@ import {
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
-import { useProjects } from "@/lib/hooks/use-projects";
-import { getActiveProjectId } from "@/lib/projects";
+import {
+  ProjectBreadcrumb,
+  ProjectPageGate,
+} from "@/components/projects/project-page-chrome";
 import {
   useIssueFilterOptions,
   useIssues,
@@ -261,64 +258,25 @@ function IssueCardActions({
 }
 
 export default function IssuesPage() {
-  const { data: projectsData, isLoading: projectsLoading } = useProjects();
-  const projects = useMemo(() => projectsData?.items ?? [], [projectsData]);
-  const navigate = useNavigate();
-  const location = useLocation();
+  // 项目上下文只认路径：列表加载中先渲染占位（冷启动无效 ID 不给数据请求窗口），
+  // 确认无效整页空态，其余放行（列表查询失败交给页面自身兜底）
+  return (
+    <ProjectPageGate>
+      {({ projectId, project }) => (
+        <IssuesPageContent projectId={projectId} project={project} />
+      )}
+    </ProjectPageGate>
+  );
+}
 
+function IssuesPageContent({
+  projectId,
+  project,
+}: {
+  projectId: string;
+  project: Project | undefined;
+}) {
   const [searchParams, setSearchParams] = useSearchParams();
-  // 新路径 /projects/:id/issues 由路径提供项目；过渡期旧链接仍读 ?project=
-  const { projectId: routeProjectId } = useRouteProject();
-  const urlProjectId = routeProjectId || searchParams.get("project");
-  const { lastSelectedProjectId, setLastSelectedProjectId } =
-    useProjectPreferenceStore();
-
-  const [selectedProjectId, setSelectedProjectId] = useState<string>(
-    () => urlProjectId ?? lastSelectedProjectId ?? "",
-  );
-
-  const activeProjectId = useMemo(
-    () =>
-      routeProjectId || getActiveProjectId(projects, selectedProjectId, urlProjectId),
-    [routeProjectId, projects, selectedProjectId, urlProjectId],
-  );
-
-  const activeProject = useMemo(
-    () => projects.find((p) => p.id === activeProjectId),
-    [projects, activeProjectId],
-  );
-
-  // 当 activeProjectId 回退时（如存储的项目被删除），同步 state 和 store
-  useEffect(() => {
-    if (!projectsLoading && activeProjectId !== selectedProjectId) {
-      setSelectedProjectId(activeProjectId);
-      setLastSelectedProjectId(activeProjectId || null);
-    }
-  }, [
-    projectsLoading,
-    activeProjectId,
-    selectedProjectId,
-    setLastSelectedProjectId,
-  ]);
-
-  // Sync URL when active project changes from non-URL sources (e.g. first load)
-  // Also ensure default state filter is "open" when not specified
-  // Skip when user manually changes project (selectedProjectId matches activeProjectId)
-  useEffect(() => {
-    if (
-      activeProjectId &&
-      activeProjectId !== urlProjectId &&
-      selectedProjectId !== activeProjectId
-    ) {
-      const next = new URLSearchParams(searchParams);
-      next.set("project", activeProjectId);
-      next.delete("page");
-      if (!next.has("state")) {
-        next.set("state", "open");
-      }
-      setSearchParams(next, { replace: true });
-    }
-  }, [activeProjectId, urlProjectId, searchParams, setSearchParams, selectedProjectId]);
 
   // Filters from URL
   const issueStateFilter = searchParams.get("state") ?? "open";
@@ -337,7 +295,7 @@ export default function IssuesPage() {
   const deferredIssueQuery = useDeferredValue(issueQuery.trim());
 
   const { data: issuesData, isLoading: issuesLoading } = useIssues(
-    activeProjectId,
+    projectId,
     {
       state: issueStateFilter === "all" ? undefined : issueStateFilter,
       q: deferredIssueQuery || undefined,
@@ -352,9 +310,9 @@ export default function IssuesPage() {
   );
 
   const { data: filterOptionsData, isLoading: filtersLoading } =
-    useIssueFilterOptions(activeProjectId);
+    useIssueFilterOptions(projectId);
 
-  const syncIssues = useSyncProjectIssues(activeProjectId);
+  const syncIssues = useSyncProjectIssues(projectId);
 
   const issues = issuesData?.items ?? [];
   const issueTotal = issuesData?.total ?? 0;
@@ -362,7 +320,7 @@ export default function IssuesPage() {
   const issueTotalPages = Math.max(Math.ceil(issueTotal / issuePageSize), 1);
 
   const labels = filterOptionsData?.labels ?? [];
-  const issueSync = activeProject?.issue_sync;
+  const issueSync = project?.issue_sync;
 
   const updateSearchParams = (
     updates: Record<string, string | null>,
@@ -380,24 +338,6 @@ export default function IssuesPage() {
       next.delete("page");
     }
     setSearchParams(next, { replace: true });
-  };
-
-  const handleProjectChange = (value: string | null) => {
-    const nextValue = value ?? "";
-    // 新路径以 URL 为唯一事实源：切换项目即导航到目标项目的问题列表，
-    // selectedProjectId 由回填 effect 对齐；旧路径维持 state + ?project= 行为
-    const to = projectSwitchPath(location.pathname, nextValue);
-    if (to) {
-      navigate(to);
-    } else {
-      setSelectedProjectId(nextValue);
-      const next = new URLSearchParams();
-      if (nextValue) {
-        next.set("project", nextValue);
-      }
-      setSearchParams(next, { replace: true });
-    }
-    setLastSelectedProjectId(nextValue || null);
   };
 
   const handleResetFilters = () => {
@@ -444,38 +384,62 @@ export default function IssuesPage() {
   return (
     <>
       <Header
-        title="问题"
+        title={<ProjectBreadcrumb section="问题" project={project} />}
         actions={
-          activeProjectId ? (
-            <HeaderActions
-              primary={
-                <Button
-                  variant="outline"
-                  size="sm"
-                  render={
-                    <Link
-                      to={{
-                        pathname: `/projects/${activeProjectId}/issues/new`,
-                        search: searchParams.toString()
-                          ? `?${searchParams.toString()}`
-                          : "",
-                      }}
-                    />
-                  }
-                >
-                  <Plus className="mr-1.5 h-3.5 w-3.5" />
-                  新建问题
-                </Button>
-              }
+          <HeaderActions
+            primary={
+              <Button
+                variant="outline"
+                size="sm"
+                render={
+                  <Link
+                    to={{
+                      pathname: `/projects/${projectId}/issues/new`,
+                      search: searchParams.toString()
+                        ? `?${searchParams.toString()}`
+                        : "",
+                    }}
+                  />
+                }
+              >
+                <Plus className="mr-1.5 h-3.5 w-3.5" />
+                新建问题
+              </Button>
+            }
               secondary={[
+                ...(issueSync
+                  ? [
+                      <span
+                        key="sync-status"
+                        className={cn(
+                          "max-w-[12rem] truncate text-xs text-muted-foreground",
+                          issueSync.status === "failed" && "text-destructive",
+                        )}
+                        title={
+                          issueSync.status === "failed" && issueSync.last_error
+                            ? issueSync.last_error
+                            : undefined
+                        }
+                      >
+                        {issueSync.status === "running"
+                          ? "GitHub 同步中…"
+                          : issueSync.status === "failed"
+                            ? `GitHub 同步失败${issueSync.last_error ? ` · ${issueSync.last_error}` : ""}`
+                            : issueSync.status === "completed" &&
+                                issueSync.last_synced_at
+                              ? `GitHub ${formatRelativeTime(issueSync.last_synced_at)}同步完成`
+                              : "GitHub 未同步"}
+                      </span>,
+                    ]
+                  : []),
                 <Button
                   key="sync"
                   variant="outline"
                   size="sm"
                   onClick={() => {
                     if (
-                      ensureGitHubLinked(activeProject, "同步 Issue") &&
-                      ensureGitHubToken(activeProject, "同步 Issue")
+                      ensureGitHubLinked(project, "同步 Issue") &&
+                      ensureGitHubToken(project, "同步 Issue")
                     ) {
                       handleSync();
                     }
@@ -496,7 +460,7 @@ export default function IssuesPage() {
                   )}
                   {syncIssues.isPending ? "同步中..." : "同步"}
                 </Button>,
-                ...(hasGitHubRepo(activeProject)
+                ...(hasGitHubRepo(project)
                   ? [
                       <Button
                         key="github"
@@ -505,7 +469,7 @@ export default function IssuesPage() {
                         aria-label="在 GitHub 打开仓库"
                         render={
                           <a
-                            href={activeProject!.repository_url ?? undefined}
+                            href={project!.repository_url ?? undefined}
                             target="_blank"
                             rel="noopener noreferrer"
                           />
@@ -517,55 +481,11 @@ export default function IssuesPage() {
                   : []),
               ]}
             />
-          ) : undefined
         }
       />
       <div className="p-4 md:p-6 space-y-6">
-        {/* Project selector + sync status */}
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-            {projectsLoading ? (
-              <Skeleton className="h-10 w-48 rounded-md" />
-            ) : projects.length === 0 ? (
-              <p className="text-sm text-muted-foreground">暂无项目</p>
-            ) : (
-              <ProjectSwitcher
-                value={activeProjectId}
-                onValueChange={handleProjectChange}
-                projects={projects}
-                placeholder="请选择项目"
-                className="w-auto min-w-32"
-              />
-            )}
-
-            {activeProject && issueSync && (
-              <span
-                className={cn(
-                  "max-w-xs truncate text-xs text-muted-foreground",
-                  issueSync.status === "failed" && "text-destructive",
-                )}
-                title={
-                  issueSync.status === "failed" && issueSync.last_error
-                    ? issueSync.last_error
-                    : undefined
-                }
-              >
-                {issueSync.status === "running"
-                  ? "同步中…"
-                  : issueSync.status === "failed"
-                    ? `同步失败${issueSync.last_error ? ` · ${issueSync.last_error}` : ""}`
-                    : issueSync.status === "completed" &&
-                        issueSync.last_synced_at
-                      ? `${formatRelativeTime(issueSync.last_synced_at)}同步完成`
-                      : "未同步"}
-              </span>
-            )}
-          </div>
-        </div>
-
         {/* Filters */}
-        {activeProjectId && (
-          <div className="flex flex-wrap items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
             <div className="relative">
               <Search className="pointer-events-none absolute top-1/2 left-2.5 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
               <Input
@@ -664,36 +584,15 @@ export default function IssuesPage() {
               <RotateCcw className="mr-1.5 h-3.5 w-3.5" />
               重置
             </Button>
-          </div>
-        )}
+        </div>
 
         {/* Issues list */}
-        {projectsLoading || issuesLoading ? (
+        {issuesLoading ? (
           <div className="space-y-3">
             {Array.from({ length: 4 }).map((_, i) => (
               <Skeleton key={i} className="h-24 rounded-lg" />
             ))}
           </div>
-        ) : projects.length === 0 ? (
-          <Card>
-            <CardContent className="flex flex-col items-center justify-center py-16 text-center">
-              <Package className="mb-4 h-12 w-12 text-muted-foreground/50" />
-              <h3 className="text-lg font-medium">暂无项目</h3>
-              <p className="mt-1 text-sm text-muted-foreground">
-                创建项目后即可同步和管理 GitHub Issues
-              </p>
-            </CardContent>
-          </Card>
-        ) : !activeProjectId ? (
-          <Card>
-            <CardContent className="flex flex-col items-center justify-center py-16 text-center">
-              <Package className="mb-4 h-12 w-12 text-muted-foreground/50" />
-              <h3 className="text-lg font-medium">请选择项目</h3>
-              <p className="mt-1 text-sm text-muted-foreground">
-                从上方下拉菜单选择一个项目以查看问题列表
-              </p>
-            </CardContent>
-          </Card>
         ) : issues.length === 0 ? (
           <Card>
             <CardContent className="flex flex-col items-center justify-center py-16 text-center">
@@ -714,7 +613,7 @@ export default function IssuesPage() {
               <Link
                 key={issue.id}
                 to={{
-                  pathname: `/projects/${activeProjectId}/issues/${issue.id}`,
+                  pathname: `/projects/${projectId}/issues/${issue.id}`,
                   search: issueDetailSearch ? `?${issueDetailSearch}` : "",
                 }}
                 className="group block"

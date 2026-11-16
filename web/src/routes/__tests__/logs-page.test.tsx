@@ -42,7 +42,6 @@ vi.mock("@/lib/hooks/use-logs", () => ({
   useDeleteLogRun: () => ({ mutateAsync: vi.fn(), isPending: false }),
   useClearProjectLogs: () => ({ mutateAsync: vi.fn(), isPending: false }),
 }));
-
 vi.mock("@/lib/api/logs", () => ({
   logApi: {
     listRuns: (...args: unknown[]) => listRunsMock(...args),
@@ -51,13 +50,6 @@ vi.mock("@/lib/api/logs", () => ({
 
 vi.mock("@/lib/copy", () => ({
   copyWithToast: (...args: unknown[]) => copyWithToastMock(...args),
-}));
-
-vi.mock("@/lib/store/project-preference-store", () => ({
-  useProjectPreferenceStore: () => ({
-    lastSelectedProjectId: "proj-1",
-    setLastSelectedProjectId: vi.fn(),
-  }),
 }));
 
 function renderLogs() {

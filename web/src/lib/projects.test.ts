@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getActiveProjectId, shelvedStatusLabel } from "./projects";
+import { shelvedStatusLabel } from "./projects";
 
 function makeProject(
   id: string,
@@ -27,45 +27,6 @@ function makeProject(
     updated_at: "2026-10-01T00:00:00Z",
   };
 }
-
-describe("getActiveProjectId", () => {
-  const projects = [
-    makeProject("a"),
-    makeProject("b", { shelved: true }),
-    makeProject("c"),
-  ];
-
-  it("已选项在列表中直接沿用，即使是搁置项目", () => {
-    expect(getActiveProjectId(projects, "b", null)).toBe("b");
-  });
-
-  it("已选项不在列表中时回落到 URL 指定项目，含搁置项目", () => {
-    expect(getActiveProjectId(projects, "ghost", "b")).toBe("b");
-    expect(getActiveProjectId(projects, "ghost", "c")).toBe("c");
-  });
-
-  it("两个指定都未命中时选第一个未搁置项目", () => {
-    expect(getActiveProjectId(projects, "ghost", "ghost2")).toBe("a");
-    const shelvedFirst = [
-      makeProject("x", { shelved: true }),
-      makeProject("y"),
-      makeProject("z"),
-    ];
-    expect(getActiveProjectId(shelvedFirst, "", null)).toBe("y");
-  });
-
-  it("全部项目搁置时回落到列表首项", () => {
-    const allShelved = [
-      makeProject("x", { shelved: true }),
-      makeProject("y", { shelved: true }),
-    ];
-    expect(getActiveProjectId(allShelved, "", null)).toBe("x");
-  });
-
-  it("空列表返回空串", () => {
-    expect(getActiveProjectId([], "", null)).toBe("");
-  });
-});
 
 describe("shelvedStatusLabel", () => {
   it("未搁置返回 null", () => {
