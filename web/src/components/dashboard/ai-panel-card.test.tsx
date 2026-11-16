@@ -24,7 +24,7 @@ describe("AiPanelCard", () => {
                   running: 0,
                   waiting: 0,
                   queued: 0,
-                  readable: false,
+                  readable: true,
                 },
               ],
             },
@@ -55,7 +55,6 @@ describe("AiPanelCard", () => {
 
     expect(screen.getByTestId("ai-panel-card")).toBeInTheDocument();
     expect(screen.getByText("运行 2 · 等待 1 · 排队 1")).toBeInTheDocument();
-    expect(screen.getByText("本轮不可读")).toBeInTheDocument();
     // 通过率 = 3/(3+1) = 75%
     expect(screen.getByText("通过率 75%")).toBeInTheDocument();
     expect(screen.getByText("Tokens · 请求（1 个机器人）")).toBeInTheDocument();
@@ -64,6 +63,60 @@ describe("AiPanelCard", () => {
     expect(screen.getByText("未计价")).toBeInTheDocument();
     expect(screen.getByText(/下次任务/)).toBeInTheDocument();
     expect(screen.getByText(/晚报 · 值夜机器人/)).toBeInTheDocument();
+  });
+
+  it("keeps healthy env rows visible when the block is partially readable", () => {
+    // 后端可产出形态：complete=false 时载荷里的不可读行必须带 readable:false；
+    // 可读环境的行不能被整块短路隐藏（panel P3）。
+    render(
+      <MemoryRouter>
+        <AiPanelCard
+          ai={{
+            t3: {
+              complete: false,
+              environments: [
+                {
+                  environment_id: "env-1",
+                  environment_name: "工作站",
+                  running: 2,
+                  waiting: 1,
+                  queued: 1,
+                  readable: true,
+                },
+                {
+                  environment_id: "env-2",
+                  environment_name: "离线机",
+                  running: 0,
+                  waiting: 0,
+                  queued: 0,
+                  readable: false,
+                },
+              ],
+            },
+          }}
+        />
+      </MemoryRouter>,
+    );
+
+    // 健康行仍在，不可读行标「本轮不可读」，区块头带琥珀色降级徽章
+    expect(screen.getByText("运行 2 · 等待 1 · 排队 1")).toBeInTheDocument();
+    expect(screen.getByText("本轮不可读")).toBeInTheDocument();
+    expect(screen.getByText("部分环境暂不可用")).toBeInTheDocument();
+    expect(screen.queryByText("暂不可用")).not.toBeInTheDocument();
+  });
+
+  it("shows 暂不可用 only when degraded with no environment rows", () => {
+    render(
+      <MemoryRouter>
+        <AiPanelCard
+          ai={{
+            t3: { complete: false, environments: [] },
+          }}
+        />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByTestId("ai-t3-section")).toHaveTextContent("暂不可用");
   });
 
   it("hides the pass rate when its denominator is zero and shows the empty bots state", () => {

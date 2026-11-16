@@ -52,13 +52,30 @@ export function AiPanelCard({ ai }: { ai: AiBlock }) {
 }
 
 function AiT3Section({ t3 }: { t3: NonNullable<AiBlock["t3"]> }) {
+  // 降级不整块短路（panel P3）：可读环境的行照常展示，不可读的行才标
+  // 「本轮不可读」；有环境行且降级时区块标头加琥珀色「部分环境暂不可用」
+  // 徽章（与「待我处理」t3_waiting 组的琥珀徽章同款）。只有 environments
+  // 为空且降级才是整块「暂不可用」。
+  const degraded = t3.complete === false;
   return (
     <section className="space-y-2 py-3 first:pt-0" data-testid="ai-t3-section">
-      <SectionHeader icon={Hourglass} title="T3 线程" />
-      {t3.complete === false ? (
-        <SectionUnavailable />
-      ) : t3.environments.length === 0 ? (
-        <p className="text-xs text-muted-foreground">没有活跃线程</p>
+      <SectionHeader
+        icon={Hourglass}
+        title="T3 线程"
+        trailing={
+          degraded && t3.environments.length > 0 ? (
+            <span className="rounded-full bg-amber-500/10 px-2 py-0.5 text-[11px] font-medium text-amber-700 dark:text-amber-400">
+              部分环境暂不可用
+            </span>
+          ) : undefined
+        }
+      />
+      {t3.environments.length === 0 ? (
+        degraded ? (
+          <SectionUnavailable />
+        ) : (
+          <p className="text-xs text-muted-foreground">没有活跃线程</p>
+        )
       ) : (
         <ul className="space-y-1">
           {t3.environments.map((env) => (
