@@ -107,6 +107,43 @@ describe("AiPanelCard", () => {
     expect(screen.queryByText("暂不可用")).not.toBeInTheDocument();
   });
 
+  it("shows 暂不可用 badge when every env is unreadable (PR#215 Note2)", () => {
+    // 全不可读时不能再写「部分」：徽章文案按可读行数区分。
+    render(
+      <MemoryRouter>
+        <AiPanelCard
+          ai={{
+            t3: {
+              complete: false,
+              environments: [
+                {
+                  environment_id: "env-1",
+                  environment_name: "离线机一",
+                  running: 0,
+                  waiting: 0,
+                  queued: 0,
+                  readable: false,
+                },
+                {
+                  environment_id: "env-2",
+                  environment_name: "离线机二",
+                  running: 0,
+                  waiting: 0,
+                  queued: 0,
+                  readable: false,
+                },
+              ],
+            },
+          }}
+        />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getAllByText("本轮不可读")).toHaveLength(2);
+    expect(screen.getByText("暂不可用")).toBeInTheDocument();
+    expect(screen.queryByText("部分环境暂不可用")).not.toBeInTheDocument();
+  });
+
   it("shows 暂不可用 only when degraded with no environment rows", () => {
     render(
       <MemoryRouter>

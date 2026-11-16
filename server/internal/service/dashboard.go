@@ -18,8 +18,6 @@ const (
 	dashboardPendingVersionsMax   = 3
 	dashboardRecentReleasesMax    = 5
 	dashboardCycleTimeMax         = 5
-	dashboardBacklogUnder7Days    = 7 * 24 * time.Hour
-	dashboardBacklogUnder30Days   = 30 * 24 * time.Hour
 	dashboardReviewsWindowDays    = 30
 )
 
@@ -285,12 +283,10 @@ func (s *DashboardService) buildAiBots(userID string) *api.DashboardAiBots {
 		TotalRequests: overview.Totals.TotalRequests,
 		TotalTokens:   overview.Totals.TotalTokens,
 	}
-	task, err := s.dashboardRepo.GetNextScheduleTask(userID)
-	if err != nil {
-		bots.Complete = api.Ptr(false)
-		return bots
-	}
-	if task != nil {
+	// next_schedule 单独查询，失败只省略该子信息（省略 ⟺ 无任务或查询暂
+	// 不可用，契约已注明），不降级整块——用量数据已成功拿到，不能因辅助
+	// 查询失败隐藏有效数据（PR#215 审查 P2）。
+	if task, err := s.dashboardRepo.GetNextScheduleTask(userID); err == nil && task != nil {
 		bots.NextSchedule = &api.DashboardAiBotNextSchedule{
 			BotId:     task.BotID,
 			BotName:   task.BotName,
@@ -356,8 +352,11 @@ func (s *DashboardService) buildFlow(userID string, startInclusive, endExclusive
 		return degraded()
 	}
 
-	now := time.Now().UTC()
-	age, err := s.dashboardRepo.GetBacklogAge(userID, now.Add(-dashboardBacklogUnder7Days), now.Add(-dashboardBacklogUnder30Days))
+	// 积压年龄分档边界按 UTC 整日（与 openapi/仓库注释声明的口径一致，
+	// PR#215 审查 Note1）：精确到时刻会让「7 天内」实为 168 小时窗口。
+	today := time.Now().UTC().Truncate(24 * time.Hour)
+	age, err := s.dashboardRepo.GetBacklogAge(userID,
+		today.AddDate(0, 0, -7), today.AddDate(0, 0, -30))
 	if err != nil {
 		return degraded()
 	}

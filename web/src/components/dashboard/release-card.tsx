@@ -115,12 +115,17 @@ export function ReleaseCard({ release }: { release: ReleaseBlock }) {
   );
 }
 
-/** 距今 N 天（自然日向下取整）；无效时间返回 null，今天发版返回「今天」。 */
+/** 距今 N 天（按本地自然日差，PR#215 审查 Note3）；无效时间返回 null，今天发版返回「今天」。 */
 function daysAgoText(iso: string | null | undefined) {
   if (!iso) return null;
-  const time = new Date(iso).getTime();
-  if (Number.isNaN(time)) return null;
-  const days = Math.floor((Date.now() - time) / 86_400_000);
+  const time = new Date(iso);
+  if (Number.isNaN(time.getTime())) return null;
+  const today = new Date();
+  const days = Math.round(
+    (Date.UTC(today.getFullYear(), today.getMonth(), today.getDate()) -
+      Date.UTC(time.getFullYear(), time.getMonth(), time.getDate())) /
+      86_400_000,
+  );
   if (days <= 0) return "今天";
   return `${days} 天`;
 }

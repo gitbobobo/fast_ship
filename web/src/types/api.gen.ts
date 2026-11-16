@@ -5377,7 +5377,7 @@ export interface components {
              */
             pass_rate: number | null;
         };
-        /** @description 机器人近 7 天用量（按用户时区聚合，与机器人页用量口径同源）；next_schedule 为 null 表示没有开启且排了下一次触发的任务 */
+        /** @description 机器人近 7 天用量（按用户时区聚合，与机器人页用量口径同源）；用量查询失败才整体降级（complete=false），next_schedule 省略不影响本块有效性 */
         DashboardAiBots: {
             /** @description false = 用量服务查询失败降级；成功时不返回 */
             complete?: boolean;
@@ -5397,7 +5397,7 @@ export interface components {
              * @description prompt+completion（NULL 记 0）；reasoning ⊆ completion 已含其中，不重复计
              */
             total_tokens: number;
-            /** @description 最近一次将触发的已启用定时任务；没有时省略 */
+            /** @description 最近一次将触发的已启用定时任务；没有任务或该查询暂不可用时省略（省略不代表无任务） */
             next_schedule?: components["schemas"]["DashboardAiBotNextSchedule"];
         };
         DashboardAiBotNextSchedule: {

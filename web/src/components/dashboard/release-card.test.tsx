@@ -77,4 +77,63 @@ describe("ReleaseCard", () => {
     expect(screen.queryByText(/距上次发版/)).not.toBeInTheDocument();
     expect(screen.getByTestId("release-card")).toHaveTextContent("暂不可用");
   });
+
+  it("computes the last-release badge by local natural day (PR#215 Note3)", () => {
+    // 昨天本地 00:05 发版：自然日差是 1 天，不能因不足 24 小时显示「今天」。
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    yesterday.setHours(0, 5, 0, 0);
+    render(
+      <MemoryRouter>
+        <ReleaseCard
+          release={{
+            pending_count: 0,
+            pending_versions: [],
+            recent_releases: [
+              {
+                version_id: "v0",
+                version_number: "v1.9.0",
+                project_id: "p1",
+                project_name: "Alpha App",
+                created_at: yesterday.toISOString(),
+                shipped_at: yesterday.toISOString(),
+                href: "/projects/p1/versions/v0",
+              },
+            ],
+            unmerged_pr_issue_count: 0,
+          }}
+        />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByText("距上次发版 1 天")).toBeInTheDocument();
+  });
+
+  it("shows 时间未知 for releases whose shipped_at is null (panel round2 F1)", () => {
+    render(
+      <MemoryRouter>
+        <ReleaseCard
+          release={{
+            pending_count: 0,
+            pending_versions: [],
+            recent_releases: [
+              {
+                version_id: "v0",
+                version_number: "v1.9.0",
+                project_id: "p1",
+                project_name: "Alpha App",
+                created_at: "2026-05-20T00:00:00Z",
+                shipped_at: null,
+                href: "/projects/p1/versions/v0",
+              },
+            ],
+            unmerged_pr_issue_count: 0,
+          }}
+        />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByText("时间未知")).toBeInTheDocument();
+    expect(screen.queryByText(/距上次发版/)).not.toBeInTheDocument();
+  });
 });

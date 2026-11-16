@@ -954,6 +954,38 @@ func TestDashboardAiBotsDegradedOnError(t *testing.T) {
 	// 顶层 complete 已删（panel P6，无客户端）：子块级降级语义足够。
 }
 
+// PR#215 审查 P2：next_schedule 查询失败只省略该子信息（省略 ⟺ 无任务
+// 或查询暂不可用），不降级整块——用量数据已成功拿到，complete 不得置
+// false。
+func TestDashboardAiBotsScheduleFailureKeepsUsage(t *testing.T) {
+	db := newDashboardServiceTestDB(t)
+	userID := dashboardSeedUser(t, db)
+	if err := db.Migrator().DropTable(&model.BotScheduleTask{}); err != nil {
+		t.Fatalf("drop table: %v", err)
+	}
+	svc := newDashboardServiceWithAI(t, db, &fakeUnreadCounter{count: 0}, &fakeT3WaitingSource{result: nil},
+		nil,
+		&fakeBotUsageSource{overview: &api.BotUsageOverview{
+			Timezone: "Asia/Shanghai",
+			Totals:   api.BotUsageTotals{TotalRequests: 7, TotalTokens: 8848},
+			Bots:     []api.BotUsageBot{{BotId: "b1", Name: "机器人"}},
+		}})
+	resp, err := svc.GetOverview(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("GetOverview: %v", err)
+	}
+	bots := resp.Ai.Bots
+	if bots == nil || bots.Complete != nil {
+		t.Fatalf("usage data must stay valid without complete flag: %+v", bots)
+	}
+	if bots.TotalRequests != 7 || bots.TotalTokens != 8848 {
+		t.Fatalf("usage must be intact: %+v", bots)
+	}
+	if bots.NextSchedule != nil {
+		t.Fatalf("next_schedule must be omitted on query failure: %+v", bots.NextSchedule)
+	}
+}
+
 // buildAiQuota：快照透传（前端算剩余百分比）；服务错误吞掉降级；窄接口
 // nil 时子块整体缺席。
 func TestDashboardAiQuotaBlock(t *testing.T) {
