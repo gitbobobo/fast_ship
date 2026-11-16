@@ -20,6 +20,9 @@ import {
   type MetricChartPoint,
   type MetricChartSeriesPoint,
 } from "@/components/dashboard/metric-chart";
+import { FlowCard } from "@/components/dashboard/flow-card";
+import { AiPanelCard } from "@/components/dashboard/ai-panel-card";
+import { ReleaseCard } from "@/components/dashboard/release-card";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -40,7 +43,6 @@ function formatDailyAverage(value: number) {
   if (value > 0 && value < 0.1) return "<0.1";
   return value.toFixed(1);
 }
-
 
 function formatDate() {
   const now = new Date();
@@ -86,6 +88,16 @@ export default function DashboardPage() {
   // 当成当前状态：所有数字与趋势展示统一走这一个条件。
   const unavailable = isLoading || isError;
 
+  const groups = useMemo<ActionItemGroup[]>(
+    () => data?.action_item_groups ?? [],
+    [data],
+  );
+  const pendingTotal = groups.reduce((sum, group) => sum + group.count, 0);
+  // 任一组不完整时真实待办只会更多：摘要句用 M+ 表达下界，不假装精确。
+  const anyGroupIncomplete = groups.some(
+    (group) => group.complete === false,
+  );
+
   const openIssuePoints = useMemo<MetricChartPoint[]>(() => {
     return (
       data?.open_issues_by_project.map((item) => ({
@@ -110,6 +122,26 @@ export default function DashboardPage() {
           : [],
       })) ?? []
     );
+  }, [data]);
+
+  // 流转效率：新建 vs 已解决按 date 对齐成两条堆叠序列（纯展示，不做方向判断）。
+  const flowPoints = useMemo<MetricChartSeriesPoint[]>(() => {
+    if (!data?.flow) return [];
+    const resolvedByDate = new Map(
+      data.daily_resolved.map((point) => [point.date, point.resolved_count]),
+    );
+    return data.flow.daily_created.map((point) => {
+      const resolved = resolvedByDate.get(point.date) ?? 0;
+      return {
+        label: point.date,
+        shortLabel: formatDateLabel(point.date),
+        value: point.created_count + resolved,
+        series: [
+          { id: "created", name: "新建", value: point.created_count },
+          { id: "resolved", name: "已解决", value: resolved },
+        ],
+      };
+    });
   }, [data]);
 
   const configuredProjectCount = data?.open_issues_by_project.length ?? 0;
@@ -137,13 +169,19 @@ export default function DashboardPage() {
       <Header title="仪表盘" />
 
       <div className="flex-1 space-y-8 p-4 md:p-6">
-        {/* Hero */}
+        {/* Hero：有数据时给一句摘要（「今天」是 UTC 日，不能用于东八区早上，
+            所以问候语只在无数据可说时兜底）；任一组不完整用 M+ 表达下界。
+            N 与「近 30 天已解决」KPI 同源（30 天合计），不再另立尾 7 天窗口（W7） */}
         <section className="space-y-1">
           <p className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
             {formatDate()}
           </p>
           <h2 className="text-2xl font-bold tracking-tight md:text-3xl">
-            {getGreeting()}，查看今日项目概况
+            {unavailable
+              ? `${getGreeting()}，查看今日项目概况`
+              : `近 30 天解决 ${totalResolvedIssues} 个问题，${pendingTotal}${
+                  anyGroupIncomplete ? "+" : ""
+                } 件事等你处理`}
           </h2>
         </section>
 
@@ -169,151 +207,184 @@ export default function DashboardPage() {
           </div>
         )}
 
-        {/* 待我处理：加载用骨架屏，失败不渲染，绝不能把旧数字当当前状态 */}
-        {isLoading ? (
-          <Card className="overflow-hidden">
-            <CardContent className="space-y-4 p-5">
-              <Skeleton className="h-4 w-24" />
-              <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-                <Skeleton className="h-28 w-full" />
-                <Skeleton className="h-28 w-full" />
-                <Skeleton className="h-28 w-full" />
-              </div>
-            </CardContent>
-          </Card>
-        ) : isError ? null : (
-          <ActionItemsCard groups={data?.action_item_groups ?? []} />
-        )}
+        <div className="grid items-start gap-8 xl:grid-cols-2">
+          {/* 左列：KPI → 待我处理 → 流转效率 → 图表；窄屏按 DOM 顺序单列 */}
+          <div className="space-y-8">
+            {/* KPI Cards */}
+            <section className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              <KpiCard
+                icon={FolderKanban}
+                label="已配置项目"
+                value={unavailable ? null : configuredProjectCount}
+                isLoading={isLoading}
+                tone="neutral"
+                href="/projects"
+              />
+              <KpiCard
+                icon={Bug}
+                label="剩余开启问题"
+                value={unavailable ? null : totalOpenIssues}
+                isLoading={isLoading}
+                tone={
+                  unavailable
+                    ? "neutral"
+                    : totalOpenIssues > 0
+                      ? "warning"
+                      : "neutral"
+                }
+              />
+              <KpiCard
+                icon={CalendarDays}
+                label="近 30 天已解决"
+                value={unavailable ? null : totalResolvedIssues}
+                isLoading={isLoading}
+                tone={
+                  unavailable
+                    ? "neutral"
+                    : totalResolvedIssues > 0
+                      ? "positive"
+                      : "neutral"
+                }
+                // 迷你趋势只给这一张卡：最后一点是尚未结束的 UTC 当天，
+                // 仅展示不判断方向。
+                sparkline={
+                  unavailable
+                    ? undefined
+                    : data?.daily_resolved
+                        .slice(-7)
+                        .map((point) => point.resolved_count)
+                }
+              />
+            </section>
 
-        {/* KPI Cards */}
-        <section className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          <KpiCard
-            icon={FolderKanban}
-            label="已配置项目"
-            value={unavailable ? null : configuredProjectCount}
-            isLoading={isLoading}
-            tone="neutral"
-            href="/projects"
-          />
-          <KpiCard
-            icon={Bug}
-            label="剩余开启问题"
-            value={unavailable ? null : totalOpenIssues}
-            isLoading={isLoading}
-            tone={
-              unavailable
-                ? "neutral"
-                : totalOpenIssues > 0
-                  ? "warning"
-                  : "neutral"
-            }
-          />
-          <KpiCard
-            icon={CalendarDays}
-            label="近 30 天已解决"
-            value={unavailable ? null : totalResolvedIssues}
-            isLoading={isLoading}
-            tone={
-              unavailable
-                ? "neutral"
-                : totalResolvedIssues > 0
-                  ? "positive"
-                  : "neutral"
-            }
-          />
-        </section>
+            {shelvedCount > 0 && (
+              <p className="-mt-4 text-xs text-muted-foreground">
+                另有 {shelvedCount} 个项目已搁置
+              </p>
+            )}
 
-        {shelvedCount > 0 && (
-          <p className="-mt-4 text-xs text-muted-foreground">
-            另有 {shelvedCount} 个项目已搁置
-          </p>
-        )}
+            {/* 待我处理：加载用骨架屏，失败不渲染，绝不能把旧数字当当前状态 */}
+            {isLoading ? (
+              <Card className="overflow-hidden">
+                <CardContent className="space-y-4 p-5">
+                  <Skeleton className="h-4 w-24" />
+                  <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+                    <Skeleton className="h-28 w-full" />
+                    <Skeleton className="h-28 w-full" />
+                    <Skeleton className="h-28 w-full" />
+                  </div>
+                </CardContent>
+              </Card>
+            ) : isError ? null : (
+              <ActionItemsCard groups={groups} />
+            )}
 
-        {/* Charts */}
-        <section className="grid gap-6 xl:grid-cols-2">
-          <Card className="overflow-hidden">
-            <CardContent className="p-5">
-              <div className="mb-5 flex items-center justify-between">
-                <div>
-                  <h3 className="text-sm font-semibold">开放问题</h3>
-                  <p className="text-xs text-muted-foreground">
-                    {unavailable
-                      ? "—"
-                      : `${projectsWithOpenIssues} 个项目有开启问题`}
-                  </p>
-                </div>
-                {!unavailable && totalOpenIssues > 0 && (
-                  <span className="rounded-full bg-primary/10 px-2.5 py-0.5 text-xs font-medium text-primary">
-                    总计 {totalOpenIssues}
-                  </span>
-                )}
-              </div>
-              {isLoading ? (
-                <ChartSkeleton />
-              ) : isError ? (
-                <ChartFailure />
-              ) : (
-                <MetricChart
-                  points={openIssuePoints}
-                  variant="bar"
-                  emptyMessage="暂无已配置项目"
-                  maxRows={BAR_CHART_MAX_ROWS}
-                  collapsedLabel={(hidden) =>
-                    `其他 ${hidden.length} 个项目共 ${hidden.reduce(
-                      (sum, p) => sum + p.value,
-                      0,
-                    )} 条`
-                  }
-                  emptyAction={
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      render={<Link to="/projects" />}
-                    >
-                      <Plus />
-                      去创建项目
-                    </Button>
-                  }
-                />
-              )}
-            </CardContent>
-          </Card>
+            {/* 流转效率（W8）：属于原需求「左侧待处理与趋势」的趋势段，
+                上移到待我处理之后、图表之前，让 1440×900 首屏至少入镜卡头；
+                仅 DOM 顺序，不改样式 */}
+            {!isLoading && !isError && data?.flow && (
+              <FlowCard flow={data.flow} points={flowPoints} />
+            )}
 
-          <Card className="overflow-hidden">
-            <CardContent className="p-5">
-              <div className="mb-5 flex items-center justify-between">
-                <div>
-                  <h3 className="text-sm font-semibold">近 30 天已解决</h3>
-                  <p className="text-xs text-muted-foreground">
-                    每日已解决问题数量趋势
-                  </p>
-                </div>
-                {!unavailable && totalResolvedIssues > 0 && (
-                  <span className="text-xs font-medium text-muted-foreground">
-                    日均 {formatDailyAverage(avgDailyResolved)}
-                  </span>
-                )}
-              </div>
-              {isLoading ? (
-                <ChartSkeleton />
-              ) : isError ? (
-                <ChartFailure />
-              ) : (
-                <MetricChart
-                  points={dailyResolvedPoints}
-                  variant="area"
-                  emptyMessage="暂无已解决问题数据"
-                />
-              )}
-            </CardContent>
-          </Card>
-        </section>
+            {/* Charts：左列内纵向堆叠（半宽列里并排会挤坏刻度） */}
+            <section className="space-y-6">
+              <Card className="overflow-hidden">
+                <CardContent className="p-5">
+                  <div className="mb-5 flex items-center justify-between">
+                    <div>
+                      <h3 className="text-sm font-semibold">开放问题</h3>
+                      <p className="text-xs text-muted-foreground">
+                        {unavailable
+                          ? "—"
+                          : `${projectsWithOpenIssues} 个项目有开启问题`}
+                      </p>
+                    </div>
+                    {!unavailable && totalOpenIssues > 0 && (
+                      <span className="rounded-full bg-primary/10 px-2.5 py-0.5 text-xs font-medium text-primary">
+                        总计 {totalOpenIssues}
+                      </span>
+                    )}
+                  </div>
+                  {isLoading ? (
+                    <ChartSkeleton />
+                  ) : isError ? (
+                    <ChartFailure />
+                  ) : (
+                    <MetricChart
+                      points={openIssuePoints}
+                      variant="bar"
+                      emptyMessage="暂无已配置项目"
+                      maxRows={BAR_CHART_MAX_ROWS}
+                      collapsedLabel={(hidden) =>
+                        `其他 ${hidden.length} 个项目共 ${hidden.reduce(
+                          (sum, p) => sum + p.value,
+                          0,
+                        )} 条`
+                      }
+                      emptyAction={
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          render={<Link to="/projects" />}
+                        >
+                          <Plus />
+                          去创建项目
+                        </Button>
+                      }
+                    />
+                  )}
+                </CardContent>
+              </Card>
+
+              <Card className="overflow-hidden">
+                <CardContent className="p-5">
+                  <div className="mb-5 flex items-center justify-between">
+                    <div>
+                      <h3 className="text-sm font-semibold">每日已解决</h3>
+                      <p className="text-xs text-muted-foreground">
+                        近 30 天 · UTC 日
+                      </p>
+                    </div>
+                    {!unavailable && totalResolvedIssues > 0 && (
+                      <span className="text-xs font-medium text-muted-foreground">
+                        日均 {formatDailyAverage(avgDailyResolved)}
+                      </span>
+                    )}
+                  </div>
+                  {isLoading ? (
+                    <ChartSkeleton />
+                  ) : isError ? (
+                    <ChartFailure />
+                  ) : (
+                    <MetricChart
+                      points={dailyResolvedPoints}
+                      variant="area"
+                      colorIndex={1}
+                      lastPointLabel="今日"
+                      emptyMessage="暂无已解决问题数据"
+                    />
+                  )}
+                </CardContent>
+              </Card>
+            </section>
+          </div>
+
+          {/* 右列：AI 运行面板 → 发布节奏 */}
+          <div className="space-y-6">
+            {!isLoading && !isError && data?.ai && (
+              <AiPanelCard ai={data.ai} />
+            )}
+            {!isLoading && !isError && data?.release && (
+              <ReleaseCard release={data.release} />
+            )}
+          </div>
+        </div>
       </div>
     </div>
   );
 }
 
-/* ─── Subcomponents ─── */
+/* ─── 待我处理 ─── */
 
 /** 「待我处理」聚合区：只列有待办或部分不可用的组；全部清零时折叠成「一切正常」。 */
 function ActionItemsCard({ groups }: { groups: ActionItemGroup[] }) {
@@ -387,6 +458,8 @@ function ActionItemGroupSection({ group }: { group: ActionItemGroup }) {
   );
 }
 
+/* ─── 通用 ─── */
+
 function KpiCard({
   icon: Icon,
   label,
@@ -394,6 +467,7 @@ function KpiCard({
   isLoading,
   tone = "neutral",
   href,
+  sparkline,
 }: {
   icon: typeof Activity;
   label: string;
@@ -401,14 +475,24 @@ function KpiCard({
   isLoading: boolean;
   tone?: "neutral" | "warning" | "positive";
   href?: string;
+  /** 7 天迷你趋势（仅近 30 天已解决卡）；全零不画，避免噪音。 */
+  sparkline?: number[];
 }) {
   const toneClasses = {
-    neutral:
-      "bg-muted/40 text-foreground ring-foreground/10 hover:ring-foreground/20",
+    neutral: "bg-muted/40 ring-foreground/10 hover:ring-foreground/20",
     warning:
-      "bg-amber-500/[0.06] text-amber-700 ring-amber-500/20 hover:ring-amber-500/30 dark:bg-amber-500/10 dark:text-amber-400",
+      "bg-amber-500/[0.06] ring-amber-500/20 hover:ring-amber-500/30 dark:bg-amber-500/10",
     positive:
-      "bg-emerald-500/[0.06] text-emerald-700 ring-emerald-500/20 hover:ring-emerald-500/30 dark:bg-emerald-500/10 dark:text-emerald-400",
+      "bg-emerald-500/[0.06] ring-emerald-500/20 hover:ring-emerald-500/30 dark:bg-emerald-500/10",
+  };
+
+  // tone 色只上数值与图标（视觉 round1 V4）：原来卡根节点的 amber/emerald-700
+  // 会让标签（继承 + opacity-70）在浅色底上对比度只剩 ~2.7–3.0:1；标签行
+  // 固定中性色，不随 tone 变。
+  const toneText = {
+    neutral: "text-foreground",
+    warning: "text-amber-700 dark:text-amber-400",
+    positive: "text-emerald-700 dark:text-emerald-400",
   };
 
   const className = cn(
@@ -419,23 +503,27 @@ function KpiCard({
 
   const body = (
     <>
-      <div className="flex items-center gap-2 text-xs font-medium opacity-70">
-        <Icon className="h-4 w-4" />
+      <div className="flex items-center gap-2 text-xs font-medium text-gray-700 dark:text-gray-300">
+        <Icon className={cn("h-4 w-4", toneText[tone])} />
         <span>{label}</span>
       </div>
       {isLoading ? (
         <Skeleton className="h-10 w-24" />
       ) : (
         <div
+          data-testid="kpi-value"
           className={cn(
             "tracking-tighter tabular-nums",
             value === null
               ? "text-3xl font-normal text-muted-foreground"
-              : "text-4xl font-bold",
+              : cn("text-4xl font-bold", toneText[tone]),
           )}
         >
           {value ?? "—"}
         </div>
+      )}
+      {!isLoading && sparkline && (
+        <Sparkline values={sparkline} tone={tone} />
       )}
     </>
   );
@@ -446,6 +534,63 @@ function KpiCard({
     </Link>
   ) : (
     <div className={className}>{body}</div>
+  );
+}
+
+/** 7 天 sparkline：最后一格是尚未结束的 UTC 当天，仅展示不判断方向。 */
+function Sparkline({
+  values,
+  tone,
+}: {
+  values: number[];
+  tone: "neutral" | "warning" | "positive";
+}) {
+  if (values.length < 2 || values.every((value) => value === 0)) return null;
+  const max = Math.max(...values);
+  // viewBox 用比例单位（宽 100）+ preserveAspectRatio="none"，横向撑满卡片
+  // 内容宽度（视觉 round1 V3）；描边配 non-scaling-stroke，避免非等比拉伸
+  // 后线条粗细不均；圆点会被拉伸压变形，所以不画点。
+  const width = 100;
+  const height = 24;
+  const linePoints = values
+    .map((value, index) => {
+      const x = (index / (values.length - 1)) * width;
+      const y = height - 2 - (value / max) * (height - 4);
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(" ");
+  const areaPoints = `0,${height} ${linePoints} ${width},${height}`;
+  const stroke = {
+    neutral: "text-muted-foreground",
+    warning: "text-amber-700 dark:text-amber-400",
+    positive: "text-emerald-700 dark:text-emerald-400",
+  }[tone];
+
+  return (
+    <div className="space-y-1">
+      <svg
+        viewBox={`0 0 ${width} ${height}`}
+        className={cn("h-6 w-full", stroke)}
+        preserveAspectRatio="none"
+        aria-hidden="true"
+        data-testid="kpi-sparkline"
+      >
+        {/* 线下同色淡面积（视觉 round1 V3）：趋势带表达方向感 */}
+        <polygon points={areaPoints} fill="currentColor" opacity={0.12} />
+        <polyline
+          points={linePoints}
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          strokeLinejoin="round"
+          strokeLinecap="round"
+          vectorEffect="non-scaling-stroke"
+        />
+      </svg>
+      {/* 窗口说明（round4 X5）：sparkline 只画尾 7 天，与卡标题「近 30 天」
+          不同窗，不标会被读成同一个口径。 */}
+      <p className="text-[11px] text-muted-foreground">近 7 天</p>
+    </div>
   );
 }
 

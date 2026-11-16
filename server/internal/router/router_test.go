@@ -1069,9 +1069,10 @@ func setupRouterTestEnvMaybeLogs(t *testing.T, captureLogs bool, opts ...routerC
 	t3BindingService := service.NewT3BindingService(t3ThreadsService, projectRepo, repository.NewProjectT3BindingRepository(db))
 	notificationSink := service.NewNotificationSink(db)
 	notificationService := service.NewNotificationService(repository.NewNotificationRepository(db))
-	dashboardService := service.NewDashboardService(dashboardRepo, notificationService, t3ThreadsService)
-	reviewService := service.NewReviewService(db, projectRepo, repository.NewGitHubWebhookDeliveryRepository(db), notificationSink, nil, nil, nil, nil, nil, nil, cfg, zap.NewNop())
 	botService := service.NewBotService(db, cfg, zap.NewNop(), projectService, issueService, t3ThreadsService, t3BindingService)
+	quotaService := service.NewQuotaService(repository.NewQuotaAccountRepository(db), cfg, zap.NewNop(), nil)
+	dashboardService := service.NewDashboardService(dashboardRepo, notificationService, t3ThreadsService, quotaService, botService)
+	reviewService := service.NewReviewService(db, projectRepo, repository.NewGitHubWebhookDeliveryRepository(db), notificationSink, nil, nil, nil, nil, nil, nil, cfg, zap.NewNop())
 	aiProviderHandler := handler.NewAIProviderHandler(service.NewAIProviderService(db, cfg, zap.NewNop()))
 
 	authHandler := handler.NewAuthHandler(authService, fileStorage, cfg)

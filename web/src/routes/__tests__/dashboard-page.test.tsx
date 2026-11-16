@@ -54,6 +54,40 @@ describe("DashboardPage", () => {
     expect(screen.getByText("日均 <0.1")).toBeInTheDocument();
     // 方向图标已移出本需求：不再对两周合计做涨跌判断。
     expect(screen.queryByRole("img", { name: /最近 7 天/ })).toBeNull();
+    // 视觉 round1 V3：趋势线横向撑满（viewBox 比例单位 + preserveAspectRatio），
+    // 线下带同色淡面积；有非零数据才画。
+    const sparkline = screen.getByTestId("kpi-sparkline");
+    expect(sparkline).toHaveAttribute("preserveAspectRatio", "none");
+    expect(sparkline).toHaveClass("w-full");
+    expect(sparkline.querySelector("polygon")).not.toBeNull();
+    // round4 X5：sparkline 下方标窗口「近 7 天」，与卡标题「近 30 天」区分口径。
+    expect(screen.getByText("近 7 天")).toBeInTheDocument();
+    expect(screen.getByText("近 7 天")).toHaveClass("text-[11px]");
+  });
+
+  it("moves the tone color to the value and keeps the label row neutral (视觉 round1 V4)", async () => {
+    vi.mocked(useDashboardOverview).mockReturnValue({
+      data: {
+        open_issues_by_project: [],
+        daily_resolved: dailyResolvedWith({ 29: 1 }),
+      },
+      isLoading: false,
+    } as unknown as ReturnType<typeof useDashboardOverview>);
+
+    await renderDashboardPage();
+
+    // 标签行固定中性色，不再继承 tone 色 + opacity（浅色底上对比度不达标）
+    const label = screen.getByText("近 30 天已解决");
+    expect(label.parentElement).toHaveClass("text-gray-700", "dark:text-gray-300");
+    expect(label.parentElement).not.toHaveClass("opacity-70");
+    // tone 色移到数值元素：已解决 > 0 → positive 绿
+    const [resolvedValue] = screen
+      .getAllByTestId("kpi-value")
+      .filter((el) => el.textContent === "1");
+    expect(resolvedValue).toHaveClass(
+      "text-emerald-700",
+      "dark:text-emerald-400",
+    );
   });
 
   it("hides stale header numbers when cached data is followed by a failed refetch", async () => {
@@ -112,10 +146,10 @@ describe("DashboardPage", () => {
     expect(
       screen.getAllByText(/未解决问题|open issues|开放问题/i).length,
     ).toBeGreaterThan(0);
-    expect(
-      screen.getAllByText(/近 ?30 ?天.*已解决|30-?day resolved|最近 30 天已解决/i)
-        .length,
-    ).toBeGreaterThan(0);
+    // 视觉 round1 V7：图表卡标题与 KPI 卡区分——图表「每日已解决」/「近 30 天 · UTC 日」，KPI 保持「近 30 天已解决」
+    expect(screen.getByText("每日已解决")).toBeInTheDocument();
+    expect(screen.getByText("近 30 天 · UTC 日")).toBeInTheDocument();
+    expect(screen.getByText("近 30 天已解决")).toBeInTheDocument();
     expect(screen.getByText("Alpha App")).toBeInTheDocument();
     expect(screen.getByText("Beta Console")).toBeInTheDocument();
     expect(screen.getAllByText("2").length).toBeGreaterThan(0);
@@ -140,10 +174,10 @@ describe("DashboardPage", () => {
     expect(
       screen.getAllByText(/未解决问题|open issues|开放问题/i).length,
     ).toBeGreaterThan(0);
-    expect(
-      screen.getAllByText(/近 ?30 ?天.*已解决|30-?day resolved|最近 30 天已解决/i)
-        .length,
-    ).toBeGreaterThan(0);
+    // 视觉 round1 V7：KPI 卡标题保持，图表卡标题改为「每日已解决」
+    expect(screen.getByText("每日已解决")).toBeInTheDocument();
+    expect(screen.getByText("近 30 天 · UTC 日")).toBeInTheDocument();
+    expect(screen.getByText("近 30 天已解决")).toBeInTheDocument();
     expect(screen.getAllByText("0").length).toBeGreaterThanOrEqual(2);
     // 每个图表只保留一个空状态，且带一个真实的配置入口。
     expect(screen.getAllByText("暂无已配置项目")).toHaveLength(1);
@@ -157,7 +191,30 @@ describe("DashboardPage", () => {
     expect(
       screen.queryByRole("img", { name: "stacked area chart" }),
     ).not.toBeInTheDocument();
+    // 全零不画迷你趋势（视觉 round1 V3 保留原门禁）。
+    expect(screen.queryByTestId("kpi-sparkline")).not.toBeInTheDocument();
     expect(screen.queryByText(/日均 0\.0/)).not.toBeInTheDocument();
+  });
+
+  it("styles the daily-resolved chart green with a 今日 axis marker (round4 X2/X7)", async () => {
+    vi.mocked(useDashboardOverview).mockReturnValue({
+      data: {
+        open_issues_by_project: [],
+        daily_resolved: dailyResolvedWith({ 29: 2 }),
+      },
+      isLoading: false,
+    } as unknown as ReturnType<typeof useDashboardOverview>);
+
+    await renderDashboardPage();
+
+    // 页面 mock 不含 flow，唯一的 area 图即「每日已解决」。
+    const charts = screen.getAllByRole("img", { name: "stacked area chart" });
+    expect(charts).toHaveLength(1);
+    // X2：单系列用第 1 颜色槽（绿），与流转效率卡的已解决同色。
+    const path = charts[0].querySelector("path[stroke]");
+    expect(path).toHaveAttribute("stroke", "oklch(0.65 0.18 150)");
+    // X7：末点轴区标「今日」。
+    expect(charts[0].textContent).toContain("今日");
   });
 
   it("shows a retryable error state instead of an empty account when the overview fails", async () => {
@@ -366,5 +423,145 @@ describe("DashboardPage", () => {
     expect(screen.getByText("其他 3 个项目共 6 条")).toBeInTheDocument();
     expect(screen.queryByText("Project 10")).not.toBeInTheDocument();
     expect(screen.getByText("13 个项目有开启问题")).toBeInTheDocument();
+  });
+});
+
+describe("DashboardPage INT-235 阶段二/三（流转效率 / AI 面板 / 发布节奏）", () => {
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  function dailyResolvedWith(resolvedByIndex: Record<number, number>) {
+    return Array.from({ length: 30 }, (_, index) => ({
+      date: `2026-05-${String(index + 1).padStart(2, "0")}`,
+      resolved_count: resolvedByIndex[index] ?? 0,
+    }));
+  }
+
+  it("renders hero summary with resolved count and pending total", async () => {
+    vi.mocked(useDashboardOverview).mockReturnValue({
+      data: {
+        open_issues_by_project: [],
+        daily_resolved: dailyResolvedWith({ 28: 2, 29: 3 }),
+        action_item_groups: [
+          { kind: "recommendations", count: 2, items: [] },
+          { kind: "unread_notifications", count: 3, items: [] },
+        ],
+      },
+      isLoading: false,
+    } as unknown as ReturnType<typeof useDashboardOverview>);
+
+    await renderDashboardPage();
+
+    // N=daily_resolved 30 天合计（与「近 30 天已解决」KPI 同源，W7）；M=待处理组 count 合计
+    expect(screen.getByText("近 30 天解决 5 个问题，5 件事等你处理")).toBeInTheDocument();
+  });
+
+  it("places the flow card between 待我处理 and the open-issues chart (W8)", async () => {
+    vi.mocked(useDashboardOverview).mockReturnValue({
+      data: {
+        open_issues_by_project: [
+          { project_id: "p1", project_name: "Alpha App", open_issue_count: 1 },
+        ],
+        daily_resolved: dailyResolvedWith({}),
+        flow: {
+          todo_count: 1,
+          in_progress_count: 0,
+          daily_created: [],
+          cycle_time_by_project: [],
+          backlog_age: { under_7d: 1, d7_to_30d: 0, over_30d: 0 },
+        },
+      },
+      isLoading: false,
+    } as unknown as ReturnType<typeof useDashboardOverview>);
+
+    await renderDashboardPage();
+
+    // 仅 DOM 顺序调整：流转效率属趋势段，上移后 1440×900 首屏至少入镜卡头
+    const actionItems = screen.getByText("待我处理");
+    const flowCard = screen.getByTestId("flow-card");
+    const openIssues = screen.getByText("开放问题");
+    expect(
+      actionItems.compareDocumentPosition(flowCard) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      flowCard.compareDocumentPosition(openIssues) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it("marks the hero pending total with + when any action group is incomplete", async () => {
+    vi.mocked(useDashboardOverview).mockReturnValue({
+      data: {
+        open_issues_by_project: [],
+        daily_resolved: dailyResolvedWith({}),
+        action_item_groups: [
+          { kind: "t3_waiting", count: 2, complete: false, items: [] },
+          { kind: "recommendations", count: 1, items: [] },
+        ],
+      },
+      isLoading: false,
+    } as unknown as ReturnType<typeof useDashboardOverview>);
+
+    await renderDashboardPage();
+
+    expect(screen.getByText("近 30 天解决 0 个问题，3+ 件事等你处理")).toBeInTheDocument();
+  });
+
+  it("falls back to the greeting while unavailable", async () => {
+    vi.mocked(useDashboardOverview).mockReturnValue({
+      data: {
+        open_issues_by_project: [],
+        daily_resolved: dailyResolvedWith({}),
+        action_item_groups: [{ kind: "recommendations", count: 4, items: [] }],
+      },
+      isLoading: false,
+      isError: true,
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useDashboardOverview>);
+
+    await renderDashboardPage();
+
+    // 摘要句依赖数据可用性：失败时回退问候语，绝不展示旧数字
+    expect(screen.queryByText(/近 30 天解决/)).not.toBeInTheDocument();
+    expect(screen.getByText(/查看今日项目概况/)).toBeInTheDocument();
+  });
+
+  it("shows 暂不可用 for degraded ai/release blocks and hides new cards on overview failure", async () => {
+    vi.mocked(useDashboardOverview).mockReturnValue({
+      data: {
+        open_issues_by_project: [],
+        daily_resolved: dailyResolvedWith({}),
+        flow: { complete: false, todo_count: 0, in_progress_count: 0, daily_created: [], cycle_time_by_project: [], backlog_age: { under_7d: 0, d7_to_30d: 0, over_30d: 0 } },
+        ai: { reviews: { complete: false, passed: 0, blocked: 0, errored: 0, in_flight: 0, pass_rate: null } },
+        release: {
+          complete: false,
+          pending_count: 0,
+          pending_versions: [],
+          recent_releases: [],
+          unmerged_pr_issue_count: 0,
+        },
+      },
+      isLoading: false,
+    } as unknown as ReturnType<typeof useDashboardOverview>);
+
+    await renderDashboardPage();
+
+    expect(screen.getByTestId("flow-card")).toHaveTextContent("暂不可用");
+    expect(screen.getByTestId("ai-reviews-section")).toHaveTextContent("暂不可用");
+    expect(screen.getByTestId("release-card")).toHaveTextContent("暂不可用");
+  });
+
+  it("hides new blocks entirely while the overview is loading", async () => {
+    vi.mocked(useDashboardOverview).mockReturnValue({
+      isLoading: true,
+    } as unknown as ReturnType<typeof useDashboardOverview>);
+
+    await renderDashboardPage();
+
+    expect(screen.queryByTestId("flow-card")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("ai-panel-card")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("release-card")).not.toBeInTheDocument();
   });
 });

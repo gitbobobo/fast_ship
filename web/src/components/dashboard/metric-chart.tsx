@@ -59,6 +59,14 @@ interface MultiSeriesChartProps {
   points: MetricChartSeriesPoint[];
   /** area 为堆叠面积图；columns 为按点堆叠的竖向柱状图。 */
   variant: "area" | "columns";
+  /** 堆叠语义（默认 true）：各系列是可加分量，面积/柱按累计顶边画。
+   *  false 为叠加折线（area 变体）：各序列是独立流量，各自 y=自身值，
+   *  线型区分（首序列细虚线、其余实线），线末直接标数值。columns 忽略。 */
+  stacked?: boolean;
+  /** 单系列图的颜色槽位（默认 0）：多系列图忽略，仍按首现顺序分配。 */
+  colorIndex?: number;
+  /** area 变体末点 x 正下方轴区的小字（如「今日」）；columns 忽略。 */
+  lastPointLabel?: string;
   emptyMessage: string;
   emptyAction?: ReactNode;
   formatValue?: MetricChartFormatValue;
@@ -110,6 +118,9 @@ export function MetricChart(props: ChartProps) {
             emptyMessage={emptyMessage}
             emptyAction={emptyAction}
             formatValue={props.formatValue}
+            stacked={(props as MultiSeriesChartProps).stacked}
+            colorIndex={(props as MultiSeriesChartProps).colorIndex}
+            lastPointLabel={(props as MultiSeriesChartProps).lastPointLabel}
           />
         )}
       </div>
@@ -266,6 +277,10 @@ const CHART_HEIGHT = 240;
 const CHART_PADDING_X = 40;
 const CHART_PADDING_TOP = 24;
 const CHART_PADDING_BOTTOM = 30;
+/** 面积图末点右缘内收（W10；round4 X7 由 6px 提到 12px）：最后一个点与绘图区
+ *  右边框脱开，不再视觉上贴边，也给线末数值标签（X3）留出落脚空间。
+ *  columns 变体按槽位居中、本就内收，坐标计算不受此值影响。 */
+const AREA_END_INSET = 12;
 
 interface SeriesMeta {
   id: string;
@@ -306,8 +321,13 @@ export function MetricChartLegend({
   );
 }
 
-/** 系列清单按首次出现次序分配颜色：同一 id 跨点归入同一层。 */
-function useSeriesMeta(points: MetricChartSeriesPoint[]): SeriesMeta[] {
+/** 系列清单按首次出现次序分配颜色：同一 id 跨点归入同一层。
+ *  colorIndex 只对单系列图生效（X2）：如「每日已解决」用第 1 槽（绿）与
+ *  流转效率卡的已解决同色；多系列图忽略该参数（bot 用量页零变化）。 */
+function useSeriesMeta(
+  points: MetricChartSeriesPoint[],
+  colorIndex = 0,
+): SeriesMeta[] {
   return useMemo(() => {
     const seen = new Map<string, string>();
     for (const point of points) {
@@ -317,32 +337,45 @@ function useSeriesMeta(points: MetricChartSeriesPoint[]): SeriesMeta[] {
         }
       }
     }
-    return Array.from(seen.entries()).map(([id, name], index) => ({
-      id,
-      name,
-      color: CHART_COLORS[index % CHART_COLORS.length],
-    }));
-  }, [points]);
+    return Array.from(seen.entries()).map(([id, name], index) => {
+      const slot =
+        seen.size === 1 && colorIndex > 0 ? colorIndex : index;
+      return {
+        id,
+        name,
+        color: CHART_COLORS[slot % CHART_COLORS.length],
+      };
+    });
+  }, [points, colorIndex]);
 }
 
-/** 每个点按系列清单累出堆叠区间：缺的系列补 0，层序与颜色分配一致。 */
+/** 每个点按系列清单累出堆叠区间：缺的系列补 0，层序与颜色分配一致。
+ *  叠加模式（X1）各序列是独立流量：bottom 恒 0、top=自身值，total 取该点
+ *  各系列值的最大者（只用于 y 轴缩放；tooltip 不再报「总计」）。 */
 function buildStackedData(
   points: MetricChartSeriesPoint[],
   seriesMeta: SeriesMeta[],
+  overlay: boolean,
 ): StackedDatum[] {
   return points.map((point) => {
     let cumulative = 0;
+    let maxValue = 0;
     const stacks = seriesMeta.map((meta) => {
       const s = point.series.find((x) => x.id === meta.id);
       const value = s?.value ?? 0;
-      const bottom = cumulative;
       cumulative += value;
-      return { ...meta, value, bottom, top: cumulative };
+      maxValue = Math.max(maxValue, value);
+      return {
+        ...meta,
+        value,
+        bottom: overlay ? 0 : cumulative - value,
+        top: overlay ? value : cumulative,
+      };
     });
     return {
       label: point.label,
       shortLabel: point.shortLabel,
-      total: cumulative,
+      total: overlay ? maxValue : cumulative,
       stacks,
     };
   });
@@ -457,11 +490,13 @@ function useSeriesHover(
   return { hoveredIndex, tooltipPos, onMouseMove, onMouseLeave };
 }
 
-/** 悬浮明细：该点各系列取值（倒序，视觉最上层先列）与总计。 */
+/** 悬浮明细：该点各系列取值（倒序，视觉最上层先列）与总计；
+ *  叠加模式（X1）各序列是独立流量，没有可加的「总计」，不显示该行。 */
 function SeriesTooltip({
   datum,
   pos,
   formatValue,
+  overlay,
 }: {
   datum: {
     label: string;
@@ -470,6 +505,7 @@ function SeriesTooltip({
   };
   pos: { x: number; y: number; containerWidth: number };
   formatValue: MetricChartFormatValue;
+  overlay: boolean;
 }) {
   return (
     <div
@@ -506,7 +542,7 @@ function SeriesTooltip({
               </span>
             </div>
           ))}
-        {datum.total > 0 && (
+        {!overlay && datum.total > 0 && (
           <div className="mt-1 flex items-center justify-between gap-4 border-t border-border/50 pt-1">
             <span className="text-[11px] text-muted-foreground">总计</span>
             <span className="text-[11px] font-bold tabular-nums text-popover-foreground">
@@ -525,21 +561,30 @@ function StackedSeriesChart({
   emptyMessage,
   emptyAction,
   formatValue = defaultFormatValue,
+  stacked = true,
+  colorIndex = 0,
+  lastPointLabel,
 }: {
-  /** area 渲染堆叠面积层，columns 渲染每点一根堆叠柱。 */
+  /** area 渲染堆叠面积层（stacked=false 时为叠加折线），columns 渲染每点一根堆叠柱。 */
   shape: "area" | "columns";
   points: MetricChartSeriesPoint[];
   emptyMessage: string;
   emptyAction?: ReactNode;
   formatValue?: MetricChartFormatValue;
+  /** 默认 true（堆叠，bot 用量页语义不变）；false 仅对 area 生效为叠加折线。 */
+  stacked?: boolean;
+  colorIndex?: number;
+  lastPointLabel?: string;
 }) {
   const svgRef = useRef<SVGSVGElement>(null);
   const { boxRef, chartWidth } = useChartWidth();
 
-  const seriesMeta = useSeriesMeta(points);
+  // 叠加折线只定义在 area 变体上：columns（bot 用量页）永远按堆叠画。
+  const overlay = !stacked && shape === "area";
+  const seriesMeta = useSeriesMeta(points, colorIndex);
   const stackedData = useMemo(
-    () => buildStackedData(points, seriesMeta),
-    [points, seriesMeta],
+    () => buildStackedData(points, seriesMeta, overlay),
+    [points, seriesMeta, overlay],
   );
 
   const maxTotal = Math.max(...stackedData.map((d) => d.total), 0);
@@ -570,7 +615,11 @@ function StackedSeriesChart({
     x:
       shape === "columns"
         ? CHART_PADDING_X + slotWidth * (index + 0.5)
-        : CHART_PADDING_X + (plotWidth * index) / denominator,
+        : // 面积图只有末点内收 6px（W10），中间点坐标不变：视觉差异最小。
+          CHART_PADDING_X +
+          ((plotWidth - (index === shapedData.length - 1 ? AREA_END_INSET : 0)) *
+            index) /
+            denominator,
     yTotal: getY(point.total),
     stacks: point.stacks.map((stack) => ({
       ...stack,
@@ -584,7 +633,7 @@ function StackedSeriesChart({
 
   // 面积层路径：顶线从左到右、底线从右到左围出闭合区域。
   const layerPaths = useMemo(() => {
-    if (shape !== "area" || coordinates.length === 0) return [];
+    if (shape !== "area" || overlay || coordinates.length === 0) return [];
     return seriesMeta.map((meta, seriesIndex) => {
       const topPoints = coordinates
         .map((c) => `${c.x},${c.stacks[seriesIndex].yTop}`)
@@ -597,7 +646,23 @@ function StackedSeriesChart({
       const d = `M ${topPoints} L ${bottomPoints} Z`;
       return { ...meta, d };
     });
-  }, [shape, coordinates, seriesMeta]);
+  }, [shape, overlay, coordinates, seriesMeta]);
+
+  // 叠加折线路径（X1）：每条序列独立连线，首序列细虚线、其余实线，
+  // 末段重合时仍能分辨两条线。
+  const overlayLines = useMemo(() => {
+    if (!overlay || coordinates.length === 0) return [];
+    return seriesMeta.map((meta, seriesIndex) => ({
+      ...meta,
+      dashed: seriesIndex === 0,
+      d: coordinates
+        .map(
+          (c, i) =>
+            `${i === 0 ? "M" : "L"} ${c.x} ${c.stacks[seriesIndex].yTop}`,
+        )
+        .join(" "),
+    }));
+  }, [overlay, coordinates, seriesMeta]);
 
   const gridLines = Array.from({ length: tickIntervals + 1 }, (_, index) => ({
     y: baselineY - (plotHeight * index) / tickIntervals,
@@ -632,12 +697,16 @@ function StackedSeriesChart({
             style={{ height: CHART_HEIGHT }}
             role="img"
             aria-label={
-              shape === "columns" ? "stacked column chart" : "stacked area chart"
+              shape === "columns"
+                ? "stacked column chart"
+                : overlay
+                  ? "overlay line chart"
+                  : "stacked area chart"
             }
             onMouseMove={onMouseMove}
             onMouseLeave={onMouseLeave}
           >
-            {shape === "area" && (
+            {shape === "area" && !overlay && (
               <defs>
                 {seriesMeta.map((meta) => (
                   <linearGradient
@@ -682,19 +751,34 @@ function StackedSeriesChart({
               </g>
             ))}
 
-            {shape === "area"
-              ? layerPaths.map((layer) => (
+            {shape === "area" && overlay
+              ? overlayLines.map((line) => (
                   <path
-                    key={layer.id}
-                    d={layer.d}
-                    fill={`url(#grad-${layer.id})`}
-                    stroke={layer.color}
+                    key={line.id}
+                    data-series={line.id}
+                    d={line.d}
+                    fill="none"
+                    stroke={line.color}
                     strokeWidth="1.5"
                     strokeLinejoin="round"
+                    strokeLinecap="round"
+                    strokeDasharray={line.dashed ? "6 4" : undefined}
                     opacity={hoveredIndex !== null ? 0.85 : 1}
                   />
                 ))
-              : coordinates.map((point, pointIndex) => (
+              : shape === "area"
+                ? layerPaths.map((layer) => (
+                    <path
+                      key={layer.id}
+                      d={layer.d}
+                      fill={`url(#grad-${layer.id})`}
+                      stroke={layer.color}
+                      strokeWidth="1.5"
+                      strokeLinejoin="round"
+                      opacity={hoveredIndex !== null ? 0.85 : 1}
+                    />
+                  ))
+                : coordinates.map((point, pointIndex) => (
                   <g key={`col-${pointIndex}`}>
                     {point.stacks.map((stack) => {
                       if (stack.value <= 0) return null;
@@ -735,21 +819,70 @@ function StackedSeriesChart({
               />
             )}
 
-            {/* Data points on top line（面积图：悬浮时标出合计点） */}
-            {shape === "area" &&
-              coordinates.map((point, index) => (
-                <circle
-                  key={`pt-${index}`}
-                  cx={point.x}
-                  cy={point.yTotal}
-                  r={hoveredIndex === index ? 5 : 0}
-                  className="fill-foreground stroke-background stroke-[2] transition-all duration-150"
-                />
-              ))}
+            {/* Data points on top line（面积图：悬浮时标点；叠加模式标在各序列线上） */}
+            {shape === "area" && overlay
+              ? coordinates.map((point, index) =>
+                  point.stacks.map((stack) => (
+                    <circle
+                      key={`pt-${index}-${stack.id}`}
+                      cx={point.x}
+                      cy={stack.yTop}
+                      r={hoveredIndex === index ? 4 : 0}
+                      fill={stack.color}
+                      className="stroke-background stroke-[2] transition-all duration-150"
+                    />
+                  )),
+                )
+              : shape === "area" &&
+                coordinates.map((point, index) => (
+                  <circle
+                    key={`pt-${index}`}
+                    cx={point.x}
+                    cy={point.yTotal}
+                    r={hoveredIndex === index ? 5 : 0}
+                    className="fill-foreground stroke-background stroke-[2] transition-all duration-150"
+                  />
+                ))}
 
-            {/* X-axis labels：画在图内，和数据点共用同一套坐标，刻度与日期一一对应 */}
+            {/* 线末数值标签（X3，叠加模式）：两条线末端右上/右下错开。
+                字用中性深灰（round5 视觉：系列色原样白底对比度不足 AA，
+                且这是全图唯一精确读数），前置系列色小点保留颜色关联。 */}
+            {overlay &&
+              coordinates.length > 0 &&
+              seriesMeta.map((meta, seriesIndex) => {
+                const last = coordinates[coordinates.length - 1];
+                const stack = last.stacks[seriesIndex];
+                return (
+                  <g key={`end-label-${meta.id}`} data-series={meta.id}>
+                    <circle
+                      cx={last.x + 8}
+                      cy={stack.yTop + (seriesIndex % 2 === 0 ? 8 : -6)}
+                      r={3}
+                      fill={meta.color}
+                    />
+                    <text
+                      x={last.x + 14}
+                      y={stack.yTop + (seriesIndex % 2 === 0 ? 8 : -6)}
+                      dominantBaseline="middle"
+                      className="fill-gray-700 tabular-nums text-[11px] font-semibold dark:fill-gray-300"
+                    >
+                      {formatValue(stack.value)}
+                    </text>
+                  </g>
+                );
+              })}
+
+            {/* （lastPointLabel 已并入末刻度文字，不再单独渲染） */}
+
+            {/* X-axis labels：画在图内，和数据点共用同一套坐标，刻度与日期一一对应；
+                lastPointLabel 并入末刻度（round5 视觉：与「今日」单字堆叠难读） */}
             {labelIndexes.map((index) => {
               const point = points[index];
+              const isLast = index === points.length - 1;
+              const text =
+                isLast && lastPointLabel
+                  ? `${point.shortLabel ?? point.label}·${lastPointLabel}`
+                  : (point.shortLabel ?? point.label);
               return (
                 <text
                   key={getPointKey(point, index)}
@@ -758,7 +891,7 @@ function StackedSeriesChart({
                   textAnchor="middle"
                   className="fill-muted-foreground text-[11px]"
                 >
-                  {point.shortLabel ?? point.label}
+                  {text}
                 </text>
               );
             })}
@@ -772,6 +905,7 @@ function StackedSeriesChart({
           datum={hoveredData}
           pos={tooltipPos}
           formatValue={formatValue}
+          overlay={overlay}
         />
       )}
     </div>

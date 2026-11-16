@@ -311,6 +311,7 @@ describe("花费总览的预算入口", () => {
     start: "2026-10-19T16:00:00Z",
     end: "2026-10-26T16:00:00Z",
     totals: {
+      total_tokens: 0,
       cost: 1,
       daily_average: 0.14,
       total_requests: 4,

@@ -5266,6 +5266,99 @@ title/body/parent_id 至少传一个
 | `action_item_groups[].items[].title` | string | 是 |  |
 | `action_item_groups[].items[].detail` | string | 否 | 补充说明（如项目名/环境名），无则省略 |
 | `action_item_groups[].items[].href` | string | 是 | 站内跳转路径 |
+| `flow` | object | 否 |  |
+| `flow.complete` | boolean | 否 | false = 该块任一查询失败降级（结构仍完整，显示为空但不代表真实为零）；成功时不返回 |
+| `flow.todo_count` | integer | 是 | 开启且 workflow_status 为空/NULL 的问题数；与 open_issues_by_project 同口径（排除搁置项目），恒等式 todo_count+in_progress_count=Σopen_issue_count |
+| `flow.in_progress_count` | integer | 是 | 开启且 workflow_status 非 done 非空的问题数 |
+| `flow.daily_created` | object[] | 是 | 固定近 30 天（含今天），与 daily_resolved 同一窗口；只统计 source=internal 的手动 issue（GitHub 同步 issue 无 completed_at，混算会系统性画成积压增长） |
+| `flow.daily_created[].date` | string | 是 | YYYY-MM-DD |
+| `flow.daily_created[].created_count` | integer | 是 |  |
+| `flow.cycle_time_by_project` | object[]（≤5 项） | 是 | 近 30 天窗口内完成且有 started_at 的问题的周期中位数，按 completed_count 降序、项目名升序取前 5；零时长（started=completed）行剔除 |
+| `flow.cycle_time_by_project[].project_id` | string | 是 |  |
+| `flow.cycle_time_by_project[].project_name` | string | 是 |  |
+| `flow.cycle_time_by_project[].median_days` | number（double） | 是 | 从 started_at 到 completed_at 的天数中位数 |
+| `flow.cycle_time_by_project[].completed_count` | integer | 是 | 该项目计入中位数的样本数（恒等式 Σcompleted_count ≤ Σdaily_resolved） |
+| `flow.backlog_age` | object | 是 | 当前开启问题按创建时间分档（<7 天 / 7-30 天 / >30 天）；三档之和=todo_count+in_progress_count=Σopen_issue_count。边界按 UTC 整日在 Go 算好传入 SQL（时间是文本存储） |
+| `flow.backlog_age.under_7d` | integer | 是 |  |
+| `flow.backlog_age.d7_to_30d` | integer | 是 |  |
+| `flow.backlog_age.over_30d` | integer | 是 |  |
+| `ai` | object | 否 | AI 运行面板；无 T3 环境时 t3 缺席，单子块失败各自降级 complete=false |
+| `ai.t3` | object | 否 | 每环境一行活跃线程计数；与「待我处理」的 t3_waiting 组同源（单遍历） |
+| `ai.t3.complete` | boolean | 否 | false = 任一环境未 ready（Syncing/Stale/Failed/凭证不可用）；成功时不返回 |
+| `ai.t3.environments` | object[] | 是 |  |
+| `ai.t3.environments[].environment_id` | string | 是 |  |
+| `ai.t3.environments[].environment_name` | string | 是 |  |
+| `ai.t3.environments[].running` | integer | 是 | 状态为 running 的活跃线程数（不含 subagent） |
+| `ai.t3.environments[].waiting` | integer | 是 | 状态为 waiting 的活跃线程数（与 t3_waiting 组同口径） |
+| `ai.t3.environments[].queued` | integer | 是 | 原始 shell status=queued 的线程数（queued 是 running 的先导阶段，含在 running 计数内） |
+| `ai.t3.environments[].readable` | boolean | 是 | 本轮该环境活跃快照是否可读；false 时 running/waiting/queued 无效 |
+| `ai.reviews` | object | 否 | PR 级审查结论分布（近 30 天，排除搁置项目；按 review_pull_requests 当前轮次+当前 head 分组）：code_status=success→passed、failure→blocked、error→errored，pending 或仍有在途 run→in_flight |
+| `ai.reviews.complete` | boolean | 否 | false = 查询失败降级；成功时不返回 |
+| `ai.reviews.passed` | integer | 是 |  |
+| `ai.reviews.blocked` | integer | 是 |  |
+| `ai.reviews.errored` | integer | 是 |  |
+| `ai.reviews.in_flight` | integer | 是 |  |
+| `ai.reviews.pass_rate` | number（double，可空） | 是 | passed/(passed+blocked)；分母为 0 时为 null（不显示），此时不代表通过率 100% |
+| `ai.bots` | object | 否 | 机器人近 7 天用量（按用户时区聚合，与机器人页用量口径同源）；next_schedule 为 null 表示没有开启且排了下一次触发的任务 |
+| `ai.bots.complete` | boolean | 否 | false = 用量服务查询失败降级；成功时不返回 |
+| `ai.bots.bot_count` | integer | 是 | 已配置机器人数 + 窗口内有记录的已删除机器人（与展示数字的参与者集合一致） |
+| `ai.bots.timezone` | string | 是 | 用量统计的生效时区（IANA 名称） |
+| `ai.bots.cost` | number（double，可空） | 是 | 近 7 天显示成本合计（USD）；无金额请求为 null（缺失 ≠ 0，前端显示「未计价」） |
+| `ai.bots.total_requests` | integer（int64） | 是 |  |
+| `ai.bots.total_tokens` | integer（int64） | 是 | prompt+completion（NULL 记 0）；reasoning ⊆ completion 已含其中，不重复计 |
+| `ai.bots.next_schedule` | object | 否 | 最近一次将触发的已启用定时任务；没有时省略 |
+| `ai.bots.next_schedule.bot_id` | string | 是 |  |
+| `ai.bots.next_schedule.bot_name` | string | 是 |  |
+| `ai.bots.next_schedule.task_name` | string | 是 |  |
+| `ai.bots.next_schedule.next_run_at` | string（date-time） | 是 | 下一次计划触发时间（UTC） |
+| `ai.quota` | object | 否 |  |
+| `ai.quota.complete` | boolean | 否 | false = 额度服务查询失败降级；成功时不返回 |
+| `ai.quota.accounts` | object[] | 是 | 全部额度账号只读快照（可能落后于实时，配合 status 展示）；剩余百分比不在后端计算，由前端 lib/quota.ts accountRemaining 推导 |
+| `ai.quota.accounts[].id` | string | 是 |  |
+| `ai.quota.accounts[].provider` | string | 是 |  |
+| `ai.quota.accounts[].provider_name` | string | 是 | 供应商显示名（随供应商元数据，非用户可改） |
+| `ai.quota.accounts[].label` | string | 是 |  |
+| `ai.quota.accounts[].credential_hint` | string | 是 | 凭据尾号（形如 …ab12）；绝不回显明文 |
+| `ai.quota.accounts[].plan_name` | string | 是 | 最近一次成功快照的套餐名；未抓取过为空串 |
+| `ai.quota.accounts[].note` | string | 是 | 供应商特有的补充说明（如「无 Design Plan 额度，按钱包计费」）；为空串表示无 |
+| `ai.quota.accounts[].status` | string（enum: ok \| credential_invalid \| provider_error \| pending） | 是 | ok=正常；credential_invalid=凭据失效（401/403）；provider_error=接口异常；pending=暂未抓取 |
+| `ai.quota.accounts[].last_error` | string | 是 | 最近一次失败原因（脱敏后的用户可读文本） |
+| `ai.quota.accounts[].fetched_at` | string（date-time，可空） | 是 | 最近一次成功抓取时间（= 快照数据时间）；未成功过为 null |
+| `ai.quota.accounts[].last_success_at` | string（date-time，可空） | 是 | 同 fetched_at（保留字段名便于前端区分） |
+| `ai.quota.accounts[].windows` | object[] | 是 | 最近一次成功快照的窗口；失败时保留旧数据 |
+| `ai.quota.accounts[].windows[].kind` | string（enum: five_hour \| daily \| weekly \| monthly \| other） | 是 |  |
+| `ai.quota.accounts[].windows[].label` | string | 是 | 面向用户的窗口名；other 类给准确名字（如 MCP 次数） |
+| `ai.quota.accounts[].windows[].used_percent` | number（double，可空） | 是 | 0..100，四舍五入到 1 位小数；算不出为 null |
+| `ai.quota.accounts[].windows[].used` | number（double，可空） | 否 | 单位由 unit 决定 |
+| `ai.quota.accounts[].windows[].limit` | number（double，可空） | 否 |  |
+| `ai.quota.accounts[].windows[].unit` | string（enum: percent \| usd \| count） | 是 |  |
+| `ai.quota.accounts[].windows[].reset_at` | string（date-time，可空） | 否 | UTC；窗口重置时间 |
+| `ai.quota.accounts[].windows[].pool` | string | 否 | 窗口所属额度池的展示名；只有同账号存在多个并行额度池时才出现，如 Factory Droid 的「标准」/「Core」 |
+| `ai.quota.accounts[].balance` | object（可空） | 是 |  |
+| `ai.quota.accounts[].balance.label` | string | 是 |  |
+| `ai.quota.accounts[].balance.amount` | number（double） | 是 | 金额；显式 double，不降 float32 |
+| `ai.quota.accounts[].balance.currency` | string | 是 |  |
+| `ai.quota.accounts[].created_at` | string（date-time） | 是 |  |
+| `ai.quota.accounts[].updated_at` | string（date-time） | 是 |  |
+| `release` | object | 否 |  |
+| `release.complete` | boolean | 否 | false = 该块任一查询失败降级；成功时不返回 |
+| `release.pending_count` | integer | 是 | status=pending 的版本总数（列表截前 3 条） |
+| `release.pending_versions` | object[]（≤3 项） | 是 | 按 created_at 升序（最早的排前，先处理） |
+| `release.pending_versions[].version_id` | string | 是 |  |
+| `release.pending_versions[].version_number` | string | 是 |  |
+| `release.pending_versions[].project_id` | string | 是 |  |
+| `release.pending_versions[].project_name` | string | 是 |  |
+| `release.pending_versions[].created_at` | string（date-time） | 是 |  |
+| `release.pending_versions[].href` | string | 是 | 站内跳转路径 |
+| `release.recent_releases` | object[]（≤5 项） | 是 | 按 shipped_at 降序取前 5；不加时间窗口（发货时间文本存储，窗口会错位） |
+| `release.recent_releases[].version_id` | string | 是 |  |
+| `release.recent_releases[].version_number` | string | 是 |  |
+| `release.recent_releases[].project_id` | string | 是 |  |
+| `release.recent_releases[].project_name` | string | 是 |  |
+| `release.recent_releases[].created_at` | string（date-time） | 是 |  |
+| `release.recent_releases[].shipped_at` | string（date-time） | 是 |  |
+| `release.recent_releases[].href` | string | 是 | 站内跳转路径 |
+| `release.unmerged_pr_issue_count` | integer | 是 | 开启且至少关联一个未合并 PR（含 closed 未合并）的问题数，按 issue 去重、排除搁置项目 |
 
 **错误**
 
@@ -8997,6 +9090,7 @@ unpriced_requests。
 | `start` | string（date-time） | 是 | 统计窗口起点 UTC（含） |
 | `end` | string（date-time） | 是 | 统计窗口终点 UTC（不含，即查询时刻） |
 | `totals` | object | 是 |  |
+| `totals.total_tokens` | integer（int64） | 是 | token 总量 = prompt + completion（reasoning ⊆ completion 已含其中不重复计，供应商未返回按 0 计），与 total_requests 同窗口 |
 | `totals.cost` | number（double，可空） | 是 | 窗口内显示成本合计（USD，请求级实收优先）；无任何金额请求为 null（缺失 ≠ 0） |
 | `totals.daily_average` | number（double，可空） | 是 | cost / 窗口天数；cost 为 null 时同 null |
 | `totals.total_requests` | integer（int64） | 是 | 模型请求总数（主线/定时 + 维护） |

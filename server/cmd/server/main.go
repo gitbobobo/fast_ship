@@ -423,9 +423,6 @@ func main() {
 	t3BindingService := service.NewT3BindingService(t3ThreadsService, projectRepo, projectT3BindingRepo)
 	notificationSink := service.NewNotificationSink(db)
 	notificationService := service.NewNotificationService(notificationRepo)
-	// 仪表盘「待我处理」聚合：依赖通知计数与 T3 线程只读快照（非阻塞），
-	// 须在这两个服务之后装配。
-	dashboardService := service.NewDashboardService(dashboardRepo, notificationService, t3ThreadsService)
 
 	// 内置机器人（INT-101）：管理、主线循环、后台执行与 SSE。
 	botService := service.NewBotService(db, cfg, zapLogger.With(zap.String("module", "bot")), projectService, issueService, t3ThreadsService, t3BindingService)
@@ -463,6 +460,10 @@ func main() {
 	quotaScheduler := service.NewQuotaScheduler(quotaService, quotaAccountRepo, cfg, quotaLogger)
 	// HTTP 侧新建/换凭据/手动刷新写入更早的 next_retry_at 时，叫醒可能在睡长定时器的调度器。
 	quotaService.SetKick(quotaScheduler.Kick)
+
+	// 仪表盘聚合（INT-235）：依赖通知计数、T3 只读快照、机器人用量与额度
+	// 快照（均非阻塞、可降级），须在这些服务之后装配。
+	dashboardService := service.NewDashboardService(dashboardRepo, notificationService, t3ThreadsService, quotaService, botService)
 
 	// PR 审查（INT-135）：webhook 幂等入口 + 审查调度循环（防抖/排队/派发/
 	// 超时/同步/工作区清理）。ghPR 是 App 访问面，App 身份与 public_url

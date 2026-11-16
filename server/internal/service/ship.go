@@ -207,7 +207,9 @@ func (s *ShipService) Ship(versionID, userID string) (*ShipResult, error) {
 
 	// 更新状态
 	_ = s.updateShipState(version, model.ShipStatusInProgress, model.ShipStageFinalize, "正在更新版本状态")
-	now := time.Now()
+	// 文本存储的时间统一写 UTC：本地时区写法会让按字典序比较的时间窗口
+	// （如仪表盘发布节奏）与真实时间序错位（INT-235 残留清理）。
+	now := time.Now().UTC()
 	version.Status = model.VersionStatusShipped
 	version.ShippedAt = &now
 	version.GithubReleaseURL = release.GetHTMLURL()

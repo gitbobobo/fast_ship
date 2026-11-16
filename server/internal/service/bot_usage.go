@@ -475,11 +475,21 @@ type botUsageBotAcc struct {
 	pricedReq       int64
 	cachedSum       int64
 	promptSum       int64
+	// completionSum 供仪表盘 total_tokens 共用（INT-235）：total =
+	// prompt+completion。reasoning ⊆ completion（model/bot.go ReasoningTokens），
+	// 不再重复计入——曾误加出「total 超过各分项之和」的读数。
+	completionSum int64
 }
 
 // totalCost 机器人三桶之和（任一非空即非空，全空保持 null）。
 func (a *botUsageBotAcc) totalCost() *float64 {
 	return botSumOptional(botSumOptional(a.costMain, a.costSchedule), a.costMaintenance)
+}
+
+// totalTokens 两类 token 合计（reasoning ⊆ completion 已含其中，未返回按 0），
+// 与 total_requests 同窗口。
+func (a *botUsageBotAcc) totalTokens() int64 {
+	return a.promptSum + a.completionSum
 }
 
 // botUsageDayAcc 是窗口内单个当地日的金额与「当日有请求机器人」累加。
@@ -847,6 +857,7 @@ func (s *BotService) loadBotUsageLedger(userID, rangeParam, botID string, maintD
 		acc.pricedReq += agg.Counted
 		acc.cachedSum += agg.CachedSum
 		acc.promptSum += agg.PromptSum
+		acc.completionSum += agg.CompletionSum
 
 		// 显示成本 = run 自身 + 关联维护（都为空则 null），桶归属随显示成本。
 		// run 自身与维护金额都走实收优先口径（provider_cost 覆盖估算）。
@@ -911,6 +922,7 @@ func (s *BotService) loadBotUsageLedger(userID, rangeParam, botID string, maintD
 		acc.pricedReq += agg.Counted
 		acc.cachedSum += agg.CachedSum
 		acc.promptSum += agg.PromptSum
+		acc.completionSum += agg.CompletionSum
 
 		day := dayOf(m.CreatedAt)
 		if day != nil && agg.Total > 0 {
@@ -962,6 +974,7 @@ func (s *BotService) loadBotUsageLedger(userID, rangeParam, botID string, maintD
 		acc.pricedReq += row.Requests - row.UnpricedRequests
 		acc.cachedSum += row.CachedTokens
 		acc.promptSum += row.PromptTokens
+		acc.completionSum += row.CompletionTokens
 		acc.runs += row.Runs // maintenance 桶行恒 0
 		samples := botUsageDailyCosts(row.DisplayCosts)
 		acc.displayCosts = append(acc.displayCosts, samples...)
@@ -1107,6 +1120,7 @@ func (s *BotService) GetBotUsageOverview(userID, rangeParam, botID string) (*api
 		overview.Totals.TotalRequests += acc.totalReq
 		overview.Totals.PricedRequests += acc.pricedReq
 		overview.Totals.UnpricedRequests += acc.totalReq - acc.pricedReq
+		overview.Totals.TotalTokens += acc.totalTokens()
 		cost := acc.totalCost()
 		totalCost = botSumOptional(totalCost, cost)
 		var avg, maxCost *float64

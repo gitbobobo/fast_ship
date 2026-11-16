@@ -2,6 +2,7 @@ package repository
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -238,6 +239,348 @@ func (r *DashboardRepository) ListFailedShips(userID string, limit int) (int64, 
 		Order("v.created_at DESC")
 	total, err := r.countAndScan(base, limit, &items)
 	return total, items, err
+}
+
+// DashboardPendingVersion 一个待发版版本。
+type DashboardPendingVersion struct {
+	VersionID     string    `gorm:"column:version_id"`
+	VersionNumber string    `gorm:"column:version_number"`
+	ProjectID     string    `gorm:"column:project_id"`
+	ProjectName   string    `gorm:"column:project_name"`
+	CreatedAt     time.Time `gorm:"column:created_at"`
+}
+
+// ListPendingVersions status=pending（未发货）的版本，排除搁置项目；按
+// created_at 升序——创建越早等得越久，越该先处理。count 是全量 pending 数，
+// items 截前 limit 条。
+func (r *DashboardRepository) ListPendingVersions(userID string, limit int) (int64, []DashboardPendingVersion, error) {
+	items := make([]DashboardPendingVersion, 0, limit)
+	base := r.db.
+		Table("versions AS v").
+		Select("v.id AS version_id, v.version_number, v.project_id, p.name AS project_name, v.created_at").
+		Joins("JOIN projects p ON p.id = v.project_id").
+		Where("p.user_id = ?", userID).
+		Where("v.status = ?", string(model.VersionStatusPending)).
+		Where(projectNotShelvedSQL("p"), time.Now().UTC()).
+		Order("v.created_at ASC")
+	total, err := r.countAndScan(base, limit, &items)
+	return total, items, err
+}
+
+// DashboardRecentRelease 一个已发版版本。ShippedAt 是 Go 侧解析后的真实时间；
+// 文本解析失败的行保持 nil（展示层只见版本号不见时间，排序垫底）。
+type DashboardRecentRelease struct {
+	VersionID     string     `gorm:"column:version_id"`
+	VersionNumber string     `gorm:"column:version_number"`
+	ProjectID     string     `gorm:"column:project_id"`
+	ProjectName   string     `gorm:"column:project_name"`
+	CreatedAt     time.Time  `gorm:"column:created_at"`
+	ShippedAt     *time.Time `gorm:"column:shipped_at"`
+}
+
+// dashboardShippedAtRow 是 ListRecentReleases 的扫描行：shipped_at 有意扫成
+// 字符串——驱动解析不了的写法不应让整个查询报错降级。
+type dashboardShippedAtRow struct {
+	VersionID     string    `gorm:"column:version_id"`
+	VersionNumber string    `gorm:"column:version_number"`
+	ProjectID     string    `gorm:"column:project_id"`
+	ProjectName   string    `gorm:"column:project_name"`
+	CreatedAt     time.Time `gorm:"column:created_at"`
+	ShippedAtRaw  string    `gorm:"column:shipped_at"`
+}
+
+// dashboardShippedAtLayouts 是 shipped_at 文本的历史写法：ship.go 现统一写
+// UTC（RFC3339），存量行有本地时区偏移（如 +08:00）与空格分隔的写法；无
+// 偏移的历史行按 UTC 读。
+var dashboardShippedAtLayouts = []string{
+	time.RFC3339,
+	"2006-01-02 15:04:05Z07:00",
+	"2006-01-02T15:04:05",
+	"2006-01-02 15:04:05",
+}
+
+// ListRecentReleases 最近 limit 次已发版。有意**不在 SQL 侧排序/截断**：
+// shipped_at 是文本存储，历史行（ship.go 已改为写 UTC）存在本地时区偏移的
+// 写法，字典序与真实时间序错位会把最新发版排丢。候选全取（表按版本量级极
+// 小，仍不加时间窗口），Go 侧解析后按真实时间倒序取前 limit；解析失败的行
+// 排最后不丢弃（按 created_at 垄底保持稳定序）。
+func (r *DashboardRepository) ListRecentReleases(userID string, limit int) ([]DashboardRecentRelease, error) {
+	var rows []dashboardShippedAtRow
+	err := r.db.
+		Table("versions AS v").
+		Select("v.id AS version_id, v.version_number, v.project_id, p.name AS project_name, v.created_at, v.shipped_at").
+		Joins("JOIN projects p ON p.id = v.project_id").
+		Where("p.user_id = ?", userID).
+		Where("v.status = ?", string(model.VersionStatusShipped)).
+		Where("v.shipped_at IS NOT NULL").
+		Where(projectNotShelvedSQL("p"), time.Now().UTC()).
+		Order("v.created_at DESC").
+		Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+
+	type candidate struct {
+		item  DashboardRecentRelease
+		at    time.Time
+		valid bool
+	}
+	list := make([]candidate, 0, len(rows))
+	for i := range rows {
+		raw := &rows[i]
+		item := DashboardRecentRelease{
+			VersionID:     raw.VersionID,
+			VersionNumber: raw.VersionNumber,
+			ProjectID:     raw.ProjectID,
+			ProjectName:   raw.ProjectName,
+			CreatedAt:     raw.CreatedAt,
+		}
+		at, ok := parseShippedAt(raw.ShippedAtRaw)
+		if ok {
+			t := at
+			item.ShippedAt = &t
+		}
+		list = append(list, candidate{item: item, at: at, valid: ok})
+	}
+	sort.SliceStable(list, func(i, j int) bool {
+		switch {
+		case list[i].valid != list[j].valid:
+			return list[i].valid // 可解析的排前；解析失败的垫底不丢弃
+		case list[i].valid:
+			return list[i].at.After(list[j].at)
+		default:
+			return list[i].item.CreatedAt.After(list[j].item.CreatedAt)
+		}
+	})
+	if len(list) > limit {
+		list = list[:limit]
+	}
+	items := make([]DashboardRecentRelease, 0, len(list))
+	for _, c := range list {
+		items = append(items, c.item)
+	}
+	return items, nil
+}
+
+// parseShippedAt 按历史写法集合逐个尝试解析 shipped_at 文本；全部失配返回 false。
+func parseShippedAt(raw string) (time.Time, bool) {
+	for _, layout := range dashboardShippedAtLayouts {
+		if t, err := time.Parse(layout, raw); err == nil {
+			return t, true
+		}
+	}
+	return time.Time{}, false
+}
+
+// CountUnmergedPRIssues 开启且至少关联一个未合并 PR（含 closed 未合并）的
+// 问题数，按 issue 去重、排除搁置项目。连接方向 projects(user_id 索引) →
+// issues(project_id) → issue_pull_requests(issue_id/project_id 各有索引)，
+// 与其它仪表盘查询同向，不从关联表出发全表扫。
+func (r *DashboardRepository) CountUnmergedPRIssues(userID string) (int64, error) {
+	var total int64
+	err := r.db.
+		Table("projects AS p").
+		Select("COUNT(DISTINCT i.id)").
+		Joins("JOIN issues i ON i.project_id = p.id").
+		Joins("JOIN issue_pull_requests l ON l.issue_id = i.id").
+		Where("p.user_id = ?", userID).
+		Where("i.state = ?", model.IssueStateOpen).
+		Where("l.state != ?", model.IssuePullRequestStateMerged).
+		Where(projectNotShelvedSQL("p"), time.Now().UTC()).
+		Scan(&total).Error
+	return total, err
+}
+
+// DashboardWorkflowBuckets 开启 issue 按 workflow_status 的两档分桶。
+type DashboardWorkflowBuckets struct {
+	TodoCount       int `gorm:"column:todo_count"`
+	InProgressCount int `gorm:"column:in_progress_count"`
+}
+
+// GetWorkflowBuckets 开启 issue 按 workflow_status 分桶：meta 缺失（NULL）、
+// 空串（列默认值）与显式 'todo' 都归 todo，其余（外层谓词已排除 done，合法
+// 取值只剩 'in_progress'）归 in_progress。分母判定与 GetOpenIssueCounts 完全
+// 一致（state=open AND (m.workflow_status IS NULL OR m.workflow_status !=
+// 'done')），恒等式 todo+in_progress == Σopen_issue_count。刻意独立成查询而
+// 不塞进 GetOpenIssueCounts：概览那两个查询失败即 500，新指标必须能单独降级
+// （complete=false）。issues 用内连接：谓词含 i.state（非空条件），LEFT JOIN
+// 本就会被 WHERE 降级成内连接，写 JOIN 如实表达也利于查询规划；meta 保持
+// LEFT——缺失即 todo 桶，不能丢行。
+func (r *DashboardRepository) GetWorkflowBuckets(userID string) (DashboardWorkflowBuckets, error) {
+	var buckets DashboardWorkflowBuckets
+	err := r.db.
+		Table("projects AS p").
+		Select(`
+			COALESCE(SUM(CASE WHEN m.workflow_status IS NULL OR m.workflow_status IN (?, ?) THEN 1 ELSE 0 END), 0) AS todo_count,
+			COALESCE(SUM(CASE WHEN m.workflow_status IS NOT NULL AND m.workflow_status NOT IN (?, ?) THEN 1 ELSE 0 END), 0) AS in_progress_count
+		`, "", model.IssueWorkflowStatusTodo, "", model.IssueWorkflowStatusTodo).
+		Joins("JOIN issues i ON i.project_id = p.id").
+		Joins("LEFT JOIN issue_internal_meta m ON m.issue_id = i.id").
+		Where("p.user_id = ?", userID).
+		// 搁置中的项目不进概览（INT-165），与 GetOpenIssueCounts 同排除。
+		Where(projectNotShelvedSQL("p"), time.Now().UTC()).
+		Where("i.state = ? AND (m.workflow_status IS NULL OR m.workflow_status != ?)", model.IssueStateOpen, model.IssueWorkflowStatusDone).
+		Scan(&buckets).Error
+	return buckets, err
+}
+
+// DashboardDailyCreatedCount 一天的新建 issue 数。
+type DashboardDailyCreatedCount struct {
+	Date         string `gorm:"column:date"`
+	CreatedCount int    `gorm:"column:created_count"`
+}
+
+// GetDailyCreatedCounts 与 GetDailyResolvedCounts 同一 UTC 窗口（同一
+// startInclusive/endExclusive 参数）。只统计 source='internal'：GitHub 同步
+// issue 关闭时不写 completed_at，混算会把积压趋势系统性画成增长（INT-235
+// 裁决）。连接从 projects(user_id 索引) 出发，不从关联表出发。
+func (r *DashboardRepository) GetDailyCreatedCounts(
+	userID string,
+	startInclusive time.Time,
+	endExclusive time.Time,
+) ([]DashboardDailyCreatedCount, error) {
+	var rows []DashboardDailyCreatedCount
+	err := r.db.
+		Table("projects AS p").
+		Select("DATE(i.created_at) AS date, COUNT(*) AS created_count").
+		Joins("JOIN issues i ON i.project_id = p.id").
+		Where("p.user_id = ?", userID).
+		Where(projectNotShelvedSQL("p"), time.Now().UTC()).
+		Where("i.source = ?", model.IssueSourceInternal).
+		Where("i.created_at >= ? AND i.created_at < ?", startInclusive, endExclusive).
+		Group("DATE(i.created_at)").
+		Order("DATE(i.created_at) ASC").
+		Scan(&rows).Error
+	return rows, err
+}
+
+// DashboardCycleTimeSample 一条周期样本（started→completed）。
+type DashboardCycleTimeSample struct {
+	ProjectID   string    `gorm:"column:project_id"`
+	ProjectName string    `gorm:"column:project_name"`
+	StartedAt   time.Time `gorm:"column:started_at"`
+	CompletedAt time.Time `gorm:"column:completed_at"`
+}
+
+// GetCycleTimeSamples 近 30 天 resolved 窗口内 completed 且有 started_at 的
+// issue 样本（零时长行由服务层剔除，中位数也在服务层 Go 内算）。连接方向
+// projects → issues(project_id 索引) → meta 主键，不从 meta 出发全表扫。
+func (r *DashboardRepository) GetCycleTimeSamples(
+	userID string,
+	startInclusive time.Time,
+	endExclusive time.Time,
+) ([]DashboardCycleTimeSample, error) {
+	var rows []DashboardCycleTimeSample
+	err := r.db.
+		Table("projects AS p").
+		Select("p.id AS project_id, p.name AS project_name, m.started_at, m.completed_at").
+		Joins("JOIN issues i ON i.project_id = p.id").
+		Joins("JOIN issue_internal_meta m ON m.issue_id = i.id").
+		Where("p.user_id = ?", userID).
+		Where(projectNotShelvedSQL("p"), time.Now().UTC()).
+		Where("m.completed_at >= ? AND m.completed_at < ?", startInclusive, endExclusive).
+		Where("m.started_at IS NOT NULL").
+		Scan(&rows).Error
+	return rows, err
+}
+
+// DashboardBacklogAge 当前开启问题按创建时间的三档分布。
+type DashboardBacklogAge struct {
+	Under7d int `gorm:"column:under_7d"`
+	D7To30d int `gorm:"column:d7_to_30d"`
+	Over30d int `gorm:"column:over_30d"`
+}
+
+// GetBacklogAge 范围与待办分桶同口径（state=open 且 workflow 未 done、排除
+// 搁置项目），恒等式三档之和 == todo+in_progress == Σopen_issue_count。分档
+// 边界由服务层 Go 算好 time 参数传入：时间是文本存储，比较走字符串序，
+// 不用 julianday。issues 用内连接的理由与 GetWorkflowBuckets 同（谓词含
+// i.state，LEFT JOIN 已被 WHERE 降级）；meta 保持 LEFT 缺行不影响。
+func (r *DashboardRepository) GetBacklogAge(userID string, under7, under30 time.Time) (DashboardBacklogAge, error) {
+	var age DashboardBacklogAge
+	err := r.db.
+		Table("projects AS p").
+		Select(`
+			COALESCE(SUM(CASE WHEN i.created_at >= ? THEN 1 ELSE 0 END), 0) AS under_7d,
+			COALESCE(SUM(CASE WHEN i.created_at >= ? AND i.created_at < ? THEN 1 ELSE 0 END), 0) AS d7_to_30d,
+			COALESCE(SUM(CASE WHEN i.created_at < ? THEN 1 ELSE 0 END), 0) AS over_30d
+		`, under7, under30, under7, under30).
+		Joins("JOIN issues i ON i.project_id = p.id").
+		Joins("LEFT JOIN issue_internal_meta m ON m.issue_id = i.id").
+		Where("p.user_id = ?", userID).
+		Where(projectNotShelvedSQL("p"), time.Now().UTC()).
+		Where("i.state = ? AND (m.workflow_status IS NULL OR m.workflow_status != ?)", model.IssueStateOpen, model.IssueWorkflowStatusDone).
+		Scan(&age).Error
+	return age, err
+}
+
+// DashboardReviewPRRow PR 级审查聚合行：窗口内（或仍有在途 run）的当前轮次
+// +当前 head 连接结论，分桶在服务层归一。
+type DashboardReviewPRRow struct {
+	ProjectID     string `gorm:"column:project_id"`
+	RepoFullName  string `gorm:"column:repo_full_name"`
+	PRNumber      int    `gorm:"column:pr_number"`
+	IntegrationID string `gorm:"column:integration_id"`
+	CodeStatus    string `gorm:"column:code_status"`
+	ActiveRuns    int64  `gorm:"column:active_runs"`
+}
+
+// GetReviewOutcomes PR 级审查结论：复用阶段一 review_runs⨝review_pull_requests
+// 全键连接（当前轮次+当前 head，与 ListFailedReviews 同一连接），按 PR 分组。
+// 入窗条件（finished_at≥since 或仍在途）下推 SQL：MAX(finished_at) 聚合在
+// SQLite 会以字符串回传（文本存储的时间不走驱动转换），不下推就得在 Go 里
+// 自行解析多种历史写法；在途 run 的 finished_at 为 NULL，由 OR 的第二支保住。
+// p.user_id 与 r.user_id 双重圈定（零成本加固）：与 ListFailedReviews 同构，
+// 防两表 user_id 不一致的存量行跨用户泄漏。
+func (r *DashboardRepository) GetReviewOutcomes(userID string, since time.Time) ([]DashboardReviewPRRow, error) {
+	var rows []DashboardReviewPRRow
+	err := r.db.
+		Table("review_runs AS r").
+		Select(`
+			r.project_id, r.repo_full_name, r.pr_number, r.integration_id,
+			rp.code_status,
+			SUM(CASE WHEN r.status IN ? THEN 1 ELSE 0 END) AS active_runs
+		`, model.ReviewRunActiveStatuses).
+		Joins("JOIN review_pull_requests rp ON r.project_id = rp.project_id AND r.repo_full_name = rp.repo_full_name AND r.pr_number = rp.pr_number AND r.integration_id = rp.integration_id AND r.round_number = rp.round_number AND r.head_sha = rp.head_sha").
+		Joins("JOIN projects p ON p.id = r.project_id").
+		Where("r.user_id = ?", userID).
+		Where("p.user_id = ?", userID).
+		Where(projectNotShelvedSQL("p"), time.Now().UTC()).
+		Where("r.finished_at >= ? OR r.status IN ?", since, model.ReviewRunActiveStatuses).
+		Group("r.project_id, r.repo_full_name, r.pr_number, r.integration_id, rp.code_status").
+		Scan(&rows).Error
+	return rows, err
+}
+
+// DashboardNextScheduleTask 机器人下一次计划触发的任务。
+type DashboardNextScheduleTask struct {
+	BotID     string    `gorm:"column:bot_id"`
+	BotName   string    `gorm:"column:bot_name"`
+	TaskName  string    `gorm:"column:task_name"`
+	NextRunAt time.Time `gorm:"column:next_run_at"`
+}
+
+// GetNextScheduleTask 最近一次将要触发的已启用定时任务；没有则返回 nil。
+// bot_schedule_tasks 与 bots 都是小表且按主键连接，无额外索引可接受
+// （INT-235 文档注记）。
+func (r *DashboardRepository) GetNextScheduleTask(userID string) (*DashboardNextScheduleTask, error) {
+	var row DashboardNextScheduleTask
+	err := r.db.
+		Table("bot_schedule_tasks AS t").
+		Select("t.bot_id, b.name AS bot_name, t.name AS task_name, t.next_run_at").
+		Joins("JOIN bots b ON b.id = t.bot_id").
+		Where("b.user_id = ?", userID).
+		Where("t.enabled AND t.next_run_at IS NOT NULL").
+		Order("t.next_run_at ASC").
+		Limit(1).
+		Scan(&row).Error
+	if err != nil {
+		return nil, err
+	}
+	if row.BotID == "" {
+		return nil, nil // Scan 空结果不报错：按无任务处理
+	}
+	return &row, nil
 }
 
 // DashboardQuotaAttention 一条需要处理的配额账号。

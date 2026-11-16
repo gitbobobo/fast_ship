@@ -2791,6 +2791,9 @@ type BotUsageTotals struct {
 	// TotalRequests 模型请求总数（主线/定时 + 维护）
 	TotalRequests int64 `json:"total_requests"`
 
+	// TotalTokens token 总量 = prompt + completion（reasoning ⊆ completion 已含其中不重复计，供应商未返回按 0 计），与 total_requests 同窗口
+	TotalTokens int64 `json:"total_tokens"`
+
 	// UnpricedRequests 无金额请求数（估算与实收都为空：自定义提供商、目录无价、缺 usage、v0.1.63 前旧记录）
 	UnpricedRequests int64 `json:"unpriced_requests"`
 }
@@ -3110,6 +3113,123 @@ type DashboardActionItemGroup struct {
 // DashboardActionItemKind defines model for DashboardActionItemKind.
 type DashboardActionItemKind string
 
+// DashboardAi AI 运行面板；无 T3 环境时 t3 缺席，单子块失败各自降级 complete=false
+type DashboardAi struct {
+	// Bots 机器人近 7 天用量（按用户时区聚合，与机器人页用量口径同源）；用量查询失败才整体降级（complete=false），next_schedule 省略不影响本块有效性
+	Bots  *DashboardAiBots  `json:"bots,omitempty"`
+	Quota *DashboardAiQuota `json:"quota,omitempty"`
+
+	// Reviews PR 级审查结论分布（近 30 天，排除搁置项目；按 review_pull_requests 当前轮次+当前 head 分组）：code_status=success→passed、failure→blocked、error→errored，pending 或仍有在途 run→in_flight
+	Reviews *DashboardAiReviews `json:"reviews,omitempty"`
+
+	// T3 每环境一行活跃线程计数；与「待我处理」的 t3_waiting 组同源（单遍历）
+	T3 *DashboardAiT3 `json:"t3,omitempty"`
+}
+
+// DashboardAiBotNextSchedule defines model for DashboardAiBotNextSchedule.
+type DashboardAiBotNextSchedule struct {
+	BotId   string `json:"bot_id"`
+	BotName string `json:"bot_name"`
+
+	// NextRunAt 下一次计划触发时间（UTC）
+	NextRunAt string `json:"next_run_at"`
+	TaskName  string `json:"task_name"`
+}
+
+// DashboardAiBots 机器人近 7 天用量（按用户时区聚合，与机器人页用量口径同源）；用量查询失败才整体降级（complete=false），next_schedule 省略不影响本块有效性
+type DashboardAiBots struct {
+	// BotCount 已配置机器人数 + 窗口内有记录的已删除机器人（与展示数字的参与者集合一致）
+	BotCount int `json:"bot_count"`
+
+	// Complete false = 用量服务查询失败降级；成功时不返回
+	Complete *bool `json:"complete,omitempty"`
+
+	// Cost 近 7 天显示成本合计（USD）；无金额请求为 null（缺失 ≠ 0，前端显示「未计价」）
+	Cost         *float64                    `json:"cost"`
+	NextSchedule *DashboardAiBotNextSchedule `json:"next_schedule,omitempty"`
+
+	// Timezone 用量统计的生效时区（IANA 名称）
+	Timezone      string `json:"timezone"`
+	TotalRequests int64  `json:"total_requests"`
+
+	// TotalTokens prompt+completion（NULL 记 0）；reasoning ⊆ completion 已含其中，不重复计
+	TotalTokens int64 `json:"total_tokens"`
+}
+
+// DashboardAiQuota defines model for DashboardAiQuota.
+type DashboardAiQuota struct {
+	// Accounts 全部额度账号只读快照（可能落后于实时，配合 status 展示）；剩余百分比不在后端计算，由前端 lib/quota.ts accountRemaining 推导
+	Accounts []QuotaAccount `json:"accounts"`
+
+	// Complete false = 额度服务查询失败降级；成功时不返回
+	Complete *bool `json:"complete,omitempty"`
+}
+
+// DashboardAiReviews PR 级审查结论分布（近 30 天，排除搁置项目；按 review_pull_requests 当前轮次+当前 head 分组）：code_status=success→passed、failure→blocked、error→errored，pending 或仍有在途 run→in_flight
+type DashboardAiReviews struct {
+	Blocked int `json:"blocked"`
+
+	// Complete false = 查询失败降级；成功时不返回
+	Complete *bool `json:"complete,omitempty"`
+	Errored  int   `json:"errored"`
+	InFlight int   `json:"in_flight"`
+
+	// PassRate passed/(passed+blocked)；分母为 0 时为 null（不显示），此时不代表通过率 100%
+	PassRate *float64 `json:"pass_rate"`
+	Passed   int      `json:"passed"`
+}
+
+// DashboardAiT3 每环境一行活跃线程计数；与「待我处理」的 t3_waiting 组同源（单遍历）
+type DashboardAiT3 struct {
+	// Complete false = 任一环境未 ready（Syncing/Stale/Failed/凭证不可用）；成功时不返回
+	Complete     *bool                      `json:"complete,omitempty"`
+	Environments []DashboardAiT3Environment `json:"environments"`
+}
+
+// DashboardAiT3Environment defines model for DashboardAiT3Environment.
+type DashboardAiT3Environment struct {
+	EnvironmentId   string `json:"environment_id"`
+	EnvironmentName string `json:"environment_name"`
+
+	// Queued 原始 shell status=queued 的线程数（queued 是 running 的先导阶段，含在 running 计数内）
+	Queued int `json:"queued"`
+
+	// Readable 本轮该环境活跃快照是否可读；false 时 running/waiting/queued 无效
+	Readable bool `json:"readable"`
+
+	// Running 状态为 running 的活跃线程数（不含 subagent）
+	Running int `json:"running"`
+
+	// Waiting 状态为 waiting 的活跃线程数（与 t3_waiting 组同口径）
+	Waiting int `json:"waiting"`
+}
+
+// DashboardBacklogAge 当前开启问题按创建时间分档（<7 天 / 7-30 天 / >30 天）；三档之和=todo_count+in_progress_count=Σopen_issue_count。边界按 UTC 整日在 Go 算好传入 SQL（时间是文本存储）
+type DashboardBacklogAge struct {
+	D7To30d int `json:"d7_to_30d"`
+	Over30d int `json:"over_30d"`
+	Under7d int `json:"under_7d"`
+}
+
+// DashboardCycleTimeProject defines model for DashboardCycleTimeProject.
+type DashboardCycleTimeProject struct {
+	// CompletedCount 该项目计入中位数的样本数（恒等式 Σcompleted_count ≤ Σdaily_resolved）
+	CompletedCount int `json:"completed_count"`
+
+	// MedianDays 从 started_at 到 completed_at 的天数中位数
+	MedianDays  float64 `json:"median_days"`
+	ProjectId   string  `json:"project_id"`
+	ProjectName string  `json:"project_name"`
+}
+
+// DashboardDailyCreatedPoint defines model for DashboardDailyCreatedPoint.
+type DashboardDailyCreatedPoint struct {
+	CreatedCount int `json:"created_count"`
+
+	// Date YYYY-MM-DD
+	Date string `json:"date"`
+}
+
 // DashboardDailyResolvedPoint defines model for DashboardDailyResolvedPoint.
 type DashboardDailyResolvedPoint struct {
 	// Date YYYY-MM-DD
@@ -3117,14 +3237,40 @@ type DashboardDailyResolvedPoint struct {
 	ResolvedCount int    `json:"resolved_count"`
 }
 
+// DashboardFlow defines model for DashboardFlow.
+type DashboardFlow struct {
+	// BacklogAge 当前开启问题按创建时间分档（<7 天 / 7-30 天 / >30 天）；三档之和=todo_count+in_progress_count=Σopen_issue_count。边界按 UTC 整日在 Go 算好传入 SQL（时间是文本存储）
+	BacklogAge DashboardBacklogAge `json:"backlog_age"`
+
+	// Complete false = 该块任一查询失败降级（结构仍完整，显示为空但不代表真实为零）；成功时不返回
+	Complete *bool `json:"complete,omitempty"`
+
+	// CycleTimeByProject 近 30 天窗口内完成且有 started_at 的问题的周期中位数，按 completed_count 降序、项目名升序取前 5；零时长（started=completed）行剔除
+	CycleTimeByProject []DashboardCycleTimeProject `json:"cycle_time_by_project"`
+
+	// DailyCreated 固定近 30 天（含今天），与 daily_resolved 同一窗口；只统计 source=internal 的手动 issue（GitHub 同步 issue 无 completed_at，混算会系统性画成积压增长）
+	DailyCreated []DashboardDailyCreatedPoint `json:"daily_created"`
+
+	// InProgressCount 开启且 workflow_status 非 done 非空的问题数
+	InProgressCount int `json:"in_progress_count"`
+
+	// TodoCount 开启且 workflow_status 为空/NULL 的问题数；与 open_issues_by_project 同口径（排除搁置项目），恒等式 todo_count+in_progress_count=Σopen_issue_count
+	TodoCount int `json:"todo_count"`
+}
+
 // DashboardOverview defines model for DashboardOverview.
 type DashboardOverview struct {
 	// ActionItemGroups 「待我处理」聚合区，固定顺序；无 T3 环境时不含 t3_waiting 组。review_failed 仅近 14 天且仅当前轮次+当前 head 的失败/超时审查，按 PR 去重；ship_failed 含 pending 发货失败与已发货 hooks failed/incomplete
 	ActionItemGroups []DashboardActionItemGroup `json:"action_item_groups"`
 
+	// Ai AI 运行面板；无 T3 环境时 t3 缺席，单子块失败各自降级 complete=false
+	Ai *DashboardAi `json:"ai,omitempty"`
+
 	// DailyResolved 固定近 30 天（含今天），逐日排列
 	DailyResolved       []DashboardDailyResolvedPoint    `json:"daily_resolved"`
+	Flow                *DashboardFlow                   `json:"flow,omitempty"`
 	OpenIssuesByProject []DashboardProjectOpenIssuePoint `json:"open_issues_by_project"`
+	Release             *DashboardRelease                `json:"release,omitempty"`
 }
 
 // DashboardProjectOpenIssuePoint defines model for DashboardProjectOpenIssuePoint.
@@ -3132,6 +3278,51 @@ type DashboardProjectOpenIssuePoint struct {
 	OpenIssueCount int    `json:"open_issue_count"`
 	ProjectId      string `json:"project_id"`
 	ProjectName    string `json:"project_name"`
+}
+
+// DashboardRelease defines model for DashboardRelease.
+type DashboardRelease struct {
+	// Complete false = 该块任一查询失败降级；成功时不返回
+	Complete *bool `json:"complete,omitempty"`
+
+	// PendingCount status=pending 的版本总数（列表截前 3 条）
+	PendingCount int `json:"pending_count"`
+
+	// PendingVersions 按 created_at 升序（最早的排前，先处理）
+	PendingVersions []DashboardReleaseVersion `json:"pending_versions"`
+
+	// RecentReleases 按 shipped_at 降序取前 5；不加时间窗口（发货时间文本存储，窗口会错位）
+	RecentReleases []DashboardReleaseShipped `json:"recent_releases"`
+
+	// UnmergedPrIssueCount 开启且至少关联一个未合并 PR（含 closed 未合并）的问题数，按 issue 去重、排除搁置项目
+	UnmergedPrIssueCount int `json:"unmerged_pr_issue_count"`
+}
+
+// DashboardReleaseShipped defines model for DashboardReleaseShipped.
+type DashboardReleaseShipped struct {
+	CreatedAt string `json:"created_at"`
+
+	// Href 站内跳转路径
+	Href        string `json:"href"`
+	ProjectId   string `json:"project_id"`
+	ProjectName string `json:"project_name"`
+
+	// ShippedAt 发版时间；发版时间戳解析失败的历史记录为 null（垫底保留，不丢行）
+	ShippedAt     *string `json:"shipped_at"`
+	VersionId     string  `json:"version_id"`
+	VersionNumber string  `json:"version_number"`
+}
+
+// DashboardReleaseVersion defines model for DashboardReleaseVersion.
+type DashboardReleaseVersion struct {
+	CreatedAt string `json:"created_at"`
+
+	// Href 站内跳转路径
+	Href          string `json:"href"`
+	ProjectId     string `json:"project_id"`
+	ProjectName   string `json:"project_name"`
+	VersionId     string `json:"version_id"`
+	VersionNumber string `json:"version_number"`
 }
 
 // DeferIssueRecommendationRequest defines model for DeferIssueRecommendationRequest.

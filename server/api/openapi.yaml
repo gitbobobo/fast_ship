@@ -12426,6 +12426,259 @@ components:
           items:
             $ref: '#/components/schemas/DashboardActionItemGroup'
           description: 「待我处理」聚合区，固定顺序；无 T3 环境时不含 t3_waiting 组。review_failed 仅近 14 天且仅当前轮次+当前 head 的失败/超时审查，按 PR 去重；ship_failed 含 pending 发货失败与已发货 hooks failed/incomplete
+        flow:
+          $ref: '#/components/schemas/DashboardFlow'
+        ai:
+          $ref: '#/components/schemas/DashboardAi'
+        release:
+          $ref: '#/components/schemas/DashboardRelease'
+    DashboardFlow:
+      type: object
+      required: [todo_count, in_progress_count, daily_created, cycle_time_by_project, backlog_age]
+      properties:
+        complete:
+          type: boolean
+          description: false = 该块任一查询失败降级（结构仍完整，显示为空但不代表真实为零）；成功时不返回
+        todo_count:
+          type: integer
+          description: 开启且 workflow_status 为空/NULL 的问题数；与 open_issues_by_project 同口径（排除搁置项目），恒等式 todo_count+in_progress_count=Σopen_issue_count
+        in_progress_count:
+          type: integer
+          description: 开启且 workflow_status 非 done 非空的问题数
+        daily_created:
+          type: array
+          items:
+            $ref: '#/components/schemas/DashboardDailyCreatedPoint'
+          description: 固定近 30 天（含今天），与 daily_resolved 同一窗口；只统计 source=internal 的手动 issue（GitHub 同步 issue 无 completed_at，混算会系统性画成积压增长）
+        cycle_time_by_project:
+          type: array
+          maxItems: 5
+          items:
+            $ref: '#/components/schemas/DashboardCycleTimeProject'
+          description: 近 30 天窗口内完成且有 started_at 的问题的周期中位数，按 completed_count 降序、项目名升序取前 5；零时长（started=completed）行剔除
+        backlog_age:
+          $ref: '#/components/schemas/DashboardBacklogAge'
+    DashboardDailyCreatedPoint:
+      type: object
+      required: [date, created_count]
+      properties:
+        date:
+          type: string
+          description: YYYY-MM-DD
+        created_count:
+          type: integer
+    DashboardCycleTimeProject:
+      type: object
+      required: [project_id, project_name, median_days, completed_count]
+      properties:
+        project_id:
+          type: string
+        project_name:
+          type: string
+        median_days:
+          type: number
+          format: double
+          description: 从 started_at 到 completed_at 的天数中位数
+        completed_count:
+          type: integer
+          description: 该项目计入中位数的样本数（恒等式 Σcompleted_count ≤ Σdaily_resolved）
+    DashboardBacklogAge:
+      type: object
+      required: [under_7d, d7_to_30d, over_30d]
+      properties:
+        under_7d:
+          type: integer
+        d7_to_30d:
+          type: integer
+        over_30d:
+          type: integer
+      description: 当前开启问题按创建时间分档（<7 天 / 7-30 天 / >30 天）；三档之和=todo_count+in_progress_count=Σopen_issue_count。边界按 UTC 整日在 Go 算好传入 SQL（时间是文本存储）
+    DashboardAi:
+      type: object
+      properties:
+        t3:
+          $ref: '#/components/schemas/DashboardAiT3'
+        reviews:
+          $ref: '#/components/schemas/DashboardAiReviews'
+        bots:
+          $ref: '#/components/schemas/DashboardAiBots'
+        quota:
+          $ref: '#/components/schemas/DashboardAiQuota'
+      description: AI 运行面板；无 T3 环境时 t3 缺席，单子块失败各自降级 complete=false
+    DashboardAiT3:
+      type: object
+      required: [environments]
+      properties:
+        complete:
+          type: boolean
+          description: false = 任一环境未 ready（Syncing/Stale/Failed/凭证不可用）；成功时不返回
+        environments:
+          type: array
+          items:
+            $ref: '#/components/schemas/DashboardAiT3Environment'
+      description: 每环境一行活跃线程计数；与「待我处理」的 t3_waiting 组同源（单遍历）
+    DashboardAiT3Environment:
+      type: object
+      required: [environment_id, environment_name, running, waiting, queued, readable]
+      properties:
+        environment_id:
+          type: string
+        environment_name:
+          type: string
+        running:
+          type: integer
+          description: 状态为 running 的活跃线程数（不含 subagent）
+        waiting:
+          type: integer
+          description: 状态为 waiting 的活跃线程数（与 t3_waiting 组同口径）
+        queued:
+          type: integer
+          description: 原始 shell status=queued 的线程数（queued 是 running 的先导阶段，含在 running 计数内）
+        readable:
+          type: boolean
+          description: 本轮该环境活跃快照是否可读；false 时 running/waiting/queued 无效
+    DashboardAiReviews:
+      type: object
+      required: [passed, blocked, errored, in_flight, pass_rate]
+      properties:
+        complete:
+          type: boolean
+          description: false = 查询失败降级；成功时不返回
+        passed:
+          type: integer
+        blocked:
+          type: integer
+        errored:
+          type: integer
+        in_flight:
+          type: integer
+        pass_rate:
+          type: number
+          format: double
+          nullable: true
+          description: passed/(passed+blocked)；分母为 0 时为 null（不显示），此时不代表通过率 100%
+      description: PR 级审查结论分布（近 30 天，排除搁置项目；按 review_pull_requests 当前轮次+当前 head 分组）：code_status=success→passed、failure→blocked、error→errored，pending 或仍有在途 run→in_flight
+    DashboardAiBots:
+      type: object
+      required: [bot_count, timezone, cost, total_requests, total_tokens]
+      properties:
+        complete:
+          type: boolean
+          description: false = 用量服务查询失败降级；成功时不返回
+        bot_count:
+          type: integer
+          description: 已配置机器人数 + 窗口内有记录的已删除机器人（与展示数字的参与者集合一致）
+        timezone:
+          type: string
+          description: 用量统计的生效时区（IANA 名称）
+        cost:
+          type: number
+          format: double
+          nullable: true
+          description: 近 7 天显示成本合计（USD）；无金额请求为 null（缺失 ≠ 0，前端显示「未计价」）
+        total_requests:
+          type: integer
+          format: int64
+        total_tokens:
+          type: integer
+          format: int64
+          description: prompt+completion（NULL 记 0）；reasoning ⊆ completion 已含其中，不重复计
+        next_schedule:
+          $ref: '#/components/schemas/DashboardAiBotNextSchedule'
+          description: 最近一次将触发的已启用定时任务；没有任务或该查询暂不可用时省略（省略不代表无任务）
+      description: 机器人近 7 天用量（按用户时区聚合，与机器人页用量口径同源）；用量查询失败才整体降级（complete=false），next_schedule 省略不影响本块有效性
+    DashboardAiBotNextSchedule:
+      type: object
+      required: [bot_id, bot_name, task_name, next_run_at]
+      properties:
+        bot_id:
+          type: string
+        bot_name:
+          type: string
+        task_name:
+          type: string
+        next_run_at:
+          type: string
+          format: date-time
+          description: 下一次计划触发时间（UTC）
+    DashboardAiQuota:
+      type: object
+      required: [accounts]
+      properties:
+        complete:
+          type: boolean
+          description: false = 额度服务查询失败降级；成功时不返回
+        accounts:
+          type: array
+          items:
+            $ref: '#/components/schemas/QuotaAccount'
+          description: 全部额度账号只读快照（可能落后于实时，配合 status 展示）；剩余百分比不在后端计算，由前端 lib/quota.ts accountRemaining 推导
+    DashboardRelease:
+      type: object
+      required: [pending_count, pending_versions, recent_releases, unmerged_pr_issue_count]
+      properties:
+        complete:
+          type: boolean
+          description: false = 该块任一查询失败降级；成功时不返回
+        pending_count:
+          type: integer
+          description: status=pending 的版本总数（列表截前 3 条）
+        pending_versions:
+          type: array
+          maxItems: 3
+          items:
+            $ref: '#/components/schemas/DashboardReleaseVersion'
+          description: 按 created_at 升序（最早的排前，先处理）
+        recent_releases:
+          type: array
+          maxItems: 5
+          items:
+            $ref: '#/components/schemas/DashboardReleaseShipped'
+          description: 按 shipped_at 降序取前 5；不加时间窗口（发货时间文本存储，窗口会错位）
+        unmerged_pr_issue_count:
+          type: integer
+          description: 开启且至少关联一个未合并 PR（含 closed 未合并）的问题数，按 issue 去重、排除搁置项目
+    DashboardReleaseVersion:
+      type: object
+      required: [version_id, version_number, project_id, project_name, created_at, href]
+      properties:
+        version_id:
+          type: string
+        version_number:
+          type: string
+        project_id:
+          type: string
+        project_name:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        href:
+          type: string
+          description: 站内跳转路径
+    DashboardReleaseShipped:
+      type: object
+      required: [version_id, version_number, project_id, project_name, created_at, shipped_at, href]
+      properties:
+        version_id:
+          type: string
+        version_number:
+          type: string
+        project_id:
+          type: string
+        project_name:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        shipped_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: 发版时间；发版时间戳解析失败的历史记录为 null（垫底保留，不丢行）
+        href:
+          type: string
+          description: 站内跳转路径
 
     # ---- logs ----
     LogEntryInput:
@@ -15242,8 +15495,12 @@ components:
 
     BotUsageTotals:
       type: object
-      required: [cost, daily_average, total_requests, priced_requests, unpriced_requests]
+      required: [cost, daily_average, total_requests, priced_requests, unpriced_requests, total_tokens]
       properties:
+        total_tokens:
+          type: integer
+          format: int64
+          description: token 总量 = prompt + completion（reasoning ⊆ completion 已含其中不重复计，供应商未返回按 0 计），与 total_requests 同窗口
         cost:
           type: number
           format: double
