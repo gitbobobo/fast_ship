@@ -21,17 +21,17 @@ export function ProjectBreadcrumb({
       className="flex min-w-0 items-center gap-1.5 text-sm"
       data-testid="project-breadcrumb"
     >
-      <span className="shrink-0 text-muted-foreground">fast_ship</span>
+      <span className="shrink-0 text-muted-foreground">Fast Ship</span>
       <span className="shrink-0 text-muted-foreground/50">/</span>
       {project && (
         <>
-          <span className="max-w-40 truncate" title={project.name}>
+          <span className="max-w-40 truncate text-muted-foreground" title={project.name}>
             {project.name}
           </span>
           <span className="shrink-0 text-muted-foreground/50">/</span>
         </>
       )}
-      <span className="truncate font-medium">{section}</span>
+      <span className="truncate font-semibold text-foreground">{section}</span>
     </span>
   );
 }

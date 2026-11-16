@@ -227,12 +227,12 @@ describe("项目级页面骨架回归（INT-237 PR3）", () => {
   });
 
   it.each(PAGES)(
-    "$key 页面包屑为 fast_ship / 项目名 / section，且不再渲染页内切换器",
+    "$key 页面包屑为 Fast Ship / 项目名 / section，且不再渲染页内切换器",
     ({ element, route, entry, section }) => {
       renderPage(element, route, entry);
 
       const crumb = screen.getByTestId("project-breadcrumb");
-      expect(crumb).toHaveTextContent("fast_ship");
+      expect(crumb).toHaveTextContent("Fast Ship");
       expect(crumb).toHaveTextContent("Demo");
       expect(crumb).toHaveTextContent(section);
       // 页内项目选择已上移侧边栏：不再出现下拉占位文案
@@ -298,7 +298,7 @@ describe("项目级页面骨架回归（INT-237 PR3）", () => {
     renderPage(<LogRunDetailPage />, "/projects/:id/logs/:runId", "/projects/proj-1/logs/run-1");
 
     const crumb = screen.getByTestId("project-breadcrumb");
-    expect(crumb).toHaveTextContent("fast_ship");
+    expect(crumb).toHaveTextContent("Fast Ship");
     expect(crumb).toHaveTextContent("Demo");
     expect(crumb).toHaveTextContent("运行详情");
     expect(screen.queryByText("请选择项目")).not.toBeInTheDocument();

@@ -407,6 +407,31 @@ function IssuesPageContent({
               </Button>
             }
               secondary={[
+                ...(issueSync
+                  ? [
+                      <span
+                        key="sync-status"
+                        className={cn(
+                          "max-w-[12rem] truncate text-xs text-muted-foreground",
+                          issueSync.status === "failed" && "text-destructive",
+                        )}
+                        title={
+                          issueSync.status === "failed" && issueSync.last_error
+                            ? issueSync.last_error
+                            : undefined
+                        }
+                      >
+                        {issueSync.status === "running"
+                          ? "GitHub 同步中…"
+                          : issueSync.status === "failed"
+                            ? `GitHub 同步失败${issueSync.last_error ? ` · ${issueSync.last_error}` : ""}`
+                            : issueSync.status === "completed" &&
+                                issueSync.last_synced_at
+                              ? `GitHub ${formatRelativeTime(issueSync.last_synced_at)}同步完成`
+                              : "GitHub 未同步"}
+                      </span>,
+                    ]
+                  : []),
                 <Button
                   key="sync"
                   variant="outline"
@@ -459,32 +484,6 @@ function IssuesPageContent({
         }
       />
       <div className="p-4 md:p-6 space-y-6">
-        {/* 同步状态：项目选择已上移侧边栏，这里只展示当前项目的同步进度 */}
-        {issueSync && (
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-            <span
-              className={cn(
-                "max-w-xs truncate text-xs text-muted-foreground",
-                issueSync.status === "failed" && "text-destructive",
-              )}
-              title={
-                issueSync.status === "failed" && issueSync.last_error
-                  ? issueSync.last_error
-                  : undefined
-              }
-            >
-              {issueSync.status === "running"
-                ? "同步中…"
-                : issueSync.status === "failed"
-                  ? `同步失败${issueSync.last_error ? ` · ${issueSync.last_error}` : ""}`
-                  : issueSync.status === "completed" &&
-                      issueSync.last_synced_at
-                    ? `${formatRelativeTime(issueSync.last_synced_at)}同步完成`
-                    : "未同步"}
-            </span>
-          </div>
-        )}
-
         {/* Filters */}
         <div className="flex flex-wrap items-center gap-2">
             <div className="relative">

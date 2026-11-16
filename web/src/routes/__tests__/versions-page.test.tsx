@@ -86,7 +86,7 @@ describe("VersionsPage", () => {
 
     expect(useVersions).toHaveBeenCalledWith("proj-1");
     const crumb = screen.getByTestId("project-breadcrumb");
-    expect(crumb).toHaveTextContent("fast_ship");
+    expect(crumb).toHaveTextContent("Fast Ship");
     expect(crumb).toHaveTextContent("Alpha App");
     expect(crumb).toHaveTextContent("版本");
     expect(screen.getByText("v1.2.0")).toBeInTheDocument();

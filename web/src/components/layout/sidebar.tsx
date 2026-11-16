@@ -83,12 +83,28 @@ function SidebarNavItem({
   onNavigate?: () => void;
 }) {
   const { pathname } = useLocation();
-  // 有未保存内容的页面（如文档编辑器）登记导航守卫：用户取消则留在原地
+  // 有未保存内容的页面（如文档编辑器）登记导航守卫；左键无修饰键且目标
+  // 不在当前页时才询问，修饰键/中键（新标签打开）不拦
   const link = (
     <NavLink
       to={item.to}
       end={item.end}
       onClick={(event) => {
+        if (
+          event.button !== 0 ||
+          event.metaKey ||
+          event.ctrlKey ||
+          event.shiftKey ||
+          event.altKey
+        ) {
+          onNavigate?.();
+          return;
+        }
+        // 点击当前所在页的链接是空操作，不必询问守卫
+        if (pathname === item.to) {
+          onNavigate?.();
+          return;
+        }
         if (!confirmNavigationLeave()) {
           event.preventDefault();
           return;

@@ -100,15 +100,22 @@ export function ProjectSwitcher({
           variant === "sidebar" &&
             "h-8 w-full justify-between py-2 pr-2 pl-2.5 whitespace-nowrap",
           variant === "sidebar-collapsed" &&
-            "size-8 shrink-0 justify-center font-medium",
+            "relative size-8 shrink-0 justify-center font-medium hover:bg-accent/60",
           className,
         )}
       >
         {variant === "sidebar-collapsed" ? (
-          // 收起态：项目首字素方块，完整名称交给 tooltip（侧边栏负责渲染）
-          <span aria-hidden="true" className="leading-none">
-            {firstGrapheme(activeProject?.name ?? "?")}
-          </span>
+          // 收起态：项目首字素方块，完整名称交给 tooltip（侧边栏负责渲染）；
+          // 右下角小 chevron 提供稳定的「可点击/可选」 affordance，与纯导航图标区分
+          <>
+            <span aria-hidden="true" className="leading-none">
+              {firstGrapheme(activeProject?.name ?? "?")}
+            </span>
+            <ChevronDown
+              aria-hidden="true"
+              className="absolute -right-px -bottom-px size-2.5 rounded-tl-sm bg-background text-muted-foreground"
+            />
+          </>
         ) : (
           <>
             <span
