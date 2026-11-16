@@ -12368,33 +12368,49 @@ components:
           type: string
         open_issue_count:
           type: integer
-    DashboardDailyResolvedProjectPoint:
-      type: object
-      required: [project_id, project_name, count]
-      properties:
-        project_id:
-          type: string
-        project_name:
-          type: string
-        count:
-          type: integer
     DashboardDailyResolvedPoint:
       type: object
-      required: [date, resolved_count, projects]
+      required: [date, resolved_count]
       properties:
         date:
           type: string
           description: YYYY-MM-DD
         resolved_count:
           type: integer
-        projects:
+    DashboardActionItemKind:
+      type: string
+      enum: [t3_waiting, review_failed, recommendations, ship_failed, quota_attention, unread_notifications]
+    DashboardActionItem:
+      type: object
+      required: [title, href]
+      properties:
+        title:
+          type: string
+        detail:
+          type: string
+          description: 补充说明（如项目名/环境名），无则省略
+        href:
+          type: string
+          description: 站内跳转路径
+    DashboardActionItemGroup:
+      type: object
+      required: [kind, count, items]
+      properties:
+        kind:
+          $ref: '#/components/schemas/DashboardActionItemKind'
+        count:
+          type: integer
+        complete:
+          type: boolean
+          description: false = 该组数据不完整/不可读（t3_waiting 任一环境未 ready，或其它组查询失败降级）；成功时不返回
+        items:
           type: array
+          maxItems: 5
           items:
-            $ref: '#/components/schemas/DashboardDailyResolvedProjectPoint'
-          description: 当日无数据的项目不出现（可为 null/空）
+            $ref: '#/components/schemas/DashboardActionItem'
     DashboardOverview:
       type: object
-      required: [open_issues_by_project, daily_resolved]
+      required: [open_issues_by_project, daily_resolved, action_item_groups]
       properties:
         open_issues_by_project:
           type: array
@@ -12405,6 +12421,11 @@ components:
           items:
             $ref: '#/components/schemas/DashboardDailyResolvedPoint'
           description: 固定近 30 天（含今天），逐日排列
+        action_item_groups:
+          type: array
+          items:
+            $ref: '#/components/schemas/DashboardActionItemGroup'
+          description: 「待我处理」聚合区，固定顺序；无 T3 环境时不含 t3_waiting 组。review_failed 仅近 14 天且仅当前轮次+当前 head 的失败/超时审查，按 PR 去重；ship_failed 含 pending 发货失败与已发货 hooks failed/incomplete
 
     # ---- logs ----
     LogEntryInput:

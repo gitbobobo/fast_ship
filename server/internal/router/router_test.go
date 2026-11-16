@@ -754,10 +754,6 @@ func TestRouterDashboardOverview_ReturnsDailyResolvedSeriesWithZeroFilledDates(t
 		dayStart.AddDate(0, 0, -5).Format("2006-01-02"): 1,
 		dayStart.AddDate(0, 0, -2).Format("2006-01-02"): 2,
 	}
-	wantProjectCounts := map[string]map[string]int{
-		dayStart.AddDate(0, 0, -5).Format("2006-01-02"): {projectA.ID: 1},
-		dayStart.AddDate(0, 0, -2).Format("2006-01-02"): {projectA.ID: 1, projectB.ID: 1},
-	}
 	for index, point := range resp.DailyResolved {
 		wantDate := dayStart.AddDate(0, 0, -(29 - index)).Format("2006-01-02")
 		if point.Date != wantDate {
@@ -766,16 +762,6 @@ func TestRouterDashboardOverview_ReturnsDailyResolvedSeriesWithZeroFilledDates(t
 		wantCount := wantCounts[wantDate]
 		if point.ResolvedCount != wantCount {
 			t.Fatalf("expected resolved count %d for %s, got %+v", wantCount, wantDate, point)
-		}
-		wantProjects := wantProjectCounts[wantDate]
-		gotProjects := make(map[string]int, len(point.Projects))
-		for _, p := range point.Projects {
-			gotProjects[p.ProjectID] = p.Count
-		}
-		for pid, wantCnt := range wantProjects {
-			if gotProjects[pid] != wantCnt {
-				t.Fatalf("expected project %s resolved count %d for %s, got %+v", pid, wantCnt, wantDate, point.Projects)
-			}
 		}
 	}
 }
@@ -1058,7 +1044,6 @@ func setupRouterTestEnvMaybeLogs(t *testing.T, captureLogs bool, opts ...routerC
 	issuePromptService := service.NewIssuePromptService(userIssuePromptRepo, t3EnvironmentRepo)
 	apiKeyService := service.NewApiKeyService(apiKeyRepo, loggerOrNil(appLogger, "api_key"))
 	githubTokenService := service.NewGitHubTokenService(githubTokenRepo, cfg, zap.NewNop())
-	dashboardService := service.NewDashboardService(dashboardRepo)
 	projectService := service.NewProjectService(projectRepo, versionRepo, issueSyncStateRepo, githubTokenRepo, fileStorage, cfg, zap.NewNop(), nil)
 	versionService := service.NewVersionService(versionRepo, projectRepo, githubTokenRepo, fileStorage, cfg, zap.NewNop())
 	githubRepoLabelRepo := repository.NewGitHubRepoLabelRepository(db)
@@ -1084,6 +1069,7 @@ func setupRouterTestEnvMaybeLogs(t *testing.T, captureLogs bool, opts ...routerC
 	t3BindingService := service.NewT3BindingService(t3ThreadsService, projectRepo, repository.NewProjectT3BindingRepository(db))
 	notificationSink := service.NewNotificationSink(db)
 	notificationService := service.NewNotificationService(repository.NewNotificationRepository(db))
+	dashboardService := service.NewDashboardService(dashboardRepo, notificationService, t3ThreadsService)
 	reviewService := service.NewReviewService(db, projectRepo, repository.NewGitHubWebhookDeliveryRepository(db), notificationSink, nil, nil, nil, nil, nil, nil, cfg, zap.NewNop())
 	botService := service.NewBotService(db, cfg, zap.NewNop(), projectService, issueService, t3ThreadsService, t3BindingService)
 	aiProviderHandler := handler.NewAIProviderHandler(service.NewAIProviderService(db, cfg, zap.NewNop()))
@@ -1304,16 +1290,9 @@ type dashboardProjectOpenIssuePoint struct {
 	OpenIssueCount int    `json:"open_issue_count"`
 }
 
-type dashboardDailyResolvedProjectPoint struct {
-	ProjectID   string `json:"project_id"`
-	ProjectName string `json:"project_name"`
-	Count       int    `json:"count"`
-}
-
 type dashboardDailyResolvedPoint struct {
-	Date          string                               `json:"date"`
-	ResolvedCount int                                  `json:"resolved_count"`
-	Projects      []dashboardDailyResolvedProjectPoint `json:"projects"`
+	Date          string `json:"date"`
+	ResolvedCount int    `json:"resolved_count"`
 }
 
 func registerAndLoginRouterUser(t *testing.T, r *gin.Engine, username, email, password string) routerAuthResult {

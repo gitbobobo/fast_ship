@@ -5272,22 +5272,33 @@ export interface components {
             project_name: string;
             open_issue_count: number;
         };
-        DashboardDailyResolvedProjectPoint: {
-            project_id: string;
-            project_name: string;
-            count: number;
-        };
         DashboardDailyResolvedPoint: {
             /** @description YYYY-MM-DD */
             date: string;
             resolved_count: number;
-            /** @description 当日无数据的项目不出现（可为 null/空） */
-            projects: components["schemas"]["DashboardDailyResolvedProjectPoint"][];
+        };
+        /** @enum {string} */
+        DashboardActionItemKind: "t3_waiting" | "review_failed" | "recommendations" | "ship_failed" | "quota_attention" | "unread_notifications";
+        DashboardActionItem: {
+            title: string;
+            /** @description 补充说明（如项目名/环境名），无则省略 */
+            detail?: string;
+            /** @description 站内跳转路径 */
+            href: string;
+        };
+        DashboardActionItemGroup: {
+            kind: components["schemas"]["DashboardActionItemKind"];
+            count: number;
+            /** @description false = 该组数据不完整/不可读（t3_waiting 任一环境未 ready，或其它组查询失败降级）；成功时不返回 */
+            complete?: boolean;
+            items: components["schemas"]["DashboardActionItem"][];
         };
         DashboardOverview: {
             open_issues_by_project: components["schemas"]["DashboardProjectOpenIssuePoint"][];
             /** @description 固定近 30 天（含今天），逐日排列 */
             daily_resolved: components["schemas"]["DashboardDailyResolvedPoint"][];
+            /** @description 「待我处理」聚合区，固定顺序；无 T3 环境时不含 t3_waiting 组。review_failed 仅近 14 天且仅当前轮次+当前 head 的失败/超时审查，按 PR 去重；ship_failed 含 pending 发货失败与已发货 hooks failed/incomplete */
+            action_item_groups: components["schemas"]["DashboardActionItemGroup"][];
         };
         LogEntryInput: {
             /**

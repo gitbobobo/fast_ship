@@ -6,6 +6,7 @@ import {
   type ReactNode,
   type RefObject,
 } from "react";
+import { Link } from "react-router";
 import { cn } from "@/lib/utils";
 
 export interface MetricChartPoint {
@@ -13,6 +14,8 @@ export interface MetricChartPoint {
   label: string;
   value: number;
   shortLabel?: string;
+  /** 行内跳转路径（站内）；有值时整行渲染为链接。 */
+  href?: string;
 }
 
 export interface MetricChartSeriesPoint {
@@ -44,6 +47,10 @@ interface MetricChartProps {
   emptyAction?: ReactNode;
   formatValue?: MetricChartFormatValue;
   className?: string;
+  /** 只显示前 N 行，其余折叠成一行汇总（文案由 collapsedLabel 生成）。 */
+  maxRows?: number;
+  /** 折叠行文案：输入被折掉的点，返回一行说明；不传则静默截断。 */
+  collapsedLabel?: (hidden: MetricChartPoint[]) => string;
 }
 
 interface MultiSeriesChartProps {
@@ -93,6 +100,8 @@ export function MetricChart(props: ChartProps) {
             emptyMessage={emptyMessage}
             emptyAction={emptyAction}
             formatValue={props.formatValue}
+            maxRows={(props as MetricChartProps).maxRows}
+            collapsedLabel={(props as MetricChartProps).collapsedLabel}
           />
         ) : (
           <StackedSeriesChart
@@ -135,11 +144,15 @@ function HorizontalBarChart({
   emptyMessage,
   emptyAction,
   formatValue = defaultFormatValue,
+  maxRows,
+  collapsedLabel,
 }: {
   points: MetricChartPoint[];
   emptyMessage: string;
   emptyAction?: ReactNode;
   formatValue?: MetricChartFormatValue;
+  maxRows?: number;
+  collapsedLabel?: (hidden: MetricChartPoint[]) => string;
 }) {
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
   const maxValue = Math.max(...points.map((p) => p.value), 0);
@@ -149,66 +162,100 @@ function HorizontalBarChart({
   const maxBarWidth = 360;
   // 只有完全没数据才算空；全是 0 的项目行仍然保留，读者能看到项目本身。
   const isEmpty = points.length === 0;
+  const visible =
+    maxRows !== undefined && points.length > maxRows
+      ? points.slice(0, maxRows)
+      : points;
+  const hidden = points.slice(visible.length);
 
   if (isEmpty) {
     return <ChartEmptyState message={emptyMessage} action={emptyAction} />;
   }
 
+  const renderRow = (point: MetricChartPoint, index: number) => {
+    const ratio = point.value / chartMax;
+    const isHovered = hoveredIndex === index;
+
+    return (
+      <>
+        <div
+          className="shrink-0 truncate text-right text-xs text-muted-foreground transition-colors"
+          style={{ width: labelWidth }}
+          title={point.label}
+        >
+          {point.shortLabel ?? point.label}
+        </div>
+
+        <div className="relative flex-1">
+          <div
+            className="relative overflow-hidden rounded-full bg-muted/60 transition-all duration-500"
+            style={{ height: barHeight }}
+          >
+            {/* 值为 0 时只留空轨道：画一段短灰条会被误读成「有少量进度」。 */}
+            {point.value > 0 && (
+              <div
+                className={cn(
+                  "absolute left-0 top-0 h-full rounded-full transition-all duration-500 ease-out",
+                  isHovered ? "bg-primary" : "bg-primary/70",
+                )}
+                style={{
+                  width: `${(ratio * 100).toFixed(1)}%`,
+                  maxWidth: maxBarWidth,
+                }}
+              >
+                <div className="absolute inset-0 -translate-x-full animate-[shimmer_2s_infinite] bg-gradient-to-r from-transparent via-white/20 to-transparent" />
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div
+          className={cn(
+            "min-w-[2rem] shrink-0 text-right text-xs font-semibold tabular-nums transition-colors duration-200",
+            isHovered ? "text-foreground" : "text-muted-foreground",
+          )}
+        >
+          {formatValue(point.value)}
+        </div>
+      </>
+    );
+  };
+
+  const rowClassName = "group flex items-center gap-3";
+
   return (
     <div className="space-y-1">
-      {points.map((point, index) => {
-        const ratio = point.value / chartMax;
-        const isHovered = hoveredIndex === index;
-
-        return (
-          <div
+      {visible.map((point, index) =>
+        // 带 href 的行整行是链接；折叠汇总行永远不可点。
+        point.href ? (
+          <Link
             key={getPointKey(point, index)}
-            className="group flex items-center gap-3"
+            to={point.href}
+            className={cn(rowClassName, "-mx-1 rounded-md px-1 hover:bg-muted/40")}
             onMouseEnter={() => setHoveredIndex(index)}
             onMouseLeave={() => setHoveredIndex(null)}
           >
-            <div
-              className="shrink-0 truncate text-right text-xs text-muted-foreground transition-colors"
-              style={{ width: labelWidth }}
-              title={point.label}
-            >
-              {point.shortLabel ?? point.label}
-            </div>
-
-            <div className="relative flex-1">
-              <div
-                className="relative overflow-hidden rounded-full bg-muted/60 transition-all duration-500"
-                style={{ height: barHeight }}
-              >
-                {/* 值为 0 时只留空轨道：画一段短灰条会被误读成「有少量进度」。 */}
-                {point.value > 0 && (
-                  <div
-                    className={cn(
-                      "absolute left-0 top-0 h-full rounded-full transition-all duration-500 ease-out",
-                      isHovered ? "bg-primary" : "bg-primary/70",
-                    )}
-                    style={{
-                      width: `${(ratio * 100).toFixed(1)}%`,
-                      maxWidth: maxBarWidth,
-                    }}
-                  >
-                    <div className="absolute inset-0 -translate-x-full animate-[shimmer_2s_infinite] bg-gradient-to-r from-transparent via-white/20 to-transparent" />
-                  </div>
-                )}
-              </div>
-            </div>
-
-            <div
-              className={cn(
-                "min-w-[2rem] shrink-0 text-right text-xs font-semibold tabular-nums transition-colors duration-200",
-                isHovered ? "text-foreground" : "text-muted-foreground",
-              )}
-            >
-              {formatValue(point.value)}
-            </div>
+            {renderRow(point, index)}
+          </Link>
+        ) : (
+          <div
+            key={getPointKey(point, index)}
+            className={rowClassName}
+            onMouseEnter={() => setHoveredIndex(index)}
+            onMouseLeave={() => setHoveredIndex(null)}
+          >
+            {renderRow(point, index)}
           </div>
-        );
-      })}
+        ),
+      )}
+      {hidden.length > 0 && collapsedLabel && (
+        <div className="flex items-center gap-3">
+          <div className="shrink-0" style={{ width: labelWidth }} />
+          <div className="flex-1 text-xs text-muted-foreground">
+            {collapsedLabel(hidden)}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

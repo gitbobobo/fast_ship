@@ -34,15 +34,6 @@ describe("DashboardPage", () => {
     return Array.from({ length: 30 }, (_, index) => ({
       date: `2026-05-${String(index + 1).padStart(2, "0")}`,
       resolved_count: resolvedByIndex[index] ?? 0,
-      projects: resolvedByIndex[index]
-        ? [
-            {
-              project_id: "p1",
-              project_name: "Alpha App",
-              count: resolvedByIndex[index],
-            },
-          ]
-        : [],
     }));
   }
 
@@ -108,9 +99,9 @@ describe("DashboardPage", () => {
           },
         ],
         daily_resolved: [
-          { date: "2026-05-11", resolved_count: 1, projects: [{ project_id: "p1", project_name: "Alpha App", count: 1 }] },
-          { date: "2026-05-12", resolved_count: 0, projects: [] },
-          { date: "2026-05-13", resolved_count: 2, projects: [{ project_id: "p1", project_name: "Alpha App", count: 1 }, { project_id: "p2", project_name: "Beta Console", count: 1 }] },
+          { date: "2026-05-11", resolved_count: 1 },
+          { date: "2026-05-12", resolved_count: 0 },
+          { date: "2026-05-13", resolved_count: 2 },
         ],
       },
       isLoading: false,
@@ -139,7 +130,6 @@ describe("DashboardPage", () => {
         daily_resolved: Array.from({ length: 30 }, (_, index) => ({
           date: `2026-05-${String(index + 1).padStart(2, "0")}`,
           resolved_count: 0,
-          projects: [],
         })),
       },
       isLoading: false,
@@ -196,5 +186,185 @@ describe("DashboardPage", () => {
     expect(
       screen.getAllByText("数据加载失败，请在上方重试。"),
     ).toHaveLength(2);
+  });
+
+  it("renders action item groups with links and counts", async () => {
+    vi.mocked(useDashboardOverview).mockReturnValue({
+      data: {
+        open_issues_by_project: [],
+        daily_resolved: dailyResolvedWith({}),
+        action_item_groups: [
+          {
+            kind: "recommendations",
+            count: 2,
+            items: [
+              {
+                title: "优化登录流程",
+                detail: "Alpha App",
+                href: "/projects/p1/issues/i1",
+              },
+              { title: "修复崩溃", href: "/projects/p1/issues/i2" },
+            ],
+          },
+          {
+            kind: "unread_notifications",
+            count: 3,
+            items: [{ title: "3 条未读通知", href: "/notifications" }],
+          },
+        ],
+      },
+      isLoading: false,
+    } as unknown as ReturnType<typeof useDashboardOverview>);
+
+    await renderDashboardPage();
+
+    expect(screen.getByText("待我处理")).toBeInTheDocument();
+    expect(screen.getByText("推荐任务")).toBeInTheDocument();
+    expect(screen.getByText("未读通知")).toBeInTheDocument();
+    expect(screen.getByText("2")).toBeInTheDocument();
+    expect(screen.getByText("3")).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: /优化登录流程/ }),
+    ).toHaveAttribute("href", "/projects/p1/issues/i1");
+    expect(screen.getByText("Alpha App")).toBeInTheDocument();
+    expect(screen.queryByText("一切正常")).not.toBeInTheDocument();
+  });
+
+  it("shows 一切正常 when every action group is zero", async () => {
+    vi.mocked(useDashboardOverview).mockReturnValue({
+      data: {
+        open_issues_by_project: [],
+        daily_resolved: dailyResolvedWith({}),
+        action_item_groups: [
+          { kind: "recommendations", count: 0, items: [] },
+          { kind: "unread_notifications", count: 0, items: [] },
+        ],
+      },
+      isLoading: false,
+    } as unknown as ReturnType<typeof useDashboardOverview>);
+
+    await renderDashboardPage();
+
+    expect(screen.getByText("一切正常")).toBeInTheDocument();
+    expect(screen.queryByText("推荐任务")).not.toBeInTheDocument();
+  });
+
+  it("marks a partially unavailable group instead of trusting its count", async () => {
+    vi.mocked(useDashboardOverview).mockReturnValue({
+      data: {
+        open_issues_by_project: [],
+        daily_resolved: dailyResolvedWith({}),
+        action_item_groups: [
+          {
+            kind: "t3_waiting",
+            count: 2,
+            complete: false,
+            items: [
+              {
+                title: "等待确认",
+                detail: "Mac",
+                href: "/threads/env1/t1",
+              },
+            ],
+          },
+        ],
+      },
+      isLoading: false,
+    } as unknown as ReturnType<typeof useDashboardOverview>);
+
+    await renderDashboardPage();
+
+    expect(screen.getByText("T3 线程待处理")).toBeInTheDocument();
+    expect(
+      screen.getByText("2+ · 部分环境暂不可用"),
+    ).toBeInTheDocument();
+  });
+
+  it("shows 暂不可用 badge for a fully unavailable group with zero count", async () => {
+    vi.mocked(useDashboardOverview).mockReturnValue({
+      data: {
+        open_issues_by_project: [],
+        daily_resolved: dailyResolvedWith({}),
+        action_item_groups: [
+          { kind: "t3_waiting", count: 0, complete: false, items: [] },
+        ],
+      },
+      isLoading: false,
+    } as unknown as ReturnType<typeof useDashboardOverview>);
+
+    await renderDashboardPage();
+
+    expect(screen.getByText("T3 线程待处理")).toBeInTheDocument();
+    expect(screen.getByText("暂不可用")).toBeInTheDocument();
+    expect(screen.queryByText("一切正常")).not.toBeInTheDocument();
+  });
+
+  it("keeps stale action items hidden while the overview failed", async () => {
+    vi.mocked(useDashboardOverview).mockReturnValue({
+      data: {
+        open_issues_by_project: [],
+        daily_resolved: dailyResolvedWith({}),
+        action_item_groups: [
+          {
+            kind: "recommendations",
+            count: 5,
+            items: [{ title: "旧任务", href: "/projects/p1/issues/i1" }],
+          },
+        ],
+      },
+      isLoading: false,
+      isError: true,
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useDashboardOverview>);
+
+    await renderDashboardPage();
+
+    expect(screen.queryByText("待我处理")).not.toBeInTheDocument();
+    expect(screen.queryByText("旧任务")).not.toBeInTheDocument();
+    expect(screen.queryByText("一切正常")).not.toBeInTheDocument();
+  });
+
+  it("links the configured-projects KPI card to /projects", async () => {
+    vi.mocked(useDashboardOverview).mockReturnValue({
+      data: {
+        open_issues_by_project: [
+          { project_id: "p1", project_name: "Alpha App", open_issue_count: 0 },
+        ],
+        daily_resolved: dailyResolvedWith({}),
+        action_item_groups: [],
+      },
+      isLoading: false,
+    } as unknown as ReturnType<typeof useDashboardOverview>);
+
+    await renderDashboardPage();
+
+    expect(
+      screen.getByRole("link", { name: /已配置项目/ }),
+    ).toHaveAttribute("href", "/projects");
+  });
+
+  it("collapses the open-issues chart beyond top 10 and links rows to filtered issues", async () => {
+    const projects = Array.from({ length: 13 }, (_, index) => ({
+      project_id: `p${index}`,
+      project_name: `Project ${index}`,
+      open_issue_count: 13 - index,
+    }));
+    vi.mocked(useDashboardOverview).mockReturnValue({
+      data: {
+        open_issues_by_project: projects,
+        daily_resolved: dailyResolvedWith({}),
+        action_item_groups: [],
+      },
+      isLoading: false,
+    } as unknown as ReturnType<typeof useDashboardOverview>);
+
+    await renderDashboardPage();
+
+    expect(
+      screen.getByRole("link", { name: /Project 0/ }),
+    ).toHaveAttribute("href", "/issues?project=p0&state=open");
+    expect(screen.getByText("其他 3 个项目共 6 条")).toBeInTheDocument();
+    expect(screen.queryByText("Project 10")).not.toBeInTheDocument();
+    expect(screen.getByText("13 个项目有开启问题")).toBeInTheDocument();
   });
 });

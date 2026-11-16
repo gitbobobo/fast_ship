@@ -1,4 +1,5 @@
 import { fireEvent, render, screen } from "@testing-library/react";
+import { MemoryRouter } from "react-router";
 import { MetricChart } from "@/components/dashboard/metric-chart";
 
 describe("MetricChart", () => {
@@ -44,6 +45,63 @@ describe("MetricChart", () => {
     );
 
     expect(container.querySelectorAll('[class*="bg-primary/"]')).toHaveLength(1);
+  });
+
+  it("renders rows with href as links", () => {
+    render(
+      <MemoryRouter>
+        <MetricChart
+          points={[
+            {
+              id: "p1",
+              label: "Alpha",
+              value: 3,
+              href: "/issues?project=p1&state=open",
+            },
+            { id: "p2", label: "Beta", value: 0 },
+          ]}
+          variant="bar"
+          emptyMessage="暂无已配置项目"
+        />
+      </MemoryRouter>,
+    );
+
+    const link = screen.getByRole("link", { name: /Alpha/ });
+    expect(link).toHaveAttribute("href", "/issues?project=p1&state=open");
+    // 无 href 的行保持普通行，不出链接。
+    expect(screen.queryByRole("link", { name: /Beta/ })).not.toBeInTheDocument();
+  });
+
+  it("collapses rows beyond maxRows into a non-clickable summary line", () => {
+    const points = Array.from({ length: 12 }, (_, index) => ({
+      id: `p${index}`,
+      label: `Project ${index}`,
+      value: index === 11 ? 4 : 1,
+      href: `/issues?project=p${index}&state=open`,
+    }));
+
+    render(
+      <MemoryRouter>
+        <MetricChart
+          points={points}
+          variant="bar"
+          emptyMessage="暂无已配置项目"
+          maxRows={10}
+          collapsedLabel={(hidden) =>
+            `其他 ${hidden.length} 个项目共 ${hidden.reduce(
+              (sum, p) => sum + p.value,
+              0,
+            )} 条`
+          }
+        />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByText("其他 2 个项目共 5 条")).toBeInTheDocument();
+    // 前 10 行仍是链接，被折掉的行不出现。
+    expect(screen.getAllByRole("link")).toHaveLength(10);
+    expect(screen.queryByText("Project 10")).not.toBeInTheDocument();
+    expect(screen.queryByText("Project 11")).not.toBeInTheDocument();
   });
 
   it("shows only the empty state when the 30-day series is all zeros", () => {

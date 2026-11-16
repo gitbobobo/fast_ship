@@ -319,7 +319,6 @@ func main() {
 	// 仍走 integrationService。
 	manifestService := service.NewGitHubAppManifestService(deploymentSettingsRepo, deploymentSettingsService, cfg, githubLogger)
 	memberService := service.NewMemberService(userRepo, inviteRepo, appLogger.With(slog.String("module", "member")))
-	dashboardService := service.NewDashboardService(dashboardRepo)
 	// 代码仓集成（INT-166）：项目仓库 URL 的非 github 主机按 base_url 匹配
 	// forgejo 集成并派生 code_integration_id 绑定。
 	projectService := service.NewProjectService(projectRepo, versionRepo, issueSyncStateRepo, githubTokenRepo, fileStorage, cfg, githubLogger, forgeIntegrationRepo)
@@ -424,6 +423,9 @@ func main() {
 	t3BindingService := service.NewT3BindingService(t3ThreadsService, projectRepo, projectT3BindingRepo)
 	notificationSink := service.NewNotificationSink(db)
 	notificationService := service.NewNotificationService(notificationRepo)
+	// 仪表盘「待我处理」聚合：依赖通知计数与 T3 线程只读快照（非阻塞），
+	// 须在这两个服务之后装配。
+	dashboardService := service.NewDashboardService(dashboardRepo, notificationService, t3ThreadsService)
 
 	// 内置机器人（INT-101）：管理、主线循环、后台执行与 SSE。
 	botService := service.NewBotService(db, cfg, zapLogger.With(zap.String("module", "bot")), projectService, issueService, t3ThreadsService, t3BindingService)

@@ -321,6 +321,20 @@ func (h *t3ShellHub) Peek(env *model.T3Environment, token string) (*t3ShellView,
 	return e.viewLocked(), nil
 }
 
+// PeekActive 只读活跃面当前值：与 Peek 同为非阻塞读；entry 已存在时不
+// 触发归档面的后台补齐——仪表盘「待我处理」每页一次只看 waiting 线程，
+// 不需要归档数据。注意 entry 尚不存在时 admitEntry 会新建并顺带一次
+// kickArchiveRefresh（仅首次，可接受）。
+func (h *t3ShellHub) PeekActive(env *model.T3Environment, token string) (*t3ShellView, error) {
+	e, err := h.admitEntry(env, token)
+	if err != nil {
+		return nil, err
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.viewLocked(), nil
+}
+
 // t3ShellFloorTTL 是配置世代 floor 的保留时长。floor 的用途是拒掉「配置变更前
 // 读出、变更后才到达」的在途请求，这类请求的生命周期是几十秒量级；按**记录
 // 时刻**保留 1 小时后清理，floors 表不随时间增长。清理只能以记录时刻为准：

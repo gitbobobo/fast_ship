@@ -192,8 +192,6 @@ declare global {
   type DashboardOverview = components["schemas"]["DashboardOverview"];
   type DashboardProjectOpenIssuePoint =
     components["schemas"]["DashboardProjectOpenIssuePoint"];
-  type DashboardDailyResolvedProjectPoint =
-    components["schemas"]["DashboardDailyResolvedProjectPoint"];
   type DashboardDailyResolvedPoint =
     components["schemas"]["DashboardDailyResolvedPoint"];
 
