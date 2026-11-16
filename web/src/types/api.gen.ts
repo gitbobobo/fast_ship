@@ -5381,7 +5381,7 @@ export interface components {
         DashboardAiBots: {
             /** @description false = 用量服务查询失败降级；成功时不返回 */
             complete?: boolean;
-            /** @description 近 7 天窗口内有用量的机器人数（含已删除） */
+            /** @description 已配置机器人数 + 窗口内有记录的已删除机器人（与展示数字的参与者集合一致） */
             bot_count: number;
             /** @description 用量统计的生效时区（IANA 名称） */
             timezone: string;

@@ -3138,7 +3138,7 @@ type DashboardAiBotNextSchedule struct {
 
 // DashboardAiBots 机器人近 7 天用量（按用户时区聚合，与机器人页用量口径同源）；next_schedule 为 null 表示没有开启且排了下一次触发的任务
 type DashboardAiBots struct {
-	// BotCount 近 7 天窗口内有用量的机器人数（含已删除）
+	// BotCount 已配置机器人数 + 窗口内有记录的已删除机器人（与展示数字的参与者集合一致）
 	BotCount int `json:"bot_count"`
 
 	// Complete false = 用量服务查询失败降级；成功时不返回

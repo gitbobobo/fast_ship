@@ -5301,7 +5301,7 @@ title/body/parent_id 至少传一个
 | `ai.reviews.pass_rate` | number（double，可空） | 是 | passed/(passed+blocked)；分母为 0 时为 null（不显示），此时不代表通过率 100% |
 | `ai.bots` | object | 否 | 机器人近 7 天用量（按用户时区聚合，与机器人页用量口径同源）；next_schedule 为 null 表示没有开启且排了下一次触发的任务 |
 | `ai.bots.complete` | boolean | 否 | false = 用量服务查询失败降级；成功时不返回 |
-| `ai.bots.bot_count` | integer | 是 | 近 7 天窗口内有用量的机器人数（含已删除） |
+| `ai.bots.bot_count` | integer | 是 | 已配置机器人数 + 窗口内有记录的已删除机器人（与展示数字的参与者集合一致） |
 | `ai.bots.timezone` | string | 是 | 用量统计的生效时区（IANA 名称） |
 | `ai.bots.cost` | number（double，可空） | 是 | 近 7 天显示成本合计（USD）；无金额请求为 null（缺失 ≠ 0，前端显示「未计价」） |
 | `ai.bots.total_requests` | integer（int64） | 是 |  |
