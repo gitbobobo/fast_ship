@@ -1,13 +1,11 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Sidebar } from "@/components/layout/sidebar";
 import { useAuthStore } from "@/lib/store/auth-store";
 import { useLastBotStore } from "@/lib/store/last-bot-store";
+import { useSidebarStore } from "@/lib/store/sidebar-store";
 
-vi.mock("@/lib/hooks/use-notifications", () => ({
-  useUnreadNotificationCount: () => ({ data: 0 }),
-}));
 vi.mock("@/components/user-nav", () => ({
   UserNav: () => <div data-testid="user-nav" />,
 }));
@@ -39,6 +37,7 @@ describe("Sidebar 机器人入口", () => {
   beforeEach(() => {
     useAuthStore.setState({ user });
     useLastBotStore.setState({ byUser: { "u-1": "bot-1" } });
+    useSidebarStore.setState({ collapsed: false });
   });
 
   it("有 lastBotId 时跳转目标改写为对应聊天页", () => {
@@ -76,5 +75,34 @@ describe("Sidebar 机器人入口", () => {
     renderSidebar("/dashboard");
     const link = screen.getByRole("link", { name: "机器人" });
     expect(link).toHaveAttribute("href", "/bots/bot-1");
+  });
+});
+
+describe("Sidebar 导航分组", () => {
+  beforeEach(() => {
+    useAuthStore.setState({ user });
+    useSidebarStore.setState({ collapsed: false });
+  });
+
+  it("展开态渲染组标题，且无通知与套餐额度项", () => {
+    renderSidebar("/dashboard");
+
+    const nav = screen.getByRole("navigation");
+    expect(within(nav).getByText("项目内")).toBeInTheDocument();
+    expect(within(nav).getByText("智能体")).toBeInTheDocument();
+    expect(within(nav).queryByRole("link", { name: "通知" })).not.toBeInTheDocument();
+    expect(within(nav).queryByRole("link", { name: "套餐额度" })).not.toBeInTheDocument();
+  });
+
+  it("收起态不渲染组标题，改渲染分隔线", () => {
+    useSidebarStore.setState({ collapsed: true });
+    renderSidebar("/dashboard");
+
+    const nav = screen.getByRole("navigation");
+    expect(within(nav).queryByText("项目内")).not.toBeInTheDocument();
+    expect(within(nav).queryByText("智能体")).not.toBeInTheDocument();
+    expect(
+      within(nav).getAllByTestId("sidebar-group-separator"),
+    ).toHaveLength(2);
   });
 });

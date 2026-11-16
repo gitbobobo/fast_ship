@@ -113,6 +113,7 @@ describe("UserNav Component", () => {
       expect(screen.getByText("john@example.com")).toBeInTheDocument();
       expect(screen.getByRole("menuitem", { name: /个人信息/i })).toBeInTheDocument();
       expect(screen.getByRole("menuitem", { name: /设置/i })).toBeInTheDocument();
+      expect(screen.getByRole("menuitem", { name: /套餐额度/i })).toBeInTheDocument();
       expect(screen.getByRole("menuitem", { name: /主题/i })).toBeInTheDocument();
       expect(screen.getByRole("menuitem", { name: /登出/i })).toBeInTheDocument();
     });
@@ -167,6 +168,32 @@ describe("UserNav Component", () => {
 
     await waitFor(() => {
       expect(screen.getByTestId("location").textContent).toBe("/settings");
+    });
+  });
+
+  it("navigates to quota page when 套餐额度 is clicked", async () => {
+    render(
+      <MemoryRouter initialEntries={["/projects"]}>
+        <Routes>
+          <Route path="/*" element={<>
+            <UserNav />
+            <LocationDisplay />
+          </>} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    const avatarButton = screen.getByRole("button", { name: /john_doe/ });
+    fireEvent.click(avatarButton);
+
+    await waitFor(() => {
+      expect(screen.getByRole("menuitem", { name: /套餐额度/i })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("menuitem", { name: /套餐额度/i }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("location").textContent).toBe("/quota");
     });
   });
 
