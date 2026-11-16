@@ -1,4 +1,5 @@
 import { useNavigate } from "react-router";
+import { confirmNavigationLeave } from "@/lib/navigation-guard";
 import { User, LogOut, Settings, Gauge, Sun, Moon, Monitor } from "lucide-react";
 import { Avatar, AvatarImage, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
@@ -98,15 +99,40 @@ export function UserNav({
           </div>
         </div>
         <DropdownMenuSeparator />
-        <DropdownMenuItem onClick={() => navigate("/settings/profile")}>
+        <DropdownMenuItem
+          onClick={(event) => {
+            // 文档等页面可能脏：离开前先过导航守卫，取消则不跳转
+            if (!confirmNavigationLeave()) {
+              event.preventDefault();
+              return;
+            }
+            navigate("/settings/profile");
+          }}
+        >
           <User className="mr-2 h-4 w-4" />
           个人信息
         </DropdownMenuItem>
-        <DropdownMenuItem onClick={() => navigate("/settings")}>
+        <DropdownMenuItem
+          onClick={(event) => {
+            if (!confirmNavigationLeave()) {
+              event.preventDefault();
+              return;
+            }
+            navigate("/settings");
+          }}
+        >
           <Settings className="mr-2 h-4 w-4" />
           设置
         </DropdownMenuItem>
-        <DropdownMenuItem onClick={() => navigate("/quota")}>
+        <DropdownMenuItem
+          onClick={(event) => {
+            if (!confirmNavigationLeave()) {
+              event.preventDefault();
+              return;
+            }
+            navigate("/quota");
+          }}
+        >
           <Gauge className="mr-2 h-4 w-4" />
           套餐额度
         </DropdownMenuItem>

@@ -105,7 +105,7 @@ export default function DashboardPage() {
         label: item.project_name,
         shortLabel: item.project_name,
         value: item.open_issue_count,
-        href: `/issues?project=${item.project_id}&state=open`,
+        href: `/projects/${item.project_id}/issues?state=open`,
       })) ?? []
     );
   }, [data]);

@@ -1,8 +1,9 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { NavLink, useLocation } from "react-router";
+import { Link, NavLink, useLocation, useNavigate } from "react-router";
 import {
   LayoutDashboard,
   Package,
+  Plus,
   Tags,
   Bug,
   Kanban,
@@ -22,9 +23,15 @@ import {
 } from "@/components/ui/tooltip";
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
 import { FastShipLogo } from "@/components/ui/fast-ship-logo";
+import { ProjectSwitcher } from "@/components/projects/project-switcher";
 import { UserNav } from "@/components/user-nav";
+import { useCurrentProjectId } from "@/lib/current-project";
+import { useProjects } from "@/lib/hooks/use-projects";
+import { projectSwitchPath } from "@/lib/project-nav";
 import { useLastBotId } from "@/lib/store/last-bot-store";
+import { useProjectPreferenceStore } from "@/lib/store/project-preference-store";
 import { useSidebarStore } from "@/lib/store/sidebar-store";
+import { confirmNavigationLeave } from "@/lib/navigation-guard";
 import { cn } from "@/lib/utils";
 
 interface NavItem {
@@ -37,34 +44,33 @@ interface NavItem {
   activePrefix?: string;
 }
 
-// 侧边栏按用途分三组：主入口、项目内功能、智能体相关；组标题仅作视觉分区，
-// 不可折叠。收起态下不显示标题，用分隔线代替。
-const navGroups: { label?: string; items: NavItem[] }[] = [
-  {
-    items: [
-      { to: "/dashboard", label: "仪表盘", icon: LayoutDashboard, end: true },
-      { to: "/projects", label: "项目", icon: Package, end: true },
-    ],
-  },
-  {
-    label: "项目内",
-    items: [
-      { to: "/issues", label: "问题", icon: Bug, end: true },
-      { to: "/board", label: "看板", icon: Kanban, end: true },
-      { to: "/versions", label: "版本", icon: Tags, end: true },
-      { to: "/documents", label: "文档", icon: FileText, end: true },
-      { to: "/screenshots", label: "截图", icon: Images, end: true },
-      { to: "/logs", label: "日志", icon: ScrollText, end: false },
-    ],
-  },
-  {
-    label: "智能体",
-    items: [
-      { to: "/threads", label: "线程", icon: MessagesSquare, end: false },
-      { to: "/bots", label: "机器人", icon: Bot, end: false },
-      { to: "/reviews", label: "审查", icon: GitPullRequest, end: false },
-    ],
-  },
+// 主入口与智能体组是静态的；「项目内」组的链接按当前项目 ID 动态拼出，
+// 当前项目由 useCurrentProjectId 裁决（路径 > 最近选择 > 兜底回落）。
+const mainGroupItems: NavItem[] = [
+  { to: "/dashboard", label: "仪表盘", icon: LayoutDashboard, end: true },
+  { to: "/projects", label: "项目", icon: Package, end: true },
+];
+
+// 项目内六个分区：链接目标 = /projects/<当前项目>/<section>，路径直接命中
+// 新路由，不再经过旧路径重定向。日志有 runId 子页，不做 end 精确匹配。
+const projectSectionItems: {
+  section: string;
+  label: string;
+  icon: NavItem["icon"];
+  end?: boolean;
+}[] = [
+  { section: "issues", label: "问题", icon: Bug, end: true },
+  { section: "board", label: "看板", icon: Kanban, end: true },
+  { section: "versions", label: "版本", icon: Tags, end: true },
+  { section: "documents", label: "文档", icon: FileText, end: true },
+  { section: "screenshots", label: "截图", icon: Images, end: true },
+  { section: "logs", label: "日志", icon: ScrollText, end: false },
+];
+
+const agentGroupItems: NavItem[] = [
+  { to: "/threads", label: "线程", icon: MessagesSquare, end: false },
+  { to: "/bots", label: "机器人", icon: Bot, end: false },
+  { to: "/reviews", label: "审查", icon: GitPullRequest, end: false },
 ];
 
 function SidebarNavItem({
@@ -76,12 +82,36 @@ function SidebarNavItem({
   collapsed: boolean;
   onNavigate?: () => void;
 }) {
-  const { pathname } = useLocation();
+  const { pathname, search } = useLocation();
+  // 有未保存内容的页面（如文档编辑器）登记导航守卫；左键无修饰键且目标
+  // 与当前地址完全一致（含 query）时才是空操作，不拦
   const link = (
     <NavLink
       to={item.to}
       end={item.end}
-      onClick={onNavigate}
+      onClick={(event) => {
+        if (
+          event.button !== 0 ||
+          event.metaKey ||
+          event.ctrlKey ||
+          event.shiftKey ||
+          event.altKey
+        ) {
+          onNavigate?.();
+          return;
+        }
+        // 点击当前页且无 query 差异才是空操作；带 query（如文档页 ?doc=）
+        // 的点击会改写地址，仍需过守卫，否则静默丢未保存内容
+        if (pathname === item.to && search === "") {
+          onNavigate?.();
+          return;
+        }
+        if (!confirmNavigationLeave()) {
+          event.preventDefault();
+          return;
+        }
+        onNavigate?.();
+      }}
       aria-label={item.label}
       className={({ isActive }) =>
         cn(
@@ -159,6 +189,60 @@ function SidebarBottom({ collapsed }: { collapsed: boolean }) {
   );
 }
 
+// 组标题：展开态显示文字，收起态退化为分隔线（与旧版侧边栏行为一致）。
+function NavGroupHeading({
+  label,
+  collapsed,
+}: {
+  label: string;
+  collapsed: boolean;
+}) {
+  if (collapsed) {
+    return (
+      <div data-testid="sidebar-group-separator" className="my-2 border-t" />
+    );
+  }
+  return (
+    <div className="px-3 py-1 text-xs text-muted-foreground">{label}</div>
+  );
+}
+
+// 无项目时的创建入口：跳 /projects 页使用那里的创建对话框，不在侧边栏复制弹层。
+function CreateProjectItem({
+  collapsed,
+  onNavigate,
+}: {
+  collapsed: boolean;
+  onNavigate?: () => void;
+}) {
+  const link = (
+    <Link
+      to="/projects"
+      onClick={onNavigate}
+      aria-label="创建项目"
+      className={cn(
+        "flex items-center rounded-md text-sm font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground",
+        collapsed ? "justify-center px-2 py-2" : "gap-3 px-3 py-2",
+      )}
+    >
+      <Plus className="h-4 w-4 shrink-0" />
+      {!collapsed && (
+        <span className="overflow-hidden whitespace-nowrap">创建项目</span>
+      )}
+    </Link>
+  );
+
+  if (collapsed) {
+    return (
+      <Tooltip>
+        <TooltipTrigger render={link} />
+        <TooltipContent side="right">创建项目</TooltipContent>
+      </Tooltip>
+    );
+  }
+  return link;
+}
+
 function NavContent({
   collapsed,
   onNavigate,
@@ -168,6 +252,47 @@ function NavContent({
 }) {
   // 「机器人」菜单项直跳上次打开的聊天（INT-157）；没打开过就进列表。
   const lastBotId = useLastBotId();
+  const navigate = useNavigate();
+  const { pathname } = useLocation();
+  const setLastSelectedProjectId = useProjectPreferenceStore(
+    (state) => state.setLastSelectedProjectId,
+  );
+
+  // 当前项目与项目列表：切换器和「项目内」组都依赖它们。
+  const projectsQuery = useProjects();
+  const projects = projectsQuery.data?.items ?? [];
+  const currentProjectId = useCurrentProjectId(projects);
+  const currentProject = projects.find((p) => p.id === currentProjectId);
+  // 列表就绪且为空：没有可切换的项目，切换器位置换成「创建项目」入口，
+  // 「项目内」组一并隐藏；加载中或查询失败（无数据）不误判为无项目。
+  const projectListEmpty = projectsQuery.isSuccess && projects.length === 0;
+  const showProjectGroup = !projectListEmpty && !!currentProjectId;
+
+  // 切换规则（INT-237）：项目级页面 → projectSwitchPath 延续同名 section
+  // （列表页丢页内 query，详情/new/edit/runId 回对应列表页）；全局页无法
+  // 延续项目上下文，只记住偏好，侧边栏链接随之更新。切完必调 onNavigate，
+  // 让移动端 Sheet 收起——全局页不改变 pathname，不能依赖路由变化自动关闭。
+  // 导航守卫先于一切跳转：文档等页面有未保存内容时用户可取消本次切换。
+  const handleSwitchProject = (nextId: string) => {
+    if (!confirmNavigationLeave()) return;
+    const to = projectSwitchPath(pathname, nextId);
+    if (to) navigate(to);
+    else setLastSelectedProjectId(nextId);
+    onNavigate?.();
+  };
+
+  const renderNavItem = (item: NavItem) => (
+    <SidebarNavItem
+      key={item.to}
+      item={{
+        ...item,
+        to: item.to === "/bots" && lastBotId ? `/bots/${lastBotId}` : item.to,
+        activePrefix: item.to === "/bots" ? "/bots" : undefined,
+      }}
+      collapsed={!!collapsed}
+      onNavigate={onNavigate}
+    />
+  );
 
   return (
     <div className="flex h-full flex-col">
@@ -190,39 +315,60 @@ function NavContent({
           collapsed ? "p-2" : "p-3"
         )}
       >
-        {navGroups.map((group, groupIndex) => (
-          <div
-            key={group.label ?? "main"}
-            className={cn("space-y-1", groupIndex > 0 && "mt-4")}
-          >
-            {group.label &&
-              (collapsed ? (
-                <div
-                  data-testid="sidebar-group-separator"
-                  className="my-2 border-t"
-                />
-              ) : (
-                <div className="px-3 py-1 text-xs text-muted-foreground">
-                  {group.label}
-                </div>
-              ))}
-            {group.items.map((item) => (
-              <SidebarNavItem
-                key={item.to}
-                item={{
-                  ...item,
-                  to:
-                    item.to === "/bots" && lastBotId
-                      ? `/bots/${lastBotId}`
-                      : item.to,
-                  activePrefix: item.to === "/bots" ? "/bots" : undefined,
-                }}
+        <div className="space-y-1">
+          {mainGroupItems.map((item) => renderNavItem(item))}
+        </div>
+
+        {/* 项目上下文区块：分隔线 + 切换器（或创建入口）+ 「项目内」组 */}
+        {(projectListEmpty || currentProjectId) && (
+          <div className="mt-4 border-t pt-2">
+            {projectListEmpty ? (
+              <CreateProjectItem
                 collapsed={!!collapsed}
                 onNavigate={onNavigate}
               />
-            ))}
+            ) : (
+              currentProjectId && (
+                <SidebarControl
+                  collapsed={!!collapsed}
+                  label={currentProject?.name ?? "切换项目"}
+                >
+                  <div className={!collapsed ? "pb-1" : undefined}>
+                    <ProjectSwitcher
+                      projects={projects}
+                      value={currentProjectId}
+                      onValueChange={handleSwitchProject}
+                      variant={collapsed ? "sidebar-collapsed" : "sidebar"}
+                    />
+                  </div>
+                </SidebarControl>
+              )
+            )}
+            {showProjectGroup && (
+              <div className="space-y-1">
+                <NavGroupHeading label="项目内" collapsed={!!collapsed} />
+                {projectSectionItems.map(({ section, label, icon, end }) => (
+                  <SidebarNavItem
+                    key={section}
+                    item={{
+                      to: `/projects/${currentProjectId}/${section}`,
+                      label,
+                      icon,
+                      end,
+                    }}
+                    collapsed={!!collapsed}
+                    onNavigate={onNavigate}
+                  />
+                ))}
+              </div>
+            )}
           </div>
-        ))}
+        )}
+
+        <div className="mt-4 space-y-1">
+          <NavGroupHeading label="智能体" collapsed={!!collapsed} />
+          {agentGroupItems.map((item) => renderNavItem(item))}
+        </div>
       </nav>
       <SidebarBottom collapsed={!!collapsed} />
     </div>

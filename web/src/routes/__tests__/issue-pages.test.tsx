@@ -1187,9 +1187,9 @@ describe("Issue pages", () => {
     } as unknown as ReturnType<typeof useIssues>);
 
     renderWithRoute(<IssuesPage />, {
-      path: "/issues",
+      path: "/projects/:id/issues",
       initialEntry:
-        "/issues?project=proj-1&state=open&q=crash&label=bug&source=github&sort=updated_desc&page=2",
+        "/projects/proj-1/issues?state=open&q=crash&label=bug&source=github&sort=updated_desc&page=2",
     });
 
     await waitFor(() =>
@@ -1217,8 +1217,8 @@ describe("Issue pages", () => {
     } as unknown as ReturnType<typeof useIssues>);
 
     renderWithRoute(<IssuesPage />, {
-      path: "/issues",
-      initialEntry: "/issues?project=proj-1&workflow_status=in_progress",
+      path: "/projects/:id/issues",
+      initialEntry: "/projects/proj-1/issues?workflow_status=in_progress",
     });
 
     expect(screen.getByText("开发中")).toBeInTheDocument();
@@ -2301,8 +2301,8 @@ describe("Issue pages", () => {
     } as unknown as ReturnType<typeof useIssues>);
 
     renderWithRoute(<IssuesPage />, {
-      path: "/issues",
-      initialEntry: "/issues?project=proj-1",
+      path: "/projects/:id/issues",
+      initialEntry: "/projects/proj-1/issues",
     });
 
     await waitFor(() =>
@@ -2351,8 +2351,8 @@ describe("Issue pages", () => {
     } as unknown as ReturnType<typeof useIssues>);
 
     renderWithRoute(<IssuesPage />, {
-      path: "/issues",
-      initialEntry: "/issues?project=proj-1",
+      path: "/projects/:id/issues",
+      initialEntry: "/projects/proj-1/issues",
     });
 
     await waitFor(() =>
@@ -2392,8 +2392,8 @@ describe("Issue pages", () => {
     } as unknown as ReturnType<typeof useIssues>);
 
     renderWithRoute(<IssuesPage />, {
-      path: "/issues",
-      initialEntry: "/issues?project=proj-1",
+      path: "/projects/:id/issues",
+      initialEntry: "/projects/proj-1/issues",
     });
 
     const unreadCount = await screen.findByText("3 条新");

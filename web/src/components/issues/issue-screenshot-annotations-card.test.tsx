@@ -68,7 +68,7 @@ describe("IssueScreenshotAnnotationsCard", () => {
     const link = screen.getByText("按钮错位").closest("a");
     expect(link).toHaveAttribute(
       "href",
-      "/screenshots?project=p-1&annotation=a-1",
+      "/projects/p-1/screenshots?annotation=a-1",
     );
   });
 });

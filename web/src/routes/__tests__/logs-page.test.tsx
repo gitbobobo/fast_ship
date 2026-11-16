@@ -42,7 +42,6 @@ vi.mock("@/lib/hooks/use-logs", () => ({
   useDeleteLogRun: () => ({ mutateAsync: vi.fn(), isPending: false }),
   useClearProjectLogs: () => ({ mutateAsync: vi.fn(), isPending: false }),
 }));
-
 vi.mock("@/lib/api/logs", () => ({
   logApi: {
     listRuns: (...args: unknown[]) => listRunsMock(...args),
@@ -53,24 +52,17 @@ vi.mock("@/lib/copy", () => ({
   copyWithToast: (...args: unknown[]) => copyWithToastMock(...args),
 }));
 
-vi.mock("@/lib/store/project-preference-store", () => ({
-  useProjectPreferenceStore: () => ({
-    lastSelectedProjectId: "proj-1",
-    setLastSelectedProjectId: vi.fn(),
-  }),
-}));
-
 function renderLogs() {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
   return render(
     <QueryClientProvider client={client}>
-      <MemoryRouter initialEntries={["/logs?project=proj-1"]}>
+      <MemoryRouter initialEntries={["/projects/proj-1/logs"]}>
         <Routes>
-          <Route path="/logs" element={<LogsPage />} />
+          <Route path="/projects/:id/logs" element={<LogsPage />} />
           <Route
-            path="/logs/:runId"
+            path="/projects/:id/logs/:runId"
             element={<div data-testid="log-detail">detail</div>}
           />
         </Routes>

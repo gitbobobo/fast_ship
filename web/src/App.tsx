@@ -1,5 +1,5 @@
 import { Suspense, lazy, useEffect, type ReactNode } from "react";
-import { BrowserRouter, Routes, Route, Navigate, useParams } from "react-router";
+import { BrowserRouter, Routes, Route, Navigate } from "react-router";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -19,6 +19,11 @@ import { watchReviewsIdentity } from "@/lib/hooks/use-reviews";
 import AppLayout from "@/routes/_layout";
 import AuthLayout from "@/routes/_auth-layout";
 import SettingsLayout from "@/routes/settings/layout";
+import {
+  LegacyLogRunRedirect,
+  LegacyNewVersionRedirect,
+  LegacySectionRedirect,
+} from "@/routes/legacy-redirects";
 
 const LoginPage = lazy(() => import("@/routes/login"));
 const OAuthAuthorizePage = lazy(() => import("@/routes/oauth/authorize"));
@@ -146,29 +151,34 @@ export default function App() {
                 path="/projects"
                 element={<LazyPage render={<ProjectsPage />} />}
               />
-              <Route
-                path="/versions"
-                element={<LazyPage render={<VersionsPage />} />}
-              />
-              <Route
-                path="/screenshots"
-                element={<LazyPage render={<ScreenshotsPage />} />}
-              />
+              {/* 旧版单项目路由 → 新版 /projects/:id/<section>（query 择优保留） */}
               <Route
                 path="/issues"
-                element={<LazyPage render={<IssuesPage />} />}
+                element={<LegacySectionRedirect section="issues" />}
               />
               <Route
-                path="/logs"
-                element={<LazyPage render={<LogsPage />} />}
+                path="/board"
+                element={<LegacySectionRedirect section="board" />}
               />
               <Route
-                path="/logs/:runId"
-                element={<LazyPage render={<LogRunDetailPage />} />}
+                path="/versions"
+                element={<LegacySectionRedirect section="versions" />}
               />
               <Route
                 path="/documents"
-                element={<LazyPage render={<DocumentsPage />} />}
+                element={<LegacySectionRedirect section="documents" />}
+              />
+              <Route
+                path="/screenshots"
+                element={<LegacySectionRedirect section="screenshots" />}
+              />
+              <Route
+                path="/logs"
+                element={<LegacySectionRedirect section="logs" />}
+              />
+              <Route
+                path="/logs/:runId"
+                element={<LegacyLogRunRedirect />}
               />
               {/* 新建页保持整页，不套 /threads 的主从两栏 */}
               <Route
@@ -185,9 +195,34 @@ export default function App() {
                   element={<LazyPage render={<ThreadDetailPage />} />}
                 />
               </Route>
+              {/* 项目级 section 路由：项目由路径唯一决定，页面从路径参数取项目 ID */}
               <Route
-                path="/board"
+                path="/projects/:id/issues"
+                element={<LazyPage render={<IssuesPage />} />}
+              />
+              <Route
+                path="/projects/:id/board"
                 element={<LazyPage render={<BoardPage />} />}
+              />
+              <Route
+                path="/projects/:id/versions"
+                element={<LazyPage render={<VersionsPage />} />}
+              />
+              <Route
+                path="/projects/:id/documents"
+                element={<LazyPage render={<DocumentsPage />} />}
+              />
+              <Route
+                path="/projects/:id/screenshots"
+                element={<LazyPage render={<ScreenshotsPage />} />}
+              />
+              <Route
+                path="/projects/:id/logs"
+                element={<LazyPage render={<LogsPage />} />}
+              />
+              <Route
+                path="/projects/:id/logs/:runId"
+                element={<LazyPage render={<LogRunDetailPage />} />}
               />
 
               <Route
@@ -314,14 +349,6 @@ export default function App() {
       </TooltipProvider>
     </QueryClientProvider>
   );
-}
-
-function LegacyNewVersionRedirect() {
-  const { id } = useParams();
-  const to = id
-    ? `/versions?project=${encodeURIComponent(id)}&create=1`
-    : "/versions?create=1";
-  return <Navigate to={to} replace />;
 }
 
 function LazyPage({ render }: { render: ReactNode }) {

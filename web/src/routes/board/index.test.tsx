@@ -1,5 +1,5 @@
 import { fireEvent, render, screen } from "@testing-library/react";
-import { MemoryRouter } from "react-router";
+import { MemoryRouter, Route, Routes } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@/lib/copy", () => ({ copyWithToast: vi.fn() }));
@@ -119,8 +119,10 @@ vi.mock("@dnd-kit/core", async (importOriginal) => {
 async function renderBoardPage() {
   const { default: BoardPage } = await import("@/routes/board/index");
   return render(
-    <MemoryRouter initialEntries={["/board?project=project-1"]}>
-      <BoardPage />
+    <MemoryRouter initialEntries={["/projects/project-1/board"]}>
+      <Routes>
+        <Route path="/projects/:id/board" element={<BoardPage />} />
+      </Routes>
     </MemoryRouter>,
   );
 }

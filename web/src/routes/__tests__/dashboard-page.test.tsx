@@ -419,7 +419,7 @@ describe("DashboardPage", () => {
 
     expect(
       screen.getByRole("link", { name: /Project 0/ }),
-    ).toHaveAttribute("href", "/issues?project=p0&state=open");
+    ).toHaveAttribute("href", "/projects/p0/issues?state=open");
     expect(screen.getByText("其他 3 个项目共 6 条")).toBeInTheDocument();
     expect(screen.queryByText("Project 10")).not.toBeInTheDocument();
     expect(screen.getByText("13 个项目有开启问题")).toBeInTheDocument();

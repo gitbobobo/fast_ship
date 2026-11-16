@@ -147,11 +147,11 @@ function mockScreens(items: ScreenshotScreen[]) {
   } as unknown as ReturnType<typeof useScreenshotScreens>);
 }
 
-function renderPage(initialEntry = "/screenshots") {
+function renderPage(initialEntry = "/projects/proj-1/screenshots") {
   return render(
     <MemoryRouter initialEntries={[initialEntry]}>
       <Routes>
-        <Route path="/screenshots" element={<ScreenshotsPage />} />
+        <Route path="/projects/:id/screenshots" element={<ScreenshotsPage />} />
       </Routes>
     </MemoryRouter>,
   );
@@ -194,11 +194,11 @@ describe("ScreenshotsPage", () => {
   });
 
   it("ignores the legacy ?view= param and still lands on the canvas", () => {
-    const first = renderPage("/screenshots?view=list");
+    const first = renderPage("/projects/proj-1/screenshots?view=list");
     expect(screen.getByTestId("canvas-stub")).toBeInTheDocument();
     first.unmount();
 
-    renderPage("/screenshots?view=canvas");
+    renderPage("/projects/proj-1/screenshots?view=canvas");
     expect(screen.getByTestId("canvas-stub")).toBeInTheDocument();
   });
 
@@ -225,7 +225,7 @@ describe("ScreenshotsPage", () => {
   });
 
   it("keeps both statuses when the filter selects open and resolved", async () => {
-    renderPage("/screenshots?status=open,resolved");
+    renderPage("/projects/proj-1/screenshots?status=open,resolved");
 
     await waitFor(() => {
       expect(canvasProps().statusScope).toEqual({ open: true, resolved: true });
@@ -247,7 +247,7 @@ describe("ScreenshotsPage", () => {
         uploaded_at: "2026-10-04T00:00:00Z",
       }),
     ]);
-    renderPage("/screenshots?locale=en-us");
+    renderPage("/projects/proj-1/screenshots?locale=en-us");
 
     await waitFor(() => {
       expect(canvasProps().screens.map((s) => s.id)).toEqual(["en"]);
@@ -271,7 +271,7 @@ describe("ScreenshotsPage", () => {
         uploaded_at: "2026-10-04T00:00:00Z",
       }),
     ]);
-    renderPage("/screenshots?platform=WEB");
+    renderPage("/projects/proj-1/screenshots?platform=WEB");
 
     await waitFor(() => {
       expect(canvasProps().screens.map((s) => s.id)).toEqual(["web"]);
@@ -294,7 +294,7 @@ describe("ScreenshotsPage", () => {
         uploaded_at: "2026-10-04T00:00:00Z",
       }),
     ]);
-    renderPage("/screenshots?theme=__NONE__");
+    renderPage("/projects/proj-1/screenshots?theme=__NONE__");
 
     await waitFor(() => {
       expect(canvasProps().screens.map((s) => s.id)).toEqual(["untagged"]);
@@ -420,7 +420,7 @@ describe("ScreenshotsPage", () => {
         >,
     );
 
-    const utils = renderPage("/screenshots?view=canvas&annotation=a-1");
+    const utils = renderPage("/projects/proj-1/screenshots?view=canvas&annotation=a-1");
 
     await waitFor(() =>
       expect(screen.getByTestId("canvas-stub")).toBeInTheDocument(),
@@ -434,9 +434,9 @@ describe("ScreenshotsPage", () => {
       isFetching: false,
     };
     utils.rerender(
-      <MemoryRouter initialEntries={["/screenshots?view=canvas&annotation=a-1"]}>
+      <MemoryRouter initialEntries={["/projects/proj-1/screenshots?view=canvas&annotation=a-1"]}>
         <Routes>
-          <Route path="/screenshots" element={<ScreenshotsPage />} />
+          <Route path="/projects/:id/screenshots" element={<ScreenshotsPage />} />
         </Routes>
       </MemoryRouter>,
     );
@@ -473,7 +473,7 @@ describe("ScreenshotsPage", () => {
       isFetching: false,
     } as unknown as ReturnType<typeof useScreenshotAnnotations>);
 
-    renderPage("/screenshots?platform=web&annotation=a-1");
+    renderPage("/projects/proj-1/screenshots?platform=web&annotation=a-1");
     await waitFor(() => {
       expect(canvasProps().locateRequest?.annotationId).toBe("a-1");
     });
@@ -502,7 +502,7 @@ describe("ScreenshotsPage", () => {
       isFetching: false,
     } as unknown as ReturnType<typeof useScreenshotAnnotations>);
     renderPage(
-      "/screenshots?platform=web&locale=fr-FR&theme=dark&status=open&annotation=a-1",
+      "/projects/proj-1/screenshots?platform=web&locale=fr-FR&theme=dark&status=open&annotation=a-1",
     );
 
     await waitFor(() => {
@@ -533,7 +533,7 @@ describe("ScreenshotsPage", () => {
       isSuccess: true,
       isFetching: false,
     } as unknown as ReturnType<typeof useScreenshotAnnotations>);
-    renderPage("/screenshots?platform=web&annotation=a-3");
+    renderPage("/projects/proj-1/screenshots?platform=web&annotation=a-3");
 
     await waitFor(() => {
       expect(canvasProps().locateRequest?.annotationId).toBe("a-3");
@@ -600,7 +600,7 @@ describe("ScreenshotsPage", () => {
       isSuccess: true,
       isFetching: false,
     } as unknown as ReturnType<typeof useScreenshotAnnotations>);
-    renderPage("/screenshots?status=resolved");
+    renderPage("/projects/proj-1/screenshots?status=resolved");
 
     // resolved-only 时范围内的 open 为 0：入口置灰，提示词不指向范围外标注
     await waitFor(() => {

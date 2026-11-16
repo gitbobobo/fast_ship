@@ -7,7 +7,10 @@ import { HeaderActions } from "@/components/layout/header-actions";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
-import { ProjectSwitcher } from "@/components/projects/project-switcher";
+import {
+  ProjectBreadcrumb,
+  ProjectPageGate,
+} from "@/components/projects/project-page-chrome";
 import { UploadScreenshotsDialog } from "@/components/screenshots/upload-screenshots-dialog";
 import { ScreenshotLightbox } from "@/components/screenshots/screenshot-lightbox";
 import { DimensionMultiSelect } from "@/components/screenshots/dimension-multi-select";
@@ -30,43 +33,30 @@ import {
   goTrim,
   SCREENSHOT_NONE,
 } from "@/lib/screenshots";
-import { useProjects } from "@/lib/hooks/use-projects";
 import { useScreenshotScreens } from "@/lib/hooks/use-screenshots";
 import { useScreenshotAnnotations } from "@/lib/hooks/use-screenshot-annotations";
-import { getActiveProjectId } from "@/lib/projects";
-import { useProjectPreferenceStore } from "@/lib/store/project-preference-store";
 
 export default function ScreenshotsPage() {
-  const { data: projectsData, isLoading: projectsLoading } = useProjects();
-  const projects = useMemo(
-    () => projectsData?.items ?? [],
-    [projectsData?.items],
+  // 项目上下文只认路径：列表加载中先渲染占位（冷启动无效 ID 不给数据请求窗口），
+  // 确认无效整页空态，其余放行（列表查询失败交给页面自身兜底）
+  return (
+    <ProjectPageGate>
+      {({ projectId, project }) => (
+        <ScreenshotsPageContent projectId={projectId} project={project} />
+      )}
+    </ProjectPageGate>
   );
-  const [searchParams, setSearchParams] = useSearchParams();
-  const urlProjectId = searchParams.get("project");
-  const urlAnnotationId = searchParams.get("annotation");
-  const { lastSelectedProjectId, setLastSelectedProjectId } =
-    useProjectPreferenceStore();
-  const [selectedProjectId, setSelectedProjectId] = useState<string>(
-    () => urlProjectId ?? lastSelectedProjectId ?? "",
-  );
-  const activeProjectId = useMemo(
-    () => getActiveProjectId(projects, selectedProjectId, urlProjectId),
-    [projects, selectedProjectId, urlProjectId],
-  );
+}
 
-  // 当 activeProjectId 回退到第一个项目时（如存储的项目被删除），同步 state 和 store
-  useEffect(() => {
-    if (!projectsLoading && activeProjectId !== selectedProjectId) {
-      setSelectedProjectId(activeProjectId);
-      setLastSelectedProjectId(activeProjectId || null);
-    }
-  }, [
-    projectsLoading,
-    activeProjectId,
-    selectedProjectId,
-    setLastSelectedProjectId,
-  ]);
+function ScreenshotsPageContent({
+  projectId,
+  project,
+}: {
+  projectId: string;
+  project: Project | undefined;
+}) {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const urlAnnotationId = searchParams.get("annotation");
 
   // 筛选条 ↔ URL（逗号分隔）；旧链接里的 ?view= 直接忽略。
   // status 不允许空集：URL 无参数、空值或解析后为空都回落默认「只看未解决」，
@@ -126,14 +116,14 @@ export default function ScreenshotsPage() {
   };
 
   const { data: screensData, isLoading: screensLoading } =
-    useScreenshotScreens(activeProjectId);
+    useScreenshotScreens(projectId);
   const allScreens = useMemo(() => screensData?.items ?? [], [screensData]);
 
   const {
     data: annotationsData,
     isSuccess: annotationsReady,
     isFetching: annotationsFetching,
-  } = useScreenshotAnnotations(activeProjectId);
+  } = useScreenshotAnnotations(projectId);
   const allAnnotations = useMemo(
     () => annotationsData ?? [],
     [annotationsData],
@@ -209,12 +199,12 @@ export default function ScreenshotsPage() {
   );
 
   // 项目切换时关闭预览并重置深链；换项目后摘掉 annotation 参数，
-  // 避免指向旧项目的标注。首个空值（项目列表未加载）到首个项目不算切换
-  const prevProjectIdRef = useRef(activeProjectId);
+  // 避免指向旧项目的标注。首个挂载（prev 为 null）不算切换
+  const prevProjectIdRef = useRef(projectId);
   useEffect(() => {
     const prev = prevProjectIdRef.current;
-    prevProjectIdRef.current = activeProjectId;
-    if (!prev || prev === activeProjectId) return;
+    prevProjectIdRef.current = projectId;
+    if (!prev || prev === projectId) return;
     setOpenScreenId(null);
     handledUrlAnnotationRef.current = null;
     if (urlAnnotationId) {
@@ -227,7 +217,7 @@ export default function ScreenshotsPage() {
         { replace: true },
       );
     }
-  }, [activeProjectId, urlAnnotationId, setSearchParams]);
+  }, [projectId, urlAnnotationId, setSearchParams]);
 
   // ?annotation=<id>：数据就绪后一次性放宽筛选（把目标截图过滤掉的维度 +
   // 目标标注的状态），再交给画布执行定位。所有放宽合并进同一次 URL 写入：
@@ -277,7 +267,7 @@ export default function ScreenshotsPage() {
   const promptText = useMemo(
     () =>
       buildAnnotationPrompt({
-        projectId: activeProjectId,
+        projectId,
         filters: {
           platform: filters.platform,
           locale: filters.locale,
@@ -286,46 +276,27 @@ export default function ScreenshotsPage() {
         openCount: launchOpenCount,
         resolvedCount: scopeResolvedCount,
       }),
-    [activeProjectId, filters, launchOpenCount, scopeResolvedCount],
+    [projectId, filters, launchOpenCount, scopeResolvedCount],
   );
 
   return (
     <>
       <Header
-        title="截图"
+        title={<ProjectBreadcrumb section="截图" project={project} />}
         actions={
-          activeProjectId ? (
-            <HeaderActions
-              primary={
-                <Button size="sm" onClick={() => setUploadOpen(true)}>
-                  <Upload className="mr-1.5 h-3.5 w-3.5" />
-                  上传截图
-                </Button>
-              }
-            />
-          ) : undefined
+          <HeaderActions
+            primary={
+              <Button size="sm" onClick={() => setUploadOpen(true)}>
+                <Upload className="mr-1.5 h-3.5 w-3.5" />
+                上传截图
+              </Button>
+            }
+          />
         }
       />
-      {/* 画布直达：工具行只放项目选择与筛选条，画布贴边占满剩余空间 */}
+      {/* 画布直达：项目选择已上移侧边栏，工具行只放筛选条，画布贴边占满剩余空间 */}
       <div className="flex h-[calc(100dvh-3.5rem)] flex-col">
         <div className="flex shrink-0 flex-wrap items-center gap-2 border-b px-3 py-2">
-          {projectsLoading ? (
-            <Skeleton className="h-8 w-64 rounded-md" />
-          ) : projects.length === 0 ? (
-            <p className="text-sm text-muted-foreground">暂无项目</p>
-          ) : (
-            <ProjectSwitcher
-              value={activeProjectId}
-              onValueChange={(nextValue) => {
-                setSelectedProjectId(nextValue);
-                setLastSelectedProjectId(nextValue || null);
-              }}
-              projects={projects}
-              placeholder="请选择项目"
-              className="w-64"
-            />
-          )}
-
           {allScreens.length > 0 && (
             <div className="flex min-w-0 flex-wrap items-center gap-1.5">
               <DimensionMultiSelect
@@ -370,14 +341,9 @@ export default function ScreenshotsPage() {
         </div>
 
         <div className="min-h-0 flex-1">
-          {projectsLoading || screensLoading ? (
+          {screensLoading ? (
             <div className="flex h-full items-center justify-center">
               <Skeleton className="h-full w-full rounded-none" />
-            </div>
-          ) : projects.length === 0 ? (
-            <div className="flex h-full flex-col items-center justify-center gap-2 text-muted-foreground">
-              <Images className="h-10 w-10 text-muted-foreground/50" />
-              <p className="text-sm">暂无项目</p>
             </div>
           ) : allScreens.length === 0 ? (
             // 空状态 = 画布中央上传按钮
@@ -400,7 +366,7 @@ export default function ScreenshotsPage() {
             </div>
           ) : (
             <ScreenshotCanvas
-              projectId={activeProjectId}
+              projectId={projectId}
               screens={visibleScreens}
               scopeScreenIds={scopeScreenIds}
               annotations={visibleAnnotations}
@@ -420,7 +386,7 @@ export default function ScreenshotsPage() {
                 theme: filters.theme,
               }}
               openCount={launchOpenCount}
-              resetKey={`${activeProjectId}|${searchParams.toString()}`}
+              resetKey={`${projectId}|${searchParams.toString()}`}
               controlsEnabled={openScreenId === null && !uploadOpen && !launchOpen}
               locateRequest={locateRequest}
               onOpenPreview={setOpenScreenId}
@@ -434,25 +400,23 @@ export default function ScreenshotsPage() {
       <UploadScreenshotsDialog
         open={uploadOpen}
         onOpenChange={setUploadOpen}
-        projectId={activeProjectId}
+        projectId={projectId}
       />
 
-      {activeProjectId && (
-        <LaunchAnnotationThreadDialog
-          open={launchOpen}
-          onOpenChange={setLaunchOpen}
-          projectId={activeProjectId}
-          promptText={promptText}
-          openCount={launchOpenCount}
-        />
-      )}
+      <LaunchAnnotationThreadDialog
+        open={launchOpen}
+        onOpenChange={setLaunchOpen}
+        projectId={projectId}
+        promptText={promptText}
+        openCount={launchOpenCount}
+      />
 
       <ScreenshotLightbox
         open={openScreenId !== null}
         onOpenChange={(open) => {
           if (!open) setOpenScreenId(null);
         }}
-        projectId={activeProjectId}
+        projectId={projectId}
         screens={visibleScreens}
         screenId={openScreenId}
         onNavigate={setOpenScreenId}

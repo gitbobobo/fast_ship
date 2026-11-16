@@ -104,6 +104,20 @@ vi.mock("@/lib/hooks/use-notifications", () => ({
   useMarkAllNotificationsRead: vi.fn(() => ({ mutate: vi.fn(), mutateAsync: vi.fn() })),
 }));
 
+// 侧边栏「项目内」组与切换器依赖项目列表；固定两个项目让分区链接可拼出。
+vi.mock("@/lib/hooks/use-projects", () => ({
+  useProjects: vi.fn(() => ({
+    data: {
+      items: [
+        { id: "proj-1", name: "Project One", is_shelved: false },
+        { id: "proj-2", name: "Project Two", is_shelved: false },
+      ],
+      total: 2,
+    },
+    isSuccess: true,
+  })),
+}));
+
 describe("UI Integration Tests", () => {
   beforeEach(() => {
     vi.mocked(useAuthStore).mockReturnValue({
@@ -241,37 +255,37 @@ describe("UI Integration Tests", () => {
       expect(links[0]).toHaveAttribute("aria-current", "page");
     });
 
-    it("renders logs sidebar item and keeps it active on /logs", () => {
-      renderWithProviders(<Sidebar />, { initialEntry: "/logs" });
+    it("renders logs sidebar item and keeps it active on the project logs page", () => {
+      renderWithProviders(<Sidebar />, { initialEntry: "/projects/proj-1/logs" });
 
-      const logLink = document.querySelector('a[href="/logs"]');
+      const logLink = document.querySelector('a[href="/projects/proj-1/logs"]');
       expect(logLink).toHaveTextContent(/日志/);
       expect(logLink).toHaveAttribute("aria-current", "page");
     });
 
-    it("renders documents sidebar item and keeps it active on /documents", () => {
-      renderWithProviders(<Sidebar />, { initialEntry: "/documents" });
+    it("renders documents sidebar item and keeps it active on the project documents page", () => {
+      renderWithProviders(<Sidebar />, { initialEntry: "/projects/proj-1/documents" });
 
-      const docsLink = document.querySelector('a[href="/documents"]');
+      const docsLink = document.querySelector('a[href="/projects/proj-1/documents"]');
       expect(docsLink).toHaveTextContent(/文档/);
       expect(docsLink).toHaveAttribute("aria-current", "page");
     });
 
     it("keeps documents sidebar item active with query params", () => {
       renderWithProviders(<Sidebar />, {
-        initialEntry: "/documents?project=p1&doc=d1",
+        initialEntry: "/projects/proj-1/documents?doc=d1",
       });
 
-      const docsLink = document.querySelector('a[href="/documents"]');
+      const docsLink = document.querySelector('a[href="/projects/proj-1/documents"]');
       expect(docsLink).toHaveAttribute("aria-current", "page");
     });
 
-    it("keeps logs sidebar item active on /logs/:runId", () => {
+    it("keeps logs sidebar item active on /projects/:id/logs/:runId", () => {
       renderWithProviders(<Sidebar />, {
-        initialEntry: "/logs/run-123",
+        initialEntry: "/projects/proj-1/logs/run-123",
       });
 
-      const logLink = document.querySelector('a[href="/logs"]');
+      const logLink = document.querySelector('a[href="/projects/proj-1/logs"]');
       expect(logLink).toHaveAttribute("aria-current", "page");
     });
 

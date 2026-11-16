@@ -43,13 +43,6 @@ vi.mock("@/lib/hooks/use-logs", () => ({
   useDeleteLogRun: () => ({ mutateAsync: vi.fn(), isPending: false }),
 }));
 
-vi.mock("@/lib/store/project-preference-store", () => ({
-  useProjectPreferenceStore: () => ({
-    lastSelectedProjectId: "proj-1",
-    setLastSelectedProjectId: vi.fn(),
-  }),
-}));
-
 vi.mock("@/lib/copy", () => ({
   copyWithToast: vi.fn(),
 }));
@@ -63,9 +56,9 @@ async function renderRunDetail(search = "") {
   });
   return render(
     <QueryClientProvider client={client}>
-      <MemoryRouter initialEntries={[`/logs/run-1${search}`]}>
+      <MemoryRouter initialEntries={[`/projects/proj-1/logs/run-1${search}`]}>
         <Routes>
-          <Route path="/logs/:runId" element={<LogRunDetailPage />} />
+          <Route path="/projects/:id/logs/:runId" element={<LogRunDetailPage />} />
         </Routes>
       </MemoryRouter>
     </QueryClientProvider>,
@@ -78,7 +71,7 @@ function levelSelectTrigger() {
 
 describe("LogRunDetailPage level select label", () => {
   it("shows 全部级别 instead of all when no level filter", async () => {
-    await renderRunDetail("?project=proj-1");
+    await renderRunDetail();
 
     await waitFor(() => {
       expect(levelSelectTrigger()).toHaveTextContent("全部级别");
@@ -87,7 +80,7 @@ describe("LogRunDetailPage level select label", () => {
   });
 
   it("shows Error instead of error when level=error", async () => {
-    await renderRunDetail("?project=proj-1&level=error");
+    await renderRunDetail("?level=error");
 
     await waitFor(() => {
       expect(levelSelectTrigger()).toHaveTextContent("Error");
@@ -108,7 +101,7 @@ describe("LogRunDetailPage not found", () => {
     });
     mockState.runError = error;
 
-    await renderRunDetail("?project=proj-1");
+    await renderRunDetail();
 
     await waitFor(() => {
       expect(screen.getByText("运行不存在")).toBeInTheDocument();

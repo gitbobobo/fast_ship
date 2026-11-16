@@ -193,7 +193,7 @@ describe("ProjectsPage", () => {
     expect(card).toBeTruthy();
     card.click();
 
-    expect(mockNavigate).toHaveBeenCalledWith("/issues?project=p1");
+    expect(mockNavigate).toHaveBeenCalledWith("/projects/p1/issues");
   });
 
   it("opens dropdown menu and opens edit dialog", async () => {

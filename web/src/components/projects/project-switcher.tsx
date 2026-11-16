@@ -24,7 +24,27 @@ interface ProjectSwitcherProps {
   placeholder?: string;
   disabled?: boolean;
   className?: string;
+  /**
+   * 触发器形态：default 行内小按钮（表单/页内工具条）；sidebar 占满整行
+   * （侧边栏展开态）；sidebar-collapsed 首字母方块（侧边栏收起态，弹层
+   * 从右侧弹出）。弹层内容三态共用。
+   */
+  variant?: "default" | "sidebar" | "sidebar-collapsed";
   [attribute: `data-${string}`]: string | number | boolean | undefined;
+}
+
+// 首个用户可见字符（字素）：项目名以复合 emoji 开头时，按码点取首项会拆坏
+// 旗帜/ZWJ 序列（🇨🇳→🇨、👩‍💻→👩），用 Intl.Segmenter 按字素切；环境不支持时退回码点。
+function firstGrapheme(name: string): string {
+  if (typeof Intl !== "undefined" && "Segmenter" in Intl) {
+    const segmenter = new Intl.Segmenter(undefined, {
+      granularity: "grapheme",
+    });
+    const first = segmenter.segment(name)[Symbol.iterator]().next();
+    if (!first.done) return first.value.segment;
+    return "?";
+  }
+  return Array.from(name)[0] ?? "?";
 }
 
 export function ProjectSwitcher({
@@ -34,6 +54,7 @@ export function ProjectSwitcher({
   placeholder = "请选择项目",
   disabled = false,
   className,
+  variant = "default",
   ...triggerProps
 }: ProjectSwitcherProps) {
   const [open, setOpen] = useState(false);
@@ -73,30 +94,58 @@ export function ProjectSwitcher({
         disabled={disabled}
         aria-label={`切换项目：${activeProject?.name ?? placeholder}`}
         className={cn(
-          "flex h-8 w-fit items-center justify-between gap-1.5 rounded-lg border border-input bg-transparent py-2 pr-2 pl-2.5 text-sm whitespace-nowrap transition-colors outline-none select-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-input/30 dark:hover:bg-input/50",
+          "flex items-center gap-1.5 rounded-lg border border-input bg-transparent text-sm transition-colors outline-none select-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-input/30 dark:hover:bg-input/50",
+          variant === "default" &&
+            "h-8 w-fit justify-between py-2 pr-2 pl-2.5 whitespace-nowrap",
+          variant === "sidebar" &&
+            "h-11 w-full justify-between py-2 pr-2 pl-2.5 whitespace-nowrap md:h-9",
+          variant === "sidebar-collapsed" &&
+            "relative size-8 shrink-0 justify-center font-medium hover:bg-accent/60",
           className,
         )}
       >
-        <span
-          className={cn(
-            "min-w-0 flex-1 truncate text-left",
-            !activeProject && "text-muted-foreground",
-          )}
-        >
-          {activeProject?.name ?? placeholder}
-        </span>
-        {activeProject?.is_shelved && (
-          <Badge variant="secondary">
-            {shelvedStatusLabel(activeProject)}
-          </Badge>
+        {variant === "sidebar-collapsed" ? (
+          // 收起态：项目首字素方块，完整名称交给 tooltip（侧边栏负责渲染）；
+          // 右下角小 chevron 提供稳定的「可点击/可选」 affordance，与纯导航图标区分
+          <>
+            <span aria-hidden="true" className="leading-none">
+              {firstGrapheme(activeProject?.name ?? "?")}
+            </span>
+            <ChevronDown
+              aria-hidden="true"
+              className="absolute -right-px -bottom-px size-2.5 rounded-tl-sm bg-background text-muted-foreground"
+            />
+          </>
+        ) : (
+          <>
+            <span
+              className={cn(
+                "min-w-0 flex-1 truncate text-left",
+                !activeProject && "text-muted-foreground",
+              )}
+            >
+              {activeProject?.name ?? placeholder}
+            </span>
+            {activeProject?.is_shelved && (
+              <Badge variant="secondary">
+                {shelvedStatusLabel(activeProject)}
+              </Badge>
+            )}
+            <ChevronDown
+              aria-hidden="true"
+              className="pointer-events-none size-4 shrink-0 text-muted-foreground"
+            />
+          </>
         )}
-        <ChevronDown
-          aria-hidden="true"
-          className="pointer-events-none size-4 shrink-0 text-muted-foreground"
-        />
       </Popover.Trigger>
       <Popover.Portal>
-        <Popover.Positioner align="start" sideOffset={4} className="isolate z-50">
+        {/* 收起态方块挂在窄侧栏旁，弹层从右侧展开；其余从下方 */}
+        <Popover.Positioner
+          align="start"
+          side={variant === "sidebar-collapsed" ? "right" : "bottom"}
+          sideOffset={4}
+          className="isolate z-50"
+        >
           <Popover.Popup
             aria-label="切换项目"
             initialFocus={inputRef}
@@ -145,7 +194,7 @@ export function ProjectSwitcher({
                       aria-current={selected || undefined}
                       onClick={() => handleSelect(project)}
                       className={cn(
-                        "min-w-0 rounded-lg border border-border p-3 text-left text-sm transition-colors outline-none hover:bg-accent focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50",
+                        "flex min-w-0 flex-col justify-center rounded-lg border border-border p-3 text-left text-sm transition-colors outline-none hover:bg-accent focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50",
                         selected && "border-primary bg-primary/5 ring-1 ring-primary",
                       )}
                     >

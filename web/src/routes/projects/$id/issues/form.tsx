@@ -130,7 +130,8 @@ export default function IssueFormPage() {
                 <Button
                   variant="outline"
                   render={
-                    <Link to={id ? `/projects/${id}/issues/${iid}` : "/issues"} />
+                    // 路径必有项目 ID；兜底分支（无 ID）回项目列表选一个再进来
+                    <Link to={id ? `/projects/${id}/issues/${iid}` : "/projects"} />
                   }
                 >
                   返回
