@@ -844,44 +844,45 @@ function StackedSeriesChart({
                   />
                 ))}
 
-            {/* 线末数值标签（X3，叠加模式）：两条线末端右上/右下错开，色随线，
-                读者把线末值与 KPI 直接对齐；空态不渲染（整个 svg 不出现）。 */}
+            {/* 线末数值标签（X3，叠加模式）：两条线末端右上/右下错开。
+                字用中性深灰（round5 视觉：系列色原样白底对比度不足 AA，
+                且这是全图唯一精确读数），前置系列色小点保留颜色关联。 */}
             {overlay &&
               coordinates.length > 0 &&
               seriesMeta.map((meta, seriesIndex) => {
                 const last = coordinates[coordinates.length - 1];
                 const stack = last.stacks[seriesIndex];
                 return (
-                  <text
-                    key={`end-label-${meta.id}`}
-                    data-series={meta.id}
-                    x={last.x + 8}
-                    y={stack.yTop + (seriesIndex % 2 === 0 ? 8 : -6)}
-                    dominantBaseline="middle"
-                    className="text-[11px] font-semibold tabular-nums"
-                    fill={meta.color}
-                  >
-                    {formatValue(stack.value)}
-                  </text>
+                  <g key={`end-label-${meta.id}`} data-series={meta.id}>
+                    <circle
+                      cx={last.x + 8}
+                      cy={stack.yTop + (seriesIndex % 2 === 0 ? 8 : -6)}
+                      r={3}
+                      fill={meta.color}
+                    />
+                    <text
+                      x={last.x + 14}
+                      y={stack.yTop + (seriesIndex % 2 === 0 ? 8 : -6)}
+                      dominantBaseline="middle"
+                      className="fill-gray-700 tabular-nums text-[11px] font-semibold dark:fill-gray-300"
+                    >
+                      {formatValue(stack.value)}
+                    </text>
+                  </g>
                 );
               })}
 
-            {/* 末点轴区小字（X7）：标出最后一格是「今日」，与横轴日期同 x 双行，
-                只在 area 变体渲染（columns 与 bot 用量页零变化）。 */}
-            {shape === "area" && lastPointLabel && coordinates.length > 0 && (
-              <text
-                x={coordinates[coordinates.length - 1].x}
-                y={CHART_HEIGHT - 22}
-                textAnchor="middle"
-                className="fill-muted-foreground text-[11px]"
-              >
-                {lastPointLabel}
-              </text>
-            )}
+            {/* （lastPointLabel 已并入末刻度文字，不再单独渲染） */}
 
-            {/* X-axis labels：画在图内，和数据点共用同一套坐标，刻度与日期一一对应 */}
+            {/* X-axis labels：画在图内，和数据点共用同一套坐标，刻度与日期一一对应；
+                lastPointLabel 并入末刻度（round5 视觉：与「今日」单字堆叠难读） */}
             {labelIndexes.map((index) => {
               const point = points[index];
+              const isLast = index === points.length - 1;
+              const text =
+                isLast && lastPointLabel
+                  ? `${point.shortLabel ?? point.label}·${lastPointLabel}`
+                  : (point.shortLabel ?? point.label);
               return (
                 <text
                   key={getPointKey(point, index)}
@@ -890,7 +891,7 @@ function StackedSeriesChart({
                   textAnchor="middle"
                   className="fill-muted-foreground text-[11px]"
                 >
-                  {point.shortLabel ?? point.label}
+                  {text}
                 </text>
               );
             })}

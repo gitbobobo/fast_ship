@@ -48,7 +48,8 @@ export function SectionEmptyLink({
   return (
     <Link
       to={to}
-      className="inline-flex shrink-0 items-center px-3 py-2.5 text-primary underline-offset-2 transition-colors hover:text-primary/75"
+      /* 按钮底让触控目标在静态截图里也可辨（round5 视觉：纯文字链不像入口） */
+      className="inline-flex shrink-0 items-center rounded-md border bg-background px-3 py-2.5 text-primary underline-offset-2 transition-colors hover:bg-muted/60 hover:text-primary/75"
     >
       {children} →
     </Link>

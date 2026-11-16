@@ -83,7 +83,7 @@ export function FlowCard({
 
             <div>
               <h4 className="mb-2 text-xs font-medium text-muted-foreground">
-                各项目完成周期（近 30 天中位数）
+                各项目完成周期（近 30 天 · 仅计有开工记录的完成）
               </h4>
               {flow.cycle_time_by_project.length === 0 ? (
                 <p className="text-xs text-muted-foreground">暂无周期数据</p>

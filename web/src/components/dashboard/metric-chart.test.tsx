@@ -480,21 +480,35 @@ describe("MetricChart", () => {
       />,
     );
 
-    // 线末直接标数值：两条标签都存在，色随线。
-    const labels = Array.from(
-      container.querySelectorAll("svg text[data-series]"),
+    // 线末直接标数值：两条标签都存在；字改中性深灰（round5 AA），系列色
+    // 由前置小点承载。
+    const labels = Array.from(container.querySelectorAll("svg g[data-series]"));
+    expect(labels.map((n) => n.querySelector("text")?.textContent)).toEqual([
+      "4",
+      "4",
+    ]);
+    expect(labels[0].querySelector("circle")).toHaveAttribute(
+      "fill",
+      "oklch(0.65 0.18 250)",
     );
-    expect(labels.map((n) => n.textContent)).toEqual(["4", "4"]);
-    expect(labels[0]).toHaveAttribute("fill", "oklch(0.65 0.18 250)");
-    expect(labels[1]).toHaveAttribute("fill", "oklch(0.65 0.18 150)");
-    expect(labels[0].getAttribute("class")).toContain("tabular-nums");
+    expect(labels[1].querySelector("circle")).toHaveAttribute(
+      "fill",
+      "oklch(0.65 0.18 150)",
+    );
+    expect(labels[0].querySelector("text")?.getAttribute("class")).toContain(
+      "tabular-nums",
+    );
 
     // 末点右上/右下错开：两标签 y 至少差一个字号（11px），不重叠。
-    const ys = labels.map((node) => Number(node.getAttribute("y")));
+    const ys = labels.map(
+      (node) => Number(node.querySelector("text")?.getAttribute("y")),
+    );
     expect(Math.abs(ys[0] - ys[1])).toBeGreaterThanOrEqual(11);
 
     // 不越界：标签画在末点（内收后 x=668）右侧，仍在 viewBox（宽 720）内。
-    const xs = labels.map((node) => Number(node.getAttribute("x")));
+    const xs = labels.map(
+      (node) => Number(node.querySelector("text")?.getAttribute("x")),
+    );
     for (const x of xs) {
       expect(x + 14).toBeLessThan(720);
     }
@@ -529,7 +543,7 @@ describe("MetricChart", () => {
       },
     ];
 
-    const { container } = render(
+    render(
       <MetricChart
         points={points}
         variant="area"
@@ -538,13 +552,9 @@ describe("MetricChart", () => {
       />,
     );
 
-    // 与末点（内收后 x=668）同 x，落在轴区：基线 210 之下、viewBox 高 240 之内。
-    const label = screen.getByText("今日");
-    expect(label).toHaveAttribute("x", "668");
-    const y = Number(label.getAttribute("y"));
-    expect(y).toBeGreaterThan(210);
-    expect(y).toBeLessThan(240);
-    expect(container.querySelector("svg")).toContainElement(label);
+    // 「今日」并入末刻度（round5 视觉）：不再单独渲染轴区小字。
+    expect(screen.getByText("D2·今日")).toBeInTheDocument();
+    expect(screen.queryByText(/^今日$/)).not.toBeInTheDocument();
   });
 
   it("ignores lastPointLabel on the columns variant and empty state (X7)", () => {

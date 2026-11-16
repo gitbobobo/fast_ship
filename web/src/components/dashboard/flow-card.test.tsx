@@ -52,8 +52,9 @@ describe("FlowCard", () => {
     // 双序列图例（W1）：新建/已解决 色点与面积图两条序列同色
     expect(screen.getByText("新建")).toBeInTheDocument();
     expect(screen.getByText("已解决")).toBeInTheDocument();
-    // 叠加模式末点轴区标「今日」（X7）；FlowCard 把 stacked=false 传给 MetricChart
-    expect(screen.getByText("今日")).toBeInTheDocument();
+    // 「今日」并入末刻度（round5 视觉：与日期刻度堆叠难读）；FlowCard 把
+    // stacked=false 传给 MetricChart
+    expect(screen.getByText("05-30·今日")).toBeInTheDocument();
     expect(screen.getByTestId("backlog-age-bar")).toBeInTheDocument();
     expect(screen.getByText("7 天内 2")).toBeInTheDocument();
     expect(screen.getByText("30 天以上 1")).toBeInTheDocument();
@@ -144,12 +145,18 @@ describe("FlowCard", () => {
     expect(created).toHaveAttribute("stroke", "oklch(0.65 0.18 250)");
     expect(resolved).toHaveAttribute("stroke", "oklch(0.65 0.18 150)");
 
-    // 线末数值标签（X3）：末点新建 4、已解决 0，两条标签错开不重叠。
+    // 线末数值标签（X3 + round5 AA）：深灰字前置系列色点，g[data-series] 聚合；
+    // 末点新建 4、已解决 0，两条标签错开不重叠。
     const endLabels = Array.from(
-      container.querySelectorAll("svg text[data-series]"),
+      container.querySelectorAll("svg g[data-series]"),
     );
-    expect(endLabels.map((n) => n.textContent)).toEqual(["4", "0"]);
-    const ys = endLabels.map((node) => Number(node.getAttribute("y")));
+    expect(endLabels.map((n) => n.querySelector("text")?.textContent)).toEqual([
+      "4",
+      "0",
+    ]);
+    const ys = endLabels.map(
+      (node) => Number(node.querySelector("text")?.getAttribute("y")),
+    );
     expect(Math.abs(ys[0] - ys[1])).toBeGreaterThanOrEqual(11);
   });
 
