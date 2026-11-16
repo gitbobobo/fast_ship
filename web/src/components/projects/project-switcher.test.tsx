@@ -433,4 +433,25 @@ describe("ProjectSwitcher", () => {
     expect(trigger).toHaveTextContent("Shelved App");
     expect(trigger).toHaveTextContent("已搁置");
   });
+
+  it("sidebar-collapsed 触发器取首个字素，不拆坏复合 emoji", () => {
+    const cases = [
+      { id: "flag", name: "🇨🇳项目", initial: "🇨🇳" },
+      { id: "zwj", name: "👩‍💻开发", initial: "👩‍💻" },
+    ];
+    for (const { id, name, initial } of cases) {
+      render(
+        <ProjectSwitcher
+          projects={[{ ...projects[0], id, name }]}
+          value={id}
+          onValueChange={vi.fn()}
+          variant="sidebar-collapsed"
+        />,
+      );
+      const trigger = screen.getByRole("button", {
+        name: `切换项目：${name}`,
+      });
+      expect(trigger.textContent).toBe(initial);
+    }
+  });
 });

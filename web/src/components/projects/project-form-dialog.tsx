@@ -504,7 +504,7 @@ export function ProjectFormDialog({
         const res = await createProject.mutateAsync(payload);
         toast.success("项目创建成功");
         onOpenChange(false);
-        navigate(`/issues?project=${res.data.id}`);
+        navigate(`/projects/${res.data.id}/issues`);
       }
     } catch (err) {
       // 服务端 40001 的具体原因（主机未匹配集成、端口无效、多余路径段等）

@@ -324,7 +324,7 @@ export default function LogsPage() {
                     <CardContent className="p-4">
                       <div className="flex flex-wrap items-start gap-3">
                         <Link
-                          to={`/logs/${run.run_id}?project=${activeProjectId}`}
+                          to={`/projects/${activeProjectId}/logs/${run.run_id}`}
                           className="group min-w-0 flex-1 space-y-1"
                         >
                           <p className="whitespace-pre-wrap text-sm font-medium group-hover:text-primary">
