@@ -450,7 +450,7 @@ func TestDashboardListRecentReleases(t *testing.T) {
 }
 
 // ListRecentReleases 混合时区排序回归：字典序会把带偏移的历史行排错
-//（"2026-05-21T02:00:00+08:00" > "2026-05-20T20:00:00Z"，但真实时间前者更早），
+// （"2026-05-21T02:00:00+08:00" > "2026-05-20T20:00:00Z"，但真实时间前者更早），
 // 必须在 Go 侧解析后按真实时间倒序；解析失败的行垫底不丢弃。
 func TestDashboardListRecentReleasesMixedTimezones(t *testing.T) {
 	db := newDashboardTestDB(t)

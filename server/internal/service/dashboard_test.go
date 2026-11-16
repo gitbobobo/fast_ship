@@ -971,7 +971,7 @@ func TestDashboardAiQuotaBlock(t *testing.T) {
 // AI 面板 t3 子块与 t3_waiting 组共用同一 WaitingThreads 结果：每环境
 // running/waiting/queued/readable 透传、complete 仅降级返回 false（成功时
 // 不返回，契约与 reviews/bots/quota 同形）；err 时子块降级；无环境
-//（result=nil）时子块缺席。
+// （result=nil）时子块缺席。
 func TestDashboardAiT3Block(t *testing.T) {
 	db := newDashboardServiceTestDB(t)
 	userID := dashboardSeedUser(t, db)
