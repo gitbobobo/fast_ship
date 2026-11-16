@@ -21,8 +21,8 @@ describe("AiPanelCard", () => {
                 {
                   environment_id: "env-2",
                   environment_name: "离线机",
-                  running: 0,
-                  waiting: 0,
+                  running: 1,
+                  waiting: 3,
                   queued: 0,
                   readable: true,
                 },
@@ -54,7 +54,9 @@ describe("AiPanelCard", () => {
     );
 
     expect(screen.getByTestId("ai-panel-card")).toBeInTheDocument();
-    expect(screen.getByText("运行 2 · 等待 1 · 排队 1")).toBeInTheDocument();
+    // K>0 括号注记包含关系；K=0 维持「运行 N · 等待 M」（panel P13）
+    expect(screen.getByText("运行 2（含排队 1）· 等待 1")).toBeInTheDocument();
+    expect(screen.getByText("运行 1 · 等待 3")).toBeInTheDocument();
     // 通过率 = 3/(3+1) = 75%
     expect(screen.getByText("通过率 75%")).toBeInTheDocument();
     expect(screen.getByText("Tokens · 请求（1 个机器人）")).toBeInTheDocument();
@@ -98,8 +100,8 @@ describe("AiPanelCard", () => {
       </MemoryRouter>,
     );
 
-    // 健康行仍在，不可读行标「本轮不可读」，区块头带琥珀色降级徽章
-    expect(screen.getByText("运行 2 · 等待 1 · 排队 1")).toBeInTheDocument();
+    // 健康行仍在（含排队括号注记），不可读行标「本轮不可读」，区块头带琥珀色降级徽章
+    expect(screen.getByText("运行 2（含排队 1）· 等待 1")).toBeInTheDocument();
     expect(screen.getByText("本轮不可读")).toBeInTheDocument();
     expect(screen.getByText("部分环境暂不可用")).toBeInTheDocument();
     expect(screen.queryByText("暂不可用")).not.toBeInTheDocument();

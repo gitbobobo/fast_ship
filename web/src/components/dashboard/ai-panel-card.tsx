@@ -86,13 +86,11 @@ function AiT3Section({ t3 }: { t3: NonNullable<AiBlock["t3"]> }) {
               <span className="min-w-0 truncate">{env.environment_name}</span>
               <span className="shrink-0 tabular-nums text-muted-foreground">
                 {env.readable
-                  ? [
-                      `运行 ${env.running}`,
-                      `等待 ${env.waiting}`,
-                      env.queued > 0 ? `排队 ${env.queued}` : null,
-                    ]
-                      .filter(Boolean)
-                      .join(" · ")
+                  ? // 排队是 running 的先导阶段（已含在 running 内），并排
+                    // 「排队 K」会被读成并集；括号注记表达包含关系（panel P13）。
+                    env.queued > 0
+                      ? `运行 ${env.running}（含排队 ${env.queued}）· 等待 ${env.waiting}`
+                      : `运行 ${env.running} · 等待 ${env.waiting}`
                   : "本轮不可读"}
               </span>
             </li>
