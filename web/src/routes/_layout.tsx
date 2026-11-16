@@ -2,11 +2,15 @@ import { useEffect, useState } from "react";
 import { Navigate, Outlet, useLocation } from "react-router";
 import { Sidebar } from "@/components/layout/sidebar";
 import { authApi } from "@/lib/api/auth";
+import { useSyncRouteProjectPreference } from "@/lib/current-project";
 import { usePersistedScroll } from "@/lib/hooks/use-persisted-scroll";
 import { getLocationScrollKey } from "@/lib/scroll-positions";
 import { useAuthStore } from "@/lib/store/auth-store";
 
 export default function AppLayout() {
+  // 路径项目写入最近选择：深链进入 /projects/B/* 后，侧栏旧路径入口的重定向
+  // 兜底也落在 B，而不是上次选过的项目（审查 R1：跨 section 导航不静默换项目）
+  useSyncRouteProjectPreference();
   const location = useLocation();
   const { token, user, setUser, logout } = useAuthStore();
   const shouldBootstrapUser = Boolean(token && !user);

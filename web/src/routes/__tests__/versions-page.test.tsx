@@ -78,8 +78,8 @@ describe("VersionsPage", () => {
 
   it("uses the first project as the active selection without flashing the empty-project state", () => {
     renderWithRoute(<VersionsPage />, {
-      path: "/versions",
-      initialEntry: "/versions",
+      path: "/projects/:id/versions",
+      initialEntry: "/projects/proj-1/versions",
     });
 
     expect(useVersions).toHaveBeenCalledWith("proj-1");
@@ -95,8 +95,8 @@ describe("VersionsPage", () => {
     const user = userEvent.setup();
 
     renderWithRoute(<VersionsPage />, {
-      path: "/versions",
-      initialEntry: "/versions",
+      path: "/projects/:id/versions",
+      initialEntry: "/projects/proj-1/versions",
     });
 
     await user.click(screen.getByRole("button", { name: /创建版本/i }));
@@ -126,8 +126,8 @@ describe("VersionsPage", () => {
     } as unknown as ReturnType<typeof useVersions>);
 
     renderWithRoute(<VersionsPage />, {
-      path: "/versions",
-      initialEntry: "/versions",
+      path: "/projects/:id/versions",
+      initialEntry: "/projects/proj-1/versions",
     });
 
     expect(screen.getAllByText("暂无项目")).toHaveLength(2);

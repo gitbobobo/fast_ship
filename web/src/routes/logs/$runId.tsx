@@ -87,7 +87,10 @@ function formatTime(value: string | null): string {
 }
 
 export default function LogRunDetailPage() {
-  const { runId = "" } = useParams<{ runId: string }>();
+  const { runId = "", id: routeProjectId } = useParams<{
+    runId: string;
+    id: string;
+  }>();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const { lastSelectedProjectId, setLastSelectedProjectId } =
@@ -95,7 +98,8 @@ export default function LogRunDetailPage() {
   const { data: projectsData } = useProjects();
   const projects = useMemo(() => projectsData?.items ?? [], [projectsData]);
 
-  const urlProjectId = searchParams.get("project");
+  // 新路径 /projects/:id/logs/:runId 由路径提供项目；过渡期旧链接仍读 ?project=
+  const urlProjectId = routeProjectId || searchParams.get("project");
   const projectId = urlProjectId ?? lastSelectedProjectId ?? "";
 
   useEffect(() => {
@@ -178,9 +182,8 @@ export default function LogRunDetailPage() {
   };
 
   const handleResetFilters = () => {
-    const next = new URLSearchParams();
-    if (projectId) next.set("project", projectId);
-    setSearchParams(next, { replace: true });
+    // 项目已在路径里，重置筛选只清页面内 query，不再回写 project
+    setSearchParams(new URLSearchParams(), { replace: true });
   };
 
   const canResetFilters =

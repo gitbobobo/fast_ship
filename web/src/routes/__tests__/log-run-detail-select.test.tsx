@@ -63,9 +63,9 @@ async function renderRunDetail(search = "") {
   });
   return render(
     <QueryClientProvider client={client}>
-      <MemoryRouter initialEntries={[`/logs/run-1${search}`]}>
+      <MemoryRouter initialEntries={[`/projects/proj-1/logs/run-1${search}`]}>
         <Routes>
-          <Route path="/logs/:runId" element={<LogRunDetailPage />} />
+          <Route path="/projects/:id/logs/:runId" element={<LogRunDetailPage />} />
         </Routes>
       </MemoryRouter>
     </QueryClientProvider>,

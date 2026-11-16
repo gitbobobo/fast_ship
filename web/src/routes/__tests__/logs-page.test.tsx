@@ -66,9 +66,9 @@ function renderLogs() {
   });
   return render(
     <QueryClientProvider client={client}>
-      <MemoryRouter initialEntries={["/logs?project=proj-1"]}>
+      <MemoryRouter initialEntries={["/projects/proj-1/logs"]}>
         <Routes>
-          <Route path="/logs" element={<LogsPage />} />
+          <Route path="/projects/:id/logs" element={<LogsPage />} />
           <Route
             path="/logs/:runId"
             element={<div data-testid="log-detail">detail</div>}

@@ -1,5 +1,5 @@
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
-import { useSearchParams } from "react-router";
+import { useLocation, useNavigate, useSearchParams } from "react-router";
 import { Images, Search, Upload } from "lucide-react";
 import { toast } from "sonner";
 import { Header } from "@/components/layout/header";
@@ -35,6 +35,8 @@ import { useScreenshotScreens } from "@/lib/hooks/use-screenshots";
 import { useScreenshotAnnotations } from "@/lib/hooks/use-screenshot-annotations";
 import { getActiveProjectId } from "@/lib/projects";
 import { useProjectPreferenceStore } from "@/lib/store/project-preference-store";
+import { useRouteProject } from "@/lib/current-project";
+import { projectSwitchPath } from "@/lib/project-nav";
 
 export default function ScreenshotsPage() {
   const { data: projectsData, isLoading: projectsLoading } = useProjects();
@@ -43,7 +45,11 @@ export default function ScreenshotsPage() {
     [projectsData?.items],
   );
   const [searchParams, setSearchParams] = useSearchParams();
-  const urlProjectId = searchParams.get("project");
+  const navigate = useNavigate();
+  const { pathname } = useLocation();
+  // 新路径 /projects/:id/screenshots 由路径提供项目；过渡期旧链接仍读 ?project=
+  const { projectId: routeProjectId } = useRouteProject();
+  const urlProjectId = routeProjectId || searchParams.get("project");
   const urlAnnotationId = searchParams.get("annotation");
   const { lastSelectedProjectId, setLastSelectedProjectId } =
     useProjectPreferenceStore();
@@ -51,8 +57,9 @@ export default function ScreenshotsPage() {
     () => urlProjectId ?? lastSelectedProjectId ?? "",
   );
   const activeProjectId = useMemo(
-    () => getActiveProjectId(projects, selectedProjectId, urlProjectId),
-    [projects, selectedProjectId, urlProjectId],
+    () =>
+      routeProjectId || getActiveProjectId(projects, selectedProjectId, urlProjectId),
+    [routeProjectId, projects, selectedProjectId, urlProjectId],
   );
 
   // 当 activeProjectId 回退到第一个项目时（如存储的项目被删除），同步 state 和 store
@@ -317,7 +324,14 @@ export default function ScreenshotsPage() {
             <ProjectSwitcher
               value={activeProjectId}
               onValueChange={(nextValue) => {
-                setSelectedProjectId(nextValue);
+                // 新路径以 URL 为唯一事实源：切换项目即导航，state 由回填 effect 对齐；
+                // 旧路径维持 state 行为
+                const to = projectSwitchPath(pathname, nextValue);
+                if (to) {
+                  navigate(to);
+                } else {
+                  setSelectedProjectId(nextValue);
+                }
                 setLastSelectedProjectId(nextValue || null);
               }}
               projects={projects}
