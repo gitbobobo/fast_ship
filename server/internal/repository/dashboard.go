@@ -403,7 +403,9 @@ type DashboardWorkflowBuckets struct {
 // 一致（state=open AND (m.workflow_status IS NULL OR m.workflow_status !=
 // 'done')），恒等式 todo+in_progress == Σopen_issue_count。刻意独立成查询而
 // 不塞进 GetOpenIssueCounts：概览那两个查询失败即 500，新指标必须能单独降级
-// （complete=false）。
+// （complete=false）。issues 用内连接：谓词含 i.state（非空条件），LEFT JOIN
+// 本就会被 WHERE 降级成内连接，写 JOIN 如实表达也利于查询规划；meta 保持
+// LEFT——缺失即 todo 桶，不能丢行。
 func (r *DashboardRepository) GetWorkflowBuckets(userID string) (DashboardWorkflowBuckets, error) {
 	var buckets DashboardWorkflowBuckets
 	err := r.db.
@@ -412,7 +414,7 @@ func (r *DashboardRepository) GetWorkflowBuckets(userID string) (DashboardWorkfl
 			COALESCE(SUM(CASE WHEN m.workflow_status IS NULL OR m.workflow_status IN (?, ?) THEN 1 ELSE 0 END), 0) AS todo_count,
 			COALESCE(SUM(CASE WHEN m.workflow_status IS NOT NULL AND m.workflow_status NOT IN (?, ?) THEN 1 ELSE 0 END), 0) AS in_progress_count
 		`, "", model.IssueWorkflowStatusTodo, "", model.IssueWorkflowStatusTodo).
-		Joins("LEFT JOIN issues i ON i.project_id = p.id").
+		Joins("JOIN issues i ON i.project_id = p.id").
 		Joins("LEFT JOIN issue_internal_meta m ON m.issue_id = i.id").
 		Where("p.user_id = ?", userID).
 		// 搁置中的项目不进概览（INT-165），与 GetOpenIssueCounts 同排除。
@@ -492,7 +494,8 @@ type DashboardBacklogAge struct {
 // GetBacklogAge 范围与待办分桶同口径（state=open 且 workflow 未 done、排除
 // 搁置项目），恒等式三档之和 == todo+in_progress == Σopen_issue_count。分档
 // 边界由服务层 Go 算好 time 参数传入：时间是文本存储，比较走字符串序，
-// 不用 julianday。
+// 不用 julianday。issues 用内连接的理由与 GetWorkflowBuckets 同（谓词含
+// i.state，LEFT JOIN 已被 WHERE 降级）；meta 保持 LEFT 缺行不影响。
 func (r *DashboardRepository) GetBacklogAge(userID string, under7, under30 time.Time) (DashboardBacklogAge, error) {
 	var age DashboardBacklogAge
 	err := r.db.
@@ -502,7 +505,7 @@ func (r *DashboardRepository) GetBacklogAge(userID string, under7, under30 time.
 			COALESCE(SUM(CASE WHEN i.created_at >= ? AND i.created_at < ? THEN 1 ELSE 0 END), 0) AS d7_to_30d,
 			COALESCE(SUM(CASE WHEN i.created_at < ? THEN 1 ELSE 0 END), 0) AS over_30d
 		`, under7, under30, under7, under30).
-		Joins("LEFT JOIN issues i ON i.project_id = p.id").
+		Joins("JOIN issues i ON i.project_id = p.id").
 		Joins("LEFT JOIN issue_internal_meta m ON m.issue_id = i.id").
 		Where("p.user_id = ?", userID).
 		Where(projectNotShelvedSQL("p"), time.Now().UTC()).
