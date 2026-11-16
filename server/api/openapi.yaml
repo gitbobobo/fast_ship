@@ -12563,7 +12563,7 @@ components:
       description: PR 级审查结论分布（近 30 天，排除搁置项目；按 review_pull_requests 当前轮次+当前 head 分组）：code_status=success→passed、failure→blocked、error→errored，pending 或仍有在途 run→in_flight
     DashboardAiBots:
       type: object
-      required: [bot_count, timezone, cost, total_requests, total_tokens, next_schedule]
+      required: [bot_count, timezone, cost, total_requests, total_tokens]
       properties:
         complete:
           type: boolean
@@ -12588,6 +12588,7 @@ components:
           description: prompt+completion+reasoning（NULL 记 0）
         next_schedule:
           $ref: '#/components/schemas/DashboardAiBotNextSchedule'
+          description: 最近一次将触发的已启用定时任务；没有时省略
       description: 机器人近 7 天用量（按用户时区聚合，与机器人页用量口径同源）；next_schedule 为 null 表示没有开启且排了下一次触发的任务
     DashboardAiBotNextSchedule:
       type: object

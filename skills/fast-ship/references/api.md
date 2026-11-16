@@ -5307,7 +5307,7 @@ title/body/parent_id 至少传一个
 | `ai.bots.cost` | number（double，可空） | 是 | 近 7 天显示成本合计（USD）；无金额请求为 null（缺失 ≠ 0，前端显示「未计价」） |
 | `ai.bots.total_requests` | integer（int64） | 是 |  |
 | `ai.bots.total_tokens` | integer（int64） | 是 | prompt+completion+reasoning（NULL 记 0） |
-| `ai.bots.next_schedule` | object | 是 |  |
+| `ai.bots.next_schedule` | object | 否 | 最近一次将触发的已启用定时任务；没有时省略 |
 | `ai.bots.next_schedule.bot_id` | string | 是 |  |
 | `ai.bots.next_schedule.bot_name` | string | 是 |  |
 | `ai.bots.next_schedule.task_name` | string | 是 |  |

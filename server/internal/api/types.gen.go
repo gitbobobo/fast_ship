@@ -3148,8 +3148,8 @@ type DashboardAiBots struct {
 	Complete *bool `json:"complete,omitempty"`
 
 	// Cost 近 7 天显示成本合计（USD）；无金额请求为 null（缺失 ≠ 0，前端显示「未计价」）
-	Cost         *float64                   `json:"cost"`
-	NextSchedule DashboardAiBotNextSchedule `json:"next_schedule"`
+	Cost         *float64                    `json:"cost"`
+	NextSchedule *DashboardAiBotNextSchedule `json:"next_schedule,omitempty"`
 
 	// Timezone 用量统计的生效时区（IANA 名称）
 	Timezone      string `json:"timezone"`

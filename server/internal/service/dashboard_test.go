@@ -35,6 +35,26 @@ func (f *fakeUnreadCounter) UnreadCount(context.Context, string) (int64, error) 
 	return f.count, f.err
 }
 
+// fakeQuotaLister 额度快照假实现。
+type fakeQuotaLister struct {
+	accounts []api.QuotaAccount
+	err      error
+}
+
+func (f *fakeQuotaLister) List(string) ([]api.QuotaAccount, error) {
+	return f.accounts, f.err
+}
+
+// fakeBotUsageSource 机器人用量假实现。
+type fakeBotUsageSource struct {
+	overview *api.BotUsageOverview
+	err      error
+}
+
+func (f *fakeBotUsageSource) GetBotUsageOverview(string, string, string) (*api.BotUsageOverview, error) {
+	return f.overview, f.err
+}
+
 func newDashboardServiceTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	dsn := "file:" + uuid.NewString() + "?mode=memory&cache=shared"
@@ -56,7 +76,21 @@ func newDashboardServiceTestDB(t *testing.T) *gorm.DB {
 
 func newDashboardService(t *testing.T, db *gorm.DB, unread dashboardUnreadCounter, t3 dashboardT3WaitingSource) *DashboardService {
 	t.Helper()
-	return NewDashboardService(repository.NewDashboardRepository(db), unread, t3)
+	// 默认不带 quota/bots 窄接口：AI 面板子块缺席，既有用例不受影响。
+	return NewDashboardService(repository.NewDashboardRepository(db), unread, t3, nil, nil)
+}
+
+// newDashboardServiceWithAI 注入 quota/bots 假实现，供 AI 面板用例使用。
+func newDashboardServiceWithAI(
+	t *testing.T,
+	db *gorm.DB,
+	unread dashboardUnreadCounter,
+	t3 dashboardT3WaitingSource,
+	quota dashboardQuotaLister,
+	bots dashboardBotUsageSource,
+) *DashboardService {
+	t.Helper()
+	return NewDashboardService(repository.NewDashboardRepository(db), unread, t3, quota, bots)
 }
 
 func dashboardSeedUser(t *testing.T, db *gorm.DB) string {
@@ -818,5 +852,111 @@ func TestDashboardAiReviewsDegradedOnError(t *testing.T) {
 	}
 	if resp.Ai.Complete == nil || *resp.Ai.Complete {
 		t.Fatal("ai top-level complete must be false when all sub-blocks are incomplete")
+	}
+}
+
+// buildAiBots：复用 GetBotUsageOverview 窄接口（7d/时区/请求/token 合计），
+// next_schedule 走 DashboardRepository 查询；bot_count=0 合法（未配置机器人）。
+func TestDashboardAiBotsBlock(t *testing.T) {
+	db := newDashboardServiceTestDB(t)
+	userID := dashboardSeedUser(t, db)
+	now := time.Now().UTC()
+
+	botID := uuid.NewString()
+	if err := db.Create(&model.Bot{ID: botID, UserID: userID, Name: "值夜机器人", PersonaPrompt: "p", Model: "m", ProviderID: "pv", CreatedAt: now, UpdatedAt: now}).Error; err != nil {
+		t.Fatal(err)
+	}
+	next := now.Add(2 * time.Hour)
+	if err := db.Create(&model.BotScheduleTask{
+		ID: uuid.NewString(), BotID: botID, Name: "晚报", CronExpression: "* * * * *",
+		Enabled: true, NextRunAt: &next, CreatedAt: now, UpdatedAt: now,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	cost := 1.5
+	svc := newDashboardServiceWithAI(t, db, &fakeUnreadCounter{count: 0}, &fakeT3WaitingSource{result: nil},
+		nil,
+		&fakeBotUsageSource{overview: &api.BotUsageOverview{
+			Timezone: "Asia/Shanghai",
+			Totals: api.BotUsageTotals{
+				Cost:          &cost,
+				TotalRequests: 12,
+				TotalTokens:   3456,
+			},
+			Bots: []api.BotUsageBot{{BotId: botID, Name: "值夜机器人"}},
+		}})
+	resp, err := svc.GetOverview(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("GetOverview: %v", err)
+	}
+	bots := resp.Ai.Bots
+	if bots == nil || bots.Complete != nil {
+		t.Fatalf("bots must be present and complete: %+v", bots)
+	}
+	if bots.BotCount != 1 || bots.Timezone != "Asia/Shanghai" || bots.TotalRequests != 12 || bots.TotalTokens != 3456 {
+		t.Fatalf("bots block: %+v", bots)
+	}
+	if bots.Cost == nil || *bots.Cost != 1.5 {
+		t.Fatalf("cost must pass through: %+v", bots.Cost)
+	}
+	if bots.NextSchedule == nil || bots.NextSchedule.TaskName != "晚报" || bots.NextSchedule.BotName != "值夜机器人" {
+		t.Fatalf("next_schedule: %+v", bots.NextSchedule)
+	}
+	if _, err := time.Parse(time.RFC3339, bots.NextSchedule.NextRunAt); err != nil {
+		t.Fatalf("next_run_at must parse: %v", err)
+	}
+}
+
+// 用量服务错误（含 ErrInvalidParams/ErrBotNotFound 同型错误）→ 吞掉降级；
+// next_schedule 查询失败也只降级本子块。
+func TestDashboardAiBotsDegradedOnError(t *testing.T) {
+	db := newDashboardServiceTestDB(t)
+	userID := dashboardSeedUser(t, db)
+
+	svc := newDashboardServiceWithAI(t, db, &fakeUnreadCounter{count: 0}, &fakeT3WaitingSource{result: nil},
+		nil, &fakeBotUsageSource{err: errors.New("boom")})
+	resp, err := svc.GetOverview(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("GetOverview must not fail: %v", err)
+	}
+	if resp.Ai.Bots == nil || resp.Ai.Bots.Complete == nil || *resp.Ai.Bots.Complete {
+		t.Fatalf("bots must degrade: %+v", resp.Ai.Bots)
+	}
+	// reviews 在空库查询成功（空桶不算不可用），顶层 complete 不出现；
+	// 「全部在场子块都不可用」路径由 TestDashboardAiReviewsDegradedOnError 覆盖。
+	if resp.Ai.Complete != nil {
+		t.Fatalf("ai top-level complete must be omitted when any sub-block works: %+v", resp.Ai.Complete)
+	}
+}
+
+// buildAiQuota：快照透传（前端算剩余百分比）；服务错误吞掉降级；窄接口
+// nil 时子块整体缺席。
+func TestDashboardAiQuotaBlock(t *testing.T) {
+	db := newDashboardServiceTestDB(t)
+	userID := dashboardSeedUser(t, db)
+
+	accounts := []api.QuotaAccount{{Id: "acc-1", Label: "主账号", Provider: "claude", Status: "ok"}}
+	svc := newDashboardServiceWithAI(t, db, &fakeUnreadCounter{count: 0}, &fakeT3WaitingSource{result: nil},
+		&fakeQuotaLister{accounts: accounts}, nil)
+	resp, err := svc.GetOverview(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("GetOverview: %v", err)
+	}
+	if resp.Ai.Quota == nil || resp.Ai.Quota.Complete != nil || len(resp.Ai.Quota.Accounts) != 1 {
+		t.Fatalf("quota block: %+v", resp.Ai.Quota)
+	}
+	if resp.Ai.Bots != nil {
+		t.Fatal("bots sub-block must be absent when narrow interface is nil")
+	}
+
+	failSvc := newDashboardServiceWithAI(t, db, &fakeUnreadCounter{count: 0}, &fakeT3WaitingSource{result: nil},
+		&fakeQuotaLister{err: errors.New("boom")}, nil)
+	resp, err = failSvc.GetOverview(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("GetOverview must not fail: %v", err)
+	}
+	if resp.Ai.Quota == nil || resp.Ai.Quota.Complete == nil || *resp.Ai.Quota.Complete || resp.Ai.Quota.Accounts == nil {
+		t.Fatalf("quota must degrade with structure: %+v", resp.Ai.Quota)
 	}
 }

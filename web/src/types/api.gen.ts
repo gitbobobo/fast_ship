@@ -5399,7 +5399,8 @@ export interface components {
              * @description prompt+completion+reasoning（NULL 记 0）
              */
             total_tokens: number;
-            next_schedule: components["schemas"]["DashboardAiBotNextSchedule"];
+            /** @description 最近一次将触发的已启用定时任务；没有时省略 */
+            next_schedule?: components["schemas"]["DashboardAiBotNextSchedule"];
         };
         DashboardAiBotNextSchedule: {
             bot_id: string;

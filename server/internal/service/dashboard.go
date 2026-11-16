@@ -35,18 +35,35 @@ type dashboardUnreadCounter interface {
 	UnreadCount(ctx context.Context, userID string) (int64, error)
 }
 
+// dashboardQuotaLister 额度账号快照的窄接口（QuotaService.List 实现）：只读
+// 本地快照不访问网络。nil 时 quota 子块整体缺席（阶段一 s.unread != nil 模式）。
+type dashboardQuotaLister interface {
+	List(userID string) ([]api.QuotaAccount, error)
+}
+
+// dashboardBotUsageSource 机器人用量总览的窄接口（BotService 实现）：复用
+// GetBotUsageOverview 的今天/脏日回退实时扫描，绝不直读 bot_usage_daily。
+// nil 时 bots 子块整体缺席。
+type dashboardBotUsageSource interface {
+	GetBotUsageOverview(userID, rangeParam, botID string) (*api.BotUsageOverview, error)
+}
+
 type DashboardService struct {
 	dashboardRepo *repository.DashboardRepository
 	unread        dashboardUnreadCounter
 	t3Waiting     dashboardT3WaitingSource
+	quota         dashboardQuotaLister
+	bots          dashboardBotUsageSource
 }
 
 func NewDashboardService(
 	dashboardRepo *repository.DashboardRepository,
 	unread dashboardUnreadCounter,
 	t3Waiting dashboardT3WaitingSource,
+	quota dashboardQuotaLister,
+	bots dashboardBotUsageSource,
 ) *DashboardService {
-	return &DashboardService{dashboardRepo: dashboardRepo, unread: unread, t3Waiting: t3Waiting}
+	return &DashboardService{dashboardRepo: dashboardRepo, unread: unread, t3Waiting: t3Waiting, quota: quota, bots: bots}
 }
 
 // dashboardActionRef 一条聚合条目的路由参数集合（按组取用其中字段）。
@@ -156,12 +173,43 @@ func (s *DashboardService) GetOverview(ctx context.Context, userID string) (*Das
 func (s *DashboardService) buildAi(ctx context.Context, userID string) *api.DashboardAi {
 	ai := &api.DashboardAi{
 		Reviews: s.buildAiReviews(userID, time.Now().UTC()),
+		Bots:    s.buildAiBots(userID),
+		Quota:   s.buildAiQuota(userID),
 	}
-	// 顶层 complete 仅在全部子块都不可用时返回 false；有任一子块可用即省略。
-	if ai.Reviews.Complete != nil && !*ai.Reviews.Complete {
+	// 顶层 complete 仅在全部在场子块都不可用时返回 false（子块缺席不算不可用）；
+	// 有任一子块可用即省略。
+	incomplete := func(complete *bool) bool { return complete != nil && !*complete }
+	present, failed := 0, 0
+	check := func(complete *bool, exists bool) {
+		if !exists {
+			return
+		}
+		present++
+		if incomplete(complete) {
+			failed++
+		}
+	}
+	check(ai.Reviews.Complete, ai.Reviews != nil)
+	check(aiBotsComplete(ai.Bots), ai.Bots != nil)
+	check(aiQuotaComplete(ai.Quota), ai.Quota != nil)
+	if present > 0 && failed == present {
 		ai.Complete = api.Ptr(false)
 	}
 	return ai
+}
+
+func aiBotsComplete(b *api.DashboardAiBots) *bool {
+	if b == nil {
+		return nil
+	}
+	return b.Complete
+}
+
+func aiQuotaComplete(q *api.DashboardAiQuota) *bool {
+	if q == nil {
+		return nil
+	}
+	return q.Complete
 }
 
 // buildAiReviews 审查四分桶：按 PR 归一（code_status success→passed /
@@ -198,6 +246,57 @@ func (s *DashboardService) buildAiReviews(userID string, now time.Time) *api.Das
 		reviews.PassRate = api.Ptr(float64(reviews.Passed) / float64(reviews.Passed+reviews.Blocked))
 	}
 	return reviews
+}
+
+// buildAiBots 机器人近 7 天用量（按用户时区，与机器人页同源）：经
+// GetBotUsageOverview 窄接口取数（今天/脏日回退实时扫描），绝不直读
+// bot_usage_daily。服务错误（含 ErrInvalidParams/ErrBotNotFound）一律吞掉降级。
+// next_schedule 单独查询，失败也只降级本子块。
+func (s *DashboardService) buildAiBots(userID string) *api.DashboardAiBots {
+	if s.bots == nil {
+		return nil
+	}
+	overview, err := s.bots.GetBotUsageOverview(userID, "7d", "")
+	if err != nil {
+		return &api.DashboardAiBots{Complete: api.Ptr(false)}
+	}
+	bots := &api.DashboardAiBots{
+		BotCount:      len(overview.Bots),
+		Timezone:      overview.Timezone,
+		Cost:          overview.Totals.Cost,
+		TotalRequests: overview.Totals.TotalRequests,
+		TotalTokens:   overview.Totals.TotalTokens,
+	}
+	task, err := s.dashboardRepo.GetNextScheduleTask(userID)
+	if err != nil {
+		bots.Complete = api.Ptr(false)
+		return bots
+	}
+	if task != nil {
+		bots.NextSchedule = &api.DashboardAiBotNextSchedule{
+			BotId:     task.BotID,
+			BotName:   task.BotName,
+			TaskName:  task.TaskName,
+			NextRunAt: task.NextRunAt.UTC().Format(time.RFC3339Nano),
+		}
+	}
+	return bots
+}
+
+// buildAiQuota 额度账号只读快照（QuotaService.List 不访问网络）：剩余百分比
+// 不在后端算，前端用 lib/quota.ts accountRemaining 推导。服务错误吞掉降级。
+func (s *DashboardService) buildAiQuota(userID string) *api.DashboardAiQuota {
+	if s.quota == nil {
+		return nil
+	}
+	accounts, err := s.quota.List(userID)
+	if err != nil {
+		return &api.DashboardAiQuota{Complete: api.Ptr(false), Accounts: []api.QuotaAccount{}}
+	}
+	if accounts == nil {
+		accounts = []api.QuotaAccount{}
+	}
+	return &api.DashboardAiQuota{Accounts: accounts}
 }
 
 // buildFlow 流转效率聚合：待办分桶、internal 新建趋势、周期中位数与积压
