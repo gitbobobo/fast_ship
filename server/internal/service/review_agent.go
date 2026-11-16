@@ -158,26 +158,22 @@ func (s *ReviewService) AgentHistory(ctx context.Context, runID string) (string,
 	return s.codeHistory(ctx, run)
 }
 
-// codeHistory 代码审查历史：上一轮各组合 findings + 上轮之后的新讨论；
-// 首次审查（无上一轮）给全部讨论（≤50 条）。
+// codeHistory 代码审查历史：上一轮各组合 findings + 跨全部轮次去重的
+// open / rejected 遗留 + 全部人工讨论（最近 50 条）。讨论不再按上一轮结束
+// 时间截断（INT-234）：实现者「先推送再回复」时回复落在上一轮运行期间，
+// 旧的「FinishedAt 之后」时间窗口让回复哪一轮都读不到。
 func (s *ReviewService) codeHistory(ctx context.Context, run *model.ReviewRun) (string, error) {
+	client, err := s.reviewClient(ctx, run.IntegrationID, run.RepoFullName)
+	if err != nil {
+		return "", err
+	}
 	prevRuns, err := s.runsAtRound(ctx, run, run.RoundNumber-1, model.ReviewKindCode)
 	if err != nil {
 		return "", err
 	}
 	var b strings.Builder
 	if len(prevRuns) > 0 {
-		var lastFinished time.Time
-		for _, r := range prevRuns {
-			if r.FinishedAt != nil && r.FinishedAt.After(lastFinished) {
-				lastFinished = *r.FinishedAt
-			}
-		}
 		fmt.Fprintf(&b, "## 上一轮（轮次 %d，head %s）\n", run.RoundNumber-1, reviewShortSHA(prevRuns[0].HeadSHA))
-		// 跨组合去重（审查 R5）：多组合项目里同一未解决条目常被多个组合各
-		// 自标 open，逐条渲染会让下一轮历史重复 N 次、诱发重复 prior；首个
-		// 报告它的组合渲染，其余跳过。
-		seenPrior := map[string]bool{}
 		for _, r := range prevRuns {
 			// 历史上下文是纯文本：选项拼在标题行，不用 <sub>（那是渲染层的小字）。
 			label := runCombinationLabel(&r)
@@ -189,99 +185,265 @@ func (s *ReviewService) codeHistory(ctx context.Context, run *model.ReviewRun) (
 				var result api.ReviewCodeResult
 				if json.Unmarshal([]byte(r.ResultJSON), &result) == nil {
 					for _, f := range result.Findings {
-						loc := f.File
+						loc := singleLine(f.File)
 						if f.Line != nil && *f.Line > 0 {
-							loc = fmt.Sprintf("%s:%d", f.File, *f.Line)
+							loc = fmt.Sprintf("%s:%d", loc, *f.Line)
 						}
-						fmt.Fprintf(&b, "- %s %s %s\n", f.Level, loc, f.Body)
-					}
-					// 增量提示词要求核对仍为 open 的条目并逐条给 prior 处置，
-					// 但这些条目只存在于 prior 里：不补这段，模型把它们标成
-					// open 后会在下一轮历史里消失，复核断链（对齐 visualHistory
-					// 的 openPrior 补偿，INT-204 审查 R1）。
-					for _, p := range openPriorDecisions(result.Prior) {
-						key := codePriorDedupeKey(p)
-						if seenPrior[key] {
-							continue
-						}
-						seenPrior[key] = true
-						fmt.Fprintf(&b, "- 仍未解决 · %s %s %s\n", priorLevelText(p.Level), priorLoc(p), p.Body)
+						fmt.Fprintf(&b, "- %s %s %s\n", f.Level, loc, singleLine(f.Body))
 					}
 				}
 			} else {
 				fmt.Fprintf(&b, "- （本组合未完成：%s）\n", r.Status)
 			}
 		}
-		b.WriteString("\n## 上一轮结论之后的新讨论\n")
-		if err := s.appendNewDiscussion(ctx, run, &b, lastFinished, prevRuns == nil); err != nil {
-			return "", err
-		}
-		return strings.TrimRight(b.String(), "\n"), nil
+		b.WriteString("\n")
 	}
-
-	// 首次审查：全部讨论（≤50 条）。
-	b.WriteString("## 全部讨论\n")
-	if err := s.appendNewDiscussion(ctx, run, &b, time.Time{}, true); err != nil {
+	// 跨轮遗留与人工讨论：代码/视觉共用同一收尾编排（INT-234）。
+	if err := s.appendSharedHistoryTail(ctx, run, model.ReviewKindCode, client, &b); err != nil {
 		return "", err
 	}
 	return strings.TrimRight(b.String(), "\n"), nil
 }
 
-// appendNewDiscussion 把 after 之后的行内评论与会话评论按时间正序写进 b。
-// 本系统自己发的结论（机器人标记/自身 review）过滤掉。limit 最近 50 条。
-func (s *ReviewService) appendNewDiscussion(ctx context.Context, run *model.ReviewRun, b *strings.Builder, after time.Time, all bool) error {
-	client, err := s.reviewClient(ctx, run.IntegrationID, run.RepoFullName)
+// appendSharedHistoryTail 代码/视觉历史共用的收尾编排：跨轮遗留两节 +
+// 人工讨论节（含 PR 作者标注）。两条路径共用同一段编排，防止再次分叉
+// （本次修复的主题就是消除这种分叉）。
+func (s *ReviewService) appendSharedHistoryTail(ctx context.Context, run *model.ReviewRun, kind model.ReviewKind, client forge.ReviewClient, b *strings.Builder) error {
+	open, rejected, err := s.crossRoundPriors(ctx, run, kind)
 	if err != nil {
 		return err
 	}
+	writeCrossRoundPriors(b, open, rejected)
+	b.WriteString("## 人工讨论（最近 50 条，按时间正序）\n")
+	return s.appendNewDiscussion(ctx, run, client, b, s.reviewPRAuthorLogin(ctx, run, client))
+}
+
+// crossRoundPriors 扫描本 (项目, 集成, PR, kind) 全部早于本轮轮次、已完成的
+// 运行结论，跨轮收集 prior 里仍未解决（open）与已驳回（rejected）的条目。
+// 去重键与 codePriorDedupeKey 同构（级别+定位+正文）；同键多次出现时取
+// **最新轮次**的处置（INT-234 审查 A1/B1：标准生命周期是先 open 后 rejected
+// /fixed，最早胜出会把条目永久冻结在 open，驳回理由与修复都到不了历史）。
+// 同一轮多个组合判定冲突时按保守优先级收敛：open > rejected > fixed——
+// 只要有组合仍认为未解决就不丢；fixed 是已了结处置，不进历史任何小节。
+// 去重键含级别与定位：条目跨轮换级或挪行会产生新键，旧键的处置不再被后续
+// 轮次更新，可能与同一条目的新处置并存。方向保守——顶多多留一条 open 遗留，
+// 不会丢驳回，接受该语义（INT-234 审查复核）。
+func (s *ReviewService) crossRoundPriors(ctx context.Context, run *model.ReviewRun, kind model.ReviewKind) (open, rejected []api.ReviewPriorDecision, err error) {
+	var runs []model.ReviewRun
+	if err := s.db.WithContext(ctx).
+		Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND integration_id = ? AND kind = ? AND round_number < ? AND status = ? AND result_json != ''",
+			run.ProjectID, run.RepoFullName, run.PRNumber, run.IntegrationID, kind, run.RoundNumber, model.ReviewRunCompleted).
+		Order("created_at ASC").Find(&runs).Error; err != nil {
+		return nil, nil, errs.ErrInternal
+	}
+	type disposition struct {
+		round int
+		prior api.ReviewPriorDecision
+	}
+	latest := map[string]disposition{}
+	var order []string // 首次出现顺序：输出顺序稳定，不随 map 遍历随机
+	for i := range runs {
+		var priors []api.ReviewPriorDecision
+		if kind == model.ReviewKindVisual {
+			var result api.ReviewVisualResult
+			if json.Unmarshal([]byte(runs[i].ResultJSON), &result) != nil {
+				continue
+			}
+			priors = result.Prior
+		} else {
+			var result api.ReviewCodeResult
+			if json.Unmarshal([]byte(runs[i].ResultJSON), &result) != nil {
+				continue
+			}
+			priors = result.Prior
+		}
+		for _, p := range priors {
+			key := codePriorDedupeKey(p)
+			cur, ok := latest[key]
+			if !ok {
+				latest[key] = disposition{round: runs[i].RoundNumber, prior: p}
+				order = append(order, key)
+				continue
+			}
+			// 最新轮次的处置胜出；同轮冲突按保守优先级收敛（见函数注释）。
+			if runs[i].RoundNumber > cur.round ||
+				(runs[i].RoundNumber == cur.round && priorStatusRank(p) > priorStatusRank(cur.prior)) {
+				latest[key] = disposition{round: runs[i].RoundNumber, prior: p}
+			}
+		}
+	}
+	for _, key := range order {
+		switch latest[key].prior.Status {
+		case api.ReviewPriorDecisionStatusOpen:
+			open = append(open, latest[key].prior)
+		case api.ReviewPriorDecisionStatusRejected:
+			rejected = append(rejected, latest[key].prior)
+		}
+	}
+	return open, rejected, nil
+}
+
+// priorStatusRank 同轮冲突的收敛优先级：open > rejected > fixed。
+func priorStatusRank(p api.ReviewPriorDecision) int {
+	switch p.Status {
+	case api.ReviewPriorDecisionStatusOpen:
+		return 3
+	case api.ReviewPriorDecisionStatusRejected:
+		return 2
+	default:
+		return 1
+	}
+}
+
+// writeCrossRoundPriors 跨轮遗留的两个小节。「已驳回」单独成节且标题即指令：
+// 没有新证据不要再提；rejected 的理由逐条带出，审查者判断「新证据」时要用。
+func writeCrossRoundPriors(b *strings.Builder, open, rejected []api.ReviewPriorDecision) {
+	if len(open) > 0 {
+		b.WriteString("## 仍未解决（跨轮遗留，已去重）\n")
+		for _, p := range open {
+			b.WriteString(priorLine("仍未解决", priorLevelText(p.Level), priorLoc(p), p.Body))
+		}
+		b.WriteString("\n")
+	}
+	if len(rejected) > 0 {
+		b.WriteString("## 已驳回（此前判定为作者驳回或有意为之，没有新证据不要再提）\n")
+		for _, p := range rejected {
+			b.WriteString(priorLine("已驳回", priorLevelText(p.Level), priorLoc(p), p.Body))
+			if p.Reason != nil && strings.TrimSpace(*p.Reason) != "" {
+				fmt.Fprintf(b, "  驳回理由：%s\n", singleLine(*p.Reason))
+			}
+		}
+		b.WriteString("\n")
+	}
+}
+
+// priorLine 历史里的一条遗留/驳回行：级别 + 定位（无定位时省略，避免双空格）+ 正文。
+// prior 各字段是模型转写的不可信文本（level 对代码 prior 与视觉 rejected
+// prior 是自由字符串，驳回理由常逐字摘抄评论原文），三个字段都压成单行，
+// 换行不能伪造行首的节标题或条目标题。
+func priorLine(prefix, level, loc, body string) string {
+	level, loc, body = singleLine(level), singleLine(loc), singleLine(body)
+	if loc != "" {
+		return fmt.Sprintf("- %s · %s %s %s\n", prefix, level, loc, body)
+	}
+	return fmt.Sprintf("- %s · %s：%s\n", prefix, level, body)
+}
+
+// appendNewDiscussion 把全部人工讨论（行内 + 会话评论）按时间正序写进 b，
+// 取最近 50 条。本系统自己发的结论（机器人标记/自身 review）过滤掉。
+// authorLogin 非空时给 PR 作者的发言标注身份——标注按平台 login 真值计算，
+// 评论正文写什么改变不了标注（防注入）；authorLogin 为空时不标任何人，
+// 宁可缺标注也不能把普通评论者误标成作者。
+func (s *ReviewService) appendNewDiscussion(ctx context.Context, run *model.ReviewRun, client forge.ReviewClient, b *strings.Builder, authorLogin string) error {
+	// 讨论是历史的辅助面：单一来源拉取失败降级为该来源缺失并在节尾标注，
+	// 不整个挂掉 GET /history——提示词把「读过历史」设为开审前置，一次平台
+	// 抖动不该卡死整轮审查。
+	var incomplete []string
 	reviewComments, err := client.ListReviewComments(ctx, run.RepoFullName, run.PRNumber)
 	if err != nil {
-		return errs.New(errs.ErrGitHubAPI.Code, "读取行内评论失败: "+err.Error())
+		s.logger.Warn("历史上下文读取行内评论失败，本节不含该来源", zap.String("run", run.ID), zap.Error(err))
+		incomplete = append(incomplete, "行内评论")
 	}
 	issueComments, err := client.ListIssueCommentsForPR(ctx, run.RepoFullName, run.PRNumber)
 	if err != nil {
-		return errs.New(errs.ErrGitHubAPI.Code, "读取会话评论失败: "+err.Error())
+		s.logger.Warn("历史上下文读取会话评论失败，本节不含该来源", zap.String("run", run.ID), zap.Error(err))
+		incomplete = append(incomplete, "会话评论")
 	}
 	type entry struct {
 		at   time.Time
 		head string
+		path string
 		body string
 	}
 	var entries []entry
 	for _, c := range reviewComments {
-		// c.Self 覆盖 Forgejo：那边的机器人是普通账号，不以 [bot] 结尾，
-		// 行内评论又没有隐藏标记可拦。
-		if c.Self || strings.HasSuffix(c.User, "[bot]") || (!c.CreatedAt.After(after) && !all) {
+		// c.Self 覆盖 Forgejo：那边的机器人是普通账号，不以 [bot] 结尾。
+		// 行内评论体带 <!-- fast-ship-inline --> 隐藏标记（发布侧写在首行），
+		// PAT 重启示得 selfLogin 之前的窗口里也照样拦得住自己的意见。
+		// 只认行首：平台的引用回复会把原件正文（含标记）搬进引用块，
+		// Contains 会把作者对机器人意见的引用驳回整条误丢（PR#209 审查 R2）。
+		if c.Self || strings.HasSuffix(c.User, "[bot]") || strings.HasPrefix(c.Body, "<!-- fast-ship-") {
 			continue
 		}
-		head := "行内评论"
-		if c.Path != "" {
-			head += " · " + c.Path
-		}
-		entries = append(entries, entry{at: c.CreatedAt, head: head + " · @" + c.User, body: c.Body})
+		// 文件路径不进可信标题：文件名允许换行，也能直接写出「（PR 作者）」，
+		// 与正文同级收进引用块。
+		head := "行内评论 · @" + c.User + discussionAuthorTag(c.User, authorLogin)
+		entries = append(entries, entry{at: c.CreatedAt, head: head, path: c.Path, body: c.Body})
 	}
 	for _, c := range issueComments {
-		// 系统自己的顶层结论评论（隐藏标记）与机器人发言不进历史。
-		if c.Self || strings.HasSuffix(c.User, "[bot]") || strings.Contains(c.Body, "<!-- fast-ship-") ||
-			(!c.CreatedAt.After(after) && !all) {
+		// 系统自己的顶层结论评论（隐藏标记在首行）与机器人发言不进历史；
+		// 只认行首——引用回复会把原件正文（含标记）搬进引用块，Contains
+		// 会把作者的引用驳回整条误丢。
+		if c.Self || strings.HasSuffix(c.User, "[bot]") || strings.HasPrefix(c.Body, "<!-- fast-ship-") {
 			continue
 		}
-		entries = append(entries, entry{at: c.CreatedAt, head: "会话评论 · @" + c.User, body: c.Body})
+		head := "会话评论 · @" + c.User + discussionAuthorTag(c.User, authorLogin)
+		entries = append(entries, entry{at: c.CreatedAt, head: head, body: c.Body})
 	}
 	sort.SliceStable(entries, func(i, j int) bool { return entries[i].at.Before(entries[j].at) })
 	if len(entries) > 50 {
 		entries = entries[len(entries)-50:]
 	}
+	if len(incomplete) > 0 {
+		fmt.Fprintf(b, "- （提示：%s读取失败，本节不含该来源讨论）\n", strings.Join(incomplete, "与"))
+	}
 	for _, e := range entries {
-		fmt.Fprintf(b, "### %s\n%s\n", e.head, e.body)
+		fmt.Fprintf(b, "### %s\n", e.head)
+		// 正文逐行引用化（INT-234 审查 A2/B3）：不可信评论原文被结构性隔离在
+		// 引用块里，正文无法伪造行首的条目标题或「（PR 作者）」标注——身份
+		// 标注只存在于服务端生成的条目标题上。行内评论的文件路径同样按
+		// 不可信原文收进引用块（文件名可含换行与伪造标注）。
+		lines := discussionLines(e.body)
+		if e.path != "" {
+			lines = append(discussionLines("文件："+e.path), lines...)
+		}
+		for _, line := range lines {
+			fmt.Fprintf(b, "> %s\n", line)
+		}
 	}
 	return nil
 }
 
-// visualHistory 视觉审查历史：上一轮视觉运行的 findings + unmeasurable，再
-// 补上该轮 result 里 prior 仍未解决的条目——模型可能只把遗留写进 prior(open)
-// 而没重写进 findings，不补这段的话未解决项会从下一轮历史里消失，复核断链。
+// discussionLines 不可信评论原文分行：先把 CRLF 与裸 CR 统一成 \n 再切——
+// CommonMark 的行尾定义含裸 CR，只按 \n 分行会让回车后的伪造标题逃出
+// 引用块。
+func discussionLines(s string) []string {
+	return strings.Split(strings.NewReplacer("\r\n", "\n", "\r", "\n").Replace(s), "\n")
+}
+
+// discussionAuthorTag 讨论条目的作者身份标注：PR 作者本人（login 不区分
+// 大小写）标「PR 作者」，提示词据它认定作者驳回。
+func discussionAuthorTag(user, authorLogin string) string {
+	if authorLogin != "" && strings.EqualFold(strings.TrimSpace(user), strings.TrimSpace(authorLogin)) {
+		return "（PR 作者）"
+	}
+	return ""
+}
+
+// reviewPRAuthorLogin 取 PR 作者 login（讨论条目作者身份标注用）。读取失败
+// 只记 Warn 返回空串——身份标注缺失时提示词按「无标注不算作者驳回」处理，
+// 不让一次平台抖动卡住整个历史端点。
+func (s *ReviewService) reviewPRAuthorLogin(ctx context.Context, run *model.ReviewRun, client forge.ReviewClient) string {
+	authorCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	pr, err := client.GetPullRequest(authorCtx, run.RepoFullName, run.PRNumber)
+	if err != nil {
+		s.logger.Warn("历史上下文读取 PR 作者失败，讨论条目不加作者标注",
+			zap.String("run", run.ID), zap.Error(err))
+		return ""
+	}
+	return pr.AuthorLogin
+}
+
+// visualHistory 视觉审查历史：上一轮视觉运行的 findings + unmeasurable，
+// 再补跨全部轮次去重的 open / rejected 遗留（INT-234 起与代码共用一套结构，
+// 并收录人工讨论——视觉提示词要求把作者驳回写成 prior(rejected)，讨论不进
+// 历史时审查者看不到作者说了什么，无法执行）。
 func (s *ReviewService) visualHistory(ctx context.Context, run *model.ReviewRun) (string, error) {
+	client, err := s.reviewClient(ctx, run.IntegrationID, run.RepoFullName)
+	if err != nil {
+		return "", err
+	}
 	// 最近一轮「确有视觉运行」的轮次：中间轮可能只跑了代码审查，
 	// round-1 会拿到空历史。历史只在本 (项目, 集成) 账本内取。
 	var prevRound *int
@@ -291,47 +453,40 @@ func (s *ReviewService) visualHistory(ctx context.Context, run *model.ReviewRun)
 		Select("MAX(round_number)").Scan(&prevRound).Error; err != nil {
 		return "", errs.ErrInternal
 	}
-	if prevRound == nil {
-		return "", nil
-	}
-	prevRuns, err := s.runsAtRound(ctx, run, *prevRound, model.ReviewKindVisual)
-	if err != nil {
-		return "", err
-	}
-	if len(prevRuns) == 0 {
-		return "", nil
-	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "## 上一轮视觉审查（轮次 %d）\n", *prevRound)
-	var unmeasurable []api.ReviewUnmeasurable
-	var openPrior []api.ReviewPriorDecision
-	for _, r := range prevRuns {
-		if r.Status != model.ReviewRunCompleted || r.ResultJSON == "" {
-			continue
+	if prevRound != nil {
+		prevRuns, err := s.runsAtRound(ctx, run, *prevRound, model.ReviewKindVisual)
+		if err != nil {
+			return "", err
 		}
-		var result api.ReviewVisualResult
-		if json.Unmarshal([]byte(r.ResultJSON), &result) != nil {
-			continue
+		if len(prevRuns) > 0 {
+			fmt.Fprintf(&b, "## 上一轮视觉审查（轮次 %d）\n", *prevRound)
+			var unmeasurable []api.ReviewUnmeasurable
+			for _, r := range prevRuns {
+				if r.Status != model.ReviewRunCompleted || r.ResultJSON == "" {
+					continue
+				}
+				var result api.ReviewVisualResult
+				if json.Unmarshal([]byte(r.ResultJSON), &result) != nil {
+					continue
+				}
+				for _, f := range result.Findings {
+					fmt.Fprintf(&b, "- %s · %s · %s：%s\n  %s\n", f.Severity, singleLine(f.Screenshot), f.Dimension, singleLine(f.Body), singleLine(f.Fix))
+				}
+				unmeasurable = append(unmeasurable, result.Unmeasurable...)
+			}
+			if len(unmeasurable) > 0 {
+				b.WriteString("### 无法判断\n")
+				for _, u := range unmeasurable {
+					fmt.Fprintf(&b, "- %s：%s\n", singleLine(u.Screenshot), singleLine(u.Reason))
+				}
+			}
+			b.WriteString("\n")
 		}
-		for _, f := range result.Findings {
-			fmt.Fprintf(&b, "- %s · %s · %s：%s\n  %s\n", f.Severity, f.Screenshot, f.Dimension, f.Body, f.Fix)
-		}
-		unmeasurable = append(unmeasurable, result.Unmeasurable...)
-		openPrior = append(openPrior, openPriorDecisions(result.Prior)...)
 	}
-	if len(unmeasurable) > 0 {
-		b.WriteString("### 无法判断\n")
-		for _, u := range unmeasurable {
-			fmt.Fprintf(&b, "- %s：%s\n", u.Screenshot, u.Reason)
-		}
-	}
-	if len(openPrior) > 0 {
-		// 独立小节：这些条目「更早一轮」就提出了，上一轮也没能了结——比
-		// 上一轮 findings 更值得审查员优先复核。
-		b.WriteString("### 仍未解决（更早一轮）\n")
-		for _, p := range openPrior {
-			fmt.Fprintf(&b, "- %s：%s\n", priorLevelText(p.Level), p.Body)
-		}
+	// 跨轮遗留与人工讨论：代码/视觉共用同一收尾编排（INT-234）。
+	if err := s.appendSharedHistoryTail(ctx, run, model.ReviewKindVisual, client, &b); err != nil {
+		return "", err
 	}
 	return strings.TrimRight(b.String(), "\n"), nil
 }
@@ -415,7 +570,7 @@ func runCombinationOptions(run *model.ReviewRun) string {
 			parts = append(parts, o.Id+"="+string(encoded))
 		}
 	}
-	return truncateRunes(strings.Join(parts, " · "), reviewOptionsMaxRunes)
+	return truncateRunes(singleLine(strings.Join(parts, " · ")), reviewOptionsMaxRunes)
 }
 
 // AgentSubmitResult POST /api/review-agent/runs/:runId/result：结构化结论的校验与落地。

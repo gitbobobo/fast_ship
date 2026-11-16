@@ -49,6 +49,9 @@ const (
 	reviewVisualStatusContext = "视觉审查"
 	reviewCodeCommentMarker   = "<!-- fast-ship-code-review -->"
 	reviewVisualCommentMarker = "<!-- fast-ship-visual-review -->"
+	// reviewInlineCommentMarker 行内意见体的隐藏标记：历史讨论节靠它把机器人
+	// 自己的行内意见挡在外面（Forgejo 重启后 selfLogin 未习得时 Self 为空）。
+	reviewInlineCommentMarker = "<!-- fast-ship-inline -->"
 )
 
 // reviewRoundTag 顶层评论第二行的轮次标记（INT-233）：评论按「marker + 轮次
@@ -1569,7 +1572,7 @@ func (s *ReviewService) postInlineReviews(ctx context.Context, client forge.Revi
 			if lines, ok := valid[f.File]; ok && lines[*f.Line] {
 				comments = append(comments, forge.ReviewInlineComment{
 					Path: f.File, Line: *f.Line, Side: "RIGHT",
-					Body: fmt.Sprintf("%s：%s", f.Level, f.Body),
+					Body: reviewInlineCommentMarker + "\n" + fmt.Sprintf("%s：%s", f.Level, f.Body),
 				})
 			}
 		}
