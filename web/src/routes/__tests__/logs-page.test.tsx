@@ -70,7 +70,7 @@ function renderLogs() {
         <Routes>
           <Route path="/projects/:id/logs" element={<LogsPage />} />
           <Route
-            path="/logs/:runId"
+            path="/projects/:id/logs/:runId"
             element={<div data-testid="log-detail">detail</div>}
           />
         </Routes>

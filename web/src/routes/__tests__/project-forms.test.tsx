@@ -207,7 +207,7 @@ describe("ProjectAndVersionForms", () => {
         repository_url: "https://github.com/godbobo/fast_ship",
       }),
     );
-    expect(mockNavigate).toHaveBeenCalledWith("/issues?project=proj-99");
+    expect(mockNavigate).toHaveBeenCalledWith("/projects/proj-99/issues");
   });
 
   it("submits create project form with a token picked from the library", async () => {
@@ -242,7 +242,7 @@ describe("ProjectAndVersionForms", () => {
         public_github_token_id: "tok-public",
       }),
     );
-    expect(mockNavigate).toHaveBeenCalledWith("/issues?project=proj-99");
+    expect(mockNavigate).toHaveBeenCalledWith("/projects/proj-99/issues");
   });
 
   it("submits edit project form without sending token when left empty", async () => {

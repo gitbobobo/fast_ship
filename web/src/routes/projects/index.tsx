@@ -299,7 +299,7 @@ function ProjectCard({
   return (
     <Card
       className="relative flex flex-col transition-colors hover:border-primary/50 cursor-pointer p-3"
-      onClick={() => navigate(`/issues?project=${project.id}`)}
+      onClick={() => navigate(`/projects/${project.id}/issues`)}
     >
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0 flex-1 space-y-1">

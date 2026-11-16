@@ -189,17 +189,17 @@ export default function LogRunDetailPage() {
   const canResetFilters =
     levelFilter !== "all" || queryFilter.trim().length > 0;
 
-  const handleProjectChange = (value: string | null) => {
-    const nextValue = value ?? "";
-    setLastSelectedProjectId(nextValue || null);
-    navigate(nextValue ? `/logs?project=${nextValue}` : "/logs");
+  const handleProjectChange = (value: string) => {
+    // 新路径下项目由路径提供：切换后回该项目日志列表，页内 query 不延续
+    setLastSelectedProjectId(value);
+    navigate(`/projects/${value}/logs`);
   };
 
   const handleDeleteRun = async () => {
     try {
       await deleteRun.mutateAsync(runId);
       toast.success("已删除该运行日志");
-      navigate(projectId ? `/logs?project=${projectId}` : "/logs");
+      if (projectId) navigate(`/projects/${projectId}/logs`);
     } catch {
       toast.error("删除失败，请稍后重试");
     }
@@ -224,20 +224,13 @@ export default function LogRunDetailPage() {
                   onValueChange={(value) => {
                     if (!value) return;
                     setLastSelectedProjectId(value);
-                    navigate(`/logs/${runId}?project=${value}`);
+                    navigate(`/projects/${value}/logs/${runId}`);
                   }}
                   projects={projects}
                   placeholder="请选择项目"
                   className="w-auto min-w-32"
                 />
               )}
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => navigate("/logs")}
-              >
-                返回日志列表
-              </Button>
             </CardContent>
           </Card>
         </div>
@@ -274,22 +267,22 @@ export default function LogRunDetailPage() {
                   onValueChange={(value) => {
                     if (!value) return;
                     setLastSelectedProjectId(value);
-                    navigate(`/logs/${runId}?project=${value}`);
+                    navigate(`/projects/${value}/logs/${runId}`);
                   }}
                   projects={projects}
                   placeholder="请选择项目"
                   className="w-auto min-w-32"
                 />
               )}
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() =>
-                  navigate(projectId ? `/logs?project=${projectId}` : "/logs")
-                }
-              >
-                返回日志列表
-              </Button>
+              {projectId && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => navigate(`/projects/${projectId}/logs`)}
+                >
+                  返回日志列表
+                </Button>
+              )}
             </CardContent>
           </Card>
         </div>
