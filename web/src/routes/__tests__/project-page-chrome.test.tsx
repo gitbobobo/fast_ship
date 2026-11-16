@@ -259,16 +259,22 @@ describe("项目级页面骨架回归（INT-237 PR3）", () => {
   );
 
   it.each(PAGES)(
-    "$key 页在项目列表加载中不渲染空态",
-    ({ element, route, entry }) => {
-      // 首次加载：列表查询未返回（data undefined），页面正常渲染，面包屑先只有 section 名
+    "$key 页在项目列表加载中渲染门控占位，不挂数据 hooks",
+    ({ element, route, entry, dataHook }) => {
+      // 冷启动：列表查询未返回时项目有效性未知，页面数据 hooks 不得挂载，
+      // 否则无效 ID 深链会在确认前发出数据请求
       mockProjects(undefined, { isLoading: true });
+      const dataHookMock = dataHook();
+      dataHookMock.mockClear?.();
 
       renderPage(element, route, entry);
 
-      const crumb = screen.getByTestId("project-breadcrumb");
-      expect(crumb).not.toHaveTextContent("Demo");
+      expect(screen.getByTestId("project-page-loading")).toBeInTheDocument();
+      expect(screen.queryByTestId("project-breadcrumb")).not.toBeInTheDocument();
       expect(screen.queryByTestId("project-not-found")).not.toBeInTheDocument();
+      if (dataHookMock.mock) {
+        expect(dataHookMock).not.toHaveBeenCalled();
+      }
     },
   );
 

@@ -9,7 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   ProjectBreadcrumb,
-  ProjectNotFoundCard,
+  ProjectPageGate,
 } from "@/components/projects/project-page-chrome";
 import { UploadScreenshotsDialog } from "@/components/screenshots/upload-screenshots-dialog";
 import { ScreenshotLightbox } from "@/components/screenshots/screenshot-lightbox";
@@ -35,15 +35,17 @@ import {
 } from "@/lib/screenshots";
 import { useScreenshotScreens } from "@/lib/hooks/use-screenshots";
 import { useScreenshotAnnotations } from "@/lib/hooks/use-screenshot-annotations";
-import { useRouteProject } from "@/lib/current-project";
 
 export default function ScreenshotsPage() {
-  // 项目上下文只认路径：无效 ID 整页空态，不再回退到偏好或静默换项目
-  const { projectId, project, notFound } = useRouteProject();
-  if (notFound) {
-    return <ProjectNotFoundCard />;
-  }
-  return <ScreenshotsPageContent projectId={projectId} project={project} />;
+  // 项目上下文只认路径：列表加载中先渲染占位（冷启动无效 ID 不给数据请求窗口），
+  // 确认无效整页空态，其余放行（列表查询失败交给页面自身兜底）
+  return (
+    <ProjectPageGate>
+      {({ projectId, project }) => (
+        <ScreenshotsPageContent projectId={projectId} project={project} />
+      )}
+    </ProjectPageGate>
+  );
 }
 
 function ScreenshotsPageContent({

@@ -14,11 +14,10 @@ import { Header } from "@/components/layout/header";
 import { HeaderActions } from "@/components/layout/header-actions";
 import { Button } from "@/components/ui/button";
 import { useUpdateIssueWorkflowStatus } from "@/lib/hooks/use-issues";
-import { useRouteProject } from "@/lib/current-project";
 import { toast } from "sonner";
 import {
   ProjectBreadcrumb,
-  ProjectNotFoundCard,
+  ProjectPageGate,
 } from "@/components/projects/project-page-chrome";
 import {
   COLUMNS,
@@ -47,12 +46,15 @@ function createDefaultColumnFilters(): Record<ColumnId, BoardColumnFilterValue> 
 }
 
 export default function BoardPage() {
-  // 项目上下文只认路径：无效 ID 整页空态，不再回退到偏好或静默换项目
-  const { projectId, project, notFound } = useRouteProject();
-  if (notFound) {
-    return <ProjectNotFoundCard />;
-  }
-  return <BoardPageContent projectId={projectId} project={project} />;
+  // 项目上下文只认路径：列表加载中先渲染占位（冷启动无效 ID 不给数据请求窗口），
+  // 确认无效整页空态，其余放行（列表查询失败交给页面自身兜底）
+  return (
+    <ProjectPageGate>
+      {({ projectId, project }) => (
+        <BoardPageContent projectId={projectId} project={project} />
+      )}
+    </ProjectPageGate>
+  );
 }
 
 function BoardPageContent({

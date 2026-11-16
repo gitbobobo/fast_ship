@@ -10,8 +10,9 @@ Web 端的 URL 分三层：全局页、项目页、详情页。项目上下文�
 - 项目页（六个 section）：`/projects/:id/{issues,board,versions,documents,screenshots,logs}`。
   页面标题是面包屑 `fast_ship / <项目名> / <section>`（问题/看板/版本/文档/截图/日志）。
 - 详情/子页：`/projects/:id/issues/new`、`issues/:iid`、`issues/:iid/edit`、
-  `versions/new`、`versions/:vid`、`logs/:runId`。同样挂在项目路径下，面包屑
-  末段用各自语义（如运行详情）。
+  `versions/new`、`versions/:vid`、`logs/:runId`。其中仅日志运行详情接入了
+  面包屑（末段「运行详情」）；问题/版本详情与新建、编辑页仍用各自的页头标题，
+  后续需要时再接入 `ProjectBreadcrumb`。
 
 ## 当前项目判定
 

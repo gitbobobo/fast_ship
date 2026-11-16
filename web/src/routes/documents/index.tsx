@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useSearchParams } from "react-router";
+import { registerNavigationGuard } from "@/lib/navigation-guard";
 import {
   ChevronRight,
   FilePlus2,
@@ -9,7 +10,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { Header } from "@/components/layout/header";
-import { ProjectBreadcrumb, ProjectNotFoundCard } from "@/components/projects/project-page-chrome";
+import { ProjectBreadcrumb, ProjectPageGate } from "@/components/projects/project-page-chrome";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -36,7 +37,6 @@ import {
   useDocuments,
   useUpdateDocument,
 } from "@/lib/hooks/use-documents";
-import { useRouteProject } from "@/lib/current-project";
 import { usePersistedScroll } from "@/lib/hooks/use-persisted-scroll";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
@@ -146,12 +146,15 @@ function confirmIfDirty(isDirty: boolean, message: string): boolean {
 }
 
 export default function DocumentsPage() {
-  // 项目上下文只认路径：无效 ID 整页空态，不再回退到偏好或静默换项目
-  const { projectId, project, notFound } = useRouteProject();
-  if (notFound) {
-    return <ProjectNotFoundCard />;
-  }
-  return <DocumentsPageContent projectId={projectId} project={project} />;
+  // 项目上下文只认路径：列表加载中先渲染占位（冷启动无效 ID 不给数据请求窗口），
+  // 确认无效整页空态，其余放行（列表查询失败交给页面自身兜底）
+  return (
+    <ProjectPageGate>
+      {({ projectId, project }) => (
+        <DocumentsPageContent projectId={projectId} project={project} />
+      )}
+    </ProjectPageGate>
+  );
 }
 
 function DocumentsPageContent({
@@ -230,6 +233,15 @@ function DocumentsPageContent({
     };
     window.addEventListener("beforeunload", onBeforeUnload);
     return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [isDirty]);
+
+  // 站内导航（侧边栏链接、项目切换）不触发 beforeunload：脏时登记守卫，
+  // 由侧边栏在导航前逐一询问，用户可取消留在原文档
+  useEffect(() => {
+    if (!isDirty) return;
+    return registerNavigationGuard(() =>
+      "当前文档有未保存的修改，切换将丢弃这些修改。是否继续？",
+    );
   }, [isDirty]);
 
   const parentOptions = useMemo(() => {

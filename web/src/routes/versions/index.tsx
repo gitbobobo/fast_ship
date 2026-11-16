@@ -2,10 +2,9 @@ import { useState, useEffect } from "react";
 import { Link, useSearchParams } from "react-router";
 import { Plus, Package } from "lucide-react";
 import { VersionFormDialog } from "@/components/versions/version-form-dialog";
-import { useRouteProject } from "@/lib/current-project";
 import {
   ProjectBreadcrumb,
-  ProjectNotFoundCard,
+  ProjectPageGate,
 } from "@/components/projects/project-page-chrome";
 import { Header } from "@/components/layout/header";
 import { HeaderActions } from "@/components/layout/header-actions";
@@ -20,12 +19,15 @@ import { useVersions } from "@/lib/hooks/use-versions";
 import { formatRelativeTime } from "@/lib/utils/format";
 
 export default function VersionsPage() {
-  // 项目上下文只认路径：无效 ID 整页空态，不再回退到偏好或静默换项目
-  const { projectId, project, notFound } = useRouteProject();
-  if (notFound) {
-    return <ProjectNotFoundCard />;
-  }
-  return <VersionsPageContent projectId={projectId} project={project} />;
+  // 项目上下文只认路径：列表加载中先渲染占位（冷启动无效 ID 不给数据请求窗口），
+  // 确认无效整页空态，其余放行（列表查询失败交给页面自身兜底）
+  return (
+    <ProjectPageGate>
+      {({ projectId, project }) => (
+        <VersionsPageContent projectId={projectId} project={project} />
+      )}
+    </ProjectPageGate>
+  );
 }
 
 function VersionsPageContent({

@@ -31,6 +31,7 @@ import { projectSwitchPath } from "@/lib/project-nav";
 import { useLastBotId } from "@/lib/store/last-bot-store";
 import { useProjectPreferenceStore } from "@/lib/store/project-preference-store";
 import { useSidebarStore } from "@/lib/store/sidebar-store";
+import { confirmNavigationLeave } from "@/lib/navigation-guard";
 import { cn } from "@/lib/utils";
 
 interface NavItem {
@@ -82,11 +83,18 @@ function SidebarNavItem({
   onNavigate?: () => void;
 }) {
   const { pathname } = useLocation();
+  // 有未保存内容的页面（如文档编辑器）登记导航守卫：用户取消则留在原地
   const link = (
     <NavLink
       to={item.to}
       end={item.end}
-      onClick={onNavigate}
+      onClick={(event) => {
+        if (!confirmNavigationLeave()) {
+          event.preventDefault();
+          return;
+        }
+        onNavigate?.();
+      }}
       aria-label={item.label}
       className={({ isActive }) =>
         cn(
@@ -247,7 +255,9 @@ function NavContent({
   // （列表页丢页内 query，详情/new/edit/runId 回对应列表页）；全局页无法
   // 延续项目上下文，只记住偏好，侧边栏链接随之更新。切完必调 onNavigate，
   // 让移动端 Sheet 收起——全局页不改变 pathname，不能依赖路由变化自动关闭。
+  // 导航守卫先于一切跳转：文档等页面有未保存内容时用户可取消本次切换。
   const handleSwitchProject = (nextId: string) => {
+    if (!confirmNavigationLeave()) return;
     const to = projectSwitchPath(pathname, nextId);
     if (to) navigate(to);
     else setLastSelectedProjectId(nextId);

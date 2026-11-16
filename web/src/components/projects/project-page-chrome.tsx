@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { Link } from "react-router";
 import { FolderX } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { useRouteProject } from "@/lib/current-project";
 
 /**
  * 项目级页面的面包屑标题：`fast_ship / <项目名> / <section>`。
@@ -52,4 +53,35 @@ export function ProjectNotFoundCard(): ReactNode {
       </Button>
     </div>
   );
+}
+
+/** 项目列表首次加载中的整页占位：项目有效性未知，页面数据 hooks 不应挂载。 */
+function ProjectPageSkeleton(): ReactNode {
+  return (
+    <div
+      data-testid="project-page-loading"
+      className="flex min-h-[40vh] items-center justify-center text-sm text-muted-foreground"
+    >
+      加载中...
+    </div>
+  );
+}
+
+/**
+ * 项目页三态门：项目列表首次加载中先渲染占位（冷启动深链无效 ID 时不给
+ * 数据请求窗口）；确认无效渲染空态；其余放行——包括列表查询失败（无法
+ * 判定有效性时交给页面自身与后端兑底），避免列表故障拖垮全部项目页。
+ */
+export function ProjectPageGate({
+  children,
+}: {
+  children: (ctx: {
+    projectId: string;
+    project: Project | undefined;
+  }) => ReactNode;
+}): ReactNode {
+  const { projectId, project, isLoading, notFound } = useRouteProject();
+  if (isLoading) return <ProjectPageSkeleton />;
+  if (notFound) return <ProjectNotFoundCard />;
+  return <>{children({ projectId, project })}</>;
 }

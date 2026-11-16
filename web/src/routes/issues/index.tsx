@@ -35,10 +35,9 @@ import {
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
-import { useRouteProject } from "@/lib/current-project";
 import {
   ProjectBreadcrumb,
-  ProjectNotFoundCard,
+  ProjectPageGate,
 } from "@/components/projects/project-page-chrome";
 import {
   useIssueFilterOptions,
@@ -259,13 +258,15 @@ function IssueCardActions({
 }
 
 export default function IssuesPage() {
-  // 项目上下文只认路径：无效 ID 整页空态，不再回退到偏好或静默换项目；
-  // 列表加载中（isLoading）不算无效，正常走页面骨架
-  const { projectId, project, notFound } = useRouteProject();
-  if (notFound) {
-    return <ProjectNotFoundCard />;
-  }
-  return <IssuesPageContent projectId={projectId} project={project} />;
+  // 项目上下文只认路径：列表加载中先渲染占位（冷启动无效 ID 不给数据请求窗口），
+  // 确认无效整页空态，其余放行（列表查询失败交给页面自身兜底）
+  return (
+    <ProjectPageGate>
+      {({ projectId, project }) => (
+        <IssuesPageContent projectId={projectId} project={project} />
+      )}
+    </ProjectPageGate>
+  );
 }
 
 function IssuesPageContent({

@@ -107,8 +107,8 @@ describe("VersionsPage", () => {
     expect(screen.queryByTestId("project-not-found")).not.toBeInTheDocument();
   });
 
-  it("shows only the section name in the breadcrumb while the project list is loading", () => {
-    // 首次加载：列表查询未返回（data undefined）
+  it("shows the gate placeholder while the project list is loading", () => {
+    // 冷启动：项目有效性未知，先渲染门控占位，页面数据 hooks 不挂载（不发请求）
     vi.mocked(useProjects).mockReturnValue({
       data: undefined,
       isLoading: true,
@@ -123,9 +123,8 @@ describe("VersionsPage", () => {
       initialEntry: "/projects/proj-1/versions",
     });
 
-    const crumb = screen.getByTestId("project-breadcrumb");
-    expect(crumb).toHaveTextContent("版本");
-    expect(crumb).not.toHaveTextContent("Alpha App");
+    expect(screen.getByTestId("project-page-loading")).toBeInTheDocument();
+    expect(screen.queryByTestId("project-breadcrumb")).not.toBeInTheDocument();
     // 加载中不算无效项目，不渲染空态
     expect(screen.queryByTestId("project-not-found")).not.toBeInTheDocument();
   });
