@@ -82,9 +82,9 @@ function SidebarNavItem({
   collapsed: boolean;
   onNavigate?: () => void;
 }) {
-  const { pathname } = useLocation();
+  const { pathname, search } = useLocation();
   // 有未保存内容的页面（如文档编辑器）登记导航守卫；左键无修饰键且目标
-  // 不在当前页时才询问，修饰键/中键（新标签打开）不拦
+  // 与当前地址完全一致（含 query）时才是空操作，不拦
   const link = (
     <NavLink
       to={item.to}
@@ -100,8 +100,9 @@ function SidebarNavItem({
           onNavigate?.();
           return;
         }
-        // 点击当前所在页的链接是空操作，不必询问守卫
-        if (pathname === item.to) {
+        // 点击当前页且无 query 差异才是空操作；带 query（如文档页 ?doc=）
+        // 的点击会改写地址，仍需过守卫，否则静默丢未保存内容
+        if (pathname === item.to && search === "") {
           onNavigate?.();
           return;
         }

@@ -252,6 +252,24 @@ describe("Sidebar 项目切换器与项目内导航（INT-237 PR2）", () => {
     }
   });
 
+  it("同页但带 query 的链接点击仍过导航守卫（?doc= 编辑中点「文档」）", async () => {
+    const confirmMock = vi.fn().mockReturnValue(false);
+    vi.stubGlobal("confirm", confirmMock);
+    const unregister = registerNavigationGuard(() => "有未保存的修改");
+    const utils = renderSidebar("/projects/p-alpha/documents?doc=d-1");
+
+    try {
+      await userEvent.setup().click(screen.getByRole("link", { name: "文档" }));
+
+      // 该点击会剥掉 ?doc=（真实导航，非空操作）：守卫取消后必须原地不动
+      expect(utils.currentLocation()?.pathname).toBe("/projects/p-alpha/documents");
+      expect(utils.currentLocation()?.search).toBe("?doc=d-1");
+      expect(confirmMock).toHaveBeenCalledTimes(1);
+    } finally {
+      unregister();
+    }
+  });
+
   it("侧栏链接点击同样受导航守卫拦截", async () => {
     const confirmMock = vi.fn().mockReturnValue(false);
     vi.stubGlobal("confirm", confirmMock);
