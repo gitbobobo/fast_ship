@@ -435,6 +435,72 @@ func (r *DashboardRepository) GetBacklogAge(userID string, under7, under30 time.
 	return age, err
 }
 
+// DashboardReviewPRRow PR 级审查聚合行：窗口内（或仍有在途 run）的当前轮次
+// +当前 head 连接结论，分桶在服务层归一。
+type DashboardReviewPRRow struct {
+	ProjectID     string `gorm:"column:project_id"`
+	RepoFullName  string `gorm:"column:repo_full_name"`
+	PRNumber      int    `gorm:"column:pr_number"`
+	IntegrationID string `gorm:"column:integration_id"`
+	CodeStatus    string `gorm:"column:code_status"`
+	ActiveRuns    int64  `gorm:"column:active_runs"`
+}
+
+// GetReviewOutcomes PR 级审查结论：复用阶段一 review_runs⨝review_pull_requests
+// 全键连接（当前轮次+当前 head，与 ListFailedReviews 同一连接），按 PR 分组。
+// 入窗条件（finished_at≥since 或仍在途）下推 SQL：MAX(finished_at) 聚合在
+// SQLite 会以字符串回传（文本存储的时间不走驱动转换），不下推就得在 Go 里
+// 自行解析多种历史写法；在途 run 的 finished_at 为 NULL，由 OR 的第二支保住。
+func (r *DashboardRepository) GetReviewOutcomes(userID string, since time.Time) ([]DashboardReviewPRRow, error) {
+	var rows []DashboardReviewPRRow
+	err := r.db.
+		Table("review_runs AS r").
+		Select(`
+			r.project_id, r.repo_full_name, r.pr_number, r.integration_id,
+			rp.code_status,
+			SUM(CASE WHEN r.status IN ? THEN 1 ELSE 0 END) AS active_runs
+		`, model.ReviewRunActiveStatuses).
+		Joins("JOIN review_pull_requests rp ON r.project_id = rp.project_id AND r.repo_full_name = rp.repo_full_name AND r.pr_number = rp.pr_number AND r.integration_id = rp.integration_id AND r.round_number = rp.round_number AND r.head_sha = rp.head_sha").
+		Joins("JOIN projects p ON p.id = r.project_id").
+		Where("r.user_id = ?", userID).
+		Where(projectNotShelvedSQL("p"), time.Now().UTC()).
+		Where("r.finished_at >= ? OR r.status IN ?", since, model.ReviewRunActiveStatuses).
+		Group("r.project_id, r.repo_full_name, r.pr_number, r.integration_id, rp.code_status").
+		Scan(&rows).Error
+	return rows, err
+}
+
+// DashboardNextScheduleTask 机器人下一次计划触发的任务。
+type DashboardNextScheduleTask struct {
+	BotID     string    `gorm:"column:bot_id"`
+	BotName   string    `gorm:"column:bot_name"`
+	TaskName  string    `gorm:"column:task_name"`
+	NextRunAt time.Time `gorm:"column:next_run_at"`
+}
+
+// GetNextScheduleTask 最近一次将要触发的已启用定时任务；没有则返回 nil。
+// bot_schedule_tasks 与 bots 都是小表且按主键连接，无额外索引可接受
+// （INT-235 文档注记）。
+func (r *DashboardRepository) GetNextScheduleTask(userID string) (*DashboardNextScheduleTask, error) {
+	var row DashboardNextScheduleTask
+	err := r.db.
+		Table("bot_schedule_tasks AS t").
+		Select("t.bot_id, b.name AS bot_name, t.name AS task_name, t.next_run_at").
+		Joins("JOIN bots b ON b.id = t.bot_id").
+		Where("b.user_id = ?", userID).
+		Where("t.enabled AND t.next_run_at IS NOT NULL").
+		Order("t.next_run_at ASC").
+		Limit(1).
+		Scan(&row).Error
+	if err != nil {
+		return nil, err
+	}
+	if row.BotID == "" {
+		return nil, nil // Scan 空结果不报错：按无任务处理
+	}
+	return &row, nil
+}
+
 // DashboardQuotaAttention 一条需要处理的配额账号。
 type DashboardQuotaAttention struct {
 	Label    string `gorm:"column:label"`

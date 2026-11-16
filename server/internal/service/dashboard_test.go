@@ -677,3 +677,146 @@ func TestDashboardFlowDegradedOnError(t *testing.T) {
 		t.Fatal("degraded flow must keep complete structure")
 	}
 }
+
+// buildAiReviews 四分桶与 pass_rate：在途优先；completed 但 code_status=failure
+// → blocked（completed ≠ 通过）；分母 0 → pass_rate=null；窗口外排除。
+func TestDashboardAiReviewsBuckets(t *testing.T) {
+	db := newDashboardServiceTestDB(t)
+	userID := dashboardSeedUser(t, db)
+	now := time.Now().UTC()
+	pid := dashboardSeedProject(t, db, userID, "项目A")
+
+	seedPR := func(prNumber int, codeStatus string, runs []struct {
+		status   model.ReviewRunStatus
+		finished *time.Time
+	}) {
+		round := 3
+		sha := "sha-3"
+		if err := db.Create(&model.ReviewPullRequest{
+			ProjectID: pid, RepoFullName: "o/r", PRNumber: prNumber, IntegrationID: "int-1",
+			UserID: userID, RoundNumber: round, HeadSHA: sha, CodeStatus: codeStatus, UpdatedAt: now,
+		}).Error; err != nil {
+			t.Fatal(err)
+		}
+		for _, run := range runs {
+			if err := db.Create(&model.ReviewRun{
+				ID: uuid.NewString(), UserID: userID, ProjectID: pid, Kind: model.ReviewKindCode,
+				RepoFullName: "o/r", PRNumber: prNumber, HeadSHA: sha, RoundNumber: round,
+				IntegrationID: "int-1", EnvironmentID: "e", InstanceID: "i", Model: "m",
+				ThreadID: "t", LaunchCommandID: "c", InitialMessageID: "m",
+				Status: run.status, FinishedAt: run.finished, DeadlineAt: now, CreatedAt: now, UpdatedAt: now,
+			}).Error; err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	// PR1 success 终态 → passed
+	seedPR(1, "success", []struct {
+		status   model.ReviewRunStatus
+		finished *time.Time
+	}{{model.ReviewRunCompleted, ptrTime(now.Add(-2 * time.Hour))}})
+	// PR2 completed 但 code_status=failure → blocked（completed ≠ 通过）
+	seedPR(2, "failure", []struct {
+		status   model.ReviewRunStatus
+		finished *time.Time
+	}{{model.ReviewRunCompleted, ptrTime(now.Add(-3 * time.Hour))}})
+	// PR3 error → errored
+	seedPR(3, "error", []struct {
+		status   model.ReviewRunStatus
+		finished *time.Time
+	}{{model.ReviewRunFailed, ptrTime(now.Add(-4 * time.Hour))}})
+	// PR4 pending 且有在途 run → in_flight
+	seedPR(4, "pending", []struct {
+		status   model.ReviewRunStatus
+		finished *time.Time
+	}{{model.ReviewRunRunning, nil}})
+	// PR5 success 但仍有在途 run → in_flight（在途优先，不落 passed）
+	seedPR(5, "success", []struct {
+		status   model.ReviewRunStatus
+		finished *time.Time
+	}{{model.ReviewRunQueued, nil}})
+	// PR6 窗口外终态 → 不计
+	seedPR(6, "failure", []struct {
+		status   model.ReviewRunStatus
+		finished *time.Time
+	}{{model.ReviewRunCompleted, ptrTime(now.Add(-40 * 24 * time.Hour))}})
+	// PR7 pending、终态、窗口内（结论未回写）→ in_flight
+	seedPR(7, "", []struct {
+		status   model.ReviewRunStatus
+		finished *time.Time
+	}{{model.ReviewRunCompleted, ptrTime(now.Add(-time.Hour))}})
+
+	svc := newDashboardService(t, db, &fakeUnreadCounter{count: 0}, &fakeT3WaitingSource{result: nil})
+	resp, err := svc.GetOverview(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("GetOverview: %v", err)
+	}
+	reviews := resp.Ai.Reviews
+	if reviews == nil || reviews.Complete != nil {
+		t.Fatalf("reviews must be present and complete: %+v", reviews)
+	}
+	if reviews.Passed != 1 || reviews.Blocked != 1 || reviews.Errored != 1 || reviews.InFlight != 3 {
+		t.Fatalf("buckets=%+v, want passed=1 blocked=1 errored=1 in_flight=3", reviews)
+	}
+	if reviews.PassRate == nil || *reviews.PassRate != 0.5 {
+		t.Fatalf("pass_rate=%v, want 0.5", reviews.PassRate)
+	}
+}
+
+// pass_rate 分母为 0（只有 in_flight）→ null，不代表 100%。
+func TestDashboardAiReviewsPassRateZeroDenominator(t *testing.T) {
+	db := newDashboardServiceTestDB(t)
+	userID := dashboardSeedUser(t, db)
+	now := time.Now().UTC()
+	pid := dashboardSeedProject(t, db, userID, "项目A")
+
+	if err := db.Create(&model.ReviewPullRequest{
+		ProjectID: pid, RepoFullName: "o/r", PRNumber: 9, IntegrationID: "int-1",
+		UserID: userID, RoundNumber: 1, HeadSHA: "s", CodeStatus: "pending", UpdatedAt: now,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&model.ReviewRun{
+		ID: uuid.NewString(), UserID: userID, ProjectID: pid, Kind: model.ReviewKindCode,
+		RepoFullName: "o/r", PRNumber: 9, HeadSHA: "s", RoundNumber: 1,
+		IntegrationID: "int-1", EnvironmentID: "e", InstanceID: "i", Model: "m",
+		ThreadID: "t", LaunchCommandID: "c", InitialMessageID: "m",
+		Status: model.ReviewRunQueued, DeadlineAt: now, CreatedAt: now, UpdatedAt: now,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	svc := newDashboardService(t, db, &fakeUnreadCounter{count: 0}, &fakeT3WaitingSource{result: nil})
+	resp, err := svc.GetOverview(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("GetOverview: %v", err)
+	}
+	reviews := resp.Ai.Reviews
+	if reviews.InFlight != 1 || reviews.PassRate != nil {
+		t.Fatalf("reviews=%+v, want in_flight=1 pass_rate=null", reviews)
+	}
+}
+
+// 审查查询失败 → reviews 子块降级 complete=false，其余不 500。
+func TestDashboardAiReviewsDegradedOnError(t *testing.T) {
+	db := newDashboardServiceTestDB(t)
+	userID := dashboardSeedUser(t, db)
+	if err := db.Exec("DROP TABLE review_runs").Error; err != nil {
+		t.Fatalf("drop table: %v", err)
+	}
+	svc := newDashboardService(t, db, &fakeUnreadCounter{count: 0}, &fakeT3WaitingSource{result: nil})
+	resp, err := svc.GetOverview(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("GetOverview must not fail: %v", err)
+	}
+	if resp.Ai == nil || resp.Ai.Reviews == nil {
+		t.Fatal("ai/reviews must degrade, not disappear")
+	}
+	if resp.Ai.Reviews.Complete == nil || *resp.Ai.Reviews.Complete {
+		t.Fatal("reviews complete must be present and false")
+	}
+	if resp.Ai.Complete == nil || *resp.Ai.Complete {
+		t.Fatal("ai top-level complete must be false when all sub-blocks are incomplete")
+	}
+}

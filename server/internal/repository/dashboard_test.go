@@ -648,3 +648,124 @@ func TestDashboardBacklogAgeIdentity(t *testing.T) {
 		t.Fatalf("identity broken: %d != %d", age.Under7d+age.D7To30d+age.Over30d, sum)
 	}
 }
+
+// GetReviewOutcomes：当前轮次+当前 head 全键分组、max finished_at 与在途 run
+// 计数；搁置项目排除；非本用户排除。
+func TestDashboardGetReviewOutcomes(t *testing.T) {
+	db := newDashboardTestDB(t)
+	userID := dashboardTestUser(t, db)
+	now := time.Now().UTC()
+	pid := dashboardTestProject(t, db, userID, "项目A", now, false)
+	shelved := dashboardTestProject(t, db, userID, "搁置项目", now, true)
+
+	mkPR := func(projectID string, prNumber, round int, codeStatus string) {
+		if err := db.Create(&model.ReviewPullRequest{
+			ProjectID: projectID, RepoFullName: "o/r", PRNumber: prNumber, IntegrationID: "int-1",
+			UserID: userID, RoundNumber: round, HeadSHA: "sha", CodeStatus: codeStatus, UpdatedAt: now,
+		}).Error; err != nil {
+			t.Fatalf("create rp: %v", err)
+		}
+	}
+	mkRunAt := func(projectID, status string, round int, finished *time.Time, prNumber int) {
+		r := &model.ReviewRun{
+			ID: uuid.NewString(), UserID: userID, ProjectID: projectID, Kind: model.ReviewKindCode,
+			RepoFullName: "o/r", PRNumber: prNumber, HeadSHA: "sha", RoundNumber: round,
+			IntegrationID: "int-1", EnvironmentID: "env", InstanceID: "i", Model: "m",
+			ThreadID: "t", LaunchCommandID: "c", InitialMessageID: "m1",
+			Status: model.ReviewRunStatus(status), DeadlineAt: now,
+			FinishedAt: finished, CreatedAt: now, UpdatedAt: now,
+		}
+		if err := db.Create(r).Error; err != nil {
+			t.Fatalf("create run: %v", err)
+		}
+	}
+	mkRun := func(projectID, status string, round int, finished *time.Time) {
+		mkRunAt(projectID, status, round, finished, 7)
+	}
+
+	// PR#7：当前轮次 success（终态）+ 更早轮次不参与（rp.round=2）
+	mkPR(pid, 7, 2, "success")
+	mkRun(pid, "completed", 2, ptrTime(now.Add(-2*time.Hour)))
+	mkRun(pid, "failed", 1, ptrTime(now.Add(-3*time.Hour)))
+	// PR#8：pending 且有在途 run
+	mkPR(pid, 8, 1, "pending")
+	mkRunAt(pid, "running", 1, nil, 8)
+	// 搁置项目：不进结果
+	mkPR(shelved, 7, 1, "failure")
+	mkRun(shelved, "completed", 1, ptrTime(now.Add(-time.Hour)))
+
+	repo := NewDashboardRepository(db)
+	rows, err := repo.GetReviewOutcomes(userID, now.Add(-30*24*time.Hour))
+	if err != nil {
+		t.Fatalf("GetReviewOutcomes: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("rows=%d, want 2（搁置排除、旧轮次被全键连接过滤）", len(rows))
+	}
+	byPR := map[int]DashboardReviewPRRow{}
+	for _, row := range rows {
+		byPR[row.PRNumber] = row
+	}
+	p7 := byPR[7]
+	if p7.CodeStatus != "success" || p7.ActiveRuns != 0 {
+		t.Fatalf("PR7 row: %+v", p7)
+	}
+	p8 := byPR[8]
+	if p8.ActiveRuns != 1 || p8.CodeStatus != "pending" {
+		t.Fatalf("PR8 row must carry active run: %+v", p8)
+	}
+}
+
+// GetNextScheduleTask：最近一次将触发的已启用任务；停用/无 next_run_at/他人排除。
+func TestDashboardGetNextScheduleTask(t *testing.T) {
+	db := newDashboardTestDB(t)
+	userID := dashboardTestUser(t, db)
+	other := dashboardTestUser(t, db)
+	now := time.Now().UTC()
+
+	mkBot := func(owner, name string) string {
+		id := uuid.NewString()
+		if err := db.Create(&model.Bot{ID: id, UserID: owner, Name: name, PersonaPrompt: "p", Model: "m", ProviderID: "pv", CreatedAt: now, UpdatedAt: now}).Error; err != nil {
+			t.Fatalf("create bot: %v", err)
+		}
+		return id
+	}
+	botID := mkBot(userID, "值夜机器人")
+	otherBot := mkBot(other, "他人机器人")
+
+	mkTask := func(botID, name string, enabled bool, next *time.Time) {
+		id := uuid.NewString()
+		if err := db.Create(&model.BotScheduleTask{
+			ID: id, BotID: botID, Name: name, CronExpression: "* * * * *",
+			Enabled: enabled, NextRunAt: next, CreatedAt: now, UpdatedAt: now,
+		}).Error; err != nil {
+			t.Fatalf("create task: %v", err)
+		}
+		if !enabled {
+			// Enabled 有 default:true：零值 false 会被默认值覆盖，显式回写
+			if err := db.Model(&model.BotScheduleTask{}).Where("id = ?", id).Update("enabled", false).Error; err != nil {
+				t.Fatalf("disable task: %v", err)
+			}
+		}
+	}
+	mkTask(botID, "晚报", true, ptrTime(now.Add(2*time.Hour)))
+	mkTask(botID, "早报", true, ptrTime(now.Add(1*time.Hour))) // 更早，应中选
+	mkTask(botID, "停用", false, ptrTime(now.Add(30*time.Minute)))
+	mkTask(botID, "无下次", true, nil)
+	mkTask(otherBot, "他人任务", true, ptrTime(now.Add(10*time.Minute)))
+
+	repo := NewDashboardRepository(db)
+	task, err := repo.GetNextScheduleTask(userID)
+	if err != nil {
+		t.Fatalf("GetNextScheduleTask: %v", err)
+	}
+	if task == nil || task.TaskName != "早报" || task.BotName != "值夜机器人" {
+		t.Fatalf("task=%+v, want 早报/值夜机器人", task)
+	}
+
+	// 没有任何任务的用户 → nil
+	loner := dashboardTestUser(t, db)
+	if task, err := repo.GetNextScheduleTask(loner); err != nil || task != nil {
+		t.Fatalf("empty user: task=%+v err=%v, want nil/nil", task, err)
+	}
+}

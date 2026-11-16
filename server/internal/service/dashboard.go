@@ -20,6 +20,7 @@ const (
 	dashboardCycleTimeMax         = 5
 	dashboardBacklogUnder7Days    = 7 * 24 * time.Hour
 	dashboardBacklogUnder30Days   = 30 * 24 * time.Hour
+	dashboardReviewsWindowDays    = 30
 )
 
 // dashboardT3WaitingSource 是 DashboardService 对 T3 侧的唯一依赖：窄接口，
@@ -145,7 +146,58 @@ func (s *DashboardService) GetOverview(ctx context.Context, userID string) (*Das
 	// 流转效率（阶段二）：与 daily_resolved 共用同一 UTC 窗口。
 	resp.Flow = s.buildFlow(userID, startInclusive, endExclusive)
 
+	// AI 运行面板（阶段三）：各子块独立降级；T3 与「待我处理」共用同一
+	// 遍历结果（见 actionGroups），quota/bots 走窄接口。
+	resp.Ai = s.buildAi(ctx, userID)
+
 	return resp, nil
+}
+
+func (s *DashboardService) buildAi(ctx context.Context, userID string) *api.DashboardAi {
+	ai := &api.DashboardAi{
+		Reviews: s.buildAiReviews(userID, time.Now().UTC()),
+	}
+	// 顶层 complete 仅在全部子块都不可用时返回 false；有任一子块可用即省略。
+	if ai.Reviews.Complete != nil && !*ai.Reviews.Complete {
+		ai.Complete = api.Ptr(false)
+	}
+	return ai
+}
+
+// buildAiReviews 审查四分桶：按 PR 归一（code_status success→passed /
+// failure→blocked / error→errored，pending 或仍有在途 run→in_flight，
+// 在途优先——正在审的 PR 不因上轮结论落桶）。completed ≠ 通过：run 终态
+// completed 但 code_status=failure 的 PR 归 blocked。pass_rate=passed/(passed+blocked)，
+// 分母 0 时为 null（不显示，不代表 100%）。
+func (s *DashboardService) buildAiReviews(userID string, now time.Time) *api.DashboardAiReviews {
+	since := now.Add(-dashboardReviewsWindowDays * 24 * time.Hour)
+	rows, err := s.dashboardRepo.GetReviewOutcomes(userID, since)
+	if err != nil {
+		return &api.DashboardAiReviews{
+			Complete: api.Ptr(false),
+			PassRate: nil,
+		}
+	}
+	reviews := &api.DashboardAiReviews{}
+	for _, row := range rows {
+		// 入窗（finished_at≥since 或仍在途）已下推 SQL，这里只归一分桶。
+		switch {
+		case row.ActiveRuns > 0:
+			reviews.InFlight++
+		case row.CodeStatus == "success":
+			reviews.Passed++
+		case row.CodeStatus == "failure":
+			reviews.Blocked++
+		case row.CodeStatus == "error":
+			reviews.Errored++
+		default: // pending/空：本轮结论未出
+			reviews.InFlight++
+		}
+	}
+	if reviews.Passed+reviews.Blocked > 0 {
+		reviews.PassRate = api.Ptr(float64(reviews.Passed) / float64(reviews.Passed+reviews.Blocked))
+	}
+	return reviews
 }
 
 // buildFlow 流转效率聚合：待办分桶、internal 新建趋势、周期中位数与积压
