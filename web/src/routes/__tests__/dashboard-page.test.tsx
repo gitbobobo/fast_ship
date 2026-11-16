@@ -368,3 +368,394 @@ describe("DashboardPage", () => {
     expect(screen.getByText("13 个项目有开启问题")).toBeInTheDocument();
   });
 });
+
+describe("DashboardPage INT-235 阶段二/三（流转效率 / AI 面板 / 发布节奏）", () => {
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  function dailyResolvedWith(resolvedByIndex: Record<number, number>) {
+    return Array.from({ length: 30 }, (_, index) => ({
+      date: `2026-05-${String(index + 1).padStart(2, "0")}`,
+      resolved_count: resolvedByIndex[index] ?? 0,
+    }));
+  }
+
+  const dailyCreated = Array.from({ length: 30 }, (_, index) => ({
+    date: `2026-05-${String(index + 1).padStart(2, "0")}`,
+    created_count: index === 29 ? 4 : 0,
+  }));
+
+  it("renders hero summary with resolved count and pending total", async () => {
+    vi.mocked(useDashboardOverview).mockReturnValue({
+      data: {
+        open_issues_by_project: [],
+        daily_resolved: dailyResolvedWith({ 28: 2, 29: 3 }),
+        action_item_groups: [
+          { kind: "recommendations", count: 2, items: [] },
+          { kind: "unread_notifications", count: 3, items: [] },
+        ],
+      },
+      isLoading: false,
+    } as unknown as ReturnType<typeof useDashboardOverview>);
+
+    await renderDashboardPage();
+
+    // N=daily_resolved 尾 7 天合计；M=待处理组 count 合计
+    expect(screen.getByText("近 7 天解决 5 个，5 件事等你处理")).toBeInTheDocument();
+  });
+
+  it("marks the hero pending total with + when any action group is incomplete", async () => {
+    vi.mocked(useDashboardOverview).mockReturnValue({
+      data: {
+        open_issues_by_project: [],
+        daily_resolved: dailyResolvedWith({}),
+        action_item_groups: [
+          { kind: "t3_waiting", count: 2, complete: false, items: [] },
+          { kind: "recommendations", count: 1, items: [] },
+        ],
+      },
+      isLoading: false,
+    } as unknown as ReturnType<typeof useDashboardOverview>);
+
+    await renderDashboardPage();
+
+    expect(screen.getByText("近 7 天解决 0 个，3+ 件事等你处理")).toBeInTheDocument();
+  });
+
+  it("falls back to the greeting while unavailable", async () => {
+    vi.mocked(useDashboardOverview).mockReturnValue({
+      data: {
+        open_issues_by_project: [],
+        daily_resolved: dailyResolvedWith({}),
+        action_item_groups: [{ kind: "recommendations", count: 4, items: [] }],
+      },
+      isLoading: false,
+      isError: true,
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useDashboardOverview>);
+
+    await renderDashboardPage();
+
+    // 摘要句依赖数据可用性：失败时回退问候语，绝不展示旧数字
+    expect(screen.queryByText(/近 7 天解决/)).not.toBeInTheDocument();
+    expect(screen.getByText(/查看今日项目概况/)).toBeInTheDocument();
+  });
+
+  it("renders the flow card with bucket badges, cycle list and backlog bar", async () => {
+    vi.mocked(useDashboardOverview).mockReturnValue({
+      data: {
+        open_issues_by_project: [
+          { project_id: "p1", project_name: "Alpha App", open_issue_count: 5 },
+        ],
+        daily_resolved: dailyResolvedWith({ 29: 1 }),
+        daily_created: dailyCreated,
+        flow: {
+          todo_count: 3,
+          in_progress_count: 2,
+          daily_created: dailyCreated,
+          cycle_time_by_project: [
+            {
+              project_id: "p1",
+              project_name: "Alpha App",
+              median_days: 2.5,
+              completed_count: 3,
+            },
+          ],
+          backlog_age: { under_7d: 2, d7_to_30d: 2, over_30d: 1 },
+        },
+      },
+      isLoading: false,
+    } as unknown as ReturnType<typeof useDashboardOverview>);
+
+    await renderDashboardPage();
+
+    expect(screen.getByTestId("flow-card")).toBeInTheDocument();
+    // 恒等式徽章：3+2 == Σopen_issue_count（5）
+    expect(screen.getByText("待办 3")).toBeInTheDocument();
+    expect(screen.getByText("进行中 2")).toBeInTheDocument();
+    expect(screen.getByText("中位 2.5 天 · 3 个")).toBeInTheDocument();
+    expect(screen.getByTestId("backlog-age-bar")).toBeInTheDocument();
+    expect(screen.getByText("7 天内 2")).toBeInTheDocument();
+    expect(screen.getByText("30 天以上 1")).toBeInTheDocument();
+  });
+
+  it("shows 暂不可用 for a degraded flow block instead of zeroed numbers", async () => {
+    vi.mocked(useDashboardOverview).mockReturnValue({
+      data: {
+        open_issues_by_project: [],
+        daily_resolved: dailyResolvedWith({}),
+        flow: {
+          complete: false,
+          todo_count: 0,
+          in_progress_count: 0,
+          daily_created: dailyCreated,
+          cycle_time_by_project: [],
+          backlog_age: { under_7d: 0, d7_to_30d: 0, over_30d: 0 },
+        },
+      },
+      isLoading: false,
+    } as unknown as ReturnType<typeof useDashboardOverview>);
+
+    await renderDashboardPage();
+
+    const card = screen.getByTestId("flow-card");
+    expect(card).toHaveTextContent("暂不可用");
+    // 降级时零值徽章不渲染，避免被读成真实读数
+    expect(screen.queryByText("待办 0")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("backlog-age-bar")).not.toBeInTheDocument();
+  });
+
+  it("renders the AI panel with per-env rows, review buckets and bots stats", async () => {
+    vi.mocked(useDashboardOverview).mockReturnValue({
+      data: {
+        open_issues_by_project: [],
+        daily_resolved: dailyResolvedWith({}),
+        ai: {
+          t3: {
+            environments: [
+              {
+                environment_id: "env-1",
+                environment_name: "工作站",
+                running: 2,
+                waiting: 1,
+                queued: 1,
+                readable: true,
+              },
+              {
+                environment_id: "env-2",
+                environment_name: "离线机",
+                running: 0,
+                waiting: 0,
+                queued: 0,
+                readable: false,
+              },
+            ],
+          },
+          reviews: {
+            passed: 3,
+            blocked: 1,
+            errored: 1,
+            in_flight: 2,
+            pass_rate: 0.75,
+          },
+          bots: {
+            bot_count: 1,
+            timezone: "Asia/Shanghai",
+            cost: null,
+            total_requests: 12,
+            total_tokens: 3456,
+            next_schedule: {
+              bot_id: "b1",
+              bot_name: "值夜机器人",
+              task_name: "晚报",
+              next_run_at: "2026-05-30T12:00:00Z",
+            },
+          },
+        },
+      },
+      isLoading: false,
+    } as unknown as ReturnType<typeof useDashboardOverview>);
+
+    await renderDashboardPage();
+
+    expect(screen.getByTestId("ai-panel-card")).toBeInTheDocument();
+    expect(screen.getByText("运行 2 · 等待 1 · 排队 1")).toBeInTheDocument();
+    expect(screen.getByText("本轮不可读")).toBeInTheDocument();
+    // 通过率 = 3/(3+1) = 75%
+    expect(screen.getByText("通过率 75%")).toBeInTheDocument();
+    expect(screen.getByText("Tokens · 请求（1 个机器人）")).toBeInTheDocument();
+    expect(screen.getByText(/3,456 · 12/)).toBeInTheDocument();
+    // cost=null 是缺失不是 0：显示「未计价」而不是 $0.00
+    expect(screen.getByText("未计价")).toBeInTheDocument();
+    expect(screen.getByText(/下次任务/)).toBeInTheDocument();
+    expect(screen.getByText(/晚报 · 值夜机器人/)).toBeInTheDocument();
+  });
+
+  it("hides the pass rate when its denominator is zero and shows the empty bots state", async () => {
+    vi.mocked(useDashboardOverview).mockReturnValue({
+      data: {
+        open_issues_by_project: [],
+        daily_resolved: dailyResolvedWith({}),
+        ai: {
+          reviews: {
+            passed: 0,
+            blocked: 0,
+            errored: 0,
+            in_flight: 1,
+            pass_rate: null,
+          },
+          bots: {
+            bot_count: 0,
+            timezone: "UTC",
+            cost: null,
+            total_requests: 0,
+            total_tokens: 0,
+          },
+        },
+      },
+      isLoading: false,
+    } as unknown as ReturnType<typeof useDashboardOverview>);
+
+    await renderDashboardPage();
+
+    expect(screen.queryByText(/通过率/)).not.toBeInTheDocument();
+    expect(screen.getByText("未配置机器人")).toBeInTheDocument();
+    expect(screen.getByText("近 7 天（按你的时区）")).toBeInTheDocument();
+  });
+
+  it("renders quota mini bars with remaining percent and status badges", async () => {
+    vi.mocked(useDashboardOverview).mockReturnValue({
+      data: {
+        open_issues_by_project: [],
+        daily_resolved: dailyResolvedWith({}),
+        ai: {
+          quota: {
+            accounts: [
+              {
+                id: "acc-1",
+                label: "主账号",
+                provider: "claude",
+                provider_name: "Claude",
+                credential_hint: "…ab12",
+                status: "ok",
+                note: "",
+                plan_name: "",
+                last_error: "",
+                created_at: "2026-05-01T00:00:00Z",
+                updated_at: "2026-05-01T00:00:00Z",
+                fetched_at: null,
+                last_success_at: null,
+                balance: null,
+                windows: [
+                  {
+                    kind: "session",
+                    label: "五小时",
+                    pool: "",
+                    used: 4,
+                    limit: 10,
+                    unit: "percent",
+                    used_percent: 40,
+                    resets_at: null,
+                    reset_at: null,
+                  },
+                ],
+              },
+              {
+                id: "acc-2",
+                label: "备用号",
+                provider: "codex",
+                provider_name: "Codex",
+                credential_hint: "…cd34",
+                status: "credential_invalid",
+                note: "",
+                plan_name: "",
+                last_error: "",
+                created_at: "2026-05-01T00:00:00Z",
+                updated_at: "2026-05-01T00:00:00Z",
+                fetched_at: null,
+                last_success_at: null,
+                balance: null,
+                windows: [],
+              },
+            ],
+          },
+        },
+      },
+      isLoading: false,
+    } as unknown as ReturnType<typeof useDashboardOverview>);
+
+    await renderDashboardPage();
+
+    expect(screen.getByTestId("ai-quota-section")).toBeInTheDocument();
+    // 剩余百分比由前端 accountRemaining 推导：100-40=60%
+    expect(screen.getByText("60%")).toBeInTheDocument();
+    // 快照旧/失效状态与徽章一起展示
+    expect(screen.getByText("凭据失效")).toBeInTheDocument();
+    expect(screen.getAllByTestId("dashboard-quota-bar")).toHaveLength(2);
+  });
+
+  it("renders the release card with pending links, timeline and unmerged count", async () => {
+    vi.mocked(useDashboardOverview).mockReturnValue({
+      data: {
+        open_issues_by_project: [],
+        daily_resolved: dailyResolvedWith({}),
+        release: {
+          pending_count: 2,
+          pending_versions: [
+            {
+              version_id: "v1",
+              version_number: "v2.0.0",
+              project_id: "p1",
+              project_name: "Alpha App",
+              created_at: "2026-05-28T00:00:00Z",
+              href: "/projects/p1/versions/v1",
+            },
+          ],
+          recent_releases: [
+            {
+              version_id: "v0",
+              version_number: "v1.9.0",
+              project_id: "p1",
+              project_name: "Alpha App",
+              created_at: "2026-05-20T00:00:00Z",
+              shipped_at: "2026-05-20T08:00:00Z",
+              href: "/projects/p1/versions/v0",
+            },
+          ],
+          unmerged_pr_issue_count: 3,
+        },
+      },
+      isLoading: false,
+    } as unknown as ReturnType<typeof useDashboardOverview>);
+
+    await renderDashboardPage();
+
+    expect(screen.getByTestId("release-card")).toBeInTheDocument();
+    expect(screen.getByText("待发版 2")).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: /v2\.0\.0/ }),
+    ).toHaveAttribute("href", "/projects/p1/versions/v1");
+    expect(screen.getByText(/距上次发版/)).toBeInTheDocument();
+    expect(
+      screen.getByText("3 个开启问题还有未合并的 PR"),
+    ).toBeInTheDocument();
+  });
+
+  it("shows 暂不可用 for degraded ai/release blocks and hides new cards on overview failure", async () => {
+    vi.mocked(useDashboardOverview).mockReturnValue({
+      data: {
+        open_issues_by_project: [],
+        daily_resolved: dailyResolvedWith({}),
+        flow: { complete: false, todo_count: 0, in_progress_count: 0, daily_created: [], cycle_time_by_project: [], backlog_age: { under_7d: 0, d7_to_30d: 0, over_30d: 0 } },
+        ai: { reviews: { complete: false, passed: 0, blocked: 0, errored: 0, in_flight: 0, pass_rate: null } },
+        release: {
+          complete: false,
+          pending_count: 0,
+          pending_versions: [],
+          recent_releases: [],
+          unmerged_pr_issue_count: 0,
+        },
+      },
+      isLoading: false,
+    } as unknown as ReturnType<typeof useDashboardOverview>);
+
+    await renderDashboardPage();
+
+    expect(screen.getByTestId("flow-card")).toHaveTextContent("暂不可用");
+    expect(screen.getByTestId("ai-reviews-section")).toHaveTextContent("暂不可用");
+    expect(screen.getByTestId("release-card")).toHaveTextContent("暂不可用");
+  });
+
+  it("hides new blocks entirely while the overview is loading", async () => {
+    vi.mocked(useDashboardOverview).mockReturnValue({
+      isLoading: true,
+    } as unknown as ReturnType<typeof useDashboardOverview>);
+
+    await renderDashboardPage();
+
+    expect(screen.queryByTestId("flow-card")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("ai-panel-card")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("release-card")).not.toBeInTheDocument();
+  });
+});

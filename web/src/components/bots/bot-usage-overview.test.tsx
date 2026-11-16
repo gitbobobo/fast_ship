@@ -26,6 +26,7 @@ const pricedOverview: BotUsageOverview = {
   start: "2026-10-11T16:00:00Z",
   end: "2026-10-18T16:00:00Z",
   totals: {
+    total_tokens: 0,
     cost: 1.23,
     daily_average: 0.1757,
     total_requests: 10,
@@ -124,6 +125,7 @@ const pricedOverview: BotUsageOverview = {
 const unpricedOverview: BotUsageOverview = {
   ...pricedOverview,
   totals: {
+    total_tokens: 0,
     cost: null,
     daily_average: null,
     total_requests: 3,
@@ -234,6 +236,7 @@ describe("usage 格式化助手", () => {
     });
     expect(
       unpricedShare({
+        total_tokens: 0,
         cost: null,
         daily_average: null,
         total_requests: 0,

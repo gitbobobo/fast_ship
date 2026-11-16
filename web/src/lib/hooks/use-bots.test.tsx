@@ -38,6 +38,7 @@ const overview: BotUsageOverview = {
   start: "2026-10-11T16:00:00Z",
   end: "2026-10-18T16:00:00Z",
   totals: {
+    total_tokens: 0,
     cost: null,
     daily_average: null,
     total_requests: 0,
