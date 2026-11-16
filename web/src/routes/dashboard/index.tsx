@@ -367,8 +367,8 @@ function ActionItemGroupSection({ group }: { group: ActionItemGroup }) {
         </span>
       </div>
       <ul className="space-y-1">
-        {group.items.map((item) => (
-          <li key={`${item.href}-${item.title}`}>
+        {group.items.map((item, idx) => (
+          <li key={`${item.href}-${item.title}-${idx}`}>
             <Link
               to={item.href}
               className="block rounded-md px-2 py-1.5 -mx-2 transition-colors hover:bg-muted/60"

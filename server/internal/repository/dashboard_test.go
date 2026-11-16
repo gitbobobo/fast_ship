@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -195,6 +196,61 @@ func TestDashboardListFailedReviews(t *testing.T) {
 	}
 	if items[0].PRTitle != "修复登录页" || items[0].ProjectName != "项目A" || items[0].PRNumber != 7 {
 		t.Fatalf("unexpected item: %+v", items[0])
+	}
+}
+
+// ListFailedReviews 按 PR 去重的 items 必须取满 limit：一个 PR 同轮次可有多条
+// run（code/visual × 多模型），若先 Limit 再去重会让条目数少于角标计数。
+func TestDashboardListFailedReviews_FillsLimitAcrossDupRuns(t *testing.T) {
+	db := newDashboardTestDB(t)
+	userID := dashboardTestUser(t, db)
+	repo := NewDashboardRepository(db)
+	pid := dashboardTestProject(t, db, userID, "项目A", time.Now(), false)
+
+	now := time.Now().UTC()
+	const prs = 7
+	const runsPerPR = 9 // 超过旧实现 limit*8 窗口下单个 PR 能塞满的行数
+	for pr := 1; pr <= prs; pr++ {
+		if err := db.Create(&model.ReviewPullRequest{
+			ProjectID: pid, RepoFullName: "o/r", PRNumber: pr, IntegrationID: "int-1",
+			UserID: userID, RoundNumber: 1, HeadSHA: "sha", UpdatedAt: now,
+		}).Error; err != nil {
+			t.Fatalf("create rp: %v", err)
+		}
+		for k := 0; k < runsPerPR; k++ {
+			fin := now.Add(-time.Duration(pr*100+k) * time.Minute)
+			if err := db.Create(&model.ReviewRun{
+				ID: uuid.NewString(), UserID: userID, ProjectID: pid, Kind: model.ReviewKindCode,
+				RepoFullName: "o/r", PRNumber: pr, HeadSHA: "sha", RoundNumber: 1,
+				IntegrationID: "int-1", EnvironmentID: "env", InstanceID: fmt.Sprintf("i%d-%d", pr, k),
+				Model: "m", ThreadID: "t", LaunchCommandID: "c", InitialMessageID: "m1",
+				Status: model.ReviewRunFailed, DeadlineAt: now, FinishedAt: &fin,
+				PRTitle: fmt.Sprintf("PR%d", pr), CreatedAt: now, UpdatedAt: now,
+			}).Error; err != nil {
+				t.Fatalf("create run: %v", err)
+			}
+		}
+	}
+
+	total, items, err := repo.ListFailedReviews(userID, now.Add(-14*24*time.Hour), 5)
+	if err != nil {
+		t.Fatalf("ListFailedReviews: %v", err)
+	}
+	if total != prs {
+		t.Fatalf("expected total=%d, got %d", prs, total)
+	}
+	if len(items) != 5 {
+		t.Fatalf("expected 5 deduped items, got %d", len(items))
+	}
+	seen := map[int]bool{}
+	for _, it := range items {
+		if seen[it.PRNumber] {
+			t.Fatalf("duplicate PR %d in items", it.PRNumber)
+		}
+		seen[it.PRNumber] = true
+	}
+	if items[0].PRNumber != 1 {
+		t.Fatalf("expected newest PR first (pr 1), got %d", items[0].PRNumber)
 	}
 }
 

@@ -2,6 +2,7 @@ package repository
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/model"
@@ -122,27 +123,61 @@ func (r *DashboardRepository) ListFailedReviews(userID string, since time.Time, 
 		return 0, nil, err
 	}
 
-	// 取回比上限多的行再去重：一个 PR 可能占多行（多个 run kind/模型）。
+	// 先在 SQL 侧按 PR 分组取最新 run，保证 items 取满 limit 个不同 PR
+	//（一个 PR 同轮次可能有多条 run：code/visual × 多模型组合）。
+	type prKey struct {
+		ProjectID    string `gorm:"column:project_id"`
+		RepoFullName string `gorm:"column:repo_full_name"`
+		PRNumber     int    `gorm:"column:pr_number"`
+	}
+	var keys []prKey
+	if err := base.Session(&gorm.Session{}).
+		Select("r.project_id, r.repo_full_name, r.pr_number").
+		Group("r.project_id, r.repo_full_name, r.pr_number").
+		Order("MAX(r.finished_at) DESC").
+		Limit(limit).
+		Scan(&keys).Error; err != nil {
+		return 0, nil, err
+	}
+	items := make([]DashboardFailedReview, 0, len(keys))
+	if len(keys) == 0 {
+		return total, items, nil
+	}
+
+	conds := make([]string, len(keys))
+	args := make([]any, 0, 3*len(keys))
+	for i, k := range keys {
+		conds[i] = "(r.project_id = ? AND r.repo_full_name = ? AND r.pr_number = ?)"
+		args = append(args, k.ProjectID, k.RepoFullName, k.PRNumber)
+	}
 	var rows []DashboardFailedReview
-	if err := base.
+	if err := base.Session(&gorm.Session{}).
 		Select("r.project_id, r.repo_full_name, p.name AS project_name, r.pr_title, r.pr_number").
+		Where(strings.Join(conds, " OR "), args...).
 		Order("r.finished_at DESC").
-		Limit(limit * 8).
 		Scan(&rows).Error; err != nil {
 		return 0, nil, err
 	}
 
-	seen := make(map[string]struct{}, len(rows))
-	items := make([]DashboardFailedReview, 0, limit)
-	for _, row := range rows {
+	// 行按 finished_at 倒序，每个 PR 取第一条即该 PR 最新失败 run；
+	// 输出顺序回填 keys 的分组排序（MAX finished_at 倒序）。
+	rank := make(map[string]int, len(keys))
+	for i, k := range keys {
+		rank[k.ProjectID+"|"+k.RepoFullName+"|"+fmt.Sprint(k.PRNumber)] = i
+	}
+	byPR := make([]*DashboardFailedReview, len(keys))
+	for i := range rows {
+		row := &rows[i]
 		key := row.ProjectID + "|" + row.RepoFullName + "|" + fmt.Sprint(row.PRNumber)
-		if _, ok := seen[key]; ok {
+		idx, ok := rank[key]
+		if !ok || byPR[idx] != nil {
 			continue
 		}
-		seen[key] = struct{}{}
-		items = append(items, row)
-		if len(items) >= limit {
-			break
+		byPR[idx] = row
+	}
+	for _, row := range byPR {
+		if row != nil {
+			items = append(items, *row)
 		}
 	}
 	return total, items, nil
