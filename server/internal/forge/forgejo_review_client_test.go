@@ -142,13 +142,6 @@ func TestForgejoClient_CommentsRoundTrip(t *testing.T) {
 	if got := jsonBody(t, log.body); got["body"] != "body" {
 		t.Fatalf("create body = %v", got)
 	}
-	if err := client.UpdatePullRequestComment(ctx, "o/r", 22, "v2"); err != nil {
-		t.Fatalf("UpdatePullRequestComment: %v", err)
-	}
-	log = lastServeLog(t, logs)
-	if log.method != http.MethodPatch || log.path != "/api/v1/repos/o/r/issues/comments/22" {
-		t.Fatalf("update 形状: %s %s", log.method, log.path)
-	}
 }
 
 // TestForgejoClient_FindPullRequestComment 认自己的评论：先 GET /user 学到
@@ -308,29 +301,6 @@ func TestForgejoClient_StatusErr_RateLimitInTruncatedMiddle(t *testing.T) {
 	}
 	if !IsRateLimit(err) {
 		t.Fatalf("中段限流字样被截断后仍应判 IsRateLimit: %v", err)
-	}
-}
-
-// TestForgejoClient_UpdateComment_NoLearnForeignLogin PATCH 响应的 user 是
-// 原作者不是编辑者：marker-only 命中他人伪造评论时不得把其 login 学进缓存
-// （否则 Self/对账认攻击者为自己且持久中毒——fsb 第 5 轮 P2）。
-func TestForgejoClient_UpdateComment_NoLearnForeignLogin(t *testing.T) {
-	client, _ := newForgejoTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/api/v1/user":
-			w.WriteHeader(http.StatusForbidden)
-		case r.Method == http.MethodPatch:
-			// Forgejo PATCH 回评论对象：user=原作者（伪造者），不是 PAT 账号。
-			_, _ = w.Write([]byte(`{"id": 1, "body": "x", "user": {"login": "mallory"}}`))
-		default:
-			_, _ = w.Write([]byte(`[]`))
-		}
-	})
-	if err := client.UpdatePullRequestComment(context.Background(), "o/r", 1, "b"); err != nil {
-		t.Fatalf("UpdatePullRequestComment: %v", err)
-	}
-	if got := client.loginCache.login; got != "" {
-		t.Fatalf("PATCH 响应不得学习 login，got %q", got)
 	}
 }
 

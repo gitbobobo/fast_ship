@@ -414,8 +414,8 @@ func (c *ForgejoReviewClient) botLogin(ctx context.Context) (string, error) {
 
 // selfLogin 自评判定用的 PAT 账号探测：只有非限流 403（仓库级 PAT 拿不到
 // read:user 的确定性信号）才退化空 login；瞬时网络错误、5xx、401/404
-// 照旧传播挂起本轮——瞬时故障若也降级 marker-only，「作者==自己」过滤就
-// 形同虚设，且 PAT 有仓库管理权限时 PATCH 覆写他人评论连 403 兜底都没有。
+// 照旧传播挂起本轮——瞬时故障若也降级前缀-only，「作者==自己」过滤就
+// 形同虚设：伪造前缀的评论会被当成机器人自己的，本轮发布被跳过。
 // /user 404 不降级：仓库级 PAT 的缺 scope 信号是 403 不是 404——404 更像
 // api_base_url 指错路径前缀，静默降级会让 Self 过滤失效且无任何报错线索。
 // 403 降级前先判 IsRateLimit：GitHub/前置代理的限流正是回 403（body 含
@@ -449,10 +449,11 @@ func (c *ForgejoReviewClient) learnLogin(login string) {
 
 // FindPullRequestComment 按 marker 找机器人顶层评论：GitHub 侧认
 // user.type=Bot，Forgejo 的机器人是普通账号——改为「作者 == PAT 所属账号 +
-// 正文以 marker 开头」。login 不可知（仓库级 PAT + 尚无写响应可学）时退化
-// 到 marker-only 认领：用户伪造 marker 会被覆写一次，但按原样传播错误会让
-// 文档推荐的 token 契约永远发不出评论（两害相权取其轻，详见
-// docs/internal/forge-integrations.md 的 PAT 契约段）。
+// 正文以 marker（含轮次标记行）开头」。login 不可知（仓库级 PAT + 尚无写
+// 响应可学）时退化到前缀-only 认领：顶层评论只建不改后，伪造「marker + 本轮
+// 轮次标记」评论会让机器人这一轮跳过发布（取舍写入 docs/internal/reviews.md；
+// 按原样传播错误会让文档推荐的 token 契约永远发不出评论，两害相权取其轻，
+// 详见 docs/internal/forge-integrations.md 的 PAT 契约段）。
 func (c *ForgejoReviewClient) FindPullRequestComment(ctx context.Context, repoFullName string, number int, marker string) (int64, bool, error) {
 	login, err := c.selfLogin(ctx)
 	if err != nil {
@@ -500,23 +501,6 @@ func (c *ForgejoReviewClient) CreatePullRequestComment(ctx context.Context, repo
 	}
 	c.learnLogin(wire.User.Login)
 	return wire.ID, nil
-}
-
-func (c *ForgejoReviewClient) UpdatePullRequestComment(ctx context.Context, repoFullName string, commentID int64, body string) error {
-	repo, err := repoPath(repoFullName)
-	if err != nil {
-		return err
-	}
-	// PATCH 响应不学 login：评论对象的 user 是原作者不是编辑者——marker-only
-	// 退化命中他人伪造评论且 PAT 有权编辑他人评论时，会把攻击者 login 学进
-	// 共享缓存（中毒是持久的：Self 把攻击者当自己、真机器人评论回流历史）。
-	// 学习只走「响应 user 必然等于 PAT 所属账号」的 POST 路径（create/review）。
-	if err := c.do(ctx, http.MethodPatch,
-		"/repos/"+repo+"/issues/comments/"+strconv.FormatInt(commentID, 10),
-		map[string]string{"body": body}, nil); err != nil {
-		return err
-	}
-	return nil
 }
 
 func (c *ForgejoReviewClient) ListReviews(ctx context.Context, repoFullName string, number int) ([]ReviewSummary, error) {

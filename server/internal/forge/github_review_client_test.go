@@ -24,7 +24,6 @@ type recordingAPI struct {
 	foundID        int64
 	found          bool
 	createdID      int64
-	updatedBody    string
 	reviews        []githubapi.ReviewSummary
 	reviewID       int64
 	reviewInput    githubapi.ReviewInput
@@ -84,12 +83,6 @@ func (r *recordingAPI) FindPullRequestComment(_ context.Context, installationID 
 func (r *recordingAPI) CreatePullRequestComment(_ context.Context, installationID int64, _ string, _ int, _ string) (int64, error) {
 	r.mark(installationID)
 	return r.createdID, nil
-}
-
-func (r *recordingAPI) UpdatePullRequestComment(_ context.Context, installationID int64, _ string, _ int64, body string) error {
-	r.mark(installationID)
-	r.updatedBody = body
-	return nil
 }
 
 func (r *recordingAPI) SubmitReview(_ context.Context, installationID int64, _ string, _ int, in githubapi.ReviewInput) (int64, error) {
@@ -183,9 +176,6 @@ func TestGitHubReviewClientPassesInstallationID(t *testing.T) {
 	}
 	if _, err := client.CreatePullRequestComment(ctx, "o/r", 1, "b"); err != nil || api.last() != inst {
 		t.Fatalf("CreatePullRequestComment installationID = %d, want %d (err=%v)", api.last(), inst, err)
-	}
-	if err := client.UpdatePullRequestComment(ctx, "o/r", 7, "b"); err != nil || api.last() != inst {
-		t.Fatalf("UpdatePullRequestComment installationID = %d, want %d (err=%v)", api.last(), inst, err)
 	}
 	if _, err := client.ListReviews(ctx, "o/r", 1); err != nil || api.last() != inst {
 		t.Fatalf("ListReviews installationID = %d, want %d (err=%v)", api.last(), inst, err)
@@ -285,9 +275,6 @@ func TestGitHubReviewClientConvertsListAndSubmitTypes(t *testing.T) {
 		Path: "a.go", Line: 5, Side: "RIGHT", Body: "c1",
 	}) {
 		t.Fatalf("ReviewInput 转换不完整: %+v", api.reviewInput)
-	}
-	if err := client.UpdatePullRequestComment(ctx, "o/r", 7, "nb"); err != nil || api.updatedBody != "nb" {
-		t.Fatalf("UpdatePullRequestComment body = %q (err=%v)", api.updatedBody, err)
 	}
 	if err := client.CreateCommitStatus(ctx, "o/r", "sha", "success", "ctx", "d", "u"); err != nil ||
 		api.status != (statusCall{repo: "o/r", sha: "sha", state: "success", statusContext: "ctx", description: "d", targetURL: "u"}) {

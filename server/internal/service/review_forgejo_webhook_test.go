@@ -768,59 +768,104 @@ func TestForgejoPoll_DecryptErrorDisablesReview(t *testing.T) {
 	}
 }
 
-// TestUpsertPRCommentRateLimitDoesNotDuplicate marker 找回的顶层评论 PATCH
-// 撞限流 403：报错重试而不是当「不是我们的」回退新建——否则限流窗口每次
-// 同步都会多发一条重复顶层审查评论。对照：真权限 403 照常回退新建。
-func TestUpsertPRCommentRateLimitDoesNotDuplicate(t *testing.T) {
+// TestPostRoundCommentOnlyCreates 顶层评论每轮新发、只建不改（INT-233）：
+// 账本已有 id 直接跳过；id 缺失时按「marker + 轮次标记」前缀找回（用户粘贴
+// 的同文评论不算——FindPullRequestComment 只认 bot 作者）；找不到才新建。
+// 任何路径都不再 PATCH，也就不存在「限流 403 是否回退新建」的分叉。
+func TestPostRoundCommentOnlyCreates(t *testing.T) {
 	svc := setupTestServices(t)
 	review := newReviewTestService(t, svc, nil, nil, nil)
 	ledger := &model.ReviewPullRequest{
 		IntegrationID: "forge-x", ProjectID: "p1",
 		RepoFullName: "acme/app", PRNumber: 5,
+		HeadSHA: "sha-1", RoundNumber: 2,
 	}
 
-	rateLimited := &upsertStubClient{patchErr: &forge.StatusError{StatusCode: 403, Body: "API rate limit exceeded"}}
-	if err := review.upsertPRComment(context.Background(), rateLimited, ledger,
-		"<!-- m -->", "body", "code_comment_id", 0); err == nil {
-		t.Fatal("限流 403 应返回错误走重试")
+	// 找回命中（前缀匹配）→ 跳过、不新建、id 补记回账本。
+	if err := svc.db.Create(ledger).Error; err != nil {
+		t.Fatalf("seed ledger: %v", err)
 	}
-	if rateLimited.created != 0 {
-		t.Fatalf("限流 403 不得新建重复顶层评论, created=%d", rateLimited.created)
-	}
-
-	forbidden := &upsertStubClient{patchErr: &forge.StatusError{StatusCode: 403, Body: "Forbidden"}}
-	if err := review.upsertPRComment(context.Background(), forbidden, ledger,
+	found := &roundStubClient{findID: 900}
+	ledger.CodeCommentID = 0
+	if err := review.postRoundComment(context.Background(), found, ledger,
 		"<!-- m -->", "body", "code_comment_id", 0); err != nil {
-		t.Fatalf("权限 403 应回退新建: %v", err)
+		t.Fatalf("找回路径不应报错: %v", err)
 	}
-	if forbidden.created != 1 {
-		t.Fatalf("权限 403 应回退新建一条, created=%d", forbidden.created)
+	if found.created != 0 {
+		t.Fatalf("找回命中不得新建, created=%d", found.created)
+	}
+	var stored model.ReviewPullRequest
+	svc.db.Where("project_id = ? AND repo_full_name = ? AND pr_number = ?",
+		"p1", "acme/app", 5).First(&stored)
+	if got := stored.CodeCommentID; got != 900 {
+		t.Fatalf("找回后应补记 id, got=%d", got)
+	}
+
+	// 找回失败 → 新建一条；同轮再次发布（重试）不再重复建。
+	fresh := &roundStubClient{}
+	ledger.CodeCommentID = 0
+	if err := review.postRoundComment(context.Background(), fresh, ledger,
+		"<!-- m -->", "body", "code_comment_id", 0); err != nil {
+		t.Fatalf("新建路径不应报错: %v", err)
+	}
+	svc.db.Where("project_id = ? AND repo_full_name = ? AND pr_number = ?",
+		"p1", "acme/app", 5).First(&stored)
+	if fresh.created != 1 || stored.CodeCommentID == 0 {
+		t.Fatalf("应新建一条并写回 id, created=%d id=%d", fresh.created, stored.CodeCommentID)
+	}
+	if err := review.postRoundComment(context.Background(), fresh, ledger,
+		"<!-- m -->", "body", "code_comment_id", stored.CodeCommentID); err != nil {
+		t.Fatalf("重试路径不应报错: %v", err)
+	}
+	if fresh.created != 1 {
+		t.Fatalf("同轮重试不得重复新建, created=%d", fresh.created)
+	}
+
+	// 账本 id 已存在但评论被人为删除：仍跳过（发出后不再改写/重建）。
+	deleted := &roundStubClient{}
+	if err := review.postRoundComment(context.Background(), deleted, ledger,
+		"<!-- m -->", "body", "code_comment_id", 777); err != nil {
+		t.Fatalf("id 命中路径不应报错: %v", err)
+	}
+	if deleted.created != 0 || deleted.finds != 0 {
+		t.Fatalf("id 命中应直接跳过, created=%d finds=%d", deleted.created, deleted.finds)
+	}
+
+	// 找回报错 → 错误透出走重试，不新建。
+	erred := &roundStubClient{findErr: errors.New("boom")}
+	ledger.CodeCommentID = 0
+	if err := review.postRoundComment(context.Background(), erred, ledger,
+		"<!-- m -->", "body", "code_comment_id", 0); err == nil {
+		t.Fatal("找回报错应透出")
+	}
+	if erred.created != 0 {
+		t.Fatalf("找回报错不得新建, created=%d", erred.created)
 	}
 }
 
-// upsertStubClient 顶层评论 upsert 路径桩：marker 找回已存评论，PATCH
-// 结果与新建计数可观测。
-type upsertStubClient struct {
+// roundStubClient 顶层评论只建不改路径桩：前缀找回结果与新建计数可观测。
+type roundStubClient struct {
 	forge.ReviewClient
-	patchErr error
-	created  int
+	findID  int64
+	findErr error
+	finds   int
+	created int
 }
 
-func (c *upsertStubClient) ListIssueCommentsForPR(context.Context, string, int) ([]forge.IssueComment, error) {
-	return nil, nil
+func (c *roundStubClient) FindPullRequestComment(context.Context, string, int, string) (int64, bool, error) {
+	c.finds++
+	if c.findErr != nil {
+		return 0, false, c.findErr
+	}
+	if c.findID != 0 {
+		return c.findID, true, nil
+	}
+	return 0, false, nil
 }
 
-func (c *upsertStubClient) FindPullRequestComment(context.Context, string, int, string) (int64, bool, error) {
-	return 900, true, nil
-}
-
-func (c *upsertStubClient) UpdatePullRequestComment(context.Context, string, int64, string) error {
-	return c.patchErr
-}
-
-func (c *upsertStubClient) CreatePullRequestComment(context.Context, string, int, string) (int64, error) {
+func (c *roundStubClient) CreatePullRequestComment(context.Context, string, int, string) (int64, error) {
 	c.created++
-	return 901, nil
+	return 1000 + int64(c.created), nil
 }
 
 // decryptFailClient 密文损坏场景桩：reviewClient 的解密在 resolver 内发生——

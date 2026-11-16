@@ -145,16 +145,18 @@ func TestReviewSyncDiffTooLargeDowngradesThenSelfHeals(t *testing.T) {
 	if got := len(e.fake.ReviewEvents(repo)); got != 1 {
 		t.Fatalf("diff 可读后应补发 1 条行内 review，实际 %d", got)
 	}
+	// 评论每轮只建不改（INT-233）：降级提示按首次口径一次写定，自愈只补
+	// 行内 review，不回头改评论注记；也不得重复发第二条评论。
+	if counts := e.fake.CallCounts(); counts["CreatePullRequestComment"] != 1 {
+		t.Fatalf("自愈不得重复发顶层评论，create=%d", counts["CreatePullRequestComment"])
+	}
 	for _, body := range e.fake.Comments(repo, 78) {
 		if strings.Contains(body, reviewCodeCommentMarker) {
 			codeComment = body
 		}
 	}
-	if strings.Contains(codeComment, tooLargeNotice) {
-		t.Fatal("diff 可读后评论正文不应再含降级提示")
-	}
-	if strings.Contains(codeComment, "未行内标注") {
-		t.Fatal("行号 2 在 diff 右侧有效行内，不应加「未行内标注」注记")
+	if !strings.Contains(codeComment, tooLargeNotice) {
+		t.Fatal("评论注记按首次口径保持不变（自愈不改评论）")
 	}
 	e.svc.db.First(&after, "id = ?", run.ID)
 	if after.PostedAt == nil {
@@ -210,17 +212,11 @@ func TestReviewSyncDiff406WithoutTooLargeStaysRetryable(t *testing.T) {
 	if got := len(e.fake.StatusesForContext(reviewCodeStatusContext)); got == 0 {
 		t.Fatal("暂时态 diff 失败不应阻断代码 commit status 写入")
 	}
-	commentBody := ""
+	// 顶层评论先不发（INT-233）：暂时态失败等 diff 恢复后一次发完整口径。
 	for _, body := range e.fake.Comments(repo, 81) {
 		if strings.Contains(body, reviewCodeCommentMarker) {
-			commentBody = body
+			t.Fatalf("暂时态 diff 失败不应发顶层评论，发出了: %s", body)
 		}
-	}
-	if commentBody == "" {
-		t.Fatal("暂时态 diff 失败不应阻断顶层评论写入")
-	}
-	if strings.Contains(commentBody, "本轮 GitHub 拒绝读取 PR diff") {
-		t.Fatal("没有结构化 too_large 不应按降级收尾渲染提示")
 	}
 	if got := e.fake.ReviewEvents(repo); len(got) != 0 {
 		t.Fatalf("暂时态失败不应提交行内 review，events = %v", got)
@@ -345,13 +341,14 @@ func TestReviewSyncDiffTooLargeKeepsAllFindingsAndClearsStaleFailure(t *testing.
 		}).Error; err != nil {
 		t.Fatalf("重新入队: %v", err)
 	}
-	updatesBefore := e.fake.CallCounts()["UpdatePullRequestComment"]
+	createsBefore := e.fake.CallCounts()["CreatePullRequestComment"]
 	review.syncPendingPRs(now.Add(time.Minute))
 	if client.diffCalls != 2 {
 		t.Fatalf("同轮新事件应再读一次 diff，调用 = %d, want 2", client.diffCalls)
 	}
-	if got := e.fake.CallCounts()["UpdatePullRequestComment"]; got != updatesBefore {
-		t.Fatalf("正文未变不应重复 PATCH：%d → %d", updatesBefore, got)
+	// 评论每轮只建不改：同轮新事件不重复发帖、不改写既有评论。
+	if got := e.fake.CallCounts()["CreatePullRequestComment"]; got != createsBefore {
+		t.Fatalf("同轮新事件不得重复发顶层评论：%d → %d", createsBefore, got)
 	}
 	loadLedger()
 	if ledger.SyncPending || ledger.SyncError != "" {
@@ -378,16 +375,21 @@ func TestReviewSyncDiffTooLargeKeepsAllFindingsAndClearsStaleFailure(t *testing.
 	if afterPending.PostedAt == nil {
 		t.Fatal("补发行内 review 后应标记 posted_at")
 	}
+	// 评论每轮只建不改（INT-233）：自愈只补行内 review，降级提示按首次口径
+	// 一次写定，评论不再改写，也不重复发第二条。
+	if counts := e.fake.CallCounts(); counts["CreatePullRequestComment"] != 1 {
+		t.Fatalf("自愈不得重复发顶层评论，create=%d", counts["CreatePullRequestComment"])
+	}
 	for _, body := range e.fake.Comments(repo, 82) {
 		if strings.Contains(body, reviewCodeCommentMarker) {
 			codeComment = body
 		}
 	}
-	if strings.Contains(codeComment, "本轮 GitHub 拒绝读取 PR diff") {
-		t.Fatal("diff 可读后评论正文不应再含降级提示")
+	if !strings.Contains(codeComment, "本轮 GitHub 拒绝读取 PR diff") {
+		t.Fatal("评论注记按首次口径保持不变（自愈不改评论）")
 	}
 	if !strings.Contains(codeComment, "阻断问题正文") || !strings.Contains(codeComment, "已发布组合的问题") {
-		t.Fatal("恢复后评论应仍完整保留全部组合的发现")
+		t.Fatal("评论应仍完整保留全部组合的发现")
 	}
 }
 

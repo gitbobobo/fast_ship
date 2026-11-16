@@ -65,7 +65,8 @@ func IsForbidden(err error) bool {
 	return errors.Is(err, ErrForbidden) || errors.Is(err, githubapi.ErrForbidden)
 }
 
-// IsNotFound 判断 err 是否 404（评论被删后 PATCH 失败，回退到按标记找回）。
+// IsNotFound 判断 err 是否 404（资源不存在：评论找回/树查询等按确定性
+// 失败归类的判定）。
 func IsNotFound(err error) bool {
 	code, ok := statusOf(err)
 	return ok && code == http.StatusNotFound

@@ -80,6 +80,13 @@ func (s *ReviewService) openRoundTx(
 	// 无条件清空，让同步重新发 pending/结论。
 	ledger.CodeStatus = ""
 	ledger.VisualStatus = ""
+	// 顶层评论每轮新发（INT-233）：轮次推进时清零上一轮的评论 id，本轮
+	// 首次发布按「marker + 轮次标记」前缀找回/新建。同 head 非 manual/comment
+	// 沿用原轮次时不清——同轮内的评论仍按账本 id 幂等跳过。
+	if round != ledger.RoundNumber {
+		ledger.CodeCommentID = 0
+		ledger.VisualCommentID = 0
+	}
 	ledger.HeadSHA = headSHA
 	// 受理时刻的实拉快照随 head 一起推进（滞后时序判定基准，见模型注释）。
 	// nil = 本路径没有实拉快照时刻（防抖消费）：保留旧值（与 installationID

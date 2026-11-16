@@ -613,7 +613,7 @@ func TestReviewSummarizeAndComment(t *testing.T) {
 
 	// 评论正文：标题/结论/分节 + 排序 + 遗留提示（inlineLines=nil：有行号的不加注）。
 	body := buildCodeComment(reviewCommentMeta{RepoFullName: "o/r", HeadSHA: "0123456789abcdef", links: githubLinks("https://github.com"), RoundNumber: 1},
-		[]model.ReviewRun{mkRun(model.ReviewRunCompleted, fail)}, nil, false, true)
+		[]model.ReviewRun{mkRun(model.ReviewRunCompleted, fail)}, nil, true)
 	if !strings.Contains(body, reviewCodeCommentMarker) ||
 		!strings.Contains(body, "## 代码审查 · 0123456 · 第 1 轮") ||
 		!strings.Contains(body, "**P0** [a.go:1](https://github.com/o/r/blob/0123456789abcdef/a.go#L1)") {

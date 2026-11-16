@@ -37,7 +37,7 @@ func TestBuildCodeCommentFormatFull(t *testing.T) {
 	meta := reviewCommentMeta{RepoFullName: "o/r", HeadSHA: "abcdef1234567890", links: githubLinks("https://github.com"), RoundNumber: 3}
 	// 行内判定只认 x.go:42：y.go:7 与 z.go:208 都要加「未行内标注」。
 	body := buildCodeComment(meta, []model.ReviewRun{done, running},
-		map[string]map[int]bool{"server/x.go": {42: true}}, false, false)
+		map[string]map[int]bool{"server/x.go": {42: true}}, false)
 
 	if !strings.Contains(body, "## 代码审查 · abcdef1 · 第 3 轮") {
 		t.Fatalf("missing title: %s", body)
@@ -80,22 +80,14 @@ func TestBuildCodeCommentFormatFull(t *testing.T) {
 	if !strings.Contains(body, "### glm-5.3 · codex\n\n审查中…") {
 		t.Fatalf("missing running section: %s", body)
 	}
-	if strings.Contains(body, "视觉审查尚未结束") {
-		t.Fatal("visualPending=false 不应出现视觉提示")
-	}
 	if !strings.HasSuffix(body, "复审说明：推送新提交后会自动重新审查。") {
 		t.Fatalf("missing closing line: %s", body)
 	}
 
-	// 视觉待办提示仍在表格之后、复审说明之前。
-	pending := buildCodeComment(meta, []model.ReviewRun{done, running},
-		map[string]map[int]bool{"server/x.go": {42: true}}, true, false)
-	if !strings.Contains(pending, "视觉审查尚未结束，将复核截图。") {
-		t.Fatalf("missing visual pending hint: %s", pending)
-	}
-	if i, j, k := strings.Index(pending, "| glm-5.3 · codex"),
-		strings.Index(pending, "视觉审查尚未结束"), strings.Index(pending, "### glm-5.3 · claude-code"); !(i < j && j < k) {
-		t.Fatalf("visual hint not between table and sections: %d %d %d", i, j, k)
+	// 轮次标记（INT-233）：第二行是「marker + 本轮 head + 轮次」，找回按两行
+	// 合并前缀匹配。
+	if !strings.Contains(body, "<!-- fast-ship-code-review -->\n<!-- fast-ship-round:abcdef1234567890:3 -->\n## 代码审查") {
+		t.Fatalf("missing round tag line: %s", body)
 	}
 }
 
@@ -110,7 +102,7 @@ func TestBuildCodeCommentNotInlined(t *testing.T) {
 	meta := reviewCommentMeta{RepoFullName: "o/r", HeadSHA: "abcdef1234567890", links: githubLinks("https://github.com"), RoundNumber: 1}
 
 	// inlineLines 存在但缺该行 → 链接后加注；无行号 → file 后加注。
-	body := buildCodeComment(meta, []model.ReviewRun{run}, map[string]map[int]bool{"a.go": {9: true}}, false, false)
+	body := buildCodeComment(meta, []model.ReviewRun{run}, map[string]map[int]bool{"a.go": {9: true}}, false)
 	if !strings.Contains(body, "**P1** [a.go:5](https://github.com/o/r/blob/abcdef1234567890/a.go#L5)（未行内标注）") {
 		t.Fatalf("missing not-inlined mark on linked finding: %s", body)
 	}
@@ -119,7 +111,7 @@ func TestBuildCodeCommentNotInlined(t *testing.T) {
 	}
 
 	// 行在 diff 有效行内 → 有行号的不加注（无行号的仍然加注）。
-	body = buildCodeComment(meta, []model.ReviewRun{run}, map[string]map[int]bool{"a.go": {5: true}}, false, false)
+	body = buildCodeComment(meta, []model.ReviewRun{run}, map[string]map[int]bool{"a.go": {5: true}}, false)
 	if strings.Contains(body, "a.go#L5)（未行内标注") {
 		t.Fatalf("inlined finding should not be marked: %s", body)
 	}
@@ -128,7 +120,7 @@ func TestBuildCodeCommentNotInlined(t *testing.T) {
 	}
 
 	// 没读 diff（nil）→ 有行号的不臆断加注，无行号的照加。
-	body = buildCodeComment(meta, []model.ReviewRun{run}, nil, false, false)
+	body = buildCodeComment(meta, []model.ReviewRun{run}, nil, false)
 	if strings.Contains(body, "a.go#L5)（未行内标注") {
 		t.Fatalf("nil inlineLines should not mark line findings: %s", body)
 	}
@@ -143,12 +135,53 @@ func TestBuildCodeCommentAllPass(t *testing.T) {
 		`"ui_changed":false,"ui_changed_since_last_visual":false}`
 	run := fmtTestRun(model.ReviewRunCompleted, pass)
 	body := buildCodeComment(reviewCommentMeta{RepoFullName: "o/r", HeadSHA: "abcdef1234567890", links: githubLinks("https://github.com"), RoundNumber: 1},
-		[]model.ReviewRun{run}, nil, false, false)
+		[]model.ReviewRun{run}, nil, false)
 	if !strings.Contains(body, "全部组合通过，未发现 P0–P2 问题。") {
 		t.Fatalf("missing all-pass verdict: %s", body)
 	}
 	if !strings.Contains(body, "| glm-5.3 · claude-code | 完成 | 0 | 0 | 0 | 1 |") {
 		t.Fatalf("missing note count in table: %s", body)
+	}
+}
+
+// TestBuildVisualCommentCarryText 沿用开场白由沿用分支决定（INT-233 审查）：
+// carryFailure 传 visualCarryTextPending（含仅有 prior(open)、无新 findings
+// 的形态——priorVisualFailure 按阻断口径已把这类上一轮判为沿用失败），
+// carrySuccess 传 visualCarryTextPassed，文案与状态判定同源不漂移。
+func TestBuildVisualCommentCarryText(t *testing.T) {
+	meta := reviewCommentMeta{RepoFullName: "o/r", HeadSHA: "abcdef1234567890", links: githubLinks("https://github.com"), RoundNumber: 2}
+	openPrior := []model.ReviewRun{{
+		Kind: model.ReviewKindVisual, Status: model.ReviewRunCompleted,
+		RoundNumber: 1, HeadSHA: "sha-prev",
+		ResultJSON: `{"summary":"有遗留","findings":[],"prior":[{"level":"blocker","body":"旧问题","status":"open"}],"unmeasurable":[]}`,
+	}}
+	if !priorVisualFailure(openPrior) {
+		t.Fatal("前置：仅 prior(open) 阻断的上一轮应判沿用失败（场景成立性）")
+	}
+	body := buildVisualComment(meta, nil, openPrior, visualCarryTextPending)
+	if !strings.Contains(body, "意见尚未处理") || strings.Contains(body, "上一轮审查通过") {
+		t.Fatalf("carryFailure 沿用应写「意见尚未处理」: %s", body)
+	}
+	if !strings.Contains(body, "仍未解决") {
+		t.Fatalf("prior(open) 应渲染进「仍未解决」段: %s", body)
+	}
+
+	clean := []model.ReviewRun{{
+		Kind: model.ReviewKindVisual, Status: model.ReviewRunCompleted,
+		RoundNumber: 1, HeadSHA: "sha-prev",
+		ResultJSON: `{"summary":"通过","findings":[],"prior":[{"level":"P0","body":"已修","status":"fixed"}],"unmeasurable":[]}`,
+	}}
+	if priorVisualFailure(clean) || !priorVisualPassed(clean) {
+		t.Fatal("前置：干净上一轮应判沿用通过（场景成立性）")
+	}
+	body = buildVisualComment(meta, nil, clean, visualCarryTextPassed)
+	if !strings.Contains(body, "上一轮审查通过") || strings.Contains(body, "意见尚未处理") {
+		t.Fatalf("carrySuccess 沿用应写「上一轮审查通过」: %s", body)
+	}
+	// 非沿用（本轮视觉运行结论）不带开场白。
+	plain := buildVisualComment(meta, openPrior, nil, "")
+	if strings.Contains(plain, "沿用上一轮") {
+		t.Fatalf("非沿用评论不应带沿用开场白: %s", plain)
 	}
 }
 
@@ -203,7 +236,7 @@ func TestBuildCodeCommentEscaping(t *testing.T) {
 	run.InstanceID = "in\"stance"
 	run.ModelOptionsJSON = `[{"id":"tag","value":"<b>&amp;"},{"id":"off","value":null}]`
 	meta := reviewCommentMeta{RepoFullName: "o/r", HeadSHA: "abcdef1234567890", links: githubLinks("https://github.com"), RoundNumber: 1}
-	body := buildCodeComment(meta, []model.ReviewRun{run}, map[string]map[int]bool{}, false, false)
+	body := buildCodeComment(meta, []model.ReviewRun{run}, map[string]map[int]bool{}, false)
 
 	// 路径分段编码：括号/空格/# 都不能裸出现在 URL 里，行锚点仍在。
 	for _, want := range []string{

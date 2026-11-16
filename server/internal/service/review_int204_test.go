@@ -319,7 +319,7 @@ func TestBuildCodeCommentOverCap(t *testing.T) {
 	// 超限（受审 head 数 4 > 上限 3，第 4 轮）：P2/Note 不出现，表格下有注明行。
 	meta := reviewCommentMeta{RepoFullName: "o/r", HeadSHA: "abcdef1234567890",
 		links: githubLinks("https://github.com"), RoundNumber: 4, RoundCap: 3, ReviewedHeads: 4}
-	body := buildCodeComment(meta, mkRuns(t), nil, false, false)
+	body := buildCodeComment(meta, mkRuns(t), nil, false)
 	if !strings.Contains(body, "已过轮次上限 3（按受审 head 计），仅报告阻断问题。") {
 		t.Fatalf("超限评论缺注明行: %s", body)
 	}
@@ -337,7 +337,7 @@ func TestBuildCodeCommentOverCap(t *testing.T) {
 	// 都不出现在评论里（契约「超限后只报告 P0/P1」）。
 	onlyP2 := []model.ReviewRun{int204Run(t,
 		`[{"level":"P2","file":"c.go","line":3,"body":"边界"},{"level":"P2","file":"e.go","body":"边界2"}]`, `[]`)}
-	body = buildCodeComment(meta, onlyP2, nil, false, false)
+	body = buildCodeComment(meta, onlyP2, nil, false)
 	if !strings.Contains(body, "无阻断问题。") || strings.Contains(body, "另有 P2 建议") {
 		t.Fatalf("超限仅 P2 结论不符: %s", body)
 	}
@@ -350,14 +350,14 @@ func TestBuildCodeCommentOverCap(t *testing.T) {
 
 	// 超限且全净：通过文案换成「阻断问题」措辞。
 	clean := []model.ReviewRun{int204Run(t, `[]`, `[]`)}
-	body = buildCodeComment(meta, clean, nil, false, false)
+	body = buildCodeComment(meta, clean, nil, false)
 	if !strings.Contains(body, "全部组合通过，未发现阻断问题。") {
 		t.Fatalf("超限全净结论不符: %s", body)
 	}
 
 	// 未超限（RoundCap 未填 = 不限）：P0–P2 与 Note 折叠照常。
 	meta.RoundCap = 0
-	body = buildCodeComment(meta, mkRuns(t), nil, false, false)
+	body = buildCodeComment(meta, mkRuns(t), nil, false)
 	if strings.Contains(body, "已过轮次上限") {
 		t.Fatal("未超限不应有注明行")
 	}
@@ -370,7 +370,7 @@ func TestBuildCodeCommentOverCap(t *testing.T) {
 
 	// 未超限且只有 P2（INT-204 一致性）：状态已是 success，结论措辞与之一致，
 	// 不写「发现」制造红感。
-	body = buildCodeComment(meta, onlyP2, nil, false, false)
+	body = buildCodeComment(meta, onlyP2, nil, false)
 	if !strings.Contains(body, "无阻断问题，另有 P2 建议 2 条。") {
 		t.Fatalf("未超限仅 P2 结论不符: %s", body)
 	}
@@ -387,7 +387,7 @@ func TestBuildCodeCommentOverCap(t *testing.T) {
 		  {"level":"P1","file":"z.go","body":"已驳回","status":"rejected","reason":"有意为之"}]`)}
 	meta.RoundCap = 3
 	meta.ReviewedHeads = 1
-	body = buildCodeComment(meta, withPrior, nil, false, false)
+	body = buildCodeComment(meta, withPrior, nil, false)
 	if !strings.Contains(body, "**仍未解决**") || !strings.Contains(body, "遗留P1") ||
 		!strings.Contains(body, "遗留P2") || !strings.Contains(body, "（非阻断）") {
 		t.Fatalf("未超限应全列 open prior（非阻断带标记）: %s", body)
@@ -400,7 +400,7 @@ func TestBuildCodeCommentOverCap(t *testing.T) {
 	}
 	meta.RoundNumber = 4
 	meta.ReviewedHeads = 4
-	body = buildCodeComment(meta, withPrior, nil, false, false)
+	body = buildCodeComment(meta, withPrior, nil, false)
 	if strings.Contains(body, "遗留P2") || strings.Contains(body, "（非阻断）") {
 		t.Fatalf("超限轮非阻断遗留应省略: %s", body)
 	}
@@ -785,7 +785,7 @@ func TestBuildCodeCommentPriorDedupedAcrossRuns(t *testing.T) {
 	}
 	meta := reviewCommentMeta{RepoFullName: "o/r", HeadSHA: "abcdef1234567890",
 		links: githubLinks("https://github.com"), RoundNumber: 2, RoundCap: 3, ReviewedHeads: 2}
-	body := buildCodeComment(meta, dup, nil, false, false)
+	body := buildCodeComment(meta, dup, nil, false)
 	if !strings.Contains(body, "遗留未解决 1 条。") {
 		t.Fatalf("结论的遗留计数应去重为 1 条:\n%s", body)
 	}
@@ -797,7 +797,7 @@ func TestBuildCodeCommentPriorDedupedAcrossRuns(t *testing.T) {
 	// 超限轮同口径：去重后的遗留阻断计数进结论。
 	meta.RoundNumber = 4
 	meta.ReviewedHeads = 4
-	body = buildCodeComment(meta, dup, nil, false, false)
+	body = buildCodeComment(meta, dup, nil, false)
 	if !strings.Contains(body, "遗留未解决 1 条。") {
 		t.Fatalf("超限轮结论的遗留计数也应去重:\n%s", body)
 	}

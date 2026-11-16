@@ -28,10 +28,9 @@ type ReviewClient interface {
 	// ListIssueCommentsForPR PR 会话评论（review 行内之外的顶层讨论，INT-135
 	// 历史上下文用）。
 	ListIssueCommentsForPR(ctx context.Context, repoFullName string, number int) ([]IssueComment, error)
-	// 机器人顶层评论（每 PR 一条）
+	// 机器人顶层评论（每轮新发，只建不改；找回用「marker + 轮次标记」前缀）
 	FindPullRequestComment(ctx context.Context, repoFullName string, number int, marker string) (commentID int64, found bool, err error)
 	CreatePullRequestComment(ctx context.Context, repoFullName string, number int, body string) (commentID int64, err error)
-	UpdatePullRequestComment(ctx context.Context, repoFullName string, commentID int64, body string) error
 	// review
 	// ListReviews 列出 PR 上已提交的 review（对账用）。
 	ListReviews(ctx context.Context, repoFullName string, number int) ([]ReviewSummary, error)
