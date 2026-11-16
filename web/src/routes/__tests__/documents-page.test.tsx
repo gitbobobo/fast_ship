@@ -81,13 +81,6 @@ vi.mock("@/components/ui/markdown-editor", () => ({
   ),
 }));
 
-vi.mock("@/lib/store/project-preference-store", () => ({
-  useProjectPreferenceStore: () => ({
-    lastSelectedProjectId: "proj-1",
-    setLastSelectedProjectId: vi.fn(),
-  }),
-}));
-
 function renderDocuments(entry = "/projects/proj-1/documents?doc=doc-1") {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },

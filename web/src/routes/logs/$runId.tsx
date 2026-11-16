@@ -12,7 +12,6 @@ import {
   Trash2,
 } from "lucide-react";
 import { HTTPError } from "ky";
-import { ProjectSwitcher } from "@/components/projects/project-switcher";
 import { Header } from "@/components/layout/header";
 import { HeaderActions } from "@/components/layout/header-actions";
 import { Button } from "@/components/ui/button";
@@ -31,13 +30,16 @@ import {
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
 import { Skeleton } from "@/components/ui/skeleton";
-import { useProjects } from "@/lib/hooks/use-projects";
 import {
   useDeleteLogRun,
   useInfiniteLogEntries,
   useLogRun,
 } from "@/lib/hooks/use-logs";
-import { useProjectPreferenceStore } from "@/lib/store/project-preference-store";
+import { useRouteProject } from "@/lib/current-project";
+import {
+  ProjectBreadcrumb,
+  ProjectNotFoundCard,
+} from "@/components/projects/project-page-chrome";
 import { copyWithToast } from "@/lib/copy";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
@@ -87,37 +89,27 @@ function formatTime(value: string | null): string {
 }
 
 export default function LogRunDetailPage() {
-  const { runId = "", id: routeProjectId } = useParams<{
-    runId: string;
-    id: string;
-  }>();
+  const { runId = "" } = useParams<{ runId: string }>();
+  // 项目上下文只认路径：无效 ID 整页空态，不再回退到偏好或静默换项目；
+  // 项目无效时也不发运行详情请求（内容组件不挂载）
+  const { projectId, project, notFound } = useRouteProject();
+  if (notFound) {
+    return <ProjectNotFoundCard />;
+  }
+  return <LogRunDetailContent runId={runId} projectId={projectId} project={project} />;
+}
+
+function LogRunDetailContent({
+  runId,
+  projectId,
+  project,
+}: {
+  runId: string;
+  projectId: string;
+  project: Project | undefined;
+}) {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
-  const { lastSelectedProjectId, setLastSelectedProjectId } =
-    useProjectPreferenceStore();
-  const { data: projectsData } = useProjects();
-  const projects = useMemo(() => projectsData?.items ?? [], [projectsData]);
-
-  // 新路径 /projects/:id/logs/:runId 由路径提供项目；过渡期旧链接仍读 ?project=
-  const urlProjectId = routeProjectId || searchParams.get("project");
-  const projectId = urlProjectId ?? lastSelectedProjectId ?? "";
-
-  useEffect(() => {
-    if (projectId) {
-      setLastSelectedProjectId(projectId);
-    }
-    if (urlProjectId !== projectId && projectId) {
-      const next = new URLSearchParams(searchParams);
-      next.set("project", projectId);
-      setSearchParams(next, { replace: true });
-    }
-  }, [
-    projectId,
-    urlProjectId,
-    searchParams,
-    setSearchParams,
-    setLastSelectedProjectId,
-  ]);
 
   const {
     data: run,
@@ -189,12 +181,6 @@ export default function LogRunDetailPage() {
   const canResetFilters =
     levelFilter !== "all" || queryFilter.trim().length > 0;
 
-  const handleProjectChange = (value: string) => {
-    // 新路径下项目由路径提供：切换后回该项目日志列表，页内 query 不延续
-    setLastSelectedProjectId(value);
-    navigate(`/projects/${value}/logs`);
-  };
-
   const handleDeleteRun = async () => {
     try {
       await deleteRun.mutateAsync(runId);
@@ -205,43 +191,15 @@ export default function LogRunDetailPage() {
     }
   };
 
-  const notFound =
+  const runNotFound =
     runError &&
     runQueryError instanceof HTTPError &&
     runQueryError.response.status === 404;
 
-  if (!projectId) {
-    return (
-      <>
-        <Header title="日志运行" />
-        <div className="p-4 md:p-6">
-          <Card>
-            <CardContent className="flex flex-col items-center justify-center gap-3 py-16 text-muted-foreground">
-              <p className="text-sm">缺少项目 ID，请从日志列表进入或选择项目</p>
-              {projects.length > 0 && (
-                <ProjectSwitcher
-                  value={projectId}
-                  onValueChange={(value) => {
-                    if (!value) return;
-                    setLastSelectedProjectId(value);
-                    navigate(`/projects/${value}/logs/${runId}`);
-                  }}
-                  projects={projects}
-                  placeholder="请选择项目"
-                  className="w-auto min-w-32"
-                />
-              )}
-            </CardContent>
-          </Card>
-        </div>
-      </>
-    );
-  }
-
   if (runLoading) {
     return (
       <>
-        <Header title="日志运行" />
+        <Header title={<ProjectBreadcrumb section="运行详情" project={project} />} />
         <div className="p-4 md:p-6 space-y-4">
           <Skeleton className="h-10 w-64" />
           <Skeleton className="h-32 w-full" />
@@ -251,38 +209,23 @@ export default function LogRunDetailPage() {
     );
   }
 
-  if (notFound || (!runLoading && runError)) {
+  if (runNotFound || (!runLoading && runError)) {
     return (
       <>
-        <Header title="日志运行" />
+        <Header title={<ProjectBreadcrumb section="运行详情" project={project} />} />
         <div className="p-4 md:p-6">
           <Card>
             <CardContent className="flex flex-col items-center justify-center gap-3 py-16 text-muted-foreground">
               <p className="text-sm">
-                {notFound ? "运行不存在" : "加载运行失败，请稍后重试"}
+                {runNotFound ? "运行不存在" : "加载运行失败，请稍后重试"}
               </p>
-              {projects.length > 0 && (
-                <ProjectSwitcher
-                  value={projectId}
-                  onValueChange={(value) => {
-                    if (!value) return;
-                    setLastSelectedProjectId(value);
-                    navigate(`/projects/${value}/logs/${runId}`);
-                  }}
-                  projects={projects}
-                  placeholder="请选择项目"
-                  className="w-auto min-w-32"
-                />
-              )}
-              {projectId && (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => navigate(`/projects/${projectId}/logs`)}
-                >
-                  返回日志列表
-                </Button>
-              )}
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => navigate(`/projects/${projectId}/logs`)}
+              >
+                返回日志列表
+              </Button>
             </CardContent>
           </Card>
         </div>
@@ -295,7 +238,7 @@ export default function LogRunDetailPage() {
   return (
     <>
       <Header
-        title="日志运行"
+        title={<ProjectBreadcrumb section="运行详情" project={project} />}
         actions={
           <HeaderActions
             primary={
@@ -331,16 +274,6 @@ export default function LogRunDetailPage() {
         }
       />
       <div className="p-4 md:p-6 space-y-6">
-        {projects.length > 0 && (
-          <ProjectSwitcher
-            value={projectId}
-            onValueChange={handleProjectChange}
-            projects={projects}
-            placeholder="请选择项目"
-            className="w-auto min-w-32"
-          />
-        )}
-
         <Card>
           <CardContent className="p-4 space-y-3">
             <p className="whitespace-pre-wrap text-base font-medium">
