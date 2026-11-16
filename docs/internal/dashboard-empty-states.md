@@ -9,10 +9,19 @@
 - `open_issues_by_project`：该用户的**全部项目**（`repository/dashboard.go` 从 `projects` 出发 `LEFT JOIN issues`），没有开启问题的项目计数为 `0`，后端已按 `open_issue_count` 降序排好。所以**空数组 ⟺ 没有项目**，有项目时最低也会返回 `0` 行。
 - `daily_resolved`：固定 30 条（含 0 值日期），按 `issue_internal_meta.completed_at` 分日聚合，**不再按项目拆分**（无 `projects` 字段）。近 30 天没有完成记录时 30 条全是 0；更早完成的问题不计入这个窗口。
 - `action_item_groups`：「待我处理」聚合区，固定顺序返回，前端按序渲染。每组 `{kind, count, complete?, items[]}`，`items` 最多 5 条、各带站内 `href`。`complete=false` 表示该组数据不完整：`t3_waiting` 任一环境未 ready（无 T3 环境时该组整组缺席），或其它组查询失败降级（显示「暂不可用」而不是静默清零假扮「一切正常」）。各组口径：`review_failed` 只算近 14 天、`review_pull_requests` 当前轮次+当前 head 的 failed/timed_out 运行，按 PR 去重（同轮次多 run 不重复计数）；`ship_failed` 含 pending 且 `ship_status=failed`（发货失败）与 `ship_hooks_status ∈ {failed, incomplete}`（已发货钩子失败/未齐，会在下次发货重试并自行消失）；`recommendations` 排除 `deferred_at`；`quota_attention` 只认 `credential_invalid`/`provider_error`，与额度页「需处理」横幅同口径。
+- `flow`：流转效率块（INT-235 阶段二），带可省略 `complete`（仅 false 返回）。`todo_count`/`in_progress_count` 按 workflow_status 分桶（NULL/空串/显式 todo 归待办，其余非 done 归进行中），分母判定与 `open_issues_by_project` 完全一致，**恒等式 todo+in_progress == Σopen_issue_count**；刻意独立成查询（概览那两个查询失败即 500，新指标必须能单独降级）。`daily_created` 与 `daily_resolved` 共用同一 UTC 窗口（固定 30 条），前端把两条序列按 date 对齐画堆叠面积图；**只统计 `source='internal'`**——GitHub 同步 issue 关闭时不写 completed_at，混算会把积压趋势系统性画成增长（裁决采纳）。`cycle_time_by_project` ≤5 条：窗口内 completed 且有 started_at 的样本、零时长行剔除、中位数 Go 内算、按 completed_count 降序+项目名升序取前 5，**恒等式 Σcompleted_count ≤ Σdaily_resolved**；连接方向 projects→issues→meta 主键，禁止从 `issue_internal_meta` 出发全表扫（所有新查询同此红线）。`backlog_age` 三档与待办分桶同口径，**恒等式三档之和 == todo+in_progress == Σopen_issue_count**；分档边界在 Go 算好 time 参数传 SQL（时间是文本存储，不用 julianday）。任一子查询失败整块 `complete=false`、计数清零但结构完整。
+- `ai`：AI 运行面板（阶段三），子块独立降级，顶层 `complete=false` 仅当全部在场子块都不可用：
+  - `t3`：每环境一行 `{running, waiting, queued, readable}`，与 `t3_waiting` 组**共用同一次 WaitingThreads 遍历**（绝不调第二次 PeekActive）；`queued` 取原始 shell `status==queued` 且运行相位在 running 的线程——该状态在 `t3ThreadStatus` 兜底分支被折进 running，现有 PeekActive 路径即可分辨，无需动跨端契约（裁决：做，不缺席）；`pendingRuntimeRequest` 优先落 waiting 的线程不算 queued。无 T3 环境时子块缺席。
+  - `reviews`：PR 级四分桶（近 30 天、排除搁置，复用 `review_runs⨝review_pull_requests` 全键连接）：`code_status=success→passed / failure→blocked / error→errored`，pending 或仍有在途 run（`ReviewRunActiveStatuses`）→`in_flight`（在途优先）。**completed ≠ 通过**：run 终态 completed 但 `code_status=failure` 的 PR 归 blocked。`pass_rate=passed/(passed+blocked)`，**分母 0 → null（前端不显示，不代表 100%）**。
+  - `bots`：经 `GetBotUsageOverview(userID,"7d","")` 窄接口取数（今天/脏日回退实时扫描），**绝不直读 bot_usage_daily**；`total_tokens=prompt+completion+reasoning`（未返回按 0）由共享累加器 `botUsageBotAcc` 合计。`cost=null` 是缺失不是 0（前端显示「未计价」）。时区是用量统计的生效时区，前端标注「近 7 天（按你的时区）」。`next_schedule` 走 `bot_schedule_tasks ⨝ bots` 新查询（b.user_id 圈定、enabled、next_run_at 最早一条）：两表小且主键连接，**无额外索引可接受**（本注记即记录）。服务错误（含 ErrInvalidParams/ErrBotNotFound）一律吞掉降级；窄接口 nil 时子块缺席。
+  - `quota`：`QuotaService.List(userID)` 只读快照（不访问网络）。**后端不算剩余百分比**——前端用 `lib/quota.ts` 的 `accountRemaining`（100−max(used_percent)，默认池）推导，配色用 `quotaUsageTone`；快照可能落后，非 ok 状态与徽章一起展示。
+- `release`：发布节奏块（阶段三），子查询任一失败整块降级。`pending_versions`（pending 按 created_at 升序截前 3，count 为全量）；`recent_releases`（shipped_at 降序截前 5，**有意不加时间窗口**——shipped_at 是文本存储，历史行有本地时区写法，窗口过滤会错位；ship.go:210 的发货时间已顺手改写 `.UTC()`（残留清理，新写入恒为 UTC，存量行不作迁移））；`unmerged_pr_issue_count`：开启且至少关联一个非 merged PR（含 closed 未合并）的 issue 去重数、排除搁置，从 projects 出发连接。`days_since_last_release` 不做——前端从 `recent_releases[0].shipped_at` 推「距上次发版 N 天」。
 
 ## 「待我处理」区
 
-- 位于 Hero/错误条之下、KPI 之上，同样受 `unavailable = isLoading || isError` 约束：**加载时渲染骨架屏，失败时整块不渲染**——不能显示缓存里的旧数字，也不能在失败时显示「一切正常」。
+- 位于 Hero/错误条之下、KPI 之上（INT-235 阶段二起 KPI 上移到它前面：左列顺序为 KPI → 待我处理 → 图表 → 流转效率），同样受 `unavailable = isLoading || isError` 约束：**加载时渲染骨架屏，失败时整块不渲染**——不能显示缓存里的旧数字，也不能在失败时显示「一切正常」。
+- Hero 摘要句「近 7 天解决 N 个，M 件事等你处理」：N=`daily_resolved` 尾 7 天合计，「今天」是 UTC 日不能用于东八区早上，所以问候语只在无数据可说（unavailable）时兜底；M=待处理组 count 合计，任一组 `complete=false` 时显示 **M+**（真实值只会更多，不假装精确）。
+- 布局 xl 断点两栏：左列 KPI+待我处理+柱图+面积图+流转效率卡，右列 AI 面板卡+发布节奏卡；窄屏单列按此顺序。两列都是普通文档流（`items-start`），不强行等高。
 - 只列出 `count > 0` 或 `complete === false` 的组；全部组为零且无 incomplete 时整卡折叠成一句「一切正常」。
 - `complete === false` 时组标不看 count：`count > 0` 显示「N+ · 部分环境暂不可用」，`count = 0` 显示「暂不可用」。N+ 表示后端只给了部分环境的读数，真实值只会更多。
 - 每条 item 是一个站内 `Link`（`item.href`），title 主行、detail 次行；不要自己拼 URL。
@@ -33,6 +42,10 @@
 - 卡片右上角只显示「日均 x.x」读数，**不显示涨跌方向图标**；近 30 天没有已解决数据时整段隐藏，避免在空状态下暗示「在变差」。旧的底部统计条（最高日解决/日均解决/活跃项目/问题总量）已随 INT-235 删除，不要恢复。
 - 不要恢复旧的「日均是否达到最大值一半」判断（1 条/30 天会被标成下降），也不要用「最近 7 天 vs 前 7 天」做方向判断：序列最后一格是尚未结束的 UTC 当天，最近窗口天然少一天，平稳吞吐也会被判成下降。真要做周期对比，得先用两个**已结束**的窗口，并补上对应文案。
 - 日均大于 0 且小于 `0.1` 时显示 `<0.1`；日均等于 0（窗口内没有已解决记录）时仍显示 `0.0`。直接 `toFixed(1)` 会把 1 条/30 天渲染成 `0.0`，看起来像没有数据。
+- 「近 30 天已解决」KPI 卡带 7 天 sparkline（`daily_resolved` 尾 7 天）：最后一格是尚未结束的 UTC 当天，**仅展示不判断方向**；全零不画（避免噪音）。其它 KPI 卡不带迷你趋势。
+- 流转效率/AI/发布节奏三张新卡全部受 `unavailable` 约束：加载/失败时不渲染（不是显示旧值）；块级 `complete=false` 时显示「暂不可用」，且**零值徽章/图表/分布条一并不渲染**——降级返回里的 0 是清零占位，不是真实读数。
+- 流转效率卡的「新建 vs 已解决」是堆叠面积图（两条序列按 date 对齐），纯展示无方向判断，不恢复任何涨跌图标。积压年龄分布条三段（7 天内/7-30 天/30 天以上）宽度即占比，总开启数为 0 时显示文案不画条。
+- AI 面板：审查通过率只在分母非零时显示（`pass_rate=null` 不渲染）；机器人 `cost=null` 显示「未计价」不渲染 `$0.00`；`bot_count=0` 显示「未配置机器人」；额度迷你条画已用方向、剩余百分比用 `accountRemaining` 推导，非 ok 状态配状态徽章（快照可能是旧数据）。
 
 ## 纵轴刻度
 
@@ -45,5 +58,6 @@
 ## 测试
 
 - `web/src/components/dashboard/metric-chart.test.tsx`：空状态、全零项目行（含不画填充段）、带 `href` 的行渲染为链接、`maxRows`+`collapsedLabel` 折叠行不可点、窗口全零、最大值 1/2 与 5 时的刻度阶梯。
-- `web/src/routes/__tests__/dashboard-page.test.tsx`：「待我处理」区渲染组名/count/items 链接、「一切正常」空态、`complete === false` 降级（「N+ · 部分环境暂不可用」/「暂不可用」）、错误态不渲染该区；柱图 Top 10 折叠与行 href 指向 `/issues?project=<id>&state=open`；「已配置项目」KPI 链接 `/projects`；空数据时每张图表卡片只有一个空状态、无伪造项目行、入口链接指向 `/projects`、不渲染趋势图；日均 `<0.1` 的显示且不再有方向图标；首次失败与「缓存后 refetch 失败」两种错误态都隐藏旧数字（`unavailable` 条件）。
+- `web/src/routes/__tests__/dashboard-page.test.tsx`：「待我处理」区渲染组名/count/items 链接、「一切正常」空态、`complete === false` 降级（「N+ · 部分环境暂不可用」/「暂不可用」）、错误态不渲染该区；柱图 Top 10 折叠与行 href 指向 `/issues?project=<id>&state=open`；「已配置项目」KPI 链接 `/projects`；空数据时每张图表卡片只有一个空状态、无伪造项目行、入口链接指向 `/projects`、不渲染趋势图；日均 `<0.1` 的显示且不再有方向图标；首次失败与「缓存后 refetch 失败」两种错误态都隐藏旧数字（`unavailable` 条件）。INT-235 阶段二/三：Hero 摘要句（N/M/M+ 与 unavailable 回退）、流转效率卡（徽章/周期列表/积压条/降级零值不渲染）、AI 面板（每环境行含排队/不可读、四分桶+通过率 75%、pass_rate null 不显示、机器人 token/未计价/未配置、额度条 60%+凭据失效徽章）、发布节奏卡（待发版链接/时间线/未合并计数/降级）。
+- 后端恒等式与降级：`server/internal/service/dashboard_test.go`（todo+in_progress==Σopen、三档年龄==Σopen、Σcycle≤Σresolved、中位数边界、各块降级不 500、t3 单遍历共用）；`server/internal/repository/dashboard_test.go`（分桶判定、internal 过滤、样本窗口、next_schedule 语义）。
 - 网格：`MetricChart` 的 tooltip 在图表转为空状态时必须消失（悬浮中数据可能被刷新成全零）。
