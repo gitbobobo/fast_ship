@@ -93,7 +93,9 @@ export function ReleaseCard({ release }: { release: ReleaseBlock }) {
                         {releaseItem.project_name}
                       </span>
                       <span className="shrink-0 tabular-nums text-[11px] text-muted-foreground">
-                        {formatScheduleTime(releaseItem.shipped_at)}
+                        {releaseItem.shipped_at
+                          ? formatScheduleTime(releaseItem.shipped_at)
+                          : "时间未知"}
                       </span>
                     </li>
                   ))}
