@@ -616,4 +616,22 @@ func TestAppendNewDiscussion_FetchFailureDegrades(t *testing.T) {
 	if !strings.Contains(b2.String(), "人工行内回复") {
 		t.Fatalf("人工行内评论照常收录:\n%s", b2.String())
 	}
+
+	// 引用回复把原件标记搬进引用块（> 前缀），不得被自评过滤误丢——作者
+	// 引用机器人行内意见回复「驳回」正是本题要保住的通道（PR#209 审查 R2）。
+	client3 := &discussionStubClient{
+		reviewComments: []forge.ReviewComment{
+			{User: "fjbobo", Path: "a.go", Body: "> <!-- fast-ship-inline -->\n> P1：自评意见\n\n这条我驳回", CreatedAt: now},
+		},
+		issueComments: []forge.IssueComment{
+			{User: "fjbobo", Body: "> <!-- fast-ship-code-review -->\n> 顶层结论\n\n会话里的引用驳回", CreatedAt: now},
+		},
+	}
+	var b3 strings.Builder
+	if err := review.appendNewDiscussion(context.Background(), run, client3, &b3, "fjbobo"); err != nil {
+		t.Fatalf("appendNewDiscussion: %v", err)
+	}
+	if !strings.Contains(b3.String(), "这条我驳回") || !strings.Contains(b3.String(), "会话里的引用驳回") {
+		t.Fatalf("引用回复不得因含标记被误丢:\n%s", b3.String())
+	}
 }

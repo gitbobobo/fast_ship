@@ -358,9 +358,11 @@ func (s *ReviewService) appendNewDiscussion(ctx context.Context, run *model.Revi
 	var entries []entry
 	for _, c := range reviewComments {
 		// c.Self 覆盖 Forgejo：那边的机器人是普通账号，不以 [bot] 结尾。
-		// 行内评论体带 <!-- fast-ship-inline --> 隐藏标记（发布侧写入），
+		// 行内评论体带 <!-- fast-ship-inline --> 隐藏标记（发布侧写在首行），
 		// PAT 重启示得 selfLogin 之前的窗口里也照样拦得住自己的意见。
-		if c.Self || strings.HasSuffix(c.User, "[bot]") || strings.Contains(c.Body, "<!-- fast-ship-") {
+		// 只认行首：平台的引用回复会把原件正文（含标记）搬进引用块，
+		// Contains 会把作者对机器人意见的引用驳回整条误丢（PR#209 审查 R2）。
+		if c.Self || strings.HasSuffix(c.User, "[bot]") || strings.HasPrefix(c.Body, "<!-- fast-ship-") {
 			continue
 		}
 		// 文件路径不进可信标题：文件名允许换行，也能直接写出「（PR 作者）」，
@@ -369,8 +371,10 @@ func (s *ReviewService) appendNewDiscussion(ctx context.Context, run *model.Revi
 		entries = append(entries, entry{at: c.CreatedAt, head: head, path: c.Path, body: c.Body})
 	}
 	for _, c := range issueComments {
-		// 系统自己的顶层结论评论（隐藏标记）与机器人发言不进历史。
-		if c.Self || strings.HasSuffix(c.User, "[bot]") || strings.Contains(c.Body, "<!-- fast-ship-") {
+		// 系统自己的顶层结论评论（隐藏标记在首行）与机器人发言不进历史；
+		// 只认行首——引用回复会把原件正文（含标记）搬进引用块，Contains
+		// 会把作者的引用驳回整条误丢。
+		if c.Self || strings.HasSuffix(c.User, "[bot]") || strings.HasPrefix(c.Body, "<!-- fast-ship-") {
 			continue
 		}
 		head := "会话评论 · @" + c.User + discussionAuthorTag(c.User, authorLogin)
