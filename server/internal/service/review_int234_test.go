@@ -41,7 +41,7 @@ func TestCodeHistoryRejectedPersistsAcrossRounds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("codeHistory: %v", err)
 	}
-	if !strings.Contains(h, "## 已驳回（作者驳回，没有新证据不要再提）") {
+	if !strings.Contains(h, "## 已驳回（此前判定为作者驳回或有意为之，没有新证据不要再提）") {
 		t.Fatalf("第 3 轮历史缺已驳回小节:\n%s", h)
 	}
 	for _, want := range []string{"- 已驳回 · P2 a.go:3 间距问题", "驳回理由：设计有意为之"} {
@@ -148,7 +148,7 @@ func TestVisualHistoryIncludesDiscussionAndRejected(t *testing.T) {
 		t.Fatalf("visualHistory: %v", err)
 	}
 	for _, want := range []string{
-		"## 已驳回（作者驳回，没有新证据不要再提）",
+		"## 已驳回（此前判定为作者驳回或有意为之，没有新证据不要再提）",
 		"- 已驳回 · minor：副标题间距",
 		"驳回理由：设计有意为之",
 		"## 人工讨论（最近 50 条，按时间正序）",

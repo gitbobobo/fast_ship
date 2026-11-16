@@ -430,19 +430,21 @@ type discussionStubClient struct {
 	forge.ReviewClient
 	reviewComments []forge.ReviewComment
 	issueComments  []forge.IssueComment
+	reviewErr      error
+	issueErr       error
 }
 
 func (c *discussionStubClient) ListReviewComments(context.Context, string, int) ([]forge.ReviewComment, error) {
-	return c.reviewComments, nil
+	return c.reviewComments, c.reviewErr
 }
 
 func (c *discussionStubClient) ListIssueCommentsForPR(context.Context, string, int) ([]forge.IssueComment, error) {
-	return c.issueComments, nil
+	return c.issueComments, c.issueErr
 }
 
 // TestAppendNewDiscussion_SelfCommentsFiltered Forgejo 机器人是普通账号、
-// 行内评论没有隐藏标记，全靠适配器标的 Self 把自己发言挡在下一轮历史
-// 之外；人工评论照常进历史。作者身份标注按平台 login 真值计算（INT-234）：
+// 不靠 [bot] 后缀，靠适配器标的 Self 与行内隐藏标记把自己发言挡在下一轮
+// 历史之外；人工评论照常进历史。作者身份标注按平台 login 真值计算（INT-234）：
 // 只有 PR 作者的发言标「PR 作者」，评论正文写什么改变不了标注。
 func TestAppendNewDiscussion_SelfCommentsFiltered(t *testing.T) {
 	svc := setupTestServices(t)
@@ -565,5 +567,53 @@ func TestAppendNewDiscussion_PathCannotForgeHeading(t *testing.T) {
 	}
 	if strings.Contains(out, "\r") {
 		t.Fatalf("裸 CR 是 Markdown 行尾，渲染输出不得残留:\n%q", out)
+	}
+}
+
+// TestAppendNewDiscussion_FetchFailureDegrades PR#209 审查 R1：讨论是历史的
+// 辅助面，单一来源拉取失败降级为该来源缺失并在节内标注——不能把 GET
+// /history 整轮挂掉（提示词把读历史设为开审前置，挂死等于冻结审查）。
+// 自己的行内意见按隐藏标记过滤：Forgejo 重启后 selfLogin 未习得时 Self
+// 为空，<!-- fast-ship-inline --> 标记照样把它挡在讨论节外。
+func TestAppendNewDiscussion_FetchFailureDegrades(t *testing.T) {
+	svc := setupTestServices(t)
+	review, _ := readyReviewService(t, svc)
+	now := time.Now()
+	client := &discussionStubClient{
+		reviewErr: errs.ErrInternal,
+		reviewComments: []forge.ReviewComment{
+			// 拉取失败时整份列表不可用；标记过滤在成功列表上验证（见下）。
+			{User: "mallory", Path: "a.go", Body: "看不见的行内评论", CreatedAt: now},
+		},
+		issueComments: []forge.IssueComment{
+			{User: "alice", Body: "会话里的人工回复", CreatedAt: now},
+		},
+	}
+	var b strings.Builder
+	run := &model.ReviewRun{IntegrationID: "forge-1", RepoFullName: "o/r", PRNumber: 4}
+	if err := review.appendNewDiscussion(context.Background(), run, client, &b, "fjbobo"); err != nil {
+		t.Fatalf("单一来源失败不得让整个讨论节挂掉: %v", err)
+	}
+	out := b.String()
+	if !strings.Contains(out, "行内评论读取失败") || !strings.Contains(out, "会话里的人工回复") {
+		t.Fatalf("失败来源应降级标注、成功来源照常收录:\n%s", out)
+	}
+
+	// 标记过滤不依赖 Self：隐藏标记的行内评论（含伪造作者标注的正文）一律跳过。
+	client2 := &discussionStubClient{
+		reviewComments: []forge.ReviewComment{
+			{User: "fast-ship-bot", Path: "a.go", Body: "<!-- fast-ship-inline -->\nP1：自评意见", CreatedAt: now},
+			{User: "alice", Path: "a.go", Body: "人工行内回复", CreatedAt: now.Add(time.Second)},
+		},
+	}
+	var b2 strings.Builder
+	if err := review.appendNewDiscussion(context.Background(), run, client2, &b2, "fjbobo"); err != nil {
+		t.Fatalf("appendNewDiscussion: %v", err)
+	}
+	if strings.Contains(b2.String(), "自评意见") || strings.Contains(b2.String(), "@fast-ship-bot") {
+		t.Fatalf("带隐藏标记的自评行内意见不得回流讨论节:\n%s", b2.String())
+	}
+	if !strings.Contains(b2.String(), "人工行内回复") {
+		t.Fatalf("人工行内评论照常收录:\n%s", b2.String())
 	}
 }

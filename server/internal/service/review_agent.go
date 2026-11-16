@@ -306,7 +306,7 @@ func writeCrossRoundPriors(b *strings.Builder, open, rejected []api.ReviewPriorD
 		b.WriteString("\n")
 	}
 	if len(rejected) > 0 {
-		b.WriteString("## 已驳回（作者驳回，没有新证据不要再提）\n")
+		b.WriteString("## 已驳回（此前判定为作者驳回或有意为之，没有新证据不要再提）\n")
 		for _, p := range rejected {
 			b.WriteString(priorLine("已驳回", priorLevelText(p.Level), priorLoc(p), p.Body))
 			if p.Reason != nil && strings.TrimSpace(*p.Reason) != "" {
@@ -335,13 +335,19 @@ func priorLine(prefix, level, loc, body string) string {
 // 评论正文写什么改变不了标注（防注入）；authorLogin 为空时不标任何人，
 // 宁可缺标注也不能把普通评论者误标成作者。
 func (s *ReviewService) appendNewDiscussion(ctx context.Context, run *model.ReviewRun, client forge.ReviewClient, b *strings.Builder, authorLogin string) error {
+	// 讨论是历史的辅助面：单一来源拉取失败降级为该来源缺失并在节尾标注，
+	// 不整个挂掉 GET /history——提示词把「读过历史」设为开审前置，一次平台
+	// 抖动不该卡死整轮审查。
+	var incomplete []string
 	reviewComments, err := client.ListReviewComments(ctx, run.RepoFullName, run.PRNumber)
 	if err != nil {
-		return errs.New(errs.ErrGitHubAPI.Code, "读取行内评论失败: "+err.Error())
+		s.logger.Warn("历史上下文读取行内评论失败，本节不含该来源", zap.String("run", run.ID), zap.Error(err))
+		incomplete = append(incomplete, "行内评论")
 	}
 	issueComments, err := client.ListIssueCommentsForPR(ctx, run.RepoFullName, run.PRNumber)
 	if err != nil {
-		return errs.New(errs.ErrGitHubAPI.Code, "读取会话评论失败: "+err.Error())
+		s.logger.Warn("历史上下文读取会话评论失败，本节不含该来源", zap.String("run", run.ID), zap.Error(err))
+		incomplete = append(incomplete, "会话评论")
 	}
 	type entry struct {
 		at   time.Time
@@ -351,9 +357,10 @@ func (s *ReviewService) appendNewDiscussion(ctx context.Context, run *model.Revi
 	}
 	var entries []entry
 	for _, c := range reviewComments {
-		// c.Self 覆盖 Forgejo：那边的机器人是普通账号，不以 [bot] 结尾，
-		// 行内评论又没有隐藏标记可拦。
-		if c.Self || strings.HasSuffix(c.User, "[bot]") {
+		// c.Self 覆盖 Forgejo：那边的机器人是普通账号，不以 [bot] 结尾。
+		// 行内评论体带 <!-- fast-ship-inline --> 隐藏标记（发布侧写入），
+		// PAT 重启示得 selfLogin 之前的窗口里也照样拦得住自己的意见。
+		if c.Self || strings.HasSuffix(c.User, "[bot]") || strings.Contains(c.Body, "<!-- fast-ship-") {
 			continue
 		}
 		// 文件路径不进可信标题：文件名允许换行，也能直接写出「（PR 作者）」，
@@ -372,6 +379,9 @@ func (s *ReviewService) appendNewDiscussion(ctx context.Context, run *model.Revi
 	sort.SliceStable(entries, func(i, j int) bool { return entries[i].at.Before(entries[j].at) })
 	if len(entries) > 50 {
 		entries = entries[len(entries)-50:]
+	}
+	if len(incomplete) > 0 {
+		fmt.Fprintf(b, "- （提示：%s读取失败，本节不含该来源讨论）\n", strings.Join(incomplete, "与"))
 	}
 	for _, e := range entries {
 		fmt.Fprintf(b, "### %s\n", e.head)
