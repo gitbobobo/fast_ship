@@ -62,15 +62,21 @@ func reviewRoundTag(meta reviewCommentMeta, suffix string) string {
 }
 
 // roundCommentPrefix 找回用两行合并前缀（ledger 快照口径，postRoundComment
-// 与各调用点共用，保证写入正文与找回前缀一字不差）。
+// 与各调用点共用；格式只此一处，复用 reviewRoundTag 保证与正文一字不差）。
 func roundCommentPrefix(marker string, ledger *model.ReviewPullRequest, suffix string) string {
-	return marker + "\n" + fmt.Sprintf("<!-- fast-ship-round:%s:%d%s -->", ledger.HeadSHA, ledger.RoundNumber, suffix)
+	return marker + "\n" + reviewRoundTag(reviewCommentMeta{
+		RepoFullName: ledger.RepoFullName,
+		HeadSHA:      ledger.HeadSHA,
+		RoundNumber:  ledger.RoundNumber,
+	}, suffix)
 }
 
-// 顶层评论角色后缀。
+// 顶层评论角色后缀：终态结论无后缀；沿用与「截图不可用」是两种占位角色，
+// 各占独立前缀——同轮角色互翻时互不认领，找回也只认本角色。
 const (
-	roundTagConclusion = ""
-	roundTagCarryNote  = ":carry"
+	roundTagConclusion  = ""
+	roundTagCarryNote   = ":carry"
+	roundTagScreensNote = ":screens"
 )
 
 // statusDesc commit status 的 description 截断（GitHub 上限 140 字节）：
@@ -476,7 +482,7 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 					links:        links,
 				}, outcome.PriorRuns)
 				if err := s.postRoundComment(ctx, client, ledger,
-					roundCommentPrefix(reviewVisualCommentMarker, ledger, roundTagCarryNote),
+					roundCommentPrefix(reviewVisualCommentMarker, ledger, roundTagScreensNote),
 					body, "visual_comment_id", ledger.VisualCommentID); err != nil {
 					return err
 				}
@@ -497,17 +503,6 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 				break
 			}
 			visualRuns = created
-			// 同轮决策从沿用/截图不可用翻到真正开轮（截图探测恢复、PR 描述
-			// 换了可下载的截图集合）：清掉占位评论 id，本轮终态视觉评论按新发
-			// 处理——否则 postRoundComment 按旧 id 短路，本轮 findings 只剩
-			// status、评论区仍是占位说法。占位评论原样留作决策轨迹，不回写
-			// 不改（INT-233 历史不覆写）。
-			if ok, err := s.updateLedgerEpoch(ledger, epoch, map[string]any{"visual_comment_id": 0}); err != nil {
-				return errs.ErrInternal
-			} else if !ok {
-				return nil
-			}
-			ledger.VisualCommentID = 0
 			if err := client.CreateCommitStatus(ctx, ledger.RepoFullName,
 				ledger.HeadSHA, "pending", reviewVisualStatusContext, statusDesc("视觉审查中"), targetURL); err != nil {
 				return errs.New(errs.ErrGitHubAPI.Code, "写视觉审查状态失败: "+err.Error())
@@ -813,13 +808,19 @@ func (s *ReviewService) postVisualComment(ctx context.Context, client forge.Revi
 		links:        links,
 	}
 	body := buildVisualComment(meta, visualRuns, priorRuns, carryText)
+	// 终态结论不按 visual_comment_id 短路、只认终态前缀找回：占位评论
+	// （沿用/截图不可用）与建视觉运行不同事务，占位 id 可能残留在列里，
+	// 按 savedID 短路会让本轮终态 findings 永久漏发（INT-233 审查 R2 P2）。
+	// 终态前缀与占位前缀天然不同，找回幂等，代价只是每 tick 一次列表读。
+	savedID := int64(0)
 	tagSuffix := roundTagConclusion
 	if carryText != "" {
 		tagSuffix = roundTagCarryNote
+		savedID = ledger.VisualCommentID
 	}
 	return s.postRoundComment(ctx, client, ledger,
 		roundCommentPrefix(reviewVisualCommentMarker, ledger, tagSuffix),
-		body, "visual_comment_id", ledger.VisualCommentID)
+		body, "visual_comment_id", savedID)
 }
 
 // codeOpenPriorBlocks 结论里仍未解决（status=open）且会阻断的 prior 条目数
@@ -1494,7 +1495,7 @@ func buildVisualComment(meta reviewCommentMeta, visualRuns, priorRuns []model.Re
 func buildScreensUnavailableComment(meta reviewCommentMeta, priorRuns []model.ReviewRun) string {
 	var b strings.Builder
 	b.WriteString(reviewVisualCommentMarker + "\n")
-	b.WriteString(reviewRoundTag(meta, roundTagCarryNote) + "\n")
+	b.WriteString(reviewRoundTag(meta, roundTagScreensNote) + "\n")
 	fmt.Fprintf(&b, "## 视觉审查 · %s · 第 %d 轮\n\n", reviewShortSHA(meta.HeadSHA), meta.RoundNumber)
 	b.WriteString("本轮 PR 描述里的截图全部无法下载，未做视觉审查。以下为上一轮的视觉审查意见：\n\n")
 	appendVisualFindings(&b, priorRuns, true)

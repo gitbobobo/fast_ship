@@ -719,10 +719,11 @@ func TestVisualSyncScreensUnavailableKeepsSameRoundComment(t *testing.T) {
 	}
 }
 
-// 账本 id 写回失败恢复（INT-233）：carry 同步发出评论后把 visual_comment_id
-// 清零（模拟写回失败），下一轮同轮同步按「marker + 轮次标记」前缀找回既有
-// 评论——跳过发布并把 id 补记回账本，不重复发第二条。
-func TestVisualSyncScreensUnavailableRecoversIDViaPrefix(t *testing.T) {
+// 占位角色前缀与 id 恢复（INT-233 审查 R2）：carry 同步发出评论后把
+// visual_comment_id 清零（模拟写回失败），同轮决策翻到「截图不可用」时按
+// :screens 前缀发布自己的占位评论并把新 id 补记回账本——不会把 carry 评论
+// 认成本角色，也不覆盖 carry 占位。
+func TestVisualSyncScreensUnavailablePostsOwnRoleAfterIDLoss(t *testing.T) {
 	e := newReviewEngineEnv(t)
 	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
 	now := time.Now().UTC()
@@ -787,34 +788,46 @@ func TestVisualSyncScreensUnavailableRecoversIDViaPrefix(t *testing.T) {
 	e.setLedgerPending(t, repo, 91)
 	e.review.syncPendingPRs(now.Add(time.Second))
 
-	// 前缀找回命中本轮 carry 评论：跳过发布，不重复发第二条；id 补记回账本。
+	// 角色各占独立前缀（INT-233 审查 R2：carry 与截图不可用互不认领）：
+	// carry 占位原样保留，「截图不可用」按 :screens 前缀新发自己的占位并
+	// 把新 id 补记回账本。
 	var visuals []string
 	for _, c := range e.fake.Comments(repo, 91) {
 		if strings.Contains(c, reviewVisualCommentMarker) {
 			visuals = append(visuals, c)
 		}
 	}
-	if len(visuals) != 1 {
-		t.Fatalf("visual comments = %d, want 1（前缀找回后不重复发）", len(visuals))
+	if len(visuals) != 2 {
+		t.Fatalf("visual comments = %d, want 2（carry 占位 + :screens 占位各一条）", len(visuals))
 	}
-	if !strings.Contains(visuals[0], "截图未变化") {
-		t.Fatalf("carry 评论应原样保留, got: %s", visuals[0])
+	hasCarry, hasScreens := false, false
+	for _, c := range visuals {
+		if strings.Contains(c, "截图未变化") && strings.Contains(c, ":carry") {
+			hasCarry = true
+		}
+		if strings.Contains(c, "未做视觉审查") && strings.Contains(c, ":screens") {
+			hasScreens = true
+		}
+	}
+	if !hasCarry || !hasScreens {
+		t.Fatalf("应同时存在 :carry 与 :screens 占位评论: %v", visuals)
 	}
 	var ledger2 model.ReviewPullRequest
 	e.svc.db.First(&ledger2, "repo_full_name = ? AND pr_number = 91", repo)
 	if ledger2.VisualCommentID == 0 {
-		t.Fatal("找回后应把 visual_comment_id 补记回账本")
+		t.Fatal("新建后应把 visual_comment_id 补记回账本")
 	}
-	if ledger2.VisualCommentID != ledger.VisualCommentID {
-		t.Fatalf("找回的 id 应与原评论一致: %d != %d", ledger2.VisualCommentID, ledger.VisualCommentID)
+	if ledger2.VisualCommentID == ledger.VisualCommentID {
+		t.Fatalf("补记的应是 :screens 新评论 id, 不该等于被清零前的 carry id %d", ledger.VisualCommentID)
 	}
 }
 
-// INT-233 审查 P2 回归：同一轮内视觉决策从「截图无法下载」翻到真正开轮
-// （探测恢复、PR 描述换了可下载的截图集合）时，visualStart 清掉占位评论 id，
-// 终态视觉评论照常新发——本轮 findings 不再被 savedID 短路吞掉；占位评论
-// 原样保留作决策轨迹。
-func TestVisualSyncStartClearsPlaceholderCommentID(t *testing.T) {
+// INT-233 审查 R2 P2 回归：同一轮内视觉决策从「截图无法下载」翻到真正开轮
+// （探测恢复、PR 描述换了可下载的截图集合）后，终态视觉评论不按占位
+// visual_comment_id 短路、只认终态前缀找回——即使占位 id 残留在账本列里
+// （清 id 与建视觉运行非原子，R2 指出的窗口），本轮 findings 也照常新发；
+// 占位评论原样保留作决策轨迹。
+func TestVisualSyncTerminalCommentSurvivesStalePlaceholderID(t *testing.T) {
 	e := newReviewEngineEnv(t)
 	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
 	now := time.Now().UTC()
@@ -872,8 +885,8 @@ func TestVisualSyncStartClearsPlaceholderCommentID(t *testing.T) {
 	e.setLedgerPending(t, repo, 93)
 	e.review.syncPendingPRs(now.Add(time.Second))
 	e.svc.db.First(&ledger, "repo_full_name = ? AND pr_number = 93", repo)
-	if ledger.VisualCommentID != 0 {
-		t.Fatalf("visualStart 后占位评论 id 应清零, got=%d", ledger.VisualCommentID)
+	if ledger.VisualCommentID != placeholderID {
+		t.Fatalf("占位 id 残留窗口（不与建运行同事务清零）, got=%d want=%d", ledger.VisualCommentID, placeholderID)
 	}
 
 	// 本轮视觉运行出结论（blocker finding），同轮再次同步 → 终态视觉评论
@@ -905,7 +918,8 @@ func TestVisualSyncStartClearsPlaceholderCommentID(t *testing.T) {
 		if strings.Contains(c, "未做视觉审查") {
 			hasPlaceholder = true
 		}
-		if strings.Contains(c, "对比度不足") && strings.Contains(c, "<!-- fast-ship-round:sha-flip:2 -->") {
+		if strings.Contains(c, "对比度不足") && strings.Contains(c, "<!-- fast-ship-round:sha-flip:2 -->") &&
+			!strings.Contains(c, ":carry") && !strings.Contains(c, ":screens") {
 			hasConclusion = true
 		}
 	}
