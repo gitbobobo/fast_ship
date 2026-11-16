@@ -1,6 +1,8 @@
 import { useDeferredValue, useMemo, useState, useEffect } from "react";
 import { Link, useLocation, useNavigate, useSearchParams } from "react-router";
 import { useProjectPreferenceStore } from "@/lib/store/project-preference-store";
+import { useRouteProject } from "@/lib/current-project";
+import { projectSwitchPath } from "@/lib/project-nav";
 import {
   Bug,
   ChevronLeft,
@@ -261,9 +263,13 @@ function IssueCardActions({
 export default function IssuesPage() {
   const { data: projectsData, isLoading: projectsLoading } = useProjects();
   const projects = useMemo(() => projectsData?.items ?? [], [projectsData]);
+  const navigate = useNavigate();
+  const location = useLocation();
 
   const [searchParams, setSearchParams] = useSearchParams();
-  const urlProjectId = searchParams.get("project");
+  // 新路径 /projects/:id/issues 由路径提供项目；过渡期旧链接仍读 ?project=
+  const { projectId: routeProjectId } = useRouteProject();
+  const urlProjectId = routeProjectId || searchParams.get("project");
   const { lastSelectedProjectId, setLastSelectedProjectId } =
     useProjectPreferenceStore();
 
@@ -272,8 +278,9 @@ export default function IssuesPage() {
   );
 
   const activeProjectId = useMemo(
-    () => getActiveProjectId(projects, selectedProjectId, urlProjectId),
-    [projects, selectedProjectId, urlProjectId],
+    () =>
+      routeProjectId || getActiveProjectId(projects, selectedProjectId, urlProjectId),
+    [routeProjectId, projects, selectedProjectId, urlProjectId],
   );
 
   const activeProject = useMemo(
@@ -377,13 +384,20 @@ export default function IssuesPage() {
 
   const handleProjectChange = (value: string | null) => {
     const nextValue = value ?? "";
-    setSelectedProjectId(nextValue);
-    setLastSelectedProjectId(nextValue || null);
-    const next = new URLSearchParams();
-    if (nextValue) {
-      next.set("project", nextValue);
+    // 新路径以 URL 为唯一事实源：切换项目即导航到目标项目的问题列表，
+    // selectedProjectId 由回填 effect 对齐；旧路径维持 state + ?project= 行为
+    const to = projectSwitchPath(location.pathname, nextValue);
+    if (to) {
+      navigate(to);
+    } else {
+      setSelectedProjectId(nextValue);
+      const next = new URLSearchParams();
+      if (nextValue) {
+        next.set("project", nextValue);
+      }
+      setSearchParams(next, { replace: true });
     }
-    setSearchParams(next, { replace: true });
+    setLastSelectedProjectId(nextValue || null);
   };
 
   const handleResetFilters = () => {

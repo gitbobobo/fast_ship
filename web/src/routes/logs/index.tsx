@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Link, useSearchParams } from "react-router";
+import { Link, useLocation, useNavigate, useSearchParams } from "react-router";
 import {
   ChevronLeft,
   ChevronRight,
@@ -35,6 +35,8 @@ import {
 } from "@/lib/hooks/use-logs";
 import { useProjectPreferenceStore } from "@/lib/store/project-preference-store";
 import { getActiveProjectId } from "@/lib/projects";
+import { useRouteProject } from "@/lib/current-project";
+import { projectSwitchPath } from "@/lib/project-nav";
 import { copyWithToast } from "@/lib/copy";
 import { toast } from "sonner";
 
@@ -55,7 +57,11 @@ export default function LogsPage() {
   const projects = useMemo(() => projectsData?.items ?? [], [projectsData]);
 
   const [searchParams, setSearchParams] = useSearchParams();
-  const urlProjectId = searchParams.get("project");
+  const navigate = useNavigate();
+  const { pathname } = useLocation();
+  // 新路径 /projects/:id/logs 由路径提供项目；过渡期旧链接仍读 ?project=
+  const { projectId: routeProjectId } = useRouteProject();
+  const urlProjectId = routeProjectId || searchParams.get("project");
   const { lastSelectedProjectId, setLastSelectedProjectId } =
     useProjectPreferenceStore();
 
@@ -64,8 +70,9 @@ export default function LogsPage() {
   );
 
   const activeProjectId = useMemo(
-    () => getActiveProjectId(projects, selectedProjectId, urlProjectId),
-    [projects, selectedProjectId, urlProjectId],
+    () =>
+      routeProjectId || getActiveProjectId(projects, selectedProjectId, urlProjectId),
+    [routeProjectId, projects, selectedProjectId, urlProjectId],
   );
 
   const activeProject = useMemo(
@@ -136,13 +143,20 @@ export default function LogsPage() {
 
   const handleProjectChange = (value: string | null) => {
     const nextValue = value ?? "";
-    setSelectedProjectId(nextValue);
-    setLastSelectedProjectId(nextValue || null);
-    const next = new URLSearchParams();
-    if (nextValue) {
-      next.set("project", nextValue);
+    // 新路径以 URL 为唯一事实源：切换项目即导航，state 由回填 effect 对齐；
+    // 旧路径维持 state + ?project= 行为
+    const to = projectSwitchPath(pathname, nextValue);
+    if (to) {
+      navigate(to);
+    } else {
+      setSelectedProjectId(nextValue);
+      const next = new URLSearchParams();
+      if (nextValue) {
+        next.set("project", nextValue);
+      }
+      setSearchParams(next, { replace: true });
     }
-    setSearchParams(next, { replace: true });
+    setLastSelectedProjectId(nextValue || null);
   };
 
   const handleResetFilters = () => {

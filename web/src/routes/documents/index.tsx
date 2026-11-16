@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { useSearchParams } from "react-router";
+import { useLocation, useNavigate, useSearchParams } from "react-router";
 import {
   ChevronRight,
   FilePlus2,
@@ -41,6 +41,8 @@ import {
 } from "@/lib/hooks/use-documents";
 import { useProjectPreferenceStore } from "@/lib/store/project-preference-store";
 import { getActiveProjectId } from "@/lib/projects";
+import { useRouteProject } from "@/lib/current-project";
+import { projectSwitchPath } from "@/lib/project-nav";
 import { usePersistedScroll } from "@/lib/hooks/use-persisted-scroll";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
@@ -154,7 +156,11 @@ export default function DocumentsPage() {
   const projects = useMemo(() => projectsData?.items ?? [], [projectsData]);
 
   const [searchParams, setSearchParams] = useSearchParams();
-  const urlProjectId = searchParams.get("project");
+  const navigate = useNavigate();
+  const { pathname } = useLocation();
+  // 新路径 /projects/:id/documents 由路径提供项目；过渡期旧链接仍读 ?project=
+  const { projectId: routeProjectId } = useRouteProject();
+  const urlProjectId = routeProjectId || searchParams.get("project");
   const urlDocId = searchParams.get("doc") ?? "";
   const { lastSelectedProjectId, setLastSelectedProjectId } =
     useProjectPreferenceStore();
@@ -164,8 +170,9 @@ export default function DocumentsPage() {
   );
 
   const activeProjectId = useMemo(
-    () => getActiveProjectId(projects, selectedProjectId, urlProjectId),
-    [projects, selectedProjectId, urlProjectId],
+    () =>
+      routeProjectId || getActiveProjectId(projects, selectedProjectId, urlProjectId),
+    [routeProjectId, projects, selectedProjectId, urlProjectId],
   );
 
   useEffect(() => {
@@ -273,12 +280,19 @@ export default function DocumentsPage() {
       return;
     }
     const nextValue = value ?? "";
-    setSelectedProjectId(nextValue);
+    // 新路径以 URL 为唯一事实源：切换项目即导航，state 由回填 effect 对齐；
+    // 旧路径维持 state + ?project= 行为
+    const to = projectSwitchPath(pathname, nextValue);
+    if (to) {
+      navigate(to);
+    } else {
+      setSelectedProjectId(nextValue);
+      const next = new URLSearchParams();
+      if (nextValue) next.set("project", nextValue);
+      setSearchParams(next, { replace: true });
+    }
     setLastSelectedProjectId(nextValue || null);
     resetEditorState();
-    const next = new URLSearchParams();
-    if (nextValue) next.set("project", nextValue);
-    setSearchParams(next, { replace: true });
   };
 
   const handleSelectDoc = (id: string) => {

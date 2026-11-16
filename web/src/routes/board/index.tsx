@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useSearchParams, Link } from "react-router";
+import {
+  useLocation,
+  useNavigate,
+  useSearchParams,
+  Link,
+} from "react-router";
 import {
   DndContext,
   DragOverlay,
@@ -17,6 +22,8 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useProjects } from "@/lib/hooks/use-projects";
 import { useUpdateIssueWorkflowStatus } from "@/lib/hooks/use-issues";
 import { useProjectPreferenceStore } from "@/lib/store/project-preference-store";
+import { useRouteProject } from "@/lib/current-project";
+import { projectSwitchPath } from "@/lib/project-nav";
 import { toast } from "sonner";
 import { getActiveProjectId } from "@/lib/projects";
 import {
@@ -50,7 +57,11 @@ export default function BoardPage() {
   const projects = useMemo(() => projectsData?.items ?? [], [projectsData]);
 
   const [searchParams, setSearchParams] = useSearchParams();
-  const urlProjectId = searchParams.get("project");
+  const navigate = useNavigate();
+  const { pathname } = useLocation();
+  // 新路径 /projects/:id/board 由路径提供项目；过渡期旧链接仍读 ?project=
+  const { projectId: routeProjectId } = useRouteProject();
+  const urlProjectId = routeProjectId || searchParams.get("project");
   const { lastSelectedProjectId, setLastSelectedProjectId } =
     useProjectPreferenceStore();
 
@@ -59,8 +70,9 @@ export default function BoardPage() {
   );
 
   const activeProjectId = useMemo(
-    () => getActiveProjectId(projects, selectedProjectId, urlProjectId),
-    [projects, selectedProjectId, urlProjectId],
+    () =>
+      routeProjectId || getActiveProjectId(projects, selectedProjectId, urlProjectId),
+    [routeProjectId, projects, selectedProjectId, urlProjectId],
   );
 
   // 当 activeProjectId 回退时（如存储的项目被删除），同步 state 和 store
@@ -162,13 +174,20 @@ export default function BoardPage() {
 
   const handleProjectChange = (value: string | null) => {
     const nextValue = value ?? "";
-    setSelectedProjectId(nextValue);
-    setLastSelectedProjectId(nextValue || null);
-    const next = new URLSearchParams();
-    if (nextValue) {
-      next.set("project", nextValue);
+    // 新路径以 URL 为唯一事实源：切换项目即导航到目标项目的看板页，
+    // selectedProjectId 由回填 effect 对齐；旧路径维持 state + ?project= 行为
+    const to = projectSwitchPath(pathname, nextValue);
+    if (to) {
+      navigate(to);
+    } else {
+      setSelectedProjectId(nextValue);
+      const next = new URLSearchParams();
+      if (nextValue) {
+        next.set("project", nextValue);
+      }
+      setSearchParams(next, { replace: true });
     }
-    setSearchParams(next, { replace: true });
+    setLastSelectedProjectId(nextValue || null);
   };
 
   const isEmptyProject = !projectsLoading && projects.length === 0;

@@ -88,7 +88,7 @@ vi.mock("@/lib/store/project-preference-store", () => ({
   }),
 }));
 
-function renderDocuments(entry = "/documents?project=proj-1&doc=doc-1") {
+function renderDocuments(entry = "/projects/proj-1/documents?doc=doc-1") {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
@@ -96,7 +96,7 @@ function renderDocuments(entry = "/documents?project=proj-1&doc=doc-1") {
     <QueryClientProvider client={client}>
       <MemoryRouter initialEntries={[entry]}>
         <Routes>
-          <Route path="/documents" element={<DocumentsPage />} />
+          <Route path="/projects/:id/documents" element={<DocumentsPage />} />
         </Routes>
       </MemoryRouter>
     </QueryClientProvider>,
@@ -144,7 +144,7 @@ describe("DocumentsPage", () => {
 
   it("creates a document and allows saving edits", async () => {
     const user = userEvent.setup();
-    renderDocuments("/documents?project=proj-1");
+    renderDocuments("/projects/proj-1/documents");
 
     await waitFor(() => {
       expect(screen.getByText("新建根文档")).toBeInTheDocument();
