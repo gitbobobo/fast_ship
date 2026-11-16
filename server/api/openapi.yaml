@@ -12674,6 +12674,8 @@ components:
         shipped_at:
           type: string
           format: date-time
+          nullable: true
+          description: 发版时间；发版时间戳解析失败的历史记录为 null（垫底保留，不丢行）
         href:
           type: string
           description: 站内跳转路径

@@ -450,7 +450,8 @@ func (s *DashboardService) buildRelease(userID string) *api.DashboardRelease {
 			Href:          dashboardVersionHref(row.ProjectID, row.VersionID),
 		}
 		if row.ShippedAt != nil {
-			item.ShippedAt = row.ShippedAt.UTC().Format(time.RFC3339Nano)
+			shipped := row.ShippedAt.UTC().Format(time.RFC3339Nano)
+			item.ShippedAt = &shipped
 		}
 		release.RecentReleases = append(release.RecentReleases, item)
 	}

@@ -536,8 +536,25 @@ func TestDashboardReleaseBlock(t *testing.T) {
 	if release.RecentReleases[0].Href != "/projects/"+pid+"/versions/"+release.RecentReleases[0].VersionId {
 		t.Fatalf("bad href: %s", release.RecentReleases[0].Href)
 	}
-	if _, err := time.Parse(time.RFC3339, release.RecentReleases[0].ShippedAt); err != nil {
+	if v := release.RecentReleases[0].ShippedAt; v == nil {
+		t.Fatal("shipped_at must be present for parseable rows")
+	} else if _, err := time.Parse(time.RFC3339, *v); err != nil {
 		t.Fatalf("shipped_at must parse: %v", err)
+	}
+	// shipped_at 解析失败的历史行：垫底保留不丢行，契约回 null（F1）
+	if err := db.Exec(`UPDATE versions SET shipped_at = ? WHERE version_number = ?`,
+		"2026-05-30 10:00:00+08:00-not-a-time", "v1.1.0").Error; err != nil {
+		t.Fatal(err)
+	}
+	resp2, err := svc.GetOverview(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("GetOverview(2): %v", err)
+	}
+	if len(resp2.Release.RecentReleases) != 2 {
+		t.Fatalf("unparseable row must be kept: %d", len(resp2.Release.RecentReleases))
+	}
+	if resp2.Release.RecentReleases[1].VersionNumber != "v1.1.0" || resp2.Release.RecentReleases[1].ShippedAt != nil {
+		t.Fatalf("unparseable row must sort last with null shipped_at: %+v", resp2.Release.RecentReleases[1])
 	}
 	if release.UnmergedPrIssueCount != 1 {
 		t.Fatalf("unmerged_pr_issue_count=%d, want 1（去重/关闭/已合并/他人排除）", release.UnmergedPrIssueCount)

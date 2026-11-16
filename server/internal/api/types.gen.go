@@ -3303,12 +3303,14 @@ type DashboardReleaseShipped struct {
 	CreatedAt string `json:"created_at"`
 
 	// Href 站内跳转路径
-	Href          string `json:"href"`
-	ProjectId     string `json:"project_id"`
-	ProjectName   string `json:"project_name"`
-	ShippedAt     string `json:"shipped_at"`
-	VersionId     string `json:"version_id"`
-	VersionNumber string `json:"version_number"`
+	Href        string `json:"href"`
+	ProjectId   string `json:"project_id"`
+	ProjectName string `json:"project_name"`
+
+	// ShippedAt 发版时间；发版时间戳解析失败的历史记录为 null（垫底保留，不丢行）
+	ShippedAt     *string `json:"shipped_at"`
+	VersionId     string  `json:"version_id"`
+	VersionNumber string  `json:"version_number"`
 }
 
 // DashboardReleaseVersion defines model for DashboardReleaseVersion.

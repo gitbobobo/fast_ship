@@ -5445,8 +5445,11 @@ export interface components {
             project_name: string;
             /** Format: date-time */
             created_at: string;
-            /** Format: date-time */
-            shipped_at: string;
+            /**
+             * Format: date-time
+             * @description 发版时间；发版时间戳解析失败的历史记录为 null（垫底保留，不丢行）
+             */
+            shipped_at: string | null;
             /** @description 站内跳转路径 */
             href: string;
         };

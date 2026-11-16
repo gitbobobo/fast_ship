@@ -114,7 +114,7 @@ export function ReleaseCard({ release }: { release: ReleaseBlock }) {
 }
 
 /** 距今 N 天（自然日向下取整）；无效时间返回 null，今天发版返回「今天」。 */
-function daysAgoText(iso: string | undefined) {
+function daysAgoText(iso: string | null | undefined) {
   if (!iso) return null;
   const time = new Date(iso).getTime();
   if (Number.isNaN(time)) return null;
