@@ -17,6 +17,9 @@ const (
 	dashboardActionItemsMax       = 5
 	dashboardPendingVersionsMax   = 3
 	dashboardRecentReleasesMax    = 5
+	dashboardCycleTimeMax         = 5
+	dashboardBacklogUnder7Days    = 7 * 24 * time.Hour
+	dashboardBacklogUnder30Days   = 30 * 24 * time.Hour
 )
 
 // dashboardT3WaitingSource 是 DashboardService 对 T3 侧的唯一依赖：窄接口，
@@ -139,7 +142,103 @@ func (s *DashboardService) GetOverview(ctx context.Context, userID string) (*Das
 	// 发版节奏（阶段三）：纯 SQL 聚合，单块失败降级 complete=false。
 	resp.Release = s.buildRelease(userID)
 
+	// 流转效率（阶段二）：与 daily_resolved 共用同一 UTC 窗口。
+	resp.Flow = s.buildFlow(userID, startInclusive, endExclusive)
+
 	return resp, nil
+}
+
+// buildFlow 流转效率聚合：待办分桶、internal 新建趋势、周期中位数与积压
+// 年龄。任一子查询失败整块降级（complete=false、计数清零、结构仍完整），
+// 绝不 500——前端据此显示「暂不可用」而不是误读成零。
+func (s *DashboardService) buildFlow(userID string, startInclusive, endExclusive time.Time) *api.DashboardFlow {
+	degraded := func() *api.DashboardFlow {
+		return &api.DashboardFlow{
+			Complete:           api.Ptr(false),
+			DailyCreated:       make([]api.DashboardDailyCreatedPoint, 0, dashboardResolvedWindowDays),
+			CycleTimeByProject: []api.DashboardCycleTimeProject{},
+			BacklogAge:         api.DashboardBacklogAge{},
+		}
+	}
+
+	buckets, err := s.dashboardRepo.GetWorkflowBuckets(userID)
+	if err != nil {
+		return degraded()
+	}
+
+	createdRows, err := s.dashboardRepo.GetDailyCreatedCounts(userID, startInclusive, endExclusive)
+	if err != nil {
+		return degraded()
+	}
+	createdByDate := make(map[string]int, len(createdRows))
+	for _, row := range createdRows {
+		createdByDate[row.Date] = row.CreatedCount
+	}
+	dailyCreated := make([]api.DashboardDailyCreatedPoint, 0, dashboardResolvedWindowDays)
+	for offset := 0; offset < dashboardResolvedWindowDays; offset++ {
+		date := startInclusive.AddDate(0, 0, offset).Format("2006-01-02")
+		dailyCreated = append(dailyCreated, api.DashboardDailyCreatedPoint{
+			Date: date, CreatedCount: createdByDate[date],
+		})
+	}
+
+	samples, err := s.dashboardRepo.GetCycleTimeSamples(userID, startInclusive, endExclusive)
+	if err != nil {
+		return degraded()
+	}
+
+	now := time.Now().UTC()
+	age, err := s.dashboardRepo.GetBacklogAge(userID, now.Add(-dashboardBacklogUnder7Days), now.Add(-dashboardBacklogUnder30Days))
+	if err != nil {
+		return degraded()
+	}
+
+	return &api.DashboardFlow{
+		TodoCount:          buckets.TodoCount,
+		InProgressCount:    buckets.InProgressCount,
+		DailyCreated:       dailyCreated,
+		CycleTimeByProject: dashboardCycleTimeByProject(samples, dashboardCycleTimeMax),
+		BacklogAge:         api.DashboardBacklogAge{Under7d: age.Under7d, D7To30d: age.D7To30d, Over30d: age.Over30d},
+	}
+}
+
+// dashboardCycleTimeByProject 按项目聚合周期样本：零时长（started==completed，
+// 常见为同步回填）剔除；中位数在 Go 内算（防空切片与 SQL 方言差异，偶数样本
+// 取中间两数均值）；按 completed_count 降序、项目名升序取前 limit。
+func dashboardCycleTimeByProject(samples []repository.DashboardCycleTimeSample, limit int) []api.DashboardCycleTimeProject {
+	durations := make(map[string][]float64)
+	names := make(map[string]string, len(samples))
+	for _, sample := range samples {
+		if !sample.CompletedAt.After(sample.StartedAt) {
+			continue
+		}
+		durations[sample.ProjectID] = append(durations[sample.ProjectID], sample.CompletedAt.Sub(sample.StartedAt).Hours()/24)
+		names[sample.ProjectID] = sample.ProjectName
+	}
+	items := make([]api.DashboardCycleTimeProject, 0, len(durations))
+	for projectID, ds := range durations {
+		sort.Float64s(ds)
+		median := ds[len(ds)/2]
+		if len(ds)%2 == 0 {
+			median = (ds[len(ds)/2-1] + ds[len(ds)/2]) / 2
+		}
+		items = append(items, api.DashboardCycleTimeProject{
+			ProjectId:      projectID,
+			ProjectName:    names[projectID],
+			MedianDays:     median,
+			CompletedCount: len(ds),
+		})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].CompletedCount != items[j].CompletedCount {
+			return items[i].CompletedCount > items[j].CompletedCount
+		}
+		return items[i].ProjectName < items[j].ProjectName
+	})
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	return items
 }
 
 // buildRelease 发版节奏聚合：待发版（pending 升序）+ 近期发版（shipped_at

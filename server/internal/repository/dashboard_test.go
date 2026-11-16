@@ -489,3 +489,162 @@ func TestDashboardCountUnmergedPRIssues(t *testing.T) {
 		t.Fatalf("total=%d, want 1", total)
 	}
 }
+
+// GetWorkflowBuckets：空串/NULL meta 归 todo，非空非 done 归 in_progress；
+// 恒等式 todo+in_progress == ΣGetOpenIssueCounts。
+func TestDashboardWorkflowBucketsIdentity(t *testing.T) {
+	db := newDashboardTestDB(t)
+	userID := dashboardTestUser(t, db)
+	now := time.Now().UTC()
+	pid := dashboardTestProject(t, db, userID, "项目A", now, false)
+	shelved := dashboardTestProject(t, db, userID, "搁置项目", now, true)
+
+	mkOpenMeta := func(projectID string, status model.IssueWorkflowStatus) {
+		iid := dashboardTestIssue(t, db, projectID, "i")
+		if status == "" {
+			return // 无 meta 行 = NULL JOIN
+		}
+		if err := db.Create(&model.IssueInternalMeta{IssueID: iid, WorkflowStatus: status, CreatedAt: now, UpdatedAt: now}).Error; err != nil {
+			t.Fatalf("create meta: %v", err)
+		}
+	}
+	mkOpenMeta(pid, "") // 无 meta 行
+	iid := dashboardTestIssue(t, db, pid, "i")
+	if err := db.Create(&model.IssueInternalMeta{IssueID: iid, WorkflowStatus: "", CreatedAt: now, UpdatedAt: now}).Error; err != nil {
+		t.Fatalf("create meta: %v", err)
+	}
+	mkOpenMeta(pid, model.IssueWorkflowStatusTodo)
+	mkOpenMeta(pid, model.IssueWorkflowStatusInProgress)
+	mkOpenMeta(pid, model.IssueWorkflowStatusDone) // 排除
+	mkOpenMeta(shelved, model.IssueWorkflowStatusInProgress)
+
+	repo := NewDashboardRepository(db)
+	buckets, err := repo.GetWorkflowBuckets(userID)
+	if err != nil {
+		t.Fatalf("GetWorkflowBuckets: %v", err)
+	}
+	if buckets.TodoCount != 3 || buckets.InProgressCount != 1 {
+		t.Fatalf("buckets=%+v, want todo=3 in_progress=1", buckets)
+	}
+
+	openCounts, err := repo.GetOpenIssueCounts(userID)
+	if err != nil {
+		t.Fatalf("GetOpenIssueCounts: %v", err)
+	}
+	sum := 0
+	for _, row := range openCounts {
+		sum += row.OpenIssueCount
+	}
+	if buckets.TodoCount+buckets.InProgressCount != sum {
+		t.Fatalf("identity broken: %d+%d != %d", buckets.TodoCount, buckets.InProgressCount, sum)
+	}
+}
+
+// GetDailyCreatedCounts：只算 source=internal；窗口与 daily_resolved 同参。
+func TestDashboardDailyCreatedCountsInternalOnly(t *testing.T) {
+	db := newDashboardTestDB(t)
+	userID := dashboardTestUser(t, db)
+	now := time.Now().UTC()
+	pid := dashboardTestProject(t, db, userID, "项目A", now, false)
+
+	today := now.Truncate(24 * time.Hour)
+	mkIssue := func(source model.IssueSource, created time.Time) {
+		if err := db.Create(&model.Issue{ID: uuid.NewString(), ProjectID: pid, Title: "i", State: model.IssueStateOpen, Source: source, CreatedAt: created, UpdatedAt: created}).Error; err != nil {
+			t.Fatalf("create issue: %v", err)
+		}
+	}
+	mkIssue(model.IssueSourceInternal, today)
+	mkIssue(model.IssueSourceInternal, today.Add(-24*time.Hour))
+	mkIssue(model.IssueSourceGitHub, today)                         // 排除
+	mkIssue(model.IssueSourceInternal, today.Add(-31*24*time.Hour)) // 窗口外
+
+	repo := NewDashboardRepository(db)
+	start := today.AddDate(0, 0, -29)
+	end := today.AddDate(0, 0, 1)
+	rows, err := repo.GetDailyCreatedCounts(userID, start, end)
+	if err != nil {
+		t.Fatalf("GetDailyCreatedCounts: %v", err)
+	}
+	total := 0
+	for _, row := range rows {
+		total += row.CreatedCount
+	}
+	if total != 2 {
+		t.Fatalf("created total=%d, want 2（github 与窗口外排除）", total)
+	}
+}
+
+// GetCycleTimeSamples：窗口内 completed 且有 started_at；无 started_at 排除。
+func TestDashboardCycleTimeSamples(t *testing.T) {
+	db := newDashboardTestDB(t)
+	userID := dashboardTestUser(t, db)
+	now := time.Now().UTC()
+	pid := dashboardTestProject(t, db, userID, "项目A", now, false)
+
+	today := now.Truncate(24 * time.Hour)
+	mkCompleted := func(started *time.Time, completed *time.Time) {
+		iid := dashboardTestIssue(t, db, pid, "i")
+		meta := &model.IssueInternalMeta{IssueID: iid, WorkflowStatus: model.IssueWorkflowStatusDone, CreatedAt: now, UpdatedAt: now, StartedAt: started, CompletedAt: completed}
+		if err := db.Create(meta).Error; err != nil {
+			t.Fatalf("create meta: %v", err)
+		}
+	}
+	mkCompleted(ptrTime(today.Add(-48*time.Hour)), ptrTime(today.Add(-24*time.Hour)))
+	mkCompleted(nil, ptrTime(today.Add(-time.Hour)))                                        // 无 started_at 排除
+	mkCompleted(ptrTime(today.Add(-40*24*time.Hour)), ptrTime(today.Add(-39*24*time.Hour))) // 窗口外
+
+	repo := NewDashboardRepository(db)
+	rows, err := repo.GetCycleTimeSamples(userID, today.AddDate(0, 0, -29), today.AddDate(0, 0, 1))
+	if err != nil {
+		t.Fatalf("GetCycleTimeSamples: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("samples=%d, want 1", len(rows))
+	}
+	if rows[0].ProjectID != pid || !rows[0].CompletedAt.After(rows[0].StartedAt) {
+		t.Fatalf("bad sample: %+v", rows[0])
+	}
+}
+
+// GetBacklogAge：三档之和 == 开启未 done 总数（与 GetOpenIssueCounts 同口径）；
+// 边界由 Go 传参。
+func TestDashboardBacklogAgeIdentity(t *testing.T) {
+	db := newDashboardTestDB(t)
+	userID := dashboardTestUser(t, db)
+	now := time.Now().UTC()
+	pid := dashboardTestProject(t, db, userID, "项目A", now, false)
+
+	mkOpen := func(created time.Time) {
+		if err := db.Create(&model.Issue{ID: uuid.NewString(), ProjectID: pid, Title: "i", State: model.IssueStateOpen, CreatedAt: created, UpdatedAt: created}).Error; err != nil {
+			t.Fatalf("create issue: %v", err)
+		}
+	}
+	mkOpen(now.Add(-24 * time.Hour))
+	mkOpen(now.Add(-10 * 24 * time.Hour))
+	mkOpen(now.Add(-40 * 24 * time.Hour))
+	// workflow done：不进任何档
+	done := dashboardTestIssue(t, db, pid, "i")
+	if err := db.Create(&model.IssueInternalMeta{IssueID: done, WorkflowStatus: model.IssueWorkflowStatusDone, CreatedAt: now, UpdatedAt: now}).Error; err != nil {
+		t.Fatalf("create meta: %v", err)
+	}
+
+	repo := NewDashboardRepository(db)
+	age, err := repo.GetBacklogAge(userID, now.Add(-7*24*time.Hour), now.Add(-30*24*time.Hour))
+	if err != nil {
+		t.Fatalf("GetBacklogAge: %v", err)
+	}
+	if age.Under7d != 1 || age.D7To30d != 1 || age.Over30d != 1 {
+		t.Fatalf("age=%+v, want 1/1/1", age)
+	}
+	openCounts, err := repo.GetOpenIssueCounts(userID)
+	if err != nil {
+		t.Fatalf("GetOpenIssueCounts: %v", err)
+	}
+	sum := 0
+	for _, row := range openCounts {
+		sum += row.OpenIssueCount
+	}
+	if age.Under7d+age.D7To30d+age.Over30d != sum {
+		t.Fatalf("identity broken: %d != %d", age.Under7d+age.D7To30d+age.Over30d, sum)
+	}
+}

@@ -68,6 +68,24 @@ func dashboardSeedUser(t *testing.T, db *gorm.DB) string {
 	return id
 }
 
+func dashboardSeedProject(t *testing.T, db *gorm.DB, userID, name string) string {
+	t.Helper()
+	id := uuid.NewString()
+	if err := db.Create(&model.Project{ID: id, UserID: userID, Name: name, CreatedAt: time.Now(), UpdatedAt: time.Now()}).Error; err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	return id
+}
+
+func dashboardSeedIssue(t *testing.T, db *gorm.DB, projectID string, created time.Time) string {
+	t.Helper()
+	id := uuid.NewString()
+	if err := db.Create(&model.Issue{ID: id, ProjectID: projectID, Title: "i-" + id[:8], State: model.IssueStateOpen, CreatedAt: created, UpdatedAt: created}).Error; err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+	return id
+}
+
 func groupKinds(groups []DashboardActionItemGroup) []api.DashboardActionItemKind {
 	kinds := make([]api.DashboardActionItemKind, 0, len(groups))
 	for _, g := range groups {
@@ -498,5 +516,164 @@ func TestDashboardReleaseDegradedOnError(t *testing.T) {
 	}
 	if resp.Release.PendingVersions == nil || resp.Release.RecentReleases == nil {
 		t.Fatal("degraded release must keep complete structure")
+	}
+}
+
+// buildFlow：分桶恒等式（todo+in_progress==Σopen）、daily_created 固定 30 条
+// 且只算 internal、周期中位数（偶数样本取均值、零时长剔除）、三档年龄之和
+// ==Σopen；Σcycle completed_count ≤ Σdaily_resolved。
+func TestDashboardFlowBlock(t *testing.T) {
+	db := newDashboardServiceTestDB(t)
+	userID := dashboardSeedUser(t, db)
+	now := time.Now().UTC()
+	pid := dashboardSeedProject(t, db, userID, "项目A")
+
+	// 3 open（2 默认 todo + 1 显式 todo）+ 1 in_progress + 1 done
+	for i := 0; i < 2; i++ {
+		dashboardSeedIssue(t, db, pid, now)
+	}
+	iid := dashboardSeedIssue(t, db, pid, now)
+	if err := db.Create(&model.IssueInternalMeta{IssueID: iid, WorkflowStatus: model.IssueWorkflowStatusTodo, CreatedAt: now, UpdatedAt: now}).Error; err != nil {
+		t.Fatal(err)
+	}
+	prog := dashboardSeedIssue(t, db, pid, now)
+	if err := db.Create(&model.IssueInternalMeta{IssueID: prog, WorkflowStatus: model.IssueWorkflowStatusInProgress, CreatedAt: now, UpdatedAt: now}).Error; err != nil {
+		t.Fatal(err)
+	}
+	done := dashboardSeedIssue(t, db, pid, now)
+	// 周期样本：2 天前 started，1 天前 completed（零时长样本另造一条）
+	started := now.Add(-48 * time.Hour)
+	completed := now.Add(-24 * time.Hour)
+	if err := db.Create(&model.IssueInternalMeta{IssueID: done, WorkflowStatus: model.IssueWorkflowStatusDone, StartedAt: &started, CompletedAt: &completed, CreatedAt: now, UpdatedAt: now}).Error; err != nil {
+		t.Fatal(err)
+	}
+	done2 := dashboardSeedIssue(t, db, pid, now)
+	zero := now.Add(-24 * time.Hour)
+	if err := db.Create(&model.IssueInternalMeta{IssueID: done2, WorkflowStatus: model.IssueWorkflowStatusDone, StartedAt: &zero, CompletedAt: &zero, CreatedAt: now, UpdatedAt: now}).Error; err != nil {
+		t.Fatal(err)
+	}
+	// 今天创建 2 条 internal + 1 条 github
+	dashboardSeedIssue(t, db, pid, now)
+	dashboardSeedIssue(t, db, pid, now)
+	if err := db.Create(&model.Issue{ID: uuid.NewString(), ProjectID: pid, Title: "gh", State: model.IssueStateOpen, Source: model.IssueSourceGitHub, CreatedAt: now, UpdatedAt: now}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	svc := newDashboardService(t, db, &fakeUnreadCounter{count: 0}, &fakeT3WaitingSource{result: nil})
+	resp, err := svc.GetOverview(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("GetOverview: %v", err)
+	}
+	flow := resp.Flow
+	if flow == nil || flow.Complete != nil {
+		t.Fatalf("flow must be present and complete: %+v", flow)
+	}
+
+	sumOpen := 0
+	for _, row := range resp.OpenIssuesByProject {
+		sumOpen += row.OpenIssueCount
+	}
+	if flow.TodoCount+flow.InProgressCount != sumOpen {
+		t.Fatalf("identity todo+in_progress=%d != Σopen=%d", flow.TodoCount+flow.InProgressCount, sumOpen)
+	}
+	if flow.TodoCount != 6 || flow.InProgressCount != 1 {
+		t.Fatalf("buckets=%d/%d, want 6/1（显式 todo 归待办；无 meta 的 open 含 github 同步也入桶）", flow.TodoCount, flow.InProgressCount)
+	}
+	if len(flow.DailyCreated) != dashboardResolvedWindowDays {
+		t.Fatalf("daily_created=%d, want %d", len(flow.DailyCreated), dashboardResolvedWindowDays)
+	}
+	today := now.Truncate(24 * time.Hour).Format("2006-01-02")
+	for _, point := range flow.DailyCreated {
+		if point.Date == today && point.CreatedCount != 8 {
+			t.Fatalf("today created=%d, want 8（全部 internal 创建，github 排除）", point.CreatedCount)
+		}
+	}
+	if len(flow.CycleTimeByProject) != 1 {
+		t.Fatalf("cycle rows=%d, want 1（零时长剔除后只剩项目A）", len(flow.CycleTimeByProject))
+	}
+	cycle := flow.CycleTimeByProject[0]
+	if cycle.CompletedCount != 1 || cycle.MedianDays <= 0 {
+		t.Fatalf("cycle=%+v, want 1 sample with positive median", cycle)
+	}
+	// 恒等式：Σcycle completed_count ≤ Σdaily_resolved
+	sumResolved := 0
+	for _, point := range resp.DailyResolved {
+		sumResolved += point.ResolvedCount
+	}
+	sumCycle := 0
+	for _, row := range flow.CycleTimeByProject {
+		sumCycle += row.CompletedCount
+	}
+	if sumCycle > sumResolved {
+		t.Fatalf("Σcycle %d > Σresolved %d", sumCycle, sumResolved)
+	}
+	if flow.BacklogAge.Under7d+flow.BacklogAge.D7To30d+flow.BacklogAge.Over30d != sumOpen {
+		t.Fatalf("backlog age identity broken: %+v vs Σopen=%d", flow.BacklogAge, sumOpen)
+	}
+}
+
+// dashboardCycleTimeByProject：空切片返回空列表；偶数样本取中间两数均值；
+// 排序 completed_count 降序、项目名升序；截前 limit。
+func TestDashboardCycleTimeMedian(t *testing.T) {
+	// 空切片：无项目行
+	if got := dashboardCycleTimeByProject(nil, 5); len(got) != 0 {
+		t.Fatalf("empty samples must give empty list, got %+v", got)
+	}
+
+	// 偶数样本（1、3 天）→ 中位数 2.0
+	p1 := repository.DashboardCycleTimeSample{ProjectID: "甲", ProjectName: "甲",
+		StartedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	p1.CompletedAt = p1.StartedAt.Add(24 * time.Hour)
+	p2 := repository.DashboardCycleTimeSample{ProjectID: "甲", ProjectName: "甲",
+		StartedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	p2.CompletedAt = p2.StartedAt.Add(72 * time.Hour)
+	got := dashboardCycleTimeByProject([]repository.DashboardCycleTimeSample{p1, p2}, 5)
+	if len(got) != 1 || got[0].MedianDays != 2.0 || got[0].CompletedCount != 2 {
+		t.Fatalf("median=%+v, want 2.0/2", got)
+	}
+
+	// 零时长剔除：started==completed 的样本不进计数
+	zero := repository.DashboardCycleTimeSample{ProjectID: "乙", ProjectName: "乙",
+		StartedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), CompletedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	got = dashboardCycleTimeByProject([]repository.DashboardCycleTimeSample{zero}, 5)
+	if len(got) != 0 {
+		t.Fatalf("zero-duration sample must be dropped, got %+v", got)
+	}
+
+	// 排序与截断：completed_count 降序，同数按项目名升序
+	samples := []repository.DashboardCycleTimeSample{
+		repository.DashboardCycleTimeSample{ProjectID: "丙", ProjectName: "丙", StartedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), CompletedAt: time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)},
+		repository.DashboardCycleTimeSample{ProjectID: "乙", ProjectName: "乙", StartedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), CompletedAt: time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)},
+		repository.DashboardCycleTimeSample{ProjectID: "甲", ProjectName: "甲", StartedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), CompletedAt: time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)},
+		repository.DashboardCycleTimeSample{ProjectID: "甲", ProjectName: "甲", StartedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), CompletedAt: time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)},
+	}
+	got = dashboardCycleTimeByProject(samples, 2)
+	// 同 completed_count 按项目名字典序（Unicode 码点：丙 U+4E19 < 乙 U+4E59 < 甲 U+7532）
+	if len(got) != 2 || got[0].ProjectName != "甲" || got[0].CompletedCount != 2 || got[1].ProjectName != "丙" {
+		t.Fatalf("sort/limit broken: %+v", got)
+	}
+}
+
+// flow 块子查询失败 → 整块降级 complete=false、结构完整、绝不 500。
+// 去掉 started_at 列只打断 GetCycleTimeSamples（概览核心查询不读该列）。
+func TestDashboardFlowDegradedOnError(t *testing.T) {
+	db := newDashboardServiceTestDB(t)
+	userID := dashboardSeedUser(t, db)
+	if err := db.Exec("ALTER TABLE issue_internal_meta DROP COLUMN started_at").Error; err != nil {
+		t.Fatalf("drop column: %v", err)
+	}
+	svc := newDashboardService(t, db, &fakeUnreadCounter{count: 0}, &fakeT3WaitingSource{result: nil})
+	resp, err := svc.GetOverview(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("GetOverview must not fail: %v", err)
+	}
+	if resp.Flow == nil {
+		t.Fatal("flow block must degrade, not disappear")
+	}
+	if resp.Flow.Complete == nil || *resp.Flow.Complete {
+		t.Fatal("flow complete must be present and false")
+	}
+	if resp.Flow.DailyCreated == nil || resp.Flow.CycleTimeByProject == nil {
+		t.Fatal("degraded flow must keep complete structure")
 	}
 }

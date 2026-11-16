@@ -315,6 +315,126 @@ func (r *DashboardRepository) CountUnmergedPRIssues(userID string) (int64, error
 	return total, err
 }
 
+// DashboardWorkflowBuckets 开启 issue 按 workflow_status 的两档分桶。
+type DashboardWorkflowBuckets struct {
+	TodoCount       int `gorm:"column:todo_count"`
+	InProgressCount int `gorm:"column:in_progress_count"`
+}
+
+// GetWorkflowBuckets 开启 issue 按 workflow_status 分桶：meta 缺失（NULL）、
+// 空串（列默认值）与显式 'todo' 都归 todo，其余（外层谓词已排除 done，合法
+// 取值只剩 'in_progress'）归 in_progress。分母判定与 GetOpenIssueCounts 完全
+// 一致（state=open AND (m.workflow_status IS NULL OR m.workflow_status !=
+// 'done')），恒等式 todo+in_progress == Σopen_issue_count。刻意独立成查询而
+// 不塞进 GetOpenIssueCounts：概览那两个查询失败即 500，新指标必须能单独降级
+// （complete=false）。
+func (r *DashboardRepository) GetWorkflowBuckets(userID string) (DashboardWorkflowBuckets, error) {
+	var buckets DashboardWorkflowBuckets
+	err := r.db.
+		Table("projects AS p").
+		Select(`
+			COALESCE(SUM(CASE WHEN m.workflow_status IS NULL OR m.workflow_status IN (?, ?) THEN 1 ELSE 0 END), 0) AS todo_count,
+			COALESCE(SUM(CASE WHEN m.workflow_status IS NOT NULL AND m.workflow_status NOT IN (?, ?) THEN 1 ELSE 0 END), 0) AS in_progress_count
+		`, "", model.IssueWorkflowStatusTodo, "", model.IssueWorkflowStatusTodo).
+		Joins("LEFT JOIN issues i ON i.project_id = p.id").
+		Joins("LEFT JOIN issue_internal_meta m ON m.issue_id = i.id").
+		Where("p.user_id = ?", userID).
+		// 搁置中的项目不进概览（INT-165），与 GetOpenIssueCounts 同排除。
+		Where(projectNotShelvedSQL("p"), time.Now().UTC()).
+		Where("i.state = ? AND (m.workflow_status IS NULL OR m.workflow_status != ?)", model.IssueStateOpen, model.IssueWorkflowStatusDone).
+		Scan(&buckets).Error
+	return buckets, err
+}
+
+// DashboardDailyCreatedCount 一天的新建 issue 数。
+type DashboardDailyCreatedCount struct {
+	Date         string `gorm:"column:date"`
+	CreatedCount int    `gorm:"column:created_count"`
+}
+
+// GetDailyCreatedCounts 与 GetDailyResolvedCounts 同一 UTC 窗口（同一
+// startInclusive/endExclusive 参数）。只统计 source='internal'：GitHub 同步
+// issue 关闭时不写 completed_at，混算会把积压趋势系统性画成增长（INT-235
+// 裁决）。连接从 projects(user_id 索引) 出发，不从关联表出发。
+func (r *DashboardRepository) GetDailyCreatedCounts(
+	userID string,
+	startInclusive time.Time,
+	endExclusive time.Time,
+) ([]DashboardDailyCreatedCount, error) {
+	var rows []DashboardDailyCreatedCount
+	err := r.db.
+		Table("projects AS p").
+		Select("DATE(i.created_at) AS date, COUNT(*) AS created_count").
+		Joins("JOIN issues i ON i.project_id = p.id").
+		Where("p.user_id = ?", userID).
+		Where(projectNotShelvedSQL("p"), time.Now().UTC()).
+		Where("i.source = ?", model.IssueSourceInternal).
+		Where("i.created_at >= ? AND i.created_at < ?", startInclusive, endExclusive).
+		Group("DATE(i.created_at)").
+		Order("DATE(i.created_at) ASC").
+		Scan(&rows).Error
+	return rows, err
+}
+
+// DashboardCycleTimeSample 一条周期样本（started→completed）。
+type DashboardCycleTimeSample struct {
+	ProjectID   string    `gorm:"column:project_id"`
+	ProjectName string    `gorm:"column:project_name"`
+	StartedAt   time.Time `gorm:"column:started_at"`
+	CompletedAt time.Time `gorm:"column:completed_at"`
+}
+
+// GetCycleTimeSamples 近 30 天 resolved 窗口内 completed 且有 started_at 的
+// issue 样本（零时长行由服务层剔除，中位数也在服务层 Go 内算）。连接方向
+// projects → issues(project_id 索引) → meta 主键，不从 meta 出发全表扫。
+func (r *DashboardRepository) GetCycleTimeSamples(
+	userID string,
+	startInclusive time.Time,
+	endExclusive time.Time,
+) ([]DashboardCycleTimeSample, error) {
+	var rows []DashboardCycleTimeSample
+	err := r.db.
+		Table("projects AS p").
+		Select("p.id AS project_id, p.name AS project_name, m.started_at, m.completed_at").
+		Joins("JOIN issues i ON i.project_id = p.id").
+		Joins("JOIN issue_internal_meta m ON m.issue_id = i.id").
+		Where("p.user_id = ?", userID).
+		Where(projectNotShelvedSQL("p"), time.Now().UTC()).
+		Where("m.completed_at >= ? AND m.completed_at < ?", startInclusive, endExclusive).
+		Where("m.started_at IS NOT NULL").
+		Scan(&rows).Error
+	return rows, err
+}
+
+// DashboardBacklogAge 当前开启问题按创建时间的三档分布。
+type DashboardBacklogAge struct {
+	Under7d int `gorm:"column:under_7d"`
+	D7To30d int `gorm:"column:d7_to_30d"`
+	Over30d int `gorm:"column:over_30d"`
+}
+
+// GetBacklogAge 范围与待办分桶同口径（state=open 且 workflow 未 done、排除
+// 搁置项目），恒等式三档之和 == todo+in_progress == Σopen_issue_count。分档
+// 边界由服务层 Go 算好 time 参数传入：时间是文本存储，比较走字符串序，
+// 不用 julianday。
+func (r *DashboardRepository) GetBacklogAge(userID string, under7, under30 time.Time) (DashboardBacklogAge, error) {
+	var age DashboardBacklogAge
+	err := r.db.
+		Table("projects AS p").
+		Select(`
+			COALESCE(SUM(CASE WHEN i.created_at >= ? THEN 1 ELSE 0 END), 0) AS under_7d,
+			COALESCE(SUM(CASE WHEN i.created_at >= ? AND i.created_at < ? THEN 1 ELSE 0 END), 0) AS d7_to_30d,
+			COALESCE(SUM(CASE WHEN i.created_at < ? THEN 1 ELSE 0 END), 0) AS over_30d
+		`, under7, under30, under7, under30).
+		Joins("LEFT JOIN issues i ON i.project_id = p.id").
+		Joins("LEFT JOIN issue_internal_meta m ON m.issue_id = i.id").
+		Where("p.user_id = ?", userID).
+		Where(projectNotShelvedSQL("p"), time.Now().UTC()).
+		Where("i.state = ? AND (m.workflow_status IS NULL OR m.workflow_status != ?)", model.IssueStateOpen, model.IssueWorkflowStatusDone).
+		Scan(&age).Error
+	return age, err
+}
+
 // DashboardQuotaAttention 一条需要处理的配额账号。
 type DashboardQuotaAttention struct {
 	Label    string `gorm:"column:label"`
