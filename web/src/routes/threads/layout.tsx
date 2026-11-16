@@ -119,8 +119,9 @@ export default function ThreadsLayout() {
           >
             <Plus className="size-4" />
           </Button>
-          {/* 线程页不走公共 Header，通知入口要在这里单独补一份（INT-236）。 */}
-          <NotificationBell />
+          {/* 线程页不走公共 Header，通知入口要在这里单独补一份（INT-236）。
+              详情打开时右栏自带 Header 的通知铃，这里不重复渲染。 */}
+          {!threadOpen && <NotificationBell />}
         </div>
         {isLoading ? (
           <>
