@@ -265,10 +265,10 @@ func TestDashboardListFailedShips(t *testing.T) {
 		}
 	}
 
-	mkVersion(pid, "v1.0.0", model.VersionStatusPending, model.ShipStatusFailed, "pending")     // 发货失败
+	mkVersion(pid, "v1.0.0", model.VersionStatusPending, model.ShipStatusFailed, "pending")       // 发货失败
 	mkVersion(pid, "v1.1.0", model.VersionStatusShipped, model.ShipStatusCompleted, "incomplete") // 已发货但钩子未齐
-	mkVersion(pid, "v1.2.0", model.VersionStatusPending, model.ShipStatusCompleted, "completed") // 健康，不出现
-	mkVersion(pid, "v1.3.0", model.VersionStatusShipped, model.ShipStatusCompleted, "failed")    // 已发货钩子失败
+	mkVersion(pid, "v1.2.0", model.VersionStatusPending, model.ShipStatusCompleted, "completed")  // 健康，不出现
+	mkVersion(pid, "v1.3.0", model.VersionStatusShipped, model.ShipStatusCompleted, "failed")     // 已发货钩子失败
 	mkVersion(shelved, "v9.9.9", model.VersionStatusPending, model.ShipStatusFailed, "pending")
 
 	total, items, err := repo.ListFailedShips(userID, 5)
