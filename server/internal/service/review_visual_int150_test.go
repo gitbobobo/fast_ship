@@ -205,7 +205,7 @@ func TestValidateVisualResultPriorOpenRequiresLevel(t *testing.T) {
 }
 
 // E.1 评论与历史：只写进 prior(open) 的未解决项在评论「仍未解决」段、下一轮
-// 视觉历史的「仍未解决（更早一轮）」小节里都能看到，不会凭空消失。
+// 视觉历史的「仍未解决（跨轮遗留，已去重）」小节里都能看到，不会凭空消失。
 func TestVisualPriorOpenStaysVisibleInCommentAndHistory(t *testing.T) {
 	meta := reviewCommentMeta{RepoFullName: "o/r", HeadSHA: "abcdef1234567890", links: githubLinks("https://github.com"), RoundNumber: 4}
 	body := buildVisualComment(meta, []model.ReviewRun{visComboRun(model.ReviewRunCompleted, int150Result)}, nil, "")
@@ -238,8 +238,8 @@ func TestVisualPriorOpenStaysVisibleInCommentAndHistory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("visualHistory: %v", err)
 	}
-	if !strings.Contains(history, "### 仍未解决（更早一轮）") ||
-		!strings.Contains(history, "- worth_fixing：对比度不足看不清次要按钮") {
+	if !strings.Contains(history, "## 仍未解决（跨轮遗留，已去重）") ||
+		!strings.Contains(history, "- 仍未解决 · worth_fixing：对比度不足看不清次要按钮") {
 		t.Fatalf("history missing carried-over unresolved entry:\n%s", history)
 	}
 }
