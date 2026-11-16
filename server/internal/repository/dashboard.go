@@ -527,6 +527,8 @@ type DashboardReviewPRRow struct {
 // 入窗条件（finished_at≥since 或仍在途）下推 SQL：MAX(finished_at) 聚合在
 // SQLite 会以字符串回传（文本存储的时间不走驱动转换），不下推就得在 Go 里
 // 自行解析多种历史写法；在途 run 的 finished_at 为 NULL，由 OR 的第二支保住。
+// p.user_id 与 r.user_id 双重圈定（零成本加固）：与 ListFailedReviews 同构，
+// 防两表 user_id 不一致的存量行跨用户泄漏。
 func (r *DashboardRepository) GetReviewOutcomes(userID string, since time.Time) ([]DashboardReviewPRRow, error) {
 	var rows []DashboardReviewPRRow
 	err := r.db.
@@ -539,6 +541,7 @@ func (r *DashboardRepository) GetReviewOutcomes(userID string, since time.Time) 
 		Joins("JOIN review_pull_requests rp ON r.project_id = rp.project_id AND r.repo_full_name = rp.repo_full_name AND r.pr_number = rp.pr_number AND r.integration_id = rp.integration_id AND r.round_number = rp.round_number AND r.head_sha = rp.head_sha").
 		Joins("JOIN projects p ON p.id = r.project_id").
 		Where("r.user_id = ?", userID).
+		Where("p.user_id = ?", userID).
 		Where(projectNotShelvedSQL("p"), time.Now().UTC()).
 		Where("r.finished_at >= ? OR r.status IN ?", since, model.ReviewRunActiveStatuses).
 		Group("r.project_id, r.repo_full_name, r.pr_number, r.integration_id, rp.code_status").

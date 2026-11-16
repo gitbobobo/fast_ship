@@ -750,6 +750,27 @@ func TestDashboardGetReviewOutcomes(t *testing.T) {
 	mkPR(shelved, 7, 1, "failure")
 	mkRun(shelved, "completed", 1, ptrTime(now.Add(-time.Hour)))
 
+	// 他人项目里的同 PR：r.user_id 过滤已排除，p.user_id 是第二道防线
+	//（review_runs.user_id 与 projects.user_id 必须同向，防历史脏数据泄漏）。
+	other := dashboardTestUser(t, db)
+	otherPID := dashboardTestProject(t, db, other, "他人项目", now, false)
+	if err := db.Create(&model.ReviewPullRequest{
+		ProjectID: otherPID, RepoFullName: "o/r", PRNumber: 7, IntegrationID: "int-1",
+		UserID: other, RoundNumber: 1, HeadSHA: "sha", CodeStatus: "success", UpdatedAt: now,
+	}).Error; err != nil {
+		t.Fatalf("create other rp: %v", err)
+	}
+	if err := db.Create(&model.ReviewRun{
+		ID: uuid.NewString(), UserID: other, ProjectID: otherPID, Kind: model.ReviewKindCode,
+		RepoFullName: "o/r", PRNumber: 7, HeadSHA: "sha", RoundNumber: 1,
+		IntegrationID: "int-1", EnvironmentID: "env", InstanceID: "i", Model: "m",
+		ThreadID: "t", LaunchCommandID: "c", InitialMessageID: "m1",
+		Status: model.ReviewRunCompleted, DeadlineAt: now,
+		FinishedAt: ptrTime(now.Add(-time.Hour)), CreatedAt: now, UpdatedAt: now,
+	}).Error; err != nil {
+		t.Fatalf("create other run: %v", err)
+	}
+
 	repo := NewDashboardRepository(db)
 	rows, err := repo.GetReviewOutcomes(userID, now.Add(-30*24*time.Hour))
 	if err != nil {
