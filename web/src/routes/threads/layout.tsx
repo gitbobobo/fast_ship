@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef } from "react";
 import { Link, Outlet, useParams } from "react-router";
 import { Plus, RefreshCw } from "lucide-react";
 import { MobileNav } from "@/components/layout/sidebar";
+import { NotificationBell } from "@/components/layout/notification-bell";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ThreadSidebar } from "@/components/threads/thread-sidebar";
@@ -118,6 +119,8 @@ export default function ThreadsLayout() {
           >
             <Plus className="size-4" />
           </Button>
+          {/* 线程页不走公共 Header，通知入口要在这里单独补一份（INT-236）。 */}
+          <NotificationBell />
         </div>
         {isLoading ? (
           <>
