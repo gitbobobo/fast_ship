@@ -5340,8 +5340,6 @@ export interface components {
         };
         /** @description AI 运行面板；无 T3 环境时 t3 缺席，单子块失败各自降级 complete=false */
         DashboardAi: {
-            /** @description false = 全部子块（T3/审查/机器人/额度）都不可用；成功或有任一子块可用时不返回 */
-            complete?: boolean;
             t3?: components["schemas"]["DashboardAiT3"];
             reviews?: components["schemas"]["DashboardAiReviews"];
             bots?: components["schemas"]["DashboardAiBots"];

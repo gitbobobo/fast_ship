@@ -5283,7 +5283,6 @@ title/body/parent_id 至少传一个
 | `flow.backlog_age.d7_to_30d` | integer | 是 |  |
 | `flow.backlog_age.over_30d` | integer | 是 |  |
 | `ai` | object | 否 | AI 运行面板；无 T3 环境时 t3 缺席，单子块失败各自降级 complete=false |
-| `ai.complete` | boolean | 否 | false = 全部子块（T3/审查/机器人/额度）都不可用；成功或有任一子块可用时不返回 |
 | `ai.t3` | object | 否 | 每环境一行活跃线程计数；与「待我处理」的 t3_waiting 组同源（单遍历） |
 | `ai.t3.complete` | boolean | 否 | false = 任一环境未 ready（Syncing/Stale/Failed/凭证不可用）；成功时不返回 |
 | `ai.t3.environments` | object[] | 是 |  |

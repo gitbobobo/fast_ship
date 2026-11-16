@@ -12496,9 +12496,6 @@ components:
     DashboardAi:
       type: object
       properties:
-        complete:
-          type: boolean
-          description: false = 全部子块（T3/审查/机器人/额度）都不可用；成功或有任一子块可用时不返回
         t3:
           $ref: '#/components/schemas/DashboardAiT3'
         reviews:

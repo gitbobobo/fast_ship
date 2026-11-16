@@ -173,7 +173,7 @@ func (s *DashboardService) GetOverview(ctx context.Context, userID string) (*Das
 
 	// AI 运行面板（阶段三）：各子块独立降级；T3 与「待我处理」共用同一
 	// 遍历结果（见上），quota/bots 走窄接口。
-	resp.Ai = s.buildAi(ctx, userID, t3Snap)
+	resp.Ai = s.buildAi(userID, t3Snap)
 
 	return resp, nil
 }
@@ -186,59 +186,19 @@ type dashboardT3Snapshot struct {
 	err     error
 }
 
-func (s *DashboardService) buildAi(ctx context.Context, userID string, t3Snap dashboardT3Snapshot) *api.DashboardAi {
-	ai := &api.DashboardAi{
+func (s *DashboardService) buildAi(userID string, t3Snap dashboardT3Snapshot) *api.DashboardAi {
+	return &api.DashboardAi{
 		T3:      s.buildAiT3(t3Snap),
 		Reviews: s.buildAiReviews(userID, time.Now().UTC()),
 		Bots:    s.buildAiBots(userID),
 		Quota:   s.buildAiQuota(userID),
 	}
-	// 顶层 complete 仅在全部在场子块都不可用时返回 false（子块缺席不算不可用）；
-	// 有任一子块可用即省略。
-	incomplete := func(complete *bool) bool { return complete != nil && !*complete }
-	present, failed := 0, 0
-	check := func(complete *bool, exists bool) {
-		if !exists {
-			return
-		}
-		present++
-		if incomplete(complete) {
-			failed++
-		}
-	}
-	check(aiT3Complete(ai.T3), ai.T3 != nil)
-	check(ai.Reviews.Complete, ai.Reviews != nil)
-	check(aiBotsComplete(ai.Bots), ai.Bots != nil)
-	check(aiQuotaComplete(ai.Quota), ai.Quota != nil)
-	if present > 0 && failed == present {
-		ai.Complete = api.Ptr(false)
-	}
-	return ai
-}
-
-func aiT3Complete(t *api.DashboardAiT3) *bool {
-	if t == nil {
-		return nil
-	}
-	return t.Complete
-}
-
-func aiBotsComplete(b *api.DashboardAiBots) *bool {
-	if b == nil {
-		return nil
-	}
-	return b.Complete
-}
-
-func aiQuotaComplete(q *api.DashboardAiQuota) *bool {
-	if q == nil {
-		return nil
-	}
-	return q.Complete
 }
 
 // buildAiT3 每环境活跃线程计数：直接取自与「待我处理」组同一次遍历的
 // 结果。查询错误 → 子块降级（结构完整）；无 T3 环境（result=nil）→ 缺席。
+// complete 仅在降级时返回 false（契约「成功时不返回」，与 reviews/bots/
+// quota 子块同形），成功时不携带该字段。
 func (s *DashboardService) buildAiT3(t3Snap dashboardT3Snapshot) *api.DashboardAiT3 {
 	if !t3Snap.queried {
 		return nil
@@ -263,10 +223,11 @@ func (s *DashboardService) buildAiT3(t3Snap dashboardT3Snapshot) *api.DashboardA
 			Readable:        env.Readable,
 		})
 	}
-	return &api.DashboardAiT3{
-		Complete:     api.Ptr(t3Snap.result.Complete),
-		Environments: environments,
+	t3 := &api.DashboardAiT3{Environments: environments}
+	if !t3Snap.result.Complete {
+		t3.Complete = api.Ptr(false)
 	}
+	return t3
 }
 
 // buildAiReviews 审查四分桶：按 PR 归一（code_status success→passed /
@@ -550,12 +511,17 @@ func (s *DashboardService) actionGroups(ctx context.Context, userID string, t3Sn
 					dashboardActionItemHref(api.T3Waiting, dashboardActionRef{envID: w.EnvironmentID, threadID: w.ThreadID}),
 				))
 			}
-			groups = append(groups, DashboardActionItemGroup{
-				Kind:     api.T3Waiting,
-				Count:    len(t3Snap.result.Items),
-				Complete: api.Ptr(t3Snap.result.Complete),
-				Items:    items,
-			})
+			group := DashboardActionItemGroup{
+				Kind:  api.T3Waiting,
+				Count: len(t3Snap.result.Items),
+				Items: items,
+			}
+			// complete 仅在降级时返回 false（契约「成功时不返回」），与
+			// buildAiT3 同形。
+			if !t3Snap.result.Complete {
+				group.Complete = api.Ptr(false)
+			}
+			groups = append(groups, group)
 		}
 	}
 

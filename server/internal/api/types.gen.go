@@ -3116,11 +3116,8 @@ type DashboardActionItemKind string
 // DashboardAi AI 运行面板；无 T3 环境时 t3 缺席，单子块失败各自降级 complete=false
 type DashboardAi struct {
 	// Bots 机器人近 7 天用量（按用户时区聚合，与机器人页用量口径同源）；next_schedule 为 null 表示没有开启且排了下一次触发的任务
-	Bots *DashboardAiBots `json:"bots,omitempty"`
-
-	// Complete false = 全部子块（T3/审查/机器人/额度）都不可用；成功或有任一子块可用时不返回
-	Complete *bool             `json:"complete,omitempty"`
-	Quota    *DashboardAiQuota `json:"quota,omitempty"`
+	Bots  *DashboardAiBots  `json:"bots,omitempty"`
+	Quota *DashboardAiQuota `json:"quota,omitempty"`
 
 	// Reviews PR 级审查结论分布（近 30 天，排除搁置项目；按 review_pull_requests 当前轮次+当前 head 分组）：code_status=success→passed、failure→blocked、error→errored，pending 或仍有在途 run→in_flight
 	Reviews *DashboardAiReviews `json:"reviews,omitempty"`

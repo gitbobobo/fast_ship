@@ -864,9 +864,6 @@ func TestDashboardAiReviewsDegradedOnError(t *testing.T) {
 	if resp.Ai.Reviews.Complete == nil || *resp.Ai.Reviews.Complete {
 		t.Fatal("reviews complete must be present and false")
 	}
-	if resp.Ai.Complete == nil || *resp.Ai.Complete {
-		t.Fatal("ai top-level complete must be false when all sub-blocks are incomplete")
-	}
 }
 
 // buildAiBots：复用 GetBotUsageOverview 窄接口（7d/时区/请求/token 合计），
@@ -937,11 +934,7 @@ func TestDashboardAiBotsDegradedOnError(t *testing.T) {
 	if resp.Ai.Bots == nil || resp.Ai.Bots.Complete == nil || *resp.Ai.Bots.Complete {
 		t.Fatalf("bots must degrade: %+v", resp.Ai.Bots)
 	}
-	// reviews 在空库查询成功（空桶不算不可用），顶层 complete 不出现；
-	// 「全部在场子块都不可用」路径由 TestDashboardAiReviewsDegradedOnError 覆盖。
-	if resp.Ai.Complete != nil {
-		t.Fatalf("ai top-level complete must be omitted when any sub-block works: %+v", resp.Ai.Complete)
-	}
+	// 顶层 complete 已删（panel P6，无客户端）：子块级降级语义足够。
 }
 
 // buildAiQuota：快照透传（前端算剩余百分比）；服务错误吞掉降级；窄接口
@@ -976,8 +969,9 @@ func TestDashboardAiQuotaBlock(t *testing.T) {
 }
 
 // AI 面板 t3 子块与 t3_waiting 组共用同一 WaitingThreads 结果：每环境
-// running/waiting/queued/readable 透传、complete 透传；err 时子块降级；
-// 无环境（result=nil）时子块缺席。
+// running/waiting/queued/readable 透传、complete 仅降级返回 false（成功时
+// 不返回，契约与 reviews/bots/quota 同形）；err 时子块降级；无环境
+//（result=nil）时子块缺席。
 func TestDashboardAiT3Block(t *testing.T) {
 	db := newDashboardServiceTestDB(t)
 	userID := dashboardSeedUser(t, db)
@@ -1012,6 +1006,27 @@ func TestDashboardAiT3Block(t *testing.T) {
 	// 同一结果驱动 t3_waiting 组
 	if g := findGroup(resp.ActionItemGroups, api.T3Waiting); g == nil || g.Count != 1 || g.Complete == nil || *g.Complete {
 		t.Fatalf("t3_waiting group must share the same snapshot: %+v", g)
+	}
+
+	// 全部环境可读（Complete=true）：子块与组都不携带 complete（成功时不返回）
+	successSvc := newDashboardService(t, db, &fakeUnreadCounter{count: 0}, &fakeT3WaitingSource{
+		result: &T3WaitingResult{
+			Items: []T3WaitingItem{},
+			Environments: []T3EnvironmentActivity{
+				{EnvironmentID: "env-1", EnvironmentName: "工作站", Running: 1, Waiting: 2, Readable: true},
+			},
+			Complete: true,
+		},
+	})
+	resp, err = successSvc.GetOverview(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("GetOverview: %v", err)
+	}
+	if resp.Ai.T3 == nil || resp.Ai.T3.Complete != nil {
+		t.Fatalf("t3 block must omit complete on success: %+v", resp.Ai.T3)
+	}
+	if g := findGroup(resp.ActionItemGroups, api.T3Waiting); g == nil || g.Complete != nil {
+		t.Fatalf("t3_waiting group must omit complete on success: %+v", g)
 	}
 
 	// err：子块与组同时降级
