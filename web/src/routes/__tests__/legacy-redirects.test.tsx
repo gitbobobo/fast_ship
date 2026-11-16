@@ -1,4 +1,5 @@
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import type { ReactElement } from "react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -22,6 +23,15 @@ function mockProjects(items: Project[], isLoading = false) {
   projectsMock.mockReset().mockReturnValue({
     data: { items, total: items.length, page: 1, page_size: 100 },
     isLoading,
+  });
+}
+
+function mockProjectsError(refetch: () => void = () => {}) {
+  projectsMock.mockReset().mockReturnValue({
+    data: undefined,
+    isLoading: false,
+    isError: true,
+    refetch,
   });
 }
 
@@ -155,6 +165,26 @@ describe("旧版单项目路由重定向", () => {
     expect(screen.getByTestId("location")).toHaveTextContent(
       "/issues?project=p1",
     );
+  });
+
+  it("stays on the original deep link with a retry placeholder when the list query fails", async () => {
+    const user = userEvent.setup();
+    const refetch = vi.fn();
+    mockProjectsError(refetch);
+
+    renderRedirect(
+      <LegacySectionRedirect section="issues" />,
+      "/issues?project=p1&state=closed",
+    );
+
+    // 查询失败≠无项目：不能把深链改写成 /projects 丢掉
+    expect(screen.getByTestId("legacy-redirect-error")).toBeInTheDocument();
+    expect(screen.getByTestId("location")).toHaveTextContent(
+      "/issues?project=p1&state=closed",
+    );
+
+    await user.click(screen.getByRole("button", { name: "重试" }));
+    expect(refetch).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -306,8 +306,9 @@ export default function DocumentsPage() {
       return;
     }
     resetEditorState();
+    // 项目已在路径里，页面内 query 只保留 doc 等页面内状态，不再回写 project
     updateSearchParams({
-      project: activeProjectId || null,
+      project: null,
       doc: id,
     });
   };
@@ -333,7 +334,7 @@ export default function DocumentsPage() {
       });
       resetEditorState();
       updateSearchParams({
-        project: activeProjectId,
+        project: null,
         doc: res.data.id,
       });
       toast.success("已创建文档");
@@ -382,7 +383,7 @@ export default function DocumentsPage() {
       await deleteDocument.mutateAsync(selectedDocId);
       resetEditorState();
       updateSearchParams({
-        project: activeProjectId || null,
+        project: null,
         doc: null,
       });
       toast.success("已删除文档");

@@ -5,6 +5,7 @@ import {
   matchRouteProjectId,
   useCurrentProjectId,
   useRouteProject,
+  useSyncRouteProjectPreference,
 } from "@/lib/current-project";
 import { useProjectPreferenceStore } from "@/lib/store/project-preference-store";
 
@@ -149,6 +150,57 @@ describe("useRouteProject", () => {
 
     expect(await screen.findByTestId("route")).toHaveTextContent(
       "p1|-|loading|found-or-loading",
+    );
+  });
+});
+
+describe("useSyncRouteProjectPreference", () => {
+  beforeEach(() => {
+    useProjectPreferenceStore.setState({ lastSelectedProjectId: null });
+  });
+
+  afterEach(() => {
+    useProjectPreferenceStore.setState({ lastSelectedProjectId: null });
+  });
+
+  function PreferenceProbe() {
+    useSyncRouteProjectPreference();
+    const id = useProjectPreferenceStore(
+      (state) => state.lastSelectedProjectId,
+    );
+    return <div data-testid="pref">{id ?? "null"}</div>;
+  }
+
+  function renderPreferenceProbe(entry: string) {
+    return render(
+      <MemoryRouter initialEntries={[entry]}>
+        <Routes>
+          <Route path="*" element={<PreferenceProbe />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+  }
+
+  it("writes the route project into the preference on project routes", async () => {
+    useProjectPreferenceStore.setState({ lastSelectedProjectId: "p1" });
+
+    renderPreferenceProbe("/projects/p2/logs/run-9");
+
+    await waitFor(() => {
+      expect(
+        useProjectPreferenceStore.getState().lastSelectedProjectId,
+      ).toBe("p2");
+    });
+  });
+
+  it("keeps the preference untouched outside project routes", async () => {
+    useProjectPreferenceStore.setState({ lastSelectedProjectId: "p1" });
+
+    renderPreferenceProbe("/dashboard");
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(useProjectPreferenceStore.getState().lastSelectedProjectId).toBe(
+      "p1",
     );
   });
 });

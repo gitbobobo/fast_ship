@@ -182,9 +182,8 @@ export default function LogRunDetailPage() {
   };
 
   const handleResetFilters = () => {
-    const next = new URLSearchParams();
-    if (projectId) next.set("project", projectId);
-    setSearchParams(next, { replace: true });
+    // 项目已在路径里，重置筛选只清页面内 query，不再回写 project
+    setSearchParams(new URLSearchParams(), { replace: true });
   };
 
   const canResetFilters =

@@ -62,4 +62,11 @@ describe("projectSwitchPath", () => {
       `/projects/${encodeURIComponent("p/1")}/issues`,
     );
   });
+
+  it("normalizes section casing the same way matchPath matches routes", () => {
+    // matchPath 默认大小写不敏感，切换目标也按同样口径归一，避免切换器静默无效
+    expect(projectSwitchPath("/projects/A/ISSUES", "B")).toBe(
+      "/projects/B/issues",
+    );
+  });
 });

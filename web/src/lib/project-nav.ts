@@ -32,8 +32,10 @@ export function projectSwitchPath(
   if (!nextProjectId) return null;
   const match = matchPath("/projects/:id/*", pathname);
   if (!match) return null;
-  // section 之后的路径段（详情、new、edit、runId）一律丢弃，落到 section 列表页
-  const [section] = (match.params["*"] ?? "").split("/").filter(Boolean);
+  // section 之后的路径段（详情、new、edit、runId）一律丢弃，落到 section 列表页；
+  // matchPath 默认大小写不敏感（/projects/A/ISSUES 也命中路由），这里同样归一后再比对
+  const [rawSection] = (match.params["*"] ?? "").split("/").filter(Boolean);
+  const section = rawSection?.toLowerCase();
   if (!section || !SECTION_SET.has(section)) return null;
   return `/projects/${encodeURIComponent(nextProjectId)}/${section}`;
 }

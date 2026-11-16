@@ -35,11 +35,11 @@ export function resolveCurrentProjectId(
 }
 
 /**
- * 全局当前项目 ID：路径优先，其次最近选择与兜底回落（见 resolveCurrentProjectId）。
- * 路径带项目 ID 时写入 lastSelectedProjectId，让无路径页面的兜底随之收敛；
- * 挂在旧路径上时路径分支自然为空，只剩兜底裁决（旧路由重定向依赖这一点）。
+ * 路径命中 /projects/:id/* 时把路径项目写入 lastSelectedProjectId，让无路径页面
+ * （旧路由重定向、全局页兜底）随后能落在这个项目上；路径离开项目级路由时不写。
+ * 全局挂一次（AppLayout），不依赖项目列表，登录前后都安全。
  */
-export function useCurrentProjectId(projects: Project[]): string | null {
+export function useSyncRouteProjectPreference() {
   const { pathname } = useLocation();
   const routeProjectId = matchRouteProjectId(pathname);
   const lastSelectedProjectId = useProjectPreferenceStore(
@@ -54,6 +54,19 @@ export function useCurrentProjectId(projects: Project[]): string | null {
       setLastSelectedProjectId(routeProjectId);
     }
   }, [routeProjectId, lastSelectedProjectId, setLastSelectedProjectId]);
+}
+
+/**
+ * 全局当前项目 ID：路径优先，其次最近选择与兜底回落（见 resolveCurrentProjectId）。
+ * 挂在旧路径上时路径分支自然为空，只剩兜底裁决（旧路由重定向依赖这一点）。
+ */
+export function useCurrentProjectId(projects: Project[]): string | null {
+  useSyncRouteProjectPreference();
+  const { pathname } = useLocation();
+  const routeProjectId = matchRouteProjectId(pathname);
+  const lastSelectedProjectId = useProjectPreferenceStore(
+    (state) => state.lastSelectedProjectId,
+  );
 
   return resolveCurrentProjectId(
     projects,
