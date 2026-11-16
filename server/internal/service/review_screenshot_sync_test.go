@@ -810,6 +810,114 @@ func TestVisualSyncScreensUnavailableRecoversIDViaPrefix(t *testing.T) {
 	}
 }
 
+// INT-233 审查 P2 回归：同一轮内视觉决策从「截图无法下载」翻到真正开轮
+// （探测恢复、PR 描述换了可下载的截图集合）时，visualStart 清掉占位评论 id，
+// 终态视觉评论照常新发——本轮 findings 不再被 savedID 短路吞掉；占位评论
+// 原样保留作决策轨迹。
+func TestVisualSyncStartClearsPlaceholderCommentID(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	body := "![界面](https://uiv.frp.musiver.cn/f/x.png)"
+	e.fake.SetPR(repo, 93, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 93, HeadSHA: "sha-flip", Body: body,
+		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
+	})
+	visualCombos, err := marshalCombinations([]api.ReviewCombination{testCombo("env-flip")})
+	if err != nil {
+		t.Fatalf("marshal combos: %v", err)
+	}
+	e.enableReview(t, func(s *model.ProjectReviewSettings) {
+		s.VisualCombinationsJSON = visualCombos
+	})
+	// 上一轮（round 1）视觉发现 blocker（让沿用分支也可达）。
+	prior := e.seedRun(t, repo, 93, "sha-prev", model.ReviewRunCompleted, now.Add(-time.Hour))
+	e.svc.db.Model(prior).Updates(map[string]any{
+		"kind": model.ReviewKindVisual, "round_number": 1,
+		"result_json": `{"summary":"有阻断问题","findings":[{"severity":"blocker","screenshot":"界面","dimension":"hierarchy","body":"按钮叠在文字上","fix":"调整层级"}],"prior":[],"unmeasurable":[]}`,
+	})
+	run := e.seedRun(t, repo, 93, "sha-flip", model.ReviewRunCompleted, now)
+	e.svc.db.Model(run).Updates(map[string]any{
+		"round_number": 2, "summary": "干净",
+		"result_json": `{"summary":"干净","findings":[],"prior":[],"ui_changed":true,"ui_changed_since_last_visual":true}`,
+	})
+	fp := screenshotFingerprint(collectScreenshotURLs(body))
+	if err := e.svc.db.Create(&model.ReviewPullRequest{
+		IntegrationID: model.ForgeIntegrationBuiltinGitHubID,
+		ProjectID:     e.project.ID, RepoFullName: repo, PRNumber: 93, UserID: e.user.ID,
+		InstallationID: 1, HeadSHA: "sha-flip", RoundNumber: 2,
+		VisualScreensFingerprint: fp, SyncPending: true, SyncEpoch: 1, UpdatedAt: now,
+	}).Error; err != nil {
+		t.Fatalf("seed ledger: %v", err)
+	}
+
+	// tick1：本轮新截图集合全部下载失败 → 「截图无法下载」占位评论 + id。
+	e.media.anonErr = errors.New("connection refused")
+	e.review.syncPendingPRs(now)
+	var ledger model.ReviewPullRequest
+	e.svc.db.First(&ledger, "repo_full_name = ? AND pr_number = 93", repo)
+	if ledger.VisualCommentID == 0 {
+		t.Fatal("占位评论应已发出并记账（场景前置不成立）")
+	}
+	placeholderID := ledger.VisualCommentID
+
+	// tick2：探测恢复 + PR 描述换了截图集合（指纹变化）→ visualStart 真正
+	// 开轮，占位评论 id 被清。
+	e.media.anonErr = nil
+	e.fake.SetPR(repo, 93, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 93, HeadSHA: "sha-flip",
+		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
+		Body: "![新界面](https://uiv.frp.musiver.cn/f/new.png)",
+	})
+	e.setLedgerPending(t, repo, 93)
+	e.review.syncPendingPRs(now.Add(time.Second))
+	e.svc.db.First(&ledger, "repo_full_name = ? AND pr_number = 93", repo)
+	if ledger.VisualCommentID != 0 {
+		t.Fatalf("visualStart 后占位评论 id 应清零, got=%d", ledger.VisualCommentID)
+	}
+
+	// 本轮视觉运行出结论（blocker finding），同轮再次同步 → 终态视觉评论
+	// 照常新发，不再被旧 id 短路。
+	if err := e.svc.db.Model(&model.ReviewRun{}).
+		Where("repo_full_name = ? AND pr_number = ? AND kind = ? AND status <> ?",
+			repo, 93, model.ReviewKindVisual, model.ReviewRunCompleted).
+		Updates(map[string]any{
+			"status":      model.ReviewRunCompleted,
+			"summary":     "真结论",
+			"result_json": `{"summary":"真结论","findings":[{"severity":"blocker","screenshot":"新界面","dimension":"color","body":"对比度不足","fix":"加深底色"}],"prior":[],"unmeasurable":[]}`,
+		}).Error; err != nil {
+		t.Fatalf("complete visual run: %v", err)
+	}
+	e.setLedgerPending(t, repo, 93)
+	e.review.syncPendingPRs(now.Add(2 * time.Second))
+
+	var visuals []string
+	for _, c := range e.fake.Comments(repo, 93) {
+		if strings.Contains(c, reviewVisualCommentMarker) {
+			visuals = append(visuals, c)
+		}
+	}
+	if len(visuals) != 2 {
+		t.Fatalf("visual comments = %d, want 2（占位保留 + 终态新发）", len(visuals))
+	}
+	hasPlaceholder, hasConclusion := false, false
+	for _, c := range visuals {
+		if strings.Contains(c, "未做视觉审查") {
+			hasPlaceholder = true
+		}
+		if strings.Contains(c, "对比度不足") && strings.Contains(c, "<!-- fast-ship-round:sha-flip:2 -->") {
+			hasConclusion = true
+		}
+	}
+	if !hasPlaceholder || !hasConclusion {
+		t.Fatalf("应同时存在占位评论与终态评论: %v", visuals)
+	}
+	e.svc.db.First(&ledger, "repo_full_name = ? AND pr_number = 93", repo)
+	if ledger.VisualCommentID == 0 || ledger.VisualCommentID == placeholderID {
+		t.Fatalf("账本应记终态评论的新 id, got=%d placeholder=%d", ledger.VisualCommentID, placeholderID)
+	}
+}
+
 // F26 补充：账本没有已存在的视觉评论（visual_comment_id = 0）时，「截图无法
 // 下载」分支不新发评论——结论已由 failure status 表达，避免每个失败的 head
 // 都多一条只有说明的评论。

@@ -292,7 +292,7 @@ func TestPostRoundCommentRecoversIDViaPrefix(t *testing.T) {
 	}
 	seeded := e.fake.CallCounts()["CreatePullRequestComment"]
 	client := forge.NewGitHubReviewClient(e.fake, ledger.InstallationID)
-	if err := review.postRoundComment(ctx, client, ledger, marker, prefix+"\n本轮正文", "code_comment_id", 0); err != nil {
+	if err := review.postRoundComment(ctx, client, ledger, prefix, prefix+"\n本轮正文", "code_comment_id", 0); err != nil {
 		t.Fatalf("postRoundComment: %v", err)
 	}
 	if got := e.fake.CallCounts()["CreatePullRequestComment"]; got != seeded+1 {
@@ -307,7 +307,7 @@ func TestPostRoundCommentRecoversIDViaPrefix(t *testing.T) {
 
 	// 账本 id 已在：直接跳过，不再找回也不新建。
 	idAfterCreate := after.CodeCommentID
-	if err := review.postRoundComment(ctx, client, ledger, marker, prefix+"\n本轮正文", "code_comment_id", idAfterCreate); err != nil {
+	if err := review.postRoundComment(ctx, client, ledger, prefix, prefix+"\n本轮正文", "code_comment_id", idAfterCreate); err != nil {
 		t.Fatalf("重试: %v", err)
 	}
 	if got := e.fake.CallCounts()["CreatePullRequestComment"]; got != seeded+1 {
@@ -449,8 +449,8 @@ func TestReviewSyncCarriesVisualSuccessStatusOnce(t *testing.T) {
 	if !strings.Contains(visualComment, "上一轮审查通过") || strings.Contains(visualComment, "意见尚未处理") {
 		t.Fatalf("沿用通过的文案 = %q, want 「上一轮审查通过」", visualComment)
 	}
-	if !strings.Contains(visualComment, "<!-- fast-ship-round:sha-w:2 -->") {
-		t.Fatalf("视觉评论应带本轮轮次标记: %s", visualComment)
+	if !strings.Contains(visualComment, "<!-- fast-ship-round:sha-w:2:carry -->") {
+		t.Fatalf("沿用评论应带 :carry 轮次标记: %s", visualComment)
 	}
 }
 

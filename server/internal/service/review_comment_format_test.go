@@ -144,9 +144,10 @@ func TestBuildCodeCommentAllPass(t *testing.T) {
 	}
 }
 
-// TestBuildVisualCommentCarryText 沿用开场白按上一轮结论区分（INT-233 审查）：
-// 有未处理意见（含仅有 prior(open)、无新 findings 的形态）写「意见尚未处理」；
-// 干净上一轮（沿用通过）写「上一轮审查通过」，不与 success 结论矛盾。
+// TestBuildVisualCommentCarryText 沿用开场白由沿用分支决定（INT-233 审查）：
+// carryFailure 传 visualCarryTextPending（含仅有 prior(open)、无新 findings
+// 的形态——priorVisualFailure 按阻断口径已把这类上一轮判为沿用失败），
+// carrySuccess 传 visualCarryTextPassed，文案与状态判定同源不漂移。
 func TestBuildVisualCommentCarryText(t *testing.T) {
 	meta := reviewCommentMeta{RepoFullName: "o/r", HeadSHA: "abcdef1234567890", links: githubLinks("https://github.com"), RoundNumber: 2}
 	openPrior := []model.ReviewRun{{
@@ -154,9 +155,12 @@ func TestBuildVisualCommentCarryText(t *testing.T) {
 		RoundNumber: 1, HeadSHA: "sha-prev",
 		ResultJSON: `{"summary":"有遗留","findings":[],"prior":[{"level":"blocker","body":"旧问题","status":"open"}],"unmeasurable":[]}`,
 	}}
-	body := buildVisualComment(meta, nil, openPrior, true)
+	if !priorVisualFailure(openPrior) {
+		t.Fatal("前置：仅 prior(open) 阻断的上一轮应判沿用失败（场景成立性）")
+	}
+	body := buildVisualComment(meta, nil, openPrior, visualCarryTextPending)
 	if !strings.Contains(body, "意见尚未处理") || strings.Contains(body, "上一轮审查通过") {
-		t.Fatalf("仅 prior(open) 的沿用应写「意见尚未处理」: %s", body)
+		t.Fatalf("carryFailure 沿用应写「意见尚未处理」: %s", body)
 	}
 	if !strings.Contains(body, "仍未解决") {
 		t.Fatalf("prior(open) 应渲染进「仍未解决」段: %s", body)
@@ -167,9 +171,17 @@ func TestBuildVisualCommentCarryText(t *testing.T) {
 		RoundNumber: 1, HeadSHA: "sha-prev",
 		ResultJSON: `{"summary":"通过","findings":[],"prior":[{"level":"P0","body":"已修","status":"fixed"}],"unmeasurable":[]}`,
 	}}
-	body = buildVisualComment(meta, nil, clean, true)
+	if priorVisualFailure(clean) || !priorVisualPassed(clean) {
+		t.Fatal("前置：干净上一轮应判沿用通过（场景成立性）")
+	}
+	body = buildVisualComment(meta, nil, clean, visualCarryTextPassed)
 	if !strings.Contains(body, "上一轮审查通过") || strings.Contains(body, "意见尚未处理") {
-		t.Fatalf("干净上一轮的沿用应写「上一轮审查通过」: %s", body)
+		t.Fatalf("carrySuccess 沿用应写「上一轮审查通过」: %s", body)
+	}
+	// 非沿用（本轮视觉运行结论）不带开场白。
+	plain := buildVisualComment(meta, openPrior, nil, "")
+	if strings.Contains(plain, "沿用上一轮") {
+		t.Fatalf("非沿用评论不应带沿用开场白: %s", plain)
 	}
 }
 

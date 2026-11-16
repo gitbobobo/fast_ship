@@ -54,9 +54,24 @@ const (
 // reviewRoundTag 顶层评论第二行的轮次标记（INT-233）：评论按「marker + 轮次
 // 标记」两行合并前缀找回，同一 marker 的历史轮评论不会被认成本轮的——评论
 // 因此每轮新发、发出后不再改写。sha 用完整 head SHA，避免短 SHA 碰撞。
-func reviewRoundTag(meta reviewCommentMeta) string {
-	return fmt.Sprintf("<!-- fast-ship-round:%s:%d -->", meta.HeadSHA, meta.RoundNumber)
+// suffix 区分评论角色：终态结论（代码评论、视觉结论）无后缀；视觉沿用/
+// 截图不可用的占位评论带 ":carry"——同轮决策翻转到真正开轮时清掉占位评论
+// id，终态评论按自己的前缀找回/新建，不会被占位评论短路。
+func reviewRoundTag(meta reviewCommentMeta, suffix string) string {
+	return fmt.Sprintf("<!-- fast-ship-round:%s:%d%s -->", meta.HeadSHA, meta.RoundNumber, suffix)
 }
+
+// roundCommentPrefix 找回用两行合并前缀（ledger 快照口径，postRoundComment
+// 与各调用点共用，保证写入正文与找回前缀一字不差）。
+func roundCommentPrefix(marker string, ledger *model.ReviewPullRequest, suffix string) string {
+	return marker + "\n" + fmt.Sprintf("<!-- fast-ship-round:%s:%d%s -->", ledger.HeadSHA, ledger.RoundNumber, suffix)
+}
+
+// 顶层评论角色后缀。
+const (
+	roundTagConclusion = ""
+	roundTagCarryNote  = ":carry"
+)
 
 // statusDesc commit status 的 description 截断（GitHub 上限 140 字节）：
 // 按 rune 边界累计到 ≤137 字节再加 "..."——按字节下标切会劈断中文等
@@ -460,7 +475,8 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 					RoundNumber:  ledger.RoundNumber,
 					links:        links,
 				}, outcome.PriorRuns)
-				if err := s.postRoundComment(ctx, client, ledger, reviewVisualCommentMarker,
+				if err := s.postRoundComment(ctx, client, ledger,
+					roundCommentPrefix(reviewVisualCommentMarker, ledger, roundTagCarryNote),
 					body, "visual_comment_id", ledger.VisualCommentID); err != nil {
 					return err
 				}
@@ -481,6 +497,17 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 				break
 			}
 			visualRuns = created
+			// 同轮决策从沿用/截图不可用翻到真正开轮（截图探测恢复、PR 描述
+			// 换了可下载的截图集合）：清掉占位评论 id，本轮终态视觉评论按新发
+			// 处理——否则 postRoundComment 按旧 id 短路，本轮 findings 只剩
+			// status、评论区仍是占位说法。占位评论原样留作决策轨迹，不回写
+			// 不改（INT-233 历史不覆写）。
+			if ok, err := s.updateLedgerEpoch(ledger, epoch, map[string]any{"visual_comment_id": 0}); err != nil {
+				return errs.ErrInternal
+			} else if !ok {
+				return nil
+			}
+			ledger.VisualCommentID = 0
 			if err := client.CreateCommitStatus(ctx, ledger.RepoFullName,
 				ledger.HeadSHA, "pending", reviewVisualStatusContext, statusDesc("视觉审查中"), targetURL); err != nil {
 				return errs.New(errs.ErrGitHubAPI.Code, "写视觉审查状态失败: "+err.Error())
@@ -522,7 +549,7 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 			if outcome.FingerprintToStore != "" {
 				ledger.VisualScreensFingerprint = outcome.FingerprintToStore
 			}
-			if err := s.postVisualComment(ctx, client, ledger, nil, outcome.PriorRuns, true, now, links); err != nil {
+			if err := s.postVisualComment(ctx, client, ledger, nil, outcome.PriorRuns, visualCarryTextPending, now, links); err != nil {
 				return err
 			}
 		case visualCarrySuccess:
@@ -559,7 +586,7 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 			}
 			// 「沿用上一轮」的视觉评论每轮照常新发一条（INT-233）：留痕——
 			// 上一轮的评论保持原样，复核者在本 head 也能看到沿用关系。
-			if err := s.postVisualComment(ctx, client, ledger, nil, outcome.PriorRuns, true, now, links); err != nil {
+			if err := s.postVisualComment(ctx, client, ledger, nil, outcome.PriorRuns, visualCarryTextPassed, now, links); err != nil {
 				return err
 			}
 		case visualNone:
@@ -636,7 +663,9 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 		// postRoundComment 每轮只建不改：本轮已发过就跳过，同轮重试不产生
 		// 重复评论；diff 超限轮的评论按首次口径一次写定，后续自愈只补行内
 		// review，不改评论注记。
-		if err := s.postRoundComment(ctx, client, ledger, reviewCodeCommentMarker, codeBody, "code_comment_id", ledger.CodeCommentID); err != nil {
+		if err := s.postRoundComment(ctx, client, ledger,
+			roundCommentPrefix(reviewCodeCommentMarker, ledger, roundTagConclusion),
+			codeBody, "code_comment_id", ledger.CodeCommentID); err != nil {
 			return err
 		}
 	}
@@ -689,7 +718,7 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 			ledger.VisualStatus = vs
 		}
 		if vs != "pending" {
-			if err := s.postVisualComment(ctx, client, ledger, visualRuns, nil, false, now, links); err != nil {
+			if err := s.postVisualComment(ctx, client, ledger, visualRuns, nil, "", now, links); err != nil {
 				return err
 			}
 		}
@@ -736,15 +765,10 @@ func (s *ReviewService) updateLedgerEpoch(ledger *model.ReviewPullRequest, epoch
 // id 命中时不复核远端：评论被人为删除就留到下一轮新事件再说，不做轮内
 // 重建——重建会让「只发一次」变成难以推断的多状态机。
 func (s *ReviewService) postRoundComment(ctx context.Context, client forge.ReviewClient,
-	ledger *model.ReviewPullRequest, marker, body, idColumn string, savedID int64) error {
+	ledger *model.ReviewPullRequest, prefix, body, idColumn string, savedID int64) error {
 	if savedID != 0 {
 		return nil
 	}
-	prefix := marker + "\n" + reviewRoundTag(reviewCommentMeta{
-		RepoFullName: ledger.RepoFullName,
-		HeadSHA:      ledger.HeadSHA,
-		RoundNumber:  ledger.RoundNumber,
-	})
 	commentID, found, err := client.FindPullRequestComment(ctx, ledger.RepoFullName, ledger.PRNumber, prefix)
 	if err != nil {
 		return errs.New(errs.ErrGitHubAPI.Code, "查找顶层评论失败: "+err.Error())
@@ -777,9 +801,10 @@ func (s *ReviewService) recordCommentID(ledger *model.ReviewPullRequest, idColum
 }
 
 // postVisualComment 视觉顶层评论：本 head 的视觉运行结论或沿用提醒。每轮
-// 新发、只建不改（postRoundComment）。
+// 新发、只建不改（postRoundComment）；carryText 非空表示沿用分支，决定开场
+// 白与「仍未解决」渲染口径。
 func (s *ReviewService) postVisualComment(ctx context.Context, client forge.ReviewClient,
-	ledger *model.ReviewPullRequest, visualRuns []model.ReviewRun, priorRuns []model.ReviewRun, carried bool, now time.Time,
+	ledger *model.ReviewPullRequest, visualRuns []model.ReviewRun, priorRuns []model.ReviewRun, carryText string, now time.Time,
 	links forgeLinks) error {
 	meta := reviewCommentMeta{
 		RepoFullName: ledger.RepoFullName,
@@ -787,8 +812,14 @@ func (s *ReviewService) postVisualComment(ctx context.Context, client forge.Revi
 		RoundNumber:  ledger.RoundNumber,
 		links:        links,
 	}
-	body := buildVisualComment(meta, visualRuns, priorRuns, carried)
-	return s.postRoundComment(ctx, client, ledger, reviewVisualCommentMarker, body, "visual_comment_id", ledger.VisualCommentID)
+	body := buildVisualComment(meta, visualRuns, priorRuns, carryText)
+	tagSuffix := roundTagConclusion
+	if carryText != "" {
+		tagSuffix = roundTagCarryNote
+	}
+	return s.postRoundComment(ctx, client, ledger,
+		roundCommentPrefix(reviewVisualCommentMarker, ledger, tagSuffix),
+		body, "visual_comment_id", ledger.VisualCommentID)
 }
 
 // codeOpenPriorBlocks 结论里仍未解决（status=open）且会阻断的 prior 条目数
@@ -1093,7 +1124,7 @@ func buildCodeComment(meta reviewCommentMeta, codeRuns []model.ReviewRun, inline
 
 	var b strings.Builder
 	b.WriteString(reviewCodeCommentMarker + "\n")
-	b.WriteString(reviewRoundTag(meta) + "\n")
+	b.WriteString(reviewRoundTag(meta, roundTagConclusion) + "\n")
 	fmt.Fprintf(&b, "## 代码审查 · %s · 第 %d 轮\n\n", reviewShortSHA(meta.HeadSHA), meta.RoundNumber)
 
 	// 一句话结论：优先级 在途 → 未完成 → 全净 → 按级别计数（只列非零级别）。
@@ -1421,23 +1452,30 @@ func appendVisualFindings(b *strings.Builder, runs []model.ReviewRun, carried bo
 	}
 }
 
+// visualCarryTextPending/Passed 沿用评论的开场白（INT-233 审查 R2）：与沿用
+// 分支判定同源——carryFailure（上一轮有 blocker/worth_fixing/prior(open)
+// 阻断）写「意见尚未处理」，carrySuccess（沿用通过）写「上一轮审查通过」。
+// 不从 findings 再推导一套谓词，避免与 priorVisualFailure/Passed 口径漂移。
+const (
+	visualCarryTextPending = "截图未变化，意见尚未处理"
+	visualCarryTextPassed  = "截图未变化，上一轮审查通过"
+)
+
 // buildVisualComment 视觉审查顶层评论：标题带短 SHA 与轮次（与代码评论同一
-// 定位口径），按组合分节（summary → 本轮新发现 → 仍未解决）；carried 时正文
-// 开头说明沿用原因并指向上轮的轮次与 head——复核者要能知道意见是哪轮留下
-// 的，不能只看到一句「未变化」。
-func buildVisualComment(meta reviewCommentMeta, visualRuns, priorRuns []model.ReviewRun, carried bool) string {
+// 定位口径），按组合分节（summary → 本轮新发现 → 仍未解决）；carryText 非空
+// 时（沿用分支）正文开头说明沿用原因并指向上轮的轮次与 head——复核者要能
+// 知道意见是哪轮留下的，不能只看到一句「未变化」。
+func buildVisualComment(meta reviewCommentMeta, visualRuns, priorRuns []model.ReviewRun, carryText string) string {
+	carried := carryText != ""
+	tagSuffix := roundTagConclusion
+	if carried {
+		tagSuffix = roundTagCarryNote
+	}
 	var b strings.Builder
 	b.WriteString(reviewVisualCommentMarker + "\n")
-	b.WriteString(reviewRoundTag(meta) + "\n")
+	b.WriteString(reviewRoundTag(meta, tagSuffix) + "\n")
 	fmt.Fprintf(&b, "## 视觉审查 · %s · 第 %d 轮\n\n", reviewShortSHA(meta.HeadSHA), meta.RoundNumber)
 	if carried && len(priorRuns) > 0 {
-		// 沿用文案按上一轮结论区分（INT-233 审查 R2）：有未处理意见才说
-		// 「意见尚未处理」；沿用通过（carrySuccess）的上一轮是干净的，仍写
-		// 「意见尚未处理」会与 success 结论自相矛盾，且评论发出后不再改写。
-		carryText := "截图未变化，意见尚未处理"
-		if !visualCarryHasOpenFindings(priorRuns) {
-			carryText = "截图未变化，上一轮审查通过"
-		}
 		fmt.Fprintf(&b, "沿用上一轮视觉审查结论（第 %d 轮 · head %s）：%s。\n\n",
 			priorRuns[0].RoundNumber, reviewShortSHA(priorRuns[0].HeadSHA), carryText)
 	}
@@ -1449,32 +1487,14 @@ func buildVisualComment(meta reviewCommentMeta, visualRuns, priorRuns []model.Re
 	return strings.TrimRight(b.String(), "\n")
 }
 
-// visualCarryHasOpenFindings 沿用的上一轮是否带着未处理意见（findings、
-// unmeasurable 或 prior(open)）：决定沿用评论的说明文案。只看新发现会漏掉
-// 「上一轮仅有未解决遗留、无新 findings」的沿用 failure，让评论自称
-// 「上一轮审查通过」、与 failure status 及「仍未解决」段自相矛盾。
-func visualCarryHasOpenFindings(runs []model.ReviewRun) bool {
-	for i := range runs {
-		var result api.ReviewVisualResult
-		if json.Unmarshal([]byte(runs[i].ResultJSON), &result) != nil {
-			continue
-		}
-		if len(result.Findings) > 0 || len(result.Unmeasurable) > 0 ||
-			len(openPriorDecisions(result.Prior)) > 0 {
-			return true
-		}
-	}
-	return false
-}
-
 // buildScreensUnavailableComment 截图全部无法下载时的视觉评论正文：沿用同一
 // marker 与标题口径，说明本轮未做视觉审查的原因，并保留上一轮的视觉意见条
-// 目——上一轮 carry 发的「截图未变化」评论不能原样留在新 head 上（截图集合
-// 已换），但上一轮的意见本身仍未处理，丢掉会让复核者失去线索。
+// 目。每轮新发一条（INT-233 只建不改）：同轮内截图集合再变时本评论保持首次
+// 口径，上一轮/更早占位评论原样留作决策轨迹，新结论由视觉 status 表达。
 func buildScreensUnavailableComment(meta reviewCommentMeta, priorRuns []model.ReviewRun) string {
 	var b strings.Builder
 	b.WriteString(reviewVisualCommentMarker + "\n")
-	b.WriteString(reviewRoundTag(meta) + "\n")
+	b.WriteString(reviewRoundTag(meta, roundTagCarryNote) + "\n")
 	fmt.Fprintf(&b, "## 视觉审查 · %s · 第 %d 轮\n\n", reviewShortSHA(meta.HeadSHA), meta.RoundNumber)
 	b.WriteString("本轮 PR 描述里的截图全部无法下载，未做视觉审查。以下为上一轮的视觉审查意见：\n\n")
 	appendVisualFindings(&b, priorRuns, true)

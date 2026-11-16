@@ -105,7 +105,8 @@ func (e *StatusError) Error() string {
 	return fmt.Sprintf("githubapi: %s %s -> %d: %s", e.Method, e.URL, e.StatusCode, truncateBody(e.Body))
 }
 
-// IsNotFound 判断 err 是否 404（评论被删后 PATCH 失败，回退到按标记找回）。
+// IsNotFound 判断 err 是否 404（资源不存在：评论找回/树查询等按确定性
+// 失败归类的判定）。
 func IsNotFound(err error) bool {
 	var se *StatusError
 	return errors.As(err, &se) && se.StatusCode == http.StatusNotFound
