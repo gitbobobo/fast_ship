@@ -28,7 +28,7 @@ export type BoardWorkflowStatusParam = "todo" | "in_progress" | "done" | "unset"
 export function boardWorkflowStatusParamForStatusValue(
   statusValue: string,
 ): BoardWorkflowStatusParam | null {
-  if (!(statusValue in ISSUE_WORKFLOW_STATUS_LABELS)) {
+  if (!Object.hasOwn(ISSUE_WORKFLOW_STATUS_LABELS, statusValue)) {
     return null;
   }
   return statusValue === "" ? "unset" : (statusValue as BoardWorkflowStatusParam);

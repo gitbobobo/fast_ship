@@ -12,10 +12,10 @@ export interface IssueListContext {
   page?: number;
 }
 
+// 合法取值清单由 ISSUE_WORKFLOW_STATUS_LABELS 键派生（"未设置"列对外编码为 unset），
+// 避免与编码出处再各写一份（INT-239）。
 const BOARD_WORKFLOW_STATUS_VALUES: readonly string[] = [
-  "todo",
-  "in_progress",
-  "done",
+  ...Object.keys(ISSUE_WORKFLOW_STATUS_LABELS).filter((v) => v !== ""),
   "unset",
 ];
 

@@ -17,4 +17,10 @@ describe("board workflow status param", () => {
   it("未知取值返回 null，由调用方决定兜底", () => {
     expect(getBoardWorkflowStatusParam("bogus")).toBe(null);
   });
+
+  it("原型链上的名字不算合法列值", () => {
+    expect(getBoardWorkflowStatusParam("toString")).toBe(null);
+    expect(getBoardWorkflowStatusParam("constructor")).toBe(null);
+    expect(getBoardWorkflowStatusParam("__proto__")).toBe(null);
+  });
 });
