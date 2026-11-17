@@ -31,4 +31,11 @@ describe("useInfiniteBoardIssues workflow_status 接线", () => {
     await waitFor(() => expect(listMock).toHaveBeenCalled());
     expect(listMock.mock.calls[0][1]).toMatchObject({ workflow_status: "in_progress" });
   });
+
+  it("未知取值回落发原值，后端等值过滤得空列表而非放宽成全量", async () => {
+    // 只能经 as 越域到达；钉住回落语义防将来新调用方把整列数据渲染进错列。
+    renderHook(() => useInfiniteBoardIssues("p1", "bogus" as "todo"), { wrapper });
+    await waitFor(() => expect(listMock).toHaveBeenCalled());
+    expect(listMock.mock.calls[0][1]).toMatchObject({ workflow_status: "bogus" });
+  });
 });

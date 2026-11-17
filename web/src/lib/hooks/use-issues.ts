@@ -53,7 +53,8 @@ export function useInfiniteBoardIssues(
   pageSize = 20,
 ) {
   // 看板列 → 列表筛选参数的编码唯一出处是 getBoardWorkflowStatusParam：
-  // "" 编码为 unset（与未设置列同源），返回 null（未知取值）时不传该参数。
+  // "" 编码为 unset（与未设置列同源）；未知取值回落发原值，由后端等值
+  // 过滤得空列表，而不是省略参数放宽成「全部 open issue」。
   const boardWorkflowStatusParam = getBoardWorkflowStatusParam(workflowStatus);
   return useInfiniteQuery({
     queryKey: [
@@ -70,7 +71,7 @@ export function useInfiniteBoardIssues(
     queryFn: async ({ pageParam }) => {
       const res = await issueApi.list(projectId, {
         state: "open",
-        ...(boardWorkflowStatusParam ? { workflow_status: boardWorkflowStatusParam } : {}),
+        workflow_status: boardWorkflowStatusParam ?? workflowStatus,
         page: pageParam,
         page_size: pageSize,
         ...(filters?.label ? { label: filters.label } : {}),
