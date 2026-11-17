@@ -323,6 +323,24 @@ vi.mock("@/lib/store/auth-store", () => ({
   useAuthStore: vi.fn(),
 }));
 
+/** 详情页来源抽屉按视口宽度决定点选后是否收起；matches 返回该查询是否命中 */
+function stubViewportMatchMedia(matches: (query: string) => boolean) {
+  Object.defineProperty(window, "matchMedia", {
+    configurable: true,
+    writable: true,
+    value: vi.fn().mockImplementation((query: string) => ({
+      matches: matches(query),
+      media: query,
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })),
+  });
+}
+
 function mockIssueDetailData() {
   vi.mocked(useIssues).mockReturnValue({
     data: {
@@ -714,21 +732,8 @@ describe("Issue pages", () => {
       isFetchingNextPage: false,
     } as unknown as ReturnType<typeof useInfiniteIssueList>);
 
-    // 详情页按视口宽度决定左栏/抽屉；默认宽屏（xl+）
-    Object.defineProperty(window, "matchMedia", {
-      configurable: true,
-      writable: true,
-      value: vi.fn().mockImplementation((query: string) => ({
-        matches: false,
-        media: query,
-        onchange: null,
-        addListener: vi.fn(),
-        removeListener: vi.fn(),
-        addEventListener: vi.fn(),
-        removeEventListener: vi.fn(),
-        dispatchEvent: vi.fn(),
-      })),
-    });
+    // 默认宽屏（xl+）：useIsMobile(1280) 查询 (max-width: 1279px) 不命中
+    stubViewportMatchMedia(() => false);
 
     vi.mocked(useRecommendations).mockReturnValue({
       data: undefined,
@@ -1250,10 +1255,10 @@ describe("Issue pages", () => {
         initialEntry: "/projects/proj-1/issues/issue-1",
       });
 
-      expect(screen.queryByRole("button", { name: "来源列表" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: /来源列表/ })).not.toBeInTheDocument();
     });
 
-    it("parses board source params and highlights the current issue", () => {
+    it("opens the source drawer from the edge handle and highlights the current issue", () => {
       mockIssueDetailData();
       mockSourceListPages([
         {
@@ -1273,7 +1278,15 @@ describe("Issue pages", () => {
           "/projects/proj-1/issues/issue-1?issue_from=board&issue_workflow_status=todo&issue_label=bug",
       });
 
-      expect(screen.queryByRole("button", { name: "来源列表" })).not.toBeInTheDocument();
+      // 默认收起：左缘把手在，面板处于收起态；点把手展开
+      const handle = screen.getByRole("button", { name: /来源列表/ });
+      expect(handle).toHaveAttribute("aria-expanded", "false");
+      expect(document.getElementById("issue-source-list-panel")).toHaveClass("invisible");
+
+      fireEvent.click(handle);
+
+      expect(handle).toHaveAttribute("aria-expanded", "true");
+      expect(document.getElementById("issue-source-list-panel")).not.toHaveClass("invisible");
       const list = screen.getByTestId("issue-source-list");
       expect(list).toBeInTheDocument();
       const current = within(list).getByRole("button", { current: true });
@@ -1402,6 +1415,9 @@ describe("Issue pages", () => {
           "/projects/proj-1/issues/issue-1?issue_from=board&issue_workflow_status=todo",
       });
 
+      // 列表本体只在抽屉展开时可见：先点把手展开再切换数据
+      fireEvent.click(screen.getByRole("button", { name: /来源列表/ }));
+
       // 查询移出 issue-1：issue-1 仍在原位置保留，带「已不符合来源条件」标记
       mockSourceListPages([
         {
@@ -1468,6 +1484,171 @@ describe("Issue pages", () => {
       // issue_page 跟随目标所在页（第 1 页不编码）；comments_page/hash 不随翻页带入下一问题
       expect(screen.getByTestId("location-probe").textContent).not.toContain("issue_page");
       expect(screen.getByTestId("location-probe").textContent).not.toContain("comments_page");
+    });
+
+    it("toggles the source drawer with [ and closes it with Escape", () => {
+      mockIssueDetailData();
+      mockSourceListPages([
+        {
+          items: [
+            sourceIssue("issue-1", "GH-42", "Crash on launch"),
+            sourceIssue("issue-2", "GH-43", "Next issue"),
+          ],
+          total: 2,
+          page: 1,
+        },
+      ]);
+
+      renderWithRoute(<IssueDetailPage />, {
+        path: "/projects/:id/issues/:iid",
+        initialEntry:
+          "/projects/proj-1/issues/issue-1?issue_from=board&issue_workflow_status=todo",
+      });
+
+      const handle = screen.getByRole("button", { name: /来源列表/ });
+      const panel = () => document.getElementById("issue-source-list-panel");
+
+      // ［ 打开
+      fireEvent.keyDown(window, { key: "[" });
+      expect(handle).toHaveAttribute("aria-expanded", "true");
+      expect(panel()).not.toHaveClass("invisible");
+      expect(screen.getByTestId("issue-source-list")).toBeInTheDocument();
+
+      // 再按 ［ 收起
+      fireEvent.keyDown(window, { key: "[" });
+      expect(handle).toHaveAttribute("aria-expanded", "false");
+      expect(panel()).toHaveClass("invisible");
+
+      // Esc 在抽屉打开且无外来浮层时收起
+      fireEvent.keyDown(window, { key: "[" });
+      expect(panel()).not.toHaveClass("invisible");
+      fireEvent.keyDown(window, { key: "Escape" });
+      expect(handle).toHaveAttribute("aria-expanded", "false");
+      expect(panel()).toHaveClass("invisible");
+    });
+
+    it("keeps the drawer open after selecting an issue in wide viewport", () => {
+      mockIssueDetailData();
+      mockSourceListPages([
+        {
+          items: [
+            sourceIssue("issue-1", "GH-42", "Crash on launch"),
+            sourceIssue("issue-2", "GH-43", "Next issue"),
+          ],
+          total: 2,
+          page: 1,
+        },
+      ]);
+
+      renderWithRoute(<IssueDetailPage />, {
+        path: "/projects/:id/issues/:iid",
+        initialEntry:
+          "/projects/proj-1/issues/issue-1?issue_from=board&issue_workflow_status=todo",
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: /来源列表/ }));
+
+      // 测试环境视口即宽屏（matchMedia 恒不匹配）：点选后抽屉保持打开便于逐条浏览
+      fireEvent.click(
+        within(screen.getByTestId("issue-source-list")).getByRole("button", {
+          name: /GH-43/,
+        }),
+      );
+      expect(document.getElementById("issue-source-list-panel")).not.toHaveClass("invisible");
+      expect(screen.getByTestId("issue-source-list")).toBeInTheDocument();
+    });
+
+    it("closes the drawer with Escape even when focus sits in an editable target", () => {
+      mockIssueDetailData();
+      mockSourceListPages([
+        {
+          items: [sourceIssue("issue-1", "GH-42", "Crash on launch")],
+          total: 1,
+          page: 1,
+        },
+      ]);
+
+      renderWithRoute(<IssueDetailPage />, {
+        path: "/projects/:id/issues/:iid",
+        initialEntry:
+          "/projects/proj-1/issues/issue-1?issue_from=board&issue_workflow_status=todo",
+      });
+
+      fireEvent.keyDown(window, { key: "[" });
+      expect(document.getElementById("issue-source-list-panel")).not.toHaveClass("invisible");
+
+      // 抽屉无遮罩，焦点可落回正文输入框：Esc 收起抽屉优先于输入控件避让
+      const textarea = document.createElement("textarea");
+      document.body.appendChild(textarea);
+      textarea.focus();
+      fireEvent.keyDown(textarea, { key: "Escape" });
+
+      expect(document.getElementById("issue-source-list-panel")).toHaveClass("invisible");
+    });
+
+    it("closes the drawer after selecting an issue on narrow viewports", () => {
+      mockIssueDetailData();
+      mockSourceListPages([
+        {
+          items: [
+            sourceIssue("issue-1", "GH-42", "Crash on launch"),
+            sourceIssue("issue-2", "GH-43", "Next issue"),
+          ],
+          total: 2,
+          page: 1,
+        },
+      ]);
+
+      // 窄屏 stub：(max-width: 1279px) 命中，useIsMobile(1280) 为 true；
+      // beforeEach 会在下个用例恢复宽屏 stub
+      stubViewportMatchMedia((query) => query.includes("max-width"));
+
+      renderWithRoute(<IssueDetailPage />, {
+        path: "/projects/:id/issues/:iid",
+        initialEntry:
+          "/projects/proj-1/issues/issue-1?issue_from=board&issue_workflow_status=todo",
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: /来源列表/ }));
+      expect(document.getElementById("issue-source-list-panel")).not.toHaveClass("invisible");
+
+      fireEvent.click(
+        within(screen.getByTestId("issue-source-list")).getByRole("button", {
+          name: /GH-43/,
+        }),
+      );
+
+      // 窄屏点选后抽屉收起
+      expect(document.getElementById("issue-source-list-panel")).toHaveClass("invisible");
+    });
+
+    it("closes the drawer on pointer down outside and keeps the handle as the sole toggle", () => {
+      mockIssueDetailData();
+      mockSourceListPages([
+        {
+          items: [sourceIssue("issue-1", "GH-42", "Crash on launch")],
+          total: 1,
+          page: 1,
+        },
+      ]);
+
+      renderWithRoute(<IssueDetailPage />, {
+        path: "/projects/:id/issues/:iid",
+        initialEntry:
+          "/projects/proj-1/issues/issue-1?issue_from=board&issue_workflow_status=todo",
+      });
+
+      const handle = screen.getByRole("button", { name: /来源列表/ });
+      fireEvent.click(handle);
+      expect(document.getElementById("issue-source-list-panel")).not.toHaveClass("invisible");
+
+      // 把手自身的 pointerdown 不触发外点关闭，开与关只归 toggle
+      fireEvent.pointerDown(handle);
+      expect(document.getElementById("issue-source-list-panel")).not.toHaveClass("invisible");
+
+      // 点抽屉与把手之外（正文区域）收起
+      fireEvent.pointerDown(document.body);
+      expect(document.getElementById("issue-source-list-panel")).toHaveClass("invisible");
     });
   });
 

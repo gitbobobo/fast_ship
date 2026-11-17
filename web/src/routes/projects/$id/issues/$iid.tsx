@@ -15,9 +15,9 @@ import {
   Pencil,
   PanelLeft,
   PanelLeftClose,
+  PanelLeftOpen,
   Play,
   RefreshCw,
-  List,
 } from "lucide-react";
 import { GitHubContent } from "@/components/github-content";
 import { CollaborationArea } from "@/components/issues/collaboration-area";
@@ -83,7 +83,6 @@ import {
 } from "@/lib/issue-list-context";
 import { ISSUE_SOURCE_LABELS } from "@/lib/issue-source";
 import { useAuthStore } from "@/lib/store/auth-store";
-import { useProjectPreferenceStore } from "@/lib/store/project-preference-store";
 import { useIsMobile } from "@/lib/hooks/use-is-mobile";
 import {
   containsLocalIssueAssetReference,
@@ -113,7 +112,7 @@ import { IssueSourceList } from "./components/issue-source-list";
 import { useIssueSourceList } from "./components/use-issue-source";
 
 // 详情页全局快捷键要避让的浮层：Dialog/AlertDialog/Sheet/下拉菜单/Popover/Select 打开时
-// J/K/［ 让位浮层内部交互；来源列表抽屉自身不在此列（见下方过滤）
+// J/K/［ 让位浮层内部交互；来源列表抽屉是页面内普通面板（非 sheet-content），不在选择器内
 const OVERLAY_SELECTOR = [
   '[data-slot="dialog-content"]',
   '[data-slot="alert-dialog-content"]',
@@ -127,15 +126,7 @@ function isForeignOverlayOpen() {
   if (typeof document === "undefined") {
     return false;
   }
-  const overlays = document.querySelectorAll(OVERLAY_SELECTOR);
-  for (const overlay of overlays) {
-    // 来源列表抽屉打开时［/J/K 仍归详情页，不算外来浮层
-    if (overlay.hasAttribute("data-issue-source-sheet")) {
-      continue;
-    }
-    return true;
-  }
-  return false;
+  return document.querySelectorAll(OVERLAY_SELECTOR).length > 0;
 }
 
 function isEditableTarget(target: EventTarget | null) {
@@ -273,22 +264,14 @@ export default function IssueDetailPage() {
   const { data: project } = useProject(id!);
   const { data: repoLabels } = useIssueRepoLabels(id!);
 
-  // 来源列表：同一来源下跨 iid 持有；当前问题不属于来源项目时隐藏入口
+  // 来源列表抽屉：单一开关，宽窄屏共用同一套实现；每次进页默认收起（不持久化偏好）
   const isNarrowViewport = useIsMobile(1280);
-  const issueSourceListExpanded = useProjectPreferenceStore(
-    (state) => state.issueSourceListExpanded,
-  );
-  const setIssueSourceListExpanded = useProjectPreferenceStore(
-    (state) => state.setIssueSourceListExpanded,
-  );
-  const [isSourceSheetOpen, setIsSourceSheetOpen] = useState(false);
+  const [isSourcePanelOpen, setIsSourcePanelOpen] = useState(false);
   const hasSourceContext =
     issueSourceContext.kind !== "none" &&
     (issue === undefined || issue.project_id === id);
-  // 面板标题副行：说明来源是哪一列/哪组筛选与条数，宽屏栏与抽屉共用
+  // 面板标题副行：说明来源是哪一列/哪组筛选与条数
   const sourceLabel = describeIssueSourceContext(issueSourceContext);
-  const desktopSourceListOpen =
-    hasSourceContext && !isNarrowViewport && issueSourceListExpanded;
   const source = useIssueSourceList({
     projectId: id!,
     context: issueSourceContext,
@@ -300,30 +283,21 @@ export default function IssueDetailPage() {
     ? null
     : `${source.items.filter((entry) => !entry.stale).length} 个`;
 
-  const toggleSourceList = useCallback(() => {
+  const toggleSourcePanel = useCallback(() => {
     if (!hasSourceContext) {
       return;
     }
-    if (isNarrowViewport) {
-      setIsSourceSheetOpen((open) => !open);
-    } else {
-      setIssueSourceListExpanded(!issueSourceListExpanded);
-    }
-  }, [
-    hasSourceContext,
-    isNarrowViewport,
-    issueSourceListExpanded,
-    setIssueSourceListExpanded,
-  ]);
+    setIsSourcePanelOpen((open) => !open);
+  }, [hasSourceContext]);
 
   const {
     goToNext,
     goToPrevious,
   } = source;
 
-  // 全局快捷键：［ 展开收起来源列表，J/K 按来源列表顺序翻页。
-  // 避让：defaultPrevented、IME 组合态、修饰键、输入控件、其他 Dialog/Sheet/
-  // DropdownMenu/Popover/Select 浮层打开时。
+  // 全局快捷键：［ 开关来源列表抽屉，J/K 按来源列表顺序翻页；Esc 仅在无外来
+  // 浮层时收起抽屉。避让：defaultPrevented、IME 组合态、修饰键、输入控件、
+  // 其他 Dialog/Sheet/DropdownMenu/Popover/Select 浮层打开时。
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.defaultPrevented || event.isComposing) {
@@ -332,12 +306,21 @@ export default function IssueDetailPage() {
       if (event.metaKey || event.ctrlKey || event.altKey) {
         return;
       }
+      // Esc 收起抽屉优先于输入控件避让：抽屉无遮罩，焦点可落回正文输入框；
+      // 外来浮层打开时 Esc 归浮层，不动抽屉
+      if (event.key === "Escape" && isSourcePanelOpen) {
+        if (!isForeignOverlayOpen()) {
+          event.preventDefault();
+          setIsSourcePanelOpen(false);
+        }
+        return;
+      }
       if (isEditableTarget(event.target) || isForeignOverlayOpen()) {
         return;
       }
       if (event.key === "[") {
         event.preventDefault();
-        toggleSourceList();
+        toggleSourcePanel();
       } else if (event.key === "j") {
         event.preventDefault();
         goToNext();
@@ -348,7 +331,27 @@ export default function IssueDetailPage() {
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [toggleSourceList, goToNext, goToPrevious]);
+  }, [toggleSourcePanel, goToNext, goToPrevious, isSourcePanelOpen]);
+
+  // 抽屉无遮罩：打开期间点击面板与把手以外区域（正文、右栏等）直接收起
+  useEffect(() => {
+    if (!isSourcePanelOpen) {
+      return;
+    }
+    const handlePointerDown = (event: PointerEvent) => {
+      if (!(event.target instanceof Node)) {
+        return;
+      }
+      const panel = document.getElementById("issue-source-list-panel");
+      const handle = document.getElementById("issue-source-list-handle");
+      if (panel?.contains(event.target) || handle?.contains(event.target)) {
+        return;
+      }
+      setIsSourcePanelOpen(false);
+    };
+    document.addEventListener("pointerdown", handlePointerDown);
+    return () => document.removeEventListener("pointerdown", handlePointerDown);
+  }, [isSourcePanelOpen]);
   // 命中推荐时在正文卡片上方展示横幅；queryKey 与看板弹框同源，命中缓存
   const { data: recommendationsData } = useRecommendations(id);
   const recommendation = useMemo(
@@ -1084,68 +1087,77 @@ export default function IssueDetailPage() {
           />
         }
       />
-      <div
-        className={cn(
-          "mx-auto w-full p-4 md:p-6",
-          desktopSourceListOpen ? "max-w-[100rem]" : "max-w-7xl",
-        )}
-      >
-        <div
-          className={cn(
-            "grid gap-6",
-            desktopSourceListOpen
-              ? "xl:grid-cols-[280px_minmax(0,1fr)_340px]"
-              : "lg:grid-cols-[1fr_300px] xl:grid-cols-[1fr_340px]",
-          )}
-        >
-          {/* 来源列表左栏（仅宽屏 xl+ 且展开时） */}
-          {desktopSourceListOpen && (
-            <aside className="min-w-0 xl:sticky xl:top-20 xl:self-start">
-              <div
-                id="issue-source-list-panel"
-                className="overflow-hidden rounded-2xl border bg-card shadow-sm"
-              >
-                <div className="flex items-center justify-between border-b px-4 py-2.5">
-                  <div className="min-w-0">
-                    <h2 className="text-sm font-semibold">来源列表</h2>
-                    <p className="mt-0.5 flex text-xs text-muted-foreground">
-                      <span className="min-w-0 truncate">{sourceLabel}</span>
-                      {sourceCountLabel ? (
-                        <span className="shrink-0"> · {sourceCountLabel}</span>
-                      ) : null}
-                    </p>
-                  </div>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="h-7 shrink-0 gap-1 px-2 text-xs"
-                    onClick={toggleSourceList}
-                    aria-label="收起来源列表（快捷键 [）"
-                    title="收起（快捷键 [）"
-                  >
-                    <PanelLeftClose className="h-3.5 w-3.5" />
-                    收起
-                  </Button>
-                </div>
-                <IssueSourceList
-                  entries={source.items}
-                  currentIssueId={iid ?? ""}
-                  onSelect={source.goToIssue}
-                  isLoading={source.isLoading}
-                  isError={source.isError}
-                  onRetry={() => void source.refetch()}
-                  hasNextPage={source.hasNextPage}
-                  isFetchingNextPage={source.isFetchingNextPage}
-                  onLoadMore={() => {
-                    if (source.hasNextPage && !source.isFetchingNextPage) {
-                      void source.fetchNextPage();
-                    }
-                  }}
-                  className="max-h-[calc(100vh-11rem)] overflow-y-auto"
-                />
+      {/* 来源列表抽屉：内容区左缘覆盖式。sticky 贴在顶栏下方且不占文档流高度，
+          只覆盖内容区（不盖全局侧栏与顶栏）；无遮罩，开着列表也能看清正文 */}
+      {hasSourceContext && (
+        <div className="pointer-events-none sticky top-14 z-20 h-0">
+          <div
+            className={cn(
+              "absolute left-0 top-0 flex h-[calc(100dvh-3.5rem)] w-[300px] max-w-[85vw] transition-transform duration-150 motion-reduce:transition-none",
+              isSourcePanelOpen ? "translate-x-0" : "-translate-x-full",
+            )}
+          >
+            <div
+              id="issue-source-list-panel"
+              className={cn(
+                "pointer-events-auto flex min-w-0 flex-1 flex-col overflow-hidden rounded-r-2xl border border-l-0 bg-card shadow-xl transition-[visibility] duration-150 motion-reduce:transition-none",
+                isSourcePanelOpen ? "visible" : "invisible",
+              )}
+            >
+              <div className="border-b px-4 py-2.5">
+                <h2 className="text-sm font-semibold">来源列表</h2>
+                <p className="mt-0.5 flex text-xs text-muted-foreground">
+                  <span className="min-w-0 truncate">{sourceLabel}</span>
+                  {sourceCountLabel ? (
+                    <span className="shrink-0"> · {sourceCountLabel}</span>
+                  ) : null}
+                </p>
               </div>
-            </aside>
-          )}
+              <IssueSourceList
+                entries={source.items}
+                currentIssueId={iid ?? ""}
+                onSelect={(issue) => {
+                  source.goToIssue(issue);
+                  // 宽屏点选后保持打开便于逐条浏览；窄屏点选即收起
+                  if (isNarrowViewport) {
+                    setIsSourcePanelOpen(false);
+                  }
+                }}
+                isLoading={source.isLoading}
+                isError={source.isError}
+                onRetry={() => void source.refetch()}
+                hasNextPage={source.hasNextPage}
+                isFetchingNextPage={source.isFetchingNextPage}
+                onLoadMore={() => {
+                  if (source.hasNextPage && !source.isFetchingNextPage) {
+                    void source.fetchNextPage();
+                  }
+                }}
+                className="min-h-0 flex-1 overflow-y-auto"
+              />
+            </div>
+            {/* 左缘把手：开与关同一控件，随抽屉一起平移，打开时停在抽屉右缘 */}
+            <button
+              id="issue-source-list-handle"
+              type="button"
+              onClick={toggleSourcePanel}
+              aria-expanded={isSourcePanelOpen}
+              aria-controls="issue-source-list-panel"
+              aria-label="来源列表（快捷键 [）"
+              title="来源列表（快捷键 [）"
+              className="group pointer-events-auto absolute left-full top-1/2 flex h-16 w-3 -translate-y-1/2 items-center justify-center rounded-r-md border border-l-0 border-border/60 bg-muted/50 text-muted-foreground/60 transition-[width,background-color,border-color,color] duration-150 hover:w-4 hover:bg-muted hover:text-foreground motion-reduce:transition-none"
+            >
+              {isSourcePanelOpen ? (
+                <PanelLeftClose className="h-3 w-3 opacity-0 group-hover:opacity-100" />
+              ) : (
+                <PanelLeftOpen className="h-3 w-3 opacity-0 group-hover:opacity-100" />
+              )}
+            </button>
+          </div>
+        </div>
+      )}
+      <div className="mx-auto w-full max-w-7xl p-4 md:p-6">
+        <div className="grid gap-6 lg:grid-cols-[1fr_300px] xl:grid-cols-[1fr_340px]">
 
           {/* Main Content */}
           <div className="min-w-0 space-y-6 [&_img]:cursor-zoom-in" onClick={handleImageClick}>
@@ -1226,21 +1238,6 @@ export default function IssueDetailPage() {
                       <h1 className="flex-1 text-xl font-semibold leading-snug text-foreground md:text-2xl">
                         {issue.reference} {issue.title}
                       </h1>
-                      {/* 宽屏展开时面板头已有「收起」，标题旁按钮仅在未展开/窄屏时作入口，避免双控件 */}
-                      {hasSourceContext && !desktopSourceListOpen && (
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="shrink-0"
-                          onClick={toggleSourceList}
-                          aria-expanded={isNarrowViewport && isSourceSheetOpen}
-                          aria-controls="issue-source-list-panel"
-                          title="来源列表（快捷键 [）"
-                        >
-                          <List className="mr-1.5 h-3.5 w-3.5" />
-                          来源列表
-                        </Button>
-                      )}
                       <Button
                         variant="ghost"
                         size="sm"
@@ -1356,53 +1353,6 @@ export default function IssueDetailPage() {
           </div>
         </SheetContent>
       </Sheet>
-
-      {/* 窄屏（xl 以下）来源列表抽屉：从左侧覆盖；［ 可关闭，J/K 继续可用 */}
-      {hasSourceContext && isNarrowViewport && (
-        <Sheet
-          open={isSourceSheetOpen}
-          onOpenChange={setIsSourceSheetOpen}
-        >
-          <SheetContent
-            side="left"
-            data-issue-source-sheet="true"
-            className="w-[300px] max-w-[85vw] gap-0"
-          >
-            <SheetHeader className="border-b pb-3">
-              <SheetTitle>来源列表</SheetTitle>
-              <p className="mt-0.5 flex text-xs text-muted-foreground">
-                <span className="min-w-0 truncate">{sourceLabel}</span>
-                {sourceCountLabel ? (
-                  <span className="shrink-0"> · {sourceCountLabel}</span>
-                ) : null}
-              </p>
-            </SheetHeader>
-            <div
-              id="issue-source-list-panel"
-              className="min-h-0 flex-1 overflow-y-auto"
-            >
-              <IssueSourceList
-                entries={source.items}
-                currentIssueId={iid ?? ""}
-                onSelect={(issue) => {
-                  source.goToIssue(issue);
-                  setIsSourceSheetOpen(false);
-                }}
-                isLoading={source.isLoading}
-                isError={source.isError}
-                onRetry={() => void source.refetch()}
-                hasNextPage={source.hasNextPage}
-                isFetchingNextPage={source.isFetchingNextPage}
-                onLoadMore={() => {
-                  if (source.hasNextPage && !source.isFetchingNextPage) {
-                    void source.fetchNextPage();
-                  }
-                }}
-              />
-            </div>
-          </SheetContent>
-        </Sheet>
-      )}
 
       {/* 清单建议弹框全局只渲染一份，由 checklistController 驱动 */}
       <IssueChecklistSuggestionsDialog controller={checklistController} />
