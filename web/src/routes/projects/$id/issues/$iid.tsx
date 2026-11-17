@@ -10,12 +10,12 @@ import {
   Inbox,
   Lightbulb,
   Link2,
+  List,
+  ListX,
   Loader2,
   MessageSquare,
   Pencil,
   PanelLeft,
-  PanelLeftClose,
-  PanelLeftOpen,
   Play,
   RefreshCw,
   X,
@@ -1119,7 +1119,11 @@ export default function IssueDetailPage() {
           <div
             className={cn(
               "absolute left-4 top-0 flex h-[calc(100dvh-3.5rem)] w-[300px] max-w-[85vw] transition-transform duration-150 motion-reduce:transition-none max-sm:w-[calc(100%-2.5rem)] max-sm:max-w-none md:left-6",
-              isSourcePanelOpen ? "translate-x-0" : "-translate-x-full",
+              // 收起时再多平移 14/10px：把手随之落进容器内边距死区，
+              // 只与卡片描边重叠 2px，不遮断卡片左缘轮廓与左上圆角
+              isSourcePanelOpen
+                ? "translate-x-0"
+                : "-translate-x-[calc(100%+0.875rem)] md:-translate-x-[calc(100%+0.625rem)]",
             )}
           >
             <div
@@ -1131,7 +1135,8 @@ export default function IssueDetailPage() {
                 isSourcePanelOpen ? "visible" : "invisible",
               )}
             >
-              <div className="flex items-start justify-between gap-2 border-b px-4 py-2.5">
+              {/* 头部左内边距对齐列表项文字（ul p-1.5 + 项 px-2 + 选中条 + 未读点列 + gap ≈ 36px） */}
+              <div className="flex items-start justify-between gap-2 border-b pl-9 pr-4 py-2.5">
                 <div className="min-w-0">
                   <h2
                     id="issue-source-list-title"
@@ -1147,7 +1152,7 @@ export default function IssueDetailPage() {
                     ) : null}
                   </p>
                   {issue ? (
-                    <p className="mt-0.5 truncate text-xs text-muted-foreground/80">
+                    <p className="mt-0.5 truncate text-xs text-muted-foreground">
                       当前 {issue.reference} · {issue.title}
                     </p>
                   ) : null}
@@ -1186,10 +1191,13 @@ export default function IssueDetailPage() {
               />
             </div>
             {/* 左缘把手：开与关同一控件，随抽屉一起平移，打开时停在抽屉右缘。
-                顶部锚定（top-2 紧跟 Header 与面板头部同 y），不垂直居中——居中会落在
+                顶部锚定（top-8 避开卡片左上圆角），不垂直居中——居中会落在
                 卡片纵向中部、切断卡片左描边横穿分隔线，看起来像渲染残留而不是入口。
-                收起态伪元素命中区向左扩进正文容器内边距（死区），右侧只留 4px
-                不越进正文可见区；打开态把手两侧都挨着可点内容，命中区收窄到 ±4px */}
+                收起时把手随面板多移的 14/10px 落进容器内边距死区、呈浮动小片
+                （rounded-md），只与卡片描边重叠 2px；伪元素命中区向左扩进死区、
+                右侧不越进正文可见区；打开态把手两侧都挨着可点内容，命中区收窄到 ±4px。
+                图标用 List/ListX 而非 PanelLeft*——右下角移动侧栏 FAB 也是 PanelLeft，
+                同族图标并排会让用户分不清哪个开来源列表、哪个开全局侧栏 */}
             <button
               id="issue-source-list-handle"
               type="button"
@@ -1199,16 +1207,16 @@ export default function IssueDetailPage() {
               aria-label="来源列表（快捷键 [）"
               title="来源列表（快捷键 [）"
               className={cn(
-                "group pointer-events-auto absolute left-full top-2 flex h-16 w-3 items-center justify-center rounded-r-md border border-l-0 border-neutral-400 bg-neutral-300 text-muted-foreground transition-[width,background-color,border-color,color] duration-150 after:absolute after:inset-y-0 after:content-[''] hover:w-4 hover:bg-neutral-400 hover:text-foreground motion-reduce:transition-none max-sm:w-5 dark:border-neutral-500 dark:bg-neutral-600 dark:hover:bg-neutral-500",
+                "group pointer-events-auto absolute left-full top-8 flex h-16 w-3 items-center justify-center border border-neutral-400 bg-neutral-300 text-muted-foreground transition-[width,background-color,border-color,color] duration-150 after:absolute after:inset-y-0 after:content-[''] hover:w-4 hover:bg-neutral-400 hover:text-foreground motion-reduce:transition-none max-sm:w-4 dark:border-neutral-500 dark:bg-neutral-600 dark:hover:bg-neutral-500",
                 isSourcePanelOpen
-                  ? "after:-left-1 after:-right-1"
-                  : "after:-left-4 after:-right-1 md:after:-left-6",
+                  ? "rounded-r-md border-l-0 after:-left-1 after:-right-1"
+                  : "rounded-md after:-left-4 after:-right-4 md:after:-left-6 md:after:-right-1",
               )}
             >
               {isSourcePanelOpen ? (
-                <PanelLeftClose className="h-3 w-3" />
+                <ListX className="h-3 w-3" />
               ) : (
-                <PanelLeftOpen className="h-3 w-3" />
+                <List className="h-3 w-3" />
               )}
             </button>
           </div>
