@@ -279,11 +279,12 @@ export default function IssueDetailPage() {
     currentIssueId: iid ?? "",
     currentIssueProjectId: issue?.project_id,
   });
-  // 条数取符合来源条件的行数（不含 stale 保留项），与副标题的筛选描述自洽；加载中不显示
-  // 加载中/空数据加载失败时不报「0 个」——那不是事实，会误导用户跳过重试
+  // 条数取符合来源条件的行数（不含 stale 保留项），与副标题的筛选描述自洽；
+  // 加载中/空数据加载失败时用「—」占位——不报「0 个」（暗示空列表是成功结果），
+  // 也不留空槽（像标签被截断）；标签本身仍是来源列描述不随数据态切换
   const sourceCountLabel =
     source.isLoading || (source.isError && source.items.length === 0)
-      ? null
+      ? "—"
       : `${source.items.filter((entry) => !entry.stale).length} 个`;
 
   // 主动收起路径（[、Esc、X、窄屏点选）统一把焦点还给把手；
