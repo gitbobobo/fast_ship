@@ -280,9 +280,11 @@ export default function IssueDetailPage() {
     currentIssueProjectId: issue?.project_id,
   });
   // 条数取符合来源条件的行数（不含 stale 保留项），与副标题的筛选描述自洽；加载中不显示
-  const sourceCountLabel = source.isLoading
-    ? null
-    : `${source.items.filter((entry) => !entry.stale).length} 个`;
+  // 加载中/空数据加载失败时不报「0 个」——那不是事实，会误导用户跳过重试
+  const sourceCountLabel =
+    source.isLoading || (source.isError && source.items.length === 0)
+      ? null
+      : `${source.items.filter((entry) => !entry.stale).length} 个`;
 
   // 主动收起路径（[、Esc、X、窄屏点选）统一把焦点还给把手；
   // 点外部收起不走这里——焦点应落在用户点的目标上
@@ -1135,7 +1137,7 @@ export default function IssueDetailPage() {
               role="region"
               aria-label="来源列表"
               className={cn(
-                "pointer-events-auto flex min-w-0 flex-1 flex-col overflow-hidden rounded-r-2xl border border-l-0 bg-card shadow-xl transition-[visibility] duration-150 motion-reduce:transition-none",
+                "pointer-events-auto flex min-w-0 flex-1 flex-col overflow-hidden rounded-r-2xl border border-l-0 bg-card shadow-xl transition-[visibility] duration-150 motion-reduce:transition-none dark:border-neutral-600 dark:shadow-[0_0_0_1px_#404040,0_8px_32px_rgba(0,0,0,0.55)]",
                 isSourcePanelOpen ? "visible" : "invisible",
               )}
             >
@@ -1214,7 +1216,7 @@ export default function IssueDetailPage() {
               aria-label="来源列表（快捷键 [）"
               title="来源列表（快捷键 [）"
               className={cn(
-                "group pointer-events-auto absolute left-full top-8 flex h-16 w-3.5 items-center justify-center border border-neutral-400 bg-neutral-300 text-neutral-600 transition-[width,background-color,border-color,color] duration-150 after:absolute after:inset-y-0 after:content-[''] hover:w-4 hover:bg-neutral-400 hover:text-neutral-800 focus-visible:ring-2 focus-visible:ring-neutral-500 focus-visible:ring-offset-1 motion-reduce:transition-none max-sm:w-4 dark:border-neutral-500 dark:bg-neutral-600 dark:text-neutral-300 dark:hover:bg-neutral-500 dark:focus-visible:ring-neutral-400",
+                "group pointer-events-auto absolute left-full top-8 flex h-16 w-3.5 items-center justify-center border border-neutral-400 bg-neutral-300 text-neutral-600 transition-[width,background-color,border-color,color] duration-150 after:absolute after:inset-y-0 after:content-[''] hover:w-4 hover:bg-neutral-400 hover:text-neutral-900 focus-visible:ring-2 focus-visible:ring-neutral-500 focus-visible:ring-offset-1 motion-reduce:transition-none max-sm:w-4 dark:border-neutral-500 dark:bg-neutral-600 dark:text-neutral-300 dark:hover:bg-neutral-500 dark:hover:text-white dark:focus-visible:ring-neutral-400",
                 isSourcePanelOpen
                   ? "rounded-r-md border-l-0 after:-left-1 after:-right-1 max-sm:hidden"
                   : "rounded-md after:-left-4 after:-right-1 md:after:-left-6",

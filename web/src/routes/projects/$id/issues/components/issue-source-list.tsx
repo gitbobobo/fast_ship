@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { ListX, Loader2 } from "lucide-react";
+import { CircleAlert, ListX, Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { IssueSourceEntry } from "./use-issue-source";
 
@@ -89,8 +89,9 @@ export function IssueSourceList({
   // 有已加载条目时分页/后台刷新失败不整替列表：只在内联提供重试，保住用户已看到的内容
   if (isError && entries.length === 0) {
     return (
-      <div className={cn("flex flex-col items-center gap-2 p-6 text-sm text-muted-foreground", className)}>
-        <span>来源列表加载失败</span>
+      <div className={cn("flex flex-col items-center gap-2 p-6 text-sm", className)}>
+        <CircleAlert className="h-5 w-5 text-red-500" />
+        <span className="text-red-600 dark:text-red-400">来源列表加载失败</span>
         <button
           type="button"
           onClick={onRetry}
