@@ -31,19 +31,20 @@ func NewDashboardRepository(db *gorm.DB) *DashboardRepository {
 
 func (r *DashboardRepository) GetOpenIssueCounts(userID string) ([]DashboardProjectOpenIssueCount, error) {
 	var rows []DashboardProjectOpenIssueCount
+	// 分母口径唯一出处见 workflow_census.go（INT-239）：开启且未完成。
+	openNotDoneSQL, openNotDoneArgs := WorkflowOpenNotDone("i", "m")
 	err := r.db.
 		Table("projects AS p").
-		Select(`
+		Select(fmt.Sprintf(`
 			p.id AS project_id,
 			p.name AS project_name,
 			COALESCE(SUM(CASE
 				WHEN i.id IS NOT NULL
-				 AND i.state = ?
-				 AND (m.workflow_status IS NULL OR m.workflow_status != ?)
+				 AND %s
 				THEN 1
 				ELSE 0
 			END), 0) AS open_issue_count
-		`, model.IssueStateOpen, model.IssueWorkflowStatusDone).
+		`, openNotDoneSQL), openNotDoneArgs...).
 		Joins("LEFT JOIN issues i ON i.project_id = p.id").
 		Joins("LEFT JOIN issue_internal_meta m ON m.issue_id = i.id").
 		Where("p.user_id = ?", userID).
@@ -397,29 +398,32 @@ type DashboardWorkflowBuckets struct {
 	InProgressCount int `gorm:"column:in_progress_count"`
 }
 
-// GetWorkflowBuckets 开启 issue 按 workflow_status 分桶：meta 缺失（NULL）、
-// 空串（列默认值）与显式 'todo' 都归 todo，其余（外层谓词已排除 done，合法
-// 取值只剩 'in_progress'）归 in_progress。分母判定与 GetOpenIssueCounts 完全
-// 一致（state=open AND (m.workflow_status IS NULL OR m.workflow_status !=
-// 'done')），恒等式 todo+in_progress == Σopen_issue_count。刻意独立成查询而
-// 不塞进 GetOpenIssueCounts：概览那两个查询失败即 500，新指标必须能单独降级
+// GetWorkflowBuckets 开启 issue 按 workflow_status 的两档分桶：分桶谓词唯一
+// 出处见 workflow_census.go（INT-239）——未设置（meta 缺失/空串）与显式 'todo'
+// 归待办，其余非 done 归进行中（进行中片段显式排 done，不依赖外层分母）。分母
+// 判定与 GetOpenIssueCounts 完全一致（WorkflowOpenNotDone），恒等式
+// todo+in_progress == Σopen_issue_count。刻意独立成查询而不塞进
+// GetOpenIssueCounts：概览那两个查询失败即 500，新指标必须能单独降级
 // （complete=false）。issues 用内连接：谓词含 i.state（非空条件），LEFT JOIN
 // 本就会被 WHERE 降级成内连接，写 JOIN 如实表达也利于查询规划；meta 保持
-// LEFT——缺失即 todo 桶，不能丢行。
+// LEFT——缺失即待办桶，不能丢行。
 func (r *DashboardRepository) GetWorkflowBuckets(userID string) (DashboardWorkflowBuckets, error) {
 	var buckets DashboardWorkflowBuckets
+	todoBucketSQL, todoBucketArgs := WorkflowTodoBucket("m")
+	inProgressSQL, inProgressArgs := WorkflowInProgressBucket("m")
+	openNotDoneSQL, openNotDoneArgs := WorkflowOpenNotDone("i", "m")
 	err := r.db.
 		Table("projects AS p").
-		Select(`
-			COALESCE(SUM(CASE WHEN m.workflow_status IS NULL OR m.workflow_status IN (?, ?) THEN 1 ELSE 0 END), 0) AS todo_count,
-			COALESCE(SUM(CASE WHEN m.workflow_status IS NOT NULL AND m.workflow_status NOT IN (?, ?) THEN 1 ELSE 0 END), 0) AS in_progress_count
-		`, "", model.IssueWorkflowStatusTodo, "", model.IssueWorkflowStatusTodo).
+		Select(fmt.Sprintf(`
+			COALESCE(SUM(CASE WHEN %s THEN 1 ELSE 0 END), 0) AS todo_count,
+			COALESCE(SUM(CASE WHEN %s THEN 1 ELSE 0 END), 0) AS in_progress_count
+		`, todoBucketSQL, inProgressSQL), append(todoBucketArgs, inProgressArgs...)...).
 		Joins("JOIN issues i ON i.project_id = p.id").
 		Joins("LEFT JOIN issue_internal_meta m ON m.issue_id = i.id").
 		Where("p.user_id = ?", userID).
 		// 搁置中的项目不进概览（INT-165），与 GetOpenIssueCounts 同排除。
 		Where(projectNotShelvedSQL("p"), time.Now().UTC()).
-		Where("i.state = ? AND (m.workflow_status IS NULL OR m.workflow_status != ?)", model.IssueStateOpen, model.IssueWorkflowStatusDone).
+		Where(openNotDoneSQL, openNotDoneArgs...).
 		Scan(&buckets).Error
 	return buckets, err
 }
@@ -498,6 +502,8 @@ type DashboardBacklogAge struct {
 // i.state，LEFT JOIN 已被 WHERE 降级）；meta 保持 LEFT 缺行不影响。
 func (r *DashboardRepository) GetBacklogAge(userID string, under7, under30 time.Time) (DashboardBacklogAge, error) {
 	var age DashboardBacklogAge
+	// 分母与待办分桶同口径（WorkflowOpenNotDone，唯一出处见 workflow_census.go）。
+	openNotDoneSQL, openNotDoneArgs := WorkflowOpenNotDone("i", "m")
 	err := r.db.
 		Table("projects AS p").
 		Select(`
@@ -509,7 +515,7 @@ func (r *DashboardRepository) GetBacklogAge(userID string, under7, under30 time.
 		Joins("LEFT JOIN issue_internal_meta m ON m.issue_id = i.id").
 		Where("p.user_id = ?", userID).
 		Where(projectNotShelvedSQL("p"), time.Now().UTC()).
-		Where("i.state = ? AND (m.workflow_status IS NULL OR m.workflow_status != ?)", model.IssueStateOpen, model.IssueWorkflowStatusDone).
+		Where(openNotDoneSQL, openNotDoneArgs...).
 		Scan(&age).Error
 	return age, err
 }

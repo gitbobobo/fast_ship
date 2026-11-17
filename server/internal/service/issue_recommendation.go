@@ -411,8 +411,9 @@ func (s *IssueRecommendationService) ensureRecommendable(tx *gorm.DB, issue *mod
 		}
 		return nil, err
 	}
-	switch meta.WorkflowStatus {
-	case "", model.IssueWorkflowStatusTodo:
+	// 未设置与 todo 同桶，归类唯一出处见 model.IssueWorkflowBucketOf（INT-239）。
+	switch model.IssueWorkflowBucketOf(meta.WorkflowStatus) {
+	case model.IssueWorkflowBucketUnset, model.IssueWorkflowBucketTodo:
 		return meta, nil
 	default:
 		return nil, errs.ErrIssueNotRecommendable

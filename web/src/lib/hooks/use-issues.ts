@@ -9,6 +9,7 @@ import {
 import { attachmentApi } from "@/lib/api/attachments";
 import { issueApi, type IssueListParams } from "@/lib/api/issues";
 import { type IssueSourceFilter } from "@/lib/issue-source";
+import { getBoardWorkflowStatusParam } from "@/routes/board/lib/utils";
 import { useEffect, useRef } from "react";
 
 interface UseIssuesFilters {
@@ -51,6 +52,9 @@ export function useInfiniteBoardIssues(
   filters?: Pick<IssueListParams, "label" | "source">,
   pageSize = 20,
 ) {
+  // 看板列 → 列表筛选参数的编码唯一出处是 getBoardWorkflowStatusParam：
+  // "" 编码为 unset（与未设置列同源），返回 null（未知取值）时不传该参数。
+  const boardWorkflowStatusParam = getBoardWorkflowStatusParam(workflowStatus);
   return useInfiniteQuery({
     queryKey: [
       "projects",
@@ -66,7 +70,7 @@ export function useInfiniteBoardIssues(
     queryFn: async ({ pageParam }) => {
       const res = await issueApi.list(projectId, {
         state: "open",
-        workflow_status: workflowStatus || "unset",
+        ...(boardWorkflowStatusParam ? { workflow_status: boardWorkflowStatusParam } : {}),
         page: pageParam,
         page_size: pageSize,
         ...(filters?.label ? { label: filters.label } : {}),

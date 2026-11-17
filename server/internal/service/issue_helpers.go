@@ -262,17 +262,19 @@ func buildChecklistSnapshot(issueID, userID string, items []IssueChecklistItemIn
 func applyExplicitWorkflowStatus(meta *model.IssueInternalMeta, workflowStatus model.IssueWorkflowStatus, now time.Time) {
 	meta.WorkflowStatus = workflowStatus
 
-	switch workflowStatus {
-	case "", model.IssueWorkflowStatusTodo:
+	// 分桶归类唯一出处见 model.IssueWorkflowBucketOf（INT-239）：空串与 todo 同支、
+	// in_progress、done 各一支；未识别取值（Unknown）不动时间戳。
+	switch model.IssueWorkflowBucketOf(workflowStatus) {
+	case model.IssueWorkflowBucketUnset, model.IssueWorkflowBucketTodo:
 		if meta.CompletedAt == nil {
 			meta.StartedAt = nil
 		}
-	case model.IssueWorkflowStatusInProgress:
+	case model.IssueWorkflowBucketInProgress:
 		if meta.StartedAt == nil {
 			value := now
 			meta.StartedAt = &value
 		}
-	case model.IssueWorkflowStatusDone:
+	case model.IssueWorkflowBucketDone:
 		if meta.StartedAt == nil {
 			value := now
 			meta.StartedAt = &value
