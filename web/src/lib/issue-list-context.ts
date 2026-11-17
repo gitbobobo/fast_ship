@@ -123,7 +123,7 @@ const BOARD_WORKFLOW_STATUS_PARAM_LABELS: Record<
 /** 来源列表标题副行：说明来源是哪一列/哪组筛选，让「在哪个上下文里翻页」一眼可辨 */
 export function describeIssueSourceContext(context: IssueSourceContext): string {
   if (context.kind === "board") {
-    const segments = [`列 ${BOARD_WORKFLOW_STATUS_PARAM_LABELS[context.workflowStatus]}`];
+    const segments = [BOARD_WORKFLOW_STATUS_PARAM_LABELS[context.workflowStatus]];
     if (context.label) {
       segments.push(`标签 "${context.label}"`);
     }
