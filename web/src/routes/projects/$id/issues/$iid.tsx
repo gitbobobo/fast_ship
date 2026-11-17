@@ -1198,7 +1198,7 @@ export default function IssueDetailPage() {
             {/* 左缘把手：开与关同一控件，随抽屉一起平移，打开时停在抽屉右缘。
                 顶部锚定（top-8），不垂直居中——居中会落在卡片纵向中部像渲染残留。
                 收起时把手落在主区左缘（贴全局侧边栏右缘；窄屏贴屏幕左缘），
-                无圆角、只留右缘描边——需求方要求方边、边框克制不刻意；
+                把手自身 rounded-r-md（弹层方边、把手圆角——需求方定调），
                 窄屏可见宽 max-sm:w-7（28px）——它是窄屏唯一入口，16px 太难点中；
                 命中区只向右扩——向左会盖住侧边栏右缘吞掉导航点击；
                 打开态两侧都挨着可点内容收窄到 ±4px，
@@ -1215,7 +1215,7 @@ export default function IssueDetailPage() {
               aria-label={`来源列表（快捷键 [）${sourceCount !== null ? `，${sourceCount} 个` : ""}`}
               title="来源列表（快捷键 [）"
               className={cn(
-                "group pointer-events-auto absolute left-full top-8 flex h-16 w-3.5 items-center justify-center border-r border-neutral-400 bg-neutral-300 text-neutral-600 transition-[width,background-color,border-color,color] duration-150 after:absolute after:inset-y-0 after:content-[''] hover:w-4 hover:bg-neutral-400 hover:text-neutral-900 focus-visible:ring-2 focus-visible:ring-neutral-500 focus-visible:ring-offset-1 motion-reduce:transition-none max-sm:w-7 dark:border-neutral-500 dark:bg-neutral-600 dark:text-neutral-300 dark:hover:bg-neutral-500 dark:hover:text-white dark:focus-visible:ring-neutral-400",
+                "group pointer-events-auto absolute left-full top-8 flex h-16 w-3.5 items-center justify-center rounded-r-md border border-l-0 border-neutral-400 bg-neutral-300 text-neutral-600 transition-[width,background-color,border-color,color] duration-150 after:absolute after:inset-y-0 after:content-[''] hover:w-4 hover:bg-neutral-400 hover:text-neutral-900 focus-visible:ring-2 focus-visible:ring-neutral-500 focus-visible:ring-offset-1 motion-reduce:transition-none max-sm:w-7 dark:border-neutral-500 dark:bg-neutral-600 dark:text-neutral-300 dark:hover:bg-neutral-500 dark:hover:text-white dark:focus-visible:ring-neutral-400",
                 isSourcePanelOpen
                   ? "after:-left-1 after:-right-1 max-sm:hidden"
                   : "after:left-0 after:-right-4",
