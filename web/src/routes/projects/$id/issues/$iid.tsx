@@ -18,6 +18,7 @@ import {
   PanelLeftOpen,
   Play,
   RefreshCw,
+  X,
 } from "lucide-react";
 import { GitHubContent } from "@/components/github-content";
 import { CollaborationArea } from "@/components/issues/collaboration-area";
@@ -290,6 +291,11 @@ export default function IssueDetailPage() {
     if (isSourcePanelOpen) {
       // 收起后焦点还原到把手（[ 与点把手两条路径），键盘用户不丢位置
       document.getElementById("issue-source-list-handle")?.focus();
+    } else {
+      // 打开后焦点进面板标题：面板在 DOM 中位于把手前，不移焦 Tab 会整段跳过列表
+      requestAnimationFrame(() => {
+        document.getElementById("issue-source-list-title")?.focus({ preventScroll: true });
+      });
     }
     setIsSourcePanelOpen((open) => !open);
   }, [hasSourceContext, isSourcePanelOpen]);
@@ -1099,7 +1105,7 @@ export default function IssueDetailPage() {
         <div className="pointer-events-none sticky top-14 z-20 mx-auto h-0 w-full max-w-7xl">
           <div
             className={cn(
-              "absolute left-0 top-0 flex h-[calc(100dvh-3.5rem)] w-[300px] max-w-[85vw] transition-transform duration-150 motion-reduce:transition-none max-sm:w-[calc(100dvw-24px)] max-sm:max-w-none",
+              "absolute left-4 top-0 flex h-[calc(100dvh-3.5rem)] w-[300px] max-w-[85vw] transition-transform duration-150 motion-reduce:transition-none max-sm:w-[calc(100dvw-40px)] max-sm:max-w-none md:left-6",
               isSourcePanelOpen ? "translate-x-0" : "-translate-x-full",
             )}
           >
@@ -1112,14 +1118,39 @@ export default function IssueDetailPage() {
                 isSourcePanelOpen ? "visible" : "invisible",
               )}
             >
-              <div className="border-b px-4 py-2.5">
-                <h2 className="text-sm font-semibold">来源列表</h2>
-                <p className="mt-0.5 flex text-xs text-muted-foreground">
-                  <span className="min-w-0 truncate">{sourceLabel}</span>
-                  {sourceCountLabel ? (
-                    <span className="shrink-0"> · {sourceCountLabel}</span>
+              <div className="flex items-start justify-between gap-2 border-b px-4 py-2.5">
+                <div className="min-w-0">
+                  <h2
+                    id="issue-source-list-title"
+                    tabIndex={-1}
+                    className="text-sm font-semibold outline-none"
+                  >
+                    来源列表
+                  </h2>
+                  <p className="mt-0.5 flex text-xs text-muted-foreground">
+                    <span className="min-w-0 truncate">{sourceLabel}</span>
+                    {sourceCountLabel ? (
+                      <span className="shrink-0"> · {sourceCountLabel}</span>
+                    ) : null}
+                  </p>
+                  {issue ? (
+                    <p className="mt-0.5 truncate text-xs text-muted-foreground/80">
+                      当前 {issue.reference} · {issue.title}
+                    </p>
                   ) : null}
-                </p>
+                </div>
+                {/* 窄屏抽屉近满宽，点外部只剩细条；头部给明确的关闭控件，把手与 Esc 作补充 */}
+                <button
+                  type="button"
+                  aria-label="关闭来源列表"
+                  onClick={() => {
+                    setIsSourcePanelOpen(false);
+                    document.getElementById("issue-source-list-handle")?.focus();
+                  }}
+                  className="-mr-2 -mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground sm:hidden"
+                >
+                  <X className="h-4 w-4" />
+                </button>
               </div>
               <IssueSourceList
                 entries={source.items}
@@ -1145,8 +1176,8 @@ export default function IssueDetailPage() {
               />
             </div>
             {/* 左缘把手：开与关同一控件，随抽屉一起平移，打开时停在抽屉右缘。
-                伪元素向右扩展命中区到约 44px，触屏可点；常态显示淡色图标，
-                不依赖 hover 才可见 */}
+                收起态伪元素命中区向左扩进正文容器内边距（死区），右侧只留 4px
+                不越进正文可见区；打开态把手两侧都挨着可点内容，命中区收窄到 ±4px */}
             <button
               id="issue-source-list-handle"
               type="button"
@@ -1155,12 +1186,17 @@ export default function IssueDetailPage() {
               aria-controls="issue-source-list-panel"
               aria-label="来源列表（快捷键 [）"
               title="来源列表（快捷键 [）"
-              className="group pointer-events-auto absolute left-full top-1/2 flex h-16 w-3 -translate-y-1/2 items-center justify-center rounded-r-md border border-l-0 border-border bg-muted text-muted-foreground transition-[width,background-color,border-color,color] duration-150 after:absolute after:inset-y-0 after:-left-2 after:-right-8 after:content-[''] hover:w-4 hover:bg-accent hover:text-foreground motion-reduce:transition-none"
+              className={cn(
+                "group pointer-events-auto absolute left-full top-1/2 flex h-16 w-3 -translate-y-1/2 items-center justify-center rounded-r-md border border-l-0 border-neutral-300 bg-neutral-200 text-muted-foreground transition-[width,background-color,border-color,color] duration-150 after:absolute after:inset-y-0 after:content-[''] hover:w-4 hover:bg-neutral-300 hover:text-foreground motion-reduce:transition-none max-sm:w-5 dark:border-neutral-600 dark:bg-neutral-700 dark:hover:bg-neutral-600",
+                isSourcePanelOpen
+                  ? "after:-left-1 after:-right-1"
+                  : "after:-left-4 after:-right-1 md:after:-left-6",
+              )}
             >
               {isSourcePanelOpen ? (
-                <PanelLeftClose className="h-3 w-3 opacity-40 group-hover:opacity-100 max-lg:opacity-80" />
+                <PanelLeftClose className="h-3 w-3" />
               ) : (
-                <PanelLeftOpen className="h-3 w-3 opacity-40 group-hover:opacity-100 max-lg:opacity-80" />
+                <PanelLeftOpen className="h-3 w-3" />
               )}
             </button>
           </div>
@@ -1342,16 +1378,19 @@ export default function IssueDetailPage() {
         </div>
       </div>
 
-      {/* Mobile sidebar floating button */}
-      <div className="fixed bottom-6 right-6 z-40 lg:hidden">
-        <Button
-          size="icon"
-          className="h-12 w-12 rounded-full shadow-lg"
-          onClick={() => setIsMobileSidebarOpen(true)}
-        >
-          <PanelLeft className="h-5 w-5" />
-        </Button>
-      </div>
+      {/* Mobile sidebar floating button；来源抽屉打开时退场，
+          避免深色 FAB 浮在面板之上与把手抢 PanelLeft 语义 */}
+      {!isSourcePanelOpen && (
+        <div className="fixed bottom-6 right-6 z-40 lg:hidden">
+          <Button
+            size="icon"
+            className="h-12 w-12 rounded-full shadow-lg"
+            onClick={() => setIsMobileSidebarOpen(true)}
+          >
+            <PanelLeft className="h-5 w-5" />
+          </Button>
+        </div>
+      )}
 
       {/* Mobile sidebar Sheet */}
       <Sheet open={isMobileSidebarOpen} onOpenChange={setIsMobileSidebarOpen}>

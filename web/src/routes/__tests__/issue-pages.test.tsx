@@ -1255,7 +1255,7 @@ describe("Issue pages", () => {
         initialEntry: "/projects/proj-1/issues/issue-1",
       });
 
-      expect(screen.queryByRole("button", { name: /来源列表/ })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: /来源列表（快捷键/ })).not.toBeInTheDocument();
     });
 
     it("opens the source drawer from the edge handle and highlights the current issue", () => {
@@ -1279,7 +1279,7 @@ describe("Issue pages", () => {
       });
 
       // 默认收起：左缘把手在，面板处于收起态；点把手展开
-      const handle = screen.getByRole("button", { name: /来源列表/ });
+      const handle = screen.getByRole("button", { name: /来源列表（快捷键/ });
       expect(handle).toHaveAttribute("aria-expanded", "false");
       expect(document.getElementById("issue-source-list-panel")).toHaveClass("invisible");
 
@@ -1416,7 +1416,7 @@ describe("Issue pages", () => {
       });
 
       // 列表本体只在抽屉展开时可见：先点把手展开再切换数据
-      fireEvent.click(screen.getByRole("button", { name: /来源列表/ }));
+      fireEvent.click(screen.getByRole("button", { name: /来源列表（快捷键/ }));
 
       // 查询移出 issue-1：issue-1 仍在原位置保留，带「已不符合来源条件」标记
       mockSourceListPages([
@@ -1505,7 +1505,7 @@ describe("Issue pages", () => {
           "/projects/proj-1/issues/issue-1?issue_from=board&issue_workflow_status=todo",
       });
 
-      const handle = screen.getByRole("button", { name: /来源列表/ });
+      const handle = screen.getByRole("button", { name: /来源列表（快捷键/ });
       const panel = () => document.getElementById("issue-source-list-panel");
 
       // ［ 打开
@@ -1546,7 +1546,7 @@ describe("Issue pages", () => {
           "/projects/proj-1/issues/issue-1?issue_from=board&issue_workflow_status=todo",
       });
 
-      fireEvent.click(screen.getByRole("button", { name: /来源列表/ }));
+      fireEvent.click(screen.getByRole("button", { name: /来源列表（快捷键/ }));
 
       // 测试环境视口即宽屏（matchMedia 恒不匹配）：点选后抽屉保持打开便于逐条浏览
       fireEvent.click(
@@ -1609,7 +1609,7 @@ describe("Issue pages", () => {
           "/projects/proj-1/issues/issue-1?issue_from=board&issue_workflow_status=todo",
       });
 
-      fireEvent.click(screen.getByRole("button", { name: /来源列表/ }));
+      fireEvent.click(screen.getByRole("button", { name: /来源列表（快捷键/ }));
       expect(document.getElementById("issue-source-list-panel")).not.toHaveClass("invisible");
 
       fireEvent.click(
@@ -1638,7 +1638,7 @@ describe("Issue pages", () => {
           "/projects/proj-1/issues/issue-1?issue_from=board&issue_workflow_status=todo",
       });
 
-      const handle = screen.getByRole("button", { name: /来源列表/ });
+      const handle = screen.getByRole("button", { name: /来源列表（快捷键/ });
       fireEvent.click(handle);
       expect(document.getElementById("issue-source-list-panel")).not.toHaveClass("invisible");
 

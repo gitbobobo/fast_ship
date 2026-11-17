@@ -34,9 +34,11 @@
 
 ## UI 接入（`$iid.tsx`）
 
-- 内容区左侧覆盖式抽屉（INT-238）：宽窄屏同一套实现。sticky 容器（`sticky top-14 z-20 h-0 mx-auto max-w-7xl`，与正文容器同宽）紧跟 Header，不占文档流高度；面板宽屏 300px、<640px 视口近满宽（`calc(100dvw-24px)`，右侧不留露出截断控件的窄条）`absolute left-0` 覆盖正文左缘，无遮罩，不盖全局侧边栏与顶栏；150ms transform 滑入滑出，`motion-reduce` 直切。
-- 左缘把手是唯一开合控件（`aria-expanded`/`aria-controls="issue-source-list-panel"`，面板带 `role="region" aria-label="来源列表"`）：伪元素向右扩展命中区到约 44px 供触屏点按；常态显示淡色图标（窄屏 `max-lg:opacity-80`），hover 加宽加深。无来源（`hasSourceContext` 为 false）不渲染把手与抽屉。
-- 交互：`[` 或点把手开关；Esc 在输入控件聚焦时也收起抽屉（外来浮层打开时让位，且各浮层/内联编辑器消费 Esc 时 `preventDefault`，避免一次按键两处生效）；点抽屉外部（document `pointerdown`，面板与把手除外）收起；宽屏点选列表项保持打开，窄屏点选收起；J/K 翻页不变。收起（`[`/Esc/点把手）后焦点还原到把手。
+- 内容区左侧覆盖式抽屉（INT-238）：宽窄屏同一套实现。sticky 容器（`sticky top-14 z-20 h-0 mx-auto max-w-7xl`，与正文容器同宽）紧跟 Header，不占文档流高度；抽屉内层 `left-4 md:left-6` 对齐正文容器内边距，即把手与面板贴正文卡片左缘（收起时把手离屏幕/侧栏边缘 16/24px）；面板宽屏 300px、<640px 视口近满宽（`calc(100dvw-40px)`，右侧只留 24px 不露出截断控件），无遮罩，不盖全局侧边栏与顶栏；150ms transform 滑入滑出，`motion-reduce` 直切。
+- 左缘把手是唯一开合控件（`aria-expanded`/`aria-controls="issue-source-list-panel"`，面板带 `role="region" aria-label="来源列表"`，头部带 `tabIndex=-1` 的 `issue-source-list-title`）：常态显示图标不依赖 hover（`bg-neutral-200`/`border-neutral-300`，暗色 `neutral-700/600`，窄屏 `w-5` 加宽），hover 变宽加深。伪元素命中区分两态：收起时向左扩进正文容器内边距死区（`after:-left-4 md:after:-left-6`），右侧只 +4px 不越进正文可见区；打开时把手两侧都挨着可点内容，收窄到 `after:-left-1 after:-right-1`。**不要**把命中区向右扩过正文内边距——会吞掉正文左缘点击。无来源（`hasSourceContext` 为 false）不渲染把手与抽屉。
+- 交互：`[` 或点把手开关（打开后焦点进面板标题，Tab 顺着进列表）；Esc 在输入控件聚焦时也收起抽屉（外来浮层打开时让位，且各浮层/内联编辑器消费 Esc 时 `preventDefault`，避免一次按键两处生效）；点抽屉外部（document `pointerdown`，面板与把手除外）收起；宽屏点选列表项保持打开，窄屏点选收起；J/K 翻页不变。收起（`[`/Esc/点把手/窄屏 X）后焦点还原到把手。
+- 面板头部：「来源列表 + 来源描述·条数」副行 + 当前 issue `reference·标题` 行（抽屉会盖住正文标题区，头部补当前项上下文）；窄屏（`sm:hidden`）另有 40px X 关闭按钮——近满宽抽屉的点外部只剩细条，X 是主要退出，把手与 Esc 作补充。
+- 窄屏移动侧栏 FAB（`fixed bottom-6 right-6 z-40 lg:hidden`）在抽屉打开时不渲染：深色圆形 PanelLeft 图标浮在面板之上会被当成抽屉关闭钮。
 - 偏好不持久化：每次进页默认收起（`issueSourceListExpanded` 已删除，旧 localStorage 键无消费者）。
 - 抽屉与来源数据共用同一 `useIssueSourceList` 实例，**不要**挂两份控制器；`IssueSourceList` 组件只负责渲染与滚动定位。
 - 全局快捷键避让：`defaultPrevented`、IME 组合态、Ctrl/Meta/Alt、`input/textarea/select/contenteditable`、其他 Dialog/AlertDialog/Sheet/DropdownMenu/Popover/Select 浮层打开（`document.querySelector('[data-slot=…]')` 探测）。抽屉自身是页面内普通面板（非 sheet-content），不在避让名单，打开时 `[`/J/K 仍归详情页。
