@@ -1135,7 +1135,7 @@ export default function IssueDetailPage() {
               role="region"
               aria-label="来源列表"
               className={cn(
-                "pointer-events-auto flex min-w-0 flex-1 flex-col overflow-hidden rounded-r-2xl border border-l-0 bg-card shadow-xl transition-[visibility] duration-150 motion-reduce:transition-none dark:border-neutral-500 dark:shadow-[0_0_0_1px_#525252,0_12px_40px_rgba(0,0,0,0.6)]",
+                "pointer-events-auto flex min-w-0 flex-1 flex-col overflow-hidden border-r bg-card shadow-xl transition-[visibility] duration-150 motion-reduce:transition-none dark:border-neutral-600",
                 isSourcePanelOpen ? "visible" : "invisible",
               )}
             >
@@ -1197,8 +1197,9 @@ export default function IssueDetailPage() {
             {/* 左缘把手：开与关同一控件，随抽屉一起平移，打开时停在抽屉右缘。
                 顶部锚定（top-8），不垂直居中——居中会落在卡片纵向中部像渲染残留。
                 收起时把手落在主区左缘（贴全局侧边栏右缘；窄屏贴屏幕左缘），
-                rounded-r-md 呈从边缘长出的标签；命中区只向右扩——向左会盖住
-                侧边栏右缘吞掉导航点击；打开态两侧都挨着可点内容收窄到 ±4px，
+                无圆角、只留右缘描边——需求方要求方边、边框克制不刻意；
+                命中区只向右扩——向左会盖住侧边栏右缘吞掉导航点击；
+                打开态两侧都挨着可点内容收窄到 ±4px，
                 窄屏打开态把手不渲染（头部 X 是主要关闭控件）。
                 图标用 List/ListX 而非 PanelLeft*——右下角移动侧栏 FAB 也是 PanelLeft，
                 同族图标并排会让用户分不清哪个开来源列表、哪个开全局侧栏；
@@ -1212,10 +1213,10 @@ export default function IssueDetailPage() {
               aria-label={`来源列表（快捷键 [）${sourceCount !== null ? `，${sourceCount} 个` : ""}`}
               title="来源列表（快捷键 [）"
               className={cn(
-                "group pointer-events-auto absolute left-full top-8 flex h-16 w-3.5 items-center justify-center border border-neutral-400 bg-neutral-300 text-neutral-600 transition-[width,background-color,border-color,color] duration-150 after:absolute after:inset-y-0 after:content-[''] hover:w-4 hover:bg-neutral-400 hover:text-neutral-900 focus-visible:ring-2 focus-visible:ring-neutral-500 focus-visible:ring-offset-1 motion-reduce:transition-none max-sm:w-4 dark:border-neutral-500 dark:bg-neutral-600 dark:text-neutral-300 dark:hover:bg-neutral-500 dark:hover:text-white dark:focus-visible:ring-neutral-400",
+                "group pointer-events-auto absolute left-full top-8 flex h-16 w-3.5 items-center justify-center border-r border-neutral-400 bg-neutral-300 text-neutral-600 transition-[width,background-color,border-color,color] duration-150 after:absolute after:inset-y-0 after:content-[''] hover:w-4 hover:bg-neutral-400 hover:text-neutral-900 focus-visible:ring-2 focus-visible:ring-neutral-500 focus-visible:ring-offset-1 motion-reduce:transition-none max-sm:w-4 dark:border-neutral-500 dark:bg-neutral-600 dark:text-neutral-300 dark:hover:bg-neutral-500 dark:hover:text-white dark:focus-visible:ring-neutral-400",
                 isSourcePanelOpen
-                  ? "rounded-r-md border-l-0 after:-left-1 after:-right-1 max-sm:hidden"
-                  : "rounded-r-md border-l-0 after:left-0 after:-right-4",
+                  ? "after:-left-1 after:-right-1 max-sm:hidden"
+                  : "after:left-0 after:-right-4",
               )}
             >
               <span className="flex flex-col items-center gap-0.5">
