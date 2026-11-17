@@ -284,21 +284,35 @@ export default function IssueDetailPage() {
     ? null
     : `${source.items.filter((entry) => !entry.stale).length} 个`;
 
+  // 主动收起路径（[、Esc、X、窄屏点选）统一把焦点还给把手；
+  // 点外部收起不走这里——焦点应落在用户点的目标上
+  const closeSourcePanel = useCallback(() => {
+    setIsSourcePanelOpen(false);
+    document.getElementById("issue-source-list-handle")?.focus();
+  }, []);
+
   const toggleSourcePanel = useCallback(() => {
     if (!hasSourceContext) {
       return;
     }
     if (isSourcePanelOpen) {
-      // 收起后焦点还原到把手（[ 与点把手两条路径），键盘用户不丢位置
-      document.getElementById("issue-source-list-handle")?.focus();
+      closeSourcePanel();
     } else {
       // 打开后焦点进面板标题：面板在 DOM 中位于把手前，不移焦 Tab 会整段跳过列表
       requestAnimationFrame(() => {
         document.getElementById("issue-source-list-title")?.focus({ preventScroll: true });
       });
+      setIsSourcePanelOpen(true);
     }
-    setIsSourcePanelOpen((open) => !open);
-  }, [hasSourceContext, isSourcePanelOpen]);
+  }, [hasSourceContext, isSourcePanelOpen, closeSourcePanel]);
+
+  // 来源上下文消失（同路由跳到无来源详情页或后退）时复位抽屉状态：
+  // 否则 isSourcePanelOpen 残留 true，FAB 被永久隐藏、回到有来源页又莫名自动展开
+  useEffect(() => {
+    if (!hasSourceContext) {
+      setIsSourcePanelOpen(false);
+    }
+  }, [hasSourceContext]);
 
   const {
     goToNext,
@@ -321,8 +335,7 @@ export default function IssueDetailPage() {
       if (event.key === "Escape" && isSourcePanelOpen) {
         if (!isForeignOverlayOpen()) {
           event.preventDefault();
-          setIsSourcePanelOpen(false);
-          document.getElementById("issue-source-list-handle")?.focus();
+          closeSourcePanel();
         }
         return;
       }
@@ -342,7 +355,7 @@ export default function IssueDetailPage() {
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [toggleSourcePanel, goToNext, goToPrevious, isSourcePanelOpen]);
+  }, [toggleSourcePanel, closeSourcePanel, goToNext, goToPrevious, isSourcePanelOpen]);
 
   // 抽屉无遮罩：打开期间点击面板与把手以外区域（正文、右栏等）直接收起
   useEffect(() => {
@@ -1105,7 +1118,7 @@ export default function IssueDetailPage() {
         <div className="pointer-events-none sticky top-14 z-20 mx-auto h-0 w-full max-w-7xl">
           <div
             className={cn(
-              "absolute left-4 top-0 flex h-[calc(100dvh-3.5rem)] w-[300px] max-w-[85vw] transition-transform duration-150 motion-reduce:transition-none max-sm:w-[calc(100dvw-40px)] max-sm:max-w-none md:left-6",
+              "absolute left-4 top-0 flex h-[calc(100dvh-3.5rem)] w-[300px] max-w-[85vw] transition-transform duration-150 motion-reduce:transition-none max-sm:w-[calc(100%-2.5rem)] max-sm:max-w-none md:left-6",
               isSourcePanelOpen ? "translate-x-0" : "-translate-x-full",
             )}
           >
@@ -1123,7 +1136,7 @@ export default function IssueDetailPage() {
                   <h2
                     id="issue-source-list-title"
                     tabIndex={-1}
-                    className="text-sm font-semibold outline-none"
+                    className="text-sm font-semibold focus-visible:ring-2 focus-visible:ring-ring"
                   >
                     来源列表
                   </h2>
@@ -1143,10 +1156,7 @@ export default function IssueDetailPage() {
                 <button
                   type="button"
                   aria-label="关闭来源列表"
-                  onClick={() => {
-                    setIsSourcePanelOpen(false);
-                    document.getElementById("issue-source-list-handle")?.focus();
-                  }}
+                  onClick={closeSourcePanel}
                   className="-mr-2 -mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground sm:hidden"
                 >
                   <X className="h-4 w-4" />
@@ -1159,7 +1169,7 @@ export default function IssueDetailPage() {
                   source.goToIssue(issue);
                   // 宽屏点选后保持打开便于逐条浏览；窄屏点选即收起
                   if (isNarrowViewport) {
-                    setIsSourcePanelOpen(false);
+                    closeSourcePanel();
                   }
                 }}
                 isLoading={source.isLoading}
@@ -1379,8 +1389,9 @@ export default function IssueDetailPage() {
       </div>
 
       {/* Mobile sidebar floating button；来源抽屉打开时退场，
-          避免深色 FAB 浮在面板之上与把手抢 PanelLeft 语义 */}
-      {!isSourcePanelOpen && (
+          避免深色 FAB 浮在面板之上与把手抢 PanelLeft 语义。
+          联动 hasSourceContext：防来源参数消失后抽屉卸载但 FAB 仍被压状态 */}
+      {!(isSourcePanelOpen && hasSourceContext) && (
         <div className="fixed bottom-6 right-6 z-40 lg:hidden">
           <Button
             size="icon"

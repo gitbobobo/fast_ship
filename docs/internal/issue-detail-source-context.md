@@ -34,9 +34,10 @@
 
 ## UI 接入（`$iid.tsx`）
 
-- 内容区左侧覆盖式抽屉（INT-238）：宽窄屏同一套实现。sticky 容器（`sticky top-14 z-20 h-0 mx-auto max-w-7xl`，与正文容器同宽）紧跟 Header，不占文档流高度；抽屉内层 `left-4 md:left-6` 对齐正文容器内边距，即把手与面板贴正文卡片左缘（收起时把手离屏幕/侧栏边缘 16/24px）；面板宽屏 300px、<640px 视口近满宽（`calc(100dvw-40px)`，右侧只留 24px 不露出截断控件），无遮罩，不盖全局侧边栏与顶栏；150ms transform 滑入滑出，`motion-reduce` 直切。
+- 内容区左侧覆盖式抽屉（INT-238）：宽窄屏同一套实现。sticky 容器（`sticky top-14 z-20 h-0 mx-auto max-w-7xl`，与正文容器同宽）紧跟 Header，不占文档流高度；抽屉内层 `left-4 md:left-6` 对齐正文容器内边距，即把手与面板贴正文卡片左缘（收起时把手离屏幕/侧栏边缘 16/24px）；面板宽屏 300px、<640px 视口近满宽（`calc(100%-2.5rem)`——用容器百分比不用 `dvw`，后者不扣 main 的非 overlay 滚动条会横向溢出；右侧留 24px 不露出截断控件），无遮罩，不盖全局侧边栏与顶栏；150ms transform 滑入滑出，`motion-reduce` 直切。
 - 左缘把手是唯一开合控件（`aria-expanded`/`aria-controls="issue-source-list-panel"`，面板带 `role="region" aria-label="来源列表"`，头部带 `tabIndex=-1` 的 `issue-source-list-title`）：常态显示图标不依赖 hover（`bg-neutral-200`/`border-neutral-300`，暗色 `neutral-700/600`，窄屏 `w-5` 加宽），hover 变宽加深。伪元素命中区分两态：收起时向左扩进正文容器内边距死区（`after:-left-4 md:after:-left-6`），右侧只 +4px 不越进正文可见区；打开时把手两侧都挨着可点内容，收窄到 `after:-left-1 after:-right-1`。**不要**把命中区向右扩过正文内边距——会吞掉正文左缘点击。无来源（`hasSourceContext` 为 false）不渲染把手与抽屉。
-- 交互：`[` 或点把手开关（打开后焦点进面板标题，Tab 顺着进列表）；Esc 在输入控件聚焦时也收起抽屉（外来浮层打开时让位，且各浮层/内联编辑器消费 Esc 时 `preventDefault`，避免一次按键两处生效）；点抽屉外部（document `pointerdown`，面板与把手除外）收起；宽屏点选列表项保持打开，窄屏点选收起；J/K 翻页不变。收起（`[`/Esc/点把手/窄屏 X）后焦点还原到把手。
+- 交互：`[` 或点把手开关（打开后焦点进面板标题，Tab 顺着进列表）；Esc 在输入控件聚焦时也收起抽屉（外来浮层打开时让位，且各浮层/内联编辑器消费 Esc 时 `preventDefault`，避免一次按键两处生效）；点抽屉外部（document `pointerdown`，面板与把手除外）收起；宽屏点选列表项保持打开，窄屏点选收起；J/K 翻页不变。四条主动收起路径（`[`/Esc/点把手/窄屏 X/窄屏点选）统一走 `closeSourcePanel` 把焦点还原到把手；点外部收起不还原（焦点落用户点的目标）。
+- 来源上下文消失（同路由跳到无来源详情页、后退）时 effect 复位 `isSourcePanelOpen`：不 reset 会残留 true——FAB 被永久隐藏、回到有来源页抽屉莫名自动展开。FAB 渲染条件同时联动 `hasSourceContext`。
 - 面板头部：「来源列表 + 来源描述·条数」副行 + 当前 issue `reference·标题` 行（抽屉会盖住正文标题区，头部补当前项上下文）；窄屏（`sm:hidden`）另有 40px X 关闭按钮——近满宽抽屉的点外部只剩细条，X 是主要退出，把手与 Esc 作补充。
 - 窄屏移动侧栏 FAB（`fixed bottom-6 right-6 z-40 lg:hidden`）在抽屉打开时不渲染：深色圆形 PanelLeft 图标浮在面板之上会被当成抽屉关闭钮。
 - 偏好不持久化：每次进页默认收起（`issueSourceListExpanded` 已删除，旧 localStorage 键无消费者）。
