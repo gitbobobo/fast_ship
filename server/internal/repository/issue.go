@@ -68,10 +68,12 @@ func (r *IssueRepository) BatchCloseInternalTx(tx *gorm.DB, ids []string, closed
 		return nil, nil
 	}
 	closed := make([]string, 0, len(ids))
+	// done 等值片段复用普查模块口径（workflow_census.go，INT-239）。
+	doneEqSQL, doneEqArgs := WorkflowStatusEquals("", model.IssueWorkflowStatusDone)
 	for _, id := range ids {
 		res := tx.Model(&model.Issue{}).
-			Where("id = ? AND source = ? AND state = ? AND EXISTS (SELECT 1 FROM issue_internal_meta WHERE issue_id = issues.id AND workflow_status = ?)",
-				id, model.IssueSourceInternal, model.IssueStateOpen, model.IssueWorkflowStatusDone).
+			Where("id = ? AND source = ? AND state = ? AND EXISTS (SELECT 1 FROM issue_internal_meta WHERE issue_id = issues.id AND "+doneEqSQL+")",
+				append([]any{id, model.IssueSourceInternal, model.IssueStateOpen}, doneEqArgs...)...).
 			Updates(map[string]any{
 				"state":        model.IssueStateClosed,
 				"state_reason": "completed",
@@ -95,8 +97,10 @@ func (r *IssueRepository) BatchCloseInternalTx(tx *gorm.DB, ids []string, closed
 // 不会把请求拖过整批预算。
 func (r *IssueRepository) IsOpenAndDone(ctx context.Context, id string) (bool, error) {
 	var cnt int64
+	// done 守卫的等值片段复用普查模块口径（workflow_census.go，INT-239）。
+	doneEqSQL, doneEqArgs := WorkflowStatusEquals("m", model.IssueWorkflowStatusDone)
 	err := r.db.WithContext(ctx).Model(&model.Issue{}).
-		Joins("JOIN issue_internal_meta m ON m.issue_id = issues.id AND m.workflow_status = ?", model.IssueWorkflowStatusDone).
+		Joins("JOIN issue_internal_meta m ON m.issue_id = issues.id AND "+doneEqSQL, doneEqArgs...).
 		Where("issues.id = ? AND issues.state = ?", id, model.IssueStateOpen).
 		Count(&cnt).Error
 	return cnt > 0, err
@@ -262,9 +266,12 @@ func (r *IssueRepository) buildFilteredQuery(q IssueListQuery) *gorm.DB {
 	case "":
 		// 不过滤
 	case "unset":
-		query = query.Where("(im.issue_id IS NULL OR im.workflow_status = '')")
+		// 未设置口径唯一出处见 workflow_census.go（INT-239）：meta 缺行或空串。
+		unsetSQL, unsetArgs := WorkflowUnset("im")
+		query = query.Where(unsetSQL, unsetArgs...)
 	default:
-		query = query.Where("im.workflow_status = ?", q.Workflow)
+		eqSQL, eqArgs := WorkflowStatusEquals("im", model.IssueWorkflowStatus(q.Workflow))
+		query = query.Where(eqSQL, eqArgs...)
 	}
 	if q.Label != "" {
 		// 标签历史数据有两种形态：纯名称数组 ["a","b"] 与对象数组 [{"name":"a"}]

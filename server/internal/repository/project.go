@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -211,16 +212,23 @@ func (r *ProjectRepository) GetIssueCounts(projectIDs []string) (map[string]Proj
 		InProgress int    `gorm:"column:in_progress"`
 		Done       int    `gorm:"column:done"`
 	}
+	// 各桶口径唯一出处见 workflow_census.go（INT-239）：unset 为 meta 缺行/空串，
+	// todo/in_progress/done 为开启加等值。
+	unsetSQL, unsetArgs := WorkflowUnset("m")
+	openTodoSQL, openTodoArgs := WorkflowOpenWithStatus("issues", "m", model.IssueWorkflowStatusTodo)
+	openProgSQL, openProgArgs := WorkflowOpenWithStatus("issues", "m", model.IssueWorkflowStatusInProgress)
+	openDoneSQL, openDoneArgs := WorkflowOpenWithStatus("issues", "m", model.IssueWorkflowStatusDone)
+	selectArgs := append([]any{model.IssueStateOpen}, unsetArgs...)
+	selectArgs = append(selectArgs, openTodoArgs...)
+	selectArgs = append(selectArgs, openProgArgs...)
+	selectArgs = append(selectArgs, openDoneArgs...)
 	err := r.db.Model(&model.Issue{}).
-		Select(`project_id, COUNT(*) AS total,
-			SUM(CASE WHEN issues.state = ? AND (m.workflow_status IS NULL OR m.workflow_status = '') THEN 1 ELSE 0 END) AS unset,
-			SUM(CASE WHEN issues.state = ? AND m.workflow_status = ? THEN 1 ELSE 0 END) AS todo,
-			SUM(CASE WHEN issues.state = ? AND m.workflow_status = ? THEN 1 ELSE 0 END) AS in_progress,
-			SUM(CASE WHEN issues.state = ? AND m.workflow_status = ? THEN 1 ELSE 0 END) AS done`,
-			model.IssueStateOpen,
-			model.IssueStateOpen, model.IssueWorkflowStatusTodo,
-			model.IssueStateOpen, model.IssueWorkflowStatusInProgress,
-			model.IssueStateOpen, model.IssueWorkflowStatusDone).
+		Select(fmt.Sprintf(`project_id, COUNT(*) AS total,
+			SUM(CASE WHEN issues.state = ? AND %s THEN 1 ELSE 0 END) AS unset,
+			SUM(CASE WHEN %s THEN 1 ELSE 0 END) AS todo,
+			SUM(CASE WHEN %s THEN 1 ELSE 0 END) AS in_progress,
+			SUM(CASE WHEN %s THEN 1 ELSE 0 END) AS done`,
+			unsetSQL, openTodoSQL, openProgSQL, openDoneSQL), selectArgs...).
 		Joins("LEFT JOIN issue_internal_meta m ON m.issue_id = issues.id").
 		Where("project_id IN ?", projectIDs).
 		Group("project_id").

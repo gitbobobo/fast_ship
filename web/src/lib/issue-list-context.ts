@@ -1,4 +1,6 @@
-import { ISSUE_WORKFLOW_STATUS_LABELS } from "@/lib/issue-workflow-status";
+import { ISSUE_WORKFLOW_STATUS_LABELS, type BoardWorkflowStatusParam } from "@/lib/issue-workflow-status";
+
+export type { BoardWorkflowStatusParam };
 
 export interface IssueListContext {
   state?: string;
@@ -10,13 +12,10 @@ export interface IssueListContext {
   page?: number;
 }
 
-/** 看板列在 URL 中的 workflow_status 取值；「未设置」列编码为 unset */
-export type BoardWorkflowStatusParam = "todo" | "in_progress" | "done" | "unset";
-
+// 合法取值清单由 ISSUE_WORKFLOW_STATUS_LABELS 键派生（"未设置"列对外编码为 unset），
+// 避免与编码出处再各写一份（INT-239）。
 const BOARD_WORKFLOW_STATUS_VALUES: readonly string[] = [
-  "todo",
-  "in_progress",
-  "done",
+  ...Object.keys(ISSUE_WORKFLOW_STATUS_LABELS).filter((v) => v !== ""),
   "unset",
 ];
 
