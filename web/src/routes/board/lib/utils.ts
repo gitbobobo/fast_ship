@@ -1,3 +1,8 @@
+import {
+  boardWorkflowStatusParamForStatusValue,
+  type BoardWorkflowStatusParam,
+} from "@/lib/issue-workflow-status";
+
 export const COLUMNS = [
   { id: "unset", label: "未设置", statusValue: "" as const },
   { id: "todo", label: "待处理", statusValue: "todo" as const },
@@ -12,11 +17,7 @@ export function getColumnStatusValue(columnId: ColumnId): (typeof COLUMNS)[numbe
   return col ? col.statusValue : "";
 }
 
-/** 列状态 → URL 参数值：其余列同名，「未设置」列编码为 unset */
-export function getBoardWorkflowStatusParam(statusValue: string): "todo" | "in_progress" | "done" | "unset" | null {
-  const column = COLUMNS.find((c) => c.statusValue === statusValue);
-  if (!column) {
-    return null;
-  }
-  return column.id === "unset" ? "unset" : column.statusValue;
+/** 列状态 → URL 参数值：转发 lib 唯一实现，保持看板调用方路径不变 */
+export function getBoardWorkflowStatusParam(statusValue: string): BoardWorkflowStatusParam | null {
+  return boardWorkflowStatusParamForStatusValue(statusValue);
 }

@@ -14,7 +14,7 @@ describe("board workflow status param", () => {
     expect(getBoardWorkflowStatusParam("done")).toBe("done");
   });
 
-  it("未知取值返回 null（调用方不传 workflow_status 参数）", () => {
+  it("未知取值返回 null，由调用方决定兜底", () => {
     expect(getBoardWorkflowStatusParam("bogus")).toBe(null);
   });
 });

@@ -9,7 +9,7 @@ import {
 import { attachmentApi } from "@/lib/api/attachments";
 import { issueApi, type IssueListParams } from "@/lib/api/issues";
 import { type IssueSourceFilter } from "@/lib/issue-source";
-import { getBoardWorkflowStatusParam } from "@/routes/board/lib/utils";
+import { boardWorkflowStatusParamForStatusValue } from "@/lib/issue-workflow-status";
 import { useEffect, useRef } from "react";
 
 interface UseIssuesFilters {
@@ -52,10 +52,10 @@ export function useInfiniteBoardIssues(
   filters?: Pick<IssueListParams, "label" | "source">,
   pageSize = 20,
 ) {
-  // 看板列 → 列表筛选参数的编码唯一出处是 getBoardWorkflowStatusParam：
-  // "" 编码为 unset（与未设置列同源）；未知取值回落发原值，由后端等值
-  // 过滤得空列表，而不是省略参数放宽成「全部 open issue」。
-  const boardWorkflowStatusParam = getBoardWorkflowStatusParam(workflowStatus);
+  // 看板列 → 列表筛选参数的编码唯一出处是 boardWorkflowStatusParamForStatusValue：
+  // "" 编码为 unset（与未设置列同源）；类型域外取值按旧语义兜底——真值发原值
+  // 由后端等值过滤得空列表，假值回落 unset，不省略参数放宽成「全部 open issue」。
+  const boardWorkflowStatusParam = boardWorkflowStatusParamForStatusValue(workflowStatus);
   return useInfiniteQuery({
     queryKey: [
       "projects",
@@ -71,7 +71,7 @@ export function useInfiniteBoardIssues(
     queryFn: async ({ pageParam }) => {
       const res = await issueApi.list(projectId, {
         state: "open",
-        workflow_status: boardWorkflowStatusParam ?? workflowStatus,
+        workflow_status: boardWorkflowStatusParam ?? (workflowStatus || "unset"),
         page: pageParam,
         page_size: pageSize,
         ...(filters?.label ? { label: filters.label } : {}),
