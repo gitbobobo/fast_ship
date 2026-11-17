@@ -287,8 +287,12 @@ export default function IssueDetailPage() {
     if (!hasSourceContext) {
       return;
     }
+    if (isSourcePanelOpen) {
+      // 收起后焦点还原到把手（[ 与点把手两条路径），键盘用户不丢位置
+      document.getElementById("issue-source-list-handle")?.focus();
+    }
     setIsSourcePanelOpen((open) => !open);
-  }, [hasSourceContext]);
+  }, [hasSourceContext, isSourcePanelOpen]);
 
   const {
     goToNext,
@@ -312,6 +316,7 @@ export default function IssueDetailPage() {
         if (!isForeignOverlayOpen()) {
           event.preventDefault();
           setIsSourcePanelOpen(false);
+          document.getElementById("issue-source-list-handle")?.focus();
         }
         return;
       }
@@ -1087,18 +1092,21 @@ export default function IssueDetailPage() {
           />
         }
       />
-      {/* 来源列表抽屉：内容区左缘覆盖式。sticky 贴在顶栏下方且不占文档流高度，
+      {/* 来源列表抽屉：内容区左缘覆盖式。sticky 容器与正文共用 max-w-7xl 居中，
+          超宽屏下抽屉与把手对齐正文左缘；贴在顶栏下方且不占文档流高度，
           只覆盖内容区（不盖全局侧栏与顶栏）；无遮罩，开着列表也能看清正文 */}
       {hasSourceContext && (
-        <div className="pointer-events-none sticky top-14 z-20 h-0">
+        <div className="pointer-events-none sticky top-14 z-20 mx-auto h-0 w-full max-w-7xl">
           <div
             className={cn(
-              "absolute left-0 top-0 flex h-[calc(100dvh-3.5rem)] w-[300px] max-w-[85vw] transition-transform duration-150 motion-reduce:transition-none",
+              "absolute left-0 top-0 flex h-[calc(100dvh-3.5rem)] w-[300px] max-w-[85vw] transition-transform duration-150 motion-reduce:transition-none max-sm:w-[calc(100dvw-24px)] max-sm:max-w-none",
               isSourcePanelOpen ? "translate-x-0" : "-translate-x-full",
             )}
           >
             <div
               id="issue-source-list-panel"
+              role="region"
+              aria-label="来源列表"
               className={cn(
                 "pointer-events-auto flex min-w-0 flex-1 flex-col overflow-hidden rounded-r-2xl border border-l-0 bg-card shadow-xl transition-[visibility] duration-150 motion-reduce:transition-none",
                 isSourcePanelOpen ? "visible" : "invisible",
@@ -1136,7 +1144,9 @@ export default function IssueDetailPage() {
                 className="min-h-0 flex-1 overflow-y-auto"
               />
             </div>
-            {/* 左缘把手：开与关同一控件，随抽屉一起平移，打开时停在抽屉右缘 */}
+            {/* 左缘把手：开与关同一控件，随抽屉一起平移，打开时停在抽屉右缘。
+                伪元素向右扩展命中区到约 44px，触屏可点；常态显示淡色图标，
+                不依赖 hover 才可见 */}
             <button
               id="issue-source-list-handle"
               type="button"
@@ -1145,12 +1155,12 @@ export default function IssueDetailPage() {
               aria-controls="issue-source-list-panel"
               aria-label="来源列表（快捷键 [）"
               title="来源列表（快捷键 [）"
-              className="group pointer-events-auto absolute left-full top-1/2 flex h-16 w-3 -translate-y-1/2 items-center justify-center rounded-r-md border border-l-0 border-border/60 bg-muted/50 text-muted-foreground/60 transition-[width,background-color,border-color,color] duration-150 hover:w-4 hover:bg-muted hover:text-foreground motion-reduce:transition-none"
+              className="group pointer-events-auto absolute left-full top-1/2 flex h-16 w-3 -translate-y-1/2 items-center justify-center rounded-r-md border border-l-0 border-border bg-muted text-muted-foreground transition-[width,background-color,border-color,color] duration-150 after:absolute after:inset-y-0 after:-left-2 after:-right-8 after:content-[''] hover:w-4 hover:bg-accent hover:text-foreground motion-reduce:transition-none"
             >
               {isSourcePanelOpen ? (
-                <PanelLeftClose className="h-3 w-3 opacity-0 group-hover:opacity-100" />
+                <PanelLeftClose className="h-3 w-3 opacity-40 group-hover:opacity-100 max-lg:opacity-80" />
               ) : (
-                <PanelLeftOpen className="h-3 w-3 opacity-0 group-hover:opacity-100" />
+                <PanelLeftOpen className="h-3 w-3 opacity-40 group-hover:opacity-100 max-lg:opacity-80" />
               )}
             </button>
           </div>
@@ -1206,6 +1216,7 @@ export default function IssueDetailPage() {
                             e.preventDefault();
                             void handleSaveTitle();
                           } else if (e.key === "Escape") {
+                            e.preventDefault();
                             handleCancelTitleEdit();
                           }
                         }}

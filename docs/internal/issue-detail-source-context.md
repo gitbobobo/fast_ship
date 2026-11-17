@@ -34,10 +34,12 @@
 
 ## UI 接入（`$iid.tsx`）
 
-- 标题行旁「来源列表」按钮：`aria-expanded`/`aria-controls="issue-source-list-panel"`，`[` 提示。宽屏（xl+，`useIsMobile(1280)` 取反）按本地偏好 `issueSourceListExpanded`（`project-preference-store.ts`）决定固定左栏；窄屏改为 `Sheet side="left"` 抽屉，抽屉内 `[` 可关闭、J/K 继续可用（抽屉带 `data-issue-source-sheet`，快捷键的浮层避让会豁免它）。
-- 宽屏展开时容器 `max-w-7xl → max-w-[100rem]`，grid 加左侧 `280px` 列，左栏 `sticky top-20` 内部滚动。
-- 桌面栏与抽屉共用同一 `useIssueSourceList` 实例，**不要**挂两份控制器；`IssueSourceList` 组件只负责渲染与滚动定位。
-- 全局快捷键避让：`defaultPrevented`、IME 组合态、Ctrl/Meta/Alt、`input/textarea/select/contenteditable`、其他 Dialog/AlertDialog/Sheet/DropdownMenu/Popover/Select 浮层打开（`document.querySelector('[data-slot=…]')` 探测）。
+- 内容区左侧覆盖式抽屉（INT-238）：宽窄屏同一套实现。sticky 容器（`sticky top-14 z-20 h-0 mx-auto max-w-7xl`，与正文容器同宽）紧跟 Header，不占文档流高度；面板宽屏 300px、<640px 视口近满宽（`calc(100dvw-24px)`，右侧不留露出截断控件的窄条）`absolute left-0` 覆盖正文左缘，无遮罩，不盖全局侧边栏与顶栏；150ms transform 滑入滑出，`motion-reduce` 直切。
+- 左缘把手是唯一开合控件（`aria-expanded`/`aria-controls="issue-source-list-panel"`，面板带 `role="region" aria-label="来源列表"`）：伪元素向右扩展命中区到约 44px 供触屏点按；常态显示淡色图标（窄屏 `max-lg:opacity-80`），hover 加宽加深。无来源（`hasSourceContext` 为 false）不渲染把手与抽屉。
+- 交互：`[` 或点把手开关；Esc 在输入控件聚焦时也收起抽屉（外来浮层打开时让位，且各浮层/内联编辑器消费 Esc 时 `preventDefault`，避免一次按键两处生效）；点抽屉外部（document `pointerdown`，面板与把手除外）收起；宽屏点选列表项保持打开，窄屏点选收起；J/K 翻页不变。收起（`[`/Esc/点把手）后焦点还原到把手。
+- 偏好不持久化：每次进页默认收起（`issueSourceListExpanded` 已删除，旧 localStorage 键无消费者）。
+- 抽屉与来源数据共用同一 `useIssueSourceList` 实例，**不要**挂两份控制器；`IssueSourceList` 组件只负责渲染与滚动定位。
+- 全局快捷键避让：`defaultPrevented`、IME 组合态、Ctrl/Meta/Alt、`input/textarea/select/contenteditable`、其他 Dialog/AlertDialog/Sheet/DropdownMenu/Popover/Select 浮层打开（`document.querySelector('[data-slot=…]')` 探测）。抽屉自身是页面内普通面板（非 sheet-content），不在避让名单，打开时 `[`/J/K 仍归详情页。
 
 ## 看板侧编码（`web/src/routes/board/`）
 
