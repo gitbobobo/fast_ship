@@ -1186,6 +1186,8 @@ export default function IssueDetailPage() {
               />
             </div>
             {/* 左缘把手：开与关同一控件，随抽屉一起平移，打开时停在抽屉右缘。
+                顶部锚定（top-2 紧跟 Header 与面板头部同 y），不垂直居中——居中会落在
+                卡片纵向中部、切断卡片左描边横穿分隔线，看起来像渲染残留而不是入口。
                 收起态伪元素命中区向左扩进正文容器内边距（死区），右侧只留 4px
                 不越进正文可见区；打开态把手两侧都挨着可点内容，命中区收窄到 ±4px */}
             <button
@@ -1197,7 +1199,7 @@ export default function IssueDetailPage() {
               aria-label="来源列表（快捷键 [）"
               title="来源列表（快捷键 [）"
               className={cn(
-                "group pointer-events-auto absolute left-full top-1/2 flex h-16 w-3 -translate-y-1/2 items-center justify-center rounded-r-md border border-l-0 border-neutral-300 bg-neutral-200 text-muted-foreground transition-[width,background-color,border-color,color] duration-150 after:absolute after:inset-y-0 after:content-[''] hover:w-4 hover:bg-neutral-300 hover:text-foreground motion-reduce:transition-none max-sm:w-5 dark:border-neutral-600 dark:bg-neutral-700 dark:hover:bg-neutral-600",
+                "group pointer-events-auto absolute left-full top-2 flex h-16 w-3 items-center justify-center rounded-r-md border border-l-0 border-neutral-400 bg-neutral-300 text-muted-foreground transition-[width,background-color,border-color,color] duration-150 after:absolute after:inset-y-0 after:content-[''] hover:w-4 hover:bg-neutral-400 hover:text-foreground motion-reduce:transition-none max-sm:w-5 dark:border-neutral-500 dark:bg-neutral-600 dark:hover:bg-neutral-500",
                 isSourcePanelOpen
                   ? "after:-left-1 after:-right-1"
                   : "after:-left-4 after:-right-1 md:after:-left-6",
