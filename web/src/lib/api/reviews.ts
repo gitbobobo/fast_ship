@@ -53,8 +53,6 @@ export type ReviewActivityStage = NonNullable<
   Schemas["ReviewPullRequestActivity"]["stage"]
 >;
 
-export type ReviewStageStatus = Schemas["ReviewStageProgress"]["status"];
-
 /** 一段（代码/视觉）的聚合进度，前端进度文案的唯一数据源。 */
 export type ReviewStageProgress = Schemas["ReviewStageProgress"];
 

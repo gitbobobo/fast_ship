@@ -10,9 +10,6 @@ type Schemas = components["schemas"];
 
 export type EnvironmentStatus = Schemas["T3EnvironmentStatus"];
 
-/** 写操作只看 access：operate 才能发消息、新建线程、应答请求。 */
-export type EnvironmentAccess = Schemas["T3EnvironmentAccess"];
-
 export type Environment = Schemas["T3Environment"];
 
 export type ThreadStatus = Schemas["T3ThreadSummary"]["status"];
@@ -26,9 +23,6 @@ export type ChatAttachment = Schemas["T3ChatAttachment"];
 
 /** 契约名为 T3ApprovalOption。 */
 export type ApprovalOption = Schemas["T3ApprovalOption"];
-
-/** 契约名为 T3UserInputQuestion。 */
-export type UserInputQuestion = Schemas["T3UserInputQuestion"];
 
 /** 契约名为 T3ThreadItem。 */
 export type ThreadItem = Schemas["T3ThreadItem"];
