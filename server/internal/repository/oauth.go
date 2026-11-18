@@ -76,15 +76,6 @@ func (r *OAuthRepository) UpsertAuthorizationTx(tx *gorm.DB, auth *model.OAuthAu
 	return auth.ID, nil
 }
 
-func (r *OAuthRepository) FindAuthorizationByID(id, userID string) (*model.OAuthAuthorization, error) {
-	var auth model.OAuthAuthorization
-	err := r.db.Where("id = ? AND user_id = ?", id, userID).First(&auth).Error
-	if err != nil {
-		return nil, err
-	}
-	return &auth, nil
-}
-
 // AuthorizationWithClient 按授权清单投影取授权 + 客户端名。
 type AuthorizationWithClient struct {
 	model.OAuthAuthorization
@@ -195,15 +186,6 @@ func (r *OAuthRepository) CreateAuthorizationCodeTx(tx *gorm.DB, code *model.OAu
 	return tx.Create(code).Error
 }
 
-func (r *OAuthRepository) FindAuthorizationCode(codeHash string) (*model.OAuthAuthorizationCode, error) {
-	var code model.OAuthAuthorizationCode
-	err := r.db.Where("code_hash = ?", codeHash).First(&code).Error
-	if err != nil {
-		return nil, err
-	}
-	return &code, nil
-}
-
 // FindAuthorizationCodeTx 事务内读码（token 事务用它把码换令牌）。
 func (r *OAuthRepository) FindAuthorizationCodeTx(tx *gorm.DB, codeHash string) (*model.OAuthAuthorizationCode, error) {
 	var code model.OAuthAuthorizationCode
@@ -238,15 +220,6 @@ func (r *OAuthRepository) CreateRefreshTokenTx(tx *gorm.DB, token *model.OAuthRe
 
 func (r *OAuthRepository) FindAccessTokenByHash(tokenHash string) (*model.OAuthAccessToken, error) {
 	var token model.OAuthAccessToken
-	err := r.db.Where("token_hash = ? AND expires_at > ? AND revoked_at IS NULL", tokenHash, time.Now()).First(&token).Error
-	if err != nil {
-		return nil, err
-	}
-	return &token, nil
-}
-
-func (r *OAuthRepository) FindRefreshTokenByHash(tokenHash string) (*model.OAuthRefreshToken, error) {
-	var token model.OAuthRefreshToken
 	err := r.db.Where("token_hash = ? AND expires_at > ? AND revoked_at IS NULL", tokenHash, time.Now()).First(&token).Error
 	if err != nil {
 		return nil, err
