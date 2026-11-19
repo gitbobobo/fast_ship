@@ -4172,13 +4172,17 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
-          description: API Key 修改 version_number（40301）或非资源所有者（40302）
+          description: API Key 修改 version_number（40301）
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorEnvelope'
         '404':
-          $ref: '#/components/responses/NotFound'
+          description: 版本不存在（40402）或项目不存在/非所有者（40401）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
         '409':
           description: 版本非 pending 状态（40904）或版本号冲突（40903）
           content:

@@ -99,3 +99,71 @@ func TestVersionHandlerUpdate_AllowsJWTVersionNumberChange(t *testing.T) {
 func ginParams(key, value string) []gin.Param {
 	return []gin.Param{{Key: key, Value: value}}
 }
+
+// INT-241 回归：非所有者更新/删除他人版本，无论目标 pending 还是已发货，
+// 都得到 404（40401），不会先看到 409 冲突码（40904）。
+func TestVersionHandlerUpdate_NonOwnerGetsNotFoundNotConflict(t *testing.T) {
+	for _, status := range []model.VersionStatus{model.VersionStatusPending, model.VersionStatusShipped} {
+		env := setupHandlerTestEnv(t)
+		owner := createHandlerTestUser(t, env.db, "user-1")
+		intruder := createHandlerTestUser(t, env.db, "user-2")
+		project := createHandlerTestProject(t, env.db, owner.ID)
+		version := createHandlerTestVersion(t, env.db, project.ID, func(v *model.Version) {
+			v.Status = status
+		})
+
+		body := []byte(`{"release_notes":"intruder notes"}`)
+		ctx, rec := newJSONContext(http.MethodPut, "/api/versions/"+version.ID, body)
+		ctx.Params = ginParams("vid", version.ID)
+		ctx.Set(middleware.ContextKeyUserID, intruder.ID)
+		ctx.Set(middleware.ContextKeyAuthType, middleware.AuthTypeJWT)
+
+		env.versionHandler.Update(ctx)
+
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("status %q: expected 404 for non-owner, got %d: %s", status, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func TestVersionHandlerDelete_NonOwnerGetsNotFoundNotConflict(t *testing.T) {
+	for _, status := range []model.VersionStatus{model.VersionStatusPending, model.VersionStatusShipped} {
+		env := setupHandlerTestEnv(t)
+		owner := createHandlerTestUser(t, env.db, "user-1")
+		intruder := createHandlerTestUser(t, env.db, "user-2")
+		project := createHandlerTestProject(t, env.db, owner.ID)
+		version := createHandlerTestVersion(t, env.db, project.ID, func(v *model.Version) {
+			v.Status = status
+		})
+
+		ctx, rec := newJSONContext(http.MethodDelete, "/api/versions/"+version.ID, nil)
+		ctx.Params = ginParams("vid", version.ID)
+		ctx.Set(middleware.ContextKeyUserID, intruder.ID)
+
+		env.versionHandler.Delete(ctx)
+
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("status %q: expected 404 for non-owner, got %d: %s", status, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+// INT-241 回归：所有者删除非 pending 版本仍返回 409（40904）。
+func TestVersionHandlerDelete_OwnerNonPendingReturnsConflict(t *testing.T) {
+	env := setupHandlerTestEnv(t)
+	user := createHandlerTestUser(t, env.db, "user-1")
+	project := createHandlerTestProject(t, env.db, user.ID)
+	version := createHandlerTestVersion(t, env.db, project.ID, func(v *model.Version) {
+		v.Status = model.VersionStatusShipped
+	})
+
+	ctx, rec := newJSONContext(http.MethodDelete, "/api/versions/"+version.ID, nil)
+	ctx.Params = ginParams("vid", version.ID)
+	ctx.Set(middleware.ContextKeyUserID, user.ID)
+
+	env.versionHandler.Delete(ctx)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409 for owner deleting shipped version, got %d: %s", rec.Code, rec.Body.String())
+	}
+}

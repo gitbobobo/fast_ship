@@ -44,14 +44,17 @@ func (s *ArtifactService) Upload(versionID, userID, fileName string, fileSize in
 		return nil, errs.ErrInternal
 	}
 
-	if version.Status != model.VersionStatusPending {
-		return nil, errs.ErrVersionNotPending
-	}
-
-	// 校验项目归属
+	// 先校验项目归属，再判 pending：不向非所有者泄露版本状态（INT-241）。
 	_, err = s.projectRepo.FindByID(version.ProjectID, userID)
 	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errs.ErrProjectNotFound
+		}
 		return nil, errs.ErrNotOwner
+	}
+
+	if version.Status != model.VersionStatusPending {
+		return nil, errs.ErrVersionNotPending
 	}
 
 	storagePath := fmt.Sprintf("%s/%s/%s", version.ProjectID, versionID, fileName)
@@ -112,14 +115,17 @@ func (s *ArtifactService) Delete(id, userID string) error {
 		return errs.ErrInternal
 	}
 
-	if version.Status != model.VersionStatusPending {
-		return errs.ErrVersionNotPending
-	}
-
-	// 校验项目归属
+	// 先校验项目归属，再判 pending：不向非所有者泄露版本状态（INT-241）。
 	_, err = s.projectRepo.FindByID(version.ProjectID, userID)
 	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return errs.ErrProjectNotFound
+		}
 		return errs.ErrNotOwner
+	}
+
+	if version.Status != model.VersionStatusPending {
+		return errs.ErrVersionNotPending
 	}
 
 	if err := s.artifactRepo.Delete(id); err != nil {

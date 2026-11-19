@@ -158,3 +158,72 @@ type fakeBranchClient struct {
 func (f *fakeBranchClient) ListBranches(context.Context) ([]*ghclient.Branch, string, error) {
 	return f.branches, f.defaultBranch, f.err
 }
+
+// INT-241 回归：归属校验先行。非所有者无论目标是 pending 还是已发货，
+// 都得到同一归属类错误，不会先看到 40904。
+func TestVersionServiceUpdate_NonOwnerGetsOwnershipErrorNotPending(t *testing.T) {
+	for _, status := range []model.VersionStatus{model.VersionStatusPending, model.VersionStatusShipped} {
+		svc := setupTestServices(t)
+		createTestUser(t, svc.db, "user-1")
+		createTestUser(t, svc.db, "user-2")
+		project := createTestProject(t, svc.db, "user-1")
+		version := createTestVersion(t, svc.db, project.ID, func(v *model.Version) {
+			v.Status = status
+		})
+
+		newNotes := "intruder notes"
+		_, err := svc.versionService.Update(context.Background(), version.ID, "user-2", true, &UpdateVersionRequest{
+			ReleaseNotes: &newNotes,
+		})
+		if !errors.Is(err, errs.ErrProjectNotFound) {
+			t.Fatalf("status %q: expected ErrProjectNotFound for non-owner, got %v", status, err)
+		}
+	}
+}
+
+func TestVersionServiceDelete_NonOwnerGetsOwnershipErrorNotPending(t *testing.T) {
+	for _, status := range []model.VersionStatus{model.VersionStatusPending, model.VersionStatusShipped} {
+		svc := setupTestServices(t)
+		createTestUser(t, svc.db, "user-1")
+		createTestUser(t, svc.db, "user-2")
+		project := createTestProject(t, svc.db, "user-1")
+		version := createTestVersion(t, svc.db, project.ID, func(v *model.Version) {
+			v.Status = status
+		})
+
+		if err := svc.versionService.Delete(version.ID, "user-2"); !errors.Is(err, errs.ErrProjectNotFound) {
+			t.Fatalf("status %q: expected ErrProjectNotFound for non-owner, got %v", status, err)
+		}
+	}
+}
+
+// INT-241 回归：所有者对非 pending 版本的更新/删除仍返回 40904。
+func TestVersionServiceUpdate_OwnerNonPendingReturnsNotPending(t *testing.T) {
+	svc := setupTestServices(t)
+	createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, "user-1")
+	version := createTestVersion(t, svc.db, project.ID, func(v *model.Version) {
+		v.Status = model.VersionStatusShipped
+	})
+
+	newNotes := "notes"
+	_, err := svc.versionService.Update(context.Background(), version.ID, project.UserID, true, &UpdateVersionRequest{
+		ReleaseNotes: &newNotes,
+	})
+	if !errors.Is(err, errs.ErrVersionNotPending) {
+		t.Fatalf("expected ErrVersionNotPending, got %v", err)
+	}
+}
+
+func TestVersionServiceDelete_OwnerNonPendingReturnsNotPending(t *testing.T) {
+	svc := setupTestServices(t)
+	createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, "user-1")
+	version := createTestVersion(t, svc.db, project.ID, func(v *model.Version) {
+		v.Status = model.VersionStatusShipped
+	})
+
+	if err := svc.versionService.Delete(version.ID, project.UserID); !errors.Is(err, errs.ErrVersionNotPending) {
+		t.Fatalf("expected ErrVersionNotPending, got %v", err)
+	}
+}

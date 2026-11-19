@@ -299,13 +299,18 @@ func (s *ShipService) loadVersionAndProject(versionID, userID string) (*model.Ve
 		return nil, nil, errs.ErrInternal
 	}
 
-	if version.Status != model.VersionStatusPending {
-		return nil, nil, errs.ErrVersionNotPending
-	}
-
+	// 先校验项目归属，再判 pending：与 VersionService.Update/Delete 同口径，
+	// 不向非所有者泄露版本状态（INT-241）。
 	project, err := s.projectRepo.FindByID(version.ProjectID, userID)
 	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil, errs.ErrProjectNotFound
+		}
 		return nil, nil, errs.ErrNotOwner
+	}
+
+	if version.Status != model.VersionStatusPending {
+		return nil, nil, errs.ErrVersionNotPending
 	}
 
 	return version, project, nil
