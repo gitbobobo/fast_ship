@@ -12102,7 +12102,7 @@ export interface operations {
                 };
             };
             401: components["responses"]["Unauthorized"];
-            /** @description API Key 修改 version_number（40301）或非资源所有者（40302） */
+            /** @description API Key 修改 version_number（40301） */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -12111,7 +12111,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
-            404: components["responses"]["NotFound"];
+            /** @description 版本不存在（40402）或项目不存在/非所有者（40401） */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
             /** @description 版本非 pending 状态（40904）或版本号冲突（40903） */
             409: {
                 headers: {
