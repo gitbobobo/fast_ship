@@ -13,6 +13,7 @@ import (
 
 	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/model"
+	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	ghclient "github.com/godbobo/fast_ship/server/internal/pkg/github"
 	gh "github.com/google/go-github/v62/github"
 )
@@ -817,5 +818,37 @@ func TestShipServiceShip_PreservesUnknownPlaceholders(t *testing.T) {
 	}
 	if got.ShipHook == nil || api.Deref(got.ShipHook.CommentBody) != want {
 		t.Fatalf("expected rendered comment %q, got %+v", want, got.ShipHook)
+	}
+}
+
+// INT-241 回归：Ship/ShipCheck 共用 loadVersionAndProject，归属校验须先于
+// pending 判断，非所有者无论目标 pending 还是已发货都得到归属类错误（40401），
+// 不会先看到 40904。
+func TestShipServiceLoadVersionAndProject_NonOwnerGetsOwnershipErrorNotPending(t *testing.T) {
+	for _, status := range []model.VersionStatus{model.VersionStatusPending, model.VersionStatusShipped} {
+		svc := setupTestServices(t)
+		createTestUser(t, svc.db, "user-1")
+		createTestUser(t, svc.db, "user-2")
+		project := createTestProject(t, svc.db, "user-1")
+		version := createTestVersion(t, svc.db, project.ID, func(v *model.Version) {
+			v.Status = status
+		})
+
+		if _, _, err := svc.shipService.loadVersionAndProject(version.ID, "user-2"); !errors.Is(err, errs.ErrProjectNotFound) {
+			t.Fatalf("status %q: expected ErrProjectNotFound for non-owner, got %v", status, err)
+		}
+	}
+}
+
+func TestShipServiceLoadVersionAndProject_OwnerNonPendingReturnsNotPending(t *testing.T) {
+	svc := setupTestServices(t)
+	createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, "user-1")
+	version := createTestVersion(t, svc.db, project.ID, func(v *model.Version) {
+		v.Status = model.VersionStatusShipped
+	})
+
+	if _, _, err := svc.shipService.loadVersionAndProject(version.ID, project.UserID); !errors.Is(err, errs.ErrVersionNotPending) {
+		t.Fatalf("expected ErrVersionNotPending, got %v", err)
 	}
 }

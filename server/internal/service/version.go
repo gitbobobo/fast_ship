@@ -118,14 +118,18 @@ func (s *VersionService) Update(ctx context.Context, id, userID string, allowVer
 		return nil, errs.ErrInternal
 	}
 
-	if version.Status != model.VersionStatusPending {
-		return nil, errs.ErrVersionNotPending
-	}
-
-	// 校验项目归属
+	// 先校验项目归属，再判 pending：避免非所有者通过 40904 与归属错误的差异
+	// 探测他人版本是否仍为待发货状态（INT-241）。
 	project, err := s.projectRepo.FindByID(version.ProjectID, userID)
 	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errs.ErrProjectNotFound
+		}
 		return nil, errs.ErrNotOwner
+	}
+
+	if version.Status != model.VersionStatusPending {
+		return nil, errs.ErrVersionNotPending
 	}
 
 	if req.VersionNumber != nil {
@@ -194,14 +198,17 @@ func (s *VersionService) Delete(id, userID string) error {
 		return errs.ErrInternal
 	}
 
-	if version.Status != model.VersionStatusPending {
-		return errs.ErrVersionNotPending
+	// 先校验项目归属，再判 pending：与 Update 同口径，不向非所有者泄露
+	// 版本状态（INT-241）。
+	if _, err = s.projectRepo.FindByID(version.ProjectID, userID); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return errs.ErrProjectNotFound
+		}
+		return errs.ErrNotOwner
 	}
 
-	// 校验项目归属
-	_, err = s.projectRepo.FindByID(version.ProjectID, userID)
-	if err != nil {
-		return errs.ErrNotOwner
+	if version.Status != model.VersionStatusPending {
+		return errs.ErrVersionNotPending
 	}
 
 	if err := s.versionRepo.Delete(id); err != nil {
