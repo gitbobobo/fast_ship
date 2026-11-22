@@ -1379,7 +1379,7 @@ describe("Issue pages", () => {
       // 副行：来源描述带看板前缀 + 「已加载 / 总数」（total 取接口首页 total）；
       // 文本分跨两个 span，用整段 textContent 断言 p 元素
       expect(
-        screen.getByText(hasExactTextContent("看板 · 待处理 · 标签 \"bug\" · 2 / 57")),
+        screen.getByText(hasExactTextContent("看板 · 待处理 · 标签 \"bug\" · 已加载 2 / 57")),
       ).toBeInTheDocument();
       // 把手角标与 aria-label 用已加载数
       expect(

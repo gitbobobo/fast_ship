@@ -137,7 +137,9 @@ export function describeIssueSourceContext(context: IssueSourceContext): string 
   if (context.kind === "list") {
     const segments: string[] = [];
     if (context.state) {
-      segments.push(`状态 ${context.state === "open" ? "OPEN" : "CLOSED"}`);
+      // 不加「状态」前缀：行内元信息里另有内部状态，同名会读成两个「状态」
+      // （视觉审查 INT-242）；大写 OPEN/CLOSED 即 GitHub 筛选语义，与 issue 规格一致
+      segments.push(context.state === "open" ? "OPEN" : "CLOSED");
     }
     if (context.q) {
       segments.push(`搜索 "${context.q}"`);

@@ -184,7 +184,7 @@ describe("describeIssueSourceContext", () => {
         sort: "updated_desc",
         page: 1,
       }),
-    ).toBe("列表 · 状态 OPEN · 标签 \"bug\" · 来源 github");
+    ).toBe("列表 · OPEN · 标签 \"bug\" · 来源 github");
     expect(
       describeIssueSourceContext({
         kind: "list",

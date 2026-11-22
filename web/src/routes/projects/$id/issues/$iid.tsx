@@ -292,8 +292,8 @@ export default function IssueDetailPage() {
     ? "—"
     : source.total === null
       ? // total 缺失（未拉到首页/异常）时不可用已加载数伪分母：那不等于已加载完
-        `${sourceCount} / —`
-      : `${sourceCount} / ${source.total}`;
+        `已加载 ${sourceCount} / —`
+      : `已加载 ${sourceCount} / ${source.total}`;
 
   // 主动收起路径（[、Esc、X、窄屏点选）统一把焦点还给把手；
   // 点外部收起不走这里——焦点应落在用户点的目标上
