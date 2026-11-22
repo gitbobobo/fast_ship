@@ -1295,6 +1295,126 @@ describe("Issue pages", () => {
       expect(within(list).getByText("GH-43")).toBeInTheDocument();
     });
 
+    it("renders the drawer while the issue is loading and keeps the same nodes after load", () => {
+      // 回归 INT-242：旧结构下加载早退分支渲染 [Header, 骨架 div]，完成分支在
+      // 同一位置渲染 [Header, 抽屉 div, 正文]，React 复用骨架 DOM 只改 className，
+      // 抽屉外层从无平移变为 -translate-x-full + transition-transform，进页播
+      // 一次收起过渡。修复后抽屉 JSX 提取为组件级变量，两个分支同一位置渲染，
+      // 跨状态切换保持同一节点且无 className 跳变。
+      mockIssueDetailData();
+      mockSourceListPages([
+        {
+          items: [sourceIssue("issue-1", "GH-42", "Crash on launch")],
+          total: 1,
+          page: 1,
+        },
+      ]);
+      // issue 详情加载中：hasSourceContext 为 true（issue === undefined 分支）
+      vi.mocked(useIssue).mockReturnValue({
+        data: undefined,
+        isLoading: true,
+      } as unknown as ReturnType<typeof useIssue>);
+
+      const view = renderWithRoute(<IssueDetailPage />, {
+        path: "/projects/:id/issues/:iid",
+        initialEntry:
+          "/projects/proj-1/issues/issue-1?issue_from=board&issue_workflow_status=todo",
+      });
+
+      // 加载态抽屉已在 DOM（收起态），可从把手打开列表
+      const panelDuringLoading = document.getElementById("issue-source-list-panel");
+      expect(panelDuringLoading).not.toBeNull();
+      const outerDuringLoading = panelDuringLoading!.parentElement!;
+      expect(outerDuringLoading).toHaveClass("absolute", "-translate-x-full");
+      fireEvent.click(screen.getByRole("button", { name: /来源列表（快捷键/ }));
+      expect(panelDuringLoading).not.toHaveClass("invisible");
+      expect(within(screen.getByTestId("issue-source-list")).getByText("GH-42")).toBeInTheDocument();
+      // 收回去再切换，验证收起态跨状态切换不发生平移跳变
+      fireEvent.click(screen.getByRole("button", { name: /来源列表（快捷键/ }));
+      expect(outerDuringLoading).toHaveClass("-translate-x-full");
+
+      // 切到加载完成：抽屉面板与外层平移容器都是同一 DOM 节点，不是骨架节点复用；
+      // 平移类保持 -translate-x-full，无从 none 到 -full 的过渡触发
+      mockIssueDetailData();
+      view.rerender(
+        withTestQueryClient(
+          <MemoryRouter initialEntries={["/projects/proj-1/issues/issue-1?issue_from=board&issue_workflow_status=todo"]}>
+            <Routes>
+              <Route path="/projects/:id/issues/:iid" element={<IssueDetailPage />} />
+            </Routes>
+          </MemoryRouter>,
+        ),
+      );
+
+      expect(screen.getByText("Crash on launch")).toBeInTheDocument();
+      const panelAfterLoad = document.getElementById("issue-source-list-panel");
+      expect(panelAfterLoad).toBe(panelDuringLoading);
+      const outerAfterLoad = panelAfterLoad!.parentElement!;
+      expect(outerAfterLoad).toBe(outerDuringLoading);
+      expect(outerAfterLoad).toHaveClass("-translate-x-full");
+      // 骨架容器（mx-auto）不再被抽屉复用（旧 bug 的复用路径）
+      expect(outerAfterLoad).not.toHaveClass("mx-auto");
+    });
+
+    it("shows loaded/total counts in the drawer header and falls back to an em dash while loading", () => {
+      mockIssueDetailData();
+      mockSourceListPages([
+        {
+          items: [
+            sourceIssue("issue-1", "GH-42", "Crash on launch"),
+            sourceIssue("issue-2", "GH-43", "Next issue"),
+          ],
+          total: 57,
+          page: 1,
+        },
+      ]);
+
+      renderWithRoute(<IssueDetailPage />, {
+        path: "/projects/:id/issues/:iid",
+        initialEntry:
+          "/projects/proj-1/issues/issue-1?issue_from=board&issue_workflow_status=todo&issue_label=bug",
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: /来源列表（快捷键/ }));
+      // 副行：来源描述带看板前缀 + 「已加载 / 总数」（total 取接口首页 total）；
+      // 文本分跨两个 span，用整段 textContent 断言 p 元素
+      expect(
+        screen.getByText(hasExactTextContent("看板 · 待处理 · 标签 \"bug\" · 已加载 2 / 57")),
+      ).toBeInTheDocument();
+      // 把手角标与 aria-label 用已加载数
+      expect(
+        screen.getByRole("button", { name: "来源列表（快捷键 [），已加载 2 个" }),
+      ).toBeInTheDocument();
+    });
+
+    it("shows an em dash count while the source list is loading", () => {
+      mockIssueDetailData();
+      vi.mocked(useInfiniteIssueList).mockReturnValue({
+        data: undefined,
+        isLoading: true,
+        isError: false,
+        refetch: vi.fn(),
+        fetchNextPage: vi.fn(),
+        hasNextPage: true,
+        isFetching: false,
+        isFetchingNextPage: false,
+      } as unknown as ReturnType<typeof useInfiniteIssueList>);
+
+      renderWithRoute(<IssueDetailPage />, {
+        path: "/projects/:id/issues/:iid",
+        initialEntry:
+          "/projects/proj-1/issues/issue-1?issue_from=board&issue_workflow_status=todo",
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: /来源列表（快捷键/ }));
+      // 副行：来源描述带看板前缀 + 「—」占位（不报「0」，不暗示空列表是成功结果）
+      expect(screen.getByText(hasExactTextContent("看板 · 待处理 · —"))).toBeInTheDocument();
+      // 加载中把手无条数语义
+      expect(
+        screen.getByRole("button", { name: "来源列表（快捷键 [）" }),
+      ).toHaveAttribute("aria-expanded", "true");
+    });
+
     it("walks the source list with j/k via replace and returns through real history", async () => {
       mockIssueDetailData();
       mockSourceListPages([

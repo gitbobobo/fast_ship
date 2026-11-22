@@ -119,10 +119,13 @@ const BOARD_WORKFLOW_STATUS_PARAM_LABELS: Record<
   unset: "未设置",
 };
 
-/** 来源列表标题副行：说明来源是哪一列/哪组筛选，让「在哪个上下文里翻页」一眼可辨 */
+/**
+ * 来源列表标题副行：带来源类型前缀（「看板 · …」/「列表 · …」）说明是哪一列/哪组
+ * 筛选，让「在哪个上下文里翻页」一眼可辨。
+ */
 export function describeIssueSourceContext(context: IssueSourceContext): string {
   if (context.kind === "board") {
-    const segments = [BOARD_WORKFLOW_STATUS_PARAM_LABELS[context.workflowStatus]];
+    const segments = ["看板", BOARD_WORKFLOW_STATUS_PARAM_LABELS[context.workflowStatus]];
     if (context.label) {
       segments.push(`标签 "${context.label}"`);
     }
@@ -134,7 +137,9 @@ export function describeIssueSourceContext(context: IssueSourceContext): string 
   if (context.kind === "list") {
     const segments: string[] = [];
     if (context.state) {
-      segments.push(`状态 ${context.state === "open" ? "OPEN" : "CLOSED"}`);
+      // 不加「状态」前缀：行内元信息里另有内部状态，同名会读成两个「状态」
+      // （视觉审查 INT-242）；大写 OPEN/CLOSED 即 GitHub 筛选语义，与 issue 规格一致
+      segments.push(context.state === "open" ? "OPEN" : "CLOSED");
     }
     if (context.q) {
       segments.push(`搜索 "${context.q}"`);
@@ -154,7 +159,7 @@ export function describeIssueSourceContext(context: IssueSourceContext): string 
         }`,
       );
     }
-    return segments.length > 0 ? segments.join(" · ") : "全部";
+    return segments.length > 0 ? `列表 · ${segments.join(" · ")}` : "列表 · 全部";
   }
   return "";
 }

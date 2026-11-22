@@ -81,6 +81,7 @@ function Harness(props: {
     <div>
       <span data-testid="location">{location.pathname + location.search}</span>
       <span data-testid="count">{source.items.length}</span>
+      <span data-testid="total">{source.total ?? "—"}</span>
       <span data-testid="current-index">{source.currentIndex}</span>
       <span data-testid="advancing">{String(source.isAdvancing)}</span>
       <ul data-testid="list">
@@ -181,6 +182,26 @@ describe("useIssueSourceList", () => {
       },
       { enabled: true },
     );
+  });
+
+  it("exposes the server total from the first page for the loaded/total count", () => {
+    // 首页 2 条已加载、total 57：总数取接口首页 total，不随已加载页数变化
+    mockQuery([page([makeIssue("issue-1", "GH-1", "A"), makeIssue("issue-2", "GH-2", "B")], 57)]);
+    renderHarness("/projects/proj-1/issues/issue-1", {
+      currentIssueIdOverride: "issue-1",
+    });
+
+    expect(screen.getByTestId("total")).toHaveTextContent("57");
+    expect(screen.getByTestId("count")).toHaveTextContent("2");
+  });
+
+  it("keeps total unset while the first page is still loading", () => {
+    mockQuery([], { isLoading: true });
+    renderHarness("/projects/proj-1/issues/issue-1", {
+      currentIssueIdOverride: "issue-1",
+    });
+
+    expect(screen.getByTestId("total")).toHaveTextContent("—");
   });
 
   it("auto-fetches pages until the current issue appears", async () => {
