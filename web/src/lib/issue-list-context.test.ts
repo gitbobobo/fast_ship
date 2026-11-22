@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildBoardSourceSearchParams,
   buildIssueDetailSearchParams,
+  describeIssueSourceContext,
   readIssueSourceContext,
 } from "./issue-list-context";
 
@@ -148,5 +149,57 @@ describe("buildIssueDetailSearchParams", () => {
         page: 1,
       }).toString(),
     ).toBe("issue_state=open&issue_sort=updated_desc");
+  });
+});
+
+describe("describeIssueSourceContext", () => {
+  it("prefixes board sources with the board type", () => {
+    expect(
+      describeIssueSourceContext({
+        kind: "board",
+        workflowStatus: "unset",
+        label: "",
+        source: "",
+      }),
+    ).toBe("看板 · 未设置");
+    expect(
+      describeIssueSourceContext({
+        kind: "board",
+        workflowStatus: "in_progress",
+        label: "bug",
+        source: "",
+      }),
+    ).toBe("看板 · 开发中 · 标签 \"bug\"");
+  });
+
+  it("prefixes list sources with the list type", () => {
+    expect(
+      describeIssueSourceContext({
+        kind: "list",
+        state: "open",
+        q: "",
+        label: "bug",
+        source: "github",
+        workflowStatus: "",
+        sort: "updated_desc",
+        page: 1,
+      }),
+    ).toBe("列表 · 状态 OPEN · 标签 \"bug\" · 来源 github");
+    expect(
+      describeIssueSourceContext({
+        kind: "list",
+        state: "",
+        q: "",
+        label: "",
+        source: "",
+        workflowStatus: "",
+        sort: "updated_desc",
+        page: 1,
+      }),
+    ).toBe("列表 · 全部");
+  });
+
+  it("returns an empty description without a source", () => {
+    expect(describeIssueSourceContext({ kind: "none" })).toBe("");
   });
 });

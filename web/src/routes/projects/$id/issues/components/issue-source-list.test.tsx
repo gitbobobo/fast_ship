@@ -1,6 +1,11 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { IssueSourceList } from "./issue-source-list";
+import { toGitHubMediaProxyUrl } from "@/lib/utils/github-media-proxy";
+
+// spy 模式：保留真实实现，只录调用参数——Base UI Avatar 在 jsdom 不触发图片
+// 加载、不渲染真实 <img>，只能断言转换函数收到 token（见下方头像回归测试）
+vi.mock("@/lib/utils/github-media-proxy", { spy: true });
 
 function makeIssue(
   id: string,
@@ -25,6 +30,33 @@ function makeIssue(
     created_at: "2026-04-10T10:00:00Z",
     updated_at: "2026-04-12T10:00:00Z",
     ...overrides,
+  };
+}
+
+function baseGithubMeta() {
+  return {
+    github_issue_id: 1,
+    github_node_id: "I_kw",
+    number: 42,
+    html_url: "https://github.com/acme/alpha/issues/42",
+    author_association: "MEMBER",
+    assignees: [],
+    labels: [],
+    reactions: {
+      total_count: 0,
+      "+1": 0,
+      "-1": 0,
+      laugh: 0,
+      hooray: 0,
+      confused: 0,
+      heart: 0,
+      rocket: 0,
+      eyes: 0,
+    },
+    comments_count: 0,
+    locked: false,
+    active_lock_reason: "",
+    synced_at: "2026-04-12T10:00:00Z",
   };
 }
 
@@ -190,5 +222,199 @@ describe("IssueSourceList", () => {
     renderList();
 
     expect(scrollIntoView).toHaveBeenCalledWith({ block: "nearest" });
+  });
+
+  it("keeps the full title available via the title attribute while truncating", () => {
+    renderList({
+      entries: [{ issue: makeIssue("issue-1", "GH-1", "崩溃：打开主界面时白屏并且控制台报错") }],
+    });
+
+    expect(screen.getByRole("button", { name: /GH-1/ })).toHaveAttribute(
+      "title",
+      "崩溃：打开主界面时白屏并且控制台报错",
+    );
+  });
+
+  it("hides the state when the source has a single state and shows it when mixed", () => {
+    // 纯 open 来源（如看板列固定 open）：不显示状态，避免整列重复
+    renderList({
+      entries: [
+        { issue: makeIssue("issue-1", "GH-1", "崩溃") },
+        { issue: makeIssue("issue-2", "GH-2", "卡顿") },
+      ],
+    });
+    expect(screen.queryByText("Open")).not.toBeInTheDocument();
+
+    // 来源混有两种状态：圆点+文字着色展示（不用胶囊）
+    renderList();
+    expect(screen.getByText("Open")).toBeInTheDocument();
+    expect(screen.getByText("Closed")).toBeInTheDocument();
+  });
+
+  it("hides the internal status for board column sources", () => {
+    renderList({
+      showInternalStatus: false,
+      entries: [
+        {
+          issue: makeIssue("issue-1", "INT-1", "崩溃", {
+            source: "internal",
+            internal_meta: {
+              workflow_status: "in_progress",
+              progress_percent: null,
+              checklist_total: 0,
+              checklist_done: 0,
+            },
+          }),
+        },
+      ],
+    });
+
+    expect(screen.queryByText("开发中")).not.toBeInTheDocument();
+  });
+
+  it("shows the internal status dot with its label by default", () => {
+    renderList({
+      entries: [
+        {
+          issue: makeIssue("issue-1", "INT-1", "崩溃", {
+            source: "internal",
+            internal_meta: {
+              workflow_status: "in_progress",
+              progress_percent: null,
+              checklist_total: 0,
+              checklist_done: 0,
+            },
+          }),
+        },
+      ],
+    });
+
+    expect(screen.getByText("开发中")).toBeInTheDocument();
+  });
+
+  it("caps labels at two with an overflow count", () => {
+    renderList({
+      entries: [
+        {
+          issue: makeIssue("issue-1", "GH-1", "崩溃", {
+            github: {
+              ...baseGithubMeta(),
+              labels: [
+                { name: "bug", color: "d73a4a", description: "" },
+                { name: "ui", color: "1d76db", description: "" },
+                { name: "perf", color: "fbca04", description: "" },
+              ],
+            },
+          }),
+        },
+      ],
+    });
+
+    expect(screen.getByText("bug")).toBeInTheDocument();
+    expect(screen.getByText("ui")).toBeInTheDocument();
+    expect(screen.queryByText("perf")).not.toBeInTheDocument();
+    expect(screen.getByText("+1")).toBeInTheDocument();
+  });
+
+  it("shows the pull request aggregate only when there are linked prs", () => {
+    const summary = { total: 3, open: 1, merged: 2 };
+    renderList({
+      entries: [
+        { issue: makeIssue("issue-1", "GH-1", "带 PR 的问题", { pull_request_summary: summary }) },
+        { issue: makeIssue("issue-2", "GH-2", "无 PR 的问题") },
+      ],
+    });
+
+    expect(screen.getByText("PR 3 · 合 2")).toBeInTheDocument();
+    expect(screen.queryByText(/PR 0/)).not.toBeInTheDocument();
+  });
+
+  it("shows the relative updated time", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-04-13T10:00:00Z"));
+    try {
+      renderList();
+      // updated_at 2026-04-12T10:00:00Z → 恰好 1 天前
+      expect(screen.getAllByText("1 天前").length).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("shows up to three assignee avatars for github issues only", () => {
+    const assignees = [
+      { login: "alice", avatar_url: "" },
+      { login: "bob", avatar_url: "" },
+      { login: "carol", avatar_url: "" },
+      { login: "dave", avatar_url: "" },
+    ];
+    renderList({
+      entries: [
+        {
+          issue: makeIssue("issue-1", "GH-1", "多人协作", {
+            github: { ...baseGithubMeta(), assignees },
+          }),
+        },
+        {
+          issue: makeIssue("issue-2", "INT-2", "内部问题", {
+            source: "internal",
+          }),
+        },
+      ],
+    });
+
+    const list = screen.getByTestId("issue-source-list");
+    expect(within(list).getByTitle("alice、bob、carol、dave")).toBeInTheDocument();
+    expect(within(list).getByText("+1")).toBeInTheDocument();
+  });
+
+  it("keeps the stale row weakened with the marker instead of snapshot metadata", () => {
+    renderList({
+      entries: [
+        { issue: makeIssue("issue-1", "GH-1", "崩溃") },
+        {
+          issue: makeIssue("issue-x", "GH-9", "已移出", {
+            state: "closed",
+            updated_at: "2020-01-01T00:00:00Z",
+          }),
+          stale: true,
+        },
+      ],
+    });
+
+    const stale = screen.getByRole("button", { name: /GH-9/ });
+    expect(within(stale).getByText("已不符合来源条件")).toBeInTheDocument();
+    // 快照状态/时间可能已过期：stale 行不再展示 Open/Closed 与相对时间，
+    // 也不得回退成绝对日期——整行 textContent 不含任何日期形状
+    expect(within(stale).queryByText("Closed")).not.toBeInTheDocument();
+    expect(within(stale).queryByText(/天前|分钟前|小时前/)).not.toBeInTheDocument();
+    expect(stale.textContent).not.toMatch(/\d{4}-\d{2}-\d{2}/);
+  });
+
+  it("routes assignee avatars through the media proxy with the auth token", () => {
+    // 回归：负责人头像是服务端改写的媒体代理 URL，代理要求认证——
+    // 裸 <img src=avatar_url> 会 401 只剩首字母；必须带 token 过 toGitHubMediaProxyUrl。
+    // jsdom 里 Avatar 不渲染真实 <img>，改为断言转换函数收到非空 URL 与 token
+    vi.mocked(toGitHubMediaProxyUrl).mockClear();
+    renderList({
+      token: "jwt-token",
+      entries: [
+        {
+          issue: makeIssue("issue-1", "GH-1", "崩溃", {
+            github: {
+              ...baseGithubMeta(),
+              assignees: [
+                { login: "alice", avatar_url: "https://avatars.githubusercontent.com/u/9?v=4" },
+              ],
+            },
+          }),
+        },
+      ],
+    });
+
+    expect(vi.mocked(toGitHubMediaProxyUrl)).toHaveBeenCalledWith(
+      "https://avatars.githubusercontent.com/u/9?v=4",
+      "jwt-token",
+    );
   });
 });

@@ -396,9 +396,14 @@ export function useIssueSourceList(options: {
     navigateToIssue,
   ]);
 
+  // 来源总数取接口首页的 total（服务端过滤后的全量计数），供头部「已加载 / 总数」展示；
+  // 未加载到数据（加载中/失败）时为 null，由调用方用「—」占位
+  const total = data?.pages[0]?.total ?? null;
+
   return {
     items,
     currentIndex,
+    total,
     isLoading,
     isError,
     refetch,

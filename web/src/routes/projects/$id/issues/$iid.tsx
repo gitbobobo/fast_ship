@@ -280,13 +280,20 @@ export default function IssueDetailPage() {
     currentIssueProjectId: issue?.project_id,
   });
   // 条数取符合来源条件的行数（不含 stale 保留项），与副标题的筛选描述自洽；
-  // 加载中/空数据加载失败时用「—」占位——不报「0 个」（暗示空列表是成功结果），
-  // 也不留空槽（像标签被截断）；标签本身仍是来源列描述不随数据态切换
-  const sourceCount =
-    source.isLoading || (source.isError && source.items.length === 0)
-      ? null
-      : source.items.filter((entry) => !entry.stale).length;
-  const sourceCountLabel = sourceCount === null ? "—" : `${sourceCount} 个`;
+  // 加载中/空数据加载失败时用「—」占位——不报「0」（暗示空列表是成功结果），
+  // 也不留空槽（像标签被截断）；标签本身仍是来源列描述不随数据态切换。
+  // 展示为「已加载 / 总数」：总数取接口首页 total（服务端过滤后的全量计数），
+  // 已加载数含翻页进度语义，与无限滚动的「还在继续加载」相符
+  const sourceListIdle = !(source.isLoading || (source.isError && source.items.length === 0));
+  const sourceCount = sourceListIdle
+    ? source.items.filter((entry) => !entry.stale).length
+    : null;
+  const sourceCountLabel = sourceCount === null
+    ? "—"
+    : source.total === null
+      ? // total 缺失（未拉到首页/异常）时不可用已加载数伪分母：那不等于已加载完
+        `${sourceCount} / —`
+      : `${sourceCount} / ${source.total}`;
 
   // 主动收起路径（[、Esc、X、窄屏点选）统一把焦点还给把手；
   // 点外部收起不走这里——焦点应落在用户点的目标上
@@ -325,6 +332,130 @@ export default function IssueDetailPage() {
     goToNext,
     goToPrevious,
   } = source;
+
+  // 抽屉 JSX 提取为组件级变量：加载中与加载完成两个 return 分支都渲染在同一
+  // 位置（[Header, 抽屉, 正文/骨架]），早退分支不再让抽屉复用骨架 div 的 DOM
+  // 节点——否则外层容器 className 从无平移变为 -translate-x-full +
+  // transition-transform，进页会播一次 0%→-100% 的收起过渡（INT-242）。
+  // 抽屉与来源数据不依赖 issue 加载，加载态即可打开列表；无来源时渲染 null，
+  // 三个分支的子节点位置保持一致。
+  // 头部只保留两行：标题 + 来源描述·计数；当前项不再单独一行（靠列表高亮 +
+  // 自动滚动定位），也让抽屉 JSX 与 issue 加载状态彻底解耦。
+  const sourceDrawer = hasSourceContext ? (
+    <div className="pointer-events-none sticky top-14 z-20 h-0 w-full">
+      {/* 抽屉内层：贴主区左缘（侧边栏右缘）的覆盖式，几何与开合详见
+          docs/internal/issue-detail-source-context.md；无来源时整块不渲染 */}
+      <div
+        className={cn(
+          "absolute left-0 top-0 flex h-[calc(100dvh-3.5rem)] w-[300px] max-w-[85vw] transition-transform duration-150 motion-reduce:transition-none max-sm:w-[calc(100%-1.5rem)] max-sm:max-w-none",
+          isSourcePanelOpen ? "translate-x-0" : "-translate-x-full",
+        )}
+      >
+        <div
+          id="issue-source-list-panel"
+          role="region"
+          aria-label="来源列表"
+          className={cn(
+            "pointer-events-auto flex min-w-0 flex-1 flex-col overflow-hidden border-r bg-card shadow-xl transition-[visibility] duration-150 motion-reduce:transition-none dark:border-neutral-600",
+            isSourcePanelOpen ? "visible" : "invisible",
+          )}
+        >
+          {/* 头部左内边距对齐列表项文字（ul p-1.5 + 项 px-2 + 选中条 + 未读点列 + gap ≈ 36px） */}
+          <div className="flex items-start justify-between gap-2 border-b pl-9 pr-4 py-2.5">
+            <div className="min-w-0">
+              <h2
+                id="issue-source-list-title"
+                tabIndex={-1}
+                className="text-sm font-semibold focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                来源列表
+              </h2>
+              <p className="mt-0.5 flex text-xs text-muted-foreground">
+                <span className="min-w-0 truncate">{sourceLabel}</span>
+                <span className="shrink-0"> · {sourceCountLabel}</span>
+              </p>
+            </div>
+            {/* 窄屏抽屉近满宽，点外部只剩细条；头部给明确的关闭控件，把手与 Esc 作补充 */}
+            <button
+              type="button"
+              aria-label="关闭来源列表"
+              onClick={closeSourcePanel}
+              className="-mr-2 -mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground sm:hidden"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+          <IssueSourceList
+            entries={source.items}
+            currentIssueId={iid ?? ""}
+            onSelect={(issue) => {
+              source.goToIssue(issue);
+              // 宽屏点选后保持打开便于逐条浏览；窄屏点选即收起
+              if (isNarrowViewport) {
+                closeSourcePanel();
+              }
+            }}
+            isLoading={source.isLoading}
+            isError={source.isError}
+            onRetry={() => void source.refetch()}
+            hasNextPage={source.hasNextPage}
+            isFetchingNextPage={source.isFetchingNextPage}
+            onLoadMore={() => {
+              if (source.hasNextPage && !source.isFetchingNextPage) {
+                void source.fetchNextPage();
+              }
+            }}
+            // 看板列来源整列同一内部状态，行内不再重复展示
+            showInternalStatus={issueSourceContext.kind !== "board"}
+            token={token ?? undefined}
+            className="min-h-0 flex-1 overflow-y-auto"
+          />
+        </div>
+        {/* 左缘把手：开与关同一控件，随抽屉一起平移，打开时停在抽屉右缘。
+            顶部锚定（top-8），不垂直居中——居中会落在卡片纵向中部像渲染残留。
+            收起时把手落在主区左缘（贴全局侧边栏右缘；窄屏贴屏幕左缘），
+            把手自身 rounded-r-md（弹层方边、把手圆角——需求方定调），
+            窄屏可见宽 max-sm:w-7（28px）——它是窄屏唯一入口，16px 太难点中；
+            命中区只向右扩——向左会盖住侧边栏右缘吞掉导航点击；
+            打开态两侧都挨着可点内容收窄到 ±4px，
+            窄屏打开态把手不渲染（头部 X 是主要关闭控件）。
+            图标用 List/ListX 而非 PanelLeft*——右下角移动侧栏 FAB 也是 PanelLeft，
+            同族图标并排会让用户分不清哪个开来源列表、哪个开全局侧栏；
+            图标常态 neutral-600 + 14px，不依赖 hover 才可见 */}
+        <button
+          id="issue-source-list-handle"
+          type="button"
+          onClick={toggleSourcePanel}
+          aria-expanded={isSourcePanelOpen}
+          aria-controls="issue-source-list-panel"
+          aria-label={`来源列表（快捷键 [）${sourceCount !== null ? `，已加载 ${sourceCount} 个` : ""}`}
+          title="来源列表（快捷键 [）"
+          className={cn(
+            "group pointer-events-auto absolute left-full top-8 flex h-16 w-3.5 items-center justify-center rounded-r-md border border-l-0 border-neutral-400 bg-neutral-300 text-neutral-600 transition-[width,background-color,border-color,color] duration-150 after:absolute after:inset-y-0 after:content-[''] hover:w-4 hover:bg-neutral-400 hover:text-neutral-900 focus-visible:ring-2 focus-visible:ring-neutral-500 focus-visible:ring-offset-1 motion-reduce:transition-none max-sm:w-7 dark:border-neutral-500 dark:bg-neutral-600 dark:text-neutral-300 dark:hover:bg-neutral-500 dark:hover:text-white dark:focus-visible:ring-neutral-400",
+            isSourcePanelOpen
+              ? "after:-left-1 after:-right-1 max-sm:hidden"
+              : "after:left-0 after:-right-4",
+          )}
+        >
+          <span className="flex flex-col items-center gap-0.5">
+            {!isSourcePanelOpen && sourceCount !== null && (
+              <span className="text-[9px] font-bold leading-none">{sourceCount}</span>
+            )}
+            {isSourcePanelOpen ? (
+              <ListX className="h-3.5 w-3.5" />
+            ) : (
+              <List className="h-3.5 w-3.5" />
+            )}
+          </span>
+        </button>
+        {/* 窄屏打开时右侧 ~24px 留白盖一条轻遮罩：底层卡片的描边/圆角断线
+            露出来像渲染残留；遮罩不在面板内，点击仍走「点外部收起」 */}
+        {isSourcePanelOpen && (
+          <div className="pointer-events-auto absolute inset-y-0 left-full w-6 bg-black/10 sm:hidden dark:bg-black/40" />
+        )}
+      </div>
+    </div>
+  ) : null;
 
   // 全局快捷键：［ 开关来源列表抽屉，J/K 按来源列表顺序翻页；Esc 仅在无外来
   // 浮层时收起抽屉。避让：defaultPrevented、IME 组合态、修饰键、输入控件、
@@ -841,10 +972,13 @@ export default function IssueDetailPage() {
     [createComment],
   );
 
+  // 加载态与完成态共用同一抽屉渲染（sourceDrawer），抽屉与来源数据不依赖 issue，
+  // 加载中即可开抽屉看列表；骨架分支也不再与抽屉争抢同一 DOM 位置
   if (isLoading) {
     return (
       <>
         <Header title="问题详情" />
+        {sourceDrawer}
         <div className="mx-auto w-full max-w-7xl p-4 md:p-6">
           <div className="grid gap-6 lg:grid-cols-[1fr_320px]">
             <div className="space-y-4">
@@ -865,6 +999,7 @@ export default function IssueDetailPage() {
     return (
       <>
         <Header title="问题详情" />
+        {sourceDrawer}
         <div className="mx-auto w-full max-w-7xl p-4 md:p-6">
           <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed py-20 text-center">
             <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-muted">
@@ -1122,124 +1257,10 @@ export default function IssueDetailPage() {
           left-0 即紧贴全局侧边栏右缘——窄屏则贴屏幕左缘；与正文卡片解耦，
           不随 max-w-7xl 居中移动。贴在顶栏下方且不占文档流高度，
           只覆盖内容区（不盖全局侧栏与顶栏）；无全屏遮罩，开着列表也能看清正文
-          （窄屏右侧 24px 露出区有一条轻遮罩挡卡片断线，见面板后注释） */}
-      {hasSourceContext && (
-        <div className="pointer-events-none sticky top-14 z-20 h-0 w-full">
-          <div
-            className={cn(
-              "absolute left-0 top-0 flex h-[calc(100dvh-3.5rem)] w-[300px] max-w-[85vw] transition-transform duration-150 motion-reduce:transition-none max-sm:w-[calc(100%-1.5rem)] max-sm:max-w-none",
-              isSourcePanelOpen ? "translate-x-0" : "-translate-x-full",
-            )}
-          >
-            <div
-              id="issue-source-list-panel"
-              role="region"
-              aria-label="来源列表"
-              className={cn(
-                "pointer-events-auto flex min-w-0 flex-1 flex-col overflow-hidden border-r bg-card shadow-xl transition-[visibility] duration-150 motion-reduce:transition-none dark:border-neutral-600",
-                isSourcePanelOpen ? "visible" : "invisible",
-              )}
-            >
-              {/* 头部左内边距对齐列表项文字（ul p-1.5 + 项 px-2 + 选中条 + 未读点列 + gap ≈ 36px） */}
-              <div className="flex items-start justify-between gap-2 border-b pl-9 pr-4 py-2.5">
-                <div className="min-w-0">
-                  <h2
-                    id="issue-source-list-title"
-                    tabIndex={-1}
-                    className="text-sm font-semibold focus-visible:ring-2 focus-visible:ring-ring"
-                  >
-                    来源列表
-                  </h2>
-                  <p className="mt-0.5 flex text-xs text-muted-foreground">
-                    <span className="min-w-0 truncate">{sourceLabel}</span>
-                    {sourceCountLabel ? (
-                      <span className="shrink-0"> · {sourceCountLabel}</span>
-                    ) : null}
-                  </p>
-                  {issue ? (
-                    <p className="mt-0.5 truncate text-xs text-muted-foreground">
-                      当前 {issue.reference} · {issue.title}
-                    </p>
-                  ) : null}
-                </div>
-                {/* 窄屏抽屉近满宽，点外部只剩细条；头部给明确的关闭控件，把手与 Esc 作补充 */}
-                <button
-                  type="button"
-                  aria-label="关闭来源列表"
-                  onClick={closeSourcePanel}
-                  className="-mr-2 -mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground sm:hidden"
-                >
-                  <X className="h-4 w-4" />
-                </button>
-              </div>
-              <IssueSourceList
-                entries={source.items}
-                currentIssueId={iid ?? ""}
-                onSelect={(issue) => {
-                  source.goToIssue(issue);
-                  // 宽屏点选后保持打开便于逐条浏览；窄屏点选即收起
-                  if (isNarrowViewport) {
-                    closeSourcePanel();
-                  }
-                }}
-                isLoading={source.isLoading}
-                isError={source.isError}
-                onRetry={() => void source.refetch()}
-                hasNextPage={source.hasNextPage}
-                isFetchingNextPage={source.isFetchingNextPage}
-                onLoadMore={() => {
-                  if (source.hasNextPage && !source.isFetchingNextPage) {
-                    void source.fetchNextPage();
-                  }
-                }}
-                className="min-h-0 flex-1 overflow-y-auto"
-              />
-            </div>
-            {/* 左缘把手：开与关同一控件，随抽屉一起平移，打开时停在抽屉右缘。
-                顶部锚定（top-8），不垂直居中——居中会落在卡片纵向中部像渲染残留。
-                收起时把手落在主区左缘（贴全局侧边栏右缘；窄屏贴屏幕左缘），
-                把手自身 rounded-r-md（弹层方边、把手圆角——需求方定调），
-                窄屏可见宽 max-sm:w-7（28px）——它是窄屏唯一入口，16px 太难点中；
-                命中区只向右扩——向左会盖住侧边栏右缘吞掉导航点击；
-                打开态两侧都挨着可点内容收窄到 ±4px，
-                窄屏打开态把手不渲染（头部 X 是主要关闭控件）。
-                图标用 List/ListX 而非 PanelLeft*——右下角移动侧栏 FAB 也是 PanelLeft，
-                同族图标并排会让用户分不清哪个开来源列表、哪个开全局侧栏；
-                图标常态 neutral-600 + 14px，不依赖 hover 才可见 */}
-            <button
-              id="issue-source-list-handle"
-              type="button"
-              onClick={toggleSourcePanel}
-              aria-expanded={isSourcePanelOpen}
-              aria-controls="issue-source-list-panel"
-              aria-label={`来源列表（快捷键 [）${sourceCount !== null ? `，${sourceCount} 个` : ""}`}
-              title="来源列表（快捷键 [）"
-              className={cn(
-                "group pointer-events-auto absolute left-full top-8 flex h-16 w-3.5 items-center justify-center rounded-r-md border border-l-0 border-neutral-400 bg-neutral-300 text-neutral-600 transition-[width,background-color,border-color,color] duration-150 after:absolute after:inset-y-0 after:content-[''] hover:w-4 hover:bg-neutral-400 hover:text-neutral-900 focus-visible:ring-2 focus-visible:ring-neutral-500 focus-visible:ring-offset-1 motion-reduce:transition-none max-sm:w-7 dark:border-neutral-500 dark:bg-neutral-600 dark:text-neutral-300 dark:hover:bg-neutral-500 dark:hover:text-white dark:focus-visible:ring-neutral-400",
-                isSourcePanelOpen
-                  ? "after:-left-1 after:-right-1 max-sm:hidden"
-                  : "after:left-0 after:-right-4",
-              )}
-            >
-              <span className="flex flex-col items-center gap-0.5">
-                {!isSourcePanelOpen && sourceCount !== null && (
-                  <span className="text-[9px] font-bold leading-none">{sourceCount}</span>
-                )}
-                {isSourcePanelOpen ? (
-                  <ListX className="h-3.5 w-3.5" />
-                ) : (
-                  <List className="h-3.5 w-3.5" />
-                )}
-              </span>
-            </button>
-            {/* 窄屏打开时右侧 ~24px 留白盖一条轻遮罩：底层卡片的描边/圆角断线
-                露出来像渲染残留；遮罩不在面板内，点击仍走「点外部收起」 */}
-            {isSourcePanelOpen && (
-              <div className="pointer-events-auto absolute inset-y-0 left-full w-6 bg-black/10 sm:hidden dark:bg-black/40" />
-            )}
-          </div>
-        </div>
-      )}
+          （窄屏右侧 24px 露出区有一条轻遮罩挡卡片断线，见面板后注释）。
+          JSX 本体提取为组件级 sourceDrawer（见上方定义）：加载中与加载完成两个
+          return 分支都渲染在同一位置，防进页时抽屉复用骨架 DOM 播收起动画 */}
+      {sourceDrawer}
       <div className="mx-auto w-full max-w-7xl p-4 md:p-6">
         <div className="grid gap-6 lg:grid-cols-[1fr_300px] xl:grid-cols-[1fr_340px]">
 
