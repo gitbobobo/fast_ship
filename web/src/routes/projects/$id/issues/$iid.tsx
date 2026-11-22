@@ -299,7 +299,8 @@ export default function IssueDetailPage() {
         `已加载 ${sourceCount} / —`
       : `已加载 ${sourceCount} / ${source.total}`;
   if (sourceCount !== null && staleCount > 0) {
-    sourceCountLabel += ` · 另有 ${staleCount} 条已失效`;
+    // 与行内「已不符合来源条件」同词，避免同一概念两种措辞（视觉审查）
+    sourceCountLabel += ` · 另有 ${staleCount} 条已不符合来源条件`;
   }
 
   // 主动收起路径（[、Esc、X、窄屏点选）统一把焦点还给把手；

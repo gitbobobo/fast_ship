@@ -322,11 +322,12 @@ function SourceEntryMeta({
         <span
           className={cn(
             "h-1.5 w-1.5 shrink-0 rounded-full",
-            issue.state === "open" ? "bg-emerald-500" : "bg-rose-500",
+            issue.state === "open" ? "bg-emerald-600" : "bg-rose-600",
           )}
         />
-        {/* 与头部来源描述的大写 OPEN/CLOSED 保持同一写法（视觉审查：同屏两种大小写像两个概念） */}
-        {issue.state === "open" ? "OPEN" : "CLOSED"}
+        {/* 与头部来源描述的大写 OPEN/CLOSED 保持同一写法（视觉审查：同屏两种大小写像两个概念）；
+            混态下状态是最需要一眼可辨的信息，用比时间更深的中性色 + medium 字重压过时间（视觉审查） */}
+        <span className="font-medium text-foreground/75">{issue.state === "open" ? "OPEN" : "CLOSED"}</span>
       </span>,
     );
   }
