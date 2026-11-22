@@ -407,6 +407,11 @@ export default function IssueDetailPage() {
             }}
             // 看板列来源整列同一内部状态，行内不再重复展示
             showInternalStatus={issueSourceContext.kind !== "board"}
+            // OPEN/CLOSED 由来源上下文稳定决定：仅列表来源未筛选状态时恒显示
+            // （首帧即定，翻页/补拉不回流）；看板列固定 open、带状态筛选的列表来源不显示
+            showState={
+              issueSourceContext.kind === "list" && !issueSourceContext.state
+            }
             token={token ?? undefined}
             className="min-h-0 flex-1 overflow-y-auto"
           />

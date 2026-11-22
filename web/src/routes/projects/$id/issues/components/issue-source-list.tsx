@@ -56,6 +56,12 @@ export interface IssueSourceListProps {
   onLoadMore: () => void;
   /** 是否显示行内内部状态；来源是看板列（整列相同）时由页面传 false 省略 */
   showInternalStatus?: boolean;
+  /**
+   * 是否显示行内 OPEN/CLOSED；由来源上下文稳定决定（列表来源未筛选状态时才可混态），
+   * 首帧即定、翻页/补拉不变——不按已加载页动态判定，避免滚动中整列补显状态文字回流。
+   * 页面传 `issueSourceContext.kind === "list" && !issueSourceContext.state`。
+   */
+  showState?: boolean;
   /** 认证 token：GitHub 负责人头像走媒体代理时附上，避免裸请求 401 */
   token?: string;
   /** 内部滚动容器额外类名（如最大高度） */
@@ -82,15 +88,12 @@ export function IssueSourceList({
   isFetchingNextPage,
   onLoadMore,
   showInternalStatus = true,
+  showState = false,
   token,
   className,
 }: IssueSourceListProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const sentinelRef = useRef<HTMLDivElement>(null);
-
-  // OPEN/CLOSED 只在来源混有两种状态时展示（board 来源固定 open，永不触发）
-  const hasMixedStates =
-    new Set(entries.filter((e) => !e.stale).map((e) => e.issue.state)).size > 1;
 
   // 自动滚动：当前项或列表变化后把当前项滚进可视区
   useEffect(() => {
@@ -217,7 +220,7 @@ export function IssueSourceList({
                   <span className="flex w-full items-center gap-1 text-[11px] leading-4 text-muted-foreground">
                     <SourceEntryMeta
                       issue={entry.issue}
-                      hasMixedStates={hasMixedStates}
+                      showState={showState}
                       showInternalStatus={showInternalStatus}
                     />
                     {assignees.length > 0 && (
@@ -234,6 +237,7 @@ export function IssueSourceList({
                             <AvatarImage
                               src={toGitHubMediaProxyUrl(actor.avatar_url, token)}
                               alt=""
+                              loading="lazy"
                             />
                             <AvatarFallback className="text-[8px]">
                               {getInitials(actor.login)}
@@ -276,16 +280,17 @@ export function IssueSourceList({
 }
 
 /**
- * 单条非 stale 条目的元信息段：内部状态、OPEN/CLOSED（混态才显示）、标签（≤2）、
- * PR 聚合、相对更新时间，用「·」分隔；负责人头像由调用方追加在行尾。
+ * 单条非 stale 条目的元信息段：内部状态、OPEN/CLOSED（showState 时显示，判定来自
+ * 来源上下文而非已加载页，翻页稳定）、标签（≤2）、PR 聚合、相对更新时间，用「·」
+ * 分隔；负责人头像由调用方追加在行尾。
  */
 function SourceEntryMeta({
   issue,
-  hasMixedStates,
+  showState,
   showInternalStatus,
 }: {
   issue: Issue;
-  hasMixedStates: boolean;
+  showState: boolean;
   showInternalStatus: boolean;
 }) {
   const parts: React.ReactNode[] = [];
@@ -306,7 +311,7 @@ function SourceEntryMeta({
     );
   }
 
-  if (hasMixedStates) {
+  if (showState) {
     parts.push(
       <span
         key="state"

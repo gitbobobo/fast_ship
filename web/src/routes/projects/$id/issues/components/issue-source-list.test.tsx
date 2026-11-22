@@ -127,7 +127,7 @@ describe("IssueSourceList", () => {
   });
 
   it("renders reference, title, state and highlights the current issue", () => {
-    renderList();
+    renderList({ showState: true });
 
     const list = screen.getByTestId("issue-source-list");
     expect(list).toBeInTheDocument();
@@ -235,20 +235,30 @@ describe("IssueSourceList", () => {
     );
   });
 
-  it("hides the state when the source has a single state and shows it when mixed", () => {
-    // 纯 open 来源（如看板列固定 open）：不显示状态，避免整列重复
-    renderList({
+  it("shows the state markers only when the source context allows mixed states", () => {
+    // 判定由来源上下文稳定决定（页面传 showState），不随已加载页的动态混态变化：
+    // 看板列固定 open、带状态筛选的列表来源不传 —— 不显示，避免整列重复
+    const single = renderList({
       entries: [
         { issue: makeIssue("issue-1", "GH-1", "崩溃") },
         { issue: makeIssue("issue-2", "GH-2", "卡顿") },
       ],
     });
-    expect(screen.queryByText("Open")).not.toBeInTheDocument();
-
-    // 来源混有两种状态：圆点+文字着色展示（不用胶囊）
-    renderList();
-    expect(screen.getByText("Open")).toBeInTheDocument();
-    expect(screen.getByText("Closed")).toBeInTheDocument();
+    expect(within(single.container).queryByText("Open")).not.toBeInTheDocument();
+    // 首页全 open 的可混态来源（列表 · 全部）也逐行恒显示：翻页后出现 closed 行时
+    // 先前行不会补显文字回流
+    const allOpen = renderList({
+      showState: true,
+      entries: [
+        { issue: makeIssue("issue-1", "GH-1", "崩溃") },
+        { issue: makeIssue("issue-2", "GH-2", "卡顿") },
+      ],
+    });
+    expect(within(allOpen.container).getAllByText("Open").length).toBe(2);
+    // 可混态来源里 closed 行显示 Closed
+    const mixed = renderList({ showState: true });
+    expect(within(mixed.container).getByText("Open")).toBeInTheDocument();
+    expect(within(mixed.container).getByText("Closed")).toBeInTheDocument();
   });
 
   it("hides the internal status for board column sources", () => {
