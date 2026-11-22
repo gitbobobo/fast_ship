@@ -233,11 +233,13 @@ export function IssueSourceList({
                             key={actor.login}
                             className="h-4 w-4 border border-background after:hidden"
                           >
-                            {/* 头像是媒体代理 URL（服务端投影改写），不带 token 会 401 */}
+                            {/* 头像是媒体代理 URL（服务端投影改写），不带 token 会 401。
+                                Base UI Avatar.Image 挂载即用 new Image() 预载，
+                                <img loading=lazy> 不生效（INT-242 审查核实）：请求量
+                                有界（每页 20 行 × 最多 3 个）且同 URL 命中浏览器缓存，接受现状 */}
                             <AvatarImage
                               src={toGitHubMediaProxyUrl(actor.avatar_url, token)}
                               alt=""
-                              loading="lazy"
                             />
                             <AvatarFallback className="text-[8px]">
                               {getInitials(actor.login)}
