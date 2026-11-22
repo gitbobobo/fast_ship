@@ -325,7 +325,8 @@ function SourceEntryMeta({
             issue.state === "open" ? "bg-emerald-500" : "bg-rose-500",
           )}
         />
-        {issue.state === "open" ? "Open" : "Closed"}
+        {/* 与头部来源描述的大写 OPEN/CLOSED 保持同一写法（视觉审查：同屏两种大小写像两个概念） */}
+        {issue.state === "open" ? "OPEN" : "CLOSED"}
       </span>,
     );
   }

@@ -135,8 +135,8 @@ describe("IssueSourceList", () => {
     expect(current).toHaveAttribute("data-issue-id", "issue-1");
     expect(current).toHaveTextContent("GH-1");
     expect(current).toHaveTextContent("崩溃");
-    expect(screen.getByText("Closed")).toBeInTheDocument();
-    expect(screen.getAllByText("Open").length).toBeGreaterThan(0);
+    expect(screen.getByText("CLOSED")).toBeInTheDocument();
+    expect(screen.getAllByText("OPEN").length).toBeGreaterThan(0);
   });
 
   it("marks unread comments on github issues only", () => {
@@ -244,7 +244,7 @@ describe("IssueSourceList", () => {
         { issue: makeIssue("issue-2", "GH-2", "卡顿") },
       ],
     });
-    expect(within(single.container).queryByText("Open")).not.toBeInTheDocument();
+    expect(within(single.container).queryByText("OPEN")).not.toBeInTheDocument();
     // 首页全 open 的可混态来源（列表 · 全部）也逐行恒显示：翻页后出现 closed 行时
     // 先前行不会补显文字回流
     const allOpen = renderList({
@@ -254,11 +254,11 @@ describe("IssueSourceList", () => {
         { issue: makeIssue("issue-2", "GH-2", "卡顿") },
       ],
     });
-    expect(within(allOpen.container).getAllByText("Open").length).toBe(2);
+    expect(within(allOpen.container).getAllByText("OPEN").length).toBe(2);
     // 可混态来源里 closed 行显示 Closed
     const mixed = renderList({ showState: true });
-    expect(within(mixed.container).getByText("Open")).toBeInTheDocument();
-    expect(within(mixed.container).getByText("Closed")).toBeInTheDocument();
+    expect(within(mixed.container).getByText("OPEN")).toBeInTheDocument();
+    expect(within(mixed.container).getByText("CLOSED")).toBeInTheDocument();
   });
 
   it("hides the internal status for board column sources", () => {
@@ -396,7 +396,7 @@ describe("IssueSourceList", () => {
     expect(within(stale).getByText("已不符合来源条件")).toBeInTheDocument();
     // 快照状态/时间可能已过期：stale 行不再展示 Open/Closed 与相对时间，
     // 也不得回退成绝对日期——整行 textContent 不含任何日期形状
-    expect(within(stale).queryByText("Closed")).not.toBeInTheDocument();
+    expect(within(stale).queryByText("CLOSED")).not.toBeInTheDocument();
     expect(within(stale).queryByText(/天前|分钟前|小时前/)).not.toBeInTheDocument();
     expect(stale.textContent).not.toMatch(/\d{4}-\d{2}-\d{2}/);
   });

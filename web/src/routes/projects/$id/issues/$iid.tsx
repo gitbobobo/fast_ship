@@ -288,12 +288,19 @@ export default function IssueDetailPage() {
   const sourceCount = sourceListIdle
     ? source.items.filter((entry) => !entry.stale).length
     : null;
-  const sourceCountLabel = sourceCount === null
+  // stale 保留项不计入已加载数，但会占一行——头部单独交代，避免「2 / 2 却有 3 行」的矛盾
+  const staleCount = sourceListIdle
+    ? source.items.filter((entry) => entry.stale).length
+    : 0;
+  let sourceCountLabel = sourceCount === null
     ? "—"
     : source.total === null
       ? // total 缺失（未拉到首页/异常）时不可用已加载数伪分母：那不等于已加载完
         `已加载 ${sourceCount} / —`
       : `已加载 ${sourceCount} / ${source.total}`;
+  if (sourceCount !== null && staleCount > 0) {
+    sourceCountLabel += ` · 另有 ${staleCount} 条已失效`;
+  }
 
   // 主动收起路径（[、Esc、X、窄屏点选）统一把焦点还给把手；
   // 点外部收起不走这里——焦点应落在用户点的目标上
