@@ -360,8 +360,10 @@ export default function IssueDetailPage() {
             isSourcePanelOpen ? "visible" : "invisible",
           )}
         >
-          {/* 头部左内边距对齐列表项文字（ul p-1.5 + 项 px-2 + 选中条 + 未读点列 + gap ≈ 36px） */}
-          <div className="flex items-start justify-between gap-2 border-b pl-9 pr-4 py-2.5">
+          {/* 头部左内边距对齐列表项文字（ul p-1.5 + 项选中条 border-l-2 + px-2 = 16px；
+              紧凑两行布局后未读点并入行内，旧的 pl-9≈36px 对齐依据已不存在，
+              INT-242 视觉审查：头部与行文字共用同一左对齐线） */}
+          <div className="flex items-start justify-between gap-2 border-b pl-4 pr-4 py-2.5">
             <div className="min-w-0">
               <h2
                 id="issue-source-list-title"
@@ -370,9 +372,12 @@ export default function IssueDetailPage() {
               >
                 来源列表
               </h2>
-              <p className="mt-0.5 flex text-xs text-muted-foreground">
-                <span className="min-w-0 truncate">{sourceLabel}</span>
-                <span className="shrink-0"> · {sourceCountLabel}</span>
+              {/* 单一文本节点拼副行：flex 双 span 会吞掉第二段的前导空格，
+                  出现「OPEN· 已加载」错位（INT-242 视觉审查）；
+                  整行 truncate，标签过长时计数随尾截断——把手角标与 aria-label
+                  仍带已加载数，信息不丢 */}
+              <p className="mt-0.5 truncate text-xs text-muted-foreground">
+                {sourceLabel} · {sourceCountLabel}
               </p>
             </div>
             {/* 窄屏抽屉近满宽，点外部只剩细条；头部给明确的关闭控件，把手与 Esc 作补充 */}
