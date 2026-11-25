@@ -63,9 +63,8 @@ func TestMain(m *testing.M) {
 // sampleStack 取一个含该标识的 goroutine 栈样本（截到 40 行）：报告泄漏者
 // 是谁，不靠猜。
 func sampleStack(marker string) string {
-	buf := make([]byte, 16<<20)
-	n := runtime.Stack(buf, true)
-	for _, block := range strings.Split(string(buf[:n]), "\n\n") {
+	blocks, _ := goroutineStackBlocks()
+	for _, block := range blocks {
 		if strings.Contains(block, marker) {
 			lines := strings.Split(block, "\n")
 			if len(lines) > 40 {
@@ -89,11 +88,9 @@ func totalOf(counts map[string]int) int {
 // 返回值末位是截断标记：runtime.Stack 在缓冲不足时静默截断，截断下的计数
 // 不可信，守卫按可疑处理（宁可误报也不漏报）。
 func countBotLeakGoroutines() (map[string]int, bool) {
-	buf := make([]byte, 16<<20)
-	n := runtime.Stack(buf, true)
-	truncated := n >= len(buf)
+	blocks, truncated := goroutineStackBlocks()
 	counts := make(map[string]int, len(botLeakMarkers))
-	for _, block := range strings.Split(string(buf[:n]), "\n\n") {
+	for _, block := range blocks {
 		for _, marker := range botLeakMarkers {
 			if strings.Contains(block, marker) {
 				counts[marker]++
@@ -101,6 +98,31 @@ func countBotLeakGoroutines() (map[string]int, bool) {
 		}
 	}
 	return counts, truncated
+}
+
+// goroutineStackBlocks 抓全量 goroutine 栈并按块切分（一块通常就是一个
+// goroutine）。末位是截断标记，口径同 countBotLeakGoroutines。
+func goroutineStackBlocks() ([]string, bool) {
+	buf := make([]byte, 16<<20)
+	n := runtime.Stack(buf, true)
+	return strings.Split(string(buf[:n]), "\n\n"), n >= len(buf)
+}
+
+// countGoroutines 数栈里带 marker 的存活 goroutine，用作例观测后台循环是否
+// 只起了一份、Stop 是否把它收干净。栈被截断时返回 -1（计数不可信，按失败
+// 处理，不静默当成 0）。
+func countGoroutines(marker string) int {
+	blocks, truncated := goroutineStackBlocks()
+	if truncated {
+		return -1
+	}
+	count := 0
+	for _, block := range blocks {
+		if strings.Contains(block, marker) {
+			count++
+		}
+	}
+	return count
 }
 
 func reportBotLeak(header string) {

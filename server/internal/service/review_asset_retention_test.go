@@ -459,14 +459,46 @@ func TestProbeRecordAssets(t *testing.T) {
 	}
 }
 
-// 保留策略循环随 Start 启停（幂等 Start 不会叠加第二个循环）。
+// assetRetentionLoopMarker 是保留策略循环 goroutine 在栈里的帧名（与
+// main_test.go 的泄漏守卫同口径的栈扫描标识）。
+const assetRetentionLoopMarker = "service.(*ReviewService).assetRetentionLoop"
+
+// TestAssetRetentionLoopStartStop 保留策略循环随 Start 启停：幂等 Start 不叠加
+// 第二个循环、不替换停止信号，Stop 后循环归零，二次 Stop 幂等。
 func TestAssetRetentionLoopStartStop(t *testing.T) {
 	e := newReviewEngineEnv(t)
 	review := e.withT3(nil, e.media)
+
 	review.Start()
+	cancel := review.cancel
+	t.Cleanup(func() {
+		// 断言中途失败也要把循环收干净：测试收尾会关 DB 池，残留循环会撞上
+		// 已关的池。幂等被打断时第一批循环的停止信号已不在 review.cancel 上，
+		// 要单独关掉，否则 Stop 等不到它们退出。
+		if review.cancel != nil && review.cancel != cancel {
+			close(cancel)
+		}
+		review.Stop()
+	})
+	waitFor(t, 5*time.Second, func() bool { return countGoroutines(assetRetentionLoopMarker) == 1 })
+
 	review.Start() // 幂等
+	if review.cancel != cancel {
+		t.Fatal("幂等 Start 替换了停止信号：第一批循环再也收不到停止，等于叠了第二份")
+	}
+	// 第二份循环若真被起来，会先跑首扫再停在自己的 select 里：给调度一个短
+	// 窗口，窗口内任何一次数到非 1 都算叠加了循环。
+	for deadline := time.Now().Add(100 * time.Millisecond); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		if got := countGoroutines(assetRetentionLoopMarker); got != 1 {
+			t.Fatalf("幂等 Start 后保留策略循环 = %d 个, want 1", got)
+		}
+	}
+
 	review.Stop()
-	review.Stop() // 幂等
+	if got := countGoroutines(assetRetentionLoopMarker); got != 0 {
+		t.Fatalf("Stop 后保留策略循环 = %d 个, want 0（Stop 应等循环退出）", got)
+	}
+	review.Stop() // 幂等：已终止的循环再 Stop 不 panic
 }
 
 // 同源自检限量（R7）：快照与缓存目录失配的三个档位（快照为空 / 路径全在

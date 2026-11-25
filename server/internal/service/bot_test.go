@@ -990,17 +990,8 @@ func TestBotListMessagesDefaultPage(t *testing.T) {
 	}
 }
 
+// TestBotIdempotentSend 同键同正文只投递一次、同键不同正文 40925。
 func TestBotIdempotentSend(t *testing.T) {
-	testBotIdempotentSend(t)
-}
-
-// TestBotIdempotency 与 TestBotIdempotentSend 同场景（设计批次三验收命令
-// 用 Idempotency 命名）。
-func TestBotIdempotency(t *testing.T) {
-	testBotIdempotentSend(t)
-}
-
-func testBotIdempotentSend(t *testing.T) {
 	env := setupBotTestEnv(t, fakeModelTurn{Text: "收到"})
 	userID := createBotTestUser(t, env.db, "botidem")
 	bot := env.createBot(t, userID)
