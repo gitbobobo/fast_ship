@@ -12,8 +12,6 @@ type Schemas = components["schemas"];
 /** GET /api/environments/t3-projects 的逐环境条目；单环境失败只标在该条目上。 */
 export type T3EnvironmentProjects = Schemas["T3EnvironmentProjects"];
 
-export type T3DiscoveredProject = Schemas["T3DiscoveredProject"];
-
 /** GET /api/projects/:id/t3-bindings 的绑定记录（附环境名与实时探测状态）。 */
 export type ProjectT3Binding = Schemas["ProjectT3Binding"];
 

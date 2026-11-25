@@ -3,8 +3,6 @@ export const ISSUE_SOURCE_LABELS = {
   github: "GitHub",
 } as const;
 
-export type IssueSource = keyof typeof ISSUE_SOURCE_LABELS;
-
 export const ISSUE_SOURCE_FILTER_OPTIONS = [
   { value: "all", label: "全部" },
   { value: "internal", label: "内部问题" },
