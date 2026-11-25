@@ -694,14 +694,41 @@ func TestPrepRetryThrottleIgnoresStaleTickTime(t *testing.T) {
 	}
 }
 
-// TestPrepRetrySkipsWithoutT3 T3 访问面未配置时整段跳过。
+// TestPrepRetrySkipsWithoutT3 T3 访问面未配置时整段跳过：不产生任何重试副作用
+// （prep 次数、运行状态与 deadline、令牌有效期都不动）。
 func TestPrepRetrySkipsWithoutT3(t *testing.T) {
 	e := newReviewEngineEnv(t) // e.review 不带 t3
 	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
 	seedAt := time.Date(2026, 10, 22, 1, 0, 0, 0, time.UTC)
-	seedPrepRetryRun(t, e, repo, 36, seedAt)
+	run := seedPrepRetryRun(t, e, repo, 36, seedAt)
+	wantExpires := run.DeadlineAt.Add(reviewTokenGrace)
+	if err := e.svc.db.Create(&model.ReviewRunToken{
+		RunID: run.ID, TokenHash: "hash-skip", CreatedAt: seedAt, ExpiresAt: wantExpires,
+	}).Error; err != nil {
+		t.Fatalf("seed token: %v", err)
+	}
 
-	e.review.retryFailedPreparations(seedAt) // 不 panic 即通过
+	e.review.retryFailedPreparations(seedAt)
+
+	var after model.ReviewRun
+	if err := e.svc.db.First(&after, "id = ?", run.ID).Error; err != nil {
+		t.Fatalf("reload run: %v", err)
+	}
+	if after.PrepRetryCount != 0 {
+		t.Fatalf("未配置 T3 时应整段跳过, prep_retry_count = %d", after.PrepRetryCount)
+	}
+	if after.Status != run.Status || !after.DeadlineAt.Equal(run.DeadlineAt) {
+		t.Fatalf("未配置 T3 时运行被改写: status %s→%s, deadline %v→%v",
+			run.Status, after.Status, run.DeadlineAt, after.DeadlineAt)
+	}
+	var tok model.ReviewRunToken
+	if err := e.svc.db.First(&tok, "run_id = ?", run.ID).Error; err != nil {
+		t.Fatalf("reload token: %v", err)
+	}
+	if tok.ConsumedAt != nil || !tok.ExpiresAt.Equal(wantExpires) {
+		t.Fatalf("未配置 T3 时令牌被改写: consumed=%v expires_at=%v, want %v",
+			tok.ConsumedAt, tok.ExpiresAt, wantExpires)
+	}
 }
 
 // TestPrepRetryExtendsTokenWithDeadline 重试受理后 deadline 与未消费令牌的

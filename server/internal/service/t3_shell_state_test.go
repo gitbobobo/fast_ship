@@ -2193,12 +2193,6 @@ func stExpire(s *t3ShellState) bool {
 	return s.Settle().Refresh
 }
 
-func stEarliest(s *t3ShellState) (time.Time, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.earliestUncertainDeadlineLocked()
-}
-
 func stPending(s *t3ShellState) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
