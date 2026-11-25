@@ -7,13 +7,8 @@ import { api, decodeApiError } from "./client";
 
 type Schemas = components["schemas"];
 
-/** T3 模型选项，canonical `{id,value}` 数组形式（与 T3ModelSelection.options 同形）。 */
-export type ReviewModelOption = Schemas["ReviewModelOption"];
-
 /** 一个审查组合：环境 + harness（instance_id）+ 模型 + 选项（思考强度等）。 */
 export type ReviewCombination = Schemas["ReviewCombination"];
-
-export type ReviewPrerequisiteCode = Schemas["ReviewPrerequisite"]["code"];
 
 export type ReviewPrerequisite = Schemas["ReviewPrerequisite"];
 
@@ -43,9 +38,6 @@ export interface ReviewRerunResult {
 /** 单条审查发现：代码 level=P0/P1/P2/Note，视觉 level=blocker/worth_fixing/minor。 */
 export type ReviewFinding = Schemas["ReviewFinding"];
 
-/** 视觉审查「无法判断」的截图项。 */
-export type ReviewUnmeasurable = Schemas["ReviewUnmeasurable"];
-
 /* ---------------- /reviews 首页 PR 动态（INT-141） ---------------- */
 
 /** 进行中细分阶段；仅 in_progress 组的行返回。 */
@@ -58,9 +50,6 @@ export type ReviewStageProgress = Schemas["ReviewStageProgress"];
 
 /** 当前轮发现计数；JSON key 与后端一致（P0/P1/P2 大写）。 */
 export type ReviewFindingCounts = Schemas["ReviewFindingCounts"];
-
-/** 需要处理的原因行：失败的组合与可读原因；账本兜底项 combination 为 null。 */
-export type ReviewActivityIssue = Schemas["ReviewActivityIssue"];
 
 /** 跨项目 PR 动态行；分组与阶段由服务端算好，前端只负责展示。 */
 export type ReviewPullRequestActivity = Schemas["ReviewPullRequestActivity"];

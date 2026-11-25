@@ -12,9 +12,6 @@ import { api, decodeApiError } from "./client";
 // - 前端维护 status/kind 的字面量联合供穷尽 switch 的标签映射使用。
 type Schemas = components["schemas"];
 
-/** 最近一条主线消息预览：契约 kind 为 string；前端按 user/assistant 区分前缀。 */
-export type BotLastMessage = Schemas["BotLastMessage"];
-
 export type Bot = Schemas["Bot"];
 
 /** 契约名为 CreateBotRequest。 */
@@ -341,16 +338,15 @@ export type BotUsageScheduleTask = Schemas["BotUsageScheduleTask"];
 export type BotUsageRunDetail = Schemas["BotUsageRunDetail"];
 
 /**
- * 花费优化参考（INT-163）：与总览同窗口的只读聚合。子类型一并引出，
- * 组件层按需解构（BotUsageContextPoint / BotUsageModelGroup 等）。
+ * 花费优化参考（INT-163）：与总览同窗口的只读聚合。bot 行与任务行各自
+ * 引出别名；上下文增长点没有单独导出，组件直接从 bot 行的
+ * context_growth 解构。
  */
 export type BotUsageInsights = Schemas["BotUsageInsights"];
 
 export type BotUsageInsightsBot = Schemas["BotUsageInsightsBot"];
 
 export type BotUsageInsightsTask = Schemas["BotUsageInsightsTask"];
-
-export type BotUsageContextPoint = Schemas["BotUsageContextPoint"];
 
 export type BotUsageRun = Schemas["BotUsageRun"];
 
